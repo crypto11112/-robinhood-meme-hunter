@@ -1551,4 +1551,4 @@ export default {
         )
     );
   }
-}; in
+};
