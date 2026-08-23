@@ -1,5 +1,5 @@
 const RPC_URL = "https://rpc.mainnet.chain.robinhood.com";
-const BLOCKSCOUT_V2 =
+const BLOCKSCOUT_API =
   "https://robinhoodchain.blockscout.com/api/v2";
 
 async function rpc(method, params = []) {
@@ -27,10 +27,20 @@ async function rpc(method, params = []) {
 
 async function blockscout(path) {
   const response = await fetch(
-    `${BLOCKSCOUT_V2}${path}`
+    `${BLOCKSCOUT_API}${path}`
   );
 
-  const data = await response.json();
+  const text = await response.text();
+
+  let data;
+
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(
+      `Blockscout returned invalid JSON (HTTP ${response.status})`
+    );
+  }
 
   if (!response.ok) {
     throw new Error(
@@ -41,7 +51,7 @@ async function blockscout(path) {
   return data;
 }
 
-function numberOrNull(value) {
+function cleanNumber(value) {
   if (
     value === null ||
     value === undefined ||
@@ -50,29 +60,31 @@ function numberOrNull(value) {
     return null;
   }
 
-  const number = Number(value);
+  const n = Number(value);
 
-  return Number.isFinite(number) ? number : null;
+  return Number.isFinite(n) ? n : null;
 }
 
-function scoreToken(token) {
+function preliminaryScore(token) {
   let score = 0;
 
   const marketCap =
-    numberOrNull(token.market_cap);
+    cleanNumber(token.marketCap);
 
   const holders =
-    numberOrNull(
-      token.holders_count ??
-      token.holders
-    );
+    cleanNumber(token.holders);
 
   const price =
-    numberOrNull(token.exchange_rate);
+    cleanNumber(token.price);
+
+  // We are deliberately NOT calling
+  // this an investment score.
 
   if (marketCap !== null) {
     score += 20;
 
+    // Smaller-cap projects receive
+    // a small discovery bonus.
     if (
       marketCap > 0 &&
       marketCap < 500000000
@@ -87,7 +99,10 @@ function scoreToken(token) {
     if (holders >= 1000) score += 10;
   }
 
-  if (price !== null && price > 0) {
+  if (
+    price !== null &&
+    price > 0
+  ) {
     score += 5;
   }
 
@@ -97,9 +112,9 @@ function scoreToken(token) {
 export default {
   async fetch(request, env, ctx) {
     try {
-      // -----------------------------
+      // --------------------------------
       // 1. Verify Robinhood Chain
-      // -----------------------------
+      // --------------------------------
 
       const chainHex =
         await rpc("eth_chainId");
@@ -117,19 +132,22 @@ export default {
         }, 500);
       }
 
-      // -----------------------------
-      // 2. Get latest block
-      // -----------------------------
+      // --------------------------------
+      // 2. Latest block
+      // --------------------------------
 
       const latestBlockHex =
         await rpc("eth_blockNumber");
 
       const latestBlock =
-        parseInt(latestBlockHex, 16);
+        parseInt(
+          latestBlockHex,
+          16
+        );
 
-      // -----------------------------
-      // 3. Get ERC-20 token list
-      // -----------------------------
+      // --------------------------------
+      // 3. Ask Blockscout for ERC-20s
+      // --------------------------------
 
       const tokenData =
         await blockscout(
@@ -137,30 +155,33 @@ export default {
         );
 
       const rawTokens =
-        Array.isArray(tokenData.items)
+        Array.isArray(
+          tokenData.items
+        )
           ? tokenData.items
           : [];
 
-      // -----------------------------
-      // 4. Filter obvious official
-      //    stock-token names
-      // -----------------------------
+      // --------------------------------
+      // 4. Remove obvious official
+      //    stock-style tokens
+      // --------------------------------
 
-      const excludedSymbols = new Set([
-        "AAPL",
-        "AMZN",
-        "AMD",
-        "COIN",
-        "GOOGL",
-        "META",
-        "MSFT",
-        "NFLX",
-        "NVDA",
-        "PLTR",
-        "SPY",
-        "TSLA",
-        "QQQ"
-      ]);
+      const excludedSymbols =
+        new Set([
+          "AAPL",
+          "AMZN",
+          "AMD",
+          "COIN",
+          "GOOGL",
+          "META",
+          "MSFT",
+          "NFLX",
+          "NVDA",
+          "PLTR",
+          "SPY",
+          "TSLA",
+          "QQQ"
+        ]);
 
       const candidates =
         rawTokens
@@ -176,7 +197,9 @@ export default {
               ).toLowerCase();
 
             if (
-              excludedSymbols.has(symbol)
+              excludedSymbols.has(
+                symbol
+              )
             ) {
               return false;
             }
@@ -191,56 +214,55 @@ export default {
 
             return true;
           })
-          .map(token => ({
-            name:
-              token.name ||
-              "DATA UNVERIFIED",
+          .map(token => {
+            const candidate = {
+              name:
+                token.name ||
+                "DATA UNVERIFIED",
 
-            symbol:
-              token.symbol ||
-              "DATA UNVERIFIED",
+              symbol:
+                token.symbol ||
+                "DATA UNVERIFIED",
 
-            contract:
-              token.address ||
-              token.address_hash ||
-              "DATA UNVERIFIED",
+              contract:
+                token.address ||
+                token.address_hash ||
+                "DATA UNVERIFIED",
 
-            type:
-              token.type ||
-              "DATA UNVERIFIED",
+              type:
+                token.type ||
+                "DATA UNVERIFIED",
 
-            price:
-              token.exchange_rate ??
-              "DATA UNVERIFIED",
+              price:
+                token.exchange_rate ??
+                "DATA UNVERIFIED",
 
-            marketCap:
-              token.market_cap ??
-              token.circulating_market_cap ??
-              "DATA UNVERIFIED",
+              marketCap:
+                token.market_cap ??
+                token.circulating_market_cap ??
+                "DATA UNVERIFIED",
 
-            holders:
-              token.holders_count ??
-              token.holders ??
-              "DATA UNVERIFIED",
+              holders:
+                token.holders_count ??
+                token.holders ??
+                "DATA UNVERIFIED",
 
-            totalSupply:
-              token.total_supply ??
-              "DATA UNVERIFIED",
+              totalSupply:
+                token.total_supply ??
+                "DATA UNVERIFIED",
 
-            decimals:
-              token.decimals ??
-              "DATA UNVERIFIED"
-          }))
-          .map(token => ({
-            ...token,
-            discoveryScore:
-              scoreToken({
-                market_cap:
-                  token.marketCap,
-                holders_count:
-                  token.holders
-              })
-          }))
+              decimals:
+                token.decimals ??
+                "DATA UNVERIFIED"
+            };
+
+            candidate.discoveryScore =
+              preliminaryScore(
+                candidate
+              );
+
+            return candidate;
+          })
           .sort(
             (a, b) =>
               b.discoveryScore -
@@ -248,9 +270,9 @@ export default {
           )
           .slice(0, 25);
 
-      // -----------------------------
+      // --------------------------------
       // 5. Return results
-      // -----------------------------
+      // --------------------------------
 
       return json({
         agent:
@@ -263,7 +285,9 @@ export default {
         chain: {
           name:
             "Robinhood Chain",
+
           chainId: 4663,
+
           rpcStatus:
             "CONNECTED"
         },
@@ -271,15 +295,20 @@ export default {
         explorer: {
           name:
             "Blockscout",
-          apiVersion: "V2",
+
+          apiVersion:
+            "V2",
+
           status:
             "CONNECTED"
         },
 
         scan: {
           latestBlock,
+
           tokensReturned:
             rawTokens.length,
+
           candidatesReturned:
             candidates.length
         },
@@ -289,9 +318,12 @@ export default {
         scoring: {
           type:
             "PRELIMINARY DISCOVERY SCORE",
+
+          maximum:
+            100,
+
           warning:
-            "NOT AN INVESTMENT SCORE",
-          maximum: 100
+            "NOT AN INVESTMENT SCORE"
         },
 
         dataIntegrity: {
@@ -341,9 +373,11 @@ export default {
         agent:
           "Robinhood Chain Meme Hunter",
 
-        version: "V5",
+        version:
+          "V5",
 
-        status: "ERROR",
+        status:
+          "ERROR",
 
         error:
           error.message,
@@ -363,7 +397,8 @@ function json(data, status = 200) {
       2
     ),
     {
-      status,
+      status: status,
+
       headers: {
         "Content-Type":
           "application/json"
