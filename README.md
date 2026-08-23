@@ -1,8 +1,9 @@
 const VERSION = "V33";
 
+const RPC_URL =
+  "https://rpc.mainnet.chain.robinhood.com";
+
 const CHAIN_ID = 4663;
-const RPC_URL = "https://rpc.mainnet.chain.robinhood.com";
-const DEX_URL = "https://api.dexscreener.com/latest/dex/tokens/";
 
 const TOKEN_CREATED_TOPIC =
   "0x2e2b3f61b70d2d131b2a807371103cc98d51adcaa5e9a8f9c32658ad8426e74e";
@@ -12,49 +13,26 @@ const LAUNCH_CONTRACTS = [
   "0x00004c4ccc709ef590f7c81102c0689f0263d4e9"
 ];
 
-// Extremely small request budget.
-// This avoids the Cloudflare subrequest problem from V30/V31.
-const MAX_RPC_REQUESTS = 4;
-const MAX_DEX_REQUESTS = 2;
-const RECENT_BLOCKS = 100;
+const DEX =
+  "https://api.dexscreener.com/latest/dex/tokens/";
 
-const TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN";
-const TELEGRAM_CHAT_ID = "TELEGRAM_CHAT_ID";
+const MAX_BLOCKS = 100;
 
-// No KV.
-// Cursor only exists for the lifetime of the Worker isolate.
-let memoryCursor = null;
-
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store"
+function response(data, status = 200) {
+  return new Response(
+    JSON.stringify(data, null, 2),
+    {
+      status,
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store"
+      }
     }
-  });
-}
-
-function now() {
-  return new Date().toISOString();
-}
-
-function hexBlock(number) {
-  return "0x" + Number(number).toString(16);
-}
-
-function errorText(error) {
-  if (!error) return "UNKNOWN_ERROR";
-
-  if (typeof error === "string") {
-    return error.slice(0, 500);
-  }
-
-  return String(error.message || error).slice(0, 500);
+  );
 }
 
 async function rpc(method, params) {
-  const response = await fetch(RPC_URL, {
+  const r = await fetch(RPC_URL, {
     method: "POST",
     headers: {
       "content-type": "application/json"
@@ -67,190 +45,176 @@ async function rpc(method, params) {
     })
   });
 
-  const text = await response.text();
+  const text = await r.text();
 
-  if (!response.ok) {
-    const error = new Error(
-      response.status === 429
+  if (!r.ok) {
+    throw new Error(
+      r.status === 429
         ? "RPC_RATE_LIMITED"
-        : `RPC_HTTP_${response.status}`
+        : `RPC_HTTP_${r.status}`
     );
-
-    error.status = response.status;
-    error.body = text.slice(0, 500);
-
-    throw error;
   }
 
-  let data;
-
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error("RPC_INVALID_JSON");
-  }
+  const data = JSON.parse(text);
 
   if (data.error) {
-    const error = new Error(
+    throw new Error(
       data.error.message || "RPC_ERROR"
     );
-
-    error.code = data.error.code;
-
-    if (data.error.code === 429) {
-      error.message = "RPC_RATE_LIMITED";
-    }
-
-    throw error;
   }
 
   return data.result;
 }
 
 async function latestBlock() {
-  return parseInt(
-    await rpc("eth_blockNumber", []),
-    16
-  );
+  const result =
+    await rpc("eth_blockNumber", []);
+
+  return parseInt(result, 16);
 }
 
-async function getLogs(
+async function findTokens(
   contract,
-  fromBlock,
-  toBlock
+  from,
+  to
 ) {
-  return rpc("eth_getLogs", [
-    {
+  const logs = await rpc(
+    "eth_getLogs",
+    [{
       address: contract,
-      fromBlock: hexBlock(fromBlock),
-      toBlock: hexBlock(toBlock),
-      topics: [TOKEN_CREATED_TOPIC]
-    }
-  ]);
-}
+      fromBlock:
+        "0x" + from.toString(16),
+      toBlock:
+        "0x" + to.toString(16),
+      topics: [
+        TOKEN_CREATED_TOPIC
+      ]
+    }]
+  );
 
-function extractToken(log) {
-  if (!log) return null;
+  const tokens = [];
 
-  // Indexed address.
-  if (
-    Array.isArray(log.topics) &&
-    log.topics.length > 1
-  ) {
-    const topic = log.topics[1];
+  for (const log of logs || []) {
+    let address = null;
 
     if (
-      typeof topic === "string" &&
-      topic.length >= 42
+      log.topics &&
+      log.topics.length > 1
     ) {
-      return (
+      address =
         "0x" +
-        topic.slice(-40).toLowerCase()
-      );
+        log.topics[1]
+          .slice(-40)
+          .toLowerCase();
     }
-  }
 
-  // Address contained in event data.
-  if (
-    typeof log.data === "string" &&
-    log.data.length >= 66
-  ) {
-    const value = log.data.slice(-40);
+    if (!address && log.data) {
+      const value =
+        log.data.slice(-40);
 
-    if (/^[0-9a-fA-F]{40}$/.test(value)) {
-      return "0x" + value.toLowerCase();
-    }
-  }
-
-  return null;
-}
-
-async function dexLookup(address) {
-  const response = await fetch(
-    DEX_URL + encodeURIComponent(address),
-    {
-      headers: {
-        accept: "application/json"
+      if (/^[0-9a-fA-F]{40}$/.test(value)) {
+        address =
+          "0x" +
+          value.toLowerCase();
       }
     }
-  );
 
-  const text = await response.text();
-
-  if (!response.ok) {
-    throw new Error(
-      `DEX_HTTP_${response.status}`
-    );
-  }
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error("DEX_INVALID_JSON");
-  }
-}
-
-function score(pair) {
-  if (!pair) return 0;
-
-  const liquidity =
-    Number(pair.liquidity?.usd || 0);
-
-  const volume =
-    Number(pair.volume?.h24 || 0);
-
-  const buys =
-    Number(pair.txns?.h24?.buys || 0);
-
-  const sells =
-    Number(pair.txns?.h24?.sells || 0);
-
-  let points = 0;
-
-  if (liquidity >= 1000) points += 20;
-  if (liquidity >= 5000) points += 15;
-  if (liquidity >= 10000) points += 15;
-
-  if (volume >= 1000) points += 10;
-  if (volume >= 10000) points += 10;
-  if (volume >= 50000) points += 10;
-
-  if (buys + sells >= 20) points += 5;
-  if (buys + sells >= 100) points += 5;
-
-  if (buys > sells) points += 10;
-
-  return Math.min(points, 100);
-}
-
-function bestPair(pairs) {
-  if (!Array.isArray(pairs)) {
-    return null;
-  }
-
-  return [...pairs].sort(
-    (a, b) => score(b) - score(a)
-  )[0] || null;
-}
-
-function candidate(address, data) {
-  const pair = bestPair(data?.pairs);
-
-  if (!pair) {
-    return {
-      token: address,
-      pairFound: false,
-      score: 0,
-      liquidityUsd: 0,
-      volume24h: 0,
-      buys24h: 0,
-      sells24h: 0,
-      url: null
-    };
+    if (
+      address &&
+      !tokens.includes(address)
+    ) {
+      tokens.push(address);
+    }
   }
 
   return {
+    logs: logs?.length || 0,
+    tokens
+  };
+}
+
+async function dexLookup(address) {
+  const r = await fetch(
+    DEX + address
+  );
+
+  if (!r.ok) {
+    throw new Error(
+      `DEX_HTTP_${r.status}`
+    );
+  }
+
+  return r.json();
+}
+
+function analyse(address, data) {
+  const pairs =
+    Array.isArray(data?.pairs)
+      ? data.pairs
+      : [];
+
+  if (!pairs.length) {
+    return {
+      token: address,
+      pairFound: false
+    };
+  }
+
+  const pair =
+    pairs
+      .sort(
+        (a, b) =>
+          Number(
+            b.liquidity?.usd || 0
+          ) -
+          Number(
+            a.liquidity?.usd || 0
+          )
+      )[0];
+
+  const liquidity =
+    Number(
+      pair.liquidity?.usd || 0
+    );
+
+  const volume =
+    Number(
+      pair.volume?.h24 || 0
+    );
+
+  const buys =
+    Number(
+      pair.txns?.h24?.buys || 0
+    );
+
+  const sells =
+    Number(
+      pair.txns?.h24?.sells || 0
+    );
+
+  let score = 0;
+
+  if (liquidity >= 1000)
+    score += 20;
+
+  if (liquidity >= 5000)
+    score += 20;
+
+  if (volume >= 1000)
+    score += 15;
+
+  if (volume >= 10000)
+    score += 15;
+
+  if (buys > sells)
+    score += 20;
+
+  if (buys + sells >= 20)
+    score += 10;
+
+  return {
     token: address,
+
     pairFound: true,
 
     name:
@@ -261,422 +225,137 @@ function candidate(address, data) {
       pair.baseToken?.symbol ||
       null,
 
-    chainId:
-      pair.chainId || null,
-
-    dexId:
-      pair.dexId || null,
-
-    score:
-      score(pair),
-
     priceUsd:
       pair.priceUsd || null,
 
     marketCap:
       pair.marketCap || null,
 
-    fdv:
-      pair.fdv || null,
-
     liquidityUsd:
-      Number(pair.liquidity?.usd || 0),
+      liquidity,
 
     volume24h:
-      Number(pair.volume?.h24 || 0),
+      volume,
 
     buys24h:
-      Number(pair.txns?.h24?.buys || 0),
+      buys,
 
     sells24h:
-      Number(pair.txns?.h24?.sells || 0),
+      sells,
 
-    pairCreatedAt:
-      pair.pairCreatedAt || null,
+    score: Math.min(score, 100),
+
+    dex:
+      pair.dexId || null,
 
     url:
       pair.url || null
   };
 }
 
-function alertCandidate(c) {
-  return (
-    c.pairFound &&
-    c.score >= 40 &&
-    c.liquidityUsd >= 1000 &&
-    c.volume24h >= 1000 &&
-    c.buys24h > 0
-  );
-}
+async function scan() {
+  const latest =
+    await latestBlock();
 
-async function telegram(env, message) {
-  const token =
-    env[TELEGRAM_BOT_TOKEN];
-
-  const chat =
-    env[TELEGRAM_CHAT_ID];
-
-  if (!token || !chat) {
-    return {
-      sent: false,
-      reason: "TELEGRAM_NOT_CONFIGURED"
-    };
-  }
-
-  const response = await fetch(
-    `https://api.telegram.org/bot${token}/sendMessage`,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
-        chat_id: chat,
-        text: message,
-        disable_web_page_preview: true
-      })
-    }
-  );
-
-  const text = await response.text();
-
-  if (!response.ok) {
-    return {
-      sent: false,
-      status: response.status,
-      error: text.slice(0, 500)
-    };
-  }
-
-  let data = null;
-
-  try {
-    data = JSON.parse(text);
-  } catch {}
-
-  return {
-    sent: true,
-    messageId:
-      data?.result?.message_id || null
-  };
-}
-
-function alertMessage(c) {
-  return [
-    `🚨 ROBINHOOD CHAIN MEME ALERT ${VERSION}`,
-    "",
-    `${c.name || "Unknown"} ${
-      c.symbol ? "$" + c.symbol : ""
-    }`,
-    "",
-    `Contract:`,
-    c.token,
-    "",
-    `Score: ${c.score}/100`,
-    `Liquidity: $${Math.round(
-      c.liquidityUsd
-    ).toLocaleString()}`,
-    `24h Volume: $${Math.round(
-      c.volume24h
-    ).toLocaleString()}`,
-    `24h Buys: ${c.buys24h}`,
-    `24h Sells: ${c.sells24h}`,
-    "",
-    c.url ? `DEX: ${c.url}` : "",
-    "",
-    "⚠️ Early-stage screening only. Not financial advice."
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-async function scan(env) {
-  let rpcRequests = 0;
-  let dexRequests = 0;
-
-  const diagnostics = [];
-
-  let latest;
-
-  // RPC request #1
-  try {
-    rpcRequests++;
-    latest = await latestBlock();
-  } catch (error) {
-    return {
-      status:
-        error.message === "RPC_RATE_LIMITED"
-          ? "RPC_RATE_LIMITED"
-          : "RPC_UNAVAILABLE",
-
-      rpcRequests,
-      dexRequests,
-
-      diagnostics: [
-        {
-          type: "rpc",
-          method: "eth_blockNumber",
-          error: errorText(error),
-          status:
-            error.status || null,
-          timestamp: now()
-        }
-      ]
-    };
-  }
-
-  let start;
-
-  if (
-    Number.isInteger(memoryCursor) &&
-    memoryCursor < latest
-  ) {
-    start = memoryCursor;
-  } else {
-    start =
-      Math.max(
-        0,
-        latest - RECENT_BLOCKS
-      );
-  }
-
-  const end =
-    Math.min(
-      latest,
-      start + RECENT_BLOCKS
+  const start =
+    Math.max(
+      0,
+      latest - MAX_BLOCKS
     );
 
-  /*
-   * Alternate between the two known launch contracts.
-   * Only ONE eth_getLogs request is made.
-   */
-
-  const index =
-    Math.floor(end / RECENT_BLOCKS) %
-    LAUNCH_CONTRACTS.length;
+  const end = latest;
 
   const contract =
-    LAUNCH_CONTRACTS[index];
+    LAUNCH_CONTRACTS[
+      Math.floor(
+        latest / MAX_BLOCKS
+      ) %
+      LAUNCH_CONTRACTS.length
+    ];
 
-  let logs = [];
-
-  // RPC request #2
-  try {
-    rpcRequests++;
-
-    const result =
-      await getLogs(
-        contract,
-        start,
-        end
-      );
-
-    if (Array.isArray(result)) {
-      logs = result;
-    }
-
-  } catch (error) {
-    diagnostics.push({
-      type: "rpc",
-      method: "eth_getLogs",
+  const discovered =
+    await findTokens(
       contract,
-      fromBlock: start,
-      toBlock: end,
-      error: errorText(error),
-      status:
-        error.status || null,
-      timestamp: now()
-    });
-
-    return {
-      status:
-        error.message === "RPC_RATE_LIMITED"
-          ? "RPC_RATE_LIMITED"
-          : "RPC_ERROR",
-
-      latestBlock: latest,
-
-      startBlock: start,
-      endBlock: end,
-
-      blocksScanned:
-        end - start + 1,
-
-      contract,
-
-      rawLogs: 0,
-      tokensDiscovered: 0,
-
-      rpcRequests,
-      dexRequests,
-
-      diagnostics
-    };
-  }
-
-  /*
-   * Only advance cursor after a successful RPC.
-   */
-
-  memoryCursor = end + 1;
-
-  const tokens = [
-    ...new Set(
-      logs
-        .map(extractToken)
-        .filter(Boolean)
-    )
-  ];
+      start,
+      end
+    );
 
   const candidates = [];
 
   /*
-   * Maximum two DEX requests.
+   * Maximum TWO DEX requests.
    */
-
   for (
-    const token of tokens.slice(
-      0,
-      MAX_DEX_REQUESTS
-    )
+    const token of
+    discovered.tokens.slice(0, 2)
   ) {
-    if (
-      dexRequests >=
-      MAX_DEX_REQUESTS
-    ) {
-      break;
-    }
-
     try {
-      dexRequests++;
-
       const data =
         await dexLookup(token);
 
       candidates.push(
-        candidate(token, data)
+        analyse(token, data)
       );
-
-    } catch (error) {
-      diagnostics.push({
-        type: "dex",
+    } catch (e) {
+      candidates.push({
         token,
-        error: errorText(error),
-        timestamp: now()
+        pairFound: false,
+        dexError: e.message
       });
     }
-  }
-
-  const alerts = [];
-
-  for (const c of candidates) {
-    if (!alertCandidate(c)) {
-      continue;
-    }
-
-    const result =
-      await telegram(
-        env,
-        alertMessage(c)
-      );
-
-    alerts.push({
-      token: c.token,
-      score: c.score,
-      telegram: result
-    });
   }
 
   return {
     status: "OK",
 
+    version: VERSION,
+
+    chainId: CHAIN_ID,
+
     latestBlock: latest,
 
     startBlock: start,
+
     endBlock: end,
 
     blocksScanned:
       end - start + 1,
 
-    contract,
+    launchContract:
+      contract,
 
-    rawLogs: logs.length,
+    rawLogs:
+      discovered.logs,
 
     tokensDiscovered:
-      tokens.length,
+      discovered.tokens.length,
 
-    tokenAddresses: tokens,
+    tokens:
+      discovered.tokens,
 
     candidates,
 
-    alerts,
+    rpcRequests: 2,
 
-    rpcRequests,
-    dexRequests,
+    maximumDexRequests: 2,
 
-    requestsUsed:
-      rpcRequests + dexRequests,
+    kvRequired: false,
 
-    requestBudget:
-      MAX_RPC_REQUESTS +
-      MAX_DEX_REQUESTS,
+    dataIntegrity: {
+      noFabricatedMetrics: true,
 
-    diagnostics
-  };
-}
+      holderConcentration:
+        "UNVERIFIED",
 
-function health(env) {
-  return {
-    agent:
-      "Robinhood Chain Meme Hunter",
+      smartMoney:
+        "UNVERIFIED",
 
-    version: VERSION,
-
-    status: "ONLINE",
-
-    routes: [
-      "/health",
-      "/scan",
-      "/test-telegram",
-      "/reset"
-    ],
-
-    chainId: CHAIN_ID,
-
-    chain:
-      "Robinhood Chain",
-
-    rpc: {
-      primary: RPC_URL,
-      mode:
-        "PRIMARY_ONLY_ULTRA_LOW_REQUEST"
+      walletActivity:
+        "UNVERIFIED"
     },
 
-    discovery:
-      "ETH_GETLOGS_TOKEN_CREATED_V33",
-
-    marketData:
-      "DEX_SCREENER",
-
-    telegramConfigured:
-      Boolean(
-        env[TELEGRAM_BOT_TOKEN] &&
-        env[TELEGRAM_CHAT_ID]
-      ),
-
-    kvConfigured: false,
-
-    cursor: memoryCursor,
-
-    cron: "OPTIONAL",
-
-    paidApiKeyRequired: false,
-
-    cloudflareSafeBudget:
-      MAX_RPC_REQUESTS +
-      MAX_DEX_REQUESTS,
-
-    timestamp: now()
+    timestamp:
+      new Date().toISOString()
   };
 }
 
@@ -686,107 +365,196 @@ export default {
       new URL(request.url);
 
     const path =
-      url.pathname.replace(
-        /\/+$/,
-        ""
-      ) || "/";
+      url.pathname;
 
     if (path === "/health") {
-      return json(
-        health(env)
-      );
-    }
-
-    if (path === "/scan") {
-      const result =
-        await scan(env);
-
-      return json({
+      return response({
         agent:
           "Robinhood Chain Meme Hunter",
 
         version: VERSION,
 
-        success:
-          result.status === "OK",
+        status: "ONLINE",
 
-        scan: result,
+        routes: [
+          "/health",
+          "/scan",
+          "/test-telegram"
+        ],
 
-        timestamp: now()
+        chain: {
+          name:
+            "Robinhood Chain",
+
+          chainId:
+            CHAIN_ID,
+
+          rpc:
+            RPC_URL
+        },
+
+        discovery:
+          "ETH_GETLOGS_TOKEN_CREATED",
+
+        marketData:
+          "DEX_SCREENER",
+
+        kvConfigured:
+          false,
+
+        kvRequired:
+          false,
+
+        paidApiKeyRequired:
+          false,
+
+        architecture:
+          "ULTRA_LOW_RPC",
+
+        timestamp:
+          new Date().toISOString()
       });
+    }
+
+    if (path === "/scan") {
+      try {
+        const result =
+          await scan();
+
+        return response({
+          agent:
+            "Robinhood Chain Meme Hunter",
+
+          version:
+            VERSION,
+
+          success:
+            true,
+
+          scan:
+            result
+        });
+
+      } catch (error) {
+        return response({
+          agent:
+            "Robinhood Chain Meme Hunter",
+
+          version:
+            VERSION,
+
+          success:
+            false,
+
+          status:
+            error.message ===
+            "RPC_RATE_LIMITED"
+              ? "RPC_RATE_LIMITED"
+              : "SCAN_ERROR",
+
+          error:
+            error.message,
+
+          kvRequired:
+            false,
+
+          timestamp:
+            new Date().toISOString()
+        }, 200);
+      }
     }
 
     if (
       path === "/test-telegram"
     ) {
-      const result =
-        await telegram(
-          env,
-          `✅ Robinhood Chain Meme Hunter ${VERSION} Telegram test\n\n${now()}`
+      if (
+        !env.TELEGRAM_BOT_TOKEN ||
+        !env.TELEGRAM_CHAT_ID
+      ) {
+        return response({
+          agent:
+            "Robinhood Chain Meme Hunter",
+
+          version:
+            VERSION,
+
+          success:
+            false,
+
+          error:
+            "TELEGRAM_SECRETS_NOT_CONFIGURED"
+        });
+      }
+
+      const r =
+        await fetch(
+          `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+          {
+            method: "POST",
+
+            headers: {
+              "content-type":
+                "application/json"
+            },
+
+            body: JSON.stringify({
+              chat_id:
+                env.TELEGRAM_CHAT_ID,
+
+              text:
+                `✅ Robinhood Chain Meme Hunter ${VERSION} Telegram test\n\n${new Date().toISOString()}`
+            })
+          }
         );
 
-      return json({
+      const data =
+        await r.json();
+
+      return response({
         agent:
           "Robinhood Chain Meme Hunter",
 
-        version: VERSION,
-
-        telegramConfigured:
-          Boolean(
-            env[TELEGRAM_BOT_TOKEN] &&
-            env[TELEGRAM_CHAT_ID]
-          ),
+        version:
+          VERSION,
 
         success:
-          result.sent === true,
+          r.ok,
 
-        response: result,
-
-        timestamp: now()
+        response:
+          data
       });
     }
 
-    if (path === "/reset") {
-      memoryCursor = null;
-
-      return json({
-        agent:
-          "Robinhood Chain Meme Hunter",
-
-        version: VERSION,
-
-        success: true,
-
-        message:
-          "V33 memory cursor reset. No KV required.",
-
-        timestamp: now()
-      });
-    }
-
-    return json({
+    return response({
       agent:
         "Robinhood Chain Meme Hunter",
 
-      version: VERSION,
+      version:
+        VERSION,
 
-      status: "ONLINE",
+      status:
+        "ONLINE",
+
+      message:
+        "Robinhood Chain Meme Hunter V33",
 
       routes: [
         "/health",
         "/scan",
-        "/test-telegram",
-        "/reset"
-      ],
-
-      message:
-        "Robinhood Chain Meme Hunter V33"
+        "/test-telegram"
+      ]
     });
   },
 
   async scheduled(event, env, ctx) {
+    /*
+     * Optional Cloudflare Cron.
+     *
+     * No KV is used.
+     */
+
     ctx.waitUntil(
-      scan(env).catch(
+      scan().catch(
         () => {}
       )
     );
