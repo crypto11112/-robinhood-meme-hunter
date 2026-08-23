@@ -1,5 +1,6 @@
 const RPC_URL = "https://rpc.mainnet.chain.robinhood.com";
-const BLOCKSCOUT_API = "https://robinhoodchain.blockscout.com/api";
+const BLOCKSCOUT_V2 =
+  "https://robinhoodchain.blockscout.com/api/v2";
 
 async function rpc(method, params = []) {
   const response = await fetch(RPC_URL, {
@@ -24,136 +25,101 @@ async function rpc(method, params = []) {
   return data.result;
 }
 
-async function blockscout(params) {
-  const url = new URL(BLOCKSCOUT_API);
+async function blockscout(path) {
+  const response = await fetch(
+    `${BLOCKSCOUT_V2}${path}`
+  );
 
-  Object.entries(params).forEach(([key, value]) => {
-    url.searchParams.set(key, value);
-  });
-
-  const response = await fetch(url.toString());
   const data = await response.json();
 
   if (!response.ok) {
-    throw new Error(`Blockscout HTTP ${response.status}`);
+    throw new Error(
+      `Blockscout HTTP ${response.status}`
+    );
   }
 
   return data;
 }
 
-async function readContract(address, selector) {
-  return rpc("eth_call", [
-    {
-      to: address,
-      data: selector
-    },
-    "latest"
-  ]);
-}
-
-function decodeUint(hex) {
-  if (!hex || hex === "0x") return null;
-
-  try {
-    return BigInt(hex).toString();
-  } catch {
+function numberOrNull(value) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === ""
+  ) {
     return null;
   }
+
+  const number = Number(value);
+
+  return Number.isFinite(number) ? number : null;
 }
 
-function decodeBytes32(hex) {
-  if (!hex || hex === "0x") return null;
+function scoreToken(token) {
+  let score = 0;
 
-  try {
-    const bytes = hex.slice(2);
-    let output = "";
+  const marketCap =
+    numberOrNull(token.market_cap);
 
-    for (let i = 0; i < bytes.length; i += 2) {
-      const value = parseInt(bytes.slice(i, i + 2), 16);
+  const holders =
+    numberOrNull(
+      token.holders_count ??
+      token.holders
+    );
 
-      if (value === 0) break;
+  const price =
+    numberOrNull(token.exchange_rate);
 
-      if (value >= 32 && value <= 126) {
-        output += String.fromCharCode(value);
-      }
+  if (marketCap !== null) {
+    score += 20;
+
+    if (
+      marketCap > 0 &&
+      marketCap < 500000000
+    ) {
+      score += 10;
     }
-
-    return output || null;
-  } catch {
-    return null;
   }
-}
 
-async function getTokenMetadata(address) {
-  const metadata = {
-    name: "DATA UNVERIFIED",
-    symbol: "DATA UNVERIFIED",
-    decimals: "DATA UNVERIFIED",
-    totalSupply: "DATA UNVERIFIED"
-  };
+  if (holders !== null) {
+    if (holders >= 100) score += 10;
+    if (holders >= 500) score += 10;
+    if (holders >= 1000) score += 10;
+  }
 
-  try {
-    const result = await readContract(
-      address,
-      "0x06fdde03"
-    );
+  if (price !== null && price > 0) {
+    score += 5;
+  }
 
-    metadata.name = decodeBytes32(result) || "DATA UNVERIFIED";
-  } catch {}
-
-  try {
-    const result = await readContract(
-      address,
-      "0x95d89b41"
-    );
-
-    metadata.symbol = decodeBytes32(result) || "DATA UNVERIFIED";
-  } catch {}
-
-  try {
-    const result = await readContract(
-      address,
-      "0x313ce567"
-    );
-
-    metadata.decimals = decodeUint(result) ?? "DATA UNVERIFIED";
-  } catch {}
-
-  try {
-    const result = await readContract(
-      address,
-      "0x18160ddd"
-    );
-
-    metadata.totalSupply =
-      decodeUint(result) ?? "DATA UNVERIFIED";
-  } catch {}
-
-  return metadata;
+  return Math.min(score, 100);
 }
 
 export default {
   async fetch(request, env, ctx) {
     try {
-      // --------------------------------
+      // -----------------------------
       // 1. Verify Robinhood Chain
-      // --------------------------------
+      // -----------------------------
 
-      const chainHex = await rpc("eth_chainId");
-      const chainId = parseInt(chainHex, 16);
+      const chainHex =
+        await rpc("eth_chainId");
+
+      const chainId =
+        parseInt(chainHex, 16);
 
       if (chainId !== 4663) {
         return json({
-          agent: "Robinhood Chain Meme Hunter",
-          version: "V4",
+          agent:
+            "Robinhood Chain Meme Hunter",
+          version: "V5",
           status: "ERROR",
           detectedChainId: chainId
         }, 500);
       }
 
-      // --------------------------------
+      // -----------------------------
       // 2. Get latest block
-      // --------------------------------
+      // -----------------------------
 
       const latestBlockHex =
         await rpc("eth_blockNumber");
@@ -161,96 +127,210 @@ export default {
       const latestBlock =
         parseInt(latestBlockHex, 16);
 
-      // --------------------------------
-      // 3. Read latest block
-      // --------------------------------
+      // -----------------------------
+      // 3. Get ERC-20 token list
+      // -----------------------------
 
-      const block = await rpc(
-        "eth_getBlockByNumber",
-        [latestBlockHex, true]
-      );
+      const tokenData =
+        await blockscout(
+          "/tokens?type=ERC-20"
+        );
 
-      const transactions =
-        block?.transactions || [];
+      const rawTokens =
+        Array.isArray(tokenData.items)
+          ? tokenData.items
+          : [];
 
-      // --------------------------------
-      // 4. Find contract deployments
-      // --------------------------------
+      // -----------------------------
+      // 4. Filter obvious official
+      //    stock-token names
+      // -----------------------------
 
-      const deployments = [];
+      const excludedSymbols = new Set([
+        "AAPL",
+        "AMZN",
+        "AMD",
+        "COIN",
+        "GOOGL",
+        "META",
+        "MSFT",
+        "NFLX",
+        "NVDA",
+        "PLTR",
+        "SPY",
+        "TSLA",
+        "QQQ"
+      ]);
 
-      for (const tx of transactions) {
-        if (tx.to === null) {
-          deployments.push({
-            transactionHash: tx.hash,
-            creator: tx.from,
-            blockNumber: latestBlock
-          });
-        }
-      }
+      const candidates =
+        rawTokens
+          .filter(token => {
+            const symbol =
+              String(
+                token.symbol || ""
+              ).toUpperCase();
 
-      // --------------------------------
-      // 5. Blockscout health check
-      // --------------------------------
+            const name =
+              String(
+                token.name || ""
+              ).toLowerCase();
 
-      let blockscoutStatus = "CONNECTED";
+            if (
+              excludedSymbols.has(symbol)
+            ) {
+              return false;
+            }
 
-      try {
-        await blockscout({
-          module: "stats",
-          action: "ethsupply"
-        });
-      } catch {
-        blockscoutStatus = "UNAVAILABLE";
-      }
+            if (
+              name.includes(
+                "robinhood token"
+              )
+            ) {
+              return false;
+            }
 
-      // --------------------------------
-      // 6. Return scanner status
-      // --------------------------------
+            return true;
+          })
+          .map(token => ({
+            name:
+              token.name ||
+              "DATA UNVERIFIED",
+
+            symbol:
+              token.symbol ||
+              "DATA UNVERIFIED",
+
+            contract:
+              token.address ||
+              token.address_hash ||
+              "DATA UNVERIFIED",
+
+            type:
+              token.type ||
+              "DATA UNVERIFIED",
+
+            price:
+              token.exchange_rate ??
+              "DATA UNVERIFIED",
+
+            marketCap:
+              token.market_cap ??
+              token.circulating_market_cap ??
+              "DATA UNVERIFIED",
+
+            holders:
+              token.holders_count ??
+              token.holders ??
+              "DATA UNVERIFIED",
+
+            totalSupply:
+              token.total_supply ??
+              "DATA UNVERIFIED",
+
+            decimals:
+              token.decimals ??
+              "DATA UNVERIFIED"
+          }))
+          .map(token => ({
+            ...token,
+            discoveryScore:
+              scoreToken({
+                market_cap:
+                  token.marketCap,
+                holders_count:
+                  token.holders
+              })
+          }))
+          .sort(
+            (a, b) =>
+              b.discoveryScore -
+              a.discoveryScore
+          )
+          .slice(0, 25);
+
+      // -----------------------------
+      // 5. Return results
+      // -----------------------------
 
       return json({
-        agent: "Robinhood Chain Meme Hunter",
-        version: "V4",
+        agent:
+          "Robinhood Chain Meme Hunter",
+
+        version: "V5",
+
         status: "ONLINE",
 
         chain: {
-          name: "Robinhood Chain",
+          name:
+            "Robinhood Chain",
           chainId: 4663,
-          rpcStatus: "CONNECTED"
+          rpcStatus:
+            "CONNECTED"
         },
 
         explorer: {
-          name: "Blockscout",
-          status: blockscoutStatus
+          name:
+            "Blockscout",
+          apiVersion: "V2",
+          status:
+            "CONNECTED"
         },
 
         scan: {
           latestBlock,
-          transactionsChecked:
-            transactions.length,
-          contractCreationsFound:
-            deployments.length
+          tokensReturned:
+            rawTokens.length,
+          candidatesReturned:
+            candidates.length
         },
 
-        deployments,
+        candidates,
+
+        scoring: {
+          type:
+            "PRELIMINARY DISCOVERY SCORE",
+          warning:
+            "NOT AN INVESTMENT SCORE",
+          maximum: 100
+        },
 
         dataIntegrity: {
-          chainId: "CONFIRMED",
-          latestBlock: "CONFIRMED",
-          contractDeployments: "CONFIRMED",
-          tokenName: "NOT YET SCANNED",
-          tokenSymbol: "NOT YET SCANNED",
-          holders: "DATA UNVERIFIED",
-          liquidity: "DATA UNVERIFIED",
-          volume: "DATA UNVERIFIED",
-          marketCap: "DATA UNVERIFIED",
-          whaleActivity: "DATA UNVERIFIED",
-          smartMoney: "DATA UNVERIFIED",
-          socialMomentum: "DATA UNVERIFIED"
+          tokenName:
+            "VERIFIED WHERE INDEXED",
+
+          tokenSymbol:
+            "VERIFIED WHERE INDEXED",
+
+          contract:
+            "VERIFIED WHERE INDEXED",
+
+          price:
+            "VERIFIED WHERE INDEXED",
+
+          marketCap:
+            "VERIFIED WHERE INDEXED",
+
+          holders:
+            "VERIFIED WHERE INDEXED",
+
+          liquidity:
+            "DATA UNVERIFIED",
+
+          volume:
+            "DATA UNVERIFIED",
+
+          whaleActivity:
+            "DATA UNVERIFIED",
+
+          smartMoney:
+            "DATA UNVERIFIED",
+
+          socialMomentum:
+            "DATA UNVERIFIED"
         },
 
         nextStage:
-          "ERC20 token discovery and verification",
+          "Liquidity, volume and holder-activity analysis",
 
         timestamp:
           new Date().toISOString()
@@ -258,10 +338,16 @@ export default {
 
     } catch (error) {
       return json({
-        agent: "Robinhood Chain Meme Hunter",
-        version: "V4",
+        agent:
+          "Robinhood Chain Meme Hunter",
+
+        version: "V5",
+
         status: "ERROR",
-        error: error.message,
+
+        error:
+          error.message,
+
         timestamp:
           new Date().toISOString()
       }, 500);
@@ -271,11 +357,16 @@ export default {
 
 function json(data, status = 200) {
   return new Response(
-    JSON.stringify(data, null, 2),
+    JSON.stringify(
+      data,
+      null,
+      2
+    ),
     {
       status,
       headers: {
-        "Content-Type": "application/json"
+        "Content-Type":
+          "application/json"
       }
     }
   );
