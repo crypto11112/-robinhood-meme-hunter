@@ -1,6 +1,5 @@
 const RPC_URL = "https://rpc.mainnet.chain.robinhood.com";
-
-const COINGECKO_NETWORK = "robinhood";
+const BLOCKSCOUT_API = "https://robinhoodchain.blockscout.com/api";
 
 async function rpc(method, params = []) {
   const response = await fetch(RPC_URL, {
@@ -25,70 +24,193 @@ async function rpc(method, params = []) {
   return data.result;
 }
 
-async function coinGecko(path, apiKey) {
-  const response = await fetch(
-    `https://api.coingecko.com${path}`,
-    {
-      headers: {
-        "x-cg-demo-api-key": apiKey
-      }
-    }
-  );
+async function blockscout(params) {
+  const url = new URL(BLOCKSCOUT_API);
 
-  const text = await response.text();
+  Object.entries(params).forEach(([key, value]) => {
+    url.searchParams.set(key, value);
+  });
 
-  let data;
-
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error("CoinGecko returned invalid JSON");
-  }
+  const response = await fetch(url.toString());
+  const data = await response.json();
 
   if (!response.ok) {
-    throw new Error(
-      `CoinGecko HTTP ${response.status}: ${
-        data.error || data.status?.error_message || "API error"
-      }`
-    );
+    throw new Error(`Blockscout HTTP ${response.status}`);
   }
 
   return data;
 }
 
+async function readContract(address, selector) {
+  return rpc("eth_call", [
+    {
+      to: address,
+      data: selector
+    },
+    "latest"
+  ]);
+}
+
+function decodeUint(hex) {
+  if (!hex || hex === "0x") return null;
+
+  try {
+    return BigInt(hex).toString();
+  } catch {
+    return null;
+  }
+}
+
+function decodeBytes32(hex) {
+  if (!hex || hex === "0x") return null;
+
+  try {
+    const bytes = hex.slice(2);
+    let output = "";
+
+    for (let i = 0; i < bytes.length; i += 2) {
+      const value = parseInt(bytes.slice(i, i + 2), 16);
+
+      if (value === 0) break;
+
+      if (value >= 32 && value <= 126) {
+        output += String.fromCharCode(value);
+      }
+    }
+
+    return output || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getTokenMetadata(address) {
+  const metadata = {
+    name: "DATA UNVERIFIED",
+    symbol: "DATA UNVERIFIED",
+    decimals: "DATA UNVERIFIED",
+    totalSupply: "DATA UNVERIFIED"
+  };
+
+  try {
+    const result = await readContract(
+      address,
+      "0x06fdde03"
+    );
+
+    metadata.name = decodeBytes32(result) || "DATA UNVERIFIED";
+  } catch {}
+
+  try {
+    const result = await readContract(
+      address,
+      "0x95d89b41"
+    );
+
+    metadata.symbol = decodeBytes32(result) || "DATA UNVERIFIED";
+  } catch {}
+
+  try {
+    const result = await readContract(
+      address,
+      "0x313ce567"
+    );
+
+    metadata.decimals = decodeUint(result) ?? "DATA UNVERIFIED";
+  } catch {}
+
+  try {
+    const result = await readContract(
+      address,
+      "0x18160ddd"
+    );
+
+    metadata.totalSupply =
+      decodeUint(result) ?? "DATA UNVERIFIED";
+  } catch {}
+
+  return metadata;
+}
+
 export default {
   async fetch(request, env, ctx) {
     try {
-      if (!env.COINGECKO_API_KEY) {
-        return json({
-          agent: "Robinhood Chain Meme Hunter",
-          status: "ERROR",
-          error: "COINGECKO_API_KEY secret is missing"
-        }, 500);
-      }
+      // --------------------------------
+      // 1. Verify Robinhood Chain
+      // --------------------------------
 
-      // Verify Robinhood Chain
       const chainHex = await rpc("eth_chainId");
       const chainId = parseInt(chainHex, 16);
 
       if (chainId !== 4663) {
         return json({
           agent: "Robinhood Chain Meme Hunter",
+          version: "V4",
           status: "ERROR",
           detectedChainId: chainId
         }, 500);
       }
 
-      // Verify CoinGecko API access.
-      // We intentionally use a lightweight endpoint first.
-      const network = await coinGecko(
-        `/api/v3/onchain/networks/${COINGECKO_NETWORK}`,
-        env.COINGECKO_API_KEY
+      // --------------------------------
+      // 2. Get latest block
+      // --------------------------------
+
+      const latestBlockHex =
+        await rpc("eth_blockNumber");
+
+      const latestBlock =
+        parseInt(latestBlockHex, 16);
+
+      // --------------------------------
+      // 3. Read latest block
+      // --------------------------------
+
+      const block = await rpc(
+        "eth_getBlockByNumber",
+        [latestBlockHex, true]
       );
+
+      const transactions =
+        block?.transactions || [];
+
+      // --------------------------------
+      // 4. Find contract deployments
+      // --------------------------------
+
+      const deployments = [];
+
+      for (const tx of transactions) {
+        if (tx.to === null) {
+          deployments.push({
+            transactionHash: tx.hash,
+            creator: tx.from,
+            blockNumber: latestBlock
+          });
+        }
+      }
+
+      // --------------------------------
+      // 5. Blockscout health check
+      // --------------------------------
+
+      let blockscoutStatus = "CONNECTED";
+
+      try {
+        await blockscout({
+          module: "stats",
+          action: "ethsupply"
+        });
+      } catch {
+        blockscoutStatus = "UNAVAILABLE";
+      }
+
+      // --------------------------------
+      // 6. Return scanner status
+      // --------------------------------
 
       return json({
         agent: "Robinhood Chain Meme Hunter",
-        version: "V3",
+        version: "V4",
         status: "ONLINE",
 
         chain: {
@@ -97,35 +219,51 @@ export default {
           rpcStatus: "CONNECTED"
         },
 
-        coinGecko: {
-          status: "CONNECTED",
-          network: COINGECKO_NETWORK,
-          networkData: network.data || null
+        explorer: {
+          name: "Blockscout",
+          status: blockscoutStatus
         },
+
+        scan: {
+          latestBlock,
+          transactionsChecked:
+            transactions.length,
+          contractCreationsFound:
+            deployments.length
+        },
+
+        deployments,
 
         dataIntegrity: {
-          rpc: "CONFIRMED",
           chainId: "CONFIRMED",
-          coinGeckoConnection: "CONFIRMED",
-          tokenDiscovery: "NOT YET BUILT",
-          marketCap: "NOT YET BUILT",
-          liquidity: "NOT YET BUILT",
-          volume: "NOT YET BUILT",
-          holders: "NOT YET BUILT",
-          smartMoney: "NOT YET BUILT",
-          socialMomentum: "NOT YET BUILT"
+          latestBlock: "CONFIRMED",
+          contractDeployments: "CONFIRMED",
+          tokenName: "NOT YET SCANNED",
+          tokenSymbol: "NOT YET SCANNED",
+          holders: "DATA UNVERIFIED",
+          liquidity: "DATA UNVERIFIED",
+          volume: "DATA UNVERIFIED",
+          marketCap: "DATA UNVERIFIED",
+          whaleActivity: "DATA UNVERIFIED",
+          smartMoney: "DATA UNVERIFIED",
+          socialMomentum: "DATA UNVERIFIED"
         },
 
-        timestamp: new Date().toISOString()
+        nextStage:
+          "ERC20 token discovery and verification",
+
+        timestamp:
+          new Date().toISOString()
       });
 
     } catch (error) {
       return json({
         agent: "Robinhood Chain Meme Hunter",
-        version: "V3",
+        version: "V4",
         status: "ERROR",
         error: error.message,
-        timestamp: new Date().toISOString()
+        timestamp:
+          new Date().toISOString()
       }, 500);
     }
   }
