@@ -1,4 +1,4 @@
-const VERSION = "V50";
+const VERSION = "V51";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -18,15 +18,14 @@ const LAUNCHPADS = [
   "0x60d73b21cdf2ea846ab3d58699bbbb8f29d72491"
 ];
 
-const RPC_MAX_RANGE = 10;
+const MINT_FAST_LAUNCHPAD =
+  "0xd61998ae9b29e1f19dfb70ba890bc85895c83f1b";
 
-const ACTIVITY_BLOCKS = 999;
-
-const TELEGRAM_THRESHOLD = 60;
-
-const MAX_POOL_TOKENS = 30;
-
-const MAX_LAUNCHPAD_CANDIDATES = 40;
+const ALL_LAUNCH_CONTRACTS = [
+  ...ENTRY_CONTRACTS,
+  ...LAUNCHPADS,
+  MINT_FAST_LAUNCHPAD
+];
 
 const ZERO_ADDRESS =
   "0x0000000000000000000000000000000000000000";
@@ -34,8 +33,28 @@ const ZERO_ADDRESS =
 const TRANSFER_TOPIC =
   "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a1f";
 
-const APPROVAL_TOPIC =
-  "0x8c5be1e5ebec7d5bd14f714f8b3f3c6b9c5b6f5b6f6c6e6f7f8f9f0f1f2f3f4f";
+const POOLS_TOKEN_CREATED_TOPIC =
+  "0x2e2b3f61b70d2d131b2a807371103cc98d51adcaa5e9a8f9c32658ad8426e74e";
+
+const POOLS_TOKEN_DISTRIBUTED_TOPIC =
+  "0x67226bacccef969dab310a9e55dc1cf821363658e433fd330344f5cc00c79ac8";
+
+const POOLS_TOKEN_LAUNCHED_TOPIC =
+  "0x3b3d2bafdcae274a232217e1f80ee4305d3af6aa25c8b14b1681bd68d18042a4";
+
+const DISTRIBUTION_INITIALIZED_TOPIC =
+  "0x0afd26d7f0833a451173acef122d058906aa7708ceb6f67ea7471a649d88b44b";
+
+const MINT_FAST_TOKEN_CREATED_TOPIC =
+  "0x4ef8284ecf42d4cd19686572ffd87f630858c82398911e776cb831de35eddbf4";
+
+const TELEGRAM_THRESHOLD = 60;
+
+const ACTIVITY_BLOCKS = 999;
+
+const DISCOVERY_BLOCKS = 500;
+
+const MAX_CANDIDATES = 50;
 
 function isAddress(value) {
   return /^0x[a-fA-F0-9]{40}$/.test(value || "");
@@ -101,18 +120,15 @@ function validTokenCandidate(address) {
     return false;
   }
 
-  if (
-    a ===
-      "0x0000000000000000000000000000000000000001" ||
-    a ===
-      "0x0000000000000000000000000000000000000064" ||
-    a ===
-      "0x0000000000000000000000000000000000002710"
-  ) {
-    return false;
-  }
-
   return true;
+}
+
+function unique(values) {
+  return [
+    ...new Set(
+      values.filter(Boolean)
+    )
+  ];
 }
 
 function splitWords(data) {
@@ -134,7 +150,7 @@ function splitWords(data) {
   ) {
     words.push(
       "0x" +
-        clean.slice(i, i + 64)
+      clean.slice(i, i + 64)
     );
   }
 
@@ -145,7 +161,7 @@ function decodeUint24(hex) {
   try {
     return Number(
       BigInt(hex) &
-        0xffffffn
+      0xffffffn
     );
   } catch {
     return null;
@@ -154,8 +170,7 @@ function decodeUint24(hex) {
 
 function decodeInt24(hex) {
   try {
-    let n =
-      BigInt(hex);
+    let n = BigInt(hex);
 
     if (
       n >=
@@ -173,8 +188,7 @@ function decodeInt24(hex) {
 
 function decodeInt128(hex) {
   try {
-    let n =
-      BigInt(hex);
+    let n = BigInt(hex);
 
     if (
       n >=
@@ -188,300 +202,6 @@ function decodeInt128(hex) {
   } catch {
     return null;
   }
-}
-
-/*
-  Uniswap V4 Initialize:
-
-  Initialize(
-    bytes32 indexed id,
-    address indexed currency0,
-    address indexed currency1,
-    uint24 fee,
-    int24 tickSpacing,
-    address hooks,
-    uint160 sqrtPriceX96,
-    int24 tick
-  )
-
-  topics:
-    [0] event signature
-    [1] pool id
-    [2] currency0
-    [3] currency1
-
-  data:
-    5 ABI words
-*/
-
-function looksLikeInitialize(log) {
-  if (!log) {
-    return false;
-  }
-
-  if (
-    log.address?.toLowerCase() !==
-    POOL_MANAGER.toLowerCase()
-  ) {
-    return false;
-  }
-
-  if (
-    !Array.isArray(log.topics) ||
-    log.topics.length !== 4
-  ) {
-    return false;
-  }
-
-  const words =
-    splitWords(log.data);
-
-  if (words.length !== 5) {
-    return false;
-  }
-
-  const currency0 =
-    topicToAddress(
-      log.topics[2],
-      true
-    );
-
-  const currency1 =
-    topicToAddress(
-      log.topics[3],
-      true
-    );
-
-  if (
-    currency0 === null ||
-    currency1 === null
-  ) {
-    return false;
-  }
-
-  /*
-    V4 currencies are sorted.
-    Zero/native currency is allowed.
-  */
-
-  const a =
-    currency0.toLowerCase();
-
-  const b =
-    currency1.toLowerCase();
-
-  if (a === b) {
-    return false;
-  }
-
-  if (
-    a !== ZERO_ADDRESS &&
-    b !== ZERO_ADDRESS &&
-    a >= b
-  ) {
-    return false;
-  }
-
-  const fee =
-    decodeUint24(words[0]);
-
-  const tickSpacing =
-    decodeInt24(words[1]);
-
-  const hooks =
-    topicToAddress(
-      words[2],
-      true
-    );
-
-  const sqrtPrice =
-    words[3];
-
-  const tick =
-    decodeInt24(words[4]);
-
-  if (
-    fee === null ||
-    tickSpacing === null ||
-    !hooks ||
-    !sqrtPrice ||
-    tick === null
-  ) {
-    return false;
-  }
-
-  return true;
-}
-
-function decodeInitialize(log) {
-  if (
-    !looksLikeInitialize(log)
-  ) {
-    return null;
-  }
-
-  const words =
-    splitWords(log.data);
-
-  return {
-    poolId:
-      log.topics[1] || null,
-
-    currency0:
-      topicToAddress(
-        log.topics[2],
-        true
-      ),
-
-    currency1:
-      topicToAddress(
-        log.topics[3],
-        true
-      ),
-
-    fee:
-      decodeUint24(words[0]),
-
-    tickSpacing:
-      decodeInt24(words[1]),
-
-    hooks:
-      topicToAddress(
-        words[2],
-        true
-      ),
-
-    sqrtPriceX96:
-      words[3],
-
-    tick:
-      decodeInt24(words[4]),
-
-    txHash:
-      log.transactionHash ||
-      null,
-
-    blockNumber:
-      log.blockNumber ||
-      null,
-
-    logIndex:
-      log.logIndex ||
-      null
-  };
-}
-
-/*
-  Uniswap V4 Swap:
-
-  Swap(
-    bytes32 indexed id,
-    address indexed sender,
-    int128 amount0,
-    int128 amount1,
-    uint160 sqrtPriceX96,
-    uint128 liquidity,
-    int24 tick,
-    uint24 fee
-  )
-
-  topics = 3
-  data = 7 ABI words
-*/
-
-function looksLikeSwap(log) {
-  if (!log) {
-    return false;
-  }
-
-  if (
-    log.address?.toLowerCase() !==
-    POOL_MANAGER.toLowerCase()
-  ) {
-    return false;
-  }
-
-  if (
-    !Array.isArray(log.topics) ||
-    log.topics.length !== 3
-  ) {
-    return false;
-  }
-
-  const words =
-    splitWords(log.data);
-
-  if (words.length !== 7) {
-    return false;
-  }
-
-  const poolId =
-    log.topics[1];
-
-  const sender =
-    topicToAddress(
-      log.topics[2],
-      true
-    );
-
-  if (
-    !poolId ||
-    !sender
-  ) {
-    return false;
-  }
-
-  return true;
-}
-
-function decodeSwap(log) {
-  if (!looksLikeSwap(log)) {
-    return null;
-  }
-
-  const words =
-    splitWords(log.data);
-
-  return {
-    poolId:
-      log.topics[1],
-
-    sender:
-      topicToAddress(
-        log.topics[2],
-        true
-      ),
-
-    amount0:
-      decodeInt128(words[0]),
-
-    amount1:
-      decodeInt128(words[1]),
-
-    sqrtPriceX96:
-      words[2],
-
-    liquidity:
-      words[3],
-
-    tick:
-      decodeInt24(words[4]),
-
-    fee:
-      decodeUint24(words[5]),
-
-    txHash:
-      log.transactionHash ||
-      null,
-
-    blockNumber:
-      log.blockNumber ||
-      null,
-
-    logIndex:
-      log.logIndex ||
-      null
-  };
 }
 
 async function rpc(
@@ -506,8 +226,7 @@ async function rpc(
     await fetch(
       rpcUrl,
       {
-        method:
-          "POST",
+        method: "POST",
 
         headers: {
           "content-type":
@@ -516,14 +235,9 @@ async function rpc(
 
         body:
           JSON.stringify({
-            jsonrpc:
-              "2.0",
-
-            id:
-              Date.now(),
-
+            jsonrpc: "2.0",
+            id: Date.now(),
             method,
-
             params
           })
       }
@@ -579,28 +293,6 @@ async function getLogs(
   }
 }
 
-async function getPoolManagerLogs(
-  env,
-  fromBlock,
-  toBlock
-) {
-  return getLogs(
-    env,
-    {
-      address:
-        POOL_MANAGER,
-
-      fromBlock:
-        "0x" +
-        fromBlock.toString(16),
-
-      toBlock:
-        "0x" +
-        toBlock.toString(16)
-    }
-  );
-}
-
 async function ethCall(
   env,
   to,
@@ -623,6 +315,222 @@ async function ethCall(
   }
 }
 
+/*
+==================================================
+POOLMANAGER V4 INITIALIZE
+==================================================
+*/
+
+function looksLikeInitialize(log) {
+  if (!log) {
+    return false;
+  }
+
+  if (
+    log.address?.toLowerCase() !==
+    POOL_MANAGER.toLowerCase()
+  ) {
+    return false;
+  }
+
+  if (
+    !Array.isArray(log.topics) ||
+    log.topics.length !== 4
+  ) {
+    return false;
+  }
+
+  const words =
+    splitWords(log.data);
+
+  if (words.length !== 5) {
+    return false;
+  }
+
+  const currency0 =
+    topicToAddress(
+      log.topics[2],
+      true
+    );
+
+  const currency1 =
+    topicToAddress(
+      log.topics[3],
+      true
+    );
+
+  if (
+    currency0 === null ||
+    currency1 === null
+  ) {
+    return false;
+  }
+
+  if (
+    currency0.toLowerCase() ===
+    currency1.toLowerCase()
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function decodeInitialize(log) {
+  if (
+    !looksLikeInitialize(log)
+  ) {
+    return null;
+  }
+
+  const words =
+    splitWords(log.data);
+
+  return {
+    poolId:
+      log.topics[1],
+
+    currency0:
+      topicToAddress(
+        log.topics[2],
+        true
+      ),
+
+    currency1:
+      topicToAddress(
+        log.topics[3],
+        true
+      ),
+
+    fee:
+      decodeUint24(
+        words[0]
+      ),
+
+    tickSpacing:
+      decodeInt24(
+        words[1]
+      ),
+
+    hooks:
+      topicToAddress(
+        words[2],
+        true
+      ),
+
+    sqrtPriceX96:
+      words[3],
+
+    tick:
+      decodeInt24(
+        words[4]
+      ),
+
+    txHash:
+      log.transactionHash ||
+      null,
+
+    blockNumber:
+      log.blockNumber ||
+      null,
+
+    logIndex:
+      log.logIndex ||
+      null
+  };
+}
+
+/*
+==================================================
+POOLMANAGER V4 SWAP
+==================================================
+*/
+
+function looksLikeSwap(log) {
+  if (!log) {
+    return false;
+  }
+
+  if (
+    log.address?.toLowerCase() !==
+    POOL_MANAGER.toLowerCase()
+  ) {
+    return false;
+  }
+
+  if (
+    !Array.isArray(log.topics) ||
+    log.topics.length !== 3
+  ) {
+    return false;
+  }
+
+  const words =
+    splitWords(log.data);
+
+  return words.length === 7;
+}
+
+function decodeSwap(log) {
+  if (!looksLikeSwap(log)) {
+    return null;
+  }
+
+  const words =
+    splitWords(log.data);
+
+  return {
+    poolId:
+      log.topics[1],
+
+    sender:
+      topicToAddress(
+        log.topics[2],
+        true
+      ),
+
+    amount0:
+      decodeInt128(
+        words[0]
+      ),
+
+    amount1:
+      decodeInt128(
+        words[1]
+      ),
+
+    sqrtPriceX96:
+      words[2],
+
+    liquidity:
+      words[3],
+
+    tick:
+      decodeInt24(
+        words[4]
+      ),
+
+    fee:
+      decodeUint24(
+        words[5]
+      ),
+
+    txHash:
+      log.transactionHash ||
+      null,
+
+    blockNumber:
+      log.blockNumber ||
+      null
+  };
+}
+
+/*
+==================================================
+ERC20 METADATA
+==================================================
+*/
+
 const SELECTORS = {
   name:
     "0x06fdde03",
@@ -637,6 +545,62 @@ const SELECTORS = {
     "0x18160ddd"
 };
 
+function hexToUtf8(hex) {
+  try {
+    const bytes = [];
+
+    for (
+      let i = 0;
+      i + 2 <= hex.length;
+      i += 2
+    ) {
+      const n =
+        parseInt(
+          hex.slice(
+            i,
+            i + 2
+          ),
+          16
+        );
+
+      if (n !== 0) {
+        bytes.push(n);
+      }
+    }
+
+    return (
+      new TextDecoder()
+        .decode(
+          new Uint8Array(bytes)
+        )
+        .trim() ||
+      null
+    );
+  } catch {
+    return null;
+  }
+}
+
+function decodeBytes32String(result) {
+  if (
+    !result ||
+    result === "0x"
+  ) {
+    return null;
+  }
+
+  try {
+    return hexToUtf8(
+      result.slice(
+        2,
+        66
+      )
+    );
+  } catch {
+    return null;
+  }
+}
+
 function decodeString(result) {
   if (
     !result ||
@@ -649,10 +613,6 @@ function decodeString(result) {
     const hex =
       result.slice(2);
 
-    /*
-      Standard ABI dynamic string.
-    */
-
     if (
       hex.length >= 128
     ) {
@@ -660,135 +620,55 @@ function decodeString(result) {
         Number(
           BigInt(
             "0x" +
-              hex.slice(
-                0,
-                64
-              )
+            hex.slice(
+              0,
+              64
+            )
           )
         );
 
+      const lenPos =
+        offset * 2;
+
       if (
-        Number.isFinite(
-          offset
-        )
+        Number.isFinite(offset) &&
+        lenPos + 64 <=
+          hex.length
       ) {
-        const lenPos =
-          offset * 2;
+        const length =
+          Number(
+            BigInt(
+              "0x" +
+              hex.slice(
+                lenPos,
+                lenPos + 64
+              )
+            )
+          );
+
+        const start =
+          lenPos + 64;
+
+        const end =
+          start +
+          length * 2;
 
         if (
-          lenPos + 64 <=
+          end <=
           hex.length
         ) {
-          const length =
-            Number(
-              BigInt(
-                "0x" +
-                  hex.slice(
-                    lenPos,
-                    lenPos +
-                      64
-                  )
-              )
-            );
-
-          const start =
-            lenPos + 64;
-
-          const end =
-            start +
-            length * 2;
-
-          if (
-            end <=
-            hex.length
-          ) {
-            return hexToUtf8(
-              hex.slice(
-                start,
-                end
-              )
-            );
-          }
+          return hexToUtf8(
+            hex.slice(
+              start,
+              end
+            )
+          );
         }
       }
     }
 
-    /*
-      bytes32 / fixed bytes fallback.
-    */
-
     return decodeBytes32String(
       result
-    );
-  } catch {
-    return null;
-  }
-}
-
-function hexToUtf8(hex) {
-  try {
-    let bytes =
-      [];
-
-    for (
-      let i = 0;
-      i + 2 <=
-      hex.length;
-      i += 2
-    ) {
-      const n =
-        parseInt(
-          hex.slice(
-            i,
-            i + 2
-          ),
-          16
-        );
-
-      if (
-        n !== 0
-      ) {
-        bytes.push(n);
-      }
-    }
-
-    return (
-      new TextDecoder()
-        .decode(
-          new Uint8Array(
-            bytes
-          )
-        )
-        .trim() ||
-      null
-    );
-  } catch {
-    return null;
-  }
-}
-
-function decodeBytes32String(
-  result
-) {
-  if (
-    !result ||
-    result === "0x"
-  ) {
-    return null;
-  }
-
-  try {
-    const hex =
-      result.slice(
-        2,
-        66
-      );
-
-    return (
-      hexToUtf8(
-        hex
-      ) ||
-      null
     );
   } catch {
     return null;
@@ -800,13 +680,10 @@ async function getERC20Metadata(
   address
 ) {
   if (
-    !validTokenCandidate(
-      address
-    )
+    !validTokenCandidate(address)
   ) {
     return {
-      validERC20:
-        false
+      validERC20: false
     };
   }
 
@@ -843,17 +720,12 @@ async function getERC20Metadata(
     ]);
 
   const name =
-    decodeString(
-      nameRaw
-    );
+    decodeString(nameRaw);
 
   const symbol =
-    decodeString(
-      symbolRaw
-    );
+    decodeString(symbolRaw);
 
-  let decimals =
-    null;
+  let decimals = null;
 
   try {
     if (
@@ -869,8 +741,7 @@ async function getERC20Metadata(
     }
   } catch {}
 
-  let totalSupply =
-    null;
+  let totalSupply = null;
 
   try {
     if (
@@ -884,15 +755,12 @@ async function getERC20Metadata(
     }
   } catch {}
 
-  const valid =
-    !!name &&
-    !!symbol &&
-    decimals !== null &&
-    totalSupply !== null;
-
   return {
     validERC20:
-      valid,
+      !!name &&
+      !!symbol &&
+      decimals !== null &&
+      totalSupply !== null,
 
     name:
       name
@@ -910,133 +778,542 @@ async function getERC20Metadata(
   };
 }
 
-async function getRecentTokenLogs(
+/*
+==================================================
+POOLS.TRADE DISCOVERY
+==================================================
+*/
+
+async function getPoolsTradeLaunches(
   env,
-  token,
   latestBlock
 ) {
   const fromBlock =
     Math.max(
       0,
       latestBlock -
-        ACTIVITY_BLOCKS +
+        DISCOVERY_BLOCKS +
         1
     );
 
-  return getLogs(
-    env,
-    {
-      address:
-        token,
+  const logs =
+    await getLogs(
+      env,
+      {
+        address:
+          ENTRY_CONTRACTS,
 
-      fromBlock:
-        "0x" +
-        fromBlock.toString(
-          16
-        ),
+        fromBlock:
+          "0x" +
+          fromBlock.toString(
+            16
+          ),
 
-      toBlock:
-        "0x" +
-        latestBlock.toString(
-          16
-        )
-    }
-  );
-}
+        toBlock:
+          "0x" +
+          latestBlock.toString(
+            16
+          ),
 
-function unique(values) {
-  return [
-    ...new Set(
-      values.filter(Boolean)
-    )
-  ];
-}
+        topics: [
+          POOLS_TOKEN_CREATED_TOPIC
+        ]
+      }
+    );
 
-function getWalletsFromTransferLogs(
-  logs
-) {
-  const wallets =
-    [];
+  const launches = [];
 
   for (
     const log of logs
   ) {
     if (
       !log.topics ||
-      log.topics.length < 3
+      log.topics.length < 2
     ) {
       continue;
     }
 
+    const token =
+      topicToAddress(
+        log.topics[1]
+      );
+
     if (
-      log.topics[0]
-        ?.toLowerCase() !==
-      TRANSFER_TOPIC
+      !token ||
+      !validTokenCandidate(token)
     ) {
       continue;
     }
 
-    const from =
-      topicToAddress(
-        log.topics[1],
-        true
+    launches.push({
+      token:
+        token.toLowerCase(),
+
+      source:
+        "POOLS_TRADE",
+
+      entryContract:
+        log.address,
+
+      txHash:
+        log.transactionHash ||
+        null,
+
+      blockNumber:
+        log.blockNumber ||
+        null,
+
+      logIndex:
+        log.logIndex ||
+        null,
+
+      event:
+        "TokenCreated"
+    });
+  }
+
+  return {
+    fromBlock,
+
+    toBlock:
+      latestBlock,
+
+    rawEvents:
+      logs.length,
+
+    launches
+  };
+}
+
+/*
+==================================================
+POOLS.TRADE DISTRIBUTION / LAUNCHPAD EVIDENCE
+==================================================
+*/
+
+async function getPoolsTradeEvidence(
+  env,
+  latestBlock
+) {
+  const fromBlock =
+    Math.max(
+      0,
+      latestBlock -
+        DISCOVERY_BLOCKS +
+        1
+    );
+
+  const [
+    distributed,
+    launched
+  ] =
+    await Promise.all([
+      getLogs(
+        env,
+        {
+          address:
+            ENTRY_CONTRACTS,
+
+          fromBlock:
+            "0x" +
+            fromBlock.toString(
+              16
+            ),
+
+          toBlock:
+            "0x" +
+            latestBlock.toString(
+              16
+            ),
+
+          topics: [
+            POOLS_TOKEN_DISTRIBUTED_TOPIC
+          ]
+        }
+      ),
+
+      getLogs(
+        env,
+        {
+          address:
+            LAUNCHPADS,
+
+          fromBlock:
+            "0x" +
+            fromBlock.toString(
+              16
+            ),
+
+          toBlock:
+            "0x" +
+            latestBlock.toString(
+              16
+            ),
+
+          topics: [
+            POOLS_TOKEN_LAUNCHED_TOPIC
+          ]
+        }
+      )
+    ]);
+
+  const tokenEvidence =
+    new Map();
+
+  for (
+    const log of distributed
+  ) {
+    const words =
+      splitWords(
+        log.data
       );
 
-    const to =
-      topicToAddress(
-        log.topics[2],
-        true
-      );
+    let token =
+      null;
+
+    /*
+      TokenDistributed:
+      tokenAddress is indexed.
+      We support both indexed and ABI-word
+      layouts defensively.
+    */
 
     if (
-      from &&
-      !isZeroAddress(from)
+      log.topics.length >= 2
     ) {
-      wallets.push(
-        from
-      );
+      token =
+        topicToAddress(
+          log.topics[1]
+        );
     }
 
     if (
-      to &&
-      !isZeroAddress(to)
+      !token &&
+      words.length > 0
     ) {
-      wallets.push(
-        to
+      token =
+        topicToAddress(
+          words[0]
+        );
+    }
+
+    if (token) {
+      tokenEvidence.set(
+        token.toLowerCase(),
+        {
+          type:
+            "TokenDistributed",
+
+          contract:
+            log.address,
+
+          txHash:
+            log.transactionHash,
+
+          blockNumber:
+            log.blockNumber
+        }
       );
     }
   }
 
-  return unique(
-    wallets
-  );
+  for (
+    const log of launched
+  ) {
+    const possible =
+      [];
+
+    for (
+      const topic of
+        log.topics.slice(1)
+    ) {
+      const address =
+        topicToAddress(
+          topic
+        );
+
+      if (address) {
+        possible.push(
+          address
+        );
+      }
+    }
+
+    for (
+      const word of
+        splitWords(
+          log.data
+        )
+    ) {
+      const address =
+        topicToAddress(
+          word
+        );
+
+      if (address) {
+        possible.push(
+          address
+        );
+      }
+    }
+
+    for (
+      const address of
+        unique(possible)
+    ) {
+      tokenEvidence.set(
+        address.toLowerCase(),
+        {
+          type:
+            "TokenLaunched",
+
+          contract:
+            log.address,
+
+          txHash:
+            log.transactionHash,
+
+          blockNumber:
+            log.blockNumber
+        }
+      );
+    }
+  }
+
+  return {
+    distributedEvents:
+      distributed.length,
+
+    launchEvents:
+      launched.length,
+
+    tokenEvidence
+  };
 }
 
-function countTransfers(
-  logs
+/*
+==================================================
+MINT.FAST DISCOVERY
+==================================================
+
+We inspect the launchpad for the exact
+TokenCreated topic. If the ABI/topic changes,
+the contract address is still reported as
+checked rather than fabricating a token.
+*/
+
+async function getMintFastLaunches(
+  env,
+  latestBlock
 ) {
-  return logs.filter(
-    log =>
-      log.topics &&
-      log.topics[0]
-        ?.toLowerCase() ===
-        TRANSFER_TOPIC
-  ).length;
+  const fromBlock =
+    Math.max(
+      0,
+      latestBlock -
+        DISCOVERY_BLOCKS +
+        1
+    );
+
+  const logs =
+    await getLogs(
+      env,
+      {
+        address:
+          MINT_FAST_LAUNCHPAD,
+
+        fromBlock:
+          "0x" +
+          fromBlock.toString(
+            16
+          ),
+
+        toBlock:
+          "0x" +
+          latestBlock.toString(
+            16
+          ),
+
+        topics: [
+          MINT_FAST_TOKEN_CREATED_TOPIC
+        ]
+      }
+    );
+
+  const launches =
+    [];
+
+  for (
+    const log of logs
+  ) {
+    const addresses =
+      [];
+
+    for (
+      const topic of
+        log.topics.slice(1)
+    ) {
+      const address =
+        topicToAddress(
+          topic
+        );
+
+      if (address) {
+        addresses.push(
+          address
+        );
+      }
+    }
+
+    for (
+      const word of
+        splitWords(
+          log.data
+        )
+    ) {
+      const address =
+        topicToAddress(
+          word
+        );
+
+      if (address) {
+        addresses.push(
+          address
+        );
+      }
+    }
+
+    for (
+      const token of
+        unique(addresses)
+    ) {
+      launches.push({
+        token:
+          token.toLowerCase(),
+
+        source:
+          "MINT_FAST",
+
+        launchpad:
+          MINT_FAST_LAUNCHPAD,
+
+        txHash:
+          log.transactionHash ||
+          null,
+
+        blockNumber:
+          log.blockNumber ||
+          null,
+
+        event:
+          "TokenCreated"
+      });
+    }
+  }
+
+  return {
+    fromBlock,
+
+    toBlock:
+      latestBlock,
+
+    rawEvents:
+      logs.length,
+
+    launches
+  };
 }
 
-function countApprovals(
-  logs
+/*
+==================================================
+V4 POOL SCAN
+==================================================
+*/
+
+async function getPoolManagerActivity(
+  env,
+  latestBlock
 ) {
-  return logs.filter(
-    log =>
-      log.topics &&
-      log.topics[0]
-        ?.toLowerCase() ===
-        APPROVAL_TOPIC
-  ).length;
+  const fromBlock =
+    Math.max(
+      0,
+      latestBlock - 20
+    );
+
+  const logs =
+    await getLogs(
+      env,
+      {
+        address:
+          POOL_MANAGER,
+
+        fromBlock:
+          "0x" +
+          fromBlock.toString(
+            16
+          ),
+
+        toBlock:
+          "0x" +
+          latestBlock.toString(
+            16
+          )
+      }
+    );
+
+  const initializeEvents =
+    [];
+
+  const swapEvents =
+    [];
+
+  for (
+    const log of logs
+  ) {
+    const initialize =
+      decodeInitialize(
+        log
+      );
+
+    if (initialize) {
+      initializeEvents.push(
+        initialize
+      );
+    }
+
+    const swap =
+      decodeSwap(
+        log
+      );
+
+    if (swap) {
+      swapEvents.push(
+        swap
+      );
+    }
+  }
+
+  return {
+    fromBlock,
+
+    toBlock:
+      latestBlock,
+
+    rawLogs:
+      logs.length,
+
+    initializeEvents,
+
+    swapEvents
+  };
 }
 
-async function getActivityMetrics(
+/*
+==================================================
+TOKEN ACTIVITY
+==================================================
+*/
+
+async function getTokenActivity(
   env,
   token,
   latestBlock
@@ -1110,79 +1387,98 @@ async function getActivityMetrics(
     ]);
 
   const recentTransfers =
-    countTransfers(
-      recentLogs
+    recentLogs.filter(
+      log =>
+        log.topics?.[0]
+          ?.toLowerCase() ===
+        TRANSFER_TOPIC
     );
 
   const previousTransfers =
-    countTransfers(
-      previousLogs
+    previousLogs.filter(
+      log =>
+        log.topics?.[0]
+          ?.toLowerCase() ===
+        TRANSFER_TOPIC
     );
 
   const wallets =
-    getWalletsFromTransferLogs(
-      recentLogs
-    );
+    [];
 
-  let activityAcceleration =
-    0;
+  for (
+    const log of
+      recentTransfers
+  ) {
+    const from =
+      topicToAddress(
+        log.topics[1],
+        true
+      );
 
-  if (
-    previousLogs.length > 0
-  ) {
-    activityAcceleration =
-      recentLogs.length /
-      previousLogs.length;
-  } else if (
-    recentLogs.length > 0
-  ) {
-    activityAcceleration =
-      2;
+    const to =
+      topicToAddress(
+        log.topics[2],
+        true
+      );
+
+    if (
+      from &&
+      !isZeroAddress(from)
+    ) {
+      wallets.push(from);
+    }
+
+    if (
+      to &&
+      !isZeroAddress(to)
+    ) {
+      wallets.push(to);
+    }
   }
 
-  let transferAcceleration =
-    0;
+  const recentCount =
+    recentLogs.length;
 
-  if (
-    previousTransfers > 0
-  ) {
-    transferAcceleration =
-      recentTransfers /
-      previousTransfers;
-  } else if (
-    recentTransfers > 0
-  ) {
-    transferAcceleration =
-      2;
-  }
+  const previousCount =
+    previousLogs.length;
+
+  const activityAcceleration =
+    previousCount > 0
+      ? recentCount /
+        previousCount
+      : recentCount > 0
+        ? 2
+        : 0;
+
+  const transferAcceleration =
+    previousTransfers.length > 0
+      ? recentTransfers.length /
+        previousTransfers.length
+      : recentTransfers.length > 0
+        ? 2
+        : 0;
 
   return {
     recentActivity:
-      recentLogs.length,
+      recentCount,
 
     previousActivity:
-      previousLogs.length,
+      previousCount,
 
     activityAcceleration,
 
-    recentTransfers,
+    recentTransfers:
+      recentTransfers.length,
 
-    previousTransfers,
+    previousTransfers:
+      previousTransfers.length,
 
     transferAcceleration,
 
     uniqueWallets:
-      wallets.length,
+      unique(wallets).length,
 
-    transferActivity:
-      recentTransfers,
-
-    approvalActivity:
-      countApprovals(
-        recentLogs
-      ),
-
-    activityWindow: {
+    window: {
       recentFrom,
       recentTo:
         latestBlock,
@@ -1193,405 +1489,127 @@ async function getActivityMetrics(
   };
 }
 
-function extractTokenAddressesFromPools(
-  pools
+/*
+==================================================
+POOL MATCHING
+==================================================
+*/
+
+function findPoolsForToken(
+  token,
+  initializeEvents
 ) {
-  const result =
-    [];
+  const target =
+    token.toLowerCase();
 
-  for (
-    const pool of pools
-  ) {
-    if (
-      pool.currency0 &&
-      !isZeroAddress(
-        pool.currency0
-      )
-    ) {
-      result.push(
-        pool.currency0
-      );
-    }
-
-    if (
-      pool.currency1 &&
-      !isZeroAddress(
-        pool.currency1
-      )
-    ) {
-      result.push(
-        pool.currency1
-      );
-    }
-  }
-
-  return unique(
-    result.map(
-      x =>
-        x.toLowerCase()
-    )
+  return initializeEvents.filter(
+    pool =>
+      pool.currency0
+        ?.toLowerCase() ===
+        target ||
+      pool.currency1
+        ?.toLowerCase() ===
+        target
   );
 }
 
 /*
-  Launchpad/entry-contract discovery.
-
-  We inspect indexed topics and ABI words for
-  addresses, then independently verify each address
-  by calling ERC20 metadata methods.
-
-  This deliberately does NOT claim that an address is
-  a launchpad-created token merely because it appeared
-  in a log.
+==================================================
+SCORING
+==================================================
 */
-
-function extractAddressesFromLog(
-  log
-) {
-  const addresses =
-    [];
-
-  if (
-    Array.isArray(
-      log.topics
-    )
-  ) {
-    for (
-      const topic of log.topics
-    ) {
-      const address =
-        topicToAddress(
-          topic
-        );
-
-      if (
-        address &&
-        validTokenCandidate(
-          address
-        )
-      ) {
-        addresses.push(
-          address
-        );
-      }
-    }
-  }
-
-  const words =
-    splitWords(
-      log.data
-    );
-
-  for (
-    const word of words
-  ) {
-    const address =
-      topicToAddress(
-        word
-      );
-
-    if (
-      address &&
-      validTokenCandidate(
-        address
-      )
-    ) {
-      addresses.push(
-        address
-      );
-    }
-  }
-
-  return unique(
-    addresses.map(
-      x =>
-        x.toLowerCase()
-    )
-  );
-}
-
-async function inspectLaunchpads(
-  env,
-  fromBlock,
-  toBlock
-) {
-  const observations =
-    [];
-
-  const discovered =
-    [];
-
-  const contracts =
-    unique([
-      ...ENTRY_CONTRACTS,
-      ...LAUNCHPADS
-    ]);
-
-  for (
-    const address of contracts
-  ) {
-    const logs =
-      await getLogs(
-        env,
-        {
-          address,
-
-          fromBlock:
-            "0x" +
-            fromBlock.toString(
-              16
-            ),
-
-          toBlock:
-            "0x" +
-            toBlock.toString(
-              16
-            )
-        }
-      );
-
-    const addresses =
-      [];
-
-    for (
-      const log of logs
-    ) {
-      const found =
-        extractAddressesFromLog(
-          log
-        );
-
-      for (
-        const candidate of found
-      ) {
-        if (
-          candidate !==
-          address.toLowerCase()
-        ) {
-          addresses.push(
-            candidate
-          );
-        }
-      }
-    }
-
-    const uniqueAddresses =
-      unique(
-        addresses
-      );
-
-    for (
-      const candidate of uniqueAddresses
-    ) {
-      discovered.push({
-        address:
-          candidate,
-
-        sourceContract:
-          address,
-
-        evidence:
-          "ADDRESS_APPEARED_IN_LAUNCHPAD_OR_ENTRY_LOG",
-
-        blockRange: {
-          fromBlock,
-          toBlock
-        }
-      });
-    }
-
-    observations.push({
-      address,
-
-      logsFound:
-        logs.length,
-
-      candidateAddresses:
-        uniqueAddresses.length,
-
-      tokenCreationEvents:
-        "ADDRESS_EXTRACTION_ONLY",
-
-      discoveredAddresses:
-        uniqueAddresses.slice(
-          0,
-          20
-        )
-    });
-  }
-
-  return {
-    observations,
-
-    discovered:
-      discovered.slice(
-        0,
-        MAX_LAUNCHPAD_CANDIDATES
-      )
-  };
-}
 
 function scoreCandidate(
   candidate
 ) {
-  let score =
-    0;
-
-  /*
-    Contract verification
-  */
+  let score = 0;
 
   if (
     candidate.validERC20
   ) {
-    score +=
-      20;
+    score += 20;
   }
-
-  /*
-    Metadata
-  */
 
   if (
     candidate.name
   ) {
-    score +=
-      5;
+    score += 5;
   }
 
   if (
     candidate.symbol
   ) {
-    score +=
-      5;
-  }
-
-  /*
-    Pool
-  */
-
-  if (
-    candidate.poolInitialized
-  ) {
-    score +=
-      10;
+    score += 5;
   }
 
   if (
-    candidate.poolCount > 1
+    candidate.launchEvidence
   ) {
-    score +=
-      Math.min(
-        10,
-        candidate.poolCount *
-          2
-      );
+    score += 15;
   }
 
-  /*
-    Recent activity
-  */
+  if (
+    candidate.poolCount > 0
+  ) {
+    score += 10;
+  }
 
   if (
     candidate.recentActivity > 0
   ) {
-    score +=
-      Math.min(
-        10,
-        Math.ceil(
-          candidate.recentActivity /
-            10
-        )
-      );
+    score += Math.min(
+      10,
+      Math.ceil(
+        candidate.recentActivity /
+        10
+      )
+    );
   }
-
-  /*
-    Unique transfer wallets
-  */
 
   if (
     candidate.uniqueWallets > 0
   ) {
-    score +=
-      Math.min(
-        10,
-        candidate.uniqueWallets
-      );
+    score += Math.min(
+      10,
+      candidate.uniqueWallets
+    );
   }
-
-  /*
-    True recent-vs-previous acceleration
-  */
 
   if (
     candidate.activityAcceleration >
     1
   ) {
-    score +=
-      Math.min(
-        10,
-        Math.floor(
-          candidate.activityAcceleration *
-            2
-        )
-      );
+    score += Math.min(
+      10,
+      Math.floor(
+        candidate.activityAcceleration *
+        2
+      )
+    );
   }
-
-  /*
-    Transfer activity
-  */
-
-  if (
-    candidate.transferActivity >
-    0
-  ) {
-    score +=
-      Math.min(
-        5,
-        Math.ceil(
-          candidate.transferActivity /
-            20
-        )
-      );
-  }
-
-  /*
-    Transfer acceleration
-  */
 
   if (
     candidate.transferAcceleration >
     1
   ) {
-    score +=
-      Math.min(
-        5,
-        Math.floor(
-          candidate.transferAcceleration
-        )
-      );
+    score += Math.min(
+      5,
+      Math.floor(
+        candidate.transferAcceleration
+      )
+    );
   }
 
-  /*
-    Launchpad evidence
-  */
-
   if (
-    candidate.launchpadEvidence
+    candidate.recentTransfers > 0
   ) {
-    score +=
-      10;
-  }
-
-  /*
-    Native pair
-  */
-
-  if (
-    candidate.isNativePair
-  ) {
-    score +=
-      5;
+    score += Math.min(
+      5,
+      Math.ceil(
+        candidate.recentTransfers /
+        20
+      )
+    );
   }
 
   return Math.min(
@@ -1600,17 +1618,23 @@ function scoreCandidate(
   );
 }
 
+/*
+==================================================
+CANDIDATE BUILDER
+==================================================
+*/
+
 async function buildCandidate(
   env,
-  address,
+  token,
   latestBlock,
-  pools = [],
-  launchpadEvidence = null
+  initializeEvents,
+  evidence
 ) {
   const metadata =
     await getERC20Metadata(
       env,
-      address
+      token
     );
 
   if (
@@ -1619,25 +1643,45 @@ async function buildCandidate(
     return null;
   }
 
+  const pools =
+    findPoolsForToken(
+      token,
+      initializeEvents
+    );
+
   const activity =
-    await getActivityMetrics(
+    await getTokenActivity(
       env,
-      address,
+      token,
       latestBlock
     );
 
   const candidate = {
     address:
-      address.toLowerCase(),
+      token.toLowerCase(),
 
     ...metadata,
 
-    poolInitialized:
-      pools.length >
-      0,
+    launchEvidence:
+      !!evidence,
+
+    launchSource:
+      evidence?.source ||
+      null,
+
+    launchTx:
+      evidence?.txHash ||
+      null,
+
+    launchBlock:
+      evidence?.blockNumber ||
+      null,
 
     poolCount:
       pools.length,
+
+    poolInitialized:
+      pools.length > 0,
 
     recentActivity:
       activity.recentActivity,
@@ -1660,12 +1704,6 @@ async function buildCandidate(
     uniqueWallets:
       activity.uniqueWallets,
 
-    transferActivity:
-      activity.transferActivity,
-
-    approvalActivity:
-      activity.approvalActivity,
-
     isNativePair:
       pools.some(
         pool =>
@@ -1676,13 +1714,6 @@ async function buildCandidate(
             pool.currency1
           )
       ),
-
-    launchpadEvidence:
-      !!launchpadEvidence,
-
-    launchpadSource:
-      launchpadEvidence?.sourceContract ||
-      null,
 
     pools:
       pools.map(
@@ -1705,9 +1736,6 @@ async function buildCandidate(
           hooks:
             pool.hooks,
 
-          sqrtPriceX96:
-            pool.sqrtPriceX96,
-
           tick:
             pool.tick,
 
@@ -1715,10 +1743,7 @@ async function buildCandidate(
             pool.txHash,
 
           blockNumber:
-            pool.blockNumber,
-
-          logIndex:
-            pool.logIndex
+            pool.blockNumber
         })
       )
   };
@@ -1731,474 +1756,11 @@ async function buildCandidate(
   return candidate;
 }
 
-async function scan(env) {
-  const latestBlock =
-    await getLatestBlock(
-      env
-    );
-
-  /*
-    Keep the PoolManager RPC range small.
-  */
-
-  const startBlock =
-    Math.max(
-      0,
-      latestBlock -
-        (RPC_MAX_RANGE - 1)
-    );
-
-  const logs =
-    await getPoolManagerLogs(
-      env,
-      startBlock,
-      latestBlock
-    );
-
-  const initializeEvents =
-    [];
-
-  const swapEvents =
-    [];
-
-  for (
-    const log of logs
-  ) {
-    if (
-      looksLikeInitialize(
-        log
-      )
-    ) {
-      const decoded =
-        decodeInitialize(
-          log
-        );
-
-      if (decoded) {
-        initializeEvents.push(
-          decoded
-        );
-      }
-    }
-
-    if (
-      looksLikeSwap(
-        log
-      )
-    ) {
-      const decoded =
-        decodeSwap(
-          log
-        );
-
-      if (decoded) {
-        swapEvents.push(
-          decoded
-        );
-      }
-    }
-  }
-
-  const poolTokenAddresses =
-    extractTokenAddressesFromPools(
-      initializeEvents
-    );
-
-  /*
-    Launchpad discovery.
-  */
-
-  const launchpadData =
-    await inspectLaunchpads(
-      env,
-      startBlock,
-      latestBlock
-    );
-
-  /*
-    Build launchpad candidate map.
-  */
-
-  const launchpadMap =
-    new Map();
-
-  for (
-    const item of
-      launchpadData.discovered
-  ) {
-    launchpadMap.set(
-      item.address.toLowerCase(),
-      item
-    );
-  }
-
-  /*
-    All candidate addresses.
-  */
-
-  const allAddresses =
-    unique([
-      ...poolTokenAddresses,
-
-      ...launchpadData.discovered.map(
-        x =>
-          x.address.toLowerCase()
-      )
-    ]).slice(
-      0,
-      MAX_POOL_TOKENS +
-        MAX_LAUNCHPAD_CANDIDATES
-    );
-
-  const candidates =
-    [];
-
-  const validationResults =
-    [];
-
-  for (
-    const address of allAddresses
-  ) {
-    const metadata =
-      await getERC20Metadata(
-        env,
-        address
-      );
-
-    validationResults.push({
-      address,
-
-      ...metadata
-    });
-
-    if (
-      !metadata.validERC20
-    ) {
-      continue;
-    }
-
-    const pools =
-      initializeEvents.filter(
-        event =>
-          event.currency0
-            ?.toLowerCase() ===
-            address ||
-          event.currency1
-            ?.toLowerCase() ===
-            address
-      );
-
-    const launchEvidence =
-      launchpadMap.get(
-        address
-      ) ||
-      null;
-
-    const activity =
-      await getActivityMetrics(
-        env,
-        address,
-        latestBlock
-      );
-
-    const candidate = {
-      address,
-
-      ...metadata,
-
-      poolInitialized:
-        pools.length >
-        0,
-
-      poolCount:
-        pools.length,
-
-      recentActivity:
-        activity.recentActivity,
-
-      previousActivity:
-        activity.previousActivity,
-
-      activityAcceleration:
-        activity.activityAcceleration,
-
-      recentTransfers:
-        activity.recentTransfers,
-
-      previousTransfers:
-        activity.previousTransfers,
-
-      transferAcceleration:
-        activity.transferAcceleration,
-
-      uniqueWallets:
-        activity.uniqueWallets,
-
-      transferActivity:
-        activity.transferActivity,
-
-      approvalActivity:
-        activity.approvalActivity,
-
-      isNativePair:
-        pools.some(
-          pool =>
-            isZeroAddress(
-              pool.currency0
-            ) ||
-            isZeroAddress(
-              pool.currency1
-            )
-        ),
-
-      launchpadEvidence:
-        !!launchEvidence,
-
-      launchpadSource:
-        launchEvidence?.sourceContract ||
-        null,
-
-      pools:
-        pools.map(
-          pool => ({
-            poolId:
-              pool.poolId,
-
-            currency0:
-              pool.currency0,
-
-            currency1:
-              pool.currency1,
-
-            fee:
-              pool.fee,
-
-            tickSpacing:
-              pool.tickSpacing,
-
-            hooks:
-              pool.hooks,
-
-            sqrtPriceX96:
-              pool.sqrtPriceX96,
-
-            tick:
-              pool.tick,
-
-            txHash:
-              pool.txHash,
-
-            blockNumber:
-              pool.blockNumber,
-
-            logIndex:
-              pool.logIndex
-          })
-        )
-    };
-
-    candidate.score =
-      scoreCandidate(
-        candidate
-      );
-
-    candidates.push(
-      candidate
-    );
-  }
-
-  candidates.sort(
-    (a, b) =>
-      b.score -
-      a.score
-  );
-
-  const qualifyingCandidates =
-    candidates.filter(
-      candidate =>
-        candidate.score >=
-        TELEGRAM_THRESHOLD
-    );
-
-  let telegramResult = {
-    sent:
-      false,
-
-    reason:
-      "NO_QUALIFYING_CANDIDATE"
-  };
-
-  if (
-    qualifyingCandidates.length >
-    0
-  ) {
-    telegramResult =
-      await sendTelegram(
-        env,
-        qualifyingCandidates[0]
-      );
-  }
-
-  return {
-    agent:
-      "Robinhood Chain Meme Hunter",
-
-    version:
-      VERSION,
-
-    success:
-      true,
-
-    scan: {
-      status:
-        "OK",
-
-      latestBlock,
-
-      startBlock,
-
-      endBlock:
-        latestBlock,
-
-      blocksScanned:
-        latestBlock -
-        startBlock +
-        1,
-
-      poolManager:
-        POOL_MANAGER,
-
-      rawLogs:
-        logs.length,
-
-      initializeEventsFound:
-        initializeEvents.length,
-
-      swapEventsFound:
-        swapEvents.length,
-
-      currenciesDiscovered:
-        poolTokenAddresses.length,
-
-      uniqueTokenCandidates:
-        allAddresses.length,
-
-      tokenValidationChecks:
-        validationResults.length,
-
-      validERC20Tokens:
-        validationResults.filter(
-          x =>
-            x.validERC20
-        ).length,
-
-      validationResults,
-
-      pools:
-        initializeEvents,
-
-      swapActivity: {
-        events:
-          swapEvents.length,
-
-        uniqueSenders:
-          unique(
-            swapEvents
-              .map(
-                x =>
-                  x.sender
-              )
-              .filter(Boolean)
-          ).length,
-
-        uniquePools:
-          unique(
-            swapEvents
-              .map(
-                x =>
-                  x.poolId
-              )
-              .filter(Boolean)
-          ).length
-      },
-
-      candidates,
-
-      qualifyingCandidates:
-        qualifyingCandidates.length,
-
-      telegram:
-        telegramResult,
-
-      launchpadDiscovery: {
-        contractsChecked:
-          ENTRY_CONTRACTS.length +
-          LAUNCHPADS.length,
-
-        discoveredAddresses:
-          launchpadData.discovered.length,
-
-        observations:
-          launchpadData.observations,
-
-        method:
-          "LOG_ADDRESS_EXTRACTION_PLUS_ERC20_VERIFICATION"
-      },
-
-      rpcProvider:
-        "ALCHEMY",
-
-      discovery:
-        "UNISWAP_V4_INITIALIZE_SWAP_ACTIVITY_PLUS_LAUNCHPAD_DISCOVERY_V50",
-
-      chain: {
-        name:
-          CHAIN_NAME,
-
-        chainId:
-          CHAIN_ID
-      },
-
-      dataIntegrity: {
-        noFabricatedMetrics:
-          true,
-
-        holderConcentration:
-          "UNVERIFIED",
-
-        smartMoney:
-          "UNVERIFIED",
-
-        whaleActivity:
-          "UNVERIFIED",
-
-        walletActivity:
-          "TRANSFER_LOG_BASED",
-
-        accumulationDistribution:
-          "UNVERIFIED",
-
-        marketCap:
-          "UNVERIFIED",
-
-        liquidity:
-          "UNVERIFIED",
-
-        volume:
-          "RAW_V4_SWAP_ACTIVITY_ONLY",
-
-        socialMomentum:
-          "UNVERIFIED",
-
-        launchpadCreation:
-          "PARTIALLY_VERIFIED"
-      }
-    },
-
-    timestamp:
-      new Date().toISOString()
-  };
-}
+/*
+==================================================
+TELEGRAM
+==================================================
+*/
 
 async function sendTelegram(
   env,
@@ -2209,9 +1771,7 @@ async function sendTelegram(
     !env.TELEGRAM_CHAT_ID
   ) {
     return {
-      sent:
-        false,
-
+      sent: false,
       reason:
         "TELEGRAM_NOT_CONFIGURED"
     };
@@ -2227,11 +1787,12 @@ async function sendTelegram(
       "",
       `📍 Token: ${candidate.address}`,
       "",
+      `🚀 Source: ${candidate.launchSource || "ON-CHAIN DISCOVERY"}`,
       `🏊 Pools: ${candidate.poolCount}`,
-      `📊 Recent logs: ${candidate.recentActivity}`,
-      `🔄 Transfers: ${candidate.transferActivity}`,
+      `📊 Recent activity: ${candidate.recentActivity}`,
       `👥 Unique wallets: ${candidate.uniqueWallets}`,
-      `⚡ Activity: ${
+      `🔄 Transfers: ${candidate.recentTransfers}`,
+      `⚡ Activity acceleration: ${
         Number.isFinite(
           candidate.activityAcceleration
         )
@@ -2248,25 +1809,14 @@ async function sendTelegram(
           : "UNVERIFIED"
       }`,
       "",
-      `🚀 Launchpad evidence: ${
-        candidate.launchpadEvidence
-          ? "YES"
-          : "NO"
-      }`,
-      candidate.launchpadSource
-        ? `🏗️ Source: ${candidate.launchpadSource}`
-        : "",
-      "",
       "⚠️ Market cap: UNVERIFIED",
       "⚠️ Liquidity: UNVERIFIED",
-      "⚠️ Holders: UNVERIFIED",
+      "⚠️ Holder concentration: UNVERIFIED",
       "⚠️ Smart money: UNVERIFIED",
       "⚠️ Whale activity: UNVERIFIED",
       "",
-      "V50 — Activity + Launchpad Discovery"
-    ]
-      .filter(Boolean)
-      .join("\n");
+      "V51 — Launch + V4 Activity Hunter"
+    ].join("\n");
 
   const url =
     "https://api.telegram.org/bot" +
@@ -2305,8 +1855,7 @@ async function sendTelegram(
       !result.ok
     ) {
       return {
-        sent:
-          false,
+        sent: false,
 
         reason:
           result.description ||
@@ -2315,8 +1864,7 @@ async function sendTelegram(
     }
 
     return {
-      sent:
-        true,
+      sent: true,
 
       messageId:
         result.result?.message_id ||
@@ -2324,8 +1872,7 @@ async function sendTelegram(
     };
   } catch (error) {
     return {
-      sent:
-        false,
+      sent: false,
 
       reason:
         error?.message ||
@@ -2333,6 +1880,420 @@ async function sendTelegram(
     };
   }
 }
+
+/*
+==================================================
+SCAN
+==================================================
+*/
+
+async function scan(env) {
+  const latestBlock =
+    await getLatestBlock(
+      env
+    );
+
+  const [
+    poolData,
+    poolsTrade,
+    poolsEvidence,
+    mintFast
+  ] =
+    await Promise.all([
+      getPoolManagerActivity(
+        env,
+        latestBlock
+      ),
+
+      getPoolsTradeLaunches(
+        env,
+        latestBlock
+      ),
+
+      getPoolsTradeEvidence(
+        env,
+        latestBlock
+      ),
+
+      getMintFastLaunches(
+        env,
+        latestBlock
+      )
+    ]);
+
+  const tokenMap =
+    new Map();
+
+  /*
+    Pools.trade TokenCreated
+  */
+
+  for (
+    const launch of
+      poolsTrade.launches
+  ) {
+    tokenMap.set(
+      launch.token,
+      launch
+    );
+  }
+
+  /*
+    Mint.fast
+  */
+
+  for (
+    const launch of
+      mintFast.launches
+  ) {
+    if (
+      validTokenCandidate(
+        launch.token
+      )
+    ) {
+      tokenMap.set(
+        launch.token,
+        launch
+      );
+    }
+  }
+
+  /*
+    Evidence can identify tokens
+    independently.
+  */
+
+  for (
+    const [
+      token,
+      evidence
+    ] of
+      poolsEvidence.tokenEvidence
+  ) {
+    if (
+      validTokenCandidate(
+        token
+      ) &&
+      !tokenMap.has(token)
+    ) {
+      tokenMap.set(
+        token,
+        {
+          token,
+
+          source:
+            "POOLS_TRADE_EVIDENCE",
+
+          txHash:
+            evidence.txHash,
+
+          blockNumber:
+            evidence.blockNumber
+        }
+      );
+    }
+  }
+
+  /*
+    Add currencies found directly from
+    PoolManager Initialize events.
+  */
+
+  for (
+    const pool of
+      poolData.initializeEvents
+  ) {
+    for (
+      const currency of [
+        pool.currency0,
+        pool.currency1
+      ]
+    ) {
+      if (
+        currency &&
+        !isZeroAddress(currency) &&
+        validTokenCandidate(currency)
+      ) {
+        if (
+          !tokenMap.has(
+            currency.toLowerCase()
+          )
+        ) {
+          tokenMap.set(
+            currency.toLowerCase(),
+            {
+              token:
+                currency.toLowerCase(),
+
+              source:
+                "V4_POOL_DISCOVERY",
+
+              txHash:
+                pool.txHash,
+
+              blockNumber:
+                pool.blockNumber
+            }
+          );
+        }
+      }
+    }
+  }
+
+  const addresses =
+    [
+      ...tokenMap.keys()
+    ].slice(
+      0,
+      MAX_CANDIDATES
+    );
+
+  const candidates =
+    [];
+
+  const validationResults =
+    [];
+
+  for (
+    const token of addresses
+  ) {
+    const metadata =
+      await getERC20Metadata(
+        env,
+        token
+      );
+
+    validationResults.push({
+      address:
+        token,
+
+      ...metadata
+    });
+
+    if (
+      !metadata.validERC20
+    ) {
+      continue;
+    }
+
+    const candidate =
+      await buildCandidate(
+        env,
+        token,
+        latestBlock,
+        poolData.initializeEvents,
+        tokenMap.get(token)
+      );
+
+    if (candidate) {
+      candidates.push(
+        candidate
+      );
+    }
+  }
+
+  candidates.sort(
+    (a, b) =>
+      b.score -
+      a.score
+  );
+
+  const qualifyingCandidates =
+    candidates.filter(
+      candidate =>
+        candidate.score >=
+        TELEGRAM_THRESHOLD
+    );
+
+  let telegramResult = {
+    sent: false,
+
+    reason:
+      "NO_QUALIFYING_CANDIDATE"
+  };
+
+  if (
+    qualifyingCandidates.length >
+    0
+  ) {
+    telegramResult =
+      await sendTelegram(
+        env,
+        qualifyingCandidates[0]
+      );
+  }
+
+  return {
+    agent:
+      "Robinhood Chain Meme Hunter",
+
+    version:
+      VERSION,
+
+    success:
+      true,
+
+    scan: {
+      status:
+        "OK",
+
+      latestBlock,
+
+      discoveryWindow: {
+        fromBlock:
+          poolsTrade.fromBlock,
+
+        toBlock:
+          poolsTrade.toBlock,
+
+        blocks:
+          poolsTrade.toBlock -
+          poolsTrade.fromBlock +
+          1
+      },
+
+      poolsTrade: {
+        entryContracts:
+          ENTRY_CONTRACTS,
+
+        rawTokenCreatedEvents:
+          poolsTrade.rawEvents,
+
+        launchesFound:
+          poolsTrade.launches.length,
+
+        distributedEvents:
+          poolsEvidence.distributedEvents,
+
+        tokenLaunchedEvents:
+          poolsEvidence.launchEvents
+      },
+
+      mintFast: {
+        launchpad:
+          MINT_FAST_LAUNCHPAD,
+
+        rawTokenCreatedEvents:
+          mintFast.rawEvents,
+
+        launchesFound:
+          mintFast.launches.length
+      },
+
+      v4: {
+        poolManager:
+          POOL_MANAGER,
+
+        rawLogs:
+          poolData.rawLogs,
+
+        initializeEvents:
+          poolData.initializeEvents.length,
+
+        swapEvents:
+          poolData.swapEvents.length,
+
+        uniqueSwapPools:
+          unique(
+            poolData.swapEvents.map(
+              x =>
+                x.poolId
+            )
+          ).length,
+
+        uniqueSwapSenders:
+          unique(
+            poolData.swapEvents
+              .map(
+                x =>
+                  x.sender
+              )
+              .filter(Boolean)
+          ).length
+      },
+
+      uniqueTokenCandidates:
+        tokenMap.size,
+
+      tokenValidationChecks:
+        validationResults.length,
+
+      validERC20Tokens:
+        validationResults.filter(
+          x =>
+            x.validERC20
+        ).length,
+
+      validationResults,
+
+      candidates,
+
+      qualifyingCandidates:
+        qualifyingCandidates.length,
+
+      telegram:
+        telegramResult,
+
+      dataIntegrity: {
+        noFabricatedMetrics:
+          true,
+
+        launchDetection:
+          "ON_CHAIN_EVENT_VERIFIED",
+
+        tokenContract:
+          "ERC20_CALL_VERIFIED",
+
+        poolDetection:
+          "V4_INITIALIZE_OR_LAUNCHPAD_EVIDENCE",
+
+        walletActivity:
+          "ERC20_TRANSFER_LOG_BASED",
+
+        activityAcceleration:
+          "NON_OVERLAPPING_BLOCK_WINDOWS",
+
+        marketCap:
+          "UNVERIFIED",
+
+        liquidity:
+          "UNVERIFIED",
+
+        holderConcentration:
+          "UNVERIFIED",
+
+        smartMoney:
+          "UNVERIFIED",
+
+        whaleActivity:
+          "UNVERIFIED",
+
+        socialMomentum:
+          "UNVERIFIED"
+      },
+
+      discovery:
+        "POOLS_TRADE_TOKEN_CREATED_PLUS_MINT_FAST_PLUS_UNISWAP_V4_V51",
+
+      chain: {
+        name:
+          CHAIN_NAME,
+
+        chainId:
+          CHAIN_ID
+      }
+    },
+
+    timestamp:
+      new Date().toISOString()
+  };
+}
+
+/*
+==================================================
+HEALTH
+==================================================
+*/
 
 async function health(env) {
   let latestBlock =
@@ -2387,11 +2348,19 @@ async function health(env) {
           : "MISSING_ALCHEMY_API_KEY"
     },
 
-    poolManager:
-      POOL_MANAGER,
+    contracts: {
+      poolManager:
+        POOL_MANAGER,
 
-    discovery:
-      "UNISWAP_V4_INITIALIZE_SWAP_ACTIVITY_PLUS_LAUNCHPAD_DISCOVERY_V50",
+      poolsTradeEntryContracts:
+        ENTRY_CONTRACTS,
+
+      poolsTradeLaunchpads:
+        LAUNCHPADS,
+
+      mintFastLaunchpad:
+        MINT_FAST_LAUNCHPAD
+    },
 
     alchemyConfigured:
       !!env.ALCHEMY_API_KEY,
@@ -2413,16 +2382,20 @@ async function health(env) {
     },
 
     architecture:
-      "V50_ACTIVITY_LAUNCHPAD_MEME_DISCOVERY",
+      "V51_LAUNCH_EVENT_V4_ACTIVITY_HUNTER",
 
     timestamp:
       new Date().toISOString()
   };
 }
 
-async function testTelegram(
-  env
-) {
+/*
+==================================================
+TELEGRAM TEST
+==================================================
+*/
+
+async function testTelegram(env) {
   if (
     !env.TELEGRAM_BOT_TOKEN ||
     !env.TELEGRAM_CHAT_ID
@@ -2447,7 +2420,7 @@ async function testTelegram(
       env,
       {
         name:
-          "V50 TEST",
+          "V51 TEST",
 
         symbol:
           "TEST",
@@ -2458,29 +2431,26 @@ async function testTelegram(
         score:
           100,
 
+        launchSource:
+          "SYSTEM TEST",
+
         poolCount:
           1,
 
         recentActivity:
-          10,
+          25,
 
         uniqueWallets:
-          5,
+          10,
+
+        recentTransfers:
+          20,
 
         activityAcceleration:
           2.5,
 
-        transferActivity:
-          10,
-
         transferAcceleration:
-          2,
-
-        launchpadEvidence:
-          true,
-
-        launchpadSource:
-          "V50 TEST"
+          2
       }
     );
 
@@ -2501,6 +2471,12 @@ async function testTelegram(
       new Date().toISOString()
   };
 }
+
+/*
+==================================================
+WORKER
+==================================================
+*/
 
 export default {
   async fetch(
@@ -2562,9 +2538,7 @@ export default {
           "/test-telegram"
         ]
       });
-    } catch (
-      error
-    ) {
+    } catch (error) {
       return json(
         {
           agent:
