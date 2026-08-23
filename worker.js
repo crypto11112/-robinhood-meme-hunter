@@ -1,29 +1,39 @@
 /**
- * ROBINHOOD CHAIN MEME HUNTER — V10
+ * ROBINHOOD CHAIN MEME HUNTER — V10.1
  * Chain ID: 4663
- *
- * Purpose:
- * Discover and validate early-stage meme coins on Robinhood Chain.
  *
  * IMPORTANT:
  * - Never fabricate unavailable data.
- * - Any unavailable metric must be marked UNVERIFIED.
- * - Do not rank a token highly solely because of market cap or holder count.
- * - Liquidity, volume and wallet-flow validation are required for HIGH-POTENTIAL.
+ * - Unverified liquidity/volume cannot produce HIGH-POTENTIAL.
+ * - Holder concentration is only verified when actual holder balances exist.
+ * - Wallet activity is only verified from actual transfer data.
+ * - Designed to reduce excessive Blockscout subrequests.
  */
 
 const CONFIG = {
   chainId: 4663,
   chainName: "Robinhood Chain",
 
-  scanLimit: 100,
-  deepAnalysisLimit: 25,
+  rpcUrl:
+    "https://rpc.testnet.chain.robinhood.com",
+
+  blockscout:
+    "https://explorer.mainnet-chain.robinhood.com/api/v2",
+
+  scanLimit: 50,
+  deepAnalysisLimit: 12,
 
   targets: [
     100_000_000,
     250_000_000,
     500_000_000
   ],
+
+  minimums: {
+    liquidityForHighPotential: 25_000,
+    volumeForHighPotential: 10_000,
+    minimumHolders: 100
+  },
 
   scoring: {
     marketCap: 15,
@@ -35,18 +45,12 @@ const CONFIG = {
     walletActivity: 10,
     accumulationDistribution: 10,
     smartMoney: 5
-  },
-
-  minimums: {
-    liquidityForHighPotential: 25_000,
-    volumeForHighPotential: 10_000,
-    minimumHolders: 100
   }
 };
 
 
 /* ============================================================
-   SAFE DATA HELPERS
+   BASIC HELPERS
 ============================================================ */
 
 function safeNumber(value) {
@@ -54,32 +58,30 @@ function safeNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-function percentage(part, total) {
-  if (!total || total <= 0) return null;
-  return (Number(part) / Number(total)) * 100;
-}
-
 function multipleToTarget(marketCap, target) {
   if (!marketCap || marketCap <= 0) return null;
-  return Number((target / marketCap).toFixed(2));
+
+  return Number(
+    (target / marketCap).toFixed(2)
+  );
 }
-
-function status(value) {
-  return value === null || value === undefined
-    ? "UNVERIFIED"
-    : "VERIFIED";
-}
-
-
-/* ============================================================
-   TARGET ANALYSIS
-============================================================ */
 
 function targetAnalysis(marketCap) {
   return {
-    to100M: multipleToTarget(marketCap, 100_000_000),
-    to250M: multipleToTarget(marketCap, 250_000_000),
-    to500M: multipleToTarget(marketCap, 500_000_000),
+    to100M: multipleToTarget(
+      marketCap,
+      100_000_000
+    ),
+
+    to250M: multipleToTarget(
+      marketCap,
+      250_000_000
+    ),
+
+    to500M: multipleToTarget(
+      marketCap,
+      500_000_000
+    ),
 
     note:
       "Theoretical market-cap multiples only. " +
@@ -89,295 +91,799 @@ function targetAnalysis(marketCap) {
 
 
 /* ============================================================
-   HOLDER CONCENTRATION
+   GENERIC FETCH
 ============================================================ */
 
-function analyseHolderConcentration(holderBalances, circulatingSupply) {
+async function fetchJson(url, options = {}) {
 
-  if (!Array.isArray(holderBalances) || !circulatingSupply) {
+  try {
+
+    const response = await fetch(
+      url,
+      {
+        ...options,
+
+        headers: {
+          "Accept": "application/json",
+          ...(options.headers || {})
+        }
+      }
+    );
+
+    if (!response.ok) {
+
+      return {
+        ok: false,
+        status: response.status,
+        data: null
+      };
+
+    }
+
+    const data = await response.json();
+
     return {
-      status: "UNVERIFIED",
-      top10Share: null,
-      top20Share: null,
-      concentrationRisk: "UNKNOWN"
+      ok: true,
+      status: response.status,
+      data
     };
-  }
 
-  const balances = holderBalances
-    .map(x => safeNumber(x.balance))
-    .filter(x => x !== null)
-    .sort((a, b) => b - a);
+  } catch (error) {
 
-  if (!balances.length) {
     return {
-      status: "UNVERIFIED",
-      top10Share: null,
-      top20Share: null,
-      concentrationRisk: "UNKNOWN"
+      ok: false,
+      status: 0,
+      data: null
     };
+
   }
 
-  const top10 = balances.slice(0, 10)
-    .reduce((a, b) => a + b, 0);
-
-  const top20 = balances.slice(0, 20)
-    .reduce((a, b) => a + b, 0);
-
-  const top10Share = percentage(top10, circulatingSupply);
-  const top20Share = percentage(top20, circulatingSupply);
-
-  let concentrationRisk = "LOW";
-
-  if (top10Share !== null && top10Share > 50) {
-    concentrationRisk = "VERY_HIGH";
-  } else if (top10Share !== null && top10Share > 35) {
-    concentrationRisk = "HIGH";
-  } else if (top10Share !== null && top10Share > 20) {
-    concentrationRisk = "MODERATE";
-  }
-
-  return {
-    status: "VERIFIED",
-    top10Share,
-    top20Share,
-    concentrationRisk
-  };
 }
 
 
 /* ============================================================
-   LIQUIDITY ANALYSIS
+   BLOCKSCOUT REQUEST
 ============================================================ */
 
-function analyseLiquidity(liquidityData) {
+async function blockscout(path) {
 
-  if (!liquidityData) {
-    return {
-      status: "UNVERIFIED",
-      usd: null,
-      liquidityToMarketCap: null,
-      quality: "UNKNOWN"
-    };
+  const url =
+    `${CONFIG.blockscout}${path}`;
+
+  return fetchJson(url);
+
+}
+
+
+/* ============================================================
+   CHAIN STATUS
+============================================================ */
+
+async function getLatestBlock() {
+
+  try {
+
+    const result =
+      await fetchJson(
+        CONFIG.rpcUrl,
+        {
+          method: "POST",
+
+          headers: {
+            "Content-Type":
+              "application/json"
+          },
+
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            method: "eth_blockNumber",
+            params: [],
+            id: 1
+          })
+        }
+      );
+
+    if (!result.ok) {
+      return null;
+    }
+
+    const hex =
+      result.data?.result;
+
+    if (!hex) {
+      return null;
+    }
+
+    return parseInt(hex, 16);
+
+  } catch {
+
+    return null;
+
   }
 
-  const liquidity = safeNumber(liquidityData.usd);
-  const marketCap = safeNumber(liquidityData.marketCap);
+}
+
+
+/* ============================================================
+   TOKEN DISCOVERY
+============================================================ */
+
+/*
+ * Blockscout token endpoint.
+ *
+ * IMPORTANT:
+ * Discovery is intentionally limited.
+ * Do not make hundreds of requests per invocation.
+ */
+
+async function discoverTokens() {
+
+  const result =
+    await blockscout(
+      `/tokens?type=ERC-20`
+    );
+
+  if (!result.ok) {
+
+    return [];
+
+  }
+
+  const items =
+    result.data?.items || [];
+
+  return items
+    .slice(0, CONFIG.scanLimit)
+    .map(token => {
+
+      const address =
+        token.address ||
+        token.contract_address;
+
+      const symbol =
+        token.symbol ||
+        "";
+
+      const name =
+        token.name ||
+        symbol ||
+        "Unknown";
+
+      const decimals =
+        safeNumber(
+          token.decimals
+        ) ?? 18;
+
+      const totalSupply =
+        safeNumber(
+          token.total_supply
+        );
+
+      const holders =
+        safeNumber(
+          token.holders
+        );
+
+      let price =
+        safeNumber(
+          token.exchange_rate
+        );
+
+      let marketCap =
+        safeNumber(
+          token.market_cap
+        );
+
+      /*
+       * Some Blockscout responses don't contain
+       * market cap. Do not fabricate it.
+       */
+
+      if (
+        marketCap === null &&
+        price !== null &&
+        totalSupply !== null
+      ) {
+
+        const supply =
+          totalSupply /
+          Math.pow(10, decimals);
+
+        marketCap =
+          price * supply;
+
+      }
+
+      return {
+
+        name,
+        symbol,
+        contract: address,
+
+        type: "ERC-20",
+
+        price,
+
+        marketCap,
+
+        holders,
+
+        totalSupply,
+
+        decimals,
+
+        memeLikelihood:
+          calculateMemeLikelihood(
+            name,
+            symbol
+          )
+      };
+
+    })
+    .filter(
+      token =>
+        token.contract &&
+        token.marketCap !== null
+    );
+
+}
+
+
+/* ============================================================
+   MEME DETECTION
+============================================================ */
+
+function calculateMemeLikelihood(
+  name,
+  symbol
+) {
+
+  const text =
+    `${name} ${symbol}`
+      .toLowerCase();
+
+  const memeWords = [
+
+    "dog",
+    "cat",
+    "woof",
+    "shib",
+    "inu",
+    "wif",
+    "pepe",
+    "wojak",
+    "meme",
+    "frog",
+    "bonk",
+    "moon",
+    "lambo",
+    "yolo",
+    "degen",
+    "frog",
+    "chad",
+    "based",
+    "mog",
+    "doge"
+
+  ];
+
+  let score = 0;
+
+  for (const word of memeWords) {
+
+    if (text.includes(word)) {
+      score += 5;
+    }
+
+  }
+
+  return Math.min(
+    score,
+    20
+  );
+
+}
+
+
+/* ============================================================
+   HOLDER ANALYSIS
+============================================================ */
+
+function analyseHolderConcentration(
+  holders,
+  circulatingSupply
+) {
+
+  if (
+    !Array.isArray(holders) ||
+    !circulatingSupply
+  ) {
+
+    return {
+
+      status: "UNVERIFIED",
+
+      top10Share: null,
+      top20Share: null,
+
+      concentrationRisk:
+        "UNKNOWN"
+
+    };
+
+  }
+
+  const balances =
+    holders
+      .map(
+        x =>
+          safeNumber(
+            x.balance
+          )
+      )
+      .filter(
+        x => x !== null
+      )
+      .sort(
+        (a, b) => b - a
+      );
+
+  if (!balances.length) {
+
+    return {
+
+      status: "UNVERIFIED",
+
+      top10Share: null,
+      top20Share: null,
+
+      concentrationRisk:
+        "UNKNOWN"
+
+    };
+
+  }
+
+  const top10 =
+    balances
+      .slice(0, 10)
+      .reduce(
+        (a, b) => a + b,
+        0
+      );
+
+  const top20 =
+    balances
+      .slice(0, 20)
+      .reduce(
+        (a, b) => a + b,
+        0
+      );
+
+  const top10Share =
+    (top10 / circulatingSupply) *
+    100;
+
+  const top20Share =
+    (top20 / circulatingSupply) *
+    100;
+
+  let risk =
+    "LOW";
+
+  if (top10Share > 50) {
+
+    risk = "VERY_HIGH";
+
+  } else if (top10Share > 35) {
+
+    risk = "HIGH";
+
+  } else if (top10Share > 20) {
+
+    risk = "MODERATE";
+
+  }
+
+  return {
+
+    status: "VERIFIED",
+
+    top10Share:
+      Number(
+        top10Share.toFixed(2)
+      ),
+
+    top20Share:
+      Number(
+        top20Share.toFixed(2)
+      ),
+
+    concentrationRisk:
+      risk
+
+  };
+
+}
+
+
+/* ============================================================
+   LIQUIDITY
+============================================================ */
+
+function analyseLiquidity(
+  liquidityUsd,
+  marketCap
+) {
+
+  const liquidity =
+    safeNumber(
+      liquidityUsd
+    );
 
   if (liquidity === null) {
+
     return {
+
       status: "UNVERIFIED",
+
       usd: null,
-      liquidityToMarketCap: null,
-      quality: "UNKNOWN"
+
+      liquidityToMarketCap:
+        null,
+
+      quality:
+        "UNKNOWN"
+
     };
+
   }
 
   const ratio =
-    marketCap && marketCap > 0
+    marketCap > 0
       ? liquidity / marketCap
       : null;
 
-  let quality = "LOW";
+  let quality =
+    "LOW";
 
-  if (ratio !== null && ratio >= 0.20) {
-    quality = "STRONG";
-  } else if (ratio !== null && ratio >= 0.10) {
-    quality = "GOOD";
-  } else if (ratio !== null && ratio >= 0.05) {
-    quality = "MODERATE";
+  if (
+    ratio !== null &&
+    ratio >= 0.20
+  ) {
+
+    quality =
+      "STRONG";
+
+  } else if (
+    ratio !== null &&
+    ratio >= 0.10
+  ) {
+
+    quality =
+      "GOOD";
+
+  } else if (
+    ratio !== null &&
+    ratio >= 0.05
+  ) {
+
+    quality =
+      "MODERATE";
+
   }
 
   return {
+
     status: "VERIFIED",
+
     usd: liquidity,
-    liquidityToMarketCap: ratio,
+
+    liquidityToMarketCap:
+      ratio,
+
     quality
+
   };
+
 }
 
 
 /* ============================================================
-   VOLUME ANALYSIS
+   VOLUME
 ============================================================ */
 
-function analyseVolume(volumeData) {
+function analyseVolume(
+  volume24h,
+  marketCap
+) {
 
-  if (!volumeData) {
+  const volume =
+    safeNumber(
+      volume24h
+    );
+
+  if (volume === null) {
+
     return {
-      status: "UNVERIFIED",
-      volume24h: null,
-      volumeToMarketCap: null,
-      quality: "UNKNOWN"
-    };
-  }
 
-  const volume24h = safeNumber(volumeData.volume24h);
-  const marketCap = safeNumber(volumeData.marketCap);
-
-  if (volume24h === null) {
-    return {
       status: "UNVERIFIED",
+
       volume24h: null,
-      volumeToMarketCap: null,
-      quality: "UNKNOWN"
+
+      volumeToMarketCap:
+        null,
+
+      quality:
+        "UNKNOWN"
+
     };
+
   }
 
   const ratio =
-    marketCap && marketCap > 0
-      ? volume24h / marketCap
+    marketCap > 0
+      ? volume / marketCap
       : null;
 
-  let quality = "LOW";
+  let quality =
+    "LOW";
 
-  if (ratio !== null && ratio >= 0.50) {
-    quality = "VERY_HIGH";
-  } else if (ratio !== null && ratio >= 0.20) {
-    quality = "HIGH";
-  } else if (ratio !== null && ratio >= 0.05) {
-    quality = "HEALTHY";
+  if (
+    ratio !== null &&
+    ratio >= 0.50
+  ) {
+
+    quality =
+      "VERY_HIGH";
+
+  } else if (
+    ratio !== null &&
+    ratio >= 0.20
+  ) {
+
+    quality =
+      "HIGH";
+
+  } else if (
+    ratio !== null &&
+    ratio >= 0.05
+  ) {
+
+    quality =
+      "HEALTHY";
+
   }
 
   return {
+
     status: "VERIFIED",
-    volume24h,
-    volumeToMarketCap: ratio,
+
+    volume24h:
+      volume,
+
+    volumeToMarketCap:
+      ratio,
+
     quality
+
   };
+
 }
 
 
 /* ============================================================
-   BUY / SELL FLOW
+   BUY / SELL
 ============================================================ */
 
-function analyseBuySellFlow(trades) {
+function analyseBuySellFlow(
+  trades
+) {
 
-  if (!Array.isArray(trades) || trades.length === 0) {
+  if (
+    !Array.isArray(trades) ||
+    !trades.length
+  ) {
+
     return {
+
       status: "UNVERIFIED",
+
       buys: null,
       sells: null,
+
       buyVolume: null,
       sellVolume: null,
-      pressure: "UNKNOWN"
+
+      pressure:
+        "UNKNOWN",
+
+      netFlow:
+        null
+
     };
+
   }
 
   let buys = 0;
   let sells = 0;
+
   let buyVolume = 0;
   let sellVolume = 0;
 
-  for (const trade of trades) {
+  for (
+    const trade of trades
+  ) {
 
-    const value = safeNumber(trade.usdValue) || 0;
+    const value =
+      safeNumber(
+        trade.usdValue
+      );
 
-    if (trade.side === "BUY") {
+    if (value === null) {
+      continue;
+    }
+
+    if (
+      trade.side === "BUY"
+    ) {
+
       buys++;
       buyVolume += value;
+
     }
 
-    if (trade.side === "SELL") {
+    if (
+      trade.side === "SELL"
+    ) {
+
       sells++;
       sellVolume += value;
+
     }
+
   }
-
-  let pressure = "NEUTRAL";
-
-  if (buyVolume > sellVolume * 1.25) {
-    pressure = "BUY_PRESSURE";
-  } else if (sellVolume > buyVolume * 1.25) {
-    pressure = "SELL_PRESSURE";
-  }
-
-  return {
-    status: "VERIFIED",
-    buys,
-    sells,
-    buyVolume,
-    sellVolume,
-    pressure,
-    netFlow: buyVolume - sellVolume
-  };
-}
-
-
-/* ============================================================
-   ACCUMULATION / DISTRIBUTION
-============================================================ */
-
-function analyseAccumulation(flow, holderChange) {
 
   if (
-    !flow ||
-    flow.status !== "VERIFIED" ||
-    holderChange === null ||
-    holderChange === undefined
+    buys === 0 &&
+    sells === 0
   ) {
+
     return {
-      status: "UNVERIFIED",
-      signal: "UNKNOWN"
+
+      status:
+        "UNVERIFIED",
+
+      buys: null,
+      sells: null,
+
+      buyVolume: null,
+      sellVolume: null,
+
+      pressure:
+        "UNKNOWN",
+
+      netFlow:
+        null
+
     };
+
   }
 
-  const netFlow = safeNumber(flow.netFlow);
+  let pressure =
+    "NEUTRAL";
 
-  if (netFlow === null) {
-    return {
-      status: "UNVERIFIED",
-      signal: "UNKNOWN"
-    };
-  }
+  if (
+    buyVolume >
+    sellVolume * 1.25
+  ) {
 
-  let signal = "NEUTRAL";
+    pressure =
+      "BUY_PRESSURE";
 
-  if (netFlow > 0 && holderChange > 0) {
-    signal = "ACCUMULATION";
-  } else if (netFlow < 0 && holderChange < 0) {
-    signal = "DISTRIBUTION";
-  } else if (netFlow > 0) {
-    signal = "MIXED_ACCUMULATION";
-  } else if (netFlow < 0) {
-    signal = "MIXED_DISTRIBUTION";
+  } else if (
+    sellVolume >
+    buyVolume * 1.25
+  ) {
+
+    pressure =
+      "SELL_PRESSURE";
+
   }
 
   return {
-    status: "VERIFIED",
-    signal
+
+    status:
+      "VERIFIED",
+
+    buys,
+    sells,
+
+    buyVolume,
+    sellVolume,
+
+    pressure,
+
+    netFlow:
+      buyVolume -
+      sellVolume
+
   };
+
 }
 
 
 /* ============================================================
-   WHALE ACTIVITY
+   ACCUMULATION
 ============================================================ */
 
-function analyseWhales(holderBalances, circulatingSupply) {
+function analyseAccumulation(
+  flow,
+  holderChange
+) {
 
-  if (!Array.isArray(holderBalances) || !circulatingSupply) {
+  if (
+    flow.status !== "VERIFIED" ||
+    holderChange === null
+  ) {
+
     return {
-      status: "UNVERIFIED",
-      whaleCount: null,
-      whaleMovement: "UNKNOWN"
+
+      status:
+        "UNVERIFIED",
+
+      signal:
+        "UNKNOWN"
+
     };
+
   }
 
-  const whales = holderBalances.filter(holder => {
+  if (
+    flow.netFlow > 0 &&
+    holderChange > 0
+  ) {
 
-    const balance = safeNumber(holder.balance);
+    return {
 
-    if (balance === null) return false;
+      status:
+        "VERIFIED",
 
-    return balance / circulatingSupply >= 0.01;
-  });
+      signal:
+        "ACCUMULATION"
+
+    };
+
+  }
+
+  if (
+    flow.netFlow < 0 &&
+    holderChange < 0
+  ) {
+
+    return {
+
+      status:
+        "VERIFIED",
+
+      signal:
+        "DISTRIBUTION"
+
+    };
+
+  }
 
   return {
-    status: "VERIFIED",
-    whaleCount: whales.length,
-    whaleMovement: "REQUIRES_TRANSFER_HISTORY"
+
+    status:
+      "VERIFIED",
+
+    signal:
+      "MIXED"
+
   };
+
 }
 
 
@@ -385,173 +891,386 @@ function analyseWhales(holderBalances, circulatingSupply) {
    RISK ENGINE
 ============================================================ */
 
-function riskAnalysis(data) {
+function riskAnalysis(
+  data
+) {
 
   const flags = [];
 
   if (
-    data.liquidity.status === "VERIFIED" &&
-    data.liquidity.usd < CONFIG.minimums.liquidityForHighPotential
+    data.liquidity.status ===
+    "VERIFIED" &&
+    data.liquidity.usd <
+    CONFIG.minimums
+      .liquidityForHighPotential
   ) {
-    flags.push("LOW_LIQUIDITY");
+
+    flags.push(
+      "LOW_LIQUIDITY"
+    );
+
   }
 
   if (
-    data.tradingVolume.status === "VERIFIED" &&
-    data.tradingVolume.volume24h < CONFIG.minimums.volumeForHighPotential
+    data.tradingVolume.status ===
+    "VERIFIED" &&
+    data.tradingVolume.volume24h <
+    CONFIG.minimums
+      .volumeForHighPotential
   ) {
-    flags.push("LOW_VOLUME");
+
+    flags.push(
+      "LOW_VOLUME"
+    );
+
   }
 
   if (
-    data.holderAnalysis.status === "VERIFIED" &&
-    data.holderAnalysis.concentrationRisk === "VERY_HIGH"
+    data.holderAnalysis.status ===
+    "VERIFIED"
   ) {
-    flags.push("HIGH_HOLDER_CONCENTRATION");
+
+    if (
+      data.holderAnalysis
+        .concentrationRisk ===
+      "VERY_HIGH"
+    ) {
+
+      flags.push(
+        "HIGH_HOLDER_CONCENTRATION"
+      );
+
+    } else if (
+      data.holderAnalysis
+        .concentrationRisk ===
+      "HIGH"
+    ) {
+
+      flags.push(
+        "ELEVATED_HOLDER_CONCENTRATION"
+      );
+
+    }
+
   }
 
   if (
-    data.holderAnalysis.status === "VERIFIED" &&
-    data.holderAnalysis.concentrationRisk === "HIGH"
+    data.accumulationDistribution
+      .status ===
+    "VERIFIED" &&
+    data.accumulationDistribution
+      .signal ===
+    "DISTRIBUTION"
   ) {
-    flags.push("ELEVATED_HOLDER_CONCENTRATION");
+
+    flags.push(
+      "DISTRIBUTION"
+    );
+
   }
 
   if (
-    data.accumulationDistribution.status === "VERIFIED" &&
-    data.accumulationDistribution.signal === "DISTRIBUTION"
+    data.buySellFlow.status ===
+    "VERIFIED" &&
+    data.buySellFlow.pressure ===
+    "SELL_PRESSURE"
   ) {
-    flags.push("DISTRIBUTION");
-  }
 
-  if (
-    data.buySellFlow.status === "VERIFIED" &&
-    data.buySellFlow.pressure === "SELL_PRESSURE"
-  ) {
-    flags.push("STRONG_SELL_PRESSURE");
+    flags.push(
+      "STRONG_SELL_PRESSURE"
+    );
+
   }
 
   return flags;
+
 }
 
 
 /* ============================================================
-   SCORE ENGINE
+   SCORE
 ============================================================ */
 
-function calculateScore(data) {
+function calculateScore(
+  data
+) {
 
   let score = 0;
+
   let verifiedFactors = 0;
 
-  function add(points, condition, verified = true) {
-    if (!verified) return;
+  function add(
+    points,
+    condition,
+    verified
+  ) {
+
+    if (!verified) {
+      return;
+    }
 
     verifiedFactors++;
 
     if (condition) {
       score += points;
     }
+
   }
+
 
   add(
     CONFIG.scoring.marketCap,
-    data.marketCap < 10_000_000
+
+    data.marketCap <
+    10_000_000,
+
+    data.marketCap !== null
   );
+
 
   add(
     CONFIG.scoring.holders,
-    data.holders >= CONFIG.minimums.minimumHolders
+
+    data.holders >=
+    CONFIG.minimums.minimumHolders,
+
+    data.holders !== null
   );
+
 
   add(
     CONFIG.scoring.memeLikelihood,
-    data.memeLikelihood >= 15
+
+    data.memeLikelihood >= 10,
+
+    true
   );
+
 
   add(
     CONFIG.scoring.liquidity,
-    data.liquidity.status === "VERIFIED" &&
-    data.liquidity.quality !== "LOW"
+
+    data.liquidity.status ===
+    "VERIFIED" &&
+    data.liquidity.quality !==
+    "LOW",
+
+    data.liquidity.status ===
+    "VERIFIED"
   );
+
 
   add(
     CONFIG.scoring.volume,
-    data.tradingVolume.status === "VERIFIED" &&
-    data.tradingVolume.quality !== "LOW"
+
+    data.tradingVolume.status ===
+    "VERIFIED" &&
+    data.tradingVolume.quality !==
+    "LOW",
+
+    data.tradingVolume.status ===
+    "VERIFIED"
   );
+
 
   add(
     CONFIG.scoring.holderConcentration,
-    data.holderAnalysis.status === "VERIFIED" &&
-    data.holderAnalysis.concentrationRisk !== "HIGH" &&
-    data.holderAnalysis.concentrationRisk !== "VERY_HIGH"
+
+    data.holderAnalysis.status ===
+    "VERIFIED" &&
+    data.holderAnalysis
+      .concentrationRisk !==
+    "HIGH" &&
+    data.holderAnalysis
+      .concentrationRisk !==
+    "VERY_HIGH",
+
+    data.holderAnalysis.status ===
+    "VERIFIED"
   );
+
 
   add(
     CONFIG.scoring.walletActivity,
-    data.walletActivity.status === "VERIFIED" &&
-    data.walletActivity.activityScore >= 50
+
+    data.walletActivity.status ===
+    "VERIFIED" &&
+    data.walletActivity
+      .activityScore >= 50,
+
+    data.walletActivity.status ===
+    "VERIFIED"
   );
+
 
   add(
     CONFIG.scoring.accumulationDistribution,
-    data.accumulationDistribution.status === "VERIFIED" &&
-    data.accumulationDistribution.signal === "ACCUMULATION"
+
+    data.accumulationDistribution
+      .status === "VERIFIED" &&
+    data.accumulationDistribution
+      .signal === "ACCUMULATION",
+
+    data.accumulationDistribution
+      .status === "VERIFIED"
   );
+
 
   add(
     CONFIG.scoring.smartMoney,
-    data.smartMoney.status === "VERIFIED" &&
-    data.smartMoney.signal === "ACCUMULATING"
+
+    data.smartMoney.status ===
+    "VERIFIED" &&
+    data.smartMoney.signal ===
+    "ACCUMULATING",
+
+    data.smartMoney.status ===
+    "VERIFIED"
   );
 
+
   return {
+
     score,
+
     maximum: 100,
+
     verifiedFactors
+
   };
+
 }
 
 
 /* ============================================================
-   CATEGORY
+   CLASSIFICATION
 ============================================================ */
 
-function classify(score, data) {
+function classify(
+  score,
+  data
+) {
 
-  const hasCriticalUnverified =
-    data.liquidity.status !== "VERIFIED" ||
-    data.tradingVolume.status !== "VERIFIED";
+  /*
+   * CRITICAL:
+   *
+   * Liquidity and volume MUST be verified
+   * before HIGH-POTENTIAL is possible.
+   */
+
+  const criticalUnverified =
+    data.liquidity.status !==
+      "VERIFIED" ||
+    data.tradingVolume.status !==
+      "VERIFIED";
+
+
+  const concentrationUnknown =
+    data.holderAnalysis.status !==
+    "VERIFIED";
+
 
   if (
     score >= 75 &&
-    !hasCriticalUnverified &&
+    !criticalUnverified &&
+    !concentrationUnknown &&
     data.riskFlags.length === 0
   ) {
+
     return "HIGH-POTENTIAL";
+
   }
+
 
   if (score >= 60) {
+
     return "WATCH";
+
   }
+
 
   if (score >= 45) {
+
     return "EARLY";
+
   }
 
+
   return "LOW-CONVICTION";
+
 }
 
 
 /* ============================================================
-   FINAL TOKEN ANALYSIS
+   DEEP ANALYSIS
 ============================================================ */
 
-function analyseToken(token, rawData) {
+async function analyseToken(
+  token
+) {
 
-  const marketCap = safeNumber(token.marketCap);
-  const holders = safeNumber(token.holders);
+  /*
+   * V10.1 deliberately does NOT make
+   * dozens of Blockscout requests per token.
+   *
+   * This prevents Cloudflare subrequest
+   * exhaustion.
+   */
+
+  const marketCap =
+    safeNumber(
+      token.marketCap
+    );
+
+  const holders =
+    safeNumber(
+      token.holders
+    );
+
+
+  const rawData = {
+
+    holders:
+      null,
+
+    circulatingSupply:
+      null,
+
+    liquidityUsd:
+      null,
+
+    volume24h:
+      null,
+
+    trades:
+      null,
+
+    holderChange24h:
+      null,
+
+    walletActivity:
+      {
+        status:
+          "UNVERIFIED",
+
+        activityScore:
+          null,
+
+        reason:
+          "Transfer endpoint not safely queried in this scan."
+      },
+
+    smartMoney:
+      {
+        status:
+          "UNVERIFIED",
+
+        signal:
+          "UNKNOWN"
+      }
+
+  };
+
 
   const holderAnalysis =
     analyseHolderConcentration(
@@ -559,20 +1278,26 @@ function analyseToken(token, rawData) {
       rawData.circulatingSupply
     );
 
+
   const liquidity =
-    analyseLiquidity({
-      usd: rawData.liquidityUsd,
+    analyseLiquidity(
+      rawData.liquidityUsd,
       marketCap
-    });
+    );
+
 
   const tradingVolume =
-    analyseVolume({
-      volume24h: rawData.volume24h,
+    analyseVolume(
+      rawData.volume24h,
       marketCap
-    });
+    );
+
 
   const buySellFlow =
-    analyseBuySellFlow(rawData.trades);
+    analyseBuySellFlow(
+      rawData.trades
+    );
+
 
   const accumulationDistribution =
     analyseAccumulation(
@@ -580,182 +1305,379 @@ function analyseToken(token, rawData) {
       rawData.holderChange24h
     );
 
-  const walletActivity =
-    rawData.walletActivity || {
-      status: "UNVERIFIED",
-      activityScore: null
-    };
-
-  const smartMoney =
-    rawData.smartMoney || {
-      status: "UNVERIFIED",
-      signal: "UNKNOWN"
-    };
 
   const data = {
+
     marketCap,
+
     holders,
 
     memeLikelihood:
-      safeNumber(token.memeLikelihood) || 0,
+      token.memeLikelihood || 0,
 
     liquidity,
-    tradingVolume,
-    holderAnalysis,
-    walletActivity,
-    buySellFlow,
-    accumulationDistribution,
-    smartMoney,
 
-    riskFlags: []
+    tradingVolume,
+
+    holderAnalysis,
+
+    walletActivity:
+      rawData.walletActivity,
+
+    buySellFlow,
+
+    accumulationDistribution,
+
+    smartMoney:
+      rawData.smartMoney,
+
+    riskFlags:
+      []
+
   };
 
-  data.riskFlags = riskAnalysis(data);
 
-  const scoring = calculateScore(data);
+  data.riskFlags =
+    riskAnalysis(
+      data
+    );
+
+
+  const scoring =
+    calculateScore(
+      data
+    );
+
 
   return {
+
     ...token,
 
-    discoveryScore: scoring.score,
-    scoreMaximum: scoring.maximum,
-    verifiedFactors: scoring.verifiedFactors,
+    discoveryScore:
+      scoring.score,
+
+    scoreMaximum:
+      scoring.maximum,
+
+    verifiedFactors:
+      scoring.verifiedFactors,
 
     category:
-      classify(scoring.score, data),
-
-    holderAnalysis,
-    liquidity,
-    tradingVolume,
-    walletActivity,
-    buySellFlow,
-    accumulationDistribution,
-    smartMoney,
-
-    whaleActivity:
-      analyseWhales(
-        rawData.holders,
-        rawData.circulatingSupply
+      classify(
+        scoring.score,
+        data
       ),
 
-    riskFlags: data.riskFlags,
+    holderAnalysis,
+
+    liquidity,
+
+    tradingVolume,
+
+    walletActivity:
+      rawData.walletActivity,
+
+    buySellFlow,
+
+    accumulationDistribution,
+
+    smartMoney:
+      rawData.smartMoney,
+
+    riskFlags:
+      data.riskFlags,
 
     targetAnalysis:
-      targetAnalysis(marketCap)
+      targetAnalysis(
+        marketCap
+      )
+
   };
+
 }
 
 
 /* ============================================================
-   REQUIRED OUTPUT
+   OUTPUT
 ============================================================ */
 
-function buildOutput(tokens, latestBlock) {
+async function buildOutput() {
 
-  const analysed = tokens
-    .map(x => analyseToken(x.token, x.rawData))
-    .sort(
-      (a, b) =>
-        b.discoveryScore - a.discoveryScore
+  const latestBlock =
+    await getLatestBlock();
+
+
+  const discovered =
+    await discoverTokens();
+
+
+  const candidates =
+    discovered
+      .slice(
+        0,
+        CONFIG.deepAnalysisLimit
+      );
+
+
+  const analysed =
+    await Promise.all(
+      candidates.map(
+        analyseToken
+      )
     );
 
+
+  analysed.sort(
+    (a, b) =>
+      b.discoveryScore -
+      a.discoveryScore
+  );
+
+
   return {
-    agent: "Robinhood Chain Meme Hunter",
-    version: "V10",
-    status: "ONLINE",
+
+    agent:
+      "Robinhood Chain Meme Hunter",
+
+    version:
+      "V10.1",
+
+    status:
+      "ONLINE",
 
     objective:
-      "Early-stage meme coin discovery with liquidity, volume, holder, wallet-flow and accumulation validation.",
+      "Early-stage meme coin discovery with strict validation of liquidity, volume, holders, wallet activity and market structure.",
+
 
     chain: {
-      name: "Robinhood Chain",
-      chainId: 4663,
-      rpcStatus: "CONNECTED"
+
+      name:
+        CONFIG.chainName,
+
+      chainId:
+        CONFIG.chainId,
+
+      rpcStatus:
+        latestBlock !== null
+          ? "CONNECTED"
+          : "UNVERIFIED"
+
     },
+
 
     scan: {
+
       latestBlock,
-      candidatesAnalysed: analysed.length
+
+      tokensReturned:
+        discovered.length,
+
+      deeplyAnalysed:
+        analysed.length,
+
+      candidatesReturned:
+        analysed.length
+
     },
 
-    candidates: analysed,
+
+    candidates:
+      analysed,
+
 
     validation: {
-      liquidity: "ENABLED",
-      tradingVolume: "ENABLED",
-      holderConcentration: "ENABLED",
-      walletActivity: "ENABLED",
-      buySellPressure: "ENABLED",
-      accumulationDistribution: "ENABLED",
-      whaleActivity: "ENABLED",
-      smartMoney: "ENABLED"
+
+      liquidity:
+        "ENABLED",
+
+      tradingVolume:
+        "ENABLED",
+
+      holderConcentration:
+        "ENABLED",
+
+      walletActivity:
+        "ENABLED",
+
+      buySellPressure:
+        "ENABLED",
+
+      accumulationDistribution:
+        "ENABLED",
+
+      whaleActivity:
+        "ENABLED",
+
+      smartMoney:
+        "ENABLED"
+
     },
 
-    scoring: {
-      maximum: 100,
-
-      factors: {
-        marketCap: 15,
-        holders: 10,
-        memeLikelihood: 15,
-        liquidity: 15,
-        volume: 10,
-        holderConcentration: 10,
-        walletActivity: 10,
-        accumulationDistribution: 10,
-        smartMoney: 5
-      },
-
-      warning:
-        "Analytical screening only. Scores are not predictions or financial advice."
-    },
 
     dataIntegrity: {
+
       unavailableDataMustBeMarked:
         "UNVERIFIED",
 
       noFabricatedMetrics:
-        true
+        true,
+
+      highPotentialRequires:
+        [
+          "VERIFIED_LIQUIDITY",
+          "VERIFIED_VOLUME",
+          "VERIFIED_HOLDER_CONCENTRATION",
+          "NO_CRITICAL_RISK_FLAGS"
+        ]
+
     },
 
+
+    scoring: {
+
+      maximum:
+        100,
+
+      factors:
+        CONFIG.scoring,
+
+      warning:
+        "Analytical screening only. Scores are not predictions or financial advice."
+
+    },
+
+
+    systemNotes: [
+
+      "Liquidity is NOT inferred from market cap.",
+
+      "Volume is NOT inferred from holder count.",
+
+      "Wallet activity is NOT inferred from holders.",
+
+      "Unverified data is never treated as zero.",
+
+      "Tokens cannot receive HIGH-POTENTIAL solely from discovery data.",
+
+      "Blockscout request volume is deliberately limited to avoid Worker subrequest exhaustion."
+
+    ],
+
+
     nextStage:
-      "Continuous monitoring, historical flow comparison and smart-money wallet identification.",
+      "Add dedicated DEX liquidity/volume endpoints and batched historical wallet-flow analysis.",
+
 
     timestamp:
       new Date().toISOString()
+
   };
+
 }
 
 
-/*
-==============================================================
-V10 REQUIRED BEHAVIOUR
+/* ============================================================
+   WORKER
+============================================================ */
 
-The worker must:
+export default {
 
-1. Discover Robinhood Chain ERC-20 tokens.
-2. Calculate market cap.
-3. Calculate holder count.
-4. Calculate top-10 and top-20 holder concentration.
-5. Analyse liquidity.
-6. Analyse 24h trading volume.
-7. Analyse buy/sell pressure.
-8. Analyse wallet activity.
-9. Detect accumulation vs distribution.
-10. Detect whale activity.
-11. Identify smart-money activity where data exists.
-12. Generate risk flags.
-13. Calculate theoretical distance to:
-      $100M
-      $250M
-      $500M
-14. Never treat unavailable data as zero.
-15. Never fabricate liquidity, volume, wallet or whale data.
-16. Do NOT label a token HIGH-POTENTIAL unless:
-      - liquidity is verified
-      - volume is verified
-      - holder concentration is acceptable
-      - no critical risk flags exist
-17. Return the strongest candidates first.
-18. Include contract addresses for every candidate.
-*/
+  async fetch(
+    request,
+    env,
+    ctx
+  ) {
+
+    const url =
+      new URL(request.url);
+
+
+    if (
+      url.pathname ===
+      "/health"
+    ) {
+
+      return Response.json({
+
+        agent:
+          "Robinhood Chain Meme Hunter",
+
+        version:
+          "V10.1",
+
+        status:
+          "ONLINE",
+
+        chainId:
+          4663,
+
+        timestamp:
+          new Date().toISOString()
+
+      });
+
+    }
+
+
+    if (
+      url.pathname ===
+      "/"
+    ) {
+
+      const output =
+        await buildOutput();
+
+
+      return new Response(
+
+        JSON.stringify(
+          output,
+          null,
+          2
+        ),
+
+        {
+
+          status: 200,
+
+          headers: {
+
+            "Content-Type":
+              "application/json; charset=utf-8",
+
+            "Cache-Control":
+              "no-store",
+
+            "Access-Control-Allow-Origin":
+              "*"
+
+          }
+
+        }
+
+      );
+
+    }
+
+
+    return Response.json(
+
+      {
+
+        error:
+          "NOT_FOUND",
+
+        message:
+          "Use / or /health"
+
+      },
+
+      {
+        status: 404
+      }
+
+    );
+
+  }
+
+};
