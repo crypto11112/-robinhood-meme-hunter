@@ -1,10 +1,28 @@
 const RPC_URL = "https://rpc.mainnet.chain.robinhood.com";
-const BLOCKSCOUT_API =
-  "https://robinhoodchain.blockscout.com/api/v2";
+const BLOCKSCOUT_API = "https://robinhoodchain.blockscout.com/api/v2";
 
-const MAX_TOKENS = 50;
-const MAX_CANDIDATES = 20;
-const MAX_ACTIVITY_REQUESTS = 12;
+const CACHE_TTL = 60;
+
+const EXCLUDED_SYMBOLS = new Set([
+  "WETH",
+  "USDC",
+  "USDT",
+  "WBTC",
+  "DAI",
+  "AAPL",
+  "AMZN",
+  "AMD",
+  "COIN",
+  "GOOGL",
+  "META",
+  "MSFT",
+  "NFLX",
+  "NVDA",
+  "PLTR",
+  "SPY",
+  "TSLA",
+  "QQQ"
+]);
 
 async function rpc(method, params = []) {
   const response = await fetch(RPC_URL, {
@@ -29,10 +47,24 @@ async function rpc(method, params = []) {
   return data.result;
 }
 
-async function blockscout(path) {
-  const response = await fetch(
-    `${BLOCKSCOUT_API}${path}`
-  );
+async function blockscout(path, cache) {
+  const url = `${BLOCKSCOUT_API}${path}`;
+
+  const cacheKey = new Request(url);
+  const cached = await cache.match(cacheKey);
+
+  if (cached) {
+    return {
+      data: await cached.json(),
+      cached: true
+    };
+  }
+
+  const response = await fetch(url);
+
+  if (response.status === 429) {
+    throw new Error("BLOCKSCOUT_RATE_LIMITED");
+  }
 
   const text = await response.text();
 
@@ -52,10 +84,25 @@ async function blockscout(path) {
     );
   }
 
-  return data;
+  const cacheResponse = new Response(
+    JSON.stringify(data),
+    {
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": `public, max-age=${CACHE_TTL}`
+      }
+    }
+  );
+
+  await cache.put(cacheKey, cacheResponse);
+
+  return {
+    data,
+    cached: false
+  };
 }
 
-function num(value) {
+function number(value) {
   if (
     value === null ||
     value === undefined ||
@@ -69,18 +116,18 @@ function num(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-function text(value) {
+function string(value) {
   return String(value || "").trim();
 }
 
-function isLikelyMeme(token) {
+function memeLikelihood(token) {
   const name =
-    text(token.name).toLowerCase();
+    string(token.name).toLowerCase();
 
   const symbol =
-    text(token.symbol).toLowerCase();
+    string(token.symbol).toLowerCase();
 
-  const memeWords = [
+  const words = [
     "cat",
     "dog",
     "frog",
@@ -97,103 +144,46 @@ function isLikelyMeme(token) {
     "degen",
     "tendies",
     "ape",
-    "bro",
-    "baby",
-    "chad",
-    "based",
-    "coin",
     "goat",
     "penguin",
     "duck",
     "bear",
     "bull",
     "panda",
-    "fish",
-    "hamster",
     "monkey",
     "pizza",
-    "shit",
-    "stonk",
-    "woof",
-    "frong",
-    "john"
-  ];
-
-  return memeWords.some(
-    word =>
-      name.includes(word) ||
-      symbol.includes(word)
-  );
-}
-
-function memeNameScore(token) {
-  const name =
-    text(token.name).toLowerCase();
-
-  const symbol =
-    text(token.symbol).toLowerCase();
-
-  let score = 0;
-
-  const strongWords = [
-    "pepe",
-    "dog",
-    "cat",
-    "frog",
-    "wojak",
-    "wif",
-    "shib",
-    "inu",
-    "bonk",
-    "meme"
-  ];
-
-  const mediumWords = [
-    "yolo",
-    "degen",
-    "tendies",
-    "ape",
-    "goat",
-    "moon",
-    "lambo",
     "woof",
     "stonk",
     "chad",
-    "panda",
-    "penguin"
+    "frong"
   ];
 
-  for (const word of strongWords) {
+  let matches = 0;
+
+  for (const word of words) {
     if (
       name.includes(word) ||
       symbol.includes(word)
     ) {
-      score += 18;
+      matches++;
     }
   }
 
-  for (const word of mediumWords) {
-    if (
-      name.includes(word) ||
-      symbol.includes(word)
-    ) {
-      score += 10;
-    }
-  }
-
-  return Math.min(score, 35);
+  return Math.min(
+    matches * 12,
+    36
+  );
 }
 
 function marketCapScore(marketCap) {
   if (marketCap === null) return 0;
 
-  if (marketCap < 1_000_000) return 30;
-  if (marketCap < 5_000_000) return 27;
-  if (marketCap < 10_000_000) return 24;
-  if (marketCap < 25_000_000) return 20;
-  if (marketCap < 50_000_000) return 14;
-  if (marketCap < 100_000_000) return 8;
-  if (marketCap < 500_000_000) return 3;
+  if (marketCap < 1_000_000) return 28;
+  if (marketCap < 5_000_000) return 25;
+  if (marketCap < 10_000_000) return 22;
+  if (marketCap < 25_000_000) return 18;
+  if (marketCap < 50_000_000) return 12;
+  if (marketCap < 100_000_000) return 6;
 
   return 0;
 }
@@ -201,48 +191,28 @@ function marketCapScore(marketCap) {
 function holderScore(holders) {
   if (holders === null) return 0;
 
-  if (holders >= 1000 && holders < 10000) {
-    return 15;
-  }
+  if (holders >= 1000 && holders < 10000) return 16;
+  if (holders >= 500 && holders < 1000) return 12;
+  if (holders >= 10000) return 9;
+  if (holders >= 100) return 6;
 
-  if (holders >= 500 && holders < 1000) {
-    return 11;
-  }
-
-  if (holders >= 10000) {
-    return 8;
-  }
-
-  if (holders >= 100) {
-    return 6;
-  }
-
-  return 2;
-}
-
-function activityScore(transfers) {
-  if (transfers === null) return 0;
-
-  if (transfers >= 100000) return 15;
-  if (transfers >= 50000) return 13;
-  if (transfers >= 10000) return 10;
-  if (transfers >= 5000) return 7;
-  if (transfers >= 1000) return 4;
-  if (transfers >= 100) return 2;
-
-  return 0;
+  return 1;
 }
 
 function earlyStageScore(marketCap) {
   if (marketCap === null) return 0;
 
-  if (marketCap >= 1_000_000 &&
-      marketCap <= 10_000_000) {
+  if (
+    marketCap >= 1_000_000 &&
+    marketCap <= 10_000_000
+  ) {
     return 10;
   }
 
-  if (marketCap > 10_000_000 &&
-      marketCap <= 25_000_000) {
+  if (
+    marketCap > 10_000_000 &&
+    marketCap <= 25_000_000
+  ) {
     return 7;
   }
 
@@ -257,14 +227,14 @@ function riskFlags(token) {
   const flags = [];
 
   const marketCap =
-    num(token.marketCap);
+    number(token.marketCap);
 
   const holders =
-    num(token.holders);
+    number(token.holders);
 
   if (
     marketCap !== null &&
-    marketCap < 500000
+    marketCap < 500_000
   ) {
     flags.push(
       "VERY_LOW_MARKET_CAP"
@@ -281,18 +251,8 @@ function riskFlags(token) {
   }
 
   if (
-    token.transfers !== null &&
-    token.transfers !== undefined &&
-    num(token.transfers) < 100
-  ) {
-    flags.push(
-      "LOW_TRANSFER_ACTIVITY"
-    );
-  }
-
-  if (
     marketCap !== null &&
-    marketCap > 100000000
+    marketCap > 100_000_000
   ) {
     flags.push(
       "ALREADY_LARGE"
@@ -302,66 +262,67 @@ function riskFlags(token) {
   return flags;
 }
 
-function finalScore(token) {
+function score(token) {
   const marketCap =
-    num(token.marketCap);
+    number(token.marketCap);
 
   const holders =
-    num(token.holders);
+    number(token.holders);
 
-  const transfers =
-    num(token.transfers);
-
-  let score = 0;
-
-  score += marketCapScore(
-    marketCap
-  );
-
-  score += holderScore(
-    holders
-  );
-
-  score += activityScore(
-    transfers
-  );
-
-  score += memeNameScore(
-    token
-  );
-
-  score += earlyStageScore(
-    marketCap
-  );
+  const total =
+    marketCapScore(marketCap) +
+    holderScore(holders) +
+    earlyStageScore(marketCap) +
+    memeLikelihood(token);
 
   return Math.min(
-    Math.round(score),
+    Math.round(total),
     100
   );
 }
 
 function category(score) {
-  if (score >= 75) {
+  if (score >= 70) {
     return "HIGH-POTENTIAL";
   }
 
-  if (score >= 60) {
+  if (score >= 55) {
     return "WATCH";
   }
 
-  if (score >= 45) {
+  if (score >= 40) {
     return "EARLY";
   }
 
   return "LOW-PRIORITY";
 }
 
+function json(data, status = 200) {
+  return new Response(
+    JSON.stringify(
+      data,
+      null,
+      2
+    ),
+    {
+      status,
+      headers: {
+        "Content-Type":
+          "application/json"
+      }
+    }
+  );
+}
+
 export default {
   async fetch(request, env, ctx) {
+    const cache =
+      caches.default;
+
     try {
-      // ==============================
-      // 1. VERIFY CHAIN
-      // ==============================
+      // -----------------------------
+      // Verify Robinhood Chain
+      // -----------------------------
 
       const chainHex =
         await rpc("eth_chainId");
@@ -373,15 +334,15 @@ export default {
         return json({
           agent:
             "Robinhood Chain Meme Hunter",
-          version: "V6",
+          version: "V7",
           status: "ERROR",
           detectedChainId: chainId
         }, 500);
       }
 
-      // ==============================
-      // 2. LATEST BLOCK
-      // ==============================
+      // -----------------------------
+      // Latest block
+      // -----------------------------
 
       const latestBlockHex =
         await rpc(
@@ -394,14 +355,64 @@ export default {
           16
         );
 
-      // ==============================
-      // 3. GET TOKEN LIST
-      // ==============================
+      // -----------------------------
+      // ONE Blockscout request
+      // -----------------------------
 
-      const tokenData =
-        await blockscout(
-          `/tokens?type=ERC-20&items_count=${MAX_TOKENS}`
-        );
+      let tokenData;
+      let fromCache = false;
+
+      try {
+        const result =
+          await blockscout(
+            "/tokens?type=ERC-20&items_count=50",
+            cache
+          );
+
+        tokenData = result.data;
+        fromCache = result.cached;
+
+      } catch (error) {
+        if (
+          error.message ===
+          "BLOCKSCOUT_RATE_LIMITED"
+        ) {
+          return json({
+            agent:
+              "Robinhood Chain Meme Hunter",
+
+            version:
+              "V7",
+
+            status:
+              "RATE_LIMITED",
+
+            chain: {
+              name:
+                "Robinhood Chain",
+
+              chainId:
+                4663,
+
+              rpcStatus:
+                "CONNECTED"
+            },
+
+            blockscout:
+              "RATE LIMITED",
+
+            message:
+              "Blockscout public API temporarily rate-limited. Wait before retrying.",
+
+            latestBlock,
+
+            timestamp:
+              new Date().toISOString()
+          }, 429);
+        }
+
+        throw error;
+      }
 
       const rawTokens =
         Array.isArray(
@@ -410,49 +421,21 @@ export default {
           ? tokenData.items
           : [];
 
-      // ==============================
-      // 4. EXCLUDE OBVIOUS NON-MEMES
-      // ==============================
+      // -----------------------------
+      // Filter
+      // -----------------------------
 
-      const excludedSymbols =
-        new Set([
-          "WETH",
-          "USDC",
-          "USDT",
-          "WBTC",
-          "DAI",
-          "AAPL",
-          "AMZN",
-          "AMD",
-          "COIN",
-          "GOOGL",
-          "META",
-          "MSFT",
-          "NFLX",
-          "NVDA",
-          "PLTR",
-          "SPY",
-          "TSLA",
-          "QQQ"
-        ]);
-
-      const baseCandidates =
+      const candidates =
         rawTokens
           .filter(token => {
             const symbol =
-              text(
+              string(
                 token.symbol
               ).toUpperCase();
 
-            if (
-              excludedSymbols.has(
-                symbol
-              )
-            ) {
-              return false;
-            }
-
-            return true;
+            return !EXCLUDED_SYMBOLS.has(
+              symbol
+            );
           })
           .map(token => ({
             name:
@@ -492,94 +475,32 @@ export default {
 
             decimals:
               token.decimals ??
-              null,
-
-            transfers:
-              null,
-
-            likelyMeme:
-              isLikelyMeme(token)
+              null
           }))
           .filter(token => {
-            const mc =
-              num(token.marketCap);
-
-            // Prefer tokens below $100M
-            // because this is an early-stage
-            // discovery scanner.
+            const marketCap =
+              number(
+                token.marketCap
+              );
 
             return (
-              mc === null ||
-              mc < 100_000_000
+              marketCap === null ||
+              marketCap < 100_000_000
             );
           });
 
-      // ==============================
-      // 5. SORT MEME-LIKE TOKENS FIRST
-      // ==============================
-
-      baseCandidates.sort(
-        (a, b) => {
-          if (
-            a.likelyMeme &&
-            !b.likelyMeme
-          ) {
-            return -1;
-          }
-
-          if (
-            !a.likelyMeme &&
-            b.likelyMeme
-          ) {
-            return 1;
-          }
-
-          return (
-            (num(a.marketCap) || 999999999) -
-            (num(b.marketCap) || 999999999)
-          );
-        }
-      );
-
-      const activityCandidates =
-        baseCandidates.slice(
-          0,
-          MAX_ACTIVITY_REQUESTS
-        );
-
-      // ==============================
-      // 6. FETCH TRANSFER COUNTERS
-      // ==============================
+      // -----------------------------
+      // Score
+      // -----------------------------
 
       for (
-        const token of activityCandidates
+        const token of candidates
       ) {
-        try {
-          const counters =
-            await blockscout(
-              `/tokens/${token.contract}/counters`
-            );
+        token.memeLikelihood =
+          memeLikelihood(token);
 
-          token.transfers =
-            num(
-              counters.transfers_count ??
-              counters.transfers
-            );
-
-        } catch {
-          token.transfers = null;
-        }
-      }
-
-      // ==============================
-      // 7. SCORE
-      // ==============================
-
-      for (
-        const token of baseCandidates
-      ) {
         token.discoveryScore =
-          finalScore(token);
+          score(token);
 
         token.category =
           category(
@@ -590,32 +511,24 @@ export default {
           riskFlags(token);
       }
 
-      // ==============================
-      // 8. FINAL SORT
-      // ==============================
-
-      baseCandidates.sort(
+      candidates.sort(
         (a, b) =>
           b.discoveryScore -
           a.discoveryScore
       );
 
-      const candidates =
-        baseCandidates.slice(
+      const topCandidates =
+        candidates.slice(
           0,
-          MAX_CANDIDATES
+          25
         );
-
-      // ==============================
-      // 9. RETURN
-      // ==============================
 
       return json({
         agent:
           "Robinhood Chain Meme Hunter",
 
         version:
-          "V6",
+          "V7",
 
         status:
           "ONLINE",
@@ -639,7 +552,12 @@ export default {
             "V2",
 
           status:
-            "CONNECTED"
+            "CONNECTED",
+
+          cache:
+            fromCache
+              ? "HIT"
+              : "MISS"
         },
 
         scan: {
@@ -648,17 +566,15 @@ export default {
           tokensReturned:
             rawTokens.length,
 
-          tokensAfterFiltering:
-            baseCandidates.length,
-
-          candidatesReturned:
+          candidatesFound:
             candidates.length,
 
-          activityRequests:
-            activityCandidates.length
+          candidatesReturned:
+            topCandidates.length
         },
 
-        candidates,
+        candidates:
+          topCandidates,
 
         scoring: {
           maximum:
@@ -667,9 +583,8 @@ export default {
           factors: [
             "market cap",
             "holder count",
-            "transfer activity",
-            "meme likelihood",
-            "early-stage potential"
+            "early-stage position",
+            "meme likelihood"
           ],
 
           warning:
@@ -688,9 +603,6 @@ export default {
 
           holders:
             "VERIFIED WHERE INDEXED",
-
-          transfers:
-            "VERIFIED WHERE INDEXED WHERE AVAILABLE",
 
           liquidity:
             "NOT YET VERIFIED",
@@ -724,7 +636,7 @@ export default {
           "Robinhood Chain Meme Hunter",
 
         version:
-          "V6",
+          "V7",
 
         status:
           "ERROR",
@@ -738,21 +650,3 @@ export default {
     }
   }
 };
-
-function json(data, status = 200) {
-  return new Response(
-    JSON.stringify(
-      data,
-      null,
-      2
-    ),
-    {
-      status,
-
-      headers: {
-        "Content-Type":
-          "application/json"
-      }
-    }
-  );
-}
