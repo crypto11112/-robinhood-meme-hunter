@@ -1,4 +1,4 @@
-const VERSION = "V43";
+const VERSION = "V44";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -31,12 +31,13 @@ const DISCOVERY_CONTRACTS = [
 ];
 
 const MAX_LOG_RANGE = 10;
-const MIN_SCORE = 60;
 const MAX_TOKEN_CHECKS = 8;
+const MAX_MARKET_LOOKUPS = 8;
+const MIN_SCORE = 60;
 
 
 /* =========================================================
-   RESPONSE
+   JSON
 ========================================================= */
 
 function json(data, status = 200) {
@@ -45,11 +46,8 @@ function json(data, status = 200) {
     {
       status,
       headers: {
-        "content-type":
-          "application/json;charset=UTF-8",
-
-        "cache-control":
-          "no-store"
+        "content-type": "application/json;charset=UTF-8",
+        "cache-control": "no-store"
       }
     }
   );
@@ -61,10 +59,7 @@ function json(data, status = 200) {
 ========================================================= */
 
 function hex(n) {
-  return (
-    "0x" +
-    Number(n).toString(16)
-  );
+  return "0x" + Number(n).toString(16);
 }
 
 function normaliseAddress(value) {
@@ -79,46 +74,26 @@ function normaliseAddress(value) {
 }
 
 function unique(values) {
-  return [
-    ...new Set(
-      values.filter(Boolean)
-    )
-  ];
+  return [...new Set(values.filter(Boolean))];
 }
 
 function isZeroAddress(value) {
-  const a =
-    normaliseAddress(value);
+  const a = normaliseAddress(value);
 
   return (
     !a ||
-    a ===
-      "0x0000000000000000000000000000000000000000"
+    a === "0x0000000000000000000000000000000000000000"
   );
 }
 
 function isSuspiciousAddress(value) {
-  const a =
-    normaliseAddress(value);
+  const a = normaliseAddress(value);
 
-  if (!a) {
+  if (!a || isZeroAddress(a)) {
     return true;
   }
 
-  if (isZeroAddress(a)) {
-    return true;
-  }
-
-  /*
-   * Reject addresses produced from very small
-   * integer values such as:
-   *
-   * 0x...0271
-   * 0x...0bb8
-   * 0x...2710
-   */
-  const clean =
-    a.slice(2);
+  const clean = a.slice(2);
 
   const leadingZeros =
     clean.match(/^0+/)?.[0]?.length || 0;
@@ -127,13 +102,8 @@ function isSuspiciousAddress(value) {
     return true;
   }
 
-  /*
-   * Reject addresses dominated by ff.
-   */
   const ffCount =
-    (
-      clean.match(/f/gi) || []
-    ).length;
+    (clean.match(/f/gi) || []).length;
 
   if (ffCount >= 34) {
     return true;
@@ -143,111 +113,77 @@ function isSuspiciousAddress(value) {
 }
 
 function money(value) {
-  const n =
-    Number(value || 0);
+  const n = Number(value || 0);
 
-  if (
-    !Number.isFinite(n) ||
-    n <= 0
-  ) {
+  if (!Number.isFinite(n) || n <= 0) {
     return "UNVERIFIED";
   }
 
   if (n >= 1_000_000_000) {
-    return (
-      "$" +
-      (n / 1_000_000_000)
-        .toFixed(2) +
-      "B"
-    );
+    return "$" + (n / 1_000_000_000).toFixed(2) + "B";
   }
 
   if (n >= 1_000_000) {
-    return (
-      "$" +
-      (n / 1_000_000)
-        .toFixed(2) +
-      "M"
-    );
+    return "$" + (n / 1_000_000).toFixed(2) + "M";
   }
 
   if (n >= 1_000) {
-    return (
-      "$" +
-      (n / 1_000)
-        .toFixed(1) +
-      "K"
-    );
+    return "$" + (n / 1_000).toFixed(1) + "K";
   }
 
-  return (
-    "$" +
-    n.toFixed(2)
-  );
+  return "$" + n.toFixed(2);
+}
+
+function safeNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
 }
 
 
 /* =========================================================
-   ALCHEMY RPC
+   ALCHEMY
 ========================================================= */
 
-async function rpc(
-  env,
-  method,
-  params
-) {
+async function rpc(env, method, params) {
   if (!env.ALCHEMY_API_KEY) {
-    throw new Error(
-      "ALCHEMY_API_KEY_NOT_CONFIGURED"
-    );
+    throw new Error("ALCHEMY_API_KEY_NOT_CONFIGURED");
   }
 
   const url =
     ALCHEMY_BASE +
     env.ALCHEMY_API_KEY;
 
-  const res =
-    await fetch(
-      url,
-      {
-        method: "POST",
+  const response = await fetch(
+    url,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "accept": "application/json"
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: Date.now(),
+        method,
+        params
+      })
+    }
+  );
 
-        headers: {
-          "content-type":
-            "application/json",
-
-          "accept":
-            "application/json"
-        },
-
-        body:
-          JSON.stringify({
-            jsonrpc: "2.0",
-            id: Date.now(),
-            method,
-            params
-          })
-      }
-    );
-
-  const text =
-    await res.text();
+  const text = await response.text();
 
   let body;
 
   try {
-    body =
-      JSON.parse(text);
+    body = JSON.parse(text);
   } catch {
-    throw new Error(
-      "ALCHEMY_INVALID_JSON"
-    );
+    throw new Error("ALCHEMY_INVALID_JSON");
   }
 
-  if (!res.ok) {
+  if (!response.ok) {
     throw new Error(
       body?.error?.message ||
-      `ALCHEMY_HTTP_${res.status}`
+      `ALCHEMY_HTTP_${response.status}`
     );
   }
 
@@ -261,86 +197,49 @@ async function rpc(
   return body.result;
 }
 
-
 async function getLatestBlock(env) {
   const result =
-    await rpc(
-      env,
-      "eth_blockNumber",
-      []
-    );
+    await rpc(env, "eth_blockNumber", []);
 
-  return parseInt(
-    result,
-    16
-  );
+  return parseInt(result, 16);
 }
-
 
 async function getLogs(
   env,
-  contract,
+  address,
   fromBlock,
-  toBlock
+  toBlock,
+  topics = undefined
 ) {
-  const range =
+  if (
     toBlock -
     fromBlock +
-    1;
-
-  if (
-    range > MAX_LOG_RANGE
+    1 >
+    MAX_LOG_RANGE
   ) {
     throw new Error(
       "ALCHEMY_LOG_RANGE_TOO_LARGE"
     );
   }
 
+  const filter = {
+    address,
+    fromBlock: hex(fromBlock),
+    toBlock: hex(toBlock)
+  };
+
+  if (topics) {
+    filter.topics = topics;
+  }
+
   return rpc(
     env,
     "eth_getLogs",
-    [{
-      address:
-        contract,
-
-      fromBlock:
-        hex(fromBlock),
-
-      toBlock:
-        hex(toBlock)
-    }]
+    [filter]
   );
 }
 
-
-/* =========================================================
-   ERC-20 VALIDATION
-========================================================= */
-
-/*
- * Standard ERC-20 selectors.
- *
- * These are deliberately used through eth_call.
- */
-
-const SELECTOR_NAME =
-  "0x06fdde03";
-
-const SELECTOR_SYMBOL =
-  "0x95d89b41";
-
-const SELECTOR_DECIMALS =
-  "0x313ce567";
-
-const SELECTOR_TOTAL_SUPPLY =
-  "0x18160ddd";
-
-
-async function ethCall(
-  env,
-  to,
-  data
-) {
+async function ethCall(env, to, data) {
   return rpc(
     env,
     "eth_call",
@@ -354,6 +253,22 @@ async function ethCall(
   );
 }
 
+
+/* =========================================================
+   ERC20 DECODING
+========================================================= */
+
+const SELECTOR_NAME =
+  "0x06fdde03";
+
+const SELECTOR_SYMBOL =
+  "0x95d89b41";
+
+const SELECTOR_DECIMALS =
+  "0x313ce567";
+
+const SELECTOR_TOTAL_SUPPLY =
+  "0x18160ddd";
 
 function decodeUint256(value) {
   if (
@@ -370,7 +285,6 @@ function decodeUint256(value) {
   }
 }
 
-
 function decodeString(value) {
   if (
     typeof value !== "string" ||
@@ -379,28 +293,16 @@ function decodeString(value) {
     return null;
   }
 
-  const clean =
-    value.slice(2);
-
-  /*
-   * Dynamic ABI string:
-   *
-   * offset
-   * length
-   * bytes
-   */
-
-  if (clean.length < 128) {
-    return null;
-  }
+  const clean = value.slice(2);
 
   try {
-    const lengthHex =
-      clean.slice(64, 128);
+    if (clean.length < 128) {
+      return null;
+    }
 
     const length =
       parseInt(
-        lengthHex,
+        clean.slice(64, 128),
         16
       );
 
@@ -415,13 +317,8 @@ function decodeString(value) {
     const bytes =
       clean.slice(
         128,
-        128 +
-        length * 2
+        128 + length * 2
       );
-
-    if (!bytes) {
-      return null;
-    }
 
     let result = "";
 
@@ -440,20 +337,15 @@ function decodeString(value) {
         code >= 32 &&
         code <= 126
       ) {
-        result +=
-          String.fromCharCode(
-            code
-          );
+        result += String.fromCharCode(code);
       }
     }
 
     return result || null;
-
   } catch {
     return null;
   }
 }
-
 
 function decodeBytes32String(value) {
   if (
@@ -463,12 +355,9 @@ function decodeBytes32String(value) {
     return null;
   }
 
-  const clean =
-    value.slice(2);
+  const clean = value.slice(2);
 
-  if (
-    clean.length < 64
-  ) {
+  if (clean.length < 64) {
     return null;
   }
 
@@ -493,28 +382,18 @@ function decodeBytes32String(value) {
       code >= 32 &&
       code <= 126
     ) {
-      result +=
-        String.fromCharCode(
-          code
-        );
+      result += String.fromCharCode(code);
     }
   }
 
   return result || null;
 }
 
-
-async function validateToken(
-  env,
-  token
-) {
-  if (
-    isSuspiciousAddress(token)
-  ) {
+async function validateToken(env, token) {
+  if (isSuspiciousAddress(token)) {
     return {
       valid: false,
-      reason:
-        "SUSPICIOUS_ADDRESS"
+      reason: "SUSPICIOUS_ADDRESS"
     };
   }
 
@@ -524,7 +403,7 @@ async function validateToken(
   let totalSupply = null;
 
   try {
-    const result =
+    const value =
       await ethCall(
         env,
         token,
@@ -532,13 +411,12 @@ async function validateToken(
       );
 
     name =
-      decodeString(result) ||
-      decodeBytes32String(result);
-
+      decodeString(value) ||
+      decodeBytes32String(value);
   } catch {}
 
   try {
-    const result =
+    const value =
       await ethCall(
         env,
         token,
@@ -546,13 +424,12 @@ async function validateToken(
       );
 
     symbol =
-      decodeString(result) ||
-      decodeBytes32String(result);
-
+      decodeString(value) ||
+      decodeBytes32String(value);
   } catch {}
 
   try {
-    const result =
+    const value =
       await ethCall(
         env,
         token,
@@ -560,12 +437,11 @@ async function validateToken(
       );
 
     decimals =
-      decodeUint256(result);
-
+      decodeUint256(value);
   } catch {}
 
   try {
-    const result =
+    const value =
       await ethCall(
         env,
         token,
@@ -573,14 +449,9 @@ async function validateToken(
       );
 
     totalSupply =
-      decodeUint256(result);
-
+      decodeUint256(value);
   } catch {}
 
-  /*
-   * A genuine ERC-20 should normally expose
-   * decimals and totalSupply.
-   */
   const hasDecimals =
     decimals !== null &&
     decimals >= 0n &&
@@ -591,10 +462,7 @@ async function validateToken(
     totalSupply > 0n;
 
   const hasMetadata =
-    Boolean(
-      name ||
-      symbol
-    );
+    Boolean(name || symbol);
 
   if (
     !hasDecimals &&
@@ -603,37 +471,26 @@ async function validateToken(
   ) {
     return {
       valid: false,
-      reason:
-        "NO_ERC20_SIGNATURE"
+      reason: "NO_ERC20_SIGNATURE"
     };
   }
 
   return {
     valid: true,
-
     token,
-
-    name:
-      name || null,
-
-    symbol:
-      symbol || null,
-
+    name: name || null,
+    symbol: symbol || null,
     decimals:
       hasDecimals
         ? Number(decimals)
         : null,
-
     totalSupply:
       hasSupply
         ? totalSupply.toString()
         : null,
-
     validation: {
       erc20:
-        hasDecimals ||
-        hasSupply,
-
+        hasDecimals || hasSupply,
       metadata:
         hasMetadata
     }
@@ -648,22 +505,7 @@ async function validateToken(
 function topicToAddress(topic) {
   if (
     typeof topic !== "string" ||
-    !topic.startsWith("0x")
-  ) {
-    return null;
-  }
-
-  const clean =
-    topic.slice(2);
-
-  if (
-    clean.length !== 64
-  ) {
-    return null;
-  }
-
-  if (
-    !/^[0-9a-fA-F]{64}$/.test(clean)
+    !/^0x[0-9a-fA-F]{64}$/.test(topic)
   ) {
     return null;
   }
@@ -671,57 +513,45 @@ function topicToAddress(topic) {
   const candidate =
     normaliseAddress(
       "0x" +
-      clean.slice(-40)
+      topic.slice(-40)
     );
 
-  if (
-    isSuspiciousAddress(
-      candidate
-    )
-  ) {
+  if (isSuspiciousAddress(candidate)) {
     return null;
   }
 
   return candidate;
 }
 
-
 function decodeLogCandidates(log) {
   const candidates = [];
 
   /*
-   * Topics are more likely to contain indexed
-   * addresses than arbitrary data words.
+   * Indexed event parameters are the safest
+   * place to look for addresses.
    */
-  if (
+  for (
+    const topic of
     Array.isArray(log?.topics)
+      ? log.topics
+      : []
   ) {
-    for (
-      const topic of log.topics
-    ) {
-      const candidate =
-        topicToAddress(
-          topic
-        );
+    const address =
+      topicToAddress(topic);
 
-      if (candidate) {
-        candidates.push({
-          token:
-            candidate,
-
-          source:
-            "indexed_topic"
-        });
-      }
+    if (address) {
+      candidates.push({
+        token: address,
+        source: "indexed_topic"
+      });
     }
   }
 
   /*
-   * We DO NOT blindly treat every word in `data`
-   * as an address anymore.
+   * Deliberately do NOT turn every 32-byte data
+   * word into an address.
    *
-   * Only addresses that survive structural checks
-   * are considered.
+   * This is the V43 false-positive fix.
    */
 
   return candidates;
@@ -729,7 +559,7 @@ function decodeLogCandidates(log) {
 
 
 /* =========================================================
-   ON-CHAIN DISCOVERY
+   DISCOVERY
 ========================================================= */
 
 async function scanContract(
@@ -739,7 +569,7 @@ async function scanContract(
   toBlock
 ) {
   try {
-    const result =
+    const logs =
       await getLogs(
         env,
         contract,
@@ -748,8 +578,8 @@ async function scanContract(
       );
 
     const safeLogs =
-      Array.isArray(result)
-        ? result
+      Array.isArray(logs)
+        ? logs
         : [];
 
     const candidates = [];
@@ -758,9 +588,7 @@ async function scanContract(
       const log of safeLogs
     ) {
       const decoded =
-        decodeLogCandidates(
-          log
-        );
+        decodeLogCandidates(log);
 
       for (
         const item of decoded
@@ -774,53 +602,36 @@ async function scanContract(
         }
 
         candidates.push({
-          token:
-            item.token,
-
-          source:
-            item.source,
-
+          token: item.token,
+          source: item.source,
           blockNumber:
-            log.blockNumber ||
-            null,
-
+            log.blockNumber || null,
           transactionHash:
-            log.transactionHash ||
-            null,
-
+            log.transactionHash || null,
+          logAddress:
+            log.address || null,
           topic0:
-            log.topics?.[0] ||
-            null
+            log.topics?.[0] || null
         });
       }
     }
 
     return {
       success: true,
-
       contract,
-
-      rawLogs:
-        safeLogs.length,
-
-      decodedCandidates:
+      rawLogs: safeLogs.length,
+      decodedLogCandidates:
         candidates.length,
-
       candidates
     };
 
   } catch (error) {
     return {
       success: false,
-
       contract,
-
       rawLogs: 0,
-
-      decodedCandidates: 0,
-
+      decodedLogCandidates: 0,
       candidates: [],
-
       error:
         error?.message ||
         "GET_LOGS_FAILED"
@@ -828,23 +639,11 @@ async function scanContract(
   }
 }
 
-
-async function discover(
-  env,
-  latest
-) {
-  /*
-   * Alchemy Free:
-   * exactly 10 blocks.
-   */
+async function discover(env, latest) {
   const fromBlock =
-    Math.max(
-      0,
-      latest - 9
-    );
+    Math.max(0, latest - 9);
 
-  const toBlock =
-    latest;
+  const toBlock = latest;
 
   const results = [];
 
@@ -852,35 +651,25 @@ async function discover(
     const contract of
     DISCOVERY_CONTRACTS
   ) {
-    const result =
+    results.push(
       await scanContract(
         env,
         contract,
         fromBlock,
         toBlock
-      );
-
-    results.push(
-      result
+      )
     );
   }
 
-  const map =
-    new Map();
+  const map = new Map();
 
   for (
-    const result of
-    results
+    const result of results
   ) {
     for (
-      const item of
-      result.candidates
+      const item of result.candidates
     ) {
-      if (
-        !map.has(
-          item.token
-        )
-      ) {
+      if (!map.has(item.token)) {
         map.set(
           item.token,
           item
@@ -891,193 +680,223 @@ async function discover(
 
   return {
     fromBlock,
-
     toBlock,
-
     results,
-
-    tokens:
-      [...map.values()]
+    tokens: [...map.values()]
   };
 }
 
 
 /* =========================================================
-   DEXSCREENER
+   DEXSCREENER MARKET DISCOVERY
 ========================================================= */
 
-async function getMarketData(
+async function dexTokenLookup(
   token,
   diagnostics
 ) {
-  try {
-    const url =
-      `${DEX_BASE}/latest/dex/tokens/${token}`;
+  const url =
+    `${DEX_BASE}/latest/dex/tokens/${token}`;
 
-    const res =
+  try {
+    const response =
       await fetch(
         url,
         {
           headers: {
-            "accept":
+            accept:
               "application/json"
           }
         }
       );
 
-    if (!res.ok) {
+    if (!response.ok) {
       diagnostics.push({
-        source:
-          "dexscreener",
-
+        source: "dexscreener",
         token,
-
         error:
-          `HTTP_${res.status}`
+          `HTTP_${response.status}`
       });
 
-      return null;
+      return {
+        status: "NOT_INDEXED",
+        token,
+        pairs: []
+      };
     }
 
     const body =
-      await res.json();
+      await response.json();
 
     const pairs =
-      Array.isArray(
-        body?.pairs
-      )
+      Array.isArray(body?.pairs)
         ? body.pairs
         : [];
 
-    if (
-      pairs.length === 0
-    ) {
-      return null;
+    if (!pairs.length) {
+      return {
+        status: "NOT_INDEXED",
+        token,
+        pairs: []
+      };
     }
 
-    const robinhoodPairs =
-      pairs.filter(
-        pair =>
-          String(
-            pair?.chainId ||
-            ""
-          ).toLowerCase() ===
-          "robinhood"
-      );
-
-    const selected =
-      robinhoodPairs.length
-        ? robinhoodPairs
-        : pairs;
-
-    selected.sort(
-      (a, b) =>
-        Number(
-          b?.liquidity?.usd ||
-          0
-        ) -
-        Number(
-          a?.liquidity?.usd ||
-          0
-        )
-    );
-
-    const pair =
-      selected[0];
-
     return {
-      verifiedRobinhood:
-        String(
-          pair?.chainId ||
-          ""
-        ).toLowerCase() ===
-        "robinhood",
-
-      name:
-        pair?.baseToken?.name ||
-        null,
-
-      symbol:
-        pair?.baseToken?.symbol ||
-        null,
-
-      pairAddress:
-        pair?.pairAddress ||
-        null,
-
-      url:
-        pair?.url ||
-        null,
-
-      marketCap:
-        Number(
-          pair?.marketCap ||
-          0
-        ),
-
-      liquidity:
-        Number(
-          pair?.liquidity?.usd ||
-          0
-        ),
-
-      volume24h:
-        Number(
-          pair?.volume?.h24 ||
-          0
-        ),
-
-      buys:
-        Number(
-          pair?.txns?.h24?.buys ||
-          0
-        ),
-
-      sells:
-        Number(
-          pair?.txns?.h24?.sells ||
-          0
-        ),
-
-      change5m:
-        Number(
-          pair?.priceChange?.m5 ||
-          0
-        ),
-
-      change1h:
-        Number(
-          pair?.priceChange?.h1 ||
-          0
-        ),
-
-      change6h:
-        Number(
-          pair?.priceChange?.h6 ||
-          0
-        ),
-
-      change24h:
-        Number(
-          pair?.priceChange?.h24 ||
-          0
-        )
+      status: "INDEXED",
+      token,
+      pairs
     };
 
   } catch (error) {
     diagnostics.push({
-      source:
-        "dexscreener",
-
+      source: "dexscreener",
       token,
-
       error:
         error?.message ||
         "DEX_LOOKUP_FAILED"
     });
 
+    return {
+      status: "ERROR",
+      token,
+      pairs: []
+    };
+  }
+}
+
+function selectBestRobinhoodPair(
+  marketResult
+) {
+  const pairs =
+    Array.isArray(
+      marketResult?.pairs
+    )
+      ? marketResult.pairs
+      : [];
+
+  if (!pairs.length) {
     return null;
   }
+
+  const robinhood =
+    pairs.filter(
+      pair =>
+        String(
+          pair?.chainId || ""
+        ).toLowerCase() ===
+        "robinhood"
+    );
+
+  const pool =
+    robinhood.length
+      ? robinhood
+      : [];
+
+  pool.sort(
+    (a, b) =>
+      safeNumber(
+        b?.liquidity?.usd
+      ) -
+      safeNumber(
+        a?.liquidity?.usd
+      )
+  );
+
+  return pool[0] || null;
+}
+
+function normaliseMarket(pair) {
+  if (!pair) {
+    return null;
+  }
+
+  const buys =
+    safeNumber(
+      pair?.txns?.h24?.buys
+    );
+
+  const sells =
+    safeNumber(
+      pair?.txns?.h24?.sells
+    );
+
+  return {
+    verifiedRobinhood:
+      String(
+        pair?.chainId || ""
+      ).toLowerCase() ===
+      "robinhood",
+
+    dexId:
+      pair?.dexId || null,
+
+    pairAddress:
+      pair?.pairAddress || null,
+
+    url:
+      pair?.url || null,
+
+    name:
+      pair?.baseToken?.name || null,
+
+    symbol:
+      pair?.baseToken?.symbol || null,
+
+    priceUsd:
+      safeNumber(
+        pair?.priceUsd
+      ),
+
+    marketCap:
+      safeNumber(
+        pair?.marketCap
+      ),
+
+    fdv:
+      safeNumber(
+        pair?.fdv
+      ),
+
+    liquidity:
+      safeNumber(
+        pair?.liquidity?.usd
+      ),
+
+    volume24h:
+      safeNumber(
+        pair?.volume?.h24
+      ),
+
+    buys,
+    sells,
+
+    buySellRatio:
+      sells > 0
+        ? buys / sells
+        : buys > 0
+          ? 999
+          : 0,
+
+    change5m:
+      safeNumber(
+        pair?.priceChange?.m5
+      ),
+
+    change1h:
+      safeNumber(
+        pair?.priceChange?.h1
+      ),
+
+    change6h:
+      safeNumber(
+        pair?.priceChange?.h6
+      ),
+
+    change24h:
+      safeNumber(
+        pair?.priceChange?.h24
+      )
+  };
 }
 
 
@@ -1085,7 +904,7 @@ async function getMarketData(
    SCORING
 ========================================================= */
 
-function calculateScore(
+function scoreCandidate(
   token,
   market
 ) {
@@ -1099,7 +918,7 @@ function calculateScore(
     score += 15;
 
     reasons.push(
-      "ERC-20 structure verified"
+      "ERC-20 verified on-chain"
     );
   }
 
@@ -1109,14 +928,14 @@ function calculateScore(
     score += 5;
 
     reasons.push(
-      "Token metadata verified"
+      "Token metadata detected"
     );
   }
 
   if (
     market.verifiedRobinhood
   ) {
-    score += 30;
+    score += 25;
 
     reasons.push(
       "Robinhood Chain market verified"
@@ -1170,7 +989,17 @@ function calculateScore(
     score += 10;
 
     reasons.push(
-      "Buys exceed sells"
+      "24h buys exceed sells"
+    );
+  }
+
+  if (
+    market.buySellRatio >= 1.5
+  ) {
+    score += 5;
+
+    reasons.push(
+      "Strong buy/sell ratio"
     );
   }
 
@@ -1195,12 +1024,7 @@ function calculateScore(
   }
 
   return {
-    score:
-      Math.min(
-        100,
-        score
-      ),
-
+    score: Math.min(100, score),
     reasons
   };
 }
@@ -1220,7 +1044,6 @@ async function sendTelegram(
   ) {
     return {
       sent: false,
-
       reason:
         "TELEGRAM_NOT_CONFIGURED"
     };
@@ -1230,7 +1053,7 @@ async function sendTelegram(
     const url =
       `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
 
-    const res =
+    const response =
       await fetch(
         url,
         {
@@ -1252,28 +1075,26 @@ async function sendTelegram(
               disable_web_page_preview:
                 false
             })
-          }
-        );
+        }
+      );
 
     const body =
-      await res.json();
+      await response.json();
 
     if (
-      !res.ok ||
+      !response.ok ||
       !body?.ok
     ) {
       return {
         sent: false,
-
         reason:
           body?.description ||
-          `HTTP_${res.status}`
+          `HTTP_${response.status}`
       };
     }
 
     return {
       sent: true,
-
       messageId:
         body?.result?.message_id ||
         null
@@ -1282,7 +1103,6 @@ async function sendTelegram(
   } catch (error) {
     return {
       sent: false,
-
       reason:
         error?.message ||
         "TELEGRAM_FAILED"
@@ -1290,18 +1110,14 @@ async function sendTelegram(
   }
 }
 
-
-function buildTelegramMessage(
-  candidate
-) {
-  const market =
-    candidate.market;
+function buildTelegramMessage(candidate) {
+  const m = candidate.market;
 
   return [
-    "🚨 ROBINHOOD CHAIN MEME CALL",
+    "🚨 ROBINHOOD CHAIN MEME HUNTER",
     "",
-    `🔥 $${market.symbol || "UNKNOWN"}`,
-    market.name || "",
+    `🔥 ${m.symbol || candidate.symbol || "UNKNOWN"}`,
+    m.name || candidate.name || "",
     "",
     `🎯 SCORE: ${candidate.score}/100`,
     "",
@@ -1309,34 +1125,30 @@ function buildTelegramMessage(
     candidate.token,
     "",
     "📊 MARKET",
-    `Market Cap: ${money(market.marketCap)}`,
-    `Liquidity: ${money(market.liquidity)}`,
-    `24h Volume: ${money(market.volume24h)}`,
-    `Buys: ${market.buys}`,
-    `Sells: ${market.sells}`,
-    `1h: ${market.change1h}%`,
-    `6h: ${market.change6h}%`,
+    `Market Cap: ${money(m.marketCap)}`,
+    `Liquidity: ${money(m.liquidity)}`,
+    `24h Volume: ${money(m.volume24h)}`,
+    `Buys: ${m.buys}`,
+    `Sells: ${m.sells}`,
+    `Buy/Sell: ${m.buySellRatio.toFixed(2)}`,
+    `1h: ${m.change1h}%`,
+    `6h: ${m.change6h}%`,
     "",
-    "🧠 WHY",
+    "🧠 SIGNALS",
     ...candidate.reasons.map(
-      reason =>
-        `• ${reason}`
+      x => `• ${x}`
     ),
     "",
-    "🔐 VALIDATION",
+    "🔐 DATA INTEGRITY",
     "ERC-20: VERIFIED",
     "Robinhood market: VERIFIED",
+    "Holder concentration: UNVERIFIED",
+    "Smart money: UNVERIFIED",
+    "Wallet activity: UNVERIFIED",
+    "Accumulation/distribution: UNVERIFIED",
     "",
-    "⚠️ UNVERIFIED",
-    "Holder concentration",
-    "Smart-money wallets",
-    "Wallet activity",
-    "Accumulation/distribution",
-    "",
-    "High-risk automated research alert.",
-    market.url
-      ? `📈 ${market.url}`
-      : ""
+    "⚠️ High-risk automated research alert.",
+    m.url || ""
   ]
     .filter(Boolean)
     .join("\n")
@@ -1345,19 +1157,17 @@ function buildTelegramMessage(
 
 
 /* =========================================================
-   SCAN
+   MAIN SCAN
 ========================================================= */
 
 async function runScan(env) {
   const diagnostics = [];
 
-  let latest;
+  let latestBlock;
 
   try {
-    latest =
-      await getLatestBlock(
-        env
-      );
+    latestBlock =
+      await getLatestBlock(env);
   } catch (error) {
     return {
       status:
@@ -1376,9 +1186,8 @@ async function runScan(env) {
 
       telegram: {
         sent: false,
-
         reason:
-          "SCAN_FAILED_BEFORE_TELEGRAM"
+          "SCAN_FAILED"
       }
     };
   }
@@ -1386,115 +1195,135 @@ async function runScan(env) {
   const discovery =
     await discover(
       env,
-      latest
+      latestBlock
     );
 
   for (
-    const item of
+    const result of
     discovery.results
   ) {
-    if (!item.success) {
+    if (!result.success) {
       diagnostics.push({
         method:
           "eth_getLogs",
 
         contract:
-          item.contract,
+          result.contract,
 
         error:
-          item.error
+          result.error
       });
     }
   }
 
   /*
-   * First validate addresses on-chain.
-   *
-   * This is the major V43 change.
+   * Validate addresses first.
    */
-  const tokenChecks =
+  const checks =
     discovery.tokens.slice(
       0,
       MAX_TOKEN_CHECKS
     );
 
-  const validatedTokens = [];
+  const validated = [];
 
   for (
-    const item of
-    tokenChecks
+    const item of checks
   ) {
-    const validation =
+    const result =
       await validateToken(
         env,
         item.token
       );
 
-    if (
-      validation.valid
-    ) {
-      validatedTokens.push({
+    if (result.valid) {
+      validated.push({
         ...item,
-        ...validation
+        ...result
       });
     }
   }
 
-  const candidates = [];
-
   /*
-   * Only validated ERC-20 candidates
-   * reach DexScreener.
+   * Market discovery.
    */
+  const marketResults = [];
+
   for (
     const token of
-    validatedTokens
+    validated.slice(
+      0,
+      MAX_MARKET_LOOKUPS
+    )
   ) {
-    const market =
-      await getMarketData(
+    const result =
+      await dexTokenLookup(
         token.token,
         diagnostics
       );
 
-    if (!market) {
+    const pair =
+      selectBestRobinhoodPair(
+        result
+      );
+
+    marketResults.push({
+      token,
+      lookupStatus:
+        result.status,
+      pair: normaliseMarket(pair)
+    });
+  }
+
+  /*
+   * Build candidates only from a real
+   * Robinhood market.
+   */
+  const candidates = [];
+
+  for (
+    const item of marketResults
+  ) {
+    if (!item.pair) {
+      continue;
+    }
+
+    if (
+      !item.pair.verifiedRobinhood
+    ) {
       continue;
     }
 
     const scoring =
-      calculateScore(
-        token,
-        market
+      scoreCandidate(
+        item.token,
+        item.pair
       );
 
     candidates.push({
       token:
-        token.token,
+        item.token.token,
 
       name:
-        token.name,
+        item.token.name,
 
       symbol:
-        token.symbol,
-
-      decimals:
-        token.decimals,
-
-      totalSupply:
-        token.totalSupply,
+        item.token.symbol,
 
       source:
-        token.source,
+        item.token.source,
 
       blockNumber:
-        token.blockNumber,
+        item.token.blockNumber,
 
       transactionHash:
-        token.transactionHash,
+        item.token.transactionHash,
 
       validation:
-        token.validation,
+        item.token.validation,
 
-      market,
+      market:
+        item.pair,
 
       score:
         scoring.score,
@@ -1510,33 +1339,23 @@ async function runScan(env) {
       a.score
   );
 
-  let telegramResult = {
+  /*
+   * Telegram alert.
+   */
+  let telegram = {
     sent: false,
-
     reason:
       "NO_QUALIFYING_CANDIDATE"
   };
 
-  /*
-   * A Telegram call requires:
-   *
-   * 1. Valid ERC-20
-   * 2. Verified Robinhood market
-   * 3. Score >= 60
-   */
   const winner =
     candidates.find(
       candidate =>
-        candidate.score >=
-          MIN_SCORE &&
-        candidate.validation?.erc20 ===
-          true &&
-        candidate.market?.verifiedRobinhood ===
-          true
+        candidate.score >= MIN_SCORE
     );
 
   if (winner) {
-    telegramResult =
+    telegram =
       await sendTelegram(
         env,
         buildTelegramMessage(
@@ -1544,22 +1363,44 @@ async function runScan(env) {
         )
       );
 
-    telegramResult.token =
+    telegram.token =
       winner.token;
 
-    telegramResult.score =
+    telegram.score =
       winner.score;
   }
 
+  /*
+   * Market discovery diagnostics.
+   */
+  const marketDiagnostics =
+    marketResults.map(
+      item => ({
+        token:
+          item.token.token,
+
+        symbol:
+          item.token.symbol,
+
+        lookupStatus:
+          item.lookupStatus,
+
+        robinhoodMarket:
+          Boolean(
+            item.pair?.verifiedRobinhood
+          ),
+
+        pairAddress:
+          item.pair?.pairAddress ||
+          null
+      })
+    );
+
   return {
-    status:
-      "OK",
+    status: "OK",
+    success: true,
 
-    success:
-      true,
-
-    latestBlock:
-      latest,
+    latestBlock,
 
     startBlock:
       discovery.fromBlock,
@@ -1574,17 +1415,16 @@ async function runScan(env) {
 
     rawLogs:
       discovery.results.reduce(
-        (sum, item) =>
-          sum +
-          item.rawLogs,
+        (sum, x) =>
+          sum + x.rawLogs,
         0
       ),
 
     decodedLogCandidates:
       discovery.results.reduce(
-        (sum, item) =>
+        (sum, x) =>
           sum +
-          item.decodedCandidates,
+          x.decodedLogCandidates,
         0
       ),
 
@@ -1592,18 +1432,25 @@ async function runScan(env) {
       discovery.tokens.length,
 
     tokenValidationChecks:
-      tokenChecks.length,
+      checks.length,
 
     validERC20Tokens:
-      validatedTokens.length,
+      validated.length,
 
-    tokensInspected:
-      validatedTokens.length,
+    marketLookups:
+      marketResults.length,
+
+    robinhoodMarketsFound:
+      marketResults.filter(
+        x =>
+          x.pair?.verifiedRobinhood
+      ).length,
+
+    marketDiagnostics,
 
     candidates,
 
-    telegram:
-      telegramResult,
+    telegram,
 
     rpcProvider:
       "ALCHEMY",
@@ -1612,18 +1459,17 @@ async function runScan(env) {
       "10_BLOCK_WINDOW",
 
     rpcBreakdown: {
-      eth_blockNumber:
-        1,
+      eth_blockNumber: 1,
 
       eth_getLogs:
         DISCOVERY_CONTRACTS.length,
 
       eth_call:
-        tokenChecks.length * 4
+        checks.length * 4
     },
 
     discovery:
-      "ALCHEMY_ON_CHAIN_FIRST_V43_VALIDATED",
+      "ALCHEMY_ON_CHAIN_FIRST_V44_MARKET_DISCOVERY",
 
     diagnostics,
 
@@ -1679,19 +1525,14 @@ async function runScan(env) {
 
 
 /* =========================================================
-   WORKER
+   CLOUDFLARE WORKER
 ========================================================= */
 
 export default {
 
-  async fetch(
-    request,
-    env
-  ) {
+  async fetch(request, env) {
     const url =
-      new URL(
-        request.url
-      );
+      new URL(request.url);
 
     /*
      * HEALTH
@@ -1755,11 +1596,11 @@ export default {
         alchemyMaxLogRange:
           MAX_LOG_RANGE,
 
-        marketData:
-          "DEXSCREENER_OPTIONAL",
-
         tokenValidation:
           "ERC20_ON_CHAIN",
+
+        marketDiscovery:
+          "DEXSCREENER_ROBINHOOD_PAIRS",
 
         kvRequired:
           false,
@@ -1768,7 +1609,7 @@ export default {
           false,
 
         architecture:
-          "V43_VALIDATED_DISCOVERY",
+          "V44_MARKET_DISCOVERY",
 
         timestamp:
           new Date().toISOString()
@@ -1785,9 +1626,7 @@ export default {
     ) {
       try {
         const result =
-          await runScan(
-            env
-          );
+          await runScan(env);
 
         return json({
           agent:
@@ -1871,7 +1710,7 @@ export default {
 
 
     /*
-     * DEFAULT
+     * ROOT
      */
     return json({
       agent:
@@ -1890,13 +1729,13 @@ export default {
       ],
 
       message:
-        "Robinhood Chain Meme Hunter V43"
+        "Robinhood Chain Meme Hunter V44"
     });
   },
 
 
   /*
-   * CLOUDFLARE CRON
+   * OPTIONAL CLOUDFLARE CRON
    */
   async scheduled(
     controller,
@@ -1905,41 +1744,42 @@ export default {
   ) {
     ctx.waitUntil(
       runScan(env)
-        .then(
-          result =>
-            console.log(
-              JSON.stringify({
-                event:
-                  "V43_SCHEDULED_SCAN",
+        .then(result => {
+          console.log(
+            JSON.stringify({
+              event:
+                "V44_SCHEDULED_SCAN",
 
-                status:
-                  result.status,
+              status:
+                result.status,
 
-                rawLogs:
-                  result.rawLogs,
+              block:
+                result.latestBlock,
 
-                rawAddresses:
-                  result.rawAddressesFound,
+              rawLogs:
+                result.rawLogs,
 
-                validERC20:
-                  result.validERC20Tokens,
+              validERC20:
+                result.validERC20Tokens,
 
-                candidates:
-                  result.candidates?.length ||
-                  0,
+              markets:
+                result.robinhoodMarketsFound,
 
-                telegram:
-                  result.telegram
-              })
-            )
-        )
-        .catch(
-          error =>
-            console.error(
-              "V43 scheduled scan failed",
-              error
-            )
-        )
+              candidates:
+                result.candidates?.length ||
+                0,
+
+              telegram:
+                result.telegram
+            })
+          );
+        })
+        .catch(error => {
+          console.error(
+            "V44 scheduled scan failed",
+            error
+          );
+        })
     );
   }
 };
