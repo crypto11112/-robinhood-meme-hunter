@@ -1,1039 +1,538 @@
+const VERSION = "V26.1";
 const CONFIG = {
-  VERSION: "V26.1",
-
-  CHAIN_ID: 4663,
-
-  RPC: "https://rpc.mainnet.chain.robinhood.com",
-
-  DEXSCREENER:
-    "https://api.dexscreener.com",
-
-  DEX_CHAIN:
-    "robinhood",
-
-  LAUNCH_CONTRACTS: [
+  chainId: 4663,
+  rpc: "https://rpc.mainnet.chain.robinhood.com",
+  dex: "https://api.dexscreener.com",
+  dexChain: "robinhood",
+  launchContracts: [
     "0x0000ffffbe8efe702c8703ae3477ff5de3d319c0",
     "0x00004c4ccc709ef590f7c81102c0689f0263d4e9"
   ],
-
-  TOKEN_CREATED_TOPIC:
+  tokenCreatedTopic:
     "0x2e2b3f61b70d2d131b2a807371103cc98d51adcaa5e9a8f9c32658ad8426e74e",
-
   /*
-   * Cloudflare-safe settings.
-   *
-   * We deliberately don't try to analyse
-   * every discovered token.
+   * Keep this deliberately conservative.
+   * Cloudflare free Workers have subrequest limits.
    */
-  SCAN_BLOCKS: 3000,
-
-  LOG_RANGE: 500,
-
-  MAX_LOGS: 12,
-
-  MAX_TOKENS_TO_VERIFY: 5,
-
-  MAX_DEX_LOOKUPS: 5,
-
-  MIN_MARKET_CAP: 10000,
-
-  MAX_MARKET_CAP: 50000000,
-
-  MIN_LIQUIDITY: 3000,
-
-  MIN_VOLUME_24H: 500,
-
-  ALERT_SCORE: 70,
-
-  /*
-   * Hard safety budget.
-   *
-   * Once this number is reached, the scan
-   * stops making more RPC/API calls.
-   */
-  MAX_SUBREQUESTS: 80
+  scanBlocks: 2500,
+  logChunk: 500,
+  maxLogs: 8,
+  maxTokens: 3,
+  maxDexLookups: 3,
+  maxSubrequests: 60,
+  minMarketCap: 10000,
+  maxMarketCap: 50000000,
+  minLiquidity: 3000,
+  minVolume: 500,
+  alertScore: 70
 };
-
-let requestCount = 0;
-
-
+let requests = 0;
 /* ============================================================
-   HELPERS
+   BASIC HELPERS
 ============================================================ */
-
 function lower(v) {
   return String(v || "").toLowerCase();
 }
-
-function validAddress(v) {
-  return /^0x[a-fA-F0-9]{40}$/.test(
-    String(v || "")
-  );
-}
-
-function normalizeAddress(v) {
-
+function address(v) {
   if (!v) return null;
-
   let s = String(v);
-
   if (s.startsWith("0x")) {
     s = s.slice(2);
   }
-
   if (s.length < 40) {
     return null;
   }
-
-  const address =
-    "0x" + s.slice(-40);
-
-  return validAddress(address)
-    ? address.toLowerCase()
-    : null;
+  s = s.slice(-40);
+  if (!/^[0-9a-fA-F]{40}$/.test(s)) {
+    return null;
+  }
+  return "0x" + s.toLowerCase();
 }
-
-function hexToNumber(v) {
-
-  if (!v) return 0;
-
+function hexNumber(v) {
   try {
-    return parseInt(v, 16);
+    return parseInt(v || "0x0", 16);
   } catch {
     return 0;
   }
 }
-
-function toNumber(v) {
-
+function number(v) {
   const n = Number(v);
-
-  return Number.isFinite(n)
-    ? n
-    : null;
+  return Number.isFinite(n) ? n : null;
 }
-
-function sleep(ms) {
-  return new Promise(
-    resolve => setTimeout(
-      resolve,
-      ms
-    )
-  );
+function budgetOK() {
+  return requests < CONFIG.maxSubrequests;
 }
-
 function money(v) {
-
-  if (v == null) {
-    return "N/A";
-  }
-
+  if (v == null) return "N/A";
   if (v >= 1000000) {
-    return "$" +
-      (v / 1000000).toFixed(2) +
-      "M";
+    return "$" + (v / 1000000).toFixed(2) + "M";
   }
-
   if (v >= 1000) {
-    return "$" +
-      (v / 1000).toFixed(1) +
-      "K";
+    return "$" + (v / 1000).toFixed(1) + "K";
   }
-
-  return "$" +
-    v.toFixed(2);
+  return "$" + v.toFixed(2);
 }
-
-function unique(values) {
-
-  return [
-    ...new Set(
-      values.filter(Boolean)
-    )
-  ];
-}
-
-function budgetAvailable() {
-
-  return (
-    requestCount <
-    CONFIG.MAX_SUBREQUESTS
-  );
-}
-
-
 /* ============================================================
    RPC
 ============================================================ */
-
-async function rpc(
-  method,
-  params = []
-) {
-
-  if (!budgetAvailable()) {
-
+async function rpc(method, params = []) {
+  if (!budgetOK()) {
     return {
       ok: false,
-      stopped: true,
-      error:
-        "SUBREQUEST_BUDGET_REACHED"
+      error: "SUBREQUEST_BUDGET_REACHED"
     };
   }
-
-  requestCount++;
-
+  requests++;
   try {
-
-    const response =
-      await fetch(
-        CONFIG.RPC,
-        {
-          method: "POST",
-
-          headers: {
-            "content-type":
-              "application/json",
-
-            accept:
-              "application/json"
-          },
-
-          body:
-            JSON.stringify({
-
-              jsonrpc: "2.0",
-
-              id:
-                requestCount,
-
-              method,
-
-              params
-            })
-          }
-        }
-      );
-
-    if (!response.ok) {
-
+    const r = await fetch(CONFIG.rpc, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: requests,
+        method,
+        params
+      })
+    });
+    if (!r.ok) {
       return {
         ok: false,
-        error:
-          "HTTP_" +
-          response.status
+        error: "HTTP_" + r.status
       };
     }
-
-    const data =
-      await response.json();
-
+    const data = await r.json();
     if (data.error) {
-
       return {
         ok: false,
-
         error:
           data.error.message ||
-          String(
-            data.error.code
-          )
+          String(data.error.code)
       };
     }
-
     return {
       ok: true,
-
-      result:
-        data.result
+      result: data.result
     };
-
-  } catch (error) {
-
+  } catch (e) {
     return {
       ok: false,
-
-      error:
-        String(
-          error?.message ||
-          error
-        )
+      error: String(e?.message || e)
     };
   }
 }
-
-
 /* ============================================================
    LATEST BLOCK
 ============================================================ */
-
-async function getLatestBlock() {
-
-  const result =
-    await rpc(
-      "eth_blockNumber"
-    );
-
-  if (!result.ok) {
-
-    throw new Error(
-      result.error
-    );
+async function latestBlock() {
+  const r = await rpc("eth_blockNumber");
+  if (!r.ok) {
+    throw new Error(r.error);
   }
-
-  return hexToNumber(
-    result.result
-  );
+  return hexNumber(r.result);
 }
-
-
 /* ============================================================
-   LOGS
+   GET TOKEN CREATED LOGS
 ============================================================ */
-
-async function getLogs(
-  fromBlock,
-  toBlock
-) {
-
+async function logs(fromBlock, toBlock) {
   return await rpc(
     "eth_getLogs",
     [{
       fromBlock:
-        "0x" +
-        fromBlock.toString(16),
-
+        "0x" + fromBlock.toString(16),
       toBlock:
-        "0x" +
-        toBlock.toString(16),
-
+        "0x" + toBlock.toString(16),
       address:
-        CONFIG.LAUNCH_CONTRACTS,
-
+        CONFIG.launchContracts,
       topics: [
-        CONFIG.TOKEN_CREATED_TOPIC
+        CONFIG.tokenCreatedTopic
       ]
     }]
   );
 }
-
-
 /* ============================================================
-   ADDRESS EXTRACTION
+   FIND ADDRESSES INSIDE EVENT
 ============================================================ */
-
-function extractAddresses(
-  log
-) {
-
-  const addresses = [];
-
-  /*
-   * Indexed values.
-   */
-
-  if (
-    Array.isArray(
-      log?.topics
-    )
-  ) {
-
+function eventAddresses(log) {
+  const found = [];
+  if (Array.isArray(log?.topics)) {
     for (
       let i = 1;
       i < log.topics.length;
       i++
     ) {
-
-      const address =
-        normalizeAddress(
-          log.topics[i]
-        );
-
-      if (address) {
-        addresses.push(
-          address
-        );
+      const a =
+        address(log.topics[i]);
+      if (a) {
+        found.push(a);
       }
     }
   }
-
-  /*
-   * ABI encoded non-indexed data.
-   */
-
   const data =
-    String(
-      log?.data || ""
-    );
-
+    String(log?.data || "");
   if (
     data.startsWith("0x") &&
     data.length >= 66
   ) {
-
     const clean =
       data.slice(2);
-
     for (
       let i = 0;
       i + 64 <= clean.length;
       i += 64
     ) {
-
-      const address =
-        normalizeAddress(
-          clean.slice(
-            i,
-            i + 64
-          )
+      const a =
+        address(
+          clean.slice(i, i + 64)
         );
-
-      if (address) {
-        addresses.push(
-          address
-        );
+      if (a) {
+        found.push(a);
       }
     }
   }
-
-  return unique(
-    addresses
-  );
+  return [...new Set(found)];
 }
-
-
 /* ============================================================
-   ERC20 METADATA
+   ERC20 CALL
 ============================================================ */
-
-function decodeUint(v) {
-
-  if (
-    !v ||
-    v === "0x"
-  ) {
+async function callToken(
+  token,
+  data
+) {
+  const r =
+    await rpc(
+      "eth_call",
+      [
+        {
+          to: token,
+          data
+        },
+        "latest"
+      ]
+    );
+  return r.ok
+    ? r.result
+    : null;
+}
+/* ============================================================
+   DECODE UINT
+============================================================ */
+function uint(v) {
+  if (!v || v === "0x") {
     return null;
   }
-
   try {
     return BigInt(v);
   } catch {
     return null;
   }
 }
-
-function decodeText(v) {
-
-  if (
-    !v ||
-    v === "0x"
-  ) {
+/* ============================================================
+   DECODE STRING
+============================================================ */
+function text(v) {
+  if (!v || v === "0x") {
     return null;
   }
-
-  const clean =
-    v.replace(
-      /^0x/,
-      ""
-    );
-
-  /*
-   * Dynamic string.
-   */
-
   try {
-
-    if (
-      clean.length >= 128
-    ) {
-
+    const clean =
+      v.replace(/^0x/, "");
+    /*
+     * ABI dynamic string.
+     */
+    if (clean.length >= 128) {
       const offset =
         parseInt(
-          clean.slice(
-            0,
-            64
-          ),
+          clean.slice(0, 64),
           16
         );
-
-      const position =
+      const pos =
         offset * 2;
-
       const length =
         parseInt(
           clean.slice(
-            position,
-            position + 64
+            pos,
+            pos + 64
           ),
           16
         );
-
       const start =
-        position + 64;
-
+        pos + 64;
       const end =
-        start +
-        length * 2;
-
-      if (
-        end <= clean.length
-      ) {
-
-        const bytes =
-          clean.slice(
-            start,
-            end
-          );
-
-        let result = "";
-
+        start + length * 2;
+      if (end <= clean.length) {
+        let out = "";
         for (
-          let i = 0;
-          i < bytes.length;
+          let i = start;
+          i < end;
           i += 2
         ) {
-
-          const code =
+          const c =
             parseInt(
-              bytes.slice(
-                i,
-                i + 2
-              ),
+              clean.slice(i, i + 2),
               16
             );
-
           if (
-            code >= 32 &&
-            code <= 126
+            c >= 32 &&
+            c <= 126
           ) {
-
-            result +=
-              String.fromCharCode(
-                code
-              );
+            out +=
+              String.fromCharCode(c);
           }
         }
-
-        if (
-          result.trim()
-        ) {
-
-          return result.trim();
+        if (out.trim()) {
+          return out.trim();
         }
       }
     }
-
   } catch {}
-
-  /*
-   * bytes32 fallback.
-   */
-
-  try {
-
-    let result = "";
-
-    for (
-      let i = 0;
-      i < clean.length;
-      i += 2
-    ) {
-
-      const code =
-        parseInt(
-          clean.slice(
-            i,
-            i + 2
-          ),
-          16
-        );
-
-      if (
-        code >= 32 &&
-        code <= 126
-      ) {
-
-        result +=
-          String.fromCharCode(
-            code
-          );
-      }
-    }
-
-    return result.trim() || null;
-
-  } catch {
-    return null;
-  }
+  return null;
 }
-
-
-/* ============================================================
-   SINGLE ETH CALL
-============================================================ */
-
-async function ethCall(
-  address,
-  data
-) {
-
-  const result =
-    await rpc(
-      "eth_call",
-      [
-        {
-          to:
-            address,
-
-          data
-        },
-        "latest"
-      ]
-    );
-
-  if (!result.ok) {
-    return null;
-  }
-
-  return result.result;
-}
-
-
 /* ============================================================
    VERIFY TOKEN
 ============================================================ */
-
-async function verifyToken(
-  address
-) {
-
-  if (
-    !validAddress(address)
-  ) {
+async function verifyToken(token) {
+  if (!budgetOK()) {
     return null;
   }
-
   /*
-   * Only make the calls we actually need.
-   *
-   * totalSupply is the primary contract
-   * verification.
+   * totalSupply proves the contract responds
+   * as an ERC20-like token.
    */
-
   const supplyRaw =
-    await ethCall(
-      address,
+    await callToken(
+      token,
       "0x18160ddd"
     );
-
-  if (!supplyRaw) {
-    return null;
-  }
-
   const supply =
-    decodeUint(
-      supplyRaw
-    );
-
+    uint(supplyRaw);
   if (
     supply === null ||
     supply <= 0n
   ) {
     return null;
   }
-
   /*
-   * Decimals.
+   * decimals
    */
-
   const decimalsRaw =
-    await ethCall(
-      address,
+    await callToken(
+      token,
       "0x313ce567"
     );
-
   const decimals =
-    decodeUint(
-      decimalsRaw
-    );
-
+    uint(decimalsRaw);
   if (
-    decimals === null
+    decimals === null ||
+    decimals > 36n
   ) {
     return null;
   }
-
-  const decimalNumber =
-    Number(
-      decimals
-    );
-
-  if (
-    decimalNumber < 0 ||
-    decimalNumber > 36
-  ) {
-    return null;
-  }
-
   /*
-   * Name and symbol are optional.
-   *
-   * We don't reject a valid token just
-   * because one metadata call fails.
+   * Metadata is optional.
+   * If calls fail, token remains valid.
    */
-
   let name = "UNKNOWN";
   let symbol = "UNKNOWN";
-
-  if (
-    budgetAvailable()
-  ) {
-
-    const nameRaw =
-      await ethCall(
-        address,
+  if (budgetOK()) {
+    const raw =
+      await callToken(
+        token,
         "0x06fdde03"
       );
-
     name =
-      decodeText(
-        nameRaw
-      ) ||
+      text(raw) ||
       "UNKNOWN";
   }
-
-  if (
-    budgetAvailable()
-  ) {
-
-    const symbolRaw =
-      await ethCall(
-        address,
+  if (budgetOK()) {
+    const raw =
+      await callToken(
+        token,
         "0x95d89b41"
       );
-
     symbol =
-      decodeText(
-        symbolRaw
-      ) ||
+      text(raw) ||
       "UNKNOWN";
   }
-
   return {
-
-    address:
-      address.toLowerCase(),
-
+    address: token,
     name,
-
     symbol,
-
     decimals:
-      decimalNumber,
-
+      Number(decimals),
     totalSupply:
       supply.toString()
   };
 }
-
-
 /* ============================================================
-   DISCOVER
+   DISCOVER NEWEST TOKENS
 ============================================================ */
-
 async function discover() {
-
   const latest =
-    await getLatestBlock();
-
+    await latestBlock();
   const start =
     Math.max(
       0,
-      latest -
-        CONFIG.SCAN_BLOCKS
+      latest - CONFIG.scanBlocks
     );
-
-  const logs = [];
-
+  const foundLogs = [];
   let failedRanges = 0;
-
   /*
-   * Scan newest blocks first.
+   * Newest blocks first.
    */
-
   for (
     let end = latest;
-
-    end >= start;
-
-    end -= CONFIG.LOG_RANGE
+    end > start;
+    end -= CONFIG.logChunk
   ) {
-
-    if (
-      !budgetAvailable()
-    ) {
+    if (!budgetOK()) {
       break;
     }
-
     const from =
       Math.max(
         start,
-        end -
-          CONFIG.LOG_RANGE +
-          1
+        end - CONFIG.logChunk + 1
       );
-
-    const result =
-      await getLogs(
+    const r =
+      await logs(
         from,
         end
       );
-
-    if (
-      !result.ok
-    ) {
-
+    if (!r.ok) {
       failedRanges++;
-
       continue;
     }
-
-    const found =
-      Array.isArray(
-        result.result
-      )
-        ? result.result
+    const items =
+      Array.isArray(r.result)
+        ? r.result
         : [];
-
-    logs.push(
-      ...found
+    foundLogs.push(
+      ...items
     );
-
     if (
-      logs.length >=
-      CONFIG.MAX_LOGS
+      foundLogs.length >=
+      CONFIG.maxLogs
     ) {
       break;
     }
-
-    /*
-     * Don't hammer the public RPC.
-     */
-
-    await sleep(50);
   }
-
-  /*
-   * Newest logs first.
-   */
-
-  logs.sort(
+  foundLogs.sort(
     (a, b) =>
-      hexToNumber(
-        b.blockNumber
-      ) -
-      hexToNumber(
-        a.blockNumber
-      )
+      hexNumber(b.blockNumber) -
+      hexNumber(a.blockNumber)
   );
-
   const tokens = [];
-
-  const seen =
-    new Set();
-
-  /*
-   * Only verify newest tokens.
-   */
-
+  const seen = new Set();
   for (
-    const log
-    of logs
+    const log of foundLogs
   ) {
-
     if (
       tokens.length >=
-      CONFIG.MAX_TOKENS_TO_VERIFY
+      CONFIG.maxTokens
     ) {
       break;
     }
-
-    if (
-      !budgetAvailable()
-    ) {
+    if (!budgetOK()) {
       break;
     }
-
     const addresses =
-      extractAddresses(
-        log
-      );
-
+      eventAddresses(log);
     for (
-      const address
-      of addresses
+      const token of addresses
     ) {
-
       if (
         tokens.length >=
-        CONFIG.MAX_TOKENS_TO_VERIFY
+        CONFIG.maxTokens
       ) {
         break;
       }
-
       if (
-        seen.has(address)
+        seen.has(token)
       ) {
         continue;
       }
-
       if (
-        CONFIG.LAUNCH_CONTRACTS
+        CONFIG.launchContracts
           .map(lower)
-          .includes(
-            lower(address)
-          )
+          .includes(lower(token))
       ) {
         continue;
       }
-
-      seen.add(address);
-
-      const token =
-        await verifyToken(
-          address
-        );
-
-      if (!token) {
+      seen.add(token);
+      const verified =
+        await verifyToken(token);
+      if (!verified) {
         continue;
       }
-
       tokens.push({
-
-        ...token,
-
+        ...verified,
         block:
-          hexToNumber(
+          hexNumber(
             log.blockNumber
           ),
-
         transaction:
           log.transactionHash,
-
         launchContract:
-          lower(
-            log.address
-          )
+          lower(log.address)
       });
-
-      /*
-       * Small delay prevents the free
-       * public RPC being hammered.
-       */
-
-      await sleep(75);
     }
   }
-
   return {
-
-    latestBlock:
-      latest,
-
-    startBlock:
-      start,
-
+    latestBlock: latest,
+    startBlock: start,
     blocksScanned:
       latest - start + 1,
-
     logsFound:
-      logs.length,
-
+      foundLogs.length,
     failedRanges,
-
     tokens
   };
 }
-
-
 /* ============================================================
-   DEX SCREENER
+   DEXSCREENER
 ============================================================ */
-
-async function dexLookup(
-  token
-) {
-
-  if (
-    !budgetAvailable()
-  ) {
-
+async function dex(token) {
+  if (!budgetOK()) {
     return {
-
       ok: false,
-
       error:
         "SUBREQUEST_BUDGET_REACHED",
-
       pairs: []
     };
   }
-
-  requestCount++;
-
+  requests++;
   try {
-
-    const response =
+    const r =
       await fetch(
-
-        `${CONFIG.DEXSCREENER}/latest/dex/tokens/${token}`,
-
+        `${CONFIG.dex}/latest/dex/tokens/${token}`,
         {
-
           headers: {
             accept:
               "application/json"
           }
         }
       );
-
-    if (!response.ok) {
-
+    if (!r.ok) {
       return {
-
         ok: false,
-
         error:
-          "HTTP_" +
-          response.status,
-
+          "HTTP_" + r.status,
         pairs: []
       };
     }
-
     const data =
-      await response.json();
-
+      await r.json();
     let pairs =
-      Array.isArray(
-        data?.pairs
-      )
+      Array.isArray(data?.pairs)
         ? data.pairs
         : [];
-
     pairs =
       pairs.filter(
         p =>
-          lower(
-            p?.chainId
-          ) ===
-          CONFIG.DEX_CHAIN
+          lower(p?.chainId) ===
+          CONFIG.dexChain
       );
-
-    /*
-     * Highest liquidity first.
-     */
-
     pairs.sort(
       (a, b) =>
         (
@@ -1047,50 +546,35 @@ async function dexLookup(
           ) || 0
         )
     );
-
     return {
-
       ok: true,
-
       pairs
     };
-
-  } catch (error) {
-
+  } catch (e) {
     return {
-
       ok: false,
-
       error:
         String(
-          error?.message ||
-          error
+          e?.message || e
         ),
-
       pairs: []
     };
   }
 }
-
-
 /* ============================================================
    MEME SCORE
 ============================================================ */
-
 function memeScore(
   name,
   symbol
 ) {
-
-  const text =
+  const s =
     (
-      String(name || "") +
+      String(name) +
       " " +
-      String(symbol || "")
+      String(symbol)
     ).toLowerCase();
-
   const words = [
-
     "pepe",
     "frog",
     "doge",
@@ -1118,239 +602,170 @@ function memeScore(
     "robin",
     "hood"
   ];
-
   let score = 0;
-
   for (
-    const word
-    of words
+    const word of words
   ) {
-
-    if (
-      text.includes(word)
-    ) {
-
+    if (s.includes(word)) {
       score += 4;
     }
   }
-
   return Math.min(
     20,
     score
   );
 }
-
-
 /* ============================================================
-   SCORE CANDIDATE
+   SCORE
 ============================================================ */
-
-function scoreCandidate(
-  c
-) {
-
-  let score = 0;
-
+function score(c) {
+  let s = 0;
   /*
    * Market cap.
    */
-
   if (
     c.marketCap <= 100000
   ) {
-    score += 22;
-
+    s += 22;
   } else if (
     c.marketCap <= 250000
   ) {
-    score += 20;
-
+    s += 20;
   } else if (
     c.marketCap <= 1000000
   ) {
-    score += 18;
-
+    s += 18;
   } else if (
     c.marketCap <= 5000000
   ) {
-    score += 15;
-
-  } else if (
-    c.marketCap <= 10000000
-  ) {
-    score += 11;
-
+    s += 15;
   } else {
-    score += 5;
+    s += 10;
   }
-
   /*
    * Liquidity.
    */
-
   if (
     c.liquidity >= 100000
   ) {
-    score += 15;
-
+    s += 15;
   } else if (
     c.liquidity >= 50000
   ) {
-    score += 13;
-
+    s += 13;
   } else if (
     c.liquidity >= 25000
   ) {
-    score += 10;
-
+    s += 10;
   } else if (
     c.liquidity >= 10000
   ) {
-    score += 7;
-
+    s += 7;
   } else {
-    score += 3;
+    s += 3;
   }
-
   /*
-   * Volume / MC.
+   * Volume.
    */
-
   if (
     c.volumeToMarketCap >= 5
   ) {
-    score += 15;
-
+    s += 15;
   } else if (
     c.volumeToMarketCap >= 2
   ) {
-    score += 12;
-
+    s += 12;
   } else if (
     c.volumeToMarketCap >= 1
   ) {
-    score += 9;
-
+    s += 9;
   } else if (
     c.volumeToMarketCap >= 0.5
   ) {
-    score += 5;
+    s += 5;
   }
-
   /*
    * Buy pressure.
    */
-
   if (
     c.buySellRatio >= 3
   ) {
-    score += 15;
-
+    s += 15;
   } else if (
     c.buySellRatio >= 2
   ) {
-    score += 13;
-
+    s += 13;
   } else if (
     c.buySellRatio >= 1.5
   ) {
-    score += 10;
-
+    s += 10;
   } else if (
     c.buySellRatio >= 1.2
   ) {
-    score += 7;
-
+    s += 7;
   } else if (
     c.buySellRatio >= 1
   ) {
-    score += 3;
+    s += 3;
   }
-
   /*
-   * Meme identity.
+   * Meme signal.
    */
-
-  score +=
-    Math.round(
-      c.memeScore *
-      0.75
-    );
-
+  s += Math.round(
+    c.memeScore * 0.75
+  );
   /*
-   * Transaction activity.
+   * Activity.
    */
-
   if (
     c.transactions >= 5000
   ) {
-    score += 5;
-
+    s += 5;
   } else if (
     c.transactions >= 1000
   ) {
-    score += 4;
-
+    s += 4;
   } else if (
     c.transactions >= 250
   ) {
-    score += 2;
+    s += 2;
   }
-
   /*
-   * Risk penalties.
+   * Risk.
    */
-
   if (
     c.liquidity <
     c.marketCap * 0.05
   ) {
-    score -= 10;
+    s -= 10;
   }
-
   if (
     c.buySellRatio < 0.8
   ) {
-    score -= 20;
+    s -= 20;
   }
-
   return Math.max(
     0,
     Math.min(
       100,
-      score
+      s
     )
   );
 }
-
-
 /* ============================================================
    BUILD CANDIDATE
 ============================================================ */
-
-function buildCandidate(
+function candidate(
   token,
   pair
 ) {
-
   const marketCap =
-    toNumber(
-      pair?.marketCap
-    ) ??
-    toNumber(
-      pair?.fdv
-    );
-
+    number(pair?.marketCap) ??
+    number(pair?.fdv);
   const liquidity =
-    toNumber(
-      pair?.liquidity?.usd
-    );
-
+    number(pair?.liquidity?.usd);
   const volume =
-    toNumber(
-      pair?.volume?.h24
-    );
-
+    number(pair?.volume?.h24);
   if (
     marketCap === null ||
     liquidity === null ||
@@ -1358,193 +773,124 @@ function buildCandidate(
   ) {
     return null;
   }
-
   if (
     marketCap <
-    CONFIG.MIN_MARKET_CAP
-  ) {
-    return null;
-  }
-
-  if (
+    CONFIG.minMarketCap ||
     marketCap >
-    CONFIG.MAX_MARKET_CAP
+    CONFIG.maxMarketCap
   ) {
     return null;
   }
-
   if (
     liquidity <
-    CONFIG.MIN_LIQUIDITY
+    CONFIG.minLiquidity
   ) {
     return null;
   }
-
   if (
     volume <
-    CONFIG.MIN_VOLUME_24H
+    CONFIG.minVolume
   ) {
     return null;
   }
-
   const buys =
     Number(
       pair?.txns?.h24?.buys
     ) || 0;
-
   const sells =
     Number(
       pair?.txns?.h24?.sells
     ) || 0;
-
   const transactions =
     buys + sells;
-
-  const buySellRatio =
+  const ratio =
     sells > 0
       ? buys / sells
       : buys > 0
         ? 99
         : 0;
-
-  const volumeToMarketCap =
-    volume /
-    marketCap;
-
-  const liquidityToMarketCap =
-    liquidity /
-    marketCap;
-
   const name =
     pair?.baseToken?.name ||
     token.name ||
     "UNKNOWN";
-
   const symbol =
     pair?.baseToken?.symbol ||
     token.symbol ||
     "UNKNOWN";
-
   const meme =
     memeScore(
       name,
       symbol
     );
-
-  let launchAgeHours =
-    null;
-
-  if (
-    pair?.pairCreatedAt
-  ) {
-
-    launchAgeHours =
-      (
-        Date.now() -
-        Number(
-          pair.pairCreatedAt
-        )
-      ) /
-      3600000;
-  }
-
-  const candidate = {
-
+  const c = {
     contract:
       token.address,
-
     name,
-
     symbol,
-
     priceUsd:
-      toNumber(
+      number(
         pair?.priceUsd
       ),
-
     marketCap,
-
     fdv:
-      toNumber(
+      number(
         pair?.fdv
       ),
-
     liquidity,
-
     volume24h:
       volume,
-
     buys,
-
     sells,
-
     transactions,
-
     buySellRatio:
       Number(
-        buySellRatio.toFixed(2)
+        ratio.toFixed(2)
       ),
-
     pressure:
-      buySellRatio >= 1.25
+      ratio >= 1.25
         ? "BUY_PRESSURE"
-        : buySellRatio <= 0.8
+        : ratio <= 0.8
           ? "SELL_PRESSURE"
           : "NEUTRAL",
-
     liquidityToMarketCap:
       Number(
-        liquidityToMarketCap.toFixed(4)
+        (
+          liquidity /
+          marketCap
+        ).toFixed(4)
       ),
-
     volumeToMarketCap:
       Number(
-        volumeToMarketCap.toFixed(4)
+        (
+          volume /
+          marketCap
+        ).toFixed(4)
       ),
-
     memeScore:
       meme,
-
     launchBlock:
       token.block,
-
     launchTransaction:
       token.transaction,
-
     launchContract:
       token.launchContract,
-
-    launchAgeHours:
-      launchAgeHours === null
-        ? null
-        : Number(
-            launchAgeHours.toFixed(1)
-          ),
-
     dex:
       pair?.dexId ||
       "uniswap",
-
     pairAddress:
       pair?.pairAddress ||
       null,
-
     url:
       pair?.url ||
       null,
-
     holderConcentration:
       "UNVERIFIED",
-
     walletActivity:
       "UNVERIFIED",
-
     smartMoney:
       "UNVERIFIED"
   };
-
   const riskFlags = [];
-
   if (
     liquidity <
     marketCap * 0.05
@@ -1553,15 +899,13 @@ function buildCandidate(
       "LOW_LIQUIDITY_RATIO"
     );
   }
-
   if (
-    buySellRatio < 0.8
+    ratio < 0.8
   ) {
     riskFlags.push(
       "SELL_PRESSURE"
     );
   }
-
   if (
     transactions < 100
   ) {
@@ -1569,7 +913,6 @@ function buildCandidate(
       "LOW_ACTIVITY"
     );
   }
-
   if (
     meme === 0
   ) {
@@ -1577,28 +920,19 @@ function buildCandidate(
       "WEAK_MEME_SIGNAL"
     );
   }
-
-  candidate.riskFlags =
+  c.riskFlags =
     riskFlags;
-
-  candidate.discoveryScore =
-    scoreCandidate(
-      candidate
-    );
-
-  candidate.category =
-    candidate.discoveryScore >= 80
+  c.discoveryScore =
+    score(c);
+  c.category =
+    c.discoveryScore >= 80
       ? "VERY_HIGH_POTENTIAL"
-      : candidate.discoveryScore >= 70
+      : c.discoveryScore >= 70
         ? "HIGH_POTENTIAL"
-        : candidate.discoveryScore >= 60
+        : c.discoveryScore >= 60
           ? "WATCH"
-          : candidate.discoveryScore >= 50
-            ? "EARLY"
-            : "LOW_CONVICTION";
-
-  candidate.targetMultiples = {
-
+          : "EARLY";
+  c.targetMultiples = {
     to100M:
       Number(
         (
@@ -1606,7 +940,6 @@ function buildCandidate(
           marketCap
         ).toFixed(2)
       ),
-
     to250M:
       Number(
         (
@@ -1614,7 +947,6 @@ function buildCandidate(
           marketCap
         ).toFixed(2)
       ),
-
     to500M:
       Number(
         (
@@ -1623,757 +955,486 @@ function buildCandidate(
         ).toFixed(2)
       )
   };
-
-  return candidate;
+  return c;
 }
-
-
 /* ============================================================
    TELEGRAM
 ============================================================ */
-
 async function telegram(
   env,
   message
 ) {
-
   if (
     !env.TELEGRAM_BOT_TOKEN ||
     !env.TELEGRAM_CHAT_ID
   ) {
-
     return {
       ok: false,
       error:
         "TELEGRAM_NOT_CONFIGURED"
     };
   }
-
-  if (
-    !budgetAvailable()
-  ) {
-
+  if (!budgetOK()) {
     return {
       ok: false,
       error:
         "SUBREQUEST_BUDGET_REACHED"
     };
   }
-
-  requestCount++;
-
+  requests++;
   try {
-
-    const response =
+    const r =
       await fetch(
-
         `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-
         {
-
           method: "POST",
-
           headers: {
             "content-type":
               "application/json"
           },
-
-          body:
-            JSON.stringify({
-
-              chat_id:
-                env.TELEGRAM_CHAT_ID,
-
-              text:
-                message,
-
-              parse_mode:
-                "HTML",
-
-              disable_web_page_preview:
-                false
-            })
+          body: JSON.stringify({
+            chat_id:
+              env.TELEGRAM_CHAT_ID,
+            text:
+              message,
+            parse_mode:
+              "HTML",
+            disable_web_page_preview:
+              false
+          })
         }
       );
-
     const data =
-      await response.json();
-
+      await r.json();
     return {
-
       ok:
-        response.ok &&
+        r.ok &&
         data?.ok === true,
-
       error:
         data?.description ||
         null
     };
-
-  } catch (error) {
-
+  } catch (e) {
     return {
-
       ok: false,
-
       error:
         String(
-          error?.message ||
-          error
+          e?.message || e
         )
     };
   }
 }
-
-
 /* ============================================================
-   ALERT
+   TELEGRAM MESSAGE
 ============================================================ */
-
-function alertMessage(
-  c
-) {
-
-  const emoji =
-    c.discoveryScore >= 80
-      ? "🚨"
-      : c.discoveryScore >= 70
-        ? "🔥"
-        : "👀";
-
-  return `${emoji} <b>ROBINHOOD MEME HUNTER V26.1</b>
-
+function alertText(c) {
+  return `🚨 <b>ROBINHOOD MEME HUNTER V26.1</b>
 <b>${c.name}</b>
 $${c.symbol}
-
-<b>Score:</b> ${c.discoveryScore}/100
-
+<b>Discovery Score:</b> ${c.discoveryScore}/100
+<b>Category:</b> ${c.category}
 <b>Market Cap:</b> ${money(c.marketCap)}
-
 <b>Liquidity:</b> ${money(c.liquidity)}
-
 <b>24h Volume:</b> ${money(c.volume24h)}
-
+<b>Buys:</b> ${c.buys}
+<b>Sells:</b> ${c.sells}
 <b>Buy/Sell:</b> ${c.buySellRatio}
-
 <b>Pressure:</b> ${c.pressure}
-
-<b>Transactions:</b> ${c.transactions}
-
 <b>Meme Score:</b> ${c.memeScore}/20
-
-<b>Launch Age:</b> ${
-    c.launchAgeHours ??
-    "UNVERIFIED"
-  }h
-
+<b>Transactions:</b> ${c.transactions}
 ━━━━━━━━━━━━━━
-
 <b>Holder Data:</b> UNVERIFIED
 <b>Wallet Activity:</b> UNVERIFIED
 <b>Smart Money:</b> UNVERIFIED
-
 <b>Contract:</b>
 <code>${c.contract}</code>
-
-<b>Launch TX:</b>
-<code>${c.launchTransaction}</code>
-
+<b>DEX:</b> ${c.dex}
 ${
   c.url
-    ? `<a href="${c.url}">DEX Screener</a>`
+    ? `<a href="${c.url}">Open DEX Screener</a>`
     : ""
 }
-
 ⚠️ Automated research signal.
 Not financial advice.`;
 }
-
-
 /* ============================================================
    SCAN
 ============================================================ */
-
-async function scan(
-  env
-) {
-
-  requestCount = 0;
-
+async function runScan(env) {
+  requests = 0;
   const discovery =
     await discover();
-
   const candidates = [];
-
   const lookupErrors = [];
-
   /*
-   * The tokens are already newest first.
-   *
-   * Only the newest five are examined.
+   * Only newest three tokens.
    */
-
   for (
-    const token
-    of discovery.tokens
+    const token of
+    discovery.tokens
   ) {
-
     if (
       candidates.length >=
-      CONFIG.MAX_DEX_LOOKUPS
+      CONFIG.maxDexLookups
     ) {
       break;
     }
-
-    if (
-      !budgetAvailable()
-    ) {
+    if (!budgetOK()) {
       break;
     }
-
-    const dex =
-      await dexLookup(
+    const result =
+      await dex(
         token.address
       );
-
-    if (!dex.ok) {
-
+    if (!result.ok) {
       lookupErrors.push({
-
         contract:
           token.address,
-
         error:
-          dex.error
+          result.error
       });
-
       continue;
     }
-
     if (
-      dex.pairs.length === 0
+      result.pairs.length === 0
     ) {
-
-      /*
-       * No Robinhood DEX pair yet.
-       *
-       * This is useful information rather
-       * than an error.
-       */
-
       continue;
     }
-
-    /*
-     * Best liquidity pair.
-     */
-
-    const candidate =
-      buildCandidate(
+    const c =
+      candidate(
         token,
-        dex.pairs[0]
+        result.pairs[0]
       );
-
-    if (!candidate) {
-      continue;
+    if (c) {
+      candidates.push(c);
     }
-
-    candidates.push(
-      candidate
-    );
   }
-
   candidates.sort(
     (a, b) =>
       b.discoveryScore -
       a.discoveryScore
   );
-
   const alerts = [];
-
-  /*
-   * Only alert high-conviction candidates.
-   */
-
   for (
-    const candidate
-    of candidates
+    const c of candidates
   ) {
-
     if (
-      candidate.discoveryScore <
-      CONFIG.ALERT_SCORE
+      c.discoveryScore <
+      CONFIG.alertScore
     ) {
       continue;
     }
-
     if (
-      candidate.riskFlags.includes(
+      c.riskFlags.includes(
         "SELL_PRESSURE"
       )
     ) {
       continue;
     }
-
-    if (
-      !budgetAvailable()
-    ) {
+    if (!budgetOK()) {
       break;
     }
-
-    const result =
+    const sent =
       await telegram(
         env,
-        alertMessage(
-          candidate
-        )
+        alertText(c)
       );
-
     alerts.push({
-
       contract:
-        candidate.contract,
-
+        c.contract,
       symbol:
-        candidate.symbol,
-
+        c.symbol,
       score:
-        candidate.discoveryScore,
-
+        c.discoveryScore,
       sent:
-        result.ok,
-
+        sent.ok,
       error:
-        result.ok
+        sent.ok
           ? null
-          : result.error
+          : sent.error
     });
   }
-
   return {
-
     agent:
       "Robinhood Chain Meme Hunter",
-
     version:
-      CONFIG.VERSION,
-
+      VERSION,
     status:
       "ONLINE",
-
     objective:
       "Discover early-stage Robinhood Chain meme coins using free on-chain discovery and DEX market data.",
-
     chain: {
-
       name:
         "Robinhood Chain",
-
       chainId:
-        CONFIG.CHAIN_ID,
-
+        CONFIG.chainId,
       rpc:
-        CONFIG.RPC
+        CONFIG.rpc
     },
-
     discovery: {
-
       source:
-        "TOKEN_CREATED",
-
+        "ETH_GETLOGS_TOKEN_CREATED",
       event:
         "TokenCreated(address)",
-
       eventTopic:
-        CONFIG.TOKEN_CREATED_TOPIC,
-
+        CONFIG.tokenCreatedTopic,
       launchContracts:
-        CONFIG.LAUNCH_CONTRACTS,
-
+        CONFIG.launchContracts,
       latestBlock:
         discovery.latestBlock,
-
       startBlock:
         discovery.startBlock,
-
       blocksScanned:
         discovery.blocksScanned,
-
       logsFound:
         discovery.logsFound,
-
       failedRanges:
         discovery.failedRanges,
-
       tokensDiscovered:
         discovery.tokens.length,
-
       verifiedTokenAddresses:
         discovery.tokens.map(
           t => ({
-
             address:
               t.address,
-
             name:
               t.name,
-
             symbol:
               t.symbol,
-
             block:
               t.block,
-
             transaction:
               t.transaction
           })
         )
     },
-
     marketData: {
-
       source:
         "DEX_SCREENER",
-
-      lookupLimit:
-        CONFIG.MAX_DEX_LOOKUPS,
-
+      lookupMode:
+        "ONE_TOKEN_AT_A_TIME",
+      maxLookups:
+        CONFIG.maxDexLookups,
       candidatesAnalysed:
         candidates.length,
-
       lookupErrors
     },
-
     telegram: {
-
       configured:
         Boolean(
           env.TELEGRAM_BOT_TOKEN &&
           env.TELEGRAM_CHAT_ID
         ),
-
       chatId:
         env.TELEGRAM_CHAT_ID ||
         null,
-
       alertsSent:
         alerts.filter(
           x => x.sent
         ).length
     },
-
     scan: {
-
       candidatesAnalysed:
         candidates.length,
-
-      requestCount,
-
-      subrequestBudget:
-        CONFIG.MAX_SUBREQUESTS,
-
-      budgetRemaining:
+      requestCount:
+        requests,
+      requestLimit:
+        CONFIG.maxSubrequests,
+      requestsRemaining:
         Math.max(
           0,
-          CONFIG.MAX_SUBREQUESTS -
-            requestCount
+          CONFIG.maxSubrequests -
+          requests
         )
     },
-
-    candidates:
-      candidates.slice(
-        0,
-        20
-      ),
-
+    candidates,
     alerts,
-
     validation: {
-
       tokenDiscovery:
         "VERIFIED TOKEN_CREATED EVENT",
-
       tokenAddress:
         "VERIFIED BY ERC20 ETH_CALL",
-
       erc20Metadata:
         "VERIFIED THROUGH ETH_CALL",
-
       liquidity:
         "DEX SCREENER",
-
       volume:
         "DEX SCREENER",
-
       buySellPressure:
         "DEX SCREENER",
-
       holderConcentration:
         "UNVERIFIED",
-
       walletActivity:
         "UNVERIFIED",
-
       smartMoney:
         "UNVERIFIED",
-
       accumulationDistribution:
         "BUY/SELL FLOW ONLY"
     },
-
     dataIntegrity: {
-
       noFabricatedMetrics:
         true,
-
       unavailableData:
         "UNVERIFIED"
     },
-
     timestamp:
       new Date().toISOString()
   };
 }
-
-
 /* ============================================================
-   WORKER
+   CLOUDFLARE WORKER
 ============================================================ */
-
 export default {
-
   async fetch(
     request,
     env
   ) {
-
     const url =
-      new URL(
-        request.url
-      );
-
+      new URL(request.url);
     /*
      * HEALTH
      */
-
     if (
       url.pathname ===
       "/health"
     ) {
-
       return Response.json({
-
         agent:
           "Robinhood Chain Meme Hunter",
-
         version:
-          CONFIG.VERSION,
-
+          VERSION,
         status:
           "ONLINE",
-
         chainId:
-          CONFIG.CHAIN_ID,
-
+          CONFIG.chainId,
         rpc:
-          CONFIG.RPC,
-
+          CONFIG.rpc,
         discovery:
-          "TOKEN_CREATED",
-
+          "ETH_GETLOGS_TOKEN_CREATED",
         marketData:
           "DEX_SCREENER",
-
         telegramConfigured:
           Boolean(
             env.TELEGRAM_BOT_TOKEN &&
             env.TELEGRAM_CHAT_ID
           ),
-
         holderData:
           "UNVERIFIED",
-
         smartMoney:
           "UNVERIFIED",
-
-        paidApiRequired:
-          false,
-
-        maxSubrequestsPerScan:
-          CONFIG.MAX_SUBREQUESTS
+        paidApiKeyRequired:
+          false
       });
     }
-
     /*
      * TELEGRAM TEST
      */
-
     if (
       url.pathname ===
       "/test-telegram"
     ) {
-
-      requestCount = 0;
-
+      requests = 0;
       const result =
         await telegram(
-
           env,
-
           `🤖 <b>Robinhood Chain Meme Hunter V26.1</b>
-
-Telegram connection successful.
-
-Chain ID: 4663 ✅
-Free Robinhood RPC: ✅
-Token discovery: ✅
+Telegram connection successful ✅
+Chain ID: 4663
+Free RPC: ✅
+On-chain discovery: ✅
 ERC20 verification: ✅
 DEX Screener: ✅
-
-Cloudflare-safe scan: ✅
-
-Holder concentration: UNVERIFIED
+Cloudflare-safe scanning: ✅
+Holder data: UNVERIFIED
 Wallet activity: UNVERIFIED
 Smart money: UNVERIFIED`
         );
-
       return Response.json({
-
         agent:
           "Robinhood Chain Meme Hunter",
-
         version:
-          CONFIG.VERSION,
-
+          VERSION,
         telegramConfigured:
           Boolean(
             env.TELEGRAM_BOT_TOKEN &&
             env.TELEGRAM_CHAT_ID
           ),
-
         success:
           result.ok,
-
         error:
           result.ok
             ? null
             : result.error,
-
-        requestCount
+        requestCount:
+          requests
       });
     }
-
     /*
      * SCAN
      */
-
     if (
       url.pathname ===
       "/scan"
     ) {
-
       try {
-
-        const result =
-          await scan(
-            env
-          );
-
         return Response.json(
-
-          result,
-
+          await runScan(env),
           {
-
             headers: {
-
               "cache-control":
                 "no-store",
-
               "access-control-allow-origin":
                 "*"
             }
           }
         );
-
-      } catch (error) {
-
+      } catch (e) {
         return Response.json(
-
           {
-
             agent:
               "Robinhood Chain Meme Hunter",
-
             version:
-              CONFIG.VERSION,
-
+              VERSION,
             status:
               "ERROR",
-
             error:
               String(
-                error?.message ||
-                error
+                e?.message || e
               ),
-
-            requestCount,
-
+            requestCount:
+              requests,
             dataIntegrity: {
-
               noFabricatedMetrics:
                 true,
-
               unavailableData:
                 "UNVERIFIED"
             },
-
             timestamp:
               new Date().toISOString()
           },
-
           {
-
-            status:
-              500,
-
-            headers: {
-
-              "cache-control":
-                "no-store"
-            }
+            status: 500
           }
         );
       }
     }
-
     /*
      * DEFAULT
      */
-
     return Response.json({
-
       agent:
         "Robinhood Chain Meme Hunter",
-
       version:
-        CONFIG.VERSION,
-
+        VERSION,
       status:
         "ONLINE",
-
       routes: [
-
         "/health",
-
         "/test-telegram",
-
         "/scan"
       ],
-
       chainId:
-        CONFIG.CHAIN_ID,
-
+        CONFIG.chainId,
       paidApiKeyRequired:
         false
     });
