@@ -1,4 +1,4 @@
-const VERSION = "V27";
+const VERSION = "V28";
 
 const CONFIG = {
   chainId: 4663,
@@ -16,38 +16,53 @@ const CONFIG = {
     "0x2e2b3f61b70d2d131b2a807371103cc98d51adcaa5e9a8f9c32658ad8426e74e",
 
   /*
-   * V27 uses small RPC ranges instead of large getLogs requests.
-   * This is designed to reduce RPC failures on the free endpoint.
+   * Keep RPC discovery conservative because
+   * the Robinhood public RPC may reject large
+   * eth_getLogs ranges.
    */
   scanBlocks: 5000,
   initialChunk: 250,
 
   /*
-   * Keep enough room for:
-   * RPC discovery
-   * ERC20 verification
-   * DEX lookups
-   * Telegram
+   * Cloudflare Worker free-plan protection.
    */
   maxSubrequests: 55,
 
-  maxLogs: 20,
-  maxTokens: 6,
-  maxDexLookups: 4,
+  /*
+   * Only inspect a few of the newest verified
+   * launches per scan.
+   */
+  maxTokens: 5,
+
+  /*
+   * DexScreener endpoint accepts multiple
+   * comma-separated token addresses.
+   */
+  maxDexBatchSize: 5,
 
   minMarketCap: 10000,
   maxMarketCap: 50000000,
   minLiquidity: 3000,
   minVolume24h: 500,
 
-  alertScore: 70
+  alertScore: 70,
+
+  /*
+   * In-memory cache for the current Worker
+   * isolate. This is not permanent storage,
+   * but prevents duplicate calls during an
+   * invocation.
+   */
+  cacheTtlMs: 30000
 };
 
 let requests = 0;
 
+const dexCache = new Map();
+
 
 /* ============================================================
-   HELPERS
+   BASIC HELPERS
 ============================================================ */
 
 function lower(v) {
@@ -97,9 +112,15 @@ function addRequest() {
   requests++;
 }
 
+function sleep(ms) {
+  return new Promise(
+    resolve => setTimeout(resolve, ms)
+  );
+}
+
 
 /* ============================================================
-   RPC
+   GENERIC RPC
 ============================================================ */
 
 async function rpc(method, params = []) {
@@ -171,7 +192,7 @@ async function rpc(method, params = []) {
 
 
 /* ============================================================
-   BLOCK NUMBER
+   LATEST BLOCK
 ============================================================ */
 
 async function getLatestBlock() {
@@ -221,7 +242,7 @@ async function getLogs(
 
 
 /* ============================================================
-   ADAPTIVE LOG SCANNING
+   ADAPTIVE RPC DISCOVERY
 ============================================================ */
 
 async function scanLogRange(
@@ -273,12 +294,10 @@ async function scanLogRange(
         end + 1;
 
       /*
-       * Gradually increase successful
-       * ranges to improve coverage.
+       * Slowly increase range after
+       * successful calls.
        */
-      if (
-        chunk < 500
-      ) {
+      if (chunk < 500) {
         chunk += 50;
       }
 
@@ -288,8 +307,7 @@ async function scanLogRange(
     failedRanges++;
 
     /*
-     * Retry failed ranges using
-     * a smaller block window.
+     * Shrink failed ranges.
      */
     if (chunk > 25) {
 
@@ -305,9 +323,7 @@ async function scanLogRange(
     }
 
     /*
-     * If even a 25-block range fails,
-     * move forward rather than getting
-     * stuck forever.
+     * Avoid infinite retry loops.
      */
     current =
       end + 1;
@@ -315,9 +331,7 @@ async function scanLogRange(
 
   return {
     logs,
-    failedRanges,
-    scannedTo:
-      current - 1
+    failedRanges
   };
 }
 
@@ -342,13 +356,13 @@ function extractAddresses(log) {
       i++
     ) {
 
-      const a =
+      const address =
         toAddress(
           log.topics[i]
         );
 
-      if (a) {
-        result.push(a);
+      if (address) {
+        result.push(address);
       }
     }
   }
@@ -365,9 +379,6 @@ function extractAddresses(log) {
     const clean =
       data.slice(2);
 
-    /*
-     * Scan 32-byte ABI words.
-     */
     for (
       let i = 0;
       i + 64 <= clean.length;
@@ -380,11 +391,11 @@ function extractAddresses(log) {
           i + 64
         );
 
-      const a =
+      const address =
         toAddress(word);
 
-      if (a) {
-        result.push(a);
+      if (address) {
+        result.push(address);
       }
     }
   }
@@ -396,7 +407,7 @@ function extractAddresses(log) {
 
 
 /* ============================================================
-   ERC20 CALL
+   ETH CALL
 ============================================================ */
 
 async function ethCall(
@@ -423,7 +434,7 @@ async function ethCall(
 
 
 /* ============================================================
-   UINT DECODER
+   ABI UINT
 ============================================================ */
 
 function decodeUint(v) {
@@ -441,7 +452,7 @@ function decodeUint(v) {
 
 
 /* ============================================================
-   STRING DECODER
+   ABI STRING
 ============================================================ */
 
 function decodeString(v) {
@@ -459,7 +470,7 @@ function decodeString(v) {
       );
 
     /*
-     * Standard ABI dynamic string.
+     * Dynamic ABI string.
      */
     if (
       clean.length >= 128
@@ -519,7 +530,6 @@ function decodeString(v) {
             code >= 32 &&
             code <= 126
           ) {
-
             output +=
               String.fromCharCode(
                 code
@@ -542,7 +552,7 @@ function decodeString(v) {
 
 
 /* ============================================================
-   VERIFY ERC20
+   ERC20 VERIFICATION
 ============================================================ */
 
 async function verifyToken(
@@ -554,7 +564,7 @@ async function verifyToken(
   }
 
   /*
-   * totalSupply
+   * totalSupply()
    */
   const supplyRaw =
     await ethCall(
@@ -575,7 +585,7 @@ async function verifyToken(
   }
 
   /*
-   * decimals
+   * decimals()
    */
   const decimalsRaw =
     await ethCall(
@@ -601,9 +611,6 @@ async function verifyToken(
   let symbol =
     "UNKNOWN";
 
-  /*
-   * Metadata calls are optional.
-   */
   if (canRequest()) {
 
     const raw =
@@ -649,7 +656,7 @@ async function verifyToken(
 
 
 /* ============================================================
-   DISCOVERY
+   DISCOVER TOKENS
 ============================================================ */
 
 async function discoverTokens() {
@@ -675,7 +682,7 @@ async function discoverTokens() {
     scan.logs;
 
   /*
-   * Newest launches first.
+   * Newest first.
    */
   rawLogs.sort(
     (a, b) =>
@@ -708,7 +715,9 @@ async function discoverTokens() {
     }
 
     const addresses =
-      extractAddresses(log);
+      extractAddresses(
+        log
+      );
 
     for (
       const token of addresses
@@ -729,10 +738,6 @@ async function discoverTokens() {
 
       seen.add(token);
 
-      /*
-       * Don't accidentally treat the
-       * launch contract itself as a token.
-       */
       if (
         CONFIG.launchContracts
           .map(lower)
@@ -743,18 +748,18 @@ async function discoverTokens() {
         continue;
       }
 
-      const tokenInfo =
+      const info =
         await verifyToken(
           token
         );
 
-      if (!tokenInfo) {
+      if (!info) {
         continue;
       }
 
       verified.push({
 
-        ...tokenInfo,
+        ...info,
 
         block:
           hexToNumber(
@@ -797,20 +802,88 @@ async function discoverTokens() {
 
 
 /* ============================================================
-   DEXSCREENER
+   DEXSCREENER BATCH LOOKUP
 ============================================================ */
 
-async function getDexData(
-  token
+async function dexBatchLookup(
+  tokens
 ) {
+
+  const output = {};
+
+  const addresses =
+    tokens
+      .map(
+        t => lower(
+          t.address
+        )
+      )
+      .filter(Boolean);
+
+  if (
+    addresses.length === 0
+  ) {
+    return {
+      ok: true,
+      data: output,
+      error: null
+    };
+  }
+
+  /*
+   * Remove duplicate addresses.
+   */
+  const unique =
+    [
+      ...new Set(
+        addresses
+      )
+    ];
+
+  /*
+   * Use a single request.
+   */
+  const batch =
+    unique
+      .slice(
+        0,
+        CONFIG.maxDexBatchSize
+      )
+      .join(",");
+
+  const cacheKey =
+    batch;
+
+  const cached =
+    dexCache.get(
+      cacheKey
+    );
+
+  if (
+    cached &&
+    (
+      Date.now() -
+      cached.time
+    ) <
+    CONFIG.cacheTtlMs
+  ) {
+
+    return {
+      ok: true,
+      data:
+        cached.data,
+      error: null,
+      cached: true
+    };
+  }
 
   if (!canRequest()) {
 
     return {
       ok: false,
+      data: output,
       error:
-        "SUBREQUEST_LIMIT",
-      pairs: []
+        "SUBREQUEST_LIMIT"
     };
   }
 
@@ -820,72 +893,139 @@ async function getDexData(
 
     const response =
       await fetch(
-        `${CONFIG.dexApi}/latest/dex/tokens/${token}`,
+        `${CONFIG.dexApi}/latest/dex/tokens/${batch}`,
         {
+          method: "GET",
+
           headers: {
             accept:
-              "application/json"
+              "application/json",
+
+            "user-agent":
+              "Robinhood-Meme-Hunter-V28"
           }
         }
       );
+
+    /*
+     * Rate limit.
+     */
+    if (
+      response.status ===
+      429
+    ) {
+
+      return {
+        ok: false,
+        data: output,
+        error:
+          "HTTP_429"
+      };
+    }
 
     if (!response.ok) {
 
       return {
         ok: false,
+        data: output,
         error:
-          `HTTP_${response.status}`,
-        pairs: []
+          `HTTP_${response.status}`
       };
     }
 
-    const data =
+    const json =
       await response.json();
 
-    let pairs =
+    const pairs =
       Array.isArray(
-        data?.pairs
+        json?.pairs
       )
-        ? data.pairs
+        ? json.pairs
         : [];
 
-    pairs =
-      pairs.filter(
-        p =>
-          lower(
-            p?.chainId
-          ) ===
-          CONFIG.dexChain
-      );
+    for (
+      const pair of pairs
+    ) {
 
-    pairs.sort(
-      (a, b) =>
-        (
-          Number(
-            b?.liquidity?.usd
-          ) || 0
-        ) -
-        (
-          Number(
-            a?.liquidity?.usd
-          ) || 0
-        )
+      if (
+        lower(
+          pair?.chainId
+        ) !==
+        CONFIG.dexChain
+      ) {
+        continue;
+      }
+
+      const address =
+        lower(
+          pair?.baseToken?.address
+        );
+
+      if (!address) {
+        continue;
+      }
+
+      if (
+        !output[address]
+      ) {
+        output[address] = [];
+      }
+
+      output[address].push(
+        pair
+      );
+    }
+
+    /*
+     * Sort each token's pairs by
+     * liquidity.
+     */
+    for (
+      const address of
+      Object.keys(output)
+    ) {
+
+      output[address].sort(
+        (a, b) =>
+          (
+            Number(
+              b?.liquidity?.usd
+            ) || 0
+          ) -
+          (
+            Number(
+              a?.liquidity?.usd
+            ) || 0
+          )
+      );
+    }
+
+    dexCache.set(
+      cacheKey,
+      {
+        time:
+          Date.now(),
+
+        data:
+          output
+      }
     );
 
     return {
       ok: true,
-      pairs
+      data: output,
+      error: null
     };
 
   } catch (e) {
 
     return {
       ok: false,
+      data: output,
       error:
         String(
           e?.message || e
-        ),
-      pairs: []
+        )
     };
   }
 }
@@ -967,7 +1107,7 @@ function calculateScore(c) {
   let score = 0;
 
   /*
-   * Early market cap.
+   * Market cap.
    */
   if (
     c.marketCap <= 100000
@@ -1013,7 +1153,7 @@ function calculateScore(c) {
   }
 
   /*
-   * Volume.
+   * Volume / market cap.
    */
   if (
     c.volumeToMarketCap >= 5
@@ -1061,14 +1201,12 @@ function calculateScore(c) {
   /*
    * Meme signal.
    */
-  score +=
-    Math.round(
-      c.memeScore *
-      0.75
-    );
+  score += Math.round(
+    c.memeScore * 0.75
+  );
 
   /*
-   * Transaction activity.
+   * Activity.
    */
   if (
     c.transactions >= 5000
@@ -1085,7 +1223,7 @@ function calculateScore(c) {
   }
 
   /*
-   * Risk penalties.
+   * Risk.
    */
   if (
     c.liquidity <
@@ -1476,12 +1614,12 @@ async function sendTelegram(
 
 
 /* ============================================================
-   TELEGRAM ALERT
+   TELEGRAM ALERT FORMAT
 ============================================================ */
 
 function formatAlert(c) {
 
-  return `🚨 <b>ROBINHOOD MEME HUNTER V27</b>
+  return `🚨 <b>ROBINHOOD MEME HUNTER V28</b>
 
 <b>${c.name}</b>
 $${c.symbol}
@@ -1533,6 +1671,8 @@ async function performScan(
 
   requests = 0;
 
+  dexCache.clear();
+
   const discovery =
     await discoverTokens();
 
@@ -1541,63 +1681,70 @@ async function performScan(
   const lookupErrors = [];
 
   /*
-   * Only inspect a limited number
-   * of newest verified tokens.
+   * IMPORTANT:
+   * One batched DEX request instead of
+   * one request for every token.
    */
-  for (
-    const token of
-    discovery.verified
-  ) {
+  const dexResult =
+    await dexBatchLookup(
+      discovery.verified
+    );
 
-    if (
-      candidates.length >=
-      CONFIG.maxDexLookups
+  if (!dexResult.ok) {
+
+    lookupErrors.push({
+
+      error:
+        dexResult.error,
+
+      mode:
+        "BATCH"
+    });
+
+  } else {
+
+    for (
+      const token of
+      discovery.verified
     ) {
-      break;
-    }
 
-    if (!canRequest()) {
-      break;
-    }
+      if (
+        candidates.length >=
+        CONFIG.maxDexBatchSize
+      ) {
+        break;
+      }
 
-    const result =
-      await getDexData(
-        token.address
-      );
+      const pairs =
+        dexResult.data[
+          lower(
+            token.address
+          )
+        ] || [];
 
-    if (!result.ok) {
+      if (
+        pairs.length === 0
+      ) {
+        continue;
+      }
 
-      lookupErrors.push({
+      /*
+       * Highest-liquidity pair.
+       */
+      const bestPair =
+        pairs[0];
 
-        contract:
-          token.address,
+      const candidate =
+        buildCandidate(
+          token,
+          bestPair
+        );
 
-        error:
-          result.error
-      });
-
-      continue;
-    }
-
-    if (
-      result.pairs.length === 0
-    ) {
-      continue;
-    }
-
-    const bestPair =
-      result.pairs[0];
-
-    const candidate =
-      buildCandidate(
-        token,
-        bestPair
-      );
-
-    if (candidate) {
-      candidates.push(
-        candidate
-      );
+      if (candidate) {
+        candidates.push(
+          candidate
+        );
+      }
     }
   }
 
@@ -1674,7 +1821,7 @@ async function performScan(
       "ONLINE",
 
     objective:
-      "Discover early-stage Robinhood Chain meme coins using free on-chain launch discovery and verified DEX market data.",
+      "Discover early-stage Robinhood Chain meme coins using free on-chain launch discovery and batched DEX market data.",
 
     chain: {
 
@@ -1748,10 +1895,10 @@ async function performScan(
         "DEX_SCREENER",
 
       lookupMode:
-        "ONE_TOKEN_AT_A_TIME",
+        "BATCH_MULTI_TOKEN",
 
-      maxLookups:
-        CONFIG.maxDexLookups,
+      batchSize:
+        CONFIG.maxDexBatchSize,
 
       candidatesAnalysed:
         candidates.length,
@@ -1894,7 +2041,7 @@ export default {
           "ETH_GETLOGS_TOKEN_CREATED_ADAPTIVE",
 
         marketData:
-          "DEX_SCREENER",
+          "DEX_SCREENER_BATCH",
 
         telegramConfigured:
           Boolean(
@@ -1929,7 +2076,7 @@ export default {
         await sendTelegram(
           env,
 
-          `🤖 <b>Robinhood Chain Meme Hunter V27</b>
+          `🤖 <b>Robinhood Chain Meme Hunter V28</b>
 
 Telegram connection successful ✅
 
@@ -1937,9 +2084,9 @@ Chain ID: 4663
 Free Robinhood RPC: ✅
 Adaptive launch discovery: ✅
 ERC20 verification: ✅
-DEX Screener: ✅
+Batched DEX lookup: ✅
 
-Cloudflare request protection: ✅
+Paid API key required: ❌
 
 Holder data: UNVERIFIED
 Wallet activity: UNVERIFIED
