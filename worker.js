@@ -1,462 +1,277 @@
-const VERSION = "V36";
-
+const VERSION = "V37";
 const CHAIN_ID = 4663;
-const RPC_URL = "https://rpc.mainnet.chain.robinhood.com";
-
-const TOKEN_CREATED_CONTRACTS = [
+const CHAIN_NAME = "Robinhood Chain";
+const RPC_URL =
+  "https://rpc.mainnet.chain.robinhood.com";
+const DEX_API =
+  "https://api.dexscreener.com";
+const TELEGRAM_MIN_SCORE = 60;
+/*
+ * Official pools.trade contracts.
+ *
+ * pools.trade has TWO entry contracts:
+ * current + original.
+ */
+const ENTRY_CONTRACTS = [
   "0x0000ffffbe8efe702c8703ae3477ff5de3d319c0",
   "0x00004c4ccc709ef590f7c81102c0689f0263d4e9"
 ];
-
 const LAUNCHPAD_CONTRACTS = [
   "0x23f8209572b4a1c2ad88a42749e830791fb027f1",
   "0xad44d55e7f8337c3ce113fbb591486e85be104b2",
   "0xce57498d3474dcc244dfb6710ffbe6d4441cd2b2",
   "0x60d73b21cdf2ea846ab3d58699bbbb8f29d72491"
 ];
-
 const POOL_MANAGER =
   "0x8366a39cc670b4001a1121b8f6a443a643e40951";
-
-const ZERO_ADDRESS =
+const ZERO =
   "0x0000000000000000000000000000000000000000";
-
 /*
  * TokenCreated(address)
- *
- * IMPORTANT:
- * This is the event signature used by the existing
- * V34/V35 scanner that successfully discovered tokens.
  */
 const TOKEN_CREATED_TOPIC =
   "0x2e2b3f61b70d2d131b2a807371103cc98d51adcaa5e9a8f9c32658ad8426e74e";
-
 /*
- * TokenLaunched event.
- *
- * We keep this separate from TokenCreated because a
- * token can be created before the pool-launch event.
+ * TokenLaunched
  */
 const TOKEN_LAUNCHED_TOPIC =
   "0x3b3d2bafdcae274a232217e1f80ee4305d3af6aa25c8b14b1681bd68d18042a4";
-
 /*
- * Keep the RPC window conservative.
- */
-const BLOCK_WINDOW = 500;
-
-/*
- * Never make more than two external market-data
- * lookups per scan.
- */
-const MAX_MARKET_LOOKUPS = 2;
-
-/*
- * Telegram alert threshold.
+ * V37 intentionally does NOT repeatedly retry RPC.
  *
- * A real v4 pool starts with 60 points.
- * This means a verified launch can trigger,
- * while an unverified token cannot.
+ * RPC is a confirmation/fallback source.
+ * Discovery can continue through DEX Screener.
  */
-const TELEGRAM_MIN_SCORE = 60;
-
-/*
- * Prevent excessively long Telegram messages.
- */
-const MAX_MESSAGE_LENGTH = 3900;
-
-function json(data, status = 200) {
+const RPC_MAX_REQUESTS = 3;
+const DEX_PROFILE_URL =
+  `${DEX_API}/token-profiles/latest/v1`;
+const DEX_BOOST_URL =
+  `${DEX_API}/token-boosts/latest/v1`;
+const DEX_PAIRS_URL =
+  `${DEX_API}/latest/dex/tokens/`;
+function responseJSON(data, status = 200) {
   return new Response(
     JSON.stringify(data, null, 2),
     {
       status,
       headers: {
-        "content-type": "application/json; charset=utf-8",
-        "cache-control": "no-store"
+        "content-type":
+          "application/json; charset=utf-8",
+        "cache-control":
+          "no-store"
       }
     }
   );
 }
-
-function normaliseAddress(value) {
+function address(value) {
   if (
     typeof value !== "string" ||
     !/^0x[a-fA-F0-9]{40}$/.test(value)
   ) {
     return null;
   }
-
   return value.toLowerCase();
 }
-
 function unique(values) {
   return [
     ...new Set(
       values
         .filter(Boolean)
-        .map(value => value.toLowerCase())
+        .map(
+          value =>
+            String(value).toLowerCase()
+        )
     )
   ];
 }
-
-async function rpc(method, params) {
-  const response = await fetch(
-    RPC_URL,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "accept": "application/json"
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method,
-        params
-      })
-    }
-  );
-
-  const text = await response.text();
-
-  if (!response.ok) {
-    if (response.status === 429) {
-      throw new Error("RPC_RATE_LIMITED");
-    }
-
-    throw new Error(
-      `RPC_HTTP_${response.status}`
-    );
-  }
-
-  let data;
-
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error("RPC_INVALID_JSON");
-  }
-
-  if (data.error) {
-    const message =
-      data.error.message || "RPC_ERROR";
-
-    if (
-      data.error.code === 429 ||
-      /rate.?limit|too many/i.test(message)
-    ) {
-      throw new Error("RPC_RATE_LIMITED");
-    }
-
-    throw new Error(message);
-  }
-
-  return data.result;
-}
-
-function blockHex(number) {
-  return "0x" + number.toString(16);
-}
-
-async function getLatestBlock() {
-  const result = await rpc(
-    "eth_blockNumber",
-    []
-  );
-
-  return parseInt(result, 16);
-}
-
-/*
- * RPC discovery call #1
- */
-async function getTokenCreatedLogs(
-  fromBlock,
-  toBlock
-) {
-  return rpc(
-    "eth_getLogs",
-    [{
-      address: TOKEN_CREATED_CONTRACTS,
-      fromBlock: blockHex(fromBlock),
-      toBlock: blockHex(toBlock),
-      topics: [
-        TOKEN_CREATED_TOPIC
-      ]
-    }]
-  );
-}
-
-/*
- * RPC discovery call #2
- */
-async function getTokenLaunchedLogs(
-  fromBlock,
-  toBlock
-) {
-  return rpc(
-    "eth_getLogs",
-    [{
-      address: LAUNCHPAD_CONTRACTS,
-      fromBlock: blockHex(fromBlock),
-      toBlock: blockHex(toBlock),
-      topics: [
-        TOKEN_LAUNCHED_TOPIC
-      ]
-    }]
-  );
-}
-
-function topicAddress(topic) {
+function shortAddress(value) {
   if (
-    typeof topic !== "string" ||
-    topic.length !== 66
+    typeof value !== "string"
   ) {
-    return null;
+    return "UNKNOWN";
   }
-
-  return normaliseAddress(
-    "0x" + topic.slice(-40)
-  );
-}
-
-function extractCreatedToken(log) {
-  if (
-    Array.isArray(log.topics) &&
-    log.topics.length >= 2
-  ) {
-    const address =
-      topicAddress(log.topics[1]);
-
-    if (address) {
-      return address;
-    }
-  }
-
-  if (
-    typeof log.data === "string" &&
-    log.data.length >= 66
-  ) {
-    const address =
-      normaliseAddress(
-        "0x" + log.data.slice(-40)
-      );
-
-    if (address) {
-      return address;
-    }
-  }
-
-  return null;
-}
-
-function readWord(data, index) {
-  if (
-    typeof data !== "string" ||
-    !data.startsWith("0x")
-  ) {
-    return null;
-  }
-
-  const start =
-    2 + index * 64;
-
-  const word =
-    data.slice(start, start + 64);
-
-  if (word.length !== 64) {
-    return null;
-  }
-
-  return word;
-}
-
-function readAddress(data, index) {
-  const word =
-    readWord(data, index);
-
-  if (!word) {
-    return null;
-  }
-
-  return normaliseAddress(
-    "0x" + word.slice(-40)
-  );
-}
-
-function readUint(data, index) {
-  const word =
-    readWord(data, index);
-
-  if (!word) {
-    return null;
-  }
-
-  try {
-    return Number(
-      BigInt("0x" + word)
-    );
-  } catch {
-    return null;
-  }
-}
-
-/*
- * Decode the v4 pool information exposed
- * by the TokenLaunched event.
- */
-function parseTokenLaunched(log) {
-  if (
-    !Array.isArray(log.topics) ||
-    log.topics.length < 3
-  ) {
-    return null;
-  }
-
-  const poolId =
-    typeof log.topics[1] === "string"
-      ? log.topics[1].toLowerCase()
-      : null;
-
-  const token =
-    topicAddress(log.topics[2]);
-
-  const currency0 =
-    readAddress(log.data, 0);
-
-  const currency1 =
-    readAddress(log.data, 1);
-
-  const fee =
-    readUint(log.data, 2);
-
-  const tickSpacing =
-    readUint(log.data, 3);
-
-  const hooks =
-    readAddress(log.data, 4);
-
-  if (!token) {
-    return null;
-  }
-
-  return {
-    token,
-    poolId,
-    currency0,
-    currency1,
-    fee,
-    tickSpacing,
-    hooks,
-    launchpad:
-      normaliseAddress(log.address),
-    blockNumber:
-      log.blockNumber || null,
-    transactionHash:
-      log.transactionHash || null,
-    logIndex:
-      log.logIndex || null
-  };
-}
-
-function isNativeEthPool(pool) {
   return (
-    pool &&
-    (
-      pool.currency0 === ZERO_ADDRESS ||
-      pool.currency1 === ZERO_ADDRESS
-    )
+    value.slice(0, 6) +
+    "..." +
+    value.slice(-4)
   );
 }
-
-function calculatePoolScore(pool) {
-  let score = 0;
-
-  if (!pool) {
-    return 0;
+function money(value) {
+  const n = Number(value);
+  if (
+    !Number.isFinite(n)
+  ) {
+    return "UNVERIFIED";
   }
-
-  /*
-   * TokenLaunched gives us a verified pool.
-   */
-  if (pool.poolId) {
-    score += 40;
+  if (n >= 1000000) {
+    return (
+      "$" +
+      (n / 1000000).toFixed(2) +
+      "M"
+    );
   }
-
-  /*
-   * Native ETH is the expected pools.trade
-   * quote currency.
-   */
-  if (isNativeEthPool(pool)) {
-    score += 15;
+  if (n >= 1000) {
+    return (
+      "$" +
+      (n / 1000).toFixed(1) +
+      "K"
+    );
   }
-
-  /*
-   * Current pools.trade path.
-   */
-  if (pool.tickSpacing === 25) {
-    score += 10;
-  }
-
-  /*
-   * Original pools.trade path.
-   */
-  if (pool.tickSpacing === 60) {
-    score += 5;
-  }
-
-  /*
-   * 0.25% fee.
-   */
-  if (pool.fee === 2500) {
-    score += 10;
-  }
-
-  /*
-   * No hook.
-   */
-  if (pool.hooks === ZERO_ADDRESS) {
-    score += 10;
-  }
-
-  return Math.min(score, 90);
+  return (
+    "$" +
+    n.toFixed(2)
+  );
 }
-
-async function getDexData(token) {
+/* ---------------------------------------------------------
+   DEX SCREENER DISCOVERY
+--------------------------------------------------------- */
+async function dexFetch(url) {
   const response =
     await fetch(
-      "https://api.dexscreener.com/latest/dex/tokens/" +
-      token,
+      url,
       {
+        method: "GET",
         headers: {
-          "accept": "application/json"
+          "accept":
+            "application/json"
         }
       }
     );
-
+  const text =
+    await response.text();
   if (!response.ok) {
     throw new Error(
-      `DEXSCREENER_HTTP_${response.status}`
+      `DEX_HTTP_${response.status}`
     );
   }
-
-  return response.json();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(
+      "DEX_INVALID_JSON"
+    );
+  }
 }
-
-function chooseBestDexPair(data) {
+/*
+ * DEX Screener's latest token profile feed
+ * contains chainId and tokenAddress.
+ *
+ * Robinhood Chain is represented as:
+ * chainId = "robinhood"
+ */
+async function discoverDexProfiles() {
+  const data =
+    await dexFetch(
+      DEX_PROFILE_URL
+    );
+  const rows =
+    Array.isArray(data)
+      ? data
+      : [];
+  return rows
+    .filter(
+      row =>
+        String(
+          row?.chainId || ""
+        ).toLowerCase() ===
+        "robinhood"
+    )
+    .map(
+      row => ({
+        token:
+          address(
+            row?.tokenAddress
+          ),
+        url:
+          row?.url || null,
+        description:
+          row?.description ||
+          null,
+        icon:
+          row?.icon ||
+          null,
+        links:
+          Array.isArray(
+            row?.links
+          )
+            ? row.links
+            : []
+      })
+    )
+    .filter(
+      row =>
+        Boolean(row.token)
+    );
+}
+/*
+ * Boosts can reveal tokens that have
+ * current promotional/trending activity.
+ *
+ * IMPORTANT:
+ * A boost is NOT treated as proof of quality.
+ */
+async function discoverDexBoosts() {
+  const data =
+    await dexFetch(
+      DEX_BOOST_URL
+    );
+  const rows =
+    Array.isArray(data)
+      ? data
+      : [];
+  return rows
+    .filter(
+      row =>
+        String(
+          row?.chainId || ""
+        ).toLowerCase() ===
+        "robinhood"
+    )
+    .map(
+      row =>
+        address(
+          row?.tokenAddress
+        )
+    )
+    .filter(Boolean);
+}
+/* ---------------------------------------------------------
+   MARKET DATA
+--------------------------------------------------------- */
+async function getDexPairs(token) {
+  return dexFetch(
+    DEX_PAIRS_URL +
+    token
+  );
+}
+function selectBestPair(data) {
   const pairs =
-    Array.isArray(data?.pairs)
+    Array.isArray(
+      data?.pairs
+    )
       ? data.pairs
       : [];
-
   if (!pairs.length) {
     return null;
   }
-
   /*
-   * Prefer highest reported liquidity.
+   * Prefer Robinhood pairs.
    */
-  return [...pairs].sort(
+  const robinhood =
+    pairs.filter(
+      pair =>
+        String(
+          pair?.chainId || ""
+        ).toLowerCase() ===
+        "robinhood"
+    );
+  const usable =
+    robinhood.length
+      ? robinhood
+      : pairs;
+  return [
+    ...usable
+  ].sort(
     (a, b) =>
       Number(
         b?.liquidity?.usd || 0
@@ -466,66 +281,71 @@ function chooseBestDexPair(data) {
       )
   )[0];
 }
-
-function analyseDexPair(pair) {
+function analysePair(pair) {
   if (!pair) {
     return {
-      pairFound: false,
+      found: false,
       verified: false
     };
   }
-
   const liquidity =
     Number(
       pair?.liquidity?.usd || 0
     );
-
   const volume =
     Number(
       pair?.volume?.h24 || 0
     );
-
   const buys =
     Number(
       pair?.txns?.h24?.buys || 0
     );
-
   const sells =
     Number(
       pair?.txns?.h24?.sells || 0
     );
-
   return {
-    pairFound: true,
-    verified: true,
-
+    found: true,
+    verified:
+      String(
+        pair?.chainId || ""
+      ).toLowerCase() ===
+      "robinhood",
+    chainId:
+      pair?.chainId ||
+      null,
+    dexId:
+      pair?.dexId ||
+      null,
+    pairAddress:
+      pair?.pairAddress ||
+      null,
+    url:
+      pair?.url ||
+      null,
     name:
-      pair?.baseToken?.name || null,
-
+      pair?.baseToken?.name ||
+      null,
     symbol:
-      pair?.baseToken?.symbol || null,
-
+      pair?.baseToken?.symbol ||
+      null,
     priceUsd:
-      pair?.priceUsd || null,
-
+      pair?.priceUsd ||
+      null,
     marketCap:
-      pair?.marketCap || null,
-
+      pair?.marketCap ||
+      null,
     fdv:
-      pair?.fdv || null,
-
+      pair?.fdv ||
+      null,
     liquidityUsd:
       liquidity,
-
     volume24h:
       volume,
-
     buys24h:
       buys,
-
     sells24h:
       sells,
-
     buySellRatio:
       sells > 0
         ? Number(
@@ -533,218 +353,316 @@ function analyseDexPair(pair) {
               buys / sells
             ).toFixed(2)
           )
-        : null,
-
-    dexId:
-      pair?.dexId || null,
-
-    pairAddress:
-      pair?.pairAddress || null,
-
-    url:
-      pair?.url || null
+        : null
   };
 }
-
-function calculateMarketScore(market) {
+/* ---------------------------------------------------------
+   SCORING
+--------------------------------------------------------- */
+function scoreCandidate({
+  market,
+  profileFound,
+  boostFound
+}) {
   let score = 0;
-
-  if (!market?.pairFound) {
-    return 0;
+  const reasons = [];
+  /*
+   * Confirmed Robinhood market.
+   */
+  if (
+    market?.verified
+  ) {
+    score += 25;
+    reasons.push(
+      "Robinhood Chain market confirmed"
+    );
   }
-
-  const liquidity =
-    Number(
-      market.liquidityUsd || 0
-    );
-
-  const volume =
-    Number(
-      market.volume24h || 0
-    );
-
-  const buys =
-    Number(
-      market.buys24h || 0
-    );
-
-  const sells =
-    Number(
-      market.sells24h || 0
-    );
-
   /*
    * Liquidity.
    */
-  if (liquidity >= 1000) {
+  const liquidity =
+    Number(
+      market?.liquidityUsd || 0
+    );
+  if (
+    liquidity >= 1000
+  ) {
     score += 5;
+    reasons.push(
+      "Liquidity above $1K"
+    );
   }
-
-  if (liquidity >= 5000) {
+  if (
+    liquidity >= 5000
+  ) {
     score += 5;
+    reasons.push(
+      "Liquidity above $5K"
+    );
   }
-
-  if (liquidity >= 10000) {
+  if (
+    liquidity >= 10000
+  ) {
     score += 5;
+    reasons.push(
+      "Liquidity above $10K"
+    );
   }
-
   /*
-   * Trading activity.
+   * Volume.
    */
-  if (volume >= 1000) {
+  const volume =
+    Number(
+      market?.volume24h || 0
+    );
+  if (
+    volume >= 1000
+  ) {
     score += 5;
+    reasons.push(
+      "24h volume detected"
+    );
   }
-
-  if (volume >= 10000) {
+  if (
+    volume >= 10000
+  ) {
     score += 5;
+    reasons.push(
+      "Strong 24h volume"
+    );
   }
-
   /*
    * Buy pressure.
    */
+  const buys =
+    Number(
+      market?.buys24h || 0
+    );
+  const sells =
+    Number(
+      market?.sells24h || 0
+    );
   if (
     buys > sells &&
     buys > 0
   ) {
+    score += 10;
+    reasons.push(
+      "Buys currently exceed sells"
+    );
+  }
+  /*
+   * Profile presence.
+   */
+  if (
+    profileFound
+  ) {
     score += 5;
-  }
-
-  return Math.min(score, 30);
-}
-
-function formatMoney(value) {
-  if (
-    value === null ||
-    value === undefined ||
-    !Number.isFinite(
-      Number(value)
-    )
-  ) {
-    return "UNVERIFIED";
-  }
-
-  const number =
-    Number(value);
-
-  if (number >= 1000000) {
-    return (
-      "$" +
-      (
-        number / 1000000
-      ).toFixed(2) +
-      "M"
+    reasons.push(
+      "Token appears in current DEX discovery feed"
     );
   }
-
-  if (number >= 1000) {
-    return (
-      "$" +
-      (
-        number / 1000
-      ).toFixed(1) +
-      "K"
+  /*
+   * Boost presence.
+   *
+   * Only 5 points because boosts can be paid/promotional.
+   */
+  if (
+    boostFound
+  ) {
+    score += 5;
+    reasons.push(
+      "Current DEX Screener boost detected"
     );
   }
-
-  return (
-    "$" +
-    number.toFixed(2)
-  );
+  return {
+    score:
+      Math.min(
+        score,
+        100
+      ),
+    reasons
+  };
 }
-
-function shortAddress(address) {
+/* ---------------------------------------------------------
+   RPC FALLBACK / CONFIRMATION
+--------------------------------------------------------- */
+async function rpcCall(
+  method,
+  params
+) {
+  const response =
+    await fetch(
+      RPC_URL,
+      {
+        method: "POST",
+        headers: {
+          "content-type":
+            "application/json"
+        },
+        body:
+          JSON.stringify({
+            jsonrpc:
+              "2.0",
+            id: 1,
+            method,
+            params
+          })
+      }
+    );
+  const text =
+    await response.text();
   if (
-    typeof address !== "string" ||
-    address.length < 12
+    response.status === 429
   ) {
-    return address || "UNKNOWN";
+    throw new Error(
+      "RPC_RATE_LIMITED"
+    );
   }
-
-  return (
-    address.slice(0, 6) +
-    "..." +
-    address.slice(-4)
+  if (
+    !response.ok
+  ) {
+    throw new Error(
+      `RPC_HTTP_${response.status}`
+    );
+  }
+  let result;
+  try {
+    result =
+      JSON.parse(text);
+  } catch {
+    throw new Error(
+      "RPC_INVALID_JSON"
+    );
+  }
+  if (
+    result?.error
+  ) {
+    throw new Error(
+      result.error.message ||
+      "RPC_ERROR"
+    );
+  }
+  return result.result;
+}
+async function rpcLatestBlock() {
+  return rpcCall(
+    "eth_blockNumber",
+    []
   );
 }
-
-function buildTelegramMessage(candidate) {
-  const pool =
-    candidate.pool;
-
-  const market =
-    candidate.market;
-
-  const score =
-    candidate.score;
-
-  const lines = [
-    "🚨 ROBINHOOD MEME CALL — V36",
-    "",
-    `🔥 ${candidate.symbol ? "$" + candidate.symbol : "NEW TOKEN"}`,
-    `Score: ${score}/100`,
-    "",
-    `Contract: ${candidate.token}`,
-    "",
-    "🦄 UNISWAP V4",
-    `Pool: ${pool?.poolId ? "✅ VERIFIED" : "❌ NOT VERIFIED"}`,
-    `ETH Pair: ${isNativeEthPool(pool) ? "✅" : "UNVERIFIED"}`,
-    `Tick spacing: ${pool?.tickSpacing ?? "UNVERIFIED"}`,
-    `Fee: ${
-      pool?.fee !== null &&
-      pool?.fee !== undefined
-        ? (pool.fee / 10000).toFixed(2) + "%"
-        : "UNVERIFIED"
-    }`,
-    "",
-    "📊 MARKET DATA",
-    `Liquidity: ${formatMoney(market?.liquidityUsd)}`,
-    `24h Volume: ${formatMoney(market?.volume24h)}`,
-    `Buys: ${market?.buys24h ?? "UNVERIFIED"}`,
-    `Sells: ${market?.sells24h ?? "UNVERIFIED"}`,
-    `Market Cap: ${formatMoney(market?.marketCap)}`,
-    "",
-    "🎯 WHY IT TRIGGERED",
-    "• Newly discovered Robinhood Chain token",
-    "• Verified Uniswap v4 launch pool",
-    isNativeEthPool(pool)
-      ? "• Native ETH trading pair confirmed"
-      : "• ETH pairing unverified",
-    market?.liquidityUsd > 0
-      ? "• Liquidity detected"
-      : "• Liquidity unverified",
-    market?.buys24h > market?.sells24h
-      ? "• Buy pressure currently exceeds sells"
-      : "• Buy pressure not confirmed",
-    "",
-    "⚠️ VERY EARLY / HIGH RISK",
-    "This is an automated discovery alert, not a guarantee of performance.",
-    "",
-    `TX: ${candidate.transactionHash || "UNVERIFIED"}`,
-    "",
-    `#RobinhoodChain #MemeCoin #V36`
-  ];
-
-  let message =
-    lines.join("\n");
-
-  if (
-    message.length >
-    MAX_MESSAGE_LENGTH
-  ) {
-    message =
-      message.slice(
+/*
+ * RPC confirmation is deliberately optional.
+ *
+ * If it gets rate limited, V37 keeps working.
+ */
+async function tryRpcConfirmation(
+  token,
+  diagnostics
+) {
+  try {
+    const latestHex =
+      await rpcLatestBlock();
+    const latest =
+      parseInt(
+        latestHex,
+        16
+      );
+    const from =
+      Math.max(
         0,
-        MAX_MESSAGE_LENGTH - 20
-      ) +
-      "\n\n[V36 TRUNCATED]";
+        latest - 250
+      );
+    /*
+     * Only confirm TokenCreated.
+     */
+    const logs =
+      await rpcCall(
+        "eth_getLogs",
+        [{
+          address:
+            ENTRY_CONTRACTS,
+          fromBlock:
+            "0x" +
+            from.toString(16),
+          toBlock:
+            latestHex,
+          topics: [
+            TOKEN_CREATED_TOPIC
+          ]
+        }]
+      );
+    const tokenLower =
+      token.toLowerCase();
+    const match =
+      Array.isArray(logs)
+        ? logs.find(
+            log => {
+              const topics =
+                Array.isArray(
+                  log?.topics
+                )
+                  ? log.topics
+                  : [];
+              const candidates =
+                topics
+                  .slice(1)
+                  .map(
+                    topic => {
+                      if (
+                        typeof topic !==
+                        "string"
+                      ) {
+                        return null;
+                      }
+                      return address(
+                        "0x" +
+                        topic.slice(-40)
+                      );
+                    }
+                  )
+                  .filter(Boolean);
+              return candidates.includes(
+                tokenLower
+              );
+            }
+          )
+        : null;
+    return {
+      rpcAvailable:
+        true,
+      tokenCreated:
+        Boolean(match),
+      block:
+        match?.blockNumber ||
+        null,
+      transactionHash:
+        match?.transactionHash ||
+        null
+    };
+  } catch (error) {
+    diagnostics.push({
+      source:
+        "rpc",
+      status:
+        error.message
+    });
+    return {
+      rpcAvailable:
+        false,
+      tokenCreated:
+        false,
+      reason:
+        error.message
+    };
   }
-
-  return message;
 }
-
+/* ---------------------------------------------------------
+   TELEGRAM
+--------------------------------------------------------- */
 async function sendTelegram(
   env,
-  message
+  text
 ) {
   if (
     !env.TELEGRAM_BOT_TOKEN
@@ -755,7 +673,6 @@ async function sendTelegram(
         "TELEGRAM_BOT_TOKEN_NOT_CONFIGURED"
     };
   }
-
   if (
     !env.TELEGRAM_CHAT_ID
   ) {
@@ -765,11 +682,11 @@ async function sendTelegram(
         "TELEGRAM_CHAT_ID_NOT_CONFIGURED"
     };
   }
-
-  const url =
-    `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
-
   try {
+    const url =
+      "https://api.telegram.org/bot" +
+      env.TELEGRAM_BOT_TOKEN +
+      "/sendMessage";
     const response =
       await fetch(
         url,
@@ -783,35 +700,27 @@ async function sendTelegram(
             JSON.stringify({
               chat_id:
                 env.TELEGRAM_CHAT_ID,
-
-              text:
-                message,
-
+              text,
               disable_web_page_preview:
                 true
             })
         }
       );
-
     const data =
       await response.json();
-
     if (
       !response.ok ||
       !data?.ok
     ) {
       return {
         sent: false,
-
         reason:
           data?.description ||
           `TELEGRAM_HTTP_${response.status}`
       };
     }
-
     return {
       sent: true,
-
       messageId:
         data?.result?.message_id ||
         null
@@ -819,505 +728,392 @@ async function sendTelegram(
   } catch (error) {
     return {
       sent: false,
-
       reason:
         error?.message ||
         "TELEGRAM_FETCH_ERROR"
     };
   }
 }
-
+function buildTelegramMessage(
+  candidate
+) {
+  const market =
+    candidate.market;
+  const lines = [
+    "🚨 ROBINHOOD MEME CALL — V37",
+    "",
+    `🔥 ${
+      candidate.symbol
+        ? "$" +
+          candidate.symbol
+        : "NEW ROBINHOOD TOKEN"
+    }`,
+    candidate.name
+      ? candidate.name
+      : "",
+    "",
+    `Hunter Score: ${candidate.score}/100`,
+    "",
+    "📍 CONTRACT",
+    candidate.token,
+    "",
+    "📊 MARKET",
+    `Liquidity: ${money(
+      market.liquidityUsd
+    )}`,
+    `24h Volume: ${money(
+      market.volume24h
+    )}`,
+    `Buys: ${
+      market.buys24h ??
+      "UNVERIFIED"
+    }`,
+    `Sells: ${
+      market.sells24h ??
+      "UNVERIFIED"
+    }`,
+    `Buy/Sell: ${
+      market.buySellRatio ??
+      "UNVERIFIED"
+    }`,
+    `Market Cap: ${money(
+      market.marketCap
+    )}`,
+    `FDV: ${money(
+      market.fdv
+    )}`,
+    "",
+    "🎯 WHY IT TRIGGERED",
+    ...candidate.reasons.map(
+      reason =>
+        "• " + reason
+    ),
+    "",
+    "🔎 DATA STATUS",
+    "Token: VERIFIED",
+    `Robinhood market: ${
+      market.verified
+        ? "VERIFIED"
+        : "UNVERIFIED"
+    }`,
+    "Holder concentration: UNVERIFIED",
+    "Smart money: UNVERIFIED",
+    "Wallet activity: UNVERIFIED",
+    "",
+    "⚠️ VERY EARLY / HIGH RISK",
+    "Automated discovery alert. Not a guarantee of performance.",
+    "",
+    market.url
+      ? `Chart: ${market.url}`
+      : "",
+    "",
+    "#RobinhoodChain #MemeCoin #V37"
+  ];
+  return lines
+    .filter(
+      line =>
+        line !== null &&
+        line !== undefined
+    )
+    .join("\n")
+    .slice(
+      0,
+      3900
+    );
+}
+/* ---------------------------------------------------------
+   MAIN SCAN
+--------------------------------------------------------- */
 async function runScan(env) {
   const diagnostics = [];
-
-  let latestBlock;
-
-  try {
-    latestBlock =
-      await getLatestBlock();
-  } catch (error) {
-    return {
-      status:
-        error.message ===
-        "RPC_RATE_LIMITED"
-          ? "RPC_RATE_LIMITED"
-          : "RPC_ERROR",
-
-      telegram: {
-        sent: false,
-        reason:
-          "SCAN_FAILED_BEFORE_TELEGRAM"
-      },
-
-      diagnostics: [{
-        method:
-          "eth_blockNumber",
-
-        error:
-          error.message
-      }]
-    };
-  }
-
-  const startBlock =
-    Math.max(
-      0,
-      latestBlock -
-        BLOCK_WINDOW +
-        1
-    );
-
-  const endBlock =
-    latestBlock;
-
-  let createdLogs = [];
-
-  let launchedLogs = [];
-
+  let profiles = [];
+  let boosts = [];
   /*
-   * RPC #2
+   * Discovery source #1.
    */
   try {
-    createdLogs =
-      await getTokenCreatedLogs(
-        startBlock,
-        endBlock
-      );
-  } catch (error) {
-    return {
-      status:
-        error.message ===
-        "RPC_RATE_LIMITED"
-          ? "RPC_RATE_LIMITED"
-          : "RPC_ERROR",
-
-      latestBlock,
-
-      startBlock,
-
-      endBlock,
-
-      telegram: {
-        sent: false,
-        reason:
-          "TOKEN_DISCOVERY_FAILED"
-      },
-
-      diagnostics: [{
-        method:
-          "eth_getLogs_tokenCreated",
-
-        error:
-          error.message
-      }]
-    };
-  }
-
-  /*
-   * RPC #3
-   */
-  try {
-    launchedLogs =
-      await getTokenLaunchedLogs(
-        startBlock,
-        endBlock
-      );
+    profiles =
+      await discoverDexProfiles();
   } catch (error) {
     diagnostics.push({
-      method:
-        "eth_getLogs_tokenLaunched",
-
+      source:
+        "dex_profiles",
       error:
         error.message
     });
   }
-
-  const createdTokens =
-    unique(
-      createdLogs.map(
-        extractCreatedToken
-      )
-    );
-
-  const launchedPools =
-    launchedLogs
-      .map(
-        parseTokenLaunched
-      )
-      .filter(Boolean);
-
-  const poolsByToken =
-    new Map();
-
-  for (
-    const pool of launchedPools
-  ) {
-    if (
-      !poolsByToken.has(
-        pool.token
-      )
-    ) {
-      poolsByToken.set(
-        pool.token,
-        pool
-      );
-    }
+  /*
+   * Discovery source #2.
+   */
+  try {
+    boosts =
+      await discoverDexBoosts();
+  } catch (error) {
+    diagnostics.push({
+      source:
+        "dex_boosts",
+      error:
+        error.message
+    });
   }
-
-  /*
-   * Include tokens discovered
-   * through either route.
-   */
-  const allTokens =
+  const profileTokens =
+    profiles.map(
+      row =>
+        row.token
+    );
+  const boostTokens =
+    boosts;
+  const discovered =
     unique([
-      ...createdTokens,
-      ...launchedPools.map(
-        pool => pool.token
-      )
+      ...profileTokens,
+      ...boostTokens
     ]);
-
-  const candidates = [];
-
   /*
-   * Only enrich two tokens per scan.
+   * Don't hammer DEX Screener.
+   *
+   * Only inspect the first 2 candidates
+   * in each scan.
    */
-  const enrichmentTokens =
-    allTokens
-      .filter(
-        token =>
-          poolsByToken.has(token)
-      )
-      .slice(
-        0,
-        MAX_MARKET_LOOKUPS
-      );
-
+  const tokensToInspect =
+    discovered.slice(
+      0,
+      2
+    );
+  const candidates = [];
   for (
-    const token of enrichmentTokens
+    const token of
+      tokensToInspect
   ) {
-    const pool =
-      poolsByToken.get(token);
-
+    let pair = null;
     let market = {
-      pairFound: false,
+      found: false,
       verified: false
     };
-
-    let marketError = null;
-
-    /*
-     * DEX Screener is enrichment only.
-     * Discovery does NOT depend on it.
-     */
     try {
-      const dexData =
-        await getDexData(token);
-
-      const pair =
-        chooseBestDexPair(
-          dexData
+      const data =
+        await getDexPairs(
+          token
         );
-
+      pair =
+        selectBestPair(
+          data
+        );
       market =
-        analyseDexPair(
+        analysePair(
           pair
         );
     } catch (error) {
-      marketError =
-        error.message;
-
       diagnostics.push({
-        type:
-          "market_data",
-
+        source:
+          "dex_pairs",
         token,
-
         error:
           error.message
       });
     }
-
-    const poolScore =
-      calculatePoolScore(
-        pool
+    const profileFound =
+      profileTokens.includes(
+        token
       );
-
-    const marketScore =
-      calculateMarketScore(
-        market
+    const boostFound =
+      boostTokens.includes(
+        token
       );
-
-    const score =
-      Math.min(
-        100,
-        poolScore +
-          marketScore
+    const scoring =
+      scoreCandidate({
+        market,
+        profileFound,
+        boostFound
+      });
+    /*
+     * RPC confirmation is attempted only
+     * for a promising candidate.
+     *
+     * It cannot kill the scan.
+     */
+    let rpc =
+      {
+        rpcAvailable:
+          false,
+        tokenCreated:
+          false,
+        reason:
+          "NOT_ATTEMPTED"
+      };
+    if (
+      scoring.score >= 45
+    ) {
+      rpc =
+        await tryRpcConfirmation(
+          token,
+          diagnostics
+        );
+    }
+    /*
+     * RPC confirmation gives bonus points,
+     * but is NOT required.
+     */
+    let finalScore =
+      scoring.score;
+    if (
+      rpc.tokenCreated
+    ) {
+      finalScore =
+        Math.min(
+          100,
+          finalScore + 10
+        );
+      scoring.reasons.push(
+        "TokenCreated confirmed on Robinhood Chain"
       );
-
-    const candidate = {
+    }
+    candidates.push({
       token,
-
-      symbol:
-        market?.symbol ||
-        null,
-
       name:
-        market?.name ||
+        market.name ||
         null,
-
-      score,
-
-      pool,
-
-      market: {
-        ...market,
-
-        error:
-          marketError
+      symbol:
+        market.symbol ||
+        null,
+      score:
+        finalScore,
+      reasons:
+        scoring.reasons,
+      market,
+      discovery: {
+        dexProfile:
+          profileFound,
+        dexBoost:
+          boostFound
       },
-
-      transactionHash:
-        pool.transactionHash,
-
-      discoveredAtBlock:
-        pool.blockNumber,
-
+      rpc,
       validation: {
         token:
           "VERIFIED",
-
-        v4Pool:
-          pool.poolId
+        market:
+          market.verified
             ? "VERIFIED"
             : "UNVERIFIED",
-
         liquidity:
-          market?.liquidityUsd !==
+          market.liquidityUsd !==
           undefined
             ? "DEXSCREENER"
             : "UNVERIFIED",
-
-        volume:
-          market?.volume24h !==
-          undefined
-            ? "DEXSCREENER"
-            : "UNVERIFIED",
-
         holders:
           "UNVERIFIED",
-
         smartMoney:
           "UNVERIFIED",
-
         walletActivity:
           "UNVERIFIED",
-
         accumulationDistribution:
           "UNVERIFIED"
       }
-    };
-
-    candidates.push(
-      candidate
-    );
+    });
   }
-
-  /*
-   * Tokens with no TokenLaunched event
-   * are still returned, but NEVER become
-   * Telegram calls.
-   */
-  for (
-    const token of allTokens
-  ) {
-    if (
-      !poolsByToken.has(token)
-    ) {
-      candidates.push({
-        token,
-
-        score: 0,
-
-        pool: null,
-
-        market: {
-          pairFound: false,
-          verified: false
-        },
-
-        validation: {
-          token:
-            "VERIFIED_FROM_TOKEN_CREATED",
-
-          v4Pool:
-            "NOT_VERIFIED",
-
-          liquidity:
-            "UNVERIFIED",
-
-          volume:
-            "UNVERIFIED",
-
-          holders:
-            "UNVERIFIED",
-
-          smartMoney:
-            "UNVERIFIED",
-
-          walletActivity:
-            "UNVERIFIED",
-
-          accumulationDistribution:
-            "UNVERIFIED"
-        }
-      });
-    }
-  }
-
   candidates.sort(
     (a, b) =>
-      Number(
-        b.score || 0
-      ) -
-      Number(
-        a.score || 0
-      )
+      b.score -
+      a.score
   );
-
   /*
-   * TELEGRAM ALERT
+   * A call requires:
    *
-   * This is the important V36 change.
+   * 1. Robinhood market
+   * 2. Score >= 60
+   *
+   * This avoids Telegram spam from random
+   * boosted tokens.
    */
+  const qualifying =
+    candidates.find(
+      candidate =>
+        candidate.market?.verified &&
+        candidate.score >=
+          TELEGRAM_MIN_SCORE
+    );
   let telegram = {
     sent: false,
     reason:
       "NO_QUALIFYING_CANDIDATE"
   };
-
-  const qualifying =
-    candidates.find(
-      candidate =>
-        candidate.pool &&
-        candidate.pool.poolId &&
-        Number(candidate.score) >=
-          TELEGRAM_MIN_SCORE
-    );
-
-  if (qualifying) {
+  if (
+    qualifying
+  ) {
     const message =
       buildTelegramMessage(
         qualifying
       );
-
     telegram =
       await sendTelegram(
         env,
         message
       );
-
-    /*
-     * Never hide which candidate
-     * generated the alert.
-     */
     telegram.token =
       qualifying.token;
-
     telegram.score =
       qualifying.score;
   }
-
   return {
-    status: "OK",
-
-    latestBlock,
-
-    startBlock,
-
-    endBlock,
-
-    blocksScanned:
-      endBlock -
-      startBlock +
-      1,
-
-    rawTokenLogs:
-      createdLogs.length,
-
-    rawPoolLogs:
-      launchedLogs.length,
-
+    status:
+      "OK",
+    discovery:
+      "DEXSCREENER_ROBINHOOD",
+    latestProfiles:
+      profiles.length,
+    latestBoosts:
+      boosts.length,
     tokensDiscovered:
-      allTokens.length,
-
-    poolsDiscovered:
-      launchedPools.length,
-
-    tokensWithV4Pools:
-      allTokens.filter(
-        token =>
-          poolsByToken.has(token)
-      ).length,
-
-    tokens,
-
+      discovered.length,
+    tokensInspected:
+      tokensToInspect.length,
     candidates,
-
     telegram,
-
     telegramThreshold:
       TELEGRAM_MIN_SCORE,
-
-    rpcRequests:
-      3,
-
-    rpcBreakdown: {
-      eth_blockNumber:
-        1,
-
-      eth_getLogs_tokenCreated:
-        1,
-
-      eth_getLogs_tokenLaunched:
-        1
+    rpc: {
+      role:
+        "OPTIONAL_CONFIRMATION",
+      rateLimitDoesNotAbortScan:
+        true,
+      maxRequests:
+        RPC_MAX_REQUESTS
     },
-
-    externalMarketLookups:
-      enrichmentTokens.length,
-
-    maximumMarketLookups:
-      MAX_MARKET_LOOKUPS,
-
-    diagnostics,
-
-    chainId:
-      CHAIN_ID,
-
-    kvRequired:
-      false,
-
     dataIntegrity: {
       noFabricatedMetrics:
         true,
-
       holderConcentration:
         "UNVERIFIED",
-
       smartMoney:
         "UNVERIFIED",
-
       walletActivity:
         "UNVERIFIED",
-
       accumulationDistribution:
         "UNVERIFIED"
     },
-
+    diagnostics,
+    chain: {
+      name:
+        CHAIN_NAME,
+      chainId:
+        CHAIN_ID
+    },
+    poolsTrade: {
+      entryContracts:
+        ENTRY_CONTRACTS,
+      launchpadContracts:
+        LAUNCHPAD_CONTRACTS,
+      poolManager:
+        POOL_MANAGER
+    },
+    kvRequired:
+      false,
     timestamp:
       new Date().toISOString()
   };
 }
-
+/* ---------------------------------------------------------
+   WORKER
+--------------------------------------------------------- */
 export default {
   async fetch(
     request,
@@ -1328,87 +1124,59 @@ export default {
       new URL(
         request.url
       );
-
     const path =
       url.pathname;
-
     /*
      * HEALTH
      */
     if (
       path === "/health"
     ) {
-      return json({
+      return responseJSON({
         agent:
           "Robinhood Chain Meme Hunter",
-
         version:
           VERSION,
-
         status:
           "ONLINE",
-
         routes: [
           "/health",
           "/scan",
           "/test-telegram"
         ],
-
         chain: {
           name:
-            "Robinhood Chain",
-
+            CHAIN_NAME,
           chainId:
             CHAIN_ID,
-
           rpc:
             RPC_URL
         },
-
         discovery:
-          "TOKEN_CREATED_PLUS_TOKEN_LAUNCHED",
-
-        poolManager:
-          POOL_MANAGER,
-
-        launchpadContracts:
-          LAUNCHPAD_CONTRACTS,
-
+          "DEXSCREENER_ROBINHOOD_FIRST",
+        rpcFallback:
+          "OPTIONAL_RATE_LIMIT_SAFE",
         marketData:
-          "DEX_SCREENER_ENRICHMENT",
-
-        telegram:
-          {
-            configured:
-              Boolean(
-                env.TELEGRAM_BOT_TOKEN &&
-                env.TELEGRAM_CHAT_ID
-              ),
-
-            automaticCalls:
-              true,
-
-            minimumScore:
-              TELEGRAM_MIN_SCORE
-          },
-
+          "DEX_SCREENER",
+        telegram: {
+          configured:
+            Boolean(
+              env.TELEGRAM_BOT_TOKEN &&
+              env.TELEGRAM_CHAT_ID
+            ),
+          automaticCalls:
+            true,
+          minimumScore:
+            TELEGRAM_MIN_SCORE
+        },
         kvRequired:
           false,
-
-        kvConfigured:
-          false,
-
         architecture:
-          "ULTRA_LOW_RPC_NO_KV",
-
-        rpcBudget:
-          "3 BASE RPC REQUESTS",
-
+          "V37_RPC_RESILIENT",
         timestamp:
           new Date().toISOString()
       });
     }
-
     /*
      * SCAN
      */
@@ -1419,24 +1187,19 @@ export default {
         await runScan(
           env
         );
-
-      return json({
+      return responseJSON({
         agent:
           "Robinhood Chain Meme Hunter",
-
         version:
           VERSION,
-
         success:
-          scan.status === "OK",
-
+          scan.status ===
+          "OK",
         scan,
-
         timestamp:
           new Date().toISOString()
       });
     }
-
     /*
      * TELEGRAM TEST
      */
@@ -1447,38 +1210,28 @@ export default {
       const result =
         await sendTelegram(
           env,
-
           `✅ Robinhood Chain Meme Hunter ${VERSION} Telegram test\n\n${new Date().toISOString()}`
         );
-
-      return json({
+      return responseJSON({
         agent:
           "Robinhood Chain Meme Hunter",
-
         version:
           VERSION,
-
         success:
           result.sent,
-
         response:
           result,
-
         timestamp:
           new Date().toISOString()
       });
     }
-
-    return json({
+    return responseJSON({
       agent:
         "Robinhood Chain Meme Hunter",
-
       version:
         VERSION,
-
       status:
         "ONLINE",
-
       routes: [
         "/health",
         "/scan",
@@ -1486,22 +1239,26 @@ export default {
       ]
     });
   },
-
   /*
-   * CRON
+   * AUTOMATIC CRON
    *
-   * Cloudflare invokes this handler
-   * when a Cron Trigger fires.
+   * Configure the Cron Trigger separately
+   * in Cloudflare.
    */
   async scheduled(
-    event,
+    controller,
     env,
     ctx
   ) {
     ctx.waitUntil(
       runScan(env)
         .catch(
-          () => {}
+          error => {
+            console.error(
+              "V37 scheduled scan failed:",
+              error
+            );
+          }
         )
     );
   }
