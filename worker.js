@@ -1,63 +1,53 @@
-/**
- * ROBINHOOD CHAIN MEME HUNTER — V15
- *
- * FREE-FIRST TELEGRAM ALERT BOT
- *
- * Chain ID: 4663
- *
- * Data:
- * - Robinhood Chain RPC
- * - Robinhood Chain Blockscout V2
- * - DEX Screener public API
- * - Telegram Bot API
- *
- * Cloudflare Worker compatible.
- *
- * Required secrets:
- *
- * TELEGRAM_BOT_TOKEN
- * TELEGRAM_CHAT_ID
- *
- * TELEGRAM_CHAT_ID:
- * -1004466114680
- *
- * IMPORTANT:
- * - Never fabricate unavailable data.
- * - UNVERIFIED is never treated as zero.
- * - Alerts require verified DEX data.
- */
+/*
+============================================================
+ROBINHOOD CHAIN MEME HUNTER — V15
+============================================================
+
+FREE-FIRST TELEGRAM MEME COIN SCANNER
+
+Chain:
+  Robinhood Chain
+  Chain ID: 4663
+
+Cloudflare bindings required:
+
+SECRET:
+  TELEGRAM_BOT_TOKEN
+
+VARIABLE:
+  TELEGRAM_CHAT_ID
+  value: -1004466114680
+
+Routes:
+
+  /
+  /health
+  /test-telegram
+  /scan
+
+Cron:
+  scheduled()
+
+============================================================
+*/
 
 const CONFIG = {
-
   VERSION: "V15",
 
-  CHAIN_ID: 4663,
-
   CHAIN_NAME: "Robinhood Chain",
-
-  RPC:
-    "https://rpc.mainnet.chain.robinhood.com",
+  CHAIN_ID: 4663,
 
   BLOCKSCOUT:
     "https://robinhoodchain.blockscout.com/api/v2",
 
-  DEX:
+  DEXSCREENER:
     "https://api.dexscreener.com",
 
-  MAX_DISCOVERY:
-    50,
+  MAX_REQUESTS: 10,
 
-  MAX_CANDIDATES:
-    12,
+  CANDIDATE_LIMIT: 15,
 
-  MAX_HOLDER_CHECKS:
-    3,
-
-  MAX_REQUESTS:
-    10,
-
-  MIN_MARKET_CAP:
-    0,
+  MIN_MARKET_CAP: 1_000,
 
   MAX_MARKET_CAP:
     50_000_000,
@@ -68,57 +58,38 @@ const CONFIG = {
   MIN_VOLUME:
     10_000,
 
+  MIN_SCORE:
+    55,
+
   ALERT_SCORE:
     65,
 
   TARGETS: [
-
     100_000_000,
-
     250_000_000,
-
     500_000_000
-
   ]
-
 };
 
+
+/* ============================================================
+REQUEST COUNTER
+============================================================ */
 
 let requestCount = 0;
 
 
 /* ============================================================
-   REQUEST CONTROL
+FETCH JSON
 ============================================================ */
 
-function canRequest() {
+async function getJSON(url, options = {}) {
 
-  return (
-    requestCount <
-    CONFIG.MAX_REQUESTS
-  );
-
-}
-
-
-/* ============================================================
-   HTTP
-============================================================ */
-
-async function fetchJson(
-  url,
-  options = {}
-) {
-
-  if (!canRequest()) {
+  if (requestCount >= CONFIG.MAX_REQUESTS) {
 
     return {
-
       ok: false,
-
-      error:
-        "REQUEST_BUDGET_EXCEEDED"
-
+      error: "REQUEST_BUDGET_EXCEEDED"
     };
 
   }
@@ -127,73 +98,50 @@ async function fetchJson(
 
   try {
 
-    const response =
-      await fetch(
-        url,
-        {
+    const response = await fetch(url, {
+      ...options,
 
-          ...options,
-
-          headers: {
-
-            "accept":
-              "application/json",
-
-            ...(options.headers || {})
-
-          }
-
-        }
-      );
+      headers: {
+        "accept": "application/json",
+        ...(options.headers || {})
+      }
+    });
 
     if (!response.ok) {
 
       return {
-
         ok: false,
-
-        error:
-          `HTTP_${response.status}`
-
+        status: response.status,
+        error: `HTTP_${response.status}`
       };
 
     }
 
     return {
-
       ok: true,
-
-      data:
-        await response.json()
-
+      data: await response.json()
     };
 
-  } catch {
+  } catch (error) {
 
     return {
-
       ok: false,
-
-      error:
-        "REQUEST_FAILED"
-
+      error: String(
+        error?.message || error
+      )
     };
 
   }
-
 }
 
 
 /* ============================================================
-   HELPERS
+HELPERS
 ============================================================ */
 
-function number(
-  value
-) {
+function number(value) {
 
-  const n =
-    Number(value);
+  const n = Number(value);
 
   return Number.isFinite(n)
     ? n
@@ -202,45 +150,35 @@ function number(
 }
 
 
-function round(
-  value,
-  decimals = 2
-) {
+function round(value, decimals = 2) {
 
-  if (
-    value === null ||
-    value === undefined
-  ) {
-
+  if (value === null || value === undefined) {
     return null;
-
   }
 
   return Number(
-    Number(value)
-      .toFixed(decimals)
+    Number(value).toFixed(decimals)
   );
 
 }
 
 
-function multiple(
-  marketCap,
-  target
-) {
+function cleanAddress(address) {
 
-  if (
-    marketCap === null ||
-    marketCap <= 0
-  ) {
+  return String(address || "")
+    .toLowerCase();
 
+}
+
+
+function multiple(marketCap, target) {
+
+  if (!marketCap || marketCap <= 0) {
     return null;
-
   }
 
   return round(
-    target /
-    marketCap,
+    target / marketCap,
     2
   );
 
@@ -248,272 +186,307 @@ function multiple(
 
 
 /* ============================================================
-   MEME SCORE
+MEME DETECTION
 ============================================================ */
 
-function memeScore(
-  token
-) {
+const MEME_WORDS = [
+  "dog",
+  "doge",
+  "inu",
+  "shib",
+  "cat",
+  "kitty",
+  "frog",
+  "pepe",
+  "wojak",
+  "bonk",
+  "wif",
+  "meme",
+  "moon",
+  "chad",
+  "based",
+  "goat",
+  "ape",
+  "degen",
+  "shit",
+  "woof",
+  "wen",
+  "yolo",
+  "bull",
+  "bear",
+  "penguin",
+  "panda",
+  "hamster",
+  "rat",
+  "fish",
+  "cult",
+  "baby"
+];
+
+
+function memeScore(name, symbol) {
 
   const text =
-
-    (
-      `${token.name || ""} ` +
-      `${token.symbol || ""}`
-    )
+    `${name || ""} ${symbol || ""}`
       .toLowerCase();
-
-  const words = [
-
-    "dog",
-    "doge",
-    "shib",
-    "inu",
-    "cat",
-    "kitty",
-    "frog",
-    "pepe",
-    "wojak",
-    "bonk",
-    "wif",
-    "meme",
-    "moon",
-    "chad",
-    "based",
-    "goat",
-    "ape",
-    "degen",
-    "woof",
-    "wen",
-    "yolo",
-    "bull",
-    "bear"
-
-  ];
 
   let score = 0;
 
-  for (
-    const word of words
-  ) {
+  for (const word of MEME_WORDS) {
 
-    if (
-      text.includes(word)
-    ) {
-
+    if (text.includes(word)) {
       score += 5;
-
     }
 
   }
 
   return Math.min(
-    score,
-    20
+    20,
+    score
   );
 
 }
 
 
 /* ============================================================
-   TOKEN DISCOVERY
+EXCLUSIONS
+============================================================ */
+
+const EXCLUDED_WORDS = [
+  "wrapped",
+  "usd coin",
+  "usdc",
+  "tether",
+  "usdt",
+  "stablecoin",
+  "tokenized stock",
+  "tokenized",
+  "gold",
+  "treasury"
+];
+
+
+function isExcluded(token) {
+
+  const text =
+    `${token.name || ""} ${token.symbol || ""}`
+      .toLowerCase();
+
+  return EXCLUDED_WORDS.some(
+    word => text.includes(word)
+  );
+
+}
+
+
+/* ============================================================
+BLOCKSCOUT TOKEN DISCOVERY
 ============================================================ */
 
 async function discoverTokens() {
 
-  const url =
-    CONFIG.BLOCKSCOUT +
-    "/tokens?type=ERC-20";
-
-  const result =
-    await fetchJson(
-      url
-    );
+  const result = await getJSON(
+    `${CONFIG.BLOCKSCOUT}/tokens?type=ERC-20`
+  );
 
   if (!result.ok) {
 
     return {
-
-      status:
-        "UNVERIFIED",
-
+      status: "UNVERIFIED",
       tokens: [],
-
-      error:
-        result.error
-
+      error: result.error
     };
 
   }
 
   const items =
-    Array.isArray(
-      result.data?.items
-    )
+    Array.isArray(result.data?.items)
       ? result.data.items
       : [];
 
-  const tokens =
+  const tokens = items
+    .filter(token => {
 
-    items
+      if (!token?.address) {
+        return false;
+      }
 
-      .filter(
-        token =>
-          token &&
-          token.address
-      )
+      if (isExcluded(token)) {
+        return false;
+      }
 
-      .map(
-        token => {
+      return true;
 
-          const marketCap =
-            number(
-              token.circulating_market_cap
-            );
+    })
+    .map(token => {
 
-          const price =
-            number(
-              token.exchange_rate
-            );
+      const marketCap =
+        number(
+          token.circulating_market_cap
+        );
 
-          const holders =
-            number(
-              token.holders
-            );
+      const price =
+        number(
+          token.exchange_rate
+        );
 
-          return {
+      const holders =
+        number(
+          token.holders
+        );
 
-            name:
-              token.name ||
-              "Unknown",
+      return {
 
-            symbol:
-              token.symbol ||
-              "UNKNOWN",
+        contract:
+          token.address,
 
-            contract:
-              token.address,
+        name:
+          token.name ||
+          "Unknown",
 
-            marketCap,
+        symbol:
+          token.symbol ||
+          "UNKNOWN",
 
-            price,
+        marketCap,
 
-            holders,
+        price,
 
-            memeLikelihood:
-              memeScore(token)
+        holders,
 
-          };
+        decimals:
+          number(token.decimals),
 
-        }
-      )
+        memeLikelihood:
+          memeScore(
+            token.name,
+            token.symbol
+          )
 
-      .filter(
-        token =>
+      };
 
-          token.marketCap !== null &&
+    })
+    .filter(token => {
 
-          token.marketCap >=
-            CONFIG.MIN_MARKET_CAP &&
+      if (
+        token.marketCap === null
+      ) {
+        return false;
+      }
 
-          token.marketCap <=
-            CONFIG.MAX_MARKET_CAP
+      if (
+        token.marketCap <
+        CONFIG.MIN_MARKET_CAP
+      ) {
+        return false;
+      }
 
-      );
+      if (
+        token.marketCap >
+        CONFIG.MAX_MARKET_CAP
+      ) {
+        return false;
+      }
+
+      return true;
+
+    });
 
   return {
-
-    status:
-      "VERIFIED",
-
+    status: "VERIFIED",
     tokens
-
   };
 
 }
 
 
 /* ============================================================
-   DEX SCREENER
+DEX SCREENER
 ============================================================ */
 
-async function dexData(
-  addresses
-) {
+async function getDexData(addresses) {
 
-  if (
-    !addresses.length
-  ) {
+  if (!addresses.length) {
 
     return {
-
-      status:
-        "UNVERIFIED",
-
+      status: "UNVERIFIED",
       pairs: []
-
     };
 
   }
 
-  const unique =
+  /*
+   * DEX Screener accepts comma-separated
+   * token addresses.
+   */
 
-    [
-      ...new Set(
-        addresses.map(
-          address =>
-            String(address)
-              .toLowerCase()
-        )
-      )
-    ];
+  const unique = [
+    ...new Set(
+      addresses.map(cleanAddress)
+    )
+  ];
 
-  const url =
+  const chunks = [];
 
-    CONFIG.DEX +
-    "/tokens/v1/robinhood/" +
-    unique.join(",");
+  for (
+    let i = 0;
+    i < unique.length;
+    i += 30
+  ) {
 
-  const result =
-    await fetchJson(
-      url
+    chunks.push(
+      unique.slice(i, i + 30)
     );
 
-  if (!result.ok) {
+  }
 
-    return {
+  const pairs = [];
 
-      status:
-        "UNVERIFIED",
+  for (const chunk of chunks) {
 
-      pairs: [],
+    if (
+      requestCount >=
+      CONFIG.MAX_REQUESTS
+    ) {
+      break;
+    }
 
-      error:
-        result.error
+    const result = await getJSON(
+      `${CONFIG.DEXSCREENER}/tokens/v1/robinhood/${chunk.join(",")}`
+    );
 
-    };
+    if (
+      !result.ok
+    ) {
+      continue;
+    }
+
+    if (
+      Array.isArray(result.data)
+    ) {
+
+      pairs.push(
+        ...result.data
+      );
+
+    }
 
   }
 
   return {
-
     status:
-      "VERIFIED",
+      pairs.length
+        ? "VERIFIED"
+        : "UNVERIFIED",
 
-    pairs:
-      Array.isArray(
-        result.data
-      )
-        ? result.data
-        : []
-
+    pairs
   };
 
 }
 
 
 /* ============================================================
-   DEX ANALYSIS
+DEX ANALYSIS
 ============================================================ */
 
 function analyseDex(
@@ -522,102 +495,67 @@ function analyseDex(
 ) {
 
   const address =
-    String(
+    cleanAddress(
       token.contract
-    )
-      .toLowerCase();
-
-  const matching =
-
-    pairs.filter(
-      pair => {
-
-        const base =
-
-          String(
-            pair?.baseToken?.address ||
-            ""
-          )
-            .toLowerCase();
-
-        const quote =
-
-          String(
-            pair?.quoteToken?.address ||
-            ""
-          )
-            .toLowerCase();
-
-        return (
-
-          base === address ||
-          quote === address
-
-        );
-
-      }
     );
 
-  if (
-    !matching.length
-  ) {
+  const matches =
+    pairs.filter(pair => {
+
+      const base =
+        cleanAddress(
+          pair?.baseToken?.address
+        );
+
+      const quote =
+        cleanAddress(
+          pair?.quoteToken?.address
+        );
+
+      return (
+        base === address ||
+        quote === address
+      );
+
+    });
+
+  if (!matches.length) {
 
     return {
-
-      status:
-        "UNVERIFIED",
-
-      liquidity:
-        null,
-
-      volume24h:
-        null,
-
-      buys:
-        null,
-
-      sells:
-        null,
-
-      pressure:
-        "UNKNOWN",
-
-      pair:
-        null
-
+      status: "UNVERIFIED",
+      liquidity: null,
+      volume: null,
+      buys: null,
+      sells: null,
+      ratio: null,
+      pressure: "UNKNOWN",
+      pair: null
     };
 
   }
 
   let liquidity = 0;
-
   let volume = 0;
-
   let buys = 0;
-
   let sells = 0;
 
   let bestPair = null;
-
   let bestLiquidity = 0;
 
-  for (
-    const pair of matching
-  ) {
+  for (const pair of matches) {
 
-    const liq =
+    const l =
       number(
         pair?.liquidity?.usd
       ) || 0;
 
-    const vol =
+    const v =
       number(
         pair?.volume?.h24
       ) || 0;
 
-    liquidity += liq;
-
-    volume += vol;
+    liquidity += l;
+    volume += v;
 
     buys +=
       number(
@@ -630,36 +568,46 @@ function analyseDex(
       ) || 0;
 
     if (
-      liq >
+      l >
       bestLiquidity
     ) {
 
-      bestLiquidity =
-        liq;
-
-      bestPair =
-        pair;
+      bestLiquidity = l;
+      bestPair = pair;
 
     }
 
   }
 
-  let pressure =
-    "NEUTRAL";
+  let pressure = "NEUTRAL";
 
   if (
     buys >
-    sells * 1.25
+    sells * 1.5
+  ) {
+
+    pressure =
+      "STRONG_BUY_PRESSURE";
+
+  } else if (
+    buys >
+    sells * 1.2
   ) {
 
     pressure =
       "BUY_PRESSURE";
 
-  }
-
-  if (
+  } else if (
     sells >
-    buys * 1.25
+    buys * 1.5
+  ) {
+
+    pressure =
+      "STRONG_SELL_PRESSURE";
+
+  } else if (
+    sells >
+    buys * 1.2
   ) {
 
     pressure =
@@ -668,40 +616,28 @@ function analyseDex(
   }
 
   const marketCap =
-
     number(
       bestPair?.marketCap
     ) ??
-
     number(
       bestPair?.fdv
     ) ??
-
     token.marketCap;
 
   const liquidityRatio =
-
-    marketCap > 0
-
-      ? liquidity /
-        marketCap
-
+    marketCap
+      ? liquidity / marketCap
       : null;
 
   const volumeRatio =
-
-    marketCap > 0
-
-      ? volume /
-        marketCap
-
+    marketCap
+      ? volume / marketCap
       : null;
 
   let liquidityQuality =
     "LOW";
 
   if (
-    liquidityRatio !== null &&
     liquidityRatio >= 0.20
   ) {
 
@@ -709,7 +645,6 @@ function analyseDex(
       "STRONG";
 
   } else if (
-    liquidityRatio !== null &&
     liquidityRatio >= 0.10
   ) {
 
@@ -717,7 +652,6 @@ function analyseDex(
       "GOOD";
 
   } else if (
-    liquidityRatio !== null &&
     liquidityRatio >= 0.05
   ) {
 
@@ -730,7 +664,6 @@ function analyseDex(
     "LOW";
 
   if (
-    volumeRatio !== null &&
     volumeRatio >= 0.50
   ) {
 
@@ -738,7 +671,6 @@ function analyseDex(
       "VERY_HIGH";
 
   } else if (
-    volumeRatio !== null &&
     volumeRatio >= 0.20
   ) {
 
@@ -746,7 +678,6 @@ function analyseDex(
       "HIGH";
 
   } else if (
-    volumeRatio !== null &&
     volumeRatio >= 0.05
   ) {
 
@@ -757,35 +688,31 @@ function analyseDex(
 
   return {
 
-    status:
-      "VERIFIED",
+    status: "VERIFIED",
 
     liquidity:
-      round(
-        liquidity,
-        2
-      ),
+      round(liquidity),
 
-    volume24h:
-      round(
-        volume,
-        2
-      ),
+    volume:
+      round(volume),
 
     buys,
 
     sells,
 
-    buySellRatio:
+    ratio:
       sells > 0
         ? round(
-            buys /
-            sells,
+            buys / sells,
             2
           )
         : null,
 
     pressure,
+
+    liquidityQuality,
+
+    volumeQuality,
 
     liquidityRatio:
       round(
@@ -799,14 +726,8 @@ function analyseDex(
         4
       ),
 
-    liquidityQuality,
-
-    volumeQuality,
-
     pair:
-
       bestPair
-
         ? {
 
             dex:
@@ -826,12 +747,11 @@ function analyseDex(
                 bestPair.priceUsd
               ),
 
-            pairCreatedAt:
+            createdAt:
               bestPair.pairCreatedAt ||
               null
 
           }
-
         : null
 
   };
@@ -840,423 +760,190 @@ function analyseDex(
 
 
 /* ============================================================
-   HOLDER ANALYSIS
+SCORE
 ============================================================ */
 
-async function holderAnalysis(
-  address
-) {
-
-  if (
-    !canRequest()
-  ) {
-
-    return {
-
-      status:
-        "UNVERIFIED",
-
-      top10:
-        null,
-
-      top20:
-        null
-
-    };
-
-  }
-
-  const url =
-
-    CONFIG.BLOCKSCOUT +
-    "/tokens/" +
-    address +
-    "/holders";
-
-  const result =
-    await fetchJson(
-      url
-    );
-
-  if (!result.ok) {
-
-    return {
-
-      status:
-        "UNVERIFIED",
-
-      top10:
-        null,
-
-      top20:
-        null,
-
-      error:
-        result.error
-
-    };
-
-  }
-
-  const items =
-    Array.isArray(
-      result.data?.items
-    )
-      ? result.data.items
-      : [];
-
-  if (
-    !items.length
-  ) {
-
-    return {
-
-      status:
-        "UNVERIFIED",
-
-      top10:
-        null,
-
-      top20:
-        null
-
-    };
-
-  }
-
-  const balances =
-
-    items
-
-      .map(
-        holder =>
-          number(
-            holder.value
-          )
-      )
-
-      .filter(
-        value =>
-          value !== null
-      )
-
-      .sort(
-        (a, b) =>
-          b - a
-      );
-
-  if (
-    !balances.length
-  ) {
-
-    return {
-
-      status:
-        "UNVERIFIED",
-
-      top10:
-        null,
-
-      top20:
-        null
-
-    };
-
-  }
-
-  const total =
-
-    balances.reduce(
-      (a, b) =>
-        a + b,
-      0
-    );
-
-  if (
-    total <= 0
-  ) {
-
-    return {
-
-      status:
-        "UNVERIFIED",
-
-      top10:
-        null,
-
-      top20:
-        null
-
-    };
-
-  }
-
-  const top10 =
-
-    balances
-      .slice(
-        0,
-        10
-      )
-      .reduce(
-        (a, b) =>
-          a + b,
-        0
-      );
-
-  const top20 =
-
-    balances
-      .slice(
-        0,
-        20
-      )
-      .reduce(
-        (a, b) =>
-          a + b,
-        0
-      );
-
-  const top10Percent =
-    round(
-      top10 /
-      total *
-      100,
-      2
-    );
-
-  const top20Percent =
-    round(
-      top20 /
-      total *
-      100,
-      2
-    );
-
-  let risk =
-    "LOW";
-
-  if (
-    top10Percent > 50
-  ) {
-
-    risk =
-      "VERY_HIGH";
-
-  } else if (
-    top10Percent > 35
-  ) {
-
-    risk =
-      "HIGH";
-
-  } else if (
-    top10Percent > 20
-  ) {
-
-    risk =
-      "MODERATE";
-
-  }
-
-  return {
-
-    status:
-      "VERIFIED",
-
-    top10:
-      top10Percent,
-
-    top20:
-      top20Percent,
-
-    risk
-
-  };
-
-}
-
-
-/* ============================================================
-   SCORING
-============================================================ */
-
-function score(
+function scoreToken(
   token,
-  dex,
-  holders
+  dex
 ) {
 
   let score = 0;
 
-  let factors = 0;
+  /*
+   * Early market cap
+   */
 
   if (
-    token.marketCap !== null
+    token.marketCap <
+    1_000_000
   ) {
 
-    factors++;
-
-    if (
-      token.marketCap <
-      1_000_000
-    ) {
-
-      score += 15;
-
-    } else if (
-      token.marketCap <
-      10_000_000
-    ) {
-
-      score += 12;
-
-    } else if (
-      token.marketCap <
-      25_000_000
-    ) {
-
-      score += 8;
-
-    } else {
-
-      score += 5;
-
-    }
-
-  }
-
-  factors++;
-
-  if (
-    token.memeLikelihood >= 15
-  ) {
-
-    score += 15;
+    score += 20;
 
   } else if (
-    token.memeLikelihood >= 10
+    token.marketCap <
+    5_000_000
+  ) {
+
+    score += 17;
+
+  } else if (
+    token.marketCap <
+    10_000_000
+  ) {
+
+    score += 14;
+
+  } else if (
+    token.marketCap <
+    25_000_000
   ) {
 
     score += 10;
 
-  } else if (
-    token.memeLikelihood >= 5
-  ) {
+  } else {
 
     score += 5;
 
   }
+
+
+  /*
+   * Meme identity
+   */
+
+  score +=
+    token.memeLikelihood;
+
+
+  /*
+   * Liquidity
+   */
 
   if (
     dex.status ===
     "VERIFIED"
   ) {
 
-    factors++;
-
     if (
       dex.liquidityQuality ===
       "STRONG"
     ) {
-
       score += 15;
+    }
 
-    } else if (
+    else if (
       dex.liquidityQuality ===
       "GOOD"
     ) {
-
       score += 12;
+    }
 
-    } else if (
+    else if (
       dex.liquidityQuality ===
       "MODERATE"
     ) {
-
-      score += 7;
-
+      score += 8;
     }
 
-    factors++;
+  }
+
+
+  /*
+   * Volume
+   */
+
+  if (
+    dex.status ===
+    "VERIFIED"
+  ) {
 
     if (
       dex.volumeQuality ===
       "VERY_HIGH"
     ) {
+      score += 15;
+    }
 
-      score += 10;
-
-    } else if (
+    else if (
       dex.volumeQuality ===
       "HIGH"
     ) {
+      score += 12;
+    }
 
-      score += 8;
-
-    } else if (
+    else if (
       dex.volumeQuality ===
       "HEALTHY"
     ) {
-
-      score += 5;
-
-    }
-
-    factors++;
-
-    if (
-      dex.pressure ===
-      "BUY_PRESSURE"
-    ) {
-
-      score += 10;
-
-    } else if (
-      dex.pressure ===
-      "NEUTRAL"
-    ) {
-
-      score += 5;
-
+      score += 7;
     }
 
   }
+
+
+  /*
+   * Buy pressure
+   */
 
   if (
-    holders.status ===
-    "VERIFIED"
+    dex.pressure ===
+    "STRONG_BUY_PRESSURE"
   ) {
-
-    factors++;
-
-    if (
-      holders.risk ===
-      "LOW"
-    ) {
-
-      score += 10;
-
-    } else if (
-      holders.risk ===
-      "MODERATE"
-    ) {
-
-      score += 5;
-
-    }
-
+    score += 15;
   }
+
+  else if (
+    dex.pressure ===
+    "BUY_PRESSURE"
+  ) {
+    score += 10;
+  }
+
+  else if (
+    dex.pressure ===
+    "NEUTRAL"
+  ) {
+    score += 4;
+  }
+
+
+  return Math.min(
+    100,
+    score
+  );
+
+}
+
+
+/* ============================================================
+TARGETS
+============================================================ */
+
+function targetAnalysis(
+  marketCap
+) {
 
   return {
 
-    score:
-      Math.min(
-        score,
-        100
+    "$100M":
+      multiple(
+        marketCap,
+        100_000_000
       ),
 
-    factors
+    "$250M":
+      multiple(
+        marketCap,
+        250_000_000
+      ),
+
+    "$500M":
+      multiple(
+        marketCap,
+        500_000_000
+      )
 
   };
 
@@ -1264,23 +951,288 @@ function score(
 
 
 /* ============================================================
-   TELEGRAM
+CLASSIFICATION
 ============================================================ */
+
+function classification(
+  score
+) {
+
+  if (
+    score >= 80
+  ) {
+    return "HIGH-POTENTIAL";
+  }
+
+  if (
+    score >= 65
+  ) {
+    return "STRONG-WATCH";
+  }
+
+  if (
+    score >= 55
+  ) {
+    return "WATCH";
+  }
+
+  if (
+    score >= 40
+  ) {
+    return "EARLY";
+  }
+
+  return "LOW-CONVICTION";
+
+}
+
+
+/* ============================================================
+ANALYSE TOKEN
+============================================================ */
+
+function analyseToken(
+  token,
+  dexPairs
+) {
+
+  const dex =
+    analyseDex(
+      token,
+      dexPairs
+    );
+
+  const score =
+    scoreToken(
+      token,
+      dex
+    );
+
+  const riskFlags = [];
+
+  if (
+    dex.status ===
+      "VERIFIED" &&
+    dex.liquidity <
+      CONFIG.MIN_LIQUIDITY
+  ) {
+
+    riskFlags.push(
+      "LOW_LIQUIDITY"
+    );
+
+  }
+
+  if (
+    dex.status ===
+      "VERIFIED" &&
+    dex.volume <
+      CONFIG.MIN_VOLUME
+  ) {
+
+    riskFlags.push(
+      "LOW_VOLUME"
+    );
+
+  }
+
+  if (
+    dex.pressure ===
+    "STRONG_SELL_PRESSURE"
+  ) {
+
+    riskFlags.push(
+      "STRONG_SELL_PRESSURE"
+    );
+
+  }
+
+  return {
+
+    contract:
+      token.contract,
+
+    name:
+      token.name,
+
+    symbol:
+      token.symbol,
+
+    price:
+      token.price,
+
+    marketCap:
+      token.marketCap,
+
+    holders:
+      token.holders,
+
+    memeLikelihood:
+      token.memeLikelihood,
+
+    score,
+
+    category:
+      classification(score),
+
+    dex,
+
+    riskFlags,
+
+    targets:
+      targetAnalysis(
+        token.marketCap
+      )
+
+  };
+
+}
+
+
+/* ============================================================
+SCAN
+============================================================ */
+
+async function runScan() {
+
+  requestCount = 0;
+
+  const discovery =
+    await discoverTokens();
+
+  const discovered =
+    discovery.tokens || [];
+
+  if (!discovered.length) {
+
+    return {
+
+      status:
+        "NO_CANDIDATES",
+
+      tokensDiscovered:
+        0,
+
+      candidates: [],
+
+      requestCount
+
+    };
+
+  }
+
+
+  /*
+   * Prioritise meme-like tokens
+   * and smaller market caps.
+   */
+
+  discovered.sort(
+    (a, b) => {
+
+      const aScore =
+        a.memeLikelihood * 10 -
+        Math.log10(
+          Math.max(
+            1,
+            a.marketCap
+          )
+        );
+
+      const bScore =
+        b.memeLikelihood * 10 -
+        Math.log10(
+          Math.max(
+            1,
+            b.marketCap
+          )
+        );
+
+      return bScore - aScore;
+
+    }
+  );
+
+
+  const selected =
+    discovered.slice(
+      0,
+      CONFIG.CANDIDATE_LIMIT
+    );
+
+
+  const dex =
+    await getDexData(
+      selected.map(
+        token =>
+          token.contract
+      )
+    );
+
+
+  const results =
+    selected
+      .map(token =>
+        analyseToken(
+          token,
+          dex.pairs || []
+        )
+      )
+      .filter(
+        token =>
+          token.dex.status ===
+            "VERIFIED" &&
+          token.dex.liquidity >=
+            CONFIG.MIN_LIQUIDITY &&
+          token.dex.volume >=
+            CONFIG.MIN_VOLUME
+      )
+      .sort(
+        (a, b) =>
+          b.score -
+          a.score
+      );
+
+
+  return {
+
+    status:
+      "OK",
+
+    tokensDiscovered:
+      discovered.length,
+
+    candidates:
+      results,
+
+    requestCount
+
+  };
+
+}
+
+
+/* ============================================================
+TELEGRAM
+============================================================ */
+
+function telegramConfigured(env) {
+
+  return Boolean(
+    env.TELEGRAM_BOT_TOKEN &&
+    env.TELEGRAM_CHAT_ID
+  );
+
+}
+
 
 async function sendTelegram(
   env,
-  message
+  text
 ) {
 
-  const token =
-    env.TELEGRAM_BOT_TOKEN;
-
-  const chatId =
-    env.TELEGRAM_CHAT_ID;
-
   if (
-    !token ||
-    !chatId
+    !telegramConfigured(env)
   ) {
 
     return {
@@ -1294,510 +1246,260 @@ async function sendTelegram(
 
   }
 
+
   const url =
+    `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
 
-    `https://api.telegram.org/bot` +
-    `${token}/sendMessage`;
 
-  const result =
-    await fetch(
-      url,
-      {
+  try {
 
-        method:
-          "POST",
+    const response =
+      await fetch(
+        url,
+        {
 
-        headers: {
+          method:
+            "POST",
 
-          "content-type":
-            "application/json"
+          headers: {
+            "content-type":
+              "application/json"
+          },
 
-        },
+          body:
+            JSON.stringify({
 
-        body:
-          JSON.stringify({
+              chat_id:
+                env.TELEGRAM_CHAT_ID,
 
-            chat_id:
-              chatId,
+              text,
 
-            text:
-              message,
+              disable_web_page_preview:
+                false
 
-            parse_mode:
-              "HTML",
+            })
 
-            disable_web_page_preview:
-              true
+        }
+      );
 
-          })
 
-      }
-    );
+    const data =
+      await response.json();
 
-  if (
-    !result.ok
-  ) {
+
+    if (
+      !response.ok ||
+      !data.ok
+    ) {
+
+      return {
+
+        ok: false,
+
+        error:
+          data?.description ||
+          `HTTP_${response.status}`
+
+      };
+
+    }
+
+
+    return {
+      ok: true
+    };
+
+
+  } catch (error) {
 
     return {
 
       ok: false,
 
       error:
-        `TELEGRAM_HTTP_${result.status}`
+        String(
+          error?.message ||
+          error
+        )
 
     };
 
   }
 
-  const data =
-    await result.json();
-
-  return {
-
-    ok:
-      data.ok === true,
-
-    data
-
-  };
-
 }
 
 
 /* ============================================================
-   TELEGRAM MESSAGE
+FORMAT TELEGRAM ALERT
 ============================================================ */
 
-function buildAlert(
-  token,
-  dex,
-  holders,
-  score
+function formatAlert(
+  candidate
 ) {
 
-  const target100 =
-    multiple(
-      token.marketCap,
-      100_000_000
-    );
+  const marketCap =
+    candidate.marketCap;
 
-  const target250 =
-    multiple(
-      token.marketCap,
-      250_000_000
-    );
+  const liquidity =
+    candidate.dex.liquidity;
 
-  const target500 =
-    multiple(
-      token.marketCap,
-      500_000_000
-    );
+  const volume =
+    candidate.dex.volume;
 
-  const pairUrl =
-    dex.pair?.url ||
-    "";
+  const ratio =
+    candidate.dex.ratio;
 
-  return `🚨 <b>ROBINHOOD CHAIN MEME ALERT</b>
+  const pressure =
+    candidate.dex.pressure;
 
-🔥 <b>${token.name}</b> (${
-    token.symbol
-  })
 
-📜 <b>Contract:</b>
-<code>${token.contract}</code>
+  let message =
+`🚨 ROBINHOOD CHAIN MEME ALERT
 
-💰 <b>Market Cap:</b>
-$${Math.round(
-    token.marketCap || 0
-  ).toLocaleString()}
+🔥 ${candidate.name} ($${candidate.symbol})
 
-💧 <b>Liquidity:</b>
-$${Math.round(
-    dex.liquidity || 0
-  ).toLocaleString()}
+⭐ Score: ${candidate.score}/100
+🏷️ Category: ${candidate.category}
 
-📊 <b>24h Volume:</b>
-$${Math.round(
-    dex.volume24h || 0
-  ).toLocaleString()}
+💰 Market Cap: $${marketCap.toLocaleString()}
+💧 Liquidity: $${liquidity.toLocaleString()}
+📊 24h Volume: $${volume.toLocaleString()}
 
-🟢 <b>Buys:</b>
-${dex.buys ?? "UNVERIFIED"}
+🟢 Buys: ${candidate.dex.buys.toLocaleString()}
+🔴 Sells: ${candidate.dex.sells.toLocaleString()}
+⚖️ Buy/Sell: ${ratio ?? "N/A"}
+📈 Pressure: ${pressure}
 
-🔴 <b>Sells:</b>
-${dex.sells ?? "UNVERIFIED"}
-
-📈 <b>Pressure:</b>
-${dex.pressure}
-
-🎯 <b>Hunter Score:</b>
-${score}/100
-
-👥 <b>Holder concentration:</b>
-${
-  holders.status ===
-  "VERIFIED"
-
-    ? `Top 10: ${holders.top10}%`
-
+👥 Holders: ${
+  candidate.holders !== null
+    ? candidate.holders.toLocaleString()
     : "UNVERIFIED"
 }
 
-🎯 <b>Theoretical market-cap multiples</b>
+🎯 Theoretical multiples:
+$100M: ${
+  candidate.targets["$100M"] ?? "N/A"
+}x
 
-$100M → ${
-    target100 ?? "UNVERIFIED"
-  }x
+$250M: ${
+  candidate.targets["$250M"] ?? "N/A"
+}x
 
-$250M → ${
-    target250 ?? "UNVERIFIED"
-  }x
+$500M: ${
+  candidate.targets["$500M"] ?? "N/A"
+}
 
-$500M → ${
-    target500 ?? "UNVERIFIED"
-  }x
+📄 Contract:
+${candidate.contract}`;
 
-⚠️ <b>Risk:</b>
-Early-stage / highly speculative.
+  if (
+    candidate.dex.pair?.url
+  ) {
 
-🔗 ${
-    pairUrl ||
-    "DEX pair link unavailable"
-  }`;
+    message +=
+      `\n\n🔎 DEX:
+${candidate.dex.pair.url}`;
+
+  }
+
+
+  message +=
+    `\n\n⚠️ Research alert only — not financial advice.`;
+
+  return message;
 
 }
 
 
 /* ============================================================
-   SCANNER
+SEND ALERTS
 ============================================================ */
 
-async function runScanner(
-  env
+async function processAlerts(
+  env,
+  candidates
 ) {
 
-  requestCount = 0;
-
-  const discovery =
-    await discoverTokens();
-
-  const discovered =
-    discovery.tokens || [];
-
-  const ranked =
-    discovered
-
-      .sort(
-        (a, b) => {
-
-          const aScore =
-            (
-              a.memeLikelihood *
-              3
-            ) +
-            Math.min(
-              10,
-              Math.log10(
-                Math.max(
-                  1,
-                  a.holders || 1
-                )
-              )
-            );
-
-          const bScore =
-            (
-              b.memeLikelihood *
-              3
-            ) +
-            Math.min(
-              10,
-              Math.log10(
-                Math.max(
-                  1,
-                  b.holders || 1
-                )
-              )
-            );
-
-          return bScore - aScore;
-
-        }
-      )
-
-      .slice(
-        0,
-        CONFIG.MAX_CANDIDATES
-      );
-
-  const dexResult =
-    await dexData(
-      ranked.map(
-        token =>
-          token.contract
-      )
-    );
-
-  const pairs =
-    dexResult.pairs || [];
-
-  const results = [];
-
-  let holderChecks = 0;
-
-  let alerts = [];
+  const alerts = [];
 
   for (
-    const token
-    of ranked
+    const candidate
+    of candidates
   ) {
 
-    const dex =
-      analyseDex(
-        token,
-        pairs
-      );
-
-    let holders = {
-
-      status:
-        "UNVERIFIED",
-
-      top10:
-        null,
-
-      top20:
-        null,
-
-      risk:
-        "UNKNOWN"
-
-    };
-
     if (
-      holderChecks <
-      CONFIG.MAX_HOLDER_CHECKS &&
-      canRequest()
+      candidate.score <
+      CONFIG.ALERT_SCORE
     ) {
 
-      holders =
-        await holderAnalysis(
-          token.contract
-        );
-
-      holderChecks++;
+      continue;
 
     }
 
-    const scoring =
-      score(
-        token,
-        dex,
-        holders
-      );
-
-    const riskFlags = [];
-
-    if (
-      dex.status ===
-      "VERIFIED"
-    ) {
-
-      if (
-        dex.liquidity <
-        CONFIG.MIN_LIQUIDITY
-      ) {
-
-        riskFlags.push(
-          "LOW_LIQUIDITY"
-        );
-
-      }
-
-      if (
-        dex.volume24h <
-        CONFIG.MIN_VOLUME
-      ) {
-
-        riskFlags.push(
-          "LOW_VOLUME"
-        );
-
-      }
-
-      if (
-        dex.pressure ===
-        "SELL_PRESSURE"
-      ) {
-
-        riskFlags.push(
-          "SELL_PRESSURE"
-        );
-
-      }
-
-    }
-
-    if (
-      holders.risk ===
-      "HIGH"
-    ) {
-
-      riskFlags.push(
-        "HIGH_HOLDER_CONCENTRATION"
-      );
-
-    }
-
-    if (
-      holders.risk ===
-      "VERY_HIGH"
-    ) {
-
-      riskFlags.push(
-        "VERY_HIGH_HOLDER_CONCENTRATION"
-      );
-
-    }
-
-    const highPotential =
-
-      scoring.score >=
-        CONFIG.ALERT_SCORE &&
-
-      dex.status ===
-        "VERIFIED" &&
-
-      dex.liquidity !== null &&
-
-      dex.liquidity >=
-        CONFIG.MIN_LIQUIDITY &&
-
-      dex.volume24h !== null &&
-
-      dex.volume24h >=
-        CONFIG.MIN_VOLUME &&
-
-      !riskFlags.includes(
-        "LOW_LIQUIDITY"
-      ) &&
-
-      !riskFlags.includes(
-        "LOW_VOLUME"
-      ) &&
-
-      !riskFlags.includes(
-        "VERY_HIGH_HOLDER_CONCENTRATION"
-      );
-
-    const result = {
-
-      ...token,
-
-      discoveryScore:
-        scoring.score,
-
-      scoreFactors:
-        scoring.factors,
-
-      dex,
-
-      holders,
-
-      riskFlags,
-
-      category:
-        highPotential
-
-          ? "HIGH-POTENTIAL"
-
-          : scoring.score >= 60
-
-            ? "WATCH"
-
-            : scoring.score >= 40
-
-              ? "EARLY"
-
-              : "LOW-CONVICTION",
-
-      targets: {
-
-        to100M:
-          multiple(
-            token.marketCap,
-            100_000_000
-          ),
-
-        to250M:
-          multiple(
-            token.marketCap,
-            250_000_000
-          ),
-
-        to500M:
-          multiple(
-            token.marketCap,
-            500_000_000
-          )
-
-      }
-
-    };
-
-    results.push(
-      result
-    );
 
     /*
-     * Telegram alert
+     * Avoid obvious bad candidates.
      */
 
     if (
-      highPotential
+      candidate.riskFlags.includes(
+        "LOW_LIQUIDITY"
+      ) ||
+      candidate.riskFlags.includes(
+        "LOW_VOLUME"
+      ) ||
+      candidate.riskFlags.includes(
+        "STRONG_SELL_PRESSURE"
+      )
     ) {
 
-      const message =
-        buildAlert(
-          token,
-          dex,
-          holders,
-          scoring.score
-        );
-
-      const telegram =
-        await sendTelegram(
-          env,
-          message
-        );
-
-      alerts.push({
-
-        contract:
-          token.contract,
-
-        symbol:
-          token.symbol,
-
-        score:
-          scoring.score,
-
-        telegram:
-          telegram.ok
-            ? "SENT"
-            : telegram.error
-
-      });
+      continue;
 
     }
 
+
+    const message =
+      formatAlert(
+        candidate
+      );
+
+
+    const result =
+      await sendTelegram(
+        env,
+        message
+      );
+
+
+    alerts.push({
+
+      contract:
+        candidate.contract,
+
+      score:
+        candidate.score,
+
+      sent:
+        result.ok,
+
+      error:
+        result.error ||
+        null
+
+    });
+
   }
 
-  results.sort(
-    (a, b) =>
-      b.discoveryScore -
-      a.discoveryScore
-  );
+  return alerts;
+
+}
+
+
+/* ============================================================
+HEALTH
+============================================================ */
+
+function health(env) {
 
   return {
 
@@ -1810,100 +1512,26 @@ async function runScanner(
     status:
       "ONLINE",
 
-    objective:
-      "Automatically discover early-stage Robinhood Chain meme coins and alert Telegram when verified conditions are met.",
+    chain:
+      CONFIG.CHAIN_NAME,
 
-    chain: {
-
-      name:
-        CONFIG.CHAIN_NAME,
-
-      chainId:
-        CONFIG.CHAIN_ID,
-
-      rpc:
-        CONFIG.RPC,
-
-      status:
-        "AVAILABLE"
-
-    },
+    chainId:
+      CONFIG.CHAIN_ID,
 
     telegram: {
 
       configured:
-        Boolean(
-          env.TELEGRAM_BOT_TOKEN &&
-          env.TELEGRAM_CHAT_ID
-        ),
+        telegramConfigured(env),
 
       chatId:
-        env.TELEGRAM_CHAT_ID ||
-        null,
-
-      alertsSent:
-        alerts.filter(
-          x =>
-            x.telegram ===
-            "SENT"
-        ).length
+        env.TELEGRAM_CHAT_ID
+          ? env.TELEGRAM_CHAT_ID
+          : null
 
     },
 
-    scan: {
-
-      tokensDiscovered:
-        discovered.length,
-
-      candidatesAnalysed:
-        results.length,
-
-      requestCount,
-
-      requestLimit:
-        CONFIG.MAX_REQUESTS
-
-    },
-
-    candidates:
-      results,
-
-    alerts,
-
-    validation: {
-
-      liquidity:
-        "DEX SCREENER",
-
-      volume:
-        "DEX SCREENER",
-
-      buySellPressure:
-        "DEX TRANSACTIONS",
-
-      holderConcentration:
-        "BLOCKSCOUT",
-
-      walletActivity:
-        "NOT YET VERIFIED",
-
-      accumulationDistribution:
-        "NOT YET VERIFIED",
-
-      smartMoney:
-        "NOT YET VERIFIED"
-
-    },
-
-    dataIntegrity: {
-
-      noFabricatedMetrics:
-        true,
-
-      unavailableData:
-        "UNVERIFIED"
-
-    },
+    freeFirst:
+      true,
 
     timestamp:
       new Date().toISOString()
@@ -1914,7 +1542,7 @@ async function runScanner(
 
 
 /* ============================================================
-   WORKER
+MAIN
 ============================================================ */
 
 export default {
@@ -1930,14 +1558,43 @@ export default {
         request.url
       );
 
-    /*
-     * HEALTH
-     */
+
+    /* HEALTH */
 
     if (
       url.pathname ===
       "/health"
     ) {
+
+      return Response.json(
+        health(env)
+      );
+
+    }
+
+
+    /* TELEGRAM TEST */
+
+    if (
+      url.pathname ===
+      "/test-telegram"
+    ) {
+
+      const result =
+        await sendTelegram(
+          env,
+
+          `🤖 Robinhood Chain Meme Hunter V15
+
+✅ Telegram connection test successful.
+
+Chat ID:
+${env.TELEGRAM_CHAT_ID || "NOT CONFIGURED"}
+
+Time:
+${new Date().toISOString()}`
+        );
+
 
       return Response.json({
 
@@ -1947,162 +1604,170 @@ export default {
         version:
           CONFIG.VERSION,
 
-        status:
-          "ONLINE",
-
-        chainId:
-          CONFIG.CHAIN_ID,
-
-        telegramConfigured:
-          Boolean(
-            env.TELEGRAM_BOT_TOKEN &&
-            env.TELEGRAM_CHAT_ID
-          ),
-
-        chatId:
-          env.TELEGRAM_CHAT_ID ||
-          null,
-
-        cost:
-          "FREE-FIRST"
+        telegram:
+          result
 
       });
 
     }
 
 
-    /*
-     * TELEGRAM TEST
-     *
-     * Open:
-     *
-     * /telegram-test
-     */
+    /* MANUAL SCAN */
 
     if (
       url.pathname ===
-      "/telegram-test"
+      "/scan"
     ) {
 
-      const result =
-        await sendTelegram(
-
-          env,
-
-          `🤖 <b>Robinhood Chain Meme Hunter</b>
-
-✅ Telegram connection successful.
-
-Version: ${CONFIG.VERSION}
-
-Chain: Robinhood Chain
-Chain ID: 4663
-
-The bot is ready to scan.`
-
-        );
-
-      return Response.json(
-        result
-      );
-
-    }
+      const scan =
+        await runScan();
 
 
-    /*
-     * MAIN SCAN
-     */
+      let alerts = [];
 
-    if (
-      url.pathname ===
-      "/"
-    ) {
-
-      try {
-
-        const result =
-          await runScanner(
-            env
-          );
-
-        return Response.json(
-
-          result,
-
-          {
-
-            headers: {
-
-              "access-control-allow-origin":
-                "*",
-
-              "cache-control":
-                "no-store"
-
-            }
-
-          }
-
-        );
-
-      } catch (
-        error
+      if (
+        scan.candidates?.length
       ) {
 
-        return Response.json(
-
-          {
-
-            agent:
-              "Robinhood Chain Meme Hunter",
-
-            version:
-              CONFIG.VERSION,
-
-            status:
-              "ERROR",
-
-            error:
-              String(
-                error?.message ||
-                error
-              ),
-
-            dataIntegrity: {
-
-              noFabricatedMetrics:
-                true
-
-            },
-
-            timestamp:
-              new Date().toISOString()
-
-          },
-
-          {
-
-            status:
-              500
-
-          }
-
-        );
+        alerts =
+          await processAlerts(
+            env,
+            scan.candidates
+          );
 
       }
+
+
+      return Response.json({
+
+        agent:
+          "Robinhood Chain Meme Hunter",
+
+        version:
+          CONFIG.VERSION,
+
+        telegram: {
+
+          configured:
+            telegramConfigured(env),
+
+          chatId:
+            env.TELEGRAM_CHAT_ID ||
+            null
+
+        },
+
+        scan,
+
+        alerts,
+
+        timestamp:
+          new Date().toISOString()
+
+      });
 
     }
 
 
-    return new Response(
+    /* DEFAULT */
 
-      "Robinhood Chain Meme Hunter V15",
+    return Response.json({
 
-      {
+      agent:
+        "Robinhood Chain Meme Hunter",
 
-        status: 200
+      version:
+        CONFIG.VERSION,
 
-      }
+      status:
+        "ONLINE",
+
+      routes: [
+
+        "/health",
+
+        "/test-telegram",
+
+        "/scan"
+
+      ],
+
+      telegramConfigured:
+        telegramConfigured(env)
+
+    });
+
+  },
+
+
+  /*
+   * CLOUDFLARE CRON
+   *
+   * Runs automatically when the
+   * Cron Trigger fires.
+   */
+
+  async scheduled(
+    controller,
+    env,
+    ctx
+  ) {
+
+    ctx.waitUntil(
+
+      (async () => {
+
+        try {
+
+          const scan =
+            await runScan();
+
+
+          if (
+            scan.candidates?.length
+          ) {
+
+            await processAlerts(
+              env,
+              scan.candidates
+            );
+
+          }
+
+
+          console.log(
+            JSON.stringify({
+
+              event:
+                "scheduled_scan",
+
+              tokensDiscovered:
+                scan.tokensDiscovered,
+
+              candidates:
+                scan.candidates?.length ||
+                0,
+
+              requestCount:
+                scan.requestCount,
+
+              timestamp:
+                new Date().toISOString()
+
+            })
+          );
+
+
+        } catch (error) {
+
+          console.error(
+            "Scheduled scan failed:",
+            error
+          );
+
+        }
+
+      })()
 
     );
 
