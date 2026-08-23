@@ -1,4 +1,4 @@
-const VERSION = "V38";
+const VERSION = "V39";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9,19 +9,11 @@ const RPC_URL =
 const DEX_API =
   "https://api.dexscreener.com";
 
-const TELEGRAM_MIN_SCORE = 60;
-
-/*
- * Robinhood / pools.trade entry contracts
- */
 const ENTRY_CONTRACTS = [
   "0x0000ffffbe8efe702c8703ae3477ff5de3d319c0",
   "0x00004c4ccc709ef590f7c81102c0689f0263d4e9"
 ];
 
-/*
- * Known Robinhood launchpads
- */
 const LAUNCHPAD_CONTRACTS = [
   "0x23f8209572b4a1c2ad88a42749e830791fb027f1",
   "0xad44d55e7f8337c3ce113fbb591486e85be104b2",
@@ -29,44 +21,29 @@ const LAUNCHPAD_CONTRACTS = [
   "0x60d73b21cdf2ea846ab3d58699bbbb8f29d72491"
 ];
 
-/*
- * Uniswap V4 PoolManager
- */
 const POOL_MANAGER =
   "0x8366a39cc670b4001a1121b8f6a443a643e40951";
 
-/*
- * Keep the scan deliberately small.
- *
- * 1 x eth_blockNumber
- * 2 x eth_getLogs
- *
- * Maximum base RPC requests = 3.
- */
 const MAX_BLOCKS = 500;
-
 const MAX_RPC_REQUESTS = 3;
-
-/*
- * External market enrichment is OPTIONAL.
- *
- * If DEX Screener returns 429, the on-chain
- * discovery still succeeds.
- */
 const MAX_MARKET_LOOKUPS = 2;
 
+const TELEGRAM_MIN_SCORE = 60;
+
 /*
- * In-memory duplicate protection.
+ * No KV.
  *
- * No KV required.
+ * In-memory duplicate protection only.
  */
-const seenTokens =
-  new Map();
+const seen = new Map();
 
 const SEEN_TTL =
   30 * 60 * 1000;
 
-function json(data, status = 200) {
+function json(
+  data,
+  status = 200
+) {
   return new Response(
     JSON.stringify(
       data,
@@ -86,9 +63,12 @@ function json(data, status = 200) {
   );
 }
 
-function normaliseAddress(value) {
+function normaliseAddress(
+  value
+) {
   if (
-    typeof value !== "string"
+    typeof value !==
+    "string"
   ) {
     return null;
   }
@@ -104,31 +84,86 @@ function normaliseAddress(value) {
   return null;
 }
 
-function topicAddress(topic) {
+/*
+ * Extract a possible Ethereum address
+ * from a 32-byte ABI word.
+ */
+function addressFromWord(
+  word
+) {
   if (
-    typeof topic !== "string"
+    typeof word !==
+    "string"
   ) {
     return null;
   }
 
+  const clean =
+    word.replace(
+      /^0x/,
+      ""
+    );
+
   if (
-    !/^0x[a-fA-F0-9]{64}$/.test(
-      topic
+    clean.length !== 64 ||
+    !/^[0-9a-fA-F]+$/.test(
+      clean
     )
   ) {
     return null;
   }
 
-  return normaliseAddress(
+  const candidate =
     "0x" +
-    topic.slice(-40)
+    clean.slice(-40);
+
+  return normaliseAddress(
+    candidate
   );
 }
 
-function dataAddresses(data) {
+function addressesFromTopics(
+  topics
+) {
   if (
-    typeof data !== "string" ||
-    !data.startsWith("0x")
+    !Array.isArray(
+      topics
+    )
+  ) {
+    return [];
+  }
+
+  const result = [];
+
+  for (
+    const topic of topics
+  ) {
+    const address =
+      addressFromWord(
+        topic
+      );
+
+    if (
+      address
+    ) {
+      result.push(
+        address
+      );
+    }
+  }
+
+  return result;
+}
+
+function addressesFromData(
+  data
+) {
+  if (
+    typeof data !==
+      "string" ||
+    !data.startsWith(
+      "0x"
+    )
   ) {
     return [];
   }
@@ -139,11 +174,13 @@ function dataAddresses(data) {
   const result = [];
 
   /*
-   * ABI words are 32 bytes / 64 hex chars.
+   * ABI dynamic/static data is
+   * represented in 32-byte words.
    */
   for (
     let i = 0;
-    i + 64 <= body.length;
+    i + 64 <=
+      body.length;
     i += 64
   ) {
     const word =
@@ -152,17 +189,16 @@ function dataAddresses(data) {
         i + 64
       );
 
-    const candidate =
-      normaliseAddress(
-        "0x" +
-        word.slice(-40)
+    const address =
+      addressFromWord(
+        word
       );
 
     if (
-      candidate
+      address
     ) {
       result.push(
-        candidate
+        address
       );
     }
   }
@@ -170,56 +206,52 @@ function dataAddresses(data) {
   return result;
 }
 
-function unique(values) {
+function unique(
+  values
+) {
   return [
     ...new Set(
-      values.filter(Boolean)
+      values.filter(
+        Boolean
+      )
     )
   ];
 }
 
 /*
- * Extract every plausible address from a log.
- *
- * We deliberately don't hard-code a possibly
- * incorrect event signature. V35 proved that
- * raw eth_getLogs against these contracts
- * can discover token-created logs.
+ * Infrastructure addresses that should
+ * never be treated as token contracts.
  */
-function addressesFromLog(log) {
-  const addresses = [];
+const BLOCKED_ADDRESSES =
+  new Set([
+    ...ENTRY_CONTRACTS,
+    ...LAUNCHPAD_CONTRACTS,
+    POOL_MANAGER
+  ].map(
+    address =>
+      address.toLowerCase()
+  )
+);
 
-  if (
-    Array.isArray(
-      log?.topics
-    )
-  ) {
-    for (
-      const topic of log.topics
-    ) {
-      const addr =
-        topicAddress(
-          topic
-        );
+function possibleTokenAddresses(
+  log
+) {
+  const candidates =
+    unique([
+      ...addressesFromTopics(
+        log?.topics
+      ),
 
-      if (
-        addr
-      ) {
-        addresses.push(
-          addr
-        );
-      }
-    }
-  }
+      ...addressesFromData(
+        log?.data
+      )
+    ]);
 
-  addresses.push(
-    ...dataAddresses(
-      log?.data
-    )
-  );
-
-  return unique(
-    addresses
+  return candidates.filter(
+    address =>
+      !BLOCKED_ADDRESSES.has(
+        address
+      )
   );
 }
 
@@ -231,7 +263,8 @@ async function rpc(
     await fetch(
       RPC_URL,
       {
-        method: "POST",
+        method:
+          "POST",
 
         headers: {
           "content-type":
@@ -261,9 +294,6 @@ async function rpc(
     );
   }
 
-  const text =
-    await response.text();
-
   if (
     !response.ok
   ) {
@@ -272,10 +302,13 @@ async function rpc(
     );
   }
 
-  let data;
+  const text =
+    await response.text();
+
+  let result;
 
   try {
-    data =
+    result =
       JSON.parse(
         text
       );
@@ -286,37 +319,34 @@ async function rpc(
   }
 
   if (
-    data?.error
+    result?.error
   ) {
     throw new Error(
-      data.error.message ||
+      result.error.message ||
       "RPC_ERROR"
     );
   }
 
-  return data.result;
+  return result.result;
 }
 
 async function getLatestBlock() {
-  const result =
+  return parseInt(
     await rpc(
       "eth_blockNumber",
       []
-    );
-
-  return parseInt(
-    result,
+    ),
     16
   );
 }
 
 /*
- * V38 primary discovery.
+ * We deliberately do NOT specify a topic.
  *
- * Two calls:
- * one for each known entry contract.
+ * This is important because we do not want
+ * V39 to guess the event signature.
  */
-async function getLogsForContract(
+async function getLogs(
   contract,
   fromBlock,
   toBlock
@@ -342,62 +372,34 @@ async function getLogsForContract(
   );
 }
 
-/*
- * Remove obvious infrastructure addresses.
- */
-function filterTokenAddresses(
-  addresses
-) {
-  const blocked =
-    new Set([
-      ...ENTRY_CONTRACTS,
-      ...LAUNCHPAD_CONTRACTS,
-      POOL_MANAGER
-    ].map(
-      address =>
-        address.toLowerCase()
-    ));
+function pruneSeen() {
+  const now =
+    Date.now();
 
-  return unique(
-    addresses.filter(
-      address =>
-        !blocked.has(
-          address
-        )
-    )
-  );
-}
-
-function blockToNumber(
-  value
-) {
-  if (
-    typeof value !==
-    "string"
+  for (
+    const [
+      token,
+      timestamp
+    ] of seen
   ) {
-    return null;
+    if (
+      now -
+        timestamp >
+      SEEN_TTL
+    ) {
+      seen.delete(
+        token
+      );
+    }
   }
-
-  if (
-    !/^0x[0-9a-f]+$/i.test(
-      value
-    )
-  ) {
-    return null;
-  }
-
-  return parseInt(
-    value,
-    16
-  );
 }
 
 /*
- * Optional DEX lookup.
+ * Optional market enrichment.
  *
- * This NEVER causes a scan to fail.
+ * A 429 here NEVER kills discovery.
  */
-async function marketLookup(
+async function getMarket(
   token,
   diagnostics
 ) {
@@ -456,6 +458,9 @@ async function marketLookup(
         ? data.pairs
         : [];
 
+    /*
+     * Prefer Robinhood Chain.
+     */
     const robinhood =
       pairs.filter(
         pair =>
@@ -478,7 +483,10 @@ async function marketLookup(
     }
 
     usable.sort(
-      (a, b) =>
+      (
+        a,
+        b
+      ) =>
         Number(
           b?.liquidity?.usd ||
           0
@@ -529,12 +537,16 @@ async function marketLookup(
         null,
 
       marketCap:
-        pair?.marketCap ||
-        null,
+        Number(
+          pair?.marketCap ||
+          0
+        ),
 
       fdv:
-        pair?.fdv ||
-        null,
+        Number(
+          pair?.fdv ||
+          0
+        ),
 
       liquidityUsd:
         Number(
@@ -571,30 +583,21 @@ async function marketLookup(
 
       error:
         error?.message ||
-        "LOOKUP_FAILED"
+        "MARKET_LOOKUP_FAILED"
     });
 
     return null;
   }
 }
 
-function calculateScore(
-  token,
+function scoreCandidate(
   market
 ) {
   let score = 20;
 
   const reasons = [
-    "New token discovered directly from Robinhood Chain on-chain logs"
+    "Token discovered from Robinhood Chain on-chain log"
   ];
-
-  /*
-   * A discovered token starts at 20.
-   *
-   * We do NOT pretend that holders,
-   * smart-money or accumulation data
-   * is available.
-   */
 
   if (
     market?.verified
@@ -602,7 +605,7 @@ function calculateScore(
     score += 25;
 
     reasons.push(
-      "Robinhood Chain trading pair verified"
+      "Robinhood Chain market verified"
     );
   }
 
@@ -635,9 +638,8 @@ function calculateScore(
     1000
   ) {
     score += 5;
-
     reasons.push(
-      "Liquidity above $1K"
+      "Liquidity > $1K"
     );
   }
 
@@ -646,9 +648,8 @@ function calculateScore(
     5000
   ) {
     score += 5;
-
     reasons.push(
-      "Liquidity above $5K"
+      "Liquidity > $5K"
     );
   }
 
@@ -657,9 +658,8 @@ function calculateScore(
     10000
   ) {
     score += 5;
-
     reasons.push(
-      "Liquidity above $10K"
+      "Liquidity > $10K"
     );
   }
 
@@ -668,34 +668,31 @@ function calculateScore(
     5000
   ) {
     score += 5;
-
     reasons.push(
-      "Meaningful 24h volume"
+      "24h volume > $5K"
     );
   }
 
   if (
-    buys > sells &&
-    buys > 0
+    buys >
+      sells &&
+    buys >
+      0
   ) {
     score += 10;
 
     reasons.push(
-      "Buy count currently exceeds sell count"
+      "Buys currently exceed sells"
     );
   }
 
-  /*
-   * Hard cap.
-   */
-  score =
-    Math.min(
-      100,
-      score
-    );
-
   return {
-    score,
+    score:
+      Math.min(
+        score,
+        100
+      ),
+
     reasons
   };
 }
@@ -704,182 +701,163 @@ function money(
   value
 ) {
   const n =
-    Number(value);
+    Number(
+      value
+    );
 
   if (
-    !Number.isFinite(n) ||
+    !Number.isFinite(
+      n
+    ) ||
     n <= 0
   ) {
     return "UNVERIFIED";
   }
 
   if (
-    n >= 1000000
+    n >=
+    1000000
   ) {
     return (
       "$" +
       (
-        n / 1000000
-      ).toFixed(2) +
+        n /
+        1000000
+      ).toFixed(
+        2
+      ) +
       "M"
     );
   }
 
   if (
-    n >= 1000
+    n >=
+    1000
   ) {
     return (
       "$" +
       (
-        n / 1000
-      ).toFixed(1) +
+        n /
+        1000
+      ).toFixed(
+        1
+      ) +
       "K"
     );
   }
 
   return (
     "$" +
-    n.toFixed(2)
+    n.toFixed(
+      2
+    )
   );
 }
 
-function telegramMessage(
+function buildTelegramMessage(
   candidate
 ) {
-  const market =
+  const m =
     candidate.market;
 
-  const lines = [
-    "🚨 ROBINHOOD MEME CALL — V38",
+  return [
+    "🚨 ROBINHOOD MEME CALL — V39",
     "",
     candidate.symbol
       ? `🔥 $${candidate.symbol}`
-      : "🔥 NEW ROBINHOOD TOKEN",
+      : "🔥 NEW TOKEN",
 
     candidate.name ||
       "",
 
     "",
-
-    `Hunter Score: ${candidate.score}/100`,
+    `🎯 Hunter Score: ${candidate.score}/100`,
 
     "",
-
     "📍 CONTRACT",
-
     candidate.token,
 
     "",
-
-    "📊 MARKET DATA",
-
+    "📊 MARKET",
     `Liquidity: ${money(
-      market?.liquidityUsd
+      m?.liquidityUsd
     )}`,
 
     `24h Volume: ${money(
-      market?.volume24h
+      m?.volume24h
     )}`,
 
     `Buys: ${
-      market?.buys24h ??
+      m?.buys24h ??
       "UNVERIFIED"
     }`,
 
     `Sells: ${
-      market?.sells24h ??
+      m?.sells24h ??
       "UNVERIFIED"
     }`,
 
     `Market Cap: ${money(
-      market?.marketCap
+      m?.marketCap
     )}`,
 
     "",
-
-    "🎯 SIGNALS",
-
-    ...candidate.reasons.map(
-      reason =>
-        "• " +
-        reason
-    ),
-
-    "",
-
-    "🔬 DATA INTEGRITY",
-
-    "On-chain discovery: VERIFIED",
-
+    "🔎 VERIFIED",
+    "On-chain discovery: YES",
     `Robinhood market: ${
-      market?.verified
-        ? "VERIFIED"
-        : "UNVERIFIED"
+      m?.verified
+        ? "YES"
+        : "NO"
     }`,
 
-    "Holder concentration: UNVERIFIED",
-
-    "Smart money: UNVERIFIED",
-
-    "Wallet activity: UNVERIFIED",
-
-    "Accumulation/distribution: UNVERIFIED",
+    "",
+    "⚠️ UNVERIFIED",
+    "Holder concentration",
+    "Smart-money activity",
+    "Wallet activity",
+    "Accumulation/distribution",
 
     "",
-
-    "⚠️ VERY HIGH RISK / EARLY STAGE",
-
+    "⚠️ HIGH RISK / EARLY STAGE",
     "Automated research alert — not financial advice.",
 
-    market?.url
-      ? ""
-      : "",
-
-    market?.url
-      ? `Chart: ${market.url}`
+    m?.url
+      ? `Chart: ${m.url}`
       : ""
-  ];
-
-  return lines
-    .join("\n")
+  ]
+    .filter(
+      Boolean
+    )
+    .join(
+      "\n"
+    )
     .slice(
       0,
       3900
     );
 }
 
-async function sendTelegram(
+async function telegram(
   env,
   message
 ) {
   if (
-    !env.TELEGRAM_BOT_TOKEN
-  ) {
-    return {
-      sent: false,
-
-      reason:
-        "TELEGRAM_BOT_TOKEN_NOT_CONFIGURED"
-    };
-  }
-
-  if (
+    !env.TELEGRAM_BOT_TOKEN ||
     !env.TELEGRAM_CHAT_ID
   ) {
     return {
-      sent: false,
+      sent:
+        false,
 
       reason:
-        "TELEGRAM_CHAT_ID_NOT_CONFIGURED"
+        "TELEGRAM_NOT_CONFIGURED"
     };
   }
 
   try {
     const response =
       await fetch(
-        "https://api.telegram.org/bot" +
-        env.TELEGRAM_BOT_TOKEN +
-        "/sendMessage",
+        `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
         {
           method:
             "POST",
@@ -911,16 +889,18 @@ async function sendTelegram(
       !data?.ok
     ) {
       return {
-        sent: false,
+        sent:
+          false,
 
         reason:
           data?.description ||
-          "TELEGRAM_SEND_FAILED"
+          "TELEGRAM_FAILED"
       };
     }
 
     return {
-      sent: true,
+      sent:
+        true,
 
       messageId:
         data?.result?.message_id ||
@@ -930,7 +910,8 @@ async function sendTelegram(
     error
   ) {
     return {
-      sent: false,
+      sent:
+        false,
 
       reason:
         error?.message ||
@@ -939,28 +920,7 @@ async function sendTelegram(
   }
 }
 
-function pruneSeen() {
-  const now =
-    Date.now();
-
-  for (
-    const [
-      token,
-      timestamp
-    ] of seenTokens
-  ) {
-    if (
-      now - timestamp >
-      SEEN_TTL
-    ) {
-      seenTokens.delete(
-        token
-      );
-    }
-  }
-}
-
-async function scan(
+async function runScan(
   env
 ) {
   pruneSeen();
@@ -970,7 +930,7 @@ async function scan(
   let latestBlock;
 
   /*
-   * Request #1
+   * RPC request #1
    */
   try {
     latestBlock =
@@ -980,13 +940,18 @@ async function scan(
   ) {
     return {
       status:
-        "RPC_RATE_LIMITED",
+        "RPC_BLOCK_NUMBER_FAILED",
 
       success:
         false,
 
-      rpcRequests:
-        1,
+      telegram: {
+        sent:
+          false,
+
+        reason:
+          "DISCOVERY_NOT_RUN"
+      },
 
       diagnostics: [
         {
@@ -997,14 +962,7 @@ async function scan(
             error?.message ||
             "RPC_ERROR"
         }
-      ],
-
-      telegram: {
-        sent: false,
-
-        reason:
-          "BLOCK_NUMBER_FAILED"
-      }
+      ]
     };
   }
 
@@ -1016,43 +974,70 @@ async function scan(
         1
     );
 
-  let allLogs = [];
+  let logs = [];
+
+  let contractResults =
+    [];
 
   /*
-   * Requests #2 and #3.
+   * RPC requests #2 and #3
    */
   for (
     const contract of
       ENTRY_CONTRACTS
   ) {
     try {
-      const logs =
-        await getLogsForContract(
+      const result =
+        await getLogs(
           contract,
           startBlock,
           latestBlock
         );
 
-      if (
+      const safe =
         Array.isArray(
-          logs
+          result
         )
-      ) {
-        allLogs =
-          allLogs.concat(
-            logs.map(
-              log => ({
-                ...log,
+          ? result
+          : [];
 
-                sourceContract:
-                  contract
-              })
-            )
-          );
-      }
+      logs.push(
+        ...safe.map(
+          log => ({
+            ...log,
+
+            sourceContract:
+              contract
+          })
+        )
+      );
+
+      contractResults.push({
+        contract,
+
+        success:
+          true,
+
+        rawLogs:
+          safe.length
+      });
     } catch (
       error
     ) {
+      contractResults.push({
+        contract,
+
+        success:
+          false,
+
+        rawLogs:
+          0,
+
+        error:
+          error?.message ||
+          "RPC_ERROR"
+      });
+
       diagnostics.push({
         method:
           "eth_getLogs",
@@ -1067,87 +1052,146 @@ async function scan(
   }
 
   /*
-   * Extract addresses from logs.
+   * V39 discovery decoder.
    */
-  const discoveredAddresses =
-    filterTokenAddresses(
-      allLogs.flatMap(
-        log =>
-          addressesFromLog(
-            log
-          )
-      )
-    );
-
-  /*
-   * Keep newest-looking discoveries first.
-   */
-  const discoveredTokens =
+  const discovered =
     [];
 
   for (
-    const token of
-      discoveredAddresses
+    const log of
+      logs
+  ) {
+    const addresses =
+      possibleTokenAddresses(
+        log
+      );
+
+    for (
+      const token of
+        addresses
+    ) {
+      discovered.push({
+        token,
+
+        blockNumber:
+          log.blockNumber ||
+          null,
+
+        transactionHash:
+          log.transactionHash ||
+          null,
+
+        logIndex:
+          log.logIndex ||
+          null,
+
+        sourceContract:
+          log.sourceContract ||
+          null,
+
+        topics:
+          Array.isArray(
+            log.topics
+          )
+            ? log.topics
+            : [],
+
+        dataLength:
+          typeof log.data ===
+          "string"
+            ? log.data.length
+            : 0
+      });
+    }
+  }
+
+  /*
+   * Deduplicate by token.
+   */
+  const tokenMap =
+    new Map();
+
+  for (
+    const item of
+      discovered
   ) {
     if (
-      !seenTokens.has(
-        token
+      !tokenMap.has(
+        item.token
       )
     ) {
-      discoveredTokens.push(
-        token
+      tokenMap.set(
+        item.token,
+        item
+      );
+    }
+  }
+
+  const fresh =
+    [];
+
+  for (
+    const item of
+      tokenMap.values()
+  ) {
+    if (
+      !seen.has(
+        item.token
+      )
+    ) {
+      fresh.push(
+        item
       );
     }
   }
 
   /*
-   * Only enrich TWO tokens per scan.
-   * This protects DEX Screener and the
-   * Cloudflare Worker from unnecessary load.
+   * Only enrich a small number of tokens.
    */
-  const tokensToEnrich =
-    discoveredTokens.slice(
+  const inspected =
+    fresh.slice(
       0,
       MAX_MARKET_LOOKUPS
     );
 
-  const candidates = [];
+  const candidates =
+    [];
 
   for (
-    const token of
-      tokensToEnrich
+    const item of
+      inspected
   ) {
-    /*
-     * Mark as seen before enrichment.
-     * This prevents repeated Telegram spam.
-     */
-    seenTokens.set(
-      token,
+    seen.set(
+      item.token,
       Date.now()
     );
 
     const market =
-      await marketLookup(
-        token,
+      await getMarket(
+        item.token,
         diagnostics
       );
 
     const scoring =
-      calculateScore(
-        token,
+      scoreCandidate(
         market
       );
 
     candidates.push({
-      token,
+      token:
+        item.token,
 
-      name:
-        market?.name ||
-        null,
+      blockNumber:
+        item.blockNumber,
 
-      symbol:
-        market?.symbol ||
-        null,
+      transactionHash:
+        item.transactionHash,
+
+      logIndex:
+        item.logIndex,
+
+      sourceContract:
+        item.sourceContract,
 
       score:
         scoring.score,
@@ -1161,27 +1205,16 @@ async function scan(
             false
         },
 
-      discovery: {
-        source:
-          "ROBINHOOD_CHAIN_LOG",
-
-        sourceContracts:
-          ENTRY_CONTRACTS,
-
-        logCount:
-          allLogs.length
-      },
-
       dataIntegrity: {
         onChainDiscovery:
           "VERIFIED",
 
         marketData:
           market
-            ? "DEXSCREENER"
+            ? "AVAILABLE"
             : "UNVERIFIED",
 
-        holders:
+        holderConcentration:
           "UNVERIFIED",
 
         smartMoney:
@@ -1197,25 +1230,20 @@ async function scan(
   }
 
   candidates.sort(
-    (a, b) =>
+    (
+      a,
+      b
+    ) =>
       b.score -
       a.score
   );
 
   /*
-   * IMPORTANT:
+   * Strict Telegram rule.
    *
-   * We only make an automatic "Meme Call"
-   * when we have BOTH:
-   *
-   * 1. on-chain discovery
-   * 2. verified Robinhood market
-   * 3. score >= 60
-   *
-   * This prevents random log addresses
-   * becoming Telegram calls.
+   * Discovery alone is NOT enough.
    */
-  const qualifying =
+  const call =
     candidates.find(
       candidate =>
         candidate.market?.verified &&
@@ -1223,30 +1251,30 @@ async function scan(
           TELEGRAM_MIN_SCORE
     );
 
-  let telegram = {
-    sent: false,
+  let telegramResult = {
+    sent:
+      false,
 
     reason:
       "NO_QUALIFYING_CANDIDATE"
   };
 
   if (
-    qualifying
+    call
   ) {
-    telegram =
-      await sendTelegram(
+    telegramResult =
+      await telegram(
         env,
-
-        telegramMessage(
-          qualifying
+        buildTelegramMessage(
+          call
         )
       );
 
-    telegram.token =
-      qualifying.token;
+    telegramResult.token =
+      call.token;
 
-    telegram.score =
-      qualifying.score;
+    telegramResult.score =
+      call.score;
   }
 
   return {
@@ -1268,21 +1296,30 @@ async function scan(
       startBlock +
       1,
 
+    contractResults,
+
     rawLogs:
-      allLogs.length,
+      logs.length,
+
+    decodedLogCandidates:
+      discovered.length,
 
     tokensDiscovered:
-      discoveredTokens.length,
+      fresh.length,
 
     tokensInspected:
-      tokensToEnrich.length,
+      inspected.length,
 
     tokens:
-      discoveredTokens,
+      fresh.map(
+        item =>
+          item.token
+      ),
 
     candidates,
 
-    telegram,
+    telegram:
+      telegramResult,
 
     rpcRequests:
       MAX_RPC_REQUESTS,
@@ -1295,11 +1332,8 @@ async function scan(
         2
     },
 
-    rpcArchitecture:
-      "ON_CHAIN_FIRST",
-
-    maximumMarketLookups:
-      MAX_MARKET_LOOKUPS,
+    discovery:
+      "RAW_LOG_DECODER",
 
     diagnostics,
 
@@ -1315,7 +1349,7 @@ async function scan(
       entryContracts:
         ENTRY_CONTRACTS,
 
-      launchpadContracts:
+      launchpads:
         LAUNCHPAD_CONTRACTS,
 
       poolManager:
@@ -1361,9 +1395,6 @@ export default {
     const path =
       url.pathname;
 
-    /*
-     * HEALTH
-     */
     if (
       path ===
       "/health"
@@ -1396,9 +1427,9 @@ export default {
         },
 
         discovery:
-          "ON_CHAIN_FIRST",
+          "RAW_LOG_DECODER",
 
-        discoveryContracts:
+        entryContracts:
           ENTRY_CONTRACTS,
 
         poolManager:
@@ -1431,22 +1462,19 @@ export default {
           "3 BASE REQUESTS",
 
         architecture:
-          "V38_ON_CHAIN_FIRST",
+          "V39_DISCOVERY_DECODER",
 
         timestamp:
           new Date().toISOString()
       });
     }
 
-    /*
-     * SCAN
-     */
     if (
       path ===
       "/scan"
     ) {
       const result =
-        await scan(
+        await runScan(
           env
         );
 
@@ -1469,15 +1497,12 @@ export default {
       });
     }
 
-    /*
-     * TELEGRAM TEST
-     */
     if (
       path ===
       "/test-telegram"
     ) {
       const result =
-        await sendTelegram(
+        await telegram(
           env,
 
           `✅ Robinhood Chain Meme Hunter ${VERSION} Telegram test\n\n${new Date().toISOString()}`
@@ -1519,35 +1544,30 @@ export default {
     });
   },
 
-  /*
-   * Cloudflare Cron.
-   *
-   * Configure the trigger separately.
-   */
   async scheduled(
     controller,
     env,
     ctx
   ) {
     ctx.waitUntil(
-      scan(env)
+      runScan(
+        env
+      )
         .then(
-          result => {
+          result =>
             console.log(
-              "V38 scheduled scan:",
+              "V39 scheduled scan:",
               JSON.stringify(
                 result
               )
-            );
-          }
+            )
         )
         .catch(
-          error => {
+          error =>
             console.error(
-              "V38 scheduled scan failed:",
+              "V39 scheduled scan failed:",
               error
-            );
-          }
+            )
         )
     );
   }
