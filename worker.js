@@ -1,4 +1,4 @@
-const VERSION = "V54";
+const VERSION = "V55";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -24,7 +24,8 @@ const MINT_FAST_LAUNCHPAD =
 const ALL_DISCOVERY_CONTRACTS = [
   ...ENTRY_CONTRACTS,
   ...LAUNCHPADS,
-  MINT_FAST_LAUNCHPAD
+  MINT_FAST_LAUNCHPAD,
+  POOL_MANAGER
 ];
 
 const ZERO_ADDRESS =
@@ -35,268 +36,279 @@ const TRANSFER_TOPIC =
 
 const TELEGRAM_THRESHOLD = 60;
 
-const DISCOVERY_BLOCKS = 500;
-const ACTIVITY_BLOCKS = 100;
-const V4_BLOCKS = 100;
+/*
+==================================================
+V55 PERFORMANCE SETTINGS
+==================================================
+*/
+
+const DISCOVERY_BLOCKS = 100;
 const RPC_LOG_CHUNK = 10;
-const MAX_CANDIDATES = 50;
+const RPC_TIMEOUT_MS = 3500;
+const MAX_DISCOVERY_CONTRACTS = 7;
+const MAX_CANDIDATES = 12;
+const MAX_METADATA_CALLS = 12;
+const MAX_ACTIVITY_CANDIDATES = 6;
 
-const POOLS_TOKEN_CREATED_TOPIC =
-  "0x2e2b3f61b70d2d131b2a807371103cc98d51adcaa5e9a8f9c32658ad8426e74e";
+const REQUEST_TIMEOUT_MS = 15000;
 
-const POOLS_TOKEN_DISTRIBUTED_TOPIC =
-  "0x67226bacccef969dab310a9e55dc1cf821363658e433fd330344f5cc00c79ac8";
-
-const POOLS_TOKEN_LAUNCHED_TOPIC =
-  "0x3b3d2bafdcae274a232217e1f80ee4305d3af6aa25c8b14b1681bd68d18042a4";
-
-const MINT_FAST_TOKEN_CREATED_TOPIC =
-  "0x4ef8284ecf42d4cd19686572ffd87f630858c82398911e776cb831de35eddbf4";
-
-const SELECTORS = {
-  name: "0x06fdde03",
-  symbol: "0x95d89b41",
-  decimals: "0x313ce567",
-  totalSupply: "0x18160ddd"
-};
+/*
+==================================================
+UTILITY
+==================================================
+*/
 
 function json(data, status = 200) {
-  return new Response(JSON.stringify(data, null, 2), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store"
+  return new Response(
+    JSON.stringify(data, null, 2),
+    {
+      status,
+      headers: {
+        "content-type":
+          "application/json; charset=utf-8",
+        "cache-control":
+          "no-store"
+      }
     }
-  });
+  );
 }
 
 function isAddress(value) {
-  return /^0x[a-fA-F0-9]{40}$/.test(value || "");
+  return /^0x[a-fA-F0-9]{40}$/.test(
+    value || ""
+  );
 }
 
-function isZeroAddress(value) {
-  return !value ||
-    value.toLowerCase() === ZERO_ADDRESS;
-}
-
-function validTokenCandidate(value) {
+function isZeroAddress(address) {
   return (
-    isAddress(value) &&
-    !isZeroAddress(value)
+    !address ||
+    address.toLowerCase() ===
+      ZERO_ADDRESS
+  );
+}
+
+function validTokenCandidate(address) {
+  return (
+    isAddress(address) &&
+    !isZeroAddress(address)
   );
 }
 
 function unique(values) {
-  return [...new Set(values.filter(Boolean))];
+  return [
+    ...new Set(
+      values.filter(Boolean)
+    )
+  ];
 }
 
-function topicToAddress(topic, allowZero = false) {
+function cleanTopicAddress(topic) {
   if (
-    typeof topic !== "string" ||
-    !/^0x[0-9a-fA-F]{64}$/.test(topic)
+    !topic ||
+    typeof topic !== "string"
   ) {
+    return null;
+  }
+
+  const clean = topic.startsWith("0x")
+    ? topic.slice(2)
+    : topic;
+
+  if (clean.length !== 64) {
+    return null;
+  }
+
+  if (!/^[0-9a-fA-F]{64}$/.test(clean)) {
     return null;
   }
 
   const address =
-    "0x" + topic.slice(-40);
+    "0x" + clean.slice(24);
 
-  if (!allowZero && isZeroAddress(address)) {
-    return null;
-  }
-
-  return address.toLowerCase();
+  return validTokenCandidate(address)
+    ? address.toLowerCase()
+    : null;
 }
 
 function splitWords(data) {
   if (
-    typeof data !== "string" ||
-    !data.startsWith("0x")
+    !data ||
+    typeof data !== "string"
   ) {
     return [];
   }
 
-  const clean = data.slice(2);
-  const result = [];
+  const clean = data.startsWith("0x")
+    ? data.slice(2)
+    : data;
+
+  const words = [];
 
   for (
     let i = 0;
     i + 64 <= clean.length;
     i += 64
   ) {
-    result.push("0x" + clean.slice(i, i + 64));
+    words.push(
+      "0x" +
+        clean.slice(i, i + 64)
+    );
   }
 
-  return result;
+  return words;
 }
 
-function decodeUint24(hex) {
-  try {
-    return Number(BigInt(hex) & 0xffffffn);
-  } catch {
-    return null;
-  }
+function blockHex(block) {
+  return (
+    "0x" +
+    Number(block).toString(16)
+  );
 }
 
-function decodeInt24(hex) {
-  try {
-    let n = BigInt(hex);
+/*
+==================================================
+RPC WITH HARD TIMEOUT
+==================================================
+*/
 
-    if (n >= (1n << 23n)) {
-      n -= 1n << 24n;
-    }
-
-    return Number(n);
-  } catch {
-    return null;
-  }
-}
-
-function decodeInt128(hex) {
-  try {
-    let n = BigInt(hex);
-
-    if (n >= (1n << 127n)) {
-      n -= 1n << 128n;
-    }
-
-    return n.toString();
-  } catch {
-    return null;
-  }
-}
-
-async function rpc(env, method, params = []) {
+async function rpc(
+  env,
+  method,
+  params = [],
+  timeoutMs = RPC_TIMEOUT_MS
+) {
   if (!env.ALCHEMY_API_KEY) {
-    throw new Error("ALCHEMY_API_KEY secret is missing");
+    throw new Error(
+      "ALCHEMY_API_KEY missing"
+    );
   }
 
   const url =
     "https://robinhood-mainnet.g.alchemy.com/v2/" +
     env.ALCHEMY_API_KEY;
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json"
-    },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: Date.now(),
-      method,
-      params
-    })
-  });
+  const controller =
+    new AbortController();
 
-  const text = await response.text();
-
-  let result;
+  const timer =
+    setTimeout(
+      () => controller.abort(),
+      timeoutMs
+    );
 
   try {
-    result = JSON.parse(text);
-  } catch {
-    throw new Error(
-      `Alchemy HTTP ${response.status}: invalid JSON`
-    );
+    const response =
+      await fetch(
+        url,
+        {
+          method: "POST",
+          headers: {
+            "content-type":
+              "application/json"
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: Date.now(),
+            method,
+            params
+          }),
+          signal:
+            controller.signal
+        }
+      );
+
+    if (!response.ok) {
+      throw new Error(
+        `Alchemy HTTP ${response.status}`
+      );
+    }
+
+    const result =
+      await response.json();
+
+    if (result.error) {
+      throw new Error(
+        result.error.message ||
+          "RPC error"
+      );
+    }
+
+    return result.result;
+  } finally {
+    clearTimeout(timer);
   }
-
-  if (!response.ok) {
-    throw new Error(
-      `Alchemy HTTP ${response.status}: ${
-        result?.error?.message || "RPC request failed"
-      }`
-    );
-  }
-
-  if (result.error) {
-    throw new Error(
-      `${method}: ${
-        result.error.message || "RPC error"
-      }`
-    );
-  }
-
-  return result.result;
-}
-
-async function getLatestBlock(env) {
-  const result = await rpc(env, "eth_blockNumber");
-  return Number(BigInt(result));
 }
 
 /*
 ==================================================
-V54 FIXED LOG READER
+SAFE RPC
 ==================================================
-
-The V53 scanner was requesting large eth_getLogs
-ranges and/or address arrays.
-
-V54:
-- one contract per request
-- maximum 10 blocks per request
-- retries failed requests
-- preserves RPC errors
 */
 
-async function getLogsChunk(
+async function safeRpc(
   env,
-  address,
-  fromBlock,
-  toBlock,
-  topics = null
+  method,
+  params = []
 ) {
-  const filter = {
-    address,
-    fromBlock:
-      "0x" + fromBlock.toString(16),
-    toBlock:
-      "0x" + toBlock.toString(16)
-  };
-
-  if (topics) {
-    filter.topics = topics;
+  try {
+    return {
+      ok: true,
+      result:
+        await rpc(
+          env,
+          method,
+          params
+        )
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      result: null,
+      error:
+        error?.name ===
+        "AbortError"
+          ? "RPC_TIMEOUT"
+          : error?.message ||
+            String(error)
+    };
   }
-
-  let lastError = null;
-
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const logs = await rpc(
-        env,
-        "eth_getLogs",
-        [filter]
-      );
-
-      return {
-        logs: Array.isArray(logs) ? logs : [],
-        error: null
-      };
-    } catch (error) {
-      lastError = error;
-
-      if (attempt < 3) {
-        await new Promise(resolve =>
-          setTimeout(resolve, 150 * attempt)
-        );
-      }
-    }
-  }
-
-  return {
-    logs: [],
-    error:
-      lastError?.message ||
-      "eth_getLogs failed"
-  };
 }
+
+/*
+==================================================
+LATEST BLOCK
+==================================================
+*/
+
+async function getLatestBlock(env) {
+  const result =
+    await safeRpc(
+      env,
+      "eth_blockNumber"
+    );
+
+  if (!result.ok) {
+    throw new Error(
+      result.error
+    );
+  }
+
+  return Number(
+    BigInt(result.result)
+  );
+}
+
+/*
+==================================================
+CHUNKED LOG SCAN
+==================================================
+*/
 
 async function getLogsChunked(
   env,
-  address,
+  filter,
   fromBlock,
   toBlock,
-  topics = null,
   chunkSize = RPC_LOG_CHUNK
 ) {
   const allLogs = [];
@@ -312,106 +324,114 @@ async function getLogsChunked(
       toBlock
     );
 
-    const result = await getLogsChunk(
-      env,
-      address,
-      start,
-      end,
-      topics
-    );
+    const chunkFilter = {
+      ...filter,
+      fromBlock:
+        blockHex(start),
+      toBlock:
+        blockHex(end)
+    };
 
-    if (result.logs.length) {
-      allLogs.push(...result.logs);
-    }
+    const result =
+      await safeRpc(
+        env,
+        "eth_getLogs",
+        [chunkFilter]
+      );
 
-    if (result.error) {
+    if (!result.ok) {
       errors.push({
-        address,
         fromBlock: start,
         toBlock: end,
         error: result.error
       });
+
+      continue;
+    }
+
+    if (
+      Array.isArray(
+        result.result
+      )
+    ) {
+      allLogs.push(
+        ...result.result
+      );
     }
   }
 
-  const seen = new Set();
-
-  const deduped =
-    allLogs.filter(log => {
-      const key =
-        `${log.transactionHash || ""}:` +
-        `${log.logIndex || ""}`;
-
-      if (seen.has(key)) {
-        return false;
-      }
-
-      seen.add(key);
-      return true;
-    });
-
   return {
-    logs: deduped,
+    logs: allLogs,
     errors
   };
 }
 
-async function ethCall(
-  env,
-  to,
-  data
-) {
-  try {
-    return await rpc(
-      env,
-      "eth_call",
-      [
-        {
-          to,
-          data
-        },
-        "latest"
-      ]
-    );
-  } catch {
-    return null;
+/*
+==================================================
+BROAD ADDRESS EXTRACTION
+==================================================
+*/
+
+function extractAddresses(log) {
+  const found = [];
+
+  for (
+    const topic of
+      log?.topics || []
+  ) {
+    const address =
+      cleanTopicAddress(
+        topic
+      );
+
+    if (address) {
+      found.push(address);
+    }
   }
+
+  for (
+    const word of
+      splitWords(
+        log?.data
+      )
+  ) {
+    const address =
+      cleanTopicAddress(
+        word
+      );
+
+    if (address) {
+      found.push(address);
+    }
+  }
+
+  return unique(found);
 }
 
 /*
 ==================================================
-ERC20 DECODING
+ERC20 METADATA
 ==================================================
 */
 
-function hexToUtf8(hex) {
+const SELECTORS = {
+  name: "0x06fdde03",
+  symbol: "0x95d89b41",
+  decimals: "0x313ce567",
+  totalSupply: "0x18160ddd"
+};
+
+function decodeUint(result) {
   try {
-    if (!hex) return null;
-
-    const clean = hex.replace(/^0x/, "");
-    const bytes = [];
-
-    for (
-      let i = 0;
-      i + 2 <= clean.length;
-      i += 2
+    if (
+      !result ||
+      result === "0x"
     ) {
-      const n =
-        parseInt(
-          clean.slice(i, i + 2),
-          16
-        );
-
-      if (n !== 0) {
-        bytes.push(n);
-      }
+      return null;
     }
 
-    return (
-      new TextDecoder()
-        .decode(new Uint8Array(bytes))
-        .replace(/\0/g, "")
-        .trim() || null
+    return Number(
+      BigInt(result)
     );
   } catch {
     return null;
@@ -427,54 +447,101 @@ function decodeString(result) {
   }
 
   try {
-    const clean = result.slice(2);
+    const hex =
+      result.slice(2);
 
-    if (clean.length >= 128) {
+    /*
+      Dynamic ABI string
+    */
+
+    if (
+      hex.length >= 128
+    ) {
       const offset =
         Number(
           BigInt(
             "0x" +
-            clean.slice(0, 64)
+              hex.slice(0, 64)
           )
         );
 
-      const lengthPosition =
+      const pos =
         offset * 2;
 
       if (
-        Number.isFinite(offset) &&
-        lengthPosition + 64 <= clean.length
+        pos + 64 <=
+        hex.length
       ) {
         const length =
           Number(
             BigInt(
               "0x" +
-              clean.slice(
-                lengthPosition,
-                lengthPosition + 64
-              )
+                hex.slice(
+                  pos,
+                  pos + 64
+                )
             )
           );
 
         const start =
-          lengthPosition + 64;
+          pos + 64;
 
         const end =
-          start + length * 2;
+          start +
+          length * 2;
 
         if (
-          length >= 0 &&
-          end <= clean.length
+          end <=
+          hex.length
         ) {
-          return hexToUtf8(
-            clean.slice(start, end)
+          return decodeHexText(
+            hex.slice(
+              start,
+              end
+            )
           );
         }
       }
     }
 
-    return hexToUtf8(
-      clean.slice(0, 64)
+    /*
+      bytes32 fallback
+    */
+
+    return decodeHexText(
+      hex.slice(0, 64)
+    );
+  } catch {
+    return null;
+  }
+}
+
+function decodeHexText(hex) {
+  try {
+    let output = "";
+
+    for (
+      let i = 0;
+      i + 2 <= hex.length;
+      i += 2
+    ) {
+      const n =
+        parseInt(
+          hex.slice(i, i + 2),
+          16
+        );
+
+      if (
+        n >= 32 &&
+        n <= 126
+      ) {
+        output +=
+          String.fromCharCode(n);
+      }
+    }
+
+    return (
+      output.trim() || null
     );
   } catch {
     return null;
@@ -483,72 +550,104 @@ function decodeString(result) {
 
 async function getERC20Metadata(
   env,
-  token
+  address
 ) {
-  if (!validTokenCandidate(token)) {
+  if (
+    !validTokenCandidate(address)
+  ) {
     return {
-      validERC20: false,
-      reason: "INVALID_OR_ZERO_ADDRESS"
+      validERC20: false
     };
   }
 
-  const address =
-    token.toLowerCase();
+  const calls = await Promise.all([
+    safeRpc(
+      env,
+      "eth_call",
+      [
+        {
+          to: address,
+          data: SELECTORS.name
+        },
+        "latest"
+      ]
+    ),
 
-  const [
-    nameRaw,
-    symbolRaw,
-    decimalsRaw,
-    supplyRaw
-  ] = await Promise.all([
-    ethCall(
+    safeRpc(
       env,
-      address,
-      SELECTORS.name
+      "eth_call",
+      [
+        {
+          to: address,
+          data: SELECTORS.symbol
+        },
+        "latest"
+      ]
     ),
-    ethCall(
+
+    safeRpc(
       env,
-      address,
-      SELECTORS.symbol
+      "eth_call",
+      [
+        {
+          to: address,
+          data:
+            SELECTORS.decimals
+        },
+        "latest"
+      ]
     ),
-    ethCall(
+
+    safeRpc(
       env,
-      address,
-      SELECTORS.decimals
-    ),
-    ethCall(
-      env,
-      address,
-      SELECTORS.totalSupply
+      "eth_call",
+      [
+        {
+          to: address,
+          data:
+            SELECTORS.totalSupply
+        },
+        "latest"
+      ]
     )
   ]);
 
   const name =
-    decodeString(nameRaw);
+    calls[0].ok
+      ? decodeString(
+          calls[0].result
+        )
+      : null;
 
   const symbol =
-    decodeString(symbolRaw);
+    calls[1].ok
+      ? decodeString(
+          calls[1].result
+        )
+      : null;
 
-  let decimals = null;
-
-  try {
-    if (decimalsRaw) {
-      decimals =
-        Number(BigInt(decimalsRaw));
-    }
-  } catch {}
+  const decimals =
+    calls[2].ok
+      ? decodeUint(
+          calls[2].result
+        )
+      : null;
 
   let totalSupply = null;
 
-  try {
-    if (supplyRaw) {
+  if (
+    calls[3].ok &&
+    calls[3].result
+  ) {
+    try {
       totalSupply =
-        BigInt(supplyRaw).toString();
-    }
-  } catch {}
+        BigInt(
+          calls[3].result
+        ).toString();
+    } catch {}
+  }
 
   const valid =
-    !isZeroAddress(address) &&
     !!name &&
     !!symbol &&
     decimals !== null &&
@@ -556,265 +655,112 @@ async function getERC20Metadata(
 
   return {
     validERC20: valid,
-    name: name
-      ? name.slice(0, 100)
-      : null,
-    symbol: symbol
-      ? symbol.slice(0, 50)
-      : null,
+    name:
+      name?.slice(0, 100) ||
+      null,
+    symbol:
+      symbol?.slice(0, 50) ||
+      null,
     decimals,
-    totalSupply,
-    verification:
-      valid
-        ? "VERIFIED"
-        : "FAILED"
+    totalSupply
   };
 }
 
 /*
 ==================================================
-V4 INITIALIZE / SWAP
+DISCOVERY
 ==================================================
 */
 
-function decodeInitialize(log) {
-  if (
-    !log ||
-    log.address?.toLowerCase() !==
-      POOL_MANAGER.toLowerCase()
-  ) {
-    return null;
-  }
-
-  if (
-    !Array.isArray(log.topics) ||
-    log.topics.length < 4
-  ) {
-    return null;
-  }
-
-  const words =
-    splitWords(log.data);
-
-  if (words.length < 5) {
-    return null;
-  }
-
-  const currency0 =
-    topicToAddress(
-      log.topics[2],
-      true
-    );
-
-  const currency1 =
-    topicToAddress(
-      log.topics[3],
-      true
-    );
-
-  if (
-    !currency0 ||
-    !currency1 ||
-    currency0 === currency1
-  ) {
-    return null;
-  }
-
-  return {
-    poolId: log.topics[1],
-    currency0,
-    currency1,
-    fee: decodeUint24(words[0]),
-    tickSpacing: decodeInt24(words[1]),
-    hooks: topicToAddress(words[2], true),
-    sqrtPriceX96: words[3],
-    tick: decodeInt24(words[4]),
-    txHash: log.transactionHash || null,
-    blockNumber: log.blockNumber || null,
-    logIndex: log.logIndex || null
-  };
-}
-
-function decodeSwap(log) {
-  if (
-    !log ||
-    log.address?.toLowerCase() !==
-      POOL_MANAGER.toLowerCase()
-  ) {
-    return null;
-  }
-
-  if (
-    !Array.isArray(log.topics) ||
-    log.topics.length < 3
-  ) {
-    return null;
-  }
-
-  const words =
-    splitWords(log.data);
-
-  if (words.length < 7) {
-    return null;
-  }
-
-  return {
-    poolId: log.topics[1],
-    sender:
-      topicToAddress(
-        log.topics[2],
-        true
-      ),
-    amount0:
-      decodeInt128(words[0]),
-    amount1:
-      decodeInt128(words[1]),
-    sqrtPriceX96: words[2],
-    liquidity: words[3],
-    tick:
-      decodeInt24(words[4]),
-    fee:
-      decodeUint24(words[5]),
-    txHash:
-      log.transactionHash || null,
-    blockNumber:
-      log.blockNumber || null
-  };
-}
-
-async function getV4Activity(
+async function discoverContracts(
   env,
   latestBlock
 ) {
   const fromBlock =
     Math.max(
       0,
-      latestBlock - V4_BLOCKS + 1
+      latestBlock -
+        DISCOVERY_BLOCKS +
+        1
     );
 
-  const result =
-    await getLogsChunked(
-      env,
-      POOL_MANAGER,
-      fromBlock,
-      latestBlock,
-      null,
-      RPC_LOG_CHUNK
-    );
+  const observations = [];
+  const candidates = new Set();
 
-  const initializeEvents = [];
-  const swapEvents = [];
+  for (
+    const contract of
+      ALL_DISCOVERY_CONTRACTS
+        .slice(
+          0,
+          MAX_DISCOVERY_CONTRACTS
+        )
+  ) {
+    const result =
+      await getLogsChunked(
+        env,
+        {
+          address: contract
+        },
+        fromBlock,
+        latestBlock
+      );
 
-  for (const log of result.logs) {
-    const init =
-      decodeInitialize(log);
+    const addresses = [];
 
-    if (init) {
-      initializeEvents.push(init);
+    for (
+      const log of
+        result.logs
+    ) {
+      const extracted =
+        extractAddresses(
+          log
+        );
+
+      for (
+        const address of
+          extracted
+      ) {
+        candidates.add(
+          address
+        );
+
+        addresses.push(
+          address
+        );
+      }
     }
 
-    const swap =
-      decodeSwap(log);
-
-    if (swap) {
-      swapEvents.push(swap);
-    }
+    observations.push({
+      contract,
+      logsFound:
+        result.logs.length,
+      addressesExtracted:
+        unique(addresses)
+          .length,
+      rpcErrors:
+        result.errors.length,
+      errors:
+        result.errors.slice(
+          0,
+          3
+        )
+    });
   }
 
   return {
     fromBlock,
-    toBlock: latestBlock,
-    rawLogs: result.logs.length,
-    initializeEvents,
-    swapEvents,
-    rpcErrors: result.errors
+    toBlock:
+      latestBlock,
+    candidates: [
+      ...candidates
+    ],
+    observations
   };
 }
 
 /*
 ==================================================
-ADDRESS EXTRACTION
-==================================================
-*/
-
-function extractAddressesFromLog(log) {
-  const addresses = [];
-
-  for (
-    const topic of
-      log?.topics || []
-  ) {
-    const address =
-      topicToAddress(topic);
-
-    if (validTokenCandidate(address)) {
-      addresses.push(address);
-    }
-  }
-
-  for (
-    const word of
-      splitWords(log?.data)
-  ) {
-    const address =
-      topicToAddress(word);
-
-    if (validTokenCandidate(address)) {
-      addresses.push(address);
-    }
-  }
-
-  return unique(addresses);
-}
-
-/*
-==================================================
-BROAD LAUNCHPAD DISCOVERY
-==================================================
-*/
-
-async function discoverContract(
-  env,
-  contract,
-  fromBlock,
-  toBlock
-) {
-  const result =
-    await getLogsChunked(
-      env,
-      contract,
-      fromBlock,
-      toBlock,
-      null,
-      RPC_LOG_CHUNK
-    );
-
-  const addresses = [];
-
-  for (
-    const log of result.logs
-  ) {
-    addresses.push(
-      ...extractAddressesFromLog(log)
-    );
-  }
-
-  return {
-    contract,
-    logsFound:
-      result.logs.length,
-    addressesExtracted:
-      unique(addresses).length,
-    addresses:
-      unique(addresses),
-    rpcErrors:
-      result.errors
-  };
-}
-
-/*
-==================================================
-TOKEN ACTIVITY
+TRANSFER ACTIVITY
 ==================================================
 */
 
@@ -823,155 +769,70 @@ async function getTokenActivity(
   token,
   latestBlock
 ) {
-  if (!validTokenCandidate(token)) {
-    return {
-      recentActivity: 0,
-      previousActivity: 0,
-      recentTransfers: 0,
-      previousTransfers: 0,
-      uniqueWallets: 0,
-      activityAcceleration: 0,
-      transferAcceleration: 0
-    };
-  }
-
-  const recentFrom =
+  const fromBlock =
     Math.max(
       0,
-      latestBlock -
-        ACTIVITY_BLOCKS +
-        1
+      latestBlock - 30
     );
 
-  const previousTo =
-    recentFrom - 1;
-
-  const previousFrom =
-    Math.max(
-      0,
-      previousTo -
-        ACTIVITY_BLOCKS +
-        1
-    );
-
-  const [
-    recent,
-    previous
-  ] = await Promise.all([
-    getLogsChunked(
+  const result =
+    await getLogsChunked(
       env,
-      token,
-      recentFrom,
-      latestBlock,
-      [TRANSFER_TOPIC],
-      RPC_LOG_CHUNK
-    ),
-    previousTo >= previousFrom
-      ? getLogsChunked(
-          env,
-          token,
-          previousFrom,
-          previousTo,
-          [TRANSFER_TOPIC],
-          RPC_LOG_CHUNK
-        )
-      : {
-          logs: [],
-          errors: []
-        }
-  ]);
+      {
+        address: token,
+        topics: [
+          TRANSFER_TOPIC
+        ]
+      },
+      fromBlock,
+      latestBlock
+    );
+
+  const transfers =
+    result.logs.filter(
+      log =>
+        log?.topics?.[0]
+          ?.toLowerCase() ===
+        TRANSFER_TOPIC
+    );
 
   const wallets = [];
 
   for (
-    const log of recent.logs
+    const log of transfers
   ) {
     const from =
-      topicToAddress(
-        log.topics?.[1],
-        true
+      cleanTopicAddress(
+        log.topics?.[1]
       );
 
     const to =
-      topicToAddress(
-        log.topics?.[2],
-        true
+      cleanTopicAddress(
+        log.topics?.[2]
       );
 
-    if (
-      from &&
-      !isZeroAddress(from)
-    ) {
+    if (from) {
       wallets.push(from);
     }
 
-    if (
-      to &&
-      !isZeroAddress(to)
-    ) {
+    if (to) {
       wallets.push(to);
     }
   }
 
-  const recentTransfers =
-    recent.logs.length;
-
-  const previousTransfers =
-    previous.logs.length;
-
-  const acceleration =
-    previousTransfers > 0
-      ? recentTransfers /
-        previousTransfers
-      : recentTransfers > 0
-        ? 2
-        : 0;
-
   return {
     recentActivity:
-      recent.logs.length,
+      result.logs.length,
 
-    previousActivity:
-      previous.logs.length,
-
-    recentTransfers,
-
-    previousTransfers,
+    recentTransfers:
+      transfers.length,
 
     uniqueWallets:
       unique(wallets).length,
 
-    activityAcceleration:
-      acceleration,
-
-    transferAcceleration:
-      acceleration,
-
-    rpcErrors: [
-      ...recent.errors,
-      ...previous.errors
-    ]
+    rpcErrors:
+      result.errors.length
   };
-}
-
-/*
-==================================================
-POOL MATCHING
-==================================================
-*/
-
-function findPools(
-  token,
-  initializeEvents
-) {
-  const target =
-    token.toLowerCase();
-
-  return initializeEvents.filter(
-    pool =>
-      pool.currency0?.toLowerCase() === target ||
-      pool.currency1?.toLowerCase() === target
-  );
 }
 
 /*
@@ -980,172 +841,73 @@ SCORING
 ==================================================
 */
 
-function scoreCandidate(candidate) {
+function scoreCandidate(
+  candidate
+) {
   let score = 0;
 
-  if (candidate.validERC20) {
-    score += 20;
+  if (
+    candidate.validERC20
+  ) {
+    score += 25;
   }
 
-  if (candidate.name) {
+  if (
+    candidate.name
+  ) {
     score += 5;
   }
 
-  if (candidate.symbol) {
+  if (
+    candidate.symbol
+  ) {
     score += 5;
   }
 
-  if (candidate.launchEvidence) {
+  if (
+    candidate.discoverySources
+      ?.length
+  ) {
     score += 15;
   }
 
-  if (candidate.poolCount > 0) {
-    score += 10;
+  if (
+    candidate.recentActivity >
+    0
+  ) {
+    score += Math.min(
+      15,
+      candidate.recentActivity
+    );
   }
 
-  if (candidate.recentActivity > 0) {
+  if (
+    candidate.recentTransfers >
+    0
+  ) {
     score += Math.min(
-      10,
+      15,
       Math.ceil(
-        candidate.recentActivity / 10
+        candidate.recentTransfers /
+          2
       )
     );
   }
 
-  if (candidate.uniqueWallets > 0) {
+  if (
+    candidate.uniqueWallets >
+    0
+  ) {
     score += Math.min(
       10,
       candidate.uniqueWallets
     );
   }
 
-  if (
-    candidate.activityAcceleration > 1
-  ) {
-    score += Math.min(
-      10,
-      Math.floor(
-        candidate.activityAcceleration * 2
-      )
-    );
-  }
-
-  if (
-    candidate.transferAcceleration > 1
-  ) {
-    score += Math.min(
-      5,
-      Math.floor(
-        candidate.transferAcceleration
-      )
-    );
-  }
-
-  return Math.min(100, score);
-}
-
-/*
-==================================================
-CANDIDATE
-==================================================
-*/
-
-async function buildCandidate(
-  env,
-  token,
-  latestBlock,
-  initializeEvents,
-  evidence
-) {
-  if (!validTokenCandidate(token)) {
-    return null;
-  }
-
-  const metadata =
-    await getERC20Metadata(
-      env,
-      token
-    );
-
-  if (!metadata.validERC20) {
-    return null;
-  }
-
-  const activity =
-    await getTokenActivity(
-      env,
-      token,
-      latestBlock
-    );
-
-  const pools =
-    findPools(
-      token,
-      initializeEvents
-    );
-
-  const candidate = {
-    address:
-      token.toLowerCase(),
-
-    ...metadata,
-
-    launchEvidence:
-      !!evidence,
-
-    launchSource:
-      evidence?.source || null,
-
-    launchTx:
-      evidence?.txHash || null,
-
-    launchBlock:
-      evidence?.blockNumber || null,
-
-    poolCount:
-      pools.length,
-
-    poolInitialized:
-      pools.length > 0,
-
-    recentActivity:
-      activity.recentActivity,
-
-    previousActivity:
-      activity.previousActivity,
-
-    recentTransfers:
-      activity.recentTransfers,
-
-    previousTransfers:
-      activity.previousTransfers,
-
-    uniqueWallets:
-      activity.uniqueWallets,
-
-    activityAcceleration:
-      activity.activityAcceleration,
-
-    transferAcceleration:
-      activity.transferAcceleration,
-
-    pools:
-      pools.map(pool => ({
-        poolId: pool.poolId,
-        currency0: pool.currency0,
-        currency1: pool.currency1,
-        fee: pool.fee,
-        tickSpacing: pool.tickSpacing,
-        hooks: pool.hooks,
-        txHash: pool.txHash,
-        blockNumber: pool.blockNumber
-      }))
-  };
-
-  candidate.score =
-    scoreCandidate(candidate);
-
-  return candidate;
+  return Math.min(
+    100,
+    score
+  );
 }
 
 /*
@@ -1158,28 +920,6 @@ async function sendTelegram(
   env,
   candidate
 ) {
-  /*
-    HARD SAFETY CHECK.
-    Nothing reaches Telegram unless:
-    - address is valid
-    - address is non-zero
-    - ERC20 verification succeeded
-  */
-
-  if (
-    !candidate ||
-    !validTokenCandidate(
-      candidate.address
-    ) ||
-    candidate.validERC20 !== true
-  ) {
-    return {
-      sent: false,
-      reason:
-        "BLOCKED_INVALID_OR_UNVERIFIED_TOKEN"
-    };
-  }
-
   if (
     !env.TELEGRAM_BOT_TOKEN ||
     !env.TELEGRAM_CHAT_ID
@@ -1191,29 +931,49 @@ async function sendTelegram(
     };
   }
 
+  /*
+    HARD SAFETY CHECK
+  */
+
+  if (
+    !validTokenCandidate(
+      candidate?.address
+    )
+  ) {
+    return {
+      sent: false,
+      reason:
+        "BLOCKED_INVALID_OR_ZERO_TOKEN_ADDRESS"
+    };
+  }
+
+  if (
+    !candidate.validERC20
+  ) {
+    return {
+      sent: false,
+      reason:
+        "BLOCKED_UNVERIFIED_ERC20"
+    };
+  }
+
   const message = [
     "🚨 ROBINHOOD CHAIN MEME HUNTER",
     "",
     `🧪 Score: ${candidate.score}/100`,
-    `🪙 ${candidate.name}`,
-    `🔹 ${candidate.symbol}`,
+    `🪙 ${candidate.name || "Unknown"}`,
+    `🔹 ${candidate.symbol || "UNKNOWN"}`,
     "",
     `📍 Token: ${candidate.address}`,
     "",
-    `🚀 Source: ${
-      candidate.launchSource ||
-      "ON-CHAIN DISCOVERY"
+    `🔎 Discovery: ${
+      candidate.discoverySources?.join(
+        ", "
+      ) || "ON-CHAIN"
     }`,
-    `🏊 Pools: ${candidate.poolCount}`,
-    `📊 Recent activity: ${candidate.recentActivity}`,
+    `📊 Activity: ${candidate.recentActivity}`,
     `🔄 Transfers: ${candidate.recentTransfers}`,
-    `👥 Unique wallets: ${candidate.uniqueWallets}`,
-    `⚡ Activity acceleration: ${
-      candidate.activityAcceleration.toFixed(2)
-    }x`,
-    `📈 Transfer acceleration: ${
-      candidate.transferAcceleration.toFixed(2)
-    }x`,
+    `👥 Wallets: ${candidate.uniqueWallets}`,
     "",
     "⚠️ Market cap: UNVERIFIED",
     "⚠️ Liquidity: UNVERIFIED",
@@ -1221,7 +981,7 @@ async function sendTelegram(
     "⚠️ Smart money: UNVERIFIED",
     "⚠️ Whale activity: UNVERIFIED",
     "",
-    "V54 — Verified Launch + V4 Activity Hunter"
+    "V55 — Fast Verified Chain Hunter"
   ].join("\n");
 
   const url =
@@ -1230,19 +990,38 @@ async function sendTelegram(
     "/sendMessage";
 
   try {
+    const controller =
+      new AbortController();
+
+    const timer =
+      setTimeout(
+        () =>
+          controller.abort(),
+        5000
+      );
+
     const response =
-      await fetch(url, {
-        method: "POST",
-        headers: {
-          "content-type":
-            "application/json"
-        },
-        body: JSON.stringify({
-          chat_id:
-            env.TELEGRAM_CHAT_ID,
-          text: message
-        })
-      });
+      await fetch(
+        url,
+        {
+          method: "POST",
+          headers: {
+            "content-type":
+              "application/json"
+          },
+          body: JSON.stringify({
+            chat_id:
+              env.TELEGRAM_CHAT_ID,
+            text: message,
+            disable_web_page_preview:
+              true
+          }),
+          signal:
+            controller.signal
+        }
+      );
+
+    clearTimeout(timer);
 
     const result =
       await response.json();
@@ -1254,7 +1033,7 @@ async function sendTelegram(
       return {
         sent: false,
         reason:
-          result?.description ||
+          result.description ||
           "TELEGRAM_SEND_FAILED"
       };
     }
@@ -1262,7 +1041,8 @@ async function sendTelegram(
     return {
       sent: true,
       messageId:
-        result.result?.message_id ||
+        result.result
+          ?.message_id ||
         null
     };
   } catch (error) {
@@ -1282,208 +1062,138 @@ SCAN
 */
 
 async function scan(env) {
+  const started =
+    Date.now();
+
   const latestBlock =
-    await getLatestBlock(env);
-
-  const discoveryFrom =
-    Math.max(
-      0,
-      latestBlock -
-        DISCOVERY_BLOCKS +
-        1
+    await getLatestBlock(
+      env
     );
 
-  /*
-    BROAD DISCOVERY
-
-    One contract at a time.
-    10-block chunks.
-  */
-
-  const observations = [];
-
-  for (
-    const contract of
-      ALL_DISCOVERY_CONTRACTS
-  ) {
-    observations.push(
-      await discoverContract(
-        env,
-        contract,
-        discoveryFrom,
-        latestBlock
-      )
-    );
-  }
-
-  /*
-    Extract all addresses.
-  */
-
-  const discoveredAddresses =
-    unique(
-      observations.flatMap(
-        observation =>
-          observation.addresses
-      )
-    ).filter(
-      validTokenCandidate
-    );
-
-  /*
-    V4 activity.
-  */
-
-  const v4 =
-    await getV4Activity(
+  const discovery =
+    await discoverContracts(
       env,
       latestBlock
     );
 
-  /*
-    Add V4 currencies.
-  */
-
-  for (
-    const pool of
-      v4.initializeEvents
-  ) {
-    if (
-      validTokenCandidate(
-        pool.currency0
-      )
-    ) {
-      discoveredAddresses.push(
-        pool.currency0
-      );
-    }
-
-    if (
-      validTokenCandidate(
-        pool.currency1
-      )
-    ) {
-      discoveredAddresses.push(
-        pool.currency1
-      );
-    }
-  }
-
-  const candidatesToCheck =
+  const addresses =
     unique(
-      discoveredAddresses
-    ).slice(
-      0,
-      MAX_CANDIDATES
-    );
+      discovery.candidates
+    )
+      .filter(
+        validTokenCandidate
+      )
+      .slice(
+        0,
+        MAX_CANDIDATES
+      );
 
-  const validationResults = [];
   const candidates = [];
+  const validationResults = [];
 
   /*
-    First verify every candidate.
+    Metadata validation is intentionally
+    bounded to prevent Worker freezes.
   */
 
   for (
-    const token of
-      candidatesToCheck
+    const address of
+      addresses.slice(
+        0,
+        MAX_METADATA_CALLS
+      )
   ) {
-    if (
-      !validTokenCandidate(token)
-    ) {
-      continue;
-    }
-
     const metadata =
       await getERC20Metadata(
         env,
-        token
+        address
       );
 
     validationResults.push({
-      address: token,
+      address,
       ...metadata
     });
 
-    if (!metadata.validERC20) {
+    if (
+      !metadata.validERC20
+    ) {
       continue;
     }
 
-    const observation =
-      observations.find(
-        item =>
-          item.addresses?.some(
-            address =>
-              address.toLowerCase() ===
-              token.toLowerCase()
-          )
-      );
+    candidates.push({
+      address,
+      ...metadata,
+      discoverySources: [
+        "BROAD_ON_CHAIN_LOG"
+      ],
+      recentActivity: 0,
+      recentTransfers: 0,
+      uniqueWallets: 0
+    });
+  }
 
-    const candidate =
-      await buildCandidate(
+  /*
+    Activity is only performed on a
+    small number of verified tokens.
+  */
+
+  for (
+    const candidate of
+      candidates.slice(
+        0,
+        MAX_ACTIVITY_CANDIDATES
+      )
+  ) {
+    const activity =
+      await getTokenActivity(
         env,
-        token,
-        latestBlock,
-        v4.initializeEvents,
-        observation
-          ? {
-              source:
-                observation.contract,
-              txHash: null,
-              blockNumber: null
-            }
-          : {
-              source:
-                "V4_POOL_DISCOVERY"
-            }
+        candidate.address,
+        latestBlock
       );
 
-    if (candidate) {
-      candidates.push(candidate);
-    }
+    Object.assign(
+      candidate,
+      activity
+    );
+
+    candidate.score =
+      scoreCandidate(
+        candidate
+      );
   }
 
   candidates.sort(
     (a, b) =>
-      b.score - a.score
+      b.score -
+      a.score
   );
 
   const qualifyingCandidates =
     candidates.filter(
       candidate =>
         candidate.score >=
-        TELEGRAM_THRESHOLD &&
-        candidate.validERC20 === true &&
+          TELEGRAM_THRESHOLD &&
         validTokenCandidate(
           candidate.address
-        )
+        ) &&
+        candidate.validERC20
     );
 
-  let telegramResult = {
+  let telegram = {
     sent: false,
     reason:
       "NO_VERIFIED_QUALIFYING_CANDIDATE"
   };
 
   if (
-    qualifyingCandidates.length > 0
+    qualifyingCandidates.length
   ) {
-    telegramResult =
+    telegram =
       await sendTelegram(
         env,
         qualifyingCandidates[0]
       );
   }
-
-  const rpcErrors =
-    observations.flatMap(
-      observation =>
-        observation.rpcErrors || []
-    );
-
-  rpcErrors.push(
-    ...v4.rpcErrors
-  );
 
   return {
     agent:
@@ -1492,100 +1202,49 @@ async function scan(env) {
     version:
       VERSION,
 
-    success:
-      true,
+    success: true,
 
     scan: {
-      status:
-        "OK",
+      status: "OK",
+
+      durationMs:
+        Date.now() -
+        started,
 
       latestBlock,
 
       discoveryWindow: {
         fromBlock:
-          discoveryFrom,
+          discovery.fromBlock,
+
         toBlock:
-          latestBlock,
+          discovery.toBlock,
+
         blocks:
-          latestBlock -
-          discoveryFrom +
-          1,
-        rpcChunkSize:
-          RPC_LOG_CHUNK
+          discovery.toBlock -
+          discovery.fromBlock +
+          1
       },
 
       launchpadDiscovery: {
         contractsChecked:
-          ALL_DISCOVERY_CONTRACTS.length,
+          discovery.observations
+            .length,
 
         observations:
-          observations.map(
-            observation => ({
-              contract:
-                observation.contract,
-
-              logsFound:
-                observation.logsFound,
-
-              addressesExtracted:
-                observation.addressesExtracted,
-
-              rpcErrors:
-                observation.rpcErrors
-            })
-          )
-      },
-
-      v4: {
-        poolManager:
-          POOL_MANAGER,
-
-        fromBlock:
-          v4.fromBlock,
-
-        toBlock:
-          v4.toBlock,
-
-        rawLogs:
-          v4.rawLogs,
-
-        initializeEvents:
-          v4.initializeEvents.length,
-
-        swapEvents:
-          v4.swapEvents.length,
-
-        uniqueSwapPools:
-          unique(
-            v4.swapEvents.map(
-              x => x.poolId
-            )
-          ).length,
-
-        uniqueSwapSenders:
-          unique(
-            v4.swapEvents
-              .map(
-                x => x.sender
-              )
-              .filter(Boolean)
-          ).length,
-
-        rpcErrors:
-          v4.rpcErrors
+          discovery.observations
       },
 
       uniqueTokenCandidates:
-        unique(
-          candidatesToCheck
-        ).length,
+        addresses.length,
 
       tokenValidationChecks:
         validationResults.length,
 
       validERC20Tokens:
         validationResults.filter(
-          x => x.validERC20
+          x =>
+            x.validERC20
         ).length,
 
       validationResults,
@@ -1598,38 +1257,29 @@ async function scan(env) {
       telegramCandidates:
         qualifyingCandidates.length,
 
-      telegram:
-        telegramResult,
-
-      rpcErrors,
+      telegram,
 
       dataIntegrity: {
         noFabricatedMetrics:
           true,
 
-        logDiscovery:
-          "ONE_CONTRACT_PER_REQUEST",
+        rpcTimeoutProtection:
+          true,
 
-        rpcLogChunking:
-          `${RPC_LOG_CHUNK}_BLOCK_CHUNKS`,
+        boundedRPCWorkload:
+          true,
 
-        launchDetection:
-          "BROAD_LOG_DISCOVERY",
-
-        tokenContract:
-          "ERC20_CALL_VERIFIED",
+        zeroAddressProtection:
+          true,
 
         telegramTokenSafety:
           "NON_ZERO_VERIFIED_ERC20_ONLY",
 
-        poolDetection:
-          "V4_INITIALIZE_OR_BROAD_LOG_DISCOVERY",
+        tokenContract:
+          "ERC20_CALL_VERIFIED",
 
         walletActivity:
           "ERC20_TRANSFER_LOG_BASED",
-
-        activityAcceleration:
-          "NON_OVERLAPPING_BLOCK_WINDOWS",
 
         marketCap:
           "UNVERIFIED",
@@ -1650,8 +1300,8 @@ async function scan(env) {
           "UNVERIFIED"
       },
 
-      discovery:
-        "V54_CHUNKED_RPC_BROAD_DISCOVERY_VERIFIED_TOKEN_HUNTER",
+      architecture:
+        "V55_FAST_BOUNDED_RPC_VERIFIED_TOKEN_HUNTER",
 
       chain: {
         name:
@@ -1674,20 +1324,38 @@ HEALTH
 */
 
 async function health(env) {
-  let latestBlock = null;
-  let rpcStatus = "UNKNOWN";
+  let latestBlock =
+    null;
 
-  if (env.ALCHEMY_API_KEY) {
-    try {
+  let rpcStatus =
+    "UNKNOWN";
+
+  if (
+    env.ALCHEMY_API_KEY
+  ) {
+    const result =
+      await safeRpc(
+        env,
+        "eth_blockNumber"
+      );
+
+    if (result.ok) {
       latestBlock =
-        await getLatestBlock(env);
+        Number(
+          BigInt(
+            result.result
+          )
+        );
 
       rpcStatus =
         "CONNECTED";
-    } catch {
+    } else {
       rpcStatus =
-        "ERROR";
+        result.error;
     }
+  } else {
+    rpcStatus =
+      "MISSING_ALCHEMY_API_KEY";
   }
 
   return {
@@ -1743,6 +1411,9 @@ async function health(env) {
     rpcLogChunkSize:
       RPC_LOG_CHUNK,
 
+    rpcTimeoutMs:
+      RPC_TIMEOUT_MS,
+
     telegram: {
       configured:
         !!env.TELEGRAM_BOT_TOKEN &&
@@ -1762,7 +1433,7 @@ async function health(env) {
     },
 
     architecture:
-      "V54_CHUNKED_RPC_VERIFIED_TOKEN_HUNTER",
+      "V55_FAST_BOUNDED_RPC_VERIFIED_TOKEN_HUNTER",
 
     timestamp:
       new Date().toISOString()
@@ -1771,26 +1442,32 @@ async function health(env) {
 
 /*
 ==================================================
-SAFE TELEGRAM TEST
+TELEGRAM SAFETY TEST
 ==================================================
 */
 
 async function testTelegram(env) {
-  /*
-    Deliberately uses ZERO ADDRESS.
-    It MUST be rejected.
-  */
+  const fakeCandidate = {
+    address:
+      ZERO_ADDRESS,
+
+    validERC20:
+      true,
+
+    name:
+      "V55 SAFETY TEST",
+
+    symbol:
+      "TEST",
+
+    score:
+      100
+  };
 
   const result =
     await sendTelegram(
       env,
-      {
-        name: "V54 SAFETY TEST",
-        symbol: "TEST",
-        address: ZERO_ADDRESS,
-        validERC20: false,
-        score: 100
-      }
+      fakeCandidate
     );
 
   return {
@@ -1801,12 +1478,13 @@ async function testTelegram(env) {
       VERSION,
 
     success:
-      true,
+      result.sent === false,
 
     safetyTest:
-      result.sent
-        ? "FAILED"
-        : "ZERO_ADDRESS_BLOCKED",
+      result.reason ===
+      "BLOCKED_INVALID_OR_ZERO_TOKEN_ADDRESS"
+        ? "ZERO_ADDRESS_BLOCKED"
+        : "FAILED",
 
     response:
       result,
@@ -1823,9 +1501,14 @@ WORKER
 */
 
 export default {
-  async fetch(request, env) {
+  async fetch(
+    request,
+    env
+  ) {
     const url =
-      new URL(request.url);
+      new URL(
+        request.url
+      );
 
     try {
       if (
@@ -1842,7 +1525,22 @@ export default {
         "/scan"
       ) {
         return json(
-          await scan(env)
+          await Promise.race([
+            scan(env),
+
+            new Promise(
+              (_, reject) =>
+                setTimeout(
+                  () =>
+                    reject(
+                      new Error(
+                        "SCAN_TIMEOUT"
+                      )
+                    ),
+                  REQUEST_TIMEOUT_MS
+                )
+            )
+          ])
         );
       }
 
@@ -1851,7 +1549,9 @@ export default {
         "/test-telegram"
       ) {
         return json(
-          await testTelegram(env)
+          await testTelegram(
+            env
+          )
         );
       }
 
