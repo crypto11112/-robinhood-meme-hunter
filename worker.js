@@ -1,22 +1,23 @@
 /**
  * Robinhood Chain Meme Hunter
- * V65
+ * V66
  *
  * Chain: Robinhood Chain
  * Chain ID: 4663
  *
- * V65 changes:
- * - Correct Uniswap V4 Initialize event signature
- * - Removes unsafe "4 topics = Initialize" fallback
- * - Validates Initialize ABI data structure
- * - Correct V4 Swap event signature
- * - Counts real V4 swaps instead of generic logs
- * - Tracks ModifyLiquidity events
- * - Keeps V64 RPC fallback / Telegram safety / ERC20 verification
- * - Native currency is excluded from ERC20 checks
+ * Full replacement for V65.
+ *
+ * V66 fixes:
+ * - Fixes modifyLiquidityTopicMatches runtime error
+ * - Keeps exact V4 event matching
+ * - Keeps multi-pool activity analysis
+ * - Keeps ERC20 verification
+ * - Keeps rug/opportunity scoring
+ * - Keeps Telegram safety controls
+ * - Keeps RPC fallback and 429 backoff
  */
 
-const VERSION = "V65";
+const VERSION = "V66";
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
 
@@ -36,41 +37,7 @@ const MAX_TOKEN_CHECKS = 5;
 const MIN_TELEGRAM_SCORE = 60;
 
 /*
- * Confirmed Uniswap V4 PoolManager events.
- *
- * Initialize:
- * Initialize(
- *   bytes32 indexed id,
- *   address indexed currency0,
- *   address indexed currency1,
- *   uint24 fee,
- *   int24 tickSpacing,
- *   address hooks,
- *   uint160 sqrtPriceX96,
- *   int24 tick
- * )
- *
- * Swap:
- * Swap(
- *   bytes32 indexed id,
- *   address indexed sender,
- *   int128 amount0,
- *   int128 amount1,
- *   uint160 sqrtPriceX96,
- *   uint128 liquidity,
- *   int24 tick,
- *   uint24 fee
- * )
- *
- * ModifyLiquidity:
- * ModifyLiquidity(
- *   bytes32 indexed id,
- *   address indexed sender,
- *   int24 tickLower,
- *   int24 tickUpper,
- *   int256 liquidityDelta,
- *   bytes32 salt
- * )
+ * V4 EVENT TOPICS
  */
 
 const V4_INITIALIZE_TOPIC =
@@ -81,6 +48,10 @@ const V4_SWAP_TOPIC =
 
 const V4_MODIFY_LIQUIDITY_TOPIC =
   "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec";
+
+/*
+ * ERC20 selectors.
+ */
 
 const SEL_NAME = "0x06fdde03";
 const SEL_SYMBOL = "0x95d89b41";
@@ -141,7 +112,9 @@ function topicToAddress(topic) {
 }
 
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise(
+    resolve => setTimeout(resolve, ms)
+  );
 }
 
 function clamp(value, min, max) {
@@ -170,6 +143,7 @@ function hexWord(data, index) {
   }
 
   const raw = data.slice(2);
+
   const start = index * 64;
   const end = start + 64;
 
@@ -244,12 +218,13 @@ async function rpcRequest(
             "content-type":
               "application/json"
           },
-          body: JSON.stringify({
-            jsonrpc: "2.0",
-            id: Date.now(),
-            method,
-            params
-          }),
+          body:
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: Date.now(),
+              method,
+              params
+            }),
           signal:
             controller.signal
         }
@@ -529,9 +504,6 @@ function decodeString(hex) {
   }
 
   try {
-    /*
-     * ABI dynamic string.
-     */
     if (raw.length >= 128) {
       const offset =
         Number(
@@ -582,9 +554,6 @@ function decodeString(hex) {
       }
     }
 
-    /*
-     * bytes32 fallback.
-     */
     if (raw.length >= 64) {
       return hexToUtf8(
         raw.slice(0, 64)
@@ -613,8 +582,10 @@ async function getCode(
   return {
     code:
       result.result || null,
+
     provider:
       result.provider,
+
     error:
       result.error
   };
@@ -762,12 +733,22 @@ async function verifyERC20(
 
   return {
     validERC20: true,
-    reason: "VERIFIED",
+    reason:
+      "VERIFIED",
+
     address,
+
     bytecode: true,
-    name: checks.name,
-    symbol: checks.symbol,
-    decimals: checks.decimals,
+
+    name:
+      checks.name,
+
+    symbol:
+      checks.symbol,
+
+    decimals:
+      checks.decimals,
+
     totalSupply:
       checks.totalSupply.toString()
   };
@@ -817,16 +798,6 @@ function decodeInitializeLog(log) {
     return null;
   }
 
-  /*
-   * Initialize has exactly
-   * 5 non-indexed ABI words:
-   *
-   * fee
-   * tickSpacing
-   * hooks
-   * sqrtPriceX96
-   * tick
-   */
   const data =
     log.data || "0x";
 
@@ -951,7 +922,9 @@ function extractTokenCurrencies(
           normalized
       )
     ) {
-      result.push(currency);
+      result.push(
+        currency
+      );
     }
   }
 
@@ -960,7 +933,7 @@ function extractTokenCurrencies(
 
 /*
  * ------------------------------------------------------------------
- * V4 pool activity
+ * Pool activity
  * ------------------------------------------------------------------
  */
 
@@ -985,12 +958,17 @@ async function checkPoolActivity(
   if (!result.result) {
     return {
       success: false,
+
       provider:
         result.provider,
+
       error:
         result.error,
+
       logs: 0,
+
       swaps: 0,
+
       liquidityEvents: 0
     };
   }
@@ -1052,7 +1030,9 @@ function scoreRugRisk(
 
   const reasons = [];
 
-  if (token.validERC20) {
+  if (
+    token.validERC20
+  ) {
     risk -= 15;
 
     reasons.push(
@@ -1128,7 +1108,8 @@ function scoreRugRisk(
     );
 
   return {
-    score: risk,
+    score:
+      risk,
 
     label:
       risk >= 80
@@ -1328,10 +1309,12 @@ ${candidate.rugRisk.reasons
         url,
         {
           method: "POST",
+
           headers: {
             "content-type":
               "application/json"
           },
+
           body:
             JSON.stringify({
               chat_id:
@@ -1355,8 +1338,10 @@ ${candidate.rugRisk.reasons
     ) {
       return {
         sent: false,
+
         reason:
           "TELEGRAM_API_ERROR",
+
         error:
           body?.description ||
           `HTTP ${response.status}`
@@ -1365,6 +1350,7 @@ ${candidate.rugRisk.reasons
 
     return {
       sent: true,
+
       messageId:
         body.result?.message_id ||
         null
@@ -1373,8 +1359,10 @@ ${candidate.rugRisk.reasons
   } catch (error) {
     return {
       sent: false,
+
       reason:
         "TELEGRAM_REQUEST_FAILED",
+
       error:
         String(
           error?.message ||
@@ -1476,12 +1464,9 @@ async function scan(env) {
     raw.result;
 
   /*
-   * ONLY exact V4 Initialize events.
-   *
-   * V64's structural fallback has intentionally
-   * been removed because arbitrary PoolManager logs
-   * with four topics can otherwise become false pools.
+   * Exact Initialize event matching.
    */
+
   const initializeLogs =
     logs.filter(
       log =>
@@ -1508,6 +1493,10 @@ async function scan(env) {
       );
     }
   }
+
+  /*
+   * Candidate map.
+   */
 
   const candidateMap =
     new Map();
@@ -1560,6 +1549,10 @@ async function scan(env) {
 
   const analysed = [];
 
+  /*
+   * Verify tokens.
+   */
+
   for (
     const candidate of
     candidates
@@ -1573,6 +1566,7 @@ async function scan(env) {
     validationResults.push({
       address:
         candidate.address,
+
       ...token
     });
 
@@ -1582,13 +1576,16 @@ async function scan(env) {
       continue;
     }
 
+    let bestActivity =
+      null;
+
+    let bestPool =
+      null;
+
     /*
-     * Analyse every discovered pool
-     * belonging to this token until
-     * one shows activity.
+     * Check up to three pools
+     * for the same token.
      */
-    let bestActivity = null;
-    let bestPool = null;
 
     for (
       const pool of
@@ -1627,11 +1624,16 @@ async function scan(env) {
     const activity =
       bestActivity || {
         success: false,
+
         provider: null,
+
         error:
           "NO_POOL_ACTIVITY_CHECK",
+
         logs: 0,
+
         swaps: 0,
+
         liquidityEvents: 0
       };
 
@@ -1688,6 +1690,10 @@ async function scan(env) {
     });
   }
 
+  /*
+   * Qualifying candidates.
+   */
+
   const qualifying =
     analysed.filter(
       candidate =>
@@ -1722,6 +1728,10 @@ async function scan(env) {
       );
     }
   }
+
+  /*
+   * Diagnostics.
+   */
 
   const topic0Sample =
     [
@@ -1772,6 +1782,23 @@ async function scan(env) {
         V4_MODIFY_LIQUIDITY_TOPIC
     ).length;
 
+  /*
+   * IMPORTANT:
+   *
+   * The V65 runtime error was caused by returning:
+   *
+   * modifyLiquidityTopicMatches
+   *
+   * while the actual variable was:
+   *
+   * modifyLiquidityMatches
+   *
+   * V66 explicitly assigns the correct value here.
+   */
+
+  const modifyLiquidityTopicMatches =
+    modifyLiquidityMatches;
+
   return {
     agent:
       "Robinhood Chain Meme Hunter",
@@ -1790,14 +1817,20 @@ async function scan(env) {
         started,
 
       latestBlock:
-        Number(toBlock),
+        Number(
+          toBlock
+        ),
 
       discoveryWindow: {
         fromBlock:
-          Number(fromBlock),
+          Number(
+            fromBlock
+          ),
 
         toBlock:
-          Number(toBlock),
+          Number(
+            toBlock
+          ),
 
         blocks:
           DISCOVERY_BLOCKS
@@ -1813,13 +1846,18 @@ async function scan(env) {
         initializeEvents:
           pools.length,
 
-        initializeTopicMatches,
+        initializeTopicMatches:
+          initializeTopicMatches,
 
-        swapTopicMatches,
+        swapTopicMatches:
+          swapTopicMatches,
 
-        modifyLiquidityTopicMatches,
+        modifyLiquidityTopicMatches:
+          modifyLiquidityTopicMatches,
 
-        topic0Sample,
+        topic0Sample:
+
+          topic0Sample,
 
         tokenCandidates:
           candidateMap.size,
@@ -1858,11 +1896,13 @@ async function scan(env) {
         telegramCandidates.length > 0
           ? {
               sent: true,
+
               count:
                 telegramCandidates.length
             }
           : {
               sent: false,
+
               reason:
                 qualifying.length === 0
                   ? "NO_VERIFIED_LOW_RISK_QUALIFYING_CANDIDATE"
@@ -1934,7 +1974,7 @@ async function scan(env) {
       },
 
       architecture:
-        "V65_EXACT_V4_EVENTS_MULTI_POOL_ACTIVITY_VERIFIED_TOKEN_RUG_RISK_HUNTER"
+        "V66_EXACT_V4_EVENTS_MULTI_POOL_ACTIVITY_VERIFIED_TOKEN_RUG_RISK_HUNTER"
     },
 
     chain: {
@@ -2085,7 +2125,7 @@ async function health(env) {
     },
 
     architecture:
-      "V65_EXACT_V4_EVENTS_MULTI_POOL_ACTIVITY_VERIFIED_TOKEN_RUG_RISK_HUNTER",
+      "V66_EXACT_V4_EVENTS_MULTI_POOL_ACTIVITY_VERIFIED_TOKEN_RUG_RISK_HUNTER",
 
     timestamp:
       now()
@@ -2150,13 +2190,19 @@ async function rpcTest(env) {
     },
 
     latestBlock:
-      Number(toBlock),
+      Number(
+        toBlock
+      ),
 
     fromBlock:
-      Number(fromBlock),
+      Number(
+        fromBlock
+      ),
 
     toBlock:
-      Number(toBlock),
+      Number(
+        toBlock
+      ),
 
     blockRange:
       3,
@@ -2239,12 +2285,16 @@ async function telegramTest(env) {
           false,
 
         rugRisk: {
-          score: 100,
-          label: "HIGH"
+          score:
+            100,
+
+          label:
+            "HIGH"
         },
 
         opportunity: {
-          score: 0
+          score:
+            0
         }
       }
     );
