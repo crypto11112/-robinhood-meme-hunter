@@ -1,64 +1,32 @@
 /**
  * Robinhood Chain Meme Hunter
- * V68
+ * V69
  *
- * Chain: Robinhood Chain
- * Chain ID: 4663
+ * Full replacement for V68.
  *
- * Full replacement for V67.
+ * V69 keeps the V68 discovery/enrichment/scoring pipeline.
  *
- * V68 keeps:
- * - Exact V4 Initialize discovery
- * - Exact V4 Swap detection
- * - Exact V4 ModifyLiquidity detection
- * - ERC20 bytecode verification
- * - ERC20 metadata verification
- * - Robinhood public RPC
- * - Alchemy fallback
- * - Rug-risk scoring
- * - Opportunity scoring
- * - Telegram safety
- * - Automatic scheduled scans
- * - No KV required
- *
- * V68 adds:
- * - DexScreener 429 retry/backoff
- * - Blockscout 429 retry/backoff
- * - Candidate prioritisation
- * - Known quote/stable token deprioritisation
- * - Fewer external enrichment requests
- * - Market lookup before holder lookup
- * - Holder lookup only for useful candidates
- * - /diagnostics combined route
- * - Better enrichment diagnostics
- * - Duplicate Telegram cooldown
+ * Adds:
+ * - Persistent last-scanned block with Cloudflare KV
+ * - Gap-free catch-up scanning in 10-block chunks
+ * - Maximum bounded catch-up workload
+ * - Persistent candidate watch list
+ * - Re-check recently discovered tokens even after their launch block passes
+ * - Persistent Telegram duplicate protection
+ * - /state route
+ * - Falls back safely to latest-10 scanning if KV is not bound
  */
 
-
-const VERSION = "V68";
+const VERSION = "V69";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
-
-
-/*
- * ---------------------------------------------------------
- * RPC
- * ---------------------------------------------------------
- */
 
 const PUBLIC_RPC =
   "https://rpc.mainnet.chain.robinhood.com";
 
 const ALCHEMY_BASE =
   "https://robinhood-mainnet.g.alchemy.com/v2/";
-
-
-/*
- * ---------------------------------------------------------
- * MARKET / EXPLORER
- * ---------------------------------------------------------
- */
 
 const DEXSCREENER_BASE =
   "https://api.dexscreener.com";
@@ -72,101 +40,77 @@ const BLOCKSCOUT_PUBLIC =
 const BLOCKSCOUT_PRO =
   "https://api.blockscout.com/4663";
 
-
-/*
- * ---------------------------------------------------------
- * ROBINHOOD V4
- * ---------------------------------------------------------
- */
-
 const POOL_MANAGER =
   "0x8366a39cc670b4001a1121b8f6a443a643e40951";
 
 const ZERO =
   "0x0000000000000000000000000000000000000000";
 
-
-/*
- * Known quote / infrastructure assets.
- *
- * USDG was verified by the V67 scan.
- *
- * These are NOT ignored completely.
- * They are simply given lower enrichment priority so a pool like:
- *
- * USDG / SPURDO
- *
- * causes SPURDO to be inspected first.
- */
-
 const KNOWN_QUOTE_TOKENS =
   new Set([
     "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
   ]);
 
-
 /*
- * ---------------------------------------------------------
- * LIMITS
- * ---------------------------------------------------------
+ * Scan limits.
  */
 
-const DISCOVERY_BLOCKS =
-  10;
-
-const RPC_TIMEOUT_MS =
-  3000;
-
-const HTTP_TIMEOUT_MS =
-  4000;
-
-const MAX_TOKEN_CHECKS =
-  5;
-
-const MAX_MARKET_LOOKUPS =
-  3;
-
-const MAX_HOLDER_LOOKUPS =
-  2;
-
-const MIN_TELEGRAM_SCORE =
-  60;
-
-const MAX_RUG_RISK_FOR_ALERT =
-  59;
-
-const MIN_ALERT_LIQUIDITY_USD =
-  1000;
-
+const DISCOVERY_BLOCKS = 10;
 
 /*
- * Retry limits.
- */
-
-const DEX_MAX_ATTEMPTS =
-  3;
-
-const BLOCKSCOUT_MAX_ATTEMPTS =
-  2;
-
-
-/*
- * Telegram duplicate protection.
+ * Catch up at most 12 × 10 blocks per invocation.
  *
- * This is memory-only because V68 still has no KV.
+ * If more than 120 blocks behind, the next Cron invocation
+ * continues where this one stopped.
  */
+
+const MAX_CATCHUP_CHUNKS = 12;
+
+const RPC_TIMEOUT_MS = 3000;
+const HTTP_TIMEOUT_MS = 4000;
+
+const MAX_TOKEN_CHECKS = 5;
+const MAX_MARKET_LOOKUPS = 3;
+const MAX_HOLDER_LOOKUPS = 2;
+
+const MIN_TELEGRAM_SCORE = 60;
+const MAX_RUG_RISK_FOR_ALERT = 59;
+const MIN_ALERT_LIQUIDITY_USD = 1000;
+
+const DEX_MAX_ATTEMPTS = 3;
+const BLOCKSCOUT_MAX_ATTEMPTS = 2;
+
+/*
+ * Persistent candidate watching.
+ *
+ * Newly found coins stay in the watch list so the bot can
+ * re-check them after DexScreener / Blockscout indexing catches up.
+ */
+
+const WATCH_TOKEN_MAX_AGE_MS =
+  12 * 60 * 60 * 1000;
+
+const MAX_WATCHED_TOKENS = 50;
 
 const ALERT_COOLDOWN_MS =
   6 * 60 * 60 * 1000;
 
-const SENT_TOKENS =
-  new Map();
+/*
+ * KV key.
+ */
 
+const STATE_KEY =
+  "robinhood-meme-hunter-v69-state";
 
 /*
- * ---------------------------------------------------------
- * V4 EVENT TOPICS
- * ---------------------------------------------------------
+ * Memory fallback when KV is not configured.
+ */
+
+const MEMORY_ALERTS =
+  new Map();
+
+/*
+ * V4 events.
  */
 
 const V4_INITIALIZE_TOPIC =
@@ -178,24 +122,14 @@ const V4_SWAP_TOPIC =
 const V4_MODIFY_LIQUIDITY_TOPIC =
   "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec";
 
-
 /*
- * ---------------------------------------------------------
- * ERC20 SELECTORS
- * ---------------------------------------------------------
+ * ERC20 selectors.
  */
 
-const SEL_NAME =
-  "0x06fdde03";
-
-const SEL_SYMBOL =
-  "0x95d89b41";
-
-const SEL_DECIMALS =
-  "0x313ce567";
-
-const SEL_TOTAL_SUPPLY =
-  "0x18160ddd";
+const SEL_NAME = "0x06fdde03";
+const SEL_SYMBOL = "0x95d89b41";
+const SEL_DECIMALS = "0x313ce567";
+const SEL_TOTAL_SUPPLY = "0x18160ddd";
 
 
 /*
@@ -204,19 +138,11 @@ const SEL_TOTAL_SUPPLY =
  * =========================================================
  */
 
-function json(
-  data,
-  status = 200
-) {
+function json(data, status = 200) {
   return new Response(
-    JSON.stringify(
-      data,
-      null,
-      2
-    ),
+    JSON.stringify(data, null, 2),
     {
       status,
-
       headers: {
         "content-type":
           "application/json; charset=utf-8",
@@ -230,42 +156,28 @@ function json(
 
 
 function now() {
-  return new Date()
-    .toISOString();
+  return new Date().toISOString();
 }
 
 
 function sleep(ms) {
   return new Promise(
     resolve =>
-      setTimeout(
-        resolve,
-        ms
-      )
+      setTimeout(resolve, ms)
   );
 }
 
 
-function clamp(
-  value,
-  min,
-  max
-) {
+function clamp(value, min, max) {
   return Math.max(
     min,
-    Math.min(
-      max,
-      value
-    )
+    Math.min(max, value)
   );
 }
 
 
-function safeNumber(
-  value
-) {
-  const n =
-    Number(value);
+function safeNumber(value) {
+  const n = Number(value);
 
   return Number.isFinite(n)
     ? n
@@ -273,104 +185,68 @@ function safeNumber(
 }
 
 
-function isAddress(
-  value
-) {
+function isAddress(value) {
   return (
-    typeof value ===
-      "string" &&
-    /^0x[a-fA-F0-9]{40}$/.test(
-      value
-    )
+    typeof value === "string" &&
+    /^0x[a-fA-F0-9]{40}$/.test(value)
   );
 }
 
 
-function normalizeAddress(
-  value
-) {
+function normalizeAddress(value) {
   return String(
     value || ""
   ).toLowerCase();
 }
 
 
-function isZeroAddress(
-  value
-) {
+function isZeroAddress(value) {
   return (
     !value ||
-    normalizeAddress(
-      value
-    ) === ZERO
+    normalizeAddress(value) === ZERO
   );
 }
 
 
-function isKnownQuoteToken(
-  address
-) {
+function isKnownQuoteToken(address) {
   return KNOWN_QUOTE_TOKENS.has(
-    normalizeAddress(
-      address
-    )
+    normalizeAddress(address)
   );
 }
 
 
-function topicToAddress(
-  topic
-) {
+function topicToAddress(topic) {
   if (
-    typeof topic !==
-      "string" ||
-    !/^0x[0-9a-fA-F]{64}$/.test(
-      topic
-    )
+    typeof topic !== "string" ||
+    !/^0x[0-9a-fA-F]{64}$/.test(topic)
   ) {
     return null;
   }
 
-  return (
-    "0x" +
-    topic.slice(-40)
-  );
+  return "0x" + topic.slice(-40);
 }
 
 
-function hexToNumber(
-  hex
-) {
-  if (!hex) {
-    return null;
-  }
+function hexToNumber(hex) {
+  if (!hex) return null;
 
   try {
-    return Number(
-      BigInt(hex)
-    );
+    return Number(BigInt(hex));
   } catch {
     return null;
   }
 }
 
 
-function hexWord(
-  data,
-  index
-) {
+function hexWord(data, index) {
   if (
-    typeof data !==
-      "string" ||
-    !data.startsWith(
-      "0x"
-    )
+    typeof data !== "string" ||
+    !data.startsWith("0x")
   ) {
     return null;
   }
 
-  const raw =
-    data.slice(2);
+  const raw = data.slice(2);
 
   const start =
     index * 64;
@@ -378,58 +254,37 @@ function hexWord(
   const end =
     start + 64;
 
-  if (
-    end >
-    raw.length
-  ) {
+  if (end > raw.length) {
     return null;
   }
 
   return (
     "0x" +
-    raw.slice(
-      start,
-      end
-    )
+    raw.slice(start, end)
   );
 }
 
 
-function decodeSignedInt(
-  hex,
-  bits
-) {
-  if (!hex) {
-    return null;
-  }
+function decodeSignedInt(hex, bits) {
+  if (!hex) return null;
 
   try {
     let value =
       BigInt(hex);
 
     const mask =
-      (
-        1n <<
-        BigInt(bits)
-      ) -
+      (1n << BigInt(bits)) -
       1n;
 
-    value =
-      value &
-      mask;
+    value &= mask;
 
     const sign =
       1n <<
-      BigInt(
-        bits - 1
-      );
+      BigInt(bits - 1);
 
-    if (
-      value >= sign
-    ) {
+    if (value >= sign) {
       value -=
-        1n <<
-        BigInt(bits);
+        1n << BigInt(bits);
     }
 
     return value;
@@ -445,18 +300,12 @@ function percentage(
   denominator
 ) {
   const a =
-    safeNumber(
-      numerator
-    );
+    safeNumber(numerator);
 
   const b =
-    safeNumber(
-      denominator
-    );
+    safeNumber(denominator);
 
-  if (
-    b <= 0
-  ) {
+  if (b <= 0) {
     return null;
   }
 
@@ -468,88 +317,343 @@ function percentage(
 }
 
 
-function formatMoney(
-  value
-) {
+function formatMoney(value) {
   const n =
-    safeNumber(
-      value
-    );
+    safeNumber(value);
 
-  if (
-    n <= 0
-  ) {
+  if (n <= 0) {
     return "UNVERIFIED";
   }
 
-  if (
-    n >=
-    1_000_000_000
-  ) {
+  if (n >= 1_000_000_000) {
     return (
       "$" +
-      (
-        n /
-        1_000_000_000
-      ).toFixed(2) +
+      (n / 1_000_000_000)
+        .toFixed(2) +
       "B"
     );
   }
 
-  if (
-    n >=
-    1_000_000
-  ) {
+  if (n >= 1_000_000) {
     return (
       "$" +
-      (
-        n /
-        1_000_000
-      ).toFixed(2) +
+      (n / 1_000_000)
+        .toFixed(2) +
       "M"
     );
   }
 
-  if (
-    n >= 1000
-  ) {
+  if (n >= 1000) {
     return (
       "$" +
-      (
-        n /
-        1000
-      ).toFixed(1) +
+      (n / 1000)
+        .toFixed(1) +
       "K"
     );
   }
 
-  return (
-    "$" +
-    n.toFixed(2)
+  return "$" + n.toFixed(2);
+}
+
+
+/*
+ * =========================================================
+ * PERSISTENT STATE
+ * =========================================================
+ */
+
+function hasStateKV(env) {
+  return Boolean(
+    env.MEME_HUNTER_STATE &&
+    typeof env.MEME_HUNTER_STATE.get ===
+      "function" &&
+    typeof env.MEME_HUNTER_STATE.put ===
+      "function"
   );
 }
 
 
-function pruneSentTokens() {
+function defaultState() {
+  return {
+    version:
+      VERSION,
+
+    lastScannedBlock:
+      null,
+
+    watchedTokens:
+      [],
+
+    alerts:
+      {},
+
+    createdAt:
+      now(),
+
+    updatedAt:
+      now()
+  };
+}
+
+
+async function readState(env) {
+  if (!hasStateKV(env)) {
+    return {
+      persistent:
+        false,
+
+      state:
+        defaultState(),
+
+      error:
+        null
+    };
+  }
+
+  try {
+    const raw =
+      await env
+        .MEME_HUNTER_STATE
+        .get(STATE_KEY);
+
+    if (!raw) {
+      return {
+        persistent:
+          true,
+
+        state:
+          defaultState(),
+
+        error:
+          null
+      };
+    }
+
+    const parsed =
+      JSON.parse(raw);
+
+    return {
+      persistent:
+        true,
+
+      state: {
+        ...defaultState(),
+        ...parsed,
+
+        watchedTokens:
+          Array.isArray(
+            parsed?.watchedTokens
+          )
+            ? parsed.watchedTokens
+            : [],
+
+        alerts:
+          parsed?.alerts &&
+          typeof parsed.alerts === "object"
+            ? parsed.alerts
+            : {}
+      },
+
+      error:
+        null
+    };
+
+  } catch (error) {
+    return {
+      persistent:
+        true,
+
+      state:
+        defaultState(),
+
+      error:
+        String(
+          error?.message ||
+          error
+        )
+    };
+  }
+}
+
+
+async function writeState(
+  env,
+  state
+) {
+  if (!hasStateKV(env)) {
+    return {
+      saved:
+        false,
+
+      reason:
+        "KV_NOT_CONFIGURED"
+    };
+  }
+
+  try {
+    state.version =
+      VERSION;
+
+    state.updatedAt =
+      now();
+
+    await env
+      .MEME_HUNTER_STATE
+      .put(
+        STATE_KEY,
+        JSON.stringify(state)
+      );
+
+    return {
+      saved:
+        true,
+
+      reason:
+        null
+    };
+
+  } catch (error) {
+    return {
+      saved:
+        false,
+
+      reason:
+        String(
+          error?.message ||
+          error
+        )
+    };
+  }
+}
+
+
+function pruneState(state) {
   const current =
     Date.now();
+
+  state.watchedTokens =
+    (state.watchedTokens || [])
+      .filter(
+        item => {
+          const firstSeen =
+            safeNumber(
+              item.firstSeenAt
+            );
+
+          return (
+            firstSeen > 0 &&
+            current -
+              firstSeen <=
+              WATCH_TOKEN_MAX_AGE_MS
+          );
+        }
+      )
+      .slice(
+        0,
+        MAX_WATCHED_TOKENS
+      );
+
+  const alerts =
+    state.alerts || {};
 
   for (
     const [
       token,
       timestamp
-    ] of SENT_TOKENS
+    ] of
+    Object.entries(alerts)
   ) {
     if (
       current -
-      timestamp >
+        safeNumber(timestamp) >
       ALERT_COOLDOWN_MS
     ) {
-      SENT_TOKENS.delete(
-        token
-      );
+      delete alerts[token];
     }
   }
+
+  state.alerts =
+    alerts;
+}
+
+
+function mergeWatchedToken(
+  state,
+  candidate
+) {
+  const address =
+    normalizeAddress(
+      candidate.address
+    );
+
+  let existing =
+    state.watchedTokens
+      .find(
+        token =>
+          normalizeAddress(
+            token.address
+          ) === address
+      );
+
+  if (!existing) {
+    existing = {
+      address:
+        candidate.address,
+
+      pools:
+        [],
+
+      firstSeenAt:
+        Date.now(),
+
+      lastCheckedAt:
+        null,
+
+      checks:
+        0,
+
+      metadata:
+        null,
+
+      lastMarket:
+        null
+    };
+
+    state.watchedTokens
+      .push(existing);
+  }
+
+  const existingPoolIds =
+    new Set(
+      (existing.pools || [])
+        .map(
+          pool =>
+            pool.poolId
+        )
+        .filter(Boolean)
+    );
+
+  for (
+    const pool of
+    candidate.pools || []
+  ) {
+    if (
+      pool?.poolId &&
+      !existingPoolIds.has(
+        pool.poolId
+      )
+    ) {
+      existing.pools
+        .push(pool);
+
+      existingPoolIds
+        .add(
+          pool.poolId
+        );
+    }
+  }
+
+  return existing;
 }
 
 
@@ -580,16 +684,13 @@ async function fetchWithTimeout(
       url,
       {
         ...options,
-
         signal:
           controller.signal
       }
     );
 
   } finally {
-    clearTimeout(
-      timer
-    );
+    clearTimeout(timer);
   }
 }
 
@@ -600,12 +701,8 @@ async function fetchWithTimeout(
  * =========================================================
  */
 
-function alchemyRpc(
-  env
-) {
-  if (
-    !env.ALCHEMY_API_KEY
-  ) {
+function alchemyRpc(env) {
+  if (!env.ALCHEMY_API_KEY) {
     return null;
   }
 
@@ -667,9 +764,7 @@ async function rpcRequest(
       response.status ===
       429
     ) {
-      if (
-        attempt < 2
-      ) {
+      if (attempt < 2) {
         await sleep(
           300 *
           Math.pow(
@@ -691,9 +786,7 @@ async function rpcRequest(
       );
     }
 
-    if (
-      !response.ok
-    ) {
+    if (!response.ok) {
       throw new Error(
         `HTTP ${response.status}`
       );
@@ -702,12 +795,9 @@ async function rpcRequest(
     const body =
       await response.json();
 
-    if (
-      body.error
-    ) {
+    if (body.error) {
       throw new Error(
-        body.error
-          .message ||
+        body.error.message ||
         `RPC error ${body.error.code}`
       );
     }
@@ -715,9 +805,7 @@ async function rpcRequest(
     return body.result;
 
   } finally {
-    clearTimeout(
-      timer
-    );
+    clearTimeout(timer);
   }
 }
 
@@ -757,9 +845,7 @@ async function rpcWithFallback(
   }
 
   const alchemy =
-    alchemyRpc(
-      env
-    );
+    alchemyRpc(env);
 
   if (!alchemy) {
     return {
@@ -814,13 +900,11 @@ async function rpcWithFallback(
 
 /*
  * =========================================================
- * BLOCK
+ * BLOCK + LOGS
  * =========================================================
  */
 
-async function getLatestBlock(
-  env
-) {
+async function getLatestBlock(env) {
   const result =
     await rpcWithFallback(
       env,
@@ -828,9 +912,7 @@ async function getLatestBlock(
       []
     );
 
-  if (
-    !result.result
-  ) {
+  if (!result.result) {
     throw new Error(
       result.error ||
       "LATEST_BLOCK_FAILED"
@@ -848,12 +930,6 @@ async function getLatestBlock(
   };
 }
 
-
-/*
- * =========================================================
- * LOGS
- * =========================================================
- */
 
 async function getLogs(
   env,
@@ -894,6 +970,164 @@ async function getLogs(
 
 /*
  * =========================================================
+ * CATCH-UP PLAN
+ * =========================================================
+ */
+
+function buildScanRanges(
+  latestBlock,
+  lastScannedBlock,
+  persistent
+) {
+  /*
+   * No KV:
+   * V68-compatible latest-10 fallback.
+   */
+
+  if (!persistent) {
+    const from =
+      latestBlock -
+      BigInt(
+        DISCOVERY_BLOCKS -
+        1
+      );
+
+    return {
+      mode:
+        "LATEST_WINDOW_FALLBACK",
+
+      ranges: [
+        {
+          fromBlock:
+            from < 0n
+              ? 0n
+              : from,
+
+          toBlock:
+            latestBlock
+        }
+      ],
+
+      backlogBlocks:
+        0
+    };
+  }
+
+  /*
+   * First persistent run:
+   * bootstrap from latest 10 blocks.
+   */
+
+  if (
+    lastScannedBlock ===
+      null ||
+    lastScannedBlock ===
+      undefined
+  ) {
+    const from =
+      latestBlock -
+      BigInt(
+        DISCOVERY_BLOCKS -
+        1
+      );
+
+    return {
+      mode:
+        "PERSISTENT_BOOTSTRAP",
+
+      ranges: [
+        {
+          fromBlock:
+            from < 0n
+              ? 0n
+              : from,
+
+          toBlock:
+            latestBlock
+        }
+      ],
+
+      backlogBlocks:
+        DISCOVERY_BLOCKS
+    };
+  }
+
+  const last =
+    BigInt(
+      lastScannedBlock
+    );
+
+  if (last >= latestBlock) {
+    return {
+      mode:
+        "UP_TO_DATE",
+
+      ranges:
+        [],
+
+      backlogBlocks:
+        0
+    };
+  }
+
+  const start =
+    last + 1n;
+
+  const backlog =
+    latestBlock -
+    start +
+    1n;
+
+  const ranges =
+    [];
+
+  let cursor =
+    start;
+
+  while (
+    cursor <=
+      latestBlock &&
+    ranges.length <
+      MAX_CATCHUP_CHUNKS
+  ) {
+    let end =
+      cursor +
+      BigInt(
+        DISCOVERY_BLOCKS -
+        1
+      );
+
+    if (end > latestBlock) {
+      end =
+        latestBlock;
+    }
+
+    ranges.push({
+      fromBlock:
+        cursor,
+
+      toBlock:
+        end
+    });
+
+    cursor =
+      end + 1n;
+  }
+
+  return {
+    mode:
+      "PERSISTENT_CATCHUP",
+
+    ranges,
+
+    backlogBlocks:
+      Number(backlog)
+  };
+}
+
+
+/*
+ * =========================================================
  * ERC20
  * =========================================================
  */
@@ -919,9 +1153,7 @@ async function ethCall(
       ]
     );
 
-  if (
-    !result.result
-  ) {
+  if (!result.result) {
     throw new Error(
       result.error ||
       "ETH_CALL_FAILED"
@@ -932,40 +1164,29 @@ async function ethCall(
 }
 
 
-function decodeUint256(
-  hex
-) {
+function decodeUint256(hex) {
   if (
-    typeof hex !==
-      "string" ||
-    !/^0x[0-9a-fA-F]+$/.test(
-      hex
-    ) ||
+    typeof hex !== "string" ||
+    !/^0x[0-9a-fA-F]+$/.test(hex) ||
     hex.length < 66
   ) {
     return null;
   }
 
   try {
-    return BigInt(
-      hex
-    );
+    return BigInt(hex);
   } catch {
     return null;
   }
 }
 
 
-function hexToUtf8(
-  hex
-) {
+function hexToUtf8(hex) {
   try {
     const bytes =
       new Uint8Array(
         hex
-          .match(
-            /.{1,2}/g
-          )
+          .match(/.{1,2}/g)
           ?.map(
             value =>
               parseInt(
@@ -977,13 +1198,8 @@ function hexToUtf8(
       );
 
     return new TextDecoder()
-      .decode(
-        bytes
-      )
-      .replace(
-        /\0/g,
-        ""
-      )
+      .decode(bytes)
+      .replace(/\0/g, "")
       .trim();
 
   } catch {
@@ -992,15 +1208,10 @@ function hexToUtf8(
 }
 
 
-function decodeString(
-  hex
-) {
+function decodeString(hex) {
   if (
-    typeof hex !==
-      "string" ||
-    !/^0x[0-9a-fA-F]*$/.test(
-      hex
-    )
+    typeof hex !== "string" ||
+    !/^0x[0-9a-fA-F]*$/.test(hex)
   ) {
     return null;
   }
@@ -1008,17 +1219,12 @@ function decodeString(
   const raw =
     hex.slice(2);
 
-  if (
-    !raw.length
-  ) {
+  if (!raw.length) {
     return null;
   }
 
   try {
-    if (
-      raw.length >=
-      128
-    ) {
+    if (raw.length >= 128) {
       const offset =
         Number(
           BigInt(
@@ -1049,17 +1255,13 @@ function decodeString(
           );
 
         const start =
-          lengthPos +
-          64;
+          lengthPos + 64;
 
         const end =
           start +
           length * 2;
 
-        if (
-          end <=
-          raw.length
-        ) {
+        if (end <= raw.length) {
           return hexToUtf8(
             raw.slice(
               start,
@@ -1070,10 +1272,7 @@ function decodeString(
       }
     }
 
-    if (
-      raw.length >=
-      64
-    ) {
+    if (raw.length >= 64) {
       return hexToUtf8(
         raw.slice(
           0,
@@ -1121,12 +1320,8 @@ async function verifyERC20(
   address
 ) {
   if (
-    !isAddress(
-      address
-    ) ||
-    isZeroAddress(
-      address
-    )
+    !isAddress(address) ||
+    isZeroAddress(address)
   ) {
     return {
       validERC20:
@@ -1145,8 +1340,7 @@ async function verifyERC20(
 
   if (
     !codeResult.code ||
-    codeResult.code ===
-      "0x"
+    codeResult.code === "0x"
   ) {
     return {
       validERC20:
@@ -1170,8 +1364,7 @@ async function verifyERC20(
       );
 
   } catch {
-    checks.name =
-      null;
+    checks.name = null;
   }
 
   try {
@@ -1185,8 +1378,7 @@ async function verifyERC20(
       );
 
   } catch {
-    checks.symbol =
-      null;
+    checks.symbol = null;
   }
 
   try {
@@ -1201,14 +1393,11 @@ async function verifyERC20(
 
     checks.decimals =
       result !== null
-        ? Number(
-            result
-          )
+        ? Number(result)
         : null;
 
   } catch {
-    checks.decimals =
-      null;
+    checks.decimals = null;
   }
 
   try {
@@ -1222,37 +1411,24 @@ async function verifyERC20(
       );
 
   } catch {
-    checks.totalSupply =
-      null;
+    checks.totalSupply = null;
   }
 
   const methodScore =
+    (checks.name ? 1 : 0) +
+    (checks.symbol ? 1 : 0) +
     (
-      checks.name
+      checks.decimals !== null
         ? 1
         : 0
     ) +
     (
-      checks.symbol
-        ? 1
-        : 0
-    ) +
-    (
-      checks.decimals !==
-        null
-        ? 1
-        : 0
-    ) +
-    (
-      checks.totalSupply !==
-        null
+      checks.totalSupply !== null
         ? 1
         : 0
     );
 
-  if (
-    methodScore < 3
-  ) {
+  if (methodScore < 3) {
     return {
       validERC20:
         false,
@@ -1265,12 +1441,9 @@ async function verifyERC20(
   }
 
   if (
-    checks.decimals ===
-      null ||
-    checks.decimals <
-      0 ||
-    checks.decimals >
-      255
+    checks.decimals === null ||
+    checks.decimals < 0 ||
+    checks.decimals > 255
   ) {
     return {
       validERC20:
@@ -1284,10 +1457,8 @@ async function verifyERC20(
   }
 
   if (
-    checks.totalSupply ===
-      null ||
-    checks.totalSupply <=
-      0n
+    checks.totalSupply === null ||
+    checks.totalSupply <= 0n
   ) {
     return {
       validERC20:
@@ -1330,28 +1501,22 @@ async function verifyERC20(
 
 /*
  * =========================================================
- * V4 INITIALIZE DECODER
+ * V4 INITIALIZE
  * =========================================================
  */
 
-function decodeInitializeLog(
-  log
-) {
+function decodeInitializeLog(log) {
   if (
     !log ||
-    !Array.isArray(
-      log.topics
-    ) ||
-    log.topics.length !==
-      4
+    !Array.isArray(log.topics) ||
+    log.topics.length !== 4
   ) {
     return null;
   }
 
   const topic0 =
     String(
-      log.topics[0] ||
-      ""
+      log.topics[0] || ""
     ).toLowerCase();
 
   if (
@@ -1379,62 +1544,43 @@ function decodeInitializeLog(
   }
 
   const data =
-    log.data ||
-    "0x";
+    log.data || "0x";
 
   if (
-    !/^0x[0-9a-fA-F]{320}$/.test(
-      data
-    )
+    !/^0x[0-9a-fA-F]{320}$/.test(data)
   ) {
     return null;
   }
 
   const fee =
     hexToNumber(
-      hexWord(
-        data,
-        0
-      )
+      hexWord(data, 0)
     );
 
   const tickSpacing =
     decodeSignedInt(
-      hexWord(
-        data,
-        1
-      ),
+      hexWord(data, 1),
       24
     );
 
   const hooks =
     topicToAddress(
-      hexWord(
-        data,
-        2
-      )
+      hexWord(data, 2)
     );
 
-  let sqrtPriceX96 =
-    null;
+  let sqrtPriceX96 = null;
 
   try {
     sqrtPriceX96 =
       BigInt(
-        hexWord(
-          data,
-          3
-        )
+        hexWord(data, 3)
       );
 
   } catch {}
 
   const tick =
     decodeSignedInt(
-      hexWord(
-        data,
-        4
-      ),
+      hexWord(data, 4),
       24
     );
 
@@ -1442,8 +1588,7 @@ function decodeInitializeLog(
     fee === null ||
     tickSpacing === null ||
     !hooks ||
-    sqrtPriceX96 ===
-      null ||
+    sqrtPriceX96 === null ||
     tick === null
   ) {
     return null;
@@ -1460,14 +1605,12 @@ function decodeInitializeLog(
     fee,
 
     tickSpacing:
-      tickSpacing
-        .toString(),
+      tickSpacing.toString(),
 
     hooks,
 
     sqrtPriceX96:
-      sqrtPriceX96
-        .toString(),
+      sqrtPriceX96.toString(),
 
     tick:
       tick.toString(),
@@ -1500,30 +1643,22 @@ function extractTokenCurrencies(
   ) {
     if (
       !currency ||
-      isZeroAddress(
-        currency
-      )
+      isZeroAddress(currency)
     ) {
       continue;
     }
 
     const normalized =
-      normalizeAddress(
-        currency
-      );
+      normalizeAddress(currency);
 
     if (
       !result.some(
         token =>
-          normalizeAddress(
-            token
-          ) ===
+          normalizeAddress(token) ===
           normalized
       )
     ) {
-      result.push(
-        currency
-      );
+      result.push(currency);
     }
   }
 
@@ -1533,34 +1668,26 @@ function extractTokenCurrencies(
 
 /*
  * =========================================================
- * CANDIDATE PRIORITY
+ * PRIORITY
  * =========================================================
  */
 
 function candidatePriority(
   candidate
 ) {
-  let priority =
-    50;
+  let priority = 50;
 
   if (
     isKnownQuoteToken(
       candidate.address
     )
   ) {
-    priority -=
-      40;
+    priority -= 40;
   }
-
-  /*
-   * If token appears against a known quote token,
-   * increase priority considerably.
-   */
 
   for (
     const pool of
-    candidate.pools ||
-    []
+    candidate.pools || []
   ) {
     const other =
       normalizeAddress(
@@ -1573,13 +1700,23 @@ function candidatePriority(
         : pool.currency0;
 
     if (
-      isKnownQuoteToken(
-        other
-      )
+      isKnownQuoteToken(other)
     ) {
-      priority +=
-        35;
+      priority += 35;
     }
+  }
+
+  /*
+   * Newer / less-checked watch items
+   * get a slight boost.
+   */
+
+  if (
+    safeNumber(
+      candidate.checks
+    ) < 3
+  ) {
+    priority += 5;
   }
 
   return priority;
@@ -1610,9 +1747,7 @@ async function checkPoolActivity(
       ]
     );
 
-  if (
-    !result.result
-  ) {
+  if (!result.result) {
     return {
       success:
         false,
@@ -1634,11 +1769,8 @@ async function checkPoolActivity(
     };
   }
 
-  let swaps =
-    0;
-
-  let liquidityEvents =
-    0;
+  let swaps = 0;
+  let liquidityEvents = 0;
 
   for (
     const log of
@@ -1646,8 +1778,7 @@ async function checkPoolActivity(
   ) {
     const topic0 =
       String(
-        log.topics?.[0] ||
-        ""
+        log.topics?.[0] || ""
       ).toLowerCase();
 
     if (
@@ -1687,7 +1818,7 @@ async function checkPoolActivity(
 
 /*
  * =========================================================
- * DEXSCREENER WITH 429 BACKOFF
+ * DEXSCREENER
  * =========================================================
  */
 
@@ -1708,23 +1839,18 @@ async function dexRequest(
       );
 
     if (
-      response.status ===
-      429
+      response.status === 429
     ) {
       if (
         attempt <
-        DEX_MAX_ATTEMPTS -
-        1
+        DEX_MAX_ATTEMPTS - 1
       ) {
-        const delay =
+        await sleep(
           500 *
           Math.pow(
             2,
             attempt
-          );
-
-        await sleep(
-          delay
+          )
         );
 
         return dexRequest(
@@ -1743,17 +1869,12 @@ async function dexRequest(
         attempts:
           attempt + 1,
 
-        status:
-          429,
-
         error:
           "HTTP 429"
       };
     }
 
-    if (
-      !response.ok
-    ) {
+    if (!response.ok) {
       return {
         ok:
           false,
@@ -1764,9 +1885,6 @@ async function dexRequest(
         attempts:
           attempt + 1,
 
-        status:
-          response.status,
-
         error:
           `HTTP ${response.status}`
       };
@@ -1776,14 +1894,8 @@ async function dexRequest(
       ok:
         true,
 
-      rateLimited:
-        false,
-
       attempts:
         attempt + 1,
-
-      status:
-        response.status,
 
       data:
         await response.json()
@@ -1794,14 +1906,8 @@ async function dexRequest(
       ok:
         false,
 
-      rateLimited:
-        false,
-
       attempts:
         attempt + 1,
-
-      status:
-        null,
 
       error:
         String(
@@ -1823,13 +1929,9 @@ async function getMarketData(
     `${token}`;
 
   const request =
-    await dexRequest(
-      url
-    );
+    await dexRequest(url);
 
-  if (
-    !request.ok
-  ) {
+  if (!request.ok) {
     return {
       verified:
         false,
@@ -1854,35 +1956,17 @@ async function getMarketData(
       ? request.data
       : [];
 
-  if (
-    pairs.length ===
-    0
-  ) {
-    return {
-      verified:
-        false,
-
-      status:
-        "NO_MARKET_FOUND",
-
-      attempts:
-        request.attempts
-    };
-  }
-
   const robinhoodPairs =
     pairs.filter(
       pair =>
         String(
-          pair?.chainId ||
-          ""
+          pair?.chainId || ""
         ).toLowerCase() ===
         DEX_CHAIN_ID
     );
 
   if (
-    robinhoodPairs.length ===
-    0
+    robinhoodPairs.length === 0
   ) {
     return {
       verified:
@@ -1911,50 +1995,32 @@ async function getMarketData(
 
   const buys5m =
     safeNumber(
-      pair?.txns
-        ?.m5?.buys
+      pair?.txns?.m5?.buys
     );
 
   const sells5m =
     safeNumber(
-      pair?.txns
-        ?.m5?.sells
+      pair?.txns?.m5?.sells
     );
 
   const buys1h =
     safeNumber(
-      pair?.txns
-        ?.h1?.buys
+      pair?.txns?.h1?.buys
     );
 
   const sells1h =
     safeNumber(
-      pair?.txns
-        ?.h1?.sells
-    );
-
-  const buys6h =
-    safeNumber(
-      pair?.txns
-        ?.h6?.buys
-    );
-
-  const sells6h =
-    safeNumber(
-      pair?.txns
-        ?.h6?.sells
+      pair?.txns?.h1?.sells
     );
 
   const buys24h =
     safeNumber(
-      pair?.txns
-        ?.h24?.buys
+      pair?.txns?.h24?.buys
     );
 
   const sells24h =
     safeNumber(
-      pair?.txns
-        ?.h24?.sells
+      pair?.txns?.h24?.sells
     );
 
   const liquidityUsd =
@@ -1967,25 +2033,10 @@ async function getMarketData(
       pair?.marketCap
     );
 
-  const fdv =
-    safeNumber(
-      pair?.fdv
-    );
-
   const pairCreatedAt =
     safeNumber(
       pair?.pairCreatedAt
     );
-
-  const ageMinutes =
-    pairCreatedAt >
-      0
-      ? (
-          Date.now() -
-          pairCreatedAt
-        ) /
-        60000
-      : null;
 
   return {
     verified:
@@ -2009,14 +2060,6 @@ async function getMarketData(
       pair?.url ||
       null,
 
-    baseToken:
-      pair?.baseToken ||
-      null,
-
-    quoteToken:
-      pair?.quoteToken ||
-      null,
-
     priceUsd:
       pair?.priceUsd ||
       null,
@@ -2024,24 +2067,23 @@ async function getMarketData(
     liquidityUsd,
 
     marketCap:
-      marketCap >
-        0
+      marketCap > 0
         ? marketCap
         : null,
 
     fdv:
-      fdv >
-        0
-        ? fdv
-        : null,
+      safeNumber(
+        pair?.fdv
+      ) || null,
 
-    pairCreatedAt:
-      pairCreatedAt >
-        0
-        ? pairCreatedAt
+    ageMinutes:
+      pairCreatedAt > 0
+        ? (
+            Date.now() -
+            pairCreatedAt
+          ) /
+          60000
         : null,
-
-    ageMinutes,
 
     volume: {
       m5:
@@ -2082,14 +2124,6 @@ async function getMarketData(
           sells1h
       },
 
-      h6: {
-        buys:
-          buys6h,
-
-        sells:
-          sells6h
-      },
-
       h24: {
         buys:
           buys24h,
@@ -2125,50 +2159,40 @@ async function getMarketData(
     priceChange: {
       m5:
         safeNumber(
-          pair?.priceChange
-            ?.m5
+          pair?.priceChange?.m5
         ),
 
       h1:
         safeNumber(
-          pair?.priceChange
-            ?.h1
+          pair?.priceChange?.h1
         ),
 
       h6:
         safeNumber(
-          pair?.priceChange
-            ?.h6
+          pair?.priceChange?.h6
         ),
 
       h24:
         safeNumber(
-          pair?.priceChange
-            ?.h24
+          pair?.priceChange?.h24
         )
     },
 
     liquidityMarketCapRatio:
-      marketCap >
-        0
+      marketCap > 0
         ? (
             liquidityUsd /
             marketCap *
             100
           )
-        : null,
-
-    boostsActive:
-      safeNumber(
-        pair?.boosts?.active
-      )
+        : null
   };
 }
 
 
 /*
  * =========================================================
- * BLOCKSCOUT WITH BACKOFF
+ * BLOCKSCOUT
  * =========================================================
  */
 
@@ -2176,9 +2200,7 @@ function blockscoutUrl(
   env,
   path
 ) {
-  if (
-    env.BLOCKSCOUT_API_KEY
-  ) {
+  if (env.BLOCKSCOUT_API_KEY) {
     const separator =
       path.includes("?")
         ? "&"
@@ -2204,16 +2226,13 @@ async function blockscoutGet(
   path,
   attempt = 0
 ) {
-  const url =
-    blockscoutUrl(
-      env,
-      path
-    );
-
   try {
     const response =
       await fetchWithTimeout(
-        url,
+        blockscoutUrl(
+          env,
+          path
+        ),
         {
           headers: {
             accept:
@@ -2223,23 +2242,19 @@ async function blockscoutGet(
       );
 
     if (
-      response.status ===
-      429
+      response.status === 429
     ) {
       if (
         attempt <
         BLOCKSCOUT_MAX_ATTEMPTS -
         1
       ) {
-        const delay =
+        await sleep(
           750 *
           Math.pow(
             2,
             attempt
-          );
-
-        await sleep(
-          delay
+          )
         );
 
         return blockscoutGet(
@@ -2256,26 +2271,18 @@ async function blockscoutGet(
         attempts:
           attempt + 1,
 
-        rateLimited:
-          true,
-
         error:
           "HTTP 429"
       };
     }
 
-    if (
-      !response.ok
-    ) {
+    if (!response.ok) {
       return {
         ok:
           false,
 
         attempts:
           attempt + 1,
-
-        rateLimited:
-          false,
 
         error:
           `HTTP ${response.status}`
@@ -2289,9 +2296,6 @@ async function blockscoutGet(
       attempts:
         attempt + 1,
 
-      rateLimited:
-        false,
-
       data:
         await response.json()
     };
@@ -2303,9 +2307,6 @@ async function blockscoutGet(
 
       attempts:
         attempt + 1,
-
-      rateLimited:
-        false,
 
       error:
         String(
@@ -2324,21 +2325,15 @@ function holderPercentage(
   try {
     const held =
       BigInt(
-        String(
-          rawValue
-        )
+        String(rawValue)
       );
 
     const supply =
       BigInt(
-        String(
-          totalSupply
-        )
+        String(totalSupply)
       );
 
-    if (
-      supply <= 0n
-    ) {
+    if (supply <= 0n) {
       return null;
     }
 
@@ -2348,9 +2343,7 @@ function holderPercentage(
       supply;
 
     return (
-      Number(
-        scaled
-      ) /
+      Number(scaled) /
       10_000
     );
 
@@ -2365,30 +2358,16 @@ async function getHolderData(
   token,
   totalSupply
 ) {
-  /*
-   * Call counters first.
-   *
-   * Only call the more expensive holder listing
-   * if counters succeeds.
-   */
-
   const counters =
     await blockscoutGet(
       env,
       `/api/v2/tokens/${token}/counters`
     );
 
-  if (
-    !counters.ok
-  ) {
+  if (!counters.ok) {
     return {
       verified:
         false,
-
-      source:
-        env.BLOCKSCOUT_API_KEY
-          ? "BLOCKSCOUT_PRO"
-          : "BLOCKSCOUT_PUBLIC",
 
       holderCount:
         null,
@@ -2404,30 +2383,18 @@ async function getHolderData(
           null,
 
         top10Percent:
-          null,
-
-        adjustedForKnownSystemWallets:
-          false
+          null
       },
 
       topHolders:
         [],
-
-      requestAttempts: {
-        counters:
-          counters.attempts ||
-          0,
-
-        holders:
-          0
-      },
 
       errors: {
         counters:
           counters.error,
 
         holders:
-          "SKIPPED_AFTER_COUNTER_FAILURE"
+          "SKIPPED"
       }
     };
   }
@@ -2444,68 +2411,19 @@ async function getHolderData(
         ?.transfers_count
     );
 
-  /*
-   * Don't waste another request when there
-   * are no holders to inspect.
-   */
-
-  if (
-    holderCount <= 0
-  ) {
-    return {
-      verified:
-        true,
-
-      source:
-        env.BLOCKSCOUT_API_KEY
-          ? "BLOCKSCOUT_PRO"
-          : "BLOCKSCOUT_PUBLIC",
-
-      holderCount:
-        0,
-
-      transferCount,
-
-      concentration: {
-        top1Percent:
-          null,
-
-        top5Percent:
-          null,
-
-        top10Percent:
-          null,
-
-        adjustedForKnownSystemWallets:
-          false
-      },
-
-      topHolders:
-        [],
-
-      requestAttempts: {
-        counters:
-          counters.attempts,
-
-        holders:
-          0
-      },
-
-      errors: {
-        counters:
-          null,
-
-        holders:
-          null
-      }
-    };
-  }
-
   const holders =
-    await blockscoutGet(
-      env,
-      `/api/v2/tokens/${token}/holders`
-    );
+    holderCount > 0
+      ? await blockscoutGet(
+          env,
+          `/api/v2/tokens/${token}/holders`
+        )
+      : {
+          ok:
+            false,
+
+          error:
+            "NO_HOLDERS"
+        };
 
   const topHolders =
     [];
@@ -2523,42 +2441,26 @@ async function getHolderData(
         10
       )
     ) {
-      const holderAddress =
-        item
-          ?.address_hash
-          ?.hash ||
-        item
-          ?.address
-          ?.hash ||
-        null;
-
       const value =
-        item?.value ||
-        "0";
+        item?.value || "0";
 
       topHolders.push({
         address:
-          holderAddress,
+          item
+            ?.address_hash
+            ?.hash ||
+          item
+            ?.address
+            ?.hash ||
+          null,
 
         value:
-          String(
-            value
-          ),
+          String(value),
 
         percentage:
           holderPercentage(
             value,
             totalSupply
-          ),
-
-        isContract:
-          Boolean(
-            item
-              ?.address_hash
-              ?.is_contract ||
-            item
-              ?.address
-              ?.is_contract
           )
       });
     }
@@ -2567,100 +2469,51 @@ async function getHolderData(
   const percentages =
     topHolders
       .map(
-        holder =>
-          holder.percentage
+        item =>
+          item.percentage
       )
       .filter(
         value =>
-          value !==
-          null
+          value !== null
       );
-
-  const top1 =
-    percentages.length
-      ? percentages[0]
-      : null;
-
-  const top5 =
-    percentages.length
-      ? percentages
-          .slice(
-            0,
-            5
-          )
-          .reduce(
-            (
-              sum,
-              value
-            ) =>
-              sum +
-              value,
-            0
-          )
-      : null;
-
-  const top10 =
-    percentages.length
-      ? percentages
-          .slice(
-            0,
-            10
-          )
-          .reduce(
-            (
-              sum,
-              value
-            ) =>
-              sum +
-              value,
-            0
-          )
-      : null;
 
   return {
     verified:
-      Boolean(
-        counters.ok
-      ),
+      true,
 
-    source:
-      env.BLOCKSCOUT_API_KEY
-        ? "BLOCKSCOUT_PRO"
-        : "BLOCKSCOUT_PUBLIC",
+    holderCount,
 
-    holderCount:
-      holderCount ||
-      null,
-
-    transferCount:
-      transferCount ||
-      null,
+    transferCount,
 
     concentration: {
       top1Percent:
-        top1,
+        percentages[0] ??
+        null,
 
       top5Percent:
-        top5,
+        percentages.length
+          ? percentages
+              .slice(0, 5)
+              .reduce(
+                (a, b) =>
+                  a + b,
+                0
+              )
+          : null,
 
       top10Percent:
-        top10,
-
-      adjustedForKnownSystemWallets:
-        false
+        percentages.length
+          ? percentages
+              .slice(0, 10)
+              .reduce(
+                (a, b) =>
+                  a + b,
+                0
+              )
+          : null
     },
 
     topHolders,
-
-    requestAttempts: {
-      counters:
-        counters.attempts ||
-        0,
-
-      holders:
-        holders.attempts ||
-        0
-    },
 
     errors: {
       counters:
@@ -2677,7 +2530,7 @@ async function getHolderData(
 
 /*
  * =========================================================
- * RUG SCORE
+ * SCORING
  * =========================================================
  */
 
@@ -2687,17 +2540,12 @@ function scoreRugRisk(
   market,
   holders
 ) {
-  let risk =
-    50;
+  let risk = 50;
 
-  const reasons =
-    [];
+  const reasons = [];
 
-  if (
-    token.validERC20
-  ) {
-    risk -=
-      15;
+  if (token.validERC20) {
+    risk -= 15;
 
     reasons.push(
       "Verified ERC-20 contract"
@@ -2710,28 +2558,13 @@ function scoreRugRisk(
       token.totalSupply
     ) > 0n
   ) {
-    risk -=
-      5;
-
-    reasons.push(
-      "Positive total supply"
-    );
+    risk -= 5;
   }
 
   if (
-    token.name &&
-    token.symbol
+    activity.swaps > 0
   ) {
-    risk -=
-      5;
-  }
-
-  if (
-    activity.swaps >
-    0
-  ) {
-    risk -=
-      8;
+    risk -= 8;
 
     reasons.push(
       "Observed V4 swaps"
@@ -2739,67 +2572,39 @@ function scoreRugRisk(
   }
 
   if (
-    activity.liquidityEvents >
-    0
+    activity.liquidityEvents > 0
   ) {
-    risk -=
-      4;
-
-    reasons.push(
-      "Observed V4 liquidity activity"
-    );
+    risk -= 4;
   }
 
-  if (
-    market?.verified
-  ) {
-    risk -=
-      5;
-
-    reasons.push(
-      "Market data verified"
-    );
+  if (market?.verified) {
+    risk -= 5;
 
     if (
       market.liquidityUsd >=
       10_000
     ) {
-      risk -=
-        8;
-
-      reasons.push(
-        "Liquidity above $10K"
-      );
+      risk -= 8;
     }
 
     if (
       market.liquidityUsd <
       1_000
     ) {
-      risk +=
-        15;
+      risk += 15;
 
       reasons.push(
-        "Very low verified liquidity"
+        "Very low liquidity"
       );
     }
   }
 
-  if (
-    holders?.verified
-  ) {
+  if (holders?.verified) {
     if (
-      holders.holderCount !==
-        null &&
       holders.holderCount <
-        10
+      10
     ) {
-      risk +=
-        15;
-
-      reasons.push(
-        "Very low holder count"
-      );
+      risk += 15;
     }
 
     const top1 =
@@ -2813,76 +2618,18 @@ function scoreRugRisk(
         ?.top10Percent;
 
     if (
-      top1 !==
-        null &&
-      top1 !==
-        undefined &&
-      top1 >
-        50
+      top1 !== null &&
+      top1 > 50
     ) {
-      risk +=
-        20;
-
-      reasons.push(
-        "Top holder controls >50%"
-      );
+      risk += 20;
     }
 
     if (
-      top10 !==
-        null &&
-      top10 !==
-        undefined &&
-      top10 >
-        80
+      top10 !== null &&
+      top10 > 80
     ) {
-      risk +=
-        20;
-
-      reasons.push(
-        "Top 10 holders control >80%"
-      );
+      risk += 20;
     }
-
-    if (
-      top10 !==
-        null &&
-      top10 !==
-        undefined &&
-      top10 <
-        50
-    ) {
-      risk -=
-        5;
-
-      reasons.push(
-        "Lower raw top-10 concentration"
-      );
-    }
-  }
-
-  if (
-    activity.swaps ===
-      0 &&
-    !market?.verified
-  ) {
-    risk +=
-      10;
-
-    reasons.push(
-      "No verified trading data"
-    );
-  }
-
-  if (
-    !token.validERC20
-  ) {
-    risk =
-      100;
-
-    reasons.push(
-      "ERC-20 verification failed"
-    );
   }
 
   return {
@@ -2894,11 +2641,9 @@ function scoreRugRisk(
       ),
 
     label:
-      risk >=
-        80
+      risk >= 80
         ? "HIGH"
-        : risk >=
-            60
+        : risk >= 60
         ? "MEDIUM"
         : "LOW",
 
@@ -2907,29 +2652,18 @@ function scoreRugRisk(
 }
 
 
-/*
- * =========================================================
- * OPPORTUNITY SCORE
- * =========================================================
- */
-
 function scoreOpportunity(
   token,
   activity,
   market,
   holders
 ) {
-  let score =
-    0;
+  let score = 0;
 
-  const reasons =
-    [];
+  const reasons = [];
 
-  if (
-    token.validERC20
-  ) {
-    score +=
-      20;
+  if (token.validERC20) {
+    score += 20;
 
     reasons.push(
       "Verified ERC-20"
@@ -2940,133 +2674,66 @@ function scoreOpportunity(
     token.name &&
     token.symbol
   ) {
-    score +=
-      5;
+    score += 5;
+  }
+
+  if (
+    activity.swaps > 0
+  ) {
+    score += 10;
 
     reasons.push(
-      "Token metadata available"
+      "V4 swaps detected"
     );
   }
 
   if (
-    activity.swaps >
-    0
+    activity.liquidityEvents > 0
   ) {
-    score +=
-      10;
-
-    reasons.push(
-      "On-chain V4 swaps detected"
-    );
+    score += 5;
   }
 
-  if (
-    activity.liquidityEvents >
-    0
-  ) {
-    score +=
-      5;
-
-    reasons.push(
-      "Liquidity activity detected"
-    );
-  }
-
-  if (
-    market?.verified
-  ) {
-    score +=
-      10;
-
-    reasons.push(
-      "External market data verified"
-    );
+  if (market?.verified) {
+    score += 10;
 
     if (
       market.liquidityUsd >=
       5_000
     ) {
-      score +=
-        5;
-
-      reasons.push(
-        "Liquidity above $5K"
-      );
+      score += 5;
     }
 
     if (
       market.liquidityUsd >=
       25_000
     ) {
-      score +=
-        5;
-
-      reasons.push(
-        "Liquidity above $25K"
-      );
+      score += 5;
     }
 
     if (
-      market.volume
-        ?.h24 >=
+      market.volume?.h24 >=
       10_000
     ) {
-      score +=
-        5;
-
-      reasons.push(
-        "24h volume above $10K"
-      );
+      score += 5;
     }
 
     if (
-      market.volume
-        ?.h24 >=
+      market.volume?.h24 >=
       50_000
     ) {
-      score +=
-        5;
-
-      reasons.push(
-        "24h volume above $50K"
-      );
+      score += 5;
     }
 
     if (
-      market.buyPressure
-        ?.h1 !==
+      market.buyPressure?.h1 !==
         null &&
-      market.buyPressure
-        ?.h1 !==
-        undefined &&
-      market.buyPressure
-        .h1 >=
+      market.buyPressure?.h1 >=
         60
     ) {
-      score +=
-        7;
+      score += 7;
 
       reasons.push(
         "Strong 1h buy pressure"
-      );
-    }
-
-    if (
-      market.buyPressure
-        ?.m5 !==
-        null &&
-      market.buyPressure
-        ?.m5 !==
-        undefined &&
-      market.buyPressure
-        .m5 >=
-        65
-    ) {
-      score +=
-        5;
-
-      reasons.push(
-        "Strong 5m buy pressure"
       );
     }
 
@@ -3076,72 +2743,41 @@ function scoreOpportunity(
       market.ageMinutes <=
         1440
     ) {
-      score +=
-        5;
+      score += 5;
 
       reasons.push(
-        "Pair less than 24h old"
+        "Pair under 24h old"
       );
     }
 
     if (
-      market.marketCap !==
-        null &&
+      market.marketCap !== null &&
       market.marketCap >=
         25_000 &&
       market.marketCap <=
         5_000_000
     ) {
-      score +=
-        5;
+      score += 5;
 
       reasons.push(
-        "Early-stage market-cap range"
-      );
-    }
-
-    if (
-      market
-        .liquidityMarketCapRatio !==
-        null &&
-      market
-        .liquidityMarketCapRatio >=
-        5
-    ) {
-      score +=
-        3;
-
-      reasons.push(
-        "Healthy liquidity / market-cap ratio"
+        "Early market-cap range"
       );
     }
   }
 
-  if (
-    holders?.verified
-  ) {
+  if (holders?.verified) {
     if (
       holders.holderCount >=
       50
     ) {
-      score +=
-        4;
-
-      reasons.push(
-        "50+ holders"
-      );
+      score += 4;
     }
 
     if (
       holders.holderCount >=
       200
     ) {
-      score +=
-        4;
-
-      reasons.push(
-        "200+ holders"
-      );
+      score += 4;
     }
 
     const top10 =
@@ -3150,35 +2786,17 @@ function scoreOpportunity(
         ?.top10Percent;
 
     if (
-      top10 !==
-        null &&
-      top10 !==
-        undefined &&
-      top10 <=
-        60
+      top10 !== null &&
+      top10 <= 60
     ) {
-      score +=
-        4;
-
-      reasons.push(
-        "Top-10 concentration below 60%"
-      );
+      score += 4;
     }
 
     if (
-      top10 !==
-        null &&
-      top10 !==
-        undefined &&
-      top10 >
-        85
+      top10 !== null &&
+      top10 > 85
     ) {
-      score -=
-        15;
-
-      reasons.push(
-        "Penalty: extreme holder concentration"
-      );
+      score -= 15;
     }
   }
 
@@ -3201,8 +2819,63 @@ function scoreOpportunity(
  * =========================================================
  */
 
+function alreadyAlerted(
+  state,
+  address
+) {
+  const key =
+    normalizeAddress(address);
+
+  const timestamp =
+    safeNumber(
+      state?.alerts?.[key]
+    );
+
+  if (
+    timestamp > 0 &&
+    Date.now() -
+      timestamp <
+      ALERT_COOLDOWN_MS
+  ) {
+    return true;
+  }
+
+  const memoryTimestamp =
+    MEMORY_ALERTS.get(key);
+
+  return Boolean(
+    memoryTimestamp &&
+    Date.now() -
+      memoryTimestamp <
+      ALERT_COOLDOWN_MS
+  );
+}
+
+
+function recordAlert(
+  state,
+  address
+) {
+  const key =
+    normalizeAddress(address);
+
+  if (!state.alerts) {
+    state.alerts = {};
+  }
+
+  state.alerts[key] =
+    Date.now();
+
+  MEMORY_ALERTS.set(
+    key,
+    Date.now()
+  );
+}
+
+
 async function sendTelegram(
   env,
+  state,
   candidate
 ) {
   if (
@@ -3234,9 +2907,7 @@ async function sendTelegram(
     };
   }
 
-  if (
-    !candidate.validERC20
-  ) {
+  if (!candidate.validERC20) {
     return {
       sent:
         false,
@@ -3246,10 +2917,7 @@ async function sendTelegram(
     };
   }
 
-  if (
-    !candidate.market
-      ?.verified
-  ) {
+  if (!candidate.market?.verified) {
     return {
       sent:
         false,
@@ -3274,8 +2942,7 @@ async function sendTelegram(
   }
 
   if (
-    candidate.rugRisk
-      .score >
+    candidate.rugRisk.score >
     MAX_RUG_RISK_FOR_ALERT
   ) {
     return {
@@ -3288,8 +2955,7 @@ async function sendTelegram(
   }
 
   if (
-    candidate.opportunity
-      .score <
+    candidate.opportunity.score <
     MIN_TELEGRAM_SCORE
   ) {
     return {
@@ -3301,16 +2967,10 @@ async function sendTelegram(
     };
   }
 
-  pruneSentTokens();
-
-  const tokenKey =
-    normalizeAddress(
-      candidate.address
-    );
-
   if (
-    SENT_TOKENS.has(
-      tokenKey
+    alreadyAlerted(
+      state,
+      candidate.address
     )
   ) {
     return {
@@ -3328,18 +2988,8 @@ async function sendTelegram(
   const holders =
     candidate.holders;
 
-  const top10 =
-    holders
-      ?.concentration
-      ?.top10Percent;
-
-  const buyPressure =
-    market
-      ?.buyPressure
-      ?.h1;
-
   const message =
-`🚨 Robinhood Chain Meme Hunter V68
+`🚨 Robinhood Chain Meme Hunter V69
 
 🪙 ${candidate.name || "Unknown"} (${candidate.symbol || "?"})
 
@@ -3356,56 +3006,33 @@ ${candidate.address}
 
 🟢 1h Buys: ${market.transactions?.h1?.buys ?? "UNVERIFIED"}
 🔴 1h Sells: ${market.transactions?.h1?.sells ?? "UNVERIFIED"}
-📈 Buy Pressure: ${
-  buyPressure !== null &&
-  buyPressure !== undefined
-    ? buyPressure.toFixed(1) + "%"
-    : "UNVERIFIED"
-}
 
-👥 Holders: ${
-  holders?.holderCount ??
-  "UNVERIFIED"
-}
-
-🎯 Top 10 Supply: ${
-  top10 !== null &&
-  top10 !== undefined
-    ? top10.toFixed(2) + "%"
-    : "UNVERIFIED"
-}
+👥 Holders: ${holders?.holderCount ?? "UNVERIFIED"}
 
 📡 V4 Swaps: ${candidate.activity.swaps}
 💦 Liquidity Events: ${candidate.activity.liquidityEvents}
 
 Why:
 ${candidate.opportunity.reasons
-  .map(reason => "• " + reason)
+  .map(x => "• " + x)
   .join("\n")}
 
 Risk:
 ${candidate.rugRisk.reasons
-  .map(reason => "• " + reason)
+  .map(x => "• " + x)
   .join("\n")}
 
-${
-  market.url
-    ? `Chart:\n${market.url}`
-    : ""
-}
+${market.url ? `Chart:\n${market.url}` : ""}
 
-⚠️ Automated early-stage on-chain screening.
-⚠️ High-risk asset — not financial advice.`;
-
-  const telegramUrl =
-    "https://api.telegram.org/bot" +
-    env.TELEGRAM_BOT_TOKEN +
-    "/sendMessage";
+⚠️ Automated high-risk early-stage screening.`;
 
   try {
     const response =
       await fetchWithTimeout(
-        telegramUrl,
+        "https://api.telegram.org/bot" +
+        env.TELEGRAM_BOT_TOKEN +
+        "/sendMessage",
+
         {
           method:
             "POST",
@@ -3424,10 +3051,7 @@ ${
                 message.slice(
                   0,
                   3900
-                ),
-
-              disable_web_page_preview:
-                false
+                )
             })
         },
         5000
@@ -3453,9 +3077,9 @@ ${
       };
     }
 
-    SENT_TOKENS.set(
-      tokenKey,
-      Date.now()
+    recordAlert(
+      state,
+      candidate.address
     );
 
     return {
@@ -3492,174 +3116,172 @@ ${
  * =========================================================
  */
 
-async function scan(
-  env
-) {
+async function scan(env) {
   const started =
     Date.now();
 
-  const diagnostics =
-    [];
+  const diagnostics = [];
+
+  const stateResult =
+    await readState(env);
+
+  const state =
+    stateResult.state;
+
+  pruneState(state);
 
   const latest =
-    await getLatestBlock(
-      env
-    );
+    await getLatestBlock(env);
 
-  const toBlock =
+  const latestBlock =
     latest.block;
 
-  const fromBlock =
-    toBlock -
-    BigInt(
-      DISCOVERY_BLOCKS -
-      1
+  const plan =
+    buildScanRanges(
+      latestBlock,
+      state.lastScannedBlock,
+      stateResult.persistent
     );
 
-  const raw =
-    await getLogs(
-      env,
-      fromBlock,
-      toBlock,
-      POOL_MANAGER
-    );
+  const allLogs = [];
 
-  if (
-    !raw.result
+  const rangesCompleted = [];
+
+  let processedThrough =
+    state.lastScannedBlock !== null
+      ? BigInt(
+          state.lastScannedBlock
+        )
+      : null;
+
+  /*
+   * Catch-up discovery.
+   */
+
+  for (
+    const range of
+    plan.ranges
   ) {
-    return {
-      agent:
-        "Robinhood Chain Meme Hunter",
+    const raw =
+      await getLogs(
+        env,
+        range.fromBlock,
+        range.toBlock,
+        POOL_MANAGER
+      );
 
-      version:
-        VERSION,
+    if (!raw.result) {
+      diagnostics.push({
+        source:
+          "RPC",
 
-      success:
-        false,
-
-      scan: {
-        status:
-          "RPC_ERROR",
-
-        durationMs:
-          Date.now() -
-          started,
-
-        discoveryWindow: {
+        range: {
           fromBlock:
             Number(
-              fromBlock
+              range.fromBlock
             ),
 
           toBlock:
             Number(
-              toBlock
-            ),
-
-          blocks:
-            DISCOVERY_BLOCKS
+              range.toBlock
+            )
         },
 
-        v4: {
-          poolManager:
-            POOL_MANAGER,
+        error:
+          raw.error
+      });
 
-          rawLogs:
-            0,
+      break;
+    }
 
-          initializeEvents:
-            0,
-
-          tokenCandidates:
-            0,
-
-          provider:
-            raw.provider,
-
-          rpcError:
-            raw.error
-        },
-
-        diagnostics
-      },
-
-      timestamp:
-        now()
-    };
-  }
-
-  const logs =
-    raw.result;
-
-
-  /*
-   * -------------------------------------------------------
-   * INITIALIZE DISCOVERY
-   * -------------------------------------------------------
-   */
-
-  const initializeLogs =
-    logs.filter(
-      log =>
-        String(
-          log.topics?.[0] ||
-          ""
-        ).toLowerCase() ===
-        V4_INITIALIZE_TOPIC
+    allLogs.push(
+      ...raw.result
     );
 
-  const pools =
-    [];
+    processedThrough =
+      range.toBlock;
+
+    rangesCompleted.push({
+      fromBlock:
+        Number(
+          range.fromBlock
+        ),
+
+      toBlock:
+        Number(
+          range.toBlock
+        ),
+
+      logs:
+        raw.result.length,
+
+      provider:
+        raw.provider
+    });
+  }
+
+  /*
+   * Persist cursor only through successfully fetched ranges.
+   */
+
+  if (
+    stateResult.persistent &&
+    processedThrough !== null
+  ) {
+    state.lastScannedBlock =
+      Number(
+        processedThrough
+      );
+  }
+
+  /*
+   * Decode all newly discovered pools.
+   */
+
+  const pools = [];
 
   for (
     const log of
-    initializeLogs
+    allLogs
   ) {
-    const decoded =
-      decodeInitializeLog(
-        log
-      );
-
     if (
-      decoded
+      String(
+        log.topics?.[0] || ""
+      ).toLowerCase() !==
+      V4_INITIALIZE_TOPIC
     ) {
-      pools.push(
-        decoded
-      );
+      continue;
+    }
+
+    const decoded =
+      decodeInitializeLog(log);
+
+    if (decoded) {
+      pools.push(decoded);
     }
   }
 
-
   /*
-   * -------------------------------------------------------
-   * TOKEN MAP
-   * -------------------------------------------------------
+   * Add newly discovered tokens to persistent watch list.
    */
 
-  const candidateMap =
+  const newCandidateMap =
     new Map();
 
   for (
-    const pool of
-    pools
+    const pool of pools
   ) {
     for (
       const token of
-      extractTokenCurrencies(
-        pool
-      )
+      extractTokenCurrencies(pool)
     ) {
       const key =
-        normalizeAddress(
-          token
-        );
+        normalizeAddress(token);
 
       if (
-        !candidateMap.has(
-          key
-        )
+        !newCandidateMap.has(key)
       ) {
-        candidateMap.set(
+        newCandidateMap.set(
           key,
           {
             address:
@@ -3671,79 +3293,78 @@ async function scan(
         );
       }
 
-      candidateMap
+      newCandidateMap
         .get(key)
         .pools
-        .push(
-          pool
-        );
+        .push(pool);
     }
   }
 
+  for (
+    const candidate of
+    newCandidateMap.values()
+  ) {
+    mergeWatchedToken(
+      state,
+      candidate
+    );
+  }
+
+  pruneState(state);
 
   /*
-   * -------------------------------------------------------
-   * PRIORITISE MEME-SIDE TOKENS
-   * -------------------------------------------------------
+   * Build candidates from persistent watch list.
    */
 
   const candidateList =
-    [
-      ...candidateMap
-        .values()
-    ];
+    state.watchedTokens
+      .map(
+        watched => ({
+          ...watched,
+
+          knownQuoteToken:
+            isKnownQuoteToken(
+              watched.address
+            ),
+
+          priority:
+            candidatePriority(
+              watched
+            )
+        })
+      )
+      .sort(
+        (a, b) =>
+          b.priority -
+          a.priority
+      )
+      .slice(
+        0,
+        MAX_TOKEN_CHECKS
+      );
+
+  const validationResults = [];
+
+  const verifiedTokens = [];
 
   for (
     const candidate of
     candidateList
   ) {
-    candidate.priority =
-      candidatePriority(
-        candidate
-      );
+    let token =
+      candidate.metadata;
 
-    candidate.knownQuoteToken =
-      isKnownQuoteToken(
-        candidate.address
-      );
-  }
+    if (
+      !token?.validERC20
+    ) {
+      token =
+        await verifyERC20(
+          env,
+          candidate.address
+        );
+    }
 
-  candidateList.sort(
-    (a, b) =>
-      b.priority -
-      a.priority
-  );
-
-  const candidates =
-    candidateList.slice(
-      0,
-      MAX_TOKEN_CHECKS
-    );
-
-
-  /*
-   * -------------------------------------------------------
-   * TOKEN VERIFICATION
-   * -------------------------------------------------------
-   */
-
-  const validationResults =
-    [];
-
-  const verifiedTokens =
-    [];
-
-  for (
-    const candidate of
-    candidates
-  ) {
-    const token =
-      await verifyERC20(
-        env,
-        candidate.address
-      );
-
-    const result = {
+    validationResults.push({
       address:
         candidate.address,
 
@@ -3755,15 +3376,34 @@ async function scan(
           .knownQuoteToken,
 
       ...token
-    };
+    });
 
-    validationResults.push(
-      result
-    );
+    const watched =
+      state.watchedTokens
+        .find(
+          item =>
+            normalizeAddress(
+              item.address
+            ) ===
+            normalizeAddress(
+              candidate.address
+            )
+        );
 
-    if (
-      !token.validERC20
-    ) {
+    if (watched) {
+      watched.metadata =
+        token;
+
+      watched.lastCheckedAt =
+        Date.now();
+
+      watched.checks =
+        safeNumber(
+          watched.checks
+        ) + 1;
+    }
+
+    if (!token.validERC20) {
       continue;
     }
 
@@ -3772,15 +3412,6 @@ async function scan(
       token
     });
   }
-
-
-  /*
-   * -------------------------------------------------------
-   * MARKET FIRST
-   *
-   * Skip known quote tokens unless we have spare capacity.
-   * -------------------------------------------------------
-   */
 
   const marketPriority =
     verifiedTokens
@@ -3796,11 +3427,24 @@ async function scan(
         MAX_MARKET_LOOKUPS
       );
 
-  const analysed =
-    [];
+  const analysed = [];
 
-  let holderLookupCount =
-    0;
+  let holderLookupCount = 0;
+
+  /*
+   * Activity window remains the latest 10 blocks even when
+   * no new catch-up ranges exist.
+   */
+
+  const activityToBlock =
+    latestBlock;
+
+  const activityFromBlock =
+    latestBlock -
+    BigInt(
+      DISCOVERY_BLOCKS -
+      1
+    );
 
   for (
     const item of
@@ -3812,30 +3456,20 @@ async function scan(
     const token =
       item.token;
 
-
-    /*
-     * Find best V4 activity.
-     */
-
-    let bestActivity =
-      null;
-
-    let bestPool =
-      null;
+    let bestActivity = null;
+    let bestPool = null;
 
     for (
       const pool of
-      candidate.pools.slice(
-        0,
-        3
-      )
+      (candidate.pools || [])
+        .slice(0, 3)
     ) {
       const activity =
         await checkPoolActivity(
           env,
           pool.poolId,
-          fromBlock,
-          toBlock
+          activityFromBlock,
+          activityToBlock
         );
 
       if (
@@ -3845,10 +3479,9 @@ async function scan(
         (
           activity.swaps ===
             bestActivity.swaps &&
-          activity
-            .liquidityEvents >
-          bestActivity
-            .liquidityEvents
+          activity.liquidityEvents >
+            bestActivity
+              .liquidityEvents
         )
       ) {
         bestActivity =
@@ -3865,12 +3498,6 @@ async function scan(
         success:
           false,
 
-        provider:
-          null,
-
-        error:
-          "NO_POOL_ACTIVITY_CHECK",
-
         logs:
           0,
 
@@ -3881,23 +3508,12 @@ async function scan(
           0
       };
 
-    const pool =
-      bestPool ||
-      candidate.pools[0];
-
-
-    /*
-     * Market data.
-     */
-
     const market =
       await getMarketData(
         candidate.address
       );
 
-    if (
-      !market.verified
-    ) {
+    if (!market.verified) {
       diagnostics.push({
         source:
           "DEXSCREENER",
@@ -3909,8 +3525,7 @@ async function scan(
           market.status,
 
         attempts:
-          market.attempts ||
-          0,
+          market.attempts,
 
         error:
           market.error ||
@@ -3918,21 +3533,9 @@ async function scan(
       });
     }
 
-
-    /*
-     * Holder lookup only when useful.
-     *
-     * This is one of the main V68 429 reductions.
-     */
-
     let holders = {
       verified:
         false,
-
-      source:
-        env.BLOCKSCOUT_API_KEY
-          ? "BLOCKSCOUT_PRO"
-          : "BLOCKSCOUT_PUBLIC",
 
       holderCount:
         null,
@@ -3948,17 +3551,11 @@ async function scan(
           null,
 
         top10Percent:
-          null,
-
-        adjustedForKnownSystemWallets:
-          false
+          null
       },
 
       topHolders:
-        [],
-
-      status:
-        "SKIPPED"
+        []
     };
 
     const shouldCheckHolders =
@@ -3968,16 +3565,12 @@ async function scan(
         MAX_HOLDER_LOOKUPS &&
       (
         market.verified ||
-        activity.swaps >
-          0 ||
+        activity.swaps > 0 ||
         activity
-          .liquidityEvents >
-          0
+          .liquidityEvents > 0
       );
 
-    if (
-      shouldCheckHolders
-    ) {
+    if (shouldCheckHolders) {
       holderLookupCount++;
 
       holders =
@@ -3986,34 +3579,7 @@ async function scan(
           candidate.address,
           token.totalSupply
         );
-
-      if (
-        !holders.verified
-      ) {
-        diagnostics.push({
-          source:
-            "BLOCKSCOUT",
-
-          token:
-            candidate.address,
-
-          countersError:
-            holders.errors
-              ?.counters ||
-            null,
-
-          holdersError:
-            holders.errors
-              ?.holders ||
-            null
-        });
-      }
     }
-
-
-    /*
-     * Scores.
-     */
 
     const rugRisk =
       scoreRugRisk(
@@ -4031,7 +3597,7 @@ async function scan(
         holders
       );
 
-    analysed.push({
+    const analysedCandidate = {
       address:
         candidate.address,
 
@@ -4058,16 +3624,15 @@ async function scan(
         token.validERC20,
 
       poolId:
-        pool?.poolId ||
-        null,
-
-      pool:
-        pool ||
+        bestPool?.poolId ||
+        candidate.pools?.[0]
+          ?.poolId ||
         null,
 
       poolCount:
-        candidate
-          .pools.length,
+        candidate.pools
+          ?.length ||
+        0,
 
       activity,
 
@@ -4079,56 +3644,50 @@ async function scan(
 
       opportunity,
 
-      intelligence: {
-        marketData:
-          market?.verified
-            ? "VERIFIED"
-            : "UNVERIFIED",
+      watch: {
+        firstSeenAt:
+          candidate.firstSeenAt,
 
-        holderData:
-          holders?.verified
-            ? "VERIFIED"
-            : "UNVERIFIED",
+        lastCheckedAt:
+          candidate.lastCheckedAt,
 
-        smartMoney:
-          "NOT_VERIFIED",
-
-        whaleActivity:
-          "NOT_VERIFIED",
-
-        socialMomentum:
-          "NOT_VERIFIED"
+        checks:
+          candidate.checks
       }
-    });
+    };
+
+    analysed.push(
+      analysedCandidate
+    );
+
+    const watched =
+      state.watchedTokens
+        .find(
+          item =>
+            normalizeAddress(
+              item.address
+            ) ===
+            normalizeAddress(
+              candidate.address
+            )
+        );
+
+    if (watched) {
+      watched.lastMarket =
+        market;
+    }
   }
-
-
-  /*
-   * -------------------------------------------------------
-   * OPPORTUNITY SORT
-   * -------------------------------------------------------
-   */
 
   analysed.sort(
     (a, b) =>
-      b.opportunity
-        .score -
-      a.opportunity
-        .score
+      b.opportunity.score -
+      a.opportunity.score
   );
-
-
-  /*
-   * -------------------------------------------------------
-   * TELEGRAM
-   * -------------------------------------------------------
-   */
 
   const qualifying =
     analysed.filter(
       candidate =>
-        candidate
-          .validERC20 &&
+        candidate.validERC20 &&
         !candidate
           .knownQuoteToken &&
         candidate.market
@@ -4140,106 +3699,74 @@ async function scan(
         candidate.rugRisk
           .score <=
           MAX_RUG_RISK_FOR_ALERT &&
-        candidate
-          .opportunity
+        candidate.opportunity
           .score >=
           MIN_TELEGRAM_SCORE
     );
 
-  const telegramCandidates =
-    [];
+  const telegramCandidates = [];
 
   for (
     const candidate of
-    qualifying.slice(
-      0,
-      2
-    )
+    qualifying.slice(0, 2)
   ) {
     const telegram =
       await sendTelegram(
         env,
+        state,
         candidate
       );
 
     candidate.telegram =
       telegram;
 
-    if (
-      telegram.sent
-    ) {
+    if (telegram.sent) {
       telegramCandidates.push(
         candidate
       );
     }
   }
 
+  pruneState(state);
 
-  /*
-   * -------------------------------------------------------
-   * TOPIC DIAGNOSTICS
-   * -------------------------------------------------------
-   */
-
-  const topic0Sample =
-    [
-      ...new Set(
-        logs
-          .map(
-            log =>
-              log
-                .topics?.[0]
-          )
-          .filter(
-            Boolean
-          )
-          .map(
-            topic =>
-              topic
-                .toLowerCase()
-          )
-      )
-    ].slice(
-      0,
-      15
+  const stateWrite =
+    await writeState(
+      env,
+      state
     );
 
-  const initializeTopicMatches =
-    logs.filter(
-      log =>
-        String(
-          log.topics?.[0] ||
-          ""
-        ).toLowerCase() ===
-        V4_INITIALIZE_TOPIC
-    ).length;
-
   const swapTopicMatches =
-    logs.filter(
+    allLogs.filter(
       log =>
         String(
-          log.topics?.[0] ||
-          ""
+          log.topics?.[0] || ""
         ).toLowerCase() ===
         V4_SWAP_TOPIC
     ).length;
 
   const modifyLiquidityTopicMatches =
-    logs.filter(
+    allLogs.filter(
       log =>
         String(
-          log.topics?.[0] ||
-          ""
+          log.topics?.[0] || ""
         ).toLowerCase() ===
         V4_MODIFY_LIQUIDITY_TOPIC
     ).length;
 
-
-  /*
-   * -------------------------------------------------------
-   * RETURN
-   * -------------------------------------------------------
-   */
+  const remainingBacklog =
+    stateResult.persistent &&
+    state.lastScannedBlock !==
+      null
+      ? Math.max(
+          0,
+          Number(
+            latestBlock -
+            BigInt(
+              state.lastScannedBlock
+            )
+          )
+        )
+      : 0;
 
   return {
     agent:
@@ -4261,82 +3788,78 @@ async function scan(
 
       latestBlock:
         Number(
-          toBlock
+          latestBlock
         ),
 
-      discoveryWindow: {
-        fromBlock:
-          Number(
-            fromBlock
-          ),
+      persistence: {
+        enabled:
+          stateResult.persistent,
 
-        toBlock:
-          Number(
-            toBlock
-          ),
+        stateReadError:
+          stateResult.error,
 
-        blocks:
+        stateSaved:
+          stateWrite.saved,
+
+        stateSaveError:
+          stateWrite.reason,
+
+        scanMode:
+          plan.mode,
+
+        previousLastScannedBlock:
+          stateResult.state
+            .lastScannedBlock,
+
+        currentLastScannedBlock:
+          state.lastScannedBlock,
+
+        backlogAtStart:
+          plan.backlogBlocks,
+
+        backlogRemaining:
+          remainingBacklog,
+
+        maxCatchupBlocksPerRun:
+          MAX_CATCHUP_CHUNKS *
           DISCOVERY_BLOCKS
       },
+
+      rangesCompleted,
 
       v4: {
         poolManager:
           POOL_MANAGER,
 
         rawLogs:
-          logs.length,
+          allLogs.length,
 
         initializeEvents:
           pools.length,
 
-        initializeTopicMatches,
+        initializeTopicMatches:
+          pools.length,
 
         swapTopicMatches,
 
         modifyLiquidityTopicMatches,
 
-        topic0Sample,
-
-        tokenCandidates:
-          candidateMap.size,
-
-        provider:
-          raw.provider,
-
-        rpcError:
-          raw.error
+        newTokenCandidates:
+          newCandidateMap.size
       },
 
-      candidatePriority:
-        candidateList.map(
-          candidate => ({
-            address:
-              candidate.address,
-
-            priority:
-              candidate.priority,
-
-            knownQuoteToken:
-              candidate
-                .knownQuoteToken,
-
-            poolCount:
-              candidate
-                .pools.length
-          })
-        ),
-
-      uniqueTokenCandidates:
-        candidateMap.size,
+      watchedTokens:
+        state.watchedTokens
+          .length,
 
       tokenValidationChecks:
-        candidates.length,
+        candidateList.length,
 
       validERC20Tokens:
         validationResults
           .filter(
-            result =>
-              result.validERC20
+            item =>
+              item.validERC20
           )
           .length,
 
@@ -4358,9 +3881,7 @@ async function scan(
         telegramCandidates.length,
 
       telegram:
-        telegramCandidates
-          .length >
-        0
+        telegramCandidates.length
           ? {
               sent:
                 true,
@@ -4374,105 +3895,35 @@ async function scan(
                 false,
 
               reason:
-                qualifying.length ===
-                0
-                  ? "NO_VERIFIED_LOW_RISK_QUALIFYING_CANDIDATE"
-                  : "TELEGRAM_NOT_SENT"
+                "NO_NEW_QUALIFYING_ALERT"
             },
 
       diagnostics,
 
       intelligence: {
-        candidatePriority:
-          "ENABLED",
+        persistentBlockTracking:
+          stateResult.persistent
+            ? "ENABLED"
+            : "DISABLED_NO_KV",
 
-        stableQuoteDeprioritisation:
-          "ENABLED",
+        catchUpScanning:
+          "10_BLOCK_CHUNKS",
 
-        dexScreener:
-          "ENABLED_WITH_BACKOFF",
+        persistentCandidateWatch:
+          stateResult.persistent
+            ? "ENABLED"
+            : "MEMORYLESS_FALLBACK",
 
-        blockscout:
-          env.BLOCKSCOUT_API_KEY
-            ? "PRO_WITH_BACKOFF"
-            : "PUBLIC_WITH_BACKOFF",
+        persistentAlertCooldown:
+          stateResult.persistent
+            ? "ENABLED"
+            : "MEMORY_ONLY",
 
-        marketCap:
-          "DEXSCREENER_IF_AVAILABLE",
-
-        liquidity:
-          "DEXSCREENER_USD",
-
-        volume:
+        market:
           "DEXSCREENER",
 
-        buySellActivity:
-          "DEXSCREENER",
-
-        holderCount:
-          "BLOCKSCOUT_IF_AVAILABLE",
-
-        holderConcentration:
-          "BLOCKSCOUT_RAW_IF_AVAILABLE",
-
-        smartMoney:
-          "NOT_VERIFIED",
-
-        whaleActivity:
-          "NOT_VERIFIED",
-
-        socialMomentum:
-          "NOT_VERIFIED"
-      },
-
-      dataIntegrity: {
-        noFabricatedMetrics:
-          true,
-
-        zeroAddressProtection:
-          true,
-
-        boundedRPCWorkload:
-          true,
-
-        safeEmptyRPCResults:
-          true,
-
-        exactV4EventTopics:
-          true,
-
-        v4CurrencyDecoding:
-          "TOPICS_2_AND_3",
-
-        nativeCurrencyFiltered:
-          true,
-
-        tokenContract:
-          "BYTECODE_AND_ERC20_METHOD_VERIFIED",
-
-        quoteTokenFiltering:
-          "DEPRIORITISED_NOT_REMOVED",
-
-        rugRisk:
-          "V68_ON_CHAIN_MARKET_HOLDER_HEURISTIC",
-
-        opportunity:
-          "V68_ON_CHAIN_MARKET_HOLDER_HEURISTIC",
-
-        telegramTokenSafety:
-          "VERIFIED_MARKET_LOW_RISK_NON_QUOTE_ONLY",
-
-        duplicateProtection:
-          "MEMORY_ONLY_6_HOUR_COOLDOWN",
-
-        marketCap:
-          "DEXSCREENER_IF_AVAILABLE",
-
-        liquidity:
-          "DEXSCREENER_IF_AVAILABLE",
-
-        holderConcentration:
-          "RAW_BLOCKSCOUT_NOT_LP_BURN_ADJUSTED",
+        holders:
+          "BLOCKSCOUT",
 
         smartMoney:
           "NOT_VERIFIED",
@@ -4485,7 +3936,7 @@ async function scan(
       },
 
       architecture:
-        "V68_V67_BASELINE_RATE_LIMIT_RESILIENT_ENRICHMENT"
+        "V69_PERSISTENT_GAP_FREE_CATCHUP_WATCHLIST_HUNTER"
     },
 
     chain: {
@@ -4508,23 +3959,14 @@ async function scan(
  * =========================================================
  */
 
-async function health(
-  env
-) {
-  let latestBlock =
-    null;
-
-  let provider =
-    null;
-
-  let error =
-    null;
+async function health(env) {
+  let latestBlock = null;
+  let provider = null;
+  let error = null;
 
   try {
     const latest =
-      await getLatestBlock(
-        env
-      );
+      await getLatestBlock(env);
 
     latestBlock =
       Number(
@@ -4541,6 +3983,13 @@ async function health(
         e
       );
   }
+
+  const stateResult =
+    await readState(env);
+
+  pruneState(
+    stateResult.state
+  );
 
   return {
     agent:
@@ -4559,6 +4008,7 @@ async function health(
       "/rpc-test",
       "/scan",
       "/diagnostics",
+      "/state",
       "/test-telegram"
     ],
 
@@ -4567,36 +4017,7 @@ async function health(
         CHAIN_NAME,
 
       chainId:
-        CHAIN_ID,
-
-      rpc:
-        "ROBINHOOD_PUBLIC_RPC + ALCHEMY_FALLBACK"
-    },
-
-    providers: {
-      robinhoodPublicRpc:
-        PUBLIC_RPC,
-
-      alchemyConfigured:
-        Boolean(
-          env.ALCHEMY_API_KEY
-        ),
-
-      alchemyEndpoint:
-        "ROBINHOOD_MAINNET",
-
-      dexScreener:
-        "BACKOFF_ENABLED",
-
-      blockscout:
-        env.BLOCKSCOUT_API_KEY
-          ? "PRO_API"
-          : "PUBLIC_API",
-
-      blockscoutApiKeyConfigured:
-        Boolean(
-          env.BLOCKSCOUT_API_KEY
-        )
+        CHAIN_ID
     },
 
     rpcStatus:
@@ -4609,22 +4030,44 @@ async function health(
     rpcProvider:
       provider,
 
-    error,
+    alchemyConfigured:
+      Boolean(
+        env.ALCHEMY_API_KEY
+      ),
 
-    rpcTimeoutMs:
-      RPC_TIMEOUT_MS,
+    persistence: {
+      kvConfigured:
+        stateResult.persistent,
 
-    discoveryBlocks:
-      DISCOVERY_BLOCKS,
+      mode:
+        stateResult.persistent
+          ? "PERSISTENT"
+          : "LATEST_10_BLOCK_FALLBACK",
 
-    maxTokenChecks:
-      MAX_TOKEN_CHECKS,
+      lastScannedBlock:
+        stateResult.state
+          .lastScannedBlock,
 
-    maxMarketLookups:
-      MAX_MARKET_LOOKUPS,
+      watchedTokens:
+        stateResult.state
+          .watchedTokens
+          .length,
 
-    maxHolderLookups:
-      MAX_HOLDER_LOOKUPS,
+      stateError:
+        stateResult.error
+    },
+
+    discovery: {
+      chunkSize:
+        DISCOVERY_BLOCKS,
+
+      maximumChunksPerRun:
+        MAX_CATCHUP_CHUNKS,
+
+      maximumCatchupBlocksPerRun:
+        DISCOVERY_BLOCKS *
+        MAX_CATCHUP_CHUNKS
+    },
 
     telegram: {
       configured:
@@ -4639,61 +4082,91 @@ async function health(
       minimumScore:
         MIN_TELEGRAM_SCORE,
 
-      maximumRugRisk:
-        MAX_RUG_RISK_FOR_ALERT,
-
       minimumLiquidityUsd:
-        MIN_ALERT_LIQUIDITY_USD,
-
-      tokenVerification:
-        "REQUIRED",
-
-      marketVerification:
-        "REQUIRED",
-
-      zeroAddressProtection:
-        true,
-
-      knownQuoteTokenAlerts:
-        "BLOCKED",
-
-      duplicateProtection:
-        "MEMORY_ONLY_6_HOURS"
-    },
-
-    v4: {
-      initializeTopic:
-        V4_INITIALIZE_TOPIC,
-
-      swapTopic:
-        V4_SWAP_TOPIC,
-
-      modifyLiquidityTopic:
-        V4_MODIFY_LIQUIDITY_TOPIC,
-
-      exactTopicMatching:
-        true
-    },
-
-    enrichment: {
-      candidatePrioritisation:
-        true,
-
-      quoteTokenDeprioritisation:
-        true,
-
-      dexRetry:
-        DEX_MAX_ATTEMPTS,
-
-      blockscoutRetry:
-        BLOCKSCOUT_MAX_ATTEMPTS,
-
-      holderLookupOnlyAfterSignal:
-        true
+        MIN_ALERT_LIQUIDITY_USD
     },
 
     architecture:
-      "V68_V67_BASELINE_RATE_LIMIT_RESILIENT_ENRICHMENT",
+      "V69_PERSISTENT_GAP_FREE_CATCHUP_WATCHLIST_HUNTER",
+
+    timestamp:
+      now()
+  };
+}
+
+
+/*
+ * =========================================================
+ * STATE ROUTE
+ * =========================================================
+ */
+
+async function stateStatus(env) {
+  const result =
+    await readState(env);
+
+  pruneState(
+    result.state
+  );
+
+  return {
+    agent:
+      "Robinhood Chain Meme Hunter",
+
+    version:
+      VERSION,
+
+    persistenceConfigured:
+      result.persistent,
+
+    error:
+      result.error,
+
+    lastScannedBlock:
+      result.state
+        .lastScannedBlock,
+
+    watchedTokens:
+      result.state
+        .watchedTokens
+        .map(
+          item => ({
+            address:
+              item.address,
+
+            firstSeenAt:
+              item.firstSeenAt,
+
+            lastCheckedAt:
+              item.lastCheckedAt,
+
+            checks:
+              item.checks,
+
+            poolCount:
+              item.pools?.length ||
+              0,
+
+            name:
+              item.metadata?.name ||
+              null,
+
+            symbol:
+              item.metadata?.symbol ||
+              null,
+
+            marketStatus:
+              item.lastMarket
+                ?.status ||
+              null
+          })
+        ),
+
+    recentAlertCount:
+      Object.keys(
+        result.state.alerts ||
+        {}
+      ).length,
 
     timestamp:
       now()
@@ -4707,27 +4180,15 @@ async function health(
  * =========================================================
  */
 
-async function rpcTest(
-  env
-) {
+async function rpcTest(env) {
   const latest =
-    await getLatestBlock(
-      env
-    );
+    await getLatestBlock(env);
 
   const toBlock =
     latest.block;
 
   const fromBlock =
-    toBlock -
-    2n;
-
-  const range =
-    await getLogs(
-      env,
-      fromBlock,
-      toBlock
-    );
+    toBlock - 2n;
 
   const pool =
     await getLogs(
@@ -4746,69 +4207,23 @@ async function rpcTest(
 
     success:
       Boolean(
-        range.result ||
         pool.result
       ),
-
-    chain: {
-      name:
-        CHAIN_NAME,
-
-      chainId:
-        CHAIN_ID
-    },
 
     latestBlock:
       Number(
         toBlock
       ),
 
-    blockRange:
-      3,
+    poolManagerLogs:
+      pool.result?.length ||
+      0,
 
-    tests: [
-      {
-        test:
-          "range_only",
+    provider:
+      pool.provider,
 
-        success:
-          Boolean(
-            range.result
-          ),
-
-        provider:
-          range.provider,
-
-        logs:
-          range.result
-            ?.length ||
-          0,
-
-        error:
-          range.error
-      },
-
-      {
-        test:
-          "pool_manager",
-
-        success:
-          Boolean(
-            pool.result
-          ),
-
-        provider:
-          pool.provider,
-
-        logs:
-          pool.result
-            ?.length ||
-          0,
-
-        error:
-          pool.error
-      }
-    ],
+    error:
+      pool.error,
 
     timestamp:
       now()
@@ -4822,12 +4237,14 @@ async function rpcTest(
  * =========================================================
  */
 
-async function telegramTest(
-  env
-) {
+async function telegramTest(env) {
+  const stateResult =
+    await readState(env);
+
   const result =
     await sendTelegram(
       env,
+      stateResult.state,
       {
         address:
           ZERO,
@@ -4885,87 +4302,22 @@ async function telegramTest(
 
 /*
  * =========================================================
- * COMBINED DIAGNOSTICS
+ * DIAGNOSTICS
  * =========================================================
  */
 
-async function diagnostics(
-  env
-) {
+async function diagnostics(env) {
   const started =
     Date.now();
 
-  let healthResult =
-    null;
+  const healthResult =
+    await health(env);
 
-  let rpcResult =
-    null;
+  const rpcResult =
+    await rpcTest(env);
 
-  let scanResult =
-    null;
-
-  let healthError =
-    null;
-
-  let rpcError =
-    null;
-
-  let scanError =
-    null;
-
-  try {
-    healthResult =
-      await health(
-        env
-      );
-  } catch (error) {
-    healthError =
-      String(
-        error?.message ||
-        error
-      );
-  }
-
-  try {
-    rpcResult =
-      await rpcTest(
-        env
-      );
-  } catch (error) {
-    rpcError =
-      String(
-        error?.message ||
-        error
-      );
-  }
-
-  try {
-    scanResult =
-      await scan(
-        env
-      );
-  } catch (error) {
-    scanError =
-      String(
-        error?.message ||
-        error
-      );
-  }
-
-  const healthy =
-    healthResult
-      ?.status ===
-      "ONLINE";
-
-  const rpcHealthy =
-    rpcResult
-      ?.success ===
-      true;
-
-  const scanHealthy =
-    scanResult
-      ?.success ===
-      true;
+  const scanResult =
+    await scan(env);
 
   return {
     agent:
@@ -4978,9 +4330,12 @@ async function diagnostics(
       true,
 
     overallStatus:
-      healthy &&
-      rpcHealthy &&
-      scanHealthy
+      (
+        healthResult.status ===
+          "ONLINE" &&
+        rpcResult.success &&
+        scanResult.success
+      )
         ? "PASS"
         : "CHECK_REQUIRED",
 
@@ -4988,38 +4343,14 @@ async function diagnostics(
       Date.now() -
       started,
 
-    health: {
-      success:
-        healthy,
+    health:
+      healthResult,
 
-      error:
-        healthError,
+    rpc:
+      rpcResult,
 
-      result:
-        healthResult
-    },
-
-    rpc: {
-      success:
-        rpcHealthy,
-
-      error:
-        rpcError,
-
-      result:
-        rpcResult
-    },
-
-    scan: {
-      success:
-        scanHealthy,
-
-      error:
-        scanError,
-
-      result:
-        scanResult
-    },
+    scan:
+      scanResult,
 
     timestamp:
       now()
@@ -5055,66 +4386,58 @@ export default {
     try {
 
       if (
-        path ===
-          "/" ||
-        path ===
-          "/health"
+        path === "/" ||
+        path === "/health"
       ) {
         return json(
-          await health(
-            env
-          )
+          await health(env)
         );
       }
-
 
       if (
         path ===
         "/rpc-test"
       ) {
         return json(
-          await rpcTest(
-            env
-          )
+          await rpcTest(env)
         );
       }
-
 
       if (
         path ===
         "/scan"
       ) {
         return json(
-          await scan(
-            env
-          )
+          await scan(env)
         );
       }
-
 
       if (
         path ===
         "/diagnostics"
       ) {
         return json(
-          await diagnostics(
-            env
-          )
+          await diagnostics(env)
         );
       }
 
+      if (
+        path ===
+        "/state"
+      ) {
+        return json(
+          await stateStatus(env)
+        );
+      }
 
       if (
         path ===
         "/test-telegram"
       ) {
         return json(
-          await telegramTest(
-            env
-          )
+          await telegramTest(env)
         );
       }
-
 
       return json(
         {
@@ -5132,6 +4455,7 @@ export default {
             "/rpc-test",
             "/scan",
             "/diagnostics",
+            "/state",
             "/test-telegram"
           ]
         },
@@ -5166,10 +4490,7 @@ export default {
 
 
   /*
-   * Automatic Cloudflare Cron scans.
-   *
-   * Your existing Cron Trigger can continue
-   * calling this handler.
+   * Automatic Cloudflare Cron scanning.
    */
 
   async scheduled(
@@ -5178,28 +4499,38 @@ export default {
     ctx
   ) {
     ctx.waitUntil(
-      scan(
-        env
-      )
+      scan(env)
         .then(
           result => {
             console.log(
               JSON.stringify({
                 event:
-                  "V68_SCHEDULED_SCAN",
+                  "V69_SCHEDULED_SCAN",
 
                 success:
                   result.success,
 
-                initializeEvents:
+                lastScannedBlock:
+                  result.scan
+                    ?.persistence
+                    ?.currentLastScannedBlock ||
+                  null,
+
+                backlogRemaining:
+                  result.scan
+                    ?.persistence
+                    ?.backlogRemaining ||
+                  0,
+
+                newPools:
                   result.scan
                     ?.v4
                     ?.initializeEvents ||
                   0,
 
-                validTokens:
+                watchedTokens:
                   result.scan
-                    ?.validERC20Tokens ||
+                    ?.watchedTokens ||
                   0,
 
                 qualifying:
@@ -5221,9 +4552,11 @@ export default {
         .catch(
           error => {
             console.error(
-              "V68 scheduled scan failed",
+              "V69 scheduled scan failed",
               error
             );
+
+            throw error;
           }
         )
     );
