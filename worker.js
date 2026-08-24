@@ -1,23 +1,21 @@
 /**
  * Robinhood Chain Meme Hunter
- * V69
+ * V70
  *
- * Full replacement for V68.
+ * Full replacement for V69.
  *
- * V69 keeps the V68 discovery/enrichment/scoring pipeline.
+ * V70 keeps all working V69 functionality.
  *
- * Adds:
- * - Persistent last-scanned block with Cloudflare KV
- * - Gap-free catch-up scanning in 10-block chunks
- * - Maximum bounded catch-up workload
- * - Persistent candidate watch list
- * - Re-check recently discovered tokens even after their launch block passes
- * - Persistent Telegram duplicate protection
- * - /state route
- * - Falls back safely to latest-10 scanning if KV is not bound
+ * V70 fixes:
+ * - Uses Cloudflare KV binding KV_BINDING
+ * - Also accepts MEME_HUNTER_STATE as fallback
+ * - Preserves persistent catch-up scanning
+ * - Preserves persistent token watch list
+ * - Preserves persistent Telegram cooldown
+ * - Correctly reports previous vs current scanned block
  */
 
-const VERSION = "V69";
+const VERSION = "V70";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -51,18 +49,14 @@ const KNOWN_QUOTE_TOKENS =
     "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
   ]);
 
+
 /*
- * Scan limits.
+ * =========================================================
+ * LIMITS
+ * =========================================================
  */
 
 const DISCOVERY_BLOCKS = 10;
-
-/*
- * Catch up at most 12 × 10 blocks per invocation.
- *
- * If more than 120 blocks behind, the next Cron invocation
- * continues where this one stopped.
- */
 
 const MAX_CATCHUP_CHUNKS = 12;
 
@@ -74,18 +68,14 @@ const MAX_MARKET_LOOKUPS = 3;
 const MAX_HOLDER_LOOKUPS = 2;
 
 const MIN_TELEGRAM_SCORE = 60;
+
 const MAX_RUG_RISK_FOR_ALERT = 59;
+
 const MIN_ALERT_LIQUIDITY_USD = 1000;
 
 const DEX_MAX_ATTEMPTS = 3;
-const BLOCKSCOUT_MAX_ATTEMPTS = 2;
 
-/*
- * Persistent candidate watching.
- *
- * Newly found coins stay in the watch list so the bot can
- * re-check them after DexScreener / Blockscout indexing catches up.
- */
+const BLOCKSCOUT_MAX_ATTEMPTS = 2;
 
 const WATCH_TOKEN_MAX_AGE_MS =
   12 * 60 * 60 * 1000;
@@ -95,22 +85,23 @@ const MAX_WATCHED_TOKENS = 50;
 const ALERT_COOLDOWN_MS =
   6 * 60 * 60 * 1000;
 
+
 /*
- * KV key.
+ * Keep same state key so existing V69 state
+ * is not lost if it already exists.
  */
 
 const STATE_KEY =
   "robinhood-meme-hunter-v69-state";
 
-/*
- * Memory fallback when KV is not configured.
- */
-
 const MEMORY_ALERTS =
   new Map();
 
+
 /*
- * V4 events.
+ * =========================================================
+ * V4 EVENTS
+ * =========================================================
  */
 
 const V4_INITIALIZE_TOPIC =
@@ -122,14 +113,24 @@ const V4_SWAP_TOPIC =
 const V4_MODIFY_LIQUIDITY_TOPIC =
   "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec";
 
+
 /*
- * ERC20 selectors.
+ * =========================================================
+ * ERC20
+ * =========================================================
  */
 
-const SEL_NAME = "0x06fdde03";
-const SEL_SYMBOL = "0x95d89b41";
-const SEL_DECIMALS = "0x313ce567";
-const SEL_TOTAL_SUPPLY = "0x18160ddd";
+const SEL_NAME =
+  "0x06fdde03";
+
+const SEL_SYMBOL =
+  "0x95d89b41";
+
+const SEL_DECIMALS =
+  "0x313ce567";
+
+const SEL_TOTAL_SUPPLY =
+  "0x18160ddd";
 
 
 /*
@@ -138,11 +139,19 @@ const SEL_TOTAL_SUPPLY = "0x18160ddd";
  * =========================================================
  */
 
-function json(data, status = 200) {
+function json(
+  data,
+  status = 200
+) {
   return new Response(
-    JSON.stringify(data, null, 2),
+    JSON.stringify(
+      data,
+      null,
+      2
+    ),
     {
       status,
+
       headers: {
         "content-type":
           "application/json; charset=utf-8",
@@ -156,28 +165,42 @@ function json(data, status = 200) {
 
 
 function now() {
-  return new Date().toISOString();
+  return new Date()
+    .toISOString();
 }
 
 
 function sleep(ms) {
   return new Promise(
     resolve =>
-      setTimeout(resolve, ms)
+      setTimeout(
+        resolve,
+        ms
+      )
   );
 }
 
 
-function clamp(value, min, max) {
+function clamp(
+  value,
+  min,
+  max
+) {
   return Math.max(
     min,
-    Math.min(max, value)
+    Math.min(
+      max,
+      value
+    )
   );
 }
 
 
-function safeNumber(value) {
-  const n = Number(value);
+function safeNumber(
+  value
+) {
+  const n =
+    Number(value);
 
   return Number.isFinite(n)
     ? n
@@ -185,68 +208,106 @@ function safeNumber(value) {
 }
 
 
-function isAddress(value) {
+function isAddress(
+  value
+) {
   return (
-    typeof value === "string" &&
-    /^0x[a-fA-F0-9]{40}$/.test(value)
+    typeof value ===
+      "string" &&
+    /^0x[a-fA-F0-9]{40}$/.test(
+      value
+    )
   );
 }
 
 
-function normalizeAddress(value) {
+function normalizeAddress(
+  value
+) {
   return String(
     value || ""
   ).toLowerCase();
 }
 
 
-function isZeroAddress(value) {
+function isZeroAddress(
+  value
+) {
   return (
     !value ||
-    normalizeAddress(value) === ZERO
+    normalizeAddress(
+      value
+    ) ===
+    ZERO
   );
 }
 
 
-function isKnownQuoteToken(address) {
-  return KNOWN_QUOTE_TOKENS.has(
-    normalizeAddress(address)
-  );
+function isKnownQuoteToken(
+  address
+) {
+  return KNOWN_QUOTE_TOKENS
+    .has(
+      normalizeAddress(
+        address
+      )
+    );
 }
 
 
-function topicToAddress(topic) {
+function topicToAddress(
+  topic
+) {
   if (
-    typeof topic !== "string" ||
-    !/^0x[0-9a-fA-F]{64}$/.test(topic)
+    typeof topic !==
+      "string" ||
+    !/^0x[0-9a-fA-F]{64}$/.test(
+      topic
+    )
   ) {
     return null;
   }
 
-  return "0x" + topic.slice(-40);
+  return (
+    "0x" +
+    topic.slice(-40)
+  );
 }
 
 
-function hexToNumber(hex) {
-  if (!hex) return null;
+function hexToNumber(
+  hex
+) {
+  if (!hex) {
+    return null;
+  }
 
   try {
-    return Number(BigInt(hex));
+    return Number(
+      BigInt(hex)
+    );
   } catch {
     return null;
   }
 }
 
 
-function hexWord(data, index) {
+function hexWord(
+  data,
+  index
+) {
   if (
-    typeof data !== "string" ||
-    !data.startsWith("0x")
+    typeof data !==
+      "string" ||
+    !data.startsWith(
+      "0x"
+    )
   ) {
     return null;
   }
 
-  const raw = data.slice(2);
+  const raw =
+    data.slice(2);
 
   const start =
     index * 64;
@@ -254,37 +315,57 @@ function hexWord(data, index) {
   const end =
     start + 64;
 
-  if (end > raw.length) {
+  if (
+    end >
+    raw.length
+  ) {
     return null;
   }
 
   return (
     "0x" +
-    raw.slice(start, end)
+    raw.slice(
+      start,
+      end
+    )
   );
 }
 
 
-function decodeSignedInt(hex, bits) {
-  if (!hex) return null;
+function decodeSignedInt(
+  hex,
+  bits
+) {
+  if (!hex) {
+    return null;
+  }
 
   try {
     let value =
       BigInt(hex);
 
     const mask =
-      (1n << BigInt(bits)) -
+      (
+        1n <<
+        BigInt(bits)
+      ) -
       1n;
 
-    value &= mask;
+    value &=
+      mask;
 
     const sign =
       1n <<
-      BigInt(bits - 1);
+      BigInt(
+        bits - 1
+      );
 
-    if (value >= sign) {
+    if (
+      value >= sign
+    ) {
       value -=
-        1n << BigInt(bits);
+        1n <<
+        BigInt(bits);
     }
 
     return value;
@@ -300,12 +381,18 @@ function percentage(
   denominator
 ) {
   const a =
-    safeNumber(numerator);
+    safeNumber(
+      numerator
+    );
 
   const b =
-    safeNumber(denominator);
+    safeNumber(
+      denominator
+    );
 
-  if (b <= 0) {
+  if (
+    b <= 0
+  ) {
     return null;
   }
 
@@ -317,58 +404,133 @@ function percentage(
 }
 
 
-function formatMoney(value) {
+function formatMoney(
+  value
+) {
   const n =
-    safeNumber(value);
+    safeNumber(
+      value
+    );
 
-  if (n <= 0) {
+  if (
+    n <= 0
+  ) {
     return "UNVERIFIED";
   }
 
-  if (n >= 1_000_000_000) {
+  if (
+    n >=
+    1_000_000_000
+  ) {
     return (
       "$" +
-      (n / 1_000_000_000)
-        .toFixed(2) +
+      (
+        n /
+        1_000_000_000
+      ).toFixed(2) +
       "B"
     );
   }
 
-  if (n >= 1_000_000) {
+  if (
+    n >=
+    1_000_000
+  ) {
     return (
       "$" +
-      (n / 1_000_000)
-        .toFixed(2) +
+      (
+        n /
+        1_000_000
+      ).toFixed(2) +
       "M"
     );
   }
 
-  if (n >= 1000) {
+  if (
+    n >= 1000
+  ) {
     return (
       "$" +
-      (n / 1000)
-        .toFixed(1) +
+      (
+        n /
+        1000
+      ).toFixed(1) +
       "K"
     );
   }
 
-  return "$" + n.toFixed(2);
+  return (
+    "$" +
+    n.toFixed(2)
+  );
 }
 
 
 /*
  * =========================================================
- * PERSISTENT STATE
+ * KV
  * =========================================================
  */
 
-function hasStateKV(env) {
-  return Boolean(
+/*
+ * V70 FIX:
+ *
+ * Cloudflare currently has your namespace configured as
+ * KV_BINDING.
+ *
+ * We support BOTH names so either configuration works.
+ */
+
+function getStateKV(
+  env
+) {
+  if (
+    env.KV_BINDING &&
+    typeof env.KV_BINDING.get ===
+      "function" &&
+    typeof env.KV_BINDING.put ===
+      "function"
+  ) {
+    return {
+      kv:
+        env.KV_BINDING,
+
+      binding:
+        "KV_BINDING"
+    };
+  }
+
+  if (
     env.MEME_HUNTER_STATE &&
     typeof env.MEME_HUNTER_STATE.get ===
       "function" &&
     typeof env.MEME_HUNTER_STATE.put ===
       "function"
+  ) {
+    return {
+      kv:
+        env.MEME_HUNTER_STATE,
+
+      binding:
+        "MEME_HUNTER_STATE"
+    };
+  }
+
+  return {
+    kv:
+      null,
+
+    binding:
+      null
+  };
+}
+
+
+function hasStateKV(
+  env
+) {
+  return Boolean(
+    getStateKV(env).kv
   );
 }
 
@@ -396,11 +558,19 @@ function defaultState() {
 }
 
 
-async function readState(env) {
-  if (!hasStateKV(env)) {
+async function readState(
+  env
+) {
+  const binding =
+    getStateKV(env);
+
+  if (!binding.kv) {
     return {
       persistent:
         false,
+
+      binding:
+        null,
 
       state:
         defaultState(),
@@ -412,14 +582,18 @@ async function readState(env) {
 
   try {
     const raw =
-      await env
-        .MEME_HUNTER_STATE
-        .get(STATE_KEY);
+      await binding.kv
+        .get(
+          STATE_KEY
+        );
 
     if (!raw) {
       return {
         persistent:
           true,
+
+        binding:
+          binding.binding,
 
         state:
           defaultState(),
@@ -436,20 +610,27 @@ async function readState(env) {
       persistent:
         true,
 
+      binding:
+        binding.binding,
+
       state: {
         ...defaultState(),
         ...parsed,
 
         watchedTokens:
           Array.isArray(
-            parsed?.watchedTokens
+            parsed
+              ?.watchedTokens
           )
-            ? parsed.watchedTokens
+            ? parsed
+                .watchedTokens
             : [],
 
         alerts:
           parsed?.alerts &&
-          typeof parsed.alerts === "object"
+          typeof parsed
+            .alerts ===
+            "object"
             ? parsed.alerts
             : {}
       },
@@ -462,6 +643,9 @@ async function readState(env) {
     return {
       persistent:
         true,
+
+      binding:
+        binding.binding,
 
       state:
         defaultState(),
@@ -480,10 +664,16 @@ async function writeState(
   env,
   state
 ) {
-  if (!hasStateKV(env)) {
+  const binding =
+    getStateKV(env);
+
+  if (!binding.kv) {
     return {
       saved:
         false,
+
+      binding:
+        null,
 
       reason:
         "KV_NOT_CONFIGURED"
@@ -497,16 +687,20 @@ async function writeState(
     state.updatedAt =
       now();
 
-    await env
-      .MEME_HUNTER_STATE
+    await binding.kv
       .put(
         STATE_KEY,
-        JSON.stringify(state)
+        JSON.stringify(
+          state
+        )
       );
 
     return {
       saved:
         true,
+
+      binding:
+        binding.binding,
 
       reason:
         null
@@ -516,6 +710,9 @@ async function writeState(
     return {
       saved:
         false,
+
+      binding:
+        binding.binding,
 
       reason:
         String(
@@ -527,12 +724,17 @@ async function writeState(
 }
 
 
-function pruneState(state) {
+function pruneState(
+  state
+) {
   const current =
     Date.now();
 
   state.watchedTokens =
-    (state.watchedTokens || [])
+    (
+      state.watchedTokens ||
+      []
+    )
       .filter(
         item => {
           const firstSeen =
@@ -541,7 +743,8 @@ function pruneState(state) {
             );
 
           return (
-            firstSeen > 0 &&
+            firstSeen >
+              0 &&
             current -
               firstSeen <=
               WATCH_TOKEN_MAX_AGE_MS
@@ -554,21 +757,28 @@ function pruneState(state) {
       );
 
   const alerts =
-    state.alerts || {};
+    state.alerts ||
+    {};
 
   for (
     const [
       token,
       timestamp
     ] of
-    Object.entries(alerts)
+    Object.entries(
+      alerts
+    )
   ) {
     if (
       current -
-        safeNumber(timestamp) >
+        safeNumber(
+          timestamp
+        ) >
       ALERT_COOLDOWN_MS
     ) {
-      delete alerts[token];
+      delete alerts[
+        token
+      ];
     }
   }
 
@@ -592,7 +802,8 @@ function mergeWatchedToken(
         token =>
           normalizeAddress(
             token.address
-          ) === address
+          ) ===
+          address
       );
 
   if (!existing) {
@@ -620,31 +831,42 @@ function mergeWatchedToken(
     };
 
     state.watchedTokens
-      .push(existing);
+      .push(
+        existing
+      );
   }
 
   const existingPoolIds =
     new Set(
-      (existing.pools || [])
+      (
+        existing.pools ||
+        []
+      )
         .map(
           pool =>
             pool.poolId
         )
-        .filter(Boolean)
+        .filter(
+          Boolean
+        )
     );
 
   for (
     const pool of
-    candidate.pools || []
+    candidate.pools ||
+    []
   ) {
     if (
       pool?.poolId &&
-      !existingPoolIds.has(
-        pool.poolId
-      )
+      !existingPoolIds
+        .has(
+          pool.poolId
+        )
     ) {
       existing.pools
-        .push(pool);
+        .push(
+          pool
+        );
 
       existingPoolIds
         .add(
@@ -684,13 +906,16 @@ async function fetchWithTimeout(
       url,
       {
         ...options,
+
         signal:
           controller.signal
       }
     );
 
   } finally {
-    clearTimeout(timer);
+    clearTimeout(
+      timer
+    );
   }
 }
 
@@ -701,8 +926,12 @@ async function fetchWithTimeout(
  * =========================================================
  */
 
-function alchemyRpc(env) {
-  if (!env.ALCHEMY_API_KEY) {
+function alchemyRpc(
+  env
+) {
+  if (
+    !env.ALCHEMY_API_KEY
+  ) {
     return null;
   }
 
@@ -764,7 +993,9 @@ async function rpcRequest(
       response.status ===
       429
     ) {
-      if (attempt < 2) {
+      if (
+        attempt < 2
+      ) {
         await sleep(
           300 *
           Math.pow(
@@ -786,7 +1017,9 @@ async function rpcRequest(
       );
     }
 
-    if (!response.ok) {
+    if (
+      !response.ok
+    ) {
       throw new Error(
         `HTTP ${response.status}`
       );
@@ -795,9 +1028,12 @@ async function rpcRequest(
     const body =
       await response.json();
 
-    if (body.error) {
+    if (
+      body.error
+    ) {
       throw new Error(
-        body.error.message ||
+        body.error
+          .message ||
         `RPC error ${body.error.code}`
       );
     }
@@ -805,7 +1041,9 @@ async function rpcRequest(
     return body.result;
 
   } finally {
-    clearTimeout(timer);
+    clearTimeout(
+      timer
+    );
   }
 }
 
@@ -845,7 +1083,9 @@ async function rpcWithFallback(
   }
 
   const alchemy =
-    alchemyRpc(env);
+    alchemyRpc(
+      env
+    );
 
   if (!alchemy) {
     return {
@@ -900,11 +1140,13 @@ async function rpcWithFallback(
 
 /*
  * =========================================================
- * BLOCK + LOGS
+ * BLOCK / LOGS
  * =========================================================
  */
 
-async function getLatestBlock(env) {
+async function getLatestBlock(
+  env
+) {
   const result =
     await rpcWithFallback(
       env,
@@ -912,7 +1154,9 @@ async function getLatestBlock(env) {
       []
     );
 
-  if (!result.result) {
+  if (
+    !result.result
+  ) {
     throw new Error(
       result.error ||
       "LATEST_BLOCK_FAILED"
@@ -963,14 +1207,16 @@ async function getLogs(
   return rpcWithFallback(
     env,
     "eth_getLogs",
-    [filter]
+    [
+      filter
+    ]
   );
 }
 
 
 /*
  * =========================================================
- * CATCH-UP PLAN
+ * CATCH-UP
  * =========================================================
  */
 
@@ -979,11 +1225,6 @@ function buildScanRanges(
   lastScannedBlock,
   persistent
 ) {
-  /*
-   * No KV:
-   * V68-compatible latest-10 fallback.
-   */
-
   if (!persistent) {
     const from =
       latestBlock -
@@ -1012,11 +1253,6 @@ function buildScanRanges(
         0
     };
   }
-
-  /*
-   * First persistent run:
-   * bootstrap from latest 10 blocks.
-   */
 
   if (
     lastScannedBlock ===
@@ -1057,7 +1293,10 @@ function buildScanRanges(
       lastScannedBlock
     );
 
-  if (last >= latestBlock) {
+  if (
+    last >=
+    latestBlock
+  ) {
     return {
       mode:
         "UP_TO_DATE",
@@ -1097,7 +1336,10 @@ function buildScanRanges(
         1
       );
 
-    if (end > latestBlock) {
+    if (
+      end >
+      latestBlock
+    ) {
       end =
         latestBlock;
     }
@@ -1121,14 +1363,16 @@ function buildScanRanges(
     ranges,
 
     backlogBlocks:
-      Number(backlog)
+      Number(
+        backlog
+      )
   };
 }
 
 
 /*
  * =========================================================
- * ERC20
+ * ERC20 VERIFY
  * =========================================================
  */
 
@@ -1153,7 +1397,9 @@ async function ethCall(
       ]
     );
 
-  if (!result.result) {
+  if (
+    !result.result
+  ) {
     throw new Error(
       result.error ||
       "ETH_CALL_FAILED"
@@ -1164,29 +1410,41 @@ async function ethCall(
 }
 
 
-function decodeUint256(hex) {
+function decodeUint256(
+  hex
+) {
   if (
-    typeof hex !== "string" ||
-    !/^0x[0-9a-fA-F]+$/.test(hex) ||
-    hex.length < 66
+    typeof hex !==
+      "string" ||
+    !/^0x[0-9a-fA-F]+$/.test(
+      hex
+    ) ||
+    hex.length <
+      66
   ) {
     return null;
   }
 
   try {
-    return BigInt(hex);
+    return BigInt(
+      hex
+    );
   } catch {
     return null;
   }
 }
 
 
-function hexToUtf8(hex) {
+function hexToUtf8(
+  hex
+) {
   try {
     const bytes =
       new Uint8Array(
         hex
-          .match(/.{1,2}/g)
+          .match(
+            /.{1,2}/g
+          )
           ?.map(
             value =>
               parseInt(
@@ -1198,8 +1456,13 @@ function hexToUtf8(hex) {
       );
 
     return new TextDecoder()
-      .decode(bytes)
-      .replace(/\0/g, "")
+      .decode(
+        bytes
+      )
+      .replace(
+        /\0/g,
+        ""
+      )
       .trim();
 
   } catch {
@@ -1208,10 +1471,15 @@ function hexToUtf8(hex) {
 }
 
 
-function decodeString(hex) {
+function decodeString(
+  hex
+) {
   if (
-    typeof hex !== "string" ||
-    !/^0x[0-9a-fA-F]*$/.test(hex)
+    typeof hex !==
+      "string" ||
+    !/^0x[0-9a-fA-F]*$/.test(
+      hex
+    )
   ) {
     return null;
   }
@@ -1219,12 +1487,17 @@ function decodeString(hex) {
   const raw =
     hex.slice(2);
 
-  if (!raw.length) {
+  if (
+    !raw.length
+  ) {
     return null;
   }
 
   try {
-    if (raw.length >= 128) {
+    if (
+      raw.length >=
+      128
+    ) {
       const offset =
         Number(
           BigInt(
@@ -1255,13 +1528,18 @@ function decodeString(hex) {
           );
 
         const start =
-          lengthPos + 64;
+          lengthPos +
+          64;
 
         const end =
           start +
-          length * 2;
+          length *
+          2;
 
-        if (end <= raw.length) {
+        if (
+          end <=
+          raw.length
+        ) {
           return hexToUtf8(
             raw.slice(
               start,
@@ -1272,7 +1550,10 @@ function decodeString(hex) {
       }
     }
 
-    if (raw.length >= 64) {
+    if (
+      raw.length >=
+      64
+    ) {
       return hexToUtf8(
         raw.slice(
           0,
@@ -1320,8 +1601,12 @@ async function verifyERC20(
   address
 ) {
   if (
-    !isAddress(address) ||
-    isZeroAddress(address)
+    !isAddress(
+      address
+    ) ||
+    isZeroAddress(
+      address
+    )
   ) {
     return {
       validERC20:
@@ -1340,7 +1625,8 @@ async function verifyERC20(
 
   if (
     !codeResult.code ||
-    codeResult.code === "0x"
+    codeResult.code ===
+      "0x"
   ) {
     return {
       validERC20:
@@ -1364,7 +1650,8 @@ async function verifyERC20(
       );
 
   } catch {
-    checks.name = null;
+    checks.name =
+      null;
   }
 
   try {
@@ -1378,7 +1665,8 @@ async function verifyERC20(
       );
 
   } catch {
-    checks.symbol = null;
+    checks.symbol =
+      null;
   }
 
   try {
@@ -1392,12 +1680,16 @@ async function verifyERC20(
       );
 
     checks.decimals =
-      result !== null
-        ? Number(result)
+      result !==
+        null
+        ? Number(
+            result
+          )
         : null;
 
   } catch {
-    checks.decimals = null;
+    checks.decimals =
+      null;
   }
 
   try {
@@ -1411,24 +1703,38 @@ async function verifyERC20(
       );
 
   } catch {
-    checks.totalSupply = null;
+    checks.totalSupply =
+      null;
   }
 
   const methodScore =
-    (checks.name ? 1 : 0) +
-    (checks.symbol ? 1 : 0) +
     (
-      checks.decimals !== null
+      checks.name
         ? 1
         : 0
     ) +
     (
-      checks.totalSupply !== null
+      checks.symbol
+        ? 1
+        : 0
+    ) +
+    (
+      checks.decimals !==
+        null
+        ? 1
+        : 0
+    ) +
+    (
+      checks.totalSupply !==
+        null
         ? 1
         : 0
     );
 
-  if (methodScore < 3) {
+  if (
+    methodScore <
+    3
+  ) {
     return {
       validERC20:
         false,
@@ -1441,9 +1747,12 @@ async function verifyERC20(
   }
 
   if (
-    checks.decimals === null ||
-    checks.decimals < 0 ||
-    checks.decimals > 255
+    checks.decimals ===
+      null ||
+    checks.decimals <
+      0 ||
+    checks.decimals >
+      255
   ) {
     return {
       validERC20:
@@ -1457,8 +1766,10 @@ async function verifyERC20(
   }
 
   if (
-    checks.totalSupply === null ||
-    checks.totalSupply <= 0n
+    checks.totalSupply ===
+      null ||
+    checks.totalSupply <=
+      0n
   ) {
     return {
       validERC20:
@@ -1505,22 +1816,25 @@ async function verifyERC20(
  * =========================================================
  */
 
-function decodeInitializeLog(log) {
+function decodeInitializeLog(
+  log
+) {
   if (
     !log ||
-    !Array.isArray(log.topics) ||
-    log.topics.length !== 4
+    !Array.isArray(
+      log.topics
+    ) ||
+    log.topics.length !==
+      4
   ) {
     return null;
   }
 
-  const topic0 =
-    String(
-      log.topics[0] || ""
-    ).toLowerCase();
-
   if (
-    topic0 !==
+    String(
+      log.topics[0] ||
+      ""
+    ).toLowerCase() !==
     V4_INITIALIZE_TOPIC
   ) {
     return null;
@@ -1544,51 +1858,72 @@ function decodeInitializeLog(log) {
   }
 
   const data =
-    log.data || "0x";
+    log.data ||
+    "0x";
 
   if (
-    !/^0x[0-9a-fA-F]{320}$/.test(data)
+    !/^0x[0-9a-fA-F]{320}$/.test(
+      data
+    )
   ) {
     return null;
   }
 
   const fee =
     hexToNumber(
-      hexWord(data, 0)
+      hexWord(
+        data,
+        0
+      )
     );
 
   const tickSpacing =
     decodeSignedInt(
-      hexWord(data, 1),
+      hexWord(
+        data,
+        1
+      ),
       24
     );
 
   const hooks =
     topicToAddress(
-      hexWord(data, 2)
+      hexWord(
+        data,
+        2
+      )
     );
 
-  let sqrtPriceX96 = null;
+  let sqrtPriceX96 =
+    null;
 
   try {
     sqrtPriceX96 =
       BigInt(
-        hexWord(data, 3)
+        hexWord(
+          data,
+          3
+        )
       );
 
   } catch {}
 
   const tick =
     decodeSignedInt(
-      hexWord(data, 4),
+      hexWord(
+        data,
+        4
+      ),
       24
     );
 
   if (
     fee === null ||
-    tickSpacing === null ||
+    tickSpacing ===
+      null ||
     !hooks ||
-    sqrtPriceX96 === null ||
+    sqrtPriceX96 ===
+      null ||
     tick === null
   ) {
     return null;
@@ -1605,12 +1940,14 @@ function decodeInitializeLog(log) {
     fee,
 
     tickSpacing:
-      tickSpacing.toString(),
+      tickSpacing
+        .toString(),
 
     hooks,
 
     sqrtPriceX96:
-      sqrtPriceX96.toString(),
+      sqrtPriceX96
+        .toString(),
 
     tick:
       tick.toString(),
@@ -1633,7 +1970,8 @@ function decodeInitializeLog(log) {
 function extractTokenCurrencies(
   pool
 ) {
-  const result = [];
+  const result =
+    [];
 
   for (
     const currency of [
@@ -1643,22 +1981,27 @@ function extractTokenCurrencies(
   ) {
     if (
       !currency ||
-      isZeroAddress(currency)
+      isZeroAddress(
+        currency
+      )
     ) {
       continue;
     }
 
-    const normalized =
-      normalizeAddress(currency);
-
     if (
       !result.some(
         token =>
-          normalizeAddress(token) ===
-          normalized
+          normalizeAddress(
+            token
+          ) ===
+          normalizeAddress(
+            currency
+          )
       )
     ) {
-      result.push(currency);
+      result.push(
+        currency
+      );
     }
   }
 
@@ -1675,19 +2018,22 @@ function extractTokenCurrencies(
 function candidatePriority(
   candidate
 ) {
-  let priority = 50;
+  let priority =
+    50;
 
   if (
     isKnownQuoteToken(
       candidate.address
     )
   ) {
-    priority -= 40;
+    priority -=
+      40;
   }
 
   for (
     const pool of
-    candidate.pools || []
+    candidate.pools ||
+    []
   ) {
     const other =
       normalizeAddress(
@@ -1700,23 +2046,22 @@ function candidatePriority(
         : pool.currency0;
 
     if (
-      isKnownQuoteToken(other)
+      isKnownQuoteToken(
+        other
+      )
     ) {
-      priority += 35;
+      priority +=
+        35;
     }
   }
-
-  /*
-   * Newer / less-checked watch items
-   * get a slight boost.
-   */
 
   if (
     safeNumber(
       candidate.checks
     ) < 3
   ) {
-    priority += 5;
+    priority +=
+      5;
   }
 
   return priority;
@@ -1725,7 +2070,7 @@ function candidatePriority(
 
 /*
  * =========================================================
- * POOL ACTIVITY
+ * ACTIVITY
  * =========================================================
  */
 
@@ -1747,7 +2092,9 @@ async function checkPoolActivity(
       ]
     );
 
-  if (!result.result) {
+  if (
+    !result.result
+  ) {
     return {
       success:
         false,
@@ -1769,8 +2116,11 @@ async function checkPoolActivity(
     };
   }
 
-  let swaps = 0;
-  let liquidityEvents = 0;
+  let swaps =
+    0;
+
+  let liquidityEvents =
+    0;
 
   for (
     const log of
@@ -1778,7 +2128,8 @@ async function checkPoolActivity(
   ) {
     const topic0 =
       String(
-        log.topics?.[0] || ""
+        log.topics?.[0] ||
+        ""
       ).toLowerCase();
 
     if (
@@ -1807,7 +2158,8 @@ async function checkPoolActivity(
       null,
 
     logs:
-      result.result.length,
+      result.result
+        .length,
 
     swaps,
 
@@ -1839,11 +2191,13 @@ async function dexRequest(
       );
 
     if (
-      response.status === 429
+      response.status ===
+      429
     ) {
       if (
         attempt <
-        DEX_MAX_ATTEMPTS - 1
+        DEX_MAX_ATTEMPTS -
+        1
       ) {
         await sleep(
           500 *
@@ -1874,7 +2228,9 @@ async function dexRequest(
       };
     }
 
-    if (!response.ok) {
+    if (
+      !response.ok
+    ) {
       return {
         ok:
           false,
@@ -1898,7 +2254,8 @@ async function dexRequest(
         attempt + 1,
 
       data:
-        await response.json()
+        await response
+          .json()
     };
 
   } catch (error) {
@@ -1922,16 +2279,17 @@ async function dexRequest(
 async function getMarketData(
   token
 ) {
-  const url =
-    `${DEXSCREENER_BASE}` +
-    `/token-pairs/v1/` +
-    `${DEX_CHAIN_ID}/` +
-    `${token}`;
-
   const request =
-    await dexRequest(url);
+    await dexRequest(
+      `${DEXSCREENER_BASE}` +
+      `/token-pairs/v1/` +
+      `${DEX_CHAIN_ID}/` +
+      `${token}`
+    );
 
-  if (!request.ok) {
+  if (
+    !request.ok
+  ) {
     return {
       verified:
         false,
@@ -1957,16 +2315,19 @@ async function getMarketData(
       : [];
 
   const robinhoodPairs =
-    pairs.filter(
-      pair =>
-        String(
-          pair?.chainId || ""
-        ).toLowerCase() ===
-        DEX_CHAIN_ID
-    );
+    pairs
+      .filter(
+        pair =>
+          String(
+            pair?.chainId ||
+            ""
+          ).toLowerCase() ===
+          DEX_CHAIN_ID
+      );
 
   if (
-    robinhoodPairs.length === 0
+    robinhoodPairs.length ===
+    0
   ) {
     return {
       verified:
@@ -1983,10 +2344,12 @@ async function getMarketData(
   robinhoodPairs.sort(
     (a, b) =>
       safeNumber(
-        b?.liquidity?.usd
+        b?.liquidity
+          ?.usd
       ) -
       safeNumber(
-        a?.liquidity?.usd
+        a?.liquidity
+          ?.usd
       )
   );
 
@@ -1995,37 +2358,50 @@ async function getMarketData(
 
   const buys5m =
     safeNumber(
-      pair?.txns?.m5?.buys
+      pair?.txns
+        ?.m5
+        ?.buys
     );
 
   const sells5m =
     safeNumber(
-      pair?.txns?.m5?.sells
+      pair?.txns
+        ?.m5
+        ?.sells
     );
 
   const buys1h =
     safeNumber(
-      pair?.txns?.h1?.buys
+      pair?.txns
+        ?.h1
+        ?.buys
     );
 
   const sells1h =
     safeNumber(
-      pair?.txns?.h1?.sells
+      pair?.txns
+        ?.h1
+        ?.sells
     );
 
   const buys24h =
     safeNumber(
-      pair?.txns?.h24?.buys
+      pair?.txns
+        ?.h24
+        ?.buys
     );
 
   const sells24h =
     safeNumber(
-      pair?.txns?.h24?.sells
+      pair?.txns
+        ?.h24
+        ?.sells
     );
 
   const liquidityUsd =
     safeNumber(
-      pair?.liquidity?.usd
+      pair?.liquidity
+        ?.usd
     );
 
   const marketCap =
@@ -2033,9 +2409,10 @@ async function getMarketData(
       pair?.marketCap
     );
 
-  const pairCreatedAt =
+  const created =
     safeNumber(
-      pair?.pairCreatedAt
+      pair
+        ?.pairCreatedAt
     );
 
   return {
@@ -2049,7 +2426,8 @@ async function getMarketData(
       request.attempts,
 
     pairAddress:
-      pair?.pairAddress ||
+      pair
+        ?.pairAddress ||
       null,
 
     dexId:
@@ -2077,10 +2455,10 @@ async function getMarketData(
       ) || null,
 
     ageMinutes:
-      pairCreatedAt > 0
+      created > 0
         ? (
             Date.now() -
-            pairCreatedAt
+            created
           ) /
           60000
         : null,
@@ -2088,22 +2466,26 @@ async function getMarketData(
     volume: {
       m5:
         safeNumber(
-          pair?.volume?.m5
+          pair?.volume
+            ?.m5
         ),
 
       h1:
         safeNumber(
-          pair?.volume?.h1
+          pair?.volume
+            ?.h1
         ),
 
       h6:
         safeNumber(
-          pair?.volume?.h6
+          pair?.volume
+            ?.h6
         ),
 
       h24:
         safeNumber(
-          pair?.volume?.h24
+          pair?.volume
+            ?.h24
         )
     },
 
@@ -2159,32 +2541,34 @@ async function getMarketData(
     priceChange: {
       m5:
         safeNumber(
-          pair?.priceChange?.m5
+          pair?.priceChange
+            ?.m5
         ),
 
       h1:
         safeNumber(
-          pair?.priceChange?.h1
+          pair?.priceChange
+            ?.h1
         ),
 
       h6:
         safeNumber(
-          pair?.priceChange?.h6
+          pair?.priceChange
+            ?.h6
         ),
 
       h24:
         safeNumber(
-          pair?.priceChange?.h24
+          pair?.priceChange
+            ?.h24
         )
     },
 
     liquidityMarketCapRatio:
       marketCap > 0
-        ? (
-            liquidityUsd /
-            marketCap *
-            100
-          )
+        ? liquidityUsd /
+          marketCap *
+          100
         : null
   };
 }
@@ -2200,7 +2584,9 @@ function blockscoutUrl(
   env,
   path
 ) {
-  if (env.BLOCKSCOUT_API_KEY) {
+  if (
+    env.BLOCKSCOUT_API_KEY
+  ) {
     const separator =
       path.includes("?")
         ? "&"
@@ -2242,7 +2628,8 @@ async function blockscoutGet(
       );
 
     if (
-      response.status === 429
+      response.status ===
+      429
     ) {
       if (
         attempt <
@@ -2276,7 +2663,9 @@ async function blockscoutGet(
       };
     }
 
-    if (!response.ok) {
+    if (
+      !response.ok
+    ) {
       return {
         ok:
           false,
@@ -2297,7 +2686,8 @@ async function blockscoutGet(
         attempt + 1,
 
       data:
-        await response.json()
+        await response
+          .json()
     };
 
   } catch (error) {
@@ -2325,15 +2715,21 @@ function holderPercentage(
   try {
     const held =
       BigInt(
-        String(rawValue)
+        String(
+          rawValue
+        )
       );
 
     const supply =
       BigInt(
-        String(totalSupply)
+        String(
+          totalSupply
+        )
       );
 
-    if (supply <= 0n) {
+    if (
+      supply <= 0n
+    ) {
       return null;
     }
 
@@ -2343,7 +2739,9 @@ function holderPercentage(
       supply;
 
     return (
-      Number(scaled) /
+      Number(
+        scaled
+      ) /
       10_000
     );
 
@@ -2364,7 +2762,9 @@ async function getHolderData(
       `/api/v2/tokens/${token}/counters`
     );
 
-  if (!counters.ok) {
+  if (
+    !counters.ok
+  ) {
     return {
       verified:
         false,
@@ -2436,13 +2836,15 @@ async function getHolderData(
   ) {
     for (
       const item of
-      holders.data.items.slice(
-        0,
-        10
-      )
+      holders.data.items
+        .slice(
+          0,
+          10
+        )
     ) {
       const value =
-        item?.value || "0";
+        item?.value ||
+        "0";
 
       topHolders.push({
         address:
@@ -2455,7 +2857,9 @@ async function getHolderData(
           null,
 
         value:
-          String(value),
+          String(
+            value
+          ),
 
         percentage:
           holderPercentage(
@@ -2474,7 +2878,8 @@ async function getHolderData(
       )
       .filter(
         value =>
-          value !== null
+          value !==
+          null
       );
 
   return {
@@ -2493,7 +2898,10 @@ async function getHolderData(
       top5Percent:
         percentages.length
           ? percentages
-              .slice(0, 5)
+              .slice(
+                0,
+                5
+              )
               .reduce(
                 (a, b) =>
                   a + b,
@@ -2504,7 +2912,10 @@ async function getHolderData(
       top10Percent:
         percentages.length
           ? percentages
-              .slice(0, 10)
+              .slice(
+                0,
+                10
+              )
               .reduce(
                 (a, b) =>
                   a + b,
@@ -2540,12 +2951,17 @@ function scoreRugRisk(
   market,
   holders
 ) {
-  let risk = 50;
+  let risk =
+    50;
 
-  const reasons = [];
+  const reasons =
+    [];
 
-  if (token.validERC20) {
-    risk -= 15;
+  if (
+    token.validERC20
+  ) {
+    risk -=
+      15;
 
     reasons.push(
       "Verified ERC-20 contract"
@@ -2556,15 +2972,19 @@ function scoreRugRisk(
     token.totalSupply &&
     BigInt(
       token.totalSupply
-    ) > 0n
+    ) >
+    0n
   ) {
-    risk -= 5;
+    risk -=
+      5;
   }
 
   if (
-    activity.swaps > 0
+    activity.swaps >
+    0
   ) {
-    risk -= 8;
+    risk -=
+      8;
 
     reasons.push(
       "Observed V4 swaps"
@@ -2572,26 +2992,36 @@ function scoreRugRisk(
   }
 
   if (
-    activity.liquidityEvents > 0
+    activity
+      .liquidityEvents >
+    0
   ) {
-    risk -= 4;
+    risk -=
+      4;
   }
 
-  if (market?.verified) {
-    risk -= 5;
+  if (
+    market?.verified
+  ) {
+    risk -=
+      5;
 
     if (
-      market.liquidityUsd >=
+      market
+        .liquidityUsd >=
       10_000
     ) {
-      risk -= 8;
+      risk -=
+        8;
     }
 
     if (
-      market.liquidityUsd <
+      market
+        .liquidityUsd <
       1_000
     ) {
-      risk += 15;
+      risk +=
+        15;
 
       reasons.push(
         "Very low liquidity"
@@ -2599,12 +3029,15 @@ function scoreRugRisk(
     }
   }
 
-  if (holders?.verified) {
+  if (
+    holders?.verified
+  ) {
     if (
       holders.holderCount <
       10
     ) {
-      risk += 15;
+      risk +=
+        15;
     }
 
     const top1 =
@@ -2621,14 +3054,16 @@ function scoreRugRisk(
       top1 !== null &&
       top1 > 50
     ) {
-      risk += 20;
+      risk +=
+        20;
     }
 
     if (
       top10 !== null &&
       top10 > 80
     ) {
-      risk += 20;
+      risk +=
+        20;
     }
   }
 
@@ -2658,12 +3093,17 @@ function scoreOpportunity(
   market,
   holders
 ) {
-  let score = 0;
+  let score =
+    0;
 
-  const reasons = [];
+  const reasons =
+    [];
 
-  if (token.validERC20) {
-    score += 20;
+  if (
+    token.validERC20
+  ) {
+    score +=
+      20;
 
     reasons.push(
       "Verified ERC-20"
@@ -2674,13 +3114,16 @@ function scoreOpportunity(
     token.name &&
     token.symbol
   ) {
-    score += 5;
+    score +=
+      5;
   }
 
   if (
-    activity.swaps > 0
+    activity.swaps >
+    0
   ) {
-    score += 10;
+    score +=
+      10;
 
     reasons.push(
       "V4 swaps detected"
@@ -2688,49 +3131,66 @@ function scoreOpportunity(
   }
 
   if (
-    activity.liquidityEvents > 0
+    activity
+      .liquidityEvents >
+    0
   ) {
-    score += 5;
+    score +=
+      5;
   }
 
-  if (market?.verified) {
-    score += 10;
+  if (
+    market?.verified
+  ) {
+    score +=
+      10;
 
     if (
-      market.liquidityUsd >=
+      market
+        .liquidityUsd >=
       5_000
     ) {
-      score += 5;
+      score +=
+        5;
     }
 
     if (
-      market.liquidityUsd >=
+      market
+        .liquidityUsd >=
       25_000
     ) {
-      score += 5;
+      score +=
+        5;
     }
 
     if (
-      market.volume?.h24 >=
+      market.volume
+        ?.h24 >=
       10_000
     ) {
-      score += 5;
+      score +=
+        5;
     }
 
     if (
-      market.volume?.h24 >=
+      market.volume
+        ?.h24 >=
       50_000
     ) {
-      score += 5;
+      score +=
+        5;
     }
 
     if (
-      market.buyPressure?.h1 !==
+      market.buyPressure
+        ?.h1 !==
         null &&
-      market.buyPressure?.h1 >=
+      market.buyPressure
+        ?.h1 >=
         60
     ) {
-      score += 7;
+      score +=
+        7;
 
       reasons.push(
         "Strong 1h buy pressure"
@@ -2743,7 +3203,8 @@ function scoreOpportunity(
       market.ageMinutes <=
         1440
     ) {
-      score += 5;
+      score +=
+        5;
 
       reasons.push(
         "Pair under 24h old"
@@ -2751,13 +3212,15 @@ function scoreOpportunity(
     }
 
     if (
-      market.marketCap !== null &&
+      market.marketCap !==
+        null &&
       market.marketCap >=
         25_000 &&
       market.marketCap <=
         5_000_000
     ) {
-      score += 5;
+      score +=
+        5;
 
       reasons.push(
         "Early market-cap range"
@@ -2765,19 +3228,23 @@ function scoreOpportunity(
     }
   }
 
-  if (holders?.verified) {
+  if (
+    holders?.verified
+  ) {
     if (
       holders.holderCount >=
       50
     ) {
-      score += 4;
+      score +=
+        4;
     }
 
     if (
       holders.holderCount >=
       200
     ) {
-      score += 4;
+      score +=
+        4;
     }
 
     const top10 =
@@ -2789,14 +3256,16 @@ function scoreOpportunity(
       top10 !== null &&
       top10 <= 60
     ) {
-      score += 4;
+      score +=
+        4;
     }
 
     if (
       top10 !== null &&
       top10 > 85
     ) {
-      score -= 15;
+      score -=
+        15;
     }
   }
 
@@ -2824,11 +3293,15 @@ function alreadyAlerted(
   address
 ) {
   const key =
-    normalizeAddress(address);
+    normalizeAddress(
+      address
+    );
 
   const timestamp =
     safeNumber(
-      state?.alerts?.[key]
+      state
+        ?.alerts
+        ?.[key]
     );
 
   if (
@@ -2840,13 +3313,16 @@ function alreadyAlerted(
     return true;
   }
 
-  const memoryTimestamp =
-    MEMORY_ALERTS.get(key);
+  const memory =
+    MEMORY_ALERTS
+      .get(
+        key
+      );
 
   return Boolean(
-    memoryTimestamp &&
+    memory &&
     Date.now() -
-      memoryTimestamp <
+      memory <
       ALERT_COOLDOWN_MS
   );
 }
@@ -2857,19 +3333,27 @@ function recordAlert(
   address
 ) {
   const key =
-    normalizeAddress(address);
+    normalizeAddress(
+      address
+    );
 
-  if (!state.alerts) {
-    state.alerts = {};
+  if (
+    !state.alerts
+  ) {
+    state.alerts =
+      {};
   }
 
-  state.alerts[key] =
+  state.alerts[
+    key
+  ] =
     Date.now();
 
-  MEMORY_ALERTS.set(
-    key,
-    Date.now()
-  );
+  MEMORY_ALERTS
+    .set(
+      key,
+      Date.now()
+    );
 }
 
 
@@ -2907,7 +3391,9 @@ async function sendTelegram(
     };
   }
 
-  if (!candidate.validERC20) {
+  if (
+    !candidate.validERC20
+  ) {
     return {
       sent:
         false,
@@ -2917,7 +3403,10 @@ async function sendTelegram(
     };
   }
 
-  if (!candidate.market?.verified) {
+  if (
+    !candidate.market
+      ?.verified
+  ) {
     return {
       sent:
         false,
@@ -2942,7 +3431,8 @@ async function sendTelegram(
   }
 
   if (
-    candidate.rugRisk.score >
+    candidate.rugRisk
+      .score >
     MAX_RUG_RISK_FOR_ALERT
   ) {
     return {
@@ -2955,7 +3445,9 @@ async function sendTelegram(
   }
 
   if (
-    candidate.opportunity.score <
+    candidate
+      .opportunity
+      .score <
     MIN_TELEGRAM_SCORE
   ) {
     return {
@@ -2989,7 +3481,7 @@ async function sendTelegram(
     candidate.holders;
 
   const message =
-`🚨 Robinhood Chain Meme Hunter V69
+`🚨 Robinhood Chain Meme Hunter V70
 
 🪙 ${candidate.name || "Unknown"} (${candidate.symbol || "?"})
 
@@ -3054,11 +3546,13 @@ ${market.url ? `Chart:\n${market.url}` : ""}
                 )
             })
         },
+
         5000
       );
 
     const body =
-      await response.json();
+      await response
+        .json();
 
     if (
       !response.ok ||
@@ -3112,26 +3606,43 @@ ${market.url ? `Chart:\n${market.url}` : ""}
 
 /*
  * =========================================================
- * MAIN SCAN
+ * SCAN
  * =========================================================
  */
 
-async function scan(env) {
+async function scan(
+  env
+) {
   const started =
     Date.now();
 
-  const diagnostics = [];
+  const diagnostics =
+    [];
 
   const stateResult =
-    await readState(env);
+    await readState(
+      env
+    );
 
   const state =
     stateResult.state;
 
-  pruneState(state);
+  pruneState(
+    state
+  );
+
+  /*
+   * V70:
+   * capture previous block BEFORE changing state.
+   */
+
+  const previousLastScannedBlock =
+    state.lastScannedBlock;
 
   const latest =
-    await getLatestBlock(env);
+    await getLatestBlock(
+      env
+    );
 
   const latestBlock =
     latest.block;
@@ -3139,24 +3650,23 @@ async function scan(env) {
   const plan =
     buildScanRanges(
       latestBlock,
-      state.lastScannedBlock,
+      previousLastScannedBlock,
       stateResult.persistent
     );
 
-  const allLogs = [];
+  const allLogs =
+    [];
 
-  const rangesCompleted = [];
+  const rangesCompleted =
+    [];
 
   let processedThrough =
-    state.lastScannedBlock !== null
+    previousLastScannedBlock !==
+      null
       ? BigInt(
-          state.lastScannedBlock
+          previousLastScannedBlock
         )
       : null;
-
-  /*
-   * Catch-up discovery.
-   */
 
   for (
     const range of
@@ -3170,7 +3680,9 @@ async function scan(env) {
         POOL_MANAGER
       );
 
-    if (!raw.result) {
+    if (
+      !raw.result
+    ) {
       diagnostics.push({
         source:
           "RPC",
@@ -3201,32 +3713,32 @@ async function scan(env) {
     processedThrough =
       range.toBlock;
 
-    rangesCompleted.push({
-      fromBlock:
-        Number(
-          range.fromBlock
-        ),
+    rangesCompleted
+      .push({
+        fromBlock:
+          Number(
+            range.fromBlock
+          ),
 
-      toBlock:
-        Number(
-          range.toBlock
-        ),
+        toBlock:
+          Number(
+            range.toBlock
+          ),
 
-      logs:
-        raw.result.length,
+        logs:
+          raw.result
+            .length,
 
-      provider:
-        raw.provider
-    });
+        provider:
+          raw.provider
+      });
   }
 
-  /*
-   * Persist cursor only through successfully fetched ranges.
-   */
-
   if (
-    stateResult.persistent &&
-    processedThrough !== null
+    stateResult
+      .persistent &&
+    processedThrough !==
+      null
   ) {
     state.lastScannedBlock =
       Number(
@@ -3234,11 +3746,8 @@ async function scan(env) {
       );
   }
 
-  /*
-   * Decode all newly discovered pools.
-   */
-
-  const pools = [];
+  const pools =
+    [];
 
   for (
     const log of
@@ -3246,7 +3755,8 @@ async function scan(env) {
   ) {
     if (
       String(
-        log.topics?.[0] || ""
+        log.topics?.[0] ||
+        ""
       ).toLowerCase() !==
       V4_INITIALIZE_TOPIC
     ) {
@@ -3254,55 +3764,71 @@ async function scan(env) {
     }
 
     const decoded =
-      decodeInitializeLog(log);
+      decodeInitializeLog(
+        log
+      );
 
-    if (decoded) {
-      pools.push(decoded);
+    if (
+      decoded
+    ) {
+      pools.push(
+        decoded
+      );
     }
   }
-
-  /*
-   * Add newly discovered tokens to persistent watch list.
-   */
 
   const newCandidateMap =
     new Map();
 
   for (
-    const pool of pools
+    const pool of
+    pools
   ) {
     for (
       const token of
-      extractTokenCurrencies(pool)
+      extractTokenCurrencies(
+        pool
+      )
     ) {
       const key =
-        normalizeAddress(token);
+        normalizeAddress(
+          token
+        );
 
       if (
-        !newCandidateMap.has(key)
+        !newCandidateMap
+          .has(
+            key
+          )
       ) {
-        newCandidateMap.set(
-          key,
-          {
-            address:
-              token,
+        newCandidateMap
+          .set(
+            key,
+            {
+              address:
+                token,
 
-            pools:
-              []
-          }
-        );
+              pools:
+                []
+            }
+          );
       }
 
       newCandidateMap
-        .get(key)
+        .get(
+          key
+        )
         .pools
-        .push(pool);
+        .push(
+          pool
+        );
     }
   }
 
   for (
     const candidate of
-    newCandidateMap.values()
+    newCandidateMap
+      .values()
   ) {
     mergeWatchedToken(
       state,
@@ -3310,11 +3836,9 @@ async function scan(env) {
     );
   }
 
-  pruneState(state);
-
-  /*
-   * Build candidates from persistent watch list.
-   */
+  pruneState(
+    state
+  );
 
   const candidateList =
     state.watchedTokens
@@ -3343,9 +3867,11 @@ async function scan(env) {
         MAX_TOKEN_CHECKS
       );
 
-  const validationResults = [];
+  const validationResults =
+    [];
 
-  const verifiedTokens = [];
+  const verifiedTokens =
+    [];
 
   for (
     const candidate of
@@ -3364,19 +3890,20 @@ async function scan(env) {
         );
     }
 
-    validationResults.push({
-      address:
-        candidate.address,
+    validationResults
+      .push({
+        address:
+          candidate.address,
 
-      priority:
-        candidate.priority,
+        priority:
+          candidate.priority,
 
-      knownQuoteToken:
-        candidate
-          .knownQuoteToken,
+        knownQuoteToken:
+          candidate
+            .knownQuoteToken,
 
-      ...token
-    });
+        ...token
+      });
 
     const watched =
       state.watchedTokens
@@ -3390,7 +3917,9 @@ async function scan(env) {
             )
         );
 
-    if (watched) {
+    if (
+      watched
+    ) {
       watched.metadata =
         token;
 
@@ -3400,17 +3929,21 @@ async function scan(env) {
       watched.checks =
         safeNumber(
           watched.checks
-        ) + 1;
+        ) +
+        1;
     }
 
-    if (!token.validERC20) {
+    if (
+      !token.validERC20
+    ) {
       continue;
     }
 
-    verifiedTokens.push({
-      candidate,
-      token
-    });
+    verifiedTokens
+      .push({
+        candidate,
+        token
+      });
   }
 
   const marketPriority =
@@ -3427,14 +3960,11 @@ async function scan(env) {
         MAX_MARKET_LOOKUPS
       );
 
-  const analysed = [];
+  const analysed =
+    [];
 
-  let holderLookupCount = 0;
-
-  /*
-   * Activity window remains the latest 10 blocks even when
-   * no new catch-up ranges exist.
-   */
+  let holderLookupCount =
+    0;
 
   const activityToBlock =
     latestBlock;
@@ -3456,13 +3986,21 @@ async function scan(env) {
     const token =
       item.token;
 
-    let bestActivity = null;
-    let bestPool = null;
+    let bestActivity =
+      null;
+
+    let bestPool =
+      null;
 
     for (
       const pool of
-      (candidate.pools || [])
-        .slice(0, 3)
+      (
+        candidate.pools ||
+        []
+      ).slice(
+        0,
+        3
+      )
     ) {
       const activity =
         await checkPoolActivity(
@@ -3475,13 +4013,16 @@ async function scan(env) {
       if (
         !bestActivity ||
         activity.swaps >
-          bestActivity.swaps ||
+          bestActivity
+            .swaps ||
         (
           activity.swaps ===
-            bestActivity.swaps &&
-          activity.liquidityEvents >
             bestActivity
-              .liquidityEvents
+              .swaps &&
+          activity
+            .liquidityEvents >
+          bestActivity
+            .liquidityEvents
         )
       ) {
         bestActivity =
@@ -3513,7 +4054,9 @@ async function scan(env) {
         candidate.address
       );
 
-    if (!market.verified) {
+    if (
+      !market.verified
+    ) {
       diagnostics.push({
         source:
           "DEXSCREENER",
@@ -3565,12 +4108,16 @@ async function scan(env) {
         MAX_HOLDER_LOOKUPS &&
       (
         market.verified ||
-        activity.swaps > 0 ||
+        activity.swaps >
+          0 ||
         activity
-          .liquidityEvents > 0
+          .liquidityEvents >
+          0
       );
 
-    if (shouldCheckHolders) {
+    if (
+      shouldCheckHolders
+    ) {
       holderLookupCount++;
 
       holders =
@@ -3625,7 +4172,8 @@ async function scan(env) {
 
       poolId:
         bestPool?.poolId ||
-        candidate.pools?.[0]
+        candidate.pools
+          ?.[0]
           ?.poolId ||
         null,
 
@@ -3646,10 +4194,12 @@ async function scan(env) {
 
       watch: {
         firstSeenAt:
-          candidate.firstSeenAt,
+          candidate
+            .firstSeenAt,
 
         lastCheckedAt:
-          candidate.lastCheckedAt,
+          candidate
+            .lastCheckedAt,
 
         checks:
           candidate.checks
@@ -3672,7 +4222,9 @@ async function scan(env) {
             )
         );
 
-    if (watched) {
+    if (
+      watched
+    ) {
       watched.lastMarket =
         market;
     }
@@ -3680,14 +4232,17 @@ async function scan(env) {
 
   analysed.sort(
     (a, b) =>
-      b.opportunity.score -
-      a.opportunity.score
+      b.opportunity
+        .score -
+      a.opportunity
+        .score
   );
 
   const qualifying =
     analysed.filter(
       candidate =>
-        candidate.validERC20 &&
+        candidate
+          .validERC20 &&
         !candidate
           .knownQuoteToken &&
         candidate.market
@@ -3699,16 +4254,21 @@ async function scan(env) {
         candidate.rugRisk
           .score <=
           MAX_RUG_RISK_FOR_ALERT &&
-        candidate.opportunity
+        candidate
+          .opportunity
           .score >=
           MIN_TELEGRAM_SCORE
     );
 
-  const telegramCandidates = [];
+  const telegramCandidates =
+    [];
 
   for (
     const candidate of
-    qualifying.slice(0, 2)
+    qualifying.slice(
+      0,
+      2
+    )
   ) {
     const telegram =
       await sendTelegram(
@@ -3720,14 +4280,19 @@ async function scan(env) {
     candidate.telegram =
       telegram;
 
-    if (telegram.sent) {
-      telegramCandidates.push(
-        candidate
-      );
+    if (
+      telegram.sent
+    ) {
+      telegramCandidates
+        .push(
+          candidate
+        );
     }
   }
 
-  pruneState(state);
+  pruneState(
+    state
+  );
 
   const stateWrite =
     await writeState(
@@ -3739,7 +4304,8 @@ async function scan(env) {
     allLogs.filter(
       log =>
         String(
-          log.topics?.[0] || ""
+          log.topics?.[0] ||
+          ""
         ).toLowerCase() ===
         V4_SWAP_TOPIC
     ).length;
@@ -3748,7 +4314,8 @@ async function scan(env) {
     allLogs.filter(
       log =>
         String(
-          log.topics?.[0] || ""
+          log.topics?.[0] ||
+          ""
         ).toLowerCase() ===
         V4_MODIFY_LIQUIDITY_TOPIC
     ).length;
@@ -3793,7 +4360,11 @@ async function scan(env) {
 
       persistence: {
         enabled:
-          stateResult.persistent,
+          stateResult
+            .persistent,
+
+        binding:
+          stateResult.binding,
 
         stateReadError:
           stateResult.error,
@@ -3807,12 +4378,11 @@ async function scan(env) {
         scanMode:
           plan.mode,
 
-        previousLastScannedBlock:
-          stateResult.state
-            .lastScannedBlock,
+        previousLastScannedBlock,
 
         currentLastScannedBlock:
-          state.lastScannedBlock,
+          state
+            .lastScannedBlock,
 
         backlogAtStart:
           plan.backlogBlocks,
@@ -3878,10 +4448,12 @@ async function scan(env) {
         qualifying.length,
 
       telegramCandidates:
-        telegramCandidates.length,
+        telegramCandidates
+          .length,
 
       telegram:
-        telegramCandidates.length
+        telegramCandidates
+          .length
           ? {
               sent:
                 true,
@@ -3902,20 +4474,27 @@ async function scan(env) {
 
       intelligence: {
         persistentBlockTracking:
-          stateResult.persistent
+          stateResult
+            .persistent
             ? "ENABLED"
             : "DISABLED_NO_KV",
+
+        kvBinding:
+          stateResult.binding ||
+          "NONE",
 
         catchUpScanning:
           "10_BLOCK_CHUNKS",
 
         persistentCandidateWatch:
-          stateResult.persistent
+          stateResult
+            .persistent
             ? "ENABLED"
             : "MEMORYLESS_FALLBACK",
 
         persistentAlertCooldown:
-          stateResult.persistent
+          stateResult
+            .persistent
             ? "ENABLED"
             : "MEMORY_ONLY",
 
@@ -3936,7 +4515,7 @@ async function scan(env) {
       },
 
       architecture:
-        "V69_PERSISTENT_GAP_FREE_CATCHUP_WATCHLIST_HUNTER"
+        "V70_DUAL_KV_BINDING_PERSISTENT_GAP_FREE_HUNTER"
     },
 
     chain: {
@@ -3959,14 +4538,23 @@ async function scan(env) {
  * =========================================================
  */
 
-async function health(env) {
-  let latestBlock = null;
-  let provider = null;
-  let error = null;
+async function health(
+  env
+) {
+  let latestBlock =
+    null;
+
+  let provider =
+    null;
+
+  let error =
+    null;
 
   try {
     const latest =
-      await getLatestBlock(env);
+      await getLatestBlock(
+        env
+      );
 
     latestBlock =
       Number(
@@ -3985,7 +4573,9 @@ async function health(env) {
   }
 
   const stateResult =
-    await readState(env);
+    await readState(
+      env
+    );
 
   pruneState(
     stateResult.state
@@ -4037,10 +4627,20 @@ async function health(env) {
 
     persistence: {
       kvConfigured:
-        stateResult.persistent,
+        stateResult
+          .persistent,
+
+      bindingDetected:
+        stateResult.binding,
+
+      kvBindingSupported: [
+        "KV_BINDING",
+        "MEME_HUNTER_STATE"
+      ],
 
       mode:
-        stateResult.persistent
+        stateResult
+          .persistent
           ? "PERSISTENT"
           : "LATEST_10_BLOCK_FALLBACK",
 
@@ -4087,7 +4687,7 @@ async function health(env) {
     },
 
     architecture:
-      "V69_PERSISTENT_GAP_FREE_CATCHUP_WATCHLIST_HUNTER",
+      "V70_DUAL_KV_BINDING_PERSISTENT_GAP_FREE_HUNTER",
 
     timestamp:
       now()
@@ -4097,13 +4697,17 @@ async function health(env) {
 
 /*
  * =========================================================
- * STATE ROUTE
+ * STATE
  * =========================================================
  */
 
-async function stateStatus(env) {
+async function stateStatus(
+  env
+) {
   const result =
-    await readState(env);
+    await readState(
+      env
+    );
 
   pruneState(
     result.state
@@ -4118,6 +4722,9 @@ async function stateStatus(env) {
 
     persistenceConfigured:
       result.persistent,
+
+    bindingDetected:
+      result.binding,
 
     error:
       result.error,
@@ -4138,21 +4745,25 @@ async function stateStatus(env) {
               item.firstSeenAt,
 
             lastCheckedAt:
-              item.lastCheckedAt,
+              item
+                .lastCheckedAt,
 
             checks:
               item.checks,
 
             poolCount:
-              item.pools?.length ||
+              item.pools
+                ?.length ||
               0,
 
             name:
-              item.metadata?.name ||
+              item.metadata
+                ?.name ||
               null,
 
             symbol:
-              item.metadata?.symbol ||
+              item.metadata
+                ?.symbol ||
               null,
 
             marketStatus:
@@ -4164,7 +4775,8 @@ async function stateStatus(env) {
 
     recentAlertCount:
       Object.keys(
-        result.state.alerts ||
+        result.state
+          .alerts ||
         {}
       ).length,
 
@@ -4180,9 +4792,13 @@ async function stateStatus(env) {
  * =========================================================
  */
 
-async function rpcTest(env) {
+async function rpcTest(
+  env
+) {
   const latest =
-    await getLatestBlock(env);
+    await getLatestBlock(
+      env
+    );
 
   const toBlock =
     latest.block;
@@ -4216,7 +4832,8 @@ async function rpcTest(env) {
       ),
 
     poolManagerLogs:
-      pool.result?.length ||
+      pool.result
+        ?.length ||
       0,
 
     provider:
@@ -4233,13 +4850,17 @@ async function rpcTest(env) {
 
 /*
  * =========================================================
- * TELEGRAM SAFETY TEST
+ * TELEGRAM TEST
  * =========================================================
  */
 
-async function telegramTest(env) {
+async function telegramTest(
+  env
+) {
   const stateResult =
-    await readState(env);
+    await readState(
+      env
+    );
 
   const result =
     await sendTelegram(
@@ -4306,18 +4927,26 @@ async function telegramTest(env) {
  * =========================================================
  */
 
-async function diagnostics(env) {
+async function diagnostics(
+  env
+) {
   const started =
     Date.now();
 
   const healthResult =
-    await health(env);
+    await health(
+      env
+    );
 
   const rpcResult =
-    await rpcTest(env);
+    await rpcTest(
+      env
+    );
 
   const scanResult =
-    await scan(env);
+    await scan(
+      env
+    );
 
   return {
     agent:
@@ -4390,7 +5019,9 @@ export default {
         path === "/health"
       ) {
         return json(
-          await health(env)
+          await health(
+            env
+          )
         );
       }
 
@@ -4399,7 +5030,9 @@ export default {
         "/rpc-test"
       ) {
         return json(
-          await rpcTest(env)
+          await rpcTest(
+            env
+          )
         );
       }
 
@@ -4408,7 +5041,9 @@ export default {
         "/scan"
       ) {
         return json(
-          await scan(env)
+          await scan(
+            env
+          )
         );
       }
 
@@ -4417,7 +5052,9 @@ export default {
         "/diagnostics"
       ) {
         return json(
-          await diagnostics(env)
+          await diagnostics(
+            env
+          )
         );
       }
 
@@ -4426,7 +5063,9 @@ export default {
         "/state"
       ) {
         return json(
-          await stateStatus(env)
+          await stateStatus(
+            env
+          )
         );
       }
 
@@ -4435,7 +5074,9 @@ export default {
         "/test-telegram"
       ) {
         return json(
-          await telegramTest(env)
+          await telegramTest(
+            env
+          )
         );
       }
 
@@ -4489,26 +5130,30 @@ export default {
   },
 
 
-  /*
-   * Automatic Cloudflare Cron scanning.
-   */
-
   async scheduled(
     controller,
     env,
     ctx
   ) {
     ctx.waitUntil(
-      scan(env)
+      scan(
+        env
+      )
         .then(
           result => {
             console.log(
               JSON.stringify({
                 event:
-                  "V69_SCHEDULED_SCAN",
+                  "V70_SCHEDULED_SCAN",
 
                 success:
                   result.success,
+
+                kvBinding:
+                  result.scan
+                    ?.persistence
+                    ?.binding ||
+                  null,
 
                 lastScannedBlock:
                   result.scan
@@ -4552,7 +5197,7 @@ export default {
         .catch(
           error => {
             console.error(
-              "V69 scheduled scan failed",
+              "V70 scheduled scan failed",
               error
             );
 
