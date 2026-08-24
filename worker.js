@@ -1,23 +1,33 @@
 /**
  * Robinhood Chain Meme Hunter
- * V66
+ * V67
  *
- * Chain: Robinhood Chain
- * Chain ID: 4663
+ * BASELINE:
+ * - V66 preserved
  *
- * Full replacement for V65.
- *
- * V66 fixes:
- * - Fixes modifyLiquidityTopicMatches runtime error
- * - Keeps exact V4 event matching
- * - Keeps multi-pool activity analysis
+ * V67 ADDS:
+ * - DexScreener market enrichment
+ * - Verified liquidity when available
+ * - Verified market cap / FDV when available
+ * - Verified 24h volume
+ * - Buy / sell activity
+ * - Price movement
+ * - Market-data-aware opportunity scoring
+ * - Telegram market metrics
+ * - Keeps Alchemy fallback
+ * - Keeps exact V4 discovery
  * - Keeps ERC20 verification
- * - Keeps rug/opportunity scoring
- * - Keeps Telegram safety controls
- * - Keeps RPC fallback and 429 backoff
+ * - Keeps rug-risk controls
+ *
+ * Required Cloudflare secrets:
+ *
+ * ALCHEMY_API_KEY
+ * TELEGRAM_BOT_TOKEN
+ * TELEGRAM_CHAT_ID
  */
 
-const VERSION = "V66";
+const VERSION = "V67";
+
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
 
@@ -31,13 +41,30 @@ const ZERO =
   "0x0000000000000000000000000000000000000000";
 
 const DISCOVERY_BLOCKS = 10;
-const RPC_TIMEOUT_MS = 2500;
+
+const RPC_TIMEOUT_MS = 3000;
+
 const MAX_TOKEN_CHECKS = 5;
 
 const MIN_TELEGRAM_SCORE = 60;
 
 /*
+ * Market lookup limit.
+ *
+ * Keep this low.
+ */
+const MAX_MARKET_LOOKUPS = 5;
+
+/*
+ * DEX Screener.
+ */
+const DEXSCREENER_BASE =
+  "https://api.dexscreener.com";
+
+/*
+ * ============================================================
  * V4 EVENT TOPICS
+ * ============================================================
  */
 
 const V4_INITIALIZE_TOPIC =
@@ -50,29 +77,47 @@ const V4_MODIFY_LIQUIDITY_TOPIC =
   "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec";
 
 /*
- * ERC20 selectors.
+ * ============================================================
+ * ERC20 SELECTORS
+ * ============================================================
  */
 
-const SEL_NAME = "0x06fdde03";
-const SEL_SYMBOL = "0x95d89b41";
-const SEL_DECIMALS = "0x313ce567";
-const SEL_TOTAL_SUPPLY = "0x18160ddd";
+const SEL_NAME =
+  "0x06fdde03";
+
+const SEL_SYMBOL =
+  "0x95d89b41";
+
+const SEL_DECIMALS =
+  "0x313ce567";
+
+const SEL_TOTAL_SUPPLY =
+  "0x18160ddd";
 
 /*
- * ------------------------------------------------------------------
- * Utility
- * ------------------------------------------------------------------
+ * ============================================================
+ * GENERAL UTILITY
+ * ============================================================
  */
 
-function json(data, status = 200) {
+function json(
+  data,
+  status = 200
+) {
   return new Response(
-    JSON.stringify(data, null, 2),
+    JSON.stringify(
+      data,
+      null,
+      2
+    ),
     {
       status,
       headers: {
         "content-type":
           "application/json; charset=utf-8",
-        "cache-control": "no-store"
+
+        "cache-control":
+          "no-store"
       }
     }
   );
@@ -82,59 +127,96 @@ function now() {
   return new Date().toISOString();
 }
 
+function sleep(ms) {
+  return new Promise(
+    resolve =>
+      setTimeout(
+        resolve,
+        ms
+      )
+  );
+}
+
+function clamp(
+  value,
+  min,
+  max
+) {
+  return Math.max(
+    min,
+    Math.min(
+      max,
+      value
+    )
+  );
+}
+
 function isAddress(value) {
   return (
     typeof value === "string" &&
-    /^0x[a-fA-F0-9]{40}$/.test(value)
+    /^0x[a-fA-F0-9]{40}$/.test(
+      value
+    )
   );
 }
 
-function normalizeAddress(value) {
-  return String(value).toLowerCase();
+function normalizeAddress(
+  value
+) {
+  return String(
+    value
+  ).toLowerCase();
 }
 
-function isZeroAddress(value) {
+function isZeroAddress(
+  value
+) {
   return (
     !value ||
-    normalizeAddress(value) === ZERO
+    normalizeAddress(
+      value
+    ) === ZERO
   );
 }
 
-function topicToAddress(topic) {
+function topicToAddress(
+  topic
+) {
   if (
     typeof topic !== "string" ||
-    !/^0x[0-9a-fA-F]{64}$/.test(topic)
+    !/^0x[0-9a-fA-F]{64}$/.test(
+      topic
+    )
   ) {
     return null;
   }
 
-  return "0x" + topic.slice(-40);
-}
-
-function sleep(ms) {
-  return new Promise(
-    resolve => setTimeout(resolve, ms)
+  return (
+    "0x" +
+    topic.slice(-40)
   );
 }
 
-function clamp(value, min, max) {
-  return Math.max(
-    min,
-    Math.min(max, value)
-  );
-}
-
-function hexToNumber(hex) {
-  if (!hex) return null;
+function hexToNumber(
+  hex
+) {
+  if (!hex) {
+    return null;
+  }
 
   try {
-    return Number(BigInt(hex));
+    return Number(
+      BigInt(hex)
+    );
   } catch {
     return null;
   }
 }
 
-function hexWord(data, index) {
+function hexWord(
+  data,
+  index
+) {
   if (
     typeof data !== "string" ||
     !data.startsWith("0x")
@@ -142,56 +224,165 @@ function hexWord(data, index) {
     return null;
   }
 
-  const raw = data.slice(2);
+  const raw =
+    data.slice(2);
 
-  const start = index * 64;
-  const end = start + 64;
+  const start =
+    index * 64;
 
-  if (end > raw.length) {
+  const end =
+    start + 64;
+
+  if (
+    end >
+    raw.length
+  ) {
     return null;
   }
 
-  return "0x" + raw.slice(start, end);
+  return (
+    "0x" +
+    raw.slice(
+      start,
+      end
+    )
+  );
 }
 
-function decodeSignedInt(hex, bits) {
-  if (!hex) return null;
+function decodeSignedInt(
+  hex,
+  bits
+) {
+  if (!hex) {
+    return null;
+  }
 
   try {
-    let value = BigInt(hex);
+    let value =
+      BigInt(hex);
 
     const max =
-      1n << BigInt(bits - 1);
+      1n <<
+      BigInt(
+        bits - 1
+      );
 
     const mod =
-      1n << BigInt(bits);
+      1n <<
+      BigInt(bits);
 
-    if (value >= max) {
+    if (
+      value >= max
+    ) {
       value -= mod;
     }
 
     return value;
+
   } catch {
     return null;
   }
 }
 
+function safeNumber(
+  value
+) {
+  const number =
+    Number(value);
+
+  return Number.isFinite(
+    number
+  )
+    ? number
+    : 0;
+}
+
+function formatMoney(
+  value
+) {
+  const number =
+    safeNumber(value);
+
+  if (
+    number <= 0
+  ) {
+    return "UNVERIFIED";
+  }
+
+  if (
+    number >=
+    1_000_000_000
+  ) {
+    return (
+      "$" +
+      (
+        number /
+        1_000_000_000
+      ).toFixed(2) +
+      "B"
+    );
+  }
+
+  if (
+    number >=
+    1_000_000
+  ) {
+    return (
+      "$" +
+      (
+        number /
+        1_000_000
+      ).toFixed(2) +
+      "M"
+    );
+  }
+
+  if (
+    number >=
+    1000
+  ) {
+    return (
+      "$" +
+      (
+        number /
+        1000
+      ).toFixed(1) +
+      "K"
+    );
+  }
+
+  return (
+    "$" +
+    number.toFixed(2)
+  );
+}
+
 /*
- * ------------------------------------------------------------------
- * RPC
- * ------------------------------------------------------------------
+ * ============================================================
+ * RPC PROVIDERS
+ * ============================================================
  */
 
-function alchemyRpc(env) {
-  if (!env.ALCHEMY_API_KEY) {
+function alchemyRpc(
+  env
+) {
+  if (
+    !env.ALCHEMY_API_KEY
+  ) {
     return null;
   }
 
   return (
-    "https://rpc-mainnet.g.alchemy.com/v2/" +
+    "https://robinhood-mainnet.g.alchemy.com/v2/" +
     env.ALCHEMY_API_KEY
   );
 }
+
+/*
+ * ============================================================
+ * RPC REQUEST
+ * ============================================================
+ */
 
 async function rpcRequest(
   url,
@@ -204,34 +395,53 @@ async function rpcRequest(
 
   const timer =
     setTimeout(
-      () => controller.abort(),
+      () =>
+        controller.abort(),
       RPC_TIMEOUT_MS
     );
 
   try {
+
     const response =
       await fetch(
         url,
         {
-          method: "POST",
+          method:
+            "POST",
+
           headers: {
             "content-type":
               "application/json"
           },
+
           body:
             JSON.stringify({
-              jsonrpc: "2.0",
-              id: Date.now(),
+              jsonrpc:
+                "2.0",
+
+              id:
+                Date.now(),
+
               method,
+
               params
             }),
+
           signal:
             controller.signal
         }
       );
 
-    if (response.status === 429) {
-      if (attempt < 2) {
+    /*
+     * 429 handling.
+     */
+    if (
+      response.status ===
+      429
+    ) {
+      if (
+        attempt < 2
+      ) {
         await sleep(
           250 *
           Math.pow(
@@ -253,16 +463,23 @@ async function rpcRequest(
       );
     }
 
-    if (!response.ok) {
+    if (
+      !response.ok
+    ) {
+      const text =
+        await response.text();
+
       throw new Error(
-        `HTTP ${response.status}`
+        `HTTP ${response.status}: ${text.slice(0, 300)}`
       );
     }
 
     const body =
       await response.json();
 
-    if (body.error) {
+    if (
+      body.error
+    ) {
       throw new Error(
         body.error.message ||
         `RPC error ${body.error.code}`
@@ -272,17 +489,29 @@ async function rpcRequest(
     return body.result;
 
   } finally {
-    clearTimeout(timer);
+    clearTimeout(
+      timer
+    );
   }
 }
+
+/*
+ * ============================================================
+ * RPC FALLBACK
+ * ============================================================
+ */
 
 async function rpcWithFallback(
   env,
   method,
   params
 ) {
-  let publicError = null;
+  let publicError =
+    null;
 
+  /*
+   * Public RPC first.
+   */
   try {
     const result =
       await rpcRequest(
@@ -293,9 +522,12 @@ async function rpcWithFallback(
 
     return {
       result,
+
       provider:
         "ROBINHOOD_PUBLIC_RPC",
-      error: null
+
+      error:
+        null
     };
 
   } catch (error) {
@@ -306,16 +538,22 @@ async function rpcWithFallback(
       );
   }
 
+  /*
+   * Alchemy fallback.
+   */
   const alchemy =
     alchemyRpc(env);
 
   if (!alchemy) {
     return {
-      result: null,
-      provider: null,
+      result:
+        null,
+
+      provider:
+        null,
+
       error:
-        `ROBINHOOD_PUBLIC_RPC: ${publicError}; ` +
-        "ALCHEMY_NOT_CONFIGURED"
+        `ROBINHOOD_PUBLIC_RPC: ${publicError}; ALCHEMY_NOT_CONFIGURED`
     };
   }
 
@@ -329,18 +567,24 @@ async function rpcWithFallback(
 
     return {
       result,
+
       provider:
         "ALCHEMY",
-      error: null
+
+      error:
+        null
     };
 
   } catch (error) {
     return {
-      result: null,
-      provider: null,
+      result:
+        null,
+
+      provider:
+        null,
+
       error:
-        `ROBINHOOD_PUBLIC_RPC: ${publicError}; ` +
-        `ALCHEMY: ${String(
+        `ROBINHOOD_PUBLIC_RPC: ${publicError}; ALCHEMY: ${String(
           error?.message ||
           error
         )}`
@@ -349,12 +593,14 @@ async function rpcWithFallback(
 }
 
 /*
- * ------------------------------------------------------------------
- * Block
- * ------------------------------------------------------------------
+ * ============================================================
+ * BLOCK
+ * ============================================================
  */
 
-async function getLatestBlock(env) {
+async function getLatestBlock(
+  env
+) {
   const result =
     await rpcWithFallback(
       env,
@@ -362,7 +608,9 @@ async function getLatestBlock(env) {
       []
     );
 
-  if (!result.result) {
+  if (
+    !result.result
+  ) {
     throw new Error(
       result.error ||
       "LATEST_BLOCK_FAILED"
@@ -371,16 +619,19 @@ async function getLatestBlock(env) {
 
   return {
     block:
-      BigInt(result.result),
+      BigInt(
+        result.result
+      ),
+
     provider:
       result.provider
   };
 }
 
 /*
- * ------------------------------------------------------------------
- * Logs
- * ------------------------------------------------------------------
+ * ============================================================
+ * LOGS
+ * ============================================================
  */
 
 async function getLogs(
@@ -418,9 +669,9 @@ async function getLogs(
 }
 
 /*
- * ------------------------------------------------------------------
- * ERC20
- * ------------------------------------------------------------------
+ * ============================================================
+ * ETH CALL
+ * ============================================================
  */
 
 async function ethCall(
@@ -434,14 +685,18 @@ async function ethCall(
       "eth_call",
       [
         {
-          to: token,
+          to:
+            token,
+
           data
         },
         "latest"
       ]
     );
 
-  if (!result.result) {
+  if (
+    !result.result
+  ) {
     throw new Error(
       result.error ||
       "ETH_CALL_FAILED"
@@ -451,119 +706,11 @@ async function ethCall(
   return result.result;
 }
 
-function decodeUint256(hex) {
-  if (
-    typeof hex !== "string" ||
-    !/^0x[0-9a-fA-F]+$/.test(hex) ||
-    hex.length < 66
-  ) {
-    return null;
-  }
-
-  try {
-    return BigInt(hex);
-  } catch {
-    return null;
-  }
-}
-
-function hexToUtf8(hex) {
-  try {
-    const bytes =
-      new Uint8Array(
-        hex
-          .match(/.{1,2}/g)
-          ?.map(
-            b => parseInt(b, 16)
-          ) || []
-      );
-
-    return new TextDecoder()
-      .decode(bytes)
-      .replace(/\0/g, "")
-      .trim();
-
-  } catch {
-    return null;
-  }
-}
-
-function decodeString(hex) {
-  if (
-    typeof hex !== "string" ||
-    !/^0x[0-9a-fA-F]*$/.test(hex)
-  ) {
-    return null;
-  }
-
-  const raw =
-    hex.slice(2);
-
-  if (!raw.length) {
-    return null;
-  }
-
-  try {
-    if (raw.length >= 128) {
-      const offset =
-        Number(
-          BigInt(
-            "0x" +
-            raw.slice(
-              0,
-              64
-            )
-          )
-        );
-
-      const lengthPos =
-        offset * 2;
-
-      if (
-        lengthPos + 64 <=
-        raw.length
-      ) {
-        const length =
-          Number(
-            BigInt(
-              "0x" +
-              raw.slice(
-                lengthPos,
-                lengthPos + 64
-              )
-            )
-          );
-
-        const start =
-          lengthPos + 64;
-
-        const end =
-          start +
-          length * 2;
-
-        if (
-          end <= raw.length
-        ) {
-          return hexToUtf8(
-            raw.slice(
-              start,
-              end
-            )
-          );
-        }
-      }
-    }
-
-    if (raw.length >= 64) {
-      return hexToUtf8(
-        raw.slice(0, 64)
-      );
-    }
-
-  } catch {}
-
-  return null;
-}
+/*
+ * ============================================================
+ * CONTRACT CODE
+ * ============================================================
+ */
 
 async function getCode(
   env,
@@ -581,7 +728,8 @@ async function getCode(
 
   return {
     code:
-      result.result || null,
+      result.result ||
+      null,
 
     provider:
       result.provider,
@@ -591,21 +739,196 @@ async function getCode(
   };
 }
 
+/*
+ * ============================================================
+ * ERC20 DECODING
+ * ============================================================
+ */
+
+function decodeUint256(
+  hex
+) {
+  if (
+    typeof hex !==
+      "string" ||
+    !/^0x[0-9a-fA-F]+$/.test(
+      hex
+    )
+  ) {
+    return null;
+  }
+
+  try {
+    return BigInt(hex);
+  } catch {
+    return null;
+  }
+}
+
+function hexToUtf8(
+  hex
+) {
+  try {
+    const bytes =
+      new Uint8Array(
+        hex
+          .match(/.{1,2}/g)
+          ?.map(
+            byte =>
+              parseInt(
+                byte,
+                16
+              )
+          ) || []
+      );
+
+    return new TextDecoder()
+      .decode(bytes)
+      .replace(
+        /\0/g,
+        ""
+      )
+      .trim();
+
+  } catch {
+    return null;
+  }
+}
+
+function decodeString(
+  hex
+) {
+  if (
+    typeof hex !==
+      "string" ||
+    !/^0x[0-9a-fA-F]*$/.test(
+      hex
+    )
+  ) {
+    return null;
+  }
+
+  const raw =
+    hex.slice(2);
+
+  if (
+    !raw.length
+  ) {
+    return null;
+  }
+
+  try {
+
+    /*
+     * Dynamic string.
+     */
+    if (
+      raw.length >=
+      128
+    ) {
+      const offset =
+        Number(
+          BigInt(
+            "0x" +
+            raw.slice(
+              0,
+              64
+            )
+          )
+        );
+
+      const lengthPos =
+        offset * 2;
+
+      if (
+        lengthPos +
+        64 <=
+        raw.length
+      ) {
+        const length =
+          Number(
+            BigInt(
+              "0x" +
+              raw.slice(
+                lengthPos,
+                lengthPos +
+                64
+              )
+            )
+          );
+
+        const start =
+          lengthPos +
+          64;
+
+        const end =
+          start +
+          length * 2;
+
+        if (
+          end <=
+          raw.length
+        ) {
+          return hexToUtf8(
+            raw.slice(
+              start,
+              end
+            )
+          );
+        }
+      }
+    }
+
+    /*
+     * bytes32 fallback.
+     */
+    if (
+      raw.length >=
+      64
+    ) {
+      return hexToUtf8(
+        raw.slice(
+          0,
+          64
+        )
+      );
+    }
+
+  } catch {}
+
+  return null;
+}
+
+/*
+ * ============================================================
+ * ERC20 VERIFICATION
+ * ============================================================
+ */
+
 async function verifyERC20(
   env,
   address
 ) {
   if (
-    !isAddress(address) ||
-    isZeroAddress(address)
+    !isAddress(
+      address
+    ) ||
+    isZeroAddress(
+      address
+    )
   ) {
     return {
-      validERC20: false,
+      validERC20:
+        false,
+
       reason:
         "INVALID_OR_ZERO_ADDRESS"
     };
   }
 
+  /*
+   * Bytecode.
+   */
   const codeResult =
     await getCode(
       env,
@@ -614,10 +937,13 @@ async function verifyERC20(
 
   if (
     !codeResult.code ||
-    codeResult.code === "0x"
+    codeResult.code ===
+      "0x"
   ) {
     return {
-      validERC20: false,
+      validERC20:
+        false,
+
       reason:
         "NO_CONTRACT_BYTECODE"
     };
@@ -625,46 +951,52 @@ async function verifyERC20(
 
   const checks = {};
 
+  /*
+   * name()
+   */
   try {
-    const result =
-      await ethCall(
-        env,
-        address,
-        SEL_NAME
-      );
-
     checks.name =
-      decodeString(result);
-
+      decodeString(
+        await ethCall(
+          env,
+          address,
+          SEL_NAME
+        )
+      );
   } catch {
-    checks.name = null;
+    checks.name =
+      null;
   }
 
+  /*
+   * symbol()
+   */
   try {
-    const result =
-      await ethCall(
-        env,
-        address,
-        SEL_SYMBOL
-      );
-
     checks.symbol =
-      decodeString(result);
-
+      decodeString(
+        await ethCall(
+          env,
+          address,
+          SEL_SYMBOL
+        )
+      );
   } catch {
-    checks.symbol = null;
+    checks.symbol =
+      null;
   }
 
+  /*
+   * decimals()
+   */
   try {
-    const result =
-      await ethCall(
-        env,
-        address,
-        SEL_DECIMALS
-      );
-
     const decoded =
-      decodeUint256(result);
+      decodeUint256(
+        await ethCall(
+          env,
+          address,
+          SEL_DECIMALS
+        )
+      );
 
     checks.decimals =
       decoded !== null
@@ -672,19 +1004,22 @@ async function verifyERC20(
         : null;
 
   } catch {
-    checks.decimals = null;
+    checks.decimals =
+      null;
   }
 
+  /*
+   * totalSupply()
+   */
   try {
-    const result =
-      await ethCall(
-        env,
-        address,
-        SEL_TOTAL_SUPPLY
-      );
-
     checks.totalSupply =
-      decodeUint256(result);
+      decodeUint256(
+        await ethCall(
+          env,
+          address,
+          SEL_TOTAL_SUPPLY
+        )
+      );
 
   } catch {
     checks.totalSupply =
@@ -692,53 +1027,89 @@ async function verifyERC20(
   }
 
   const methodScore =
-    (checks.name ? 1 : 0) +
-    (checks.symbol ? 1 : 0) +
-    (checks.decimals !== null ? 1 : 0) +
-    (checks.totalSupply !== null ? 1 : 0);
+    (checks.name
+      ? 1
+      : 0) +
 
-  if (methodScore < 3) {
+    (checks.symbol
+      ? 1
+      : 0) +
+
+    (
+      checks.decimals !==
+      null
+        ? 1
+        : 0
+    ) +
+
+    (
+      checks.totalSupply !==
+      null
+        ? 1
+        : 0
+    );
+
+  if (
+    methodScore < 3
+  ) {
     return {
-      validERC20: false,
+      validERC20:
+        false,
+
       reason:
         "ERC20_METHODS_NOT_VERIFIED",
+
       ...checks
     };
   }
 
   if (
-    checks.decimals === null ||
-    checks.decimals < 0 ||
-    checks.decimals > 255
+    checks.decimals ===
+      null ||
+    checks.decimals <
+      0 ||
+    checks.decimals >
+      255
   ) {
     return {
-      validERC20: false,
+      validERC20:
+        false,
+
       reason:
         "INVALID_DECIMALS",
+
       ...checks
     };
   }
 
   if (
-    checks.totalSupply === null ||
-    checks.totalSupply <= 0n
+    checks.totalSupply ===
+      null ||
+    checks.totalSupply <=
+      0n
   ) {
     return {
-      validERC20: false,
+      validERC20:
+        false,
+
       reason:
         "INVALID_TOTAL_SUPPLY",
+
       ...checks
     };
   }
 
   return {
-    validERC20: true,
+    validERC20:
+      true,
+
     reason:
       "VERIFIED",
 
     address,
 
-    bytecode: true,
+    bytecode:
+      true,
 
     name:
       checks.name,
@@ -755,23 +1126,29 @@ async function verifyERC20(
 }
 
 /*
- * ------------------------------------------------------------------
- * V4 Initialize decoder
- * ------------------------------------------------------------------
+ * ============================================================
+ * V4 INITIALIZE
+ * ============================================================
  */
 
-function decodeInitializeLog(log) {
+function decodeInitializeLog(
+  log
+) {
   if (
     !log ||
-    !Array.isArray(log.topics) ||
-    log.topics.length !== 4
+    !Array.isArray(
+      log.topics
+    ) ||
+    log.topics.length !==
+      4
   ) {
     return null;
   }
 
   const topic0 =
     String(
-      log.topics[0] || ""
+      log.topics[0] ||
+      ""
     ).toLowerCase();
 
   if (
@@ -799,7 +1176,8 @@ function decodeInitializeLog(log) {
   }
 
   const data =
-    log.data || "0x";
+    log.data ||
+    "0x";
 
   if (
     !/^0x[0-9a-fA-F]{320}$/.test(
@@ -811,40 +1189,58 @@ function decodeInitializeLog(log) {
 
   const fee =
     hexToNumber(
-      hexWord(data, 0)
+      hexWord(
+        data,
+        0
+      )
     );
 
   const tickSpacing =
     decodeSignedInt(
-      hexWord(data, 1),
+      hexWord(
+        data,
+        1
+      ),
       24
     );
 
   const hooks =
     topicToAddress(
-      hexWord(data, 2)
+      hexWord(
+        data,
+        2
+      )
     );
 
-  let sqrtPriceX96 = null;
+  let sqrtPriceX96 =
+    null;
 
   try {
     sqrtPriceX96 =
       BigInt(
-        hexWord(data, 3)
+        hexWord(
+          data,
+          3
+        )
       );
   } catch {}
 
   const tick =
     decodeSignedInt(
-      hexWord(data, 4),
+      hexWord(
+        data,
+        4
+      ),
       24
     );
 
   if (
     fee === null ||
-    tickSpacing === null ||
+    tickSpacing ===
+      null ||
     !hooks ||
-    sqrtPriceX96 === null ||
+    sqrtPriceX96 ===
+      null ||
     tick === null
   ) {
     return null;
@@ -855,6 +1251,7 @@ function decodeInitializeLog(log) {
       log.topics[1],
 
     currency0,
+
     currency1,
 
     fee,
@@ -877,19 +1274,14 @@ function decodeInitializeLog(log) {
       log.transactionHash,
 
     logIndex:
-      log.logIndex,
-
-    address:
-      log.address,
-
-    data
+      log.logIndex
   };
 }
 
 /*
- * ------------------------------------------------------------------
- * Candidate extraction
- * ------------------------------------------------------------------
+ * ============================================================
+ * TOKEN CURRENCIES
+ * ============================================================
  */
 
 function extractTokenCurrencies(
@@ -905,7 +1297,9 @@ function extractTokenCurrencies(
   ) {
     if (
       !currency ||
-      isZeroAddress(currency)
+      isZeroAddress(
+        currency
+      )
     ) {
       continue;
     }
@@ -917,8 +1311,10 @@ function extractTokenCurrencies(
 
     if (
       !result.some(
-        x =>
-          normalizeAddress(x) ===
+        item =>
+          normalizeAddress(
+            item
+          ) ===
           normalized
       )
     ) {
@@ -932,9 +1328,9 @@ function extractTokenCurrencies(
 }
 
 /*
- * ------------------------------------------------------------------
- * Pool activity
- * ------------------------------------------------------------------
+ * ============================================================
+ * POOL ACTIVITY
+ * ============================================================
  */
 
 async function checkPoolActivity(
@@ -955,9 +1351,12 @@ async function checkPoolActivity(
       ]
     );
 
-  if (!result.result) {
+  if (
+    !result.result
+  ) {
     return {
-      success: false,
+      success:
+        false,
 
       provider:
         result.provider,
@@ -965,23 +1364,30 @@ async function checkPoolActivity(
       error:
         result.error,
 
-      logs: 0,
+      logs:
+        0,
 
-      swaps: 0,
+      swaps:
+        0,
 
-      liquidityEvents: 0
+      liquidityEvents:
+        0
     };
   }
 
   let swaps = 0;
-  let liquidityEvents = 0;
+
+  let liquidityEvents =
+    0;
 
   for (
-    const log of result.result
+    const log of
+      result.result
   ) {
     const topic0 =
       String(
-        log.topics?.[0] || ""
+        log.topics?.[0] ||
+        ""
       ).toLowerCase();
 
     if (
@@ -1000,12 +1406,14 @@ async function checkPoolActivity(
   }
 
   return {
-    success: true,
+    success:
+      true,
 
     provider:
       result.provider,
 
-    error: null,
+    error:
+      null,
 
     logs:
       result.result.length,
@@ -1017,18 +1425,295 @@ async function checkPoolActivity(
 }
 
 /*
- * ------------------------------------------------------------------
- * Risk scoring
- * ------------------------------------------------------------------
+ * ============================================================
+ * V67 MARKET DATA
+ * ============================================================
+ */
+
+async function getMarketData(
+  token
+) {
+  const url =
+    `${DEXSCREENER_BASE}/latest/dex/tokens/${token}`;
+
+  try {
+
+    const response =
+      await fetch(
+        url,
+        {
+          method:
+            "GET",
+
+          headers: {
+            accept:
+              "application/json"
+          }
+        }
+      );
+
+    /*
+     * DexScreener rate limit.
+     */
+    if (
+      response.status ===
+      429
+    ) {
+      return {
+        available:
+          false,
+
+        verifiedRobinhood:
+          false,
+
+        reason:
+          "DEXSCREENER_RATE_LIMITED"
+      };
+    }
+
+    if (
+      !response.ok
+    ) {
+      return {
+        available:
+          false,
+
+        verifiedRobinhood:
+          false,
+
+        reason:
+          `DEXSCREENER_HTTP_${response.status}`
+      };
+    }
+
+    const data =
+      await response.json();
+
+    const pairs =
+      Array.isArray(
+        data?.pairs
+      )
+        ? data.pairs
+        : [];
+
+    /*
+     * Robinhood-only pairs.
+     */
+    const robinhoodPairs =
+      pairs.filter(
+        pair =>
+          String(
+            pair?.chainId ||
+            ""
+          ).toLowerCase() ===
+          "robinhood"
+      );
+
+    if (
+      !robinhoodPairs.length
+    ) {
+      return {
+        available:
+          false,
+
+        verifiedRobinhood:
+          false,
+
+        reason:
+          "NO_ROBINHOOD_MARKET_FOUND"
+      };
+    }
+
+    /*
+     * Prefer highest liquidity.
+     */
+    robinhoodPairs.sort(
+      (a, b) =>
+        safeNumber(
+          b?.liquidity?.usd
+        ) -
+        safeNumber(
+          a?.liquidity?.usd
+        )
+    );
+
+    const pair =
+      robinhoodPairs[0];
+
+    const buys5m =
+      safeNumber(
+        pair?.txns?.m5?.buys
+      );
+
+    const sells5m =
+      safeNumber(
+        pair?.txns?.m5?.sells
+      );
+
+    const buys1h =
+      safeNumber(
+        pair?.txns?.h1?.buys
+      );
+
+    const sells1h =
+      safeNumber(
+        pair?.txns?.h1?.sells
+      );
+
+    const buys24h =
+      safeNumber(
+        pair?.txns?.h24?.buys
+      );
+
+    const sells24h =
+      safeNumber(
+        pair?.txns?.h24?.sells
+      );
+
+    return {
+      available:
+        true,
+
+      verifiedRobinhood:
+        true,
+
+      source:
+        "DEXSCREENER",
+
+      pairAddress:
+        pair?.pairAddress ||
+        null,
+
+      dexId:
+        pair?.dexId ||
+        null,
+
+      url:
+        pair?.url ||
+        null,
+
+      priceUsd:
+        safeNumber(
+          pair?.priceUsd
+        ),
+
+      marketCap:
+        safeNumber(
+          pair?.marketCap
+        ),
+
+      fdv:
+        safeNumber(
+          pair?.fdv
+        ),
+
+      liquidityUsd:
+        safeNumber(
+          pair?.liquidity?.usd
+        ),
+
+      volume5m:
+        safeNumber(
+          pair?.volume?.m5
+        ),
+
+      volume1h:
+        safeNumber(
+          pair?.volume?.h1
+        ),
+
+      volume6h:
+        safeNumber(
+          pair?.volume?.h6
+        ),
+
+      volume24h:
+        safeNumber(
+          pair?.volume?.h24
+        ),
+
+      buys5m,
+
+      sells5m,
+
+      buys1h,
+
+      sells1h,
+
+      buys24h,
+
+      sells24h,
+
+      transactions24h:
+        buys24h +
+        sells24h,
+
+      buySellRatio24h:
+        sells24h > 0
+          ? buys24h /
+            sells24h
+          : buys24h > 0
+          ? 999
+          : 0,
+
+      priceChange5m:
+        safeNumber(
+          pair?.priceChange?.m5
+        ),
+
+      priceChange1h:
+        safeNumber(
+          pair?.priceChange?.h1
+        ),
+
+      priceChange6h:
+        safeNumber(
+          pair?.priceChange?.h6
+        ),
+
+      priceChange24h:
+        safeNumber(
+          pair?.priceChange?.h24
+        ),
+
+      pairCreatedAt:
+        pair?.pairCreatedAt ||
+        null
+    };
+
+  } catch (error) {
+    return {
+      available:
+        false,
+
+      verifiedRobinhood:
+        false,
+
+      reason:
+        String(
+          error?.message ||
+          error
+        )
+    };
+  }
+}
+
+/*
+ * ============================================================
+ * RUG RISK
+ * ============================================================
  */
 
 function scoreRugRisk(
   token,
-  activity
+  activity,
+  market
 ) {
-  let risk = 50;
+  let risk =
+    50;
 
-  const reasons = [];
+  const reasons =
+    [];
 
   if (
     token.validERC20
@@ -1061,7 +1746,8 @@ function scoreRugRisk(
   }
 
   if (
-    activity.swaps > 0
+    activity.swaps >
+    0
   ) {
     risk -= 10;
 
@@ -1071,7 +1757,8 @@ function scoreRugRisk(
   }
 
   if (
-    activity.liquidityEvents > 0
+    activity.liquidityEvents >
+    0
   ) {
     risk -= 5;
 
@@ -1080,8 +1767,51 @@ function scoreRugRisk(
     );
   }
 
+  /*
+   * Market-data additions.
+   */
   if (
-    activity.swaps === 0
+    market?.available &&
+    market?.verifiedRobinhood
+  ) {
+    risk -= 5;
+
+    reasons.push(
+      "Robinhood market independently verified"
+    );
+  }
+
+  if (
+    market?.liquidityUsd >=
+    5000
+  ) {
+    risk -= 5;
+
+    reasons.push(
+      "Liquidity above $5K"
+    );
+  }
+
+  /*
+   * Very thin liquidity.
+   */
+  if (
+    market?.available &&
+    market?.liquidityUsd >
+      0 &&
+    market?.liquidityUsd <
+      1000
+  ) {
+    risk += 15;
+
+    reasons.push(
+      "Very low verified liquidity"
+    );
+  }
+
+  if (
+    activity.swaps ===
+    0
   ) {
     risk += 10;
 
@@ -1123,23 +1853,30 @@ function scoreRugRisk(
 }
 
 /*
- * ------------------------------------------------------------------
- * Opportunity scoring
- * ------------------------------------------------------------------
+ * ============================================================
+ * OPPORTUNITY SCORE
+ * ============================================================
  */
 
 function scoreOpportunity(
   token,
-  activity
+  activity,
+  market
 ) {
-  let score = 0;
+  let score =
+    0;
 
-  const reasons = [];
+  const reasons =
+    [];
+
+  /*
+   * V66 signals.
+   */
 
   if (
     token.validERC20
   ) {
-    score += 25;
+    score += 20;
 
     reasons.push(
       "Verified ERC-20"
@@ -1150,7 +1887,7 @@ function scoreOpportunity(
     token.name &&
     token.symbol
   ) {
-    score += 10;
+    score += 5;
 
     reasons.push(
       "Token metadata available"
@@ -1158,9 +1895,10 @@ function scoreOpportunity(
   }
 
   if (
-    activity.swaps > 0
+    activity.swaps >
+    0
   ) {
-    score += 30;
+    score += 15;
 
     reasons.push(
       "V4 swap activity detected"
@@ -1168,23 +1906,107 @@ function scoreOpportunity(
   }
 
   if (
-    activity.liquidityEvents > 0
+    activity.liquidityEvents >
+    0
   ) {
-    score += 15;
+    score += 10;
 
     reasons.push(
       "Liquidity activity detected"
     );
   }
 
+  /*
+   * V67 market signals.
+   */
+
   if (
-    activity.logs > 0 &&
-    activity.logs < 20
+    market?.available &&
+    market?.verifiedRobinhood
   ) {
     score += 10;
 
     reasons.push(
-      "Early activity profile"
+      "Robinhood market verified"
+    );
+  }
+
+  if (
+    market?.liquidityUsd >=
+    1000
+  ) {
+    score += 5;
+
+    reasons.push(
+      "Liquidity above $1K"
+    );
+  }
+
+  if (
+    market?.liquidityUsd >=
+    5000
+  ) {
+    score += 5;
+
+    reasons.push(
+      "Liquidity above $5K"
+    );
+  }
+
+  if (
+    market?.volume1h >=
+    1000
+  ) {
+    score += 5;
+
+    reasons.push(
+      "1h volume above $1K"
+    );
+  }
+
+  if (
+    market?.volume24h >=
+    5000
+  ) {
+    score += 5;
+
+    reasons.push(
+      "24h volume above $5K"
+    );
+  }
+
+  if (
+    market?.buys1h >
+    market?.sells1h &&
+    market?.buys1h >
+    0
+  ) {
+    score += 5;
+
+    reasons.push(
+      "1h buys exceed sells"
+    );
+  }
+
+  if (
+    market?.buySellRatio24h >=
+    1.25
+  ) {
+    score += 5;
+
+    reasons.push(
+      "Positive 24h buy/sell ratio"
+    );
+  }
+
+  if (
+    market?.priceChange1h >
+    0
+  ) {
+    score += 5;
+
+    reasons.push(
+      "Positive 1h momentum"
     );
   }
 
@@ -1197,14 +2019,15 @@ function scoreOpportunity(
 
   return {
     score,
+
     reasons
   };
 }
 
 /*
- * ------------------------------------------------------------------
- * Telegram
- * ------------------------------------------------------------------
+ * ============================================================
+ * TELEGRAM
+ * ============================================================
  */
 
 async function sendTelegram(
@@ -1216,7 +2039,9 @@ async function sendTelegram(
     !env.TELEGRAM_CHAT_ID
   ) {
     return {
-      sent: false,
+      sent:
+        false,
+
       reason:
         "TELEGRAM_NOT_CONFIGURED"
     };
@@ -1230,7 +2055,9 @@ async function sendTelegram(
     )
   ) {
     return {
-      sent: false,
+      sent:
+        false,
+
       reason:
         "BLOCKED_INVALID_OR_ZERO_TOKEN_ADDRESS"
     };
@@ -1240,17 +2067,22 @@ async function sendTelegram(
     !candidate.validERC20
   ) {
     return {
-      sent: false,
+      sent:
+        false,
+
       reason:
         "BLOCKED_UNVERIFIED_ERC20"
     };
   }
 
   if (
-    candidate.rugRisk.score >= 60
+    candidate.rugRisk.score >=
+    60
   ) {
     return {
-      sent: false,
+      sent:
+        false,
+
       reason:
         "BLOCKED_HIGH_RUG_RISK"
     };
@@ -1261,42 +2093,71 @@ async function sendTelegram(
     MIN_TELEGRAM_SCORE
   ) {
     return {
-      sent: false,
+      sent:
+        false,
+
       reason:
         "OPPORTUNITY_SCORE_BELOW_THRESHOLD"
     };
   }
 
+  const market =
+    candidate.market ||
+    {};
+
   const message =
-`🚨 Robinhood Chain Meme Hunter
+`🚨 ROBINHOOD CHAIN MEME HUNTER V67
 
 🪙 ${candidate.name || "Unknown"} (${candidate.symbol || "?"})
 
-Contract:
+📍 Contract
 ${candidate.address}
 
 🎯 Opportunity: ${candidate.opportunity.score}/100
 🛡 Rug risk: ${candidate.rugRisk.score}/100 (${candidate.rugRisk.label})
 
-📊 V4 swaps: ${candidate.activity.swaps}
-💧 Liquidity events: ${candidate.activity.liquidityEvents}
-📡 Pool logs: ${candidate.activity.logs}
+💰 Market Cap: ${formatMoney(market.marketCap)}
+💧 Liquidity: ${formatMoney(market.liquidityUsd)}
+📊 1h Volume: ${formatMoney(market.volume1h)}
+📈 24h Volume: ${formatMoney(market.volume24h)}
+
+🟢 1h Buys: ${market.buys1h ?? "UNVERIFIED"}
+🔴 1h Sells: ${market.sells1h ?? "UNVERIFIED"}
+
+🟢 24h Buys: ${market.buys24h ?? "UNVERIFIED"}
+🔴 24h Sells: ${market.sells24h ?? "UNVERIFIED"}
+
+📈 1h Price: ${market.priceChange1h ?? "UNVERIFIED"}%
+📈 24h Price: ${market.priceChange24h ?? "UNVERIFIED"}%
+
+⚙️ V4 swaps: ${candidate.activity.swaps}
+💧 V4 liquidity events: ${candidate.activity.liquidityEvents}
 
 Why:
 ${candidate.opportunity.reasons
   .map(
-    x => "• " + x
+    reason =>
+      "• " +
+      reason
   )
   .join("\n")}
 
 Risk:
 ${candidate.rugRisk.reasons
   .map(
-    x => "• " + x
+    reason =>
+      "• " +
+      reason
   )
   .join("\n")}
 
-⚠️ Automated on-chain screening only.`;
+⚠️ Holder concentration: UNVERIFIED
+⚠️ Smart money: UNVERIFIED
+⚠️ Whale activity: UNVERIFIED
+
+${market.url ? "Chart:\n" + market.url : ""}
+
+Automated on-chain screening only.`;
 
   const url =
     "https://api.telegram.org/bot" +
@@ -1304,11 +2165,13 @@ ${candidate.rugRisk.reasons
     "/sendMessage";
 
   try {
+
     const response =
       await fetch(
         url,
         {
-          method: "POST",
+          method:
+            "POST",
 
           headers: {
             "content-type":
@@ -1337,7 +2200,8 @@ ${candidate.rugRisk.reasons
       !body.ok
     ) {
       return {
-        sent: false,
+        sent:
+          false,
 
         reason:
           "TELEGRAM_API_ERROR",
@@ -1349,16 +2213,19 @@ ${candidate.rugRisk.reasons
     }
 
     return {
-      sent: true,
+      sent:
+        true,
 
       messageId:
-        body.result?.message_id ||
+        body.result
+          ?.message_id ||
         null
     };
 
   } catch (error) {
     return {
-      sent: false,
+      sent:
+        false,
 
       reason:
         "TELEGRAM_REQUEST_FAILED",
@@ -1373,15 +2240,20 @@ ${candidate.rugRisk.reasons
 }
 
 /*
- * ------------------------------------------------------------------
- * Scan
- * ------------------------------------------------------------------
+ * ============================================================
+ * SCAN
+ * ============================================================
  */
 
-async function scan(env) {
+async function scan(
+  env
+) {
   const started =
     Date.now();
 
+  /*
+   * Latest block.
+   */
   const latest =
     await getLatestBlock(
       env
@@ -1393,9 +2265,13 @@ async function scan(env) {
   const fromBlock =
     toBlock -
     BigInt(
-      DISCOVERY_BLOCKS - 1
+      DISCOVERY_BLOCKS -
+      1
     );
 
+  /*
+   * PoolManager logs.
+   */
   const raw =
     await getLogs(
       env,
@@ -1404,7 +2280,9 @@ async function scan(env) {
       POOL_MANAGER
     );
 
-  if (!raw.result) {
+  if (
+    !raw.result
+  ) {
     return {
       agent:
         "Robinhood Chain Meme Hunter",
@@ -1412,7 +2290,8 @@ async function scan(env) {
       version:
         VERSION,
 
-      success: false,
+      success:
+        false,
 
       scan: {
         status:
@@ -1441,11 +2320,14 @@ async function scan(env) {
           poolManager:
             POOL_MANAGER,
 
-          rawLogs: 0,
+          rawLogs:
+            0,
 
-          initializeEvents: 0,
+          initializeEvents:
+            0,
 
-          tokenCandidates: 0,
+          tokenCandidates:
+            0,
 
           provider:
             raw.provider,
@@ -1464,9 +2346,8 @@ async function scan(env) {
     raw.result;
 
   /*
-   * Exact Initialize event matching.
+   * Initialize logs only.
    */
-
   const initializeLogs =
     logs.filter(
       log =>
@@ -1477,17 +2358,21 @@ async function scan(env) {
         V4_INITIALIZE_TOPIC
     );
 
-  const pools = [];
+  const pools =
+    [];
 
   for (
-    const log of initializeLogs
+    const log of
+      initializeLogs
   ) {
     const decoded =
       decodeInitializeLog(
         log
       );
 
-    if (decoded) {
+    if (
+      decoded
+    ) {
       pools.push(
         decoded
       );
@@ -1495,20 +2380,20 @@ async function scan(env) {
   }
 
   /*
-   * Candidate map.
+   * Candidate token map.
    */
-
   const candidateMap =
     new Map();
 
   for (
-    const pool of pools
+    const pool of
+      pools
   ) {
     for (
       const token of
-      extractTokenCurrencies(
-        pool
-      )
+        extractTokenCurrencies(
+          pool
+        )
     ) {
       const key =
         normalizeAddress(
@@ -1516,7 +2401,9 @@ async function scan(env) {
         );
 
       if (
-        !candidateMap.has(key)
+        !candidateMap.has(
+          key
+        )
       ) {
         candidateMap.set(
           key,
@@ -1524,7 +2411,8 @@ async function scan(env) {
             address:
               token,
 
-            pools: []
+            pools:
+              []
           }
         );
       }
@@ -1538,7 +2426,8 @@ async function scan(env) {
 
   const candidates =
     [
-      ...candidateMap.values()
+      ...candidateMap
+        .values()
     ].slice(
       0,
       MAX_TOKEN_CHECKS
@@ -1547,15 +2436,15 @@ async function scan(env) {
   const validationResults =
     [];
 
-  const analysed = [];
+  const analysed =
+    [];
 
   /*
    * Verify tokens.
    */
-
   for (
     const candidate of
-    candidates
+      candidates
   ) {
     const token =
       await verifyERC20(
@@ -1576,23 +2465,21 @@ async function scan(env) {
       continue;
     }
 
+    /*
+     * Find best pool activity.
+     */
     let bestActivity =
       null;
 
     let bestPool =
       null;
 
-    /*
-     * Check up to three pools
-     * for the same token.
-     */
-
     for (
       const pool of
-      candidate.pools.slice(
-        0,
-        3
-      )
+        candidate.pools.slice(
+          0,
+          3
+        )
     ) {
       const activity =
         await checkPoolActivity(
@@ -1608,7 +2495,7 @@ async function scan(env) {
           bestActivity.swaps ||
         (
           activity.swaps ===
-          bestActivity.swaps &&
+            bestActivity.swaps &&
           activity.liquidityEvents >
             bestActivity.liquidityEvents
         )
@@ -1622,35 +2509,66 @@ async function scan(env) {
     }
 
     const activity =
-      bestActivity || {
-        success: false,
+      bestActivity ||
+      {
+        success:
+          false,
 
-        provider: null,
+        provider:
+          null,
 
         error:
           "NO_POOL_ACTIVITY_CHECK",
 
-        logs: 0,
+        logs:
+          0,
 
-        swaps: 0,
+        swaps:
+          0,
 
-        liquidityEvents: 0
+        liquidityEvents:
+          0
       };
 
     const pool =
       bestPool ||
       candidate.pools[0];
 
+    /*
+     * V67 MARKET LOOKUP.
+     */
+    const market =
+      analysed.length <
+      MAX_MARKET_LOOKUPS
+        ? await getMarketData(
+            candidate.address
+          )
+        : {
+            available:
+              false,
+
+            verifiedRobinhood:
+              false,
+
+            reason:
+              "MARKET_LOOKUP_LIMIT_REACHED"
+          };
+
+    /*
+     * Scores now include market data.
+     */
     const rugRisk =
       scoreRugRisk(
         token,
-        activity
+        activity,
+        market
       );
 
     const opportunity =
       scoreOpportunity(
         token,
-        activity
+        activity,
+        market
       );
 
     analysed.push({
@@ -1677,12 +2595,15 @@ async function scan(env) {
         null,
 
       pool:
-        pool || null,
+        pool ||
+        null,
 
       poolCount:
         candidate.pools.length,
 
       activity,
+
+      market,
 
       rugRisk,
 
@@ -1691,9 +2612,17 @@ async function scan(env) {
   }
 
   /*
-   * Qualifying candidates.
+   * Best first.
    */
+  analysed.sort(
+    (a, b) =>
+      b.opportunity.score -
+      a.opportunity.score
+  );
 
+  /*
+   * Telegram eligibility.
+   */
   const qualifying =
     analysed.filter(
       candidate =>
@@ -1709,7 +2638,10 @@ async function scan(env) {
 
   for (
     const candidate of
-    qualifying
+      qualifying.slice(
+        0,
+        2
+      )
   ) {
     const telegram =
       await sendTelegram(
@@ -1730,21 +2662,22 @@ async function scan(env) {
   }
 
   /*
-   * Diagnostics.
+   * Topic diagnostics.
    */
-
   const topic0Sample =
     [
       ...new Set(
         logs
           .map(
-            x =>
-              x.topics?.[0]
+            log =>
+              log
+                .topics?.[0]
           )
           .filter(Boolean)
           .map(
-            x =>
-              x.toLowerCase()
+            topic =>
+              topic
+                .toLowerCase()
           )
       )
     ].slice(
@@ -1772,7 +2705,7 @@ async function scan(env) {
         V4_SWAP_TOPIC
     ).length;
 
-  const modifyLiquidityMatches =
+  const modifyLiquidityTopicMatches =
     logs.filter(
       log =>
         String(
@@ -1783,21 +2716,16 @@ async function scan(env) {
     ).length;
 
   /*
-   * IMPORTANT:
-   *
-   * The V65 runtime error was caused by returning:
-   *
-   * modifyLiquidityTopicMatches
-   *
-   * while the actual variable was:
-   *
-   * modifyLiquidityMatches
-   *
-   * V66 explicitly assigns the correct value here.
+   * Market summary.
    */
-
-  const modifyLiquidityTopicMatches =
-    modifyLiquidityMatches;
+  const marketsFound =
+    analysed.filter(
+      candidate =>
+        candidate.market
+          ?.available &&
+        candidate.market
+          ?.verifiedRobinhood
+    ).length;
 
   return {
     agent:
@@ -1806,7 +2734,8 @@ async function scan(env) {
     version:
       VERSION,
 
-    success: true,
+    success:
+      true,
 
     scan: {
       status:
@@ -1846,18 +2775,13 @@ async function scan(env) {
         initializeEvents:
           pools.length,
 
-        initializeTopicMatches:
-          initializeTopicMatches,
+        initializeTopicMatches,
 
-        swapTopicMatches:
-          swapTopicMatches,
+        swapTopicMatches,
 
-        modifyLiquidityTopicMatches:
-          modifyLiquidityTopicMatches,
+        modifyLiquidityTopicMatches,
 
-        topic0Sample:
-
-          topic0Sample,
+        topic0Sample,
 
         tokenCandidates:
           candidateMap.size,
@@ -1877,11 +2801,26 @@ async function scan(env) {
 
       validERC20Tokens:
         validationResults.filter(
-          x =>
-            x.validERC20
+          result =>
+            result
+              .validERC20
         ).length,
 
       validationResults,
+
+      /*
+       * V67 MARKET SUMMARY
+       */
+      marketData: {
+        source:
+          "DEXSCREENER",
+
+        lookupsAttempted:
+          analysed.length,
+
+        robinhoodMarketsFound:
+          marketsFound
+      },
 
       candidates:
         analysed,
@@ -1893,18 +2832,22 @@ async function scan(env) {
         telegramCandidates.length,
 
       telegram:
-        telegramCandidates.length > 0
+        telegramCandidates.length >
+        0
           ? {
-              sent: true,
+              sent:
+                true,
 
               count:
                 telegramCandidates.length
             }
           : {
-              sent: false,
+              sent:
+                false,
 
               reason:
-                qualifying.length === 0
+                qualifying.length ===
+                0
                   ? "NO_VERIFIED_LOW_RISK_QUALIFYING_CANDIDATE"
                   : "TELEGRAM_NOT_SENT"
             },
@@ -1925,17 +2868,6 @@ async function scan(env) {
         exactV4EventTopics:
           true,
 
-        structuralInitializeFallback:
-          false,
-
-        robinhoodPublicRpc:
-          "PRIMARY_WITH_429_BACKOFF",
-
-        alchemyFallback:
-          env.ALCHEMY_API_KEY
-            ? "CONFIGURED"
-            : "NOT_CONFIGURED",
-
         v4CurrencyDecoding:
           "TOPICS_2_AND_3",
 
@@ -1946,21 +2878,36 @@ async function scan(env) {
           "BYTECODE_AND_ERC20_METHOD_VERIFIED",
 
         rugRisk:
-          "HEURISTIC_ON_CHAIN_RISK_SCORE",
+          "ON_CHAIN_PLUS_VERIFIED_MARKET_HEURISTIC",
 
         opportunity:
-          "HEURISTIC_ON_CHAIN_OPPORTUNITY_SCORE",
+          "ON_CHAIN_PLUS_MARKET_OPPORTUNITY_SCORE",
 
         telegramTokenSafety:
           "NON_ZERO_VERIFIED_LOW_RISK_ONLY",
 
+        /*
+         * V67
+         */
         liquidity:
-          "V4_MODIFY_LIQUIDITY_EVENTS_DETECTED_NOT_VALUE_VERIFIED",
+          "DEXSCREENER_VERIFIED_WHEN_AVAILABLE",
 
         marketCap:
-          "NOT_VERIFIED",
+          "DEXSCREENER_VERIFIED_WHEN_AVAILABLE",
+
+        fdv:
+          "DEXSCREENER_VERIFIED_WHEN_AVAILABLE",
+
+        volume:
+          "DEXSCREENER_VERIFIED_WHEN_AVAILABLE",
+
+        buySellActivity:
+          "DEXSCREENER_VERIFIED_WHEN_AVAILABLE",
 
         holderConcentration:
+          "NOT_VERIFIED",
+
+        holderCount:
           "NOT_VERIFIED",
 
         smartMoney:
@@ -1974,7 +2921,7 @@ async function scan(env) {
       },
 
       architecture:
-        "V66_EXACT_V4_EVENTS_MULTI_POOL_ACTIVITY_VERIFIED_TOKEN_RUG_RISK_HUNTER"
+        "V67_V66_BASELINE_PLUS_VERIFIED_MARKET_LIQUIDITY_VOLUME"
     },
 
     chain: {
@@ -1991,15 +2938,22 @@ async function scan(env) {
 }
 
 /*
- * ------------------------------------------------------------------
- * Health
- * ------------------------------------------------------------------
+ * ============================================================
+ * HEALTH
+ * ============================================================
  */
 
-async function health(env) {
-  let latestBlock = null;
-  let provider = null;
-  let error = null;
+async function health(
+  env
+) {
+  let latestBlock =
+    null;
+
+  let provider =
+    null;
+
+  let error =
+    null;
 
   try {
     const latest =
@@ -2015,11 +2969,11 @@ async function health(env) {
     provider =
       latest.provider;
 
-  } catch (e) {
+  } catch (caught) {
     error =
       String(
-        e?.message ||
-        e
+        caught?.message ||
+        caught
       );
   }
 
@@ -2062,8 +3016,8 @@ async function health(env) {
           env.ALCHEMY_API_KEY
         ),
 
-      blockscoutConfigured:
-        false
+      dexScreener:
+        true
     },
 
     rpcStatus:
@@ -2086,6 +3040,9 @@ async function health(env) {
 
     maxTokenChecks:
       MAX_TOKEN_CHECKS,
+
+    maxMarketLookups:
+      MAX_MARKET_LOOKUPS,
 
     telegram: {
       configured:
@@ -2124,8 +3081,31 @@ async function health(env) {
         true
     },
 
+    marketData: {
+      provider:
+        "DEXSCREENER",
+
+      liquidity:
+        true,
+
+      marketCap:
+        true,
+
+      fdv:
+        true,
+
+      volume:
+        true,
+
+      buySell:
+        true,
+
+      momentum:
+        true
+    },
+
     architecture:
-      "V66_EXACT_V4_EVENTS_MULTI_POOL_ACTIVITY_VERIFIED_TOKEN_RUG_RISK_HUNTER",
+      "V67_V66_BASELINE_PLUS_VERIFIED_MARKET_LIQUIDITY_VOLUME",
 
     timestamp:
       now()
@@ -2133,12 +3113,14 @@ async function health(env) {
 }
 
 /*
- * ------------------------------------------------------------------
- * RPC Test
- * ------------------------------------------------------------------
+ * ============================================================
+ * RPC TEST
+ * ============================================================
  */
 
-async function rpcTest(env) {
+async function rpcTest(
+  env
+) {
   const latest =
     await getLatestBlock(
       env
@@ -2148,7 +3130,8 @@ async function rpcTest(env) {
     latest.block;
 
   const fromBlock =
-    toBlock - 2n;
+    toBlock -
+    2n;
 
   const range =
     await getLogs(
@@ -2251,29 +3234,20 @@ async function rpcTest(env) {
       }
     ],
 
-    v4Topics: {
-      initialize:
-        V4_INITIALIZE_TOPIC,
-
-      swap:
-        V4_SWAP_TOPIC,
-
-      modifyLiquidity:
-        V4_MODIFY_LIQUIDITY_TOPIC
-    },
-
     timestamp:
       now()
   };
 }
 
 /*
- * ------------------------------------------------------------------
- * Telegram safety test
- * ------------------------------------------------------------------
+ * ============================================================
+ * TELEGRAM SAFETY TEST
+ * ============================================================
  */
 
-async function telegramTest(env) {
+async function telegramTest(
+  env
+) {
   const result =
     await sendTelegram(
       env,
@@ -2324,9 +3298,9 @@ async function telegramTest(env) {
 }
 
 /*
- * ------------------------------------------------------------------
- * Worker
- * ------------------------------------------------------------------
+ * ============================================================
+ * WORKER
+ * ============================================================
  */
 
 export default {
@@ -2346,36 +3320,50 @@ export default {
       ) || "/";
 
     try {
+
       if (
-        path === "/health" ||
-        path === "/"
+        path ===
+          "/health" ||
+        path ===
+          "/"
       ) {
         return json(
-          await health(env)
+          await health(
+            env
+          )
         );
       }
 
       if (
-        path === "/rpc-test"
+        path ===
+        "/rpc-test"
       ) {
         return json(
-          await rpcTest(env)
+          await rpcTest(
+            env
+          )
         );
       }
 
       if (
-        path === "/scan"
+        path ===
+        "/scan"
       ) {
         return json(
-          await scan(env)
+          await scan(
+            env
+          )
         );
       }
 
       if (
-        path === "/test-telegram"
+        path ===
+        "/test-telegram"
       ) {
         return json(
-          await telegramTest(env)
+          await telegramTest(
+            env
+          )
         );
       }
 
