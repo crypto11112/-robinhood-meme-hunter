@@ -1,4 +1,4 @@
-const VERSION = "V57";
+const VERSION = "V58";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -36,15 +36,12 @@ const TRANSFER_TOPIC =
 const SCORE_THRESHOLD = 60;
 
 const DISCOVERY_BLOCKS = 100;
-
 const V4_BLOCKS = 100;
-
 const ACTIVITY_BLOCKS = 50;
 
 const RPC_TIMEOUT_MS = 3500;
 
 const MAX_DISCOVERY_CALLS = 8;
-
 const MAX_TOKEN_CHECKS = 5;
 
 
@@ -208,6 +205,301 @@ async function latestBlock(env) {
 
 
 /* =========================================================
+   RPC LOG TEST
+========================================================= */
+
+async function rpcTest(env) {
+  const latest =
+    await latestBlock(env);
+
+  /*
+    Only test a very small range.
+    This deliberately avoids the scanner.
+  */
+
+  const fromBlock =
+    Math.max(
+      0,
+      latest - 10
+    );
+
+  const fromHex =
+    "0x" +
+    fromBlock.toString(16);
+
+  const toHex =
+    "0x" +
+    latest.toString(16);
+
+  const tests = [];
+
+  /*
+    TEST 1
+    eth_getLogs with ONLY block range.
+  */
+
+  try {
+    const result =
+      await rpc(
+        env,
+        "eth_getLogs",
+        [
+          {
+            fromBlock:
+              fromHex,
+
+            toBlock:
+              toHex
+          }
+        ]
+      );
+
+    tests.push({
+      test:
+        "range_only",
+
+      success:
+        true,
+
+      logs:
+        Array.isArray(result)
+          ? result.length
+          : 0
+    });
+
+  } catch (error) {
+    tests.push({
+      test:
+        "range_only",
+
+      success:
+        false,
+
+      error:
+        error?.message ||
+        String(error)
+    });
+  }
+
+
+  /*
+    TEST 2
+    eth_getLogs against PoolManager.
+  */
+
+  try {
+    const result =
+      await rpc(
+        env,
+        "eth_getLogs",
+        [
+          {
+            address:
+              POOL_MANAGER,
+
+            fromBlock:
+              fromHex,
+
+            toBlock:
+              toHex
+          }
+        ]
+      );
+
+    tests.push({
+      test:
+        "pool_manager",
+
+      success:
+        true,
+
+      logs:
+        Array.isArray(result)
+          ? result.length
+          : 0
+    });
+
+  } catch (error) {
+    tests.push({
+      test:
+        "pool_manager",
+
+      success:
+        false,
+
+      error:
+        error?.message ||
+        String(error)
+    });
+  }
+
+
+  /*
+    TEST 3
+    eth_getLogs against ONE launchpad.
+  */
+
+  try {
+    const result =
+      await rpc(
+        env,
+        "eth_getLogs",
+        [
+          {
+            address:
+              LAUNCHPADS[0],
+
+            fromBlock:
+              fromHex,
+
+            toBlock:
+              toHex
+          }
+        ]
+      );
+
+    tests.push({
+      test:
+        "single_launchpad",
+
+      success:
+        true,
+
+      logs:
+        Array.isArray(result)
+          ? result.length
+          : 0
+    });
+
+  } catch (error) {
+    tests.push({
+      test:
+        "single_launchpad",
+
+      success:
+        false,
+
+      error:
+        error?.message ||
+        String(error)
+    });
+  }
+
+
+  /*
+    TEST 4
+    eth_getLogs with a Transfer topic.
+  */
+
+  try {
+    const result =
+      await rpc(
+        env,
+        "eth_getLogs",
+        [
+          {
+            fromBlock:
+              fromHex,
+
+            toBlock:
+              toHex,
+
+            topics: [
+              TRANSFER_TOPIC
+            ]
+          }
+        ]
+      );
+
+    tests.push({
+      test:
+        "transfer_topic",
+
+      success:
+        true,
+
+      logs:
+        Array.isArray(result)
+          ? result.length
+          : 0
+    });
+
+  } catch (error) {
+    tests.push({
+      test:
+        "transfer_topic",
+
+      success:
+        false,
+
+      error:
+        error?.message ||
+        String(error)
+    });
+  }
+
+
+  return {
+    agent:
+      "Robinhood Chain Meme Hunter",
+
+    version:
+      VERSION,
+
+    success:
+      true,
+
+    rpcTest:
+      true,
+
+    chain: {
+      name:
+        CHAIN_NAME,
+
+      chainId:
+        CHAIN_ID
+    },
+
+    latestBlock:
+      latest,
+
+    fromBlock,
+
+    toBlock:
+      latest,
+
+    blockRange:
+      latest - fromBlock + 1,
+
+    endpoint:
+      "ALCHEMY_ROBINHOOD_MAINNET",
+
+    tests,
+
+    interpretation: {
+      blockNumber:
+        "eth_blockNumber must succeed",
+
+      rangeOnly:
+        "Tests whether eth_getLogs itself is accepted",
+
+      poolManager:
+        "Tests address-filtered eth_getLogs",
+
+      singleLaunchpad:
+        "Tests launchpad address filtering",
+
+      transferTopic:
+        "Tests topic filtering"
+    },
+
+    timestamp:
+      new Date().toISOString()
+  };
+}
+
+
+/* =========================================================
    SINGLE-CONTRACT LOG QUERY
 ========================================================= */
 
@@ -222,6 +514,7 @@ async function getContractLogs(
   ) {
     return {
       logs: [],
+
       error:
         "INVALID_CONTRACT"
     };
@@ -254,7 +547,8 @@ async function getContractLogs(
           ? result
           : [],
 
-      error: null
+      error:
+        null
     };
 
   } catch (error) {
@@ -348,14 +642,6 @@ async function discover(
 
   let calls = 0;
 
-  /*
-    IMPORTANT:
-    V57 deliberately performs ONE contract query
-    at a time. This avoids the V56 HTTP 400 caused
-    by the multi-address request and avoids the V55
-    Cloudflare subrequest explosion.
-  */
-
   for (
     const contract of
       DISCOVERY_CONTRACTS
@@ -433,9 +719,11 @@ async function discover(
   }
 
   return {
-    fromBlock: from,
+    fromBlock:
+      from,
 
-    toBlock: latest,
+    toBlock:
+      latest,
 
     blocks:
       latest - from + 1,
@@ -490,11 +778,6 @@ async function discoverV4(
       continue;
     }
 
-    /*
-      Keep this deliberately conservative.
-      We do not fabricate V4 event decoding.
-    */
-
     if (
       log.topics.length >= 3
     ) {
@@ -534,9 +817,11 @@ async function discoverV4(
   }
 
   return {
-    fromBlock: from,
+    fromBlock:
+      from,
 
-    toBlock: latest,
+    toBlock:
+      latest,
 
     rawLogs:
       result.logs.length,
@@ -572,16 +857,21 @@ async function call(
       "eth_call",
       [
         {
-          to: address,
+          to:
+            address,
+
           data
         },
+
         "latest"
       ]
     );
+
   } catch {
     return null;
   }
 }
+
 
 function decodeText(value) {
   if (
@@ -594,10 +884,6 @@ function decodeText(value) {
   try {
     const clean =
       value.slice(2);
-
-    /*
-      Dynamic ABI string
-    */
 
     if (
       clean.length >= 128
@@ -681,6 +967,7 @@ function decodeText(value) {
     return null;
   }
 }
+
 
 async function verifyERC20(
   env,
@@ -781,6 +1068,7 @@ async function activity(
   ) {
     return {
       transfers: 0,
+
       wallets: 0
     };
   }
@@ -924,10 +1212,6 @@ async function telegram(
   env,
   candidate
 ) {
-  /*
-    FINAL HARD SAFETY CHECK
-  */
-
   if (
     !isValidToken(
       candidate.address
@@ -1004,7 +1288,7 @@ async function telegram(
 
       "",
 
-      "Robinhood Chain Meme Hunter V57"
+      "Robinhood Chain Meme Hunter V58"
     ].join("\n");
 
   try {
@@ -1093,10 +1377,6 @@ async function runScan(env) {
       env,
       latest
     );
-
-  /*
-    Combine candidates.
-  */
 
   const candidateMap =
     new Map();
@@ -1187,11 +1467,6 @@ async function runScan(env) {
 
   const validationResults =
     [];
-
-  /*
-    Each candidate is validated sequentially.
-    This keeps Worker subrequests bounded.
-  */
 
   for (
     const raw of
@@ -1446,6 +1721,9 @@ async function runScan(env) {
         sequentialContractDiscovery:
           true,
 
+        rpcDiagnostic:
+          "/rpc-test",
+
         tokenContract:
           "ERC20_CALL_VERIFIED",
 
@@ -1475,7 +1753,7 @@ async function runScan(env) {
       },
 
       architecture:
-        "V57_RESTORED_SINGLE_CONTRACT_RPC_DISCOVERY",
+        "V58_RPC_DIAGNOSTIC_VERIFIED_TOKEN_HUNTER",
 
       chain: {
         name:
@@ -1530,7 +1808,8 @@ async function health(env) {
     routes: [
       "/health",
       "/scan",
-      "/test-telegram"
+      "/test-telegram",
+      "/rpc-test"
     ],
 
     chain: {
@@ -1595,7 +1874,7 @@ async function health(env) {
     },
 
     architecture:
-      "V57_RESTORED_SINGLE_CONTRACT_RPC_DISCOVERY",
+      "V58_RPC_DIAGNOSTIC_VERIFIED_TOKEN_HUNTER",
 
     timestamp:
       new Date().toISOString()
@@ -1625,7 +1904,16 @@ async function telegramTest(env) {
           "ZERO",
 
         symbol:
-          "ZERO"
+          "ZERO",
+
+        source:
+          "SAFETY_TEST",
+
+        transfers:
+          0,
+
+        wallets:
+          0
       }
     );
 
@@ -1695,6 +1983,9 @@ export default {
       );
 
     try {
+
+      /* HEALTH */
+
       if (
         url.pathname ===
         "/health"
@@ -1705,6 +1996,23 @@ export default {
           )
         );
       }
+
+
+      /* RPC DIAGNOSTIC */
+
+      if (
+        url.pathname ===
+        "/rpc-test"
+      ) {
+        return response(
+          await rpcTest(
+            env
+          )
+        );
+      }
+
+
+      /* SCAN */
 
       if (
         url.pathname ===
@@ -1717,6 +2025,9 @@ export default {
         );
       }
 
+
+      /* TELEGRAM SAFETY TEST */
+
       if (
         url.pathname ===
         "/test-telegram"
@@ -1727,6 +2038,9 @@ export default {
           )
         );
       }
+
+
+      /* ROOT */
 
       return response({
         agent:
@@ -1740,12 +2054,14 @@ export default {
 
         routes: [
           "/health",
+          "/rpc-test",
           "/scan",
           "/test-telegram"
         ]
       });
 
     } catch (error) {
+
       return response(
         {
           agent:
