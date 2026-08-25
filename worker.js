@@ -39,9 +39,25 @@
  * - FIX: Pool Manager balance displayed separately from real ownership
  * - FIX: concentration trend restored
  * - FIX: previous score-improvement / whale-accumulation alert override restored
+ *
+ * V89:
+ * - Preserves complete V88 capability set and KV history
+ * - FIX: one failed growth probe is remembered immediately
+ * - FIX: same failed backlog range cannot repeat in one scan
+ * - FIX: proven 10-block Alchemy range continues after a failed 15-block probe
+ * - FIX: provider failed-upper-bound now actively blocks repeat growth probes
+ * - FIX: temporary shrink sizes are not persisted until proven successful
+ * - FIX: DexScreener fresh-call pressure reduced with 9-minute market cache
+ * - FIX: one fresh DexScreener lookup per scan, prioritised by watch ranking
+ * - FIX: 90-second persistent DexScreener fresh-request guard
+ * - FIX: 30-minute stale market fallback and 10-minute 429 cooldown
+ * - FIX: Blockscout holder details fallback reordered for lower request cost
+ * - FIX: holder outage path normally consumes at most two Blockscout requests
+ * - FIX: analysis cost estimates updated to reduce unnecessary deferrals
+ * - Preserves V77-style rich Telegram alerts
  */
 
-const VERSION = "V88";
+const VERSION = "V89";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -178,9 +194,9 @@ const ANALYSIS_REQUEST_LIMIT = 21;
 
 const NOTIFICATION_REQUEST_LIMIT = 2;
 
-const FRESH_ANALYSIS_COST_ALCHEMY = 9;
-const FRESH_ANALYSIS_COST_FALLBACK = 14;
-const CACHED_ANALYSIS_COST = 4;
+const FRESH_ANALYSIS_COST_ALCHEMY = 8;
+const FRESH_ANALYSIS_COST_FALLBACK = 11;
+const CACHED_ANALYSIS_COST = 3;
 
 /* =========================================================
    TOKEN ANALYSIS
@@ -196,13 +212,18 @@ const METADATA_REUSE_MS =
    ========================================================= */
 
 const MARKET_CACHE_MS =
-  4 * 60 * 1000;
+  9 * 60 * 1000;
 
 const MARKET_STALE_CACHE_MS =
-  15 * 60 * 1000;
+  30 * 60 * 1000;
 
 const DEXSCREENER_429_COOLDOWN_MS =
-  5 * 60 * 1000;
+  10 * 60 * 1000;
+
+const DEXSCREENER_MIN_FRESH_INTERVAL_MS =
+  90 * 1000;
+
+const DEXSCREENER_MAX_FRESH_PER_SCAN = 1;
 
 /* =========================================================
    WATCHLIST
@@ -1050,7 +1071,10 @@ function newState() {
           null,
 
         total429s:
-          0
+          0,
+
+        lastRequestAt:
+          null
       },
 
       discoveryRpc:
@@ -2650,11 +2674,31 @@ async function scanBacklogSequential(
   let probeAttempts =
     0;
 
+  let blockedRepeatProbes =
+    0;
+
   let error =
     null;
 
   const probeHistory =
     [];
+
+  /*
+   * V89:
+   * A failed speculative range is blocked immediately for
+   * the rest of this invocation even if legacy persisted
+   * success-streak state is unexpectedly high.
+   */
+  const failedProbeKeys =
+    new Set();
+
+  /*
+   * If a previously-proven range itself fails, shrink only
+   * in memory. The smaller size becomes persistent ONLY
+   * after it has actually succeeded.
+   */
+  const temporaryChunkOverrides =
+    new Map();
 
   while (
     cursor <=
@@ -2683,29 +2727,36 @@ async function scanBacklogSequential(
         provider
       );
 
+    const temporaryOverride =
+      temporaryChunkOverrides.get(
+        provider
+      );
+
+    let chunkSize =
+      temporaryOverride ||
+      provenSize;
+
     const failedUpper =
       getProviderFailedUpperBound(
         state,
         provider
       );
 
-    let chunkSize =
-      provenSize;
-
-    /*
-     * V88 controlled future probe:
-     * only after 12 consecutive successful chunks and only
-     * if there is no known failed upper bound blocking it.
-     */
     const streak =
       providerSuccessStreak(
         state,
         provider
       );
 
+    /*
+     * Conservative growth probing. A known failed upper
+     * bound always wins. A failed size is never retried in
+     * the same scan.
+     */
     if (
+      !temporaryOverride &&
       streak >=
-      BACKLOG_SUCCESS_PROBE_THRESHOLD
+        BACKLOG_SUCCESS_PROBE_THRESHOLD
     ) {
       const proposed =
         Math.min(
@@ -2715,15 +2766,33 @@ async function scanBacklogSequential(
           BACKLOG_PROBE_INCREMENT
         );
 
-      if (
+      const probeKey =
+        `${provider}:${proposed}`;
+
+      const allowedByUpperBound =
         !failedUpper ||
         proposed <
-        failedUpper
+          failedUpper;
+
+      if (
+        allowedByUpperBound &&
+        !failedProbeKeys.has(
+          probeKey
+        )
       ) {
         chunkSize =
           proposed;
 
         probeAttempts++;
+      }
+
+      else if (
+        !allowedByUpperBound ||
+        failedProbeKeys.has(
+          probeKey
+        )
+      ) {
+        blockedRepeatProbes++;
       }
     }
 
@@ -2817,6 +2886,11 @@ async function scanBacklogSequential(
               provider
             );
 
+          const alternateOverride =
+            temporaryChunkOverrides.get(
+              provider
+            );
+
           const alternateRemaining =
             Number(
               targetLatest -
@@ -2826,6 +2900,7 @@ async function scanBacklogSequential(
 
           const alternateSize =
             Math.min(
+              alternateOverride ||
               provenSize,
               alternateRemaining
             );
@@ -2914,7 +2989,7 @@ async function scanBacklogSequential(
           "discovery-backlog",
 
         strategy:
-          "V88_PROVEN_PROVIDER_RANGE"
+          "V89_ONE_STRIKE_PROVEN_RANGE"
       });
 
       probeHistory.push({
@@ -2947,13 +3022,16 @@ async function scanBacklogSequential(
       });
 
       /*
-       * CRITICAL V88 FIX:
-       * Persist EXACTLY the size that just worked.
+       * Persist only an actually successful size.
        */
       setProviderSuccessfulBacklogSize(
         state,
         response.provider,
         actualBlocks
+      );
+
+      temporaryChunkOverrides.delete(
+        response.provider
       );
 
       processedThrough =
@@ -2995,10 +3073,12 @@ async function scanBacklogSequential(
         response.error
     });
 
-    /*
-     * HTTP 400 = known range rejection.
-     * Record it as a failed upper bound.
-     */
+    const lastProven =
+      getProviderBacklogSize(
+        state,
+        provider
+      );
+
     if (
       is400(
         response.error
@@ -3009,6 +3089,52 @@ async function scanBacklogSequential(
         provider,
         actualBlocks
       );
+
+      failedProbeKeys.add(
+        `${provider}:${actualBlocks}`
+      );
+
+      /*
+       * Failed speculative growth: immediately return to
+       * the proven size and continue using the remaining
+       * request budget. This is the V88 -> V89 core fix.
+       */
+      if (
+        actualBlocks >
+        lastProven
+      ) {
+        temporaryChunkOverrides.delete(
+          provider
+        );
+
+        continue;
+      }
+
+      /*
+       * A proven size unexpectedly failed. Test a smaller
+       * temporary size without persisting it yet.
+       */
+      if (
+        lastProven >
+        BACKLOG_MIN_CHUNK_BLOCKS
+      ) {
+        const reduced =
+          Math.max(
+            BACKLOG_MIN_CHUNK_BLOCKS,
+
+            Math.floor(
+              lastProven /
+              2
+            )
+          );
+
+        temporaryChunkOverrides.set(
+          provider,
+          reduced
+        );
+
+        continue;
+      }
     }
 
     if (
@@ -3028,68 +3154,6 @@ async function scanBacklogSequential(
         "DISCOVERY_RPC_COOLDOWN";
 
       break;
-    }
-
-    /*
-     * If this was a speculative growth probe and it failed,
-     * immediately return to the last proven size.
-     */
-    const lastProven =
-      getProviderBacklogSize(
-        state,
-        provider
-      );
-
-    if (
-      actualBlocks >
-      lastProven
-    ) {
-      continue;
-    }
-
-    /*
-     * If a supposedly proven size fails with HTTP400,
-     * reduce until a safe range is found.
-     */
-    if (
-      is400(
-        response.error
-      ) &&
-      lastProven >
-      BACKLOG_MIN_CHUNK_BLOCKS
-    ) {
-      const reduced =
-        Math.max(
-          BACKLOG_MIN_CHUNK_BLOCKS,
-
-          Math.floor(
-            lastProven /
-            2
-          )
-        );
-
-      /*
-       * Do NOT save reduced size yet.
-       * It must succeed first.
-       */
-      if (
-        provider ===
-        "ALCHEMY"
-      ) {
-        discoveryService(
-          state
-        ).alchemyBacklogChunkBlocks =
-          reduced;
-      }
-
-      else {
-        discoveryService(
-          state
-        ).publicBacklogChunkBlocks =
-          reduced;
-      }
-
-      continue;
     }
 
     error =
@@ -3158,6 +3222,8 @@ async function scanBacklogSequential(
     providerSwitches,
 
     probeAttempts,
+
+    blockedRepeatProbes,
 
     blocksProcessed,
 
@@ -4247,7 +4313,10 @@ function dexService(state) {
         null,
 
       total429s:
-        0
+        0,
+
+      lastRequestAt:
+        null
     };
 
   return state.services.dexscreener;
@@ -4330,6 +4399,99 @@ async function marketData(
     };
   }
 
+  /*
+   * V89: avoid hammering DexScreener during manual/repeated
+   * scans. Cached/stale data is preferred when available.
+   */
+  const sinceLastFreshRequest =
+    Date.now() -
+    safeNumber(
+      service.lastRequestAt
+    );
+
+  if (
+    safeNumber(
+      service.lastRequestAt
+    ) &&
+    sinceLastFreshRequest <
+      DEXSCREENER_MIN_FRESH_INTERVAL_MS
+  ) {
+    const stale =
+      cachedMarket(
+        watched,
+        MARKET_STALE_CACHE_MS
+      );
+
+    if (stale) {
+      return {
+        ...stale,
+
+        source:
+          "STALE_CACHE_FRESH_GUARD",
+
+        freshGuard:
+          true
+      };
+    }
+
+    return {
+      verified:
+        false,
+
+      status:
+        "DEXSCREENER_FRESH_GUARD",
+
+      freshGuard:
+        true,
+
+      retryAfterMs:
+        Math.max(
+          0,
+          DEXSCREENER_MIN_FRESH_INTERVAL_MS -
+          sinceLastFreshRequest
+        )
+    };
+  }
+
+  budget.analysis.dexFreshUsed =
+    safeNumber(
+      budget.analysis.dexFreshUsed
+    );
+
+  if (
+    budget.analysis.dexFreshUsed >=
+    DEXSCREENER_MAX_FRESH_PER_SCAN
+  ) {
+    const stale =
+      cachedMarket(
+        watched,
+        MARKET_STALE_CACHE_MS
+      );
+
+    if (stale) {
+      return {
+        ...stale,
+
+        source:
+          "STALE_CACHE_SCAN_LIMIT",
+
+        scanFreshLimit:
+          true
+      };
+    }
+
+    return {
+      verified:
+        false,
+
+      status:
+        "DEXSCREENER_SCAN_FRESH_LIMIT",
+
+      scanFreshLimit:
+        true
+    };
+  }
+
   if (
     !consumeBudget(
       budget,
@@ -4345,6 +4507,11 @@ async function marketData(
         "ANALYSIS_BUDGET_PROTECTED"
     };
   }
+
+  budget.analysis.dexFreshUsed++;
+
+  service.lastRequestAt =
+    Date.now();
 
   try {
     const response =
@@ -5188,8 +5355,14 @@ async function holderIntelligence(
   }
 
   /*
-   * V88:
-   * Fetch holder rows first.
+   * V89 request order:
+   * 1. holder rows (needed for concentration)
+   * 2. token details (usually enough for counters)
+   * 3. counters endpoint only when rows exist and details
+   *    did not expose counters.
+   *
+   * During a Blockscout holder outage this normally uses
+   * only two requests instead of three.
    */
   let holders =
     null;
@@ -5207,12 +5380,7 @@ async function holderIntelligence(
       );
   }
 
-  /*
-   * V88:
-   * Even if holder rows fail, still attempt counters/details
-   * so Telegram can show a holder COUNT when possible.
-   */
-  let counters =
+  let details =
     null;
 
   if (
@@ -5221,24 +5389,33 @@ async function holderIntelligence(
       "analysis"
     )
   ) {
-    counters =
+    details =
       await blockscout(
-        `/api/v2/tokens/${token}/counters`,
+        `/api/v2/tokens/${token}`,
         budget
       );
   }
 
   let counterData =
     extractCounterData(
-      counters
+      details
     );
 
   let counterSource =
-    counters
-      ? "COUNTERS"
+    details
+      ? "TOKEN_DETAILS_FALLBACK"
       : null;
 
+  /*
+   * Only spend a third request when holder rows themselves
+   * were successfully returned and counters are still
+   * missing. This keeps outage scans cheap.
+   */
   if (
+    holders &&
+    Array.isArray(
+      holders.items
+    ) &&
     (
       counterData.holderCount ===
         null ||
@@ -5250,18 +5427,16 @@ async function holderIntelligence(
       "analysis"
     )
   ) {
-    const details =
+    const counters =
       await blockscout(
-        `/api/v2/tokens/${token}`,
+        `/api/v2/tokens/${token}/counters`,
         budget
       );
 
-    if (
-      details
-    ) {
+    if (counters) {
       const fallback =
         extractCounterData(
-          details
+          counters
         );
 
       if (
@@ -5281,7 +5456,7 @@ async function holderIntelligence(
       }
 
       counterSource =
-        "TOKEN_DETAILS_FALLBACK";
+        "COUNTERS_FALLBACK";
     }
   }
 
@@ -10192,7 +10367,7 @@ async function scan(
     status,
 
     scanMode:
-      "V88_PROVEN_RANGE_RICH_ALERT_HUNTER",
+      "V89_ONE_STRIKE_EFFICIENT_RICH_ALERT_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -10377,7 +10552,11 @@ async function scan(
         total429s:
           safeNumber(
             dex.total429s
-          )
+          ),
+
+        lastRequestAt:
+          dex.lastRequestAt ||
+          null
       }
     },
 
@@ -10462,7 +10641,7 @@ async function scan(
                 ),
 
               strategy:
-                "V88_PROVIDER_SPECIFIC_PROVEN_RANGE",
+                "V89_ONE_STRIKE_PROVEN_RANGE",
 
               publicLearnedChunk:
                 backlogResult
@@ -10506,6 +10685,11 @@ async function scan(
               probeAttempts:
                 backlogResult
                   ?.probeAttempts ||
+                0,
+
+              blockedRepeatProbes:
+                backlogResult
+                  ?.blockedRepeatProbes ||
                 0,
 
               rawLogs:
@@ -10596,10 +10780,10 @@ async function scan(
           .unknownPoolIds.size,
 
       liveActivityPromotion:
-        "ENABLED_V88",
+        "ENABLED_V89",
 
       providerSpecificBacklogLearning:
-        "ENABLED_V88"
+        "ENABLED_V89"
     },
 
     watchedTokens:
@@ -10632,16 +10816,16 @@ async function scan(
 
     intelligence: {
       trueLiveFirstScanning:
-        "ENABLED_V88",
+        "ENABLED_V89",
 
       providerSpecificBacklogLearning:
-        "ENABLED_V88",
+        "ENABLED_V89",
 
       provenSuccessRangePersistence:
-        "ENABLED_V88",
+        "ENABLED_V89",
 
       failedUpperBoundLearning:
-        "ENABLED_V88",
+        "ENABLED_V89",
 
       persistentRpc429Cooldown:
         "ENABLED",
@@ -10653,10 +10837,19 @@ async function scan(
         "ENABLED",
 
       richV77StyleTelegram:
-        "ENABLED_V88",
+        "ENABLED_V89",
+
+      oneStrikeFailedRangeLearning:
+        "ENABLED_V89",
+
+      dexscreenerFreshRequestGuard:
+        "ENABLED_V89",
+
+      blockscoutEfficientFallback:
+        "ENABLED_V89",
 
       severeRiskOverride:
-        "ENABLED_V88",
+        "ENABLED_V89",
 
       singleSwapLowRiskProtection:
         "ENABLED",
@@ -10665,7 +10858,7 @@ async function scan(
         "ENABLED",
 
       holderCounterFallback:
-        "ENABLED_V88",
+        "ENABLED_V89",
 
       tokenizedSecurityFiltering:
         "ENABLED",
@@ -10713,7 +10906,7 @@ async function scan(
         "ENABLED",
 
       concentrationTrend:
-        "ENABLED_V88",
+        "ENABLED_V89",
 
       candidateRanking:
         "ENABLED",
@@ -10726,7 +10919,7 @@ async function scan(
     },
 
     architecture:
-      "V88_PROVEN_RANGE_RICH_ALERT_INFRASTRUCTURE_AWARE_MULTI_SIGNAL_HUNTER",
+      "V89_ONE_STRIKE_RATE_LIMIT_EFFICIENT_INFRASTRUCTURE_AWARE_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -11042,7 +11235,7 @@ async function health(
     },
 
     architecture:
-      "V88_PROVEN_RANGE_RICH_ALERT_INFRASTRUCTURE_AWARE_MULTI_SIGNAL_HUNTER",
+      "V89_ONE_STRIKE_RATE_LIMIT_EFFICIENT_INFRASTRUCTURE_AWARE_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -11431,7 +11624,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V88_PROVEN_RANGE_RICH_ALERT_INFRASTRUCTURE_AWARE_MULTI_SIGNAL_HUNTER",
+      "V89_ONE_STRIKE_RATE_LIMIT_EFFICIENT_INFRASTRUCTURE_AWARE_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -11449,7 +11642,7 @@ async function telegramTest(
     await sendTelegram(
       env,
 
-`✅ <b>Robinhood Chain Meme Hunter V88</b>
+`✅ <b>Robinhood Chain Meme Hunter V89</b>
 
 Telegram connection test successful.
 
@@ -11748,7 +11941,7 @@ async function scheduledScan(
   console.log(
     JSON.stringify({
       event:
-        "V88_SCHEDULED_SCAN",
+        "V89_SCHEDULED_SCAN",
 
       status:
         result.status,
@@ -11839,7 +12032,7 @@ export default {
 
     catch (error) {
       console.error(
-        "V88 request failed",
+        "V89 request failed",
         error
       );
 
@@ -11860,7 +12053,7 @@ export default {
             ),
 
           architecture:
-            "V88_PROVEN_RANGE_RICH_ALERT_INFRASTRUCTURE_AWARE_MULTI_SIGNAL_HUNTER",
+            "V89_ONE_STRIKE_RATE_LIMIT_EFFICIENT_INFRASTRUCTURE_AWARE_MULTI_SIGNAL_HUNTER",
 
           timestamp:
             now()
