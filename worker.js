@@ -1,28 +1,27 @@
 /**
  * Robinhood Chain Meme Hunter
- * V112
+ * V113
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V112:
- * - Builds directly forward from confirmed V111
+ * V113:
+ * - Builds directly forward from confirmed V112
+ * - Preserves V112 hard 7-request resolver cap and stalled-pool backoff
  * - Preserves V111 KV sanitization and safe HTTP 400 demotion/retry
- * - Preserves V108 balanced breadth/depth architecture and downstream reserve
- * - FIX: hard resolver network-call cap now equals the advertised requestLimit
- * - FIX: growth probe + fallback cannot push resolver above its hard cap
- * - NEW: stalled unknown pools enter adaptive retry backoff instead of
- *        consuming resolver slots on every run
- * - NEW: severe-stall pools get a longer retry interval
- * - NEW: DEEP_BURST is provider-aware and only runs when the wider public
- *        exact-pool range is currently usable
- * - NEW: heavily retried pools are not allowed to monopolize DEEP_BURST
- * - NEW: unused depth slots are returned to breadth/fair discovery
- * - NEW: resolver telemetry exposes stalled pools, backoff skips,
- *        hard request budget and distance searched from first activity
- * - Preserves contiguous Initialize coverage; no searched ranges are skipped
- * - Preserves all V99+ market, holder, risk, momentum and Telegram systems
+ * - NEW: provider-specific failed exact-range growth-probe cooldowns
+ * - NEW: Alchemy failed 20-block exact probes cool down for 30 minutes
+ * - NEW: Public RPC failed exact probes cool down for 10 minutes
+ * - NEW: deep historical unknown-pool searching pauses while only the
+ *        narrow 10-block Alchemy exact range is available
+ * - NEW: deep contiguous search automatically resumes when the wider
+ *        proven Public RPC exact range is available
+ * - NEW: launch-proximity priority favors fresh/liquidity-active pools
+ *        whose Initialize is most likely near first observed activity
+ * - Preserves all unresolved cursors in KV; no searched coverage is lost
+ * - Preserves live-first scanning, backlog catch-up, holder/risk systems,
+ *        DexScreener protection, candidate ranking and Telegram
  */
-const VERSION = "V112";
+const VERSION = "V113";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -236,6 +235,20 @@ const UNKNOWN_POOL_STALLED_ATTEMPTS = 12;
 const UNKNOWN_POOL_SEVERE_STALLED_ATTEMPTS = 24;
 const UNKNOWN_POOL_STALLED_RETRY_MS = 10 * 60 * 1000;
 const UNKNOWN_POOL_SEVERE_STALLED_RETRY_MS = 30 * 60 * 1000;
+
+/*
+ * V113 provider-specific failed growth-probe suppression.
+ */
+const UNKNOWN_POOL_EXACT_FAILED_PROBE_COOLDOWN_PUBLIC_MS =
+  10 * 60 * 1000;
+const UNKNOWN_POOL_EXACT_FAILED_PROBE_COOLDOWN_ALCHEMY_MS =
+  30 * 60 * 1000;
+
+/*
+ * When Public RPC is unavailable, Alchemy's proven exact range is only
+ * 10 blocks. Do not grind old pools indefinitely at that width.
+ */
+const UNKNOWN_POOL_ALCHEMY_DEEP_SEARCH_DISTANCE_BLOCKS = 60;
 const UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN = 7;
 const UNKNOWN_POOL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_UNKNOWN_POOL_TRACKER = 500;
@@ -2467,11 +2480,28 @@ function exactPoolCanGrowthProbe(
       ]
     );
 
+  const probeFailures =
+    safeNumber(
+      service[
+        fields.probeFailures
+      ]
+    );
+
+  const effectiveProbeCooldown =
+    probeFailures > 0
+      ? (
+          provider ===
+            "ALCHEMY"
+            ? UNKNOWN_POOL_EXACT_FAILED_PROBE_COOLDOWN_ALCHEMY_MS
+            : UNKNOWN_POOL_EXACT_FAILED_PROBE_COOLDOWN_PUBLIC_MS
+        )
+      : UNKNOWN_POOL_EXACT_PROBE_COOLDOWN_MS;
+
   if (
     lastProbeAt > 0 &&
     Date.now() -
       lastProbeAt <
-      UNKNOWN_POOL_EXACT_PROBE_COOLDOWN_MS
+      effectiveProbeCooldown
   ) {
     return false;
   }
@@ -3372,6 +3402,90 @@ function unknownPoolSearchDistance(
 }
 
 
+
+function unknownPoolLaunchProximityScore(
+  entry
+) {
+  const distance =
+    unknownPoolSearchDistance(
+      entry
+    );
+
+  const liquidityEvents =
+    safeNumber(
+      entry?.liquidityEvents
+    );
+
+  const swaps =
+    safeNumber(
+      entry?.swapEvents
+    );
+
+  let score = 0;
+
+  if (distance <= 10) {
+    score += 40;
+  } else if (distance <= 30) {
+    score += 25;
+  } else if (distance <= 60) {
+    score += 10;
+  }
+
+  score += Math.min(
+    30,
+    liquidityEvents * 6
+  );
+
+  score += Math.min(
+    10,
+    swaps
+  );
+
+  return score;
+}
+
+function unknownPoolDeepSearchAllowedNow(
+  state,
+  entry
+) {
+  const distance =
+    unknownPoolSearchDistance(
+      entry
+    );
+
+  const publicAvailable =
+    !discoveryProviderCooling(
+      state,
+      "ROBINHOOD_PUBLIC_RPC"
+    );
+
+  const publicRange =
+    exactPoolSafeChunk(
+      state,
+      "ROBINHOOD_PUBLIC_RPC"
+    );
+
+  const alchemyRange =
+    exactPoolSafeChunk(
+      state,
+      "ALCHEMY"
+    );
+
+  if (
+    publicAvailable &&
+    publicRange >
+      alchemyRange
+  ) {
+    return true;
+  }
+
+  return (
+    distance <=
+    UNKNOWN_POOL_ALCHEMY_DEEP_SEARCH_DISTANCE_BLOCKS
+  );
+}
+
+
 async function resolvePersistentUnknownPools(
   env,
   state,
@@ -3550,7 +3664,11 @@ async function resolvePersistentUnknownPools(
         entry =>
           safeNumber(
             entry?.attempts
-          ) > 0
+          ) > 0 &&
+          unknownPoolDeepSearchAllowedNow(
+            state,
+            entry
+          )
       )
       .sort((a, b) => {
         const activityDiff =
@@ -3702,6 +3820,20 @@ async function resolvePersistentUnknownPools(
         );
       })
       .sort((a, b) => {
+        const proximityDiff =
+          unknownPoolLaunchProximityScore(
+            b
+          ) -
+          unknownPoolLaunchProximityScore(
+            a
+          );
+
+        if (
+          proximityDiff !== 0
+        ) {
+          return proximityDiff;
+        }
+
         const activityDiff =
           activityScore(b) -
           activityScore(a);
@@ -3798,9 +3930,26 @@ async function resolvePersistentUnknownPools(
           )
         );
       })
-      .sort(
-        byOldestWait
-      );
+      .sort((a, b) => {
+        const proximityDiff =
+          unknownPoolLaunchProximityScore(
+            b
+          ) -
+          unknownPoolLaunchProximityScore(
+            a
+          );
+
+        if (
+          proximityDiff !== 0
+        ) {
+          return proximityDiff;
+        }
+
+        return byOldestWait(
+          a,
+          b
+        );
+      });
 
   for (
     const entry
@@ -3874,6 +4023,26 @@ async function resolvePersistentUnknownPools(
           UNKNOWN_POOL_SEVERE_STALLED_ATTEMPTS
       ).length,
     publicDeepBurstUsable,
+    providerAwareDeepSearch:
+      "ENABLED_V113",
+    alchemyDeepSearchDistanceLimit:
+      UNKNOWN_POOL_ALCHEMY_DEEP_SEARCH_DISTANCE_BLOCKS,
+    deepSearchEligibleCount:
+      eligibleCandidates.filter(
+        entry =>
+          unknownPoolDeepSearchAllowedNow(
+            state,
+            entry
+          )
+      ).length,
+    deepSearchDeferredCount:
+      eligibleCandidates.filter(
+        entry =>
+          !unknownPoolDeepSearchAllowedNow(
+            state,
+            entry
+          )
+      ).length,
     exactPoolCapabilityLearning:
       "ENABLED_V110",
     capabilityProbesThisRun:
@@ -4139,6 +4308,15 @@ async function resolvePersistentUnknownPools(
       priorAttempts,
       searchDistanceFromFirstActivity:
         unknownPoolSearchDistance(
+          entry
+        ),
+      launchProximityScore:
+        unknownPoolLaunchProximityScore(
+          entry
+        ),
+      deepSearchAllowedNow:
+        unknownPoolDeepSearchAllowedNow(
+          state,
           entry
         ),
       retryBackoffMs:
@@ -13736,7 +13914,7 @@ async function scan(
     status,
 
     scanMode:
-      "V112_V111_CORE_STALL_BACKOFF_HARD_RESOLVER_BUDGET_HUNTER",
+      "V113_V112_CORE_PROVIDER_AWARE_INIT_LOCALITY_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -14494,15 +14672,33 @@ async function scan(
       deepBurstStallMonopolyProtection:
         "ENABLED_V112",
 
+      providerAwareInitializeLocality:
+        "ENABLED_V113",
+
+      alchemyDeepSearchGrindingProtection:
+        "ENABLED_V113",
+
+      launchProximityUnknownPoolPriority:
+        "ENABLED_V113",
+
+      failedExactProbeProviderCooldown:
+        "ENABLED_V113",
+
+      alchemyFailedExactProbeCooldownMs:
+        UNKNOWN_POOL_EXACT_FAILED_PROBE_COOLDOWN_ALCHEMY_MS,
+
+      publicFailedExactProbeCooldownMs:
+        UNKNOWN_POOL_EXACT_FAILED_PROBE_COOLDOWN_PUBLIC_MS,
+
       contiguousInitializeCoverage:
-        "ENABLED_V112",
+        "ENABLED_V113",
 
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V112_V111_CORE_STALL_BACKOFF_HARD_RESOLVER_BUDGET_V77_TELEGRAM_HUNTER",
+      "V113_V112_CORE_PROVIDER_AWARE_INIT_LOCALITY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -14818,7 +15014,7 @@ async function health(
     },
 
     architecture:
-      "V112_V111_CORE_STALL_BACKOFF_HARD_RESOLVER_BUDGET_V77_TELEGRAM_HUNTER",
+      "V113_V112_CORE_PROVIDER_AWARE_INIT_LOCALITY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -15217,7 +15413,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V112_V111_CORE_STALL_BACKOFF_HARD_RESOLVER_BUDGET_V77_TELEGRAM_HUNTER",
+      "V113_V112_CORE_PROVIDER_AWARE_INIT_LOCALITY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -15646,7 +15842,7 @@ export default {
             ),
 
           architecture:
-            "V112_V111_CORE_STALL_BACKOFF_HARD_RESOLVER_BUDGET_V77_TELEGRAM_HUNTER",
+            "V113_V112_CORE_PROVIDER_AWARE_INIT_LOCALITY_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
