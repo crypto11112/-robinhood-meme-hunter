@@ -1,24 +1,26 @@
 /**
  * Robinhood Chain Meme Hunter
- * V114
+ * V115
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V114:
- * - Builds directly forward from confirmed V113
+ * V115:
+ * - Builds directly forward from confirmed V114
+ * - Preserves V114 provider-head synchronization and Telegram diagnostics
  * - Preserves V113 provider-aware Initialize locality logic
- * - Preserves V112 hard resolver request cap / stalled-pool backoff
- * - Preserves V111 KV range sanitization and HTTP 400 demotion
- * - FIX: provider-aware live-head synchronization
- * - FIX: detects live ranges beyond the selected provider head
- * - FIX: refreshes that provider's own eth_blockNumber, clamps and retries
- * - FIX: lastLiveScannedBlock records the block actually scanned
- * - NEW: live-head clamp/retry telemetry
- * - NEW: Telegram qualification diagnostics without weakening thresholds
- * - Preserves scoring, holder/risk logic, DexScreener protection,
- *        backlog catch-up, Telegram delivery and KV history
+ * - Preserves V112 hard resolver budget and stalled-pool backoff
+ * - NEW: persistent priority-candidate completion lane
+ * - FIX: candidates blocked by DexScreener spacing persist as the priority
+ *        fresh-market target on later scans instead of being replaced
+ * - FIX: persistent completion candidate is moved to the front of analysis
+ * - NEW: completion state persists market/holder/risk blockers in KV
+ * - NEW: completion target clears once enough market+risk evidence exists
+ * - NEW: priority-completion telemetry explains the remaining blockers
+ * - Does NOT lower Telegram score, risk, liquidity or confidence thresholds
+ * - Preserves discovery, backlog, holder integrity, scoring, rate-limit
+ *        protection and Telegram delivery
  */
-const VERSION = "V114";
+const VERSION = "V115";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -13257,6 +13259,149 @@ function backlogLagLabel(
   return "CAUGHT_UP";
 }
 
+
+/* =========================================================
+   V115 PRIORITY CANDIDATE COMPLETION
+   ========================================================= */
+
+function completionCandidateStillEligible(
+  watched
+) {
+  return Boolean(
+    watched &&
+    normalize(
+      watched.address
+    ) &&
+    !watched.excludedReason
+  );
+}
+
+function completionCandidateAddress(
+  state
+) {
+  return normalize(
+    state
+      ?.priorityCandidateCompletion
+      ?.address
+  );
+}
+
+function completionCandidateBlockers(
+  candidate
+) {
+  if (!candidate) {
+    return [
+      "ANALYSIS_NOT_COMPLETED"
+    ];
+  }
+
+  const blockers = [];
+
+  if (
+    !candidate?.market?.verified
+  ) {
+    blockers.push(
+      "MARKET_UNVERIFIED"
+    );
+  }
+
+  if (
+    !candidate?.holders?.concentrationVerified &&
+    !candidate?.holders?.countersVerified
+  ) {
+    blockers.push(
+      "HOLDER_EVIDENCE_UNVERIFIED"
+    );
+  }
+
+  if (
+    !candidate?.risk?.verified
+  ) {
+    blockers.push(
+      "RISK_UNVERIFIED"
+    );
+  }
+
+  if (
+    candidate?.market?.verified &&
+    safeNumber(
+      candidate?.market?.liquidityUsd
+    ) <
+    MIN_ALERT_LIQUIDITY
+  ) {
+    blockers.push(
+      "LIQUIDITY_BELOW_ALERT_MINIMUM"
+    );
+  }
+
+  if (
+    safeNumber(
+      candidate?.confidence?.score
+    ) <
+    MIN_CONFIDENCE_ALERT
+  ) {
+    blockers.push(
+      "CONFIDENCE_BELOW_ALERT_MINIMUM"
+    );
+  }
+
+  if (
+    safeNumber(
+      candidate?.opportunity?.score
+    ) <
+    MIN_ALERT_SCORE
+  ) {
+    blockers.push(
+      "OPPORTUNITY_BELOW_ALERT_MINIMUM"
+    );
+  }
+
+  return blockers;
+}
+
+function shouldKeepCompletionCandidate(
+  candidate
+) {
+  if (
+    !candidate ||
+    !candidate.validERC20 ||
+    candidate.excludedAsset ||
+    candidate.infrastructureToken
+  ) {
+    return false;
+  }
+
+  /*
+   * Once market and risk are verified, the candidate can receive a real
+   * Telegram decision. Do not let a clearly completed loser monopolize
+   * the persistent completion lane.
+   */
+  if (
+    candidate?.market?.verified &&
+    candidate?.risk?.verified
+  ) {
+    return false;
+  }
+
+  return (
+    Boolean(
+      candidate?.newlyDiscovered
+    ) ||
+    Boolean(
+      candidate?.liveDiscovery
+    ) ||
+    safeNumber(
+      candidate?.activity?.swaps
+    ) > 0 ||
+    safeNumber(
+      candidate?.activity?.liquidityEvents
+    ) > 0 ||
+    safeNumber(
+      candidate?.signalConfirmation?.signals
+    ) >= 2
+  );
+}
+
 /* =========================================================
    MAIN SCAN
    ========================================================= */
@@ -13656,17 +13801,57 @@ async function scan(
       MAX_WATCHED_TOKENS
     );
 
-  const selected =
+  const selectedBase =
     state.watchedTokens.slice(
       0,
       MAX_TOKEN_CHECKS
     );
 
+  const pendingCompletionAddress =
+    completionCandidateAddress(
+      state
+    );
+
+  const pendingCompletionToken =
+    pendingCompletionAddress
+      ? state.watchedTokens.find(
+          token =>
+            normalize(
+              token.address
+            ) ===
+              pendingCompletionAddress &&
+            completionCandidateStillEligible(
+              token
+            )
+        ) ||
+        null
+      : null;
+
+  const selected =
+    pendingCompletionToken
+      ? uniqueBy(
+          [
+            pendingCompletionToken,
+            ...selectedBase
+          ],
+          token =>
+            normalize(
+              token.address
+            )
+        ).slice(
+          0,
+          MAX_TOKEN_CHECKS
+        )
+      : selectedBase;
+
   /*
-   * V91: choose exactly one token to own the fresh market-data
-   * slot. Live/new activity wins; otherwise use watch priority.
+   * V115:
+   * A pending incomplete candidate owns the next available fresh-market
+   * slot. Only when there is no pending completion target do new/live
+   * candidates compete for it.
    */
   const marketFreshTarget =
+    pendingCompletionToken ||
     selected.find(
       token => {
         const address =
@@ -13697,6 +13882,35 @@ async function scan(
     normalize(
       marketFreshTarget?.address
     );
+
+  const priorityCompletionTelemetry = {
+    enabled:
+      true,
+
+    carriedFromPreviousRun:
+      Boolean(
+        pendingCompletionToken
+      ),
+
+    address:
+      marketFreshTargetAddress ||
+      null,
+
+    symbol:
+      marketFreshTarget
+        ?.metadata
+        ?.symbol ||
+      null,
+
+    completed:
+      false,
+
+    persistedForRetry:
+      false,
+
+    blockers:
+      []
+  };
 
   const combinedLogs = [
     ...liveOutput.logs,
@@ -13729,6 +13943,15 @@ async function scan(
     const watched
     of selected
   ) {
+    const address =
+      normalize(
+        watched.address
+      );
+
+    const isPriorityCompletion =
+      address ===
+      marketFreshTargetAddress;
+
     const required =
       estimatedAnalysisCost(
         env,
@@ -13766,11 +13989,6 @@ async function scan(
       continue;
     }
 
-    const address =
-      normalize(
-        watched.address
-      );
-
     const activity =
       activityForToken(
         watched,
@@ -13797,8 +14015,10 @@ async function scan(
             ),
 
           marketFreshEligible:
-            address ===
-            marketFreshTargetAddress
+            isPriorityCompletion,
+
+          priorityCompletion:
+            isPriorityCompletion
         }
       );
 
@@ -14018,6 +14238,143 @@ async function scan(
         a.analysisPriority
       )
   );
+
+  const completionCandidate =
+    candidates.find(
+      candidate =>
+        normalize(
+          candidate.address
+        ) ===
+        marketFreshTargetAddress
+    ) ||
+    null;
+
+  if (
+    completionCandidate
+  ) {
+    const blockers =
+      completionCandidateBlockers(
+        completionCandidate
+      );
+
+    const keepForRetry =
+      shouldKeepCompletionCandidate(
+        completionCandidate
+      );
+
+    priorityCompletionTelemetry.symbol =
+      completionCandidate.symbol ||
+      priorityCompletionTelemetry.symbol;
+
+    priorityCompletionTelemetry.blockers =
+      blockers;
+
+    priorityCompletionTelemetry.completed =
+      !keepForRetry;
+
+    priorityCompletionTelemetry.persistedForRetry =
+      keepForRetry;
+
+    if (
+      keepForRetry
+    ) {
+      const previousCompletion =
+        state.priorityCandidateCompletion ||
+        {};
+
+      state.priorityCandidateCompletion = {
+        address:
+          marketFreshTargetAddress,
+
+        symbol:
+          completionCandidate.symbol ||
+          null,
+
+        firstQueuedAt:
+          safeNumber(
+            previousCompletion.firstQueuedAt
+          ) ||
+          Date.now(),
+
+        lastAttemptAt:
+          Date.now(),
+
+        attempts:
+          safeNumber(
+            previousCompletion.attempts
+          ) +
+          1,
+
+        blockers,
+
+        marketStatus:
+          completionCandidate.market
+            ?.status ||
+          null,
+
+        holderStatus:
+          completionCandidate.holders
+            ?.integrity
+            ?.status ||
+          null
+      };
+    }
+
+    else {
+      state.priorityCandidateCompletion =
+        null;
+    }
+  }
+
+  else if (
+    marketFreshTargetAddress
+  ) {
+    const previousCompletion =
+      state.priorityCandidateCompletion ||
+      {};
+
+    state.priorityCandidateCompletion = {
+      address:
+        marketFreshTargetAddress,
+
+      symbol:
+        marketFreshTarget
+          ?.metadata
+          ?.symbol ||
+        null,
+
+      firstQueuedAt:
+        safeNumber(
+          previousCompletion.firstQueuedAt
+        ) ||
+        Date.now(),
+
+      lastAttemptAt:
+        Date.now(),
+
+      attempts:
+        safeNumber(
+          previousCompletion.attempts
+        ),
+
+      blockers: [
+        "ANALYSIS_NOT_COMPLETED"
+      ],
+
+      marketStatus:
+        null,
+
+      holderStatus:
+        null
+    };
+
+    priorityCompletionTelemetry.persistedForRetry =
+      true;
+
+    priorityCompletionTelemetry.blockers = [
+      "ANALYSIS_NOT_COMPLETED"
+    ];
+  }
 
   const telegramQualificationDiagnostics =
     buildTelegramQualificationDiagnostics(
@@ -14294,7 +14651,7 @@ async function scan(
     status,
 
     scanMode:
-      "V114_V113_CORE_PROVIDER_HEAD_SYNC_QUALIFICATION_DIAGNOSTICS_HUNTER",
+      "V115_V114_CORE_PERSISTENT_PRIORITY_CANDIDATE_COMPLETION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -14786,6 +15143,9 @@ async function scan(
       marketFreshTargetAddress ||
       null,
 
+    priorityCandidateCompletion:
+      priorityCompletionTelemetry,
+
     tokenValidationChecks:
       validationResults.length,
 
@@ -15141,12 +15501,24 @@ async function scan(
       telegramThresholdsUnchanged:
         "ENABLED_V114",
 
+      persistentPriorityCandidateCompletion:
+        "ENABLED_V115",
+
+      priorityCandidateFirstAnalysis:
+        "ENABLED_V115",
+
+      priorityMarketTargetPersistence:
+        "ENABLED_V115",
+
+      telegramThresholdsStillUnchanged:
+        "ENABLED_V115",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V114_V113_CORE_PROVIDER_HEAD_SYNC_QUALIFICATION_DIAGNOSTICS_V77_TELEGRAM_HUNTER",
+      "V115_V114_CORE_PERSISTENT_PRIORITY_CANDIDATE_COMPLETION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -15462,7 +15834,7 @@ async function health(
     },
 
     architecture:
-      "V114_V113_CORE_PROVIDER_HEAD_SYNC_QUALIFICATION_DIAGNOSTICS_V77_TELEGRAM_HUNTER",
+      "V115_V114_CORE_PERSISTENT_PRIORITY_CANDIDATE_COMPLETION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -15861,7 +16233,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V114_V113_CORE_PROVIDER_HEAD_SYNC_QUALIFICATION_DIAGNOSTICS_V77_TELEGRAM_HUNTER",
+      "V115_V114_CORE_PERSISTENT_PRIORITY_CANDIDATE_COMPLETION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -16290,7 +16662,7 @@ export default {
             ),
 
           architecture:
-            "V114_V113_CORE_PROVIDER_HEAD_SYNC_QUALIFICATION_DIAGNOSTICS_V77_TELEGRAM_HUNTER",
+            "V115_V114_CORE_PERSISTENT_PRIORITY_CANDIDATE_COMPLETION_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
