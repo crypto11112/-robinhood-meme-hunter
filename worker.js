@@ -1,10 +1,10 @@
 /**
  * Robinhood Chain Meme Hunter
- * V95
+ * V96
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V95:
+ * V96:
  * - Builds directly forward from the confirmed V94 baseline
  * - Preserves existing KV state key/history and all working V94 scanner logic
  * - Preserves V77-style spaced Telegram alerts and token image/sendPhoto fallback
@@ -16,7 +16,7 @@
  * - Cleans current runtime V95 scan/architecture labels without changing the persistent STATE_KEY
  */
 
-const VERSION = "V95";
+const VERSION = "V96";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -175,6 +175,15 @@ const METADATA_REUSE_MS =
 
 const MARKET_CACHE_MS =
   9 * 60 * 1000;
+
+/*
+ * V96: negative DexScreener results must expire much sooner than
+ * verified market data. Newly-created Robinhood Chain pools can be
+ * indexed shortly after our first lookup; caching NO_MARKET_FOUND for
+ * the full verified-data TTL can hide the exact early launch we want.
+ */
+const MARKET_NEGATIVE_CACHE_MS =
+  90 * 1000;
 
 const MARKET_STALE_CACHE_MS =
   30 * 60 * 1000;
@@ -3097,7 +3106,7 @@ async function scanBacklogSequential(
           "discovery-backlog",
 
         strategy:
-          "V91_PROTECTED_ACCELERATED_PROVEN_RANGE"
+          "V96_PROTECTED_ACCELERATED_PROVEN_RANGE"
       });
 
       probeHistory.push({
@@ -4411,17 +4420,32 @@ function cachedMarket(
     timestamp;
 
   if (
-    age < 0 ||
-    age >
-      maxAge
+    !cache.data ||
+    typeof cache.data !==
+      "object"
   ) {
     return null;
   }
 
+  /*
+   * V96 NEGATIVE-CACHE PROTECTION
+   *
+   * A verified pair may use the caller's normal cache TTL.
+   * An unverified/NO_MARKET_FOUND result gets only a short TTL so
+   * DexScreener indexing delay cannot suppress a new token for 9m.
+   */
+  const effectiveMaxAge =
+    cache.data?.verified === true
+      ? maxAge
+      : Math.min(
+          maxAge,
+          MARKET_NEGATIVE_CACHE_MS
+        );
+
   if (
-    !cache.data ||
-    typeof cache.data !==
-      "object"
+    age < 0 ||
+    age >
+      effectiveMaxAge
   ) {
     return null;
   }
@@ -7906,7 +7930,7 @@ function scoreRisk(
         100;
 
       reasons.push(
-        "Single owner controls most circulating ownership"
+        "Single non-infrastructure owner controls most circulating ownership"
       );
     }
 
@@ -10748,7 +10772,7 @@ async function scan(
     status,
 
     scanMode:
-      "V95_V94_CORE_HOLDER_MARKET_FALLBACK_RICH_ALERT_HUNTER",
+      "V96_V95_CORE_NEGATIVE_CACHE_CIRCULATING_SUPPLY_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -11022,7 +11046,7 @@ async function scan(
                 ),
 
               strategy:
-                "V91_PROTECTED_ACCELERATED_PROVEN_RANGE",
+                "V96_PROTECTED_ACCELERATED_PROVEN_RANGE",
 
               publicLearnedChunk:
                 backlogResult
@@ -11161,10 +11185,10 @@ async function scan(
           .unknownPoolIds.size,
 
       liveActivityPromotion:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       providerSpecificBacklogLearning:
-        "ENABLED_V95"
+        "ENABLED_V96"
     },
 
     watchedTokens:
@@ -11206,37 +11230,37 @@ async function scan(
 
     intelligence: {
       trueLiveFirstScanning:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       persistentPoolRegistry:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       livePoolReactivation:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       holderIntelligenceCache:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       staleHolderOutageFallback:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       priorityMarketFreshSlot:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       protectedBacklogAcceleration:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       backlogGlobalReserveRequests:
         BACKLOG_GLOBAL_RESERVE,
 
       providerSpecificBacklogLearning:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       provenSuccessRangePersistence:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       failedUpperBoundLearning:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       persistentRpc429Cooldown:
         "ENABLED",
@@ -11248,19 +11272,19 @@ async function scan(
         "ENABLED",
 
       richV77StyleTelegram:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       oneStrikeFailedRangeLearning:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       dexscreenerFreshRequestGuard:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       blockscoutEfficientFallback:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       severeRiskOverride:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       singleSwapLowRiskProtection:
         "ENABLED",
@@ -11269,7 +11293,7 @@ async function scan(
         "ENABLED",
 
       holderCounterFallback:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       tokenizedSecurityFiltering:
         "ENABLED",
@@ -11317,35 +11341,35 @@ async function scan(
         "ENABLED",
 
       concentrationTrend:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       candidateRanking:
         "ENABLED",
 
       telegramTokenImages:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       telegramSendPhotoFallback:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       telegram:
         "ENABLED",
 
       blockscoutLegacyHolderFallback:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       blockscoutIndependentCounters:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       dexscreenerSecondTokenRoute:
-        "ENABLED_V95",
+        "ENABLED_V96",
 
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V95_V94_CORE_HOLDER_MARKET_FALLBACK_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
+      "V96_V95_CORE_NEGATIVE_CACHE_CIRCULATING_SUPPLY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -11661,7 +11685,7 @@ async function health(
     },
 
     architecture:
-      "V95_V94_CORE_HOLDER_MARKET_FALLBACK_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
+      "V96_V95_CORE_NEGATIVE_CACHE_CIRCULATING_SUPPLY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -12055,7 +12079,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V95_V94_CORE_HOLDER_MARKET_FALLBACK_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
+      "V96_V95_CORE_NEGATIVE_CACHE_CIRCULATING_SUPPLY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -12372,7 +12396,7 @@ async function scheduledScan(
   console.log(
     JSON.stringify({
       event:
-        "V95_SCHEDULED_SCAN",
+        "V96_SCHEDULED_SCAN",
 
       status:
         result.status,
@@ -12463,7 +12487,7 @@ export default {
 
     catch (error) {
       console.error(
-        "V95 request failed",
+        "V96 request failed",
         error
       );
 
@@ -12484,7 +12508,7 @@ export default {
             ),
 
           architecture:
-            "V95_V94_CORE_HOLDER_MARKET_FALLBACK_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
+            "V96_V95_CORE_NEGATIVE_CACHE_CIRCULATING_SUPPLY_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
