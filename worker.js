@@ -1,21 +1,22 @@
 /**
  * Robinhood Chain Meme Hunter
- * V94
+ * V95
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V94:
- * - Builds directly forward from the confirmed V93 corrected baseline
- * - Preserves existing KV state key/history and all V93 scanning/intelligence logic
- * - FIX: Telegram rich alerts now use real newline characters instead of literal 
- text
- * - FIX: restores the spacious original V77 section layout
- * - FIX: Telegram title always uses the live VERSION constant
- * - FIX: Telegram test message also uses the live VERSION constant
- * - Preserves token image/logo sendPhoto support with text-only fallback
+ * V95:
+ * - Builds directly forward from the confirmed V94 baseline
+ * - Preserves existing KV state key/history and all working V94 scanner logic
+ * - Preserves V77-style spaced Telegram alerts and token image/sendPhoto fallback
+ * - FIX: Blockscout counters endpoint can run even when holder rows are unavailable
+ * - NEW: Blockscout legacy getTokenHolders fallback when V2 holder rows are unavailable
+ * - NEW: DexScreener /tokens/v1 fallback when token-pairs/v1 returns no market
+ * - Preserves DexScreener cooldown/cache/fresh-request protections
+ * - Preserves live-first scanning, pool registry, accelerated backlog and risk protections
+ * - Cleans current runtime V95 scan/architecture labels without changing the persistent STATE_KEY
  */
 
-const VERSION = "V94";
+const VERSION = "V95";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -4822,29 +4823,105 @@ async function marketData(
     if (
       !pairs.length
     ) {
-      service.lastStatus =
-        "NO_MARKET_FOUND";
+      /*
+       * V95: DexScreener exposes both token-pairs/v1 and
+       * tokens/v1. A newly indexed token can occasionally be
+       * absent from one route, so use the second documented
+       * route before declaring NO_MARKET_FOUND.
+       */
+      if (
+        consumeBudget(
+          budget,
+          "analysis",
+          "DEXSCREENER_TOKEN_FALLBACK"
+        )
+      ) {
+        try {
+          const fallbackResponse =
+            await fetch(
+              `${DEXSCREENER_BASE}/tokens/v1/robinhood/${token}`,
+              {
+                headers: {
+                  accept:
+                    "application/json"
+                }
+              }
+            );
 
-      const result = {
-        verified:
-          false,
+          if (
+            fallbackResponse.status ===
+              429
+          ) {
+            service.last429At =
+              Date.now();
+            service.cooldownUntil =
+              Date.now() +
+              DEXSCREENER_429_COOLDOWN_MS;
+            service.lastStatus =
+              "HTTP_429";
+            service.total429s =
+              safeNumber(
+                service.total429s
+              ) + 1;
+          }
 
-        status:
-          "NO_MARKET_FOUND",
+          else if (
+            fallbackResponse.ok
+          ) {
+            const fallbackData =
+              await fallbackResponse.json();
 
-        cached:
-          false,
+            const fallbackPairs =
+              Array.isArray(
+                fallbackData
+              )
+                ? fallbackData
+                : [];
 
-        source:
-          "DEXSCREENER"
-      };
+            if (
+              fallbackPairs.length
+            ) {
+              pairs.push(
+                ...fallbackPairs
+              );
+              service.lastStatus =
+                "VERIFIED_TOKEN_FALLBACK";
+            }
+          }
+        }
 
-      saveMarketCache(
-        watched,
-        result
-      );
+        catch {
+          /* Preserve the normal NO_MARKET_FOUND path below. */
+        }
+      }
 
-      return result;
+      if (
+        !pairs.length
+      ) {
+        service.lastStatus =
+          "NO_MARKET_FOUND";
+
+        const result = {
+          verified:
+            false,
+
+          status:
+            "NO_MARKET_FOUND",
+
+          cached:
+            false,
+
+          source:
+            "DEXSCREENER_BOTH_TOKEN_ROUTES"
+        };
+
+        saveMarketCache(
+          watched,
+          result
+        );
+
+        return result;
+      }
     }
 
     pairs.sort(
@@ -4885,7 +4962,10 @@ async function marketData(
         false,
 
       source:
-        "DEXSCREENER",
+        service.lastStatus ===
+          "VERIFIED_TOKEN_FALLBACK"
+          ? "DEXSCREENER_TOKENS_V1_FALLBACK"
+          : "DEXSCREENER",
 
       pairAddress:
         pair?.pairAddress ||
@@ -5037,6 +5117,74 @@ async function blockscout(
     }
 
     return await response.json();
+  }
+
+  catch {
+    return null;
+  }
+}
+
+
+async function blockscoutLegacyHolders(
+  token,
+  budget
+) {
+  if (
+    !consumeBudget(
+      budget,
+      "analysis",
+      "BLOCKSCOUT_LEGACY_HOLDERS"
+    )
+  ) {
+    return null;
+  }
+
+  try {
+    const url =
+      `${BLOCKSCOUT}/api?module=token&action=getTokenHolders&contractaddress=${token}&page=1&offset=10`;
+
+    const response =
+      await fetch(
+        url,
+        {
+          headers: {
+            accept:
+              "application/json"
+          }
+        }
+      );
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data =
+      await response.json();
+
+    if (
+      !data ||
+      !Array.isArray(
+        data.result
+      )
+    ) {
+      return null;
+    }
+
+    return {
+      items:
+        data.result.map(
+          item => ({
+            address:
+              item?.address ||
+              null,
+            value:
+              item?.value ||
+              "0"
+          })
+        ),
+      legacy:
+        true
+    };
   }
 
   catch {
@@ -5719,15 +5867,11 @@ async function holderIntelligence(
       : null;
 
   /*
-   * Only spend a third request when holder rows themselves
-   * were successfully returned and counters are still
-   * missing. This keeps outage scans cheap.
+   * V95: counters are useful even if the V2 holder-row endpoint
+   * is temporarily unavailable. Do not tie counter recovery to
+   * successful holder-row retrieval.
    */
   if (
-    holders &&
-    Array.isArray(
-      holders.items
-    ) &&
     (
       counterData.holderCount ===
         null ||
@@ -5768,7 +5912,42 @@ async function holderIntelligence(
       }
 
       counterSource =
-        "COUNTERS_FALLBACK";
+        "COUNTERS_ENDPOINT";
+    }
+  }
+
+  /*
+   * V95: Blockscout documents a legacy token-holder endpoint.
+   * Use it only when V2 holder rows are unavailable and budget
+   * remains. The returned rows are normalized into the same
+   * shape used by the existing concentration/integrity logic.
+   */
+  if (
+    (
+      !holders ||
+      !Array.isArray(
+        holders.items
+      )
+    ) &&
+    budgetAvailable(
+      budget,
+      "analysis"
+    )
+  ) {
+    const legacyHolders =
+      await blockscoutLegacyHolders(
+        token,
+        budget
+      );
+
+    if (
+      legacyHolders &&
+      Array.isArray(
+        legacyHolders.items
+      )
+    ) {
+      holders =
+        legacyHolders;
     }
   }
 
@@ -5848,6 +6027,11 @@ async function holderIntelligence(
       transferCount
     };
   }
+
+  const holderSource =
+    holders?.legacy
+      ? "BLOCKSCOUT_LEGACY"
+      : "BLOCKSCOUT_V2";
 
   const items =
     holders.items.slice(
@@ -6229,6 +6413,7 @@ async function holderIntelligence(
       100.000001
   ) {
     return {
+    holderSource,
       verified:
         countersVerified,
 
@@ -10563,7 +10748,7 @@ async function scan(
     status,
 
     scanMode:
-      "V94_V93_CORE_V77_SPACED_TOKEN_IMAGE_RICH_ALERT_HUNTER",
+      "V95_V94_CORE_HOLDER_MARKET_FALLBACK_RICH_ALERT_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -10976,10 +11161,10 @@ async function scan(
           .unknownPoolIds.size,
 
       liveActivityPromotion:
-        "ENABLED_V91",
+        "ENABLED_V95",
 
       providerSpecificBacklogLearning:
-        "ENABLED_V91"
+        "ENABLED_V95"
     },
 
     watchedTokens:
@@ -11021,37 +11206,37 @@ async function scan(
 
     intelligence: {
       trueLiveFirstScanning:
-        "ENABLED_V91",
+        "ENABLED_V95",
 
       persistentPoolRegistry:
-        "ENABLED_V91",
+        "ENABLED_V95",
 
       livePoolReactivation:
-        "ENABLED_V91",
+        "ENABLED_V95",
 
       holderIntelligenceCache:
-        "ENABLED_V91",
+        "ENABLED_V95",
 
       staleHolderOutageFallback:
-        "ENABLED_V91",
+        "ENABLED_V95",
 
       priorityMarketFreshSlot:
-        "ENABLED_V91",
+        "ENABLED_V95",
 
       protectedBacklogAcceleration:
-        "ENABLED_V91",
+        "ENABLED_V95",
 
       backlogGlobalReserveRequests:
         BACKLOG_GLOBAL_RESERVE,
 
       providerSpecificBacklogLearning:
-        "ENABLED_V91",
+        "ENABLED_V95",
 
       provenSuccessRangePersistence:
-        "ENABLED_V91",
+        "ENABLED_V95",
 
       failedUpperBoundLearning:
-        "ENABLED_V91",
+        "ENABLED_V95",
 
       persistentRpc429Cooldown:
         "ENABLED",
@@ -11063,19 +11248,19 @@ async function scan(
         "ENABLED",
 
       richV77StyleTelegram:
-        "ENABLED_V93",
+        "ENABLED_V95",
 
       oneStrikeFailedRangeLearning:
-        "ENABLED_V91",
+        "ENABLED_V95",
 
       dexscreenerFreshRequestGuard:
-        "ENABLED_V91",
+        "ENABLED_V95",
 
       blockscoutEfficientFallback:
-        "ENABLED_V91",
+        "ENABLED_V95",
 
       severeRiskOverride:
-        "ENABLED_V91",
+        "ENABLED_V95",
 
       singleSwapLowRiskProtection:
         "ENABLED",
@@ -11084,7 +11269,7 @@ async function scan(
         "ENABLED",
 
       holderCounterFallback:
-        "ENABLED_V91",
+        "ENABLED_V95",
 
       tokenizedSecurityFiltering:
         "ENABLED",
@@ -11132,26 +11317,35 @@ async function scan(
         "ENABLED",
 
       concentrationTrend:
-        "ENABLED_V93",
+        "ENABLED_V95",
 
       candidateRanking:
         "ENABLED",
 
       telegramTokenImages:
-        "ENABLED_V93",
+        "ENABLED_V95",
 
       telegramSendPhotoFallback:
-        "ENABLED_V93",
+        "ENABLED_V95",
 
       telegram:
         "ENABLED",
+
+      blockscoutLegacyHolderFallback:
+        "ENABLED_V95",
+
+      blockscoutIndependentCounters:
+        "ENABLED_V95",
+
+      dexscreenerSecondTokenRoute:
+        "ENABLED_V95",
 
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V94_V93_CORE_V77_SPACED_TOKEN_IMAGE_TELEGRAM_MULTI_SIGNAL_HUNTER",
+      "V95_V94_CORE_HOLDER_MARKET_FALLBACK_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -11467,7 +11661,7 @@ async function health(
     },
 
     architecture:
-      "V94_V93_CORE_V77_SPACED_TOKEN_IMAGE_TELEGRAM_MULTI_SIGNAL_HUNTER",
+      "V95_V94_CORE_HOLDER_MARKET_FALLBACK_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -11861,7 +12055,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V94_V93_CORE_V77_SPACED_TOKEN_IMAGE_TELEGRAM_MULTI_SIGNAL_HUNTER",
+      "V95_V94_CORE_HOLDER_MARKET_FALLBACK_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -12178,7 +12372,7 @@ async function scheduledScan(
   console.log(
     JSON.stringify({
       event:
-        "V94_SCHEDULED_SCAN",
+        "V95_SCHEDULED_SCAN",
 
       status:
         result.status,
@@ -12269,7 +12463,7 @@ export default {
 
     catch (error) {
       console.error(
-        "V94 request failed",
+        "V95 request failed",
         error
       );
 
@@ -12290,7 +12484,7 @@ export default {
             ),
 
           architecture:
-            "V94_V93_CORE_V77_SPACED_TOKEN_IMAGE_TELEGRAM_MULTI_SIGNAL_HUNTER",
+            "V95_V94_CORE_HOLDER_MARKET_FALLBACK_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
 
           timestamp:
             now()
