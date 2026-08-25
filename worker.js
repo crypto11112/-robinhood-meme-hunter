@@ -1,51 +1,32 @@
 /**
  * Robinhood Chain Meme Hunter
- * V77
+ * V78
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * Built directly from V76.
+ * Built directly from V77.
  *
- * V77:
- * - Preserves V76 scanning/discovery architecture
- * - Preserves KV state
- * - Preserves V4 pool discovery
- * - Preserves ERC20 validation
- * - Preserves DexScreener market intelligence
- * - Preserves Blockscout holder intelligence
- * - Preserves momentum snapshots
- * - Preserves whale accumulation/distribution detection
- * - Preserves smart-money behaviour scoring
- * - Preserves Telegram alerts
- *
- * NEW V77:
- * - Hard discovery/analysis budget separation
- * - Discovery can NEVER consume analysis reserve
- * - RPC fallback correctly charged to originating phase
- * - Analysis RPC calls use protected analysis allocation
- * - Candidate analysis continues after catch-up pauses
- * - Better candidate rotation
- * - Newly discovered tokens receive priority
- * - Analysis-budget telemetry
- * - Catch-up progress preserved safely
+ * V78:
+ * - Preserves V77 KV state/key and working analysis pipeline
+ * - Preserves hard system/discovery/analysis request isolation
+ * - LIVE-FIRST: scans newest blocks on every run before historical catch-up
+ * - Separate live-discovery and backlog-discovery allowances
+ * - Historical backlog can no longer delay fresh-launch detection
+ * - Fresh live discoveries get highest analysis priority
+ * - Backlog progress is persisted independently from live scanning
+ * - Preserves V4 pool discovery, ERC20 validation, DexScreener,
+ *   Blockscout, snapshots, momentum, whale-flow, scoring and Telegram
  */
 
-const VERSION = "V77";
+const VERSION = "V78";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
 
-const PUBLIC_RPC =
-  "https://rpc.mainnet.chain.robinhood.com";
-
-const ALCHEMY_BASE =
-  "https://robinhood-mainnet.g.alchemy.com/v2/";
-
-const DEXSCREENER_BASE =
-  "https://api.dexscreener.com";
-
-const BLOCKSCOUT =
-  "https://robinhoodchain.blockscout.com";
+const PUBLIC_RPC = "https://rpc.mainnet.chain.robinhood.com";
+const ALCHEMY_BASE = "https://robinhood-mainnet.g.alchemy.com/v2/";
+const DEXSCREENER_BASE = "https://api.dexscreener.com";
+const BLOCKSCOUT = "https://robinhoodchain.blockscout.com";
 
 const POOL_MANAGER =
   "0x8366a39cc670b4001a1121b8f6a443a643e40951";
@@ -77,61 +58,85 @@ const MODIFY_LIQUIDITY_TOPIC =
   "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec";
 
 /*
- * IMPORTANT:
- * Keep the existing state key so V77 continues
- * directly from the V76/V75 state.
+ * Keep the existing state key so V78 continues
+ * from V77/V76/V75 state.
  */
 const STATE_KEY =
   "robinhood-meme-hunter-v69-state";
 
+
+/* =========================================================
+   SCAN WINDOWS
+   ========================================================= */
+
 const LIVE_SCAN_BLOCKS = 20;
+
 const CATCHUP_TARGET_BLOCKS = 2000;
 
 const INITIAL_LOG_RANGE = 250;
+
 const MIN_LOG_RANGE = 10;
 
 const BACKLOG_LIVE_THRESHOLD = 100;
 
-/*
- * =========================================================
- * V77 HARD REQUEST BUDGET
- * =========================================================
- *
- * TOTAL = 42
- *
- * SYSTEM:
- * 2 requests reserved for latest-block / operational work.
- *
- * DISCOVERY:
- * Maximum 22 requests.
- *
- * ANALYSIS:
- * Minimum protected allocation of 18 requests.
- *
- * Discovery cannot borrow from analysis.
- */
+
+/* =========================================================
+   V78 HARD REQUEST BUDGET
+   =========================================================
+   TOTAL:     42
+   SYSTEM:     2
+   DISCOVERY: 22
+      LIVE:    8
+      BACKLOG:14
+   ANALYSIS:  18
+   ========================================================= */
 
 const MAX_EXTERNAL_REQUESTS = 42;
 
 const SYSTEM_REQUEST_LIMIT = 2;
+
 const DISCOVERY_REQUEST_LIMIT = 22;
+
+const LIVE_DISCOVERY_REQUEST_LIMIT = 8;
+
+const BACKLOG_DISCOVERY_REQUEST_LIMIT = 14;
+
 const ANALYSIS_REQUEST_LIMIT = 18;
 
+
 const MAX_TOKEN_CHECKS = 4;
+
 const MAX_MARKET_LOOKUPS = 3;
+
 const MAX_HOLDER_LOOKUPS = 2;
+
+
+/*
+ * V78:
+ * Previously verified ERC-20 metadata can be reused briefly.
+ * This saves protected analysis RPC requests for fresh tokens.
+ */
+const METADATA_REUSE_MS =
+  30 * 60 * 1000;
+
 
 const WATCH_MAX_AGE =
   12 * 60 * 60 * 1000;
 
 const MAX_WATCHED_TOKENS = 50;
 
+
 const ALERT_COOLDOWN =
   6 * 60 * 60 * 1000;
 
 const MIN_ALERT_SCORE = 60;
+
 const MAX_ALERT_RISK = 59;
+
 const MIN_ALERT_LIQUIDITY = 1000;
+
+const MIN_CONFIDENCE_ALERT = 55;
+
 
 const MAX_SNAPSHOTS_PER_TOKEN = 24;
 
@@ -148,7 +153,9 @@ const MOMENTUM_IDEAL_HISTORY_MS =
   15 * 60 * 1000;
 
 const MOMENTUM_STRONG = 75;
+
 const MOMENTUM_GOOD = 50;
+
 
 const MAX_PAIR_AGE_EARLY_MS =
   24 * 60 * 60 * 1000;
@@ -156,13 +163,13 @@ const MAX_PAIR_AGE_EARLY_MS =
 const VERY_EARLY_PAIR_AGE_MS =
   2 * 60 * 60 * 1000;
 
-const MIN_CONFIDENCE_ALERT = 55;
 
-const MEMORY_ALERTS = new Map();
+const MEMORY_ALERTS =
+  new Map();
 
 
 /* =========================================================
-   V77 HARD PHASE BUDGET
+   V78 HARD PHASE BUDGET
    ========================================================= */
 
 function createBudget() {
@@ -174,18 +181,31 @@ function createBudget() {
 
     system: {
       used: 0,
+
       limit:
         SYSTEM_REQUEST_LIMIT
     },
 
     discovery: {
       used: 0,
+
       limit:
-        DISCOVERY_REQUEST_LIMIT
+        DISCOVERY_REQUEST_LIMIT,
+
+      liveUsed: 0,
+
+      liveLimit:
+        LIVE_DISCOVERY_REQUEST_LIMIT,
+
+      backlogUsed: 0,
+
+      backlogLimit:
+        BACKLOG_DISCOVERY_REQUEST_LIMIT
     },
 
     analysis: {
       used: 0,
+
       limit:
         ANALYSIS_REQUEST_LIMIT
     },
@@ -194,27 +214,12 @@ function createBudget() {
   };
 }
 
-function phaseBudget(
-  budget,
-  phase
-) {
-  return budget[phase] || null;
-}
 
 function budgetAvailable(
   budget,
   phase,
   amount = 1
 ) {
-  const section =
-    phaseBudget(
-      budget,
-      phase
-    );
-
-  if (!section) {
-    return false;
-  }
 
   if (
     budget.totalUsed +
@@ -224,12 +229,64 @@ function budgetAvailable(
     return false;
   }
 
-  return (
-    section.used +
-      amount <=
-    section.limit
-  );
+
+  if (
+    phase === "system"
+  ) {
+    return (
+      budget.system.used +
+        amount <=
+      budget.system.limit
+    );
+  }
+
+
+  if (
+    phase === "analysis"
+  ) {
+    return (
+      budget.analysis.used +
+        amount <=
+      budget.analysis.limit
+    );
+  }
+
+
+  if (
+    phase ===
+    "discovery-live"
+  ) {
+    return (
+      budget.discovery.used +
+        amount <=
+        budget.discovery.limit &&
+
+      budget.discovery.liveUsed +
+        amount <=
+        budget.discovery.liveLimit
+    );
+  }
+
+
+  if (
+    phase ===
+    "discovery-backlog"
+  ) {
+    return (
+      budget.discovery.used +
+        amount <=
+        budget.discovery.limit &&
+
+      budget.discovery.backlogUsed +
+        amount <=
+        budget.discovery.backlogLimit
+    );
+  }
+
+
+  return false;
 }
+
 
 function consumeBudget(
   budget,
@@ -237,6 +294,7 @@ function consumeBudget(
   type,
   amount = 1
 ) {
+
   if (
     !budgetAvailable(
       budget,
@@ -244,10 +302,12 @@ function consumeBudget(
       amount
     )
   ) {
+
     budget.skipped.push({
       phase,
       type,
       amount,
+
       reason:
         "PHASE_BUDGET_EXHAUSTED"
     });
@@ -255,18 +315,57 @@ function consumeBudget(
     return false;
   }
 
+
   budget.totalUsed +=
     amount;
 
-  budget[phase].used +=
-    amount;
+
+  if (
+    phase === "system"
+  ) {
+
+    budget.system.used +=
+      amount;
+
+  } else if (
+    phase === "analysis"
+  ) {
+
+    budget.analysis.used +=
+      amount;
+
+  } else if (
+    phase ===
+    "discovery-live"
+  ) {
+
+    budget.discovery.used +=
+      amount;
+
+    budget.discovery.liveUsed +=
+      amount;
+
+  } else if (
+    phase ===
+    "discovery-backlog"
+  ) {
+
+    budget.discovery.used +=
+      amount;
+
+    budget.discovery.backlogUsed +=
+      amount;
+  }
+
 
   return true;
 }
 
+
 function budgetTelemetry(
   budget
 ) {
+
   return {
     used:
       budget.totalUsed,
@@ -280,6 +379,7 @@ function budgetTelemetry(
         budget.totalLimit -
         budget.totalUsed
       ),
+
 
     system: {
       used:
@@ -296,6 +396,7 @@ function budgetTelemetry(
         )
     },
 
+
     discovery: {
       used:
         budget.discovery.used,
@@ -308,8 +409,39 @@ function budgetTelemetry(
           0,
           budget.discovery.limit -
           budget.discovery.used
-        )
+        ),
+
+      live: {
+        used:
+          budget.discovery.liveUsed,
+
+        limit:
+          budget.discovery.liveLimit,
+
+        remaining:
+          Math.max(
+            0,
+            budget.discovery.liveLimit -
+            budget.discovery.liveUsed
+          )
+      },
+
+      backlog: {
+        used:
+          budget.discovery.backlogUsed,
+
+        limit:
+          budget.discovery.backlogLimit,
+
+        remaining:
+          Math.max(
+            0,
+            budget.discovery.backlogLimit -
+            budget.discovery.backlogUsed
+          )
+      }
     },
+
 
     analysis: {
       used:
@@ -328,7 +460,11 @@ function budgetTelemetry(
       protected: true
     },
 
+
     hardPhaseIsolation:
+      true,
+
+    liveFirst:
       true,
 
     skipped:
@@ -342,13 +478,16 @@ function budgetTelemetry(
    ========================================================= */
 
 function now() {
-  return new Date().toISOString();
+  return new Date()
+    .toISOString();
 }
+
 
 function json(
   data,
   status = 200
 ) {
+
   return new Response(
     JSON.stringify(
       data,
@@ -369,7 +508,11 @@ function json(
   );
 }
 
-function safeNumber(value) {
+
+function safeNumber(
+  value
+) {
+
   const n =
     Number(value);
 
@@ -378,11 +521,13 @@ function safeNumber(value) {
     : 0;
 }
 
+
 function clamp(
   value,
   min,
   max
 ) {
+
   return Math.max(
     min,
     Math.min(
@@ -392,459 +537,91 @@ function clamp(
   );
 }
 
-function normalize(value) {
+
+function normalize(
+  value
+) {
+
   return String(
     value || ""
   ).toLowerCase();
 }
 
-function isAddress(value) {
+
+function isAddress(
+  value
+) {
+
   return /^0x[a-fA-F0-9]{40}$/.test(
-    String(value || "")
-  );
-}
-
-function topicAddress(topic) {
-  if (
-    !/^0x[a-fA-F0-9]{64}$/.test(
-      String(topic || "")
-    )
-  ) {
-    return null;
-  }
-
-  return (
-    "0x" +
-    topic.slice(-40)
-  );
-}
-
-function knownQuote(address) {
-  return KNOWN_QUOTES.has(
-    normalize(address)
-  );
-}
-
-function knownQuoteMetadata(
-  address,
-  symbol
-) {
-  if (knownQuote(address)) {
-    return true;
-  }
-
-  return KNOWN_QUOTE_SYMBOLS.has(
     String(
-      symbol || ""
-    ).toUpperCase()
+      value || ""
+    )
   );
 }
 
-function errorString(error) {
-  return String(
-    error?.message ||
-    error ||
-    "UNKNOWN_ERROR"
-  );
-}
 
-function money(value) {
-  const n =
-    safeNumber(value);
-
-  if (!n) {
-    return "UNVERIFIED";
-  }
-
-  if (n >= 1e9) {
-    return (
-      "$" +
-      (n / 1e9).toFixed(2) +
-      "B"
-    );
-  }
-
-  if (n >= 1e6) {
-    return (
-      "$" +
-      (n / 1e6).toFixed(2) +
-      "M"
-    );
-  }
-
-  if (n >= 1e3) {
-    return (
-      "$" +
-      (n / 1e3).toFixed(1) +
-      "K"
-    );
-  }
-
-  return (
-    "$" +
-    n.toFixed(2)
-  );
-}
-
-function percentChange(
-  previous,
-  current
+function topicAddress(
+  topic
 ) {
-  const a =
-    safeNumber(previous);
-
-  const b =
-    safeNumber(current);
-
-  if (a <= 0) {
-    return null;
-  }
-
-  return (
-    ((b - a) / a) *
-    100
-  );
-}
-
-
-/* =========================================================
-   KV
-   ========================================================= */
-
-function getKV(env) {
-  if (
-    env.MEME_HUNTER_STATE &&
-    typeof env.MEME_HUNTER_STATE.get ===
-      "function" &&
-    typeof env.MEME_HUNTER_STATE.put ===
-      "function"
-  ) {
-    return {
-      kv:
-        env.MEME_HUNTER_STATE,
-
-      binding:
-        "MEME_HUNTER_STATE"
-    };
-  }
 
   if (
-    env.KV_BINDING &&
-    typeof env.KV_BINDING.get ===
-      "function" &&
-    typeof env.KV_BINDING.put ===
-      "function"
-  ) {
-    return {
-      kv:
-        env.KV_BINDING,
+    !/^0x[a-fA-F0-
 
-      binding:
-        "KV_BINDING"
-    };
-  }
-
-  return {
-    kv: null,
-    binding: null
-  };
-}
-
-function newState() {
-  return {
-    version:
-      VERSION,
-
-    lastScannedBlock:
-      null,
-
-    watchedTokens:
-      [],
-
-    alerts:
-      {},
-
-    snapshots:
-      {},
-
-    createdAt:
-      now(),
-
-    updatedAt:
-      now()
-  };
-}
-
-async function readState(env) {
-  const {
-    kv,
-    binding
-  } = getKV(env);
-
-  if (!kv) {
-    return {
-      persistent: false,
-      binding: null,
-      state: newState(),
-      error: null
-    };
-  }
-
-  try {
-    const raw =
-      await kv.get(
-        STATE_KEY
-      );
-
-    if (!raw) {
-      return {
-        persistent: true,
-        binding,
-        state: newState(),
-        error: null
-      };
-    }
-
-    const parsed =
-      JSON.parse(raw);
-
-    return {
-      persistent: true,
-
-      binding,
-
-      state: {
-        ...newState(),
-        ...parsed,
-
-        watchedTokens:
-          Array.isArray(
-            parsed?.watchedTokens
-          )
-            ? parsed.watchedTokens
-            : [],
-
-        alerts:
-          parsed?.alerts &&
-          typeof parsed.alerts ===
-            "object"
-            ? parsed.alerts
-            : {},
-
-        snapshots:
-          parsed?.snapshots &&
-          typeof parsed.snapshots ===
-            "object"
-            ? parsed.snapshots
-            : {}
-      },
-
-      error: null
-    };
-
-  } catch (error) {
-    return {
-      persistent: true,
-
-      binding,
-
-      state:
-        newState(),
-
-      error:
-        errorString(error)
-    };
-  }
-}
-
-async function writeState(
-  env,
-  state
-) {
-  const {
-    kv,
-    binding
-  } = getKV(env);
-
-  if (!kv) {
-    return {
-      saved: false,
-      binding: null,
-      error:
-        "KV_NOT_CONFIGURED"
-    };
-  }
-
-  try {
-    state.version =
-      VERSION;
-
-    state.updatedAt =
-      now();
-
-    await kv.put(
-      STATE_KEY,
-      JSON.stringify(state)
-    );
-
-    return {
-      saved: true,
-      binding,
-      error: null
-    };
-
-  } catch (error) {
-    return {
-      saved: false,
-      binding,
-      error:
-        errorString(error)
-    };
-  }
-}
-
-function persistenceHealth(
-  result
-) {
-  if (!result.persistent) {
-    return {
-      healthy: false,
-      status:
-        "KV_BINDING_MISSING"
-    };
-  }
-
-  if (result.error) {
-    return {
-      healthy: false,
-      status:
-        "KV_READ_ERROR"
-    };
-  }
-
-  return {
-    healthy: true,
-    status: "READY"
-  };
-}
-
-
-/* =========================================================
+    /* =========================================================
    STATE PRUNING
    ========================================================= */
 
 function pruneSnapshots(state) {
-  const current =
-    Date.now();
+  const current = Date.now();
 
   state.snapshots =
-    state.snapshots &&
-    typeof state.snapshots ===
-      "object"
+    state.snapshots && typeof state.snapshots === "object"
       ? state.snapshots
       : {};
 
-  for (
-    const [
-      address,
-      snapshots
-    ] of Object.entries(
-      state.snapshots
-    )
-  ) {
-    if (
-      !Array.isArray(
-        snapshots
-      )
-    ) {
-      delete state.snapshots[
-        address
-      ];
-
+  for (const [address, snapshots] of Object.entries(state.snapshots)) {
+    if (!Array.isArray(snapshots)) {
+      delete state.snapshots[address];
       continue;
     }
 
-    const valid =
-      snapshots
-        .filter(snapshot => {
-          const timestamp =
-            safeNumber(
-              snapshot?.timestamp
-            );
-
-          return (
-            timestamp &&
-            current -
-              timestamp <=
-              SNAPSHOT_MAX_AGE
-          );
-        })
-        .slice(
-          -MAX_SNAPSHOTS_PER_TOKEN
-        );
+    const valid = snapshots
+      .filter(snapshot => {
+        const timestamp = safeNumber(snapshot?.timestamp);
+        return timestamp && current - timestamp <= SNAPSHOT_MAX_AGE;
+      })
+      .slice(-MAX_SNAPSHOTS_PER_TOKEN);
 
     if (valid.length) {
-      state.snapshots[
-        address
-      ] = valid;
+      state.snapshots[address] = valid;
     } else {
-      delete state.snapshots[
-        address
-      ];
+      delete state.snapshots[address];
     }
   }
 }
 
 function pruneState(state) {
-  const current =
-    Date.now();
+  const current = Date.now();
 
-  state.watchedTokens =
-    (
-      state.watchedTokens ||
-      []
-    )
-      .filter(token => {
-        const firstSeen =
-          safeNumber(
-            token.firstSeenAt
-          );
+  state.watchedTokens = (state.watchedTokens || [])
+    .filter(token => {
+      const firstSeen = safeNumber(token.firstSeenAt);
 
-        return (
-          firstSeen &&
-          current -
-            firstSeen <
-            WATCH_MAX_AGE
-        );
-      })
-      .slice(
-        0,
-        MAX_WATCHED_TOKENS
+      return (
+        firstSeen &&
+        current - firstSeen < WATCH_MAX_AGE
       );
+    })
+    .slice(0, MAX_WATCHED_TOKENS);
 
   state.alerts =
-    state.alerts &&
-    typeof state.alerts ===
-      "object"
+    state.alerts && typeof state.alerts === "object"
       ? state.alerts
       : {};
 
-  for (
-    const [
-      address,
-      timestamp
-    ] of Object.entries(
-      state.alerts
-    )
-  ) {
-    if (
-      current -
-        safeNumber(timestamp) >
-      ALERT_COOLDOWN
-    ) {
-      delete state.alerts[
-        address
-      ];
+  for (const [address, timestamp] of Object.entries(state.alerts)) {
+    if (current - safeNumber(timestamp) > ALERT_COOLDOWN) {
+      delete state.alerts[address];
     }
   }
 
@@ -854,10 +631,10 @@ function pruneState(state) {
 function addWatch(
   state,
   address,
-  pool
+  pool,
+  source = "UNKNOWN"
 ) {
-  const key =
-    normalize(address);
+  const key = normalize(address);
 
   if (
     !isAddress(address) ||
@@ -867,42 +644,29 @@ function addWatch(
     return false;
   }
 
-  let token =
-    state.watchedTokens.find(
-      item =>
-        normalize(
-          item.address
-        ) === key
-    );
+  let token = state.watchedTokens.find(
+    item => normalize(item.address) === key
+  );
 
   let added = false;
 
   if (!token) {
     token = {
       address,
-
-      firstSeenAt:
-        Date.now(),
-
-      lastCheckedAt:
-        null,
-
+      firstSeenAt: Date.now(),
+      lastCheckedAt: null,
       checks: 0,
-
-      pools: []
+      pools: [],
+      discoverySource: source
     };
 
-    state.watchedTokens.push(
-      token
-    );
+    state.watchedTokens.push(token);
 
     added = true;
   }
 
   token.pools =
-    Array.isArray(
-      token.pools
-    )
+    Array.isArray(token.pools)
       ? token.pools
       : [];
 
@@ -910,15 +674,16 @@ function addWatch(
     pool &&
     !token.pools.some(
       item =>
-        normalize(
-          item.poolId
-        ) ===
-        normalize(
-          pool.poolId
-        )
+        normalize(item.poolId) ===
+        normalize(pool.poolId)
     )
   ) {
     token.pools.push(pool);
+  }
+
+  if (source === "LIVE") {
+    token.discoverySource = "LIVE";
+    token.lastLiveSeenAt = Date.now();
   }
 
   return added;
@@ -929,87 +694,61 @@ function addWatch(
    SNAPSHOTS
    ========================================================= */
 
-function createSnapshot(
-  candidate
-) {
+function createSnapshot(candidate) {
   const whale =
-    candidate.holders
-      ?.whale;
+    candidate.holders?.whale;
 
   return {
-    timestamp:
-      Date.now(),
+    timestamp: Date.now(),
 
     holderCount:
-      candidate.holders
-        ?.verified
-        ? candidate.holders
-            .holderCount
+      candidate.holders?.verified
+        ? candidate.holders.holderCount
         : null,
 
     transferCount:
-      candidate.holders
-        ?.verified
-        ? candidate.holders
-            .transferCount
+      candidate.holders?.verified
+        ? candidate.holders.transferCount
         : null,
 
     liquidityUsd:
-      candidate.market
-        ?.verified
-        ? candidate.market
-            .liquidityUsd
+      candidate.market?.verified
+        ? candidate.market.liquidityUsd
         : null,
 
     marketCap:
-      candidate.market
-        ?.verified
-        ? candidate.market
-            .marketCap
+      candidate.market?.verified
+        ? candidate.market.marketCap
         : null,
 
     volumeM5:
-      candidate.market
-        ?.verified
-        ? candidate.market
-            .volume?.m5
+      candidate.market?.verified
+        ? candidate.market.volume?.m5
         : null,
 
     volumeH1:
-      candidate.market
-        ?.verified
-        ? candidate.market
-            .volume?.h1
+      candidate.market?.verified
+        ? candidate.market.volume?.h1
         : null,
 
     volumeH24:
-      candidate.market
-        ?.verified
-        ? candidate.market
-            .volume?.h24
+      candidate.market?.verified
+        ? candidate.market.volume?.h24
         : null,
 
     buysH1:
-      candidate.market
-        ?.verified
-        ? candidate.market
-            .transactions
-            ?.h1?.buys
+      candidate.market?.verified
+        ? candidate.market.transactions?.h1?.buys
         : null,
 
     sellsH1:
-      candidate.market
-        ?.verified
-        ? candidate.market
-            .transactions
-            ?.h1?.sells
+      candidate.market?.verified
+        ? candidate.market.transactions?.h1?.sells
         : null,
 
     buyPressure1h:
-      candidate.market
-        ?.verified
-        ? candidate.market
-            .buyPressure1h
+      candidate.market?.verified
+        ? candidate.market.buyPressure1h
         : null,
 
     top1Percent:
@@ -1028,20 +767,11 @@ function createSnapshot(
         : null,
 
     whaleBalances:
-      candidate.holders
-        ?.verified
-        ? (
-            candidate.holders
-              .topHolders || []
-          ).map(holder => ({
-            address:
-              holder.address,
-
-            value:
-              holder.value,
-
-            percentage:
-              holder.percentage
+      candidate.holders?.verified
+        ? (candidate.holders.topHolders || []).map(holder => ({
+            address: holder.address,
+            value: holder.value,
+            percentage: holder.percentage
           }))
         : []
   };
@@ -1052,14 +782,10 @@ function saveSnapshot(
   candidate
 ) {
   const key =
-    normalize(
-      candidate.address
-    );
+    normalize(candidate.address);
 
   state.snapshots[key] =
-    Array.isArray(
-      state.snapshots[key]
-    )
+    Array.isArray(state.snapshots[key])
       ? state.snapshots[key]
       : [];
 
@@ -1068,26 +794,20 @@ function saveSnapshot(
 
   const previous =
     snapshots.length
-      ? snapshots[
-          snapshots.length - 1
-        ]
+      ? snapshots[snapshots.length - 1]
       : null;
 
   if (
     previous &&
     Date.now() -
-      safeNumber(
-        previous.timestamp
-      ) <
+      safeNumber(previous.timestamp) <
       MIN_SNAPSHOT_INTERVAL
   ) {
     return false;
   }
 
   snapshots.push(
-    createSnapshot(
-      candidate
-    )
+    createSnapshot(candidate)
   );
 
   state.snapshots[key] =
@@ -1108,9 +828,7 @@ function getMomentumSnapshot(
     ];
 
   if (
-    !Array.isArray(
-      snapshots
-    ) ||
+    !Array.isArray(snapshots) ||
     !snapshots.length
   ) {
     return null;
@@ -1120,8 +838,7 @@ function getMomentumSnapshot(
     Date.now();
 
   for (
-    let i =
-      snapshots.length - 1;
+    let i = snapshots.length - 1;
     i >= 0;
     i--
   ) {
@@ -1130,9 +847,7 @@ function getMomentumSnapshot(
 
     const age =
       current -
-      safeNumber(
-        snapshot.timestamp
-      );
+      safeNumber(snapshot.timestamp);
 
     if (
       age >=
@@ -1143,8 +858,7 @@ function getMomentumSnapshot(
   }
 
   for (
-    let i =
-      snapshots.length - 1;
+    let i = snapshots.length - 1;
     i >= 0;
     i--
   ) {
@@ -1153,9 +867,7 @@ function getMomentumSnapshot(
 
     const age =
       current -
-      safeNumber(
-        snapshot.timestamp
-      );
+      safeNumber(snapshot.timestamp);
 
     if (
       age >=
@@ -1170,7 +882,7 @@ function getMomentumSnapshot(
 
 
 /* =========================================================
-   V77 RPC
+   V78 RPC
    ========================================================= */
 
 async function rpcCall(
@@ -1188,7 +900,9 @@ async function rpcCall(
     )
   ) {
     throw new Error(
-      `REQUEST_BUDGET_EXHAUSTED_${phase.toUpperCase()}`
+      `REQUEST_BUDGET_EXHAUSTED_${phase
+        .toUpperCase()
+        .replace(/-/g, "_")}`
     );
   }
 
@@ -1197,8 +911,7 @@ async function rpcCall(
 
   const timer =
     setTimeout(
-      () =>
-        controller.abort(),
+      () => controller.abort(),
       4000
     );
 
@@ -1288,8 +1001,7 @@ async function rpc(
       return {
         result: null,
         provider: null,
-        error:
-          publicError
+        error: publicError
       };
     }
   }
@@ -1306,11 +1018,10 @@ async function rpc(
   }
 
   /*
-   * V77:
-   * Alchemy fallback is charged to the SAME phase.
-   * Discovery therefore cannot consume analysis reserve.
+   * Fallback remains charged to the originating phase.
+   * Live discovery therefore cannot consume backlog
+   * or protected analysis requests.
    */
-
   if (
     !budgetAvailable(
       budget,
@@ -1323,7 +1034,9 @@ async function rpc(
       provider: null,
 
       error:
-        `REQUEST_BUDGET_EXHAUSTED_${phase.toUpperCase()}`
+        `REQUEST_BUDGET_EXHAUSTED_${phase
+          .toUpperCase()
+          .replace(/-/g, "_")}`
     };
   }
 
@@ -1332,7 +1045,7 @@ async function rpc(
       result:
         await rpcCall(
           ALCHEMY_BASE +
-          env.ALCHEMY_API_KEY,
+            env.ALCHEMY_API_KEY,
           method,
           params,
           budget,
@@ -1363,11 +1076,6 @@ async function latestBlock(
   env,
   budget
 ) {
-  /*
-   * Latest block is operational/system budget,
-   * not discovery or analysis.
-   */
-
   const result =
     await rpc(
       env,
@@ -1386,9 +1094,7 @@ async function latestBlock(
 
   return {
     block:
-      BigInt(
-        result.result
-      ),
+      BigInt(result.result),
 
     provider:
       result.provider
@@ -1399,7 +1105,8 @@ async function getLogs(
   env,
   from,
   to,
-  budget
+  budget,
+  phase
 ) {
   return rpc(
     env,
@@ -1417,13 +1124,13 @@ async function getLogs(
         POOL_MANAGER
     }],
     budget,
-    "discovery"
+    phase
   );
 }
 
 
 /* =========================================================
-   V77 LOG SCANNER
+   V78 LOG RANGE SCANNER
    ========================================================= */
 
 async function scanLogRange(
@@ -1432,23 +1139,20 @@ async function scanLogRange(
   to,
   budget,
   output,
+  phase,
   depth = 0
 ) {
   if (
     !budgetAvailable(
       budget,
-      "discovery",
+      phase,
       1
     )
   ) {
     return {
       success: false,
-
-      discoveryBudgetExhausted:
-        true,
-
-      processedThrough:
-        null
+      budgetExhausted: true,
+      processedThrough: null
     };
   }
 
@@ -1457,7 +1161,8 @@ async function scanLogRange(
       env,
       from,
       to,
-      budget
+      budget,
+      phase
     );
 
   if (
@@ -1482,15 +1187,15 @@ async function scanLogRange(
       provider:
         result.provider,
 
+      phase,
+
       splitDepth:
         depth
     });
 
     return {
       success: true,
-
-      processedThrough:
-        to
+      processedThrough: to
     };
   }
 
@@ -1503,12 +1208,8 @@ async function scanLogRange(
   ) {
     return {
       success: false,
-
-      discoveryBudgetExhausted:
-        true,
-
-      processedThrough:
-        null
+      budgetExhausted: true,
+      processedThrough: null
     };
   }
 
@@ -1517,14 +1218,11 @@ async function scanLogRange(
 
   if (
     size >
-    BigInt(
-      MIN_LOG_RANGE
-    )
+    BigInt(MIN_LOG_RANGE)
   ) {
     const middle =
       from +
-      (to - from) /
-      2n;
+      (to - from) / 2n;
 
     const left =
       await scanLogRange(
@@ -1533,6 +1231,7 @@ async function scanLogRange(
         middle,
         budget,
         output,
+        phase,
         depth + 1
       );
 
@@ -1547,13 +1246,13 @@ async function scanLogRange(
         to,
         budget,
         output,
+        phase,
         depth + 1
       );
 
     if (!right.success) {
       return {
         ...right,
-
         processedThrough:
           left.processedThrough
       };
@@ -1561,7 +1260,6 @@ async function scanLogRange(
 
     return {
       success: true,
-
       processedThrough:
         right.processedThrough
     };
@@ -1570,8 +1268,7 @@ async function scanLogRange(
   return {
     success: false,
 
-    processedThrough:
-      null,
+    processedThrough: null,
 
     error:
       result.error ||
@@ -1763,16 +1460,7 @@ function decodeString(hex) {
   }
 }
 
-async function verifyERC20(
-  env,
-  address,
-  budget
-) {
-  /*
-   * V77 checks budget before beginning a token.
-   * We need room for contract bytecode + core metadata.
-   */
-
+async function verifyERC20(env, address, budget) {
   if (
     !budgetAvailable(
       budget,
@@ -1782,9 +1470,7 @@ async function verifyERC20(
   ) {
     return {
       validERC20: false,
-
-      reason:
-        "ANALYSIS_BUDGET_PROTECTED"
+      reason: "ANALYSIS_BUDGET_PROTECTED"
     };
   }
 
@@ -1804,9 +1490,7 @@ async function verifyERC20(
   ) {
     return {
       validERC20: false,
-
-      reason:
-        "NO_CONTRACT_BYTECODE"
+      reason: "NO_CONTRACT_BYTECODE"
     };
   }
 
@@ -1855,10 +1539,6 @@ async function verifyERC20(
         Number(value);
     }
   } catch {}
-
-  /*
-   * Only request supply if analysis budget remains.
-   */
 
   if (
     budgetAvailable(
@@ -1915,10 +1595,7 @@ async function verifyERC20(
 
   return {
     validERC20: true,
-
-    reason:
-      "VERIFIED",
-
+    reason: "VERIFIED",
     address,
     name,
     symbol,
@@ -1927,7 +1604,46 @@ async function verifyERC20(
     totalSupply:
       totalSupply !== null
         ? totalSupply.toString()
-        : null
+        : null,
+
+    verifiedAt:
+      Date.now()
+  };
+}
+
+
+/* =========================================================
+   V78 METADATA REUSE
+   ========================================================= */
+
+function reusableMetadata(watched) {
+  const metadata =
+    watched?.metadata;
+
+  if (
+    !metadata ||
+    !metadata.validERC20
+  ) {
+    return null;
+  }
+
+  const verifiedAt =
+    safeNumber(
+      metadata.verifiedAt
+    );
+
+  if (
+    !verifiedAt ||
+    Date.now() -
+      verifiedAt >
+      METADATA_REUSE_MS
+  ) {
+    return null;
+  }
+
+  return {
+    ...metadata,
+    reused: true
   };
 }
 
@@ -1986,6 +1702,7 @@ function decodeInitialize(log) {
       log.transactionHash
   };
 }
+
 
 function activityForToken(
   watched,
@@ -2066,9 +1783,7 @@ async function marketData(
   ) {
     return {
       verified: false,
-
-      status:
-        "ANALYSIS_BUDGET_PROTECTED"
+      status: "ANALYSIS_BUDGET_PROTECTED"
     };
   }
 
@@ -2087,7 +1802,6 @@ async function marketData(
     if (!response.ok) {
       return {
         verified: false,
-
         status:
           `HTTP_${response.status}`
       };
@@ -2104,9 +1818,7 @@ async function marketData(
     if (!pairs.length) {
       return {
         verified: false,
-
-        status:
-          "NO_MARKET_FOUND"
+        status: "NO_MARKET_FOUND"
       };
     }
 
@@ -2139,9 +1851,7 @@ async function marketData(
 
     return {
       verified: true,
-
-      status:
-        "VERIFIED",
+      status: "VERIFIED",
 
       pairAddress:
         p?.pairAddress ||
@@ -2215,12 +1925,8 @@ async function marketData(
   } catch (error) {
     return {
       verified: false,
-
-      status:
-        "DEXSCREENER_ERROR",
-
-      error:
-        errorString(error)
+      status: "DEXSCREENER_ERROR",
+      error: errorString(error)
     };
   }
 }
@@ -2267,6 +1973,7 @@ async function blockscout(
   }
 }
 
+
 function holderPercent(
   value,
   supply
@@ -2299,6 +2006,7 @@ function holderPercent(
     return null;
   }
 }
+
 
 function extractHolderAddress(
   item
@@ -2333,6 +2041,7 @@ function extractHolderAddress(
 
   return null;
 }
+
 
 function unverifiedHolders() {
   return {
@@ -2374,6 +2083,7 @@ function unverifiedHolders() {
     }
   };
 }
+
 
 async function holderIntelligence(
   token,
@@ -2901,7 +2611,6 @@ function analyseWhaleFlow(
   };
 }
 
-
 /* =========================================================
    MOMENTUM
    ========================================================= */
@@ -3050,7 +2759,6 @@ function momentumAnalysis(
       : null;
 
   let score = 0;
-
   const reasons = [];
 
   if (
@@ -3314,7 +3022,6 @@ function marketQuality(
   }
 
   let score = 0;
-
   const reasons = [];
 
   const liquidity =
@@ -3475,6 +3182,294 @@ function marketQuality(
 
 
 /* =========================================================
+   V78 EARLY LAUNCH STAGE
+   ========================================================= */
+
+function launchStage(
+  market
+) {
+  if (
+    !market?.verified ||
+    !safeNumber(
+      market.pairCreatedAt
+    )
+  ) {
+    return {
+      verified: false,
+
+      ageMinutes: null,
+
+      stage:
+        "UNVERIFIED",
+
+      score: 0
+    };
+  }
+
+  const ageMs =
+    Math.max(
+      0,
+      Date.now() -
+      safeNumber(
+        market.pairCreatedAt
+      )
+    );
+
+  const ageMinutes =
+    ageMs /
+    60000;
+
+  let stage =
+    "MATURE";
+
+  let score = 0;
+
+  if (
+    ageMs <=
+    15 * 60 * 1000
+  ) {
+    stage =
+      "JUST_LAUNCHED";
+
+    score = 100;
+
+  } else if (
+    ageMs <=
+    60 * 60 * 1000
+  ) {
+    stage =
+      "VERY_EARLY";
+
+    score = 90;
+
+  } else if (
+    ageMs <=
+    2 * 60 * 60 * 1000
+  ) {
+    stage =
+      "EARLY";
+
+    score = 80;
+
+  } else if (
+    ageMs <=
+    6 * 60 * 60 * 1000
+  ) {
+    stage =
+      "EMERGING";
+
+    score = 65;
+
+  } else if (
+    ageMs <=
+    24 * 60 * 60 * 1000
+  ) {
+    stage =
+      "YOUNG";
+
+    score = 45;
+
+  } else if (
+    ageMs <=
+    72 * 60 * 60 * 1000
+  ) {
+    stage =
+      "ESTABLISHING";
+
+    score = 25;
+  }
+
+  return {
+    verified: true,
+    ageMinutes,
+    stage,
+    score
+  };
+}
+
+
+/* =========================================================
+   V78 SIGNAL CONFIRMATION
+   ========================================================= */
+
+function signalConfirmation(
+  candidate
+) {
+  let signals = 0;
+  let score = 0;
+
+  const reasons = [];
+
+  const market =
+    candidate.market;
+
+  const momentum =
+    candidate.momentum;
+
+  const holders =
+    candidate.holders;
+
+  const whaleFlow =
+    candidate.whaleFlow;
+
+  const activity =
+    candidate.activity;
+
+  if (
+    activity?.swaps > 0
+  ) {
+    signals++;
+    score += 10;
+
+    reasons.push(
+      "V4 swap activity confirmed"
+    );
+  }
+
+  if (
+    activity?.liquidityEvents > 0
+  ) {
+    signals++;
+    score += 8;
+
+    reasons.push(
+      "Liquidity activity confirmed"
+    );
+  }
+
+  if (
+    market?.verified &&
+    safeNumber(
+      market.liquidityUsd
+    ) >= 5000
+  ) {
+    signals++;
+    score += 12;
+
+    reasons.push(
+      "Meaningful liquidity confirmed"
+    );
+  }
+
+  if (
+    market?.verified &&
+    safeNumber(
+      market.volume?.h24
+    ) >= 10000
+  ) {
+    signals++;
+    score += 10;
+
+    reasons.push(
+      "Trading volume confirmed"
+    );
+  }
+
+  if (
+    market?.buyPressure1h !==
+      null &&
+    market.buyPressure1h >= 60
+  ) {
+    signals++;
+    score += 12;
+
+    reasons.push(
+      "Buy pressure confirmed"
+    );
+  }
+
+  if (
+    holders?.verified &&
+    safeNumber(
+      holders.holderCount
+    ) >= 50
+  ) {
+    signals++;
+    score += 10;
+
+    reasons.push(
+      "Holder base confirmed"
+    );
+  }
+
+  if (
+    momentum?.verified &&
+    momentum.score >= 50
+  ) {
+    signals++;
+    score += 18;
+
+    reasons.push(
+      "Momentum acceleration confirmed"
+    );
+  }
+
+  if (
+    whaleFlow?.verified &&
+    whaleFlow.flow ===
+      "NET_ACCUMULATION"
+  ) {
+    signals++;
+    score += 15;
+
+    reasons.push(
+      "Whale accumulation confirmed"
+    );
+  }
+
+  if (
+    holders?.whale
+      ?.concentrationRisk ===
+      "LOW"
+  ) {
+    signals++;
+    score += 10;
+
+    reasons.push(
+      "Healthy holder concentration"
+    );
+  }
+
+  if (
+    signals >= 5
+  ) {
+    score += 10;
+
+    reasons.push(
+      "Strong multi-signal confirmation"
+    );
+  }
+
+  return {
+    verified:
+      signals >= 2,
+
+    signals,
+
+    score:
+      clamp(
+        score,
+        0,
+        100
+      ),
+
+    label:
+      signals >= 7
+        ? "VERY_STRONG"
+        : signals >= 5
+          ? "STRONG"
+          : signals >= 3
+            ? "DEVELOPING"
+            : signals >= 2
+              ? "EARLY"
+              : "WEAK",
+
+    reasons
+  };
+}
+
+
+/* =========================================================
    RISK
    ========================================================= */
 
@@ -3609,7 +3604,8 @@ function scoreOpportunity(
   activity,
   momentum,
   quality,
-  whaleFlow
+  whaleFlow,
+  launch
 ) {
   let score = 0;
 
@@ -3707,6 +3703,45 @@ function scoreOpportunity(
       reasons.push(
         "Early market-cap range"
       );
+    }
+  }
+
+  /*
+   * V78:
+   * Reward genuine early-stage discovery,
+   * but do not let age alone dominate ranking.
+   */
+
+  if (
+    launch?.verified
+  ) {
+    if (
+      launch.stage ===
+      "JUST_LAUNCHED"
+    ) {
+      score += 10;
+
+      reasons.push(
+        "Just-launched pair"
+      );
+
+    } else if (
+      launch.stage ===
+        "VERY_EARLY" ||
+      launch.stage ===
+        "EARLY"
+    ) {
+      score += 7;
+
+      reasons.push(
+        "Very early launch stage"
+      );
+
+    } else if (
+      launch.stage ===
+      "EMERGING"
+    ) {
+      score += 4;
     }
   }
 
@@ -3955,7 +3990,7 @@ function candidateConfidence(
 
 
 /* =========================================================
-   V77 WATCH PRIORITY
+   V78 WATCH PRIORITY
    ========================================================= */
 
 function watchPriority(
@@ -3989,14 +4024,14 @@ function watchPriority(
   }
 
   /*
-   * V77:
-   * Brand-new discoveries get immediate priority.
+   * Newly observed pool/token gets highest
+   * short-term analysis priority.
    */
 
   if (
     newTokens.has(key)
   ) {
-    score += 1000;
+    score += 1200;
   }
 
   const lastChecked =
@@ -4008,15 +4043,18 @@ function watchPriority(
     score += 500;
 
   } else {
+    const minutesSinceCheck =
+      (
+        Date.now() -
+        lastChecked
+      ) /
+      60000;
+
     score +=
       Math.min(
-        400,
+        500,
         Math.floor(
-          (
-            Date.now() -
-            lastChecked
-          ) /
-          60000
+          minutesSinceCheck
         )
       );
   }
@@ -4030,6 +4068,13 @@ function watchPriority(
   if (
     age >= 0 &&
     age <
+      30 * 60 * 1000
+  ) {
+    score += 175;
+
+  } else if (
+    age >= 0 &&
+    age <
       60 * 60 * 1000
   ) {
     score += 100;
@@ -4037,17 +4082,108 @@ function watchPriority(
 
   score +=
     Math.min(
-      50,
+      60,
       (
         watched.pools
           ?.length ||
         0
-      ) * 10
+      ) * 12
     );
+
+  /*
+   * V78:
+   * Tokens with existing history remain useful
+   * because momentum/whale-flow can now be verified.
+   */
+
+  if (
+    safeNumber(
+      watched.checks
+    ) > 0
+  ) {
+    score += 30;
+  }
 
   return score;
 }
 
+
+/* =========================================================
+   V78 ANALYSIS PRIORITY
+   ========================================================= */
+
+function analysisPriority(
+  candidate
+) {
+  let score =
+    safeNumber(
+      candidate.opportunity
+        ?.score
+    ) * 2;
+
+  score +=
+    safeNumber(
+      candidate.confidence
+        ?.score
+    );
+
+  score +=
+    safeNumber(
+      candidate.momentum
+        ?.score
+    );
+
+  score +=
+    safeNumber(
+      candidate.marketQuality
+        ?.score
+    );
+
+  score +=
+    safeNumber(
+      candidate.signalConfirmation
+        ?.score
+    );
+
+  score +=
+    safeNumber(
+      candidate.launchStage
+        ?.score
+    ) * 0.25;
+
+  if (
+    candidate.newlyDiscovered
+  ) {
+    score += 25;
+  }
+
+  if (
+    candidate.whaleFlow
+      ?.flow ===
+      "NET_ACCUMULATION"
+  ) {
+    score += 30;
+  }
+
+  if (
+    candidate.whaleFlow
+      ?.flow ===
+      "NET_DISTRIBUTION"
+  ) {
+    score -= 30;
+  }
+
+  if (
+    candidate.holders
+      ?.whale
+      ?.concentrationRisk ===
+      "HIGH"
+  ) {
+    score -= 40;
+  }
+
+  return score;
+}
 
 /* =========================================================
    TELEGRAM
@@ -4099,7 +4235,6 @@ async function telegram(
   ) {
     return {
       sent: false,
-
       reason:
         "TELEGRAM_NOT_CONFIGURED"
     };
@@ -4111,7 +4246,6 @@ async function telegram(
   ) {
     return {
       sent: false,
-
       reason:
         "UNVERIFIED_CANDIDATE"
     };
@@ -4124,7 +4258,6 @@ async function telegram(
   ) {
     return {
       sent: false,
-
       reason:
         "LOW_LIQUIDITY"
     };
@@ -4136,7 +4269,6 @@ async function telegram(
   ) {
     return {
       sent: false,
-
       reason:
         "RISK_TOO_HIGH"
     };
@@ -4148,7 +4280,6 @@ async function telegram(
   ) {
     return {
       sent: false,
-
       reason:
         "SCORE_TOO_LOW"
     };
@@ -4163,7 +4294,6 @@ async function telegram(
   ) {
     return {
       sent: false,
-
       reason:
         "CONFIDENCE_TOO_LOW"
     };
@@ -4177,7 +4307,6 @@ async function telegram(
   ) {
     return {
       sent: false,
-
       reason:
         "COOLDOWN"
     };
@@ -4192,7 +4321,6 @@ async function telegram(
   ) {
     return {
       sent: false,
-
       reason:
         "ANALYSIS_BUDGET_PROTECTED"
     };
@@ -4205,8 +4333,14 @@ async function telegram(
   const flow =
     candidate.whaleFlow;
 
+  const launch =
+    candidate.launchStage;
+
+  const confirmation =
+    candidate.signalConfirmation;
+
   const message =
-`🚨 Robinhood Chain Meme Hunter V77
+`🚨 Robinhood Chain Meme Hunter V78
 
 🪙 ${candidate.name || "Unknown"} (${candidate.symbol || "?"})
 
@@ -4218,6 +4352,13 @@ ${candidate.address}
 🔎 Confidence: ${candidate.confidence?.score ?? 0}/100 (${candidate.confidence?.label || "LOW"})
 🧪 Market Quality: ${candidate.marketQuality?.score ?? 0}/100
 🛡 Rug Risk: ${candidate.rugRisk.score}/100 (${candidate.rugRisk.label})
+
+🆕 Launch Stage: ${launch?.stage || "UNVERIFIED"}
+⏱ Pair Age: ${Number.isFinite(launch?.ageMinutes) ? launch.ageMinutes.toFixed(1) + " min" : "UNVERIFIED"}
+
+📡 Signal Confirmation: ${confirmation?.score ?? 0}/100
+📡 Signals Confirmed: ${confirmation?.signals ?? 0}
+📡 Signal Strength: ${confirmation?.label || "UNVERIFIED"}
 
 💰 Market Cap: ${money(candidate.market.marketCap)}
 💧 Liquidity: ${money(candidate.market.liquidityUsd)}
@@ -4283,10 +4424,8 @@ ${candidate.address}
     ) {
       return {
         sent: false,
-
         reason:
           "TELEGRAM_API_ERROR",
-
         status:
           response.status
       };
@@ -4332,7 +4471,7 @@ ${candidate.address}
 
 
 /* =========================================================
-   V77 SCAN
+   V78 SCAN
    ========================================================= */
 
 async function scan(env) {
@@ -4441,11 +4580,10 @@ async function scan(env) {
   let failedRange =
     null;
 
-  /*
-   * =======================================================
-   * PHASE 1 — DISCOVERY
-   * =======================================================
-   */
+
+  /* =======================================================
+     PHASE 1 — DISCOVERY
+     ======================================================= */
 
   if (!upToDate) {
     let cursor =
@@ -4598,11 +4736,6 @@ async function scan(env) {
           pool
         );
 
-      /*
-       * Even if already watched, a newly observed
-       * initialize event receives V77 priority.
-       */
-
       newTokens.add(
         normalize(address)
       );
@@ -4629,11 +4762,10 @@ async function scan(env) {
 
   pruneState(state);
 
-  /*
-   * =======================================================
-   * PHASE 2 — PROTECTED ANALYSIS
-   * =======================================================
-   */
+
+  /* =======================================================
+     PHASE 2 — PROTECTED ANALYSIS
+     ======================================================= */
 
   const validationResults =
     [];
@@ -4671,11 +4803,6 @@ async function scan(env) {
     const watched
     of candidatesToCheck
   ) {
-    /*
-     * Leave enough analysis budget for at least
-     * one market lookup after validation.
-     */
-
     if (
       !budgetAvailable(
         budget,
@@ -4845,6 +4972,11 @@ async function scan(env) {
         market
       );
 
+    const launch =
+      launchStage(
+        market
+      );
+
     const whaleFlow =
       analyseWhaleFlow(
         previousSnapshot,
@@ -4902,7 +5034,8 @@ async function scan(env) {
         activity,
         momentum,
         quality,
-        whaleFlow
+        whaleFlow,
+        launch
       );
 
     const candidate = {
@@ -4959,13 +5092,43 @@ async function scan(env) {
       marketQuality:
         quality,
 
+      launchStage:
+        launch,
+
       rugRisk,
 
       opportunity
     };
 
+    /*
+     * Confidence uses all verified information
+     * collected so far.
+     */
+
     candidate.confidence =
       candidateConfidence(
+        candidate
+      );
+
+    /*
+     * V78:
+     * Signal confirmation evaluates whether
+     * multiple independent signals agree.
+     */
+
+    candidate.signalConfirmation =
+      signalConfirmation(
+        candidate
+      );
+
+    /*
+     * V78:
+     * Composite ranking priority is calculated
+     * independently from the opportunity score.
+     */
+
+    candidate.analysisPriority =
+      analysisPriority(
         candidate
       );
 
@@ -4979,22 +5142,30 @@ async function scan(env) {
     );
   }
 
+
+  /* =======================================================
+     V78 CANDIDATE RANKING
+     ======================================================= */
+
   analysed.sort(
     (a, b) => {
-      /*
-       * V77:
-       * Opportunity remains primary ranking,
-       * but new discoveries receive a small
-       * tie-break advantage.
-       */
+      const priorityDiff =
+        safeNumber(
+          b.analysisPriority
+        ) -
+        safeNumber(
+          a.analysisPriority
+        );
+
+      if (priorityDiff) {
+        return priorityDiff;
+      }
 
       const opportunityDiff =
         b.opportunity.score -
         a.opportunity.score;
 
-      if (
-        opportunityDiff
-      ) {
+      if (opportunityDiff) {
         return opportunityDiff;
       }
 
@@ -5007,22 +5178,17 @@ async function scan(env) {
           : -1;
       }
 
-      const confidenceDiff =
-        b.confidence.score -
-        a.confidence.score;
-
-      if (
-        confidenceDiff
-      ) {
-        return confidenceDiff;
-      }
-
       return (
-        b.momentum.score -
-        a.momentum.score
+        b.confidence.score -
+        a.confidence.score
       );
     }
   );
+
+
+  /* =======================================================
+     V78 QUALIFICATION
+     ======================================================= */
 
   const qualifying =
     analysed.filter(
@@ -5046,6 +5212,11 @@ async function scan(env) {
           ?.score >=
           MIN_CONFIDENCE_ALERT
     );
+
+
+  /* =======================================================
+     TELEGRAM
+     ======================================================= */
 
   const telegramResults =
     [];
@@ -5280,13 +5451,13 @@ async function scan(env) {
             : "DISABLED",
 
         adaptiveCatchup:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         failedRangeProtection:
           "ENABLED",
 
         requestBudget:
-          "HARD_PHASE_ISOLATION_V77",
+          "HARD_PHASE_ISOLATION_V78",
 
         discoveryBudget:
           DISCOVERY_REQUEST_LIMIT,
@@ -5295,76 +5466,85 @@ async function scan(env) {
           ANALYSIS_REQUEST_LIMIT,
 
         analysisBudgetProtection:
-          "HARD_PROTECTED_V77",
+          "HARD_PROTECTED_V78",
 
         discoveryCanConsumeAnalysis:
           false,
 
         candidateAnalysisAfterCatchupPause:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         infrastructureFiltering:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         candidateRotation:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         newLaunchPriority:
-          "ENABLED_V77",
+          "ENABLED_V78",
+
+        launchStageDetection:
+          "ENABLED_V78",
+
+        compositeCandidateRanking:
+          "ENABLED_V78",
+
+        signalConfirmation:
+          "MULTI_SIGNAL_V78",
 
         poolSpecificActivity:
           "ENABLED",
 
         historicalSnapshots:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         momentumSnapshotAgeProtection:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         holderGrowth:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         liquidityGrowth:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         volumeAcceleration:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         transactionAcceleration:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         momentumScoring:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         multiSignalConfirmation:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         earlyLaunchDetection:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         marketQuality:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         candidateConfidence:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         whaleConcentration:
           "ENABLED",
 
         whaleFlow:
-          "OBSERVED_BALANCE_CHANGE_V77",
+          "OBSERVED_BALANCE_CHANGE_V78",
 
         whaleAccumulation:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         whaleDistribution:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         concentrationTrend:
-          "ENABLED_V77",
+          "ENABLED_V78",
 
         smartMoney:
-          "BEHAVIOUR_CANDIDATE_SCORING_V77",
+          "BEHAVIOUR_CANDIDATE_SCORING_V78",
 
         smartMoneyVerified:
           false,
@@ -5374,7 +5554,7 @@ async function scan(env) {
       },
 
       architecture:
-        "V77_HARD_BUDGET_ISOLATED_EARLY_MOMENTUM_WHALE_FLOW_HUNTER"
+        "V78_EARLY_LAUNCH_MULTI_SIGNAL_PRIORITY_HUNTER"
     },
 
     chain: {
@@ -5389,7 +5569,6 @@ async function scan(env) {
       now()
   };
 }
-
 
 /* =========================================================
    HEALTH
@@ -5476,6 +5655,8 @@ async function health(env) {
     rpcProvider:
       provider,
 
+    error,
+
     alchemyConfigured:
       Boolean(
         env.ALCHEMY_API_KEY
@@ -5553,8 +5734,31 @@ async function health(env) {
         true
     },
 
+    intelligence: {
+      launchStageDetection:
+        "ENABLED_V78",
+
+      compositeCandidateRanking:
+        "ENABLED_V78",
+
+      signalConfirmation:
+        "MULTI_SIGNAL_V78",
+
+      momentumTracking:
+        "ENABLED_V78",
+
+      whaleFlow:
+        "ENABLED_V78",
+
+      smartMoneyBehaviour:
+        "ENABLED_V78",
+
+      socialMomentum:
+        "NOT_VERIFIED"
+    },
+
     architecture:
-      "V77_HARD_BUDGET_ISOLATED_EARLY_MOMENTUM_WHALE_FLOW_HUNTER",
+      "V78_EARLY_LAUNCH_MULTI_SIGNAL_PRIORITY_HUNTER",
 
     timestamp:
       now()
@@ -5697,10 +5901,6 @@ async function rpcTest(env) {
       env,
       budget
     );
-
-  /*
-   * rpc-test uses discovery phase for the log test.
-   */
 
   const from =
     latest.block > 2n
@@ -5937,7 +6137,7 @@ async function diagnostics(env) {
       "PUBLIC_API"
   };
 
-  checks.v77 = {
+  checks.v78 = {
     adaptiveCatchup:
       true,
 
@@ -5974,6 +6174,15 @@ async function diagnostics(env) {
     newLaunchPriority:
       true,
 
+    launchStageDetection:
+      true,
+
+    compositeCandidateRanking:
+      true,
+
+    multiSignalConfirmation:
+      true,
+
     momentumHistory:
       true,
 
@@ -6005,6 +6214,9 @@ async function diagnostics(env) {
       true,
 
     knownSmartMoneyIdentityVerification:
+      false,
+
+    socialMomentumVerification:
       false
   };
 
@@ -6076,7 +6288,7 @@ async function diagnostics(env) {
       ),
 
     architecture:
-      "V77_HARD_BUDGET_ISOLATED_EARLY_MOMENTUM_WHALE_FLOW_HUNTER",
+      "V78_EARLY_LAUNCH_MULTI_SIGNAL_PRIORITY_HUNTER",
 
     timestamp:
       now()
@@ -6184,7 +6396,7 @@ async function runAll(env) {
         ),
 
       note:
-        "V77 /run-all avoids duplicate network diagnostics. Use /diagnostics and /rpc-test separately."
+        "V78 /run-all avoids duplicate network diagnostics. Use /diagnostics and /rpc-test separately."
     },
 
     timestamp:
@@ -6322,6 +6534,10 @@ export default {
   },
 
 
+  /* =======================================================
+     V78 SCHEDULED SCANNER
+     ======================================================= */
+
   async scheduled(
     controller,
     env,
@@ -6333,7 +6549,7 @@ export default {
           console.log(
             JSON.stringify({
               event:
-                "V77_SCHEDULED_SCAN",
+                "V78_SCHEDULED_SCAN",
 
               success:
                 result.success,
@@ -6429,6 +6645,54 @@ export default {
                   ?.telegramCandidates ||
                 0,
 
+              topCandidate:
+                result.scan
+                  ?.candidates?.[0]
+                  ? {
+                      symbol:
+                        result.scan
+                          .candidates[0]
+                          .symbol,
+
+                      address:
+                        result.scan
+                          .candidates[0]
+                          .address,
+
+                      opportunity:
+                        result.scan
+                          .candidates[0]
+                          .opportunity
+                          ?.score,
+
+                      confidence:
+                        result.scan
+                          .candidates[0]
+                          .confidence
+                          ?.score,
+
+                      signalConfirmation:
+                        result.scan
+                          .candidates[0]
+                          .signalConfirmation
+                          ?.score,
+
+                      analysisPriority:
+                        result.scan
+                          .candidates[0]
+                          .analysisPriority,
+
+                      launchStage:
+                        result.scan
+                          .candidates[0]
+                          .launchStage
+                          ?.stage
+                    }
+                  : null,
+
+              architecture:
+                "V78_EARLY_LAUNCH_MULTI_SIGNAL_PRIORITY_HUNTER",
+
               timestamp:
                 now()
             })
@@ -6436,7 +6700,7 @@ export default {
         })
         .catch(error => {
           console.error(
-            "V77 scheduled scan failed",
+            "V78 scheduled scan failed",
             error
           );
 
