@@ -1,93 +1,28 @@
 /**
  * Robinhood Chain Meme Hunter
- * V92
+ * V93
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * BUILT DIRECTLY FORWARD FROM V87 / V86
- *
- * V88:
+ * V93:
+ * - Builds directly forward from the confirmed V92 baseline
  * - Preserves existing KV state key/history
- * - Preserves live-first scanning
- * - Preserves provider 429 cooldown/failover
- * - Preserves DexScreener 429 cache/stale fallback
- * - Preserves ERC20 validation
- * - Preserves Blockscout intelligence
- * - Preserves holder-integrity protections
- * - Preserves Pool Manager/infrastructure whale exclusion
- * - Preserves tokenized Robinhood/Ondo security filtering
- * - Preserves momentum snapshots
- * - Preserves whale-flow analysis
- * - Preserves opportunity/confidence/signal scoring
- * - Preserves Telegram alerts
- * - Preserves scheduled heartbeat
- * - Preserves hard phase request budgets
- *
- * V88 FIXES:
- * - FIX: backlog learned size must be PROVEN successful
- * - FIX: failed growth sizes are never saved as learned sizes
- * - FIX: provider-specific backlog learning
- * - FIX: Robinhood RPC and Alchemy learn independently
- * - FIX: Alchemy can remain at 10 blocks while public RPC uses larger ranges
- * - FIX: HTTP 400 establishes failed upper bound
- * - FIX: avoids repeated 10 -> 20 -> fail -> 10 loops
- * - FIX: severe verified concentration can immediately classify HIGH risk
- * - FIX: two-evidence rule only protects LOW/MEDIUM classification
- * - FIX: single weak swap can NOT generate LOW risk
- * - FIX: richer V77-style Telegram calls restored
- * - FIX: holder count fallback still attempted when holder rows unavailable
- * - FIX: Pool Manager balance displayed separately from real ownership
- * - FIX: concentration trend restored
- * - FIX: previous score-improvement / whale-accumulation alert override restored
- *
- * V89:
- * - Preserves complete V88 capability set and KV history
- * - FIX: one failed growth probe is remembered immediately
- * - FIX: same failed backlog range cannot repeat in one scan
- * - FIX: proven 10-block Alchemy range continues after a failed 15-block probe
- * - FIX: provider failed-upper-bound now actively blocks repeat growth probes
- * - FIX: temporary shrink sizes are not persisted until proven successful
- * - FIX: DexScreener fresh-call pressure reduced with 9-minute market cache
- * - FIX: one fresh DexScreener lookup per scan, prioritised by watch ranking
- * - FIX: 90-second persistent DexScreener fresh-request guard
- * - FIX: 30-minute stale market fallback and 10-minute 429 cooldown
- * - FIX: Blockscout holder details fallback reordered for lower request cost
- * - FIX: holder outage path normally consumes at most two Blockscout requests
- * - FIX: analysis cost estimates updated to reduce unnecessary deferrals
- * - Preserves V77-style rich Telegram alerts
- *
- * V90:
- * - Preserves complete V89/V88 capability set and existing KV history
- * - FIX: backlog catch-up budget increased from 9 to 12 requests per scan
- * - FIX: discovery phase ceiling increased from 17 to 20 requests
- * - FIX: backlog cannot consume the final 20 global requests reserved for analysis/Telegram
- * - FIX: preserves live-first scanning before any backlog acceleration
- * - FIX: keeps provider-specific proven ranges and failed-upper-bound learning
- * - FIX: keeps one-strike failed growth probe protection
- * - FIX: improves catch-up throughput without sacrificing candidate analysis protection
- * - Preserves DexScreener rate-limit protection, holder fallbacks and V77-style rich Telegram alerts
-
- * V91:
- * - Preserves complete V90 capability set and existing KV history
- * - FIX: persistent pool registry survives watchlist trimming
- * - FIX: live activity can reactivate tokens from known pool mappings
- * - FIX: improves active watched-token matching without weakening live-first scanning
- * - FIX: holder intelligence cache reuses recently verified Blockscout data
- * - FIX: stale verified holder fallback used during temporary Blockscout outages
- * - FIX: fresh market lookup is explicitly prioritised to the strongest live/new token
- * - FIX: non-priority candidates use cache/stale data instead of consuming the DexScreener fresh slot
- * - Preserves V90 accelerated backlog, one-strike range learning and V77-style rich Telegram alerts
- *
- * V92 FIXED:
- * - Built directly from the actual V91 source
- * - Preserves V91 persistent pool registry and live registry reactivation
- * - Preserves V91 holder intelligence cache/stale fallback
- * - Preserves V91 priority-reserved fresh DexScreener lookup
- * - Restores the exact compact V77 Telegram visual layout requested by the user
- * - Removes later diagnostic-only rows from Telegram alerts while retaining them in scan JSON
+ * - Preserves V91/V92 live pool registry and live-pool reactivation
+ * - Preserves accelerated proven-range backlog scanning
+ * - Preserves provider-specific RPC cooldown/range learning
+ * - Preserves ERC20 validation and tokenized-security filtering
+ * - Preserves holder-integrity, infrastructure-holder and whale protections
+ * - Preserves holder cache/stale fallback
+ * - Preserves DexScreener cache, cooldown and priority fresh-slot protection
+ * - Preserves momentum, whale-flow, risk, opportunity and confidence scoring
+ * - Preserves V77-style rich Telegram alert layout
+ * - NEW: token image/logo support in Telegram alerts
+ * - NEW: Telegram sendPhoto with rich caption when verified artwork is available
+ * - NEW: automatic text-only fallback when token artwork is unavailable or sendPhoto fails
+ * - Preserves scheduled heartbeat and hard request-budget isolation
  */
 
-const VERSION = "V92";
+const VERSION = "V93";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -5026,6 +4961,11 @@ async function marketData(
         safeNumber(
           pair?.pairCreatedAt
         ) ||
+        null,
+
+      imageUrl:
+        pair?.info?.imageUrl ||
+        pair?.info?.header ||
         null
     };
 
@@ -8970,21 +8910,17 @@ function percentDisplay(
 async function sendTelegram(
   env,
   message,
-  budget = null
+  budget = null,
+  imageUrl = null
 ) {
   if (
     !env.TELEGRAM_BOT_TOKEN ||
     !env.TELEGRAM_CHAT_ID
   ) {
     return {
-      success:
-        false,
-
-      skipped:
-        true,
-
-      reason:
-        "TELEGRAM_NOT_CONFIGURED"
+      success: false,
+      skipped: true,
+      reason: "TELEGRAM_NOT_CONFIGURED"
     };
   }
 
@@ -8997,74 +8933,79 @@ async function sendTelegram(
     )
   ) {
     return {
-      success:
-        false,
-
-      skipped:
-        true,
-
-      reason:
-        "NOTIFICATION_BUDGET_EXHAUSTED"
+      success: false,
+      skipped: true,
+      reason: "NOTIFICATION_BUDGET_EXHAUSTED"
     };
   }
+
+  const telegramBase =
+    `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
 
   try {
-    const response =
-      await fetch(
-        `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-
-        {
-          method:
-            "POST",
-
-          headers: {
-            "content-type":
-              "application/json"
-          },
-
-          body:
-            JSON.stringify({
-              chat_id:
-                env.TELEGRAM_CHAT_ID,
-
-              text:
-                message,
-
-              parse_mode:
-                "HTML",
-
-              disable_web_page_preview:
-                true
+    /* V93: Prefer the token artwork as the Telegram photo. */
+    if (imageUrl) {
+      try {
+        const photoResponse = await fetch(
+          `${telegramBase}/sendPhoto`,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json"
+            },
+            body: JSON.stringify({
+              chat_id: env.TELEGRAM_CHAT_ID,
+              photo: imageUrl,
+              caption: message,
+              parse_mode: "HTML"
             })
-        }
-      );
+          }
+        );
 
-    const data =
-      await response.json();
+        const photoData = await photoResponse.json();
+
+        if (photoResponse.ok && photoData?.ok) {
+          return {
+            success: true,
+            status: photoResponse.status,
+            mode: "PHOTO",
+            imageUrl,
+            data: photoData
+          };
+        }
+      } catch (photoError) {
+        /* Fall through to the proven V93 text-only alert path. */
+      }
+    }
+
+    const response = await fetch(
+      `${telegramBase}/sendMessage`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          chat_id: env.TELEGRAM_CHAT_ID,
+          text: message,
+          parse_mode: "HTML",
+          disable_web_page_preview: true
+        })
+      }
+    );
+
+    const data = await response.json();
 
     return {
-      success:
-        response.ok &&
-        Boolean(
-          data?.ok
-        ),
-
-      status:
-        response.status,
-
+      success: response.ok && Boolean(data?.ok),
+      status: response.status,
+      mode: imageUrl ? "TEXT_FALLBACK" : "TEXT",
       data
     };
-  }
-
-  catch (error) {
+  } catch (error) {
     return {
-      success:
-        false,
-
-      error:
-        errorString(
-          error
-        )
+      success: false,
+      error: errorString(error)
     };
   }
 }
@@ -10470,7 +10411,8 @@ async function scan(
         telegramMessage(
           candidate
         ),
-        budget
+        budget,
+        candidate.market?.imageUrl || null
       );
 
     telegramResults.push({
@@ -10628,7 +10570,7 @@ async function scan(
     status,
 
     scanMode:
-      "V91_LIVE_POOL_REGISTRY_HOLDER_CACHE_HUNTER",
+      "V93_V92_CORE_TOKEN_IMAGE_RICH_ALERT_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -11128,7 +11070,7 @@ async function scan(
         "ENABLED",
 
       richV77StyleTelegram:
-        "ENABLED_V91",
+        "ENABLED_V93",
 
       oneStrikeFailedRangeLearning:
         "ENABLED_V91",
@@ -11197,10 +11139,16 @@ async function scan(
         "ENABLED",
 
       concentrationTrend:
-        "ENABLED_V91",
+        "ENABLED_V93",
 
       candidateRanking:
         "ENABLED",
+
+      telegramTokenImages:
+        "ENABLED_V93",
+
+      telegramSendPhotoFallback:
+        "ENABLED_V93",
 
       telegram:
         "ENABLED",
@@ -11210,7 +11158,7 @@ async function scan(
     },
 
     architecture:
-      "V92_V91_CORE_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
+      "V93_V92_CORE_TOKEN_IMAGE_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -11526,7 +11474,7 @@ async function health(
     },
 
     architecture:
-      "V92_V91_CORE_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
+      "V93_V92_CORE_TOKEN_IMAGE_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -11920,7 +11868,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V92_V91_CORE_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
+      "V93_V92_CORE_TOKEN_IMAGE_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -12237,7 +12185,7 @@ async function scheduledScan(
   console.log(
     JSON.stringify({
       event:
-        "V92_SCHEDULED_SCAN",
+        "V93_SCHEDULED_SCAN",
 
       status:
         result.status,
@@ -12328,7 +12276,7 @@ export default {
 
     catch (error) {
       console.error(
-        "V92 request failed",
+        "V93 request failed",
         error
       );
 
@@ -12349,7 +12297,7 @@ export default {
             ),
 
           architecture:
-            "V92_V91_CORE_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
+            "V93_V92_CORE_TOKEN_IMAGE_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
 
           timestamp:
             now()
