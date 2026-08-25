@@ -1,26 +1,28 @@
 /**
  * Robinhood Chain Meme Hunter
- * V104
+ * V105
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V104:
- * - Builds directly forward from the confirmed V103 baseline
+ * V105:
+ * - Builds directly forward from the confirmed V104 baseline
  * - Preserves the existing KV state key/history
- * - Preserves V103 mixed-depth resolver lanes: FRESH / DEEP / OLDEST_WAIT
- * - Preserves V102 fair rotation and unknown-pool persistence
+ * - Preserves V104 provider-safe DEEP resolver behavior
+ * - Preserves V103 FRESH / DEEP / OLDEST_WAIT mixed-depth lanes
+ * - Preserves V102 fair rotation and persistent unknown-pool cursors
  * - Preserves V99 5m/1h/24h Telegram trade counts
  * - Preserves V98 DexScreener protection
  * - Preserves V97 holder-integrity safeguards
  * - Preserves V77-style Telegram layout + token-image/sendPhoto fallback
- * - FIX: DEEP unknown-pool probes now respect provider-proven range limits
- * - FIX: Alchemy DEEP searches no longer jump to 20/40-block requests
- * - FIX: persistent deep progress advances through sequential safe windows
- * - FIX: failed deep probes do not advance the cursor
- * - NEW: provider-safe requested-block telemetry per resolver probe
- * - NEW: deep-search telemetry reports desired vs actual chunk size
+ * - NEW: provider-specific unknown-pool resolution ranges
+ * - NEW: Robinhood public RPC can use its larger learned safe range
+ * - NEW: Alchemy remains capped to its proven safe range
+ * - NEW: unknown-pool activity scoring from repeated swaps/liquidity events
+ * - NEW: resolver lanes prefer higher-activity unresolved pools
+ * - NEW: per-pool swap/liquidity counters persist in KV
+ * - NEW: resolver telemetry reports provider preference and activity score
  */
-const VERSION = "V104";
+const VERSION = "V105";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1939,6 +1941,29 @@ function observeUnknownPools(
               : null
           );
 
+    const isSwap =
+      topic0 === SWAP_TOPIC;
+
+    const isLiquidity =
+      topic0 === MODIFY_LIQUIDITY_TOPIC;
+
+    const swapEvents =
+      safeNumber(
+        previous.swapEvents
+      ) +
+      (isSwap ? 1 : 0);
+
+    const liquidityEvents =
+      safeNumber(
+        previous.liquidityEvents
+      ) +
+      (isLiquidity ? 1 : 0);
+
+    const appearances =
+      safeNumber(
+        previous.appearances
+      ) + 1;
+
     tracker[poolId] = {
       poolId,
       firstSeenAt:
@@ -1975,6 +2000,16 @@ function observeUnknownPools(
       searchedBlocks:
         safeNumber(
           previous.searchedBlocks
+        ),
+      swapEvents,
+      liquidityEvents,
+      appearances,
+      activityScore:
+        swapEvents * 3 +
+        liquidityEvents * 5 +
+        Math.min(
+          appearances,
+          20
         ),
       lastAttemptAt:
         previous.lastAttemptAt ||
@@ -2034,7 +2069,7 @@ function pruneUnknownPools(state) {
     );
 }
 
-function providerSafeUnknownPoolChunk(
+function providerSafeUnknownPoolChunks(
   state,
   desiredChunkBlocks
 ) {
@@ -2058,25 +2093,24 @@ function providerSafeUnknownPoolChunk(
       UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS
     );
 
-  /*
-   * V104 deliberately uses the most conservative currently-proven
-   * provider range so a fallback provider can safely service the same
-   * exact-pool request without generating a size-related HTTP 400.
-   */
-  const provenSafe =
-    Math.max(
-      1,
-      Math.min(
-        publicSafe,
-        alchemySafe,
-        desiredChunkBlocks
-      )
-    );
-
   return {
     desiredChunkBlocks,
-    actualChunkBlocks:
-      provenSafe,
+    publicChunkBlocks:
+      Math.max(
+        1,
+        Math.min(
+          desiredChunkBlocks,
+          publicSafe
+        )
+      ),
+    alchemyChunkBlocks:
+      Math.max(
+        1,
+        Math.min(
+          desiredChunkBlocks,
+          alchemySafe
+        )
+      ),
     publicSafe,
     alchemySafe
   };
@@ -2086,13 +2120,13 @@ async function getInitializeForPoolRange(
   env,
   state,
   poolId,
-  from,
-  to,
+  cursorBlock,
+  desiredChunkBlocks,
   budget
 ) {
   if (
-    from > to ||
     !poolId ||
+    cursorBlock <= 0 ||
     !budgetAvailable(
       budget,
       "discovery-live"
@@ -2101,21 +2135,47 @@ async function getInitializeForPoolRange(
     return {
       logs: [],
       provider: null,
-      error: null
+      error: null,
+      fromBlock: null,
+      toBlock: null,
+      requestedBlocks: 0,
+      desiredChunkBlocks,
+      providerSafeChunkBlocks: 0,
+      publicProvenChunkBlocks: 0,
+      alchemyProvenChunkBlocks: 0
     };
   }
 
+  const safeChunks =
+    providerSafeUnknownPoolChunks(
+      state,
+      desiredChunkBlocks
+    );
+
   const preferred = [
-    "ALCHEMY",
-    "ROBINHOOD_PUBLIC_RPC"
+    {
+      provider:
+        "ROBINHOOD_PUBLIC_RPC",
+      chunkBlocks:
+        safeChunks.publicChunkBlocks
+    },
+    {
+      provider:
+        "ALCHEMY",
+      chunkBlocks:
+        safeChunks.alchemyChunkBlocks
+    }
   ];
 
   let lastError = null;
 
   for (
-    const provider
+    const option
     of preferred
   ) {
+    const provider =
+      option.provider;
+
     if (
       discoveryProviderCooling(
         state,
@@ -2135,6 +2195,27 @@ async function getInitializeForPoolRange(
       continue;
     }
 
+    const to =
+      BigInt(
+        cursorBlock
+      );
+
+    const requestedBlocks =
+      Math.max(
+        1,
+        option.chunkBlocks
+      );
+
+    const span =
+      BigInt(
+        requestedBlocks - 1
+      );
+
+    const from =
+      to > span
+        ? to - span
+        : 0n;
+
     try {
       const logs =
         await rpcCall(
@@ -2143,14 +2224,10 @@ async function getInitializeForPoolRange(
           [{
             fromBlock:
               "0x" +
-              BigInt(
-                from
-              ).toString(16),
+              from.toString(16),
             toBlock:
               "0x" +
-              BigInt(
-                to
-              ).toString(16),
+              to.toString(16),
             address:
               POOL_MANAGER,
             topics: [
@@ -2170,7 +2247,24 @@ async function getInitializeForPoolRange(
             ? logs
             : [],
         provider,
-        error: null
+        error: null,
+        fromBlock:
+          Number(from),
+        toBlock:
+          Number(to),
+        requestedBlocks:
+          Number(
+            to -
+            from +
+            1n
+          ),
+        desiredChunkBlocks,
+        providerSafeChunkBlocks:
+          requestedBlocks,
+        publicProvenChunkBlocks:
+          safeChunks.publicSafe,
+        alchemyProvenChunkBlocks:
+          safeChunks.alchemySafe
       };
     } catch (error) {
       lastError =
@@ -2186,7 +2280,16 @@ async function getInitializeForPoolRange(
     provider: null,
     error:
       lastError ||
-      "UNKNOWN_POOL_LOOKUP_UNAVAILABLE"
+      "UNKNOWN_POOL_LOOKUP_UNAVAILABLE",
+    fromBlock: null,
+    toBlock: null,
+    requestedBlocks: 0,
+    desiredChunkBlocks,
+    providerSafeChunkBlocks: 0,
+    publicProvenChunkBlocks:
+      safeChunks.publicSafe,
+    alchemyProvenChunkBlocks:
+      safeChunks.alchemySafe
   };
 }
 
@@ -2288,6 +2391,25 @@ async function resolvePersistentUnknownPools(
     );
   };
 
+  const activityScore = entry =>
+    safeNumber(
+      entry?.activityScore
+    ) ||
+    (
+      safeNumber(
+        entry?.swapEvents
+      ) * 3 +
+      safeNumber(
+        entry?.liquidityEvents
+      ) * 5 +
+      Math.min(
+        safeNumber(
+          entry?.appearances
+        ),
+        20
+      )
+    );
+
   const freshLane =
     eligibleCandidates
       .filter(
@@ -2296,9 +2418,22 @@ async function resolvePersistentUnknownPools(
             entry?.attempts
           ) <= 0
       )
-      .sort(
-        byOldestWait
-      );
+      .sort((a, b) => {
+        const activityDiff =
+          activityScore(b) -
+          activityScore(a);
+
+        if (
+          activityDiff !== 0
+        ) {
+          return activityDiff;
+        }
+
+        return byOldestWait(
+          a,
+          b
+        );
+      });
 
   const deepLane =
     eligibleCandidates
@@ -2309,10 +2444,16 @@ async function resolvePersistentUnknownPools(
           ) > 0
       )
       .sort((a, b) => {
-        /*
-         * Prefer deeper attempts first, then the pool that has waited
-         * longest. This guarantees some actual backwards progress.
-         */
+        const activityDiff =
+          activityScore(b) -
+          activityScore(a);
+
+        if (
+          activityDiff !== 0
+        ) {
+          return activityDiff;
+        }
+
         const attemptDiff =
           safeNumber(
             b?.attempts
@@ -2403,9 +2544,24 @@ async function resolvePersistentUnknownPools(
           )
         );
       })
-      .sort(
-        byOldestWait
-      );
+      .sort((a, b) => {
+        const fair =
+          byOldestWait(
+            a,
+            b
+          );
+
+        if (
+          fair !== 0
+        ) {
+          return fair;
+        }
+
+        return (
+          activityScore(b) -
+          activityScore(a)
+        );
+      });
 
   pushCandidate(
     remainingByOldest[0],
@@ -2537,26 +2693,6 @@ async function resolvePersistentUnknownPools(
           )
       );
 
-    const safeChunk =
-      providerSafeUnknownPoolChunk(
-        state,
-        desiredChunkBlocks
-      );
-
-    const adaptiveChunkBlocks =
-      safeChunk.actualChunkBlocks;
-
-    const span =
-      BigInt(
-        adaptiveChunkBlocks -
-        1
-      );
-
-    const from =
-      to > span
-        ? to - span
-        : 0n;
-
     output.attempted++;
 
     const result =
@@ -2564,17 +2700,15 @@ async function resolvePersistentUnknownPools(
         env,
         state,
         poolId,
-        from,
-        to,
+        cursor,
+        desiredChunkBlocks,
         budget
       );
 
     output.requestsUsed++;
     output.searchedBlocks +=
-      Number(
-        to -
-        from +
-        1n
+      safeNumber(
+        result.requestedBlocks
       );
 
     entry.attempts =
@@ -2589,10 +2723,8 @@ async function resolvePersistentUnknownPools(
       safeNumber(
         entry.searchedBlocks
       ) +
-      Number(
-        to -
-        from +
-        1n
+      safeNumber(
+        result.requestedBlocks
       );
 
     entry.lastError =
@@ -2627,24 +2759,47 @@ async function resolvePersistentUnknownPools(
     output.probes.push({
       poolId,
       resolverLane,
+      activityScore:
+        activityScore(
+          entry
+        ),
+      swapEvents:
+        safeNumber(
+          entry.swapEvents
+        ),
+      liquidityEvents:
+        safeNumber(
+          entry.liquidityEvents
+        ),
+      appearances:
+        safeNumber(
+          entry.appearances
+        ),
       fromBlock:
-        Number(from),
+        result.fromBlock,
       toBlock:
-        Number(to),
+        result.toBlock,
       requestedBlocks:
-        Number(
-          to -
-          from +
-          1n
+        safeNumber(
+          result.requestedBlocks
         ),
       desiredChunkBlocks,
-      adaptiveChunkBlocks,
+      adaptiveChunkBlocks:
+        safeNumber(
+          result.providerSafeChunkBlocks
+        ),
       providerSafeChunkBlocks:
-        safeChunk.actualChunkBlocks,
+        safeNumber(
+          result.providerSafeChunkBlocks
+        ),
       publicProvenChunkBlocks:
-        safeChunk.publicSafe,
+        safeNumber(
+          result.publicProvenChunkBlocks
+        ),
       alchemyProvenChunkBlocks:
-        safeChunk.alchemySafe,
+        safeNumber(
+          result.alchemyProvenChunkBlocks
+        ),
       priorAttempts,
       provider:
         result.provider,
@@ -2715,14 +2870,13 @@ async function resolvePersistentUnknownPools(
      * advance by the complete adaptive window and continue next run.
      */
     if (
-      !result.error
+      !result.error &&
+      result.fromBlock !== null &&
+      result.fromBlock !== undefined
     ) {
       entry.searchCursorBlock =
-        from > 0n
-          ? Number(
-              from -
-              1n
-            )
+        result.fromBlock > 0
+          ? result.fromBlock - 1
           : 0;
     }
   }
@@ -12208,7 +12362,7 @@ async function scan(
     status,
 
     scanMode:
-      "V104_V103_CORE_PROVIDER_SAFE_DEEP_POOL_RESOLUTION_HUNTER",
+      "V105_V104_CORE_ACTIVITY_PRIORITY_PROVIDER_SPECIFIC_POOL_RESOLUTION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -12873,12 +13027,21 @@ async function scan(
       deepPoolDesiredVsActualChunkTelemetry:
         "ENABLED_V104",
 
+      providerSpecificUnknownPoolRanges:
+        "ENABLED_V105",
+
+      unknownPoolActivityPriority:
+        "ENABLED_V105",
+
+      persistentUnknownPoolActivityCounters:
+        "ENABLED_V105",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V104_V103_CORE_PROVIDER_SAFE_DEEP_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V105_V104_CORE_ACTIVITY_PRIORITY_PROVIDER_SPECIFIC_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -13194,7 +13357,7 @@ async function health(
     },
 
     architecture:
-      "V104_V103_CORE_PROVIDER_SAFE_DEEP_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V105_V104_CORE_ACTIVITY_PRIORITY_PROVIDER_SPECIFIC_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -13593,7 +13756,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V104_V103_CORE_PROVIDER_SAFE_DEEP_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V105_V104_CORE_ACTIVITY_PRIORITY_PROVIDER_SPECIFIC_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -14022,7 +14185,7 @@ export default {
             ),
 
           architecture:
-            "V104_V103_CORE_PROVIDER_SAFE_DEEP_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+            "V105_V104_CORE_ACTIVITY_PRIORITY_PROVIDER_SPECIFIC_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
