@@ -1,30 +1,31 @@
 /**
  * Robinhood Chain Meme Hunter
- * V109
+ * V110
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V109:
+ * V110:
  * - Builds directly forward from the confirmed V108 baseline
  * - Preserves the existing KV state key/history
- * - Preserves V108 budget reserve + balanced breadth/depth resolver
+ * - Preserves V108 downstream budget reserve and balanced resolver
  * - Preserves V107 no-speculative-15-block Alchemy backlog behavior
- * - Preserves V106 RPC state-path fix
- * - Preserves V105 activity-prioritized unknown-pool telemetry
+ * - Preserves V106 RPC learning-state path fix
+ * - Preserves V105 activity-prioritized unknown-pool resolution
  * - Preserves V99 5m/1h/24h Telegram trade counts
  * - Preserves DexScreener, holder-integrity, risk and Telegram safeguards
- * - FIX: unknown-pool Initialize resolution no longer reuses dense backlog
- *        block-range limits for exact pool/topic lookups
- * - NEW: independent provider-specific exact-pool Initialize range learning
- * - NEW: public RPC exact-pool resolver starts with a much wider contiguous range
- * - NEW: Alchemy exact-pool resolver safely tests a wider exact-topic range once
- *        and immediately falls back to its proven generic range on HTTP 400
- * - NEW: exact-pool HTTP 429s feed the existing persistent provider cooldown
- * - NEW: successful exact-pool range sizes persist in KV
- * - NEW: resolver telemetry reports exact-pool learned range / fallback behavior
- * - No historical Initialize ranges are skipped; searches remain contiguous
+ * - FIX: replaces V109's repeated wide exact-pool probes
+ * - NEW: exact-pool Initialize range learning starts from proven-safe sizes
+ * - NEW: max ONE growth capability probe per provider per run
+ * - NEW: growth probes only occur after repeated successful exact lookups
+ * - NEW: failed growth probes persist an upper bound in KV
+ * - NEW: failed growth probes immediately fall back to the already-proven
+ *        safe range without changing/forgetting that safe range
+ * - NEW: successful growth probes promote the learned exact-pool range in KV
+ * - NEW: resolver request telemetry counts real external requests correctly
+ * - NEW: exact-pool 429s feed the existing persistent provider cooldown
+ * - Searches remain contiguous; no Initialize block ranges are skipped
  */
-const VERSION = "V109";
+const VERSION = "V110";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -218,15 +219,16 @@ const UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS = 10;
 const UNKNOWN_POOL_SEARCH_MAX_CHUNK_BLOCKS = 40;
 
 /*
- * V109:
- * Exact Initialize lookups filter by PoolManager + Initialize topic + poolId.
- * They are dramatically lower-density than the generic backlog scan, so they
- * get their own learned provider ranges rather than inheriting 31/10 blocks.
+ * V110 exact-pool Initialize capability learning.
+ *
+ * Start from the provider's already-proven generic safe range, not an
+ * optimistic 100/500 block jump. After repeated exact-query successes,
+ * test one larger range. At most one growth probe per provider per run.
  */
-const PUBLIC_UNKNOWN_POOL_EXACT_DEFAULT = 500;
-const ALCHEMY_UNKNOWN_POOL_EXACT_DEFAULT = 100;
-const UNKNOWN_POOL_EXACT_MAX_BLOCKS = 4000;
-const UNKNOWN_POOL_EXACT_GROW_STREAK = 3;
+const UNKNOWN_POOL_EXACT_GROW_SUCCESS_STREAK = 3;
+const UNKNOWN_POOL_EXACT_MAX_BLOCKS = 1000;
+const UNKNOWN_POOL_EXACT_PROBE_COOLDOWN_MS =
+  5 * 60 * 1000;
 const UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN = 7;
 const UNKNOWN_POOL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_UNKNOWN_POOL_TRACKER = 500;
@@ -1046,14 +1048,15 @@ function defaultDiscoveryRpcState() {
       0,
 
     /*
-     * V109 exact-pool Initialize lookup learning.
-     * Separate from dense generic backlog range learning.
+     * V110 exact-pool Initialize lookup learning.
+     * Values begin at 0 so migration can seed them from each provider's
+     * proven generic range after state is loaded.
      */
     publicUnknownPoolExactChunkBlocks:
-      PUBLIC_UNKNOWN_POOL_EXACT_DEFAULT,
+      0,
 
     alchemyUnknownPoolExactChunkBlocks:
-      ALCHEMY_UNKNOWN_POOL_EXACT_DEFAULT,
+      0,
 
     publicUnknownPoolExactFailedUpperBound:
       null,
@@ -1065,6 +1068,24 @@ function defaultDiscoveryRpcState() {
       0,
 
     alchemyUnknownPoolExactSuccessStreak:
+      0,
+
+    publicUnknownPoolExactLastProbeAt:
+      null,
+
+    alchemyUnknownPoolExactLastProbeAt:
+      null,
+
+    publicUnknownPoolExactProbeFailures:
+      0,
+
+    alchemyUnknownPoolExactProbeFailures:
+      0,
+
+    publicUnknownPoolExactProbeSuccesses:
+      0,
+
+    alchemyUnknownPoolExactProbeSuccesses:
       0,
 
     lastUnknownPoolExactProvider:
@@ -1370,6 +1391,42 @@ async function readState(env) {
                 migratedAlchemy,
                 BACKLOG_MIN_CHUNK_BLOCKS,
                 BACKLOG_MAX_CHUNK_BLOCKS
+              ),
+
+            /*
+             * V110 migration:
+             * If no exact-pool range has yet been proven, seed it from
+             * the provider's proven generic range. Existing V110 values
+             * persist through ...previousDiscovery above.
+             */
+            publicUnknownPoolExactChunkBlocks:
+              clamp(
+                safeNumber(
+                  previousDiscovery
+                    .publicUnknownPoolExactChunkBlocks
+                ) ||
+                clamp(
+                  migratedPublic,
+                  BACKLOG_MIN_CHUNK_BLOCKS,
+                  BACKLOG_MAX_CHUNK_BLOCKS
+                ),
+                1,
+                UNKNOWN_POOL_EXACT_MAX_BLOCKS
+              ),
+
+            alchemyUnknownPoolExactChunkBlocks:
+              clamp(
+                safeNumber(
+                  previousDiscovery
+                    .alchemyUnknownPoolExactChunkBlocks
+                ) ||
+                clamp(
+                  migratedAlchemy,
+                  BACKLOG_MIN_CHUNK_BLOCKS,
+                  BACKLOG_MAX_CHUNK_BLOCKS
+                ),
+                1,
+                UNKNOWN_POOL_EXACT_MAX_BLOCKS
               )
           }
         }
@@ -2126,7 +2183,7 @@ function pruneUnknownPools(state) {
     );
 }
 
-function unknownPoolExactService(
+function exactPoolLearningState(
   state
 ) {
   return discoveryService(
@@ -2134,226 +2191,348 @@ function unknownPoolExactService(
   );
 }
 
-function unknownPoolExactChunk(
+function exactPoolProviderFields(
+  provider
+) {
+  const isAlchemy =
+    provider ===
+    "ALCHEMY";
+
+  return {
+    chunk:
+      isAlchemy
+        ? "alchemyUnknownPoolExactChunkBlocks"
+        : "publicUnknownPoolExactChunkBlocks",
+
+    failedUpper:
+      isAlchemy
+        ? "alchemyUnknownPoolExactFailedUpperBound"
+        : "publicUnknownPoolExactFailedUpperBound",
+
+    streak:
+      isAlchemy
+        ? "alchemyUnknownPoolExactSuccessStreak"
+        : "publicUnknownPoolExactSuccessStreak",
+
+    lastProbeAt:
+      isAlchemy
+        ? "alchemyUnknownPoolExactLastProbeAt"
+        : "publicUnknownPoolExactLastProbeAt",
+
+    probeFailures:
+      isAlchemy
+        ? "alchemyUnknownPoolExactProbeFailures"
+        : "publicUnknownPoolExactProbeFailures",
+
+    probeSuccesses:
+      isAlchemy
+        ? "alchemyUnknownPoolExactProbeSuccesses"
+        : "publicUnknownPoolExactProbeSuccesses",
+
+    genericChunk:
+      isAlchemy
+        ? "alchemyBacklogChunkBlocks"
+        : "publicBacklogChunkBlocks"
+  };
+}
+
+function exactPoolSafeChunk(
   state,
   provider
 ) {
   const service =
-    unknownPoolExactService(
+    exactPoolLearningState(
       state
     );
 
-  const value =
-    provider ===
-      "ALCHEMY"
-      ? safeNumber(
-          service
-            .alchemyUnknownPoolExactChunkBlocks
-        )
-      : safeNumber(
-          service
-            .publicUnknownPoolExactChunkBlocks
-        );
+  const fields =
+    exactPoolProviderFields(
+      provider
+    );
 
-  const fallback =
-    provider ===
-      "ALCHEMY"
-      ? ALCHEMY_UNKNOWN_POOL_EXACT_DEFAULT
-      : PUBLIC_UNKNOWN_POOL_EXACT_DEFAULT;
+  const generic =
+    Math.max(
+      1,
+      safeNumber(
+        service[
+          fields.genericChunk
+        ]
+      ) ||
+      UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS
+    );
+
+  const learned =
+    safeNumber(
+      service[
+        fields.chunk
+      ]
+    );
+
+  if (
+    learned <= 0
+  ) {
+    service[
+      fields.chunk
+    ] =
+      generic;
+
+    return generic;
+  }
 
   return clamp(
-    value || fallback,
+    learned,
     1,
     UNKNOWN_POOL_EXACT_MAX_BLOCKS
   );
 }
 
-function unknownPoolExactFailedUpper(
+function exactPoolFailedUpper(
   state,
   provider
 ) {
   const service =
-    unknownPoolExactService(
+    exactPoolLearningState(
       state
     );
 
-  return provider ===
-    "ALCHEMY"
-    ? (
-        safeNumber(
-          service
-            .alchemyUnknownPoolExactFailedUpperBound
-        ) || null
-      )
-    : (
-        safeNumber(
-          service
-            .publicUnknownPoolExactFailedUpperBound
-        ) || null
-      );
-}
-
-function setUnknownPoolExactFailure(
-  state,
-  provider,
-  attemptedBlocks
-) {
-  const service =
-    unknownPoolExactService(
-      state
-    );
-
-  const previous =
-    unknownPoolExactFailedUpper(
-      state,
+  const fields =
+    exactPoolProviderFields(
       provider
     );
 
-  const nextFailed =
-    previous
-      ? Math.min(
-          previous,
-          attemptedBlocks
-        )
-      : attemptedBlocks;
-
-  const genericFallback =
-    provider ===
-      "ALCHEMY"
-      ? Math.max(
-          1,
-          safeNumber(
-            service.alchemyBacklogChunkBlocks
-          ) ||
-          ALCHEMY_BACKLOG_DEFAULT
-        )
-      : Math.max(
-          1,
-          safeNumber(
-            service.publicBacklogChunkBlocks
-          ) ||
-          PUBLIC_BACKLOG_DEFAULT
-        );
-
-  if (
-    provider ===
-    "ALCHEMY"
-  ) {
-    service.alchemyUnknownPoolExactFailedUpperBound =
-      nextFailed;
-
-    service.alchemyUnknownPoolExactChunkBlocks =
-      Math.min(
-        unknownPoolExactChunk(
-          state,
-          provider
-        ),
-        genericFallback
-      );
-
-    service.alchemyUnknownPoolExactSuccessStreak =
-      0;
-  }
-
-  else {
-    service.publicUnknownPoolExactFailedUpperBound =
-      nextFailed;
-
-    service.publicUnknownPoolExactChunkBlocks =
-      Math.min(
-        unknownPoolExactChunk(
-          state,
-          provider
-        ),
-        genericFallback
-      );
-
-    service.publicUnknownPoolExactSuccessStreak =
-      0;
-  }
+  return (
+    safeNumber(
+      service[
+        fields.failedUpper
+      ]
+    ) ||
+    null
+  );
 }
 
-function setUnknownPoolExactSuccess(
+function exactPoolCanGrowthProbe(
   state,
   provider,
-  successfulBlocks
+  runProbeState
 ) {
   const service =
-    unknownPoolExactService(
+    exactPoolLearningState(
       state
+    );
+
+  const fields =
+    exactPoolProviderFields(
+      provider
+    );
+
+  if (
+    runProbeState?.has(
+      provider
+    )
+  ) {
+    return false;
+  }
+
+  const streak =
+    safeNumber(
+      service[
+        fields.streak
+      ]
+    );
+
+  if (
+    streak <
+    UNKNOWN_POOL_EXACT_GROW_SUCCESS_STREAK
+  ) {
+    return false;
+  }
+
+  const lastProbeAt =
+    safeNumber(
+      service[
+        fields.lastProbeAt
+      ]
+    );
+
+  if (
+    lastProbeAt > 0 &&
+    Date.now() -
+      lastProbeAt <
+      UNKNOWN_POOL_EXACT_PROBE_COOLDOWN_MS
+  ) {
+    return false;
+  }
+
+  const safeChunk =
+    exactPoolSafeChunk(
+      state,
+      provider
     );
 
   const failedUpper =
-    unknownPoolExactFailedUpper(
+    exactPoolFailedUpper(
       state,
       provider
     );
 
+  const candidate =
+    Math.min(
+      UNKNOWN_POOL_EXACT_MAX_BLOCKS,
+      safeChunk * 2
+    );
+
   if (
-    provider ===
-    "ALCHEMY"
+    candidate <=
+    safeChunk
   ) {
-    service.alchemyUnknownPoolExactChunkBlocks =
-      successfulBlocks;
-
-    service.alchemyUnknownPoolExactSuccessStreak =
-      safeNumber(
-        service
-          .alchemyUnknownPoolExactSuccessStreak
-      ) + 1;
-
-    /*
-     * Only grow Alchemy exact-topic range if the initial wider probe
-     * actually succeeded. If it ever 400s, V109 falls back to proven
-     * generic size and does not repeatedly hammer the failed range.
-     */
-    if (
-      !failedUpper &&
-      service.alchemyUnknownPoolExactSuccessStreak >=
-        UNKNOWN_POOL_EXACT_GROW_STREAK
-    ) {
-      service.alchemyUnknownPoolExactChunkBlocks =
-        Math.min(
-          UNKNOWN_POOL_EXACT_MAX_BLOCKS,
-          successfulBlocks * 2
-        );
-
-      service.alchemyUnknownPoolExactSuccessStreak =
-        0;
-    }
+    return false;
   }
 
-  else {
-    service.publicUnknownPoolExactChunkBlocks =
-      successfulBlocks;
-
-    service.publicUnknownPoolExactSuccessStreak =
-      safeNumber(
-        service
-          .publicUnknownPoolExactSuccessStreak
-      ) + 1;
-
-    if (
-      !failedUpper &&
-      service.publicUnknownPoolExactSuccessStreak >=
-        UNKNOWN_POOL_EXACT_GROW_STREAK
-    ) {
-      service.publicUnknownPoolExactChunkBlocks =
-        Math.min(
-          UNKNOWN_POOL_EXACT_MAX_BLOCKS,
-          successfulBlocks * 2
-        );
-
-      service.publicUnknownPoolExactSuccessStreak =
-        0;
-    }
+  if (
+    failedUpper &&
+    candidate >=
+      failedUpper
+  ) {
+    return false;
   }
+
+  return true;
+}
+
+function exactPoolRecordNormalSuccess(
+  state,
+  provider
+) {
+  const service =
+    exactPoolLearningState(
+      state
+    );
+
+  const fields =
+    exactPoolProviderFields(
+      provider
+    );
+
+  service[
+    fields.streak
+  ] =
+    safeNumber(
+      service[
+        fields.streak
+      ]
+    ) + 1;
 
   service.lastUnknownPoolExactProvider =
     provider;
 
   service.lastUnknownPoolExactSuccessAt =
     Date.now();
+}
+
+function exactPoolRecordProbeSuccess(
+  state,
+  provider,
+  promotedBlocks
+) {
+  const service =
+    exactPoolLearningState(
+      state
+    );
+
+  const fields =
+    exactPoolProviderFields(
+      provider
+    );
+
+  service[
+    fields.chunk
+  ] =
+    clamp(
+      promotedBlocks,
+      1,
+      UNKNOWN_POOL_EXACT_MAX_BLOCKS
+    );
+
+  service[
+    fields.streak
+  ] =
+    0;
+
+  service[
+    fields.lastProbeAt
+  ] =
+    Date.now();
+
+  service[
+    fields.probeSuccesses
+  ] =
+    safeNumber(
+      service[
+        fields.probeSuccesses
+      ]
+    ) + 1;
+
+  service.lastUnknownPoolExactProvider =
+    provider;
+
+  service.lastUnknownPoolExactSuccessAt =
+    Date.now();
+}
+
+function exactPoolRecordProbeFailure(
+  state,
+  provider,
+  failedBlocks
+) {
+  const service =
+    exactPoolLearningState(
+      state
+    );
+
+  const fields =
+    exactPoolProviderFields(
+      provider
+    );
+
+  const previousFailed =
+    exactPoolFailedUpper(
+      state,
+      provider
+    );
+
+  service[
+    fields.failedUpper
+  ] =
+    previousFailed
+      ? Math.min(
+          previousFailed,
+          failedBlocks
+        )
+      : failedBlocks;
+
+  /*
+   * IMPORTANT:
+   * Do NOT replace the already-proven safe chunk with the failed size.
+   * This is the V109 regression V110 explicitly fixes.
+   */
+  service[
+    fields.streak
+  ] =
+    0;
+
+  service[
+    fields.lastProbeAt
+  ] =
+    Date.now();
+
+  service[
+    fields.probeFailures
+  ] =
+    safeNumber(
+      service[
+        fields.probeFailures
+      ]
+    ) + 1;
 }
 
 function providerSafeUnknownPoolChunks(
@@ -2386,45 +2565,45 @@ function providerSafeUnknownPoolChunks(
       UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS
     );
 
-  const publicExact =
-    unknownPoolExactChunk(
+  const publicSafe =
+    exactPoolSafeChunk(
       state,
       "ROBINHOOD_PUBLIC_RPC"
     );
 
-  const alchemyExact =
-    unknownPoolExactChunk(
+  const alchemySafe =
+    exactPoolSafeChunk(
       state,
       "ALCHEMY"
     );
 
-  /*
-   * Exact-pool lookups deliberately ignore the old desired 10/20/40
-   * generic-search ceiling. The provider-specific exact range itself is
-   * the safety boundary and is independently learned/persisted.
-   */
   return {
     desiredChunkBlocks,
+
     publicChunkBlocks:
-      publicExact,
+      publicSafe,
+
     alchemyChunkBlocks:
-      alchemyExact,
-    publicSafe:
-      publicExact,
-    alchemySafe:
-      alchemyExact,
+      alchemySafe,
+
+    publicSafe,
+    alchemySafe,
+
     publicGenericSafe,
     alchemyGenericSafe,
+
     publicFailedUpper:
-      unknownPoolExactFailedUpper(
+      exactPoolFailedUpper(
         state,
         "ROBINHOOD_PUBLIC_RPC"
       ),
+
     alchemyFailedUpper:
-      unknownPoolExactFailedUpper(
+      exactPoolFailedUpper(
         state,
         "ALCHEMY"
       ),
+
     learningStatePath:
       state?.services
         ?.discoveryRpc
@@ -2443,7 +2622,8 @@ async function getInitializeForPoolRange(
   poolId,
   cursorBlock,
   desiredChunkBlocks,
-  budget
+  budget,
+  runProbeState
 ) {
   if (
     !poolId ||
@@ -2466,6 +2646,9 @@ async function getInitializeForPoolRange(
       alchemyProvenChunkBlocks: 0,
       publicGenericSafeBlocks: 0,
       alchemyGenericSafeBlocks: 0,
+      growthProbeAttempted: false,
+      growthProbeSucceeded: false,
+      growthProbeBlocks: null,
       exactRangeFallbackUsed: false,
       externalRequestsUsed: 0,
       learningStatePath:
@@ -2483,7 +2666,7 @@ async function getInitializeForPoolRange(
     {
       provider:
         "ROBINHOOD_PUBLIC_RPC",
-      chunkBlocks:
+      safeBlocks:
         safeChunks.publicChunkBlocks,
       genericSafe:
         safeChunks.publicGenericSafe
@@ -2491,7 +2674,7 @@ async function getInitializeForPoolRange(
     {
       provider:
         "ALCHEMY",
-      chunkBlocks:
+      safeBlocks:
         safeChunks.alchemyChunkBlocks,
       genericSafe:
         safeChunks.alchemyGenericSafe
@@ -2500,9 +2683,12 @@ async function getInitializeForPoolRange(
 
   let lastError = null;
   let externalRequestsUsed = 0;
+  let growthProbeAttempted = false;
+  let growthProbeSucceeded = false;
+  let growthProbeBlocks = null;
   let exactRangeFallbackUsed = false;
 
-  const executeExactRange =
+  const executeRange =
     async (
       provider,
       url,
@@ -2571,16 +2757,6 @@ async function getInitializeForPoolRange(
             "discovery-live"
           );
 
-        setUnknownPoolExactSuccess(
-          state,
-          provider,
-          Number(
-            to -
-            from +
-            1n
-          )
-        );
-
         return {
           logs:
             Array.isArray(
@@ -2616,18 +2792,6 @@ async function getInitializeForPoolRange(
           markDiscovery429(
             state,
             provider
-          );
-        }
-
-        if (
-          is400(
-            message
-          )
-        ) {
-          setUnknownPoolExactFailure(
-            state,
-            provider,
-            blocks
           );
         }
 
@@ -2676,28 +2840,186 @@ async function getInitializeForPoolRange(
       continue;
     }
 
-    let result =
-      await executeExactRange(
+    const shouldProbe =
+      exactPoolCanGrowthProbe(
+        state,
+        provider,
+        runProbeState
+      );
+
+    if (
+      shouldProbe &&
+      budgetAvailable(
+        budget,
+        "discovery-live",
+        2
+      )
+    ) {
+      runProbeState?.add(
+        provider
+      );
+
+      growthProbeAttempted =
+        true;
+
+      growthProbeBlocks =
+        Math.min(
+          UNKNOWN_POOL_EXACT_MAX_BLOCKS,
+          option.safeBlocks * 2
+        );
+
+      const probe =
+        await executeRange(
+          provider,
+          url,
+          growthProbeBlocks
+        );
+
+      if (
+        !probe.error
+      ) {
+        exactPoolRecordProbeSuccess(
+          state,
+          provider,
+          probe.requestedBlocks
+        );
+
+        growthProbeSucceeded =
+          true;
+
+        return {
+          ...probe,
+          desiredChunkBlocks,
+          providerSafeChunkBlocks:
+            probe.requestedBlocks,
+          publicProvenChunkBlocks:
+            exactPoolSafeChunk(
+              state,
+              "ROBINHOOD_PUBLIC_RPC"
+            ),
+          alchemyProvenChunkBlocks:
+            exactPoolSafeChunk(
+              state,
+              "ALCHEMY"
+            ),
+          publicGenericSafeBlocks:
+            safeChunks.publicGenericSafe,
+          alchemyGenericSafeBlocks:
+            safeChunks.alchemyGenericSafe,
+          growthProbeAttempted,
+          growthProbeSucceeded,
+          growthProbeBlocks,
+          exactRangeFallbackUsed,
+          externalRequestsUsed,
+          learningStatePath:
+            safeChunks.learningStatePath
+        };
+      }
+
+      lastError =
+        probe.error;
+
+      if (
+        is400(
+          probe.error
+        )
+      ) {
+        exactPoolRecordProbeFailure(
+          state,
+          provider,
+          growthProbeBlocks
+        );
+
+        exactRangeFallbackUsed =
+          true;
+
+        /*
+         * Fall back ONCE to the already-proven exact safe size.
+         * The failed size is persisted as an upper bound and will not
+         * be re-probed on every pool.
+         */
+        const fallback =
+          await executeRange(
+            provider,
+            url,
+            option.safeBlocks
+          );
+
+        if (
+          !fallback.error
+        ) {
+          exactPoolRecordNormalSuccess(
+            state,
+            provider
+          );
+
+          return {
+            ...fallback,
+            desiredChunkBlocks,
+            providerSafeChunkBlocks:
+              fallback.requestedBlocks,
+            publicProvenChunkBlocks:
+              exactPoolSafeChunk(
+                state,
+                "ROBINHOOD_PUBLIC_RPC"
+              ),
+            alchemyProvenChunkBlocks:
+              exactPoolSafeChunk(
+                state,
+                "ALCHEMY"
+              ),
+            publicGenericSafeBlocks:
+              safeChunks.publicGenericSafe,
+            alchemyGenericSafeBlocks:
+              safeChunks.alchemyGenericSafe,
+            growthProbeAttempted,
+            growthProbeSucceeded,
+            growthProbeBlocks,
+            exactRangeFallbackUsed,
+            externalRequestsUsed,
+            learningStatePath:
+              safeChunks.learningStatePath
+          };
+        }
+
+        lastError =
+          fallback.error;
+      }
+
+      /*
+       * On 429 or non-400 errors, do not immediately hammer the same
+       * provider again. Allow the normal provider loop to fail over.
+       */
+      continue;
+    }
+
+    const result =
+      await executeRange(
         provider,
         url,
-        option.chunkBlocks
+        option.safeBlocks
       );
 
     if (
       !result.error
     ) {
+      exactPoolRecordNormalSuccess(
+        state,
+        provider
+      );
+
       return {
         ...result,
         desiredChunkBlocks,
         providerSafeChunkBlocks:
           result.requestedBlocks,
         publicProvenChunkBlocks:
-          unknownPoolExactChunk(
+          exactPoolSafeChunk(
             state,
             "ROBINHOOD_PUBLIC_RPC"
           ),
         alchemyProvenChunkBlocks:
-          unknownPoolExactChunk(
+          exactPoolSafeChunk(
             state,
             "ALCHEMY"
           ),
@@ -2705,6 +3027,9 @@ async function getInitializeForPoolRange(
           safeChunks.publicGenericSafe,
         alchemyGenericSafeBlocks:
           safeChunks.alchemyGenericSafe,
+        growthProbeAttempted,
+        growthProbeSucceeded,
+        growthProbeBlocks,
         exactRangeFallbackUsed,
         externalRequestsUsed,
         learningStatePath:
@@ -2714,66 +3039,6 @@ async function getInitializeForPoolRange(
 
     lastError =
       result.error;
-
-    /*
-     * V109: a 400 on a wide exact-topic range immediately retries the
-     * same contiguous ending block using that provider's known generic
-     * safe range. This gives us progress now and persists the smaller
-     * exact range, instead of repeating the same failed wide probe.
-     */
-    if (
-      is400(
-        result.error
-      ) &&
-      option.chunkBlocks >
-        option.genericSafe &&
-      budgetAvailable(
-        budget,
-        "discovery-live"
-      )
-    ) {
-      exactRangeFallbackUsed =
-        true;
-
-      result =
-        await executeExactRange(
-          provider,
-          url,
-          option.genericSafe
-        );
-
-      if (
-        !result.error
-      ) {
-        return {
-          ...result,
-          desiredChunkBlocks,
-          providerSafeChunkBlocks:
-            result.requestedBlocks,
-          publicProvenChunkBlocks:
-            unknownPoolExactChunk(
-              state,
-              "ROBINHOOD_PUBLIC_RPC"
-            ),
-          alchemyProvenChunkBlocks:
-            unknownPoolExactChunk(
-              state,
-              "ALCHEMY"
-            ),
-          publicGenericSafeBlocks:
-            safeChunks.publicGenericSafe,
-          alchemyGenericSafeBlocks:
-            safeChunks.alchemyGenericSafe,
-          exactRangeFallbackUsed,
-          externalRequestsUsed,
-          learningStatePath:
-            safeChunks.learningStatePath
-        };
-      }
-
-      lastError =
-        result.error;
-    }
   }
 
   return {
@@ -2788,12 +3053,12 @@ async function getInitializeForPoolRange(
     desiredChunkBlocks,
     providerSafeChunkBlocks: 0,
     publicProvenChunkBlocks:
-      unknownPoolExactChunk(
+      exactPoolSafeChunk(
         state,
         "ROBINHOOD_PUBLIC_RPC"
       ),
     alchemyProvenChunkBlocks:
-      unknownPoolExactChunk(
+      exactPoolSafeChunk(
         state,
         "ALCHEMY"
       ),
@@ -2801,6 +3066,9 @@ async function getInitializeForPoolRange(
       safeChunks.publicGenericSafe,
     alchemyGenericSafeBlocks:
       safeChunks.alchemyGenericSafe,
+    growthProbeAttempted,
+    growthProbeSucceeded,
+    growthProbeBlocks,
     exactRangeFallbackUsed,
     externalRequestsUsed,
     learningStatePath:
@@ -2821,6 +3089,13 @@ async function resolvePersistentUnknownPools(
     ensureUnknownPoolState(
       state
     );
+
+  /*
+   * V110: prevents repeated capability probes against the same provider
+   * during one scan run.
+   */
+  const exactPoolGrowthProbedProviders =
+    new Set();
 
   const eligibleCandidates =
     Object.values(
@@ -3230,15 +3505,35 @@ async function resolvePersistentUnknownPools(
       ).length,
     downstreamReserveRequests:
       LIVE_GLOBAL_RESERVE,
-    exactPoolRangeLearning:
-      "ENABLED_V109",
-    exactPoolRangeDefaults: {
+    exactPoolCapabilityLearning:
+      "ENABLED_V110",
+    capabilityProbesThisRun:
+      Array.from(
+        exactPoolGrowthProbedProviders
+      ),
+    exactPoolLearnedRanges: {
       public:
-        PUBLIC_UNKNOWN_POOL_EXACT_DEFAULT,
+        exactPoolSafeChunk(
+          state,
+          "ROBINHOOD_PUBLIC_RPC"
+        ),
       alchemy:
-        ALCHEMY_UNKNOWN_POOL_EXACT_DEFAULT,
-      max:
-        UNKNOWN_POOL_EXACT_MAX_BLOCKS
+        exactPoolSafeChunk(
+          state,
+          "ALCHEMY"
+        )
+    },
+    exactPoolFailedUpperBounds: {
+      public:
+        exactPoolFailedUpper(
+          state,
+          "ROBINHOOD_PUBLIC_RPC"
+        ),
+      alchemy:
+        exactPoolFailedUpper(
+          state,
+          "ALCHEMY"
+        )
     },
     trackerCount:
       Object.keys(
@@ -3317,7 +3612,8 @@ async function resolvePersistentUnknownPools(
         poolId,
         cursor,
         desiredChunkBlocks,
-        budget
+        budget,
+        exactPoolGrowthProbedProviders
       );
 
     output.requestsUsed +=
@@ -3430,6 +3726,17 @@ async function resolvePersistentUnknownPools(
         safeNumber(
           result.alchemyGenericSafeBlocks
         ),
+      growthProbeAttempted:
+        Boolean(
+          result.growthProbeAttempted
+        ),
+      growthProbeSucceeded:
+        Boolean(
+          result.growthProbeSucceeded
+        ),
+      growthProbeBlocks:
+        result.growthProbeBlocks ??
+        null,
       exactRangeFallbackUsed:
         Boolean(
           result.exactRangeFallbackUsed
@@ -13005,7 +13312,7 @@ async function scan(
     status,
 
     scanMode:
-      "V109_V108_CORE_EXACT_POOL_RANGE_LEARNING_INITIALIZE_HUNTER",
+      "V110_V108_CORE_SAFE_EXACT_POOL_CAPABILITY_LEARNING_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -13709,33 +14016,42 @@ async function scan(
       liveGlobalDownstreamReserve:
         LIVE_GLOBAL_RESERVE,
 
-      exactPoolInitializeRangeLearning:
-        "ENABLED_V109",
+      exactPoolCapabilityLearning:
+        "ENABLED_V110",
 
-      exactPoolInitializePublicDefaultBlocks:
-        PUBLIC_UNKNOWN_POOL_EXACT_DEFAULT,
+      exactPoolStartsFromProvenSafeRange:
+        "ENABLED_V110",
 
-      exactPoolInitializeAlchemyDefaultBlocks:
-        ALCHEMY_UNKNOWN_POOL_EXACT_DEFAULT,
+      exactPoolOneGrowthProbePerProviderPerRun:
+        "ENABLED_V110",
 
-      exactPoolInitializeMaxBlocks:
+      exactPoolGrowthSuccessStreak:
+        UNKNOWN_POOL_EXACT_GROW_SUCCESS_STREAK,
+
+      exactPoolGrowthMaxBlocks:
         UNKNOWN_POOL_EXACT_MAX_BLOCKS,
 
-      exactPool400ImmediateSafeFallback:
-        "ENABLED_V109",
+      exactPoolFailedUpperBoundPersistence:
+        "ENABLED_V110",
+
+      exactPoolProbeFailureSafeFallback:
+        "ENABLED_V110",
 
       exactPool429PersistentCooldown:
-        "ENABLED_V109",
+        "ENABLED_V110",
+
+      actualResolverRequestAccounting:
+        "ENABLED_V110",
 
       contiguousInitializeCoverage:
-        "ENABLED_V109",
+        "ENABLED_V110",
 
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V109_V108_CORE_EXACT_POOL_RANGE_LEARNING_INITIALIZE_V77_TELEGRAM_HUNTER",
+      "V110_V108_CORE_SAFE_EXACT_POOL_CAPABILITY_LEARNING_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -14051,7 +14367,7 @@ async function health(
     },
 
     architecture:
-      "V109_V108_CORE_EXACT_POOL_RANGE_LEARNING_INITIALIZE_V77_TELEGRAM_HUNTER",
+      "V110_V108_CORE_SAFE_EXACT_POOL_CAPABILITY_LEARNING_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -14450,7 +14766,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V109_V108_CORE_EXACT_POOL_RANGE_LEARNING_INITIALIZE_V77_TELEGRAM_HUNTER",
+      "V110_V108_CORE_SAFE_EXACT_POOL_CAPABILITY_LEARNING_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -14879,7 +15195,7 @@ export default {
             ),
 
           architecture:
-            "V109_V108_CORE_EXACT_POOL_RANGE_LEARNING_INITIALIZE_V77_TELEGRAM_HUNTER",
+            "V110_V108_CORE_SAFE_EXACT_POOL_CAPABILITY_LEARNING_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
