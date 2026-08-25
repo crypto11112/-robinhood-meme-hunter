@@ -1,27 +1,24 @@
 /**
  * Robinhood Chain Meme Hunter
- * V113
+ * V114
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V113:
- * - Builds directly forward from confirmed V112
- * - Preserves V112 hard 7-request resolver cap and stalled-pool backoff
- * - Preserves V111 KV sanitization and safe HTTP 400 demotion/retry
- * - NEW: provider-specific failed exact-range growth-probe cooldowns
- * - NEW: Alchemy failed 20-block exact probes cool down for 30 minutes
- * - NEW: Public RPC failed exact probes cool down for 10 minutes
- * - NEW: deep historical unknown-pool searching pauses while only the
- *        narrow 10-block Alchemy exact range is available
- * - NEW: deep contiguous search automatically resumes when the wider
- *        proven Public RPC exact range is available
- * - NEW: launch-proximity priority favors fresh/liquidity-active pools
- *        whose Initialize is most likely near first observed activity
- * - Preserves all unresolved cursors in KV; no searched coverage is lost
- * - Preserves live-first scanning, backlog catch-up, holder/risk systems,
- *        DexScreener protection, candidate ranking and Telegram
+ * V114:
+ * - Builds directly forward from confirmed V113
+ * - Preserves V113 provider-aware Initialize locality logic
+ * - Preserves V112 hard resolver request cap / stalled-pool backoff
+ * - Preserves V111 KV range sanitization and HTTP 400 demotion
+ * - FIX: provider-aware live-head synchronization
+ * - FIX: detects live ranges beyond the selected provider head
+ * - FIX: refreshes that provider's own eth_blockNumber, clamps and retries
+ * - FIX: lastLiveScannedBlock records the block actually scanned
+ * - NEW: live-head clamp/retry telemetry
+ * - NEW: Telegram qualification diagnostics without weakening thresholds
+ * - Preserves scoring, holder/risk logic, DexScreener protection,
+ *        backlog catch-up, Telegram delivery and KV history
  */
-const VERSION = "V113";
+const VERSION = "V114";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -5040,6 +5037,104 @@ async function latestBlock(
   };
 }
 
+function isBeyondProviderHeadError(
+  value
+) {
+  const text =
+    String(
+      value ||
+      ""
+    ).toLowerCase();
+
+  return (
+    text.includes(
+      "beyond current head"
+    ) ||
+    text.includes(
+      "extends beyond current head"
+    ) ||
+    (
+      text.includes(
+        "block range"
+      ) &&
+      text.includes(
+        "head block"
+      )
+    )
+  );
+}
+
+async function providerHeadBlock(
+  env,
+  budget,
+  provider
+) {
+  const url =
+    rpcProviderUrl(
+      env,
+      provider
+    );
+
+  if (!url) {
+    return {
+      block: null,
+      provider,
+      error:
+        "PROVIDER_UNAVAILABLE"
+    };
+  }
+
+  if (
+    !budgetAvailable(
+      budget,
+      "system"
+    )
+  ) {
+    return {
+      block: null,
+      provider,
+      error:
+        "SYSTEM_BUDGET_PROTECTED"
+    };
+  }
+
+  try {
+    const result =
+      await rpcCall(
+        url,
+        "eth_blockNumber",
+        [],
+        budget,
+        "system"
+      );
+
+    return {
+      block:
+        result
+          ? BigInt(
+              result
+            )
+          : null,
+      provider,
+      error:
+        result
+          ? null
+          : "PROVIDER_HEAD_UNAVAILABLE"
+    };
+  }
+
+  catch (error) {
+    return {
+      block: null,
+      provider,
+      error:
+        errorString(
+          error
+        )
+    };
+  }
+}
+
 function rpcProviderUrl(
   env,
   provider
@@ -5173,6 +5268,12 @@ async function scanLiveRange(
       LIVE_SAFE_CHUNK_MAX
     );
 
+  const requestedTo =
+    to;
+
+  let effectiveTo =
+    to;
+
   let cursor =
     from;
 
@@ -5182,9 +5283,24 @@ async function scanLiveRange(
   let error =
     null;
 
+  let providerHead =
+    null;
+
+  let providerHeadProvider =
+    null;
+
+  let providerHeadClamped =
+    false;
+
+  let providerHeadRefreshes =
+    0;
+
+  let providerHeadRetries =
+    0;
+
   while (
     cursor <=
-      to &&
+      effectiveTo &&
     budgetAvailable(
       budget,
       "discovery-live"
@@ -5199,10 +5315,10 @@ async function scanLiveRange(
 
     if (
       chunkTo >
-      to
+      effectiveTo
     ) {
       chunkTo =
-        to;
+        effectiveTo;
     }
 
     let provider =
@@ -5227,6 +5343,95 @@ async function scanLiveRange(
         "discovery-live",
         provider
       );
+
+    if (
+      !Array.isArray(
+        response.result
+      ) &&
+      isBeyondProviderHeadError(
+        response.error
+      )
+    ) {
+      const head =
+        await providerHeadBlock(
+          env,
+          budget,
+          provider
+        );
+
+      providerHeadRefreshes++;
+
+      if (
+        head.block !==
+          null
+      ) {
+        providerHead =
+          head.block;
+
+        providerHeadProvider =
+          provider;
+
+        if (
+          providerHead <
+          effectiveTo
+        ) {
+          effectiveTo =
+            providerHead;
+
+          providerHeadClamped =
+            true;
+        }
+
+        if (
+          cursor <=
+            effectiveTo &&
+          budgetAvailable(
+            budget,
+            "discovery-live"
+          )
+        ) {
+          chunkTo =
+            cursor +
+            BigInt(
+              chunkSize -
+              1
+            );
+
+          if (
+            chunkTo >
+            effectiveTo
+          ) {
+            chunkTo =
+              effectiveTo;
+          }
+
+          response =
+            await getLogsSingleProvider(
+              env,
+              cursor,
+              chunkTo,
+              budget,
+              "discovery-live",
+              provider
+            );
+
+          providerHeadRetries++;
+        }
+
+        else if (
+          cursor >
+          effectiveTo
+        ) {
+          processedThrough =
+            effectiveTo;
+
+          error =
+            null;
+
+          break;
+        }
+      }
+    }
 
     if (
       !Array.isArray(
@@ -5344,7 +5549,10 @@ async function scanLiveRange(
 
     if (
       chunkSize >
-      LIVE_SAFE_CHUNK_MIN
+      LIVE_SAFE_CHUNK_MIN &&
+      !isBeyondProviderHeadError(
+        response.error
+      )
     ) {
       chunkSize =
         Math.max(
@@ -5369,10 +5577,17 @@ async function scanLiveRange(
     break;
   }
 
-  return {
-    success:
+  const success =
+    !error &&
+    (
       processedThrough ===
-      to,
+        effectiveTo ||
+      cursor >
+        effectiveTo
+    );
+
+  return {
+    success,
 
     processedThrough,
 
@@ -5385,7 +5600,21 @@ async function scanLiveRange(
 
     chunkSize,
 
-    error
+    error,
+
+    requestedTo,
+
+    effectiveTo,
+
+    providerHead,
+
+    providerHeadProvider,
+
+    providerHeadClamped,
+
+    providerHeadRefreshes,
+
+    providerHeadRetries
   };
 }
 
@@ -12258,6 +12487,146 @@ function qualifiesTelegram(
   return true;
 }
 
+
+function telegramQualificationReasons(
+  candidate
+) {
+  const reasons = [];
+
+  if (
+    safeNumber(
+      candidate?.opportunity?.score
+    ) <
+    MIN_ALERT_SCORE
+  ) {
+    reasons.push(
+      "OPPORTUNITY_SCORE"
+    );
+  }
+
+  if (
+    safeNumber(
+      candidate?.confidence?.score
+    ) <
+    MIN_CONFIDENCE_ALERT
+  ) {
+    reasons.push(
+      "CONFIDENCE_SCORE"
+    );
+  }
+
+  if (
+    !candidate?.risk?.verified
+  ) {
+    reasons.push(
+      "RISK_UNVERIFIED"
+    );
+  }
+
+  else if (
+    safeNumber(
+      candidate?.risk?.score
+    ) >
+    MAX_ALERT_RISK
+  ) {
+    reasons.push(
+      "RISK_TOO_HIGH"
+    );
+  }
+
+  if (
+    !candidate?.market?.verified
+  ) {
+    reasons.push(
+      "MARKET_UNVERIFIED"
+    );
+  }
+
+  if (
+    safeNumber(
+      candidate?.market?.liquidityUsd
+    ) <
+    MIN_ALERT_LIQUIDITY
+  ) {
+    reasons.push(
+      "LIQUIDITY_TOO_LOW_OR_UNVERIFIED"
+    );
+  }
+
+  if (
+    safeNumber(
+      candidate?.signalConfirmation?.signals
+    ) <
+    2
+  ) {
+    reasons.push(
+      "INSUFFICIENT_SIGNALS"
+    );
+  }
+
+  return reasons;
+}
+
+function buildTelegramQualificationDiagnostics(
+  candidates
+) {
+  const blockedBy = {};
+  const candidateResults = [];
+
+  for (
+    const candidate
+    of candidates
+  ) {
+    const reasons =
+      telegramQualificationReasons(
+        candidate
+      );
+
+    for (
+      const reason
+      of reasons
+    ) {
+      blockedBy[
+        reason
+      ] =
+        safeNumber(
+          blockedBy[
+            reason
+          ]
+        ) +
+        1;
+    }
+
+    candidateResults.push({
+      address:
+        candidate.address,
+      symbol:
+        candidate.symbol,
+      qualifies:
+        reasons.length ===
+        0,
+      reasons
+    });
+  }
+
+  return {
+    evaluated:
+      candidates.length,
+    qualifying:
+      candidateResults.filter(
+        item =>
+          item.qualifies
+      ).length,
+    blockedBy,
+    candidates:
+      candidateResults.slice(
+        0,
+        10
+      )
+  };
+}
+
+
 /* =========================================================
    V88 RICH V77-STYLE TELEGRAM CALL
    ========================================================= */
@@ -13133,10 +13502,16 @@ async function scan(
   }
 
   if (
-    liveScan.success
+    liveScan.success &&
+    liveScan.processedThrough !==
+      null &&
+    liveScan.processedThrough !==
+      undefined
   ) {
     state.lastLiveScannedBlock =
-      latestNumber;
+      Number(
+        liveScan.processedThrough
+      );
   }
 
   /* =======================================================
@@ -13644,6 +14019,11 @@ async function scan(
       )
   );
 
+  const telegramQualificationDiagnostics =
+    buildTelegramQualificationDiagnostics(
+      candidates
+    );
+
   /* =======================================================
      TELEGRAM
      ======================================================= */
@@ -13914,7 +14294,7 @@ async function scan(
     status,
 
     scanMode:
-      "V113_V112_CORE_PROVIDER_AWARE_INIT_LOCALITY_HUNTER",
+      "V114_V113_CORE_PROVIDER_HEAD_SYNC_QUALIFICATION_DIAGNOSTICS_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -14174,6 +14554,57 @@ async function scan(
         error:
           liveError,
 
+        providerHeadSync: {
+          requestedTo:
+            liveScan.requestedTo !==
+              null &&
+            liveScan.requestedTo !==
+              undefined
+              ? Number(
+                  liveScan.requestedTo
+                )
+              : null,
+
+          effectiveTo:
+            liveScan.effectiveTo !==
+              null &&
+            liveScan.effectiveTo !==
+              undefined
+              ? Number(
+                  liveScan.effectiveTo
+                )
+              : null,
+
+          providerHead:
+            liveScan.providerHead !==
+              null &&
+            liveScan.providerHead !==
+              undefined
+              ? Number(
+                  liveScan.providerHead
+                )
+              : null,
+
+          provider:
+            liveScan.providerHeadProvider ||
+            null,
+
+          clamped:
+            Boolean(
+              liveScan.providerHeadClamped
+            ),
+
+          refreshes:
+            safeNumber(
+              liveScan.providerHeadRefreshes
+            ),
+
+          retries:
+            safeNumber(
+              liveScan.providerHeadRetries
+            )
+        },
+
         ranges:
           liveOutput.ranges
       },
@@ -14377,6 +14808,8 @@ async function scan(
       candidates.filter(
         qualifiesTelegram
       ).length,
+
+    telegramQualificationDiagnostics,
 
     telegramResults,
 
@@ -14693,12 +15126,27 @@ async function scan(
       contiguousInitializeCoverage:
         "ENABLED_V113",
 
+      providerAwareLiveHeadSync:
+        "ENABLED_V114",
+
+      liveHeadClampRetry:
+        "ENABLED_V114",
+
+      actualLiveScannedBlockPersistence:
+        "ENABLED_V114",
+
+      telegramQualificationDiagnostics:
+        "ENABLED_V114",
+
+      telegramThresholdsUnchanged:
+        "ENABLED_V114",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V113_V112_CORE_PROVIDER_AWARE_INIT_LOCALITY_V77_TELEGRAM_HUNTER",
+      "V114_V113_CORE_PROVIDER_HEAD_SYNC_QUALIFICATION_DIAGNOSTICS_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -15014,7 +15462,7 @@ async function health(
     },
 
     architecture:
-      "V113_V112_CORE_PROVIDER_AWARE_INIT_LOCALITY_V77_TELEGRAM_HUNTER",
+      "V114_V113_CORE_PROVIDER_HEAD_SYNC_QUALIFICATION_DIAGNOSTICS_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -15413,7 +15861,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V113_V112_CORE_PROVIDER_AWARE_INIT_LOCALITY_V77_TELEGRAM_HUNTER",
+      "V114_V113_CORE_PROVIDER_HEAD_SYNC_QUALIFICATION_DIAGNOSTICS_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -15842,7 +16290,7 @@ export default {
             ),
 
           architecture:
-            "V113_V112_CORE_PROVIDER_AWARE_INIT_LOCALITY_V77_TELEGRAM_HUNTER",
+            "V114_V113_CORE_PROVIDER_HEAD_SYNC_QUALIFICATION_DIAGNOSTICS_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
