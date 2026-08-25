@@ -1,30 +1,36 @@
 /**
  * Robinhood Chain Meme Hunter
- * V76
+ * V77
  *
- * COMPLETE DEPLOYABLE WORKER
- * Built directly from V75.
+ * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V76:
- * - Preserves V75 discovery/scanning architecture
- * - Preserves V75 whale-flow intelligence
- * - Fixes catch-up consuming entire request budget
- * - Partitions request budget between discovery and intelligence
- * - Reserves requests for ERC20/market/holder analysis
- * - Adaptive catch-up
- * - Persistent KV state
- * - Infrastructure/quote filtering
- * - Persistent snapshots
- * - Historical momentum
- * - Whale accumulation/distribution history
- * - Concentration trend
- * - Smart-money behaviour candidate scoring
- * - Market quality
- * - Candidate confidence
- * - Telegram alerts
+ * Built directly from V76.
+ *
+ * V77:
+ * - Preserves V76 scanning/discovery architecture
+ * - Preserves KV state
+ * - Preserves V4 pool discovery
+ * - Preserves ERC20 validation
+ * - Preserves DexScreener market intelligence
+ * - Preserves Blockscout holder intelligence
+ * - Preserves momentum snapshots
+ * - Preserves whale accumulation/distribution detection
+ * - Preserves smart-money behaviour scoring
+ * - Preserves Telegram alerts
+ *
+ * NEW V77:
+ * - Hard discovery/analysis budget separation
+ * - Discovery can NEVER consume analysis reserve
+ * - RPC fallback correctly charged to originating phase
+ * - Analysis RPC calls use protected analysis allocation
+ * - Candidate analysis continues after catch-up pauses
+ * - Better candidate rotation
+ * - Newly discovered tokens receive priority
+ * - Analysis-budget telemetry
+ * - Catch-up progress preserved safely
  */
 
-const VERSION = "V76";
+const VERSION = "V77";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71,7 +77,9 @@ const MODIFY_LIQUIDITY_TOPIC =
   "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec";
 
 /*
- * Preserve existing state.
+ * IMPORTANT:
+ * Keep the existing state key so V77 continues
+ * directly from the V76/V75 state.
  */
 const STATE_KEY =
   "robinhood-meme-hunter-v69-state";
@@ -85,17 +93,31 @@ const MIN_LOG_RANGE = 10;
 const BACKLOG_LIVE_THRESHOLD = 100;
 
 /*
- * V76 BUDGET PARTITION
+ * =========================================================
+ * V77 HARD REQUEST BUDGET
+ * =========================================================
+ *
+ * TOTAL = 42
+ *
+ * SYSTEM:
+ * 2 requests reserved for latest-block / operational work.
+ *
+ * DISCOVERY:
+ * Maximum 22 requests.
+ *
+ * ANALYSIS:
+ * Minimum protected allocation of 18 requests.
+ *
+ * Discovery cannot borrow from analysis.
  */
+
 const MAX_EXTERNAL_REQUESTS = 42;
 
-const RESERVED_ANALYSIS_REQUESTS = 16;
+const SYSTEM_REQUEST_LIMIT = 2;
+const DISCOVERY_REQUEST_LIMIT = 22;
+const ANALYSIS_REQUEST_LIMIT = 18;
 
-const MAX_DISCOVERY_REQUESTS =
-  MAX_EXTERNAL_REQUESTS -
-  RESERVED_ANALYSIS_REQUESTS;
-
-const MAX_TOKEN_CHECKS = 6;
+const MAX_TOKEN_CHECKS = 4;
 const MAX_MARKET_LOOKUPS = 3;
 const MAX_HOLDER_LOOKUPS = 2;
 
@@ -140,54 +162,178 @@ const MEMORY_ALERTS = new Map();
 
 
 /* =========================================================
-   REQUEST BUDGET
+   V77 HARD PHASE BUDGET
    ========================================================= */
 
 function createBudget() {
   return {
-    used: 0,
-    limit: MAX_EXTERNAL_REQUESTS,
+    totalUsed: 0,
+
+    totalLimit:
+      MAX_EXTERNAL_REQUESTS,
+
+    system: {
+      used: 0,
+      limit:
+        SYSTEM_REQUEST_LIMIT
+    },
+
+    discovery: {
+      used: 0,
+      limit:
+        DISCOVERY_REQUEST_LIMIT
+    },
+
+    analysis: {
+      used: 0,
+      limit:
+        ANALYSIS_REQUEST_LIMIT
+    },
+
     skipped: []
   };
 }
 
-function budgetAvailable(
+function phaseBudget(
   budget,
-  amount = 1
+  phase
 ) {
-  return (
-    budget.used + amount <=
-    budget.limit
-  );
+  return budget[phase] || null;
 }
 
-function discoveryBudgetAvailable(
+function budgetAvailable(
   budget,
+  phase,
   amount = 1
 ) {
+  const section =
+    phaseBudget(
+      budget,
+      phase
+    );
+
+  if (!section) {
+    return false;
+  }
+
+  if (
+    budget.totalUsed +
+      amount >
+    budget.totalLimit
+  ) {
+    return false;
+  }
+
   return (
-    budget.used + amount <=
-    MAX_DISCOVERY_REQUESTS
+    section.used +
+      amount <=
+    section.limit
   );
 }
 
 function consumeBudget(
   budget,
+  phase,
   type,
   amount = 1
 ) {
   if (
     !budgetAvailable(
       budget,
+      phase,
       amount
     )
   ) {
-    budget.skipped.push(type);
+    budget.skipped.push({
+      phase,
+      type,
+      amount,
+      reason:
+        "PHASE_BUDGET_EXHAUSTED"
+    });
+
     return false;
   }
 
-  budget.used += amount;
+  budget.totalUsed +=
+    amount;
+
+  budget[phase].used +=
+    amount;
+
   return true;
+}
+
+function budgetTelemetry(
+  budget
+) {
+  return {
+    used:
+      budget.totalUsed,
+
+    limit:
+      budget.totalLimit,
+
+    remaining:
+      Math.max(
+        0,
+        budget.totalLimit -
+        budget.totalUsed
+      ),
+
+    system: {
+      used:
+        budget.system.used,
+
+      limit:
+        budget.system.limit,
+
+      remaining:
+        Math.max(
+          0,
+          budget.system.limit -
+          budget.system.used
+        )
+    },
+
+    discovery: {
+      used:
+        budget.discovery.used,
+
+      limit:
+        budget.discovery.limit,
+
+      remaining:
+        Math.max(
+          0,
+          budget.discovery.limit -
+          budget.discovery.used
+        )
+    },
+
+    analysis: {
+      used:
+        budget.analysis.used,
+
+      limit:
+        budget.analysis.limit,
+
+      remaining:
+        Math.max(
+          0,
+          budget.analysis.limit -
+          budget.analysis.used
+        ),
+
+      protected: true
+    },
+
+    hardPhaseIsolation:
+      true,
+
+    skipped:
+      budget.skipped
+  };
 }
 
 
@@ -199,14 +345,23 @@ function now() {
   return new Date().toISOString();
 }
 
-function json(data, status = 200) {
+function json(
+  data,
+  status = 200
+) {
   return new Response(
-    JSON.stringify(data, null, 2),
+    JSON.stringify(
+      data,
+      null,
+      2
+    ),
     {
       status,
+
       headers: {
         "content-type":
           "application/json; charset=utf-8",
+
         "cache-control":
           "no-store"
       }
@@ -215,7 +370,8 @@ function json(data, status = 200) {
 }
 
 function safeNumber(value) {
-  const n = Number(value);
+  const n =
+    Number(value);
 
   return Number.isFinite(n)
     ? n
@@ -229,13 +385,17 @@ function clamp(
 ) {
   return Math.max(
     min,
-    Math.min(max, value)
+    Math.min(
+      max,
+      value
+    )
   );
 }
 
 function normalize(value) {
-  return String(value || "")
-    .toLowerCase();
+  return String(
+    value || ""
+  ).toLowerCase();
 }
 
 function isAddress(value) {
@@ -253,8 +413,10 @@ function topicAddress(topic) {
     return null;
   }
 
-  return "0x" +
-    topic.slice(-40);
+  return (
+    "0x" +
+    topic.slice(-40)
+  );
 }
 
 function knownQuote(address) {
@@ -272,38 +434,10 @@ function knownQuoteMetadata(
   }
 
   return KNOWN_QUOTE_SYMBOLS.has(
-    String(symbol || "")
-      .toUpperCase()
+    String(
+      symbol || ""
+    ).toUpperCase()
   );
-}
-
-function money(value) {
-  const n = safeNumber(value);
-
-  if (!n) {
-    return "UNVERIFIED";
-  }
-
-  if (n >= 1e9) {
-    return "$" +
-      (n / 1e9).toFixed(2) +
-      "B";
-  }
-
-  if (n >= 1e6) {
-    return "$" +
-      (n / 1e6).toFixed(2) +
-      "M";
-  }
-
-  if (n >= 1e3) {
-    return "$" +
-      (n / 1e3).toFixed(1) +
-      "K";
-  }
-
-  return "$" +
-    n.toFixed(2);
 }
 
 function errorString(error) {
@@ -311,6 +445,44 @@ function errorString(error) {
     error?.message ||
     error ||
     "UNKNOWN_ERROR"
+  );
+}
+
+function money(value) {
+  const n =
+    safeNumber(value);
+
+  if (!n) {
+    return "UNVERIFIED";
+  }
+
+  if (n >= 1e9) {
+    return (
+      "$" +
+      (n / 1e9).toFixed(2) +
+      "B"
+    );
+  }
+
+  if (n >= 1e6) {
+    return (
+      "$" +
+      (n / 1e6).toFixed(2) +
+      "M"
+    );
+  }
+
+  if (n >= 1e3) {
+    return (
+      "$" +
+      (n / 1e3).toFixed(1) +
+      "K"
+    );
+  }
+
+  return (
+    "$" +
+    n.toFixed(2)
   );
 }
 
@@ -329,8 +501,7 @@ function percentChange(
   }
 
   return (
-    (b - a) /
-    a *
+    ((b - a) / a) *
     100
   );
 }
@@ -351,6 +522,7 @@ function getKV(env) {
     return {
       kv:
         env.MEME_HUNTER_STATE,
+
       binding:
         "MEME_HUNTER_STATE"
     };
@@ -366,6 +538,7 @@ function getKV(env) {
     return {
       kv:
         env.KV_BINDING,
+
       binding:
         "KV_BINDING"
     };
@@ -379,13 +552,26 @@ function getKV(env) {
 
 function newState() {
   return {
-    version: VERSION,
-    lastScannedBlock: null,
-    watchedTokens: [],
-    alerts: {},
-    snapshots: {},
-    createdAt: now(),
-    updatedAt: now()
+    version:
+      VERSION,
+
+    lastScannedBlock:
+      null,
+
+    watchedTokens:
+      [],
+
+    alerts:
+      {},
+
+    snapshots:
+      {},
+
+    createdAt:
+      now(),
+
+    updatedAt:
+      now()
   };
 }
 
@@ -424,6 +610,7 @@ async function readState(env) {
 
     return {
       persistent: true,
+
       binding,
 
       state: {
@@ -458,8 +645,12 @@ async function readState(env) {
   } catch (error) {
     return {
       persistent: true,
+
       binding,
-      state: newState(),
+
+      state:
+        newState(),
+
       error:
         errorString(error)
     };
@@ -513,37 +704,34 @@ async function writeState(
 }
 
 function persistenceHealth(
-  stateResult
+  result
 ) {
-  if (!stateResult.persistent) {
+  if (!result.persistent) {
     return {
       healthy: false,
       status:
-        "KV_BINDING_MISSING",
-      critical: true,
-      message:
-        "MEME_HUNTER_STATE/KV_BINDING is unavailable."
+        "KV_BINDING_MISSING"
     };
   }
 
-  if (stateResult.error) {
+  if (result.error) {
     return {
       healthy: false,
       status:
-        "KV_READ_ERROR",
-      critical: true,
-      message:
-        stateResult.error
+        "KV_READ_ERROR"
     };
   }
 
   return {
     healthy: true,
-    status: "READY",
-    critical: false,
-    message: null
+    status: "READY"
   };
 }
+
+
+/* =========================================================
+   STATE PRUNING
+   ========================================================= */
 
 function pruneSnapshots(state) {
   const current =
@@ -564,10 +752,15 @@ function pruneSnapshots(state) {
       state.snapshots
     )
   ) {
-    if (!Array.isArray(snapshots)) {
+    if (
+      !Array.isArray(
+        snapshots
+      )
+    ) {
       delete state.snapshots[
         address
       ];
+
       continue;
     }
 
@@ -607,21 +800,21 @@ function pruneState(state) {
     Date.now();
 
   state.watchedTokens =
-    (state.watchedTokens || [])
+    (
+      state.watchedTokens ||
+      []
+    )
       .filter(token => {
         const firstSeen =
           safeNumber(
             token.firstSeenAt
           );
 
-        if (!firstSeen) {
-          return false;
-        }
-
         return (
+          firstSeen &&
           current -
-          firstSeen <
-          WATCH_MAX_AGE
+            firstSeen <
+            WATCH_MAX_AGE
         );
       })
       .slice(
@@ -646,7 +839,7 @@ function pruneState(state) {
   ) {
     if (
       current -
-      safeNumber(timestamp) >
+        safeNumber(timestamp) >
       ALERT_COOLDOWN
     ) {
       delete state.alerts[
@@ -671,7 +864,7 @@ function addWatch(
     key === ZERO ||
     knownQuote(address)
   ) {
-    return;
+    return false;
   }
 
   let token =
@@ -682,24 +875,34 @@ function addWatch(
         ) === key
     );
 
+  let added = false;
+
   if (!token) {
     token = {
       address,
+
       firstSeenAt:
         Date.now(),
+
       lastCheckedAt:
         null,
+
       checks: 0,
+
       pools: []
     };
 
     state.watchedTokens.push(
       token
     );
+
+    added = true;
   }
 
   token.pools =
-    Array.isArray(token.pools)
+    Array.isArray(
+      token.pools
+    )
       ? token.pools
       : [];
 
@@ -717,6 +920,8 @@ function addWatch(
   ) {
     token.pools.push(pool);
   }
+
+  return added;
 }
 
 
@@ -728,7 +933,8 @@ function createSnapshot(
   candidate
 ) {
   const whale =
-    candidate.holders?.whale;
+    candidate.holders
+      ?.whale;
 
   return {
     timestamp:
@@ -830,8 +1036,10 @@ function createSnapshot(
           ).map(holder => ({
             address:
               holder.address,
+
             value:
               holder.value,
+
             percentage:
               holder.percentage
           }))
@@ -900,7 +1108,9 @@ function getMomentumSnapshot(
     ];
 
   if (
-    !Array.isArray(snapshots) ||
+    !Array.isArray(
+      snapshots
+    ) ||
     !snapshots.length
   ) {
     return null;
@@ -960,24 +1170,25 @@ function getMomentumSnapshot(
 
 
 /* =========================================================
-   RPC
+   V77 RPC
    ========================================================= */
 
 async function rpcCall(
   url,
   method,
   params,
-  budget
+  budget,
+  phase
 ) {
   if (
-    budget &&
     !consumeBudget(
       budget,
+      phase,
       `RPC:${method}`
     )
   ) {
     throw new Error(
-      "REQUEST_BUDGET_EXHAUSTED"
+      `REQUEST_BUDGET_EXHAUSTED_${phase.toUpperCase()}`
     );
   }
 
@@ -1043,7 +1254,8 @@ async function rpc(
   env,
   method,
   params,
-  budget
+  budget,
+  phase = "analysis"
 ) {
   let publicError = null;
 
@@ -1054,7 +1266,8 @@ async function rpc(
           PUBLIC_RPC,
           method,
           params,
-          budget
+          budget,
+          phase
         ),
 
       provider:
@@ -1068,8 +1281,9 @@ async function rpc(
       errorString(error);
 
     if (
-      publicError ===
-      "REQUEST_BUDGET_EXHAUSTED"
+      publicError.startsWith(
+        "REQUEST_BUDGET_EXHAUSTED"
+      )
     ) {
       return {
         result: null,
@@ -1084,9 +1298,32 @@ async function rpc(
     return {
       result: null,
       provider: null,
+
       error:
         "PUBLIC_RPC_FAILED: " +
         publicError
+    };
+  }
+
+  /*
+   * V77:
+   * Alchemy fallback is charged to the SAME phase.
+   * Discovery therefore cannot consume analysis reserve.
+   */
+
+  if (
+    !budgetAvailable(
+      budget,
+      phase,
+      1
+    )
+  ) {
+    return {
+      result: null,
+      provider: null,
+
+      error:
+        `REQUEST_BUDGET_EXHAUSTED_${phase.toUpperCase()}`
     };
   }
 
@@ -1098,7 +1335,8 @@ async function rpc(
           env.ALCHEMY_API_KEY,
           method,
           params,
-          budget
+          budget,
+          phase
         ),
 
       provider:
@@ -1125,12 +1363,18 @@ async function latestBlock(
   env,
   budget
 ) {
+  /*
+   * Latest block is operational/system budget,
+   * not discovery or analysis.
+   */
+
   const result =
     await rpc(
       env,
       "eth_blockNumber",
       [],
-      budget
+      budget,
+      "system"
     );
 
   if (!result.result) {
@@ -1172,13 +1416,14 @@ async function getLogs(
       address:
         POOL_MANAGER
     }],
-    budget
+    budget,
+    "discovery"
   );
 }
 
 
 /* =========================================================
-   V76 ADAPTIVE LOG SCANNER
+   V77 LOG SCANNER
    ========================================================= */
 
 async function scanLogRange(
@@ -1190,16 +1435,20 @@ async function scanLogRange(
   depth = 0
 ) {
   if (
-    !discoveryBudgetAvailable(
+    !budgetAvailable(
       budget,
-      2
+      "discovery",
+      1
     )
   ) {
     return {
       success: false,
-      budgetExhausted: true,
-      analysisBudgetReserved: true,
-      processedThrough: null
+
+      discoveryBudgetExhausted:
+        true,
+
+      processedThrough:
+        null
     };
   }
 
@@ -1239,8 +1488,27 @@ async function scanLogRange(
 
     return {
       success: true,
+
       processedThrough:
         to
+    };
+  }
+
+  if (
+    String(
+      result.error || ""
+    ).includes(
+      "REQUEST_BUDGET_EXHAUSTED"
+    )
+  ) {
+    return {
+      success: false,
+
+      discoveryBudgetExhausted:
+        true,
+
+      processedThrough:
+        null
     };
   }
 
@@ -1285,6 +1553,7 @@ async function scanLogRange(
     if (!right.success) {
       return {
         ...right,
+
         processedThrough:
           left.processedThrough
       };
@@ -1292,6 +1561,7 @@ async function scanLogRange(
 
     return {
       success: true,
+
       processedThrough:
         right.processedThrough
     };
@@ -1299,6 +1569,7 @@ async function scanLogRange(
 
   return {
     success: false,
+
     processedThrough:
       null,
 
@@ -1339,7 +1610,8 @@ async function ethCall(
         to: token,
         data
       }, "latest"],
-      budget
+      budget,
+      "analysis"
     );
 
   if (!result.result) {
@@ -1478,13 +1750,13 @@ function decodeString(hex) {
         )
       );
 
-    const decoded =
+    return (
       new TextDecoder()
         .decode(bytes)
         .replace(/\0/g, "")
-        .trim();
-
-    return decoded || null;
+        .trim() ||
+      null
+    );
 
   } catch {
     return null;
@@ -1496,12 +1768,33 @@ async function verifyERC20(
   address,
   budget
 ) {
+  /*
+   * V77 checks budget before beginning a token.
+   * We need room for contract bytecode + core metadata.
+   */
+
+  if (
+    !budgetAvailable(
+      budget,
+      "analysis",
+      4
+    )
+  ) {
+    return {
+      validERC20: false,
+
+      reason:
+        "ANALYSIS_BUDGET_PROTECTED"
+    };
+  }
+
   const code =
     await rpc(
       env,
       "eth_getCode",
       [address, "latest"],
-      budget
+      budget,
+      "analysis"
     );
 
   if (
@@ -1511,6 +1804,7 @@ async function verifyERC20(
   ) {
     return {
       validERC20: false,
+
       reason:
         "NO_CONTRACT_BYTECODE"
     };
@@ -1562,17 +1856,29 @@ async function verifyERC20(
     }
   } catch {}
 
-  try {
-    totalSupply =
-      decodeUint(
-        await ethCall(
-          env,
-          address,
-          "0x18160ddd",
-          budget
-        )
-      );
-  } catch {}
+  /*
+   * Only request supply if analysis budget remains.
+   */
+
+  if (
+    budgetAvailable(
+      budget,
+      "analysis",
+      1
+    )
+  ) {
+    try {
+      totalSupply =
+        decodeUint(
+          await ethCall(
+            env,
+            address,
+            "0x18160ddd",
+            budget
+          )
+        );
+    } catch {}
+  }
 
   const score =
     (name ? 1 : 0) +
@@ -1592,17 +1898,27 @@ async function verifyERC20(
   if (score < 3) {
     return {
       validERC20: false,
+
       reason:
         "ERC20_METHODS_NOT_VERIFIED",
+
       name,
       symbol,
-      decimals
+      decimals,
+
+      totalSupply:
+        totalSupply !== null
+          ? totalSupply.toString()
+          : null
     };
   }
 
   return {
     validERC20: true,
-    reason: "VERIFIED",
+
+    reason:
+      "VERIFIED",
+
     address,
     name,
     symbol,
@@ -1726,6 +2042,7 @@ function activityForToken(
   return {
     swaps,
     liquidityEvents,
+
     poolSpecific:
       poolIds.size > 0
   };
@@ -1743,13 +2060,15 @@ async function marketData(
   if (
     !consumeBudget(
       budget,
+      "analysis",
       "DEXSCREENER"
     )
   ) {
     return {
       verified: false,
+
       status:
-        "REQUEST_BUDGET_SKIPPED"
+        "ANALYSIS_BUDGET_PROTECTED"
     };
   }
 
@@ -1768,6 +2087,7 @@ async function marketData(
     if (!response.ok) {
       return {
         verified: false,
+
         status:
           `HTTP_${response.status}`
       };
@@ -1784,6 +2104,7 @@ async function marketData(
     if (!pairs.length) {
       return {
         verified: false,
+
         status:
           "NO_MARKET_FOUND"
       };
@@ -1818,7 +2139,9 @@ async function marketData(
 
     return {
       verified: true,
-      status: "VERIFIED",
+
+      status:
+        "VERIFIED",
 
       pairAddress:
         p?.pairAddress ||
@@ -1876,9 +2199,11 @@ async function marketData(
 
       buyPressure1h:
         total > 0
-          ? buys1h /
-            total *
-            100
+          ? (
+              buys1h /
+              total *
+              100
+            )
           : null,
 
       pairCreatedAt:
@@ -1890,8 +2215,10 @@ async function marketData(
   } catch (error) {
     return {
       verified: false,
+
       status:
         "DEXSCREENER_ERROR",
+
       error:
         errorString(error)
     };
@@ -1910,6 +2237,7 @@ async function blockscout(
   if (
     !consumeBudget(
       budget,
+      "analysis",
       "BLOCKSCOUT"
     )
   ) {
@@ -1958,11 +2286,14 @@ function holderPercent(
       return null;
     }
 
-    return Number(
-      held *
-      1000000n /
-      total
-    ) / 10000;
+    return (
+      Number(
+        held *
+        1000000n /
+        total
+      ) /
+      10000
+    );
 
   } catch {
     return null;
@@ -2006,27 +2337,38 @@ function extractHolderAddress(
 function unverifiedHolders() {
   return {
     verified: false,
+
     holderCount: null,
     transferCount: null,
+
     topHolders: [],
 
     whale: {
       verified: false,
+
       whaleCount: null,
+
       top1Percent: null,
       top5Percent: null,
       top10Percent: null,
+
       concentrationRisk:
         "UNVERIFIED",
+
       flow:
         "NOT_VERIFIED",
+
       accumulation:
         "NOT_VERIFIED",
+
       distribution:
         "NOT_VERIFIED",
+
       smartMoneyScore: 0,
+
       smartMoneyCandidate:
         false,
+
       smartMoneyVerified:
         false
     }
@@ -2038,6 +2380,17 @@ async function holderIntelligence(
   totalSupply,
   budget
 ) {
+  if (
+    !totalSupply ||
+    !budgetAvailable(
+      budget,
+      "analysis",
+      2
+    )
+  ) {
+    return unverifiedHolders();
+  }
+
   const counters =
     await blockscout(
       `/api/v2/tokens/${token}/counters`,
@@ -2244,7 +2597,7 @@ async function holderIntelligence(
 
 
 /* =========================================================
-   V75/V76 WHALE FLOW
+   WHALE FLOW
    ========================================================= */
 
 function analyseWhaleFlow(
@@ -2258,14 +2611,21 @@ function analyseWhaleFlow(
   ) {
     return {
       verified: false,
-      flow: "BUILDING_HISTORY",
+
+      flow:
+        "BUILDING_HISTORY",
+
       accumulation:
         "NOT_VERIFIED",
+
       distribution:
         "NOT_VERIFIED",
+
       concentrationTrend:
         "NOT_VERIFIED",
+
       score: 0,
+
       reasons: []
     };
   }
@@ -2317,7 +2677,9 @@ function analyseWhaleFlow(
         "Top-10 whale concentration increasing"
       );
 
-    } else if (change <= -2) {
+    } else if (
+      change <= -2
+    ) {
       concentrationTrend =
         "DECREASING";
 
@@ -2414,24 +2776,32 @@ function analyseWhaleFlow(
       const oldValue =
         BigInt(
           String(
-            old.value || "0"
+            old.value ||
+            "0"
           )
         );
 
       const newValue =
         BigInt(
           String(
-            holder.value || "0"
+            holder.value ||
+            "0"
           )
         );
 
       comparable++;
 
-      if (newValue > oldValue) {
+      if (
+        newValue >
+        oldValue
+      ) {
         increasing++;
       }
 
-      if (newValue < oldValue) {
+      if (
+        newValue <
+        oldValue
+      ) {
         decreasing++;
       }
 
@@ -2440,7 +2810,8 @@ function analyseWhaleFlow(
 
   if (
     comparable >= 2 &&
-    increasing > decreasing
+    increasing >
+      decreasing
   ) {
     score += 25;
 
@@ -2451,7 +2822,8 @@ function analyseWhaleFlow(
 
   if (
     comparable >= 2 &&
-    decreasing > increasing
+    decreasing >
+      increasing
   ) {
     score -= 20;
 
@@ -2471,7 +2843,8 @@ function analyseWhaleFlow(
 
   if (
     increasing >= 2 &&
-    increasing > decreasing
+    increasing >
+      decreasing
   ) {
     flow =
       "NET_ACCUMULATION";
@@ -2485,7 +2858,8 @@ function analyseWhaleFlow(
 
   if (
     decreasing >= 2 &&
-    decreasing > increasing
+    decreasing >
+      increasing
   ) {
     flow =
       "NET_DISTRIBUTION";
@@ -2502,9 +2876,7 @@ function analyseWhaleFlow(
       comparable > 0,
 
     flow,
-
     accumulation,
-
     distribution,
 
     concentrationTrend,
@@ -2543,21 +2915,30 @@ function momentumAnalysis(
     return {
       verified: false,
       score: 0,
+
       label:
         "BUILDING_HISTORY",
+
       historyAgeMinutes:
         null,
+
       positiveSignals: 0,
+
       holderGrowthPercent:
         null,
+
       transferGrowthPercent:
         null,
+
       liquidityGrowthPercent:
         null,
+
       volumeH1GrowthPercent:
         null,
+
       transactionGrowthPercent:
         null,
+
       reasons: [
         "Waiting for historical snapshot"
       ]
@@ -2581,20 +2962,29 @@ function momentumAnalysis(
     return {
       verified: false,
       score: 0,
+
       label:
         "BUILDING_HISTORY",
+
       historyAgeMinutes,
+
       positiveSignals: 0,
+
       holderGrowthPercent:
         null,
+
       transferGrowthPercent:
         null,
+
       liquidityGrowthPercent:
         null,
+
       volumeH1GrowthPercent:
         null,
+
       transactionGrowthPercent:
         null,
+
       reasons: [
         "Historical snapshot too recent"
       ]
@@ -2753,7 +3143,9 @@ function momentumAnalysis(
       score += 5;
     }
 
-    if (volumeGrowth > 0) {
+    if (
+      volumeGrowth > 0
+    ) {
       reasons.push(
         `Volume acceleration ${volumeGrowth.toFixed(1)}%`
       );
@@ -2784,6 +3176,7 @@ function momentumAnalysis(
     buyPressure >= 70
   ) {
     score += 12;
+
     reasons.push(
       "Very strong buy pressure"
     );
@@ -2793,6 +3186,7 @@ function momentumAnalysis(
     buyPressure >= 60
   ) {
     score += 7;
+
     reasons.push(
       "Positive buy pressure"
     );
@@ -2835,7 +3229,9 @@ function momentumAnalysis(
     positiveSignals++;
   }
 
-  if (positiveSignals >= 4) {
+  if (
+    positiveSignals >= 4
+  ) {
     score += 10;
 
     reasons.push(
@@ -2869,6 +3265,7 @@ function momentumAnalysis(
             : "WEAK",
 
     historyAgeMinutes,
+
     positiveSignals,
 
     holderGrowthPercent:
@@ -2902,17 +3299,22 @@ function marketQuality(
     return {
       verified: false,
       score: 0,
+
       liquidityMarketCapRatio:
         null,
+
       volumeLiquidityRatio:
         null,
+
       pairAgeMinutes:
         null,
+
       reasons: []
     };
   }
 
   let score = 0;
+
   const reasons = [];
 
   const liquidity =
@@ -3084,17 +3486,22 @@ function scoreRisk(
   whaleFlow
 ) {
   let score = 50;
+
   const reasons = [];
 
   if (token.validERC20) {
     score -= 15;
+
     reasons.push(
       "Verified ERC-20"
     );
   }
 
-  if (activity.swaps > 0) {
+  if (
+    activity.swaps > 0
+  ) {
     score -= 7;
+
     reasons.push(
       "Active V4 swaps"
     );
@@ -3205,10 +3612,12 @@ function scoreOpportunity(
   whaleFlow
 ) {
   let score = 0;
+
   const reasons = [];
 
   if (token.validERC20) {
     score += 20;
+
     reasons.push(
       "Verified ERC-20"
     );
@@ -3221,7 +3630,9 @@ function scoreOpportunity(
     score += 5;
   }
 
-  if (activity.swaps > 0) {
+  if (
+    activity.swaps > 0
+  ) {
     score += 10;
 
     reasons.push(
@@ -3301,13 +3712,15 @@ function scoreOpportunity(
 
   if (holders?.verified) {
     if (
-      holders.holderCount >= 50
+      holders.holderCount >=
+      50
     ) {
       score += 4;
     }
 
     if (
-      holders.holderCount >= 200
+      holders.holderCount >=
+      200
     ) {
       score += 4;
     }
@@ -3444,9 +3857,12 @@ function candidateConfidence(
   candidate
 ) {
   let score = 0;
+
   const reasons = [];
 
-  if (candidate.validERC20) {
+  if (
+    candidate.validERC20
+  ) {
     score += 15;
   }
 
@@ -3454,6 +3870,7 @@ function candidateConfidence(
     candidate.market?.verified
   ) {
     score += 20;
+
     reasons.push(
       "Market data verified"
     );
@@ -3463,6 +3880,7 @@ function candidateConfidence(
     candidate.holders?.verified
   ) {
     score += 15;
+
     reasons.push(
       "Holder data verified"
     );
@@ -3537,13 +3955,20 @@ function candidateConfidence(
 
 
 /* =========================================================
-   WATCH PRIORITY
+   V77 WATCH PRIORITY
    ========================================================= */
 
 function watchPriority(
-  watched
+  watched,
+  newTokens =
+    new Set()
 ) {
   let score = 0;
+
+  const key =
+    normalize(
+      watched.address
+    );
 
   if (
     !knownQuote(
@@ -3553,17 +3978,25 @@ function watchPriority(
     score += 1000;
   }
 
-  const metadataSymbol =
-    watched.metadata
-      ?.symbol;
-
   if (
     knownQuoteMetadata(
       watched.address,
-      metadataSymbol
+      watched.metadata
+        ?.symbol
     )
   ) {
     score -= 2000;
+  }
+
+  /*
+   * V77:
+   * Brand-new discoveries get immediate priority.
+   */
+
+  if (
+    newTokens.has(key)
+  ) {
+    score += 1000;
   }
 
   const lastChecked =
@@ -3573,6 +4006,7 @@ function watchPriority(
 
   if (!lastChecked) {
     score += 500;
+
   } else {
     score +=
       Math.min(
@@ -3665,6 +4099,7 @@ async function telegram(
   ) {
     return {
       sent: false,
+
       reason:
         "TELEGRAM_NOT_CONFIGURED"
     };
@@ -3676,6 +4111,7 @@ async function telegram(
   ) {
     return {
       sent: false,
+
       reason:
         "UNVERIFIED_CANDIDATE"
     };
@@ -3688,6 +4124,7 @@ async function telegram(
   ) {
     return {
       sent: false,
+
       reason:
         "LOW_LIQUIDITY"
     };
@@ -3699,6 +4136,7 @@ async function telegram(
   ) {
     return {
       sent: false,
+
       reason:
         "RISK_TOO_HIGH"
     };
@@ -3710,6 +4148,7 @@ async function telegram(
   ) {
     return {
       sent: false,
+
       reason:
         "SCORE_TOO_LOW"
     };
@@ -3724,6 +4163,7 @@ async function telegram(
   ) {
     return {
       sent: false,
+
       reason:
         "CONFIDENCE_TOO_LOW"
     };
@@ -3737,6 +4177,7 @@ async function telegram(
   ) {
     return {
       sent: false,
+
       reason:
         "COOLDOWN"
     };
@@ -3745,13 +4186,15 @@ async function telegram(
   if (
     !consumeBudget(
       budget,
+      "analysis",
       "TELEGRAM"
     )
   ) {
     return {
       sent: false,
+
       reason:
-        "REQUEST_BUDGET_SKIPPED"
+        "ANALYSIS_BUDGET_PROTECTED"
     };
   }
 
@@ -3763,7 +4206,7 @@ async function telegram(
     candidate.whaleFlow;
 
   const message =
-`🚨 Robinhood Chain Meme Hunter V76
+`🚨 Robinhood Chain Meme Hunter V77
 
 🪙 ${candidate.name || "Unknown"} (${candidate.symbol || "?"})
 
@@ -3840,8 +4283,10 @@ ${candidate.address}
     ) {
       return {
         sent: false,
+
         reason:
           "TELEGRAM_API_ERROR",
+
         status:
           response.status
       };
@@ -3875,8 +4320,10 @@ ${candidate.address}
   } catch (error) {
     return {
       sent: false,
+
       reason:
         "TELEGRAM_REQUEST_FAILED",
+
       error:
         errorString(error)
     };
@@ -3885,7 +4332,7 @@ ${candidate.address}
 
 
 /* =========================================================
-   SCAN
+   V77 SCAN
    ========================================================= */
 
 async function scan(env) {
@@ -3930,6 +4377,7 @@ async function scan(env) {
     from =
       BigInt(previous) +
       1n;
+
   } else {
     from =
       latestNumber -
@@ -3967,12 +4415,17 @@ async function scan(env) {
       targetBlocks - 1
     );
 
-  if (to > latestNumber) {
-    to = latestNumber;
+  if (
+    to >
+    latestNumber
+  ) {
+    to =
+      latestNumber;
   }
 
   const upToDate =
-    from > latestNumber;
+    from >
+    latestNumber;
 
   const scanOutput = {
     logs: [],
@@ -3985,16 +4438,25 @@ async function scan(env) {
       ? BigInt(previous)
       : null;
 
-  let failedRange = null;
+  let failedRange =
+    null;
+
+  /*
+   * =======================================================
+   * PHASE 1 — DISCOVERY
+   * =======================================================
+   */
 
   if (!upToDate) {
-    let cursor = from;
+    let cursor =
+      from;
 
     while (
       cursor <= to &&
-      discoveryBudgetAvailable(
+      budgetAvailable(
         budget,
-        3
+        "discovery",
+        1
       )
     ) {
       let end =
@@ -4025,12 +4487,11 @@ async function scan(env) {
             Number(end),
 
           error:
-            result.analysisBudgetReserved
-              ? "ANALYSIS_BUDGET_RESERVED"
-              : result.budgetExhausted
-                ? "REQUEST_BUDGET_EXHAUSTED"
-                : result.error ||
-                  "SCAN_FAILED"
+            result
+              .discoveryBudgetExhausted
+              ? "DISCOVERY_BUDGET_EXHAUSTED_ANALYSIS_PROTECTED"
+              : result.error ||
+                "SCAN_FAILED"
         };
 
         if (
@@ -4054,16 +4515,13 @@ async function scan(env) {
         1n;
     }
 
-    /*
-     * If the outer loop stopped because the V76 discovery
-     * allocation was reached, explicitly report it.
-     */
     if (
       !failedRange &&
       cursor <= to &&
-      !discoveryBudgetAvailable(
+      !budgetAvailable(
         budget,
-        3
+        "discovery",
+        1
       )
     ) {
       failedRange = {
@@ -4074,10 +4532,14 @@ async function scan(env) {
           Number(to),
 
         error:
-          "ANALYSIS_BUDGET_RESERVED"
+          "DISCOVERY_BUDGET_EXHAUSTED_ANALYSIS_PROTECTED"
       };
     }
   }
+
+  /*
+   * Only persist successfully processed blocks.
+   */
 
   if (
     stateResult.persistent &&
@@ -4129,22 +4591,55 @@ async function scan(env) {
         continue;
       }
 
-      addWatch(
-        state,
-        address,
-        pool
-      );
+      const added =
+        addWatch(
+          state,
+          address,
+          pool
+        );
+
+      /*
+       * Even if already watched, a newly observed
+       * initialize event receives V77 priority.
+       */
 
       newTokens.add(
         normalize(address)
       );
+
+      if (added) {
+        const watched =
+          state.watchedTokens.find(
+            item =>
+              normalize(
+                item.address
+              ) ===
+              normalize(
+                address
+              )
+          );
+
+        if (watched) {
+          watched.newDiscovery =
+            true;
+        }
+      }
     }
   }
 
   pruneState(state);
 
-  const validationResults = [];
-  const verified = [];
+  /*
+   * =======================================================
+   * PHASE 2 — PROTECTED ANALYSIS
+   * =======================================================
+   */
+
+  const validationResults =
+    [];
+
+  const verified =
+    [];
 
   const candidatesToCheck =
     [...state.watchedTokens]
@@ -4158,8 +4653,14 @@ async function scan(env) {
       )
       .sort(
         (a, b) =>
-          watchPriority(b) -
-          watchPriority(a)
+          watchPriority(
+            b,
+            newTokens
+          ) -
+          watchPriority(
+            a,
+            newTokens
+          )
       )
       .slice(
         0,
@@ -4170,9 +4671,15 @@ async function scan(env) {
     const watched
     of candidatesToCheck
   ) {
+    /*
+     * Leave enough analysis budget for at least
+     * one market lookup after validation.
+     */
+
     if (
       !budgetAvailable(
         budget,
+        "analysis",
         5
       )
     ) {
@@ -4197,6 +4704,9 @@ async function scan(env) {
     watched.metadata =
       token;
 
+    watched.newDiscovery =
+      false;
+
     const infrastructure =
       knownQuoteMetadata(
         watched.address,
@@ -4209,7 +4719,15 @@ async function scan(env) {
 
       priority:
         watchPriority(
-          watched
+          watched,
+          newTokens
+        ),
+
+      newlyDiscovered:
+        newTokens.has(
+          normalize(
+            watched.address
+          )
         ),
 
       knownQuoteToken:
@@ -4232,10 +4750,12 @@ async function scan(env) {
   verified.sort(
     (a, b) =>
       watchPriority(
-        b.watched
+        b.watched,
+        newTokens
       ) -
       watchPriority(
-        a.watched
+        a.watched,
+        newTokens
       )
   );
 
@@ -4258,7 +4778,8 @@ async function scan(env) {
     if (
       !budgetAvailable(
         budget,
-        2
+        "analysis",
+        1
       )
     ) {
       break;
@@ -4283,8 +4804,10 @@ async function scan(env) {
     if (
       holderLookups <
         MAX_HOLDER_LOOKUPS &&
+      token.totalSupply &&
       budgetAvailable(
         budget,
+        "analysis",
         2
       )
     ) {
@@ -4328,7 +4851,9 @@ async function scan(env) {
         holders
       );
 
-    if (holders?.whale) {
+    if (
+      holders?.whale
+    ) {
       holders.whale.flow =
         whaleFlow.flow;
 
@@ -4384,6 +4909,13 @@ async function scan(env) {
       address:
         watched.address,
 
+      newlyDiscovered:
+        newTokens.has(
+          normalize(
+            watched.address
+          )
+        ),
+
       knownQuoteToken:
         false,
 
@@ -4410,7 +4942,8 @@ async function scan(env) {
           ?.length || 0,
 
       pools:
-        watched.pools || [],
+        watched.pools ||
+        [],
 
       activity,
       market,
@@ -4448,19 +4981,39 @@ async function scan(env) {
 
   analysed.sort(
     (a, b) => {
+      /*
+       * V77:
+       * Opportunity remains primary ranking,
+       * but new discoveries receive a small
+       * tie-break advantage.
+       */
+
       const opportunityDiff =
         b.opportunity.score -
         a.opportunity.score;
 
-      if (opportunityDiff) {
+      if (
+        opportunityDiff
+      ) {
         return opportunityDiff;
+      }
+
+      if (
+        a.newlyDiscovered !==
+        b.newlyDiscovered
+      ) {
+        return b.newlyDiscovered
+          ? 1
+          : -1;
       }
 
       const confidenceDiff =
         b.confidence.score -
         a.confidence.score;
 
-      if (confidenceDiff) {
+      if (
+        confidenceDiff
+      ) {
         return confidenceDiff;
       }
 
@@ -4494,7 +5047,8 @@ async function scan(env) {
           MIN_CONFIDENCE_ALERT
     );
 
-  const telegramResults = [];
+  const telegramResults =
+    [];
 
   for (
     const candidate
@@ -4506,6 +5060,7 @@ async function scan(env) {
     if (
       !budgetAvailable(
         budget,
+        "analysis",
         1
       )
     ) {
@@ -4556,25 +5111,31 @@ async function scan(env) {
   const scanMode =
     !stateResult.persistent
       ? "NON_PERSISTENT_RECENT_WINDOW"
+
       : backlogRemaining >
           BACKLOG_LIVE_THRESHOLD
         ? "PERSISTENT_FAST_CATCHUP"
+
         : "PERSISTENT_LIVE";
 
-  const scanStatus =
-    failedRange
-      ? (
-          failedRange.error ===
-            "ANALYSIS_BUDGET_RESERVED"
-            ? "CATCHUP_PAUSED_FOR_ANALYSIS"
+  let scanStatus =
+    "OK";
 
-            : failedRange.error ===
-                "REQUEST_BUDGET_EXHAUSTED"
-              ? "BUDGET_LIMIT_REACHED"
+  if (failedRange) {
+    if (
+      failedRange.error ===
+      "DISCOVERY_BUDGET_EXHAUSTED_ANALYSIS_PROTECTED"
+    ) {
+      scanStatus =
+        analysed.length
+          ? "CATCHUP_PAUSED_ANALYSIS_COMPLETED"
+          : "CATCHUP_PAUSED_ANALYSIS_PROTECTED";
 
-              : "PARTIAL"
-        )
-      : "OK";
+    } else {
+      scanStatus =
+        "PARTIAL";
+    }
+  }
 
   return {
     agent:
@@ -4584,15 +5145,9 @@ async function scan(env) {
       VERSION,
 
     success:
-      (
-        !failedRange ||
-
-        failedRange.error ===
-          "REQUEST_BUDGET_EXHAUSTED" ||
-
-        failedRange.error ===
-          "ANALYSIS_BUDGET_RESERVED"
-      ),
+      !failedRange ||
+      failedRange.error ===
+        "DISCOVERY_BUDGET_EXHAUSTED_ANALYSIS_PROTECTED",
 
     scan: {
       status:
@@ -4645,32 +5200,10 @@ async function scan(env) {
           CATCHUP_TARGET_BLOCKS
       },
 
-      requestBudget: {
-        used:
-          budget.used,
-
-        limit:
-          budget.limit,
-
-        remaining:
-          Math.max(
-            0,
-            budget.limit -
-            budget.used
-          ),
-
-        discoveryLimit:
-          MAX_DISCOVERY_REQUESTS,
-
-        reservedForAnalysis:
-          RESERVED_ANALYSIS_REQUESTS,
-
-        analysisBudgetProtected:
-          true,
-
-        skipped:
-          budget.skipped
-      },
+      requestBudget:
+        budgetTelemetry(
+          budget
+        ),
 
       rangesCompleted:
         scanOutput.ranges,
@@ -4747,76 +5280,91 @@ async function scan(env) {
             : "DISABLED",
 
         adaptiveCatchup:
-          "ENABLED_V76",
+          "ENABLED_V77",
 
         failedRangeProtection:
           "ENABLED",
 
         requestBudget:
-          "PARTITIONED_V76",
+          "HARD_PHASE_ISOLATION_V77",
+
+        discoveryBudget:
+          DISCOVERY_REQUEST_LIMIT,
+
+        analysisBudget:
+          ANALYSIS_REQUEST_LIMIT,
 
         analysisBudgetProtection:
-          "ENABLED_V76",
+          "HARD_PROTECTED_V77",
+
+        discoveryCanConsumeAnalysis:
+          false,
+
+        candidateAnalysisAfterCatchupPause:
+          "ENABLED_V77",
 
         infrastructureFiltering:
-          "ENABLED_V76",
+          "ENABLED_V77",
 
         candidateRotation:
-          "ENABLED_V76",
+          "ENABLED_V77",
+
+        newLaunchPriority:
+          "ENABLED_V77",
 
         poolSpecificActivity:
           "ENABLED",
 
         historicalSnapshots:
-          "ENABLED_V76",
+          "ENABLED_V77",
 
         momentumSnapshotAgeProtection:
-          "ENABLED_V76",
+          "ENABLED_V77",
 
         holderGrowth:
-          "ENABLED_V76",
+          "ENABLED_V77",
 
         liquidityGrowth:
-          "ENABLED_V76",
+          "ENABLED_V77",
 
         volumeAcceleration:
-          "ENABLED_V76",
+          "ENABLED_V77",
 
         transactionAcceleration:
-          "ENABLED_V76",
+          "ENABLED_V77",
 
         momentumScoring:
-          "ENABLED_V76",
+          "ENABLED_V77",
 
         multiSignalConfirmation:
-          "ENABLED_V76",
+          "ENABLED_V77",
 
         earlyLaunchDetection:
-          "ENABLED_V76",
+          "ENABLED_V77",
 
         marketQuality:
-          "ENABLED_V76",
+          "ENABLED_V77",
 
         candidateConfidence:
-          "ENABLED_V76",
+          "ENABLED_V77",
 
         whaleConcentration:
           "ENABLED",
 
         whaleFlow:
-          "OBSERVED_BALANCE_CHANGE_V76",
+          "OBSERVED_BALANCE_CHANGE_V77",
 
         whaleAccumulation:
-          "ENABLED_V76",
+          "ENABLED_V77",
 
         whaleDistribution:
-          "ENABLED_V76",
+          "ENABLED_V77",
 
         concentrationTrend:
-          "ENABLED_V76",
+          "ENABLED_V77",
 
         smartMoney:
-          "BEHAVIOUR_CANDIDATE_SCORING_V76",
+          "BEHAVIOUR_CANDIDATE_SCORING_V77",
 
         smartMoneyVerified:
           false,
@@ -4826,7 +5374,7 @@ async function scan(env) {
       },
 
       architecture:
-        "V76_BUDGET_PROTECTED_EARLY_MOMENTUM_WHALE_FLOW_HUNTER"
+        "V77_HARD_BUDGET_ISOLATED_EARLY_MOMENTUM_WHALE_FLOW_HUNTER"
     },
 
     chain: {
@@ -4992,18 +5540,21 @@ async function health(env) {
       totalRequests:
         MAX_EXTERNAL_REQUESTS,
 
-      discoveryLimit:
-        MAX_DISCOVERY_REQUESTS,
+      systemRequests:
+        SYSTEM_REQUEST_LIMIT,
 
-      reservedAnalysisRequests:
-        RESERVED_ANALYSIS_REQUESTS,
+      discoveryRequests:
+        DISCOVERY_REQUEST_LIMIT,
 
-      analysisBudgetProtection:
+      protectedAnalysisRequests:
+        ANALYSIS_REQUEST_LIMIT,
+
+      hardPhaseIsolation:
         true
     },
 
     architecture:
-      "V76_BUDGET_PROTECTED_EARLY_MOMENTUM_WHALE_FLOW_HUNTER",
+      "V77_HARD_BUDGET_ISOLATED_EARLY_MOMENTUM_WHALE_FLOW_HUNTER",
 
     timestamp:
       now()
@@ -5147,6 +5698,10 @@ async function rpcTest(env) {
       budget
     );
 
+  /*
+   * rpc-test uses discovery phase for the log test.
+   */
+
   const from =
     latest.block > 2n
       ? latest.block - 2n
@@ -5190,8 +5745,10 @@ async function rpcTest(env) {
     error:
       logs.error,
 
-    requestBudgetUsed:
-      budget.used,
+    requestBudget:
+      budgetTelemetry(
+        budget
+      ),
 
     timestamp:
       now()
@@ -5283,7 +5840,9 @@ async function diagnostics(env) {
     };
   }
 
-  if (checks.rpc.success) {
+  if (
+    checks.rpc.success
+  ) {
     try {
       const latest =
         BigInt(
@@ -5366,34 +5925,53 @@ async function diagnostics(env) {
 
   checks.dexscreener = {
     configured: true,
+
     mode:
       "PUBLIC_API"
   };
 
   checks.blockscout = {
     configured: true,
+
     mode:
       "PUBLIC_API"
   };
 
-  checks.v76 = {
-    adaptiveCatchup: true,
-
-    requestBudget: true,
-
-    partitionedRequestBudget:
+  checks.v77 = {
+    adaptiveCatchup:
       true,
 
+    hardPhaseBudgetIsolation:
+      true,
+
+    totalRequestLimit:
+      MAX_EXTERNAL_REQUESTS,
+
+    systemRequestLimit:
+      SYSTEM_REQUEST_LIMIT,
+
     discoveryRequestLimit:
-      MAX_DISCOVERY_REQUESTS,
+      DISCOVERY_REQUEST_LIMIT,
 
-    reservedAnalysisRequests:
-      RESERVED_ANALYSIS_REQUESTS,
+    protectedAnalysisRequests:
+      ANALYSIS_REQUEST_LIMIT,
 
-    analysisBudgetProtection:
+    discoveryCanConsumeAnalysis:
+      false,
+
+    candidateAnalysisAfterCatchupPause:
+      true,
+
+    rpcFallbackPhaseAccounting:
       true,
 
     infrastructureFiltering:
+      true,
+
+    candidateRotation:
+      true,
+
+    newLaunchPriority:
       true,
 
     momentumHistory:
@@ -5492,11 +6070,13 @@ async function diagnostics(env) {
       )
     ],
 
-    requestBudgetUsed:
-      budget.used,
+    requestBudget:
+      budgetTelemetry(
+        budget
+      ),
 
     architecture:
-      "V76_BUDGET_PROTECTED_EARLY_MOMENTUM_WHALE_FLOW_HUNTER",
+      "V77_HARD_BUDGET_ISOLATED_EARLY_MOMENTUM_WHALE_FLOW_HUNTER",
 
     timestamp:
       now()
@@ -5541,8 +6121,11 @@ async function runAll(env) {
   const started =
     Date.now();
 
-  let scanResult = null;
-  let scanError = null;
+  let scanResult =
+    null;
+
+  let scanError =
+    null;
 
   try {
     scanResult =
@@ -5581,7 +6164,9 @@ async function runAll(env) {
     errors:
       scanError
         ? [{
-            test: "scan",
+            test:
+              "scan",
+
             error:
               scanError
           }]
@@ -5599,7 +6184,7 @@ async function runAll(env) {
         ),
 
       note:
-        "V76 /run-all keeps duplicate network tests disabled. Use /diagnostics and /rpc-test separately."
+        "V77 /run-all avoids duplicate network diagnostics. Use /diagnostics and /rpc-test separately."
     },
 
     timestamp:
@@ -5748,7 +6333,7 @@ export default {
           console.log(
             JSON.stringify({
               event:
-                "V76_SCHEDULED_SCAN",
+                "V77_SCHEDULED_SCAN",
 
               success:
                 result.success,
@@ -5780,19 +6365,52 @@ export default {
                   ?.persistence
                   ?.healthy,
 
-              requestsUsed:
+              totalRequests:
                 result.scan
                   ?.requestBudget
                   ?.used,
 
-              analysisBudgetProtected:
+              discoveryRequests:
                 result.scan
                   ?.requestBudget
-                  ?.analysisBudgetProtected,
+                  ?.discovery
+                  ?.used,
+
+              analysisRequests:
+                result.scan
+                  ?.requestBudget
+                  ?.analysis
+                  ?.used,
+
+              analysisBudgetRemaining:
+                result.scan
+                  ?.requestBudget
+                  ?.analysis
+                  ?.remaining,
+
+              hardPhaseIsolation:
+                result.scan
+                  ?.requestBudget
+                  ?.hardPhaseIsolation,
 
               watchedTokens:
                 result.scan
                   ?.watchedTokens ||
+                0,
+
+              validationChecks:
+                result.scan
+                  ?.tokenValidationChecks ||
+                0,
+
+              marketLookups:
+                result.scan
+                  ?.marketLookups ||
+                0,
+
+              holderLookups:
+                result.scan
+                  ?.holderLookups ||
                 0,
 
               candidates:
@@ -5818,7 +6436,7 @@ export default {
         })
         .catch(error => {
           console.error(
-            "V76 scheduled scan failed",
+            "V77 scheduled scan failed",
             error
           );
 
