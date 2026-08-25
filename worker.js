@@ -1,33 +1,37 @@
 /**
  * Robinhood Chain Meme Hunter
- * V83
+ * V84
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V83:
- * - Preserves V82 live-first architecture
- * - Preserves existing KV state key
- * - FIX: replaces huge recursive backlog scan with small sequential chunks
- * - FIX: backlog cursor now advances every successful small chunk
- * - FIX: prevents backlog request-budget lock-up
- * - FIX: Alchemy-first RPC for analysis/log workloads when configured
- * - FIX: removes repeated public->Alchemy request doubling
- * - FIX: fallback-aware token analysis budgeting
- * - FIX: Blockscout counters failure no longer kills holder analysis
- * - FIX: Blockscout token-details fallback for holder counters
- * - FIX: holder concentration can remain usable without counters
- * - FIX: scheduled 5-minute cron heartbeat stored in KV
- * - FIX: scheduled run count + last run exposed in /health and /state
- * - FIX: unknown live V4 pool IDs exposed for discovery diagnostics
- * - FIX: smarter watchlist retention and invalid-token penalties
- * - Preserves holder-integrity protection
+ * V84:
+ * - Preserves full V83 capability set
+ * - Preserves existing KV state key/history
+ * - FIX: DexScreener HTTP 429 cooldown protection
+ * - FIX: persistent DexScreener service cooldown in KV
+ * - FIX: per-token market-data cache
+ * - FIX: stale-cache fallback during DexScreener rate limiting
+ * - FIX: prevents repeated DexScreener hammering after 429
+ * - FIX: empty holder lists can NOT be classified LOW concentration
+ * - FIX: zero holder balances can NOT be classified LOW concentration
+ * - FIX: "Healthy holder concentration" requires real holder balances
+ * - FIX: tokenized Robinhood stocks/securities automatically excluded
+ * - FIX: excluded infrastructure/security tokens lose watch priority
+ * - Preserves live-first scanning
+ * - Preserves sequential backlog catch-up
+ * - Preserves unknown live V4 pool telemetry
+ * - Preserves ERC20 validation
+ * - Preserves Blockscout intelligence/fallbacks
+ * - Preserves holder integrity protection
  * - Preserves momentum snapshots
- * - Preserves whale-flow tracking
- * - Preserves scoring / Telegram thresholds
+ * - Preserves whale flow
+ * - Preserves opportunity/risk/confidence scoring
+ * - Preserves Telegram alerts
+ * - Preserves five-minute scheduled heartbeat tracking
  * - Preserves hard request-budget isolation
  */
 
-const VERSION = "V83";
+const VERSION = "V84";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -45,7 +49,7 @@ const ZERO =
 
 /*
  * IMPORTANT:
- * Preserve existing V69-V82 state.
+ * Preserve existing V69-V83 state.
  */
 const STATE_KEY =
   "robinhood-meme-hunter-v69-state";
@@ -82,39 +86,19 @@ const MODIFY_LIQUIDITY_TOPIC =
   "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec";
 
 /* =========================================================
-   SCANNING — V83
+   SCANNING
    ========================================================= */
 
 const LIVE_SCAN_BLOCKS = 20;
 
-/*
- * V83:
- * Stop attempting 2,000-block backlog ranges.
- *
- * Robinhood RPC behaviour observed in V82 showed those large
- * ranges could consume the entire backlog request allowance
- * before completing even one safe range.
- *
- * Backlog is now processed sequentially in small 10-block
- * chunks. Every successful chunk moves the cursor.
- */
 const BACKLOG_CHUNK_BLOCKS = 10;
 const BACKLOG_MAX_CHUNKS_PER_SCAN = 5;
 
 const MIN_LOG_RANGE = 10;
 
 /* =========================================================
-   HARD REQUEST BUDGET — V83
+   HARD REQUEST BUDGET
    ========================================================= */
-
-/*
- * 2 system
- * 17 discovery
- * 21 analysis
- * 2 notification
- * ----------------
- * 42 maximum
- */
 
 const MAX_EXTERNAL_REQUESTS = 42;
 
@@ -127,28 +111,8 @@ const BACKLOG_DISCOVERY_REQUEST_LIMIT = 9;
 const ANALYSIS_REQUEST_LIMIT = 21;
 const NOTIFICATION_REQUEST_LIMIT = 2;
 
-/*
- * Alchemy-first analysis:
- *
- * Fresh:
- *   5 ERC20 RPC
- *   1 DexScreener
- *   2 Blockscout normal
- *   +1 Blockscout fallback allowance
- * = 9
- *
- * Cached:
- *   1 DexScreener
- *   2 Blockscout normal
- *   +1 fallback
- * = 4
- *
- * Without Alchemy we reserve more because RPC fallback can
- * cause additional requests.
- */
 const FRESH_ANALYSIS_COST_ALCHEMY = 9;
 const FRESH_ANALYSIS_COST_FALLBACK = 14;
-
 const CACHED_ANALYSIS_COST = 4;
 
 /* =========================================================
@@ -159,6 +123,35 @@ const MAX_TOKEN_CHECKS = 4;
 
 const METADATA_REUSE_MS =
   30 * 60 * 1000;
+
+/* =========================================================
+   DEXSCREENER — V84
+   ========================================================= */
+
+/*
+ * Normal verified market data can be reused for 4 minutes.
+ *
+ * Cron is every 5 minutes, so normal scheduled scans can
+ * still build fresh momentum while duplicate/manual scans
+ * do not repeatedly hammer DexScreener.
+ */
+const MARKET_CACHE_MS =
+  4 * 60 * 1000;
+
+/*
+ * During 429 rate limiting we can temporarily reuse market
+ * data up to 15 minutes old rather than inventing data or
+ * hammering the API repeatedly.
+ */
+const MARKET_STALE_CACHE_MS =
+  15 * 60 * 1000;
+
+/*
+ * One 429 pauses fresh DexScreener calls globally for five
+ * minutes. State persists this across Worker invocations.
+ */
+const DEXSCREENER_429_COOLDOWN_MS =
+  5 * 60 * 1000;
 
 /* =========================================================
    WATCHLIST
@@ -213,10 +206,7 @@ function safeNumber(value) {
 }
 
 function clamp(value, min, max) {
-  return Math.max(
-    min,
-    Math.min(max, value)
-  );
+  return Math.max(min, Math.min(max, value));
 }
 
 function normalize(value) {
@@ -240,9 +230,7 @@ function errorString(error) {
 function topicAddress(topic) {
   const value = String(topic || "");
 
-  if (
-    !/^0x[a-fA-F0-9]{64}$/.test(value)
-  ) {
+  if (!/^0x[a-fA-F0-9]{64}$/.test(value)) {
     return null;
   }
 
@@ -269,6 +257,60 @@ function knownQuoteMetadata(
   return KNOWN_QUOTE_SYMBOLS.has(
     String(symbol || "").toUpperCase()
   );
+}
+
+/*
+ * V84:
+ * Strict tokenized-security detection.
+ *
+ * We intentionally avoid broad rules like simply matching
+ * the word "stock", because meme coins can use that word.
+ *
+ * The patterns below target Robinhood's tokenized-security
+ * naming structure seen in live V83 results.
+ */
+function tokenizedSecurityReason(
+  name,
+  symbol
+) {
+  const n =
+    String(name || "").trim();
+
+  const upper =
+    n.toUpperCase();
+
+  if (
+    upper.includes(
+      "• ROBINHOOD TOKEN"
+    )
+  ) {
+    return "ROBINHOOD_TOKENIZED_SECURITY";
+  }
+
+  if (
+    upper.includes(
+      "ROBINHOOD TOKEN"
+    ) &&
+    (
+      upper.includes("COMMON STOCK") ||
+      upper.includes("CLASS A") ||
+      upper.includes("CLASS B") ||
+      upper.includes("CLASS C") ||
+      upper.includes("ETF")
+    )
+  ) {
+    return "ROBINHOOD_TOKENIZED_SECURITY";
+  }
+
+  if (
+    /CLASS\s+[A-Z]\s+COMMON\s+STOCK/i.test(
+      n
+    )
+  ) {
+    return "TOKENIZED_COMMON_STOCK";
+  }
+
+  return null;
 }
 
 function percentChange(
@@ -506,7 +548,6 @@ function consumeBudget(
     "discovery-backlog"
   ) {
     budget.discovery.used += amount;
-
     budget.discovery.backlogUsed +=
       amount;
   }
@@ -706,6 +747,25 @@ function newState() {
         null
     },
 
+    services: {
+      dexscreener: {
+        cooldownUntil:
+          null,
+
+        last429At:
+          null,
+
+        lastSuccessAt:
+          null,
+
+        lastStatus:
+          null,
+
+        total429s:
+          0
+      }
+    },
+
     createdAt:
       now(),
 
@@ -769,12 +829,15 @@ async function readState(env) {
         );
     }
 
+    const fresh =
+      newState();
+
     return {
       persistent: true,
       binding,
 
       state: {
-        ...newState(),
+        ...fresh,
         ...parsed,
 
         watchedTokens,
@@ -794,7 +857,7 @@ async function readState(env) {
             : {},
 
         scheduler: {
-          ...newState().scheduler,
+          ...fresh.scheduler,
 
           ...(
             parsed.scheduler &&
@@ -803,6 +866,34 @@ async function readState(env) {
               ? parsed.scheduler
               : {}
           )
+        },
+
+        services: {
+          ...fresh.services,
+
+          ...(
+            parsed.services &&
+            typeof parsed.services ===
+              "object"
+              ? parsed.services
+              : {}
+          ),
+
+          dexscreener: {
+            ...fresh.services
+              .dexscreener,
+
+            ...(
+              parsed.services
+                ?.dexscreener &&
+              typeof parsed.services
+                .dexscreener ===
+                "object"
+                ? parsed.services
+                    .dexscreener
+                : {}
+            )
+          }
         }
       },
 
@@ -1012,6 +1103,26 @@ function pruneState(
       "object"
       ? state.scheduler
       : newState().scheduler;
+
+  if (
+    !state.services ||
+    typeof state.services !==
+      "object"
+  ) {
+    state.services =
+      newState().services;
+  }
+
+  if (
+    !state.services.dexscreener ||
+    typeof state.services.dexscreener !==
+      "object"
+  ) {
+    state.services.dexscreener =
+      newState()
+        .services
+        .dexscreener;
+  }
 }
 
 function findWatched(
@@ -1080,9 +1191,15 @@ function addWatch(
       lastValidationReason:
         null,
 
+      excludedReason:
+        null,
+
       pools: [],
 
       metadata: null,
+
+      marketCache:
+        null,
 
       discoverySource:
         source ||
@@ -1140,7 +1257,7 @@ function addWatch(
 }
 
 /* =========================================================
-   RPC — V83 PROVIDER STRATEGY
+   RPC
    ========================================================= */
 
 async function rpcCall(
@@ -1235,19 +1352,10 @@ function preferAlchemy(
   phase,
   method
 ) {
-  if (
-    !env.ALCHEMY_API_KEY
-  ) {
+  if (!env.ALCHEMY_API_KEY) {
     return false;
   }
 
-  /*
-   * Keep lightweight system block-number request public-first.
-   *
-   * Heavy log and analysis calls use configured Alchemy first
-   * because V82 demonstrated repeated public RPC failures were
-   * doubling request consumption.
-   */
   if (phase === "analysis") {
     return true;
   }
@@ -1338,9 +1446,7 @@ async function rpc(
     const provider
     of providers
   ) {
-    if (
-      !provider.url
-    ) {
+    if (!provider.url) {
       continue;
     }
 
@@ -1539,6 +1645,7 @@ async function scanLogRange(
         response.provider,
 
       phase,
+
       splitDepth:
         depth
     });
@@ -1553,7 +1660,8 @@ async function scanLogRange(
 
   if (
     String(
-      response.error || ""
+      response.error ||
+      ""
     ).includes(
       "REQUEST_BUDGET_EXHAUSTED"
     )
@@ -1644,7 +1752,7 @@ async function scanLogRange(
 }
 
 /* =========================================================
-   V83 SEQUENTIAL BACKLOG SCANNER
+   SEQUENTIAL BACKLOG
    ========================================================= */
 
 async function scanBacklogSequential(
@@ -1674,18 +1782,16 @@ async function scanBacklogSequential(
       "discovery-backlog"
     )
   ) {
-    const chunkTo =
+    const proposed =
       cursor +
-        BigInt(
-          BACKLOG_CHUNK_BLOCKS -
-            1
-        ) <
-      latest
-        ? cursor +
-          BigInt(
-            BACKLOG_CHUNK_BLOCKS -
-              1
-          )
+      BigInt(
+        BACKLOG_CHUNK_BLOCKS -
+        1
+      );
+
+    const chunkTo =
+      proposed < latest
+        ? proposed
         : latest;
 
     chunksAttempted++;
@@ -1892,17 +1998,13 @@ function processDiscoveryLogs(
           source
         );
 
-      if (
-        result.token
-      ) {
+      if (result.token) {
         seenTokens.add(
           normalize(address)
         );
       }
 
-      if (
-        result.added
-      ) {
+      if (result.added) {
         newTokens.add(
           normalize(address)
         );
@@ -1924,7 +2026,7 @@ function processDiscoveryLogs(
 }
 
 /* =========================================================
-   LIVE POOL ACTIVITY — V83
+   LIVE POOL ACTIVITY
    ========================================================= */
 
 function activeTokensFromLogs(
@@ -2236,7 +2338,8 @@ function decodeBytes32String(
         (
           raw.match(
             /.{2}/g
-          ) || []
+          ) ||
+          []
         ).map(
           value =>
             parseInt(
@@ -2282,7 +2385,8 @@ function decodeString(hex) {
       raw.length === 64
     ) {
       return decodeBytes32String(
-        "0x" + raw
+        "0x" +
+        raw
       );
     }
 
@@ -2341,7 +2445,8 @@ function decodeString(hex) {
         (
           data.match(
             /.{2}/g
-          ) || []
+          ) ||
+          []
         ).map(
           value =>
             parseInt(
@@ -2406,6 +2511,12 @@ function estimatedAnalysisCost(
   watched
 ) {
   if (
+    watched?.excludedReason
+  ) {
+    return 1;
+  }
+
+  if (
     reusableMetadata(
       watched
     )
@@ -2447,7 +2558,8 @@ async function verifyERC20(
       reason:
         "ANALYSIS_BUDGET_PROTECTED",
 
-      requiredRequests: 5
+      requiredRequests:
+        5
     };
   }
 
@@ -2611,13 +2723,206 @@ async function verifyERC20(
 }
 
 /* =========================================================
-   DEXSCREENER
+   DEXSCREENER — V84 CACHE + 429 PROTECTION
    ========================================================= */
+
+function cachedMarket(
+  watched,
+  maxAge
+) {
+  const cache =
+    watched?.marketCache;
+
+  if (
+    !cache ||
+    typeof cache !==
+      "object"
+  ) {
+    return null;
+  }
+
+  const timestamp =
+    safeNumber(
+      cache.timestamp
+    );
+
+  if (!timestamp) {
+    return null;
+  }
+
+  const age =
+    Date.now() -
+    timestamp;
+
+  if (
+    age < 0 ||
+    age > maxAge
+  ) {
+    return null;
+  }
+
+  if (
+    !cache.data ||
+    typeof cache.data !==
+      "object"
+  ) {
+    return null;
+  }
+
+  return {
+    ...cache.data,
+
+    cached:
+      true,
+
+    cacheAgeMs:
+      age
+  };
+}
+
+function saveMarketCache(
+  watched,
+  data
+) {
+  if (!watched) {
+    return;
+  }
+
+  /*
+   * Don't cache 429/cooldown errors as if they were actual
+   * market intelligence.
+   */
+  if (
+    data?.status ===
+      "HTTP_429" ||
+    data?.status ===
+      "DEXSCREENER_COOLDOWN"
+  ) {
+    return;
+  }
+
+  watched.marketCache = {
+    timestamp:
+      Date.now(),
+
+    data: {
+      ...data,
+
+      cached:
+        false,
+
+      cacheAgeMs:
+        0
+    }
+  };
+}
+
+function dexService(state) {
+  state.services =
+    state.services ||
+    {};
+
+  state.services.dexscreener =
+    state.services.dexscreener ||
+    {
+      cooldownUntil:
+        null,
+
+      last429At:
+        null,
+
+      lastSuccessAt:
+        null,
+
+      lastStatus:
+        null,
+
+      total429s:
+        0
+    };
+
+  return state.services
+    .dexscreener;
+}
 
 async function marketData(
   token,
-  budget
+  budget,
+  watched,
+  state
 ) {
+  /*
+   * First reuse very recent market data.
+   */
+  const freshCache =
+    cachedMarket(
+      watched,
+      MARKET_CACHE_MS
+    );
+
+  if (freshCache) {
+    return {
+      ...freshCache,
+
+      source:
+        "CACHE"
+    };
+  }
+
+  const service =
+    dexService(state);
+
+  const cooldownUntil =
+    safeNumber(
+      service.cooldownUntil
+    );
+
+  /*
+   * During an active global 429 cooldown:
+   * use stale verified data if available.
+   */
+  if (
+    cooldownUntil &&
+    Date.now() <
+      cooldownUntil
+  ) {
+    const stale =
+      cachedMarket(
+        watched,
+        MARKET_STALE_CACHE_MS
+      );
+
+    if (stale) {
+      return {
+        ...stale,
+
+        source:
+          "STALE_CACHE_429",
+
+        rateLimited:
+          true,
+
+        cooldownUntil
+      };
+    }
+
+    return {
+      verified:
+        false,
+
+      status:
+        "DEXSCREENER_COOLDOWN",
+
+      rateLimited:
+        true,
+
+      cooldownUntil,
+
+      cached:
+        false
+    };
+  }
+
   if (
     !consumeBudget(
       budget,
@@ -2626,7 +2931,8 @@ async function marketData(
     )
   ) {
     return {
-      verified: false,
+      verified:
+        false,
 
       status:
         "ANALYSIS_BUDGET_PROTECTED"
@@ -2646,9 +2952,70 @@ async function marketData(
         }
       );
 
-    if (!response.ok) {
+    if (
+      response.status === 429
+    ) {
+      service.last429At =
+        Date.now();
+
+      service.cooldownUntil =
+        Date.now() +
+        DEXSCREENER_429_COOLDOWN_MS;
+
+      service.lastStatus =
+        "HTTP_429";
+
+      service.total429s =
+        safeNumber(
+          service.total429s
+        ) + 1;
+
+      const stale =
+        cachedMarket(
+          watched,
+          MARKET_STALE_CACHE_MS
+        );
+
+      if (stale) {
+        return {
+          ...stale,
+
+          source:
+            "STALE_CACHE_AFTER_429",
+
+          rateLimited:
+            true,
+
+          cooldownUntil:
+            service.cooldownUntil
+        };
+      }
+
       return {
-        verified: false,
+        verified:
+          false,
+
+        status:
+          "HTTP_429",
+
+        rateLimited:
+          true,
+
+        cooldownUntil:
+          service.cooldownUntil,
+
+        cached:
+          false
+      };
+    }
+
+    if (!response.ok) {
+      service.lastStatus =
+        `HTTP_${response.status}`;
+
+      return {
+        verified:
+          false,
 
         status:
           `HTTP_${response.status}`
@@ -2663,15 +3030,30 @@ async function marketData(
         ? data
         : [];
 
-    if (
-      !pairs.length
-    ) {
-      return {
-        verified: false,
+    if (!pairs.length) {
+      service.lastStatus =
+        "NO_MARKET_FOUND";
+
+      const result = {
+        verified:
+          false,
 
         status:
-          "NO_MARKET_FOUND"
+          "NO_MARKET_FOUND",
+
+        cached:
+          false,
+
+        source:
+          "DEXSCREENER"
       };
+
+      saveMarketCache(
+        watched,
+        result
+      );
+
+      return result;
     }
 
     pairs.sort(
@@ -2698,13 +3080,21 @@ async function marketData(
       );
 
     const transactions =
-      buys + sells;
+      buys +
+      sells;
 
-    return {
-      verified: true,
+    const result = {
+      verified:
+        true,
 
       status:
         "VERIFIED",
+
+      cached:
+        false,
+
+      source:
+        "DEXSCREENER",
 
       pairAddress:
         pair?.pairAddress ||
@@ -2770,11 +3160,31 @@ async function marketData(
           pair?.pairCreatedAt
         ) || null
     };
+
+    service.cooldownUntil =
+      null;
+
+    service.lastSuccessAt =
+      Date.now();
+
+    service.lastStatus =
+      "VERIFIED";
+
+    saveMarketCache(
+      watched,
+      result
+    );
+
+    return result;
   }
 
   catch (error) {
+    service.lastStatus =
+      "DEXSCREENER_ERROR";
+
     return {
-      verified: false,
+      verified:
+        false,
 
       status:
         "DEXSCREENER_ERROR",
@@ -2786,7 +3196,7 @@ async function marketData(
 }
 
 /* =========================================================
-   BLOCKSCOUT — V83
+   BLOCKSCOUT
    ========================================================= */
 
 async function blockscout(
@@ -2981,6 +3391,25 @@ function extractHolderValue(
   }
 
   return String(value);
+}
+
+function positiveHolderBalance(
+  holder
+) {
+  try {
+    return (
+      BigInt(
+        String(
+          holder?.value ||
+          "0"
+        )
+      ) > 0n
+    );
+  }
+
+  catch {
+    return false;
+  }
 }
 
 function validateHolderIntegrity(
@@ -3210,7 +3639,7 @@ function unverifiedHolders(
 }
 
 /* =========================================================
-   HOLDER INTELLIGENCE — V83 FALLBACK
+   HOLDER INTELLIGENCE — V84 EMPTY-DATA PROTECTION
    ========================================================= */
 
 async function holderIntelligence(
@@ -3231,19 +3660,16 @@ async function holderIntelligence(
     );
   }
 
-  /*
-   * V83:
-   * Fetch holders first.
-   *
-   * This means a failed /counters endpoint can no longer
-   * prevent concentration analysis.
-   */
   const holders =
     await blockscout(
       `/api/v2/tokens/${token}/holders`,
       budget
     );
 
+  /*
+   * V84:
+   * Missing holders response is not concentration evidence.
+   */
   if (
     !holders ||
     !Array.isArray(
@@ -3281,11 +3707,6 @@ async function holderIntelligence(
       ? "COUNTERS"
       : null;
 
-  /*
-   * V83 fallback:
-   * If /counters fails or does not expose holder totals,
-   * try the token detail endpoint.
-   */
   if (
     (
       counterData.holderCount ===
@@ -3337,6 +3758,87 @@ async function holderIntelligence(
   const transferCount =
     counterData.transferCount;
 
+  const countersVerified =
+    holderCount !== null ||
+    transferCount !== null;
+
+  /*
+   * V84 FIX:
+   * An empty top-holder result can NEVER prove LOW risk.
+   */
+  if (
+    holders.items.length === 0
+  ) {
+    return {
+      verified:
+        countersVerified,
+
+      countersVerified,
+
+      counterSource,
+
+      concentrationVerified:
+        false,
+
+      integrity: {
+        verified:
+          false,
+
+        status:
+          "NO_HOLDER_ROWS",
+
+        impossibleBalanceCount:
+          0,
+
+        percentageSum:
+          null,
+
+        supply:
+          String(
+            totalSupply
+          ),
+
+        topHolderBalanceSum:
+          null
+      },
+
+      holderCount,
+      transferCount,
+
+      topHolders:
+        [],
+
+      whale: {
+        verified:
+          false,
+
+        whaleCount:
+          null,
+
+        top1Percent:
+          null,
+
+        top5Percent:
+          null,
+
+        top10Percent:
+          null,
+
+        concentrationRisk:
+          "UNVERIFIED",
+
+        smartMoneyScore:
+          0,
+
+        smartMoneyCandidate:
+          false,
+
+        reason:
+          "NO_HOLDER_ROWS"
+      }
+    };
+  }
+
   const items =
     holders.items.slice(
       0,
@@ -3379,12 +3881,9 @@ async function holderIntelligence(
   ) {
     return {
       verified:
-        holderCount !== null ||
-        transferCount !== null,
+        countersVerified,
 
-      countersVerified:
-        holderCount !== null ||
-        transferCount !== null,
+      countersVerified,
 
       counterSource,
 
@@ -3407,7 +3906,8 @@ async function holderIntelligence(
         ),
 
       whale: {
-        verified: false,
+        verified:
+          false,
 
         whaleCount:
           null,
@@ -3436,8 +3936,85 @@ async function holderIntelligence(
     };
   }
 
+  /*
+   * V84 FIX:
+   * Even if rows exist, all-zero balances cannot prove
+   * holder concentration.
+   */
+  const positiveHolders =
+    topHolders.filter(
+      holder =>
+        holder.address &&
+        holder.percentage !==
+          null &&
+        positiveHolderBalance(
+          holder
+        )
+    );
+
+  if (
+    positiveHolders.length ===
+    0
+  ) {
+    return {
+      verified:
+        countersVerified,
+
+      countersVerified,
+
+      counterSource,
+
+      concentrationVerified:
+        false,
+
+      integrity: {
+        ...integrity,
+
+        verified:
+          false,
+
+        status:
+          "NO_POSITIVE_HOLDER_BALANCES"
+      },
+
+      holderCount,
+      transferCount,
+
+      topHolders,
+
+      whale: {
+        verified:
+          false,
+
+        whaleCount:
+          null,
+
+        top1Percent:
+          null,
+
+        top5Percent:
+          null,
+
+        top10Percent:
+          null,
+
+        concentrationRisk:
+          "UNVERIFIED",
+
+        smartMoneyScore:
+          0,
+
+        smartMoneyCandidate:
+          false,
+
+        reason:
+          "NO_POSITIVE_HOLDER_BALANCES"
+      }
+    };
+  }
+
   const percentages =
-    topHolders
+    positiveHolders
       .map(
         holder =>
           holder.percentage
@@ -3451,10 +4028,66 @@ async function holderIntelligence(
           value <= 100
       );
 
+  if (
+    percentages.length ===
+    0
+  ) {
+    return {
+      verified:
+        countersVerified,
+
+      countersVerified,
+
+      counterSource,
+
+      concentrationVerified:
+        false,
+
+      integrity: {
+        ...integrity,
+
+        verified:
+          false,
+
+        status:
+          "NO_VALID_HOLDER_PERCENTAGES"
+      },
+
+      holderCount,
+      transferCount,
+
+      topHolders,
+
+      whale: {
+        verified:
+          false,
+
+        whaleCount:
+          null,
+
+        top1Percent:
+          null,
+
+        top5Percent:
+          null,
+
+        top10Percent:
+          null,
+
+        concentrationRisk:
+          "UNVERIFIED",
+
+        smartMoneyScore:
+          0,
+
+        smartMoneyCandidate:
+          false
+      }
+    };
+  }
+
   const top1 =
-    percentages.length
-      ? percentages[0]
-      : null;
+    percentages[0];
 
   const top5 =
     percentages
@@ -3486,12 +4119,9 @@ async function holderIntelligence(
   ) {
     return {
       verified:
-        holderCount !== null ||
-        transferCount !== null,
+        countersVerified,
 
-      countersVerified:
-        holderCount !== null ||
-        transferCount !== null,
+      countersVerified,
 
       counterSource,
 
@@ -3525,7 +4155,8 @@ async function holderIntelligence(
         ),
 
       whale: {
-        verified: false,
+        verified:
+          false,
 
         whaleCount:
           null,
@@ -3555,21 +4186,17 @@ async function holderIntelligence(
   }
 
   const whales =
-    topHolders.filter(
+    positiveHolders.filter(
       holder =>
-        holder.percentage !==
-          null &&
-        holder.percentage >= 1
+        holder.percentage >=
+        1
     );
 
   let concentrationRisk =
     "LOW";
 
   if (
-    (
-      top1 !== null &&
-      top1 >= 20
-    ) ||
+    top1 >= 20 ||
     top10 >= 80
   ) {
     concentrationRisk =
@@ -3577,10 +4204,7 @@ async function holderIntelligence(
   }
 
   else if (
-    (
-      top1 !== null &&
-      top1 >= 10
-    ) ||
+    top1 >= 10 ||
     top10 >= 60
   ) {
     concentrationRisk =
@@ -3609,7 +4233,6 @@ async function holderIntelligence(
   }
 
   if (
-    top1 !== null &&
     top1 <= 15
   ) {
     smartMoneyScore += 15;
@@ -3634,16 +4257,10 @@ async function holderIntelligence(
     );
 
   return {
-    /*
-     * V83:
-     * verified means some holder intelligence was retrieved.
-     * Concentration has its own independent verification flag.
-     */
-    verified: true,
+    verified:
+      true,
 
-    countersVerified:
-      holderCount !== null ||
-      transferCount !== null,
+    countersVerified,
 
     counterSource,
 
@@ -3657,8 +4274,12 @@ async function holderIntelligence(
 
     topHolders,
 
+    positiveHolderRows:
+      positiveHolders.length,
+
     whale: {
-      verified: true,
+      verified:
+        true,
 
       whaleCount:
         whales.length,
@@ -3844,7 +4465,10 @@ function createSnapshot(
               holder =>
                 holder.address &&
                 holder.percentage !==
-                  null
+                  null &&
+                positiveHolderBalance(
+                  holder
+                )
             )
             .map(
               holder => ({
@@ -5052,11 +5676,19 @@ function scoreOpportunity(
     }
   }
 
+  /*
+   * V84:
+   * Healthy concentration score requires verified real holder
+   * balances. Empty lists cannot reach this branch.
+   */
   if (
     holders
       ?.concentrationVerified &&
     holders.whale
       ?.verified &&
+    safeNumber(
+      holders.positiveHolderRows
+    ) > 0 &&
     holders.whale
       ?.concentrationRisk ===
       "LOW"
@@ -5203,6 +5835,10 @@ function signalConfirmation(
   ) {
     signals++;
     score += 8;
+
+    reasons.push(
+      "V4 liquidity activity"
+    );
   }
 
   if (
@@ -5215,6 +5851,10 @@ function signalConfirmation(
   ) {
     signals++;
     score += 12;
+
+    reasons.push(
+      "Liquidity confirmed"
+    );
   }
 
   if (
@@ -5227,6 +5867,10 @@ function signalConfirmation(
   ) {
     signals++;
     score += 10;
+
+    reasons.push(
+      "Trading volume confirmed"
+    );
   }
 
   if (
@@ -5239,6 +5883,10 @@ function signalConfirmation(
   ) {
     signals++;
     score += 12;
+
+    reasons.push(
+      "Buy pressure confirmed"
+    );
   }
 
   if (
@@ -5251,6 +5899,10 @@ function signalConfirmation(
   ) {
     signals++;
     score += 10;
+
+    reasons.push(
+      "Holder base confirmed"
+    );
   }
 
   if (
@@ -5261,6 +5913,10 @@ function signalConfirmation(
   ) {
     signals++;
     score += 18;
+
+    reasons.push(
+      "Momentum confirmed"
+    );
   }
 
   if (
@@ -5272,6 +5928,10 @@ function signalConfirmation(
   ) {
     signals++;
     score += 15;
+
+    reasons.push(
+      "Whale accumulation confirmed"
+    );
   }
 
   if (
@@ -5279,6 +5939,10 @@ function signalConfirmation(
       ?.concentrationVerified &&
     candidate.holders
       ?.whale?.verified &&
+    safeNumber(
+      candidate.holders
+        ?.positiveHolderRows
+    ) > 0 &&
     candidate.holders
       ?.whale
       ?.concentrationRisk ===
@@ -5286,6 +5950,10 @@ function signalConfirmation(
   ) {
     signals++;
     score += 10;
+
+    reasons.push(
+      "Healthy concentration confirmed"
+    );
   }
 
   if (
@@ -5412,7 +6080,7 @@ function candidateConfidence(
 }
 
 /* =========================================================
-   WATCH PRIORITY — V83
+   PRIORITY
    ========================================================= */
 
 function watchPriority(
@@ -5435,6 +6103,18 @@ function watchPriority(
     )
   ) {
     return -10000;
+  }
+
+  /*
+   * V84:
+   * Already-confirmed tokenized securities remain remembered
+   * but are pushed to the bottom so they stop consuming
+   * analysis budget.
+   */
+  if (
+    watched.excludedReason
+  ) {
+    return -9000;
   }
 
   if (
@@ -5538,10 +6218,6 @@ function watchPriority(
       ) * 15
     );
 
-  /*
-   * Tokens repeatedly failing ERC20 validation gradually lose
-   * retention priority.
-   */
   score -=
     Math.min(
       900,
@@ -5625,7 +6301,8 @@ function analysisPriority(
 
 function escapeHtml(value) {
   return String(
-    value ?? ""
+    value ??
+    ""
   )
     .replace(
       /&/g,
@@ -5831,7 +6508,7 @@ function telegramMessage(
   candidate
 ) {
   const lines = [
-    "🚨 <b>ROBINHOOD MEME HUNTER V83</b>",
+    "🚨 <b>ROBINHOOD MEME HUNTER V84</b>",
     ""
   ];
 
@@ -5991,6 +6668,37 @@ async function analyzeToken(
       address
     );
 
+  /*
+   * Already excluded tokenized securities require no further
+   * external analysis.
+   */
+  if (
+    watched.excludedReason
+  ) {
+    return {
+      address,
+
+      validERC20:
+        false,
+
+      analysisDeferred:
+        false,
+
+      excludedAsset:
+        true,
+
+      exclusionReason:
+        watched.excludedReason,
+
+      validation:
+        watched.metadata ||
+        null,
+
+      reason:
+        watched.excludedReason
+    };
+  }
+
   const validation =
     await verifyERC20(
       env,
@@ -6080,8 +6788,54 @@ async function analyzeToken(
     };
   }
 
+  /*
+   * V84 tokenized stock/security filtering.
+   */
+  const exclusionReason =
+    tokenizedSecurityReason(
+      validation.name,
+      validation.symbol
+    );
+
+  if (
+    exclusionReason
+  ) {
+    return {
+      address,
+
+      validERC20:
+        false,
+
+      analysisDeferred:
+        false,
+
+      excludedAsset:
+        true,
+
+      exclusionReason,
+
+      validation,
+
+      reason:
+        exclusionReason,
+
+      newlyDiscovered:
+        Boolean(
+          options
+            ?.newlyDiscovered
+        ),
+
+      liveDiscovery:
+        Boolean(
+          options
+            ?.liveDiscovery
+        )
+    };
+  }
+
   let market = {
-    verified: false,
+    verified:
+      false,
 
     status:
       "LOOKUP_SKIPPED"
@@ -6096,7 +6850,9 @@ async function analyzeToken(
     market =
       await marketData(
         address,
-        budget
+        budget,
+        watched,
+        state
       );
   }
 
@@ -6233,7 +6989,7 @@ async function analyzeToken(
 }
 
 /* =========================================================
-   LIVE RANGE
+   LIVE / BACKLOG RANGE
    ========================================================= */
 
 function liveRange(
@@ -6294,7 +7050,7 @@ function backlogStart(
 }
 
 /* =========================================================
-   MAIN SCAN — V83
+   MAIN SCAN
    ========================================================= */
 
 async function scan(
@@ -6323,13 +7079,6 @@ async function scan(
       options.scheduled
     );
 
-  /*
-   * V83 CRON HEARTBEAT.
-   *
-   * This proves whether Cloudflare's five-minute scheduled
-   * trigger is actually firing even when zero Telegram calls
-   * qualify.
-   */
   if (scheduled) {
     state.scheduler =
       state.scheduler ||
@@ -6455,7 +7204,7 @@ async function scan(
   }
 
   /* =======================================================
-     BACKLOG — SEQUENTIAL V83
+     BACKLOG
      ======================================================= */
 
   const backlogFrom =
@@ -6529,7 +7278,7 @@ async function scan(
   }
 
   /* =======================================================
-     PRIORITISE WATCHLIST
+     PRIORITY
      ======================================================= */
 
   state.watchedTokens =
@@ -6580,7 +7329,9 @@ async function scan(
 
   let marketLookups = 0;
   let holderLookups = 0;
+
   let deferredAnalysis = 0;
+  let excludedAssets = 0;
 
   /* =======================================================
      ANALYSIS
@@ -6697,6 +7448,81 @@ async function scan(
       candidate.reason ||
       null;
 
+    /*
+     * V84:
+     * Excluded tokenized securities are remembered and will
+     * automatically sink to bottom of future watch priority.
+     */
+    if (
+      candidate.excludedAsset
+    ) {
+      excludedAssets++;
+
+      watched.excludedReason =
+        candidate.exclusionReason ||
+        candidate.reason ||
+        "EXCLUDED_ASSET";
+
+      if (
+        candidate.validation
+          ?.validERC20
+      ) {
+        watched.metadata = {
+          validERC20:
+            true,
+
+          name:
+            candidate.validation
+              .name,
+
+          symbol:
+            candidate.validation
+              .symbol,
+
+          decimals:
+            candidate.validation
+              .decimals,
+
+          totalSupply:
+            candidate.validation
+              .totalSupply,
+
+          verifiedAt:
+            candidate.validation
+              .verifiedAt ||
+            Date.now()
+        };
+      }
+
+      validationResults.push({
+        address,
+
+        validERC20:
+          false,
+
+        deferred:
+          false,
+
+        excluded:
+          true,
+
+        reason:
+          watched.excludedReason,
+
+        name:
+          candidate.validation
+            ?.name ||
+          null,
+
+        symbol:
+          candidate.validation
+            ?.symbol ||
+          null
+      });
+
+      continue;
+    }
+
     validationResults.push({
       address,
 
@@ -6704,6 +7530,9 @@ async function scan(
         candidate.validERC20,
 
       deferred:
+        false,
+
+      excluded:
         false,
 
       reason:
@@ -6737,6 +7566,9 @@ async function scan(
     watched.invalidChecks =
       0;
 
+    watched.excludedReason =
+      null;
+
     watched.metadata = {
       validERC20:
         true,
@@ -6761,7 +7593,10 @@ async function scan(
 
     if (
       candidate.market
-        ?.verified
+        ?.verified &&
+      candidate.market
+        ?.source ===
+        "DEXSCREENER"
     ) {
       marketLookups++;
     }
@@ -6975,10 +7810,6 @@ async function scan(
       "LIVE_SCAN_COMPLETE_CATCHUP_CONTINUING";
   }
 
-  /*
-   * Backlog budget stopping is now normal catch-up behaviour,
-   * not automatically a failed scan.
-   */
   if (liveError) {
     status =
       "PARTIAL_SCAN_FAILED_LIVE_RANGE";
@@ -7015,6 +7846,9 @@ async function scan(
       state
     );
 
+  const dex =
+    dexService(state);
+
   return {
     agent:
       "Robinhood Chain Meme Hunter",
@@ -7025,7 +7859,7 @@ async function scan(
     status,
 
     scanMode:
-      "V83_LIVE_FIRST_SEQUENTIAL_BACKLOG",
+      "V84_LIVE_FIRST_RATE_LIMIT_SAFE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -7107,6 +7941,33 @@ async function scan(
         state.scheduler
           ?.lastScheduledLatestBlock ||
         null
+    },
+
+    services: {
+      dexscreener: {
+        lastStatus:
+          dex.lastStatus,
+
+        lastSuccessAt:
+          dex.lastSuccessAt,
+
+        last429At:
+          dex.last429At,
+
+        cooldownUntil:
+          dex.cooldownUntil,
+
+        cooldownActive:
+          safeNumber(
+            dex.cooldownUntil
+          ) >
+          Date.now(),
+
+        total429s:
+          safeNumber(
+            dex.total429s
+          )
+      }
     },
 
     requestBudget:
@@ -7193,7 +8054,8 @@ async function scan(
       },
 
       backlog:
-        backlogFrom !== null
+        backlogFrom !==
+          null
           ? {
               fromBlock:
                 Number(
@@ -7290,7 +8152,7 @@ async function scan(
           .size,
 
       liveActivityPromotion:
-        "ENABLED_V83"
+        "ENABLED_V84"
     },
 
     watchedTokens:
@@ -7302,6 +8164,8 @@ async function scan(
         .length,
 
     deferredAnalysis,
+
+    excludedAssets,
 
     validERC20Tokens:
       candidates.length,
@@ -7322,45 +8186,54 @@ async function scan(
 
     intelligence: {
       trueLiveFirstScanning:
-        "ENABLED_V83",
+        "ENABLED_V84",
 
       alchemyFirstHeavyRPC:
         env.ALCHEMY_API_KEY
-          ? "ENABLED_V83"
+          ? "ENABLED"
           : "UNAVAILABLE",
 
       liveSwapActivityPriority:
         "ENABLED",
 
       unknownLivePoolTelemetry:
-        "ENABLED_V83",
+        "ENABLED",
 
       persistentBacklogCursor:
         "ENABLED",
 
       sequentialBacklogScanning:
-        "ENABLED_V83",
+        "ENABLED",
 
       backlogBudgetLockProtection:
-        "ENABLED_V83",
+        "ENABLED",
 
       hardPhaseIsolation:
         "ENABLED",
 
-      telegramBudgetIsolation:
-        "ENABLED",
-
       fallbackAwareAnalysisBudget:
-        "ENABLED_V83",
+        "ENABLED",
 
       deferredAnalysisRetry:
         "ENABLED",
 
       scheduledHeartbeat:
-        "ENABLED_V83",
+        "ENABLED",
 
       smartWatchlistRetention:
-        "ENABLED_V83",
+        "ENABLED",
+
+      tokenizedSecurityFiltering:
+        "ENABLED_V84",
+
+      dexscreener429Protection:
+        "ENABLED_V84",
+
+      dexscreenerMarketCache:
+        "ENABLED_V84",
+
+      dexscreenerStaleFallback:
+        "ENABLED_V84",
 
       metadataReuse:
         "ENABLED",
@@ -7378,10 +8251,16 @@ async function scan(
         "ENABLED",
 
       blockscoutCounterFallback:
-        "ENABLED_V83",
+        "ENABLED",
 
       holderIntegrityValidation:
         "ENABLED",
+
+      emptyHolderFalsePositiveProtection:
+        "ENABLED_V84",
+
+      zeroBalanceConcentrationProtection:
+        "ENABLED_V84",
 
       impossibleConcentrationProtection:
         "ENABLED",
@@ -7403,7 +8282,7 @@ async function scan(
     },
 
     architecture:
-      "V83_LIVE_FIRST_SEQUENTIAL_BACKLOG_MULTI_SIGNAL_HUNTER",
+      "V84_LIVE_FIRST_RATE_LIMIT_SAFE_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -7420,6 +8299,14 @@ async function health(env) {
 
   const stateResult =
     await readState(env);
+
+  const state =
+    stateResult.state;
+
+  pruneState(
+    state,
+    true
+  );
 
   let block = null;
   let provider = null;
@@ -7446,14 +8333,6 @@ async function health(env) {
       errorString(err);
   }
 
-  const state =
-    stateResult.state;
-
-  pruneState(
-    state,
-    true
-  );
-
   const lastScheduledRun =
     safeNumber(
       state.scheduler
@@ -7468,6 +8347,9 @@ async function health(env) {
         ) /
         60000
       : null;
+
+  const dex =
+    dexService(state);
 
   return {
     agent:
@@ -7584,6 +8466,33 @@ async function health(env) {
           10
     },
 
+    services: {
+      dexscreener: {
+        lastStatus:
+          dex.lastStatus,
+
+        lastSuccessAt:
+          dex.lastSuccessAt,
+
+        last429At:
+          dex.last429At,
+
+        cooldownUntil:
+          dex.cooldownUntil,
+
+        cooldownActive:
+          safeNumber(
+            dex.cooldownUntil
+          ) >
+          Date.now(),
+
+        total429s:
+          safeNumber(
+            dex.total429s
+          )
+      }
+    },
+
     telegram: {
       configured:
         Boolean(
@@ -7613,7 +8522,7 @@ async function health(env) {
       ),
 
     architecture:
-      "V83_LIVE_FIRST_SEQUENTIAL_BACKLOG_MULTI_SIGNAL_HUNTER",
+      "V84_LIVE_FIRST_RATE_LIMIT_SAFE_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -7748,6 +8657,9 @@ async function stateStatus(env) {
         ?.lastScheduledRunAt
     );
 
+  const dex =
+    dexService(state);
+
   return {
     agent:
       "Robinhood Chain Meme Hunter",
@@ -7810,6 +8722,33 @@ async function stateStatus(env) {
           : null
     },
 
+    services: {
+      dexscreener: {
+        lastStatus:
+          dex.lastStatus,
+
+        lastSuccessAt:
+          dex.lastSuccessAt,
+
+        last429At:
+          dex.last429At,
+
+        cooldownUntil:
+          dex.cooldownUntil,
+
+        cooldownActive:
+          safeNumber(
+            dex.cooldownUntil
+          ) >
+          Date.now(),
+
+        total429s:
+          safeNumber(
+            dex.total429s
+          )
+      }
+    },
+
     watchedTokenCount:
       state.watchedTokens
         .length,
@@ -7840,9 +8779,18 @@ async function stateStatus(env) {
               token.invalidChecks
             ),
 
+          excludedReason:
+            token.excludedReason ||
+            null,
+
           lastValidationReason:
             token
               .lastValidationReason ||
+            null,
+
+          marketCacheAt:
+            token.marketCache
+              ?.timestamp ||
             null,
 
           firstSeenAt:
@@ -7890,25 +8838,30 @@ async function stateStatus(env) {
    ========================================================= */
 
 async function diagnostics(env) {
-  const state =
+  const stateResult =
     await readState(env);
+
+  const state =
+    stateResult.state;
 
   const rpcResult =
     await rpcTest(env);
 
   const scheduledAge =
-    state.state?.scheduler
+    state.scheduler
       ?.lastScheduledRunAt
       ? (
           Date.now() -
           safeNumber(
-            state.state
-              .scheduler
+            state.scheduler
               .lastScheduledRunAt
           )
         ) /
         60000
       : null;
+
+  const dex =
+    dexService(state);
 
   return {
     agent:
@@ -7922,7 +8875,7 @@ async function diagnostics(env) {
 
     status:
       rpcResult.success
-        ? state.persistent
+        ? stateResult.persistent
           ? "READY"
           : "READY_WITH_KV_FIX_REQUIRED"
 
@@ -7957,29 +8910,27 @@ async function diagnostics(env) {
 
       kv: {
         configured:
-          state.persistent,
+          stateResult.persistent,
 
         binding:
-          state.binding,
+          stateResult.binding,
 
         stateKey:
           STATE_KEY,
 
         readError:
-          state.error
+          stateResult.error
       },
 
       scheduler: {
         scheduledRunCount:
           safeNumber(
-            state.state
-              ?.scheduler
+            state.scheduler
               ?.scheduledRunCount
           ),
 
         lastScheduledRunAt:
-          state.state
-            ?.scheduler
+          state.scheduler
             ?.lastScheduledRunAt ||
           null,
 
@@ -7990,6 +8941,25 @@ async function diagnostics(env) {
           scheduledAge !==
             null &&
           scheduledAge <= 10
+      },
+
+      dexscreener: {
+        lastStatus:
+          dex.lastStatus,
+
+        cooldownActive:
+          safeNumber(
+            dex.cooldownUntil
+          ) >
+          Date.now(),
+
+        cooldownUntil:
+          dex.cooldownUntil,
+
+        total429s:
+          safeNumber(
+            dex.total429s
+          )
       },
 
       telegram: {
@@ -8015,7 +8985,7 @@ async function diagnostics(env) {
           )
       },
 
-      v83: {
+      v84: {
         trueLiveFirst:
           true,
 
@@ -8052,6 +9022,24 @@ async function diagnostics(env) {
         smarterWatchlistRetention:
           true,
 
+        tokenizedSecurityFiltering:
+          true,
+
+        dexscreener429Protection:
+          true,
+
+        dexscreenerCaching:
+          true,
+
+        staleMarketFallback:
+          true,
+
+        emptyHolderProtection:
+          true,
+
+        zeroBalanceHolderProtection:
+          true,
+
         metadataReuse:
           true,
 
@@ -8073,7 +9061,7 @@ async function diagnostics(env) {
     },
 
     architecture:
-      "V83_LIVE_FIRST_SEQUENTIAL_BACKLOG_MULTI_SIGNAL_HUNTER",
+      "V84_LIVE_FIRST_RATE_LIMIT_SAFE_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -8086,19 +9074,21 @@ async function diagnostics(env) {
 
 async function telegramTest(env) {
   const message =
-`✅ <b>Robinhood Chain Meme Hunter V83</b>
+`✅ <b>Robinhood Chain Meme Hunter V84</b>
 
 Telegram connection test successful.
 
 ⚡ True live-first scanning enabled
 🔥 Live V4 activity tracking enabled
 📚 Sequential backlog catch-up enabled
-🛡 Improved analysis budget enabled
+🛡 Protected analysis budget enabled
 🔁 Deferred-token retry enabled
 🐋 Whale-flow tracking enabled
 📈 Momentum tracking enabled
 🔍 Holder-integrity protection enabled
-🧭 Blockscout holder fallback enabled
+🚫 Tokenized-stock filtering enabled
+🧯 DexScreener 429 protection enabled
+💾 Market-data cache enabled
 ⏱ Scheduled-run heartbeat enabled
 
 No fake token alert was generated by this test.`;
@@ -8375,7 +9365,7 @@ async function scheduledScan(env) {
   console.log(
     JSON.stringify({
       event:
-        "V83_SCHEDULED_SCAN",
+        "V84_SCHEDULED_SCAN",
 
       status:
         result.status,
@@ -8414,12 +9404,25 @@ async function scheduledScan(env) {
         result.candidates
           ?.length,
 
+      excludedAssets:
+        result.excludedAssets,
+
       deferredAnalysis:
         result.deferredAnalysis,
 
       qualifyingCandidates:
         result
           .qualifyingCandidates,
+
+      dexStatus:
+        result.services
+          ?.dexscreener
+          ?.lastStatus,
+
+      dexCooldown:
+        result.services
+          ?.dexscreener
+          ?.cooldownActive,
 
       requests:
         result.requestBudget
@@ -8457,7 +9460,7 @@ export default {
 
     catch (error) {
       console.error(
-        "V83 request failed",
+        "V84 request failed",
         error
       );
 
@@ -8478,7 +9481,7 @@ export default {
             ),
 
           architecture:
-            "V83_LIVE_FIRST_SEQUENTIAL_BACKLOG_MULTI_SIGNAL_HUNTER",
+            "V84_LIVE_FIRST_RATE_LIMIT_SAFE_MULTI_SIGNAL_HUNTER",
 
           timestamp:
             now()
