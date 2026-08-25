@@ -1,29 +1,28 @@
 /**
  * Robinhood Chain Meme Hunter
- * V111
+ * V112
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V111:
- * - Preserves the V108 confirmed core and all V110 safety additions
- * - Preserves the existing KV state key/history
- * - FIX: automatically sanitizes contaminated V109/V110 500/100
- *        exact-pool ranges back to each provider's proven generic range
- *        unless that larger range was genuinely promoted by a successful
- *        V110/V111 capability probe
- * - FIX: a supposedly safe exact-pool range that returns HTTP 400 is
- *        immediately demoted to the provider's proven generic range
- * - FIX: demotion is persisted in KV and the failed range becomes an
- *        upper bound so it is not repeatedly retried
- * - FIX: after demotion, the same contiguous cursor is retried once at
- *        the safe generic range so resolver progress is not lost
- * - Preserves one growth capability probe per provider per run
- * - Preserves gradual exact-range growth after repeated successes
- * - Preserves V108 downstream request reserve and balanced resolver
- * - Preserves V107 no-speculative-15-block Alchemy backlog behavior
- * - Preserves V99 trade-flow, holder integrity, risk and Telegram systems
+ * V112:
+ * - Builds directly forward from confirmed V111
+ * - Preserves V111 KV sanitization and safe HTTP 400 demotion/retry
+ * - Preserves V108 balanced breadth/depth architecture and downstream reserve
+ * - FIX: hard resolver network-call cap now equals the advertised requestLimit
+ * - FIX: growth probe + fallback cannot push resolver above its hard cap
+ * - NEW: stalled unknown pools enter adaptive retry backoff instead of
+ *        consuming resolver slots on every run
+ * - NEW: severe-stall pools get a longer retry interval
+ * - NEW: DEEP_BURST is provider-aware and only runs when the wider public
+ *        exact-pool range is currently usable
+ * - NEW: heavily retried pools are not allowed to monopolize DEEP_BURST
+ * - NEW: unused depth slots are returned to breadth/fair discovery
+ * - NEW: resolver telemetry exposes stalled pools, backoff skips,
+ *        hard request budget and distance searched from first activity
+ * - Preserves contiguous Initialize coverage; no searched ranges are skipped
+ * - Preserves all V99+ market, holder, risk, momentum and Telegram systems
  */
-const VERSION = "V111";
+const VERSION = "V112";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -227,6 +226,16 @@ const UNKNOWN_POOL_EXACT_GROW_SUCCESS_STREAK = 3;
 const UNKNOWN_POOL_EXACT_MAX_BLOCKS = 1000;
 const UNKNOWN_POOL_EXACT_PROBE_COOLDOWN_MS =
   5 * 60 * 1000;
+
+/*
+ * V112 stalled-pool protection.
+ * A pool that has already consumed many contiguous empty searches should
+ * not take one or more resolver slots every scheduled run forever.
+ */
+const UNKNOWN_POOL_STALLED_ATTEMPTS = 12;
+const UNKNOWN_POOL_SEVERE_STALLED_ATTEMPTS = 24;
+const UNKNOWN_POOL_STALLED_RETRY_MS = 10 * 60 * 1000;
+const UNKNOWN_POOL_SEVERE_STALLED_RETRY_MS = 30 * 60 * 1000;
 const UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN = 7;
 const UNKNOWN_POOL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_UNKNOWN_POOL_TRACKER = 500;
@@ -2126,6 +2135,17 @@ function observeUnknownPools(
       lastAttemptAt:
         previous.lastAttemptAt ||
         null,
+      lastSuccessfulSearchAt:
+        previous.lastSuccessfulSearchAt ||
+        null,
+      consecutiveEmptySearches:
+        safeNumber(
+          previous.consecutiveEmptySearches
+        ),
+      lastResolvedSearchDistance:
+        safeNumber(
+          previous.lastResolvedSearchDistance
+        ) || null,
       lastError:
         previous.lastError ||
         null
@@ -2716,7 +2736,9 @@ async function getInitializeForPoolRange(
   cursorBlock,
   desiredChunkBlocks,
   budget,
-  runProbeState
+  runProbeState,
+  externalRequestAllowance =
+    UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN
 ) {
   if (
     !poolId ||
@@ -2787,6 +2809,21 @@ async function getInitializeForPoolRange(
       url,
       requestedBlocks
     ) => {
+      if (
+        externalRequestsUsed >=
+          externalRequestAllowance
+      ) {
+        return {
+          logs: [],
+          provider: null,
+          error:
+            "UNKNOWN_POOL_HARD_REQUEST_LIMIT",
+          fromBlock: null,
+          toBlock: null,
+          requestedBlocks: 0
+        };
+      }
+
       if (
         !budgetAvailable(
           budget,
@@ -2942,6 +2979,10 @@ async function getInitializeForPoolRange(
 
     if (
       shouldProbe &&
+      (
+        externalRequestAllowance -
+        externalRequestsUsed
+      ) >= 2 &&
       budgetAvailable(
         budget,
         "discovery-live",
@@ -3251,6 +3292,86 @@ async function getInitializeForPoolRange(
   };
 }
 
+
+function unknownPoolRetryBackoffMs(
+  entry
+) {
+  const attempts =
+    safeNumber(
+      entry?.attempts
+    );
+
+  if (
+    attempts >=
+    UNKNOWN_POOL_SEVERE_STALLED_ATTEMPTS
+  ) {
+    return UNKNOWN_POOL_SEVERE_STALLED_RETRY_MS;
+  }
+
+  if (
+    attempts >=
+    UNKNOWN_POOL_STALLED_ATTEMPTS
+  ) {
+    return UNKNOWN_POOL_STALLED_RETRY_MS;
+  }
+
+  return 0;
+}
+
+function unknownPoolBackoffActive(
+  entry,
+  now = Date.now()
+) {
+  const retryMs =
+    unknownPoolRetryBackoffMs(
+      entry
+    );
+
+  if (
+    retryMs <= 0
+  ) {
+    return false;
+  }
+
+  const lastAttemptAt =
+    safeNumber(
+      entry?.lastAttemptAt
+    );
+
+  return (
+    lastAttemptAt > 0 &&
+    now - lastAttemptAt <
+      retryMs
+  );
+}
+
+function unknownPoolSearchDistance(
+  entry
+) {
+  const firstActive =
+    safeNumber(
+      entry?.firstActiveBlock
+    );
+
+  const cursor =
+    safeNumber(
+      entry?.searchCursorBlock
+    );
+
+  if (
+    firstActive <= 0 ||
+    cursor <= 0
+  ) {
+    return 0;
+  }
+
+  return Math.max(
+    0,
+    firstActive - cursor - 1
+  );
+}
+
+
 async function resolvePersistentUnknownPools(
   env,
   state,
@@ -3272,7 +3393,7 @@ async function resolvePersistentUnknownPools(
   const exactPoolGrowthProbedProviders =
     new Set();
 
-  const eligibleCandidates =
+  const allUnresolvedCandidates =
     Object.values(
       tracker
     )
@@ -3293,6 +3414,29 @@ async function resolvePersistentUnknownPools(
           ) > 0
         );
       });
+
+  const now =
+    Date.now();
+
+  const backedOffCandidates =
+    allUnresolvedCandidates
+      .filter(
+        entry =>
+          unknownPoolBackoffActive(
+            entry,
+            now
+          )
+      );
+
+  const eligibleCandidates =
+    allUnresolvedCandidates
+      .filter(
+        entry =>
+          !unknownPoolBackoffActive(
+            entry,
+            now
+          )
+      );
 
   const byOldestWait = (
     a,
@@ -3591,10 +3735,37 @@ async function resolvePersistentUnknownPools(
     deepLane[0] ||
     null;
 
+  const publicDeepBurstUsable =
+    !discoveryProviderCooling(
+      state,
+      "ROBINHOOD_PUBLIC_RPC"
+    ) &&
+    exactPoolSafeChunk(
+      state,
+      "ROBINHOOD_PUBLIC_RPC"
+    ) >
+    exactPoolSafeChunk(
+      state,
+      "ALCHEMY"
+    );
+
+  const strongestDeepAttempts =
+    safeNumber(
+      strongestDeep?.attempts
+    );
+
+  const allowDeepBurst =
+    Boolean(
+      strongestDeep
+    ) &&
+    publicDeepBurstUsable &&
+    strongestDeepAttempts <
+      UNKNOWN_POOL_STALLED_ATTEMPTS;
+
   let deepBurstAdded = 0;
 
   while (
-    strongestDeep &&
+    allowDeepBurst &&
     deepBurstAdded < 2 &&
     selectedCandidates.length <
       UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN
@@ -3680,6 +3851,29 @@ async function resolvePersistentUnknownPools(
       ).length,
     downstreamReserveRequests:
       LIVE_GLOBAL_RESERVE,
+    hardExternalRequestLimit:
+      UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN,
+    stalledPoolBackoff:
+      "ENABLED_V112",
+    backedOffPoolCount:
+      backedOffCandidates.length,
+    stalledPoolCount:
+      allUnresolvedCandidates.filter(
+        entry =>
+          safeNumber(
+            entry?.attempts
+          ) >=
+          UNKNOWN_POOL_STALLED_ATTEMPTS
+      ).length,
+    severeStalledPoolCount:
+      allUnresolvedCandidates.filter(
+        entry =>
+          safeNumber(
+            entry?.attempts
+          ) >=
+          UNKNOWN_POOL_SEVERE_STALLED_ATTEMPTS
+      ).length,
+    publicDeepBurstUsable,
     exactPoolCapabilityLearning:
       "ENABLED_V110",
     capabilityProbesThisRun:
@@ -3727,6 +3921,8 @@ async function resolvePersistentUnknownPools(
     const resolverLane =
       selected.lane;
     if (
+      output.requestsUsed >=
+        UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN ||
       !budgetAvailable(
         budget,
         "discovery-live"
@@ -3788,15 +3984,17 @@ async function resolvePersistentUnknownPools(
         cursor,
         desiredChunkBlocks,
         budget,
-        exactPoolGrowthProbedProviders
+        exactPoolGrowthProbedProviders,
+        Math.max(
+          0,
+          UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN -
+          output.requestsUsed
+        )
       );
 
     output.requestsUsed +=
-      Math.max(
-        1,
-        safeNumber(
-          result.externalRequestsUsed
-        )
+      safeNumber(
+        result.externalRequestsUsed
       );
 
     output.searchedBlocks +=
@@ -3823,6 +4021,21 @@ async function resolvePersistentUnknownPools(
     entry.lastError =
       result.error ||
       null;
+
+    if (
+      !result.error &&
+      safeNumber(
+        result.requestedBlocks
+      ) > 0
+    ) {
+      entry.lastSuccessfulSearchAt =
+        Date.now();
+
+      entry.consecutiveEmptySearches =
+        safeNumber(
+          entry.consecutiveEmptySearches
+        ) + 1;
+    }
 
     let resolvedPool =
       null;
@@ -3924,6 +4137,18 @@ async function resolvePersistentUnknownPools(
         result.learningStatePath ||
         null,
       priorAttempts,
+      searchDistanceFromFirstActivity:
+        unknownPoolSearchDistance(
+          entry
+        ),
+      retryBackoffMs:
+        unknownPoolRetryBackoffMs(
+          entry
+        ),
+      consecutiveEmptySearches:
+        safeNumber(
+          entry.consecutiveEmptySearches
+        ),
       provider:
         result.provider,
       logs:
@@ -3939,6 +4164,14 @@ async function resolvePersistentUnknownPools(
     if (
       resolvedPool
     ) {
+      entry.lastResolvedSearchDistance =
+        unknownPoolSearchDistance(
+          entry
+        );
+
+      entry.consecutiveEmptySearches =
+        0;
+
       registerPoolMapping(
         state,
         resolvedPool
@@ -4010,6 +4243,22 @@ async function resolvePersistentUnknownPools(
         state
       )
     ).length;
+
+  output.capabilityProbesThisRun =
+    Array.from(
+      exactPoolGrowthProbedProviders
+    );
+
+  output.hardRequestLimitRespected =
+    output.requestsUsed <=
+    UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN;
+
+  output.remainingResolverRequests =
+    Math.max(
+      0,
+      UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN -
+      output.requestsUsed
+    );
 
   return output;
 }
@@ -13487,7 +13736,7 @@ async function scan(
     status,
 
     scanMode:
-      "V111_V110_CORE_KV_RANGE_SANITIZE_SAFE_DEMOTION_HUNTER",
+      "V112_V111_CORE_STALL_BACKOFF_HARD_RESOLVER_BUDGET_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -14230,12 +14479,30 @@ async function scan(
       exactSafeRange400ContiguousRetry:
         "ENABLED_V111",
 
+      hardUnknownPoolExternalRequestLimit:
+        "ENABLED_V112",
+
+      stalledUnknownPoolAdaptiveBackoff:
+        "ENABLED_V112",
+
+      severeStalledUnknownPoolBackoff:
+        "ENABLED_V112",
+
+      providerAwareDeepBurst:
+        "ENABLED_V112",
+
+      deepBurstStallMonopolyProtection:
+        "ENABLED_V112",
+
+      contiguousInitializeCoverage:
+        "ENABLED_V112",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V111_V110_CORE_KV_RANGE_SANITIZE_SAFE_DEMOTION_V77_TELEGRAM_HUNTER",
+      "V112_V111_CORE_STALL_BACKOFF_HARD_RESOLVER_BUDGET_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -14551,7 +14818,7 @@ async function health(
     },
 
     architecture:
-      "V111_V110_CORE_KV_RANGE_SANITIZE_SAFE_DEMOTION_V77_TELEGRAM_HUNTER",
+      "V112_V111_CORE_STALL_BACKOFF_HARD_RESOLVER_BUDGET_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -14950,7 +15217,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V111_V110_CORE_KV_RANGE_SANITIZE_SAFE_DEMOTION_V77_TELEGRAM_HUNTER",
+      "V112_V111_CORE_STALL_BACKOFF_HARD_RESOLVER_BUDGET_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -15379,7 +15646,7 @@ export default {
             ),
 
           architecture:
-            "V111_V110_CORE_KV_RANGE_SANITIZE_SAFE_DEMOTION_V77_TELEGRAM_HUNTER",
+            "V112_V111_CORE_STALL_BACKOFF_HARD_RESOLVER_BUDGET_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
