@@ -1,12 +1,13 @@
 /**
  * Robinhood Chain Meme Hunter
- * V105
+ * V106
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V105:
- * - Builds directly forward from the confirmed V104 baseline
+ * V106:
+ * - Builds directly forward from the confirmed V105 baseline
  * - Preserves the existing KV state key/history
+ * - Preserves V105 activity-prioritized unknown-pool resolution
  * - Preserves V104 provider-safe DEEP resolver behavior
  * - Preserves V103 FRESH / DEEP / OLDEST_WAIT mixed-depth lanes
  * - Preserves V102 fair rotation and persistent unknown-pool cursors
@@ -14,15 +15,12 @@
  * - Preserves V98 DexScreener protection
  * - Preserves V97 holder-integrity safeguards
  * - Preserves V77-style Telegram layout + token-image/sendPhoto fallback
- * - NEW: provider-specific unknown-pool resolution ranges
- * - NEW: Robinhood public RPC can use its larger learned safe range
- * - NEW: Alchemy remains capped to its proven safe range
- * - NEW: unknown-pool activity scoring from repeated swaps/liquidity events
- * - NEW: resolver lanes prefer higher-activity unresolved pools
- * - NEW: per-pool swap/liquidity counters persist in KV
- * - NEW: resolver telemetry reports provider preference and activity score
+ * - FIX: resolver reads persisted RPC learning from state.services.discoveryRpc
+ * - FIX: Robinhood public RPC can use its learned larger safe range
+ * - FIX: Alchemy remains capped to its learned safe range
+ * - NEW: resolver telemetry reports RPC learning-state path
  */
-const VERSION = "V105";
+const VERSION = "V106";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2073,11 +2071,17 @@ function providerSafeUnknownPoolChunks(
   state,
   desiredChunkBlocks
 ) {
+  const discoveryRpcState =
+    state?.services
+      ?.discoveryRpc ||
+    state?.discoveryRpc ||
+    {};
+
   const publicSafe =
     Math.max(
       1,
       safeNumber(
-        state?.discoveryRpc
+        discoveryRpcState
           ?.publicBacklogChunkBlocks
       ) ||
       UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS
@@ -2087,7 +2091,7 @@ function providerSafeUnknownPoolChunks(
     Math.max(
       1,
       safeNumber(
-        state?.discoveryRpc
+        discoveryRpcState
           ?.alchemyBacklogChunkBlocks
       ) ||
       UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS
@@ -2112,7 +2116,16 @@ function providerSafeUnknownPoolChunks(
         )
       ),
     publicSafe,
-    alchemySafe
+    alchemySafe,
+    learningStatePath:
+      state?.services
+        ?.discoveryRpc
+        ? "state.services.discoveryRpc"
+        : (
+            state?.discoveryRpc
+              ? "state.discoveryRpc"
+              : "fallback-defaults"
+          )
   };
 }
 
@@ -2142,7 +2155,9 @@ async function getInitializeForPoolRange(
       desiredChunkBlocks,
       providerSafeChunkBlocks: 0,
       publicProvenChunkBlocks: 0,
-      alchemyProvenChunkBlocks: 0
+      alchemyProvenChunkBlocks: 0,
+      learningStatePath:
+        "NOT_EVALUATED"
     };
   }
 
@@ -2264,7 +2279,9 @@ async function getInitializeForPoolRange(
         publicProvenChunkBlocks:
           safeChunks.publicSafe,
         alchemyProvenChunkBlocks:
-          safeChunks.alchemySafe
+          safeChunks.alchemySafe,
+        learningStatePath:
+          safeChunks.learningStatePath
       };
     } catch (error) {
       lastError =
@@ -2289,7 +2306,9 @@ async function getInitializeForPoolRange(
     publicProvenChunkBlocks:
       safeChunks.publicSafe,
     alchemyProvenChunkBlocks:
-      safeChunks.alchemySafe
+      safeChunks.alchemySafe,
+    learningStatePath:
+      safeChunks.learningStatePath
   };
 }
 
@@ -2800,6 +2819,9 @@ async function resolvePersistentUnknownPools(
         safeNumber(
           result.alchemyProvenChunkBlocks
         ),
+      learningStatePath:
+        result.learningStatePath ||
+        null,
       priorAttempts,
       provider:
         result.provider,
@@ -12362,7 +12384,7 @@ async function scan(
     status,
 
     scanMode:
-      "V105_V104_CORE_ACTIVITY_PRIORITY_PROVIDER_SPECIFIC_POOL_RESOLUTION_HUNTER",
+      "V106_V105_CORE_RPC_STATE_PATH_FIX_ACTIVITY_POOL_RESOLUTION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -13036,12 +13058,18 @@ async function scan(
       persistentUnknownPoolActivityCounters:
         "ENABLED_V105",
 
+      rpcLearningStatePathFix:
+        "ENABLED_V106",
+
+      rpcLearningStatePath:
+        "state.services.discoveryRpc",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V105_V104_CORE_ACTIVITY_PRIORITY_PROVIDER_SPECIFIC_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V106_V105_CORE_RPC_STATE_PATH_FIX_ACTIVITY_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -13357,7 +13385,7 @@ async function health(
     },
 
     architecture:
-      "V105_V104_CORE_ACTIVITY_PRIORITY_PROVIDER_SPECIFIC_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V106_V105_CORE_RPC_STATE_PATH_FIX_ACTIVITY_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -13756,7 +13784,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V105_V104_CORE_ACTIVITY_PRIORITY_PROVIDER_SPECIFIC_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V106_V105_CORE_RPC_STATE_PATH_FIX_ACTIVITY_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -14185,7 +14213,7 @@ export default {
             ),
 
           architecture:
-            "V105_V104_CORE_ACTIVITY_PRIORITY_PROVIDER_SPECIFIC_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+            "V106_V105_CORE_RPC_STATE_PATH_FIX_ACTIVITY_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
