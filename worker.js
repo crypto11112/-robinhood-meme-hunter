@@ -1,13 +1,21 @@
 /**
  * Robinhood Chain Meme Hunter
- * V81
+ * V82
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V81:
- * - Preserves V80 live-first architecture
+ * V82:
+ * - Preserves V81 live-first architecture
  * - Preserves existing KV state key
- * - Fixes impossible holder concentration calculations
+ * - FIX: fresh ERC20 verification reserves the real 5-request cost
+ * - FIX: analysis-budget deferrals are retried instead of treated as failures
+ * - FIX: Telegram requests now count inside hard request budget
+ * - FIX: live swaps/liquidity activity promotes already-watched tokens
+ * - FIX: partial backlog progress can safely advance without losing discoveries
+ * - FIX: successful partial discovery logs are processed before cursor advance
+ * - FIX: safer Blockscout holder-value extraction
+ * - FIX: watchlist pruning no longer removes candidates before priority sorting
+ * - Preserves V81 holder-integrity protection
  * - Rejects holder totals > total supply
  * - Separates holder counters from concentration verification
  * - Prevents corrupt holder data affecting risk/smart-money/whale flow
@@ -24,7 +32,7 @@
  * - Hard request-budget isolation
  */
 
-const VERSION = "V81";
+const VERSION = "V82";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -42,7 +50,7 @@ const ZERO =
 
 /*
  * IMPORTANT:
- * Preserve existing V69-V80 state.
+ * Preserve existing V69-V81 state.
  */
 const STATE_KEY =
   "robinhood-meme-hunter-v69-state";
@@ -87,15 +95,46 @@ const CATCHUP_TARGET_BLOCKS = 2000;
 const MIN_LOG_RANGE = 10;
 
 /* =========================================================
-   HARD REQUEST BUDGET
+   HARD REQUEST BUDGET — V82
    ========================================================= */
 
+/*
+ * 2 system
+ * 21 discovery
+ * 17 analysis
+ * 2 notification
+ * ----------------
+ * 42 hard maximum
+ */
+
 const MAX_EXTERNAL_REQUESTS = 42;
+
 const SYSTEM_REQUEST_LIMIT = 2;
-const DISCOVERY_REQUEST_LIMIT = 22;
+
+const DISCOVERY_REQUEST_LIMIT = 21;
 const LIVE_DISCOVERY_REQUEST_LIMIT = 8;
-const BACKLOG_DISCOVERY_REQUEST_LIMIT = 14;
-const ANALYSIS_REQUEST_LIMIT = 18;
+const BACKLOG_DISCOVERY_REQUEST_LIMIT = 13;
+
+const ANALYSIS_REQUEST_LIMIT = 17;
+const NOTIFICATION_REQUEST_LIMIT = 2;
+
+/*
+ * Fresh verification worst-case:
+ *   eth_getCode
+ *   name()
+ *   symbol()
+ *   decimals()
+ *   totalSupply()
+ * = 5 RPC requests
+ *
+ * Full fresh intelligence:
+ *   5 ERC20
+ *   1 DexScreener
+ *   2 Blockscout
+ * = 8 requests
+ */
+const FRESH_TOKEN_FULL_ANALYSIS_COST = 8;
+const CACHED_TOKEN_FULL_ANALYSIS_COST = 3;
 
 /* =========================================================
    ANALYSIS
@@ -218,7 +257,7 @@ function jsonResponse(data, status = 200) {
 }
 
 /* =========================================================
-   REQUEST BUDGET
+   REQUEST BUDGET — V82
    ========================================================= */
 
 function createBudget() {
@@ -234,8 +273,10 @@ function createBudget() {
     discovery: {
       used: 0,
       limit: DISCOVERY_REQUEST_LIMIT,
+
       liveUsed: 0,
       liveLimit: LIVE_DISCOVERY_REQUEST_LIMIT,
+
       backlogUsed: 0,
       backlogLimit: BACKLOG_DISCOVERY_REQUEST_LIMIT
     },
@@ -245,42 +286,82 @@ function createBudget() {
       limit: ANALYSIS_REQUEST_LIMIT
     },
 
+    notification: {
+      used: 0,
+      limit: NOTIFICATION_REQUEST_LIMIT
+    },
+
     skipped: []
   };
 }
 
-function budgetAvailable(budget, phase, amount = 1) {
-  if (budget.totalUsed + amount > budget.totalLimit) {
+function budgetAvailable(
+  budget,
+  phase,
+  amount = 1
+) {
+  if (
+    budget.totalUsed + amount >
+    budget.totalLimit
+  ) {
     return false;
   }
 
   if (phase === "system") {
-    return budget.system.used + amount <= budget.system.limit;
+    return (
+      budget.system.used + amount <=
+      budget.system.limit
+    );
   }
 
   if (phase === "analysis") {
-    return budget.analysis.used + amount <= budget.analysis.limit;
+    return (
+      budget.analysis.used + amount <=
+      budget.analysis.limit
+    );
+  }
+
+  if (phase === "notification") {
+    return (
+      budget.notification.used + amount <=
+      budget.notification.limit
+    );
   }
 
   if (phase === "discovery-live") {
     return (
-      budget.discovery.used + amount <= budget.discovery.limit &&
-      budget.discovery.liveUsed + amount <= budget.discovery.liveLimit
+      budget.discovery.used + amount <=
+        budget.discovery.limit &&
+      budget.discovery.liveUsed + amount <=
+        budget.discovery.liveLimit
     );
   }
 
   if (phase === "discovery-backlog") {
     return (
-      budget.discovery.used + amount <= budget.discovery.limit &&
-      budget.discovery.backlogUsed + amount <= budget.discovery.backlogLimit
+      budget.discovery.used + amount <=
+        budget.discovery.limit &&
+      budget.discovery.backlogUsed + amount <=
+        budget.discovery.backlogLimit
     );
   }
 
   return false;
 }
 
-function consumeBudget(budget, phase, type, amount = 1) {
-  if (!budgetAvailable(budget, phase, amount)) {
+function consumeBudget(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  if (
+    !budgetAvailable(
+      budget,
+      phase,
+      amount
+    )
+  ) {
     budget.skipped.push({
       phase,
       type,
@@ -297,6 +378,8 @@ function consumeBudget(budget, phase, type, amount = 1) {
     budget.system.used += amount;
   } else if (phase === "analysis") {
     budget.analysis.used += amount;
+  } else if (phase === "notification") {
+    budget.notification.used += amount;
   } else if (phase === "discovery-live") {
     budget.discovery.used += amount;
     budget.discovery.liveUsed += amount;
@@ -312,56 +395,100 @@ function budgetTelemetry(budget) {
   return {
     used: budget.totalUsed,
     limit: budget.totalLimit,
-    remaining: Math.max(0, budget.totalLimit - budget.totalUsed),
+    remaining:
+      Math.max(
+        0,
+        budget.totalLimit -
+          budget.totalUsed
+      ),
 
     system: {
       used: budget.system.used,
       limit: budget.system.limit,
-      remaining: Math.max(
-        0,
-        budget.system.limit - budget.system.used
-      )
+      remaining:
+        Math.max(
+          0,
+          budget.system.limit -
+            budget.system.used
+        )
     },
 
     discovery: {
       used: budget.discovery.used,
       limit: budget.discovery.limit,
-      remaining: Math.max(
-        0,
-        budget.discovery.limit - budget.discovery.used
-      ),
+
+      remaining:
+        Math.max(
+          0,
+          budget.discovery.limit -
+            budget.discovery.used
+        ),
 
       live: {
-        used: budget.discovery.liveUsed,
-        limit: budget.discovery.liveLimit,
-        remaining: Math.max(
-          0,
-          budget.discovery.liveLimit - budget.discovery.liveUsed
-        )
+        used:
+          budget.discovery.liveUsed,
+
+        limit:
+          budget.discovery.liveLimit,
+
+        remaining:
+          Math.max(
+            0,
+            budget.discovery.liveLimit -
+              budget.discovery.liveUsed
+          )
       },
 
       backlog: {
-        used: budget.discovery.backlogUsed,
-        limit: budget.discovery.backlogLimit,
-        remaining: Math.max(
-          0,
-          budget.discovery.backlogLimit - budget.discovery.backlogUsed
-        )
+        used:
+          budget.discovery.backlogUsed,
+
+        limit:
+          budget.discovery.backlogLimit,
+
+        remaining:
+          Math.max(
+            0,
+            budget.discovery.backlogLimit -
+              budget.discovery.backlogUsed
+          )
       }
     },
 
     analysis: {
       used: budget.analysis.used,
       limit: budget.analysis.limit,
-      remaining: Math.max(
-        0,
-        budget.analysis.limit - budget.analysis.used
-      ),
+
+      remaining:
+        Math.max(
+          0,
+          budget.analysis.limit -
+            budget.analysis.used
+        ),
+
+      protected: true
+    },
+
+    notification: {
+      used:
+        budget.notification.used,
+
+      limit:
+        budget.notification.limit,
+
+      remaining:
+        Math.max(
+          0,
+          budget.notification.limit -
+            budget.notification.used
+        ),
+
       protected: true
     },
 
     hardPhaseIsolation: true,
     liveFirstIsolation: true,
+    telegramBudgeted: true,
     skipped: budget.skipped
   };
 }
@@ -402,18 +529,22 @@ function getKV(env) {
 function newState() {
   return {
     version: VERSION,
+
     lastScannedBlock: null,
     lastLiveScannedBlock: null,
+
     watchedTokens: [],
     alerts: {},
     snapshots: {},
+
     createdAt: now(),
     updatedAt: now()
   };
 }
 
 async function readState(env) {
-  const { kv, binding } = getKV(env);
+  const { kv, binding } =
+    getKV(env);
 
   if (!kv) {
     return {
@@ -425,7 +556,8 @@ async function readState(env) {
   }
 
   try {
-    const raw = await kv.get(STATE_KEY);
+    const raw =
+      await kv.get(STATE_KEY);
 
     if (!raw) {
       return {
@@ -436,17 +568,27 @@ async function readState(env) {
       };
     }
 
-    const parsed = JSON.parse(raw);
+    const parsed =
+      JSON.parse(raw);
 
     let watchedTokens = [];
 
-    if (Array.isArray(parsed.watchedTokens)) {
-      watchedTokens = parsed.watchedTokens;
+    if (
+      Array.isArray(
+        parsed.watchedTokens
+      )
+    ) {
+      watchedTokens =
+        parsed.watchedTokens;
     } else if (
       parsed.watchedTokens &&
-      typeof parsed.watchedTokens === "object"
+      typeof parsed.watchedTokens ===
+        "object"
     ) {
-      watchedTokens = Object.values(parsed.watchedTokens);
+      watchedTokens =
+        Object.values(
+          parsed.watchedTokens
+        );
     }
 
     return {
@@ -456,15 +598,20 @@ async function readState(env) {
       state: {
         ...newState(),
         ...parsed,
+
         watchedTokens,
 
         alerts:
-          parsed.alerts && typeof parsed.alerts === "object"
+          parsed.alerts &&
+          typeof parsed.alerts ===
+            "object"
             ? parsed.alerts
             : {},
 
         snapshots:
-          parsed.snapshots && typeof parsed.snapshots === "object"
+          parsed.snapshots &&
+          typeof parsed.snapshots ===
+            "object"
             ? parsed.snapshots
             : {}
       },
@@ -481,8 +628,12 @@ async function readState(env) {
   }
 }
 
-async function writeState(env, state) {
-  const { kv, binding } = getKV(env);
+async function writeState(
+  env,
+  state
+) {
+  const { kv, binding } =
+    getKV(env);
 
   if (!kv) {
     return {
@@ -515,85 +666,155 @@ async function writeState(env, state) {
   }
 }
 
-function pruneState(state) {
-  const current = Date.now();
+/*
+ * V82:
+ * trimWatchlist=false is used before discovery so a token cannot
+ * disappear merely because it had not yet been priority-sorted.
+ */
+function pruneState(
+  state,
+  trimWatchlist = true
+) {
+  const current =
+    Date.now();
 
   state.watchedTokens =
-    Array.isArray(state.watchedTokens)
+    Array.isArray(
+      state.watchedTokens
+    )
       ? state.watchedTokens
       : [];
 
-  state.watchedTokens = state.watchedTokens
-    .filter(token => {
-      const firstSeen = safeNumber(token.firstSeenAt);
+  state.watchedTokens =
+    state.watchedTokens.filter(
+      token => {
+        const firstSeen =
+          safeNumber(
+            token.firstSeenAt
+          );
 
-      if (!firstSeen) return true;
+        if (!firstSeen) {
+          return true;
+        }
 
-      return current - firstSeen <= WATCH_MAX_AGE;
-    })
-    .slice(0, MAX_WATCHED_TOKENS);
+        return (
+          current - firstSeen <=
+          WATCH_MAX_AGE
+        );
+      }
+    );
+
+  if (trimWatchlist) {
+    state.watchedTokens =
+      state.watchedTokens.slice(
+        0,
+        MAX_WATCHED_TOKENS
+      );
+  }
 
   state.alerts =
-    state.alerts && typeof state.alerts === "object"
+    state.alerts &&
+    typeof state.alerts === "object"
       ? state.alerts
       : {};
 
-  for (const [address, alert] of Object.entries(state.alerts)) {
+  for (
+    const [address, alert]
+    of Object.entries(
+      state.alerts
+    )
+  ) {
     const timestamp =
       typeof alert === "object"
-        ? safeNumber(alert.timestamp)
+        ? safeNumber(
+            alert.timestamp
+          )
         : safeNumber(alert);
 
     if (
       timestamp &&
-      current - timestamp > ALERT_COOLDOWN
+      current - timestamp >
+        ALERT_COOLDOWN
     ) {
-      delete state.alerts[address];
+      delete state.alerts[
+        address
+      ];
     }
   }
 
   state.snapshots =
-    state.snapshots && typeof state.snapshots === "object"
+    state.snapshots &&
+    typeof state.snapshots ===
+      "object"
       ? state.snapshots
       : {};
 
-  for (const [address, snapshots] of Object.entries(state.snapshots)) {
+  for (
+    const [address, snapshots]
+    of Object.entries(
+      state.snapshots
+    )
+  ) {
     let list =
       Array.isArray(snapshots)
         ? snapshots
-        : snapshots && typeof snapshots === "object"
+        : snapshots &&
+            typeof snapshots ===
+              "object"
           ? [snapshots]
           : [];
 
     list = list
       .filter(snapshot => {
-        const timestamp = safeNumber(snapshot.timestamp);
+        const timestamp =
+          safeNumber(
+            snapshot.timestamp
+          );
 
         return (
           timestamp &&
-          current - timestamp <= SNAPSHOT_MAX_AGE
+          current - timestamp <=
+            SNAPSHOT_MAX_AGE
         );
       })
-      .slice(-MAX_SNAPSHOTS_PER_TOKEN);
+      .slice(
+        -MAX_SNAPSHOTS_PER_TOKEN
+      );
 
     if (list.length) {
-      state.snapshots[address] = list;
+      state.snapshots[address] =
+        list;
     } else {
-      delete state.snapshots[address];
+      delete state.snapshots[
+        address
+      ];
     }
   }
 }
 
-function findWatched(state, address) {
-  const key = normalize(address);
+function findWatched(
+  state,
+  address
+) {
+  const key =
+    normalize(address);
 
   return state.watchedTokens.find(
-    token => normalize(token.address) === key
+    token =>
+      normalize(
+        token.address
+      ) === key
   );
 }
 
-function addWatch(state, address, pool, source) {
-  address = normalize(address);
+function addWatch(
+  state,
+  address,
+  pool,
+  source
+) {
+  address =
+    normalize(address);
 
   if (
     !isAddress(address) ||
@@ -606,30 +827,51 @@ function addWatch(state, address, pool, source) {
     };
   }
 
-  let token = findWatched(state, address);
+  let token =
+    findWatched(
+      state,
+      address
+    );
+
   let added = false;
 
   if (!token) {
     token = {
       address,
-      firstSeenAt: Date.now(),
-      lastSeenAt: Date.now(),
-      lastCheckedAt: null,
+
+      firstSeenAt:
+        Date.now(),
+
+      lastSeenAt:
+        Date.now(),
+
+      lastCheckedAt:
+        null,
+
       checks: 0,
       pools: [],
       metadata: null,
-      discoverySource: source || "UNKNOWN"
+
+      discoverySource:
+        source || "UNKNOWN"
     };
 
-    state.watchedTokens.push(token);
+    state.watchedTokens.push(
+      token
+    );
+
     added = true;
   }
 
-  token.lastSeenAt = Date.now();
+  token.lastSeenAt =
+    Date.now();
 
   if (source === "LIVE") {
-    token.discoverySource = "LIVE";
-    token.lastLiveSeenAt = Date.now();
+    token.discoverySource =
+      "LIVE";
+
+    token.lastLiveSeenAt =
+      Date.now();
   }
 
   token.pools =
@@ -638,10 +880,16 @@ function addWatch(state, address, pool, source) {
       : [];
 
   if (pool) {
-    const exists = token.pools.some(
-      existing =>
-        normalize(existing.poolId) === normalize(pool.poolId)
-    );
+    const exists =
+      token.pools.some(
+        existing =>
+          normalize(
+            existing.poolId
+          ) ===
+          normalize(
+            pool.poolId
+          )
+      );
 
     if (!exists) {
       token.pools.push(pool);
@@ -673,46 +921,58 @@ async function rpcCall(
     )
   ) {
     throw new Error(
-      `REQUEST_BUDGET_EXHAUSTED_${String(phase)
+      `REQUEST_BUDGET_EXHAUSTED_${String(
+        phase
+      )
         .toUpperCase()
         .replace(/-/g, "_")}`
     );
   }
 
-  const controller = new AbortController();
+  const controller =
+    new AbortController();
 
-  const timer = setTimeout(
-    () => controller.abort(),
-    4500
-  );
+  const timer =
+    setTimeout(
+      () =>
+        controller.abort(),
+      4500
+    );
 
   try {
-    const response = await fetch(url, {
-      method: "POST",
+    const response =
+      await fetch(url, {
+        method: "POST",
 
-      headers: {
-        "content-type": "application/json"
-      },
+        headers: {
+          "content-type":
+            "application/json"
+        },
 
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: Date.now(),
-        method,
-        params
-      }),
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: Date.now(),
+          method,
+          params
+        }),
 
-      signal: controller.signal
-    });
+        signal:
+          controller.signal
+      });
 
     if (!response.ok) {
-      throw new Error(`HTTP_${response.status}`);
+      throw new Error(
+        `HTTP_${response.status}`
+      );
     }
 
-    const body = await response.json();
+    const body =
+      await response.json();
 
     if (body.error) {
       throw new Error(
-        body.error.message || "RPC_ERROR"
+        body.error.message ||
+          "RPC_ERROR"
       );
     }
 
@@ -732,21 +992,24 @@ async function rpc(
   let publicError = null;
 
   try {
-    const result = await rpcCall(
-      PUBLIC_RPC,
-      method,
-      params,
-      budget,
-      phase
-    );
+    const result =
+      await rpcCall(
+        PUBLIC_RPC,
+        method,
+        params,
+        budget,
+        phase
+      );
 
     return {
       result,
-      provider: "ROBINHOOD_PUBLIC_RPC",
+      provider:
+        "ROBINHOOD_PUBLIC_RPC",
       error: null
     };
   } catch (error) {
-    publicError = errorString(error);
+    publicError =
+      errorString(error);
 
     if (
       publicError.startsWith(
@@ -765,28 +1028,39 @@ async function rpc(
     return {
       result: null,
       provider: null,
+
       error:
         "PUBLIC_RPC_FAILED: " +
         publicError
     };
   }
 
-  if (!budgetAvailable(budget, phase, 1)) {
+  if (
+    !budgetAvailable(
+      budget,
+      phase,
+      1
+    )
+  ) {
     return {
       result: null,
       provider: null,
-      error: "REQUEST_BUDGET_EXHAUSTED"
+      error:
+        "REQUEST_BUDGET_EXHAUSTED"
     };
   }
 
   try {
-    const result = await rpcCall(
-      ALCHEMY_BASE + env.ALCHEMY_API_KEY,
-      method,
-      params,
-      budget,
-      phase
-    );
+    const result =
+      await rpcCall(
+        ALCHEMY_BASE +
+          env.ALCHEMY_API_KEY,
+
+        method,
+        params,
+        budget,
+        phase
+      );
 
     return {
       result,
@@ -797,6 +1071,7 @@ async function rpc(
     return {
       result: null,
       provider: null,
+
       error:
         "PUBLIC_RPC_FAILED: " +
         publicError +
@@ -806,25 +1081,32 @@ async function rpc(
   }
 }
 
-async function latestBlock(env, budget) {
-  const response = await rpc(
-    env,
-    "eth_blockNumber",
-    [],
-    budget,
-    "system"
-  );
+async function latestBlock(
+  env,
+  budget
+) {
+  const response =
+    await rpc(
+      env,
+      "eth_blockNumber",
+      [],
+      budget,
+      "system"
+    );
 
   if (!response.result) {
     throw new Error(
       response.error ||
-      "BLOCK_NUMBER_FAILED"
+        "BLOCK_NUMBER_FAILED"
     );
   }
 
   return {
-    block: BigInt(response.result),
-    provider: response.provider
+    block:
+      BigInt(response.result),
+
+    provider:
+      response.provider
   };
 }
 
@@ -838,15 +1120,20 @@ async function getLogs(
   return rpc(
     env,
     "eth_getLogs",
-    [{
-      fromBlock:
-        "0x" + from.toString(16),
+    [
+      {
+        fromBlock:
+          "0x" +
+          from.toString(16),
 
-      toBlock:
-        "0x" + to.toString(16),
+        toBlock:
+          "0x" +
+          to.toString(16),
 
-      address: POOL_MANAGER
-    }],
+        address:
+          POOL_MANAGER
+      }
+    ],
     budget,
     phase
   );
@@ -866,39 +1153,63 @@ async function scanLogRange(
   depth = 0
 ) {
   if (
-    phase !== "discovery-live" &&
-    phase !== "discovery-backlog"
+    phase !==
+      "discovery-live" &&
+    phase !==
+      "discovery-backlog"
   ) {
     return {
       success: false,
-      error: "INVALID_DISCOVERY_PHASE"
+      error:
+        "INVALID_DISCOVERY_PHASE"
     };
   }
 
-  if (!budgetAvailable(budget, phase)) {
+  if (
+    !budgetAvailable(
+      budget,
+      phase
+    )
+  ) {
     return {
       success: false,
       budgetExhausted: true,
-      error: "DISCOVERY_BUDGET_EXHAUSTED"
+      error:
+        "DISCOVERY_BUDGET_EXHAUSTED"
     };
   }
 
-  const response = await getLogs(
-    env,
-    from,
-    to,
-    budget,
-    phase
-  );
+  const response =
+    await getLogs(
+      env,
+      from,
+      to,
+      budget,
+      phase
+    );
 
-  if (Array.isArray(response.result)) {
-    output.logs.push(...response.result);
+  if (
+    Array.isArray(
+      response.result
+    )
+  ) {
+    output.logs.push(
+      ...response.result
+    );
 
     output.ranges.push({
-      fromBlock: Number(from),
-      toBlock: Number(to),
-      logs: response.result.length,
-      provider: response.provider,
+      fromBlock:
+        Number(from),
+
+      toBlock:
+        Number(to),
+
+      logs:
+        response.result.length,
+
+      provider:
+        response.provider,
+
       phase,
       splitDepth: depth
     });
@@ -910,7 +1221,9 @@ async function scanLogRange(
   }
 
   if (
-    String(response.error || "").includes(
+    String(
+      response.error || ""
+    ).includes(
       "REQUEST_BUDGET_EXHAUSTED"
     )
   ) {
@@ -921,39 +1234,52 @@ async function scanLogRange(
     };
   }
 
-  const size = to - from + 1n;
+  const size =
+    to - from + 1n;
 
-  if (size > BigInt(MIN_LOG_RANGE)) {
+  if (
+    size >
+    BigInt(MIN_LOG_RANGE)
+  ) {
     const middle =
-      from + (to - from) / 2n;
+      from +
+      (to - from) / 2n;
 
-    const left = await scanLogRange(
-      env,
-      from,
-      middle,
-      budget,
-      output,
-      phase,
-      depth + 1
-    );
+    const left =
+      await scanLogRange(
+        env,
+        from,
+        middle,
+        budget,
+        output,
+        phase,
+        depth + 1
+      );
 
     if (!left.success) {
       return left;
     }
 
-    const right = await scanLogRange(
-      env,
-      middle + 1n,
-      to,
-      budget,
-      output,
-      phase,
-      depth + 1
-    );
+    const right =
+      await scanLogRange(
+        env,
+        middle + 1n,
+        to,
+        budget,
+        output,
+        phase,
+        depth + 1
+      );
 
     if (!right.success) {
       return {
         ...right,
+
+        /*
+         * V82:
+         * Safe contiguous progress exists
+         * through the successful left side.
+         */
         processedThrough:
           left.processedThrough
       };
@@ -961,6 +1287,7 @@ async function scanLogRange(
 
     return {
       success: true,
+
       processedThrough:
         right.processedThrough
     };
@@ -974,8 +1301,12 @@ async function scanLogRange(
       "GET_LOGS_FAILED",
 
     failedRange: {
-      fromBlock: Number(from),
-      toBlock: Number(to),
+      fromBlock:
+        Number(from),
+
+      toBlock:
+        Number(to),
+
       error:
         response.error ||
         "GET_LOGS_FAILED"
@@ -989,34 +1320,51 @@ async function scanLogRange(
 
 function decodeInitialize(log) {
   if (
-    normalize(log?.topics?.[0]) !==
-    INITIALIZE_TOPIC
+    normalize(
+      log?.topics?.[0]
+    ) !== INITIALIZE_TOPIC
   ) {
     return null;
   }
 
   if (
-    !Array.isArray(log.topics) ||
+    !Array.isArray(
+      log.topics
+    ) ||
     log.topics.length < 4
   ) {
     return null;
   }
 
   const currency0 =
-    topicAddress(log.topics[2]);
+    topicAddress(
+      log.topics[2]
+    );
 
   const currency1 =
-    topicAddress(log.topics[3]);
+    topicAddress(
+      log.topics[3]
+    );
 
-  if (!currency0 || !currency1) {
+  if (
+    !currency0 ||
+    !currency1
+  ) {
     return null;
   }
 
   return {
-    poolId: normalize(log.topics[1]),
+    poolId:
+      normalize(
+        log.topics[1]
+      ),
+
     currency0,
     currency1,
-    blockNumber: log.blockNumber,
+
+    blockNumber:
+      log.blockNumber,
+
     transactionHash:
       log.transactionHash
   };
@@ -1027,8 +1375,11 @@ function processDiscoveryLogs(
   logs,
   source
 ) {
-  const newTokens = new Set();
-  const seenTokens = new Set();
+  const newTokens =
+    new Set();
+
+  const seenTokens =
+    new Set();
 
   let initializeEvents = 0;
   let swapTopicMatches = 0;
@@ -1036,28 +1387,38 @@ function processDiscoveryLogs(
 
   for (const log of logs) {
     const topic0 =
-      normalize(log?.topics?.[0]);
+      normalize(
+        log?.topics?.[0]
+      );
 
-    if (topic0 === SWAP_TOPIC) {
+    if (
+      topic0 ===
+      SWAP_TOPIC
+    ) {
       swapTopicMatches++;
     }
 
     if (
-      topic0 === MODIFY_LIQUIDITY_TOPIC
+      topic0 ===
+      MODIFY_LIQUIDITY_TOPIC
     ) {
       liquidityTopicMatches++;
     }
 
-    const pool = decodeInitialize(log);
+    const pool =
+      decodeInitialize(log);
 
     if (!pool) continue;
 
     initializeEvents++;
 
-    for (const address of [
-      pool.currency0,
-      pool.currency1
-    ]) {
+    for (
+      const address
+      of [
+        pool.currency0,
+        pool.currency1
+      ]
+    ) {
       if (
         !isAddress(address) ||
         address === ZERO ||
@@ -1066,12 +1427,13 @@ function processDiscoveryLogs(
         continue;
       }
 
-      const result = addWatch(
-        state,
-        address,
-        pool,
-        source
-      );
+      const result =
+        addWatch(
+          state,
+          address,
+          pool,
+          source
+        );
 
       if (result.token) {
         seenTokens.add(
@@ -1088,12 +1450,147 @@ function processDiscoveryLogs(
   }
 
   return {
-    rawLogs: logs.length,
+    rawLogs:
+      logs.length,
+
     initializeEvents,
     swapTopicMatches,
     liquidityTopicMatches,
+
     newTokens,
     seenTokens
+  };
+}
+
+/*
+ * V82:
+ * A watched token does not need a fresh Initialize event to be
+ * considered live. If its known V4 pool is swapping or changing
+ * liquidity inside the live block window, promote it.
+ */
+function activeTokensFromLogs(
+  state,
+  logs
+) {
+  const poolToTokens =
+    new Map();
+
+  for (
+    const watched
+    of state.watchedTokens
+  ) {
+    const address =
+      normalize(
+        watched.address
+      );
+
+    if (
+      !isAddress(address) ||
+      knownQuote(address)
+    ) {
+      continue;
+    }
+
+    for (
+      const pool
+      of watched.pools || []
+    ) {
+      const poolId =
+        normalize(
+          pool.poolId
+        );
+
+      if (!poolId) {
+        continue;
+      }
+
+      if (
+        !poolToTokens.has(
+          poolId
+        )
+      ) {
+        poolToTokens.set(
+          poolId,
+          new Set()
+        );
+      }
+
+      poolToTokens
+        .get(poolId)
+        .add(address);
+    }
+  }
+
+  const active =
+    new Set();
+
+  let swapEvents = 0;
+  let liquidityEvents = 0;
+
+  for (const log of logs) {
+    const topic0 =
+      normalize(
+        log?.topics?.[0]
+      );
+
+    if (
+      topic0 !== SWAP_TOPIC &&
+      topic0 !==
+        MODIFY_LIQUIDITY_TOPIC
+    ) {
+      continue;
+    }
+
+    const poolId =
+      normalize(
+        log?.topics?.[1]
+      );
+
+    const tokens =
+      poolToTokens.get(
+        poolId
+      );
+
+    if (!tokens) {
+      continue;
+    }
+
+    if (
+      topic0 === SWAP_TOPIC
+    ) {
+      swapEvents++;
+    }
+
+    if (
+      topic0 ===
+      MODIFY_LIQUIDITY_TOPIC
+    ) {
+      liquidityEvents++;
+    }
+
+    for (
+      const address
+      of tokens
+    ) {
+      active.add(address);
+
+      const watched =
+        findWatched(
+          state,
+          address
+        );
+
+      if (watched) {
+        watched.lastLiveSeenAt =
+          Date.now();
+      }
+    }
+  }
+
+  return {
+    tokens: active,
+    swapEvents,
+    liquidityEvents
   };
 }
 
@@ -1101,34 +1598,47 @@ function activityForToken(
   watched,
   logs
 ) {
-  const poolIds = new Set(
-    (watched.pools || [])
-      .map(pool =>
-        normalize(pool.poolId)
-      )
-      .filter(Boolean)
-  );
+  const poolIds =
+    new Set(
+      (watched.pools || [])
+        .map(pool =>
+          normalize(
+            pool.poolId
+          )
+        )
+        .filter(Boolean)
+    );
 
   let swaps = 0;
   let liquidityEvents = 0;
 
   for (const log of logs) {
     const topic0 =
-      normalize(log?.topics?.[0]);
+      normalize(
+        log?.topics?.[0]
+      );
 
     const poolId =
-      normalize(log?.topics?.[1]);
+      normalize(
+        log?.topics?.[1]
+      );
 
-    if (!poolIds.has(poolId)) {
+    if (
+      !poolIds.has(poolId)
+    ) {
       continue;
     }
 
-    if (topic0 === SWAP_TOPIC) {
+    if (
+      topic0 ===
+      SWAP_TOPIC
+    ) {
       swaps++;
     }
 
     if (
-      topic0 === MODIFY_LIQUIDITY_TOPIC
+      topic0 ===
+      MODIFY_LIQUIDITY_TOPIC
     ) {
       liquidityEvents++;
     }
@@ -1137,6 +1647,7 @@ function activityForToken(
   return {
     swaps,
     liquidityEvents,
+
     poolSpecific:
       poolIds.size > 0
   };
@@ -1152,21 +1663,25 @@ async function ethCall(
   data,
   budget
 ) {
-  const response = await rpc(
-    env,
-    "eth_call",
-    [{
-      to: token,
-      data
-    }, "latest"],
-    budget,
-    "analysis"
-  );
+  const response =
+    await rpc(
+      env,
+      "eth_call",
+      [
+        {
+          to: token,
+          data
+        },
+        "latest"
+      ],
+      budget,
+      "analysis"
+    );
 
   if (!response.result) {
     throw new Error(
       response.error ||
-      "ETH_CALL_FAILED"
+        "ETH_CALL_FAILED"
     );
   }
 
@@ -1181,7 +1696,9 @@ function decodeUint(hex) {
   }
 }
 
-function decodeBytes32String(hex) {
+function decodeBytes32String(
+  hex
+) {
   try {
     const raw =
       String(hex || "")
@@ -1191,12 +1708,18 @@ function decodeBytes32String(hex) {
       return null;
     }
 
-    const bytes = new Uint8Array(
-      (raw.match(/.{2}/g) || [])
-        .map(value =>
-          parseInt(value, 16)
+    const bytes =
+      new Uint8Array(
+        (
+          raw.match(/.{2}/g) ||
+          []
+        ).map(value =>
+          parseInt(
+            value,
+            16
+          )
         )
-    );
+      );
 
     return (
       new TextDecoder()
@@ -1216,7 +1739,9 @@ function decodeString(hex) {
       String(hex || "")
         .replace(/^0x/, "");
 
-    if (!raw) return null;
+    if (!raw) {
+      return null;
+    }
 
     if (raw.length === 64) {
       return decodeBytes32String(
@@ -1232,26 +1757,31 @@ function decodeString(hex) {
       Number(
         BigInt(
           "0x" +
-          raw.slice(0, 64)
+          raw.slice(
+            0,
+            64
+          )
         )
       ) * 2;
 
     if (
       offset < 0 ||
-      offset + 64 > raw.length
+      offset + 64 >
+        raw.length
     ) {
       return null;
     }
 
-    const length = Number(
-      BigInt(
-        "0x" +
-        raw.slice(
-          offset,
-          offset + 64
+    const length =
+      Number(
+        BigInt(
+          "0x" +
+          raw.slice(
+            offset,
+            offset + 64
+          )
         )
-      )
-    );
+      );
 
     if (
       length <= 0 ||
@@ -1269,10 +1799,15 @@ function decodeString(hex) {
 
     const bytes =
       new Uint8Array(
-        (data.match(/.{2}/g) || [])
-          .map(value =>
-            parseInt(value, 16)
+        (
+          data.match(/.{2}/g) ||
+          []
+        ).map(value =>
+          parseInt(
+            value,
+            16
           )
+        )
       );
 
     return (
@@ -1287,7 +1822,9 @@ function decodeString(hex) {
   }
 }
 
-function reusableMetadata(watched) {
+function reusableMetadata(
+  watched
+) {
   const metadata =
     watched?.metadata;
 
@@ -1305,7 +1842,8 @@ function reusableMetadata(watched) {
 
   if (
     !verifiedAt ||
-    Date.now() - verifiedAt >
+    Date.now() -
+      verifiedAt >
       METADATA_REUSE_MS
   ) {
     return null;
@@ -1317,6 +1855,16 @@ function reusableMetadata(watched) {
   };
 }
 
+function estimatedAnalysisCost(
+  watched
+) {
+  return reusableMetadata(
+    watched
+  )
+    ? CACHED_TOKEN_FULL_ANALYSIS_COST
+    : FRESH_TOKEN_FULL_ANALYSIS_COST;
+}
+
 async function verifyERC20(
   env,
   address,
@@ -1324,33 +1872,54 @@ async function verifyERC20(
   watched
 ) {
   const cached =
-    reusableMetadata(watched);
+    reusableMetadata(
+      watched
+    );
 
   if (cached) {
     return cached;
   }
 
+  /*
+   * V82 FIX:
+   * V81 checked for 4 requests but verification can consume 5.
+   */
   if (
     !budgetAvailable(
       budget,
       "analysis",
-      4
+      5
     )
   ) {
     return {
       validERC20: false,
+      deferred: true,
+
       reason:
-        "ANALYSIS_BUDGET_PROTECTED"
+        "ANALYSIS_BUDGET_PROTECTED",
+
+      requiredRequests: 5,
+
+      remainingRequests:
+        Math.max(
+          0,
+          budget.analysis.limit -
+            budget.analysis.used
+        )
     };
   }
 
-  const code = await rpc(
-    env,
-    "eth_getCode",
-    [address, "latest"],
-    budget,
-    "analysis"
-  );
+  const code =
+    await rpc(
+      env,
+      "eth_getCode",
+      [
+        address,
+        "latest"
+      ],
+      budget,
+      "analysis"
+    );
 
   if (
     !code.result ||
@@ -1359,6 +1928,7 @@ async function verifyERC20(
   ) {
     return {
       validERC20: false,
+      deferred: false,
       reason:
         "NO_CONTRACT_BYTECODE"
     };
@@ -1370,50 +1940,54 @@ async function verifyERC20(
   let totalSupply = null;
 
   try {
-    name = decodeString(
-      await ethCall(
-        env,
-        address,
-        "0x06fdde03",
-        budget
-      )
-    );
+    name =
+      decodeString(
+        await ethCall(
+          env,
+          address,
+          "0x06fdde03",
+          budget
+        )
+      );
   } catch {}
 
   try {
-    symbol = decodeString(
-      await ethCall(
-        env,
-        address,
-        "0x95d89b41",
-        budget
-      )
-    );
+    symbol =
+      decodeString(
+        await ethCall(
+          env,
+          address,
+          "0x95d89b41",
+          budget
+        )
+      );
   } catch {}
 
   try {
-    const value = decodeUint(
-      await ethCall(
-        env,
-        address,
-        "0x313ce567",
-        budget
-      )
-    );
+    const value =
+      decodeUint(
+        await ethCall(
+          env,
+          address,
+          "0x313ce567",
+          budget
+        )
+      );
 
     if (value !== null) {
-      decimals = Number(value);
+      decimals =
+        Number(value);
     }
   } catch {}
 
-  if (
-    budgetAvailable(
-      budget,
-      "analysis"
-    )
-  ) {
-    try {
-      totalSupply = decodeUint(
+  /*
+   * The 5-request reservation above guarantees that a
+   * totalSupply call cannot be blocked merely because V81
+   * under-reserved the verification budget.
+   */
+  try {
+    totalSupply =
+      decodeUint(
         await ethCall(
           env,
           address,
@@ -1421,13 +1995,18 @@ async function verifyERC20(
           budget
         )
       );
-    } catch {}
-  }
+  } catch {}
 
   const score =
     (name ? 1 : 0) +
     (symbol ? 1 : 0) +
-    (Number.isFinite(decimals) ? 1 : 0) +
+    (
+      Number.isFinite(
+        decimals
+      )
+        ? 1
+        : 0
+    ) +
     (
       totalSupply !== null &&
       totalSupply > 0n
@@ -1438,11 +2017,15 @@ async function verifyERC20(
   if (score < 3) {
     return {
       validERC20: false,
+      deferred: false,
+
       reason:
         "ERC20_METHODS_NOT_VERIFIED",
+
       name,
       symbol,
       decimals,
+
       totalSupply:
         totalSupply !== null
           ? totalSupply.toString()
@@ -1452,7 +2035,9 @@ async function verifyERC20(
 
   return {
     validERC20: true,
+    deferred: false,
     reason: "VERIFIED",
+
     address,
     name,
     symbol,
@@ -1463,7 +2048,9 @@ async function verifyERC20(
         ? totalSupply.toString()
         : null,
 
-    verifiedAt: Date.now(),
+    verifiedAt:
+      Date.now(),
+
     reused: false
   };
 }
@@ -1485,24 +2072,28 @@ async function marketData(
   ) {
     return {
       verified: false,
+
       status:
         "ANALYSIS_BUDGET_PROTECTED"
     };
   }
 
   try {
-    const response = await fetch(
-      `${DEXSCREENER_BASE}/token-pairs/v1/robinhood/${token}`,
-      {
-        headers: {
-          accept: "application/json"
+    const response =
+      await fetch(
+        `${DEXSCREENER_BASE}/token-pairs/v1/robinhood/${token}`,
+        {
+          headers: {
+            accept:
+              "application/json"
+          }
         }
-      }
-    );
+      );
 
     if (!response.ok) {
       return {
         verified: false,
+
         status:
           `HTTP_${response.status}`
       };
@@ -1519,7 +2110,8 @@ async function marketData(
     if (!pairs.length) {
       return {
         verified: false,
-        status: "NO_MARKET_FOUND"
+        status:
+          "NO_MARKET_FOUND"
       };
     }
 
@@ -1533,7 +2125,8 @@ async function marketData(
         )
     );
 
-    const pair = pairs[0];
+    const pair =
+      pairs[0];
 
     const buys =
       safeNumber(
@@ -1553,13 +2146,16 @@ async function marketData(
       status: "VERIFIED",
 
       pairAddress:
-        pair?.pairAddress || null,
+        pair?.pairAddress ||
+        null,
 
       url:
-        pair?.url || null,
+        pair?.url ||
+        null,
 
       priceUsd:
-        pair?.priceUsd || null,
+        pair?.priceUsd ||
+        null,
 
       liquidityUsd:
         safeNumber(
@@ -1615,8 +2211,11 @@ async function marketData(
   } catch (error) {
     return {
       verified: false,
-      status: "DEXSCREENER_ERROR",
-      error: errorString(error)
+      status:
+        "DEXSCREENER_ERROR",
+
+      error:
+        errorString(error)
     };
   }
 }
@@ -1640,14 +2239,16 @@ async function blockscout(
   }
 
   try {
-    const response = await fetch(
-      BLOCKSCOUT + path,
-      {
-        headers: {
-          accept: "application/json"
+    const response =
+      await fetch(
+        BLOCKSCOUT + path,
+        {
+          headers: {
+            accept:
+              "application/json"
+          }
         }
-      }
-    );
+      );
 
     if (!response.ok) {
       return null;
@@ -1659,9 +2260,9 @@ async function blockscout(
   }
 }
 
-/*
- * V81 HOLDER INTEGRITY
- */
+/* =========================================================
+   HOLDER INTEGRITY — V82
+   ========================================================= */
 
 function holderPercent(
   value,
@@ -1669,10 +2270,14 @@ function holderPercent(
 ) {
   try {
     const held =
-      BigInt(String(value));
+      BigInt(
+        String(value)
+      );
 
     const total =
-      BigInt(String(supply));
+      BigInt(
+        String(supply)
+      );
 
     if (
       held < 0n ||
@@ -1685,8 +2290,8 @@ function holderPercent(
     const percentage =
       Number(
         held *
-        100000000n /
-        total
+          100000000n /
+          total
       ) /
       1000000;
 
@@ -1706,26 +2311,58 @@ function holderPercent(
   }
 }
 
-function extractHolderAddress(item) {
+function extractHolderAddress(
+  item
+) {
   if (
-    typeof item?.address === "string"
+    typeof item?.address ===
+      "string"
   ) {
     return item.address;
   }
 
   if (
-    typeof item?.address?.hash === "string"
+    typeof item?.address?.hash ===
+      "string"
   ) {
     return item.address.hash;
   }
 
   if (
-    typeof item?.address_hash === "string"
+    typeof item?.address_hash ===
+      "string"
   ) {
     return item.address_hash;
   }
 
   return null;
+}
+
+/*
+ * V82:
+ * Use nullish selection rather than truthy selection.
+ * This avoids valid zero-like values accidentally falling
+ * through to another field.
+ */
+function extractHolderValue(
+  item
+) {
+  const value =
+    item?.value ??
+    item?.token?.value ??
+    item?.balance ??
+    item?.token_balance ??
+    null;
+
+  if (
+    value === null ||
+    value === undefined ||
+    value === ""
+  ) {
+    return "0";
+  }
+
+  return String(value);
 }
 
 function validateHolderIntegrity(
@@ -1742,39 +2379,53 @@ function validateHolderIntegrity(
   } catch {
     return {
       verified: false,
+
       status:
         "INVALID_TOTAL_SUPPLY",
+
       impossibleBalanceCount: 0,
       percentageSum: null,
+
       supply:
-        String(totalSupply || ""),
-      topHolderBalanceSum: null
+        String(
+          totalSupply || ""
+        ),
+
+      topHolderBalanceSum:
+        null
     };
   }
 
   if (supply <= 0n) {
     return {
       verified: false,
+
       status:
         "INVALID_TOTAL_SUPPLY",
+
       impossibleBalanceCount: 0,
       percentageSum: null,
-      supply: supply.toString(),
-      topHolderBalanceSum: null
+
+      supply:
+        supply.toString(),
+
+      topHolderBalanceSum:
+        null
     };
   }
 
   let balanceSum = 0n;
   let impossibleBalanceCount = 0;
 
-  for (const item of rawHolders) {
+  for (
+    const item
+    of rawHolders
+  ) {
     try {
       const value =
         BigInt(
-          String(
-            item?.value ||
-            item?.token?.value ||
-            "0"
+          extractHolderValue(
+            item
           )
         );
 
@@ -1795,19 +2446,27 @@ function validateHolderIntegrity(
   const percentageSum =
     Number(
       balanceSum *
-      100000000n /
-      supply
+        100000000n /
+        supply
     ) /
     1000000;
 
-  if (impossibleBalanceCount > 0) {
+  if (
+    impossibleBalanceCount >
+    0
+  ) {
     return {
       verified: false,
+
       status:
         "IMPOSSIBLE_HOLDER_BALANCE",
+
       impossibleBalanceCount,
       percentageSum,
-      supply: supply.toString(),
+
+      supply:
+        supply.toString(),
+
       topHolderBalanceSum:
         balanceSum.toString()
     };
@@ -1815,15 +2474,21 @@ function validateHolderIntegrity(
 
   if (
     balanceSum > supply ||
-    percentageSum > 100.000001
+    percentageSum >
+      100.000001
   ) {
     return {
       verified: false,
+
       status:
         "TOP_HOLDERS_EXCEED_TOTAL_SUPPLY",
+
       impossibleBalanceCount,
       percentageSum,
-      supply: supply.toString(),
+
+      supply:
+        supply.toString(),
+
       topHolderBalanceSum:
         balanceSum.toString()
     };
@@ -1832,29 +2497,45 @@ function validateHolderIntegrity(
   return {
     verified: true,
     status: "VERIFIED",
-    impossibleBalanceCount: 0,
+
+    impossibleBalanceCount:
+      0,
+
     percentageSum,
-    supply: supply.toString(),
+
+    supply:
+      supply.toString(),
+
     topHolderBalanceSum:
       balanceSum.toString()
   };
 }
 
 function unverifiedHolders(
-  reason = "NOT_VERIFIED"
+  reason =
+    "NOT_VERIFIED"
 ) {
   return {
     verified: false,
-    countersVerified: false,
-    concentrationVerified: false,
+
+    countersVerified:
+      false,
+
+    concentrationVerified:
+      false,
 
     integrity: {
       verified: false,
       status: reason,
-      impossibleBalanceCount: 0,
+
+      impossibleBalanceCount:
+        0,
+
       percentageSum: null,
       supply: null,
-      topHolderBalanceSum: null
+
+      topHolderBalanceSum:
+        null
     },
 
     holderCount: null,
@@ -1863,14 +2544,19 @@ function unverifiedHolders(
 
     whale: {
       verified: false,
+
       whaleCount: null,
       top1Percent: null,
       top5Percent: null,
       top10Percent: null,
+
       concentrationRisk:
         "UNVERIFIED",
+
       smartMoneyScore: 0,
-      smartMoneyCandidate: false
+
+      smartMoneyCandidate:
+        false
     }
   };
 }
@@ -1925,21 +2611,35 @@ async function holderIntelligence(
 
   if (
     !holders ||
-    !Array.isArray(holders.items)
+    !Array.isArray(
+      holders.items
+    )
   ) {
     return {
       verified: true,
       countersVerified: true,
-      concentrationVerified: false,
+
+      concentrationVerified:
+        false,
 
       integrity: {
         verified: false,
+
         status:
           "BLOCKSCOUT_HOLDERS_UNAVAILABLE",
-        impossibleBalanceCount: 0,
+
+        impossibleBalanceCount:
+          0,
+
         percentageSum: null,
-        supply: String(totalSupply),
-        topHolderBalanceSum: null
+
+        supply:
+          String(
+            totalSupply
+          ),
+
+        topHolderBalanceSum:
+          null
       },
 
       holderCount,
@@ -1948,20 +2648,28 @@ async function holderIntelligence(
 
       whale: {
         verified: false,
+
         whaleCount: null,
         top1Percent: null,
         top5Percent: null,
         top10Percent: null,
+
         concentrationRisk:
           "UNVERIFIED",
+
         smartMoneyScore: 0,
-        smartMoneyCandidate: false
+
+        smartMoneyCandidate:
+          false
       }
     };
   }
 
   const items =
-    holders.items.slice(0, 10);
+    holders.items.slice(
+      0,
+      10
+    );
 
   const integrity =
     validateHolderIntegrity(
@@ -1972,15 +2680,15 @@ async function holderIntelligence(
   const topHolders =
     items.map(item => {
       const value =
-        String(
-          item?.value ||
-          item?.token?.value ||
-          "0"
+        extractHolderValue(
+          item
         );
 
       return {
         address:
-          extractHolderAddress(item),
+          extractHolderAddress(
+            item
+          ),
 
         value,
 
@@ -1996,7 +2704,10 @@ async function holderIntelligence(
     return {
       verified: true,
       countersVerified: true,
-      concentrationVerified: false,
+
+      concentrationVerified:
+        false,
+
       integrity,
       holderCount,
       transferCount,
@@ -2011,28 +2722,39 @@ async function holderIntelligence(
 
       whale: {
         verified: false,
+
         whaleCount: null,
         top1Percent: null,
         top5Percent: null,
         top10Percent: null,
+
         concentrationRisk:
           "UNVERIFIED",
+
         smartMoneyScore: 0,
-        smartMoneyCandidate: false,
-        reason: integrity.status
+
+        smartMoneyCandidate:
+          false,
+
+        reason:
+          integrity.status
       }
     };
   }
 
   const percentages =
     topHolders
-      .map(holder =>
-        holder.percentage
+      .map(
+        holder =>
+          holder.percentage
       )
-      .filter(value =>
-        Number.isFinite(value) &&
-        value >= 0 &&
-        value <= 100
+      .filter(
+        value =>
+          Number.isFinite(
+            value
+          ) &&
+          value >= 0 &&
+          value <= 100
       );
 
   const top1 =
@@ -2044,7 +2766,8 @@ async function holderIntelligence(
     percentages
       .slice(0, 5)
       .reduce(
-        (a, b) => a + b,
+        (a, b) =>
+          a + b,
         0
       );
 
@@ -2052,7 +2775,8 @@ async function holderIntelligence(
     percentages
       .slice(0, 10)
       .reduce(
-        (a, b) => a + b,
+        (a, b) =>
+          a + b,
         0
       );
 
@@ -2063,14 +2787,19 @@ async function holderIntelligence(
     return {
       verified: true,
       countersVerified: true,
-      concentrationVerified: false,
+
+      concentrationVerified:
+        false,
 
       integrity: {
         ...integrity,
         verified: false,
+
         status:
           "PERCENTAGE_SUM_EXCEEDS_100",
-        percentageSum: top10
+
+        percentageSum:
+          top10
       },
 
       holderCount,
@@ -2086,14 +2815,20 @@ async function holderIntelligence(
 
       whale: {
         verified: false,
+
         whaleCount: null,
         top1Percent: null,
         top5Percent: null,
         top10Percent: null,
+
         concentrationRisk:
           "UNVERIFIED",
+
         smartMoneyScore: 0,
-        smartMoneyCandidate: false,
+
+        smartMoneyCandidate:
+          false,
+
         reason:
           "PERCENTAGE_SUM_EXCEEDS_100"
       }
@@ -2103,11 +2838,13 @@ async function holderIntelligence(
   const whales =
     topHolders.filter(
       holder =>
-        holder.percentage !== null &&
+        holder.percentage !==
+          null &&
         holder.percentage >= 1
     );
 
-  let concentrationRisk = "LOW";
+  let concentrationRisk =
+    "LOW";
 
   if (
     (
@@ -2116,7 +2853,8 @@ async function holderIntelligence(
     ) ||
     top10 >= 80
   ) {
-    concentrationRisk = "HIGH";
+    concentrationRisk =
+      "HIGH";
   } else if (
     (
       top1 !== null &&
@@ -2124,16 +2862,21 @@ async function holderIntelligence(
     ) ||
     top10 >= 60
   ) {
-    concentrationRisk = "MEDIUM";
+    concentrationRisk =
+      "MEDIUM";
   }
 
   let smartMoneyScore = 0;
 
-  if (whales.length >= 2) {
+  if (
+    whales.length >= 2
+  ) {
     smartMoneyScore += 20;
   }
 
-  if (whales.length >= 4) {
+  if (
+    whales.length >= 4
+  ) {
     smartMoneyScore += 15;
   }
 
@@ -2152,7 +2895,8 @@ async function holderIntelligence(
   }
 
   if (
-    concentrationRisk === "HIGH"
+    concentrationRisk ===
+    "HIGH"
   ) {
     smartMoneyScore =
       Math.min(
@@ -2172,6 +2916,7 @@ async function holderIntelligence(
     verified: true,
     countersVerified: true,
     concentrationVerified: true,
+
     integrity,
     holderCount,
     transferCount,
@@ -2179,12 +2924,22 @@ async function holderIntelligence(
 
     whale: {
       verified: true,
-      whaleCount: whales.length,
-      top1Percent: top1,
-      top5Percent: top5,
-      top10Percent: top10,
+
+      whaleCount:
+        whales.length,
+
+      top1Percent:
+        top1,
+
+      top5Percent:
+        top5,
+
+      top10Percent:
+        top10,
+
       concentrationRisk,
       smartMoneyScore,
+
       smartMoneyCandidate:
         smartMoneyScore >= 55
     }
@@ -2205,23 +2960,28 @@ function getHistoricalSnapshot(
     ];
 
   if (
-    !Array.isArray(snapshots) ||
+    !Array.isArray(
+      snapshots
+    ) ||
     !snapshots.length
   ) {
     return null;
   }
 
-  const current = Date.now();
+  const current =
+    Date.now();
 
   for (
-    let i = snapshots.length - 1;
+    let i =
+      snapshots.length - 1;
     i >= 0;
     i--
   ) {
     const age =
       current -
       safeNumber(
-        snapshots[i].timestamp
+        snapshots[i]
+          .timestamp
       );
 
     if (
@@ -2233,14 +2993,16 @@ function getHistoricalSnapshot(
   }
 
   for (
-    let i = snapshots.length - 1;
+    let i =
+      snapshots.length - 1;
     i >= 0;
     i--
   ) {
     const age =
       current -
       safeNumber(
-        snapshots[i].timestamp
+        snapshots[i]
+          .timestamp
       );
 
     if (
@@ -2254,7 +3016,9 @@ function getHistoricalSnapshot(
   return null;
 }
 
-function createSnapshot(candidate) {
+function createSnapshot(
+  candidate
+) {
   const concentrationVerified =
     Boolean(
       candidate.holders
@@ -2264,54 +3028,71 @@ function createSnapshot(candidate) {
     );
 
   return {
-    timestamp: Date.now(),
+    timestamp:
+      Date.now(),
 
     holderCount:
-      candidate.holders?.verified
-        ? candidate.holders.holderCount
+      candidate.holders
+        ?.verified
+        ? candidate.holders
+            .holderCount
         : null,
 
     transferCount:
-      candidate.holders?.verified
-        ? candidate.holders.transferCount
+      candidate.holders
+        ?.verified
+        ? candidate.holders
+            .transferCount
         : null,
 
     liquidityUsd:
-      candidate.market?.verified
-        ? candidate.market.liquidityUsd
+      candidate.market
+        ?.verified
+        ? candidate.market
+            .liquidityUsd
         : null,
 
     marketCap:
-      candidate.market?.verified
-        ? candidate.market.marketCap
+      candidate.market
+        ?.verified
+        ? candidate.market
+            .marketCap
         : null,
 
     volumeH1:
-      candidate.market?.verified
-        ? candidate.market.volume?.h1
+      candidate.market
+        ?.verified
+        ? candidate.market
+            .volume?.h1
         : null,
 
     buysH1:
-      candidate.market?.verified
-        ? candidate.market.transactions
+      candidate.market
+        ?.verified
+        ? candidate.market
+            .transactions
             ?.h1?.buys
         : null,
 
     sellsH1:
-      candidate.market?.verified
-        ? candidate.market.transactions
+      candidate.market
+        ?.verified
+        ? candidate.market
+            .transactions
             ?.h1?.sells
         : null,
 
     top1Percent:
       concentrationVerified
-        ? candidate.holders.whale
+        ? candidate.holders
+            .whale
             .top1Percent
         : null,
 
     top10Percent:
       concentrationVerified
-        ? candidate.holders.whale
+        ? candidate.holders
+            .whale
             .top10Percent
         : null,
 
@@ -2319,19 +3100,27 @@ function createSnapshot(candidate) {
       concentrationVerified
         ? (
             candidate.holders
-              .topHolders || []
+              .topHolders ||
+            []
           )
             .filter(
               holder =>
                 holder.address &&
-                holder.percentage !== null
+                holder.percentage !==
+                  null
             )
-            .map(holder => ({
-              address: holder.address,
-              value: holder.value,
-              percentage:
-                holder.percentage
-            }))
+            .map(
+              holder => ({
+                address:
+                  holder.address,
+
+                value:
+                  holder.value,
+
+                percentage:
+                  holder.percentage
+              })
+            )
         : [],
 
     holderIntegrity:
@@ -2346,12 +3135,20 @@ function saveSnapshot(
   candidate
 ) {
   const address =
-    normalize(candidate.address);
+    normalize(
+      candidate.address
+    );
 
   let snapshots =
-    state.snapshots[address];
+    state.snapshots[
+      address
+    ];
 
-  if (!Array.isArray(snapshots)) {
+  if (
+    !Array.isArray(
+      snapshots
+    )
+  ) {
     snapshots = [];
   }
 
@@ -2365,17 +3162,23 @@ function saveSnapshot(
   if (
     last &&
     Date.now() -
-      safeNumber(last.timestamp) <
+      safeNumber(
+        last.timestamp
+      ) <
       MIN_SNAPSHOT_INTERVAL
   ) {
     return;
   }
 
   snapshots.push(
-    createSnapshot(candidate)
+    createSnapshot(
+      candidate
+    )
   );
 
-  state.snapshots[address] =
+  state.snapshots[
+    address
+  ] =
     snapshots.slice(
       -MAX_SNAPSHOTS_PER_TOKEN
     );
@@ -2394,8 +3197,12 @@ function momentumAnalysis(
     return {
       verified: false,
       score: 0,
-      label: "BUILDING_HISTORY",
+
+      label:
+        "BUILDING_HISTORY",
+
       positiveSignals: 0,
+
       reasons: [
         "Waiting for historical snapshot"
       ]
@@ -2404,7 +3211,9 @@ function momentumAnalysis(
 
   const historyAgeMs =
     Date.now() -
-    safeNumber(previous.timestamp);
+    safeNumber(
+      previous.timestamp
+    );
 
   if (
     historyAgeMs <
@@ -2413,10 +3222,16 @@ function momentumAnalysis(
     return {
       verified: false,
       score: 0,
-      label: "BUILDING_HISTORY",
+
+      label:
+        "BUILDING_HISTORY",
+
       positiveSignals: 0,
+
       historyAgeMinutes:
-        historyAgeMs / 60000,
+        historyAgeMs /
+        60000,
+
       reasons: [
         "Historical snapshot too recent"
       ]
@@ -2456,15 +3271,21 @@ function momentumAnalysis(
       : null;
 
   const oldTx =
-    safeNumber(previous.buysH1) +
-    safeNumber(previous.sellsH1);
+    safeNumber(
+      previous.buysH1
+    ) +
+    safeNumber(
+      previous.sellsH1
+    );
 
   const newTx =
     safeNumber(
-      market?.transactions?.h1?.buys
+      market?.transactions
+        ?.h1?.buys
     ) +
     safeNumber(
-      market?.transactions?.h1?.sells
+      market?.transactions
+        ?.h1?.sells
     );
 
   const txGrowth =
@@ -2477,6 +3298,7 @@ function momentumAnalysis(
 
   let score = 0;
   let positiveSignals = 0;
+
   const reasons = [];
 
   if (
@@ -2517,8 +3339,12 @@ function momentumAnalysis(
     );
   }
 
-  if (liquidityGrowth !== null) {
-    if (liquidityGrowth >= 20) {
+  if (
+    liquidityGrowth !== null
+  ) {
+    if (
+      liquidityGrowth >= 20
+    ) {
       positiveSignals++;
       score += 18;
 
@@ -2580,13 +3406,16 @@ function momentumAnalysis(
   }
 
   if (
-    market?.buyPressure1h !== null &&
-    market?.buyPressure1h >= 60
+    market?.buyPressure1h !==
+      null &&
+    market?.buyPressure1h >=
+      60
   ) {
     positiveSignals++;
 
     score +=
-      market.buyPressure1h >= 70
+      market.buyPressure1h >=
+        70
         ? 12
         : 7;
 
@@ -2595,7 +3424,9 @@ function momentumAnalysis(
     );
   }
 
-  if (positiveSignals >= 4) {
+  if (
+    positiveSignals >= 4
+  ) {
     score += 10;
 
     reasons.push(
@@ -2603,11 +3434,12 @@ function momentumAnalysis(
     );
   }
 
-  score = clamp(
-    score,
-    0,
-    100
-  );
+  score =
+    clamp(
+      score,
+      0,
+      100
+    );
 
   return {
     verified:
@@ -2628,25 +3460,32 @@ function momentumAnalysis(
             : "WEAK",
 
     historyAgeMinutes:
-      historyAgeMs / 60000,
+      historyAgeMs /
+      60000,
 
     positiveSignals,
+
     holderGrowthPercent:
       holderGrowth,
+
     transferGrowthPercent:
       transferGrowth,
+
     liquidityGrowthPercent:
       liquidityGrowth,
+
     volumeH1GrowthPercent:
       volumeGrowth,
+
     transactionGrowthPercent:
       txGrowth,
+
     reasons
   };
 }
 
 /* =========================================================
-   WHALE FLOW — V81 INTEGRITY PROTECTED
+   WHALE FLOW — INTEGRITY PROTECTED
    ========================================================= */
 
 function analyseWhaleFlow(
@@ -2656,22 +3495,28 @@ function analyseWhaleFlow(
   if (
     !previous ||
     !holders?.verified ||
-    !holders?.concentrationVerified ||
+    !holders
+      ?.concentrationVerified ||
     !holders?.whale?.verified
   ) {
     return {
       verified: false,
-      flow: "BUILDING_HISTORY",
+
+      flow:
+        "BUILDING_HISTORY",
+
       accumulation:
         "NOT_VERIFIED",
+
       distribution:
         "NOT_VERIFIED",
+
       score: 0,
 
       reasons:
         holders?.integrity &&
-        holders.integrity.verified ===
-          false
+        holders.integrity
+          .verified === false
           ? [
               `Holder concentration unavailable: ${holders.integrity.status}`
             ]
@@ -2689,10 +3534,14 @@ function analyseWhaleFlow(
           holder =>
             holder.address
         )
-        .map(holder => [
-          normalize(holder.address),
-          holder
-        ])
+        .map(
+          holder => [
+            normalize(
+              holder.address
+            ),
+            holder
+          ]
+        )
     );
 
   let increasing = 0;
@@ -2700,19 +3549,23 @@ function analyseWhaleFlow(
   let comparable = 0;
 
   for (
-    const holder of
-    holders.topHolders || []
+    const holder
+    of holders.topHolders ||
+      []
   ) {
     if (
       !holder.address ||
-      holder.percentage === null
+      holder.percentage ===
+        null
     ) {
       continue;
     }
 
     const old =
       previousMap.get(
-        normalize(holder.address)
+        normalize(
+          holder.address
+        )
       );
 
     if (!old) continue;
@@ -2720,21 +3573,31 @@ function analyseWhaleFlow(
     try {
       const oldValue =
         BigInt(
-          String(old.value || "0")
+          String(
+            old.value ||
+            "0"
+          )
         );
 
       const newValue =
         BigInt(
-          String(holder.value || "0")
+          String(
+            holder.value ||
+            "0"
+          )
         );
 
       comparable++;
 
-      if (newValue > oldValue) {
+      if (
+        newValue > oldValue
+      ) {
         increasing++;
       }
 
-      if (newValue < oldValue) {
+      if (
+        newValue < oldValue
+      ) {
         decreasing++;
       }
     } catch {}
@@ -2742,13 +3605,16 @@ function analyseWhaleFlow(
 
   let score = 0;
   const reasons = [];
+
   let flow = "MIXED";
 
   if (
     comparable >= 2 &&
     increasing > decreasing
   ) {
-    flow = "NET_ACCUMULATION";
+    flow =
+      "NET_ACCUMULATION";
+
     score += 25;
 
     reasons.push(
@@ -2760,7 +3626,9 @@ function analyseWhaleFlow(
     comparable >= 2 &&
     decreasing > increasing
   ) {
-    flow = "NET_DISTRIBUTION";
+    flow =
+      "NET_DISTRIBUTION";
+
     score -= 20;
 
     reasons.push(
@@ -2769,23 +3637,31 @@ function analyseWhaleFlow(
   }
 
   const oldTop10 =
-    Number(previous.top10Percent);
+    Number(
+      previous.top10Percent
+    );
 
   const newTop10 =
     Number(
-      holders.whale.top10Percent
+      holders.whale
+        .top10Percent
     );
 
   if (
-    Number.isFinite(oldTop10) &&
-    Number.isFinite(newTop10) &&
+    Number.isFinite(
+      oldTop10
+    ) &&
+    Number.isFinite(
+      newTop10
+    ) &&
     oldTop10 >= 0 &&
     oldTop10 <= 100 &&
     newTop10 >= 0 &&
     newTop10 <= 100
   ) {
     const change =
-      newTop10 - oldTop10;
+      newTop10 -
+      oldTop10;
 
     if (
       change >= 2 &&
@@ -2798,7 +3674,9 @@ function analyseWhaleFlow(
       );
     }
 
-    if (newTop10 >= 80) {
+    if (
+      newTop10 >= 80
+    ) {
       score -= 20;
 
       reasons.push(
@@ -2814,18 +3692,25 @@ function analyseWhaleFlow(
     flow,
 
     accumulation:
-      flow === "NET_ACCUMULATION"
+      flow ===
+      "NET_ACCUMULATION"
         ? "OBSERVED"
         : "NOT_OBSERVED",
 
     distribution:
-      flow === "NET_DISTRIBUTION"
+      flow ===
+      "NET_DISTRIBUTION"
         ? "OBSERVED"
         : "NOT_OBSERVED",
 
-    trackedWallets: comparable,
-    increasingWallets: increasing,
-    decreasingWallets: decreasing,
+    trackedWallets:
+      comparable,
+
+    increasingWallets:
+      increasing,
+
+    decreasingWallets:
+      decreasing,
 
     score:
       clamp(
@@ -2842,8 +3727,12 @@ function analyseWhaleFlow(
    MARKET QUALITY
    ========================================================= */
 
-function marketQuality(market) {
-  if (!market?.verified) {
+function marketQuality(
+  market
+) {
+  if (
+    !market?.verified
+  ) {
     return {
       verified: false,
       score: 0,
@@ -2882,8 +3771,10 @@ function marketQuality(market) {
       100;
 
     if (
-      liquidityMarketCapRatio >= 10 &&
-      liquidityMarketCapRatio <= 60
+      liquidityMarketCapRatio >=
+        10 &&
+      liquidityMarketCapRatio <=
+        60
     ) {
       score += 20;
 
@@ -2891,13 +3782,15 @@ function marketQuality(market) {
         "Healthy liquidity/market-cap ratio"
       );
     } else if (
-      liquidityMarketCapRatio >= 5
+      liquidityMarketCapRatio >=
+      5
     ) {
       score += 10;
     }
 
     if (
-      liquidityMarketCapRatio < 2
+      liquidityMarketCapRatio <
+      2
     ) {
       score -= 15;
     }
@@ -2911,10 +3804,12 @@ function marketQuality(market) {
     liquidity > 0
   ) {
     volumeLiquidityRatio =
-      volume / liquidity;
+      volume /
+      liquidity;
 
     if (
-      volumeLiquidityRatio >= 1
+      volumeLiquidityRatio >=
+      1
     ) {
       score += 15;
 
@@ -2922,15 +3817,18 @@ function marketQuality(market) {
         "Strong volume/liquidity ratio"
       );
     } else if (
-      volumeLiquidityRatio >= 0.25
+      volumeLiquidityRatio >=
+      0.25
     ) {
       score += 8;
     }
   }
 
   if (
-    market.buyPressure1h !== null &&
-    market.buyPressure1h >= 60
+    market.buyPressure1h !==
+      null &&
+    market.buyPressure1h >=
+      60
   ) {
     score += 10;
   }
@@ -2955,7 +3853,9 @@ function marketQuality(market) {
    LAUNCH STAGE
    ========================================================= */
 
-function launchStage(market) {
+function launchStage(
+  market
+) {
   if (
     !market?.verified ||
     !safeNumber(
@@ -2973,6 +3873,7 @@ function launchStage(market) {
   const ageMs =
     Math.max(
       0,
+
       Date.now() -
       safeNumber(
         market.pairCreatedAt
@@ -2989,13 +3890,17 @@ function launchStage(market) {
     ageMs <=
     15 * 60 * 1000
   ) {
-    stage = "JUST_LAUNCHED";
+    stage =
+      "JUST_LAUNCHED";
+
     score = 100;
   } else if (
     ageMs <=
     60 * 60 * 1000
   ) {
-    stage = "VERY_EARLY";
+    stage =
+      "VERY_EARLY";
+
     score = 90;
   } else if (
     ageMs <=
@@ -3007,7 +3912,9 @@ function launchStage(market) {
     ageMs <=
     6 * 60 * 60 * 1000
   ) {
-    stage = "EMERGING";
+    stage =
+      "EMERGING";
+
     score = 65;
   } else if (
     ageMs <=
@@ -3026,7 +3933,7 @@ function launchStage(market) {
 }
 
 /* =========================================================
-   RISK — V81 INTEGRITY PROTECTED
+   RISK
    ========================================================= */
 
 function scoreRisk(
@@ -3039,21 +3946,29 @@ function scoreRisk(
   let score = 50;
   const reasons = [];
 
-  if (token.validERC20) {
+  if (
+    token.validERC20
+  ) {
     score -= 15;
+
     reasons.push(
       "Verified ERC-20"
     );
   }
 
-  if (activity.swaps > 0) {
+  if (
+    activity.swaps > 0
+  ) {
     score -= 7;
+
     reasons.push(
       "Active V4 swaps"
     );
   }
 
-  if (market?.verified) {
+  if (
+    market?.verified
+  ) {
     score -= 5;
 
     if (
@@ -3079,7 +3994,8 @@ function scoreRisk(
     holders?.whale;
 
   if (
-    holders?.concentrationVerified &&
+    holders
+      ?.concentrationVerified &&
     whale?.verified
   ) {
     if (
@@ -3103,8 +4019,10 @@ function scoreRisk(
     }
 
     if (
-      whale.top1Percent !== null &&
-      whale.top1Percent > 40
+      whale.top1Percent !==
+        null &&
+      whale.top1Percent >
+        40
     ) {
       score += 15;
 
@@ -3172,8 +4090,11 @@ function scoreOpportunity(
   let score = 0;
   const reasons = [];
 
-  if (token.validERC20) {
+  if (
+    token.validERC20
+  ) {
     score += 20;
+
     reasons.push(
       "Verified ERC-20"
     );
@@ -3186,41 +4107,61 @@ function scoreOpportunity(
     score += 5;
   }
 
-  if (activity.swaps > 0) {
+  if (
+    activity.swaps > 0
+  ) {
     score += 10;
+
     reasons.push(
       "V4 swaps detected"
     );
   }
 
   if (
-    activity.liquidityEvents > 0
+    activity.liquidityEvents >
+    0
   ) {
     score += 5;
   }
 
-  if (market?.verified) {
+  if (
+    market?.verified
+  ) {
     score += 10;
 
     if (
-      market.liquidityUsd >= 5000
-    ) score += 5;
+      market.liquidityUsd >=
+      5000
+    ) {
+      score += 5;
+    }
 
     if (
-      market.liquidityUsd >= 25000
-    ) score += 5;
+      market.liquidityUsd >=
+      25000
+    ) {
+      score += 5;
+    }
 
     if (
-      market.volume?.h24 >= 10000
-    ) score += 5;
+      market.volume?.h24 >=
+      10000
+    ) {
+      score += 5;
+    }
 
     if (
-      market.volume?.h24 >= 50000
-    ) score += 5;
+      market.volume?.h24 >=
+      50000
+    ) {
+      score += 5;
+    }
 
     if (
-      market.buyPressure1h !== null &&
-      market.buyPressure1h >= 60
+      market.buyPressure1h !==
+        null &&
+      market.buyPressure1h >=
+        60
     ) {
       score += 7;
 
@@ -3231,8 +4172,10 @@ function scoreOpportunity(
 
     if (
       market.marketCap &&
-      market.marketCap >= 25000 &&
-      market.marketCap <= 5000000
+      market.marketCap >=
+        25000 &&
+      market.marketCap <=
+        5000000
     ) {
       score += 5;
 
@@ -3242,44 +4185,62 @@ function scoreOpportunity(
     }
   }
 
-  if (launch?.verified) {
+  if (
+    launch?.verified
+  ) {
     if (
       launch.stage ===
       "JUST_LAUNCHED"
     ) {
       score += 10;
+
       reasons.push(
         "Just launched"
       );
     } else if (
-      launch.stage === "VERY_EARLY" ||
-      launch.stage === "EARLY"
+      launch.stage ===
+        "VERY_EARLY" ||
+      launch.stage ===
+        "EARLY"
     ) {
       score += 7;
+
       reasons.push(
         "Early launch"
       );
     } else if (
-      launch.stage === "EMERGING"
+      launch.stage ===
+      "EMERGING"
     ) {
       score += 4;
     }
   }
 
-  if (holders?.verified) {
+  if (
+    holders?.verified
+  ) {
     if (
-      holders.holderCount >= 50
-    ) score += 4;
+      holders.holderCount >=
+      50
+    ) {
+      score += 4;
+    }
 
     if (
-      holders.holderCount >= 200
-    ) score += 4;
+      holders.holderCount >=
+      200
+    ) {
+      score += 4;
+    }
 
     if (
-      holders.concentrationVerified &&
-      holders.whale?.verified &&
+      holders
+        .concentrationVerified &&
       holders.whale
-        ?.concentrationRisk === "LOW"
+        ?.verified &&
+      holders.whale
+        ?.concentrationRisk ===
+        "LOW"
     ) {
       score += 5;
 
@@ -3289,8 +4250,10 @@ function scoreOpportunity(
     }
 
     if (
-      holders.concentrationVerified &&
-      holders.whale?.verified &&
+      holders
+        .concentrationVerified &&
+      holders.whale
+        ?.verified &&
       holders.whale
         ?.smartMoneyCandidate
     ) {
@@ -3298,10 +4261,13 @@ function scoreOpportunity(
     }
 
     if (
-      holders.concentrationVerified &&
-      holders.whale?.verified &&
+      holders
+        .concentrationVerified &&
       holders.whale
-        ?.concentrationRisk === "HIGH"
+        ?.verified &&
+      holders.whale
+        ?.concentrationRisk ===
+        "HIGH"
     ) {
       score -= 15;
 
@@ -3311,9 +4277,14 @@ function scoreOpportunity(
     }
   }
 
-  if (momentum?.verified) {
-    if (momentum.score >= 75) {
+  if (
+    momentum?.verified
+  ) {
+    if (
+      momentum.score >= 75
+    ) {
       score += 15;
+
       reasons.push(
         "Strong momentum"
       );
@@ -3328,8 +4299,12 @@ function scoreOpportunity(
     }
   }
 
-  if (quality?.verified) {
-    if (quality.score >= 40) {
+  if (
+    quality?.verified
+  ) {
+    if (
+      quality.score >= 40
+    ) {
       score += 10;
     } else if (
       quality.score >= 20
@@ -3383,10 +4358,12 @@ function signalConfirmation(
 ) {
   let signals = 0;
   let score = 0;
+
   const reasons = [];
 
   if (
-    candidate.activity?.swaps > 0
+    candidate.activity
+      ?.swaps > 0
   ) {
     signals++;
     score += 10;
@@ -3405,9 +4382,11 @@ function signalConfirmation(
   }
 
   if (
-    candidate.market?.verified &&
+    candidate.market
+      ?.verified &&
     safeNumber(
-      candidate.market.liquidityUsd
+      candidate.market
+        .liquidityUsd
     ) >= 5000
   ) {
     signals++;
@@ -3415,9 +4394,11 @@ function signalConfirmation(
   }
 
   if (
-    candidate.market?.verified &&
+    candidate.market
+      ?.verified &&
     safeNumber(
-      candidate.market.volume?.h24
+      candidate.market
+        .volume?.h24
     ) >= 10000
   ) {
     signals++;
@@ -3426,16 +4407,19 @@ function signalConfirmation(
 
   if (
     candidate.market
-      ?.buyPressure1h !== null &&
+      ?.buyPressure1h !==
+      null &&
     candidate.market
-      ?.buyPressure1h >= 60
+      ?.buyPressure1h >=
+      60
   ) {
     signals++;
     score += 12;
   }
 
   if (
-    candidate.holders?.verified &&
+    candidate.holders
+      ?.verified &&
     candidate.holders
       .holderCount >= 50
   ) {
@@ -3444,16 +4428,20 @@ function signalConfirmation(
   }
 
   if (
-    candidate.momentum?.verified &&
-    candidate.momentum.score >= 50
+    candidate.momentum
+      ?.verified &&
+    candidate.momentum
+      .score >= 50
   ) {
     signals++;
     score += 18;
   }
 
   if (
-    candidate.whaleFlow?.verified &&
-    candidate.whaleFlow.flow ===
+    candidate.whaleFlow
+      ?.verified &&
+    candidate.whaleFlow
+      .flow ===
       "NET_ACCUMULATION"
   ) {
     signals++;
@@ -3466,14 +4454,17 @@ function signalConfirmation(
     candidate.holders
       ?.whale?.verified &&
     candidate.holders
-      ?.whale?.concentrationRisk ===
+      ?.whale
+      ?.concentrationRisk ===
       "LOW"
   ) {
     signals++;
     score += 10;
   }
 
-  if (signals >= 5) {
+  if (
+    signals >= 5
+  ) {
     score += 10;
   }
 
@@ -3514,18 +4505,22 @@ function candidateConfidence(
 ) {
   let score = 0;
 
-  if (candidate.validERC20) {
+  if (
+    candidate.validERC20
+  ) {
     score += 15;
   }
 
   if (
-    candidate.market?.verified
+    candidate.market
+      ?.verified
   ) {
     score += 20;
   }
 
   if (
-    candidate.holders?.verified
+    candidate.holders
+      ?.verified
   ) {
     score += 15;
   }
@@ -3538,13 +4533,15 @@ function candidateConfidence(
   }
 
   if (
-    candidate.activity?.swaps > 0
+    candidate.activity
+      ?.swaps > 0
   ) {
     score += 10;
   }
 
   if (
-    candidate.momentum?.verified
+    candidate.momentum
+      ?.verified
   ) {
     score += 15;
   }
@@ -3556,11 +4553,6 @@ function candidateConfidence(
     score += 10;
   }
 
-  /*
-   * V81:
-   * Whale confidence requires
-   * concentration integrity.
-   */
   if (
     candidate.holders
       ?.concentrationVerified &&
@@ -3599,12 +4591,15 @@ function watchPriority(
   let score = 0;
 
   const address =
-    normalize(watched.address);
+    normalize(
+      watched.address
+    );
 
   if (
     knownQuoteMetadata(
       address,
-      watched.metadata?.symbol
+      watched.metadata
+        ?.symbol
     )
   ) {
     return -10000;
@@ -3613,13 +4608,22 @@ function watchPriority(
   score += 1000;
 
   if (
-    liveTokens?.has(address)
+    liveTokens?.has(
+      address
+    )
   ) {
+    /*
+     * V82:
+     * Live swap/liquidity activity receives
+     * the same strong priority as live initialize discovery.
+     */
     score += 2000;
   }
 
   if (
-    newTokens?.has(address)
+    newTokens?.has(
+      address
+    )
   ) {
     score += 1200;
   }
@@ -3631,18 +4635,20 @@ function watchPriority(
   ) {
     score += 500;
   } else {
-    score += Math.min(
-      500,
-      Math.floor(
-        (
-          Date.now() -
-          safeNumber(
-            watched.lastCheckedAt
-          )
-        ) /
-        60000
-      )
-    );
+    score +=
+      Math.min(
+        500,
+
+        Math.floor(
+          (
+            Date.now() -
+            safeNumber(
+              watched.lastCheckedAt
+            )
+          ) /
+          60000
+        )
+      );
   }
 
   const age =
@@ -3653,49 +4659,62 @@ function watchPriority(
 
   if (
     age >= 0 &&
-    age < 30 * 60 * 1000
+    age <
+      30 * 60 * 1000
   ) {
     score += 175;
   } else if (
     age >= 0 &&
-    age < 60 * 60 * 1000
+    age <
+      60 * 60 * 1000
   ) {
     score += 100;
   }
 
-  score += Math.min(
-    60,
-    (watched.pools?.length || 0) *
-      12
-  );
+  score +=
+    Math.min(
+      60,
+
+      (
+        watched.pools
+          ?.length || 0
+      ) * 12
+    );
 
   return score;
 }
 
-function analysisPriority(candidate) {
+function analysisPriority(
+  candidate
+) {
   let score =
     safeNumber(
-      candidate.opportunity?.score
+      candidate.opportunity
+        ?.score
     ) * 2;
 
   score +=
     safeNumber(
-      candidate.confidence?.score
+      candidate.confidence
+        ?.score
     );
 
   score +=
     safeNumber(
-      candidate.momentum?.score
+      candidate.momentum
+        ?.score
     );
 
   score +=
     safeNumber(
-      candidate.marketQuality?.score
+      candidate.marketQuality
+        ?.score
     );
 
   score +=
     safeNumber(
-      candidate.signalConfirmation
+      candidate
+        .signalConfirmation
         ?.score
     );
 
@@ -3712,15 +4731,17 @@ function analysisPriority(candidate) {
   }
 
   if (
-    candidate.whaleFlow?.flow ===
-    "NET_ACCUMULATION"
+    candidate.whaleFlow
+      ?.flow ===
+      "NET_ACCUMULATION"
   ) {
     score += 30;
   }
 
   if (
-    candidate.whaleFlow?.flow ===
-    "NET_DISTRIBUTION"
+    candidate.whaleFlow
+      ?.flow ===
+      "NET_DISTRIBUTION"
   ) {
     score -= 30;
   }
@@ -3729,11 +4750,13 @@ function analysisPriority(candidate) {
 }
 
 /* =========================================================
-   TELEGRAM
+   TELEGRAM — V82 BUDGETED
    ========================================================= */
 
 function escapeHtml(value) {
-  return String(value ?? "")
+  return String(
+    value ?? ""
+  )
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -3742,7 +4765,8 @@ function escapeHtml(value) {
 }
 
 function formatNumber(value) {
-  const n = safeNumber(value);
+  const n =
+    safeNumber(value);
 
   if (n >= 1e9) {
     return (
@@ -3767,7 +4791,8 @@ function formatNumber(value) {
 
 async function sendTelegram(
   env,
-  message
+  message,
+  budget = null
 ) {
   if (
     !env.TELEGRAM_BOT_TOKEN ||
@@ -3776,35 +4801,64 @@ async function sendTelegram(
     return {
       success: false,
       skipped: true,
+
       reason:
         "TELEGRAM_NOT_CONFIGURED"
     };
   }
 
+  /*
+   * V82:
+   * Production scan notifications count against the
+   * hard request budget. Manual /test-telegram can call
+   * this function without a scan budget.
+   */
+  if (budget) {
+    if (
+      !consumeBudget(
+        budget,
+        "notification",
+        "TELEGRAM_SEND"
+      )
+    ) {
+      return {
+        success: false,
+        skipped: true,
+
+        reason:
+          "NOTIFICATION_BUDGET_EXHAUSTED"
+      };
+    }
+  }
+
   try {
-    const response = await fetch(
-      `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
-      {
-        method: "POST",
+    const response =
+      await fetch(
+        `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+        {
+          method: "POST",
 
-        headers: {
-          "content-type":
-            "application/json"
-        },
+          headers: {
+            "content-type":
+              "application/json"
+          },
 
-        body: JSON.stringify({
-          chat_id:
-            env.TELEGRAM_CHAT_ID,
+          body:
+            JSON.stringify({
+              chat_id:
+                env.TELEGRAM_CHAT_ID,
 
-          text: message,
+              text:
+                message,
 
-          parse_mode: "HTML",
+              parse_mode:
+                "HTML",
 
-          disable_web_page_preview:
-            true
-        })
-      }
-    );
+              disable_web_page_preview:
+                true
+            })
+        }
+      );
 
     const data =
       await response.json();
@@ -3812,15 +4866,21 @@ async function sendTelegram(
     return {
       success:
         response.ok &&
-        Boolean(data?.ok),
+        Boolean(
+          data?.ok
+        ),
 
-      status: response.status,
+      status:
+        response.status,
+
       data
     };
   } catch (error) {
     return {
       success: false,
-      error: errorString(error)
+
+      error:
+        errorString(error)
     };
   }
 }
@@ -3829,49 +4889,69 @@ function qualifiesTelegram(
   candidate
 ) {
   if (
-    candidate.opportunity.score <
+    candidate.opportunity
+      .score <
     MIN_ALERT_SCORE
-  ) return false;
+  ) {
+    return false;
+  }
 
   if (
-    candidate.confidence.score <
+    candidate.confidence
+      .score <
     MIN_CONFIDENCE_ALERT
-  ) return false;
+  ) {
+    return false;
+  }
 
   if (
     candidate.risk.score >
     MAX_ALERT_RISK
-  ) return false;
+  ) {
+    return false;
+  }
 
   if (
     safeNumber(
-      candidate.market?.liquidityUsd
+      candidate.market
+        ?.liquidityUsd
     ) <
     MIN_ALERT_LIQUIDITY
-  ) return false;
+  ) {
+    return false;
+  }
 
   if (
-    candidate.signalConfirmation
+    candidate
+      .signalConfirmation
       .signals < 2
-  ) return false;
+  ) {
+    return false;
+  }
 
   return true;
 }
 
-function telegramMessage(candidate) {
+function telegramMessage(
+  candidate
+) {
   const lines = [
-    "🚨 <b>ROBINHOOD MEME HUNTER V81</b>",
+    "🚨 <b>ROBINHOOD MEME HUNTER V82</b>",
     ""
   ];
 
-  if (candidate.liveDiscovery) {
+  if (
+    candidate.liveDiscovery
+  ) {
     lines.push(
-      "⚡ <b>LIVE BLOCK DISCOVERY</b>",
+      "⚡ <b>LIVE CHAIN ACTIVITY</b>",
       ""
     );
   }
 
-  if (candidate.newlyDiscovered) {
+  if (
+    candidate.newlyDiscovered
+  ) {
     lines.push(
       "🆕 <b>NEW TOKEN DISCOVERY</b>",
       ""
@@ -3881,41 +4961,50 @@ function telegramMessage(candidate) {
   lines.push(
     `<b>${escapeHtml(
       candidate.name ||
-      "Unknown Token"
+        "Unknown Token"
     )} (${escapeHtml(
       candidate.symbol ||
-      "UNKNOWN"
+        "UNKNOWN"
     )})</b>`,
 
     "",
 
     `Opportunity: <b>${candidate.opportunity.score}/100</b>`,
+
     `Confidence: <b>${candidate.confidence.score}/100</b>`,
+
     `Risk: <b>${candidate.risk.label}</b>`,
+
     `Signals: <b>${candidate.signalConfirmation.signals}</b>`,
 
     "",
 
     `Launch: <b>${candidate.launchStage.stage}</b>`,
+
     `Momentum: <b>${candidate.momentum.label}</b>`,
+
     `Whale Flow: <b>${candidate.whaleFlow.flow}</b>`,
 
     "",
 
     `Liquidity: <b>$${formatNumber(
-      candidate.market?.liquidityUsd
+      candidate.market
+        ?.liquidityUsd
     )}</b>`,
 
     `Market Cap: <b>$${formatNumber(
-      candidate.market?.marketCap
+      candidate.market
+        ?.marketCap
     )}</b>`,
 
     `Volume 1h: <b>$${formatNumber(
-      candidate.market?.volume?.h1
+      candidate.market
+        ?.volume?.h1
     )}</b>`,
 
     `Volume 24h: <b>$${formatNumber(
-      candidate.market?.volume?.h24
+      candidate.market
+        ?.volume?.h24
     )}</b>`,
 
     `Buy Pressure: <b>${
@@ -3930,7 +5019,8 @@ function telegramMessage(candidate) {
     }</b>`,
 
     `Holders: <b>${
-      candidate.holders?.verified
+      candidate.holders
+        ?.verified
         ? formatNumber(
             candidate.holders
               .holderCount
@@ -3952,8 +5042,9 @@ function telegramMessage(candidate) {
   );
 
   if (
-    candidate.whaleFlow.flow ===
-    "NET_ACCUMULATION"
+    candidate.whaleFlow
+      .flow ===
+      "NET_ACCUMULATION"
   ) {
     lines.push(
       "",
@@ -3962,7 +5053,8 @@ function telegramMessage(candidate) {
   }
 
   if (
-    candidate.momentum.score >= 75
+    candidate.momentum
+      .score >= 75
   ) {
     lines.push(
       "",
@@ -3970,7 +5062,9 @@ function telegramMessage(candidate) {
     );
   }
 
-  return lines.join("\n");
+  return lines.join(
+    "\n"
+  );
 }
 
 /* =========================================================
@@ -3986,7 +5080,9 @@ async function analyzeToken(
   options
 ) {
   const address =
-    normalize(watched.address);
+    normalize(
+      watched.address
+    );
 
   const previous =
     getHistoricalSnapshot(
@@ -4002,20 +5098,52 @@ async function analyzeToken(
       watched
     );
 
-  if (!validation.validERC20) {
+  if (
+    validation.deferred
+  ) {
     return {
       address,
+
       validERC20: false,
+      analysisDeferred: true,
+
       validation,
 
       newlyDiscovered:
         Boolean(
-          options?.newlyDiscovered
+          options
+            ?.newlyDiscovered
         ),
 
       liveDiscovery:
         Boolean(
-          options?.liveDiscovery
+          options
+            ?.liveDiscovery
+        )
+    };
+  }
+
+  if (
+    !validation.validERC20
+  ) {
+    return {
+      address,
+
+      validERC20: false,
+      analysisDeferred: false,
+
+      validation,
+
+      newlyDiscovered:
+        Boolean(
+          options
+            ?.newlyDiscovered
+        ),
+
+      liveDiscovery:
+        Boolean(
+          options
+            ?.liveDiscovery
         )
     };
   }
@@ -4028,9 +5156,15 @@ async function analyzeToken(
   ) {
     return {
       address,
+
       validERC20: false,
-      infrastructureToken: true,
+      analysisDeferred: false,
+
+      infrastructureToken:
+        true,
+
       validation,
+
       reason:
         "KNOWN_QUOTE_OR_INFRASTRUCTURE"
     };
@@ -4038,7 +5172,8 @@ async function analyzeToken(
 
   let market = {
     verified: false,
-    status: "LOOKUP_SKIPPED"
+    status:
+      "LOOKUP_SKIPPED"
   };
 
   if (
@@ -4087,10 +5222,14 @@ async function analyzeToken(
     );
 
   const quality =
-    marketQuality(market);
+    marketQuality(
+      market
+    );
 
   const launch =
-    launchStage(market);
+    launchStage(
+      market
+    );
 
   const risk =
     scoreRisk(
@@ -4115,44 +5254,67 @@ async function analyzeToken(
 
   const candidate = {
     address,
-    name: validation.name,
-    symbol: validation.symbol,
+
+    name:
+      validation.name,
+
+    symbol:
+      validation.symbol,
+
     decimals:
       validation.decimals,
+
     totalSupply:
       validation.totalSupply,
 
     validERC20: true,
+    analysisDeferred: false,
+
     validation,
     market,
     holders,
     activity,
     momentum,
-    marketQuality: quality,
-    launchStage: launch,
+
+    marketQuality:
+      quality,
+
+    launchStage:
+      launch,
+
     whaleFlow,
     risk,
     opportunity,
 
     newlyDiscovered:
       Boolean(
-        options?.newlyDiscovered
+        options
+          ?.newlyDiscovered
       ),
 
     liveDiscovery:
       Boolean(
-        options?.liveDiscovery
+        options
+          ?.liveDiscovery
       )
   };
 
-  candidate.signalConfirmation =
-    signalConfirmation(candidate);
+  candidate
+    .signalConfirmation =
+    signalConfirmation(
+      candidate
+    );
 
   candidate.confidence =
-    candidateConfidence(candidate);
+    candidateConfidence(
+      candidate
+    );
 
-  candidate.analysisPriority =
-    analysisPriority(candidate);
+  candidate
+    .analysisPriority =
+    analysisPriority(
+      candidate
+    );
 
   return candidate;
 }
@@ -4161,14 +5323,17 @@ async function analyzeToken(
    LIVE / BACKLOG RANGES
    ========================================================= */
 
-function liveRange(latest) {
+function liveRange(
+  latest
+) {
   const to = latest;
 
   const from =
     latest -
       BigInt(
         LIVE_SCAN_BLOCKS - 1
-      ) >= 0n
+      ) >=
+    0n
       ? latest -
         BigInt(
           LIVE_SCAN_BLOCKS - 1
@@ -4203,17 +5368,22 @@ function backlogRange(
         : 0n;
   } else {
     from =
-      BigInt(lastScanned) + 1n;
+      BigInt(
+        lastScanned
+      ) + 1n;
   }
 
-  if (from > latest) {
+  if (
+    from > latest
+  ) {
     return null;
   }
 
   const targetTo =
     from +
     BigInt(
-      CATCHUP_TARGET_BLOCKS - 1
+      CATCHUP_TARGET_BLOCKS -
+        1
     );
 
   return {
@@ -4227,12 +5397,15 @@ function backlogRange(
 }
 
 /* =========================================================
-   MAIN SCAN
+   MAIN SCAN — V82
    ========================================================= */
 
 async function scan(env) {
-  const startedAt = Date.now();
-  const budget = createBudget();
+  const startedAt =
+    Date.now();
+
+  const budget =
+    createBudget();
 
   const stateResult =
     await readState(env);
@@ -4240,7 +5413,13 @@ async function scan(env) {
   const state =
     stateResult.state;
 
-  pruneState(state);
+  /*
+   * Do not trim before new discovery is priority-sorted.
+   */
+  pruneState(
+    state,
+    false
+  );
 
   const latest =
     await latestBlock(
@@ -4249,7 +5428,9 @@ async function scan(env) {
     );
 
   const latestNumber =
-    Number(latest.block);
+    Number(
+      latest.block
+    );
 
   const previousBacklogCursor =
     state.lastScannedBlock;
@@ -4264,16 +5445,23 @@ async function scan(env) {
     ranges: []
   };
 
-  const newTokens = new Set();
-  const liveTokens = new Set();
+  const newTokens =
+    new Set();
+
+  const liveTokens =
+    new Set();
 
   let liveError = null;
   let backlogError = null;
 
-  /* LIVE FIRST */
+  /* =======================================================
+     LIVE FIRST
+     ======================================================= */
 
   const live =
-    liveRange(latest.block);
+    liveRange(
+      latest.block
+    );
 
   const liveScan =
     await scanLogRange(
@@ -4285,44 +5473,61 @@ async function scan(env) {
       "discovery-live"
     );
 
-  let liveDiscovery = {
-    rawLogs: 0,
-    initializeEvents: 0,
-    swapTopicMatches: 0,
-    liquidityTopicMatches: 0,
-    newTokens: new Set(),
-    seenTokens: new Set()
-  };
+  /*
+   * V82:
+   * Process any successfully retrieved ranges even if
+   * another split range failed afterwards.
+   */
+  const liveDiscovery =
+    processDiscoveryLogs(
+      state,
+      liveOutput.logs,
+      "LIVE"
+    );
 
-  if (liveScan.success) {
-    liveDiscovery =
-      processDiscoveryLogs(
-        state,
-        liveOutput.logs,
-        "LIVE"
-      );
+  for (
+    const token
+    of liveDiscovery.newTokens
+  ) {
+    newTokens.add(token);
+  }
 
-    for (
-      const token of
-      liveDiscovery.newTokens
-    ) {
-      newTokens.add(token);
-    }
+  for (
+    const token
+    of liveDiscovery.seenTokens
+  ) {
+    liveTokens.add(token);
+  }
 
-    for (
-      const token of
-      liveDiscovery.seenTokens
-    ) {
-      liveTokens.add(token);
-    }
+  /*
+   * Detect live activity from already-known pools.
+   */
+  const liveActivity =
+    activeTokensFromLogs(
+      state,
+      liveOutput.logs
+    );
 
+  for (
+    const token
+    of liveActivity.tokens
+  ) {
+    liveTokens.add(token);
+  }
+
+  if (
+    liveScan.success
+  ) {
     state.lastLiveScannedBlock =
       latestNumber;
   } else {
-    liveError = liveScan.error;
+    liveError =
+      liveScan.error;
   }
 
-  /* BACKLOG */
+  /* =======================================================
+     BACKLOG
+     ======================================================= */
 
   const backlog =
     backlogRange(
@@ -4338,6 +5543,9 @@ async function scan(env) {
     newTokens: new Set(),
     seenTokens: new Set()
   };
+
+  let backlogProcessedThrough =
+    null;
 
   if (
     backlog &&
@@ -4356,40 +5564,82 @@ async function scan(env) {
         "discovery-backlog"
       );
 
-    if (result.success) {
-      backlogDiscovery =
-        processDiscoveryLogs(
-          state,
-          backlogOutput.logs,
-          "BACKLOG"
-        );
+    /*
+     * V82:
+     * Always process logs that were successfully fetched.
+     * This prevents safe partial progress from losing
+     * discovered pools/tokens.
+     */
+    backlogDiscovery =
+      processDiscoveryLogs(
+        state,
+        backlogOutput.logs,
+        "BACKLOG"
+      );
 
-      for (
-        const token of
-        backlogDiscovery.newTokens
-      ) {
-        newTokens.add(token);
-      }
+    for (
+      const token
+      of backlogDiscovery.newTokens
+    ) {
+      newTokens.add(token);
+    }
+
+    if (
+      result.success
+    ) {
+      backlogProcessedThrough =
+        result.processedThrough;
 
       state.lastScannedBlock =
         Number(
           result.processedThrough
         );
     } else {
-      backlogError = result.error;
+      backlogError =
+        result.error;
 
-      state.lastScannedBlock =
-        previousBacklogCursor;
+      /*
+       * V82:
+       * If recursive scanning completed a contiguous prefix
+       * before failing on the right side, advance only through
+       * that safe prefix. The next run starts on the failed side.
+       */
+      if (
+        result.processedThrough !==
+          null &&
+        result.processedThrough !==
+          undefined &&
+        BigInt(
+          result.processedThrough
+        ) >= backlog.from
+      ) {
+        backlogProcessedThrough =
+          BigInt(
+            result.processedThrough
+          );
+
+        state.lastScannedBlock =
+          Number(
+            backlogProcessedThrough
+          );
+      } else {
+        state.lastScannedBlock =
+          previousBacklogCursor;
+      }
     }
   }
 
-  /* PRIORITISE */
+  /* =======================================================
+     PRIORITISE
+     ======================================================= */
 
   state.watchedTokens =
     uniqueBy(
       state.watchedTokens,
       token =>
-        normalize(token.address)
+        normalize(
+          token.address
+        )
     );
 
   state.watchedTokens.sort(
@@ -4405,6 +5655,15 @@ async function scan(env) {
         liveTokens
       )
   );
+
+  /*
+   * Now it is safe to trim.
+   */
+  state.watchedTokens =
+    state.watchedTokens.slice(
+      0,
+      MAX_WATCHED_TOKENS
+    );
 
   const selected =
     state.watchedTokens.slice(
@@ -4422,21 +5681,63 @@ async function scan(env) {
 
   let marketLookups = 0;
   let holderLookups = 0;
+  let deferredAnalysis = 0;
 
-  /* ANALYSIS */
+  /* =======================================================
+     ANALYSIS
+     ======================================================= */
 
-  for (const watched of selected) {
+  for (
+    const watched
+    of selected
+  ) {
+    const required =
+      estimatedAnalysisCost(
+        watched
+      );
+
+    /*
+     * V82:
+     * Protect candidates from half-analysis.
+     *
+     * Fresh token = reserve 8.
+     * Cached token = reserve 3.
+     *
+     * If not enough budget remains, leave lastCheckedAt alone
+     * so it receives another opportunity on the next run.
+     */
     if (
       !budgetAvailable(
         budget,
-        "analysis"
+        "analysis",
+        required
       )
     ) {
-      break;
+      deferredAnalysis++;
+
+      validationResults.push({
+        address:
+          normalize(
+            watched.address
+          ),
+
+        validERC20: null,
+        deferred: true,
+
+        reason:
+          "FULL_ANALYSIS_BUDGET_PROTECTED",
+
+        estimatedRequests:
+          required
+      });
+
+      continue;
     }
 
     const address =
-      normalize(watched.address);
+      normalize(
+        watched.address
+      );
 
     const activity =
       activityForToken(
@@ -4453,24 +5754,67 @@ async function scan(env) {
         activity,
         {
           newlyDiscovered:
-            newTokens.has(address),
+            newTokens.has(
+              address
+            ),
 
           liveDiscovery:
-            liveTokens.has(address)
+            liveTokens.has(
+              address
+            )
         }
       );
+
+    /*
+     * V82:
+     * Do not mark budget-deferred tokens as checked.
+     */
+    if (
+      candidate
+        .analysisDeferred
+    ) {
+      deferredAnalysis++;
+
+      validationResults.push({
+        address,
+
+        validERC20: null,
+        deferred: true,
+
+        reason:
+          candidate.validation
+            ?.reason ||
+          "ANALYSIS_DEFERRED",
+
+        name:
+          candidate.validation
+            ?.name ||
+          null,
+
+        symbol:
+          candidate.validation
+            ?.symbol ||
+          null
+      });
+
+      continue;
+    }
 
     watched.lastCheckedAt =
       Date.now();
 
     watched.checks =
-      safeNumber(watched.checks) + 1;
+      safeNumber(
+        watched.checks
+      ) + 1;
 
     validationResults.push({
       address,
 
       validERC20:
         candidate.validERC20,
+
+      deferred: false,
 
       reason:
         candidate.validation
@@ -4489,16 +5833,24 @@ async function scan(env) {
         null
     });
 
-    if (!candidate.validERC20) {
+    if (
+      !candidate.validERC20
+    ) {
       continue;
     }
 
     watched.metadata = {
       validERC20: true,
-      name: candidate.name,
-      symbol: candidate.symbol,
+
+      name:
+        candidate.name,
+
+      symbol:
+        candidate.symbol,
+
       decimals:
         candidate.decimals,
+
       totalSupply:
         candidate.totalSupply,
 
@@ -4509,13 +5861,15 @@ async function scan(env) {
     };
 
     if (
-      candidate.market?.verified
+      candidate.market
+        ?.verified
     ) {
       marketLookups++;
     }
 
     if (
-      candidate.holders?.verified
+      candidate.holders
+        ?.verified
     ) {
       holderLookups++;
     }
@@ -4525,7 +5879,9 @@ async function scan(env) {
       candidate
     );
 
-    candidates.push(candidate);
+    candidates.push(
+      candidate
+    );
   }
 
   candidates.sort(
@@ -4538,34 +5894,48 @@ async function scan(env) {
       )
   );
 
-  /* TELEGRAM */
+  /* =======================================================
+     TELEGRAM
+     ======================================================= */
 
-  const telegramResults = [];
+  const telegramResults =
+    [];
 
   for (
-    const candidate of candidates
+    const candidate
+    of candidates
   ) {
     if (
-      !qualifiesTelegram(candidate)
+      !qualifiesTelegram(
+        candidate
+      )
     ) {
       continue;
     }
 
     const address =
-      normalize(candidate.address);
+      normalize(
+        candidate.address
+      );
 
     const previous =
-      state.alerts[address];
+      state.alerts[
+        address
+      ];
 
     const previousTimestamp =
-      typeof previous === "object"
+      typeof previous ===
+        "object"
         ? safeNumber(
             previous.timestamp
           )
-        : safeNumber(previous);
+        : safeNumber(
+            previous
+          );
 
     const previousScore =
-      typeof previous === "object"
+      typeof previous ===
+        "object"
         ? safeNumber(
             previous.score
           )
@@ -4578,12 +5948,14 @@ async function scan(env) {
         ALERT_COOLDOWN;
 
     const scoreImproved =
-      candidate.opportunity.score -
+      candidate.opportunity
+        .score -
         previousScore >=
       10;
 
     const newAccumulation =
-      candidate.whaleFlow.flow ===
+      candidate.whaleFlow
+        .flow ===
         "NET_ACCUMULATION" &&
       previous?.whaleFlow !==
         "NET_ACCUMULATION";
@@ -4596,7 +5968,26 @@ async function scan(env) {
       telegramResults.push({
         address,
         sent: false,
-        reason: "ALERT_COOLDOWN"
+
+        reason:
+          "ALERT_COOLDOWN"
+      });
+
+      continue;
+    }
+
+    if (
+      !budgetAvailable(
+        budget,
+        "notification"
+      )
+    ) {
+      telegramResults.push({
+        address,
+        sent: false,
+
+        reason:
+          "NOTIFICATION_BUDGET_EXHAUSTED"
       });
 
       continue;
@@ -4605,30 +5996,52 @@ async function scan(env) {
     const result =
       await sendTelegram(
         env,
-        telegramMessage(candidate)
+        telegramMessage(
+          candidate
+        ),
+        budget
       );
 
     telegramResults.push({
       address,
-      symbol: candidate.symbol,
-      sent: result.success,
+
+      symbol:
+        candidate.symbol,
+
+      sent:
+        result.success,
+
       result
     });
 
-    if (result.success) {
-      state.alerts[address] = {
-        timestamp: Date.now(),
+    if (
+      result.success
+    ) {
+      state.alerts[
+        address
+      ] = {
+        timestamp:
+          Date.now(),
+
         score:
-          candidate.opportunity.score,
+          candidate.opportunity
+            .score,
+
         confidence:
-          candidate.confidence.score,
+          candidate.confidence
+            .score,
+
         whaleFlow:
-          candidate.whaleFlow.flow
+          candidate.whaleFlow
+            .flow
       };
     }
   }
 
-  pruneState(state);
+  pruneState(
+    state,
+    true
+  );
 
   const save =
     await writeState(
@@ -4645,14 +6058,19 @@ async function scan(env) {
       ? null
       : Math.max(
           0,
+
           latestNumber -
-          safeNumber(currentCursor)
+          safeNumber(
+            currentCursor
+          )
         );
 
-  let status = "SCAN_COMPLETE";
+  let status =
+    "SCAN_COMPLETE";
 
   if (
-    backlogRemaining !== null &&
+    backlogRemaining !==
+      null &&
     backlogRemaining > 0
   ) {
     status =
@@ -4671,14 +6089,17 @@ async function scan(env) {
     agent:
       "Robinhood Chain Meme Hunter",
 
-    version: VERSION,
+    version:
+      VERSION,
+
     status,
 
     scanMode:
-      "V81_TRUE_LIVE_FIRST_PERSISTENT_CATCHUP",
+      "V82_TRUE_LIVE_FIRST_SAFE_PARTIAL_PROGRESS",
 
     durationMs:
-      Date.now() - startedAt,
+      Date.now() -
+      startedAt,
 
     latestBlock:
       latestNumber,
@@ -4711,22 +6132,37 @@ async function scan(env) {
       lastLiveScannedBlock:
         state.lastLiveScannedBlock,
 
+      backlogProcessedThrough:
+        backlogProcessedThrough !==
+          null
+          ? Number(
+              backlogProcessedThrough
+            )
+          : null,
+
       backlogRemaining
     },
 
     requestBudget:
-      budgetTelemetry(budget),
+      budgetTelemetry(
+        budget
+      ),
 
     discovery: {
       live: {
         fromBlock:
-          Number(live.from),
+          Number(
+            live.from
+          ),
 
         toBlock:
-          Number(live.to),
+          Number(
+            live.to
+          ),
 
         rawLogs:
-          liveDiscovery.rawLogs,
+          liveDiscovery
+            .rawLogs,
 
         initializeEvents:
           liveDiscovery
@@ -4748,7 +6184,20 @@ async function scan(env) {
           liveDiscovery
             .newTokens.size,
 
-        error: liveError,
+        activeWatchedTokens:
+          liveActivity
+            .tokens.size,
+
+        matchedWatchedSwapEvents:
+          liveActivity
+            .swapEvents,
+
+        matchedWatchedLiquidityEvents:
+          liveActivity
+            .liquidityEvents,
+
+        error:
+          liveError,
 
         ranges:
           liveOutput.ranges
@@ -4758,10 +6207,14 @@ async function scan(env) {
         backlog
           ? {
               fromBlock:
-                Number(backlog.from),
+                Number(
+                  backlog.from
+                ),
 
               toBlock:
-                Number(backlog.to),
+                Number(
+                  backlog.to
+                ),
 
               rawLogs:
                 backlogDiscovery
@@ -4783,11 +6236,20 @@ async function scan(env) {
                 backlogDiscovery
                   .newTokens.size,
 
+              processedThrough:
+                backlogProcessedThrough !==
+                  null
+                  ? Number(
+                      backlogProcessedThrough
+                    )
+                  : null,
+
               error:
                 backlogError,
 
               ranges:
-                backlogOutput.ranges
+                backlogOutput
+                  .ranges
             }
           : null
     },
@@ -4800,14 +6262,21 @@ async function scan(env) {
         newTokens.size,
 
       liveTokenCandidates:
-        liveTokens.size
+        liveTokens.size,
+
+      liveActivityPromotion:
+        "ENABLED_V82"
     },
 
     watchedTokens:
-      state.watchedTokens.length,
+      state.watchedTokens
+        .length,
 
     tokenValidationChecks:
-      validationResults.length,
+      validationResults
+        .length,
+
+    deferredAnalysis,
 
     validERC20Tokens:
       candidates.length,
@@ -4826,19 +6295,34 @@ async function scan(env) {
 
     intelligence: {
       trueLiveFirstScanning:
-        "ENABLED_V81",
+        "ENABLED_V82",
+
+      liveSwapActivityPriority:
+        "ENABLED_V82",
 
       persistentBacklogCursor:
         "ENABLED",
 
+      partialBacklogProgress:
+        "ENABLED_V82",
+
       failedRangeProtection:
-        "ENABLED",
+        "ENABLED_V82",
 
       hardPhaseIsolation:
-        "ENABLED",
+        "ENABLED_V82",
+
+      telegramBudgetIsolation:
+        "ENABLED_V82",
+
+      freshERC20BudgetReservation:
+        "FIXED_V82",
+
+      deferredAnalysisRetry:
+        "ENABLED_V82",
 
       metadataReuse:
-        "ENABLED_V81",
+        "ENABLED",
 
       v4Discovery:
         "ENABLED",
@@ -4853,10 +6337,13 @@ async function scan(env) {
         "ENABLED",
 
       holderIntegrityValidation:
-        "ENABLED_V81",
+        "ENABLED",
 
       impossibleConcentrationProtection:
-        "ENABLED_V81",
+        "ENABLED",
+
+      holderValueParsing:
+        "HARDENED_V82",
 
       momentum:
         "ENABLED",
@@ -4875,9 +6362,10 @@ async function scan(env) {
     },
 
     architecture:
-      "V81_TRUE_LIVE_FIRST_HOLDER_INTEGRITY_MULTI_SIGNAL_HUNTER",
+      "V82_TRUE_LIVE_FIRST_SAFE_BUDGET_MULTI_SIGNAL_HUNTER",
 
-    timestamp: now()
+    timestamp:
+      now()
   };
 }
 
@@ -4904,7 +6392,9 @@ async function health(env) {
       );
 
     block =
-      Number(latest.block);
+      Number(
+        latest.block
+      );
 
     provider =
       latest.provider;
@@ -4920,7 +6410,8 @@ async function health(env) {
     agent:
       "Robinhood Chain Meme Hunter",
 
-    version: VERSION,
+    version:
+      VERSION,
 
     status:
       error
@@ -4938,8 +6429,11 @@ async function health(env) {
     ],
 
     chain: {
-      name: CHAIN_NAME,
-      chainId: CHAIN_ID
+      name:
+        CHAIN_NAME,
+
+      chainId:
+        CHAIN_ID
     },
 
     rpcStatus:
@@ -4947,8 +6441,12 @@ async function health(env) {
         ? "ERROR"
         : "CONNECTED",
 
-    latestBlock: block,
-    rpcProvider: provider,
+    latestBlock:
+      block,
+
+    rpcProvider:
+      provider,
+
     error,
 
     alchemyConfigured:
@@ -4963,7 +6461,8 @@ async function health(env) {
       binding:
         stateResult.binding,
 
-      stateKey: STATE_KEY,
+      stateKey:
+        STATE_KEY,
 
       lastScannedBlock:
         state.lastScannedBlock,
@@ -4972,11 +6471,13 @@ async function health(env) {
         state.lastLiveScannedBlock,
 
       watchedTokens:
-        state.watchedTokens.length,
+        state.watchedTokens
+          .length,
 
       snapshotTokens:
         Object.keys(
-          state.snapshots || {}
+          state.snapshots ||
+            {}
         ).length,
 
       stateError:
@@ -4990,7 +6491,9 @@ async function health(env) {
           env.TELEGRAM_CHAT_ID
         ),
 
-      automaticCalls: true,
+      automaticCalls:
+        true,
+
       minimumScore:
         MIN_ALERT_SCORE,
 
@@ -4998,16 +6501,22 @@ async function health(env) {
         MIN_CONFIDENCE_ALERT,
 
       minimumLiquidityUsd:
-        MIN_ALERT_LIQUIDITY
+        MIN_ALERT_LIQUIDITY,
+
+      maximumSendsPerScan:
+        NOTIFICATION_REQUEST_LIMIT
     },
 
     budget:
-      budgetTelemetry(budget),
+      budgetTelemetry(
+        budget
+      ),
 
     architecture:
-      "V81_TRUE_LIVE_FIRST_HOLDER_INTEGRITY_MULTI_SIGNAL_HUNTER",
+      "V82_TRUE_LIVE_FIRST_SAFE_BUDGET_MULTI_SIGNAL_HUNTER",
 
-    timestamp: now()
+    timestamp:
+      now()
   };
 }
 
@@ -5047,7 +6556,8 @@ async function rpcTest(env) {
       agent:
         "Robinhood Chain Meme Hunter",
 
-      version: VERSION,
+      version:
+        VERSION,
 
       success:
         Array.isArray(
@@ -5055,7 +6565,9 @@ async function rpcTest(env) {
         ),
 
       latestBlock:
-        Number(latest.block),
+        Number(
+          latest.block
+        ),
 
       provider:
         logs.provider ||
@@ -5065,36 +6577,48 @@ async function rpcTest(env) {
         POOL_MANAGER,
 
       poolManagerLogs:
-        Array.isArray(logs.result)
+        Array.isArray(
+          logs.result
+        )
           ? logs.result.length
           : 0,
 
-      error: logs.error,
+      error:
+        logs.error,
 
       requestBudget:
-        budgetTelemetry(budget),
+        budgetTelemetry(
+          budget
+        ),
 
       durationMs:
         Date.now() -
         startedAt,
 
-      timestamp: now()
+      timestamp:
+        now()
     };
   } catch (error) {
     return {
       agent:
         "Robinhood Chain Meme Hunter",
 
-      version: VERSION,
-      success: false,
+      version:
+        VERSION,
+
+      success:
+        false,
 
       error:
         errorString(error),
 
       requestBudget:
-        budgetTelemetry(budget),
+        budgetTelemetry(
+          budget
+        ),
 
-      timestamp: now()
+      timestamp:
+        now()
     };
   }
 }
@@ -5103,20 +6627,26 @@ async function rpcTest(env) {
    STATE
    ========================================================= */
 
-async function stateStatus(env) {
+async function stateStatus(
+  env
+) {
   const result =
     await readState(env);
 
   const state =
     result.state;
 
-  pruneState(state);
+  pruneState(
+    state,
+    true
+  );
 
   return {
     agent:
       "Robinhood Chain Meme Hunter",
 
-    version: VERSION,
+    version:
+      VERSION,
 
     persistenceConfigured:
       result.persistent,
@@ -5124,8 +6654,11 @@ async function stateStatus(env) {
     bindingDetected:
       result.binding,
 
-    stateKey: STATE_KEY,
-    error: result.error,
+    stateKey:
+      STATE_KEY,
+
+    error:
+      result.error,
 
     lastScannedBlock:
       state.lastScannedBlock,
@@ -5134,23 +6667,29 @@ async function stateStatus(env) {
       state.lastLiveScannedBlock,
 
     watchedTokenCount:
-      state.watchedTokens.length,
+      state.watchedTokens
+        .length,
 
     watchedTokens:
       state.watchedTokens.map(
         token => ({
-          address: token.address,
+          address:
+            token.address,
 
           name:
-            token.metadata?.name ||
+            token.metadata
+              ?.name ||
             null,
 
           symbol:
-            token.metadata?.symbol ||
+            token.metadata
+              ?.symbol ||
             null,
 
           checks:
-            safeNumber(token.checks),
+            safeNumber(
+              token.checks
+            ),
 
           firstSeenAt:
             token.firstSeenAt,
@@ -5158,28 +6697,36 @@ async function stateStatus(env) {
           lastSeenAt:
             token.lastSeenAt,
 
+          lastLiveSeenAt:
+            token.lastLiveSeenAt ||
+            null,
+
           lastCheckedAt:
             token.lastCheckedAt,
 
           poolCount:
-            token.pools?.length || 0
+            token.pools
+              ?.length || 0
         })
       ),
 
     snapshotTokenCount:
       Object.keys(
-        state.snapshots || {}
+        state.snapshots ||
+          {}
       ).length,
 
     alertHistoryCount:
       Object.keys(
-        state.alerts || {}
+        state.alerts ||
+          {}
       ).length,
 
     updatedAt:
       state.updatedAt,
 
-    timestamp: now()
+    timestamp:
+      now()
   };
 }
 
@@ -5187,7 +6734,9 @@ async function stateStatus(env) {
    DIAGNOSTICS
    ========================================================= */
 
-async function diagnostics(env) {
+async function diagnostics(
+  env
+) {
   const state =
     await readState(env);
 
@@ -5198,7 +6747,8 @@ async function diagnostics(env) {
     agent:
       "Robinhood Chain Meme Hunter",
 
-    version: VERSION,
+    version:
+      VERSION,
 
     success:
       rpcResult.success,
@@ -5233,7 +6783,8 @@ async function diagnostics(env) {
           POOL_MANAGER,
 
         logs:
-          rpcResult.poolManagerLogs
+          rpcResult
+            .poolManagerLogs
       },
 
       kv: {
@@ -5255,7 +6806,10 @@ async function diagnostics(env) {
           Boolean(
             env.TELEGRAM_BOT_TOKEN &&
             env.TELEGRAM_CHAT_ID
-          )
+          ),
+
+        scanBudgetLimit:
+          NOTIFICATION_REQUEST_LIMIT
       },
 
       alchemy: {
@@ -5265,24 +6819,62 @@ async function diagnostics(env) {
           )
       },
 
-      v81: {
-        trueLiveFirst: true,
-        separateBacklogCursor: true,
-        failedRangeProtection: true,
-        hardPhaseIsolation: true,
-        metadataReuse: true,
-        momentumSnapshots: true,
-        whaleFlow: true,
-        telegramAlerts: true,
-        holderIntegrityValidation: true,
-        impossibleConcentrationProtection: true
+      v82: {
+        trueLiveFirst:
+          true,
+
+        liveSwapActivityPriority:
+          true,
+
+        separateBacklogCursor:
+          true,
+
+        safePartialBacklogProgress:
+          true,
+
+        failedRangeProtection:
+          true,
+
+        hardPhaseIsolation:
+          true,
+
+        telegramBudgetIsolation:
+          true,
+
+        fiveRequestERC20Reservation:
+          true,
+
+        deferredAnalysisRetry:
+          true,
+
+        metadataReuse:
+          true,
+
+        momentumSnapshots:
+          true,
+
+        whaleFlow:
+          true,
+
+        telegramAlerts:
+          true,
+
+        holderIntegrityValidation:
+          true,
+
+        holderValueParsingHardened:
+          true,
+
+        impossibleConcentrationProtection:
+          true
       }
     },
 
     architecture:
-      "V81_TRUE_LIVE_FIRST_HOLDER_INTEGRITY_MULTI_SIGNAL_HUNTER",
+      "V82_TRUE_LIVE_FIRST_SAFE_BUDGET_MULTI_SIGNAL_HUNTER",
 
-    timestamp: now()
+    timestamp:
+      now()
   };
 }
 
@@ -5290,32 +6882,43 @@ async function diagnostics(env) {
    TELEGRAM TEST
    ========================================================= */
 
-async function telegramTest(env) {
+async function telegramTest(
+  env
+) {
   const message =
-`✅ <b>Robinhood Chain Meme Hunter V81</b>
+`✅ <b>Robinhood Chain Meme Hunter V82</b>
 
 Telegram connection test successful.
 
 ⚡ True live-first scanning enabled
+🔥 Live swap/activity promotion enabled
 📚 Historical catch-up enabled
 🛡 Protected analysis budget enabled
+🔁 Deferred-token retry enabled
 🐋 Whale-flow tracking enabled
 📈 Momentum tracking enabled
 🔍 Holder-integrity protection enabled
+📨 Telegram scan-budget protection enabled
 
 No fake token alert was generated by this test.`;
 
+  /*
+   * Manual connectivity test does not use the scan's request
+   * budget because this route performs only the requested test.
+   */
   const result =
     await sendTelegram(
       env,
-      message
+      message,
+      null
     );
 
   return {
     agent:
       "Robinhood Chain Meme Hunter",
 
-    version: VERSION,
+    version:
+      VERSION,
 
     success:
       result.success,
@@ -5327,7 +6930,9 @@ No fake token alert was generated by this test.`;
       ),
 
     result,
-    timestamp: now()
+
+    timestamp:
+      now()
   };
 }
 
@@ -5349,8 +6954,11 @@ async function runAll(env) {
     agent:
       "Robinhood Chain Meme Hunter",
 
-    version: VERSION,
-    success: true,
+    version:
+      VERSION,
+
+    success:
+      true,
 
     status:
       "ALL_CORE_TESTS_COMPLETED",
@@ -5360,11 +6968,14 @@ async function runAll(env) {
       startedAt,
 
     results: {
-      scan: result,
+      scan:
+        result,
+
       state
     },
 
-    timestamp: now()
+    timestamp:
+      now()
   };
 }
 
@@ -5377,15 +6988,20 @@ async function handleRequest(
   env
 ) {
   const url =
-    new URL(request.url);
+    new URL(
+      request.url
+    );
 
   const path =
     url.pathname
-      .replace(/\/+$/, "") ||
-    "/";
+      .replace(
+        /\/+$/,
+        ""
+      ) || "/";
 
   if (
-    request.method === "OPTIONS"
+    request.method ===
+    "OPTIONS"
   ) {
     return new Response(
       null,
@@ -5407,18 +7023,25 @@ async function handleRequest(
   }
 
   if (
-    request.method !== "GET"
+    request.method !==
+    "GET"
   ) {
     return jsonResponse(
       {
         agent:
           "Robinhood Chain Meme Hunter",
 
-        version: VERSION,
-        success: false,
+        version:
+          VERSION,
+
+        success:
+          false,
+
         error:
           "METHOD_NOT_ALLOWED",
-        timestamp: now()
+
+        timestamp:
+          now()
       },
       405
     );
@@ -5433,40 +7056,50 @@ async function handleRequest(
     );
   }
 
-  if (path === "/rpc-test") {
+  if (
+    path === "/rpc-test"
+  ) {
     return jsonResponse(
       await rpcTest(env)
     );
   }
 
-  if (path === "/scan") {
+  if (
+    path === "/scan"
+  ) {
     return jsonResponse(
       await scan(env)
     );
   }
 
-  if (path === "/state") {
+  if (
+    path === "/state"
+  ) {
     return jsonResponse(
       await stateStatus(env)
     );
   }
 
   if (
-    path === "/diagnostics"
+    path ===
+    "/diagnostics"
   ) {
     return jsonResponse(
       await diagnostics(env)
     );
   }
 
-  if (path === "/run-all") {
+  if (
+    path === "/run-all"
+  ) {
     return jsonResponse(
       await runAll(env)
     );
   }
 
   if (
-    path === "/test-telegram"
+    path ===
+    "/test-telegram"
   ) {
     return jsonResponse(
       await telegramTest(env)
@@ -5478,9 +7111,14 @@ async function handleRequest(
       agent:
         "Robinhood Chain Meme Hunter",
 
-      version: VERSION,
-      success: false,
-      error: "NOT_FOUND",
+      version:
+        VERSION,
+
+      success:
+        false,
+
+      error:
+        "NOT_FOUND",
 
       routes: [
         "/health",
@@ -5492,7 +7130,8 @@ async function handleRequest(
         "/test-telegram"
       ],
 
-      timestamp: now()
+      timestamp:
+        now()
     },
     404
   );
@@ -5502,14 +7141,16 @@ async function handleRequest(
    SCHEDULED
    ========================================================= */
 
-async function scheduledScan(env) {
+async function scheduledScan(
+  env
+) {
   const result =
     await scan(env);
 
   console.log(
     JSON.stringify({
       event:
-        "V81_SCHEDULED_SCAN",
+        "V82_SCHEDULED_SCAN",
 
       status:
         result.status,
@@ -5533,15 +7174,26 @@ async function scheduledScan(env) {
         result.watchedTokens,
 
       candidates:
-        result.candidates?.length,
+        result.candidates
+          ?.length,
+
+      deferredAnalysis:
+        result.deferredAnalysis,
 
       qualifyingCandidates:
-        result.qualifyingCandidates,
+        result
+          .qualifyingCandidates,
 
       requests:
-        result.requestBudget?.used,
+        result.requestBudget
+          ?.used,
 
-      timestamp: now()
+      notifications:
+        result.requestBudget
+          ?.notification?.used,
+
+      timestamp:
+        now()
     })
   );
 
@@ -5565,7 +7217,7 @@ export default {
       );
     } catch (error) {
       console.error(
-        "V81 request failed",
+        "V82 request failed",
         error
       );
 
@@ -5574,16 +7226,20 @@ export default {
           agent:
             "Robinhood Chain Meme Hunter",
 
-          version: VERSION,
-          success: false,
+          version:
+            VERSION,
+
+          success:
+            false,
 
           error:
             errorString(error),
 
           architecture:
-            "V81_TRUE_LIVE_FIRST_HOLDER_INTEGRITY_MULTI_SIGNAL_HUNTER",
+            "V82_TRUE_LIVE_FIRST_SAFE_BUDGET_MULTI_SIGNAL_HUNTER",
 
-          timestamp: now()
+          timestamp:
+            now()
         },
         500
       );
