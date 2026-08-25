@@ -2,24 +2,26 @@
  * Robinhood Chain Meme Hunter
  * V81
  *
- * COMPLETE CLOUDFLARE WORKER
+ * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
  * V81:
  * - Preserves V80 live-first architecture
- * - Preserves existing KV state/history
- * - Fixes backlog request-budget exhaustion
- * - Uses deterministic small backlog chunks
- * - Never advances cursor across failed ranges
- * - Prioritises live/new tokens for analysis
- * - Protects analysis request budget
- * - Excludes Pool Manager / infrastructure from whale scoring
- * - ERC20 validation
+ * - Preserves existing KV state key
+ * - Fixes impossible holder concentration calculations
+ * - Rejects holder totals > total supply
+ * - Separates holder counters from concentration verification
+ * - Prevents corrupt holder data affecting risk/smart-money/whale flow
+ * - True live-first scanning
+ * - Persistent historical catch-up
+ * - Uniswap V4 discovery
+ * - ERC20 verification
  * - DexScreener intelligence
- * - Blockscout holder intelligence
+ * - Blockscout intelligence
  * - Momentum snapshots
- * - Whale accumulation/distribution
+ * - Whale flow
  * - Candidate scoring
  * - Telegram alerts
+ * - Hard request-budget isolation
  */
 
 const VERSION = "V81";
@@ -27,26 +29,16 @@ const VERSION = "V81";
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
 
-const PUBLIC_RPC =
-  "https://rpc.mainnet.chain.robinhood.com";
-
-const ALCHEMY_BASE =
-  "https://robinhood-mainnet.g.alchemy.com/v2/";
-
-const DEXSCREENER_BASE =
-  "https://api.dexscreener.com";
-
-const BLOCKSCOUT =
-  "https://robinhoodchain.blockscout.com";
+const PUBLIC_RPC = "https://rpc.mainnet.chain.robinhood.com";
+const ALCHEMY_BASE = "https://robinhood-mainnet.g.alchemy.com/v2/";
+const DEXSCREENER_BASE = "https://api.dexscreener.com";
+const BLOCKSCOUT = "https://robinhoodchain.blockscout.com";
 
 const POOL_MANAGER =
   "0x8366a39cc670b4001a1121b8f6a443a643e40951";
 
 const ZERO =
   "0x0000000000000000000000000000000000000000";
-
-const DEAD =
-  "0x000000000000000000000000000000000000dead";
 
 /*
  * IMPORTANT:
@@ -56,18 +48,12 @@ const STATE_KEY =
   "robinhood-meme-hunter-v69-state";
 
 /* =========================================================
-   KNOWN INFRASTRUCTURE
+   KNOWN INFRASTRUCTURE / QUOTES
    ========================================================= */
 
 const KNOWN_QUOTES = new Set([
   "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
   "0x0bd7d308f8e1639fab988df18a8011f41eacad73"
-]);
-
-const KNOWN_INFRASTRUCTURE = new Set([
-  POOL_MANAGER.toLowerCase(),
-  ZERO,
-  DEAD
 ]);
 
 const KNOWN_QUOTE_SYMBOLS = new Set([
@@ -80,7 +66,7 @@ const KNOWN_QUOTE_SYMBOLS = new Set([
 ]);
 
 /* =========================================================
-   UNISWAP V4 EVENTS
+   UNISWAP V4 TOPICS
    ========================================================= */
 
 const INITIALIZE_TOPIC =
@@ -97,64 +83,39 @@ const MODIFY_LIQUIDITY_TOPIC =
    ========================================================= */
 
 const LIVE_SCAN_BLOCKS = 20;
-
-/*
- * V81 IMPORTANT:
- *
- * V80 attempted a 2,000-block backlog range.
- * Robinhood/Alchemy often forced recursive splitting,
- * consuming the whole discovery budget.
- *
- * V81 deliberately scans smaller blocks.
- */
-const BACKLOG_CHUNK_BLOCKS = 100;
-const BACKLOG_MAX_CHUNKS = 6;
-
-const MIN_LOG_RANGE = 5;
+const CATCHUP_TARGET_BLOCKS = 2000;
+const MIN_LOG_RANGE = 10;
 
 /* =========================================================
-   REQUEST BUDGET
+   HARD REQUEST BUDGET
    ========================================================= */
 
 const MAX_EXTERNAL_REQUESTS = 42;
-
 const SYSTEM_REQUEST_LIMIT = 2;
+const DISCOVERY_REQUEST_LIMIT = 22;
+const LIVE_DISCOVERY_REQUEST_LIMIT = 8;
+const BACKLOG_DISCOVERY_REQUEST_LIMIT = 14;
+const ANALYSIS_REQUEST_LIMIT = 18;
 
-const DISCOVERY_REQUEST_LIMIT = 16;
-const LIVE_DISCOVERY_REQUEST_LIMIT = 6;
-const BACKLOG_DISCOVERY_REQUEST_LIMIT = 10;
+/* =========================================================
+   ANALYSIS
+   ========================================================= */
 
-const ANALYSIS_REQUEST_LIMIT = 24;
-
-/*
- * Number of tokens considered each run.
- *
- * Actual number analysed depends on remaining
- * analysis request budget.
- */
-const MAX_TOKEN_CHECKS = 6;
-
-const MAX_FULL_ANALYSIS = 3;
-
-const METADATA_REUSE_MS =
-  30 * 60 * 1000;
+const MAX_TOKEN_CHECKS = 4;
+const METADATA_REUSE_MS = 30 * 60 * 1000;
 
 /* =========================================================
    WATCHLIST
    ========================================================= */
 
-const WATCH_MAX_AGE =
-  12 * 60 * 60 * 1000;
-
-const MAX_WATCHED_TOKENS = 60;
+const WATCH_MAX_AGE = 12 * 60 * 60 * 1000;
+const MAX_WATCHED_TOKENS = 50;
 
 /* =========================================================
    TELEGRAM
    ========================================================= */
 
-const ALERT_COOLDOWN =
-  6 * 60 * 60 * 1000;
-
+const ALERT_COOLDOWN = 6 * 60 * 60 * 1000;
 const MIN_ALERT_SCORE = 60;
 const MAX_ALERT_RISK = 59;
 const MIN_ALERT_LIQUIDITY = 1000;
@@ -165,18 +126,10 @@ const MIN_CONFIDENCE_ALERT = 55;
    ========================================================= */
 
 const MAX_SNAPSHOTS_PER_TOKEN = 24;
-
-const SNAPSHOT_MAX_AGE =
-  24 * 60 * 60 * 1000;
-
-const MIN_SNAPSHOT_INTERVAL =
-  2 * 60 * 1000;
-
-const MOMENTUM_MIN_HISTORY_MS =
-  5 * 60 * 1000;
-
-const MOMENTUM_IDEAL_HISTORY_MS =
-  15 * 60 * 1000;
+const SNAPSHOT_MAX_AGE = 24 * 60 * 60 * 1000;
+const MIN_SNAPSHOT_INTERVAL = 2 * 60 * 1000;
+const MOMENTUM_MIN_HISTORY_MS = 5 * 60 * 1000;
+const MOMENTUM_IDEAL_HISTORY_MS = 15 * 60 * 1000;
 
 /* =========================================================
    HELPERS
@@ -200,17 +153,11 @@ function normalize(value) {
 }
 
 function isAddress(value) {
-  return /^0x[a-fA-F0-9]{40}$/.test(
-    String(value || "")
-  );
+  return /^0x[a-fA-F0-9]{40}$/.test(String(value || ""));
 }
 
 function errorString(error) {
-  return String(
-    error?.message ||
-    error ||
-    "UNKNOWN_ERROR"
-  );
+  return String(error?.message || error || "UNKNOWN_ERROR");
 }
 
 function topicAddress(topic) {
@@ -220,28 +167,15 @@ function topicAddress(topic) {
     return null;
   }
 
-  return (
-    "0x" +
-    value.slice(-40)
-  ).toLowerCase();
+  return ("0x" + value.slice(-40)).toLowerCase();
 }
 
 function knownQuote(address) {
-  return KNOWN_QUOTES.has(
-    normalize(address)
-  );
-}
-
-function knownInfrastructure(address) {
-  return KNOWN_INFRASTRUCTURE.has(
-    normalize(address)
-  );
+  return KNOWN_QUOTES.has(normalize(address));
 }
 
 function knownQuoteMetadata(address, symbol) {
-  if (knownQuote(address)) {
-    return true;
-  }
+  if (knownQuote(address)) return true;
 
   return KNOWN_QUOTE_SYMBOLS.has(
     String(symbol || "").toUpperCase()
@@ -252,9 +186,7 @@ function percentChange(previous, current) {
   const a = safeNumber(previous);
   const b = safeNumber(current);
 
-  if (a <= 0) {
-    return null;
-  }
+  if (a <= 0) return null;
 
   return ((b - a) / a) * 100;
 }
@@ -264,11 +196,7 @@ function uniqueBy(array, keyFunction) {
 
   for (const item of array) {
     const key = keyFunction(item);
-
-    if (!key) {
-      continue;
-    }
-
+    if (!key) continue;
     map.set(key, item);
   }
 
@@ -280,16 +208,10 @@ function jsonResponse(data, status = 200) {
     JSON.stringify(data, null, 2),
     {
       status,
-
       headers: {
-        "content-type":
-          "application/json; charset=utf-8",
-
-        "cache-control":
-          "no-store",
-
-        "access-control-allow-origin":
-          "*"
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+        "access-control-allow-origin": "*"
       }
     }
   );
@@ -312,10 +234,8 @@ function createBudget() {
     discovery: {
       used: 0,
       limit: DISCOVERY_REQUEST_LIMIT,
-
       liveUsed: 0,
       liveLimit: LIVE_DISCOVERY_REQUEST_LIMIT,
-
       backlogUsed: 0,
       backlogLimit: BACKLOG_DISCOVERY_REQUEST_LIMIT
     },
@@ -329,74 +249,43 @@ function createBudget() {
   };
 }
 
-function budgetAvailable(
-  budget,
-  phase,
-  amount = 1
-) {
-  if (
-    budget.totalUsed + amount >
-    budget.totalLimit
-  ) {
+function budgetAvailable(budget, phase, amount = 1) {
+  if (budget.totalUsed + amount > budget.totalLimit) {
     return false;
   }
 
   if (phase === "system") {
-    return (
-      budget.system.used + amount <=
-      budget.system.limit
-    );
+    return budget.system.used + amount <= budget.system.limit;
   }
 
   if (phase === "analysis") {
-    return (
-      budget.analysis.used + amount <=
-      budget.analysis.limit
-    );
+    return budget.analysis.used + amount <= budget.analysis.limit;
   }
 
   if (phase === "discovery-live") {
     return (
-      budget.discovery.used + amount <=
-        budget.discovery.limit &&
-
-      budget.discovery.liveUsed + amount <=
-        budget.discovery.liveLimit
+      budget.discovery.used + amount <= budget.discovery.limit &&
+      budget.discovery.liveUsed + amount <= budget.discovery.liveLimit
     );
   }
 
   if (phase === "discovery-backlog") {
     return (
-      budget.discovery.used + amount <=
-        budget.discovery.limit &&
-
-      budget.discovery.backlogUsed + amount <=
-        budget.discovery.backlogLimit
+      budget.discovery.used + amount <= budget.discovery.limit &&
+      budget.discovery.backlogUsed + amount <= budget.discovery.backlogLimit
     );
   }
 
   return false;
 }
 
-function consumeBudget(
-  budget,
-  phase,
-  type,
-  amount = 1
-) {
-  if (
-    !budgetAvailable(
-      budget,
-      phase,
-      amount
-    )
-  ) {
+function consumeBudget(budget, phase, type, amount = 1) {
+  if (!budgetAvailable(budget, phase, amount)) {
     budget.skipped.push({
       phase,
       type,
       amount,
-      reason:
-        "PHASE_BUDGET_EXHAUSTED"
+      reason: "PHASE_BUDGET_EXHAUSTED"
     });
 
     return false;
@@ -406,18 +295,12 @@ function consumeBudget(
 
   if (phase === "system") {
     budget.system.used += amount;
-  }
-
-  if (phase === "analysis") {
+  } else if (phase === "analysis") {
     budget.analysis.used += amount;
-  }
-
-  if (phase === "discovery-live") {
+  } else if (phase === "discovery-live") {
     budget.discovery.used += amount;
     budget.discovery.liveUsed += amount;
-  }
-
-  if (phase === "discovery-backlog") {
+  } else if (phase === "discovery-backlog") {
     budget.discovery.used += amount;
     budget.discovery.backlogUsed += amount;
   }
@@ -429,100 +312,69 @@ function budgetTelemetry(budget) {
   return {
     used: budget.totalUsed,
     limit: budget.totalLimit,
-
-    remaining:
-      Math.max(
-        0,
-        budget.totalLimit -
-        budget.totalUsed
-      ),
+    remaining: Math.max(0, budget.totalLimit - budget.totalUsed),
 
     system: {
       used: budget.system.used,
       limit: budget.system.limit,
-
-      remaining:
-        Math.max(
-          0,
-          budget.system.limit -
-          budget.system.used
-        )
+      remaining: Math.max(
+        0,
+        budget.system.limit - budget.system.used
+      )
     },
 
     discovery: {
       used: budget.discovery.used,
       limit: budget.discovery.limit,
-
-      remaining:
-        Math.max(
-          0,
-          budget.discovery.limit -
-          budget.discovery.used
-        ),
+      remaining: Math.max(
+        0,
+        budget.discovery.limit - budget.discovery.used
+      ),
 
       live: {
-        used:
-          budget.discovery.liveUsed,
-
-        limit:
-          budget.discovery.liveLimit,
-
-        remaining:
-          Math.max(
-            0,
-            budget.discovery.liveLimit -
-            budget.discovery.liveUsed
-          )
+        used: budget.discovery.liveUsed,
+        limit: budget.discovery.liveLimit,
+        remaining: Math.max(
+          0,
+          budget.discovery.liveLimit - budget.discovery.liveUsed
+        )
       },
 
       backlog: {
-        used:
-          budget.discovery.backlogUsed,
-
-        limit:
-          budget.discovery.backlogLimit,
-
-        remaining:
-          Math.max(
-            0,
-            budget.discovery.backlogLimit -
-            budget.discovery.backlogUsed
-          )
+        used: budget.discovery.backlogUsed,
+        limit: budget.discovery.backlogLimit,
+        remaining: Math.max(
+          0,
+          budget.discovery.backlogLimit - budget.discovery.backlogUsed
+        )
       }
     },
 
     analysis: {
       used: budget.analysis.used,
       limit: budget.analysis.limit,
-
-      remaining:
-        Math.max(
-          0,
-          budget.analysis.limit -
-          budget.analysis.used
-        ),
-
+      remaining: Math.max(
+        0,
+        budget.analysis.limit - budget.analysis.used
+      ),
       protected: true
     },
 
     hardPhaseIsolation: true,
     liveFirstIsolation: true,
-
     skipped: budget.skipped
   };
 }
 
 /* =========================================================
-   KV
+   KV STATE
    ========================================================= */
 
 function getKV(env) {
   if (
     env.MEME_HUNTER_STATE &&
-    typeof env.MEME_HUNTER_STATE.get ===
-      "function" &&
-    typeof env.MEME_HUNTER_STATE.put ===
-      "function"
+    typeof env.MEME_HUNTER_STATE.get === "function" &&
+    typeof env.MEME_HUNTER_STATE.put === "function"
   ) {
     return {
       kv: env.MEME_HUNTER_STATE,
@@ -532,10 +384,8 @@ function getKV(env) {
 
   if (
     env.KV_BINDING &&
-    typeof env.KV_BINDING.get ===
-      "function" &&
-    typeof env.KV_BINDING.put ===
-      "function"
+    typeof env.KV_BINDING.get === "function" &&
+    typeof env.KV_BINDING.put === "function"
   ) {
     return {
       kv: env.KV_BINDING,
@@ -552,25 +402,18 @@ function getKV(env) {
 function newState() {
   return {
     version: VERSION,
-
     lastScannedBlock: null,
     lastLiveScannedBlock: null,
-
     watchedTokens: [],
-
     alerts: {},
     snapshots: {},
-
     createdAt: now(),
     updatedAt: now()
   };
 }
 
 async function readState(env) {
-  const {
-    kv,
-    binding
-  } = getKV(env);
+  const { kv, binding } = getKV(env);
 
   if (!kv) {
     return {
@@ -582,8 +425,7 @@ async function readState(env) {
   }
 
   try {
-    const raw =
-      await kv.get(STATE_KEY);
+    const raw = await kv.get(STATE_KEY);
 
     if (!raw) {
       return {
@@ -594,28 +436,17 @@ async function readState(env) {
       };
     }
 
-    const parsed =
-      JSON.parse(raw);
+    const parsed = JSON.parse(raw);
 
     let watchedTokens = [];
 
-    if (
-      Array.isArray(
-        parsed.watchedTokens
-      )
-    ) {
-      watchedTokens =
-        parsed.watchedTokens;
-
+    if (Array.isArray(parsed.watchedTokens)) {
+      watchedTokens = parsed.watchedTokens;
     } else if (
       parsed.watchedTokens &&
-      typeof parsed.watchedTokens ===
-        "object"
+      typeof parsed.watchedTokens === "object"
     ) {
-      watchedTokens =
-        Object.values(
-          parsed.watchedTokens
-        );
+      watchedTokens = Object.values(parsed.watchedTokens);
     }
 
     return {
@@ -625,27 +456,21 @@ async function readState(env) {
       state: {
         ...newState(),
         ...parsed,
-
         watchedTokens,
 
         alerts:
-          parsed.alerts &&
-          typeof parsed.alerts ===
-            "object"
+          parsed.alerts && typeof parsed.alerts === "object"
             ? parsed.alerts
             : {},
 
         snapshots:
-          parsed.snapshots &&
-          typeof parsed.snapshots ===
-            "object"
+          parsed.snapshots && typeof parsed.snapshots === "object"
             ? parsed.snapshots
             : {}
       },
 
       error: null
     };
-
   } catch (error) {
     return {
       persistent: true,
@@ -657,10 +482,7 @@ async function readState(env) {
 }
 
 async function writeState(env, state) {
-  const {
-    kv,
-    binding
-  } = getKV(env);
+  const { kv, binding } = getKV(env);
 
   if (!kv) {
     return {
@@ -684,7 +506,6 @@ async function writeState(env, state) {
       binding,
       error: null
     };
-
   } catch (error) {
     return {
       saved: false,
@@ -702,59 +523,22 @@ function pruneState(state) {
       ? state.watchedTokens
       : [];
 
-  /*
-   * V81 removes known quote/infrastructure
-   * contracts from active candidate watchlist.
-   */
-  state.watchedTokens =
-    state.watchedTokens
-      .filter(token => {
-        const address =
-          normalize(token.address);
+  state.watchedTokens = state.watchedTokens
+    .filter(token => {
+      const firstSeen = safeNumber(token.firstSeenAt);
 
-        if (
-          knownQuote(address) ||
-          knownInfrastructure(address)
-        ) {
-          return false;
-        }
+      if (!firstSeen) return true;
 
-        if (
-          knownQuoteMetadata(
-            address,
-            token.metadata?.symbol
-          )
-        ) {
-          return false;
-        }
-
-        const firstSeen =
-          safeNumber(token.firstSeenAt);
-
-        if (!firstSeen) {
-          return true;
-        }
-
-        return (
-          current - firstSeen <=
-          WATCH_MAX_AGE
-        );
-      })
-      .slice(
-        0,
-        MAX_WATCHED_TOKENS
-      );
+      return current - firstSeen <= WATCH_MAX_AGE;
+    })
+    .slice(0, MAX_WATCHED_TOKENS);
 
   state.alerts =
-    state.alerts &&
-    typeof state.alerts === "object"
+    state.alerts && typeof state.alerts === "object"
       ? state.alerts
       : {};
 
-  for (
-    const [address, alert] of
-    Object.entries(state.alerts)
-  ) {
+  for (const [address, alert] of Object.entries(state.alerts)) {
     const timestamp =
       typeof alert === "object"
         ? safeNumber(alert.timestamp)
@@ -762,48 +546,35 @@ function pruneState(state) {
 
     if (
       timestamp &&
-      current - timestamp >
-        ALERT_COOLDOWN
+      current - timestamp > ALERT_COOLDOWN
     ) {
       delete state.alerts[address];
     }
   }
 
   state.snapshots =
-    state.snapshots &&
-    typeof state.snapshots === "object"
+    state.snapshots && typeof state.snapshots === "object"
       ? state.snapshots
       : {};
 
-  for (
-    const [address, snapshots] of
-    Object.entries(state.snapshots)
-  ) {
+  for (const [address, snapshots] of Object.entries(state.snapshots)) {
     let list =
       Array.isArray(snapshots)
         ? snapshots
-        : snapshots &&
-          typeof snapshots === "object"
+        : snapshots && typeof snapshots === "object"
           ? [snapshots]
           : [];
 
-    list =
-      list
-        .filter(snapshot => {
-          const timestamp =
-            safeNumber(
-              snapshot.timestamp
-            );
+    list = list
+      .filter(snapshot => {
+        const timestamp = safeNumber(snapshot.timestamp);
 
-          return (
-            timestamp &&
-            current - timestamp <=
-              SNAPSHOT_MAX_AGE
-          );
-        })
-        .slice(
-          -MAX_SNAPSHOTS_PER_TOKEN
+        return (
+          timestamp &&
+          current - timestamp <= SNAPSHOT_MAX_AGE
         );
+      })
+      .slice(-MAX_SNAPSHOTS_PER_TOKEN);
 
     if (list.length) {
       state.snapshots[address] = list;
@@ -817,24 +588,17 @@ function findWatched(state, address) {
   const key = normalize(address);
 
   return state.watchedTokens.find(
-    token =>
-      normalize(token.address) === key
+    token => normalize(token.address) === key
   );
 }
 
-function addWatch(
-  state,
-  address,
-  pool,
-  source
-) {
+function addWatch(state, address, pool, source) {
   address = normalize(address);
 
   if (
     !isAddress(address) ||
     address === ZERO ||
-    knownQuote(address) ||
-    knownInfrastructure(address)
+    knownQuote(address)
   ) {
     return {
       added: false,
@@ -842,31 +606,22 @@ function addWatch(
     };
   }
 
-  let token =
-    findWatched(state, address);
-
+  let token = findWatched(state, address);
   let added = false;
 
   if (!token) {
     token = {
       address,
-
       firstSeenAt: Date.now(),
       lastSeenAt: Date.now(),
       lastCheckedAt: null,
-
       checks: 0,
-
       pools: [],
-
       metadata: null,
-
-      discoverySource:
-        source || "UNKNOWN"
+      discoverySource: source || "UNKNOWN"
     };
 
     state.watchedTokens.push(token);
-
     added = true;
   }
 
@@ -883,12 +638,10 @@ function addWatch(
       : [];
 
   if (pool) {
-    const exists =
-      token.pools.some(
-        existing =>
-          normalize(existing.poolId) ===
-          normalize(pool.poolId)
-      );
+    const exists = token.pools.some(
+      existing =>
+        normalize(existing.poolId) === normalize(pool.poolId)
+    );
 
     if (!exists) {
       token.pools.push(pool);
@@ -920,66 +673,50 @@ async function rpcCall(
     )
   ) {
     throw new Error(
-      `REQUEST_BUDGET_EXHAUSTED_${String(
-        phase
-      )
+      `REQUEST_BUDGET_EXHAUSTED_${String(phase)
         .toUpperCase()
         .replace(/-/g, "_")}`
     );
   }
 
-  const controller =
-    new AbortController();
+  const controller = new AbortController();
 
-  const timer =
-    setTimeout(
-      () => controller.abort(),
-      4500
-    );
+  const timer = setTimeout(
+    () => controller.abort(),
+    4500
+  );
 
   try {
-    const response =
-      await fetch(
-        url,
-        {
-          method: "POST",
+    const response = await fetch(url, {
+      method: "POST",
 
-          headers: {
-            "content-type":
-              "application/json"
-          },
+      headers: {
+        "content-type": "application/json"
+      },
 
-          body:
-            JSON.stringify({
-              jsonrpc: "2.0",
-              id: Date.now(),
-              method,
-              params
-            }),
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: Date.now(),
+        method,
+        params
+      }),
 
-          signal:
-            controller.signal
-        }
-      );
+      signal: controller.signal
+    });
 
     if (!response.ok) {
-      throw new Error(
-        `HTTP_${response.status}`
-      );
+      throw new Error(`HTTP_${response.status}`);
     }
 
-    const body =
-      await response.json();
+    const body = await response.json();
 
     if (body.error) {
       throw new Error(
-        body.error.message ||
-        "RPC_ERROR"
+        body.error.message || "RPC_ERROR"
       );
     }
 
     return body.result;
-
   } finally {
     clearTimeout(timer);
   }
@@ -995,25 +732,21 @@ async function rpc(
   let publicError = null;
 
   try {
-    const result =
-      await rpcCall(
-        PUBLIC_RPC,
-        method,
-        params,
-        budget,
-        phase
-      );
+    const result = await rpcCall(
+      PUBLIC_RPC,
+      method,
+      params,
+      budget,
+      phase
+    );
 
     return {
       result,
-      provider:
-        "ROBINHOOD_PUBLIC_RPC",
+      provider: "ROBINHOOD_PUBLIC_RPC",
       error: null
     };
-
   } catch (error) {
-    publicError =
-      errorString(error);
+    publicError = errorString(error);
 
     if (
       publicError.startsWith(
@@ -1032,49 +765,38 @@ async function rpc(
     return {
       result: null,
       provider: null,
-
       error:
         "PUBLIC_RPC_FAILED: " +
         publicError
     };
   }
 
-  if (
-    !budgetAvailable(
-      budget,
-      phase
-    )
-  ) {
+  if (!budgetAvailable(budget, phase, 1)) {
     return {
       result: null,
       provider: null,
-      error:
-        "REQUEST_BUDGET_EXHAUSTED"
+      error: "REQUEST_BUDGET_EXHAUSTED"
     };
   }
 
   try {
-    const result =
-      await rpcCall(
-        ALCHEMY_BASE +
-          env.ALCHEMY_API_KEY,
-        method,
-        params,
-        budget,
-        phase
-      );
+    const result = await rpcCall(
+      ALCHEMY_BASE + env.ALCHEMY_API_KEY,
+      method,
+      params,
+      budget,
+      phase
+    );
 
     return {
       result,
       provider: "ALCHEMY",
       error: null
     };
-
   } catch (error) {
     return {
       result: null,
       provider: null,
-
       error:
         "PUBLIC_RPC_FAILED: " +
         publicError +
@@ -1084,18 +806,14 @@ async function rpc(
   }
 }
 
-async function latestBlock(
-  env,
-  budget
-) {
-  const response =
-    await rpc(
-      env,
-      "eth_blockNumber",
-      [],
-      budget,
-      "system"
-    );
+async function latestBlock(env, budget) {
+  const response = await rpc(
+    env,
+    "eth_blockNumber",
+    [],
+    budget,
+    "system"
+  );
 
   if (!response.result) {
     throw new Error(
@@ -1127,8 +845,7 @@ async function getLogs(
       toBlock:
         "0x" + to.toString(16),
 
-      address:
-        POOL_MANAGER
+      address: POOL_MANAGER
     }],
     budget,
     phase
@@ -1136,7 +853,7 @@ async function getLogs(
 }
 
 /* =========================================================
-   SAFE LOG RANGE
+   ADAPTIVE LOG SCANNER
    ========================================================= */
 
 async function scanLogRange(
@@ -1149,47 +866,39 @@ async function scanLogRange(
   depth = 0
 ) {
   if (
-    !budgetAvailable(
-      budget,
-      phase
-    )
+    phase !== "discovery-live" &&
+    phase !== "discovery-backlog"
   ) {
     return {
       success: false,
-      budgetExhausted: true,
-      error:
-        "DISCOVERY_BUDGET_EXHAUSTED"
+      error: "INVALID_DISCOVERY_PHASE"
     };
   }
 
-  const response =
-    await getLogs(
-      env,
-      from,
-      to,
-      budget,
-      phase
-    );
+  if (!budgetAvailable(budget, phase)) {
+    return {
+      success: false,
+      budgetExhausted: true,
+      error: "DISCOVERY_BUDGET_EXHAUSTED"
+    };
+  }
 
-  if (
-    Array.isArray(
-      response.result
-    )
-  ) {
-    output.logs.push(
-      ...response.result
-    );
+  const response = await getLogs(
+    env,
+    from,
+    to,
+    budget,
+    phase
+  );
+
+  if (Array.isArray(response.result)) {
+    output.logs.push(...response.result);
 
     output.ranges.push({
       fromBlock: Number(from),
       toBlock: Number(to),
-
-      logs:
-        response.result.length,
-
-      provider:
-        response.provider,
-
+      logs: response.result.length,
+      provider: response.provider,
       phase,
       splitDepth: depth
     });
@@ -1201,9 +910,7 @@ async function scanLogRange(
   }
 
   if (
-    String(
-      response.error || ""
-    ).includes(
+    String(response.error || "").includes(
       "REQUEST_BUDGET_EXHAUSTED"
     )
   ) {
@@ -1214,42 +921,35 @@ async function scanLogRange(
     };
   }
 
-  const size =
-    to - from + 1n;
+  const size = to - from + 1n;
 
-  if (
-    size >
-    BigInt(MIN_LOG_RANGE)
-  ) {
+  if (size > BigInt(MIN_LOG_RANGE)) {
     const middle =
-      from +
-      (to - from) / 2n;
+      from + (to - from) / 2n;
 
-    const left =
-      await scanLogRange(
-        env,
-        from,
-        middle,
-        budget,
-        output,
-        phase,
-        depth + 1
-      );
+    const left = await scanLogRange(
+      env,
+      from,
+      middle,
+      budget,
+      output,
+      phase,
+      depth + 1
+    );
 
     if (!left.success) {
       return left;
     }
 
-    const right =
-      await scanLogRange(
-        env,
-        middle + 1n,
-        to,
-        budget,
-        output,
-        phase,
-        depth + 1
-      );
+    const right = await scanLogRange(
+      env,
+      middle + 1n,
+      to,
+      budget,
+      output,
+      phase,
+      depth + 1
+    );
 
     if (!right.success) {
       return {
@@ -1276,7 +976,6 @@ async function scanLogRange(
     failedRange: {
       fromBlock: Number(from),
       toBlock: Number(to),
-
       error:
         response.error ||
         "GET_LOGS_FAILED"
@@ -1314,15 +1013,10 @@ function decodeInitialize(log) {
   }
 
   return {
-    poolId:
-      normalize(log.topics[1]),
-
+    poolId: normalize(log.topics[1]),
     currency0,
     currency1,
-
-    blockNumber:
-      log.blockNumber,
-
+    blockNumber: log.blockNumber,
     transactionHash:
       log.transactionHash
   };
@@ -1349,43 +1043,35 @@ function processDiscoveryLogs(
     }
 
     if (
-      topic0 ===
-      MODIFY_LIQUIDITY_TOPIC
+      topic0 === MODIFY_LIQUIDITY_TOPIC
     ) {
       liquidityTopicMatches++;
     }
 
-    const pool =
-      decodeInitialize(log);
+    const pool = decodeInitialize(log);
 
-    if (!pool) {
-      continue;
-    }
+    if (!pool) continue;
 
     initializeEvents++;
 
-    for (
-      const address of [
-        pool.currency0,
-        pool.currency1
-      ]
-    ) {
+    for (const address of [
+      pool.currency0,
+      pool.currency1
+    ]) {
       if (
         !isAddress(address) ||
         address === ZERO ||
-        knownQuote(address) ||
-        knownInfrastructure(address)
+        knownQuote(address)
       ) {
         continue;
       }
 
-      const result =
-        addWatch(
-          state,
-          address,
-          pool,
-          source
-        );
+      const result = addWatch(
+        state,
+        address,
+        pool,
+        source
+      );
 
       if (result.token) {
         seenTokens.add(
@@ -1415,15 +1101,13 @@ function activityForToken(
   watched,
   logs
 ) {
-  const poolIds =
-    new Set(
-      (watched.pools || [])
-        .map(
-          pool =>
-            normalize(pool.poolId)
-        )
-        .filter(Boolean)
-    );
+  const poolIds = new Set(
+    (watched.pools || [])
+      .map(pool =>
+        normalize(pool.poolId)
+      )
+      .filter(Boolean)
+  );
 
   let swaps = 0;
   let liquidityEvents = 0;
@@ -1444,8 +1128,7 @@ function activityForToken(
     }
 
     if (
-      topic0 ===
-      MODIFY_LIQUIDITY_TOPIC
+      topic0 === MODIFY_LIQUIDITY_TOPIC
     ) {
       liquidityEvents++;
     }
@@ -1469,17 +1152,16 @@ async function ethCall(
   data,
   budget
 ) {
-  const response =
-    await rpc(
-      env,
-      "eth_call",
-      [{
-        to: token,
-        data
-      }, "latest"],
-      budget,
-      "analysis"
-    );
+  const response = await rpc(
+    env,
+    "eth_call",
+    [{
+      to: token,
+      data
+    }, "latest"],
+    budget,
+    "analysis"
+  );
 
   if (!response.result) {
     throw new Error(
@@ -1509,16 +1191,12 @@ function decodeBytes32String(hex) {
       return null;
     }
 
-    const bytes =
-      new Uint8Array(
-        (
-          raw.match(/.{2}/g) ||
-          []
-        ).map(
-          value =>
-            parseInt(value, 16)
+    const bytes = new Uint8Array(
+      (raw.match(/.{2}/g) || [])
+        .map(value =>
+          parseInt(value, 16)
         )
-      );
+    );
 
     return (
       new TextDecoder()
@@ -1527,7 +1205,6 @@ function decodeBytes32String(hex) {
         .trim() ||
       null
     );
-
   } catch {
     return null;
   }
@@ -1539,9 +1216,7 @@ function decodeString(hex) {
       String(hex || "")
         .replace(/^0x/, "");
 
-    if (!raw) {
-      return null;
-    }
+    if (!raw) return null;
 
     if (raw.length === 64) {
       return decodeBytes32String(
@@ -1568,16 +1243,15 @@ function decodeString(hex) {
       return null;
     }
 
-    const length =
-      Number(
-        BigInt(
-          "0x" +
-          raw.slice(
-            offset,
-            offset + 64
-          )
+    const length = Number(
+      BigInt(
+        "0x" +
+        raw.slice(
+          offset,
+          offset + 64
         )
-      );
+      )
+    );
 
     if (
       length <= 0 ||
@@ -1595,13 +1269,10 @@ function decodeString(hex) {
 
     const bytes =
       new Uint8Array(
-        (
-          data.match(/.{2}/g) ||
-          []
-        ).map(
-          value =>
+        (data.match(/.{2}/g) || [])
+          .map(value =>
             parseInt(value, 16)
-        )
+          )
       );
 
     return (
@@ -1611,7 +1282,6 @@ function decodeString(hex) {
         .trim() ||
       null
     );
-
   } catch {
     return null;
   }
@@ -1660,10 +1330,6 @@ async function verifyERC20(
     return cached;
   }
 
-  /*
-   * Reserve enough requests for
-   * meaningful validation.
-   */
   if (
     !budgetAvailable(
       budget,
@@ -1678,14 +1344,13 @@ async function verifyERC20(
     };
   }
 
-  const code =
-    await rpc(
-      env,
-      "eth_getCode",
-      [address, "latest"],
-      budget,
-      "analysis"
-    );
+  const code = await rpc(
+    env,
+    "eth_getCode",
+    [address, "latest"],
+    budget,
+    "analysis"
+  );
 
   if (
     !code.result ||
@@ -1705,39 +1370,36 @@ async function verifyERC20(
   let totalSupply = null;
 
   try {
-    name =
-      decodeString(
-        await ethCall(
-          env,
-          address,
-          "0x06fdde03",
-          budget
-        )
-      );
+    name = decodeString(
+      await ethCall(
+        env,
+        address,
+        "0x06fdde03",
+        budget
+      )
+    );
   } catch {}
 
   try {
-    symbol =
-      decodeString(
-        await ethCall(
-          env,
-          address,
-          "0x95d89b41",
-          budget
-        )
-      );
+    symbol = decodeString(
+      await ethCall(
+        env,
+        address,
+        "0x95d89b41",
+        budget
+      )
+    );
   } catch {}
 
   try {
-    const value =
-      decodeUint(
-        await ethCall(
-          env,
-          address,
-          "0x313ce567",
-          budget
-        )
-      );
+    const value = decodeUint(
+      await ethCall(
+        env,
+        address,
+        "0x313ce567",
+        budget
+      )
+    );
 
     if (value !== null) {
       decimals = Number(value);
@@ -1751,26 +1413,21 @@ async function verifyERC20(
     )
   ) {
     try {
-      totalSupply =
-        decodeUint(
-          await ethCall(
-            env,
-            address,
-            "0x18160ddd",
-            budget
-          )
-        );
+      totalSupply = decodeUint(
+        await ethCall(
+          env,
+          address,
+          "0x18160ddd",
+          budget
+        )
+      );
     } catch {}
   }
 
   const score =
     (name ? 1 : 0) +
     (symbol ? 1 : 0) +
-    (
-      Number.isFinite(decimals)
-        ? 1
-        : 0
-    ) +
+    (Number.isFinite(decimals) ? 1 : 0) +
     (
       totalSupply !== null &&
       totalSupply > 0n
@@ -1781,14 +1438,11 @@ async function verifyERC20(
   if (score < 3) {
     return {
       validERC20: false,
-
       reason:
         "ERC20_METHODS_NOT_VERIFIED",
-
       name,
       symbol,
       decimals,
-
       totalSupply:
         totalSupply !== null
           ? totalSupply.toString()
@@ -1799,7 +1453,6 @@ async function verifyERC20(
   return {
     validERC20: true,
     reason: "VERIFIED",
-
     address,
     name,
     symbol,
@@ -1838,16 +1491,14 @@ async function marketData(
   }
 
   try {
-    const response =
-      await fetch(
-        `${DEXSCREENER_BASE}/token-pairs/v1/robinhood/${token}`,
-        {
-          headers: {
-            accept:
-              "application/json"
-          }
+    const response = await fetch(
+      `${DEXSCREENER_BASE}/token-pairs/v1/robinhood/${token}`,
+      {
+        headers: {
+          accept: "application/json"
         }
-      );
+      }
+    );
 
     if (!response.ok) {
       return {
@@ -1868,8 +1519,7 @@ async function marketData(
     if (!pairs.length) {
       return {
         verified: false,
-        status:
-          "NO_MARKET_FOUND"
+        status: "NO_MARKET_FOUND"
       };
     }
 
@@ -1903,16 +1553,13 @@ async function marketData(
       status: "VERIFIED",
 
       pairAddress:
-        pair?.pairAddress ||
-        null,
+        pair?.pairAddress || null,
 
       url:
-        pair?.url ||
-        null,
+        pair?.url || null,
 
       priceUsd:
-        pair?.priceUsd ||
-        null,
+        pair?.priceUsd || null,
 
       liquidityUsd:
         safeNumber(
@@ -1955,11 +1602,9 @@ async function marketData(
 
       buyPressure1h:
         transactions > 0
-          ? (
-              buys /
-              transactions *
-              100
-            )
+          ? buys /
+            transactions *
+            100
           : null,
 
       pairCreatedAt:
@@ -1967,14 +1612,11 @@ async function marketData(
           pair?.pairCreatedAt
         ) || null
     };
-
   } catch (error) {
     return {
       verified: false,
-      status:
-        "DEXSCREENER_ERROR",
-      error:
-        errorString(error)
+      status: "DEXSCREENER_ERROR",
+      error: errorString(error)
     };
   }
 }
@@ -1998,27 +1640,28 @@ async function blockscout(
   }
 
   try {
-    const response =
-      await fetch(
-        BLOCKSCOUT + path,
-        {
-          headers: {
-            accept:
-              "application/json"
-          }
+    const response = await fetch(
+      BLOCKSCOUT + path,
+      {
+        headers: {
+          accept: "application/json"
         }
-      );
+      }
+    );
 
     if (!response.ok) {
       return null;
     }
 
     return await response.json();
-
   } catch {
     return null;
   }
 }
+
+/*
+ * V81 HOLDER INTEGRITY
+ */
 
 function holderPercent(
   value,
@@ -2031,19 +1674,33 @@ function holderPercent(
     const total =
       BigInt(String(supply));
 
-    if (total <= 0n) {
+    if (
+      held < 0n ||
+      total <= 0n ||
+      held > total
+    ) {
       return null;
     }
 
-    return (
+    const percentage =
       Number(
         held *
-        1000000n /
+        100000000n /
         total
       ) /
-      10000
-    );
+      1000000;
 
+    if (
+      !Number.isFinite(
+        percentage
+      ) ||
+      percentage < 0 ||
+      percentage > 100
+    ) {
+      return null;
+    }
+
+    return percentage;
   } catch {
     return null;
   }
@@ -2051,22 +1708,19 @@ function holderPercent(
 
 function extractHolderAddress(item) {
   if (
-    typeof item?.address ===
-    "string"
+    typeof item?.address === "string"
   ) {
     return item.address;
   }
 
   if (
-    typeof item?.address?.hash ===
-    "string"
+    typeof item?.address?.hash === "string"
   ) {
     return item.address.hash;
   }
 
   if (
-    typeof item?.address_hash ===
-    "string"
+    typeof item?.address_hash === "string"
   ) {
     return item.address_hash;
   }
@@ -2074,33 +1728,149 @@ function extractHolderAddress(item) {
   return null;
 }
 
-function unverifiedHolders() {
+function validateHolderIntegrity(
+  rawHolders,
+  totalSupply
+) {
+  let supply;
+
+  try {
+    supply =
+      BigInt(
+        String(totalSupply)
+      );
+  } catch {
+    return {
+      verified: false,
+      status:
+        "INVALID_TOTAL_SUPPLY",
+      impossibleBalanceCount: 0,
+      percentageSum: null,
+      supply:
+        String(totalSupply || ""),
+      topHolderBalanceSum: null
+    };
+  }
+
+  if (supply <= 0n) {
+    return {
+      verified: false,
+      status:
+        "INVALID_TOTAL_SUPPLY",
+      impossibleBalanceCount: 0,
+      percentageSum: null,
+      supply: supply.toString(),
+      topHolderBalanceSum: null
+    };
+  }
+
+  let balanceSum = 0n;
+  let impossibleBalanceCount = 0;
+
+  for (const item of rawHolders) {
+    try {
+      const value =
+        BigInt(
+          String(
+            item?.value ||
+            item?.token?.value ||
+            "0"
+          )
+        );
+
+      if (
+        value < 0n ||
+        value > supply
+      ) {
+        impossibleBalanceCount++;
+        continue;
+      }
+
+      balanceSum += value;
+    } catch {
+      impossibleBalanceCount++;
+    }
+  }
+
+  const percentageSum =
+    Number(
+      balanceSum *
+      100000000n /
+      supply
+    ) /
+    1000000;
+
+  if (impossibleBalanceCount > 0) {
+    return {
+      verified: false,
+      status:
+        "IMPOSSIBLE_HOLDER_BALANCE",
+      impossibleBalanceCount,
+      percentageSum,
+      supply: supply.toString(),
+      topHolderBalanceSum:
+        balanceSum.toString()
+    };
+  }
+
+  if (
+    balanceSum > supply ||
+    percentageSum > 100.000001
+  ) {
+    return {
+      verified: false,
+      status:
+        "TOP_HOLDERS_EXCEED_TOTAL_SUPPLY",
+      impossibleBalanceCount,
+      percentageSum,
+      supply: supply.toString(),
+      topHolderBalanceSum:
+        balanceSum.toString()
+    };
+  }
+
+  return {
+    verified: true,
+    status: "VERIFIED",
+    impossibleBalanceCount: 0,
+    percentageSum,
+    supply: supply.toString(),
+    topHolderBalanceSum:
+      balanceSum.toString()
+  };
+}
+
+function unverifiedHolders(
+  reason = "NOT_VERIFIED"
+) {
   return {
     verified: false,
+    countersVerified: false,
+    concentrationVerified: false,
+
+    integrity: {
+      verified: false,
+      status: reason,
+      impossibleBalanceCount: 0,
+      percentageSum: null,
+      supply: null,
+      topHolderBalanceSum: null
+    },
 
     holderCount: null,
     transferCount: null,
-
     topHolders: [],
-
-    excludedInfrastructure: [],
 
     whale: {
       verified: false,
-
       whaleCount: null,
-
       top1Percent: null,
       top5Percent: null,
       top10Percent: null,
-
       concentrationRisk:
         "UNVERIFIED",
-
       smartMoneyScore: 0,
-
-      smartMoneyCandidate:
-        false
+      smartMoneyCandidate: false
     }
   };
 }
@@ -2118,7 +1888,9 @@ async function holderIntelligence(
       2
     )
   ) {
-    return unverifiedHolders();
+    return unverifiedHolders(
+      "ANALYSIS_BUDGET_OR_SUPPLY_UNAVAILABLE"
+    );
   }
 
   const counters =
@@ -2128,8 +1900,22 @@ async function holderIntelligence(
     );
 
   if (!counters) {
-    return unverifiedHolders();
+    return unverifiedHolders(
+      "BLOCKSCOUT_COUNTERS_UNAVAILABLE"
+    );
   }
+
+  const holderCount =
+    safeNumber(
+      counters?.token_holders_count ??
+      counters?.holders_count
+    );
+
+  const transferCount =
+    safeNumber(
+      counters?.transfers_count ??
+      counters?.token_transfers_count
+    );
 
   const holders =
     await blockscout(
@@ -2137,17 +1923,53 @@ async function holderIntelligence(
       budget
     );
 
-  const items =
-    Array.isArray(
-      holders?.items
-    )
-      ? holders.items.slice(
-          0,
-          20
-        )
-      : [];
+  if (
+    !holders ||
+    !Array.isArray(holders.items)
+  ) {
+    return {
+      verified: true,
+      countersVerified: true,
+      concentrationVerified: false,
 
-  const rawHolders =
+      integrity: {
+        verified: false,
+        status:
+          "BLOCKSCOUT_HOLDERS_UNAVAILABLE",
+        impossibleBalanceCount: 0,
+        percentageSum: null,
+        supply: String(totalSupply),
+        topHolderBalanceSum: null
+      },
+
+      holderCount,
+      transferCount,
+      topHolders: [],
+
+      whale: {
+        verified: false,
+        whaleCount: null,
+        top1Percent: null,
+        top5Percent: null,
+        top10Percent: null,
+        concentrationRisk:
+          "UNVERIFIED",
+        smartMoneyScore: 0,
+        smartMoneyCandidate: false
+      }
+    };
+  }
+
+  const items =
+    holders.items.slice(0, 10);
+
+  const integrity =
+    validateHolderIntegrity(
+      items,
+      totalSupply
+    );
+
+  const topHolders =
     items.map(item => {
       const value =
         String(
@@ -2156,11 +1978,9 @@ async function holderIntelligence(
           "0"
         );
 
-      const address =
-        extractHolderAddress(item);
-
       return {
-        address,
+        address:
+          extractHolderAddress(item),
 
         value,
 
@@ -2172,42 +1992,53 @@ async function holderIntelligence(
       };
     });
 
-  /*
-   * V81 FIX:
-   *
-   * Pool Manager, zero address and burn address
-   * are not interpreted as ordinary whales.
-   */
-  const excludedInfrastructure =
-    rawHolders.filter(
-      holder =>
-        knownInfrastructure(
-          holder.address
-        )
-    );
+  if (!integrity.verified) {
+    return {
+      verified: true,
+      countersVerified: true,
+      concentrationVerified: false,
+      integrity,
+      holderCount,
+      transferCount,
 
-  const topHolders =
-    rawHolders.filter(
-      holder =>
-        !knownInfrastructure(
-          holder.address
-        )
-    );
+      topHolders:
+        topHolders.map(
+          holder => ({
+            ...holder,
+            percentage: null
+          })
+        ),
+
+      whale: {
+        verified: false,
+        whaleCount: null,
+        top1Percent: null,
+        top5Percent: null,
+        top10Percent: null,
+        concentrationRisk:
+          "UNVERIFIED",
+        smartMoneyScore: 0,
+        smartMoneyCandidate: false,
+        reason: integrity.status
+      }
+    };
+  }
 
   const percentages =
     topHolders
-      .map(
-        holder =>
-          holder.percentage
+      .map(holder =>
+        holder.percentage
       )
-      .filter(
-        value =>
-          Number.isFinite(value)
+      .filter(value =>
+        Number.isFinite(value) &&
+        value >= 0 &&
+        value <= 100
       );
 
   const top1 =
-    percentages[0] ??
-    null;
+    percentages.length
+      ? percentages[0]
+      : null;
 
   const top5 =
     percentages
@@ -2225,16 +2056,58 @@ async function holderIntelligence(
         0
       );
 
+  if (
+    top5 > 100.000001 ||
+    top10 > 100.000001
+  ) {
+    return {
+      verified: true,
+      countersVerified: true,
+      concentrationVerified: false,
+
+      integrity: {
+        ...integrity,
+        verified: false,
+        status:
+          "PERCENTAGE_SUM_EXCEEDS_100",
+        percentageSum: top10
+      },
+
+      holderCount,
+      transferCount,
+
+      topHolders:
+        topHolders.map(
+          holder => ({
+            ...holder,
+            percentage: null
+          })
+        ),
+
+      whale: {
+        verified: false,
+        whaleCount: null,
+        top1Percent: null,
+        top5Percent: null,
+        top10Percent: null,
+        concentrationRisk:
+          "UNVERIFIED",
+        smartMoneyScore: 0,
+        smartMoneyCandidate: false,
+        reason:
+          "PERCENTAGE_SUM_EXCEEDS_100"
+      }
+    };
+  }
+
   const whales =
     topHolders.filter(
       holder =>
-        holder.percentage !==
-          null &&
+        holder.percentage !== null &&
         holder.percentage >= 1
     );
 
-  let concentrationRisk =
-    "LOW";
+  let concentrationRisk = "LOW";
 
   if (
     (
@@ -2243,9 +2116,7 @@ async function holderIntelligence(
     ) ||
     top10 >= 80
   ) {
-    concentrationRisk =
-      "HIGH";
-
+    concentrationRisk = "HIGH";
   } else if (
     (
       top1 !== null &&
@@ -2253,8 +2124,7 @@ async function holderIntelligence(
     ) ||
     top10 >= 60
   ) {
-    concentrationRisk =
-      "MEDIUM";
+    concentrationRisk = "MEDIUM";
   }
 
   let smartMoneyScore = 0;
@@ -2281,52 +2151,40 @@ async function holderIntelligence(
     smartMoneyScore += 15;
   }
 
+  if (
+    concentrationRisk === "HIGH"
+  ) {
+    smartMoneyScore =
+      Math.min(
+        smartMoneyScore,
+        25
+      );
+  }
+
+  smartMoneyScore =
+    clamp(
+      smartMoneyScore,
+      0,
+      100
+    );
+
   return {
     verified: true,
-
-    holderCount:
-      safeNumber(
-        counters
-          ?.token_holders_count ??
-        counters
-          ?.holders_count
-      ),
-
-    transferCount:
-      safeNumber(
-        counters
-          ?.transfers_count ??
-        counters
-          ?.token_transfers_count
-      ),
-
+    countersVerified: true,
+    concentrationVerified: true,
+    integrity,
+    holderCount,
+    transferCount,
     topHolders,
 
-    excludedInfrastructure,
-
     whale: {
-      verified:
-        Boolean(holders),
-
-      whaleCount:
-        whales.length,
-
-      top1Percent:
-        top1,
-
-      top5Percent:
-        top5,
-
-      top10Percent:
-        top10,
-
-      concentrationRisk:
-        holders
-          ? concentrationRisk
-          : "UNVERIFIED",
-
+      verified: true,
+      whaleCount: whales.length,
+      top1Percent: top1,
+      top5Percent: top5,
+      top10Percent: top10,
+      concentrationRisk,
       smartMoneyScore,
-
       smartMoneyCandidate:
         smartMoneyScore >= 55
     }
@@ -2356,8 +2214,7 @@ function getHistoricalSnapshot(
   const current = Date.now();
 
   for (
-    let i =
-      snapshots.length - 1;
+    let i = snapshots.length - 1;
     i >= 0;
     i--
   ) {
@@ -2376,8 +2233,7 @@ function getHistoricalSnapshot(
   }
 
   for (
-    let i =
-      snapshots.length - 1;
+    let i = snapshots.length - 1;
     i >= 0;
     i--
   ) {
@@ -2399,87 +2255,89 @@ function getHistoricalSnapshot(
 }
 
 function createSnapshot(candidate) {
+  const concentrationVerified =
+    Boolean(
+      candidate.holders
+        ?.concentrationVerified &&
+      candidate.holders
+        ?.whale?.verified
+    );
+
   return {
     timestamp: Date.now(),
 
     holderCount:
       candidate.holders?.verified
-        ? candidate.holders
-            .holderCount
+        ? candidate.holders.holderCount
         : null,
 
     transferCount:
       candidate.holders?.verified
-        ? candidate.holders
-            .transferCount
+        ? candidate.holders.transferCount
         : null,
 
     liquidityUsd:
       candidate.market?.verified
-        ? candidate.market
-            .liquidityUsd
+        ? candidate.market.liquidityUsd
         : null,
 
     marketCap:
       candidate.market?.verified
-        ? candidate.market
-            .marketCap
+        ? candidate.market.marketCap
         : null,
 
     volumeH1:
       candidate.market?.verified
-        ? candidate.market
-            .volume?.h1
+        ? candidate.market.volume?.h1
         : null,
 
     buysH1:
       candidate.market?.verified
-        ? candidate.market
-            .transactions
+        ? candidate.market.transactions
             ?.h1?.buys
         : null,
 
     sellsH1:
       candidate.market?.verified
-        ? candidate.market
-            .transactions
+        ? candidate.market.transactions
             ?.h1?.sells
         : null,
 
     top1Percent:
-      candidate.holders
-        ?.whale?.verified
-        ? candidate.holders
-            .whale
+      concentrationVerified
+        ? candidate.holders.whale
             .top1Percent
         : null,
 
     top10Percent:
-      candidate.holders
-        ?.whale?.verified
-        ? candidate.holders
-            .whale
+      concentrationVerified
+        ? candidate.holders.whale
             .top10Percent
         : null,
 
     whaleBalances:
-      candidate.holders?.verified
+      concentrationVerified
         ? (
             candidate.holders
               .topHolders || []
-          ).map(
-            holder => ({
-              address:
-                holder.address,
-
-              value:
-                holder.value,
-
+          )
+            .filter(
+              holder =>
+                holder.address &&
+                holder.percentage !== null
+            )
+            .map(holder => ({
+              address: holder.address,
+              value: holder.value,
               percentage:
                 holder.percentage
-            })
-          )
-        : []
+            }))
+        : [],
+
+    holderIntegrity:
+      candidate.holders
+        ?.integrity?.status ||
+      "UNVERIFIED"
   };
 }
 
@@ -2519,4 +2377,369 @@ function saveSnapshot(
 
   state.snapshots[address] =
     snapshots.slice(
-     
+      -MAX_SNAPSHOTS_PER_TOKEN
+    );
+}
+
+/* =========================================================
+   MOMENTUM
+   ========================================================= */
+
+function momentumAnalysis(
+  previous,
+  market,
+  holders
+) {
+  if (!previous) {
+    return {
+      verified: false,
+      score: 0,
+      label: "BUILDING_HISTORY",
+      positiveSignals: 0,
+      reasons: [
+        "Waiting for historical snapshot"
+      ]
+    };
+  }
+
+  const historyAgeMs =
+    Date.now() -
+    safeNumber(previous.timestamp);
+
+  if (
+    historyAgeMs <
+    MOMENTUM_MIN_HISTORY_MS
+  ) {
+    return {
+      verified: false,
+      score: 0,
+      label: "BUILDING_HISTORY",
+      positiveSignals: 0,
+      historyAgeMinutes:
+        historyAgeMs / 60000,
+      reasons: [
+        "Historical snapshot too recent"
+      ]
+    };
+  }
+
+  const holderGrowth =
+    holders?.verified
+      ? percentChange(
+          previous.holderCount,
+          holders.holderCount
+        )
+      : null;
+
+  const transferGrowth =
+    holders?.verified
+      ? percentChange(
+          previous.transferCount,
+          holders.transferCount
+        )
+      : null;
+
+  const liquidityGrowth =
+    market?.verified
+      ? percentChange(
+          previous.liquidityUsd,
+          market.liquidityUsd
+        )
+      : null;
+
+  const volumeGrowth =
+    market?.verified
+      ? percentChange(
+          previous.volumeH1,
+          market.volume?.h1
+        )
+      : null;
+
+  const oldTx =
+    safeNumber(previous.buysH1) +
+    safeNumber(previous.sellsH1);
+
+  const newTx =
+    safeNumber(
+      market?.transactions?.h1?.buys
+    ) +
+    safeNumber(
+      market?.transactions?.h1?.sells
+    );
+
+  const txGrowth =
+    market?.verified
+      ? percentChange(
+          oldTx,
+          newTx
+        )
+      : null;
+
+  let score = 0;
+  let positiveSignals = 0;
+  const reasons = [];
+
+  if (
+    holderGrowth !== null &&
+    holderGrowth > 0
+  ) {
+    positiveSignals++;
+
+    score +=
+      holderGrowth >= 20
+        ? 25
+        : holderGrowth >= 10
+          ? 20
+          : holderGrowth >= 3
+            ? 12
+            : 5;
+
+    reasons.push(
+      `Holder growth ${holderGrowth.toFixed(1)}%`
+    );
+  }
+
+  if (
+    transferGrowth !== null &&
+    transferGrowth > 0
+  ) {
+    positiveSignals++;
+
+    score +=
+      transferGrowth >= 25
+        ? 15
+        : transferGrowth >= 10
+          ? 10
+          : 5;
+
+    reasons.push(
+      `Transfer growth ${transferGrowth.toFixed(1)}%`
+    );
+  }
+
+  if (liquidityGrowth !== null) {
+    if (liquidityGrowth >= 20) {
+      positiveSignals++;
+      score += 18;
+
+      reasons.push(
+        `Liquidity acceleration ${liquidityGrowth.toFixed(1)}%`
+      );
+    } else if (
+      liquidityGrowth >= 5
+    ) {
+      positiveSignals++;
+      score += 10;
+    } else if (
+      liquidityGrowth <= -20
+    ) {
+      score -= 20;
+
+      reasons.push(
+        `Liquidity falling ${liquidityGrowth.toFixed(1)}%`
+      );
+    }
+  }
+
+  if (
+    volumeGrowth !== null &&
+    volumeGrowth > 0
+  ) {
+    positiveSignals++;
+
+    score +=
+      volumeGrowth >= 100
+        ? 22
+        : volumeGrowth >= 30
+          ? 16
+          : volumeGrowth >= 10
+            ? 10
+            : 5;
+
+    reasons.push(
+      `Volume acceleration ${volumeGrowth.toFixed(1)}%`
+    );
+  }
+
+  if (
+    txGrowth !== null &&
+    txGrowth > 0
+  ) {
+    positiveSignals++;
+
+    score +=
+      txGrowth >= 50
+        ? 15
+        : txGrowth >= 15
+          ? 10
+          : 5;
+
+    reasons.push(
+      `Transaction acceleration ${txGrowth.toFixed(1)}%`
+    );
+  }
+
+  if (
+    market?.buyPressure1h !== null &&
+    market?.buyPressure1h >= 60
+  ) {
+    positiveSignals++;
+
+    score +=
+      market.buyPressure1h >= 70
+        ? 12
+        : 7;
+
+    reasons.push(
+      "Positive buy pressure"
+    );
+  }
+
+  if (positiveSignals >= 4) {
+    score += 10;
+
+    reasons.push(
+      "Multi-signal momentum confirmation"
+    );
+  }
+
+  score = clamp(
+    score,
+    0,
+    100
+  );
+
+  return {
+    verified:
+      Boolean(
+        market?.verified ||
+        holders?.verified
+      ),
+
+    score,
+
+    label:
+      score >= 75
+        ? "STRONG"
+        : score >= 50
+          ? "GOOD"
+          : score >= 25
+            ? "EARLY"
+            : "WEAK",
+
+    historyAgeMinutes:
+      historyAgeMs / 60000,
+
+    positiveSignals,
+    holderGrowthPercent:
+      holderGrowth,
+    transferGrowthPercent:
+      transferGrowth,
+    liquidityGrowthPercent:
+      liquidityGrowth,
+    volumeH1GrowthPercent:
+      volumeGrowth,
+    transactionGrowthPercent:
+      txGrowth,
+    reasons
+  };
+}
+
+/* =========================================================
+   WHALE FLOW — V81 INTEGRITY PROTECTED
+   ========================================================= */
+
+function analyseWhaleFlow(
+  previous,
+  holders
+) {
+  if (
+    !previous ||
+    !holders?.verified ||
+    !holders?.concentrationVerified ||
+    !holders?.whale?.verified
+  ) {
+    return {
+      verified: false,
+      flow: "BUILDING_HISTORY",
+      accumulation:
+        "NOT_VERIFIED",
+      distribution:
+        "NOT_VERIFIED",
+      score: 0,
+
+      reasons:
+        holders?.integrity &&
+        holders.integrity.verified ===
+          false
+          ? [
+              `Holder concentration unavailable: ${holders.integrity.status}`
+            ]
+          : []
+    };
+  }
+
+  const previousMap =
+    new Map(
+      (
+        previous.whaleBalances ||
+        []
+      )
+        .filter(
+          holder =>
+            holder.address
+        )
+        .map(holder => [
+          normalize(holder.address),
+          holder
+        ])
+    );
+
+  let increasing = 0;
+  let decreasing = 0;
+  let comparable = 0;
+
+  for (
+    const holder of
+    holders.topHolders || []
+  ) {
+    if (
+      !holder.address ||
+      holder.percentage === null
+    ) {
+      continue;
+    }
+
+    const old =
+      previousMap.get(
+        normalize(holder.address)
+      );
+
+    if (!old) continue;
+
+    try {
+      const oldValue =
+        BigInt(
+          String(old.value || "0")
+        );
+
+      const newValue =
+        BigInt(
+          String(holder.value || "0")
+        );
+
+      comparable++;
+
+      if (newValue > oldValue) {
+        increasing++;
+      }
+
+      if (newValue < oldValue) {
+        decreasing++;
+      }
+    } catch {}
+  }
+
+  let score = 0;
+  const reasons = [];
+  let flow
