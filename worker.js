@@ -4,7 +4,7 @@
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V115:
+ * V116:
  * - Builds directly forward from confirmed V114
  * - Preserves V114 provider-head synchronization and Telegram diagnostics
  * - Preserves V113 provider-aware Initialize locality logic
@@ -16,11 +16,15 @@
  * - NEW: completion state persists market/holder/risk blockers in KV
  * - NEW: completion target clears once enough market+risk evidence exists
  * - NEW: priority-completion telemetry explains the remaining blockers
+ * - V116: aligns fresh-market retry timing with the 5-minute scheduled scanner
+ *        while preserving the 10-minute HTTP-429 cooldown protection
+ * - V116: persists an explicit priority fresh-market reservation/eligibility time
+ * - V116: priority candidate receives the next eligible fresh DexScreener request
  * - Does NOT lower Telegram score, risk, liquidity or confidence thresholds
  * - Preserves discovery, backlog, holder integrity, scoring, rate-limit
  *        protection and Telegram delivery
  */
-const VERSION = "V115";
+const VERSION = "V116";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -201,10 +205,16 @@ const MARKET_STALE_CACHE_MS =
 const DEXSCREENER_429_COOLDOWN_MS =
   10 * 60 * 1000;
 
+/* V116: align the fresh-market guard with the existing ~5-minute
+ * scheduled scanner cadence. HTTP-429 protection remains 10 minutes. */
 const DEXSCREENER_MIN_FRESH_INTERVAL_MS =
-  8 * 60 * 1000;
+  5 * 60 * 1000;
 
 const DEXSCREENER_MAX_FRESH_PER_SCAN = 1;
+
+/* V116 priority fresh-market reservation. */
+const PRIORITY_FRESH_RESERVATION_MAX_AGE_MS =
+  24 * 60 * 60 * 1000;
 
 /* V98: one short initialize-only lookback catches pools created just before the live window. */
 const LIVE_INITIALIZE_LOOKBACK_BLOCKS = 10;
@@ -1191,7 +1201,20 @@ function newState() {
           0,
 
         lastRequestAt:
-          null
+          null,
+
+        priorityFreshReservation: {
+          address:
+            null,
+          reservedAt:
+            null,
+          eligibleAt:
+            null,
+          lastServedAt:
+            null,
+          attempts:
+            0
+        }
       },
 
       discoveryRpc:
@@ -7438,7 +7461,150 @@ function dexService(state) {
         null
     };
 
+  const reservation =
+    state.services.dexscreener.priorityFreshReservation;
+
+  if (
+    !reservation ||
+    typeof reservation !== "object"
+  ) {
+    state.services.dexscreener.priorityFreshReservation = {
+      address: null,
+      reservedAt: null,
+      eligibleAt: null,
+      lastServedAt: null,
+      attempts: 0
+    };
+  }
+
   return state.services.dexscreener;
+}
+
+function priorityFreshSchedule(
+  state,
+  address = null
+) {
+  const service = dexService(state);
+  const reservation =
+    service.priorityFreshReservation || {};
+  const lastRequestAt =
+    safeNumber(service.lastRequestAt);
+  const cooldownUntil =
+    safeNumber(service.cooldownUntil);
+  const intervalEligibleAt =
+    lastRequestAt
+      ? lastRequestAt + DEXSCREENER_MIN_FRESH_INTERVAL_MS
+      : Date.now();
+  const eligibleAt =
+    Math.max(
+      intervalEligibleAt,
+      cooldownUntil || 0
+    );
+  const retryAfterMs =
+    Math.max(0, eligibleAt - Date.now());
+
+  return {
+    enabled: true,
+    address:
+      normalize(address) ||
+      normalize(reservation.address) ||
+      null,
+    reserved: Boolean(reservation.address),
+    reservedAt:
+      safeNumber(reservation.reservedAt) || null,
+    eligibleAt:
+      eligibleAt || null,
+    retryAfterMs,
+    cooldownUntil:
+      cooldownUntil || null,
+    lastRequestAt:
+      lastRequestAt || null
+  };
+}
+
+function reservePriorityFreshMarket(
+  state,
+  address
+) {
+  const normalized = normalize(address);
+  const service = dexService(state);
+  const reservation =
+    service.priorityFreshReservation || {};
+
+  if (!normalized) {
+    service.priorityFreshReservation = {
+      address: null,
+      reservedAt: null,
+      eligibleAt: null,
+      lastServedAt:
+        safeNumber(reservation.lastServedAt) || null,
+      attempts:
+        safeNumber(reservation.attempts)
+    };
+    return;
+  }
+
+  const sameAddress =
+    normalize(reservation.address) === normalized;
+  const firstReservedAt =
+    sameAddress && safeNumber(reservation.reservedAt)
+      ? safeNumber(reservation.reservedAt)
+      : Date.now();
+
+  if (
+    Date.now() - firstReservedAt >
+    PRIORITY_FRESH_RESERVATION_MAX_AGE_MS
+  ) {
+    service.priorityFreshReservation = {
+      address: normalized,
+      reservedAt: Date.now(),
+      eligibleAt:
+        safeNumber(service.lastRequestAt)
+          ? safeNumber(service.lastRequestAt) + DEXSCREENER_MIN_FRESH_INTERVAL_MS
+          : Date.now(),
+      lastServedAt:
+        safeNumber(reservation.lastServedAt) || null,
+      attempts: 0
+    };
+    return;
+  }
+
+  service.priorityFreshReservation = {
+    address: normalized,
+    reservedAt: firstReservedAt,
+    eligibleAt:
+      safeNumber(service.lastRequestAt)
+        ? safeNumber(service.lastRequestAt) + DEXSCREENER_MIN_FRESH_INTERVAL_MS
+        : Date.now(),
+    lastServedAt:
+      safeNumber(reservation.lastServedAt) || null,
+    attempts:
+      safeNumber(reservation.attempts)
+  };
+}
+
+function clearPriorityFreshReservation(
+  state,
+  address
+) {
+  const service = dexService(state);
+  const reservation =
+    service.priorityFreshReservation || {};
+
+  if (
+    !address ||
+    normalize(reservation.address) === normalize(address)
+  ) {
+    service.priorityFreshReservation = {
+      address: null,
+      reservedAt: null,
+      eligibleAt: null,
+      lastServedAt:
+        safeNumber(reservation.lastServedAt) || Date.now(),
+      attempts:
+        safeNumber(reservation.attempts)
+    };
+  }
 }
 
 async function marketData(
@@ -7446,7 +7612,8 @@ async function marketData(
   budget,
   watched,
   state,
-  allowFresh = true
+  allowFresh = true,
+  priority = false
 ) {
   const freshCache =
     cachedMarket(
@@ -7469,6 +7636,13 @@ async function marketData(
     dexService(
       state
     );
+
+  if (priority) {
+    reservePriorityFreshMarket(
+      state,
+      watched?.address || token
+    );
+  }
 
   const cooldownUntil =
     safeNumber(
@@ -7498,7 +7672,12 @@ async function marketData(
         rateLimited:
           true,
 
-        cooldownUntil
+        cooldownUntil,
+        priorityFreshSchedule:
+          priorityFreshSchedule(
+            state,
+            watched?.address || token
+          )
       };
     }
 
@@ -7601,6 +7780,11 @@ async function marketData(
           0,
           DEXSCREENER_MIN_FRESH_INTERVAL_MS -
           sinceLastFreshRequest
+        ),
+      priorityFreshSchedule:
+        priorityFreshSchedule(
+          state,
+          watched?.address || token
         )
     };
   }
@@ -7664,6 +7848,22 @@ async function marketData(
 
   service.lastRequestAt =
     Date.now();
+
+  if (priority) {
+    const reservation =
+      service.priorityFreshReservation || {};
+    service.priorityFreshReservation = {
+      ...reservation,
+      address:
+        normalize(watched?.address || token),
+      lastServedAt:
+        Date.now(),
+      attempts:
+        safeNumber(reservation.attempts) + 1,
+      eligibleAt:
+        Date.now() + DEXSCREENER_MIN_FRESH_INTERVAL_MS
+    };
+  }
 
   try {
     const response =
@@ -13000,6 +13200,9 @@ async function analyzeToken(
         state,
         Boolean(
           options?.marketFreshEligible
+        ),
+        Boolean(
+          options?.priorityCompletion
         )
       );
   }
@@ -13883,6 +14086,19 @@ async function scan(
       marketFreshTarget?.address
     );
 
+  if (marketFreshTargetAddress) {
+    reservePriorityFreshMarket(
+      state,
+      marketFreshTargetAddress
+    );
+  }
+
+  const priorityFreshScheduleTelemetry =
+    priorityFreshSchedule(
+      state,
+      marketFreshTargetAddress
+    );
+
   const priorityCompletionTelemetry = {
     enabled:
       true,
@@ -13909,7 +14125,10 @@ async function scan(
       false,
 
     blockers:
-      []
+      [],
+
+    priorityFreshSchedule:
+      priorityFreshScheduleTelemetry
   };
 
   const combinedLogs = [
@@ -14323,6 +14542,10 @@ async function scan(
     else {
       state.priorityCandidateCompletion =
         null;
+      clearPriorityFreshReservation(
+        state,
+        marketFreshTargetAddress
+      );
     }
   }
 
@@ -14651,7 +14874,7 @@ async function scan(
     status,
 
     scanMode:
-      "V115_V114_CORE_PERSISTENT_PRIORITY_CANDIDATE_COMPLETION_HUNTER",
+      "V116_V115_CORE_PRIORITY_FRESH_SCHEDULER_ALIGNED_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -15143,6 +15366,12 @@ async function scan(
       marketFreshTargetAddress ||
       null,
 
+    priorityFreshMarketSchedule:
+      priorityFreshSchedule(
+        state,
+        marketFreshTargetAddress
+      ),
+
     priorityCandidateCompletion:
       priorityCompletionTelemetry,
 
@@ -15513,12 +15742,23 @@ async function scan(
       telegramThresholdsStillUnchanged:
         "ENABLED_V115",
 
+      schedulerAlignedDexFreshInterval:
+        "ENABLED_V116",
+      persistentPriorityFreshReservation:
+        "ENABLED_V116",
+      priorityFreshEligibilityTelemetry:
+        "ENABLED_V116",
+      priorityCandidateNextFreshRequest:
+        "ENABLED_V116",
+      dexscreener429CooldownPreserved:
+        "ENABLED_V116",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V115_V114_CORE_PERSISTENT_PRIORITY_CANDIDATE_COMPLETION_V77_TELEGRAM_HUNTER",
+      "V116_V115_CORE_PRIORITY_FRESH_SCHEDULER_ALIGNED_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -15834,7 +16074,7 @@ async function health(
     },
 
     architecture:
-      "V115_V114_CORE_PERSISTENT_PRIORITY_CANDIDATE_COMPLETION_V77_TELEGRAM_HUNTER",
+      "V116_V115_CORE_PRIORITY_FRESH_SCHEDULER_ALIGNED_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -16233,7 +16473,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V115_V114_CORE_PERSISTENT_PRIORITY_CANDIDATE_COMPLETION_V77_TELEGRAM_HUNTER",
+      "V116_V115_CORE_PRIORITY_FRESH_SCHEDULER_ALIGNED_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -16662,7 +16902,7 @@ export default {
             ),
 
           architecture:
-            "V115_V114_CORE_PERSISTENT_PRIORITY_CANDIDATE_COMPLETION_V77_TELEGRAM_HUNTER",
+            "V116_V115_CORE_PRIORITY_FRESH_SCHEDULER_ALIGNED_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
