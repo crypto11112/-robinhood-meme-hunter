@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V97
+ * V98
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -16,7 +16,7 @@
  * - Cleans current runtime V95 scan/architecture labels without changing the persistent STATE_KEY
  */
 
-const VERSION = "V97";
+const VERSION = "V98";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -192,9 +192,12 @@ const DEXSCREENER_429_COOLDOWN_MS =
   10 * 60 * 1000;
 
 const DEXSCREENER_MIN_FRESH_INTERVAL_MS =
-  90 * 1000;
+  5 * 60 * 1000;
 
 const DEXSCREENER_MAX_FRESH_PER_SCAN = 1;
+
+/* V98: one short initialize-only lookback catches pools created just before the live window. */
+const LIVE_INITIALIZE_LOOKBACK_BLOCKS = 10;
 
 /* =========================================================
    WATCHLIST
@@ -3363,6 +3366,59 @@ async function scanBacklogSequential(
 }
 
 /* =========================================================
+   V98 TARGETED INITIALIZE LOOKBACK
+   ========================================================= */
+
+async function getInitializeLookback(
+  env,
+  state,
+  from,
+  to,
+  budget
+) {
+  if (from > to || !budgetAvailable(budget, "discovery-live")) {
+    return { logs: [], provider: null, error: null };
+  }
+
+  const preferred = ["ROBINHOOD_PUBLIC_RPC", "ALCHEMY"];
+
+  for (const provider of preferred) {
+    if (discoveryProviderCooling(state, provider)) continue;
+
+    const url = rpcProviderUrl(env, provider);
+    if (!url) continue;
+
+    try {
+      const logs = await rpcCall(
+        url,
+        "eth_getLogs",
+        [{
+          fromBlock: "0x" + from.toString(16),
+          toBlock: "0x" + to.toString(16),
+          address: POOL_MANAGER,
+          topics: [INITIALIZE_TOPIC]
+        }],
+        budget,
+        "discovery-live"
+      );
+
+      return {
+        logs: Array.isArray(logs) ? logs : [],
+        provider,
+        error: null
+      };
+    } catch (error) {
+      const message = String(error?.message || error);
+      if (message.includes("429")) {
+        /* provider cooldown is already handled by the normal discovery path */
+      }
+    }
+  }
+
+  return { logs: [], provider: null, error: "LOOKBACK_UNAVAILABLE" };
+}
+
+/* =========================================================
    V4 DECODING
    ========================================================= */
 
@@ -4853,7 +4909,13 @@ async function marketData(
        * absent from one route, so use the second documented
        * route before declaring NO_MARKET_FOUND.
        */
+      /*
+       * V98: do NOT immediately fire the second DexScreener route after
+       * a zero-result first route. Back-to-back route calls were a major
+       * source of 429s. The short V96 negative cache lets a later scan retry.
+       */
       if (
+        false &&
         consumeBudget(
           budget,
           "analysis",
@@ -10155,6 +10217,51 @@ async function scan(
     );
   }
 
+  /*
+   * V98: a pool can be active in the 20-block live window while its
+   * Initialize event sits just outside that window. Fetch one cheap,
+   * initialize-only lookback range and register those mappings before
+   * classifying live swaps as unknown.
+   */
+  let liveInitializeLookback = {
+    attempted: false,
+    fromBlock: null,
+    toBlock: null,
+    logs: 0,
+    initializeEvents: 0,
+    provider: null,
+    error: null
+  };
+
+  if (live.from > 0n) {
+    const lookbackTo = live.from - 1n;
+    const lookbackFrom =
+      lookbackTo >= BigInt(LIVE_INITIALIZE_LOOKBACK_BLOCKS - 1)
+        ? lookbackTo - BigInt(LIVE_INITIALIZE_LOOKBACK_BLOCKS - 1)
+        : 0n;
+
+    const lookback = await getInitializeLookback(
+      env, state, lookbackFrom, lookbackTo, budget
+    );
+
+    liveInitializeLookback = {
+      attempted: true,
+      fromBlock: Number(lookbackFrom),
+      toBlock: Number(lookbackTo),
+      logs: lookback.logs.length,
+      initializeEvents: 0,
+      provider: lookback.provider,
+      error: lookback.error
+    };
+
+    for (const log of lookback.logs) {
+      const pool = decodeInitialize(log);
+      if (!pool) continue;
+      registerPoolMapping(state, pool);
+      liveInitializeLookback.initializeEvents++;
+    }
+  }
+
   const liveActivity =
     activeTokensFromLogs(
       state,
@@ -10952,7 +11059,7 @@ async function scan(
     status,
 
     scanMode:
-      "V97_V96_CORE_HOLDER_ROW_RECONCILIATION_INTEGRITY_GUARD_HUNTER",
+      "V98_V97_CORE_LIVE_INITIALIZE_LOOKBACK_DEX_BURST_GUARD_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -11195,6 +11302,8 @@ async function scan(
         unknownPoolCount:
           liveActivity
             .unknownPoolIds.size,
+        initializeLookback:
+          liveInitializeLookback,
 
         unknownSwapEvents:
           liveActivity
@@ -11544,12 +11653,16 @@ async function scan(
       dexscreenerSecondTokenRoute:
         "ENABLED_V96",
 
+      liveInitializeLookback:
+        "ENABLED_V98",
+      dexscreenerBurstSuppression:
+        "ENABLED_V98",
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V97_V96_CORE_HOLDER_ROW_RECONCILIATION_INTEGRITY_GUARD_V77_TELEGRAM_HUNTER",
+      "V98_V97_CORE_LIVE_INITIALIZE_LOOKBACK_DEX_BURST_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -11865,7 +11978,7 @@ async function health(
     },
 
     architecture:
-      "V97_V96_CORE_HOLDER_ROW_RECONCILIATION_INTEGRITY_GUARD_V77_TELEGRAM_HUNTER",
+      "V98_V97_CORE_LIVE_INITIALIZE_LOOKBACK_DEX_BURST_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -12259,7 +12372,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V97_V96_CORE_HOLDER_ROW_RECONCILIATION_INTEGRITY_GUARD_V77_TELEGRAM_HUNTER",
+      "V98_V97_CORE_LIVE_INITIALIZE_LOOKBACK_DEX_BURST_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -12688,7 +12801,7 @@ export default {
             ),
 
           architecture:
-            "V97_V96_CORE_HOLDER_ROW_RECONCILIATION_INTEGRITY_GUARD_V77_TELEGRAM_HUNTER",
+            "V98_V97_CORE_LIVE_INITIALIZE_LOOKBACK_DEX_BURST_GUARD_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
