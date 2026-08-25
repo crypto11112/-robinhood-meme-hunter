@@ -1,26 +1,27 @@
 /**
  * Robinhood Chain Meme Hunter
- * V101
+ * V102
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V101:
- * - Builds directly forward from the confirmed V100 baseline
+ * V102:
+ * - Builds directly forward from the confirmed V101 baseline
  * - Preserves the existing KV state key/history
- * - Preserves V100 persistent unknown-pool tracking/search cursors
+ * - Preserves V101 targeted unknown-pool resolution priority
+ * - Preserves V100 persistent unknown-pool tracker/search cursors
  * - Preserves V99 5m/1h/24h trade-count Telegram section
  * - Preserves strict UNVERIFIED directional USD handling
- * - Preserves V98 DexScreener protection
- * - Preserves V97 holder integrity/reconciliation
- * - Preserves V77-style spaced Telegram alerts + token-image/sendPhoto fallback
- * - NEW: prioritises targeted unknown-pool resolution over low-value blanket lookback
- * - NEW: increases targeted resolver capacity from 2 to 3 successful probes/run
- * - NEW: avoids spending a live-discovery request on blanket Initialize lookback
- *        when several unresolved active pools already exist
- * - NEW: preserves the blanket lookback for quiet/small-unknown-pool windows
- * - NEW: explicit resolution-budget telemetry
+ * - Preserves V98/V97 market + holder safety protections
+ * - Preserves V77-style Telegram layout and token-image/sendPhoto fallback
+ * - NEW: fair unresolved-pool rotation so old pools cannot starve
+ * - NEW: adaptive exact-pool Initialize windows: 10 -> 20 -> 40 blocks
+ * - NEW: adaptive window telemetry per probe
+ * - NEW: successful empty searches advance by the full adaptive window
+ * - NEW: failed provider searches do not advance the persistent cursor
+ * - NEW: DexScreener global fresh spacing increased to 8 minutes
+ * - NEW: preserves verified 9-minute cache so market freshness remains efficient
  */
-const VERSION = "V101";
+const VERSION = "V102";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -196,7 +197,7 @@ const DEXSCREENER_429_COOLDOWN_MS =
   10 * 60 * 1000;
 
 const DEXSCREENER_MIN_FRESH_INTERVAL_MS =
-  5 * 60 * 1000;
+  8 * 60 * 1000;
 
 const DEXSCREENER_MAX_FRESH_PER_SCAN = 1;
 
@@ -205,6 +206,7 @@ const LIVE_INITIALIZE_LOOKBACK_BLOCKS = 10;
 
 /* V100 persistent unknown-pool resolver */
 const UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS = 10;
+const UNKNOWN_POOL_SEARCH_MAX_CHUNK_BLOCKS = 40;
 const UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN = 3;
 const UNKNOWN_POOL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_UNKNOWN_POOL_TRACKER = 500;
@@ -2177,24 +2179,68 @@ async function resolvePersistentUnknownPools(
         );
       })
       .sort((a, b) => {
-        const recent =
+        /*
+         * V102 FAIR ROTATION
+         *
+         * Never-attempted pools go first. After that, the pool that
+         * has waited longest since its previous probe gets priority.
+         * This prevents continuously-active/new pools from starving
+         * older unresolved pools forever.
+         */
+        const aAttemptAt =
           safeNumber(
-            b?.lastSeenAt
-          ) -
-          safeNumber(
-            a?.lastSeenAt
+            a?.lastAttemptAt
           );
 
-        if (recent !== 0) {
-          return recent;
+        const bAttemptAt =
+          safeNumber(
+            b?.lastAttemptAt
+          );
+
+        if (
+          !aAttemptAt &&
+          bAttemptAt
+        ) {
+          return -1;
         }
 
-        return (
+        if (
+          aAttemptAt &&
+          !bAttemptAt
+        ) {
+          return 1;
+        }
+
+        if (
+          aAttemptAt !==
+          bAttemptAt
+        ) {
+          return (
+            aAttemptAt -
+            bAttemptAt
+          );
+        }
+
+        const attemptDiff =
           safeNumber(
             a?.attempts
           ) -
           safeNumber(
             b?.attempts
+          );
+
+        if (
+          attemptDiff !== 0
+        ) {
+          return attemptDiff;
+        }
+
+        return (
+          safeNumber(
+            b?.lastSeenAt
+          ) -
+          safeNumber(
+            a?.lastSeenAt
           )
         );
       });
@@ -2251,9 +2297,27 @@ async function resolvePersistentUnknownPools(
         cursor
       );
 
+    const priorAttempts =
+      safeNumber(
+        entry.attempts
+      );
+
+    const adaptiveChunkBlocks =
+      Math.min(
+        UNKNOWN_POOL_SEARCH_MAX_CHUNK_BLOCKS,
+        UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS *
+          (
+            priorAttempts <= 0
+              ? 1
+              : priorAttempts === 1
+                ? 2
+                : 4
+          )
+      );
+
     const span =
       BigInt(
-        UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS -
+        adaptiveChunkBlocks -
         1
       );
 
@@ -2335,6 +2399,14 @@ async function resolvePersistentUnknownPools(
         Number(from),
       toBlock:
         Number(to),
+      requestedBlocks:
+        Number(
+          to -
+          from +
+          1n
+        ),
+      adaptiveChunkBlocks,
+      priorAttempts,
       provider:
         result.provider,
       logs:
@@ -2401,7 +2473,7 @@ async function resolvePersistentUnknownPools(
 
     /*
      * Do not advance after a provider error. Successful empty ranges
-     * advance ten blocks backwards and continue on future runs.
+     * advance by the complete adaptive window and continue next run.
      */
     if (
       !result.error
@@ -11897,7 +11969,7 @@ async function scan(
     status,
 
     scanMode:
-      "V101_V100_CORE_ACCELERATED_UNKNOWN_POOL_RESOLUTION_HUNTER",
+      "V102_V101_CORE_FAIR_DEEP_UNKNOWN_POOL_RESOLUTION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -12534,12 +12606,24 @@ async function scan(
       adaptiveInitializeLookbackPriority:
         "ENABLED_V101",
 
+      fairUnknownPoolRotation:
+        "ENABLED_V102",
+
+      adaptiveUnknownPoolSearchWindows:
+        "ENABLED_V102",
+
+      maxUnknownPoolSearchChunkBlocks:
+        UNKNOWN_POOL_SEARCH_MAX_CHUNK_BLOCKS,
+
+      dexscreenerFreshSpacingMs:
+        DEXSCREENER_MIN_FRESH_INTERVAL_MS,
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V101_V100_CORE_ACCELERATED_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V102_V101_CORE_FAIR_DEEP_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -12855,7 +12939,7 @@ async function health(
     },
 
     architecture:
-      "V101_V100_CORE_ACCELERATED_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V102_V101_CORE_FAIR_DEEP_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -13254,7 +13338,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V101_V100_CORE_ACCELERATED_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V102_V101_CORE_FAIR_DEEP_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -13683,7 +13767,7 @@ export default {
             ),
 
           architecture:
-            "V101_V100_CORE_ACCELERATED_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+            "V102_V101_CORE_FAIR_DEEP_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
