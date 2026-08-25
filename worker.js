@@ -1,38 +1,33 @@
 /**
  * Robinhood Chain Meme Hunter
- * V82
+ * V83
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V82:
- * - Preserves V81 live-first architecture
+ * V83:
+ * - Preserves V82 live-first architecture
  * - Preserves existing KV state key
- * - FIX: fresh ERC20 verification reserves the real 5-request cost
- * - FIX: analysis-budget deferrals are retried instead of treated as failures
- * - FIX: Telegram requests now count inside hard request budget
- * - FIX: live swaps/liquidity activity promotes already-watched tokens
- * - FIX: partial backlog progress can safely advance without losing discoveries
- * - FIX: successful partial discovery logs are processed before cursor advance
- * - FIX: safer Blockscout holder-value extraction
- * - FIX: watchlist pruning no longer removes candidates before priority sorting
- * - Preserves V81 holder-integrity protection
- * - Rejects holder totals > total supply
- * - Separates holder counters from concentration verification
- * - Prevents corrupt holder data affecting risk/smart-money/whale flow
- * - True live-first scanning
- * - Persistent historical catch-up
- * - Uniswap V4 discovery
- * - ERC20 verification
- * - DexScreener intelligence
- * - Blockscout intelligence
- * - Momentum snapshots
- * - Whale flow
- * - Candidate scoring
- * - Telegram alerts
- * - Hard request-budget isolation
+ * - FIX: replaces huge recursive backlog scan with small sequential chunks
+ * - FIX: backlog cursor now advances every successful small chunk
+ * - FIX: prevents backlog request-budget lock-up
+ * - FIX: Alchemy-first RPC for analysis/log workloads when configured
+ * - FIX: removes repeated public->Alchemy request doubling
+ * - FIX: fallback-aware token analysis budgeting
+ * - FIX: Blockscout counters failure no longer kills holder analysis
+ * - FIX: Blockscout token-details fallback for holder counters
+ * - FIX: holder concentration can remain usable without counters
+ * - FIX: scheduled 5-minute cron heartbeat stored in KV
+ * - FIX: scheduled run count + last run exposed in /health and /state
+ * - FIX: unknown live V4 pool IDs exposed for discovery diagnostics
+ * - FIX: smarter watchlist retention and invalid-token penalties
+ * - Preserves holder-integrity protection
+ * - Preserves momentum snapshots
+ * - Preserves whale-flow tracking
+ * - Preserves scoring / Telegram thresholds
+ * - Preserves hard request-budget isolation
  */
 
-const VERSION = "V82";
+const VERSION = "V83";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -50,7 +45,7 @@ const ZERO =
 
 /*
  * IMPORTANT:
- * Preserve existing V69-V81 state.
+ * Preserve existing V69-V82 state.
  */
 const STATE_KEY =
   "robinhood-meme-hunter-v69-state";
@@ -87,74 +82,100 @@ const MODIFY_LIQUIDITY_TOPIC =
   "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec";
 
 /* =========================================================
-   SCANNING
+   SCANNING — V83
    ========================================================= */
 
 const LIVE_SCAN_BLOCKS = 20;
-const CATCHUP_TARGET_BLOCKS = 2000;
+
+/*
+ * V83:
+ * Stop attempting 2,000-block backlog ranges.
+ *
+ * Robinhood RPC behaviour observed in V82 showed those large
+ * ranges could consume the entire backlog request allowance
+ * before completing even one safe range.
+ *
+ * Backlog is now processed sequentially in small 10-block
+ * chunks. Every successful chunk moves the cursor.
+ */
+const BACKLOG_CHUNK_BLOCKS = 10;
+const BACKLOG_MAX_CHUNKS_PER_SCAN = 5;
+
 const MIN_LOG_RANGE = 10;
 
 /* =========================================================
-   HARD REQUEST BUDGET — V82
+   HARD REQUEST BUDGET — V83
    ========================================================= */
 
 /*
  * 2 system
- * 21 discovery
- * 17 analysis
+ * 17 discovery
+ * 21 analysis
  * 2 notification
  * ----------------
- * 42 hard maximum
+ * 42 maximum
  */
 
 const MAX_EXTERNAL_REQUESTS = 42;
 
 const SYSTEM_REQUEST_LIMIT = 2;
 
-const DISCOVERY_REQUEST_LIMIT = 21;
+const DISCOVERY_REQUEST_LIMIT = 17;
 const LIVE_DISCOVERY_REQUEST_LIMIT = 8;
-const BACKLOG_DISCOVERY_REQUEST_LIMIT = 13;
+const BACKLOG_DISCOVERY_REQUEST_LIMIT = 9;
 
-const ANALYSIS_REQUEST_LIMIT = 17;
+const ANALYSIS_REQUEST_LIMIT = 21;
 const NOTIFICATION_REQUEST_LIMIT = 2;
 
 /*
- * Fresh verification worst-case:
- *   eth_getCode
- *   name()
- *   symbol()
- *   decimals()
- *   totalSupply()
- * = 5 RPC requests
+ * Alchemy-first analysis:
  *
- * Full fresh intelligence:
- *   5 ERC20
+ * Fresh:
+ *   5 ERC20 RPC
  *   1 DexScreener
- *   2 Blockscout
- * = 8 requests
+ *   2 Blockscout normal
+ *   +1 Blockscout fallback allowance
+ * = 9
+ *
+ * Cached:
+ *   1 DexScreener
+ *   2 Blockscout normal
+ *   +1 fallback
+ * = 4
+ *
+ * Without Alchemy we reserve more because RPC fallback can
+ * cause additional requests.
  */
-const FRESH_TOKEN_FULL_ANALYSIS_COST = 8;
-const CACHED_TOKEN_FULL_ANALYSIS_COST = 3;
+const FRESH_ANALYSIS_COST_ALCHEMY = 9;
+const FRESH_ANALYSIS_COST_FALLBACK = 14;
+
+const CACHED_ANALYSIS_COST = 4;
 
 /* =========================================================
    ANALYSIS
    ========================================================= */
 
 const MAX_TOKEN_CHECKS = 4;
-const METADATA_REUSE_MS = 30 * 60 * 1000;
+
+const METADATA_REUSE_MS =
+  30 * 60 * 1000;
 
 /* =========================================================
    WATCHLIST
    ========================================================= */
 
-const WATCH_MAX_AGE = 12 * 60 * 60 * 1000;
+const WATCH_MAX_AGE =
+  12 * 60 * 60 * 1000;
+
 const MAX_WATCHED_TOKENS = 50;
 
 /* =========================================================
    TELEGRAM
    ========================================================= */
 
-const ALERT_COOLDOWN = 6 * 60 * 60 * 1000;
+const ALERT_COOLDOWN =
+  6 * 60 * 60 * 1000;
+
 const MIN_ALERT_SCORE = 60;
 const MAX_ALERT_RISK = 59;
 const MIN_ALERT_LIQUIDITY = 1000;
@@ -165,10 +186,18 @@ const MIN_CONFIDENCE_ALERT = 55;
    ========================================================= */
 
 const MAX_SNAPSHOTS_PER_TOKEN = 24;
-const SNAPSHOT_MAX_AGE = 24 * 60 * 60 * 1000;
-const MIN_SNAPSHOT_INTERVAL = 2 * 60 * 1000;
-const MOMENTUM_MIN_HISTORY_MS = 5 * 60 * 1000;
-const MOMENTUM_IDEAL_HISTORY_MS = 15 * 60 * 1000;
+
+const SNAPSHOT_MAX_AGE =
+  24 * 60 * 60 * 1000;
+
+const MIN_SNAPSHOT_INTERVAL =
+  2 * 60 * 1000;
+
+const MOMENTUM_MIN_HISTORY_MS =
+  5 * 60 * 1000;
+
+const MOMENTUM_IDEAL_HISTORY_MS =
+  15 * 60 * 1000;
 
 /* =========================================================
    HELPERS
@@ -184,7 +213,10 @@ function safeNumber(value) {
 }
 
 function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
+  return Math.max(
+    min,
+    Math.min(max, value)
+  );
 }
 
 function normalize(value) {
@@ -192,103 +224,156 @@ function normalize(value) {
 }
 
 function isAddress(value) {
-  return /^0x[a-fA-F0-9]{40}$/.test(String(value || ""));
+  return /^0x[a-fA-F0-9]{40}$/.test(
+    String(value || "")
+  );
 }
 
 function errorString(error) {
-  return String(error?.message || error || "UNKNOWN_ERROR");
+  return String(
+    error?.message ||
+    error ||
+    "UNKNOWN_ERROR"
+  );
 }
 
 function topicAddress(topic) {
   const value = String(topic || "");
 
-  if (!/^0x[a-fA-F0-9]{64}$/.test(value)) {
+  if (
+    !/^0x[a-fA-F0-9]{64}$/.test(value)
+  ) {
     return null;
   }
 
-  return ("0x" + value.slice(-40)).toLowerCase();
+  return (
+    "0x" +
+    value.slice(-40)
+  ).toLowerCase();
 }
 
 function knownQuote(address) {
-  return KNOWN_QUOTES.has(normalize(address));
+  return KNOWN_QUOTES.has(
+    normalize(address)
+  );
 }
 
-function knownQuoteMetadata(address, symbol) {
-  if (knownQuote(address)) return true;
+function knownQuoteMetadata(
+  address,
+  symbol
+) {
+  if (knownQuote(address)) {
+    return true;
+  }
 
   return KNOWN_QUOTE_SYMBOLS.has(
     String(symbol || "").toUpperCase()
   );
 }
 
-function percentChange(previous, current) {
+function percentChange(
+  previous,
+  current
+) {
   const a = safeNumber(previous);
   const b = safeNumber(current);
 
-  if (a <= 0) return null;
+  if (a <= 0) {
+    return null;
+  }
 
   return ((b - a) / a) * 100;
 }
 
-function uniqueBy(array, keyFunction) {
+function uniqueBy(
+  array,
+  keyFunction
+) {
   const map = new Map();
 
   for (const item of array) {
-    const key = keyFunction(item);
-    if (!key) continue;
+    const key =
+      keyFunction(item);
+
+    if (!key) {
+      continue;
+    }
+
     map.set(key, item);
   }
 
-  return Array.from(map.values());
+  return Array.from(
+    map.values()
+  );
 }
 
-function jsonResponse(data, status = 200) {
+function jsonResponse(
+  data,
+  status = 200
+) {
   return new Response(
-    JSON.stringify(data, null, 2),
+    JSON.stringify(
+      data,
+      null,
+      2
+    ),
     {
       status,
+
       headers: {
-        "content-type": "application/json; charset=utf-8",
-        "cache-control": "no-store",
-        "access-control-allow-origin": "*"
+        "content-type":
+          "application/json; charset=utf-8",
+
+        "cache-control":
+          "no-store",
+
+        "access-control-allow-origin":
+          "*"
       }
     }
   );
 }
 
 /* =========================================================
-   REQUEST BUDGET — V82
+   REQUEST BUDGET
    ========================================================= */
 
 function createBudget() {
   return {
     totalUsed: 0,
-    totalLimit: MAX_EXTERNAL_REQUESTS,
+    totalLimit:
+      MAX_EXTERNAL_REQUESTS,
 
     system: {
       used: 0,
-      limit: SYSTEM_REQUEST_LIMIT
+      limit:
+        SYSTEM_REQUEST_LIMIT
     },
 
     discovery: {
       used: 0,
-      limit: DISCOVERY_REQUEST_LIMIT,
+      limit:
+        DISCOVERY_REQUEST_LIMIT,
 
       liveUsed: 0,
-      liveLimit: LIVE_DISCOVERY_REQUEST_LIMIT,
+      liveLimit:
+        LIVE_DISCOVERY_REQUEST_LIMIT,
 
       backlogUsed: 0,
-      backlogLimit: BACKLOG_DISCOVERY_REQUEST_LIMIT
+      backlogLimit:
+        BACKLOG_DISCOVERY_REQUEST_LIMIT
     },
 
     analysis: {
       used: 0,
-      limit: ANALYSIS_REQUEST_LIMIT
+      limit:
+        ANALYSIS_REQUEST_LIMIT
     },
 
     notification: {
       used: 0,
-      limit: NOTIFICATION_REQUEST_LIMIT
+      limit:
+        NOTIFICATION_REQUEST_LIMIT
     },
 
     skipped: []
@@ -309,39 +394,55 @@ function budgetAvailable(
 
   if (phase === "system") {
     return (
-      budget.system.used + amount <=
+      budget.system.used +
+        amount <=
       budget.system.limit
     );
   }
 
   if (phase === "analysis") {
     return (
-      budget.analysis.used + amount <=
+      budget.analysis.used +
+        amount <=
       budget.analysis.limit
     );
   }
 
-  if (phase === "notification") {
+  if (
+    phase === "notification"
+  ) {
     return (
-      budget.notification.used + amount <=
+      budget.notification.used +
+        amount <=
       budget.notification.limit
     );
   }
 
-  if (phase === "discovery-live") {
+  if (
+    phase === "discovery-live"
+  ) {
     return (
-      budget.discovery.used + amount <=
+      budget.discovery.used +
+          amount <=
         budget.discovery.limit &&
-      budget.discovery.liveUsed + amount <=
+
+      budget.discovery.liveUsed +
+          amount <=
         budget.discovery.liveLimit
     );
   }
 
-  if (phase === "discovery-backlog") {
+  if (
+    phase ===
+    "discovery-backlog"
+  ) {
     return (
-      budget.discovery.used + amount <=
+      budget.discovery.used +
+          amount <=
         budget.discovery.limit &&
-      budget.discovery.backlogUsed + amount <=
+
+      budget.discovery.backlogUsed +
+          amount <=
         budget.discovery.backlogLimit
     );
   }
@@ -366,7 +467,8 @@ function consumeBudget(
       phase,
       type,
       amount,
-      reason: "PHASE_BUDGET_EXHAUSTED"
+      reason:
+        "PHASE_BUDGET_EXHAUSTED"
     });
 
     return false;
@@ -376,16 +478,37 @@ function consumeBudget(
 
   if (phase === "system") {
     budget.system.used += amount;
-  } else if (phase === "analysis") {
+  }
+
+  else if (
+    phase === "analysis"
+  ) {
     budget.analysis.used += amount;
-  } else if (phase === "notification") {
-    budget.notification.used += amount;
-  } else if (phase === "discovery-live") {
+  }
+
+  else if (
+    phase === "notification"
+  ) {
+    budget.notification.used +=
+      amount;
+  }
+
+  else if (
+    phase === "discovery-live"
+  ) {
     budget.discovery.used += amount;
-    budget.discovery.liveUsed += amount;
-  } else if (phase === "discovery-backlog") {
+    budget.discovery.liveUsed +=
+      amount;
+  }
+
+  else if (
+    phase ===
+    "discovery-backlog"
+  ) {
     budget.discovery.used += amount;
-    budget.discovery.backlogUsed += amount;
+
+    budget.discovery.backlogUsed +=
+      amount;
   }
 
   return true;
@@ -393,8 +516,12 @@ function consumeBudget(
 
 function budgetTelemetry(budget) {
   return {
-    used: budget.totalUsed,
-    limit: budget.totalLimit,
+    used:
+      budget.totalUsed,
+
+    limit:
+      budget.totalLimit,
+
     remaining:
       Math.max(
         0,
@@ -403,8 +530,12 @@ function budgetTelemetry(budget) {
       ),
 
     system: {
-      used: budget.system.used,
-      limit: budget.system.limit,
+      used:
+        budget.system.used,
+
+      limit:
+        budget.system.limit,
+
       remaining:
         Math.max(
           0,
@@ -414,8 +545,11 @@ function budgetTelemetry(budget) {
     },
 
     discovery: {
-      used: budget.discovery.used,
-      limit: budget.discovery.limit,
+      used:
+        budget.discovery.used,
+
+      limit:
+        budget.discovery.limit,
 
       remaining:
         Math.max(
@@ -456,8 +590,11 @@ function budgetTelemetry(budget) {
     },
 
     analysis: {
-      used: budget.analysis.used,
-      limit: budget.analysis.limit,
+      used:
+        budget.analysis.used,
+
+      limit:
+        budget.analysis.limit,
 
       remaining:
         Math.max(
@@ -489,7 +626,9 @@ function budgetTelemetry(budget) {
     hardPhaseIsolation: true,
     liveFirstIsolation: true,
     telegramBudgeted: true,
-    skipped: budget.skipped
+
+    skipped:
+      budget.skipped
   };
 }
 
@@ -500,23 +639,33 @@ function budgetTelemetry(budget) {
 function getKV(env) {
   if (
     env.MEME_HUNTER_STATE &&
-    typeof env.MEME_HUNTER_STATE.get === "function" &&
-    typeof env.MEME_HUNTER_STATE.put === "function"
+    typeof env.MEME_HUNTER_STATE.get ===
+      "function" &&
+    typeof env.MEME_HUNTER_STATE.put ===
+      "function"
   ) {
     return {
-      kv: env.MEME_HUNTER_STATE,
-      binding: "MEME_HUNTER_STATE"
+      kv:
+        env.MEME_HUNTER_STATE,
+
+      binding:
+        "MEME_HUNTER_STATE"
     };
   }
 
   if (
     env.KV_BINDING &&
-    typeof env.KV_BINDING.get === "function" &&
-    typeof env.KV_BINDING.put === "function"
+    typeof env.KV_BINDING.get ===
+      "function" &&
+    typeof env.KV_BINDING.put ===
+      "function"
   ) {
     return {
-      kv: env.KV_BINDING,
-      binding: "KV_BINDING"
+      kv:
+        env.KV_BINDING,
+
+      binding:
+        "KV_BINDING"
     };
   }
 
@@ -528,23 +677,48 @@ function getKV(env) {
 
 function newState() {
   return {
-    version: VERSION,
+    version:
+      VERSION,
 
-    lastScannedBlock: null,
-    lastLiveScannedBlock: null,
+    lastScannedBlock:
+      null,
+
+    lastLiveScannedBlock:
+      null,
 
     watchedTokens: [],
     alerts: {},
     snapshots: {},
 
-    createdAt: now(),
-    updatedAt: now()
+    scheduler: {
+      scheduledRunCount: 0,
+
+      lastScheduledRunAt:
+        null,
+
+      lastScheduledSuccessAt:
+        null,
+
+      lastScheduledStatus:
+        null,
+
+      lastScheduledLatestBlock:
+        null
+    },
+
+    createdAt:
+      now(),
+
+    updatedAt:
+      now()
   };
 }
 
 async function readState(env) {
-  const { kv, binding } =
-    getKV(env);
+  const {
+    kv,
+    binding
+  } = getKV(env);
 
   if (!kv) {
     return {
@@ -557,7 +731,9 @@ async function readState(env) {
 
   try {
     const raw =
-      await kv.get(STATE_KEY);
+      await kv.get(
+        STATE_KEY
+      );
 
     if (!raw) {
       return {
@@ -580,7 +756,9 @@ async function readState(env) {
     ) {
       watchedTokens =
         parsed.watchedTokens;
-    } else if (
+    }
+
+    else if (
       parsed.watchedTokens &&
       typeof parsed.watchedTokens ===
         "object"
@@ -613,17 +791,33 @@ async function readState(env) {
           typeof parsed.snapshots ===
             "object"
             ? parsed.snapshots
-            : {}
+            : {},
+
+        scheduler: {
+          ...newState().scheduler,
+
+          ...(
+            parsed.scheduler &&
+            typeof parsed.scheduler ===
+              "object"
+              ? parsed.scheduler
+              : {}
+          )
+        }
       },
 
       error: null
     };
-  } catch (error) {
+  }
+
+  catch (error) {
     return {
       persistent: true,
       binding,
       state: newState(),
-      error: errorString(error)
+
+      error:
+        errorString(error)
     };
   }
 }
@@ -632,20 +826,27 @@ async function writeState(
   env,
   state
 ) {
-  const { kv, binding } =
-    getKV(env);
+  const {
+    kv,
+    binding
+  } = getKV(env);
 
   if (!kv) {
     return {
       saved: false,
       binding: null,
-      error: "KV_NOT_CONFIGURED"
+
+      error:
+        "KV_NOT_CONFIGURED"
     };
   }
 
   try {
-    state.version = VERSION;
-    state.updatedAt = now();
+    state.version =
+      VERSION;
+
+    state.updatedAt =
+      now();
 
     await kv.put(
       STATE_KEY,
@@ -657,20 +858,19 @@ async function writeState(
       binding,
       error: null
     };
-  } catch (error) {
+  }
+
+  catch (error) {
     return {
       saved: false,
       binding,
-      error: errorString(error)
+
+      error:
+        errorString(error)
     };
   }
 }
 
-/*
- * V82:
- * trimWatchlist=false is used before discovery so a token cannot
- * disappear merely because it had not yet been priority-sorted.
- */
 function pruneState(
   state,
   trimWatchlist = true
@@ -698,7 +898,8 @@ function pruneState(
         }
 
         return (
-          current - firstSeen <=
+          current -
+            firstSeen <=
           WATCH_MAX_AGE
         );
       }
@@ -714,18 +915,22 @@ function pruneState(
 
   state.alerts =
     state.alerts &&
-    typeof state.alerts === "object"
+    typeof state.alerts ===
+      "object"
       ? state.alerts
       : {};
 
   for (
-    const [address, alert]
-    of Object.entries(
+    const [
+      address,
+      alert
+    ] of Object.entries(
       state.alerts
     )
   ) {
     const timestamp =
-      typeof alert === "object"
+      typeof alert ===
+        "object"
         ? safeNumber(
             alert.timestamp
           )
@@ -750,46 +955,63 @@ function pruneState(
       : {};
 
   for (
-    const [address, snapshots]
-    of Object.entries(
+    const [
+      address,
+      snapshots
+    ] of Object.entries(
       state.snapshots
     )
   ) {
     let list =
       Array.isArray(snapshots)
         ? snapshots
+
         : snapshots &&
-            typeof snapshots ===
-              "object"
+          typeof snapshots ===
+            "object"
           ? [snapshots]
           : [];
 
-    list = list
-      .filter(snapshot => {
-        const timestamp =
-          safeNumber(
-            snapshot.timestamp
-          );
+    list =
+      list
+        .filter(
+          snapshot => {
+            const timestamp =
+              safeNumber(
+                snapshot.timestamp
+              );
 
-        return (
-          timestamp &&
-          current - timestamp <=
-            SNAPSHOT_MAX_AGE
+            return (
+              timestamp &&
+              current -
+                timestamp <=
+                SNAPSHOT_MAX_AGE
+            );
+          }
+        )
+        .slice(
+          -MAX_SNAPSHOTS_PER_TOKEN
         );
-      })
-      .slice(
-        -MAX_SNAPSHOTS_PER_TOKEN
-      );
 
     if (list.length) {
-      state.snapshots[address] =
-        list;
-    } else {
+      state.snapshots[
+        address
+      ] = list;
+    }
+
+    else {
       delete state.snapshots[
         address
       ];
     }
   }
+
+  state.scheduler =
+    state.scheduler &&
+    typeof state.scheduler ===
+      "object"
+      ? state.scheduler
+      : newState().scheduler;
 }
 
 function findWatched(
@@ -845,15 +1067,26 @@ function addWatch(
       lastSeenAt:
         Date.now(),
 
+      lastLiveSeenAt:
+        null,
+
       lastCheckedAt:
         null,
 
       checks: 0,
+
+      invalidChecks: 0,
+
+      lastValidationReason:
+        null,
+
       pools: [],
+
       metadata: null,
 
       discoverySource:
-        source || "UNKNOWN"
+        source ||
+        "UNKNOWN"
     };
 
     state.watchedTokens.push(
@@ -875,7 +1108,9 @@ function addWatch(
   }
 
   token.pools =
-    Array.isArray(token.pools)
+    Array.isArray(
+      token.pools
+    )
       ? token.pools
       : [];
 
@@ -892,7 +1127,9 @@ function addWatch(
       );
 
     if (!exists) {
-      token.pools.push(pool);
+      token.pools.push(
+        pool
+      );
     }
   }
 
@@ -903,7 +1140,7 @@ function addWatch(
 }
 
 /* =========================================================
-   RPC
+   RPC — V83 PROVIDER STRATEGY
    ========================================================= */
 
 async function rpcCall(
@@ -941,24 +1178,33 @@ async function rpcCall(
 
   try {
     const response =
-      await fetch(url, {
-        method: "POST",
+      await fetch(
+        url,
+        {
+          method:
+            "POST",
 
-        headers: {
-          "content-type":
-            "application/json"
-        },
+          headers: {
+            "content-type":
+              "application/json"
+          },
 
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: Date.now(),
-          method,
-          params
-        }),
+          body:
+            JSON.stringify({
+              jsonrpc:
+                "2.0",
 
-        signal:
-          controller.signal
-      });
+              id:
+                Date.now(),
+
+              method,
+              params
+            }),
+
+          signal:
+            controller.signal
+        }
+      );
 
     if (!response.ok) {
       throw new Error(
@@ -972,14 +1218,56 @@ async function rpcCall(
     if (body.error) {
       throw new Error(
         body.error.message ||
-          "RPC_ERROR"
+        "RPC_ERROR"
       );
     }
 
     return body.result;
-  } finally {
+  }
+
+  finally {
     clearTimeout(timer);
   }
+}
+
+function preferAlchemy(
+  env,
+  phase,
+  method
+) {
+  if (
+    !env.ALCHEMY_API_KEY
+  ) {
+    return false;
+  }
+
+  /*
+   * Keep lightweight system block-number request public-first.
+   *
+   * Heavy log and analysis calls use configured Alchemy first
+   * because V82 demonstrated repeated public RPC failures were
+   * doubling request consumption.
+   */
+  if (phase === "analysis") {
+    return true;
+  }
+
+  if (
+    phase ===
+    "discovery-backlog"
+  ) {
+    return true;
+  }
+
+  if (
+    phase ===
+      "discovery-live" &&
+    method === "eth_getLogs"
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 async function rpc(
@@ -989,96 +1277,130 @@ async function rpc(
   budget,
   phase
 ) {
-  let publicError = null;
+  const alchemyUrl =
+    env.ALCHEMY_API_KEY
+      ? ALCHEMY_BASE +
+        env.ALCHEMY_API_KEY
+      : null;
 
-  try {
-    const result =
-      await rpcCall(
-        PUBLIC_RPC,
-        method,
-        params,
-        budget,
-        phase
-      );
+  const useAlchemyFirst =
+    preferAlchemy(
+      env,
+      phase,
+      method
+    );
 
-    return {
-      result,
-      provider:
-        "ROBINHOOD_PUBLIC_RPC",
-      error: null
-    };
-  } catch (error) {
-    publicError =
-      errorString(error);
+  const providers =
+    useAlchemyFirst
+      ? [
+          {
+            name:
+              "ALCHEMY",
+
+            url:
+              alchemyUrl
+          },
+
+          {
+            name:
+              "ROBINHOOD_PUBLIC_RPC",
+
+            url:
+              PUBLIC_RPC
+          }
+        ]
+
+      : [
+          {
+            name:
+              "ROBINHOOD_PUBLIC_RPC",
+
+            url:
+              PUBLIC_RPC
+          },
+
+          ...(alchemyUrl
+            ? [
+                {
+                  name:
+                    "ALCHEMY",
+
+                  url:
+                    alchemyUrl
+                }
+              ]
+            : [])
+        ];
+
+  const errors = [];
+
+  for (
+    const provider
+    of providers
+  ) {
+    if (
+      !provider.url
+    ) {
+      continue;
+    }
 
     if (
-      publicError.startsWith(
-        "REQUEST_BUDGET_EXHAUSTED"
+      !budgetAvailable(
+        budget,
+        phase,
+        1
       )
     ) {
+      break;
+    }
+
+    try {
+      const result =
+        await rpcCall(
+          provider.url,
+          method,
+          params,
+          budget,
+          phase
+        );
+
       return {
-        result: null,
-        provider: null,
-        error: publicError
+        result,
+
+        provider:
+          provider.name,
+
+        error: null
       };
+    }
+
+    catch (error) {
+      const message =
+        errorString(error);
+
+      errors.push(
+        `${provider.name}: ${message}`
+      );
+
+      if (
+        message.startsWith(
+          "REQUEST_BUDGET_EXHAUSTED"
+        )
+      ) {
+        break;
+      }
     }
   }
 
-  if (!env.ALCHEMY_API_KEY) {
-    return {
-      result: null,
-      provider: null,
+  return {
+    result: null,
+    provider: null,
 
-      error:
-        "PUBLIC_RPC_FAILED: " +
-        publicError
-    };
-  }
-
-  if (
-    !budgetAvailable(
-      budget,
-      phase,
-      1
-    )
-  ) {
-    return {
-      result: null,
-      provider: null,
-      error:
-        "REQUEST_BUDGET_EXHAUSTED"
-    };
-  }
-
-  try {
-    const result =
-      await rpcCall(
-        ALCHEMY_BASE +
-          env.ALCHEMY_API_KEY,
-
-        method,
-        params,
-        budget,
-        phase
-      );
-
-    return {
-      result,
-      provider: "ALCHEMY",
-      error: null
-    };
-  } catch (error) {
-    return {
-      result: null,
-      provider: null,
-
-      error:
-        "PUBLIC_RPC_FAILED: " +
-        publicError +
-        " | ALCHEMY_FAILED: " +
-        errorString(error)
-    };
-  }
+    error:
+      errors.length
+        ? errors.join(" | ")
+        : "REQUEST_BUDGET_EXHAUSTED"
+  };
 }
 
 async function latestBlock(
@@ -1097,13 +1419,15 @@ async function latestBlock(
   if (!response.result) {
     throw new Error(
       response.error ||
-        "BLOCK_NUMBER_FAILED"
+      "BLOCK_NUMBER_FAILED"
     );
   }
 
   return {
     block:
-      BigInt(response.result),
+      BigInt(
+        response.result
+      ),
 
     provider:
       response.provider
@@ -1120,6 +1444,7 @@ async function getLogs(
   return rpc(
     env,
     "eth_getLogs",
+
     [
       {
         fromBlock:
@@ -1134,13 +1459,14 @@ async function getLogs(
           POOL_MANAGER
       }
     ],
+
     budget,
     phase
   );
 }
 
 /* =========================================================
-   ADAPTIVE LOG SCANNER
+   ADAPTIVE LIVE LOG SCANNER
    ========================================================= */
 
 async function scanLogRange(
@@ -1160,6 +1486,7 @@ async function scanLogRange(
   ) {
     return {
       success: false,
+
       error:
         "INVALID_DISCOVERY_PHASE"
     };
@@ -1174,6 +1501,7 @@ async function scanLogRange(
     return {
       success: false,
       budgetExhausted: true,
+
       error:
         "DISCOVERY_BUDGET_EXHAUSTED"
     };
@@ -1211,12 +1539,15 @@ async function scanLogRange(
         response.provider,
 
       phase,
-      splitDepth: depth
+      splitDepth:
+        depth
     });
 
     return {
       success: true,
-      processedThrough: to
+
+      processedThrough:
+        to
     };
   }
 
@@ -1230,7 +1561,9 @@ async function scanLogRange(
     return {
       success: false,
       budgetExhausted: true,
-      error: response.error
+
+      error:
+        response.error
     };
   }
 
@@ -1243,7 +1576,8 @@ async function scanLogRange(
   ) {
     const middle =
       from +
-      (to - from) / 2n;
+      (to - from) /
+        2n;
 
     const left =
       await scanLogRange(
@@ -1275,11 +1609,6 @@ async function scanLogRange(
       return {
         ...right,
 
-        /*
-         * V82:
-         * Safe contiguous progress exists
-         * through the successful left side.
-         */
         processedThrough:
           left.processedThrough
       };
@@ -1315,6 +1644,128 @@ async function scanLogRange(
 }
 
 /* =========================================================
+   V83 SEQUENTIAL BACKLOG SCANNER
+   ========================================================= */
+
+async function scanBacklogSequential(
+  env,
+  start,
+  latest,
+  budget,
+  output
+) {
+  let cursor =
+    start;
+
+  let processedThrough =
+    null;
+
+  let chunksAttempted = 0;
+  let chunksCompleted = 0;
+
+  let error = null;
+
+  while (
+    cursor <= latest &&
+    chunksAttempted <
+      BACKLOG_MAX_CHUNKS_PER_SCAN &&
+    budgetAvailable(
+      budget,
+      "discovery-backlog"
+    )
+  ) {
+    const chunkTo =
+      cursor +
+        BigInt(
+          BACKLOG_CHUNK_BLOCKS -
+            1
+        ) <
+      latest
+        ? cursor +
+          BigInt(
+            BACKLOG_CHUNK_BLOCKS -
+              1
+          )
+        : latest;
+
+    chunksAttempted++;
+
+    const response =
+      await getLogs(
+        env,
+        cursor,
+        chunkTo,
+        budget,
+        "discovery-backlog"
+      );
+
+    if (
+      !Array.isArray(
+        response.result
+      )
+    ) {
+      error =
+        response.error ||
+        "BACKLOG_GET_LOGS_FAILED";
+
+      break;
+    }
+
+    output.logs.push(
+      ...response.result
+    );
+
+    output.ranges.push({
+      fromBlock:
+        Number(cursor),
+
+      toBlock:
+        Number(chunkTo),
+
+      logs:
+        response.result.length,
+
+      provider:
+        response.provider,
+
+      phase:
+        "discovery-backlog",
+
+      sequential:
+        true
+    });
+
+    processedThrough =
+      chunkTo;
+
+    chunksCompleted++;
+
+    cursor =
+      chunkTo + 1n;
+  }
+
+  return {
+    success:
+      chunksCompleted > 0,
+
+    complete:
+      cursor > latest,
+
+    processedThrough,
+
+    nextBlock:
+      cursor <= latest
+        ? cursor
+        : null,
+
+    chunksAttempted,
+    chunksCompleted,
+
+    error
+  };
+}
+
+/* =========================================================
    V4 DECODING
    ========================================================= */
 
@@ -1322,7 +1773,8 @@ function decodeInitialize(log) {
   if (
     normalize(
       log?.topics?.[0]
-    ) !== INITIALIZE_TOPIC
+    ) !==
+    INITIALIZE_TOPIC
   ) {
     return null;
   }
@@ -1385,7 +1837,10 @@ function processDiscoveryLogs(
   let swapTopicMatches = 0;
   let liquidityTopicMatches = 0;
 
-  for (const log of logs) {
+  for (
+    const log
+    of logs
+  ) {
     const topic0 =
       normalize(
         log?.topics?.[0]
@@ -1408,7 +1863,9 @@ function processDiscoveryLogs(
     const pool =
       decodeInitialize(log);
 
-    if (!pool) continue;
+    if (!pool) {
+      continue;
+    }
 
     initializeEvents++;
 
@@ -1435,13 +1892,17 @@ function processDiscoveryLogs(
           source
         );
 
-      if (result.token) {
+      if (
+        result.token
+      ) {
         seenTokens.add(
           normalize(address)
         );
       }
 
-      if (result.added) {
+      if (
+        result.added
+      ) {
         newTokens.add(
           normalize(address)
         );
@@ -1462,12 +1923,10 @@ function processDiscoveryLogs(
   };
 }
 
-/*
- * V82:
- * A watched token does not need a fresh Initialize event to be
- * considered live. If its known V4 pool is swapping or changing
- * liquidity inside the live block window, promote it.
- */
+/* =========================================================
+   LIVE POOL ACTIVITY — V83
+   ========================================================= */
+
 function activeTokensFromLogs(
   state,
   logs
@@ -1493,7 +1952,8 @@ function activeTokensFromLogs(
 
     for (
       const pool
-      of watched.pools || []
+      of watched.pools ||
+      []
     ) {
       const poolId =
         normalize(
@@ -1524,17 +1984,27 @@ function activeTokensFromLogs(
   const active =
     new Set();
 
+  const unknownPoolIds =
+    new Set();
+
   let swapEvents = 0;
   let liquidityEvents = 0;
 
-  for (const log of logs) {
+  let unknownSwapEvents = 0;
+  let unknownLiquidityEvents = 0;
+
+  for (
+    const log
+    of logs
+  ) {
     const topic0 =
       normalize(
         log?.topics?.[0]
       );
 
     if (
-      topic0 !== SWAP_TOPIC &&
+      topic0 !==
+        SWAP_TOPIC &&
       topic0 !==
         MODIFY_LIQUIDITY_TOPIC
     ) {
@@ -1552,11 +2022,32 @@ function activeTokensFromLogs(
       );
 
     if (!tokens) {
+      if (poolId) {
+        unknownPoolIds.add(
+          poolId
+        );
+      }
+
+      if (
+        topic0 ===
+        SWAP_TOPIC
+      ) {
+        unknownSwapEvents++;
+      }
+
+      if (
+        topic0 ===
+        MODIFY_LIQUIDITY_TOPIC
+      ) {
+        unknownLiquidityEvents++;
+      }
+
       continue;
     }
 
     if (
-      topic0 === SWAP_TOPIC
+      topic0 ===
+      SWAP_TOPIC
     ) {
       swapEvents++;
     }
@@ -1572,7 +2063,9 @@ function activeTokensFromLogs(
       const address
       of tokens
     ) {
-      active.add(address);
+      active.add(
+        address
+      );
 
       const watched =
         findWatched(
@@ -1588,9 +2081,16 @@ function activeTokensFromLogs(
   }
 
   return {
-    tokens: active,
+    tokens:
+      active,
+
     swapEvents,
-    liquidityEvents
+    liquidityEvents,
+
+    unknownPoolIds,
+
+    unknownSwapEvents,
+    unknownLiquidityEvents
   };
 }
 
@@ -1600,11 +2100,15 @@ function activityForToken(
 ) {
   const poolIds =
     new Set(
-      (watched.pools || [])
-        .map(pool =>
-          normalize(
-            pool.poolId
-          )
+      (
+        watched.pools ||
+        []
+      )
+        .map(
+          pool =>
+            normalize(
+              pool.poolId
+            )
         )
         .filter(Boolean)
     );
@@ -1612,7 +2116,10 @@ function activityForToken(
   let swaps = 0;
   let liquidityEvents = 0;
 
-  for (const log of logs) {
+  for (
+    const log
+    of logs
+  ) {
     const topic0 =
       normalize(
         log?.topics?.[0]
@@ -1624,7 +2131,9 @@ function activityForToken(
       );
 
     if (
-      !poolIds.has(poolId)
+      !poolIds.has(
+        poolId
+      )
     ) {
       continue;
     }
@@ -1667,13 +2176,18 @@ async function ethCall(
     await rpc(
       env,
       "eth_call",
+
       [
         {
-          to: token,
+          to:
+            token,
+
           data
         },
+
         "latest"
       ],
+
       budget,
       "analysis"
     );
@@ -1681,7 +2195,7 @@ async function ethCall(
   if (!response.result) {
     throw new Error(
       response.error ||
-        "ETH_CALL_FAILED"
+      "ETH_CALL_FAILED"
     );
   }
 
@@ -1691,7 +2205,9 @@ async function ethCall(
 function decodeUint(hex) {
   try {
     return BigInt(hex);
-  } catch {
+  }
+
+  catch {
     return null;
   }
 }
@@ -1701,34 +2217,48 @@ function decodeBytes32String(
 ) {
   try {
     const raw =
-      String(hex || "")
-        .replace(/^0x/, "");
+      String(
+        hex ||
+        ""
+      ).replace(
+        /^0x/,
+        ""
+      );
 
-    if (raw.length !== 64) {
+    if (
+      raw.length !== 64
+    ) {
       return null;
     }
 
     const bytes =
       new Uint8Array(
         (
-          raw.match(/.{2}/g) ||
-          []
-        ).map(value =>
-          parseInt(
-            value,
-            16
-          )
+          raw.match(
+            /.{2}/g
+          ) || []
+        ).map(
+          value =>
+            parseInt(
+              value,
+              16
+            )
         )
       );
 
     return (
       new TextDecoder()
         .decode(bytes)
-        .replace(/\0/g, "")
+        .replace(
+          /\0/g,
+          ""
+        )
         .trim() ||
       null
     );
-  } catch {
+  }
+
+  catch {
     return null;
   }
 }
@@ -1736,20 +2266,29 @@ function decodeBytes32String(
 function decodeString(hex) {
   try {
     const raw =
-      String(hex || "")
-        .replace(/^0x/, "");
+      String(
+        hex ||
+        ""
+      ).replace(
+        /^0x/,
+        ""
+      );
 
     if (!raw) {
       return null;
     }
 
-    if (raw.length === 64) {
+    if (
+      raw.length === 64
+    ) {
       return decodeBytes32String(
         "0x" + raw
       );
     }
 
-    if (raw.length < 128) {
+    if (
+      raw.length < 128
+    ) {
       return null;
     }
 
@@ -1800,24 +2339,31 @@ function decodeString(hex) {
     const bytes =
       new Uint8Array(
         (
-          data.match(/.{2}/g) ||
-          []
-        ).map(value =>
-          parseInt(
-            value,
-            16
-          )
+          data.match(
+            /.{2}/g
+          ) || []
+        ).map(
+          value =>
+            parseInt(
+              value,
+              16
+            )
         )
       );
 
     return (
       new TextDecoder()
         .decode(bytes)
-        .replace(/\0/g, "")
+        .replace(
+          /\0/g,
+          ""
+        )
         .trim() ||
       null
     );
-  } catch {
+  }
+
+  catch {
     return null;
   }
 }
@@ -1856,13 +2402,20 @@ function reusableMetadata(
 }
 
 function estimatedAnalysisCost(
+  env,
   watched
 ) {
-  return reusableMetadata(
-    watched
-  )
-    ? CACHED_TOKEN_FULL_ANALYSIS_COST
-    : FRESH_TOKEN_FULL_ANALYSIS_COST;
+  if (
+    reusableMetadata(
+      watched
+    )
+  ) {
+    return CACHED_ANALYSIS_COST;
+  }
+
+  return env.ALCHEMY_API_KEY
+    ? FRESH_ANALYSIS_COST_ALCHEMY
+    : FRESH_ANALYSIS_COST_FALLBACK;
 }
 
 async function verifyERC20(
@@ -1880,10 +2433,6 @@ async function verifyERC20(
     return cached;
   }
 
-  /*
-   * V82 FIX:
-   * V81 checked for 4 requests but verification can consume 5.
-   */
   if (
     !budgetAvailable(
       budget,
@@ -1898,14 +2447,7 @@ async function verifyERC20(
       reason:
         "ANALYSIS_BUDGET_PROTECTED",
 
-      requiredRequests: 5,
-
-      remainingRequests:
-        Math.max(
-          0,
-          budget.analysis.limit -
-            budget.analysis.used
-        )
+      requiredRequests: 5
     };
   }
 
@@ -1913,10 +2455,12 @@ async function verifyERC20(
     await rpc(
       env,
       "eth_getCode",
+
       [
         address,
         "latest"
       ],
+
       budget,
       "analysis"
     );
@@ -1929,6 +2473,7 @@ async function verifyERC20(
     return {
       validERC20: false,
       deferred: false,
+
       reason:
         "NO_CONTRACT_BYTECODE"
     };
@@ -1949,7 +2494,9 @@ async function verifyERC20(
           budget
         )
       );
-  } catch {}
+  }
+
+  catch {}
 
   try {
     symbol =
@@ -1961,7 +2508,9 @@ async function verifyERC20(
           budget
         )
       );
-  } catch {}
+  }
+
+  catch {}
 
   try {
     const value =
@@ -1974,17 +2523,16 @@ async function verifyERC20(
         )
       );
 
-    if (value !== null) {
+    if (
+      value !== null
+    ) {
       decimals =
         Number(value);
     }
-  } catch {}
+  }
 
-  /*
-   * The 5-request reservation above guarantees that a
-   * totalSupply call cannot be blocked merely because V81
-   * under-reserved the verification budget.
-   */
+  catch {}
+
   try {
     totalSupply =
       decodeUint(
@@ -1995,7 +2543,9 @@ async function verifyERC20(
           budget
         )
       );
-  } catch {}
+  }
+
+  catch {}
 
   const score =
     (name ? 1 : 0) +
@@ -2014,7 +2564,9 @@ async function verifyERC20(
         : 0
     );
 
-  if (score < 3) {
+  if (
+    score < 3
+  ) {
     return {
       validERC20: false,
       deferred: false,
@@ -2036,7 +2588,9 @@ async function verifyERC20(
   return {
     validERC20: true,
     deferred: false,
-    reason: "VERIFIED",
+
+    reason:
+      "VERIFIED",
 
     address,
     name,
@@ -2051,7 +2605,8 @@ async function verifyERC20(
     verifiedAt:
       Date.now(),
 
-    reused: false
+    reused:
+      false
   };
 }
 
@@ -2082,6 +2637,7 @@ async function marketData(
     const response =
       await fetch(
         `${DEXSCREENER_BASE}/token-pairs/v1/robinhood/${token}`,
+
         {
           headers: {
             accept:
@@ -2107,9 +2663,12 @@ async function marketData(
         ? data
         : [];
 
-    if (!pairs.length) {
+    if (
+      !pairs.length
+    ) {
       return {
         verified: false,
+
         status:
           "NO_MARKET_FOUND"
       };
@@ -2143,7 +2702,9 @@ async function marketData(
 
     return {
       verified: true,
-      status: "VERIFIED",
+
+      status:
+        "VERIFIED",
 
       pairAddress:
         pair?.pairAddress ||
@@ -2198,9 +2759,10 @@ async function marketData(
 
       buyPressure1h:
         transactions > 0
-          ? buys /
-            transactions *
-            100
+          ? (
+              buys /
+              transactions
+            ) * 100
           : null,
 
       pairCreatedAt:
@@ -2208,9 +2770,12 @@ async function marketData(
           pair?.pairCreatedAt
         ) || null
     };
-  } catch (error) {
+  }
+
+  catch (error) {
     return {
       verified: false,
+
       status:
         "DEXSCREENER_ERROR",
 
@@ -2221,7 +2786,7 @@ async function marketData(
 }
 
 /* =========================================================
-   BLOCKSCOUT
+   BLOCKSCOUT — V83
    ========================================================= */
 
 async function blockscout(
@@ -2241,7 +2806,9 @@ async function blockscout(
   try {
     const response =
       await fetch(
-        BLOCKSCOUT + path,
+        BLOCKSCOUT +
+          path,
+
         {
           headers: {
             accept:
@@ -2255,13 +2822,68 @@ async function blockscout(
     }
 
     return await response.json();
-  } catch {
+  }
+
+  catch {
     return null;
   }
 }
 
+function extractCounterData(
+  data
+) {
+  if (
+    !data ||
+    typeof data !==
+      "object"
+  ) {
+    return {
+      holderCount:
+        null,
+
+      transferCount:
+        null
+    };
+  }
+
+  const holderRaw =
+    data.token_holders_count ??
+    data.holders_count ??
+    data.holders ??
+    data.holder_count ??
+    null;
+
+  const transferRaw =
+    data.transfers_count ??
+    data.token_transfers_count ??
+    data.transfer_count ??
+    null;
+
+  const holderNumber =
+    Number(holderRaw);
+
+  const transferNumber =
+    Number(transferRaw);
+
+  return {
+    holderCount:
+      Number.isFinite(
+        holderNumber
+      )
+        ? holderNumber
+        : null,
+
+    transferCount:
+      Number.isFinite(
+        transferNumber
+      )
+        ? transferNumber
+        : null
+  };
+}
+
 /* =========================================================
-   HOLDER INTEGRITY — V82
+   HOLDER INTEGRITY
    ========================================================= */
 
 function holderPercent(
@@ -2306,7 +2928,9 @@ function holderPercent(
     }
 
     return percentage;
-  } catch {
+  }
+
+  catch {
     return null;
   }
 }
@@ -2338,12 +2962,6 @@ function extractHolderAddress(
   return null;
 }
 
-/*
- * V82:
- * Use nullish selection rather than truthy selection.
- * This avoids valid zero-like values accidentally falling
- * through to another field.
- */
 function extractHolderValue(
   item
 ) {
@@ -2374,9 +2992,13 @@ function validateHolderIntegrity(
   try {
     supply =
       BigInt(
-        String(totalSupply)
+        String(
+          totalSupply
+        )
       );
-  } catch {
+  }
+
+  catch {
     return {
       verified: false,
 
@@ -2388,7 +3010,8 @@ function validateHolderIntegrity(
 
       supply:
         String(
-          totalSupply || ""
+          totalSupply ||
+          ""
         ),
 
       topHolderBalanceSum:
@@ -2396,7 +3019,9 @@ function validateHolderIntegrity(
     };
   }
 
-  if (supply <= 0n) {
+  if (
+    supply <= 0n
+  ) {
     return {
       verified: false,
 
@@ -2415,7 +3040,9 @@ function validateHolderIntegrity(
   }
 
   let balanceSum = 0n;
-  let impossibleBalanceCount = 0;
+
+  let impossibleBalanceCount =
+    0;
 
   for (
     const item
@@ -2438,7 +3065,9 @@ function validateHolderIntegrity(
       }
 
       balanceSum += value;
-    } catch {
+    }
+
+    catch {
       impossibleBalanceCount++;
     }
   }
@@ -2496,7 +3125,9 @@ function validateHolderIntegrity(
 
   return {
     verified: true,
-    status: "VERIFIED",
+
+    status:
+      "VERIFIED",
 
     impossibleBalanceCount:
       0,
@@ -2526,40 +3157,61 @@ function unverifiedHolders(
 
     integrity: {
       verified: false,
-      status: reason,
+
+      status:
+        reason,
 
       impossibleBalanceCount:
         0,
 
-      percentageSum: null,
-      supply: null,
+      percentageSum:
+        null,
+
+      supply:
+        null,
 
       topHolderBalanceSum:
         null
     },
 
-    holderCount: null,
-    transferCount: null,
+    holderCount:
+      null,
+
+    transferCount:
+      null,
+
     topHolders: [],
 
     whale: {
       verified: false,
 
-      whaleCount: null,
-      top1Percent: null,
-      top5Percent: null,
-      top10Percent: null,
+      whaleCount:
+        null,
+
+      top1Percent:
+        null,
+
+      top5Percent:
+        null,
+
+      top10Percent:
+        null,
 
       concentrationRisk:
         "UNVERIFIED",
 
-      smartMoneyScore: 0,
+      smartMoneyScore:
+        0,
 
       smartMoneyCandidate:
         false
     }
   };
 }
+
+/* =========================================================
+   HOLDER INTELLIGENCE — V83 FALLBACK
+   ========================================================= */
 
 async function holderIntelligence(
   token,
@@ -2579,30 +3231,13 @@ async function holderIntelligence(
     );
   }
 
-  const counters =
-    await blockscout(
-      `/api/v2/tokens/${token}/counters`,
-      budget
-    );
-
-  if (!counters) {
-    return unverifiedHolders(
-      "BLOCKSCOUT_COUNTERS_UNAVAILABLE"
-    );
-  }
-
-  const holderCount =
-    safeNumber(
-      counters?.token_holders_count ??
-      counters?.holders_count
-    );
-
-  const transferCount =
-    safeNumber(
-      counters?.transfers_count ??
-      counters?.token_transfers_count
-    );
-
+  /*
+   * V83:
+   * Fetch holders first.
+   *
+   * This means a failed /counters endpoint can no longer
+   * prevent concentration analysis.
+   */
   const holders =
     await blockscout(
       `/api/v2/tokens/${token}/holders`,
@@ -2615,55 +3250,92 @@ async function holderIntelligence(
       holders.items
     )
   ) {
-    return {
-      verified: true,
-      countersVerified: true,
-
-      concentrationVerified:
-        false,
-
-      integrity: {
-        verified: false,
-
-        status:
-          "BLOCKSCOUT_HOLDERS_UNAVAILABLE",
-
-        impossibleBalanceCount:
-          0,
-
-        percentageSum: null,
-
-        supply:
-          String(
-            totalSupply
-          ),
-
-        topHolderBalanceSum:
-          null
-      },
-
-      holderCount,
-      transferCount,
-      topHolders: [],
-
-      whale: {
-        verified: false,
-
-        whaleCount: null,
-        top1Percent: null,
-        top5Percent: null,
-        top10Percent: null,
-
-        concentrationRisk:
-          "UNVERIFIED",
-
-        smartMoneyScore: 0,
-
-        smartMoneyCandidate:
-          false
-      }
-    };
+    return unverifiedHolders(
+      "BLOCKSCOUT_HOLDERS_UNAVAILABLE"
+    );
   }
+
+  let counters =
+    null;
+
+  if (
+    budgetAvailable(
+      budget,
+      "analysis"
+    )
+  ) {
+    counters =
+      await blockscout(
+        `/api/v2/tokens/${token}/counters`,
+        budget
+      );
+  }
+
+  let counterData =
+    extractCounterData(
+      counters
+    );
+
+  let counterSource =
+    counters
+      ? "COUNTERS"
+      : null;
+
+  /*
+   * V83 fallback:
+   * If /counters fails or does not expose holder totals,
+   * try the token detail endpoint.
+   */
+  if (
+    (
+      counterData.holderCount ===
+        null ||
+      counterData.transferCount ===
+        null
+    ) &&
+    budgetAvailable(
+      budget,
+      "analysis"
+    )
+  ) {
+    const details =
+      await blockscout(
+        `/api/v2/tokens/${token}`,
+        budget
+      );
+
+    if (details) {
+      const fallbackData =
+        extractCounterData(
+          details
+        );
+
+      if (
+        counterData.holderCount ===
+          null
+      ) {
+        counterData.holderCount =
+          fallbackData.holderCount;
+      }
+
+      if (
+        counterData.transferCount ===
+          null
+      ) {
+        counterData.transferCount =
+          fallbackData.transferCount;
+      }
+
+      counterSource =
+        "TOKEN_DETAILS_FALLBACK";
+    }
+  }
+
+  const holderCount =
+    counterData.holderCount;
+
+  const transferCount =
+    counterData.transferCount;
 
   const items =
     holders.items.slice(
@@ -2678,37 +3350,49 @@ async function holderIntelligence(
     );
 
   const topHolders =
-    items.map(item => {
-      const value =
-        extractHolderValue(
-          item
-        );
-
-      return {
-        address:
-          extractHolderAddress(
+    items.map(
+      item => {
+        const value =
+          extractHolderValue(
             item
-          ),
+          );
 
-        value,
+        return {
+          address:
+            extractHolderAddress(
+              item
+            ),
 
-        percentage:
-          holderPercent(
-            value,
-            totalSupply
-          )
-      };
-    });
+          value,
 
-  if (!integrity.verified) {
+          percentage:
+            holderPercent(
+              value,
+              totalSupply
+            )
+        };
+      }
+    );
+
+  if (
+    !integrity.verified
+  ) {
     return {
-      verified: true,
-      countersVerified: true,
+      verified:
+        holderCount !== null ||
+        transferCount !== null,
+
+      countersVerified:
+        holderCount !== null ||
+        transferCount !== null,
+
+      counterSource,
 
       concentrationVerified:
         false,
 
       integrity,
+
       holderCount,
       transferCount,
 
@@ -2716,22 +3400,32 @@ async function holderIntelligence(
         topHolders.map(
           holder => ({
             ...holder,
-            percentage: null
+
+            percentage:
+              null
           })
         ),
 
       whale: {
         verified: false,
 
-        whaleCount: null,
-        top1Percent: null,
-        top5Percent: null,
-        top10Percent: null,
+        whaleCount:
+          null,
+
+        top1Percent:
+          null,
+
+        top5Percent:
+          null,
+
+        top10Percent:
+          null,
 
         concentrationRisk:
           "UNVERIFIED",
 
-        smartMoneyScore: 0,
+        smartMoneyScore:
+          0,
 
         smartMoneyCandidate:
           false,
@@ -2764,7 +3458,10 @@ async function holderIntelligence(
 
   const top5 =
     percentages
-      .slice(0, 5)
+      .slice(
+        0,
+        5
+      )
       .reduce(
         (a, b) =>
           a + b,
@@ -2773,7 +3470,10 @@ async function holderIntelligence(
 
   const top10 =
     percentages
-      .slice(0, 10)
+      .slice(
+        0,
+        10
+      )
       .reduce(
         (a, b) =>
           a + b,
@@ -2785,15 +3485,24 @@ async function holderIntelligence(
     top10 > 100.000001
   ) {
     return {
-      verified: true,
-      countersVerified: true,
+      verified:
+        holderCount !== null ||
+        transferCount !== null,
+
+      countersVerified:
+        holderCount !== null ||
+        transferCount !== null,
+
+      counterSource,
 
       concentrationVerified:
         false,
 
       integrity: {
         ...integrity,
-        verified: false,
+
+        verified:
+          false,
 
         status:
           "PERCENTAGE_SUM_EXCEEDS_100",
@@ -2809,22 +3518,32 @@ async function holderIntelligence(
         topHolders.map(
           holder => ({
             ...holder,
-            percentage: null
+
+            percentage:
+              null
           })
         ),
 
       whale: {
         verified: false,
 
-        whaleCount: null,
-        top1Percent: null,
-        top5Percent: null,
-        top10Percent: null,
+        whaleCount:
+          null,
+
+        top1Percent:
+          null,
+
+        top5Percent:
+          null,
+
+        top10Percent:
+          null,
 
         concentrationRisk:
           "UNVERIFIED",
 
-        smartMoneyScore: 0,
+        smartMoneyScore:
+          0,
 
         smartMoneyCandidate:
           false,
@@ -2855,7 +3574,9 @@ async function holderIntelligence(
   ) {
     concentrationRisk =
       "HIGH";
-  } else if (
+  }
+
+  else if (
     (
       top1 !== null &&
       top1 >= 10
@@ -2913,13 +3634,27 @@ async function holderIntelligence(
     );
 
   return {
+    /*
+     * V83:
+     * verified means some holder intelligence was retrieved.
+     * Concentration has its own independent verification flag.
+     */
     verified: true,
-    countersVerified: true,
-    concentrationVerified: true,
+
+    countersVerified:
+      holderCount !== null ||
+      transferCount !== null,
+
+    counterSource,
+
+    concentrationVerified:
+      true,
 
     integrity,
+
     holderCount,
     transferCount,
+
     topHolders,
 
     whale: {
@@ -2938,10 +3673,12 @@ async function holderIntelligence(
         top10,
 
       concentrationRisk,
+
       smartMoneyScore,
 
       smartMoneyCandidate:
-        smartMoneyScore >= 55
+        smartMoneyScore >=
+        55
     }
   };
 }
@@ -3033,14 +3770,14 @@ function createSnapshot(
 
     holderCount:
       candidate.holders
-        ?.verified
+        ?.countersVerified
         ? candidate.holders
             .holderCount
         : null,
 
     transferCount:
       candidate.holders
-        ?.verified
+        ?.countersVerified
         ? candidate.holders
             .transferCount
         : null,
@@ -3155,7 +3892,8 @@ function saveSnapshot(
   const last =
     snapshots.length
       ? snapshots[
-          snapshots.length - 1
+          snapshots.length -
+          1
         ]
       : null;
 
@@ -3201,7 +3939,8 @@ function momentumAnalysis(
       label:
         "BUILDING_HISTORY",
 
-      positiveSignals: 0,
+      positiveSignals:
+        0,
 
       reasons: [
         "Waiting for historical snapshot"
@@ -3226,7 +3965,8 @@ function momentumAnalysis(
       label:
         "BUILDING_HISTORY",
 
-      positiveSignals: 0,
+      positiveSignals:
+        0,
 
       historyAgeMinutes:
         historyAgeMs /
@@ -3238,8 +3978,14 @@ function momentumAnalysis(
     };
   }
 
+  const countersUsable =
+    Boolean(
+      holders
+        ?.countersVerified
+    );
+
   const holderGrowth =
-    holders?.verified
+    countersUsable
       ? percentChange(
           previous.holderCount,
           holders.holderCount
@@ -3247,7 +3993,7 @@ function momentumAnalysis(
       : null;
 
   const transferGrowth =
-    holders?.verified
+    countersUsable
       ? percentChange(
           previous.transferCount,
           holders.transferCount
@@ -3340,7 +4086,8 @@ function momentumAnalysis(
   }
 
   if (
-    liquidityGrowth !== null
+    liquidityGrowth !==
+    null
   ) {
     if (
       liquidityGrowth >= 20
@@ -3351,12 +4098,16 @@ function momentumAnalysis(
       reasons.push(
         `Liquidity acceleration ${liquidityGrowth.toFixed(1)}%`
       );
-    } else if (
+    }
+
+    else if (
       liquidityGrowth >= 5
     ) {
       positiveSignals++;
       score += 10;
-    } else if (
+    }
+
+    else if (
       liquidityGrowth <= -20
     ) {
       score -= 20;
@@ -3406,9 +4157,11 @@ function momentumAnalysis(
   }
 
   if (
-    market?.buyPressure1h !==
+    market
+      ?.buyPressure1h !==
       null &&
-    market?.buyPressure1h >=
+    market
+      ?.buyPressure1h >=
       60
   ) {
     positiveSignals++;
@@ -3445,7 +4198,7 @@ function momentumAnalysis(
     verified:
       Boolean(
         market?.verified ||
-        holders?.verified
+        countersUsable
       ),
 
     score,
@@ -3485,7 +4238,7 @@ function momentumAnalysis(
 }
 
 /* =========================================================
-   WHALE FLOW — INTEGRITY PROTECTED
+   WHALE FLOW
    ========================================================= */
 
 function analyseWhaleFlow(
@@ -3494,10 +4247,10 @@ function analyseWhaleFlow(
 ) {
   if (
     !previous ||
-    !holders?.verified ||
     !holders
       ?.concentrationVerified ||
-    !holders?.whale?.verified
+    !holders
+      ?.whale?.verified
   ) {
     return {
       verified: false,
@@ -3539,6 +4292,7 @@ function analyseWhaleFlow(
             normalize(
               holder.address
             ),
+
             holder
           ]
         )
@@ -3568,7 +4322,9 @@ function analyseWhaleFlow(
         )
       );
 
-    if (!old) continue;
+    if (!old) {
+      continue;
+    }
 
     try {
       const oldValue =
@@ -3590,27 +4346,34 @@ function analyseWhaleFlow(
       comparable++;
 
       if (
-        newValue > oldValue
+        newValue >
+        oldValue
       ) {
         increasing++;
       }
 
       if (
-        newValue < oldValue
+        newValue <
+        oldValue
       ) {
         decreasing++;
       }
-    } catch {}
+    }
+
+    catch {}
   }
 
   let score = 0;
+
   const reasons = [];
 
-  let flow = "MIXED";
+  let flow =
+    "MIXED";
 
   if (
     comparable >= 2 &&
-    increasing > decreasing
+    increasing >
+      decreasing
   ) {
     flow =
       "NET_ACCUMULATION";
@@ -3624,7 +4387,8 @@ function analyseWhaleFlow(
 
   if (
     comparable >= 2 &&
-    decreasing > increasing
+    decreasing >
+      increasing
   ) {
     flow =
       "NET_DISTRIBUTION";
@@ -3734,9 +4498,14 @@ function marketQuality(
     !market?.verified
   ) {
     return {
-      verified: false,
-      score: 0,
-      reasons: []
+      verified:
+        false,
+
+      score:
+        0,
+
+      reasons:
+        []
     };
   }
 
@@ -3756,6 +4525,7 @@ function marketQuality(
     );
 
   let score = 0;
+
   const reasons = [];
 
   let liquidityMarketCapRatio =
@@ -3766,9 +4536,10 @@ function marketQuality(
     marketCap > 0
   ) {
     liquidityMarketCapRatio =
-      liquidity /
-      marketCap *
-      100;
+      (
+        liquidity /
+        marketCap
+      ) * 100;
 
     if (
       liquidityMarketCapRatio >=
@@ -3781,7 +4552,9 @@ function marketQuality(
       reasons.push(
         "Healthy liquidity/market-cap ratio"
       );
-    } else if (
+    }
+
+    else if (
       liquidityMarketCapRatio >=
       5
     ) {
@@ -3816,7 +4589,9 @@ function marketQuality(
       reasons.push(
         "Strong volume/liquidity ratio"
       );
-    } else if (
+    }
+
+    else if (
       volumeLiquidityRatio >=
       0.25
     ) {
@@ -3834,7 +4609,8 @@ function marketQuality(
   }
 
   return {
-    verified: true,
+    verified:
+      true,
 
     score:
       clamp(
@@ -3845,6 +4621,7 @@ function marketQuality(
 
     liquidityMarketCapRatio,
     volumeLiquidityRatio,
+
     reasons
   };
 }
@@ -3863,10 +4640,17 @@ function launchStage(
     )
   ) {
     return {
-      verified: false,
-      ageMinutes: null,
-      stage: "UNVERIFIED",
-      score: 0
+      verified:
+        false,
+
+      ageMinutes:
+        null,
+
+      stage:
+        "UNVERIFIED",
+
+      score:
+        0
     };
   }
 
@@ -3881,9 +4665,12 @@ function launchStage(
     );
 
   const ageMinutes =
-    ageMs / 60000;
+    ageMs /
+    60000;
 
-  let stage = "MATURE";
+  let stage =
+    "MATURE";
+
   let score = 0;
 
   if (
@@ -3893,39 +4680,58 @@ function launchStage(
     stage =
       "JUST_LAUNCHED";
 
-    score = 100;
-  } else if (
+    score =
+      100;
+  }
+
+  else if (
     ageMs <=
     60 * 60 * 1000
   ) {
     stage =
       "VERY_EARLY";
 
-    score = 90;
-  } else if (
+    score =
+      90;
+  }
+
+  else if (
     ageMs <=
     2 * 60 * 60 * 1000
   ) {
-    stage = "EARLY";
-    score = 80;
-  } else if (
+    stage =
+      "EARLY";
+
+    score =
+      80;
+  }
+
+  else if (
     ageMs <=
     6 * 60 * 60 * 1000
   ) {
     stage =
       "EMERGING";
 
-    score = 65;
-  } else if (
+    score =
+      65;
+  }
+
+  else if (
     ageMs <=
     24 * 60 * 60 * 1000
   ) {
-    stage = "YOUNG";
-    score = 45;
+    stage =
+      "YOUNG";
+
+    score =
+      45;
   }
 
   return {
-    verified: true,
+    verified:
+      true,
+
     ageMinutes,
     stage,
     score
@@ -3944,6 +4750,7 @@ function scoreRisk(
   whaleFlow
 ) {
   let score = 50;
+
   const reasons = [];
 
   if (
@@ -4007,7 +4814,9 @@ function scoreRisk(
       reasons.push(
         "High whale concentration"
       );
-    } else if (
+    }
+
+    else if (
       whale.concentrationRisk ===
       "MEDIUM"
     ) {
@@ -4030,8 +4839,9 @@ function scoreRisk(
         "Extreme top-holder concentration"
       );
     }
-  } else if (
-    holders?.verified &&
+  }
+
+  else if (
     holders?.integrity
       ?.verified === false
   ) {
@@ -4088,6 +4898,7 @@ function scoreOpportunity(
   launch
 ) {
   let score = 0;
+
   const reasons = [];
 
   if (
@@ -4118,8 +4929,8 @@ function scoreOpportunity(
   }
 
   if (
-    activity.liquidityEvents >
-    0
+    activity
+      .liquidityEvents > 0
   ) {
     score += 5;
   }
@@ -4197,7 +5008,9 @@ function scoreOpportunity(
       reasons.push(
         "Just launched"
       );
-    } else if (
+    }
+
+    else if (
       launch.stage ===
         "VERY_EARLY" ||
       launch.stage ===
@@ -4208,7 +5021,9 @@ function scoreOpportunity(
       reasons.push(
         "Early launch"
       );
-    } else if (
+    }
+
+    else if (
       launch.stage ===
       "EMERGING"
     ) {
@@ -4217,64 +5032,67 @@ function scoreOpportunity(
   }
 
   if (
-    holders?.verified
+    holders
+      ?.countersVerified
   ) {
     if (
-      holders.holderCount >=
-      50
+      safeNumber(
+        holders.holderCount
+      ) >= 50
     ) {
       score += 4;
     }
 
     if (
-      holders.holderCount >=
-      200
+      safeNumber(
+        holders.holderCount
+      ) >= 200
     ) {
       score += 4;
     }
+  }
 
-    if (
-      holders
-        .concentrationVerified &&
-      holders.whale
-        ?.verified &&
-      holders.whale
-        ?.concentrationRisk ===
-        "LOW"
-    ) {
-      score += 5;
+  if (
+    holders
+      ?.concentrationVerified &&
+    holders.whale
+      ?.verified &&
+    holders.whale
+      ?.concentrationRisk ===
+      "LOW"
+  ) {
+    score += 5;
 
-      reasons.push(
-        "Healthy holder concentration"
-      );
-    }
+    reasons.push(
+      "Healthy holder concentration"
+    );
+  }
 
-    if (
-      holders
-        .concentrationVerified &&
-      holders.whale
-        ?.verified &&
-      holders.whale
-        ?.smartMoneyCandidate
-    ) {
-      score += 5;
-    }
+  if (
+    holders
+      ?.concentrationVerified &&
+    holders.whale
+      ?.verified &&
+    holders.whale
+      ?.smartMoneyCandidate
+  ) {
+    score += 5;
+  }
 
-    if (
-      holders
-        .concentrationVerified &&
-      holders.whale
-        ?.verified &&
-      holders.whale
-        ?.concentrationRisk ===
-        "HIGH"
-    ) {
-      score -= 15;
+  if (
+    holders
+      ?.concentrationVerified &&
+    holders.whale
+      ?.verified &&
+    holders.whale
+      ?.concentrationRisk ===
+      "HIGH"
+  ) {
+    score -= 15;
 
-      reasons.push(
-        "Whale concentration penalty"
-      );
-    }
+    reasons.push(
+      "Whale concentration penalty"
+    );
   }
 
   if (
@@ -4288,11 +5106,15 @@ function scoreOpportunity(
       reasons.push(
         "Strong momentum"
       );
-    } else if (
+    }
+
+    else if (
       momentum.score >= 50
     ) {
       score += 10;
-    } else if (
+    }
+
+    else if (
       momentum.score >= 25
     ) {
       score += 5;
@@ -4306,7 +5128,9 @@ function scoreOpportunity(
       quality.score >= 40
     ) {
       score += 10;
-    } else if (
+    }
+
+    else if (
       quality.score >= 20
     ) {
       score += 5;
@@ -4419,9 +5243,11 @@ function signalConfirmation(
 
   if (
     candidate.holders
-      ?.verified &&
-    candidate.holders
-      .holderCount >= 50
+      ?.countersVerified &&
+    safeNumber(
+      candidate.holders
+        .holderCount
+    ) >= 50
   ) {
     signals++;
     score += 10;
@@ -4484,12 +5310,16 @@ function signalConfirmation(
     label:
       signals >= 7
         ? "VERY_STRONG"
+
         : signals >= 5
           ? "STRONG"
+
           : signals >= 3
             ? "DEVELOPING"
+
             : signals >= 2
               ? "EARLY"
+
               : "WEAK",
 
     reasons
@@ -4520,7 +5350,7 @@ function candidateConfidence(
 
   if (
     candidate.holders
-      ?.verified
+      ?.countersVerified
   ) {
     score += 15;
   }
@@ -4573,14 +5403,16 @@ function candidateConfidence(
     label:
       score >= 80
         ? "HIGH"
+
         : score >= 55
           ? "MEDIUM"
+
           : "LOW"
   };
 }
 
 /* =========================================================
-   PRIORITY
+   WATCH PRIORITY — V83
    ========================================================= */
 
 function watchPriority(
@@ -4588,7 +5420,7 @@ function watchPriority(
   newTokens,
   liveTokens
 ) {
-  let score = 0;
+  let score = 1000;
 
   const address =
     normalize(
@@ -4605,19 +5437,12 @@ function watchPriority(
     return -10000;
   }
 
-  score += 1000;
-
   if (
     liveTokens?.has(
       address
     )
   ) {
-    /*
-     * V82:
-     * Live swap/liquidity activity receives
-     * the same strong priority as live initialize discovery.
-     */
-    score += 2000;
+    score += 2500;
   }
 
   if (
@@ -4625,16 +5450,40 @@ function watchPriority(
       address
     )
   ) {
-    score += 1200;
+    score += 1500;
   }
 
   if (
-    !safeNumber(
-      watched.lastCheckedAt
-    )
+    watched.metadata
+      ?.validERC20
   ) {
-    score += 500;
-  } else {
+    score += 200;
+  }
+
+  const lastLive =
+    safeNumber(
+      watched.lastLiveSeenAt
+    );
+
+  if (
+    lastLive &&
+    Date.now() -
+      lastLive <
+      30 * 60 * 1000
+  ) {
+    score += 250;
+  }
+
+  const lastChecked =
+    safeNumber(
+      watched.lastCheckedAt
+    );
+
+  if (!lastChecked) {
+    score += 600;
+  }
+
+  else {
     score +=
       Math.min(
         500,
@@ -4642,9 +5491,7 @@ function watchPriority(
         Math.floor(
           (
             Date.now() -
-            safeNumber(
-              watched.lastCheckedAt
-            )
+            lastChecked
           ) /
           60000
         )
@@ -4662,23 +5509,46 @@ function watchPriority(
     age <
       30 * 60 * 1000
   ) {
-    score += 175;
-  } else if (
+    score += 200;
+  }
+
+  else if (
     age >= 0 &&
     age <
       60 * 60 * 1000
   ) {
-    score += 100;
+    score += 125;
+  }
+
+  else if (
+    age >
+    6 * 60 * 60 * 1000
+  ) {
+    score -= 100;
   }
 
   score +=
     Math.min(
-      60,
+      80,
 
       (
         watched.pools
-          ?.length || 0
-      ) * 12
+          ?.length ||
+        0
+      ) * 15
+    );
+
+  /*
+   * Tokens repeatedly failing ERC20 validation gradually lose
+   * retention priority.
+   */
+  score -=
+    Math.min(
+      900,
+
+      safeNumber(
+        watched.invalidChecks
+      ) * 300
     );
 
   return score;
@@ -4750,40 +5620,67 @@ function analysisPriority(
 }
 
 /* =========================================================
-   TELEGRAM — V82 BUDGETED
+   TELEGRAM
    ========================================================= */
 
 function escapeHtml(value) {
   return String(
     value ?? ""
   )
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
+    .replace(
+      /&/g,
+      "&amp;"
+    )
+    .replace(
+      /</g,
+      "&lt;"
+    )
+    .replace(
+      />/g,
+      "&gt;"
+    )
+    .replace(
+      /"/g,
+      "&quot;"
+    )
+    .replace(
+      /'/g,
+      "&#039;"
+    );
 }
 
 function formatNumber(value) {
   const n =
     safeNumber(value);
 
-  if (n >= 1e9) {
+  if (
+    n >= 1e9
+  ) {
     return (
-      n / 1e9
-    ).toFixed(2) + "B";
+      n /
+      1e9
+    ).toFixed(2) +
+      "B";
   }
 
-  if (n >= 1e6) {
+  if (
+    n >= 1e6
+  ) {
     return (
-      n / 1e6
-    ).toFixed(2) + "M";
+      n /
+      1e6
+    ).toFixed(2) +
+      "M";
   }
 
-  if (n >= 1e3) {
+  if (
+    n >= 1e3
+  ) {
     return (
-      n / 1e3
-    ).toFixed(2) + "K";
+      n /
+      1e3
+    ).toFixed(2) +
+      "K";
   }
 
   return n.toFixed(2);
@@ -4807,12 +5704,6 @@ async function sendTelegram(
     };
   }
 
-  /*
-   * V82:
-   * Production scan notifications count against the
-   * hard request budget. Manual /test-telegram can call
-   * this function without a scan budget.
-   */
   if (budget) {
     if (
       !consumeBudget(
@@ -4835,8 +5726,10 @@ async function sendTelegram(
     const response =
       await fetch(
         `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+
         {
-          method: "POST",
+          method:
+            "POST",
 
           headers: {
             "content-type":
@@ -4875,7 +5768,9 @@ async function sendTelegram(
 
       data
     };
-  } catch (error) {
+  }
+
+  catch (error) {
     return {
       success: false,
 
@@ -4936,7 +5831,7 @@ function telegramMessage(
   candidate
 ) {
   const lines = [
-    "🚨 <b>ROBINHOOD MEME HUNTER V82</b>",
+    "🚨 <b>ROBINHOOD MEME HUNTER V83</b>",
     ""
   ];
 
@@ -4961,10 +5856,10 @@ function telegramMessage(
   lines.push(
     `<b>${escapeHtml(
       candidate.name ||
-        "Unknown Token"
+      "Unknown Token"
     )} (${escapeHtml(
       candidate.symbol ||
-        "UNKNOWN"
+      "UNKNOWN"
     )})</b>`,
 
     "",
@@ -5009,18 +5904,24 @@ function telegramMessage(
 
     `Buy Pressure: <b>${
       candidate.market
-        ?.buyPressure1h !== null &&
+        ?.buyPressure1h !==
+          null &&
       candidate.market
-        ?.buyPressure1h !== undefined
+        ?.buyPressure1h !==
+          undefined
         ? candidate.market
             .buyPressure1h
-            .toFixed(1) + "%"
+            .toFixed(1) +
+          "%"
         : "UNVERIFIED"
     }</b>`,
 
     `Holders: <b>${
       candidate.holders
-        ?.verified
+        ?.countersVerified &&
+      candidate.holders
+        ?.holderCount !==
+          null
         ? formatNumber(
             candidate.holders
               .holderCount
@@ -5104,8 +6005,11 @@ async function analyzeToken(
     return {
       address,
 
-      validERC20: false,
-      analysisDeferred: true,
+      validERC20:
+        false,
+
+      analysisDeferred:
+        true,
 
       validation,
 
@@ -5129,8 +6033,11 @@ async function analyzeToken(
     return {
       address,
 
-      validERC20: false,
-      analysisDeferred: false,
+      validERC20:
+        false,
+
+      analysisDeferred:
+        false,
 
       validation,
 
@@ -5157,8 +6064,11 @@ async function analyzeToken(
     return {
       address,
 
-      validERC20: false,
-      analysisDeferred: false,
+      validERC20:
+        false,
+
+      analysisDeferred:
+        false,
 
       infrastructureToken:
         true,
@@ -5172,6 +6082,7 @@ async function analyzeToken(
 
   let market = {
     verified: false,
+
     status:
       "LOOKUP_SKIPPED"
   };
@@ -5267,8 +6178,11 @@ async function analyzeToken(
     totalSupply:
       validation.totalSupply,
 
-    validERC20: true,
-    analysisDeferred: false,
+    validERC20:
+      true,
+
+    analysisDeferred:
+      false,
 
     validation,
     market,
@@ -5310,8 +6224,7 @@ async function analyzeToken(
       candidate
     );
 
-  candidate
-    .analysisPriority =
+  candidate.analysisPriority =
     analysisPriority(
       candidate
     );
@@ -5320,23 +6233,26 @@ async function analyzeToken(
 }
 
 /* =========================================================
-   LIVE / BACKLOG RANGES
+   LIVE RANGE
    ========================================================= */
 
 function liveRange(
   latest
 ) {
-  const to = latest;
+  const to =
+    latest;
 
   const from =
     latest -
       BigInt(
-        LIVE_SCAN_BLOCKS - 1
+        LIVE_SCAN_BLOCKS -
+        1
       ) >=
     0n
       ? latest -
         BigInt(
-          LIVE_SCAN_BLOCKS - 1
+          LIVE_SCAN_BLOCKS -
+          1
         )
       : 0n;
 
@@ -5346,32 +6262,27 @@ function liveRange(
   };
 }
 
-function backlogRange(
+function backlogStart(
   lastScanned,
   latest
 ) {
-  let from;
-
   if (
-    lastScanned === null ||
-    lastScanned === undefined
+    lastScanned ===
+      null ||
+    lastScanned ===
+      undefined
   ) {
-    from =
-      latest >
-      BigInt(
-        CATCHUP_TARGET_BLOCKS
-      )
-        ? latest -
-          BigInt(
-            CATCHUP_TARGET_BLOCKS
-          )
-        : 0n;
-  } else {
-    from =
-      BigInt(
-        lastScanned
-      ) + 1n;
+    return latest >
+      2000n
+      ? latest -
+        2000n
+      : 0n;
   }
+
+  const from =
+    BigInt(
+      lastScanned
+    ) + 1n;
 
   if (
     from > latest
@@ -5379,28 +6290,17 @@ function backlogRange(
     return null;
   }
 
-  const targetTo =
-    from +
-    BigInt(
-      CATCHUP_TARGET_BLOCKS -
-        1
-    );
-
-  return {
-    from,
-
-    to:
-      targetTo < latest
-        ? targetTo
-        : latest
-  };
+  return from;
 }
 
 /* =========================================================
-   MAIN SCAN — V82
+   MAIN SCAN — V83
    ========================================================= */
 
-async function scan(env) {
+async function scan(
+  env,
+  options = {}
+) {
   const startedAt =
     Date.now();
 
@@ -5413,13 +6313,39 @@ async function scan(env) {
   const state =
     stateResult.state;
 
-  /*
-   * Do not trim before new discovery is priority-sorted.
-   */
   pruneState(
     state,
     false
   );
+
+  const scheduled =
+    Boolean(
+      options.scheduled
+    );
+
+  /*
+   * V83 CRON HEARTBEAT.
+   *
+   * This proves whether Cloudflare's five-minute scheduled
+   * trigger is actually firing even when zero Telegram calls
+   * qualify.
+   */
+  if (scheduled) {
+    state.scheduler =
+      state.scheduler ||
+      {};
+
+    state.scheduler
+      .scheduledRunCount =
+      safeNumber(
+        state.scheduler
+          .scheduledRunCount
+      ) + 1;
+
+    state.scheduler
+      .lastScheduledRunAt =
+      Date.now();
+  }
 
   const latest =
     await latestBlock(
@@ -5451,8 +6377,11 @@ async function scan(env) {
   const liveTokens =
     new Set();
 
-  let liveError = null;
-  let backlogError = null;
+  let liveError =
+    null;
+
+  let backlogError =
+    null;
 
   /* =======================================================
      LIVE FIRST
@@ -5473,11 +6402,6 @@ async function scan(env) {
       "discovery-live"
     );
 
-  /*
-   * V82:
-   * Process any successfully retrieved ranges even if
-   * another split range failed afterwards.
-   */
   const liveDiscovery =
     processDiscoveryLogs(
       state,
@@ -5489,19 +6413,20 @@ async function scan(env) {
     const token
     of liveDiscovery.newTokens
   ) {
-    newTokens.add(token);
+    newTokens.add(
+      token
+    );
   }
 
   for (
     const token
     of liveDiscovery.seenTokens
   ) {
-    liveTokens.add(token);
+    liveTokens.add(
+      token
+    );
   }
 
-  /*
-   * Detect live activity from already-known pools.
-   */
   const liveActivity =
     activeTokensFromLogs(
       state,
@@ -5512,7 +6437,9 @@ async function scan(env) {
     const token
     of liveActivity.tokens
   ) {
-    liveTokens.add(token);
+    liveTokens.add(
+      token
+    );
   }
 
   if (
@@ -5520,17 +6447,19 @@ async function scan(env) {
   ) {
     state.lastLiveScannedBlock =
       latestNumber;
-  } else {
+  }
+
+  else {
     liveError =
       liveScan.error;
   }
 
   /* =======================================================
-     BACKLOG
+     BACKLOG — SEQUENTIAL V83
      ======================================================= */
 
-  const backlog =
-    backlogRange(
+  const backlogFrom =
+    backlogStart(
       previousBacklogCursor,
       latest.block
     );
@@ -5544,32 +6473,25 @@ async function scan(env) {
     seenTokens: new Set()
   };
 
-  let backlogProcessedThrough =
+  let backlogResult =
     null;
 
   if (
-    backlog &&
+    backlogFrom !== null &&
     budgetAvailable(
       budget,
       "discovery-backlog"
     )
   ) {
-    const result =
-      await scanLogRange(
+    backlogResult =
+      await scanBacklogSequential(
         env,
-        backlog.from,
-        backlog.to,
+        backlogFrom,
+        latest.block,
         budget,
-        backlogOutput,
-        "discovery-backlog"
+        backlogOutput
       );
 
-    /*
-     * V82:
-     * Always process logs that were successfully fetched.
-     * This prevents safe partial progress from losing
-     * discovered pools/tokens.
-     */
     backlogDiscovery =
       processDiscoveryLogs(
         state,
@@ -5581,61 +6503,39 @@ async function scan(env) {
       const token
       of backlogDiscovery.newTokens
     ) {
-      newTokens.add(token);
+      newTokens.add(
+        token
+      );
     }
 
     if (
-      result.success
+      backlogResult
+        .processedThrough !==
+        null
     ) {
-      backlogProcessedThrough =
-        result.processedThrough;
-
       state.lastScannedBlock =
         Number(
-          result.processedThrough
+          backlogResult
+            .processedThrough
         );
-    } else {
+    }
+
+    if (
+      backlogResult.error
+    ) {
       backlogError =
-        result.error;
-
-      /*
-       * V82:
-       * If recursive scanning completed a contiguous prefix
-       * before failing on the right side, advance only through
-       * that safe prefix. The next run starts on the failed side.
-       */
-      if (
-        result.processedThrough !==
-          null &&
-        result.processedThrough !==
-          undefined &&
-        BigInt(
-          result.processedThrough
-        ) >= backlog.from
-      ) {
-        backlogProcessedThrough =
-          BigInt(
-            result.processedThrough
-          );
-
-        state.lastScannedBlock =
-          Number(
-            backlogProcessedThrough
-          );
-      } else {
-        state.lastScannedBlock =
-          previousBacklogCursor;
-      }
+        backlogResult.error;
     }
   }
 
   /* =======================================================
-     PRIORITISE
+     PRIORITISE WATCHLIST
      ======================================================= */
 
   state.watchedTokens =
     uniqueBy(
       state.watchedTokens,
+
       token =>
         normalize(
           token.address
@@ -5656,9 +6556,6 @@ async function scan(env) {
       )
   );
 
-  /*
-   * Now it is safe to trim.
-   */
   state.watchedTokens =
     state.watchedTokens.slice(
       0,
@@ -5677,7 +6574,9 @@ async function scan(env) {
   ];
 
   const candidates = [];
-  const validationResults = [];
+
+  const validationResults =
+    [];
 
   let marketLookups = 0;
   let holderLookups = 0;
@@ -5693,19 +6592,10 @@ async function scan(env) {
   ) {
     const required =
       estimatedAnalysisCost(
+        env,
         watched
       );
 
-    /*
-     * V82:
-     * Protect candidates from half-analysis.
-     *
-     * Fresh token = reserve 8.
-     * Cached token = reserve 3.
-     *
-     * If not enough budget remains, leave lastCheckedAt alone
-     * so it receives another opportunity on the next run.
-     */
     if (
       !budgetAvailable(
         budget,
@@ -5721,8 +6611,11 @@ async function scan(env) {
             watched.address
           ),
 
-        validERC20: null,
-        deferred: true,
+        validERC20:
+          null,
+
+        deferred:
+          true,
 
         reason:
           "FULL_ANALYSIS_BUDGET_PROTECTED",
@@ -5752,6 +6645,7 @@ async function scan(env) {
         state,
         watched,
         activity,
+
         {
           newlyDiscovered:
             newTokens.has(
@@ -5765,10 +6659,6 @@ async function scan(env) {
         }
       );
 
-    /*
-     * V82:
-     * Do not mark budget-deferred tokens as checked.
-     */
     if (
       candidate
         .analysisDeferred
@@ -5778,23 +6668,16 @@ async function scan(env) {
       validationResults.push({
         address,
 
-        validERC20: null,
-        deferred: true,
+        validERC20:
+          null,
+
+        deferred:
+          true,
 
         reason:
           candidate.validation
             ?.reason ||
-          "ANALYSIS_DEFERRED",
-
-        name:
-          candidate.validation
-            ?.name ||
-          null,
-
-        symbol:
-          candidate.validation
-            ?.symbol ||
-          null
+          "ANALYSIS_DEFERRED"
       });
 
       continue;
@@ -5808,13 +6691,20 @@ async function scan(env) {
         watched.checks
       ) + 1;
 
+    watched.lastValidationReason =
+      candidate.validation
+        ?.reason ||
+      candidate.reason ||
+      null;
+
     validationResults.push({
       address,
 
       validERC20:
         candidate.validERC20,
 
-      deferred: false,
+      deferred:
+        false,
 
       reason:
         candidate.validation
@@ -5836,11 +6726,20 @@ async function scan(env) {
     if (
       !candidate.validERC20
     ) {
+      watched.invalidChecks =
+        safeNumber(
+          watched.invalidChecks
+        ) + 1;
+
       continue;
     }
 
+    watched.invalidChecks =
+      0;
+
     watched.metadata = {
-      validERC20: true,
+      validERC20:
+        true,
 
       name:
         candidate.name,
@@ -5967,7 +6866,8 @@ async function scan(env) {
     ) {
       telegramResults.push({
         address,
-        sent: false,
+        sent:
+          false,
 
         reason:
           "ALERT_COOLDOWN"
@@ -5984,7 +6884,8 @@ async function scan(env) {
     ) {
       telegramResults.push({
         address,
-        sent: false,
+        sent:
+          false,
 
         reason:
           "NOTIFICATION_BUDGET_EXHAUSTED"
@@ -6043,19 +6944,16 @@ async function scan(env) {
     true
   );
 
-  const save =
-    await writeState(
-      env,
-      state
-    );
-
   const currentCursor =
     state.lastScannedBlock;
 
   const backlogRemaining =
-    currentCursor === null ||
-    currentCursor === undefined
+    currentCursor ===
+      null ||
+    currentCursor ===
+      undefined
       ? null
+
       : Math.max(
           0,
 
@@ -6077,13 +6975,45 @@ async function scan(env) {
       "LIVE_SCAN_COMPLETE_CATCHUP_CONTINUING";
   }
 
-  if (
-    liveError ||
-    backlogError
+  /*
+   * Backlog budget stopping is now normal catch-up behaviour,
+   * not automatically a failed scan.
+   */
+  if (liveError) {
+    status =
+      "PARTIAL_SCAN_FAILED_LIVE_RANGE";
+  }
+
+  else if (
+    backlogError &&
+    !backlogResult
+      ?.processedThrough
   ) {
     status =
-      "PARTIAL_SCAN_FAILED_RANGE_PROTECTED";
+      "LIVE_SCAN_COMPLETE_BACKLOG_RETRY_PENDING";
   }
+
+  if (scheduled) {
+    state.scheduler
+      .lastScheduledStatus =
+      status;
+
+    state.scheduler
+      .lastScheduledLatestBlock =
+      latestNumber;
+
+    if (!liveError) {
+      state.scheduler
+        .lastScheduledSuccessAt =
+        Date.now();
+    }
+  }
+
+  const save =
+    await writeState(
+      env,
+      state
+    );
 
   return {
     agent:
@@ -6095,7 +7025,10 @@ async function scan(env) {
     status,
 
     scanMode:
-      "V82_TRUE_LIVE_FIRST_SAFE_PARTIAL_PROGRESS",
+      "V83_LIVE_FIRST_SEQUENTIAL_BACKLOG",
+
+    scheduledRun:
+      scheduled,
 
     durationMs:
       Date.now() -
@@ -6133,14 +7066,47 @@ async function scan(env) {
         state.lastLiveScannedBlock,
 
       backlogProcessedThrough:
-        backlogProcessedThrough !==
-          null
+        backlogResult
+          ?.processedThrough !==
+          null &&
+        backlogResult
+          ?.processedThrough !==
+          undefined
           ? Number(
-              backlogProcessedThrough
+              backlogResult
+                .processedThrough
             )
           : null,
 
       backlogRemaining
+    },
+
+    scheduler: {
+      scheduledRunCount:
+        safeNumber(
+          state.scheduler
+            ?.scheduledRunCount
+        ),
+
+      lastScheduledRunAt:
+        state.scheduler
+          ?.lastScheduledRunAt ||
+        null,
+
+      lastScheduledSuccessAt:
+        state.scheduler
+          ?.lastScheduledSuccessAt ||
+        null,
+
+      lastScheduledStatus:
+        state.scheduler
+          ?.lastScheduledStatus ||
+        null,
+
+      lastScheduledLatestBlock:
+        state.scheduler
+          ?.lastScheduledLatestBlock ||
+        null
     },
 
     requestBudget:
@@ -6196,25 +7162,59 @@ async function scan(env) {
           liveActivity
             .liquidityEvents,
 
+        unknownPoolCount:
+          liveActivity
+            .unknownPoolIds
+            .size,
+
+        unknownSwapEvents:
+          liveActivity
+            .unknownSwapEvents,
+
+        unknownLiquidityEvents:
+          liveActivity
+            .unknownLiquidityEvents,
+
+        unknownPoolIds:
+          Array.from(
+            liveActivity
+              .unknownPoolIds
+          ).slice(
+            0,
+            20
+          ),
+
         error:
           liveError,
 
         ranges:
-          liveOutput.ranges
+          liveOutput
+            .ranges
       },
 
       backlog:
-        backlog
+        backlogFrom !== null
           ? {
               fromBlock:
                 Number(
-                  backlog.from
+                  backlogFrom
                 ),
 
-              toBlock:
-                Number(
-                  backlog.to
-                ),
+              chunkSize:
+                BACKLOG_CHUNK_BLOCKS,
+
+              maximumChunks:
+                BACKLOG_MAX_CHUNKS_PER_SCAN,
+
+              chunksAttempted:
+                backlogResult
+                  ?.chunksAttempted ||
+                0,
+
+              chunksCompleted:
+                backlogResult
+                  ?.chunksCompleted ||
+                0,
 
               rawLogs:
                 backlogDiscovery
@@ -6234,13 +7234,32 @@ async function scan(env) {
 
               newTokens:
                 backlogDiscovery
-                  .newTokens.size,
+                  .newTokens
+                  .size,
 
               processedThrough:
-                backlogProcessedThrough !==
-                  null
+                backlogResult
+                  ?.processedThrough !==
+                  null &&
+                backlogResult
+                  ?.processedThrough !==
+                  undefined
                   ? Number(
-                      backlogProcessedThrough
+                      backlogResult
+                        .processedThrough
+                    )
+                  : null,
+
+              nextBlock:
+                backlogResult
+                  ?.nextBlock !==
+                  null &&
+                backlogResult
+                  ?.nextBlock !==
+                  undefined
+                  ? Number(
+                      backlogResult
+                        .nextBlock
                     )
                   : null,
 
@@ -6251,6 +7270,7 @@ async function scan(env) {
                 backlogOutput
                   .ranges
             }
+
           : null
     },
 
@@ -6264,8 +7284,13 @@ async function scan(env) {
       liveTokenCandidates:
         liveTokens.size,
 
+      unknownLivePools:
+        liveActivity
+          .unknownPoolIds
+          .size,
+
       liveActivityPromotion:
-        "ENABLED_V82"
+        "ENABLED_V83"
     },
 
     watchedTokens:
@@ -6282,8 +7307,10 @@ async function scan(env) {
       candidates.length,
 
     validationResults,
+
     marketLookups,
     holderLookups,
+
     candidates,
 
     qualifyingCandidates:
@@ -6295,31 +7322,45 @@ async function scan(env) {
 
     intelligence: {
       trueLiveFirstScanning:
-        "ENABLED_V82",
+        "ENABLED_V83",
+
+      alchemyFirstHeavyRPC:
+        env.ALCHEMY_API_KEY
+          ? "ENABLED_V83"
+          : "UNAVAILABLE",
 
       liveSwapActivityPriority:
-        "ENABLED_V82",
+        "ENABLED",
+
+      unknownLivePoolTelemetry:
+        "ENABLED_V83",
 
       persistentBacklogCursor:
         "ENABLED",
 
-      partialBacklogProgress:
-        "ENABLED_V82",
+      sequentialBacklogScanning:
+        "ENABLED_V83",
 
-      failedRangeProtection:
-        "ENABLED_V82",
+      backlogBudgetLockProtection:
+        "ENABLED_V83",
 
       hardPhaseIsolation:
-        "ENABLED_V82",
+        "ENABLED",
 
       telegramBudgetIsolation:
-        "ENABLED_V82",
+        "ENABLED",
 
-      freshERC20BudgetReservation:
-        "FIXED_V82",
+      fallbackAwareAnalysisBudget:
+        "ENABLED_V83",
 
       deferredAnalysisRetry:
-        "ENABLED_V82",
+        "ENABLED",
+
+      scheduledHeartbeat:
+        "ENABLED_V83",
+
+      smartWatchlistRetention:
+        "ENABLED_V83",
 
       metadataReuse:
         "ENABLED",
@@ -6336,14 +7377,14 @@ async function scan(env) {
       blockscout:
         "ENABLED",
 
+      blockscoutCounterFallback:
+        "ENABLED_V83",
+
       holderIntegrityValidation:
         "ENABLED",
 
       impossibleConcentrationProtection:
         "ENABLED",
-
-      holderValueParsing:
-        "HARDENED_V82",
 
       momentum:
         "ENABLED",
@@ -6362,7 +7403,7 @@ async function scan(env) {
     },
 
     architecture:
-      "V82_TRUE_LIVE_FIRST_SAFE_BUDGET_MULTI_SIGNAL_HUNTER",
+      "V83_LIVE_FIRST_SEQUENTIAL_BACKLOG_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -6398,13 +7439,35 @@ async function health(env) {
 
     provider =
       latest.provider;
-  } catch (err) {
+  }
+
+  catch (err) {
     error =
       errorString(err);
   }
 
   const state =
     stateResult.state;
+
+  pruneState(
+    state,
+    true
+  );
+
+  const lastScheduledRun =
+    safeNumber(
+      state.scheduler
+        ?.lastScheduledRunAt
+    );
+
+  const scheduledAgeMinutes =
+    lastScheduledRun
+      ? (
+          Date.now() -
+          lastScheduledRun
+        ) /
+        60000
+      : null;
 
   return {
     agent:
@@ -6477,11 +7540,48 @@ async function health(env) {
       snapshotTokens:
         Object.keys(
           state.snapshots ||
-            {}
+          {}
         ).length,
 
       stateError:
         stateResult.error
+    },
+
+    scheduler: {
+      scheduledRunCount:
+        safeNumber(
+          state.scheduler
+            ?.scheduledRunCount
+        ),
+
+      lastScheduledRunAt:
+        state.scheduler
+          ?.lastScheduledRunAt ||
+        null,
+
+      lastScheduledSuccessAt:
+        state.scheduler
+          ?.lastScheduledSuccessAt ||
+        null,
+
+      lastScheduledStatus:
+        state.scheduler
+          ?.lastScheduledStatus ||
+        null,
+
+      lastScheduledLatestBlock:
+        state.scheduler
+          ?.lastScheduledLatestBlock ||
+        null,
+
+      minutesSinceScheduledRun:
+        scheduledAgeMinutes,
+
+      fiveMinuteCronLikelyActive:
+        scheduledAgeMinutes !==
+          null &&
+        scheduledAgeMinutes <=
+          10
     },
 
     telegram: {
@@ -6513,7 +7613,7 @@ async function health(env) {
       ),
 
     architecture:
-      "V82_TRUE_LIVE_FIRST_SAFE_BUDGET_MULTI_SIGNAL_HUNTER",
+      "V83_LIVE_FIRST_SEQUENTIAL_BACKLOG_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -6540,7 +7640,8 @@ async function rpcTest(env) {
 
     const from =
       latest.block > 2n
-        ? latest.block - 2n
+        ? latest.block -
+          2n
         : 0n;
 
     const logs =
@@ -6598,7 +7699,9 @@ async function rpcTest(env) {
       timestamp:
         now()
     };
-  } catch (error) {
+  }
+
+  catch (error) {
     return {
       agent:
         "Robinhood Chain Meme Hunter",
@@ -6627,9 +7730,7 @@ async function rpcTest(env) {
    STATE
    ========================================================= */
 
-async function stateStatus(
-  env
-) {
+async function stateStatus(env) {
   const result =
     await readState(env);
 
@@ -6640,6 +7741,12 @@ async function stateStatus(
     state,
     true
   );
+
+  const lastScheduled =
+    safeNumber(
+      state.scheduler
+        ?.lastScheduledRunAt
+    );
 
   return {
     agent:
@@ -6666,6 +7773,43 @@ async function stateStatus(
     lastLiveScannedBlock:
       state.lastLiveScannedBlock,
 
+    scheduler: {
+      scheduledRunCount:
+        safeNumber(
+          state.scheduler
+            ?.scheduledRunCount
+        ),
+
+      lastScheduledRunAt:
+        state.scheduler
+          ?.lastScheduledRunAt ||
+        null,
+
+      lastScheduledSuccessAt:
+        state.scheduler
+          ?.lastScheduledSuccessAt ||
+        null,
+
+      lastScheduledStatus:
+        state.scheduler
+          ?.lastScheduledStatus ||
+        null,
+
+      lastScheduledLatestBlock:
+        state.scheduler
+          ?.lastScheduledLatestBlock ||
+        null,
+
+      minutesSinceScheduledRun:
+        lastScheduled
+          ? (
+              Date.now() -
+              lastScheduled
+            ) /
+            60000
+          : null
+    },
+
     watchedTokenCount:
       state.watchedTokens
         .length,
@@ -6691,6 +7835,16 @@ async function stateStatus(
               token.checks
             ),
 
+          invalidChecks:
+            safeNumber(
+              token.invalidChecks
+            ),
+
+          lastValidationReason:
+            token
+              .lastValidationReason ||
+            null,
+
           firstSeenAt:
             token.firstSeenAt,
 
@@ -6706,20 +7860,21 @@ async function stateStatus(
 
           poolCount:
             token.pools
-              ?.length || 0
+              ?.length ||
+            0
         })
       ),
 
     snapshotTokenCount:
       Object.keys(
         state.snapshots ||
-          {}
+        {}
       ).length,
 
     alertHistoryCount:
       Object.keys(
         state.alerts ||
-          {}
+        {}
       ).length,
 
     updatedAt:
@@ -6734,14 +7889,26 @@ async function stateStatus(
    DIAGNOSTICS
    ========================================================= */
 
-async function diagnostics(
-  env
-) {
+async function diagnostics(env) {
   const state =
     await readState(env);
 
   const rpcResult =
     await rpcTest(env);
+
+  const scheduledAge =
+    state.state?.scheduler
+      ?.lastScheduledRunAt
+      ? (
+          Date.now() -
+          safeNumber(
+            state.state
+              .scheduler
+              .lastScheduledRunAt
+          )
+        ) /
+        60000
+      : null;
 
   return {
     agent:
@@ -6758,6 +7925,7 @@ async function diagnostics(
         ? state.persistent
           ? "READY"
           : "READY_WITH_KV_FIX_REQUIRED"
+
         : "DEGRADED",
 
     checks: {
@@ -6801,6 +7969,29 @@ async function diagnostics(
           state.error
       },
 
+      scheduler: {
+        scheduledRunCount:
+          safeNumber(
+            state.state
+              ?.scheduler
+              ?.scheduledRunCount
+          ),
+
+        lastScheduledRunAt:
+          state.state
+            ?.scheduler
+            ?.lastScheduledRunAt ||
+          null,
+
+        minutesSinceScheduledRun:
+          scheduledAge,
+
+        fiveMinuteCronLikelyActive:
+          scheduledAge !==
+            null &&
+          scheduledAge <= 10
+      },
+
       telegram: {
         configured:
           Boolean(
@@ -6816,35 +8007,49 @@ async function diagnostics(
         configured:
           Boolean(
             env.ALCHEMY_API_KEY
+          ),
+
+        heavyRpcPreferred:
+          Boolean(
+            env.ALCHEMY_API_KEY
           )
       },
 
-      v82: {
+      v83: {
         trueLiveFirst:
           true,
+
+        sequentialBacklog:
+          true,
+
+        backlogChunkBlocks:
+          BACKLOG_CHUNK_BLOCKS,
+
+        backlogMaxChunks:
+          BACKLOG_MAX_CHUNKS_PER_SCAN,
 
         liveSwapActivityPriority:
           true,
 
-        separateBacklogCursor:
+        unknownPoolTelemetry:
           true,
 
-        safePartialBacklogProgress:
-          true,
-
-        failedRangeProtection:
+        safeBacklogCursor:
           true,
 
         hardPhaseIsolation:
           true,
 
-        telegramBudgetIsolation:
+        fallbackAwareAnalysisBudget:
           true,
 
-        fiveRequestERC20Reservation:
+        blockscoutCounterFallback:
           true,
 
-        deferredAnalysisRetry:
+        scheduledHeartbeat:
+          true,
+
+        smarterWatchlistRetention:
           true,
 
         metadataReuse:
@@ -6862,16 +8067,13 @@ async function diagnostics(
         holderIntegrityValidation:
           true,
 
-        holderValueParsingHardened:
-          true,
-
         impossibleConcentrationProtection:
           true
       }
     },
 
     architecture:
-      "V82_TRUE_LIVE_FIRST_SAFE_BUDGET_MULTI_SIGNAL_HUNTER",
+      "V83_LIVE_FIRST_SEQUENTIAL_BACKLOG_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -6882,30 +8084,25 @@ async function diagnostics(
    TELEGRAM TEST
    ========================================================= */
 
-async function telegramTest(
-  env
-) {
+async function telegramTest(env) {
   const message =
-`✅ <b>Robinhood Chain Meme Hunter V82</b>
+`✅ <b>Robinhood Chain Meme Hunter V83</b>
 
 Telegram connection test successful.
 
 ⚡ True live-first scanning enabled
-🔥 Live swap/activity promotion enabled
-📚 Historical catch-up enabled
-🛡 Protected analysis budget enabled
+🔥 Live V4 activity tracking enabled
+📚 Sequential backlog catch-up enabled
+🛡 Improved analysis budget enabled
 🔁 Deferred-token retry enabled
 🐋 Whale-flow tracking enabled
 📈 Momentum tracking enabled
 🔍 Holder-integrity protection enabled
-📨 Telegram scan-budget protection enabled
+🧭 Blockscout holder fallback enabled
+⏱ Scheduled-run heartbeat enabled
 
 No fake token alert was generated by this test.`;
 
-  /*
-   * Manual connectivity test does not use the scan's request
-   * budget because this route performs only the requested test.
-   */
   const result =
     await sendTelegram(
       env,
@@ -6945,10 +8142,18 @@ async function runAll(env) {
     Date.now();
 
   const result =
-    await scan(env);
+    await scan(
+      env,
+      {
+        scheduled:
+          false
+      }
+    );
 
   const state =
-    await stateStatus(env);
+    await stateStatus(
+      env
+    );
 
   return {
     agent:
@@ -6997,7 +8202,8 @@ async function handleRequest(
       .replace(
         /\/+$/,
         ""
-      ) || "/";
+      ) ||
+    "/";
 
   if (
     request.method ===
@@ -7006,7 +8212,8 @@ async function handleRequest(
     return new Response(
       null,
       {
-        status: 204,
+        status:
+          204,
 
         headers: {
           "access-control-allow-origin":
@@ -7043,6 +8250,7 @@ async function handleRequest(
         timestamp:
           now()
       },
+
       405
     );
   }
@@ -7068,7 +8276,13 @@ async function handleRequest(
     path === "/scan"
   ) {
     return jsonResponse(
-      await scan(env)
+      await scan(
+        env,
+        {
+          scheduled:
+            false
+        }
+      )
     );
   }
 
@@ -7076,7 +8290,9 @@ async function handleRequest(
     path === "/state"
   ) {
     return jsonResponse(
-      await stateStatus(env)
+      await stateStatus(
+        env
+      )
     );
   }
 
@@ -7085,7 +8301,9 @@ async function handleRequest(
     "/diagnostics"
   ) {
     return jsonResponse(
-      await diagnostics(env)
+      await diagnostics(
+        env
+      )
     );
   }
 
@@ -7102,7 +8320,9 @@ async function handleRequest(
     "/test-telegram"
   ) {
     return jsonResponse(
-      await telegramTest(env)
+      await telegramTest(
+        env
+      )
     );
   }
 
@@ -7133,6 +8353,7 @@ async function handleRequest(
       timestamp:
         now()
     },
+
     404
   );
 }
@@ -7141,19 +8362,27 @@ async function handleRequest(
    SCHEDULED
    ========================================================= */
 
-async function scheduledScan(
-  env
-) {
+async function scheduledScan(env) {
   const result =
-    await scan(env);
+    await scan(
+      env,
+      {
+        scheduled:
+          true
+      }
+    );
 
   console.log(
     JSON.stringify({
       event:
-        "V82_SCHEDULED_SCAN",
+        "V83_SCHEDULED_SCAN",
 
       status:
         result.status,
+
+      scheduledRunCount:
+        result.scheduler
+          ?.scheduledRunCount,
 
       latestBlock:
         result.latestBlock,
@@ -7162,9 +8391,17 @@ async function scheduledScan(
         result.persistence
           ?.backlogRemaining,
 
+      backlogProcessedThrough:
+        result.persistence
+          ?.backlogProcessedThrough,
+
       liveTokenCandidates:
         result.v4
           ?.liveTokenCandidates,
+
+      unknownLivePools:
+        result.v4
+          ?.unknownLivePools,
 
       newTokenCandidates:
         result.v4
@@ -7190,7 +8427,8 @@ async function scheduledScan(
 
       notifications:
         result.requestBudget
-          ?.notification?.used,
+          ?.notification
+          ?.used,
 
       timestamp:
         now()
@@ -7215,9 +8453,11 @@ export default {
         request,
         env
       );
-    } catch (error) {
+    }
+
+    catch (error) {
       console.error(
-        "V82 request failed",
+        "V83 request failed",
         error
       );
 
@@ -7233,14 +8473,17 @@ export default {
             false,
 
           error:
-            errorString(error),
+            errorString(
+              error
+            ),
 
           architecture:
-            "V82_TRUE_LIVE_FIRST_SAFE_BUDGET_MULTI_SIGNAL_HUNTER",
+            "V83_LIVE_FIRST_SEQUENTIAL_BACKLOG_MULTI_SIGNAL_HUNTER",
 
           timestamp:
             now()
         },
+
         500
       );
     }
