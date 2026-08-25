@@ -1,30 +1,39 @@
 /**
  * Robinhood Chain Meme Hunter
- * V71
+ * V72
  *
- * Compact full replacement for V70.
+ * Incremental upgrade from V71.
  *
- * Keeps:
+ * Keeps V71:
  * - Robinhood RPC + Alchemy fallback
- * - Uniswap V4 pool discovery
+ * - Uniswap V4 discovery
  * - Persistent KV block tracking
  * - Catch-up scanning
  * - Persistent token watch list
  * - ERC20 verification
- * - DexScreener market intelligence
- * - Blockscout holder intelligence
- * - Telegram alerts
- *
- * Adds:
+ * - DexScreener intelligence
+ * - Blockscout holders
  * - Whale concentration
- * - Whale accumulation/distribution candidates
  * - Smart-money candidate scoring
+ * - Telegram alerts
+ * - Duplicate/cooldown protection
  *
- * Smart money is NEVER labelled verified without
- * historical wallet-performance evidence.
+ * V72 adds/fixes:
+ * - /diagnostics restored
+ * - Single /run-all route to test everything
+ * - Better KV diagnostics
+ * - Pool-specific V4 activity instead of assigning all activity to every token
+ * - Candidate prioritisation
+ * - Watch-list rotation so the same first tokens aren't checked forever
+ * - Quote-token deprioritisation
+ * - Persistent scan-mode reporting
+ * - Failed-range protection: lastScannedBlock only advances through completed ranges
+ * - Better Blockscout parsing
+ * - Better bytes32 ERC20 name/symbol decoding
+ * - Telegram messages report V72
  */
 
-const VERSION = "V71";
+const VERSION = "V72";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -60,6 +69,11 @@ const SWAP_TOPIC =
 const MODIFY_LIQUIDITY_TOPIC =
   "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec";
 
+/*
+ * IMPORTANT:
+ * Keep the old state key so V72 continues using
+ * V69/V70/V71 persistent state instead of starting over.
+ */
 const STATE_KEY =
   "robinhood-meme-hunter-v69-state";
 
@@ -72,6 +86,8 @@ const MAX_HOLDER_LOOKUPS = 3;
 
 const WATCH_MAX_AGE =
   12 * 60 * 60 * 1000;
+
+const MAX_WATCHED_TOKENS = 50;
 
 const ALERT_COOLDOWN =
   6 * 60 * 60 * 1000;
@@ -112,11 +128,15 @@ function safeNumber(value) {
 }
 
 function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
+  return Math.max(
+    min,
+    Math.min(max, value)
+  );
 }
 
 function normalize(value) {
-  return String(value || "").toLowerCase();
+  return String(value || "")
+    .toLowerCase();
 }
 
 function isAddress(value) {
@@ -138,24 +158,45 @@ function topicAddress(topic) {
 }
 
 function knownQuote(address) {
-  return KNOWN_QUOTES.has(normalize(address));
+  return KNOWN_QUOTES.has(
+    normalize(address)
+  );
 }
 
 function money(value) {
   const n = safeNumber(value);
 
-  if (!n) return "UNVERIFIED";
+  if (!n) {
+    return "UNVERIFIED";
+  }
 
-  if (n >= 1e9)
-    return "$" + (n / 1e9).toFixed(2) + "B";
+  if (n >= 1e9) {
+    return "$" +
+      (n / 1e9).toFixed(2) +
+      "B";
+  }
 
-  if (n >= 1e6)
-    return "$" + (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e6) {
+    return "$" +
+      (n / 1e6).toFixed(2) +
+      "M";
+  }
 
-  if (n >= 1e3)
-    return "$" + (n / 1e3).toFixed(1) + "K";
+  if (n >= 1e3) {
+    return "$" +
+      (n / 1e3).toFixed(1) +
+      "K";
+  }
 
   return "$" + n.toFixed(2);
+}
+
+function errorString(error) {
+  return String(
+    error?.message ||
+    error ||
+    "UNKNOWN_ERROR"
+  );
 }
 
 
@@ -166,8 +207,8 @@ function money(value) {
 function getKV(env) {
   if (
     env.MEME_HUNTER_STATE &&
-    typeof env.MEME_HUNTER_STATE.get ===
-      "function"
+    typeof env.MEME_HUNTER_STATE.get === "function" &&
+    typeof env.MEME_HUNTER_STATE.put === "function"
   ) {
     return {
       kv: env.MEME_HUNTER_STATE,
@@ -177,8 +218,8 @@ function getKV(env) {
 
   if (
     env.KV_BINDING &&
-    typeof env.KV_BINDING.get ===
-      "function"
+    typeof env.KV_BINDING.get === "function" &&
+    typeof env.KV_BINDING.put === "function"
   ) {
     return {
       kv: env.KV_BINDING,
@@ -204,7 +245,10 @@ function newState() {
 }
 
 async function readState(env) {
-  const { kv, binding } = getKV(env);
+  const {
+    kv,
+    binding
+  } = getKV(env);
 
   if (!kv) {
     return {
@@ -216,7 +260,8 @@ async function readState(env) {
   }
 
   try {
-    const raw = await kv.get(STATE_KEY);
+    const raw =
+      await kv.get(STATE_KEY);
 
     if (!raw) {
       return {
@@ -227,7 +272,8 @@ async function readState(env) {
       };
     }
 
-    const parsed = JSON.parse(raw);
+    const parsed =
+      JSON.parse(raw);
 
     return {
       persistent: true,
@@ -235,32 +281,41 @@ async function readState(env) {
       state: {
         ...newState(),
         ...parsed,
+
         watchedTokens:
-          Array.isArray(parsed.watchedTokens)
+          Array.isArray(
+            parsed?.watchedTokens
+          )
             ? parsed.watchedTokens
             : [],
+
         alerts:
-          parsed.alerts &&
+          parsed?.alerts &&
           typeof parsed.alerts === "object"
             ? parsed.alerts
             : {}
       },
       error: null
     };
+
   } catch (error) {
     return {
       persistent: true,
       binding,
       state: newState(),
-      error: String(
-        error?.message || error
-      )
+      error: errorString(error)
     };
   }
 }
 
-async function writeState(env, state) {
-  const { kv, binding } = getKV(env);
+async function writeState(
+  env,
+  state
+) {
+  const {
+    kv,
+    binding
+  } = getKV(env);
 
   if (!kv) {
     return {
@@ -284,46 +339,76 @@ async function writeState(env, state) {
       binding,
       error: null
     };
+
   } catch (error) {
     return {
       saved: false,
       binding,
-      error: String(
-        error?.message || error
-      )
+      error: errorString(error)
     };
   }
 }
 
 function pruneState(state) {
-  const current = Date.now();
+  const current =
+    Date.now();
 
   state.watchedTokens =
     (state.watchedTokens || [])
-      .filter(
-        token =>
-          safeNumber(token.firstSeenAt) &&
+      .filter(token => {
+        const firstSeen =
+          safeNumber(
+            token.firstSeenAt
+          );
+
+        if (!firstSeen) {
+          return false;
+        }
+
+        return (
           current -
-            safeNumber(token.firstSeenAt) <
-            WATCH_MAX_AGE
-      )
-      .slice(0, 50);
+          firstSeen <
+          WATCH_MAX_AGE
+        );
+      })
+      .slice(
+        0,
+        MAX_WATCHED_TOKENS
+      );
+
+  state.alerts =
+    state.alerts &&
+    typeof state.alerts === "object"
+      ? state.alerts
+      : {};
 
   for (
-    const [address, timestamp]
-    of Object.entries(state.alerts || {})
+    const [
+      address,
+      timestamp
+    ] of Object.entries(
+      state.alerts
+    )
   ) {
     if (
-      current - safeNumber(timestamp) >
+      current -
+      safeNumber(timestamp) >
       ALERT_COOLDOWN
     ) {
-      delete state.alerts[address];
+      delete state.alerts[
+        address
+      ];
     }
   }
 }
 
-function addWatch(state, address, pool) {
-  const key = normalize(address);
+function addWatch(
+  state,
+  address,
+  pool
+) {
+  const key =
+    normalize(address);
 
   if (
     !isAddress(address) ||
@@ -334,25 +419,39 @@ function addWatch(state, address, pool) {
 
   let token =
     state.watchedTokens.find(
-      x => normalize(x.address) === key
+      item =>
+        normalize(
+          item.address
+        ) === key
     );
 
   if (!token) {
     token = {
       address,
-      firstSeenAt: Date.now(),
-      lastCheckedAt: null,
+      firstSeenAt:
+        Date.now(),
+      lastCheckedAt:
+        null,
       checks: 0,
       pools: []
     };
 
-    state.watchedTokens.push(token);
+    state.watchedTokens.push(
+      token
+    );
   }
+
+  token.pools =
+    Array.isArray(token.pools)
+      ? token.pools
+      : [];
 
   if (
     pool &&
     !token.pools.some(
-      x => x.poolId === pool.poolId
+      item =>
+        item.poolId ===
+        pool.poolId
     )
   ) {
     token.pools.push(pool);
@@ -374,36 +473,44 @@ async function rpcCall(
 
   const timer =
     setTimeout(
-      () => controller.abort(),
+      () =>
+        controller.abort(),
       4000
     );
 
   try {
-    const response = await fetch(
-      url,
-      {
-        method: "POST",
-        headers: {
-          "content-type":
-            "application/json"
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: Date.now(),
-          method,
-          params
-        }),
-        signal: controller.signal
-      }
-    );
+    const response =
+      await fetch(
+        url,
+        {
+          method: "POST",
+
+          headers: {
+            "content-type":
+              "application/json"
+          },
+
+          body:
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: Date.now(),
+              method,
+              params
+            }),
+
+          signal:
+            controller.signal
+        }
+      );
 
     if (!response.ok) {
       throw new Error(
-        `HTTP ${response.status}`
+        `HTTP_${response.status}`
       );
     }
 
-    const body = await response.json();
+    const body =
+      await response.json();
 
     if (body.error) {
       throw new Error(
@@ -413,12 +520,19 @@ async function rpcCall(
     }
 
     return body.result;
+
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function rpc(env, method, params) {
+async function rpc(
+  env,
+  method,
+  params
+) {
+  let publicError = null;
+
   try {
     return {
       result:
@@ -427,44 +541,61 @@ async function rpc(env, method, params) {
           method,
           params
         ),
+
       provider:
         "ROBINHOOD_PUBLIC_RPC",
+
       error: null
     };
-  } catch (publicError) {
-    if (!env.ALCHEMY_API_KEY) {
-      return {
-        result: null,
-        provider: null,
-        error:
-          String(publicError)
-      };
-    }
 
-    try {
-      return {
-        result:
-          await rpcCall(
-            ALCHEMY_BASE +
-              env.ALCHEMY_API_KEY,
-            method,
-            params
-          ),
-        provider: "ALCHEMY",
-        error: null
-      };
-    } catch (alchemyError) {
-      return {
-        result: null,
-        provider: null,
-        error:
-          String(alchemyError)
-      };
-    }
+  } catch (error) {
+    publicError =
+      errorString(error);
+  }
+
+  if (!env.ALCHEMY_API_KEY) {
+    return {
+      result: null,
+      provider: null,
+      error:
+        "PUBLIC_RPC_FAILED: " +
+        publicError
+    };
+  }
+
+  try {
+    return {
+      result:
+        await rpcCall(
+          ALCHEMY_BASE +
+          env.ALCHEMY_API_KEY,
+          method,
+          params
+        ),
+
+      provider:
+        "ALCHEMY",
+
+      error: null
+    };
+
+  } catch (error) {
+    return {
+      result: null,
+      provider: null,
+
+      error:
+        "PUBLIC_RPC_FAILED: " +
+        publicError +
+        " | ALCHEMY_FAILED: " +
+        errorString(error)
+    };
   }
 }
 
-async function latestBlock(env) {
+async function latestBlock(
+  env
+) {
   const result =
     await rpc(
       env,
@@ -480,8 +611,13 @@ async function latestBlock(env) {
   }
 
   return {
-    block: BigInt(result.result),
-    provider: result.provider
+    block:
+      BigInt(
+        result.result
+      ),
+
+    provider:
+      result.provider
   };
 }
 
@@ -495,10 +631,12 @@ async function getLogs(
     "eth_getLogs",
     [{
       fromBlock:
-        "0x" + from.toString(16),
+        "0x" +
+        from.toString(16),
 
       toBlock:
-        "0x" + to.toString(16),
+        "0x" +
+        to.toString(16),
 
       address:
         POOL_MANAGER
@@ -527,7 +665,10 @@ async function ethCall(
     );
 
   if (!result.result) {
-    throw new Error("ETH_CALL_FAILED");
+    throw new Error(
+      result.error ||
+      "ETH_CALL_FAILED"
+    );
   }
 
   return result.result;
@@ -541,55 +682,134 @@ function decodeUint(hex) {
   }
 }
 
-function decodeString(hex) {
+function decodeBytes32String(
+  hex
+) {
   try {
     const raw =
-      String(hex || "").slice(2);
+      String(hex || "")
+        .replace(/^0x/, "");
 
-    if (!raw) return null;
+    if (
+      raw.length !== 64
+    ) {
+      return null;
+    }
 
-    if (raw.length >= 128) {
-      const offset =
-        Number(
-          BigInt(
-            "0x" +
-            raw.slice(0, 64)
+    const bytes =
+      new Uint8Array(
+        raw.match(/.{2}/g)
+          .map(
+            value =>
+              parseInt(
+                value,
+                16
+              )
           )
-        ) * 2;
+      );
 
-      const length =
-        Number(
-          BigInt(
-            "0x" +
-            raw.slice(
-              offset,
-              offset + 64
-            )
-          )
-        );
-
-      const data =
-        raw.slice(
-          offset + 64,
-          offset + 64 +
-            length * 2
-        );
-
-      const bytes =
-        new Uint8Array(
-          data.match(/.{2}/g)
-            ?.map(x =>
-              parseInt(x, 16)
-            ) || []
-        );
-
-      return new TextDecoder()
+    const decoded =
+      new TextDecoder()
         .decode(bytes)
         .replace(/\0/g, "")
         .trim();
+
+    return decoded || null;
+
+  } catch {
+    return null;
+  }
+}
+
+function decodeString(hex) {
+  try {
+    const raw =
+      String(hex || "")
+        .slice(2);
+
+    if (!raw) {
+      return null;
     }
 
-    return null;
+    /*
+     * bytes32 fallback.
+     */
+    if (raw.length === 64) {
+      return decodeBytes32String(
+        "0x" + raw
+      );
+    }
+
+    if (raw.length < 128) {
+      return null;
+    }
+
+    const offset =
+      Number(
+        BigInt(
+          "0x" +
+          raw.slice(0, 64)
+        )
+      ) * 2;
+
+    if (
+      !Number.isFinite(offset) ||
+      offset < 0 ||
+      offset + 64 >
+        raw.length
+    ) {
+      return null;
+    }
+
+    const length =
+      Number(
+        BigInt(
+          "0x" +
+          raw.slice(
+            offset,
+            offset + 64
+          )
+        )
+      );
+
+    if (
+      !Number.isFinite(length) ||
+      length <= 0 ||
+      length > 1024
+    ) {
+      return null;
+    }
+
+    const data =
+      raw.slice(
+        offset + 64,
+        offset + 64 +
+        length * 2
+      );
+
+    const matches =
+      data.match(/.{2}/g) ||
+      [];
+
+    const bytes =
+      new Uint8Array(
+        matches.map(
+          value =>
+            parseInt(
+              value,
+              16
+            )
+        )
+      );
+
+    const decoded =
+      new TextDecoder()
+        .decode(bytes)
+        .replace(/\0/g, "")
+        .trim();
+
+    return decoded || null;
+
   } catch {
     return null;
   }
@@ -608,7 +828,8 @@ async function verifyERC20(
 
   if (
     !code.result ||
-    code.result === "0x"
+    code.result === "0x" ||
+    code.result === "0x0"
   ) {
     return {
       validERC20: false,
@@ -645,16 +866,19 @@ async function verifyERC20(
   } catch {}
 
   try {
-    decimals =
-      Number(
-        decodeUint(
-          await ethCall(
-            env,
-            address,
-            "0x313ce567"
-          )
+    const value =
+      decodeUint(
+        await ethCall(
+          env,
+          address,
+          "0x313ce567"
         )
       );
+
+    if (value !== null) {
+      decimals =
+        Number(value);
+    }
   } catch {}
 
   try {
@@ -671,12 +895,19 @@ async function verifyERC20(
   const score =
     (name ? 1 : 0) +
     (symbol ? 1 : 0) +
-    (Number.isFinite(decimals)
-      ? 1
-      : 0) +
-    (totalSupply > 0n
-      ? 1
-      : 0);
+    (
+      Number.isFinite(
+        decimals
+      )
+        ? 1
+        : 0
+    ) +
+    (
+      totalSupply !== null &&
+      totalSupply > 0n
+        ? 1
+        : 0
+    );
 
   if (score < 3) {
     return {
@@ -684,7 +915,8 @@ async function verifyERC20(
       reason:
         "ERC20_METHODS_NOT_VERIFIED",
       name,
-      symbol
+      symbol,
+      decimals
     };
   }
 
@@ -695,8 +927,11 @@ async function verifyERC20(
     name,
     symbol,
     decimals,
+
     totalSupply:
-      totalSupply.toString()
+      totalSupply !== null
+        ? totalSupply.toString()
+        : null
   };
 }
 
@@ -707,24 +942,32 @@ async function verifyERC20(
 
 function decodeInitialize(log) {
   if (
-    normalize(log?.topics?.[0]) !==
+    normalize(
+      log?.topics?.[0]
+    ) !==
     INITIALIZE_TOPIC
   ) {
     return null;
   }
 
   if (
-    !log.topics ||
+    !Array.isArray(
+      log.topics
+    ) ||
     log.topics.length < 4
   ) {
     return null;
   }
 
   const currency0 =
-    topicAddress(log.topics[2]);
+    topicAddress(
+      log.topics[2]
+    );
 
   const currency1 =
-    topicAddress(log.topics[3]);
+    topicAddress(
+      log.topics[3]
+    );
 
   if (
     !currency0 ||
@@ -734,13 +977,77 @@ function decodeInitialize(log) {
   }
 
   return {
-    poolId: log.topics[1],
+    poolId:
+      log.topics[1],
+
     currency0,
     currency1,
+
     blockNumber:
       log.blockNumber,
+
     transactionHash:
       log.transactionHash
+  };
+}
+
+function activityForToken(
+  watched,
+  logs
+) {
+  const poolIds =
+    new Set(
+      (watched.pools || [])
+        .map(
+          pool =>
+            normalize(
+              pool.poolId
+            )
+        )
+        .filter(Boolean)
+    );
+
+  let swaps = 0;
+  let liquidityEvents = 0;
+
+  for (const log of logs) {
+    const topic0 =
+      normalize(
+        log?.topics?.[0]
+      );
+
+    const poolId =
+      normalize(
+        log?.topics?.[1]
+      );
+
+    if (
+      !poolIds.size ||
+      !poolIds.has(poolId)
+    ) {
+      continue;
+    }
+
+    if (
+      topic0 ===
+      SWAP_TOPIC
+    ) {
+      swaps++;
+    }
+
+    if (
+      topic0 ===
+      MODIFY_LIQUIDITY_TOPIC
+    ) {
+      liquidityEvents++;
+    }
+  }
+
+  return {
+    swaps,
+    liquidityEvents,
+    poolSpecific:
+      poolIds.size > 0
   };
 }
 
@@ -749,7 +1056,9 @@ function decodeInitialize(log) {
    DEXSCREENER
    ========================================================= */
 
-async function marketData(token) {
+async function marketData(
+  token
+) {
   try {
     const response =
       await fetch(
@@ -796,7 +1105,8 @@ async function marketData(token) {
         )
     );
 
-    const p = pairs[0];
+    const p =
+      pairs[0];
 
     const buys1h =
       safeNumber(
@@ -809,20 +1119,24 @@ async function marketData(token) {
       );
 
     const total =
-      buys1h + sells1h;
+      buys1h +
+      sells1h;
 
     return {
       verified: true,
       status: "VERIFIED",
 
       pairAddress:
-        p?.pairAddress || null,
+        p?.pairAddress ||
+        null,
 
       url:
-        p?.url || null,
+        p?.url ||
+        null,
 
       priceUsd:
-        p?.priceUsd || null,
+        p?.priceUsd ||
+        null,
 
       liquidityUsd:
         safeNumber(
@@ -844,10 +1158,12 @@ async function marketData(token) {
           safeNumber(
             p?.volume?.m5
           ),
+
         h1:
           safeNumber(
             p?.volume?.h1
           ),
+
         h24:
           safeNumber(
             p?.volume?.h24
@@ -856,13 +1172,16 @@ async function marketData(token) {
 
       transactions: {
         h1: {
-          buys: buys1h,
-          sells: sells1h
+          buys:
+            buys1h,
+
+          sells:
+            sells1h
         }
       },
 
       buyPressure1h:
-        total
+        total > 0
           ? buys1h /
             total *
             100
@@ -873,15 +1192,14 @@ async function marketData(token) {
           p?.pairCreatedAt
         ) || null
     };
+
   } catch (error) {
     return {
       verified: false,
       status:
         "DEXSCREENER_ERROR",
       error:
-        String(
-          error?.message || error
-        )
+        errorString(error)
     };
   }
 }
@@ -891,7 +1209,9 @@ async function marketData(token) {
    BLOCKSCOUT + WHALES
    ========================================================= */
 
-async function blockscout(path) {
+async function blockscout(
+  path
+) {
   try {
     const response =
       await fetch(
@@ -909,6 +1229,7 @@ async function blockscout(path) {
     }
 
     return await response.json();
+
   } catch {
     return null;
   }
@@ -920,37 +1241,80 @@ function holderPercent(
 ) {
   try {
     const held =
-      BigInt(String(value));
+      BigInt(
+        String(value)
+      );
 
     const total =
-      BigInt(String(supply));
+      BigInt(
+        String(supply)
+      );
 
-    if (total <= 0n)
+    if (total <= 0n) {
       return null;
+    }
 
     return Number(
       held *
       1000000n /
       total
     ) / 10000;
+
   } catch {
     return null;
   }
+}
+
+function extractHolderAddress(
+  item
+) {
+  if (
+    typeof item?.address ===
+    "string"
+  ) {
+    return item.address;
+  }
+
+  if (
+    typeof item?.address?.hash ===
+    "string"
+  ) {
+    return item.address.hash;
+  }
+
+  if (
+    typeof item?.address_hash ===
+    "string"
+  ) {
+    return item.address_hash;
+  }
+
+  if (
+    typeof item?.address_hash?.hash ===
+    "string"
+  ) {
+    return item.address_hash.hash;
+  }
+
+  return null;
 }
 
 async function holderIntelligence(
   token,
   totalSupply
 ) {
-  const counters =
-    await blockscout(
+  const [
+    counters,
+    holders
+  ] = await Promise.all([
+    blockscout(
       `/api/v2/tokens/${token}/counters`
-    );
+    ),
 
-  const holders =
-    await blockscout(
+    blockscout(
       `/api/v2/tokens/${token}/holders`
-    );
+    )
+  ]);
 
   if (!counters) {
     return {
@@ -958,18 +1322,31 @@ async function holderIntelligence(
       holderCount: null,
       transferCount: null,
       topHolders: [],
+
       whale: {
         verified: false,
         whaleCount: null,
         top1Percent: null,
         top5Percent: null,
         top10Percent: null,
+
         concentrationRisk:
           "UNVERIFIED",
+
         flow:
-          "UNVERIFIED",
+          "NOT_VERIFIED",
+
+        accumulation:
+          "NOT_VERIFIED",
+
+        distribution:
+          "NOT_VERIFIED",
+
+        smartMoneyScore: 0,
+
         smartMoneyCandidate:
           false,
+
         smartMoneyVerified:
           false
       }
@@ -977,22 +1354,29 @@ async function holderIntelligence(
   }
 
   const items =
-    Array.isArray(holders?.items)
-      ? holders.items.slice(0, 10)
+    Array.isArray(
+      holders?.items
+    )
+      ? holders.items.slice(
+          0,
+          10
+        )
       : [];
 
   const topHolders =
     items.map(item => {
       const value =
         String(
-          item?.value || "0"
+          item?.value ||
+          item?.token?.value ||
+          "0"
         );
 
       return {
         address:
-          item?.address?.hash ||
-          item?.address_hash?.hash ||
-          null,
+          extractHolderAddress(
+            item
+          ),
 
         value,
 
@@ -1006,19 +1390,27 @@ async function holderIntelligence(
 
   const percentages =
     topHolders
-      .map(x => x.percentage)
-      .filter(x =>
-        Number.isFinite(x)
+      .map(
+        item =>
+          item.percentage
+      )
+      .filter(
+        value =>
+          Number.isFinite(
+            value
+          )
       );
 
   const top1 =
-    percentages[0] ?? null;
+    percentages[0] ??
+    null;
 
   const top5 =
     percentages
       .slice(0, 5)
       .reduce(
-        (a, b) => a + b,
+        (a, b) =>
+          a + b,
         0
       );
 
@@ -1026,49 +1418,56 @@ async function holderIntelligence(
     percentages
       .slice(0, 10)
       .reduce(
-        (a, b) => a + b,
+        (a, b) =>
+          a + b,
         0
       );
 
   const whales =
     topHolders.filter(
-      x =>
-        x.percentage !== null &&
-        x.percentage >= 1
+      item =>
+        item.percentage !==
+          null &&
+        item.percentage >= 1
     );
 
   let concentrationRisk =
     "LOW";
 
   if (
-    (top1 !== null &&
-      top1 >= 20) ||
+    (
+      top1 !== null &&
+      top1 >= 20
+    ) ||
     top10 >= 80
   ) {
     concentrationRisk =
       "HIGH";
+
   } else if (
-    (top1 !== null &&
-      top1 >= 10) ||
+    (
+      top1 !== null &&
+      top1 >= 10
+    ) ||
     top10 >= 60
   ) {
     concentrationRisk =
       "MEDIUM";
   }
 
-  /*
-   * V71:
-   * This is intentionally a candidate signal,
-   * not verified smart-money identification.
-   */
-
   let smartMoneyScore = 0;
 
-  if (whales.length >= 2)
+  if (
+    whales.length >= 2
+  ) {
     smartMoneyScore += 20;
+  }
 
-  if (whales.length >= 4)
+  if (
+    whales.length >= 4
+  ) {
     smartMoneyScore += 15;
+  }
 
   if (
     top10 > 0 &&
@@ -1093,13 +1492,17 @@ async function holderIntelligence(
     holderCount:
       safeNumber(
         counters
-          ?.token_holders_count
+          ?.token_holders_count ??
+        counters
+          ?.holders_count
       ),
 
     transferCount:
       safeNumber(
         counters
-          ?.transfers_count
+          ?.transfers_count ??
+        counters
+          ?.token_transfers_count
       ),
 
     topHolders,
@@ -1122,10 +1525,9 @@ async function holderIntelligence(
       concentrationRisk,
 
       /*
-       * Transfer-direction history is not
-       * claimed unless verified.
+       * V72 still refuses to fabricate
+       * wallet flow or verified smart money.
        */
-
       flow:
         "NOT_VERIFIED",
 
@@ -1162,13 +1564,17 @@ function scoreRisk(
 
   if (token.validERC20) {
     score -= 15;
+
     reasons.push(
       "Verified ERC-20"
     );
   }
 
-  if (activity.swaps > 0) {
+  if (
+    activity.swaps > 0
+  ) {
     score -= 7;
+
     reasons.push(
       "Active V4 swaps"
     );
@@ -1189,6 +1595,7 @@ function scoreRisk(
       1000
     ) {
       score += 15;
+
       reasons.push(
         "Very low liquidity"
       );
@@ -1204,6 +1611,7 @@ function scoreRisk(
       "HIGH"
     ) {
       score += 25;
+
       reasons.push(
         "High whale concentration"
       );
@@ -1221,20 +1629,30 @@ function scoreRisk(
       whale.top1Percent > 40
     ) {
       score += 15;
+
+      reasons.push(
+        "Extreme top-holder concentration"
+      );
     }
   }
 
   score =
-    clamp(score, 0, 100);
+    clamp(
+      score,
+      0,
+      100
+    );
 
   return {
     score,
+
     label:
       score >= 80
         ? "HIGH"
         : score >= 60
-        ? "MEDIUM"
-        : "LOW",
+          ? "MEDIUM"
+          : "LOW",
+
     reasons
   };
 }
@@ -1251,6 +1669,7 @@ function scoreOpportunity(
 
   if (token.validERC20) {
     score += 20;
+
     reasons.push(
       "Verified ERC-20"
     );
@@ -1263,10 +1682,13 @@ function scoreOpportunity(
     score += 5;
   }
 
-  if (activity.swaps > 0) {
+  if (
+    activity.swaps > 0
+  ) {
     score += 10;
+
     reasons.push(
-      "V4 activity detected"
+      "Pool-specific V4 swaps detected"
     );
   }
 
@@ -1275,6 +1697,10 @@ function scoreOpportunity(
     0
   ) {
     score += 5;
+
+    reasons.push(
+      "Pool liquidity activity"
+    );
   }
 
   if (market.verified) {
@@ -1295,14 +1721,14 @@ function scoreOpportunity(
     }
 
     if (
-      market.volume.h24 >=
+      market.volume?.h24 >=
       10000
     ) {
       score += 5;
     }
 
     if (
-      market.volume.h24 >=
+      market.volume?.h24 >=
       50000
     ) {
       score += 5;
@@ -1315,6 +1741,7 @@ function scoreOpportunity(
         60
     ) {
       score += 7;
+
       reasons.push(
         "Strong 1h buy pressure"
       );
@@ -1328,6 +1755,7 @@ function scoreOpportunity(
         5000000
     ) {
       score += 5;
+
       reasons.push(
         "Early market-cap range"
       );
@@ -1356,6 +1784,7 @@ function scoreOpportunity(
       "LOW"
     ) {
       score += 5;
+
       reasons.push(
         "Healthy whale concentration"
       );
@@ -1366,6 +1795,7 @@ function scoreOpportunity(
         ?.smartMoneyCandidate
     ) {
       score += 5;
+
       reasons.push(
         "Smart-money candidate pattern"
       );
@@ -1377,12 +1807,20 @@ function scoreOpportunity(
       "HIGH"
     ) {
       score -= 15;
+
+      reasons.push(
+        "Whale concentration penalty"
+      );
     }
   }
 
   return {
     score:
-      clamp(score, 0, 100),
+      clamp(
+        score,
+        0,
+        100
+      ),
 
     reasons
   };
@@ -1390,11 +1828,84 @@ function scoreOpportunity(
 
 
 /* =========================================================
+   WATCH PRIORITY
+   ========================================================= */
+
+function watchPriority(
+  watched
+) {
+  let score = 0;
+
+  if (
+    !knownQuote(
+      watched.address
+    )
+  ) {
+    score += 1000;
+  }
+
+  /*
+   * Prefer tokens checked least recently.
+   */
+  const lastChecked =
+    safeNumber(
+      watched.lastCheckedAt
+    );
+
+  if (!lastChecked) {
+    score += 500;
+  } else {
+    score += Math.min(
+      400,
+      Math.floor(
+        (
+          Date.now() -
+          lastChecked
+        ) /
+        60000
+      )
+    );
+  }
+
+  /*
+   * Newer discoveries get a small boost.
+   */
+  const age =
+    Date.now() -
+    safeNumber(
+      watched.firstSeenAt
+    );
+
+  if (
+    age >= 0 &&
+    age < 60 * 60 * 1000
+  ) {
+    score += 100;
+  }
+
+  score +=
+    Math.min(
+      50,
+      (
+        watched.pools?.length ||
+        0
+      ) * 10
+    );
+
+  return score;
+}
+
+
+/* =========================================================
    TELEGRAM
    ========================================================= */
 
-function alerted(state, address) {
-  const key = normalize(address);
+function alerted(
+  state,
+  address
+) {
+  const key =
+    normalize(address);
 
   const persistent =
     safeNumber(
@@ -1411,7 +1922,9 @@ function alerted(state, address) {
   }
 
   const memory =
-    MEMORY_ALERTS.get(key);
+    MEMORY_ALERTS.get(
+      key
+    );
 
   return Boolean(
     memory &&
@@ -1496,10 +2009,28 @@ async function telegram(
   }
 
   const whale =
-    candidate.holders?.whale;
+    candidate
+      .holders
+      ?.whale;
+
+  const top1 =
+    Number.isFinite(
+      whale?.top1Percent
+    )
+      ? whale.top1Percent
+          .toFixed(2)
+      : "UNVERIFIED";
+
+  const top10 =
+    Number.isFinite(
+      whale?.top10Percent
+    )
+      ? whale.top10Percent
+          .toFixed(2)
+      : "UNVERIFIED";
 
   const message =
-`🚨 Robinhood Chain Meme Hunter V71
+`🚨 Robinhood Chain Meme Hunter V72
 
 🪙 ${candidate.name || "Unknown"} (${candidate.symbol || "?"})
 
@@ -1519,15 +2050,15 @@ ${candidate.address}
 👥 Holders: ${candidate.holders?.holderCount ?? "UNVERIFIED"}
 
 🐋 Whale wallets: ${whale?.whaleCount ?? "UNVERIFIED"}
-🐋 Top holder: ${whale?.top1Percent?.toFixed?.(2) ?? "UNVERIFIED"}%
-🐋 Top 10: ${whale?.top10Percent?.toFixed?.(2) ?? "UNVERIFIED"}%
+🐋 Top holder: ${top1}%
+🐋 Top 10: ${top10}%
 🐋 Concentration: ${whale?.concentrationRisk ?? "UNVERIFIED"}
 
 🧠 Smart-money candidate: ${whale?.smartMoneyCandidate ? "YES" : "NO"}
 🧠 Smart-money verified: NO
 
-📡 V4 swaps: ${candidate.activity.swaps}
-💦 Liquidity events: ${candidate.activity.liquidityEvents}
+📡 Pool V4 swaps: ${candidate.activity.swaps}
+💦 Pool liquidity events: ${candidate.activity.liquidityEvents}
 
 ⚠️ Automated early-stage screening. High risk.`;
 
@@ -1539,16 +2070,23 @@ ${candidate.address}
         "/sendMessage",
         {
           method: "POST",
+
           headers: {
             "content-type":
               "application/json"
           },
-          body: JSON.stringify({
-            chat_id:
-              env.TELEGRAM_CHAT_ID,
-            text:
-              message.slice(0, 3900)
-          })
+
+          body:
+            JSON.stringify({
+              chat_id:
+                env.TELEGRAM_CHAT_ID,
+
+              text:
+                message.slice(
+                  0,
+                  3900
+                )
+            })
         }
       );
 
@@ -1562,7 +2100,9 @@ ${candidate.address}
       return {
         sent: false,
         reason:
-          "TELEGRAM_API_ERROR"
+          "TELEGRAM_API_ERROR",
+        status:
+          response.status
       };
     }
 
@@ -1571,29 +2111,33 @@ ${candidate.address}
         candidate.address
       );
 
-    state.alerts[key] =
+    const timestamp =
       Date.now();
+
+    state.alerts[key] =
+      timestamp;
 
     MEMORY_ALERTS.set(
       key,
-      Date.now()
+      timestamp
     );
 
     return {
       sent: true,
+
       messageId:
         body.result
-          ?.message_id || null
+          ?.message_id ||
+        null
     };
+
   } catch (error) {
     return {
       sent: false,
       reason:
         "TELEGRAM_REQUEST_FAILED",
       error:
-        String(
-          error?.message || error
-        )
+        errorString(error)
     };
   }
 }
@@ -1628,51 +2172,72 @@ async function scan(env) {
 
   if (
     stateResult.persistent &&
-    previous !== null
+    previous !== null &&
+    previous !== undefined
   ) {
     from =
-      BigInt(previous) + 1n;
+      BigInt(previous) +
+      1n;
+
   } else {
     from =
       latestNumber -
       BigInt(
-        DISCOVERY_BLOCKS - 1
+        DISCOVERY_BLOCKS -
+        1
       );
   }
 
-  if (from < 0n) from = 0n;
+  if (from < 0n) {
+    from = 0n;
+  }
 
   let to =
     from +
     BigInt(
-      MAX_CATCHUP_BLOCKS - 1
+      MAX_CATCHUP_BLOCKS -
+      1
     );
 
-  if (to > latestNumber) {
-    to = latestNumber;
+  if (
+    to >
+    latestNumber
+  ) {
+    to =
+      latestNumber;
   }
 
   const upToDate =
-    from > latestNumber;
+    from >
+    latestNumber;
 
   const rangesCompleted = [];
-
   const allLogs = [];
+  const diagnostics = [];
 
   let processedThrough =
     previous;
 
-  if (!upToDate) {
-    let cursor = from;
+  let rangeFailure =
+    null;
 
-    while (cursor <= to) {
+  if (!upToDate) {
+    let cursor =
+      from;
+
+    while (
+      cursor <= to
+    ) {
       let end =
         cursor +
         BigInt(
-          DISCOVERY_BLOCKS - 1
+          DISCOVERY_BLOCKS -
+          1
         );
 
-      if (end > to) end = to;
+      if (end > to) {
+        end = to;
+      }
 
       const result =
         await getLogs(
@@ -1681,7 +2246,35 @@ async function scan(env) {
           end
         );
 
-      if (!result.result) {
+      if (
+        !Array.isArray(
+          result.result
+        )
+      ) {
+        rangeFailure = {
+          fromBlock:
+            Number(cursor),
+
+          toBlock:
+            Number(end),
+
+          error:
+            result.error ||
+            "GET_LOGS_FAILED"
+        };
+
+        diagnostics.push({
+          type:
+            "RANGE_SCAN_FAILED",
+
+          ...rangeFailure
+        });
+
+        /*
+         * Critical:
+         * Stop here and do NOT jump over
+         * the failed block range.
+         */
         break;
       }
 
@@ -1706,13 +2299,20 @@ async function scan(env) {
           result.provider
       });
 
-      cursor = end + 1n;
+      cursor =
+        end + 1n;
     }
   }
 
+  /*
+   * Only persistent mode advances the cursor.
+   * It advances ONLY through successfully
+   * completed contiguous ranges.
+   */
   if (
     stateResult.persistent &&
-    processedThrough !== null
+    processedThrough !== null &&
+    processedThrough !== undefined
   ) {
     state.lastScannedBlock =
       processedThrough;
@@ -1729,13 +2329,18 @@ async function scan(env) {
 
   const pools =
     initializeLogs
-      .map(decodeInitialize)
+      .map(
+        decodeInitialize
+      )
       .filter(Boolean);
 
   const newTokens =
     new Set();
 
-  for (const pool of pools) {
+  for (
+    const pool
+    of pools
+  ) {
     for (
       const address
       of [
@@ -1745,7 +2350,8 @@ async function scan(env) {
     ) {
       if (
         !address ||
-        normalize(address) === ZERO
+        normalize(address) ===
+          ZERO
       ) {
         continue;
       }
@@ -1765,19 +2371,19 @@ async function scan(env) {
   pruneState(state);
 
   const validationResults = [];
-
   const verified = [];
 
+  /*
+   * V72 rotation:
+   * do not repeatedly check the same
+   * first six tokens forever.
+   */
   const candidatesToCheck =
-    state.watchedTokens
+    [...state.watchedTokens]
       .sort(
         (a, b) =>
-          Number(
-            !knownQuote(b.address)
-          ) -
-          Number(
-            !knownQuote(a.address)
-          )
+          watchPriority(b) -
+          watchPriority(a)
       )
       .slice(
         0,
@@ -1809,6 +2415,11 @@ async function scan(env) {
       address:
         watched.address,
 
+      priority:
+        watchPriority(
+          watched
+        ),
+
       knownQuoteToken:
         knownQuote(
           watched.address
@@ -1817,7 +2428,9 @@ async function scan(env) {
       ...token
     });
 
-    if (token.validERC20) {
+    if (
+      token.validERC20
+    ) {
       verified.push({
         watched,
         token
@@ -1825,9 +2438,45 @@ async function scan(env) {
     }
   }
 
+  /*
+   * Prioritise non-quote verified
+   * tokens for expensive market lookups.
+   */
+  verified.sort(
+    (a, b) => {
+      const aq =
+        knownQuote(
+          a.watched.address
+        )
+          ? 1
+          : 0;
+
+      const bq =
+        knownQuote(
+          b.watched.address
+        )
+          ? 1
+          : 0;
+
+      if (aq !== bq) {
+        return aq - bq;
+      }
+
+      return (
+        watchPriority(
+          b.watched
+        ) -
+        watchPriority(
+          a.watched
+        )
+      );
+    }
+  );
+
   const analysed = [];
 
   let holderLookups = 0;
+  let marketLookups = 0;
 
   for (
     const item
@@ -1841,6 +2490,8 @@ async function scan(env) {
       token
     } = item;
 
+    marketLookups++;
+
     const market =
       await marketData(
         watched.address
@@ -1848,8 +2499,27 @@ async function scan(env) {
 
     let holders = {
       verified: false,
+
+      holderCount:
+        null,
+
+      transferCount:
+        null,
+
+      topHolders: [],
+
       whale: {
         verified: false,
+
+        concentrationRisk:
+          "UNVERIFIED",
+
+        flow:
+          "NOT_VERIFIED",
+
+        smartMoneyCandidate:
+          false,
+
         smartMoneyVerified:
           false
       }
@@ -1872,30 +2542,16 @@ async function scan(env) {
     }
 
     /*
-     * Pool-specific activity can be improved
-     * further in V72. V71 uses exact topic
-     * activity from the scanned window.
+     * V72 FIX:
+     * activity belongs to this token's
+     * discovered V4 pools, not every log
+     * in the scan window.
      */
-
-    const activity = {
-      swaps:
-        allLogs.filter(
-          log =>
-            normalize(
-              log?.topics?.[0]
-            ) ===
-            SWAP_TOPIC
-        ).length,
-
-      liquidityEvents:
-        allLogs.filter(
-          log =>
-            normalize(
-              log?.topics?.[0]
-            ) ===
-            MODIFY_LIQUIDITY_TOPIC
-        ).length
-    };
+    const activity =
+      activityForToken(
+        watched,
+        allLogs
+      );
 
     const rugRisk =
       scoreRisk(
@@ -1937,8 +2593,15 @@ async function scan(env) {
       validERC20:
         true,
 
+      firstSeenAt:
+        watched.firstSeenAt,
+
       poolCount:
-        watched.pools?.length || 0,
+        watched.pools
+          ?.length || 0,
+
+      pools:
+        watched.pools || [],
 
       activity,
 
@@ -1966,14 +2629,18 @@ async function scan(env) {
       candidate =>
         !candidate
           .knownQuoteToken &&
+
         candidate.market
           ?.verified &&
+
         candidate.market
           .liquidityUsd >=
           MIN_ALERT_LIQUIDITY &&
+
         candidate.rugRisk
           .score <=
           MAX_ALERT_RISK &&
+
         candidate.opportunity
           .score >=
           MIN_ALERT_SCORE
@@ -1983,7 +2650,10 @@ async function scan(env) {
 
   for (
     const candidate
-    of qualifying.slice(0, 2)
+    of qualifying.slice(
+      0,
+      2
+    )
   ) {
     const result =
       await telegram(
@@ -2012,7 +2682,8 @@ async function scan(env) {
     state.lastScannedBlock;
 
   const backlogRemaining =
-    currentLast !== null
+    currentLast !== null &&
+    currentLast !== undefined
       ? Math.max(
           0,
           Number(
@@ -2022,6 +2693,16 @@ async function scan(env) {
         )
       : 0;
 
+  const scanMode =
+    stateResult.persistent
+      ? previous === null ||
+        previous === undefined
+        ? "PERSISTENT_INITIAL"
+        : backlogRemaining > 0
+          ? "PERSISTENT_CATCHUP"
+          : "PERSISTENT_LIVE"
+      : "NON_PERSISTENT_RECENT_WINDOW";
+
   return {
     agent:
       "Robinhood Chain Meme Hunter",
@@ -2029,10 +2710,16 @@ async function scan(env) {
     version:
       VERSION,
 
-    success: true,
+    success:
+      rangeFailure === null,
 
     scan: {
-      status: "OK",
+      status:
+        rangeFailure
+          ? "PARTIAL"
+          : "OK",
+
+      scanMode,
 
       durationMs:
         Date.now() -
@@ -2073,6 +2760,9 @@ async function scan(env) {
 
       rangesCompleted,
 
+      failedRange:
+        rangeFailure,
+
       v4: {
         poolManager:
           POOL_MANAGER,
@@ -2106,21 +2796,19 @@ async function scan(env) {
       },
 
       watchedTokens:
-        state.watchedTokens.length,
+        state.watchedTokens
+          .length,
 
       tokenValidationChecks:
-        candidatesToCheck.length,
+        candidatesToCheck
+          .length,
 
       validERC20Tokens:
         verified.length,
 
       validationResults,
 
-      marketLookups:
-        Math.min(
-          verified.length,
-          MAX_MARKET_LOOKUPS
-        ),
+      marketLookups,
 
       holderLookups,
 
@@ -2131,9 +2819,16 @@ async function scan(env) {
         qualifying.length,
 
       telegramCandidates:
-        telegramResults.filter(
-          x => x.sent
-        ).length,
+        telegramResults
+          .filter(
+            result =>
+              result.sent
+          )
+          .length,
+
+      telegramResults,
+
+      diagnostics,
 
       intelligence: {
         persistentBlockTracking:
@@ -2145,6 +2840,25 @@ async function scan(env) {
           stateResult.binding ||
           "NONE",
 
+        catchUpScanning:
+          "10_BLOCK_CHUNKS",
+
+        persistentCandidateWatch:
+          stateResult.persistent
+            ? "ENABLED"
+            : "MEMORY_ONLY",
+
+        persistentAlertCooldown:
+          stateResult.persistent
+            ? "ENABLED"
+            : "MEMORY_ONLY",
+
+        candidateRotation:
+          "ENABLED_V72",
+
+        poolSpecificActivity:
+          "ENABLED_V72",
+
         market:
           "DEXSCREENER",
 
@@ -2152,7 +2866,7 @@ async function scan(env) {
           "BLOCKSCOUT",
 
         whaleConcentration:
-          "ENABLED_V71",
+          "ENABLED_V72",
 
         whaleFlow:
           "NOT_VERIFIED",
@@ -2168,7 +2882,7 @@ async function scan(env) {
       },
 
       architecture:
-        "V71_COMPACT_WHALE_INTELLIGENCE_HUNTER"
+        "V72_PERSISTENT_POOL_SPECIFIC_INTELLIGENCE_HUNTER"
     },
 
     chain: {
@@ -2199,15 +2913,16 @@ async function health(env) {
       await latestBlock(env);
 
     latest =
-      Number(result.block);
+      Number(
+        result.block
+      );
 
     provider =
       result.provider;
+
   } catch (e) {
     error =
-      String(
-        e?.message || e
-      );
+      errorString(e);
   }
 
   const stateResult =
@@ -2234,6 +2949,8 @@ async function health(env) {
       "/rpc-test",
       "/scan",
       "/state",
+      "/diagnostics",
+      "/run-all",
       "/test-telegram"
     ],
 
@@ -2268,13 +2985,22 @@ async function health(env) {
       bindingDetected:
         stateResult.binding,
 
+      supportedBindings: [
+        "MEME_HUNTER_STATE",
+        "KV_BINDING"
+      ],
+
+      stateKey:
+        STATE_KEY,
+
       lastScannedBlock:
         stateResult.state
           .lastScannedBlock,
 
       watchedTokens:
         stateResult.state
-          .watchedTokens.length,
+          .watchedTokens
+          .length,
 
       stateError:
         stateResult.error
@@ -2287,7 +3013,8 @@ async function health(env) {
           env.TELEGRAM_CHAT_ID
         ),
 
-      automaticCalls: true,
+      automaticCalls:
+        true,
 
       minimumScore:
         MIN_ALERT_SCORE,
@@ -2297,6 +3024,12 @@ async function health(env) {
     },
 
     intelligence: {
+      poolSpecificActivity:
+        "ENABLED",
+
+      candidateRotation:
+        "ENABLED",
+
       whaleConcentration:
         "ENABLED",
 
@@ -2308,7 +3041,7 @@ async function health(env) {
     },
 
     architecture:
-      "V71_COMPACT_WHALE_INTELLIGENCE_HUNTER",
+      "V72_PERSISTENT_POOL_SPECIFIC_INTELLIGENCE_HUNTER",
 
     timestamp:
       now()
@@ -2320,11 +3053,15 @@ async function health(env) {
    STATE
    ========================================================= */
 
-async function stateStatus(env) {
+async function stateStatus(
+  env
+) {
   const result =
     await readState(env);
 
-  pruneState(result.state);
+  pruneState(
+    result.state
+  );
 
   return {
     agent:
@@ -2339,6 +3076,9 @@ async function stateStatus(env) {
     bindingDetected:
       result.binding,
 
+    stateKey:
+      STATE_KEY,
+
     error:
       result.error,
 
@@ -2348,31 +3088,50 @@ async function stateStatus(env) {
 
     watchedTokens:
       result.state
-        .watchedTokens.map(
-          token => ({
-            address:
-              token.address,
+        .watchedTokens
+        .map(token => ({
+          address:
+            token.address,
 
-            name:
-              token.metadata
-                ?.name || null,
+          name:
+            token.metadata
+              ?.name ||
+            null,
 
-            symbol:
-              token.metadata
-                ?.symbol || null,
+          symbol:
+            token.metadata
+              ?.symbol ||
+            null,
 
-            checks:
-              token.checks,
+          validERC20:
+            token.metadata
+              ?.validERC20 ??
+            null,
 
-            poolCount:
-              token.pools
-                ?.length || 0
-          })
-        ),
+          checks:
+            token.checks,
+
+          firstSeenAt:
+            token.firstSeenAt,
+
+          lastCheckedAt:
+            token.lastCheckedAt,
+
+          poolCount:
+            token.pools
+              ?.length ||
+            0,
+
+          priority:
+            watchPriority(
+              token
+            )
+        })),
 
     recentAlertCount:
       Object.keys(
-        result.state.alerts || {}
+        result.state.alerts ||
+        {}
       ).length,
 
     timestamp:
@@ -2409,13 +3168,21 @@ async function rpcTest(env) {
       VERSION,
 
     success:
-      Boolean(logs.result),
+      Array.isArray(
+        logs.result
+      ),
 
     latestBlock:
-      Number(latest.block),
+      Number(
+        latest.block
+      ),
 
     poolManagerLogs:
-      logs.result?.length || 0,
+      Array.isArray(
+        logs.result
+      )
+        ? logs.result.length
+        : 0,
 
     provider:
       logs.provider,
@@ -2430,10 +3197,254 @@ async function rpcTest(env) {
 
 
 /* =========================================================
+   DIAGNOSTICS
+   ========================================================= */
+
+async function diagnostics(env) {
+  const checks = {};
+
+  /*
+   * KV
+   */
+  const stateResult =
+    await readState(env);
+
+  checks.kv = {
+    success:
+      stateResult.persistent &&
+      !stateResult.error,
+
+    configured:
+      stateResult.persistent,
+
+    binding:
+      stateResult.binding,
+
+    supportedBindings: [
+      "MEME_HUNTER_STATE",
+      "KV_BINDING"
+    ],
+
+    stateKey:
+      STATE_KEY,
+
+    readError:
+      stateResult.error,
+
+    lastScannedBlock:
+      stateResult.state
+        .lastScannedBlock,
+
+    watchedTokens:
+      stateResult.state
+        .watchedTokens
+        ?.length ||
+      0
+  };
+
+  /*
+   * RPC
+   */
+  try {
+    const latest =
+      await latestBlock(env);
+
+    checks.rpc = {
+      success: true,
+
+      latestBlock:
+        Number(
+          latest.block
+        ),
+
+      provider:
+        latest.provider
+    };
+
+  } catch (error) {
+    checks.rpc = {
+      success: false,
+      error:
+        errorString(error)
+    };
+  }
+
+  /*
+   * Pool Manager log test
+   */
+  if (
+    checks.rpc.success
+  ) {
+    try {
+      const latest =
+        BigInt(
+          checks.rpc
+            .latestBlock
+        );
+
+      const from =
+        latest > 2n
+          ? latest - 2n
+          : 0n;
+
+      const logs =
+        await getLogs(
+          env,
+          from,
+          latest
+        );
+
+      checks.poolManager = {
+        success:
+          Array.isArray(
+            logs.result
+          ),
+
+        address:
+          POOL_MANAGER,
+
+        logs:
+          Array.isArray(
+            logs.result
+          )
+            ? logs.result.length
+            : 0,
+
+        provider:
+          logs.provider,
+
+        error:
+          logs.error
+      };
+
+    } catch (error) {
+      checks.poolManager = {
+        success: false,
+        address:
+          POOL_MANAGER,
+        error:
+          errorString(error)
+      };
+    }
+  } else {
+    checks.poolManager = {
+      success: false,
+      skipped:
+        "RPC_UNAVAILABLE"
+    };
+  }
+
+  /*
+   * External configuration.
+   */
+  checks.alchemy = {
+    configured:
+      Boolean(
+        env.ALCHEMY_API_KEY
+      )
+  };
+
+  checks.telegram = {
+    configured:
+      Boolean(
+        env.TELEGRAM_BOT_TOKEN &&
+        env.TELEGRAM_CHAT_ID
+      ),
+
+    botTokenConfigured:
+      Boolean(
+        env.TELEGRAM_BOT_TOKEN
+      ),
+
+    chatIdConfigured:
+      Boolean(
+        env.TELEGRAM_CHAT_ID
+      )
+  };
+
+  checks.dexscreener = {
+    configured: true,
+    mode:
+      "PUBLIC_API"
+  };
+
+  checks.blockscout = {
+    configured: true,
+    mode:
+      "PUBLIC_API"
+  };
+
+  const criticalOK =
+    checks.rpc.success &&
+    checks.poolManager.success;
+
+  return {
+    agent:
+      "Robinhood Chain Meme Hunter",
+
+    version:
+      VERSION,
+
+    success:
+      criticalOK,
+
+    status:
+      criticalOK
+        ? "READY"
+        : "DEGRADED",
+
+    checks,
+
+    requiredFixes: [
+      ...(
+        !checks.kv.configured
+          ? [
+              "ADD_KV_BINDING_MEME_HUNTER_STATE"
+            ]
+          : []
+      ),
+
+      ...(
+        !checks.rpc.success
+          ? [
+              "FIX_RPC_CONNECTION"
+            ]
+          : []
+      ),
+
+      ...(
+        !checks.poolManager.success
+          ? [
+              "FIX_POOL_MANAGER_LOG_ACCESS"
+            ]
+          : []
+      ),
+
+      ...(
+        !checks.telegram.configured
+          ? [
+              "CONFIGURE_TELEGRAM_SECRETS"
+            ]
+          : []
+      )
+    ],
+
+    architecture:
+      "V72_PERSISTENT_POOL_SPECIFIC_INTELLIGENCE_HUNTER",
+
+    timestamp:
+      now()
+  };
+}
+
+
+/* =========================================================
    TELEGRAM SAFETY TEST
    ========================================================= */
 
-async function telegramTest(env) {
+async function telegramTest(
+  env
+) {
   return {
     agent:
       "Robinhood Chain Meme Hunter",
@@ -2459,18 +3470,146 @@ async function telegramTest(env) {
 
 
 /* =========================================================
+   RUN ALL
+   ========================================================= */
+
+async function runAll(env) {
+  const started =
+    Date.now();
+
+  const results = {
+    health: null,
+    diagnostics: null,
+    rpcTest: null,
+    scan: null,
+    state: null,
+    telegramTest: null
+  };
+
+  const errors = [];
+
+  try {
+    results.health =
+      await health(env);
+  } catch (error) {
+    errors.push({
+      test: "health",
+      error:
+        errorString(error)
+    });
+  }
+
+  try {
+    results.diagnostics =
+      await diagnostics(env);
+  } catch (error) {
+    errors.push({
+      test: "diagnostics",
+      error:
+        errorString(error)
+    });
+  }
+
+  try {
+    results.rpcTest =
+      await rpcTest(env);
+  } catch (error) {
+    errors.push({
+      test: "rpc-test",
+      error:
+        errorString(error)
+    });
+  }
+
+  /*
+   * Scan is intentionally executed before
+   * final state so /run-all shows the state
+   * after the scan.
+   */
+  try {
+    results.scan =
+      await scan(env);
+  } catch (error) {
+    errors.push({
+      test: "scan",
+      error:
+        errorString(error)
+    });
+  }
+
+  try {
+    results.state =
+      await stateStatus(env);
+  } catch (error) {
+    errors.push({
+      test: "state",
+      error:
+        errorString(error)
+    });
+  }
+
+  try {
+    results.telegramTest =
+      await telegramTest(env);
+  } catch (error) {
+    errors.push({
+      test:
+        "test-telegram",
+      error:
+        errorString(error)
+    });
+  }
+
+  return {
+    agent:
+      "Robinhood Chain Meme Hunter",
+
+    version:
+      VERSION,
+
+    success:
+      errors.length === 0,
+
+    status:
+      errors.length === 0
+        ? "ALL_TESTS_COMPLETED"
+        : "COMPLETED_WITH_ERRORS",
+
+    durationMs:
+      Date.now() -
+      started,
+
+    errors,
+
+    results,
+
+    timestamp:
+      now()
+  };
+}
+
+
+/* =========================================================
    WORKER
    ========================================================= */
 
 export default {
 
-  async fetch(request, env) {
+  async fetch(
+    request,
+    env
+  ) {
     const url =
-      new URL(request.url);
+      new URL(
+        request.url
+      );
 
     const path =
       url.pathname
-        .replace(/\/+$/, "") ||
+        .replace(
+          /\/+$/,
+          ""
+        ) ||
       "/";
 
     try {
@@ -2509,6 +3648,22 @@ export default {
       }
 
       if (
+        path === "/diagnostics"
+      ) {
+        return json(
+          await diagnostics(env)
+        );
+      }
+
+      if (
+        path === "/run-all"
+      ) {
+        return json(
+          await runAll(env)
+        );
+      }
+
+      if (
         path ===
         "/test-telegram"
       ) {
@@ -2533,6 +3688,8 @@ export default {
             "/rpc-test",
             "/scan",
             "/state",
+            "/diagnostics",
+            "/run-all",
             "/test-telegram"
           ]
         },
@@ -2540,7 +3697,6 @@ export default {
       );
 
     } catch (error) {
-
       return json(
         {
           agent:
@@ -2552,10 +3708,7 @@ export default {
           success: false,
 
           error:
-            String(
-              error?.message ||
-              error
-            ),
+            errorString(error),
 
           timestamp:
             now()
@@ -2577,10 +3730,18 @@ export default {
           console.log(
             JSON.stringify({
               event:
-                "V71_SCHEDULED_SCAN",
+                "V72_SCHEDULED_SCAN",
 
               success:
                 result.success,
+
+              status:
+                result.scan
+                  ?.status,
+
+              scanMode:
+                result.scan
+                  ?.scanMode,
 
               latestBlock:
                 result.scan
@@ -2596,14 +3757,25 @@ export default {
                   ?.persistence
                   ?.backlogRemaining,
 
+              watchedTokens:
+                result.scan
+                  ?.watchedTokens ||
+                0,
+
               candidates:
                 result.scan
                   ?.candidates
-                  ?.length || 0,
+                  ?.length ||
+                0,
 
               qualifying:
                 result.scan
                   ?.qualifyingCandidates ||
+                0,
+
+              telegramAlerts:
+                result.scan
+                  ?.telegramCandidates ||
                 0,
 
               timestamp:
@@ -2613,7 +3785,7 @@ export default {
         })
         .catch(error => {
           console.error(
-            "V71 scheduled scan failed",
+            "V72 scheduled scan failed",
             error
           );
 
