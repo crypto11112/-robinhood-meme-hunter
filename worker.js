@@ -1,22 +1,24 @@
 /**
  * Robinhood Chain Meme Hunter
- * V98
+ * V99
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V96:
- * - Builds directly forward from the confirmed V94 baseline
- * - Preserves existing KV state key/history and all working V94 scanner logic
+ * V99:
+ * - Builds directly forward from the confirmed/deployed V98 baseline
+ * - Preserves the existing KV STATE_KEY/history
+ * - Preserves V98 live Initialize lookback and DexScreener burst/cooldown protection
+ * - Preserves V97 holder reconciliation and integrity guards
+ * - Preserves V95/V96 Blockscout holder fallbacks and market negative-cache protection
  * - Preserves V77-style spaced Telegram alerts and token image/sendPhoto fallback
- * - FIX: Blockscout counters endpoint can run even when holder rows are unavailable
- * - NEW: Blockscout legacy getTokenHolders fallback when V2 holder rows are unavailable
- * - NEW: DexScreener /tokens/v1 fallback when token-pairs/v1 returns no market
- * - Preserves DexScreener cooldown/cache/fresh-request protections
- * - Preserves live-first scanning, pool registry, accelerated backlog and risk protections
- * - Cleans current runtime V95 scan/architecture labels without changing the persistent STATE_KEY
+ * - NEW: DexScreener 5m, 1h and 24h buy/sell transaction counts
+ * - NEW: 5m, 1h and 24h buy-pressure telemetry
+ * - NEW: directional buy/sell USD fields with strict VERIFIED/UNVERIFIED handling
+ * - NEW: Telegram trading-activity section for 5m, 1h and 24h
+ * - NEW: net-flow field is displayed only when directional USD flow is genuinely verified
+ * - Never estimates buy/sell dollar amounts from transaction counts or total volume
  */
-
-const VERSION = "V98";
+const VERSION = "V99";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -5023,19 +5025,105 @@ async function marketData(
     const pair =
       pairs[0];
 
-    const buys =
-      safeNumber(
-        pair?.txns?.h1?.buys
-      );
+    const txWindow = window => {
+      const row =
+        pair?.txns?.[window] ||
+        {};
 
-    const sells =
-      safeNumber(
-        pair?.txns?.h1?.sells
-      );
+      const buys =
+        safeNumber(
+          row?.buys
+        );
 
-    const transactions =
-      buys +
-      sells;
+      const sells =
+        safeNumber(
+          row?.sells
+        );
+
+      const total =
+        buys +
+        sells;
+
+      /*
+       * V99 STRICT DIRECTIONAL-USD RULE
+       *
+       * DexScreener normally exposes total window volume plus buy/sell
+       * transaction counts, not a guaranteed buy-USD / sell-USD split.
+       * We therefore only mark directional USD as verified if BOTH
+       * explicit directional fields are actually present in the payload.
+       * We never infer dollar flow from counts or split total volume.
+       */
+      const explicitBuyUsd =
+        row?.buyVolumeUsd ??
+        row?.buysVolumeUsd ??
+        null;
+
+      const explicitSellUsd =
+        row?.sellVolumeUsd ??
+        row?.sellsVolumeUsd ??
+        null;
+
+      const buyUsd =
+        explicitBuyUsd !== null &&
+        explicitBuyUsd !== undefined &&
+        Number.isFinite(
+          Number(explicitBuyUsd)
+        )
+          ? Number(explicitBuyUsd)
+          : null;
+
+      const sellUsd =
+        explicitSellUsd !== null &&
+        explicitSellUsd !== undefined &&
+        Number.isFinite(
+          Number(explicitSellUsd)
+        )
+          ? Number(explicitSellUsd)
+          : null;
+
+      const directionalUsdVerified =
+        buyUsd !== null &&
+        sellUsd !== null &&
+        buyUsd >= 0 &&
+        sellUsd >= 0;
+
+      return {
+        buys,
+        sells,
+        total,
+        buyPressure:
+          total > 0
+            ? (
+                buys /
+                total
+              ) *
+              100
+            : null,
+        directionalUsdVerified,
+        buyVolumeUsd:
+          directionalUsdVerified
+            ? buyUsd
+            : null,
+        sellVolumeUsd:
+          directionalUsdVerified
+            ? sellUsd
+            : null,
+        netFlowUsd:
+          directionalUsdVerified
+            ? buyUsd -
+              sellUsd
+            : null
+      };
+    };
+
+    const txM5 =
+      txWindow("m5");
+
+    const txH1 =
+      txWindow("h1");
+
+    const txH24 =
+      txWindow("h24");
 
     const result = {
       verified:
@@ -5100,21 +5188,52 @@ async function marketData(
       },
 
       transactions: {
-        h1: {
-          buys,
-          sells
-        }
+        m5: txM5,
+        h1: txH1,
+        h24: txH24
       },
 
+      buyPressure5m:
+        txM5.buyPressure,
+
       buyPressure1h:
-        transactions >
-          0
-          ? (
-              buys /
-              transactions
-            ) *
-            100
-          : null,
+        txH1.buyPressure,
+
+      buyPressure24h:
+        txH24.buyPressure,
+
+      directionalFlow: {
+        m5: {
+          verified:
+            txM5.directionalUsdVerified,
+          buyVolumeUsd:
+            txM5.buyVolumeUsd,
+          sellVolumeUsd:
+            txM5.sellVolumeUsd,
+          netFlowUsd:
+            txM5.netFlowUsd
+        },
+        h1: {
+          verified:
+            txH1.directionalUsdVerified,
+          buyVolumeUsd:
+            txH1.buyVolumeUsd,
+          sellVolumeUsd:
+            txH1.sellVolumeUsd,
+          netFlowUsd:
+            txH1.netFlowUsd
+        },
+        h24: {
+          verified:
+            txH24.directionalUsdVerified,
+          buyVolumeUsd:
+            txH24.buyVolumeUsd,
+          sellVolumeUsd:
+            txH24.sellVolumeUsd,
+          netFlowUsd:
+            txH24.netFlowUsd
+        }
+      },
 
       pairCreatedAt:
         safeNumber(
@@ -9559,13 +9678,52 @@ function telegramMessage(
       ? whale.concentrationRisk
       : "UNVERIFIED";
 
-  const buys = market?.verified
-    ? safeNumber(market.transactions?.h1?.buys)
-    : "UNVERIFIED";
+  const tradeWindow = window => {
+    if (!market?.verified) {
+      return {
+        buys: "UNVERIFIED",
+        sells: "UNVERIFIED",
+        buyUsd: "UNVERIFIED",
+        sellUsd: "UNVERIFIED",
+        netUsd: "UNVERIFIED",
+        pressure: "UNVERIFIED"
+      };
+    }
 
-  const sells = market?.verified
-    ? safeNumber(market.transactions?.h1?.sells)
-    : "UNVERIFIED";
+    const tx =
+      market.transactions?.[window] ||
+      {};
+
+    const flow =
+      market.directionalFlow?.[window] ||
+      {};
+
+    return {
+      buys:
+        safeNumber(tx?.buys),
+      sells:
+        safeNumber(tx?.sells),
+      buyUsd:
+        flow?.verified
+          ? money(flow.buyVolumeUsd)
+          : "UNVERIFIED",
+      sellUsd:
+        flow?.verified
+          ? money(flow.sellVolumeUsd)
+          : "UNVERIFIED",
+      netUsd:
+        flow?.verified
+          ? money(flow.netFlowUsd)
+          : "UNVERIFIED",
+      pressure:
+        tx?.buyPressure !== null &&
+        tx?.buyPressure !== undefined
+          ? percentDisplay(
+              tx.buyPressure
+            )
+          : "UNVERIFIED"
+    };
+  };
 
   const smartMoneyCandidate =
     holders?.concentrationVerified && whale?.verified
@@ -9576,6 +9734,15 @@ function telegramMessage(
     value !== null && value !== undefined
       ? "$" + formatNumber(value)
       : "UNVERIFIED";
+
+  const trade5m =
+    tradeWindow("m5");
+
+  const trade1h =
+    tradeWindow("h1");
+
+  const trade24h =
+    tradeWindow("h24");
 
   const lines = [
     `🚨 <b>Robinhood Chain Meme Hunter ${VERSION}</b>`,
@@ -9595,8 +9762,17 @@ function telegramMessage(
     `💧 Liquidity: <b>${market?.verified ? money(market.liquidityUsd) : "UNVERIFIED"}</b>`,
     `📊 24h Volume: <b>${market?.verified ? money(market.volume?.h24) : "UNVERIFIED"}</b>`,
     "",
-    `🟢 1h Buys: <b>${buys}</b>`,
-    `🔴 1h Sells: <b>${sells}</b>`,
+    "📊 <b>Trading Activity</b>",
+    `🟢 5m Buys: <b>${trade5m.buys}</b> — <b>${trade5m.buyUsd}</b>`,
+    `🔴 5m Sells: <b>${trade5m.sells}</b> — <b>${trade5m.sellUsd}</b>`,
+    "",
+    `🟢 1h Buys: <b>${trade1h.buys}</b> — <b>${trade1h.buyUsd}</b>`,
+    `🔴 1h Sells: <b>${trade1h.sells}</b> — <b>${trade1h.sellUsd}</b>`,
+    `📈 1h Net Flow: <b>${trade1h.netUsd}</b>`,
+    `🟢 1h Buy Pressure: <b>${trade1h.pressure}</b>`,
+    "",
+    `🟢 24h Buys: <b>${trade24h.buys}</b> — <b>${trade24h.buyUsd}</b>`,
+    `🔴 24h Sells: <b>${trade24h.sells}</b> — <b>${trade24h.sellUsd}</b>`,
     "",
     `👥 Holders: <b>${holderText}</b>`,
     "",
@@ -11059,7 +11235,7 @@ async function scan(
     status,
 
     scanMode:
-      "V98_V97_CORE_LIVE_INITIALIZE_LOOKBACK_DEX_BURST_GUARD_HUNTER",
+      "V99_V98_CORE_MULTI_WINDOW_TRADE_FLOW_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -11657,12 +11833,22 @@ async function scan(
         "ENABLED_V98",
       dexscreenerBurstSuppression:
         "ENABLED_V98",
+
+      multiWindowTradeCounts:
+        "ENABLED_V99",
+
+      directionalUsdStrictVerification:
+        "ENABLED_V99",
+
+      telegramTradeFlowSection:
+        "ENABLED_V99",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V98_V97_CORE_LIVE_INITIALIZE_LOOKBACK_DEX_BURST_GUARD_V77_TELEGRAM_HUNTER",
+      "V99_V98_CORE_MULTI_WINDOW_TRADE_FLOW_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -11978,7 +12164,7 @@ async function health(
     },
 
     architecture:
-      "V98_V97_CORE_LIVE_INITIALIZE_LOOKBACK_DEX_BURST_GUARD_V77_TELEGRAM_HUNTER",
+      "V99_V98_CORE_MULTI_WINDOW_TRADE_FLOW_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -12372,7 +12558,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V98_V97_CORE_LIVE_INITIALIZE_LOOKBACK_DEX_BURST_GUARD_V77_TELEGRAM_HUNTER",
+      "V99_V98_CORE_MULTI_WINDOW_TRADE_FLOW_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -12801,7 +12987,7 @@ export default {
             ),
 
           architecture:
-            "V98_V97_CORE_LIVE_INITIALIZE_LOOKBACK_DEX_BURST_GUARD_V77_TELEGRAM_HUNTER",
+            "V99_V98_CORE_MULTI_WINDOW_TRADE_FLOW_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
