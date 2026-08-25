@@ -28,11 +28,8 @@ const ALCHEMY_BASE = "https://robinhood-mainnet.g.alchemy.com/v2/";
 const DEXSCREENER_BASE = "https://api.dexscreener.com";
 const BLOCKSCOUT = "https://robinhoodchain.blockscout.com";
 
-const POOL_MANAGER =
-  "0x8366a39cc670b4001a1121b8f6a443a643e40951";
-
-const ZERO =
-  "0x0000000000000000000000000000000000000000";
+const POOL_MANAGER = "0x8366a39cc670b4001a1121b8f6a443a643e40951";
+const ZERO = "0x0000000000000000000000000000000000000000";
 
 const KNOWN_QUOTES = new Set([
   "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
@@ -40,12 +37,7 @@ const KNOWN_QUOTES = new Set([
 ]);
 
 const KNOWN_QUOTE_SYMBOLS = new Set([
-  "WETH",
-  "ETH",
-  "USDC",
-  "USDT",
-  "DAI",
-  "USD"
+  "WETH", "ETH", "USDC", "USDT", "DAI", "USD"
 ]);
 
 const INITIALIZE_TOPIC =
@@ -58,27 +50,19 @@ const MODIFY_LIQUIDITY_TOPIC =
   "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec";
 
 /*
- * Keep the existing state key so V78 continues
- * from V77/V76/V75 state.
+ * Keep the existing state key so V78 continues from V77/V76/V75 state.
  */
-const STATE_KEY =
-  "robinhood-meme-hunter-v69-state";
-
+const STATE_KEY = "robinhood-meme-hunter-v69-state";
 
 /* =========================================================
    SCAN WINDOWS
    ========================================================= */
 
 const LIVE_SCAN_BLOCKS = 20;
-
 const CATCHUP_TARGET_BLOCKS = 2000;
-
 const INITIAL_LOG_RANGE = 250;
-
 const MIN_LOG_RANGE = 10;
-
 const BACKLOG_LIVE_THRESHOLD = 100;
-
 
 /* =========================================================
    V78 HARD REQUEST BUDGET
@@ -92,482 +76,412 @@ const BACKLOG_LIVE_THRESHOLD = 100;
    ========================================================= */
 
 const MAX_EXTERNAL_REQUESTS = 42;
-
 const SYSTEM_REQUEST_LIMIT = 2;
-
 const DISCOVERY_REQUEST_LIMIT = 22;
-
 const LIVE_DISCOVERY_REQUEST_LIMIT = 8;
-
 const BACKLOG_DISCOVERY_REQUEST_LIMIT = 14;
-
 const ANALYSIS_REQUEST_LIMIT = 18;
 
-
 const MAX_TOKEN_CHECKS = 4;
-
 const MAX_MARKET_LOOKUPS = 3;
-
 const MAX_HOLDER_LOOKUPS = 2;
 
+const METADATA_REUSE_MS = 30 * 60 * 1000;
 
-/*
- * V78:
- * Previously verified ERC-20 metadata can be reused briefly.
- * This saves protected analysis RPC requests for fresh tokens.
- */
-const METADATA_REUSE_MS =
-  30 * 60 * 1000;
-
-
-const WATCH_MAX_AGE =
-  12 * 60 * 60 * 1000;
-
+const WATCH_MAX_AGE = 12 * 60 * 60 * 1000;
 const MAX_WATCHED_TOKENS = 50;
 
-
-const ALERT_COOLDOWN =
-  6 * 60 * 60 * 1000;
-
+const ALERT_COOLDOWN = 6 * 60 * 60 * 1000;
 const MIN_ALERT_SCORE = 60;
-
 const MAX_ALERT_RISK = 59;
-
 const MIN_ALERT_LIQUIDITY = 1000;
-
 const MIN_CONFIDENCE_ALERT = 55;
 
-
 const MAX_SNAPSHOTS_PER_TOKEN = 24;
-
-const SNAPSHOT_MAX_AGE =
-  24 * 60 * 60 * 1000;
-
-const MIN_SNAPSHOT_INTERVAL =
-  2 * 60 * 1000;
-
-const MOMENTUM_MIN_HISTORY_MS =
-  5 * 60 * 1000;
-
-const MOMENTUM_IDEAL_HISTORY_MS =
-  15 * 60 * 1000;
-
+const SNAPSHOT_MAX_AGE = 24 * 60 * 60 * 1000;
+const MIN_SNAPSHOT_INTERVAL = 2 * 60 * 1000;
+const MOMENTUM_MIN_HISTORY_MS = 5 * 60 * 1000;
+const MOMENTUM_IDEAL_HISTORY_MS = 15 * 60 * 1000;
 const MOMENTUM_STRONG = 75;
-
 const MOMENTUM_GOOD = 50;
 
+const MAX_PAIR_AGE_EARLY_MS = 24 * 60 * 60 * 1000;
+const VERY_EARLY_PAIR_AGE_MS = 2 * 60 * 60 * 1000;
 
-const MAX_PAIR_AGE_EARLY_MS =
-  24 * 60 * 60 * 1000;
-
-const VERY_EARLY_PAIR_AGE_MS =
-  2 * 60 * 60 * 1000;
-
-
-const MEMORY_ALERTS =
-  new Map();
-
+const MEMORY_ALERTS = new Map();
 
 /* =========================================================
-   V78 HARD PHASE BUDGET
+   BUDGET
    ========================================================= */
 
 function createBudget() {
   return {
     totalUsed: 0,
-
-    totalLimit:
-      MAX_EXTERNAL_REQUESTS,
+    totalLimit: MAX_EXTERNAL_REQUESTS,
 
     system: {
       used: 0,
-
-      limit:
-        SYSTEM_REQUEST_LIMIT
+      limit: SYSTEM_REQUEST_LIMIT
     },
 
     discovery: {
       used: 0,
-
-      limit:
-        DISCOVERY_REQUEST_LIMIT,
-
+      limit: DISCOVERY_REQUEST_LIMIT,
       liveUsed: 0,
-
-      liveLimit:
-        LIVE_DISCOVERY_REQUEST_LIMIT,
-
+      liveLimit: LIVE_DISCOVERY_REQUEST_LIMIT,
       backlogUsed: 0,
-
-      backlogLimit:
-        BACKLOG_DISCOVERY_REQUEST_LIMIT
+      backlogLimit: BACKLOG_DISCOVERY_REQUEST_LIMIT
     },
 
     analysis: {
       used: 0,
-
-      limit:
-        ANALYSIS_REQUEST_LIMIT
+      limit: ANALYSIS_REQUEST_LIMIT
     },
 
     skipped: []
   };
 }
 
+function budgetAvailable(budget, phase, amount = 1) {
+  if (budget.totalUsed + amount > budget.totalLimit) return false;
 
-function budgetAvailable(
-  budget,
-  phase,
-  amount = 1
-) {
-
-  if (
-    budget.totalUsed +
-      amount >
-    budget.totalLimit
-  ) {
-    return false;
+  if (phase === "system") {
+    return budget.system.used + amount <= budget.system.limit;
   }
 
+  if (phase === "analysis") {
+    return budget.analysis.used + amount <= budget.analysis.limit;
+  }
 
-  if (
-    phase === "system"
-  ) {
+  if (phase === "discovery-live") {
     return (
-      budget.system.used +
-        amount <=
-      budget.system.limit
+      budget.discovery.used + amount <= budget.discovery.limit &&
+      budget.discovery.liveUsed + amount <= budget.discovery.liveLimit
     );
   }
 
-
-  if (
-    phase === "analysis"
-  ) {
+  if (phase === "discovery-backlog") {
     return (
-      budget.analysis.used +
-        amount <=
-      budget.analysis.limit
+      budget.discovery.used + amount <= budget.discovery.limit &&
+      budget.discovery.backlogUsed + amount <= budget.discovery.backlogLimit
     );
   }
-
-
-  if (
-    phase ===
-    "discovery-live"
-  ) {
-    return (
-      budget.discovery.used +
-        amount <=
-        budget.discovery.limit &&
-
-      budget.discovery.liveUsed +
-        amount <=
-        budget.discovery.liveLimit
-    );
-  }
-
-
-  if (
-    phase ===
-    "discovery-backlog"
-  ) {
-    return (
-      budget.discovery.used +
-        amount <=
-        budget.discovery.limit &&
-
-      budget.discovery.backlogUsed +
-        amount <=
-        budget.discovery.backlogLimit
-    );
-  }
-
 
   return false;
 }
 
-
-function consumeBudget(
-  budget,
-  phase,
-  type,
-  amount = 1
-) {
-
-  if (
-    !budgetAvailable(
-      budget,
-      phase,
-      amount
-    )
-  ) {
-
+function consumeBudget(budget, phase, type, amount = 1) {
+  if (!budgetAvailable(budget, phase, amount)) {
     budget.skipped.push({
       phase,
       type,
       amount,
-
-      reason:
-        "PHASE_BUDGET_EXHAUSTED"
+      reason: "PHASE_BUDGET_EXHAUSTED"
     });
-
     return false;
   }
 
+  budget.totalUsed += amount;
 
-  budget.totalUsed +=
-    amount;
-
-
-  if (
-    phase === "system"
-  ) {
-
-    budget.system.used +=
-      amount;
-
-  } else if (
-    phase === "analysis"
-  ) {
-
-    budget.analysis.used +=
-      amount;
-
-  } else if (
-    phase ===
-    "discovery-live"
-  ) {
-
-    budget.discovery.used +=
-      amount;
-
-    budget.discovery.liveUsed +=
-      amount;
-
-  } else if (
-    phase ===
-    "discovery-backlog"
-  ) {
-
-    budget.discovery.used +=
-      amount;
-
-    budget.discovery.backlogUsed +=
-      amount;
+  if (phase === "system") {
+    budget.system.used += amount;
+  } else if (phase === "analysis") {
+    budget.analysis.used += amount;
+  } else if (phase === "discovery-live") {
+    budget.discovery.used += amount;
+    budget.discovery.liveUsed += amount;
+  } else if (phase === "discovery-backlog") {
+    budget.discovery.used += amount;
+    budget.discovery.backlogUsed += amount;
   }
-
 
   return true;
 }
 
-
-function budgetTelemetry(
-  budget
-) {
-
+function budgetTelemetry(budget) {
   return {
-    used:
-      budget.totalUsed,
-
-    limit:
-      budget.totalLimit,
-
-    remaining:
-      Math.max(
-        0,
-        budget.totalLimit -
-        budget.totalUsed
-      ),
-
+    used: budget.totalUsed,
+    limit: budget.totalLimit,
+    remaining: Math.max(0, budget.totalLimit - budget.totalUsed),
 
     system: {
-      used:
-        budget.system.used,
-
-      limit:
-        budget.system.limit,
-
-      remaining:
-        Math.max(
-          0,
-          budget.system.limit -
-          budget.system.used
-        )
+      used: budget.system.used,
+      limit: budget.system.limit,
+      remaining: Math.max(0, budget.system.limit - budget.system.used)
     },
 
-
     discovery: {
-      used:
-        budget.discovery.used,
-
-      limit:
-        budget.discovery.limit,
-
-      remaining:
-        Math.max(
-          0,
-          budget.discovery.limit -
-          budget.discovery.used
-        ),
+      used: budget.discovery.used,
+      limit: budget.discovery.limit,
+      remaining: Math.max(0, budget.discovery.limit - budget.discovery.used),
 
       live: {
-        used:
-          budget.discovery.liveUsed,
-
-        limit:
-          budget.discovery.liveLimit,
-
-        remaining:
-          Math.max(
-            0,
-            budget.discovery.liveLimit -
-            budget.discovery.liveUsed
-          )
+        used: budget.discovery.liveUsed,
+        limit: budget.discovery.liveLimit,
+        remaining: Math.max(
+          0,
+          budget.discovery.liveLimit - budget.discovery.liveUsed
+        )
       },
 
       backlog: {
-        used:
-          budget.discovery.backlogUsed,
-
-        limit:
-          budget.discovery.backlogLimit,
-
-        remaining:
-          Math.max(
-            0,
-            budget.discovery.backlogLimit -
-            budget.discovery.backlogUsed
-          )
+        used: budget.discovery.backlogUsed,
+        limit: budget.discovery.backlogLimit,
+        remaining: Math.max(
+          0,
+          budget.discovery.backlogLimit - budget.discovery.backlogUsed
+        )
       }
     },
 
-
     analysis: {
-      used:
-        budget.analysis.used,
-
-      limit:
-        budget.analysis.limit,
-
-      remaining:
-        Math.max(
-          0,
-          budget.analysis.limit -
-          budget.analysis.used
-        ),
-
+      used: budget.analysis.used,
+      limit: budget.analysis.limit,
+      remaining: Math.max(0, budget.analysis.limit - budget.analysis.used),
       protected: true
     },
 
-
-    hardPhaseIsolation:
-      true,
-
-    liveFirst:
-      true,
-
-    skipped:
-      budget.skipped
+    hardPhaseIsolation: true,
+    liveFirstIsolation: true,
+    skipped: budget.skipped
   };
 }
-
 
 /* =========================================================
    HELPERS
    ========================================================= */
 
 function now() {
-  return new Date()
-    .toISOString();
+  return new Date().toISOString();
 }
 
-
-function json(
-  data,
-  status = 200
-) {
-
-  return new Response(
-    JSON.stringify(
-      data,
-      null,
-      2
-    ),
-    {
-      status,
-
-      headers: {
-        "content-type":
-          "application/json; charset=utf-8",
-
-        "cache-control":
-          "no-store"
-      }
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store"
     }
-  );
+  });
 }
 
-
-function safeNumber(
-  value
-) {
-
-  const n =
-    Number(value);
-
-  return Number.isFinite(n)
-    ? n
-    : 0;
+function safeNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
 }
 
-
-function clamp(
-  value,
-  min,
-  max
-) {
-
-  return Math.max(
-    min,
-    Math.min(
-      max,
-      value
-    )
-  );
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }
 
-
-function normalize(
-  value
-) {
-
-  return String(
-    value || ""
-  ).toLowerCase();
+function normalize(value) {
+  return String(value || "").toLowerCase();
 }
 
-
-function isAddress(
-  value
-) {
-
-  return /^0x[a-fA-F0-9]{40}$/.test(
-    String(
-      value || ""
-    )
-  );
+function isAddress(value) {
+  return /^0x[a-fA-F0-9]{40}$/.test(String(value || ""));
 }
 
+function topicAddress(topic) {
+  if (!/^0x[a-fA-F0-9]{64}$/.test(String(topic || ""))) return null;
+  return "0x" + topic.slice(-40);
+}
 
-function topicAddress(
-  topic
-) {
+function knownQuote(address) {
+  return KNOWN_QUOTES.has(normalize(address));
+}
+
+function knownQuoteMetadata(address, symbol) {
+  if (knownQuote(address)) return true;
+  return KNOWN_QUOTE_SYMBOLS.has(String(symbol || "").toUpperCase());
+}
+
+function errorString(error) {
+  return String(error?.message || error || "UNKNOWN_ERROR");
+}
+
+function money(value) {
+  const n = safeNumber(value);
+  if (!n) return "UNVERIFIED";
+  if (n >= 1e9) return "$" + (n / 1e9).toFixed(2) + "B";
+  if (n >= 1e6) return "$" + (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return "$" + (n / 1e3).toFixed(1) + "K";
+  return "$" + n.toFixed(2);
+}
+
+function percentChange(previous, current) {
+  const a = safeNumber(previous);
+  const b = safeNumber(current);
+  if (a <= 0) return null;
+  return ((b - a) / a) * 100;
+}
+
+/* =========================================================
+   KV
+   ========================================================= */
+
+function getKV(env) {
+  if (
+    env.MEME_HUNTER_STATE &&
+    typeof env.MEME_HUNTER_STATE.get === "function" &&
+    typeof env.MEME_HUNTER_STATE.put === "function"
+  ) {
+    return {
+      kv: env.MEME_HUNTER_STATE,
+      binding: "MEME_HUNTER_STATE"
+    };
+  }
 
   if (
-    !/^0x[a-fA-F0-
+    env.KV_BINDING &&
+    typeof env.KV_BINDING.get === "function" &&
+    typeof env.KV_BINDING.put === "function"
+  ) {
+    return {
+      kv: env.KV_BINDING,
+      binding: "KV_BINDING"
+    };
+  }
 
-    /* =========================================================
+  return {
+    kv: null,
+    binding: null
+  };
+}
+
+function newState() {
+  return {
+    version: VERSION,
+
+    // Historical catch-up cursor
+    lastScannedBlock: null,
+
+    // V78 live-head telemetry
+    lastLiveScannedBlock: null,
+
+    watchedTokens: [],
+    alerts: {},
+    snapshots: {},
+    createdAt: now(),
+    updatedAt: now()
+  };
+}
+
+async function readState(env) {
+  const { kv, binding } = getKV(env);
+
+  if (!kv) {
+    return {
+      persistent: false,
+      binding: null,
+      state: newState(),
+      error: null
+    };
+  }
+
+  try {
+    const raw = await kv.get(STATE_KEY);
+
+    if (!raw) {
+      return {
+        persistent: true,
+        binding,
+        state: newState(),
+        error: null
+      };
+    }
+
+    const parsed = JSON.parse(raw);
+
+    return {
+      persistent: true,
+      binding,
+
+      state: {
+        ...newState(),
+        ...parsed,
+
+        watchedTokens: Array.isArray(parsed?.watchedTokens)
+          ? parsed.watchedTokens
+          : [],
+
+        alerts:
+          parsed?.alerts && typeof parsed.alerts === "object"
+            ? parsed.alerts
+            : {},
+
+        snapshots:
+          parsed?.snapshots && typeof parsed.snapshots === "object"
+            ? parsed.snapshots
+            : {}
+      },
+
+      error: null
+    };
+  } catch (error) {
+    return {
+      persistent: true,
+      binding,
+      state: newState(),
+      error: errorString(error)
+    };
+  }
+}
+
+async function writeState(env, state) {
+  const { kv, binding } = getKV(env);
+
+  if (!kv) {
+    return {
+      saved: false,
+      binding: null,
+      error: "KV_NOT_CONFIGURED"
+    };
+  }
+
+  try {
+    state.version = VERSION;
+    state.updatedAt = now();
+
+    await kv.put(
+      STATE_KEY,
+      JSON.stringify(state)
+    );
+
+    return {
+      saved: true,
+      binding,
+      error: null
+    };
+  } catch (error) {
+    return {
+      saved: false,
+      binding,
+      error: errorString(error)
+    };
+  }
+}
+
+function persistenceHealth(result) {
+  if (!result.persistent) {
+    return {
+      healthy: false,
+      status: "KV_BINDING_MISSING"
+    };
+  }
+
+  if (result.error) {
+    return {
+      healthy: false,
+      status: "KV_READ_ERROR"
+    };
+  }
+
+  return {
+    healthy: true,
+    status: "READY"
+  };
+}/* =========================================================
    STATE PRUNING
    ========================================================= */
 
@@ -1458,9 +1372,7 @@ function decodeString(hex) {
   } catch {
     return null;
   }
-}
-
-async function verifyERC20(env, address, budget) {
+}async function verifyERC20(env, address, budget) {
   if (
     !budgetAvailable(
       budget,
@@ -2609,9 +2521,7 @@ function analyseWhaleFlow(
 
     reasons
   };
-}
-
-/* =========================================================
+}/* =========================================================
    MOMENTUM
    ========================================================= */
 
@@ -4183,9 +4093,7 @@ function analysisPriority(
   }
 
   return score;
-}
-
-/* =========================================================
+}/* =========================================================
    TELEGRAM
    ========================================================= */
 
@@ -5568,9 +5476,7 @@ async function scan(env) {
     timestamp:
       now()
   };
-}
-
-/* =========================================================
+}/* =========================================================
    HEALTH
    ========================================================= */
 
