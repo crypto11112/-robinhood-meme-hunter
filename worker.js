@@ -1,24 +1,26 @@
 /**
  * Robinhood Chain Meme Hunter
- * V99
+ * V100
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V99:
- * - Builds directly forward from the confirmed/deployed V98 baseline
- * - Preserves the existing KV STATE_KEY/history
- * - Preserves V98 live Initialize lookback and DexScreener burst/cooldown protection
- * - Preserves V97 holder reconciliation and integrity guards
- * - Preserves V95/V96 Blockscout holder fallbacks and market negative-cache protection
- * - Preserves V77-style spaced Telegram alerts and token image/sendPhoto fallback
- * - NEW: DexScreener 5m, 1h and 24h buy/sell transaction counts
- * - NEW: 5m, 1h and 24h buy-pressure telemetry
- * - NEW: directional buy/sell USD fields with strict VERIFIED/UNVERIFIED handling
- * - NEW: Telegram trading-activity section for 5m, 1h and 24h
- * - NEW: net-flow field is displayed only when directional USD flow is genuinely verified
- * - Never estimates buy/sell dollar amounts from transaction counts or total volume
+ * V100:
+ * - Builds directly forward from the confirmed V99 baseline
+ * - Preserves the existing KV state key/history
+ * - Preserves V99 5m/1h/24h trade-count Telegram section
+ * - Preserves strict UNVERIFIED directional USD handling
+ * - Preserves V98 Initialize lookback and DexScreener rate-limit protection
+ * - Preserves V97 holder reconciliation/integrity guards
+ * - Preserves V77-style spaced Telegram alerts and token-image/sendPhoto fallback
+ * - NEW: persistent unknown V4 pool tracker in existing KV state
+ * - NEW: first/last active block tracking for unresolved pool IDs
+ * - NEW: targeted historical Initialize lookup by exact pool ID
+ * - NEW: bounded backwards search cursor continues across scheduled runs
+ * - NEW: resolved pools automatically enter the pool registry/watchlist
+ * - NEW: same-run live activity reclassification after a pool resolves
+ * - NEW: tracker pruning/limits to protect KV size
  */
-const VERSION = "V99";
+const VERSION = "V100";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -200,6 +202,12 @@ const DEXSCREENER_MAX_FRESH_PER_SCAN = 1;
 
 /* V98: one short initialize-only lookback catches pools created just before the live window. */
 const LIVE_INITIALIZE_LOOKBACK_BLOCKS = 10;
+
+/* V100 persistent unknown-pool resolver */
+const UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS = 10;
+const UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN = 2;
+const UNKNOWN_POOL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_UNKNOWN_POOL_TRACKER = 500;
 
 /* =========================================================
    WATCHLIST
@@ -1038,6 +1046,9 @@ function newState() {
     poolRegistry:
       {},
 
+    unknownPools:
+      {},
+
     scheduler: {
       scheduledRunCount:
         0,
@@ -1231,6 +1242,13 @@ async function readState(env) {
           typeof parsed.poolRegistry ===
             "object"
             ? parsed.poolRegistry
+            : {},
+
+        unknownPools:
+          parsed.unknownPools &&
+          typeof parsed.unknownPools ===
+            "object"
+            ? parsed.unknownPools
             : {},
 
         scheduler: {
@@ -1819,6 +1837,586 @@ function prunePoolRegistry(
     );
 }
 
+
+/* =========================================================
+   V100 PERSISTENT UNKNOWN V4 POOL TRACKER
+   ========================================================= */
+
+function ensureUnknownPoolState(state) {
+  state.unknownPools =
+    state.unknownPools &&
+    typeof state.unknownPools === "object"
+      ? state.unknownPools
+      : {};
+
+  return state.unknownPools;
+}
+
+function observeUnknownPools(
+  state,
+  logs,
+  unknownPoolIds
+) {
+  const tracker =
+    ensureUnknownPoolState(state);
+
+  const unknownSet =
+    unknownPoolIds instanceof Set
+      ? unknownPoolIds
+      : new Set();
+
+  const now = Date.now();
+
+  for (const log of logs || []) {
+    const topic0 =
+      normalize(log?.topics?.[0]);
+
+    if (
+      topic0 !== SWAP_TOPIC &&
+      topic0 !== MODIFY_LIQUIDITY_TOPIC
+    ) {
+      continue;
+    }
+
+    const poolId =
+      normalize(log?.topics?.[1]);
+
+    if (
+      !poolId ||
+      !unknownSet.has(poolId) ||
+      state.poolRegistry?.[poolId]
+    ) {
+      continue;
+    }
+
+    let blockNumber = 0;
+
+    try {
+      blockNumber =
+        Number(
+          BigInt(
+            log?.blockNumber ||
+            "0x0"
+          )
+        );
+    } catch {
+      blockNumber = 0;
+    }
+
+    const previous =
+      tracker[poolId] &&
+      typeof tracker[poolId] ===
+        "object"
+        ? tracker[poolId]
+        : {};
+
+    const priorFirst =
+      safeNumber(
+        previous.firstActiveBlock
+      );
+
+    const firstActiveBlock =
+      priorFirst > 0
+        ? (
+            blockNumber > 0
+              ? Math.min(
+                  priorFirst,
+                  blockNumber
+                )
+              : priorFirst
+          )
+        : (
+            blockNumber > 0
+              ? blockNumber
+              : null
+          );
+
+    tracker[poolId] = {
+      poolId,
+      firstSeenAt:
+        safeNumber(
+          previous.firstSeenAt
+        ) || now,
+      lastSeenAt:
+        now,
+      firstActiveBlock,
+      lastActiveBlock:
+        Math.max(
+          safeNumber(
+            previous.lastActiveBlock
+          ),
+          blockNumber
+        ) || null,
+      searchCursorBlock:
+        safeNumber(
+          previous.searchCursorBlock
+        ) > 0
+          ? safeNumber(
+              previous.searchCursorBlock
+            )
+          : (
+              firstActiveBlock &&
+              firstActiveBlock > 0
+                ? firstActiveBlock - 1
+                : null
+            ),
+      attempts:
+        safeNumber(
+          previous.attempts
+        ),
+      searchedBlocks:
+        safeNumber(
+          previous.searchedBlocks
+        ),
+      lastAttemptAt:
+        previous.lastAttemptAt ||
+        null,
+      lastError:
+        previous.lastError ||
+        null
+    };
+  }
+}
+
+function pruneUnknownPools(state) {
+  const tracker =
+    ensureUnknownPoolState(state);
+
+  const now = Date.now();
+
+  const entries =
+    Object.entries(tracker)
+      .filter(([poolId, entry]) => {
+        if (
+          state.poolRegistry?.[
+            poolId
+          ]
+        ) {
+          return false;
+        }
+
+        const seen =
+          safeNumber(
+            entry?.lastSeenAt
+          );
+
+        return (
+          !seen ||
+          now - seen <=
+            UNKNOWN_POOL_MAX_AGE_MS
+        );
+      })
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b[1]?.lastSeenAt
+          ) -
+          safeNumber(
+            a[1]?.lastSeenAt
+          )
+      )
+      .slice(
+        0,
+        MAX_UNKNOWN_POOL_TRACKER
+      );
+
+  state.unknownPools =
+    Object.fromEntries(
+      entries
+    );
+}
+
+async function getInitializeForPoolRange(
+  env,
+  state,
+  poolId,
+  from,
+  to,
+  budget
+) {
+  if (
+    from > to ||
+    !poolId ||
+    !budgetAvailable(
+      budget,
+      "discovery-live"
+    )
+  ) {
+    return {
+      logs: [],
+      provider: null,
+      error: null
+    };
+  }
+
+  const preferred = [
+    "ALCHEMY",
+    "ROBINHOOD_PUBLIC_RPC"
+  ];
+
+  let lastError = null;
+
+  for (
+    const provider
+    of preferred
+  ) {
+    if (
+      discoveryProviderCooling(
+        state,
+        provider
+      )
+    ) {
+      continue;
+    }
+
+    const url =
+      rpcProviderUrl(
+        env,
+        provider
+      );
+
+    if (!url) {
+      continue;
+    }
+
+    try {
+      const logs =
+        await rpcCall(
+          url,
+          "eth_getLogs",
+          [{
+            fromBlock:
+              "0x" +
+              BigInt(
+                from
+              ).toString(16),
+            toBlock:
+              "0x" +
+              BigInt(
+                to
+              ).toString(16),
+            address:
+              POOL_MANAGER,
+            topics: [
+              INITIALIZE_TOPIC,
+              poolId
+            ]
+          }],
+          budget,
+          "discovery-live"
+        );
+
+      return {
+        logs:
+          Array.isArray(
+            logs
+          )
+            ? logs
+            : [],
+        provider,
+        error: null
+      };
+    } catch (error) {
+      lastError =
+        String(
+          error?.message ||
+          error
+        );
+    }
+  }
+
+  return {
+    logs: [],
+    provider: null,
+    error:
+      lastError ||
+      "UNKNOWN_POOL_LOOKUP_UNAVAILABLE"
+  };
+}
+
+async function resolvePersistentUnknownPools(
+  env,
+  state,
+  budget
+) {
+  pruneUnknownPools(
+    state
+  );
+
+  const tracker =
+    ensureUnknownPoolState(
+      state
+    );
+
+  const candidates =
+    Object.values(
+      tracker
+    )
+      .filter(entry => {
+        const poolId =
+          normalize(
+            entry?.poolId
+          );
+
+        return (
+          poolId &&
+          !state.poolRegistry?.[
+            poolId
+          ] &&
+          safeNumber(
+            entry
+              ?.searchCursorBlock
+          ) > 0
+        );
+      })
+      .sort((a, b) => {
+        const recent =
+          safeNumber(
+            b?.lastSeenAt
+          ) -
+          safeNumber(
+            a?.lastSeenAt
+          );
+
+        if (recent !== 0) {
+          return recent;
+        }
+
+        return (
+          safeNumber(
+            a?.attempts
+          ) -
+          safeNumber(
+            b?.attempts
+          )
+        );
+      });
+
+  const output = {
+    attempted: 0,
+    requestsUsed: 0,
+    resolved: 0,
+    resolvedPoolIds: [],
+    searchedBlocks: 0,
+    trackerCount:
+      Object.keys(
+        tracker
+      ).length,
+    probes: []
+  };
+
+  for (
+    const entry
+    of candidates
+  ) {
+    if (
+      output.requestsUsed >=
+        UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN ||
+      !budgetAvailable(
+        budget,
+        "discovery-live"
+      )
+    ) {
+      break;
+    }
+
+    const poolId =
+      normalize(
+        entry.poolId
+      );
+
+    const cursor =
+      safeNumber(
+        entry.searchCursorBlock
+      );
+
+    if (
+      !poolId ||
+      cursor <= 0
+    ) {
+      continue;
+    }
+
+    const to =
+      BigInt(
+        cursor
+      );
+
+    const span =
+      BigInt(
+        UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS -
+        1
+      );
+
+    const from =
+      to > span
+        ? to - span
+        : 0n;
+
+    output.attempted++;
+
+    const result =
+      await getInitializeForPoolRange(
+        env,
+        state,
+        poolId,
+        from,
+        to,
+        budget
+      );
+
+    output.requestsUsed++;
+    output.searchedBlocks +=
+      Number(
+        to -
+        from +
+        1n
+      );
+
+    entry.attempts =
+      safeNumber(
+        entry.attempts
+      ) + 1;
+
+    entry.lastAttemptAt =
+      Date.now();
+
+    entry.searchedBlocks =
+      safeNumber(
+        entry.searchedBlocks
+      ) +
+      Number(
+        to -
+        from +
+        1n
+      );
+
+    entry.lastError =
+      result.error ||
+      null;
+
+    let resolvedPool =
+      null;
+
+    for (
+      const log
+      of result.logs
+    ) {
+      const pool =
+        decodeInitialize(
+          log
+        );
+
+      if (
+        pool &&
+        normalize(
+          pool.poolId
+        ) ===
+          poolId
+      ) {
+        resolvedPool =
+          pool;
+        break;
+      }
+    }
+
+    output.probes.push({
+      poolId,
+      fromBlock:
+        Number(from),
+      toBlock:
+        Number(to),
+      provider:
+        result.provider,
+      logs:
+        result.logs.length,
+      resolved:
+        Boolean(
+          resolvedPool
+        ),
+      error:
+        result.error
+    });
+
+    if (
+      resolvedPool
+    ) {
+      registerPoolMapping(
+        state,
+        resolvedPool
+      );
+
+      for (
+        const address
+        of [
+          resolvedPool
+            .currency0,
+          resolvedPool
+            .currency1
+        ]
+      ) {
+        if (
+          !isAddress(
+            address
+          ) ||
+          address ===
+            ZERO ||
+          knownQuote(
+            address
+          )
+        ) {
+          continue;
+        }
+
+        addWatch(
+          state,
+          address,
+          resolvedPool,
+          "V100_UNKNOWN_POOL_RESOLUTION"
+        );
+      }
+
+      delete tracker[
+        poolId
+      ];
+
+      output.resolved++;
+      output
+        .resolvedPoolIds
+        .push(
+          poolId
+        );
+
+      continue;
+    }
+
+    /*
+     * Do not advance after a provider error. Successful empty ranges
+     * advance ten blocks backwards and continue on future runs.
+     */
+    if (
+      !result.error
+    ) {
+      entry.searchCursorBlock =
+        from > 0n
+          ? Number(
+              from -
+              1n
+            )
+          : 0;
+    }
+  }
+
+  output.trackerCount =
+    Object.keys(
+      ensureUnknownPoolState(
+        state
+      )
+    ).length;
+
+  return output;
+}
+
 /* =========================================================
    PRUNE
    ========================================================= */
@@ -1831,6 +2429,10 @@ function pruneState(
     Date.now();
 
   prunePoolRegistry(
+    state
+  );
+
+  pruneUnknownPools(
     state
   );
 
@@ -10438,11 +11040,36 @@ async function scan(
     }
   }
 
-  const liveActivity =
+  let liveActivity =
     activeTokensFromLogs(
       state,
       liveOutput.logs
     );
+
+  observeUnknownPools(
+    state,
+    liveOutput.logs,
+    liveActivity
+      .unknownPoolIds
+  );
+
+  const unknownPoolResolution =
+    await resolvePersistentUnknownPools(
+      env,
+      state,
+      budget
+    );
+
+  if (
+    unknownPoolResolution
+      .resolved > 0
+  ) {
+    liveActivity =
+      activeTokensFromLogs(
+        state,
+        liveOutput.logs
+      );
+  }
 
   for (
     const token
@@ -11235,7 +11862,7 @@ async function scan(
     status,
 
     scanMode:
-      "V99_V98_CORE_MULTI_WINDOW_TRADE_FLOW_HUNTER",
+      "V100_V99_CORE_PERSISTENT_UNKNOWN_POOL_RESOLUTION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -11481,6 +12108,9 @@ async function scan(
         initializeLookback:
           liveInitializeLookback,
 
+        persistentUnknownResolution:
+          unknownPoolResolution,
+
         unknownSwapEvents:
           liveActivity
             .unknownSwapEvents,
@@ -11664,6 +12294,11 @@ async function scan(
         state.poolRegistry || {}
       ).length,
 
+    unknownPoolTrackerCount:
+      Object.keys(
+        state.unknownPools || {}
+      ).length,
+
     marketFreshTarget:
       marketFreshTargetAddress ||
       null,
@@ -11843,12 +12478,24 @@ async function scan(
       telegramTradeFlowSection:
         "ENABLED_V99",
 
+      persistentUnknownPoolTracker:
+        "ENABLED_V100",
+
+      targetedUnknownPoolInitializeResolution:
+        "ENABLED_V100",
+
+      boundedUnknownPoolSearchCursor:
+        "ENABLED_V100",
+
+      sameRunResolvedPoolReactivation:
+        "ENABLED_V100",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V99_V98_CORE_MULTI_WINDOW_TRADE_FLOW_V77_TELEGRAM_HUNTER",
+      "V100_V99_CORE_PERSISTENT_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -12164,7 +12811,7 @@ async function health(
     },
 
     architecture:
-      "V99_V98_CORE_MULTI_WINDOW_TRADE_FLOW_V77_TELEGRAM_HUNTER",
+      "V100_V99_CORE_PERSISTENT_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -12343,6 +12990,11 @@ async function stateStatus(
     poolRegistryCount:
       Object.keys(
         state.poolRegistry || {}
+      ).length,
+
+    unknownPoolTrackerCount:
+      Object.keys(
+        state.unknownPools || {}
       ).length,
 
     watchedTokens:
@@ -12558,7 +13210,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V99_V98_CORE_MULTI_WINDOW_TRADE_FLOW_V77_TELEGRAM_HUNTER",
+      "V100_V99_CORE_PERSISTENT_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -12987,7 +13639,7 @@ export default {
             ),
 
           architecture:
-            "V99_V98_CORE_MULTI_WINDOW_TRADE_FLOW_V77_TELEGRAM_HUNTER",
+            "V100_V99_CORE_PERSISTENT_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
