@@ -1,26 +1,26 @@
 /**
  * Robinhood Chain Meme Hunter
- * V100
+ * V101
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V100:
- * - Builds directly forward from the confirmed V99 baseline
+ * V101:
+ * - Builds directly forward from the confirmed V100 baseline
  * - Preserves the existing KV state key/history
+ * - Preserves V100 persistent unknown-pool tracking/search cursors
  * - Preserves V99 5m/1h/24h trade-count Telegram section
  * - Preserves strict UNVERIFIED directional USD handling
- * - Preserves V98 Initialize lookback and DexScreener rate-limit protection
- * - Preserves V97 holder reconciliation/integrity guards
- * - Preserves V77-style spaced Telegram alerts and token-image/sendPhoto fallback
- * - NEW: persistent unknown V4 pool tracker in existing KV state
- * - NEW: first/last active block tracking for unresolved pool IDs
- * - NEW: targeted historical Initialize lookup by exact pool ID
- * - NEW: bounded backwards search cursor continues across scheduled runs
- * - NEW: resolved pools automatically enter the pool registry/watchlist
- * - NEW: same-run live activity reclassification after a pool resolves
- * - NEW: tracker pruning/limits to protect KV size
+ * - Preserves V98 DexScreener protection
+ * - Preserves V97 holder integrity/reconciliation
+ * - Preserves V77-style spaced Telegram alerts + token-image/sendPhoto fallback
+ * - NEW: prioritises targeted unknown-pool resolution over low-value blanket lookback
+ * - NEW: increases targeted resolver capacity from 2 to 3 successful probes/run
+ * - NEW: avoids spending a live-discovery request on blanket Initialize lookback
+ *        when several unresolved active pools already exist
+ * - NEW: preserves the blanket lookback for quiet/small-unknown-pool windows
+ * - NEW: explicit resolution-budget telemetry
  */
-const VERSION = "V100";
+const VERSION = "V101";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -205,9 +205,16 @@ const LIVE_INITIALIZE_LOOKBACK_BLOCKS = 10;
 
 /* V100 persistent unknown-pool resolver */
 const UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS = 10;
-const UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN = 2;
+const UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN = 3;
 const UNKNOWN_POOL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_UNKNOWN_POOL_TRACKER = 500;
+
+/*
+ * V101: when at least this many unresolved pools are active in the
+ * current live window, targeted exact-pool history is more valuable
+ * than another generic 10-block Initialize-only lookback.
+ */
+const UNKNOWN_POOL_TARGETED_PRIORITY_THRESHOLD = 3;
 
 /* =========================================================
    WATCHLIST
@@ -2195,6 +2202,8 @@ async function resolvePersistentUnknownPools(
   const output = {
     attempted: 0,
     requestsUsed: 0,
+    requestLimit:
+      UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN,
     resolved: 0,
     resolvedPoolIds: [],
     searchedBlocks: 0,
@@ -11001,8 +11010,22 @@ async function scan(
    * initialize-only lookback range and register those mappings before
    * classifying live swaps as unknown.
    */
+  const preLookbackActivity =
+    activeTokensFromLogs(
+      state,
+      liveOutput.logs
+    );
+
+  const prioritizeTargetedResolution =
+    preLookbackActivity
+      .unknownPoolIds
+      .size >=
+    UNKNOWN_POOL_TARGETED_PRIORITY_THRESHOLD;
+
   let liveInitializeLookback = {
     attempted: false,
+    skipped: false,
+    skippedReason: null,
     fromBlock: null,
     toBlock: null,
     logs: 0,
@@ -11011,7 +11034,10 @@ async function scan(
     error: null
   };
 
-  if (live.from > 0n) {
+  if (
+    live.from > 0n &&
+    !prioritizeTargetedResolution
+  ) {
     const lookbackTo = live.from - 1n;
     const lookbackFrom =
       lookbackTo >= BigInt(LIVE_INITIALIZE_LOOKBACK_BLOCKS - 1)
@@ -11038,6 +11064,15 @@ async function scan(
       registerPoolMapping(state, pool);
       liveInitializeLookback.initializeEvents++;
     }
+  } else if (
+    live.from > 0n &&
+    prioritizeTargetedResolution
+  ) {
+    liveInitializeLookback.skipped =
+      true;
+
+    liveInitializeLookback.skippedReason =
+      "TARGETED_UNKNOWN_POOL_RESOLUTION_PRIORITY";
   }
 
   let liveActivity =
@@ -11862,7 +11897,7 @@ async function scan(
     status,
 
     scanMode:
-      "V100_V99_CORE_PERSISTENT_UNKNOWN_POOL_RESOLUTION_HUNTER",
+      "V101_V100_CORE_ACCELERATED_UNKNOWN_POOL_RESOLUTION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -12490,12 +12525,21 @@ async function scan(
       sameRunResolvedPoolReactivation:
         "ENABLED_V100",
 
+      acceleratedUnknownPoolResolution:
+        "ENABLED_V101",
+
+      targetedResolutionRequestLimit:
+        UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN,
+
+      adaptiveInitializeLookbackPriority:
+        "ENABLED_V101",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V100_V99_CORE_PERSISTENT_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V101_V100_CORE_ACCELERATED_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -12811,7 +12855,7 @@ async function health(
     },
 
     architecture:
-      "V100_V99_CORE_PERSISTENT_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V101_V100_CORE_ACCELERATED_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -13210,7 +13254,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V100_V99_CORE_PERSISTENT_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V101_V100_CORE_ACCELERATED_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -13639,7 +13683,7 @@ export default {
             ),
 
           architecture:
-            "V100_V99_CORE_PERSISTENT_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+            "V101_V100_CORE_ACCELERATED_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
