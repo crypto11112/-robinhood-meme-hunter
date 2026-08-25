@@ -1,4 +1,4 @@
-/**
+**
  * Robinhood Chain Meme Hunter
  * V90
  *
@@ -66,9 +66,20 @@
  * - FIX: keeps one-strike failed growth probe protection
  * - FIX: improves catch-up throughput without sacrificing candidate analysis protection
  * - Preserves DexScreener rate-limit protection, holder fallbacks and V77-style rich Telegram alerts
+
+ * V92:
+ * - Preserves complete V90 capability set and existing KV history
+ * - FIX: persistent pool registry survives watchlist trimming
+ * - FIX: live activity can reactivate tokens from known pool mappings
+ * - FIX: improves active watched-token matching without weakening live-first scanning
+ * - FIX: holder intelligence cache reuses recently verified Blockscout data
+ * - FIX: stale verified holder fallback used during temporary Blockscout outages
+ * - FIX: fresh market lookup is explicitly prioritised to the strongest live/new token
+ * - FIX: non-priority candidates use cache/stale data instead of consuming the DexScreener fresh slot
+ * - Preserves V90 accelerated backlog, one-strike range learning and V77-style rich Telegram alerts
  */
 
-const VERSION = "V90";
+const VERSION = "V92";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -247,6 +258,19 @@ const WATCH_MAX_AGE =
   12 * 60 * 60 * 1000;
 
 const MAX_WATCHED_TOKENS = 50;
+
+/* V92: retain pool->token mappings beyond the 50-token watchlist. */
+const POOL_REGISTRY_MAX_AGE =
+  48 * 60 * 60 * 1000;
+
+const MAX_POOL_REGISTRY = 2500;
+
+/* V92: holder intelligence reuse / outage protection. */
+const HOLDER_CACHE_MS =
+  20 * 60 * 1000;
+
+const HOLDER_STALE_CACHE_MS =
+  2 * 60 * 60 * 1000;
 
 /* =========================================================
    TELEGRAM
@@ -1060,6 +1084,9 @@ function newState() {
     snapshots:
       {},
 
+    poolRegistry:
+      {},
+
     scheduler: {
       scheduledRunCount:
         0,
@@ -1246,6 +1273,13 @@ async function readState(env) {
           typeof parsed.snapshots ===
             "object"
             ? parsed.snapshots
+            : {},
+
+        poolRegistry:
+          parsed.poolRegistry &&
+          typeof parsed.poolRegistry ===
+            "object"
+            ? parsed.poolRegistry
             : {},
 
         scheduler: {
@@ -1723,6 +1757,118 @@ function alternateDiscoveryProvider(
 }
 
 /* =========================================================
+   V92 POOL REGISTRY
+   ========================================================= */
+
+function registerPoolMapping(
+  state,
+  pool
+) {
+  const poolId =
+    normalize(
+      pool?.poolId
+    );
+
+  if (!poolId) {
+    return;
+  }
+
+  state.poolRegistry =
+    state.poolRegistry &&
+    typeof state.poolRegistry ===
+      "object"
+      ? state.poolRegistry
+      : {};
+
+  const tokens =
+    [
+      pool.currency0,
+      pool.currency1
+    ]
+      .map(normalize)
+      .filter(
+        address =>
+          isAddress(address) &&
+          address !== ZERO &&
+          !knownQuote(address)
+      );
+
+  if (!tokens.length) {
+    return;
+  }
+
+  state.poolRegistry[
+    poolId
+  ] = {
+    poolId,
+    currency0:
+      normalize(pool.currency0),
+    currency1:
+      normalize(pool.currency1),
+    tokens,
+    lastSeenAt:
+      Date.now(),
+    blockNumber:
+      pool.blockNumber ||
+      null,
+    transactionHash:
+      pool.transactionHash ||
+      null
+  };
+}
+
+function prunePoolRegistry(
+  state
+) {
+  state.poolRegistry =
+    state.poolRegistry &&
+    typeof state.poolRegistry ===
+      "object"
+      ? state.poolRegistry
+      : {};
+
+  const current =
+    Date.now();
+
+  const entries =
+    Object.entries(
+      state.poolRegistry
+    )
+      .filter(
+        ([, entry]) => {
+          const seen =
+            safeNumber(
+              entry?.lastSeenAt
+            );
+
+          return (
+            !seen ||
+            current - seen <=
+              POOL_REGISTRY_MAX_AGE
+          );
+        }
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b[1]?.lastSeenAt
+          ) -
+          safeNumber(
+            a[1]?.lastSeenAt
+          )
+      )
+      .slice(
+        0,
+        MAX_POOL_REGISTRY
+      );
+
+  state.poolRegistry =
+    Object.fromEntries(
+      entries
+    );
+}
+
+/* =========================================================
    PRUNE
    ========================================================= */
 
@@ -1732,6 +1878,10 @@ function pruneState(
 ) {
   const current =
     Date.now();
+
+  prunePoolRegistry(
+    state
+  );
 
   state.watchedTokens =
     Array.isArray(
@@ -3010,7 +3160,7 @@ async function scanBacklogSequential(
           "discovery-backlog",
 
         strategy:
-          "V90_PROTECTED_ACCELERATED_PROVEN_RANGE"
+          "V92_PROTECTED_ACCELERATED_PROVEN_RANGE"
       });
 
       probeHistory.push({
@@ -3381,6 +3531,11 @@ function processDiscoveryLogs(
 
     initializeEvents++;
 
+    registerPoolMapping(
+      state,
+      pool
+    );
+
     for (
       const address
       of [
@@ -3513,6 +3668,54 @@ function activeTokensFromLogs(
     }
   }
 
+  /*
+   * V92: merge persistent pool registry mappings. This lets a
+   * token become live-active again even if it previously fell
+   * outside the 50-token watchlist.
+   */
+  for (
+    const entry
+    of Object.values(
+      state.poolRegistry || {}
+    )
+  ) {
+    const poolId =
+      normalize(
+        entry?.poolId
+      );
+
+    if (!poolId) {
+      continue;
+    }
+
+    if (
+      !poolToTokens.has(
+        poolId
+      )
+    ) {
+      poolToTokens.set(
+        poolId,
+        new Set()
+      );
+    }
+
+    for (
+      const address
+      of entry.tokens || []
+    ) {
+      if (
+        isAddress(address) &&
+        !knownQuote(address)
+      ) {
+        poolToTokens
+          .get(poolId)
+          .add(
+            normalize(address)
+          );
+      }
+    }
+  }
+
   const active =
     new Set();
 
@@ -3605,11 +3808,28 @@ function activeTokensFromLogs(
         address
       );
 
-      const watched =
+      let watched =
         findWatched(
           state,
           address
         );
+
+      if (!watched) {
+        const registryPool =
+          state.poolRegistry
+            ?.[poolId] ||
+          null;
+
+        if (registryPool) {
+          watched =
+            addWatch(
+              state,
+              address,
+              registryPool,
+              "LIVE_REGISTRY_REACTIVATION"
+            ).token;
+        }
+      }
 
       if (watched) {
         watched.lastLiveSeenAt =
@@ -4347,7 +4567,8 @@ async function marketData(
   token,
   budget,
   watched,
-  state
+  state,
+  allowFresh = true
 ) {
   const freshCache =
     cachedMarket(
@@ -4417,6 +4638,38 @@ async function marketData(
 
       cached:
         false
+    };
+  }
+
+  /*
+   * V92: reserve the scarce fresh DexScreener request for the
+   * highest-priority live/new candidate. Other candidates still
+   * receive verified cached/stale intelligence when available.
+   */
+  if (!allowFresh) {
+    const stale =
+      cachedMarket(
+        watched,
+        MARKET_STALE_CACHE_MS
+      );
+
+    if (stale) {
+      return {
+        ...stale,
+        source:
+          "STALE_CACHE_PRIORITY_RESERVE",
+        freshReserved:
+          true
+      };
+    }
+
+    return {
+      verified:
+        false,
+      status:
+        "DEXSCREENER_FRESH_RESERVED_FOR_PRIORITY",
+      freshReserved:
+        true
     };
   }
 
@@ -5359,13 +5612,96 @@ function unverifiedHolders(
 }
 
 /* =========================================================
+   V92 HOLDER CACHE
+   ========================================================= */
+
+function cachedHolderIntelligence(
+  watched,
+  maxAge
+) {
+  const cache =
+    watched?.holderCache;
+
+  if (
+    !cache ||
+    typeof cache !==
+      "object"
+  ) {
+    return null;
+  }
+
+  const timestamp =
+    safeNumber(
+      cache.timestamp
+    );
+
+  if (
+    !timestamp ||
+    Date.now() - timestamp >
+      maxAge
+  ) {
+    return null;
+  }
+
+  if (
+    !cache.data ||
+    typeof cache.data !==
+      "object"
+  ) {
+    return null;
+  }
+
+  return {
+    ...cache.data,
+    cached:
+      true,
+    holderCacheAgeMs:
+      Date.now() - timestamp
+  };
+}
+
+function saveHolderIntelligence(
+  watched,
+  data
+) {
+  if (
+    !watched ||
+    !data ||
+    typeof data !==
+      "object"
+  ) {
+    return;
+  }
+
+  if (
+    !data.countersVerified &&
+    !data.concentrationVerified
+  ) {
+    return;
+  }
+
+  watched.holderCache = {
+    timestamp:
+      Date.now(),
+    data: {
+      ...data,
+      cached:
+        false,
+      holderCacheAgeMs:
+        0
+    }
+  };
+}
+
+/* =========================================================
    HOLDER INTELLIGENCE â V88
    ========================================================= */
 
 async function holderIntelligence(
   token,
   totalSupply,
-  budget
+  budget,
+  watched
 ) {
   if (
     !totalSupply
@@ -5373,6 +5709,20 @@ async function holderIntelligence(
     return unverifiedHolders(
       "TOTAL_SUPPLY_UNAVAILABLE"
     );
+  }
+
+  const freshHolderCache =
+    cachedHolderIntelligence(
+      watched,
+      HOLDER_CACHE_MS
+    );
+
+  if (freshHolderCache) {
+    return {
+      ...freshHolderCache,
+      holderSource:
+        "CACHE"
+    };
   }
 
   /*
@@ -5499,6 +5849,22 @@ async function holderIntelligence(
       holders.items
     )
   ) {
+    const staleHolderCache =
+      cachedHolderIntelligence(
+        watched,
+        HOLDER_STALE_CACHE_MS
+      );
+
+    if (staleHolderCache) {
+      return {
+        ...staleHolderCache,
+        holderSource:
+          "STALE_CACHE_BLOCKSCOUT_OUTAGE",
+        blockscoutUnavailable:
+          true
+      };
+    }
+
     return {
       ...unverifiedHolders(
         "BLOCKSCOUT_HOLDERS_UNAVAILABLE"
@@ -5513,7 +5879,10 @@ async function holderIntelligence(
 
       holderCount,
 
-      transferCount
+      transferCount,
+
+      holderSource:
+        "BLOCKSCOUT"
     };
   }
 
@@ -6052,7 +6421,7 @@ async function holderIntelligence(
       );
   }
 
-  return {
+  const result = {
     verified:
       true,
 
@@ -6123,6 +6492,13 @@ async function holderIntelligence(
         infrastructureHolders.length
     }
   };
+
+  saveHolderIntelligence(
+    watched,
+    result
+  );
+
+  return result;
 }
 
 /* =========================================================
@@ -8749,296 +9125,108 @@ function qualifiesTelegram(
 function telegramMessage(
   candidate
 ) {
-  const holders =
-    candidate.holders;
-
-  const whale =
-    holders?.whale;
-
-  const market =
-    candidate.market;
+  const holders = candidate.holders;
+  const whale = holders?.whale;
+  const market = candidate.market;
 
   const riskScore =
-    candidate.risk
-      ?.verified &&
-    candidate.risk
-      ?.score !==
-      null
+    candidate.risk?.verified && candidate.risk?.score !== null
       ? `${candidate.risk.score}/100 (${candidate.risk.label})`
       : "UNVERIFIED";
 
   const marketQualityText =
-    candidate.marketQuality
-      ?.verified
+    candidate.marketQuality?.verified
       ? `${candidate.marketQuality.score}/100`
       : "UNVERIFIED";
 
   const holderText =
-    holders
-      ?.countersVerified &&
-    holders
-      ?.holderCount !==
-      null
-      ? formatNumber(
-          holders.holderCount
-        )
+    holders?.countersVerified && holders?.holderCount !== null
+      ? formatNumber(holders.holderCount)
       : "UNVERIFIED";
 
   const whaleWallets =
-    holders
-      ?.concentrationVerified &&
-    whale
-      ?.verified
-      ? String(
-          whale.whaleCount
-        )
+    holders?.concentrationVerified && whale?.verified
+      ? String(whale.whaleCount)
       : "UNVERIFIED";
 
   const topHolder =
-    holders
-      ?.concentrationVerified &&
-    whale
-      ?.verified
-      ? percentDisplay(
-          whale.top1Percent
-        )
+    holders?.concentrationVerified && whale?.verified
+      ? percentDisplay(whale.top1Percent)
       : "UNVERIFIED";
 
   const top10 =
-    holders
-      ?.concentrationVerified &&
-    whale
-      ?.verified
-      ? percentDisplay(
-          whale.top10Percent
-        )
+    holders?.concentrationVerified && whale?.verified
+      ? percentDisplay(whale.top10Percent)
       : "UNVERIFIED";
 
   const concentration =
-    holders
-      ?.concentrationVerified &&
-    whale
-      ?.verified
+    holders?.concentrationVerified && whale?.verified
       ? whale.concentrationRisk
       : "UNVERIFIED";
 
-  const buys =
-    market
-      ?.verified
-      ? safeNumber(
-          market.transactions
-            ?.h1?.buys
-        )
-      : "UNVERIFIED";
+  const buys = market?.verified
+    ? safeNumber(market.transactions?.h1?.buys)
+    : "UNVERIFIED";
 
-  const sells =
-    market
-      ?.verified
-      ? safeNumber(
-          market.transactions
-            ?.h1?.sells
-        )
-      : "UNVERIFIED";
+  const sells = market?.verified
+    ? safeNumber(market.transactions?.h1?.sells)
+    : "UNVERIFIED";
 
   const smartMoneyCandidate =
-    holders
-      ?.concentrationVerified &&
-    whale
-      ?.verified
-      ? yesNo(
-          whale.smartMoneyCandidate
-        )
-      : "NOT_VERIFIED";
+    holders?.concentrationVerified && whale?.verified
+      ? yesNo(whale.smartMoneyCandidate)
+      : "NO";
 
-  const infrastructureExcluded =
-    holders
-      ?.infrastructureHolders
-      ?.length ||
-    0;
+  const money = (value) =>
+    value !== null && value !== undefined
+      ? `$${formatNumber(value)}`
+      : "UNVERIFIED";
 
+  // V92: exact V77-style visual Telegram layout restored.
+  // Scanner/intelligence remains V92; only alert presentation follows V77.
   const lines = [
     `ð¨ <b>Robinhood Chain Meme Hunter ${VERSION}</b>`,
-    ""
+    "",
+    `ðª <b>${escapeHtml(candidate.name || "Unknown Token")} (${escapeHtml(candidate.symbol || "UNKNOWN")})</b>`,
+    "",
+    "<b>Contract:</b>",
+    `<code>${escapeHtml(candidate.address)}</code>`,
+    "",
+    `ð¯ Opportunity: <b>${candidate.opportunity.score}/100</b>`,
+    `ð Momentum: <b>${candidate.momentum.score}/100 (${candidate.momentum.label})</b>`,
+    `ð Confidence: <b>${candidate.confidence.score}/100 (${candidate.confidence.label})</b>`,
+    `ð§ª Market Quality: <b>${marketQualityText}</b>`,
+    `ð¡ Rug Risk: <b>${riskScore}</b>`,
+    "",
+    `ð° Market Cap: <b>${market?.verified ? money(market.marketCap) : "UNVERIFIED"}</b>`,
+    `ð§ Liquidity: <b>${market?.verified ? money(market.liquidityUsd) : "UNVERIFIED"}</b>`,
+    `ð 24h Volume: <b>${market?.verified ? money(market.volume?.h24) : "UNVERIFIED"}</b>`,
+    "",
+    `ð¢ 1h Buys: <b>${buys}</b>`,
+    `ð´ 1h Sells: <b>${sells}</b>`,
+    "",
+    `ð¥ Holders: <b>${holderText}</b>`,
+    "",
+    `ð Whale wallets: <b>${whaleWallets}</b>`,
+    `ð Top holder: <b>${topHolder}</b>`,
+    `ð Top 10: <b>${top10}</b>`,
+    `ð Concentration: <b>${concentration}</b>`,
+    "",
+    `ð Whale Flow: <b>${candidate.whaleFlow.flow}</b>`,
+    `ð¥ Accumulation: <b>${candidate.whaleFlow.accumulation}</b>`,
+    `ð¤ Distribution: <b>${candidate.whaleFlow.distribution}</b>`,
+    `ð Concentration Trend: <b>${candidate.whaleFlow.concentrationTrend}</b>`,
+    "",
+    `ð§  Smart-money candidate: <b>${smartMoneyCandidate}</b>`,
+    "ð§  Smart-money identity verified: <b>NO</b>",
+    "",
+    `ð¡ Pool V4 swaps: <b>${candidate.activity.swaps}</b>`,
+    `ð¦ Pool liquidity events: <b>${candidate.activity.liquidityEvents}</b>`,
+    "",
+    "â ï¸ <b>Automated early-stage screening. High risk.</b>"
   ];
 
-  if (
-    candidate.liveDiscovery
-  ) {
-    lines.push(
-      "â¡ <b>LIVE CHAIN DISCOVERY</b>",
-      ""
-    );
-  }
-
-  if (
-    candidate.newlyDiscovered
-  ) {
-    lines.push(
-      "ð <b>NEW TOKEN</b>",
-      ""
-    );
-  }
-
-  lines.push(
-    `ðª <b>${escapeHtml(
-      candidate.name ||
-      "Unknown Token"
-    )} (${escapeHtml(
-      candidate.symbol ||
-      "UNKNOWN"
-    )})</b>`,
-
-    "",
-
-    "<b>Contract:</b>",
-
-    `<code>${escapeHtml(
-      candidate.address
-    )}</code>`,
-
-    "",
-
-    `ð¯ Opportunity: <b>${candidate.opportunity.score}/100</b>`,
-
-    `ð Momentum: <b>${candidate.momentum.score}/100 (${candidate.momentum.label})</b>`,
-
-    `ð Confidence: <b>${candidate.confidence.score}/100 (${candidate.confidence.label})</b>`,
-
-    `ð§ª Market Quality: <b>${marketQualityText}</b>`,
-
-    `ð¡ Rug Risk: <b>${riskScore}</b>`,
-
-    "",
-
-    `ð¦ Launch Stage: <b>${candidate.launchStage.stage}</b>`,
-
-    `ð¡ Signal Strength: <b>${candidate.signalConfirmation.score}/100 (${candidate.signalConfirmation.label})</b>`,
-
-    `ð§¾ Safety Evidence: <b>${safeNumber(
-      candidate.risk
-        ?.independentEvidence
-    )}</b>`,
-
-    "",
-
-    `ð° Market Cap: <b>${
-      market?.verified &&
-      market.marketCap !==
-        null
-        ? "$" +
-          formatNumber(
-            market.marketCap
-          )
-        : "UNVERIFIED"
-    }</b>`,
-
-    `ð§ Liquidity: <b>${
-      market?.verified
-        ? "$" +
-          formatNumber(
-            market.liquidityUsd
-          )
-        : "UNVERIFIED"
-    }</b>`,
-
-    `ð 24h Volume: <b>${
-      market?.verified
-        ? "$" +
-          formatNumber(
-            market.volume?.h24
-          )
-        : "UNVERIFIED"
-    }</b>`,
-
-    `ð 1h Volume: <b>${
-      market?.verified
-        ? "$" +
-          formatNumber(
-            market.volume?.h1
-          )
-        : "UNVERIFIED"
-    }</b>`,
-
-    "",
-
-    `ð¢ 1h Buys: <b>${buys}</b>`,
-
-    `ð´ 1h Sells: <b>${sells}</b>`,
-
-    `ð Buy Pressure: <b>${
-      market
-        ?.verified &&
-      market
-        .buyPressure1h !==
-        null
-        ? `${market.buyPressure1h.toFixed(1)}%`
-        : "UNVERIFIED"
-    }</b>`,
-
-    "",
-
-    `ð¥ Holders: <b>${holderText}</b>`,
-
-    `ð Holder Integrity: <b>${
-      holders
-        ?.integrity?.status ||
-      "UNVERIFIED"
-    }</b>`,
-
-    `ð Infrastructure holders excluded: <b>${infrastructureExcluded}</b>`,
-
-    "",
-
-    `ð Whale wallets: <b>${whaleWallets}</b>`,
-
-    `ð Top holder: <b>${topHolder}</b>`,
-
-    `ð Top 10: <b>${top10}</b>`,
-
-    `ð Concentration: <b>${concentration}</b>`,
-
-    "",
-
-    `ð Whale Flow: <b>${candidate.whaleFlow.flow}</b>`,
-
-    `ð¥ Accumulation: <b>${candidate.whaleFlow.accumulation}</b>`,
-
-    `ð¤ Distribution: <b>${candidate.whaleFlow.distribution}</b>`,
-
-    `ð Concentration Trend: <b>${candidate.whaleFlow.concentrationTrend}</b>`,
-
-    "",
-
-    `ð§  Smart-money candidate: <b>${smartMoneyCandidate}</b>`,
-
-    "ð§  Smart-money identity verified: <b>NO</b>",
-
-    "",
-
-    `ð¡ Pool V4 swaps: <b>${candidate.activity.swaps}</b>`,
-
-    `ð¦ Pool liquidity events: <b>${candidate.activity.liquidityEvents}</b>`,
-
-    "",
-
-    `ð Market data: <b>${escapeHtml(
-      market?.status ||
-      "UNVERIFIED"
-    )}</b>`,
-
-    `ð¾ Market source: <b>${escapeHtml(
-      market?.source ||
-      "UNVERIFIED"
-    )}</b>`,
-
-    "",
-
-    "â ï¸ <b>Automated early-stage screening. Meme coins are high risk.</b>"
-  );
-
-  return lines.join(
-    "\n"
-  );
+  return lines.join("\\n");
 }
 
 /* =========================================================
@@ -9241,7 +9429,10 @@ async function analyzeToken(
         address,
         budget,
         watched,
-        state
+        state,
+        Boolean(
+          options?.marketFreshEligible
+        )
       );
   }
 
@@ -9259,7 +9450,8 @@ async function analyzeToken(
       await holderIntelligence(
         address,
         validation.totalSupply,
-        budget
+        budget,
+        watched
       );
   }
 
@@ -9802,6 +9994,42 @@ async function scan(
       MAX_TOKEN_CHECKS
     );
 
+  /*
+   * V92: choose exactly one token to own the fresh market-data
+   * slot. Live/new activity wins; otherwise use watch priority.
+   */
+  const marketFreshTarget =
+    selected.find(
+      token => {
+        const address =
+          normalize(
+            token.address
+          );
+
+        return (
+          newTokens.has(address) ||
+          liveTokens.has(address) ||
+          (
+            safeNumber(
+              token.lastLiveSeenAt
+            ) > 0 &&
+            Date.now() -
+              safeNumber(
+                token.lastLiveSeenAt
+              ) <
+              30 * 60 * 1000
+          )
+        );
+      }
+    ) ||
+    selected[0] ||
+    null;
+
+  const marketFreshTargetAddress =
+    normalize(
+      marketFreshTarget?.address
+    );
+
   const combinedLogs = [
     ...liveOutput.logs,
     ...backlogOutput.logs
@@ -9898,7 +10126,11 @@ async function scan(
           liveDiscovery:
             liveTokens.has(
               address
-            )
+            ),
+
+          marketFreshEligible:
+            address ===
+            marketFreshTargetAddress
         }
       );
 
@@ -10388,7 +10620,7 @@ async function scan(
     status,
 
     scanMode:
-      "V90_PROTECTED_ACCELERATED_RICH_ALERT_HUNTER",
+      "V92_LIVE_POOL_REGISTRY_HOLDER_CACHE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -10662,7 +10894,7 @@ async function scan(
                 ),
 
               strategy:
-                "V90_PROTECTED_ACCELERATED_PROVEN_RANGE",
+                "V92_PROTECTED_ACCELERATED_PROVEN_RANGE",
 
               publicLearnedChunk:
                 backlogResult
@@ -10801,14 +11033,23 @@ async function scan(
           .unknownPoolIds.size,
 
       liveActivityPromotion:
-        "ENABLED_V90",
+        "ENABLED_V92",
 
       providerSpecificBacklogLearning:
-        "ENABLED_V90"
+        "ENABLED_V92"
     },
 
     watchedTokens:
       state.watchedTokens.length,
+
+    poolRegistryCount:
+      Object.keys(
+        state.poolRegistry || {}
+      ).length,
+
+    marketFreshTarget:
+      marketFreshTargetAddress ||
+      null,
 
     tokenValidationChecks:
       validationResults.length,
@@ -10837,22 +11078,37 @@ async function scan(
 
     intelligence: {
       trueLiveFirstScanning:
-        "ENABLED_V90",
+        "ENABLED_V92",
+
+      persistentPoolRegistry:
+        "ENABLED_V92",
+
+      livePoolReactivation:
+        "ENABLED_V92",
+
+      holderIntelligenceCache:
+        "ENABLED_V92",
+
+      staleHolderOutageFallback:
+        "ENABLED_V92",
+
+      priorityMarketFreshSlot:
+        "ENABLED_V92",
 
       protectedBacklogAcceleration:
-        "ENABLED_V90",
+        "ENABLED_V92",
 
       backlogGlobalReserveRequests:
         BACKLOG_GLOBAL_RESERVE,
 
       providerSpecificBacklogLearning:
-        "ENABLED_V90",
+        "ENABLED_V92",
 
       provenSuccessRangePersistence:
-        "ENABLED_V90",
+        "ENABLED_V92",
 
       failedUpperBoundLearning:
-        "ENABLED_V90",
+        "ENABLED_V92",
 
       persistentRpc429Cooldown:
         "ENABLED",
@@ -10864,19 +11120,19 @@ async function scan(
         "ENABLED",
 
       richV77StyleTelegram:
-        "ENABLED_V90",
+        "ENABLED_V92",
 
       oneStrikeFailedRangeLearning:
-        "ENABLED_V90",
+        "ENABLED_V92",
 
       dexscreenerFreshRequestGuard:
-        "ENABLED_V90",
+        "ENABLED_V92",
 
       blockscoutEfficientFallback:
-        "ENABLED_V90",
+        "ENABLED_V92",
 
       severeRiskOverride:
-        "ENABLED_V90",
+        "ENABLED_V92",
 
       singleSwapLowRiskProtection:
         "ENABLED",
@@ -10885,7 +11141,7 @@ async function scan(
         "ENABLED",
 
       holderCounterFallback:
-        "ENABLED_V90",
+        "ENABLED_V92",
 
       tokenizedSecurityFiltering:
         "ENABLED",
@@ -10933,7 +11189,7 @@ async function scan(
         "ENABLED",
 
       concentrationTrend:
-        "ENABLED_V90",
+        "ENABLED_V92",
 
       candidateRanking:
         "ENABLED",
@@ -10946,7 +11202,7 @@ async function scan(
     },
 
     architecture:
-      "V90_PROTECTED_ACCELERATED_RATE_LIMIT_EFFICIENT_MULTI_SIGNAL_HUNTER",
+      "V92_LIVE_POOL_REGISTRY_HOLDER_CACHE_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -11262,7 +11518,7 @@ async function health(
     },
 
     architecture:
-      "V90_PROTECTED_ACCELERATED_RATE_LIMIT_EFFICIENT_MULTI_SIGNAL_HUNTER",
+      "V92_LIVE_POOL_REGISTRY_HOLDER_CACHE_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -11437,6 +11693,11 @@ async function stateStatus(
 
     watchedTokenCount:
       state.watchedTokens.length,
+
+    poolRegistryCount:
+      Object.keys(
+        state.poolRegistry || {}
+      ).length,
 
     watchedTokens:
       state.watchedTokens.map(
@@ -11651,7 +11912,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V90_PROTECTED_ACCELERATED_RATE_LIMIT_EFFICIENT_MULTI_SIGNAL_HUNTER",
+      "V92_LIVE_POOL_REGISTRY_HOLDER_CACHE_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -11968,7 +12229,7 @@ async function scheduledScan(
   console.log(
     JSON.stringify({
       event:
-        "V90_SCHEDULED_SCAN",
+        "V92_SCHEDULED_SCAN",
 
       status:
         result.status,
@@ -12059,7 +12320,7 @@ export default {
 
     catch (error) {
       console.error(
-        "V89 request failed",
+        "V92 request failed",
         error
       );
 
@@ -12080,7 +12341,7 @@ export default {
             ),
 
           architecture:
-            "V90_PROTECTED_ACCELERATED_RATE_LIMIT_EFFICIENT_MULTI_SIGNAL_HUNTER",
+            "V92_LIVE_POOL_REGISTRY_HOLDER_CACHE_MULTI_SIGNAL_HUNTER",
 
           timestamp:
             now()
