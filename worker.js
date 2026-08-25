@@ -492,7 +492,7 @@ function tokenizedSecurityReason(
 
   if (
     upper.includes(
-      "• ROBINHOOD TOKEN"
+      "â¢ ROBINHOOD TOKEN"
     )
   ) {
     return "ROBINHOOD_TOKENIZED_SECURITY";
@@ -5338,7 +5338,7 @@ function unverifiedHolders(
 }
 
 /* =========================================================
-   HOLDER INTELLIGENCE — V88
+   HOLDER INTELLIGENCE â V88
    ========================================================= */
 
 async function holderIntelligence(
@@ -8836,7 +8836,7 @@ function telegramMessage(
     0;
 
   const lines = [
-    `🚨 <b>Robinhood Chain Meme Hunter ${VERSION}</b>`,
+    `ð¨ <b>Robinhood Chain Meme Hunter ${VERSION}</b>`,
     ""
   ];
 
@@ -8844,7 +8844,7 @@ function telegramMessage(
     candidate.liveDiscovery
   ) {
     lines.push(
-      "⚡ <b>LIVE CHAIN DISCOVERY</b>",
+      "â¡ <b>LIVE CHAIN DISCOVERY</b>",
       ""
     );
   }
@@ -8853,13 +8853,13 @@ function telegramMessage(
     candidate.newlyDiscovered
   ) {
     lines.push(
-      "🆕 <b>NEW TOKEN</b>",
+      "ð <b>NEW TOKEN</b>",
       ""
     );
   }
 
   lines.push(
-    `🪙 <b>${escapeHtml(
+    `ðª <b>${escapeHtml(
       candidate.name ||
       "Unknown Token"
     )} (${escapeHtml(
@@ -8877,30 +8877,30 @@ function telegramMessage(
 
     "",
 
-    `🎯 Opportunity: <b>${candidate.opportunity.score}/100</b>`,
+    `ð¯ Opportunity: <b>${candidate.opportunity.score}/100</b>`,
 
-    `🚀 Momentum: <b>${candidate.momentum.score}/100 (${candidate.momentum.label})</b>`,
+    `ð Momentum: <b>${candidate.momentum.score}/100 (${candidate.momentum.label})</b>`,
 
-    `🔎 Confidence: <b>${candidate.confidence.score}/100 (${candidate.confidence.label})</b>`,
+    `ð Confidence: <b>${candidate.confidence.score}/100 (${candidate.confidence.label})</b>`,
 
-    `🧪 Market Quality: <b>${marketQualityText}</b>`,
+    `ð§ª Market Quality: <b>${marketQualityText}</b>`,
 
-    `🛡 Rug Risk: <b>${riskScore}</b>`,
+    `ð¡ Rug Risk: <b>${riskScore}</b>`,
 
     "",
 
-    `🚦 Launch Stage: <b>${candidate.launchStage.stage}</b>`,
+    `ð¦ Launch Stage: <b>${candidate.launchStage.stage}</b>`,
 
-    `📡 Signal Strength: <b>${candidate.signalConfirmation.score}/100 (${candidate.signalConfirmation.label})</b>`,
+    `ð¡ Signal Strength: <b>${candidate.signalConfirmation.score}/100 (${candidate.signalConfirmation.label})</b>`,
 
-    `🧾 Safety Evidence: <b>${safeNumber(
+    `ð§¾ Safety Evidence: <b>${safeNumber(
       candidate.risk
         ?.independentEvidence
     )}</b>`,
 
     "",
 
-    `💰 Market Cap: <b>${
+    `ð° Market Cap: <b>${
       market?.verified &&
       market.marketCap !==
         null
@@ -8911,7 +8911,7 @@ function telegramMessage(
         : "UNVERIFIED"
     }</b>`,
 
-    `💧 Liquidity: <b>${
+    `ð§ Liquidity: <b>${
       market?.verified
         ? "$" +
           formatNumber(
@@ -8920,7 +8920,7 @@ function telegramMessage(
         : "UNVERIFIED"
     }</b>`,
 
-    `📊 24h Volume: <b>${
+    `ð 24h Volume: <b>${
       market?.verified
         ? "$" +
           formatNumber(
@@ -8929,7 +8929,7 @@ function telegramMessage(
         : "UNVERIFIED"
     }</b>`,
 
-    `📊 1h Volume: <b>${
+    `ð 1h Volume: <b>${
       market?.verified
         ? "$" +
           formatNumber(
@@ -8940,11 +8940,11 @@ function telegramMessage(
 
     "",
 
-    `🟢 1h Buys: <b>${buys}</b>`,
+    `ð¢ 1h Buys: <b>${buys}</b>`,
 
-    `🔴 1h Sells: <b>${sells}</b>`,
+    `ð´ 1h Sells: <b>${sells}</b>`,
 
-    `📈 Buy Pressure: <b>${
+    `ð Buy Pressure: <b>${
       market
         ?.verified &&
       market
@@ -8956,63 +8956,63 @@ function telegramMessage(
 
     "",
 
-    `👥 Holders: <b>${holderText}</b>`,
+    `ð¥ Holders: <b>${holderText}</b>`,
 
-    `🔍 Holder Integrity: <b>${
+    `ð Holder Integrity: <b>${
       holders
         ?.integrity?.status ||
       "UNVERIFIED"
     }</b>`,
 
-    `🏊 Infrastructure holders excluded: <b>${infrastructureExcluded}</b>`,
+    `ð Infrastructure holders excluded: <b>${infrastructureExcluded}</b>`,
 
     "",
 
-    `🐋 Whale wallets: <b>${whaleWallets}</b>`,
+    `ð Whale wallets: <b>${whaleWallets}</b>`,
 
-    `🐋 Top holder: <b>${topHolder}</b>`,
+    `ð Top holder: <b>${topHolder}</b>`,
 
-    `🐋 Top 10: <b>${top10}</b>`,
+    `ð Top 10: <b>${top10}</b>`,
 
-    `🐋 Concentration: <b>${concentration}</b>`,
-
-    "",
-
-    `🐋 Whale Flow: <b>${candidate.whaleFlow.flow}</b>`,
-
-    `📥 Accumulation: <b>${candidate.whaleFlow.accumulation}</b>`,
-
-    `📤 Distribution: <b>${candidate.whaleFlow.distribution}</b>`,
-
-    `📊 Concentration Trend: <b>${candidate.whaleFlow.concentrationTrend}</b>`,
+    `ð Concentration: <b>${concentration}</b>`,
 
     "",
 
-    `🧠 Smart-money candidate: <b>${smartMoneyCandidate}</b>`,
+    `ð Whale Flow: <b>${candidate.whaleFlow.flow}</b>`,
 
-    "🧠 Smart-money identity verified: <b>NO</b>",
+    `ð¥ Accumulation: <b>${candidate.whaleFlow.accumulation}</b>`,
 
-    "",
+    `ð¤ Distribution: <b>${candidate.whaleFlow.distribution}</b>`,
 
-    `📡 Pool V4 swaps: <b>${candidate.activity.swaps}</b>`,
-
-    `💦 Pool liquidity events: <b>${candidate.activity.liquidityEvents}</b>`,
+    `ð Concentration Trend: <b>${candidate.whaleFlow.concentrationTrend}</b>`,
 
     "",
 
-    `🌐 Market data: <b>${escapeHtml(
+    `ð§  Smart-money candidate: <b>${smartMoneyCandidate}</b>`,
+
+    "ð§  Smart-money identity verified: <b>NO</b>",
+
+    "",
+
+    `ð¡ Pool V4 swaps: <b>${candidate.activity.swaps}</b>`,
+
+    `ð¦ Pool liquidity events: <b>${candidate.activity.liquidityEvents}</b>`,
+
+    "",
+
+    `ð Market data: <b>${escapeHtml(
       market?.status ||
       "UNVERIFIED"
     )}</b>`,
 
-    `💾 Market source: <b>${escapeHtml(
+    `ð¾ Market source: <b>${escapeHtml(
       market?.source ||
       "UNVERIFIED"
     )}</b>`,
 
     "",
 
-    "⚠️ <b>Automated early-stage screening. Meme coins are high risk.</b>"
+    "â ï¸ <b>Automated early-stage screening. Meme coins are high risk.</b>"
   );
 
   return lines.join(
@@ -11642,20 +11642,20 @@ async function telegramTest(
     await sendTelegram(
       env,
 
-`✅ <b>Robinhood Chain Meme Hunter V89</b>
+`â <b>Robinhood Chain Meme Hunter V89</b>
 
 Telegram connection test successful.
 
-📨 Rich V77-style calls restored
-⚡ Live-first discovery active
-🧠 Provider-specific RPC learning active
-✅ Only proven successful ranges are saved
-🛡 Stronger rug-risk logic active
-🐋 Pool Manager whale exclusion active
-👥 Holder counter fallback active
-📈 Momentum tracking active
-🐋 Whale-flow tracking active
-🧯 DexScreener protection active
+ð¨ Rich V77-style calls restored
+â¡ Live-first discovery active
+ð§  Provider-specific RPC learning active
+â Only proven successful ranges are saved
+ð¡ Stronger rug-risk logic active
+ð Pool Manager whale exclusion active
+ð¥ Holder counter fallback active
+ð Momentum tracking active
+ð Whale-flow tracking active
+ð§¯ DexScreener protection active
 
 No fake token call was generated by this test.`
     );
