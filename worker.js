@@ -1,26 +1,28 @@
 /**
  * Robinhood Chain Meme Hunter
- * V106
+ * V107
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V106:
- * - Builds directly forward from the confirmed V105 baseline
+ * V107:
+ * - Builds directly forward from the saved/confirmed V106 baseline
  * - Preserves the existing KV state key/history
+ * - Preserves V106 RPC learning-state path fix
  * - Preserves V105 activity-prioritized unknown-pool resolution
  * - Preserves V104 provider-safe DEEP resolver behavior
- * - Preserves V103 FRESH / DEEP / OLDEST_WAIT mixed-depth lanes
- * - Preserves V102 fair rotation and persistent unknown-pool cursors
+ * - Preserves V103 FRESH / DEEP / OLDEST_WAIT lanes
  * - Preserves V99 5m/1h/24h Telegram trade counts
- * - Preserves V98 DexScreener protection
- * - Preserves V97 holder-integrity safeguards
- * - Preserves V77-style Telegram layout + token-image/sendPhoto fallback
- * - FIX: resolver reads persisted RPC learning from state.services.discoveryRpc
- * - FIX: Robinhood public RPC can use its learned larger safe range
- * - FIX: Alchemy remains capped to its learned safe range
- * - NEW: resolver telemetry reports RPC learning-state path
+ * - Preserves DexScreener/holder/risk/Telegram protections
+ * - FIX: Alchemy no longer performs speculative 15-block backlog probes
+ *        after 10 blocks is the learned safe size
+ * - NEW: expands live discovery budget using previously unused global headroom
+ * - NEW: increases targeted unknown-pool resolution capacity
+ * - NEW: high-activity DEEP pools receive contiguous same-run burst searches
+ * - NEW: DEEP burst searches advance the existing cursor only after success,
+ *        so no Initialize history ranges are skipped
+ * - NEW: resolver telemetry reports deep-burst selections
  */
-const VERSION = "V106";
+const VERSION = "V107";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -149,8 +151,8 @@ const MAX_EXTERNAL_REQUESTS = 42;
 
 const SYSTEM_REQUEST_LIMIT = 2;
 
-const DISCOVERY_REQUEST_LIMIT = 20;
-const LIVE_DISCOVERY_REQUEST_LIMIT = 8;
+const DISCOVERY_REQUEST_LIMIT = 24;
+const LIVE_DISCOVERY_REQUEST_LIMIT = 12;
 const BACKLOG_DISCOVERY_REQUEST_LIMIT = 12;
 
 const ANALYSIS_REQUEST_LIMIT = 21;
@@ -206,7 +208,7 @@ const LIVE_INITIALIZE_LOOKBACK_BLOCKS = 10;
 /* V100 persistent unknown-pool resolver */
 const UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS = 10;
 const UNKNOWN_POOL_SEARCH_MAX_CHUNK_BLOCKS = 40;
-const UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN = 3;
+const UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN = 7;
 const UNKNOWN_POOL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_UNKNOWN_POOL_TRACKER = 500;
 
@@ -2588,7 +2590,35 @@ async function resolvePersistentUnknownPools(
   );
 
   /*
-   * If one lane is empty, fill any remaining resolver slots with the
+   * V107 CONTIGUOUS DEEP BURST
+   *
+   * After preserving one FRESH, one DEEP and one OLDEST_WAIT slot,
+   * spend additional resolver capacity on the strongest active DEEP
+   * pool. These are intentionally duplicate references to the same
+   * persisted tracker entry. Each successful request updates that
+   * entry's searchCursorBlock before the next burst executes, so the
+   * search walks backwards contiguously and cannot skip Initialize
+   * ranges.
+   */
+  const strongestDeep =
+    deepLane[0] ||
+    null;
+
+  while (
+    strongestDeep &&
+    selectedCandidates.length <
+      UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN
+  ) {
+    selectedCandidates.push({
+      entry:
+        strongestDeep,
+      lane:
+        "DEEP_BURST"
+    });
+  }
+
+  /*
+   * If no DEEP candidate exists, fill remaining resolver slots with the
    * fairest remaining candidates so the request budget is not wasted.
    */
   const fillCandidates =
@@ -2636,7 +2666,7 @@ async function resolvePersistentUnknownPools(
     requestLimit:
       UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN,
     scheduler:
-      "MIXED_DEPTH_V103",
+      "CONTIGUOUS_DEEP_BURST_V107",
     selectedLanes:
       candidates.map(
         item =>
@@ -2645,6 +2675,12 @@ async function resolvePersistentUnknownPools(
     resolved: 0,
     resolvedPoolIds: [],
     searchedBlocks: 0,
+    deepBurstSelections:
+      candidates.filter(
+        item =>
+          item.lane ===
+          "DEEP_BURST"
+      ).length,
     trackerCount:
       Object.keys(
         tracker
@@ -2684,7 +2720,10 @@ async function resolvePersistentUnknownPools(
 
     if (
       !poolId ||
-      cursor <= 0
+      cursor <= 0 ||
+      state.poolRegistry?.[
+        poolId
+      ]
     ) {
       continue;
     }
@@ -3974,6 +4013,8 @@ async function scanBacklogSequential(
      * the same scan.
      */
     if (
+      provider !==
+        "ALCHEMY" &&
       !temporaryOverride &&
       streak >=
         BACKLOG_SUCCESS_PROBE_THRESHOLD
@@ -12384,7 +12425,7 @@ async function scan(
     status,
 
     scanMode:
-      "V106_V105_CORE_RPC_STATE_PATH_FIX_ACTIVITY_POOL_RESOLUTION_HUNTER",
+      "V107_V106_CORE_CONTIGUOUS_DEEP_BURST_NO_ALCHEMY_PROBE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -13064,12 +13105,24 @@ async function scan(
       rpcLearningStatePath:
         "state.services.discoveryRpc",
 
+      alchemySpeculativeBacklogGrowth:
+        "DISABLED_V107",
+
+      contiguousDeepPoolBurst:
+        "ENABLED_V107",
+
+      unknownPoolResolutionRequestsPerRun:
+        UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN,
+
+      liveDiscoveryRequestLimit:
+        LIVE_DISCOVERY_REQUEST_LIMIT,
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V106_V105_CORE_RPC_STATE_PATH_FIX_ACTIVITY_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V107_V106_CORE_CONTIGUOUS_DEEP_BURST_NO_ALCHEMY_PROBE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -13385,7 +13438,7 @@ async function health(
     },
 
     architecture:
-      "V106_V105_CORE_RPC_STATE_PATH_FIX_ACTIVITY_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V107_V106_CORE_CONTIGUOUS_DEEP_BURST_NO_ALCHEMY_PROBE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -13784,7 +13837,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V106_V105_CORE_RPC_STATE_PATH_FIX_ACTIVITY_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V107_V106_CORE_CONTIGUOUS_DEEP_BURST_NO_ALCHEMY_PROBE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -14213,7 +14266,7 @@ export default {
             ),
 
           architecture:
-            "V106_V105_CORE_RPC_STATE_PATH_FIX_ACTIVITY_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+            "V107_V106_CORE_CONTIGUOUS_DEEP_BURST_NO_ALCHEMY_PROBE_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
