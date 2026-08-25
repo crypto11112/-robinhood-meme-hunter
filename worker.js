@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V115
+ * V116
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -13464,7 +13464,7 @@ function backlogLagLabel(
 
 
 /* =========================================================
-   V115 PRIORITY CANDIDATE COMPLETION
+   V116 PRIORITY CANDIDATE COMPLETION
    ========================================================= */
 
 function completionCandidateStillEligible(
@@ -14048,7 +14048,7 @@ async function scan(
       : selectedBase;
 
   /*
-   * V115:
+   * V116:
    * A pending incomplete candidate owns the next available fresh-market
    * slot. Only when there is no pending completion target do new/live
    * candidates compete for it.
@@ -14874,7 +14874,7 @@ async function scan(
     status,
 
     scanMode:
-      "V116_V115_CORE_PRIORITY_FRESH_SCHEDULER_ALIGNED_HUNTER",
+      "V116_CORE_PRIORITY_FRESH_SCHEDULER_ALIGNED_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -15731,16 +15731,16 @@ async function scan(
         "ENABLED_V114",
 
       persistentPriorityCandidateCompletion:
-        "ENABLED_V115",
+        "ENABLED_V116",
 
       priorityCandidateFirstAnalysis:
-        "ENABLED_V115",
+        "ENABLED_V116",
 
       priorityMarketTargetPersistence:
-        "ENABLED_V115",
+        "ENABLED_V116",
 
       telegramThresholdsStillUnchanged:
-        "ENABLED_V115",
+        "ENABLED_V116",
 
       schedulerAlignedDexFreshInterval:
         "ENABLED_V116",
@@ -15758,7 +15758,7 @@ async function scan(
     },
 
     architecture:
-      "V116_V115_CORE_PRIORITY_FRESH_SCHEDULER_ALIGNED_V77_TELEGRAM_HUNTER",
+      "V116_CORE_PRIORITY_FRESH_SCHEDULER_ALIGNED_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -16074,7 +16074,7 @@ async function health(
     },
 
     architecture:
-      "V116_V115_CORE_PRIORITY_FRESH_SCHEDULER_ALIGNED_V77_TELEGRAM_HUNTER",
+      "V116_CORE_PRIORITY_FRESH_SCHEDULER_ALIGNED_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -16473,7 +16473,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V116_V115_CORE_PRIORITY_FRESH_SCHEDULER_ALIGNED_V77_TELEGRAM_HUNTER",
+      "V116_CORE_PRIORITY_FRESH_SCHEDULER_ALIGNED_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -16902,7 +16902,7 @@ export default {
             ),
 
           architecture:
-            "V116_V115_CORE_PRIORITY_FRESH_SCHEDULER_ALIGNED_V77_TELEGRAM_HUNTER",
+            "V116_CORE_PRIORITY_FRESH_SCHEDULER_ALIGNED_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
