@@ -1,31 +1,29 @@
 /**
  * Robinhood Chain Meme Hunter
- * V110
+ * V111
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V110:
- * - Builds directly forward from the confirmed V108 baseline
+ * V111:
+ * - Preserves the V108 confirmed core and all V110 safety additions
  * - Preserves the existing KV state key/history
- * - Preserves V108 downstream budget reserve and balanced resolver
+ * - FIX: automatically sanitizes contaminated V109/V110 500/100
+ *        exact-pool ranges back to each provider's proven generic range
+ *        unless that larger range was genuinely promoted by a successful
+ *        V110/V111 capability probe
+ * - FIX: a supposedly safe exact-pool range that returns HTTP 400 is
+ *        immediately demoted to the provider's proven generic range
+ * - FIX: demotion is persisted in KV and the failed range becomes an
+ *        upper bound so it is not repeatedly retried
+ * - FIX: after demotion, the same contiguous cursor is retried once at
+ *        the safe generic range so resolver progress is not lost
+ * - Preserves one growth capability probe per provider per run
+ * - Preserves gradual exact-range growth after repeated successes
+ * - Preserves V108 downstream request reserve and balanced resolver
  * - Preserves V107 no-speculative-15-block Alchemy backlog behavior
- * - Preserves V106 RPC learning-state path fix
- * - Preserves V105 activity-prioritized unknown-pool resolution
- * - Preserves V99 5m/1h/24h Telegram trade counts
- * - Preserves DexScreener, holder-integrity, risk and Telegram safeguards
- * - FIX: replaces V109's repeated wide exact-pool probes
- * - NEW: exact-pool Initialize range learning starts from proven-safe sizes
- * - NEW: max ONE growth capability probe per provider per run
- * - NEW: growth probes only occur after repeated successful exact lookups
- * - NEW: failed growth probes persist an upper bound in KV
- * - NEW: failed growth probes immediately fall back to the already-proven
- *        safe range without changing/forgetting that safe range
- * - NEW: successful growth probes promote the learned exact-pool range in KV
- * - NEW: resolver request telemetry counts real external requests correctly
- * - NEW: exact-pool 429s feed the existing persistent provider cooldown
- * - Searches remain contiguous; no Initialize block ranges are skipped
+ * - Preserves V99 trade-flow, holder integrity, risk and Telegram systems
  */
-const VERSION = "V110";
+const VERSION = "V111";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2268,13 +2266,38 @@ function exactPoolSafeChunk(
       ]
     );
 
+  const verifiedPromotions =
+    safeNumber(
+      service[
+        fields.probeSuccesses
+      ]
+    );
+
+  /*
+   * V111 contamination repair:
+   *
+   * V109/V110 could leave optimistic 500/100 values in KV even though
+   * those ranges had never succeeded. A range larger than the provider's
+   * proven generic range is trusted only after a real capability-probe
+   * success has been recorded. Otherwise it is immediately sanitized.
+   */
   if (
-    learned <= 0
+    learned <= 0 ||
+    (
+      learned >
+        generic &&
+      verifiedPromotions <= 0
+    )
   ) {
     service[
       fields.chunk
     ] =
       generic;
+
+    service[
+      fields.streak
+    ] =
+      0;
 
     return generic;
   }
@@ -2284,6 +2307,76 @@ function exactPoolSafeChunk(
     1,
     UNKNOWN_POOL_EXACT_MAX_BLOCKS
   );
+}
+
+function exactPoolDemoteOn400(
+  state,
+  provider,
+  failedBlocks
+) {
+  const service =
+    exactPoolLearningState(
+      state
+    );
+
+  const fields =
+    exactPoolProviderFields(
+      provider
+    );
+
+  const generic =
+    Math.max(
+      1,
+      safeNumber(
+        service[
+          fields.genericChunk
+        ]
+      ) ||
+      UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS
+    );
+
+  const previousFailed =
+    exactPoolFailedUpper(
+      state,
+      provider
+    );
+
+  service[
+    fields.failedUpper
+  ] =
+    previousFailed
+      ? Math.min(
+          previousFailed,
+          failedBlocks
+        )
+      : failedBlocks;
+
+  /*
+   * Persist the demotion. This is deliberately different from a failed
+   * growth probe: here the currently-used "safe" range itself failed.
+   */
+  service[
+    fields.chunk
+  ] =
+    Math.min(
+      exactPoolSafeChunk(
+        state,
+        provider
+      ),
+      generic
+    );
+
+  service[
+    fields.streak
+  ] =
+    0;
+
+  service[
+    fields.lastProbeAt
+  ] =
+    Date.now();
+
+  return generic;
 }
 
 function exactPoolFailedUpper(
@@ -2993,7 +3086,7 @@ async function getInitializeForPoolRange(
       continue;
     }
 
-    const result =
+    let result =
       await executeRange(
         provider,
         url,
@@ -3039,6 +3132,88 @@ async function getInitializeForPoolRange(
 
     lastError =
       result.error;
+
+    /*
+     * V111:
+     * If a currently-learned exact range itself 400s, immediately
+     * demote/persist to the proven generic provider range and retry the
+     * SAME cursor contiguously once. This repairs stale/contaminated KV
+     * without sacrificing resolver progress.
+     */
+    if (
+      is400(
+        result.error
+      )
+    ) {
+      const demotedSafe =
+        exactPoolDemoteOn400(
+          state,
+          provider,
+          Math.max(
+            1,
+            option.safeBlocks
+          )
+        );
+
+      if (
+        demotedSafe <
+          option.safeBlocks &&
+        budgetAvailable(
+          budget,
+          "discovery-live"
+        )
+      ) {
+        exactRangeFallbackUsed =
+          true;
+
+        result =
+          await executeRange(
+            provider,
+            url,
+            demotedSafe
+          );
+
+        if (
+          !result.error
+        ) {
+          exactPoolRecordNormalSuccess(
+            state,
+            provider
+          );
+
+          return {
+            ...result,
+            desiredChunkBlocks,
+            providerSafeChunkBlocks:
+              result.requestedBlocks,
+            publicProvenChunkBlocks:
+              exactPoolSafeChunk(
+                state,
+                "ROBINHOOD_PUBLIC_RPC"
+              ),
+            alchemyProvenChunkBlocks:
+              exactPoolSafeChunk(
+                state,
+                "ALCHEMY"
+              ),
+            publicGenericSafeBlocks:
+              safeChunks.publicGenericSafe,
+            alchemyGenericSafeBlocks:
+              safeChunks.alchemyGenericSafe,
+            growthProbeAttempted,
+            growthProbeSucceeded,
+            growthProbeBlocks,
+            exactRangeFallbackUsed,
+            externalRequestsUsed,
+            learningStatePath:
+              safeChunks.learningStatePath
+          };
+        }
+
+        lastError =
+          result.error;
+      }
+    }
   }
 
   return {
@@ -13312,7 +13487,7 @@ async function scan(
     status,
 
     scanMode:
-      "V110_V108_CORE_SAFE_EXACT_POOL_CAPABILITY_LEARNING_HUNTER",
+      "V111_V110_CORE_KV_RANGE_SANITIZE_SAFE_DEMOTION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -14046,12 +14221,21 @@ async function scan(
       contiguousInitializeCoverage:
         "ENABLED_V110",
 
+      contaminatedExactRangeKvSanitizer:
+        "ENABLED_V111",
+
+      exactSafeRange400Demotion:
+        "ENABLED_V111",
+
+      exactSafeRange400ContiguousRetry:
+        "ENABLED_V111",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V110_V108_CORE_SAFE_EXACT_POOL_CAPABILITY_LEARNING_V77_TELEGRAM_HUNTER",
+      "V111_V110_CORE_KV_RANGE_SANITIZE_SAFE_DEMOTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -14367,7 +14551,7 @@ async function health(
     },
 
     architecture:
-      "V110_V108_CORE_SAFE_EXACT_POOL_CAPABILITY_LEARNING_V77_TELEGRAM_HUNTER",
+      "V111_V110_CORE_KV_RANGE_SANITIZE_SAFE_DEMOTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -14766,7 +14950,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V110_V108_CORE_SAFE_EXACT_POOL_CAPABILITY_LEARNING_V77_TELEGRAM_HUNTER",
+      "V111_V110_CORE_KV_RANGE_SANITIZE_SAFE_DEMOTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -15195,7 +15379,7 @@ export default {
             ),
 
           architecture:
-            "V110_V108_CORE_SAFE_EXACT_POOL_CAPABILITY_LEARNING_V77_TELEGRAM_HUNTER",
+            "V111_V110_CORE_KV_RANGE_SANITIZE_SAFE_DEMOTION_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
