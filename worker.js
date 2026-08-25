@@ -2,1382 +2,704 @@
  * Robinhood Chain Meme Hunter
  * V71
  *
- * Upgrade from V70.
+ * Full standalone replacement for V70.
  *
- * V71 ADDS:
- * - Whale accumulation intelligence
- * - Large-holder analysis
- * - Whale concentration scoring
- * - Whale accumulation / distribution signal
- * - Smart-money candidate detection
- * - Wallet-quality scoring
- * - Whale data added to opportunity score
- * - Whale risk added to rug-risk score
- * - Whale information in Telegram alerts
+ * V71 keeps:
+ * - Robinhood public RPC
+ * - Alchemy fallback
+ * - Exact Uniswap V4 discovery
+ * - Persistent KV block tracking
+ * - Catch-up scanning
+ * - Persistent candidate watch list
+ * - ERC20 verification
+ * - DexScreener market data
+ * - Blockscout holder data
+ * - Rug-risk scoring
+ * - Opportunity scoring
+ * - Telegram alerts
+ * - Persistent duplicate protection
+ *
+ * V71 adds:
+ * - Whale holder detection
+ * - Whale concentration intelligence
+ * - Large-wallet transfer-flow analysis
+ * - Accumulation / distribution detection
+ * - Smart-money CANDIDATE scoring
+ * - Whale intelligence added to opportunity score
+ * - Whale intelligence added to rug-risk score
  *
  * IMPORTANT:
- * V70 discovery/KV/scanning remains the baseline.
- *
- * Add the V71 sections below to the V70 code.
+ * "Smart money" is NOT claimed as verified unless historical
+ * wallet performance is actually available.
  */
 
 const VERSION = "V71";
 
+const CHAIN_ID = 4663;
+const CHAIN_NAME = "Robinhood Chain";
+
+const PUBLIC_RPC =
+  "https://rpc.mainnet.chain.robinhood.com";
+
+const ALCHEMY_BASE =
+  "https://robinhood-mainnet.g.alchemy.com/v2/";
+
+const DEXSCREENER_BASE =
+  "https://api.dexscreener.com";
+
+const DEX_CHAIN_ID =
+  "robinhood";
+
+const BLOCKSCOUT_PUBLIC =
+  "https://robinhoodchain.blockscout.com";
+
+const BLOCKSCOUT_PRO =
+  "https://api.blockscout.com/4663";
+
+const POOL_MANAGER =
+  "0x8366a39cc670b4001a1121b8f6a443a643e40951";
+
+const ZERO =
+  "0x0000000000000000000000000000000000000000";
+
+const KNOWN_QUOTE_TOKENS =
+  new Set([
+    "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+  ]);
+
 /*
  * =========================================================
- * V71 WHALE / SMART MONEY SETTINGS
+ * LIMITS
  * =========================================================
  */
+
+const DISCOVERY_BLOCKS = 10;
+
+const MAX_CATCHUP_CHUNKS = 12;
+
+const RPC_TIMEOUT_MS = 3000;
+const HTTP_TIMEOUT_MS = 4000;
+
+const MAX_TOKEN_CHECKS = 5;
+const MAX_MARKET_LOOKUPS = 3;
+const MAX_HOLDER_LOOKUPS = 2;
+
+/*
+ * V71 whale workload limits.
+ */
+
+const MAX_WHALE_ANALYSES = 2;
 
 const MAX_WHALE_WALLETS = 10;
 
-const WHALE_SUPPLY_PERCENT = 1;
+const MAX_WHALE_TRANSFER_LOOKUPS = 4;
 
-const EXTREME_WHALE_PERCENT = 10;
+const WHALE_MIN_SUPPLY_PERCENT = 1;
 
-const MAX_WHALE_TRANSFER_LOOKUPS = 5;
+const EXTREME_WHALE_PERCENT = 20;
 
-const SMART_MONEY_MIN_SCORE = 55;
+const SMART_MONEY_CANDIDATE_SCORE = 55;
 
-const WHALE_ACCUMULATION_BONUS = 10;
+const MIN_TELEGRAM_SCORE = 60;
 
-const WHALE_DISTRIBUTION_PENALTY = 15;
+const MAX_RUG_RISK_FOR_ALERT = 59;
+
+const MIN_ALERT_LIQUIDITY_USD = 1000;
+
+const DEX_MAX_ATTEMPTS = 3;
+
+const BLOCKSCOUT_MAX_ATTEMPTS = 2;
+
+const WATCH_TOKEN_MAX_AGE_MS =
+  12 * 60 * 60 * 1000;
+
+const MAX_WATCHED_TOKENS = 50;
+
+const ALERT_COOLDOWN_MS =
+  6 * 60 * 60 * 1000;
+
+/*
+ * Preserve existing V69/V70 KV state.
+ */
+
+const STATE_KEY =
+  "robinhood-meme-hunter-v69-state";
+
+const MEMORY_ALERTS =
+  new Map();
 
 
 /*
  * =========================================================
- * V71 BLOCKSCOUT ADDRESS HELPERS
+ * V4 EVENTS
  * =========================================================
  */
 
-function getHolderAddress(item) {
-  return (
-    item?.address?.hash ||
-    item?.address_hash?.hash ||
-    item?.address_hash ||
-    null
-  );
-}
+const V4_INITIALIZE_TOPIC =
+  "0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438";
+
+const V4_SWAP_TOPIC =
+  "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f";
+
+const V4_MODIFY_LIQUIDITY_TOPIC =
+  "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec";
 
 
-function isContractHolder(item) {
-  return Boolean(
-    item?.address?.is_contract ||
-    item?.address_hash?.is_contract
-  );
-}
+/*
+ * =========================================================
+ * ERC20
+ * =========================================================
+ */
+
+const SEL_NAME =
+  "0x06fdde03";
+
+const SEL_SYMBOL =
+  "0x95d89b41";
+
+const SEL_DECIMALS =
+  "0x313ce567";
+
+const SEL_TOTAL_SUPPLY =
+  "0x18160ddd";
 
 
-function isExchangeLikeHolder(item) {
-  const name =
-    String(
-      item?.address?.name ||
-      item?.address_hash?.name ||
-      ""
-    ).toLowerCase();
+/*
+ * =========================================================
+ * BASIC HELPERS
+ * =========================================================
+ */
 
-  const labels =
+function json(
+  data,
+  status = 200
+) {
+  return new Response(
     JSON.stringify(
-      item?.address?.metadata ||
-      item?.address_hash?.metadata ||
-      {}
-    ).toLowerCase();
+      data,
+      null,
+      2
+    ),
+    {
+      status,
 
-  const text =
-    `${name} ${labels}`;
+      headers: {
+        "content-type":
+          "application/json; charset=utf-8",
 
-  return (
-    text.includes("exchange") ||
-    text.includes("bridge") ||
-    text.includes("router") ||
-    text.includes("pool") ||
-    text.includes("liquidity") ||
-    text.includes("burn") ||
-    text.includes("dead")
+        "cache-control":
+          "no-store"
+      }
+    }
   );
 }
 
 
-/*
- * =========================================================
- * V71 TOKEN TRANSFER FETCHING
- * =========================================================
- */
+function now() {
+  return new Date()
+    .toISOString();
+}
 
-async function getAddressTokenTransfers(
-  env,
-  address,
-  token
+
+function sleep(ms) {
+  return new Promise(
+    resolve =>
+      setTimeout(
+        resolve,
+        ms
+      )
+  );
+}
+
+
+function clamp(
+  value,
+  min,
+  max
 ) {
-  if (
-    !isAddress(address) ||
-    !isAddress(token)
-  ) {
-    return {
-      verified: false,
-      transfers: [],
-      error: "INVALID_ADDRESS"
-    };
-  }
-
-  const request =
-    await blockscoutGet(
-      env,
-      `/api/v2/addresses/${address}/token-transfers?token=${token}`
-    );
-
-  if (!request.ok) {
-    return {
-      verified: false,
-      transfers: [],
-      error: request.error
-    };
-  }
-
-  const items =
-    Array.isArray(
-      request.data?.items
+  return Math.max(
+    min,
+    Math.min(
+      max,
+      value
     )
-      ? request.data.items
-      : [];
-
-  return {
-    verified: true,
-    transfers: items,
-    error: null
-  };
+  );
 }
 
 
-/*
- * =========================================================
- * V71 TRANSFER VALUE
- * =========================================================
- */
-
-function transferRawValue(
-  transfer
+function safeNumber(
+  value
 ) {
-  try {
-    const raw =
-      transfer?.total?.value ??
-      transfer?.value ??
-      "0";
+  const n =
+    Number(value);
 
-    return BigInt(
-      String(raw)
-    );
-
-  } catch {
-    return 0n;
-  }
-}
-
-
-function transferTimestamp(
-  transfer
-) {
-  const timestamp =
-    transfer?.timestamp ||
-    transfer?.block_timestamp ||
-    null;
-
-  if (!timestamp) {
-    return 0;
-  }
-
-  const value =
-    Date.parse(timestamp);
-
-  return Number.isFinite(value)
-    ? value
+  return Number.isFinite(n)
+    ? n
     : 0;
 }
 
 
-/*
- * =========================================================
- * V71 WALLET FLOW ANALYSIS
- * =========================================================
- */
-
-function analyseWalletTransfers(
-  wallet,
-  transfers
+function isAddress(
+  value
 ) {
-  const walletLower =
-    normalizeAddress(wallet);
+  return (
+    typeof value ===
+      "string" &&
+    /^0x[a-fA-F0-9]{40}$/.test(
+      value
+    )
+  );
+}
 
-  let incoming = 0n;
-  let outgoing = 0n;
 
-  let incomingCount = 0;
-  let outgoingCount = 0;
+function normalizeAddress(
+  value
+) {
+  return String(
+    value || ""
+  ).toLowerCase();
+}
 
-  let recentIncoming = 0n;
-  let recentOutgoing = 0n;
 
-  const cutoff =
-    Date.now() -
-    60 * 60 * 1000;
+function isZeroAddress(
+  value
+) {
+  return (
+    !value ||
+    normalizeAddress(
+      value
+    ) ===
+      ZERO
+  );
+}
 
-  for (const transfer of transfers) {
 
-    const from =
+function isKnownQuoteToken(
+  address
+) {
+  return KNOWN_QUOTE_TOKENS
+    .has(
       normalizeAddress(
-        transfer?.from?.hash ||
-        transfer?.from_address_hash ||
-        transfer?.from ||
-        ""
-      );
-
-    const to =
-      normalizeAddress(
-        transfer?.to?.hash ||
-        transfer?.to_address_hash ||
-        transfer?.to ||
-        ""
-      );
-
-    const value =
-      transferRawValue(
-        transfer
-      );
-
-    const timestamp =
-      transferTimestamp(
-        transfer
-      );
-
-    if (
-      to === walletLower
-    ) {
-      incoming += value;
-      incomingCount++;
-
-      if (
-        timestamp >= cutoff
-      ) {
-        recentIncoming += value;
-      }
-    }
-
-    if (
-      from === walletLower
-    ) {
-      outgoing += value;
-      outgoingCount++;
-
-      if (
-        timestamp >= cutoff
-      ) {
-        recentOutgoing += value;
-      }
-    }
-  }
-
-  const net =
-    incoming -
-    outgoing;
-
-  const recentNet =
-    recentIncoming -
-    recentOutgoing;
-
-  let direction =
-    "NEUTRAL";
-
-  if (
-    recentNet > 0n
-  ) {
-    direction =
-      "ACCUMULATING";
-  }
-
-  if (
-    recentNet < 0n
-  ) {
-    direction =
-      "DISTRIBUTING";
-  }
-
-  return {
-    incoming:
-      incoming.toString(),
-
-    outgoing:
-      outgoing.toString(),
-
-    net:
-      net.toString(),
-
-    recentIncoming:
-      recentIncoming.toString(),
-
-    recentOutgoing:
-      recentOutgoing.toString(),
-
-    recentNet:
-      recentNet.toString(),
-
-    incomingCount,
-
-    outgoingCount,
-
-    direction
-  };
+        address
+      )
+    );
 }
 
 
-/*
- * =========================================================
- * V71 SMART MONEY CANDIDATE SCORE
- * =========================================================
- */
-
-function scoreWalletQuality(
-  holder,
-  flow
+function topicToAddress(
+  topic
 ) {
-  let score = 0;
-
-  const reasons = [];
-
-  const percentage =
-    safeNumber(
-      holder.percentage
-    );
-
   if (
-    percentage >= 1 &&
-    percentage <= 10
+    typeof topic !==
+      "string" ||
+    !/^0x[0-9a-fA-F]{64}$/.test(
+      topic
+    )
   ) {
-    score += 20;
-
-    reasons.push(
-      "Meaningful token position"
-    );
+    return null;
   }
-
-  if (
-    percentage > 10
-  ) {
-    score -= 10;
-
-    reasons.push(
-      "Very concentrated position"
-    );
-  }
-
-  if (
-    !holder.isContract
-  ) {
-    score += 10;
-
-    reasons.push(
-      "Externally-owned wallet candidate"
-    );
-  }
-
-  if (
-    !holder.exchangeLike
-  ) {
-    score += 10;
-  }
-
-  if (
-    flow?.direction ===
-    "ACCUMULATING"
-  ) {
-    score += 25;
-
-    reasons.push(
-      "Recent accumulation detected"
-    );
-  }
-
-  if (
-    flow?.incomingCount >
-    flow?.outgoingCount
-  ) {
-    score += 10;
-
-    reasons.push(
-      "More incoming than outgoing transfers"
-    );
-  }
-
-  if (
-    flow?.direction ===
-    "DISTRIBUTING"
-  ) {
-    score -= 20;
-
-    reasons.push(
-      "Recent distribution detected"
-    );
-  }
-
-  return {
-    score:
-      clamp(
-        score,
-        0,
-        100
-      ),
-
-    candidate:
-      score >=
-      SMART_MONEY_MIN_SCORE,
-
-    verifiedSmartMoney:
-      false,
-
-    reasons
-  };
-}
-
-
-/*
- * =========================================================
- * V71 WHALE INTELLIGENCE
- * =========================================================
- */
-
-async function getWhaleIntelligence(
-  env,
-  token,
-  totalSupply,
-  existingHolderData
-) {
-  const result = {
-    verified: false,
-
-    whaleCount: 0,
-
-    accumulatingWhales: 0,
-
-    distributingWhales: 0,
-
-    neutralWhales: 0,
-
-    whaleSupplyPercent: 0,
-
-    largestWalletPercent: null,
-
-    accumulationSignal:
-      "UNVERIFIED",
-
-    smartMoneyCandidates: 0,
-
-    verifiedSmartMoney: 0,
-
-    wallets: [],
-
-    error: null
-  };
-
-  try {
-
-    let holders =
-      existingHolderData
-        ?.topHolders ||
-      [];
-
-    /*
-     * If V70 holder lookup did not return
-     * enough holder information, query again.
-     */
-
-    if (
-      holders.length === 0
-    ) {
-      const request =
-        await blockscoutGet(
-          env,
-          `/api/v2/tokens/${token}/holders`
-        );
-
-      if (
-        !request.ok
-      ) {
-        result.error =
-          request.error;
-
-        return result;
-      }
-
-      holders =
-        (
-          request.data?.items ||
-          []
-        )
-          .slice(
-            0,
-            MAX_WHALE_WALLETS
-          )
-          .map(
-            item => ({
-              address:
-                getHolderAddress(
-                  item
-                ),
-
-              value:
-                String(
-                  item?.value ||
-                  "0"
-                ),
-
-              percentage:
-                holderPercentage(
-                  item?.value ||
-                  "0",
-                  totalSupply
-                ),
-
-              isContract:
-                isContractHolder(
-                  item
-                ),
-
-              exchangeLike:
-                isExchangeLikeHolder(
-                  item
-                )
-            })
-          );
-    } else {
-
-      holders =
-        holders.map(
-          holder => ({
-            ...holder,
-
-            isContract:
-              Boolean(
-                holder.isContract
-              ),
-
-            exchangeLike:
-              Boolean(
-                holder.exchangeLike
-              )
-          })
-        );
-    }
-
-    const whaleHolders =
-      holders
-        .filter(
-          holder =>
-            holder.address &&
-            holder.percentage !==
-              null &&
-            holder.percentage >=
-              WHALE_SUPPLY_PERCENT
-        )
-        .slice(
-          0,
-          MAX_WHALE_WALLETS
-        );
-
-    result.whaleCount =
-      whaleHolders.length;
-
-    result.whaleSupplyPercent =
-      whaleHolders.reduce(
-        (
-          total,
-          holder
-        ) =>
-          total +
-          safeNumber(
-            holder.percentage
-          ),
-        0
-      );
-
-    result.largestWalletPercent =
-      whaleHolders.length
-        ? Math.max(
-            ...whaleHolders.map(
-              holder =>
-                safeNumber(
-                  holder.percentage
-                )
-            )
-          )
-        : null;
-
-    let transferLookups =
-      0;
-
-    for (
-      const holder of
-      whaleHolders
-    ) {
-
-      let flow = {
-        direction:
-          "UNVERIFIED",
-
-        incoming:
-          null,
-
-        outgoing:
-          null,
-
-        net:
-          null,
-
-        recentIncoming:
-          null,
-
-        recentOutgoing:
-          null,
-
-        recentNet:
-          null,
-
-        incomingCount:
-          0,
-
-        outgoingCount:
-          0
-      };
-
-      /*
-       * Skip obvious contracts / exchanges.
-       */
-
-      if (
-        !holder.isContract &&
-        !holder.exchangeLike &&
-        transferLookups <
-          MAX_WHALE_TRANSFER_LOOKUPS
-      ) {
-        transferLookups++;
-
-        const transferData =
-          await getAddressTokenTransfers(
-            env,
-            holder.address,
-            token
-          );
-
-        if (
-          transferData.verified
-        ) {
-          flow =
-            analyseWalletTransfers(
-              holder.address,
-              transferData.transfers
-            );
-        }
-      }
-
-      const walletQuality =
-        scoreWalletQuality(
-          holder,
-          flow
-        );
-
-      if (
-        flow.direction ===
-        "ACCUMULATING"
-      ) {
-        result
-          .accumulatingWhales++;
-      }
-
-      if (
-        flow.direction ===
-        "DISTRIBUTING"
-      ) {
-        result
-          .distributingWhales++;
-      }
-
-      if (
-        flow.direction ===
-        "NEUTRAL"
-      ) {
-        result
-          .neutralWhales++;
-      }
-
-      if (
-        walletQuality.candidate
-      ) {
-        result
-          .smartMoneyCandidates++;
-      }
-
-      if (
-        walletQuality
-          .verifiedSmartMoney
-      ) {
-        result
-          .verifiedSmartMoney++;
-      }
-
-      result.wallets.push({
-        address:
-          holder.address,
-
-        supplyPercent:
-          holder.percentage,
-
-        isContract:
-          holder.isContract,
-
-        exchangeLike:
-          holder.exchangeLike,
-
-        flow,
-
-        walletQuality
-      });
-    }
-
-    if (
-      result.accumulatingWhales >
-      result.distributingWhales
-    ) {
-      result.accumulationSignal =
-        "ACCUMULATION";
-    }
-
-    else if (
-      result.distributingWhales >
-      result.accumulatingWhales
-    ) {
-      result.accumulationSignal =
-        "DISTRIBUTION";
-    }
-
-    else if (
-      result.whaleCount > 0
-    ) {
-      result.accumulationSignal =
-        "NEUTRAL";
-    }
-
-    result.verified =
-      true;
-
-    return result;
-
-  } catch (error) {
-
-    result.error =
-      String(
-        error?.message ||
-        error
-      );
-
-    return result;
-  }
-}
-
-
-/*
- * =========================================================
- * V71 WHALE OPPORTUNITY SCORE
- * =========================================================
- */
-
-function applyWhaleOpportunityScore(
-  opportunity,
-  whales
-) {
-  let score =
-    opportunity.score;
-
-  const reasons = [
-    ...(opportunity.reasons || [])
-  ];
-
-  if (
-    !whales?.verified
-  ) {
-    return {
-      score,
-      reasons
-    };
-  }
-
-  if (
-    whales.accumulationSignal ===
-    "ACCUMULATION"
-  ) {
-    score +=
-      WHALE_ACCUMULATION_BONUS;
-
-    reasons.push(
-      "Whale accumulation detected"
-    );
-  }
-
-  if (
-    whales.accumulatingWhales >=
-    2
-  ) {
-    score += 5;
-
-    reasons.push(
-      "Multiple accumulating whales"
-    );
-  }
-
-  if (
-    whales.smartMoneyCandidates >=
-    1
-  ) {
-    score += 5;
-
-    reasons.push(
-      "Smart-money candidate wallet detected"
-    );
-  }
-
-  if (
-    whales.smartMoneyCandidates >=
-    2
-  ) {
-    score += 5;
-
-    reasons.push(
-      "Multiple high-quality wallet candidates"
-    );
-  }
-
-  if (
-    whales.accumulationSignal ===
-    "DISTRIBUTION"
-  ) {
-    score -=
-      WHALE_DISTRIBUTION_PENALTY;
-
-    reasons.push(
-      "Whale distribution detected"
-    );
-  }
-
-  if (
-    whales.largestWalletPercent !==
-      null &&
-    whales.largestWalletPercent >
-      EXTREME_WHALE_PERCENT
-  ) {
-    score -= 5;
-
-    reasons.push(
-      "Large single-wallet concentration"
-    );
-  }
-
-  return {
-    score:
-      clamp(
-        score,
-        0,
-        100
-      ),
-
-    reasons
-  };
-}
-
-
-/*
- * =========================================================
- * V71 WHALE RUG-RISK SCORE
- * =========================================================
- */
-
-function applyWhaleRugRisk(
-  rugRisk,
-  whales
-) {
-  let score =
-    rugRisk.score;
-
-  const reasons = [
-    ...(rugRisk.reasons || [])
-  ];
-
-  if (
-    !whales?.verified
-  ) {
-    return {
-      score,
-
-      label:
-        score >= 80
-          ? "HIGH"
-          : score >= 60
-          ? "MEDIUM"
-          : "LOW",
-
-      reasons
-    };
-  }
-
-  if (
-    whales.largestWalletPercent !==
-      null &&
-    whales.largestWalletPercent >
-      20
-  ) {
-    score += 20;
-
-    reasons.push(
-      "Extreme whale concentration"
-    );
-  }
-
-  else if (
-    whales.largestWalletPercent !==
-      null &&
-    whales.largestWalletPercent >
-      10
-  ) {
-    score += 10;
-
-    reasons.push(
-      "High whale concentration"
-    );
-  }
-
-  if (
-    whales.whaleSupplyPercent >
-    70
-  ) {
-    score += 15;
-
-    reasons.push(
-      "Whales control majority of supply"
-    );
-  }
-
-  if (
-    whales.accumulationSignal ===
-    "DISTRIBUTION"
-  ) {
-    score += 10;
-
-    reasons.push(
-      "Large wallets distributing"
-    );
-  }
-
-  if (
-    whales.accumulationSignal ===
-    "ACCUMULATION" &&
-    whales.whaleSupplyPercent <
-      60
-  ) {
-    score -= 5;
-  }
-
-  score =
-    clamp(
-      score,
-      0,
-      100
-    );
-
-  return {
-    score,
-
-    label:
-      score >= 80
-        ? "HIGH"
-        : score >= 60
-        ? "MEDIUM"
-        : "LOW",
-
-    reasons
-  };
-}
-
-
-/*
- * =========================================================
- * V71 ANALYSIS FUNCTION
- *
- * CALL THIS AFTER V70:
- *
- * const rugRisk = scoreRugRisk(...)
- * const opportunity = scoreOpportunity(...)
- *
- * Replace those final values with this function.
- * =========================================================
- */
-
-async function buildV71Intelligence(
-  env,
-  token,
-  activity,
-  market,
-  holders
-) {
-  const baseRugRisk =
-    scoreRugRisk(
-      token,
-      activity,
-      market,
-      holders
-    );
-
-  const baseOpportunity =
-    scoreOpportunity(
-      token,
-      activity,
-      market,
-      holders
-    );
-
-  const whales =
-    await getWhaleIntelligence(
-      env,
-      token.address,
-      token.totalSupply,
-      holders
-    );
-
-  const rugRisk =
-    applyWhaleRugRisk(
-      baseRugRisk,
-      whales
-    );
-
-  const opportunity =
-    applyWhaleOpportunityScore(
-      baseOpportunity,
-      whales
-    );
-
-  return {
-    whales,
-    rugRisk,
-    opportunity
-  };
-}
-
-
-/*
- * =========================================================
- * IMPORTANT V70 -> V71 SCAN CHANGE
- * =========================================================
- *
- * FIND THIS IN YOUR V70 scan():
- *
- * const rugRisk =
- *   scoreRugRisk(
- *     token,
- *     activity,
- *     market,
- *     holders
- *   );
- *
- * const opportunity =
- *   scoreOpportunity(
- *     token,
- *     activity,
- *     market,
- *     holders
- *   );
- *
- *
- * REPLACE IT WITH:
- */
-
-const v71ExampleReplacement = async (
-  env,
-  token,
-  activity,
-  market,
-  holders
-) => {
-
-  const intelligence =
-    await buildV71Intelligence(
-      env,
-      token,
-      activity,
-      market,
-      holders
-    );
-
-  const whales =
-    intelligence.whales;
-
-  const rugRisk =
-    intelligence.rugRisk;
-
-  const opportunity =
-    intelligence.opportunity;
-
-  return {
-    whales,
-    rugRisk,
-    opportunity
-  };
-};
-
-
-/*
- * =========================================================
- * THEN IN analysedCandidate ADD:
- * =========================================================
- *
- * whales,
- *
- * so it becomes:
- *
- * const analysedCandidate = {
- *   ...
- *   activity,
- *   market,
- *   holders,
- *   whales,
- *   rugRisk,
- *   opportunity,
- *   ...
- * };
- */
-
-
-/*
- * =========================================================
- * V71 TELEGRAM MESSAGE
- *
- * In sendTelegram(), replace the existing message
- * declaration with this function call:
- *
- * const message = buildV71TelegramMessage(candidate);
- * =========================================================
- */
-
-function buildV71TelegramMessage(
-  candidate
-) {
-  const market =
-    candidate.market || {};
-
-  const holders =
-    candidate.holders || {};
-
-  const whales =
-    candidate.whales || {};
-
-  const opportunity =
-    candidate.opportunity || {
-      score: 0,
-      reasons: []
-    };
-
-  const rugRisk =
-    candidate.rugRisk || {
-      score: 100,
-      label: "HIGH",
-      reasons: []
-    };
-
-  const whaleSignal =
-    whales.verified
-      ? whales.accumulationSignal
-      : "DATA UNVERIFIED";
-
-  const smartMoney =
-    whales.verified
-      ? whales.smartMoneyCandidates
-      : "DATA UNVERIFIED";
-
-  const verifiedSmartMoney =
-    whales.verifiedSmartMoney > 0
-      ? whales.verifiedSmartMoney
-      : "NOT VERIFIED";
 
   return (
-`🚨 Robinhood Chain Meme Hunter V71
-
-🪙 ${candidate.name || "Unknown"} (${candidate.symbol || "?"})
-
-Contract:
-${candidate.address}
-
-🎯 Opportunity: ${opportunity.score}/100
-🛡 Rug Risk: ${rugRisk.score}/100 (${rugRisk.label})
-
-💰 Market Cap: ${formatMoney(market.marketCap)}
-💧 Liquidity: ${formatMoney(market.liquidityUsd)}
-📊 24h Volume: ${formatMoney(market.volume?.h24)}
-⚡ 1h Volume: ${formatMoney(market.volume?.h1)}
-
-🟢 1h Buys: ${market.transactions?.h1?.buys ?? "UNVERIFIED"}
-🔴 1h Sells: ${market.transactions?.h1?.sells ?? "UNVERIFIED"}
-
-👥 Holders: ${holders.holderCount ?? "UNVERIFIED"}
-
-🐋 WHALE INTELLIGENCE
-
-Signal: ${whaleSignal}
-
-Accumulating whales:
-${whales.accumulatingWhales ?? "UNVERIFIED"}
-
-Distributing whales:
-${whales.distributingWhales ?? "UNVERIFIED"}
-
-Whale supply:
-${
-  whales.verified
-    ? Number(
-        whales.whaleSupplyPercent || 0
-      ).toFixed(2) + "%"
-    : "UNVERIFIED"
+    "0x" +
+    topic.slice(-40)
+  );
 }
 
-Largest whale:
-${
-  whales.largestWalletPercent !== null &&
-  whales.largestWalletPercent !== undefined
-    ? Number(
-        whales.largestWalletPercent
-      ).toFixed(2) + "%"
-    : "UNVERIFIED"
+
+function hexToNumber(
+  hex
+) {
+  if (!hex) {
+    return null;
+  }
+
+  try {
+    return Number(
+      BigInt(hex)
+    );
+
+  } catch {
+    return null;
+  }
 }
 
-🧠 Smart-money candidates:
-${smartMoney}
 
-Verified smart money:
-${verifiedSmartMoney}
+function hexWord(
+  data,
+  index
+) {
+  if (
+    typeof data !==
+      "string" ||
+    !data.startsWith(
+      "0x"
+    )
+  ) {
+    return null;
+  }
 
-📡 V4 Swaps: ${candidate.activity?.swaps ?? 0}
-💦 Liquidity Events: ${candidate.activity?.liquidityEvents ?? 0}
+  const raw =
+    data.slice(2);
 
-WHY:
+  const start =
+    index * 64;
 
-${(opportunity.reasons || [])
-  .map(
-    reason =>
-      "• " + reason
-  )
-  .join("\n")}
+  const end =
+    start + 64;
 
-RISK:
+  if (
+    end >
+    raw.length
+  ) {
+    return null;
+  }
 
-${(rugRisk.reasons || [])
-  .map(
-    reason =>
-      "• " + reason
-  )
-  .join("\n")}
-
-${
-  market.url
-    ? `Chart:\n${market.url}`
-    : ""
+  return (
+    "0x" +
+    raw.slice(
+      start,
+      end
+    )
+  );
 }
 
-⚠️ Automated high-risk early-stage screening.
-Smart-money labels remain unverified unless wallet history proves performance.`
+
+function decodeSignedInt(
+  hex,
+  bits
+) {
+  if (!hex) {
+    return null;
+  }
+
+  try {
+    let value =
+      BigInt(hex);
+
+    const mask =
+      (
+        1n <<
+        BigInt(bits)
+      ) -
+      1n;
+
+    value &=
+      mask;
+
+    const sign =
+      1n <<
+      BigInt(
+        bits - 1
+      );
+
+    if (
+      value >= sign
+    ) {
+      value -=
+        1n <<
+        BigInt(bits);
+    }
+
+    return value;
+
+  } catch {
+    return null;
+  }
+}
+
+
+function percentage(
+  numerator,
+  denominator
+) {
+  const a =
+    safeNumber(
+      numerator
+    );
+
+  const b =
+    safeNumber(
+      denominator
+    );
+
+  if (
+    b <= 0
+  ) {
+    return null;
+  }
+
+  return (
+    a /
+    b *
+    100
+  );
+}
+
+
+function formatMoney(
+  value
+) {
+  const n =
+    safeNumber(
+      value
+    );
+
+  if (
+    n <= 0
+  ) {
+    return "UNVERIFIED";
+  }
+
+  if (
+    n >=
+    1_000_000_000
+  ) {
+    return (
+      "$" +
+      (
+        n /
+        1_000_000_000
+      ).toFixed(2) +
+      "B"
+    );
+  }
+
+  if (
+    n >=
+    1_000_000
+  ) {
+    return (
+      "$" +
+      (
+        n /
+        1_000_000
+      ).toFixed(2) +
+      "M"
+    );
+  }
+
+  if (
+    n >= 1000
+  ) {
+    return (
+      "$" +
+      (
+        n /
+        1000
+      ).toFixed(1) +
+      "K"
+    );
+  }
+
+  return (
+    "$" +
+    n.toFixed(2)
   );
 }
 
 
 /*
  * =========================================================
- * V71 HEALTH INTELLIGENCE
- *
- * Replace the intelligence section returned by scan()
- * with:
+ * KV
  * =========================================================
  */
 
-function v71IntelligenceStatus(
-  stateResult
+function getStateKV(
+  env
 ) {
+  if (
+    env.KV_BINDING &&
+    typeof env.KV_BINDING.get ===
+      "function" &&
+    typeof env.KV_BINDING.put ===
+      "function"
+  ) {
+    return {
+      kv:
+        env.KV_BINDING,
+
+      binding:
+        "KV_BINDING"
+    };
+  }
+
+  if (
+    env.MEME_HUNTER_STATE &&
+    typeof env.MEME_HUNTER_STATE.get ===
+      "function" &&
+    typeof env.MEME_HUNTER_STATE.put ===
+      "function"
+  ) {
+    return {
+      kv:
+        env.MEME_HUNTER_STATE,
+
+      binding:
+        "MEME_HUNTER_STATE"
+    };
+  }
+
   return {
-    persistentBlockTracking:
-      stateResult.persistent
-        ? "ENABLED"
-        : "DISABLED_NO_KV",
+    kv:
+      null,
 
-    kvBinding:
-      stateResult.binding ||
-      "NONE",
-
-    catchUpScanning:
-      "10_BLOCK_CHUNKS",
-
-    persistentCandidateWatch:
-      stateResult.persistent
-        ? "ENABLED"
-        : "MEMORYLESS_FALLBACK",
-
-    persistentAlertCooldown:
-      stateResult.persistent
-        ? "ENABLED"
-        : "MEMORY_ONLY",
-
-    market:
-      "DEXSCREENER",
-
-    holders:
-      "BLOCKSCOUT",
-
-    whaleActivity:
-      "BLOCKSCOUT_TRANSFER_ANALYSIS",
-
-    whaleAccumulation:
-      "ENABLED",
-
-    whaleDistribution:
-      "ENABLED",
-
-    smartMoneyCandidates:
-      "ENABLED",
-
-    smartMoney:
-      "CANDIDATE_DETECTION_ONLY",
-
-    verifiedSmartMoney:
-      "NOT_YET_IMPLEMENTED",
-
-    socialMomentum:
-      "NOT_VERIFIED"
+    binding:
+      null
   };
 }
 
 
-/*
- * =========================================================
- * V71 ARCHITECTURE NAME
- * =========================================================
- *
- * Replace:
- *
- * V70_DUAL_KV_BINDING_PERSISTENT_GAP_FREE_HUNTER
- *
- * with:
- *
- * V71_PERSISTENT_WHALE_INTELLIGENCE_HUNTER
- *
- *
- * ALSO replace the original:
- *
- * const VERSION = "V70";
- *
- * with:
- *
- * const VERSION = "V71";
- *
- * Do NOT leave two VERSION declarations.
- * =========================================================
- */
+function defaultState() {
+  return {
+    version:
+      VERSION,
+
+    lastScannedBlock:
+      null,
+
+    watchedTokens:
+      [],
+
+    alerts:
+      {},
+
+    createdAt:
+      now(),
+
+    updatedAt:
+      now()
+  };
+}
+
+
+async function readState(
+  env
+) {
+  const binding =
+    getStateKV(
+      env
+    );
+
+  if (
+    !binding.kv
+  ) {
+    return {
+      persistent:
+        false,
+
+      binding:
+        null,
+
+      state:
+        defaultState(),
+
+      error:
+        null
+    };
+  }
+
+  try {
+    const raw =
+      await binding.kv
+        .get(
+          STATE_KEY
+        );
+
+    if (!raw) {
+      return {
+        persistent:
+          true,
+
+        binding:
+          binding.binding,
+
+        state:
+          defaultState(),
+
+        error:
+          null
+      };
+    }
+
+    const parsed =
+      JSON.parse(
+        raw
+      );
+
+    return {
+      persistent:
+        true,
+
+      binding:
+        binding.binding,
+
+      state: {
+        ...defaultState(),
+        ...parsed,
+
+        watchedTokens:
+          Array.isArray(
+            parsed
+              ?.watchedTokens
+          )
+            ? parsed
+                .watchedTokens
+            : [],
+
+        alerts:
+          parsed
+            ?.alerts &&
+          typeof parsed
+            .alerts ===
+            "object"
+            ? parsed.alerts
+            : {}
+      },
+
+      error:
+        null
+    };
+
+  } catch (error) {
+    return {
+      persistent:
+        true,
+
+      binding:
+        binding.binding,
+
+      state:
+        defaultState(),
+
+      error:
+        String(
+          error?.message ||
+          error
+        )
+    };
+  }
+}
+
+
+async function writeState(
+  env,
+  state
+) {
+  const binding =
+    getStateKV(
+      env
+    );
+
+  if (
+    !binding.kv
+  ) {
+    return {
+      saved:
+        false,
+
+      binding:
+        null,
+
+      reason:
+        "KV_NOT_CONFIGURED"
+    };
