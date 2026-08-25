@@ -1,27 +1,26 @@
 /**
  * Robinhood Chain Meme Hunter
- * V103
+ * V104
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V103:
- * - Builds directly forward from the confirmed V102 baseline
+ * V104:
+ * - Builds directly forward from the confirmed V103 baseline
  * - Preserves the existing KV state key/history
- * - Preserves V102 fair rotation + adaptive 10/20/40 block pool searches
- * - Preserves V101 targeted resolution priority
- * - Preserves V100 persistent unknown-pool tracker/search cursors
+ * - Preserves V103 mixed-depth resolver lanes: FRESH / DEEP / OLDEST_WAIT
+ * - Preserves V102 fair rotation and unknown-pool persistence
  * - Preserves V99 5m/1h/24h Telegram trade counts
  * - Preserves V98 DexScreener protection
- * - Preserves V97 holder integrity safeguards
+ * - Preserves V97 holder-integrity safeguards
  * - Preserves V77-style Telegram layout + token-image/sendPhoto fallback
- * - NEW: mixed-depth unknown-pool resolver scheduling
- * - NEW: reserves one probe for never-attempted pools
- * - NEW: reserves one probe for pools already searched once or more
- * - NEW: reserves one probe for the oldest/highest-wait unresolved pool
- * - NEW: prevents all resolver capacity being consumed by brand-new pools
- * - NEW: scheduler telemetry shows the selected resolver lanes
+ * - FIX: DEEP unknown-pool probes now respect provider-proven range limits
+ * - FIX: Alchemy DEEP searches no longer jump to 20/40-block requests
+ * - FIX: persistent deep progress advances through sequential safe windows
+ * - FIX: failed deep probes do not advance the cursor
+ * - NEW: provider-safe requested-block telemetry per resolver probe
+ * - NEW: deep-search telemetry reports desired vs actual chunk size
  */
-const VERSION = "V103";
+const VERSION = "V104";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2035,6 +2034,54 @@ function pruneUnknownPools(state) {
     );
 }
 
+function providerSafeUnknownPoolChunk(
+  state,
+  desiredChunkBlocks
+) {
+  const publicSafe =
+    Math.max(
+      1,
+      safeNumber(
+        state?.discoveryRpc
+          ?.publicBacklogChunkBlocks
+      ) ||
+      UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS
+    );
+
+  const alchemySafe =
+    Math.max(
+      1,
+      safeNumber(
+        state?.discoveryRpc
+          ?.alchemyBacklogChunkBlocks
+      ) ||
+      UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS
+    );
+
+  /*
+   * V104 deliberately uses the most conservative currently-proven
+   * provider range so a fallback provider can safely service the same
+   * exact-pool request without generating a size-related HTTP 400.
+   */
+  const provenSafe =
+    Math.max(
+      1,
+      Math.min(
+        publicSafe,
+        alchemySafe,
+        desiredChunkBlocks
+      )
+    );
+
+  return {
+    desiredChunkBlocks,
+    actualChunkBlocks:
+      provenSafe,
+    publicSafe,
+    alchemySafe
+  };
+}
+
 async function getInitializeForPoolRange(
   env,
   state,
@@ -2477,7 +2524,7 @@ async function resolvePersistentUnknownPools(
         entry.attempts
       );
 
-    const adaptiveChunkBlocks =
+    const desiredChunkBlocks =
       Math.min(
         UNKNOWN_POOL_SEARCH_MAX_CHUNK_BLOCKS,
         UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS *
@@ -2489,6 +2536,15 @@ async function resolvePersistentUnknownPools(
                 : 4
           )
       );
+
+    const safeChunk =
+      providerSafeUnknownPoolChunk(
+        state,
+        desiredChunkBlocks
+      );
+
+    const adaptiveChunkBlocks =
+      safeChunk.actualChunkBlocks;
 
     const span =
       BigInt(
@@ -2581,7 +2637,14 @@ async function resolvePersistentUnknownPools(
           from +
           1n
         ),
+      desiredChunkBlocks,
       adaptiveChunkBlocks,
+      providerSafeChunkBlocks:
+        safeChunk.actualChunkBlocks,
+      publicProvenChunkBlocks:
+        safeChunk.publicSafe,
+      alchemyProvenChunkBlocks:
+        safeChunk.alchemySafe,
       priorAttempts,
       provider:
         result.provider,
@@ -12145,7 +12208,7 @@ async function scan(
     status,
 
     scanMode:
-      "V103_V102_CORE_MIXED_DEPTH_UNKNOWN_POOL_RESOLUTION_HUNTER",
+      "V104_V103_CORE_PROVIDER_SAFE_DEEP_POOL_RESOLUTION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -12804,12 +12867,18 @@ async function scan(
           "OLDEST_WAIT"
         ],
 
+      providerSafeDeepPoolResolution:
+        "ENABLED_V104",
+
+      deepPoolDesiredVsActualChunkTelemetry:
+        "ENABLED_V104",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V103_V102_CORE_MIXED_DEPTH_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V104_V103_CORE_PROVIDER_SAFE_DEEP_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -13125,7 +13194,7 @@ async function health(
     },
 
     architecture:
-      "V103_V102_CORE_MIXED_DEPTH_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V104_V103_CORE_PROVIDER_SAFE_DEEP_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -13524,7 +13593,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V103_V102_CORE_MIXED_DEPTH_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V104_V103_CORE_PROVIDER_SAFE_DEEP_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -13953,7 +14022,7 @@ export default {
             ),
 
           architecture:
-            "V103_V102_CORE_MIXED_DEPTH_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+            "V104_V103_CORE_PROVIDER_SAFE_DEEP_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
