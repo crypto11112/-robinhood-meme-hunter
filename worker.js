@@ -1,28 +1,27 @@
 /**
  * Robinhood Chain Meme Hunter
- * V107
+ * V108
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V107:
- * - Builds directly forward from the saved/confirmed V106 baseline
+ * V108:
+ * - Builds directly forward from the tested V107 baseline
  * - Preserves the existing KV state key/history
+ * - Preserves V107 no-speculative-15-block Alchemy behavior
+ * - Preserves V107 contiguous provider-safe DEEP resolution
  * - Preserves V106 RPC learning-state path fix
- * - Preserves V105 activity-prioritized unknown-pool resolution
- * - Preserves V104 provider-safe DEEP resolver behavior
- * - Preserves V103 FRESH / DEEP / OLDEST_WAIT lanes
+ * - Preserves V105 activity-prioritized unknown-pool telemetry
+ * - Preserves V103 FRESH / DEEP / OLDEST_WAIT fairness lanes
  * - Preserves V99 5m/1h/24h Telegram trade counts
- * - Preserves DexScreener/holder/risk/Telegram protections
- * - FIX: Alchemy no longer performs speculative 15-block backlog probes
- *        after 10 blocks is the learned safe size
- * - NEW: expands live discovery budget using previously unused global headroom
- * - NEW: increases targeted unknown-pool resolution capacity
- * - NEW: high-activity DEEP pools receive contiguous same-run burst searches
- * - NEW: DEEP burst searches advance the existing cursor only after success,
- *        so no Initialize history ranges are skipped
- * - NEW: resolver telemetry reports deep-burst selections
+ * - Preserves DexScreener, holder-integrity, risk and Telegram safeguards
+ * - FIX: resolver no longer spends four extra slots on one DEEP pool
+ * - NEW: balanced depth + breadth unknown-pool scheduler
+ * - NEW: two high-activity breadth slots target different unresolved pools
+ * - NEW: DEEP burst is capped to two extra contiguous requests per run
+ * - NEW: live discovery keeps a global downstream reserve for analysis/alerts
+ * - NEW: resolver telemetry exposes breadth and burst selection counts
  */
-const VERSION = "V107";
+const VERSION = "V108";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -161,6 +160,12 @@ const NOTIFICATION_REQUEST_LIMIT = 2;
 
 /* V90: protect downstream intelligence even while accelerating backlog catch-up. */
 const BACKLOG_GLOBAL_RESERVE = 20;
+
+/*
+ * V108: live discovery/unknown-pool resolution must leave enough global
+ * headroom for at least one meaningful fresh analysis plus notification.
+ */
+const LIVE_GLOBAL_RESERVE = 10;
 
 const FRESH_ANALYSIS_COST_ALCHEMY = 8;
 const FRESH_ANALYSIS_COST_FALLBACK = 11;
@@ -691,7 +696,14 @@ function budgetAvailable(
     phase ===
     "discovery-live"
   ) {
+    const leavesDownstreamReserve =
+      budget.totalUsed +
+        amount <=
+      budget.totalLimit -
+        LIVE_GLOBAL_RESERVE;
+
     return (
+      leavesDownstreamReserve &&
       budget.discovery.used +
           amount <=
         budget.discovery.limit &&
@@ -917,6 +929,9 @@ function budgetTelemetry(
 
     hardPhaseIsolation:
       true,
+
+    liveDownstreamReserve:
+      LIVE_GLOBAL_RESERVE,
 
     liveFirstIsolation:
       true,
@@ -2590,22 +2605,68 @@ async function resolvePersistentUnknownPools(
   );
 
   /*
-   * V107 CONTIGUOUS DEEP BURST
+   * V108 BALANCED BREADTH + DEPTH SCHEDULER
    *
-   * After preserving one FRESH, one DEEP and one OLDEST_WAIT slot,
-   * spend additional resolver capacity on the strongest active DEEP
-   * pool. These are intentionally duplicate references to the same
-   * persisted tracker entry. Each successful request updates that
-   * entry's searchCursorBlock before the next burst executes, so the
-   * search walks backwards contiguously and cannot skip Initialize
-   * ranges.
+   * Keep the original three fairness lanes, then use two slots on the
+   * highest-activity unresolved pools not already selected. Finally use
+   * at most two contiguous DEEP_BURST requests on the strongest DEEP
+   * pool. This prevents one pool consuming almost the whole resolver
+   * budget while still making meaningful backwards progress.
    */
+  const activityBreadth =
+    eligibleCandidates
+      .filter(entry => {
+        const poolId =
+          normalize(
+            entry?.poolId
+          );
+
+        return (
+          poolId &&
+          !selectedPoolIds.has(
+            poolId
+          )
+        );
+      })
+      .sort((a, b) => {
+        const activityDiff =
+          activityScore(b) -
+          activityScore(a);
+
+        if (
+          activityDiff !== 0
+        ) {
+          return activityDiff;
+        }
+
+        return byOldestWait(
+          a,
+          b
+        );
+      });
+
+  for (
+    const entry
+    of activityBreadth.slice(
+      0,
+      2
+    )
+  ) {
+    pushCandidate(
+      entry,
+      "ACTIVITY_BREADTH"
+    );
+  }
+
   const strongestDeep =
     deepLane[0] ||
     null;
 
+  let deepBurstAdded = 0;
+
   while (
     strongestDeep &&
+    deepBurstAdded < 2 &&
     selectedCandidates.length <
       UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN
   ) {
@@ -2615,11 +2676,12 @@ async function resolvePersistentUnknownPools(
       lane:
         "DEEP_BURST"
     });
+
+    deepBurstAdded++;
   }
 
   /*
-   * If no DEEP candidate exists, fill remaining resolver slots with the
-   * fairest remaining candidates so the request budget is not wasted.
+   * Fill any remaining resolver slots fairly if a lane was unavailable.
    */
   const fillCandidates =
     eligibleCandidates
@@ -2666,7 +2728,7 @@ async function resolvePersistentUnknownPools(
     requestLimit:
       UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN,
     scheduler:
-      "CONTIGUOUS_DEEP_BURST_V107",
+      "BALANCED_BREADTH_DEPTH_V108",
     selectedLanes:
       candidates.map(
         item =>
@@ -2675,12 +2737,20 @@ async function resolvePersistentUnknownPools(
     resolved: 0,
     resolvedPoolIds: [],
     searchedBlocks: 0,
+    activityBreadthSelections:
+      candidates.filter(
+        item =>
+          item.lane ===
+          "ACTIVITY_BREADTH"
+      ).length,
     deepBurstSelections:
       candidates.filter(
         item =>
           item.lane ===
           "DEEP_BURST"
       ).length,
+    downstreamReserveRequests:
+      LIVE_GLOBAL_RESERVE,
     trackerCount:
       Object.keys(
         tracker
@@ -12425,7 +12495,7 @@ async function scan(
     status,
 
     scanMode:
-      "V107_V106_CORE_CONTIGUOUS_DEEP_BURST_NO_ALCHEMY_PROBE_HUNTER",
+      "V108_V107_CORE_BALANCED_BREADTH_DEPTH_BUDGET_RESERVE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -13117,12 +13187,24 @@ async function scan(
       liveDiscoveryRequestLimit:
         LIVE_DISCOVERY_REQUEST_LIMIT,
 
+      balancedUnknownPoolBreadthDepth:
+        "ENABLED_V108",
+
+      activityBreadthSlotsPerRun:
+        2,
+
+      maxDeepBurstSlotsPerRun:
+        2,
+
+      liveGlobalDownstreamReserve:
+        LIVE_GLOBAL_RESERVE,
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V107_V106_CORE_CONTIGUOUS_DEEP_BURST_NO_ALCHEMY_PROBE_V77_TELEGRAM_HUNTER",
+      "V108_V107_CORE_BALANCED_BREADTH_DEPTH_BUDGET_RESERVE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -13438,7 +13520,7 @@ async function health(
     },
 
     architecture:
-      "V107_V106_CORE_CONTIGUOUS_DEEP_BURST_NO_ALCHEMY_PROBE_V77_TELEGRAM_HUNTER",
+      "V108_V107_CORE_BALANCED_BREADTH_DEPTH_BUDGET_RESERVE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -13837,7 +13919,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V107_V106_CORE_CONTIGUOUS_DEEP_BURST_NO_ALCHEMY_PROBE_V77_TELEGRAM_HUNTER",
+      "V108_V107_CORE_BALANCED_BREADTH_DEPTH_BUDGET_RESERVE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -14266,7 +14348,7 @@ export default {
             ),
 
           architecture:
-            "V107_V106_CORE_CONTIGUOUS_DEEP_BURST_NO_ALCHEMY_PROBE_V77_TELEGRAM_HUNTER",
+            "V108_V107_CORE_BALANCED_BREADTH_DEPTH_BUDGET_RESERVE_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
