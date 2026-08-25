@@ -1,27 +1,27 @@
 /**
  * Robinhood Chain Meme Hunter
- * V102
+ * V103
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V102:
- * - Builds directly forward from the confirmed V101 baseline
+ * V103:
+ * - Builds directly forward from the confirmed V102 baseline
  * - Preserves the existing KV state key/history
- * - Preserves V101 targeted unknown-pool resolution priority
+ * - Preserves V102 fair rotation + adaptive 10/20/40 block pool searches
+ * - Preserves V101 targeted resolution priority
  * - Preserves V100 persistent unknown-pool tracker/search cursors
- * - Preserves V99 5m/1h/24h trade-count Telegram section
- * - Preserves strict UNVERIFIED directional USD handling
- * - Preserves V98/V97 market + holder safety protections
- * - Preserves V77-style Telegram layout and token-image/sendPhoto fallback
- * - NEW: fair unresolved-pool rotation so old pools cannot starve
- * - NEW: adaptive exact-pool Initialize windows: 10 -> 20 -> 40 blocks
- * - NEW: adaptive window telemetry per probe
- * - NEW: successful empty searches advance by the full adaptive window
- * - NEW: failed provider searches do not advance the persistent cursor
- * - NEW: DexScreener global fresh spacing increased to 8 minutes
- * - NEW: preserves verified 9-minute cache so market freshness remains efficient
+ * - Preserves V99 5m/1h/24h Telegram trade counts
+ * - Preserves V98 DexScreener protection
+ * - Preserves V97 holder integrity safeguards
+ * - Preserves V77-style Telegram layout + token-image/sendPhoto fallback
+ * - NEW: mixed-depth unknown-pool resolver scheduling
+ * - NEW: reserves one probe for never-attempted pools
+ * - NEW: reserves one probe for pools already searched once or more
+ * - NEW: reserves one probe for the oldest/highest-wait unresolved pool
+ * - NEW: prevents all resolver capacity being consumed by brand-new pools
+ * - NEW: scheduler telemetry shows the selected resolver lanes
  */
-const VERSION = "V102";
+const VERSION = "V103";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2157,7 +2157,7 @@ async function resolvePersistentUnknownPools(
       state
     );
 
-  const candidates =
+  const eligibleCandidates =
     Object.values(
       tracker
     )
@@ -2177,56 +2177,101 @@ async function resolvePersistentUnknownPools(
               ?.searchCursorBlock
           ) > 0
         );
-      })
+      });
+
+  const byOldestWait = (
+    a,
+    b
+  ) => {
+    const aAttemptAt =
+      safeNumber(
+        a?.lastAttemptAt
+      );
+
+    const bAttemptAt =
+      safeNumber(
+        b?.lastAttemptAt
+      );
+
+    if (
+      !aAttemptAt &&
+      bAttemptAt
+    ) {
+      return -1;
+    }
+
+    if (
+      aAttemptAt &&
+      !bAttemptAt
+    ) {
+      return 1;
+    }
+
+    if (
+      aAttemptAt !==
+      bAttemptAt
+    ) {
+      return (
+        aAttemptAt -
+        bAttemptAt
+      );
+    }
+
+    const attemptDiff =
+      safeNumber(
+        a?.attempts
+      ) -
+      safeNumber(
+        b?.attempts
+      );
+
+    if (
+      attemptDiff !== 0
+    ) {
+      return attemptDiff;
+    }
+
+    return (
+      safeNumber(
+        a?.firstSeenAt
+      ) -
+      safeNumber(
+        b?.firstSeenAt
+      )
+    );
+  };
+
+  const freshLane =
+    eligibleCandidates
+      .filter(
+        entry =>
+          safeNumber(
+            entry?.attempts
+          ) <= 0
+      )
+      .sort(
+        byOldestWait
+      );
+
+  const deepLane =
+    eligibleCandidates
+      .filter(
+        entry =>
+          safeNumber(
+            entry?.attempts
+          ) > 0
+      )
       .sort((a, b) => {
         /*
-         * V102 FAIR ROTATION
-         *
-         * Never-attempted pools go first. After that, the pool that
-         * has waited longest since its previous probe gets priority.
-         * This prevents continuously-active/new pools from starving
-         * older unresolved pools forever.
+         * Prefer deeper attempts first, then the pool that has waited
+         * longest. This guarantees some actual backwards progress.
          */
-        const aAttemptAt =
-          safeNumber(
-            a?.lastAttemptAt
-          );
-
-        const bAttemptAt =
-          safeNumber(
-            b?.lastAttemptAt
-          );
-
-        if (
-          !aAttemptAt &&
-          bAttemptAt
-        ) {
-          return -1;
-        }
-
-        if (
-          aAttemptAt &&
-          !bAttemptAt
-        ) {
-          return 1;
-        }
-
-        if (
-          aAttemptAt !==
-          bAttemptAt
-        ) {
-          return (
-            aAttemptAt -
-            bAttemptAt
-          );
-        }
-
         const attemptDiff =
           safeNumber(
-            a?.attempts
+            b?.attempts
           ) -
           safeNumber(
-            b?.attempts
+            a?.attempts
           );
 
         if (
@@ -2235,21 +2280,146 @@ async function resolvePersistentUnknownPools(
           return attemptDiff;
         }
 
-        return (
-          safeNumber(
-            b?.lastSeenAt
-          ) -
-          safeNumber(
-            a?.lastSeenAt
-          )
+        return byOldestWait(
+          a,
+          b
         );
       });
+
+  const selectedCandidates =
+    [];
+
+  const selectedPoolIds =
+    new Set();
+
+  const pushCandidate = (
+    entry,
+    lane
+  ) => {
+    if (!entry) {
+      return;
+    }
+
+    const poolId =
+      normalize(
+        entry?.poolId
+      );
+
+    if (
+      !poolId ||
+      selectedPoolIds.has(
+        poolId
+      )
+    ) {
+      return;
+    }
+
+    selectedPoolIds.add(
+      poolId
+    );
+
+    selectedCandidates.push({
+      entry,
+      lane
+    });
+  };
+
+  /*
+   * V103 MIXED-DEPTH SCHEDULER
+   *
+   * Probe #1: breadth / new pool
+   * Probe #2: depth / already-searched pool
+   * Probe #3: oldest waiting remaining pool, regardless of lane
+   */
+  pushCandidate(
+    freshLane[0],
+    "FRESH"
+  );
+
+  pushCandidate(
+    deepLane[0],
+    "DEEP"
+  );
+
+  const remainingByOldest =
+    eligibleCandidates
+      .filter(entry => {
+        const poolId =
+          normalize(
+            entry?.poolId
+          );
+
+        return (
+          poolId &&
+          !selectedPoolIds.has(
+            poolId
+          )
+        );
+      })
+      .sort(
+        byOldestWait
+      );
+
+  pushCandidate(
+    remainingByOldest[0],
+    "OLDEST_WAIT"
+  );
+
+  /*
+   * If one lane is empty, fill any remaining resolver slots with the
+   * fairest remaining candidates so the request budget is not wasted.
+   */
+  const fillCandidates =
+    eligibleCandidates
+      .filter(entry => {
+        const poolId =
+          normalize(
+            entry?.poolId
+          );
+
+        return (
+          poolId &&
+          !selectedPoolIds.has(
+            poolId
+          )
+        );
+      })
+      .sort(
+        byOldestWait
+      );
+
+  for (
+    const entry
+    of fillCandidates
+  ) {
+    if (
+      selectedCandidates.length >=
+      UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN
+    ) {
+      break;
+    }
+
+    pushCandidate(
+      entry,
+      "FAIR_FILL"
+    );
+  }
+
+  const candidates =
+    selectedCandidates;
 
   const output = {
     attempted: 0,
     requestsUsed: 0,
     requestLimit:
       UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN,
+    scheduler:
+      "MIXED_DEPTH_V103",
+    selectedLanes:
+      candidates.map(
+        item =>
+          item.lane
+      ),
     resolved: 0,
     resolvedPoolIds: [],
     searchedBlocks: 0,
@@ -2261,9 +2431,14 @@ async function resolvePersistentUnknownPools(
   };
 
   for (
-    const entry
+    const selected
     of candidates
   ) {
+    const entry =
+      selected.entry;
+
+    const resolverLane =
+      selected.lane;
     if (
       output.requestsUsed >=
         UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN ||
@@ -2395,6 +2570,7 @@ async function resolvePersistentUnknownPools(
 
     output.probes.push({
       poolId,
+      resolverLane,
       fromBlock:
         Number(from),
       toBlock:
@@ -11969,7 +12145,7 @@ async function scan(
     status,
 
     scanMode:
-      "V102_V101_CORE_FAIR_DEEP_UNKNOWN_POOL_RESOLUTION_HUNTER",
+      "V103_V102_CORE_MIXED_DEPTH_UNKNOWN_POOL_RESOLUTION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -12618,12 +12794,22 @@ async function scan(
       dexscreenerFreshSpacingMs:
         DEXSCREENER_MIN_FRESH_INTERVAL_MS,
 
+      mixedDepthUnknownPoolScheduler:
+        "ENABLED_V103",
+
+      unknownPoolResolverLanes:
+        [
+          "FRESH",
+          "DEEP",
+          "OLDEST_WAIT"
+        ],
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V102_V101_CORE_FAIR_DEEP_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V103_V102_CORE_MIXED_DEPTH_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -12939,7 +13125,7 @@ async function health(
     },
 
     architecture:
-      "V102_V101_CORE_FAIR_DEEP_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V103_V102_CORE_MIXED_DEPTH_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -13338,7 +13524,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V102_V101_CORE_FAIR_DEEP_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+      "V103_V102_CORE_MIXED_DEPTH_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -13767,7 +13953,7 @@ export default {
             ),
 
           architecture:
-            "V102_V101_CORE_FAIR_DEEP_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
+            "V103_V102_CORE_MIXED_DEPTH_UNKNOWN_POOL_RESOLUTION_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
