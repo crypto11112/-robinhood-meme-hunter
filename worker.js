@@ -1,6 +1,6 @@
-**
+/**
  * Robinhood Chain Meme Hunter
- * V90
+ * V92
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -67,7 +67,7 @@
  * - FIX: improves catch-up throughput without sacrificing candidate analysis protection
  * - Preserves DexScreener rate-limit protection, holder fallbacks and V77-style rich Telegram alerts
 
- * V92:
+ * V91:
  * - Preserves complete V90 capability set and existing KV history
  * - FIX: persistent pool registry survives watchlist trimming
  * - FIX: live activity can reactivate tokens from known pool mappings
@@ -77,6 +77,14 @@
  * - FIX: fresh market lookup is explicitly prioritised to the strongest live/new token
  * - FIX: non-priority candidates use cache/stale data instead of consuming the DexScreener fresh slot
  * - Preserves V90 accelerated backlog, one-strike range learning and V77-style rich Telegram alerts
+ *
+ * V92 FIXED:
+ * - Built directly from the actual V91 source
+ * - Preserves V91 persistent pool registry and live registry reactivation
+ * - Preserves V91 holder intelligence cache/stale fallback
+ * - Preserves V91 priority-reserved fresh DexScreener lookup
+ * - Restores the exact compact V77 Telegram visual layout requested by the user
+ * - Removes later diagnostic-only rows from Telegram alerts while retaining them in scan JSON
  */
 
 const VERSION = "V92";
@@ -259,13 +267,13 @@ const WATCH_MAX_AGE =
 
 const MAX_WATCHED_TOKENS = 50;
 
-/* V92: retain pool->token mappings beyond the 50-token watchlist. */
+/* V91: retain pool->token mappings beyond the 50-token watchlist. */
 const POOL_REGISTRY_MAX_AGE =
   48 * 60 * 60 * 1000;
 
 const MAX_POOL_REGISTRY = 2500;
 
-/* V92: holder intelligence reuse / outage protection. */
+/* V91: holder intelligence reuse / outage protection. */
 const HOLDER_CACHE_MS =
   20 * 60 * 1000;
 
@@ -530,7 +538,7 @@ function tokenizedSecurityReason(
 
   if (
     upper.includes(
-      "â¢ ROBINHOOD TOKEN"
+      "• ROBINHOOD TOKEN"
     )
   ) {
     return "ROBINHOOD_TOKENIZED_SECURITY";
@@ -1757,7 +1765,7 @@ function alternateDiscoveryProvider(
 }
 
 /* =========================================================
-   V92 POOL REGISTRY
+   V91 POOL REGISTRY
    ========================================================= */
 
 function registerPoolMapping(
@@ -3160,7 +3168,7 @@ async function scanBacklogSequential(
           "discovery-backlog",
 
         strategy:
-          "V92_PROTECTED_ACCELERATED_PROVEN_RANGE"
+          "V91_PROTECTED_ACCELERATED_PROVEN_RANGE"
       });
 
       probeHistory.push({
@@ -3669,7 +3677,7 @@ function activeTokensFromLogs(
   }
 
   /*
-   * V92: merge persistent pool registry mappings. This lets a
+   * V91: merge persistent pool registry mappings. This lets a
    * token become live-active again even if it previously fell
    * outside the 50-token watchlist.
    */
@@ -4642,7 +4650,7 @@ async function marketData(
   }
 
   /*
-   * V92: reserve the scarce fresh DexScreener request for the
+   * V91: reserve the scarce fresh DexScreener request for the
    * highest-priority live/new candidate. Other candidates still
    * receive verified cached/stale intelligence when available.
    */
@@ -5612,7 +5620,7 @@ function unverifiedHolders(
 }
 
 /* =========================================================
-   V92 HOLDER CACHE
+   V91 HOLDER CACHE
    ========================================================= */
 
 function cachedHolderIntelligence(
@@ -5694,7 +5702,7 @@ function saveHolderIntelligence(
 }
 
 /* =========================================================
-   HOLDER INTELLIGENCE â V88
+   HOLDER INTELLIGENCE — V88
    ========================================================= */
 
 async function holderIntelligence(
@@ -9130,7 +9138,8 @@ function telegramMessage(
   const market = candidate.market;
 
   const riskScore =
-    candidate.risk?.verified && candidate.risk?.score !== null
+    candidate.risk?.verified &&
+    candidate.risk?.score !== null
       ? `${candidate.risk.score}/100 (${candidate.risk.label})`
       : "UNVERIFIED";
 
@@ -9140,7 +9149,8 @@ function telegramMessage(
       : "UNVERIFIED";
 
   const holderText =
-    holders?.countersVerified && holders?.holderCount !== null
+    holders?.countersVerified &&
+    holders?.holderCount !== null
       ? formatNumber(holders.holderCount)
       : "UNVERIFIED";
 
@@ -9177,53 +9187,51 @@ function telegramMessage(
       ? yesNo(whale.smartMoneyCandidate)
       : "NO";
 
-  const money = (value) =>
+  const money = value =>
     value !== null && value !== undefined
-      ? `$${formatNumber(value)}`
+      ? "$" + formatNumber(value)
       : "UNVERIFIED";
 
-  // V92: exact V77-style visual Telegram layout restored.
-  // Scanner/intelligence remains V92; only alert presentation follows V77.
   const lines = [
-    `ð¨ <b>Robinhood Chain Meme Hunter ${VERSION}</b>`,
+    `🚨 <b>Robinhood Chain Meme Hunter ${VERSION}</b>`,
     "",
-    `ðª <b>${escapeHtml(candidate.name || "Unknown Token")} (${escapeHtml(candidate.symbol || "UNKNOWN")})</b>`,
+    `🪙 <b>${escapeHtml(candidate.name || "Unknown Token")} (${escapeHtml(candidate.symbol || "UNKNOWN")})</b>`,
     "",
     "<b>Contract:</b>",
     `<code>${escapeHtml(candidate.address)}</code>`,
     "",
-    `ð¯ Opportunity: <b>${candidate.opportunity.score}/100</b>`,
-    `ð Momentum: <b>${candidate.momentum.score}/100 (${candidate.momentum.label})</b>`,
-    `ð Confidence: <b>${candidate.confidence.score}/100 (${candidate.confidence.label})</b>`,
-    `ð§ª Market Quality: <b>${marketQualityText}</b>`,
-    `ð¡ Rug Risk: <b>${riskScore}</b>`,
+    `🎯 Opportunity: <b>${candidate.opportunity.score}/100</b>`,
+    `🚀 Momentum: <b>${candidate.momentum.score}/100 (${candidate.momentum.label})</b>`,
+    `🔎 Confidence: <b>${candidate.confidence.score}/100 (${candidate.confidence.label})</b>`,
+    `🧪 Market Quality: <b>${marketQualityText}</b>`,
+    `🛡 Rug Risk: <b>${riskScore}</b>`,
     "",
-    `ð° Market Cap: <b>${market?.verified ? money(market.marketCap) : "UNVERIFIED"}</b>`,
-    `ð§ Liquidity: <b>${market?.verified ? money(market.liquidityUsd) : "UNVERIFIED"}</b>`,
-    `ð 24h Volume: <b>${market?.verified ? money(market.volume?.h24) : "UNVERIFIED"}</b>`,
+    `💰 Market Cap: <b>${market?.verified ? money(market.marketCap) : "UNVERIFIED"}</b>`,
+    `💧 Liquidity: <b>${market?.verified ? money(market.liquidityUsd) : "UNVERIFIED"}</b>`,
+    `📊 24h Volume: <b>${market?.verified ? money(market.volume?.h24) : "UNVERIFIED"}</b>`,
     "",
-    `ð¢ 1h Buys: <b>${buys}</b>`,
-    `ð´ 1h Sells: <b>${sells}</b>`,
+    `🟢 1h Buys: <b>${buys}</b>`,
+    `🔴 1h Sells: <b>${sells}</b>`,
     "",
-    `ð¥ Holders: <b>${holderText}</b>`,
+    `👥 Holders: <b>${holderText}</b>`,
     "",
-    `ð Whale wallets: <b>${whaleWallets}</b>`,
-    `ð Top holder: <b>${topHolder}</b>`,
-    `ð Top 10: <b>${top10}</b>`,
-    `ð Concentration: <b>${concentration}</b>`,
+    `🐋 Whale wallets: <b>${whaleWallets}</b>`,
+    `🐋 Top holder: <b>${topHolder}</b>`,
+    `🐋 Top 10: <b>${top10}</b>`,
+    `🐋 Concentration: <b>${concentration}</b>`,
     "",
-    `ð Whale Flow: <b>${candidate.whaleFlow.flow}</b>`,
-    `ð¥ Accumulation: <b>${candidate.whaleFlow.accumulation}</b>`,
-    `ð¤ Distribution: <b>${candidate.whaleFlow.distribution}</b>`,
-    `ð Concentration Trend: <b>${candidate.whaleFlow.concentrationTrend}</b>`,
+    `🐋 Whale Flow: <b>${candidate.whaleFlow.flow}</b>`,
+    `📥 Accumulation: <b>${candidate.whaleFlow.accumulation}</b>`,
+    `📤 Distribution: <b>${candidate.whaleFlow.distribution}</b>`,
+    `📊 Concentration Trend: <b>${candidate.whaleFlow.concentrationTrend}</b>`,
     "",
-    `ð§  Smart-money candidate: <b>${smartMoneyCandidate}</b>`,
-    "ð§  Smart-money identity verified: <b>NO</b>",
+    `🧠 Smart-money candidate: <b>${smartMoneyCandidate}</b>`,
+    "🧠 Smart-money identity verified: <b>NO</b>",
     "",
-    `ð¡ Pool V4 swaps: <b>${candidate.activity.swaps}</b>`,
-    `ð¦ Pool liquidity events: <b>${candidate.activity.liquidityEvents}</b>`,
+    `📡 Pool V4 swaps: <b>${candidate.activity.swaps}</b>`,
+    `💦 Pool liquidity events: <b>${candidate.activity.liquidityEvents}</b>`,
     "",
-    "â ï¸ <b>Automated early-stage screening. High risk.</b>"
+    "⚠️ <b>Automated early-stage screening. High risk.</b>"
   ];
 
   return lines.join("\\n");
@@ -9995,7 +10003,7 @@ async function scan(
     );
 
   /*
-   * V92: choose exactly one token to own the fresh market-data
+   * V91: choose exactly one token to own the fresh market-data
    * slot. Live/new activity wins; otherwise use watch priority.
    */
   const marketFreshTarget =
@@ -10620,7 +10628,7 @@ async function scan(
     status,
 
     scanMode:
-      "V92_LIVE_POOL_REGISTRY_HOLDER_CACHE_HUNTER",
+      "V91_LIVE_POOL_REGISTRY_HOLDER_CACHE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -10894,7 +10902,7 @@ async function scan(
                 ),
 
               strategy:
-                "V92_PROTECTED_ACCELERATED_PROVEN_RANGE",
+                "V91_PROTECTED_ACCELERATED_PROVEN_RANGE",
 
               publicLearnedChunk:
                 backlogResult
@@ -11033,10 +11041,10 @@ async function scan(
           .unknownPoolIds.size,
 
       liveActivityPromotion:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       providerSpecificBacklogLearning:
-        "ENABLED_V92"
+        "ENABLED_V91"
     },
 
     watchedTokens:
@@ -11078,37 +11086,37 @@ async function scan(
 
     intelligence: {
       trueLiveFirstScanning:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       persistentPoolRegistry:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       livePoolReactivation:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       holderIntelligenceCache:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       staleHolderOutageFallback:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       priorityMarketFreshSlot:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       protectedBacklogAcceleration:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       backlogGlobalReserveRequests:
         BACKLOG_GLOBAL_RESERVE,
 
       providerSpecificBacklogLearning:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       provenSuccessRangePersistence:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       failedUpperBoundLearning:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       persistentRpc429Cooldown:
         "ENABLED",
@@ -11120,19 +11128,19 @@ async function scan(
         "ENABLED",
 
       richV77StyleTelegram:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       oneStrikeFailedRangeLearning:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       dexscreenerFreshRequestGuard:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       blockscoutEfficientFallback:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       severeRiskOverride:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       singleSwapLowRiskProtection:
         "ENABLED",
@@ -11141,7 +11149,7 @@ async function scan(
         "ENABLED",
 
       holderCounterFallback:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       tokenizedSecurityFiltering:
         "ENABLED",
@@ -11189,7 +11197,7 @@ async function scan(
         "ENABLED",
 
       concentrationTrend:
-        "ENABLED_V92",
+        "ENABLED_V91",
 
       candidateRanking:
         "ENABLED",
@@ -11202,7 +11210,7 @@ async function scan(
     },
 
     architecture:
-      "V92_LIVE_POOL_REGISTRY_HOLDER_CACHE_MULTI_SIGNAL_HUNTER",
+      "V92_V91_CORE_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -11518,7 +11526,7 @@ async function health(
     },
 
     architecture:
-      "V92_LIVE_POOL_REGISTRY_HOLDER_CACHE_MULTI_SIGNAL_HUNTER",
+      "V92_V91_CORE_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -11912,7 +11920,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V92_LIVE_POOL_REGISTRY_HOLDER_CACHE_MULTI_SIGNAL_HUNTER",
+      "V92_V91_CORE_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -11930,20 +11938,20 @@ async function telegramTest(
     await sendTelegram(
       env,
 
-`â <b>Robinhood Chain Meme Hunter V89</b>
+`✅ <b>Robinhood Chain Meme Hunter V89</b>
 
 Telegram connection test successful.
 
-ð¨ Rich V77-style calls restored
-â¡ Live-first discovery active
-ð§  Provider-specific RPC learning active
-â Only proven successful ranges are saved
-ð¡ Stronger rug-risk logic active
-ð Pool Manager whale exclusion active
-ð¥ Holder counter fallback active
-ð Momentum tracking active
-ð Whale-flow tracking active
-ð§¯ DexScreener protection active
+📨 Rich V77-style calls restored
+⚡ Live-first discovery active
+🧠 Provider-specific RPC learning active
+✅ Only proven successful ranges are saved
+🛡 Stronger rug-risk logic active
+🐋 Pool Manager whale exclusion active
+👥 Holder counter fallback active
+📈 Momentum tracking active
+🐋 Whale-flow tracking active
+🧯 DexScreener protection active
 
 No fake token call was generated by this test.`
     );
@@ -12341,7 +12349,7 @@ export default {
             ),
 
           architecture:
-            "V92_LIVE_POOL_REGISTRY_HOLDER_CACHE_MULTI_SIGNAL_HUNTER",
+            "V92_V91_CORE_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
 
           timestamp:
             now()
