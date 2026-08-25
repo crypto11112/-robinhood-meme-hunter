@@ -2742,4 +2742,2861 @@ function analyseWhaleFlow(
 
   let score = 0;
   const reasons = [];
-  let flow
+  let flow = "MIXED";
+
+  if (
+    comparable >= 2 &&
+    increasing > decreasing
+  ) {
+    flow = "NET_ACCUMULATION";
+    score += 25;
+
+    reasons.push(
+      `${increasing} tracked top wallets increased balances`
+    );
+  }
+
+  if (
+    comparable >= 2 &&
+    decreasing > increasing
+  ) {
+    flow = "NET_DISTRIBUTION";
+    score -= 20;
+
+    reasons.push(
+      `${decreasing} tracked top wallets reduced balances`
+    );
+  }
+
+  const oldTop10 =
+    Number(previous.top10Percent);
+
+  const newTop10 =
+    Number(
+      holders.whale.top10Percent
+    );
+
+  if (
+    Number.isFinite(oldTop10) &&
+    Number.isFinite(newTop10) &&
+    oldTop10 >= 0 &&
+    oldTop10 <= 100 &&
+    newTop10 >= 0 &&
+    newTop10 <= 100
+  ) {
+    const change =
+      newTop10 - oldTop10;
+
+    if (
+      change >= 2 &&
+      newTop10 < 70
+    ) {
+      score += 10;
+
+      reasons.push(
+        "Top holders increasing positions"
+      );
+    }
+
+    if (newTop10 >= 80) {
+      score -= 20;
+
+      reasons.push(
+        "Dangerous concentration"
+      );
+    }
+  }
+
+  return {
+    verified:
+      comparable > 0,
+
+    flow,
+
+    accumulation:
+      flow === "NET_ACCUMULATION"
+        ? "OBSERVED"
+        : "NOT_OBSERVED",
+
+    distribution:
+      flow === "NET_DISTRIBUTION"
+        ? "OBSERVED"
+        : "NOT_OBSERVED",
+
+    trackedWallets: comparable,
+    increasingWallets: increasing,
+    decreasingWallets: decreasing,
+
+    score:
+      clamp(
+        score,
+        -50,
+        50
+      ),
+
+    reasons
+  };
+}
+
+/* =========================================================
+   MARKET QUALITY
+   ========================================================= */
+
+function marketQuality(market) {
+  if (!market?.verified) {
+    return {
+      verified: false,
+      score: 0,
+      reasons: []
+    };
+  }
+
+  const liquidity =
+    safeNumber(
+      market.liquidityUsd
+    );
+
+  const marketCap =
+    safeNumber(
+      market.marketCap
+    );
+
+  const volume =
+    safeNumber(
+      market.volume?.h24
+    );
+
+  let score = 0;
+  const reasons = [];
+
+  let liquidityMarketCapRatio =
+    null;
+
+  if (
+    liquidity > 0 &&
+    marketCap > 0
+  ) {
+    liquidityMarketCapRatio =
+      liquidity /
+      marketCap *
+      100;
+
+    if (
+      liquidityMarketCapRatio >= 10 &&
+      liquidityMarketCapRatio <= 60
+    ) {
+      score += 20;
+
+      reasons.push(
+        "Healthy liquidity/market-cap ratio"
+      );
+    } else if (
+      liquidityMarketCapRatio >= 5
+    ) {
+      score += 10;
+    }
+
+    if (
+      liquidityMarketCapRatio < 2
+    ) {
+      score -= 15;
+    }
+  }
+
+  let volumeLiquidityRatio =
+    null;
+
+  if (
+    volume > 0 &&
+    liquidity > 0
+  ) {
+    volumeLiquidityRatio =
+      volume / liquidity;
+
+    if (
+      volumeLiquidityRatio >= 1
+    ) {
+      score += 15;
+
+      reasons.push(
+        "Strong volume/liquidity ratio"
+      );
+    } else if (
+      volumeLiquidityRatio >= 0.25
+    ) {
+      score += 8;
+    }
+  }
+
+  if (
+    market.buyPressure1h !== null &&
+    market.buyPressure1h >= 60
+  ) {
+    score += 10;
+  }
+
+  return {
+    verified: true,
+
+    score:
+      clamp(
+        score,
+        0,
+        100
+      ),
+
+    liquidityMarketCapRatio,
+    volumeLiquidityRatio,
+    reasons
+  };
+}
+
+/* =========================================================
+   LAUNCH STAGE
+   ========================================================= */
+
+function launchStage(market) {
+  if (
+    !market?.verified ||
+    !safeNumber(
+      market.pairCreatedAt
+    )
+  ) {
+    return {
+      verified: false,
+      ageMinutes: null,
+      stage: "UNVERIFIED",
+      score: 0
+    };
+  }
+
+  const ageMs =
+    Math.max(
+      0,
+      Date.now() -
+      safeNumber(
+        market.pairCreatedAt
+      )
+    );
+
+  const ageMinutes =
+    ageMs / 60000;
+
+  let stage = "MATURE";
+  let score = 0;
+
+  if (
+    ageMs <=
+    15 * 60 * 1000
+  ) {
+    stage = "JUST_LAUNCHED";
+    score = 100;
+  } else if (
+    ageMs <=
+    60 * 60 * 1000
+  ) {
+    stage = "VERY_EARLY";
+    score = 90;
+  } else if (
+    ageMs <=
+    2 * 60 * 60 * 1000
+  ) {
+    stage = "EARLY";
+    score = 80;
+  } else if (
+    ageMs <=
+    6 * 60 * 60 * 1000
+  ) {
+    stage = "EMERGING";
+    score = 65;
+  } else if (
+    ageMs <=
+    24 * 60 * 60 * 1000
+  ) {
+    stage = "YOUNG";
+    score = 45;
+  }
+
+  return {
+    verified: true,
+    ageMinutes,
+    stage,
+    score
+  };
+}
+
+/* =========================================================
+   RISK — V81 INTEGRITY PROTECTED
+   ========================================================= */
+
+function scoreRisk(
+  token,
+  market,
+  holders,
+  activity,
+  whaleFlow
+) {
+  let score = 50;
+  const reasons = [];
+
+  if (token.validERC20) {
+    score -= 15;
+    reasons.push(
+      "Verified ERC-20"
+    );
+  }
+
+  if (activity.swaps > 0) {
+    score -= 7;
+    reasons.push(
+      "Active V4 swaps"
+    );
+  }
+
+  if (market?.verified) {
+    score -= 5;
+
+    if (
+      market.liquidityUsd >=
+      10000
+    ) {
+      score -= 8;
+    }
+
+    if (
+      market.liquidityUsd <
+      1000
+    ) {
+      score += 15;
+
+      reasons.push(
+        "Very low liquidity"
+      );
+    }
+  }
+
+  const whale =
+    holders?.whale;
+
+  if (
+    holders?.concentrationVerified &&
+    whale?.verified
+  ) {
+    if (
+      whale.concentrationRisk ===
+      "HIGH"
+    ) {
+      score += 25;
+
+      reasons.push(
+        "High whale concentration"
+      );
+    } else if (
+      whale.concentrationRisk ===
+      "MEDIUM"
+    ) {
+      score += 10;
+
+      reasons.push(
+        "Medium whale concentration"
+      );
+    }
+
+    if (
+      whale.top1Percent !== null &&
+      whale.top1Percent > 40
+    ) {
+      score += 15;
+
+      reasons.push(
+        "Extreme top-holder concentration"
+      );
+    }
+  } else if (
+    holders?.verified &&
+    holders?.integrity
+      ?.verified === false
+  ) {
+    reasons.push(
+      `Holder concentration unverified: ${holders.integrity.status}`
+    );
+  }
+
+  if (
+    whaleFlow?.verified &&
+    whaleFlow.flow ===
+      "NET_DISTRIBUTION"
+  ) {
+    score += 10;
+
+    reasons.push(
+      "Observed whale distribution"
+    );
+  }
+
+  score =
+    clamp(
+      score,
+      0,
+      100
+    );
+
+  return {
+    score,
+
+    label:
+      score >= 80
+        ? "HIGH"
+        : score >= 60
+          ? "MEDIUM"
+          : "LOW",
+
+    reasons
+  };
+}
+
+/* =========================================================
+   OPPORTUNITY
+   ========================================================= */
+
+function scoreOpportunity(
+  token,
+  market,
+  holders,
+  activity,
+  momentum,
+  quality,
+  whaleFlow,
+  launch
+) {
+  let score = 0;
+  const reasons = [];
+
+  if (token.validERC20) {
+    score += 20;
+    reasons.push(
+      "Verified ERC-20"
+    );
+  }
+
+  if (
+    token.name &&
+    token.symbol
+  ) {
+    score += 5;
+  }
+
+  if (activity.swaps > 0) {
+    score += 10;
+    reasons.push(
+      "V4 swaps detected"
+    );
+  }
+
+  if (
+    activity.liquidityEvents > 0
+  ) {
+    score += 5;
+  }
+
+  if (market?.verified) {
+    score += 10;
+
+    if (
+      market.liquidityUsd >= 5000
+    ) score += 5;
+
+    if (
+      market.liquidityUsd >= 25000
+    ) score += 5;
+
+    if (
+      market.volume?.h24 >= 10000
+    ) score += 5;
+
+    if (
+      market.volume?.h24 >= 50000
+    ) score += 5;
+
+    if (
+      market.buyPressure1h !== null &&
+      market.buyPressure1h >= 60
+    ) {
+      score += 7;
+
+      reasons.push(
+        "Strong buy pressure"
+      );
+    }
+
+    if (
+      market.marketCap &&
+      market.marketCap >= 25000 &&
+      market.marketCap <= 5000000
+    ) {
+      score += 5;
+
+      reasons.push(
+        "Early market-cap range"
+      );
+    }
+  }
+
+  if (launch?.verified) {
+    if (
+      launch.stage ===
+      "JUST_LAUNCHED"
+    ) {
+      score += 10;
+      reasons.push(
+        "Just launched"
+      );
+    } else if (
+      launch.stage === "VERY_EARLY" ||
+      launch.stage === "EARLY"
+    ) {
+      score += 7;
+      reasons.push(
+        "Early launch"
+      );
+    } else if (
+      launch.stage === "EMERGING"
+    ) {
+      score += 4;
+    }
+  }
+
+  if (holders?.verified) {
+    if (
+      holders.holderCount >= 50
+    ) score += 4;
+
+    if (
+      holders.holderCount >= 200
+    ) score += 4;
+
+    if (
+      holders.concentrationVerified &&
+      holders.whale?.verified &&
+      holders.whale
+        ?.concentrationRisk === "LOW"
+    ) {
+      score += 5;
+
+      reasons.push(
+        "Healthy holder concentration"
+      );
+    }
+
+    if (
+      holders.concentrationVerified &&
+      holders.whale?.verified &&
+      holders.whale
+        ?.smartMoneyCandidate
+    ) {
+      score += 5;
+    }
+
+    if (
+      holders.concentrationVerified &&
+      holders.whale?.verified &&
+      holders.whale
+        ?.concentrationRisk === "HIGH"
+    ) {
+      score -= 15;
+
+      reasons.push(
+        "Whale concentration penalty"
+      );
+    }
+  }
+
+  if (momentum?.verified) {
+    if (momentum.score >= 75) {
+      score += 15;
+      reasons.push(
+        "Strong momentum"
+      );
+    } else if (
+      momentum.score >= 50
+    ) {
+      score += 10;
+    } else if (
+      momentum.score >= 25
+    ) {
+      score += 5;
+    }
+  }
+
+  if (quality?.verified) {
+    if (quality.score >= 40) {
+      score += 10;
+    } else if (
+      quality.score >= 20
+    ) {
+      score += 5;
+    }
+  }
+
+  if (
+    whaleFlow?.verified &&
+    whaleFlow.flow ===
+      "NET_ACCUMULATION"
+  ) {
+    score += 10;
+
+    reasons.push(
+      "Whale accumulation"
+    );
+  }
+
+  if (
+    whaleFlow?.verified &&
+    whaleFlow.flow ===
+      "NET_DISTRIBUTION"
+  ) {
+    score -= 10;
+
+    reasons.push(
+      "Whale distribution"
+    );
+  }
+
+  return {
+    score:
+      clamp(
+        score,
+        0,
+        100
+      ),
+
+    reasons
+  };
+}
+
+/* =========================================================
+   SIGNAL CONFIRMATION
+   ========================================================= */
+
+function signalConfirmation(
+  candidate
+) {
+  let signals = 0;
+  let score = 0;
+  const reasons = [];
+
+  if (
+    candidate.activity?.swaps > 0
+  ) {
+    signals++;
+    score += 10;
+
+    reasons.push(
+      "V4 swap activity"
+    );
+  }
+
+  if (
+    candidate.activity
+      ?.liquidityEvents > 0
+  ) {
+    signals++;
+    score += 8;
+  }
+
+  if (
+    candidate.market?.verified &&
+    safeNumber(
+      candidate.market.liquidityUsd
+    ) >= 5000
+  ) {
+    signals++;
+    score += 12;
+  }
+
+  if (
+    candidate.market?.verified &&
+    safeNumber(
+      candidate.market.volume?.h24
+    ) >= 10000
+  ) {
+    signals++;
+    score += 10;
+  }
+
+  if (
+    candidate.market
+      ?.buyPressure1h !== null &&
+    candidate.market
+      ?.buyPressure1h >= 60
+  ) {
+    signals++;
+    score += 12;
+  }
+
+  if (
+    candidate.holders?.verified &&
+    candidate.holders
+      .holderCount >= 50
+  ) {
+    signals++;
+    score += 10;
+  }
+
+  if (
+    candidate.momentum?.verified &&
+    candidate.momentum.score >= 50
+  ) {
+    signals++;
+    score += 18;
+  }
+
+  if (
+    candidate.whaleFlow?.verified &&
+    candidate.whaleFlow.flow ===
+      "NET_ACCUMULATION"
+  ) {
+    signals++;
+    score += 15;
+  }
+
+  if (
+    candidate.holders
+      ?.concentrationVerified &&
+    candidate.holders
+      ?.whale?.verified &&
+    candidate.holders
+      ?.whale?.concentrationRisk ===
+      "LOW"
+  ) {
+    signals++;
+    score += 10;
+  }
+
+  if (signals >= 5) {
+    score += 10;
+  }
+
+  return {
+    verified:
+      signals >= 2,
+
+    signals,
+
+    score:
+      clamp(
+        score,
+        0,
+        100
+      ),
+
+    label:
+      signals >= 7
+        ? "VERY_STRONG"
+        : signals >= 5
+          ? "STRONG"
+          : signals >= 3
+            ? "DEVELOPING"
+            : signals >= 2
+              ? "EARLY"
+              : "WEAK",
+
+    reasons
+  };
+}
+
+/* =========================================================
+   CONFIDENCE
+   ========================================================= */
+
+function candidateConfidence(
+  candidate
+) {
+  let score = 0;
+
+  if (candidate.validERC20) {
+    score += 15;
+  }
+
+  if (
+    candidate.market?.verified
+  ) {
+    score += 20;
+  }
+
+  if (
+    candidate.holders?.verified
+  ) {
+    score += 15;
+  }
+
+  if (
+    candidate.activity
+      ?.poolSpecific
+  ) {
+    score += 10;
+  }
+
+  if (
+    candidate.activity?.swaps > 0
+  ) {
+    score += 10;
+  }
+
+  if (
+    candidate.momentum?.verified
+  ) {
+    score += 15;
+  }
+
+  if (
+    candidate.marketQuality
+      ?.verified
+  ) {
+    score += 10;
+  }
+
+  /*
+   * V81:
+   * Whale confidence requires
+   * concentration integrity.
+   */
+  if (
+    candidate.holders
+      ?.concentrationVerified &&
+    candidate.holders
+      ?.whale?.verified
+  ) {
+    score += 5;
+  }
+
+  return {
+    score:
+      clamp(
+        score,
+        0,
+        100
+      ),
+
+    label:
+      score >= 80
+        ? "HIGH"
+        : score >= 55
+          ? "MEDIUM"
+          : "LOW"
+  };
+}
+
+/* =========================================================
+   PRIORITY
+   ========================================================= */
+
+function watchPriority(
+  watched,
+  newTokens,
+  liveTokens
+) {
+  let score = 0;
+
+  const address =
+    normalize(watched.address);
+
+  if (
+    knownQuoteMetadata(
+      address,
+      watched.metadata?.symbol
+    )
+  ) {
+    return -10000;
+  }
+
+  score += 1000;
+
+  if (
+    liveTokens?.has(address)
+  ) {
+    score += 2000;
+  }
+
+  if (
+    newTokens?.has(address)
+  ) {
+    score += 1200;
+  }
+
+  if (
+    !safeNumber(
+      watched.lastCheckedAt
+    )
+  ) {
+    score += 500;
+  } else {
+    score += Math.min(
+      500,
+      Math.floor(
+        (
+          Date.now() -
+          safeNumber(
+            watched.lastCheckedAt
+          )
+        ) /
+        60000
+      )
+    );
+  }
+
+  const age =
+    Date.now() -
+    safeNumber(
+      watched.firstSeenAt
+    );
+
+  if (
+    age >= 0 &&
+    age < 30 * 60 * 1000
+  ) {
+    score += 175;
+  } else if (
+    age >= 0 &&
+    age < 60 * 60 * 1000
+  ) {
+    score += 100;
+  }
+
+  score += Math.min(
+    60,
+    (watched.pools?.length || 0) *
+      12
+  );
+
+  return score;
+}
+
+function analysisPriority(candidate) {
+  let score =
+    safeNumber(
+      candidate.opportunity?.score
+    ) * 2;
+
+  score +=
+    safeNumber(
+      candidate.confidence?.score
+    );
+
+  score +=
+    safeNumber(
+      candidate.momentum?.score
+    );
+
+  score +=
+    safeNumber(
+      candidate.marketQuality?.score
+    );
+
+  score +=
+    safeNumber(
+      candidate.signalConfirmation
+        ?.score
+    );
+
+  if (
+    candidate.newlyDiscovered
+  ) {
+    score += 25;
+  }
+
+  if (
+    candidate.liveDiscovery
+  ) {
+    score += 100;
+  }
+
+  if (
+    candidate.whaleFlow?.flow ===
+    "NET_ACCUMULATION"
+  ) {
+    score += 30;
+  }
+
+  if (
+    candidate.whaleFlow?.flow ===
+    "NET_DISTRIBUTION"
+  ) {
+    score -= 30;
+  }
+
+  return score;
+}
+
+/* =========================================================
+   TELEGRAM
+   ========================================================= */
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function formatNumber(value) {
+  const n = safeNumber(value);
+
+  if (n >= 1e9) {
+    return (
+      n / 1e9
+    ).toFixed(2) + "B";
+  }
+
+  if (n >= 1e6) {
+    return (
+      n / 1e6
+    ).toFixed(2) + "M";
+  }
+
+  if (n >= 1e3) {
+    return (
+      n / 1e3
+    ).toFixed(2) + "K";
+  }
+
+  return n.toFixed(2);
+}
+
+async function sendTelegram(
+  env,
+  message
+) {
+  if (
+    !env.TELEGRAM_BOT_TOKEN ||
+    !env.TELEGRAM_CHAT_ID
+  ) {
+    return {
+      success: false,
+      skipped: true,
+      reason:
+        "TELEGRAM_NOT_CONFIGURED"
+    };
+  }
+
+  try {
+    const response = await fetch(
+      `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`,
+      {
+        method: "POST",
+
+        headers: {
+          "content-type":
+            "application/json"
+        },
+
+        body: JSON.stringify({
+          chat_id:
+            env.TELEGRAM_CHAT_ID,
+
+          text: message,
+
+          parse_mode: "HTML",
+
+          disable_web_page_preview:
+            true
+        })
+      }
+    );
+
+    const data =
+      await response.json();
+
+    return {
+      success:
+        response.ok &&
+        Boolean(data?.ok),
+
+      status: response.status,
+      data
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: errorString(error)
+    };
+  }
+}
+
+function qualifiesTelegram(
+  candidate
+) {
+  if (
+    candidate.opportunity.score <
+    MIN_ALERT_SCORE
+  ) return false;
+
+  if (
+    candidate.confidence.score <
+    MIN_CONFIDENCE_ALERT
+  ) return false;
+
+  if (
+    candidate.risk.score >
+    MAX_ALERT_RISK
+  ) return false;
+
+  if (
+    safeNumber(
+      candidate.market?.liquidityUsd
+    ) <
+    MIN_ALERT_LIQUIDITY
+  ) return false;
+
+  if (
+    candidate.signalConfirmation
+      .signals < 2
+  ) return false;
+
+  return true;
+}
+
+function telegramMessage(candidate) {
+  const lines = [
+    "🚨 <b>ROBINHOOD MEME HUNTER V81</b>",
+    ""
+  ];
+
+  if (candidate.liveDiscovery) {
+    lines.push(
+      "⚡ <b>LIVE BLOCK DISCOVERY</b>",
+      ""
+    );
+  }
+
+  if (candidate.newlyDiscovered) {
+    lines.push(
+      "🆕 <b>NEW TOKEN DISCOVERY</b>",
+      ""
+    );
+  }
+
+  lines.push(
+    `<b>${escapeHtml(
+      candidate.name ||
+      "Unknown Token"
+    )} (${escapeHtml(
+      candidate.symbol ||
+      "UNKNOWN"
+    )})</b>`,
+
+    "",
+
+    `Opportunity: <b>${candidate.opportunity.score}/100</b>`,
+    `Confidence: <b>${candidate.confidence.score}/100</b>`,
+    `Risk: <b>${candidate.risk.label}</b>`,
+    `Signals: <b>${candidate.signalConfirmation.signals}</b>`,
+
+    "",
+
+    `Launch: <b>${candidate.launchStage.stage}</b>`,
+    `Momentum: <b>${candidate.momentum.label}</b>`,
+    `Whale Flow: <b>${candidate.whaleFlow.flow}</b>`,
+
+    "",
+
+    `Liquidity: <b>$${formatNumber(
+      candidate.market?.liquidityUsd
+    )}</b>`,
+
+    `Market Cap: <b>$${formatNumber(
+      candidate.market?.marketCap
+    )}</b>`,
+
+    `Volume 1h: <b>$${formatNumber(
+      candidate.market?.volume?.h1
+    )}</b>`,
+
+    `Volume 24h: <b>$${formatNumber(
+      candidate.market?.volume?.h24
+    )}</b>`,
+
+    `Buy Pressure: <b>${
+      candidate.market
+        ?.buyPressure1h !== null &&
+      candidate.market
+        ?.buyPressure1h !== undefined
+        ? candidate.market
+            .buyPressure1h
+            .toFixed(1) + "%"
+        : "UNVERIFIED"
+    }</b>`,
+
+    `Holders: <b>${
+      candidate.holders?.verified
+        ? formatNumber(
+            candidate.holders
+              .holderCount
+          )
+        : "UNVERIFIED"
+    }</b>`,
+
+    `Holder Integrity: <b>${
+      candidate.holders
+        ?.integrity?.status ||
+      "UNVERIFIED"
+    }</b>`,
+
+    "",
+
+    `<code>${escapeHtml(
+      candidate.address
+    )}</code>`
+  );
+
+  if (
+    candidate.whaleFlow.flow ===
+    "NET_ACCUMULATION"
+  ) {
+    lines.push(
+      "",
+      "🐋 <b>WHALE ACCUMULATION DETECTED</b>"
+    );
+  }
+
+  if (
+    candidate.momentum.score >= 75
+  ) {
+    lines.push(
+      "",
+      "📈 <b>STRONG MOMENTUM</b>"
+    );
+  }
+
+  return lines.join("\n");
+}
+
+/* =========================================================
+   TOKEN ANALYSIS
+   ========================================================= */
+
+async function analyzeToken(
+  env,
+  budget,
+  state,
+  watched,
+  activity,
+  options
+) {
+  const address =
+    normalize(watched.address);
+
+  const previous =
+    getHistoricalSnapshot(
+      state,
+      address
+    );
+
+  const validation =
+    await verifyERC20(
+      env,
+      address,
+      budget,
+      watched
+    );
+
+  if (!validation.validERC20) {
+    return {
+      address,
+      validERC20: false,
+      validation,
+
+      newlyDiscovered:
+        Boolean(
+          options?.newlyDiscovered
+        ),
+
+      liveDiscovery:
+        Boolean(
+          options?.liveDiscovery
+        )
+    };
+  }
+
+  if (
+    knownQuoteMetadata(
+      address,
+      validation.symbol
+    )
+  ) {
+    return {
+      address,
+      validERC20: false,
+      infrastructureToken: true,
+      validation,
+      reason:
+        "KNOWN_QUOTE_OR_INFRASTRUCTURE"
+    };
+  }
+
+  let market = {
+    verified: false,
+    status: "LOOKUP_SKIPPED"
+  };
+
+  if (
+    budgetAvailable(
+      budget,
+      "analysis"
+    )
+  ) {
+    market =
+      await marketData(
+        address,
+        budget
+      );
+  }
+
+  let holders =
+    unverifiedHolders();
+
+  if (
+    validation.totalSupply &&
+    budgetAvailable(
+      budget,
+      "analysis",
+      2
+    )
+  ) {
+    holders =
+      await holderIntelligence(
+        address,
+        validation.totalSupply,
+        budget
+      );
+  }
+
+  const whaleFlow =
+    analyseWhaleFlow(
+      previous,
+      holders
+    );
+
+  const momentum =
+    momentumAnalysis(
+      previous,
+      market,
+      holders
+    );
+
+  const quality =
+    marketQuality(market);
+
+  const launch =
+    launchStage(market);
+
+  const risk =
+    scoreRisk(
+      validation,
+      market,
+      holders,
+      activity,
+      whaleFlow
+    );
+
+  const opportunity =
+    scoreOpportunity(
+      validation,
+      market,
+      holders,
+      activity,
+      momentum,
+      quality,
+      whaleFlow,
+      launch
+    );
+
+  const candidate = {
+    address,
+    name: validation.name,
+    symbol: validation.symbol,
+    decimals:
+      validation.decimals,
+    totalSupply:
+      validation.totalSupply,
+
+    validERC20: true,
+    validation,
+    market,
+    holders,
+    activity,
+    momentum,
+    marketQuality: quality,
+    launchStage: launch,
+    whaleFlow,
+    risk,
+    opportunity,
+
+    newlyDiscovered:
+      Boolean(
+        options?.newlyDiscovered
+      ),
+
+    liveDiscovery:
+      Boolean(
+        options?.liveDiscovery
+      )
+  };
+
+  candidate.signalConfirmation =
+    signalConfirmation(candidate);
+
+  candidate.confidence =
+    candidateConfidence(candidate);
+
+  candidate.analysisPriority =
+    analysisPriority(candidate);
+
+  return candidate;
+}
+
+/* =========================================================
+   LIVE / BACKLOG RANGES
+   ========================================================= */
+
+function liveRange(latest) {
+  const to = latest;
+
+  const from =
+    latest -
+      BigInt(
+        LIVE_SCAN_BLOCKS - 1
+      ) >= 0n
+      ? latest -
+        BigInt(
+          LIVE_SCAN_BLOCKS - 1
+        )
+      : 0n;
+
+  return {
+    from,
+    to
+  };
+}
+
+function backlogRange(
+  lastScanned,
+  latest
+) {
+  let from;
+
+  if (
+    lastScanned === null ||
+    lastScanned === undefined
+  ) {
+    from =
+      latest >
+      BigInt(
+        CATCHUP_TARGET_BLOCKS
+      )
+        ? latest -
+          BigInt(
+            CATCHUP_TARGET_BLOCKS
+          )
+        : 0n;
+  } else {
+    from =
+      BigInt(lastScanned) + 1n;
+  }
+
+  if (from > latest) {
+    return null;
+  }
+
+  const targetTo =
+    from +
+    BigInt(
+      CATCHUP_TARGET_BLOCKS - 1
+    );
+
+  return {
+    from,
+
+    to:
+      targetTo < latest
+        ? targetTo
+        : latest
+  };
+}
+
+/* =========================================================
+   MAIN SCAN
+   ========================================================= */
+
+async function scan(env) {
+  const startedAt = Date.now();
+  const budget = createBudget();
+
+  const stateResult =
+    await readState(env);
+
+  const state =
+    stateResult.state;
+
+  pruneState(state);
+
+  const latest =
+    await latestBlock(
+      env,
+      budget
+    );
+
+  const latestNumber =
+    Number(latest.block);
+
+  const previousBacklogCursor =
+    state.lastScannedBlock;
+
+  const liveOutput = {
+    logs: [],
+    ranges: []
+  };
+
+  const backlogOutput = {
+    logs: [],
+    ranges: []
+  };
+
+  const newTokens = new Set();
+  const liveTokens = new Set();
+
+  let liveError = null;
+  let backlogError = null;
+
+  /* LIVE FIRST */
+
+  const live =
+    liveRange(latest.block);
+
+  const liveScan =
+    await scanLogRange(
+      env,
+      live.from,
+      live.to,
+      budget,
+      liveOutput,
+      "discovery-live"
+    );
+
+  let liveDiscovery = {
+    rawLogs: 0,
+    initializeEvents: 0,
+    swapTopicMatches: 0,
+    liquidityTopicMatches: 0,
+    newTokens: new Set(),
+    seenTokens: new Set()
+  };
+
+  if (liveScan.success) {
+    liveDiscovery =
+      processDiscoveryLogs(
+        state,
+        liveOutput.logs,
+        "LIVE"
+      );
+
+    for (
+      const token of
+      liveDiscovery.newTokens
+    ) {
+      newTokens.add(token);
+    }
+
+    for (
+      const token of
+      liveDiscovery.seenTokens
+    ) {
+      liveTokens.add(token);
+    }
+
+    state.lastLiveScannedBlock =
+      latestNumber;
+  } else {
+    liveError = liveScan.error;
+  }
+
+  /* BACKLOG */
+
+  const backlog =
+    backlogRange(
+      previousBacklogCursor,
+      latest.block
+    );
+
+  let backlogDiscovery = {
+    rawLogs: 0,
+    initializeEvents: 0,
+    swapTopicMatches: 0,
+    liquidityTopicMatches: 0,
+    newTokens: new Set(),
+    seenTokens: new Set()
+  };
+
+  if (
+    backlog &&
+    budgetAvailable(
+      budget,
+      "discovery-backlog"
+    )
+  ) {
+    const result =
+      await scanLogRange(
+        env,
+        backlog.from,
+        backlog.to,
+        budget,
+        backlogOutput,
+        "discovery-backlog"
+      );
+
+    if (result.success) {
+      backlogDiscovery =
+        processDiscoveryLogs(
+          state,
+          backlogOutput.logs,
+          "BACKLOG"
+        );
+
+      for (
+        const token of
+        backlogDiscovery.newTokens
+      ) {
+        newTokens.add(token);
+      }
+
+      state.lastScannedBlock =
+        Number(
+          result.processedThrough
+        );
+    } else {
+      backlogError = result.error;
+
+      state.lastScannedBlock =
+        previousBacklogCursor;
+    }
+  }
+
+  /* PRIORITISE */
+
+  state.watchedTokens =
+    uniqueBy(
+      state.watchedTokens,
+      token =>
+        normalize(token.address)
+    );
+
+  state.watchedTokens.sort(
+    (a, b) =>
+      watchPriority(
+        b,
+        newTokens,
+        liveTokens
+      ) -
+      watchPriority(
+        a,
+        newTokens,
+        liveTokens
+      )
+  );
+
+  const selected =
+    state.watchedTokens.slice(
+      0,
+      MAX_TOKEN_CHECKS
+    );
+
+  const combinedLogs = [
+    ...liveOutput.logs,
+    ...backlogOutput.logs
+  ];
+
+  const candidates = [];
+  const validationResults = [];
+
+  let marketLookups = 0;
+  let holderLookups = 0;
+
+  /* ANALYSIS */
+
+  for (const watched of selected) {
+    if (
+      !budgetAvailable(
+        budget,
+        "analysis"
+      )
+    ) {
+      break;
+    }
+
+    const address =
+      normalize(watched.address);
+
+    const activity =
+      activityForToken(
+        watched,
+        combinedLogs
+      );
+
+    const candidate =
+      await analyzeToken(
+        env,
+        budget,
+        state,
+        watched,
+        activity,
+        {
+          newlyDiscovered:
+            newTokens.has(address),
+
+          liveDiscovery:
+            liveTokens.has(address)
+        }
+      );
+
+    watched.lastCheckedAt =
+      Date.now();
+
+    watched.checks =
+      safeNumber(watched.checks) + 1;
+
+    validationResults.push({
+      address,
+
+      validERC20:
+        candidate.validERC20,
+
+      reason:
+        candidate.validation
+          ?.reason ||
+        candidate.reason ||
+        null,
+
+      name:
+        candidate.validation
+          ?.name ||
+        null,
+
+      symbol:
+        candidate.validation
+          ?.symbol ||
+        null
+    });
+
+    if (!candidate.validERC20) {
+      continue;
+    }
+
+    watched.metadata = {
+      validERC20: true,
+      name: candidate.name,
+      symbol: candidate.symbol,
+      decimals:
+        candidate.decimals,
+      totalSupply:
+        candidate.totalSupply,
+
+      verifiedAt:
+        candidate.validation
+          ?.verifiedAt ||
+        Date.now()
+    };
+
+    if (
+      candidate.market?.verified
+    ) {
+      marketLookups++;
+    }
+
+    if (
+      candidate.holders?.verified
+    ) {
+      holderLookups++;
+    }
+
+    saveSnapshot(
+      state,
+      candidate
+    );
+
+    candidates.push(candidate);
+  }
+
+  candidates.sort(
+    (a, b) =>
+      safeNumber(
+        b.analysisPriority
+      ) -
+      safeNumber(
+        a.analysisPriority
+      )
+  );
+
+  /* TELEGRAM */
+
+  const telegramResults = [];
+
+  for (
+    const candidate of candidates
+  ) {
+    if (
+      !qualifiesTelegram(candidate)
+    ) {
+      continue;
+    }
+
+    const address =
+      normalize(candidate.address);
+
+    const previous =
+      state.alerts[address];
+
+    const previousTimestamp =
+      typeof previous === "object"
+        ? safeNumber(
+            previous.timestamp
+          )
+        : safeNumber(previous);
+
+    const previousScore =
+      typeof previous === "object"
+        ? safeNumber(
+            previous.score
+          )
+        : 0;
+
+    const cooldownExpired =
+      !previousTimestamp ||
+      Date.now() -
+        previousTimestamp >=
+        ALERT_COOLDOWN;
+
+    const scoreImproved =
+      candidate.opportunity.score -
+        previousScore >=
+      10;
+
+    const newAccumulation =
+      candidate.whaleFlow.flow ===
+        "NET_ACCUMULATION" &&
+      previous?.whaleFlow !==
+        "NET_ACCUMULATION";
+
+    if (
+      !cooldownExpired &&
+      !scoreImproved &&
+      !newAccumulation
+    ) {
+      telegramResults.push({
+        address,
+        sent: false,
+        reason: "ALERT_COOLDOWN"
+      });
+
+      continue;
+    }
+
+    const result =
+      await sendTelegram(
+        env,
+        telegramMessage(candidate)
+      );
+
+    telegramResults.push({
+      address,
+      symbol: candidate.symbol,
+      sent: result.success,
+      result
+    });
+
+    if (result.success) {
+      state.alerts[address] = {
+        timestamp: Date.now(),
+        score:
+          candidate.opportunity.score,
+        confidence:
+          candidate.confidence.score,
+        whaleFlow:
+          candidate.whaleFlow.flow
+      };
+    }
+  }
+
+  pruneState(state);
+
+  const save =
+    await writeState(
+      env,
+      state
+    );
+
+  const currentCursor =
+    state.lastScannedBlock;
+
+  const backlogRemaining =
+    currentCursor === null ||
+    currentCursor === undefined
+      ? null
+      : Math.max(
+          0,
+          latestNumber -
+          safeNumber(currentCursor)
+        );
+
+  let status = "SCAN_COMPLETE";
+
+  if (
+    backlogRemaining !== null &&
+    backlogRemaining > 0
+  ) {
+    status =
+      "LIVE_SCAN_COMPLETE_CATCHUP_CONTINUING";
+  }
+
+  if (
+    liveError ||
+    backlogError
+  ) {
+    status =
+      "PARTIAL_SCAN_FAILED_RANGE_PROTECTED";
+  }
+
+  return {
+    agent:
+      "Robinhood Chain Meme Hunter",
+
+    version: VERSION,
+    status,
+
+    scanMode:
+      "V81_TRUE_LIVE_FIRST_PERSISTENT_CATCHUP",
+
+    durationMs:
+      Date.now() - startedAt,
+
+    latestBlock:
+      latestNumber,
+
+    rpcProvider:
+      latest.provider,
+
+    persistence: {
+      enabled:
+        stateResult.persistent,
+
+      binding:
+        stateResult.binding,
+
+      readError:
+        stateResult.error,
+
+      stateSaved:
+        save.saved,
+
+      saveError:
+        save.error,
+
+      previousLastScannedBlock:
+        previousBacklogCursor,
+
+      currentLastScannedBlock:
+        currentCursor,
+
+      lastLiveScannedBlock:
+        state.lastLiveScannedBlock,
+
+      backlogRemaining
+    },
+
+    requestBudget:
+      budgetTelemetry(budget),
+
+    discovery: {
+      live: {
+        fromBlock:
+          Number(live.from),
+
+        toBlock:
+          Number(live.to),
+
+        rawLogs:
+          liveDiscovery.rawLogs,
+
+        initializeEvents:
+          liveDiscovery
+            .initializeEvents,
+
+        swapTopicMatches:
+          liveDiscovery
+            .swapTopicMatches,
+
+        modifyLiquidityTopicMatches:
+          liveDiscovery
+            .liquidityTopicMatches,
+
+        tokensSeen:
+          liveDiscovery
+            .seenTokens.size,
+
+        newTokens:
+          liveDiscovery
+            .newTokens.size,
+
+        error: liveError,
+
+        ranges:
+          liveOutput.ranges
+      },
+
+      backlog:
+        backlog
+          ? {
+              fromBlock:
+                Number(backlog.from),
+
+              toBlock:
+                Number(backlog.to),
+
+              rawLogs:
+                backlogDiscovery
+                  .rawLogs,
+
+              initializeEvents:
+                backlogDiscovery
+                  .initializeEvents,
+
+              swapTopicMatches:
+                backlogDiscovery
+                  .swapTopicMatches,
+
+              modifyLiquidityTopicMatches:
+                backlogDiscovery
+                  .liquidityTopicMatches,
+
+              newTokens:
+                backlogDiscovery
+                  .newTokens.size,
+
+              error:
+                backlogError,
+
+              ranges:
+                backlogOutput.ranges
+            }
+          : null
+    },
+
+    v4: {
+      poolManager:
+        POOL_MANAGER,
+
+      newTokenCandidates:
+        newTokens.size,
+
+      liveTokenCandidates:
+        liveTokens.size
+    },
+
+    watchedTokens:
+      state.watchedTokens.length,
+
+    tokenValidationChecks:
+      validationResults.length,
+
+    validERC20Tokens:
+      candidates.length,
+
+    validationResults,
+    marketLookups,
+    holderLookups,
+    candidates,
+
+    qualifyingCandidates:
+      candidates.filter(
+        qualifiesTelegram
+      ).length,
+
+    telegramResults,
+
+    intelligence: {
+      trueLiveFirstScanning:
+        "ENABLED_V81",
+
+      persistentBacklogCursor:
+        "ENABLED",
+
+      failedRangeProtection:
+        "ENABLED",
+
+      hardPhaseIsolation:
+        "ENABLED",
+
+      metadataReuse:
+        "ENABLED_V81",
+
+      v4Discovery:
+        "ENABLED",
+
+      erc20Validation:
+        "ENABLED",
+
+      dexscreener:
+        "ENABLED",
+
+      blockscout:
+        "ENABLED",
+
+      holderIntegrityValidation:
+        "ENABLED_V81",
+
+      impossibleConcentrationProtection:
+        "ENABLED_V81",
+
+      momentum:
+        "ENABLED",
+
+      whaleFlow:
+        "ENABLED",
+
+      candidateRanking:
+        "ENABLED",
+
+      telegram:
+        "ENABLED",
+
+      socialMomentum:
+        "NOT_VERIFIED"
+    },
+
+    architecture:
+      "V81_TRUE_LIVE_FIRST_HOLDER_INTEGRITY_MULTI_SIGNAL_HUNTER",
+
+    timestamp: now()
+  };
+}
+
+/* =========================================================
+   HEALTH
+   ========================================================= */
+
+async function health(env) {
+  const budget =
+    createBudget();
+
+  const stateResult =
+    await readState(env);
+
+  let block = null;
+  let provider = null;
+  let error = null;
+
+  try {
+    const latest =
+      await latestBlock(
+        env,
+        budget
+      );
+
+    block =
+      Number(latest.block);
+
+    provider =
+      latest.provider;
+  } catch (err) {
+    error =
+      errorString(err);
+  }
+
+  const state =
+    stateResult.state;
+
+  return {
+    agent:
+      "Robinhood Chain Meme Hunter",
+
+    version: VERSION,
+
+    status:
+      error
+        ? "DEGRADED"
+        : "ONLINE",
+
+    routes: [
+      "/health",
+      "/rpc-test",
+      "/scan",
+      "/state",
+      "/diagnostics",
+      "/run-all",
+      "/test-telegram"
+    ],
+
+    chain: {
+      name: CHAIN_NAME,
+      chainId: CHAIN_ID
+    },
+
+    rpcStatus:
+      error
+        ? "ERROR"
+        : "CONNECTED",
+
+    latestBlock: block,
+    rpcProvider: provider,
+    error,
+
+    alchemyConfigured:
+      Boolean(
+        env.ALCHEMY_API_KEY
+      ),
+
+    persistence: {
+      kvConfigured:
+        stateResult.persistent,
+
+      binding:
+        stateResult.binding,
+
+      stateKey: STATE_KEY,
+
+      lastScannedBlock:
+        state.lastScannedBlock,
+
+      lastLiveScannedBlock:
+        state.lastLiveScannedBlock,
+
+      watchedTokens:
+        state.watchedTokens.length,
+
+      snapshotTokens:
+        Object.keys(
+          state.snapshots || {}
+        ).length,
+
+      stateError:
+        stateResult.error
+    },
+
+    telegram: {
+      configured:
+        Boolean(
+          env.TELEGRAM_BOT_TOKEN &&
+          env.TELEGRAM_CHAT_ID
+        ),
+
+      automaticCalls: true,
+      minimumScore:
+        MIN_ALERT_SCORE,
+
+      minimumConfidence:
+        MIN_CONFIDENCE_ALERT,
+
+      minimumLiquidityUsd:
+        MIN_ALERT_LIQUIDITY
+    },
+
+    budget:
+      budgetTelemetry(budget),
+
+    architecture:
+      "V81_TRUE_LIVE_FIRST_HOLDER_INTEGRITY_MULTI_SIGNAL_HUNTER",
+
+    timestamp: now()
+  };
+}
+
+/* =========================================================
+   RPC TEST
+   ========================================================= */
+
+async function rpcTest(env) {
+  const budget =
+    createBudget();
+
+  const startedAt =
+    Date.now();
+
+  try {
+    const latest =
+      await latestBlock(
+        env,
+        budget
+      );
+
+    const from =
+      latest.block > 2n
+        ? latest.block - 2n
+        : 0n;
+
+    const logs =
+      await getLogs(
+        env,
+        from,
+        latest.block,
+        budget,
+        "discovery-live"
+      );
+
+    return {
+      agent:
+        "Robinhood Chain Meme Hunter",
+
+      version: VERSION,
+
+      success:
+        Array.isArray(
+          logs.result
+        ),
+
+      latestBlock:
+        Number(latest.block),
+
+      provider:
+        logs.provider ||
+        latest.provider,
+
+      poolManager:
+        POOL_MANAGER,
+
+      poolManagerLogs:
+        Array.isArray(logs.result)
+          ? logs.result.length
+          : 0,
+
+      error: logs.error,
+
+      requestBudget:
+        budgetTelemetry(budget),
+
+      durationMs:
+        Date.now() -
+        startedAt,
+
+      timestamp: now()
+    };
+  } catch (error) {
+    return {
+      agent:
+        "Robinhood Chain Meme Hunter",
+
+      version: VERSION,
+      success: false,
+
+      error:
+        errorString(error),
+
+      requestBudget:
+        budgetTelemetry(budget),
+
+      timestamp: now()
+    };
+  }
+}
+
+/* =========================================================
+   STATE
+   ========================================================= */
+
+async function stateStatus(env) {
+  const result =
+    await readState(env);
+
+  const state =
+    result.state;
+
+  pruneState(state);
+
+  return {
+    agent:
+      "Robinhood Chain Meme Hunter",
+
+    version: VERSION,
+
+    persistenceConfigured:
+      result.persistent,
+
+    bindingDetected:
+      result.binding,
+
+    stateKey: STATE_KEY,
+    error: result.error,
+
+    lastScannedBlock:
+      state.lastScannedBlock,
+
+    lastLiveScannedBlock:
+      state.lastLiveScannedBlock,
+
+    watchedTokenCount:
+      state.watchedTokens.length,
+
+    watchedTokens:
+      state.watchedTokens.map(
+        token => ({
+          address: token.address,
+
+          name:
+            token.metadata?.name ||
+            null,
+
+          symbol:
+            token.metadata?.symbol ||
+            null,
+
+          checks:
+            safeNumber(token.checks),
+
+          firstSeenAt:
+            token.firstSeenAt,
+
+          lastSeenAt:
+            token.lastSeenAt,
+
+          lastCheckedAt:
+            token.lastCheckedAt,
+
+          poolCount:
+            token.pools?.length || 0
+        })
+      ),
+
+    snapshotTokenCount:
+      Object.keys(
+        state.snapshots || {}
+      ).length,
+
+    alertHistoryCount:
+      Object.keys(
+        state.alerts || {}
+      ).length,
+
+    updatedAt:
+      state.updatedAt,
+
+    timestamp: now()
+  };
+}
+
+/* =========================================================
+   DIAGNOSTICS
+   ========================================================= */
+
+async function diagnostics(env) {
+  const state =
+    await readState(env);
+
+  const rpcResult =
+    await rpcTest(env);
+
+  return {
+    agent:
+      "Robinhood Chain Meme Hunter",
+
+    version: VERSION,
+
+    success:
+      rpcResult.success,
+
+    status:
+      rpcResult.success
+        ? state.persistent
+          ? "READY"
+          : "READY_WITH_KV_FIX_REQUIRED"
+        : "DEGRADED",
+
+    checks: {
+      rpc: {
+        success:
+          rpcResult.success,
+
+        latestBlock:
+          rpcResult.latestBlock,
+
+        provider:
+          rpcResult.provider,
+
+        error:
+          rpcResult.error
+      },
+
+      poolManager: {
+        success:
+          rpcResult.success,
+
+        address:
+          POOL_MANAGER,
+
+        logs:
+          rpcResult.poolManagerLogs
+      },
+
+      kv: {
+        configured:
+          state.persistent,
+
+        binding:
+          state.binding,
+
+        stateKey:
+          STATE_KEY,
+
+        readError:
+          state.error
+      },
+
+      telegram: {
+        configured:
+          Boolean(
+            env.TELEGRAM_BOT_TOKEN &&
+            env.TELEGRAM_CHAT_ID
+          )
+      },
+
+      alchemy: {
+        configured:
+          Boolean(
+            env.ALCHEMY_API_KEY
+          )
+      },
+
+      v81: {
+        trueLiveFirst: true,
+        separateBacklogCursor: true,
+        failedRangeProtection: true,
+        hardPhaseIsolation: true,
+        metadataReuse: true,
+        momentumSnapshots: true,
+        whaleFlow: true,
+        telegramAlerts: true,
+        holderIntegrityValidation: true,
+        impossibleConcentrationProtection: true
+      }
+    },
+
+    architecture:
+      "V81_TRUE_LIVE_FIRST_HOLDER_INTEGRITY_MULTI_SIGNAL_HUNTER",
+
+    timestamp: now()
+  };
+}
+
+/* =========================================================
+   TELEGRAM TEST
+   ========================================================= */
+
+async function telegramTest(env) {
+  const message =
+`✅ <b>Robinhood Chain Meme Hunter V81</b>
+
+Telegram connection test successful.
+
+⚡ True live-first scanning enabled
+📚 Historical catch-up enabled
+🛡 Protected analysis budget enabled
+🐋 Whale-flow tracking enabled
+📈 Momentum tracking enabled
+🔍 Holder-integrity protection enabled
+
+No fake token alert was generated by this test.`;
+
+  const result =
+    await sendTelegram(
+      env,
+      message
+    );
+
+  return {
+    agent:
+      "Robinhood Chain Meme Hunter",
+
+    version: VERSION,
+
+    success:
+      result.success,
+
+    telegramConfigured:
+      Boolean(
+        env.TELEGRAM_BOT_TOKEN &&
+        env.TELEGRAM_CHAT_ID
+      ),
+
+    result,
+    timestamp: now()
+  };
+}
+
+/* =========================================================
+   RUN ALL
+   ========================================================= */
+
+async function runAll(env) {
+  const startedAt =
+    Date.now();
+
+  const result =
+    await scan(env);
+
+  const state =
+    await stateStatus(env);
+
+  return {
+    agent:
+      "Robinhood Chain Meme Hunter",
+
+    version: VERSION,
+    success: true,
+
+    status:
+      "ALL_CORE_TESTS_COMPLETED",
+
+    durationMs:
+      Date.now() -
+      startedAt,
+
+    results: {
+      scan: result,
+      state
+    },
+
+    timestamp: now()
+  };
+}
+
+/* =========================================================
+   ROUTER
+   ========================================================= */
+
+async function handleRequest(
+  request,
+  env
+) {
+  const url =
+    new URL(request.url);
+
+  const path =
+    url.pathname
+      .replace(/\/+$/, "") ||
+    "/";
+
+  if (
+    request.method === "OPTIONS"
+  ) {
+    return new Response(
+      null,
+      {
+        status: 204,
+
+        headers: {
+          "access-control-allow-origin":
+            "*",
+
+          "access-control-allow-methods":
+            "GET, OPTIONS",
+
+          "access-control-allow-headers":
+            "content-type"
+        }
+      }
+    );
+  }
+
+  if (
+    request.method !== "GET"
+  ) {
+    return jsonResponse(
+      {
+        agent:
+          "Robinhood Chain Meme Hunter",
+
+        version: VERSION,
+        success: false,
+        error:
+          "METHOD_NOT_ALLOWED",
+        timestamp: now()
+      },
+      405
+    );
+  }
+
+  if (
+    path === "/" ||
+    path === "/health"
+  ) {
+    return jsonResponse(
+      await health(env)
+    );
+  }
+
+  if (path === "/rpc-test") {
+    return jsonResponse(
+      await rpcTest(env)
+    );
+  }
+
+  if (path === "/scan") {
+    return jsonResponse(
+      await scan(env)
+    );
+  }
+
+  if (path === "/state") {
+    return jsonResponse(
+      await stateStatus(env)
+    );
+  }
+
+  if (
+    path === "/diagnostics"
+  ) {
+    return jsonResponse(
+      await diagnostics(env)
+    );
+  }
+
+  if (path === "/run-all") {
+    return jsonResponse(
+      await runAll(env)
+    );
+  }
+
+  if (
+    path === "/test-telegram"
+  ) {
+    return jsonResponse(
+      await telegramTest(env)
+    );
+  }
+
+  return jsonResponse(
+    {
+      agent:
+        "Robinhood Chain Meme Hunter",
+
+      version: VERSION,
+      success: false,
+      error: "NOT_FOUND",
+
+      routes: [
+        "/health",
+        "/rpc-test",
+        "/scan",
+        "/state",
+        "/diagnostics",
+        "/run-all",
+        "/test-telegram"
+      ],
+
+      timestamp: now()
+    },
+    404
+  );
+}
+
+/* =========================================================
+   SCHEDULED
+   ========================================================= */
+
+async function scheduledScan(env) {
+  const result =
+    await scan(env);
+
+  console.log(
+    JSON.stringify({
+      event:
+        "V81_SCHEDULED_SCAN",
+
+      status:
+        result.status,
+
+      latestBlock:
+        result.latestBlock,
+
+      backlogRemaining:
+        result.persistence
+          ?.backlogRemaining,
+
+      liveTokenCandidates:
+        result.v4
+          ?.liveTokenCandidates,
+
+      newTokenCandidates:
+        result.v4
+          ?.newTokenCandidates,
+
+      watchedTokens:
+        result.watchedTokens,
+
+      candidates:
+        result.candidates?.length,
+
+      qualifyingCandidates:
+        result.qualifyingCandidates,
+
+      requests:
+        result.requestBudget?.used,
+
+      timestamp: now()
+    })
+  );
+
+  return result;
+}
+
+/* =========================================================
+   CLOUDFLARE EXPORT
+   ========================================================= */
+
+export default {
+  async fetch(
+    request,
+    env,
+    ctx
+  ) {
+    try {
+      return await handleRequest(
+        request,
+        env
+      );
+    } catch (error) {
+      console.error(
+        "V81 request failed",
+        error
+      );
+
+      return jsonResponse(
+        {
+          agent:
+            "Robinhood Chain Meme Hunter",
+
+          version: VERSION,
+          success: false,
+
+          error:
+            errorString(error),
+
+          architecture:
+            "V81_TRUE_LIVE_FIRST_HOLDER_INTEGRITY_MULTI_SIGNAL_HUNTER",
+
+          timestamp: now()
+        },
+        500
+      );
+    }
+  },
+
+  async scheduled(
+    controller,
+    env,
+    ctx
+  ) {
+    ctx.waitUntil(
+      scheduledScan(env)
+    );
+  }
+};
