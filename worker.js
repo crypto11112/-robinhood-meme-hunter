@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V96
+ * V97
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -16,7 +16,7 @@
  * - Cleans current runtime V95 scan/architecture labels without changing the persistent STATE_KEY
  */
 
-const VERSION = "V96";
+const VERSION = "V97";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -5457,8 +5457,114 @@ function infrastructureHolderReason(
 }
 
 /* =========================================================
-   HOLDER INTEGRITY
+   HOLDER INTEGRITY — V97
    ========================================================= */
+
+/*
+ * V97:
+ * Blockscout can occasionally return duplicate holder rows while
+ * indexing a young token. Summing duplicate rows can incorrectly
+ * produce >100% of totalSupply.
+ *
+ * Safety rule:
+ * - normalize by address
+ * - for duplicate addresses keep the largest observed balance
+ * - never add duplicate balances together
+ * - unresolved >100% data still remains UNVERIFIED
+ */
+function normalizeHolderRows(
+  rawHolders
+) {
+  const byAddress =
+    new Map();
+
+  const anonymous =
+    [];
+
+  for (
+    const item
+    of Array.isArray(
+      rawHolders
+    )
+      ? rawHolders
+      : []
+  ) {
+    const address =
+      normalize(
+        extractHolderAddress(
+          item
+        )
+      );
+
+    if (!address) {
+      anonymous.push(
+        item
+      );
+      continue;
+    }
+
+    let value =
+      0n;
+
+    try {
+      value =
+        BigInt(
+          extractHolderValue(
+            item
+          )
+        );
+    }
+
+    catch {
+      anonymous.push(
+        item
+      );
+      continue;
+    }
+
+    const existing =
+      byAddress.get(
+        address
+      );
+
+    if (!existing) {
+      byAddress.set(
+        address,
+        item
+      );
+      continue;
+    }
+
+    let existingValue =
+      0n;
+
+    try {
+      existingValue =
+        BigInt(
+          extractHolderValue(
+            existing
+          )
+        );
+    }
+
+    catch {}
+
+    if (
+      value >
+      existingValue
+    ) {
+      byAddress.set(
+        address,
+        item
+      );
+    }
+  }
+
+  return [
+    ...byAddress.values(),
+    ...anonymous
+  ];
+}
 
 function validateHolderIntegrity(
   rawHolders,
@@ -6057,10 +6163,28 @@ async function holderIntelligence(
       ? "BLOCKSCOUT_LEGACY"
       : "BLOCKSCOUT_V2";
 
-  const items =
+  const rawItems =
     holders.items.slice(
       0,
-      10
+      25
+    );
+
+  const items =
+    normalizeHolderRows(
+      rawItems
+    )
+      .slice(
+        0,
+        10
+      );
+
+  const duplicateHolderRowsRemoved =
+    Math.max(
+      0,
+      rawItems.length -
+      normalizeHolderRows(
+        rawItems
+      ).length
     );
 
   const integrity =
@@ -6068,6 +6192,14 @@ async function holderIntelligence(
       items,
       totalSupply
     );
+
+  if (
+    duplicateHolderRowsRemoved >
+      0
+  ) {
+    integrity.duplicateHolderRowsRemoved =
+      duplicateHolderRowsRemoved;
+  }
 
   if (
     !integrity.verified
@@ -7876,6 +8008,54 @@ function scoreRisk(
 
   const whale =
     holders?.whale;
+
+  /*
+   * V97 HOLDER-INTEGRITY SAFETY GATE
+   *
+   * If holder rows were returned but failed integrity validation,
+   * the token cannot be classified LOW risk from unrelated signals.
+   * This preserves the existing false-positive protection while
+   * Blockscout catches up.
+   */
+  const holderIntegrityInvalid =
+    Boolean(
+      holders?.integrity &&
+      holders.integrity.status &&
+      !holders.integrity.verified &&
+      ![
+        "BLOCKSCOUT_HOLDERS_UNAVAILABLE",
+        "NO_HOLDER_ROWS"
+      ].includes(
+        holders.integrity.status
+      )
+    );
+
+  if (
+    holderIntegrityInvalid &&
+    !evidence.concentration
+  ) {
+    return {
+      verified:
+        false,
+
+      severeOverride:
+        false,
+
+      score:
+        null,
+
+      label:
+        "UNVERIFIED",
+
+      evidence,
+
+      independentEvidence,
+
+      reasons: [
+        `Holder integrity unresolved: ${holders.integrity.status}`
+      ]
+    };
+  }
 
   /*
    * V88 SEVERE RED-FLAG OVERRIDE
@@ -10772,7 +10952,7 @@ async function scan(
     status,
 
     scanMode:
-      "V96_V95_CORE_NEGATIVE_CACHE_CIRCULATING_SUPPLY_HUNTER",
+      "V97_V96_CORE_HOLDER_ROW_RECONCILIATION_INTEGRITY_GUARD_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -11369,7 +11549,7 @@ async function scan(
     },
 
     architecture:
-      "V96_V95_CORE_NEGATIVE_CACHE_CIRCULATING_SUPPLY_V77_TELEGRAM_HUNTER",
+      "V97_V96_CORE_HOLDER_ROW_RECONCILIATION_INTEGRITY_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -11685,7 +11865,7 @@ async function health(
     },
 
     architecture:
-      "V96_V95_CORE_NEGATIVE_CACHE_CIRCULATING_SUPPLY_V77_TELEGRAM_HUNTER",
+      "V97_V96_CORE_HOLDER_ROW_RECONCILIATION_INTEGRITY_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -12079,7 +12259,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V96_V95_CORE_NEGATIVE_CACHE_CIRCULATING_SUPPLY_V77_TELEGRAM_HUNTER",
+      "V97_V96_CORE_HOLDER_ROW_RECONCILIATION_INTEGRITY_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -12396,7 +12576,7 @@ async function scheduledScan(
   console.log(
     JSON.stringify({
       event:
-        "V96_SCHEDULED_SCAN",
+        "V97_SCHEDULED_SCAN",
 
       status:
         result.status,
@@ -12487,7 +12667,7 @@ export default {
 
     catch (error) {
       console.error(
-        "V96 request failed",
+        "V97 request failed",
         error
       );
 
@@ -12508,7 +12688,7 @@ export default {
             ),
 
           architecture:
-            "V96_V95_CORE_NEGATIVE_CACHE_CIRCULATING_SUPPLY_V77_TELEGRAM_HUNTER",
+            "V97_V96_CORE_HOLDER_ROW_RECONCILIATION_INTEGRITY_GUARD_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
