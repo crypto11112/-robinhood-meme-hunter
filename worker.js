@@ -1,28 +1,21 @@
 /**
  * Robinhood Chain Meme Hunter
- * V93
+ * V94
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * V93:
- * - Builds directly forward from the confirmed V92 baseline
- * - Preserves existing KV state key/history
- * - Preserves V91/V92 live pool registry and live-pool reactivation
- * - Preserves accelerated proven-range backlog scanning
- * - Preserves provider-specific RPC cooldown/range learning
- * - Preserves ERC20 validation and tokenized-security filtering
- * - Preserves holder-integrity, infrastructure-holder and whale protections
- * - Preserves holder cache/stale fallback
- * - Preserves DexScreener cache, cooldown and priority fresh-slot protection
- * - Preserves momentum, whale-flow, risk, opportunity and confidence scoring
- * - Preserves V77-style rich Telegram alert layout
- * - NEW: token image/logo support in Telegram alerts
- * - NEW: Telegram sendPhoto with rich caption when verified artwork is available
- * - NEW: automatic text-only fallback when token artwork is unavailable or sendPhoto fails
- * - Preserves scheduled heartbeat and hard request-budget isolation
+ * V94:
+ * - Builds directly forward from the confirmed V93 corrected baseline
+ * - Preserves existing KV state key/history and all V93 scanning/intelligence logic
+ * - FIX: Telegram rich alerts now use real newline characters instead of literal 
+ text
+ * - FIX: restores the spacious original V77 section layout
+ * - FIX: Telegram title always uses the live VERSION constant
+ * - FIX: Telegram test message also uses the live VERSION constant
+ * - Preserves token image/logo sendPhoto support with text-only fallback
  */
 
-const VERSION = "V93";
+const VERSION = "V94";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -8943,7 +8936,7 @@ async function sendTelegram(
     `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
 
   try {
-    /* V93: Prefer the token artwork as the Telegram photo. */
+    /* V94: Prefer the token artwork as the Telegram photo. */
     if (imageUrl) {
       try {
         const photoResponse = await fetch(
@@ -8974,7 +8967,7 @@ async function sendTelegram(
           };
         }
       } catch (photoError) {
-        /* Fall through to the proven V93 text-only alert path. */
+        /* Fall through to the proven V94 text-only alert path. */
       }
     }
 
@@ -9175,7 +9168,7 @@ function telegramMessage(
     "⚠️ <b>Automated early-stage screening. High risk.</b>"
   ];
 
-  return lines.join("\\n");
+  return lines.join("\n");
 }
 
 /* =========================================================
@@ -10570,7 +10563,7 @@ async function scan(
     status,
 
     scanMode:
-      "V93_V92_CORE_TOKEN_IMAGE_RICH_ALERT_HUNTER",
+      "V94_V93_CORE_V77_SPACED_TOKEN_IMAGE_RICH_ALERT_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -11158,7 +11151,7 @@ async function scan(
     },
 
     architecture:
-      "V93_V92_CORE_TOKEN_IMAGE_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
+      "V94_V93_CORE_V77_SPACED_TOKEN_IMAGE_TELEGRAM_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -11474,7 +11467,7 @@ async function health(
     },
 
     architecture:
-      "V93_V92_CORE_TOKEN_IMAGE_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
+      "V94_V93_CORE_V77_SPACED_TOKEN_IMAGE_TELEGRAM_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -11868,7 +11861,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V93_V92_CORE_TOKEN_IMAGE_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
+      "V94_V93_CORE_V77_SPACED_TOKEN_IMAGE_TELEGRAM_MULTI_SIGNAL_HUNTER",
 
     timestamp:
       now()
@@ -11886,7 +11879,7 @@ async function telegramTest(
     await sendTelegram(
       env,
 
-`✅ <b>Robinhood Chain Meme Hunter V89</b>
+`✅ <b>Robinhood Chain Meme Hunter ${VERSION}</b>
 
 Telegram connection test successful.
 
@@ -12185,7 +12178,7 @@ async function scheduledScan(
   console.log(
     JSON.stringify({
       event:
-        "V93_SCHEDULED_SCAN",
+        "V94_SCHEDULED_SCAN",
 
       status:
         result.status,
@@ -12276,7 +12269,7 @@ export default {
 
     catch (error) {
       console.error(
-        "V93 request failed",
+        "V94 request failed",
         error
       );
 
@@ -12297,7 +12290,7 @@ export default {
             ),
 
           architecture:
-            "V93_V92_CORE_TOKEN_IMAGE_V77_TELEGRAM_MULTI_SIGNAL_HUNTER",
+            "V94_V93_CORE_V77_SPACED_TOKEN_IMAGE_TELEGRAM_MULTI_SIGNAL_HUNTER",
 
           timestamp:
             now()
