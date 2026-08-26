@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V124
+ * V125
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -100,8 +100,19 @@
  * - NEW: fresh-market telemetry exposes terminal-pruned ranking candidates
  * - Preserves DexScreener cooldown spacing; does not increase external request rate
  * - Preserves all Telegram thresholds unchanged
+
+ *
+ * V125:
+ * - Preserves full V124 capability set
+ * - NEW: same-run holder results can terminal-prune candidates immediately
+ * - FIX: current-scan HIGH concentration / extreme top1 candidates cannot
+ *        persist as priority-completion retries
+ * - NEW: same-run terminal cleanup telemetry
+ * - NEW: Telegram alerts distinguish NEW/EARLY/MATURE launch stage
+ * - FIX: mature opportunities no longer use misleading early-stage wording
+ * - Preserves DexScreener timing/cooldowns and all Telegram thresholds unchanged
 */
-const VERSION = "V124";
+const VERSION = "V125";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -13664,9 +13675,105 @@ async function sendTelegram(
   }
 }
 
+
+function sameRunTerminalReject(
+  candidate
+) {
+  const holders =
+    candidate?.holders;
+
+  const evidenceVerified =
+    holders
+      ?.integrity
+      ?.verified ===
+      true &&
+    holders
+      ?.concentrationVerified ===
+      true &&
+    holders
+      ?.whale
+      ?.verified ===
+      true;
+
+  if (
+    !evidenceVerified
+  ) {
+    return {
+      terminal:
+        false,
+      reason:
+        null,
+      top1Percent:
+        null,
+      concentrationRisk:
+        "UNVERIFIED"
+    };
+  }
+
+  const top1Percent =
+    safeNumber(
+      holders
+        ?.whale
+        ?.top1Percent
+    );
+
+  const concentrationRisk =
+    String(
+      holders
+        ?.whale
+        ?.concentrationRisk ||
+      "UNVERIFIED"
+    ).toUpperCase();
+
+  if (
+    concentrationRisk ===
+      "HIGH"
+  ) {
+    return {
+      terminal:
+        true,
+      reason:
+        "SAME_RUN_VERIFIED_HIGH_CONCENTRATION",
+      top1Percent,
+      concentrationRisk
+    };
+  }
+
+  if (
+    top1Percent >=
+      50
+  ) {
+    return {
+      terminal:
+        true,
+      reason:
+        "SAME_RUN_VERIFIED_EXTREME_TOP1",
+      top1Percent,
+      concentrationRisk
+    };
+  }
+
+  return {
+    terminal:
+      false,
+    reason:
+      null,
+    top1Percent,
+    concentrationRisk
+  };
+}
+
 function qualifiesTelegram(
   candidate
 ) {
+  if (
+    sameRunTerminalReject(
+      candidate
+    ).terminal
+  ) {
+    return false;
+  }
+
   if (
     candidate.opportunity
       .score <
@@ -13748,6 +13855,20 @@ function telegramQualificationReasons(
   candidate
 ) {
   const reasons = [];
+
+  const sameRunTerminal =
+    sameRunTerminalReject(
+      candidate
+    );
+
+  if (
+    sameRunTerminal.terminal
+  ) {
+    reasons.push(
+      sameRunTerminal.reason ||
+      "SAME_RUN_TERMINAL_RISK"
+    );
+  }
 
   if (
     safeNumber(
@@ -13911,9 +14032,85 @@ function buildTelegramQualificationDiagnostics(
    V88 RICH V77-STYLE TELEGRAM CALL
    ========================================================= */
 
+
+function telegramAlertClass(
+  candidate
+) {
+  const freshness =
+    candidate
+      ?.discoveryClassification
+      ?.launchFreshness ||
+    candidate
+      ?.launchStage ||
+    null;
+
+  const label =
+    String(
+      freshness?.label ||
+      freshness?.stage ||
+      "UNVERIFIED"
+    ).toUpperCase();
+
+  if (
+    label ===
+      "NEWLY_LAUNCHED"
+  ) {
+    return {
+      code:
+        "NEW_LAUNCH",
+      title:
+        "New Launch Alert",
+      footer:
+        "Automated new-launch screening. High risk."
+    };
+  }
+
+  if (
+    label ===
+      "EARLY"
+  ) {
+    return {
+      code:
+        "EARLY_STAGE",
+      title:
+        "Early Opportunity Alert",
+      footer:
+        "Automated early-stage screening. High risk."
+    };
+  }
+
+  if (
+    label ===
+      "MATURE"
+  ) {
+    return {
+      code:
+        "MATURE_OPPORTUNITY",
+      title:
+        "Mature Opportunity Alert",
+      footer:
+        "Automated mature-market opportunity screening. High risk."
+    };
+  }
+
+  return {
+    code:
+      "UNVERIFIED_STAGE",
+    title:
+      "Opportunity Alert",
+    footer:
+      "Automated opportunity screening. Launch stage unverified. High risk."
+  };
+}
+
 function telegramMessage(
   candidate
 ) {
+  const alertClass =
+    telegramAlertClass(
+      candidate
+    );
+
   const holders = candidate.holders;
   const whale = holders?.whale;
   const market = candidate.market;
@@ -14023,6 +14220,7 @@ function telegramMessage(
 
   const lines = [
     `🚨 <b>Robinhood Chain Meme Hunter ${VERSION}</b>`,
+    `📣 <b>${escapeHtml(alertClass.title)}</b>`,
     "",
     `🪙 <b>${escapeHtml(candidate.name || "Unknown Token")} (${escapeHtml(candidate.symbol || "UNKNOWN")})</b>`,
     "",
@@ -14069,7 +14267,7 @@ function telegramMessage(
     `📡 Pool V4 swaps: <b>${candidate.activity.swaps}</b>`,
     `💦 Pool liquidity events: <b>${candidate.activity.liquidityEvents}</b>`,
     "",
-    "⚠️ <b>Automated early-stage screening. High risk.</b>"
+    `⚠️ <b>${escapeHtml(alertClass.footer)}</b>`
   ];
 
   return lines.join("\n");
@@ -16420,6 +16618,37 @@ async function scan(
       )
   );
 
+  const sameRunTerminalCandidates =
+    candidates
+      .map(
+        candidate => ({
+          candidate,
+          terminal:
+            sameRunTerminalReject(
+              candidate
+            )
+        })
+      )
+      .filter(
+        row =>
+          row
+            .terminal
+            .terminal
+      );
+
+  const sameRunTerminalAddresses =
+    new Set(
+      sameRunTerminalCandidates
+        .map(
+          row =>
+            normalize(
+              row
+                .candidate
+                .address
+            )
+        )
+    );
+
   const completionCandidate =
     candidates.find(
       candidate =>
@@ -16438,13 +16667,24 @@ async function scan(
         completionCandidate
       );
 
-    const keepForRetry =
-      shouldKeepCompletionCandidate(
+    const sameRunTerminal =
+      sameRunTerminalReject(
+        completionCandidate
+      );
+
+    const cachedOrGeneralTerminal =
+      terminalPriorityReject(
         completionCandidate
       );
 
     const terminalReject =
-      terminalPriorityReject(
+      sameRunTerminal.terminal
+        ? sameRunTerminal
+        : cachedOrGeneralTerminal;
+
+    const keepForRetry =
+      !terminalReject.terminal &&
+      shouldKeepCompletionCandidate(
         completionCandidate
       );
 
@@ -16579,6 +16819,35 @@ async function scan(
     priorityCompletionTelemetry.blockers = [
       "ANALYSIS_NOT_COMPLETED"
     ];
+  }
+
+  if (
+    state
+      ?.priorityCandidateCompletion
+      ?.address &&
+    sameRunTerminalAddresses
+      .has(
+        normalize(
+          state
+            .priorityCandidateCompletion
+            .address
+        )
+      )
+  ) {
+    const terminalAddress =
+      normalize(
+        state
+          .priorityCandidateCompletion
+          .address
+      );
+
+    state.priorityCandidateCompletion =
+      null;
+
+    clearPriorityFreshReservation(
+      state,
+      terminalAddress
+    );
   }
 
   const telegramQualificationDiagnostics =
@@ -16856,7 +17125,7 @@ async function scan(
     status,
 
     scanMode:
-      "V124_CORE_TERMINAL_RANKING_CACHE_RESILIENCE_HUNTER",
+      "V125_CORE_SAME_RUN_TERMINAL_ALERT_CLASSIFICATION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -17445,7 +17714,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V124_TERMINAL_PRUNED_UNVERIFIED_MARKET_FIRST",
+        "V125_SAME_RUN_TERMINAL_PRUNED_UNVERIFIED_MARKET_FIRST",
 
       selectedAddress:
         marketFreshTargetAddress ||
@@ -17578,6 +17847,55 @@ async function scan(
       candidates.filter(
         qualifiesTelegram
       ).length,
+
+    sameRunTerminalCleanup: {
+      enabled:
+        true,
+
+      prunedCount:
+        sameRunTerminalCandidates.length,
+
+      pruned:
+        sameRunTerminalCandidates
+          .slice(
+            0,
+            10
+          )
+          .map(
+            row => ({
+              address:
+                normalize(
+                  row
+                    .candidate
+                    .address
+                ),
+
+              symbol:
+                row
+                  .candidate
+                  ?.symbol ||
+                null,
+
+              reason:
+                row
+                  .terminal
+                  .reason ||
+                null,
+
+              top1Percent:
+                row
+                  .terminal
+                  .top1Percent ??
+                null,
+
+              concentrationRisk:
+                row
+                  .terminal
+                  .concentrationRisk ||
+                null
+            })
+          )
+    },
 
     telegramQualificationDiagnostics,
 
@@ -18072,12 +18390,30 @@ async function scan(
       telegramThresholdsUnchangedV124:
         "ENABLED_V124",
 
+      sameRunTerminalRiskCleanup:
+        "ENABLED_V125",
+
+      sameRunHighConcentrationPriorityCleanup:
+        "ENABLED_V125",
+
+      telegramLaunchStageClassification:
+        "ENABLED_V125",
+
+      matureAlertWording:
+        "ENABLED_V125",
+
+      externalRequestRateStillUnchanged:
+        "ENABLED_V125",
+
+      telegramThresholdsUnchangedV125:
+        "ENABLED_V125",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V124_CORE_TERMINAL_RANKING_CACHE_RESILIENCE_V77_TELEGRAM_HUNTER",
+      "V125_CORE_SAME_RUN_TERMINAL_ALERT_CLASSIFICATION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -18393,7 +18729,7 @@ async function health(
     },
 
     architecture:
-      "V124_CORE_TERMINAL_RANKING_CACHE_RESILIENCE_V77_TELEGRAM_HUNTER",
+      "V125_CORE_SAME_RUN_TERMINAL_ALERT_CLASSIFICATION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -18792,7 +19128,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V124_CORE_TERMINAL_RANKING_CACHE_RESILIENCE_V77_TELEGRAM_HUNTER",
+      "V125_CORE_SAME_RUN_TERMINAL_ALERT_CLASSIFICATION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -19221,7 +19557,7 @@ export default {
             ),
 
           architecture:
-            "V124_CORE_TERMINAL_RANKING_CACHE_RESILIENCE_V77_TELEGRAM_HUNTER",
+            "V125_CORE_SAME_RUN_TERMINAL_ALERT_CLASSIFICATION_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
