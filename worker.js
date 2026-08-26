@@ -19839,10 +19839,40 @@ async function scan(
           ?.address
       );
 
-    const v135SameRunTerminal =
-      sameRunTerminalRejectFromCandidate(
-        candidate
+    const v135HolderTerminalEvidence =
+      Boolean(
+        candidate?.holders?.integrity?.verified &&
+        candidate?.holders?.concentrationVerified &&
+        candidate?.holders?.whale?.verified
       );
+
+    const v135Top1Percent =
+      safeNumber(
+        candidate?.holders?.whale?.top1Percent
+      );
+
+    const v135ConcentrationRisk =
+      String(
+        candidate?.holders?.whale?.concentrationRisk || ""
+      ).toUpperCase();
+
+    const v135SameRunTerminal =
+      v135HolderTerminalEvidence &&
+      (
+        v135ConcentrationRisk === "HIGH" ||
+        v135Top1Percent >= 50
+      )
+        ? {
+            terminal: true,
+            reason:
+              v135Top1Percent >= 50
+                ? "SAME_RUN_VERIFIED_EXTREME_TOP1"
+                : "SAME_RUN_VERIFIED_HIGH_CONCENTRATION"
+          }
+        : {
+            terminal: false,
+            reason: null
+          };
 
     if (
       v135CarriedPriorityAddress &&
