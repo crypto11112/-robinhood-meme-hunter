@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V139
+ * V140
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -301,8 +301,25 @@
  * - The challenger temporarily receives first analysis + fresh-market priority
  * - Retry state cannot be accidentally overwritten by the temporary challenger
  * - Telegram thresholds, API rates and request caps unchanged
+
+ *
+ * V140:
+ * - Preserves V139 retry fairness
+ * - Preserves V138 transient retry persistence
+ * - Preserves V137 local terminal-priority handoff
+ * - Preserves V136 organic-holder breadth protection
+ * - NEW: relevance expiry only removes a token from the PRIORITY RETRY lane;
+ *   it does not delete it from the watchlist
+ * - Relevance expiry requires VERIFIED market age >= 7 days plus extremely
+ *   weak verified 24h activity (<= $10 volume, <= 2 transactions), no current
+ *   on-chain V4 activity, and no new/live classification
+ * - Provider outage alone can never trigger relevance expiry
+ * - A mature token that becomes active again can still be ranked normally
+ * - Conservative 7-day / near-zero-activity policy protects the bot's stated
+ *   early-discovery mission without treating ordinary 24h maturity as stale
+ * - Telegram thresholds, API request frequency and hard budgets unchanged
 */
-const VERSION = "V139";
+const VERSION = "V140";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -18853,6 +18870,15 @@ function completionCandidateBlockers(
   return blockers;
 }
 
+const PRIORITY_RELEVANCE_MIN_AGE_MS_V140 =
+  7 * 24 * 60 * 60 * 1000;
+
+const PRIORITY_RELEVANCE_MAX_VOLUME_24H_USD_V140 =
+  10;
+
+const PRIORITY_RELEVANCE_MAX_TXNS_24H_V140 =
+  2;
+
 const RETRY_FAIRNESS_MIN_SCORE_LEAD_V139 =
   20;
 
@@ -18861,6 +18887,156 @@ const PRIORITY_COMPLETION_MAX_ATTEMPTS_V138 =
 
 const PRIORITY_COMPLETION_MAX_AGE_MS_V138 =
   6 * 60 * 60 * 1000;
+
+function priorityRetryRelevanceExpiryV140(
+  candidate
+) {
+  if (
+    !candidate ||
+    !candidate?.market?.verified
+  ) {
+    return {
+      expired: false,
+      reason: null,
+      evidence:
+        "MARKET_NOT_VERIFIED"
+    };
+  }
+
+  const pairCreatedAt =
+    safeNumber(
+      candidate
+        ?.market
+        ?.pairCreatedAt
+    );
+
+  if (
+    pairCreatedAt <= 0
+  ) {
+    return {
+      expired: false,
+      reason: null,
+      evidence:
+        "PAIR_AGE_UNAVAILABLE"
+    };
+  }
+
+  const ageMs =
+    Math.max(
+      0,
+      Date.now() -
+        pairCreatedAt
+    );
+
+  if (
+    ageMs <
+      PRIORITY_RELEVANCE_MIN_AGE_MS_V140
+  ) {
+    return {
+      expired: false,
+      reason: null,
+      evidence:
+        "AGE_BELOW_RELEVANCE_EXPIRY"
+    };
+  }
+
+  if (
+    candidate?.newlyDiscovered ||
+    candidate?.liveDiscovery ||
+    candidate?.newlyLaunched
+  ) {
+    return {
+      expired: false,
+      reason: null,
+      evidence:
+        "NEW_OR_LIVE_CLASSIFICATION"
+    };
+  }
+
+  const onChainSwaps =
+    safeNumber(
+      candidate
+        ?.activity
+        ?.swaps
+    );
+
+  const onChainLiquidityEvents =
+    safeNumber(
+      candidate
+        ?.activity
+        ?.liquidityEvents
+    );
+
+  if (
+    onChainSwaps > 0 ||
+    onChainLiquidityEvents > 0
+  ) {
+    return {
+      expired: false,
+      reason: null,
+      evidence:
+        "CURRENT_ONCHAIN_ACTIVITY"
+    };
+  }
+
+  const volume24h =
+    safeNumber(
+      candidate
+        ?.market
+        ?.volume
+        ?.h24
+    );
+
+  const txns24h =
+    safeNumber(
+      candidate
+        ?.market
+        ?.transactions
+        ?.h24
+        ?.total
+    );
+
+  const nearZeroVerifiedActivity =
+    volume24h <=
+      PRIORITY_RELEVANCE_MAX_VOLUME_24H_USD_V140 &&
+    txns24h <=
+      PRIORITY_RELEVANCE_MAX_TXNS_24H_V140;
+
+  if (
+    !nearZeroVerifiedActivity
+  ) {
+    return {
+      expired: false,
+      reason: null,
+      evidence:
+        "VERIFIED_MARKET_ACTIVITY_PRESENT",
+      ageMs,
+      volume24h,
+      txns24h
+    };
+  }
+
+  return {
+    expired: true,
+    reason:
+      "PRIORITY_RETRY_RELEVANCE_EXPIRED_V140",
+    evidence:
+      "VERIFIED_OLD_AND_NEAR_ZERO_ACTIVITY",
+    ageMs,
+    ageDays:
+      ageMs /
+      (
+        24 *
+        60 *
+        60 *
+        1000
+      ),
+    volume24h,
+    txns24h,
+    onChainSwaps,
+    onChainLiquidityEvents
+  };
+}
 
 function shouldKeepCompletionCandidate(
   candidate,
@@ -18883,6 +19059,17 @@ function shouldKeepCompletionCandidate(
     !candidate.validERC20 ||
     candidate.excludedAsset ||
     candidate.infrastructureToken
+  ) {
+    return false;
+  }
+
+  const relevanceExpiry =
+    priorityRetryRelevanceExpiryV140(
+      candidate
+    );
+
+  if (
+    relevanceExpiry.expired
   ) {
     return false;
   }
@@ -19714,6 +19901,29 @@ async function scan(
         PRIORITY_COMPLETION_MAX_AGE_MS_V138
     },
 
+    relevancePolicyV140: {
+      minimumAgeMs:
+        PRIORITY_RELEVANCE_MIN_AGE_MS_V140,
+
+      maxVolume24hUsd:
+        PRIORITY_RELEVANCE_MAX_VOLUME_24H_USD_V140,
+
+      maxTransactions24h:
+        PRIORITY_RELEVANCE_MAX_TXNS_24H_V140,
+
+      requiresVerifiedMarket:
+        true,
+
+      requiresNoOnChainActivity:
+        true,
+
+      removesFromWatchlist:
+        false
+    },
+
+    relevanceExpiryV140:
+      null,
+
     priorityFreshSchedule:
       priorityFreshScheduleTelemetry,
 
@@ -20445,12 +20655,21 @@ async function scan(
         ? sameRunTerminal
         : cachedOrGeneralTerminal;
 
+    const relevanceExpiryV140 =
+      priorityRetryRelevanceExpiryV140(
+        completionCandidate
+      );
+
     const keepForRetry =
       !terminalReject.terminal &&
       shouldKeepCompletionCandidate(
         completionCandidate,
         state.priorityCandidateCompletion
       );
+
+    priorityCompletionTelemetry
+      .relevanceExpiryV140 =
+      relevanceExpiryV140;
 
     priorityCompletionTelemetry.symbol =
       completionCandidate.symbol ||
@@ -20477,6 +20696,14 @@ async function scan(
     ) {
       priorityCompletionTelemetry.blockers = [
         terminalReject.reason
+      ];
+    }
+
+    else if (
+      relevanceExpiryV140.expired
+    ) {
+      priorityCompletionTelemetry.blockers = [
+        relevanceExpiryV140.reason
       ];
     }
 
@@ -21155,7 +21382,7 @@ async function scan(
     status,
 
     scanMode:
-      "V139_CORE_RETRY_FAIRNESS_HUNTER",
+      "V140_CORE_RETRY_RELEVANCE_EXPIRY_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -21772,7 +21999,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V139_RETRY_FAIRNESS_DIRECTIONAL_USD_HUNTER",
+        "V140_RETRY_RELEVANCE_EXPIRY_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -22999,12 +23226,54 @@ async function scan(
       telegramThresholdsUnchangedV139:
         "ENABLED_V139",
 
+      priorityRetryRelevanceExpiry:
+        "ENABLED_V140",
+
+      priorityRetryRelevanceMinimumAgeMsV140:
+        PRIORITY_RELEVANCE_MIN_AGE_MS_V140,
+
+      priorityRetryRelevanceMaxVolume24hUsdV140:
+        PRIORITY_RELEVANCE_MAX_VOLUME_24H_USD_V140,
+
+      priorityRetryRelevanceMaxTransactions24hV140:
+        PRIORITY_RELEVANCE_MAX_TXNS_24H_V140,
+
+      providerOutageAloneNeverExpiresPriorityV140:
+        "ENABLED_V140",
+
+      relevanceExpiryOnlyLeavesPriorityLaneV140:
+        "ENABLED_V140",
+
+      retryFairnessUnchangedV140:
+        "ENABLED_V140",
+
+      transientRetryPersistenceUnchangedV140:
+        "ENABLED_V140",
+
+      localPriorityHandoffUnchangedV140:
+        "ENABLED_V140",
+
+      organicHolderBreadthUnchangedV140:
+        "ENABLED_V140",
+
+      blockscoutOutageResilienceUnchangedV140:
+        "ENABLED_V140",
+
+      rollingDirectionalUsdUnchangedV140:
+        "ENABLED_V140",
+
+      externalRequestRateUnchangedV140:
+        "ENABLED_V140",
+
+      telegramThresholdsUnchangedV140:
+        "ENABLED_V140",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V139_CORE_RETRY_FAIRNESS_V77_TELEGRAM_HUNTER",
+      "V140_CORE_RETRY_RELEVANCE_EXPIRY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -23320,7 +23589,7 @@ async function health(
     },
 
     architecture:
-      "V139_CORE_RETRY_FAIRNESS_V77_TELEGRAM_HUNTER",
+      "V140_CORE_RETRY_RELEVANCE_EXPIRY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -23719,7 +23988,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V139_CORE_RETRY_FAIRNESS_V77_TELEGRAM_HUNTER",
+      "V140_CORE_RETRY_RELEVANCE_EXPIRY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -24148,7 +24417,7 @@ export default {
             ),
 
           architecture:
-            "V139_CORE_RETRY_FAIRNESS_V77_TELEGRAM_HUNTER",
+            "V140_CORE_RETRY_RELEVANCE_EXPIRY_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
