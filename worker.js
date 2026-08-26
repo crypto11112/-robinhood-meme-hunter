@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V145
+ * V146
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -387,8 +387,22 @@
  * - NEW: response telemetry exposes PRO cooldown/failure/recovery state
  * - Public Blockscout remains primary; verified holder cache remains available
  * - Alert thresholds, scoring and holder safety gates are unchanged
+
+ *
+ * V146:
+ * - Preserves V145 persistent 502/503/504 PRO outage protection
+ * - Preserves V144 exact holder-provider telemetry
+ * - NEW: HTTP 404 is classified separately from provider outage
+ * - NEW: 404 does NOT claim the token is unindexed; it is treated as
+ *   holder data currently unavailable from the PRO route
+ * - NEW: address-scoped 5-minute retry delay prevents repeated PRO 404 calls
+ * - NEW: public Blockscout routes remain first and are still checked normally
+ * - NEW: verified stale holder cache remains usable during a 404 retry delay
+ * - NEW: later successful PRO response automatically clears the token 404 delay
+ * - NEW: response telemetry exposes 404 retry state without changing safety gates
+ * - Telegram thresholds, scoring, request cap and holder evidence rules unchanged
 */
-const VERSION = "V145";
+const VERSION = "V146";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -455,6 +469,9 @@ const BLOCKSCOUT_PRO_CHAIN_ID =
 
 const BLOCKSCOUT_PRO_OUTAGE_COOLDOWN_MS_V145 =
   10 * 60 * 1000;
+
+const BLOCKSCOUT_PRO_404_RETRY_MS_V146 =
+  5 * 60 * 1000;
 
 const POOL_MANAGER =
   "0x8366a39cc670b4001a1121b8f6a443a643e40951";
@@ -12071,11 +12088,110 @@ function blockscoutProOutageTelemetryV145(
   };
 }
 
+
+function blockscoutPro404RetryV146(
+  watched
+) {
+  const raw =
+    watched?.blockscoutPro404RetryV146;
+
+  if (
+    !raw ||
+    typeof raw !==
+      "object"
+  ) {
+    return {
+      active:
+        false,
+      retryUntil:
+        null,
+      retryAfterMs:
+        0,
+      last404At:
+        null,
+      total404s:
+        0
+    };
+  }
+
+  const retryUntil =
+    safeNumber(
+      raw.retryUntil
+    ) || null;
+
+  const now =
+    Date.now();
+
+  return {
+    active:
+      Boolean(
+        retryUntil &&
+        retryUntil > now
+      ),
+    retryUntil,
+    retryAfterMs:
+      retryUntil &&
+      retryUntil > now
+        ? retryUntil - now
+        : 0,
+    last404At:
+      safeNumber(
+        raw.last404At
+      ) || null,
+    total404s:
+      safeNumber(
+        raw.total404s
+      )
+  };
+}
+
+function setBlockscoutPro404RetryV146(
+  watched
+) {
+  if (!watched) {
+    return null;
+  }
+
+  const previous =
+    blockscoutPro404RetryV146(
+      watched
+    );
+
+  const now =
+    Date.now();
+
+  watched.blockscoutPro404RetryV146 = {
+    retryUntil:
+      now +
+      BLOCKSCOUT_PRO_404_RETRY_MS_V146,
+    last404At:
+      now,
+    total404s:
+      previous.total404s + 1
+  };
+
+  return blockscoutPro404RetryV146(
+    watched
+  );
+}
+
+function clearBlockscoutPro404RetryV146(
+  watched
+) {
+  if (
+    watched &&
+    watched.blockscoutPro404RetryV146
+  ) {
+    delete watched.blockscoutPro404RetryV146;
+  }
+}
+
 async function blockscoutProHoldersV143(
   token,
   budget,
   env,
-  state
+  state,
+  watched
 ) {
   const apiKey =
     String(
@@ -12122,6 +12238,30 @@ async function blockscoutProHoldersV143(
       retryAfterMs:
         existingCooldownUntilV145 -
         Date.now(),
+      data: null
+    };
+  }
+
+  const token404RetryV146 =
+    blockscoutPro404RetryV146(
+      watched
+    );
+
+  if (
+    token404RetryV146.active
+  ) {
+    return {
+      configured: true,
+      attempted: false,
+      success: false,
+      status:
+        "BLOCKSCOUT_PRO_404_RETRY_DELAY_V146",
+      http404V146:
+        true,
+      retryUntilV146:
+        token404RetryV146.retryUntil,
+      retryAfterMs:
+        token404RetryV146.retryAfterMs,
       data: null
     };
   }
@@ -12174,11 +12314,27 @@ async function blockscoutProHoldersV143(
         response.status === 503 ||
         response.status === 504;
 
+      const http404V146 =
+        response.status ===
+        404;
+
       proServiceV145.lastStatus =
         status;
 
       proServiceV145.lastFailureAt =
         Date.now();
+
+      let token404StateV146 =
+        null;
+
+      if (
+        http404V146
+      ) {
+        token404StateV146 =
+          setBlockscoutPro404RetryV146(
+            watched
+          );
+      }
 
       if (
         transientOutageV145
@@ -12202,12 +12358,26 @@ async function blockscoutProHoldersV143(
         configured: true,
         attempted: true,
         success: false,
-        status,
+        status:
+          http404V146
+            ? "BLOCKSCOUT_PRO_HOLDER_DATA_UNAVAILABLE_404_V146"
+            : status,
+        httpStatus:
+          response.status,
+        http404V146,
         transientOutageV145,
         cooldownUntil:
           safeNumber(
             proServiceV145.cooldownUntil
           ) || null,
+        retryUntilV146:
+          token404StateV146
+            ?.retryUntil ||
+          null,
+        retryAfterMs:
+          token404StateV146
+            ?.retryAfterMs ||
+          0,
         data: null
       };
     }
@@ -12230,6 +12400,10 @@ async function blockscoutProHoldersV143(
         data: null
       };
     }
+
+    clearBlockscoutPro404RetryV146(
+      watched
+    );
 
     proServiceV145.lastStatus =
       "VERIFIED_RESPONSE";
@@ -13339,7 +13513,8 @@ async function holderIntelligence(
         token,
         budget,
         env,
-        state
+        state,
+        watched
       );
 
     blockscoutProHolderFallbackV143 = {
@@ -13361,7 +13536,18 @@ async function holderIntelligence(
       retryAfterMs:
         safeNumber(
           proResult.retryAfterMs
-        )
+        ),
+      http404V146:
+        Boolean(
+          proResult.http404V146
+        ),
+      httpStatus:
+        safeNumber(
+          proResult.httpStatus
+        ) || null,
+      retryUntilV146:
+        proResult.retryUntilV146 ??
+        null
     };
 
     if (
@@ -21521,6 +21707,33 @@ async function scan(
           candidate?.holders
             ?.blockscoutProHolderFallbackV143
             ?.cooldownUntil ||
+          null,
+        proHttp404V146:
+          Boolean(
+            candidate?.holders
+              ?.blockscoutProHolderFallbackV143
+              ?.http404V146
+          ),
+        proHttpStatusV146:
+          candidate?.holders
+            ?.blockscoutProHolderFallbackV143
+            ?.httpStatus ||
+          null,
+        pro404RetryUntilV146:
+          candidate?.holders
+            ?.blockscoutProHolderFallbackV143
+            ?.retryUntilV146 ||
+          blockscoutPro404RetryV146(
+            state.watchedTokens?.find(
+              watched =>
+                normalize(
+                  watched?.address
+                ) ===
+                normalize(
+                  candidate?.address
+                )
+            )
+          ).retryUntil ||
           null
       })
     );
@@ -22317,7 +22530,7 @@ async function scan(
     status,
 
     scanMode:
-      "V145_CORE_BLOCKSCOUT_PRO_OUTAGE_PROTECTION_HUNTER",
+      "V146_CORE_BLOCKSCOUT_PRO_404_RETRY_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -22934,7 +23147,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V145_BLOCKSCOUT_PRO_OUTAGE_PROTECTION_DIRECTIONAL_USD_HUNTER",
+        "V146_BLOCKSCOUT_PRO_404_RETRY_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -23170,6 +23383,45 @@ async function scan(
     preAnalysisTerminalPruningV142,
 
     holderProviderTelemetryV144,
+
+    blockscoutPro404RetryProtectionV146: {
+      enabled:
+        true,
+      retryMs:
+        BLOCKSCOUT_PRO_404_RETRY_MS_V146,
+      classification:
+        "HOLDER_DATA_CURRENTLY_UNAVAILABLE",
+      doesNotAssumeIndexingCause:
+        true,
+      addressScoped:
+        true,
+      publicBlockscoutStillCheckedFirst:
+        true,
+      activeRetries:
+        state.watchedTokens
+          .map(
+            watched => ({
+              address:
+                normalize(
+                  watched?.address
+                ),
+              symbol:
+                watched?.symbol ||
+                null,
+              ...blockscoutPro404RetryV146(
+                watched
+              )
+            })
+          )
+          .filter(
+            row =>
+              row.active
+          )
+          .slice(
+            0,
+            10
+          )
+    },
 
     blockscoutProOutageProtectionV145: {
       enabled:
@@ -24455,12 +24707,63 @@ async function scan(
       telegramThresholdsUnchangedV145:
         "ENABLED_V145",
 
+      blockscoutPro404Classification:
+        "ENABLED_V146",
+
+      blockscoutPro404ClassificationV146:
+        "HOLDER_DATA_CURRENTLY_UNAVAILABLE",
+
+      blockscoutPro404CauseNotAssumedV146:
+        "ENABLED_V146",
+
+      blockscoutPro404RetryMsV146:
+        BLOCKSCOUT_PRO_404_RETRY_MS_V146,
+
+      addressScopedPro404RetryV146:
+        "ENABLED_V146",
+
+      pro404RetrySkipsAnalysisRequestV146:
+        "ENABLED_V146",
+
+      proSuccessClears404RetryV146:
+        "ENABLED_V146",
+
+      publicBlockscoutPriorityUnchangedV146:
+        "ENABLED_V146",
+
+      blockscoutProOutageProtectionUnchangedV146:
+        "ENABLED_V146",
+
+      holderProviderTelemetryUnchangedV146:
+        "ENABLED_V146",
+
+      telegramHolderWordingUnchangedV146:
+        "ENABLED_V146",
+
+      preAnalysisTerminalPruningUnchangedV146:
+        "ENABLED_V146",
+
+      excludedTargetHandoffUnchangedV146:
+        "ENABLED_V146",
+
+      retryFairnessUnchangedV146:
+        "ENABLED_V146",
+
+      rollingDirectionalUsdUnchangedV146:
+        "ENABLED_V146",
+
+      externalRequestRateUnchangedV146:
+        "ENABLED_V146",
+
+      telegramThresholdsUnchangedV146:
+        "ENABLED_V146",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V145_CORE_BLOCKSCOUT_PRO_OUTAGE_PROTECTION_V77_TELEGRAM_HUNTER",
+      "V146_CORE_BLOCKSCOUT_PRO_404_RETRY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -24776,7 +25079,7 @@ async function health(
     },
 
     architecture:
-      "V145_CORE_BLOCKSCOUT_PRO_OUTAGE_PROTECTION_V77_TELEGRAM_HUNTER",
+      "V146_CORE_BLOCKSCOUT_PRO_404_RETRY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -25175,7 +25478,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V145_CORE_BLOCKSCOUT_PRO_OUTAGE_PROTECTION_V77_TELEGRAM_HUNTER",
+      "V146_CORE_BLOCKSCOUT_PRO_404_RETRY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -25604,7 +25907,7 @@ export default {
             ),
 
           architecture:
-            "V145_CORE_BLOCKSCOUT_PRO_OUTAGE_PROTECTION_V77_TELEGRAM_HUNTER",
+            "V146_CORE_BLOCKSCOUT_PRO_404_RETRY_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
