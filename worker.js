@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V123
+ * V124
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -87,8 +87,21 @@
  * - FIX: reuses tokenizedSecurityReason(name, symbol)
  * - FIX: known quote/infrastructure metadata is excluded pre-market
  * - Preserves V121/V120/V119/V118 functionality and Telegram thresholds
+
+ *
+ * V124:
+ * - Preserves full V123 capability set
+ * - FIX: every fresh-market candidate is screened for cached terminal holder risk
+ *        before ranking, not only carried priority candidates
+ * - FIX: HIGH concentration / extreme top1 cached candidates cannot enter the
+ *        fresh-market priority pool
+ * - NEW: verified cached market data is explicitly preferred over unnecessary
+ *        repeat external lookups while provider cooldowns are active
+ * - NEW: fresh-market telemetry exposes terminal-pruned ranking candidates
+ * - Preserves DexScreener cooldown spacing; does not increase external request rate
+ * - Preserves all Telegram thresholds unchanged
 */
-const VERSION = "V123";
+const VERSION = "V124";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -15046,14 +15059,54 @@ function preMarketExcludedToken(
 function preMarketCandidateAllowed(
   token
 ) {
+  const terminal =
+    terminalPriorityRejectFromWatched(
+      token
+    );
+
   return (
     marketFreshCandidateAllowed(
       token
     ) &&
     !preMarketExcludedToken(
       token
-    ).excluded
+    ).excluded &&
+    !terminal.terminal
   );
+}
+
+
+function verifiedUsableMarketCache(
+  token
+) {
+  const cache =
+    token?.marketCache;
+
+  const data =
+    cache?.data;
+
+  if (
+    !data ||
+    data.verified !==
+      true
+  ) {
+    return false;
+  }
+
+  if (
+    safeNumber(
+      data.liquidityUsd
+    ) <=
+      0 ||
+    safeNumber(
+      data.priceUsd
+    ) <=
+      0
+  ) {
+    return false;
+  }
+
+  return true;
 }
 
 function marketFreshPriorityScore(
@@ -15132,7 +15185,16 @@ function marketFreshPriorityScore(
   }
   else {
     score -=
-      120;
+      160;
+  }
+
+  if (
+    verifiedUsableMarketCache(
+      token
+    )
+  ) {
+    score -=
+      40;
   }
 
   /*
@@ -16794,7 +16856,7 @@ async function scan(
     status,
 
     scanMode:
-      "V123_CORE_PREMARKET_EXCLUSION_FIX_HUNTER",
+      "V124_CORE_TERMINAL_RANKING_CACHE_RESILIENCE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -17383,7 +17445,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V121_UNVERIFIED_MARKET_FIRST_WITH_MATURE_DEMOTION",
+        "V124_TERMINAL_PRUNED_UNVERIFIED_MARKET_FIRST",
 
       selectedAddress:
         marketFreshTargetAddress ||
@@ -17423,6 +17485,11 @@ async function scan(
                   ?.verified ===
                 true,
 
+              usableVerifiedMarketCache:
+                verifiedUsableMarketCache(
+                  row.token
+                ),
+
               concentrationRisk:
                 row.token
                   ?.holderCache
@@ -17431,6 +17498,52 @@ async function scan(
                   ?.concentrationRisk ||
                 "UNVERIFIED"
             })
+          ),
+
+      terminalPruned:
+        selected
+          .filter(
+            token =>
+              terminalPriorityRejectFromWatched(
+                token
+              ).terminal
+          )
+          .slice(
+            0,
+            10
+          )
+          .map(
+            token => {
+              const terminal =
+                terminalPriorityRejectFromWatched(
+                  token
+                );
+
+              return {
+                address:
+                  normalize(
+                    token.address
+                  ),
+
+                symbol:
+                  token
+                    ?.metadata
+                    ?.symbol ||
+                  null,
+
+                reason:
+                  terminal.reason ||
+                  null,
+
+                top1Percent:
+                  terminal.top1Percent ??
+                  null,
+
+                concentrationRisk:
+                  terminal.concentrationRisk ||
+                  null
+              };
+            }
           )
     },
 
@@ -17941,12 +18054,30 @@ async function scan(
       telegramThresholdsUnchangedV123:
         "ENABLED_V123",
 
+      freshMarketTerminalRiskFilter:
+        "ENABLED_V124",
+
+      highConcentrationRankingPrune:
+        "ENABLED_V124",
+
+      extremeTop1RankingPrune:
+        "ENABLED_V124",
+
+      verifiedMarketCachePreference:
+        "ENABLED_V124",
+
+      externalRequestRateUnchanged:
+        "ENABLED_V124",
+
+      telegramThresholdsUnchangedV124:
+        "ENABLED_V124",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V123_CORE_PREMARKET_EXCLUSION_FIX_V77_TELEGRAM_HUNTER",
+      "V124_CORE_TERMINAL_RANKING_CACHE_RESILIENCE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -18262,7 +18393,7 @@ async function health(
     },
 
     architecture:
-      "V123_CORE_PREMARKET_EXCLUSION_FIX_V77_TELEGRAM_HUNTER",
+      "V124_CORE_TERMINAL_RANKING_CACHE_RESILIENCE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -18661,7 +18792,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V123_CORE_PREMARKET_EXCLUSION_FIX_V77_TELEGRAM_HUNTER",
+      "V124_CORE_TERMINAL_RANKING_CACHE_RESILIENCE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -19090,7 +19221,7 @@ export default {
             ),
 
           architecture:
-            "V123_CORE_PREMARKET_EXCLUSION_FIX_V77_TELEGRAM_HUNTER",
+            "V124_CORE_TERMINAL_RANKING_CACHE_RESILIENCE_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
