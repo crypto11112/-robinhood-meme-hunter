@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V130
+ * V131
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -179,8 +179,21 @@
  * - Does NOT increase Gecko/Dex request frequency or loosen Telegram thresholds
  * - Preserves V129 concentration-basis guards, V128 LP exclusion,
  *   V127 API guards/reselection, exact KV key, /sendPhoto and all safety gates
+
+ *
+ * V131:
+ * - Preserves the full V130 rolling directional USD ledger unchanged
+ * - NEW: persists ownershipSupply/infrastructureBalanceSum in holder snapshots
+ * - NEW: detects material circulating-ownership denominator changes
+ * - NEW: concentration trend is NOT_VERIFIED when a material denominator move
+ *   could explain the percentage change and tracked wallets do not confirm it
+ * - NEW: exposes ownershipSupplyChangePercent and denominator reset reason
+ * - Prevents liquidity/PoolManager supply movement from looking like whale
+ *   accumulation or distribution
+ * - Does NOT increase Gecko/Dex request frequency
+ * - Does NOT loosen Telegram thresholds or any existing safety gates
 */
-const VERSION = "V130";
+const VERSION = "V131";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -227,6 +240,14 @@ const DIRECTIONAL_LEDGER_MAX_TRADES =
 
 const DIRECTIONAL_LEDGER_MAX_POOLS =
   2;
+
+/*
+ * V131: if the circulating ownership denominator moves by this much between
+ * comparable snapshots, concentration percentage direction must also be
+ * supported by actual tracked-wallet balance movement.
+ */
+const MATERIAL_OWNERSHIP_SUPPLY_CHANGE_PERCENT =
+  10;
 
 const BLOCKSCOUT =
   "https://robinhoodchain.blockscout.com";
@@ -13516,6 +13537,35 @@ function createSnapshot(
             .top10Percent
         : null,
 
+    ownershipSupply:
+      concentrationVerified &&
+      candidate.holders
+        ?.integrity
+        ?.ownershipSupply
+        ? String(
+            candidate.holders
+              .integrity
+              .ownershipSupply
+          )
+        : null,
+
+    infrastructureBalanceSum:
+      concentrationVerified &&
+      candidate.holders
+        ?.integrity
+        ?.infrastructureBalanceSum !==
+          null &&
+      candidate.holders
+        ?.integrity
+        ?.infrastructureBalanceSum !==
+          undefined
+        ? String(
+            candidate.holders
+              .integrity
+              .infrastructureBalanceSum
+          )
+        : null,
+
     whaleBalances:
       concentrationVerified
         ? (
@@ -13963,6 +14013,216 @@ function momentumAnalysis(
    WHALE FLOW + CONCENTRATION TREND
    ========================================================= */
 
+function ownershipDenominatorComparison(
+  previous,
+  holders,
+  concentrationChange,
+  increasing,
+  decreasing
+) {
+  const previousRaw =
+    previous
+      ?.ownershipSupply;
+
+  const currentRaw =
+    holders
+      ?.integrity
+      ?.ownershipSupply;
+
+  if (
+    previousRaw ===
+      null ||
+    previousRaw ===
+      undefined
+  ) {
+    return {
+      verified:
+        false,
+
+      materialChange:
+        false,
+
+      changePercent:
+        null,
+
+      walletDirectionConfirmed:
+        false,
+
+      reason:
+        "PREVIOUS_OWNERSHIP_SUPPLY_UNAVAILABLE"
+    };
+  }
+
+  if (
+    currentRaw ===
+      null ||
+    currentRaw ===
+      undefined
+  ) {
+    return {
+      verified:
+        false,
+
+      materialChange:
+        false,
+
+      changePercent:
+        null,
+
+      walletDirectionConfirmed:
+        false,
+
+      reason:
+        "CURRENT_OWNERSHIP_SUPPLY_UNAVAILABLE"
+    };
+  }
+
+  let previousSupply;
+  let currentSupply;
+
+  try {
+    previousSupply =
+      BigInt(
+        String(
+          previousRaw
+        )
+      );
+
+    currentSupply =
+      BigInt(
+        String(
+          currentRaw
+        )
+      );
+  }
+
+  catch {
+    return {
+      verified:
+        false,
+
+      materialChange:
+        false,
+
+      changePercent:
+        null,
+
+      walletDirectionConfirmed:
+        false,
+
+      reason:
+        "OWNERSHIP_SUPPLY_PARSE_FAILED"
+    };
+  }
+
+  if (
+    previousSupply <=
+      0n ||
+    currentSupply <=
+      0n
+  ) {
+    return {
+      verified:
+        false,
+
+      materialChange:
+        false,
+
+      changePercent:
+        null,
+
+      walletDirectionConfirmed:
+        false,
+
+      reason:
+        "OWNERSHIP_SUPPLY_NON_POSITIVE"
+    };
+  }
+
+  /*
+   * Integer basis-points calculation avoids lossy BigInt -> Number conversion
+   * on ERC-20 supply-sized values.
+   */
+  const delta =
+    currentSupply -
+    previousSupply;
+
+  const absDelta =
+    delta < 0n
+      ? -delta
+      : delta;
+
+  const basisPoints =
+    Number(
+      (
+        absDelta *
+        10000n
+      ) /
+      previousSupply
+    );
+
+  const changePercent =
+    basisPoints /
+    100;
+
+  const materialChange =
+    changePercent >=
+      MATERIAL_OWNERSHIP_SUPPLY_CHANGE_PERCENT;
+
+  let walletDirectionConfirmed =
+    false;
+
+  if (
+    Number.isFinite(
+      concentrationChange
+    )
+  ) {
+    if (
+      concentrationChange >
+        1
+    ) {
+      walletDirectionConfirmed =
+        increasing >
+          decreasing &&
+        increasing >
+          0;
+    }
+
+    else if (
+      concentrationChange <
+        -1
+    ) {
+      walletDirectionConfirmed =
+        decreasing >
+          increasing &&
+        decreasing >
+          0;
+    }
+
+    else {
+      walletDirectionConfirmed =
+        true;
+    }
+  }
+
+  return {
+    verified:
+      true,
+
+    materialChange,
+
+    changePercent,
+
+    walletDirectionConfirmed,
+
+    reason:
+      materialChange &&
+      !walletDirectionConfirmed
+        ? "MATERIAL_OWNERSHIP_DENOMINATOR_CHANGE_UNCONFIRMED_BY_WALLETS"
+        : null
+  };
+}
+
 function analyseWhaleFlow(
   previous,
   holders
@@ -14005,6 +14265,15 @@ function analyseWhaleFlow(
         holderOwnershipBasisSignature(
           holders
         ),
+
+      ownershipSupplyChangePercent:
+        null,
+
+      ownershipDenominatorMaterialChange:
+        false,
+
+      ownershipDenominatorWalletConfirmed:
+        false,
 
       trackedWallets:
         0,
@@ -14230,35 +14499,88 @@ function analyseWhaleFlow(
       concentrationTrend =
         "STABLE";
     }
+  }
 
-    if (
-      concentrationChange >=
-        2 &&
-      newTop10 <
-        70 &&
-      increasing >
-        decreasing &&
-      increasing >
-        0
-    ) {
-      score +=
-        10;
+  const denominatorComparison =
+    ownershipDenominatorComparison(
+      previous,
+      holders,
+      concentrationChange,
+      increasing,
+      decreasing
+    );
 
-      reasons.push(
-        "Top-holder concentration increasing with tracked-wallet accumulation"
-      );
-    }
+  /*
+   * V131: the methodology/address-set can be identical while the amount
+   * excluded as infrastructure moves sharply. That changes ownershipSupply
+   * and can mechanically move top-10 percentages without any whale buying
+   * or selling. Never label that as a verified trend without wallet support.
+   */
+  if (
+    concentrationComparison
+      .comparable &&
+    concentrationTrend !==
+      "NOT_VERIFIED" &&
+    (
+      !denominatorComparison
+        .verified ||
+      (
+        denominatorComparison
+          .materialChange &&
+        !denominatorComparison
+          .walletDirectionConfirmed
+      )
+    )
+  ) {
+    concentrationTrend =
+      "NOT_VERIFIED";
 
-    else if (
-      concentrationChange >=
-        2 &&
-      newTop10 <
-        70
-    ) {
-      reasons.push(
-        "Concentration increased without tracked-wallet accumulation confirmation"
-      );
-    }
+    concentrationChange =
+      null;
+  }
+
+  if (
+    concentrationTrend ===
+      "INCREASING" &&
+    concentrationChange >=
+      2 &&
+    newTop10 <
+      70 &&
+    increasing >
+      decreasing &&
+    increasing >
+      0
+  ) {
+    score +=
+      10;
+
+    reasons.push(
+      "Top-holder concentration increasing with tracked-wallet accumulation"
+    );
+  }
+
+  else if (
+    concentrationTrend ===
+      "INCREASING" &&
+    concentrationChange >=
+      2 &&
+    newTop10 <
+      70
+  ) {
+    reasons.push(
+      "Concentration increased without tracked-wallet accumulation confirmation"
+    );
+  }
+
+  if (
+    denominatorComparison
+      .materialChange &&
+    !denominatorComparison
+      .walletDirectionConfirmed
+  ) {
+    reasons.push(
+      "Material ownership-supply denominator change; concentration trend reset"
+    );
   }
 
   /*
@@ -14307,19 +14629,40 @@ function analyseWhaleFlow(
 
     concentrationTrendComparable:
       concentrationComparison
-        .comparable,
+        .comparable &&
+      concentrationTrend !==
+        "NOT_VERIFIED",
 
     concentrationTrendResetReason:
-      concentrationComparison
+      !concentrationComparison
         .comparable
-        ? null
-        : concentrationComparison
-            .reason,
+        ? concentrationComparison
+            .reason
+        : (
+            concentrationTrend ===
+              "NOT_VERIFIED"
+              ? denominatorComparison
+                  .reason ||
+                "OWNERSHIP_DENOMINATOR_COMPARISON_UNAVAILABLE"
+              : null
+          ),
 
     ownershipBasisSignature:
       holderOwnershipBasisSignature(
         holders
       ),
+
+    ownershipSupplyChangePercent:
+      denominatorComparison
+        .changePercent,
+
+    ownershipDenominatorMaterialChange:
+      denominatorComparison
+        .materialChange,
+
+    ownershipDenominatorWalletConfirmed:
+      denominatorComparison
+        .walletDirectionConfirmed,
 
     trackedWallets:
       comparable,
@@ -19763,7 +20106,7 @@ async function scan(
     status,
 
     scanMode:
-      "V130_CORE_ROLLING_DIRECTIONAL_USD_HUNTER",
+      "V131_CORE_OWNERSHIP_DENOMINATOR_GUARD_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -20380,7 +20723,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V130_ROLLING_DIRECTIONAL_USD_CONTINUITY_HUNTER",
+        "V131_OWNERSHIP_DENOMINATOR_GUARD_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -21204,12 +21547,36 @@ async function scan(
       telegramThresholdsUnchangedV130:
         "ENABLED_V130",
 
+      ownershipSupplySnapshotPersistence:
+        "ENABLED_V131",
+
+      materialOwnershipDenominatorGuard:
+        "ENABLED_V131",
+
+      materialOwnershipSupplyChangePercent:
+        MATERIAL_OWNERSHIP_SUPPLY_CHANGE_PERCENT,
+
+      denominatorChangeWalletConfirmation:
+        "ENABLED_V131",
+
+      falseConcentrationTrendDenominatorProtection:
+        "ENABLED_V131",
+
+      rollingDirectionalUsdUnchangedV131:
+        "ENABLED_V131",
+
+      externalRequestRateUnchangedV131:
+        "ENABLED_V131",
+
+      telegramThresholdsUnchangedV131:
+        "ENABLED_V131",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V130_CORE_ROLLING_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
+      "V131_CORE_OWNERSHIP_DENOMINATOR_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -21525,7 +21892,7 @@ async function health(
     },
 
     architecture:
-      "V130_CORE_ROLLING_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
+      "V131_CORE_OWNERSHIP_DENOMINATOR_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -21924,7 +22291,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V130_CORE_ROLLING_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
+      "V131_CORE_OWNERSHIP_DENOMINATOR_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -22353,7 +22720,7 @@ export default {
             ),
 
           architecture:
-            "V130_CORE_ROLLING_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
+            "V131_CORE_OWNERSHIP_DENOMINATOR_GUARD_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
