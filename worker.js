@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V133
+ * V134
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -221,8 +221,25 @@
  * - Does NOT increase the 42-request hard budget
  * - Does NOT increase provider/API request frequency
  * - Does NOT loosen Telegram thresholds or safety gates
+
+ *
+ * V134:
+ * - Preserves V133 top-candidate-first completion
+ * - Preserves V132 dynamic unknown-pool analysis reserve
+ * - Preserves V131 ownership-denominator guard
+ * - Preserves V130 rolling directional USD ledger
+ * - NEW: same-run Blockscout holder-outage circuit breaker
+ * - The priority/top candidate always gets the first real holder attempt
+ * - If both V2 and legacy holder sources fail for that candidate, lower-
+ *   priority candidates stop hammering the same unavailable holder service
+ * - Lower-priority candidates reuse fresh/stale verified holder cache when
+ *   available; otherwise holder evidence remains explicitly UNVERIFIED
+ * - No stale/unverified holder evidence can create a Telegram qualification
+ * - Adds Blockscout holder-outage telemetry
+ * - Does NOT increase provider/API request frequency
+ * - Does NOT loosen Telegram thresholds or safety gates
 */
-const VERSION = "V133";
+const VERSION = "V134";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -12506,7 +12523,8 @@ async function holderIntelligence(
   totalSupply,
   budget,
   watched,
-  market = null
+  market = null,
+  priorityCompletion = false
 ) {
   if (
     !totalSupply
@@ -12567,6 +12585,83 @@ async function holderIntelligence(
   }
 
   /*
+   * V134 same-run outage circuit breaker.
+   *
+   * V133 guarantees the priority candidate is analysed first. If that first
+   * candidate proves both Blockscout holder routes unavailable, do not spend
+   * more analysis requests repeating the same holder calls on lower-ranked
+   * candidates in the same scan.
+   *
+   * Safety rule: stale holder data can preserve previously VERIFIED evidence,
+   * but missing evidence never becomes healthy/verified evidence.
+   */
+  if (
+    budget
+      ?.blockscoutHolderOutage
+      ?.active ===
+      true &&
+    !priorityCompletion
+  ) {
+    const staleHolderCache =
+      cachedHolderIntelligence(
+        watched,
+        HOLDER_STALE_CACHE_MS
+      );
+
+    if (
+      staleHolderCache
+    ) {
+      budget
+        .blockscoutHolderOutage
+        .lowerPriorityCacheFallbacks =
+        safeNumber(
+          budget
+            .blockscoutHolderOutage
+            .lowerPriorityCacheFallbacks
+        ) +
+        1;
+
+      return {
+        ...staleHolderCache,
+
+        holderSource:
+          "STALE_CACHE_BLOCKSCOUT_RUN_OUTAGE",
+
+        blockscoutUnavailable:
+          true,
+
+        blockscoutRunCircuitBreaker:
+          true
+      };
+    }
+
+    budget
+      .blockscoutHolderOutage
+      .lowerPriorityFreshRequestsSuppressed =
+      safeNumber(
+        budget
+          .blockscoutHolderOutage
+          .lowerPriorityFreshRequestsSuppressed
+      ) +
+      1;
+
+    return {
+      ...unverifiedHolders(
+        "BLOCKSCOUT_HOLDER_OUTAGE_DEFERRED"
+      ),
+
+      blockscoutUnavailable:
+        true,
+
+      blockscoutRunCircuitBreaker:
+        true,
+
+      holderSource:
+        "BLOCKSCOUT_OUTAGE_DEFERRED"
+    };
+  }
+
+  /*
    * V89 request order:
    * 1. holder rows (needed for concentration)
    * 2. token details (usually enough for counters)
@@ -12579,6 +12674,12 @@ async function holderIntelligence(
   let holders =
     null;
 
+  let v2HolderRowsUnavailable =
+    false;
+
+  let legacyHolderRowsUnavailable =
+    false;
+
   if (
     budgetAvailable(
       budget,
@@ -12589,6 +12690,12 @@ async function holderIntelligence(
       await blockscout(
         `/api/v2/tokens/${token}/holders`,
         budget
+      );
+
+    v2HolderRowsUnavailable =
+      !holders ||
+      !Array.isArray(
+        holders.items
       );
   }
 
@@ -12700,7 +12807,65 @@ async function holderIntelligence(
     ) {
       holders =
         legacyHolders;
+
+      legacyHolderRowsUnavailable =
+        false;
     }
+
+    else {
+      legacyHolderRowsUnavailable =
+        true;
+    }
+  }
+
+  /*
+   * V134: only open the same-run circuit after BOTH holder-row paths have
+   * failed. Token-details/counters may still be healthy and are not treated
+   * as proof that holder concentration is available.
+   */
+  if (
+    v2HolderRowsUnavailable &&
+    legacyHolderRowsUnavailable
+  ) {
+    if (
+      !budget.blockscoutHolderOutage ||
+      typeof budget.blockscoutHolderOutage !==
+        "object"
+    ) {
+      budget.blockscoutHolderOutage = {
+        active:
+          false,
+
+        detectedAt:
+          null,
+
+        detectedToken:
+          null,
+
+        lowerPriorityFreshRequestsSuppressed:
+          0,
+
+        lowerPriorityCacheFallbacks:
+          0
+      };
+    }
+
+    budget
+      .blockscoutHolderOutage
+      .active =
+      true;
+
+    budget
+      .blockscoutHolderOutage
+      .detectedAt =
+      Date.now();
+
+    budget
+      .blockscoutHolderOutage
+      .detectedToken =
+      normalize(
+        token
+      );
   }
 
   const holderCount =
@@ -15212,6 +15377,7 @@ function scoreRisk(
       !holders.integrity.verified &&
       ![
         "BLOCKSCOUT_HOLDERS_UNAVAILABLE",
+        "BLOCKSCOUT_HOLDER_OUTAGE_DEFERRED",
         "NO_HOLDER_ROWS"
       ].includes(
         holders.integrity.status
@@ -17439,7 +17605,10 @@ async function analyzeToken(
         validation.totalSupply,
         budget,
         watched,
-        market
+        market,
+        Boolean(
+          options?.priorityCompletion
+        )
       );
   }
 
@@ -20395,7 +20564,7 @@ async function scan(
     status,
 
     scanMode:
-      "V133_CORE_TOP_CANDIDATE_COMPLETION_HUNTER",
+      "V134_CORE_BLOCKSCOUT_OUTAGE_RESILIENCE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -21012,7 +21181,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V133_TOP_CANDIDATE_COMPLETION_DIRECTIONAL_USD_HUNTER",
+        "V134_BLOCKSCOUT_RESILIENT_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -21159,6 +21328,43 @@ async function scan(
 
       lowerPriorityProtected:
         topCandidateAnalysisDeferred
+    },
+
+    blockscoutHolderOutageProtection: {
+      enabled:
+        true,
+
+      active:
+        budget
+          ?.blockscoutHolderOutage
+          ?.active ===
+        true,
+
+      detectedAt:
+        budget
+          ?.blockscoutHolderOutage
+          ?.detectedAt ||
+        null,
+
+      detectedToken:
+        budget
+          ?.blockscoutHolderOutage
+          ?.detectedToken ||
+        null,
+
+      lowerPriorityFreshRequestsSuppressed:
+        safeNumber(
+          budget
+            ?.blockscoutHolderOutage
+            ?.lowerPriorityFreshRequestsSuppressed
+        ),
+
+      lowerPriorityCacheFallbacks:
+        safeNumber(
+          budget
+            ?.blockscoutHolderOutage
+            ?.lowerPriorityCacheFallbacks
+        )
     },
 
     marketLookups,
@@ -21940,12 +22146,45 @@ async function scan(
       telegramThresholdsUnchangedV133:
         "ENABLED_V133",
 
+      sameRunBlockscoutHolderOutageCircuitBreaker:
+        "ENABLED_V134",
+
+      priorityCandidateAlwaysGetsHolderRetryV134:
+        "ENABLED_V134",
+
+      lowerPriorityHolderRequestSuppressionOnOutage:
+        "ENABLED_V134",
+
+      staleVerifiedHolderCacheOutageFallbackV134:
+        "ENABLED_V134",
+
+      missingHolderEvidenceNeverPromotedV134:
+        "ENABLED_V134",
+
+      topCandidateCompletionUnchangedV134:
+        "ENABLED_V134",
+
+      unknownPoolBudgetProtectionUnchangedV134:
+        "ENABLED_V134",
+
+      ownershipDenominatorGuardUnchangedV134:
+        "ENABLED_V134",
+
+      rollingDirectionalUsdUnchangedV134:
+        "ENABLED_V134",
+
+      externalRequestRateUnchangedV134:
+        "ENABLED_V134",
+
+      telegramThresholdsUnchangedV134:
+        "ENABLED_V134",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V133_CORE_TOP_CANDIDATE_COMPLETION_V77_TELEGRAM_HUNTER",
+      "V134_CORE_BLOCKSCOUT_OUTAGE_RESILIENCE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -22261,7 +22500,7 @@ async function health(
     },
 
     architecture:
-      "V133_CORE_TOP_CANDIDATE_COMPLETION_V77_TELEGRAM_HUNTER",
+      "V134_CORE_BLOCKSCOUT_OUTAGE_RESILIENCE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -22660,7 +22899,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V133_CORE_TOP_CANDIDATE_COMPLETION_V77_TELEGRAM_HUNTER",
+      "V134_CORE_BLOCKSCOUT_OUTAGE_RESILIENCE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -23089,7 +23328,7 @@ export default {
             ),
 
           architecture:
-            "V133_CORE_TOP_CANDIDATE_COMPLETION_V77_TELEGRAM_HUNTER",
+            "V134_CORE_BLOCKSCOUT_OUTAGE_RESILIENCE_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
