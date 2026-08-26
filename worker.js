@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V144
+ * V145
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -375,8 +375,20 @@
  * - NEW: Telegram distinguishes holder count from holder concentration
  * - NEW: Telegram shows holder-data source when concentration is verified
  * - No alert thresholds, safety gates, request frequency or provider priority changed
+
+ *
+ * V145:
+ * - Preserves V144 holder-provider telemetry and Telegram wording
+ * - Preserves V143 Blockscout PRO holder fallback
+ * - NEW: persistent 10-minute PRO cooldown after HTTP 502/503/504
+ * - NEW: cooldown uses the existing KV state key and survives scheduled runs
+ * - NEW: no PRO analysis request is spent while cooldown is active
+ * - NEW: successful PRO response clears transient outage cooldown
+ * - NEW: response telemetry exposes PRO cooldown/failure/recovery state
+ * - Public Blockscout remains primary; verified holder cache remains available
+ * - Alert thresholds, scoring and holder safety gates are unchanged
 */
-const VERSION = "V144";
+const VERSION = "V145";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -440,6 +452,9 @@ const BLOCKSCOUT_PRO =
 
 const BLOCKSCOUT_PRO_CHAIN_ID =
   4663;
+
+const BLOCKSCOUT_PRO_OUTAGE_COOLDOWN_MS_V145 =
+  10 * 60 * 1000;
 
 const POOL_MANAGER =
   "0x8366a39cc670b4001a1121b8f6a443a643e40951";
@@ -1729,6 +1744,29 @@ function newState() {
           null
       },
 
+      blockscoutPro: {
+        lastStatus:
+          null,
+
+        lastSuccessAt:
+          null,
+
+        lastFailureAt:
+          null,
+
+        cooldownUntil:
+          null,
+
+        totalTransientFailures:
+          0,
+
+        consecutiveTransientFailures:
+          0,
+
+        totalRequests:
+          0
+      },
+
       discoveryRpc:
         defaultDiscoveryRpcState()
     },
@@ -1925,6 +1963,19 @@ async function readState(env) {
               typeof parsed.services.dexscreener ===
                 "object"
                 ? parsed.services.dexscreener
+                : {}
+            )
+          },
+
+          blockscoutPro: {
+            ...fresh.services.blockscoutPro,
+
+            ...(
+              parsed.services
+                ?.blockscoutPro &&
+              typeof parsed.services.blockscoutPro ===
+                "object"
+                ? parsed.services.blockscoutPro
                 : {}
             )
           },
@@ -11943,10 +11994,88 @@ async function blockscoutLegacyHolders(
 }
 
 
+
+function blockscoutProServiceV145(
+  state
+) {
+  state.services =
+    state.services ||
+    {};
+
+  state.services.blockscoutPro =
+    state.services.blockscoutPro ||
+    {
+      lastStatus: null,
+      lastSuccessAt: null,
+      lastFailureAt: null,
+      cooldownUntil: null,
+      totalTransientFailures: 0,
+      consecutiveTransientFailures: 0,
+      totalRequests: 0
+    };
+
+  return state.services.blockscoutPro;
+}
+
+function blockscoutProOutageTelemetryV145(
+  state
+) {
+  const service =
+    blockscoutProServiceV145(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  const cooldownUntil =
+    safeNumber(
+      service.cooldownUntil
+    ) || null;
+
+  return {
+    lastStatus:
+      service.lastStatus ||
+      null,
+    lastSuccessAt:
+      safeNumber(
+        service.lastSuccessAt
+      ) || null,
+    lastFailureAt:
+      safeNumber(
+        service.lastFailureAt
+      ) || null,
+    cooldownUntil,
+    cooldownActive:
+      Boolean(
+        cooldownUntil &&
+        cooldownUntil > now
+      ),
+    retryAfterMs:
+      cooldownUntil &&
+      cooldownUntil > now
+        ? cooldownUntil - now
+        : 0,
+    totalTransientFailures:
+      safeNumber(
+        service.totalTransientFailures
+      ),
+    consecutiveTransientFailures:
+      safeNumber(
+        service.consecutiveTransientFailures
+      ),
+    totalRequests:
+      safeNumber(
+        service.totalRequests
+      )
+  };
+}
+
 async function blockscoutProHoldersV143(
   token,
   budget,
-  env
+  env,
+  state
 ) {
   const apiKey =
     String(
@@ -11963,6 +12092,36 @@ async function blockscoutProHoldersV143(
       success: false,
       status:
         "BLOCKSCOUT_PRO_NOT_CONFIGURED",
+      data: null
+    };
+  }
+
+  const proServiceV145 =
+    blockscoutProServiceV145(
+      state
+    );
+
+  const existingCooldownUntilV145 =
+    safeNumber(
+      proServiceV145.cooldownUntil
+    );
+
+  if (
+    existingCooldownUntilV145 &&
+    existingCooldownUntilV145 >
+      Date.now()
+  ) {
+    return {
+      configured: true,
+      attempted: false,
+      success: false,
+      status:
+        "BLOCKSCOUT_PRO_COOLDOWN_V145",
+      cooldownUntil:
+        existingCooldownUntilV145,
+      retryAfterMs:
+        existingCooldownUntilV145 -
+        Date.now(),
       data: null
     };
   }
@@ -11985,6 +12144,11 @@ async function blockscoutProHoldersV143(
   }
 
   try {
+    proServiceV145.totalRequests =
+      safeNumber(
+        proServiceV145.totalRequests
+      ) + 1;
+
     const url =
       `${BLOCKSCOUT_PRO}/${BLOCKSCOUT_PRO_CHAIN_ID}/api/v2/tokens/${token}/holders?apikey=${encodeURIComponent(apiKey)}`;
 
@@ -12002,12 +12166,48 @@ async function blockscoutProHoldersV143(
     if (
       !response.ok
     ) {
+      const status =
+        `HTTP_${response.status}`;
+
+      const transientOutageV145 =
+        response.status === 502 ||
+        response.status === 503 ||
+        response.status === 504;
+
+      proServiceV145.lastStatus =
+        status;
+
+      proServiceV145.lastFailureAt =
+        Date.now();
+
+      if (
+        transientOutageV145
+      ) {
+        proServiceV145.totalTransientFailures =
+          safeNumber(
+            proServiceV145.totalTransientFailures
+          ) + 1;
+
+        proServiceV145.consecutiveTransientFailures =
+          safeNumber(
+            proServiceV145.consecutiveTransientFailures
+          ) + 1;
+
+        proServiceV145.cooldownUntil =
+          Date.now() +
+          BLOCKSCOUT_PRO_OUTAGE_COOLDOWN_MS_V145;
+      }
+
       return {
         configured: true,
         attempted: true,
         success: false,
-        status:
-          `HTTP_${response.status}`,
+        status,
+        transientOutageV145,
+        cooldownUntil:
+          safeNumber(
+            proServiceV145.cooldownUntil
+          ) || null,
         data: null
       };
     }
@@ -12031,6 +12231,18 @@ async function blockscoutProHoldersV143(
       };
     }
 
+    proServiceV145.lastStatus =
+      "VERIFIED_RESPONSE";
+
+    proServiceV145.lastSuccessAt =
+      Date.now();
+
+    proServiceV145.cooldownUntil =
+      null;
+
+    proServiceV145.consecutiveTransientFailures =
+      0;
+
     return {
       configured: true,
       attempted: true,
@@ -12046,6 +12258,12 @@ async function blockscoutProHoldersV143(
   }
 
   catch (error) {
+    proServiceV145.lastStatus =
+      "FETCH_ERROR";
+
+    proServiceV145.lastFailureAt =
+      Date.now();
+
     return {
       configured: true,
       attempted: true,
@@ -12787,7 +13005,8 @@ async function holderIntelligence(
   watched,
   market = null,
   priorityCompletion = false,
-  env = null
+  env = null,
+  state = null
 ) {
   if (
     !totalSupply
@@ -13119,7 +13338,8 @@ async function holderIntelligence(
       await blockscoutProHoldersV143(
         token,
         budget,
-        env
+        env,
+        state
       );
 
     blockscoutProHolderFallbackV143 = {
@@ -13130,7 +13350,18 @@ async function holderIntelligence(
       success:
         proResult.success,
       status:
-        proResult.status
+        proResult.status,
+      transientOutageV145:
+        Boolean(
+          proResult.transientOutageV145
+        ),
+      cooldownUntil:
+        proResult.cooldownUntil ??
+        null,
+      retryAfterMs:
+        safeNumber(
+          proResult.retryAfterMs
+        )
     };
 
     if (
@@ -18062,7 +18293,8 @@ async function analyzeToken(
         Boolean(
           options?.priorityCompletion
         ),
-        env
+        env,
+        state
       );
   }
 
@@ -21278,6 +21510,17 @@ async function scan(
           candidate?.holders
             ?.blockscoutProHolderFallbackV143
             ?.status ||
+          null,
+        proTransientOutageV145:
+          Boolean(
+            candidate?.holders
+              ?.blockscoutProHolderFallbackV143
+              ?.transientOutageV145
+          ),
+        proCooldownUntilV145:
+          candidate?.holders
+            ?.blockscoutProHolderFallbackV143
+            ?.cooldownUntil ||
           null
       })
     );
@@ -22074,7 +22317,7 @@ async function scan(
     status,
 
     scanMode:
-      "V144_CORE_HOLDER_PROVIDER_TELEMETRY_HUNTER",
+      "V145_CORE_BLOCKSCOUT_PRO_OUTAGE_PROTECTION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -22691,7 +22934,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V144_HOLDER_PROVIDER_TELEMETRY_DIRECTIONAL_USD_HUNTER",
+        "V145_BLOCKSCOUT_PRO_OUTAGE_PROTECTION_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -22927,6 +23170,16 @@ async function scan(
     preAnalysisTerminalPruningV142,
 
     holderProviderTelemetryV144,
+
+    blockscoutProOutageProtectionV145: {
+      enabled:
+        true,
+      cooldownMs:
+        BLOCKSCOUT_PRO_OUTAGE_COOLDOWN_MS_V145,
+      ...blockscoutProOutageTelemetryV145(
+        state
+      )
+    },
 
     blockscoutProV143: {
       configured:
@@ -24156,12 +24409,58 @@ async function scan(
       telegramThresholdsUnchangedV144:
         "ENABLED_V144",
 
+      blockscoutProTransientOutageCooldown:
+        "ENABLED_V145",
+
+      blockscoutProTransientStatusesV145:
+        [
+          502,
+          503,
+          504
+        ],
+
+      blockscoutProOutageCooldownMsV145:
+        BLOCKSCOUT_PRO_OUTAGE_COOLDOWN_MS_V145,
+
+      blockscoutProCooldownStoredInExistingKvV145:
+        "ENABLED_V145",
+
+      blockscoutProCooldownSkipsAnalysisRequestV145:
+        "ENABLED_V145",
+
+      blockscoutProSuccessClearsCooldownV145:
+        "ENABLED_V145",
+
+      holderProviderTelemetryUnchangedV145:
+        "ENABLED_V145",
+
+      telegramHolderWordingUnchangedV145:
+        "ENABLED_V145",
+
+      preAnalysisTerminalPruningUnchangedV145:
+        "ENABLED_V145",
+
+      excludedTargetHandoffUnchangedV145:
+        "ENABLED_V145",
+
+      retryFairnessUnchangedV145:
+        "ENABLED_V145",
+
+      rollingDirectionalUsdUnchangedV145:
+        "ENABLED_V145",
+
+      externalRequestRateUnchangedV145:
+        "ENABLED_V145",
+
+      telegramThresholdsUnchangedV145:
+        "ENABLED_V145",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V144_CORE_HOLDER_PROVIDER_TELEMETRY_V77_TELEGRAM_HUNTER",
+      "V145_CORE_BLOCKSCOUT_PRO_OUTAGE_PROTECTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -24477,7 +24776,7 @@ async function health(
     },
 
     architecture:
-      "V144_CORE_HOLDER_PROVIDER_TELEMETRY_V77_TELEGRAM_HUNTER",
+      "V145_CORE_BLOCKSCOUT_PRO_OUTAGE_PROTECTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -24876,7 +25175,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V144_CORE_HOLDER_PROVIDER_TELEMETRY_V77_TELEGRAM_HUNTER",
+      "V145_CORE_BLOCKSCOUT_PRO_OUTAGE_PROTECTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -25305,7 +25604,7 @@ export default {
             ),
 
           architecture:
-            "V144_CORE_HOLDER_PROVIDER_TELEMETRY_V77_TELEGRAM_HUNTER",
+            "V145_CORE_BLOCKSCOUT_PRO_OUTAGE_PROTECTION_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
