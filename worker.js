@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V120
+ * V121
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -58,8 +58,19 @@
  * - NEW: low/medium verified concentration improves fresh-market priority
  * - NEW: explicit launch/discovery classification telemetry
  * - Preserves all Telegram thresholds unchanged
+
+ *
+ * V121:
+ * - Preserves full V120 capability set
+ * - FIX: market-unverified viable candidates strongly outrank mature tokens
+ *        whose market data is already verified
+ * - FIX: mature verified-market tokens cannot monopolize the fresh market slot
+ * - NEW: Telegram qualification requires verified holder concentration evidence
+ * - NEW: holder-unverified candidates remain tracked instead of being alerted
+ * - NEW: diagnostics expose HOLDER_EVIDENCE_UNVERIFIED
+ * - Preserves all existing Telegram score/risk/liquidity/confidence thresholds
 */
-const VERSION = "V120";
+const VERSION = "V121";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -13667,6 +13678,28 @@ function qualifiesTelegram(
     return false;
   }
 
+  const holderEvidenceVerified =
+    candidate
+      ?.holders
+      ?.integrity
+      ?.verified ===
+      true &&
+    candidate
+      ?.holders
+      ?.concentrationVerified ===
+      true &&
+    candidate
+      ?.holders
+      ?.whale
+      ?.verified ===
+      true;
+
+  if (
+    !holderEvidenceVerified
+  ) {
+    return false;
+  }
+
   if (
     candidate
       .signalConfirmation
@@ -13742,6 +13775,30 @@ function telegramQualificationReasons(
   ) {
     reasons.push(
       "LIQUIDITY_TOO_LOW_OR_UNVERIFIED"
+    );
+  }
+
+  const holderEvidenceVerified =
+    candidate
+      ?.holders
+      ?.integrity
+      ?.verified ===
+      true &&
+    candidate
+      ?.holders
+      ?.concentrationVerified ===
+      true &&
+    candidate
+      ?.holders
+      ?.whale
+      ?.verified ===
+      true;
+
+  if (
+    !holderEvidenceVerified
+  ) {
+    reasons.push(
+      "HOLDER_EVIDENCE_UNVERIFIED"
     );
   }
 
@@ -14926,11 +14983,11 @@ function marketFreshPriorityScore(
     !cachedMarketVerified
   ) {
     score +=
-      100;
+      220;
   }
   else {
     score -=
-      40;
+      120;
   }
 
   /*
@@ -14992,7 +15049,7 @@ function marketFreshPriorityScore(
         "MATURE"
     ) {
       score -=
-        25;
+        50;
     }
   }
 
@@ -16574,7 +16631,7 @@ async function scan(
     status,
 
     scanMode:
-      "V120_CORE_TRUE_LAUNCH_AGE_PRIORITY_HUNTER",
+      "V121_CORE_MARKET_SLOT_HOLDER_GATE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -17139,7 +17196,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V120_TRUE_LAUNCH_AGE_VIABLE_UNVERIFIED_MARKET",
+        "V121_UNVERIFIED_MARKET_FIRST_WITH_MATURE_DEMOTION",
 
       selectedAddress:
         marketFreshTargetAddress ||
@@ -17655,12 +17712,27 @@ async function scan(
       telegramThresholdsUnchangedV120:
         "ENABLED_V120",
 
+      marketUnverifiedFreshSlotDominance:
+        "ENABLED_V121",
+
+      matureVerifiedMarketFreshSlotDemotion:
+        "ENABLED_V121",
+
+      telegramHolderEvidenceGate:
+        "ENABLED_V121",
+
+      holderUnverifiedTrackInsteadOfAlert:
+        "ENABLED_V121",
+
+      telegramThresholdsUnchangedV121:
+        "ENABLED_V121",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V120_CORE_TRUE_LAUNCH_AGE_PRIORITY_V77_TELEGRAM_HUNTER",
+      "V121_CORE_MARKET_SLOT_HOLDER_GATE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -17976,7 +18048,7 @@ async function health(
     },
 
     architecture:
-      "V120_CORE_TRUE_LAUNCH_AGE_PRIORITY_V77_TELEGRAM_HUNTER",
+      "V121_CORE_MARKET_SLOT_HOLDER_GATE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -18375,7 +18447,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V120_CORE_TRUE_LAUNCH_AGE_PRIORITY_V77_TELEGRAM_HUNTER",
+      "V121_CORE_MARKET_SLOT_HOLDER_GATE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -18804,7 +18876,7 @@ export default {
             ),
 
           architecture:
-            "V120_CORE_TRUE_LAUNCH_AGE_PRIORITY_V77_TELEGRAM_HUNTER",
+            "V121_CORE_MARKET_SLOT_HOLDER_GATE_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
