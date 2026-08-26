@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V154
+ * V155
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -505,8 +505,18 @@
  * - Fixes the V153 Gecko pool-identity scope ReferenceError
  * - Keeps the pool identity source variable inside directional enrichment
  * - No request-rate, scoring, market-verification or Telegram changes
+
+ *
+ * V155 HOTFIX:
+ * - Preserves V154/V153 functionality
+ * - Fixes V154 runtime ReferenceError: candidates is not defined
+ * - V153 top-level pool-identity telemetry had been inserted inside
+ *   momentumAnalysis(), where the scan-level candidates array is unavailable
+ * - Moves that telemetry to the scan response where candidates is in scope
+ * - Restores momentumAnalysis() to candidate-local telemetry only
+ * - No request-rate, scoring, verification or Telegram-threshold changes
 */
-const VERSION = "V154";
+const VERSION = "V155";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -16174,30 +16184,6 @@ function momentumAnalysis(
     transactionGrowthPercent:
       txGrowth,
 
-    onChainPoolIdentityDirectionalV153: {
-      enabled: true,
-      externalRequestsAdded: 0,
-      marketVerificationPromoted: false,
-      strictDirectionalUsdVerificationPreserved: true,
-      candidates:
-        candidates
-          .map(
-            candidate => ({
-              address:
-                normalize(
-                  candidate.address
-                ),
-              symbol:
-                candidate.symbol || null,
-              identity:
-                candidate
-                  .onChainPoolIdentityV153 ||
-                null
-            })
-          )
-          .slice(0, 10)
-    },
-
     onChainActivityMomentumV152: {
       verified:
         onChainActivityUsableV152,
@@ -24265,7 +24251,7 @@ async function scan(
     status,
 
     scanMode:
-      "V154_CORE_ONCHAIN_POOL_IDENTITY_SCOPE_HOTFIX_HUNTER",
+      "V155_CORE_POOL_IDENTITY_TELEMETRY_SCOPE_HOTFIX_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -24904,7 +24890,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V154_ONCHAIN_POOL_IDENTITY_SCOPE_HOTFIX_DIRECTIONAL_USD_HUNTER",
+        "V155_POOL_IDENTITY_TELEMETRY_SCOPE_HOTFIX_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -25337,6 +25323,38 @@ async function scan(
       candidates.filter(
         qualifiesTelegram
       ).length,
+
+    onChainPoolIdentityDirectionalV153: {
+      enabled:
+        true,
+      externalRequestsAdded:
+        0,
+      marketVerificationPromoted:
+        false,
+      strictDirectionalUsdVerificationPreserved:
+        true,
+      candidates:
+        candidates
+          .map(
+            candidate => ({
+              address:
+                normalize(
+                  candidate.address
+                ),
+              symbol:
+                candidate.symbol ||
+                null,
+              identity:
+                candidate
+                  .onChainPoolIdentityV153 ||
+                null
+            })
+          )
+          .slice(
+            0,
+            10
+          )
+    },
 
     onChainActivityMomentumV152: {
       enabled:
@@ -26948,12 +26966,30 @@ async function scan(
       telegramThresholdsUnchangedV154:
         "ENABLED_V154",
 
+      poolIdentityTelemetryScopeHotfix:
+        "FIXED_V155",
+
+      scanCandidatesTelemetryScopedCorrectlyV155:
+        "ENABLED_V155",
+
+      momentumCandidateLocalScopeRestoredV155:
+        "ENABLED_V155",
+
+      onChainPoolIdentityDirectionalUnchangedV155:
+        "ENABLED_V155",
+
+      noExternalRequestRateChangeV155:
+        "ENABLED_V155",
+
+      telegramThresholdsUnchangedV155:
+        "ENABLED_V155",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V154_CORE_ONCHAIN_POOL_IDENTITY_SCOPE_HOTFIX_V77_TELEGRAM_HUNTER",
+      "V155_CORE_POOL_IDENTITY_TELEMETRY_SCOPE_HOTFIX_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -27269,7 +27305,7 @@ async function health(
     },
 
     architecture:
-      "V154_CORE_ONCHAIN_POOL_IDENTITY_SCOPE_HOTFIX_V77_TELEGRAM_HUNTER",
+      "V155_CORE_POOL_IDENTITY_TELEMETRY_SCOPE_HOTFIX_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -27668,7 +27704,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V154_CORE_ONCHAIN_POOL_IDENTITY_SCOPE_HOTFIX_V77_TELEGRAM_HUNTER",
+      "V155_CORE_POOL_IDENTITY_TELEMETRY_SCOPE_HOTFIX_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -28097,7 +28133,7 @@ export default {
             ),
 
           architecture:
-            "V154_CORE_ONCHAIN_POOL_IDENTITY_SCOPE_HOTFIX_V77_TELEGRAM_HUNTER",
+            "V155_CORE_POOL_IDENTITY_TELEMETRY_SCOPE_HOTFIX_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
