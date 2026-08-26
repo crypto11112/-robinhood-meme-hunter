@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V119
+ * V120
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -47,8 +47,19 @@
  * - FIX: current scanMode/architecture labels now report V119 consistently
  * - Preserves V118 on-chain V4 activity evidence without inventing USD data
  * - Preserves all Telegram thresholds unchanged
+
+ *
+ * V120:
+ * - Preserves full V119 end-to-end Telegram success path
+ * - NEW: separates NEW_TO_SCANNER from NEWLY_LAUNCHED
+ * - NEW: pair creation age is authoritative when verified market age exists
+ * - NEW: mature backlog discoveries no longer receive new-launch priority
+ * - NEW: market-fresh ranking prefers viable candidates still missing market
+ * - NEW: low/medium verified concentration improves fresh-market priority
+ * - NEW: explicit launch/discovery classification telemetry
+ * - Preserves all Telegram thresholds unchanged
 */
-const VERSION = "V119";
+const VERSION = "V120";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -14310,10 +14321,36 @@ async function analyzeToken(
 
     opportunity,
 
+    /*
+     * V120: newlyDiscovered means NEW_TO_SCANNER only.
+     * It is intentionally separate from verified pair launch age.
+     */
     newlyDiscovered:
       Boolean(
         options?.newlyDiscovered
       ),
+
+    discoveryClassification: {
+      newToScanner:
+        Boolean(
+          options?.newlyDiscovered
+        ),
+
+      liveDiscovery:
+        Boolean(
+          options?.liveDiscovery
+        ),
+
+      launchFreshness:
+        trueLaunchFreshness(
+          watched
+        )
+    },
+
+    newlyLaunched:
+      trueLaunchFreshness(
+        watched
+      ).newlyLaunched,
 
     liveDiscovery:
       Boolean(
@@ -14720,6 +14757,293 @@ function terminalPriorityRejectFromWatched(
     top1Percent,
     concentrationRisk
   };
+}
+
+
+function marketPairAgeMinutes(
+  watched
+) {
+  const createdAt =
+    safeNumber(
+      watched
+        ?.marketCache
+        ?.data
+        ?.pairCreatedAt
+    );
+
+  if (
+    !createdAt ||
+    createdAt <=
+      0
+  ) {
+    return null;
+  }
+
+  return Math.max(
+    0,
+    (
+      Date.now() -
+      createdAt
+    ) /
+    60000
+  );
+}
+
+function trueLaunchFreshness(
+  watched
+) {
+  const ageMinutes =
+    marketPairAgeMinutes(
+      watched
+    );
+
+  if (
+    ageMinutes ===
+      null
+  ) {
+    return {
+      verified:
+        false,
+      ageMinutes:
+        null,
+      newlyLaunched:
+        false,
+      label:
+        "UNVERIFIED"
+    };
+  }
+
+  if (
+    ageMinutes <=
+      60
+  ) {
+    return {
+      verified:
+        true,
+      ageMinutes,
+      newlyLaunched:
+        true,
+      label:
+        "NEWLY_LAUNCHED"
+    };
+  }
+
+  if (
+    ageMinutes <=
+      24 * 60
+  ) {
+    return {
+      verified:
+        true,
+      ageMinutes,
+      newlyLaunched:
+        false,
+      label:
+        "EARLY"
+    };
+  }
+
+  return {
+    verified:
+      true,
+    ageMinutes,
+    newlyLaunched:
+      false,
+    label:
+      "MATURE"
+  };
+}
+
+function marketFreshPriorityScore(
+  token,
+  newTokens,
+  liveTokens
+) {
+  if (
+    !marketFreshCandidateAllowed(
+      token
+    )
+  ) {
+    return -1000000;
+  }
+
+  const address =
+    normalize(
+      token.address
+    );
+
+  const launch =
+    trueLaunchFreshness(
+      token
+    );
+
+  const cachedMarketVerified =
+    token
+      ?.marketCache
+      ?.data
+      ?.verified ===
+      true;
+
+  const holders =
+    token
+      ?.holderCache
+      ?.data;
+
+  const holderVerified =
+    holders
+      ?.integrity
+      ?.verified ===
+      true &&
+    holders
+      ?.concentrationVerified ===
+      true &&
+    holders
+      ?.whale
+      ?.verified ===
+      true;
+
+  const concentration =
+    holders
+      ?.whale
+      ?.concentrationRisk ||
+    "UNVERIFIED";
+
+  const top1 =
+    safeNumber(
+      holders
+        ?.whale
+        ?.top1Percent
+    );
+
+  let score =
+    0;
+
+  /*
+   * Main V120 goal: use the scarce fresh market request on a viable token
+   * whose market data is still missing.
+   */
+  if (
+    !cachedMarketVerified
+  ) {
+    score +=
+      100;
+  }
+  else {
+    score -=
+      40;
+  }
+
+  /*
+   * "New to this scanner" is useful discovery information, but is no longer
+   * treated as proof that the token itself was newly launched.
+   */
+  if (
+    newTokens.has(
+      address
+    )
+  ) {
+    score +=
+      25;
+  }
+
+  if (
+    liveTokens.has(
+      address
+    )
+  ) {
+    score +=
+      30;
+  }
+
+  if (
+    safeNumber(
+      token.lastLiveSeenAt
+    ) >
+      0 &&
+    Date.now() -
+      safeNumber(
+        token.lastLiveSeenAt
+      ) <
+      30 * 60 * 1000
+  ) {
+    score +=
+      20;
+  }
+
+  if (
+    launch.verified
+  ) {
+    if (
+      launch.label ===
+        "NEWLY_LAUNCHED"
+    ) {
+      score +=
+        40;
+    }
+    else if (
+      launch.label ===
+        "EARLY"
+    ) {
+      score +=
+        20;
+    }
+    else if (
+      launch.label ===
+        "MATURE"
+    ) {
+      score -=
+        25;
+    }
+  }
+
+  if (
+    holderVerified
+  ) {
+    if (
+      concentration ===
+        "LOW"
+    ) {
+      score +=
+        35;
+    }
+    else if (
+      concentration ===
+        "MEDIUM"
+    ) {
+      score +=
+        15;
+    }
+
+    if (
+      top1 >
+        0 &&
+      top1 <=
+        10
+    ) {
+      score +=
+        15;
+    }
+    else if (
+      top1 >
+        10 &&
+      top1 <=
+        20
+    ) {
+      score +=
+        8;
+    }
+  }
+
+  score +=
+    Math.min(
+      30,
+      safeNumber(
+        token.analysisPriority
+      ) /
+      10
+    );
+
+  return score;
 }
 
 function marketFreshCandidateAllowed(
@@ -15360,45 +15684,37 @@ async function scan(
    * slot. Only when there is no pending completion target do new/live
    * candidates compete for it.
    */
-  const marketFreshTarget =
-    pendingCompletionToken ||
-    selected.find(
-      token => {
-        const address =
-          normalize(
-            token.address
-          );
-
-        if (
-          !marketFreshCandidateAllowed(
+  const rankedMarketFreshCandidates =
+    selected
+      .filter(
+        token =>
+          marketFreshCandidateAllowed(
             token
           )
-        ) {
-          return false;
-        }
+      )
+      .map(
+        token => ({
+          token,
 
-        return (
-          newTokens.has(address) ||
-          liveTokens.has(address) ||
-          (
-            safeNumber(
-              token.lastLiveSeenAt
-            ) > 0 &&
-            Date.now() -
-              safeNumber(
-                token.lastLiveSeenAt
-              ) <
-              30 * 60 * 1000
-          )
-        );
-      }
-    ) ||
-    selected.find(
-      token =>
-        marketFreshCandidateAllowed(
-          token
-        )
-    ) ||
+          score:
+            marketFreshPriorityScore(
+              token,
+              newTokens,
+              liveTokens
+            )
+        })
+      )
+      .sort(
+        (a, b) =>
+          b.score -
+          a.score
+      );
+
+  const marketFreshTarget =
+    pendingCompletionToken ||
+    rankedMarketFreshCandidates
+      [0]
+      ?.token ||
     null;
 
   const marketFreshTargetAddress =
@@ -16258,7 +16574,7 @@ async function scan(
     status,
 
     scanMode:
-      "V119_CORE_PREMARKET_TERMINAL_PRUNING_HUNTER",
+      "V120_CORE_TRUE_LAUNCH_AGE_PRIORITY_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -16821,6 +17137,59 @@ async function scan(
         null
     },
 
+    marketFreshPriority: {
+      strategy:
+        "V120_TRUE_LAUNCH_AGE_VIABLE_UNVERIFIED_MARKET",
+
+      selectedAddress:
+        marketFreshTargetAddress ||
+        null,
+
+      ranked:
+        rankedMarketFreshCandidates
+          .slice(
+            0,
+            5
+          )
+          .map(
+            row => ({
+              address:
+                normalize(
+                  row.token.address
+                ),
+
+              symbol:
+                row.token
+                  ?.metadata
+                  ?.symbol ||
+                null,
+
+              score:
+                row.score,
+
+              launchFreshness:
+                trueLaunchFreshness(
+                  row.token
+                ),
+
+              cachedMarketVerified:
+                row.token
+                  ?.marketCache
+                  ?.data
+                  ?.verified ===
+                true,
+
+              concentrationRisk:
+                row.token
+                  ?.holderCache
+                  ?.data
+                  ?.whale
+                  ?.concentrationRisk ||
+                "UNVERIFIED"
+            })
+          )
+    },
+
     priorityFreshMarketSchedule:
       priorityFreshSchedule(
         state,
@@ -17268,12 +17637,30 @@ async function scan(
       telegramThresholdsUnchangedV119:
         "ENABLED_V119",
 
+      trueLaunchAgeClassification:
+        "ENABLED_V120",
+
+      newToScannerVsNewlyLaunched:
+        "ENABLED_V120",
+
+      matureBacklogDiscoveryDemotion:
+        "ENABLED_V120",
+
+      viableUnverifiedMarketPriority:
+        "ENABLED_V120",
+
+      launchAgeAwareFreshMarketRanking:
+        "ENABLED_V120",
+
+      telegramThresholdsUnchangedV120:
+        "ENABLED_V120",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V119_CORE_PREMARKET_TERMINAL_PRUNING_V77_TELEGRAM_HUNTER",
+      "V120_CORE_TRUE_LAUNCH_AGE_PRIORITY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -17589,7 +17976,7 @@ async function health(
     },
 
     architecture:
-      "V119_CORE_PREMARKET_TERMINAL_PRUNING_V77_TELEGRAM_HUNTER",
+      "V120_CORE_TRUE_LAUNCH_AGE_PRIORITY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -17988,7 +18375,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V119_CORE_PREMARKET_TERMINAL_PRUNING_V77_TELEGRAM_HUNTER",
+      "V120_CORE_TRUE_LAUNCH_AGE_PRIORITY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -18417,7 +18804,7 @@ export default {
             ),
 
           architecture:
-            "V119_CORE_PREMARKET_TERMINAL_PRUNING_V77_TELEGRAM_HUNTER",
+            "V120_CORE_TRUE_LAUNCH_AGE_PRIORITY_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
