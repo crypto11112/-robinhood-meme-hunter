@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V146
+ * V147
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -401,8 +401,21 @@
  * - NEW: later successful PRO response automatically clears the token 404 delay
  * - NEW: response telemetry exposes 404 retry state without changing safety gates
  * - Telegram thresholds, scoring, request cap and holder evidence rules unchanged
+
+ *
+ * V147:
+ * - Preserves V146 Blockscout PRO 404 retry handling
+ * - Preserves V145 Blockscout PRO outage protection
+ * - NEW: adaptive DexScreener 429 backoff capped at 30 minutes
+ * - NEW: Dex 429 backoff state persists in the existing KV state
+ * - NEW: successful Dex market response de-escalates the 429 level
+ * - NEW: Dex/Gecko availability is coordinated before fallback
+ * - NEW: Gecko fallback telemetry distinguishes checked from HTTP-requested
+ * - NEW: exact earliest market retry is exposed when both providers unavailable
+ * - Existing verified fresh/stale market cache remains preferred
+ * - No request-frequency increase, threshold change or safety-gate change
 */
-const VERSION = "V146";
+const VERSION = "V147";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -709,6 +722,12 @@ const MARKET_STALE_CACHE_MS =
 
 const DEXSCREENER_429_COOLDOWN_MS =
   10 * 60 * 1000;
+
+const DEXSCREENER_MAX_429_COOLDOWN_MS_V147 =
+  30 * 60 * 1000;
+
+const DEXSCREENER_429_CHAIN_WINDOW_MS_V147 =
+  30 * 60 * 1000;
 
 /* V116: align the fresh-market guard with the existing ~5-minute
  * scheduled scanner cadence. HTTP-429 protection remains 10 minutes. */
@@ -1719,6 +1738,12 @@ function newState() {
           null,
 
         total429s:
+          0,
+
+        consecutive429s:
+          0,
+
+        lastBackoffMs:
           0,
 
         lastRequestAt:
@@ -8180,9 +8205,25 @@ function dexService(state) {
       total429s:
         0,
 
+      consecutive429s:
+        0,
+
+      lastBackoffMs:
+        0,
+
       lastRequestAt:
         null
     };
+
+  state.services.dexscreener.consecutive429s =
+    safeNumber(
+      state.services.dexscreener.consecutive429s
+    );
+
+  state.services.dexscreener.lastBackoffMs =
+    safeNumber(
+      state.services.dexscreener.lastBackoffMs
+    );
 
   const reservation =
     state.services.dexscreener.priorityFreshReservation;
@@ -8201,6 +8242,213 @@ function dexService(state) {
   }
 
   return state.services.dexscreener;
+}
+
+
+function registerDex429V147(
+  service
+) {
+  const now =
+    Date.now();
+
+  const previous429At =
+    safeNumber(
+      service.last429At
+    );
+
+  let level =
+    safeNumber(
+      service.consecutive429s
+    );
+
+  if (
+    previous429At &&
+    now - previous429At <=
+      DEXSCREENER_429_CHAIN_WINDOW_MS_V147
+  ) {
+    level =
+      Math.min(
+        3,
+        Math.max(
+          1,
+          level + 1
+        )
+      );
+  }
+
+  else {
+    level = 1;
+  }
+
+  const backoffMs =
+    Math.min(
+      DEXSCREENER_MAX_429_COOLDOWN_MS_V147,
+      DEXSCREENER_429_COOLDOWN_MS *
+        Math.pow(
+          2,
+          Math.max(
+            0,
+            level - 1
+          )
+        )
+    );
+
+  service.consecutive429s =
+    level;
+  service.last429At =
+    now;
+  service.cooldownUntil =
+    now + backoffMs;
+  service.lastBackoffMs =
+    backoffMs;
+  service.lastStatus =
+    "HTTP_429";
+  service.total429s =
+    safeNumber(
+      service.total429s
+    ) + 1;
+
+  return backoffMs;
+}
+
+function registerDexSuccessV147(
+  service,
+  status = "VERIFIED"
+) {
+  service.cooldownUntil =
+    null;
+  service.lastSuccessAt =
+    Date.now();
+  service.lastStatus =
+    status;
+
+  service.consecutive429s =
+    Math.max(
+      0,
+      safeNumber(
+        service.consecutive429s
+      ) - 1
+    );
+
+  if (
+    service.consecutive429s === 0
+  ) {
+    service.lastBackoffMs =
+      0;
+  }
+}
+
+function marketProviderAvailabilityV147(
+  state,
+  address = null
+) {
+  const dex =
+    dexService(
+      state
+    );
+  const now =
+    Date.now();
+
+  const dexCooldownUntil =
+    safeNumber(
+      dex.cooldownUntil
+    );
+
+  const dexSpacingAt =
+    safeNumber(
+      dex.lastRequestAt
+    )
+      ? safeNumber(
+          dex.lastRequestAt
+        ) +
+        DEXSCREENER_MIN_FRESH_INTERVAL_MS
+      : now;
+
+  const dexEligibleAt =
+    Math.max(
+      now,
+      dexCooldownUntil || 0,
+      dexSpacingAt || 0
+    );
+
+  const gecko =
+    geckoFreshEligibility(
+      state
+    );
+
+  const geckoEligibleAt =
+    safeNumber(
+      gecko.eligibleAt
+    ) || now;
+
+  const dexEligible =
+    dexEligibleAt <= now;
+
+  const geckoEligible =
+    gecko.eligible === true;
+
+  const bothUnavailable =
+    !dexEligible &&
+    !geckoEligible;
+
+  const earliestEligibleAt =
+    bothUnavailable
+      ? Math.min(
+          dexEligibleAt,
+          geckoEligibleAt
+        )
+      : now;
+
+  return {
+    address:
+      normalize(
+        address
+      ) || null,
+
+    dex: {
+      eligible:
+        dexEligible,
+      eligibleAt:
+        dexEligibleAt,
+      cooldownUntil:
+        dexCooldownUntil || null,
+      consecutive429s:
+        safeNumber(
+          dex.consecutive429s
+        ),
+      lastBackoffMs:
+        safeNumber(
+          dex.lastBackoffMs
+        )
+    },
+
+    gecko: {
+      eligible:
+        geckoEligible,
+      reason:
+        gecko.reason || null,
+      eligibleAt:
+        geckoEligibleAt,
+      cooldownUntil:
+        gecko.reason ===
+          "GECKOTERMINAL_COOLDOWN"
+          ? geckoEligibleAt
+          : null
+    },
+
+    bothUnavailable,
+
+    earliestEligibleAt:
+      earliestEligibleAt || now,
+
+    retryAfterMs:
+      bothUnavailable
+        ? Math.max(
+            0,
+            earliestEligibleAt - now
+          )
+        : 0
+  };
 }
 
 function priorityFreshSchedule(
@@ -9339,6 +9587,61 @@ async function priorityMarketFallback(
     return original;
   }
 
+  const availabilityV147 =
+    marketProviderAvailabilityV147(
+      state,
+      watched?.address ||
+      token
+    );
+
+  if (
+    !availabilityV147
+      .gecko
+      .eligible
+  ) {
+    return {
+      ...original,
+
+      marketProviderAvailabilityV147:
+        availabilityV147,
+
+      alternativeMarketData: {
+        attempted:
+          false,
+        checked:
+          true,
+        requestSent:
+          false,
+        source:
+          "GECKOTERMINAL",
+        status:
+          availabilityV147
+            .gecko
+            .reason ||
+          "GECKOTERMINAL_NOT_ELIGIBLE",
+        fallbackTrigger:
+          trigger,
+        cooldownUntil:
+          availabilityV147
+            .gecko
+            .cooldownUntil,
+        freshEligibleAt:
+          availabilityV147
+            .gecko
+            .eligibleAt,
+        bothProvidersUnavailable:
+          availabilityV147
+            .bothUnavailable,
+        earliestMarketRetryAt:
+          availabilityV147
+            .earliestEligibleAt,
+        retryAfterMs:
+          availabilityV147
+            .retryAfterMs
+      }
+    };
+  }
+
   const fallback =
     await geckoTerminalMarketData(
       token,
@@ -9349,33 +9652,55 @@ async function priorityMarketFallback(
     );
 
   if (
-    fallback
-      ?.verified
+    fallback?.verified
   ) {
-    return fallback;
+    return {
+      ...fallback,
+      marketProviderAvailabilityV147:
+        marketProviderAvailabilityV147(
+          state,
+          watched?.address ||
+          token
+        )
+    };
   }
 
   return {
     ...original,
 
+    marketProviderAvailabilityV147:
+      marketProviderAvailabilityV147(
+        state,
+        watched?.address ||
+        token
+      ),
+
     alternativeMarketData: {
       attempted:
         true,
-
+      checked:
+        true,
+      requestSent:
+        ![
+          "GECKOTERMINAL_COOLDOWN",
+          "GECKOTERMINAL_FRESH_SPACING",
+          "GECKOTERMINAL_SCAN_LIMIT",
+          "GECKOTERMINAL_BUDGET_PROTECTED"
+        ].includes(
+          fallback?.status
+        ),
       source:
         "GECKOTERMINAL",
-
       status:
-        fallback
-          ?.status ||
+        fallback?.status ||
         "UNAVAILABLE",
-
       fallbackTrigger:
         trigger,
-
       cooldownUntil:
-        fallback
-          ?.cooldownUntil ||
+        fallback?.cooldownUntil ||
+        null,
+      freshEligibleAt:
+        fallback?.freshEligibleAt ||
         null
     }
   };
@@ -11383,20 +11708,10 @@ async function marketData(
       response.status ===
       429
     ) {
-      service.last429At =
-        Date.now();
-
-      service.cooldownUntil =
-        Date.now() +
-        DEXSCREENER_429_COOLDOWN_MS;
-
-      service.lastStatus =
-        "HTTP_429";
-
-      service.total429s =
-        safeNumber(
-          service.total429s
-        ) + 1;
+      const dexBackoffMsV147 =
+        registerDex429V147(
+          service
+        );
 
       const stale =
         cachedMarket(
@@ -11415,7 +11730,15 @@ async function marketData(
             true,
 
           cooldownUntil:
-            service.cooldownUntil
+            service.cooldownUntil,
+
+          adaptiveBackoffMsV147:
+            dexBackoffMsV147,
+
+          rateLimitLevelV147:
+            safeNumber(
+              service.consecutive429s
+            )
         };
       }
 
@@ -11438,6 +11761,14 @@ async function marketData(
 
           cooldownUntil:
             service.cooldownUntil,
+
+          adaptiveBackoffMsV147:
+            dexBackoffMsV147,
+
+          rateLimitLevelV147:
+            safeNumber(
+              service.consecutive429s
+            ),
 
           cached:
             false
@@ -11508,17 +11839,9 @@ async function marketData(
             fallbackResponse.status ===
               429
           ) {
-            service.last429At =
-              Date.now();
-            service.cooldownUntil =
-              Date.now() +
-              DEXSCREENER_429_COOLDOWN_MS;
-            service.lastStatus =
-              "HTTP_429";
-            service.total429s =
-              safeNumber(
-                service.total429s
-              ) + 1;
+            registerDex429V147(
+              service
+            );
           }
 
           else if (
@@ -11860,14 +12183,10 @@ async function marketData(
         null
     };
 
-    service.cooldownUntil =
-      null;
-
-    service.lastSuccessAt =
-      Date.now();
-
-    service.lastStatus =
-      "VERIFIED";
+    registerDexSuccessV147(
+      service,
+      "VERIFIED"
+    );
 
     saveMarketCache(
       watched,
@@ -22530,7 +22849,7 @@ async function scan(
     status,
 
     scanMode:
-      "V146_CORE_BLOCKSCOUT_PRO_404_RETRY_HUNTER",
+      "V147_CORE_MARKET_PROVIDER_429_COORDINATION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -22717,6 +23036,20 @@ async function scan(
             dex.total429s
           ),
 
+        consecutive429s:
+          safeNumber(
+            dex.consecutive429s
+          ),
+
+        lastBackoffMs:
+          safeNumber(
+            dex.lastBackoffMs
+          ) ||
+          null,
+
+        max429CooldownMsV147:
+          DEXSCREENER_MAX_429_COOLDOWN_MS_V147,
+
         lastRequestAt:
           dex.lastRequestAt ||
           null
@@ -22795,6 +23128,12 @@ async function scan(
     requestBudget:
       budgetTelemetry(
         budget
+      ),
+
+    marketProviderCoordinationV147:
+      marketProviderAvailabilityV147(
+        state,
+        marketFreshTarget
       ),
 
     discovery: {
@@ -23147,7 +23486,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V146_BLOCKSCOUT_PRO_404_RETRY_DIRECTIONAL_USD_HUNTER",
+        "V147_MARKET_PROVIDER_429_COORDINATION_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -24758,12 +25097,63 @@ async function scan(
       telegramThresholdsUnchangedV146:
         "ENABLED_V146",
 
+      marketProvider429Coordination:
+        "ENABLED_V147",
+
+      dexAdaptive429BackoffV147:
+        "ENABLED_V147",
+
+      dex429BaseCooldownMsV147:
+        DEXSCREENER_429_COOLDOWN_MS,
+
+      dex429MaxCooldownMsV147:
+        DEXSCREENER_MAX_429_COOLDOWN_MS_V147,
+
+      dex429SuccessDeescalationV147:
+        "ENABLED_V147",
+
+      geckoKnownCooldownPrecheckV147:
+        "ENABLED_V147",
+
+      fallbackAttemptTelemetryAccuracyV147:
+        "ENABLED_V147",
+
+      bothProvidersUnavailableRetryTelemetryV147:
+        "ENABLED_V147",
+
+      noMarketProviderRequestRateIncreaseV147:
+        "ENABLED_V147",
+
+      blockscoutPro404RetryUnchangedV147:
+        "ENABLED_V147",
+
+      blockscoutProOutageProtectionUnchangedV147:
+        "ENABLED_V147",
+
+      holderProviderTelemetryUnchangedV147:
+        "ENABLED_V147",
+
+      preAnalysisTerminalPruningUnchangedV147:
+        "ENABLED_V147",
+
+      excludedTargetHandoffUnchangedV147:
+        "ENABLED_V147",
+
+      retryFairnessUnchangedV147:
+        "ENABLED_V147",
+
+      rollingDirectionalUsdUnchangedV147:
+        "ENABLED_V147",
+
+      telegramThresholdsUnchangedV147:
+        "ENABLED_V147",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V146_CORE_BLOCKSCOUT_PRO_404_RETRY_V77_TELEGRAM_HUNTER",
+      "V147_CORE_MARKET_PROVIDER_429_COORDINATION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -25079,7 +25469,7 @@ async function health(
     },
 
     architecture:
-      "V146_CORE_BLOCKSCOUT_PRO_404_RETRY_V77_TELEGRAM_HUNTER",
+      "V147_CORE_MARKET_PROVIDER_429_COORDINATION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -25478,7 +25868,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V146_CORE_BLOCKSCOUT_PRO_404_RETRY_V77_TELEGRAM_HUNTER",
+      "V147_CORE_MARKET_PROVIDER_429_COORDINATION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -25907,7 +26297,7 @@ export default {
             ),
 
           architecture:
-            "V146_CORE_BLOCKSCOUT_PRO_404_RETRY_V77_TELEGRAM_HUNTER",
+            "V147_CORE_MARKET_PROVIDER_429_COORDINATION_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
