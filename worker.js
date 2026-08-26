@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V138
+ * V139
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -287,8 +287,22 @@
  * - Retry counters are address-scoped so a new target cannot inherit another
  *   token's retry history
  * - Telegram thresholds, API rates and request caps unchanged
+
+ *
+ * V139:
+ * - Preserves V138 transient retry persistence
+ * - Preserves V137 local terminal-priority handoff
+ * - Preserves V136 organic-holder breadth protection
+ * - NEW: retry fairness prevents an unresolved carried token monopolising the
+ *   fresh market slot when a clearly stronger new/live candidate appears
+ * - A challenger must lead the carried candidate by at least 20 priority
+ *   points and have new/live/recent-live evidence
+ * - The carried retry candidate remains persisted and is still analysed
+ * - The challenger temporarily receives first analysis + fresh-market priority
+ * - Retry state cannot be accidentally overwritten by the temporary challenger
+ * - Telegram thresholds, API rates and request caps unchanged
 */
-const VERSION = "V138";
+const VERSION = "V139";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -18839,6 +18853,9 @@ function completionCandidateBlockers(
   return blockers;
 }
 
+const RETRY_FAIRNESS_MIN_SCORE_LEAD_V139 =
+  20;
+
 const PRIORITY_COMPLETION_MAX_ATTEMPTS_V138 =
   12;
 
@@ -19509,17 +19526,121 @@ async function scan(
           a.score
       );
 
+  const pendingCompletionRankedRow =
+    pendingCompletionToken
+      ? rankedMarketFreshCandidates.find(
+          row =>
+            normalize(
+              row?.token?.address
+            ) ===
+              pendingCompletionAddress
+        ) ||
+        null
+      : null;
+
+  const pendingCompletionPriorityScore =
+    pendingCompletionRankedRow
+      ?.score ??
+    (
+      pendingCompletionToken
+        ? marketFreshPriorityScore(
+            pendingCompletionToken,
+            newTokens,
+            liveTokens
+          )
+        : null
+    );
+
+  const retryFairnessChallengerRow =
+    pendingCompletionToken
+      ? rankedMarketFreshCandidates.find(
+          row => {
+            const address =
+              normalize(
+                row?.token?.address
+              );
+
+            if (
+              !address ||
+              address ===
+                pendingCompletionAddress
+            ) {
+              return false;
+            }
+
+            const isNew =
+              newTokens.has(
+                address
+              );
+
+            const isLive =
+              liveTokens.has(
+                address
+              );
+
+            const recentlyLive =
+              safeNumber(
+                row?.token?.lastLiveSeenAt
+              ) > 0 &&
+              Date.now() -
+                safeNumber(
+                  row?.token?.lastLiveSeenAt
+                ) <
+                30 * 60 * 1000;
+
+            const clearlyStronger =
+              safeNumber(
+                row?.score
+              ) >=
+              safeNumber(
+                pendingCompletionPriorityScore
+              ) +
+                RETRY_FAIRNESS_MIN_SCORE_LEAD_V139;
+
+            return (
+              clearlyStronger &&
+              (
+                isNew ||
+                isLive ||
+                recentlyLive
+              )
+            );
+          }
+        ) ||
+        null
+      : null;
+
+  const retryFairnessOverrideV139 =
+    Boolean(
+      pendingCompletionToken &&
+      retryFairnessChallengerRow
+    );
+
   let marketFreshTarget =
-    pendingCompletionToken ||
-    rankedMarketFreshCandidates
-      [0]
-      ?.token ||
-    null;
+    retryFairnessOverrideV139
+      ? retryFairnessChallengerRow
+          ?.token ||
+        null
+      : pendingCompletionToken ||
+        rankedMarketFreshCandidates
+          [0]
+          ?.token ||
+        null;
 
   let marketFreshTargetAddress =
     normalize(
       marketFreshTarget?.address
     );
+
+  const retryPersistenceAddressV139 =
+    retryFairnessOverrideV139
+      ? pendingCompletionAddress
+      : marketFreshTargetAddress;
+
+  const retryPersistenceTokenV139 =
+    retryFairnessOverrideV139
+      ? pendingCompletionToken
+      : marketFreshTarget;
 
   /*
    * V133:
@@ -19567,11 +19688,11 @@ async function scan(
       ),
 
     address:
-      marketFreshTargetAddress ||
+      retryPersistenceAddressV139 ||
       null,
 
     symbol:
-      marketFreshTarget
+      retryPersistenceTokenV139
         ?.metadata
         ?.symbol ||
       null,
@@ -20201,7 +20322,13 @@ async function scan(
           true;
 
         if (
-          state?.priorityCandidateCompletion
+          state?.priorityCandidateCompletion &&
+          normalize(
+            state
+              .priorityCandidateCompletion
+              .address
+          ) ===
+            v135CurrentAddress
         ) {
           state
             .priorityCandidateCompletion
@@ -20291,7 +20418,7 @@ async function scan(
         normalize(
           candidate.address
         ) ===
-        marketFreshTargetAddress
+        retryPersistenceAddressV139
     ) ||
     null;
 
@@ -20365,14 +20492,14 @@ async function scan(
           previousCompletionRaw.address
         ) ===
           normalize(
-            marketFreshTargetAddress
+            retryPersistenceAddressV139
           )
           ? previousCompletionRaw
           : {};
 
       state.priorityCandidateCompletion = {
         address:
-          marketFreshTargetAddress,
+          retryPersistenceAddressV139,
 
         symbol:
           completionCandidate.symbol ||
@@ -20413,13 +20540,13 @@ async function scan(
         null;
       clearPriorityFreshReservation(
         state,
-        marketFreshTargetAddress
+        retryPersistenceAddressV139
       );
     }
   }
 
   else if (
-    marketFreshTargetAddress
+    retryPersistenceAddressV139
   ) {
     const previousCompletionRaw =
       state.priorityCandidateCompletion ||
@@ -20430,17 +20557,17 @@ async function scan(
         previousCompletionRaw.address
       ) ===
         normalize(
-          marketFreshTargetAddress
+          retryPersistenceAddressV139
         )
         ? previousCompletionRaw
         : {};
 
     state.priorityCandidateCompletion = {
       address:
-        marketFreshTargetAddress,
+        retryPersistenceAddressV139,
 
       symbol:
-        marketFreshTarget
+        retryPersistenceTokenV139
           ?.metadata
           ?.symbol ||
         null,
@@ -21028,7 +21155,7 @@ async function scan(
     status,
 
     scanMode:
-      "V138_CORE_TRANSIENT_RETRY_PERSISTENCE_HUNTER",
+      "V139_CORE_RETRY_FAIRNESS_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -21645,7 +21772,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V138_TRANSIENT_RETRY_PERSISTENCE_DIRECTIONAL_USD_HUNTER",
+        "V139_RETRY_FAIRNESS_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -21745,6 +21872,60 @@ async function scan(
               };
             }
           )
+    },
+
+    retryFairnessV139: {
+      enabled:
+        true,
+
+      triggered:
+        retryFairnessOverrideV139,
+
+      minimumScoreLead:
+        RETRY_FAIRNESS_MIN_SCORE_LEAD_V139,
+
+      carriedAddress:
+        pendingCompletionAddress ||
+        null,
+
+      carriedScore:
+        pendingCompletionPriorityScore ??
+        null,
+
+      challengerAddress:
+        normalize(
+          retryFairnessChallengerRow
+            ?.token
+            ?.address
+        ) ||
+        null,
+
+      challengerSymbol:
+        retryFairnessChallengerRow
+          ?.token
+          ?.metadata
+          ?.symbol ||
+        null,
+
+      challengerScore:
+        retryFairnessChallengerRow
+          ?.score ??
+        null,
+
+      freshSlotAddress:
+        marketFreshTargetAddress ||
+        null,
+
+      persistedRetryAddress:
+        retryPersistenceAddressV139 ||
+        null,
+
+      carriedRetryPreserved:
+        Boolean(
+          retryFairnessOverrideV139 &&
+          retryPersistenceAddressV139 ===
+            pendingCompletionAddress
+        )
     },
 
     priorityFreshMarketSchedule:
@@ -22785,12 +22966,45 @@ async function scan(
       telegramThresholdsUnchangedV138:
         "ENABLED_V138",
 
+      retryFairnessFreshSlot:
+        "ENABLED_V139",
+
+      retryFairnessMinimumScoreLeadV139:
+        RETRY_FAIRNESS_MIN_SCORE_LEAD_V139,
+
+      strongerNewLiveCandidateCanPreemptFreshSlotV139:
+        "ENABLED_V139",
+
+      carriedRetryStatePreservedDuringFairnessV139:
+        "ENABLED_V139",
+
+      transientRetryPersistenceUnchangedV139:
+        "ENABLED_V139",
+
+      localPriorityHandoffUnchangedV139:
+        "ENABLED_V139",
+
+      organicHolderBreadthUnchangedV139:
+        "ENABLED_V139",
+
+      blockscoutOutageResilienceUnchangedV139:
+        "ENABLED_V139",
+
+      rollingDirectionalUsdUnchangedV139:
+        "ENABLED_V139",
+
+      externalRequestRateUnchangedV139:
+        "ENABLED_V139",
+
+      telegramThresholdsUnchangedV139:
+        "ENABLED_V139",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V138_CORE_TRANSIENT_RETRY_PERSISTENCE_V77_TELEGRAM_HUNTER",
+      "V139_CORE_RETRY_FAIRNESS_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -23106,7 +23320,7 @@ async function health(
     },
 
     architecture:
-      "V138_CORE_TRANSIENT_RETRY_PERSISTENCE_V77_TELEGRAM_HUNTER",
+      "V139_CORE_RETRY_FAIRNESS_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -23505,7 +23719,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V138_CORE_TRANSIENT_RETRY_PERSISTENCE_V77_TELEGRAM_HUNTER",
+      "V139_CORE_RETRY_FAIRNESS_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -23934,7 +24148,7 @@ export default {
             ),
 
           architecture:
-            "V138_CORE_TRANSIENT_RETRY_PERSISTENCE_V77_TELEGRAM_HUNTER",
+            "V139_CORE_RETRY_FAIRNESS_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
