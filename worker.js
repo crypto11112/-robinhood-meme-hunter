@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V151
+ * V152
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -471,8 +471,22 @@
  * - Momentum prefers VERIFIED directional USD buy pressure when available
  * - Transaction-count pressure remains separate and never becomes fake USD
  * - Telegram thresholds unchanged
+
+ *
+ * V152:
+ * - Preserves V151 pre-qualification directional USD enrichment
+ * - NEW: persistent live-only Uniswap V4 activity momentum
+ * - NEW: snapshots store live-window swap/liquidity counts separately from
+ *   combined backlog activity, preventing old backlog events from faking momentum
+ * - NEW: scores verified live V4 swap acceleration and liquidity-event acceleration
+ * - NEW: sustained live swap intensity can contribute a small momentum signal
+ *   even when external market APIs are unavailable
+ * - NEW: on-chain activity can verify the momentum evidence layer without
+ *   inventing USD price, liquidity, volume or buy/sell direction
+ * - Existing holder/market/directional momentum inputs remain intact
+ * - No extra external requests and all Telegram thresholds remain unchanged
 */
-const VERSION = "V151";
+const VERSION = "V152";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -15274,6 +15288,36 @@ function createSnapshot(
             ?.h1?.sells
         : null,
 
+    v4LiveActivityVerifiedV152:
+      candidate
+        ?.liveMomentumActivityV152
+        ?.verified ===
+      true,
+
+    v4LiveSwapsV152:
+      candidate
+        ?.liveMomentumActivityV152
+        ?.verified ===
+      true
+        ? safeNumber(
+            candidate
+              .liveMomentumActivityV152
+              .swaps
+          )
+        : null,
+
+    v4LiveLiquidityEventsV152:
+      candidate
+        ?.liveMomentumActivityV152
+        ?.verified ===
+      true
+        ? safeNumber(
+            candidate
+              .liveMomentumActivityV152
+              .liquidityEvents
+          )
+        : null,
+
     top1Percent:
       concentrationVerified
         ? candidate.holders
@@ -15424,7 +15468,8 @@ function saveSnapshot(
 function momentumAnalysis(
   previous,
   market,
-  holders
+  holders,
+  liveActivityV152 = null
 ) {
   if (!previous) {
     return {
@@ -15541,6 +15586,71 @@ function momentumAnalysis(
           oldTx,
           newTx
         )
+      : null;
+
+  const onChainActivityUsableV152 =
+    liveActivityV152?.verified ===
+      true;
+
+  const previousOnChainUsableV152 =
+    previous
+      ?.v4LiveActivityVerifiedV152 ===
+      true &&
+    previous
+      ?.v4LiveSwapsV152 !==
+      null &&
+    previous
+      ?.v4LiveSwapsV152 !==
+      undefined &&
+    previous
+      ?.v4LiveLiquidityEventsV152 !==
+      null &&
+    previous
+      ?.v4LiveLiquidityEventsV152 !==
+      undefined;
+
+  const currentLiveSwapsV152 =
+    onChainActivityUsableV152
+      ? safeNumber(
+          liveActivityV152.swaps
+        )
+      : null;
+
+  const currentLiveLiquidityV152 =
+    onChainActivityUsableV152
+      ? safeNumber(
+          liveActivityV152
+            .liquidityEvents
+        )
+      : null;
+
+  const previousLiveSwapsV152 =
+    previousOnChainUsableV152
+      ? safeNumber(
+          previous.v4LiveSwapsV152
+        )
+      : null;
+
+  const previousLiveLiquidityV152 =
+    previousOnChainUsableV152
+      ? safeNumber(
+          previous
+            .v4LiveLiquidityEventsV152
+        )
+      : null;
+
+  const liveSwapDeltaV152 =
+    onChainActivityUsableV152 &&
+    previousOnChainUsableV152
+      ? currentLiveSwapsV152 -
+        previousLiveSwapsV152
+      : null;
+
+  const liveLiquidityDeltaV152 =
+    onChainActivityUsableV152 &&
+    previousOnChainUsableV152
+      ? currentLiveLiquidityV152 -
+        previousLiveLiquidityV152
       : null;
 
   let score =
@@ -15677,6 +15787,77 @@ function momentumAnalysis(
     );
   }
 
+  /*
+   * V152 live-only on-chain momentum.
+   *
+   * These signals prove activity/intensity only. They never imply USD value
+   * or buy/sell direction. Backlog logs are deliberately excluded.
+   */
+  if (
+    onChainActivityUsableV152 &&
+    previousOnChainUsableV152 &&
+    liveSwapDeltaV152 >
+      0
+  ) {
+    positiveSignals++;
+
+    const swapAccelerationStrongV152 =
+      previousLiveSwapsV152 >
+        0
+        ? currentLiveSwapsV152 >=
+          previousLiveSwapsV152 * 2
+        : currentLiveSwapsV152 >=
+          3;
+
+    score +=
+      swapAccelerationStrongV152
+        ? 18
+        : 10;
+
+    reasons.push(
+      `Live V4 swap acceleration ${previousLiveSwapsV152}→${currentLiveSwapsV152}`
+    );
+  }
+
+  else if (
+    onChainActivityUsableV152 &&
+    currentLiveSwapsV152 >=
+      3
+  ) {
+    positiveSignals++;
+
+    score +=
+      currentLiveSwapsV152 >=
+        10
+        ? 10
+        : 6;
+
+    reasons.push(
+      previousOnChainUsableV152
+        ? `Sustained live V4 swap activity ${currentLiveSwapsV152}`
+        : `Live V4 swap activity ${currentLiveSwapsV152}`
+    );
+  }
+
+  if (
+    onChainActivityUsableV152 &&
+    previousOnChainUsableV152 &&
+    liveLiquidityDeltaV152 >
+      0
+  ) {
+    positiveSignals++;
+
+    score +=
+      liveLiquidityDeltaV152 >=
+        3
+        ? 10
+        : 6;
+
+    reasons.push(
+      `Live V4 liquidity-event acceleration ${previousLiveLiquidityV152}→${currentLiveLiquidityV152}`
+    );
+  }
+
   const directionalPressureH1V151 =
     market?.directionalFlow?.h1?.verified === true
       ? safeNumber(
@@ -15758,7 +15939,8 @@ function momentumAnalysis(
     verified:
       Boolean(
         market?.verified ||
-        countersUsable
+        countersUsable ||
+        onChainActivityUsableV152
       ),
 
     score,
@@ -15792,6 +15974,31 @@ function momentumAnalysis(
 
     transactionGrowthPercent:
       txGrowth,
+
+    onChainActivityMomentumV152: {
+      verified:
+        onChainActivityUsableV152,
+      historicalComparable:
+        previousOnChainUsableV152,
+      currentLiveSwaps:
+        currentLiveSwapsV152,
+      previousLiveSwaps:
+        previousLiveSwapsV152,
+      swapDelta:
+        liveSwapDeltaV152,
+      currentLiveLiquidityEvents:
+        currentLiveLiquidityV152,
+      previousLiveLiquidityEvents:
+        previousLiveLiquidityV152,
+      liquidityEventDelta:
+        liveLiquidityDeltaV152,
+      source:
+        "UNISWAP_V4_LIVE_WINDOW_ONLY",
+      usdValueInferred:
+        false,
+      directionInferred:
+        false
+    },
 
     directionalUsdPressureV151: {
       verified:
@@ -19166,11 +19373,41 @@ async function analyzeToken(
       holders
     );
 
+  const liveMomentumActivityV152 = {
+    swaps:
+      safeNumber(
+        options
+          ?.liveMomentumActivityV152
+          ?.swaps
+      ),
+
+    liquidityEvents:
+      safeNumber(
+        options
+          ?.liveMomentumActivityV152
+          ?.liquidityEvents
+      ),
+
+    poolSpecific:
+      Boolean(
+        options
+          ?.liveMomentumActivityV152
+          ?.poolSpecific
+      ),
+
+    verified:
+      options
+        ?.liveMomentumActivityV152
+        ?.verified ===
+      true
+  };
+
   const momentum =
     momentumAnalysis(
       previous,
       market,
-      holders
+      holders,
+      liveMomentumActivityV152
     );
 
   const quality =
@@ -19232,6 +19469,8 @@ async function analyzeToken(
     holders,
 
     activity,
+
+    liveMomentumActivityV152,
 
     momentum,
 
@@ -22161,6 +22400,33 @@ async function scan(
         combinedLogs
       );
 
+    const liveMomentumActivityV152Raw =
+      activityForToken(
+        watched,
+        liveOutput.logs
+      );
+
+    const liveMomentumActivityV152 = {
+      ...liveMomentumActivityV152Raw,
+
+      verified:
+        !liveError &&
+        liveMomentumActivityV152Raw
+          .poolSpecific ===
+        true,
+
+      source:
+        "UNISWAP_V4_LIVE_WINDOW_ONLY",
+
+      fromBlock:
+        liveOutput?.fromBlock ??
+        null,
+
+      toBlock:
+        liveOutput?.toBlock ??
+        null
+    };
+
     const candidate =
       await analyzeToken(
         env,
@@ -22184,7 +22450,9 @@ async function scan(
             isPriorityCompletion,
 
           priorityCompletion:
-            isPriorityCompletion
+            isPriorityCompletion,
+
+          liveMomentumActivityV152
         }
       );
 
@@ -23416,7 +23684,9 @@ async function scan(
         momentumAnalysis(
           historicalV151,
           directionalTarget.market,
-          directionalTarget.holders
+          directionalTarget.holders,
+          directionalTarget
+            .liveMomentumActivityV152
         );
 
       directionalTarget.opportunity =
@@ -23757,7 +24027,7 @@ async function scan(
     status,
 
     scanMode:
-      "V151_CORE_PREQUAL_DIRECTIONAL_MOMENTUM_HUNTER",
+      "V152_CORE_ONCHAIN_ACTIVITY_MOMENTUM_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -24396,7 +24666,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V151_PREQUAL_DIRECTIONAL_MOMENTUM_DIRECTIONAL_USD_HUNTER",
+        "V152_ONCHAIN_ACTIVITY_MOMENTUM_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -24829,6 +25099,47 @@ async function scan(
       candidates.filter(
         qualifiesTelegram
       ).length,
+
+    onChainActivityMomentumV152: {
+      enabled:
+        true,
+      source:
+        "UNISWAP_V4_LIVE_WINDOW_ONLY",
+      externalRequestsAdded:
+        0,
+      usdValueInferred:
+        false,
+      buySellDirectionInferred:
+        false,
+      candidates:
+        candidates
+          .map(
+            candidate => ({
+              address:
+                normalize(
+                  candidate.address
+                ),
+              symbol:
+                candidate.symbol ||
+                null,
+              momentumScore:
+                candidate.momentum?.score ??
+                0,
+              momentumVerified:
+                candidate.momentum?.verified ===
+                true,
+              activity:
+                candidate
+                  .momentum
+                  ?.onChainActivityMomentumV152 ||
+                null
+            })
+          )
+          .slice(
+            0,
+            10
+          )
+    },
 
     directionalTradeEnrichment,
 
@@ -26312,12 +26623,48 @@ async function scan(
       telegramThresholdsUnchangedV151:
         "ENABLED_V151",
 
+      liveOnlyOnChainActivityMomentum:
+        "ENABLED_V152",
+
+      persistentV4ActivitySnapshotsV152:
+        "ENABLED_V152",
+
+      backlogExcludedFromMomentumV152:
+        "ENABLED_V152",
+
+      v4SwapAccelerationMomentumV152:
+        "ENABLED_V152",
+
+      v4LiquidityEventAccelerationMomentumV152:
+        "ENABLED_V152",
+
+      onChainMomentumNeverInventsUsdV152:
+        "ENABLED_V152",
+
+      onChainMomentumNeverInventsDirectionV152:
+        "ENABLED_V152",
+
+      externalRequestRateUnchangedV152:
+        "ENABLED_V152",
+
+      preQualificationDirectionalUsdUnchangedV152:
+        "ENABLED_V152",
+
+      terminalSnapshotQueueGuardUnchangedV152:
+        "ENABLED_V152",
+
+      partialHolderRetryCacheUnchangedV152:
+        "ENABLED_V152",
+
+      telegramThresholdsUnchangedV152:
+        "ENABLED_V152",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V151_CORE_PREQUAL_DIRECTIONAL_MOMENTUM_V77_TELEGRAM_HUNTER",
+      "V152_CORE_ONCHAIN_ACTIVITY_MOMENTUM_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -26633,7 +26980,7 @@ async function health(
     },
 
     architecture:
-      "V151_CORE_PREQUAL_DIRECTIONAL_MOMENTUM_V77_TELEGRAM_HUNTER",
+      "V152_CORE_ONCHAIN_ACTIVITY_MOMENTUM_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -27032,7 +27379,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V151_CORE_PREQUAL_DIRECTIONAL_MOMENTUM_V77_TELEGRAM_HUNTER",
+      "V152_CORE_ONCHAIN_ACTIVITY_MOMENTUM_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -27461,7 +27808,7 @@ export default {
             ),
 
           architecture:
-            "V151_CORE_PREQUAL_DIRECTIONAL_MOMENTUM_V77_TELEGRAM_HUNTER",
+            "V152_CORE_ONCHAIN_ACTIVITY_MOMENTUM_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
