@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V126
+ * V127
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -125,8 +125,19 @@
  * - SAFETY: incomplete 24h coverage stays UNVERIFIED rather than extrapolated
  * - SAFETY: no USD amount is inferred from buy/sell counts or total volume
  * - Preserves existing DexScreener spacing/cooldowns and Telegram thresholds
+
+ *
+ * V127:
+ * - Preserves full V126 capability set
+ * - FIX: same-run terminal target is immediately replaced by next viable candidate
+ * - FIX: final fresh-market telemetry reflects the post-analysis viable target
+ * - FIX: replacement target is reserved/persisted for the next scan
+ * - NEW: GeckoTerminal global 5-minute fresh spacing across fallback + trade feed
+ * - NEW: adaptive GeckoTerminal 429 cooldown escalation
+ * - NEW: Gecko rate-limit level persists in existing KV state
+ * - Preserves one-Gecko-request-per-scan, Dex timing and Telegram thresholds
 */
-const VERSION = "V126";
+const VERSION = "V127";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -149,6 +160,12 @@ const GECKOTERMINAL_NETWORK =
 
 const GECKOTERMINAL_429_COOLDOWN_MS =
   2 * 60 * 1000;
+
+const GECKOTERMINAL_MIN_FRESH_INTERVAL_MS =
+  5 * 60 * 1000;
+
+const GECKOTERMINAL_MAX_429_COOLDOWN_MS =
+  30 * 60 * 1000;
 
 const GECKOTERMINAL_MAX_FRESH_PER_SCAN =
   1;
@@ -7852,7 +7869,205 @@ function geckoService(
             null
         };
 
-  return state.services.geckoterminal;
+  const service =
+    state.services.geckoterminal;
+
+  service.consecutive429s =
+    safeNumber(
+      service.consecutive429s
+    );
+
+  service.lastBackoffMs =
+    safeNumber(
+      service.lastBackoffMs
+    );
+
+  if (
+    service.consecutive429s <=
+      0 &&
+    safeNumber(
+      service.total429s
+    ) >=
+      10
+  ) {
+    service.consecutive429s =
+      2;
+  }
+
+  return service;
+}
+
+function geckoFreshEligibility(
+  state
+) {
+  const service =
+    geckoService(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  const cooldownUntil =
+    safeNumber(
+      service.cooldownUntil
+    );
+
+  if (
+    cooldownUntil &&
+    now <
+      cooldownUntil
+  ) {
+    return {
+      eligible:
+        false,
+
+      reason:
+        "GECKOTERMINAL_COOLDOWN",
+
+      eligibleAt:
+        cooldownUntil
+    };
+  }
+
+  const lastRequestAt =
+    safeNumber(
+      service.lastRequestAt
+    );
+
+  const spacingEligibleAt =
+    lastRequestAt
+      ? lastRequestAt +
+        GECKOTERMINAL_MIN_FRESH_INTERVAL_MS
+      : 0;
+
+  if (
+    spacingEligibleAt &&
+    now <
+      spacingEligibleAt
+  ) {
+    return {
+      eligible:
+        false,
+
+      reason:
+        "GECKOTERMINAL_FRESH_SPACING",
+
+      eligibleAt:
+        spacingEligibleAt
+    };
+  }
+
+  return {
+    eligible:
+      true,
+
+    reason:
+      null,
+
+    eligibleAt:
+      now
+  };
+}
+
+function registerGecko429(
+  service
+) {
+  const now =
+    Date.now();
+
+  const previous429At =
+    safeNumber(
+      service.last429At
+    );
+
+  let level =
+    safeNumber(
+      service.consecutive429s
+    );
+
+  if (
+    previous429At &&
+    now -
+      previous429At <=
+      30 * 60 * 1000
+  ) {
+    level =
+      Math.min(
+        4,
+        Math.max(
+          1,
+          level +
+            1
+        )
+      );
+  }
+
+  else {
+    level =
+      1;
+  }
+
+  const backoffMs =
+    Math.min(
+      GECKOTERMINAL_MAX_429_COOLDOWN_MS,
+      GECKOTERMINAL_429_COOLDOWN_MS *
+        Math.pow(
+          2,
+          Math.max(
+            0,
+            level -
+              1
+          )
+        )
+    );
+
+  service.consecutive429s =
+    level;
+
+  service.last429At =
+    now;
+
+  service.cooldownUntil =
+    now +
+    backoffMs;
+
+  service.lastBackoffMs =
+    backoffMs;
+
+  service.lastStatus =
+    "HTTP_429";
+
+  service.total429s =
+    safeNumber(
+      service.total429s
+    ) +
+    1;
+
+  return backoffMs;
+}
+
+function registerGeckoSuccess(
+  service,
+  status
+) {
+  service.lastSuccessAt =
+    Date.now();
+
+  service.lastStatus =
+    status;
+
+  service.cooldownUntil =
+    null;
+
+  service.consecutive429s =
+    Math.max(
+      0,
+      safeNumber(
+        service.consecutive429s
+      ) -
+        1
+    );
 }
 
 function geckoRelationshipAddress(
@@ -8310,22 +8525,20 @@ async function geckoTerminalMarketData(
       state
     );
 
-  const cooldownUntil =
-    safeNumber(
-      service.cooldownUntil
+  const freshEligibility =
+    geckoFreshEligibility(
+      state
     );
 
   if (
-    cooldownUntil &&
-    Date.now() <
-      cooldownUntil
+    !freshEligibility.eligible
   ) {
     return {
       verified:
         false,
 
       status:
-        "GECKOTERMINAL_COOLDOWN",
+        freshEligibility.reason,
 
       source:
         "GECKOTERMINAL",
@@ -8333,7 +8546,14 @@ async function geckoTerminalMarketData(
       fallbackTrigger:
         trigger,
 
-      cooldownUntil
+      cooldownUntil:
+        freshEligibility.reason ===
+          "GECKOTERMINAL_COOLDOWN"
+          ? freshEligibility.eligibleAt
+          : null,
+
+      freshEligibleAt:
+        freshEligibility.eligibleAt
     };
   }
 
@@ -8411,21 +8631,10 @@ async function geckoTerminalMarketData(
       response.status ===
       429
     ) {
-      service.last429At =
-        Date.now();
-
-      service.cooldownUntil =
-        Date.now() +
-        GECKOTERMINAL_429_COOLDOWN_MS;
-
-      service.lastStatus =
-        "HTTP_429";
-
-      service.total429s =
-        safeNumber(
-          service.total429s
-        ) +
-        1;
+      const backoffMs =
+        registerGecko429(
+          service
+        );
 
       return {
         verified:
@@ -8444,7 +8653,13 @@ async function geckoTerminalMarketData(
           true,
 
         cooldownUntil:
-          service.cooldownUntil
+          service.cooldownUntil,
+
+        adaptiveBackoffMs:
+          backoffMs,
+
+        rateLimitLevel:
+          service.consecutive429s
       };
     }
 
@@ -8541,14 +8756,10 @@ async function geckoTerminalMarketData(
         trigger
     };
 
-    service.lastSuccessAt =
-      Date.now();
-
-    service.lastStatus =
-      "VERIFIED";
-
-    service.cooldownUntil =
-      null;
+    registerGeckoSuccess(
+      service,
+      "VERIFIED"
+    );
 
     saveMarketCache(
       watched,
@@ -9008,15 +9219,13 @@ async function geckoDirectionalTradeFlow(
       state
     );
 
-  const cooldownUntil =
-    safeNumber(
-      service.cooldownUntil
+  const freshEligibility =
+    geckoFreshEligibility(
+      state
     );
 
   if (
-    cooldownUntil &&
-    Date.now() <
-      cooldownUntil
+    !freshEligibility.eligible
   ) {
     return {
       attempted:
@@ -9026,9 +9235,16 @@ async function geckoDirectionalTradeFlow(
         false,
 
       status:
-        "GECKOTERMINAL_COOLDOWN",
+        freshEligibility.reason,
 
-      cooldownUntil
+      cooldownUntil:
+        freshEligibility.reason ===
+          "GECKOTERMINAL_COOLDOWN"
+          ? freshEligibility.eligibleAt
+          : null,
+
+      freshEligibleAt:
+        freshEligibility.eligibleAt
     };
   }
 
@@ -9104,21 +9320,10 @@ async function geckoDirectionalTradeFlow(
       response.status ===
         429
     ) {
-      service.last429At =
-        Date.now();
-
-      service.cooldownUntil =
-        Date.now() +
-        GECKOTERMINAL_429_COOLDOWN_MS;
-
-      service.lastStatus =
-        "HTTP_429";
-
-      service.total429s =
-        safeNumber(
-          service.total429s
-        ) +
-        1;
+      const backoffMs =
+        registerGecko429(
+          service
+        );
 
       return {
         attempted:
@@ -9134,7 +9339,13 @@ async function geckoDirectionalTradeFlow(
           true,
 
         cooldownUntil:
-          service.cooldownUntil
+          service.cooldownUntil,
+
+        adaptiveBackoffMs:
+          backoffMs,
+
+        rateLimitLevel:
+          service.consecutive429s
       };
     }
 
@@ -9269,16 +9480,12 @@ async function geckoDirectionalTradeFlow(
       h1.verified ||
       h24.verified;
 
-    service.lastSuccessAt =
-      Date.now();
-
-    service.lastStatus =
+    registerGeckoSuccess(
+      service,
       verifiedAnyWindow
         ? "VERIFIED_DIRECTIONAL_TRADES"
-        : "DIRECTIONAL_TRADES_PARTIAL";
-
-    service.cooldownUntil =
-      null;
+        : "DIRECTIONAL_TRADES_PARTIAL"
+    );
 
     return {
       attempted:
@@ -17712,6 +17919,197 @@ async function scan(
   }
 
   /*
+   * V127:
+   * If the original fresh target becomes terminal after holder analysis,
+   * replace it immediately for the NEXT scan. This cannot reclaim an already
+   * spent current-run request, but it removes stale terminal priority state.
+   */
+  let effectiveMarketFreshTarget =
+    marketFreshTarget;
+
+  let effectiveMarketFreshTargetAddress =
+    marketFreshTargetAddress;
+
+  let sameRunTargetReselection = {
+    triggered:
+      false,
+
+    rejectedAddress:
+      null,
+
+    rejectedReason:
+      null,
+
+    replacementAddress:
+      null,
+
+    replacementSymbol:
+      null,
+
+    replacementPersisted:
+      false
+  };
+
+  if (
+    marketFreshTargetAddress &&
+    sameRunTerminalAddresses
+      .has(
+        marketFreshTargetAddress
+      )
+  ) {
+    const rejectedRow =
+      sameRunTerminalCandidates
+        .find(
+          row =>
+            normalize(
+              row.candidate.address
+            ) ===
+            marketFreshTargetAddress
+        ) ||
+      null;
+
+    clearPriorityFreshReservation(
+      state,
+      marketFreshTargetAddress
+    );
+
+    const replacementRow =
+      rankedMarketFreshCandidates
+        .find(
+          row => {
+            const address =
+              normalize(
+                row.token.address
+              );
+
+            return (
+              address &&
+              address !==
+                marketFreshTargetAddress &&
+              !sameRunTerminalAddresses
+                .has(
+                  address
+                ) &&
+              preMarketCandidateAllowed(
+                row.token
+              )
+            );
+          }
+        ) ||
+      null;
+
+    effectiveMarketFreshTarget =
+      replacementRow
+        ?.token ||
+      null;
+
+    effectiveMarketFreshTargetAddress =
+      normalize(
+        effectiveMarketFreshTarget
+          ?.address
+      );
+
+    sameRunTargetReselection = {
+      triggered:
+        true,
+
+      rejectedAddress:
+        marketFreshTargetAddress,
+
+      rejectedReason:
+        rejectedRow
+          ?.terminal
+          ?.reason ||
+        "SAME_RUN_TERMINAL_RISK",
+
+      replacementAddress:
+        effectiveMarketFreshTargetAddress ||
+        null,
+
+      replacementSymbol:
+        effectiveMarketFreshTarget
+          ?.metadata
+          ?.symbol ||
+        null,
+
+      replacementPersisted:
+        false
+    };
+
+    if (
+      effectiveMarketFreshTargetAddress
+    ) {
+      reservePriorityFreshMarket(
+        state,
+        effectiveMarketFreshTargetAddress
+      );
+
+      const analyzedReplacement =
+        candidates.find(
+          candidate =>
+            normalize(
+              candidate.address
+            ) ===
+            effectiveMarketFreshTargetAddress
+        ) ||
+        null;
+
+      state.priorityCandidateCompletion = {
+        address:
+          effectiveMarketFreshTargetAddress,
+
+        symbol:
+          analyzedReplacement
+            ?.symbol ||
+          effectiveMarketFreshTarget
+            ?.metadata
+            ?.symbol ||
+          null,
+
+        firstQueuedAt:
+          Date.now(),
+
+        lastAttemptAt:
+          Date.now(),
+
+        attempts:
+          0,
+
+        blockers:
+          analyzedReplacement
+            ? completionCandidateBlockers(
+                analyzedReplacement
+              )
+            : [
+                "RESELECTED_AFTER_SAME_RUN_TERMINAL"
+              ],
+
+        marketStatus:
+          analyzedReplacement
+            ?.market
+            ?.status ||
+          null,
+
+        holderStatus:
+          analyzedReplacement
+            ?.holders
+            ?.integrity
+            ?.status ||
+          null
+      };
+
+      sameRunTargetReselection
+        .replacementPersisted =
+          true;
+    }
+
+    else {
+      state.priorityCandidateCompletion =
+        null;
+    }
+  }
+
+  /*
    * V126: spend at most one Gecko request on directional USD enrichment,
    * and only on a candidate that already passes every normal Telegram gate.
    * This does not loosen qualification; it only enriches a call we were
@@ -18041,7 +18439,7 @@ async function scan(
     status,
 
     scanMode:
-      "V126_CORE_VERIFIED_DIRECTIONAL_USD_FLOW_HUNTER",
+      "V127_CORE_SAME_RUN_RESELECTION_GECKO_GUARD_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -18267,6 +18665,30 @@ async function scan(
             safeNumber(
               gecko.totalRequests
             ),
+
+          consecutive429s:
+            safeNumber(
+              gecko.consecutive429s
+            ),
+
+          lastBackoffMs:
+            safeNumber(
+              gecko.lastBackoffMs
+            ) ||
+            null,
+
+          minFreshIntervalMs:
+            GECKOTERMINAL_MIN_FRESH_INTERVAL_MS,
+
+          nextFreshEligibleAt:
+            safeNumber(
+              gecko.lastRequestAt
+            )
+              ? safeNumber(
+                  gecko.lastRequestAt
+                ) +
+                GECKOTERMINAL_MIN_FRESH_INTERVAL_MS
+              : null,
 
           lastRequestAt:
             gecko.lastRequestAt ||
@@ -18571,7 +18993,7 @@ async function scan(
       ).length,
 
     marketFreshTarget:
-      marketFreshTargetAddress ||
+      effectiveMarketFreshTargetAddress ||
       null,
 
     preMarketExclusion: {
@@ -18594,7 +19016,7 @@ async function scan(
         null,
 
       selectedAddress:
-        marketFreshTargetAddress ||
+        effectiveMarketFreshTargetAddress ||
         null
     },
 
@@ -18624,16 +19046,16 @@ async function scan(
         null,
 
       nextMarketFreshTarget:
-        marketFreshTargetAddress ||
+        effectiveMarketFreshTargetAddress ||
         null
     },
 
     marketFreshPriority: {
       strategy:
-        "V126_VERIFIED_DIRECTIONAL_USD_SAME_RUN_TERMINAL_HUNTER",
+        "V127_POST_ANALYSIS_RESELECTION_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
-        marketFreshTargetAddress ||
+        effectiveMarketFreshTargetAddress ||
         null,
 
       ranked:
@@ -18735,7 +19157,7 @@ async function scan(
     priorityFreshMarketSchedule:
       priorityFreshSchedule(
         state,
-        marketFreshTargetAddress
+        effectiveMarketFreshTargetAddress
       ),
 
     priorityCandidateCompletion:
@@ -18765,6 +19187,8 @@ async function scan(
       ).length,
 
     directionalTradeEnrichment,
+
+    sameRunTargetReselection,
 
     sameRunTerminalCleanup: {
       enabled:
@@ -19353,12 +19777,36 @@ async function scan(
       telegramThresholdsUnchangedV126:
         "ENABLED_V126",
 
+      sameRunTerminalTargetReselection:
+        "ENABLED_V127",
+
+      postAnalysisFreshTargetTelemetry:
+        "ENABLED_V127",
+
+      nextViableTargetPersistence:
+        "ENABLED_V127",
+
+      geckoGlobalFreshSpacingMs:
+        GECKOTERMINAL_MIN_FRESH_INTERVAL_MS,
+
+      geckoAdaptive429Backoff:
+        "ENABLED_V127",
+
+      geckoMax429CooldownMs:
+        GECKOTERMINAL_MAX_429_COOLDOWN_MS,
+
+      geckoRateLimitHistoryPersistence:
+        "ENABLED_V127",
+
+      telegramThresholdsUnchangedV127:
+        "ENABLED_V127",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V126_CORE_VERIFIED_DIRECTIONAL_USD_FLOW_V77_TELEGRAM_HUNTER",
+      "V127_CORE_SAME_RUN_RESELECTION_GECKO_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -19674,7 +20122,7 @@ async function health(
     },
 
     architecture:
-      "V126_CORE_VERIFIED_DIRECTIONAL_USD_FLOW_V77_TELEGRAM_HUNTER",
+      "V127_CORE_SAME_RUN_RESELECTION_GECKO_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -20073,7 +20521,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V126_CORE_VERIFIED_DIRECTIONAL_USD_FLOW_V77_TELEGRAM_HUNTER",
+      "V127_CORE_SAME_RUN_RESELECTION_GECKO_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -20502,7 +20950,7 @@ export default {
             ),
 
           architecture:
-            "V126_CORE_VERIFIED_DIRECTIONAL_USD_FLOW_V77_TELEGRAM_HUNTER",
+            "V127_CORE_SAME_RUN_RESELECTION_GECKO_GUARD_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
