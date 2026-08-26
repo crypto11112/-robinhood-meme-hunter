@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V137
+ * V138
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -273,8 +273,22 @@
  * - FIX: terminal priority candidate can immediately yield to the next viable
  *   ranked target in the same run before lower-priority budget is consumed
  * - Telegram thresholds, API rates and request caps unchanged
+
+ *
+ * V138:
+ * - Preserves V137 local priority handoff
+ * - Preserves V136 organic-holder breadth protection
+ * - NEW: unresolved priority candidates persist across transient provider
+ *   failures/guards instead of being marked complete too early
+ * - Controlled retry policy: maximum 12 attempts or 6 hours
+ * - Retry persistence covers unverified market, holder evidence, or risk
+ * - Terminal, excluded, invalid, fully resolved, expired, or retry-exhausted
+ *   candidates still leave the priority lane
+ * - Retry counters are address-scoped so a new target cannot inherit another
+ *   token's retry history
+ * - Telegram thresholds, API rates and request caps unchanged
 */
-const VERSION = "V137";
+const VERSION = "V138";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -18825,8 +18839,15 @@ function completionCandidateBlockers(
   return blockers;
 }
 
+const PRIORITY_COMPLETION_MAX_ATTEMPTS_V138 =
+  12;
+
+const PRIORITY_COMPLETION_MAX_AGE_MS_V138 =
+  6 * 60 * 60 * 1000;
+
 function shouldKeepCompletionCandidate(
-  candidate
+  candidate,
+  previousCompletion = null
 ) {
 
   const terminal =
@@ -18850,15 +18871,98 @@ function shouldKeepCompletionCandidate(
   }
 
   /*
-   * Once market and risk are verified, the candidate can receive a real
-   * Telegram decision. Do not let a clearly completed loser monopolize
-   * the persistent completion lane.
+   * Once market and risk are verified, the candidate has enough evidence for
+   * a real Telegram qualification decision and must not monopolize retries.
    */
   if (
     candidate?.market?.verified &&
     candidate?.risk?.verified
   ) {
     return false;
+  }
+
+  const candidateAddress =
+    normalize(
+      candidate?.address
+    );
+
+  const previousAddress =
+    normalize(
+      previousCompletion?.address
+    );
+
+  const samePreviousCandidate =
+    Boolean(
+      candidateAddress &&
+      previousAddress &&
+      candidateAddress ===
+        previousAddress
+    );
+
+  const attempts =
+    samePreviousCandidate
+      ? safeNumber(
+          previousCompletion?.attempts
+        )
+      : 0;
+
+  const firstQueuedAt =
+    samePreviousCandidate
+      ? safeNumber(
+          previousCompletion?.firstQueuedAt
+        )
+      : 0;
+
+  const ageMs =
+    firstQueuedAt > 0
+      ? Math.max(
+          0,
+          Date.now() -
+            firstQueuedAt
+        )
+      : 0;
+
+  const retryExhausted =
+    attempts >=
+      PRIORITY_COMPLETION_MAX_ATTEMPTS_V138 ||
+    ageMs >=
+      PRIORITY_COMPLETION_MAX_AGE_MS_V138;
+
+  if (
+    retryExhausted
+  ) {
+    return false;
+  }
+
+  const holderEvidenceVerified =
+    Boolean(
+      candidate
+        ?.holders
+        ?.concentrationVerified ||
+      candidate
+        ?.holders
+        ?.countersVerified
+    );
+
+  const transientEvidenceGap =
+    !candidate
+      ?.market
+      ?.verified ||
+    !holderEvidenceVerified ||
+    !candidate
+      ?.risk
+      ?.verified;
+
+  /*
+   * V138:
+   * Provider guards/cooldowns/outages can leave an otherwise valid candidate
+   * unresolved. Preserve it for a bounded retry even if it has not yet built
+   * enough activity signals to satisfy the older V115/V116 persistence rule.
+   */
+  if (
+    transientEvidenceGap
+  ) {
+    return true;
   }
 
   return (
@@ -18879,6 +18983,7 @@ function shouldKeepCompletionCandidate(
     ) >= 2
   );
 }
+
 
 /* =========================================================
    MAIN SCAN
@@ -19479,6 +19584,14 @@ async function scan(
 
     blockers:
       [],
+
+    retryPolicyV138: {
+      maxAttempts:
+        PRIORITY_COMPLETION_MAX_ATTEMPTS_V138,
+
+      maxAgeMs:
+        PRIORITY_COMPLETION_MAX_AGE_MS_V138
+    },
 
     priorityFreshSchedule:
       priorityFreshScheduleTelemetry,
@@ -20208,7 +20321,8 @@ async function scan(
     const keepForRetry =
       !terminalReject.terminal &&
       shouldKeepCompletionCandidate(
-        completionCandidate
+        completionCandidate,
+        state.priorityCandidateCompletion
       );
 
     priorityCompletionTelemetry.symbol =
@@ -20242,9 +20356,19 @@ async function scan(
     if (
       keepForRetry
     ) {
-      const previousCompletion =
+      const previousCompletionRaw =
         state.priorityCandidateCompletion ||
         {};
+
+      const previousCompletion =
+        normalize(
+          previousCompletionRaw.address
+        ) ===
+          normalize(
+            marketFreshTargetAddress
+          )
+          ? previousCompletionRaw
+          : {};
 
       state.priorityCandidateCompletion = {
         address:
@@ -20297,9 +20421,19 @@ async function scan(
   else if (
     marketFreshTargetAddress
   ) {
-    const previousCompletion =
+    const previousCompletionRaw =
       state.priorityCandidateCompletion ||
       {};
+
+    const previousCompletion =
+      normalize(
+        previousCompletionRaw.address
+      ) ===
+        normalize(
+          marketFreshTargetAddress
+        )
+        ? previousCompletionRaw
+        : {};
 
     state.priorityCandidateCompletion = {
       address:
@@ -20894,7 +21028,7 @@ async function scan(
     status,
 
     scanMode:
-      "V137_CORE_LOCAL_PRIORITY_HANDOFF_HUNTER",
+      "V138_CORE_TRANSIENT_RETRY_PERSISTENCE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -21511,7 +21645,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V137_LOCAL_PRIORITY_HANDOFF_DIRECTIONAL_USD_HUNTER",
+        "V138_TRANSIENT_RETRY_PERSISTENCE_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -22621,12 +22755,42 @@ async function scan(
       telegramThresholdsUnchangedV137:
         "ENABLED_V137",
 
+      transientPriorityRetryPersistence:
+        "ENABLED_V138",
+
+      priorityRetryMaxAttemptsV138:
+        PRIORITY_COMPLETION_MAX_ATTEMPTS_V138,
+
+      priorityRetryMaxAgeMsV138:
+        PRIORITY_COMPLETION_MAX_AGE_MS_V138,
+
+      addressScopedPriorityRetryHistoryV138:
+        "ENABLED_V138",
+
+      localPriorityHandoffUnchangedV138:
+        "ENABLED_V138",
+
+      organicHolderBreadthUnchangedV138:
+        "ENABLED_V138",
+
+      blockscoutOutageResilienceUnchangedV138:
+        "ENABLED_V138",
+
+      rollingDirectionalUsdUnchangedV138:
+        "ENABLED_V138",
+
+      externalRequestRateUnchangedV138:
+        "ENABLED_V138",
+
+      telegramThresholdsUnchangedV138:
+        "ENABLED_V138",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V137_CORE_LOCAL_PRIORITY_HANDOFF_V77_TELEGRAM_HUNTER",
+      "V138_CORE_TRANSIENT_RETRY_PERSISTENCE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -22942,7 +23106,7 @@ async function health(
     },
 
     architecture:
-      "V137_CORE_LOCAL_PRIORITY_HANDOFF_V77_TELEGRAM_HUNTER",
+      "V138_CORE_TRANSIENT_RETRY_PERSISTENCE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -23341,7 +23505,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V137_CORE_LOCAL_PRIORITY_HANDOFF_V77_TELEGRAM_HUNTER",
+      "V138_CORE_TRANSIENT_RETRY_PERSISTENCE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -23770,7 +23934,7 @@ export default {
             ),
 
           architecture:
-            "V137_CORE_LOCAL_PRIORITY_HANDOFF_V77_TELEGRAM_HUNTER",
+            "V138_CORE_TRANSIENT_RETRY_PERSISTENCE_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
