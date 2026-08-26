@@ -249,6 +249,7 @@
  * - NEW: carried priority candidates that become terminal in the same run
  *   immediately yield priority to the next viable fresh-market target
  * - NEW: replacement target is inserted into the same-run analysis queue
+ * - FIXED BUILD: mutable market target + valid ranked replacement source
  * - No increase to the 42-request cap, API frequency, or Telegram thresholds
 */
 const VERSION = "V135";
@@ -19294,14 +19295,14 @@ async function scan(
           a.score
       );
 
-  const marketFreshTarget =
+  let marketFreshTarget =
     pendingCompletionToken ||
     rankedMarketFreshCandidates
       [0]
       ?.token ||
     null;
 
-  const marketFreshTargetAddress =
+  let marketFreshTargetAddress =
     normalize(
       marketFreshTarget?.address
     );
@@ -19861,22 +19862,14 @@ async function scan(
       };
 
       const v135RankedReplacement =
-        (
-          marketFreshPriority?.ranked ||
-          []
-        )
+        rankedMarketFreshCandidates
           .map(
             ranked =>
-              watchedTokens.find(
-                item =>
-                  normalize(
-                    item?.address
-                  ) ===
-                  normalize(
-                    ranked?.address
-                  )
-              ) ||
-              ranked
+              ranked?.token ||
+              null
+          )
+          .filter(
+            Boolean
           )
           .find(
             item => {
