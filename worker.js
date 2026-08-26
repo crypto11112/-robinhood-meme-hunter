@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V153
+ * V154
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -498,8 +498,15 @@
  * - Does not promote price/liquidity/marketCap/FDV or market.verified
  * - Keeps Gecko cooldown, 5m spacing and one-fresh-request-per-scan
  * - Adds no external requests and changes no Telegram thresholds
+
+ *
+ * V154 HOTFIX:
+ * - Preserves all V153 functionality
+ * - Fixes the V153 Gecko pool-identity scope ReferenceError
+ * - Keeps the pool identity source variable inside directional enrichment
+ * - No request-rate, scoring, market-verification or Telegram changes
 */
-const VERSION = "V153";
+const VERSION = "V154";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -8856,11 +8863,6 @@ function geckoService(
 function geckoFreshEligibility(
   state
 ) {
-  const poolIdentitySourceV153 =
-    marketIdentityVerifiedV153
-      ? "VERIFIED_MARKET"
-      : "ONCHAIN_V4_POOL_IDENTITY_V153";
-
   const service =
     geckoService(
       state
@@ -11116,6 +11118,11 @@ async function geckoDirectionalTradeFlow(
         "TARGET_POOL_SIDE_UNVERIFIED"
     };
   }
+
+  const poolIdentitySourceV153 =
+    marketIdentityVerifiedV153
+      ? "VERIFIED_MARKET"
+      : "ONCHAIN_V4_POOL_IDENTITY_V153";
 
   const service =
     geckoService(
@@ -24258,7 +24265,7 @@ async function scan(
     status,
 
     scanMode:
-      "V153_CORE_ONCHAIN_POOL_IDENTITY_DIRECTIONAL_USD_HUNTER",
+      "V154_CORE_ONCHAIN_POOL_IDENTITY_SCOPE_HOTFIX_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -24897,7 +24904,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V153_ONCHAIN_POOL_IDENTITY_DIRECTIONAL_USD_HUNTER",
+        "V154_ONCHAIN_POOL_IDENTITY_SCOPE_HOTFIX_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -26926,12 +26933,27 @@ async function scan(
       telegramThresholdsUnchangedV153:
         "ENABLED_V153",
 
+      geckoPoolIdentityScopeHotfix:
+        "FIXED_V154",
+
+      marketIdentityReferenceScopedToDirectionalFlowV154:
+        "ENABLED_V154",
+
+      onChainPoolIdentityDirectionalUnchangedV154:
+        "ENABLED_V154",
+
+      noExternalRequestRateChangeV154:
+        "ENABLED_V154",
+
+      telegramThresholdsUnchangedV154:
+        "ENABLED_V154",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V153_CORE_ONCHAIN_POOL_IDENTITY_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
+      "V154_CORE_ONCHAIN_POOL_IDENTITY_SCOPE_HOTFIX_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -27247,7 +27269,7 @@ async function health(
     },
 
     architecture:
-      "V153_CORE_ONCHAIN_POOL_IDENTITY_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
+      "V154_CORE_ONCHAIN_POOL_IDENTITY_SCOPE_HOTFIX_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -27646,7 +27668,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V153_CORE_ONCHAIN_POOL_IDENTITY_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
+      "V154_CORE_ONCHAIN_POOL_IDENTITY_SCOPE_HOTFIX_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -28075,7 +28097,7 @@ export default {
             ),
 
           architecture:
-            "V153_CORE_ONCHAIN_POOL_IDENTITY_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
+            "V154_CORE_ONCHAIN_POOL_IDENTITY_SCOPE_HOTFIX_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
