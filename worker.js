@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V152
+ * V153
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -485,8 +485,21 @@
  *   inventing USD price, liquidity, volume or buy/sell direction
  * - Existing holder/market/directional momentum inputs remain intact
  * - No extra external requests and all Telegram thresholds remain unchanged
+
+ *
+ * V153:
+ * - Preserves V152 live-only on-chain momentum
+ * - Derives Gecko-compatible V4 pool identity from decoded Initialize mappings
+ * - Uses the Uniswap V4 32-byte poolId directly for Gecko pool trade queries
+ * - Only accepts candidate + known quote/native ZERO quote pools
+ * - Allows protected Gecko directional USD enrichment without Dex market
+ *   verification when the on-chain pool identity is verified
+ * - Gecko trade rows still provide the actual USD amounts
+ * - Does not promote price/liquidity/marketCap/FDV or market.verified
+ * - Keeps Gecko cooldown, 5m spacing and one-fresh-request-per-scan
+ * - Adds no external requests and changes no Telegram thresholds
 */
-const VERSION = "V152";
+const VERSION = "V153";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -7562,6 +7575,117 @@ function activeTokensFromLogs(
   };
 }
 
+
+function onChainPoolIdentityV153(
+  watched
+) {
+  const token =
+    normalize(
+      watched?.address
+    );
+
+  if (
+    !isAddress(token) ||
+    token === ZERO ||
+    knownQuote(token)
+  ) {
+    return {
+      verified: false,
+      status: "TOKEN_NOT_ELIGIBLE"
+    };
+  }
+
+  const pools =
+    Array.isArray(watched?.pools)
+      ? watched.pools
+      : [];
+
+  const matches = [];
+
+  for (const pool of pools) {
+    const poolId =
+      normalize(pool?.poolId);
+
+    const currency0 =
+      normalize(pool?.currency0);
+
+    const currency1 =
+      normalize(pool?.currency1);
+
+    if (
+      !/^0x[0-9a-f]{64}$/.test(
+        String(poolId || "")
+      ) ||
+      !isAddress(currency0) ||
+      !isAddress(currency1)
+    ) {
+      continue;
+    }
+
+    const tokenIs0 =
+      currency0 === token;
+
+    const tokenIs1 =
+      currency1 === token;
+
+    if (!tokenIs0 && !tokenIs1) {
+      continue;
+    }
+
+    const quoteToken =
+      tokenIs0
+        ? currency1
+        : currency0;
+
+    const quoteVerified =
+      quoteToken === ZERO ||
+      knownQuote(quoteToken);
+
+    if (!quoteVerified) {
+      continue;
+    }
+
+    matches.push({
+      verified: true,
+      status:
+        "ONCHAIN_V4_POOL_IDENTITY_VERIFIED",
+      source:
+        "UNISWAP_V4_INITIALIZE_POOL_ID",
+      poolId,
+      pairAddress: poolId,
+      candidateAddress: token,
+      quoteTokenAddress: quoteToken,
+      nativeQuote:
+        quoteToken === ZERO,
+      /*
+       * For candidate/known-quote Gecko V4 pools the candidate is represented
+       * as the base asset. This is only asserted for deterministic quote pools.
+       */
+      targetTokenSide: "BASE",
+      blockNumber:
+        pool?.blockNumber || null,
+      transactionHash:
+        pool?.transactionHash || null
+    });
+  }
+
+  if (!matches.length) {
+    return {
+      verified: false,
+      status:
+        "NO_KNOWN_QUOTE_V4_POOL"
+    };
+  }
+
+  matches.sort(
+    (a, b) =>
+      safeNumber(b?.blockNumber) -
+      safeNumber(a?.blockNumber)
+  );
+
+  return matches[0];
+}
+
 function activityForToken(
   watched,
   logs
@@ -8732,6 +8856,11 @@ function geckoService(
 function geckoFreshEligibility(
   state
 ) {
+  const poolIdentitySourceV153 =
+    marketIdentityVerifiedV153
+      ? "VERIFIED_MARKET"
+      : "ONCHAIN_V4_POOL_IDENTITY_V153";
+
   const service =
     geckoService(
       state
@@ -10258,9 +10387,15 @@ function updateDirectionalTradeLedger(
     candidate?.market ||
     {};
 
+  const onChainIdentityV153 =
+    candidate
+      ?.onChainPoolIdentityV153;
+
   const poolKey =
     String(
       market.pairAddress ||
+      onChainIdentityV153
+        ?.pairAddress ||
       ""
     ).toLowerCase();
 
@@ -10271,8 +10406,22 @@ function updateDirectionalTradeLedger(
 
   const targetSide =
     String(
-      market.targetTokenSide ||
-      ""
+      (
+        String(
+          market.targetTokenSide ||
+          ""
+        ).toUpperCase() ===
+          "BASE" ||
+        String(
+          market.targetTokenSide ||
+          ""
+        ).toUpperCase() ===
+          "QUOTE"
+      )
+        ? market.targetTokenSide
+        : onChainIdentityV153
+            ?.targetTokenSide ||
+          ""
     ).toUpperCase();
 
   if (
@@ -10873,26 +11022,43 @@ async function geckoDirectionalTradeFlow(
   const market =
     candidate?.market;
 
+  const onChainIdentityV153 =
+    candidate
+      ?.onChainPoolIdentityV153;
+
+  const marketIdentityVerifiedV153 =
+    market?.verified === true;
+
+  const onChainIdentityVerifiedV153 =
+    onChainIdentityV153
+      ?.verified === true;
+
   if (
-    market?.verified !==
-      true
+    !marketIdentityVerifiedV153 &&
+    !onChainIdentityVerifiedV153
   ) {
     return {
-      attempted:
-        false,
-
-      verifiedAnyWindow:
-        false,
-
+      attempted: false,
+      verifiedAnyWindow: false,
       status:
-        "MARKET_UNVERIFIED"
+        "MARKET_AND_ONCHAIN_POOL_IDENTITY_UNVERIFIED"
     };
   }
 
   const poolAddress =
     String(
-      market?.pairAddress ||
-      ""
+      marketIdentityVerifiedV153
+        ? (
+            market?.pairAddress ||
+            onChainIdentityV153
+              ?.pairAddress ||
+            ""
+          )
+        : (
+            onChainIdentityV153
+              ?.pairAddress ||
+            ""
+          )
     );
 
   if (
@@ -10912,8 +11078,25 @@ async function geckoDirectionalTradeFlow(
 
   const targetSide =
     String(
-      market?.targetTokenSide ||
-      ""
+      (
+        marketIdentityVerifiedV153 &&
+        (
+          String(
+            market?.targetTokenSide ||
+            ""
+          ).toUpperCase() ===
+            "BASE" ||
+          String(
+            market?.targetTokenSide ||
+            ""
+          ).toUpperCase() ===
+            "QUOTE"
+        )
+      )
+        ? market.targetTokenSide
+        : onChainIdentityV153
+            ?.targetTokenSide ||
+          ""
     ).toUpperCase();
 
   if (
@@ -11304,6 +11487,15 @@ async function geckoDirectionalTradeFlow(
 
       source:
         "GECKOTERMINAL_POOL_TRADES",
+
+      poolIdentitySourceV153,
+
+      onChainPoolIdentityUsedV153:
+        !marketIdentityVerifiedV153 &&
+        onChainIdentityVerifiedV153,
+
+      marketVerifiedForPoolIdentityV153:
+        marketIdentityVerifiedV153,
 
       poolAddress,
 
@@ -15975,6 +16167,30 @@ function momentumAnalysis(
     transactionGrowthPercent:
       txGrowth,
 
+    onChainPoolIdentityDirectionalV153: {
+      enabled: true,
+      externalRequestsAdded: 0,
+      marketVerificationPromoted: false,
+      strictDirectionalUsdVerificationPreserved: true,
+      candidates:
+        candidates
+          .map(
+            candidate => ({
+              address:
+                normalize(
+                  candidate.address
+                ),
+              symbol:
+                candidate.symbol || null,
+              identity:
+                candidate
+                  .onChainPoolIdentityV153 ||
+                null
+            })
+          )
+          .slice(0, 10)
+    },
+
     onChainActivityMomentumV152: {
       verified:
         onChainActivityUsableV152,
@@ -19324,6 +19540,11 @@ async function analyzeToken(
       );
   }
 
+  const onChainPoolIdentity =
+    onChainPoolIdentityV153(
+      watched
+    );
+
   const onChainMarketEvidence =
     onChainV4MarketEvidence(
       watched,
@@ -19469,6 +19690,9 @@ async function analyzeToken(
     holders,
 
     activity,
+
+    onChainPoolIdentityV153:
+      onChainPoolIdentity,
 
     liveMomentumActivityV152,
 
@@ -23614,17 +23838,24 @@ async function scan(
       .filter(
         candidate =>
           candidate?.validERC20 === true &&
-          candidate?.market?.verified === true &&
-          Boolean(
-            candidate?.market?.pairAddress
-          ) &&
           (
-            String(
-              candidate?.market?.targetTokenSide || ""
-            ).toUpperCase() === "BASE" ||
-            String(
-              candidate?.market?.targetTokenSide || ""
-            ).toUpperCase() === "QUOTE"
+            (
+              candidate?.market?.verified === true &&
+              Boolean(
+                candidate?.market?.pairAddress
+              ) &&
+              (
+                String(
+                  candidate?.market?.targetTokenSide || ""
+                ).toUpperCase() === "BASE" ||
+                String(
+                  candidate?.market?.targetTokenSide || ""
+                ).toUpperCase() === "QUOTE"
+              )
+            ) ||
+            candidate
+              ?.onChainPoolIdentityV153
+              ?.verified === true
           ) &&
           !sameRunTerminalAddresses.has(
             normalize(
@@ -23653,7 +23884,7 @@ async function scan(
     alreadyQualifiedDirectionalTargetV151
       ? "ALREADY_TELEGRAM_QUALIFIED"
       : directionalTarget
-        ? "PREQUAL_HIGHEST_ANALYSIS_PRIORITY_VERIFIED_MARKET"
+        ? "PREQUAL_HIGHEST_PRIORITY_VERIFIED_MARKET_OR_ONCHAIN_POOL"
         : "NO_VERIFIED_MARKET_CANDIDATE";
 
   if (
@@ -24027,7 +24258,7 @@ async function scan(
     status,
 
     scanMode:
-      "V152_CORE_ONCHAIN_ACTIVITY_MOMENTUM_HUNTER",
+      "V153_CORE_ONCHAIN_POOL_IDENTITY_DIRECTIONAL_USD_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -24666,7 +24897,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V152_ONCHAIN_ACTIVITY_MOMENTUM_DIRECTIONAL_USD_HUNTER",
+        "V153_ONCHAIN_POOL_IDENTITY_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -26659,12 +26890,48 @@ async function scan(
       telegramThresholdsUnchangedV152:
         "ENABLED_V152",
 
+      onChainV4PoolIdentityForDirectionalUsd:
+        "ENABLED_V153",
+
+      uniswapV4PoolIdAsGeckoPoolIdV153:
+        "ENABLED_V153",
+
+      knownQuoteOnlyPoolIdentityV153:
+        "ENABLED_V153",
+
+      nativeZeroQuoteIdentityV153:
+        "ENABLED_V153",
+
+      directionalUsdNoLongerRequiresDexVerifiedMarketV153:
+        "ENABLED_V153",
+
+      marketVerificationNeverPromotedByPoolIdentityV153:
+        "ENABLED_V153",
+
+      geckoTradeRowsStillRequiredForUsdV153:
+        "ENABLED_V153",
+
+      noExtraExternalRequestsV153:
+        "ENABLED_V153",
+
+      geckoFreshSpacingUnchangedV153:
+        "ENABLED_V153",
+
+      geckoOneFreshPerScanUnchangedV153:
+        "ENABLED_V153",
+
+      onChainActivityMomentumUnchangedV153:
+        "ENABLED_V153",
+
+      telegramThresholdsUnchangedV153:
+        "ENABLED_V153",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V152_CORE_ONCHAIN_ACTIVITY_MOMENTUM_V77_TELEGRAM_HUNTER",
+      "V153_CORE_ONCHAIN_POOL_IDENTITY_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -26980,7 +27247,7 @@ async function health(
     },
 
     architecture:
-      "V152_CORE_ONCHAIN_ACTIVITY_MOMENTUM_V77_TELEGRAM_HUNTER",
+      "V153_CORE_ONCHAIN_POOL_IDENTITY_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -27379,7 +27646,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V152_CORE_ONCHAIN_ACTIVITY_MOMENTUM_V77_TELEGRAM_HUNTER",
+      "V153_CORE_ONCHAIN_POOL_IDENTITY_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -27808,7 +28075,7 @@ export default {
             ),
 
           architecture:
-            "V152_CORE_ONCHAIN_ACTIVITY_MOMENTUM_V77_TELEGRAM_HUNTER",
+            "V153_CORE_ONCHAIN_POOL_IDENTITY_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
