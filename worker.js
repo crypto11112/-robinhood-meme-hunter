@@ -261,8 +261,20 @@
  * - Thin-holder tokens remain LOW if mathematically valid, but cannot gain
  *   false healthy-concentration opportunity or signal-confirmation bonuses
  * - Telegram thresholds, API rates and request caps unchanged
+
+ *
+ * V137:
+ * - Preserves V136 organic-holder breadth protection
+ * - Preserves V135 terminal-priority handoff architecture
+ * - FIX: same-run terminal handoff no longer depends on persisted
+ *   state.priorityCandidateCompletion.address during analysis
+ * - FIX: handoff uses the actual local isPriorityCompletion flag for the
+ *   candidate currently being analysed
+ * - FIX: terminal priority candidate can immediately yield to the next viable
+ *   ranked target in the same run before lower-priority budget is consumed
+ * - Telegram thresholds, API rates and request caps unchanged
 */
-const VERSION = "V136";
+const VERSION = "V137";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -19929,12 +19941,12 @@ async function scan(
         candidate?.address
       );
 
-    const v135CarriedPriorityAddress =
-      normalize(
-        state
-          ?.priorityCandidateCompletion
-          ?.address
-      );
+    const v137ActivePriorityAddress =
+      isPriorityCompletion
+        ? v135CurrentAddress
+        : normalize(
+            marketFreshTargetAddress
+          );
 
     const v135HolderTerminalEvidence =
       Boolean(
@@ -19972,9 +19984,13 @@ async function scan(
           };
 
     if (
-      v135CarriedPriorityAddress &&
-      v135CurrentAddress === v135CarriedPriorityAddress &&
-      v135SameRunTerminal?.terminal === true
+      isPriorityCompletion &&
+      v137ActivePriorityAddress &&
+      v135CurrentAddress ===
+        v137ActivePriorityAddress &&
+      v135SameRunTerminal
+        ?.terminal ===
+        true
     ) {
       v135TerminalPriorityHandoff = {
         triggered: true,
@@ -20878,7 +20894,7 @@ async function scan(
     status,
 
     scanMode:
-      "V136_CORE_ORGANIC_HOLDER_BREADTH_HUNTER",
+      "V137_CORE_LOCAL_PRIORITY_HANDOFF_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -21495,7 +21511,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V136_ORGANIC_HOLDER_BREADTH_DIRECTIONAL_USD_HUNTER",
+        "V137_LOCAL_PRIORITY_HANDOFF_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -21666,7 +21682,10 @@ async function scan(
           .replacementSymbol,
       replacementInserted:
         v135TerminalPriorityHandoff
-          .replacementInserted
+          .replacementInserted,
+
+      prioritySource:
+        "LOCAL_IS_PRIORITY_COMPLETION_V137"
     },
 
     blockscoutHolderOutageProtection: {
@@ -22578,12 +22597,36 @@ async function scan(
       telegramThresholdsUnchangedV136:
         "ENABLED_V136",
 
+      localPriorityCompletionHandoffFix:
+        "ENABLED_V137",
+
+      persistedPriorityAddressDependencyRemovedV137:
+        "ENABLED_V137",
+
+      immediateTerminalPriorityBudgetHandoffV137:
+        "ENABLED_V137",
+
+      organicHolderBreadthUnchangedV137:
+        "ENABLED_V137",
+
+      blockscoutOutageResilienceUnchangedV137:
+        "ENABLED_V137",
+
+      rollingDirectionalUsdUnchangedV137:
+        "ENABLED_V137",
+
+      externalRequestRateUnchangedV137:
+        "ENABLED_V137",
+
+      telegramThresholdsUnchangedV137:
+        "ENABLED_V137",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V136_CORE_ORGANIC_HOLDER_BREADTH_V77_TELEGRAM_HUNTER",
+      "V137_CORE_LOCAL_PRIORITY_HANDOFF_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -22899,7 +22942,7 @@ async function health(
     },
 
     architecture:
-      "V136_CORE_ORGANIC_HOLDER_BREADTH_V77_TELEGRAM_HUNTER",
+      "V137_CORE_LOCAL_PRIORITY_HANDOFF_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -23298,7 +23341,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V136_CORE_ORGANIC_HOLDER_BREADTH_V77_TELEGRAM_HUNTER",
+      "V137_CORE_LOCAL_PRIORITY_HANDOFF_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -23727,7 +23770,7 @@ export default {
             ),
 
           architecture:
-            "V136_CORE_ORGANIC_HOLDER_BREADTH_V77_TELEGRAM_HUNTER",
+            "V137_CORE_LOCAL_PRIORITY_HANDOFF_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
