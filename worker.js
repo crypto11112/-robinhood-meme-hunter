@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V140
+ * V141
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -318,8 +318,22 @@
  * - Conservative 7-day / near-zero-activity policy protects the bot's stated
  *   early-discovery mission without treating ordinary 24h maturity as stale
  * - Telegram thresholds, API request frequency and hard budgets unchanged
+
+ *
+ * V141:
+ * - Preserves V140 retry relevance expiry
+ * - Preserves V139 retry fairness
+ * - Preserves V138 transient retry persistence
+ * - Preserves V137 local terminal-priority handoff
+ * - Preserves V136 organic-holder breadth protection
+ * - NEW: immediate same-run fresh-target handoff when validation rejects the
+ *   selected target as a tokenized security, infrastructure token or invalid ERC-20
+ * - Replacement comes from the existing ranked viable set and is moved to the
+ *   next analysis position so it inherits the remaining fresh-market opportunity
+ * - Existing carried retry state remains separate from the temporary fresh target
+ * - Telegram thresholds, external API frequency and hard request caps unchanged
 */
-const VERSION = "V140";
+const VERSION = "V141";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -20013,6 +20027,22 @@ async function scan(
       ...analysisSelected
     ];
 
+  const v141AnalysedAddresses =
+    new Set();
+
+  let excludedTargetHandoffV141 = {
+    enabled: true,
+    triggered: false,
+    rejectedAddress: null,
+    rejectedSymbol: null,
+    rejectedReason: null,
+    replacementAddress: null,
+    replacementSymbol: null,
+    replacementScore: null,
+    replacementInserted: false,
+    freshSlotTransferred: false
+  };
+
   let v135TerminalPriorityHandoff = {
     triggered: false,
     rejectedAddress: null,
@@ -20021,6 +20051,180 @@ async function scan(
     replacementAddress: null,
     replacementSymbol: null,
     replacementInserted: false
+  };
+
+  const handoffExcludedFreshTargetV141 = (
+    rejectedWatched,
+    rejectedCandidate,
+    rejectedAddress,
+    currentIndex
+  ) => {
+    const rejected =
+      normalize(
+        rejectedAddress
+      );
+
+    if (
+      !rejected ||
+      rejected !==
+        marketFreshTargetAddress
+    ) {
+      return false;
+    }
+
+    const replacementRow =
+      rankedMarketFreshCandidates
+        .find(
+          row => {
+            const item =
+              row?.token ||
+              null;
+
+            const itemAddress =
+              normalize(
+                item?.address
+              );
+
+            if (
+              !item ||
+              !itemAddress ||
+              itemAddress === rejected ||
+              v141AnalysedAddresses.has(
+                itemAddress
+              )
+            ) {
+              return false;
+            }
+
+            if (
+              item?.excludedReason
+            ) {
+              return false;
+            }
+
+            const terminal =
+              terminalPriorityRejectFromWatched(
+                item
+              );
+
+            return !terminal?.terminal;
+          }
+        ) ||
+      null;
+
+    excludedTargetHandoffV141 = {
+      enabled: true,
+      triggered: true,
+      rejectedAddress:
+        rejected,
+      rejectedSymbol:
+        rejectedCandidate
+          ?.validation
+          ?.symbol ||
+        rejectedWatched
+          ?.metadata
+          ?.symbol ||
+        null,
+      rejectedReason:
+        rejectedCandidate
+          ?.exclusionReason ||
+        rejectedCandidate
+          ?.reason ||
+        rejectedCandidate
+          ?.validation
+          ?.reason ||
+        (
+          rejectedCandidate
+            ?.infrastructureToken
+            ? "KNOWN_QUOTE_OR_INFRASTRUCTURE"
+            : "INVALID_ERC20"
+        ),
+      replacementAddress: null,
+      replacementSymbol: null,
+      replacementScore: null,
+      replacementInserted: false,
+      freshSlotTransferred: false
+    };
+
+    if (
+      !replacementRow?.token
+    ) {
+      return true;
+    }
+
+    const replacement =
+      replacementRow.token;
+
+    const replacementAddress =
+      normalize(
+        replacement.address
+      );
+
+    marketFreshTarget =
+      replacement;
+
+    marketFreshTargetAddress =
+      replacementAddress;
+
+    excludedTargetHandoffV141
+      .replacementAddress =
+      replacementAddress;
+
+    excludedTargetHandoffV141
+      .replacementSymbol =
+      replacement?.metadata?.symbol ||
+      replacement?.symbol ||
+      null;
+
+    excludedTargetHandoffV141
+      .replacementScore =
+      safeNumber(
+        replacementRow.score
+      );
+
+    for (
+      let i =
+        v135AnalysisQueue.length - 1;
+      i > currentIndex;
+      i--
+    ) {
+      if (
+        normalize(
+          v135AnalysisQueue[i]?.address
+        ) ===
+          replacementAddress
+      ) {
+        v135AnalysisQueue.splice(
+          i,
+          1
+        );
+      }
+    }
+
+    v135AnalysisQueue.splice(
+      currentIndex + 1,
+      0,
+      replacement
+    );
+
+    excludedTargetHandoffV141
+      .replacementInserted =
+      true;
+
+    excludedTargetHandoffV141
+      .freshSlotTransferred =
+      true;
+
+    topCandidateAnalysisDeferred =
+      false;
+
+    topCandidateDeferredReason =
+      null;
+
+    topCandidateRequiredRequests =
+      null;
+
+    return true;
   };
 
   for (
@@ -20036,6 +20240,14 @@ async function scan(
       normalize(
         watched.address
       );
+
+    if (
+      address
+    ) {
+      v141AnalysedAddresses.add(
+        address
+      );
+    }
 
     const isPriorityCompletion =
       address ===
@@ -20285,6 +20497,13 @@ async function scan(
           null
       });
 
+      handoffExcludedFreshTargetV141(
+        watched,
+        candidate,
+        address,
+        v135Index
+      );
+
       continue;
     }
 
@@ -20325,6 +20544,13 @@ async function scan(
           watched.invalidChecks
         ) +
         1;
+
+      handoffExcludedFreshTargetV141(
+        watched,
+        candidate,
+        address,
+        v135Index
+      );
 
       continue;
     }
@@ -21382,7 +21608,7 @@ async function scan(
     status,
 
     scanMode:
-      "V140_CORE_RETRY_RELEVANCE_EXPIRY_HUNTER",
+      "V141_CORE_EXCLUDED_TARGET_HANDOFF_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -21999,7 +22225,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V140_RETRY_RELEVANCE_EXPIRY_DIRECTIONAL_USD_HUNTER",
+        "V141_EXCLUDED_TARGET_HANDOFF_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -22229,6 +22455,8 @@ async function scan(
       prioritySource:
         "LOCAL_IS_PRIORITY_COMPLETION_V137"
     },
+
+    excludedTargetHandoffV141,
 
     blockscoutHolderOutageProtection: {
       enabled:
@@ -23268,12 +23496,54 @@ async function scan(
       telegramThresholdsUnchangedV140:
         "ENABLED_V140",
 
+      immediateExcludedFreshTargetHandoff:
+        "ENABLED_V141",
+
+      tokenizedSecuritySameRunFreshSlotRecoveryV141:
+        "ENABLED_V141",
+
+      infrastructureSameRunFreshSlotRecoveryV141:
+        "ENABLED_V141",
+
+      invalidErc20SameRunFreshSlotRecoveryV141:
+        "ENABLED_V141",
+
+      nextRankedReplacementImmediateAnalysisV141:
+        "ENABLED_V141",
+
+      retryRelevanceExpiryUnchangedV141:
+        "ENABLED_V141",
+
+      retryFairnessUnchangedV141:
+        "ENABLED_V141",
+
+      transientRetryPersistenceUnchangedV141:
+        "ENABLED_V141",
+
+      localPriorityHandoffUnchangedV141:
+        "ENABLED_V141",
+
+      organicHolderBreadthUnchangedV141:
+        "ENABLED_V141",
+
+      blockscoutOutageResilienceUnchangedV141:
+        "ENABLED_V141",
+
+      rollingDirectionalUsdUnchangedV141:
+        "ENABLED_V141",
+
+      externalRequestRateUnchangedV141:
+        "ENABLED_V141",
+
+      telegramThresholdsUnchangedV141:
+        "ENABLED_V141",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V140_CORE_RETRY_RELEVANCE_EXPIRY_V77_TELEGRAM_HUNTER",
+      "V141_CORE_EXCLUDED_TARGET_HANDOFF_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -23589,7 +23859,7 @@ async function health(
     },
 
     architecture:
-      "V140_CORE_RETRY_RELEVANCE_EXPIRY_V77_TELEGRAM_HUNTER",
+      "V141_CORE_EXCLUDED_TARGET_HANDOFF_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -23988,7 +24258,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V140_CORE_RETRY_RELEVANCE_EXPIRY_V77_TELEGRAM_HUNTER",
+      "V141_CORE_EXCLUDED_TARGET_HANDOFF_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -24417,7 +24687,7 @@ export default {
             ),
 
           architecture:
-            "V140_CORE_RETRY_RELEVANCE_EXPIRY_V77_TELEGRAM_HUNTER",
+            "V141_CORE_EXCLUDED_TARGET_HANDOFF_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
