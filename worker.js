@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V150
+ * V151
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -457,8 +457,22 @@
  * - marketFreshPriority terminalPruned now reports only pre-analysis evidence
  * - postAnalysisTerminalDiscoveriesV150 separates risks learned during analysis
  * - Watchlist retention and all safety/Telegram thresholds unchanged
+
+ *
+ * V151:
+ * - Preserves V150 terminal snapshot queue guard
+ * - Allows the best viable VERIFIED-market candidate to receive the single
+ *   protected Gecko directional-trade opportunity before Telegram qualification
+ * - Already-qualified candidate remains preferred when one exists
+ * - Never requests directional trades without verified market/pool/token side
+ * - Preserves Gecko cooldown, 5m spacing and one-fresh-request-per-scan limits
+ * - Excludes same-run terminal/high-risk-pruned candidates
+ * - Recomputes momentum/opportunity/signals/confidence after verified USD flow
+ * - Momentum prefers VERIFIED directional USD buy pressure when available
+ * - Transaction-count pressure remains separate and never becomes fake USD
+ * - Telegram thresholds unchanged
 */
-const VERSION = "V150";
+const VERSION = "V151";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -15663,7 +15677,44 @@ function momentumAnalysis(
     );
   }
 
+  const directionalPressureH1V151 =
+    market?.directionalFlow?.h1?.verified === true
+      ? safeNumber(
+          market.directionalFlow.h1.buyPressureUsd
+        )
+      : null;
+
+  const directionalPressureM5V151 =
+    market?.directionalFlow?.m5?.verified === true
+      ? safeNumber(
+          market.directionalFlow.m5.buyPressureUsd
+        )
+      : null;
+
+  const verifiedDirectionalPressureV151 =
+    directionalPressureH1V151 !== null
+      ? directionalPressureH1V151
+      : directionalPressureM5V151;
+
   if (
+    verifiedDirectionalPressureV151 !== null &&
+    verifiedDirectionalPressureV151 >= 60
+  ) {
+    positiveSignals++;
+
+    score +=
+      verifiedDirectionalPressureV151 >= 70
+        ? 12
+        : 7;
+
+    reasons.push(
+      directionalPressureH1V151 !== null
+        ? "Verified USD buy pressure (1h)"
+        : "Verified USD buy pressure (5m)"
+    );
+  }
+
+  else if (
     market
       ?.buyPressure1h !==
       null &&
@@ -15680,7 +15731,7 @@ function momentumAnalysis(
         : 7;
 
     reasons.push(
-      "Positive buy pressure"
+      "Positive transaction-count buy pressure"
     );
   }
 
@@ -15741,6 +15792,19 @@ function momentumAnalysis(
 
     transactionGrowthPercent:
       txGrowth,
+
+    directionalUsdPressureV151: {
+      verified:
+        verifiedDirectionalPressureV151 !== null,
+      window:
+        directionalPressureH1V151 !== null
+          ? "h1"
+          : directionalPressureM5V151 !== null
+            ? "m5"
+            : null,
+      buyPressureUsd:
+        verifiedDirectionalPressureV151
+    },
 
     reasons
   };
@@ -23244,30 +23308,85 @@ async function scan(
   }
 
   /*
-   * V126: spend at most one Gecko request on directional USD enrichment,
-   * and only on a candidate that already passes every normal Telegram gate.
-   * This does not loosen qualification; it only enriches a call we were
-   * already willing to send.
+   * V151:
+   * Directional USD is discovery intelligence, not merely alert decoration.
+   * Existing provider guards remain authoritative; this only changes which
+   * candidate may receive the already-capped single Gecko fresh opportunity.
    */
   let directionalTradeEnrichment = {
     attempted:
       false,
-
     address:
       null,
-
     status:
-      "NO_QUALIFYING_CANDIDATE",
-
+      "NO_DIRECTIONAL_ELIGIBLE_CANDIDATE",
     verifiedAnyWindow:
-      false
+      false,
+    selectionMode:
+      null
   };
 
-  const directionalTarget =
+  const alreadyQualifiedDirectionalTargetV151 =
     candidates.find(
-      qualifiesTelegram
+      candidate =>
+        qualifiesTelegram(
+          candidate
+        ) &&
+        candidate?.market?.verified === true &&
+        !sameRunTerminalAddresses.has(
+          normalize(
+            candidate?.address
+          )
+        )
     ) ||
     null;
+
+  const preQualificationDirectionalPoolV151 =
+    candidates
+      .filter(
+        candidate =>
+          candidate?.validERC20 === true &&
+          candidate?.market?.verified === true &&
+          Boolean(
+            candidate?.market?.pairAddress
+          ) &&
+          (
+            String(
+              candidate?.market?.targetTokenSide || ""
+            ).toUpperCase() === "BASE" ||
+            String(
+              candidate?.market?.targetTokenSide || ""
+            ).toUpperCase() === "QUOTE"
+          ) &&
+          !sameRunTerminalAddresses.has(
+            normalize(
+              candidate?.address
+            )
+          ) &&
+          candidate?.risk?.severeOverride !== true &&
+          candidate?.risk?.label !== "HIGH"
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.analysisPriority
+          ) -
+          safeNumber(
+            a?.analysisPriority
+          )
+      );
+
+  const directionalTarget =
+    alreadyQualifiedDirectionalTargetV151 ||
+    preQualificationDirectionalPoolV151[0] ||
+    null;
+
+  const directionalSelectionModeV151 =
+    alreadyQualifiedDirectionalTargetV151
+      ? "ALREADY_TELEGRAM_QUALIFIED"
+      : directionalTarget
+        ? "PREQUAL_HIGHEST_ANALYSIS_PRIORITY_VERIFIED_MARKET"
+        : "NO_VERIFIED_MARKET_CANDIDATE";
 
   if (
     directionalTarget
@@ -23284,17 +23403,82 @@ async function scan(
       enrichment
     );
 
+    if (
+      enrichment?.verifiedAnyWindow === true
+    ) {
+      const historicalV151 =
+        getHistoricalSnapshot(
+          state,
+          directionalTarget.address
+        );
+
+      directionalTarget.momentum =
+        momentumAnalysis(
+          historicalV151,
+          directionalTarget.market,
+          directionalTarget.holders
+        );
+
+      directionalTarget.opportunity =
+        scoreOpportunity(
+          directionalTarget.validation,
+          directionalTarget.market,
+          directionalTarget.holders,
+          directionalTarget.activity,
+          directionalTarget.momentum,
+          directionalTarget.marketQuality,
+          directionalTarget.whaleFlow,
+          directionalTarget.launchStage
+        );
+
+      directionalTarget.signalConfirmation =
+        signalConfirmation(
+          directionalTarget
+        );
+
+      directionalTarget.confidence =
+        candidateConfidence(
+          directionalTarget
+        );
+
+      directionalTarget.analysisPriority =
+        analysisPriority(
+          directionalTarget
+        );
+    }
+
     directionalTradeEnrichment = {
       address:
         normalize(
           directionalTarget.address
         ),
-
       symbol:
-        directionalTarget.symbol ||
-        null,
-
+        directionalTarget.symbol || null,
+      selectionMode:
+        directionalSelectionModeV151,
+      preQualification:
+        !Boolean(
+          alreadyQualifiedDirectionalTargetV151
+        ),
+      candidateWasQualifiedBeforeEnrichment:
+        Boolean(
+          alreadyQualifiedDirectionalTargetV151
+        ),
+      candidateQualifiesAfterEnrichment:
+        qualifiesTelegram(
+          directionalTarget
+        ),
       ...enrichment
+    };
+  }
+
+  else {
+    directionalTradeEnrichment = {
+      ...directionalTradeEnrichment,
+      selectionMode:
+        directionalSelectionModeV151,
+      eligibleVerifiedMarketCandidates:
+        preQualificationDirectionalPoolV151.length
     };
   }
 
@@ -23573,7 +23757,7 @@ async function scan(
     status,
 
     scanMode:
-      "V150_CORE_TERMINAL_SNAPSHOT_QUEUE_GUARD_HUNTER",
+      "V151_CORE_PREQUAL_DIRECTIONAL_MOMENTUM_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -24212,7 +24396,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V150_TERMINAL_SNAPSHOT_QUEUE_GUARD_DIRECTIONAL_USD_HUNTER",
+        "V151_PREQUAL_DIRECTIONAL_MOMENTUM_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -24647,6 +24831,29 @@ async function scan(
       ).length,
 
     directionalTradeEnrichment,
+
+    preQualificationDirectionalEnrichmentV151: {
+      enabled:
+        true,
+      selectionMode:
+        directionalTradeEnrichment?.selectionMode || null,
+      address:
+        directionalTradeEnrichment?.address || null,
+      attempted:
+        directionalTradeEnrichment?.attempted === true,
+      verifiedAnyWindow:
+        directionalTradeEnrichment?.verifiedAnyWindow === true,
+      candidateWasQualifiedBeforeEnrichment:
+        directionalTradeEnrichment
+          ?.candidateWasQualifiedBeforeEnrichment === true,
+      candidateQualifiesAfterEnrichment:
+        directionalTradeEnrichment
+          ?.candidateQualifiesAfterEnrichment === true,
+      oneGeckoFreshPerScanPreserved:
+        true,
+      strictUsdVerificationPreserved:
+        true
+    },
 
     sameRunTargetReselection,
 
@@ -26072,12 +26279,45 @@ async function scan(
       telegramThresholdsUnchangedV150:
         "ENABLED_V150",
 
+      preQualificationDirectionalUsdEnrichment:
+        "ENABLED_V151",
+
+      highestPriorityVerifiedMarketDirectionalTargetV151:
+        "ENABLED_V151",
+
+      alreadyQualifiedDirectionalTargetStillPreferredV151:
+        "ENABLED_V151",
+
+      verifiedDirectionalUsdMomentumInputV151:
+        "ENABLED_V151",
+
+      postDirectionalMomentumRecomputeV151:
+        "ENABLED_V151",
+
+      geckoOneFreshPerScanUnchangedV151:
+        "ENABLED_V151",
+
+      geckoFreshSpacingUnchangedV151:
+        "ENABLED_V151",
+
+      strictDirectionalUsdVerificationUnchangedV151:
+        "ENABLED_V151",
+
+      terminalSnapshotQueueGuardUnchangedV151:
+        "ENABLED_V151",
+
+      partialHolderRetryCacheUnchangedV151:
+        "ENABLED_V151",
+
+      telegramThresholdsUnchangedV151:
+        "ENABLED_V151",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V150_CORE_TERMINAL_SNAPSHOT_QUEUE_GUARD_V77_TELEGRAM_HUNTER",
+      "V151_CORE_PREQUAL_DIRECTIONAL_MOMENTUM_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -26393,7 +26633,7 @@ async function health(
     },
 
     architecture:
-      "V150_CORE_TERMINAL_SNAPSHOT_QUEUE_GUARD_V77_TELEGRAM_HUNTER",
+      "V151_CORE_PREQUAL_DIRECTIONAL_MOMENTUM_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -26792,7 +27032,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V150_CORE_TERMINAL_SNAPSHOT_QUEUE_GUARD_V77_TELEGRAM_HUNTER",
+      "V151_CORE_PREQUAL_DIRECTIONAL_MOMENTUM_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -27221,7 +27461,7 @@ export default {
             ),
 
           architecture:
-            "V150_CORE_TERMINAL_SNAPSHOT_QUEUE_GUARD_V77_TELEGRAM_HUNTER",
+            "V151_CORE_PREQUAL_DIRECTIONAL_MOMENTUM_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
