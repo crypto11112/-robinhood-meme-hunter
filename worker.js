@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V141
+ * V142
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -332,8 +332,24 @@
  *   next analysis position so it inherits the remaining fresh-market opportunity
  * - Existing carried retry state remains separate from the temporary fresh target
  * - Telegram thresholds, external API frequency and hard request caps unchanged
+
+ *
+ * V142:
+ * - Preserves V141 excluded-target same-run handoff
+ * - Preserves V140 retry relevance expiry
+ * - Preserves V139 retry fairness
+ * - Preserves V138 transient retry persistence
+ * - Preserves V137 local terminal-priority handoff
+ * - Preserves V136 organic-holder breadth protection
+ * - NEW: verified cached terminal candidates are pruned before expensive analysis
+ * - A carried retry candidate already proven HIGH/extreme concentration is cleared
+ *   before analysis and cannot be re-persisted as ANALYSIS_NOT_COMPLETED
+ * - Only existing verified terminalPriorityRejectFromWatched evidence is used
+ * - Unverified holder states are never pre-pruned
+ * - Watchlist entries remain available for future reactivation/history
+ * - Telegram thresholds, provider frequencies and hard request caps unchanged
 */
-const VERSION = "V141";
+const VERSION = "V142";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -19849,7 +19865,7 @@ async function scan(
    * has already decided is most important to finish. Analyse it before lower
    * priority candidates so they cannot consume its required budget first.
    */
-  const analysisSelected =
+  const analysisSelectedRawV142 =
     marketFreshTarget
       ? uniqueBy(
           [
@@ -19865,6 +19881,110 @@ async function scan(
           MAX_TOKEN_CHECKS
         )
       : selected;
+
+  const preAnalysisTerminalRowsV142 =
+    analysisSelectedRawV142
+      .map(
+        token => ({
+          token,
+          terminal:
+            terminalPriorityRejectFromWatched(
+              token
+            )
+        })
+      )
+      .filter(
+        row =>
+          row?.terminal?.terminal ===
+          true
+      );
+
+  const preAnalysisTerminalAddressesV142 =
+    new Set(
+      preAnalysisTerminalRowsV142
+        .map(
+          row =>
+            normalize(
+              row?.token?.address
+            )
+        )
+        .filter(
+          Boolean
+        )
+    );
+
+  const v142CarriedTerminalPruned =
+    Boolean(
+      retryPersistenceAddressV139 &&
+      preAnalysisTerminalAddressesV142
+        .has(
+          retryPersistenceAddressV139
+        )
+    );
+
+  const preAnalysisTerminalPruningV142 = {
+    enabled: true,
+    prunedCount:
+      preAnalysisTerminalRowsV142.length,
+    carriedPriorityCleared:
+      v142CarriedTerminalPruned,
+    carriedPriorityAddress:
+      v142CarriedTerminalPruned
+        ? retryPersistenceAddressV139
+        : null,
+    pruned:
+      preAnalysisTerminalRowsV142
+        .map(
+          row => ({
+            address:
+              normalize(
+                row?.token?.address
+              ),
+            symbol:
+              row?.token
+                ?.metadata
+                ?.symbol ||
+              row?.token
+                ?.symbol ||
+              null,
+            reason:
+              row?.terminal?.reason ||
+              null,
+            top1Percent:
+              row?.terminal
+                ?.top1Percent ??
+              null,
+            concentrationRisk:
+              row?.terminal
+                ?.concentrationRisk ||
+              null
+          })
+        )
+  };
+
+  if (
+    v142CarriedTerminalPruned
+  ) {
+    state.priorityCandidateCompletion =
+      null;
+
+    clearPriorityFreshReservation(
+      state,
+      retryPersistenceAddressV139
+    );
+  }
+
+  const analysisSelected =
+    analysisSelectedRawV142
+      .filter(
+        token =>
+          !preAnalysisTerminalAddressesV142
+            .has(
+              normalize(
+                token?.address
+              )
+            )
+      );
 
   if (marketFreshTargetAddress) {
     reservePriorityFreshMarket(
@@ -19985,6 +20105,42 @@ async function scan(
         null
     }
   };
+
+  if (
+    v142CarriedTerminalPruned
+  ) {
+    const carriedTerminalRowV142 =
+      preAnalysisTerminalRowsV142.find(
+        row =>
+          normalize(
+            row?.token?.address
+          ) ===
+            retryPersistenceAddressV139
+      ) ||
+      null;
+
+    priorityCompletionTelemetry.completed =
+      true;
+
+    priorityCompletionTelemetry.persistedForRetry =
+      false;
+
+    priorityCompletionTelemetry.blockers = [
+      carriedTerminalRowV142
+        ?.terminal
+        ?.reason ||
+      "CACHED_VERIFIED_TERMINAL_PREANALYSIS_V142"
+    ];
+
+    priorityCompletionTelemetry.terminalRejected =
+      true;
+
+    priorityCompletionTelemetry.terminalRejectReason =
+      carriedTerminalRowV142
+        ?.terminal
+        ?.reason ||
+      "CACHED_VERIFIED_TERMINAL_PREANALYSIS_V142";
+  }
 
   const combinedLogs = [
     ...liveOutput.logs,
@@ -20999,7 +21155,8 @@ async function scan(
   }
 
   else if (
-    retryPersistenceAddressV139
+    retryPersistenceAddressV139 &&
+    !v142CarriedTerminalPruned
   ) {
     const previousCompletionRaw =
       state.priorityCandidateCompletion ||
@@ -21608,7 +21765,7 @@ async function scan(
     status,
 
     scanMode:
-      "V141_CORE_EXCLUDED_TARGET_HANDOFF_HUNTER",
+      "V142_CORE_PREANALYSIS_TERMINAL_PRUNE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -22225,7 +22382,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V141_EXCLUDED_TARGET_HANDOFF_DIRECTIONAL_USD_HUNTER",
+        "V142_PREANALYSIS_TERMINAL_PRUNE_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -22457,6 +22614,8 @@ async function scan(
     },
 
     excludedTargetHandoffV141,
+
+    preAnalysisTerminalPruningV142,
 
     blockscoutHolderOutageProtection: {
       enabled:
@@ -23538,12 +23697,57 @@ async function scan(
       telegramThresholdsUnchangedV141:
         "ENABLED_V141",
 
+      preAnalysisVerifiedTerminalPruning:
+        "ENABLED_V142",
+
+      carriedPriorityVerifiedTerminalClearV142:
+        "ENABLED_V142",
+
+      noAnalysisNotCompletedRepersistAfterTerminalPruneV142:
+        "ENABLED_V142",
+
+      verifiedTerminalEvidenceOnlyV142:
+        "ENABLED_V142",
+
+      unverifiedHolderStatesNeverPrePrunedV142:
+        "ENABLED_V142",
+
+      excludedTargetHandoffUnchangedV142:
+        "ENABLED_V142",
+
+      retryRelevanceExpiryUnchangedV142:
+        "ENABLED_V142",
+
+      retryFairnessUnchangedV142:
+        "ENABLED_V142",
+
+      transientRetryPersistenceUnchangedV142:
+        "ENABLED_V142",
+
+      localPriorityHandoffUnchangedV142:
+        "ENABLED_V142",
+
+      organicHolderBreadthUnchangedV142:
+        "ENABLED_V142",
+
+      blockscoutOutageResilienceUnchangedV142:
+        "ENABLED_V142",
+
+      rollingDirectionalUsdUnchangedV142:
+        "ENABLED_V142",
+
+      externalRequestRateUnchangedV142:
+        "ENABLED_V142",
+
+      telegramThresholdsUnchangedV142:
+        "ENABLED_V142",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V141_CORE_EXCLUDED_TARGET_HANDOFF_V77_TELEGRAM_HUNTER",
+      "V142_CORE_PREANALYSIS_TERMINAL_PRUNE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -23859,7 +24063,7 @@ async function health(
     },
 
     architecture:
-      "V141_CORE_EXCLUDED_TARGET_HANDOFF_V77_TELEGRAM_HUNTER",
+      "V142_CORE_PREANALYSIS_TERMINAL_PRUNE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -24258,7 +24462,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V141_CORE_EXCLUDED_TARGET_HANDOFF_V77_TELEGRAM_HUNTER",
+      "V142_CORE_PREANALYSIS_TERMINAL_PRUNE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -24687,7 +24891,7 @@ export default {
             ),
 
           architecture:
-            "V141_CORE_EXCLUDED_TARGET_HANDOFF_V77_TELEGRAM_HUNTER",
+            "V142_CORE_PREANALYSIS_TERMINAL_PRUNE_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
