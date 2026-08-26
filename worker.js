@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V127
+ * V128
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -136,8 +136,22 @@
  * - NEW: adaptive GeckoTerminal 429 cooldown escalation
  * - NEW: Gecko rate-limit level persists in existing KV state
  * - Preserves one-Gecko-request-per-scan, Dex timing and Telegram thresholds
+
+ *
+ * V128:
+ * - Preserves full V127 capability set
+ * - NEW: verified market pair/pool addresses are treated as holder infrastructure
+ * - SAFETY: LP exclusion requires a VERIFIED market and exact pair-address match
+ * - FIX: prevents verified liquidity pools from being scored as whale owners
+ * - FIX: a cached holder result is refreshed once if its verified pair was
+ *        previously classified as an ordinary holder
+ * - FIX: adjusted ownership supply and concentration are recalculated correctly
+ * - FIX: Gecko historical 429 seeding happens once only; successful requests
+ *        can now de-escalate consecutive429s all the way back to zero
+ * - Preserves V126 directional USD flow, V127 reselection/spacing/backoff,
+ *   Dex timing, KV history, /sendPhoto and all Telegram thresholds
 */
-const VERSION = "V127";
+const VERSION = "V128";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -7882,16 +7896,31 @@ function geckoService(
       service.lastBackoffMs
     );
 
+  /*
+   * V128:
+   * V127 migrated historical 429 state by seeding level 2 whenever the level
+   * was zero. That meant a fully recovered service could be re-seeded later.
+   * Seed historical state once, persist the migration marker, then allow
+   * successful requests to de-escalate naturally to zero.
+   */
   if (
-    service.consecutive429s <=
-      0 &&
-    safeNumber(
-      service.total429s
-    ) >=
-      10
+    service.rateLimitHistorySeeded !==
+      true
   ) {
-    service.consecutive429s =
-      2;
+    if (
+      service.consecutive429s <=
+        0 &&
+      safeNumber(
+        service.total429s
+      ) >=
+        10
+    ) {
+      service.consecutive429s =
+        2;
+    }
+
+    service.rateLimitHistorySeeded =
+      true;
   }
 
   return service;
@@ -8060,14 +8089,32 @@ function registerGeckoSuccess(
   service.cooldownUntil =
     null;
 
+  service.rateLimitHistorySeeded =
+    true;
+
+  const previousLevel =
+    Math.max(
+      0,
+      Number(
+        service.consecutive429s
+      ) ||
+      0
+    );
+
   service.consecutive429s =
     Math.max(
       0,
-      safeNumber(
-        service.consecutive429s
-      ) -
+      previousLevel -
         1
     );
+
+  if (
+    service.consecutive429s ===
+      0
+  ) {
+    service.lastBackoffMs =
+      0;
+  }
 }
 
 function geckoRelationshipAddress(
@@ -10740,7 +10787,8 @@ function positiveHolderBalance(
 
 function infrastructureHolderReason(
   holderAddress,
-  tokenAddress
+  tokenAddress,
+  verifiedPairAddress = null
 ) {
   const address =
     normalize(
@@ -10750,6 +10798,11 @@ function infrastructureHolderReason(
   const token =
     normalize(
       tokenAddress
+    );
+
+  const pair =
+    normalize(
+      verifiedPairAddress
     );
 
   if (!address) {
@@ -10785,6 +10838,19 @@ function infrastructureHolderReason(
       token
   ) {
     return "TOKEN_CONTRACT";
+  }
+
+  /*
+   * V128:
+   * Only a pair address supplied by a VERIFIED market result is accepted here.
+   * The caller never passes an unverified / guessed pool address.
+   */
+  if (
+    pair &&
+    address ===
+      pair
+  ) {
+    return "VERIFIED_MARKET_PAIR_OR_POOL";
   }
 
   return null;
@@ -11254,7 +11320,8 @@ async function holderIntelligence(
   token,
   totalSupply,
   budget,
-  watched
+  watched,
+  market = null
 ) {
   if (
     !totalSupply
@@ -11264,13 +11331,49 @@ async function holderIntelligence(
     );
   }
 
+  const verifiedPairAddress =
+    market?.verified ===
+      true
+      ? normalize(
+          market.pairAddress
+        )
+      : null;
+
   const freshHolderCache =
     cachedHolderIntelligence(
       watched,
       HOLDER_CACHE_MS
     );
 
-  if (freshHolderCache) {
+  /*
+   * V128:
+   * Old cache entries may have been created before LP/pair infrastructure
+   * exclusion existed. If the now-verified pair address is present as an
+   * ordinary holder, bypass that cache exactly once and rebuild holder
+   * concentration from Blockscout. The corrected result is then cached.
+   */
+  const cachedPairMisclassified =
+    Boolean(
+      freshHolderCache &&
+      verifiedPairAddress &&
+      Array.isArray(
+        freshHolderCache.topHolders
+      ) &&
+      freshHolderCache.topHolders.some(
+        holder =>
+          normalize(
+            holder?.address
+          ) ===
+            verifiedPairAddress &&
+          holder?.infrastructure !==
+            true
+      )
+    );
+
+  if (
+    freshHolderCache &&
+    !cachedPairMisclassified
+  ) {
     return {
       ...freshHolderCache,
       holderSource:
@@ -11643,7 +11746,8 @@ async function holderIntelligence(
         const infrastructureReason =
           infrastructureHolderReason(
             address,
-            token
+            token,
+            verifiedPairAddress
           );
 
         if (
@@ -12074,6 +12178,21 @@ async function holderIntelligence(
 
     positiveHolderRows:
       positiveHolders.length,
+
+    verifiedPairInfrastructureApplied:
+      Boolean(
+        verifiedPairAddress &&
+        infrastructureHolders.some(
+          holder =>
+            normalize(
+              holder.address
+            ) ===
+            verifiedPairAddress
+        )
+      ),
+
+    holderCachePairCorrection:
+      cachedPairMisclassified,
 
     whale: {
       verified:
@@ -15584,7 +15703,8 @@ async function analyzeToken(
         address,
         validation.totalSupply,
         budget,
-        watched
+        watched,
+        market
       );
   }
 
@@ -18439,7 +18559,7 @@ async function scan(
     status,
 
     scanMode:
-      "V127_CORE_SAME_RUN_RESELECTION_GECKO_GUARD_HUNTER",
+      "V128_CORE_DYNAMIC_LP_HOLDER_EXCLUSION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -18670,6 +18790,10 @@ async function scan(
             safeNumber(
               gecko.consecutive429s
             ),
+
+          rateLimitHistorySeeded:
+            gecko.rateLimitHistorySeeded ===
+            true,
 
           lastBackoffMs:
             safeNumber(
@@ -19052,7 +19176,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V127_POST_ANALYSIS_RESELECTION_DIRECTIONAL_USD_HUNTER",
+        "V128_DYNAMIC_LP_EXCLUSION_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -19801,12 +19925,36 @@ async function scan(
       telegramThresholdsUnchangedV127:
         "ENABLED_V127",
 
+      verifiedMarketPairHolderExclusion:
+        "ENABLED_V128",
+
+      dynamicLpInfrastructureClassification:
+        "ENABLED_V128_VERIFIED_MARKET_ONLY",
+
+      cachedHolderLpMisclassificationRepair:
+        "ENABLED_V128",
+
+      adjustedOwnershipSupplyIncludesVerifiedLp:
+        "ENABLED_V128",
+
+      lpFalseWhaleProtection:
+        "ENABLED_V128",
+
+      gecko429HistorySeedOnce:
+        "ENABLED_V128",
+
+      geckoSuccessBackoffDeescalationFix:
+        "ENABLED_V128",
+
+      telegramThresholdsUnchangedV128:
+        "ENABLED_V128",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V127_CORE_SAME_RUN_RESELECTION_GECKO_GUARD_V77_TELEGRAM_HUNTER",
+      "V128_CORE_DYNAMIC_LP_HOLDER_EXCLUSION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -20122,7 +20270,7 @@ async function health(
     },
 
     architecture:
-      "V127_CORE_SAME_RUN_RESELECTION_GECKO_GUARD_V77_TELEGRAM_HUNTER",
+      "V128_CORE_DYNAMIC_LP_HOLDER_EXCLUSION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -20521,7 +20669,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V127_CORE_SAME_RUN_RESELECTION_GECKO_GUARD_V77_TELEGRAM_HUNTER",
+      "V128_CORE_DYNAMIC_LP_HOLDER_EXCLUSION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -20950,7 +21098,7 @@ export default {
             ),
 
           architecture:
-            "V127_CORE_SAME_RUN_RESELECTION_GECKO_GUARD_V77_TELEGRAM_HUNTER",
+            "V128_CORE_DYNAMIC_LP_HOLDER_EXCLUSION_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
