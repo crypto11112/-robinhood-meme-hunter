@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V147
+ * V148
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -414,8 +414,24 @@
  * - NEW: exact earliest market retry is exposed when both providers unavailable
  * - Existing verified fresh/stale market cache remains preferred
  * - No request-frequency increase, threshold change or safety-gate change
+
+ *
+ * V148:
+ * - Preserves V147 Dex/Gecko 429 coordination unchanged
+ * - Preserves V146/V145 Blockscout PRO retry/outage protection
+ * - NEW: re-checks verified cached terminal holder evidence immediately before
+ *   every queued analysis, not only once when the queue is first constructed
+ * - NEW: terminal candidates that become known while a scan is running are
+ *   removed before they can consume another full analysis allocation
+ * - NEW: terminal fresh-target pruning transfers priority to the next viable
+ *   ranked candidate in the same run
+ * - NEW: telemetry shows dynamically pruned candidates and estimated requests saved
+ * - FIX: marketProviderCoordinationV147.address now receives an address string,
+ *   never the marketFreshTarget object
+ * - Watchlist records are retained; no terminal evidence is fabricated
+ * - Alert thresholds, scoring, request limits and safety gates unchanged
 */
-const VERSION = "V147";
+const VERSION = "V148";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -21208,6 +21224,14 @@ async function scan(
     replacementInserted: false
   };
 
+  const dynamicTerminalPruningV148 = {
+    enabled: true,
+    prunedCount: 0,
+    estimatedAnalysisRequestsSaved: 0,
+    priorityHandoffs: 0,
+    pruned: []
+  };
+
   const handoffExcludedFreshTargetV141 = (
     rejectedWatched,
     rejectedCandidate,
@@ -21404,9 +21428,210 @@ async function scan(
       );
     }
 
-    const isPriorityCompletion =
+    let isPriorityCompletion =
       address ===
       marketFreshTargetAddress;
+
+    /*
+     * V148:
+     * V142 evaluated terminal cache once before the mutable analysis queue
+     * started. Holder caches can become verified during this same run, and
+     * handoffs can insert/reorder candidates afterwards. Re-check immediately
+     * before every expensive analysis allocation.
+     */
+    const dynamicTerminalV148 =
+      terminalPriorityRejectFromWatched(
+        watched
+      );
+
+    if (
+      dynamicTerminalV148
+        ?.terminal ===
+        true
+    ) {
+      const avoidedRequestsV148 =
+        estimatedAnalysisCost(
+          env,
+          watched
+        );
+
+      dynamicTerminalPruningV148
+        .prunedCount++;
+
+      dynamicTerminalPruningV148
+        .estimatedAnalysisRequestsSaved +=
+        safeNumber(
+          avoidedRequestsV148
+        );
+
+      dynamicTerminalPruningV148
+        .pruned.push({
+          address,
+          symbol:
+            watched?.metadata?.symbol ||
+            watched?.symbol ||
+            null,
+          reason:
+            dynamicTerminalV148.reason ||
+            "VERIFIED_TERMINAL_CACHE_V148",
+          top1Percent:
+            dynamicTerminalV148
+              .top1Percent ??
+            null,
+          concentrationRisk:
+            dynamicTerminalV148
+              .concentrationRisk ||
+            null,
+          estimatedRequestsAvoided:
+            avoidedRequestsV148,
+          wasPriority:
+            isPriorityCompletion
+        });
+
+      validationResults.push({
+        address,
+        validERC20:
+          watched?.metadata?.validERC20 ===
+          true
+            ? true
+            : null,
+        deferred:
+          false,
+        terminalPruned:
+          true,
+        reason:
+          dynamicTerminalV148.reason ||
+          "VERIFIED_TERMINAL_CACHE_V148"
+      });
+
+      if (
+        isPriorityCompletion
+      ) {
+        clearPriorityFreshReservation(
+          state,
+          address
+        );
+
+        if (
+          state?.priorityCandidateCompletion &&
+          normalize(
+            state
+              .priorityCandidateCompletion
+              .address
+          ) ===
+            address
+        ) {
+          state.priorityCandidateCompletion =
+            null;
+        }
+
+        const replacementRowV148 =
+          rankedMarketFreshCandidates
+            .find(
+              row => {
+                const item =
+                  row?.token ||
+                  null;
+
+                const replacementAddress =
+                  normalize(
+                    item?.address
+                  );
+
+                if (
+                  !item ||
+                  !replacementAddress ||
+                  replacementAddress ===
+                    address ||
+                  v141AnalysedAddresses
+                    .has(
+                      replacementAddress
+                    )
+                ) {
+                  return false;
+                }
+
+                const terminal =
+                  terminalPriorityRejectFromWatched(
+                    item
+                  );
+
+                return (
+                  !terminal?.terminal &&
+                  preMarketCandidateAllowed(
+                    item
+                  )
+                );
+              }
+            ) ||
+          null;
+
+        if (
+          replacementRowV148
+            ?.token
+        ) {
+          const replacementV148 =
+            replacementRowV148.token;
+
+          const replacementAddressV148 =
+            normalize(
+              replacementV148.address
+            );
+
+          marketFreshTarget =
+            replacementV148;
+
+          marketFreshTargetAddress =
+            replacementAddressV148;
+
+          reservePriorityFreshMarket(
+            state,
+            replacementAddressV148
+          );
+
+          for (
+            let i =
+              v135AnalysisQueue.length - 1;
+            i >
+              v135Index;
+            i--
+          ) {
+            if (
+              normalize(
+                v135AnalysisQueue[i]
+                  ?.address
+              ) ===
+                replacementAddressV148
+            ) {
+              v135AnalysisQueue.splice(
+                i,
+                1
+              );
+            }
+          }
+
+          v135AnalysisQueue.splice(
+            v135Index + 1,
+            0,
+            replacementV148
+          );
+
+          dynamicTerminalPruningV148
+            .priorityHandoffs++;
+
+          topCandidateAnalysisDeferred =
+            false;
+
+          topCandidateDeferredReason =
+            null;
+
+          topCandidateRequiredRequests =
+            null;
+        }
+      }
+
+      continue;
+    }
 
     const required =
       estimatedAnalysisCost(
@@ -21952,6 +22177,100 @@ async function scan(
         topCandidateRequiredRequests =
           null;
       }
+    }
+
+    /*
+     * V148:
+     * An analysis can populate holderCache for a token referenced elsewhere
+     * in the mutable queue. Strip any now-terminal queued entries before the
+     * next loop iteration. This only acts on verified cached terminal evidence.
+     */
+    for (
+      let v148QueueIndex =
+        v135AnalysisQueue.length - 1;
+      v148QueueIndex >
+        v135Index;
+      v148QueueIndex--
+    ) {
+      const queuedV148 =
+        v135AnalysisQueue[
+          v148QueueIndex
+        ];
+
+      const queuedAddressV148 =
+        normalize(
+          queuedV148?.address
+        );
+
+      if (
+        !queuedAddressV148 ||
+        queuedAddressV148 ===
+          marketFreshTargetAddress
+      ) {
+        continue;
+      }
+
+      const queuedTerminalV148 =
+        terminalPriorityRejectFromWatched(
+          queuedV148
+        );
+
+      if (
+        queuedTerminalV148
+          ?.terminal !==
+        true
+      ) {
+        continue;
+      }
+
+      const avoidedV148 =
+        estimatedAnalysisCost(
+          env,
+          queuedV148
+        );
+
+      dynamicTerminalPruningV148
+        .prunedCount++;
+
+      dynamicTerminalPruningV148
+        .estimatedAnalysisRequestsSaved +=
+        safeNumber(
+          avoidedV148
+        );
+
+      dynamicTerminalPruningV148
+        .pruned.push({
+          address:
+            queuedAddressV148,
+          symbol:
+            queuedV148
+              ?.metadata
+              ?.symbol ||
+            queuedV148
+              ?.symbol ||
+            null,
+          reason:
+            queuedTerminalV148
+              .reason ||
+            "VERIFIED_TERMINAL_CACHE_V148",
+          top1Percent:
+            queuedTerminalV148
+              .top1Percent ??
+            null,
+          concentrationRisk:
+            queuedTerminalV148
+              .concentrationRisk ||
+            null,
+          estimatedRequestsAvoided:
+            avoidedV148,
+          wasPriority:
+            false
+        });
+
+      v135AnalysisQueue.splice(
+        v148QueueIndex,
+        1
+      );
     }
 
     candidates.push(
@@ -22849,7 +23168,7 @@ async function scan(
     status,
 
     scanMode:
-      "V147_CORE_MARKET_PROVIDER_429_COORDINATION_HUNTER",
+      "V148_CORE_DYNAMIC_TERMINAL_QUEUE_PRUNE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -23133,7 +23452,9 @@ async function scan(
     marketProviderCoordinationV147:
       marketProviderAvailabilityV147(
         state,
-        marketFreshTarget
+        effectiveMarketFreshTargetAddress ||
+        marketFreshTargetAddress ||
+        null
       ),
 
     discovery: {
@@ -23486,7 +23807,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V147_MARKET_PROVIDER_429_COORDINATION_DIRECTIONAL_USD_HUNTER",
+        "V148_DYNAMIC_TERMINAL_QUEUE_PRUNE_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -23720,6 +24041,17 @@ async function scan(
     excludedTargetHandoffV141,
 
     preAnalysisTerminalPruningV142,
+
+    dynamicTerminalPruningV148: {
+      ...dynamicTerminalPruningV148,
+      pruned:
+        dynamicTerminalPruningV148
+          .pruned
+          .slice(
+            0,
+            10
+          )
+    },
 
     holderProviderTelemetryV144,
 
@@ -25148,12 +25480,57 @@ async function scan(
       telegramThresholdsUnchangedV147:
         "ENABLED_V147",
 
+      dynamicVerifiedTerminalQueuePruning:
+        "ENABLED_V148",
+
+      terminalRecheckBeforeEveryAnalysisV148:
+        "ENABLED_V148",
+
+      sameRunMutableQueueTerminalPruneV148:
+        "ENABLED_V148",
+
+      terminalFreshTargetPriorityTransferV148:
+        "ENABLED_V148",
+
+      terminalWatchlistRetentionV148:
+        "ENABLED_V148",
+
+      marketProviderAddressTelemetryFixV148:
+        "ENABLED_V148",
+
+      marketProvider429CoordinationUnchangedV148:
+        "ENABLED_V148",
+
+      blockscoutPro404RetryUnchangedV148:
+        "ENABLED_V148",
+
+      blockscoutProOutageProtectionUnchangedV148:
+        "ENABLED_V148",
+
+      holderProviderTelemetryUnchangedV148:
+        "ENABLED_V148",
+
+      preAnalysisTerminalPruningUnchangedV148:
+        "ENABLED_V148",
+
+      excludedTargetHandoffUnchangedV148:
+        "ENABLED_V148",
+
+      retryFairnessUnchangedV148:
+        "ENABLED_V148",
+
+      rollingDirectionalUsdUnchangedV148:
+        "ENABLED_V148",
+
+      telegramThresholdsUnchangedV148:
+        "ENABLED_V148",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V147_CORE_MARKET_PROVIDER_429_COORDINATION_V77_TELEGRAM_HUNTER",
+      "V148_CORE_DYNAMIC_TERMINAL_QUEUE_PRUNE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -25469,7 +25846,7 @@ async function health(
     },
 
     architecture:
-      "V147_CORE_MARKET_PROVIDER_429_COORDINATION_V77_TELEGRAM_HUNTER",
+      "V148_CORE_DYNAMIC_TERMINAL_QUEUE_PRUNE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -25868,7 +26245,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V147_CORE_MARKET_PROVIDER_429_COORDINATION_V77_TELEGRAM_HUNTER",
+      "V148_CORE_DYNAMIC_TERMINAL_QUEUE_PRUNE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -26297,7 +26674,7 @@ export default {
             ),
 
           architecture:
-            "V147_CORE_MARKET_PROVIDER_429_COORDINATION_V77_TELEGRAM_HUNTER",
+            "V148_CORE_DYNAMIC_TERMINAL_QUEUE_PRUNE_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
