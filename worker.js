@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V142
+ * V143
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -348,8 +348,24 @@
  * - Unverified holder states are never pre-pruned
  * - Watchlist entries remain available for future reactivation/history
  * - Telegram thresholds, provider frequencies and hard request caps unchanged
+
+ *
+ * V143:
+ * - Preserves V142 pre-analysis verified terminal pruning
+ * - Preserves V141 excluded-target same-run handoff
+ * - Preserves V140 retry relevance expiry and V139 fairness
+ * - NEW: optional Blockscout PRO holder-row fallback after BOTH public
+ *   Blockscout holder routes fail
+ * - PRO route is only attempted when env.BLOCKSCOUT_PRO_API_KEY exists
+ * - Uses official multichain PRO REST shape:
+ *   https://api.blockscout.com/4663/api/v2/tokens/{token}/holders?apikey=...
+ * - PRO failure/unsupported-chain response never fabricates holder evidence
+ * - V134 same-run holder-outage circuit opens only after public V2, legacy,
+ *   AND configured PRO fallback fail
+ * - Existing public routes remain first; no extra request when they succeed
+ * - Telegram holder safety gate and all alert thresholds remain unchanged
 */
-const VERSION = "V142";
+const VERSION = "V143";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -407,6 +423,12 @@ const MATERIAL_OWNERSHIP_SUPPLY_CHANGE_PERCENT =
 
 const BLOCKSCOUT =
   "https://robinhoodchain.blockscout.com";
+
+const BLOCKSCOUT_PRO =
+  "https://api.blockscout.com";
+
+const BLOCKSCOUT_PRO_CHAIN_ID =
+  4663;
 
 const POOL_MANAGER =
   "0x8366a39cc670b4001a1121b8f6a443a643e40951";
@@ -11909,6 +11931,125 @@ async function blockscoutLegacyHolders(
   }
 }
 
+
+async function blockscoutProHoldersV143(
+  token,
+  budget,
+  env
+) {
+  const apiKey =
+    String(
+      env?.BLOCKSCOUT_PRO_API_KEY ||
+      ""
+    ).trim();
+
+  if (
+    !apiKey
+  ) {
+    return {
+      configured: false,
+      attempted: false,
+      success: false,
+      status:
+        "BLOCKSCOUT_PRO_NOT_CONFIGURED",
+      data: null
+    };
+  }
+
+  if (
+    !consumeBudget(
+      budget,
+      "analysis",
+      "BLOCKSCOUT_PRO_HOLDERS_V143"
+    )
+  ) {
+    return {
+      configured: true,
+      attempted: false,
+      success: false,
+      status:
+        "ANALYSIS_BUDGET_UNAVAILABLE",
+      data: null
+    };
+  }
+
+  try {
+    const url =
+      `${BLOCKSCOUT_PRO}/${BLOCKSCOUT_PRO_CHAIN_ID}/api/v2/tokens/${token}/holders?apikey=${encodeURIComponent(apiKey)}`;
+
+    const response =
+      await fetch(
+        url,
+        {
+          headers: {
+            accept:
+              "application/json"
+          }
+        }
+      );
+
+    if (
+      !response.ok
+    ) {
+      return {
+        configured: true,
+        attempted: true,
+        success: false,
+        status:
+          `HTTP_${response.status}`,
+        data: null
+      };
+    }
+
+    const data =
+      await response.json();
+
+    if (
+      !data ||
+      !Array.isArray(
+        data.items
+      )
+    ) {
+      return {
+        configured: true,
+        attempted: true,
+        success: false,
+        status:
+          "INVALID_RESPONSE",
+        data: null
+      };
+    }
+
+    return {
+      configured: true,
+      attempted: true,
+      success: true,
+      status:
+        "VERIFIED_RESPONSE",
+      data: {
+        ...data,
+        proV143:
+          true
+      }
+    };
+  }
+
+  catch (error) {
+    return {
+      configured: true,
+      attempted: true,
+      success: false,
+      status:
+        "FETCH_ERROR",
+      error:
+        errorString(
+          error
+        ),
+      data: null
+    };
+  }
+}
+
 function extractCounterData(
   data
 ) {
@@ -12634,7 +12775,8 @@ async function holderIntelligence(
   budget,
   watched,
   market = null,
-  priorityCompletion = false
+  priorityCompletion = false,
+  env = null
 ) {
   if (
     !totalSupply
@@ -12790,6 +12932,25 @@ async function holderIntelligence(
   let legacyHolderRowsUnavailable =
     false;
 
+  let blockscoutProHolderFallbackV143 = {
+    configured:
+      Boolean(
+        String(
+          env?.BLOCKSCOUT_PRO_API_KEY ||
+          ""
+        ).trim()
+      ),
+    attempted: false,
+    success: false,
+    status:
+      String(
+        env?.BLOCKSCOUT_PRO_API_KEY ||
+        ""
+      ).trim()
+        ? "NOT_NEEDED_YET"
+        : "BLOCKSCOUT_PRO_NOT_CONFIGURED"
+  };
+
   if (
     budgetAvailable(
       budget,
@@ -12928,9 +13089,61 @@ async function holderIntelligence(
     }
   }
 
+
   /*
-   * V134: only open the same-run circuit after BOTH holder-row paths have
-   * failed. Token-details/counters may still be healthy and are not treated
+   * V143:
+   * Public Blockscout remains first choice. Only after both public holder-row
+   * routes fail do we spend one protected analysis request on PRO, and only
+   * when a key has been configured.
+   */
+  if (
+    v2HolderRowsUnavailable &&
+    legacyHolderRowsUnavailable &&
+    budgetAvailable(
+      budget,
+      "analysis"
+    )
+  ) {
+    const proResult =
+      await blockscoutProHoldersV143(
+        token,
+        budget,
+        env
+      );
+
+    blockscoutProHolderFallbackV143 = {
+      configured:
+        proResult.configured,
+      attempted:
+        proResult.attempted,
+      success:
+        proResult.success,
+      status:
+        proResult.status
+    };
+
+    if (
+      proResult.success &&
+      proResult.data &&
+      Array.isArray(
+        proResult.data.items
+      )
+    ) {
+      holders =
+        proResult.data;
+
+      v2HolderRowsUnavailable =
+        false;
+
+      legacyHolderRowsUnavailable =
+        false;
+    }
+  }
+
+  /*
+   * V134/V143: open the same-run circuit only after the public holder-row
+   * paths and any configured PRO fallback have failed. Token details/counters
+   * may still be healthy and are not treated
    * as proof that holder concentration is available.
    */
   if (
@@ -13008,7 +13221,8 @@ async function holderIntelligence(
         holderSource:
           "STALE_CACHE_BLOCKSCOUT_OUTAGE",
         blockscoutUnavailable:
-          true
+          true,
+        blockscoutProHolderFallbackV143
       };
     }
 
@@ -13029,7 +13243,8 @@ async function holderIntelligence(
       transferCount,
 
       holderSource:
-        "BLOCKSCOUT"
+        "BLOCKSCOUT",
+      blockscoutProHolderFallbackV143
     };
   }
 
@@ -13056,9 +13271,11 @@ async function holderIntelligence(
   }
 
   const holderSource =
-    holders?.legacy
-      ? "BLOCKSCOUT_LEGACY"
-      : "BLOCKSCOUT_V2";
+    holders?.proV143
+      ? "BLOCKSCOUT_PRO_V143"
+      : holders?.legacy
+        ? "BLOCKSCOUT_LEGACY"
+        : "BLOCKSCOUT_V2";
 
   const rawItems =
     holders.items.slice(
@@ -13468,6 +13685,7 @@ async function holderIntelligence(
   ) {
     return {
     holderSource,
+    blockscoutProHolderFallbackV143,
       verified:
         countersVerified,
 
@@ -17800,7 +18018,8 @@ async function analyzeToken(
         market,
         Boolean(
           options?.priorityCompletion
-        )
+        ),
+        env
       );
   }
 
@@ -21765,7 +21984,7 @@ async function scan(
     status,
 
     scanMode:
-      "V142_CORE_PREANALYSIS_TERMINAL_PRUNE_HUNTER",
+      "V143_CORE_BLOCKSCOUT_PRO_HOLDER_FALLBACK_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -22382,7 +22601,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V142_PREANALYSIS_TERMINAL_PRUNE_DIRECTIONAL_USD_HUNTER",
+        "V143_BLOCKSCOUT_PRO_HOLDER_FALLBACK_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -22616,6 +22835,22 @@ async function scan(
     excludedTargetHandoffV141,
 
     preAnalysisTerminalPruningV142,
+
+    blockscoutProV143: {
+      configured:
+        Boolean(
+          String(
+            env?.BLOCKSCOUT_PRO_API_KEY ||
+            ""
+          ).trim()
+        ),
+      chainId:
+        BLOCKSCOUT_PRO_CHAIN_ID,
+      publicRoutesRemainPrimary:
+        true,
+      holderFallbackOnly:
+        true
+    },
 
     blockscoutHolderOutageProtection: {
       enabled:
@@ -23742,12 +23977,60 @@ async function scan(
       telegramThresholdsUnchangedV142:
         "ENABLED_V142",
 
+      blockscoutProHolderFallback:
+        "ENABLED_V143",
+
+      blockscoutProChainIdV143:
+        BLOCKSCOUT_PRO_CHAIN_ID,
+
+      blockscoutProOptionalSecretV143:
+        "BLOCKSCOUT_PRO_API_KEY",
+
+      publicBlockscoutStillPrimaryV143:
+        "ENABLED_V143",
+
+      proFallbackOnlyAfterPublicHolderFailureV143:
+        "ENABLED_V143",
+
+      noHolderEvidencePromotionOnProFailureV143:
+        "ENABLED_V143",
+
+      preAnalysisTerminalPruningUnchangedV143:
+        "ENABLED_V143",
+
+      excludedTargetHandoffUnchangedV143:
+        "ENABLED_V143",
+
+      retryRelevanceExpiryUnchangedV143:
+        "ENABLED_V143",
+
+      retryFairnessUnchangedV143:
+        "ENABLED_V143",
+
+      transientRetryPersistenceUnchangedV143:
+        "ENABLED_V143",
+
+      localPriorityHandoffUnchangedV143:
+        "ENABLED_V143",
+
+      organicHolderBreadthUnchangedV143:
+        "ENABLED_V143",
+
+      rollingDirectionalUsdUnchangedV143:
+        "ENABLED_V143",
+
+      externalRequestRateUnchangedV143:
+        "ENABLED_V143",
+
+      telegramThresholdsUnchangedV143:
+        "ENABLED_V143",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V142_CORE_PREANALYSIS_TERMINAL_PRUNE_V77_TELEGRAM_HUNTER",
+      "V143_CORE_BLOCKSCOUT_PRO_HOLDER_FALLBACK_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -24063,7 +24346,7 @@ async function health(
     },
 
     architecture:
-      "V142_CORE_PREANALYSIS_TERMINAL_PRUNE_V77_TELEGRAM_HUNTER",
+      "V143_CORE_BLOCKSCOUT_PRO_HOLDER_FALLBACK_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -24462,7 +24745,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V142_CORE_PREANALYSIS_TERMINAL_PRUNE_V77_TELEGRAM_HUNTER",
+      "V143_CORE_BLOCKSCOUT_PRO_HOLDER_FALLBACK_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -24891,7 +25174,7 @@ export default {
             ),
 
           architecture:
-            "V142_CORE_PREANALYSIS_TERMINAL_PRUNE_V77_TELEGRAM_HUNTER",
+            "V143_CORE_BLOCKSCOUT_PRO_HOLDER_FALLBACK_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
