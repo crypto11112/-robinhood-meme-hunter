@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V121
+ * V122
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -69,8 +69,18 @@
  * - NEW: holder-unverified candidates remain tracked instead of being alerted
  * - NEW: diagnostics expose HOLDER_EVIDENCE_UNVERIFIED
  * - Preserves all existing Telegram score/risk/liquidity/confidence thresholds
+
+ *
+ * V122:
+ * - Preserves full V121 capability set
+ * - NEW: known/cached excluded assets are removed before fresh-market targeting
+ * - NEW: tokenized securities cannot consume DexScreener/GeckoTerminal priority
+ * - NEW: excluded priority completion state is cleared immediately
+ * - NEW: excluded market target is reselected to the next viable candidate
+ * - NEW: pre-market exclusion telemetry explains any removed target
+ * - Preserves V121 Telegram holder gate and all existing thresholds unchanged
 */
-const VERSION = "V121";
+const VERSION = "V122";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -14911,13 +14921,120 @@ function trueLaunchFreshness(
   };
 }
 
+
+function preMarketExcludedToken(
+  token
+) {
+  const meta =
+    token?.metadata ||
+    token?.validationCache?.data ||
+    token?.validation ||
+    null;
+
+  const name =
+    String(
+      meta?.name ||
+      token?.name ||
+      ""
+    ).trim();
+
+  const symbol =
+    String(
+      meta?.symbol ||
+      token?.symbol ||
+      ""
+    ).trim();
+
+  /*
+   * Reuse the bot's own existing asset exclusion logic.
+   * This prevents stale watched-token state from bypassing filtering
+   * before scarce market-data requests are allocated.
+   */
+  const exclusion =
+    detectExcludedAsset(
+      name,
+      symbol
+    );
+
+  if (
+    exclusion?.excluded
+  ) {
+    return {
+      excluded:
+        true,
+      reason:
+        exclusion.reason ||
+        "EXCLUDED_ASSET",
+      name,
+      symbol
+    };
+  }
+
+  const cachedReason =
+    token
+      ?.validationCache
+      ?.data
+      ?.reason ||
+    token
+      ?.validation
+      ?.reason ||
+    null;
+
+  const cachedExcluded =
+    token
+      ?.validationCache
+      ?.data
+      ?.excluded ===
+      true ||
+    token
+      ?.validation
+      ?.excluded ===
+      true;
+
+  if (
+    cachedExcluded
+  ) {
+    return {
+      excluded:
+        true,
+      reason:
+        cachedReason ||
+        "CACHED_EXCLUDED_ASSET",
+      name,
+      symbol
+    };
+  }
+
+  return {
+    excluded:
+      false,
+    reason:
+      null,
+    name,
+    symbol
+  };
+}
+
+function preMarketCandidateAllowed(
+  token
+) {
+  return (
+    marketFreshCandidateAllowed(
+      token
+    ) &&
+    !preMarketExcludedToken(
+      token
+    ).excluded
+  );
+}
+
 function marketFreshPriorityScore(
   token,
   newTokens,
   liveTokens
 ) {
   if (
-    !marketFreshCandidateAllowed(
+    !preMarketCandidateAllowed(
       token
     )
   ) {
@@ -15700,9 +15817,24 @@ async function scan(
             "NO_PENDING_COMPLETION"
         };
 
+  const pendingPreMarketExclusion =
+    pendingCompletionTokenRaw
+      ? preMarketExcludedToken(
+          pendingCompletionTokenRaw
+        )
+      : {
+          excluded:
+            false,
+          reason:
+            null
+        };
+
   if (
     pendingCompletionTokenRaw &&
-    pendingPreMarketReject.terminal
+    (
+      pendingPreMarketReject.terminal ||
+      pendingPreMarketExclusion.excluded
+    )
   ) {
     state.priorityCandidateCompletion =
       null;
@@ -15714,7 +15846,10 @@ async function scan(
   }
 
   const pendingCompletionToken =
-    pendingPreMarketReject.terminal
+    (
+      pendingPreMarketReject.terminal ||
+      pendingPreMarketExclusion.excluded
+    )
       ? null
       : pendingCompletionTokenRaw;
 
@@ -15745,7 +15880,7 @@ async function scan(
     selected
       .filter(
         token =>
-          marketFreshCandidateAllowed(
+          preMarketCandidateAllowed(
             token
           )
       )
@@ -16631,7 +16766,7 @@ async function scan(
     status,
 
     scanMode:
-      "V121_CORE_MARKET_SLOT_HOLDER_GATE_HUNTER",
+      "V122_CORE_PREMARKET_EXCLUSION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -17163,6 +17298,30 @@ async function scan(
     marketFreshTarget:
       marketFreshTargetAddress ||
       null,
+
+    preMarketExclusion: {
+      enabled:
+        true,
+
+      carriedAddress:
+        pendingCompletionAddress ||
+        null,
+
+      carriedExcluded:
+        Boolean(
+          pendingPreMarketExclusion
+            ?.excluded
+        ),
+
+      excludedReason:
+        pendingPreMarketExclusion
+          ?.reason ||
+        null,
+
+      selectedAddress:
+        marketFreshTargetAddress ||
+        null
+    },
 
     preMarketTerminalPruning: {
       enabled:
@@ -17727,12 +17886,27 @@ async function scan(
       telegramThresholdsUnchangedV121:
         "ENABLED_V121",
 
+      preMarketAssetExclusion:
+        "ENABLED_V122",
+
+      tokenizedSecurityFreshSlotProtection:
+        "ENABLED_V122",
+
+      excludedPriorityStateCleanup:
+        "ENABLED_V122",
+
+      excludedTargetReselection:
+        "ENABLED_V122",
+
+      telegramThresholdsUnchangedV122:
+        "ENABLED_V122",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V121_CORE_MARKET_SLOT_HOLDER_GATE_V77_TELEGRAM_HUNTER",
+      "V122_CORE_PREMARKET_EXCLUSION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -18048,7 +18222,7 @@ async function health(
     },
 
     architecture:
-      "V121_CORE_MARKET_SLOT_HOLDER_GATE_V77_TELEGRAM_HUNTER",
+      "V122_CORE_PREMARKET_EXCLUSION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -18447,7 +18621,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V121_CORE_MARKET_SLOT_HOLDER_GATE_V77_TELEGRAM_HUNTER",
+      "V122_CORE_PREMARKET_EXCLUSION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -18876,7 +19050,7 @@ export default {
             ),
 
           architecture:
-            "V121_CORE_MARKET_SLOT_HOLDER_GATE_V77_TELEGRAM_HUNTER",
+            "V122_CORE_PREMARKET_EXCLUSION_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
