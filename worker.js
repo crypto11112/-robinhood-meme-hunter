@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V128
+ * V129
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -150,8 +150,21 @@
  *        can now de-escalate consecutive429s all the way back to zero
  * - Preserves V126 directional USD flow, V127 reselection/spacing/backoff,
  *   Dex timing, KV history, /sendPhoto and all Telegram thresholds
+
+ *
+ * V129:
+ * - Preserves full V128 capability set
+ * - FIX: concentration trend requires a genuinely comparable prior snapshot
+ * - FIX: trackedWallets=0 can no longer produce INCREASING/DECREASING trend
+ * - FIX: first/basis-mismatched holder measurement cannot masquerade as whale movement
+ * - NEW: holder ownership-basis signature tracks infrastructure-address methodology
+ * - NEW: old snapshots without a V129 basis signature are safely treated as non-comparable
+ * - NEW: concentrationTrendResetReason explains why trend is NOT_VERIFIED
+ * - V126 directional USD trade logic is intentionally unchanged
+ * - Preserves V128 LP exclusion, V127 API guards/reselection, Dex timing,
+ *   exact KV key, /sendPhoto and all Telegram thresholds
 */
-const VERSION = "V128";
+const VERSION = "V129";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -12310,6 +12323,156 @@ function getHistoricalSnapshot(
   return null;
 }
 
+
+function holderOwnershipBasisSignature(
+  holders
+) {
+  if (
+    holders?.concentrationVerified !==
+      true ||
+    holders?.whale?.verified !==
+      true
+  ) {
+    return null;
+  }
+
+  const basis =
+    holders?.integrity
+      ?.ownershipConcentrationBasis ||
+    "UNVERIFIED_BASIS";
+
+  const infrastructure =
+    Array.isArray(
+      holders.infrastructureHolders
+    )
+      ? holders.infrastructureHolders
+          .map(
+            holder => {
+              const address =
+                normalize(
+                  holder?.address
+                );
+
+              if (
+                !address
+              ) {
+                return null;
+              }
+
+              return [
+                address,
+                String(
+                  holder
+                    ?.infrastructureReason ||
+                  "UNSPECIFIED"
+                )
+              ].join(
+                ":"
+              );
+            }
+          )
+          .filter(
+            Boolean
+          )
+          .sort()
+      : [];
+
+  return [
+    basis,
+    ...infrastructure
+  ].join(
+    "|"
+  );
+}
+
+function concentrationSnapshotComparison(
+  previous,
+  holders,
+  trackedWallets
+) {
+  if (
+    !previous
+  ) {
+    return {
+      comparable:
+        false,
+
+      reason:
+        "NO_PREVIOUS_SNAPSHOT"
+    };
+  }
+
+  if (
+    safeNumber(
+      trackedWallets
+    ) <=
+      0
+  ) {
+    return {
+      comparable:
+        false,
+
+      reason:
+        "NO_TRACKED_WALLETS_FOR_TREND"
+    };
+  }
+
+  const previousSignature =
+    previous
+      .holderOwnershipBasisSignature ||
+    null;
+
+  const currentSignature =
+    holderOwnershipBasisSignature(
+      holders
+    );
+
+  if (
+    !previousSignature
+  ) {
+    return {
+      comparable:
+        false,
+
+      reason:
+        "PREVIOUS_SNAPSHOT_BASIS_UNAVAILABLE"
+    };
+  }
+
+  if (
+    !currentSignature
+  ) {
+    return {
+      comparable:
+        false,
+
+      reason:
+        "CURRENT_OWNERSHIP_BASIS_UNAVAILABLE"
+    };
+  }
+
+  if (
+    previousSignature !==
+      currentSignature
+  ) {
+    return {
+      comparable:
+        false,
+
+      reason:
+        "OWNERSHIP_BASIS_CHANGED"
+    };
+  }
+
+  return {
+    comparable:
+      true,
+
+    reason:
+      null
+  };
+}
+
 function createSnapshot(
   candidate
 ) {
@@ -12425,7 +12588,12 @@ function createSnapshot(
       candidate.holders
         ?.integrity
         ?.status ||
-      "UNVERIFIED"
+      "UNVERIFIED",
+
+    holderOwnershipBasisSignature:
+      holderOwnershipBasisSignature(
+        candidate.holders
+      )
   };
 }
 
@@ -12862,6 +13030,28 @@ function analyseWhaleFlow(
       concentrationChange:
         null,
 
+      concentrationTrendComparable:
+        false,
+
+      concentrationTrendResetReason:
+        !previous
+          ? "NO_PREVIOUS_SNAPSHOT"
+          : "CURRENT_OWNERSHIP_BASIS_UNAVAILABLE",
+
+      ownershipBasisSignature:
+        holderOwnershipBasisSignature(
+          holders
+        ),
+
+      trackedWallets:
+        0,
+
+      increasingWallets:
+        0,
+
+      decreasingWallets:
+        0,
+
       score:
         0,
 
@@ -13028,17 +13218,30 @@ function analyseWhaleFlow(
       holders.whale.top10Percent
     );
 
+  const concentrationComparison =
+    concentrationSnapshotComparison(
+      previous,
+      holders,
+      comparable
+    );
+
   if (
+    concentrationComparison
+      .comparable &&
     Number.isFinite(
       oldTop10
     ) &&
     Number.isFinite(
       newTop10
     ) &&
-    oldTop10 >= 0 &&
-    oldTop10 <= 100 &&
-    newTop10 >= 0 &&
-    newTop10 <= 100
+    oldTop10 >=
+      0 &&
+    oldTop10 <=
+      100 &&
+    newTop10 >=
+      0 &&
+    newTop10 <=
+      100
   ) {
     concentrationChange =
       newTop10 -
@@ -13046,7 +13249,7 @@ function analyseWhaleFlow(
 
     if (
       concentrationChange >
-      1
+        1
     ) {
       concentrationTrend =
         "INCREASING";
@@ -13054,7 +13257,7 @@ function analyseWhaleFlow(
 
     else if (
       concentrationChange <
-      -1
+        -1
     ) {
       concentrationTrend =
         "DECREASING";
@@ -13078,18 +13281,25 @@ function analyseWhaleFlow(
         "Top-holder concentration increasing"
       );
     }
+  }
 
-    if (
-      newTop10 >=
+  /*
+   * Dangerous current concentration remains a valid current-state penalty.
+   * It does not require historical comparability.
+   */
+  if (
+    Number.isFinite(
+      newTop10
+    ) &&
+    newTop10 >=
       80
-    ) {
-      score -=
-        20;
+  ) {
+    score -=
+      20;
 
-      reasons.push(
-        "Dangerous concentration"
-      );
-    }
+    reasons.push(
+      "Dangerous concentration"
+    );
   }
 
   return {
@@ -13116,6 +13326,22 @@ function analyseWhaleFlow(
     concentrationTrend,
 
     concentrationChange,
+
+    concentrationTrendComparable:
+      concentrationComparison
+        .comparable,
+
+    concentrationTrendResetReason:
+      concentrationComparison
+        .comparable
+        ? null
+        : concentrationComparison
+            .reason,
+
+    ownershipBasisSignature:
+      holderOwnershipBasisSignature(
+        holders
+      ),
 
     trackedWallets:
       comparable,
@@ -18559,7 +18785,7 @@ async function scan(
     status,
 
     scanMode:
-      "V128_CORE_DYNAMIC_LP_HOLDER_EXCLUSION_HUNTER",
+      "V129_CORE_CONCENTRATION_HISTORY_BASIS_GUARD_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -19176,7 +19402,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V128_DYNAMIC_LP_EXCLUSION_DIRECTIONAL_USD_HUNTER",
+        "V129_CONCENTRATION_BASIS_GUARD_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -19949,12 +20175,33 @@ async function scan(
       telegramThresholdsUnchangedV128:
         "ENABLED_V128",
 
+      concentrationComparableSnapshotGuard:
+        "ENABLED_V129",
+
+      ownershipBasisSignature:
+        "ENABLED_V129",
+
+      infrastructureBasisChangeTrendReset:
+        "ENABLED_V129",
+
+      zeroTrackedWalletTrendProtection:
+        "ENABLED_V129",
+
+      firstMeasurementTrendProtection:
+        "ENABLED_V129",
+
+      directionalUsdLogicUnchangedV129:
+        "ENABLED_V129",
+
+      telegramThresholdsUnchangedV129:
+        "ENABLED_V129",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V128_CORE_DYNAMIC_LP_HOLDER_EXCLUSION_V77_TELEGRAM_HUNTER",
+      "V129_CORE_CONCENTRATION_HISTORY_BASIS_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -20270,7 +20517,7 @@ async function health(
     },
 
     architecture:
-      "V128_CORE_DYNAMIC_LP_HOLDER_EXCLUSION_V77_TELEGRAM_HUNTER",
+      "V129_CORE_CONCENTRATION_HISTORY_BASIS_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -20669,7 +20916,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V128_CORE_DYNAMIC_LP_HOLDER_EXCLUSION_V77_TELEGRAM_HUNTER",
+      "V129_CORE_CONCENTRATION_HISTORY_BASIS_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -21098,7 +21345,7 @@ export default {
             ),
 
           architecture:
-            "V128_CORE_DYNAMIC_LP_HOLDER_EXCLUSION_V77_TELEGRAM_HUNTER",
+            "V129_CORE_CONCENTRATION_HISTORY_BASIS_GUARD_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
