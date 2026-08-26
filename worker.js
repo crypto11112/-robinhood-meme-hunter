@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V143
+ * V144
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -364,8 +364,19 @@
  *   AND configured PRO fallback fail
  * - Existing public routes remain first; no extra request when they succeed
  * - Telegram holder safety gate and all alert thresholds remain unchanged
+
+ *
+ * V144:
+ * - Preserves V143 Blockscout PRO holder fallback
+ * - Preserves V142 pre-analysis terminal pruning and V141 excluded-target handoff
+ * - NEW: successful holder intelligence exposes its exact provider
+ * - NEW: PRO configured/attempted/success/status retained per candidate
+ * - NEW: response-level holder-provider audit telemetry
+ * - NEW: Telegram distinguishes holder count from holder concentration
+ * - NEW: Telegram shows holder-data source when concentration is verified
+ * - No alert thresholds, safety gates, request frequency or provider priority changed
 */
-const VERSION = "V143";
+const VERSION = "V144";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -13252,6 +13263,13 @@ async function holderIntelligence(
     holders.items.length ===
     0
   ) {
+    const emptyHolderSourceV144 =
+      holders?.proV143
+        ? "BLOCKSCOUT_PRO_V143"
+        : holders?.legacy
+          ? "BLOCKSCOUT_LEGACY"
+          : "BLOCKSCOUT_V2";
+
     return {
       ...unverifiedHolders(
         "NO_HOLDER_ROWS"
@@ -13266,7 +13284,12 @@ async function holderIntelligence(
 
       holderCount,
 
-      transferCount
+      transferCount,
+
+      holderSource:
+        emptyHolderSourceV144,
+
+      blockscoutProHolderFallbackV143
     };
   }
 
@@ -13822,6 +13845,10 @@ async function holderIntelligence(
   const result = {
     verified:
       true,
+
+    holderSource,
+
+    blockscoutProHolderFallbackV143,
 
     countersVerified,
 
@@ -17613,6 +17640,20 @@ function telegramMessage(
       ? formatNumber(holders.holderCount)
       : "UNVERIFIED";
 
+  const holderConcentrationStatusV144 =
+    holders?.concentrationVerified === true &&
+    holders?.integrity?.verified === true
+      ? "VERIFIED"
+      : "UNVERIFIED";
+
+  const holderProviderV144 =
+    holders?.holderSource ||
+    (
+      holders?.cached
+        ? "CACHED_VERIFIED_HOLDER_DATA"
+        : "UNVERIFIED"
+    );
+
   const whaleWallets =
     holders?.concentrationVerified && whale?.verified
       ? String(whale.whaleCount)
@@ -17747,7 +17788,9 @@ function telegramMessage(
     `📈 24h Net Flow: <b>${trade24h.netUsd}</b>`,
     `💵 24h USD Buy Pressure: <b>${trade24h.pressureUsd}</b>`,
     "",
-    `👥 Holders: <b>${holderText}</b>`,
+    `👥 Holder count: <b>${holderText}</b>`,
+    `🔎 Holder concentration: <b>${holderConcentrationStatusV144}</b>`,
+    `🛰 Holder data source: <b>${escapeHtml(holderProviderV144)}</b>`,
     "",
     `🐋 Whale wallets: <b>${whaleWallets}</b>`,
     `🐋 Top holder: <b>${topHolder}</b>`,
@@ -21192,6 +21235,53 @@ async function scan(
       )
   );
 
+  const holderProviderTelemetryV144 =
+    candidates.map(
+      candidate => ({
+        address:
+          normalize(candidate?.address),
+        symbol:
+          candidate?.symbol ||
+          null,
+        holderSource:
+          candidate?.holders?.holderSource ||
+          null,
+        countVerified:
+          Boolean(
+            candidate?.holders?.countersVerified &&
+            candidate?.holders?.holderCount !== null
+          ),
+        concentrationVerified:
+          Boolean(
+            candidate?.holders?.concentrationVerified &&
+            candidate?.holders?.integrity?.verified
+          ),
+        proConfigured:
+          Boolean(
+            candidate?.holders
+              ?.blockscoutProHolderFallbackV143
+              ?.configured
+          ),
+        proAttempted:
+          Boolean(
+            candidate?.holders
+              ?.blockscoutProHolderFallbackV143
+              ?.attempted
+          ),
+        proSuccess:
+          Boolean(
+            candidate?.holders
+              ?.blockscoutProHolderFallbackV143
+              ?.success
+          ),
+        proStatus:
+          candidate?.holders
+            ?.blockscoutProHolderFallbackV143
+            ?.status ||
+          null
+      })
+    );
+
   const sameRunTerminalCandidates =
     candidates
       .map(
@@ -21984,7 +22074,7 @@ async function scan(
     status,
 
     scanMode:
-      "V143_CORE_BLOCKSCOUT_PRO_HOLDER_FALLBACK_HUNTER",
+      "V144_CORE_HOLDER_PROVIDER_TELEMETRY_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -22601,7 +22691,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V143_BLOCKSCOUT_PRO_HOLDER_FALLBACK_DIRECTIONAL_USD_HUNTER",
+        "V144_HOLDER_PROVIDER_TELEMETRY_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -22835,6 +22925,8 @@ async function scan(
     excludedTargetHandoffV141,
 
     preAnalysisTerminalPruningV142,
+
+    holderProviderTelemetryV144,
 
     blockscoutProV143: {
       configured:
@@ -24025,12 +24117,51 @@ async function scan(
       telegramThresholdsUnchangedV143:
         "ENABLED_V143",
 
+      explicitHolderProviderTelemetry:
+        "ENABLED_V144",
+
+      successfulHolderSourceRetentionV144:
+        "ENABLED_V144",
+
+      proAttemptStatusPerCandidateV144:
+        "ENABLED_V144",
+
+      telegramHolderCountVsConcentrationV144:
+        "ENABLED_V144",
+
+      telegramHolderProviderAuditV144:
+        "ENABLED_V144",
+
+      blockscoutProFallbackUnchangedV144:
+        "ENABLED_V144",
+
+      preAnalysisTerminalPruningUnchangedV144:
+        "ENABLED_V144",
+
+      excludedTargetHandoffUnchangedV144:
+        "ENABLED_V144",
+
+      retryRelevanceExpiryUnchangedV144:
+        "ENABLED_V144",
+
+      retryFairnessUnchangedV144:
+        "ENABLED_V144",
+
+      rollingDirectionalUsdUnchangedV144:
+        "ENABLED_V144",
+
+      externalRequestRateUnchangedV144:
+        "ENABLED_V144",
+
+      telegramThresholdsUnchangedV144:
+        "ENABLED_V144",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V143_CORE_BLOCKSCOUT_PRO_HOLDER_FALLBACK_V77_TELEGRAM_HUNTER",
+      "V144_CORE_HOLDER_PROVIDER_TELEMETRY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -24346,7 +24477,7 @@ async function health(
     },
 
     architecture:
-      "V143_CORE_BLOCKSCOUT_PRO_HOLDER_FALLBACK_V77_TELEGRAM_HUNTER",
+      "V144_CORE_HOLDER_PROVIDER_TELEMETRY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -24745,7 +24876,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V143_CORE_BLOCKSCOUT_PRO_HOLDER_FALLBACK_V77_TELEGRAM_HUNTER",
+      "V144_CORE_HOLDER_PROVIDER_TELEMETRY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -25174,7 +25305,7 @@ export default {
             ),
 
           architecture:
-            "V143_CORE_BLOCKSCOUT_PRO_HOLDER_FALLBACK_V77_TELEGRAM_HUNTER",
+            "V144_CORE_HOLDER_PROVIDER_TELEMETRY_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
