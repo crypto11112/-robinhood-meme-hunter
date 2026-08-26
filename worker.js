@@ -1,26 +1,40 @@
 /**
  * Robinhood Chain Meme Hunter
- * V117
+ * V118
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
  * V117:
  * - Builds directly forward from confirmed V116
- * - Preserves V116 priority-candidate completion and fresh-request reservation
+ * - Preserves V116 priority-candidate persistence and fresh-request scheduling
  * - Preserves DexScreener 429 cooldown/rate-limit protection
- * - NEW: GeckoTerminal Robinhood market-data fallback
- * - FIX: DexScreener HTTP 429/cooldown no longer leaves the priority candidate
- *        automatically MARKET_UNVERIFIED when independent market data is available
- * - NEW: fallback can verify token price, liquidity, FDV/market cap, volume,
- *        trade counts and pool creation time from GeckoTerminal
- * - NEW: one fallback request per scan with its own persistent cooldown/telemetry
- * - NEW: verified fallback results use the existing market cache and scoring path
- * - NEW: NO_MARKET_FOUND from DexScreener can be cross-checked by GeckoTerminal
- * - Does NOT weaken Telegram opportunity, risk, confidence or liquidity thresholds
- * - Does NOT infer directional USD buy/sell flow when the source does not provide it
- * - Preserves all existing discovery, backlog, holder-integrity and Telegram systems
- */
-const VERSION = "V117";
+ * - NEW: independent GeckoTerminal market-data fallback for Robinhood Chain
+ * - NEW: priority candidates can recover market verification when DexScreener
+ *        is in 429 cooldown, fresh-guard, or returns no market
+ * - NEW: fallback verifies real USD price, liquidity, FDV/market cap, volume
+ *        and transaction counts when GeckoTerminal has valid pool data
+ * - NEW: fallback is priority-only and limited to one fresh request per scan
+ * - NEW: independent GeckoTerminal 429/cooldown telemetry
+ * - SAFETY: fallback is VERIFIED only when the returned pool actually contains
+ *        the target token and has positive USD price + positive USD liquidity
+ * - Does NOT lower Telegram score, confidence, risk or liquidity thresholds
+ * - Preserves V116 discovery, backlog, holder integrity, scoring, state,
+ *        notification and Telegram behaviour
+ 
+ *
+ * V118:
+ * - Preserves full V117 multi-source market fallback
+ * - NEW: verified terminal-risk candidates are immediately removed from the
+ *        persistent priority-completion lane
+ * - NEW: severe risk / HIGH holder concentration / extreme top-holder
+ *        ownership cannot monopolize future market-data requests
+ * - NEW: explicit on-chain V4 market-activity evidence is attached to
+ *        candidates from already verified pool-specific swaps/liquidity
+ * - SAFETY: on-chain activity evidence never fabricates USD price/liquidity
+ * - DexScreener and GeckoTerminal remain supplemental market-data sources
+ * - Telegram thresholds remain unchanged
+*/
+const VERSION = "V118";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -34,8 +48,18 @@ const ALCHEMY_BASE =
 const DEXSCREENER_BASE =
   "https://api.dexscreener.com";
 
+/* V117 independent market-data fallback. */
 const GECKOTERMINAL_BASE =
   "https://api.geckoterminal.com/api/v2";
+
+const GECKOTERMINAL_NETWORK =
+  "robinhood";
+
+const GECKOTERMINAL_429_COOLDOWN_MS =
+  2 * 60 * 1000;
+
+const GECKOTERMINAL_MAX_FRESH_PER_SCAN =
+  1;
 
 const BLOCKSCOUT =
   "https://robinhoodchain.blockscout.com";
@@ -173,6 +197,79 @@ const FRESH_ANALYSIS_COST_ALCHEMY = 8;
 const FRESH_ANALYSIS_COST_FALLBACK = 11;
 const CACHED_ANALYSIS_COST = 3;
 
+
+/* =========================================================
+   V118 ON-CHAIN V4 MARKET ACTIVITY EVIDENCE
+   ========================================================= */
+
+function onChainV4MarketEvidence(
+  watched,
+  activity
+) {
+  const swaps =
+    safeNumber(
+      activity?.swaps
+    );
+
+  const liquidityEvents =
+    safeNumber(
+      activity?.liquidityEvents
+    );
+
+  const poolSpecific =
+    activity?.poolSpecific ===
+      true;
+
+  const poolId =
+    normalize(
+      watched?.poolId ||
+      watched?.primaryPoolId ||
+      watched?.lastPoolId
+    ) ||
+    null;
+
+  const marketExists =
+    poolSpecific &&
+    (
+      swaps >
+        0 ||
+      liquidityEvents >
+        0
+    );
+
+  return {
+    verified:
+      marketExists,
+
+    status:
+      marketExists
+        ? "ONCHAIN_V4_MARKET_ACTIVITY_VERIFIED"
+        : "ONCHAIN_V4_MARKET_ACTIVITY_UNVERIFIED",
+
+    source:
+      "ONCHAIN_V4",
+
+    poolSpecific,
+
+    poolId,
+
+    swaps,
+
+    liquidityEvents,
+
+    /*
+     * Important safety distinction:
+     * raw V4 activity proves an active market/pool, but does NOT by itself
+     * prove a USD price or USD liquidity amount.
+     */
+    usdPriceVerified:
+      false,
+
+    usdLiquidityVerified:
+      false
+  };
+}
+
 /* =========================================================
    TOKEN ANALYSIS
    ========================================================= */
@@ -210,12 +307,6 @@ const DEXSCREENER_MIN_FRESH_INTERVAL_MS =
   5 * 60 * 1000;
 
 const DEXSCREENER_MAX_FRESH_PER_SCAN = 1;
-
-/* V117 independent market fallback. Public GeckoTerminal data is cached upstream
- * and the bot uses at most one fallback request per scan. */
-const GECKOTERMINAL_MAX_FRESH_PER_SCAN = 1;
-const GECKOTERMINAL_429_COOLDOWN_MS =
-  5 * 60 * 1000;
 
 /* V116 priority fresh-market reservation. */
 const PRIORITY_FRESH_RESERVATION_MAX_AGE_MS =
@@ -1236,6 +1327,9 @@ function newState() {
           null,
 
         total429s:
+          0,
+
+        totalRequests:
           0,
 
         lastRequestAt:
@@ -7633,77 +7727,485 @@ function clearPriorityFreshReservation(
 }
 
 
-function geckoService(state) {
+/* =========================================================
+   V117 GECKOTERMINAL MARKET FALLBACK
+   ========================================================= */
+
+function geckoService(
+  state
+) {
   state.services =
-    state.services || {};
+    state.services ||
+    {};
 
   state.services.geckoterminal =
-    state.services.geckoterminal || {
-      cooldownUntil: null,
-      last429At: null,
-      lastSuccessAt: null,
-      lastStatus: null,
-      total429s: 0,
-      lastRequestAt: null
-    };
+    state.services.geckoterminal &&
+    typeof state.services.geckoterminal ===
+      "object"
+      ? state.services.geckoterminal
+      : {
+          cooldownUntil:
+            null,
+          last429At:
+            null,
+          lastSuccessAt:
+            null,
+          lastStatus:
+            null,
+          total429s:
+            0,
+          totalRequests:
+            0,
+          lastRequestAt:
+            null
+        };
 
   return state.services.geckoterminal;
 }
 
-function geckoRelationshipAddress(id) {
+function geckoRelationshipAddress(
+  relationship
+) {
+  const id =
+    String(
+      relationship
+        ?.data
+        ?.id ||
+      ""
+    );
+
+  const splitAt =
+    id.lastIndexOf(
+      "_"
+    );
+
+  const address =
+    normalize(
+      splitAt >= 0
+        ? id.slice(
+            splitAt + 1
+          )
+        : id
+    );
+
+  return isAddress(
+    address
+  )
+    ? address
+    : null;
+}
+
+function tokenSupplyNumber(
+  watched
+) {
+  const raw =
+    watched
+      ?.metadata
+      ?.totalSupply;
+
+  const decimals =
+    safeNumber(
+      watched
+        ?.metadata
+        ?.decimals
+    );
+
   if (
-    typeof id !== "string" ||
-    !id.length
+    raw ===
+      null ||
+    raw ===
+      undefined
   ) {
     return null;
   }
 
-  const marker =
-    id.lastIndexOf("_");
+  const numeric =
+    Number(
+      String(
+        raw
+      )
+    );
 
-  return normalize(
-    marker >= 0
-      ? id.slice(marker + 1)
-      : id
-  );
+  if (
+    !Number.isFinite(
+      numeric
+    ) ||
+    numeric <=
+      0
+  ) {
+    return null;
+  }
+
+  const supply =
+    numeric /
+    Math.pow(
+      10,
+      clamp(
+        decimals,
+        0,
+        36
+      )
+    );
+
+  return Number.isFinite(
+    supply
+  ) &&
+  supply >
+    0
+    ? supply
+    : null;
 }
 
-function geckoTxWindow(row = {}) {
+function geckoTxWindow(
+  attributes,
+  window
+) {
+  const row =
+    attributes
+      ?.transactions
+      ?.[window] ||
+    {};
+
   const buys =
-    safeNumber(row?.buys);
+    safeNumber(
+      row?.buys
+    );
+
   const sells =
-    safeNumber(row?.sells);
+    safeNumber(
+      row?.sells
+    );
+
   const total =
-    buys + sells;
+    buys +
+    sells;
 
   return {
     buys,
     sells,
     total,
+
     buyPressure:
       total > 0
-        ? (buys / total) * 100
+        ? (
+            buys /
+            total
+          ) *
+          100
         : null,
+
     directionalUsdVerified:
       false,
+
     buyVolumeUsd:
       null,
+
     sellVolumeUsd:
       null,
+
     netFlowUsd:
       null
   };
 }
 
-async function geckoMarketFallback(
+function parseGeckoPoolMarket(
+  token,
+  watched,
+  row
+) {
+  const target =
+    normalize(
+      token
+    );
+
+  const attributes =
+    row
+      ?.attributes ||
+    {};
+
+  const relationships =
+    row
+      ?.relationships ||
+    {};
+
+  const baseAddress =
+    geckoRelationshipAddress(
+      relationships.base_token
+    );
+
+  const quoteAddress =
+    geckoRelationshipAddress(
+      relationships.quote_token
+    );
+
+  const targetIsBase =
+    baseAddress ===
+    target;
+
+  const targetIsQuote =
+    quoteAddress ===
+    target;
+
+  if (
+    !targetIsBase &&
+    !targetIsQuote
+  ) {
+    return null;
+  }
+
+  const priceUsd =
+    safeNumber(
+      targetIsBase
+        ? attributes
+            .base_token_price_usd
+        : attributes
+            .quote_token_price_usd
+    );
+
+  const liquidityUsd =
+    safeNumber(
+      attributes
+        .reserve_in_usd
+    );
+
+  /*
+   * Never turn an incomplete fallback response into "verified" market
+   * intelligence. Both USD price and real USD pool reserve are required.
+   */
+  if (
+    priceUsd <=
+      0 ||
+    liquidityUsd <=
+      0
+  ) {
+    return null;
+  }
+
+  const supply =
+    tokenSupplyNumber(
+      watched
+    );
+
+  const computedValue =
+    supply &&
+    priceUsd
+      ? supply *
+        priceUsd
+      : null;
+
+  const marketCap =
+    targetIsBase &&
+    safeNumber(
+      attributes
+        .market_cap_usd
+    ) >
+      0
+      ? safeNumber(
+          attributes
+            .market_cap_usd
+        )
+      : computedValue;
+
+  const fdv =
+    targetIsBase &&
+    safeNumber(
+      attributes
+        .fdv_usd
+    ) >
+      0
+      ? safeNumber(
+          attributes
+            .fdv_usd
+        )
+      : computedValue;
+
+  const txM5 =
+    geckoTxWindow(
+      attributes,
+      "m5"
+    );
+
+  const txH1 =
+    geckoTxWindow(
+      attributes,
+      "h1"
+    );
+
+  const txH24 =
+    geckoTxWindow(
+      attributes,
+      "h24"
+    );
+
+  const poolAddress =
+    String(
+      attributes.address ||
+      ""
+    ) ||
+    null;
+
+  const parsedCreatedAt =
+    attributes
+      .pool_created_at
+      ? Date.parse(
+          attributes
+            .pool_created_at
+        )
+      : NaN;
+
+  return {
+    verified:
+      true,
+
+    status:
+      "VERIFIED",
+
+    cached:
+      false,
+
+    source:
+      "GECKOTERMINAL",
+
+    pairAddress:
+      poolAddress,
+
+    url:
+      poolAddress
+        ? `https://www.geckoterminal.com/${GECKOTERMINAL_NETWORK}/pools/${poolAddress}`
+        : null,
+
+    priceUsd:
+      String(
+        priceUsd
+      ),
+
+    liquidityUsd,
+
+    marketCap:
+      Number.isFinite(
+        marketCap
+      ) &&
+      marketCap >
+        0
+        ? marketCap
+        : null,
+
+    fdv:
+      Number.isFinite(
+        fdv
+      ) &&
+      fdv >
+        0
+        ? fdv
+        : null,
+
+    volume: {
+      m5:
+        safeNumber(
+          attributes
+            ?.volume_usd
+            ?.m5
+        ),
+
+      h1:
+        safeNumber(
+          attributes
+            ?.volume_usd
+            ?.h1
+        ),
+
+      h24:
+        safeNumber(
+          attributes
+            ?.volume_usd
+            ?.h24
+        )
+    },
+
+    transactions: {
+      m5:
+        txM5,
+
+      h1:
+        txH1,
+
+      h24:
+        txH24
+    },
+
+    buyPressure5m:
+      txM5
+        .buyPressure,
+
+    buyPressure1h:
+      txH1
+        .buyPressure,
+
+    buyPressure24h:
+      txH24
+        .buyPressure,
+
+    directionalFlow: {
+      m5: {
+        verified:
+          false,
+        buyVolumeUsd:
+          null,
+        sellVolumeUsd:
+          null,
+        netFlowUsd:
+          null
+      },
+
+      h1: {
+        verified:
+          false,
+        buyVolumeUsd:
+          null,
+        sellVolumeUsd:
+          null,
+        netFlowUsd:
+          null
+      },
+
+      h24: {
+        verified:
+          false,
+        buyVolumeUsd:
+          null,
+        sellVolumeUsd:
+          null,
+        netFlowUsd:
+          null
+      }
+    },
+
+    pairCreatedAt:
+      Number.isFinite(
+        parsedCreatedAt
+      )
+        ? parsedCreatedAt
+        : null,
+
+    imageUrl:
+      null,
+
+    fallbackVerified:
+      true
+  };
+}
+
+async function geckoTerminalMarketData(
   token,
   budget,
   watched,
   state,
-  reason = "DEXSCREENER_UNAVAILABLE"
+  trigger
 ) {
   const service =
-    geckoService(state);
+    geckoService(
+      state
+    );
 
   const cooldownUntil =
     safeNumber(
@@ -7712,13 +8214,22 @@ async function geckoMarketFallback(
 
   if (
     cooldownUntil &&
-    Date.now() < cooldownUntil
+    Date.now() <
+      cooldownUntil
   ) {
     return {
-      verified: false,
-      status: "GECKOTERMINAL_COOLDOWN",
-      fallbackAttempted: false,
-      fallbackReason: reason,
+      verified:
+        false,
+
+      status:
+        "GECKOTERMINAL_COOLDOWN",
+
+      source:
+        "GECKOTERMINAL",
+
+      fallbackTrigger:
+        trigger,
+
       cooldownUntil
     };
   }
@@ -7733,10 +8244,17 @@ async function geckoMarketFallback(
     GECKOTERMINAL_MAX_FRESH_PER_SCAN
   ) {
     return {
-      verified: false,
-      status: "GECKOTERMINAL_SCAN_FRESH_LIMIT",
-      fallbackAttempted: false,
-      fallbackReason: reason
+      verified:
+        false,
+
+      status:
+        "GECKOTERMINAL_SCAN_LIMIT",
+
+      source:
+        "GECKOTERMINAL",
+
+      fallbackTrigger:
+        trigger
     };
   }
 
@@ -7748,21 +8266,36 @@ async function geckoMarketFallback(
     )
   ) {
     return {
-      verified: false,
-      status: "MARKET_FALLBACK_BUDGET_PROTECTED",
-      fallbackAttempted: false,
-      fallbackReason: reason
+      verified:
+        false,
+
+      status:
+        "GECKOTERMINAL_BUDGET_PROTECTED",
+
+      source:
+        "GECKOTERMINAL",
+
+      fallbackTrigger:
+        trigger
     };
   }
 
   budget.analysis.geckoFreshUsed++;
+
   service.lastRequestAt =
     Date.now();
+
+  service.totalRequests =
+    safeNumber(
+      service.totalRequests
+    ) +
+    1;
 
   try {
     const response =
       await fetch(
-        `${GECKOTERMINAL_BASE}/networks/robinhood/tokens/${token}/pools?include=base_token,quote_token`,
+        `${GECKOTERMINAL_BASE}/networks/${GECKOTERMINAL_NETWORK}/tokens/${token}/pools`,
+
         {
           headers: {
             accept:
@@ -7772,303 +8305,236 @@ async function geckoMarketFallback(
       );
 
     if (
-      response.status === 429
+      response.status ===
+      429
     ) {
       service.last429At =
         Date.now();
+
       service.cooldownUntil =
         Date.now() +
         GECKOTERMINAL_429_COOLDOWN_MS;
+
       service.lastStatus =
         "HTTP_429";
+
       service.total429s =
         safeNumber(
           service.total429s
-        ) + 1;
+        ) +
+        1;
 
       return {
-        verified: false,
-        status: "GECKOTERMINAL_HTTP_429",
-        fallbackAttempted: true,
-        fallbackReason: reason,
-        rateLimited: true,
+        verified:
+          false,
+
+        status:
+          "GECKOTERMINAL_HTTP_429",
+
+        source:
+          "GECKOTERMINAL",
+
+        fallbackTrigger:
+          trigger,
+
+        rateLimited:
+          true,
+
         cooldownUntil:
           service.cooldownUntil
       };
     }
 
-    if (!response.ok) {
+    if (
+      !response.ok
+    ) {
       service.lastStatus =
         `HTTP_${response.status}`;
 
       return {
-        verified: false,
+        verified:
+          false,
+
         status:
           `GECKOTERMINAL_HTTP_${response.status}`,
-        fallbackAttempted: true,
-        fallbackReason: reason
+
+        source:
+          "GECKOTERMINAL",
+
+        fallbackTrigger:
+          trigger
       };
     }
 
     const payload =
       await response.json();
-    const pools =
-      Array.isArray(payload?.data)
+
+    const rows =
+      Array.isArray(
+        payload?.data
+      )
         ? payload.data
         : [];
-    const target =
-      normalize(token);
 
-    const usable =
-      pools
-        .map(pool => {
-          const attrs =
-            pool?.attributes || {};
-          const base =
-            geckoRelationshipAddress(
-              pool?.relationships
-                ?.base_token
-                ?.data
-                ?.id
-            );
-          const quote =
-            geckoRelationshipAddress(
-              pool?.relationships
-                ?.quote_token
-                ?.data
-                ?.id
-            );
-
-          if (
-            base !== target &&
-            quote !== target
-          ) {
-            return null;
-          }
-
-          const targetIsBase =
-            base === target;
-          const priceUsd =
-            targetIsBase
-              ? attrs.base_token_price_usd
-              : attrs.quote_token_price_usd;
-
-          if (
-            !priceUsd ||
-            !Number.isFinite(
-              Number(priceUsd)
+    const markets =
+      rows
+        .map(
+          row =>
+            parseGeckoPoolMarket(
+              token,
+              watched,
+              row
             )
-          ) {
-            return null;
-          }
-
-          return {
-            pool,
-            attrs,
-            targetIsBase,
-            liquidityUsd:
-              safeNumber(
-                attrs.reserve_in_usd
-              )
-          };
-        })
-        .filter(Boolean)
+        )
+        .filter(
+          Boolean
+        )
         .sort(
           (a, b) =>
-            b.liquidityUsd -
-            a.liquidityUsd
+            safeNumber(
+              b.liquidityUsd
+            ) -
+            safeNumber(
+              a.liquidityUsd
+            )
         );
 
-    if (!usable.length) {
+    if (
+      !markets.length
+    ) {
       service.lastStatus =
         "NO_MARKET_FOUND";
 
       return {
-        verified: false,
+        verified:
+          false,
+
         status:
           "GECKOTERMINAL_NO_MARKET_FOUND",
-        fallbackAttempted: true,
-        fallbackReason: reason,
-        source: "GECKOTERMINAL"
+
+        source:
+          "GECKOTERMINAL",
+
+        fallbackTrigger:
+          trigger
       };
     }
 
-    const chosen =
-      usable[0];
-    const attrs =
-      chosen.attrs;
-    const txM5 =
-      geckoTxWindow(
-        attrs?.transactions?.m5
-      );
-    const txH1 =
-      geckoTxWindow(
-        attrs?.transactions?.h1
-      );
-    const txH24 =
-      geckoTxWindow(
-        attrs?.transactions?.h24
-      );
+    const market = {
+      ...markets[0],
 
-    const priceUsd =
-      chosen.targetIsBase
-        ? attrs.base_token_price_usd
-        : attrs.quote_token_price_usd;
-
-    const result = {
-      verified: true,
-      status: "VERIFIED",
-      cached: false,
       source:
-        "GECKOTERMINAL_FALLBACK",
-      fallbackAttempted: true,
-      fallbackReason: reason,
-      pairAddress:
-        attrs.address ||
-        chosen.pool?.id ||
-        null,
-      url:
-        attrs.address
-          ? `https://www.geckoterminal.com/robinhood/pools/${attrs.address}`
-          : null,
-      priceUsd:
-        String(priceUsd),
-      liquidityUsd:
-        safeNumber(
-          attrs.reserve_in_usd
-        ),
-      marketCap:
-        chosen.targetIsBase
-          ? safeNumber(
-              attrs.market_cap_usd
-            ) || null
-          : null,
-      fdv:
-        chosen.targetIsBase
-          ? safeNumber(
-              attrs.fdv_usd
-            ) || null
-          : null,
-      volume: {
-        m5:
-          safeNumber(
-            attrs?.volume_usd?.m5
-          ),
-        h1:
-          safeNumber(
-            attrs?.volume_usd?.h1
-          ),
-        h24:
-          safeNumber(
-            attrs?.volume_usd?.h24
+        `GECKOTERMINAL_FALLBACK_${String(
+          trigger ||
+          "DEXSCREENER_UNAVAILABLE"
+        )
+          .replace(
+            /[^A-Z0-9_]/gi,
+            "_"
           )
-      },
-      transactions: {
-        m5: txM5,
-        h1: txH1,
-        h24: txH24
-      },
-      buyPressure5m:
-        txM5.buyPressure,
-      buyPressure1h:
-        txH1.buyPressure,
-      buyPressure24h:
-        txH24.buyPressure,
-      directionalFlow: {
-        m5: {
-          verified: false,
-          buyVolumeUsd: null,
-          sellVolumeUsd: null,
-          netFlowUsd: null
-        },
-        h1: {
-          verified: false,
-          buyVolumeUsd: null,
-          sellVolumeUsd: null,
-          netFlowUsd: null
-        },
-        h24: {
-          verified: false,
-          buyVolumeUsd: null,
-          sellVolumeUsd: null,
-          netFlowUsd: null
-        }
-      },
-      pairCreatedAt:
-        attrs.pool_created_at
-          ? Date.parse(
-              attrs.pool_created_at
-            ) || null
-          : null,
-      imageUrl: null
+          .toUpperCase()}`,
+
+      fallbackTrigger:
+        trigger
     };
+
+    service.lastSuccessAt =
+      Date.now();
 
     service.lastStatus =
       "VERIFIED";
-    service.lastSuccessAt =
-      Date.now();
+
     service.cooldownUntil =
       null;
 
     saveMarketCache(
       watched,
-      result
+      market
     );
 
-    return result;
+    return market;
   }
 
-  catch (error) {
+  catch (
+    error
+  ) {
     service.lastStatus =
       "FETCH_ERROR";
 
     return {
-      verified: false,
+      verified:
+        false,
+
       status:
         "GECKOTERMINAL_FETCH_ERROR",
-      fallbackAttempted: true,
-      fallbackReason: reason,
+
+      source:
+        "GECKOTERMINAL",
+
+      fallbackTrigger:
+        trigger,
+
       error:
-        String(
-          error?.message || error
+        errorString(
+          error
         )
     };
   }
 }
 
-async function marketFallbackOrOriginal(
-  original,
+async function priorityMarketFallback(
   token,
   budget,
   watched,
   state,
-  reason
+  priority,
+  trigger,
+  original
 ) {
+  if (
+    !priority
+  ) {
+    return original;
+  }
+
   const fallback =
-    await geckoMarketFallback(
+    await geckoTerminalMarketData(
       token,
       budget,
       watched,
       state,
-      reason
+      trigger
     );
 
-  if (fallback?.verified) {
+  if (
+    fallback
+      ?.verified
+  ) {
     return fallback;
   }
 
   return {
     ...original,
-    fallback: {
+
+    alternativeMarketData: {
       attempted:
-        Boolean(
-          fallback?.fallbackAttempted
-        ),
-      status:
-        fallback?.status ||
-        "UNAVAILABLE",
+        true,
+
       source:
-        "GECKOTERMINAL"
+        "GECKOTERMINAL",
+
+      status:
+        fallback
+          ?.status ||
+        "UNAVAILABLE",
+
+      fallbackTrigger:
+        trigger,
+
+      cooldownUntil:
+        fallback
+          ?.cooldownUntil ||
+        null
     }
   };
 }
@@ -8147,19 +8613,28 @@ async function marketData(
       };
     }
 
-    return await marketFallbackOrOriginal(
-      {
-        verified: false,
-        status: "DEXSCREENER_COOLDOWN",
-        rateLimited: true,
-        cooldownUntil,
-        cached: false
-      },
+    return await priorityMarketFallback(
       token,
       budget,
       watched,
       state,
-      "DEXSCREENER_COOLDOWN"
+      priority,
+      "DEXSCREENER_COOLDOWN",
+      {
+        verified:
+          false,
+
+        status:
+          "DEXSCREENER_COOLDOWN",
+
+        rateLimited:
+          true,
+
+        cooldownUntil,
+
+        cached:
+          false
+      }
     );
   }
 
@@ -8230,35 +8705,37 @@ async function marketData(
       };
     }
 
-    const guarded = {
-      verified: false,
-      status: "DEXSCREENER_FRESH_GUARD",
-      freshGuard: true,
-      retryAfterMs:
-        Math.max(
-          0,
-          DEXSCREENER_MIN_FRESH_INTERVAL_MS -
-          sinceLastFreshRequest
-        ),
-      priorityFreshSchedule:
-        priorityFreshSchedule(
-          state,
-          watched?.address || token
-        )
-    };
+    return await priorityMarketFallback(
+      token,
+      budget,
+      watched,
+      state,
+      priority,
+      "DEXSCREENER_FRESH_GUARD",
+      {
+        verified:
+          false,
 
-    if (priority) {
-      return await marketFallbackOrOriginal(
-        guarded,
-        token,
-        budget,
-        watched,
-        state,
-        "DEXSCREENER_FRESH_GUARD"
-      );
-    }
+        status:
+          "DEXSCREENER_FRESH_GUARD",
 
-    return guarded;
+        freshGuard:
+          true,
+
+        retryAfterMs:
+          Math.max(
+            0,
+            DEXSCREENER_MIN_FRESH_INTERVAL_MS -
+            sinceLastFreshRequest
+          ),
+
+        priorityFreshSchedule:
+          priorityFreshSchedule(
+            state,
+            watched?.address || token
+          )
+      }
+    );
   }
 
   budget.analysis.dexFreshUsed =
@@ -8390,20 +8867,29 @@ async function marketData(
         };
       }
 
-      return await marketFallbackOrOriginal(
-        {
-          verified: false,
-          status: "HTTP_429",
-          rateLimited: true,
-          cooldownUntil:
-            service.cooldownUntil,
-          cached: false
-        },
+      return await priorityMarketFallback(
         token,
         budget,
         watched,
         state,
-        "DEXSCREENER_HTTP_429"
+        priority,
+        "DEXSCREENER_HTTP_429",
+        {
+          verified:
+            false,
+
+          status:
+            "HTTP_429",
+
+          rateLimited:
+            true,
+
+          cooldownUntil:
+            service.cooldownUntil,
+
+          cached:
+            false
+        }
       );
     }
 
@@ -8533,28 +9019,20 @@ async function marketData(
             "DEXSCREENER_BOTH_TOKEN_ROUTES"
         };
 
-        const crossChecked =
-          await marketFallbackOrOriginal(
-            result,
-            token,
-            budget,
-            watched,
-            state,
-            "DEXSCREENER_NO_MARKET_FOUND"
-          );
-
-        if (
-          crossChecked?.verified
-        ) {
-          return crossChecked;
-        }
-
         saveMarketCache(
           watched,
           result
         );
 
-        return crossChecked;
+        return await priorityMarketFallback(
+          token,
+          budget,
+          watched,
+          state,
+          priority,
+          "DEXSCREENER_NO_MARKET_FOUND",
+          result
+        );
       }
     }
 
@@ -13694,6 +14172,24 @@ async function analyzeToken(
       );
   }
 
+  const onChainMarketEvidence =
+    onChainV4MarketEvidence(
+      watched,
+      activity
+    );
+
+  market = {
+    ...market,
+
+    onChainEvidence:
+      onChainMarketEvidence,
+
+    onChainMarketVerified:
+      onChainMarketEvidence
+        .verified ===
+      true
+  };
+
   let holders =
     unverifiedHolders();
 
@@ -13954,6 +14450,106 @@ function backlogLagLabel(
    V116 PRIORITY CANDIDATE COMPLETION
    ========================================================= */
 
+
+function terminalPriorityReject(
+  candidate
+) {
+  if (
+    !candidate ||
+    candidate?.risk?.verified !==
+      true
+  ) {
+    return {
+      terminal:
+        false,
+      reason:
+        null
+    };
+  }
+
+  const riskScore =
+    safeNumber(
+      candidate
+        ?.risk
+        ?.score
+    );
+
+  const severeOverride =
+    candidate
+      ?.risk
+      ?.severeOverride ===
+      true;
+
+  const concentrationRisk =
+    candidate
+      ?.holders
+      ?.whale
+      ?.concentrationRisk ||
+    null;
+
+  const top1Percent =
+    safeNumber(
+      candidate
+        ?.holders
+        ?.whale
+        ?.top1Percent
+    );
+
+  if (
+    severeOverride
+  ) {
+    return {
+      terminal:
+        true,
+      reason:
+        "VERIFIED_SEVERE_RISK"
+    };
+  }
+
+  if (
+    concentrationRisk ===
+      "HIGH"
+  ) {
+    return {
+      terminal:
+        true,
+      reason:
+        "VERIFIED_HIGH_CONCENTRATION"
+    };
+  }
+
+  if (
+    top1Percent >=
+      50
+  ) {
+    return {
+      terminal:
+        true,
+      reason:
+        "VERIFIED_EXTREME_TOP1"
+    };
+  }
+
+  if (
+    riskScore >
+      MAX_ALERT_RISK
+  ) {
+    return {
+      terminal:
+        true,
+      reason:
+        "VERIFIED_RISK_ABOVE_ALERT_MAXIMUM"
+    };
+  }
+
+  return {
+    terminal:
+      false,
+    reason:
+      null
+  };
+}
+
 function completionCandidateStillEligible(
   watched
 ) {
@@ -14052,6 +14648,18 @@ function completionCandidateBlockers(
 function shouldKeepCompletionCandidate(
   candidate
 ) {
+
+  const terminal =
+    terminalPriorityReject(
+      candidate
+    );
+
+  if (
+    terminal.terminal
+  ) {
+    return false;
+  }
+
   if (
     !candidate ||
     !candidate.validERC20 ||
@@ -14968,6 +15576,11 @@ async function scan(
         completionCandidate
       );
 
+    const terminalReject =
+      terminalPriorityReject(
+        completionCandidate
+      );
+
     priorityCompletionTelemetry.symbol =
       completionCandidate.symbol ||
       priorityCompletionTelemetry.symbol;
@@ -14980,6 +15593,21 @@ async function scan(
 
     priorityCompletionTelemetry.persistedForRetry =
       keepForRetry;
+
+
+    priorityCompletionTelemetry.terminalRejected =
+      terminalReject.terminal;
+
+    priorityCompletionTelemetry.terminalRejectReason =
+      terminalReject.reason;
+
+    if (
+      terminalReject.terminal
+    ) {
+      priorityCompletionTelemetry.blockers = [
+        terminalReject.reason
+      ];
+    }
 
     if (
       keepForRetry
@@ -15361,7 +15989,7 @@ async function scan(
     status,
 
     scanMode:
-      "V117_CORE_MULTI_SOURCE_MARKET_FALLBACK_HUNTER",
+      "V117_CORE_DUAL_MARKET_DATA_FALLBACK_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -15555,25 +16183,39 @@ async function scan(
 
       geckoterminal: (() => {
         const gecko =
-          geckoService(state);
+          geckoService(
+            state
+          );
 
         return {
           lastStatus:
             gecko.lastStatus,
+
           lastSuccessAt:
             gecko.lastSuccessAt,
+
           last429At:
             gecko.last429At,
+
           cooldownUntil:
             gecko.cooldownUntil,
+
           cooldownActive:
             safeNumber(
               gecko.cooldownUntil
-            ) > Date.now(),
+            ) >
+            Date.now(),
+
           total429s:
             safeNumber(
               gecko.total429s
             ),
+
+          totalRequests:
+            safeNumber(
+              gecko.totalRequests
+            ),
+
           lastRequestAt:
             gecko.lastRequestAt ||
             null
@@ -16267,30 +16909,54 @@ async function scan(
       dexscreener429CooldownPreserved:
         "ENABLED_V116",
 
-      multiSourceMarketVerification:
+      geckoTerminalMarketFallback:
         "ENABLED_V117",
 
-      geckoTerminalRobinhoodFallback:
+      robinhoodGeckoNetwork:
+        GECKOTERMINAL_NETWORK,
+
+      priorityOnlyMarketFallback:
         "ENABLED_V117",
 
-      dex429MarketFallback:
-        "ENABLED_V117",
-
-      dexNoMarketCrossCheck:
-        "ENABLED_V117",
-
-      geckoFallbackFreshLimitPerScan:
+      oneGeckoFreshRequestPerScan:
         GECKOTERMINAL_MAX_FRESH_PER_SCAN,
+
+      verifiedFallbackRequiresPositivePriceAndLiquidity:
+        "ENABLED_V117",
+
+      dexScreenerNoLongerSingleMarketGateway:
+        "ENABLED_V117",
 
       telegramThresholdsUnchangedV117:
         "ENABLED_V117",
+
+      terminalPriorityCandidatePruning:
+        "ENABLED_V118",
+
+      severeRiskPriorityMonopolyProtection:
+        "ENABLED_V118",
+
+      highConcentrationPriorityPruning:
+        "ENABLED_V118",
+
+      onChainV4MarketActivityEvidence:
+        "ENABLED_V118",
+
+      onChainEvidenceNeverInventsUsdPriceOrLiquidity:
+        "ENABLED_V118",
+
+      dexAndGeckoRemainSupplemental:
+        "ENABLED_V118",
+
+      telegramThresholdsUnchangedV118:
+        "ENABLED_V118",
 
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V117_CORE_MULTI_SOURCE_MARKET_FALLBACK_V77_TELEGRAM_HUNTER",
+      "V117_CORE_DUAL_MARKET_DATA_FALLBACK_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -16606,7 +17272,7 @@ async function health(
     },
 
     architecture:
-      "V117_CORE_MULTI_SOURCE_MARKET_FALLBACK_V77_TELEGRAM_HUNTER",
+      "V117_CORE_DUAL_MARKET_DATA_FALLBACK_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -17005,7 +17671,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V117_CORE_MULTI_SOURCE_MARKET_FALLBACK_V77_TELEGRAM_HUNTER",
+      "V117_CORE_DUAL_MARKET_DATA_FALLBACK_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -17434,7 +18100,7 @@ export default {
             ),
 
           architecture:
-            "V117_CORE_MULTI_SOURCE_MARKET_FALLBACK_V77_TELEGRAM_HUNTER",
+            "V117_CORE_DUAL_MARKET_DATA_FALLBACK_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
