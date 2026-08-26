@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V131
+ * V132
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -192,8 +192,23 @@
  *   accumulation or distribution
  * - Does NOT increase Gecko/Dex request frequency
  * - Does NOT loosen Telegram thresholds or any existing safety gates
+
+ *
+ * V132:
+ * - Preserves the full V131 ownership-denominator guard
+ * - Preserves the full V130 rolling directional USD ledger
+ * - NEW: candidate-analysis reserve protects high-priority token analysis
+ *   from low-yield unknown-pool resolver spending
+ * - Unknown-pool hard ceiling remains 7 requests
+ * - When the watchlist/priority pipeline is active, resolver dynamically
+ *   limits itself to 4 requests, reserving 3 additional requests for analysis
+ * - If the candidate pipeline is effectively empty, resolver can still use
+ *   the existing full 7-request ceiling
+ * - Adds resolver telemetry for dynamic request limit / protected requests
+ * - Does NOT increase any API request rate
+ * - Does NOT loosen Telegram thresholds or safety gates
 */
-const VERSION = "V131";
+const VERSION = "V132";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -543,6 +558,22 @@ const UNKNOWN_POOL_EXACT_FAILED_PROBE_COOLDOWN_ALCHEMY_MS =
  */
 const UNKNOWN_POOL_ALCHEMY_DEEP_SEARCH_DISTANCE_BLOCKS = 60;
 const UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN = 7;
+
+/*
+ * V132: unknown-pool resolution is useful, but it is downstream of the
+ * bot's primary purpose: completing analysis on promising tokens.
+ *
+ * Keep the proven hard ceiling at 7, but protect three requests whenever
+ * the candidate pipeline is active. This turns the effective resolver cap
+ * into 4 in normal operation without increasing any request frequency.
+ */
+const UNKNOWN_POOL_ANALYSIS_PROTECTED_REQUESTS = 3;
+const UNKNOWN_POOL_ACTIVE_PIPELINE_REQUEST_LIMIT =
+  Math.max(
+    1,
+    UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN -
+      UNKNOWN_POOL_ANALYSIS_PROTECTED_REQUESTS
+  );
 const UNKNOWN_POOL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_UNKNOWN_POOL_TRACKER = 500;
 
@@ -3815,6 +3846,105 @@ function unknownPoolDeepSearchAllowedNow(
 }
 
 
+function unknownPoolDynamicRequestLimit(
+  state,
+  budget
+) {
+  const watchedCount =
+    Array.isArray(
+      state?.watchedTokens
+    )
+      ? state.watchedTokens.length
+      : 0;
+
+  const pendingPriorityAddress =
+    normalize(
+      state
+        ?.priorityCandidateCompletion
+        ?.address
+    );
+
+  const pendingPriorityCompleted =
+    state
+      ?.priorityCandidateCompletion
+      ?.completed ===
+      true;
+
+  const priorityPipelineActive =
+    Boolean(
+      pendingPriorityAddress &&
+      !pendingPriorityCompleted
+    );
+
+  /*
+   * Any meaningful watchlist means later validation/market/holder work may
+   * require the protected analysis budget. A pending priority completion is
+   * an even stronger signal.
+   */
+  const candidatePipelineActive =
+    priorityPipelineActive ||
+    watchedCount >= 4;
+
+  const desiredLimit =
+    candidatePipelineActive
+      ? UNKNOWN_POOL_ACTIVE_PIPELINE_REQUEST_LIMIT
+      : UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN;
+
+  /*
+   * Also respect the current global live-discovery reserve. This calculation
+   * cannot increase the hard ceiling; it can only reduce resolver spending.
+   */
+  const totalHeadroom =
+    Math.max(
+      0,
+      safeNumber(
+        budget?.totalLimit
+      ) -
+      safeNumber(
+        budget?.totalUsed
+      ) -
+      LIVE_GLOBAL_RESERVE
+    );
+
+  const effectiveLimit =
+    Math.max(
+      0,
+      Math.min(
+        UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN,
+        desiredLimit,
+        totalHeadroom
+      )
+    );
+
+  return {
+    effectiveLimit,
+
+    hardLimit:
+      UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN,
+
+    protectedRequests:
+      Math.max(
+        0,
+        UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN -
+          effectiveLimit
+      ),
+
+    configuredAnalysisProtectedRequests:
+      UNKNOWN_POOL_ANALYSIS_PROTECTED_REQUESTS,
+
+    candidatePipelineActive,
+
+    priorityPipelineActive,
+
+    watchedCount,
+
+    reason:
+      candidatePipelineActive
+        ? "CANDIDATE_ANALYSIS_BUDGET_PROTECTED"
+        : "FULL_RESOLVER_BUDGET_AVAILABLE"
+  };
+}
+
 async function resolvePersistentUnknownPools(
   env,
   state,
@@ -3823,6 +3953,16 @@ async function resolvePersistentUnknownPools(
   pruneUnknownPools(
     state
   );
+
+  const dynamicRequestBudget =
+    unknownPoolDynamicRequestLimit(
+      state,
+      budget
+    );
+
+  const resolverRequestLimit =
+    dynamicRequestBudget
+      .effectiveLimit;
 
   const tracker =
     ensureUnknownPoolState(
@@ -4229,7 +4369,7 @@ async function resolvePersistentUnknownPools(
     allowDeepBurst &&
     deepBurstAdded < 2 &&
     selectedCandidates.length <
-      UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN
+      resolverRequestLimit
   ) {
     selectedCandidates.push({
       entry:
@@ -4286,7 +4426,7 @@ async function resolvePersistentUnknownPools(
   ) {
     if (
       selectedCandidates.length >=
-      UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN
+      resolverRequestLimit
     ) {
       break;
     }
@@ -4304,7 +4444,30 @@ async function resolvePersistentUnknownPools(
     attempted: 0,
     requestsUsed: 0,
     requestLimit:
+      resolverRequestLimit,
+
+    hardRequestLimit:
       UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN,
+
+    protectedAnalysisRequests:
+      dynamicRequestBudget
+        .protectedRequests,
+
+    configuredAnalysisProtectedRequests:
+      dynamicRequestBudget
+        .configuredAnalysisProtectedRequests,
+
+    candidatePipelineActive:
+      dynamicRequestBudget
+        .candidatePipelineActive,
+
+    priorityPipelineActive:
+      dynamicRequestBudget
+        .priorityPipelineActive,
+
+    requestLimitReason:
+      dynamicRequestBudget
+        .reason,
     scheduler:
       "BALANCED_BREADTH_DEPTH_V108",
     selectedLanes:
@@ -4420,7 +4583,7 @@ async function resolvePersistentUnknownPools(
       selected.lane;
     if (
       output.requestsUsed >=
-        UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN ||
+        resolverRequestLimit ||
       !budgetAvailable(
         budget,
         "discovery-live"
@@ -4485,7 +4648,7 @@ async function resolvePersistentUnknownPools(
         exactPoolGrowthProbedProviders,
         Math.max(
           0,
-          UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN -
+          resolverRequestLimit -
           output.requestsUsed
         )
       );
@@ -4760,11 +4923,22 @@ async function resolvePersistentUnknownPools(
     output.requestsUsed <=
     UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN;
 
+  output.dynamicRequestLimitRespected =
+    output.requestsUsed <=
+    resolverRequestLimit;
+
   output.remainingResolverRequests =
     Math.max(
       0,
-      UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN -
+      resolverRequestLimit -
       output.requestsUsed
+    );
+
+  output.requestsReturnedToAnalysis =
+    Math.max(
+      0,
+      UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN -
+        resolverRequestLimit
     );
 
   return output;
@@ -20106,7 +20280,7 @@ async function scan(
     status,
 
     scanMode:
-      "V131_CORE_OWNERSHIP_DENOMINATOR_GUARD_HUNTER",
+      "V132_CORE_ANALYSIS_BUDGET_PROTECTION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -20723,7 +20897,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V131_OWNERSHIP_DENOMINATOR_GUARD_DIRECTIONAL_USD_HUNTER",
+        "V132_ANALYSIS_RESERVED_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -21571,12 +21745,39 @@ async function scan(
       telegramThresholdsUnchangedV131:
         "ENABLED_V131",
 
+      dynamicUnknownPoolAnalysisReserve:
+        "ENABLED_V132",
+
+      unknownPoolHardCeilingPreservedV132:
+        UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN,
+
+      unknownPoolActivePipelineRequestLimitV132:
+        UNKNOWN_POOL_ACTIVE_PIPELINE_REQUEST_LIMIT,
+
+      unknownPoolAnalysisProtectedRequestsV132:
+        UNKNOWN_POOL_ANALYSIS_PROTECTED_REQUESTS,
+
+      candidateAnalysisBudgetPriorityV132:
+        "ENABLED_V132",
+
+      rollingDirectionalUsdUnchangedV132:
+        "ENABLED_V132",
+
+      ownershipDenominatorGuardUnchangedV132:
+        "ENABLED_V132",
+
+      externalRequestRateUnchangedV132:
+        "ENABLED_V132",
+
+      telegramThresholdsUnchangedV132:
+        "ENABLED_V132",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V131_CORE_OWNERSHIP_DENOMINATOR_GUARD_V77_TELEGRAM_HUNTER",
+      "V132_CORE_ANALYSIS_BUDGET_PROTECTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -21892,7 +22093,7 @@ async function health(
     },
 
     architecture:
-      "V131_CORE_OWNERSHIP_DENOMINATOR_GUARD_V77_TELEGRAM_HUNTER",
+      "V132_CORE_ANALYSIS_BUDGET_PROTECTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -22291,7 +22492,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V131_CORE_OWNERSHIP_DENOMINATOR_GUARD_V77_TELEGRAM_HUNTER",
+      "V132_CORE_ANALYSIS_BUDGET_PROTECTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -22720,7 +22921,7 @@ export default {
             ),
 
           architecture:
-            "V131_CORE_OWNERSHIP_DENOMINATOR_GUARD_V77_TELEGRAM_HUNTER",
+            "V132_CORE_ANALYSIS_BUDGET_PROTECTION_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
