@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V148
+ * V149
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -430,8 +430,24 @@
  *   never the marketFreshTarget object
  * - Watchlist records are retained; no terminal evidence is fabricated
  * - Alert thresholds, scoring, request limits and safety gates unchanged
+
+ *
+ * V149:
+ * - Preserves V148 dynamic terminal queue pruning
+ * - Preserves V147 market-provider 429 coordination
+ * - NEW: short address-scoped cache for verified holder responses that contain
+ *   infrastructure balances but no usable positive ownership balances
+ * - NEW: cached partial holder state remains UNVERIFIED and can never qualify
+ *   as healthy concentration or bypass the Telegram holder-evidence gate
+ * - NEW: 5-minute retry interval lets newly launched ownership distribution
+ *   develop without repeating the same full Blockscout holder work every scan
+ * - NEW: verified holder counters are retained in the partial cache
+ * - NEW: partial cache is invalidated when the verified pair basis changes
+ * - FIX: holderSource/provider fallback metadata is retained on partial and
+ *   integrity-failure holder results instead of becoming null
+ * - Alert thresholds, request ceilings, scoring and safety gates unchanged
 */
-const VERSION = "V148";
+const VERSION = "V149";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -846,6 +862,9 @@ const HOLDER_CACHE_MS =
 
 const HOLDER_STALE_CACHE_MS =
   2 * 60 * 60 * 1000;
+
+const HOLDER_PARTIAL_RETRY_MS_V149 =
+  5 * 60 * 1000;
 
 /* =========================================================
    TELEGRAM
@@ -13503,6 +13522,183 @@ function saveHolderIntelligence(
   };
 }
 
+function cachedPartialHolderStateV149(
+  watched,
+  verifiedPairAddress = null
+) {
+  const cache =
+    watched?.partialHolderCacheV149;
+
+  if (
+    !cache ||
+    typeof cache !==
+      "object"
+  ) {
+    return null;
+  }
+
+  const timestamp =
+    safeNumber(
+      cache.timestamp
+    );
+
+  if (
+    !timestamp ||
+    Date.now() - timestamp >
+      HOLDER_PARTIAL_RETRY_MS_V149
+  ) {
+    return null;
+  }
+
+  const cachedPairBasis =
+    normalize(
+      cache.verifiedPairAddress ||
+      ""
+    ) || null;
+
+  const currentPairBasis =
+    normalize(
+      verifiedPairAddress ||
+      ""
+    ) || null;
+
+  if (
+    cachedPairBasis !==
+      currentPairBasis
+  ) {
+    return null;
+  }
+
+  if (
+    !cache.data ||
+    typeof cache.data !==
+      "object"
+  ) {
+    return null;
+  }
+
+  const status =
+    cache.data
+      ?.integrity
+      ?.status;
+
+  if (
+    status !==
+      "NO_POSITIVE_OWNERSHIP_BALANCES" &&
+    status !==
+      "NO_POSITIVE_OWNERSHIP_SUPPLY"
+  ) {
+    return null;
+  }
+
+  return {
+    ...cache.data,
+
+    verified:
+      Boolean(
+        cache.data
+          .countersVerified
+      ),
+
+    concentrationVerified:
+      false,
+
+    holderSource:
+      `PARTIAL_CACHE_V149:${cache.source || "UNKNOWN"}`,
+
+    partialHolderCacheV149: {
+      reused:
+        true,
+      originalSource:
+        cache.source ||
+        null,
+      cachedAt:
+        timestamp,
+      cacheAgeMs:
+        Date.now() -
+        timestamp,
+      retryAt:
+        timestamp +
+        HOLDER_PARTIAL_RETRY_MS_V149,
+      retryAfterMs:
+        Math.max(
+          0,
+          timestamp +
+            HOLDER_PARTIAL_RETRY_MS_V149 -
+            Date.now()
+        ),
+      concentrationStillUnverified:
+        true
+    }
+  };
+}
+
+function savePartialHolderStateV149(
+  watched,
+  data,
+  holderSource,
+  verifiedPairAddress = null
+) {
+  if (
+    !watched ||
+    !data ||
+    typeof data !==
+      "object"
+  ) {
+    return;
+  }
+
+  const status =
+    data?.integrity?.status;
+
+  if (
+    status !==
+      "NO_POSITIVE_OWNERSHIP_BALANCES" &&
+    status !==
+      "NO_POSITIVE_OWNERSHIP_SUPPLY"
+  ) {
+    return;
+  }
+
+  watched.partialHolderCacheV149 = {
+    timestamp:
+      Date.now(),
+
+    source:
+      holderSource ||
+      null,
+
+    verifiedPairAddress:
+      normalize(
+        verifiedPairAddress ||
+        ""
+      ) || null,
+
+    data: {
+      ...data,
+
+      concentrationVerified:
+        false,
+
+      holderSource:
+        holderSource ||
+        data.holderSource ||
+        null
+    }
+  };
+}
+
+function clearPartialHolderStateV149(
+  watched
+) {
+  if (
+    watched &&
+    watched.partialHolderCacheV149
+  ) {
+    delete watched.partialHolderCacheV149;
+  }
+}
+
 /* =========================================================
    HOLDER INTELLIGENCE — V88
    ========================================================= */
@@ -13573,6 +13769,24 @@ async function holderIntelligence(
       holderSource:
         "CACHE"
     };
+  }
+
+  /*
+   * V149: repeated newly-launched PoolManager-dominant holder responses can
+   * contain no usable external ownership rows yet. Reuse that unverified
+   * state briefly instead of repeating the same holder API work every scan.
+   * This cache never upgrades concentration verification.
+   */
+  const partialHolderStateV149 =
+    cachedPartialHolderStateV149(
+      watched,
+      verifiedPairAddress
+    );
+
+  if (
+    partialHolderStateV149
+  ) {
+    return partialHolderStateV149;
   }
 
   /*
@@ -14119,6 +14333,10 @@ async function holderIntelligence(
       positiveHolderRows:
         0,
 
+      holderSource,
+
+      blockscoutProHolderFallbackV143,
+
       whale: {
         verified:
           false,
@@ -14231,7 +14449,7 @@ async function holderIntelligence(
     ownershipSupply <=
     0n
   ) {
-    return {
+    const partialResultV149 = {
       ...unverifiedHolders(
         "NO_POSITIVE_OWNERSHIP_SUPPLY"
       ),
@@ -14245,8 +14463,30 @@ async function holderIntelligence(
 
       holderCount,
 
-      transferCount
+      transferCount,
+
+      holderSource,
+
+      blockscoutProHolderFallbackV143,
+
+      partialHolderStateV149: {
+        status:
+          "NO_POSITIVE_OWNERSHIP_SUPPLY",
+        concentrationStillUnverified:
+          true,
+        retryMs:
+          HOLDER_PARTIAL_RETRY_MS_V149
+      }
     };
+
+    savePartialHolderStateV149(
+      watched,
+      partialResultV149,
+      holderSource,
+      verifiedPairAddress
+    );
+
+    return partialResultV149;
   }
 
   const topHolders =
@@ -14304,7 +14544,7 @@ async function holderIntelligence(
     positiveHolders.length ===
     0
   ) {
-    return {
+    const partialResultV149 = {
       verified:
         countersVerified,
 
@@ -14345,6 +14585,19 @@ async function holderIntelligence(
       positiveHolderRows:
         0,
 
+      holderSource,
+
+      blockscoutProHolderFallbackV143,
+
+      partialHolderStateV149: {
+        status:
+          "NO_POSITIVE_OWNERSHIP_BALANCES",
+        concentrationStillUnverified:
+          true,
+        retryMs:
+          HOLDER_PARTIAL_RETRY_MS_V149
+      },
+
       whale: {
         verified:
           false,
@@ -14371,6 +14624,15 @@ async function holderIntelligence(
           false
       }
     };
+
+    savePartialHolderStateV149(
+      watched,
+      partialResultV149,
+      holderSource,
+      verifiedPairAddress
+    );
+
+    return partialResultV149;
   }
 
   positiveHolders.sort(
@@ -14684,6 +14946,10 @@ async function holderIntelligence(
         infrastructureHolders.length
     }
   };
+
+  clearPartialHolderStateV149(
+    watched
+  );
 
   saveHolderIntelligence(
     watched,
@@ -22357,6 +22623,13 @@ async function scan(
             ?.blockscoutProHolderFallbackV143
             ?.httpStatus ||
           null,
+        partialHolderCacheV149:
+          candidate?.holders
+            ?.partialHolderCacheV149 ||
+          candidate?.holders
+            ?.partialHolderStateV149 ||
+          null,
+
         pro404RetryUntilV146:
           candidate?.holders
             ?.blockscoutProHolderFallbackV143
@@ -23168,7 +23441,7 @@ async function scan(
     status,
 
     scanMode:
-      "V148_CORE_DYNAMIC_TERMINAL_QUEUE_PRUNE_HUNTER",
+      "V149_CORE_PARTIAL_HOLDER_RETRY_CACHE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -23807,7 +24080,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V148_DYNAMIC_TERMINAL_QUEUE_PRUNE_DIRECTIONAL_USD_HUNTER",
+        "V149_PARTIAL_HOLDER_RETRY_CACHE_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -24051,6 +24324,94 @@ async function scan(
             0,
             10
           )
+    },
+
+    partialHolderRetryCacheV149: {
+      enabled:
+        true,
+      retryMs:
+        HOLDER_PARTIAL_RETRY_MS_V149,
+      concentrationPromotionAllowed:
+        false,
+      active: state.watchedTokens
+        .map(
+          watched => {
+            const cache =
+              watched
+                ?.partialHolderCacheV149;
+
+            if (
+              !cache ||
+              typeof cache !==
+                "object"
+            ) {
+              return null;
+            }
+
+            const timestamp =
+              safeNumber(
+                cache.timestamp
+              );
+
+            if (
+              !timestamp ||
+              Date.now() -
+                timestamp >
+                HOLDER_PARTIAL_RETRY_MS_V149
+            ) {
+              return null;
+            }
+
+            return {
+              address:
+                normalize(
+                  watched.address
+                ),
+              symbol:
+                watched?.metadata?.symbol ||
+                watched?.symbol ||
+                null,
+              status:
+                cache?.data
+                  ?.integrity
+                  ?.status ||
+                null,
+              source:
+                cache.source ||
+                null,
+              countersVerified:
+                Boolean(
+                  cache?.data
+                    ?.countersVerified
+                ),
+              holderCount:
+                cache?.data
+                  ?.holderCount ??
+                null,
+              transferCount:
+                cache?.data
+                  ?.transferCount ??
+                null,
+              retryAt:
+                timestamp +
+                HOLDER_PARTIAL_RETRY_MS_V149,
+              retryAfterMs:
+                Math.max(
+                  0,
+                  timestamp +
+                    HOLDER_PARTIAL_RETRY_MS_V149 -
+                    Date.now()
+                )
+            };
+          }
+        )
+        .filter(
+          Boolean
+        )
+        .slice(
+          0,
+          10
+        )
     },
 
     holderProviderTelemetryV144,
@@ -25525,12 +25886,48 @@ async function scan(
       telegramThresholdsUnchangedV148:
         "ENABLED_V148",
 
+      partialHolderRetryCache:
+        "ENABLED_V149",
+
+      partialHolderRetryMsV149:
+        HOLDER_PARTIAL_RETRY_MS_V149,
+
+      poolManagerDominantNoOwnershipProtectionV149:
+        "ENABLED_V149",
+
+      partialHolderNeverPromotesConcentrationV149:
+        "ENABLED_V149",
+
+      partialHolderCounterRetentionV149:
+        "ENABLED_V149",
+
+      partialHolderPairBasisInvalidationV149:
+        "ENABLED_V149",
+
+      partialHolderProviderSourceRetentionV149:
+        "ENABLED_V149",
+
+      dynamicTerminalQueuePruningUnchangedV149:
+        "ENABLED_V149",
+
+      marketProvider429CoordinationUnchangedV149:
+        "ENABLED_V149",
+
+      blockscoutPro404RetryUnchangedV149:
+        "ENABLED_V149",
+
+      blockscoutProOutageProtectionUnchangedV149:
+        "ENABLED_V149",
+
+      telegramThresholdsUnchangedV149:
+        "ENABLED_V149",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V148_CORE_DYNAMIC_TERMINAL_QUEUE_PRUNE_V77_TELEGRAM_HUNTER",
+      "V149_CORE_PARTIAL_HOLDER_RETRY_CACHE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -25846,7 +26243,7 @@ async function health(
     },
 
     architecture:
-      "V148_CORE_DYNAMIC_TERMINAL_QUEUE_PRUNE_V77_TELEGRAM_HUNTER",
+      "V149_CORE_PARTIAL_HOLDER_RETRY_CACHE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -26245,7 +26642,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V148_CORE_DYNAMIC_TERMINAL_QUEUE_PRUNE_V77_TELEGRAM_HUNTER",
+      "V149_CORE_PARTIAL_HOLDER_RETRY_CACHE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -26674,7 +27071,7 @@ export default {
             ),
 
           architecture:
-            "V148_CORE_DYNAMIC_TERMINAL_QUEUE_PRUNE_V77_TELEGRAM_HUNTER",
+            "V149_CORE_PARTIAL_HOLDER_RETRY_CACHE_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
