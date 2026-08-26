@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V125
+ * V126
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -111,8 +111,22 @@
  * - NEW: Telegram alerts distinguish NEW/EARLY/MATURE launch stage
  * - FIX: mature opportunities no longer use misleading early-stage wording
  * - Preserves DexScreener timing/cooldowns and all Telegram thresholds unchanged
+
+ *
+ * V126:
+ * - Preserves full V125 capability set
+ * - NEW: GeckoTerminal trade-feed enrichment for the highest-priority
+ *        Telegram-qualifying candidate, max one request per scan
+ * - NEW: verifies directional BUY USD / SELL USD / NET USD from individual trades
+ * - NEW: aggregates exact returned trade USD into rolling 5m / 1h / 24h windows
+ * - NEW: candidate-side correction when the meme token is the quote token
+ * - SAFETY: a window is VERIFIED only when the latest-300 trade feed proves
+ *           complete coverage of that whole requested window
+ * - SAFETY: incomplete 24h coverage stays UNVERIFIED rather than extrapolated
+ * - SAFETY: no USD amount is inferred from buy/sell counts or total volume
+ * - Preserves existing DexScreener spacing/cooldowns and Telegram thresholds
 */
-const VERSION = "V125";
+const VERSION = "V126";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -8147,6 +8161,17 @@ function parseGeckoPoolMarket(
     pairAddress:
       poolAddress,
 
+    baseTokenAddress:
+      baseAddress,
+
+    quoteTokenAddress:
+      quoteAddress,
+
+    targetTokenSide:
+      targetIsBase
+        ? "BASE"
+        : "QUOTE",
+
     url:
       poolAddress
         ? `https://www.geckoterminal.com/${GECKOTERMINAL_NETWORK}/pools/${poolAddress}`
@@ -8615,6 +8640,788 @@ async function priorityMarketFallback(
         null
     }
   };
+}
+
+
+/* =========================================================
+   V126 VERIFIED DIRECTIONAL USD TRADE FEED
+   ========================================================= */
+
+/*
+ * GeckoTerminal's public pool-trades endpoint returns the latest 300 trades
+ * from the past 24 hours. We NEVER pretend that 300 rows necessarily cover
+ * 24 hours. A requested window becomes verified only when:
+ *
+ * 1. all rows inside the window have valid timestamp / kind / USD volume; and
+ * 2. the returned trade history demonstrably reaches the beginning of that
+ *    window, OR fewer than 300 rows were returned (meaning the endpoint did
+ *    not hit its documented row cap).
+ *
+ * This gives us useful verified 5m/1h directional USD on active pools while
+ * keeping 24h UNVERIFIED whenever 300 rows do not cover the full day.
+ */
+
+function normalizeGeckoTradeKind(
+  rawKind,
+  targetTokenSide
+) {
+  const kind =
+    String(
+      rawKind ||
+      ""
+    ).toLowerCase();
+
+  if (
+    kind !==
+      "buy" &&
+    kind !==
+      "sell"
+  ) {
+    return null;
+  }
+
+  /*
+   * Gecko's pool trade "kind" is expressed relative to the base token.
+   * If our candidate is the quote token, invert the side.
+   */
+  if (
+    String(
+      targetTokenSide ||
+      ""
+    ).toUpperCase() ===
+      "QUOTE"
+  ) {
+    return kind ===
+      "buy"
+      ? "sell"
+      : "buy";
+  }
+
+  if (
+    String(
+      targetTokenSide ||
+      ""
+    ).toUpperCase() !==
+      "BASE"
+  ) {
+    return null;
+  }
+
+  return kind;
+}
+
+function geckoDirectionalWindow(
+  parsedTrades,
+  returnedCount,
+  windowMs,
+  dexCounts
+) {
+  const now =
+    Date.now();
+
+  const cutoff =
+    now -
+    windowMs;
+
+  const validTimestamps =
+    parsedTrades
+      .map(
+        trade =>
+          safeNumber(
+            trade.timestamp
+          )
+      )
+      .filter(
+        value =>
+          value >
+          0
+      );
+
+  const oldestTimestamp =
+    validTimestamps.length
+      ? Math.min(
+          ...validTimestamps
+        )
+      : null;
+
+  const hitApiRowCap =
+    returnedCount >=
+      300;
+
+  /*
+   * If fewer than 300 trades came back, Gecko did not hit the documented
+   * latest-300 cap. Otherwise the oldest returned trade must reach beyond
+   * the start of the requested window.
+   */
+  const coverageComplete =
+    !hitApiRowCap ||
+    (
+      oldestTimestamp !==
+        null &&
+      oldestTimestamp <=
+        cutoff
+    );
+
+  const rows =
+    parsedTrades
+      .filter(
+        trade =>
+          safeNumber(
+            trade.timestamp
+          ) >=
+          cutoff
+      );
+
+  const validRows =
+    rows.filter(
+      trade =>
+        (
+          trade.side ===
+            "buy" ||
+          trade.side ===
+            "sell"
+        ) &&
+        Number.isFinite(
+          Number(
+            trade.volumeUsd
+          )
+        ) &&
+        Number(
+          trade.volumeUsd
+        ) >=
+          0
+    );
+
+  const dataComplete =
+    validRows.length ===
+      rows.length;
+
+  let buys =
+    0;
+
+  let sells =
+    0;
+
+  let buyVolumeUsd =
+    0;
+
+  let sellVolumeUsd =
+    0;
+
+  for (
+    const trade
+    of validRows
+  ) {
+    const usd =
+      Number(
+        trade.volumeUsd
+      );
+
+    if (
+      trade.side ===
+        "buy"
+    ) {
+      buys++;
+      buyVolumeUsd +=
+        usd;
+    }
+
+    else {
+      sells++;
+      sellVolumeUsd +=
+        usd;
+    }
+  }
+
+  const verified =
+    coverageComplete &&
+    dataComplete;
+
+  const dexBuys =
+    dexCounts?.buys !==
+      null &&
+    dexCounts?.buys !==
+      undefined
+      ? safeNumber(
+          dexCounts.buys
+        )
+      : null;
+
+  const dexSells =
+    dexCounts?.sells !==
+      null &&
+    dexCounts?.sells !==
+      undefined
+      ? safeNumber(
+          dexCounts.sells
+        )
+      : null;
+
+  const countCrossCheck =
+    dexBuys !==
+      null &&
+    dexSells !==
+      null
+      ? (
+          buys ===
+            dexBuys &&
+          sells ===
+            dexSells
+        )
+      : null;
+
+  return {
+    verified,
+
+    coverageComplete,
+    dataComplete,
+    hitApiRowCap,
+
+    returnedTrades:
+      rows.length,
+
+    oldestReturnedTimestamp:
+      oldestTimestamp,
+
+    buys,
+    sells,
+
+    buyVolumeUsd:
+      verified
+        ? buyVolumeUsd
+        : null,
+
+    sellVolumeUsd:
+      verified
+        ? sellVolumeUsd
+        : null,
+
+    netFlowUsd:
+      verified
+        ? buyVolumeUsd -
+          sellVolumeUsd
+        : null,
+
+    buyPressureUsd:
+      verified &&
+      (
+        buyVolumeUsd +
+        sellVolumeUsd
+      ) >
+        0
+        ? (
+            buyVolumeUsd /
+            (
+              buyVolumeUsd +
+              sellVolumeUsd
+            )
+          ) *
+          100
+        : verified
+          ? 0
+          : null,
+
+    countCrossCheck,
+
+    dexCounts:
+      {
+        buys:
+          dexBuys,
+
+        sells:
+          dexSells
+      }
+  };
+}
+
+async function geckoDirectionalTradeFlow(
+  candidate,
+  budget,
+  state
+) {
+  const market =
+    candidate?.market;
+
+  if (
+    market?.verified !==
+      true
+  ) {
+    return {
+      attempted:
+        false,
+
+      verifiedAnyWindow:
+        false,
+
+      status:
+        "MARKET_UNVERIFIED"
+    };
+  }
+
+  const poolAddress =
+    String(
+      market?.pairAddress ||
+      ""
+    );
+
+  if (
+    !poolAddress
+  ) {
+    return {
+      attempted:
+        false,
+
+      verifiedAnyWindow:
+        false,
+
+      status:
+        "POOL_ADDRESS_UNAVAILABLE"
+    };
+  }
+
+  const targetSide =
+    String(
+      market?.targetTokenSide ||
+      ""
+    ).toUpperCase();
+
+  if (
+    targetSide !==
+      "BASE" &&
+    targetSide !==
+      "QUOTE"
+  ) {
+    return {
+      attempted:
+        false,
+
+      verifiedAnyWindow:
+        false,
+
+      status:
+        "TARGET_POOL_SIDE_UNVERIFIED"
+    };
+  }
+
+  const service =
+    geckoService(
+      state
+    );
+
+  const cooldownUntil =
+    safeNumber(
+      service.cooldownUntil
+    );
+
+  if (
+    cooldownUntil &&
+    Date.now() <
+      cooldownUntil
+  ) {
+    return {
+      attempted:
+        false,
+
+      verifiedAnyWindow:
+        false,
+
+      status:
+        "GECKOTERMINAL_COOLDOWN",
+
+      cooldownUntil
+    };
+  }
+
+  budget.analysis.geckoFreshUsed =
+    safeNumber(
+      budget.analysis.geckoFreshUsed
+    );
+
+  /*
+   * Share V117's one-Gecko-request-per-scan guard. Market fallback and
+   * directional enrichment can never both create a Gecko request burst.
+   */
+  if (
+    budget.analysis.geckoFreshUsed >=
+      GECKOTERMINAL_MAX_FRESH_PER_SCAN
+  ) {
+    return {
+      attempted:
+        false,
+
+      verifiedAnyWindow:
+        false,
+
+      status:
+        "GECKOTERMINAL_SCAN_LIMIT"
+    };
+  }
+
+  if (
+    !consumeBudget(
+      budget,
+      "analysis",
+      "GECKOTERMINAL_DIRECTIONAL_TRADES"
+    )
+  ) {
+    return {
+      attempted:
+        false,
+
+      verifiedAnyWindow:
+        false,
+
+      status:
+        "ANALYSIS_BUDGET_PROTECTED"
+    };
+  }
+
+  budget.analysis.geckoFreshUsed++;
+
+  service.lastRequestAt =
+    Date.now();
+
+  service.totalRequests =
+    safeNumber(
+      service.totalRequests
+    ) +
+    1;
+
+  try {
+    const response =
+      await fetch(
+        `${GECKOTERMINAL_BASE}/networks/${GECKOTERMINAL_NETWORK}/pools/${poolAddress}/trades`,
+
+        {
+          headers: {
+            accept:
+              "application/json;version=20230203"
+          }
+        }
+      );
+
+    if (
+      response.status ===
+        429
+    ) {
+      service.last429At =
+        Date.now();
+
+      service.cooldownUntil =
+        Date.now() +
+        GECKOTERMINAL_429_COOLDOWN_MS;
+
+      service.lastStatus =
+        "HTTP_429";
+
+      service.total429s =
+        safeNumber(
+          service.total429s
+        ) +
+        1;
+
+      return {
+        attempted:
+          true,
+
+        verifiedAnyWindow:
+          false,
+
+        status:
+          "GECKOTERMINAL_TRADES_HTTP_429",
+
+        rateLimited:
+          true,
+
+        cooldownUntil:
+          service.cooldownUntil
+      };
+    }
+
+    if (
+      !response.ok
+    ) {
+      service.lastStatus =
+        `TRADES_HTTP_${response.status}`;
+
+      return {
+        attempted:
+          true,
+
+        verifiedAnyWindow:
+          false,
+
+        status:
+          `GECKOTERMINAL_TRADES_HTTP_${response.status}`
+      };
+    }
+
+    const payload =
+      await response.json();
+
+    const rows =
+      Array.isArray(
+        payload?.data
+      )
+        ? payload.data
+        : [];
+
+    const parsedTrades =
+      rows
+        .map(
+          row => {
+            const attributes =
+              row?.attributes ||
+              {};
+
+            const timestamp =
+              Date.parse(
+                attributes
+                  .block_timestamp ||
+                ""
+              );
+
+            const side =
+              normalizeGeckoTradeKind(
+                attributes.kind,
+                targetSide
+              );
+
+            const volumeUsd =
+              attributes
+                .volume_in_usd !==
+                null &&
+              attributes
+                .volume_in_usd !==
+                undefined &&
+              Number.isFinite(
+                Number(
+                  attributes
+                    .volume_in_usd
+                )
+              )
+                ? Number(
+                    attributes
+                      .volume_in_usd
+                  )
+                : null;
+
+            return {
+              timestamp:
+                Number.isFinite(
+                  timestamp
+                )
+                  ? timestamp
+                  : null,
+
+              side,
+
+              volumeUsd,
+
+              txHash:
+                attributes
+                  .tx_hash ||
+                null
+            };
+          }
+        )
+        .filter(
+          trade =>
+            trade.timestamp !==
+              null
+        );
+
+    const returnedCount =
+      rows.length;
+
+    const m5 =
+      geckoDirectionalWindow(
+        parsedTrades,
+        returnedCount,
+        5 * 60 * 1000,
+        market
+          ?.transactions
+          ?.m5
+      );
+
+    const h1 =
+      geckoDirectionalWindow(
+        parsedTrades,
+        returnedCount,
+        60 * 60 * 1000,
+        market
+          ?.transactions
+          ?.h1
+      );
+
+    const h24 =
+      geckoDirectionalWindow(
+        parsedTrades,
+        returnedCount,
+        24 * 60 * 60 * 1000,
+        market
+          ?.transactions
+          ?.h24
+      );
+
+    const verifiedAnyWindow =
+      m5.verified ||
+      h1.verified ||
+      h24.verified;
+
+    service.lastSuccessAt =
+      Date.now();
+
+    service.lastStatus =
+      verifiedAnyWindow
+        ? "VERIFIED_DIRECTIONAL_TRADES"
+        : "DIRECTIONAL_TRADES_PARTIAL";
+
+    service.cooldownUntil =
+      null;
+
+    return {
+      attempted:
+        true,
+
+      verifiedAnyWindow,
+
+      status:
+        verifiedAnyWindow
+          ? "VERIFIED_DIRECTIONAL_TRADES"
+          : "DIRECTIONAL_TRADES_INCOMPLETE_COVERAGE",
+
+      source:
+        "GECKOTERMINAL_POOL_TRADES",
+
+      poolAddress,
+
+      targetTokenSide:
+        targetSide,
+
+      returnedCount,
+
+      documentedMaxRows:
+        300,
+
+      windows: {
+        m5,
+        h1,
+        h24
+      }
+    };
+  }
+
+  catch (
+    error
+  ) {
+    service.lastStatus =
+      "TRADES_FETCH_ERROR";
+
+    return {
+      attempted:
+        true,
+
+      verifiedAnyWindow:
+        false,
+
+      status:
+        "GECKOTERMINAL_TRADES_FETCH_ERROR",
+
+      error:
+        errorString(
+          error
+        )
+    };
+  }
+}
+
+function applyDirectionalTradeFlow(
+  candidate,
+  enrichment
+) {
+  candidate.market =
+    candidate.market ||
+    {};
+
+  candidate.market
+    .directionalTradeFeed =
+    enrichment;
+
+  if (
+    !enrichment
+      ?.windows
+  ) {
+    return candidate;
+  }
+
+  candidate.market
+    .directionalFlow =
+    candidate.market
+      .directionalFlow ||
+    {};
+
+  for (
+    const window
+    of [
+      "m5",
+      "h1",
+      "h24"
+    ]
+  ) {
+    const row =
+      enrichment
+        .windows
+        ?.[window];
+
+    if (
+      !row
+    ) {
+      continue;
+    }
+
+    /*
+     * Never overwrite a previously verified directional source with an
+     * incomplete trade-feed window.
+     */
+    if (
+      row.verified
+    ) {
+      candidate.market
+        .directionalFlow[
+          window
+        ] = {
+          verified:
+            true,
+
+          source:
+            "GECKOTERMINAL_POOL_TRADES",
+
+          buyVolumeUsd:
+            row.buyVolumeUsd,
+
+          sellVolumeUsd:
+            row.sellVolumeUsd,
+
+          netFlowUsd:
+            row.netFlowUsd,
+
+          buyPressureUsd:
+            row.buyPressureUsd,
+
+          coverageComplete:
+            row.coverageComplete,
+
+          returnedTrades:
+            row.returnedTrades,
+
+          countCrossCheck:
+            row.countCrossCheck
+        };
+    }
+  }
+
+  return candidate;
 }
 
 async function marketData(
@@ -9246,6 +10053,43 @@ async function marketData(
       pairAddress:
         pair?.pairAddress ||
         null,
+
+      baseTokenAddress:
+        normalize(
+          pair
+            ?.baseToken
+            ?.address
+        ) ||
+        null,
+
+      quoteTokenAddress:
+        normalize(
+          pair
+            ?.quoteToken
+            ?.address
+        ) ||
+        null,
+
+      targetTokenSide:
+        normalize(
+          pair
+            ?.baseToken
+            ?.address
+        ) ===
+        normalize(
+          token
+        )
+          ? "BASE"
+          : normalize(
+              pair
+                ?.quoteToken
+                ?.address
+            ) ===
+            normalize(
+              token
+            )
+            ? "QUOTE"
+            : "UNVERIFIED",
 
       url:
         pair?.url ||
@@ -14160,7 +15004,8 @@ function telegramMessage(
         buyUsd: "UNVERIFIED",
         sellUsd: "UNVERIFIED",
         netUsd: "UNVERIFIED",
-        pressure: "UNVERIFIED"
+        pressure: "UNVERIFIED",
+        pressureUsd: "UNVERIFIED"
       };
     }
 
@@ -14194,6 +15039,17 @@ function telegramMessage(
         tx?.buyPressure !== undefined
           ? percentDisplay(
               tx.buyPressure
+            )
+          : "UNVERIFIED",
+
+      pressureUsd:
+        flow?.verified &&
+        flow?.buyPressureUsd !==
+          null &&
+        flow?.buyPressureUsd !==
+          undefined
+          ? percentDisplay(
+              flow.buyPressureUsd
             )
           : "UNVERIFIED"
     };
@@ -14240,14 +15096,19 @@ function telegramMessage(
     "📊 <b>Trading Activity</b>",
     `🟢 5m Buys: <b>${trade5m.buys}</b> — <b>${trade5m.buyUsd}</b>`,
     `🔴 5m Sells: <b>${trade5m.sells}</b> — <b>${trade5m.sellUsd}</b>`,
+    `📈 5m Net Flow: <b>${trade5m.netUsd}</b>`,
+    `💵 5m USD Buy Pressure: <b>${trade5m.pressureUsd}</b>`,
     "",
     `🟢 1h Buys: <b>${trade1h.buys}</b> — <b>${trade1h.buyUsd}</b>`,
     `🔴 1h Sells: <b>${trade1h.sells}</b> — <b>${trade1h.sellUsd}</b>`,
     `📈 1h Net Flow: <b>${trade1h.netUsd}</b>`,
     `🟢 1h Buy Pressure: <b>${trade1h.pressure}</b>`,
+    `💵 1h USD Buy Pressure: <b>${trade1h.pressureUsd}</b>`,
     "",
     `🟢 24h Buys: <b>${trade24h.buys}</b> — <b>${trade24h.buyUsd}</b>`,
     `🔴 24h Sells: <b>${trade24h.sells}</b> — <b>${trade24h.sellUsd}</b>`,
+    `📈 24h Net Flow: <b>${trade24h.netUsd}</b>`,
+    `💵 24h USD Buy Pressure: <b>${trade24h.pressureUsd}</b>`,
     "",
     `👥 Holders: <b>${holderText}</b>`,
     "",
@@ -16850,6 +17711,61 @@ async function scan(
     );
   }
 
+  /*
+   * V126: spend at most one Gecko request on directional USD enrichment,
+   * and only on a candidate that already passes every normal Telegram gate.
+   * This does not loosen qualification; it only enriches a call we were
+   * already willing to send.
+   */
+  let directionalTradeEnrichment = {
+    attempted:
+      false,
+
+    address:
+      null,
+
+    status:
+      "NO_QUALIFYING_CANDIDATE",
+
+    verifiedAnyWindow:
+      false
+  };
+
+  const directionalTarget =
+    candidates.find(
+      qualifiesTelegram
+    ) ||
+    null;
+
+  if (
+    directionalTarget
+  ) {
+    const enrichment =
+      await geckoDirectionalTradeFlow(
+        directionalTarget,
+        budget,
+        state
+      );
+
+    applyDirectionalTradeFlow(
+      directionalTarget,
+      enrichment
+    );
+
+    directionalTradeEnrichment = {
+      address:
+        normalize(
+          directionalTarget.address
+        ),
+
+      symbol:
+        directionalTarget.symbol ||
+        null,
+
+      ...enrichment
+    };
+  }
+
   const telegramQualificationDiagnostics =
     buildTelegramQualificationDiagnostics(
       candidates
@@ -17125,7 +18041,7 @@ async function scan(
     status,
 
     scanMode:
-      "V125_CORE_SAME_RUN_TERMINAL_ALERT_CLASSIFICATION_HUNTER",
+      "V126_CORE_VERIFIED_DIRECTIONAL_USD_FLOW_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -17714,7 +18630,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V125_SAME_RUN_TERMINAL_PRUNED_UNVERIFIED_MARKET_FIRST",
+        "V126_VERIFIED_DIRECTIONAL_USD_SAME_RUN_TERMINAL_HUNTER",
 
       selectedAddress:
         marketFreshTargetAddress ||
@@ -17847,6 +18763,8 @@ async function scan(
       candidates.filter(
         qualifiesTelegram
       ).length,
+
+    directionalTradeEnrichment,
 
     sameRunTerminalCleanup: {
       enabled:
@@ -18408,12 +19326,39 @@ async function scan(
       telegramThresholdsUnchangedV125:
         "ENABLED_V125",
 
+      geckoTerminalIndividualTradeFeed:
+        "ENABLED_V126",
+
+      verifiedDirectionalUsd5m1h24h:
+        "ENABLED_V126_STRICT_WINDOW_COVERAGE",
+
+      latest300CoverageProtection:
+        "ENABLED_V126",
+
+      incomplete24hNeverExtrapolated:
+        "ENABLED_V126",
+
+      candidateBaseQuoteSideCorrection:
+        "ENABLED_V126",
+
+      directionalUsdNeverInferredFromCounts:
+        "ENABLED_V126",
+
+      oneGeckoRequestPerScanStillEnforced:
+        "ENABLED_V126",
+
+      telegramUsdNetFlow:
+        "ENABLED_V126",
+
+      telegramThresholdsUnchangedV126:
+        "ENABLED_V126",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V125_CORE_SAME_RUN_TERMINAL_ALERT_CLASSIFICATION_V77_TELEGRAM_HUNTER",
+      "V126_CORE_VERIFIED_DIRECTIONAL_USD_FLOW_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -18729,7 +19674,7 @@ async function health(
     },
 
     architecture:
-      "V125_CORE_SAME_RUN_TERMINAL_ALERT_CLASSIFICATION_V77_TELEGRAM_HUNTER",
+      "V126_CORE_VERIFIED_DIRECTIONAL_USD_FLOW_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -19128,7 +20073,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V125_CORE_SAME_RUN_TERMINAL_ALERT_CLASSIFICATION_V77_TELEGRAM_HUNTER",
+      "V126_CORE_VERIFIED_DIRECTIONAL_USD_FLOW_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -19557,7 +20502,7 @@ export default {
             ),
 
           architecture:
-            "V125_CORE_SAME_RUN_TERMINAL_ALERT_CLASSIFICATION_V77_TELEGRAM_HUNTER",
+            "V126_CORE_VERIFIED_DIRECTIONAL_USD_FLOW_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
