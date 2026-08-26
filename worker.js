@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V122
+ * V123
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -79,8 +79,16 @@
  * - NEW: excluded market target is reselected to the next viable candidate
  * - NEW: pre-market exclusion telemetry explains any removed target
  * - Preserves V121 Telegram holder gate and all existing thresholds unchanged
+
+ *
+ * V123:
+ * - Preserves full V122 intended capability set
+ * - HOTFIX: pre-market exclusion now uses existing proven exclusion helpers
+ * - FIX: reuses tokenizedSecurityReason(name, symbol)
+ * - FIX: known quote/infrastructure metadata is excluded pre-market
+ * - Preserves V121/V120/V119/V118 functionality and Telegram thresholds
 */
-const VERSION = "V122";
+const VERSION = "V123";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -14946,31 +14954,48 @@ function preMarketExcludedToken(
     ).trim();
 
   /*
-   * Reuse the bot's own existing asset exclusion logic.
-   * This prevents stale watched-token state from bypassing filtering
-   * before scarce market-data requests are allocated.
+   * Reuse exclusion helpers that already exist in this worker.
    */
-  const exclusion =
-    detectExcludedAsset(
+  const tokenizedReason =
+    tokenizedSecurityReason(
       name,
       symbol
     );
 
   if (
-    exclusion?.excluded
+    tokenizedReason
   ) {
     return {
       excluded:
         true,
       reason:
-        exclusion.reason ||
-        "EXCLUDED_ASSET",
+        tokenizedReason,
+      name,
+      symbol
+    };
+  }
+
+  if (
+    knownQuoteMetadata(
+      normalize(
+        token?.address
+      ),
+      symbol
+    )
+  ) {
+    return {
+      excluded:
+        true,
+      reason:
+        "KNOWN_QUOTE_OR_INFRASTRUCTURE",
       name,
       symbol
     };
   }
 
   const cachedReason =
+    token
+      ?.excludedReason ||
     token
       ?.validationCache
       ?.data
@@ -14981,6 +15006,9 @@ function preMarketExcludedToken(
     null;
 
   const cachedExcluded =
+    Boolean(
+      token?.excludedReason
+    ) ||
     token
       ?.validationCache
       ?.data
@@ -16766,7 +16794,7 @@ async function scan(
     status,
 
     scanMode:
-      "V122_CORE_PREMARKET_EXCLUSION_HUNTER",
+      "V123_CORE_PREMARKET_EXCLUSION_FIX_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -17901,12 +17929,24 @@ async function scan(
       telegramThresholdsUnchangedV122:
         "ENABLED_V122",
 
+      preMarketExclusionRuntimeHotfix:
+        "FIXED_V123",
+
+      existingTokenizedSecurityReasonReuse:
+        "ENABLED_V123",
+
+      knownQuotePremarketExclusion:
+        "ENABLED_V123",
+
+      telegramThresholdsUnchangedV123:
+        "ENABLED_V123",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V122_CORE_PREMARKET_EXCLUSION_V77_TELEGRAM_HUNTER",
+      "V123_CORE_PREMARKET_EXCLUSION_FIX_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -18222,7 +18262,7 @@ async function health(
     },
 
     architecture:
-      "V122_CORE_PREMARKET_EXCLUSION_V77_TELEGRAM_HUNTER",
+      "V123_CORE_PREMARKET_EXCLUSION_FIX_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -18621,7 +18661,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V122_CORE_PREMARKET_EXCLUSION_V77_TELEGRAM_HUNTER",
+      "V123_CORE_PREMARKET_EXCLUSION_FIX_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -19050,7 +19090,7 @@ export default {
             ),
 
           architecture:
-            "V122_CORE_PREMARKET_EXCLUSION_V77_TELEGRAM_HUNTER",
+            "V123_CORE_PREMARKET_EXCLUSION_FIX_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
