@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V149
+ * V150
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -446,8 +446,19 @@
  * - FIX: holderSource/provider fallback metadata is retained on partial and
  *   integrity-failure holder results instead of becoming null
  * - Alert thresholds, request ceilings, scoring and safety gates unchanged
+
+ *
+ * V150:
+ * - Preserves V149 partial holder retry cache
+ * - Preserves V148 dynamic terminal queue pruning
+ * - Freezes verified terminal addresses before analysis begins
+ * - Initial analysis queue excludes the frozen terminal set
+ * - Same-run replacement paths cannot reinsert frozen terminal addresses
+ * - marketFreshPriority terminalPruned now reports only pre-analysis evidence
+ * - postAnalysisTerminalDiscoveriesV150 separates risks learned during analysis
+ * - Watchlist retention and all safety/Telegram thresholds unchanged
 */
-const VERSION = "V149";
+const VERSION = "V150";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -21194,6 +21205,48 @@ async function scan(
         )
     );
 
+  const preAnalysisTerminalSnapshotV150 =
+    preAnalysisTerminalRowsV142
+      .map(
+        row => ({
+          address:
+            normalize(
+              row?.token?.address
+            ),
+          symbol:
+            row?.token?.metadata?.symbol ||
+            row?.token?.symbol ||
+            null,
+          reason:
+            row?.terminal?.reason ||
+            null,
+          top1Percent:
+            row?.terminal?.top1Percent ??
+            null,
+          concentrationRisk:
+            row?.terminal?.concentrationRisk ||
+            null,
+          evidence:
+            row?.terminal?.evidence ||
+            "VERIFIED_CACHED_HOLDER_EVIDENCE"
+        })
+      )
+      .filter(
+        row =>
+          Boolean(
+            row.address
+          )
+      );
+
+  const terminalSnapshotAddressesV150 =
+    new Set(
+      preAnalysisTerminalSnapshotV150
+        .map(
+          row =>
+            row.address
+        )
+    );
+
   const v142CarriedTerminalPruned =
     Boolean(
       retryPersistenceAddressV139 &&
@@ -21259,7 +21312,7 @@ async function scan(
     analysisSelectedRawV142
       .filter(
         token =>
-          !preAnalysisTerminalAddressesV142
+          !terminalSnapshotAddressesV150
             .has(
               normalize(
                 token?.address
@@ -21536,6 +21589,9 @@ async function scan(
               itemAddress === rejected ||
               v141AnalysedAddresses.has(
                 itemAddress
+              ) ||
+              terminalSnapshotAddressesV150.has(
+                itemAddress
               )
             ) {
               return false;
@@ -21699,6 +21755,44 @@ async function scan(
       marketFreshTargetAddress;
 
     /*
+     * V150: frozen pre-analysis terminal evidence is authoritative for this
+     * run. A later handoff cannot accidentally reinsert one of these tokens.
+     */
+    if (
+      terminalSnapshotAddressesV150
+        .has(
+          address
+        )
+    ) {
+      const snapshotRowV150 =
+        preAnalysisTerminalSnapshotV150
+          .find(
+            row =>
+              row.address ===
+              address
+          ) ||
+        null;
+
+      validationResults.push({
+        address,
+        validERC20:
+          watched?.metadata?.validERC20 ===
+          true
+            ? true
+            : null,
+        deferred:
+          false,
+        terminalPruned:
+          true,
+        reason:
+          snapshotRowV150?.reason ||
+          "PREANALYSIS_TERMINAL_SNAPSHOT_V150"
+      });
+
+      continue;
+    }
+
+    /*
      * V148:
      * V142 evaluated terminal cache once before the mutable analysis queue
      * started. Holder caches can become verified during this same run, and
@@ -21810,6 +21904,10 @@ async function scan(
                   replacementAddress ===
                     address ||
                   v141AnalysedAddresses
+                    .has(
+                      replacementAddress
+                    ) ||
+                  terminalSnapshotAddressesV150
                     .has(
                       replacementAddress
                     )
@@ -22667,6 +22765,40 @@ async function scan(
             .terminal
       );
 
+  const postAnalysisTerminalDiscoveriesV150 =
+    sameRunTerminalCandidates
+      .filter(
+        row =>
+          !terminalSnapshotAddressesV150
+            .has(
+              normalize(
+                row?.candidate?.address
+              )
+            )
+      )
+      .map(
+        row => ({
+          address:
+            normalize(
+              row?.candidate?.address
+            ),
+          symbol:
+            row?.candidate?.symbol ||
+            null,
+          reason:
+            row?.terminal?.reason ||
+            null,
+          top1Percent:
+            row?.candidate?.holders?.whale?.top1Percent ??
+            null,
+          concentrationRisk:
+            row?.candidate?.holders?.whale?.concentrationRisk ||
+            null,
+          discoveredAfterAnalysis:
+            true
+        })
+      );
+
   const sameRunTerminalAddresses =
     new Set(
       sameRunTerminalCandidates
@@ -23441,7 +23573,7 @@ async function scan(
     status,
 
     scanMode:
-      "V149_CORE_PARTIAL_HOLDER_RETRY_CACHE_HUNTER",
+      "V150_CORE_TERMINAL_SNAPSHOT_QUEUE_GUARD_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -24080,7 +24212,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V149_PARTIAL_HOLDER_RETRY_CACHE_DIRECTIONAL_USD_HUNTER",
+        "V150_TERMINAL_SNAPSHOT_QUEUE_GUARD_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -24136,49 +24268,10 @@ async function scan(
           ),
 
       terminalPruned:
-        selected
-          .filter(
-            token =>
-              terminalPriorityRejectFromWatched(
-                token
-              ).terminal
-          )
+        preAnalysisTerminalSnapshotV150
           .slice(
             0,
             10
-          )
-          .map(
-            token => {
-              const terminal =
-                terminalPriorityRejectFromWatched(
-                  token
-                );
-
-              return {
-                address:
-                  normalize(
-                    token.address
-                  ),
-
-                symbol:
-                  token
-                    ?.metadata
-                    ?.symbol ||
-                  null,
-
-                reason:
-                  terminal.reason ||
-                  null,
-
-                top1Percent:
-                  terminal.top1Percent ??
-                  null,
-
-                concentrationRisk:
-                  terminal.concentrationRisk ||
-                  null
-              };
-            }
           )
     },
 
@@ -24314,6 +24407,30 @@ async function scan(
     excludedTargetHandoffV141,
 
     preAnalysisTerminalPruningV142,
+
+    terminalSnapshotQueueGuardV150: {
+      enabled:
+        true,
+      snapshottedBeforeAnalysis:
+        preAnalysisTerminalSnapshotV150.length,
+      addresses:
+        preAnalysisTerminalSnapshotV150
+          .slice(
+            0,
+            10
+          ),
+      reinsertionBlocked:
+        true,
+      watchlistEntriesRetained:
+        true
+    },
+
+    postAnalysisTerminalDiscoveriesV150:
+      postAnalysisTerminalDiscoveriesV150
+        .slice(
+          0,
+          10
+        ),
 
     dynamicTerminalPruningV148: {
       ...dynamicTerminalPruningV148,
@@ -25922,12 +26039,45 @@ async function scan(
       telegramThresholdsUnchangedV149:
         "ENABLED_V149",
 
+      deterministicTerminalSnapshotQueueGuard:
+        "ENABLED_V150",
+
+      terminalSnapshotFrozenBeforeAnalysisV150:
+        "ENABLED_V150",
+
+      terminalSnapshotReinsertionGuardV150:
+        "ENABLED_V150",
+
+      preVsPostAnalysisTerminalTelemetryV150:
+        "ENABLED_V150",
+
+      marketFreshTerminalTelemetryNoPostHocMutationV150:
+        "ENABLED_V150",
+
+      partialHolderRetryCacheUnchangedV150:
+        "ENABLED_V150",
+
+      dynamicTerminalQueuePruningUnchangedV150:
+        "ENABLED_V150",
+
+      marketProvider429CoordinationUnchangedV150:
+        "ENABLED_V150",
+
+      blockscoutPro404RetryUnchangedV150:
+        "ENABLED_V150",
+
+      blockscoutProOutageProtectionUnchangedV150:
+        "ENABLED_V150",
+
+      telegramThresholdsUnchangedV150:
+        "ENABLED_V150",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V149_CORE_PARTIAL_HOLDER_RETRY_CACHE_V77_TELEGRAM_HUNTER",
+      "V150_CORE_TERMINAL_SNAPSHOT_QUEUE_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -26243,7 +26393,7 @@ async function health(
     },
 
     architecture:
-      "V149_CORE_PARTIAL_HOLDER_RETRY_CACHE_V77_TELEGRAM_HUNTER",
+      "V150_CORE_TERMINAL_SNAPSHOT_QUEUE_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -26642,7 +26792,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V149_CORE_PARTIAL_HOLDER_RETRY_CACHE_V77_TELEGRAM_HUNTER",
+      "V150_CORE_TERMINAL_SNAPSHOT_QUEUE_GUARD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -27071,7 +27221,7 @@ export default {
             ),
 
           architecture:
-            "V149_CORE_PARTIAL_HOLDER_RETRY_CACHE_V77_TELEGRAM_HUNTER",
+            "V150_CORE_TERMINAL_SNAPSHOT_QUEUE_GUARD_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
