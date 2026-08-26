@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V118
+ * V119
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -33,8 +33,22 @@
  * - SAFETY: on-chain activity evidence never fabricates USD price/liquidity
  * - DexScreener and GeckoTerminal remain supplemental market-data sources
  * - Telegram thresholds remain unchanged
+
+ *
+ * V119:
+ * - Preserves the complete V118 capability set
+ * - NEW: terminal holder-risk pruning occurs BEFORE a fresh market request
+ * - NEW: cached verified HIGH concentration / extreme top-holder candidates
+ *        cannot consume the scarce DexScreener/GeckoTerminal priority slot
+ * - NEW: if the carried priority candidate is terminal, its completion state
+ *        and fresh reservation are cleared before selecting the next target
+ * - NEW: fresh-market target selection skips other cached terminal candidates
+ * - NEW: pre-market pruning telemetry explains exactly what was removed
+ * - FIX: current scanMode/architecture labels now report V119 consistently
+ * - Preserves V118 on-chain V4 activity evidence without inventing USD data
+ * - Preserves all Telegram thresholds unchanged
 */
-const VERSION = "V118";
+const VERSION = "V119";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -14550,6 +14564,172 @@ function terminalPriorityReject(
   };
 }
 
+
+/*
+ * V119 PRE-MARKET TERMINAL PRUNING
+ *
+ * This deliberately uses only persisted holder evidence that was previously
+ * verified by the normal holder-integrity pipeline. It never guesses risk
+ * from an empty/invalid holder list.
+ */
+function terminalPriorityRejectFromWatched(
+  watched
+) {
+  const cache =
+    watched?.holderCache;
+
+  if (
+    !cache ||
+    typeof cache !==
+      "object"
+  ) {
+    return {
+      terminal:
+        false,
+      reason:
+        null,
+      evidence:
+        "NO_HOLDER_CACHE"
+    };
+  }
+
+  const cacheTimestamp =
+    safeNumber(
+      cache.timestamp
+    );
+
+  const cacheAgeMs =
+    cacheTimestamp
+      ? Date.now() -
+        cacheTimestamp
+      : null;
+
+  /*
+   * Do not pre-prune from indefinitely old holder evidence.
+   * V119 reuses the same two-hour maximum stale-holder window already
+   * accepted elsewhere by the bot.
+   */
+  if (
+    !cacheTimestamp ||
+    cacheAgeMs >
+      HOLDER_STALE_CACHE_MS
+  ) {
+    return {
+      terminal:
+        false,
+      reason:
+        null,
+      evidence:
+        "HOLDER_CACHE_TOO_OLD",
+      cacheAgeMs
+    };
+  }
+
+  const holders =
+    cache.data;
+
+  const integrityVerified =
+    holders
+      ?.integrity
+      ?.verified ===
+      true &&
+    holders
+      ?.integrity
+      ?.status ===
+      "VERIFIED";
+
+  const concentrationVerified =
+    holders
+      ?.concentrationVerified ===
+      true &&
+    holders
+      ?.whale
+      ?.verified ===
+      true;
+
+  if (
+    !integrityVerified ||
+    !concentrationVerified
+  ) {
+    return {
+      terminal:
+        false,
+      reason:
+        null,
+      evidence:
+        "CACHED_CONCENTRATION_NOT_VERIFIED",
+      cacheAgeMs
+    };
+  }
+
+  const concentrationRisk =
+    holders
+      ?.whale
+      ?.concentrationRisk ||
+    "UNVERIFIED";
+
+  const top1Percent =
+    safeNumber(
+      holders
+        ?.whale
+        ?.top1Percent
+    );
+
+  if (
+    concentrationRisk ===
+      "HIGH"
+  ) {
+    return {
+      terminal:
+        true,
+      reason:
+        "CACHED_VERIFIED_HIGH_CONCENTRATION",
+      evidence:
+        "VERIFIED_HOLDER_CACHE",
+      cacheAgeMs,
+      top1Percent,
+      concentrationRisk
+    };
+  }
+
+  if (
+    top1Percent >=
+      50
+  ) {
+    return {
+      terminal:
+        true,
+      reason:
+        "CACHED_VERIFIED_EXTREME_TOP1",
+      evidence:
+        "VERIFIED_HOLDER_CACHE",
+      cacheAgeMs,
+      top1Percent,
+      concentrationRisk
+    };
+  }
+
+  return {
+    terminal:
+      false,
+    reason:
+      null,
+    evidence:
+      "VERIFIED_HOLDER_CACHE",
+    cacheAgeMs,
+    top1Percent,
+    concentrationRisk
+  };
+}
+
+function marketFreshCandidateAllowed(
+  watched
+) {
+  return !terminalPriorityRejectFromWatched(
+    watched
+  ).terminal;
+}
+
 function completionCandidateStillEligible(
   watched
 ) {
@@ -15110,7 +15290,7 @@ async function scan(
       state
     );
 
-  const pendingCompletionToken =
+  const pendingCompletionTokenRaw =
     pendingCompletionAddress
       ? state.watchedTokens.find(
           token =>
@@ -15124,6 +15304,38 @@ async function scan(
         ) ||
         null
       : null;
+
+  const pendingPreMarketReject =
+    pendingCompletionTokenRaw
+      ? terminalPriorityRejectFromWatched(
+          pendingCompletionTokenRaw
+        )
+      : {
+          terminal:
+            false,
+          reason:
+            null,
+          evidence:
+            "NO_PENDING_COMPLETION"
+        };
+
+  if (
+    pendingCompletionTokenRaw &&
+    pendingPreMarketReject.terminal
+  ) {
+    state.priorityCandidateCompletion =
+      null;
+
+    clearPriorityFreshReservation(
+      state,
+      pendingCompletionAddress
+    );
+  }
+
+  const pendingCompletionToken =
+    pendingPreMarketReject.terminal
+      ? null
+      : pendingCompletionTokenRaw;
 
   const selected =
     pendingCompletionToken
@@ -15157,6 +15369,14 @@ async function scan(
             token.address
           );
 
+        if (
+          !marketFreshCandidateAllowed(
+            token
+          )
+        ) {
+          return false;
+        }
+
         return (
           newTokens.has(address) ||
           liveTokens.has(address) ||
@@ -15173,7 +15393,12 @@ async function scan(
         );
       }
     ) ||
-    selected[0] ||
+    selected.find(
+      token =>
+        marketFreshCandidateAllowed(
+          token
+        )
+    ) ||
     null;
 
   const marketFreshTargetAddress =
@@ -15223,7 +15448,51 @@ async function scan(
       [],
 
     priorityFreshSchedule:
-      priorityFreshScheduleTelemetry
+      priorityFreshScheduleTelemetry,
+
+    preMarketTerminalPruning: {
+      evaluatedPending:
+        Boolean(
+          pendingCompletionTokenRaw
+        ),
+
+      terminalRejected:
+        Boolean(
+          pendingPreMarketReject
+            ?.terminal
+        ),
+
+      rejectedAddress:
+        pendingPreMarketReject
+          ?.terminal
+          ? pendingCompletionAddress
+          : null,
+
+      reason:
+        pendingPreMarketReject
+          ?.reason ||
+        null,
+
+      evidence:
+        pendingPreMarketReject
+          ?.evidence ||
+        null,
+
+      cacheAgeMs:
+        pendingPreMarketReject
+          ?.cacheAgeMs ??
+        null,
+
+      top1Percent:
+        pendingPreMarketReject
+          ?.top1Percent ??
+        null,
+
+      concentrationRisk:
+        pendingPreMarketReject
+          ?.concentrationRisk ||
+        null
+    }
   };
 
   const combinedLogs = [
@@ -15989,7 +16258,7 @@ async function scan(
     status,
 
     scanMode:
-      "V117_CORE_DUAL_MARKET_DATA_FALLBACK_HUNTER",
+      "V119_CORE_PREMARKET_TERMINAL_PRUNING_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -16522,6 +16791,36 @@ async function scan(
       marketFreshTargetAddress ||
       null,
 
+    preMarketTerminalPruning: {
+      enabled:
+        true,
+
+      carriedAddress:
+        pendingCompletionAddress ||
+        null,
+
+      rejectedBeforeMarketLookup:
+        Boolean(
+          pendingPreMarketReject
+            ?.terminal
+        ),
+
+      rejectedAddress:
+        pendingPreMarketReject
+          ?.terminal
+          ? pendingCompletionAddress
+          : null,
+
+      reason:
+        pendingPreMarketReject
+          ?.reason ||
+        null,
+
+      nextMarketFreshTarget:
+        marketFreshTargetAddress ||
+        null
+    },
+
     priorityFreshMarketSchedule:
       priorityFreshSchedule(
         state,
@@ -16951,12 +17250,30 @@ async function scan(
       telegramThresholdsUnchangedV118:
         "ENABLED_V118",
 
+      preMarketTerminalPriorityPruning:
+        "ENABLED_V119",
+
+      cachedVerifiedRiskFreshSlotProtection:
+        "ENABLED_V119",
+
+      terminalCandidateRequestWasteProtection:
+        "ENABLED_V119",
+
+      nextViableFreshMarketTargetSelection:
+        "ENABLED_V119",
+
+      currentArchitectureLabelsClean:
+        "ENABLED_V119",
+
+      telegramThresholdsUnchangedV119:
+        "ENABLED_V119",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V117_CORE_DUAL_MARKET_DATA_FALLBACK_V77_TELEGRAM_HUNTER",
+      "V119_CORE_PREMARKET_TERMINAL_PRUNING_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -17272,7 +17589,7 @@ async function health(
     },
 
     architecture:
-      "V117_CORE_DUAL_MARKET_DATA_FALLBACK_V77_TELEGRAM_HUNTER",
+      "V119_CORE_PREMARKET_TERMINAL_PRUNING_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -17671,7 +17988,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V117_CORE_DUAL_MARKET_DATA_FALLBACK_V77_TELEGRAM_HUNTER",
+      "V119_CORE_PREMARKET_TERMINAL_PRUNING_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -18100,7 +18417,7 @@ export default {
             ),
 
           architecture:
-            "V117_CORE_DUAL_MARKET_DATA_FALLBACK_V77_TELEGRAM_HUNTER",
+            "V119_CORE_PREMARKET_TERMINAL_PRUNING_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
