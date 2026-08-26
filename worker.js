@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V132
+ * V133
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -207,8 +207,22 @@
  * - Adds resolver telemetry for dynamic request limit / protected requests
  * - Does NOT increase any API request rate
  * - Does NOT loosen Telegram thresholds or safety gates
+
+ *
+ * V133:
+ * - Preserves V132 dynamic unknown-pool analysis reserve
+ * - Preserves V131 ownership-denominator guard
+ * - Preserves V130 rolling directional USD ledger
+ * - NEW: the selected fresh-market / completion target is analysed FIRST
+ * - NEW: if that top target cannot be completed because analysis budget is
+ *   insufficient, lower-priority candidates are deferred for that run rather
+ *   than consuming the remaining budget
+ * - NEW: explicit top-candidate analysis-order / budget-protection telemetry
+ * - Does NOT increase the 42-request hard budget
+ * - Does NOT increase provider/API request frequency
+ * - Does NOT loosen Telegram thresholds or safety gates
 */
-const VERSION = "V132";
+const VERSION = "V133";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -19111,6 +19125,29 @@ async function scan(
       marketFreshTarget?.address
     );
 
+  /*
+   * V133:
+   * The fresh-market / priority-completion target is the candidate the bot
+   * has already decided is most important to finish. Analyse it before lower
+   * priority candidates so they cannot consume its required budget first.
+   */
+  const analysisSelected =
+    marketFreshTarget
+      ? uniqueBy(
+          [
+            marketFreshTarget,
+            ...selected
+          ],
+          token =>
+            normalize(
+              token.address
+            )
+        ).slice(
+          0,
+          MAX_TOKEN_CHECKS
+        )
+      : selected;
+
   if (marketFreshTargetAddress) {
     reservePriorityFreshMarket(
       state,
@@ -19227,9 +19264,18 @@ async function scan(
      ANALYSIS
      ======================================================= */
 
+  let topCandidateAnalysisDeferred =
+    false;
+
+  let topCandidateRequiredRequests =
+    null;
+
+  let topCandidateDeferredReason =
+    null;
+
   for (
     const watched
-    of selected
+    of analysisSelected
   ) {
     const address =
       normalize(
@@ -19247,6 +19293,53 @@ async function scan(
       );
 
     if (
+      isPriorityCompletion
+    ) {
+      topCandidateRequiredRequests =
+        required;
+    }
+
+    /*
+     * V133:
+     * If the top target itself could not be afforded, do not let lower-ranked
+     * candidates spend the residual budget. Preserve that headroom for the
+     * next scheduled retry of the priority candidate.
+     */
+    if (
+      !isPriorityCompletion &&
+      topCandidateAnalysisDeferred
+    ) {
+      deferredAnalysis++;
+
+      validationResults.push({
+        address:
+          normalize(
+            watched.address
+          ),
+
+        validERC20:
+          null,
+
+        deferred:
+          true,
+
+        reason:
+          "TOP_CANDIDATE_COMPLETION_BUDGET_PROTECTED",
+
+        reservedForTopCandidate:
+          marketFreshTargetAddress,
+
+        topCandidateRequiredRequests:
+          topCandidateRequiredRequests,
+
+        topCandidateDeferredReason:
+          topCandidateDeferredReason
+      });
+
+      continue;
+    }
+
+    if (
       !budgetAvailable(
         budget,
         "analysis",
@@ -19254,6 +19347,16 @@ async function scan(
       )
     ) {
       deferredAnalysis++;
+
+      if (
+        isPriorityCompletion
+      ) {
+        topCandidateAnalysisDeferred =
+          true;
+
+        topCandidateDeferredReason =
+          "FULL_ANALYSIS_BUDGET_PROTECTED";
+      }
 
       validationResults.push({
         address:
@@ -19314,6 +19417,18 @@ async function scan(
       candidate.analysisDeferred
     ) {
       deferredAnalysis++;
+
+      if (
+        isPriorityCompletion
+      ) {
+        topCandidateAnalysisDeferred =
+          true;
+
+        topCandidateDeferredReason =
+          candidate.validation
+            ?.reason ||
+          "ANALYSIS_DEFERRED";
+      }
 
       validationResults.push({
         address,
@@ -20280,7 +20395,7 @@ async function scan(
     status,
 
     scanMode:
-      "V132_CORE_ANALYSIS_BUDGET_PROTECTION_HUNTER",
+      "V133_CORE_TOP_CANDIDATE_COMPLETION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -20897,7 +21012,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V132_ANALYSIS_RESERVED_DIRECTIONAL_USD_HUNTER",
+        "V133_TOP_CANDIDATE_COMPLETION_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -21019,6 +21134,32 @@ async function scan(
       candidates.length,
 
     validationResults,
+
+    topCandidateCompletionBudget: {
+      enabled:
+        true,
+
+      address:
+        marketFreshTargetAddress ||
+        null,
+
+      analysedFirst:
+        Boolean(
+          marketFreshTargetAddress
+        ),
+
+      deferred:
+        topCandidateAnalysisDeferred,
+
+      requiredRequests:
+        topCandidateRequiredRequests,
+
+      deferredReason:
+        topCandidateDeferredReason,
+
+      lowerPriorityProtected:
+        topCandidateAnalysisDeferred
+    },
 
     marketLookups,
 
@@ -21772,12 +21913,39 @@ async function scan(
       telegramThresholdsUnchangedV132:
         "ENABLED_V132",
 
+      topCandidateFirstAnalysisOrder:
+        "ENABLED_V133",
+
+      topCandidateCompletionBudgetProtection:
+        "ENABLED_V133",
+
+      lowerPriorityDeferralAfterTopBudgetFailure:
+        "ENABLED_V133",
+
+      hardRequestBudgetUnchangedV133:
+        42,
+
+      unknownPoolBudgetProtectionUnchangedV133:
+        "ENABLED_V133",
+
+      ownershipDenominatorGuardUnchangedV133:
+        "ENABLED_V133",
+
+      rollingDirectionalUsdUnchangedV133:
+        "ENABLED_V133",
+
+      externalRequestRateUnchangedV133:
+        "ENABLED_V133",
+
+      telegramThresholdsUnchangedV133:
+        "ENABLED_V133",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V132_CORE_ANALYSIS_BUDGET_PROTECTION_V77_TELEGRAM_HUNTER",
+      "V133_CORE_TOP_CANDIDATE_COMPLETION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -22093,7 +22261,7 @@ async function health(
     },
 
     architecture:
-      "V132_CORE_ANALYSIS_BUDGET_PROTECTION_V77_TELEGRAM_HUNTER",
+      "V133_CORE_TOP_CANDIDATE_COMPLETION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -22492,7 +22660,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V132_CORE_ANALYSIS_BUDGET_PROTECTION_V77_TELEGRAM_HUNTER",
+      "V133_CORE_TOP_CANDIDATE_COMPLETION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -22921,7 +23089,7 @@ export default {
             ),
 
           architecture:
-            "V132_CORE_ANALYSIS_BUDGET_PROTECTION_V77_TELEGRAM_HUNTER",
+            "V133_CORE_TOP_CANDIDATE_COMPLETION_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
