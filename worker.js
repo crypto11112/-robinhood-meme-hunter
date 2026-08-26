@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V129
+ * V130
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -163,8 +163,24 @@
  * - V126 directional USD trade logic is intentionally unchanged
  * - Preserves V128 LP exclusion, V127 API guards/reselection, Dex timing,
  *   exact KV key, /sendPhoto and all Telegram thresholds
+
+ *
+ * V130:
+ * - Preserves the full V129 capability set
+ * - LIVE-PROVEN V129/V126 5m directional USD path is preserved
+ * - NEW: persistent Gecko trade ledger for qualifying candidates
+ * - NEW: deduplicates overlapping Gecko trade batches by stable trade key
+ * - NEW: detects batch continuity before combining multiple requests
+ * - NEW: builds verified rolling 1h/24h USD windows only after continuous coverage
+ * - NEW: capped compact trade history prevents unbounded KV growth
+ * - NEW: a gap or trade-cap loss resets coverage instead of extrapolating
+ * - FIX: concentration increase no longer earns a whale-flow bonus unless
+ *   tracked wallet balance movement supports accumulation
+ * - Does NOT increase Gecko/Dex request frequency or loosen Telegram thresholds
+ * - Preserves V129 concentration-basis guards, V128 LP exclusion,
+ *   V127 API guards/reselection, exact KV key, /sendPhoto and all safety gates
 */
-const VERSION = "V129";
+const VERSION = "V130";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -196,6 +212,21 @@ const GECKOTERMINAL_MAX_429_COOLDOWN_MS =
 
 const GECKOTERMINAL_MAX_FRESH_PER_SCAN =
   1;
+
+/*
+ * V130 rolling verified directional-trade history.
+ * Compact per-trade arrays are capped to protect the shared KV state.
+ * If the cap prevents full coverage of a requested window, that window
+ * remains UNVERIFIED rather than being extrapolated.
+ */
+const DIRECTIONAL_LEDGER_WINDOW_MS =
+  24 * 60 * 60 * 1000;
+
+const DIRECTIONAL_LEDGER_MAX_TRADES =
+  12000;
+
+const DIRECTIONAL_LEDGER_MAX_POOLS =
+  2;
 
 const BLOCKSCOUT =
   "https://robinhoodchain.blockscout.com";
@@ -9205,6 +9236,799 @@ function geckoDirectionalWindow(
   };
 }
 
+
+function directionalTradeKey(
+  row,
+  timestamp,
+  side,
+  volumeUsd
+) {
+  const rowId =
+    String(
+      row?.id ||
+      ""
+    ).trim();
+
+  if (
+    rowId
+  ) {
+    return rowId;
+  }
+
+  const txHash =
+    String(
+      row
+        ?.attributes
+        ?.tx_hash ||
+      ""
+    ).toLowerCase();
+
+  return [
+    txHash,
+    String(
+      timestamp
+    ),
+    String(
+      side ||
+      ""
+    ),
+    String(
+      volumeUsd
+    )
+  ].join(
+    ":"
+  );
+}
+
+function directionalLedgerStore(
+  state
+) {
+  const service =
+    geckoService(
+      state
+    );
+
+  service.directionalTradeLedgers =
+    service.directionalTradeLedgers &&
+    typeof service.directionalTradeLedgers ===
+      "object" &&
+    !Array.isArray(
+      service.directionalTradeLedgers
+    )
+      ? service.directionalTradeLedgers
+      : {};
+
+  return service
+    .directionalTradeLedgers;
+}
+
+function pruneDirectionalLedgers(
+  ledgers,
+  keepPoolKey
+) {
+  const now =
+    Date.now();
+
+  for (
+    const [
+      key,
+      ledger
+    ]
+    of Object.entries(
+      ledgers
+    )
+  ) {
+    if (
+      key ===
+        keepPoolKey
+    ) {
+      continue;
+    }
+
+    const age =
+      now -
+      safeNumber(
+        ledger?.lastUpdatedAt
+      );
+
+    if (
+      age >
+        DIRECTIONAL_LEDGER_WINDOW_MS
+    ) {
+      delete ledgers[
+        key
+      ];
+    }
+  }
+
+  const entries =
+    Object.entries(
+      ledgers
+    ).sort(
+      (
+        a,
+        b
+      ) =>
+        safeNumber(
+          b?.[1]
+            ?.lastUpdatedAt
+        ) -
+        safeNumber(
+          a?.[1]
+            ?.lastUpdatedAt
+        )
+    );
+
+  for (
+    const [
+      key
+    ]
+    of entries.slice(
+      DIRECTIONAL_LEDGER_MAX_POOLS
+    )
+  ) {
+    if (
+      key !==
+        keepPoolKey
+    ) {
+      delete ledgers[
+        key
+      ];
+    }
+  }
+}
+
+function validDirectionalLedgerRecord(
+  row
+) {
+  return (
+    Array.isArray(
+      row
+    ) &&
+    row.length >=
+      4 &&
+    typeof row[0] ===
+      "string" &&
+    safeNumber(
+      row[1]
+    ) >
+      0 &&
+    (
+      row[2] ===
+        "buy" ||
+      row[2] ===
+        "sell"
+    ) &&
+    Number.isFinite(
+      Number(
+        row[3]
+      )
+    ) &&
+    Number(
+      row[3]
+    ) >=
+      0
+  );
+}
+
+function updateDirectionalTradeLedger(
+  state,
+  candidate,
+  parsedTrades,
+  returnedCount,
+  requestAt
+) {
+  const market =
+    candidate?.market ||
+    {};
+
+  const poolKey =
+    String(
+      market.pairAddress ||
+      ""
+    ).toLowerCase();
+
+  const tokenAddress =
+    normalize(
+      candidate?.address
+    );
+
+  const targetSide =
+    String(
+      market.targetTokenSide ||
+      ""
+    ).toUpperCase();
+
+  if (
+    !poolKey ||
+    !tokenAddress ||
+    (
+      targetSide !==
+        "BASE" &&
+      targetSide !==
+        "QUOTE"
+    )
+  ) {
+    return {
+      verified:
+        false,
+
+      status:
+        "LEDGER_IDENTITY_UNVERIFIED",
+
+      ledger:
+        null,
+
+      continuity:
+        false,
+
+      resetReason:
+        "LEDGER_IDENTITY_UNVERIFIED"
+    };
+  }
+
+  const ledgers =
+    directionalLedgerStore(
+      state
+    );
+
+  pruneDirectionalLedgers(
+    ledgers,
+    poolKey
+  );
+
+  let previous =
+    ledgers[
+      poolKey
+    ];
+
+  if (
+    previous &&
+    (
+      normalize(
+        previous.tokenAddress
+      ) !==
+        tokenAddress ||
+      String(
+        previous.targetTokenSide ||
+        ""
+      ).toUpperCase() !==
+        targetSide
+    )
+  ) {
+    previous =
+      null;
+  }
+
+  const validTrades =
+    (
+      parsedTrades ||
+      []
+    )
+      .filter(
+        trade =>
+          trade.tradeKey &&
+          safeNumber(
+            trade.timestamp
+          ) >
+            0 &&
+          (
+            trade.side ===
+              "buy" ||
+            trade.side ===
+              "sell"
+          ) &&
+          Number.isFinite(
+            Number(
+              trade.volumeUsd
+            )
+          ) &&
+          Number(
+            trade.volumeUsd
+          ) >=
+            0
+      );
+
+  const freshRecords =
+    validTrades.map(
+      trade => [
+        String(
+          trade.tradeKey
+        ),
+        safeNumber(
+          trade.timestamp
+        ),
+        trade.side,
+        Number(
+          trade.volumeUsd
+        )
+      ]
+    );
+
+  const previousRecords =
+    Array.isArray(
+      previous?.records
+    )
+      ? previous.records.filter(
+          validDirectionalLedgerRecord
+        )
+      : [];
+
+  const hitApiRowCap =
+    safeNumber(
+      returnedCount
+    ) >=
+      300;
+
+  const newKeys =
+    new Set(
+      freshRecords.map(
+        row =>
+          row[0]
+      )
+    );
+
+  const overlapCount =
+    previousRecords.reduce(
+      (
+        count,
+        row
+      ) =>
+        count +
+        (
+          newKeys.has(
+            row[0]
+          )
+            ? 1
+            : 0
+        ),
+      0
+    );
+
+  let continuity =
+    false;
+
+  let resetReason =
+    null;
+
+  let coverageStartAt =
+    null;
+
+  let records =
+    [];
+
+  if (
+    !hitApiRowCap
+  ) {
+    records =
+      freshRecords;
+
+    coverageStartAt =
+      requestAt -
+      DIRECTIONAL_LEDGER_WINDOW_MS;
+
+    continuity =
+      true;
+
+    resetReason =
+      previous
+        ? "FULL_HISTORY_REFRESH_BELOW_API_CAP"
+        : "FULL_HISTORY_INITIALIZED_BELOW_API_CAP";
+  }
+
+  else if (
+    previous &&
+    previousRecords.length &&
+    overlapCount >
+      0
+  ) {
+    const merged =
+      new Map();
+
+    for (
+      const row
+      of previousRecords
+    ) {
+      merged.set(
+        row[0],
+        row
+      );
+    }
+
+    for (
+      const row
+      of freshRecords
+    ) {
+      merged.set(
+        row[0],
+        row
+      );
+    }
+
+    records =
+      Array.from(
+        merged.values()
+      );
+
+    coverageStartAt =
+      safeNumber(
+        previous.coverageStartAt
+      ) ||
+      (
+        records.length
+          ? Math.min(
+              ...records.map(
+                row =>
+                  safeNumber(
+                    row[1]
+                  )
+              )
+            )
+          : requestAt
+      );
+
+    continuity =
+      true;
+  }
+
+  else {
+    records =
+      freshRecords;
+
+    coverageStartAt =
+      records.length
+        ? Math.min(
+            ...records.map(
+              row =>
+                safeNumber(
+                  row[1]
+                )
+            )
+          )
+        : requestAt;
+
+    continuity =
+      false;
+
+    resetReason =
+      previous
+        ? "CAPPED_BATCH_NO_OVERLAP_GAP_RESET"
+        : "CAPPED_BATCH_INITIAL_PARTIAL_HISTORY";
+  }
+
+  const cutoff24h =
+    requestAt -
+    DIRECTIONAL_LEDGER_WINDOW_MS;
+
+  records =
+    records
+      .filter(
+        row =>
+          safeNumber(
+            row[1]
+          ) >=
+            cutoff24h
+      )
+      .sort(
+        (
+          a,
+          b
+        ) =>
+          safeNumber(
+            a[1]
+          ) -
+          safeNumber(
+            b[1]
+          )
+      );
+
+  let trimmedByRecordCap =
+    false;
+
+  if (
+    records.length >
+      DIRECTIONAL_LEDGER_MAX_TRADES
+  ) {
+    records =
+      records.slice(
+        -DIRECTIONAL_LEDGER_MAX_TRADES
+      );
+
+    trimmedByRecordCap =
+      true;
+
+    coverageStartAt =
+      records.length
+        ? safeNumber(
+            records[0][1]
+          )
+        : requestAt;
+
+    resetReason =
+      "LEDGER_RECORD_CAP_TRIMMED";
+  }
+
+  if (
+    coverageStartAt <
+      cutoff24h
+  ) {
+    coverageStartAt =
+      cutoff24h;
+  }
+
+  const ledger = {
+    version:
+      "V130",
+
+    tokenAddress,
+
+    poolAddress:
+      poolKey,
+
+    targetTokenSide:
+      targetSide,
+
+    coverageStartAt,
+
+    coverageEndAt:
+      requestAt,
+
+    lastUpdatedAt:
+      requestAt,
+
+    lastBatchCount:
+      safeNumber(
+        returnedCount
+      ),
+
+    lastBatchHitApiCap:
+      hitApiRowCap,
+
+    lastBatchOverlapCount:
+      overlapCount,
+
+    continuity,
+
+    resetReason,
+
+    trimmedByRecordCap,
+
+    records
+  };
+
+  ledgers[
+    poolKey
+  ] =
+    ledger;
+
+  pruneDirectionalLedgers(
+    ledgers,
+    poolKey
+  );
+
+  return {
+    verified:
+      true,
+
+    status:
+      continuity
+        ? "LEDGER_CONTINUOUS"
+        : "LEDGER_PARTIAL",
+
+    ledger,
+
+    continuity,
+
+    resetReason,
+
+    overlapCount,
+
+    recordCount:
+      records.length,
+
+    trimmedByRecordCap
+  };
+}
+
+function rollingDirectionalWindow(
+  ledger,
+  windowMs,
+  dexCounts,
+  requestAt
+) {
+  const cutoff =
+    requestAt -
+    windowMs;
+
+  const records =
+    Array.isArray(
+      ledger?.records
+    )
+      ? ledger.records.filter(
+          validDirectionalLedgerRecord
+        )
+      : [];
+
+  const coverageStartAt =
+    safeNumber(
+      ledger?.coverageStartAt
+    );
+
+  const coverageEndAt =
+    safeNumber(
+      ledger?.coverageEndAt
+    );
+
+  const coverageComplete =
+    coverageStartAt >
+      0 &&
+    coverageStartAt <=
+      cutoff &&
+    coverageEndAt >=
+      requestAt;
+
+  const rows =
+    records.filter(
+      row =>
+        safeNumber(
+          row[1]
+        ) >=
+          cutoff &&
+        safeNumber(
+          row[1]
+        ) <=
+          requestAt
+    );
+
+  let buys =
+    0;
+
+  let sells =
+    0;
+
+  let buyVolumeUsd =
+    0;
+
+  let sellVolumeUsd =
+    0;
+
+  for (
+    const row
+    of rows
+  ) {
+    const side =
+      row[2];
+
+    const usd =
+      Number(
+        row[3]
+      );
+
+    if (
+      side ===
+        "buy"
+    ) {
+      buys++;
+      buyVolumeUsd +=
+        usd;
+    }
+
+    else if (
+      side ===
+        "sell"
+    ) {
+      sells++;
+      sellVolumeUsd +=
+        usd;
+    }
+  }
+
+  const dexBuys =
+    dexCounts?.buys !==
+      null &&
+    dexCounts?.buys !==
+      undefined
+      ? safeNumber(
+          dexCounts.buys
+        )
+      : null;
+
+  const dexSells =
+    dexCounts?.sells !==
+      null &&
+    dexCounts?.sells !==
+      undefined
+      ? safeNumber(
+          dexCounts.sells
+        )
+      : null;
+
+  const countCrossCheck =
+    dexBuys !==
+      null &&
+    dexSells !==
+      null
+      ? (
+          buys ===
+            dexBuys &&
+          sells ===
+            dexSells
+        )
+      : null;
+
+  return {
+    verified:
+      coverageComplete,
+
+    coverageComplete,
+
+    source:
+      "GECKOTERMINAL_POOL_TRADES_ROLLING_V130",
+
+    asOfAt:
+      requestAt,
+
+    coverageStartAt,
+
+    coverageEndAt,
+
+    returnedTrades:
+      rows.length,
+
+    ledgerRecordCount:
+      records.length,
+
+    buys,
+
+    sells,
+
+    buyVolumeUsd:
+      coverageComplete
+        ? buyVolumeUsd
+        : null,
+
+    sellVolumeUsd:
+      coverageComplete
+        ? sellVolumeUsd
+        : null,
+
+    netFlowUsd:
+      coverageComplete
+        ? buyVolumeUsd -
+          sellVolumeUsd
+        : null,
+
+    buyPressureUsd:
+      coverageComplete &&
+      (
+        buyVolumeUsd +
+        sellVolumeUsd
+      ) >
+        0
+        ? (
+            buyVolumeUsd /
+            (
+              buyVolumeUsd +
+              sellVolumeUsd
+            )
+          ) *
+          100
+        : coverageComplete
+          ? 0
+          : null,
+
+    countCrossCheck,
+
+    dexCounts: {
+      buys:
+        dexBuys,
+
+      sells:
+        dexSells
+    }
+  };
+}
+
 async function geckoDirectionalTradeFlow(
   candidate,
   budget,
@@ -9477,13 +10301,16 @@ async function geckoDirectionalTradeFlow(
                   )
                 : null;
 
+            const normalizedTimestamp =
+              Number.isFinite(
+                timestamp
+              )
+                ? timestamp
+                : null;
+
             return {
               timestamp:
-                Number.isFinite(
-                  timestamp
-                )
-                  ? timestamp
-                  : null,
+                normalizedTimestamp,
 
               side,
 
@@ -9492,7 +10319,18 @@ async function geckoDirectionalTradeFlow(
               txHash:
                 attributes
                   .tx_hash ||
-                null
+                null,
+
+              tradeKey:
+                normalizedTimestamp !==
+                  null
+                  ? directionalTradeKey(
+                      row,
+                      normalizedTimestamp,
+                      side,
+                      volumeUsd
+                    )
+                  : null
             };
           }
         )
@@ -9505,7 +10343,10 @@ async function geckoDirectionalTradeFlow(
     const returnedCount =
       rows.length;
 
-    const m5 =
+    const requestAt =
+      Date.now();
+
+    const directM5 =
       geckoDirectionalWindow(
         parsedTrades,
         returnedCount,
@@ -9515,7 +10356,7 @@ async function geckoDirectionalTradeFlow(
           ?.m5
       );
 
-    const h1 =
+    const directH1 =
       geckoDirectionalWindow(
         parsedTrades,
         returnedCount,
@@ -9525,7 +10366,7 @@ async function geckoDirectionalTradeFlow(
           ?.h1
       );
 
-    const h24 =
+    const directH24 =
       geckoDirectionalWindow(
         parsedTrades,
         returnedCount,
@@ -9534,6 +10375,73 @@ async function geckoDirectionalTradeFlow(
           ?.transactions
           ?.h24
       );
+
+    /*
+     * V130: merge this same request into persistent verified history.
+     * No extra Gecko request is created.
+     */
+    const ledgerUpdate =
+      updateDirectionalTradeLedger(
+        state,
+        candidate,
+        parsedTrades,
+        returnedCount,
+        requestAt
+      );
+
+    const rollingM5 =
+      ledgerUpdate
+        ?.ledger
+        ? rollingDirectionalWindow(
+            ledgerUpdate.ledger,
+            5 * 60 * 1000,
+            market
+              ?.transactions
+              ?.m5,
+            requestAt
+          )
+        : null;
+
+    const rollingH1 =
+      ledgerUpdate
+        ?.ledger
+        ? rollingDirectionalWindow(
+            ledgerUpdate.ledger,
+            60 * 60 * 1000,
+            market
+              ?.transactions
+              ?.h1,
+            requestAt
+          )
+        : null;
+
+    const rollingH24 =
+      ledgerUpdate
+        ?.ledger
+        ? rollingDirectionalWindow(
+            ledgerUpdate.ledger,
+            24 * 60 * 60 * 1000,
+            market
+              ?.transactions
+              ?.h24,
+            requestAt
+          )
+        : null;
+
+    const m5 =
+      rollingM5?.verified
+        ? rollingM5
+        : directM5;
+
+    const h1 =
+      rollingH1?.verified
+        ? rollingH1
+        : directH1;
+
+    const h24 =
+      rollingH24?.verified
+        ? rollingH24
+        : directH24;
 
     const verifiedAnyWindow =
       m5.verified ||
@@ -9570,6 +10478,48 @@ async function geckoDirectionalTradeFlow(
 
       documentedMaxRows:
         300,
+
+      rollingLedger: {
+        status:
+          ledgerUpdate
+            ?.status ||
+          "UNAVAILABLE",
+
+        continuity:
+          Boolean(
+            ledgerUpdate
+              ?.continuity
+          ),
+
+        resetReason:
+          ledgerUpdate
+            ?.resetReason ||
+          null,
+
+        overlapCount:
+          safeNumber(
+            ledgerUpdate
+              ?.overlapCount
+          ),
+
+        recordCount:
+          safeNumber(
+            ledgerUpdate
+              ?.recordCount
+          ),
+
+        trimmedByRecordCap:
+          Boolean(
+            ledgerUpdate
+              ?.trimmedByRecordCap
+          ),
+
+        maxTrades:
+          DIRECTIONAL_LEDGER_MAX_TRADES,
+
+        maxPools:
+          DIRECTIONAL_LEDGER_MAX_POOLS
+      },
 
       windows: {
         m5,
@@ -9662,7 +10612,20 @@ function applyDirectionalTradeFlow(
             true,
 
           source:
+            row.source ||
             "GECKOTERMINAL_POOL_TRADES",
+
+          asOfAt:
+            row.asOfAt ||
+            Date.now(),
+
+          coverageStartAt:
+            row.coverageStartAt ||
+            null,
+
+          coverageEndAt:
+            row.coverageEndAt ||
+            null,
 
           buyVolumeUsd:
             row.buyVolumeUsd,
@@ -13272,13 +14235,28 @@ function analyseWhaleFlow(
       concentrationChange >=
         2 &&
       newTop10 <
-        70
+        70 &&
+      increasing >
+        decreasing &&
+      increasing >
+        0
     ) {
       score +=
         10;
 
       reasons.push(
-        "Top-holder concentration increasing"
+        "Top-holder concentration increasing with tracked-wallet accumulation"
+      );
+    }
+
+    else if (
+      concentrationChange >=
+        2 &&
+      newTop10 <
+        70
+    ) {
+      reasons.push(
+        "Concentration increased without tracked-wallet accumulation confirmation"
       );
     }
   }
@@ -18785,7 +19763,7 @@ async function scan(
     status,
 
     scanMode:
-      "V129_CORE_CONCENTRATION_HISTORY_BASIS_GUARD_HUNTER",
+      "V130_CORE_ROLLING_DIRECTIONAL_USD_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -19402,7 +20380,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V129_CONCENTRATION_BASIS_GUARD_DIRECTIONAL_USD_HUNTER",
+        "V130_ROLLING_DIRECTIONAL_USD_CONTINUITY_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -20196,12 +21174,42 @@ async function scan(
       telegramThresholdsUnchangedV129:
         "ENABLED_V129",
 
+      rollingDirectionalTradeLedger:
+        "ENABLED_V130",
+
+      rollingDirectionalTradeDeduplication:
+        "ENABLED_V130",
+
+      directionalBatchContinuityProof:
+        "ENABLED_V130",
+
+      directionalGapResetNoExtrapolation:
+        "ENABLED_V130",
+
+      rollingDirectional1h24h:
+        "ENABLED_V130_STRICT_CONTINUOUS_COVERAGE",
+
+      directionalLedgerMaxTrades:
+        DIRECTIONAL_LEDGER_MAX_TRADES,
+
+      directionalLedgerMaxPools:
+        DIRECTIONAL_LEDGER_MAX_POOLS,
+
+      geckoRequestRateUnchangedV130:
+        "ENABLED_V130",
+
+      whaleConcentrationBonusRequiresWalletMovement:
+        "ENABLED_V130",
+
+      telegramThresholdsUnchangedV130:
+        "ENABLED_V130",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V129_CORE_CONCENTRATION_HISTORY_BASIS_GUARD_V77_TELEGRAM_HUNTER",
+      "V130_CORE_ROLLING_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -20517,7 +21525,7 @@ async function health(
     },
 
     architecture:
-      "V129_CORE_CONCENTRATION_HISTORY_BASIS_GUARD_V77_TELEGRAM_HUNTER",
+      "V130_CORE_ROLLING_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -20916,7 +21924,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V129_CORE_CONCENTRATION_HISTORY_BASIS_GUARD_V77_TELEGRAM_HUNTER",
+      "V130_CORE_ROLLING_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -21345,7 +22353,7 @@ export default {
             ),
 
           architecture:
-            "V129_CORE_CONCENTRATION_HISTORY_BASIS_GUARD_V77_TELEGRAM_HUNTER",
+            "V130_CORE_ROLLING_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
