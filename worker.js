@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V134
+ * V135
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -238,8 +238,20 @@
  * - Adds Blockscout holder-outage telemetry
  * - Does NOT increase provider/API request frequency
  * - Does NOT loosen Telegram thresholds or safety gates
+
+ *
+ * V135:
+ * - Preserves V134 Blockscout outage resilience
+ * - Preserves V133 top-candidate-first completion
+ * - Preserves V132 dynamic unknown-pool analysis reserve
+ * - Preserves V131 ownership-denominator guard
+ * - Preserves V130 rolling directional USD ledger
+ * - NEW: carried priority candidates that become terminal in the same run
+ *   immediately yield priority to the next viable fresh-market target
+ * - NEW: replacement target is inserted into the same-run analysis queue
+ * - No increase to the 42-request cap, API frequency, or Telegram thresholds
 */
-const VERSION = "V134";
+const VERSION = "V135";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -19442,10 +19454,30 @@ async function scan(
   let topCandidateDeferredReason =
     null;
 
+  const v135AnalysisQueue =
+    [
+      ...analysisSelected
+    ];
+
+  let v135TerminalPriorityHandoff = {
+    triggered: false,
+    rejectedAddress: null,
+    rejectedSymbol: null,
+    rejectedReason: null,
+    replacementAddress: null,
+    replacementSymbol: null,
+    replacementInserted: false
+  };
+
   for (
-    const watched
-    of analysisSelected
+    let v135Index = 0;
+    v135Index < v135AnalysisQueue.length;
+    v135Index++
   ) {
+    const watched =
+      v135AnalysisQueue[
+        v135Index
+      ];
     const address =
       normalize(
         watched.address
@@ -19792,6 +19824,168 @@ async function scan(
       state,
       candidate
     );
+
+
+    const v135CurrentAddress =
+      normalize(
+        candidate?.address
+      );
+
+    const v135CarriedPriorityAddress =
+      normalize(
+        state
+          ?.priorityCandidateCompletion
+          ?.address
+      );
+
+    const v135SameRunTerminal =
+      sameRunTerminalRejectFromCandidate(
+        candidate
+      );
+
+    if (
+      v135CarriedPriorityAddress &&
+      v135CurrentAddress === v135CarriedPriorityAddress &&
+      v135SameRunTerminal?.terminal === true
+    ) {
+      v135TerminalPriorityHandoff = {
+        triggered: true,
+        rejectedAddress: v135CurrentAddress,
+        rejectedSymbol: candidate?.symbol || null,
+        rejectedReason:
+          v135SameRunTerminal?.reason ||
+          "SAME_RUN_TERMINAL_RISK",
+        replacementAddress: null,
+        replacementSymbol: null,
+        replacementInserted: false
+      };
+
+      const v135RankedReplacement =
+        (
+          marketFreshPriority?.ranked ||
+          []
+        )
+          .map(
+            ranked =>
+              watchedTokens.find(
+                item =>
+                  normalize(
+                    item?.address
+                  ) ===
+                  normalize(
+                    ranked?.address
+                  )
+              ) ||
+              ranked
+          )
+          .find(
+            item => {
+              const address =
+                normalize(
+                  item?.address
+                );
+
+              if (
+                !address ||
+                address === v135CurrentAddress
+              ) {
+                return false;
+              }
+
+              const terminal =
+                terminalPriorityRejectFromWatched(
+                  item
+                );
+
+              return !terminal?.terminal;
+            }
+          );
+
+      if (
+        v135RankedReplacement
+      ) {
+        const replacementAddress =
+          normalize(
+            v135RankedReplacement?.address
+          );
+
+        v135TerminalPriorityHandoff
+          .replacementAddress =
+          replacementAddress;
+
+        v135TerminalPriorityHandoff
+          .replacementSymbol =
+          v135RankedReplacement?.symbol ||
+          null;
+
+        marketFreshTarget =
+          v135RankedReplacement;
+
+        marketFreshTargetAddress =
+          replacementAddress;
+
+        for (
+          let i = v135AnalysisQueue.length - 1;
+          i > v135Index;
+          i--
+        ) {
+          if (
+            normalize(
+              v135AnalysisQueue[i]?.address
+            ) === replacementAddress
+          ) {
+            v135AnalysisQueue.splice(
+              i,
+              1
+            );
+          }
+        }
+
+        v135AnalysisQueue.splice(
+          v135Index + 1,
+          0,
+          v135RankedReplacement
+        );
+
+        v135TerminalPriorityHandoff
+          .replacementInserted =
+          true;
+
+        if (
+          state?.priorityCandidateCompletion
+        ) {
+          state
+            .priorityCandidateCompletion
+            .completed =
+            true;
+
+          state
+            .priorityCandidateCompletion
+            .persistedForRetry =
+            false;
+
+          state
+            .priorityCandidateCompletion
+            .terminalRejected =
+            true;
+
+          state
+            .priorityCandidateCompletion
+            .terminalRejectReason =
+            v135TerminalPriorityHandoff
+              .rejectedReason;
+        }
+
+        topCandidateAnalysisDeferred =
+          false;
+
+        topCandidateDeferredReason =
+          null;
+
+        topCandidateRequiredRequests =
+          null;
+      }
+    }
 
     candidates.push(
       candidate
@@ -20564,7 +20758,7 @@ async function scan(
     status,
 
     scanMode:
-      "V134_CORE_BLOCKSCOUT_OUTAGE_RESILIENCE_HUNTER",
+      "V135_CORE_TERMINAL_PRIORITY_HANDOFF_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -21181,7 +21375,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V134_BLOCKSCOUT_RESILIENT_DIRECTIONAL_USD_HUNTER",
+        "V135_TERMINAL_PRIORITY_HANDOFF_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -21328,6 +21522,31 @@ async function scan(
 
       lowerPriorityProtected:
         topCandidateAnalysisDeferred
+    },
+
+    terminalPriorityHandoff: {
+      enabled: true,
+      triggered:
+        v135TerminalPriorityHandoff
+          .triggered,
+      rejectedAddress:
+        v135TerminalPriorityHandoff
+          .rejectedAddress,
+      rejectedSymbol:
+        v135TerminalPriorityHandoff
+          .rejectedSymbol,
+      rejectedReason:
+        v135TerminalPriorityHandoff
+          .rejectedReason,
+      replacementAddress:
+        v135TerminalPriorityHandoff
+          .replacementAddress,
+      replacementSymbol:
+        v135TerminalPriorityHandoff
+          .replacementSymbol,
+      replacementInserted:
+        v135TerminalPriorityHandoff
+          .replacementInserted
     },
 
     blockscoutHolderOutageProtection: {
@@ -22179,12 +22398,45 @@ async function scan(
       telegramThresholdsUnchangedV134:
         "ENABLED_V134",
 
+      terminalCarriedPriorityEviction:
+        "ENABLED_V135",
+
+      sameRunPriorityBudgetHandoff:
+        "ENABLED_V135",
+
+      replacementTargetImmediateAnalysis:
+        "ENABLED_V135",
+
+      terminalPriorityMonopolyProtectionV135:
+        "ENABLED_V135",
+
+      blockscoutOutageResilienceUnchangedV135:
+        "ENABLED_V135",
+
+      topCandidateCompletionUnchangedV135:
+        "ENABLED_V135",
+
+      unknownPoolBudgetProtectionUnchangedV135:
+        "ENABLED_V135",
+
+      ownershipDenominatorGuardUnchangedV135:
+        "ENABLED_V135",
+
+      rollingDirectionalUsdUnchangedV135:
+        "ENABLED_V135",
+
+      externalRequestRateUnchangedV135:
+        "ENABLED_V135",
+
+      telegramThresholdsUnchangedV135:
+        "ENABLED_V135",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V134_CORE_BLOCKSCOUT_OUTAGE_RESILIENCE_V77_TELEGRAM_HUNTER",
+      "V135_CORE_TERMINAL_PRIORITY_HANDOFF_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -22500,7 +22752,7 @@ async function health(
     },
 
     architecture:
-      "V134_CORE_BLOCKSCOUT_OUTAGE_RESILIENCE_V77_TELEGRAM_HUNTER",
+      "V135_CORE_TERMINAL_PRIORITY_HANDOFF_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -22899,7 +23151,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V134_CORE_BLOCKSCOUT_OUTAGE_RESILIENCE_V77_TELEGRAM_HUNTER",
+      "V135_CORE_TERMINAL_PRIORITY_HANDOFF_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -23328,7 +23580,7 @@ export default {
             ),
 
           architecture:
-            "V134_CORE_BLOCKSCOUT_OUTAGE_RESILIENCE_V77_TELEGRAM_HUNTER",
+            "V135_CORE_TERMINAL_PRIORITY_HANDOFF_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
