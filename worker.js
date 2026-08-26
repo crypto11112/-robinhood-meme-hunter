@@ -251,8 +251,18 @@
  * - NEW: replacement target is inserted into the same-run analysis queue
  * - FIXED BUILD: mutable market target + valid ranked replacement source
  * - No increase to the 42-request cap, API frequency, or Telegram thresholds
+
+ *
+ * V136:
+ * - Preserves V135 terminal-priority handoff and all earlier protections
+ * - NEW: LOW concentration only earns a healthy-holder bonus when there is
+ *   meaningful holder breadth behind it
+ * - Minimum 10 holders + 3 positive non-infrastructure holder rows
+ * - Thin-holder tokens remain LOW if mathematically valid, but cannot gain
+ *   false healthy-concentration opportunity or signal-confirmation bonuses
+ * - Telegram thresholds, API rates and request caps unchanged
 */
-const VERSION = "V135";
+const VERSION = "V136";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -15691,6 +15701,71 @@ function scoreRisk(
   };
 }
 
+const MIN_HEALTHY_HOLDER_COUNT_V136 =
+  10;
+
+const MIN_HEALTHY_POSITIVE_HOLDER_ROWS_V136 =
+  3;
+
+function healthyHolderBreadthV136(
+  holders
+) {
+  const holderCount =
+    safeNumber(
+      holders?.holderCount
+    );
+
+  const positiveHolderRows =
+    safeNumber(
+      holders?.positiveHolderRows
+    );
+
+  if (
+    !holders?.concentrationVerified ||
+    !holders?.whale?.verified ||
+    holders?.whale?.concentrationRisk !==
+      "LOW"
+  ) {
+    return {
+      eligible: false,
+      reason: "CONCENTRATION_NOT_VERIFIED_LOW",
+      holderCount,
+      positiveHolderRows
+    };
+  }
+
+  if (
+    holderCount <
+      MIN_HEALTHY_HOLDER_COUNT_V136
+  ) {
+    return {
+      eligible: false,
+      reason: "INSUFFICIENT_HOLDER_COUNT",
+      holderCount,
+      positiveHolderRows
+    };
+  }
+
+  if (
+    positiveHolderRows <
+      MIN_HEALTHY_POSITIVE_HOLDER_ROWS_V136
+  ) {
+    return {
+      eligible: false,
+      reason: "INSUFFICIENT_POSITIVE_HOLDER_ROWS",
+      holderCount,
+      positiveHolderRows
+    };
+  }
+
+  return {
+    eligible: true,
+    reason: "VERIFIED_HEALTHY_HOLDER_BREADTH",
+    holderCount,
+    positiveHolderRows
+  };
+}
+
 /* =========================================================
    OPPORTUNITY
    ========================================================= */
@@ -15881,24 +15956,31 @@ function scoreOpportunity(
     }
   }
 
+  const healthyHolderBreadth =
+    healthyHolderBreadthV136(
+      holders
+    );
+
   if (
-    holders
-      ?.concentrationVerified &&
-    holders.whale
-      ?.verified &&
-    safeNumber(
-      holders.positiveHolderRows
-    ) >
-      0 &&
-    holders.whale
-      ?.concentrationRisk ===
-      "LOW"
+    healthyHolderBreadth
+      .eligible
   ) {
     score +=
       5;
 
     reasons.push(
       "Healthy holder concentration"
+    );
+  }
+
+  else if (
+    holders?.concentrationVerified &&
+    holders?.whale?.verified &&
+    holders?.whale?.concentrationRisk ===
+      "LOW"
+  ) {
+    reasons.push(
+      "Low concentration but holder breadth too thin for healthy-holder bonus"
     );
   }
 
@@ -16176,20 +16258,14 @@ function signalConfirmation(
     );
   }
 
-  if (
-    candidate.holders
-      ?.concentrationVerified &&
-    candidate.holders
-      ?.whale?.verified &&
-    safeNumber(
+  const healthySignalHolderBreadth =
+    healthyHolderBreadthV136(
       candidate.holders
-        ?.positiveHolderRows
-    ) >
-      0 &&
-    candidate.holders
-      ?.whale
-      ?.concentrationRisk ===
-      "LOW"
+    );
+
+  if (
+    healthySignalHolderBreadth
+      .eligible
   ) {
     signals++;
 
@@ -16198,6 +16274,22 @@ function signalConfirmation(
 
     reasons.push(
       "Healthy concentration confirmed"
+    );
+  }
+
+  else if (
+    candidate.holders
+      ?.concentrationVerified &&
+    candidate.holders
+      ?.whale
+      ?.verified &&
+    candidate.holders
+      ?.whale
+      ?.concentrationRisk ===
+      "LOW"
+  ) {
+    reasons.push(
+      "Low concentration not counted: holder breadth too thin"
     );
   }
 
@@ -17757,6 +17849,11 @@ async function analyzeToken(
   candidate.confidence =
     candidateConfidence(
       candidate
+    );
+
+  candidate.holderBreadthV136 =
+    healthyHolderBreadthV136(
+      holders
     );
 
   candidate.analysisPriority =
@@ -20781,7 +20878,7 @@ async function scan(
     status,
 
     scanMode:
-      "V135_CORE_TERMINAL_PRIORITY_HANDOFF_HUNTER",
+      "V136_CORE_ORGANIC_HOLDER_BREADTH_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -21398,7 +21495,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V135_TERMINAL_PRIORITY_HANDOFF_DIRECTIONAL_USD_HUNTER",
+        "V136_ORGANIC_HOLDER_BREADTH_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -22454,12 +22551,39 @@ async function scan(
       telegramThresholdsUnchangedV135:
         "ENABLED_V135",
 
+      organicHolderBreadthGuard:
+        "ENABLED_V136",
+
+      minimumHealthyHolderCountV136:
+        MIN_HEALTHY_HOLDER_COUNT_V136,
+
+      minimumHealthyPositiveHolderRowsV136:
+        MIN_HEALTHY_POSITIVE_HOLDER_ROWS_V136,
+
+      lowConcentrationThinHolderBonusProtection:
+        "ENABLED_V136",
+
+      terminalPriorityHandoffUnchangedV136:
+        "ENABLED_V136",
+
+      blockscoutOutageResilienceUnchangedV136:
+        "ENABLED_V136",
+
+      rollingDirectionalUsdUnchangedV136:
+        "ENABLED_V136",
+
+      externalRequestRateUnchangedV136:
+        "ENABLED_V136",
+
+      telegramThresholdsUnchangedV136:
+        "ENABLED_V136",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V135_CORE_TERMINAL_PRIORITY_HANDOFF_V77_TELEGRAM_HUNTER",
+      "V136_CORE_ORGANIC_HOLDER_BREADTH_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -22775,7 +22899,7 @@ async function health(
     },
 
     architecture:
-      "V135_CORE_TERMINAL_PRIORITY_HANDOFF_V77_TELEGRAM_HUNTER",
+      "V136_CORE_ORGANIC_HOLDER_BREADTH_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -23174,7 +23298,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V135_CORE_TERMINAL_PRIORITY_HANDOFF_V77_TELEGRAM_HUNTER",
+      "V136_CORE_ORGANIC_HOLDER_BREADTH_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -23603,7 +23727,7 @@ export default {
             ),
 
           architecture:
-            "V135_CORE_TERMINAL_PRIORITY_HANDOFF_V77_TELEGRAM_HUNTER",
+            "V136_CORE_ORGANIC_HOLDER_BREADTH_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
