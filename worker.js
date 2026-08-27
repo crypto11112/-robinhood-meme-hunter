@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V160
+ * V161
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -575,7 +575,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V160";
+const VERSION = "V161";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -25165,6 +25165,94 @@ async function scan(
   }
 
   /*
+   * V161:
+   * Synchronize the scarce fresh-market reservation after same-run terminal
+   * handoff/reselection. The carried completion candidate may remain the
+   * holder/risk analysis priority, but no terminal/superseded candidate may
+   * remain in fresh-market reservation state or telemetry.
+   */
+  const freshMarketReservationBeforeV161 =
+    normalize(
+      dexService(state)
+        ?.priorityFreshReservation
+        ?.address
+    );
+
+  if (
+    effectiveMarketFreshTargetAddress
+  ) {
+    reservePriorityFreshMarket(
+      state,
+      effectiveMarketFreshTargetAddress
+    );
+  } else {
+    clearPriorityFreshReservation(
+      state,
+      null
+    );
+  }
+
+  const freshMarketReservationAfterV161 =
+    normalize(
+      dexService(state)
+        ?.priorityFreshReservation
+        ?.address
+    );
+
+  const finalPriorityFreshScheduleV161 =
+    priorityFreshSchedule(
+      state,
+      effectiveMarketFreshTargetAddress
+    );
+
+  priorityCompletionTelemetry
+    .priorityFreshSchedule =
+      finalPriorityFreshScheduleV161;
+
+  const freshMarketReservationSyncV161 = {
+    enabled: true,
+    synchronized:
+      freshMarketReservationAfterV161 ===
+        normalize(
+          effectiveMarketFreshTargetAddress
+        ),
+    beforeAddress:
+      freshMarketReservationBeforeV161 ||
+      null,
+    finalAddress:
+      effectiveMarketFreshTargetAddress ||
+      null,
+    afterAddress:
+      freshMarketReservationAfterV161 ||
+      null,
+    staleReservationCleared:
+      Boolean(
+        freshMarketReservationBeforeV161 &&
+        freshMarketReservationBeforeV161 !==
+          freshMarketReservationAfterV161
+      ),
+    terminalAddressesExcluded:
+      [...sameRunTerminalAddresses]
+        .filter(Boolean)
+        .slice(0, 10),
+    carriedCompletionAddress:
+      retryPersistenceAddressV139 ||
+      null,
+    carriedCompletionPreserved:
+      Boolean(
+        retryPersistenceAddressV139 &&
+        normalize(
+          state
+            ?.priorityCandidateCompletion
+            ?.address
+        ) ===
+          retryPersistenceAddressV139
+      ),
+    noExtraExternalRequests: true,
+    telegramThresholdsUnchanged: true
+  };
+
+  /*
    * V151:
    * Directional USD is discovery intelligence, not merely alert decoration.
    * Existing provider guards remain authoritative; this only changes which
@@ -25627,7 +25715,7 @@ async function scan(
     status,
 
     scanMode:
-      "V160_CORE_BLOCKSCOUT_PRO_HTTP500_OUTAGE_PROTECTION_HUNTER",
+      "V161_CORE_FRESH_MARKET_RESERVATION_SYNC_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -26237,6 +26325,8 @@ async function scan(
       effectiveMarketFreshTargetAddress ||
       null,
 
+    freshMarketReservationSyncV161,
+
     freshMarketSlotHandoffV159: {
       ...freshMarketSlotHandoffV159,
       effectiveFreshMarketAddress:
@@ -26309,7 +26399,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V160_BLOCKSCOUT_PRO_HTTP500_OUTAGE_PROTECTION_DIRECTIONAL_USD_HUNTER",
+        "V161_FRESH_MARKET_RESERVATION_SYNC_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -26427,10 +26517,7 @@ async function scan(
     },
 
     priorityFreshMarketSchedule:
-      priorityFreshSchedule(
-        state,
-        effectiveMarketFreshTargetAddress
-      ),
+      finalPriorityFreshScheduleV161,
 
     priorityCandidateCompletion:
       priorityCompletionTelemetry,
@@ -28606,12 +28693,33 @@ async function scan(
       telegramThresholdsUnchangedV160:
         "ENABLED_V160",
 
+      freshMarketReservationSynchronization:
+        "ENABLED_V161",
+
+      postTerminalFreshReservationSyncV161:
+        "ENABLED_V161",
+
+      priorityCompletionFreshScheduleSyncV161:
+        "ENABLED_V161",
+
+      terminalCandidateCannotRetainFreshReservationV161:
+        "ENABLED_V161",
+
+      carriedHolderRiskCompletionPreservedV161:
+        "ENABLED_V161",
+
+      noExternalRequestRateIncreaseV161:
+        "ENABLED_V161",
+
+      telegramThresholdsUnchangedV161:
+        "ENABLED_V161",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V160_CORE_BLOCKSCOUT_PRO_HTTP500_OUTAGE_PROTECTION_V77_TELEGRAM_HUNTER",
+      "V161_CORE_FRESH_MARKET_RESERVATION_SYNC_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
