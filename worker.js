@@ -1,10 +1,17 @@
 /**
  * Robinhood Chain Meme Hunter
- * V190
+ * V191
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V190
+ * CURRENT BUILD: V191
+ * - V191 fixes the V190 live-test integration gap
+ * - V190 already replayed live logs after resolution; the real issue was resolver target selection
+ * - Bitquery now prioritises UNKNOWN PoolIds present in the CURRENT live batch
+ * - The strongest current-live unknown pool gets the single Bitquery slot before stale tracker pools
+ * - Existing V179 same-scan reprocessing then immediately reuses the newly registered mapping
+ * - No extra external requests; Bitquery remains max 1 lookup per scan
+ * - V190 Bitquery resolver, KV persistence, USD maths, scoring and Telegram thresholds remain unchanged
  * - V190 integrates the proven Bitquery Robinhood realtime Initialize resolver
  * - Exact unknown PoolId is matched as an indexed Initialize topic
  * - Decoded currency0/currency1 are persisted into the existing canonical poolRegistry
@@ -733,7 +740,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V190";
+const VERSION = "V191";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -6254,7 +6261,8 @@ async function blockscoutWideInitializeForPoolV184(
 async function resolvePersistentUnknownPools(
   env,
   state,
-  budget
+  budget,
+  preferredLivePoolIdsV191 = null
 ) {
   pruneUnknownPools(
     state
@@ -6285,6 +6293,16 @@ async function resolvePersistentUnknownPools(
   const tracker =
     ensureUnknownPoolState(
       state
+    );
+
+  const livePriorityPoolIdsV191 =
+    new Set(
+      Array.from(
+        preferredLivePoolIdsV191 ||
+        []
+      )
+        .map(normalize)
+        .filter(Boolean)
     );
 
   /*
@@ -6755,8 +6773,79 @@ async function resolvePersistentUnknownPools(
     );
   }
 
-  const candidates =
+  let candidates =
     selectedCandidates;
+
+  /*
+   * V191: V190 proved Bitquery resolution itself works. The first V190 live
+   * test also proved V179 already runs after resolver completion. The actual
+   * gap was that Bitquery's one lookup could target an older tracker pool
+   * instead of a PoolId causing UNKNOWN_POOL_IDENTITY in this live batch.
+   */
+  const livePriorityCandidatesV191 =
+    eligibleCandidates
+      .filter(
+        entry =>
+          livePriorityPoolIdsV191.has(
+            normalize(
+              entry?.poolId
+            )
+          )
+      )
+      .sort((a, b) => {
+        const activityDiff =
+          activityScore(b) -
+          activityScore(a);
+
+        if (activityDiff !== 0) {
+          return activityDiff;
+        }
+
+        const seenDiff =
+          safeNumber(b?.lastSeenBlock) -
+          safeNumber(a?.lastSeenBlock);
+
+        if (seenDiff !== 0) {
+          return seenDiff;
+        }
+
+        return byOldestWait(a, b);
+      });
+
+  const bitqueryPriorityPoolV191 =
+    livePriorityCandidatesV191[0] ||
+    null;
+
+  if (bitqueryPriorityPoolV191) {
+    const priorityId =
+      normalize(
+        bitqueryPriorityPoolV191.poolId
+      );
+
+    const existing =
+      candidates.find(
+        item =>
+          normalize(
+            item?.entry?.poolId
+          ) === priorityId
+      );
+
+    candidates = [
+      {
+        entry:
+          bitqueryPriorityPoolV191,
+        lane:
+          existing?.lane ||
+          "LIVE_BITQUERY_PRIORITY_V191"
+      },
+      ...candidates.filter(
+        item =>
+          normalize(
+            item?.entry?.poolId
+          ) !== priorityId
+      )
+    ];
+  }
 
   const output = {
     attempted: 0,
@@ -6887,6 +6976,33 @@ async function resolvePersistentUnknownPools(
       Object.keys(
         tracker
       ).length,
+    livePoolPriorityV191: {
+      enabled: true,
+      currentLiveUnknownPoolCount:
+        livePriorityPoolIdsV191.size,
+      eligibleCurrentLiveUnknownPoolCount:
+        livePriorityCandidatesV191.length,
+      selectedPoolId:
+        bitqueryPriorityPoolV191
+          ? normalize(
+              bitqueryPriorityPoolV191.poolId
+            )
+          : null,
+      selectedActivityScore:
+        bitqueryPriorityPoolV191
+          ? activityScore(
+              bitqueryPriorityPoolV191
+            )
+          : null,
+      bitqueryAttemptForcedToCurrentLivePool:
+        Boolean(
+          bitqueryPriorityPoolV191
+        ),
+      sameScanReplayAlreadyPresentFromV179:
+        true,
+      extraExternalRequests:
+        0
+    },
     bitqueryInitializeV190: {
       enabled: true,
       configured:
@@ -28521,7 +28637,8 @@ async function scan(
     await resolvePersistentUnknownPools(
       env,
       state,
-      budget
+      budget,
+      liveActivity.unknownPoolIds
     );
 
   if (
@@ -32726,7 +32843,7 @@ async function scan(
     status,
 
     scanMode:
-      "V190_BITQUERY_POOLID_RESOLVER_HUNTER",
+      "V191_LIVE_POOL_PRIORITY_BITQUERY_REPLAY_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -36691,6 +36808,27 @@ async function scan(
       telegramThresholdsUnchangedV188:
         "ENABLED_V188",
 
+      bitqueryCurrentLivePoolPriority:
+        "ENABLED_V191",
+
+      sameScanReplayConfirmedExistingV179:
+        "ENABLED_V191",
+
+      staleTrackerCannotPreemptBitqueryLiveSlotV191:
+        "ENABLED_V191",
+
+      bitqueryMaxOneLookupPerScanUnchangedV191:
+        "ENABLED_V191",
+
+      noExtraExternalRequestsV191:
+        "ENABLED_V191",
+
+      hardRequestLimitUnchangedV191:
+        42,
+
+      telegramThresholdsUnchangedV191:
+        "ENABLED_V191",
+
       bitqueryExactPoolIdResolver:
         "ENABLED_V190",
 
@@ -36753,7 +36891,7 @@ async function scan(
     },
 
     architecture:
-      "V190_BITQUERY_POOLID_RESOLVER_V77_TELEGRAM_HUNTER",
+      "V191_LIVE_POOL_PRIORITY_BITQUERY_REPLAY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
