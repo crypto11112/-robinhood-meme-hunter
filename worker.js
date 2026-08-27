@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V157
+ * V158
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -539,8 +539,21 @@
  * - Any non-429 provider response clears that provider's recovery-pending state
  * - Existing cooldowns, 5m fresh spacing and one-Gecko-fresh-per-scan remain
  * - No increase to normal request rate and no Telegram/scoring threshold changes
+
+ *
+ * V158:
+ * - Preserves all V157 market-provider recovery staggering
+ * - NEW: evidence-quality protection derived from the BOD false-positive case
+ * - Weak/unverified momentum + no verified directional USD + no verified holder
+ *   counters can no longer produce an unjustified HIGH confidence score
+ * - If that evidence stack also relies on stale holder-cache concentration,
+ *   opportunity is capped below the existing Telegram alert threshold
+ * - Scores are recalculated after successful directional enrichment, so genuine
+ *   verified USD flow can remove the cap automatically
+ * - Existing Telegram thresholds remain exactly 60 / 59 / $1000 / 55
+ * - No new external requests and no request-rate changes
 */
-const VERSION = "V157";
+const VERSION = "V158";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -18812,6 +18825,250 @@ function scoreOpportunity(
   };
 }
 
+
+function evidenceQualityProtectionV158(
+  candidate
+) {
+  const holderSource =
+    String(
+      candidate
+        ?.holders
+        ?.holderSource ||
+      ""
+    ).toUpperCase();
+
+  const staleHolderEvidence =
+    holderSource.includes(
+      "STALE_CACHE"
+    );
+
+  const holderCountersVerified =
+    candidate
+      ?.holders
+      ?.countersVerified ===
+    true;
+
+  const directionalUsdVerified =
+    candidate
+      ?.market
+      ?.directionalTradeFeed
+      ?.verifiedAnyWindow ===
+      true ||
+    candidate
+      ?.momentum
+      ?.directionalUsdPressureV151
+      ?.verified ===
+      true;
+
+  const momentumVerified =
+    candidate
+      ?.momentum
+      ?.verified ===
+    true;
+
+  const momentumScore =
+    safeNumber(
+      candidate
+        ?.momentum
+        ?.score
+    );
+
+  const weakMomentum =
+    !momentumVerified ||
+    momentumScore <
+      25;
+
+  const missingCoreConfirmation =
+    !holderCountersVerified &&
+    !directionalUsdVerified &&
+    weakMomentum;
+
+  const originalOpportunity =
+    safeNumber(
+      candidate
+        ?.opportunity
+        ?.score
+    );
+
+  const originalConfidence =
+    safeNumber(
+      candidate
+        ?.confidence
+        ?.score
+    );
+
+  let opportunityCap =
+    null;
+
+  let confidenceCap =
+    null;
+
+  const reasons =
+    [];
+
+  /*
+   * V158: HIGH confidence requires more than verified market structure
+   * plus generic activity. At least one of holder breadth, verified USD
+   * direction, or non-weak momentum must substantively confirm the move.
+   */
+  if (
+    missingCoreConfirmation
+  ) {
+    confidenceCap =
+      69;
+
+    reasons.push(
+      "No verified holder counters, directional USD or non-weak momentum"
+    );
+  }
+
+  /*
+   * BOD-specific failure class:
+   * stale concentration evidence + no live holder counters + no verified
+   * directional dollars + weak momentum must not reach the existing alert
+   * threshold through market/activity bonuses alone.
+   */
+  if (
+    missingCoreConfirmation &&
+    staleHolderEvidence
+  ) {
+    opportunityCap =
+      59;
+
+    confidenceCap =
+      54;
+
+    reasons.push(
+      "Stale holder concentration cannot support an alert while core confirmation is missing"
+    );
+  }
+
+  if (
+    opportunityCap !==
+      null &&
+    candidate
+      ?.opportunity
+  ) {
+    candidate.opportunity.score =
+      Math.min(
+        originalOpportunity,
+        opportunityCap
+      );
+
+    if (
+      candidate.opportunity
+        .score <
+      originalOpportunity
+    ) {
+      candidate.opportunity
+        .reasons =
+        Array.isArray(
+          candidate.opportunity
+            .reasons
+        )
+          ? [
+              ...candidate.opportunity
+                .reasons,
+              "V158 evidence-quality opportunity cap"
+            ]
+          : [
+              "V158 evidence-quality opportunity cap"
+            ];
+    }
+  }
+
+  if (
+    confidenceCap !==
+      null &&
+    candidate
+      ?.confidence
+  ) {
+    candidate.confidence.score =
+      Math.min(
+        originalConfidence,
+        confidenceCap
+      );
+
+    candidate.confidence.label =
+      candidate.confidence.score >=
+        80
+        ? "HIGH"
+        : candidate.confidence.score >=
+            55
+          ? "MEDIUM"
+          : "LOW";
+  }
+
+  const applied =
+    (
+      opportunityCap !==
+        null &&
+      originalOpportunity >
+        opportunityCap
+    ) ||
+    (
+      confidenceCap !==
+        null &&
+      originalConfidence >
+        confidenceCap
+    );
+
+  const telemetry = {
+    enabled:
+      true,
+
+    applied,
+
+    holderSource:
+      holderSource ||
+      null,
+
+    staleHolderEvidence,
+
+    holderCountersVerified,
+
+    directionalUsdVerified,
+
+    momentumVerified,
+
+    momentumScore,
+
+    weakMomentum,
+
+    missingCoreConfirmation,
+
+    originalOpportunity,
+
+    finalOpportunity:
+      safeNumber(
+        candidate
+          ?.opportunity
+          ?.score
+      ),
+
+    opportunityCap,
+
+    originalConfidence,
+
+    finalConfidence:
+      safeNumber(
+        candidate
+          ?.confidence
+          ?.score
+      ),
+
+    confidenceCap,
+
+    reasons
+  };
+
+  candidate
+    .evidenceQualityProtectionV158 =
+    telemetry;
+
+  return telemetry;
+}
+
 /* =========================================================
    SIGNAL CONFIRMATION
    ========================================================= */
@@ -20617,6 +20874,10 @@ async function analyzeToken(
     candidateConfidence(
       candidate
     );
+
+  evidenceQualityProtectionV158(
+    candidate
+  );
 
   candidate.holderBreadthV136 =
     healthyHolderBreadthV136(
@@ -24808,6 +25069,10 @@ async function scan(
           directionalTarget
         );
 
+      evidenceQualityProtectionV158(
+        directionalTarget
+      );
+
       directionalTarget.analysisPriority =
         analysisPriority(
           directionalTarget
@@ -25124,7 +25389,7 @@ async function scan(
     status,
 
     scanMode:
-      "V157_CORE_MARKET_PROVIDER_RECOVERY_STAGGER_HUNTER",
+      "V158_CORE_EVIDENCE_QUALITY_SCORE_PROTECTION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -25790,7 +26055,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V157_MARKET_PROVIDER_RECOVERY_STAGGER_DIRECTIONAL_USD_HUNTER",
+        "V158_EVIDENCE_QUALITY_SCORE_PROTECTION_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -26295,6 +26560,29 @@ async function scan(
             0,
             10
           )
+    },
+
+    evidenceQualityProtectionV158: {
+      enabled:
+        true,
+      noExternalRequestsAdded:
+        true,
+      telegramThresholdsUnchanged:
+        true,
+      candidates:
+        candidates.map(
+          candidate => ({
+            address:
+              candidate.address,
+            symbol:
+              candidate.symbol ||
+              null,
+            protection:
+              candidate
+                .evidenceQualityProtectionV158 ||
+              null
+          })
+        )
     },
 
     directionalTradeEnrichment,
@@ -27947,12 +28235,51 @@ async function scan(
       telegramThresholdsUnchangedV157:
         "ENABLED_V157",
 
+      evidenceQualityScoreProtection:
+        "ENABLED_V158",
+
+      weakMomentumEvidenceProtectionV158:
+        "ENABLED_V158",
+
+      missingDirectionalUsdConfidenceProtectionV158:
+        "ENABLED_V158",
+
+      missingHolderCounterConfidenceProtectionV158:
+        "ENABLED_V158",
+
+      staleHolderAlertOpportunityCapV158:
+        59,
+
+      staleHolderAlertConfidenceCapV158:
+        54,
+
+      highConfidenceCoreConfirmationCapV158:
+        69,
+
+      postDirectionalEvidenceQualityRecomputeV158:
+        "ENABLED_V158",
+
+      noExternalRequestsAddedV158:
+        "ENABLED_V158",
+
+      marketProviderRecoveryStaggerUnchangedV158:
+        "ENABLED_V158",
+
+      rpcAbortRecoveryUnchangedV158:
+        "ENABLED_V158",
+
+      directionalUsdPoolIdentityUnchangedV158:
+        "ENABLED_V158",
+
+      telegramThresholdsUnchangedV158:
+        "ENABLED_V158",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V157_CORE_MARKET_PROVIDER_RECOVERY_STAGGER_V77_TELEGRAM_HUNTER",
+      "V158_CORE_EVIDENCE_QUALITY_SCORE_PROTECTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -28268,7 +28595,7 @@ async function health(
     },
 
     architecture:
-      "V157_CORE_MARKET_PROVIDER_RECOVERY_STAGGER_V77_TELEGRAM_HUNTER",
+      "V158_CORE_EVIDENCE_QUALITY_SCORE_PROTECTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -28667,7 +28994,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V157_CORE_MARKET_PROVIDER_RECOVERY_STAGGER_V77_TELEGRAM_HUNTER",
+      "V158_CORE_EVIDENCE_QUALITY_SCORE_PROTECTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -29096,7 +29423,7 @@ export default {
             ),
 
           architecture:
-            "V157_CORE_MARKET_PROVIDER_RECOVERY_STAGGER_V77_TELEGRAM_HUNTER",
+            "V158_CORE_EVIDENCE_QUALITY_SCORE_PROTECTION_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
