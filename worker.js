@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V156
+ * V157
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -527,8 +527,20 @@
  * - Failed backlog ranges never advance the backlog cursor
  * - Adds explicit V156 recovery telemetry
  * - No scoring, alert threshold, Gecko spacing or market-verification changes
+
+ *
+ * V157:
+ * - Preserves V156 RPC abort recovery and V153 on-chain pool identity
+ * - NEW: DexScreener/GeckoTerminal recovery staggering after HTTP 429
+ * - A fresh Dex 429 no longer immediately burns the Gecko recovery request
+ * - Provider recovery state is persisted in the existing KV state
+ * - Only one provider that is recovering from a 429 is allowed a probe per scan
+ * - A short cross-provider stagger prevents both services being re-hit together
+ * - Any non-429 provider response clears that provider's recovery-pending state
+ * - Existing cooldowns, 5m fresh spacing and one-Gecko-fresh-per-scan remain
+ * - No increase to normal request rate and no Telegram/scoring threshold changes
 */
-const VERSION = "V156";
+const VERSION = "V157";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -841,6 +853,10 @@ const DEXSCREENER_MAX_429_COOLDOWN_MS_V147 =
 
 const DEXSCREENER_429_CHAIN_WINDOW_MS_V147 =
   30 * 60 * 1000;
+
+const MARKET_PROVIDER_CROSS_STAGGER_MS_V157 =
+  2 * 60 * 1000;
+
 
 /* V116: align the fresh-market guard with the existing ~5-minute
  * scheduled scanner cadence. HTTP-429 protection remains 10 minutes. */
@@ -8755,6 +8771,403 @@ function dexService(state) {
 }
 
 
+
+function marketProviderRecoveryV157(
+  state
+) {
+  state.services =
+    state.services ||
+    {};
+
+  const existing =
+    state.services
+      .marketProviderRecoveryV157;
+
+  state.services
+    .marketProviderRecoveryV157 =
+    existing &&
+    typeof existing ===
+      "object"
+      ? existing
+      : {
+          scanStartedAt:
+            null,
+          recoveringProviderUsedThisScan:
+            null,
+          recoveringProviderUsedAt:
+            null,
+          blockDexUntil:
+            null,
+          blockGeckoUntil:
+            null,
+          last429Provider:
+            null,
+          last429At:
+            null,
+          lastRecoverySuccessProvider:
+            null,
+          lastRecoverySuccessAt:
+            null
+        };
+
+  return state.services
+    .marketProviderRecoveryV157;
+}
+
+function beginMarketProviderRecoveryScanV157(
+  state,
+  startedAt
+) {
+  const recovery =
+    marketProviderRecoveryV157(
+      state
+    );
+
+  recovery.scanStartedAt =
+    safeNumber(
+      startedAt
+    ) ||
+    Date.now();
+
+  recovery
+    .recoveringProviderUsedThisScan =
+    null;
+
+  recovery
+    .recoveringProviderUsedAt =
+    null;
+
+  return recovery;
+}
+
+function providerServiceV157(
+  state,
+  provider
+) {
+  return provider ===
+    "DEX"
+    ? dexService(
+        state
+      )
+    : geckoService(
+        state
+      );
+}
+
+function marketProviderRecoveryEligibilityV157(
+  state,
+  provider
+) {
+  const recovery =
+    marketProviderRecoveryV157(
+      state
+    );
+
+  const service =
+    providerServiceV157(
+      state,
+      provider
+    );
+
+  const now =
+    Date.now();
+
+  const blockedUntil =
+    provider ===
+      "DEX"
+      ? safeNumber(
+          recovery.blockDexUntil
+        )
+      : safeNumber(
+          recovery.blockGeckoUntil
+        );
+
+  if (
+    blockedUntil &&
+    now <
+      blockedUntil
+  ) {
+    return {
+      eligible:
+        false,
+      reason:
+        `${provider}_CROSS_PROVIDER_STAGGER_V157`,
+      eligibleAt:
+        blockedUntil,
+      recoveryPending:
+        service
+          .recoveryProbePendingV157 ===
+        true
+    };
+  }
+
+  const recoveryPending =
+    service
+      .recoveryProbePendingV157 ===
+    true;
+
+  const usedProvider =
+    String(
+      recovery
+        .recoveringProviderUsedThisScan ||
+      ""
+    );
+
+  if (
+    recoveryPending &&
+    usedProvider &&
+    usedProvider !==
+      provider
+  ) {
+    return {
+      eligible:
+        false,
+      reason:
+        `${provider}_RECOVERY_PROBE_DEFERRED_V157`,
+      eligibleAt:
+        Math.max(
+          now,
+          safeNumber(
+            recovery.scanStartedAt
+          ) +
+          MARKET_PROVIDER_CROSS_STAGGER_MS_V157
+        ),
+      recoveryPending:
+        true
+    };
+  }
+
+  return {
+    eligible:
+      true,
+    reason:
+      null,
+    eligibleAt:
+      now,
+    recoveryPending
+  };
+}
+
+function markMarketRecoveryProbeV157(
+  state,
+  provider
+) {
+  const recovery =
+    marketProviderRecoveryV157(
+      state
+    );
+
+  const service =
+    providerServiceV157(
+      state,
+      provider
+    );
+
+  if (
+    service
+      .recoveryProbePendingV157 ===
+      true
+  ) {
+    recovery
+      .recoveringProviderUsedThisScan =
+      provider;
+
+    recovery
+      .recoveringProviderUsedAt =
+      Date.now();
+  }
+}
+
+function markMarket429V157(
+  state,
+  provider
+) {
+  const recovery =
+    marketProviderRecoveryV157(
+      state
+    );
+
+  const service =
+    providerServiceV157(
+      state,
+      provider
+    );
+
+  const now =
+    Date.now();
+
+  service
+    .recoveryProbePendingV157 =
+    true;
+
+  service
+    .recoveryProbeSetAtV157 =
+    now;
+
+  recovery.last429Provider =
+    provider;
+
+  recovery.last429At =
+    now;
+
+  recovery
+    .recoveringProviderUsedThisScan =
+    provider;
+
+  recovery
+    .recoveringProviderUsedAt =
+    now;
+
+  if (
+    provider ===
+      "DEX"
+  ) {
+    recovery.blockGeckoUntil =
+      Math.max(
+        safeNumber(
+          recovery.blockGeckoUntil
+        ),
+        now +
+        MARKET_PROVIDER_CROSS_STAGGER_MS_V157
+      );
+  }
+
+  else {
+    recovery.blockDexUntil =
+      Math.max(
+        safeNumber(
+          recovery.blockDexUntil
+        ),
+        now +
+        MARKET_PROVIDER_CROSS_STAGGER_MS_V157
+      );
+  }
+}
+
+function markMarketNon429V157(
+  state,
+  provider
+) {
+  const recovery =
+    marketProviderRecoveryV157(
+      state
+    );
+
+  const service =
+    providerServiceV157(
+      state,
+      provider
+    );
+
+  if (
+    service
+      .recoveryProbePendingV157 ===
+      true
+  ) {
+    recovery
+      .lastRecoverySuccessProvider =
+      provider;
+
+    recovery
+      .lastRecoverySuccessAt =
+      Date.now();
+  }
+
+  service
+    .recoveryProbePendingV157 =
+    false;
+
+  service
+    .recoveryProbeSetAtV157 =
+    null;
+}
+
+function marketProviderRecoveryTelemetryV157(
+  state
+) {
+  const recovery =
+    marketProviderRecoveryV157(
+      state
+    );
+
+  const dex =
+    dexService(
+      state
+    );
+
+  const gecko =
+    geckoService(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  return {
+    enabled:
+      true,
+    crossProviderStaggerMs:
+      MARKET_PROVIDER_CROSS_STAGGER_MS_V157,
+    recoveringProviderUsedThisScan:
+      recovery
+        .recoveringProviderUsedThisScan ||
+      null,
+    recoveringProviderUsedAt:
+      safeNumber(
+        recovery
+          .recoveringProviderUsedAt
+      ) ||
+      null,
+    dexRecoveryPending:
+      dex
+        .recoveryProbePendingV157 ===
+      true,
+    geckoRecoveryPending:
+      gecko
+        .recoveryProbePendingV157 ===
+      true,
+    blockDexUntil:
+      safeNumber(
+        recovery.blockDexUntil
+      ) ||
+      null,
+    blockGeckoUntil:
+      safeNumber(
+        recovery.blockGeckoUntil
+      ) ||
+      null,
+    blockDexActive:
+      safeNumber(
+        recovery.blockDexUntil
+      ) >
+      now,
+    blockGeckoActive:
+      safeNumber(
+        recovery.blockGeckoUntil
+      ) >
+      now,
+    last429Provider:
+      recovery.last429Provider ||
+      null,
+    last429At:
+      safeNumber(
+        recovery.last429At
+      ) ||
+      null,
+    lastRecoverySuccessProvider:
+      recovery
+        .lastRecoverySuccessProvider ||
+      null,
+    lastRecoverySuccessAt:
+      safeNumber(
+        recovery
+          .lastRecoverySuccessAt
+      ) ||
+      null
+  };
+}
+
+
 function registerDex429V147(
   service
 ) {
@@ -8813,6 +9226,13 @@ function registerDex429V147(
     backoffMs;
   service.lastStatus =
     "HTTP_429";
+
+  service.recoveryProbePendingV157 =
+    true;
+
+  service.recoveryProbeSetAtV157 =
+    now;
+
   service.total429s =
     safeNumber(
       service.total429s
@@ -8831,6 +9251,12 @@ function registerDexSuccessV147(
     Date.now();
   service.lastStatus =
     status;
+
+  service.recoveryProbePendingV157 =
+    false;
+
+  service.recoveryProbeSetAtV157 =
+    null;
 
   service.consecutive429s =
     Math.max(
@@ -8891,8 +9317,17 @@ function marketProviderAvailabilityV147(
       gecko.eligibleAt
     ) || now;
 
+  const dexRecoveryV157 =
+    marketProviderRecoveryEligibilityV157(
+      state,
+      "DEX"
+    );
+
   const dexEligible =
-    dexEligibleAt <= now;
+    dexEligibleAt <= now &&
+    dexRecoveryV157
+      .eligible ===
+      true;
 
   const geckoEligible =
     gecko.eligible === true;
@@ -8929,7 +9364,15 @@ function marketProviderAvailabilityV147(
       lastBackoffMs:
         safeNumber(
           dex.lastBackoffMs
-        )
+        ),
+      recoveryReasonV157:
+        dexRecoveryV157
+          .reason ||
+        null,
+      recoveryPendingV157:
+        dexRecoveryV157
+          .recoveryPending ===
+        true
     },
 
     gecko: {
@@ -9176,6 +9619,35 @@ function geckoFreshEligibility(
   const now =
     Date.now();
 
+  const recoveryV157 =
+    marketProviderRecoveryEligibilityV157(
+      state,
+      "GECKO"
+    );
+
+  if (
+    recoveryV157
+      .eligible !==
+      true
+  ) {
+    return {
+      eligible:
+        false,
+      reason:
+        recoveryV157
+          .reason ||
+        "GECKOTERMINAL_RECOVERY_STAGGER_V157",
+      eligibleAt:
+        recoveryV157
+          .eligibleAt ||
+        now,
+      recoveryPendingV157:
+        recoveryV157
+          .recoveryPending ===
+        true
+    };
+  }
+
   const cooldownUntil =
     safeNumber(
       service.cooldownUntil
@@ -9306,6 +9778,12 @@ function registerGecko429(
   service.lastStatus =
     "HTTP_429";
 
+  service.recoveryProbePendingV157 =
+    true;
+
+  service.recoveryProbeSetAtV157 =
+    now;
+
   service.total429s =
     safeNumber(
       service.total429s
@@ -9326,6 +9804,12 @@ function registerGeckoSuccess(
     status;
 
   service.cooldownUntil =
+    null;
+
+  service.recoveryProbePendingV157 =
+    false;
+
+  service.recoveryProbeSetAtV157 =
     null;
 
   service.rateLimitHistorySeeded =
@@ -9891,6 +10375,11 @@ async function geckoTerminalMarketData(
 
   budget.analysis.geckoFreshUsed++;
 
+  markMarketRecoveryProbeV157(
+    state,
+    "GECKO"
+  );
+
   service.lastRequestAt =
     Date.now();
 
@@ -9922,6 +10411,11 @@ async function geckoTerminalMarketData(
           service
         );
 
+      markMarket429V157(
+        state,
+        "GECKO"
+      );
+
       return {
         verified:
           false,
@@ -9948,6 +10442,11 @@ async function geckoTerminalMarketData(
           service.consecutive429s
       };
     }
+
+    markMarketNon429V157(
+      state,
+      "GECKO"
+    );
 
     if (
       !response.ok
@@ -11509,6 +12008,11 @@ async function geckoDirectionalTradeFlow(
 
   budget.analysis.geckoFreshUsed++;
 
+  markMarketRecoveryProbeV157(
+    state,
+    "GECKO"
+  );
+
   service.lastRequestAt =
     Date.now();
 
@@ -11540,6 +12044,11 @@ async function geckoDirectionalTradeFlow(
           service
         );
 
+      markMarket429V157(
+        state,
+        "GECKO"
+      );
+
       return {
         attempted:
           true,
@@ -11563,6 +12072,11 @@ async function geckoDirectionalTradeFlow(
           service.consecutive429s
       };
     }
+
+    markMarketNon429V157(
+      state,
+      "GECKO"
+    );
 
     if (
       !response.ok
@@ -12193,6 +12707,45 @@ async function marketData(
     );
   }
 
+  const dexRecoveryV157 =
+    marketProviderRecoveryEligibilityV157(
+      state,
+      "DEX"
+    );
+
+  if (
+    dexRecoveryV157
+      .eligible !==
+      true
+  ) {
+    const originalV157 = {
+      verified:
+        false,
+      status:
+        "DEXSCREENER_RECOVERY_STAGGER_V157",
+      rateLimited:
+        true,
+      recoveryReasonV157:
+        dexRecoveryV157
+          .reason ||
+        null,
+      recoveryEligibleAtV157:
+        dexRecoveryV157
+          .eligibleAt ||
+        null
+    };
+
+    return await priorityMarketFallback(
+      token,
+      budget,
+      watched,
+      state,
+      priority,
+      "DEXSCREENER_RECOVERY_STAGGER_V157",
+      originalV157
+    );
+  }
+
   budget.analysis.dexFreshUsed =
     safeNumber(
       budget.analysis.dexFreshUsed
@@ -12250,6 +12803,11 @@ async function marketData(
 
   budget.analysis.dexFreshUsed++;
 
+  markMarketRecoveryProbeV157(
+    state,
+    "DEX"
+  );
+
   service.lastRequestAt =
     Date.now();
 
@@ -12290,6 +12848,11 @@ async function marketData(
         registerDex429V147(
           service
         );
+
+      markMarket429V157(
+        state,
+        "DEX"
+      );
 
       const stale =
         cachedMarket(
@@ -12353,6 +12916,11 @@ async function marketData(
         }
       );
     }
+
+    markMarketNon429V157(
+      state,
+      "DEX"
+    );
 
     if (
       !response.ok
@@ -12419,6 +12987,11 @@ async function marketData(
           ) {
             registerDex429V147(
               service
+            );
+
+            markMarket429V157(
+              state,
+              "DEX"
             );
           }
 
@@ -21353,6 +21926,11 @@ async function scan(
     false
   );
 
+  beginMarketProviderRecoveryScanV157(
+    state,
+    startedAt
+  );
+
   const scheduled =
     Boolean(
       options.scheduled
@@ -24546,7 +25124,7 @@ async function scan(
     status,
 
     scanMode:
-      "V156_CORE_RPC_ABORT_RECOVERY_HUNTER",
+      "V157_CORE_MARKET_PROVIDER_RECOVERY_STAGGER_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -24821,6 +25399,11 @@ async function scan(
         };
       })()
     },
+
+    marketProviderRecoveryStaggerV157:
+      marketProviderRecoveryTelemetryV157(
+        state
+      ),
 
     requestBudget:
       budgetTelemetry(
@@ -25207,7 +25790,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V156_RPC_ABORT_RECOVERY_DIRECTIONAL_USD_HUNTER",
+        "V157_MARKET_PROVIDER_RECOVERY_STAGGER_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -27331,12 +27914,45 @@ async function scan(
       telegramThresholdsUnchangedV156:
         "ENABLED_V156",
 
+      marketProviderRecoveryStagger:
+        "ENABLED_V157",
+
+      freshDex429DoesNotImmediatelyBurnGeckoV157:
+        "ENABLED_V157",
+
+      oneRecoveringProviderProbePerScanV157:
+        "ENABLED_V157",
+
+      crossProviderRecoveryStaggerMsV157:
+        MARKET_PROVIDER_CROSS_STAGGER_MS_V157,
+
+      providerNon429ClearsRecoveryPendingV157:
+        "ENABLED_V157",
+
+      dexAndGeckoNormalFreshRatesUnchangedV157:
+        "ENABLED_V157",
+
+      geckoFreshSpacingUnchangedV157:
+        "ENABLED_V157",
+
+      geckoOneFreshPerScanUnchangedV157:
+        "ENABLED_V157",
+
+      rpcAbortRecoveryUnchangedV157:
+        "ENABLED_V157",
+
+      directionalUsdPoolIdentityUnchangedV157:
+        "ENABLED_V157",
+
+      telegramThresholdsUnchangedV157:
+        "ENABLED_V157",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V156_CORE_RPC_ABORT_RECOVERY_V77_TELEGRAM_HUNTER",
+      "V157_CORE_MARKET_PROVIDER_RECOVERY_STAGGER_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -27652,7 +28268,7 @@ async function health(
     },
 
     architecture:
-      "V156_CORE_RPC_ABORT_RECOVERY_V77_TELEGRAM_HUNTER",
+      "V157_CORE_MARKET_PROVIDER_RECOVERY_STAGGER_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -28051,7 +28667,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V156_CORE_RPC_ABORT_RECOVERY_V77_TELEGRAM_HUNTER",
+      "V157_CORE_MARKET_PROVIDER_RECOVERY_STAGGER_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -28480,7 +29096,7 @@ export default {
             ),
 
           architecture:
-            "V156_CORE_RPC_ABORT_RECOVERY_V77_TELEGRAM_HUNTER",
+            "V157_CORE_MARKET_PROVIDER_RECOVERY_STAGGER_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
