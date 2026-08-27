@@ -1,10 +1,10 @@
 /**
  * Robinhood Chain Meme Hunter
- * V197
+ * V198
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V197
+ * CURRENT BUILD: V198
  * - V192 adds strict native-ETH quote valuation without changing V191 resolution/replay
  * - Robinhood Chain native ETH (ZERO currency in Uniswap V4) is treated as 18-decimal ETH
  * - Native ETH uses the same canonical WETH/USDG on-chain reference via 1:1 ETH/WETH wrapping denomination
@@ -746,7 +746,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V197";
+const VERSION = "V198";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -12512,6 +12512,189 @@ function pruneOnChainDirectionalStoreV179(
   }
 
   return store;
+}
+
+
+function resolvedPoolReplayDiagnosticV198(
+  state,
+  liveLogs,
+  unknownPoolResolution,
+  decodedOutput
+) {
+  const attempts =
+    unknownPoolResolution
+      ?.bitqueryInitializeV190
+      ?.attemptHistoryV193 || [];
+
+  const resolvedIds =
+    Array.from(
+      new Set(
+        attempts
+          .filter(
+            row =>
+              row?.resolved === true
+          )
+          .map(
+            row =>
+              normalize(
+                row?.poolId
+              )
+          )
+          .filter(Boolean)
+      )
+    );
+
+  const swapTopic =
+    normalize(
+      V4_SWAP_TOPIC
+    );
+
+  const traces =
+    resolvedIds.map(
+      poolId => {
+        const pool =
+          state?.poolRegistry?.[
+            poolId
+          ] || null;
+
+        const matchingLogs =
+          (liveLogs || [])
+            .filter(
+              log =>
+                normalize(
+                  log?.topics?.[0]
+                ) === swapTopic &&
+                normalize(
+                  log?.topics?.[1]
+                ) === poolId
+            );
+
+        const decodedTrades =
+          (
+            decodedOutput
+              ?.sampleDecodedTrades ||
+            decodedOutput
+              ?.decodedTrades ||
+            []
+          ).filter(
+            trade =>
+              normalize(
+                trade?.poolId
+              ) === poolId
+          );
+
+        const rawSamples =
+          matchingLogs
+            .slice(0, 5)
+            .map(
+              log => {
+                let decoded =
+                  null;
+
+                try {
+                  decoded =
+                    decodeV4SwapAmountsV179(
+                      log
+                    );
+                } catch {
+                  decoded =
+                    null;
+                }
+
+                return {
+                  blockNumber:
+                    hexToNumber(
+                      log?.blockNumber
+                    ),
+                  transactionHash:
+                    normalize(
+                      log?.transactionHash
+                    ),
+                  amount0:
+                    decoded?.amount0 !==
+                      undefined &&
+                    decoded?.amount0 !==
+                      null
+                      ? String(
+                          decoded.amount0
+                        )
+                      : null,
+                  amount1:
+                    decoded?.amount1 !==
+                      undefined &&
+                    decoded?.amount1 !==
+                      null
+                      ? String(
+                          decoded.amount1
+                        )
+                      : null,
+                  rawData:
+                    String(
+                      log?.data ||
+                      ""
+                    ).slice(0, 194)
+                };
+              }
+            );
+
+        return {
+          poolId,
+          registryPresent:
+            Boolean(pool),
+          currency0:
+            normalize(
+              pool?.currency0
+            ) || null,
+          currency1:
+            normalize(
+              pool?.currency1
+            ) || null,
+          hooks:
+            normalize(
+              pool?.hooks
+            ) || null,
+          fee:
+            pool?.fee ?? null,
+          tickSpacing:
+            pool?.tickSpacing ?? null,
+          matchingLiveSwapCount:
+            matchingLogs.length,
+          decodedTradeCount:
+            decodedTrades.length,
+          rawSamples
+        };
+      }
+    );
+
+  return {
+    enabled: true,
+    externalRequestsAdded: 0,
+    resolvedCurrentScanPoolCount:
+      resolvedIds.length,
+    resolvedCurrentScanPoolIds:
+      resolvedIds,
+    pools:
+      traces,
+    summary: {
+      resolvedPoolsWithMatchingLiveSwaps:
+        traces.filter(
+          row =>
+            row.matchingLiveSwapCount >
+            0
+        ).length,
+      resolvedPoolsWithDecodedTrades:
+        traces.filter(
+          row =>
+            row.decodedTradeCount >
+            0
+        ).length,
+      resolvedPoolsMissingRegistryEntry:
+        traces.filter(
+          row =>
+            !row.registryPresent
+        ).length
+    }
+  };
 }
 
 function collectOnChainDirectionalSwapsV179(
@@ -30202,6 +30385,15 @@ async function scan(
     .uniswapEthUsdGReferenceV196 =
       uniswapEthUsdGReferenceV196;
 
+  onChainDirectionalV179
+    .resolvedPoolReplayDiagnosticV198 =
+      resolvedPoolReplayDiagnosticV198(
+        state,
+        liveOutput.logs,
+        unknownPoolResolution,
+        onChainDirectionalV179
+      );
+
   for (
     const token
     of liveActivity.tokens
@@ -34382,7 +34574,7 @@ async function scan(
     status,
 
     scanMode:
-      "V197_LIVE_POOL_COVERAGE_VERIFIED_USD_HUNTER",
+      "V198_RESOLVED_POOL_REPLAY_DIAGNOSTIC_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -38374,6 +38566,30 @@ async function scan(
       telegramThresholdsUnchangedV192:
         "ENABLED_V192",
 
+      resolvedPoolReplayDiagnosticV198:
+        "ENABLED_V198",
+
+      resolvedPoolDiagnosticExternalRequestsV198:
+        0,
+
+      bitqueryResolverAttemptCapUnchangedV198:
+        4,
+
+      diagnosticRawSwapSamplesPerResolvedPoolV198:
+        5,
+
+      verifiedUsdPricingStillFrozenV198:
+        "ENABLED_V198",
+
+      resolverExpansionV198:
+        "NO",
+
+      hardRequestLimitUnchangedV198:
+        42,
+
+      telegramThresholdsUnchangedV198:
+        "ENABLED_V198",
+
       verifiedUsdPricingFrozenFromV196:
         "ENABLED_V197",
 
@@ -38610,7 +38826,7 @@ async function scan(
     },
 
     architecture:
-      "V197_LIVE_POOL_COVERAGE_VERIFIED_USD_V77_TELEGRAM_HUNTER",
+      "V198_RESOLVED_POOL_REPLAY_DIAGNOSTIC_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
