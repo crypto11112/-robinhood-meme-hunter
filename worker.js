@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V168
+ * V170
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -632,7 +632,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V169";
+const VERSION = "V170";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -821,6 +821,15 @@ const SYSTEM_REQUEST_LIMIT = 2;
 const DISCOVERY_REQUEST_LIMIT = 24;
 const LIVE_DISCOVERY_REQUEST_LIMIT = 12;
 const BACKLOG_DISCOVERY_REQUEST_LIMIT = 12;
+
+/*
+ * V170:
+ * After candidate analysis + Telegram have completed, reclaim only the
+ * otherwise-unused discovery capacity. This never raises the 42-request
+ * ceiling, never raises the 24-request discovery ceiling, and never borrows
+ * from the 21-request analysis phase.
+ */
+const V170_POST_ANALYSIS_BACKLOG_RECLAIM_MAX_REQUESTS = 5;
 
 const ANALYSIS_REQUEST_LIMIT = 21;
 
@@ -1440,6 +1449,12 @@ function createBudget() {
       limit:
         DISCOVERY_REQUEST_LIMIT,
 
+      postAnalysisBacklogReclaimV170:
+        false,
+
+      originalBacklogLimitV170:
+        BACKLOG_DISCOVERY_REQUEST_LIMIT,
+
       liveUsed:
         0,
 
@@ -1545,11 +1560,20 @@ function budgetAvailable(
     phase ===
     "discovery-backlog"
   ) {
+    const postAnalysisReclaimV170 =
+      budget.discovery
+        .postAnalysisBacklogReclaimV170 ===
+      true;
+
     const leavesProtectedReserve =
-      budget.totalUsed +
-        amount <=
-      budget.totalLimit -
-        BACKLOG_GLOBAL_RESERVE;
+      postAnalysisReclaimV170
+        ? budget.totalUsed +
+            amount <=
+          budget.totalLimit
+        : budget.totalUsed +
+            amount <=
+          budget.totalLimit -
+            BACKLOG_GLOBAL_RESERVE;
 
     return (
       leavesProtectedReserve &&
@@ -1642,6 +1666,76 @@ function consumeBudget(
   return true;
 }
 
+function activatePostAnalysisBacklogReclaimV170(
+  budget
+) {
+  const discoveryRemaining =
+    Math.max(
+      0,
+      budget.discovery.limit -
+        budget.discovery.used
+    );
+
+  const reclaimCapacity =
+    Math.min(
+      V170_POST_ANALYSIS_BACKLOG_RECLAIM_MAX_REQUESTS,
+      discoveryRemaining
+    );
+
+  const originalBacklogLimit =
+    safeNumber(
+      budget.discovery
+        .originalBacklogLimitV170
+    ) ||
+    BACKLOG_DISCOVERY_REQUEST_LIMIT;
+
+  budget.discovery
+    .postAnalysisBacklogReclaimV170 =
+      reclaimCapacity > 0;
+
+  budget.discovery.backlogLimit =
+    Math.min(
+      budget.discovery.limit,
+      Math.max(
+        budget.discovery.backlogLimit,
+        budget.discovery.backlogUsed +
+          reclaimCapacity
+      )
+    );
+
+  return {
+    enabled:
+      true,
+    activated:
+      reclaimCapacity > 0,
+    reclaimCapacityRequests:
+      reclaimCapacity,
+    originalBacklogLimit,
+    effectiveBacklogLimit:
+      budget.discovery.backlogLimit,
+    discoveryRemainingBeforeReclaim:
+      discoveryRemaining,
+    analysisUsed:
+      budget.analysis.used,
+    analysisLimit:
+      budget.analysis.limit,
+    notificationUsed:
+      budget.notification.used,
+    notificationLimit:
+      budget.notification.limit,
+    hardRequestLimit:
+      budget.totalLimit,
+    discoveryLimit:
+      budget.discovery.limit,
+    analysisLimitUnchanged:
+      budget.analysis.limit ===
+        ANALYSIS_REQUEST_LIMIT,
+    hardRequestLimitUnchanged:
+      budget.totalLimit ===
+        MAX_EXTERNAL_REQUESTS
+  };
+}
+
 function budgetTelemetry(
   budget
 ) {
@@ -1715,7 +1809,19 @@ function budgetTelemetry(
             0,
             budget.discovery.backlogLimit -
               budget.discovery.backlogUsed
-          )
+          ),
+
+        originalLimitV170:
+          safeNumber(
+            budget.discovery
+              .originalBacklogLimitV170
+          ) ||
+          BACKLOG_DISCOVERY_REQUEST_LIMIT,
+
+        postAnalysisReclaimActiveV170:
+          budget.discovery
+            .postAnalysisBacklogReclaimV170 ===
+          true
       }
     },
 
@@ -26689,6 +26795,157 @@ async function scan(
     }
   }
 
+  /*
+   * =======================================================
+   * V170 POST-ANALYSIS RESIDUAL BACKLOG CATCH-UP
+   * =======================================================
+   * Candidate analysis and Telegram notification work are complete.
+   * Reclaim only unused discovery capacity.
+   */
+  const postAnalysisBacklogReclaimV170 =
+    activatePostAnalysisBacklogReclaimV170(
+      budget
+    );
+
+  let postAnalysisBacklogResultV170 =
+    null;
+
+  let postAnalysisBacklogDiscoveryV170 = {
+    rawLogs: 0,
+    initializeEvents: 0,
+    swapTopicMatches: 0,
+    liquidityTopicMatches: 0,
+    newTokens: new Set(),
+    seenTokens: new Set()
+  };
+
+  const postAnalysisBacklogStartV170 =
+    state.lastScannedBlock !==
+      null &&
+    state.lastScannedBlock !==
+      undefined
+      ? BigInt(
+          safeNumber(
+            state.lastScannedBlock
+          ) + 1
+        )
+      : backlogFrom;
+
+  if (
+    postAnalysisBacklogReclaimV170
+      .activated &&
+    postAnalysisBacklogStartV170 !==
+      null &&
+    postAnalysisBacklogStartV170 <=
+      backlogTargetBlock &&
+    budgetAvailable(
+      budget,
+      "discovery-backlog"
+    )
+  ) {
+    const residualOutputV170 = {
+      logs: [],
+      ranges: []
+    };
+
+    postAnalysisBacklogResultV170 =
+      await scanBacklogSequential(
+        env,
+        state,
+        postAnalysisBacklogStartV170,
+        backlogTargetBlock,
+        budget,
+        residualOutputV170
+      );
+
+    if (
+      residualOutputV170.logs.length
+    ) {
+      backlogOutput.logs.push(
+        ...residualOutputV170.logs
+      );
+
+      backlogOutput.ranges.push(
+        ...residualOutputV170.ranges
+      );
+
+      postAnalysisBacklogDiscoveryV170 =
+        processDiscoveryLogs(
+          state,
+          residualOutputV170.logs,
+          "BACKLOG"
+        );
+
+      for (
+        const token
+        of postAnalysisBacklogDiscoveryV170
+          .newTokens
+      ) {
+        newTokens.add(
+          token
+        );
+      }
+    }
+
+    if (
+      postAnalysisBacklogResultV170
+        ?.processedThrough !==
+          null &&
+      postAnalysisBacklogResultV170
+        ?.processedThrough !==
+          undefined
+    ) {
+      state.lastScannedBlock =
+        Number(
+          postAnalysisBacklogResultV170
+            .processedThrough
+        );
+    }
+  }
+
+  postAnalysisBacklogReclaimV170
+    .requestsUsed =
+      Math.max(
+        0,
+        budget.discovery.backlogUsed -
+          BACKLOG_DISCOVERY_REQUEST_LIMIT
+      );
+
+  postAnalysisBacklogReclaimV170
+    .blocksAdvanced =
+      postAnalysisBacklogResultV170
+        ?.blocksProcessed ||
+      0;
+
+  postAnalysisBacklogReclaimV170
+    .provider =
+      postAnalysisBacklogResultV170
+        ?.probeHistory
+        ?.length
+        ? postAnalysisBacklogResultV170
+            .probeHistory[
+              postAnalysisBacklogResultV170
+                .probeHistory.length - 1
+            ]
+            ?.provider ||
+          null
+        : null;
+
+  postAnalysisBacklogReclaimV170
+    .alchemyFreeTierRangePreserved =
+      getProviderBacklogSize(
+        state,
+        "ALCHEMY"
+      ) <= 10;
+
+  postAnalysisBacklogReclaimV170
+    .noAnalysisCapacityBorrowed =
+      true;
+
+  postAnalysisBacklogReclaimV170
+    .telegramCompletedBeforeReclaim =
+      true;
+
   pruneState(
     state,
     true
@@ -26808,7 +27065,7 @@ async function scan(
     status,
 
     scanMode:
-      "V169_TELEGRAM_EVIDENCE_FRESHNESS_CLASSIFICATION_HUNTER",
+      "V170_POST_ANALYSIS_RESIDUAL_BACKLOG_CATCHUP_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -26849,15 +27106,25 @@ async function scan(
         state.lastLiveScannedBlock,
 
       backlogProcessedThrough:
-        backlogResult
-          ?.processedThrough !==
+        (
+          postAnalysisBacklogResultV170
+            ?.processedThrough ??
+          backlogResult
+            ?.processedThrough
+        ) !==
           null &&
-        backlogResult
-          ?.processedThrough !==
+        (
+          postAnalysisBacklogResultV170
+            ?.processedThrough ??
+          backlogResult
+            ?.processedThrough
+        ) !==
           undefined
           ? Number(
+              postAnalysisBacklogResultV170
+                ?.processedThrough ??
               backlogResult
-                .processedThrough
+                ?.processedThrough
             )
           : null,
 
@@ -27093,6 +27360,8 @@ async function scan(
       budgetTelemetry(
         budget
       ),
+
+    postAnalysisBacklogReclaimV170,
 
     marketProviderCoordinationV147:
       marketProviderAvailabilityV147(
@@ -30167,12 +30436,42 @@ async function scan(
       telegramThresholdsUnchangedV169:
         "ENABLED_V169",
 
+      postAnalysisResidualBacklogCatchup:
+        "ENABLED_V170",
+
+      unusedDiscoveryCapacityReclaimV170:
+        "ENABLED_V170",
+
+      postAnalysisBacklogReclaimMaxRequestsV170:
+        V170_POST_ANALYSIS_BACKLOG_RECLAIM_MAX_REQUESTS,
+
+      alchemyFreeTierTenBlockRangePreservedV170:
+        "ENABLED_V170",
+
+      candidateAnalysisCompletesBeforeReclaimV170:
+        "ENABLED_V170",
+
+      telegramCompletesBeforeReclaimV170:
+        "ENABLED_V170",
+
+      hardRequestLimitUnchangedV170:
+        MAX_EXTERNAL_REQUESTS,
+
+      analysisRequestLimitUnchangedV170:
+        ANALYSIS_REQUEST_LIMIT,
+
+      discoveryRequestLimitUnchangedV170:
+        DISCOVERY_REQUEST_LIMIT,
+
+      telegramThresholdsUnchangedV170:
+        "ENABLED_V170",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V169_TELEGRAM_EVIDENCE_FRESHNESS_CLASSIFICATION_V77_TELEGRAM_HUNTER",
+      "V170_POST_ANALYSIS_RESIDUAL_BACKLOG_CATCHUP_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
