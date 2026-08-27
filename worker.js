@@ -1,10 +1,10 @@
 /**
  * Robinhood Chain Meme Hunter
- * V195
+ * V196
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V195
+ * CURRENT BUILD: V196
  * - V192 adds strict native-ETH quote valuation without changing V191 resolution/replay
  * - Robinhood Chain native ETH (ZERO currency in Uniswap V4) is treated as 18-decimal ETH
  * - Native ETH uses the same canonical WETH/USDG on-chain reference via 1:1 ETH/WETH wrapping denomination
@@ -746,7 +746,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V195";
+const VERSION = "V196";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -828,6 +828,15 @@ const BITQUERY_GRAPHQL_V2 =
 
 const UNISWAP_V3_FACTORY_V195 =
   "0x1f7d7550b1b028f7571e69a784071f0205fd2efa";
+
+const UNISWAP_TRADE_API_V196 =
+  "https://trade-api.gateway.uniswap.org/v1/quote";
+
+const UNISWAP_REFERENCE_SWAPPER_V196 =
+  "0x0000000000000000000000000000000000000001";
+
+const ONE_NATIVE_ETH_WEI_V196 =
+  "1000000000000000000";
 
 const V3_STANDARD_FEES_V195 = [
   100,
@@ -10790,6 +10799,253 @@ function sqrtPriceX96ToUsdGPerWethV195(
   );
 }
 
+
+async function getUniswapEthUsdGReferenceV196(
+  env,
+  budget
+) {
+  const apiKey =
+    String(
+      env.UNISWAP_API_KEY ||
+      ""
+    ).trim();
+
+  const base = {
+    attempted: false,
+    configured:
+      Boolean(apiKey),
+    chainId: 4663,
+    tokenIn: ZERO,
+    tokenOut:
+      CANONICAL_USDG_V179,
+    inputWei:
+      ONE_NATIVE_ETH_WEI_V196,
+    outputRaw: null,
+    routing: null,
+    verified: false,
+    priceUsdGPerWeth: null,
+    source:
+      "UNISWAP_AGGREGATED_NATIVE_ETH_TO_CANONICAL_USDG_QUOTE_V196",
+    status: null,
+    httpStatus: null,
+    externalRequestsUsed: 0,
+    error: null
+  };
+
+  if (!apiKey) {
+    return {
+      ...base,
+      status:
+        "UNISWAP_API_KEY_NOT_CONFIGURED"
+    };
+  }
+
+  if (
+    !budgetAvailable(
+      budget,
+      "analysis"
+    ) ||
+    !consumeBudget(
+      budget,
+      "analysis",
+      "UNISWAP_ETH_USDG_REFERENCE_V196"
+    )
+  ) {
+    return {
+      ...base,
+      status:
+        "ANALYSIS_BUDGET_PROTECTED"
+    };
+  }
+
+  try {
+    const response =
+      await fetch(
+        UNISWAP_TRADE_API_V196,
+        {
+          method: "POST",
+          headers: {
+            "x-api-key":
+              apiKey,
+            "content-type":
+              "application/json",
+            accept:
+              "application/json",
+            /*
+             * We only need a quote, never execution. Keeping this false allows
+             * CLASSIC routing without requiring an EIP-7914 smart wallet.
+             */
+            "x-erc20eth-enabled":
+              "false"
+          },
+          body:
+            JSON.stringify({
+              type:
+                "EXACT_INPUT",
+              amount:
+                ONE_NATIVE_ETH_WEI_V196,
+              tokenInChainId:
+                4663,
+              tokenOutChainId:
+                4663,
+              tokenIn:
+                ZERO,
+              tokenOut:
+                CANONICAL_USDG_V179,
+              swapper:
+                UNISWAP_REFERENCE_SWAPPER_V196,
+              routingPreference:
+                "BEST_PRICE",
+              slippageTolerance:
+                0.5
+            })
+        }
+      );
+
+    const httpStatus =
+      response.status;
+
+    let payload =
+      null;
+
+    try {
+      payload =
+        await response.json();
+    } catch {
+      payload =
+        null;
+    }
+
+    if (!response.ok) {
+      return {
+        ...base,
+        attempted: true,
+        httpStatus,
+        externalRequestsUsed: 1,
+        status:
+          `HTTP_${httpStatus}`,
+        error:
+          payload?.detail ||
+          payload?.error ||
+          payload?.message ||
+          payload?.errors?.[0]?.message ||
+          null
+      };
+    }
+
+    const quote =
+      payload?.quote ||
+      null;
+
+    const output =
+      quote?.output ||
+      quote?.aggregatedOutputs?.[0] ||
+      null;
+
+    const outputToken =
+      normalize(
+        output?.token
+      );
+
+    const outputRaw =
+      String(
+        output?.amount ||
+        output?.startAmount ||
+        ""
+      ).trim();
+
+    let outputBigInt =
+      null;
+
+    try {
+      outputBigInt =
+        BigInt(outputRaw);
+    } catch {
+      outputBigInt =
+        null;
+    }
+
+    if (
+      outputToken !==
+        CANONICAL_USDG_V179 ||
+      outputBigInt === null ||
+      outputBigInt <= 0n
+    ) {
+      return {
+        ...base,
+        attempted: true,
+        httpStatus,
+        externalRequestsUsed: 1,
+        routing:
+          payload?.routing ||
+          null,
+        outputRaw:
+          outputRaw || null,
+        status:
+          "QUOTE_OUTPUT_UNVERIFIED",
+        error:
+          outputToken &&
+          outputToken !==
+            CANONICAL_USDG_V179
+            ? "OUTPUT_TOKEN_NOT_CANONICAL_USDG"
+            : "OUTPUT_AMOUNT_INVALID"
+      };
+    }
+
+    const usdGAmount =
+      bigintDecimalToNumberV187(
+        outputBigInt,
+        CANONICAL_USDG_DECIMALS_V179
+      );
+
+    if (
+      !Number.isFinite(
+        usdGAmount
+      ) ||
+      usdGAmount <= 0
+    ) {
+      return {
+        ...base,
+        attempted: true,
+        httpStatus,
+        externalRequestsUsed: 1,
+        routing:
+          payload?.routing ||
+          null,
+        outputRaw,
+        status:
+          "QUOTE_PRICE_UNVERIFIED"
+      };
+    }
+
+    return {
+      ...base,
+      attempted: true,
+      httpStatus,
+      externalRequestsUsed: 1,
+      routing:
+        payload?.routing ||
+        null,
+      outputRaw,
+      verified: true,
+      priceUsdGPerWeth:
+        usdGAmount,
+      status:
+        "VERIFIED"
+    };
+  } catch (error) {
+    return {
+      ...base,
+      attempted: true,
+      externalRequestsUsed: 1,
+      status:
+        "FETCH_ERROR",
+      error:
+        errorString(error)
+    };
+  }
+}
+
 async function getV3WethUsdGReferenceV195(
   env,
   state,
@@ -12262,7 +12518,8 @@ function collectOnChainDirectionalSwapsV179(
   state,
   logs,
   externalWethUsdGReferenceV194 = null,
-  v3WethUsdGReferenceV195 = null
+  v3WethUsdGReferenceV195 = null,
+  uniswapEthUsdGReferenceV196 = null
 ) {
   const now =
     Date.now();
@@ -12313,14 +12570,19 @@ function collectOnChainDirectionalSwapsV179(
       ?.verified === true
       ? sameBatchWethUsdGReferenceV187
       : (
-          v3WethUsdGReferenceV195
+          uniswapEthUsdGReferenceV196
             ?.verified === true
-            ? v3WethUsdGReferenceV195
+            ? uniswapEthUsdGReferenceV196
             : (
-                externalWethUsdGReferenceV194
+                v3WethUsdGReferenceV195
                   ?.verified === true
-                  ? externalWethUsdGReferenceV194
-                  : sameBatchWethUsdGReferenceV187
+                  ? v3WethUsdGReferenceV195
+                  : (
+                      externalWethUsdGReferenceV194
+                        ?.verified === true
+                        ? externalWethUsdGReferenceV194
+                        : sameBatchWethUsdGReferenceV187
+                    )
               )
         );
 
@@ -12717,7 +12979,7 @@ function collectOnChainDirectionalSwapsV179(
       true,
 
     usdPolicy:
-      "V195_DIRECT_USDG_OR_ETH_WETH_WITH_VERIFIED_SAME_BATCH_OR_V3_SLOT0_OR_BITQUERY_WETH_USDG_REFERENCE"
+      "V196_DIRECT_USDG_OR_ETH_WETH_WITH_VERIFIED_SAME_BATCH_OR_UNISWAP_AGGREGATED_OR_V3_OR_BITQUERY_REFERENCE"
   };
 }
 
@@ -29824,9 +30086,38 @@ async function scan(
       liveOutput.logs
     );
 
-  const v3WethUsdGReferenceV195 =
+  const uniswapEthUsdGReferenceV196 =
     sameBatchWethUsdGReferencePrecheckV194
       ?.verified === true
+      ? {
+          attempted: false,
+          configured:
+            Boolean(
+              String(
+                env.UNISWAP_API_KEY ||
+                ""
+              ).trim()
+            ),
+          verified: false,
+          status:
+            "SKIPPED_SAME_BATCH_REFERENCE_ALREADY_VERIFIED",
+          source:
+            "UNISWAP_AGGREGATED_NATIVE_ETH_TO_CANONICAL_USDG_QUOTE_V196",
+          priceUsdGPerWeth: null,
+          externalRequestsUsed: 0
+        }
+      : await getUniswapEthUsdGReferenceV196(
+          env,
+          budget
+        );
+
+  const v3WethUsdGReferenceV195 =
+    (
+      sameBatchWethUsdGReferencePrecheckV194
+        ?.verified === true ||
+      uniswapEthUsdGReferenceV196
+        ?.verified === true
+    )
       ? {
           attempted: false,
           configured:
@@ -29852,6 +30143,8 @@ async function scan(
   const bitqueryWethUsdGReferenceV194 =
     (
       sameBatchWethUsdGReferencePrecheckV194
+        ?.verified === true ||
+      uniswapEthUsdGReferenceV196
         ?.verified === true ||
       v3WethUsdGReferenceV195
         ?.verified === true
@@ -29893,7 +30186,8 @@ async function scan(
       state,
       liveOutput.logs,
       bitqueryWethUsdGReferenceV194,
-      v3WethUsdGReferenceV195
+      v3WethUsdGReferenceV195,
+      uniswapEthUsdGReferenceV196
     );
 
   onChainDirectionalV179
@@ -29903,6 +30197,10 @@ async function scan(
   onChainDirectionalV179
     .v3WethUsdGReferenceV195 =
       v3WethUsdGReferenceV195;
+
+  onChainDirectionalV179
+    .uniswapEthUsdGReferenceV196 =
+      uniswapEthUsdGReferenceV196;
 
   for (
     const token
@@ -34084,7 +34382,7 @@ async function scan(
     status,
 
     scanMode:
-      "V195_V3_WETH_USDG_ONCHAIN_REFERENCE_HUNTER",
+      "V196_UNISWAP_AGGREGATED_ETH_USDG_REFERENCE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -38076,6 +38374,42 @@ async function scan(
       telegramThresholdsUnchangedV192:
         "ENABLED_V192",
 
+      uniswapAggregatedEthUsdGReferenceV196:
+        "ENABLED_V196",
+
+      uniswapApiKeyEnvV196:
+        "UNISWAP_API_KEY",
+
+      uniswapReferenceInputV196:
+        "1_NATIVE_ETH",
+
+      uniswapReferenceOutputV196:
+        "CANONICAL_USDG",
+
+      uniswapReferenceChainIdV196:
+        4663,
+
+      uniswapReferenceMaxRequestsPerScanV196:
+        1,
+
+      uniswapReferenceUsesExistingAnalysisBudgetV196:
+        "ENABLED_V196",
+
+      uniswapReferenceOutputTokenStrictlyVerifiedV196:
+        "ENABLED_V196",
+
+      v3FallbackPreservedV196:
+        "ENABLED_V196",
+
+      bitqueryReferenceFallbackPreservedV196:
+        "ENABLED_V196",
+
+      hardRequestLimitUnchangedV196:
+        42,
+
+      telegramThresholdsUnchangedV196:
+        "ENABLED_V196",
+
       uniswapV3CanonicalWethUsdGReferenceV195:
         "ENABLED_V195",
 
@@ -38249,7 +38583,7 @@ async function scan(
     },
 
     architecture:
-      "V195_V3_WETH_USDG_ONCHAIN_REFERENCE_V77_TELEGRAM_HUNTER",
+      "V196_UNISWAP_AGGREGATED_ETH_USDG_REFERENCE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
