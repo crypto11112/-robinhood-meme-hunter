@@ -1,6 +1,752 @@
+/**
+ * Robinhood Chain Meme Hunter
+ * V198-TEST DEPLOYMENT CHECK
+ *
+ * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
+ *
+ * CURRENT BUILD: V198
+ * - V192 adds strict native-ETH quote valuation without changing V191 resolution/replay
+ * - Robinhood Chain native ETH (ZERO currency in Uniswap V4) is treated as 18-decimal ETH
+ * - Native ETH uses the same canonical WETH/USDG on-chain reference via 1:1 ETH/WETH wrapping denomination
+ * - No off-chain ETH price, symbol inference or guessed conversion is accepted
+ * - Without the same-batch canonical WETH/USDG reference, native-ETH trades remain USD UNVERIFIED
+ * - No extra external requests; V191 Bitquery live-pool priority remains unchanged
+ * - V191 fixes the V190 live-test integration gap
+ * - V190 already replayed live logs after resolution; the real issue was resolver target selection
+ * - Bitquery now prioritises UNKNOWN PoolIds present in the CURRENT live batch
+ * - The strongest current-live unknown pool gets the single Bitquery slot before stale tracker pools
+ * - Existing V179 same-scan reprocessing then immediately reuses the newly registered mapping
+ * - No extra external requests; Bitquery remains max 1 lookup per scan
+ * - V190 Bitquery resolver, KV persistence, USD maths, scoring and Telegram thresholds remain unchanged
+ * - V190 integrates the proven Bitquery Robinhood realtime Initialize resolver
+ * - Exact unknown PoolId is matched as an indexed Initialize topic
+ * - Decoded currency0/currency1 are persisted into the existing canonical poolRegistry
+ * - Successful mappings are immediately available to the existing directional USD decoder
+ * - Uses BITQUERY_ACCESS_TOKEN secret; never guesses pool identity
+ * - One Bitquery lookup consumes one existing resolver/discovery request slot
+ * - Existing RPC blockHash, Blockscout and range crawlers remain fallback-only
+ * - No Telegram thresholds, scoring rules, USD maths, KV binding/key or 42-request ceiling changed
+ * - V189 is the controlled checkpoint build for UNKNOWN_POOL_IDENTITY
+ * - Reserves the first 2 unknown-pool resolver requests exclusively for the RPC blockHash Initialize test
+ * - The old range crawler and Blockscout wide resolver cannot consume those two requests first
+ * - Emits explicit checkpoint telemetry even when the blockHash test cannot run: ATTEMPTED / RESOLVED / EMPTY / ERROR / BUDGET_BLOCKED
+ * - No new scoring, Telegram, USD maths or market-data behavior is introduced
+ * - V187 WETH/USDG valuation and all earlier protections remain unchanged
+ * - V188 adds an RPC blockHash exact-Initialize resolver for unknown V4 pools
+ * - Uses eth_getLogs blockHash filtering on the pool's first observed active block, avoiding provider multi-block range limits entirely
+ * - Filters by PoolManager + Initialize topic + exact indexed PoolId; no pool identity guessing
+ * - Tries the firstActiveBlock hash before the existing backward range crawler because launch activity commonly begins in the initialization block
+ * - Uses existing discovery-live resolver budget only; no request ceilings are increased
+ * - Successful resolution is registered immediately and can feed the existing directional/WETH/USDG pipeline
+ * - Existing V184 Blockscout wide lookup remains fallback-only, and V187 valuation logic is unchanged
+ * - V187 adds zero-extra-request on-chain WETH -> USDG valuation from canonical WETH/USDG V4 Swap logs already present in the live discovery batch
+ * - Canonical Robinhood Chain WETH and USDG addresses are used; no symbol guessing and no off-chain price is promoted to verified
+ * - WETH/USDG reference price is derived from signed PoolManager amount0/amount1 deltas, using USDG 6 decimals and WETH 18 decimals
+ * - The median of valid same-batch WETH/USDG swap prices is used to reduce single-swap distortion
+ * - Successfully decoded meme/WETH swaps can now receive an exact USDG-derived USD amount when a same-batch canonical WETH/USDG reference exists
+ * - If no canonical WETH/USDG reference swap exists in the batch, WETH-quoted trades remain UNVERIFIED rather than inventing a dollar value
+ * - Adds zero external requests and preserves V186 self-heal, V185 retention, V184 fallback resolver, V183 backoff, V182 budget protection and all Telegram/request ceilings
+ * - V186 strengthens pool identity locally before spending any external resolver requests
+ * - Rebuilds missing poolRegistry entries from canonical pool objects already persisted inside watchedTokens[].pools
+ * - Removes time-based pool-registry expiry; the registry is now LRU/cap controlled at the existing 2,500 mappings so valid identities are not forgotten merely because 30 days passed
+ * - Known Swap/ModifyLiquidity activity still refreshes lastSeenAt from V185
+ * - Recovered local mappings immediately clear matching unknown-pool tracker entries
+ * - Local self-heal runs before prune/scan so recovered identities can decode the same run's live swaps
+ * - Adds zero external requests and preserves V184 fallback resolver, V183 backoff, V182 budget protection, V181 block handoff, Telegram thresholds and USD verification rules
+ * - V185 fixes a local pool-registry expiry weakness found while investigating UNKNOWN_POOL_IDENTITY
+ * - Existing pool mappings were retained for only 48 hours from lastSeenAt; active Swap/ModifyLiquidity logs did not refresh that timestamp
+ * - V185 refreshes a known pool mapping whenever the normal live/backlog scan sees Swap or ModifyLiquidity activity for that pool
+ * - Extends inactive pool-registry retention from 48 hours to 30 days, still capped at the existing 2,500 mappings
+ * - Initialize events already collected by live/backlog discovery continue to register canonically with zero extra requests
+ * - Adds telemetry for same-run pool-registry activity refreshes and Initialize-based unknown-tracker recovery
+ * - No external requests are added; V184 Blockscout resolver remains fallback-only and all request ceilings/Telegram/USD verification rules stay unchanged
+ * - V184 attacks the current UNKNOWN_POOL_IDENTITY bottleneck directly
+ * - Adds one budgeted wide exact-pool Blockscout Initialize lookup per scan for the highest-priority unresolved V4 pool
+ * - Exact topic0+topic1 filtering lets the resolver search far behind first activity without walking backward 10 Alchemy blocks at a time
+ * - Wide lookup is capped, counted inside the existing unknown-pool resolver budget, and falls back to the existing RPC resolver
+ * - Adds persistent 429 cooldown/backoff for the wide Initialize route so it cannot hammer Blockscout
+ * - Successful Initialize identity is decoded with the existing canonical decoder, persisted in poolRegistry, and immediately re-used by same-run directional decoding
+ * - No pool identity is guessed; no request ceilings, scoring, Telegram thresholds, V181/V182/V183 protections, or USD verification rules are weakened
+ * - V183 adds persistent 429 cooldown/backoff specifically for the Blockscout exact-pool USDG directional-history route
+ * - Known Blockscout directional 429 cooldowns are checked BEFORE consuming the protected V182 request
+ * - A 429 now backs off 5m -> 10m -> 20m -> 30m max; a successful response clears the streak/cooldown
+ * - If the directional route is cooling down, the V182 reserved request is released for normal analysis instead of being wasted
+ * - Preserves V182 protected-request ordering, V181 latestNumber/toBlock fix, 42-request hard ceiling, 21-request analysis ceiling, Telegram thresholds and all existing verified-window rules
+ * - V182 reserves one protected pre-Telegram analysis request for Blockscout V4 USDG directional verification
+ * - Prevents ordinary analysis from consuming the final request needed by BLOCKSCOUT_V4_USDG_DIRECTIONAL_V180
+ * - Reservation is released automatically when the protected request is consumed
+ * - Preserves the V181 latestNumber/toBlock handoff fix
+ * - No change to the 42-request hard ceiling, 21-request analysis ceiling, notification reserve, scoring, Telegram thresholds, V4 decoding, or 5m/15m/1h/6h/24h windows
+ * - V181 fixes the V180 Blockscout directional-USD upper-block handoff bug
+ * - V180 accidentally passed the latestBlock function object into the historical USDG reader instead of the already-confirmed numeric latestNumber
+ * - V181 now passes latestNumber directly and adds explicit block-range input telemetry so this cannot silently regress
+ * - No scoring, Telegram thresholds, request ceilings, V4 decoding, 15m/6h windows, or existing protections are changed
+ * - V180 adds exact-pool Blockscout history for verified Uniswap V4 USDG pools so directional USD can be reconstructed from timestamped on-chain Swap logs
+ * - V180 uses canonical USDG's 6-decimal quote amount and its official 1:1 USD redemption denomination as the USD basis; no WETH/unknown-quote USD value is inferred
+ * - V180 only marks a rolling window VERIFIED when the queried pool history is complete (response below the 1,000-log API ceiling) and every included trade decodes cleanly
+ * - V180 adds decoder rejection telemetry proving whether failures are UNKNOWN_POOL_IDENTITY vs ABI/direction failures instead of guessing
+ * - V180 preserves V179 live zero-extra-request ledger, V178 queue ordering, V177 15m/6h windows, Telegram thresholds, and the 42-request hard ceiling
+ * - V179 adds a zero-extra-provider-request on-chain Uniswap V4 directional-swap ledger from the existing live eth_getLogs batch
+ * - V179 decodes signed amount0/amount1 directly from the canonical PoolManager Swap event and classifies candidate BUY/SELL from verified pool currency0/currency1 identity
+ * - V179 records exact raw candidate/quote deltas, tx/log identity and block number, deduplicated in KV; no USD value is invented
+ * - V179 recognises canonical Robinhood Chain USDG quote amounts separately (6 decimals) as verified USDG-denominated value, but does NOT silently promote USDG to exact USD
+ * - V179 is the on-chain foundation for the next step: timestamped rolling 5m/15m/1h/6h/24h USD verification
+ * - V178 fixes analysis-queue priority ordering so persistent V176 directional-USD retries cannot jump ahead of protected carried/fresh candidate completion
+ * - V178 keeps carried retry completion first when V159/V166 handoff rules require it, then the current fresh-market target, then the unresolved directional-USD target
+ * - V178 preserves V177 verified 15m/6h windows, V176 persistence, the 42-request hard ceiling, provider cooldowns, Telegram reserve and all qualification thresholds
+ * - V177 adds verified 15m and 6h buy/sell windows from the existing GeckoTerminal directional-trade feed and rolling ledger
+ * - V177 adds 15m/6h verified buy USD, sell USD, net flow and USD buy pressure with no extrapolation
+ * - V177 makes no extra provider request per window; all five windows reuse the same trade batch / persistent ledger
+ * - V177 keeps incomplete coverage UNVERIFIED and preserves V176 request limits, cooldowns, Telegram reserve and thresholds
+ * - V176 persists unresolved high-value directional-USD targets across scans
+ * - V176 puts that target at the front of the next analysis queue while still watched
+ * - V176 clears the target as soon as verified directional USD is obtained
+ * - V176 never fabricates USD flow and never bypasses GeckoTerminal cooldown/429 protection
+ * - V176 adds no provider and keeps the 42-request hard ceiling, phase limits, Telegram reserve and thresholds unchanged
+ * - Preserves V175 early directional enrichment and all V174/V173 protections
+ *
+ * V175
+ * - V175 prioritises verified directional USD trade enrichment before lower-priority analysis can exhaust the analysis budget
+ * - V175 attempts the existing GeckoTerminal pool-trades feed immediately for strong viable candidates (opportunity >= 60, confidence >= 55, verified market/pool identity)
+ * - V175 recomputes momentum/opportunity/confidence after verified USD flow is obtained, before Telegram qualification and snapshot persistence
+ * - V175 never fabricates buy/sell USD; incomplete/limited coverage remains UNVERIFIED
+ * - V175 adds no new provider and preserves the existing one-Gecko-fresh-request-per-scan guard, 42-request hard ceiling, Telegram reserve and thresholds
+ * - V174 protects Telegram delivery capacity against global-budget exhaustion
+ * - V174 counts each Telegram network request separately (photo and text fallback)
+ * - V174 releases unused notification reserve only after Telegram processing
+ * - V174 allows post-analysis backlog reclaim to use only genuinely released headroom
+ * - Preserves V173 verified stale-cache priority release and all prior safety logic
+ * - Hard global limit remains 42; phase limits and Telegram qualification thresholds unchanged
+ *
+ * V169:
+ * - FIX: Telegram freshness telemetry now distinguishes FRESH / STALE_CACHE / UNVERIFIED
+ * - FIX: missing or currently unavailable market evidence is no longer mislabeled as stale
+ * - FIX: missing or currently unavailable holder evidence is no longer mislabeled as stale
+ * - FIX: stale alert reasons are emitted only for genuinely verified cached evidence beyond its allowed alert age
+ * - Preserves V168 alert-safety behavior, scoring, Telegram thresholds, request budgets and provider cadence
+ * - Adds no external requests
+ *
+ * V168:
+ * - NEW: Telegram-only core evidence freshness protection
+ * - NEW: verified market/holder caches remain usable for tracking/scoring but cannot silently age into an alert
+ * - NEW: normal alerts require fresh core market + holder evidence (10-minute alert freshness window)
+ * - NEW: holder evidence up to the existing 20-minute normal holder-cache TTL may still qualify only with strong current confirmation
+ * - Strong current confirmation requires verified 5m directional USD evidence OR live V4 swap acceleration with positive momentum
+ * - Preserves all existing scoring thresholds, request budgets, provider spacing and cache reuse
+ * - No Telegram-threshold or external request-rate increase
+ *
+ * V167:
+ * - FIX: V166 partial-holder fresh-slot telemetry now reports authoritative post-selection retry/analysis preservation state
+ * - FIX: normal V139 handoff preservation is reflected separately from the V166-specific bypass branch
+ * - No selection, request-rate, scoring or Telegram-threshold changes
+ *
+ * V166:
+ * - NEW: active V149 partial-holder retries can release the scarce fresh-market slot
+ * - NEW: a better viable challenger may take that slot without the normal V139 +20 lead
+ * - NEW: carried partial-holder retry state/history remains preserved and analysed
+ * - SAFETY: ordinary V139 fairness remains unchanged for candidates without an active V149 blocker
+ * - No Telegram-threshold, request-budget or normal external request-rate increase
+ *
+ * V165:
+ * - NEW: same-run terminal replacement candidates inherit protected residual analysis budget
+ * - NEW: bounded replacement analysis may proceed when conservative estimated cost exceeds residual budget
+ * - NEW: actual per-request budget checks remain authoritative; the 42-request hard ceiling is unchanged
+ * - NEW: terminal handoff chains can protect the next viable replacement in the same run
+ * - Preserves V164 holder-provider telemetry correction and V162/V163 holder-integrity safety
+ * - No Telegram-threshold or normal external request-rate increase
+ *
+ * V164:
+ * - FIX: same-run Blockscout outage-deferred candidates retain true PRO configuration telemetry
+ * - FIX: deferred holder paths explicitly report PRO not attempted due run circuit breaker
+ * - Preserves V163 holder-reconciliation hotfix and V162 quarantine semantics
+ * - No scoring, Telegram-threshold, request-budget or external-rate changes
+ *
+ * V163:
+ * - HOTFIX: holderIntegrityReconciliationV162 now calls validateHolderIntegrity directly
+ * - HOTFIX: real holder-analysis path now executes V162 reconciliation helper
+ * - Preserves V162 structural-invalid quarantine and exact safety semantics
+ * - No scoring, Telegram-threshold, request-budget or external-rate changes
+ *
+ * V162:
+ * - Strict holder-integrity reconciliation telemetry
+ * - Same-address duplicate holder rows can be reconciled deterministically
+ * - TOP_HOLDERS_EXCEED_TOTAL_SUPPLY remains UNVERIFIED unless math reconciles
+ * - Known infrastructure is diagnostic only and never subtracted to force validity
+ * - 5-minute structural-invalid holder quarantine reduces repeated API waste
+ * - No guessed/rescaled balances and no extra normal external request rate
+ *
+ * V117:
+ * - Builds directly forward from confirmed V116
+ * - Preserves V116 priority-candidate persistence and fresh-request scheduling
+ * - Preserves DexScreener 429 cooldown/rate-limit protection
+ * - NEW: independent GeckoTerminal market-data fallback for Robinhood Chain
+ * - NEW: priority candidates can recover market verification when DexScreener
+ *        is in 429 cooldown, fresh-guard, or returns no market
+ * - NEW: fallback verifies real USD price, liquidity, FDV/market cap, volume
+ *        and transaction counts when GeckoTerminal has valid pool data
+ * - NEW: fallback is priority-only and limited to one fresh request per scan
+ * - NEW: independent GeckoTerminal 429/cooldown telemetry
+ * - SAFETY: fallback is VERIFIED only when the returned pool actually contains
+ *        the target token and has positive USD price + positive USD liquidity
+ * - Does NOT lower Telegram score, confidence, risk or liquidity thresholds
+ * - Preserves V116 discovery, backlog, holder integrity, scoring, state,
+ *        notification and Telegram behaviour
+ 
+ *
+ * V118:
+ * - Preserves full V117 multi-source market fallback
+ * - NEW: verified terminal-risk candidates are immediately removed from the
+ *        persistent priority-completion lane
+ * - NEW: severe risk / HIGH holder concentration / extreme top-holder
+ *        ownership cannot monopolize future market-data requests
+ * - NEW: explicit on-chain V4 market-activity evidence is attached to
+ *        candidates from already verified pool-specific swaps/liquidity
+ * - SAFETY: on-chain activity evidence never fabricates USD price/liquidity
+ * - DexScreener and GeckoTerminal remain supplemental market-data sources
+ * - Telegram thresholds remain unchanged
 
+ *
+ * V119:
+ * - Preserves the complete V118 capability set
+ * - NEW: terminal holder-risk pruning occurs BEFORE a fresh market request
+ * - NEW: cached verified HIGH concentration / extreme top-holder candidates
+ *        cannot consume the scarce DexScreener/GeckoTerminal priority slot
+ * - NEW: if the carried priority candidate is terminal, its completion state
+ *        and fresh reservation are cleared before selecting the next target
+ * - NEW: fresh-market target selection skips other cached terminal candidates
+ * - NEW: pre-market pruning telemetry explains exactly what was removed
+ * - FIX: current scanMode/architecture labels now report V119 consistently
+ * - Preserves V118 on-chain V4 activity evidence without inventing USD data
+ * - Preserves all Telegram thresholds unchanged
 
-const VERSION = "V199";
+ *
+ * V120:
+ * - Preserves full V119 end-to-end Telegram success path
+ * - NEW: separates NEW_TO_SCANNER from NEWLY_LAUNCHED
+ * - NEW: pair creation age is authoritative when verified market age exists
+ * - NEW: mature backlog discoveries no longer receive new-launch priority
+ * - NEW: market-fresh ranking prefers viable candidates still missing market
+ * - NEW: low/medium verified concentration improves fresh-market priority
+ * - NEW: explicit launch/discovery classification telemetry
+ * - Preserves all Telegram thresholds unchanged
+
+ *
+ * V121:
+ * - Preserves full V120 capability set
+ * - FIX: market-unverified viable candidates strongly outrank mature tokens
+ *        whose market data is already verified
+ * - FIX: mature verified-market tokens cannot monopolize the fresh market slot
+ * - NEW: Telegram qualification requires verified holder concentration evidence
+ * - NEW: holder-unverified candidates remain tracked instead of being alerted
+ * - NEW: diagnostics expose HOLDER_EVIDENCE_UNVERIFIED
+ * - Preserves all existing Telegram score/risk/liquidity/confidence thresholds
+
+ *
+ * V122:
+ * - Preserves full V121 capability set
+ * - NEW: known/cached excluded assets are removed before fresh-market targeting
+ * - NEW: tokenized securities cannot consume DexScreener/GeckoTerminal priority
+ * - NEW: excluded priority completion state is cleared immediately
+ * - NEW: excluded market target is reselected to the next viable candidate
+ * - NEW: pre-market exclusion telemetry explains any removed target
+ * - Preserves V121 Telegram holder gate and all existing thresholds unchanged
+
+ *
+ * V123:
+ * - Preserves full V122 intended capability set
+ * - HOTFIX: pre-market exclusion now uses existing proven exclusion helpers
+ * - FIX: reuses tokenizedSecurityReason(name, symbol)
+ * - FIX: known quote/infrastructure metadata is excluded pre-market
+ * - Preserves V121/V120/V119/V118 functionality and Telegram thresholds
+
+ *
+ * V124:
+ * - Preserves full V123 capability set
+ * - FIX: every fresh-market candidate is screened for cached terminal holder risk
+ *        before ranking, not only carried priority candidates
+ * - FIX: HIGH concentration / extreme top1 cached candidates cannot enter the
+ *        fresh-market priority pool
+ * - NEW: verified cached market data is explicitly preferred over unnecessary
+ *        repeat external lookups while provider cooldowns are active
+ * - NEW: fresh-market telemetry exposes terminal-pruned ranking candidates
+ * - Preserves DexScreener cooldown spacing; does not increase external request rate
+ * - Preserves all Telegram thresholds unchanged
+
+ *
+ * V125:
+ * - Preserves full V124 capability set
+ * - NEW: same-run holder results can terminal-prune candidates immediately
+ * - FIX: current-scan HIGH concentration / extreme top1 candidates cannot
+ *        persist as priority-completion retries
+ * - NEW: same-run terminal cleanup telemetry
+ * - NEW: Telegram alerts distinguish NEW/EARLY/MATURE launch stage
+ * - FIX: mature opportunities no longer use misleading early-stage wording
+ * - Preserves DexScreener timing/cooldowns and all Telegram thresholds unchanged
+
+ *
+ * V126:
+ * - Preserves full V125 capability set
+ * - NEW: GeckoTerminal trade-feed enrichment for the highest-priority
+ *        Telegram-qualifying candidate, max one request per scan
+ * - NEW: verifies directional BUY USD / SELL USD / NET USD from individual trades
+ * - NEW: aggregates exact returned trade USD into rolling 5m / 1h / 24h windows
+ * - NEW: candidate-side correction when the meme token is the quote token
+ * - SAFETY: a window is VERIFIED only when the latest-300 trade feed proves
+ *           complete coverage of that whole requested window
+ * - SAFETY: incomplete 24h coverage stays UNVERIFIED rather than extrapolated
+ * - SAFETY: no USD amount is inferred from buy/sell counts or total volume
+ * - Preserves existing DexScreener spacing/cooldowns and Telegram thresholds
+
+ *
+ * V127:
+ * - Preserves full V126 capability set
+ * - FIX: same-run terminal target is immediately replaced by next viable candidate
+ * - FIX: final fresh-market telemetry reflects the post-analysis viable target
+ * - FIX: replacement target is reserved/persisted for the next scan
+ * - NEW: GeckoTerminal global 5-minute fresh spacing across fallback + trade feed
+ * - NEW: adaptive GeckoTerminal 429 cooldown escalation
+ * - NEW: Gecko rate-limit level persists in existing KV state
+ * - Preserves one-Gecko-request-per-scan, Dex timing and Telegram thresholds
+
+ *
+ * V128:
+ * - Preserves full V127 capability set
+ * - NEW: verified market pair/pool addresses are treated as holder infrastructure
+ * - SAFETY: LP exclusion requires a VERIFIED market and exact pair-address match
+ * - FIX: prevents verified liquidity pools from being scored as whale owners
+ * - FIX: a cached holder result is refreshed once if its verified pair was
+ *        previously classified as an ordinary holder
+ * - FIX: adjusted ownership supply and concentration are recalculated correctly
+ * - FIX: Gecko historical 429 seeding happens once only; successful requests
+ *        can now de-escalate consecutive429s all the way back to zero
+ * - Preserves V126 directional USD flow, V127 reselection/spacing/backoff,
+ *   Dex timing, KV history, /sendPhoto and all Telegram thresholds
+
+ *
+ * V129:
+ * - Preserves full V128 capability set
+ * - FIX: concentration trend requires a genuinely comparable prior snapshot
+ * - FIX: trackedWallets=0 can no longer produce INCREASING/DECREASING trend
+ * - FIX: first/basis-mismatched holder measurement cannot masquerade as whale movement
+ * - NEW: holder ownership-basis signature tracks infrastructure-address methodology
+ * - NEW: old snapshots without a V129 basis signature are safely treated as non-comparable
+ * - NEW: concentrationTrendResetReason explains why trend is NOT_VERIFIED
+ * - V126 directional USD trade logic is intentionally unchanged
+ * - Preserves V128 LP exclusion, V127 API guards/reselection, Dex timing,
+ *   exact KV key, /sendPhoto and all Telegram thresholds
+
+ *
+ * V130:
+ * - Preserves the full V129 capability set
+ * - LIVE-PROVEN V129/V126 5m directional USD path is preserved
+ * - NEW: persistent Gecko trade ledger for qualifying candidates
+ * - NEW: deduplicates overlapping Gecko trade batches by stable trade key
+ * - NEW: detects batch continuity before combining multiple requests
+ * - NEW: builds verified rolling 1h/24h USD windows only after continuous coverage
+ * - NEW: capped compact trade history prevents unbounded KV growth
+ * - NEW: a gap or trade-cap loss resets coverage instead of extrapolating
+ * - FIX: concentration increase no longer earns a whale-flow bonus unless
+ *   tracked wallet balance movement supports accumulation
+ * - Does NOT increase Gecko/Dex request frequency or loosen Telegram thresholds
+ * - Preserves V129 concentration-basis guards, V128 LP exclusion,
+ *   V127 API guards/reselection, exact KV key, /sendPhoto and all safety gates
+
+ *
+ * V131:
+ * - Preserves the full V130 rolling directional USD ledger unchanged
+ * - NEW: persists ownershipSupply/infrastructureBalanceSum in holder snapshots
+ * - NEW: detects material circulating-ownership denominator changes
+ * - NEW: concentration trend is NOT_VERIFIED when a material denominator move
+ *   could explain the percentage change and tracked wallets do not confirm it
+ * - NEW: exposes ownershipSupplyChangePercent and denominator reset reason
+ * - Prevents liquidity/PoolManager supply movement from looking like whale
+ *   accumulation or distribution
+ * - Does NOT increase Gecko/Dex request frequency
+ * - Does NOT loosen Telegram thresholds or any existing safety gates
+
+ *
+ * V132:
+ * - Preserves the full V131 ownership-denominator guard
+ * - Preserves the full V130 rolling directional USD ledger
+ * - NEW: candidate-analysis reserve protects high-priority token analysis
+ *   from low-yield unknown-pool resolver spending
+ * - Unknown-pool hard ceiling remains 7 requests
+ * - When the watchlist/priority pipeline is active, resolver dynamically
+ *   limits itself to 4 requests, reserving 3 additional requests for analysis
+ * - If the candidate pipeline is effectively empty, resolver can still use
+ *   the existing full 7-request ceiling
+ * - Adds resolver telemetry for dynamic request limit / protected requests
+ * - Does NOT increase any API request rate
+ * - Does NOT loosen Telegram thresholds or safety gates
+
+ *
+ * V133:
+ * - Preserves V132 dynamic unknown-pool analysis reserve
+ * - Preserves V131 ownership-denominator guard
+ * - Preserves V130 rolling directional USD ledger
+ * - NEW: the selected fresh-market / completion target is analysed FIRST
+ * - NEW: if that top target cannot be completed because analysis budget is
+ *   insufficient, lower-priority candidates are deferred for that run rather
+ *   than consuming the remaining budget
+ * - NEW: explicit top-candidate analysis-order / budget-protection telemetry
+ * - Does NOT increase the 42-request hard budget
+ * - Does NOT increase provider/API request frequency
+ * - Does NOT loosen Telegram thresholds or safety gates
+
+ *
+ * V134:
+ * - Preserves V133 top-candidate-first completion
+ * - Preserves V132 dynamic unknown-pool analysis reserve
+ * - Preserves V131 ownership-denominator guard
+ * - Preserves V130 rolling directional USD ledger
+ * - NEW: same-run Blockscout holder-outage circuit breaker
+ * - The priority/top candidate always gets the first real holder attempt
+ * - If both V2 and legacy holder sources fail for that candidate, lower-
+ *   priority candidates stop hammering the same unavailable holder service
+ * - Lower-priority candidates reuse fresh/stale verified holder cache when
+ *   available; otherwise holder evidence remains explicitly UNVERIFIED
+ * - No stale/unverified holder evidence can create a Telegram qualification
+ * - Adds Blockscout holder-outage telemetry
+ * - Does NOT increase provider/API request frequency
+ * - Does NOT loosen Telegram thresholds or safety gates
+
+ *
+ * V135:
+ * - Preserves V134 Blockscout outage resilience
+ * - Preserves V133 top-candidate-first completion
+ * - Preserves V132 dynamic unknown-pool analysis reserve
+ * - Preserves V131 ownership-denominator guard
+ * - Preserves V130 rolling directional USD ledger
+ * - NEW: carried priority candidates that become terminal in the same run
+ *   immediately yield priority to the next viable fresh-market target
+ * - NEW: replacement target is inserted into the same-run analysis queue
+ * - FIXED BUILD: mutable market target + valid ranked replacement source
+ * - No increase to the 42-request cap, API frequency, or Telegram thresholds
+
+ *
+ * V136:
+ * - Preserves V135 terminal-priority handoff and all earlier protections
+ * - NEW: LOW concentration only earns a healthy-holder bonus when there is
+ *   meaningful holder breadth behind it
+ * - Minimum 10 holders + 3 positive non-infrastructure holder rows
+ * - Thin-holder tokens remain LOW if mathematically valid, but cannot gain
+ *   false healthy-concentration opportunity or signal-confirmation bonuses
+ * - Telegram thresholds, API rates and request caps unchanged
+
+ *
+ * V137:
+ * - Preserves V136 organic-holder breadth protection
+ * - Preserves V135 terminal-priority handoff architecture
+ * - FIX: same-run terminal handoff no longer depends on persisted
+ *   state.priorityCandidateCompletion.address during analysis
+ * - FIX: handoff uses the actual local isPriorityCompletion flag for the
+ *   candidate currently being analysed
+ * - FIX: terminal priority candidate can immediately yield to the next viable
+ *   ranked target in the same run before lower-priority budget is consumed
+ * - Telegram thresholds, API rates and request caps unchanged
+
+ *
+ * V138:
+ * - Preserves V137 local priority handoff
+ * - Preserves V136 organic-holder breadth protection
+ * - NEW: unresolved priority candidates persist across transient provider
+ *   failures/guards instead of being marked complete too early
+ * - Controlled retry policy: maximum 12 attempts or 6 hours
+ * - Retry persistence covers unverified market, holder evidence, or risk
+ * - Terminal, excluded, invalid, fully resolved, expired, or retry-exhausted
+ *   candidates still leave the priority lane
+ * - Retry counters are address-scoped so a new target cannot inherit another
+ *   token's retry history
+ * - Telegram thresholds, API rates and request caps unchanged
+
+ *
+ * V139:
+ * - Preserves V138 transient retry persistence
+ * - Preserves V137 local terminal-priority handoff
+ * - Preserves V136 organic-holder breadth protection
+ * - NEW: retry fairness prevents an unresolved carried token monopolising the
+ *   fresh market slot when a clearly stronger new/live candidate appears
+ * - A challenger must lead the carried candidate by at least 20 priority
+ *   points and have new/live/recent-live evidence
+ * - The carried retry candidate remains persisted and is still analysed
+ * - The challenger temporarily receives first analysis + fresh-market priority
+ * - Retry state cannot be accidentally overwritten by the temporary challenger
+ * - Telegram thresholds, API rates and request caps unchanged
+
+ *
+ * V140:
+ * - Preserves V139 retry fairness
+ * - Preserves V138 transient retry persistence
+ * - Preserves V137 local terminal-priority handoff
+ * - Preserves V136 organic-holder breadth protection
+ * - NEW: relevance expiry only removes a token from the PRIORITY RETRY lane;
+ *   it does not delete it from the watchlist
+ * - Relevance expiry requires VERIFIED market age >= 7 days plus extremely
+ *   weak verified 24h activity (<= $10 volume, <= 2 transactions), no current
+ *   on-chain V4 activity, and no new/live classification
+ * - Provider outage alone can never trigger relevance expiry
+ * - A mature token that becomes active again can still be ranked normally
+ * - Conservative 7-day / near-zero-activity policy protects the bot's stated
+ *   early-discovery mission without treating ordinary 24h maturity as stale
+ * - Telegram thresholds, API request frequency and hard budgets unchanged
+
+ *
+ * V141:
+ * - Preserves V140 retry relevance expiry
+ * - Preserves V139 retry fairness
+ * - Preserves V138 transient retry persistence
+ * - Preserves V137 local terminal-priority handoff
+ * - Preserves V136 organic-holder breadth protection
+ * - NEW: immediate same-run fresh-target handoff when validation rejects the
+ *   selected target as a tokenized security, infrastructure token or invalid ERC-20
+ * - Replacement comes from the existing ranked viable set and is moved to the
+ *   next analysis position so it inherits the remaining fresh-market opportunity
+ * - Existing carried retry state remains separate from the temporary fresh target
+ * - Telegram thresholds, external API frequency and hard request caps unchanged
+
+ *
+ * V142:
+ * - Preserves V141 excluded-target same-run handoff
+ * - Preserves V140 retry relevance expiry
+ * - Preserves V139 retry fairness
+ * - Preserves V138 transient retry persistence
+ * - Preserves V137 local terminal-priority handoff
+ * - Preserves V136 organic-holder breadth protection
+ * - NEW: verified cached terminal candidates are pruned before expensive analysis
+ * - A carried retry candidate already proven HIGH/extreme concentration is cleared
+ *   before analysis and cannot be re-persisted as ANALYSIS_NOT_COMPLETED
+ * - Only existing verified terminalPriorityRejectFromWatched evidence is used
+ * - Unverified holder states are never pre-pruned
+ * - Watchlist entries remain available for future reactivation/history
+ * - Telegram thresholds, provider frequencies and hard request caps unchanged
+
+ *
+ * V143:
+ * - Preserves V142 pre-analysis verified terminal pruning
+ * - Preserves V141 excluded-target same-run handoff
+ * - Preserves V140 retry relevance expiry and V139 fairness
+ * - NEW: optional Blockscout PRO holder-row fallback after BOTH public
+ *   Blockscout holder routes fail
+ * - PRO route is only attempted when env.BLOCKSCOUT_PRO_API_KEY exists
+ * - Uses official multichain PRO REST shape:
+ *   https://api.blockscout.com/4663/api/v2/tokens/{token}/holders?apikey=...
+ * - PRO failure/unsupported-chain response never fabricates holder evidence
+ * - V134 same-run holder-outage circuit opens only after public V2, legacy,
+ *   AND configured PRO fallback fail
+ * - Existing public routes remain first; no extra request when they succeed
+ * - Telegram holder safety gate and all alert thresholds remain unchanged
+
+ *
+ * V144:
+ * - Preserves V143 Blockscout PRO holder fallback
+ * - Preserves V142 pre-analysis terminal pruning and V141 excluded-target handoff
+ * - NEW: successful holder intelligence exposes its exact provider
+ * - NEW: PRO configured/attempted/success/status retained per candidate
+ * - NEW: response-level holder-provider audit telemetry
+ * - NEW: Telegram distinguishes holder count from holder concentration
+ * - NEW: Telegram shows holder-data source when concentration is verified
+ * - No alert thresholds, safety gates, request frequency or provider priority changed
+
+ *
+ * V145:
+ * - Preserves V144 holder-provider telemetry and Telegram wording
+ * - Preserves V143 Blockscout PRO holder fallback
+ * - NEW: persistent 10-minute PRO cooldown after HTTP 502/503/504
+ * - NEW: cooldown uses the existing KV state key and survives scheduled runs
+ * - NEW: no PRO analysis request is spent while cooldown is active
+ * - NEW: successful PRO response clears transient outage cooldown
+ * - NEW: response telemetry exposes PRO cooldown/failure/recovery state
+ * - Public Blockscout remains primary; verified holder cache remains available
+ * - Alert thresholds, scoring and holder safety gates are unchanged
+
+ *
+ * V146:
+ * - Preserves V145 persistent 502/503/504 PRO outage protection
+ * - Preserves V144 exact holder-provider telemetry
+ * - NEW: HTTP 404 is classified separately from provider outage
+ * - NEW: 404 does NOT claim the token is unindexed; it is treated as
+ *   holder data currently unavailable from the PRO route
+ * - NEW: address-scoped 5-minute retry delay prevents repeated PRO 404 calls
+ * - NEW: public Blockscout routes remain first and are still checked normally
+ * - NEW: verified stale holder cache remains usable during a 404 retry delay
+ * - NEW: later successful PRO response automatically clears the token 404 delay
+ * - NEW: response telemetry exposes 404 retry state without changing safety gates
+ * - Telegram thresholds, scoring, request cap and holder evidence rules unchanged
+
+ *
+ * V147:
+ * - Preserves V146 Blockscout PRO 404 retry handling
+ * - Preserves V145 Blockscout PRO outage protection
+ * - NEW: adaptive DexScreener 429 backoff capped at 30 minutes
+ * - NEW: Dex 429 backoff state persists in the existing KV state
+ * - NEW: successful Dex market response de-escalates the 429 level
+ * - NEW: Dex/Gecko availability is coordinated before fallback
+ * - NEW: Gecko fallback telemetry distinguishes checked from HTTP-requested
+ * - NEW: exact earliest market retry is exposed when both providers unavailable
+ * - Existing verified fresh/stale market cache remains preferred
+ * - No request-frequency increase, threshold change or safety-gate change
+
+ *
+ * V148:
+ * - Preserves V147 Dex/Gecko 429 coordination unchanged
+ * - Preserves V146/V145 Blockscout PRO retry/outage protection
+ * - NEW: re-checks verified cached terminal holder evidence immediately before
+ *   every queued analysis, not only once when the queue is first constructed
+ * - NEW: terminal candidates that become known while a scan is running are
+ *   removed before they can consume another full analysis allocation
+ * - NEW: terminal fresh-target pruning transfers priority to the next viable
+ *   ranked candidate in the same run
+ * - NEW: telemetry shows dynamically pruned candidates and estimated requests saved
+ * - FIX: marketProviderCoordinationV147.address now receives an address string,
+ *   never the marketFreshTarget object
+ * - Watchlist records are retained; no terminal evidence is fabricated
+ * - Alert thresholds, scoring, request limits and safety gates unchanged
+
+ *
+ * V149:
+ * - Preserves V148 dynamic terminal queue pruning
+ * - Preserves V147 market-provider 429 coordination
+ * - NEW: short address-scoped cache for verified holder responses that contain
+ *   infrastructure balances but no usable positive ownership balances
+ * - NEW: cached partial holder state remains UNVERIFIED and can never qualify
+ *   as healthy concentration or bypass the Telegram holder-evidence gate
+ * - NEW: 5-minute retry interval lets newly launched ownership distribution
+ *   develop without repeating the same full Blockscout holder work every scan
+ * - NEW: verified holder counters are retained in the partial cache
+ * - NEW: partial cache is invalidated when the verified pair basis changes
+ * - FIX: holderSource/provider fallback metadata is retained on partial and
+ *   integrity-failure holder results instead of becoming null
+ * - Alert thresholds, request ceilings, scoring and safety gates unchanged
+
+ *
+ * V150:
+ * - Preserves V149 partial holder retry cache
+ * - Preserves V148 dynamic terminal queue pruning
+ * - Freezes verified terminal addresses before analysis begins
+ * - Initial analysis queue excludes the frozen terminal set
+ * - Same-run replacement paths cannot reinsert frozen terminal addresses
+ * - marketFreshPriority terminalPruned now reports only pre-analysis evidence
+ * - postAnalysisTerminalDiscoveriesV150 separates risks learned during analysis
+ * - Watchlist retention and all safety/Telegram thresholds unchanged
+
+ *
+ * V151:
+ * - Preserves V150 terminal snapshot queue guard
+ * - Allows the best viable VERIFIED-market candidate to receive the single
+ *   protected Gecko directional-trade opportunity before Telegram qualification
+ * - Already-qualified candidate remains preferred when one exists
+ * - Never requests directional trades without verified market/pool/token side
+ * - Preserves Gecko cooldown, 5m spacing and one-fresh-request-per-scan limits
+ * - Excludes same-run terminal/high-risk-pruned candidates
+ * - Recomputes momentum/opportunity/signals/confidence after verified USD flow
+ * - Momentum prefers VERIFIED directional USD buy pressure when available
+ * - Transaction-count pressure remains separate and never becomes fake USD
+ * - Telegram thresholds unchanged
+
+ *
+ * V152:
+ * - Preserves V151 pre-qualification directional USD enrichment
+ * - NEW: persistent live-only Uniswap V4 activity momentum
+ * - NEW: snapshots store live-window swap/liquidity counts separately from
+ *   combined backlog activity, preventing old backlog events from faking momentum
+ * - NEW: scores verified live V4 swap acceleration and liquidity-event acceleration
+ * - NEW: sustained live swap intensity can contribute a small momentum signal
+ *   even when external market APIs are unavailable
+ * - NEW: on-chain activity can verify the momentum evidence layer without
+ *   inventing USD price, liquidity, volume or buy/sell direction
+ * - Existing holder/market/directional momentum inputs remain intact
+ * - No extra external requests and all Telegram thresholds remain unchanged
+
+ *
+ * V153:
+ * - Preserves V152 live-only on-chain momentum
+ * - Derives Gecko-compatible V4 pool identity from decoded Initialize mappings
+ * - Uses the Uniswap V4 32-byte poolId directly for Gecko pool trade queries
+ * - Only accepts candidate + known quote/native ZERO quote pools
+ * - Allows protected Gecko directional USD enrichment without Dex market
+ *   verification when the on-chain pool identity is verified
+ * - Gecko trade rows still provide the actual USD amounts
+ * - Does not promote price/liquidity/marketCap/FDV or market.verified
+ * - Keeps Gecko cooldown, 5m spacing and one-fresh-request-per-scan
+ * - Adds no external requests and changes no Telegram thresholds
+
+ *
+ * V154 HOTFIX:
+ * - Preserves all V153 functionality
+ * - Fixes the V153 Gecko pool-identity scope ReferenceError
+ * - Keeps the pool identity source variable inside directional enrichment
+ * - No request-rate, scoring, market-verification or Telegram changes
+
+ *
+ * V155 HOTFIX:
+ * - Preserves V154/V153 functionality
+ * - Fixes V154 runtime ReferenceError: candidates is not defined
+ * - V153 top-level pool-identity telemetry had been inserted inside
+ *   momentumAnalysis(), where the scan-level candidates array is unavailable
+ * - Moves that telemetry to the scan response where candidates is in scope
+ * - Restores momentumAnalysis() to candidate-local telemetry only
+ * - No request-rate, scoring, verification or Telegram-threshold changes
+
+ *
+ * V156:
+ * - Preserves all V155/V153 directional USD pool-identity logic
+ * - Adds bounded eth_getLogs abort/timeout recovery to live and backlog scans
+ * - Recovery tries an available alternate provider once; if none is usable,
+ *   it retries the same provider once for that exact range
+ * - Recovery occurs only after a real abort/timeout, so normal request rate
+ *   is unchanged; all recovery requests still consume the existing budget
+ * - Failed backlog ranges never advance the backlog cursor
+ * - Adds explicit V156 recovery telemetry
+ * - No scoring, alert threshold, Gecko spacing or market-verification changes
+
+ *
+ * V157:
+ * - Preserves V156 RPC abort recovery and V153 on-chain pool identity
+ * - NEW: DexScreener/GeckoTerminal recovery staggering after HTTP 429
+ * - A fresh Dex 429 no longer immediately burns the Gecko recovery request
+ * - Provider recovery state is persisted in the existing KV state
+ * - Only one provider that is recovering from a 429 is allowed a probe per scan
+ * - A short cross-provider stagger prevents both services being re-hit together
+ * - Any non-429 provider response clears that provider's recovery-pending state
+ * - Existing cooldowns, 5m fresh spacing and one-Gecko-fresh-per-scan remain
+ * - No increase to normal request rate and no Telegram/scoring threshold changes
+
+ *
+ * V158:
+ * - Preserves all V157 market-provider recovery staggering
+ * - NEW: evidence-quality protection derived from the BOD false-positive case
+ * - Weak/unverified momentum + no verified directional USD + no verified holder
+ *   counters can no longer produce an unjustified HIGH confidence score
+ * - If that evidence stack also relies on stale holder-cache concentration,
+ *   opportunity is capped below the existing Telegram alert threshold
+ * - Scores are recalculated after successful directional enrichment, so genuine
+ *   verified USD flow can remove the cap automatically
+ * - Existing Telegram thresholds remain exactly 60 / 59 / $1000 / 55
+ * - No new external requests and no request-rate changes
+
+ *
+ * V159:
+ * - Preserves full V158 evidence-quality protection and all prior safety gates
+ * - NEW: a carried priority candidate with a fresh usable VERIFIED market cache
+ *   no longer monopolizes the scarce fresh-market request slot
+ * - NEW: only the fresh-market reservation is handed to the next highest-ranked
+ *   viable candidate that still needs market verification
+ * - The carried retry candidate remains first in analysis and retains priority
+ *   holder/risk completion so unresolved evidence continues to be worked
+ * - V139 fairness, V141/V148 handoffs and V150 terminal guards remain intact
+ * - Dex fresh spacing remains 5 minutes; Gecko remains max one fresh per scan
+ * - Existing Telegram thresholds remain exactly 60 / 59 / $1000 / 55
+ * - No increase to normal external request rate
+ *
+ * V160:
+ * - Preserves full V159 fresh-market slot handoff and all prior protections
+ * - FIX: Blockscout PRO HTTP 500 is now treated as a transient server outage
+ * - HTTP 500 joins 502/503/504 in the existing persistent 10-minute PRO cooldown
+ * - Public Blockscout remains primary; missing holder evidence is never promoted
+ * - A verified PRO success still clears/de-escalates the outage state normally
+ * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
+*/
+const VERSION = "V198-TEST";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -14,7 +760,7 @@ const ALCHEMY_BASE =
 const DEXSCREENER_BASE =
   "https://api.dexscreener.com";
 
- 
+/* V117 independent market-data fallback. */
 const GECKOTERMINAL_BASE =
   "https://api.geckoterminal.com/api/v2";
 
@@ -33,6 +779,12 @@ const GECKOTERMINAL_MAX_429_COOLDOWN_MS =
 const GECKOTERMINAL_MAX_FRESH_PER_SCAN =
   1;
 
+/*
+ * V130 rolling verified directional-trade history.
+ * Compact per-trade arrays are capped to protect the shared KV state.
+ * If the cap prevents full coverage of a requested window, that window
+ * remains UNVERIFIED rather than being extrapolated.
+ */
 const DIRECTIONAL_LEDGER_WINDOW_MS =
   24 * 60 * 60 * 1000;
 
@@ -42,6 +794,11 @@ const DIRECTIONAL_LEDGER_MAX_TRADES =
 const DIRECTIONAL_LEDGER_MAX_POOLS =
   2;
 
+/*
+ * V131: if the circulating ownership denominator moves by this much between
+ * comparable snapshots, concentration percentage direction must also be
+ * supported by actual tracked-wallet balance movement.
+ */
 const MATERIAL_OWNERSHIP_SUPPLY_CHANGE_PERCENT =
   10;
 
@@ -88,14 +845,25 @@ const V3_STANDARD_FEES_V195 = [
   10000
 ];
 
+
 const ZERO =
   "0x0000000000000000000000000000000000000000";
 
 const DEAD =
   "0x000000000000000000000000000000000000dead";
 
+/*
+ * IMPORTANT:
+ * DO NOT CHANGE.
+ *
+ * Preserves V69 -> V88 history.
+ */
 const STATE_KEY =
   "robinhood-meme-hunter-v69-state";
+
+/* =========================================================
+   KNOWN INFRASTRUCTURE / QUOTES
+   ========================================================= */
 
 const KNOWN_QUOTES = new Set([
   "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
@@ -111,6 +879,18 @@ const KNOWN_QUOTE_SYMBOLS = new Set([
   "USD"
 ]);
 
+/* =========================================================
+   V179 CANONICAL QUOTE IDENTITIES
+   ========================================================= */
+
+/*
+ * Robinhood Chain canonical contracts:
+ * - USDG: 0x5fc5...d168 (6 decimals)
+ * - WETH: 0x0bd7...ad73
+ *
+ * V179 uses USDG raw units only as verified USDG-denominated quote value.
+ * It intentionally does NOT assert 1 USDG == 1 exact USD for alert verification.
+ */
 const CANONICAL_USDG_V179 =
   "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 
@@ -150,6 +930,10 @@ const V180_WINDOW_MS = Object.freeze({
   h24: 24 * 60 * 60 * 1000
 });
 
+/* =========================================================
+   UNISWAP V4 TOPICS
+   ========================================================= */
+
 const INITIALIZE_TOPIC =
   "0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438";
 
@@ -159,11 +943,32 @@ const SWAP_TOPIC =
 const MODIFY_LIQUIDITY_TOPIC =
   "0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec";
 
+/* =========================================================
+   LIVE SCANNING
+   ========================================================= */
+
 const LIVE_SCAN_BLOCKS = 20;
 
 const LIVE_SAFE_CHUNK_DEFAULT = 10;
 const LIVE_SAFE_CHUNK_MIN = 5;
 const LIVE_SAFE_CHUNK_MAX = 20;
+
+/* =========================================================
+   V88 BACKLOG LEARNING
+   ========================================================= */
+
+/*
+ * V87 test proved:
+ *
+ * Alchemy:
+ * 31 -> HTTP 400
+ * 15 -> HTTP 400
+ * 10 -> SUCCESS
+ * 20 -> HTTP 400
+ *
+ * Therefore V88 stores the LAST PROVEN SUCCESSFUL RANGE,
+ * not the proposed next range.
+ */
 
 const BACKLOG_MIN_CHUNK_BLOCKS = 10;
 
@@ -176,12 +981,26 @@ const BACKLOG_MAX_CHUNK_BLOCKS = 250;
 const BACKLOG_LIVE_GUARD_BLOCKS =
   LIVE_SCAN_BLOCKS;
 
+/*
+ * No automatic growth during every successful request.
+ *
+ * This prevents:
+ * 10 success -> save 20 -> 20 failure -> 10 success -> repeat.
+ */
 const BACKLOG_SUCCESS_PROBE_THRESHOLD = 12;
 
 const BACKLOG_PROBE_INCREMENT = 5;
 
+/* =========================================================
+   DISCOVERY RPC COOLDOWN
+   ========================================================= */
+
 const DISCOVERY_RPC_429_COOLDOWN_MS =
   60 * 1000;
+
+/* =========================================================
+   HARD REQUEST BUDGET
+   ========================================================= */
 
 const MAX_EXTERNAL_REQUESTS = 42;
 
@@ -191,20 +1010,51 @@ const DISCOVERY_REQUEST_LIMIT = 24;
 const LIVE_DISCOVERY_REQUEST_LIMIT = 12;
 const BACKLOG_DISCOVERY_REQUEST_LIMIT = 12;
 
+/*
+ * V170:
+ * After candidate analysis + Telegram have completed, reclaim only the
+ * otherwise-unused discovery capacity. This never raises the 42-request
+ * ceiling, never raises the 24-request discovery ceiling, and never borrows
+ * from the 21-request analysis phase.
+ */
 const V170_POST_ANALYSIS_BACKLOG_RECLAIM_MAX_REQUESTS = 5;
 
 const ANALYSIS_REQUEST_LIMIT = 21;
 
 const NOTIFICATION_REQUEST_LIMIT = 2;
 
- 
+/* V90: protect downstream intelligence even while accelerating backlog catch-up. */
 const BACKLOG_GLOBAL_RESERVE = 20;
 
+/*
+ * V108: live discovery/unknown-pool resolution must leave enough global
+ * headroom for at least one meaningful fresh analysis plus notification.
+ */
 const LIVE_GLOBAL_RESERVE = 10;
 
 const FRESH_ANALYSIS_COST_ALCHEMY = 8;
 const FRESH_ANALYSIS_COST_FALLBACK = 11;
 const CACHED_ANALYSIS_COST = 3;
+
+
+/*
+ * V173:
+ * - Preserves V171 mature-zero-activity priority release and V170 residual backlog catch-up
+ * - FIX: temporary market-provider unavailability can use the token's existing
+ *   VERIFIED stale market cache for the V171 release decision
+ * - SAFETY: fallback cache must be verified, must contain exact 24h volume and
+ *   transaction evidence, and must be <= existing MARKET_STALE_CACHE_MS (30m)
+ * - SAFETY: maturity is recomputed from the cached verified pairCreatedAt using
+ *   the existing launchStage() definition; no age/stage is guessed
+ * - SAFETY: unverified/negative/older caches never trigger priority release
+ * - This only releases priority state; the token remains on the watchlist
+ * - Existing V138 retry caps, V140 7-day relevance expiry, scoring, Telegram
+ *   thresholds, request budgets, provider rates and KV history remain unchanged
+ */
+
+/* =========================================================
+   V118 ON-CHAIN V4 MARKET ACTIVITY EVIDENCE
+   ========================================================= */
 
 function onChainV4MarketEvidence(
   watched,
@@ -261,8 +1111,11 @@ function onChainV4MarketEvidence(
 
     liquidityEvents,
 
-    
-
+    /*
+     * Important safety distinction:
+     * raw V4 activity proves an active market/pool, but does NOT by itself
+     * prove a USD price or USD liquidity amount.
+     */
     usdPriceVerified:
       false,
 
@@ -271,14 +1124,28 @@ function onChainV4MarketEvidence(
   };
 }
 
+/* =========================================================
+   TOKEN ANALYSIS
+   ========================================================= */
+
 const MAX_TOKEN_CHECKS = 4;
 
 const METADATA_REUSE_MS =
   30 * 60 * 1000;
 
+/* =========================================================
+   DEXSCREENER
+   ========================================================= */
+
 const MARKET_CACHE_MS =
   9 * 60 * 1000;
 
+/*
+ * V96: negative DexScreener results must expire much sooner than
+ * verified market data. Newly-created Robinhood Chain pools can be
+ * indexed shortly after our first lookup; caching NO_MARKET_FOUND for
+ * the full verified-data TTL can hide the exact early launch we want.
+ */
 const MARKET_NEGATIVE_CACHE_MS =
   90 * 1000;
 
@@ -297,40 +1164,70 @@ const DEXSCREENER_429_CHAIN_WINDOW_MS_V147 =
 const MARKET_PROVIDER_CROSS_STAGGER_MS_V157 =
   2 * 60 * 1000;
 
+
+/* V116: align the fresh-market guard with the existing ~5-minute
+ * scheduled scanner cadence. HTTP-429 protection remains 10 minutes. */
 const DEXSCREENER_MIN_FRESH_INTERVAL_MS =
   5 * 60 * 1000;
 
 const DEXSCREENER_MAX_FRESH_PER_SCAN = 1;
 
- 
+/* V116 priority fresh-market reservation. */
 const PRIORITY_FRESH_RESERVATION_MAX_AGE_MS =
   24 * 60 * 60 * 1000;
 
- 
+/* V98: one short initialize-only lookback catches pools created just before the live window. */
 const LIVE_INITIALIZE_LOOKBACK_BLOCKS = 10;
 
- 
+/* V100 persistent unknown-pool resolver */
 const UNKNOWN_POOL_SEARCH_CHUNK_BLOCKS = 10;
 const UNKNOWN_POOL_SEARCH_MAX_CHUNK_BLOCKS = 40;
 
+/*
+ * V110 exact-pool Initialize capability learning.
+ *
+ * Start from the provider's already-proven generic safe range, not an
+ * optimistic 100/500 block jump. After repeated exact-query successes,
+ * test one larger range. At most one growth probe per provider per run.
+ */
 const UNKNOWN_POOL_EXACT_GROW_SUCCESS_STREAK = 3;
 const UNKNOWN_POOL_EXACT_MAX_BLOCKS = 1000;
 const UNKNOWN_POOL_EXACT_PROBE_COOLDOWN_MS =
   5 * 60 * 1000;
 
+/*
+ * V112 stalled-pool protection.
+ * A pool that has already consumed many contiguous empty searches should
+ * not take one or more resolver slots every scheduled run forever.
+ */
 const UNKNOWN_POOL_STALLED_ATTEMPTS = 12;
 const UNKNOWN_POOL_SEVERE_STALLED_ATTEMPTS = 24;
 const UNKNOWN_POOL_STALLED_RETRY_MS = 10 * 60 * 1000;
 const UNKNOWN_POOL_SEVERE_STALLED_RETRY_MS = 30 * 60 * 1000;
 
+/*
+ * V113 provider-specific failed growth-probe suppression.
+ */
 const UNKNOWN_POOL_EXACT_FAILED_PROBE_COOLDOWN_PUBLIC_MS =
   10 * 60 * 1000;
 const UNKNOWN_POOL_EXACT_FAILED_PROBE_COOLDOWN_ALCHEMY_MS =
   30 * 60 * 1000;
 
+/*
+ * When Public RPC is unavailable, Alchemy's proven exact range is only
+ * 10 blocks. Do not grind old pools indefinitely at that width.
+ */
 const UNKNOWN_POOL_ALCHEMY_DEEP_SEARCH_DISTANCE_BLOCKS = 60;
 const UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN = 7;
 
+/*
+ * V132: unknown-pool resolution is useful, but it is downstream of the
+ * bot's primary purpose: completing analysis on promising tokens.
+ *
+ * Keep the proven hard ceiling at 7, but protect three requests whenever
+ * the candidate pipeline is active. This turns the effective resolver cap
+ * into 4 in normal operation without increasing any request frequency.
+ */
 const UNKNOWN_POOL_ANALYSIS_PROTECTED_REQUESTS = 3;
 const UNKNOWN_POOL_ACTIVE_PIPELINE_REQUEST_LIMIT =
   Math.max(
@@ -341,20 +1238,29 @@ const UNKNOWN_POOL_ACTIVE_PIPELINE_REQUEST_LIMIT =
 const UNKNOWN_POOL_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_UNKNOWN_POOL_TRACKER = 500;
 
+/*
+ * V101: when at least this many unresolved pools are active in the
+ * current live window, targeted exact-pool history is more valuable
+ * than another generic 10-block Initialize-only lookback.
+ */
 const UNKNOWN_POOL_TARGETED_PRIORITY_THRESHOLD = 3;
+
+/* =========================================================
+   WATCHLIST
+   ========================================================= */
 
 const WATCH_MAX_AGE =
   12 * 60 * 60 * 1000;
 
 const MAX_WATCHED_TOKENS = 50;
 
- 
+/* V91: retain pool->token mappings beyond the 50-token watchlist. */
 const POOL_REGISTRY_MAX_AGE =
   30 * 24 * 60 * 60 * 1000;
 
 const MAX_POOL_REGISTRY = 2500;
 
- 
+/* V91: holder intelligence reuse / outage protection. */
 const HOLDER_CACHE_MS =
   20 * 60 * 1000;
 
@@ -363,6 +1269,10 @@ const HOLDER_STALE_CACHE_MS =
 
 const HOLDER_PARTIAL_RETRY_MS_V149 =
   5 * 60 * 1000;
+
+/* =========================================================
+   TELEGRAM
+   ========================================================= */
 
 const ALERT_COOLDOWN =
   6 * 60 * 60 * 1000;
@@ -375,6 +1285,13 @@ const MIN_ALERT_LIQUIDITY = 1000;
 
 const MIN_CONFIDENCE_ALERT = 55;
 
+/*
+ * V168 TELEGRAM CORE-EVIDENCE FRESHNESS
+ *
+ * These limits affect alert eligibility only. Existing market/holder caches
+ * remain available to ranking, tracking, scoring and provider-outage fallbacks.
+ * No provider request cadence is increased.
+ */
 const TELEGRAM_MARKET_EVIDENCE_MAX_AGE_MS_V168 =
   10 * 60 * 1000;
 
@@ -383,6 +1300,10 @@ const TELEGRAM_HOLDER_EVIDENCE_MAX_AGE_MS_V168 =
 
 const TELEGRAM_HOLDER_STRONG_CONFIRMATION_MAX_AGE_MS_V168 =
   HOLDER_CACHE_MS;
+
+/* =========================================================
+   SNAPSHOTS
+   ========================================================= */
 
 const MAX_SNAPSHOTS_PER_TOKEN = 24;
 
@@ -397,6 +1318,10 @@ const MOMENTUM_MIN_HISTORY_MS =
 
 const MOMENTUM_IDEAL_HISTORY_MS =
   15 * 60 * 1000;
+
+/* =========================================================
+   HELPERS
+   ========================================================= */
 
 function now() {
   return new Date().toISOString();
@@ -601,6 +1526,10 @@ function yesNo(value) {
     : "NO";
 }
 
+/* =========================================================
+   TOKENIZED SECURITY FILTER
+   ========================================================= */
+
 function tokenizedSecurityReason(
   name,
   symbol
@@ -695,6 +1624,10 @@ function tokenizedSecurityReason(
 
   return null;
 }
+
+/* =========================================================
+   REQUEST BUDGET
+   ========================================================= */
 
 function createBudget() {
   return {
@@ -796,8 +1729,13 @@ function budgetAvailable(
   phase,
   amount = 1
 ) {
-  
-
+  /*
+   * V174:
+   * Before Telegram processing finishes, keep the still-unused notification
+   * allowance inside the 42-request hard ceiling. This fixes the V173 case
+   * where analysis could consume all 42 global requests while the separate
+   * notification phase still reported 2 requests "remaining".
+   */
   const notificationReserveRemainingV174 =
     (
       budget.notification
@@ -927,8 +1865,12 @@ function consumeBudget(
   type,
   amount = 1
 ) {
-  
-
+  /*
+   * V182:
+   * Keep one analysis request and one slot inside the current pre-Telegram
+   * global allowance available for the exact Blockscout V4 USDG history call.
+   * This does NOT raise any request ceiling. It only changes ordering/priority.
+   */
   const usdGReserveV182 =
     budget.analysis
       ?.blockscoutUsdGReserveV182;
@@ -1403,6 +2345,10 @@ function budgetTelemetry(
   };
 }
 
+/* =========================================================
+   KV
+   ========================================================= */
+
 function getKV(env) {
   if (
     env.MEME_HUNTER_STATE &&
@@ -1465,8 +2411,9 @@ function defaultDiscoveryRpcState() {
     alchemyTotal429s:
       0,
 
-    
-
+    /*
+     * V88 provider-specific proven sizes.
+     */
     publicBacklogChunkBlocks:
       PUBLIC_BACKLOG_DEFAULT,
 
@@ -1485,8 +2432,11 @@ function defaultDiscoveryRpcState() {
     alchemyBacklogSuccessStreak:
       0,
 
-    
-
+    /*
+     * V110 exact-pool Initialize lookup learning.
+     * Values begin at 0 so migration can seed them from each provider's
+     * proven generic range after state is loaded.
+     */
     publicUnknownPoolExactChunkBlocks:
       0,
 
@@ -1771,8 +2721,13 @@ async function readState(env) {
         ? parsed.services.discoveryRpc
         : {};
 
-    
-
+    /*
+     * V87 -> V88 migration.
+     *
+     * V87 stableBacklogChunkBlocks may have contained an
+     * unproven value. We deliberately do NOT trust it for
+     * Alchemy.
+     */
     const migratedPublic =
       safeNumber(
         previousDiscovery
@@ -1901,8 +2856,12 @@ async function readState(env) {
                 BACKLOG_MAX_CHUNK_BLOCKS
               ),
 
-            
-
+            /*
+             * V110 migration:
+             * If no exact-pool range has yet been proven, seed it from
+             * the provider's proven generic range. Existing V110 values
+             * persist through ...previousDiscovery above.
+             */
             publicUnknownPoolExactChunkBlocks:
               clamp(
                 safeNumber(
@@ -2043,6 +3002,10 @@ function discoveryService(state) {
   return state.services.discoveryRpc;
 }
 
+/* =========================================================
+   PROVIDER-SPECIFIC LEARNING
+   ========================================================= */
+
 function getProviderBacklogSize(
   state,
   provider
@@ -2153,8 +3116,10 @@ function setProviderSuccessfulBacklogSize(
       state
     );
 
-  
-
+  /*
+   * V88 CRITICAL:
+   * Only called AFTER an actual successful request.
+   */
   if (
     provider ===
     "ALCHEMY"
@@ -2203,6 +3168,10 @@ function providerSuccessStreak(
         service.publicBacklogSuccessStreak
       );
 }
+
+/* =========================================================
+   DISCOVERY COOLDOWN
+   ========================================================= */
 
 function markDiscovery429(
   state,
@@ -2342,6 +3311,10 @@ function alternateDiscoveryProvider(
 
   return null;
 }
+
+/* =========================================================
+   V91 POOL REGISTRY
+   ========================================================= */
 
 function registerPoolMapping(
   state,
@@ -2620,8 +3593,10 @@ function rebuildPoolRegistryFromWatchedPoolsV186(
       if (
         existing
       ) {
-        
-
+        /*
+         * Never replace canonical currencies with guesses. Only refresh an
+         * existing mapping when the persisted watched-token pool agrees.
+         */
         if (
           normalize(
             existing.currency0
@@ -2698,8 +3673,9 @@ function rebuildPoolRegistryFromWatchedPoolsV186(
           poolId
         ]
       ) {
-        
-
+        /*
+         * registerPoolMapping() already removed it.
+         */
         clearedUnknownTrackers++;
       }
     }
@@ -2738,8 +3714,12 @@ function prunePoolRegistry(
   const current =
     Date.now();
 
-  
-
+  /*
+   * V186:
+   * Pool identity is immutable once Initialize establishes the PoolKey.
+   * Do not throw away a valid identity purely because of age. Keep the
+   * existing LRU/cap protection so KV growth remains bounded.
+   */
   const entries =
     Object.entries(
       state.poolRegistry
@@ -2763,6 +3743,11 @@ function prunePoolRegistry(
       entries
     );
 }
+
+
+/* =========================================================
+   V100 PERSISTENT UNKNOWN V4 POOL TRACKER
+   ========================================================= */
 
 function ensureUnknownPoolState(state) {
   state.unknownPools =
@@ -3084,8 +4069,14 @@ function exactPoolSafeChunk(
       ]
     );
 
-  
-
+  /*
+   * V111 contamination repair:
+   *
+   * V109/V110 could leave optimistic 500/100 values in KV even though
+   * those ranges had never succeeded. A range larger than the provider's
+   * proven generic range is trusted only after a real capability-probe
+   * success has been recorded. Otherwise it is immediately sanitized.
+   */
   if (
     learned <= 0 ||
     (
@@ -3156,8 +4147,10 @@ function exactPoolDemoteOn400(
         )
       : failedBlocks;
 
-  
-
+  /*
+   * Persist the demotion. This is deliberately different from a failed
+   * growth probe: here the currently-used "safe" range itself failed.
+   */
   service[
     fields.chunk
   ] =
@@ -3423,8 +4416,11 @@ function exactPoolRecordProbeFailure(
         )
       : failedBlocks;
 
-  
-
+  /*
+   * IMPORTANT:
+   * Do NOT replace the already-proven safe chunk with the failed size.
+   * This is the V109 regression V110 explicitly fixes.
+   */
   service[
     fields.streak
   ] =
@@ -3526,425 +4522,6 @@ function providerSafeUnknownPoolChunks(
   };
 }
 
-function sortV4CurrenciesV199(
-  a,
-  b
-) {
-  const x = normalize(a);
-  const y = normalize(b);
-
-  if (
-    !isAddress(x) ||
-    !isAddress(y) ||
-    x === y
-  ) {
-    return null;
-  }
-
-  try {
-    return BigInt(x) < BigInt(y)
-      ? [x, y]
-      : [y, x];
-  } catch {
-    return null;
-  }
-}
-
-async function getPoolIdentityBitqueryDexPoolEventsV199(
-  env,
-  poolId,
-  budget
-) {
-  const normalizedPoolId =
-    normalize(poolId);
-
-  const base = {
-    attempted: false,
-    externalRequestsUsed: 0,
-    provider: "BITQUERY",
-    resolver:
-      "DEXPoolEvents_POOLID_FIRST_V199",
-    poolId:
-      normalizedPoolId,
-    returnedPoolId: null,
-    poolManager: null,
-    protocolName: null,
-    protocolVersion: null,
-    currencyA: null,
-    currencyB: null,
-    currency0: null,
-    currency1: null,
-    blockNumber: null,
-    transactionHash: null,
-    resolvedPool: null,
-    status: null,
-    httpStatus: null,
-    error: null
-  };
-
-  const token =
-    String(
-      env.BITQUERY_ACCESS_TOKEN ||
-      ""
-    ).trim();
-
-  if (!token) {
-    return {
-      ...base,
-      status: "NOT_CONFIGURED"
-    };
-  }
-
-  if (
-    !/^0x[a-f0-9]{64}$/.test(
-      normalizedPoolId
-    )
-  ) {
-    return {
-      ...base,
-      status: "INVALID_POOL_ID"
-    };
-  }
-
-  if (
-    !budgetAvailable(
-      budget,
-      "discovery-live"
-    ) ||
-    !consumeBudget(
-      budget,
-      "discovery-live",
-      "BITQUERY_DEXPOOLEVENTS_POOLID_V199"
-    )
-  ) {
-    return {
-      ...base,
-      status:
-        "DISCOVERY_LIVE_BUDGET_PROTECTED"
-    };
-  }
-
-  
-
-  const query = `
-    {
-      EVM(network: robinhood) {
-        DEXPoolEvents(
-          limit: {count: 1}
-          orderBy: {descending: Block_Time}
-          where: {
-            PoolEvent: {
-              Pool: {
-                PoolId: {
-                  is: "${normalizedPoolId}"
-                }
-              }
-            }
-          }
-        ) {
-          Block {
-            Number
-            Time
-          }
-          Transaction {
-            Hash
-          }
-          PoolEvent {
-            Dex {
-              ProtocolName
-              ProtocolVersion
-            }
-            Pool {
-              PoolId
-              SmartContract
-              CurrencyA {
-                SmartContract
-                Symbol
-                Name
-              }
-              CurrencyB {
-                SmartContract
-                Symbol
-                Name
-              }
-            }
-          }
-        }
-      }
-    }
-  `;
-
-  try {
-    const response =
-      await fetch(
-        BITQUERY_GRAPHQL_V2,
-        {
-          method: "POST",
-          headers: {
-            "content-type":
-              "application/json",
-            accept:
-              "application/json",
-            authorization:
-              `Bearer ${token}`
-          },
-          body:
-            JSON.stringify({query})
-        }
-      );
-
-    const httpStatus =
-      response.status;
-
-    let payload = null;
-
-    try {
-      payload =
-        await response.json();
-    } catch {
-      payload = null;
-    }
-
-    if (!response.ok) {
-      return {
-        ...base,
-        attempted: true,
-        externalRequestsUsed: 1,
-        httpStatus,
-        status:
-          `HTTP_${httpStatus}`,
-        error:
-          payload?.errors?.[0]?.message ||
-          `BITQUERY_HTTP_${httpStatus}`
-      };
-    }
-
-    if (
-      Array.isArray(
-        payload?.errors
-      ) &&
-      payload.errors.length
-    ) {
-      return {
-        ...base,
-        attempted: true,
-        externalRequestsUsed: 1,
-        httpStatus,
-        status: "GRAPHQL_ERROR",
-        error:
-          payload.errors
-            .map(
-              row =>
-                String(
-                  row?.message ||
-                  "GRAPHQL_ERROR"
-                )
-            )
-            .slice(0, 3)
-            .join(" | ")
-      };
-    }
-
-    const row =
-      payload?.data?.EVM
-        ?.DEXPoolEvents?.[0] ||
-      null;
-
-    if (!row) {
-      return {
-        ...base,
-        attempted: true,
-        externalRequestsUsed: 1,
-        httpStatus,
-        status:
-          "EMPTY_REALTIME_WINDOW"
-      };
-    }
-
-    const returnedPoolId =
-      normalize(
-        row?.PoolEvent?.Pool?.PoolId
-      );
-
-    const poolManager =
-      normalize(
-        row?.PoolEvent?.Pool
-          ?.SmartContract
-      );
-
-    const protocolName =
-      String(
-        row?.PoolEvent?.Dex
-          ?.ProtocolName ||
-        ""
-      ).toLowerCase();
-
-    const protocolVersion =
-      String(
-        row?.PoolEvent?.Dex
-          ?.ProtocolVersion ||
-        ""
-      );
-
-    const currencyA =
-      normalize(
-        row?.PoolEvent?.Pool
-          ?.CurrencyA?.SmartContract
-      );
-
-    const currencyB =
-      normalize(
-        row?.PoolEvent?.Pool
-          ?.CurrencyB?.SmartContract
-      );
-
-    if (
-      returnedPoolId !==
-        normalizedPoolId
-    ) {
-      return {
-        ...base,
-        attempted: true,
-        externalRequestsUsed: 1,
-        httpStatus,
-        returnedPoolId,
-        poolManager,
-        protocolName,
-        protocolVersion,
-        currencyA,
-        currencyB,
-        status:
-          "POOL_ID_MISMATCH",
-        error:
-          "BITQUERY_DEXPOOLEVENTS_RETURNED_DIFFERENT_POOL_ID"
-      };
-    }
-
-    if (
-      protocolName &&
-      protocolName !==
-        "uniswap_v4"
-    ) {
-      return {
-        ...base,
-        attempted: true,
-        externalRequestsUsed: 1,
-        httpStatus,
-        returnedPoolId,
-        poolManager,
-        protocolName,
-        protocolVersion,
-        currencyA,
-        currencyB,
-        status:
-          "PROTOCOL_UNVERIFIED",
-        error:
-          "POOL_NOT_IDENTIFIED_AS_UNISWAP_V4"
-      };
-    }
-
-    if (
-      isAddress(poolManager) &&
-      poolManager !==
-        normalize(POOL_MANAGER)
-    ) {
-      return {
-        ...base,
-        attempted: true,
-        externalRequestsUsed: 1,
-        httpStatus,
-        returnedPoolId,
-        poolManager,
-        protocolName,
-        protocolVersion,
-        currencyA,
-        currencyB,
-        status:
-          "POOL_MANAGER_MISMATCH",
-        error:
-          "DEXPOOLEVENTS_POOL_MANAGER_DOES_NOT_MATCH_ROBINHOOD_V4_MANAGER"
-      };
-    }
-
-    const sorted =
-      sortV4CurrenciesV199(
-        currencyA,
-        currencyB
-      );
-
-    if (!sorted) {
-      return {
-        ...base,
-        attempted: true,
-        externalRequestsUsed: 1,
-        httpStatus,
-        returnedPoolId,
-        poolManager,
-        protocolName,
-        protocolVersion,
-        currencyA,
-        currencyB,
-        status:
-          "CURRENCIES_UNVERIFIED",
-        error:
-          "DEXPOOLEVENTS_MISSING_OR_INVALID_CURRENCIES"
-      };
-    }
-
-    const [
-      currency0,
-      currency1
-    ] = sorted;
-
-    const resolvedPool = {
-      poolId:
-        normalizedPoolId,
-      currency0,
-      currency1,
-      blockNumber:
-        safeNumber(
-          row?.Block?.Number
-        ) || null,
-      transactionHash:
-        normalize(
-          row?.Transaction?.Hash
-        ) || null,
-      source:
-        "V199_BITQUERY_DEXPOOLEVENTS_POOLID_FIRST"
-    };
-
-    return {
-      ...base,
-      attempted: true,
-      externalRequestsUsed: 1,
-      httpStatus,
-      returnedPoolId,
-      poolManager,
-      protocolName,
-      protocolVersion,
-      currencyA,
-      currencyB,
-      currency0,
-      currency1,
-      blockNumber:
-        resolvedPool.blockNumber,
-      transactionHash:
-        resolvedPool
-          .transactionHash,
-      resolvedPool,
-      status: "RESOLVED"
-    };
-  } catch (error) {
-    return {
-      ...base,
-      attempted: true,
-      externalRequestsUsed: 1,
-      status: "FETCH_ERROR",
-      error:
-        errorString(error)
-    };
-  }
-}
 
 async function getInitializeForPoolBitqueryV190(
   env,
@@ -4024,8 +4601,11 @@ async function getInitializeForPoolBitqueryV190(
     };
   }
 
-  
-
+  /*
+   * This is the exact query proven manually against a real V189
+   * UNKNOWN_POOL_IDENTITY. PoolId is indexed in Initialize, so match it
+   * through Topics rather than guessing or crawling historical ranges.
+   */
   const query = `
     {
       EVM(network: robinhood, dataset: realtime) {
@@ -4362,8 +4942,10 @@ async function getInitializeForPoolBlockHashV188(
     }
 
     try {
-      
-
+      /*
+       * Request #1: obtain the exact block hash. A blockHash log query then
+       * avoids the provider's restrictive multi-block eth_getLogs range.
+       */
       used++;
 
       const block =
@@ -4481,8 +5063,11 @@ async function getInitializeForPoolBlockHashV188(
         );
       }
 
-      
-
+      /*
+       * A provider may not support EIP-234 blockHash filtering. Preserve
+       * the existing range resolver as fallback rather than treating that
+       * as a fatal scan error.
+       */
       continue;
     }
   }
@@ -4840,8 +5425,11 @@ async function getInitializeForPoolRange(
         exactRangeFallbackUsed =
           true;
 
-        
-
+        /*
+         * Fall back ONCE to the already-proven exact safe size.
+         * The failed size is persisted as an upper bound and will not
+         * be re-probed on every pool.
+         */
         const fallback =
           await executeRange(
             provider,
@@ -4890,8 +5478,10 @@ async function getInitializeForPoolRange(
           fallback.error;
       }
 
-      
-
+      /*
+       * On 429 or non-400 errors, do not immediately hammer the same
+       * provider again. Allow the normal provider loop to fail over.
+       */
       continue;
     }
 
@@ -4942,8 +5532,13 @@ async function getInitializeForPoolRange(
     lastError =
       result.error;
 
-    
-
+    /*
+     * V111:
+     * If a currently-learned exact range itself 400s, immediately
+     * demote/persist to the proven generic provider range and retry the
+     * SAME cursor contiguously once. This repairs stale/contaminated KV
+     * without sacrificing resolver progress.
+     */
     if (
       is400(
         result.error
@@ -5055,6 +5650,7 @@ async function getInitializeForPoolRange(
   };
 }
 
+
 function unknownPoolRetryBackoffMs(
   entry
 ) {
@@ -5132,6 +5728,8 @@ function unknownPoolSearchDistance(
     firstActive - cursor - 1
   );
 }
+
+
 
 function unknownPoolLaunchProximityScore(
   entry
@@ -5215,6 +5813,7 @@ function unknownPoolDeepSearchAllowedNow(
   );
 }
 
+
 function unknownPoolDynamicRequestLimit(
   state,
   budget
@@ -5245,8 +5844,11 @@ function unknownPoolDynamicRequestLimit(
       !pendingPriorityCompleted
     );
 
-  
-
+  /*
+   * Any meaningful watchlist means later validation/market/holder work may
+   * require the protected analysis budget. A pending priority completion is
+   * an even stronger signal.
+   */
   const candidatePipelineActive =
     priorityPipelineActive ||
     watchedCount >= 4;
@@ -5256,8 +5858,10 @@ function unknownPoolDynamicRequestLimit(
       ? UNKNOWN_POOL_ACTIVE_PIPELINE_REQUEST_LIMIT
       : UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN;
 
-  
-
+  /*
+   * Also respect the current global live-discovery reserve. This calculation
+   * cannot increase the hard ceiling; it can only reduce resolver spending.
+   */
   const totalHeadroom =
     Math.max(
       0,
@@ -5701,8 +6305,10 @@ async function resolvePersistentUnknownPools(
     dynamicRequestBudget
       .effectiveLimit;
 
-  
-
+  /*
+   * V190: the first available resolver slot belongs to Bitquery when its
+   * access token is configured. This does not raise any request ceiling.
+   */
   const bitqueryConfiguredV190 =
     Boolean(
       String(
@@ -5726,8 +6332,10 @@ async function resolvePersistentUnknownPools(
         .filter(Boolean)
     );
 
-  
-
+  /*
+   * V110: prevents repeated capability probes against the same provider
+   * during one scan run.
+   */
   const exactPoolGrowthProbedProviders =
     new Set();
 
@@ -5963,8 +6571,13 @@ async function resolvePersistentUnknownPools(
     });
   };
 
-  
-
+  /*
+   * V103 MIXED-DEPTH SCHEDULER
+   *
+   * Probe #1: breadth / new pool
+   * Probe #2: depth / already-searched pool
+   * Probe #3: oldest waiting remaining pool, regardless of lane
+   */
   pushCandidate(
     freshLane[0],
     "FRESH"
@@ -6014,8 +6627,15 @@ async function resolvePersistentUnknownPools(
     "OLDEST_WAIT"
   );
 
-  
-
+  /*
+   * V108 BALANCED BREADTH + DEPTH SCHEDULER
+   *
+   * Keep the original three fairness lanes, then use two slots on the
+   * highest-activity unresolved pools not already selected. Finally use
+   * at most two contiguous DEEP_BURST requests on the strongest DEEP
+   * pool. This prevents one pool consuming almost the whole resolver
+   * budget while still making meaningful backwards progress.
+   */
   const activityBreadth =
     eligibleCandidates
       .filter(entry => {
@@ -6124,8 +6744,9 @@ async function resolvePersistentUnknownPools(
     deepBurstAdded++;
   }
 
-  
-
+  /*
+   * Fill any remaining resolver slots fairly if a lane was unavailable.
+   */
   const fillCandidates =
     eligibleCandidates
       .filter(entry => {
@@ -6182,8 +6803,12 @@ async function resolvePersistentUnknownPools(
   let candidates =
     selectedCandidates;
 
-  
-
+  /*
+   * V191: V190 proved Bitquery resolution itself works. The first V190 live
+   * test also proved V179 already runs after resolver completion. The actual
+   * gap was that Bitquery's one lookup could target an older tracker pool
+   * instead of a PoolId causing UNKNOWN_POOL_IDENTITY in this live batch.
+   */
   const livePriorityCandidatesV191 =
     eligibleCandidates
       .filter(
@@ -6429,39 +7054,6 @@ async function resolvePersistentUnknownPools(
         "UP_TO_4_DISTINCT_CURRENT_LIVE_POOLS_V197",
       stopOnFirstResolvedV193:
         true    },
-    bitqueryDexPoolEventsV199: {
-      enabled: true,
-      configured:
-        bitqueryConfiguredV190,
-      endpoint:
-        BITQUERY_GRAPHQL_V2,
-      dataset:
-        "realtime_only",
-      poolIdFirst:
-        true,
-      maxAttemptsPerRun: 4,
-      attempts: 0,
-      requestsUsed: 0,
-      resolved: 0,
-      selectedPoolId: null,
-      currencyA: null,
-      currencyB: null,
-      currency0: null,
-      currency1: null,
-      blockNumber: null,
-      transactionHash: null,
-      httpStatus: null,
-      status:
-        bitqueryConfiguredV190
-          ? "NOT_REACHED"
-          : "NOT_CONFIGURED",
-      error: null,
-      exactPoolIdRequired: true,
-      currencyOrdering:
-        "UNISWAP_V4_NUMERIC_ADDRESS_SORT",
-      identityGuessing: false,
-      attemptHistoryV199: []
-    },
     bitqueryInitializeV190: {
       enabled: true,
       configured:
@@ -6590,137 +7182,14 @@ async function resolvePersistentUnknownPools(
 
     output.attempted++;
 
-    
-
+    /*
+     * V190: resolve one exact unknown PoolId through Bitquery first.
+     * This path was manually proven against a real V189 unresolved pool.
+     */
     let bitqueryResolvedPoolV190 =
       null;
 
-    let bitqueryResolutionPathV199 =
-      null;
-
     if (
-      output.bitqueryDexPoolEventsV199
-        .attempts <
-          output.bitqueryDexPoolEventsV199
-            .maxAttemptsPerRun &&
-      bitqueryConfiguredV190 &&
-      livePriorityPoolIdsV191.has(
-        normalize(poolId)
-      ) &&
-      output.requestsUsed <
-        resolverRequestLimit
-    ) {
-      const dexPoolV199 =
-        await getPoolIdentityBitqueryDexPoolEventsV199(
-          env,
-          poolId,
-          budget
-        );
-
-      output.bitqueryDexPoolEventsV199
-        .attempts +=
-          dexPoolV199.attempted
-            ? 1
-            : 0;
-
-      output.bitqueryDexPoolEventsV199
-        .requestsUsed +=
-          safeNumber(
-            dexPoolV199
-              .externalRequestsUsed
-          );
-
-      output.requestsUsed +=
-        safeNumber(
-          dexPoolV199
-            .externalRequestsUsed
-        );
-
-      output.bitqueryDexPoolEventsV199
-        .selectedPoolId =
-          poolId;
-
-      output.bitqueryDexPoolEventsV199
-        .currencyA =
-          dexPoolV199.currencyA;
-
-      output.bitqueryDexPoolEventsV199
-        .currencyB =
-          dexPoolV199.currencyB;
-
-      output.bitqueryDexPoolEventsV199
-        .currency0 =
-          dexPoolV199.currency0;
-
-      output.bitqueryDexPoolEventsV199
-        .currency1 =
-          dexPoolV199.currency1;
-
-      output.bitqueryDexPoolEventsV199
-        .blockNumber =
-          dexPoolV199.blockNumber;
-
-      output.bitqueryDexPoolEventsV199
-        .transactionHash =
-          dexPoolV199.transactionHash;
-
-      output.bitqueryDexPoolEventsV199
-        .httpStatus =
-          dexPoolV199.httpStatus;
-
-      output.bitqueryDexPoolEventsV199
-        .status =
-          dexPoolV199.status;
-
-      output.bitqueryDexPoolEventsV199
-        .error =
-          dexPoolV199.error;
-
-      output.bitqueryDexPoolEventsV199
-        .attemptHistoryV199.push({
-          poolId,
-          status:
-            dexPoolV199.status,
-          httpStatus:
-            dexPoolV199.httpStatus,
-          returnedPoolId:
-            dexPoolV199.returnedPoolId,
-          poolManager:
-            dexPoolV199.poolManager,
-          protocolName:
-            dexPoolV199.protocolName,
-          currencyA:
-            dexPoolV199.currencyA,
-          currencyB:
-            dexPoolV199.currencyB,
-          currency0:
-            dexPoolV199.currency0,
-          currency1:
-            dexPoolV199.currency1,
-          resolved:
-            Boolean(
-              dexPoolV199.resolvedPool
-            )
-        });
-
-      if (
-        dexPoolV199.resolvedPool
-      ) {
-        bitqueryResolvedPoolV190 =
-          dexPoolV199.resolvedPool;
-
-        bitqueryResolutionPathV199 =
-          "V199_BITQUERY_DEXPOOLEVENTS_POOLID_FIRST";
-
-        output.bitqueryDexPoolEventsV199
-          .resolved += 1;
-      }
-    }
-
-    
-
-    if (
-      !bitqueryResolvedPoolV190 &&
       output.bitqueryInitializeV190
         .attempts <
           output.bitqueryInitializeV190
@@ -6822,9 +7291,6 @@ async function resolvePersistentUnknownPools(
         bitqueryResolvedPoolV190 =
           bitqueryV190.resolvedPool;
 
-        bitqueryResolutionPathV199 =
-          "V190_BITQUERY_REALTIME_INITIALIZE";
-
         output.bitqueryInitializeV190
           .resolved = 1;
       } else if (
@@ -6871,8 +7337,7 @@ async function resolvePersistentUnknownPools(
           state,
           address,
           bitqueryResolvedPoolV190,
-          bitqueryResolutionPathV199 ||
-            "V190_BITQUERY_REALTIME_INITIALIZE"
+          "V190_BITQUERY_REALTIME_INITIALIZE"
         );
       }
 
@@ -6909,7 +7374,6 @@ async function resolvePersistentUnknownPools(
         logs: 1,
         resolved: true,
         resolutionPath:
-          bitqueryResolutionPathV199 ||
           "V190_BITQUERY_REALTIME_INITIALIZE",
         error: null
       });
@@ -6917,8 +7381,11 @@ async function resolvePersistentUnknownPools(
       continue;
     }
 
-    
-
+    /*
+     * V188: first try the exact first-active block using blockHash.
+     * This needs two RPC calls (block -> hash, then exact log query) but
+     * completely avoids the provider's 10-block/limited range constraint.
+     */
     let blockHashResolvedPoolV188 =
       null;
 
@@ -7100,8 +7567,11 @@ async function resolvePersistentUnknownPools(
       continue;
     }
 
-    
-
+    /*
+     * V184: spend at most one of the EXISTING resolver requests on a wide,
+     * exact pool-id Initialize lookup. This is especially valuable while
+     * Alchemy's proven exact-range size is only 10 blocks.
+     */
     let wideResolvedPoolV184 =
       null;
 
@@ -7521,8 +7991,10 @@ async function resolvePersistentUnknownPools(
       continue;
     }
 
-    
-
+    /*
+     * Do not advance after a provider error. Successful empty ranges
+     * advance by the complete adaptive window and continue next run.
+     */
     if (
       !result.error &&
       result.fromBlock !== null &&
@@ -7571,6 +8043,10 @@ async function resolvePersistentUnknownPools(
 
   return output;
 }
+
+/* =========================================================
+   PRUNE
+   ========================================================= */
 
 function pruneState(
   state,
@@ -7740,6 +8216,10 @@ function pruneState(
   );
 }
 
+/* =========================================================
+   WATCHLIST
+   ========================================================= */
+
 function findWatched(
   state,
   address
@@ -7892,6 +8372,10 @@ function addWatch(
     token
   };
 }
+
+/* =========================================================
+   RPC
+   ========================================================= */
 
 async function rpcCall(
   url,
@@ -8186,6 +8670,7 @@ function isBeyondProviderHeadError(
   );
 }
 
+
 function isRpcAbortLikeV156(
   value
 ) {
@@ -8389,6 +8874,10 @@ async function getLogsSingleProvider(
     };
   }
 }
+
+/* =========================================================
+   LIVE SCAN
+   ========================================================= */
 
 async function scanLiveRange(
   env,
@@ -8891,6 +9380,10 @@ async function scanLiveRange(
   };
 }
 
+/* =========================================================
+   V88 BACKLOG SCAN
+   ========================================================= */
+
 async function scanBacklogSequential(
   env,
   state,
@@ -8944,13 +9437,20 @@ async function scanBacklogSequential(
   const probeHistory =
     [];
 
-  
-
+  /*
+   * V89:
+   * A failed speculative range is blocked immediately for
+   * the rest of this invocation even if legacy persisted
+   * success-streak state is unexpectedly high.
+   */
   const failedProbeKeys =
     new Set();
 
-  
-
+  /*
+   * If a previously-proven range itself fails, shrink only
+   * in memory. The smaller size becomes persistent ONLY
+   * after it has actually succeeded.
+   */
   const temporaryChunkOverrides =
     new Map();
 
@@ -9002,8 +9502,11 @@ async function scanBacklogSequential(
         provider
       );
 
-    
-
+    /*
+     * Conservative growth probing. A known failed upper
+     * bound always wins. A failed size is never retried in
+     * the same scan.
+     */
     if (
       provider !==
         "ALCHEMY" &&
@@ -9373,8 +9876,9 @@ async function scanBacklogSequential(
           true
       });
 
-      
-
+      /*
+       * Persist only an actually successful size.
+       */
       setProviderSuccessfulBacklogSize(
         state,
         response.provider,
@@ -9445,8 +9949,11 @@ async function scanBacklogSequential(
         `${provider}:${actualBlocks}`
       );
 
-      
-
+      /*
+       * Failed speculative growth: immediately return to
+       * the proven size and continue using the remaining
+       * request budget. This is the V88 -> V89 core fix.
+       */
       if (
         actualBlocks >
         lastProven
@@ -9458,8 +9965,10 @@ async function scanBacklogSequential(
         continue;
       }
 
-      
-
+      /*
+       * A proven size unexpectedly failed. Test a smaller
+       * temporary size without persisting it yet.
+       */
       if (
         lastProven >
         BACKLOG_MIN_CHUNK_BLOCKS
@@ -9604,6 +10113,10 @@ async function scanBacklogSequential(
   };
 }
 
+/* =========================================================
+   V98 TARGETED INITIALIZE LOOKBACK
+   ========================================================= */
+
 async function getInitializeLookback(
   env,
   state,
@@ -9645,13 +10158,17 @@ async function getInitializeLookback(
     } catch (error) {
       const message = String(error?.message || error);
       if (message.includes("429")) {
-         
+        /* provider cooldown is already handled by the normal discovery path */
       }
     }
   }
 
   return { logs: [], provider: null, error: "LOOKBACK_UNAVAILABLE" };
 }
+
+/* =========================================================
+   V4 DECODING
+   ========================================================= */
 
 function decodeInitialize(
   log
@@ -9709,6 +10226,37 @@ function decodeInitialize(
       log.transactionHash
   };
 }
+
+
+/* =========================================================
+   V179 ON-CHAIN V4 DIRECTIONAL SWAP LEDGER
+   ========================================================= */
+
+/*
+ * Canonical Uniswap v4 PoolManager Swap event:
+ * Swap(
+ *   PoolId indexed id,
+ *   address indexed sender,
+ *   int128 amount0,
+ *   int128 amount1,
+ *   uint160 sqrtPriceX96,
+ *   uint128 liquidity,
+ *   int24 tick,
+ *   uint24 fee
+ * )
+ *
+ * amount0/amount1 are POOL balance deltas:
+ * positive => pool receives that currency
+ * negative => pool sends that currency
+ *
+ * Therefore for a candidate token:
+ * candidate delta < 0 => candidate was bought
+ * candidate delta > 0 => candidate was sold
+ *
+ * V179 deliberately keeps USD verification separate. It records exact
+ * quote-token amounts and exposes canonical USDG amounts, but does not
+ * claim exact USD until a separately verified USD conversion exists.
+ */
 
 function abiWordV179(
   data,
@@ -9964,6 +10512,8 @@ function medianNumberV187(
   ) / 2;
 }
 
+
+
 function encodeAddressWordV195(
   address
 ) {
@@ -10186,8 +10736,11 @@ function sqrtPriceX96ToUsdGPerWethV195(
     return null;
   }
 
-  
-
+  /*
+   * raw token1/token0 = sqrtPriceX96^2 / 2^192.
+   * Convert with token decimals. Use Number only after scaling the ratio;
+   * ETH/USD values are comfortably inside IEEE finite range.
+   */
   const sqrt =
     Number(
       sqrtPriceX96
@@ -10245,6 +10798,7 @@ function sqrtPriceX96ToUsdGPerWethV195(
     )
   );
 }
+
 
 async function getUniswapEthUsdGReferenceV196(
   env,
@@ -10317,8 +10871,10 @@ async function getUniswapEthUsdGReferenceV196(
               "application/json",
             accept:
               "application/json",
-            
-
+            /*
+             * We only need a quote, never execution. Keeping this false allows
+             * CLASSIC routing without requiring an EIP-7914 smart wallet.
+             */
             "x-erc20eth-enabled":
               "false"
           },
@@ -10536,8 +11092,10 @@ async function getV3WethUsdGReferenceV195(
     };
   }
 
-  
-
+  /*
+   * getPool(address,address,uint24)
+   * selector = 0x1698ee82
+   */
   const getPoolSelector =
     "1698ee82";
 
@@ -10598,8 +11156,12 @@ async function getV3WethUsdGReferenceV195(
       continue;
     }
 
-    
-
+    /*
+     * token0() 0x0dfe1681
+     * token1() 0xd21220a7
+     * slot0()  0x3850c7bd
+     * liquidity() 0x1a686502
+     */
     const calls = [];
 
     for (
@@ -10809,6 +11371,7 @@ function bitquerySignedIntegerV194(
         String(raw)
       );
     } catch {
+      // continue
     }
   }
 
@@ -11476,8 +12039,10 @@ function decodeV4SwapDirectionalV179(
     return null;
   }
 
-  
-
+  /*
+   * A normal swap must move currencies in opposite pool-delta directions.
+   * Reject malformed/non-swap-shaped data rather than infer.
+   */
   if (
     (
       amount0 >
@@ -11586,8 +12151,10 @@ function decodeV4SwapDirectionalV179(
       ? "buy"
       : "sell";
 
-  
-
+  /*
+   * For a valid two-currency swap, quote delta should have the opposite sign.
+   * Keep this explicit as a second direction-integrity check.
+   */
   const directionConsistent =
     (
       side ===
@@ -11946,6 +12513,7 @@ function pruneOnChainDirectionalStoreV179(
 
   return store;
 }
+
 
 function resolvedPoolReplayDiagnosticV198(
   state,
@@ -12598,6 +13166,11 @@ function collectOnChainDirectionalSwapsV179(
   };
 }
 
+
+/* =========================================================
+   V180 BLOCKSCOUT EXACT-POOL V4 USDG DIRECTIONAL USD
+   ========================================================= */
+
 function blockscoutLogTimestampMsV180(
   row
 ) {
@@ -12764,8 +13337,11 @@ function v180DecodeExactPoolLog(
       ? null
       : null;
 
-  
-
+  /*
+   * V153 identity stores BASE/QUOTE semantics but V180 needs actual
+   * currency index. Resolve it from the persistent pool registry when
+   * available; never guess the index from display-side wording.
+   */
   const poolId =
     normalize(
       identity?.poolId
@@ -13502,8 +14078,10 @@ async function blockscoutV4UsdGDirectionalV180(
         ? payload.result
         : [];
 
-    
-
+    /*
+     * Blockscout documents a maximum of 1,000 returned event logs.
+     * Exactly 1,000 is therefore treated as potentially truncated.
+     */
     const historyComplete =
       rows.length <
       BLOCKSCOUT_LOGS_MAX_ROWS_V180;
@@ -13512,8 +14090,9 @@ async function blockscoutV4UsdGDirectionalV180(
 
     const trades = [];
 
-    
-
+    /*
+     * Pass registry identity without changing the persisted candidate shape.
+     */
     Object.defineProperty(
       candidate,
       "__v180RegistryPool",
@@ -13804,6 +14383,10 @@ function processDiscoveryLogs(
   };
 }
 
+/* =========================================================
+   LIVE POOL ACTIVITY
+   ========================================================= */
+
 function activeTokensFromLogs(
   state,
   logs
@@ -13866,8 +14449,11 @@ function activeTokensFromLogs(
     }
   }
 
-  
-
+  /*
+   * V91: merge persistent pool registry mappings. This lets a
+   * token become live-active again even if it previously fell
+   * outside the 50-token watchlist.
+   */
   for (
     const entry
     of Object.values(
@@ -14049,6 +14635,7 @@ function activeTokensFromLogs(
   };
 }
 
+
 function onChainPoolIdentityV153(
   watched
 ) {
@@ -14130,8 +14717,10 @@ function onChainPoolIdentityV153(
       quoteTokenAddress: quoteToken,
       nativeQuote:
         quoteToken === ZERO,
-      
-
+      /*
+       * For candidate/known-quote Gecko V4 pools the candidate is represented
+       * as the base asset. This is only asserted for deterministic quote pools.
+       */
       targetTokenSide: "BASE",
       blockNumber:
         pool?.blockNumber || null,
@@ -14231,6 +14820,10 @@ function activityForToken(
       0
   };
 }
+
+/* =========================================================
+   ERC20
+   ========================================================= */
 
 async function ethCall(
   env,
@@ -14740,6 +15333,10 @@ async function verifyERC20(
   };
 }
 
+/* =========================================================
+   DEXSCREENER
+   ========================================================= */
+
 function cachedMarket(
   watched,
   maxAge
@@ -14776,8 +15373,13 @@ function cachedMarket(
     return null;
   }
 
-  
-
+  /*
+   * V96 NEGATIVE-CACHE PROTECTION
+   *
+   * A verified pair may use the caller's normal cache TTL.
+   * An unverified/NO_MARKET_FOUND result gets only a short TTL so
+   * DexScreener indexing delay cannot suppress a new token for 9m.
+   */
   const effectiveMaxAge =
     cache.data?.verified === true
       ? maxAge
@@ -14899,6 +15501,8 @@ function dexService(state) {
 
   return state.services.dexscreener;
 }
+
+
 
 function marketProviderRecoveryV157(
   state
@@ -15295,6 +15899,7 @@ function marketProviderRecoveryTelemetryV157(
   };
 }
 
+
 function registerDex429V147(
   service
 ) {
@@ -15658,6 +16263,11 @@ function clearPriorityFreshReservation(
   }
 }
 
+
+/* =========================================================
+   V117 GECKOTERMINAL MARKET FALLBACK
+   ========================================================= */
+
 function geckoService(
   state
 ) {
@@ -15700,8 +16310,13 @@ function geckoService(
       service.lastBackoffMs
     );
 
-  
-
+  /*
+   * V128:
+   * V127 migrated historical 429 state by seeding level 2 whenever the level
+   * was zero. That meant a fully recovered service could be re-seeded later.
+   * Seed historical state once, persist the migration marker, then allow
+   * successful requests to de-escalate naturally to zero.
+   */
   if (
     service.rateLimitHistorySeeded !==
       true
@@ -16162,8 +16777,10 @@ function parseGeckoPoolMarket(
         .reserve_in_usd
     );
 
-  
-
+  /*
+   * Never turn an incomplete fallback response into "verified" market
+   * intelligence. Both USD price and real USD pool reserve are required.
+   */
   if (
     priceUsd <=
       0 ||
@@ -16830,6 +17447,25 @@ async function priorityMarketFallback(
   };
 }
 
+
+/* =========================================================
+   V126 VERIFIED DIRECTIONAL USD TRADE FEED
+   ========================================================= */
+
+/*
+ * GeckoTerminal's public pool-trades endpoint returns the latest 300 trades
+ * from the past 24 hours. We NEVER pretend that 300 rows necessarily cover
+ * 24 hours. A requested window becomes verified only when:
+ *
+ * 1. all rows inside the window have valid timestamp / kind / USD volume; and
+ * 2. the returned trade history demonstrably reaches the beginning of that
+ *    window, OR fewer than 300 rows were returned (meaning the endpoint did
+ *    not hit its documented row cap).
+ *
+ * This gives us useful verified 5m/1h directional USD on active pools while
+ * keeping 24h UNVERIFIED whenever 300 rows do not cover the full day.
+ */
+
 function normalizeGeckoTradeKind(
   rawKind,
   targetTokenSide
@@ -16849,8 +17485,10 @@ function normalizeGeckoTradeKind(
     return null;
   }
 
-  
-
+  /*
+   * Gecko's pool trade "kind" is expressed relative to the base token.
+   * If our candidate is the quote token, invert the side.
+   */
   if (
     String(
       targetTokenSide ||
@@ -16915,8 +17553,11 @@ function geckoDirectionalWindow(
     returnedCount >=
       300;
 
-  
-
+  /*
+   * If fewer than 300 trades came back, Gecko did not hit the documented
+   * latest-300 cap. Otherwise the oldest returned trade must reach beyond
+   * the start of the requested window.
+   */
   const coverageComplete =
     !hitApiRowCap ||
     (
@@ -17097,6 +17738,7 @@ function geckoDirectionalWindow(
       }
   };
 }
+
 
 function directionalTradeKey(
   row,
@@ -18057,8 +18699,10 @@ async function geckoDirectionalTradeFlow(
       budget.analysis.geckoFreshUsed
     );
 
-  
-
+  /*
+   * Share V117's one-Gecko-request-per-scan guard. Market fallback and
+   * directional enrichment can never both create a Gecko request burst.
+   */
   if (
     budget.analysis.geckoFreshUsed >=
       GECKOTERMINAL_MAX_FRESH_PER_SCAN
@@ -18325,8 +18969,10 @@ async function geckoDirectionalTradeFlow(
           ?.h24
       );
 
-    
-
+    /*
+     * V130: merge this same request into persistent verified history.
+     * No extra Gecko request is created.
+     */
     const ledgerUpdate =
       updateDirectionalTradeLedger(
         state,
@@ -18591,8 +19237,10 @@ function applyDirectionalTradeFlow(
       continue;
     }
 
-    
-
+    /*
+     * Never overwrite a previously verified directional source with an
+     * incomplete trade-feed window.
+     */
     if (
       row.verified
     ) {
@@ -18641,8 +19289,12 @@ function applyDirectionalTradeFlow(
             row.countCrossCheck
         };
 
-      
-
+      /*
+       * V177: 15m and 6h do not exist in the normal DexScreener summary.
+       * When the individual-trade window itself has complete verified coverage,
+       * expose its real trade counts as transactions for Telegram/telemetry.
+       * No counts are guessed when coverage is incomplete.
+       */
       if (
         window === "m15" ||
         window === "h6"
@@ -18773,8 +19425,11 @@ async function marketData(
     );
   }
 
-  
-
+  /*
+   * V91: reserve the scarce fresh DexScreener request for the
+   * highest-priority live/new candidate. Other candidates still
+   * receive verified cached/stale intelligence when available.
+   */
   if (!allowFresh) {
     const stale =
       cachedMarket(
@@ -18802,8 +19457,10 @@ async function marketData(
     };
   }
 
-  
-
+  /*
+   * V89: avoid hammering DexScreener during manual/repeated
+   * scans. Cached/stale data is preferred when available.
+   */
   const sinceLastFreshRequest =
     Date.now() -
     safeNumber(
@@ -19111,10 +19768,17 @@ async function marketData(
     if (
       !pairs.length
     ) {
-      
-
-      
-
+      /*
+       * V95: DexScreener exposes both token-pairs/v1 and
+       * tokens/v1. A newly indexed token can occasionally be
+       * absent from one route, so use the second documented
+       * route before declaring NO_MARKET_FOUND.
+       */
+      /*
+       * V98: do NOT immediately fire the second DexScreener route after
+       * a zero-result first route. Back-to-back route calls were a major
+       * source of 429s. The short V96 negative cache lets a later scan retry.
+       */
       if (
         false &&
         consumeBudget(
@@ -19175,7 +19839,7 @@ async function marketData(
         }
 
         catch {
-           
+          /* Preserve the normal NO_MARKET_FOUND path below. */
         }
       }
 
@@ -19248,8 +19912,15 @@ async function marketData(
         buys +
         sells;
 
-      
-
+      /*
+       * V99 STRICT DIRECTIONAL-USD RULE
+       *
+       * DexScreener normally exposes total window volume plus buy/sell
+       * transaction counts, not a guaranteed buy-USD / sell-USD split.
+       * We therefore only mark directional USD as verified if BOTH
+       * explicit directional fields are actually present in the payload.
+       * We never infer dollar flow from counts or split total volume.
+       */
       const explicitBuyUsd =
         row?.buyVolumeUsd ??
         row?.buysVolumeUsd ??
@@ -19513,6 +20184,10 @@ async function marketData(
   }
 }
 
+/* =========================================================
+   BLOCKSCOUT
+   ========================================================= */
+
 async function blockscout(
   path,
   budget
@@ -19554,6 +20229,7 @@ async function blockscout(
     return null;
   }
 }
+
 
 async function blockscoutLegacyHolders(
   token,
@@ -19621,6 +20297,8 @@ async function blockscoutLegacyHolders(
     return null;
   }
 }
+
+
 
 function blockscoutProServiceV145(
   state
@@ -19697,6 +20375,7 @@ function blockscoutProOutageTelemetryV145(
       )
   };
 }
+
 
 function blockscoutPro404RetryV146(
   watched
@@ -20120,6 +20799,10 @@ function extractCounterData(
   };
 }
 
+/* =========================================================
+   HOLDER HELPERS
+   ========================================================= */
+
 function holderPercent(
   value,
   supply
@@ -20302,8 +20985,11 @@ function infrastructureHolderReason(
     return "TOKEN_CONTRACT";
   }
 
-  
-
+  /*
+   * V128:
+   * Only a pair address supplied by a VERIFIED market result is accepted here.
+   * The caller never passes an unverified / guessed pool address.
+   */
   if (
     pair &&
     address ===
@@ -20315,6 +21001,22 @@ function infrastructureHolderReason(
   return null;
 }
 
+/* =========================================================
+   HOLDER INTEGRITY — V97
+   ========================================================= */
+
+/*
+ * V97:
+ * Blockscout can occasionally return duplicate holder rows while
+ * indexing a young token. Summing duplicate rows can incorrectly
+ * produce >100% of totalSupply.
+ *
+ * Safety rule:
+ * - normalize by address
+ * - for duplicate addresses keep the largest observed balance
+ * - never add duplicate balances together
+ * - unresolved >100% data still remains UNVERIFIED
+ */
 function normalizeHolderRows(
   rawHolders
 ) {
@@ -20586,6 +21288,11 @@ function validateHolderIntegrity(
       balanceSum.toString()
   };
 }
+
+
+/* =========================================================
+   HOLDER INTEGRITY RECONCILIATION — V162
+   ========================================================= */
 
 function holderIntegrityReconciliationV162(
   items,
@@ -21015,6 +21722,10 @@ function unverifiedHolders(
   };
 }
 
+/* =========================================================
+   V91 HOLDER CACHE
+   ========================================================= */
+
 function cachedHolderIntelligence(
   watched,
   maxAge
@@ -21270,6 +21981,12 @@ function clearPartialHolderStateV149(
   }
 }
 
+/*
+ * V166:
+ * Detect only the still-active V149 partial-holder retry states that deliberately
+ * keep concentration unverified. This is read-only scheduling telemetry: it does
+ * not promote holder evidence, alter retry timing, or add any external request.
+ */
 function activePartialHolderRetryBlockerV166(
   watched
 ) {
@@ -21332,6 +22049,10 @@ function activePartialHolderRetryBlockerV166(
   };
 }
 
+/* =========================================================
+   HOLDER INTELLIGENCE — V88
+   ========================================================= */
+
 async function holderIntelligence(
   token,
   totalSupply,
@@ -21350,8 +22071,11 @@ async function holderIntelligence(
     );
   }
 
-  
-
+  /*
+   * V164: configuration truth must survive same-run outage deferral.
+   * A request suppressed by the V134 circuit breaker is NOT the same as
+   * BLOCKSCOUT_PRO_API_KEY being absent.
+   */
   const blockscoutProConfiguredV164 =
     Boolean(
       String(
@@ -21389,8 +22113,13 @@ async function holderIntelligence(
       HOLDER_CACHE_MS
     );
 
-  
-
+  /*
+   * V128:
+   * Old cache entries may have been created before LP/pair infrastructure
+   * exclusion existed. If the now-verified pair address is present as an
+   * ordinary holder, bypass that cache exactly once and rebuild holder
+   * concentration from Blockscout. The corrected result is then cached.
+   */
   const cachedPairMisclassified =
     Boolean(
       freshHolderCache &&
@@ -21420,8 +22149,12 @@ async function holderIntelligence(
     };
   }
 
-  
-
+  /*
+   * V149: repeated newly-launched PoolManager-dominant holder responses can
+   * contain no usable external ownership rows yet. Reuse that unverified
+   * state briefly instead of repeating the same holder API work every scan.
+   * This cache never upgrades concentration verification.
+   */
   const partialHolderStateV149 =
     cachedPartialHolderStateV149(
       watched,
@@ -21446,8 +22179,17 @@ async function holderIntelligence(
     return holderIntegrityQuarantineV162;
   }
 
-  
-
+  /*
+   * V134 same-run outage circuit breaker.
+   *
+   * V133 guarantees the priority candidate is analysed first. If that first
+   * candidate proves both Blockscout holder routes unavailable, do not spend
+   * more analysis requests repeating the same holder calls on lower-ranked
+   * candidates in the same scan.
+   *
+   * Safety rule: stale holder data can preserve previously VERIFIED evidence,
+   * but missing evidence never becomes healthy/verified evidence.
+   */
   if (
     budget
       ?.blockscoutHolderOutage
@@ -21520,8 +22262,16 @@ async function holderIntelligence(
     };
   }
 
-  
-
+  /*
+   * V89 request order:
+   * 1. holder rows (needed for concentration)
+   * 2. token details (usually enough for counters)
+   * 3. counters endpoint only when rows exist and details
+   *    did not expose counters.
+   *
+   * During a Blockscout holder outage this normally uses
+   * only two requests instead of three.
+   */
   let holders =
     null;
 
@@ -21590,8 +22340,11 @@ async function holderIntelligence(
       ? "TOKEN_DETAILS_FALLBACK"
       : null;
 
-  
-
+  /*
+   * V95: counters are useful even if the V2 holder-row endpoint
+   * is temporarily unavailable. Do not tie counter recovery to
+   * successful holder-row retrieval.
+   */
   if (
     (
       counterData.holderCount ===
@@ -21637,8 +22390,12 @@ async function holderIntelligence(
     }
   }
 
-  
-
+  /*
+   * V95: Blockscout documents a legacy token-holder endpoint.
+   * Use it only when V2 holder rows are unavailable and budget
+   * remains. The returned rows are normalized into the same
+   * shape used by the existing concentration/integrity logic.
+   */
   if (
     (
       !holders ||
@@ -21676,8 +22433,13 @@ async function holderIntelligence(
     }
   }
 
-  
 
+  /*
+   * V143:
+   * Public Blockscout remains first choice. Only after both public holder-row
+   * routes fail do we spend one protected analysis request on PRO, and only
+   * when a key has been configured.
+   */
   if (
     v2HolderRowsUnavailable &&
     legacyHolderRowsUnavailable &&
@@ -21746,8 +22508,12 @@ async function holderIntelligence(
     }
   }
 
-  
-
+  /*
+   * V134/V143: open the same-run circuit only after the public holder-row
+   * paths and any configured PRO fallback have failed. Token details/counters
+   * may still be healthy and are not treated
+   * as proof that holder concentration is available.
+   */
   if (
     v2HolderRowsUnavailable &&
     legacyHolderRowsUnavailable
@@ -22616,6 +23382,10 @@ async function holderIntelligence(
   return result;
 }
 
+/* =========================================================
+   SNAPSHOTS
+   ========================================================= */
+
 function getHistoricalSnapshot(
   state,
   address
@@ -22685,6 +23455,7 @@ function getHistoricalSnapshot(
 
   return null;
 }
+
 
 function holderOwnershipBasisSignature(
   holders
@@ -23074,6 +23845,10 @@ function saveSnapshot(
     );
 }
 
+/* =========================================================
+   MOMENTUM
+   ========================================================= */
+
 function momentumAnalysis(
   previous,
   market,
@@ -23396,8 +24171,12 @@ function momentumAnalysis(
     );
   }
 
-  
-
+  /*
+   * V152 live-only on-chain momentum.
+   *
+   * These signals prove activity/intensity only. They never imply USD value
+   * or buy/sell direction. Backlog logs are deliberately excluded.
+   */
   if (
     onChainActivityUsableV152 &&
     previousOnChainUsableV152 &&
@@ -23622,6 +24401,10 @@ function momentumAnalysis(
   };
 }
 
+/* =========================================================
+   WHALE FLOW + CONCENTRATION TREND
+   ========================================================= */
+
 function ownershipDenominatorComparison(
   previous,
   holders,
@@ -23748,8 +24531,10 @@ function ownershipDenominatorComparison(
     };
   }
 
-  
-
+  /*
+   * Integer basis-points calculation avoids lossy BigInt -> Number conversion
+   * on ERC-20 supply-sized values.
+   */
   const delta =
     currentSupply -
     previousSupply;
@@ -24117,8 +24902,12 @@ function analyseWhaleFlow(
       decreasing
     );
 
-  
-
+  /*
+   * V131: the methodology/address-set can be identical while the amount
+   * excluded as infrastructure moves sharply. That changes ownershipSupply
+   * and can mechanically move top-10 percentages without any whale buying
+   * or selling. Never label that as a verified trend without wallet support.
+   */
   if (
     concentrationComparison
       .comparable &&
@@ -24186,8 +24975,10 @@ function analyseWhaleFlow(
     );
   }
 
-  
-
+  /*
+   * Dangerous current concentration remains a valid current-state penalty.
+   * It does not require historical comparability.
+   */
   if (
     Number.isFinite(
       newTop10
@@ -24284,6 +25075,10 @@ function analyseWhaleFlow(
     reasons
   };
 }
+
+/* =========================================================
+   MARKET QUALITY
+   ========================================================= */
 
 function marketQuality(
   market
@@ -24434,6 +25229,10 @@ function marketQuality(
   };
 }
 
+/* =========================================================
+   LAUNCH STAGE
+   ========================================================= */
+
 function launchStage(
   market
 ) {
@@ -24545,6 +25344,10 @@ function launchStage(
   };
 }
 
+/* =========================================================
+   V88 RISK
+   ========================================================= */
+
 function scoreRisk(
   token,
   market,
@@ -24598,8 +25401,14 @@ function scoreRisk(
   const whale =
     holders?.whale;
 
-  
-
+  /*
+   * V97 HOLDER-INTEGRITY SAFETY GATE
+   *
+   * If holder rows were returned but failed integrity validation,
+   * the token cannot be classified LOW risk from unrelated signals.
+   * This preserves the existing false-positive protection while
+   * Blockscout catches up.
+   */
   const holderIntegrityInvalid =
     Boolean(
       holders?.integrity &&
@@ -24641,8 +25450,12 @@ function scoreRisk(
     };
   }
 
-  
-
+  /*
+   * V88 SEVERE RED-FLAG OVERRIDE
+   *
+   * Two evidence classes are NOT required to identify
+   * something clearly dangerous.
+   */
   if (
     evidence.concentration &&
     (
@@ -24719,8 +25532,10 @@ function scoreRisk(
     };
   }
 
-  
-
+  /*
+   * Extremely low verified liquidity is also a direct
+   * severe warning.
+   */
   if (
     market?.verified &&
     safeNumber(
@@ -24755,8 +25570,10 @@ function scoreRisk(
     };
   }
 
-  
-
+  /*
+   * V87/V88 safety gate:
+   * One swap alone cannot classify LOW risk.
+   */
   if (
     independentEvidence <
     2
@@ -24964,6 +25781,10 @@ function healthyHolderBreadthV136(
     positiveHolderRows
   };
 }
+
+/* =========================================================
+   OPPORTUNITY
+   ========================================================= */
 
 function scoreOpportunity(
   token,
@@ -25298,6 +26119,7 @@ function scoreOpportunity(
   };
 }
 
+
 function evidenceQualityProtectionV158(
   candidate
 ) {
@@ -25378,8 +26200,11 @@ function evidenceQualityProtectionV158(
   const reasons =
     [];
 
-  
-
+  /*
+   * V158: HIGH confidence requires more than verified market structure
+   * plus generic activity. At least one of holder breadth, verified USD
+   * direction, or non-weak momentum must substantively confirm the move.
+   */
   if (
     missingCoreConfirmation
   ) {
@@ -25391,8 +26216,12 @@ function evidenceQualityProtectionV158(
     );
   }
 
-  
-
+  /*
+   * BOD-specific failure class:
+   * stale concentration evidence + no live holder counters + no verified
+   * directional dollars + weak momentum must not reach the existing alert
+   * threshold through market/activity bonuses alone.
+   */
   if (
     missingCoreConfirmation &&
     staleHolderEvidence
@@ -25533,6 +26362,10 @@ function evidenceQualityProtectionV158(
 
   return telemetry;
 }
+
+/* =========================================================
+   SIGNAL CONFIRMATION
+   ========================================================= */
 
 function signalConfirmation(
   candidate
@@ -25757,6 +26590,10 @@ function signalConfirmation(
   };
 }
 
+/* =========================================================
+   CONFIDENCE
+   ========================================================= */
+
 function candidateConfidence(
   candidate
 ) {
@@ -25845,6 +26682,10 @@ function candidateConfidence(
           : "LOW"
   };
 }
+
+/* =========================================================
+   PRIORITY
+   ========================================================= */
 
 function watchPriority(
   watched,
@@ -26058,6 +26899,10 @@ function analysisPriority(
 
   return score;
 }
+
+/* =========================================================
+   TELEGRAM
+   ========================================================= */
 
 function escapeHtml(
   value
@@ -26713,6 +27558,7 @@ function qualifiesTelegram(
   return true;
 }
 
+
 function telegramQualificationReasons(
   candidate
 ) {
@@ -26918,9 +27764,11 @@ function buildTelegramQualificationDiagnostics(
   };
 }
 
+
 /* =========================================================
    V88 RICH V77-STYLE TELEGRAM CALL
    ========================================================= */
+
 
 function telegramAlertClass(
   candidate
@@ -27791,9 +28639,11 @@ function backlogLagLabel(
   return "CAUGHT_UP";
 }
 
+
 /* =========================================================
    V116 PRIORITY CANDIDATE COMPLETION
    ========================================================= */
+
 
 function terminalPriorityReject(
   candidate
@@ -27893,6 +28743,7 @@ function terminalPriorityReject(
       null
   };
 }
+
 
 /*
  * V119 PRE-MARKET TERMINAL PRUNING
@@ -28051,6 +28902,7 @@ function terminalPriorityRejectFromWatched(
   };
 }
 
+
 function marketPairAgeMinutes(
   watched
 ) {
@@ -28144,6 +28996,7 @@ function trueLaunchFreshness(
       "MATURE"
   };
 }
+
 
 function preMarketExcludedToken(
   token
@@ -28276,6 +29129,7 @@ function preMarketCandidateAllowed(
     !terminal.terminal
   );
 }
+
 
 function verifiedUsableMarketCache(
   token
@@ -29135,6 +29989,7 @@ function shouldKeepCompletionCandidate(
     ) >= 2
   );
 }
+
 
 /* =========================================================
    MAIN SCAN
@@ -31806,6 +32661,7 @@ async function scan(
       candidate
     );
 
+
     const v135CurrentAddress =
       normalize(
         candidate?.address
@@ -32365,6 +33221,7 @@ async function scan(
 
     priorityCompletionTelemetry.persistedForRetry =
       keepForRetry;
+
 
     priorityCompletionTelemetry.terminalRejected =
       terminalReject.terminal;
@@ -33717,7 +34574,7 @@ async function scan(
     status,
 
     scanMode:
-      "V199_BITQUERY_POOLID_FIRST_IDENTITY_HUNTER",
+      "V198_RESOLVED_POOL_REPLAY_DIAGNOSTIC_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -34423,6 +35280,10 @@ async function scan(
     partialHolderRetryFreshSlotReleaseV166: {
       ...partialHolderRetryFreshSlotReleaseV166,
 
+      // V167 telemetry-truth fix:
+      // Report the authoritative post-selection state rather than only whether
+      // the V166-specific <20-point bypass branch fired. Normal V139 fairness
+      // can also hand off the fresh slot while preserving the carried retry.
       carriedRetryPreserved:
         Boolean(
           pendingCompletionAddress &&
@@ -37302,6 +38163,7 @@ async function scan(
       persistentDirectionalUsdCompletion:
         "ENABLED_V176",
 
+
       directional15mAnd6hWindowsV177:
         "ENABLED_V177",
 
@@ -37704,36 +38566,6 @@ async function scan(
       telegramThresholdsUnchangedV192:
         "ENABLED_V192",
 
-      bitqueryDexPoolEventsPoolIdFirstV199:
-        "ENABLED_V199",
-
-      bitqueryDexPoolEventsDatasetV199:
-        "REALTIME_ONLY",
-
-      bitqueryDexPoolEventsExactPoolIdRequiredV199:
-        "ENABLED_V199",
-
-      bitqueryDexPoolEventsCurrencyOrderingV199:
-        "UNISWAP_V4_NUMERIC_ADDRESS_SORT",
-
-      bitqueryInitializeFallbackPreservedV199:
-        "ENABLED_V199",
-
-      successfulPoolIdentityPersistedImmediatelyV199:
-        "ENABLED_V199",
-
-      verifiedUsdPricingFrozenFromV196V199:
-        "ENABLED_V199",
-
-      identityGuessingV199:
-        "DISABLED",
-
-      hardRequestLimitUnchangedV199:
-        42,
-
-      telegramThresholdsUnchangedV199:
-        "ENABLED_V199",
-
       resolvedPoolReplayDiagnosticV198:
         "ENABLED_V198",
 
@@ -37994,7 +38826,7 @@ async function scan(
     },
 
     architecture:
-      "V199_BITQUERY_POOLID_FIRST_IDENTITY_V77_TELEGRAM_HUNTER",
+      "V198_RESOLVED_POOL_REPLAY_DIAGNOSTIC_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
