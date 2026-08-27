@@ -1,10 +1,16 @@
 /**
  * Robinhood Chain Meme Hunter
- * V191
+ * V192
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V191
+ * CURRENT BUILD: V192
+ * - V192 adds strict native-ETH quote valuation without changing V191 resolution/replay
+ * - Robinhood Chain native ETH (ZERO currency in Uniswap V4) is treated as 18-decimal ETH
+ * - Native ETH uses the same canonical WETH/USDG on-chain reference via 1:1 ETH/WETH wrapping denomination
+ * - No off-chain ETH price, symbol inference or guessed conversion is accepted
+ * - Without the same-batch canonical WETH/USDG reference, native-ETH trades remain USD UNVERIFIED
+ * - No extra external requests; V191 Bitquery live-pool priority remains unchanged
  * - V191 fixes the V190 live-test integration gap
  * - V190 already replayed live logs after resolution; the real issue was resolver target selection
  * - Bitquery now prioritises UNKNOWN PoolIds present in the CURRENT live batch
@@ -740,7 +746,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V191";
+const VERSION = "V192";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -873,6 +879,7 @@ const CANONICAL_WETH_V179 =
 
 const CANONICAL_USDG_DECIMALS_V179 = 6;
 const CANONICAL_WETH_DECIMALS_V187 = 18;
+const NATIVE_ETH_DECIMALS_V192 = 18;
 
 const ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179 = 6000;
 const ONCHAIN_DIRECTIONAL_MAX_TOKENS_V179 = 8;
@@ -10914,6 +10921,17 @@ function decodeV4SwapDirectionalV179(
         )
       : null;
 
+  const nativeEthQuoteV192 =
+    quoteTokenAddress === ZERO;
+
+  const nativeEthAmountV192 =
+    nativeEthQuoteV192
+      ? bigintDecimalToNumberV187(
+          quoteRaw,
+          NATIVE_ETH_DECIMALS_V192
+        )
+      : null;
+
   const wethUsdGPriceV187 =
     safeNumber(
       wethUsdGReferenceV187
@@ -10930,19 +10948,28 @@ function decodeV4SwapDirectionalV179(
         wethUsdGPriceV187
       : null;
 
+  const nativeEthUsdConvertedV192 =
+    nativeEthQuoteV192 &&
+    nativeEthAmountV192 > 0 &&
+    wethUsdGReferenceV187?.verified === true &&
+    wethUsdGPriceV187 > 0
+      ? nativeEthAmountV192 * wethUsdGPriceV187
+      : null;
+
   const exactUsdAmountV187 =
     canonicalUsdG &&
     usdGAmount !== null
-      ? safeNumber(
-          usdGAmount
-        )
+      ? safeNumber(usdGAmount)
       : (
-          Number.isFinite(
-            wethUsdConvertedV187
-          ) &&
+          Number.isFinite(wethUsdConvertedV187) &&
           wethUsdConvertedV187 > 0
             ? wethUsdConvertedV187
-            : null
+            : (
+                Number.isFinite(nativeEthUsdConvertedV192) &&
+                nativeEthUsdConvertedV192 > 0
+                  ? nativeEthUsdConvertedV192
+                  : null
+              )
         );
 
   return {
@@ -11002,9 +11029,29 @@ function decodeV4SwapDirectionalV179(
         ?.verified === true,
 
     wethUsdGPriceV187:
-      canonicalWeth &&
+      (canonicalWeth || nativeEthQuoteV192) &&
       wethUsdGPriceV187 > 0
         ? wethUsdGPriceV187
+        : null,
+
+    nativeEthQuoteV192,
+
+    nativeEthAmountVerifiedV192:
+      nativeEthQuoteV192 &&
+      nativeEthAmountV192 !== null,
+
+    nativeEthAmountV192:
+      nativeEthQuoteV192
+        ? nativeEthAmountV192
+        : null,
+
+    nativeEthUsesCanonicalWethUsdGReferenceV192:
+      nativeEthQuoteV192 &&
+      wethUsdGReferenceV187?.verified === true,
+
+    nativeEthWrappedParityBasisV192:
+      nativeEthQuoteV192
+        ? "NATIVE_ETH_1_TO_1_WETH_WRAPPING_DENOMINATION"
         : null,
 
     exactUsdVerified:
@@ -11029,7 +11076,11 @@ function decodeV4SwapDirectionalV179(
               wethUsdConvertedV187
             )
               ? "CANONICAL_WETH_X_CANONICAL_WETH_USDG_ONCHAIN_REFERENCE_V187"
-              : null
+              : (
+                  Number.isFinite(nativeEthUsdConvertedV192)
+                    ? "NATIVE_ETH_1_TO_1_WETH_X_CANONICAL_WETH_USDG_ONCHAIN_REFERENCE_V192"
+                    : null
+                )
           ),
 
     blockNumber,
@@ -11176,6 +11227,12 @@ function collectOnChainDirectionalSwapsV179(
     0;
 
   let exactUsdVerified =
+    0;
+
+  let nativeEthQuotedDecodedV192 =
+    0;
+
+  let nativeEthExactUsdVerifiedV192 =
     0;
 
   const wethUsdGReferenceV187 =
@@ -11368,6 +11425,17 @@ function collectOnChainDirectionalSwapsV179(
       wethUsdConvertedV187++;
     }
 
+    if (trade.nativeEthQuoteV192) {
+      nativeEthQuotedDecodedV192++;
+    }
+
+    if (
+      trade.nativeEthQuoteV192 &&
+      trade.exactUsdVerified
+    ) {
+      nativeEthExactUsdVerifiedV192++;
+    }
+
     if (
       trade.exactUsdVerified
     ) {
@@ -11519,6 +11587,16 @@ function collectOnChainDirectionalSwapsV179(
     wethUsdGReferenceV187,
 
     exactUsdVerified,
+
+    nativeEthQuotedDecodedV192,
+
+    nativeEthExactUsdVerifiedV192,
+
+    nativeEthUsdValuationV192:
+      "NATIVE_ETH_18_DECIMALS_X_SAME_BATCH_CANONICAL_WETH_USDG_REFERENCE",
+
+    nativeEthUsdFallbackPolicyV192:
+      "UNVERIFIED_IF_CANONICAL_WETH_USDG_REFERENCE_UNAVAILABLE",
 
     deduplicated,
 
@@ -32843,7 +32921,7 @@ async function scan(
     status,
 
     scanMode:
-      "V191_LIVE_POOL_PRIORITY_BITQUERY_REPLAY_HUNTER",
+      "V192_NATIVE_ETH_VERIFIED_USD_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -36808,6 +36886,33 @@ async function scan(
       telegramThresholdsUnchangedV188:
         "ENABLED_V188",
 
+      nativeEthDirectionalUsdValuation:
+        "ENABLED_V192",
+
+      nativeEthDecimalsV192:
+        18,
+
+      nativeEthWethWrappingParityBasisV192:
+        "STRICT_1_TO_1_DENOMINATION",
+
+      nativeEthUsesSameBatchCanonicalWethUsdGReferenceV192:
+        "ENABLED_V192",
+
+      nativeEthOffchainPriceInferenceV192:
+        "DISABLED",
+
+      nativeEthUsdUnverifiedWithoutReferenceV192:
+        "ENABLED_V192",
+
+      noExtraExternalRequestsV192:
+        "ENABLED_V192",
+
+      hardRequestLimitUnchangedV192:
+        42,
+
+      telegramThresholdsUnchangedV192:
+        "ENABLED_V192",
+
       bitqueryCurrentLivePoolPriority:
         "ENABLED_V191",
 
@@ -36891,7 +36996,7 @@ async function scan(
     },
 
     architecture:
-      "V191_LIVE_POOL_PRIORITY_BITQUERY_REPLAY_V77_TELEGRAM_HUNTER",
+      "V192_NATIVE_ETH_VERIFIED_USD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
