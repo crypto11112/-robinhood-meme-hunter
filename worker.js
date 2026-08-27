@@ -1,10 +1,16 @@
 /**
  * Robinhood Chain Meme Hunter
- * V187
+ * V188
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V187
+ * CURRENT BUILD: V188
+ * - V188 focuses exclusively on UNKNOWN_POOL_IDENTITY acquisition; V187 dollar maths is preserved
+ * - Adds a provider-safe exact Initialize(poolId) expansion strategy: successful empty exact-topic ranges grow geometrically instead of crawling backward forever at the minimum learned chunk
+ * - Growth remains bounded by each provider's learned failure ceiling and UNKNOWN_POOL_EXACT_MAX_BLOCKS
+ * - A successful larger empty range advances the persistent cursor by the full searched span, accelerating historical Initialize discovery without guessing identity
+ * - 400/429/provider failures retain the existing demotion, cooldown and request-budget protections
+ * - No scoring, Telegram thresholds, V187 WETH/USDG valuation, or verified-dollar rules are changed
  * - V187 adds zero-extra-request on-chain WETH -> USDG valuation from canonical WETH/USDG V4 Swap logs already present in the live discovery batch
  * - Canonical Robinhood Chain WETH and USDG addresses are used; no symbol guessing and no off-chain price is promoted to verified
  * - WETH/USDG reference price is derived from signed PoolManager amount0/amount1 deltas, using USDG 6 decimals and WETH 18 decimals
@@ -712,7 +718,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V187";
+const VERSION = "V188";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -4705,12 +4711,41 @@ async function getInitializeForPoolRange(
       continue;
     }
 
-    const shouldProbe =
+    const shouldProbeBaseV188 =
       exactPoolCanGrowthProbe(
         state,
         provider,
         runProbeState
       );
+
+    const learnedUpperBoundV188 =
+      provider === "ALCHEMY"
+        ? safeNumber(
+            discoveryService(state)
+              .alchemyExactPoolFailedUpperBound
+          )
+        : safeNumber(
+            discoveryService(state)
+              .publicExactPoolFailedUpperBound
+          );
+
+    const nextGrowthBlocksV188 =
+      Math.min(
+        UNKNOWN_POOL_EXACT_MAX_BLOCKS,
+        Math.max(
+          option.safeBlocks + 1,
+          option.safeBlocks * 2
+        )
+      );
+
+    const belowKnownFailureV188 =
+      !learnedUpperBoundV188 ||
+      nextGrowthBlocksV188 <
+        learnedUpperBoundV188;
+
+    const shouldProbe =
+      shouldProbeBaseV188 &&
+      belowKnownFailureV188;
 
     if (
       shouldProbe &&
@@ -4781,7 +4816,7 @@ async function getInitializeForPoolRange(
           exactRangeFallbackUsed,
           externalRequestsUsed,
           learningStatePath:
-            safeChunks.learningStatePath
+            `${safeChunks.learningStatePath}_V188_GEOMETRIC_EXACT_TOPIC_EXPANSION`
         };
       }
 
@@ -31728,7 +31763,7 @@ async function scan(
     status,
 
     scanMode:
-      "V187_ONCHAIN_WETH_USDG_VALUATION_HUNTER",
+      "V188_RPC_INITIALIZE_BINARY_EXPANSION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -35663,12 +35698,39 @@ async function scan(
       telegramThresholdsUnchangedV187:
         "ENABLED_V187",
 
+      rpcExactInitializeGeometricExpansion:
+        "ENABLED_V188",
+
+      rpcExactInitializeFilterV188:
+        "POOL_MANAGER_TOPIC0_INITIALIZE_TOPIC1_POOL_ID",
+
+      rpcExactInitializeIdentityGuessingV188:
+        "FORBIDDEN",
+
+      rpcExactInitializeGrowthV188:
+        "2X_PROVEN_RANGE_BOUNDED_BY_LEARNED_FAILURE",
+
+      rpcExactInitializePersistentCursorAdvanceV188:
+        "FULL_SUCCESSFUL_EMPTY_RANGE",
+
+      v187WethUsdMathPreservedV188:
+        "ENABLED_V188",
+
+      hardRequestLimitUnchangedV188:
+        42,
+
+      analysisRequestLimitUnchangedV188:
+        21,
+
+      telegramThresholdsUnchangedV188:
+        "ENABLED_V188",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V187_ONCHAIN_WETH_USDG_VALUATION_V77_TELEGRAM_HUNTER",
+      "V188_RPC_INITIALIZE_BINARY_EXPANSION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
