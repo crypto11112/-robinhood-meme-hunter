@@ -1,10 +1,13 @@
 /**
  * Robinhood Chain Meme Hunter
- * V177
+ * V178
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V177
+ * CURRENT BUILD: V178
+ * - V178 fixes analysis-queue priority ordering so persistent V176 directional-USD retries cannot jump ahead of protected carried/fresh candidate completion
+ * - V178 keeps carried retry completion first when V159/V166 handoff rules require it, then the current fresh-market target, then the unresolved directional-USD target
+ * - V178 preserves V177 verified 15m/6h windows, V176 persistence, the 42-request hard ceiling, provider cooldowns, Telegram reserve and all qualification thresholds
  * - V177 adds verified 15m and 6h buy/sell windows from the existing GeckoTerminal directional-trade feed and rolling ledger
  * - V177 adds 15m/6h verified buy USD, sell USD, net flow and USD buy pressure with no extrapolation
  * - V177 makes no extra provider request per window; all five windows reuse the same trade batch / persistent ledger
@@ -657,7 +660,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V177";
+const VERSION = "V178";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -24588,33 +24591,48 @@ async function scan(
    * has already decided is most important to finish. Analyse it before lower
    * priority candidates so they cannot consume its required budget first.
    */
+  /*
+   * V178:
+   * V176 persistence must not outrank protected candidate completion.
+   * Order is now:
+   *   1) carried retry completion when V159/V166 explicitly preserves it,
+   *   2) current fresh-market / completion target,
+   *   3) unresolved V176 directional-USD target,
+   *   4) remaining selected candidates.
+   * This is ordering-only: no new request class, no higher request limit,
+   * and no provider cadence or Telegram-threshold change.
+   */
+  const protectedCarriedAnalysisTargetV178 =
+    (
+      (
+        freshMarketSlotHandoffV159
+          .triggered ||
+        partialHolderFreshSlotReleaseTriggeredV166
+      ) &&
+      carriedAnalysisTargetV159
+    )
+      ? carriedAnalysisTargetV159
+      : null;
+
   const analysisSelectedRawV142 =
     marketFreshTarget ||
-    carriedAnalysisTargetV159
+    protectedCarriedAnalysisTargetV178 ||
+    pendingDirectionalUsdTokenV176
       ? uniqueBy(
           [
             ...(
-              pendingDirectionalUsdTokenV176
-                ? [pendingDirectionalUsdTokenV176]
-                : []
-            ),
-            ...(
-              (
-                freshMarketSlotHandoffV159
-                  .triggered ||
-                partialHolderFreshSlotReleaseTriggeredV166
-              ) &&
-              carriedAnalysisTargetV159
-                ? [
-                    carriedAnalysisTargetV159
-                  ]
+              protectedCarriedAnalysisTargetV178
+                ? [protectedCarriedAnalysisTargetV178]
                 : []
             ),
             ...(
               marketFreshTarget
-                ? [
-                    marketFreshTarget
-                  ]
+                ? [marketFreshTarget]
+                : []
+            ),
+            ...(
+              pendingDirectionalUsdTokenV176
+                ? [pendingDirectionalUsdTokenV176]
                 : []
             ),
             ...selected
@@ -27810,7 +27828,7 @@ async function scan(
     status,
 
     scanMode:
-      "V177_15M_6H_VERIFIED_DIRECTIONAL_WINDOWS_HUNTER",
+      "V178_PROTECTED_COMPLETION_QUEUE_ORDER_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -31372,12 +31390,36 @@ async function scan(
       telegramThresholdsUnchangedV176:
         "ENABLED_V176",
 
+      protectedCompletionQueueOrderV178:
+        "ENABLED_V178",
+
+      carriedRetryBeforeDirectionalUsdV178:
+        "ENABLED_V178",
+
+      freshMarketTargetBeforeDirectionalUsdV178:
+        "ENABLED_V178",
+
+      persistentDirectionalUsdStillPrioritizedV178:
+        "ENABLED_V178",
+
+      noExternalRequestRateIncreaseV178:
+        "ENABLED_V178",
+
+      hardRequestLimitUnchangedV178:
+        MAX_EXTERNAL_REQUESTS,
+
+      analysisRequestLimitUnchangedV178:
+        ANALYSIS_REQUEST_LIMIT,
+
+      telegramThresholdsUnchangedV178:
+        "ENABLED_V178",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V177_15M_6H_VERIFIED_DIRECTIONAL_WINDOWS_V77_TELEGRAM_HUNTER",
+      "V178_PROTECTED_COMPLETION_QUEUE_ORDER_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
