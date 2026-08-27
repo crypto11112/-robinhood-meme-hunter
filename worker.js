@@ -632,7 +632,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V171";
+const VERSION = "V172";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -850,17 +850,18 @@ const CACHED_ANALYSIS_COST = 3;
 
 
 /*
- * V171:
- * - Preserves V170 post-analysis residual backlog catch-up
- * - NEW: a carried retry candidate can release the scarce priority-retry lane
- *   once verified evidence shows it is MATURE (>24h under the existing launch
- *   stage definition), has zero verified 24h market volume and transactions,
- *   has no current V4 swaps/liquidity events, and is not new/live
+ * V172:
+ * - Preserves V171 mature-zero-activity priority release and V170 residual backlog catch-up
+ * - FIX: temporary market-provider unavailability can use the token's existing
+ *   VERIFIED stale market cache for the V171 release decision
+ * - SAFETY: fallback cache must be verified, must contain exact 24h volume and
+ *   transaction evidence, and must be <= existing MARKET_STALE_CACHE_MS (30m)
+ * - SAFETY: maturity is recomputed from the cached verified pairCreatedAt using
+ *   the existing launchStage() definition; no age/stage is guessed
+ * - SAFETY: unverified/negative/older caches never trigger priority release
  * - This only releases priority state; the token remains on the watchlist
- * - Provider outages/unverified market evidence cannot trigger this release
- * - Existing V138 retry caps and conservative V140 7-day relevance expiry stay
- *   unchanged
- * - No scoring, Telegram threshold, request-budget, or provider-rate changes
+ * - Existing V138 retry caps, V140 7-day relevance expiry, scoring, Telegram
+ *   thresholds, request budgets, provider rates and KV history remain unchanged
  */
 
 /* =========================================================
@@ -22998,17 +22999,15 @@ function priorityRetryRelevanceExpiryV140(
   };
 }
 
-function matureZeroActivityPriorityReleaseV171(
-  candidate
+function matureZeroActivityPriorityReleaseV172(
+  candidate,
+  watched = null
 ) {
-  if (
-    !candidate ||
-    !candidate?.market?.verified
-  ) {
+  if (!candidate) {
     return {
       release: false,
       reason: null,
-      evidence: "MARKET_NOT_VERIFIED"
+      evidence: "CANDIDATE_UNAVAILABLE"
     };
   }
 
@@ -23024,36 +23023,97 @@ function matureZeroActivityPriorityReleaseV171(
     };
   }
 
+  let marketEvidence =
+    candidate?.market?.verified === true
+      ? candidate.market
+      : null;
+
+  let marketEvidenceSource =
+    marketEvidence
+      ? "CURRENT_VERIFIED_MARKET"
+      : null;
+
+  let cacheAgeMs = null;
+
+  if (!marketEvidence) {
+    const cache = watched?.marketCache;
+    const timestamp = safeNumber(cache?.timestamp);
+    const ageMs = timestamp > 0
+      ? Date.now() - timestamp
+      : null;
+    const data = cache?.data;
+
+    const cacheWithinExistingStaleWindow =
+      ageMs !== null &&
+      ageMs >= 0 &&
+      ageMs <= MARKET_STALE_CACHE_MS;
+
+    const exact24hEvidencePresent =
+      data?.verified === true &&
+      Number.isFinite(Number(data?.volume?.h24)) &&
+      Number.isFinite(Number(data?.transactions?.h24?.total));
+
+    if (
+      cacheWithinExistingStaleWindow &&
+      exact24hEvidencePresent
+    ) {
+      marketEvidence = data;
+      marketEvidenceSource = "VERIFIED_STALE_MARKET_CACHE_V172";
+      cacheAgeMs = ageMs;
+    }
+  }
+
+  if (!marketEvidence) {
+    return {
+      release: false,
+      reason: null,
+      evidence: "MARKET_NOT_VERIFIED",
+      marketEvidenceSource,
+      cacheAgeMs,
+      cacheMaxAgeMs: MARKET_STALE_CACHE_MS
+    };
+  }
+
+  const stageEvidence = launchStage(marketEvidence);
+
   if (
-    candidate?.launchStage?.verified !== true ||
-    candidate?.launchStage?.stage !== "MATURE"
+    stageEvidence?.verified !== true ||
+    stageEvidence?.stage !== "MATURE"
   ) {
     return {
       release: false,
       reason: null,
-      evidence: "NOT_MATURE"
+      evidence: "NOT_MATURE",
+      marketEvidenceSource,
+      cacheAgeMs,
+      cacheMaxAgeMs: MARKET_STALE_CACHE_MS,
+      stage: stageEvidence?.stage || "UNVERIFIED",
+      ageMinutes: stageEvidence?.ageMinutes ?? null
     };
   }
 
-  const volume24h =
-    safeNumber(
-      candidate?.market?.volume?.h24
-    );
+  const rawVolume24h = marketEvidence?.volume?.h24;
+  const rawTxns24h = marketEvidence?.transactions?.h24?.total;
 
-  const txns24h =
-    safeNumber(
-      candidate?.market?.transactions?.h24?.total
-    );
+  if (
+    !Number.isFinite(Number(rawVolume24h)) ||
+    !Number.isFinite(Number(rawTxns24h))
+  ) {
+    return {
+      release: false,
+      reason: null,
+      evidence: "VERIFIED_MARKET_24H_ACTIVITY_INCOMPLETE",
+      marketEvidenceSource,
+      cacheAgeMs,
+      cacheMaxAgeMs: MARKET_STALE_CACHE_MS
+    };
+  }
 
-  const onChainSwaps =
-    safeNumber(
-      candidate?.activity?.swaps
-    );
+  const volume24h = safeNumber(rawVolume24h);
+  const txns24h = safeNumber(rawTxns24h);
 
-  const onChainLiquidityEvents =
-    safeNumber(
-      candidate?.activity?.liquidityEvents
-    );
+  const onChainSwaps = safeNumber(candidate?.activity?.swaps);
+  const onChainLiquidityEvents = safeNumber(candidate?.activity?.liquidityEvents);
 
   const zeroVerified24hActivity =
     volume24h === 0 &&
@@ -23071,6 +23131,9 @@ function matureZeroActivityPriorityReleaseV171(
       release: false,
       reason: null,
       evidence: "ACTIVITY_PRESENT",
+      marketEvidenceSource,
+      cacheAgeMs,
+      cacheMaxAgeMs: MARKET_STALE_CACHE_MS,
       volume24h,
       txns24h,
       onChainSwaps,
@@ -23080,10 +23143,13 @@ function matureZeroActivityPriorityReleaseV171(
 
   return {
     release: true,
-    reason: "MATURE_ZERO_ACTIVITY_PRIORITY_RELEASE_V171",
+    reason: "MATURE_ZERO_ACTIVITY_PRIORITY_RELEASE_V172",
     evidence: "VERIFIED_MATURE_ZERO_24H_AND_ONCHAIN_ACTIVITY",
-    stage: candidate.launchStage.stage,
-    ageMinutes: candidate.launchStage.ageMinutes ?? null,
+    marketEvidenceSource,
+    cacheAgeMs,
+    cacheMaxAgeMs: MARKET_STALE_CACHE_MS,
+    stage: stageEvidence.stage,
+    ageMinutes: stageEvidence.ageMinutes ?? null,
     volume24h,
     txns24h,
     onChainSwaps,
@@ -23094,7 +23160,8 @@ function matureZeroActivityPriorityReleaseV171(
 
 function shouldKeepCompletionCandidate(
   candidate,
-  previousCompletion = null
+  previousCompletion = null,
+  watched = null
 ) {
 
   const terminal =
@@ -23129,8 +23196,9 @@ function shouldKeepCompletionCandidate(
   }
 
   const matureZeroActivityRelease =
-    matureZeroActivityPriorityReleaseV171(
-      candidate
+    matureZeroActivityPriorityReleaseV172(
+      candidate,
+      watched
     );
 
   if (
@@ -24440,7 +24508,7 @@ async function scan(
     relevanceExpiryV140:
       null,
 
-    matureZeroActivityPriorityReleaseV171:
+    matureZeroActivityPriorityReleaseV172:
       null,
 
     priorityFreshSchedule:
@@ -26067,6 +26135,14 @@ async function scan(
   if (
     completionCandidate
   ) {
+    const completionWatched =
+      state.watchedTokens?.find(
+        watched =>
+          normalize(watched?.address) ===
+          normalize(completionCandidate?.address)
+      ) ||
+      null;
+
     const blockers =
       completionCandidateBlockers(
         completionCandidate
@@ -26092,16 +26168,18 @@ async function scan(
         completionCandidate
       );
 
-    const matureZeroActivityReleaseV171 =
-      matureZeroActivityPriorityReleaseV171(
-        completionCandidate
+    const matureZeroActivityReleaseV172 =
+      matureZeroActivityPriorityReleaseV172(
+        completionCandidate,
+        completionWatched
       );
 
     const keepForRetry =
       !terminalReject.terminal &&
       shouldKeepCompletionCandidate(
         completionCandidate,
-        state.priorityCandidateCompletion
+        state.priorityCandidateCompletion,
+        completionWatched
       );
 
     priorityCompletionTelemetry
@@ -26109,8 +26187,8 @@ async function scan(
       relevanceExpiryV140;
 
     priorityCompletionTelemetry
-      .matureZeroActivityPriorityReleaseV171 =
-      matureZeroActivityReleaseV171;
+      .matureZeroActivityPriorityReleaseV172 =
+      matureZeroActivityReleaseV172;
 
     priorityCompletionTelemetry.symbol =
       completionCandidate.symbol ||
@@ -27204,7 +27282,7 @@ async function scan(
     status,
 
     scanMode:
-      "V171_MATURE_ZERO_ACTIVITY_PRIORITY_RELEASE_HUNTER",
+      "V172_VERIFIED_STALE_CACHE_PRIORITY_RELEASE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -30638,12 +30716,42 @@ async function scan(
       telegramThresholdsUnchangedV171:
         "ENABLED_V171",
 
+      verifiedStaleMarketCachePriorityReleaseV172:
+        "ENABLED_V172",
+
+      priorityReleaseCacheMaxAgeMsV172:
+        MARKET_STALE_CACHE_MS,
+
+      cachedMaturityRecomputedWithLaunchStageV172:
+        "ENABLED_V172",
+
+      negativeOrUnverifiedCacheCannotReleaseV172:
+        "ENABLED_V172",
+
+      currentOnChainZeroActivityStillRequiredV172:
+        "ENABLED_V172",
+
+      v171PrioritySafetyPreservedV172:
+        "ENABLED_V172",
+
+      v170BacklogReclaimUnchangedV172:
+        "ENABLED_V172",
+
+      hardRequestLimitUnchangedV172:
+        42,
+
+      analysisRequestLimitUnchangedV172:
+        21,
+
+      telegramThresholdsUnchangedV172:
+        "ENABLED_V172",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V171_MATURE_ZERO_ACTIVITY_PRIORITY_RELEASE_V77_TELEGRAM_HUNTER",
+      "V172_VERIFIED_STALE_CACHE_PRIORITY_RELEASE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
