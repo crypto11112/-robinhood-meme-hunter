@@ -1,10 +1,14 @@
 /**
  * Robinhood Chain Meme Hunter
- * V180
+ * V181
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V180
+ * CURRENT BUILD: V181
+ * - V181 fixes the V180 Blockscout directional-USD upper-block handoff bug
+ * - V180 accidentally passed the latestBlock function object into the historical USDG reader instead of the already-confirmed numeric latestNumber
+ * - V181 now passes latestNumber directly and adds explicit block-range input telemetry so this cannot silently regress
+ * - No scoring, Telegram thresholds, request ceilings, V4 decoding, 15m/6h windows, or existing protections are changed
  * - V180 adds exact-pool Blockscout history for verified Uniswap V4 USDG pools so directional USD can be reconstructed from timestamped on-chain Swap logs
  * - V180 uses canonical USDG's 6-decimal quote amount and its official 1:1 USD redemption denomination as the USD basis; no WETH/unknown-quote USD value is inferred
  * - V180 only marks a rolling window VERIFIED when the queried pool history is complete (response below the 1,000-log API ceiling) and every included trade decodes cleanly
@@ -670,7 +674,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V180";
+const VERSION = "V181";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9459,15 +9463,40 @@ async function blockscoutV4UsdGDirectionalV180(
     };
   }
 
+  const rawFromBlockV181 =
+    identity?.blockNumber;
+
+  const rawToBlockV181 =
+    latestBlock;
+
   const fromBlock =
     blockNumberFromAnyV180(
-      identity?.blockNumber
+      rawFromBlockV181
     );
 
   const toBlock =
     blockNumberFromAnyV180(
-      latestBlock
+      rawToBlockV181
     );
+
+  const blockRangeInputV181 = {
+    fromRaw:
+      rawFromBlockV181 ??
+      null,
+    toRaw:
+      rawToBlockV181 ??
+      null,
+    fromType:
+      typeof rawFromBlockV181,
+    toType:
+      typeof rawToBlockV181,
+    parsedFromBlock:
+      fromBlock,
+    parsedToBlock:
+      toBlock,
+    expectedToSource:
+      "SCAN_LATEST_NUMBER"
+  };
 
   if (
     !Number.isFinite(
@@ -9484,7 +9513,8 @@ async function blockscoutV4UsdGDirectionalV180(
       status:
         "INVALID_BLOCK_RANGE",
       fromBlock,
-      toBlock
+      toBlock,
+      blockRangeInputV181
     };
   }
 
@@ -9500,7 +9530,8 @@ async function blockscoutV4UsdGDirectionalV180(
       status:
         "ANALYSIS_BUDGET_PROTECTED",
       fromBlock,
-      toBlock
+      toBlock,
+      blockRangeInputV181
     };
   }
 
@@ -9534,7 +9565,8 @@ async function blockscoutV4UsdGDirectionalV180(
         status:
           `BLOCKSCOUT_HTTP_${response.status}`,
         fromBlock,
-        toBlock
+        toBlock,
+        blockRangeInputV181
       };
     }
 
@@ -9662,6 +9694,7 @@ async function blockscoutV4UsdGDirectionalV180(
             : "BLOCKSCOUT_1000_LOG_CEILING_HISTORY_INCOMPLETE",
       fromBlock,
       toBlock,
+      blockRangeInputV181,
       poolId,
       quoteTokenAddress:
         CANONICAL_USDG_V179,
@@ -29033,7 +29066,7 @@ async function scan(
         v180UsdGDirectionalTarget,
         budget,
         state,
-        latestBlock
+        latestNumber
       );
 
     blockscoutDirectionalUsdV180 = {
@@ -29795,7 +29828,7 @@ async function scan(
     status,
 
     scanMode:
-      "V180_BLOCKSCOUT_V4_USDG_DIRECTIONAL_USD_HUNTER",
+      "V181_BLOCKSCOUT_USDG_LATEST_BLOCK_HANDOFF_FIX_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -33451,12 +33484,33 @@ async function scan(
       telegramThresholdsUnchangedV180:
         "ENABLED_V180",
 
+      blockscoutLatestBlockHandoffFix:
+        "ENABLED_V181",
+
+      blockscoutHistoricalToBlockSourceV181:
+        "SCAN_LATEST_NUMBER",
+
+      blockRangeInputTelemetryV181:
+        "ENABLED_V181",
+
+      v180DirectionalUsdLogicUnchangedV181:
+        "ENABLED_V181",
+
+      hardRequestLimitUnchangedV181:
+        42,
+
+      analysisRequestLimitUnchangedV181:
+        21,
+
+      telegramThresholdsUnchangedV181:
+        "ENABLED_V181",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V180_BLOCKSCOUT_V4_USDG_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
+      "V181_BLOCKSCOUT_USDG_LATEST_BLOCK_HANDOFF_FIX_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
