@@ -1,10 +1,10 @@
 /**
  * Robinhood Chain Meme Hunter
- * V194
+ * V195
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V194
+ * CURRENT BUILD: V195
  * - V192 adds strict native-ETH quote valuation without changing V191 resolution/replay
  * - Robinhood Chain native ETH (ZERO currency in Uniswap V4) is treated as 18-decimal ETH
  * - Native ETH uses the same canonical WETH/USDG on-chain reference via 1:1 ETH/WETH wrapping denomination
@@ -746,7 +746,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V194";
+const VERSION = "V195";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -825,6 +825,17 @@ const POOL_MANAGER =
 
 const BITQUERY_GRAPHQL_V2 =
   "https://streaming.bitquery.io/graphql";
+
+const UNISWAP_V3_FACTORY_V195_ENV =
+  "UNISWAP_V3_FACTORY";
+
+const V3_STANDARD_FEES_V195 = [
+  100,
+  500,
+  3000,
+  10000
+];
+
 
 const ZERO =
   "0x0000000000000000000000000000000000000000";
@@ -10493,6 +10504,547 @@ function medianNumberV187(
 }
 
 
+
+function encodeAddressWordV195(
+  address
+) {
+  return normalize(address)
+    .replace(/^0x/, "")
+    .padStart(64, "0");
+}
+
+function encodeUint24WordV195(
+  value
+) {
+  return Math.max(
+    0,
+    Math.floor(
+      safeNumber(value)
+    )
+  )
+    .toString(16)
+    .padStart(64, "0");
+}
+
+function decodeAddressWordV195(
+  hex
+) {
+  const clean =
+    String(hex || "")
+      .replace(/^0x/, "");
+
+  if (clean.length < 64) {
+    return null;
+  }
+
+  const address =
+    normalize(
+      "0x" +
+      clean.slice(24, 64)
+    );
+
+  return isAddress(address)
+    ? address
+    : null;
+}
+
+function decodeUint256WordV195(
+  hex,
+  wordIndex = 0
+) {
+  const clean =
+    String(hex || "")
+      .replace(/^0x/, "");
+
+  const start =
+    wordIndex * 64;
+
+  const word =
+    clean.slice(
+      start,
+      start + 64
+    );
+
+  if (word.length !== 64) {
+    return null;
+  }
+
+  try {
+    return BigInt(
+      "0x" + word
+    );
+  } catch {
+    return null;
+  }
+}
+
+async function ethCallV195(
+  env,
+  state,
+  budget,
+  to,
+  data,
+  label
+) {
+  if (
+    !budgetAvailable(
+      budget,
+      "analysis"
+    )
+  ) {
+    return {
+      ok: false,
+      status:
+        "ANALYSIS_BUDGET_PROTECTED",
+      result: null,
+      externalRequestsUsed: 0,
+      error: null
+    };
+  }
+
+  if (
+    !consumeBudget(
+      budget,
+      "analysis",
+      label
+    )
+  ) {
+    return {
+      ok: false,
+      status:
+        "ANALYSIS_BUDGET_PROTECTED",
+      result: null,
+      externalRequestsUsed: 0,
+      error: null
+    };
+  }
+
+  const rpcUrl =
+    String(
+      env.ALCHEMY_RPC_URL ||
+      env.ROBINHOOD_RPC_URL ||
+      PUBLIC_RPC
+    ).trim();
+
+  try {
+    const response =
+      await fetch(
+        rpcUrl,
+        {
+          method: "POST",
+          headers: {
+            "content-type":
+              "application/json"
+          },
+          body:
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              method: "eth_call",
+              params: [
+                {
+                  to,
+                  data
+                },
+                "latest"
+              ]
+            })
+        }
+      );
+
+    const payload =
+      await response.json();
+
+    if (
+      !response.ok ||
+      payload?.error
+    ) {
+      return {
+        ok: false,
+        status:
+          payload?.error
+            ? "RPC_ERROR"
+            : `HTTP_${response.status}`,
+        result: null,
+        externalRequestsUsed: 1,
+        error:
+          payload?.error?.message ||
+          null
+      };
+    }
+
+    return {
+      ok: true,
+      status: "OK",
+      result:
+        payload?.result ||
+        null,
+      externalRequestsUsed: 1,
+      error: null
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status:
+        "FETCH_ERROR",
+      result: null,
+      externalRequestsUsed: 1,
+      error:
+        errorString(error)
+    };
+  }
+}
+
+function sqrtPriceX96ToUsdGPerWethV195(
+  sqrtPriceX96,
+  token0,
+  token1
+) {
+  if (
+    sqrtPriceX96 === null ||
+    sqrtPriceX96 <= 0n
+  ) {
+    return null;
+  }
+
+  const t0 =
+    normalize(token0);
+
+  const t1 =
+    normalize(token1);
+
+  const pairValid =
+    (
+      t0 === CANONICAL_WETH_V179 &&
+      t1 === CANONICAL_USDG_V179
+    ) ||
+    (
+      t1 === CANONICAL_WETH_V179 &&
+      t0 === CANONICAL_USDG_V179
+    );
+
+  if (!pairValid) {
+    return null;
+  }
+
+  /*
+   * raw token1/token0 = sqrtPriceX96^2 / 2^192.
+   * Convert with token decimals. Use Number only after scaling the ratio;
+   * ETH/USD values are comfortably inside IEEE finite range.
+   */
+  const sqrt =
+    Number(
+      sqrtPriceX96
+    );
+
+  if (
+    !Number.isFinite(sqrt) ||
+    sqrt <= 0
+  ) {
+    return null;
+  }
+
+  const rawToken1PerToken0 =
+    (sqrt * sqrt) /
+    Math.pow(2, 192);
+
+  if (
+    !Number.isFinite(
+      rawToken1PerToken0
+    ) ||
+    rawToken1PerToken0 <= 0
+  ) {
+    return null;
+  }
+
+  const wethDecimals =
+    CANONICAL_WETH_DECIMALS_V187;
+
+  const usdgDecimals =
+    CANONICAL_USDG_DECIMALS_V179;
+
+  if (
+    t0 === CANONICAL_WETH_V179
+  ) {
+    return (
+      rawToken1PerToken0 *
+      Math.pow(
+        10,
+        wethDecimals -
+        usdgDecimals
+      )
+    );
+  }
+
+  const token0PerToken1 =
+    1 /
+    rawToken1PerToken0;
+
+  return (
+    token0PerToken1 *
+    Math.pow(
+      10,
+      wethDecimals -
+      usdgDecimals
+    )
+  );
+}
+
+async function getV3WethUsdGReferenceV195(
+  env,
+  state,
+  budget
+) {
+  const factory =
+    normalize(
+      env[
+        UNISWAP_V3_FACTORY_V195_ENV
+      ]
+    );
+
+  const base = {
+    attempted: false,
+    configured:
+      isAddress(factory) &&
+      factory !== ZERO,
+    factory:
+      isAddress(factory)
+        ? factory
+        : null,
+    feeTiersChecked: [],
+    selectedFee: null,
+    poolAddress: null,
+    token0: null,
+    token1: null,
+    liquidity: null,
+    sqrtPriceX96: null,
+    verified: false,
+    priceUsdGPerWeth: null,
+    source:
+      "UNISWAP_V3_CANONICAL_WETH_USDG_SLOT0_V195",
+    status: null,
+    externalRequestsUsed: 0,
+    error: null
+  };
+
+  if (
+    !isAddress(factory) ||
+    factory === ZERO
+  ) {
+    return {
+      ...base,
+      status:
+        "V3_FACTORY_NOT_CONFIGURED"
+    };
+  }
+
+  /*
+   * getPool(address,address,uint24)
+   * selector = 0x1698ee82
+   */
+  const getPoolSelector =
+    "1698ee82";
+
+  let requestsUsed =
+    0;
+
+  for (
+    const fee
+    of V3_STANDARD_FEES_V195
+  ) {
+    const data =
+      "0x" +
+      getPoolSelector +
+      encodeAddressWordV195(
+        CANONICAL_WETH_V179
+      ) +
+      encodeAddressWordV195(
+        CANONICAL_USDG_V179
+      ) +
+      encodeUint24WordV195(
+        fee
+      );
+
+    const result =
+      await ethCallV195(
+        env,
+        state,
+        budget,
+        factory,
+        data,
+        `V195_V3_GETPOOL_${fee}`
+      );
+
+    requestsUsed +=
+      safeNumber(
+        result.externalRequestsUsed
+      );
+
+    base.feeTiersChecked.push({
+      fee,
+      status:
+        result.status
+    });
+
+    if (!result.ok) {
+      continue;
+    }
+
+    const pool =
+      decodeAddressWordV195(
+        result.result
+      );
+
+    if (
+      !isAddress(pool) ||
+      pool === ZERO
+    ) {
+      continue;
+    }
+
+    /*
+     * token0() 0x0dfe1681
+     * token1() 0xd21220a7
+     * slot0()  0x3850c7bd
+     * liquidity() 0x1a686502
+     */
+    const calls = [];
+
+    for (
+      const [name, selector]
+      of [
+        ["token0", "0x0dfe1681"],
+        ["token1", "0xd21220a7"],
+        ["slot0", "0x3850c7bd"],
+        ["liquidity", "0x1a686502"]
+      ]
+    ) {
+      const call =
+        await ethCallV195(
+          env,
+          state,
+          budget,
+          pool,
+          selector,
+          `V195_V3_${name.toUpperCase()}`
+        );
+
+      requestsUsed +=
+        safeNumber(
+          call.externalRequestsUsed
+        );
+
+      calls.push([
+        name,
+        call
+      ]);
+    }
+
+    const map =
+      Object.fromEntries(
+        calls
+      );
+
+    if (
+      !map.token0?.ok ||
+      !map.token1?.ok ||
+      !map.slot0?.ok ||
+      !map.liquidity?.ok
+    ) {
+      continue;
+    }
+
+    const token0 =
+      decodeAddressWordV195(
+        map.token0.result
+      );
+
+    const token1 =
+      decodeAddressWordV195(
+        map.token1.result
+      );
+
+    const sqrtPriceX96 =
+      decodeUint256WordV195(
+        map.slot0.result,
+        0
+      );
+
+    const liquidity =
+      decodeUint256WordV195(
+        map.liquidity.result,
+        0
+      );
+
+    const price =
+      sqrtPriceX96ToUsdGPerWethV195(
+        sqrtPriceX96,
+        token0,
+        token1
+      );
+
+    if (
+      liquidity === null ||
+      liquidity <= 0n ||
+      !Number.isFinite(price) ||
+      price <= 0
+    ) {
+      continue;
+    }
+
+    state.v3WethUsdGReferenceV195 = {
+      factory,
+      poolAddress:
+        pool,
+      fee,
+      token0,
+      token1,
+      liquidity:
+        liquidity.toString(),
+      sqrtPriceX96:
+        sqrtPriceX96.toString(),
+      priceUsdGPerWeth:
+        price,
+      verifiedAt:
+        nowIso()
+    };
+
+    return {
+      ...base,
+      attempted: true,
+      selectedFee:
+        fee,
+      poolAddress:
+        pool,
+      token0,
+      token1,
+      liquidity:
+        liquidity.toString(),
+      sqrtPriceX96:
+        sqrtPriceX96.toString(),
+      verified: true,
+      priceUsdGPerWeth:
+        price,
+      status:
+        "VERIFIED",
+      externalRequestsUsed:
+        requestsUsed
+    };
+  }
+
+  return {
+    ...base,
+    attempted:
+      requestsUsed > 0,
+    status:
+      requestsUsed > 0
+        ? "NO_VERIFIED_V3_WETH_USDG_POOL"
+        : "ANALYSIS_BUDGET_PROTECTED",
+    externalRequestsUsed:
+      requestsUsed
+  };
+}
+
 function canonicalWethUsdGPoolIdsV194(
   state
 ) {
@@ -11711,7 +12263,8 @@ function pruneOnChainDirectionalStoreV179(
 function collectOnChainDirectionalSwapsV179(
   state,
   logs,
-  externalWethUsdGReferenceV194 = null
+  externalWethUsdGReferenceV194 = null,
+  v3WethUsdGReferenceV195 = null
 ) {
   const now =
     Date.now();
@@ -11762,10 +12315,15 @@ function collectOnChainDirectionalSwapsV179(
       ?.verified === true
       ? sameBatchWethUsdGReferenceV187
       : (
-          externalWethUsdGReferenceV194
+          v3WethUsdGReferenceV195
             ?.verified === true
-            ? externalWethUsdGReferenceV194
-            : sameBatchWethUsdGReferenceV187
+            ? v3WethUsdGReferenceV195
+            : (
+                externalWethUsdGReferenceV194
+                  ?.verified === true
+                  ? externalWethUsdGReferenceV194
+                  : sameBatchWethUsdGReferenceV187
+              )
         );
 
   let deduplicated =
@@ -12161,7 +12719,7 @@ function collectOnChainDirectionalSwapsV179(
       true,
 
     usdPolicy:
-      "V194_DIRECT_USDG_OR_ETH_WETH_WITH_VERIFIED_SAME_BATCH_OR_BITQUERY_CANONICAL_WETH_USDG_SWAP_REFERENCE"
+      "V195_DIRECT_USDG_OR_ETH_WETH_WITH_VERIFIED_SAME_BATCH_OR_V3_SLOT0_OR_BITQUERY_WETH_USDG_REFERENCE"
   };
 }
 
@@ -29268,9 +29826,40 @@ async function scan(
       liveOutput.logs
     );
 
-  const bitqueryWethUsdGReferenceV194 =
+  const v3WethUsdGReferenceV195 =
     sameBatchWethUsdGReferencePrecheckV194
       ?.verified === true
+      ? {
+          attempted: false,
+          configured:
+            Boolean(
+              normalize(
+                env[
+                  UNISWAP_V3_FACTORY_V195_ENV
+                ]
+              )
+            ),
+          verified: false,
+          status:
+            "SKIPPED_VERIFIED_REFERENCE_ALREADY_AVAILABLE",
+          source:
+            "UNISWAP_V3_CANONICAL_WETH_USDG_SLOT0_V195",
+          priceUsdGPerWeth: null,
+          externalRequestsUsed: 0
+        }
+      : await getV3WethUsdGReferenceV195(
+          env,
+          state,
+          budget
+        );
+
+  const bitqueryWethUsdGReferenceV194 =
+    (
+      sameBatchWethUsdGReferencePrecheckV194
+        ?.verified === true ||
+      v3WethUsdGReferenceV195
+        ?.verified === true
+    )
       ? {
           attempted: false,
           configured:
@@ -29286,7 +29875,7 @@ async function scan(
             ).length,
           selectedPoolId: null,
           status:
-            "SKIPPED_SAME_BATCH_REFERENCE_ALREADY_VERIFIED",
+            "SKIPPED_VERIFIED_REFERENCE_ALREADY_AVAILABLE",
           httpStatus: null,
           verified: false,
           source:
@@ -29307,12 +29896,17 @@ async function scan(
     collectOnChainDirectionalSwapsV179(
       state,
       liveOutput.logs,
-      bitqueryWethUsdGReferenceV194
+      bitqueryWethUsdGReferenceV194,
+      v3WethUsdGReferenceV195
     );
 
   onChainDirectionalV179
     .bitqueryWethUsdGReferenceV194 =
       bitqueryWethUsdGReferenceV194;
+
+  onChainDirectionalV179
+    .v3WethUsdGReferenceV195 =
+      v3WethUsdGReferenceV195;
 
   for (
     const token
@@ -33494,7 +34088,7 @@ async function scan(
     status,
 
     scanMode:
-      "V194_BITQUERY_WETH_USDG_REFERENCE_HUNTER",
+      "V195_V3_WETH_USDG_ONCHAIN_REFERENCE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -37486,6 +38080,42 @@ async function scan(
       telegramThresholdsUnchangedV192:
         "ENABLED_V192",
 
+      uniswapV3CanonicalWethUsdGReferenceV195:
+        "ENABLED_V195",
+
+      uniswapV3FactoryEnvNameV195:
+        "UNISWAP_V3_FACTORY",
+
+      uniswapV3StandardFeeTiersV195:
+        "100,500,3000,10000",
+
+      v3PoolMustBeFactoryReturnedV195:
+        "ENABLED_V195",
+
+      v3PoolTokenPairReverifiedV195:
+        "ENABLED_V195",
+
+      v3LiquidityMustBeNonZeroV195:
+        "ENABLED_V195",
+
+      v3Slot0PriceDecimalCorrectionV195:
+        "ENABLED_V195",
+
+      v3ReferenceCachedInKvStateV195:
+        "ENABLED_V195",
+
+      v4BitqueryReferenceFallbackPreservedV195:
+        "ENABLED_V195",
+
+      poolAndPriceGuessingV195:
+        "DISABLED",
+
+      hardRequestLimitUnchangedV195:
+        42,
+
+      telegramThresholdsUnchangedV195:
+        "ENABLED_V195",
+
       bitqueryCanonicalWethUsdGReferenceV194:
         "ENABLED_V194",
 
@@ -37620,7 +38250,7 @@ async function scan(
     },
 
     architecture:
-      "V194_BITQUERY_WETH_USDG_REFERENCE_V77_TELEGRAM_HUNTER",
+      "V195_V3_WETH_USDG_ONCHAIN_REFERENCE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
