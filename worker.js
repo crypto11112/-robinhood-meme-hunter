@@ -610,7 +610,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V166";
+const VERSION = "V167";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -26522,7 +26522,7 @@ async function scan(
     status,
 
     scanMode:
-      "V166_CORE_PARTIAL_HOLDER_RETRY_FRESH_SLOT_RELEASE_HUNTER",
+      "V167_CORE_PARTIAL_HOLDER_RETRY_TELEMETRY_TRUTH_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -27152,6 +27152,44 @@ async function scan(
 
     partialHolderRetryFreshSlotReleaseV166: {
       ...partialHolderRetryFreshSlotReleaseV166,
+
+      // V167 telemetry-truth fix:
+      // Report the authoritative post-selection state rather than only whether
+      // the V166-specific <20-point bypass branch fired. Normal V139 fairness
+      // can also hand off the fresh slot while preserving the carried retry.
+      carriedRetryPreserved:
+        Boolean(
+          pendingCompletionAddress &&
+          retryPersistenceAddressV139 ===
+            pendingCompletionAddress
+        ),
+
+      carriedAnalysisPreserved:
+        Boolean(
+          pendingCompletionAddress &&
+          analysisSelected.some(
+            token =>
+              normalize(
+                token?.address
+              ) ===
+              pendingCompletionAddress
+          )
+        ),
+
+      telemetryTruthSourceV167:
+        "POST_SELECTION_AUTHORITATIVE_STATE",
+
+      normalV139HandoffPreservationReflectedV167:
+        Boolean(
+          retryFairnessOverrideV139 &&
+          pendingCompletionAddress &&
+          retryPersistenceAddressV139 ===
+            pendingCompletionAddress
+        ),
+
+      v166SpecificBypassTriggered:
+        partialHolderFreshSlotReleaseTriggeredV166,
+
       effectiveFreshMarketAddress:
         effectiveMarketFreshTargetAddress ||
         null,
@@ -27222,7 +27260,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V166_PARTIAL_HOLDER_RETRY_FRESH_SLOT_RELEASE_DIRECTIONAL_USD_HUNTER",
+        "V167_PARTIAL_HOLDER_RETRY_TELEMETRY_TRUTH_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -29738,12 +29776,30 @@ async function scan(
       telegramThresholdsUnchangedV166:
         "ENABLED_V166",
 
+      partialHolderRetryTelemetryTruthFix:
+        "ENABLED_V167",
+
+      v139PreservationReflectedInV166TelemetryV167:
+        "ENABLED_V167",
+
+      carriedAnalysisPresenceUsesFinalAnalysisQueueV167:
+        "ENABLED_V167",
+
+      v166SpecificBypassLogicUnchangedV167:
+        "ENABLED_V167",
+
+      noExternalRequestRateIncreaseV167:
+        "ENABLED_V167",
+
+      telegramThresholdsUnchangedV167:
+        "ENABLED_V167",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V166_CORE_PARTIAL_HOLDER_RETRY_FRESH_SLOT_RELEASE_V77_TELEGRAM_HUNTER",
+      "V167_CORE_PARTIAL_HOLDER_RETRY_TELEMETRY_TRUTH_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
