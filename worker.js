@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V155
+ * V156
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -515,8 +515,20 @@
  * - Moves that telemetry to the scan response where candidates is in scope
  * - Restores momentumAnalysis() to candidate-local telemetry only
  * - No request-rate, scoring, verification or Telegram-threshold changes
+
+ *
+ * V156:
+ * - Preserves all V155/V153 directional USD pool-identity logic
+ * - Adds bounded eth_getLogs abort/timeout recovery to live and backlog scans
+ * - Recovery tries an available alternate provider once; if none is usable,
+ *   it retries the same provider once for that exact range
+ * - Recovery occurs only after a real abort/timeout, so normal request rate
+ *   is unchanged; all recovery requests still consume the existing budget
+ * - Failed backlog ranges never advance the backlog cursor
+ * - Adds explicit V156 recovery telemetry
+ * - No scoring, alert threshold, Gecko spacing or market-verification changes
 */
-const VERSION = "V155";
+const VERSION = "V156";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -5941,6 +5953,35 @@ function isBeyondProviderHeadError(
   );
 }
 
+
+function isRpcAbortLikeV156(
+  value
+) {
+  const text =
+    String(
+      value ||
+      ""
+    ).toLowerCase();
+
+  return (
+    text.includes(
+      "operation was aborted"
+    ) ||
+    text.includes(
+      "aborterror"
+    ) ||
+    text.includes(
+      "aborted"
+    ) ||
+    text.includes(
+      "timeout"
+    ) ||
+    text.includes(
+      "timed out"
+    )
+  );
+}
+
 async function providerHeadBlock(
   env,
   budget,
@@ -6175,6 +6216,21 @@ async function scanLiveRange(
   let providerHeadRetries =
     0;
 
+  let abortRecoveryAttemptsV156 =
+    0;
+
+  let abortRecoverySuccessesV156 =
+    0;
+
+  let abortAlternateProviderRetriesV156 =
+    0;
+
+  let abortSameProviderRetriesV156 =
+    0;
+
+  const abortRecoveryKeysV156 =
+    new Set();
+
   while (
     cursor <=
       effectiveTo &&
@@ -6306,6 +6362,105 @@ async function scanLiveRange(
             null;
 
           break;
+        }
+      }
+    }
+
+    if (
+      !Array.isArray(
+        response.result
+      ) &&
+      isRpcAbortLikeV156(
+        response.error
+      )
+    ) {
+      const recoveryKeyV156 =
+        `${provider}:${cursor.toString()}:${chunkTo.toString()}`;
+
+      if (
+        !abortRecoveryKeysV156.has(
+          recoveryKeyV156
+        ) &&
+        budgetAvailable(
+          budget,
+          "discovery-live"
+        )
+      ) {
+        abortRecoveryKeysV156.add(
+          recoveryKeyV156
+        );
+
+        abortRecoveryAttemptsV156++;
+
+        const alternate =
+          alternateDiscoveryProvider(
+            env,
+            state,
+            provider
+          );
+
+        if (
+          alternate &&
+          budgetAvailable(
+            budget,
+            "discovery-live"
+          )
+        ) {
+          abortAlternateProviderRetriesV156++;
+
+          const retry =
+            await getLogsSingleProvider(
+              env,
+              cursor,
+              chunkTo,
+              budget,
+              "discovery-live",
+              alternate
+            );
+
+          if (
+            Array.isArray(
+              retry.result
+            )
+          ) {
+            provider =
+              alternate;
+
+            response =
+              retry;
+
+            abortRecoverySuccessesV156++;
+          }
+        }
+
+        else if (
+          budgetAvailable(
+            budget,
+            "discovery-live"
+          )
+        ) {
+          abortSameProviderRetriesV156++;
+
+          const retry =
+            await getLogsSingleProvider(
+              env,
+              cursor,
+              chunkTo,
+              budget,
+              "discovery-live",
+              provider
+            );
+
+          response =
+            retry;
+
+          if (
+            Array.isArray(
+              retry.result
+            )
+          ) {
+            abortRecoverySuccessesV156++;
+          }
         }
       }
     }
@@ -6491,7 +6646,20 @@ async function scanLiveRange(
 
     providerHeadRefreshes,
 
-    providerHeadRetries
+    providerHeadRetries,
+
+    abortRecoveryV156: {
+      enabled:
+        true,
+      attempts:
+        abortRecoveryAttemptsV156,
+      successes:
+        abortRecoverySuccessesV156,
+      alternateProviderRetries:
+        abortAlternateProviderRetriesV156,
+      sameProviderRetries:
+        abortSameProviderRetriesV156
+    }
   };
 }
 
@@ -6533,6 +6701,21 @@ async function scanBacklogSequential(
 
   let error =
     null;
+
+  let abortRecoveryAttemptsV156 =
+    0;
+
+  let abortRecoverySuccessesV156 =
+    0;
+
+  let abortAlternateProviderRetriesV156 =
+    0;
+
+  let abortSameProviderRetriesV156 =
+    0;
+
+  const abortRecoveryKeysV156 =
+    new Set();
 
   const probeHistory =
     [];
@@ -6699,6 +6882,105 @@ async function scanBacklogSequential(
         "discovery-backlog",
         provider
       );
+
+    if (
+      !Array.isArray(
+        response.result
+      ) &&
+      isRpcAbortLikeV156(
+        response.error
+      )
+    ) {
+      const recoveryKeyV156 =
+        `${provider}:${cursor.toString()}:${chunkTo.toString()}`;
+
+      if (
+        !abortRecoveryKeysV156.has(
+          recoveryKeyV156
+        ) &&
+        budgetAvailable(
+          budget,
+          "discovery-backlog"
+        )
+      ) {
+        abortRecoveryKeysV156.add(
+          recoveryKeyV156
+        );
+
+        abortRecoveryAttemptsV156++;
+
+        const alternate =
+          alternateDiscoveryProvider(
+            env,
+            state,
+            provider
+          );
+
+        if (
+          alternate &&
+          budgetAvailable(
+            budget,
+            "discovery-backlog"
+          )
+        ) {
+          abortAlternateProviderRetriesV156++;
+
+          const retry =
+            await getLogsSingleProvider(
+              env,
+              cursor,
+              chunkTo,
+              budget,
+              "discovery-backlog",
+              alternate
+            );
+
+          if (
+            Array.isArray(
+              retry.result
+            )
+          ) {
+            provider =
+              alternate;
+
+            response =
+              retry;
+
+            abortRecoverySuccessesV156++;
+          }
+        }
+
+        else if (
+          budgetAvailable(
+            budget,
+            "discovery-backlog"
+          )
+        ) {
+          abortSameProviderRetriesV156++;
+
+          const retry =
+            await getLogsSingleProvider(
+              env,
+              cursor,
+              chunkTo,
+              budget,
+              "discovery-backlog",
+              provider
+            );
+
+          response =
+            retry;
+
+          if (
+            Array.isArray(
+              retry.result
+            )
+          ) {
+            abortRecoverySuccessesV156++;
+          }
+        }
+      }
+    }
 
     if (
       !Array.isArray(
@@ -7096,6 +7378,19 @@ async function scanBacklogSequential(
         : 0,
 
     probeHistory,
+
+    abortRecoveryV156: {
+      enabled:
+        true,
+      attempts:
+        abortRecoveryAttemptsV156,
+      successes:
+        abortRecoverySuccessesV156,
+      alternateProviderRetries:
+        abortAlternateProviderRetriesV156,
+      sameProviderRetries:
+        abortSameProviderRetriesV156
+    },
 
     error
   };
@@ -24251,7 +24546,7 @@ async function scan(
     status,
 
     scanMode:
-      "V155_CORE_POOL_IDENTITY_TELEMETRY_SCOPE_HOTFIX_HUNTER",
+      "V156_CORE_RPC_ABORT_RECOVERY_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -24653,6 +24948,17 @@ async function scan(
             )
         },
 
+        rpcAbortRecoveryV156:
+          liveScan
+            .abortRecoveryV156 ||
+          {
+            enabled: true,
+            attempts: 0,
+            successes: 0,
+            alternateProviderRetries: 0,
+            sameProviderRetries: 0
+          },
+
         ranges:
           liveOutput.ranges
       },
@@ -24785,6 +25091,17 @@ async function scan(
               error:
                 backlogError,
 
+              rpcAbortRecoveryV156:
+                backlogResult
+                  ?.abortRecoveryV156 ||
+                {
+                  enabled: true,
+                  attempts: 0,
+                  successes: 0,
+                  alternateProviderRetries: 0,
+                  sameProviderRetries: 0
+                },
+
               probes:
                 backlogResult
                   ?.probeHistory ||
@@ -24890,7 +25207,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V155_POOL_IDENTITY_TELEMETRY_SCOPE_HOTFIX_DIRECTIONAL_USD_HUNTER",
+        "V156_RPC_ABORT_RECOVERY_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -26984,12 +27301,42 @@ async function scan(
       telegramThresholdsUnchangedV155:
         "ENABLED_V155",
 
+      rpcAbortRecovery:
+        "ENABLED_V156",
+
+      liveGetLogsAbortRetryV156:
+        "ENABLED_V156",
+
+      backlogGetLogsAbortRetryV156:
+        "ENABLED_V156",
+
+      boundedAbortRecoveryPerRangeV156:
+        "ENABLED_V156",
+
+      alternateProviderAbortFailoverV156:
+        "ENABLED_V156",
+
+      sameProviderAbortRetryWhenNoAlternateV156:
+        "ENABLED_V156",
+
+      normalRequestRateUnchangedV156:
+        "ENABLED_V156",
+
+      failedBacklogCursorNeverAdvancedV156:
+        "ENABLED_V156",
+
+      directionalUsdPoolIdentityUnchangedV156:
+        "ENABLED_V156",
+
+      telegramThresholdsUnchangedV156:
+        "ENABLED_V156",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V155_CORE_POOL_IDENTITY_TELEMETRY_SCOPE_HOTFIX_V77_TELEGRAM_HUNTER",
+      "V156_CORE_RPC_ABORT_RECOVERY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -27305,7 +27652,7 @@ async function health(
     },
 
     architecture:
-      "V155_CORE_POOL_IDENTITY_TELEMETRY_SCOPE_HOTFIX_V77_TELEGRAM_HUNTER",
+      "V156_CORE_RPC_ABORT_RECOVERY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -27704,7 +28051,7 @@ async function diagnostics(
     },
 
     architecture:
-      "V155_CORE_POOL_IDENTITY_TELEMETRY_SCOPE_HOTFIX_V77_TELEGRAM_HUNTER",
+      "V156_CORE_RPC_ABORT_RECOVERY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
@@ -28133,7 +28480,7 @@ export default {
             ),
 
           architecture:
-            "V155_CORE_POOL_IDENTITY_TELEMETRY_SCOPE_HOTFIX_V77_TELEGRAM_HUNTER",
+            "V156_CORE_RPC_ABORT_RECOVERY_V77_TELEGRAM_HUNTER",
 
           timestamp:
             now()
