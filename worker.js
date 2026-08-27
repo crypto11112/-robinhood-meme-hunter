@@ -1,10 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V178
+ * V179
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V178
+ * CURRENT BUILD: V179
+ * - V179 adds a zero-extra-provider-request on-chain Uniswap V4 directional-swap ledger from the existing live eth_getLogs batch
+ * - V179 decodes signed amount0/amount1 directly from the canonical PoolManager Swap event and classifies candidate BUY/SELL from verified pool currency0/currency1 identity
+ * - V179 records exact raw candidate/quote deltas, tx/log identity and block number, deduplicated in KV; no USD value is invented
+ * - V179 recognises canonical Robinhood Chain USDG quote amounts separately (6 decimals) as verified USDG-denominated value, but does NOT silently promote USDG to exact USD
+ * - V179 is the on-chain foundation for the next step: timestamped rolling 5m/15m/1h/6h/24h USD verification
  * - V178 fixes analysis-queue priority ordering so persistent V176 directional-USD retries cannot jump ahead of protected carried/fresh candidate completion
  * - V178 keeps carried retry completion first when V159/V166 handoff rules require it, then the current fresh-market target, then the unresolved directional-USD target
  * - V178 preserves V177 verified 15m/6h windows, V176 persistence, the 42-request hard ceiling, provider cooldowns, Telegram reserve and all qualification thresholds
@@ -660,7 +665,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V178";
+const VERSION = "V179";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -769,6 +774,31 @@ const KNOWN_QUOTE_SYMBOLS = new Set([
   "DAI",
   "USD"
 ]);
+
+/* =========================================================
+   V179 CANONICAL QUOTE IDENTITIES
+   ========================================================= */
+
+/*
+ * Robinhood Chain canonical contracts:
+ * - USDG: 0x5fc5...d168 (6 decimals)
+ * - WETH: 0x0bd7...ad73
+ *
+ * V179 uses USDG raw units only as verified USDG-denominated quote value.
+ * It intentionally does NOT assert 1 USDG == 1 exact USD for alert verification.
+ */
+const CANONICAL_USDG_V179 =
+  "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+
+const CANONICAL_WETH_V179 =
+  "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
+
+const CANONICAL_USDG_DECIMALS_V179 = 6;
+
+const ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179 = 6000;
+const ONCHAIN_DIRECTIONAL_MAX_TOKENS_V179 = 8;
+const ONCHAIN_DIRECTIONAL_RETENTION_MS_V179 =
+  26 * 60 * 60 * 1000;
 
 /* =========================================================
    UNISWAP V4 TOPICS
@@ -7904,6 +7934,881 @@ function decodeInitialize(
 
     transactionHash:
       log.transactionHash
+  };
+}
+
+
+/* =========================================================
+   V179 ON-CHAIN V4 DIRECTIONAL SWAP LEDGER
+   ========================================================= */
+
+/*
+ * Canonical Uniswap v4 PoolManager Swap event:
+ * Swap(
+ *   PoolId indexed id,
+ *   address indexed sender,
+ *   int128 amount0,
+ *   int128 amount1,
+ *   uint160 sqrtPriceX96,
+ *   uint128 liquidity,
+ *   int24 tick,
+ *   uint24 fee
+ * )
+ *
+ * amount0/amount1 are POOL balance deltas:
+ * positive => pool receives that currency
+ * negative => pool sends that currency
+ *
+ * Therefore for a candidate token:
+ * candidate delta < 0 => candidate was bought
+ * candidate delta > 0 => candidate was sold
+ *
+ * V179 deliberately keeps USD verification separate. It records exact
+ * quote-token amounts and exposes canonical USDG amounts, but does not
+ * claim exact USD until a separately verified USD conversion exists.
+ */
+
+function abiWordV179(
+  data,
+  index
+) {
+  const clean =
+    String(
+      data ||
+      ""
+    ).replace(
+      /^0x/,
+      ""
+    );
+
+  const start =
+    index * 64;
+
+  if (
+    clean.length <
+      start + 64
+  ) {
+    return null;
+  }
+
+  return clean.slice(
+    start,
+    start + 64
+  );
+}
+
+function decodeSignedInt128WordV179(
+  word
+) {
+  if (
+    !/^[0-9a-fA-F]{64}$/.test(
+      String(
+        word ||
+        ""
+      )
+    )
+  ) {
+    return null;
+  }
+
+  try {
+    const raw =
+      BigInt(
+        "0x" +
+        word
+      );
+
+    const mask =
+      (1n << 128n) -
+      1n;
+
+    const low =
+      raw &
+      mask;
+
+    const signBit =
+      1n << 127n;
+
+    return (
+      low &
+      signBit
+    ) !==
+      0n
+      ? low -
+        (1n << 128n)
+      : low;
+  } catch {
+    return null;
+  }
+}
+
+function absBigIntV179(
+  value
+) {
+  return value <
+    0n
+    ? -value
+    : value;
+}
+
+function decimalBigIntStringV179(
+  rawValue,
+  decimals
+) {
+  try {
+    const value =
+      BigInt(
+        rawValue
+      );
+
+    const negative =
+      value <
+      0n;
+
+    const absolute =
+      negative
+        ? -value
+        : value;
+
+    const d =
+      Math.max(
+        0,
+        Math.floor(
+          safeNumber(
+            decimals
+          )
+        )
+      );
+
+    if (
+      d === 0
+    ) {
+      return (
+        negative
+          ? "-"
+          : ""
+      ) +
+        absolute.toString();
+    }
+
+    const base =
+      10n **
+      BigInt(
+        d
+      );
+
+    const whole =
+      absolute /
+      base;
+
+    const fraction =
+      (
+        absolute %
+        base
+      )
+        .toString()
+        .padStart(
+          d,
+          "0"
+        )
+        .replace(
+          /0+$/,
+          ""
+        );
+
+    return (
+      negative
+        ? "-"
+        : ""
+    ) +
+      whole.toString() +
+      (
+        fraction
+          ? "." +
+            fraction
+          : ""
+      );
+  } catch {
+    return null;
+  }
+}
+
+function decodeV4SwapDirectionalV179(
+  state,
+  log
+) {
+  if (
+    normalize(
+      log?.topics?.[0]
+    ) !==
+      SWAP_TOPIC
+  ) {
+    return null;
+  }
+
+  const poolId =
+    normalize(
+      log?.topics?.[1]
+    );
+
+  const pool =
+    state
+      ?.poolRegistry
+      ?.[poolId];
+
+  const currency0 =
+    normalize(
+      pool?.currency0
+    );
+
+  const currency1 =
+    normalize(
+      pool?.currency1
+    );
+
+  if (
+    !/^0x[0-9a-f]{64}$/.test(
+      String(
+        poolId ||
+        ""
+      )
+    ) ||
+    !isAddress(
+      currency0
+    ) ||
+    !isAddress(
+      currency1
+    )
+  ) {
+    return null;
+  }
+
+  const amount0 =
+    decodeSignedInt128WordV179(
+      abiWordV179(
+        log?.data,
+        0
+      )
+    );
+
+  const amount1 =
+    decodeSignedInt128WordV179(
+      abiWordV179(
+        log?.data,
+        1
+      )
+    );
+
+  if (
+    amount0 ===
+      null ||
+    amount1 ===
+      null ||
+    amount0 ===
+      0n ||
+    amount1 ===
+      0n
+  ) {
+    return null;
+  }
+
+  /*
+   * A normal swap must move currencies in opposite pool-delta directions.
+   * Reject malformed/non-swap-shaped data rather than infer.
+   */
+  if (
+    (
+      amount0 >
+        0n &&
+      amount1 >
+        0n
+    ) ||
+    (
+      amount0 <
+        0n &&
+      amount1 <
+        0n
+    )
+  ) {
+    return null;
+  }
+
+  let candidateAddress =
+    null;
+
+  let quoteTokenAddress =
+    null;
+
+  let candidateDelta =
+    null;
+
+  let quoteDelta =
+    null;
+
+  let candidateCurrencyIndex =
+    null;
+
+  if (
+    isAddress(
+      currency0
+    ) &&
+    currency0 !==
+      ZERO &&
+    !knownQuote(
+      currency0
+    ) &&
+    (
+      currency1 ===
+        ZERO ||
+      knownQuote(
+        currency1
+      )
+    )
+  ) {
+    candidateAddress =
+      currency0;
+
+    quoteTokenAddress =
+      currency1;
+
+    candidateDelta =
+      amount0;
+
+    quoteDelta =
+      amount1;
+
+    candidateCurrencyIndex =
+      0;
+  }
+
+  else if (
+    isAddress(
+      currency1
+    ) &&
+    currency1 !==
+      ZERO &&
+    !knownQuote(
+      currency1
+    ) &&
+    (
+      currency0 ===
+        ZERO ||
+      knownQuote(
+        currency0
+      )
+    )
+  ) {
+    candidateAddress =
+      currency1;
+
+    quoteTokenAddress =
+      currency0;
+
+    candidateDelta =
+      amount1;
+
+    quoteDelta =
+      amount0;
+
+    candidateCurrencyIndex =
+      1;
+  }
+
+  else {
+    return null;
+  }
+
+  const side =
+    candidateDelta <
+      0n
+      ? "buy"
+      : "sell";
+
+  /*
+   * For a valid two-currency swap, quote delta should have the opposite sign.
+   * Keep this explicit as a second direction-integrity check.
+   */
+  const directionConsistent =
+    (
+      side ===
+        "buy" &&
+      quoteDelta >
+        0n
+    ) ||
+    (
+      side ===
+        "sell" &&
+      quoteDelta <
+        0n
+    );
+
+  if (
+    !directionConsistent
+  ) {
+    return null;
+  }
+
+  const quoteRaw =
+    absBigIntV179(
+      quoteDelta
+    );
+
+  const candidateRaw =
+    absBigIntV179(
+      candidateDelta
+    );
+
+  const txHash =
+    normalize(
+      log?.transactionHash
+    );
+
+  const logIndex =
+    String(
+      log?.logIndex ||
+      ""
+    ).toLowerCase();
+
+  const blockNumberHex =
+    String(
+      log?.blockNumber ||
+      ""
+    );
+
+  let blockNumber =
+    null;
+
+  try {
+    blockNumber =
+      Number(
+        BigInt(
+          blockNumberHex ||
+          "0x0"
+        )
+      );
+  } catch {
+    blockNumber =
+      null;
+  }
+
+  const canonicalUsdG =
+    quoteTokenAddress ===
+      CANONICAL_USDG_V179;
+
+  const usdGAmount =
+    canonicalUsdG
+      ? decimalBigIntStringV179(
+          quoteRaw,
+          CANONICAL_USDG_DECIMALS_V179
+        )
+      : null;
+
+  return {
+    verified:
+      true,
+
+    source:
+      "UNISWAP_V4_POOLMANAGER_SWAP_V179",
+
+    poolId,
+
+    candidateAddress,
+
+    quoteTokenAddress,
+
+    candidateCurrencyIndex,
+
+    side,
+
+    amount0Raw:
+      amount0.toString(),
+
+    amount1Raw:
+      amount1.toString(),
+
+    candidateAmountRaw:
+      candidateRaw.toString(),
+
+    quoteAmountRaw:
+      quoteRaw.toString(),
+
+    canonicalUsdGQuote:
+      canonicalUsdG,
+
+    usdGAmountVerified:
+      canonicalUsdG &&
+      usdGAmount !==
+        null,
+
+    usdGAmount,
+
+    exactUsdVerified:
+      false,
+
+    exactUsdAmount:
+      null,
+
+    blockNumber,
+
+    transactionHash:
+      txHash ||
+      null,
+
+    logIndex:
+      logIndex ||
+      null,
+
+    tradeKey:
+      [
+        txHash ||
+        "NO_TX",
+        logIndex ||
+        "NO_LOG",
+        poolId
+      ].join(
+        ":"
+      )
+  };
+}
+
+function onChainDirectionalStoreV179(
+  state
+) {
+  state.onChainDirectionalV179 =
+    state.onChainDirectionalV179 &&
+    typeof state.onChainDirectionalV179 ===
+      "object" &&
+    !Array.isArray(
+      state.onChainDirectionalV179
+    )
+      ? state.onChainDirectionalV179
+      : {};
+
+  return state
+    .onChainDirectionalV179;
+}
+
+function pruneOnChainDirectionalStoreV179(
+  state
+) {
+  const store =
+    onChainDirectionalStoreV179(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  const entries =
+    Object.entries(
+      store
+    );
+
+  for (
+    const [
+      address,
+      ledger
+    ]
+    of entries
+  ) {
+    if (
+      now -
+      safeNumber(
+        ledger?.lastSeenAt
+      ) >
+        ONCHAIN_DIRECTIONAL_RETENTION_MS_V179
+    ) {
+      delete store[
+        address
+      ];
+    }
+  }
+
+  const remaining =
+    Object.entries(
+      store
+    ).sort(
+      (
+        a,
+        b
+      ) =>
+        safeNumber(
+          b?.[1]
+            ?.lastSeenAt
+        ) -
+        safeNumber(
+          a?.[1]
+            ?.lastSeenAt
+        )
+    );
+
+  for (
+    const [
+      address
+    ]
+    of remaining.slice(
+      ONCHAIN_DIRECTIONAL_MAX_TOKENS_V179
+    )
+  ) {
+    delete store[
+      address
+    ];
+  }
+
+  return store;
+}
+
+function collectOnChainDirectionalSwapsV179(
+  state,
+  logs
+) {
+  const now =
+    Date.now();
+
+  const store =
+    pruneOnChainDirectionalStoreV179(
+      state
+    );
+
+  let swapLogsSeen =
+    0;
+
+  let decoded =
+    0;
+
+  let buys =
+    0;
+
+  let sells =
+    0;
+
+  let usdGQuoted =
+    0;
+
+  let exactUsdVerified =
+    0;
+
+  let deduplicated =
+    0;
+
+  const touchedTokens =
+    new Set();
+
+  for (
+    const log
+    of logs ||
+    []
+  ) {
+    if (
+      normalize(
+        log?.topics?.[0]
+      ) !==
+        SWAP_TOPIC
+    ) {
+      continue;
+    }
+
+    swapLogsSeen++;
+
+    const trade =
+      decodeV4SwapDirectionalV179(
+        state,
+        log
+      );
+
+    if (
+      !trade?.verified
+    ) {
+      continue;
+    }
+
+    decoded++;
+
+    if (
+      trade.side ===
+        "buy"
+    ) {
+      buys++;
+    }
+
+    else if (
+      trade.side ===
+        "sell"
+    ) {
+      sells++;
+    }
+
+    if (
+      trade.usdGAmountVerified
+    ) {
+      usdGQuoted++;
+    }
+
+    if (
+      trade.exactUsdVerified
+    ) {
+      exactUsdVerified++;
+    }
+
+    const token =
+      normalize(
+        trade.candidateAddress
+      );
+
+    if (
+      !token
+    ) {
+      continue;
+    }
+
+    touchedTokens.add(
+      token
+    );
+
+    const previous =
+      store[token] &&
+      typeof store[token] ===
+        "object"
+        ? store[token]
+        : {};
+
+    const records =
+      Array.isArray(
+        previous.records
+      )
+        ? previous.records
+        : [];
+
+    const keys =
+      new Set(
+        records.map(
+          row =>
+            String(
+              row?.tradeKey ||
+              ""
+            )
+        )
+      );
+
+    if (
+      keys.has(
+        trade.tradeKey
+      )
+    ) {
+      deduplicated++;
+      continue;
+    }
+
+    records.push({
+      ...trade,
+      observedAt:
+        now
+    });
+
+    records.sort(
+      (
+        a,
+        b
+      ) =>
+        safeNumber(
+          a?.blockNumber
+        ) -
+        safeNumber(
+          b?.blockNumber
+        )
+    );
+
+    if (
+      records.length >
+        ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179
+    ) {
+      records.splice(
+        0,
+        records.length -
+          ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179
+      );
+    }
+
+    store[token] = {
+      version:
+        "V179",
+
+      tokenAddress:
+        token,
+
+      firstSeenAt:
+        safeNumber(
+          previous.firstSeenAt
+        ) ||
+        now,
+
+      lastSeenAt:
+        now,
+
+      poolIds:
+        Array.from(
+          new Set(
+            records.map(
+              row =>
+                row.poolId
+            )
+          )
+        ).slice(
+          -8
+        ),
+
+      records
+    };
+  }
+
+  pruneOnChainDirectionalStoreV179(
+    state
+  );
+
+  return {
+    enabled:
+      true,
+
+    source:
+      "EXISTING_LIVE_ETH_GETLOGS_NO_EXTRA_REQUESTS",
+
+    canonicalSwapAbiVerified:
+      true,
+
+    poolDeltaDirectionRule:
+      "POSITIVE_POOL_RECEIVES_NEGATIVE_POOL_SENDS",
+
+    swapLogsSeen,
+
+    decoded,
+
+    buys,
+
+    sells,
+
+    usdGQuoted,
+
+    exactUsdVerified,
+
+    deduplicated,
+
+    touchedTokens:
+      Array.from(
+        touchedTokens
+      ),
+
+    trackedTokenLedgers:
+      Object.keys(
+        onChainDirectionalStoreV179(
+          state
+        )
+      ).length,
+
+    noExtraExternalRequests:
+      true,
+
+    usdPolicy:
+      "USDG_AMOUNT_VERIFIED_SEPARATELY_EXACT_USD_REMAINS_UNVERIFIED_WITHOUT_VERIFIED_CONVERSION"
   };
 }
 
@@ -23880,6 +24785,17 @@ async function scan(
       );
   }
 
+  /*
+   * V179: decode known-pool live Swap logs after all same-run pool-resolution
+   * opportunities have completed. This reuses liveOutput.logs and adds zero
+   * external requests.
+   */
+  const onChainDirectionalV179 =
+    collectOnChainDirectionalSwapsV179(
+      state,
+      liveOutput.logs
+    );
+
   for (
     const token
     of liveActivity.tokens
@@ -24592,6 +25508,7 @@ async function scan(
    * priority candidates so they cannot consume its required budget first.
    */
   /*
+   * V179 preserves V178 queue ordering unchanged.
    * V178:
    * V176 persistence must not outrank protected candidate completion.
    * Order is now:
@@ -27828,7 +28745,7 @@ async function scan(
     status,
 
     scanMode:
-      "V178_PROTECTED_COMPLETION_QUEUE_ORDER_HUNTER",
+      "V179_ONCHAIN_V4_DIRECTIONAL_SWAP_LEDGER_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -28127,6 +29044,8 @@ async function scan(
     notificationReserveReleaseV174,
 
     postAnalysisBacklogReclaimV170,
+
+    onChainDirectionalV179,
 
     marketProviderCoordinationV147:
       marketProviderAvailabilityV147(
@@ -31414,12 +32333,45 @@ async function scan(
       telegramThresholdsUnchangedV178:
         "ENABLED_V178",
 
+      onChainV4DirectionalSwapLedger:
+        "ENABLED_V179",
+
+      canonicalPoolManagerSwapAbiV179:
+        "VERIFIED_UNISWAP_V4",
+
+      signedAmount0Amount1DecodeV179:
+        "ENABLED_V179",
+
+      poolDeltaDirectionClassificationV179:
+        "ENABLED_V179",
+
+      exactQuoteRawAmountPersistenceV179:
+        "ENABLED_V179",
+
+      canonicalUsdGQuoteAmountV179:
+        "ENABLED_V179",
+
+      usdGNotSilentlyPromotedToExactUsdV179:
+        "ENABLED_V179",
+
+      onChainDirectionalZeroExtraRequestsV179:
+        "ENABLED_V179",
+
+      hardRequestLimitUnchangedV179:
+        42,
+
+      analysisRequestLimitUnchangedV179:
+        21,
+
+      telegramThresholdsUnchangedV179:
+        "ENABLED_V179",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V178_PROTECTED_COMPLETION_QUEUE_ORDER_V77_TELEGRAM_HUNTER",
+      "V179_ONCHAIN_V4_DIRECTIONAL_SWAP_LEDGER_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
