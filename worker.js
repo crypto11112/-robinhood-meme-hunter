@@ -1,10 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V174
+ * V175
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V174
+ * CURRENT BUILD: V175
+ * - V175 prioritises verified directional USD trade enrichment before lower-priority analysis can exhaust the analysis budget
+ * - V175 attempts the existing GeckoTerminal pool-trades feed immediately for strong viable candidates (opportunity >= 60, confidence >= 55, verified market/pool identity)
+ * - V175 recomputes momentum/opportunity/confidence after verified USD flow is obtained, before Telegram qualification and snapshot persistence
+ * - V175 never fabricates buy/sell USD; incomplete/limited coverage remains UNVERIFIED
+ * - V175 adds no new provider and preserves the existing one-Gecko-fresh-request-per-scan guard, 42-request hard ceiling, Telegram reserve and thresholds
  * - V174 protects Telegram delivery capacity against global-budget exhaustion
  * - V174 counts each Telegram network request separately (photo and text fallback)
  * - V174 releases unused notification reserve only after Telegram processing
@@ -640,7 +645,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V174";
+const VERSION = "V175";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -24800,6 +24805,27 @@ async function scan(
   let holderLookups =
     0;
 
+  /*
+   * V175: opportunistically secure the existing single Gecko directional-trade
+   * request for the first strong viable candidate before lower-priority analysis
+   * can consume the remaining analysis budget. This does not add a new request
+   * class or raise any request limit.
+   */
+  let earlyDirectionalTradeEnrichmentV175 = {
+    enabled: true,
+    selectedAddress: null,
+    symbol: null,
+    eligible: false,
+    attempted: false,
+    verifiedAnyWindow: false,
+    status: "NO_EARLY_DIRECTIONAL_TARGET",
+    opportunityMinimum: 60,
+    confidenceMinimum: 55,
+    oneGeckoFreshPerScanPreserved: true,
+    strictUsdVerificationPreserved: true,
+    noExternalRequestRateIncrease: true
+  };
+
   /* =======================================================
      ANALYSIS
      ======================================================= */
@@ -25817,6 +25843,97 @@ async function scan(
         ?.verified
     ) {
       holderLookups++;
+    }
+
+    /* =====================================================
+       V175 EARLY VERIFIED DIRECTIONAL USD PRIORITY
+       ===================================================== */
+    if (
+      !earlyDirectionalTradeEnrichmentV175.selectedAddress &&
+      candidate?.validERC20 === true &&
+      candidate?.risk?.severeOverride !== true &&
+      String(candidate?.risk?.label || "").toUpperCase() !== "HIGH" &&
+      (
+        candidate?.market?.verified === true ||
+        candidate?.onChainPoolIdentityV153?.verified === true
+      ) &&
+      safeNumber(candidate?.opportunity?.score) >= 60 &&
+      safeNumber(candidate?.confidence?.score) >= 55
+    ) {
+      earlyDirectionalTradeEnrichmentV175 = {
+        ...earlyDirectionalTradeEnrichmentV175,
+        selectedAddress: normalize(candidate.address),
+        symbol: candidate.symbol || null,
+        eligible: true,
+        status: "SELECTED_BEFORE_LOWER_PRIORITY_ANALYSIS"
+      };
+
+      const earlyEnrichmentV175 =
+        await geckoDirectionalTradeFlow(
+          candidate,
+          budget,
+          state
+        );
+
+      applyDirectionalTradeFlow(
+        candidate,
+        earlyEnrichmentV175
+      );
+
+      if (
+        earlyEnrichmentV175?.verifiedAnyWindow === true
+      ) {
+        const historicalV175 =
+          getHistoricalSnapshot(
+            state,
+            candidate.address
+          );
+
+        candidate.momentum =
+          momentumAnalysis(
+            historicalV175,
+            candidate.market,
+            candidate.holders,
+            candidate.liveMomentumActivityV152
+          );
+
+        candidate.opportunity =
+          scoreOpportunity(
+            candidate.validation,
+            candidate.market,
+            candidate.holders,
+            candidate.activity,
+            candidate.momentum,
+            candidate.marketQuality,
+            candidate.whaleFlow,
+            candidate.launchStage
+          );
+
+        candidate.signalConfirmation =
+          signalConfirmation(candidate);
+
+        candidate.confidence =
+          candidateConfidence(candidate);
+
+        evidenceQualityProtectionV158(candidate);
+
+        candidate.analysisPriority =
+          analysisPriority(candidate);
+      }
+
+      earlyDirectionalTradeEnrichmentV175 = {
+        ...earlyDirectionalTradeEnrichmentV175,
+        attempted: Boolean(earlyEnrichmentV175?.attempted),
+        verifiedAnyWindow: Boolean(earlyEnrichmentV175?.verifiedAnyWindow),
+        status: earlyEnrichmentV175?.status || "UNKNOWN",
+        source: earlyEnrichmentV175?.source || null,
+        poolAddress: earlyEnrichmentV175?.poolAddress || null,
+        targetTokenSide: earlyEnrichmentV175?.targetTokenSide || null,
+        returnedCount: earlyEnrichmentV175?.returnedCount ?? null,
+        windows: earlyEnrichmentV175?.windows || null,
+        rollingLedger: earlyEnrichmentV175?.rollingLedger || null,
+        candidateQualifiesAfterEnrichment: qualifiesTelegram(candidate)
+      };
     }
 
     saveSnapshot(
@@ -26939,6 +27056,29 @@ async function scan(
         : "NO_VERIFIED_MARKET_CANDIDATE";
 
   if (
+    earlyDirectionalTradeEnrichmentV175.selectedAddress
+  ) {
+    directionalTradeEnrichment = {
+      address: earlyDirectionalTradeEnrichmentV175.selectedAddress,
+      symbol: earlyDirectionalTradeEnrichmentV175.symbol,
+      selectionMode: "V175_EARLY_STRONG_VIABLE_CANDIDATE",
+      preQualification: true,
+      candidateWasQualifiedBeforeEnrichment: null,
+      candidateQualifiesAfterEnrichment:
+        earlyDirectionalTradeEnrichmentV175.candidateQualifiesAfterEnrichment === true,
+      attempted: earlyDirectionalTradeEnrichmentV175.attempted,
+      verifiedAnyWindow: earlyDirectionalTradeEnrichmentV175.verifiedAnyWindow,
+      status: earlyDirectionalTradeEnrichmentV175.status,
+      source: earlyDirectionalTradeEnrichmentV175.source || null,
+      poolAddress: earlyDirectionalTradeEnrichmentV175.poolAddress || null,
+      targetTokenSide: earlyDirectionalTradeEnrichmentV175.targetTokenSide || null,
+      returnedCount: earlyDirectionalTradeEnrichmentV175.returnedCount ?? null,
+      rollingLedger: earlyDirectionalTradeEnrichmentV175.rollingLedger || null,
+      windows: earlyDirectionalTradeEnrichmentV175.windows || null
+    };
+  }
+
+  else if (
     directionalTarget
   ) {
     const enrichment =
@@ -27483,7 +27623,7 @@ async function scan(
     status,
 
     scanMode:
-      "V174_TELEGRAM_GLOBAL_RESERVE_EXACT_ACCOUNTING_HUNTER",
+      "V175_EARLY_VERIFIED_DIRECTIONAL_USD_PRIORITY_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -28899,6 +29039,8 @@ async function scan(
     },
 
     directionalTradeEnrichment,
+
+    earlyDirectionalTradeEnrichmentV175,
 
     preQualificationDirectionalEnrichmentV151: {
       enabled:
@@ -30976,12 +31118,42 @@ async function scan(
       telegramThresholdsUnchangedV174:
         "ENABLED_V174",
 
+      earlyVerifiedDirectionalUsdPriorityV175:
+        "ENABLED_V175",
+
+      strongCandidateDirectionalOpportunityMinimumV175:
+        60,
+
+      strongCandidateDirectionalConfidenceMinimumV175:
+        55,
+
+      directionalEnrichmentBeforeLowerPriorityAnalysisV175:
+        "ENABLED_V175",
+
+      recomputeScoresAfterVerifiedDirectionalUsdV175:
+        "ENABLED_V175",
+
+      oneGeckoFreshPerScanUnchangedV175:
+        "ENABLED_V175",
+
+      strictUsdVerificationUnchangedV175:
+        "ENABLED_V175",
+
+      hardRequestLimitUnchangedV175:
+        MAX_EXTERNAL_REQUESTS,
+
+      analysisRequestLimitUnchangedV175:
+        ANALYSIS_REQUEST_LIMIT,
+
+      telegramThresholdsUnchangedV175:
+        "ENABLED_V175",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V174_TELEGRAM_GLOBAL_RESERVE_EXACT_ACCOUNTING_V77_TELEGRAM_HUNTER",
+      "V175_EARLY_VERIFIED_DIRECTIONAL_USD_PRIORITY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
