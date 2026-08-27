@@ -1,16 +1,23 @@
 /**
  * Robinhood Chain Meme Hunter
- * V188
+ * V189
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V188
- * - V188 focuses exclusively on UNKNOWN_POOL_IDENTITY acquisition; V187 dollar maths is preserved
- * - Adds a provider-safe exact Initialize(poolId) expansion strategy: successful empty exact-topic ranges grow geometrically instead of crawling backward forever at the minimum learned chunk
- * - Growth remains bounded by each provider's learned failure ceiling and UNKNOWN_POOL_EXACT_MAX_BLOCKS
- * - A successful larger empty range advances the persistent cursor by the full searched span, accelerating historical Initialize discovery without guessing identity
- * - 400/429/provider failures retain the existing demotion, cooldown and request-budget protections
- * - No scoring, Telegram thresholds, V187 WETH/USDG valuation, or verified-dollar rules are changed
+ * CURRENT BUILD: V189
+ * - V189 is the controlled checkpoint build for UNKNOWN_POOL_IDENTITY
+ * - Reserves the first 2 unknown-pool resolver requests exclusively for the RPC blockHash Initialize test
+ * - The old range crawler and Blockscout wide resolver cannot consume those two requests first
+ * - Emits explicit checkpoint telemetry even when the blockHash test cannot run: ATTEMPTED / RESOLVED / EMPTY / ERROR / BUDGET_BLOCKED
+ * - No new scoring, Telegram, USD maths or market-data behavior is introduced
+ * - V187 WETH/USDG valuation and all earlier protections remain unchanged
+ * - V188 adds an RPC blockHash exact-Initialize resolver for unknown V4 pools
+ * - Uses eth_getLogs blockHash filtering on the pool's first observed active block, avoiding provider multi-block range limits entirely
+ * - Filters by PoolManager + Initialize topic + exact indexed PoolId; no pool identity guessing
+ * - Tries the firstActiveBlock hash before the existing backward range crawler because launch activity commonly begins in the initialization block
+ * - Uses existing discovery-live resolver budget only; no request ceilings are increased
+ * - Successful resolution is registered immediately and can feed the existing directional/WETH/USDG pipeline
+ * - Existing V184 Blockscout wide lookup remains fallback-only, and V187 valuation logic is unchanged
  * - V187 adds zero-extra-request on-chain WETH -> USDG valuation from canonical WETH/USDG V4 Swap logs already present in the live discovery batch
  * - Canonical Robinhood Chain WETH and USDG addresses are used; no symbol guessing and no off-chain price is promoted to verified
  * - WETH/USDG reference price is derived from signed PoolManager amount0/amount1 deltas, using USDG 6 decimals and WETH 18 decimals
@@ -718,7 +725,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V188";
+const VERSION = "V189";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -4470,6 +4477,227 @@ function providerSafeUnknownPoolChunks(
   };
 }
 
+async function getInitializeForPoolBlockHashV188(
+  env,
+  state,
+  poolId,
+  blockNumber,
+  budget,
+  externalRequestAllowance = 2
+) {
+  const base = {
+    attempted: false,
+    externalRequestsUsed: 0,
+    provider: null,
+    blockNumber:
+      safeNumber(blockNumber) || null,
+    blockHash: null,
+    logs: [],
+    resolvedPool: null,
+    error: null,
+    status: null
+  };
+
+  const normalizedPoolId =
+    normalize(poolId);
+
+  const targetBlock =
+    safeNumber(blockNumber);
+
+  if (
+    !normalizedPoolId ||
+    targetBlock <= 0
+  ) {
+    return {
+      ...base,
+      status:
+        "INVALID_POOL_OR_BLOCK"
+    };
+  }
+
+  const providers = [
+    "ALCHEMY",
+    "ROBINHOOD_PUBLIC_RPC"
+  ];
+
+  let used = 0;
+  let lastError = null;
+
+  for (
+    const provider
+    of providers
+  ) {
+    if (
+      used >=
+        externalRequestAllowance ||
+      !budgetAvailable(
+        budget,
+        "discovery-live"
+      ) ||
+      discoveryProviderCooling(
+        state,
+        provider
+      )
+    ) {
+      continue;
+    }
+
+    const url =
+      rpcProviderUrl(
+        env,
+        provider
+      );
+
+    if (!url) {
+      continue;
+    }
+
+    try {
+      /*
+       * Request #1: obtain the exact block hash. A blockHash log query then
+       * avoids the provider's restrictive multi-block eth_getLogs range.
+       */
+      used++;
+
+      const block =
+        await rpcCall(
+          url,
+          "eth_getBlockByNumber",
+          [
+            "0x" +
+              BigInt(
+                targetBlock
+              ).toString(16),
+            false
+          ],
+          budget,
+          "discovery-live"
+        );
+
+      const blockHash =
+        normalize(
+          block?.hash
+        );
+
+      if (
+        !blockHash ||
+        used >=
+          externalRequestAllowance ||
+        !budgetAvailable(
+          budget,
+          "discovery-live"
+        )
+      ) {
+        lastError =
+          "BLOCK_HASH_UNAVAILABLE_OR_BUDGET_PROTECTED";
+        continue;
+      }
+
+      used++;
+
+      const logs =
+        await rpcCall(
+          url,
+          "eth_getLogs",
+          [{
+            blockHash,
+            address:
+              POOL_MANAGER,
+            topics: [
+              INITIALIZE_TOPIC,
+              normalizedPoolId
+            ]
+          }],
+          budget,
+          "discovery-live"
+        );
+
+      const rows =
+        Array.isArray(logs)
+          ? logs
+          : [];
+
+      let resolvedPool =
+        null;
+
+      for (
+        const row
+        of rows
+      ) {
+        const decoded =
+          decodeInitialize(row);
+
+        if (
+          decoded &&
+          normalize(
+            decoded.poolId
+          ) ===
+            normalizedPoolId
+        ) {
+          resolvedPool =
+            decoded;
+          break;
+        }
+      }
+
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed:
+          used,
+        provider,
+        blockHash,
+        logs: rows,
+        resolvedPool,
+        error: null,
+        status:
+          resolvedPool
+            ? "RESOLVED"
+            : "EMPTY"
+      };
+    } catch (error) {
+      const message =
+        String(
+          error?.message ||
+          error
+        );
+
+      lastError =
+        message;
+
+      if (
+        is429(message)
+      ) {
+        markDiscovery429(
+          state,
+          provider
+        );
+      }
+
+      /*
+       * A provider may not support EIP-234 blockHash filtering. Preserve
+       * the existing range resolver as fallback rather than treating that
+       * as a fatal scan error.
+       */
+      continue;
+    }
+  }
+
+  return {
+    ...base,
+    attempted:
+      used > 0,
+    externalRequestsUsed:
+      used,
+    error:
+      lastError,
+    status:
+      used > 0
+        ? "UNRESOLVED"
+        : "NOT_ATTEMPTED"
+  };
+}
+
 async function getInitializeForPoolRange(
   env,
   state,
@@ -4711,41 +4939,12 @@ async function getInitializeForPoolRange(
       continue;
     }
 
-    const shouldProbeBaseV188 =
+    const shouldProbe =
       exactPoolCanGrowthProbe(
         state,
         provider,
         runProbeState
       );
-
-    const learnedUpperBoundV188 =
-      provider === "ALCHEMY"
-        ? safeNumber(
-            discoveryService(state)
-              .alchemyExactPoolFailedUpperBound
-          )
-        : safeNumber(
-            discoveryService(state)
-              .publicExactPoolFailedUpperBound
-          );
-
-    const nextGrowthBlocksV188 =
-      Math.min(
-        UNKNOWN_POOL_EXACT_MAX_BLOCKS,
-        Math.max(
-          option.safeBlocks + 1,
-          option.safeBlocks * 2
-        )
-      );
-
-    const belowKnownFailureV188 =
-      !learnedUpperBoundV188 ||
-      nextGrowthBlocksV188 <
-        learnedUpperBoundV188;
-
-    const shouldProbe =
-      shouldProbeBaseV188 &&
-      belowKnownFailureV188;
 
     if (
       shouldProbe &&
@@ -4816,7 +5015,7 @@ async function getInitializeForPoolRange(
           exactRangeFallbackUsed,
           externalRequestsUsed,
           learningStatePath:
-            `${safeChunks.learningStatePath}_V188_GEOMETRIC_EXACT_TOPIC_EXPANSION`
+            safeChunks.learningStatePath
         };
       }
 
@@ -5716,6 +5915,17 @@ async function resolvePersistentUnknownPools(
     dynamicRequestBudget
       .effectiveLimit;
 
+  /*
+   * V189 checkpoint reservation:
+   * The first two resolver requests belong to the blockHash test. This does
+   * NOT raise the resolver or global request ceiling; it only fixes ordering.
+   */
+  const blockHashCheckpointReservedRequestsV189 =
+    Math.min(
+      2,
+      resolverRequestLimit
+    );
+
   const tracker =
     ensureUnknownPoolState(
       state
@@ -6337,6 +6547,23 @@ async function resolvePersistentUnknownPools(
           state
         )
     },
+    rpcBlockHashInitializeV188: {
+      enabled: true,
+      forcedCheckpointV189: true,
+      reservedRequestsV189: 2,
+      maxPoolsPerRun: 1,
+      attempts: 0,
+      requestsUsed: 0,
+      resolved: 0,
+      selectedPoolId: null,
+      blockNumber: null,
+      blockHash: null,
+      provider: null,
+      status: "NOT_REACHED",
+      checkpointOutcomeV189: "NOT_REACHED",
+      error: null,
+      fallbackToRangeCrawler: false
+    },
     probes: []
   };
 
@@ -6405,6 +6632,220 @@ async function resolvePersistentUnknownPools(
 
     output.attempted++;
 
+    if (
+      output.rpcBlockHashInitializeV188
+        .attempts < 1 &&
+      (
+        resolverRequestLimit -
+        output.requestsUsed
+      ) <
+        blockHashCheckpointReservedRequestsV189
+    ) {
+      output.rpcBlockHashInitializeV188
+        .selectedPoolId =
+          poolId;
+
+      output.rpcBlockHashInitializeV188
+        .blockNumber =
+          safeNumber(
+            entry.firstActiveBlock
+          ) || null;
+
+      output.rpcBlockHashInitializeV188
+        .status =
+          "BUDGET_BLOCKED";
+
+      output.rpcBlockHashInitializeV188
+        .checkpointOutcomeV189 =
+          "BUDGET_BLOCKED";
+    }
+
+    /*
+     * V188: first try the exact first-active block using blockHash.
+     * This needs two RPC calls (block -> hash, then exact log query) but
+     * completely avoids the provider's 10-block/limited range constraint.
+     */
+    let blockHashResolvedPoolV188 =
+      null;
+
+    if (
+      output.rpcBlockHashInitializeV188
+        .attempts < 1 &&
+      (
+        resolverRequestLimit -
+        output.requestsUsed
+      ) >= 2
+    ) {
+      const blockHashV188 =
+        await getInitializeForPoolBlockHashV188(
+          env,
+          state,
+          poolId,
+          entry.firstActiveBlock,
+          budget,
+          Math.min(
+            2,
+            resolverRequestLimit -
+              output.requestsUsed
+          )
+        );
+
+      output.rpcBlockHashInitializeV188
+        .attempts +=
+          blockHashV188.attempted
+            ? 1
+            : 0;
+
+      output.rpcBlockHashInitializeV188
+        .requestsUsed +=
+          safeNumber(
+            blockHashV188.externalRequestsUsed
+          );
+
+      output.requestsUsed +=
+        safeNumber(
+          blockHashV188.externalRequestsUsed
+        );
+
+      output.rpcBlockHashInitializeV188
+        .selectedPoolId =
+          poolId;
+
+      output.rpcBlockHashInitializeV188
+        .blockNumber =
+          blockHashV188.blockNumber;
+
+      output.rpcBlockHashInitializeV188
+        .blockHash =
+          blockHashV188.blockHash;
+
+      output.rpcBlockHashInitializeV188
+        .provider =
+          blockHashV188.provider;
+
+      output.rpcBlockHashInitializeV188
+        .status =
+          blockHashV188.status;
+
+      output.rpcBlockHashInitializeV188
+        .checkpointOutcomeV189 =
+          blockHashV188.resolvedPool
+            ? "RESOLVED"
+            : (
+                blockHashV188.status === "EMPTY"
+                  ? "EMPTY"
+                  : (
+                      blockHashV188.attempted
+                        ? "ERROR"
+                        : "BUDGET_BLOCKED"
+                    )
+              );
+
+      output.rpcBlockHashInitializeV188
+        .error =
+          blockHashV188.error;
+
+      if (
+        blockHashV188.resolvedPool
+      ) {
+        blockHashResolvedPoolV188 =
+          blockHashV188.resolvedPool;
+
+        output.rpcBlockHashInitializeV188
+          .resolved = 1;
+      } else if (
+        blockHashV188.attempted
+      ) {
+        output.rpcBlockHashInitializeV188
+          .fallbackToRangeCrawler =
+            true;
+      }
+    }
+
+    if (
+      blockHashResolvedPoolV188
+    ) {
+      entry.lastResolvedSearchDistance =
+        unknownPoolSearchDistance(
+          entry
+        );
+
+      entry.consecutiveEmptySearches =
+        0;
+
+      registerPoolMapping(
+        state,
+        blockHashResolvedPoolV188
+      );
+
+      for (
+        const address
+        of [
+          blockHashResolvedPoolV188.currency0,
+          blockHashResolvedPoolV188.currency1
+        ]
+      ) {
+        if (
+          !isAddress(address) ||
+          address === ZERO ||
+          knownQuote(address)
+        ) {
+          continue;
+        }
+
+        addWatch(
+          state,
+          address,
+          blockHashResolvedPoolV188,
+          "V188_RPC_BLOCKHASH_INITIALIZE"
+        );
+      }
+
+      delete tracker[
+        poolId
+      ];
+
+      output.resolved++;
+
+      output.resolvedPoolIds.push(
+        poolId
+      );
+
+      output.probes.push({
+        poolId,
+        resolverLane,
+        activityScore:
+          activityScore(entry),
+        swapEvents:
+          safeNumber(entry.swapEvents),
+        liquidityEvents:
+          safeNumber(entry.liquidityEvents),
+        appearances:
+          safeNumber(entry.appearances),
+        fromBlock:
+          blockHashV188.blockNumber,
+        toBlock:
+          blockHashV188.blockNumber,
+        requestedBlocks: 1,
+        desiredChunkBlocks: 1,
+        externalRequestsUsed:
+          safeNumber(
+            blockHashV188.externalRequestsUsed
+          ),
+        provider:
+          blockHashV188.provider,
+        logs:
+          blockHashV188.logs?.length ||
+          0,
+        resolved: true,
+        resolutionPath:
+          "V188_RPC_BLOCKHASH_INITIALIZE",
+        error: null
+      });
+
+      continue;
+    }
+
     /*
      * V184: spend at most one of the EXISTING resolver requests on a wide,
      * exact pool-id Initialize lookup. This is especially valuable while
@@ -6414,6 +6855,9 @@ async function resolvePersistentUnknownPools(
       null;
 
     if (
+      output.rpcBlockHashInitializeV188
+        .checkpointOutcomeV189 !==
+          "NOT_REACHED" &&
       output.blockscoutWideInitializeV184
         .attempts < 1 &&
       output.requestsUsed <
@@ -31763,7 +32207,7 @@ async function scan(
     status,
 
     scanMode:
-      "V188_RPC_INITIALIZE_BINARY_EXPANSION_HUNTER",
+      "V189_FORCED_BLOCKHASH_CHECKPOINT_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -35698,22 +36142,25 @@ async function scan(
       telegramThresholdsUnchangedV187:
         "ENABLED_V187",
 
-      rpcExactInitializeGeometricExpansion:
+      rpcBlockHashInitializeResolver:
         "ENABLED_V188",
 
-      rpcExactInitializeFilterV188:
-        "POOL_MANAGER_TOPIC0_INITIALIZE_TOPIC1_POOL_ID",
+      rpcBlockHashInitializeFilterV188:
+        "POOL_MANAGER_PLUS_INITIALIZE_TOPIC_PLUS_EXACT_POOL_ID",
 
-      rpcExactInitializeIdentityGuessingV188:
-        "FORBIDDEN",
+      rpcBlockHashAvoidsMultiBlockRangeLimitV188:
+        "ENABLED_V188",
 
-      rpcExactInitializeGrowthV188:
-        "2X_PROVEN_RANGE_BOUNDED_BY_LEARNED_FAILURE",
+      rpcBlockHashFirstActiveBlockPriorityV188:
+        "ENABLED_V188",
 
-      rpcExactInitializePersistentCursorAdvanceV188:
-        "FULL_SUCCESSFUL_EMPTY_RANGE",
+      poolIdentityGuessingStillForbiddenV188:
+        "ENABLED_V188",
 
-      v187WethUsdMathPreservedV188:
+      v187WethUsdValuationPreservedV188:
+        "ENABLED_V188",
+
+      v184WideBlockscoutFallbackPreservedV188:
         "ENABLED_V188",
 
       hardRequestLimitUnchangedV188:
@@ -35725,12 +36172,39 @@ async function scan(
       telegramThresholdsUnchangedV188:
         "ENABLED_V188",
 
+      forcedBlockHashCheckpoint:
+        "ENABLED_V189",
+
+      blockHashResolverReservedFirstRequestsV189:
+        2,
+
+      oldRangeCrawlerCannotPreemptCheckpointV189:
+        "ENABLED_V189",
+
+      blockscoutCannotPreemptCheckpointV189:
+        "ENABLED_V189",
+
+      checkpointOutcomeTelemetryV189:
+        "ATTEMPTED_RESOLVED_EMPTY_ERROR_BUDGET_BLOCKED",
+
+      noNewUsdMathV189:
+        "ENABLED_V189",
+
+      hardRequestLimitUnchangedV189:
+        42,
+
+      analysisRequestLimitUnchangedV189:
+        21,
+
+      telegramThresholdsUnchangedV189:
+        "ENABLED_V189",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V188_RPC_INITIALIZE_BINARY_EXPANSION_V77_TELEGRAM_HUNTER",
+      "V189_FORCED_BLOCKHASH_CHECKPOINT_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
