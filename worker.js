@@ -1,10 +1,17 @@
 /**
  * Robinhood Chain Meme Hunter
- * V186
+ * V187
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V186
+ * CURRENT BUILD: V187
+ * - V187 adds zero-extra-request on-chain WETH -> USDG valuation from canonical WETH/USDG V4 Swap logs already present in the live discovery batch
+ * - Canonical Robinhood Chain WETH and USDG addresses are used; no symbol guessing and no off-chain price is promoted to verified
+ * - WETH/USDG reference price is derived from signed PoolManager amount0/amount1 deltas, using USDG 6 decimals and WETH 18 decimals
+ * - The median of valid same-batch WETH/USDG swap prices is used to reduce single-swap distortion
+ * - Successfully decoded meme/WETH swaps can now receive an exact USDG-derived USD amount when a same-batch canonical WETH/USDG reference exists
+ * - If no canonical WETH/USDG reference swap exists in the batch, WETH-quoted trades remain UNVERIFIED rather than inventing a dollar value
+ * - Adds zero external requests and preserves V186 self-heal, V185 retention, V184 fallback resolver, V183 backoff, V182 budget protection and all Telegram/request ceilings
  * - V186 strengthens pool identity locally before spending any external resolver requests
  * - Rebuilds missing poolRegistry entries from canonical pool objects already persisted inside watchedTokens[].pools
  * - Removes time-based pool-registry expiry; the registry is now LRU/cap controlled at the existing 2,500 mappings so valid identities are not forgotten merely because 30 days passed
@@ -705,7 +712,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V186";
+const VERSION = "V187";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -834,6 +841,7 @@ const CANONICAL_WETH_V179 =
   "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
 
 const CANONICAL_USDG_DECIMALS_V179 = 6;
+const CANONICAL_WETH_DECIMALS_V187 = 18;
 
 const ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179 = 6000;
 const ONCHAIN_DIRECTIONAL_MAX_TOKENS_V179 = 8;
@@ -9218,9 +9226,301 @@ function decimalBigIntStringV179(
   }
 }
 
+function bigintDecimalToNumberV187(
+  raw,
+  decimals
+) {
+  try {
+    const value =
+      BigInt(raw);
+
+    const negative =
+      value < 0n;
+
+    const abs =
+      negative
+        ? -value
+        : value;
+
+    const scale =
+      10n ** BigInt(decimals);
+
+    const whole =
+      abs / scale;
+
+    const fraction =
+      abs % scale;
+
+    const fractionString =
+      fraction
+        .toString()
+        .padStart(
+          decimals,
+          "0"
+        )
+        .slice(
+          0,
+          Math.min(
+            decimals,
+            12
+          )
+        );
+
+    const numeric =
+      Number(
+        `${negative ? "-" : ""}${whole.toString()}.${fractionString || "0"}`
+      );
+
+    return Number.isFinite(numeric)
+      ? numeric
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function medianNumberV187(
+  values
+) {
+  const clean =
+    (values || [])
+      .map(safeNumber)
+      .filter(
+        value =>
+          Number.isFinite(value) &&
+          value > 0
+      )
+      .sort(
+        (a, b) => a - b
+      );
+
+  if (!clean.length) {
+    return null;
+  }
+
+  const middle =
+    Math.floor(
+      clean.length / 2
+    );
+
+  if (
+    clean.length % 2 === 1
+  ) {
+    return clean[middle];
+  }
+
+  return (
+    clean[middle - 1] +
+    clean[middle]
+  ) / 2;
+}
+
+function deriveCanonicalWethUsdGReferenceV187(
+  state,
+  logs
+) {
+  const prices =
+    [];
+
+  const referenceTrades =
+    [];
+
+  for (
+    const log
+    of logs || []
+  ) {
+    if (
+      normalize(
+        log?.topics?.[0]
+      ) !== SWAP_TOPIC
+    ) {
+      continue;
+    }
+
+    const poolId =
+      normalize(
+        log?.topics?.[1]
+      );
+
+    const pool =
+      state?.poolRegistry?.[
+        poolId
+      ];
+
+    const currency0 =
+      normalize(
+        pool?.currency0
+      );
+
+    const currency1 =
+      normalize(
+        pool?.currency1
+      );
+
+    const canonicalPair =
+      (
+        currency0 ===
+          CANONICAL_WETH_V179 &&
+        currency1 ===
+          CANONICAL_USDG_V179
+      ) ||
+      (
+        currency1 ===
+          CANONICAL_WETH_V179 &&
+        currency0 ===
+          CANONICAL_USDG_V179
+      );
+
+    if (!canonicalPair) {
+      continue;
+    }
+
+    const amount0 =
+      decodeSignedInt128WordV179(
+        abiWordV179(
+          log?.data,
+          0
+        )
+      );
+
+    const amount1 =
+      decodeSignedInt128WordV179(
+        abiWordV179(
+          log?.data,
+          1
+        )
+      );
+
+    if (
+      amount0 === null ||
+      amount1 === null ||
+      amount0 === 0n ||
+      amount1 === 0n ||
+      (
+        amount0 > 0n &&
+        amount1 > 0n
+      ) ||
+      (
+        amount0 < 0n &&
+        amount1 < 0n
+      )
+    ) {
+      continue;
+    }
+
+    const wethRaw =
+      currency0 ===
+        CANONICAL_WETH_V179
+        ? absBigIntV179(amount0)
+        : absBigIntV179(amount1);
+
+    const usdGRaw =
+      currency0 ===
+        CANONICAL_USDG_V179
+        ? absBigIntV179(amount0)
+        : absBigIntV179(amount1);
+
+    const wethAmount =
+      bigintDecimalToNumberV187(
+        wethRaw,
+        CANONICAL_WETH_DECIMALS_V187
+      );
+
+    const usdGAmount =
+      bigintDecimalToNumberV187(
+        usdGRaw,
+        CANONICAL_USDG_DECIMALS_V179
+      );
+
+    if (
+      !wethAmount ||
+      !usdGAmount ||
+      wethAmount <= 0 ||
+      usdGAmount <= 0
+    ) {
+      continue;
+    }
+
+    const priceUsdGPerWeth =
+      usdGAmount /
+      wethAmount;
+
+    if (
+      !Number.isFinite(
+        priceUsdGPerWeth
+      ) ||
+      priceUsdGPerWeth <= 0
+    ) {
+      continue;
+    }
+
+    prices.push(
+      priceUsdGPerWeth
+    );
+
+    referenceTrades.push({
+      poolId,
+      blockNumber:
+        (() => {
+          try {
+            return Number(
+              BigInt(
+                log?.blockNumber ||
+                "0x0"
+              )
+            ) || null;
+          } catch {
+            return null;
+          }
+        })(),
+      transactionHash:
+        normalize(
+          log?.transactionHash
+        ) || null,
+      priceUsdGPerWeth
+    });
+  }
+
+  const medianPrice =
+    medianNumberV187(
+      prices
+    );
+
+  return {
+    verified:
+      Number.isFinite(
+        medianPrice
+      ) &&
+      medianPrice > 0,
+    source:
+      "CANONICAL_WETH_USDG_V4_SWAP_SAME_BATCH_V187",
+    wethAddress:
+      CANONICAL_WETH_V179,
+    usdGAddress:
+      CANONICAL_USDG_V179,
+    referenceSwapCount:
+      prices.length,
+    priceUsdGPerWeth:
+      Number.isFinite(
+        medianPrice
+      )
+        ? medianPrice
+        : null,
+    aggregation:
+      "MEDIAN_VALID_SAME_BATCH_SWAP_RATIOS",
+    zeroExtraRequests:
+      true,
+    referenceTrades:
+      referenceTrades.slice(
+        -10
+      )
+  };
+}
+
 function decodeV4SwapDirectionalV179(
   state,
-  log
+  log,
+  wethUsdGReferenceV187 = null
 ) {
   if (
     normalize(
@@ -9488,6 +9788,49 @@ function decodeV4SwapDirectionalV179(
         )
       : null;
 
+  const canonicalWeth =
+    quoteTokenAddress ===
+      CANONICAL_WETH_V179;
+
+  const wethAmount =
+    canonicalWeth
+      ? bigintDecimalToNumberV187(
+          quoteRaw,
+          CANONICAL_WETH_DECIMALS_V187
+        )
+      : null;
+
+  const wethUsdGPriceV187 =
+    safeNumber(
+      wethUsdGReferenceV187
+        ?.priceUsdGPerWeth
+    );
+
+  const wethUsdConvertedV187 =
+    canonicalWeth &&
+    wethAmount > 0 &&
+    wethUsdGReferenceV187
+      ?.verified === true &&
+    wethUsdGPriceV187 > 0
+      ? wethAmount *
+        wethUsdGPriceV187
+      : null;
+
+  const exactUsdAmountV187 =
+    canonicalUsdG &&
+    usdGAmount !== null
+      ? safeNumber(
+          usdGAmount
+        )
+      : (
+          Number.isFinite(
+            wethUsdConvertedV187
+          ) &&
+          wethUsdConvertedV187 > 0
+            ? wethUsdConvertedV187
+            : null
+        );
+
   return {
     verified:
       true,
@@ -9527,11 +9870,53 @@ function decodeV4SwapDirectionalV179(
 
     usdGAmount,
 
+    canonicalWethQuote:
+      canonicalWeth,
+
+    wethAmountVerified:
+      canonicalWeth &&
+      wethAmount !== null,
+
+    wethAmount:
+      canonicalWeth
+        ? wethAmount
+        : null,
+
+    wethUsdGReferenceVerifiedV187:
+      canonicalWeth &&
+      wethUsdGReferenceV187
+        ?.verified === true,
+
+    wethUsdGPriceV187:
+      canonicalWeth &&
+      wethUsdGPriceV187 > 0
+        ? wethUsdGPriceV187
+        : null,
+
     exactUsdVerified:
-      false,
+      Number.isFinite(
+        exactUsdAmountV187
+      ) &&
+      exactUsdAmountV187 > 0,
 
     exactUsdAmount:
-      null,
+      Number.isFinite(
+        exactUsdAmountV187
+      )
+        ? exactUsdAmountV187
+        : null,
+
+    exactUsdSource:
+      canonicalUsdG &&
+      usdGAmount !== null
+        ? "CANONICAL_USDG_DIRECT_V187"
+        : (
+            Number.isFinite(
+              wethUsdConvertedV187
+            )
+              ? "CANONICAL_WETH_X_CANONICAL_WETH_USDG_ONCHAIN_REFERENCE_V187"
+              : null
+          ),
 
     blockNumber,
 
@@ -9670,8 +10055,20 @@ function collectOnChainDirectionalSwapsV179(
   let usdGQuoted =
     0;
 
+  let wethQuotedV187 =
+    0;
+
+  let wethUsdConvertedV187 =
+    0;
+
   let exactUsdVerified =
     0;
+
+  const wethUsdGReferenceV187 =
+    deriveCanonicalWethUsdGReferenceV187(
+      state,
+      logs
+    );
 
   let deduplicated =
     0;
@@ -9809,7 +10206,8 @@ function collectOnChainDirectionalSwapsV179(
     const trade =
       decodeV4SwapDirectionalV179(
         state,
-        log
+        log,
+        wethUsdGReferenceV187
       );
 
     if (
@@ -9839,6 +10237,21 @@ function collectOnChainDirectionalSwapsV179(
       trade.usdGAmountVerified
     ) {
       usdGQuoted++;
+    }
+
+    if (
+      trade.canonicalWethQuote
+    ) {
+      wethQuotedV187++;
+    }
+
+    if (
+      trade.canonicalWethQuote &&
+      trade.exactUsdVerified &&
+      trade.exactUsdSource ===
+        "CANONICAL_WETH_X_CANONICAL_WETH_USDG_ONCHAIN_REFERENCE_V187"
+    ) {
+      wethUsdConvertedV187++;
     }
 
     if (
@@ -9985,6 +10398,12 @@ function collectOnChainDirectionalSwapsV179(
 
     usdGQuoted,
 
+    wethQuotedV187,
+
+    wethUsdConvertedV187,
+
+    wethUsdGReferenceV187,
+
     exactUsdVerified,
 
     deduplicated,
@@ -10023,7 +10442,7 @@ function collectOnChainDirectionalSwapsV179(
       true,
 
     usdPolicy:
-      "USDG_AMOUNT_VERIFIED_SEPARATELY_EXACT_USD_REMAINS_UNVERIFIED_WITHOUT_VERIFIED_CONVERSION"
+      "V187_DIRECT_USDG_OR_CANONICAL_WETH_WITH_SAME_BATCH_ONCHAIN_WETH_USDG_REFERENCE_ONLY"
   };
 }
 
@@ -31309,7 +31728,7 @@ async function scan(
     status,
 
     scanMode:
-      "V186_LOCAL_POOL_REGISTRY_SELF_HEAL_HUNTER",
+      "V187_ONCHAIN_WETH_USDG_VALUATION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -35208,12 +35627,48 @@ async function scan(
       telegramThresholdsUnchangedV186:
         "ENABLED_V186",
 
+      canonicalWethUsdGOnchainReference:
+        "ENABLED_V187",
+
+      canonicalWethAddressV187:
+        "0x0bd7d308f8e1639fab988df18a8011f41eacad73",
+
+      canonicalUsdGAddressV187:
+        "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
+
+      wethUsdReferenceSourceV187:
+        "SAME_BATCH_CANONICAL_WETH_USDG_V4_SWAPS",
+
+      wethUsdReferenceAggregationV187:
+        "MEDIAN",
+
+      wethQuoteExactUsdConversionV187:
+        "ENABLED_ONLY_WITH_VERIFIED_ONCHAIN_REFERENCE",
+
+      noOffchainPricePromotedToVerifiedV187:
+        "ENABLED_V187",
+
+      extraExternalRequestsForWethUsdV187:
+        0,
+
+      v186DirectionalDecoderPreservedV187:
+        "ENABLED_V187",
+
+      hardRequestLimitUnchangedV187:
+        42,
+
+      analysisRequestLimitUnchangedV187:
+        21,
+
+      telegramThresholdsUnchangedV187:
+        "ENABLED_V187",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V186_LOCAL_POOL_REGISTRY_SELF_HEAL_V77_TELEGRAM_HUNTER",
+      "V187_ONCHAIN_WETH_USDG_VALUATION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
