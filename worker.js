@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V159
+ * V160
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -566,8 +566,16 @@
  * - Dex fresh spacing remains 5 minutes; Gecko remains max one fresh per scan
  * - Existing Telegram thresholds remain exactly 60 / 59 / $1000 / 55
  * - No increase to normal external request rate
+ *
+ * V160:
+ * - Preserves full V159 fresh-market slot handoff and all prior protections
+ * - FIX: Blockscout PRO HTTP 500 is now treated as a transient server outage
+ * - HTTP 500 joins 502/503/504 in the existing persistent 10-minute PRO cooldown
+ * - Public Blockscout remains primary; missing holder evidence is never promoted
+ * - A verified PRO success still clears/de-escalates the outage state normally
+ * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V159";
+const VERSION = "V160";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -13807,6 +13815,7 @@ async function blockscoutProHoldersV143(
         `HTTP_${response.status}`;
 
       const transientOutageV145 =
+        response.status === 500 ||
         response.status === 502 ||
         response.status === 503 ||
         response.status === 504;
@@ -25618,7 +25627,7 @@ async function scan(
     status,
 
     scanMode:
-      "V159_CORE_PRIORITY_FRESH_MARKET_SLOT_HANDOFF_HUNTER",
+      "V160_CORE_BLOCKSCOUT_PRO_HTTP500_OUTAGE_PROTECTION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -26300,7 +26309,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V159_PRIORITY_FRESH_MARKET_SLOT_HANDOFF_DIRECTIONAL_USD_HUNTER",
+        "V160_BLOCKSCOUT_PRO_HTTP500_OUTAGE_PROTECTION_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -28562,12 +28571,47 @@ async function scan(
       telegramThresholdsUnchangedV159:
         "ENABLED_V159",
 
+      blockscoutProHttp500TransientOutageProtection:
+        "ENABLED_V160",
+
+      blockscoutProTransientStatusesV160:
+        [
+          500,
+          502,
+          503,
+          504
+        ],
+
+      blockscoutProHttp500UsesExistingCooldownV160:
+        "ENABLED_V160",
+
+      blockscoutProCooldownStoredInExistingKvUnchangedV160:
+        "ENABLED_V160",
+
+      publicBlockscoutPriorityUnchangedV160:
+        "ENABLED_V160",
+
+      missingHolderEvidenceNeverPromotedV160:
+        "ENABLED_V160",
+
+      verifiedProSuccessClearsCooldownUnchangedV160:
+        "ENABLED_V160",
+
+      freshMarketSlotHandoffUnchangedV160:
+        "ENABLED_V160",
+
+      noExternalRequestRateIncreaseV160:
+        "ENABLED_V160",
+
+      telegramThresholdsUnchangedV160:
+        "ENABLED_V160",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V159_CORE_PRIORITY_FRESH_MARKET_SLOT_HANDOFF_V77_TELEGRAM_HUNTER",
+      "V160_CORE_BLOCKSCOUT_PRO_HTTP500_OUTAGE_PROTECTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
