@@ -1,8 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V165
+ * V166
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
+ *
+ * V166:
+ * - NEW: active V149 partial-holder retries can release the scarce fresh-market slot
+ * - NEW: a better viable challenger may take that slot without the normal V139 +20 lead
+ * - NEW: carried partial-holder retry state/history remains preserved and analysed
+ * - SAFETY: ordinary V139 fairness remains unchanged for candidates without an active V149 blocker
+ * - No Telegram-threshold, request-budget or normal external request-rate increase
  *
  * V165:
  * - NEW: same-run terminal replacement candidates inherit protected residual analysis budget
@@ -603,7 +610,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V165";
+const VERSION = "V166";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -15229,6 +15236,74 @@ function clearPartialHolderStateV149(
   }
 }
 
+/*
+ * V166:
+ * Detect only the still-active V149 partial-holder retry states that deliberately
+ * keep concentration unverified. This is read-only scheduling telemetry: it does
+ * not promote holder evidence, alter retry timing, or add any external request.
+ */
+function activePartialHolderRetryBlockerV166(
+  watched
+) {
+  const cache =
+    watched?.partialHolderCacheV149;
+
+  if (
+    !cache ||
+    typeof cache !==
+      "object"
+  ) {
+    return null;
+  }
+
+  const timestamp =
+    safeNumber(
+      cache.timestamp
+    );
+
+  if (
+    !timestamp ||
+    Date.now() - timestamp >
+      HOLDER_PARTIAL_RETRY_MS_V149
+  ) {
+    return null;
+  }
+
+  const status =
+    cache?.data
+      ?.integrity
+      ?.status;
+
+  if (
+    status !==
+      "NO_POSITIVE_OWNERSHIP_BALANCES" &&
+    status !==
+      "NO_POSITIVE_OWNERSHIP_SUPPLY"
+  ) {
+    return null;
+  }
+
+  return {
+    status,
+    source:
+      cache.source ||
+      cache?.data?.holderSource ||
+      null,
+    cachedAt:
+      timestamp,
+    retryAt:
+      timestamp +
+      HOLDER_PARTIAL_RETRY_MS_V149,
+    retryAfterMs:
+      Math.max(
+        0,
+        timestamp +
+          HOLDER_PARTIAL_RETRY_MS_V149 -
+          Date.now()
+      )
+  };
+}
+
 /* =========================================================
    HOLDER INTELLIGENCE — V88
    ========================================================= */
@@ -23287,16 +23362,139 @@ async function scan(
       retryFairnessChallengerRow
     );
 
+  /*
+   * V166:
+   * A carried candidate waiting on an active V149 partial-holder retry must not
+   * monopolize the scarce fresh-market slot. Preserve the carried retry itself,
+   * but allow a strictly better viable market-unverified challenger to own the
+   * slot even when its score lead is below the ordinary V139 +20 threshold.
+   */
+  const partialHolderRetryBlockerV166 =
+    pendingCompletionToken
+      ? activePartialHolderRetryBlockerV166(
+          pendingCompletionToken
+        )
+      : null;
+
+  const partialHolderFreshSlotChallengerRowV166 =
+    pendingCompletionToken &&
+    partialHolderRetryBlockerV166 &&
+    !retryFairnessOverrideV139
+      ? rankedMarketFreshCandidates.find(
+          row => {
+            const item =
+              row?.token ||
+              null;
+
+            const address =
+              normalize(
+                item?.address
+              );
+
+            if (
+              !item ||
+              !address ||
+              address ===
+                pendingCompletionAddress ||
+              safeNumber(
+                row?.score
+              ) <=
+                safeNumber(
+                  pendingCompletionPriorityScore
+                ) ||
+              terminalPriorityRejectFromWatched(
+                item
+              )?.terminal === true ||
+              !preMarketCandidateAllowed(
+                item
+              ) ||
+              freshUsableVerifiedMarketCacheV159(
+                item
+              )
+            ) {
+              return false;
+            }
+
+            return true;
+          }
+        ) ||
+        null
+      : null;
+
+  const partialHolderFreshSlotReleaseTriggeredV166 =
+    Boolean(
+      partialHolderRetryBlockerV166 &&
+      partialHolderFreshSlotChallengerRowV166
+    );
+
+  let partialHolderRetryFreshSlotReleaseV166 = {
+    enabled: true,
+    triggered:
+      partialHolderFreshSlotReleaseTriggeredV166,
+    carriedAddress:
+      pendingCompletionAddress ||
+      null,
+    carriedSymbol:
+      pendingCompletionToken
+        ?.metadata?.symbol ||
+      pendingCompletionToken
+        ?.symbol ||
+      null,
+    carriedScore:
+      pendingCompletionPriorityScore ??
+      null,
+    activePartialHolderBlocker:
+      partialHolderRetryBlockerV166,
+    normalV139OverrideTriggered:
+      retryFairnessOverrideV139,
+    normalV139MinimumLead:
+      RETRY_FAIRNESS_MIN_SCORE_LEAD_V139,
+    challengerAddress:
+      normalize(
+        partialHolderFreshSlotChallengerRowV166
+          ?.token
+          ?.address
+      ) ||
+      null,
+    challengerSymbol:
+      partialHolderFreshSlotChallengerRowV166
+        ?.token
+        ?.metadata
+        ?.symbol ||
+      partialHolderFreshSlotChallengerRowV166
+        ?.token
+        ?.symbol ||
+      null,
+    challengerScore:
+      partialHolderFreshSlotChallengerRowV166
+        ?.score ??
+      null,
+    carriedRetryPreserved:
+      Boolean(
+        partialHolderFreshSlotReleaseTriggeredV166
+      ),
+    carriedAnalysisPreserved:
+      Boolean(
+        partialHolderFreshSlotReleaseTriggeredV166
+      ),
+    noExtraNormalRequests: true,
+    telegramThresholdsUnchanged: true
+  };
+
   let marketFreshTarget =
     retryFairnessOverrideV139
       ? retryFairnessChallengerRow
           ?.token ||
         null
-      : pendingCompletionToken ||
-        rankedMarketFreshCandidates
-          [0]
-          ?.token ||
-        null;
+      : partialHolderFreshSlotReleaseTriggeredV166
+        ? partialHolderFreshSlotChallengerRowV166
+            ?.token ||
+          null
+        : pendingCompletionToken ||
+          rankedMarketFreshCandidates
+            [0]
+            ?.token ||
+          null;
 
   let marketFreshTargetAddress =
     normalize(
@@ -23304,12 +23502,14 @@ async function scan(
     );
 
   const retryPersistenceAddressV139 =
-    retryFairnessOverrideV139
+    retryFairnessOverrideV139 ||
+    partialHolderFreshSlotReleaseTriggeredV166
       ? pendingCompletionAddress
       : marketFreshTargetAddress;
 
   const retryPersistenceTokenV139 =
-    retryFairnessOverrideV139
+    retryFairnessOverrideV139 ||
+    partialHolderFreshSlotReleaseTriggeredV166
       ? pendingCompletionToken
       : marketFreshTarget;
 
@@ -23379,7 +23579,8 @@ async function scan(
   };
 
   if (
-    carriedFreshUsableMarketV159
+    carriedFreshUsableMarketV159 &&
+    !partialHolderFreshSlotReleaseTriggeredV166
   ) {
     const replacementRowV159 =
       rankedMarketFreshCandidates
@@ -23480,8 +23681,11 @@ async function scan(
       ? uniqueBy(
           [
             ...(
-              freshMarketSlotHandoffV159
-                .triggered &&
+              (
+                freshMarketSlotHandoffV159
+                  .triggered ||
+                partialHolderFreshSlotReleaseTriggeredV166
+              ) &&
               carriedAnalysisTargetV159
                 ? [
                     carriedAnalysisTargetV159
@@ -26318,7 +26522,7 @@ async function scan(
     status,
 
     scanMode:
-      "V165_CORE_TERMINAL_REPLACEMENT_BUDGET_RECOVERY_HUNTER",
+      "V166_CORE_PARTIAL_HOLDER_RETRY_FRESH_SLOT_RELEASE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -26946,6 +27150,22 @@ async function scan(
         true
     },
 
+    partialHolderRetryFreshSlotReleaseV166: {
+      ...partialHolderRetryFreshSlotReleaseV166,
+      effectiveFreshMarketAddress:
+        effectiveMarketFreshTargetAddress ||
+        null,
+      persistedRetryAddress:
+        retryPersistenceAddressV139 ||
+        null,
+      dexFreshSpacingMs:
+        DEXSCREENER_MIN_FRESH_INTERVAL_MS,
+      geckoFreshSpacingMs:
+        GECKOTERMINAL_MIN_FRESH_INTERVAL_MS,
+      geckoOneFreshPerScan:
+        1
+    },
+
     preMarketExclusion: {
       enabled:
         true,
@@ -27002,7 +27222,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V165_TERMINAL_REPLACEMENT_BUDGET_RECOVERY_DIRECTIONAL_USD_HUNTER",
+        "V166_PARTIAL_HOLDER_RETRY_FRESH_SLOT_RELEASE_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -29497,12 +29717,33 @@ async function scan(
       telegramThresholdsUnchangedV165:
         "ENABLED_V165",
 
+      partialHolderRetryFreshSlotRelease:
+        "ENABLED_V166",
+
+      activeV149PartialHolderCannotMonopolizeFreshSlotV166:
+        "ENABLED_V166",
+
+      betterViableChallengerCanBypassV139LeadOnlyForPartialHolderV166:
+        "ENABLED_V166",
+
+      carriedPartialHolderRetryPreservedV166:
+        "ENABLED_V166",
+
+      ordinaryRetryFairnessUnchangedV166:
+        "ENABLED_V166",
+
+      noExternalRequestRateIncreaseV166:
+        "ENABLED_V166",
+
+      telegramThresholdsUnchangedV166:
+        "ENABLED_V166",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V165_CORE_TERMINAL_REPLACEMENT_BUDGET_RECOVERY_V77_TELEGRAM_HUNTER",
+      "V166_CORE_PARTIAL_HOLDER_RETRY_FRESH_SLOT_RELEASE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
