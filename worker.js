@@ -1,8 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
- * V170
+ * V173
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
+ *
+ * CURRENT BUILD: V173
+ * - V173 verified stale-cache priority-release fix
+ * - Built forward from V172/V171/V170 without removing preserved features
  *
  * V169:
  * - FIX: Telegram freshness telemetry now distinguishes FRESH / STALE_CACHE / UNVERIFIED
