@@ -1,10 +1,10 @@
 /**
  * Robinhood Chain Meme Hunter
- * V198-TEST DEPLOYMENT CHECK
+ * V199
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V198
+ * CURRENT BUILD: V199
  * - V192 adds strict native-ETH quote valuation without changing V191 resolution/replay
  * - Robinhood Chain native ETH (ZERO currency in Uniswap V4) is treated as 18-decimal ETH
  * - Native ETH uses the same canonical WETH/USDG on-chain reference via 1:1 ETH/WETH wrapping denomination
@@ -746,7 +746,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V198-TEST";
+const VERSION = "V199";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -4523,6 +4523,430 @@ function providerSafeUnknownPoolChunks(
 }
 
 
+
+function sortV4CurrenciesV199(
+  a,
+  b
+) {
+  const x = normalize(a);
+  const y = normalize(b);
+
+  if (
+    !isAddress(x) ||
+    !isAddress(y) ||
+    x === y
+  ) {
+    return null;
+  }
+
+  try {
+    return BigInt(x) < BigInt(y)
+      ? [x, y]
+      : [y, x];
+  } catch {
+    return null;
+  }
+}
+
+async function getPoolIdentityBitqueryDexPoolEventsV199(
+  env,
+  poolId,
+  budget
+) {
+  const normalizedPoolId =
+    normalize(poolId);
+
+  const base = {
+    attempted: false,
+    externalRequestsUsed: 0,
+    provider: "BITQUERY",
+    resolver:
+      "DEXPoolEvents_POOLID_FIRST_V199",
+    poolId:
+      normalizedPoolId,
+    returnedPoolId: null,
+    poolManager: null,
+    protocolName: null,
+    protocolVersion: null,
+    currencyA: null,
+    currencyB: null,
+    currency0: null,
+    currency1: null,
+    blockNumber: null,
+    transactionHash: null,
+    resolvedPool: null,
+    status: null,
+    httpStatus: null,
+    error: null
+  };
+
+  const token =
+    String(
+      env.BITQUERY_ACCESS_TOKEN ||
+      ""
+    ).trim();
+
+  if (!token) {
+    return {
+      ...base,
+      status: "NOT_CONFIGURED"
+    };
+  }
+
+  if (
+    !/^0x[a-f0-9]{64}$/.test(
+      normalizedPoolId
+    )
+  ) {
+    return {
+      ...base,
+      status: "INVALID_POOL_ID"
+    };
+  }
+
+  if (
+    !budgetAvailable(
+      budget,
+      "discovery-live"
+    ) ||
+    !consumeBudget(
+      budget,
+      "discovery-live",
+      "BITQUERY_DEXPOOLEVENTS_POOLID_V199"
+    )
+  ) {
+    return {
+      ...base,
+      status:
+        "DISCOVERY_LIVE_BUDGET_PROTECTED"
+    };
+  }
+
+  /*
+   * Bitquery documents DEXPoolEvents on Robinhood as realtime-only and
+   * directly keyed by the Uniswap v4 PoolId. This is intentionally queried
+   * without dataset: archive/combined.
+   */
+  const query = `
+    {
+      EVM(network: robinhood) {
+        DEXPoolEvents(
+          limit: {count: 1}
+          orderBy: {descending: Block_Time}
+          where: {
+            PoolEvent: {
+              Pool: {
+                PoolId: {
+                  is: "${normalizedPoolId}"
+                }
+              }
+            }
+          }
+        ) {
+          Block {
+            Number
+            Time
+          }
+          Transaction {
+            Hash
+          }
+          PoolEvent {
+            Dex {
+              ProtocolName
+              ProtocolVersion
+            }
+            Pool {
+              PoolId
+              SmartContract
+              CurrencyA {
+                SmartContract
+                Symbol
+                Name
+              }
+              CurrencyB {
+                SmartContract
+                Symbol
+                Name
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const response =
+      await fetch(
+        BITQUERY_GRAPHQL_V2,
+        {
+          method: "POST",
+          headers: {
+            "content-type":
+              "application/json",
+            accept:
+              "application/json",
+            authorization:
+              `Bearer ${token}`
+          },
+          body:
+            JSON.stringify({query})
+        }
+      );
+
+    const httpStatus =
+      response.status;
+
+    let payload = null;
+
+    try {
+      payload =
+        await response.json();
+    } catch {
+      payload = null;
+    }
+
+    if (!response.ok) {
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        status:
+          `HTTP_${httpStatus}`,
+        error:
+          payload?.errors?.[0]?.message ||
+          `BITQUERY_HTTP_${httpStatus}`
+      };
+    }
+
+    if (
+      Array.isArray(
+        payload?.errors
+      ) &&
+      payload.errors.length
+    ) {
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        status: "GRAPHQL_ERROR",
+        error:
+          payload.errors
+            .map(
+              row =>
+                String(
+                  row?.message ||
+                  "GRAPHQL_ERROR"
+                )
+            )
+            .slice(0, 3)
+            .join(" | ")
+      };
+    }
+
+    const row =
+      payload?.data?.EVM
+        ?.DEXPoolEvents?.[0] ||
+      null;
+
+    if (!row) {
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        status:
+          "EMPTY_REALTIME_WINDOW"
+      };
+    }
+
+    const returnedPoolId =
+      normalize(
+        row?.PoolEvent?.Pool?.PoolId
+      );
+
+    const poolManager =
+      normalize(
+        row?.PoolEvent?.Pool
+          ?.SmartContract
+      );
+
+    const protocolName =
+      String(
+        row?.PoolEvent?.Dex
+          ?.ProtocolName ||
+        ""
+      ).toLowerCase();
+
+    const protocolVersion =
+      String(
+        row?.PoolEvent?.Dex
+          ?.ProtocolVersion ||
+        ""
+      );
+
+    const currencyA =
+      normalize(
+        row?.PoolEvent?.Pool
+          ?.CurrencyA?.SmartContract
+      );
+
+    const currencyB =
+      normalize(
+        row?.PoolEvent?.Pool
+          ?.CurrencyB?.SmartContract
+      );
+
+    if (
+      returnedPoolId !==
+        normalizedPoolId
+    ) {
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        returnedPoolId,
+        poolManager,
+        protocolName,
+        protocolVersion,
+        currencyA,
+        currencyB,
+        status:
+          "POOL_ID_MISMATCH",
+        error:
+          "BITQUERY_DEXPOOLEVENTS_RETURNED_DIFFERENT_POOL_ID"
+      };
+    }
+
+    if (
+      protocolName &&
+      protocolName !==
+        "uniswap_v4"
+    ) {
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        returnedPoolId,
+        poolManager,
+        protocolName,
+        protocolVersion,
+        currencyA,
+        currencyB,
+        status:
+          "PROTOCOL_UNVERIFIED",
+        error:
+          "POOL_NOT_IDENTIFIED_AS_UNISWAP_V4"
+      };
+    }
+
+    if (
+      isAddress(poolManager) &&
+      poolManager !==
+        normalize(POOL_MANAGER)
+    ) {
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        returnedPoolId,
+        poolManager,
+        protocolName,
+        protocolVersion,
+        currencyA,
+        currencyB,
+        status:
+          "POOL_MANAGER_MISMATCH",
+        error:
+          "DEXPOOLEVENTS_POOL_MANAGER_DOES_NOT_MATCH_ROBINHOOD_V4_MANAGER"
+      };
+    }
+
+    const sorted =
+      sortV4CurrenciesV199(
+        currencyA,
+        currencyB
+      );
+
+    if (!sorted) {
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        returnedPoolId,
+        poolManager,
+        protocolName,
+        protocolVersion,
+        currencyA,
+        currencyB,
+        status:
+          "CURRENCIES_UNVERIFIED",
+        error:
+          "DEXPOOLEVENTS_MISSING_OR_INVALID_CURRENCIES"
+      };
+    }
+
+    const [
+      currency0,
+      currency1
+    ] = sorted;
+
+    const resolvedPool = {
+      poolId:
+        normalizedPoolId,
+      currency0,
+      currency1,
+      blockNumber:
+        safeNumber(
+          row?.Block?.Number
+        ) || null,
+      transactionHash:
+        normalize(
+          row?.Transaction?.Hash
+        ) || null,
+      source:
+        "V199_BITQUERY_DEXPOOLEVENTS_POOLID_FIRST"
+    };
+
+    return {
+      ...base,
+      attempted: true,
+      externalRequestsUsed: 1,
+      httpStatus,
+      returnedPoolId,
+      poolManager,
+      protocolName,
+      protocolVersion,
+      currencyA,
+      currencyB,
+      currency0,
+      currency1,
+      blockNumber:
+        resolvedPool.blockNumber,
+      transactionHash:
+        resolvedPool
+          .transactionHash,
+      resolvedPool,
+      status: "RESOLVED"
+    };
+  } catch (error) {
+    return {
+      ...base,
+      attempted: true,
+      externalRequestsUsed: 1,
+      status: "FETCH_ERROR",
+      error:
+        errorString(error)
+    };
+  }
+}
+
 async function getInitializeForPoolBitqueryV190(
   env,
   state,
@@ -7054,6 +7478,39 @@ async function resolvePersistentUnknownPools(
         "UP_TO_4_DISTINCT_CURRENT_LIVE_POOLS_V197",
       stopOnFirstResolvedV193:
         true    },
+    bitqueryDexPoolEventsV199: {
+      enabled: true,
+      configured:
+        bitqueryConfiguredV190,
+      endpoint:
+        BITQUERY_GRAPHQL_V2,
+      dataset:
+        "realtime_only",
+      poolIdFirst:
+        true,
+      maxAttemptsPerRun: 4,
+      attempts: 0,
+      requestsUsed: 0,
+      resolved: 0,
+      selectedPoolId: null,
+      currencyA: null,
+      currencyB: null,
+      currency0: null,
+      currency1: null,
+      blockNumber: null,
+      transactionHash: null,
+      httpStatus: null,
+      status:
+        bitqueryConfiguredV190
+          ? "NOT_REACHED"
+          : "NOT_CONFIGURED",
+      error: null,
+      exactPoolIdRequired: true,
+      currencyOrdering:
+        "UNISWAP_V4_NUMERIC_ADDRESS_SORT",
+      identityGuessing: false,
+      attemptHistoryV199: []
+    },
     bitqueryInitializeV190: {
       enabled: true,
       configured:
@@ -7183,13 +7640,142 @@ async function resolvePersistentUnknownPools(
     output.attempted++;
 
     /*
-     * V190: resolve one exact unknown PoolId through Bitquery first.
-     * This path was manually proven against a real V189 unresolved pool.
+     * V199: CURRENT-live PoolId-first identity lookup.
+     * DEXPoolEvents is realtime-only and keyed directly by the exact V4
+     * PoolId. If it cannot resolve, preserve the proven V190 exact
+     * Initialize lookup as fallback.
      */
     let bitqueryResolvedPoolV190 =
       null;
 
+    let bitqueryResolutionPathV199 =
+      null;
+
     if (
+      output.bitqueryDexPoolEventsV199
+        .attempts <
+          output.bitqueryDexPoolEventsV199
+            .maxAttemptsPerRun &&
+      bitqueryConfiguredV190 &&
+      livePriorityPoolIdsV191.has(
+        normalize(poolId)
+      ) &&
+      output.requestsUsed <
+        resolverRequestLimit
+    ) {
+      const dexPoolV199 =
+        await getPoolIdentityBitqueryDexPoolEventsV199(
+          env,
+          poolId,
+          budget
+        );
+
+      output.bitqueryDexPoolEventsV199
+        .attempts +=
+          dexPoolV199.attempted
+            ? 1
+            : 0;
+
+      output.bitqueryDexPoolEventsV199
+        .requestsUsed +=
+          safeNumber(
+            dexPoolV199
+              .externalRequestsUsed
+          );
+
+      output.requestsUsed +=
+        safeNumber(
+          dexPoolV199
+            .externalRequestsUsed
+        );
+
+      output.bitqueryDexPoolEventsV199
+        .selectedPoolId =
+          poolId;
+
+      output.bitqueryDexPoolEventsV199
+        .currencyA =
+          dexPoolV199.currencyA;
+
+      output.bitqueryDexPoolEventsV199
+        .currencyB =
+          dexPoolV199.currencyB;
+
+      output.bitqueryDexPoolEventsV199
+        .currency0 =
+          dexPoolV199.currency0;
+
+      output.bitqueryDexPoolEventsV199
+        .currency1 =
+          dexPoolV199.currency1;
+
+      output.bitqueryDexPoolEventsV199
+        .blockNumber =
+          dexPoolV199.blockNumber;
+
+      output.bitqueryDexPoolEventsV199
+        .transactionHash =
+          dexPoolV199.transactionHash;
+
+      output.bitqueryDexPoolEventsV199
+        .httpStatus =
+          dexPoolV199.httpStatus;
+
+      output.bitqueryDexPoolEventsV199
+        .status =
+          dexPoolV199.status;
+
+      output.bitqueryDexPoolEventsV199
+        .error =
+          dexPoolV199.error;
+
+      output.bitqueryDexPoolEventsV199
+        .attemptHistoryV199.push({
+          poolId,
+          status:
+            dexPoolV199.status,
+          httpStatus:
+            dexPoolV199.httpStatus,
+          returnedPoolId:
+            dexPoolV199.returnedPoolId,
+          poolManager:
+            dexPoolV199.poolManager,
+          protocolName:
+            dexPoolV199.protocolName,
+          currencyA:
+            dexPoolV199.currencyA,
+          currencyB:
+            dexPoolV199.currencyB,
+          currency0:
+            dexPoolV199.currency0,
+          currency1:
+            dexPoolV199.currency1,
+          resolved:
+            Boolean(
+              dexPoolV199.resolvedPool
+            )
+        });
+
+      if (
+        dexPoolV199.resolvedPool
+      ) {
+        bitqueryResolvedPoolV190 =
+          dexPoolV199.resolvedPool;
+
+        bitqueryResolutionPathV199 =
+          "V199_BITQUERY_DEXPOOLEVENTS_POOLID_FIRST";
+
+        output.bitqueryDexPoolEventsV199
+          .resolved += 1;
+      }
+    }
+
+    /*
+     * Preserve V190 Initialize lookup as fallback. It is only attempted
+     * when V199 did not resolve and request budget remains.
+     */
+    if (
+      !bitqueryResolvedPoolV190 &&
       output.bitqueryInitializeV190
         .attempts <
           output.bitqueryInitializeV190
@@ -7291,6 +7877,9 @@ async function resolvePersistentUnknownPools(
         bitqueryResolvedPoolV190 =
           bitqueryV190.resolvedPool;
 
+        bitqueryResolutionPathV199 =
+          "V190_BITQUERY_REALTIME_INITIALIZE";
+
         output.bitqueryInitializeV190
           .resolved = 1;
       } else if (
@@ -7337,7 +7926,8 @@ async function resolvePersistentUnknownPools(
           state,
           address,
           bitqueryResolvedPoolV190,
-          "V190_BITQUERY_REALTIME_INITIALIZE"
+          bitqueryResolutionPathV199 ||
+            "V190_BITQUERY_REALTIME_INITIALIZE"
         );
       }
 
@@ -7374,6 +7964,7 @@ async function resolvePersistentUnknownPools(
         logs: 1,
         resolved: true,
         resolutionPath:
+          bitqueryResolutionPathV199 ||
           "V190_BITQUERY_REALTIME_INITIALIZE",
         error: null
       });
@@ -34574,7 +35165,7 @@ async function scan(
     status,
 
     scanMode:
-      "V198_RESOLVED_POOL_REPLAY_DIAGNOSTIC_HUNTER",
+      "V199_BITQUERY_POOLID_FIRST_IDENTITY_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -38566,6 +39157,36 @@ async function scan(
       telegramThresholdsUnchangedV192:
         "ENABLED_V192",
 
+      bitqueryDexPoolEventsPoolIdFirstV199:
+        "ENABLED_V199",
+
+      bitqueryDexPoolEventsDatasetV199:
+        "REALTIME_ONLY",
+
+      bitqueryDexPoolEventsExactPoolIdRequiredV199:
+        "ENABLED_V199",
+
+      bitqueryDexPoolEventsCurrencyOrderingV199:
+        "UNISWAP_V4_NUMERIC_ADDRESS_SORT",
+
+      bitqueryInitializeFallbackPreservedV199:
+        "ENABLED_V199",
+
+      successfulPoolIdentityPersistedImmediatelyV199:
+        "ENABLED_V199",
+
+      verifiedUsdPricingFrozenFromV196V199:
+        "ENABLED_V199",
+
+      identityGuessingV199:
+        "DISABLED",
+
+      hardRequestLimitUnchangedV199:
+        42,
+
+      telegramThresholdsUnchangedV199:
+        "ENABLED_V199",
+
       resolvedPoolReplayDiagnosticV198:
         "ENABLED_V198",
 
@@ -38826,7 +39447,7 @@ async function scan(
     },
 
     architecture:
-      "V198_RESOLVED_POOL_REPLAY_DIAGNOSTIC_V77_TELEGRAM_HUNTER",
+      "V199_BITQUERY_POOLID_FIRST_IDENTITY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
