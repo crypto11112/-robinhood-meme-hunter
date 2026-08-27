@@ -1,10 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V182
+ * V183
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V182
+ * CURRENT BUILD: V183
+ * - V183 adds persistent 429 cooldown/backoff specifically for the Blockscout exact-pool USDG directional-history route
+ * - Known Blockscout directional 429 cooldowns are checked BEFORE consuming the protected V182 request
+ * - A 429 now backs off 5m -> 10m -> 20m -> 30m max; a successful response clears the streak/cooldown
+ * - If the directional route is cooling down, the V182 reserved request is released for normal analysis instead of being wasted
+ * - Preserves V182 protected-request ordering, V181 latestNumber/toBlock fix, 42-request hard ceiling, 21-request analysis ceiling, Telegram thresholds and all existing verified-window rules
  * - V182 reserves one protected pre-Telegram analysis request for Blockscout V4 USDG directional verification
  * - Prevents ordinary analysis from consuming the final request needed by BLOCKSCOUT_V4_USDG_DIRECTIONAL_V180
  * - Reservation is released automatically when the protected request is consumed
@@ -679,7 +684,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V182";
+const VERSION = "V183";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -815,6 +820,12 @@ const ONCHAIN_DIRECTIONAL_RETENTION_MS_V179 =
   26 * 60 * 60 * 1000;
 
 const BLOCKSCOUT_LOGS_MAX_ROWS_V180 = 1000;
+
+const BLOCKSCOUT_DIRECTIONAL_429_BASE_MS_V183 =
+  5 * 60 * 1000;
+
+const BLOCKSCOUT_DIRECTIONAL_429_MAX_MS_V183 =
+  30 * 60 * 1000;
 const V180_WINDOW_MS = Object.freeze({
   m5: 5 * 60 * 1000,
   m15: 15 * 60 * 1000,
@@ -9547,6 +9558,207 @@ function v180WindowFromTrades(
   };
 }
 
+function blockscoutDirectionalUsdServiceV183(
+  state
+) {
+  state.services =
+    state.services ||
+    {};
+
+  const existing =
+    state.services
+      .blockscoutDirectionalUsdV183;
+
+  state.services
+    .blockscoutDirectionalUsdV183 = {
+      lastStatus: null,
+      lastRequestAt: null,
+      lastSuccessAt: null,
+      last429At: null,
+      cooldownUntil: null,
+      consecutive429s: 0,
+      total429s: 0,
+      totalRequests: 0,
+      lastBackoffMs: null,
+      ...(
+        existing &&
+        typeof existing === "object" &&
+        !Array.isArray(existing)
+          ? existing
+          : {}
+      )
+    };
+
+  return state.services
+    .blockscoutDirectionalUsdV183;
+}
+
+function blockscoutDirectionalUsdTelemetryV183(
+  state
+) {
+  const service =
+    blockscoutDirectionalUsdServiceV183(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  const cooldownUntil =
+    safeNumber(
+      service.cooldownUntil
+    ) || null;
+
+  return {
+    enabled: true,
+    lastStatus:
+      service.lastStatus || null,
+    lastRequestAt:
+      safeNumber(service.lastRequestAt) || null,
+    lastSuccessAt:
+      safeNumber(service.lastSuccessAt) || null,
+    last429At:
+      safeNumber(service.last429At) || null,
+    cooldownUntil,
+    cooldownActive:
+      Boolean(
+        cooldownUntil &&
+        cooldownUntil > now
+      ),
+    retryAfterMs:
+      cooldownUntil &&
+      cooldownUntil > now
+        ? cooldownUntil - now
+        : 0,
+    consecutive429s:
+      safeNumber(
+        service.consecutive429s
+      ),
+    total429s:
+      safeNumber(
+        service.total429s
+      ),
+    totalRequests:
+      safeNumber(
+        service.totalRequests
+      ),
+    lastBackoffMs:
+      safeNumber(
+        service.lastBackoffMs
+      ) || null,
+    baseBackoffMs:
+      BLOCKSCOUT_DIRECTIONAL_429_BASE_MS_V183,
+    maxBackoffMs:
+      BLOCKSCOUT_DIRECTIONAL_429_MAX_MS_V183
+  };
+}
+
+function registerBlockscoutDirectional429V183(
+  state
+) {
+  const service =
+    blockscoutDirectionalUsdServiceV183(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  service.consecutive429s =
+    Math.max(
+      1,
+      safeNumber(
+        service.consecutive429s
+      ) + 1
+    );
+
+  service.total429s =
+    safeNumber(
+      service.total429s
+    ) + 1;
+
+  const exponent =
+    Math.max(
+      0,
+      service.consecutive429s - 1
+    );
+
+  const backoffMs =
+    Math.min(
+      BLOCKSCOUT_DIRECTIONAL_429_MAX_MS_V183,
+      BLOCKSCOUT_DIRECTIONAL_429_BASE_MS_V183 *
+        (2 ** exponent)
+    );
+
+  service.last429At =
+    now;
+
+  service.lastStatus =
+    "HTTP_429";
+
+  service.lastBackoffMs =
+    backoffMs;
+
+  service.cooldownUntil =
+    now + backoffMs;
+
+  return backoffMs;
+}
+
+function registerBlockscoutDirectionalSuccessV183(
+  state
+) {
+  const service =
+    blockscoutDirectionalUsdServiceV183(
+      state
+    );
+
+  service.lastStatus =
+    "SUCCESS";
+
+  service.lastSuccessAt =
+    Date.now();
+
+  service.consecutive429s =
+    0;
+
+  service.cooldownUntil =
+    null;
+
+  service.lastBackoffMs =
+    null;
+}
+
+function releaseBlockscoutUsdGReserveV182ForV183(
+  budget,
+  reason
+) {
+  const reserve =
+    budget.analysis
+      ?.blockscoutUsdGReserveV182;
+
+  if (
+    reserve?.active !== true
+  ) {
+    return false;
+  }
+
+  reserve.active =
+    false;
+
+  reserve.releasedWithoutUse =
+    true;
+
+  reserve.releasedAt =
+    Date.now();
+
+  reserve.releaseReasonV183 =
+    reason ||
+    "V183_DIRECTIONAL_ROUTE_NOT_REQUESTED";
+
+  return true;
+}
+
 async function blockscoutV4UsdGDirectionalV180(
   candidate,
   budget,
@@ -9666,6 +9878,45 @@ async function blockscoutV4UsdGDirectionalV180(
     };
   }
 
+  const directionalServiceV183 =
+    blockscoutDirectionalUsdServiceV183(
+      state
+    );
+
+  const nowV183 =
+    Date.now();
+
+  const directionalCooldownUntilV183 =
+    safeNumber(
+      directionalServiceV183.cooldownUntil
+    ) || null;
+
+  if (
+    directionalCooldownUntilV183 &&
+    directionalCooldownUntilV183 > nowV183
+  ) {
+    directionalServiceV183.lastStatus =
+      "COOLDOWN_ACTIVE";
+
+    return {
+      ...base,
+      attempted: false,
+      status:
+        "BLOCKSCOUT_DIRECTIONAL_429_COOLDOWN_V183",
+      fromBlock,
+      toBlock,
+      blockRangeInputV181,
+      cooldownUntil:
+        directionalCooldownUntilV183,
+      retryAfterMs:
+        directionalCooldownUntilV183 - nowV183,
+      serviceV183:
+        blockscoutDirectionalUsdTelemetryV183(
+          state
+        )
+    };
+  }
+
   if (
     !consumeBudget(
       budget,
@@ -9693,6 +9944,17 @@ async function blockscoutV4UsdGDirectionalV180(
     `&topic0_1_opr=and`;
 
   try {
+    directionalServiceV183.totalRequests =
+      safeNumber(
+        directionalServiceV183.totalRequests
+      ) + 1;
+
+    directionalServiceV183.lastRequestAt =
+      Date.now();
+
+    directionalServiceV183.lastStatus =
+      "REQUESTING";
+
     const response =
       await fetch(
         url,
@@ -9705,8 +9967,41 @@ async function blockscoutV4UsdGDirectionalV180(
       );
 
     if (
+      response.status === 429
+    ) {
+      const backoffMsV183 =
+        registerBlockscoutDirectional429V183(
+          state
+        );
+
+      return {
+        ...base,
+        attempted: true,
+        status:
+          "BLOCKSCOUT_HTTP_429",
+        fromBlock,
+        toBlock,
+        blockRangeInputV181,
+        backoffMsV183,
+        cooldownUntil:
+          safeNumber(
+            blockscoutDirectionalUsdServiceV183(
+              state
+            ).cooldownUntil
+          ) || null,
+        serviceV183:
+          blockscoutDirectionalUsdTelemetryV183(
+            state
+          )
+      };
+    }
+
+    if (
       !response.ok
     ) {
+      directionalServiceV183.lastStatus =
+        `HTTP_${response.status}`;
+
       return {
         ...base,
         attempted: true,
@@ -9714,9 +10009,17 @@ async function blockscoutV4UsdGDirectionalV180(
           `BLOCKSCOUT_HTTP_${response.status}`,
         fromBlock,
         toBlock,
-        blockRangeInputV181
+        blockRangeInputV181,
+        serviceV183:
+          blockscoutDirectionalUsdTelemetryV183(
+            state
+          )
       };
     }
+
+    registerBlockscoutDirectionalSuccessV183(
+      state
+    );
 
     const payload =
       await response.json();
@@ -9852,13 +10155,20 @@ async function blockscoutV4UsdGDirectionalV180(
         trades.length,
       decodeFailures,
       historyComplete,
-      windows
+      windows,
+      serviceV183:
+        blockscoutDirectionalUsdTelemetryV183(
+          state
+        )
     };
   }
 
   catch (
     error
   ) {
+    directionalServiceV183.lastStatus =
+      "FETCH_ERROR";
+
     return {
       ...base,
       attempted: true,
@@ -9869,7 +10179,12 @@ async function blockscoutV4UsdGDirectionalV180(
           error
         ),
       fromBlock,
-      toBlock
+      toBlock,
+      blockRangeInputV181,
+      serviceV183:
+        blockscoutDirectionalUsdTelemetryV183(
+          state
+        )
     };
   }
 }
@@ -29240,6 +29555,17 @@ async function scan(
         latestNumber
       );
 
+    if (
+      v180Result?.attempted !== true &&
+      v180Result?.status ===
+        "BLOCKSCOUT_DIRECTIONAL_429_COOLDOWN_V183"
+    ) {
+      releaseBlockscoutUsdGReserveV182ForV183(
+        budget,
+        "BLOCKSCOUT_DIRECTIONAL_429_COOLDOWN_V183"
+      );
+    }
+
     blockscoutDirectionalUsdV180 = {
       address:
         normalize(
@@ -29266,6 +29592,14 @@ async function scan(
           true,
         requestType:
           "BLOCKSCOUT_V4_USDG_DIRECTIONAL_V180",
+        releasedWithoutUse:
+          budget.analysis
+            ?.blockscoutUsdGReserveV182
+            ?.releasedWithoutUse === true,
+        releaseReasonV183:
+          budget.analysis
+            ?.blockscoutUsdGReserveV182
+            ?.releaseReasonV183 || null,
         hardRequestLimitUnchanged:
           MAX_EXTERNAL_REQUESTS,
         analysisRequestLimitUnchanged:
@@ -30019,7 +30353,7 @@ async function scan(
     status,
 
     scanMode:
-      "V182_PROTECTED_BLOCKSCOUT_USDG_DIRECTIONAL_REQUEST_HUNTER",
+      "V183_BLOCKSCOUT_USDG_429_BACKOFF_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -30322,6 +30656,11 @@ async function scan(
     onChainDirectionalV179,
 
     blockscoutDirectionalUsdV180,
+
+    blockscoutDirectionalUsd429ProtectionV183:
+      blockscoutDirectionalUsdTelemetryV183(
+        state
+      ),
 
     marketProviderCoordinationV147:
       marketProviderAvailabilityV147(
@@ -33720,12 +34059,45 @@ async function scan(
       telegramThresholdsUnchangedV182:
         "ENABLED_V182",
 
+      blockscoutDirectionalUsd429Protection:
+        "ENABLED_V183",
+
+      blockscoutDirectionalUsd429BaseBackoffMsV183:
+        300000,
+
+      blockscoutDirectionalUsd429MaxBackoffMsV183:
+        1800000,
+
+      blockscoutDirectionalCooldownPrecheckV183:
+        "ENABLED_V183",
+
+      v182ReservationReleasedDuringDirectionalCooldownV183:
+        "ENABLED_V183",
+
+      blockscoutDirectionalSuccessClears429StateV183:
+        "ENABLED_V183",
+
+      v182ProtectedRequestOrderingUnchangedV183:
+        "ENABLED_V183",
+
+      v181LatestBlockHandoffFixUnchangedV183:
+        "ENABLED_V183",
+
+      hardRequestLimitUnchangedV183:
+        42,
+
+      analysisRequestLimitUnchangedV183:
+        21,
+
+      telegramThresholdsUnchangedV183:
+        "ENABLED_V183",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V182_PROTECTED_BLOCKSCOUT_USDG_DIRECTIONAL_REQUEST_V77_TELEGRAM_HUNTER",
+      "V183_BLOCKSCOUT_USDG_429_BACKOFF_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
