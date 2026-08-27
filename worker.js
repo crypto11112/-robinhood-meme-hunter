@@ -1,10 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V181
+ * V182
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V181
+ * CURRENT BUILD: V182
+ * - V182 reserves one protected pre-Telegram analysis request for Blockscout V4 USDG directional verification
+ * - Prevents ordinary analysis from consuming the final request needed by BLOCKSCOUT_V4_USDG_DIRECTIONAL_V180
+ * - Reservation is released automatically when the protected request is consumed
+ * - Preserves the V181 latestNumber/toBlock handoff fix
+ * - No change to the 42-request hard ceiling, 21-request analysis ceiling, notification reserve, scoring, Telegram thresholds, V4 decoding, or 5m/15m/1h/6h/24h windows
  * - V181 fixes the V180 Blockscout directional-USD upper-block handoff bug
  * - V180 accidentally passed the latestBlock function object into the historical USDG reader instead of the already-confirmed numeric latestNumber
  * - V181 now passes latestNumber directly and adds explicit block-range input telemetry so this cannot silently regress
@@ -674,7 +679,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V181";
+const VERSION = "V182";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1564,7 +1569,33 @@ function createBudget() {
         0,
 
       limit:
-        ANALYSIS_REQUEST_LIMIT
+        ANALYSIS_REQUEST_LIMIT,
+
+      blockscoutUsdGReserveV182: {
+        enabled:
+          true,
+
+        active:
+          true,
+
+        reservedRequests:
+          1,
+
+        requestType:
+          "BLOCKSCOUT_V4_USDG_DIRECTIONAL_V180",
+
+        consumed:
+          false,
+
+        consumedAt:
+          null,
+
+        releasedWithoutUse:
+          false,
+
+        releasedAt:
+          null
+      }
     },
 
     notification: {
@@ -1727,6 +1758,97 @@ function consumeBudget(
   type,
   amount = 1
 ) {
+  /*
+   * V182:
+   * Keep one analysis request and one slot inside the current pre-Telegram
+   * global allowance available for the exact Blockscout V4 USDG history call.
+   * This does NOT raise any request ceiling. It only changes ordering/priority.
+   */
+  const usdGReserveV182 =
+    budget.analysis
+      ?.blockscoutUsdGReserveV182;
+
+  const protectedUsdGTypeV182 =
+    "BLOCKSCOUT_V4_USDG_DIRECTIONAL_V180";
+
+  if (
+    phase ===
+      "analysis" &&
+    usdGReserveV182
+      ?.active ===
+      true &&
+    type !==
+      protectedUsdGTypeV182
+  ) {
+    const reservedRequestsV182 =
+      Math.max(
+        0,
+        safeNumber(
+          usdGReserveV182
+            .reservedRequests
+        )
+      );
+
+    const notificationReserveRemainingV182 =
+      (
+        budget.notification
+          ?.globalReserveActiveV174 ===
+          true
+      )
+        ? Math.max(
+            0,
+            safeNumber(
+              budget.notification
+                ?.limit
+            ) -
+            safeNumber(
+              budget.notification
+                ?.used
+            )
+          )
+        : 0;
+
+    const preTelegramGlobalLimitV182 =
+      Math.max(
+        0,
+        budget.totalLimit -
+          notificationReserveRemainingV182
+      );
+
+    const analysisCapacityProtectedV182 =
+      budget.analysis.used +
+        amount <=
+      Math.max(
+        0,
+        budget.analysis.limit -
+          reservedRequestsV182
+      );
+
+    const globalCapacityProtectedV182 =
+      budget.totalUsed +
+        amount <=
+      Math.max(
+        0,
+        preTelegramGlobalLimitV182 -
+          reservedRequestsV182
+      );
+
+    if (
+      !analysisCapacityProtectedV182 ||
+      !globalCapacityProtectedV182
+    ) {
+      budget.skipped.push({
+        phase,
+        type,
+        amount,
+        reason:
+          "V182_BLOCKSCOUT_USDG_REQUEST_RESERVED"
+      });
+
+      return false;
+    }
+  }
+
   if (
     !budgetAvailable(
       budget,
@@ -1748,6 +1870,32 @@ function consumeBudget(
 
   budget.totalUsed +=
     amount;
+
+  if (
+    phase ===
+      "analysis" &&
+    type ===
+      "BLOCKSCOUT_V4_USDG_DIRECTIONAL_V180" &&
+    budget.analysis
+      ?.blockscoutUsdGReserveV182
+      ?.active ===
+      true
+  ) {
+    budget.analysis
+      .blockscoutUsdGReserveV182
+      .active =
+        false;
+
+    budget.analysis
+      .blockscoutUsdGReserveV182
+      .consumed =
+        true;
+
+    budget.analysis
+      .blockscoutUsdGReserveV182
+      .consumedAt =
+        Date.now();
+  }
 
   if (
     phase ===
@@ -29059,6 +29207,29 @@ async function scan(
   };
 
   if (
+    !v180UsdGDirectionalTarget &&
+    budget.analysis
+      ?.blockscoutUsdGReserveV182
+      ?.active ===
+      true
+  ) {
+    budget.analysis
+      .blockscoutUsdGReserveV182
+      .active =
+        false;
+
+    budget.analysis
+      .blockscoutUsdGReserveV182
+      .releasedWithoutUse =
+        true;
+
+    budget.analysis
+      .blockscoutUsdGReserveV182
+      .releasedAt =
+        Date.now();
+  }
+
+  if (
     v180UsdGDirectionalTarget
   ) {
     const v180Result =
@@ -29079,7 +29250,27 @@ async function scan(
         v180UsdGDirectionalTarget
           ?.symbol ||
         null,
-      ...v180Result
+      ...v180Result,
+      requestReservationV182: {
+        enabled:
+          true,
+        consumed:
+          budget.analysis
+            ?.blockscoutUsdGReserveV182
+            ?.consumed ===
+          true,
+        active:
+          budget.analysis
+            ?.blockscoutUsdGReserveV182
+            ?.active ===
+          true,
+        requestType:
+          "BLOCKSCOUT_V4_USDG_DIRECTIONAL_V180",
+        hardRequestLimitUnchanged:
+          MAX_EXTERNAL_REQUESTS,
+        analysisRequestLimitUnchanged:
+          ANALYSIS_REQUEST_LIMIT
+      }
     };
 
     if (
@@ -29828,7 +30019,7 @@ async function scan(
     status,
 
     scanMode:
-      "V181_BLOCKSCOUT_USDG_LATEST_BLOCK_HANDOFF_FIX_HUNTER",
+      "V182_PROTECTED_BLOCKSCOUT_USDG_DIRECTIONAL_REQUEST_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -33505,12 +33696,36 @@ async function scan(
       telegramThresholdsUnchangedV181:
         "ENABLED_V181",
 
+      protectedBlockscoutUsdGDirectionalRequest:
+        "ENABLED_V182",
+
+      blockscoutUsdGReservedAnalysisRequestsV182:
+        1,
+
+      blockscoutUsdGPreTelegramGlobalSlotProtectionV182:
+        "ENABLED_V182",
+
+      reservationAutoReleaseWhenNoEligibleTargetV182:
+        "ENABLED_V182",
+
+      v181LatestBlockHandoffFixUnchangedV182:
+        "ENABLED_V182",
+
+      hardRequestLimitUnchangedV182:
+        42,
+
+      analysisRequestLimitUnchangedV182:
+        21,
+
+      telegramThresholdsUnchangedV182:
+        "ENABLED_V182",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V181_BLOCKSCOUT_USDG_LATEST_BLOCK_HANDOFF_FIX_V77_TELEGRAM_HUNTER",
+      "V182_PROTECTED_BLOCKSCOUT_USDG_DIRECTIONAL_REQUEST_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
