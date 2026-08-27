@@ -632,7 +632,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V170";
+const VERSION = "V171";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -848,6 +848,20 @@ const FRESH_ANALYSIS_COST_ALCHEMY = 8;
 const FRESH_ANALYSIS_COST_FALLBACK = 11;
 const CACHED_ANALYSIS_COST = 3;
 
+
+/*
+ * V171:
+ * - Preserves V170 post-analysis residual backlog catch-up
+ * - NEW: a carried retry candidate can release the scarce priority-retry lane
+ *   once verified evidence shows it is MATURE (>24h under the existing launch
+ *   stage definition), has zero verified 24h market volume and transactions,
+ *   has no current V4 swaps/liquidity events, and is not new/live
+ * - This only releases priority state; the token remains on the watchlist
+ * - Provider outages/unverified market evidence cannot trigger this release
+ * - Existing V138 retry caps and conservative V140 7-day relevance expiry stay
+ *   unchanged
+ * - No scoring, Telegram threshold, request-budget, or provider-rate changes
+ */
 
 /* =========================================================
    V118 ON-CHAIN V4 MARKET ACTIVITY EVIDENCE
@@ -22984,6 +22998,100 @@ function priorityRetryRelevanceExpiryV140(
   };
 }
 
+function matureZeroActivityPriorityReleaseV171(
+  candidate
+) {
+  if (
+    !candidate ||
+    !candidate?.market?.verified
+  ) {
+    return {
+      release: false,
+      reason: null,
+      evidence: "MARKET_NOT_VERIFIED"
+    };
+  }
+
+  if (
+    candidate?.newlyDiscovered ||
+    candidate?.liveDiscovery ||
+    candidate?.newlyLaunched
+  ) {
+    return {
+      release: false,
+      reason: null,
+      evidence: "NEW_OR_LIVE_CLASSIFICATION"
+    };
+  }
+
+  if (
+    candidate?.launchStage?.verified !== true ||
+    candidate?.launchStage?.stage !== "MATURE"
+  ) {
+    return {
+      release: false,
+      reason: null,
+      evidence: "NOT_MATURE"
+    };
+  }
+
+  const volume24h =
+    safeNumber(
+      candidate?.market?.volume?.h24
+    );
+
+  const txns24h =
+    safeNumber(
+      candidate?.market?.transactions?.h24?.total
+    );
+
+  const onChainSwaps =
+    safeNumber(
+      candidate?.activity?.swaps
+    );
+
+  const onChainLiquidityEvents =
+    safeNumber(
+      candidate?.activity?.liquidityEvents
+    );
+
+  const zeroVerified24hActivity =
+    volume24h === 0 &&
+    txns24h === 0;
+
+  const noCurrentOnChainActivity =
+    onChainSwaps === 0 &&
+    onChainLiquidityEvents === 0;
+
+  if (
+    !zeroVerified24hActivity ||
+    !noCurrentOnChainActivity
+  ) {
+    return {
+      release: false,
+      reason: null,
+      evidence: "ACTIVITY_PRESENT",
+      volume24h,
+      txns24h,
+      onChainSwaps,
+      onChainLiquidityEvents
+    };
+  }
+
+  return {
+    release: true,
+    reason: "MATURE_ZERO_ACTIVITY_PRIORITY_RELEASE_V171",
+    evidence: "VERIFIED_MATURE_ZERO_24H_AND_ONCHAIN_ACTIVITY",
+    stage: candidate.launchStage.stage,
+    ageMinutes: candidate.launchStage.ageMinutes ?? null,
+    volume24h,
+    txns24h,
+    onChainSwaps,
+    onChainLiquidityEvents,
+    removesFromWatchlist: false
+  };
+}
+
 function shouldKeepCompletionCandidate(
   candidate,
   previousCompletion = null
@@ -23016,6 +23124,17 @@ function shouldKeepCompletionCandidate(
 
   if (
     relevanceExpiry.expired
+  ) {
+    return false;
+  }
+
+  const matureZeroActivityRelease =
+    matureZeroActivityPriorityReleaseV171(
+      candidate
+    );
+
+  if (
+    matureZeroActivityRelease.release
   ) {
     return false;
   }
@@ -24319,6 +24438,9 @@ async function scan(
     },
 
     relevanceExpiryV140:
+      null,
+
+    matureZeroActivityPriorityReleaseV171:
       null,
 
     priorityFreshSchedule:
@@ -25970,6 +26092,11 @@ async function scan(
         completionCandidate
       );
 
+    const matureZeroActivityReleaseV171 =
+      matureZeroActivityPriorityReleaseV171(
+        completionCandidate
+      );
+
     const keepForRetry =
       !terminalReject.terminal &&
       shouldKeepCompletionCandidate(
@@ -25980,6 +26107,10 @@ async function scan(
     priorityCompletionTelemetry
       .relevanceExpiryV140 =
       relevanceExpiryV140;
+
+    priorityCompletionTelemetry
+      .matureZeroActivityPriorityReleaseV171 =
+      matureZeroActivityReleaseV171;
 
     priorityCompletionTelemetry.symbol =
       completionCandidate.symbol ||
@@ -26014,6 +26145,14 @@ async function scan(
     ) {
       priorityCompletionTelemetry.blockers = [
         relevanceExpiryV140.reason
+      ];
+    }
+
+    else if (
+      matureZeroActivityReleaseV171.release
+    ) {
+      priorityCompletionTelemetry.blockers = [
+        matureZeroActivityReleaseV171.reason
       ];
     }
 
@@ -27065,7 +27204,7 @@ async function scan(
     status,
 
     scanMode:
-      "V170_POST_ANALYSIS_RESIDUAL_BACKLOG_CATCHUP_HUNTER",
+      "V171_MATURE_ZERO_ACTIVITY_PRIORITY_RELEASE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -30466,12 +30605,45 @@ async function scan(
       telegramThresholdsUnchangedV170:
         "ENABLED_V170",
 
+      matureZeroActivityPriorityRelease:
+        "ENABLED_V171",
+
+      matureStageUsesExistingLaunchDefinitionV171:
+        "ENABLED_V171",
+
+      verifiedZero24hMarketActivityRequiredV171:
+        "ENABLED_V171",
+
+      noCurrentOnChainActivityRequiredV171:
+        "ENABLED_V171",
+
+      newLiveCandidatesNeverReleasedByV171:
+        "ENABLED_V171",
+
+      priorityReleaseDoesNotRemoveWatchlistV171:
+        "ENABLED_V171",
+
+      v140SevenDayRelevanceExpiryUnchangedV171:
+        "ENABLED_V171",
+
+      v170BacklogReclaimUnchangedV171:
+        "ENABLED_V171",
+
+      hardRequestLimitUnchangedV171:
+        42,
+
+      analysisRequestLimitUnchangedV171:
+        21,
+
+      telegramThresholdsUnchangedV171:
+        "ENABLED_V171",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V170_POST_ANALYSIS_RESIDUAL_BACKLOG_CATCHUP_V77_TELEGRAM_HUNTER",
+      "V171_MATURE_ZERO_ACTIVITY_PRIORITY_RELEASE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
