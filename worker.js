@@ -1,10 +1,17 @@
 /**
  * Robinhood Chain Meme Hunter
- * V183
+ * V184
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V183
+ * CURRENT BUILD: V184
+ * - V184 attacks the current UNKNOWN_POOL_IDENTITY bottleneck directly
+ * - Adds one budgeted wide exact-pool Blockscout Initialize lookup per scan for the highest-priority unresolved V4 pool
+ * - Exact topic0+topic1 filtering lets the resolver search far behind first activity without walking backward 10 Alchemy blocks at a time
+ * - Wide lookup is capped, counted inside the existing unknown-pool resolver budget, and falls back to the existing RPC resolver
+ * - Adds persistent 429 cooldown/backoff for the wide Initialize route so it cannot hammer Blockscout
+ * - Successful Initialize identity is decoded with the existing canonical decoder, persisted in poolRegistry, and immediately re-used by same-run directional decoding
+ * - No pool identity is guessed; no request ceilings, scoring, Telegram thresholds, V181/V182/V183 protections, or USD verification rules are weakened
  * - V183 adds persistent 429 cooldown/backoff specifically for the Blockscout exact-pool USDG directional-history route
  * - Known Blockscout directional 429 cooldowns are checked BEFORE consuming the protected V182 request
  * - A 429 now backs off 5m -> 10m -> 20m -> 30m max; a successful response clears the streak/cooldown
@@ -684,7 +691,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V183";
+const VERSION = "V184";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -826,6 +833,15 @@ const BLOCKSCOUT_DIRECTIONAL_429_BASE_MS_V183 =
 
 const BLOCKSCOUT_DIRECTIONAL_429_MAX_MS_V183 =
   30 * 60 * 1000;
+
+const BLOCKSCOUT_WIDE_INITIALIZE_LOOKBACK_BLOCKS_V184 =
+  250000;
+
+const BLOCKSCOUT_WIDE_INITIALIZE_BASE_BACKOFF_MS_V184 =
+  10 * 60 * 1000;
+
+const BLOCKSCOUT_WIDE_INITIALIZE_MAX_BACKOFF_MS_V184 =
+  60 * 60 * 1000;
 const V180_WINDOW_MS = Object.freeze({
   m5: 5 * 60 * 1000,
   m15: 15 * 60 * 1000,
@@ -4932,6 +4948,378 @@ function unknownPoolDynamicRequestLimit(
   };
 }
 
+function blockscoutWideInitializeServiceV184(
+  state
+) {
+  state.services =
+    state.services ||
+    {};
+
+  const existing =
+    state.services
+      .blockscoutWideInitializeV184;
+
+  state.services
+    .blockscoutWideInitializeV184 = {
+      totalRequests: 0,
+      total429s: 0,
+      consecutive429s: 0,
+      lastRequestAt: null,
+      lastSuccessAt: null,
+      last429At: null,
+      lastStatus: null,
+      cooldownUntil: null,
+      lastBackoffMs: null,
+      ...(
+        existing &&
+        typeof existing === "object" &&
+        !Array.isArray(existing)
+          ? existing
+          : {}
+      )
+    };
+
+  return state.services
+    .blockscoutWideInitializeV184;
+}
+
+function blockscoutWideInitializeTelemetryV184(
+  state
+) {
+  const service =
+    blockscoutWideInitializeServiceV184(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  const cooldownUntil =
+    safeNumber(
+      service.cooldownUntil
+    ) || null;
+
+  return {
+    enabled: true,
+    totalRequests:
+      safeNumber(service.totalRequests),
+    total429s:
+      safeNumber(service.total429s),
+    consecutive429s:
+      safeNumber(service.consecutive429s),
+    lastRequestAt:
+      safeNumber(service.lastRequestAt) || null,
+    lastSuccessAt:
+      safeNumber(service.lastSuccessAt) || null,
+    last429At:
+      safeNumber(service.last429At) || null,
+    lastStatus:
+      service.lastStatus || null,
+    cooldownUntil,
+    cooldownActive:
+      Boolean(
+        cooldownUntil &&
+        cooldownUntil > now
+      ),
+    retryAfterMs:
+      cooldownUntil &&
+      cooldownUntil > now
+        ? cooldownUntil - now
+        : 0,
+    lastBackoffMs:
+      safeNumber(service.lastBackoffMs) || null,
+    lookbackBlocks:
+      BLOCKSCOUT_WIDE_INITIALIZE_LOOKBACK_BLOCKS_V184
+  };
+}
+
+function registerBlockscoutWideInitialize429V184(
+  state
+) {
+  const service =
+    blockscoutWideInitializeServiceV184(
+      state
+    );
+
+  service.consecutive429s =
+    Math.max(
+      1,
+      safeNumber(service.consecutive429s) + 1
+    );
+
+  service.total429s =
+    safeNumber(service.total429s) + 1;
+
+  const backoffMs =
+    Math.min(
+      BLOCKSCOUT_WIDE_INITIALIZE_MAX_BACKOFF_MS_V184,
+      BLOCKSCOUT_WIDE_INITIALIZE_BASE_BACKOFF_MS_V184 *
+        (2 ** Math.max(
+          0,
+          service.consecutive429s - 1
+        ))
+    );
+
+  const now =
+    Date.now();
+
+  service.last429At =
+    now;
+
+  service.lastStatus =
+    "HTTP_429";
+
+  service.lastBackoffMs =
+    backoffMs;
+
+  service.cooldownUntil =
+    now + backoffMs;
+
+  return backoffMs;
+}
+
+async function blockscoutWideInitializeForPoolV184(
+  state,
+  budget,
+  poolId,
+  firstActiveBlock
+) {
+  const base = {
+    attempted: false,
+    externalRequestsUsed: 0,
+    provider: "BLOCKSCOUT",
+    logs: [],
+    resolvedPool: null,
+    status: null,
+    fromBlock: null,
+    toBlock: null
+  };
+
+  const normalizedPoolId =
+    normalize(poolId);
+
+  const activeBlock =
+    safeNumber(firstActiveBlock);
+
+  if (
+    !normalizedPoolId ||
+    activeBlock <= 0
+  ) {
+    return {
+      ...base,
+      status:
+        "INVALID_POOL_OR_ACTIVE_BLOCK"
+    };
+  }
+
+  const service =
+    blockscoutWideInitializeServiceV184(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  const cooldownUntil =
+    safeNumber(
+      service.cooldownUntil
+    ) || null;
+
+  if (
+    cooldownUntil &&
+    cooldownUntil > now
+  ) {
+    service.lastStatus =
+      "COOLDOWN_ACTIVE";
+
+    return {
+      ...base,
+      status:
+        "BLOCKSCOUT_WIDE_INITIALIZE_COOLDOWN_V184",
+      cooldownUntil,
+      retryAfterMs:
+        cooldownUntil - now
+    };
+  }
+
+  if (
+    !consumeBudget(
+      budget,
+      "discovery-live",
+      "BLOCKSCOUT_WIDE_EXACT_INITIALIZE_V184"
+    )
+  ) {
+    return {
+      ...base,
+      status:
+        "DISCOVERY_LIVE_BUDGET_PROTECTED"
+    };
+  }
+
+  const toBlock =
+    Math.max(
+      0,
+      Math.floor(activeBlock)
+    );
+
+  const fromBlock =
+    Math.max(
+      0,
+      toBlock -
+        BLOCKSCOUT_WIDE_INITIALIZE_LOOKBACK_BLOCKS_V184 +
+        1
+    );
+
+  const url =
+    `${BLOCKSCOUT}/api?module=logs&action=getLogs` +
+    `&fromBlock=${fromBlock}` +
+    `&toBlock=${toBlock}` +
+    `&address=${POOL_MANAGER}` +
+    `&topic0=${INITIALIZE_TOPIC}` +
+    `&topic1=${normalizedPoolId}` +
+    `&topic0_1_opr=and`;
+
+  service.totalRequests =
+    safeNumber(service.totalRequests) + 1;
+
+  service.lastRequestAt =
+    Date.now();
+
+  service.lastStatus =
+    "REQUESTING";
+
+  try {
+    const response =
+      await fetch(
+        url,
+        {
+          headers: {
+            accept:
+              "application/json"
+          }
+        }
+      );
+
+    if (
+      response.status === 429
+    ) {
+      const backoffMs =
+        registerBlockscoutWideInitialize429V184(
+          state
+        );
+
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        status:
+          "BLOCKSCOUT_HTTP_429",
+        fromBlock,
+        toBlock,
+        backoffMs,
+        cooldownUntil:
+          safeNumber(
+            blockscoutWideInitializeServiceV184(
+              state
+            ).cooldownUntil
+          ) || null
+      };
+    }
+
+    if (
+      !response.ok
+    ) {
+      service.lastStatus =
+        `HTTP_${response.status}`;
+
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        status:
+          `BLOCKSCOUT_HTTP_${response.status}`,
+        fromBlock,
+        toBlock
+      };
+    }
+
+    const payload =
+      await response.json();
+
+    const rows =
+      Array.isArray(payload?.result)
+        ? payload.result
+        : [];
+
+    let resolvedPool =
+      null;
+
+    for (
+      const row
+      of rows
+    ) {
+      const decoded =
+        decodeInitialize(row);
+
+      if (
+        decoded &&
+        normalize(decoded.poolId) ===
+          normalizedPoolId
+      ) {
+        resolvedPool =
+          decoded;
+        break;
+      }
+    }
+
+    service.lastStatus =
+      resolvedPool
+        ? "RESOLVED"
+        : "EMPTY";
+
+    service.lastSuccessAt =
+      Date.now();
+
+    service.consecutive429s =
+      0;
+
+    service.cooldownUntil =
+      null;
+
+    service.lastBackoffMs =
+      null;
+
+    return {
+      ...base,
+      attempted: true,
+      externalRequestsUsed: 1,
+      logs: rows,
+      resolvedPool,
+      status:
+        resolvedPool
+          ? "RESOLVED"
+          : "EMPTY",
+      fromBlock,
+      toBlock
+    };
+  } catch (error) {
+    service.lastStatus =
+      "FETCH_ERROR";
+
+    return {
+      ...base,
+      attempted: true,
+      externalRequestsUsed: 1,
+      status:
+        "FETCH_ERROR",
+      error:
+        errorString(error),
+      fromBlock,
+      toBlock
+    };
+  }
+}
+
 async function resolvePersistentUnknownPools(
   env,
   state,
@@ -5556,6 +5944,22 @@ async function resolvePersistentUnknownPools(
       Object.keys(
         tracker
       ).length,
+    blockscoutWideInitializeV184: {
+      enabled: true,
+      maxAttemptsPerRun: 1,
+      attempts: 0,
+      requestsUsed: 0,
+      resolved: 0,
+      status: null,
+      selectedPoolId: null,
+      fromBlock: null,
+      toBlock: null,
+      fallbackToRpc: false,
+      service:
+        blockscoutWideInitializeTelemetryV184(
+          state
+        )
+    },
     probes: []
   };
 
@@ -5623,6 +6027,176 @@ async function resolvePersistentUnknownPools(
       );
 
     output.attempted++;
+
+    /*
+     * V184: spend at most one of the EXISTING resolver requests on a wide,
+     * exact pool-id Initialize lookup. This is especially valuable while
+     * Alchemy's proven exact-range size is only 10 blocks.
+     */
+    let wideResolvedPoolV184 =
+      null;
+
+    if (
+      output.blockscoutWideInitializeV184
+        .attempts < 1 &&
+      output.requestsUsed <
+        resolverRequestLimit
+    ) {
+      const wideV184 =
+        await blockscoutWideInitializeForPoolV184(
+          state,
+          budget,
+          poolId,
+          entry.firstActiveBlock
+        );
+
+      output.blockscoutWideInitializeV184
+        .attempts +=
+          wideV184.attempted
+            ? 1
+            : 0;
+
+      output.blockscoutWideInitializeV184
+        .requestsUsed +=
+          safeNumber(
+            wideV184.externalRequestsUsed
+          );
+
+      output.blockscoutWideInitializeV184
+        .status =
+          wideV184.status ||
+          null;
+
+      output.blockscoutWideInitializeV184
+        .selectedPoolId =
+          poolId;
+
+      output.blockscoutWideInitializeV184
+        .fromBlock =
+          wideV184.fromBlock;
+
+      output.blockscoutWideInitializeV184
+        .toBlock =
+          wideV184.toBlock;
+
+      output.blockscoutWideInitializeV184
+        .service =
+          blockscoutWideInitializeTelemetryV184(
+            state
+          );
+
+      output.requestsUsed +=
+        safeNumber(
+          wideV184.externalRequestsUsed
+        );
+
+      if (
+        wideV184.resolvedPool
+      ) {
+        wideResolvedPoolV184 =
+          wideV184.resolvedPool;
+
+        output.blockscoutWideInitializeV184
+          .resolved = 1;
+      } else if (
+        wideV184.attempted
+      ) {
+        output.blockscoutWideInitializeV184
+          .fallbackToRpc = true;
+      }
+    }
+
+    if (
+      wideResolvedPoolV184
+    ) {
+      entry.lastResolvedSearchDistance =
+        unknownPoolSearchDistance(
+          entry
+        );
+
+      entry.consecutiveEmptySearches =
+        0;
+
+      registerPoolMapping(
+        state,
+        wideResolvedPoolV184
+      );
+
+      for (
+        const address
+        of [
+          wideResolvedPoolV184.currency0,
+          wideResolvedPoolV184.currency1
+        ]
+      ) {
+        if (
+          !isAddress(address) ||
+          address === ZERO ||
+          knownQuote(address)
+        ) {
+          continue;
+        }
+
+        addWatch(
+          state,
+          address,
+          wideResolvedPoolV184,
+          "V184_BLOCKSCOUT_WIDE_EXACT_INITIALIZE"
+        );
+      }
+
+      delete tracker[poolId];
+
+      output.resolved++;
+
+      output.resolvedPoolIds.push(
+        poolId
+      );
+
+      output.probes.push({
+        poolId,
+        resolverLane,
+        activityScore:
+          activityScore(entry),
+        swapEvents:
+          safeNumber(entry.swapEvents),
+        liquidityEvents:
+          safeNumber(entry.liquidityEvents),
+        appearances:
+          safeNumber(entry.appearances),
+        fromBlock:
+          output.blockscoutWideInitializeV184.fromBlock,
+        toBlock:
+          output.blockscoutWideInitializeV184.toBlock,
+        requestedBlocks:
+          output.blockscoutWideInitializeV184.fromBlock !== null &&
+          output.blockscoutWideInitializeV184.toBlock !== null
+            ? (
+                output.blockscoutWideInitializeV184.toBlock -
+                output.blockscoutWideInitializeV184.fromBlock +
+                1
+              )
+            : 0,
+        desiredChunkBlocks:
+          BLOCKSCOUT_WIDE_INITIALIZE_LOOKBACK_BLOCKS_V184,
+        externalRequestsUsed: 1,
+        provider: "BLOCKSCOUT",
+        logs: 1,
+        resolved: true,
+        resolutionPath:
+          "V184_BLOCKSCOUT_WIDE_EXACT_INITIALIZE",
+        error: null
+      });
+
+      continue;
+    }
+
+    if (
+      output.requestsUsed >=
+        resolverRequestLimit
+    ) {
+      continue;
+    }
 
     const result =
       await getInitializeForPoolRange(
@@ -30353,7 +30927,7 @@ async function scan(
     status,
 
     scanMode:
-      "V183_BLOCKSCOUT_USDG_429_BACKOFF_HUNTER",
+      "V184_WIDE_EXACT_INITIALIZE_RESOLVER_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -30981,6 +31555,11 @@ async function scan(
       Object.keys(
         state.unknownPools || {}
       ).length,
+
+    blockscoutWideInitializeResolverV184:
+      blockscoutWideInitializeTelemetryV184(
+        state
+      ),
 
     marketFreshTarget:
       effectiveMarketFreshTargetAddress ||
@@ -34092,12 +34671,48 @@ async function scan(
       telegramThresholdsUnchangedV183:
         "ENABLED_V183",
 
+      wideExactInitializeResolver:
+        "ENABLED_V184",
+
+      wideExactInitializeProviderV184:
+        "BLOCKSCOUT_EXACT_TOPIC0_TOPIC1",
+
+      wideExactInitializeLookbackBlocksV184:
+        250000,
+
+      wideExactInitializeMaxAttemptsPerRunV184:
+        1,
+
+      wideExactInitializeUsesExistingResolverBudgetV184:
+        "ENABLED_V184",
+
+      wideExactInitializeRpcFallbackV184:
+        "ENABLED_V184",
+
+      wideExactInitialize429ProtectionV184:
+        "ENABLED_V184",
+
+      poolIdentityGuessingStillForbiddenV184:
+        "ENABLED_V184",
+
+      sameRunResolvedIdentityFeedsDirectionalDecoderV184:
+        "ENABLED_V184",
+
+      hardRequestLimitUnchangedV184:
+        42,
+
+      analysisRequestLimitUnchangedV184:
+        21,
+
+      telegramThresholdsUnchangedV184:
+        "ENABLED_V184",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V183_BLOCKSCOUT_USDG_429_BACKOFF_V77_TELEGRAM_HUNTER",
+      "V184_WIDE_EXACT_INITIALIZE_RESOLVER_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
