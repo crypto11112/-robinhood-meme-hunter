@@ -1,10 +1,18 @@
 /**
  * Robinhood Chain Meme Hunter
- * V189
+ * V190
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V189
+ * CURRENT BUILD: V190
+ * - V190 integrates the proven Bitquery Robinhood realtime Initialize resolver
+ * - Exact unknown PoolId is matched as an indexed Initialize topic
+ * - Decoded currency0/currency1 are persisted into the existing canonical poolRegistry
+ * - Successful mappings are immediately available to the existing directional USD decoder
+ * - Uses BITQUERY_ACCESS_TOKEN secret; never guesses pool identity
+ * - One Bitquery lookup consumes one existing resolver/discovery request slot
+ * - Existing RPC blockHash, Blockscout and range crawlers remain fallback-only
+ * - No Telegram thresholds, scoring rules, USD maths, KV binding/key or 42-request ceiling changed
  * - V189 is the controlled checkpoint build for UNKNOWN_POOL_IDENTITY
  * - Reserves the first 2 unknown-pool resolver requests exclusively for the RPC blockHash Initialize test
  * - The old range crawler and Blockscout wide resolver cannot consume those two requests first
@@ -725,7 +733,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V189";
+const VERSION = "V190";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -801,6 +809,9 @@ const HOLDER_INTEGRITY_RETRY_MS_V162 =
 
 const POOL_MANAGER =
   "0x8366a39cc670b4001a1121b8f6a443a643e40951";
+
+const BITQUERY_GRAPHQL_V2 =
+  "https://streaming.bitquery.io/graphql";
 
 const ZERO =
   "0x0000000000000000000000000000000000000000";
@@ -4477,6 +4488,350 @@ function providerSafeUnknownPoolChunks(
   };
 }
 
+
+async function getInitializeForPoolBitqueryV190(
+  env,
+  state,
+  poolId,
+  budget
+) {
+  const base = {
+    attempted: false,
+    externalRequestsUsed: 0,
+    provider: "BITQUERY",
+    poolId:
+      normalize(poolId),
+    blockNumber: null,
+    transactionHash: null,
+    currency0: null,
+    currency1: null,
+    resolvedPool: null,
+    status: null,
+    httpStatus: null,
+    error: null
+  };
+
+  const normalizedPoolId =
+    normalize(poolId);
+
+  const token =
+    String(
+      env.BITQUERY_ACCESS_TOKEN ||
+      ""
+    ).trim();
+
+  if (!token) {
+    return {
+      ...base,
+      status:
+        "NOT_CONFIGURED"
+    };
+  }
+
+  if (
+    !/^0x[a-f0-9]{64}$/.test(
+      normalizedPoolId
+    )
+  ) {
+    return {
+      ...base,
+      status:
+        "INVALID_POOL_ID"
+    };
+  }
+
+  if (
+    !budgetAvailable(
+      budget,
+      "discovery-live"
+    )
+  ) {
+    return {
+      ...base,
+      status:
+        "DISCOVERY_LIVE_BUDGET_PROTECTED"
+    };
+  }
+
+  if (
+    !consumeBudget(
+      budget,
+      "discovery-live",
+      "BITQUERY_EXACT_POOL_INITIALIZE_V190"
+    )
+  ) {
+    return {
+      ...base,
+      status:
+        "DISCOVERY_LIVE_BUDGET_PROTECTED"
+    };
+  }
+
+  /*
+   * This is the exact query proven manually against a real V189
+   * UNKNOWN_POOL_IDENTITY. PoolId is indexed in Initialize, so match it
+   * through Topics rather than guessing or crawling historical ranges.
+   */
+  const query = `
+    {
+      EVM(network: robinhood, dataset: realtime) {
+        Events(
+          limit: {count: 1}
+          where: {
+            LogHeader: {
+              Address: {
+                is: "${POOL_MANAGER}"
+              }
+            }
+            Log: {
+              Signature: {
+                Name: {
+                  is: "Initialize"
+                }
+              }
+            }
+            Topics: {
+              includes: {
+                Hash: {
+                  is: "${normalizedPoolId}"
+                }
+              }
+            }
+          }
+        ) {
+          Block {
+            Number
+            Time
+          }
+          Transaction {
+            Hash
+          }
+          Arguments {
+            Name
+            Type
+            Value {
+              ... on EVM_ABI_Address_Value_Arg {
+                address
+              }
+              ... on EVM_ABI_Bytes_Value_Arg {
+                hex
+              }
+              ... on EVM_ABI_BigInt_Value_Arg {
+                bigInteger
+              }
+              ... on EVM_ABI_Integer_Value_Arg {
+                integer
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const response =
+      await fetch(
+        BITQUERY_GRAPHQL_V2,
+        {
+          method: "POST",
+          headers: {
+            "content-type":
+              "application/json",
+            accept:
+              "application/json",
+            authorization:
+              `Bearer ${token}`
+          },
+          body:
+            JSON.stringify({
+              query
+            })
+        }
+      );
+
+    const httpStatus =
+      response.status;
+
+    let payload =
+      null;
+
+    try {
+      payload =
+        await response.json();
+    } catch {
+      payload =
+        null;
+    }
+
+    if (!response.ok) {
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        status:
+          `HTTP_${httpStatus}`,
+        error:
+          payload?.errors?.[0]?.message ||
+          `BITQUERY_HTTP_${httpStatus}`
+      };
+    }
+
+    if (
+      Array.isArray(
+        payload?.errors
+      ) &&
+      payload.errors.length
+    ) {
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        status:
+          "GRAPHQL_ERROR",
+        error:
+          payload.errors
+            .map(
+              item =>
+                String(
+                  item?.message ||
+                  "GRAPHQL_ERROR"
+                )
+            )
+            .slice(
+              0,
+              3
+            )
+            .join(" | ")
+      };
+    }
+
+    const event =
+      payload?.data?.EVM?.Events?.[0] ||
+      null;
+
+    if (!event) {
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        status:
+          "EMPTY_REALTIME_WINDOW"
+      };
+    }
+
+    let currency0 =
+      null;
+
+    let currency1 =
+      null;
+
+    for (
+      const argument
+      of event.Arguments || []
+    ) {
+      const name =
+        String(
+          argument?.Name ||
+          ""
+        ).toLowerCase();
+
+      const address =
+        normalize(
+          argument?.Value?.address
+        );
+
+      if (
+        name === "currency0" &&
+        isAddress(address)
+      ) {
+        currency0 =
+          address;
+      }
+
+      if (
+        name === "currency1" &&
+        isAddress(address)
+      ) {
+        currency1 =
+          address;
+      }
+    }
+
+    if (
+      !isAddress(currency0) ||
+      !isAddress(currency1)
+    ) {
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        blockNumber:
+          safeNumber(
+            event?.Block?.Number
+          ) || null,
+        transactionHash:
+          normalize(
+            event?.Transaction?.Hash
+          ) || null,
+        currency0,
+        currency1,
+        status:
+          "EVENT_FOUND_CURRENCIES_UNVERIFIED",
+        error:
+          "BITQUERY_INITIALIZE_MISSING_CURRENCY0_OR_CURRENCY1"
+      };
+    }
+
+    const resolvedPool = {
+      poolId:
+        normalizedPoolId,
+      currency0,
+      currency1,
+      blockNumber:
+        safeNumber(
+          event?.Block?.Number
+        ) || null,
+      transactionHash:
+        normalize(
+          event?.Transaction?.Hash
+        ) || null,
+      source:
+        "BITQUERY_REALTIME_INITIALIZE_V190"
+    };
+
+    return {
+      ...base,
+      attempted: true,
+      externalRequestsUsed: 1,
+      httpStatus,
+      blockNumber:
+        resolvedPool.blockNumber,
+      transactionHash:
+        resolvedPool.transactionHash,
+      currency0,
+      currency1,
+      resolvedPool,
+      status:
+        "RESOLVED"
+    };
+  } catch (error) {
+    return {
+      ...base,
+      attempted: true,
+      externalRequestsUsed: 1,
+      status:
+        "FETCH_ERROR",
+      error:
+        errorString(error)
+    };
+  }
+}
+
 async function getInitializeForPoolBlockHashV188(
   env,
   state,
@@ -5916,14 +6271,15 @@ async function resolvePersistentUnknownPools(
       .effectiveLimit;
 
   /*
-   * V189 checkpoint reservation:
-   * The first two resolver requests belong to the blockHash test. This does
-   * NOT raise the resolver or global request ceiling; it only fixes ordering.
+   * V190: the first available resolver slot belongs to Bitquery when its
+   * access token is configured. This does not raise any request ceiling.
    */
-  const blockHashCheckpointReservedRequestsV189 =
-    Math.min(
-      2,
-      resolverRequestLimit
+  const bitqueryConfiguredV190 =
+    Boolean(
+      String(
+        env.BITQUERY_ACCESS_TOKEN ||
+        ""
+      ).trim()
     );
 
   const tracker =
@@ -6531,6 +6887,33 @@ async function resolvePersistentUnknownPools(
       Object.keys(
         tracker
       ).length,
+    bitqueryInitializeV190: {
+      enabled: true,
+      configured:
+        bitqueryConfiguredV190,
+      endpoint:
+        BITQUERY_GRAPHQL_V2,
+      dataset:
+        "realtime",
+      maxAttemptsPerRun: 1,
+      attempts: 0,
+      requestsUsed: 0,
+      resolved: 0,
+      selectedPoolId: null,
+      currency0: null,
+      currency1: null,
+      blockNumber: null,
+      transactionHash: null,
+      httpStatus: null,
+      status:
+        bitqueryConfiguredV190
+          ? "NOT_REACHED"
+          : "NOT_CONFIGURED",
+      error: null,
+      fallbackToLegacyResolver: false,
+      exactTopicPoolIdLookup: true,
+      identityGuessing: false
+    },
     blockscoutWideInitializeV184: {
       enabled: true,
       maxAttemptsPerRun: 1,
@@ -6632,32 +7015,171 @@ async function resolvePersistentUnknownPools(
 
     output.attempted++;
 
+    /*
+     * V190: resolve one exact unknown PoolId through Bitquery first.
+     * This path was manually proven against a real V189 unresolved pool.
+     */
+    let bitqueryResolvedPoolV190 =
+      null;
+
     if (
-      output.rpcBlockHashInitializeV188
+      output.bitqueryInitializeV190
         .attempts < 1 &&
-      (
-        resolverRequestLimit -
-        output.requestsUsed
-      ) <
-        blockHashCheckpointReservedRequestsV189
+      bitqueryConfiguredV190 &&
+      output.requestsUsed <
+        resolverRequestLimit
     ) {
-      output.rpcBlockHashInitializeV188
+      const bitqueryV190 =
+        await getInitializeForPoolBitqueryV190(
+          env,
+          state,
+          poolId,
+          budget
+        );
+
+      output.bitqueryInitializeV190
+        .attempts +=
+          bitqueryV190.attempted
+            ? 1
+            : 0;
+
+      output.bitqueryInitializeV190
+        .requestsUsed +=
+          safeNumber(
+            bitqueryV190.externalRequestsUsed
+          );
+
+      output.requestsUsed +=
+        safeNumber(
+          bitqueryV190.externalRequestsUsed
+        );
+
+      output.bitqueryInitializeV190
         .selectedPoolId =
           poolId;
 
-      output.rpcBlockHashInitializeV188
+      output.bitqueryInitializeV190
+        .currency0 =
+          bitqueryV190.currency0;
+
+      output.bitqueryInitializeV190
+        .currency1 =
+          bitqueryV190.currency1;
+
+      output.bitqueryInitializeV190
         .blockNumber =
-          safeNumber(
-            entry.firstActiveBlock
-          ) || null;
+          bitqueryV190.blockNumber;
 
-      output.rpcBlockHashInitializeV188
+      output.bitqueryInitializeV190
+        .transactionHash =
+          bitqueryV190.transactionHash;
+
+      output.bitqueryInitializeV190
+        .httpStatus =
+          bitqueryV190.httpStatus;
+
+      output.bitqueryInitializeV190
         .status =
-          "BUDGET_BLOCKED";
+          bitqueryV190.status;
 
-      output.rpcBlockHashInitializeV188
-        .checkpointOutcomeV189 =
-          "BUDGET_BLOCKED";
+      output.bitqueryInitializeV190
+        .error =
+          bitqueryV190.error;
+
+      if (
+        bitqueryV190.resolvedPool
+      ) {
+        bitqueryResolvedPoolV190 =
+          bitqueryV190.resolvedPool;
+
+        output.bitqueryInitializeV190
+          .resolved = 1;
+      } else if (
+        bitqueryV190.attempted
+      ) {
+        output.bitqueryInitializeV190
+          .fallbackToLegacyResolver =
+            true;
+      }
+    }
+
+    if (
+      bitqueryResolvedPoolV190
+    ) {
+      entry.lastResolvedSearchDistance =
+        unknownPoolSearchDistance(
+          entry
+        );
+
+      entry.consecutiveEmptySearches =
+        0;
+
+      registerPoolMapping(
+        state,
+        bitqueryResolvedPoolV190
+      );
+
+      for (
+        const address
+        of [
+          bitqueryResolvedPoolV190.currency0,
+          bitqueryResolvedPoolV190.currency1
+        ]
+      ) {
+        if (
+          !isAddress(address) ||
+          address === ZERO ||
+          knownQuote(address)
+        ) {
+          continue;
+        }
+
+        addWatch(
+          state,
+          address,
+          bitqueryResolvedPoolV190,
+          "V190_BITQUERY_REALTIME_INITIALIZE"
+        );
+      }
+
+      delete tracker[
+        poolId
+      ];
+
+      output.resolved++;
+
+      output.resolvedPoolIds.push(
+        poolId
+      );
+
+      output.probes.push({
+        poolId,
+        resolverLane,
+        activityScore:
+          activityScore(entry),
+        swapEvents:
+          safeNumber(entry.swapEvents),
+        liquidityEvents:
+          safeNumber(entry.liquidityEvents),
+        appearances:
+          safeNumber(entry.appearances),
+        fromBlock:
+          bitqueryResolvedPoolV190.blockNumber,
+        toBlock:
+          bitqueryResolvedPoolV190.blockNumber,
+        requestedBlocks: 0,
+        desiredChunkBlocks: 0,
+        externalRequestsUsed: 1,
+        provider:
+          "BITQUERY",
+        logs: 1,
+        resolved: true,
+        resolutionPath:
+          "V190_BITQUERY_REALTIME_INITIALIZE",
+        error: null
+      });
+
+      continue;
     }
 
     /*
@@ -6855,9 +7377,6 @@ async function resolvePersistentUnknownPools(
       null;
 
     if (
-      output.rpcBlockHashInitializeV188
-        .checkpointOutcomeV189 !==
-          "NOT_REACHED" &&
       output.blockscoutWideInitializeV184
         .attempts < 1 &&
       output.requestsUsed <
@@ -32207,7 +32726,7 @@ async function scan(
     status,
 
     scanMode:
-      "V189_FORCED_BLOCKHASH_CHECKPOINT_HUNTER",
+      "V190_BITQUERY_POOLID_RESOLVER_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -36172,6 +36691,36 @@ async function scan(
       telegramThresholdsUnchangedV188:
         "ENABLED_V188",
 
+      bitqueryExactPoolIdResolver:
+        "ENABLED_V190",
+
+      bitqueryDatasetV190:
+        "REALTIME",
+
+      bitqueryPoolIdTopicMatchV190:
+        "ENABLED_V190",
+
+      bitqueryCanonicalCurrencyPersistenceV190:
+        "ENABLED_V190",
+
+      bitqueryIdentityGuessingV190:
+        "DISABLED",
+
+      bitquerySecretNameV190:
+        "BITQUERY_ACCESS_TOKEN",
+
+      bitqueryUsesExistingResolverBudgetV190:
+        "ENABLED_V190",
+
+      legacyResolversFallbackOnlyV190:
+        "ENABLED_V190",
+
+      hardRequestLimitUnchangedV190:
+        42,
+
+      telegramThresholdsUnchangedV190:
+        "ENABLED_V190",
+
       forcedBlockHashCheckpoint:
         "ENABLED_V189",
 
@@ -36204,7 +36753,7 @@ async function scan(
     },
 
     architecture:
-      "V189_FORCED_BLOCKHASH_CHECKPOINT_V77_TELEGRAM_HUNTER",
+      "V190_BITQUERY_POOLID_RESOLVER_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
