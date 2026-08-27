@@ -1,8 +1,22 @@
 /**
  * Robinhood Chain Meme Hunter
- * V166
+ * V168
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
+ *
+ * V168:
+ * - NEW: Telegram-only core evidence freshness protection
+ * - NEW: verified market/holder caches remain usable for tracking/scoring but cannot silently age into an alert
+ * - NEW: normal alerts require fresh core market + holder evidence (10-minute alert freshness window)
+ * - NEW: holder evidence up to the existing 20-minute normal holder-cache TTL may still qualify only with strong current confirmation
+ * - Strong current confirmation requires verified 5m directional USD evidence OR live V4 swap acceleration with positive momentum
+ * - Preserves all existing scoring thresholds, request budgets, provider spacing and cache reuse
+ * - No Telegram-threshold or external request-rate increase
+ *
+ * V167:
+ * - FIX: V166 partial-holder fresh-slot telemetry now reports authoritative post-selection retry/analysis preservation state
+ * - FIX: normal V139 handoff preservation is reflected separately from the V166-specific bypass branch
+ * - No selection, request-rate, scoring or Telegram-threshold changes
  *
  * V166:
  * - NEW: active V149 partial-holder retries can release the scarce fresh-market slot
@@ -610,7 +624,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V167";
+const VERSION = "V168";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1050,6 +1064,22 @@ const MAX_ALERT_RISK = 59;
 const MIN_ALERT_LIQUIDITY = 1000;
 
 const MIN_CONFIDENCE_ALERT = 55;
+
+/*
+ * V168 TELEGRAM CORE-EVIDENCE FRESHNESS
+ *
+ * These limits affect alert eligibility only. Existing market/holder caches
+ * remain available to ranking, tracking, scoring and provider-outage fallbacks.
+ * No provider request cadence is increased.
+ */
+const TELEGRAM_MARKET_EVIDENCE_MAX_AGE_MS_V168 =
+  10 * 60 * 1000;
+
+const TELEGRAM_HOLDER_EVIDENCE_MAX_AGE_MS_V168 =
+  10 * 60 * 1000;
+
+const TELEGRAM_HOLDER_STRONG_CONFIRMATION_MAX_AGE_MS_V168 =
+  HOLDER_CACHE_MS;
 
 /* =========================================================
    SNAPSHOTS
@@ -20454,6 +20484,171 @@ function sameRunTerminalReject(
   };
 }
 
+function telegramCoreEvidenceFreshnessV168(
+  candidate
+) {
+  const market =
+    candidate?.market || {};
+
+  const holders =
+    candidate?.holders || {};
+
+  const marketCached =
+    market?.cached === true ||
+    String(
+      market?.source ||
+      ""
+    ).toUpperCase() ===
+      "CACHE";
+
+  const holderSource =
+    String(
+      holders?.holderSource ||
+      ""
+    ).toUpperCase();
+
+  const holderCached =
+    holders?.cached === true ||
+    holderSource ===
+      "CACHE" ||
+    holderSource.startsWith(
+      "STALE_CACHE"
+    );
+
+  const marketAgeMs =
+    marketCached
+      ? safeNumber(
+          market?.cacheAgeMs
+        )
+      : 0;
+
+  const holderAgeMs =
+    holderCached
+      ? safeNumber(
+          holders?.holderCacheAgeMs
+        )
+      : 0;
+
+  const marketFresh =
+    market?.verified === true &&
+    (
+      !marketCached ||
+      (
+        marketAgeMs >= 0 &&
+        marketAgeMs <=
+          TELEGRAM_MARKET_EVIDENCE_MAX_AGE_MS_V168
+      )
+    );
+
+  const holderFresh =
+    holders?.integrity?.verified ===
+      true &&
+    holders?.concentrationVerified ===
+      true &&
+    holders?.whale?.verified ===
+      true &&
+    (
+      !holderCached ||
+      (
+        holderAgeMs >= 0 &&
+        holderAgeMs <=
+          TELEGRAM_HOLDER_EVIDENCE_MAX_AGE_MS_V168
+      )
+    );
+
+  const m5DirectionalUsdVerified =
+    market
+      ?.directionalFlow
+      ?.m5
+      ?.verified ===
+      true ||
+    market
+      ?.transactions
+      ?.m5
+      ?.directionalUsdVerified ===
+      true;
+
+  const liveMomentum =
+    candidate
+      ?.momentum
+      ?.onChainActivityMomentumV152;
+
+  const positiveLiveSwapAcceleration =
+    liveMomentum?.verified ===
+      true &&
+    safeNumber(
+      liveMomentum
+        ?.currentLiveSwaps
+    ) >= 5 &&
+    safeNumber(
+      liveMomentum
+        ?.swapDelta
+    ) > 0 &&
+    candidate?.momentum?.verified ===
+      true &&
+    safeNumber(
+      candidate?.momentum?.score
+    ) > 0;
+
+  const strongCurrentConfirmation =
+    m5DirectionalUsdVerified ||
+    positiveLiveSwapAcceleration;
+
+  /*
+   * A slightly older holder snapshot may support an alert only while it is
+   * still inside the normal holder-cache TTL AND current activity has been
+   * independently confirmed. Market evidence itself must always be fresh.
+   */
+  const holderFreshEnoughWithCurrentConfirmation =
+    holders?.integrity?.verified ===
+      true &&
+    holders?.concentrationVerified ===
+      true &&
+    holders?.whale?.verified ===
+      true &&
+    holderCached &&
+    holderAgeMs >= 0 &&
+    holderAgeMs <=
+      TELEGRAM_HOLDER_STRONG_CONFIRMATION_MAX_AGE_MS_V168 &&
+    strongCurrentConfirmation;
+
+  const passes =
+    marketFresh &&
+    (
+      holderFresh ||
+      holderFreshEnoughWithCurrentConfirmation
+    );
+
+  return {
+    enabled: true,
+    passes,
+    marketFresh,
+    holderFresh,
+    marketCached,
+    holderCached,
+    marketAgeMs:
+      marketCached
+        ? marketAgeMs
+        : 0,
+    holderAgeMs:
+      holderCached
+        ? holderAgeMs
+        : 0,
+    marketMaxAgeMs:
+      TELEGRAM_MARKET_EVIDENCE_MAX_AGE_MS_V168,
+    holderMaxAgeMs:
+      TELEGRAM_HOLDER_EVIDENCE_MAX_AGE_MS_V168,
+    holderStrongConfirmationMaxAgeMs:
+      TELEGRAM_HOLDER_STRONG_CONFIRMATION_MAX_AGE_MS_V168,
+    strongCurrentConfirmation,
+    m5DirectionalUsdVerified,
+    positiveLiveSwapAcceleration,
+    staleEvidenceMayStillTrackAndScore: true,
+    externalRequestsAdded: 0,
+    telegramThresholdsUnchanged: true
+  };
+}
+
 function qualifiesTelegram(
   candidate
 ) {
@@ -20525,6 +20720,18 @@ function qualifiesTelegram(
 
   if (
     !holderEvidenceVerified
+  ) {
+    return false;
+  }
+
+  const evidenceFreshnessV168 =
+    telegramCoreEvidenceFreshnessV168(
+      candidate
+    );
+
+  if (
+    !evidenceFreshnessV168
+      .passes
   ) {
     return false;
   }
@@ -20643,6 +20850,41 @@ function telegramQualificationReasons(
     reasons.push(
       "HOLDER_EVIDENCE_UNVERIFIED"
     );
+  }
+
+  else {
+    const evidenceFreshnessV168 =
+      telegramCoreEvidenceFreshnessV168(
+        candidate
+      );
+
+    if (
+      !evidenceFreshnessV168
+        .marketFresh
+    ) {
+      reasons.push(
+        "MARKET_EVIDENCE_STALE_FOR_ALERT_V168"
+      );
+    }
+
+    if (
+      !evidenceFreshnessV168
+        .holderFresh &&
+      !(
+        evidenceFreshnessV168
+          .strongCurrentConfirmation &&
+        evidenceFreshnessV168
+          .holderCached &&
+        evidenceFreshnessV168
+          .holderAgeMs <=
+          evidenceFreshnessV168
+            .holderStrongConfirmationMaxAgeMs
+      )
+    ) {
+      reasons.push(
+        "HOLDER_EVIDENCE_STALE_FOR_ALERT_V168"
+      );
+    }
   }
 
   if (
@@ -26522,7 +26764,7 @@ async function scan(
     status,
 
     scanMode:
-      "V167_CORE_PARTIAL_HOLDER_RETRY_TELEMETRY_TRUTH_HUNTER",
+      "V168_CORE_TELEGRAM_EVIDENCE_FRESHNESS_PROTECTION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -27260,7 +27502,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V167_PARTIAL_HOLDER_RETRY_TELEMETRY_TRUTH_DIRECTIONAL_USD_HUNTER",
+        "V168_TELEGRAM_EVIDENCE_FRESHNESS_PROTECTION_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -27886,6 +28128,39 @@ async function scan(
               candidate
                 .evidenceQualityProtectionV158 ||
               null
+          })
+        )
+    },
+
+    telegramEvidenceFreshnessProtectionV168: {
+      enabled:
+        true,
+      marketMaxAgeMs:
+        TELEGRAM_MARKET_EVIDENCE_MAX_AGE_MS_V168,
+      holderMaxAgeMs:
+        TELEGRAM_HOLDER_EVIDENCE_MAX_AGE_MS_V168,
+      holderStrongConfirmationMaxAgeMs:
+        TELEGRAM_HOLDER_STRONG_CONFIRMATION_MAX_AGE_MS_V168,
+      staleCachesStillUsableForTrackingAndScoring:
+        true,
+      noExternalRequestsAdded:
+        true,
+      telegramThresholdsUnchanged:
+        true,
+      candidates:
+        candidates.map(
+          candidate => ({
+            address:
+              normalize(
+                candidate.address
+              ),
+            symbol:
+              candidate.symbol ||
+              null,
+            freshness:
+              telegramCoreEvidenceFreshnessV168(
+                candidate
+              )
           })
         )
     },
@@ -29794,12 +30069,42 @@ async function scan(
       telegramThresholdsUnchangedV167:
         "ENABLED_V167",
 
+      telegramCoreEvidenceFreshnessProtection:
+        "ENABLED_V168",
+
+      telegramMarketEvidenceMaxAgeMsV168:
+        TELEGRAM_MARKET_EVIDENCE_MAX_AGE_MS_V168,
+
+      telegramHolderEvidenceMaxAgeMsV168:
+        TELEGRAM_HOLDER_EVIDENCE_MAX_AGE_MS_V168,
+
+      telegramHolderStrongConfirmationMaxAgeMsV168:
+        TELEGRAM_HOLDER_STRONG_CONFIRMATION_MAX_AGE_MS_V168,
+
+      staleVerifiedCachesStillTrackAndScoreV168:
+        "ENABLED_V168",
+
+      staleCoreEvidenceCannotSilentlyQualifyTelegramV168:
+        "ENABLED_V168",
+
+      verified5mDirectionalUsdCanConfirmCurrentEvidenceV168:
+        "ENABLED_V168",
+
+      liveSwapAccelerationCanConfirmCurrentEvidenceV168:
+        "ENABLED_V168",
+
+      noExternalRequestRateIncreaseV168:
+        "ENABLED_V168",
+
+      telegramThresholdsUnchangedV168:
+        "ENABLED_V168",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V167_CORE_PARTIAL_HOLDER_RETRY_TELEMETRY_TRUTH_V77_TELEGRAM_HUNTER",
+      "V168_CORE_TELEGRAM_EVIDENCE_FRESHNESS_PROTECTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
