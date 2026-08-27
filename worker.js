@@ -1,8 +1,14 @@
 /**
  * Robinhood Chain Meme Hunter
- * V163
+ * V164
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
+ *
+ * V164:
+ * - FIX: same-run Blockscout outage-deferred candidates retain true PRO configuration telemetry
+ * - FIX: deferred holder paths explicitly report PRO not attempted due run circuit breaker
+ * - Preserves V163 holder-reconciliation hotfix and V162 quarantine semantics
+ * - No scoring, Telegram-threshold, request-budget or external-rate changes
  *
  * V163:
  * - HOTFIX: holderIntegrityReconciliationV162 now calls validateHolderIntegrity directly
@@ -589,7 +595,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V163";
+const VERSION = "V164";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -15237,6 +15243,34 @@ async function holderIntelligence(
     );
   }
 
+  /*
+   * V164: configuration truth must survive same-run outage deferral.
+   * A request suppressed by the V134 circuit breaker is NOT the same as
+   * BLOCKSCOUT_PRO_API_KEY being absent.
+   */
+  const blockscoutProConfiguredV164 =
+    Boolean(
+      String(
+        env?.BLOCKSCOUT_PRO_API_KEY ||
+        ""
+      ).trim()
+    );
+
+  const blockscoutProDeferredTelemetryV164 = () => ({
+    configured:
+      blockscoutProConfiguredV164,
+    attempted: false,
+    success: false,
+    status:
+      "BLOCKSCOUT_RUN_CIRCUIT_BREAKER_DEFERRED",
+    transientOutageV145: false,
+    cooldownUntil: null,
+    retryAfterMs: 0,
+    http404V146: false,
+    httpStatus: null,
+    retryUntilV146: null
+  });
+
   const verifiedPairAddress =
     market?.verified ===
       true
@@ -15364,7 +15398,10 @@ async function holderIntelligence(
           true,
 
         blockscoutRunCircuitBreaker:
-          true
+          true,
+
+        blockscoutProHolderFallbackV143:
+          blockscoutProDeferredTelemetryV164()
       };
     }
 
@@ -15390,7 +15427,10 @@ async function holderIntelligence(
         true,
 
       holderSource:
-        "BLOCKSCOUT_OUTAGE_DEFERRED"
+        "BLOCKSCOUT_OUTAGE_DEFERRED",
+
+      blockscoutProHolderFallbackV143:
+        blockscoutProDeferredTelemetryV164()
     };
   }
 
@@ -15415,12 +15455,7 @@ async function holderIntelligence(
 
   let blockscoutProHolderFallbackV143 = {
     configured:
-      Boolean(
-        String(
-          env?.BLOCKSCOUT_PRO_API_KEY ||
-          ""
-        ).trim()
-      ),
+      blockscoutProConfiguredV164,
     attempted: false,
     success: false,
     status:
@@ -26123,7 +26158,7 @@ async function scan(
     status,
 
     scanMode:
-      "V163_CORE_HOLDER_RECONCILIATION_HOTFIX_HUNTER",
+      "V164_CORE_HOLDER_PROVIDER_DEFERRED_TELEMETRY_FIX_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -26807,7 +26842,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V163_HOLDER_RECONCILIATION_HOTFIX_DIRECTIONAL_USD_HUNTER",
+        "V164_HOLDER_PROVIDER_DEFERRED_TELEMETRY_FIX_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -29261,12 +29296,27 @@ async function scan(
       telegramThresholdsUnchangedV163:
         "ENABLED_V163",
 
+      holderProviderDeferredTelemetryCorrection:
+        "ENABLED_V164",
+
+      blockscoutProConfiguredTruthPreservedWhenDeferredV164:
+        "ENABLED_V164",
+
+      blockscoutRunCircuitBreakerExplicitProStatusV164:
+        "ENABLED_V164",
+
+      noExternalRequestRateIncreaseV164:
+        "ENABLED_V164",
+
+      telegramThresholdsUnchangedV164:
+        "ENABLED_V164",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V163_CORE_HOLDER_RECONCILIATION_HOTFIX_V77_TELEGRAM_HUNTER",
+      "V164_CORE_HOLDER_PROVIDER_DEFERRED_TELEMETRY_FIX_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
