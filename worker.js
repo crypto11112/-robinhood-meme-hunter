@@ -4,6 +4,14 @@
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
+ * V169:
+ * - FIX: Telegram freshness telemetry now distinguishes FRESH / STALE_CACHE / UNVERIFIED
+ * - FIX: missing or currently unavailable market evidence is no longer mislabeled as stale
+ * - FIX: missing or currently unavailable holder evidence is no longer mislabeled as stale
+ * - FIX: stale alert reasons are emitted only for genuinely verified cached evidence beyond its allowed alert age
+ * - Preserves V168 alert-safety behavior, scoring, Telegram thresholds, request budgets and provider cadence
+ * - Adds no external requests
+ *
  * V168:
  * - NEW: Telegram-only core evidence freshness protection
  * - NEW: verified market/holder caches remain usable for tracking/scoring but cannot silently age into an alert
@@ -624,7 +632,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V168";
+const VERSION = "V169";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -20484,7 +20492,7 @@ function sameRunTerminalReject(
   };
 }
 
-function telegramCoreEvidenceFreshnessV168(
+function telegramCoreEvidenceFreshnessV169(
   candidate
 ) {
   const market =
@@ -20529,8 +20537,52 @@ function telegramCoreEvidenceFreshnessV168(
         )
       : 0;
 
+  const marketEvidenceVerified =
+    market?.verified === true;
+
+  const holderEvidenceVerified =
+    holders?.integrity?.verified ===
+      true &&
+    holders?.concentrationVerified ===
+      true &&
+    holders?.whale?.verified ===
+      true;
+
+  /*
+   * V169 truth classification:
+   * - UNVERIFIED means there is no verified core evidence to age.
+   * - STALE_CACHE means verified cached evidence exists and exceeded
+   *   the normal Telegram freshness window.
+   * - FRESH preserves V168 semantics: verified non-cache evidence, or
+   *   verified cache evidence still inside the normal freshness window.
+   */
+  const marketFreshnessState =
+    !marketEvidenceVerified
+      ? "UNVERIFIED"
+      : (
+          marketCached &&
+          marketAgeMs >
+            TELEGRAM_MARKET_EVIDENCE_MAX_AGE_MS_V168
+        )
+        ? "STALE_CACHE"
+        : "FRESH";
+
+  const holderFreshnessState =
+    !holderEvidenceVerified
+      ? "UNVERIFIED"
+      : (
+          holderCached &&
+          holderAgeMs >
+            TELEGRAM_HOLDER_EVIDENCE_MAX_AGE_MS_V168
+        )
+        ? "STALE_CACHE"
+        : "FRESH";
+
+  /*
+   * Preserve V168 alert behavior exactly.
+   */
   const marketFresh =
-    market?.verified === true &&
+    marketEvidenceVerified &&
     (
       !marketCached ||
       (
@@ -20541,12 +20593,7 @@ function telegramCoreEvidenceFreshnessV168(
     );
 
   const holderFresh =
-    holders?.integrity?.verified ===
-      true &&
-    holders?.concentrationVerified ===
-      true &&
-    holders?.whale?.verified ===
-      true &&
+    holderEvidenceVerified &&
     (
       !holderCached ||
       (
@@ -20595,35 +20642,36 @@ function telegramCoreEvidenceFreshnessV168(
     positiveLiveSwapAcceleration;
 
   /*
-   * A slightly older holder snapshot may support an alert only while it is
-   * still inside the normal holder-cache TTL AND current activity has been
-   * independently confirmed. Market evidence itself must always be fresh.
+   * Preserve the V168 holder exception exactly: verified cached holder
+   * evidence older than the normal 10-minute alert window may remain
+   * acceptable up to the existing holder-cache TTL only when strong,
+   * current independent confirmation exists.
    */
   const holderFreshEnoughWithCurrentConfirmation =
-    holders?.integrity?.verified ===
-      true &&
-    holders?.concentrationVerified ===
-      true &&
-    holders?.whale?.verified ===
-      true &&
+    holderEvidenceVerified &&
     holderCached &&
     holderAgeMs >= 0 &&
     holderAgeMs <=
       TELEGRAM_HOLDER_STRONG_CONFIRMATION_MAX_AGE_MS_V168 &&
     strongCurrentConfirmation;
 
+  const holderAlertEvidenceAcceptable =
+    holderFresh ||
+    holderFreshEnoughWithCurrentConfirmation;
+
   const passes =
     marketFresh &&
-    (
-      holderFresh ||
-      holderFreshEnoughWithCurrentConfirmation
-    );
+    holderAlertEvidenceAcceptable;
 
   return {
     enabled: true,
     passes,
     marketFresh,
     holderFresh,
+    marketFreshnessState,
+    holderFreshnessState,
+    marketEvidenceVerified,
+    holderEvidenceVerified,
     marketCached,
     holderCached,
     marketAgeMs:
@@ -20640,6 +20688,8 @@ function telegramCoreEvidenceFreshnessV168(
       TELEGRAM_HOLDER_EVIDENCE_MAX_AGE_MS_V168,
     holderStrongConfirmationMaxAgeMs:
       TELEGRAM_HOLDER_STRONG_CONFIRMATION_MAX_AGE_MS_V168,
+    holderFreshEnoughWithCurrentConfirmation,
+    holderAlertEvidenceAcceptable,
     strongCurrentConfirmation,
     m5DirectionalUsdVerified,
     positiveLiveSwapAcceleration,
@@ -20724,13 +20774,13 @@ function qualifiesTelegram(
     return false;
   }
 
-  const evidenceFreshnessV168 =
-    telegramCoreEvidenceFreshnessV168(
+  const evidenceFreshnessV169 =
+    telegramCoreEvidenceFreshnessV169(
       candidate
     );
 
   if (
-    !evidenceFreshnessV168
+    !evidenceFreshnessV169
       .passes
   ) {
     return false;
@@ -20853,36 +20903,30 @@ function telegramQualificationReasons(
   }
 
   else {
-    const evidenceFreshnessV168 =
-      telegramCoreEvidenceFreshnessV168(
+    const evidenceFreshnessV169 =
+      telegramCoreEvidenceFreshnessV169(
         candidate
       );
 
     if (
-      !evidenceFreshnessV168
-        .marketFresh
+      evidenceFreshnessV169
+        .marketFreshnessState ===
+      "STALE_CACHE"
     ) {
       reasons.push(
-        "MARKET_EVIDENCE_STALE_FOR_ALERT_V168"
+        "MARKET_EVIDENCE_STALE_FOR_ALERT_V169"
       );
     }
 
     if (
-      !evidenceFreshnessV168
-        .holderFresh &&
-      !(
-        evidenceFreshnessV168
-          .strongCurrentConfirmation &&
-        evidenceFreshnessV168
-          .holderCached &&
-        evidenceFreshnessV168
-          .holderAgeMs <=
-          evidenceFreshnessV168
-            .holderStrongConfirmationMaxAgeMs
-      )
+      evidenceFreshnessV169
+        .holderFreshnessState ===
+        "STALE_CACHE" &&
+      !evidenceFreshnessV169
+        .holderAlertEvidenceAcceptable
     ) {
       reasons.push(
-        "HOLDER_EVIDENCE_STALE_FOR_ALERT_V168"
+        "HOLDER_EVIDENCE_STALE_FOR_ALERT_V169"
       );
     }
   }
@@ -26764,7 +26808,7 @@ async function scan(
     status,
 
     scanMode:
-      "V168_CORE_TELEGRAM_EVIDENCE_FRESHNESS_PROTECTION_HUNTER",
+      "V169_TELEGRAM_EVIDENCE_FRESHNESS_CLASSIFICATION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -28132,7 +28176,7 @@ async function scan(
         )
     },
 
-    telegramEvidenceFreshnessProtectionV168: {
+    telegramEvidenceFreshnessProtectionV169: {
       enabled:
         true,
       marketMaxAgeMs:
@@ -28158,7 +28202,7 @@ async function scan(
               candidate.symbol ||
               null,
             freshness:
-              telegramCoreEvidenceFreshnessV168(
+              telegramCoreEvidenceFreshnessV169(
                 candidate
               )
           })
@@ -30099,12 +30143,36 @@ async function scan(
       telegramThresholdsUnchangedV168:
         "ENABLED_V168",
 
+      telegramEvidenceFreshnessClassificationFix:
+        "ENABLED_V169",
+
+      telegramMarketFreshnessStateV169:
+        "FRESH_STALE_CACHE_UNVERIFIED",
+
+      telegramHolderFreshnessStateV169:
+        "FRESH_STALE_CACHE_UNVERIFIED",
+
+      unverifiedEvidenceNeverLabeledStaleV169:
+        "ENABLED_V169",
+
+      staleReasonRequiresVerifiedCachedEvidenceV169:
+        "ENABLED_V169",
+
+      v168AlertSafetySemanticsPreservedV169:
+        "ENABLED_V169",
+
+      noExternalRequestRateIncreaseV169:
+        "ENABLED_V169",
+
+      telegramThresholdsUnchangedV169:
+        "ENABLED_V169",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V168_CORE_TELEGRAM_EVIDENCE_FRESHNESS_PROTECTION_V77_TELEGRAM_HUNTER",
+      "V169_TELEGRAM_EVIDENCE_FRESHNESS_CLASSIFICATION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
