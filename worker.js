@@ -1,10 +1,17 @@
 /**
  * Robinhood Chain Meme Hunter
- * V185
+ * V186
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V185
+ * CURRENT BUILD: V186
+ * - V186 strengthens pool identity locally before spending any external resolver requests
+ * - Rebuilds missing poolRegistry entries from canonical pool objects already persisted inside watchedTokens[].pools
+ * - Removes time-based pool-registry expiry; the registry is now LRU/cap controlled at the existing 2,500 mappings so valid identities are not forgotten merely because 30 days passed
+ * - Known Swap/ModifyLiquidity activity still refreshes lastSeenAt from V185
+ * - Recovered local mappings immediately clear matching unknown-pool tracker entries
+ * - Local self-heal runs before prune/scan so recovered identities can decode the same run's live swaps
+ * - Adds zero external requests and preserves V184 fallback resolver, V183 backoff, V182 budget protection, V181 block handoff, Telegram thresholds and USD verification rules
  * - V185 fixes a local pool-registry expiry weakness found while investigating UNKNOWN_POOL_IDENTITY
  * - Existing pool mappings were retained for only 48 hours from lastSeenAt; active Swap/ModifyLiquidity logs did not refresh that timestamp
  * - V185 refreshes a known pool mapping whenever the normal live/backlog scan sees Swap or ModifyLiquidity activity for that pool
@@ -698,7 +705,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V185";
+const VERSION = "V186";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -3434,6 +3441,200 @@ function refreshKnownPoolActivityV185(
   };
 }
 
+function rebuildPoolRegistryFromWatchedPoolsV186(
+  state
+) {
+  state.poolRegistry =
+    state.poolRegistry &&
+    typeof state.poolRegistry === "object"
+      ? state.poolRegistry
+      : {};
+
+  state.watchedTokens =
+    Array.isArray(
+      state.watchedTokens
+    )
+      ? state.watchedTokens
+      : [];
+
+  let inspectedPoolRows =
+    0;
+
+  let recoveredMappings =
+    0;
+
+  let refreshedMappings =
+    0;
+
+  let clearedUnknownTrackers =
+    0;
+
+  const recoveredPoolIds =
+    [];
+
+  for (
+    const token
+    of state.watchedTokens
+  ) {
+    const pools =
+      Array.isArray(
+        token?.pools
+      )
+        ? token.pools
+        : [];
+
+    for (
+      const pool
+      of pools
+    ) {
+      inspectedPoolRows++;
+
+      const poolId =
+        normalize(
+          pool?.poolId
+        );
+
+      const currency0 =
+        normalize(
+          pool?.currency0
+        );
+
+      const currency1 =
+        normalize(
+          pool?.currency1
+        );
+
+      if (
+        !poolId ||
+        !isAddress(currency0) ||
+        !isAddress(currency1)
+      ) {
+        continue;
+      }
+
+      const existing =
+        state.poolRegistry[
+          poolId
+        ];
+
+      const hadUnknownTracker =
+        Boolean(
+          state.unknownPools?.[
+            poolId
+          ]
+        );
+
+      if (
+        existing
+      ) {
+        /*
+         * Never replace canonical currencies with guesses. Only refresh an
+         * existing mapping when the persisted watched-token pool agrees.
+         */
+        if (
+          normalize(
+            existing.currency0
+          ) === currency0 &&
+          normalize(
+            existing.currency1
+          ) === currency1
+        ) {
+          existing.lastSeenAt =
+            Math.max(
+              safeNumber(
+                existing.lastSeenAt
+              ),
+              safeNumber(
+                token?.lastSeenAt
+              ),
+              Date.now()
+            );
+
+          existing.lastSelfHealAtV186 =
+            Date.now();
+
+          refreshedMappings++;
+        }
+      } else {
+        const result =
+          registerPoolMapping(
+            state,
+            {
+              poolId,
+              currency0,
+              currency1,
+              blockNumber:
+                pool?.blockNumber ||
+                null,
+              transactionHash:
+                pool?.transactionHash ||
+                null
+            }
+          );
+
+        if (
+          result?.registered ===
+            true
+        ) {
+          recoveredMappings++;
+
+          recoveredPoolIds.push(
+            poolId
+          );
+        }
+      }
+
+      if (
+        hadUnknownTracker &&
+        state.poolRegistry?.[
+          poolId
+        ] &&
+        state.unknownPools?.[
+          poolId
+        ]
+      ) {
+        delete state.unknownPools[
+          poolId
+        ];
+
+        clearedUnknownTrackers++;
+      } else if (
+        hadUnknownTracker &&
+        state.poolRegistry?.[
+          poolId
+        ] &&
+        !state.unknownPools?.[
+          poolId
+        ]
+      ) {
+        /*
+         * registerPoolMapping() already removed it.
+         */
+        clearedUnknownTrackers++;
+      }
+    }
+  }
+
+  return {
+    enabled: true,
+    source:
+      "PERSISTED_WATCHED_TOKEN_CANONICAL_POOL_OBJECTS",
+    inspectedPoolRows,
+    recoveredMappings,
+    refreshedMappings,
+    clearedUnknownTrackers,
+    recoveredPoolIds:
+      recoveredPoolIds.slice(
+        0,
+        50
+      ),
+    zeroExtraRequests:
+      true,
+    guessing:
+      false
+  };
+}
+
 function prunePoolRegistry(
   state
 ) {
@@ -3447,24 +3648,16 @@ function prunePoolRegistry(
   const current =
     Date.now();
 
+  /*
+   * V186:
+   * Pool identity is immutable once Initialize establishes the PoolKey.
+   * Do not throw away a valid identity purely because of age. Keep the
+   * existing LRU/cap protection so KV growth remains bounded.
+   */
   const entries =
     Object.entries(
       state.poolRegistry
     )
-      .filter(
-        ([, entry]) => {
-          const seen =
-            safeNumber(
-              entry?.lastSeenAt
-            );
-
-          return (
-            !seen ||
-            current - seen <=
-              POOL_REGISTRY_MAX_AGE
-          );
-        }
-      )
       .sort(
         (a, b) =>
           safeNumber(
@@ -26681,6 +26874,16 @@ async function scan(
   const state =
     stateResult.state;
 
+  /*
+   * V186 local identity recovery must happen BEFORE pruneState so a valid
+   * pool mapping already persisted inside watchedTokens[].pools can be
+   * restored before unknown-pool resolution and live directional decoding.
+   */
+  const poolRegistrySelfHealV186 =
+    rebuildPoolRegistryFromWatchedPoolsV186(
+      state
+    );
+
   pruneState(
     state,
     false
@@ -31106,7 +31309,7 @@ async function scan(
     status,
 
     scanMode:
-      "V185_ACTIVE_POOL_REGISTRY_RETENTION_HUNTER",
+      "V186_LOCAL_POOL_REGISTRY_SELF_HEAL_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -31730,11 +31933,18 @@ async function scan(
         state.poolRegistry || {}
       ).length,
 
+    poolRegistrySelfHealV186,
+
     poolRegistryRetentionV185: {
       enabled: true,
       maxAgeMs:
-        POOL_REGISTRY_MAX_AGE,
-      maxAgeDays: 30,
+        null,
+      maxAgeDays:
+        null,
+      timeExpiryDisabledV186:
+        true,
+      retentionPolicyV186:
+        "LRU_CAP_ONLY",
       maxMappings:
         MAX_POOL_REGISTRY,
       activityRefreshFromNormalLogs:
@@ -34959,12 +35169,51 @@ async function scan(
       telegramThresholdsUnchangedV185:
         "ENABLED_V185",
 
+      localPoolRegistrySelfHeal:
+        "ENABLED_V186",
+
+      watchedTokenCanonicalPoolRecoveryV186:
+        "ENABLED_V186",
+
+      poolRegistryTimeExpiryDisabledV186:
+        "ENABLED_V186",
+
+      poolRegistryRetentionPolicyV186:
+        "LRU_CAP_ONLY",
+
+      poolRegistryMaxMappingsUnchangedV186:
+        2500,
+
+      recoveredLocalPoolClearsUnknownTrackerV186:
+        "ENABLED_V186",
+
+      selfHealBeforePruneAndLiveDecodeV186:
+        "ENABLED_V186",
+
+      extraExternalRequestsForSelfHealV186:
+        0,
+
+      v185ActivityRefreshPreservedV186:
+        "ENABLED_V186",
+
+      v184WideResolverFallbackPreservedV186:
+        "ENABLED_V186",
+
+      hardRequestLimitUnchangedV186:
+        42,
+
+      analysisRequestLimitUnchangedV186:
+        21,
+
+      telegramThresholdsUnchangedV186:
+        "ENABLED_V186",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V185_ACTIVE_POOL_REGISTRY_RETENTION_V77_TELEGRAM_HUNTER",
+      "V186_LOCAL_POOL_REGISTRY_SELF_HEAL_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
