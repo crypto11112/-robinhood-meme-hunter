@@ -1,12 +1,16 @@
 /**
  * Robinhood Chain Meme Hunter
- * V173
+ * V174
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V173
- * - V173 verified stale-cache priority-release fix
- * - Built forward from V172/V171/V170 without removing preserved features
+ * CURRENT BUILD: V174
+ * - V174 protects Telegram delivery capacity against global-budget exhaustion
+ * - V174 counts each Telegram network request separately (photo and text fallback)
+ * - V174 releases unused notification reserve only after Telegram processing
+ * - V174 allows post-analysis backlog reclaim to use only genuinely released headroom
+ * - Preserves V173 verified stale-cache priority release and all prior safety logic
+ * - Hard global limit remains 42; phase limits and Telegram qualification thresholds unchanged
  *
  * V169:
  * - FIX: Telegram freshness telemetry now distinguishes FRESH / STALE_CACHE / UNVERIFIED
@@ -636,7 +640,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V173";
+const VERSION = "V174";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1500,7 +1504,13 @@ function createBudget() {
         0,
 
       limit:
-        NOTIFICATION_REQUEST_LIMIT
+        NOTIFICATION_REQUEST_LIMIT,
+
+      globalReserveActiveV174:
+        true,
+
+      reserveReleasedAtV174:
+        null
     },
 
     skipped:
@@ -1513,10 +1523,45 @@ function budgetAvailable(
   phase,
   amount = 1
 ) {
+  /*
+   * V174:
+   * Before Telegram processing finishes, keep the still-unused notification
+   * allowance inside the 42-request hard ceiling. This fixes the V173 case
+   * where analysis could consume all 42 global requests while the separate
+   * notification phase still reported 2 requests "remaining".
+   */
+  const notificationReserveRemainingV174 =
+    (
+      budget.notification
+        ?.globalReserveActiveV174 ===
+        true &&
+      phase !==
+        "notification"
+    )
+      ? Math.max(
+          0,
+          safeNumber(
+            budget.notification
+              ?.limit
+          ) -
+          safeNumber(
+            budget.notification
+              ?.used
+          )
+        )
+      : 0;
+
+  const effectiveGlobalLimitV174 =
+    Math.max(
+      0,
+      budget.totalLimit -
+        notificationReserveRemainingV174
+    );
+
   if (
     budget.totalUsed +
       amount >
-    budget.totalLimit
+    effectiveGlobalLimitV174
   ) {
     return false;
   }
@@ -1683,6 +1728,62 @@ function consumeBudget(
   }
 
   return true;
+}
+
+function releaseNotificationReserveV174(
+  budget
+) {
+  const wasActive =
+    budget.notification
+      ?.globalReserveActiveV174 ===
+    true;
+
+  const unusedAtRelease =
+    Math.max(
+      0,
+      safeNumber(
+        budget.notification
+          ?.limit
+      ) -
+      safeNumber(
+        budget.notification
+          ?.used
+      )
+    );
+
+  if (
+    budget.notification
+  ) {
+    budget.notification
+      .globalReserveActiveV174 =
+        false;
+
+    budget.notification
+      .reserveReleasedAtV174 =
+        Date.now();
+  }
+
+  return {
+    enabled:
+      true,
+    wasActive,
+    unusedRequestsReleased:
+      unusedAtRelease,
+    notificationUsed:
+      safeNumber(
+        budget.notification
+          ?.used
+      ),
+    notificationLimit:
+      safeNumber(
+        budget.notification
+          ?.limit
+      ),
+    hardRequestLimit:
+      budget.totalLimit,
+    releasedAfterTelegram:
+      true
+  };
 }
 
 function activatePostAnalysisBacklogReclaimV170(
@@ -1877,6 +1978,30 @@ function budgetTelemetry(
         ),
 
       protected:
+        true,
+
+      globalReserveActiveV174:
+        budget.notification
+          .globalReserveActiveV174 ===
+        true,
+
+      globalReserveRemainingV174:
+        budget.notification
+          .globalReserveActiveV174 ===
+        true
+          ? Math.max(
+              0,
+              budget.notification.limit -
+                budget.notification.used
+            )
+          : 0,
+
+      reserveReleasedAtV174:
+        budget.notification
+          .reserveReleasedAtV174 ||
+        null,
+
+      exactNetworkRequestAccountingV174:
         true
     },
 
@@ -20443,27 +20568,31 @@ async function sendTelegram(
     };
   }
 
-  if (
-    budget &&
-    !consumeBudget(
-      budget,
-      "notification",
-      "TELEGRAM_SEND"
-    )
-  ) {
-    return {
-      success: false,
-      skipped: true,
-      reason: "NOTIFICATION_BUDGET_EXHAUSTED"
-    };
-  }
-
   const telegramBase =
     `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
 
   try {
-    /* V94: Prefer the token artwork as the Telegram photo. */
+    /*
+     * V174 exact notification accounting:
+     * consume one notification request immediately before each real Telegram
+     * fetch. A failed photo plus text fallback therefore costs 2, not 1.
+     */
     if (imageUrl) {
+      if (
+        budget &&
+        !consumeBudget(
+          budget,
+          "notification",
+          "TELEGRAM_SEND_PHOTO"
+        )
+      ) {
+        return {
+          success: false,
+          skipped: true,
+          reason: "NOTIFICATION_BUDGET_EXHAUSTED"
+        };
+      }
+
       try {
         const photoResponse = await fetch(
           `${telegramBase}/sendPhoto`,
@@ -20481,20 +20610,55 @@ async function sendTelegram(
           }
         );
 
-        const photoData = await photoResponse.json();
+        const photoData =
+          await photoResponse.json();
 
-        if (photoResponse.ok && photoData?.ok) {
+        if (
+          photoResponse.ok &&
+          photoData?.ok
+        ) {
           return {
             success: true,
             status: photoResponse.status,
             mode: "PHOTO",
             imageUrl,
-            data: photoData
+            data: photoData,
+            notificationRequestsUsedV174:
+              1
           };
         }
       } catch (photoError) {
-        /* Fall through to the proven V94 text-only alert path. */
+        /* Fall through to the proven text-only alert path. */
       }
+
+      if (
+        budget &&
+        !consumeBudget(
+          budget,
+          "notification",
+          "TELEGRAM_SEND_TEXT_FALLBACK"
+        )
+      ) {
+        return {
+          success: false,
+          skipped: true,
+          reason: "NOTIFICATION_BUDGET_EXHAUSTED",
+          photoAttempted: true
+        };
+      }
+    } else if (
+      budget &&
+      !consumeBudget(
+        budget,
+        "notification",
+        "TELEGRAM_SEND_TEXT"
+      )
+    ) {
+      return {
+        success: false,
+        skipped: true,
+        reason: "NOTIFICATION_BUDGET_EXHAUSTED"
+      };
     }
 
     const response = await fetch(
@@ -20513,22 +20677,36 @@ async function sendTelegram(
       }
     );
 
-    const data = await response.json();
+    const data =
+      await response.json();
 
     return {
-      success: response.ok && Boolean(data?.ok),
-      status: response.status,
-      mode: imageUrl ? "TEXT_FALLBACK" : "TEXT",
-      data
+      success:
+        response.ok &&
+        Boolean(
+          data?.ok
+        ),
+      status:
+        response.status,
+      mode:
+        imageUrl
+          ? "TEXT_FALLBACK"
+          : "TEXT",
+      data,
+      notificationRequestsUsedV174:
+        imageUrl
+          ? 2
+          : 1
     };
   } catch (error) {
     return {
       success: false,
-      error: errorString(error)
+      error: errorString(
+        error
+      )
     };
   }
 }
-
 
 function sameRunTerminalReject(
   candidate
@@ -27017,6 +27195,17 @@ async function scan(
   }
 
   /*
+   * V174:
+   * Telegram evaluation/sending is now finished. Any notification capacity
+   * that was not actually used may safely rejoin the global pool before the
+   * existing V170 post-analysis backlog reclaim runs.
+   */
+  const notificationReserveReleaseV174 =
+    releaseNotificationReserveV174(
+      budget
+    );
+
+  /*
    * =======================================================
    * V170 POST-ANALYSIS RESIDUAL BACKLOG CATCH-UP
    * =======================================================
@@ -27167,6 +27356,14 @@ async function scan(
     .telegramCompletedBeforeReclaim =
       true;
 
+  postAnalysisBacklogReclaimV170
+    .notificationReserveReleasedV174 =
+      notificationReserveReleaseV174;
+
+  postAnalysisBacklogReclaimV170
+    .notificationCapacityProtectedUntilTelegramV174 =
+      true;
+
   pruneState(
     state,
     true
@@ -27286,7 +27483,7 @@ async function scan(
     status,
 
     scanMode:
-      "V173_VERIFIED_STALE_CACHE_PRIORITY_RELEASE_HUNTER",
+      "V174_TELEGRAM_GLOBAL_RESERVE_EXACT_ACCOUNTING_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -27581,6 +27778,8 @@ async function scan(
       budgetTelemetry(
         budget
       ),
+
+    notificationReserveReleaseV174,
 
     postAnalysisBacklogReclaimV170,
 
@@ -30750,12 +30949,39 @@ async function scan(
       telegramThresholdsUnchangedV172:
         "ENABLED_V172",
 
+      telegramGlobalRequestReserveV174:
+        "ENABLED_V174",
+
+      telegramExactNetworkRequestAccountingV174:
+        "ENABLED_V174",
+
+      telegramPhotoFallbackCountsSecondRequestV174:
+        "ENABLED_V174",
+
+      notificationReserveReleasedOnlyAfterTelegramV174:
+        "ENABLED_V174",
+
+      v170BacklogReclaimUsesOnlyReleasedHeadroomV174:
+        "ENABLED_V174",
+
+      hardRequestLimitUnchangedV174:
+        MAX_EXTERNAL_REQUESTS,
+
+      analysisRequestLimitUnchangedV174:
+        ANALYSIS_REQUEST_LIMIT,
+
+      notificationRequestLimitUnchangedV174:
+        NOTIFICATION_REQUEST_LIMIT,
+
+      telegramThresholdsUnchangedV174:
+        "ENABLED_V174",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V173_VERIFIED_STALE_CACHE_PRIORITY_RELEASE_V77_TELEGRAM_HUNTER",
+      "V174_TELEGRAM_GLOBAL_RESERVE_EXACT_ACCOUNTING_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
