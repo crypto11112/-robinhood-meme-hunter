@@ -632,7 +632,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V172";
+const VERSION = "V173";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -850,7 +850,7 @@ const CACHED_ANALYSIS_COST = 3;
 
 
 /*
- * V172:
+ * V173:
  * - Preserves V171 mature-zero-activity priority release and V170 residual backlog catch-up
  * - FIX: temporary market-provider unavailability can use the token's existing
  *   VERIFIED stale market cache for the V171 release decision
@@ -26168,7 +26168,7 @@ async function scan(
         completionCandidate
       );
 
-    const matureZeroActivityReleaseV172 =
+    const matureZeroActivityReleaseV173 =
       matureZeroActivityPriorityReleaseV172(
         completionCandidate,
         completionWatched
@@ -26188,7 +26188,7 @@ async function scan(
 
     priorityCompletionTelemetry
       .matureZeroActivityPriorityReleaseV172 =
-      matureZeroActivityReleaseV172;
+      matureZeroActivityReleaseV173;
 
     priorityCompletionTelemetry.symbol =
       completionCandidate.symbol ||
@@ -26227,10 +26227,10 @@ async function scan(
     }
 
     else if (
-      matureZeroActivityReleaseV171.release
+      matureZeroActivityReleaseV173.release
     ) {
       priorityCompletionTelemetry.blockers = [
-        matureZeroActivityReleaseV171.reason
+        matureZeroActivityReleaseV173.reason
       ];
     }
 
@@ -27282,7 +27282,7 @@ async function scan(
     status,
 
     scanMode:
-      "V172_VERIFIED_STALE_CACHE_PRIORITY_RELEASE_HUNTER",
+      "V173_VERIFIED_STALE_CACHE_PRIORITY_RELEASE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -30751,7 +30751,7 @@ async function scan(
     },
 
     architecture:
-      "V172_VERIFIED_STALE_CACHE_PRIORITY_RELEASE_V77_TELEGRAM_HUNTER",
+      "V173_VERIFIED_STALE_CACHE_PRIORITY_RELEASE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
