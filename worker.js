@@ -1,8 +1,16 @@
 /**
  * Robinhood Chain Meme Hunter
- * V164
+ * V165
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
+ *
+ * V165:
+ * - NEW: same-run terminal replacement candidates inherit protected residual analysis budget
+ * - NEW: bounded replacement analysis may proceed when conservative estimated cost exceeds residual budget
+ * - NEW: actual per-request budget checks remain authoritative; the 42-request hard ceiling is unchanged
+ * - NEW: terminal handoff chains can protect the next viable replacement in the same run
+ * - Preserves V164 holder-provider telemetry correction and V162/V163 holder-integrity safety
+ * - No Telegram-threshold or normal external request-rate increase
  *
  * V164:
  * - FIX: same-run Blockscout outage-deferred candidates retain true PRO configuration telemetry
@@ -595,7 +603,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V164";
+const VERSION = "V165";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -23868,6 +23876,26 @@ async function scan(
     replacementInserted: false
   };
 
+  /* V165: bounded residual-budget protection for verified same-run terminal handoffs. */
+  const V165_MIN_BOUNDED_REPLACEMENT_REQUESTS = 3;
+
+  const v165ProtectedReplacementAddresses =
+    new Set();
+
+  const terminalReplacementBudgetRecoveryV165 = {
+    enabled: true,
+    minimumBoundedRequests: V165_MIN_BOUNDED_REPLACEMENT_REQUESTS,
+    protectedAddresses: [],
+    handoffChainCount: 0,
+    boundedAttempts: 0,
+    candidates: [],
+    hardRequestLimitUnchanged: true,
+    analysisPhaseLimitUnchanged: true,
+    perRequestBudgetChecksAuthoritative: true,
+    noExternalRequestRateIncrease: true,
+    telegramThresholdsUnchanged: true
+  };
+
   const dynamicTerminalPruningV148 = {
     enabled: true,
     prunedCount: 0,
@@ -24308,6 +24336,23 @@ async function scan(
           dynamicTerminalPruningV148
             .priorityHandoffs++;
 
+          v165ProtectedReplacementAddresses.add(
+            replacementAddressV148
+          );
+
+          if (
+            !terminalReplacementBudgetRecoveryV165
+              .protectedAddresses
+              .includes(replacementAddressV148)
+          ) {
+            terminalReplacementBudgetRecoveryV165
+              .protectedAddresses
+              .push(replacementAddressV148);
+          }
+
+          terminalReplacementBudgetRecoveryV165
+            .handoffChainCount++;
+
           topCandidateAnalysisDeferred =
             false;
 
@@ -24375,12 +24420,42 @@ async function scan(
       continue;
     }
 
-    if (
-      !budgetAvailable(
+    const v165AnalysisRemaining = Math.max(
+      0,
+      safeNumber(budget?.analysis?.limit) -
+        safeNumber(budget?.analysis?.used)
+    );
+
+    const v165TotalRemaining = Math.max(
+      0,
+      safeNumber(budget?.totalLimit) -
+        safeNumber(budget?.totalUsed)
+    );
+
+    const v165ResidualAllowance = Math.min(
+      v165AnalysisRemaining,
+      v165TotalRemaining
+    );
+
+    const v165ProtectedReplacement =
+      v165ProtectedReplacementAddresses.has(address);
+
+    const v165FullEstimateAffordable =
+      budgetAvailable(
         budget,
         "analysis",
         required
-      )
+      );
+
+    const v165BoundedReplacementAttempt =
+      !v165FullEstimateAffordable &&
+      v165ProtectedReplacement &&
+      v165ResidualAllowance >=
+        V165_MIN_BOUNDED_REPLACEMENT_REQUESTS;
+
+    if (
+      !v165FullEstimateAffordable &&
+      !v165BoundedReplacementAttempt
     ) {
       deferredAnalysis++;
 
@@ -24410,10 +24485,48 @@ async function scan(
           "FULL_ANALYSIS_BUDGET_PROTECTED",
 
         estimatedRequests:
-          required
+          required,
+
+        terminalReplacementBudgetRecoveryV165:
+          v165ProtectedReplacement
+            ? {
+                protected: true,
+                boundedAttemptEligible: false,
+                residualAllowance: v165ResidualAllowance,
+                minimumBoundedRequests:
+                  V165_MIN_BOUNDED_REPLACEMENT_REQUESTS
+              }
+            : null
       });
 
       continue;
+    }
+
+    const v165BudgetUsedBeforeCandidate =
+      safeNumber(budget?.analysis?.used);
+
+    if (
+      v165BoundedReplacementAttempt
+    ) {
+      terminalReplacementBudgetRecoveryV165
+        .boundedAttempts++;
+
+      terminalReplacementBudgetRecoveryV165
+        .candidates
+        .push({
+          address,
+          symbol:
+            watched?.metadata?.symbol ||
+            watched?.symbol ||
+            null,
+          estimatedRequests: required,
+          residualAllowanceBefore:
+            v165ResidualAllowance,
+          boundedAttempt: true,
+          actualAnalysisRequestsUsed: null,
+          candidateReturned: false,
+          analysisDeferred: null
+        });
     }
 
     const activity =
@@ -24487,6 +24600,36 @@ async function scan(
           liveMomentumActivityV152
         }
       );
+
+    if (
+      v165BoundedReplacementAttempt
+    ) {
+      const v165TelemetryRow =
+        terminalReplacementBudgetRecoveryV165
+          .candidates
+          .find(
+            row =>
+              row.address === address &&
+              row.actualAnalysisRequestsUsed === null
+          ) || null;
+
+      if (
+        v165TelemetryRow
+      ) {
+        v165TelemetryRow.actualAnalysisRequestsUsed =
+          Math.max(
+            0,
+            safeNumber(budget?.analysis?.used) -
+              v165BudgetUsedBeforeCandidate
+          );
+
+        v165TelemetryRow.candidateReturned =
+          Boolean(candidate);
+
+        v165TelemetryRow.analysisDeferred =
+          Boolean(candidate?.analysisDeferred);
+      }
+    }
 
     if (
       candidate.analysisDeferred
@@ -24864,6 +25007,23 @@ async function scan(
         v135TerminalPriorityHandoff
           .replacementInserted =
           true;
+
+        v165ProtectedReplacementAddresses.add(
+          replacementAddress
+        );
+
+        if (
+          !terminalReplacementBudgetRecoveryV165
+            .protectedAddresses
+            .includes(replacementAddress)
+        ) {
+          terminalReplacementBudgetRecoveryV165
+            .protectedAddresses
+            .push(replacementAddress);
+        }
+
+        terminalReplacementBudgetRecoveryV165
+          .handoffChainCount++;
 
         if (
           state?.priorityCandidateCompletion &&
@@ -26158,7 +26318,7 @@ async function scan(
     status,
 
     scanMode:
-      "V164_CORE_HOLDER_PROVIDER_DEFERRED_TELEMETRY_FIX_HUNTER",
+      "V165_CORE_TERMINAL_REPLACEMENT_BUDGET_RECOVERY_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -26842,7 +27002,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V164_HOLDER_PROVIDER_DEFERRED_TELEMETRY_FIX_DIRECTIONAL_USD_HUNTER",
+        "V165_TERMINAL_REPLACEMENT_BUDGET_RECOVERY_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -27037,6 +27197,8 @@ async function scan(
       prioritySource:
         "LOCAL_IS_PRIORITY_COMPLETION_V137"
     },
+
+    terminalReplacementBudgetRecoveryV165,
 
     excludedTargetHandoffV141,
 
@@ -29311,12 +29473,36 @@ async function scan(
       telegramThresholdsUnchangedV164:
         "ENABLED_V164",
 
+      terminalReplacementBudgetRecovery:
+        "ENABLED_V165",
+
+      sameRunTerminalReplacementResidualBudgetV165:
+        "ENABLED_V165",
+
+      boundedReplacementAnalysisUsesActualBudgetV165:
+        "ENABLED_V165",
+
+      terminalHandoffChainBudgetProtectionV165:
+        "ENABLED_V165",
+
+      hardRequestLimitUnchangedV165:
+        42,
+
+      analysisRequestLimitUnchangedV165:
+        21,
+
+      noExternalRequestRateIncreaseV165:
+        "ENABLED_V165",
+
+      telegramThresholdsUnchangedV165:
+        "ENABLED_V165",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V164_CORE_HOLDER_PROVIDER_DEFERRED_TELEMETRY_FIX_V77_TELEGRAM_HUNTER",
+      "V165_CORE_TERMINAL_REPLACEMENT_BUDGET_RECOVERY_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
