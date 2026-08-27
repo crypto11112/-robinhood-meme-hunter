@@ -1,10 +1,22 @@
 /**
  * Robinhood Chain Meme Hunter
- * V175
+ * V177
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V175
+ * CURRENT BUILD: V177
+ * - V177 adds verified 15m and 6h buy/sell windows from the existing GeckoTerminal directional-trade feed and rolling ledger
+ * - V177 adds 15m/6h verified buy USD, sell USD, net flow and USD buy pressure with no extrapolation
+ * - V177 makes no extra provider request per window; all five windows reuse the same trade batch / persistent ledger
+ * - V177 keeps incomplete coverage UNVERIFIED and preserves V176 request limits, cooldowns, Telegram reserve and thresholds
+ * - V176 persists unresolved high-value directional-USD targets across scans
+ * - V176 puts that target at the front of the next analysis queue while still watched
+ * - V176 clears the target as soon as verified directional USD is obtained
+ * - V176 never fabricates USD flow and never bypasses GeckoTerminal cooldown/429 protection
+ * - V176 adds no provider and keeps the 42-request hard ceiling, phase limits, Telegram reserve and thresholds unchanged
+ * - Preserves V175 early directional enrichment and all V174/V173 protections
+ *
+ * V175
  * - V175 prioritises verified directional USD trade enrichment before lower-priority analysis can exhaust the analysis budget
  * - V175 attempts the existing GeckoTerminal pool-trades feed immediately for strong viable candidates (opportunity >= 60, confidence >= 55, verified market/pool identity)
  * - V175 recomputes momentum/opportunity/confidence after verified USD flow is obtained, before Telegram qualification and snapshot persistence
@@ -645,7 +657,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V175";
+const VERSION = "V177";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -12567,6 +12579,14 @@ async function geckoDirectionalTradeFlow(
           ?.m5
       );
 
+    const directM15 =
+      geckoDirectionalWindow(
+        parsedTrades,
+        returnedCount,
+        15 * 60 * 1000,
+        null
+      );
+
     const directH1 =
       geckoDirectionalWindow(
         parsedTrades,
@@ -12575,6 +12595,14 @@ async function geckoDirectionalTradeFlow(
         market
           ?.transactions
           ?.h1
+      );
+
+    const directH6 =
+      geckoDirectionalWindow(
+        parsedTrades,
+        returnedCount,
+        6 * 60 * 60 * 1000,
+        null
       );
 
     const directH24 =
@@ -12613,6 +12641,17 @@ async function geckoDirectionalTradeFlow(
           )
         : null;
 
+    const rollingM15 =
+      ledgerUpdate
+        ?.ledger
+        ? rollingDirectionalWindow(
+            ledgerUpdate.ledger,
+            15 * 60 * 1000,
+            null,
+            requestAt
+          )
+        : null;
+
     const rollingH1 =
       ledgerUpdate
         ?.ledger
@@ -12622,6 +12661,17 @@ async function geckoDirectionalTradeFlow(
             market
               ?.transactions
               ?.h1,
+            requestAt
+          )
+        : null;
+
+    const rollingH6 =
+      ledgerUpdate
+        ?.ledger
+        ? rollingDirectionalWindow(
+            ledgerUpdate.ledger,
+            6 * 60 * 60 * 1000,
+            null,
             requestAt
           )
         : null;
@@ -12644,10 +12694,20 @@ async function geckoDirectionalTradeFlow(
         ? rollingM5
         : directM5;
 
+    const m15 =
+      rollingM15?.verified
+        ? rollingM15
+        : directM15;
+
     const h1 =
       rollingH1?.verified
         ? rollingH1
         : directH1;
+
+    const h6 =
+      rollingH6?.verified
+        ? rollingH6
+        : directH6;
 
     const h24 =
       rollingH24?.verified
@@ -12656,7 +12716,9 @@ async function geckoDirectionalTradeFlow(
 
     const verifiedAnyWindow =
       m5.verified ||
+      m15.verified ||
       h1.verified ||
+      h6.verified ||
       h24.verified;
 
     registerGeckoSuccess(
@@ -12743,7 +12805,9 @@ async function geckoDirectionalTradeFlow(
 
       windows: {
         m5,
+        m15,
         h1,
+        h6,
         h24
       }
     };
@@ -12802,7 +12866,9 @@ function applyDirectionalTradeFlow(
     const window
     of [
       "m5",
+      "m15",
       "h1",
+      "h6",
       "h24"
     ]
   ) {
@@ -12868,6 +12934,38 @@ function applyDirectionalTradeFlow(
           countCrossCheck:
             row.countCrossCheck
         };
+
+      /*
+       * V177: 15m and 6h do not exist in the normal DexScreener summary.
+       * When the individual-trade window itself has complete verified coverage,
+       * expose its real trade counts as transactions for Telegram/telemetry.
+       * No counts are guessed when coverage is incomplete.
+       */
+      if (
+        window === "m15" ||
+        window === "h6"
+      ) {
+        candidate.market.transactions =
+          candidate.market.transactions || {};
+
+        const total =
+          safeNumber(row.buys) +
+          safeNumber(row.sells);
+
+        candidate.market.transactions[window] = {
+          buys: safeNumber(row.buys),
+          sells: safeNumber(row.sells),
+          total,
+          buyPressure:
+            total > 0
+              ? (safeNumber(row.buys) / total) * 100
+              : 0,
+          directionalUsdVerified: true,
+          buyVolumeUsd: row.buyVolumeUsd,
+          sellVolumeUsd: row.sellVolumeUsd,
+          netFlowUsd: row.netFlowUsd
+        };
+      }
     }
   }
 
@@ -21472,11 +21570,23 @@ function telegramMessage(
       market.directionalFlow?.[window] ||
       {};
 
+    const derivedDirectionalWindow =
+      window === "m15" ||
+      window === "h6";
+
+    const verifiedDerivedCounts =
+      !derivedDirectionalWindow ||
+      flow?.verified === true;
+
     return {
       buys:
-        safeNumber(tx?.buys),
+        verifiedDerivedCounts
+          ? safeNumber(tx?.buys)
+          : "UNVERIFIED",
       sells:
-        safeNumber(tx?.sells),
+        verifiedDerivedCounts
+          ? safeNumber(tx?.sells)
+          : "UNVERIFIED",
       buyUsd:
         flow?.verified
           ? money(flow.buyVolumeUsd)
@@ -21523,8 +21633,14 @@ function telegramMessage(
   const trade5m =
     tradeWindow("m5");
 
+  const trade15m =
+    tradeWindow("m15");
+
   const trade1h =
     tradeWindow("h1");
+
+  const trade6h =
+    tradeWindow("h6");
 
   const trade24h =
     tradeWindow("h24");
@@ -21554,11 +21670,23 @@ function telegramMessage(
     `📈 5m Net Flow: <b>${trade5m.netUsd}</b>`,
     `💵 5m USD Buy Pressure: <b>${trade5m.pressureUsd}</b>`,
     "",
+    `🟢 15m Buys: <b>${trade15m.buys}</b> — <b>${trade15m.buyUsd}</b>`,
+    `🔴 15m Sells: <b>${trade15m.sells}</b> — <b>${trade15m.sellUsd}</b>`,
+    `📈 15m Net Flow: <b>${trade15m.netUsd}</b>`,
+    `🟢 15m Buy Pressure: <b>${trade15m.pressure}</b>`,
+    `💵 15m USD Buy Pressure: <b>${trade15m.pressureUsd}</b>`,
+    "",
     `🟢 1h Buys: <b>${trade1h.buys}</b> — <b>${trade1h.buyUsd}</b>`,
     `🔴 1h Sells: <b>${trade1h.sells}</b> — <b>${trade1h.sellUsd}</b>`,
     `📈 1h Net Flow: <b>${trade1h.netUsd}</b>`,
     `🟢 1h Buy Pressure: <b>${trade1h.pressure}</b>`,
     `💵 1h USD Buy Pressure: <b>${trade1h.pressureUsd}</b>`,
+    "",
+    `🟢 6h Buys: <b>${trade6h.buys}</b> — <b>${trade6h.buyUsd}</b>`,
+    `🔴 6h Sells: <b>${trade6h.sells}</b> — <b>${trade6h.sellUsd}</b>`,
+    `📈 6h Net Flow: <b>${trade6h.netUsd}</b>`,
+    `🟢 6h Buy Pressure: <b>${trade6h.pressure}</b>`,
+    `💵 6h USD Buy Pressure: <b>${trade6h.pressureUsd}</b>`,
     "",
     `🟢 24h Buys: <b>${trade24h.buys}</b> — <b>${trade24h.buyUsd}</b>`,
     `🔴 24h Sells: <b>${trade24h.sells}</b> — <b>${trade24h.sellUsd}</b>`,
@@ -24436,6 +24564,25 @@ async function scan(
   }
 
   /*
+   * V176:
+   * Persist unresolved directional-USD completion across scans. This changes
+   * analysis ordering only; it creates no extra request and bypasses no
+   * provider/rate-limit guard.
+   */
+  const pendingDirectionalUsdAddressV176 =
+    normalize(state?.directionalUsdPriorityV176?.address);
+
+  const pendingDirectionalUsdTokenV176 =
+    pendingDirectionalUsdAddressV176
+      ? (
+          state.watchedTokens.find(
+            token =>
+              normalize(token?.address) === pendingDirectionalUsdAddressV176
+          ) || null
+        )
+      : null;
+
+  /*
    * V133:
    * The fresh-market / priority-completion target is the candidate the bot
    * has already decided is most important to finish. Analyse it before lower
@@ -24446,6 +24593,11 @@ async function scan(
     carriedAnalysisTargetV159
       ? uniqueBy(
           [
+            ...(
+              pendingDirectionalUsdTokenV176
+                ? [pendingDirectionalUsdTokenV176]
+                : []
+            ),
             ...(
               (
                 freshMarketSlotHandoffV159
@@ -25934,6 +26086,41 @@ async function scan(
         rollingLedger: earlyEnrichmentV175?.rollingLedger || null,
         candidateQualifiesAfterEnrichment: qualifiesTelegram(candidate)
       };
+
+      /* V176 persistent directional-USD completion lane. */
+      if (earlyEnrichmentV175?.verifiedAnyWindow === true) {
+        if (
+          normalize(state?.directionalUsdPriorityV176?.address) ===
+            normalize(candidate.address)
+        ) {
+          state.directionalUsdPriorityV176 = null;
+        }
+      } else {
+        const sameDirectionalTargetV176 =
+          normalize(state?.directionalUsdPriorityV176?.address) ===
+            normalize(candidate.address);
+
+        state.directionalUsdPriorityV176 = {
+          address: normalize(candidate.address),
+          symbol: candidate.symbol || null,
+          firstQueuedAt:
+            sameDirectionalTargetV176
+              ? (
+                  safeNumber(state?.directionalUsdPriorityV176?.firstQueuedAt) ||
+                  Date.now()
+                )
+              : Date.now(),
+          lastQueuedAt: Date.now(),
+          lastStatus: earlyEnrichmentV175?.status || "UNVERIFIED",
+          attempts:
+            (sameDirectionalTargetV176
+              ? safeNumber(state?.directionalUsdPriorityV176?.attempts)
+              : 0) +
+            (earlyEnrichmentV175?.attempted === true ? 1 : 0),
+          verifiedAnyWindow: false,
+          strictUsdVerificationPreserved: true
+        };
+      }
     }
 
     saveSnapshot(
@@ -27623,7 +27810,7 @@ async function scan(
     status,
 
     scanMode:
-      "V175_EARLY_VERIFIED_DIRECTIONAL_USD_PRIORITY_HUNTER",
+      "V177_15M_6H_VERIFIED_DIRECTIONAL_WINDOWS_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -31148,12 +31335,49 @@ async function scan(
       telegramThresholdsUnchangedV175:
         "ENABLED_V175",
 
+      persistentDirectionalUsdCompletion:
+        "ENABLED_V176",
+
+
+      directional15mAnd6hWindowsV177:
+        "ENABLED_V177",
+
+      verified15m6hUsdFlowV177:
+        "ENABLED_V177",
+
+      derivedWindowsReuseExistingGeckoBatchV177:
+        "ENABLED_V177",
+
+      incomplete15m6hCoverageRemainsUnverifiedV177:
+        "ENABLED_V177",
+
+      noExtraWindowRequestsV177:
+        "ENABLED_V177",
+
+      unresolvedDirectionalTargetNextScanPriorityV176:
+        "ENABLED_V176",
+
+      verifiedDirectionalUsdClearsPersistentTargetV176:
+        "ENABLED_V176",
+
+      geckoCooldownAnd429ProtectionsUnchangedV176:
+        "ENABLED_V176",
+
+      oneGeckoFreshPerScanUnchangedV176:
+        "ENABLED_V176",
+
+      hardRequestLimitUnchangedV176:
+        MAX_EXTERNAL_REQUESTS,
+
+      telegramThresholdsUnchangedV176:
+        "ENABLED_V176",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V175_EARLY_VERIFIED_DIRECTIONAL_USD_PRIORITY_V77_TELEGRAM_HUNTER",
+      "V177_15M_6H_VERIFIED_DIRECTIONAL_WINDOWS_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
