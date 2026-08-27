@@ -1,8 +1,14 @@
 /**
  * Robinhood Chain Meme Hunter
- * V161
+ * V163
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
+ *
+ * V163:
+ * - HOTFIX: holderIntegrityReconciliationV162 now calls validateHolderIntegrity directly
+ * - HOTFIX: real holder-analysis path now executes V162 reconciliation helper
+ * - Preserves V162 structural-invalid quarantine and exact safety semantics
+ * - No scoring, Telegram-threshold, request-budget or external-rate changes
  *
  * V162:
  * - Strict holder-integrity reconciliation telemetry
@@ -583,7 +589,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V162";
+const VERSION = "V163";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -14530,12 +14536,9 @@ function holderIntegrityReconciliationV162(
   duplicateHolderRowsRemoved = 0
 ) {
   const integrity =
-    holderIntegrityReconciliationV162(
+    validateHolderIntegrity(
       items,
-      totalSupply,
-      token,
-      verifiedPairAddress,
-      duplicateHolderRowsRemoved
+      totalSupply
     );
 
   let supply = null;
@@ -15816,9 +15819,12 @@ async function holderIntelligence(
     );
 
   const integrity =
-    validateHolderIntegrity(
+    holderIntegrityReconciliationV162(
       items,
-      totalSupply
+      totalSupply,
+      token,
+      verifiedPairAddress,
+      duplicateHolderRowsRemoved
     );
 
   if (
@@ -26117,7 +26123,7 @@ async function scan(
     status,
 
     scanMode:
-      "V162_CORE_STRICT_HOLDER_INTEGRITY_RECONCILIATION_HUNTER",
+      "V163_CORE_HOLDER_RECONCILIATION_HOTFIX_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -26801,7 +26807,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V162_STRICT_HOLDER_INTEGRITY_RECONCILIATION_DIRECTIONAL_USD_HUNTER",
+        "V163_HOLDER_RECONCILIATION_HOTFIX_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -29240,12 +29246,27 @@ async function scan(
       telegramThresholdsUnchangedV162:
         "ENABLED_V162",
 
+      holderReconciliationRecursionHotfix:
+        "FIXED_V163",
+
+      holderAnalysisUsesReconciliationHelperV163:
+        "ENABLED_V163",
+
+      holderIntegrityQuarantineUnchangedV163:
+        "ENABLED_V163",
+
+      noExternalRequestRateIncreaseV163:
+        "ENABLED_V163",
+
+      telegramThresholdsUnchangedV163:
+        "ENABLED_V163",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V162_CORE_STRICT_HOLDER_INTEGRITY_RECONCILIATION_V77_TELEGRAM_HUNTER",
+      "V163_CORE_HOLDER_RECONCILIATION_HOTFIX_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
