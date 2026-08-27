@@ -826,8 +826,8 @@ const POOL_MANAGER =
 const BITQUERY_GRAPHQL_V2 =
   "https://streaming.bitquery.io/graphql";
 
-const UNISWAP_V3_FACTORY_V195_ENV =
-  "UNISWAP_V3_FACTORY";
+const UNISWAP_V3_FACTORY_V195 =
+  "0x1f7d7550b1b028f7571e69a784071f0205fd2efa";
 
 const V3_STANDARD_FEES_V195 = [
   100,
@@ -10797,9 +10797,7 @@ async function getV3WethUsdGReferenceV195(
 ) {
   const factory =
     normalize(
-      env[
-        UNISWAP_V3_FACTORY_V195_ENV
-      ]
+      UNISWAP_V3_FACTORY_V195
     );
 
   const base = {
@@ -29834,9 +29832,7 @@ async function scan(
           configured:
             Boolean(
               normalize(
-                env[
-                  UNISWAP_V3_FACTORY_V195_ENV
-                ]
+                UNISWAP_V3_FACTORY_V195
               )
             ),
           verified: false,
@@ -38083,8 +38079,11 @@ async function scan(
       uniswapV3CanonicalWethUsdGReferenceV195:
         "ENABLED_V195",
 
-      uniswapV3FactoryEnvNameV195:
-        "UNISWAP_V3_FACTORY",
+      uniswapV3FactoryAddressV195:
+        UNISWAP_V3_FACTORY_V195,
+
+      uniswapV3FactoryConfigurationV195:
+        "HARDCODED_VERIFIED_PUBLIC_DEPLOYMENT",
 
       uniswapV3StandardFeeTiersV195:
         "100,500,3000,10000",
