@@ -4,6 +4,14 @@
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
+ * V162:
+ * - Strict holder-integrity reconciliation telemetry
+ * - Same-address duplicate holder rows can be reconciled deterministically
+ * - TOP_HOLDERS_EXCEED_TOTAL_SUPPLY remains UNVERIFIED unless math reconciles
+ * - Known infrastructure is diagnostic only and never subtracted to force validity
+ * - 5-minute structural-invalid holder quarantine reduces repeated API waste
+ * - No guessed/rescaled balances and no extra normal external request rate
+ *
  * V117:
  * - Builds directly forward from confirmed V116
  * - Preserves V116 priority-candidate persistence and fresh-request scheduling
@@ -575,7 +583,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V161";
+const VERSION = "V162";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -644,6 +652,9 @@ const BLOCKSCOUT_PRO_OUTAGE_COOLDOWN_MS_V145 =
   10 * 60 * 1000;
 
 const BLOCKSCOUT_PRO_404_RETRY_MS_V146 =
+  5 * 60 * 1000;
+
+const HOLDER_INTEGRITY_RETRY_MS_V162 =
   5 * 60 * 1000;
 
 const POOL_MANAGER =
@@ -14506,6 +14517,356 @@ function validateHolderIntegrity(
   };
 }
 
+
+/* =========================================================
+   HOLDER INTEGRITY RECONCILIATION — V162
+   ========================================================= */
+
+function holderIntegrityReconciliationV162(
+  items,
+  totalSupply,
+  token,
+  verifiedPairAddress,
+  duplicateHolderRowsRemoved = 0
+) {
+  const integrity =
+    holderIntegrityReconciliationV162(
+      items,
+      totalSupply,
+      token,
+      verifiedPairAddress,
+      duplicateHolderRowsRemoved
+    );
+
+  let supply = null;
+  let holderBalanceSum = null;
+
+  try {
+    supply =
+      BigInt(
+        String(
+          totalSupply
+        )
+      );
+  } catch {}
+
+  try {
+    holderBalanceSum =
+      BigInt(
+        String(
+          integrity?.topHolderBalanceSum ||
+          "0"
+        )
+      );
+  } catch {}
+
+  let knownInfrastructureBalanceSum =
+    0n;
+
+  let knownInfrastructureRows =
+    0;
+
+  const infrastructureReasons =
+    [];
+
+  for (
+    const item
+    of Array.isArray(items)
+      ? items
+      : []
+  ) {
+    const address =
+      normalize(
+        extractHolderAddress(
+          item
+        )
+      );
+
+    const reason =
+      infrastructureHolderReason(
+        address,
+        normalize(token),
+        normalize(
+          verifiedPairAddress ||
+          ""
+        ) || null
+      );
+
+    if (!reason) {
+      continue;
+    }
+
+    let value = 0n;
+
+    try {
+      value =
+        BigInt(
+          extractHolderValue(
+            item
+          )
+        );
+    } catch {}
+
+    if (value > 0n) {
+      knownInfrastructureRows++;
+      knownInfrastructureBalanceSum +=
+        value;
+
+      if (
+        !infrastructureReasons.includes(
+          reason
+        )
+      ) {
+        infrastructureReasons.push(
+          reason
+        );
+      }
+    }
+  }
+
+  let excessBalance = null;
+  let excessPercent = null;
+
+  if (
+    supply !== null &&
+    holderBalanceSum !== null &&
+    supply > 0n &&
+    holderBalanceSum > supply
+  ) {
+    excessBalance =
+      holderBalanceSum -
+      supply;
+
+    excessPercent =
+      Number(
+        excessBalance *
+          100000000n /
+          supply
+      ) /
+      1000000;
+  }
+
+  const duplicateAddressRepairProven =
+    duplicateHolderRowsRemoved > 0 &&
+    integrity.verified === true;
+
+  const unresolvedStructuralExcess =
+    integrity.status ===
+      "TOP_HOLDERS_EXCEED_TOTAL_SUPPLY";
+
+  return {
+    ...integrity,
+
+    reconciliationV162: {
+      enabled:
+        true,
+
+      duplicateHolderRowsRemoved:
+        Math.max(
+          0,
+          safeNumber(
+            duplicateHolderRowsRemoved
+          )
+        ),
+
+      duplicateAddressRepairProven,
+
+      knownInfrastructureRows,
+
+      knownInfrastructureBalanceSum:
+        knownInfrastructureBalanceSum
+          .toString(),
+
+      infrastructureReasons,
+
+      excessBalance:
+        excessBalance !== null
+          ? excessBalance.toString()
+          : null,
+
+      excessPercent,
+
+      possibleInfrastructureOverlap:
+        Boolean(
+          unresolvedStructuralExcess &&
+          excessBalance !== null &&
+          excessBalance > 0n &&
+          knownInfrastructureBalanceSum >=
+            excessBalance
+        ),
+
+      independentlyReconciled:
+        integrity.verified === true,
+
+      concentrationPromotionAllowed:
+        integrity.verified === true,
+
+      unresolvedStructuralExcess,
+
+      classification:
+        duplicateAddressRepairProven
+          ? "DUPLICATE_ADDRESS_ROWS_RECONCILED"
+          : unresolvedStructuralExcess
+            ? "STRUCTURAL_EXCESS_UNRESOLVED"
+            : integrity.verified
+              ? "NO_RECONCILIATION_REQUIRED"
+              : integrity.status,
+
+      guessedOrRescaledBalances:
+        false
+    }
+  };
+}
+
+function cachedHolderIntegrityQuarantineV162(
+  watched,
+  verifiedPairAddress = null
+) {
+  const cache =
+    watched?.holderIntegrityQuarantineV162;
+
+  if (
+    !cache ||
+    typeof cache !==
+      "object"
+  ) {
+    return null;
+  }
+
+  const timestamp =
+    safeNumber(
+      cache.timestamp
+    );
+
+  if (
+    !timestamp ||
+    Date.now() - timestamp >
+      HOLDER_INTEGRITY_RETRY_MS_V162
+  ) {
+    return null;
+  }
+
+  const cachedPairBasis =
+    normalize(
+      cache.verifiedPairAddress ||
+      ""
+    ) || null;
+
+  const currentPairBasis =
+    normalize(
+      verifiedPairAddress ||
+      ""
+    ) || null;
+
+  if (
+    cachedPairBasis !==
+      currentPairBasis
+  ) {
+    return null;
+  }
+
+  if (
+    cache?.data?.integrity?.status !==
+      "TOP_HOLDERS_EXCEED_TOTAL_SUPPLY"
+  ) {
+    return null;
+  }
+
+  return {
+    ...cache.data,
+
+    verified:
+      Boolean(
+        cache.data?.countersVerified
+      ),
+
+    concentrationVerified:
+      false,
+
+    holderSource:
+      `INTEGRITY_QUARANTINE_V162:${cache.source || "UNKNOWN"}`,
+
+    holderIntegrityQuarantineV162: {
+      reused:
+        true,
+      originalSource:
+        cache.source ||
+        null,
+      cachedAt:
+        timestamp,
+      cacheAgeMs:
+        Date.now() -
+        timestamp,
+      retryAt:
+        timestamp +
+        HOLDER_INTEGRITY_RETRY_MS_V162,
+      retryAfterMs:
+        Math.max(
+          0,
+          timestamp +
+            HOLDER_INTEGRITY_RETRY_MS_V162 -
+            Date.now()
+        ),
+      concentrationStillUnverified:
+        true,
+      promotionAllowed:
+        false
+    }
+  };
+}
+
+function saveHolderIntegrityQuarantineV162(
+  watched,
+  data,
+  holderSource,
+  verifiedPairAddress = null
+) {
+  if (
+    !watched ||
+    !data ||
+    data?.integrity?.status !==
+      "TOP_HOLDERS_EXCEED_TOTAL_SUPPLY"
+  ) {
+    return;
+  }
+
+  watched.holderIntegrityQuarantineV162 = {
+    timestamp:
+      Date.now(),
+
+    source:
+      holderSource ||
+      null,
+
+    verifiedPairAddress:
+      normalize(
+        verifiedPairAddress ||
+        ""
+      ) || null,
+
+    data: {
+      ...data,
+      concentrationVerified:
+        false,
+      holderSource:
+        holderSource ||
+        data.holderSource ||
+        null
+    }
+  };
+}
+
+function clearHolderIntegrityQuarantineV162(
+  watched
+) {
+  if (
+    watched &&
+    watched.holderIntegrityQuarantineV162
+  ) {
+    delete watched.holderIntegrityQuarantineV162;
+  }
+}
+
 function unverifiedHolders(
   reason =
     "NOT_VERIFIED"
@@ -14939,6 +15300,18 @@ async function holderIntelligence(
     partialHolderStateV149
   ) {
     return partialHolderStateV149;
+  }
+
+  const holderIntegrityQuarantineV162 =
+    cachedHolderIntegrityQuarantineV162(
+      watched,
+      verifiedPairAddress
+    );
+
+  if (
+    holderIntegrityQuarantineV162
+  ) {
+    return holderIntegrityQuarantineV162;
   }
 
   /*
@@ -15459,7 +15832,7 @@ async function holderIntelligence(
   if (
     !integrity.verified
   ) {
-    return {
+    const unresolvedIntegrityResultV162 = {
       verified:
         countersVerified,
 
@@ -15516,9 +15889,38 @@ async function holderIntelligence(
 
         reason:
           integrity.status
+      },
+
+      holderIntegrityQuarantineV162: {
+        reused:
+          false,
+        retryMs:
+          HOLDER_INTEGRITY_RETRY_MS_V162,
+        concentrationStillUnverified:
+          true,
+        promotionAllowed:
+          false
       }
     };
+
+    if (
+      integrity.status ===
+        "TOP_HOLDERS_EXCEED_TOTAL_SUPPLY"
+    ) {
+      saveHolderIntegrityQuarantineV162(
+        watched,
+        unresolvedIntegrityResultV162,
+        holderSource,
+        verifiedPairAddress
+      );
+    }
+
+    return unresolvedIntegrityResultV162;
   }
+
+  clearHolderIntegrityQuarantineV162(
+    watched
+  );
 
   let supply;
 
@@ -25715,7 +26117,7 @@ async function scan(
     status,
 
     scanMode:
-      "V161_CORE_FRESH_MARKET_RESERVATION_SYNC_HUNTER",
+      "V162_CORE_STRICT_HOLDER_INTEGRITY_RECONCILIATION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -26399,7 +26801,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V161_FRESH_MARKET_RESERVATION_SYNC_DIRECTIONAL_USD_HUNTER",
+        "V162_STRICT_HOLDER_INTEGRITY_RECONCILIATION_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -26720,6 +27122,100 @@ async function scan(
           0,
           10
         )
+    },
+
+    holderIntegrityReconciliationV162: {
+      enabled:
+        true,
+      retryMs:
+        HOLDER_INTEGRITY_RETRY_MS_V162,
+      duplicateAddressRepairOnly:
+        true,
+      infrastructureNeverSubtractedToForceValidity:
+        true,
+      guessedOrRescaledBalances:
+        false,
+      concentrationPromotionRequiresReconciledMath:
+        true,
+      activeQuarantines: state.watchedTokens
+        .map(
+          watched => {
+            const cache =
+              watched?.holderIntegrityQuarantineV162;
+
+            if (
+              !cache ||
+              typeof cache !==
+                "object"
+            ) {
+              return null;
+            }
+
+            const timestamp =
+              safeNumber(
+                cache.timestamp
+              );
+
+            if (
+              !timestamp ||
+              Date.now() - timestamp >
+                HOLDER_INTEGRITY_RETRY_MS_V162
+            ) {
+              return null;
+            }
+
+            return {
+              address:
+                normalize(
+                  watched.address
+                ),
+              symbol:
+                watched?.metadata?.symbol ||
+                watched?.symbol ||
+                null,
+              source:
+                cache.source ||
+                null,
+              status:
+                cache?.data?.integrity?.status ||
+                null,
+              percentageSum:
+                cache?.data?.integrity?.percentageSum ??
+                null,
+              excessPercent:
+                cache?.data?.integrity
+                  ?.reconciliationV162
+                  ?.excessPercent ??
+                null,
+              duplicateHolderRowsRemoved:
+                cache?.data?.integrity
+                  ?.reconciliationV162
+                  ?.duplicateHolderRowsRemoved ??
+                0,
+              knownInfrastructureRows:
+                cache?.data?.integrity
+                  ?.reconciliationV162
+                  ?.knownInfrastructureRows ??
+                0,
+              independentlyReconciled:
+                false,
+              promotionAllowed:
+                false,
+              retryAt:
+                timestamp +
+                HOLDER_INTEGRITY_RETRY_MS_V162,
+              retryAfterMs:
+                Math.max(
+                  0,
+                  timestamp +
+                    HOLDER_INTEGRITY_RETRY_MS_V162 -
+                    Date.now()
+                )
+            };
+          }
+        )
+        .filter(Boolean)
+        .slice(0, 10)
     },
 
     holderProviderTelemetryV144,
@@ -28714,12 +29210,42 @@ async function scan(
       telegramThresholdsUnchangedV161:
         "ENABLED_V161",
 
+      strictHolderIntegrityReconciliation:
+        "ENABLED_V162",
+
+      duplicateAddressHolderRepairTelemetryV162:
+        "ENABLED_V162",
+
+      topHoldersExceedSupplyQuarantineV162:
+        "ENABLED_V162",
+
+      holderIntegrityRetryMsV162:
+        HOLDER_INTEGRITY_RETRY_MS_V162,
+
+      infrastructureNeverSubtractedToForceValidityV162:
+        "ENABLED_V162",
+
+      holderBalanceGuessingDisabledV162:
+        "ENABLED_V162",
+
+      concentrationPromotionRequiresReconciledMathV162:
+        "ENABLED_V162",
+
+      freshMarketReservationSyncUnchangedV162:
+        "ENABLED_V162",
+
+      noExternalRequestRateIncreaseV162:
+        "ENABLED_V162",
+
+      telegramThresholdsUnchangedV162:
+        "ENABLED_V162",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V161_CORE_FRESH_MARKET_RESERVATION_SYNC_V77_TELEGRAM_HUNTER",
+      "V162_CORE_STRICT_HOLDER_INTEGRITY_RECONCILIATION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
