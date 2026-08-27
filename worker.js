@@ -1,10 +1,17 @@
 /**
  * Robinhood Chain Meme Hunter
- * V184
+ * V185
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V184
+ * CURRENT BUILD: V185
+ * - V185 fixes a local pool-registry expiry weakness found while investigating UNKNOWN_POOL_IDENTITY
+ * - Existing pool mappings were retained for only 48 hours from lastSeenAt; active Swap/ModifyLiquidity logs did not refresh that timestamp
+ * - V185 refreshes a known pool mapping whenever the normal live/backlog scan sees Swap or ModifyLiquidity activity for that pool
+ * - Extends inactive pool-registry retention from 48 hours to 30 days, still capped at the existing 2,500 mappings
+ * - Initialize events already collected by live/backlog discovery continue to register canonically with zero extra requests
+ * - Adds telemetry for same-run pool-registry activity refreshes and Initialize-based unknown-tracker recovery
+ * - No external requests are added; V184 Blockscout resolver remains fallback-only and all request ceilings/Telegram/USD verification rules stay unchanged
  * - V184 attacks the current UNKNOWN_POOL_IDENTITY bottleneck directly
  * - Adds one budgeted wide exact-pool Blockscout Initialize lookup per scan for the highest-priority unresolved V4 pool
  * - Exact topic0+topic1 filtering lets the resolver search far behind first activity without walking backward 10 Alchemy blocks at a time
@@ -691,7 +698,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V184";
+const VERSION = "V185";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1176,7 +1183,7 @@ const MAX_WATCHED_TOKENS = 50;
 
 /* V91: retain pool->token mappings beyond the 50-token watchlist. */
 const POOL_REGISTRY_MAX_AGE =
-  48 * 60 * 60 * 1000;
+  30 * 24 * 60 * 60 * 1000;
 
 const MAX_POOL_REGISTRY = 2500;
 
@@ -3246,8 +3253,17 @@ function registerPoolMapping(
     );
 
   if (!poolId) {
-    return;
+    return {
+      registered: false,
+      recoveredUnknownTracker:
+        false
+    };
   }
+
+  const recoveredUnknownTracker =
+    Boolean(
+      state.unknownPools?.[poolId]
+    );
 
   state.poolRegistry =
     state.poolRegistry &&
@@ -3270,7 +3286,11 @@ function registerPoolMapping(
       );
 
   if (!tokens.length) {
-    return;
+    return {
+      registered: false,
+      recoveredUnknownTracker:
+        false
+    };
   }
 
   state.poolRegistry[
@@ -3290,6 +3310,127 @@ function registerPoolMapping(
     transactionHash:
       pool.transactionHash ||
       null
+  };
+
+  if (
+    recoveredUnknownTracker &&
+    state.unknownPools
+  ) {
+    delete state.unknownPools[
+      poolId
+    ];
+  }
+
+  return {
+    registered: true,
+    recoveredUnknownTracker
+  };
+}
+
+function refreshKnownPoolActivityV185(
+  state,
+  logs
+) {
+  state.poolRegistry =
+    state.poolRegistry &&
+    typeof state.poolRegistry ===
+      "object"
+      ? state.poolRegistry
+      : {};
+
+  const now =
+    Date.now();
+
+  const refreshedPoolIds =
+    new Set();
+
+  for (
+    const log
+    of logs || []
+  ) {
+    const topic0 =
+      normalize(
+        log?.topics?.[0]
+      );
+
+    if (
+      topic0 !== SWAP_TOPIC &&
+      topic0 !== MODIFY_LIQUIDITY_TOPIC
+    ) {
+      continue;
+    }
+
+    const poolId =
+      normalize(
+        log?.topics?.[1]
+      );
+
+    const entry =
+      poolId
+        ? state.poolRegistry?.[
+            poolId
+          ]
+        : null;
+
+    if (!entry) {
+      continue;
+    }
+
+    entry.lastSeenAt =
+      now;
+
+    let blockNumber =
+      null;
+
+    try {
+      blockNumber =
+        Number(
+          BigInt(
+            log?.blockNumber ||
+            "0x0"
+          )
+        ) || null;
+    } catch {
+      blockNumber =
+        null;
+    }
+
+    if (
+      blockNumber &&
+      (
+        !safeNumber(
+          entry.lastActivityBlock
+        ) ||
+        blockNumber >
+          safeNumber(
+            entry.lastActivityBlock
+          )
+      )
+    ) {
+      entry.lastActivityBlock =
+        blockNumber;
+    }
+
+    entry.lastActivitySourceV185 =
+      "NORMAL_DISCOVERY_LOG";
+
+    refreshedPoolIds.add(
+      poolId
+    );
+  }
+
+  return {
+    enabled: true,
+    zeroExtraRequests: true,
+    refreshedMappings:
+      refreshedPoolIds.size,
+    refreshedPoolIds:
+      [
+        ...refreshedPoolIds
+      ].slice(
+        0,
+        25
+      )
   };
 }
 
@@ -10783,6 +10924,15 @@ function processDiscoveryLogs(
   let liquidityTopicMatches =
     0;
 
+  let initializeRecoveredUnknownPoolsV185 =
+    0;
+
+  const poolRegistryActivityV185 =
+    refreshKnownPoolActivityV185(
+      state,
+      logs
+    );
+
   for (
     const log
     of logs
@@ -10817,10 +10967,19 @@ function processDiscoveryLogs(
 
     initializeEvents++;
 
-    registerPoolMapping(
-      state,
-      pool
-    );
+    const registrationV185 =
+      registerPoolMapping(
+        state,
+        pool
+      );
+
+    if (
+      registrationV185
+        ?.recoveredUnknownTracker ===
+        true
+    ) {
+      initializeRecoveredUnknownPoolsV185++;
+    }
 
     for (
       const address
@@ -10881,6 +11040,10 @@ function processDiscoveryLogs(
     swapTopicMatches,
 
     liquidityTopicMatches,
+
+    initializeRecoveredUnknownPoolsV185,
+
+    poolRegistryActivityV185,
 
     newTokens,
 
@@ -26660,6 +26823,7 @@ async function scan(
     toBlock: null,
     logs: 0,
     initializeEvents: 0,
+    recoveredUnknownPoolsV185: 0,
     provider: null,
     error: null
   };
@@ -26691,8 +26855,23 @@ async function scan(
     for (const log of lookback.logs) {
       const pool = decodeInitialize(log);
       if (!pool) continue;
-      registerPoolMapping(state, pool);
+
+      const registrationV185 =
+        registerPoolMapping(
+          state,
+          pool
+        );
+
       liveInitializeLookback.initializeEvents++;
+
+      if (
+        registrationV185
+          ?.recoveredUnknownTracker ===
+          true
+      ) {
+        liveInitializeLookback
+          .recoveredUnknownPoolsV185++;
+      }
     }
   } else if (
     live.from > 0n &&
@@ -30927,7 +31106,7 @@ async function scan(
     status,
 
     scanMode:
-      "V184_WIDE_EXACT_INITIALIZE_RESOLVER_HUNTER",
+      "V185_ACTIVE_POOL_REGISTRY_RETENTION_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -31550,6 +31729,46 @@ async function scan(
       Object.keys(
         state.poolRegistry || {}
       ).length,
+
+    poolRegistryRetentionV185: {
+      enabled: true,
+      maxAgeMs:
+        POOL_REGISTRY_MAX_AGE,
+      maxAgeDays: 30,
+      maxMappings:
+        MAX_POOL_REGISTRY,
+      activityRefreshFromNormalLogs:
+        true,
+      zeroExtraRequests:
+        true,
+      liveRefreshedMappings:
+        safeNumber(
+          liveDiscovery
+            ?.poolRegistryActivityV185
+            ?.refreshedMappings
+        ),
+      backlogRefreshedMappings:
+        safeNumber(
+          backlogDiscovery
+            ?.poolRegistryActivityV185
+            ?.refreshedMappings
+        ),
+      liveInitializeRecoveredUnknownPools:
+        safeNumber(
+          liveDiscovery
+            ?.initializeRecoveredUnknownPoolsV185
+        ),
+      backlogInitializeRecoveredUnknownPools:
+        safeNumber(
+          backlogDiscovery
+            ?.initializeRecoveredUnknownPoolsV185
+        ),
+      lookbackInitializeRecoveredUnknownPools:
+        safeNumber(
+          liveInitializeLookback
+            ?.recoveredUnknownPoolsV185
+        )
+    },
 
     unknownPoolTrackerCount:
       Object.keys(
@@ -34707,12 +34926,45 @@ async function scan(
       telegramThresholdsUnchangedV184:
         "ENABLED_V184",
 
+      activePoolRegistryRetention:
+        "ENABLED_V185",
+
+      poolRegistryRetentionDaysV185:
+        30,
+
+      poolRegistryActivityRefreshFromSwapAndLiquidityV185:
+        "ENABLED_V185",
+
+      initializeClearsUnknownTrackerV185:
+        "ENABLED_V185",
+
+      initializeHarvestFromExistingLiveAndBacklogV185:
+        "ENABLED_V185",
+
+      extraExternalRequestsForRegistryRetentionV185:
+        0,
+
+      maxPoolRegistryUnchangedV185:
+        2500,
+
+      v184WideResolverPreservedAsFallbackV185:
+        "ENABLED_V185",
+
+      hardRequestLimitUnchangedV185:
+        42,
+
+      analysisRequestLimitUnchangedV185:
+        21,
+
+      telegramThresholdsUnchangedV185:
+        "ENABLED_V185",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V184_WIDE_EXACT_INITIALIZE_RESOLVER_V77_TELEGRAM_HUNTER",
+      "V185_ACTIVE_POOL_REGISTRY_RETENTION_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
