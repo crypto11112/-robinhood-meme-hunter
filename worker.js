@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V158
+ * V159
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
@@ -552,8 +552,22 @@
  *   verified USD flow can remove the cap automatically
  * - Existing Telegram thresholds remain exactly 60 / 59 / $1000 / 55
  * - No new external requests and no request-rate changes
+
+ *
+ * V159:
+ * - Preserves full V158 evidence-quality protection and all prior safety gates
+ * - NEW: a carried priority candidate with a fresh usable VERIFIED market cache
+ *   no longer monopolizes the scarce fresh-market request slot
+ * - NEW: only the fresh-market reservation is handed to the next highest-ranked
+ *   viable candidate that still needs market verification
+ * - The carried retry candidate remains first in analysis and retains priority
+ *   holder/risk completion so unresolved evidence continues to be worked
+ * - V139 fairness, V141/V148 handoffs and V150 terminal guards remain intact
+ * - Dex fresh spacing remains 5 minutes; Gecko remains max one fresh per scan
+ * - Existing Telegram thresholds remain exactly 60 / 59 / $1000 / 55
+ * - No increase to normal external request rate
 */
-const VERSION = "V158";
+const VERSION = "V159";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -20653,6 +20667,7 @@ async function analyzeToken(
           options?.marketFreshEligible
         ),
         Boolean(
+          options?.marketPriority ??
           options?.priorityCompletion
         )
       );
@@ -20699,6 +20714,7 @@ async function analyzeToken(
         watched,
         market,
         Boolean(
+          options?.holderPriorityCompletion ??
           options?.priorityCompletion
         ),
         env,
@@ -21535,6 +21551,38 @@ function verifiedUsableMarketCache(
   }
 
   return true;
+}
+
+/*
+ * V159: A verified market cache only frees the scarce fresh slot while it is
+ * still inside the normal verified market-cache TTL. Stale verified data can
+ * remain useful for analysis, but it must not suppress a needed refresh.
+ */
+function freshUsableVerifiedMarketCacheV159(
+  token
+) {
+  const timestamp =
+    safeNumber(
+      token?.marketCache?.timestamp
+    );
+
+  if (
+    !timestamp ||
+    !verifiedUsableMarketCache(
+      token
+    )
+  ) {
+    return false;
+  }
+
+  const ageMs =
+    Date.now() -
+    timestamp;
+
+  return (
+    ageMs >= 0 &&
+    ageMs <= MARKET_CACHE_MS
+  );
 }
 
 function marketFreshPriorityScore(
@@ -22806,16 +22854,187 @@ async function scan(
       : marketFreshTarget;
 
   /*
+   * V159:
+   * Keep completion of unresolved holder/risk evidence separate from ownership
+   * of the scarce fresh-market slot. If a carried retry already has a fresh,
+   * usable VERIFIED market cache, keep it first in analysis but hand only the
+   * fresh market reservation to the next viable market-unverified candidate.
+   */
+  const carriedAnalysisTargetV159 =
+    pendingCompletionToken &&
+    !retryFairnessOverrideV139
+      ? pendingCompletionToken
+      : null;
+
+  const carriedAnalysisAddressV159 =
+    normalize(
+      carriedAnalysisTargetV159
+        ?.address
+    );
+
+  const carriedFreshUsableMarketV159 =
+    Boolean(
+      carriedAnalysisTargetV159 &&
+      carriedAnalysisAddressV159 &&
+      carriedAnalysisAddressV159 ===
+        pendingCompletionAddress &&
+      freshUsableVerifiedMarketCacheV159(
+        carriedAnalysisTargetV159
+      )
+    );
+
+  let freshMarketSlotHandoffV159 = {
+    enabled: true,
+    triggered: false,
+    carriedAddress:
+      carriedAnalysisAddressV159 ||
+      null,
+    carriedSymbol:
+      carriedAnalysisTargetV159
+        ?.metadata?.symbol ||
+      carriedAnalysisTargetV159
+        ?.symbol ||
+      null,
+    carriedFreshVerifiedMarket:
+      carriedFreshUsableMarketV159,
+    carriedMarketCacheAgeMs:
+      carriedFreshUsableMarketV159
+        ? Math.max(
+            0,
+            Date.now() -
+              safeNumber(
+                carriedAnalysisTargetV159
+                  ?.marketCache
+                  ?.timestamp
+              )
+          )
+        : null,
+    releasedFreshReservation: false,
+    replacementAddress: null,
+    replacementSymbol: null,
+    replacementScore: null,
+    carriedRemainsAnalysisPriority: false,
+    carriedRetainsHolderRetryPriority: false,
+    noExtraNormalRequests: true
+  };
+
+  if (
+    carriedFreshUsableMarketV159
+  ) {
+    const replacementRowV159 =
+      rankedMarketFreshCandidates
+        .find(
+          row => {
+            const item =
+              row?.token ||
+              null;
+
+            const itemAddress =
+              normalize(
+                item?.address
+              );
+
+            if (
+              !item ||
+              !itemAddress ||
+              itemAddress ===
+                carriedAnalysisAddressV159 ||
+              terminalPriorityRejectFromWatched(
+                item
+              )?.terminal === true ||
+              !preMarketCandidateAllowed(
+                item
+              )
+            ) {
+              return false;
+            }
+
+            return (
+              !freshUsableVerifiedMarketCacheV159(
+                item
+              )
+            );
+          }
+        ) ||
+      null;
+
+    if (
+      replacementRowV159?.token
+    ) {
+      clearPriorityFreshReservation(
+        state,
+        carriedAnalysisAddressV159
+      );
+
+      marketFreshTarget =
+        replacementRowV159.token;
+
+      marketFreshTargetAddress =
+        normalize(
+          marketFreshTarget?.address
+        );
+
+      if (
+        marketFreshTargetAddress
+      ) {
+        reservePriorityFreshMarket(
+          state,
+          marketFreshTargetAddress
+        );
+      }
+
+      freshMarketSlotHandoffV159 = {
+        ...freshMarketSlotHandoffV159,
+        triggered: true,
+        releasedFreshReservation: true,
+        replacementAddress:
+          marketFreshTargetAddress ||
+          null,
+        replacementSymbol:
+          marketFreshTarget
+            ?.metadata?.symbol ||
+          marketFreshTarget
+            ?.symbol ||
+          null,
+        replacementScore:
+          safeNumber(
+            replacementRowV159.score
+          ),
+        carriedRemainsAnalysisPriority:
+          true,
+        carriedRetainsHolderRetryPriority:
+          true
+      };
+    }
+  }
+
+  /*
    * V133:
    * The fresh-market / priority-completion target is the candidate the bot
    * has already decided is most important to finish. Analyse it before lower
    * priority candidates so they cannot consume its required budget first.
    */
   const analysisSelectedRawV142 =
-    marketFreshTarget
+    marketFreshTarget ||
+    carriedAnalysisTargetV159
       ? uniqueBy(
           [
-            marketFreshTarget,
+            ...(
+              freshMarketSlotHandoffV159
+                .triggered &&
+              carriedAnalysisTargetV159
+                ? [
+                    carriedAnalysisTargetV159
+                  ]
+                : []
+            ),
+            ...(
+              marketFreshTarget
+                ? [
+                    marketFreshTarget
+                  ]
+                : []
+            ),
             ...selected
           ],
           token =>
@@ -23802,6 +24021,16 @@ async function scan(
 
           priorityCompletion:
             isPriorityCompletion,
+
+          marketPriority:
+            isPriorityCompletion,
+
+          holderPriorityCompletion:
+            freshMarketSlotHandoffV159
+              .triggered
+              ? address ===
+                retryPersistenceAddressV139
+              : isPriorityCompletion,
 
           liveMomentumActivityV152
         }
@@ -25389,7 +25618,7 @@ async function scan(
     status,
 
     scanMode:
-      "V158_CORE_EVIDENCE_QUALITY_SCORE_PROTECTION_HUNTER",
+      "V159_CORE_PRIORITY_FRESH_MARKET_SLOT_HANDOFF_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -25999,6 +26228,22 @@ async function scan(
       effectiveMarketFreshTargetAddress ||
       null,
 
+    freshMarketSlotHandoffV159: {
+      ...freshMarketSlotHandoffV159,
+      effectiveFreshMarketAddress:
+        effectiveMarketFreshTargetAddress ||
+        null,
+      carriedPriorityRetryAddress:
+        retryPersistenceAddressV139 ||
+        null,
+      dexFreshSpacingMs:
+        DEXSCREENER_MIN_FRESH_INTERVAL_MS,
+      geckoOneFreshPerScan:
+        1,
+      telegramThresholdsUnchanged:
+        true
+    },
+
     preMarketExclusion: {
       enabled:
         true,
@@ -26055,7 +26300,7 @@ async function scan(
 
     marketFreshPriority: {
       strategy:
-        "V158_EVIDENCE_QUALITY_SCORE_PROTECTION_DIRECTIONAL_USD_HUNTER",
+        "V159_PRIORITY_FRESH_MARKET_SLOT_HANDOFF_DIRECTIONAL_USD_HUNTER",
 
       selectedAddress:
         effectiveMarketFreshTargetAddress ||
@@ -26198,12 +26443,19 @@ async function scan(
         true,
 
       address:
-        marketFreshTargetAddress ||
-        null,
+        freshMarketSlotHandoffV159
+          .triggered
+          ? retryPersistenceAddressV139 ||
+            null
+          : marketFreshTargetAddress ||
+            null,
 
       analysedFirst:
         Boolean(
-          marketFreshTargetAddress
+          freshMarketSlotHandoffV159
+            .triggered
+            ? retryPersistenceAddressV139
+            : marketFreshTargetAddress
         ),
 
       deferred:
@@ -28274,12 +28526,48 @@ async function scan(
       telegramThresholdsUnchangedV158:
         "ENABLED_V158",
 
+      priorityFreshMarketSlotHandoff:
+        "ENABLED_V159",
+
+      freshVerifiedCacheReleasesMarketSlotV159:
+        "ENABLED_V159",
+
+      carriedRetryStillAnalysedFirstV159:
+        "ENABLED_V159",
+
+      carriedHolderRiskCompletionPreservedV159:
+        "ENABLED_V159",
+
+      nextViableMarketUnverifiedCandidateGetsSlotV159:
+        "ENABLED_V159",
+
+      retryFairnessUnchangedV159:
+        "ENABLED_V159",
+
+      terminalHandoffsUnchangedV159:
+        "ENABLED_V159",
+
+      evidenceQualityProtectionUnchangedV159:
+        "ENABLED_V159",
+
+      dexFreshSpacingUnchangedV159:
+        "ENABLED_V159",
+
+      geckoOneFreshPerScanUnchangedV159:
+        "ENABLED_V159",
+
+      noNormalRequestRateIncreaseV159:
+        "ENABLED_V159",
+
+      telegramThresholdsUnchangedV159:
+        "ENABLED_V159",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V158_CORE_EVIDENCE_QUALITY_SCORE_PROTECTION_V77_TELEGRAM_HUNTER",
+      "V159_CORE_PRIORITY_FRESH_MARKET_SLOT_HANDOFF_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
