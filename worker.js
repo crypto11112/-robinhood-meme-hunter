@@ -1,10 +1,10 @@
 /**
  * Robinhood Chain Meme Hunter
- * V196
+ * V197
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V196
+ * CURRENT BUILD: V197
  * - V192 adds strict native-ETH quote valuation without changing V191 resolution/replay
  * - Robinhood Chain native ETH (ZERO currency in Uniswap V4) is treated as 18-decimal ETH
  * - Native ETH uses the same canonical WETH/USDG on-chain reference via 1:1 ETH/WETH wrapping denomination
@@ -746,7 +746,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V196";
+const VERSION = "V197";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -7051,7 +7051,7 @@ async function resolvePersistentUnknownPools(
         0
 ,
       retryUpgradeV193:
-        "UP_TO_3_DISTINCT_CURRENT_LIVE_POOLS",
+        "UP_TO_4_DISTINCT_CURRENT_LIVE_POOLS_V197",
       stopOnFirstResolvedV193:
         true    },
     bitqueryInitializeV190: {
@@ -7062,7 +7062,7 @@ async function resolvePersistentUnknownPools(
         BITQUERY_GRAPHQL_V2,
       dataset:
         "realtime",
-      maxAttemptsPerRun: 3,
+      maxAttemptsPerRun: 4,
       attempts: 0,
       requestsUsed: 0,
       resolved: 0,
@@ -34382,7 +34382,7 @@ async function scan(
     status,
 
     scanMode:
-      "V196_UNISWAP_AGGREGATED_ETH_USDG_REFERENCE_HUNTER",
+      "V197_LIVE_POOL_COVERAGE_VERIFIED_USD_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -38374,6 +38374,33 @@ async function scan(
       telegramThresholdsUnchangedV192:
         "ENABLED_V192",
 
+      verifiedUsdPricingFrozenFromV196:
+        "ENABLED_V197",
+
+      liveUnknownPoolCoverageUpgradeV197:
+        "ENABLED_V197",
+
+      bitqueryMaxCurrentLiveAttemptsV197:
+        4,
+
+      bitqueryAttemptsStillBoundByExistingResolverBudgetV197:
+        "ENABLED_V197",
+
+      currentLivePoolsRemainAheadOfStaleTrackerPoolsV197:
+        "ENABLED_V197",
+
+      uniswapEthUsdGMathChangedV197:
+        "NO",
+
+      exactUsdAggregationChangedV197:
+        "NO",
+
+      hardRequestLimitUnchangedV197:
+        42,
+
+      telegramThresholdsUnchangedV197:
+        "ENABLED_V197",
+
       uniswapAggregatedEthUsdGReferenceV196:
         "ENABLED_V196",
 
@@ -38480,7 +38507,7 @@ async function scan(
         "ENABLED_V193",
 
       bitqueryMaxAttemptsPerRunV193:
-        3,
+        4,
 
       bitqueryDistinctCurrentLivePoolsOnlyV193:
         "ENABLED_V193",
@@ -38583,7 +38610,7 @@ async function scan(
     },
 
     architecture:
-      "V196_UNISWAP_AGGREGATED_ETH_USDG_REFERENCE_V77_TELEGRAM_HUNTER",
+      "V197_LIVE_POOL_COVERAGE_VERIFIED_USD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
