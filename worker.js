@@ -1,10 +1,10 @@
 /**
  * Robinhood Chain Meme Hunter
- * V193
+ * V194
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V193
+ * CURRENT BUILD: V194
  * - V192 adds strict native-ETH quote valuation without changing V191 resolution/replay
  * - Robinhood Chain native ETH (ZERO currency in Uniswap V4) is treated as 18-decimal ETH
  * - Native ETH uses the same canonical WETH/USDG on-chain reference via 1:1 ETH/WETH wrapping denomination
@@ -746,7 +746,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V193";
+const VERSION = "V194";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -10492,6 +10492,465 @@ function medianNumberV187(
   ) / 2;
 }
 
+
+function canonicalWethUsdGPoolIdsV194(
+  state
+) {
+  const ids =
+    [];
+
+  for (
+    const [poolId, pool]
+    of Object.entries(
+      state?.poolRegistry ||
+      {}
+    )
+  ) {
+    const c0 =
+      normalize(
+        pool?.currency0
+      );
+
+    const c1 =
+      normalize(
+        pool?.currency1
+      );
+
+    if (
+      (
+        c0 === CANONICAL_WETH_V179 &&
+        c1 === CANONICAL_USDG_V179
+      ) ||
+      (
+        c1 === CANONICAL_WETH_V179 &&
+        c0 === CANONICAL_USDG_V179
+      )
+    ) {
+      ids.push(
+        normalize(poolId)
+      );
+    }
+  }
+
+  return ids.filter(
+    id =>
+      /^0x[a-f0-9]{64}$/.test(id)
+  );
+}
+
+function bitquerySignedIntegerV194(
+  value
+) {
+  const candidates = [
+    value?.bigInteger,
+    value?.integer,
+    value?.value,
+    value?.string
+  ];
+
+  for (
+    const raw
+    of candidates
+  ) {
+    if (
+      raw === null ||
+      raw === undefined ||
+      raw === ""
+    ) {
+      continue;
+    }
+
+    try {
+      return BigInt(
+        String(raw)
+      );
+    } catch {
+      // continue
+    }
+  }
+
+  return null;
+}
+
+async function getBitqueryWethUsdGReferenceV194(
+  env,
+  state,
+  budget
+) {
+  const poolIds =
+    canonicalWethUsdGPoolIdsV194(
+      state
+    );
+
+  const base = {
+    attempted: false,
+    configured:
+      Boolean(
+        String(
+          env.BITQUERY_ACCESS_TOKEN ||
+          ""
+        ).trim()
+      ),
+    poolIdsKnown:
+      poolIds.length,
+    selectedPoolId:
+      poolIds[0] || null,
+    status: null,
+    httpStatus: null,
+    verified: false,
+    source:
+      "BITQUERY_CANONICAL_WETH_USDG_LATEST_SWAP_V194",
+    priceUsdGPerWeth: null,
+    blockNumber: null,
+    transactionHash: null,
+    externalRequestsUsed: 0,
+    error: null
+  };
+
+  const token =
+    String(
+      env.BITQUERY_ACCESS_TOKEN ||
+      ""
+    ).trim();
+
+  if (!token) {
+    return {
+      ...base,
+      status: "NOT_CONFIGURED"
+    };
+  }
+
+  const poolId =
+    poolIds[0];
+
+  if (!poolId) {
+    return {
+      ...base,
+      status:
+        "NO_VERIFIED_CANONICAL_WETH_USDG_POOL_IN_REGISTRY"
+    };
+  }
+
+  if (
+    !budgetAvailable(
+      budget,
+      "analysis"
+    )
+  ) {
+    return {
+      ...base,
+      status:
+        "ANALYSIS_BUDGET_PROTECTED"
+    };
+  }
+
+  if (
+    !consumeBudget(
+      budget,
+      "analysis",
+      "BITQUERY_WETH_USDG_REFERENCE_V194"
+    )
+  ) {
+    return {
+      ...base,
+      status:
+        "ANALYSIS_BUDGET_PROTECTED"
+    };
+  }
+
+  const query = `
+    {
+      EVM(network: robinhood, dataset: realtime) {
+        Events(
+          limit: {count: 1}
+          orderBy: {descending: Block_Time}
+          where: {
+            LogHeader: {
+              Address: {
+                is: "${POOL_MANAGER}"
+              }
+            }
+            Log: {
+              Signature: {
+                Name: {
+                  is: "Swap"
+                }
+              }
+            }
+            Topics: {
+              includes: {
+                Hash: {
+                  is: "${poolId}"
+                }
+              }
+            }
+          }
+        ) {
+          Block {
+            Number
+            Time
+          }
+          Transaction {
+            Hash
+          }
+          Arguments {
+            Name
+            Type
+            Value {
+              ... on EVM_ABI_BigInt_Value_Arg {
+                bigInteger
+              }
+              ... on EVM_ABI_Integer_Value_Arg {
+                integer
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const response =
+      await fetch(
+        BITQUERY_GRAPHQL_V2,
+        {
+          method: "POST",
+          headers: {
+            "content-type":
+              "application/json",
+            accept:
+              "application/json",
+            authorization:
+              `Bearer ${token}`
+          },
+          body:
+            JSON.stringify({
+              query
+            })
+        }
+      );
+
+    const httpStatus =
+      response.status;
+
+    let payload =
+      null;
+
+    try {
+      payload =
+        await response.json();
+    } catch {
+      payload =
+        null;
+    }
+
+    if (!response.ok) {
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        status:
+          `HTTP_${httpStatus}`,
+        error:
+          payload?.errors?.[0]?.message ||
+          `BITQUERY_HTTP_${httpStatus}`
+      };
+    }
+
+    if (
+      Array.isArray(
+        payload?.errors
+      ) &&
+      payload.errors.length
+    ) {
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        status:
+          "GRAPHQL_ERROR",
+        error:
+          payload.errors
+            .map(
+              row =>
+                String(
+                  row?.message ||
+                  "GRAPHQL_ERROR"
+                )
+            )
+            .slice(0, 3)
+            .join(" | ")
+      };
+    }
+
+    const event =
+      payload?.data?.EVM?.Events?.[0] ||
+      null;
+
+    if (!event) {
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        status:
+          "EMPTY_REALTIME_WINDOW"
+      };
+    }
+
+    let amount0 =
+      null;
+
+    let amount1 =
+      null;
+
+    for (
+      const argument
+      of event.Arguments || []
+    ) {
+      const name =
+        String(
+          argument?.Name ||
+          ""
+        ).toLowerCase();
+
+      if (name === "amount0") {
+        amount0 =
+          bitquerySignedIntegerV194(
+            argument?.Value
+          );
+      }
+
+      if (name === "amount1") {
+        amount1 =
+          bitquerySignedIntegerV194(
+            argument?.Value
+          );
+      }
+    }
+
+    if (
+      amount0 === null ||
+      amount1 === null ||
+      amount0 === 0n ||
+      amount1 === 0n
+    ) {
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        status:
+          "SWAP_AMOUNTS_UNVERIFIED",
+        blockNumber:
+          safeNumber(
+            event?.Block?.Number
+          ) || null,
+        transactionHash:
+          normalize(
+            event?.Transaction?.Hash
+          ) || null
+      };
+    }
+
+    const pool =
+      state?.poolRegistry?.[
+        poolId
+      ] || {};
+
+    const c0 =
+      normalize(
+        pool.currency0
+      );
+
+    const wethRaw =
+      c0 ===
+        CANONICAL_WETH_V179
+        ? absBigIntV179(amount0)
+        : absBigIntV179(amount1);
+
+    const usdGRaw =
+      c0 ===
+        CANONICAL_USDG_V179
+        ? absBigIntV179(amount0)
+        : absBigIntV179(amount1);
+
+    const wethAmount =
+      bigintDecimalToNumberV187(
+        wethRaw,
+        CANONICAL_WETH_DECIMALS_V187
+      );
+
+    const usdGAmount =
+      bigintDecimalToNumberV187(
+        usdGRaw,
+        CANONICAL_USDG_DECIMALS_V179
+      );
+
+    const price =
+      wethAmount > 0 &&
+      usdGAmount > 0
+        ? usdGAmount /
+          wethAmount
+        : null;
+
+    if (
+      !Number.isFinite(price) ||
+      price <= 0
+    ) {
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        status:
+          "PRICE_UNVERIFIED",
+        blockNumber:
+          safeNumber(
+            event?.Block?.Number
+          ) || null,
+        transactionHash:
+          normalize(
+            event?.Transaction?.Hash
+          ) || null
+      };
+    }
+
+    return {
+      ...base,
+      attempted: true,
+      externalRequestsUsed: 1,
+      httpStatus,
+      status:
+        "VERIFIED",
+      verified: true,
+      priceUsdGPerWeth:
+        price,
+      blockNumber:
+        safeNumber(
+          event?.Block?.Number
+        ) || null,
+      transactionHash:
+        normalize(
+          event?.Transaction?.Hash
+        ) || null
+    };
+  } catch (error) {
+    return {
+      ...base,
+      attempted: true,
+      externalRequestsUsed: 1,
+      status:
+        "FETCH_ERROR",
+      error:
+        errorString(error)
+    };
+  }
+}
+
 function deriveCanonicalWethUsdGReferenceV187(
   state,
   logs
@@ -11251,7 +11710,8 @@ function pruneOnChainDirectionalStoreV179(
 
 function collectOnChainDirectionalSwapsV179(
   state,
-  logs
+  logs,
+  externalWethUsdGReferenceV194 = null
 ) {
   const now =
     Date.now();
@@ -11291,11 +11751,22 @@ function collectOnChainDirectionalSwapsV179(
   let nativeEthExactUsdVerifiedV192 =
     0;
 
-  const wethUsdGReferenceV187 =
+  const sameBatchWethUsdGReferenceV187 =
     deriveCanonicalWethUsdGReferenceV187(
       state,
       logs
     );
+
+  const wethUsdGReferenceV187 =
+    sameBatchWethUsdGReferenceV187
+      ?.verified === true
+      ? sameBatchWethUsdGReferenceV187
+      : (
+          externalWethUsdGReferenceV194
+            ?.verified === true
+            ? externalWethUsdGReferenceV194
+            : sameBatchWethUsdGReferenceV187
+        );
 
   let deduplicated =
     0;
@@ -11690,7 +12161,7 @@ function collectOnChainDirectionalSwapsV179(
       true,
 
     usdPolicy:
-      "V187_DIRECT_USDG_OR_CANONICAL_WETH_WITH_SAME_BATCH_ONCHAIN_WETH_USDG_REFERENCE_ONLY"
+      "V194_DIRECT_USDG_OR_ETH_WETH_WITH_VERIFIED_SAME_BATCH_OR_BITQUERY_CANONICAL_WETH_USDG_SWAP_REFERENCE"
   };
 }
 
@@ -28791,11 +29262,57 @@ async function scan(
    * opportunities have completed. This reuses liveOutput.logs and adds zero
    * external requests.
    */
-  const onChainDirectionalV179 =
-    collectOnChainDirectionalSwapsV179(
+  const sameBatchWethUsdGReferencePrecheckV194 =
+    deriveCanonicalWethUsdGReferenceV187(
       state,
       liveOutput.logs
     );
+
+  const bitqueryWethUsdGReferenceV194 =
+    sameBatchWethUsdGReferencePrecheckV194
+      ?.verified === true
+      ? {
+          attempted: false,
+          configured:
+            Boolean(
+              String(
+                env.BITQUERY_ACCESS_TOKEN ||
+                ""
+              ).trim()
+            ),
+          poolIdsKnown:
+            canonicalWethUsdGPoolIdsV194(
+              state
+            ).length,
+          selectedPoolId: null,
+          status:
+            "SKIPPED_SAME_BATCH_REFERENCE_ALREADY_VERIFIED",
+          httpStatus: null,
+          verified: false,
+          source:
+            "BITQUERY_CANONICAL_WETH_USDG_LATEST_SWAP_V194",
+          priceUsdGPerWeth: null,
+          blockNumber: null,
+          transactionHash: null,
+          externalRequestsUsed: 0,
+          error: null
+        }
+      : await getBitqueryWethUsdGReferenceV194(
+          env,
+          state,
+          budget
+        );
+
+  const onChainDirectionalV179 =
+    collectOnChainDirectionalSwapsV179(
+      state,
+      liveOutput.logs,
+      bitqueryWethUsdGReferenceV194
+    );
+
+  onChainDirectionalV179
+    .bitqueryWethUsdGReferenceV194 =
+      bitqueryWethUsdGReferenceV194;
 
   for (
     const token
@@ -32977,7 +33494,7 @@ async function scan(
     status,
 
     scanMode:
-      "V193_BITQUERY_LIVE_RETRY_NATIVE_ETH_USD_HUNTER",
+      "V194_BITQUERY_WETH_USDG_REFERENCE_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -36969,6 +37486,33 @@ async function scan(
       telegramThresholdsUnchangedV192:
         "ENABLED_V192",
 
+      bitqueryCanonicalWethUsdGReferenceV194:
+        "ENABLED_V194",
+
+      sameBatchWethUsdGReferenceStillPreferredV194:
+        "ENABLED_V194",
+
+      canonicalReferencePoolMustExistInRegistryV194:
+        "ENABLED_V194",
+
+      bitqueryReferenceMaxRequestsPerScanV194:
+        1,
+
+      bitqueryReferenceUsesExistingAnalysisBudgetV194:
+        "ENABLED_V194",
+
+      poolIdentityGuessingV194:
+        "DISABLED",
+
+      nativeEthUsdValuationPreservedV194:
+        "ENABLED_V194",
+
+      hardRequestLimitUnchangedV194:
+        42,
+
+      telegramThresholdsUnchangedV194:
+        "ENABLED_V194",
+
       bitqueryCurrentLiveRetryV193:
         "ENABLED_V193",
 
@@ -37076,7 +37620,7 @@ async function scan(
     },
 
     architecture:
-      "V193_BITQUERY_LIVE_RETRY_NATIVE_ETH_USD_V77_TELEGRAM_HUNTER",
+      "V194_BITQUERY_WETH_USDG_REFERENCE_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
