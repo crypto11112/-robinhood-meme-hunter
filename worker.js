@@ -12546,7 +12546,7 @@ function resolvedPoolReplayDiagnosticV198(
 
   const swapTopic =
     normalize(
-      V4_SWAP_TOPIC
+      SWAP_TOPIC
     );
 
   const traces =
