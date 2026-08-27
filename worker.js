@@ -1,10 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V179
+ * V180
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V179
+ * CURRENT BUILD: V180
+ * - V180 adds exact-pool Blockscout history for verified Uniswap V4 USDG pools so directional USD can be reconstructed from timestamped on-chain Swap logs
+ * - V180 uses canonical USDG's 6-decimal quote amount and its official 1:1 USD redemption denomination as the USD basis; no WETH/unknown-quote USD value is inferred
+ * - V180 only marks a rolling window VERIFIED when the queried pool history is complete (response below the 1,000-log API ceiling) and every included trade decodes cleanly
+ * - V180 adds decoder rejection telemetry proving whether failures are UNKNOWN_POOL_IDENTITY vs ABI/direction failures instead of guessing
+ * - V180 preserves V179 live zero-extra-request ledger, V178 queue ordering, V177 15m/6h windows, Telegram thresholds, and the 42-request hard ceiling
  * - V179 adds a zero-extra-provider-request on-chain Uniswap V4 directional-swap ledger from the existing live eth_getLogs batch
  * - V179 decodes signed amount0/amount1 directly from the canonical PoolManager Swap event and classifies candidate BUY/SELL from verified pool currency0/currency1 identity
  * - V179 records exact raw candidate/quote deltas, tx/log identity and block number, deduplicated in KV; no USD value is invented
@@ -665,7 +670,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V179";
+const VERSION = "V180";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -799,6 +804,15 @@ const ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179 = 6000;
 const ONCHAIN_DIRECTIONAL_MAX_TOKENS_V179 = 8;
 const ONCHAIN_DIRECTIONAL_RETENTION_MS_V179 =
   26 * 60 * 60 * 1000;
+
+const BLOCKSCOUT_LOGS_MAX_ROWS_V180 = 1000;
+const V180_WINDOW_MS = Object.freeze({
+  m5: 5 * 60 * 1000,
+  m15: 15 * 60 * 1000,
+  h1: 60 * 60 * 1000,
+  h6: 6 * 60 * 60 * 1000,
+  h24: 24 * 60 * 60 * 1000
+});
 
 /* =========================================================
    UNISWAP V4 TOPICS
@@ -8591,6 +8605,15 @@ function collectOnChainDirectionalSwapsV179(
   let deduplicated =
     0;
 
+  const rejectionReasons = {
+    UNKNOWN_POOL_IDENTITY: 0,
+    AMOUNT_DECODE_OR_ZERO: 0,
+    SAME_SIGN_DELTAS: 0,
+    CANDIDATE_QUOTE_IDENTITY_UNRESOLVED: 0,
+    DIRECTION_INCONSISTENT: 0,
+    OTHER: 0
+  };
+
   const touchedTokens =
     new Set();
 
@@ -8610,6 +8633,108 @@ function collectOnChainDirectionalSwapsV179(
 
     swapLogsSeen++;
 
+    const poolIdV180 =
+      normalize(
+        log?.topics?.[1]
+      );
+
+    const poolV180 =
+      state
+        ?.poolRegistry
+        ?.[poolIdV180];
+
+    if (
+      !poolV180 ||
+      !isAddress(
+        normalize(
+          poolV180?.currency0
+        )
+      ) ||
+      !isAddress(
+        normalize(
+          poolV180?.currency1
+        )
+      )
+    ) {
+      rejectionReasons.UNKNOWN_POOL_IDENTITY++;
+      continue;
+    }
+
+    const amount0V180 =
+      decodeSignedInt128WordV179(
+        abiWordV179(
+          log?.data,
+          0
+        )
+      );
+
+    const amount1V180 =
+      decodeSignedInt128WordV179(
+        abiWordV179(
+          log?.data,
+          1
+        )
+      );
+
+    if (
+      amount0V180 === null ||
+      amount1V180 === null ||
+      amount0V180 === 0n ||
+      amount1V180 === 0n
+    ) {
+      rejectionReasons.AMOUNT_DECODE_OR_ZERO++;
+      continue;
+    }
+
+    if (
+      (
+        amount0V180 > 0n &&
+        amount1V180 > 0n
+      ) ||
+      (
+        amount0V180 < 0n &&
+        amount1V180 < 0n
+      )
+    ) {
+      rejectionReasons.SAME_SIGN_DELTAS++;
+      continue;
+    }
+
+    const currency0V180 =
+      normalize(
+        poolV180?.currency0
+      );
+
+    const currency1V180 =
+      normalize(
+        poolV180?.currency1
+      );
+
+    const identityResolvableV180 =
+      (
+        currency0V180 !== ZERO &&
+        !knownQuote(currency0V180) &&
+        (
+          currency1V180 === ZERO ||
+          knownQuote(currency1V180)
+        )
+      ) ||
+      (
+        currency1V180 !== ZERO &&
+        !knownQuote(currency1V180) &&
+        (
+          currency0V180 === ZERO ||
+          knownQuote(currency0V180)
+        )
+      );
+
+    if (
+      !identityResolvableV180
+    ) {
+      rejectionReasons.CANDIDATE_QUOTE_IDENTITY_UNRESOLVED++;
+      continue;
+    }
+
     const trade =
       decodeV4SwapDirectionalV179(
         state,
@@ -8619,6 +8744,7 @@ function collectOnChainDirectionalSwapsV179(
     if (
       !trade?.verified
     ) {
+      rejectionReasons.DIRECTION_INCONSISTENT++;
       continue;
     }
 
@@ -8804,12 +8930,767 @@ function collectOnChainDirectionalSwapsV179(
         )
       ).length,
 
+    rejectionReasons,
+
+    knownPoolDecodeSuccessRate:
+      (
+        swapLogsSeen -
+        safeNumber(
+          rejectionReasons.UNKNOWN_POOL_IDENTITY
+        )
+      ) > 0
+        ? decoded /
+          (
+            swapLogsSeen -
+            safeNumber(
+              rejectionReasons.UNKNOWN_POOL_IDENTITY
+            )
+          )
+        : null,
+
     noExtraExternalRequests:
       true,
 
     usdPolicy:
       "USDG_AMOUNT_VERIFIED_SEPARATELY_EXACT_USD_REMAINS_UNVERIFIED_WITHOUT_VERIFIED_CONVERSION"
   };
+}
+
+
+/* =========================================================
+   V180 BLOCKSCOUT EXACT-POOL V4 USDG DIRECTIONAL USD
+   ========================================================= */
+
+function blockscoutLogTimestampMsV180(
+  row
+) {
+  const raw =
+    row?.timeStamp ??
+    row?.timestamp ??
+    null;
+
+  if (
+    raw === null ||
+    raw === undefined
+  ) {
+    return null;
+  }
+
+  try {
+    const seconds =
+      String(raw).startsWith("0x")
+        ? Number(BigInt(String(raw)))
+        : Number(raw);
+
+    return Number.isFinite(seconds) &&
+      seconds > 0
+      ? seconds * 1000
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function blockNumberFromAnyV180(
+  value
+) {
+  try {
+    if (
+      value === null ||
+      value === undefined
+    ) {
+      return null;
+    }
+
+    if (
+      typeof value === "number"
+    ) {
+      return Number.isFinite(value)
+        ? Math.floor(value)
+        : null;
+    }
+
+    const s =
+      String(value);
+
+    return s.startsWith("0x")
+      ? Number(BigInt(s))
+      : Number(s);
+  } catch {
+    return null;
+  }
+}
+
+function v180PoolIdentityMatchesCandidate(
+  candidate
+) {
+  const identity =
+    candidate
+      ?.onChainPoolIdentityV153;
+
+  if (
+    identity?.verified !== true
+  ) {
+    return false;
+  }
+
+  if (
+    normalize(
+      identity?.quoteTokenAddress
+    ) !==
+      CANONICAL_USDG_V179
+  ) {
+    return false;
+  }
+
+  if (
+    normalize(
+      identity?.candidateAddress
+    ) !==
+      normalize(
+        candidate?.address
+      )
+  ) {
+    return false;
+  }
+
+  return /^0x[0-9a-f]{64}$/.test(
+    normalize(
+      identity?.poolId
+    )
+  );
+}
+
+function v180DecodeExactPoolLog(
+  candidate,
+  row
+) {
+  const identity =
+    candidate
+      ?.onChainPoolIdentityV153;
+
+  const data =
+    row?.data;
+
+  const amount0 =
+    decodeSignedInt128WordV179(
+      abiWordV179(
+        data,
+        0
+      )
+    );
+
+  const amount1 =
+    decodeSignedInt128WordV179(
+      abiWordV179(
+        data,
+        1
+      )
+    );
+
+  if (
+    amount0 === null ||
+    amount1 === null ||
+    amount0 === 0n ||
+    amount1 === 0n
+  ) {
+    return {
+      verified: false,
+      reason: "AMOUNT_DECODE_OR_ZERO"
+    };
+  }
+
+  if (
+    (
+      amount0 > 0n &&
+      amount1 > 0n
+    ) ||
+    (
+      amount0 < 0n &&
+      amount1 < 0n
+    )
+  ) {
+    return {
+      verified: false,
+      reason: "SAME_SIGN_DELTAS"
+    };
+  }
+
+  const candidateAddress =
+    normalize(
+      candidate?.address
+    );
+
+  const pool =
+    candidateAddress &&
+    identity?.poolId
+      ? null
+      : null;
+
+  /*
+   * V153 identity stores BASE/QUOTE semantics but V180 needs actual
+   * currency index. Resolve it from the persistent pool registry when
+   * available; never guess the index from display-side wording.
+   */
+  const poolId =
+    normalize(
+      identity?.poolId
+    );
+
+  const registryPool =
+    candidate
+      ? candidate.__v180RegistryPool
+      : null;
+
+  const currency0 =
+    normalize(
+      registryPool?.currency0
+    );
+
+  const currency1 =
+    normalize(
+      registryPool?.currency1
+    );
+
+  let candidateDelta =
+    null;
+
+  let quoteDelta =
+    null;
+
+  if (
+    currency0 === candidateAddress &&
+    currency1 === CANONICAL_USDG_V179
+  ) {
+    candidateDelta =
+      amount0;
+    quoteDelta =
+      amount1;
+  }
+
+  else if (
+    currency1 === candidateAddress &&
+    currency0 === CANONICAL_USDG_V179
+  ) {
+    candidateDelta =
+      amount1;
+    quoteDelta =
+      amount0;
+  }
+
+  else {
+    return {
+      verified: false,
+      reason: "REGISTRY_CURRENCY_IDENTITY_UNAVAILABLE"
+    };
+  }
+
+  const side =
+    candidateDelta < 0n
+      ? "buy"
+      : "sell";
+
+  const directionConsistent =
+    (
+      side === "buy" &&
+      quoteDelta > 0n
+    ) ||
+    (
+      side === "sell" &&
+      quoteDelta < 0n
+    );
+
+  if (
+    !directionConsistent
+  ) {
+    return {
+      verified: false,
+      reason: "DIRECTION_INCONSISTENT"
+    };
+  }
+
+  const timestampMs =
+    blockscoutLogTimestampMsV180(
+      row
+    );
+
+  if (
+    !timestampMs
+  ) {
+    return {
+      verified: false,
+      reason: "TIMESTAMP_UNAVAILABLE"
+    };
+  }
+
+  const quoteRaw =
+    absBigIntV179(
+      quoteDelta
+    );
+
+  const usdString =
+    decimalBigIntStringV179(
+      quoteRaw,
+      CANONICAL_USDG_DECIMALS_V179
+    );
+
+  const usdAmount =
+    Number(
+      usdString
+    );
+
+  if (
+    !Number.isFinite(
+      usdAmount
+    ) ||
+    usdAmount < 0
+  ) {
+    return {
+      verified: false,
+      reason: "USDG_AMOUNT_INVALID"
+    };
+  }
+
+  return {
+    verified: true,
+    source: "BLOCKSCOUT_V4_SWAP_USDG_V180",
+    poolId,
+    side,
+    timestampMs,
+    blockNumber:
+      blockNumberFromAnyV180(
+        row?.blockNumber
+      ),
+    transactionHash:
+      normalize(
+        row?.transactionHash
+      ) ||
+      null,
+    logIndex:
+      String(
+        row?.logIndex ??
+        ""
+      ),
+    usdAmount,
+    usdBasis:
+      "CANONICAL_USDG_1_TO_1_USD_REDEMPTION",
+    usdGQuoteVerified: true
+  };
+}
+
+function v180WindowFromTrades(
+  trades,
+  now,
+  windowKey,
+  historyComplete
+) {
+  const windowMs =
+    V180_WINDOW_MS[
+      windowKey
+    ];
+
+  if (
+    !windowMs
+  ) {
+    return {
+      verified: false,
+      reason: "UNKNOWN_WINDOW"
+    };
+  }
+
+  if (
+    historyComplete !== true
+  ) {
+    return {
+      verified: false,
+      source: "BLOCKSCOUT_V4_SWAP_USDG_V180",
+      reason: "HISTORY_INCOMPLETE_OR_API_ROW_CEILING",
+      coverageComplete: false
+    };
+  }
+
+  const cutoff =
+    now -
+    windowMs;
+
+  const rows =
+    (trades || [])
+      .filter(
+        row =>
+          row?.verified === true &&
+          safeNumber(
+            row?.timestampMs
+          ) >= cutoff &&
+          safeNumber(
+            row?.timestampMs
+          ) <= now + 60000
+      );
+
+  let buyVolumeUsd =
+    0;
+
+  let sellVolumeUsd =
+    0;
+
+  let buys =
+    0;
+
+  let sells =
+    0;
+
+  for (
+    const row
+    of rows
+  ) {
+    if (
+      row.side === "buy"
+    ) {
+      buys++;
+      buyVolumeUsd +=
+        safeNumber(
+          row.usdAmount
+        );
+    }
+
+    else if (
+      row.side === "sell"
+    ) {
+      sells++;
+      sellVolumeUsd +=
+        safeNumber(
+          row.usdAmount
+        );
+    }
+  }
+
+  const totalUsd =
+    buyVolumeUsd +
+    sellVolumeUsd;
+
+  return {
+    verified: true,
+    source: "BLOCKSCOUT_V4_SWAP_USDG_V180",
+    usdBasis:
+      "CANONICAL_USDG_1_TO_1_USD_REDEMPTION",
+    asOfAt: now,
+    coverageStartAt: cutoff,
+    coverageEndAt: now,
+    coverageComplete: true,
+    buys,
+    sells,
+    returnedTrades:
+      rows.length,
+    buyVolumeUsd,
+    sellVolumeUsd,
+    netFlowUsd:
+      buyVolumeUsd -
+      sellVolumeUsd,
+    buyPressureUsd:
+      totalUsd > 0
+        ? (
+            buyVolumeUsd /
+            totalUsd
+          ) * 100
+        : 0
+  };
+}
+
+async function blockscoutV4UsdGDirectionalV180(
+  candidate,
+  budget,
+  state,
+  latestBlock
+) {
+  const base = {
+    enabled: true,
+    attempted: false,
+    verifiedAnyWindow: false,
+    source: "BLOCKSCOUT_V4_SWAP_USDG_V180",
+    usdBasis:
+      "CANONICAL_USDG_1_TO_1_USD_REDEMPTION",
+    apiRowCeiling:
+      BLOCKSCOUT_LOGS_MAX_ROWS_V180,
+    windows: {}
+  };
+
+  if (
+    !v180PoolIdentityMatchesCandidate(
+      candidate
+    )
+  ) {
+    return {
+      ...base,
+      status:
+        "NOT_ELIGIBLE_REQUIRES_VERIFIED_V4_USDG_POOL"
+    };
+  }
+
+  const identity =
+    candidate
+      ?.onChainPoolIdentityV153;
+
+  const poolId =
+    normalize(
+      identity?.poolId
+    );
+
+  const registryPool =
+    state
+      ?.poolRegistry
+      ?.[poolId];
+
+  if (
+    !registryPool ||
+    !isAddress(
+      normalize(
+        registryPool?.currency0
+      )
+    ) ||
+    !isAddress(
+      normalize(
+        registryPool?.currency1
+      )
+    )
+  ) {
+    return {
+      ...base,
+      status:
+        "POOL_REGISTRY_IDENTITY_UNAVAILABLE"
+    };
+  }
+
+  const fromBlock =
+    blockNumberFromAnyV180(
+      identity?.blockNumber
+    );
+
+  const toBlock =
+    blockNumberFromAnyV180(
+      latestBlock
+    );
+
+  if (
+    !Number.isFinite(
+      fromBlock
+    ) ||
+    !Number.isFinite(
+      toBlock
+    ) ||
+    fromBlock <= 0 ||
+    toBlock < fromBlock
+  ) {
+    return {
+      ...base,
+      status:
+        "INVALID_BLOCK_RANGE",
+      fromBlock,
+      toBlock
+    };
+  }
+
+  if (
+    !consumeBudget(
+      budget,
+      "analysis",
+      "BLOCKSCOUT_V4_USDG_DIRECTIONAL_V180"
+    )
+  ) {
+    return {
+      ...base,
+      status:
+        "ANALYSIS_BUDGET_PROTECTED",
+      fromBlock,
+      toBlock
+    };
+  }
+
+  const url =
+    `${BLOCKSCOUT}/api?module=logs&action=getLogs` +
+    `&fromBlock=${fromBlock}` +
+    `&toBlock=${toBlock}` +
+    `&address=${POOL_MANAGER}` +
+    `&topic0=${SWAP_TOPIC}` +
+    `&topic1=${poolId}` +
+    `&topic0_1_opr=and`;
+
+  try {
+    const response =
+      await fetch(
+        url,
+        {
+          headers: {
+            accept:
+              "application/json"
+          }
+        }
+      );
+
+    if (
+      !response.ok
+    ) {
+      return {
+        ...base,
+        attempted: true,
+        status:
+          `BLOCKSCOUT_HTTP_${response.status}`,
+        fromBlock,
+        toBlock
+      };
+    }
+
+    const payload =
+      await response.json();
+
+    const rows =
+      Array.isArray(
+        payload?.result
+      )
+        ? payload.result
+        : [];
+
+    /*
+     * Blockscout documents a maximum of 1,000 returned event logs.
+     * Exactly 1,000 is therefore treated as potentially truncated.
+     */
+    const historyComplete =
+      rows.length <
+      BLOCKSCOUT_LOGS_MAX_ROWS_V180;
+
+    const decodeFailures = {};
+
+    const trades = [];
+
+    /*
+     * Pass registry identity without changing the persisted candidate shape.
+     */
+    Object.defineProperty(
+      candidate,
+      "__v180RegistryPool",
+      {
+        value: registryPool,
+        configurable: true,
+        enumerable: false,
+        writable: true
+      }
+    );
+
+    try {
+      for (
+        const row
+        of rows
+      ) {
+        const decoded =
+          v180DecodeExactPoolLog(
+            candidate,
+            row
+          );
+
+        if (
+          decoded?.verified === true
+        ) {
+          trades.push(
+            decoded
+          );
+        }
+
+        else {
+          const reason =
+            decoded?.reason ||
+            "UNKNOWN";
+
+          decodeFailures[
+            reason
+          ] =
+            safeNumber(
+              decodeFailures[
+                reason
+              ]
+            ) +
+            1;
+        }
+      }
+    }
+
+    finally {
+      try {
+        delete candidate
+          .__v180RegistryPool;
+      } catch {}
+    }
+
+    const now =
+      Date.now();
+
+    const windows = {};
+
+    for (
+      const key
+      of [
+        "m5",
+        "m15",
+        "h1",
+        "h6",
+        "h24"
+      ]
+    ) {
+      windows[key] =
+        v180WindowFromTrades(
+          trades,
+          now,
+          key,
+          historyComplete
+        );
+    }
+
+    const verifiedAnyWindow =
+      Object.values(
+        windows
+      ).some(
+        row =>
+          row?.verified === true
+      );
+
+    return {
+      ...base,
+      attempted: true,
+      verifiedAnyWindow,
+      status:
+        verifiedAnyWindow
+          ? "VERIFIED_ONCHAIN_USDG_DIRECTIONAL_WINDOWS"
+          : historyComplete
+            ? "NO_VERIFIED_TRADES_IN_WINDOWS"
+            : "BLOCKSCOUT_1000_LOG_CEILING_HISTORY_INCOMPLETE",
+      fromBlock,
+      toBlock,
+      poolId,
+      quoteTokenAddress:
+        CANONICAL_USDG_V179,
+      returnedLogs:
+        rows.length,
+      decodedTrades:
+        trades.length,
+      decodeFailures,
+      historyComplete,
+      windows
+    };
+  }
+
+  catch (
+    error
+  ) {
+    return {
+      ...base,
+      attempted: true,
+      status:
+        "BLOCKSCOUT_FETCH_ERROR",
+      error:
+        errorString(
+          error
+        ),
+      fromBlock,
+      toBlock
+    };
+  }
 }
 
 function processDiscoveryLogs(
@@ -28090,6 +28971,143 @@ async function scan(
   };
 
   /*
+   * V180:
+   * Before spending the remaining directional slot on Gecko, try one exact,
+   * timestamped Blockscout history request for the highest-priority candidate
+   * whose verified V4 quote is canonical USDG. This is the first path capable
+   * of producing directly summed USD-denominated buy/sell amounts without
+   * inferring them from transaction counts or total volume.
+   */
+  const v180UsdGDirectionalTarget =
+    candidates
+      .filter(
+        candidate =>
+          candidate?.validERC20 === true &&
+          v180PoolIdentityMatchesCandidate(
+            candidate
+          ) &&
+          candidate?.risk?.severeOverride !== true &&
+          candidate?.risk?.label !== "HIGH" &&
+          !sameRunTerminalAddresses.has(
+            normalize(
+              candidate?.address
+            )
+          )
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.analysisPriority
+          ) -
+          safeNumber(
+            a?.analysisPriority
+          )
+      )[0] ||
+    null;
+
+  let blockscoutDirectionalUsdV180 = {
+    enabled: true,
+    attempted: false,
+    verifiedAnyWindow: false,
+    status:
+      v180UsdGDirectionalTarget
+        ? "PENDING"
+        : "NO_ELIGIBLE_V4_USDG_CANDIDATE",
+    address:
+      normalize(
+        v180UsdGDirectionalTarget
+          ?.address
+      ) ||
+      null,
+    symbol:
+      v180UsdGDirectionalTarget
+        ?.symbol ||
+      null
+  };
+
+  if (
+    v180UsdGDirectionalTarget
+  ) {
+    const v180Result =
+      await blockscoutV4UsdGDirectionalV180(
+        v180UsdGDirectionalTarget,
+        budget,
+        state,
+        latestBlock
+      );
+
+    blockscoutDirectionalUsdV180 = {
+      address:
+        normalize(
+          v180UsdGDirectionalTarget
+            ?.address
+        ),
+      symbol:
+        v180UsdGDirectionalTarget
+          ?.symbol ||
+        null,
+      ...v180Result
+    };
+
+    if (
+      v180Result
+        ?.verifiedAnyWindow === true
+    ) {
+      applyDirectionalTradeFlow(
+        v180UsdGDirectionalTarget,
+        v180Result
+      );
+
+      const historicalV180 =
+        getHistoricalSnapshot(
+          state,
+          v180UsdGDirectionalTarget
+            .address
+        );
+
+      v180UsdGDirectionalTarget.momentum =
+        momentumAnalysis(
+          historicalV180,
+          v180UsdGDirectionalTarget.market,
+          v180UsdGDirectionalTarget.holders,
+          v180UsdGDirectionalTarget
+            .liveMomentumActivityV152
+        );
+
+      v180UsdGDirectionalTarget.opportunity =
+        scoreOpportunity(
+          v180UsdGDirectionalTarget.validation,
+          v180UsdGDirectionalTarget.market,
+          v180UsdGDirectionalTarget.holders,
+          v180UsdGDirectionalTarget.activity,
+          v180UsdGDirectionalTarget.momentum,
+          v180UsdGDirectionalTarget.marketQuality,
+          v180UsdGDirectionalTarget.whaleFlow,
+          v180UsdGDirectionalTarget.launchStage
+        );
+
+      v180UsdGDirectionalTarget.signalConfirmation =
+        signalConfirmation(
+          v180UsdGDirectionalTarget
+        );
+
+      v180UsdGDirectionalTarget.confidence =
+        candidateConfidence(
+          v180UsdGDirectionalTarget
+        );
+
+      evidenceQualityProtectionV158(
+        v180UsdGDirectionalTarget
+      );
+
+      v180UsdGDirectionalTarget.analysisPriority =
+        analysisPriority(
+          v180UsdGDirectionalTarget
+        );
+    }
+  }
+
+  /*
    * V151:
    * Directional USD is discovery intelligence, not merely alert decoration.
    * Existing provider guards remain authoritative; this only changes which
@@ -28203,17 +29221,49 @@ async function scan(
   else if (
     directionalTarget
   ) {
-    const enrichment =
-      await geckoDirectionalTradeFlow(
-        directionalTarget,
-        budget,
-        state
-      );
+    const sameAsV180Target =
+      normalize(
+        directionalTarget?.address
+      ) ===
+        normalize(
+          blockscoutDirectionalUsdV180
+            ?.address
+        );
 
-    applyDirectionalTradeFlow(
-      directionalTarget,
-      enrichment
-    );
+    const v180AlreadyVerified =
+      sameAsV180Target &&
+      blockscoutDirectionalUsdV180
+        ?.verifiedAnyWindow === true;
+
+    const enrichment =
+      v180AlreadyVerified
+        ? {
+            attempted: false,
+            verifiedAnyWindow: true,
+            status:
+              "V180_ONCHAIN_USDG_ALREADY_VERIFIED",
+            source:
+              "BLOCKSCOUT_V4_SWAP_USDG_V180",
+            windows:
+              blockscoutDirectionalUsdV180
+                ?.windows ||
+              {}
+          }
+        : await geckoDirectionalTradeFlow(
+            directionalTarget,
+            budget,
+            state
+          );
+
+    if (
+      enrichment?.status !==
+        "V180_ONCHAIN_USDG_ALREADY_VERIFIED"
+    ) {
+      applyDirectionalTradeFlow(
+        directionalTarget,
+        enrichment
+      );
+    }
 
     if (
       enrichment?.verifiedAnyWindow === true
@@ -28745,7 +29795,7 @@ async function scan(
     status,
 
     scanMode:
-      "V179_ONCHAIN_V4_DIRECTIONAL_SWAP_LEDGER_HUNTER",
+      "V180_BLOCKSCOUT_V4_USDG_DIRECTIONAL_USD_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -29046,6 +30096,8 @@ async function scan(
     postAnalysisBacklogReclaimV170,
 
     onChainDirectionalV179,
+
+    blockscoutDirectionalUsdV180,
 
     marketProviderCoordinationV147:
       marketProviderAvailabilityV147(
@@ -32366,12 +33418,45 @@ async function scan(
       telegramThresholdsUnchangedV179:
         "ENABLED_V179",
 
+      blockscoutExactPoolDirectionalUsd:
+        "ENABLED_V180",
+
+      blockscoutTimestampedSwapHistoryV180:
+        "ENABLED_V180",
+
+      canonicalUsdGOneToOneUsdBasisV180:
+        "OFFICIAL_REDEMPTION_BASIS",
+
+      blockscout1000LogCeilingProtectionV180:
+        "ENABLED_V180",
+
+      exactOnChainBuySellUsdSummationV180:
+        "ENABLED_V180",
+
+      decoderRejectionTelemetryV180:
+        "ENABLED_V180",
+
+      unknownPoolIdentityNeverGuessedV180:
+        "ENABLED_V180",
+
+      geckoSkippedWhenV180AlreadyVerifiedV180:
+        "ENABLED_V180",
+
+      hardRequestLimitUnchangedV180:
+        42,
+
+      analysisRequestLimitUnchangedV180:
+        21,
+
+      telegramThresholdsUnchangedV180:
+        "ENABLED_V180",
+
       socialMomentum:
         "NOT_VERIFIED"
     },
 
     architecture:
-      "V179_ONCHAIN_V4_DIRECTIONAL_SWAP_LEDGER_V77_TELEGRAM_HUNTER",
+      "V180_BLOCKSCOUT_V4_USDG_DIRECTIONAL_USD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
