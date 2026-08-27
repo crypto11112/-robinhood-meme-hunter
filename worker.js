@@ -1,10 +1,10 @@
 /**
  * Robinhood Chain Meme Hunter
- * V192
+ * V193
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V192
+ * CURRENT BUILD: V193
  * - V192 adds strict native-ETH quote valuation without changing V191 resolution/replay
  * - Robinhood Chain native ETH (ZERO currency in Uniswap V4) is treated as 18-decimal ETH
  * - Native ETH uses the same canonical WETH/USDG on-chain reference via 1:1 ETH/WETH wrapping denomination
@@ -746,7 +746,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V192";
+const VERSION = "V193";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -6824,32 +6824,52 @@ async function resolvePersistentUnknownPools(
     null;
 
   if (bitqueryPriorityPoolV191) {
-    const priorityId =
-      normalize(
-        bitqueryPriorityPoolV191.poolId
+    const livePriorityIdsV193 =
+      new Set(
+        livePriorityCandidatesV191
+          .map(
+            entry =>
+              normalize(
+                entry?.poolId
+              )
+          )
+          .filter(Boolean)
       );
 
-    const existing =
-      candidates.find(
-        item =>
-          normalize(
-            item?.entry?.poolId
-          ) === priorityId
+    const liveRowsV193 =
+      livePriorityCandidatesV191.map(
+        entry => {
+          const id =
+            normalize(
+              entry?.poolId
+            );
+
+          const existing =
+            candidates.find(
+              item =>
+                normalize(
+                  item?.entry?.poolId
+                ) === id
+            );
+
+          return {
+            entry,
+            lane:
+              existing?.lane ||
+              "LIVE_BITQUERY_RETRY_PRIORITY_V193"
+          };
+        }
       );
 
     candidates = [
-      {
-        entry:
-          bitqueryPriorityPoolV191,
-        lane:
-          existing?.lane ||
-          "LIVE_BITQUERY_PRIORITY_V191"
-      },
+      ...liveRowsV193,
       ...candidates.filter(
         item =>
-          normalize(
-            item?.entry?.poolId
-          ) !== priorityId
+          !livePriorityIdsV193.has(
+            normalize(
+              item?.entry?.poolId
+            )
+          )
       )
     ];
   }
@@ -7009,7 +7029,11 @@ async function resolvePersistentUnknownPools(
         true,
       extraExternalRequests:
         0
-    },
+,
+      retryUpgradeV193:
+        "UP_TO_3_DISTINCT_CURRENT_LIVE_POOLS",
+      stopOnFirstResolvedV193:
+        true    },
     bitqueryInitializeV190: {
       enabled: true,
       configured:
@@ -7018,7 +7042,7 @@ async function resolvePersistentUnknownPools(
         BITQUERY_GRAPHQL_V2,
       dataset:
         "realtime",
-      maxAttemptsPerRun: 1,
+      maxAttemptsPerRun: 3,
       attempts: 0,
       requestsUsed: 0,
       resolved: 0,
@@ -7147,8 +7171,13 @@ async function resolvePersistentUnknownPools(
 
     if (
       output.bitqueryInitializeV190
-        .attempts < 1 &&
+        .attempts <
+          output.bitqueryInitializeV190
+            .maxAttemptsPerRun &&
       bitqueryConfiguredV190 &&
+      livePriorityPoolIdsV191.has(
+        normalize(poolId)
+      ) &&
       output.requestsUsed <
         resolverRequestLimit
     ) {
@@ -7176,6 +7205,33 @@ async function resolvePersistentUnknownPools(
         safeNumber(
           bitqueryV190.externalRequestsUsed
         );
+
+      if (
+        !Array.isArray(
+          output.bitqueryInitializeV190
+            .attemptHistoryV193
+        )
+      ) {
+        output.bitqueryInitializeV190
+          .attemptHistoryV193 = [];
+      }
+
+      output.bitqueryInitializeV190
+        .attemptHistoryV193.push({
+          poolId,
+          status:
+            bitqueryV190.status,
+          httpStatus:
+            bitqueryV190.httpStatus,
+          currency0:
+            bitqueryV190.currency0,
+          currency1:
+            bitqueryV190.currency1,
+          resolved:
+            Boolean(
+              bitqueryV190.resolvedPool
+            )
+        });
 
       output.bitqueryInitializeV190
         .selectedPoolId =
@@ -32921,7 +32977,7 @@ async function scan(
     status,
 
     scanMode:
-      "V192_NATIVE_ETH_VERIFIED_USD_HUNTER",
+      "V193_BITQUERY_LIVE_RETRY_NATIVE_ETH_USD_HUNTER",
 
     scheduledRun:
       scheduled,
@@ -36913,6 +36969,30 @@ async function scan(
       telegramThresholdsUnchangedV192:
         "ENABLED_V192",
 
+      bitqueryCurrentLiveRetryV193:
+        "ENABLED_V193",
+
+      bitqueryMaxAttemptsPerRunV193:
+        3,
+
+      bitqueryDistinctCurrentLivePoolsOnlyV193:
+        "ENABLED_V193",
+
+      bitqueryStopOnFirstResolvedV193:
+        "ENABLED_V193",
+
+      bitqueryRetryUsesExistingResolverBudgetV193:
+        "ENABLED_V193",
+
+      nativeEthUsdValuationPreservedV193:
+        "ENABLED_V193",
+
+      hardRequestLimitUnchangedV193:
+        42,
+
+      telegramThresholdsUnchangedV193:
+        "ENABLED_V193",
+
       bitqueryCurrentLivePoolPriority:
         "ENABLED_V191",
 
@@ -36996,7 +37076,7 @@ async function scan(
     },
 
     architecture:
-      "V192_NATIVE_ETH_VERIFIED_USD_V77_TELEGRAM_HUNTER",
+      "V193_BITQUERY_LIVE_RETRY_NATIVE_ETH_USD_V77_TELEGRAM_HUNTER",
 
     timestamp:
       now()
