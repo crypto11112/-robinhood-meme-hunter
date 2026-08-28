@@ -1,10 +1,16 @@
 /**
  * Robinhood Chain Meme Hunter
- * V218
+ * V219
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V218
+ * CURRENT BUILD: V219
+ * - V219 integrates verified Pons curve evidence into confirmation/confidence without double-counting Opportunity
+ * - Opportunity keeps using Momentum only; no separate Pons opportunity bonus is added
+ * - Adds conservative Pons confirmation based on verified trades + unique traders + real USD flow
+ * - Weak verified Momentum no longer receives the same Confidence bonus as meaningful Momentum
+ * - Verified Pons directional USD can satisfy evidence-quality confirmation even when the flow is bearish
+ * - Adds zero requests and leaves V218 Momentum, V217 targeting, Pons USD and V4 verified USD calculations unchanged
  * - V218 integrates verified Pons V2 curve evidence into Momentum scoring conservatively
  * - Uses one canonical Pons window only (15m preferred, then 5m, then 1h) to avoid double-counting the same trades
  * - Rewards breadth (unique traders), activity, meaningful verified USD buy pressure and positive net flow
@@ -826,7 +832,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V218";
+const VERSION = "V219";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -29161,6 +29167,11 @@ function evidenceQualityProtectionV158(
       ?.countersVerified ===
     true;
 
+  const ponsConfirmationV219 =
+    ponsConfirmationQualityV219(
+      candidate
+    );
+
   const directionalUsdVerified =
     candidate
       ?.market
@@ -29171,6 +29182,9 @@ function evidenceQualityProtectionV158(
       ?.momentum
       ?.directionalUsdPressureV151
       ?.verified ===
+      true ||
+    ponsConfirmationV219
+      .directionalUsdVerified ===
       true;
 
   const momentumVerified =
@@ -29342,6 +29356,8 @@ function evidenceQualityProtectionV158(
 
     directionalUsdVerified,
 
+    ponsConfirmationV219,
+
     momentumVerified,
 
     momentumScore,
@@ -29381,6 +29397,163 @@ function evidenceQualityProtectionV158(
 
   return telemetry;
 }
+
+
+/* =========================================================
+   V219 PONS CONFIRMATION QUALITY
+   ========================================================= */
+
+function ponsConfirmationQualityV219(
+  candidate
+) {
+  const flow =
+    candidate?.ponsCurveFlowV216;
+
+  const empty = {
+    verified: false,
+    usable: false,
+    strong: false,
+    directionalUsdVerified: false,
+    window: null,
+    observedTrades: 0,
+    uniqueTraders: 0,
+    totalUsd: 0,
+    netFlowUsd: null,
+    buyPressureUsd: null,
+    reason:
+      "NO_VERIFIED_PONS_CURVE_FLOW"
+  };
+
+  if (flow?.verified !== true) {
+    return empty;
+  }
+
+  const choices = [
+    ["m15", "15m"],
+    ["m5", "5m"],
+    ["h1", "1h"]
+  ];
+
+  let row = null;
+  let label = null;
+
+  for (const [key, name] of choices) {
+    const current =
+      flow?.windows?.[key];
+
+    if (
+      current?.verified === true &&
+      safeNumber(
+        current?.observedTrades
+      ) > 0
+    ) {
+      row = current;
+      label = name;
+      break;
+    }
+  }
+
+  if (!row) {
+    return {
+      ...empty,
+      verified: true,
+      reason:
+        "NO_VERIFIED_PONS_WINDOW"
+    };
+  }
+
+  const observedTrades =
+    safeNumber(
+      row?.observedTrades
+    );
+
+  const uniqueTraders =
+    safeNumber(
+      row?.uniqueTraders
+    );
+
+  const buyVolumeUsd =
+    Math.max(
+      0,
+      safeNumber(
+        row?.buyVolumeUsd
+      )
+    );
+
+  const sellVolumeUsd =
+    Math.max(
+      0,
+      safeNumber(
+        row?.sellVolumeUsd
+      )
+    );
+
+  const totalUsd =
+    buyVolumeUsd +
+    sellVolumeUsd;
+
+  const netFlowUsd =
+    buyVolumeUsd -
+    sellVolumeUsd;
+
+  const buyPressureUsd =
+    totalUsd > 0
+      ? (
+          buyVolumeUsd /
+          totalUsd
+        ) * 100
+      : null;
+
+  /*
+   * "usable" is evidence-quality confirmation, not bullish confirmation.
+   * It proves we have enough candidate-specific verified curve data to stop
+   * treating the token as directionally unobserved.
+   */
+  const usable =
+    observedTrades >= 5 &&
+    uniqueTraders >= 3 &&
+    totalUsd >= 25;
+
+  /*
+   * "strong" is deliberately harder: breadth + activity + meaningful USD
+   * plus positive direction. This is one confirmation signal only.
+   */
+  const strong =
+    observedTrades >= 10 &&
+    uniqueTraders >= 6 &&
+    totalUsd >= 100 &&
+    netFlowUsd > 0 &&
+    buyPressureUsd !== null &&
+    buyPressureUsd >= 55;
+
+  return {
+    verified: true,
+    usable,
+    strong,
+    directionalUsdVerified:
+      usable,
+    window:
+      label,
+    observedTrades,
+    uniqueTraders,
+    buys:
+      safeNumber(row?.buys),
+    sells:
+      safeNumber(row?.sells),
+    buyVolumeUsd,
+    sellVolumeUsd,
+    totalUsd,
+    netFlowUsd,
+    buyPressureUsd,
+    reason:
+      strong
+        ? "STRONG_VERIFIED_PONS_CONFIRMATION"
+        : usable
+          ? "USABLE_VERIFIED_PONS_CONFIRMATION"
+          : "VERIFIED_PONS_SAMPLE_BELOW_CONFIRMATION_THRESHOLD"
+  };
+}
+
 
 /* =========================================================
    SIGNAL CONFIRMATION
@@ -29503,6 +29676,46 @@ function signalConfirmation(
     );
   }
 
+  const ponsConfirmationV219 =
+    ponsConfirmationQualityV219(
+      candidate
+    );
+
+  /*
+   * V219: Pons curve activity can replace the missing V4-activity style
+   * confirmation for a pre-graduation token. It counts as ONE signal only.
+   * No separate Opportunity bonus is added, preventing double-counting with
+   * V218 Momentum.
+   */
+  if (
+    ponsConfirmationV219.strong === true
+  ) {
+    signals++;
+
+    score +=
+      14;
+
+    reasons.push(
+      `Verified Pons curve confirmation: ${ponsConfirmationV219.observedTrades} trades / ${ponsConfirmationV219.uniqueTraders} traders / ${ponsConfirmationV219.buyPressureUsd.toFixed(1)}% USD buy pressure`
+    );
+  }
+
+  else if (
+    ponsConfirmationV219.usable === true &&
+    safeNumber(
+      candidate?.activity?.swaps
+    ) <= 0
+  ) {
+    signals++;
+
+    score +=
+      8;
+
+    reasons.push(
+      `Verified Pons curve activity: ${ponsConfirmationV219.observedTrades} trades / ${ponsConfirmationV219.uniqueTraders} traders`
+    );
+  }
+
   if (
     candidate.momentum
       ?.verified &&
@@ -29605,7 +29818,9 @@ function signalConfirmation(
               ? "EARLY"
               : "WEAK",
 
-    reasons
+    reasons,
+
+    ponsConfirmationV219
   };
 }
 
@@ -29659,12 +29874,69 @@ function candidateConfidence(
       10;
   }
 
+  /*
+   * V219: a verified flag alone is no longer worth the full +15.
+   * V218 can legitimately mark a thin/weak Pons sample as verified, so
+   * confidence now scales with actual momentum strength.
+   */
   if (
     candidate.momentum
-      ?.verified
+      ?.verified &&
+    safeNumber(
+      candidate.momentum.score
+    ) >=
+      50
   ) {
     score +=
       15;
+  }
+
+  else if (
+    candidate.momentum
+      ?.verified &&
+    safeNumber(
+      candidate.momentum.score
+    ) >=
+      25
+  ) {
+    score +=
+      10;
+  }
+
+  else if (
+    candidate.momentum
+      ?.verified &&
+    safeNumber(
+      candidate.momentum.score
+    ) > 0
+  ) {
+    score +=
+      4;
+  }
+
+  const ponsConfirmationV219 =
+    ponsConfirmationQualityV219(
+      candidate
+    );
+
+  /*
+   * Strong verified Pons breadth/flow can add modest confidence, but this is
+   * deliberately small because the same underlying Pons evidence can also
+   * influence Momentum. This is confidence in evidence coverage, not an
+   * Opportunity/price-prediction bonus.
+   */
+  if (
+    ponsConfirmationV219.strong === true
+  ) {
+    score +=
+      8;
+  }
+
+  else if (
+    ponsConfirmationV219.usable === true
+  ) {
+    score +=
+      4;
   }
 
   if (
@@ -38048,6 +38320,42 @@ for (
             ?.ponsCurveMomentumV218 ||
           null
       };
+
+
+      candidate.ponsScoreIntegrationV219 = {
+        enabled: true,
+        opportunityDoubleCountProtection:
+          "NO_DIRECT_PONS_OPPORTUNITY_BONUS",
+        confirmation:
+          candidate?.signalConfirmation
+            ?.ponsConfirmationV219 ||
+          ponsConfirmationQualityV219(
+            candidate
+          ),
+        momentumScore:
+          safeNumber(
+            candidate?.momentum?.score
+          ),
+        opportunityScore:
+          safeNumber(
+            candidate?.opportunity?.score
+          ),
+        signalScore:
+          safeNumber(
+            candidate?.signalConfirmation?.score
+          ),
+        signalCount:
+          safeNumber(
+            candidate?.signalConfirmation?.signals
+          ),
+        confidenceScore:
+          safeNumber(
+            candidate?.confidence?.score
+          ),
+        evidenceQuality:
+          candidate?.evidenceQualityProtectionV158 ||
+          null
+      };
     } else {
       candidate.momentumPonsRecomputedV218 = {
         applied: false,
@@ -38060,6 +38368,19 @@ for (
         label:
           candidate?.momentum?.label ||
           null
+      };
+
+
+      candidate.ponsScoreIntegrationV219 = {
+        enabled: true,
+        opportunityDoubleCountProtection:
+          "NO_DIRECT_PONS_OPPORTUNITY_BONUS",
+        confirmation:
+          ponsConfirmationQualityV219(
+            candidate
+          ),
+        status:
+          "NO_VERIFIED_PONS_CURVE_FLOW"
       };
     }
 
