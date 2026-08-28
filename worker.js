@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V256 / V2.0:
+ * - FEATURE: pre-Telegram Holder Count Completion Pass for already-qualifying candidates whose holder count is still UNVERIFIED
+ * - Makes at most one final authenticated Blockscout PRO /counters attempt for one qualifying candidate per scan
+ * - Reuses the existing V247 PRO counter parser, 429/cooldown handling, V250 ambiguous-zero protection and V225 verified-count cache
+ * - Fresh completion count is Telegram/display evidence only; it does NOT recompute scoring, Momentum, confidence, concentration or qualification
+ * - Never infers total holders from returned holder rows, Top 10 rows or concentration evidence
+ * - Preserves V255 Telegram labels, V254 verified-USD completion, V253 calibration, 42/21 request ceilings, KV and provider protections
  * V255 / V2.0:
  * - TELEGRAM UX: Opportunity now shows a plain-English interpretation first, with the final calibrated score retained underneath
  * - Labels use the final post-calibration Opportunity score only; raw scores never drive the displayed label
@@ -1029,7 +1036,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V255";
+const VERSION = "V256";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1691,6 +1698,9 @@ const BLOCKSCOUT_LOGS_MAX_ROWS_V180 = 1000;
 const VERIFIED_USD_COMPLETION_MAX_CANDIDATES_V254 = 1;
 const VERIFIED_USD_COMPLETION_RECENT_BLOCKS_V254 = 12000;
 const VERIFIED_USD_COMPLETION_MAX_HISTORY_REQUESTS_V254 = 1;
+
+/* V256: display-only holder-count completion. */
+const HOLDER_COUNT_COMPLETION_MAX_CANDIDATES_V256 = 1;
 
 
 const BLOCKSCOUT_DIRECTIONAL_429_BASE_MS_V183 =
@@ -2824,6 +2834,9 @@ function consumeBudget(
   const protectedUsdCompletionTypeV254 =
     "BLOCKSCOUT_V4_USD_COMPLETION_V254";
 
+  const protectedHolderCountCompletionTypeV256 =
+    "BLOCKSCOUT_PRO_HOLDER_COUNT_COMPLETION_V256";
+
   if (
     phase ===
       "analysis" &&
@@ -2833,7 +2846,9 @@ function consumeBudget(
     type !==
       protectedUsdGTypeV182 &&
     type !==
-      protectedUsdCompletionTypeV254
+      protectedUsdCompletionTypeV254 &&
+    type !==
+      protectedHolderCountCompletionTypeV256
   ) {
     const reservedRequestsV182 =
       Math.max(
@@ -2933,7 +2948,9 @@ function consumeBudget(
       type ===
         "BLOCKSCOUT_V4_USDG_DIRECTIONAL_V180" ||
       type ===
-        "BLOCKSCOUT_V4_USD_COMPLETION_V254"
+        "BLOCKSCOUT_V4_USD_COMPLETION_V254" ||
+      type ===
+        "BLOCKSCOUT_PRO_HOLDER_COUNT_COMPLETION_V256"
     ) &&
     budget.analysis
       ?.blockscoutUsdGReserveV182
@@ -27350,7 +27367,9 @@ async function blockscoutProCountersV247(
   token,
   budget,
   env,
-  state
+  state,
+  requestTypeV256 =
+    "BLOCKSCOUT_PRO_TOKEN_COUNTERS_V247"
 ) {
   const apiKey =
     String(
@@ -27417,7 +27436,7 @@ async function blockscoutProCountersV247(
     !consumeBudget(
       budget,
       "analysis",
-      "BLOCKSCOUT_PRO_TOKEN_COUNTERS_V247"
+      requestTypeV256
     )
   ) {
     return {
@@ -38401,6 +38420,310 @@ function telegramAlertClass(
 
 
 /* =========================================================
+   V256 HOLDER COUNT COMPLETION
+   ========================================================= */
+
+function holderCountFreshlyVerifiedV256(
+  candidate
+) {
+  const holders =
+    candidate?.holders;
+
+  const direct =
+    holders?.countersVerified ===
+      true
+      ? verifiedHolderCountValueV250(
+          holders?.holderCount,
+          holders
+        )
+      : {
+          verified: false,
+          holderCount: null
+        };
+
+  if (
+    direct?.verified === true
+  ) {
+    return {
+      verified: true,
+      holderCount:
+        direct.holderCount,
+      source:
+        holders?.counterSource ||
+        holders?.holderSource ||
+        "VERIFIED_COUNTER"
+    };
+  }
+
+  const display =
+    holders?.holderCountDisplayV225;
+
+  if (
+    display?.verified === true &&
+    Number.isFinite(
+      Number(
+        display?.holderCount
+      )
+    ) &&
+    Number(
+      display?.holderCount
+    ) > 0
+  ) {
+    return {
+      verified: true,
+      holderCount:
+        Math.floor(
+          Number(
+            display.holderCount
+          )
+        ),
+      source:
+        display?.source ||
+        "VERIFIED_HOLDER_COUNT_CACHE",
+      cached:
+        display?.cached === true
+    };
+  }
+
+  return {
+    verified: false,
+    holderCount: null,
+    source: null
+  };
+}
+
+
+async function holderCountCompletionPassV256(
+  candidate,
+  budget,
+  env,
+  state
+) {
+  const address =
+    normalize(
+      candidate?.address
+    );
+
+  const before =
+    holderCountFreshlyVerifiedV256(
+      candidate
+    );
+
+  const base = {
+    enabled: true,
+    attempted: false,
+    eligible: false,
+    address:
+      address || null,
+    status: null,
+    before,
+    recovered: false,
+    holderCount: null,
+    source: null,
+    externalRequestsUsed: 0,
+    displayOnly: true,
+    scoringRecomputed: false,
+    qualificationChanged: false,
+    concentrationChanged: false,
+    inferredFromHolderRows: false
+  };
+
+  if (
+    !isAddress(address)
+  ) {
+    return {
+      ...base,
+      status:
+        "INVALID_CANDIDATE_ADDRESS"
+    };
+  }
+
+  if (
+    before?.verified === true
+  ) {
+    return {
+      ...base,
+      status:
+        "HOLDER_COUNT_ALREADY_VERIFIED"
+    };
+  }
+
+  if (
+    !candidate?.holders ||
+    typeof candidate.holders !==
+      "object"
+  ) {
+    return {
+      ...base,
+      status:
+        "HOLDER_OBJECT_UNAVAILABLE"
+    };
+  }
+
+  const watched =
+    findWatched(
+      state,
+      address
+    );
+
+  const beforeRequests =
+    safeNumber(
+      budget?.totalUsed
+    );
+
+  const result =
+    await blockscoutProCountersV247(
+      address,
+      budget,
+      env,
+      state,
+      "BLOCKSCOUT_PRO_HOLDER_COUNT_COMPLETION_V256"
+    );
+
+  const requestsUsed =
+    Math.max(
+      0,
+      safeNumber(
+        budget?.totalUsed
+      ) -
+      beforeRequests
+    );
+
+  const verifiedValue =
+    result?.verified === true
+      ? verifiedHolderCountValueV250(
+          result?.holderCount,
+          result
+        )
+      : {
+          verified: false,
+          holderCount: null,
+          reason:
+            "PRO_COUNTER_NOT_VERIFIED"
+        };
+
+  if (
+    verifiedValue?.verified !==
+      true
+  ) {
+    return {
+      ...base,
+      eligible: true,
+      attempted:
+        result?.attempted === true,
+      status:
+        result?.status ||
+        verifiedValue?.reason ||
+        "HOLDER_COUNT_NOT_RECOVERED",
+      externalRequestsUsed:
+        requestsUsed,
+      providerResult: {
+        configured:
+          result?.configured === true,
+        attempted:
+          result?.attempted === true,
+        success:
+          result?.success === true,
+        verified:
+          result?.verified === true,
+        status:
+          result?.status ||
+          null,
+        httpStatus:
+          result?.httpStatus ??
+          null,
+        cooldownUntil:
+          result?.cooldownUntil ??
+          null,
+        retryAfterMs:
+          safeNumber(
+            result?.retryAfterMs
+          )
+      }
+    };
+  }
+
+  const holderCount =
+    verifiedValue
+      .holderCount;
+
+  /*
+   * Display/cache only. Deliberately do NOT set candidate.holders
+   * .countersVerified or feed the count back through scoreOpportunity().
+   */
+  candidate.holders
+    .holderCountCompletionV256 = {
+      verified: true,
+      holderCount,
+      source:
+        "BLOCKSCOUT_PRO_COUNTERS_V256",
+      timestamp:
+        Date.now(),
+      providerStatus:
+        result?.status ||
+        "VERIFIED_PRO_COUNTERS_V247"
+    };
+
+  candidate.holders
+    .holderCountDisplayV225 = {
+      verified: true,
+      holderCount,
+      cached: false,
+      freshness:
+        "FRESH",
+      ageMs: 0,
+      source:
+        "BLOCKSCOUT_PRO_COUNTERS_V256"
+    };
+
+  if (
+    watched &&
+    typeof watched ===
+      "object"
+  ) {
+    watched.holderCountCacheV225 = {
+      timestamp:
+        Date.now(),
+      holderCount,
+      source:
+        "BLOCKSCOUT_PRO_COUNTERS_V256"
+    };
+  }
+
+  return {
+    ...base,
+    eligible: true,
+    attempted:
+      result?.attempted === true,
+    status:
+      "VERIFIED_HOLDER_COUNT_RECOVERED_V256",
+    recovered: true,
+    holderCount,
+    source:
+      "BLOCKSCOUT_PRO_COUNTERS_V256",
+    externalRequestsUsed:
+      requestsUsed,
+    providerResult: {
+      configured:
+        result?.configured === true,
+      attempted:
+        result?.attempted === true,
+      success:
+        result?.success === true,
+      verified:
+        result?.verified === true,
+      status:
+        result?.status ||
+        null,
+      httpStatus:
+        result?.httpStatus ??
+        null
+    }
+  };
+}
+
+
+/* =========================================================
    V255 TELEGRAM OPPORTUNITY LABEL
    ========================================================= */
 
@@ -38458,22 +38781,33 @@ function telegramMessage(
   const holderCountDisplayV225 =
     holders?.holderCountDisplayV225;
 
+  const holderCountCompletionV256 =
+    holders?.holderCountCompletionV256;
+
   const holderText =
-    holders?.countersVerified &&
-    holders?.holderCount !== null
-      ? `${formatNumber(holders.holderCount)} (VERIFIED)`
-      : holderCountDisplayV225?.verified === true &&
-        holderCountDisplayV225?.holderCount !== null
-        ? `${formatNumber(holderCountDisplayV225.holderCount)} (VERIFIED CACHE)`
-        : "UNVERIFIED";
+    holderCountCompletionV256?.verified === true &&
+    holderCountCompletionV256?.holderCount !== null
+      ? `${formatNumber(holderCountCompletionV256.holderCount)} (VERIFIED)`
+      : holders?.countersVerified &&
+        holders?.holderCount !== null
+        ? `${formatNumber(holders.holderCount)} (VERIFIED)`
+        : holderCountDisplayV225?.verified === true &&
+          holderCountDisplayV225?.holderCount !== null
+          ? `${formatNumber(holderCountDisplayV225.holderCount)} (VERIFIED CACHE)`
+          : "UNVERIFIED";
 
   const holderCountSourceTextV225 =
-    holders?.countersVerified &&
-    holders?.holderCount !== null
-      ? (holders?.counterSource || holders?.holderSource || "BLOCKSCOUT")
-      : holderCountDisplayV225?.verified === true
-        ? (holderCountDisplayV225?.source || "VERIFIED_CACHE")
-        : "UNVERIFIED";
+    holderCountCompletionV256?.verified === true
+      ? (
+          holderCountCompletionV256?.source ||
+          "BLOCKSCOUT_PRO_COUNTERS_V256"
+        )
+      : holders?.countersVerified &&
+        holders?.holderCount !== null
+        ? (holders?.counterSource || holders?.holderSource || "BLOCKSCOUT")
+        : holderCountDisplayV225?.verified === true
+          ? (holderCountDisplayV225?.source || "VERIFIED_CACHE")
+          : "UNVERIFIED";
 
   const holderConcentrationStatusV144 =
     holders?.concentrationVerified === true &&
@@ -46123,6 +46457,120 @@ for (
         )
     );
 
+  /*
+   * V256: after all score/confirmation work is final, select at most one
+   * candidate that would already be allowed to alert but still lacks a
+   * trustworthy total holder count. The completion result cannot create a new
+   * alert because no score/qualification function is rerun afterward.
+   */
+  const holderCountCompletionCandidatesV256 =
+    candidates
+      .filter(
+        candidate =>
+          qualifiesTelegram(
+            candidate
+          ) &&
+          holderCountFreshlyVerifiedV256(
+            candidate
+          )?.verified !== true
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.opportunity?.score
+          ) -
+          safeNumber(
+            a?.opportunity?.score
+          )
+      )
+      .slice(
+        0,
+        HOLDER_COUNT_COMPLETION_MAX_CANDIDATES_V256
+      );
+
+  const holderCountCompletionV256 = {
+    enabled: true,
+    maxCandidatesPerScan:
+      HOLDER_COUNT_COMPLETION_MAX_CANDIDATES_V256,
+    candidatesEligible:
+      holderCountCompletionCandidatesV256
+        .length,
+    attempted: 0,
+    recovered: 0,
+    externalRequestsUsed: 0,
+    displayOnly: true,
+    scoringMathChanged: false,
+    telegramThresholdsChanged: false,
+    holderConcentrationChanged: false,
+    totalInferredFromHolderRows: false,
+    results: []
+  };
+
+  for (
+    const candidate
+    of holderCountCompletionCandidatesV256
+  ) {
+    holderCountCompletionV256
+      .attempted++;
+
+    const completion =
+      await holderCountCompletionPassV256(
+        candidate,
+        budget,
+        env,
+        state
+      );
+
+    holderCountCompletionV256
+      .externalRequestsUsed +=
+        safeNumber(
+          completion
+            ?.externalRequestsUsed
+        );
+
+    if (
+      completion?.recovered ===
+        true
+    ) {
+      holderCountCompletionV256
+        .recovered++;
+    }
+
+    holderCountCompletionV256
+      .results.push({
+        address:
+          normalize(
+            candidate?.address
+          ),
+        symbol:
+          candidate?.symbol ||
+          null,
+        status:
+          completion?.status ||
+          null,
+        attempted:
+          completion?.attempted ===
+          true,
+        recovered:
+          completion?.recovered ===
+          true,
+        holderCount:
+          completion?.holderCount ??
+          null,
+        source:
+          completion?.source ||
+          null,
+        externalRequestsUsed:
+          safeNumber(
+            completion
+              ?.externalRequestsUsed
+          ),
+        providerResult:
+          completion?.providerResult ||
+          null
+      });
+  }
+
   const telegramQualificationDiagnostics =
     buildTelegramQualificationDiagnostics(
       candidates
@@ -48633,6 +49081,20 @@ for (
       marketCountUsdInference:
         false,
       candidateMatchedEvidenceRequired:
+        true
+    },
+
+    holderCountCompletionV256: {
+      ...holderCountCompletionV256,
+      preservedHardExternalRequestLimit:
+        MAX_EXTERNAL_REQUESTS,
+      preservedAnalysisRequestLimit:
+        ANALYSIS_REQUEST_LIMIT,
+      reusedExistingBlockscoutProCounterRouteV247:
+        true,
+      ambiguousZeroGuardV250Preserved:
+        true,
+      holderRowsNeverUsedAsTotal:
         true
     },
 
