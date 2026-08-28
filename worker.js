@@ -1,12 +1,13 @@
 /**
  * Robinhood Chain Meme Hunter
- * V201
+ * V202
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V201
- * - V201 diagnostic checkpoint for CANDIDATE_QUOTE_IDENTITY_UNRESOLVED
- * - Adds zero-request classification telemetry only; decoder behavior is unchanged
+ * CURRENT BUILD: V202
+ * - V202 captures up to 20 exact CANDIDATE_QUOTE_IDENTITY_UNRESOLVED identity failures
+ * - Records PoolId, both currencies, native/known-quote status and failure classification
+ * - Adds zero external requests and does not alter decoder behavior
  * - Preserves V200 Bitquery native-ETH normalization and V196 verified USD pricing
  * - Preserves request hard limit, Telegram protection, scoring, KV state and discovery logic
  * - V200 normalizes Bitquery DEXPoolEvents native currency "0x" to canonical V4 ZERO
@@ -753,7 +754,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V201";
+const VERSION = "V202";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -13399,6 +13400,11 @@ function collectOnChainDirectionalSwapsV179(
   const touchedTokens =
     new Set();
 
+  // V202 diagnostic only: bounded local samples, zero external requests.
+  // Captures the exact identities that fail the existing V180 candidate/quote gate.
+  const candidateQuoteIdentitySamplesV202 = [];
+  const candidateQuoteIdentitySampleLimitV202 = 20;
+
   for (
     const log
     of logs ||
@@ -13514,6 +13520,57 @@ function collectOnChainDirectionalSwapsV179(
       !identityResolvableV180
     ) {
       rejectionReasons.CANDIDATE_QUOTE_IDENTITY_UNRESOLVED++;
+
+      if (
+        candidateQuoteIdentitySamplesV202.length <
+          candidateQuoteIdentitySampleLimitV202
+      ) {
+        const c0IsZeroV202 =
+          currency0V180 === ZERO;
+        const c1IsZeroV202 =
+          currency1V180 === ZERO;
+        const c0KnownQuoteV202 =
+          knownQuote(currency0V180);
+        const c1KnownQuoteV202 =
+          knownQuote(currency1V180);
+
+        candidateQuoteIdentitySamplesV202.push({
+          poolId: poolIdV180,
+          currency0: currency0V180,
+          currency1: currency1V180,
+          currency0IsNativeZero: c0IsZeroV202,
+          currency1IsNativeZero: c1IsZeroV202,
+          currency0KnownQuote: c0KnownQuoteV202,
+          currency1KnownQuote: c1KnownQuoteV202,
+          currency0CandidateLike:
+            !c0IsZeroV202 &&
+            !c0KnownQuoteV202,
+          currency1CandidateLike:
+            !c1IsZeroV202 &&
+            !c1KnownQuoteV202,
+          classification:
+            (
+              !c0IsZeroV202 &&
+              !c0KnownQuoteV202 &&
+              !c1IsZeroV202 &&
+              !c1KnownQuoteV202
+            )
+              ? "BOTH_SIDES_NONQUOTE"
+              : (
+                  (
+                    c0IsZeroV202 ||
+                    c0KnownQuoteV202
+                  ) &&
+                  (
+                    c1IsZeroV202 ||
+                    c1KnownQuoteV202
+                  )
+                )
+                  ? "BOTH_SIDES_QUOTE_OR_NATIVE"
+                  : "OTHER_IDENTITY_GATE_FAILURE"
+        });
+      }
+
       continue;
     }
 
@@ -13773,16 +13830,22 @@ function collectOnChainDirectionalSwapsV179(
           )
         : null,
 
-    candidateQuoteIdentityDiagnosticV201: {
+    candidateQuoteIdentityDiagnosticV202: {
       enabled: true,
       mode: "LOCAL_ZERO_EXTERNAL_REQUESTS",
       purpose:
-        "CLASSIFY_CANDIDATE_QUOTE_IDENTITY_UNRESOLVED_WITHOUT_CHANGING_DECODER",
+        "CAPTURE_EXACT_IDENTITY_GATE_FAILURE_PATTERN_WITHOUT_CHANGING_DECODER",
       rejectionCount:
         safeNumber(
           rejectionReasons
             .CANDIDATE_QUOTE_IDENTITY_UNRESOLVED
         ),
+      sampleLimit:
+        candidateQuoteIdentitySampleLimitV202,
+      samplesCaptured:
+        candidateQuoteIdentitySamplesV202.length,
+      samples:
+        candidateQuoteIdentitySamplesV202,
       externalRequestsAdded: 0,
       verifiedUsdPathChanged: false,
       decoderBehaviorChanged: false
