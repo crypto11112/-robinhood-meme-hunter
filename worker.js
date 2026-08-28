@@ -1,10 +1,14 @@
 /**
  * Robinhood Chain Meme Hunter
- * V202
+ * V203
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V202
+ * CURRENT BUILD: V203
+ * - V203 preserves the strict candidate/quote gate after V202 proved BOTH_SIDES_NONQUOTE dominates failures
+ * - Adds explicit safety telemetry: token-to-token/non-meme V4 pools remain unresolved rather than guessed
+ * - Does NOT add arbitrary ERC-20s or Robinhood Stock Tokens to knownQuote()
+ * - Preserves V200 native-ETH normalization, V196 verified USD pricing, scoring, Telegram, KV and request budgets
  * - V202 captures up to 20 exact CANDIDATE_QUOTE_IDENTITY_UNRESOLVED identity failures
  * - Records PoolId, both currencies, native/known-quote status and failure classification
  * - Adds zero external requests and does not alter decoder behavior
@@ -754,7 +758,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V202";
+const VERSION = "V203";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -13567,7 +13571,27 @@ function collectOnChainDirectionalSwapsV179(
                   )
                 )
                   ? "BOTH_SIDES_QUOTE_OR_NATIVE"
-                  : "OTHER_IDENTITY_GATE_FAILURE"
+                  : "OTHER_IDENTITY_GATE_FAILURE",
+
+          v203SafetyDecision:
+            (
+              !c0IsZeroV202 &&
+              !c0KnownQuoteV202 &&
+              !c1IsZeroV202 &&
+              !c1KnownQuoteV202
+            )
+              ? "KEEP_UNRESOLVED_DO_NOT_GUESS_CANDIDATE"
+              : "EXISTING_GATE_CLASSIFICATION",
+
+          v203Reason:
+            (
+              !c0IsZeroV202 &&
+              !c0KnownQuoteV202 &&
+              !c1IsZeroV202 &&
+              !c1KnownQuoteV202
+            )
+              ? "ROBINHOOD_V4_CONTAINS_NON_MEME_AND_TOKEN_TO_TOKEN_POOLS_POOLMANAGER_IS_NOT_POOLS_TRADE_ONLY"
+              : null
         });
       }
 
@@ -13848,7 +13872,11 @@ function collectOnChainDirectionalSwapsV179(
         candidateQuoteIdentitySamplesV202,
       externalRequestsAdded: 0,
       verifiedUsdPathChanged: false,
-      decoderBehaviorChanged: false
+      decoderBehaviorChanged: false,
+      v203ResearchGuard:
+        "DO_NOT_PROMOTE_BOTH_SIDES_NONQUOTE_TO_KNOWN_QUOTE_WITHOUT_VERIFIED_IDENTITY",
+      v203PoolsTradeIsolationRule:
+        "POOLMANAGER_ALONE_IS_NOT_A_POOLS_TRADE_FILTER"
     },
 
     noExtraExternalRequests:
