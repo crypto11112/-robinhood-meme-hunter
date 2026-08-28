@@ -1,5 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V243: Telegram transparency fix — always renders the Verified On-chain USD section; when candidate-matched exact-USD evidence is unavailable, windows are explicitly UNVERIFIED instead of silently omitted. No verified USD maths/qualification changes.
  * V242: makes PUBLIC RPC backlog catch-up adaptive after live 429 evidence: gentler proven-range growth, bounded public backlog bursts, and growth-streak reset on 429 while preserving Alchemy free-tier protection and the 42-request ceiling.
  * V241: accelerates PUBLIC RPC backlog convergence using faster proven-range learning while preserving Alchemy free-tier 10-block protection and the 42-request ceiling.
  * V240: promotes live-proven exact-token Bitquery market + exact-PoolId liquidity evidence into a conservative verified market fallback when Dex/Gecko are unavailable; zero extra HTTP.
@@ -972,7 +973,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V242";
+const VERSION = "V243";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -34447,70 +34448,78 @@ function telegramMessage(
     telegramVerifiedUsdDiagnosticV213
       ?.telegramVerifiedUsdSectionEligible === true;
 
+  /*
+   * V243 Telegram transparency only:
+   * Always render the verified-USD section so absence of evidence is explicit.
+   * This does NOT create USD evidence, alter eligibility, or change the frozen
+   * candidate-matched BUY/SELL USD calculation.
+   */
   telegramVerifiedUsdDiagnosticV213.telegramVerifiedUsdSectionRendered =
-    telegramVerifiedUsdWillRenderV213;
+    true;
 
   telegramVerifiedUsdDiagnosticV213.telegramVerifiedUsdRenderStatus =
     telegramVerifiedUsdWillRenderV213
-      ? "RENDERED"
-      : (
-          telegramVerifiedUsdDiagnosticV213
-            ?.telegramVerifiedUsdSectionReason ||
-          "NOT_RENDERED"
-        );
+      ? "RENDERED_VERIFIED_EVIDENCE_V243"
+      : "RENDERED_UNVERIFIED_TRANSPARENCY_V243";
 
-  if (telegramVerifiedUsdWillRenderV213) {
-    verifiedObservedLinesV212.push(
-      "",
-      "✅ <b>Verified On-chain USD (observed by bot)</b>"
-    );
+  verifiedObservedLinesV212.push(
+    "",
+    "✅ <b>Verified On-chain USD (observed by bot)</b>"
+  );
 
-    const pushObserved =
-      (
-        label,
-        row
-      ) => {
-        if (!row) {
-          return;
-        }
-
+  const pushObserved =
+    (
+      label,
+      row
+    ) => {
+      if (telegramVerifiedUsdWillRenderV213 && row) {
         verifiedObservedLinesV212.push(
           `🟢 ${label} Verified Buys: <b>${row.buys}</b> — <b>${row.buyUsd}</b>`,
           `🔴 ${label} Verified Sells: <b>${row.sells}</b> — <b>${row.sellUsd}</b>`,
           `📈 ${label} Verified Net: <b>${row.netUsd}</b>`,
           `💵 ${label} Verified USD Buy Pressure: <b>${row.pressureUsd}</b>`
         );
-      };
+        return;
+      }
 
-    pushObserved(
-      "5m",
-      verifiedObserved5mV212
-    );
-    pushObserved(
-      "15m",
-      verifiedObserved15mV212
-    );
-    pushObserved(
-      "1h",
-      verifiedObserved1hV212
-    );
-    pushObserved(
-      "6h",
-      verifiedObserved6hV212
-    );
-    pushObserved(
-      "12h",
-      verifiedObserved12hV236
-    );
-    pushObserved(
-      "24h",
-      verifiedObserved24hV212
-    );
+      verifiedObservedLinesV212.push(
+        `🟢 ${label} Verified Buys: <b>UNVERIFIED</b>`,
+        `🔴 ${label} Verified Sells: <b>UNVERIFIED</b>`,
+        `📈 ${label} Verified Net: <b>UNVERIFIED</b>`,
+        `💵 ${label} Verified USD Buy Pressure: <b>UNVERIFIED</b>`
+      );
+    };
 
-    verifiedObservedLinesV212.push(
-      "ℹ️ <i>Verified exact V4 swaps observed by this bot; not claimed as complete market-window totals.</i>"
-    );
-  }
+  pushObserved(
+    "5m",
+    verifiedObserved5mV212
+  );
+  pushObserved(
+    "15m",
+    verifiedObserved15mV212
+  );
+  pushObserved(
+    "1h",
+    verifiedObserved1hV212
+  );
+  pushObserved(
+    "6h",
+    verifiedObserved6hV212
+  );
+  pushObserved(
+    "12h",
+    verifiedObserved12hV236
+  );
+  pushObserved(
+    "24h",
+    verifiedObserved24hV212
+  );
+
+  verifiedObservedLinesV212.push(
+    telegramVerifiedUsdWillRenderV213
+      ? "ℹ️ <i>Verified exact V4 swaps observed by this bot; not claimed as complete market-window totals.</i>"
+      : "ℹ️ <i>No candidate-matched exact-USD V4 swaps were verified for this alert; dollar amounts are not inferred from unverified market activity counts.</i>"
+  );
 
   const verifiedLaunchAgeV223Data =
     candidate?.verifiedLaunchAgeV223 ||
