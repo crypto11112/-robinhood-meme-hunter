@@ -4,7 +4,11 @@
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V228
+ * CURRENT BUILD: V229
+ * - V229 adds sanitized Bitquery shared-request 401/403 diagnostics without exposing credentials
+ * - Verifies current V2 Bearer auth/header path and current EVM.Holders query shape while preserving V228 holder-target handoff
+ * - Captures response content-type, bounded redacted error preview and conservative rejection classification
+ * - Adds zero external requests; Momentum, verified BUY/SELL USD, Telegram thresholds and request ceilings unchanged
  * - FIX: persists the best non-Pons candidate still missing verified holder concentration after analysis so the NEXT existing Bitquery shared request can target it
  * - FIX: next-scan persisted holder target is selected before the older completion/live fallback, closing the V227 timing gap that produced NOT_TARGETED when candidates were selected after the shared request
  * - SAFETY: persisted targets expire after 6 hours, must still be watched/non-terminal/non-excluded, and are cleared when matching fresh Bitquery holder evidence is already verified
@@ -904,7 +908,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V228";
+const VERSION = "V229";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -15976,7 +15980,13 @@ async function discoverVerifiedBagsLaunchesV210(
       holderCount: null,
       rowCount: 0,
       dataset: "combined",
-      externalRequestsAdded: 0
+      externalRequestsAdded: 0,
+      sharedRequestHttpStatusV229: null,
+      sharedRequestContentTypeV229: null,
+      sharedRequestErrorClassV229: null,
+      sharedRequestErrorPreviewV229: null,
+      bearerHeaderConfiguredV229: Boolean(String(env.BITQUERY_ACCESS_TOKEN || "").trim()),
+      endpointV229: BITQUERY_GRAPHQL_V2
     },
     status: null,
     httpStatus: null,
@@ -16247,12 +16257,63 @@ async function discoverVerifiedBagsLaunchesV210(
         }
       );
 
+    const bitqueryResponseContentTypeV229 =
+      String(response.headers.get("content-type") || "").slice(0, 120);
+
+    let responseTextV229 = "";
+    try {
+      responseTextV229 = await response.text();
+    } catch {
+      responseTextV229 = "";
+    }
+
     let payload = null;
     try {
-      payload = await response.json();
+      payload = responseTextV229 ? JSON.parse(responseTextV229) : null;
     } catch {
       payload = null;
     }
+
+    /*
+     * V229 diagnostic only. Never expose the configured secret or full gateway
+     * response. The preview is bounded and redacts bearer-like/token-like values.
+     */
+    const sanitizeBitqueryErrorPreviewV229 = value =>
+      String(value || "")
+        .replace(/Bearer\s+[^\s\"']+/gi, "Bearer [REDACTED]")
+        .replace(/ory_[A-Za-z0-9._~-]+/g, "ory_[REDACTED]")
+        .replace(/(token|apikey|api_key|authorization)([\s\"'=:\-]+)[A-Za-z0-9._~-]{12,}/gi, "$1$2[REDACTED]")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 320);
+
+    const bitqueryRawErrorV229 =
+      payload?.errors?.map(row => row?.message).filter(Boolean).join(" | ") ||
+      payload?.message ||
+      payload?.error ||
+      responseTextV229 ||
+      "";
+
+    const bitqueryErrorPreviewV229 =
+      sanitizeBitqueryErrorPreviewV229(bitqueryRawErrorV229);
+
+    const bitqueryErrorTextLowerV229 =
+      bitqueryErrorPreviewV229.toLowerCase();
+
+    const bitqueryErrorClassV229 =
+      response.status === 401
+        ? "AUTHENTICATION_REJECTED"
+        : response.status === 403 &&
+          /(plan|billing|entitle|permission|scope|upgrade|subscription|access denied)/.test(bitqueryErrorTextLowerV229)
+          ? "ACCESS_OR_ENTITLEMENT_REJECTED"
+          : response.status === 403 &&
+            /(token|oauth|authori[sz]|credential|expired|invalid)/.test(bitqueryErrorTextLowerV229)
+            ? "AUTH_OR_TOKEN_REJECTED"
+            : response.status === 403
+              ? "HTTP_403_GATEWAY_REJECTED_UNCLASSIFIED"
+              : response.status >= 400
+                ? `HTTP_${response.status}_REJECTED`
+                : null;
 
     telemetry.lastHttpStatus = response.status;
 
@@ -16266,7 +16327,19 @@ async function discoverVerifiedBagsLaunchesV210(
         status: telemetry.lastStatus,
         error:
           payload?.errors?.[0]?.message ||
-          `BITQUERY_HTTP_${response.status}`
+          `BITQUERY_HTTP_${response.status}`,
+        bitqueryHolderEvidenceV227: {
+          ...base.bitqueryHolderEvidenceV227,
+          attempted: Boolean(bitqueryHolderTargetAddressV227),
+          verified: false,
+          status: bitqueryHolderTargetAddressV227
+            ? `SHARED_REQUEST_HTTP_${response.status}`
+            : "NOT_TARGETED",
+          sharedRequestHttpStatusV229: response.status,
+          sharedRequestContentTypeV229: bitqueryResponseContentTypeV229 || null,
+          sharedRequestErrorClassV229: bitqueryErrorClassV229,
+          sharedRequestErrorPreviewV229: bitqueryErrorPreviewV229 || null
+        }
       };
     }
 
@@ -16355,7 +16428,13 @@ async function discoverVerifiedBagsLaunchesV210(
         rows: bitqueryHolderRowsV227,
         dataset: "combined",
         source: "BITQUERY_EVM_HOLDERS_V227",
-        externalRequestsAdded: 0
+        externalRequestsAdded: 0,
+        sharedRequestHttpStatusV229: response.status,
+        sharedRequestContentTypeV229: bitqueryResponseContentTypeV229 || null,
+        sharedRequestErrorClassV229: null,
+        sharedRequestErrorPreviewV229: null,
+        bearerHeaderConfiguredV229: true,
+        endpointV229: BITQUERY_GRAPHQL_V2
       };
     }
 
@@ -40836,6 +40915,13 @@ for (
       holderCount: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.holderCount ?? null,
       rowCount: safeNumber(bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.rowCount),
       dataset: "combined",
+      sharedRequestHttpStatusV229: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.sharedRequestHttpStatusV229 ?? bagsDiscoveryV210?.httpStatus ?? null,
+      sharedRequestContentTypeV229: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.sharedRequestContentTypeV229 || null,
+      sharedRequestErrorClassV229: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.sharedRequestErrorClassV229 || null,
+      sharedRequestErrorPreviewV229: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.sharedRequestErrorPreviewV229 || null,
+      bearerHeaderConfiguredV229: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.bearerHeaderConfiguredV229 === true,
+      endpointV229: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.endpointV229 || BITQUERY_GRAPHQL_V2,
+      holderQueryShapeV229: "EVM_ROBINHOOD_DATASET_COMBINED_HOLDERS_BALANCE_SELECTWHERE_GT_ZERO_UNIQ_HOLDER_ADDRESS",
       ponsConcentrationSafety: "BLOCKED_UNTIL_DYNAMIC_PROTOCOL_INFRASTRUCTURE_EXCLUSION_IS_EXPLICIT"
     },
 
