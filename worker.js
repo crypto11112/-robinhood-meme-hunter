@@ -1,10 +1,14 @@
 /**
  * Robinhood Chain Meme Hunter
- * V200
+ * V201
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V200
+ * CURRENT BUILD: V201
+ * - V201 diagnostic checkpoint for CANDIDATE_QUOTE_IDENTITY_UNRESOLVED
+ * - Adds zero-request classification telemetry only; decoder behavior is unchanged
+ * - Preserves V200 Bitquery native-ETH normalization and V196 verified USD pricing
+ * - Preserves request hard limit, Telegram protection, scoring, KV state and discovery logic
  * - V200 normalizes Bitquery DEXPoolEvents native currency "0x" to canonical V4 ZERO
  * - Normalization is restricted to the Bitquery PoolId-first identity boundary
  * - Existing strict identity validation, registry persistence/replay, request budgets and V196 verified USD path are unchanged
@@ -749,7 +753,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V200";
+const VERSION = "V201";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -13768,6 +13772,21 @@ function collectOnChainDirectionalSwapsV179(
             )
           )
         : null,
+
+    candidateQuoteIdentityDiagnosticV201: {
+      enabled: true,
+      mode: "LOCAL_ZERO_EXTERNAL_REQUESTS",
+      purpose:
+        "CLASSIFY_CANDIDATE_QUOTE_IDENTITY_UNRESOLVED_WITHOUT_CHANGING_DECODER",
+      rejectionCount:
+        safeNumber(
+          rejectionReasons
+            .CANDIDATE_QUOTE_IDENTITY_UNRESOLVED
+        ),
+      externalRequestsAdded: 0,
+      verifiedUsdPathChanged: false,
+      decoderBehaviorChanged: false
+    },
 
     noExtraExternalRequests:
       true,
