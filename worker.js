@@ -1,9 +1,16 @@
 /**
  * Robinhood Chain Meme Hunter
- * V224
+ * V225
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
+ * CURRENT BUILD: V225
+ * - NEW: display-only verified holder-count recovery from current Blockscout counters, verified holder cache, or recent verified snapshots
+ * - NEW: holder-count cache is independent from holder concentration and never promotes concentration, momentum, confidence or Telegram qualification
+ * - NEW: Telegram distinguishes FRESH verified holder counts from VERIFIED CACHE counts; absent trustworthy evidence remains UNVERIFIED
+ * - SAFETY: cached holder count is display/telemetry only and does not set countersVerified or alter scoring/confirmation logic
+ * - CONFIRMED: V224 already uses separate ClankerLaunchesV224 and VirtualsLaunchesV224 GraphQL aliases, so no anti-crowding code change was required
+ * - Adds zero external requests and preserves V224 launch discovery, V223 launch age, Momentum, verified USD, holder integrity, Telegram thresholds and 42-request ceiling
  * CURRENT BUILD: V224
  * - NEW: verified Clanker discovery using Bitquery exact factory + zero-address 100B launch mint
  * - NEW: verified Virtuals discovery using Bitquery exact factory + zero-address mint without a fixed-supply assumption
@@ -872,7 +879,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V224";
+const VERSION = "V225";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1673,6 +1680,12 @@ const HOLDER_CACHE_MS =
   20 * 60 * 1000;
 
 const HOLDER_STALE_CACHE_MS =
+  2 * 60 * 60 * 1000;
+
+/* V225: display-only verified holder-count recovery.
+ * This cache never changes countersVerified, concentration, scoring or qualification.
+ */
+const HOLDER_COUNT_DISPLAY_CACHE_MS_V225 =
   2 * 60 * 60 * 1000;
 
 const HOLDER_PARTIAL_RETRY_MS_V149 =
@@ -23999,6 +24012,144 @@ function extractCounterData(
 }
 
 /* =========================================================
+   V225 VERIFIED HOLDER-COUNT DISPLAY RECOVERY
+   ========================================================= */
+
+function holderCountDisplayEvidenceV225(
+  watched,
+  holders,
+  state,
+  address
+) {
+  const now = Date.now();
+
+  const currentCount =
+    holders?.countersVerified === true &&
+    holders?.holderCount !== null &&
+    Number.isFinite(Number(holders.holderCount))
+      ? Number(holders.holderCount)
+      : null;
+
+  if (currentCount !== null) {
+    if (watched && typeof watched === "object") {
+      watched.holderCountCacheV225 = {
+        timestamp: now,
+        holderCount: currentCount,
+        source:
+          holders?.counterSource ||
+          holders?.holderSource ||
+          "BLOCKSCOUT"
+      };
+    }
+
+    return {
+      verified: true,
+      holderCount: currentCount,
+      cached: false,
+      freshness: "FRESH",
+      ageMs: 0,
+      source:
+        holders?.counterSource ||
+        holders?.holderSource ||
+        "BLOCKSCOUT"
+    };
+  }
+
+  const candidates = [];
+
+  const directCache = watched?.holderCountCacheV225;
+  if (
+    directCache &&
+    typeof directCache === "object" &&
+    directCache.holderCount !== null &&
+    directCache.holderCount !== undefined &&
+    Number.isFinite(Number(directCache.holderCount))
+  ) {
+    candidates.push({
+      timestamp: safeNumber(directCache.timestamp),
+      holderCount: Number(directCache.holderCount),
+      source: directCache.source || "HOLDER_COUNT_CACHE_V225"
+    });
+  }
+
+  const holderCache = watched?.holderCache;
+  if (
+    holderCache &&
+    typeof holderCache === "object" &&
+    holderCache.data?.countersVerified === true &&
+    holderCache.data?.holderCount !== null &&
+    Number.isFinite(Number(holderCache.data.holderCount))
+  ) {
+    candidates.push({
+      timestamp: safeNumber(holderCache.timestamp),
+      holderCount: Number(holderCache.data.holderCount),
+      source:
+        holderCache.data?.counterSource ||
+        holderCache.data?.holderSource ||
+        "VERIFIED_HOLDER_CACHE"
+    });
+  }
+
+  const snapshots =
+    state?.snapshots &&
+    Array.isArray(state.snapshots[normalize(address)])
+      ? state.snapshots[normalize(address)]
+      : [];
+
+  for (let i = snapshots.length - 1; i >= 0; i--) {
+    const row = snapshots[i];
+    if (
+      row?.holderCount !== null &&
+      Number.isFinite(Number(row?.holderCount)) &&
+      safeNumber(row?.timestamp) > 0
+    ) {
+      candidates.push({
+        timestamp: safeNumber(row.timestamp),
+        holderCount: Number(row.holderCount),
+        source: "VERIFIED_SNAPSHOT_CACHE"
+      });
+      break;
+    }
+  }
+
+  const best = candidates
+    .filter(row =>
+      row.timestamp > 0 &&
+      now - row.timestamp >= 0 &&
+      now - row.timestamp <= HOLDER_COUNT_DISPLAY_CACHE_MS_V225
+    )
+    .sort((a, b) => b.timestamp - a.timestamp)[0] || null;
+
+  if (!best) {
+    return {
+      verified: false,
+      holderCount: null,
+      cached: false,
+      freshness: "UNVERIFIED",
+      ageMs: null,
+      source: null
+    };
+  }
+
+  if (watched && typeof watched === "object") {
+    watched.holderCountCacheV225 = {
+      timestamp: best.timestamp,
+      holderCount: best.holderCount,
+      source: best.source
+    };
+  }
+
+  return {
+    verified: true,
+    holderCount: best.holderCount,
+    cached: true,
+    freshness: "VERIFIED_CACHE",
+    ageMs: now - best.timestamp,
+    source: best.source
+  };
+}
+
+/* =========================================================
    HOLDER HELPERS
    ========================================================= */
 
@@ -32296,11 +32447,25 @@ function telegramMessage(
       ? `${candidate.marketQuality.score}/100`
       : "UNVERIFIED";
 
+  const holderCountDisplayV225 =
+    holders?.holderCountDisplayV225;
+
   const holderText =
     holders?.countersVerified &&
     holders?.holderCount !== null
-      ? formatNumber(holders.holderCount)
-      : "UNVERIFIED";
+      ? `${formatNumber(holders.holderCount)} (VERIFIED)`
+      : holderCountDisplayV225?.verified === true &&
+        holderCountDisplayV225?.holderCount !== null
+        ? `${formatNumber(holderCountDisplayV225.holderCount)} (VERIFIED CACHE)`
+        : "UNVERIFIED";
+
+  const holderCountSourceTextV225 =
+    holders?.countersVerified &&
+    holders?.holderCount !== null
+      ? (holders?.counterSource || holders?.holderSource || "BLOCKSCOUT")
+      : holderCountDisplayV225?.verified === true
+        ? (holderCountDisplayV225?.source || "VERIFIED_CACHE")
+        : "UNVERIFIED";
 
   const holderConcentrationStatusV144 =
     holders?.concentrationVerified === true &&
@@ -32690,7 +32855,8 @@ function telegramMessage(
     ...verifiedObservedLinesV212,
     ...ponsCurveLinesV216,
     "",
-    `👥 Holder count: <b>${holderText}</b>`,
+    `👥 Holder count: <b>${escapeHtml(holderText)}</b>`,
+    `🧾 Holder count source: <b>${escapeHtml(holderCountSourceTextV225)}</b>`,
     `🔎 Holder concentration: <b>${holderConcentrationStatusV144}</b>`,
     `🛰 Holder data source: <b>${escapeHtml(holderProviderV144)}</b>`,
     "",
@@ -32975,6 +33141,20 @@ async function analyzeToken(
         state
       );
   }
+
+  /* V225: recover a verified holder count for display/telemetry only.
+   * Do not mutate countersVerified: scoring and qualification stay unchanged.
+   */
+  holders = {
+    ...holders,
+    holderCountDisplayV225:
+      holderCountDisplayEvidenceV225(
+        watched,
+        holders,
+        state,
+        address
+      )
+  };
 
   const whaleFlow =
     analyseWhaleFlow(
