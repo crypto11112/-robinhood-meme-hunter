@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V260 / V2.0:
+ * - FIX: fair launch-age recovery rotation prevents a no-evidence token from monopolising the one completion slot
+ * - Persists per-token launch-age recovery state in existing KV state; NO_VERIFIED_LAUNCH_EVENT_EVIDENCE enters a 30-minute retry cooldown
+ * - Candidates cooling down are skipped during zero-request target selection so the next eligible missing-age token can be checked
+ * - Successful recovery clears the token's no-evidence cooldown; transient provider/budget failures do NOT create a no-evidence cooldown
+ * - Still processes at most ONE launch-age completion target per scan and never guesses launch time
+ * - Preserves V259 target tiers, V258 strict launch evidence, V257 USD pool fix, V256 holder completion, scoring/USD maths, KV key and 42/21 ceilings
  * V259 / V2.0:
  * - FIX: launch-age completion is no longer limited to candidates about to send a fresh Telegram alert
  * - PRIORITY: current Telegram qualifier -> recent previously-alerted watched token -> current analysed candidate
@@ -1056,7 +1063,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V259";
+const VERSION = "V260";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -3541,6 +3548,9 @@ function newState() {
     alerts:
       {},
 
+    launchAgeRecoveryV260:
+      {},
+
     snapshots:
       {},
 
@@ -4018,6 +4028,13 @@ async function readState(env) {
           typeof parsed.alerts ===
             "object"
             ? parsed.alerts
+            : {},
+
+        launchAgeRecoveryV260:
+          parsed.launchAgeRecoveryV260 &&
+          typeof parsed.launchAgeRecoveryV260 ===
+            "object"
+            ? parsed.launchAgeRecoveryV260
             : {},
 
         snapshots:
@@ -10248,6 +10265,57 @@ function pruneState(
         ALERT_COOLDOWN
     ) {
       delete state.alerts[
+        address
+      ];
+    }
+  }
+
+  const launchRecoveryV260 =
+    launchAgeRecoveryStateV260(
+      state
+    );
+
+  const watchedAddressesV260 =
+    new Set(
+      state.watchedTokens
+        .map(
+          token =>
+            normalize(
+              token?.address
+            )
+        )
+        .filter(
+          isAddress
+        )
+    );
+
+  for (
+    const [
+      address,
+      entry
+    ]
+    of Object.entries(
+      launchRecoveryV260
+    )
+  ) {
+    const lastCheckedAt =
+      safeNumber(
+        entry?.lastCheckedAt
+      );
+
+    const keepRecent =
+      lastCheckedAt > 0 &&
+      current -
+        lastCheckedAt <=
+        24 * 60 * 60 * 1000;
+
+    if (
+      !watchedAddressesV260.has(
+        normalize(address)
+      ) &&
+      !keepRecent
+    ) {
+      delete launchRecoveryV260[
         address
       ];
     }
@@ -40769,6 +40837,196 @@ function verifiedLaunchAgeV223(
   };
 }
 
+const LAUNCH_AGE_NO_EVIDENCE_COOLDOWN_MS_V260 =
+  30 * 60 * 1000;
+
+function launchAgeRecoveryStateV260(
+  state
+) {
+  state.launchAgeRecoveryV260 =
+    state.launchAgeRecoveryV260 &&
+    typeof state.launchAgeRecoveryV260 ===
+      "object"
+      ? state.launchAgeRecoveryV260
+      : {};
+
+  return state.launchAgeRecoveryV260;
+}
+
+function launchAgeRecoveryEntryV260(
+  state,
+  tokenAddress
+) {
+  const token =
+    normalize(
+      tokenAddress
+    );
+
+  if (!isAddress(token)) {
+    return null;
+  }
+
+  const store =
+    launchAgeRecoveryStateV260(
+      state
+    );
+
+  store[token] =
+    store[token] &&
+    typeof store[token] ===
+      "object"
+      ? store[token]
+      : {
+          lastCheckedAt: null,
+          lastStatus: null,
+          lastNoEvidenceAt: null,
+          cooldownUntil: null,
+          checks: 0,
+          noEvidenceCount: 0,
+          recoveredAt: null,
+          lastRecoveredLaunchTime: null
+        };
+
+  return store[token];
+}
+
+function launchAgeRecoveryEligibilityV260(
+  state,
+  tokenAddress
+) {
+  const entry =
+    launchAgeRecoveryEntryV260(
+      state,
+      tokenAddress
+    );
+
+  const now =
+    Date.now();
+
+  const cooldownUntil =
+    safeNumber(
+      entry?.cooldownUntil
+    );
+
+  return {
+    eligible:
+      !cooldownUntil ||
+      now >= cooldownUntil,
+    cooldownUntil:
+      cooldownUntil || null,
+    retryAfterMs:
+      cooldownUntil &&
+      now < cooldownUntil
+        ? cooldownUntil - now
+        : 0,
+    lastStatus:
+      entry?.lastStatus ||
+      null,
+    lastCheckedAt:
+      safeNumber(
+        entry?.lastCheckedAt
+      ) || null,
+    noEvidenceCount:
+      safeNumber(
+        entry?.noEvidenceCount
+      )
+  };
+}
+
+function recordLaunchAgeRecoveryResultV260(
+  state,
+  tokenAddress,
+  completion
+) {
+  const entry =
+    launchAgeRecoveryEntryV260(
+      state,
+      tokenAddress
+    );
+
+  if (!entry) {
+    return null;
+  }
+
+  const now =
+    Date.now();
+
+  entry.lastCheckedAt =
+    now;
+
+  entry.lastStatus =
+    completion?.status ||
+    "UNKNOWN";
+
+  entry.checks =
+    safeNumber(
+      entry.checks
+    ) + 1;
+
+  if (
+    completion?.recovered ===
+      true
+  ) {
+    entry.recoveredAt =
+      now;
+
+    entry.lastRecoveredLaunchTime =
+      completion?.after
+        ?.launchTime ||
+      null;
+
+    entry.lastNoEvidenceAt =
+      null;
+
+    entry.cooldownUntil =
+      null;
+
+    return {
+      status:
+        "RECOVERED_COOLDOWN_CLEARED_V260",
+      cooldownUntil:
+        null
+    };
+  }
+
+  if (
+    completion?.status ===
+      "NO_VERIFIED_LAUNCH_EVENT_EVIDENCE"
+  ) {
+    entry.lastNoEvidenceAt =
+      now;
+
+    entry.noEvidenceCount =
+      safeNumber(
+        entry.noEvidenceCount
+      ) + 1;
+
+    entry.cooldownUntil =
+      now +
+      LAUNCH_AGE_NO_EVIDENCE_COOLDOWN_MS_V260;
+
+    return {
+      status:
+        "NO_EVIDENCE_COOLDOWN_SET_V260",
+      cooldownUntil:
+        entry.cooldownUntil
+    };
+  }
+
+  /*
+   * Budget/provider/transient failures remain eligible next scan. They are not
+   * evidence that launch data does not exist.
+   */
+  return {
+    status:
+      "NO_NO_EVIDENCE_COOLDOWN_FOR_TRANSIENT_RESULT_V260",
+    cooldownUntil:
+      safeNumber(
+        entry.cooldownUntil
+      ) || null
+  };
+}
+
 /* =========================================================
    V258 VERIFIED LAUNCH-AGE COMPLETION
    ========================================================= */
@@ -47596,6 +47854,9 @@ for (
   const launchAgeTargetMapV259 =
     new Map();
 
+  const launchAgeCooldownSkipsV260 =
+    [];
+
   const addLaunchAgeTargetV259 = (
     candidate,
     targetClass,
@@ -47630,6 +47891,30 @@ for (
       launch?.verified ===
         true
     ) {
+      return;
+    }
+
+    const recoveryEligibilityV260 =
+      launchAgeRecoveryEligibilityV260(
+        state,
+        address
+      );
+
+    if (
+      recoveryEligibilityV260
+        ?.eligible !==
+      true
+    ) {
+      launchAgeCooldownSkipsV260
+        .push({
+          address,
+          targetClass,
+          priorityTier,
+          score:
+            safeNumber(score),
+          ...recoveryEligibilityV260
+        });
+
       return;
     }
 
@@ -47832,6 +48117,15 @@ for (
       "CURRENT_TELEGRAM_QUALIFIER_THEN_RECENT_ALERT_THEN_CURRENT_ANALYSED",
     canRecoverPreviouslyAlertedTokenV259:
       true,
+    fairRotationV260:
+      true,
+    noEvidenceCooldownMsV260:
+      LAUNCH_AGE_NO_EVIDENCE_COOLDOWN_MS_V260,
+    cooldownSkippedCountV260:
+      launchAgeCooldownSkipsV260
+        .length,
+    cooldownSkippedTargetsV260:
+      launchAgeCooldownSkipsV260,
     selectedTargetV259:
       launchAgeCompletionCandidatesV258
         [0]
@@ -47861,6 +48155,13 @@ for (
         state,
         budget,
         env
+      );
+
+    const recoveryStateUpdateV260 =
+      recordLaunchAgeRecoveryResultV260(
+        state,
+        candidate?.address,
+        completion
       );
 
     if (
@@ -47938,6 +48239,9 @@ for (
         blockTimestampRecovery:
           completion
             ?.blockTimestampRecovery ||
+          null,
+        recoveryStateUpdateV260:
+          recoveryStateUpdateV260 ||
           null
       });
   }
@@ -50494,7 +50798,15 @@ for (
       oneTargetPerScanStillEnforcedV259:
         true,
       selectionAddsExternalRequestsV259:
-        false
+        false,
+      fairRotationV260:
+        true,
+      noEvidenceCooldownMsV260:
+        LAUNCH_AGE_NO_EVIDENCE_COOLDOWN_MS_V260,
+      noEvidenceCooldownOnlyV260:
+        true,
+      transientFailuresRemainRetryableV260:
+        true
     },
 
     telegramVerifiedUsdObservabilityV213: {
