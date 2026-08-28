@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V258 / V2.0:
+ * - FEATURE: verified launch-age completion for Telegram-qualifying candidates whose launch age is still UNVERIFIED
+ * - Zero-request first: exact-token recovery from already-persisted VERIFIED launch telemetry (Bags, Flap, Pons V2, LaunchHood, fixed-1B launchpads, Clanker, Virtuals)
+ * - pools.trade recovery accepts only a VERIFIED TokenLaunched event; TokenCreated alone is not treated as launch time
+ * - When a verified launch event has a block but no timestamp, V258 may spend one budgeted eth_getBlockByNumber request to recover the canonical block timestamp
+ * - SAFETY: scanner firstSeenAt, DexScreener pair age and generic V4 Initialize time are never substituted for a verified launch timestamp
+ * - Preserves V257 live-pool USD fix, V256 holder completion, V253 calibration, scoring, USD maths, Telegram thresholds, KV and 42/21 ceilings
  * V257 / V2.0:
  * - FIX: verified-USD completion now prefers a candidate-matched CURRENT LIVE SWAP PoolId before an older stored verified PoolId
  * - FIX: selected PoolId identity is resolved EXACTLY for that PoolId, preventing onChainPoolIdentityV153() from silently switching back to another watched pool
@@ -1042,7 +1049,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V257";
+const VERSION = "V258";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -20712,7 +20719,54 @@ function processDiscoveryLogs(
           : "BACKLOG_POOLS_TRADE_VERIFIED_V208"
       );
 
-      if (watched?.token) seenTokens.add(normalize(event.token));
+      if (watched?.token) {
+        seenTokens.add(
+          normalize(
+            event.token
+          )
+        );
+
+        /*
+         * V258: persist the positively decoded pools.trade launch identity.
+         * Raw discovery logs do not carry a timestamp, so launchTime remains
+         * null until canonical block-time completion succeeds.
+         */
+        watched.token.launchpadV258 = {
+          verified: true,
+          protocol:
+            "pools.trade",
+          launchBlock:
+            (() => {
+              try {
+                return event?.blockNumber
+                  ? Number(
+                      BigInt(
+                        event.blockNumber
+                      )
+                    )
+                  : null;
+              } catch {
+                return null;
+              }
+            })(),
+          launchTime:
+            null,
+          transactionHash:
+            event
+              ?.transactionHash ||
+            null,
+          source:
+            "POOLS_TRADE_TOKEN_LAUNCHED_V208_V258",
+          event:
+            "TokenLaunched",
+          poolId:
+            event?.poolId ||
+            null,
+          timestampRecoveredFromBlockV258:
+            false
+        };
+      }
+
       if (watched?.added) {
         newTokens.add(normalize(event.token));
         poolsTradeVerifiedTokensAddedV208++;
@@ -40593,7 +40647,8 @@ function verifiedLaunchAgeV223(
     watched?.launchpadV215,
     watched?.launchpadV220,
     watched?.launchpadV222,
-    watched?.launchpadV224
+    watched?.launchpadV224,
+    watched?.launchpadV258
   ]
     .filter(
       row =>
@@ -40706,6 +40761,762 @@ function verifiedLaunchAgeV223(
     scannerAgeIsNotLaunchAge: true
   };
 }
+
+/* =========================================================
+   V258 VERIFIED LAUNCH-AGE COMPLETION
+   ========================================================= */
+
+/*
+ * Gather only launch evidence that was already positively verified by the
+ * corresponding protocol-specific discovery logic. This function never uses
+ * firstSeenAt, market pairCreatedAt, generic PoolManager Initialize or token
+ * deployment time as a substitute for protocol launch time.
+ */
+function verifiedLaunchTelemetryCandidatesV258(
+  state,
+  tokenAddress
+) {
+  const token =
+    normalize(
+      tokenAddress
+    );
+
+  if (!isAddress(token)) {
+    return [];
+  }
+
+  const sources = [
+    {
+      key: "bagsDiscoveryV210",
+      protocol: "Bags.fm",
+      rows:
+        state?.bagsDiscoveryV210
+          ?.recentVerifiedLaunches
+    },
+    {
+      key: "flapDiscoveryV214",
+      protocol: "Flap.sh",
+      rows:
+        state?.flapDiscoveryV214
+          ?.recentVerifiedLaunches
+    },
+    {
+      key: "ponsDiscoveryV215",
+      protocol: "Pons V2",
+      rows:
+        state?.ponsDiscoveryV215
+          ?.recentVerifiedLaunches
+    },
+    {
+      key: "launchHoodDiscoveryV220",
+      protocol: "LaunchHood",
+      rows:
+        state?.launchHoodDiscoveryV220
+          ?.recentVerifiedLaunches
+    },
+    {
+      key: "fixedMintLaunchpadDiscoveryV222",
+      protocol: null,
+      rows:
+        state?.fixedMintLaunchpadDiscoveryV222
+          ?.recentVerifiedLaunches
+    },
+    {
+      key: "clankerVirtualsDiscoveryV224",
+      protocol: null,
+      rows:
+        state?.clankerVirtualsDiscoveryV224
+          ?.recentVerifiedLaunches
+    },
+    {
+      key: "poolsTradeLaunchTelemetryV209",
+      protocol: "pools.trade",
+      rows:
+        state?.poolsTradeLaunchTelemetryV209
+          ?.recentVerifiedLaunches,
+      poolsTrade: true
+    }
+  ];
+
+  const found = [];
+
+  for (const source of sources) {
+    if (!Array.isArray(source.rows)) {
+      continue;
+    }
+
+    for (const row of source.rows) {
+      if (
+        normalize(
+          row?.token
+        ) !== token
+      ) {
+        continue;
+      }
+
+      /*
+       * pools.trade distinguishes TokenCreated from TokenLaunched.
+       * Only TokenLaunched is accepted as actual launch evidence.
+       */
+      if (
+        source.poolsTrade === true &&
+        row?.event !==
+          "TokenLaunched"
+      ) {
+        continue;
+      }
+
+      const rawBlock =
+        row?.blockNumber ??
+        row?.launchBlock ??
+        null;
+
+      let blockNumber =
+        null;
+
+      try {
+        if (
+          rawBlock !== null &&
+          rawBlock !== undefined &&
+          rawBlock !== ""
+        ) {
+          blockNumber =
+            Number(
+              typeof rawBlock === "string" &&
+              /^0x/i.test(rawBlock)
+                ? BigInt(rawBlock)
+                : BigInt(
+                    String(rawBlock)
+                  )
+            );
+        }
+      } catch {}
+
+      if (
+        !Number.isSafeInteger(
+          blockNumber
+        ) ||
+        blockNumber <= 0
+      ) {
+        blockNumber =
+          null;
+      }
+
+      const rawTime =
+        row?.blockTime ??
+        row?.launchTime ??
+        null;
+
+      const parsedTime =
+        rawTime
+          ? Date.parse(
+              String(rawTime)
+            )
+          : NaN;
+
+      const launchTimestampMs =
+        Number.isFinite(
+          parsedTime
+        ) &&
+        parsedTime > 0
+          ? parsedTime
+          : null;
+
+      found.push({
+        verified: true,
+        token,
+        protocol:
+          row?.protocol ||
+          row?.family ||
+          source.protocol ||
+          null,
+        telemetryKey:
+          source.key,
+        event:
+          row?.event ||
+          null,
+        source:
+          row?.source ||
+          (
+            source.poolsTrade
+              ? "VERIFIED_POOLS_TRADE_TOKEN_LAUNCHED_V258"
+              : `VERIFIED_${source.key}_TELEMETRY_V258`
+          ),
+        blockNumber,
+        launchTime:
+          launchTimestampMs !==
+            null
+            ? new Date(
+                launchTimestampMs
+              ).toISOString()
+            : null,
+        launchTimestampMs,
+        transactionHash:
+          normalize(
+            row?.transactionHash
+          ) ||
+          null
+      });
+    }
+  }
+
+  /*
+   * Prefer evidence with an actual timestamp. Otherwise prefer the earliest
+   * verified launch block for timestamp completion.
+   */
+  return found.sort(
+    (a, b) => {
+      const aTime =
+        a.launchTimestampMs !==
+          null
+          ? a.launchTimestampMs
+          : Number.MAX_SAFE_INTEGER;
+
+      const bTime =
+        b.launchTimestampMs !==
+          null
+          ? b.launchTimestampMs
+          : Number.MAX_SAFE_INTEGER;
+
+      if (aTime !== bTime) {
+        return aTime - bTime;
+      }
+
+      return (
+        safeNumber(
+          a?.blockNumber
+        ) ||
+        Number.MAX_SAFE_INTEGER
+      ) -
+      (
+        safeNumber(
+          b?.blockNumber
+        ) ||
+        Number.MAX_SAFE_INTEGER
+      );
+    }
+  );
+}
+
+
+async function verifiedLaunchBlockTimestampV258(
+  env,
+  budget,
+  blockNumber
+) {
+  const block =
+    safeNumber(
+      blockNumber
+    );
+
+  const base = {
+    attempted: false,
+    verified: false,
+    blockNumber:
+      Number.isSafeInteger(block) &&
+      block > 0
+        ? block
+        : null,
+    provider: null,
+    launchTime: null,
+    launchTimestampMs: null,
+    externalRequestsUsed: 0,
+    status: null
+  };
+
+  if (
+    !Number.isSafeInteger(block) ||
+    block <= 0
+  ) {
+    return {
+      ...base,
+      status:
+        "INVALID_VERIFIED_LAUNCH_BLOCK"
+    };
+  }
+
+  if (
+    !budgetAvailable(
+      budget,
+      "analysis"
+    )
+  ) {
+    return {
+      ...base,
+      status:
+        "ANALYSIS_BUDGET_UNAVAILABLE"
+    };
+  }
+
+  const provider =
+    env?.ALCHEMY_API_KEY
+      ? {
+          name: "ALCHEMY",
+          url:
+            ALCHEMY_BASE +
+            env.ALCHEMY_API_KEY
+        }
+      : {
+          name:
+            "ROBINHOOD_PUBLIC_RPC",
+          url:
+            PUBLIC_RPC
+        };
+
+  const before =
+    safeNumber(
+      budget?.totalUsed
+    );
+
+  try {
+    const payload =
+      await rpcCall(
+        provider.url,
+        "eth_getBlockByNumber",
+        [
+          "0x" +
+          BigInt(block)
+            .toString(16),
+          false
+        ],
+        budget,
+        "analysis"
+      );
+
+    const used =
+      Math.max(
+        0,
+        safeNumber(
+          budget?.totalUsed
+        ) -
+        before
+      );
+
+    const rawTimestamp =
+      payload?.timestamp;
+
+    let unixSeconds =
+      null;
+
+    try {
+      if (
+        rawTimestamp !==
+          null &&
+        rawTimestamp !==
+          undefined
+      ) {
+        unixSeconds =
+          Number(
+            typeof rawTimestamp ===
+              "string" &&
+            /^0x/i.test(
+              rawTimestamp
+            )
+              ? BigInt(
+                  rawTimestamp
+                )
+              : BigInt(
+                  String(
+                    rawTimestamp
+                  )
+                )
+          );
+      }
+    } catch {}
+
+    if (
+      !Number.isSafeInteger(
+        unixSeconds
+      ) ||
+      unixSeconds <= 0
+    ) {
+      return {
+        ...base,
+        attempted:
+          true,
+        provider:
+          provider.name,
+        externalRequestsUsed:
+          used,
+        status:
+          "BLOCK_TIMESTAMP_UNVERIFIED"
+      };
+    }
+
+    const launchTimestampMs =
+      unixSeconds * 1000;
+
+    if (
+      !Number.isSafeInteger(
+        launchTimestampMs
+      ) ||
+      launchTimestampMs <= 0 ||
+      launchTimestampMs >
+        Date.now() +
+          5 * 60 * 1000
+    ) {
+      return {
+        ...base,
+        attempted:
+          true,
+        provider:
+          provider.name,
+        externalRequestsUsed:
+          used,
+        status:
+          "BLOCK_TIMESTAMP_INVALID"
+      };
+    }
+
+    return {
+      ...base,
+      attempted:
+        true,
+      verified:
+        true,
+      provider:
+        provider.name,
+      launchTime:
+        new Date(
+          launchTimestampMs
+        ).toISOString(),
+      launchTimestampMs,
+      externalRequestsUsed:
+        used,
+      status:
+        "VERIFIED_BLOCK_TIMESTAMP_V258"
+    };
+  }
+
+  catch (error) {
+    return {
+      ...base,
+      attempted:
+        safeNumber(
+          budget?.totalUsed
+        ) > before,
+      provider:
+        provider.name,
+      externalRequestsUsed:
+        Math.max(
+          0,
+          safeNumber(
+            budget?.totalUsed
+          ) -
+          before
+        ),
+      status:
+        "BLOCK_TIMESTAMP_FETCH_FAILED",
+      error:
+        errorString(
+          error
+        )
+    };
+  }
+}
+
+
+async function verifiedLaunchAgeCompletionPassV258(
+  candidate,
+  state,
+  budget,
+  env
+) {
+  const token =
+    normalize(
+      candidate?.address
+    );
+
+  const watched =
+    findWatched(
+      state,
+      token
+    );
+
+  const before =
+    watched
+      ? verifiedLaunchAgeV223(
+          watched
+        )
+      : {
+          verified: false
+        };
+
+  const base = {
+    enabled: true,
+    eligible: false,
+    attempted: false,
+    recovered: false,
+    address:
+      token || null,
+    status: null,
+    before,
+    evidence: null,
+    blockTimestampRecovery: null,
+    externalRequestsUsed: 0,
+    scannerAgeUsedAsLaunchAge:
+      false,
+    pairAgeUsedAsLaunchAge:
+      false,
+    genericInitializeUsedAsLaunchAge:
+      false
+  };
+
+  if (
+    !isAddress(token) ||
+    !watched
+  ) {
+    return {
+      ...base,
+      status:
+        "WATCHED_TOKEN_UNAVAILABLE"
+    };
+  }
+
+  if (
+    before?.verified === true
+  ) {
+    return {
+      ...base,
+      status:
+        "LAUNCH_AGE_ALREADY_VERIFIED"
+    };
+  }
+
+  const telemetryEvidenceRows =
+    verifiedLaunchTelemetryCandidatesV258(
+      state,
+      token
+    );
+
+  const persistedV258 =
+    watched?.launchpadV258;
+
+  const persistedEvidenceV258 =
+    (
+      persistedV258?.verified ===
+        true &&
+      persistedV258?.launchBlock
+    )
+      ? {
+          verified: true,
+          token,
+          protocol:
+            persistedV258?.protocol ||
+            null,
+          telemetryKey:
+            "watched.launchpadV258",
+          event:
+            persistedV258?.event ||
+            null,
+          source:
+            persistedV258?.source ||
+            "PERSISTED_VERIFIED_LAUNCH_EVENT_V258",
+          blockNumber:
+            safeNumber(
+              persistedV258
+                ?.launchBlock
+            ) || null,
+          launchTime:
+            persistedV258
+              ?.launchTime ||
+            null,
+          launchTimestampMs:
+            persistedV258?.launchTime
+              ? Date.parse(
+                  String(
+                    persistedV258
+                      .launchTime
+                  )
+                )
+              : null,
+          transactionHash:
+            persistedV258
+              ?.transactionHash ||
+            null
+        }
+      : null;
+
+  const evidenceRows = [
+    ...(
+      persistedEvidenceV258
+        ? [
+            persistedEvidenceV258
+          ]
+        : []
+    ),
+    ...telemetryEvidenceRows
+  ].sort(
+    (a, b) =>
+      (
+        safeNumber(
+          a?.blockNumber
+        ) ||
+        Number.MAX_SAFE_INTEGER
+      ) -
+      (
+        safeNumber(
+          b?.blockNumber
+        ) ||
+        Number.MAX_SAFE_INTEGER
+      )
+  );
+
+  if (!evidenceRows.length) {
+    return {
+      ...base,
+      eligible: true,
+      status:
+        "NO_VERIFIED_LAUNCH_EVENT_EVIDENCE"
+    };
+  }
+
+  const evidence =
+    evidenceRows[0];
+
+  let launchTime =
+    evidence?.launchTime ||
+    null;
+
+  let timestampRecovery =
+    null;
+
+  if (
+    !launchTime &&
+    evidence?.blockNumber
+  ) {
+    timestampRecovery =
+      await verifiedLaunchBlockTimestampV258(
+        env,
+        budget,
+        evidence.blockNumber
+      );
+
+    if (
+      timestampRecovery
+        ?.verified === true
+    ) {
+      launchTime =
+        timestampRecovery
+          .launchTime;
+    }
+  }
+
+  const externalRequestsUsed =
+    safeNumber(
+      timestampRecovery
+        ?.externalRequestsUsed
+    );
+
+  if (!launchTime) {
+    return {
+      ...base,
+      eligible: true,
+      attempted:
+        timestampRecovery
+          ?.attempted === true,
+      status:
+        timestampRecovery
+          ?.status ||
+        "VERIFIED_EVENT_TIMESTAMP_UNAVAILABLE",
+      evidence,
+      blockTimestampRecovery:
+        timestampRecovery,
+      externalRequestsUsed
+    };
+  }
+
+  const parsed =
+    Date.parse(
+      String(
+        launchTime
+      )
+    );
+
+  if (
+    !Number.isFinite(parsed) ||
+    parsed <= 0 ||
+    parsed >
+      Date.now() +
+        5 * 60 * 1000
+  ) {
+    return {
+      ...base,
+      eligible: true,
+      attempted:
+        timestampRecovery
+          ?.attempted === true,
+      status:
+        "RECOVERED_LAUNCH_TIMESTAMP_INVALID",
+      evidence,
+      blockTimestampRecovery:
+        timestampRecovery,
+      externalRequestsUsed
+    };
+  }
+
+  watched.launchpadV258 = {
+    verified: true,
+    protocol:
+      evidence?.protocol ||
+      "VERIFIED_LAUNCH_EVENT",
+    launchBlock:
+      evidence?.blockNumber ||
+      null,
+    launchTime:
+      new Date(
+        parsed
+      ).toISOString(),
+    transactionHash:
+      evidence
+        ?.transactionHash ||
+      null,
+    source:
+      evidence?.source ||
+      "VERIFIED_LAUNCH_TELEMETRY_V258",
+    telemetryKey:
+      evidence
+        ?.telemetryKey ||
+      null,
+    event:
+      evidence?.event ||
+      null,
+    timestampRecoveredFromBlockV258:
+      timestampRecovery
+        ?.verified === true
+  };
+
+  const after =
+    verifiedLaunchAgeV223(
+      watched
+    );
+
+  candidate.verifiedLaunchAgeV223 =
+    after;
+
+  return {
+    ...base,
+    eligible: true,
+    attempted:
+      timestampRecovery
+        ?.attempted === true ||
+      Boolean(
+        evidence?.launchTime
+      ),
+    recovered:
+      after?.verified === true,
+    status:
+      after?.verified === true
+        ? "VERIFIED_LAUNCH_AGE_RECOVERED_V258"
+        : "LAUNCH_AGE_STILL_UNVERIFIED",
+    evidence,
+    blockTimestampRecovery:
+      timestampRecovery,
+    externalRequestsUsed,
+    after
+  };
+}
+
 
 function trueLaunchFreshness(
   watched
@@ -46759,6 +47570,139 @@ for (
       });
   }
 
+  const launchAgeCompletionCandidatesV258 =
+    candidates
+      .filter(
+        candidate =>
+          qualifiesTelegram(
+            candidate
+          ) &&
+          candidate
+            ?.verifiedLaunchAgeV223
+            ?.verified !==
+          true
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.opportunity?.score
+          ) -
+          safeNumber(
+            a?.opportunity?.score
+          )
+      )
+      .slice(
+        0,
+        1
+      );
+
+  const launchAgeCompletionV258 = {
+    enabled: true,
+    maxCandidatesPerScan: 1,
+    candidatesEligible:
+      launchAgeCompletionCandidatesV258
+        .length,
+    attempted: 0,
+    recovered: 0,
+    externalRequestsUsed: 0,
+    exactTokenMatchRequired: true,
+    verifiedLaunchEventRequired: true,
+    scannerAgeSubstitutionForbidden:
+      true,
+    pairAgeSubstitutionForbidden:
+      true,
+    genericInitializeSubstitutionForbidden:
+      true,
+    results: []
+  };
+
+  for (
+    const candidate
+    of launchAgeCompletionCandidatesV258
+  ) {
+    const completion =
+      await verifiedLaunchAgeCompletionPassV258(
+        candidate,
+        state,
+        budget,
+        env
+      );
+
+    if (
+      completion?.attempted ===
+        true
+    ) {
+      launchAgeCompletionV258
+        .attempted++;
+    }
+
+    if (
+      completion?.recovered ===
+        true
+    ) {
+      launchAgeCompletionV258
+        .recovered++;
+    }
+
+    launchAgeCompletionV258
+      .externalRequestsUsed +=
+        safeNumber(
+          completion
+            ?.externalRequestsUsed
+        );
+
+    launchAgeCompletionV258
+      .results.push({
+        address:
+          normalize(
+            candidate?.address
+          ),
+        symbol:
+          candidate?.symbol ||
+          null,
+        status:
+          completion?.status ||
+          null,
+        attempted:
+          completion?.attempted ===
+          true,
+        recovered:
+          completion?.recovered ===
+          true,
+        externalRequestsUsed:
+          safeNumber(
+            completion
+              ?.externalRequestsUsed
+          ),
+        protocol:
+          completion?.after
+            ?.protocol ||
+          completion?.evidence
+            ?.protocol ||
+          null,
+        launchTime:
+          completion?.after
+            ?.launchTime ||
+          null,
+        launchAgeDisplay:
+          completion?.after
+            ?.launchAgeDisplay ||
+          "UNVERIFIED",
+        evidenceSource:
+          completion?.evidence
+            ?.source ||
+          null,
+        telemetryKey:
+          completion?.evidence
+            ?.telemetryKey ||
+          null,
+        blockTimestampRecovery:
+          completion
+            ?.blockTimestampRecovery ||
+          null
+      });
+  }
+
   const telegramQualificationDiagnostics =
     buildTelegramQualificationDiagnostics(
       candidates
@@ -49289,6 +50233,22 @@ for (
       ambiguousZeroGuardV250Preserved:
         true,
       holderRowsNeverUsedAsTotal:
+        true
+    },
+
+    launchAgeCompletionV258: {
+      ...launchAgeCompletionV258,
+      preservedHardExternalRequestLimit:
+        MAX_EXTERNAL_REQUESTS,
+      preservedAnalysisRequestLimit:
+        ANALYSIS_REQUEST_LIMIT,
+      launchAgeDefinition:
+        "VERIFIED_PROTOCOL_LAUNCH_EVENT_TIMESTAMP_ONLY",
+      scannerAgeNeverPromoted:
+        true,
+      pairCreatedAtNeverPromoted:
+        true,
+      genericV4InitializeNeverPromoted:
         true
     },
 
