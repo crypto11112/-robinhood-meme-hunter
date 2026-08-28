@@ -1,5 +1,10 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V255 / V2.0:
+ * - TELEGRAM UX: Opportunity now shows a plain-English interpretation first, with the final calibrated score retained underneath
+ * - Labels use the final post-calibration Opportunity score only; raw scores never drive the displayed label
+ * - HIGH-CONVICTION WATCH 85-100, STRONG WATCH 75-84, WATCH 65-74, EARLY / BUILDING 50-64, WEAK below 50
+ * - Presentation only: no scoring maths, qualification thresholds, Momentum, verified USD, holders, KV or provider logic changed
  * V254 / V2.0:
  * - FEATURE: protected pre-Telegram Verified USD Completion Pass for qualifying V4 candidates
  * - Reuses current live V4 logs first with zero extra requests after repairing/confirming exact pool identity
@@ -1024,7 +1029,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V254";
+const VERSION = "V255";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -38394,6 +38399,39 @@ function telegramAlertClass(
   };
 }
 
+
+/* =========================================================
+   V255 TELEGRAM OPPORTUNITY LABEL
+   ========================================================= */
+
+function telegramOpportunityLabelV255(
+  candidate
+) {
+  const score =
+    safeNumber(
+      candidate?.opportunity?.score
+    );
+
+  if (score >= 85) {
+    return "HIGH-CONVICTION WATCH";
+  }
+
+  if (score >= 75) {
+    return "STRONG WATCH";
+  }
+
+  if (score >= 65) {
+    return "WATCH";
+  }
+
+  if (score >= 50) {
+    return "EARLY / BUILDING";
+  }
+
+  return "WEAK";
+}
+
+
 function telegramMessage(
   candidate
 ) {
@@ -38800,7 +38838,8 @@ function telegramMessage(
       ? `🏷 Launch source: <b>${escapeHtml(verifiedLaunchAgeV223Data.protocol)}</b>`
       : `🏷 Launch source: <b>UNVERIFIED</b>`,
     "",
-    `🎯 Opportunity: <b>${candidate.opportunity.score}/100</b>`,
+    `🎯 Opportunity: <b>${telegramOpportunityLabelV255(candidate)}</b>`,
+    `📊 Opportunity Score: <b>${candidate.opportunity.score}/100</b>`,
     `🚀 Momentum: <b>${candidate.momentum.score}/100 (${candidate.momentum.label})</b>`,
     `🔎 Confidence: <b>${candidate.confidence.score}/100 (${candidate.confidence.label})</b>`,
     `🧪 Market Quality: <b>${marketQualityText}</b>`,
