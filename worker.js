@@ -1,7 +1,7 @@
 /**
  * Robinhood Chain Meme Hunter
- * V245:
- * - HOTFIX: converts V244 indexed backlog BigInt telemetry to JSON-safe numbers
+ * V246:
+ * - HOTFIX: makes HTTP/KV/scheduled serialization BigInt-safe without changing internal BigInt arithmetic
  * - No discovery/backlog strategy, scoring, USD, Momentum, holder, Telegram or request-budget changes
  * V244: adds Blockscout-indexed historical backlog catch-up for verified Initialize and pools.trade launch events, with 1,000-row saturation protection and RPC fallback; live-first discovery and 42-request ceiling remain unchanged.
  * V243: Telegram transparency fix — always renders the Verified On-chain USD section; when candidate-matched exact-USD evidence is unavailable, windows are explicitly UNVERIFIED instead of silently omitted. No verified USD maths/qualification changes.
@@ -977,7 +977,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V245";
+const VERSION = "V246";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2085,14 +2085,57 @@ function uniqueBy(
   );
 }
 
+function jsonSafeReplacerV246(
+  key,
+  value
+) {
+  if (
+    typeof value ===
+    "bigint"
+  ) {
+    const max =
+      BigInt(
+        Number.MAX_SAFE_INTEGER
+      );
+
+    const min =
+      BigInt(
+        Number.MIN_SAFE_INTEGER
+      );
+
+    if (
+      value <= max &&
+      value >= min
+    ) {
+      return Number(
+        value
+      );
+    }
+
+    return value.toString();
+  }
+
+  return value;
+}
+
+function jsonStringifySafeV246(
+  data,
+  space = 2
+) {
+  return JSON.stringify(
+    data,
+    jsonSafeReplacerV246,
+    space
+  );
+}
+
 function jsonResponse(
   data,
   status = 200
 ) {
   return new Response(
-    JSON.stringify(
+    jsonStringifySafeV246(
       data,
-      null,
       2
     ),
     {
@@ -4035,8 +4078,9 @@ async function writeState(
 
     await kv.put(
       STATE_KEY,
-      JSON.stringify(
-        state
+      jsonStringifySafeV246(
+        state,
+        0
       )
     );
 
@@ -48704,7 +48748,7 @@ async function scheduledScan(
     );
 
   console.log(
-    JSON.stringify({
+    jsonStringifySafeV246({
       event:
         "V97_SCHEDULED_SCAN",
 
