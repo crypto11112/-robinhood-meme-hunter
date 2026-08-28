@@ -4,7 +4,11 @@
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V208
+ * CURRENT BUILD: V209
+ * - V209 persists cumulative verified pools.trade launch telemetry in the existing KV state
+ * - Live and backlog launch detection now surface independently in /scan
+ * - Recent verified launches are retained (bounded to 25) without extra RPC/API requests
+ * - Preserves V208 verified ABI decode, pool registration, watch insertion, BUY/SELL USD path and 42-request ceiling
  * - V208 decodes verified pools.trade TokenCreated and TokenLaunched events from existing discovery logs
  * - TokenLaunched validates PoolId + token + five-word PoolKey before registry/watchlist insertion
  * - Verified launch candidates now feed the existing analysis pipeline with zero extra requests
@@ -776,7 +780,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V208";
+const VERSION = "V209";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2738,6 +2742,21 @@ function newState() {
     unknownPools:
       {},
 
+    poolsTradeLaunchTelemetryV209: {
+      totalEventsSeen: 0,
+      totalDecodedVerified: 0,
+      totalVerifiedTokensAdded: 0,
+      totalVerifiedPoolsRegistered: 0,
+      tokenCreatedSeen: 0,
+      tokenLaunchedSeen: 0,
+      firstVerifiedLaunchAt: null,
+      lastVerifiedLaunchAt: null,
+      lastVerifiedLaunchBlock: null,
+      lastVerifiedToken: null,
+      lastVerifiedPoolId: null,
+      recentVerifiedLaunches: []
+    },
+
     scheduler: {
       scheduledRunCount:
         0,
@@ -3004,6 +3023,20 @@ async function readState(env) {
             "object"
             ? parsed.unknownPools
             : {},
+
+        poolsTradeLaunchTelemetryV209: {
+          ...fresh.poolsTradeLaunchTelemetryV209,
+          ...(
+            parsed.poolsTradeLaunchTelemetryV209 &&
+            typeof parsed.poolsTradeLaunchTelemetryV209 === "object"
+              ? parsed.poolsTradeLaunchTelemetryV209
+              : {}
+          ),
+          recentVerifiedLaunches:
+            Array.isArray(parsed.poolsTradeLaunchTelemetryV209?.recentVerifiedLaunches)
+              ? parsed.poolsTradeLaunchTelemetryV209.recentVerifiedLaunches.slice(-25)
+              : []
+        },
 
         scheduler: {
           ...fresh.scheduler,
@@ -15389,6 +15422,61 @@ function processDiscoveryLogs(
         poolsTradeVerifiedTokensAddedV208++;
       }
     }
+  }
+
+  state.poolsTradeLaunchTelemetryV209 =
+    state.poolsTradeLaunchTelemetryV209 &&
+    typeof state.poolsTradeLaunchTelemetryV209 === "object"
+      ? state.poolsTradeLaunchTelemetryV209
+      : newState().poolsTradeLaunchTelemetryV209;
+
+  const cumulativeV209 = state.poolsTradeLaunchTelemetryV209;
+  cumulativeV209.totalEventsSeen =
+    safeNumber(cumulativeV209.totalEventsSeen) + poolsTradeLaunchEventsV205.length;
+  cumulativeV209.totalDecodedVerified =
+    safeNumber(cumulativeV209.totalDecodedVerified) +
+    poolsTradeLaunchEventsV205.filter(row => row?.decodeVerified === true).length;
+  cumulativeV209.totalVerifiedTokensAdded =
+    safeNumber(cumulativeV209.totalVerifiedTokensAdded) +
+    poolsTradeVerifiedTokensAddedV208;
+  cumulativeV209.totalVerifiedPoolsRegistered =
+    safeNumber(cumulativeV209.totalVerifiedPoolsRegistered) +
+    poolsTradeVerifiedPoolsRegisteredV208;
+  cumulativeV209.tokenCreatedSeen =
+    safeNumber(cumulativeV209.tokenCreatedSeen) +
+    poolsTradeLaunchEventsV205.filter(row => row?.event === "TokenCreated").length;
+  cumulativeV209.tokenLaunchedSeen =
+    safeNumber(cumulativeV209.tokenLaunchedSeen) +
+    poolsTradeLaunchEventsV205.filter(row => row?.event === "TokenLaunched").length;
+
+  for (const event of poolsTradeLaunchEventsV205) {
+    if (event?.decodeVerified !== true) continue;
+    const at = Date.now();
+    if (!cumulativeV209.firstVerifiedLaunchAt) cumulativeV209.firstVerifiedLaunchAt = at;
+    cumulativeV209.lastVerifiedLaunchAt = at;
+    try {
+      cumulativeV209.lastVerifiedLaunchBlock =
+        event?.blockNumber ? Number(BigInt(event.blockNumber)) : null;
+    } catch {
+      cumulativeV209.lastVerifiedLaunchBlock = null;
+    }
+    cumulativeV209.lastVerifiedToken = event?.token || cumulativeV209.lastVerifiedToken || null;
+    if (event?.poolId) cumulativeV209.lastVerifiedPoolId = event.poolId;
+    cumulativeV209.recentVerifiedLaunches =
+      Array.isArray(cumulativeV209.recentVerifiedLaunches)
+        ? cumulativeV209.recentVerifiedLaunches
+        : [];
+    cumulativeV209.recentVerifiedLaunches.push({
+      event: event.event,
+      token: event.token || null,
+      poolId: event.poolId || null,
+      blockNumber: cumulativeV209.lastVerifiedLaunchBlock,
+      transactionHash: event.transactionHash || null,
+      source,
+      seenAt: at
+    });
+    cumulativeV209.recentVerifiedLaunches =
+      cumulativeV209.recentVerifiedLaunches.slice(-25);
   }
 
   return {
@@ -35924,6 +36012,9 @@ async function scan(
 
     onChainDirectionalV179,
 
+    poolsTradeLaunchCumulativeV209:
+      state.poolsTradeLaunchTelemetryV209,
+
     blockscoutDirectionalUsdV180,
 
     blockscoutDirectionalUsd429ProtectionV183:
@@ -36139,6 +36230,10 @@ async function scan(
               rawLogs:
                 backlogDiscovery
                   .rawLogs,
+
+              poolsTradeLaunchEventsV209:
+                backlogDiscovery
+                  .poolsTradeLaunchEventsV205,
 
               initializeEvents:
                 backlogDiscovery
