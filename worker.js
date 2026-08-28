@@ -1,8 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V225
+ * V226
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
+ *
+ * CURRENT BUILD: V226
+ * - NEW: priority holder-evidence completion can yield the V182 directional-USD reserve only when that reserve would otherwise block the next holder fallback
+ * - SAFETY: yield is limited to the active top/priority-completion candidate after V2 holder rows are unavailable; lower-priority candidates cannot consume it through this path
+ * - NEW: explicit V226 telemetry records reserve-yield address, reason, timestamp and whether the reserve was actually blocking
+ * - Adds zero external requests and does not increase the 42-request hard ceiling or 21-request analysis ceiling
+ * - Preserves V225 holder-count recovery, V224 launch coverage, V223 launch age, Momentum, verified BUY/SELL USD maths and Telegram thresholds
  *
  * CURRENT BUILD: V225
  * - NEW: display-only verified holder-count recovery from current Blockscout counters, verified holder cache, or recent verified snapshots
@@ -879,7 +886,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V225";
+const VERSION = "V226";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2123,6 +2130,15 @@ function createBudget() {
 
         releasedAt:
           null
+      },
+
+      priorityHolderEvidenceCompletionV226: {
+        enabled: true,
+        yields: 0,
+        address: null,
+        reason: null,
+        yieldedAt: null,
+        reserveWasBlocking: false
       }
     },
 
@@ -2278,6 +2294,43 @@ function budgetAvailable(
   }
 
   return false;
+}
+
+function v182ReserveBlocksAnalysisRequestV226(
+  budget,
+  amount = 1
+) {
+  const reserve = budget?.analysis?.blockscoutUsdGReserveV182;
+  if (reserve?.active !== true || safeNumber(reserve?.reservedRequests) <= 0) return false;
+  const reserved = Math.max(0, safeNumber(reserve.reservedRequests));
+  const notificationReserveRemaining =
+    budget?.notification?.globalReserveActiveV174 === true
+      ? Math.max(0, safeNumber(budget?.notification?.limit) - safeNumber(budget?.notification?.used))
+      : 0;
+  const preTelegramGlobalLimit = Math.max(0, safeNumber(budget?.totalLimit) - notificationReserveRemaining);
+  const analysisBlocked = safeNumber(budget?.analysis?.used) + amount > Math.max(0, safeNumber(budget?.analysis?.limit) - reserved);
+  const globalBlocked = safeNumber(budget?.totalUsed) + amount > Math.max(0, preTelegramGlobalLimit - reserved);
+  return analysisBlocked || globalBlocked;
+}
+
+function yieldV182ReserveToPriorityHolderEvidenceV226(budget, token, reason) {
+  const reserve = budget?.analysis?.blockscoutUsdGReserveV182;
+  const wasBlocking = v182ReserveBlocksAnalysisRequestV226(budget, 1);
+  if (reserve?.active !== true || !wasBlocking) return false;
+  reserve.active = false;
+  reserve.releasedWithoutUse = true;
+  reserve.releasedAt = Date.now();
+  reserve.releaseReasonV226 = reason || "PRIORITY_HOLDER_EVIDENCE_COMPLETION";
+  reserve.yieldedToPriorityHolderEvidenceV226 = true;
+  reserve.yieldedForAddressV226 = normalize(token) || null;
+  reserve.wasBlockingAtYieldV226 = true;
+  const t = budget.analysis.priorityHolderEvidenceCompletionV226 || (budget.analysis.priorityHolderEvidenceCompletionV226 = {enabled:true,yields:0,address:null,reason:null,yieldedAt:null,reserveWasBlocking:false});
+  t.yields = safeNumber(t.yields) + 1;
+  t.address = normalize(token) || null;
+  t.reason = reserve.releaseReasonV226;
+  t.yieldedAt = reserve.releasedAt;
+  t.reserveWasBlocking = true;
+  return true;
 }
 
 function consumeBudget(
@@ -2704,7 +2757,46 @@ function budgetTelemetry(
         ),
 
       protected:
-        true
+        true,
+
+      priorityHolderEvidenceCompletionV226:
+        budget.analysis
+          ?.priorityHolderEvidenceCompletionV226 ||
+        {
+          enabled: true,
+          yields: 0,
+          address: null,
+          reason: null,
+          yieldedAt: null,
+          reserveWasBlocking: false
+        },
+
+      blockscoutUsdGReserveV182: {
+        active:
+          budget.analysis
+            ?.blockscoutUsdGReserveV182
+            ?.active === true,
+        consumed:
+          budget.analysis
+            ?.blockscoutUsdGReserveV182
+            ?.consumed === true,
+        releasedWithoutUse:
+          budget.analysis
+            ?.blockscoutUsdGReserveV182
+            ?.releasedWithoutUse === true,
+        yieldedToPriorityHolderEvidenceV226:
+          budget.analysis
+            ?.blockscoutUsdGReserveV182
+            ?.yieldedToPriorityHolderEvidenceV226 === true,
+        yieldedForAddressV226:
+          budget.analysis
+            ?.blockscoutUsdGReserveV182
+            ?.yieldedForAddressV226 || null,
+        releaseReasonV226:
+          budget.analysis
+            ?.blockscoutUsdGReserveV182
+            ?.releaseReasonV226 || null
+      }
     },
 
     notification: {
@@ -25747,6 +25839,20 @@ async function holderIntelligence(
    * shape used by the existing concentration/integrity logic.
    */
   if (
+    !holders ||
+    !Array.isArray(holders.items)
+  ) {
+    /* V226: only the priority candidate may yield V182, and only if V182 is the actual blocker. */
+    if (priorityCompletion === true) {
+      yieldV182ReserveToPriorityHolderEvidenceV226(
+        budget,
+        token,
+        "PRIORITY_HOLDER_LEGACY_FALLBACK_BLOCKED_BY_V182"
+      );
+    }
+  }
+
+  if (
     (
       !holders ||
       !Array.isArray(
@@ -25790,6 +25896,18 @@ async function holderIntelligence(
    * routes fail do we spend one protected analysis request on PRO, and only
    * when a key has been configured.
    */
+  if (
+    v2HolderRowsUnavailable &&
+    legacyHolderRowsUnavailable &&
+    priorityCompletion === true
+  ) {
+    yieldV182ReserveToPriorityHolderEvidenceV226(
+      budget,
+      token,
+      "PRIORITY_HOLDER_PRO_FALLBACK_BLOCKED_BY_V182"
+    );
+  }
+
   if (
     v2HolderRowsUnavailable &&
     legacyHolderRowsUnavailable &&
