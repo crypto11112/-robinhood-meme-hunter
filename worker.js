@@ -1,5 +1,8 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V245:
+ * - HOTFIX: converts V244 indexed backlog BigInt telemetry to JSON-safe numbers
+ * - No discovery/backlog strategy, scoring, USD, Momentum, holder, Telegram or request-budget changes
  * V244: adds Blockscout-indexed historical backlog catch-up for verified Initialize and pools.trade launch events, with 1,000-row saturation protection and RPC fallback; live-first discovery and 42-request ceiling remain unchanged.
  * V243: Telegram transparency fix — always renders the Verified On-chain USD section; when candidate-matched exact-USD evidence is unavailable, windows are explicitly UNVERIFIED instead of silently omitted. No verified USD maths/qualification changes.
  * V242: makes PUBLIC RPC backlog catch-up adaptive after live 429 evidence: gentler proven-range growth, bounded public backlog bursts, and growth-streak reset on 429 while preserving Alchemy free-tier protection and the 42-request ceiling.
@@ -974,7 +977,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V244";
+const VERSION = "V245";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -11528,8 +11531,14 @@ async function scanBacklogBlockscoutIndexedV244(
   return {
     success: blocksProcessed > 0,
     complete: cursor > targetLatest,
-    processedThrough,
-    nextBlock: cursor <= targetLatest ? cursor : null,
+    processedThrough:
+      processedThrough !== null
+        ? Number(processedThrough)
+        : null,
+    nextBlock:
+      cursor <= targetLatest
+        ? Number(cursor)
+        : null,
     blocksProcessed,
     requestsUsed,
     completedRanges,
@@ -11576,7 +11585,7 @@ async function scanBacklogSequential(
   );
 
   const rpcStart = indexed.processedThrough !== null
-    ? indexed.processedThrough + 1n
+    ? BigInt(indexed.processedThrough) + 1n
     : start;
 
   let rpc = null;
@@ -11599,7 +11608,9 @@ async function scanBacklogSequential(
     rpc?.processedThrough !== null &&
     rpc?.processedThrough !== undefined
       ? rpc.processedThrough
-      : indexed.processedThrough;
+      : indexed.processedThrough !== null
+        ? BigInt(indexed.processedThrough)
+        : null;
 
   const blocksProcessed = processedThrough !== null
     ? Number(processedThrough - start + 1n)
