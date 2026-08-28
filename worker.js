@@ -1,9 +1,18 @@
 /**
  * Robinhood Chain Meme Hunter
- * V234
+ * V235
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
+ *
+ * V235 SEPARATE PERSISTED MARKET-EVIDENCE TARGET HANDOFF
+ * - Separates Bitquery market targeting from the V228 unresolved-holder target
+ * - Persists the best viable post-analysis candidate still missing verified market evidence for the NEXT shared Bitquery request
+ * - Market target must remain watched, valid/non-excluded, non-terminal and still market-unverified when consumed
+ * - Gives Trading.Tokens V233 and rank-1 Trading.Pairs V234 their own candidate-specific target while holder fallback keeps its independent target
+ * - Reuses the same shared Bitquery HTTP request: zero extra HTTP requests
+ * - Does NOT promote market.verified or infer liquidity
+ * - No changes to Momentum, verified BUY/SELL USD, holder maths, Telegram thresholds, KV key/binding or request ceilings
  *
  * V234 BITQUERY RANK-1 PAIR MARKET-EVIDENCE FALLBACK — STAGE 2
  * - Preserves V233 Trading.Tokens evidence unchanged
@@ -950,7 +959,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V234";
+const VERSION = "V235";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1046,6 +1055,10 @@ const BITQUERY_MARKET_EVIDENCE_MAX_AGE_MS_V233 =
 /* V234: freshness bound for exact-token rank-1 Trading.Pairs evidence. */
 const BITQUERY_RANKED_PAIR_EVIDENCE_MAX_AGE_MS_V234 =
   10 * 60 * 1000;
+
+/* V235: separate market-evidence target may wait for the next shared Bitquery request. */
+const BITQUERY_MARKET_TARGET_MAX_AGE_MS_V235 =
+  6 * 60 * 60 * 1000;
 
 /* =========================================================
    V210 VERIFIED BAGS.FM DISCOVERY
@@ -3140,6 +3153,16 @@ function newState() {
       status: "NONE"
     },
 
+    bitqueryMarketTargetV235: {
+      address: null,
+      reason: null,
+      selectedAt: null,
+      analysisPriority: null,
+      symbol: null,
+      sourceVersion: "V235",
+      status: "NONE"
+    },
+
     bitqueryMarketEvidenceV233: {
       address: null,
       targetReason: null,
@@ -3575,6 +3598,13 @@ async function readState(env) {
           ...(parsed.bitqueryHolderTargetV228 &&
           typeof parsed.bitqueryHolderTargetV228 === "object"
             ? parsed.bitqueryHolderTargetV228
+            : {})
+        },
+        bitqueryMarketTargetV235: {
+          ...fresh.bitqueryMarketTargetV235,
+          ...(parsed.bitqueryMarketTargetV235 &&
+          typeof parsed.bitqueryMarketTargetV235 === "object"
+            ? parsed.bitqueryMarketTargetV235
             : {})
         },
 
@@ -15927,7 +15957,8 @@ async function discoverVerifiedBagsLaunchesV210(
   env,
   state,
   budget,
-  holderTargetV227 = null
+  holderTargetV227 = null,
+  marketTargetV235 = null
 ) {
   const telemetry =
     state.bagsDiscoveryV210 &&
@@ -16053,13 +16084,20 @@ async function discoverVerifiedBagsLaunchesV210(
       `
       : "";
 
-  /* V233 stage 1: same target, same HTTP request, partial market fields only. */
+  /*
+   * V235: market evidence now has its own persisted/current target. This is
+   * intentionally independent of V228 holder targeting; both aliases still
+   * share this single existing Bitquery HTTP request.
+   */
   const bitqueryMarketTargetAddressV233 =
-    bitqueryHolderTargetAddressV227;
+    isAddress(marketTargetV235?.address) &&
+    normalize(marketTargetV235?.address) !== ZERO
+      ? normalize(marketTargetV235.address)
+      : null;
 
   const bitqueryMarketTargetReasonV233 =
     bitqueryMarketTargetAddressV233
-      ? String(bitqueryHolderTargetReasonV227 || "PRIORITY_MARKET_EVIDENCE_V233")
+      ? String(marketTargetV235?.reason || "PERSISTED_MARKET_EVIDENCE_TARGET_V235")
       : null;
 
   const bitqueryMarketGraphqlV233 =
@@ -36453,12 +36491,89 @@ for (
         ? {address: normalize(liveHolderTargetRowV227.address), reason: "HIGHEST_PRIORITY_CURRENT_LIVE_OR_NEW_V227"}
         : null;
 
+  /*
+   * V235: consume a separately persisted market-evidence target. It must still
+   * be watched, viable/non-terminal and market-unverified at request assembly.
+   * Fresh matching Bitquery market evidence clears the handoff rather than
+   * repeatedly querying the same token.
+   */
+  const persistedBitqueryMarketTargetV235 =
+    state.bitqueryMarketTargetV235 &&
+    typeof state.bitqueryMarketTargetV235 === "object"
+      ? state.bitqueryMarketTargetV235
+      : null;
+
+  const persistedBitqueryMarketTargetAddressV235 =
+    isAddress(persistedBitqueryMarketTargetV235?.address)
+      ? normalize(persistedBitqueryMarketTargetV235.address)
+      : null;
+
+  const persistedBitqueryMarketTargetAgeV235 =
+    persistedBitqueryMarketTargetAddressV235 &&
+    safeNumber(persistedBitqueryMarketTargetV235?.selectedAt)
+      ? Date.now() - safeNumber(persistedBitqueryMarketTargetV235.selectedAt)
+      : null;
+
+  const persistedBitqueryMarketWatchedV235 =
+    persistedBitqueryMarketTargetAddressV235
+      ? state.watchedTokens.find(
+          row => normalize(row?.address) === persistedBitqueryMarketTargetAddressV235
+        ) || null
+      : null;
+
+  const matchingBitqueryTokensFreshV235 = Boolean(
+    persistedBitqueryMarketTargetAddressV235 &&
+    state.bitqueryMarketEvidenceV233?.verified === true &&
+    normalize(state.bitqueryMarketEvidenceV233?.address) === persistedBitqueryMarketTargetAddressV235 &&
+    safeNumber(state.bitqueryMarketEvidenceV233?.fetchedAt) > 0 &&
+    Date.now() - safeNumber(state.bitqueryMarketEvidenceV233.fetchedAt) <=
+      BITQUERY_MARKET_EVIDENCE_MAX_AGE_MS_V233
+  );
+
+  const matchingBitqueryPairFreshV235 = Boolean(
+    persistedBitqueryMarketTargetAddressV235 &&
+    state.bitqueryRankedPairEvidenceV234?.verified === true &&
+    normalize(state.bitqueryRankedPairEvidenceV234?.address) === persistedBitqueryMarketTargetAddressV235 &&
+    safeNumber(state.bitqueryRankedPairEvidenceV234?.fetchedAt) > 0 &&
+    Date.now() - safeNumber(state.bitqueryRankedPairEvidenceV234.fetchedAt) <=
+      BITQUERY_RANKED_PAIR_EVIDENCE_MAX_AGE_MS_V234
+  );
+
+  const persistedBitqueryMarketTargetEligibleV235 = Boolean(
+    persistedBitqueryMarketTargetAddressV235 &&
+    persistedBitqueryMarketWatchedV235 &&
+    persistedBitqueryMarketTargetAgeV235 !== null &&
+    persistedBitqueryMarketTargetAgeV235 <= BITQUERY_MARKET_TARGET_MAX_AGE_MS_V235 &&
+    !matchingBitqueryTokensFreshV235 &&
+    !matchingBitqueryPairFreshV235 &&
+    !preMarketExcludedToken(persistedBitqueryMarketWatchedV235).excluded &&
+    !terminalPriorityRejectFromWatched(persistedBitqueryMarketWatchedV235).terminal &&
+    !freshUsableVerifiedMarketCacheV159(persistedBitqueryMarketWatchedV235)
+  );
+
+  if (persistedBitqueryMarketTargetAddressV235 && !persistedBitqueryMarketTargetEligibleV235) {
+    state.bitqueryMarketTargetV235 = {
+      ...newState().bitqueryMarketTargetV235,
+      status: matchingBitqueryTokensFreshV235 || matchingBitqueryPairFreshV235
+        ? "CLEARED_MATCHING_FRESH_MARKET_EVIDENCE"
+        : "CLEARED_STALE_OR_INELIGIBLE"
+    };
+  }
+
+  const bitqueryMarketTargetV235 = persistedBitqueryMarketTargetEligibleV235
+    ? {
+        address: persistedBitqueryMarketTargetAddressV235,
+        reason: "PERSISTED_MARKET_UNVERIFIED_TARGET_V235"
+      }
+    : null;
+
   const bagsDiscoveryV210 =
     await discoverVerifiedBagsLaunchesV210(
       env,
       state,
       budget,
-      bitqueryHolderTargetV227
+      bitqueryHolderTargetV227,
+      bitqueryMarketTargetV235
     );
 
   for (const launch of bagsDiscoveryV210.launches || []) {
@@ -41175,6 +41290,71 @@ for (
     };
   }
 
+  /*
+   * V235 next-scan market-target handoff. Selection is intentionally separate
+   * from holder completion. Prefer a viable analysed candidate that still has
+   * no verified usable market evidence and has candidate-matched verified
+   * on-chain trading evidence; then rank by the existing analysisPriority().
+   */
+  const bitqueryMarketTargetCandidatesV235 = candidates
+    .filter(candidate => {
+      const address = normalize(candidate?.address);
+      if (!isAddress(address) || address === ZERO) return false;
+      if (candidate?.validERC20 !== true) return false;
+      if (candidate?.excludedReason) return false;
+      if (terminalPriorityReject(candidate)?.terminal === true) return false;
+      if (candidate?.market?.verified === true &&
+          safeNumber(candidate?.market?.priceUsd) > 0 &&
+          safeNumber(candidate?.market?.liquidityUsd) > 0) return false;
+      const watched = state.watchedTokens.find(row => normalize(row?.address) === address) || null;
+      if (!watched) return false;
+      if (preMarketExcludedToken(watched).excluded) return false;
+      if (terminalPriorityRejectFromWatched(watched).terminal) return false;
+      const flow = candidate?.onChainVerifiedFlowV212;
+      if (flow?.verified !== true || safeNumber(flow?.recordCount) <= 0) return false;
+      return true;
+    })
+    .slice()
+    .sort((a, b) => analysisPriority(b) - analysisPriority(a));
+
+  const nextBitqueryMarketTargetV235 = bitqueryMarketTargetCandidatesV235[0] || null;
+
+  if (nextBitqueryMarketTargetV235) {
+    const nextAddressV235 = normalize(nextBitqueryMarketTargetV235.address);
+    const matchingTokensFreshV235 =
+      state.bitqueryMarketEvidenceV233?.verified === true &&
+      normalize(state.bitqueryMarketEvidenceV233?.address) === nextAddressV235 &&
+      safeNumber(state.bitqueryMarketEvidenceV233?.fetchedAt) > 0 &&
+      Date.now() - safeNumber(state.bitqueryMarketEvidenceV233.fetchedAt) <=
+        BITQUERY_MARKET_EVIDENCE_MAX_AGE_MS_V233;
+    const matchingPairFreshV235 =
+      state.bitqueryRankedPairEvidenceV234?.verified === true &&
+      normalize(state.bitqueryRankedPairEvidenceV234?.address) === nextAddressV235 &&
+      safeNumber(state.bitqueryRankedPairEvidenceV234?.fetchedAt) > 0 &&
+      Date.now() - safeNumber(state.bitqueryRankedPairEvidenceV234.fetchedAt) <=
+        BITQUERY_RANKED_PAIR_EVIDENCE_MAX_AGE_MS_V234;
+
+    state.bitqueryMarketTargetV235 = matchingTokensFreshV235 || matchingPairFreshV235
+      ? {
+          ...newState().bitqueryMarketTargetV235,
+          status: "NOT_QUEUED_MATCHING_FRESH_MARKET_EVIDENCE"
+        }
+      : {
+          address: nextAddressV235,
+          reason: "POST_ANALYSIS_MARKET_UNVERIFIED_WITH_VERIFIED_ONCHAIN_ACTIVITY_V235",
+          selectedAt: Date.now(),
+          analysisPriority: analysisPriority(nextBitqueryMarketTargetV235),
+          symbol: nextBitqueryMarketTargetV235?.symbol || null,
+          sourceVersion: "V235",
+          status: "QUEUED_FOR_NEXT_SHARED_BITQUERY_REQUEST"
+        };
+  } else if (!persistedBitqueryMarketTargetEligibleV235) {
+    state.bitqueryMarketTargetV235 = {
+      ...newState().bitqueryMarketTargetV235,
+      status: "NO_ELIGIBLE_MARKET_UNVERIFIED_TARGET"
+    };
+  }
+
   const save =
     await writeState(
       env,
@@ -41541,6 +41721,28 @@ for (
       maxPersistAgeMs: BITQUERY_HOLDER_TARGET_MAX_AGE_MS_V228,
       ponsV2ExcludedUntilDynamicInfrastructureReconciled: true,
       externalRequestsAdded: 0
+    },
+
+    bitqueryMarketTargetHandoffV235: {
+      enabled: true,
+      independentFromHolderTarget: true,
+      persistedTargetAtRequestStart: persistedBitqueryMarketTargetAddressV235 || null,
+      persistedTargetEligibleAtRequestStart: persistedBitqueryMarketTargetEligibleV235,
+      targetActuallySentToSharedRequest: bitqueryMarketTargetV235?.address || null,
+      targetReasonSentToSharedRequest: bitqueryMarketTargetV235?.reason || null,
+      holderTargetSentSeparately: bitqueryHolderTargetV227?.address || null,
+      nextQueuedTarget: state.bitqueryMarketTargetV235?.address || null,
+      nextQueuedSymbol: state.bitqueryMarketTargetV235?.symbol || null,
+      nextQueuedReason: state.bitqueryMarketTargetV235?.reason || null,
+      nextQueuedStatus: state.bitqueryMarketTargetV235?.status || "NONE",
+      nextQueuedAnalysisPriority: state.bitqueryMarketTargetV235?.analysisPriority ?? null,
+      requiresCandidateMatchedVerifiedOnChainActivity: true,
+      maxPersistAgeMs: BITQUERY_MARKET_TARGET_MAX_AGE_MS_V235,
+      externalRequestsAdded: 0,
+      momentumMathChanged: false,
+      verifiedUsdPathChanged: false,
+      marketVerifiedPromoted: false,
+      liquidityVerified: false
     },
 
     bitqueryHolderEvidenceV227: {
