@@ -1,5 +1,10 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V251:
+ * - FIX: holder breadth preserves UNVERIFIED holder count instead of coercing null/missing evidence to 0
+ * - FIX: Bitquery HTTP 402 quota exhaustion opens a provider-wide cooldown so repeated scans stop wasting requests
+ * - FIX: one recovery probe is allowed after the cooldown expires; a successful Bitquery HTTP response clears the quota cooldown
+ * - Preserves V250 display integrity, V249 backlog convergence/retry logic, Momentum/USD/scoring/Telegram/KV thresholds
  * V250:
  * - FIX: ambiguous holder count 0 can no longer be displayed as VERIFIED
  * - FIX: positive verified holder counts and recent verified caches continue unchanged
@@ -996,7 +1001,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V250";
+const VERSION = "V251";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1082,6 +1087,177 @@ const POOL_MANAGER =
 
 const BITQUERY_GRAPHQL_V2 =
   "https://streaming.bitquery.io/graphql";
+
+/*
+ * V251 BITQUERY PROVIDER-WIDE HTTP 402 QUOTA COOLDOWN
+ *
+ * HTTP 402 / usage quota reached is an account-level allowance state.
+ * Repeating other Bitquery requests while it is active wastes this Worker's
+ * own external-request budget without producing evidence.
+ *
+ * After one hour the next eligible Bitquery path may make one normal recovery
+ * probe. Another 402 reopens the cooldown. Any successful HTTP response clears
+ * the cooldown.
+ */
+const BITQUERY_402_COOLDOWN_MS_V251 =
+  60 * 60 * 1000;
+
+function bitqueryServiceV251(state) {
+  state.services =
+    state.services &&
+    typeof state.services === "object"
+      ? state.services
+      : {};
+
+  state.services.bitqueryV251 =
+    state.services.bitqueryV251 &&
+    typeof state.services.bitqueryV251 === "object"
+      ? state.services.bitqueryV251
+      : {
+          cooldownUntil: null,
+          total402s: 0,
+          last402At: null,
+          lastSuccessAt: null,
+          lastStatus: null,
+          skippedDuringCooldown: 0
+        };
+
+  return state.services.bitqueryV251;
+}
+
+function bitquery402CoolingV251(
+  state,
+  now = Date.now()
+) {
+  return (
+    safeNumber(
+      bitqueryServiceV251(state)
+        .cooldownUntil
+    ) > now
+  );
+}
+
+function bitquery402CooldownTelemetryV251(
+  state
+) {
+  const service =
+    bitqueryServiceV251(state);
+
+  const now =
+    Date.now();
+
+  const cooldownUntil =
+    safeNumber(
+      service.cooldownUntil
+    ) || null;
+
+  return {
+    cooling:
+      Boolean(
+        cooldownUntil &&
+        cooldownUntil > now
+      ),
+    cooldownUntil,
+    retryAfterMs:
+      cooldownUntil &&
+      cooldownUntil > now
+        ? cooldownUntil - now
+        : 0,
+    total402s:
+      safeNumber(service.total402s),
+    last402At:
+      safeNumber(service.last402At) ||
+      null,
+    lastSuccessAt:
+      safeNumber(service.lastSuccessAt) ||
+      null,
+    lastStatus:
+      service.lastStatus || null,
+    skippedDuringCooldown:
+      safeNumber(
+        service.skippedDuringCooldown
+      ),
+    recoveryProbePolicy:
+      "ONE_NORMAL_REQUEST_AFTER_1H_COOLDOWN"
+  };
+}
+
+function bitquery402CooldownResultV251(
+  state,
+  base
+) {
+  const service =
+    bitqueryServiceV251(state);
+
+  service.skippedDuringCooldown =
+    safeNumber(
+      service.skippedDuringCooldown
+    ) + 1;
+
+  service.lastStatus =
+    "HTTP_402_COOLDOWN_SKIP_V251";
+
+  return {
+    ...base,
+    attempted: false,
+    externalRequestsUsed: 0,
+    httpStatus: 402,
+    status:
+      "BITQUERY_HTTP_402_COOLDOWN_V251",
+    error:
+      "BITQUERY_USAGE_QUOTA_COOLDOWN",
+    bitqueryQuotaV251:
+      bitquery402CooldownTelemetryV251(
+        state
+      )
+  };
+}
+
+function registerBitquery402V251(state) {
+  const service =
+    bitqueryServiceV251(state);
+
+  const now =
+    Date.now();
+
+  service.total402s =
+    safeNumber(service.total402s) + 1;
+
+  service.last402At =
+    now;
+
+  service.cooldownUntil =
+    now +
+    BITQUERY_402_COOLDOWN_MS_V251;
+
+  service.lastStatus =
+    "HTTP_402_QUOTA_EXHAUSTED_V251";
+
+  return bitquery402CooldownTelemetryV251(
+    state
+  );
+}
+
+function registerBitqueryHttpSuccessV251(
+  state
+) {
+  const service =
+    bitqueryServiceV251(state);
+
+  service.cooldownUntil =
+    null;
+
+  service.lastSuccessAt =
+    Date.now();
+
+  service.lastStatus =
+    "HTTP_SUCCESS_V251";
+
+  return bitquery402CooldownTelemetryV251(
+    state
+  );
+}
+
 
 const BITQUERY_HOLDER_EVIDENCE_MAX_AGE_MS_V227 =
   10 * 60 * 1000;
@@ -5741,6 +5917,7 @@ function sortV4CurrenciesV199(
 
 async function getPoolIdentityBitqueryDexPoolEventsV199(
   env,
+  state,
   poolId,
   budget
 ) {
@@ -5782,6 +5959,17 @@ async function getPoolIdentityBitqueryDexPoolEventsV199(
       ...base,
       status: "NOT_CONFIGURED"
     };
+  }
+
+  if (
+    bitquery402CoolingV251(
+      state
+    )
+  ) {
+    return bitquery402CooldownResultV251(
+      state,
+      base
+    );
   }
 
   if (
@@ -5898,6 +6086,15 @@ async function getPoolIdentityBitqueryDexPoolEventsV199(
     }
 
     if (!response.ok) {
+      const bitqueryQuotaV251 =
+        httpStatus === 402
+          ? registerBitquery402V251(
+              state
+            )
+          : bitquery402CooldownTelemetryV251(
+              state
+            );
+
       return {
         ...base,
         attempted: true,
@@ -5907,9 +6104,14 @@ async function getPoolIdentityBitqueryDexPoolEventsV199(
           `HTTP_${httpStatus}`,
         error:
           payload?.errors?.[0]?.message ||
-          `BITQUERY_HTTP_${httpStatus}`
+          `BITQUERY_HTTP_${httpStatus}`,
+        bitqueryQuotaV251
       };
     }
+
+    registerBitqueryHttpSuccessV251(
+      state
+    );
 
     if (
       Array.isArray(
@@ -6195,6 +6397,17 @@ async function getInitializeForPoolBitqueryV190(
   }
 
   if (
+    bitquery402CoolingV251(
+      state
+    )
+  ) {
+    return bitquery402CooldownResultV251(
+      state,
+      base
+    );
+  }
+
+  if (
     !/^0x[a-f0-9]{64}$/.test(
       normalizedPoolId
     )
@@ -6331,6 +6544,15 @@ async function getInitializeForPoolBitqueryV190(
     }
 
     if (!response.ok) {
+      const bitqueryQuotaV251 =
+        httpStatus === 402
+          ? registerBitquery402V251(
+              state
+            )
+          : bitquery402CooldownTelemetryV251(
+              state
+            );
+
       return {
         ...base,
         attempted: true,
@@ -6340,9 +6562,14 @@ async function getInitializeForPoolBitqueryV190(
           `HTTP_${httpStatus}`,
         error:
           payload?.errors?.[0]?.message ||
-          `BITQUERY_HTTP_${httpStatus}`
+          `BITQUERY_HTTP_${httpStatus}`,
+        bitqueryQuotaV251
       };
     }
+
+    registerBitqueryHttpSuccessV251(
+      state
+    );
 
     if (
       Array.isArray(
@@ -8874,6 +9101,7 @@ async function resolvePersistentUnknownPools(
       const dexPoolV199 =
         await getPoolIdentityBitqueryDexPoolEventsV199(
           env,
+          state,
           poolId,
           budget
         );
@@ -14628,6 +14856,17 @@ async function getBitqueryWethUsdGReferenceV194(
     };
   }
 
+  if (
+    bitquery402CoolingV251(
+      state
+    )
+  ) {
+    return bitquery402CooldownResultV251(
+      state,
+      base
+    );
+  }
+
   const poolId =
     poolIds[0];
 
@@ -14754,6 +14993,15 @@ async function getBitqueryWethUsdGReferenceV194(
     }
 
     if (!response.ok) {
+      const bitqueryQuotaV251 =
+        httpStatus === 402
+          ? registerBitquery402V251(
+              state
+            )
+          : bitquery402CooldownTelemetryV251(
+              state
+            );
+
       return {
         ...base,
         attempted: true,
@@ -14763,9 +15011,14 @@ async function getBitqueryWethUsdGReferenceV194(
           `HTTP_${httpStatus}`,
         error:
           payload?.errors?.[0]?.message ||
-          `BITQUERY_HTTP_${httpStatus}`
+          `BITQUERY_HTTP_${httpStatus}`,
+        bitqueryQuotaV251
       };
     }
+
+    registerBitqueryHttpSuccessV251(
+      state
+    );
 
     if (
       Array.isArray(
@@ -17988,6 +18241,55 @@ async function discoverVerifiedBagsLaunchesV210(
     };
   }
 
+  if (
+    bitquery402CoolingV251(
+      state
+    )
+  ) {
+    return {
+      ...bitquery402CooldownResultV251(
+        state,
+        base
+      ),
+      bitqueryHolderEvidenceV227: {
+        ...base.bitqueryHolderEvidenceV227,
+        attempted: false,
+        verified: false,
+        status:
+          bitqueryHolderTargetAddressV227
+            ? "BITQUERY_HTTP_402_COOLDOWN_V251"
+            : "NOT_TARGETED"
+      },
+      bitqueryMarketEvidenceV233: {
+        ...base.bitqueryMarketEvidenceV233,
+        attempted: false,
+        verified: false,
+        status:
+          bitqueryMarketTargetAddressV233
+            ? "BITQUERY_HTTP_402_COOLDOWN_V251"
+            : "NOT_TARGETED"
+      },
+      bitqueryRankedPairEvidenceV234: {
+        ...base.bitqueryRankedPairEvidenceV234,
+        attempted: false,
+        verified: false,
+        status:
+          bitqueryRankedPairTargetAddressV234
+            ? "BITQUERY_HTTP_402_COOLDOWN_V251"
+            : "NOT_TARGETED"
+      },
+      bitqueryLiquidityEvidenceV237: {
+        ...base.bitqueryLiquidityEvidenceV237,
+        attempted: false,
+        verified: false,
+        status:
+          bitqueryLiquidityTargetPoolIdV237
+            ? "BITQUERY_HTTP_402_COOLDOWN_V251"
+            : "NOT_TARGETED"
+      }
+    };
+  }
+
   /*
    * One bounded discovery request only when the discovery-live budget has
    * room. Telegram/global reserves and the 42-request hard ceiling remain
@@ -18333,12 +18635,22 @@ async function discoverVerifiedBagsLaunchesV210(
     telemetry.lastHttpStatus = response.status;
 
     if (!response.ok) {
+      const bitqueryQuotaV251 =
+        response.status === 402
+          ? registerBitquery402V251(
+              state
+            )
+          : bitquery402CooldownTelemetryV251(
+              state
+            );
+
       telemetry.lastStatus = `HTTP_${response.status}`;
       return {
         ...base,
         attempted: true,
         externalRequestsUsed: 1,
         httpStatus: response.status,
+        bitqueryQuotaV251,
         status: telemetry.lastStatus,
         error:
           payload?.errors?.[0]?.message ||
@@ -18373,6 +18685,10 @@ async function discoverVerifiedBagsLaunchesV210(
         }
       };
     }
+
+    registerBitqueryHttpSuccessV251(
+      state
+    );
 
     if (Array.isArray(payload?.errors) && payload.errors.length) {
       telemetry.lastStatus = "GRAPHQL_ERROR";
@@ -33153,15 +33469,45 @@ const MIN_HEALTHY_POSITIVE_HOLDER_ROWS_V136 =
 function healthyHolderBreadthV136(
   holders
 ) {
+  /*
+   * V251: safeNumber(null) becomes 0, which previously collapsed UNKNOWN
+   * holder-count evidence into an apparently real zero.
+   */
+  const rawHolderCount =
+    holders?.holderCount;
+
+  const holderCountVerifiedV251 =
+    holders?.countersVerified === true &&
+    rawHolderCount !== null &&
+    rawHolderCount !== undefined &&
+    Number.isFinite(
+      Number(rawHolderCount)
+    ) &&
+    Number(rawHolderCount) > 0;
+
   const holderCount =
-    safeNumber(
-      holders?.holderCount
-    );
+    holderCountVerifiedV251
+      ? Math.floor(
+          Number(rawHolderCount)
+        )
+      : null;
 
   const positiveHolderRows =
     safeNumber(
       holders?.positiveHolderRows
     );
+
+  if (
+    !holderCountVerifiedV251
+  ) {
+    return {
+      eligible: false,
+      reason:
+        "HOLDER_COUNT_UNVERIFIED_V251",
+      holderCount: null,
+      positiveHolderRows
+    };
+  }
 
   if (
     !holders?.concentrationVerified ||
@@ -44819,6 +45165,10 @@ for (
       sharedRequestErrorPreviewV229: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.sharedRequestErrorPreviewV229 || null,
       bearerHeaderConfiguredV229: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.bearerHeaderConfiguredV229 === true,
       endpointV229: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.endpointV229 || BITQUERY_GRAPHQL_V2,
+      providerQuotaV251:
+        bitquery402CooldownTelemetryV251(
+          state
+        ),
       holderQueryShapeV229: "EVM_ROBINHOOD_DATASET_REALTIME_HOLDERS_BALANCE_SELECTWHERE_GT_ZERO_UNIQ_HOLDER_ADDRESS",
       ponsConcentrationSafety: "BLOCKED_UNTIL_DYNAMIC_PROTOCOL_INFRASTRUCTURE_EXCLUSION_IS_EXPLICIT"
     },
