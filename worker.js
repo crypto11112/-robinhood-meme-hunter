@@ -1,8 +1,18 @@
 /**
  * Robinhood Chain Meme Hunter
- * V226
+ * V227
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
+ *
+ * CURRENT BUILD: V227
+ * - NEW: Bitquery EVM.Holders evidence is folded into the existing shared Bitquery HTTP request for one priority/live target
+ * - NEW: uses dataset: combined with a separate EVM alias for current holder rows + verified distinct holder count
+ * - NEW: when Blockscout V2 + legacy rows fail, matching fresh Bitquery holder rows can satisfy the existing holder-integrity/concentration pipeline before spending Blockscout PRO
+ * - NEW: Bitquery holder count can fill a missing Blockscout count only when the same targeted EVM.Holders response is verified and positive
+ * - SAFETY: exact token-address match, positive balances, bounded 25-row cache, 10-minute freshness, raw-unit conversion from token decimals, and existing holder-integrity maths remain authoritative
+ * - SAFETY: Pons V2 curve tokens are not promoted through the Bitquery concentration fallback yet because dynamic curve/locker infrastructure requires explicit exclusion before concentration can be trusted
+ * - Adds zero HTTP requests: holder aliases share the existing Bitquery launch/Pons request; 42-request and 21-analysis ceilings are unchanged
+ * - Preserves V226 request allocation, V225 holder-count display recovery, V224 launch coverage, V223 launch age, Momentum functions, verified BUY/SELL USD maths and Telegram thresholds
  *
  * CURRENT BUILD: V226
  * - NEW: priority holder-evidence completion can yield the V182 directional-USD reserve only when that reserve would otherwise block the next holder fallback
@@ -886,7 +896,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V226";
+const VERSION = "V227";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -965,6 +975,12 @@ const POOL_MANAGER =
 
 const BITQUERY_GRAPHQL_V2 =
   "https://streaming.bitquery.io/graphql";
+
+const BITQUERY_HOLDER_EVIDENCE_MAX_AGE_MS_V227 =
+  10 * 60 * 1000;
+
+const BITQUERY_HOLDER_ROW_LIMIT_V227 =
+  25;
 
 /* =========================================================
    V210 VERIFIED BAGS.FM DISCOVERY
@@ -3035,6 +3051,20 @@ function newState() {
     unknownPools:
       {},
 
+    bitqueryHolderEvidenceV227: {
+      address: null,
+      targetReason: null,
+      attempted: false,
+      verified: false,
+      status: "NOT_TARGETED",
+      fetchedAt: null,
+      holderCount: null,
+      rowCount: 0,
+      rows: [],
+      dataset: "combined",
+      externalRequestsAdded: 0
+    },
+
     launchHoodDiscoveryV220: {
       totalQueriesShared: 0,
       totalLaunchesSeen: 0,
@@ -3405,6 +3435,17 @@ async function readState(env) {
             "object"
             ? parsed.unknownPools
             : {},
+
+        bitqueryHolderEvidenceV227: {
+          ...fresh.bitqueryHolderEvidenceV227,
+          ...(parsed.bitqueryHolderEvidenceV227 &&
+          typeof parsed.bitqueryHolderEvidenceV227 === "object"
+            ? parsed.bitqueryHolderEvidenceV227
+            : {}),
+          rows: Array.isArray(parsed.bitqueryHolderEvidenceV227?.rows)
+            ? parsed.bitqueryHolderEvidenceV227.rows.slice(0, BITQUERY_HOLDER_ROW_LIMIT_V227)
+            : []
+        },
 
         launchHoodDiscoveryV220: {
           ...fresh.launchHoodDiscoveryV220,
@@ -15738,7 +15779,8 @@ async function blockscoutV4UsdGDirectionalV180(
 async function discoverVerifiedBagsLaunchesV210(
   env,
   state,
-  budget
+  budget,
+  holderTargetV227 = null
 ) {
   const telemetry =
     state.bagsDiscoveryV210 &&
@@ -15827,6 +15869,43 @@ async function discoverVerifiedBagsLaunchesV210(
           .join(", ")
       : `"${ZERO}"`;
 
+  const bitqueryHolderTargetAddressV227 =
+    isAddress(holderTargetV227?.address) &&
+    normalize(holderTargetV227?.address) !== ZERO
+      ? normalize(holderTargetV227.address)
+      : null;
+
+  const bitqueryHolderTargetReasonV227 =
+    bitqueryHolderTargetAddressV227
+      ? String(holderTargetV227?.reason || "PRIORITY_OR_LIVE_TARGET")
+      : null;
+
+  const bitqueryHolderGraphqlV227 =
+    bitqueryHolderTargetAddressV227
+      ? `
+      HolderEvidenceV227: EVM(network: robinhood, dataset: combined) {
+        PriorityHolderRowsV227: Holders(
+          limit: {count: ${BITQUERY_HOLDER_ROW_LIMIT_V227}}
+          orderBy: {descending: Balance_Amount}
+          where: {Currency: {SmartContract: {is: "${bitqueryHolderTargetAddressV227}"}}}
+        ) {
+          Holder { Address }
+          Balance {
+            Amount(selectWhere: {gt: "0"})
+            FirstChangeTime
+            LastChangeTime
+            UpdateCount
+          }
+        }
+        PriorityHolderCountV227: Holders(
+          where: {Currency: {SmartContract: {is: "${bitqueryHolderTargetAddressV227}"}}}
+        ) {
+          holderCount: uniq(of: Holder_Address, if: {Balance: {Amount: {gt: "0"}}})
+        }
+      }
+      `
+      : "";
+
   const base = {
     enabled: true,
     provider: "BITQUERY",
@@ -15859,6 +15938,17 @@ async function discoverVerifiedBagsLaunchesV210(
     clankerVirtualsVerifiedTokensAddedV224: 0,
     clankerVirtualsLaunchesV224: [],
     clankerVirtualsStatusV224: null,
+    bitqueryHolderEvidenceV227: {
+      targetAddress: bitqueryHolderTargetAddressV227,
+      targetReason: bitqueryHolderTargetReasonV227,
+      attempted: Boolean(bitqueryHolderTargetAddressV227),
+      verified: false,
+      status: bitqueryHolderTargetAddressV227 ? "PENDING_SHARED_QUERY" : "NOT_TARGETED",
+      holderCount: null,
+      rowCount: 0,
+      dataset: "combined",
+      externalRequestsAdded: 0
+    },
     status: null,
     httpStatus: null,
     error: null
@@ -16025,6 +16115,8 @@ async function discoverVerifiedBagsLaunchesV210(
         }
       }
 
+      ${bitqueryHolderGraphqlV227}
+
       Trading {
         PonsTradesV216: Trades(
           limit: {count: 100}
@@ -16185,6 +16277,58 @@ async function discoverVerifiedBagsLaunchesV210(
       Array.isArray(payload?.data?.Trading?.PonsTradesV216)
         ? payload.data.Trading.PonsTradesV216
         : [];
+
+    const bitqueryHolderRowsRawV227 =
+      bitqueryHolderTargetAddressV227 &&
+      Array.isArray(payload?.data?.HolderEvidenceV227?.PriorityHolderRowsV227)
+        ? payload.data.HolderEvidenceV227.PriorityHolderRowsV227
+        : [];
+
+    const bitqueryHolderCountRowsV227 =
+      bitqueryHolderTargetAddressV227 &&
+      Array.isArray(payload?.data?.HolderEvidenceV227?.PriorityHolderCountV227)
+        ? payload.data.HolderEvidenceV227.PriorityHolderCountV227
+        : [];
+
+    const bitqueryHolderCountV227Number =
+      Number(bitqueryHolderCountRowsV227?.[0]?.holderCount);
+
+    const bitqueryHolderCountV227 =
+      Number.isFinite(bitqueryHolderCountV227Number) && bitqueryHolderCountV227Number > 0
+        ? Math.floor(bitqueryHolderCountV227Number)
+        : null;
+
+    const bitqueryHolderRowsV227 =
+      bitqueryHolderRowsRawV227
+        .map(row => ({
+          address: normalize(row?.Holder?.Address),
+          amount: row?.Balance?.Amount ?? null,
+          firstChangeTime: row?.Balance?.FirstChangeTime || null,
+          lastChangeTime: row?.Balance?.LastChangeTime || null,
+          updateCount: safeNumber(row?.Balance?.UpdateCount)
+        }))
+        .filter(row => isAddress(row.address) && row.address !== ZERO && row.amount !== null && Number(row.amount) > 0)
+        .slice(0, BITQUERY_HOLDER_ROW_LIMIT_V227);
+
+    if (bitqueryHolderTargetAddressV227) {
+      const bitqueryHolderVerifiedV227 = bitqueryHolderRowsV227.length > 0;
+      state.bitqueryHolderEvidenceV227 = {
+        address: bitqueryHolderTargetAddressV227,
+        targetReason: bitqueryHolderTargetReasonV227,
+        attempted: true,
+        verified: bitqueryHolderVerifiedV227,
+        status: bitqueryHolderVerifiedV227
+          ? "VERIFIED_HOLDER_ROWS_V227"
+          : "NO_POSITIVE_HOLDER_ROWS_V227",
+        fetchedAt: Date.now(),
+        holderCount: bitqueryHolderCountV227,
+        rowCount: bitqueryHolderRowsV227.length,
+        rows: bitqueryHolderRowsV227,
+        dataset: "combined",
+        source: "BITQUERY_EVM_HOLDERS_V227",
+        externalRequestsAdded: 0
+      };
+    }
 
     const launches = [];
     const flapLaunches = [];
@@ -17373,6 +17517,24 @@ async function discoverVerifiedBagsLaunchesV210(
       clankerVirtualsVerifiedTokensAddedV224,
       clankerVirtualsLaunchesV224: clankerVirtualsLaunchesV224.slice(0, 50),
       clankerVirtualsStatusV224: clankerVirtualsTelemetryV224.lastStatus,
+      bitqueryHolderEvidenceV227: {
+        targetAddress: bitqueryHolderTargetAddressV227,
+        targetReason: bitqueryHolderTargetReasonV227,
+        attempted: Boolean(bitqueryHolderTargetAddressV227),
+        verified: state.bitqueryHolderEvidenceV227?.verified === true &&
+          normalize(state.bitqueryHolderEvidenceV227?.address) === bitqueryHolderTargetAddressV227,
+        status: bitqueryHolderTargetAddressV227
+          ? state.bitqueryHolderEvidenceV227?.status || "NO_RESPONSE_STATE"
+          : "NOT_TARGETED",
+        holderCount: bitqueryHolderTargetAddressV227
+          ? state.bitqueryHolderEvidenceV227?.holderCount ?? null
+          : null,
+        rowCount: bitqueryHolderTargetAddressV227
+          ? safeNumber(state.bitqueryHolderEvidenceV227?.rowCount)
+          : 0,
+        dataset: "combined",
+        externalRequestsAdded: 0
+      },
       ponsCurveTradesV216: {
         targetingVersion:
           "V217_NEWEST_VERIFIED_PONS_KV_TARGETING",
@@ -25492,6 +25654,72 @@ function activePartialHolderRetryBlockerV166(
 }
 
 /* =========================================================
+   V227 BITQUERY HOLDER FALLBACK — ZERO EXTRA HTTP REQUESTS
+   ========================================================= */
+
+function decimalTokenAmountToRawV227(value, decimals) {
+  const d = Number(decimals);
+  if (!Number.isInteger(d) || d < 0 || d > 36) return null;
+  let text = String(value ?? "").trim();
+  if (!text || text.startsWith("-")) return null;
+  if (text.startsWith("+")) text = text.slice(1);
+  const match = text.match(/^(\d+)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/);
+  if (!match) return null;
+  const whole = match[1] || "0";
+  const fraction = match[2] || "";
+  const exponent = Number(match[3] || 0);
+  if (!Number.isInteger(exponent) || Math.abs(exponent) > 100) return null;
+  let digits = (whole + fraction).replace(/^0+(?=\d)/, "");
+  if (!digits) digits = "0";
+  const decimalPlaces = fraction.length - exponent;
+  const scalePower = d - decimalPlaces;
+  try {
+    let raw = BigInt(digits);
+    if (scalePower >= 0) raw *= 10n ** BigInt(scalePower);
+    else {
+      const divisor = 10n ** BigInt(-scalePower);
+      if (raw % divisor !== 0n) return null;
+      raw /= divisor;
+    }
+    return raw > 0n ? raw.toString() : null;
+  } catch { return null; }
+}
+
+function bitqueryHolderFallbackV227(state, token, decimals, watched = null) {
+  const evidence = state?.bitqueryHolderEvidenceV227;
+  const address = normalize(token);
+  if (!evidence || evidence.verified !== true || normalize(evidence.address) !== address ||
+      !safeNumber(evidence.fetchedAt) || Date.now() - safeNumber(evidence.fetchedAt) > BITQUERY_HOLDER_EVIDENCE_MAX_AGE_MS_V227 ||
+      !Array.isArray(evidence.rows) || evidence.rows.length === 0) return null;
+
+  if (watched?.launchpadV215?.verified === true) {
+    return {
+      blocked: true,
+      status: "PONS_DYNAMIC_INFRASTRUCTURE_EXCLUSION_REQUIRED_V227",
+      holderCount: safeNumber(evidence.holderCount) || null
+    };
+  }
+
+  const items = evidence.rows
+    .map(row => ({
+      address: normalize(row?.address),
+      value: decimalTokenAmountToRawV227(row?.amount, decimals)
+    }))
+    .filter(row => isAddress(row.address) && row.address !== ZERO && row.value !== null)
+    .slice(0, BITQUERY_HOLDER_ROW_LIMIT_V227);
+
+  if (!items.length) return null;
+  return {
+    items,
+    bitqueryV227: true,
+    holderCount: safeNumber(evidence.holderCount) || null,
+    fetchedAt: safeNumber(evidence.fetchedAt) || null,
+    source: "BITQUERY_EVM_HOLDERS_V227",
+    status: "VERIFIED_HOLDER_ROWS_V227"
+  };
+}
+
+/* =========================================================
    HOLDER INTELLIGENCE — V88
    ========================================================= */
 
@@ -25503,7 +25731,8 @@ async function holderIntelligence(
   market = null,
   priorityCompletion = false,
   env = null,
-  state = null
+  state = null,
+  tokenDecimals = null
 ) {
   if (
     !totalSupply
@@ -25890,6 +26119,40 @@ async function holderIntelligence(
   }
 
 
+  /* V227: reuse matching Bitquery EVM.Holders evidence before spending PRO. */
+  let bitqueryHolderFallbackTelemetryV227 = {
+    checked: false, matched: false, used: false, status: "NOT_NEEDED",
+    holderCount: null, externalRequestsAdded: 0
+  };
+
+  if (v2HolderRowsUnavailable && legacyHolderRowsUnavailable) {
+    bitqueryHolderFallbackTelemetryV227.checked = true;
+    const bitqueryFallbackV227 = bitqueryHolderFallbackV227(state, token, tokenDecimals, watched);
+    if (bitqueryFallbackV227?.blocked === true) {
+      bitqueryHolderFallbackTelemetryV227.matched = true;
+      bitqueryHolderFallbackTelemetryV227.status = bitqueryFallbackV227.status;
+      bitqueryHolderFallbackTelemetryV227.holderCount = bitqueryFallbackV227.holderCount ?? null;
+      if (counterData.holderCount === null && bitqueryFallbackV227.holderCount) {
+        counterData.holderCount = bitqueryFallbackV227.holderCount;
+        counterSource = "BITQUERY_HOLDERS_COUNT_ONLY_V227";
+      }
+    } else if (bitqueryFallbackV227 && Array.isArray(bitqueryFallbackV227.items)) {
+      bitqueryHolderFallbackTelemetryV227.matched = true;
+      bitqueryHolderFallbackTelemetryV227.used = true;
+      bitqueryHolderFallbackTelemetryV227.status = "USED_VERIFIED_ROWS_V227";
+      bitqueryHolderFallbackTelemetryV227.holderCount = bitqueryFallbackV227.holderCount ?? null;
+      holders = bitqueryFallbackV227;
+      v2HolderRowsUnavailable = false;
+      legacyHolderRowsUnavailable = false;
+      if (counterData.holderCount === null && bitqueryFallbackV227.holderCount) {
+        counterData.holderCount = bitqueryFallbackV227.holderCount;
+        counterSource = "BITQUERY_HOLDERS_V227";
+      }
+    } else {
+      bitqueryHolderFallbackTelemetryV227.status = "NO_MATCHING_FRESH_VERIFIED_ROWS_V227";
+    }
+  }
+
   /*
    * V143:
    * Public Blockscout remains first choice. Only after both public holder-row
@@ -26119,11 +26382,13 @@ async function holderIntelligence(
   }
 
   const holderSource =
-    holders?.proV143
-      ? "BLOCKSCOUT_PRO_V143"
-      : holders?.legacy
-        ? "BLOCKSCOUT_LEGACY"
-        : "BLOCKSCOUT_V2";
+    holders?.bitqueryV227
+      ? "BITQUERY_EVM_HOLDERS_V227"
+      : holders?.proV143
+        ? "BLOCKSCOUT_PRO_V143"
+        : holders?.legacy
+          ? "BLOCKSCOUT_LEGACY"
+          : "BLOCKSCOUT_V2";
 
   const rawItems =
     holders.items.slice(
@@ -33256,7 +33521,8 @@ async function analyzeToken(
           options?.priorityCompletion
         ),
         env,
-        state
+        state,
+        validation.decimals
       );
   }
 
@@ -35357,11 +35623,31 @@ for (
     newTokens.add(launchToken);
   }
 
+  const persistedHolderTargetAddressV227 = completionCandidateAddress(state);
+  const liveHolderTargetRowV227 = state.watchedTokens
+    .filter(row => {
+      const address = normalize(row?.address);
+      return isAddress(address) &&
+        (newTokens.has(address) || liveTokens.has(address)) &&
+        !preMarketExcludedToken(row).excluded &&
+        !terminalPriorityRejectFromWatched(row).terminal;
+    })
+    .sort((a, b) =>
+      watchPriority(b, newTokens, liveTokens) - watchPriority(a, newTokens, liveTokens)
+    )[0] || null;
+
+  const bitqueryHolderTargetV227 = isAddress(persistedHolderTargetAddressV227)
+    ? {address: persistedHolderTargetAddressV227, reason: "PERSISTED_PRIORITY_COMPLETION_V227"}
+    : isAddress(liveHolderTargetRowV227?.address)
+      ? {address: normalize(liveHolderTargetRowV227.address), reason: "HIGHEST_PRIORITY_CURRENT_LIVE_OR_NEW_V227"}
+      : null;
+
   const bagsDiscoveryV210 =
     await discoverVerifiedBagsLaunchesV210(
       env,
       state,
-      budget
+      budget,
+      bitqueryHolderTargetV227
     );
 
   for (const launch of bagsDiscoveryV210.launches || []) {
@@ -40374,6 +40660,21 @@ for (
 
     bagsVerifiedDiscoveryV210:
       bagsDiscoveryV210,
+
+    bitqueryHolderEvidenceV227: {
+      enabled: true,
+      sharedExistingBitqueryHttpRequest: true,
+      externalRequestsAdded: 0,
+      targetAddress: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.targetAddress || null,
+      targetReason: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.targetReason || null,
+      attempted: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.attempted === true,
+      verified: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.verified === true,
+      status: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.status || "NOT_TARGETED",
+      holderCount: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.holderCount ?? null,
+      rowCount: safeNumber(bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.rowCount),
+      dataset: "combined",
+      ponsConcentrationSafety: "BLOCKED_UNTIL_DYNAMIC_PROTOCOL_INFRASTRUCTURE_EXCLUSION_IS_EXPLICIT"
+    },
 
     bagsVerifiedDiscoveryCumulativeV210:
       state.bagsDiscoveryV210,
