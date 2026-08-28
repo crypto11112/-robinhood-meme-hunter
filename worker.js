@@ -1,5 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V242: makes PUBLIC RPC backlog catch-up adaptive after live 429 evidence: gentler proven-range growth, bounded public backlog bursts, and growth-streak reset on 429 while preserving Alchemy free-tier protection and the 42-request ceiling.
  * V241: accelerates PUBLIC RPC backlog convergence using faster proven-range learning while preserving Alchemy free-tier 10-block protection and the 42-request ceiling.
  * V240: promotes live-proven exact-token Bitquery market + exact-PoolId liquidity evidence into a conservative verified market fallback when Dex/Gecko are unavailable; zero extra HTTP.
  * V239: fixes V238 shared Bitquery GraphQL syntax by removing an invalid JavaScript-style block comment from inside the query string; no logic/request changes.
@@ -971,7 +972,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V241";
+const VERSION = "V242";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1536,6 +1537,22 @@ const BACKLOG_PROBE_INCREMENT = 5;
  */
 const V241_PUBLIC_BACKLOG_PROBE_SUCCESS_THRESHOLD = 3;
 const V241_PUBLIC_BACKLOG_GROWTH_MULTIPLIER = 2;
+
+/*
+ * V242 adaptive public-RPC backlog policy.
+ *
+ * Live evidence showed the public endpoint repeatedly entering 429 cooldown
+ * while a 62-block range itself remained proven. A 429 is therefore treated
+ * as throughput pressure, NOT proof that the range is invalid. V242 keeps the
+ * proven size, resets only the growth streak, grows in bounded ~25% steps, and
+ * limits consecutive backlog pressure on the public endpoint when Alchemy is
+ * available as the protected fallback.
+ */
+const V242_PUBLIC_BACKLOG_PROBE_SUCCESS_THRESHOLD = 4;
+const V242_PUBLIC_BACKLOG_GROWTH_FRACTION = 0.25;
+const V242_PUBLIC_BACKLOG_GROWTH_MIN_BLOCKS = 5;
+const V242_PUBLIC_BACKLOG_GROWTH_MAX_BLOCKS = 20;
+const V242_PUBLIC_BACKLOG_MAX_REQUESTS_PER_PASS = 3;
 
 /* =========================================================
    DISCOVERY RPC COOLDOWN
@@ -4255,6 +4272,14 @@ function markDiscovery429(
       safeNumber(
         service.publicTotal429s
       ) + 1;
+
+    /*
+     * V242: a 429 is throughput pressure, not a failed block-range proof.
+     * Keep the last successful chunk size but require a fresh stability
+     * streak before any larger public-RPC probe after cooldown.
+     */
+    service.publicBacklogSuccessStreak =
+      0;
   }
 
   if (
@@ -11077,6 +11102,12 @@ async function scanBacklogSequential(
   let providerSwitches =
     0;
 
+  let publicBacklogRequestsThisPassV242 =
+    0;
+
+  let publicBacklogBurstDeferralsV242 =
+    0;
+
   let probeAttempts =
     0;
 
@@ -11142,6 +11173,25 @@ async function scanBacklogSequential(
       break;
     }
 
+    /*
+     * V242: do not repeatedly hammer Robinhood's rate-limited public RPC
+     * during one backlog pass. Once the bounded public burst is consumed,
+     * use configured/non-cooling Alchemy for residual backlog work.
+     */
+    if (
+      provider === "ROBINHOOD_PUBLIC_RPC" &&
+      publicBacklogRequestsThisPassV242 >=
+        V242_PUBLIC_BACKLOG_MAX_REQUESTS_PER_PASS &&
+      env.ALCHEMY_API_KEY &&
+      !discoveryProviderCooling(
+        state,
+        "ALCHEMY"
+      )
+    ) {
+      provider = "ALCHEMY";
+      publicBacklogBurstDeferralsV242++;
+    }
+
     let provenSize =
       getProviderBacklogSize(
         state,
@@ -11179,20 +11229,25 @@ async function scanBacklogSequential(
         "ALCHEMY" &&
       !temporaryOverride &&
       streak >=
-        V241_PUBLIC_BACKLOG_PROBE_SUCCESS_THRESHOLD
+        V242_PUBLIC_BACKLOG_PROBE_SUCCESS_THRESHOLD
     ) {
+      const growthStepV242 =
+        Math.max(
+          V242_PUBLIC_BACKLOG_GROWTH_MIN_BLOCKS,
+          Math.min(
+            V242_PUBLIC_BACKLOG_GROWTH_MAX_BLOCKS,
+            Math.ceil(
+              provenSize *
+                V242_PUBLIC_BACKLOG_GROWTH_FRACTION
+            )
+          )
+        );
+
       const proposed =
         Math.min(
           BACKLOG_MAX_CHUNK_BLOCKS,
-
-          Math.max(
-            provenSize +
-              BACKLOG_PROBE_INCREMENT,
-            Math.floor(
-              provenSize *
-                V241_PUBLIC_BACKLOG_GROWTH_MULTIPLIER
-            )
-          )
+          provenSize +
+            growthStepV242
         );
 
       const probeKey =
@@ -11262,6 +11317,13 @@ async function scanBacklogSequential(
     const beforeRequests =
       budget.discovery
         .backlogUsed;
+
+    if (
+      provider ===
+        "ROBINHOOD_PUBLIC_RPC"
+    ) {
+      publicBacklogRequestsThisPassV242++;
+    }
 
     let response =
       await getLogsSingleProvider(
@@ -11752,6 +11814,27 @@ async function scanBacklogSequential(
     probeAttempts,
 
     blockedRepeatProbes,
+
+    adaptivePublicBacklogV242: {
+      publicRequestsThisPass:
+        publicBacklogRequestsThisPassV242,
+      burstDeferralsToAlchemy:
+        publicBacklogBurstDeferralsV242,
+      maxPublicRequestsPerPass:
+        V242_PUBLIC_BACKLOG_MAX_REQUESTS_PER_PASS,
+      successesBeforeGrowthProbe:
+        V242_PUBLIC_BACKLOG_PROBE_SUCCESS_THRESHOLD,
+      growthFraction:
+        V242_PUBLIC_BACKLOG_GROWTH_FRACTION,
+      growthMinBlocks:
+        V242_PUBLIC_BACKLOG_GROWTH_MIN_BLOCKS,
+      growthMaxBlocks:
+        V242_PUBLIC_BACKLOG_GROWTH_MAX_BLOCKS,
+      rangePreservedOn429:
+        true,
+      successStreakResetOn429:
+        true
+    },
 
     blocksProcessed,
 
@@ -42360,12 +42443,37 @@ for (
 
       publicBacklogFastLearningV241: {
         enabled: true,
+        supersededByV242AdaptivePolicy:
+          true,
         sameSizeSuccessesBeforeProbe:
           V241_PUBLIC_BACKLOG_PROBE_SUCCESS_THRESHOLD,
         growthMultiplier:
           V241_PUBLIC_BACKLOG_GROWTH_MULTIPLIER,
         maxChunkBlocks:
           BACKLOG_MAX_CHUNK_BLOCKS,
+        alchemyFreeTierRangePreserved:
+          safeNumber(
+            discoveryRpc
+              .alchemyBacklogChunkBlocks
+          ) <= 10
+      },
+
+      adaptivePublicBacklogV242: {
+        enabled: true,
+        sameSizeSuccessesBeforeProbe:
+          V242_PUBLIC_BACKLOG_PROBE_SUCCESS_THRESHOLD,
+        growthFraction:
+          V242_PUBLIC_BACKLOG_GROWTH_FRACTION,
+        growthMinBlocks:
+          V242_PUBLIC_BACKLOG_GROWTH_MIN_BLOCKS,
+        growthMaxBlocks:
+          V242_PUBLIC_BACKLOG_GROWTH_MAX_BLOCKS,
+        maxPublicBacklogRequestsPerPass:
+          V242_PUBLIC_BACKLOG_MAX_REQUESTS_PER_PASS,
+        preserveProvenRangeOn429:
+          true,
+        resetGrowthStreakOn429:
+          true,
         alchemyFreeTierRangePreserved:
           safeNumber(
             discoveryRpc
