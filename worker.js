@@ -1,9 +1,19 @@
 /**
  * Robinhood Chain Meme Hunter
- * V233
+ * V234
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
+ *
+ * V234 BITQUERY RANK-1 PAIR MARKET-EVIDENCE FALLBACK — STAGE 2
+ * - Preserves V233 Trading.Tokens evidence unchanged
+ * - Adds Bitquery Trading.Pairs for the same exact priority token with Ranking.Position = 1
+ * - Requires USD-quoted price, exact token-address match and a fresh 1-second top-market row
+ * - Captures top-market address/protocol/quote token, rank weight, price, market cap, FDV and current interval USD volume
+ * - Reuses the same shared Bitquery HTTP request: zero extra HTTP requests
+ * - Does NOT infer total 24h token volume from one pair and does NOT infer/verify liquidity
+ * - Does NOT promote market.verified or bypass existing market/liquidity Telegram gates
+ * - No changes to Momentum, verified BUY/SELL USD, holder maths, Telegram thresholds, KV key/binding or request ceilings
  *
  * V233 BITQUERY PRIORITY MARKET-EVIDENCE FALLBACK — STAGE 1
  * - Reuses the existing shared Bitquery HTTP request: zero extra HTTP requests
@@ -940,7 +950,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V233";
+const VERSION = "V234";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1031,6 +1041,10 @@ const BITQUERY_HOLDER_TARGET_MAX_AGE_MS_V228 =
 
 /* V233: Bitquery Trading.Tokens evidence is partial until pool liquidity is independently verified. */
 const BITQUERY_MARKET_EVIDENCE_MAX_AGE_MS_V233 =
+  10 * 60 * 1000;
+
+/* V234: freshness bound for exact-token rank-1 Trading.Pairs evidence. */
+const BITQUERY_RANKED_PAIR_EVIDENCE_MAX_AGE_MS_V234 =
   10 * 60 * 1000;
 
 /* =========================================================
@@ -3147,6 +3161,33 @@ function newState() {
       externalRequestsAdded: 0
     },
 
+    bitqueryRankedPairEvidenceV234: {
+      address: null,
+      targetReason: null,
+      attempted: false,
+      verified: false,
+      status: "NOT_TARGETED",
+      fetchedAt: null,
+      snapshotTime: null,
+      snapshotAgeMs: null,
+      priceUsd: null,
+      marketCap: null,
+      fdv: null,
+      intervalVolumeUsd: null,
+      marketAddress: null,
+      marketProtocol: null,
+      quoteTokenAddress: null,
+      quoteTokenSymbol: null,
+      rankingPosition: null,
+      rankingWeight: null,
+      dataset: "trading_realtime",
+      source: "BITQUERY_TRADING_PAIRS_RANK1_V234",
+      partialMarketOnly: true,
+      liquidityVerified: false,
+      marketVerifiedPromoted: false,
+      externalRequestsAdded: 0
+    },
+
     launchHoodDiscoveryV220: {
       totalQueriesShared: 0,
       totalLaunchesSeen: 0,
@@ -3542,6 +3583,14 @@ async function readState(env) {
           ...(parsed.bitqueryMarketEvidenceV233 &&
           typeof parsed.bitqueryMarketEvidenceV233 === "object"
             ? parsed.bitqueryMarketEvidenceV233
+            : {})
+        },
+
+        bitqueryRankedPairEvidenceV234: {
+          ...fresh.bitqueryRankedPairEvidenceV234,
+          ...(parsed.bitqueryRankedPairEvidenceV234 &&
+          typeof parsed.bitqueryRankedPairEvidenceV234 === "object"
+            ? parsed.bitqueryRankedPairEvidenceV234
             : {})
         },
 
@@ -16048,6 +16097,44 @@ async function discoverVerifiedBagsLaunchesV210(
       `
       : "";
 
+  /* V234: recommended single-token price path — exact token, rank-1 USD pair. */
+  const bitqueryRankedPairTargetAddressV234 =
+    bitqueryMarketTargetAddressV233;
+
+  const bitqueryRankedPairTargetReasonV234 =
+    bitqueryRankedPairTargetAddressV234
+      ? String(bitqueryMarketTargetReasonV233 || "PRIORITY_RANKED_PAIR_EVIDENCE_V234")
+      : null;
+
+  const bitqueryRankedPairGraphqlV234 =
+    bitqueryRankedPairTargetAddressV234
+      ? `
+        RankedPairSnapshotV234: Pairs(
+          limit: {count: 1}
+          orderBy: {descending: Block_Time}
+          where: {
+            Token: {
+              Address: {is: "${bitqueryRankedPairTargetAddressV234}"}
+              NetworkBid: {is: "bid:robinhood"}
+            }
+            Ranking: {Position: {eq: 1}}
+            Interval: {Time: {Duration: {eq: 1}}}
+            Price: {IsQuotedInUsd: true}
+          }
+        ) {
+          Block { Time }
+          Interval { Time { Start End } }
+          Token { Name Symbol Address }
+          QuoteToken { Name Symbol Address }
+          Market { Protocol Address }
+          Price { IsQuotedInUsd Ohlc { Close } }
+          Ranking { Position Weight }
+          Volume { Usd }
+          Supply { MarketCap FullyDilutedValuationUsd }
+        }
+      `
+      : "";
+
   const base = {
     enabled: true,
     provider: "BITQUERY",
@@ -16111,6 +16198,31 @@ async function discoverVerifiedBagsLaunchesV210(
       volume24hUsd: null,
       dataset: "trading_realtime",
       source: "BITQUERY_TRADING_TOKENS_V233",
+      partialMarketOnly: true,
+      liquidityVerified: false,
+      marketVerifiedPromoted: false,
+      externalRequestsAdded: 0
+    },
+    bitqueryRankedPairEvidenceV234: {
+      targetAddress: bitqueryRankedPairTargetAddressV234,
+      targetReason: bitqueryRankedPairTargetReasonV234,
+      attempted: Boolean(bitqueryRankedPairTargetAddressV234),
+      verified: false,
+      status: bitqueryRankedPairTargetAddressV234 ? "PENDING_SHARED_QUERY" : "NOT_TARGETED",
+      snapshotTime: null,
+      snapshotAgeMs: null,
+      priceUsd: null,
+      marketCap: null,
+      fdv: null,
+      intervalVolumeUsd: null,
+      marketAddress: null,
+      marketProtocol: null,
+      quoteTokenAddress: null,
+      quoteTokenSymbol: null,
+      rankingPosition: null,
+      rankingWeight: null,
+      dataset: "trading_realtime",
+      source: "BITQUERY_TRADING_PAIRS_RANK1_V234",
       partialMarketOnly: true,
       liquidityVerified: false,
       marketVerifiedPromoted: false,
@@ -16286,6 +16398,7 @@ async function discoverVerifiedBagsLaunchesV210(
 
       Trading {
         ${bitqueryMarketGraphqlV233}
+        ${bitqueryRankedPairGraphqlV234}
 
         PonsTradesV216: Trades(
           limit: {count: 100}
@@ -16477,6 +16590,14 @@ async function discoverVerifiedBagsLaunchesV210(
           status: bitqueryMarketTargetAddressV233
             ? `SHARED_REQUEST_HTTP_${response.status}`
             : "NOT_TARGETED"
+        },
+        bitqueryRankedPairEvidenceV234: {
+          ...base.bitqueryRankedPairEvidenceV234,
+          attempted: Boolean(bitqueryRankedPairTargetAddressV234),
+          verified: false,
+          status: bitqueryRankedPairTargetAddressV234
+            ? `SHARED_REQUEST_HTTP_${response.status}`
+            : "NOT_TARGETED"
         }
       };
     }
@@ -16655,6 +16776,112 @@ async function discoverVerifiedBagsLaunchesV210(
       );
       if (marketWatchedV233) {
         marketWatchedV233.bitqueryMarketEvidenceV233 = marketEvidenceV233;
+      }
+    }
+
+    /* V234: exact-token rank-1 Trading.Pairs evidence. Still partial; no liquidity promotion. */
+    const bitqueryRankedPairRowsV234 =
+      bitqueryRankedPairTargetAddressV234 &&
+      Array.isArray(payload?.data?.Trading?.RankedPairSnapshotV234)
+        ? payload.data.Trading.RankedPairSnapshotV234
+        : [];
+
+    if (bitqueryRankedPairTargetAddressV234) {
+      const pairV234 = bitqueryRankedPairRowsV234[0] || null;
+      const returnedAddressV234 = normalize(pairV234?.Token?.Address);
+      const exactTokenMatchV234 =
+        returnedAddressV234 === bitqueryRankedPairTargetAddressV234;
+      const usdQuotedV234 = pairV234?.Price?.IsQuotedInUsd === true;
+      const rankingPositionV234 = safeNumber(pairV234?.Ranking?.Position);
+      const rankOneV234 = rankingPositionV234 === 1;
+      const snapshotTimeV234 =
+        pairV234?.Block?.Time ||
+        pairV234?.Interval?.Time?.End ||
+        pairV234?.Interval?.Time?.Start ||
+        null;
+      const parsedSnapshotTimeV234 = snapshotTimeV234
+        ? Date.parse(snapshotTimeV234)
+        : NaN;
+      const snapshotAgeMsV234 = Number.isFinite(parsedSnapshotTimeV234)
+        ? Math.max(0, Date.now() - parsedSnapshotTimeV234)
+        : null;
+      const freshSnapshotV234 =
+        snapshotAgeMsV234 !== null &&
+        snapshotAgeMsV234 <= BITQUERY_RANKED_PAIR_EVIDENCE_MAX_AGE_MS_V234;
+
+      const priceUsdV234 = safeNumber(pairV234?.Price?.Ohlc?.Close);
+      const marketCapV234 = safeNumber(pairV234?.Supply?.MarketCap);
+      const fdvV234 = safeNumber(pairV234?.Supply?.FullyDilutedValuationUsd);
+      const intervalVolumeUsdV234 = safeNumber(pairV234?.Volume?.Usd);
+      const marketAddressV234 = normalize(pairV234?.Market?.Address) || null;
+      const marketProtocolV234 = pairV234?.Market?.Protocol || null;
+      const quoteTokenAddressV234 = normalize(pairV234?.QuoteToken?.Address) || null;
+      const quoteTokenSymbolV234 = pairV234?.QuoteToken?.Symbol || null;
+      const rankingWeightV234 = safeNumber(pairV234?.Ranking?.Weight);
+
+      const verifiedRankedPairV234 = Boolean(
+        exactTokenMatchV234 &&
+        usdQuotedV234 &&
+        rankOneV234 &&
+        freshSnapshotV234 &&
+        priceUsdV234 > 0 &&
+        (marketCapV234 > 0 || fdvV234 > 0 || intervalVolumeUsdV234 > 0)
+      );
+
+      const statusV234 = verifiedRankedPairV234
+        ? "VERIFIED_RANK1_PAIR_MARKET_FIELDS_V234"
+        : !pairV234
+          ? "NO_RANK1_TRADING_PAIR_SNAPSHOT_V234"
+          : !exactTokenMatchV234
+            ? "TOKEN_IDENTITY_MISMATCH_V234"
+            : !usdQuotedV234
+              ? "PAIR_NOT_USD_QUOTED_V234"
+              : !rankOneV234
+                ? "PAIR_NOT_RANK_ONE_V234"
+                : !freshSnapshotV234
+                  ? "STALE_RANK1_PAIR_SNAPSHOT_V234"
+                  : priceUsdV234 <= 0
+                    ? "INVALID_OR_MISSING_USD_PRICE_V234"
+                    : "INSUFFICIENT_RANK1_PAIR_MARKET_FIELDS_V234";
+
+      const rankedPairEvidenceV234 = {
+        address: bitqueryRankedPairTargetAddressV234,
+        targetReason: bitqueryRankedPairTargetReasonV234,
+        attempted: true,
+        verified: verifiedRankedPairV234,
+        status: statusV234,
+        fetchedAt: Date.now(),
+        snapshotTime: snapshotTimeV234,
+        snapshotAgeMs: snapshotAgeMsV234,
+        priceUsd: priceUsdV234 > 0 ? priceUsdV234 : null,
+        marketCap: marketCapV234 > 0 ? marketCapV234 : null,
+        fdv: fdvV234 > 0 ? fdvV234 : null,
+        intervalVolumeUsd: intervalVolumeUsdV234 > 0 ? intervalVolumeUsdV234 : null,
+        marketAddress: isAddress(marketAddressV234) ? marketAddressV234 : null,
+        marketProtocol: marketProtocolV234,
+        quoteTokenAddress: isAddress(quoteTokenAddressV234) ? quoteTokenAddressV234 : null,
+        quoteTokenSymbol: quoteTokenSymbolV234,
+        rankingPosition: rankOneV234 ? 1 : (rankingPositionV234 > 0 ? rankingPositionV234 : null),
+        rankingWeight: rankingWeightV234 > 0 ? rankingWeightV234 : null,
+        exactTokenMatch: exactTokenMatchV234,
+        usdQuoted: usdQuotedV234,
+        maxFreshAgeMs: BITQUERY_RANKED_PAIR_EVIDENCE_MAX_AGE_MS_V234,
+        dataset: "trading_realtime",
+        source: "BITQUERY_TRADING_PAIRS_RANK1_V234",
+        partialMarketOnly: true,
+        total24hTokenVolumeInferred: false,
+        liquidityUsd: null,
+        liquidityVerified: false,
+        marketVerifiedPromoted: false,
+        externalRequestsAdded: 0
+      };
+
+      state.bitqueryRankedPairEvidenceV234 = rankedPairEvidenceV234;
+      const pairWatchedV234 = state.watchedTokens.find(
+        row => normalize(row?.address) === bitqueryRankedPairTargetAddressV234
+      );
+      if (pairWatchedV234) {
+        pairWatchedV234.bitqueryRankedPairEvidenceV234 = rankedPairEvidenceV234;
       }
     }
 
@@ -17870,6 +18097,13 @@ async function discoverVerifiedBagsLaunchesV210(
             targetReason: bitqueryMarketTargetReasonV233
           }
         : base.bitqueryMarketEvidenceV233,
+      bitqueryRankedPairEvidenceV234: bitqueryRankedPairTargetAddressV234
+        ? {
+            ...(state.bitqueryRankedPairEvidenceV234 || base.bitqueryRankedPairEvidenceV234),
+            targetAddress: bitqueryRankedPairTargetAddressV234,
+            targetReason: bitqueryRankedPairTargetReasonV234
+          }
+        : base.bitqueryRankedPairEvidenceV234,
       ponsCurveTradesV216: {
         targetingVersion:
           "V217_NEWEST_VERIFIED_PONS_KV_TARGETING",
@@ -41350,6 +41584,41 @@ for (
       networkBid: "bid:robinhood",
       maxFreshAgeMs: BITQUERY_MARKET_EVIDENCE_MAX_AGE_MS_V233,
       partialMarketOnly: true,
+      liquidityVerified: false,
+      marketVerifiedPromoted: false,
+      fullMarketQualificationChanged: false,
+      momentumMathChanged: false,
+      verifiedUsdPathChanged: false
+    },
+
+    bitqueryRankedPairEvidenceV234: {
+      enabled: true,
+      sharedExistingBitqueryHttpRequest: true,
+      externalRequestsAdded: 0,
+      targetAddress: bagsDiscoveryV210?.bitqueryRankedPairEvidenceV234?.targetAddress || null,
+      targetReason: bagsDiscoveryV210?.bitqueryRankedPairEvidenceV234?.targetReason || null,
+      attempted: bagsDiscoveryV210?.bitqueryRankedPairEvidenceV234?.attempted === true,
+      verified: bagsDiscoveryV210?.bitqueryRankedPairEvidenceV234?.verified === true,
+      status: bagsDiscoveryV210?.bitqueryRankedPairEvidenceV234?.status || "NOT_TARGETED",
+      snapshotTime: bagsDiscoveryV210?.bitqueryRankedPairEvidenceV234?.snapshotTime || null,
+      snapshotAgeMs: bagsDiscoveryV210?.bitqueryRankedPairEvidenceV234?.snapshotAgeMs ?? null,
+      priceUsd: bagsDiscoveryV210?.bitqueryRankedPairEvidenceV234?.priceUsd ?? null,
+      marketCap: bagsDiscoveryV210?.bitqueryRankedPairEvidenceV234?.marketCap ?? null,
+      fdv: bagsDiscoveryV210?.bitqueryRankedPairEvidenceV234?.fdv ?? null,
+      intervalVolumeUsd: bagsDiscoveryV210?.bitqueryRankedPairEvidenceV234?.intervalVolumeUsd ?? null,
+      marketAddress: bagsDiscoveryV210?.bitqueryRankedPairEvidenceV234?.marketAddress || null,
+      marketProtocol: bagsDiscoveryV210?.bitqueryRankedPairEvidenceV234?.marketProtocol || null,
+      quoteTokenAddress: bagsDiscoveryV210?.bitqueryRankedPairEvidenceV234?.quoteTokenAddress || null,
+      quoteTokenSymbol: bagsDiscoveryV210?.bitqueryRankedPairEvidenceV234?.quoteTokenSymbol || null,
+      rankingPosition: bagsDiscoveryV210?.bitqueryRankedPairEvidenceV234?.rankingPosition ?? null,
+      rankingWeight: bagsDiscoveryV210?.bitqueryRankedPairEvidenceV234?.rankingWeight ?? null,
+      source: "BITQUERY_TRADING_PAIRS_RANK1_V234",
+      networkBid: "bid:robinhood",
+      rankRequired: 1,
+      usdQuoteRequired: true,
+      maxFreshAgeMs: BITQUERY_RANKED_PAIR_EVIDENCE_MAX_AGE_MS_V234,
+      partialMarketOnly: true,
+      total24hTokenVolumeInferred: false,
       liquidityVerified: false,
       marketVerifiedPromoted: false,
       fullMarketQualificationChanged: false,
