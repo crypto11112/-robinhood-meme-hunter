@@ -4,7 +4,8 @@
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V217
+ * CURRENT BUILD: V217 CORRECTED
+ * - FIX: top-level Pons targeting telemetry now reads the function result instead of referencing a function-local variable
  * - V217 targets the existing Pons Trading query to the newest verified Pons token addresses already persisted in KV
  * - Prevents older/high-activity Pons tokens from dominating the bounded 100-row trade result
  * - Uses Pair.Token.Address in [...] and keeps newest trades first
@@ -38401,9 +38402,21 @@ for (
       strategy:
         "NEWEST_VERIFIED_PONS_TOKENS_FROM_PERSISTED_KV",
       targetTokenCount:
-        ponsTradeTargetTokensV217.length,
+        safeNumber(
+          bagsDiscoveryV210
+            ?.ponsCurveTradesV216
+            ?.targetTokenCount
+        ),
       targetTokens:
-        ponsTradeTargetTokensV217,
+        Array.isArray(
+          bagsDiscoveryV210
+            ?.ponsCurveTradesV216
+            ?.targetTokens
+        )
+          ? bagsDiscoveryV210
+              .ponsCurveTradesV216
+              .targetTokens
+          : [],
       maxTargetTokens: 20,
       maxTradeRows: 100,
       sort:
