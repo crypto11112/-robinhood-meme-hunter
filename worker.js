@@ -1,10 +1,14 @@
 /**
  * Robinhood Chain Meme Hunter
- * V209
+ * V210
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V209
+ * CURRENT BUILD: V210
+ * - V210 adds verified Bags.fm token discovery via Bitquery's documented factory mint-transfer pattern
+ * - Bags tokens are source-labelled separately; bonding-curve trades are NOT passed into the Uniswap V4 decoder
+ * - Uses the existing BITQUERY_ACCESS_TOKEN and existing request-budget protections
+ * - Preserves V209 pools.trade discovery, verified BUY/SELL USD path, KV history, Telegram protection and 42-request ceiling
  * - V209 persists cumulative verified pools.trade launch telemetry in the existing KV state
  * - Live and backlog launch detection now surface independently in /scan
  * - Recent verified launches are retained (bounded to 25) without extra RPC/API requests
@@ -780,7 +784,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V209";
+const VERSION = "V210";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -859,6 +863,20 @@ const POOL_MANAGER =
 
 const BITQUERY_GRAPHQL_V2 =
   "https://streaming.bitquery.io/graphql";
+
+/* =========================================================
+   V210 VERIFIED BAGS.FM DISCOVERY
+   ========================================================= */
+
+const BAGS_FACTORY_V210 =
+  "0xe8cc4431adf8b5a847c113ef0c6af9043219cb37";
+
+const BAGS_PROTOCOL_FAMILY_V210 =
+  "Bags";
+
+const BAGS_PROTOCOL_V210 =
+  "bags_v2";
+
 
 const UNISWAP_V3_FACTORY_V195 =
   "0x1f7d7550b1b028f7571e69a784071f0205fd2efa";
@@ -2742,6 +2760,19 @@ function newState() {
     unknownPools:
       {},
 
+    bagsDiscoveryV210: {
+      totalQueries: 0,
+      totalLaunchesSeen: 0,
+      totalVerifiedTokensAdded: 0,
+      lastQueryAt: null,
+      lastStatus: null,
+      lastHttpStatus: null,
+      lastLaunchAt: null,
+      lastLaunchBlock: null,
+      lastVerifiedToken: null,
+      recentVerifiedLaunches: []
+    },
+
     poolsTradeLaunchTelemetryV209: {
       totalEventsSeen: 0,
       totalDecodedVerified: 0,
@@ -3023,6 +3054,20 @@ async function readState(env) {
             "object"
             ? parsed.unknownPools
             : {},
+
+        bagsDiscoveryV210: {
+          ...fresh.bagsDiscoveryV210,
+          ...(
+            parsed.bagsDiscoveryV210 &&
+            typeof parsed.bagsDiscoveryV210 === "object"
+              ? parsed.bagsDiscoveryV210
+              : {}
+          ),
+          recentVerifiedLaunches:
+            Array.isArray(parsed.bagsDiscoveryV210?.recentVerifiedLaunches)
+              ? parsed.bagsDiscoveryV210.recentVerifiedLaunches.slice(-25)
+              : []
+        },
 
         poolsTradeLaunchTelemetryV209: {
           ...fresh.poolsTradeLaunchTelemetryV209,
@@ -15237,6 +15282,317 @@ async function blockscoutV4UsdGDirectionalV180(
         blockscoutDirectionalUsdTelemetryV183(
           state
         )
+    };
+  }
+}
+
+
+async function discoverVerifiedBagsLaunchesV210(
+  env,
+  state,
+  budget
+) {
+  const telemetry =
+    state.bagsDiscoveryV210 &&
+    typeof state.bagsDiscoveryV210 === "object"
+      ? state.bagsDiscoveryV210
+      : newState().bagsDiscoveryV210;
+
+  state.bagsDiscoveryV210 = telemetry;
+
+  const base = {
+    enabled: true,
+    provider: "BITQUERY",
+    verification:
+      "BAGS_FACTORY_MINT_TRANSFER_PATTERN",
+    factory: BAGS_FACTORY_V210,
+    protocolFamily: BAGS_PROTOCOL_FAMILY_V210,
+    protocol: BAGS_PROTOCOL_V210,
+    attempted: false,
+    externalRequestsUsed: 0,
+    launchesSeen: 0,
+    verifiedTokensAdded: 0,
+    launches: [],
+    status: null,
+    httpStatus: null,
+    error: null
+  };
+
+  const token =
+    String(env.BITQUERY_ACCESS_TOKEN || "").trim();
+
+  if (!token) {
+    return {
+      ...base,
+      status: "NOT_CONFIGURED"
+    };
+  }
+
+  /*
+   * One bounded discovery request only when the discovery-live budget has
+   * room. Telegram/global reserves and the 42-request hard ceiling remain
+   * controlled by the existing consumeBudget() implementation.
+   */
+  if (
+    !budgetAvailable(budget, "discovery-live") ||
+    !consumeBudget(
+      budget,
+      "discovery-live",
+      "BITQUERY_BAGS_VERIFIED_LAUNCHES_V210"
+    )
+  ) {
+    return {
+      ...base,
+      status: "DISCOVERY_LIVE_BUDGET_PROTECTED"
+    };
+  }
+
+  const query = `
+    {
+      EVM(network: robinhood) {
+        Transfers(
+          orderBy: {descending: Block_Time}
+          limit: {count: 10}
+          where: {
+            Transaction: {
+              To: {is: "${BAGS_FACTORY_V210}"}
+            }
+            Transfer: {
+              Amount: {eq: "1000000000"}
+              Sender: {is: "${ZERO}"}
+            }
+          }
+        ) {
+          Block {
+            Time
+            Number
+          }
+          Transaction {
+            Hash
+            From
+            To
+          }
+          TransactionStatus {
+            Success
+          }
+          Transfer {
+            Amount
+            Sender
+            Receiver
+            Currency {
+              Name
+              Symbol
+              SmartContract
+              Decimals
+              Fungible
+              Native
+              ProtocolName
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  telemetry.totalQueries =
+    safeNumber(telemetry.totalQueries) + 1;
+  telemetry.lastQueryAt = Date.now();
+
+  try {
+    const response =
+      await fetch(
+        BITQUERY_GRAPHQL_V2,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json",
+            authorization: `Bearer ${token}`
+          },
+          body: JSON.stringify({query})
+        }
+      );
+
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+
+    telemetry.lastHttpStatus = response.status;
+
+    if (!response.ok) {
+      telemetry.lastStatus = `HTTP_${response.status}`;
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus: response.status,
+        status: telemetry.lastStatus,
+        error:
+          payload?.errors?.[0]?.message ||
+          `BITQUERY_HTTP_${response.status}`
+      };
+    }
+
+    if (Array.isArray(payload?.errors) && payload.errors.length) {
+      telemetry.lastStatus = "GRAPHQL_ERROR";
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        httpStatus: response.status,
+        status: "GRAPHQL_ERROR",
+        error: payload.errors
+          .map(row => String(row?.message || "GRAPHQL_ERROR"))
+          .slice(0, 3)
+          .join(" | ")
+      };
+    }
+
+    const rows =
+      Array.isArray(payload?.data?.EVM?.Transfers)
+        ? payload.data.EVM.Transfers
+        : [];
+
+    const launches = [];
+    let verifiedTokensAdded = 0;
+
+    for (const row of rows) {
+      const success =
+        row?.TransactionStatus?.Success;
+
+      if (success === false) continue;
+
+      const txTo = normalize(row?.Transaction?.To);
+      const sender = normalize(row?.Transfer?.Sender);
+      const tokenAddress =
+        normalize(row?.Transfer?.Currency?.SmartContract);
+      const amount = String(row?.Transfer?.Amount ?? "");
+
+      if (
+        txTo !== BAGS_FACTORY_V210 ||
+        sender !== ZERO ||
+        amount !== "1000000000" ||
+        !isAddress(tokenAddress) ||
+        tokenAddress === ZERO ||
+        knownQuote(tokenAddress)
+      ) {
+        continue;
+      }
+
+      const launch = {
+        verified: true,
+        source: "BITQUERY_BAGS_FACTORY_MINT_V210",
+        protocolFamily: BAGS_PROTOCOL_FAMILY_V210,
+        protocol: BAGS_PROTOCOL_V210,
+        factory: BAGS_FACTORY_V210,
+        token: tokenAddress,
+        name: row?.Transfer?.Currency?.Name || null,
+        symbol: row?.Transfer?.Currency?.Symbol || null,
+        decimals:
+          safeNumber(row?.Transfer?.Currency?.Decimals) || null,
+        receiver: normalize(row?.Transfer?.Receiver) || null,
+        creator: normalize(row?.Transaction?.From) || null,
+        transactionHash:
+          normalize(row?.Transaction?.Hash) || null,
+        blockNumber:
+          safeNumber(row?.Block?.Number) || null,
+        blockTime: row?.Block?.Time || null
+      };
+
+      launches.push(launch);
+
+      const watched =
+        addWatch(
+          state,
+          tokenAddress,
+          null,
+          "BITQUERY_BAGS_VERIFIED_LAUNCH_V210"
+        );
+
+      if (watched?.token) {
+        watched.token.launchpadV210 = {
+          verified: true,
+          family: BAGS_PROTOCOL_FAMILY_V210,
+          protocol: BAGS_PROTOCOL_V210,
+          factory: BAGS_FACTORY_V210,
+          launchBlock: launch.blockNumber,
+          launchTime: launch.blockTime,
+          transactionHash: launch.transactionHash
+        };
+      }
+
+      if (watched?.added) {
+        verifiedTokensAdded++;
+      }
+    }
+
+    /*
+     * Deduplicate by token+tx because the bounded latest-launch query can
+     * overlap between scans. Persistent totals count only launch identities
+     * not already retained in recentVerifiedLaunches.
+     */
+    telemetry.recentVerifiedLaunches =
+      Array.isArray(telemetry.recentVerifiedLaunches)
+        ? telemetry.recentVerifiedLaunches
+        : [];
+
+    const known =
+      new Set(
+        telemetry.recentVerifiedLaunches.map(
+          row =>
+            `${normalize(row?.token)}:${normalize(row?.transactionHash)}`
+        )
+      );
+
+    let newlyObserved = 0;
+
+    for (const launch of launches) {
+      const key =
+        `${normalize(launch.token)}:${normalize(launch.transactionHash)}`;
+
+      if (known.has(key)) continue;
+      known.add(key);
+      newlyObserved++;
+
+      telemetry.lastLaunchAt = Date.now();
+      telemetry.lastLaunchBlock = launch.blockNumber;
+      telemetry.lastVerifiedToken = launch.token;
+      telemetry.recentVerifiedLaunches.push(launch);
+    }
+
+    telemetry.recentVerifiedLaunches =
+      telemetry.recentVerifiedLaunches.slice(-25);
+
+    telemetry.totalLaunchesSeen =
+      safeNumber(telemetry.totalLaunchesSeen) + newlyObserved;
+    telemetry.totalVerifiedTokensAdded =
+      safeNumber(telemetry.totalVerifiedTokensAdded) +
+      verifiedTokensAdded;
+    telemetry.lastStatus =
+      launches.length ? "VERIFIED_LAUNCHES_FOUND" : "NO_LAUNCHES_RETURNED";
+
+    return {
+      ...base,
+      attempted: true,
+      externalRequestsUsed: 1,
+      httpStatus: response.status,
+      launchesSeen: launches.length,
+      newlyObserved,
+      verifiedTokensAdded,
+      launches: launches.slice(0, 10),
+      status: telemetry.lastStatus
+    };
+  } catch (error) {
+    telemetry.lastStatus = "FETCH_ERROR";
+    return {
+      ...base,
+      attempted: true,
+      externalRequestsUsed: 1,
+      status: "FETCH_ERROR",
+      error: errorString(error)
     };
   }
 }
@@ -31275,6 +31631,20 @@ async function scan(
     );
   }
 
+  const bagsDiscoveryV210 =
+    await discoverVerifiedBagsLaunchesV210(
+      env,
+      state,
+      budget
+    );
+
+  for (const launch of bagsDiscoveryV210.launches || []) {
+    if (isAddress(launch?.token)) {
+      liveTokens.add(normalize(launch.token));
+      newTokens.add(normalize(launch.token));
+    }
+  }
+
   /*
    * V98: a pool can be active in the 20-block live window while its
    * Initialize event sits just outside that window. Fetch one cheap,
@@ -36014,6 +36384,12 @@ async function scan(
 
     poolsTradeLaunchCumulativeV209:
       state.poolsTradeLaunchTelemetryV209,
+
+    bagsVerifiedDiscoveryV210:
+      bagsDiscoveryV210,
+
+    bagsVerifiedDiscoveryCumulativeV210:
+      state.bagsDiscoveryV210,
 
     blockscoutDirectionalUsdV180,
 
