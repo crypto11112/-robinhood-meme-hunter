@@ -1,5 +1,11 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V253 / V2.0:
+ * - FIX: Momentum exactly 25 is now inside the V2 confirmation-quality boundary
+ * - FIX: final Opportunity calibration re-runs after authoritative candidate-matched V212 verified USD is attached
+ * - FIX: V253 prefers onChainVerifiedFlowV212 over earlier market directional-flow evidence when available
+ * - FIX: preserves the uncapped Opportunity score across same-cycle recalibration so later authoritative evidence can apply the correct ceiling
+ * - Preserves V252 cap policy, V251 provider/holder fixes, V249 backlog logic, Momentum maths, verified USD maths, Telegram thresholds and KV
  * V252 / V2.0:
  * - CALIBRATION: very high Opportunity scores now require confirmation quality when Momentum is WEAK
  * - Weak Momentum + no verified directional USD confirmation caps Opportunity at 79
@@ -1008,7 +1014,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V252";
+const VERSION = "V253";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -34168,13 +34174,30 @@ function evidenceQualityProtectionV158(
  * untouched. It only constrains the very top of the final Opportunity range
  * when confirmation is weak, so the bot still surfaces promising candidates.
  */
-function opportunityConfirmationCalibrationV252(
-  candidate
+function opportunityConfirmationCalibrationV253(
+  candidate,
+  options = {}
 ) {
-  const opportunity =
+  const currentOpportunity =
     safeNumber(
       candidate?.opportunity?.score
     );
+
+  const priorRaw =
+    Number(
+      candidate
+        ?.opportunityConfirmationCalibrationV253
+        ?.rawOpportunity
+    );
+
+  const rawOpportunity =
+    options?.refreshRaw === true
+      ? currentOpportunity
+      : (
+          Number.isFinite(priorRaw)
+            ? priorRaw
+            : currentOpportunity
+        );
 
   const momentumVerified =
     candidate?.momentum?.verified ===
@@ -34185,21 +34208,38 @@ function opportunityConfirmationCalibrationV252(
       candidate?.momentum?.score
     );
 
+  /*
+   * V253: live validation proved Momentum exactly 25 must not escape the
+   * confirmation-quality ceiling.
+   */
   const weakMomentum =
     !momentumVerified ||
-    momentumScore < 25;
+    momentumScore <= 25;
 
-  const flow =
+  const marketFlow =
     candidate?.market?.directionalFlow ||
     {};
 
-  const verifiedWindow = key => {
-    const row =
-      flow?.[key];
+  const authoritativeFlow =
+    candidate?.onChainVerifiedFlowV212;
 
-    if (
-      row?.verified !== true
-    ) {
+  const verifiedWindow = key => {
+    const exactRow =
+      authoritativeFlow
+        ?.windows
+        ?.[key];
+
+    const fallbackRow =
+      marketFlow?.[key];
+
+    const row =
+      exactRow?.verified === true
+        ? exactRow
+        : fallbackRow?.verified === true
+          ? fallbackRow
+          : null;
+
+    if (!row) {
       return null;
     }
 
@@ -34234,6 +34274,10 @@ function opportunityConfirmationCalibrationV252(
 
     return {
       key,
+      source:
+        exactRow?.verified === true
+          ? "ONCHAIN_VERIFIED_FLOW_V212"
+          : "MARKET_DIRECTIONAL_FLOW",
       buyUsd,
       sellUsd,
       totalUsd:
@@ -34241,7 +34285,11 @@ function opportunityConfirmationCalibrationV252(
         Math.max(0, sellUsd),
       netUsd,
       buyPressureUsd:
-        pressure
+        pressure,
+      observedTrades:
+        safeNumber(
+          row?.observedTrades
+        )
     };
   };
 
@@ -34278,11 +34326,6 @@ function opportunityConfirmationCalibrationV252(
       ponsUsable
     );
 
-  /*
-   * Medium-window confirmation is intentionally preferred to 5m because a
-   * tiny immediate sample can reverse while the broader observed flow remains
-   * bearish. This matches the evidence exposed by the first V1 live alerts.
-   */
   const positiveMediumUsd =
     Boolean(
       (
@@ -34351,10 +34394,6 @@ function opportunityConfirmationCalibrationV252(
     else if (
       positiveMediumUsd
     ) {
-      /*
-       * Positive verified 15m/1h flow is materially better evidence than raw
-       * transaction counts, but weak Momentum still prevents an 85-100 grade.
-       */
       cap =
         84;
 
@@ -34381,10 +34420,6 @@ function opportunityConfirmationCalibrationV252(
     }
 
     else {
-      /*
-       * A verified 5m sample alone is useful but not enough to justify the
-       * very-high Opportunity band while broader confirmation is absent.
-       */
       cap =
         79;
 
@@ -34401,8 +34436,16 @@ function opportunityConfirmationCalibrationV252(
     }
   }
 
-  const originalOpportunity =
-    opportunity;
+  /*
+   * Restore the same-cycle uncapped score before applying the latest evidence
+   * ceiling. This lets a later V212 pass tighten or relax the cap correctly.
+   */
+  if (
+    candidate?.opportunity
+  ) {
+    candidate.opportunity.score =
+      rawOpportunity;
+  }
 
   if (
     cap !== null &&
@@ -34410,25 +34453,31 @@ function opportunityConfirmationCalibrationV252(
   ) {
     candidate.opportunity.score =
       Math.min(
-        originalOpportunity,
+        rawOpportunity,
         cap
       );
 
     if (
       candidate.opportunity.score <
-      originalOpportunity
+      rawOpportunity
     ) {
-      candidate.opportunity.reasons =
+      const existingReasons =
         Array.isArray(
           candidate.opportunity.reasons
         )
-          ? [
-              ...candidate.opportunity.reasons,
-              "V252 confirmation-quality opportunity cap"
-            ]
-          : [
-              "V252 confirmation-quality opportunity cap"
-            ];
+          ? candidate.opportunity.reasons.filter(
+              reason =>
+                reason !==
+                  "V252 confirmation-quality opportunity cap" &&
+                reason !==
+                  "V253 confirmation-quality opportunity cap"
+            )
+          : [];
+
+      candidate.opportunity.reasons = [
+        ...existingReasons,
+        "V253 confirmation-quality opportunity cap"
+      ];
     }
   }
 
@@ -34436,11 +34485,18 @@ function opportunityConfirmationCalibrationV252(
     enabled:
       true,
 
+    phase:
+      options?.phase ||
+      null,
+
+    refreshRaw:
+      options?.refreshRaw === true,
+
     applied:
       cap !== null &&
-      originalOpportunity > cap,
+      rawOpportunity > cap,
 
-    originalOpportunity,
+    rawOpportunity,
 
     finalOpportunity:
       safeNumber(
@@ -34456,6 +34512,23 @@ function opportunityConfirmationCalibrationV252(
     momentumScore,
 
     weakMomentum,
+
+    authoritativeV212: {
+      attached:
+        Boolean(
+          authoritativeFlow
+        ),
+      verified:
+        authoritativeFlow?.verified ===
+          true,
+      source:
+        authoritativeFlow?.source ||
+        null,
+      recordCount:
+        safeNumber(
+          authoritativeFlow?.recordCount
+        )
+    },
 
     directionalUsd: {
       anyVerified:
@@ -34504,7 +34577,7 @@ function opportunityConfirmationCalibrationV252(
   };
 
   candidate
-    .opportunityConfirmationCalibrationV252 =
+    .opportunityConfirmationCalibrationV253 =
     telemetry;
 
   return telemetry;
@@ -38079,8 +38152,12 @@ async function analyzeToken(
     candidate
   );
 
-  opportunityConfirmationCalibrationV252(
-    candidate
+  opportunityConfirmationCalibrationV253(
+    candidate,
+    {
+      refreshRaw: true,
+      phase: "INITIAL_SCORE"
+    }
   );
 
   candidate.holderBreadthV136 =
@@ -42726,7 +42803,13 @@ for (
           candidateConfidence(candidate);
 
         evidenceQualityProtectionV158(candidate);
-        opportunityConfirmationCalibrationV252(candidate);
+        opportunityConfirmationCalibrationV253(
+          candidate,
+          {
+            refreshRaw: true,
+            phase: "EARLY_DIRECTIONAL_RECOMPUTE"
+          }
+        );
 
         candidate.analysisPriority =
           analysisPriority(candidate);
@@ -44004,8 +44087,12 @@ for (
       evidenceQualityProtectionV158(
         v180UsdGDirectionalTarget
       );
-      opportunityConfirmationCalibrationV252(
-        v180UsdGDirectionalTarget
+      opportunityConfirmationCalibrationV253(
+        v180UsdGDirectionalTarget,
+        {
+          refreshRaw: true,
+          phase: "V180_DIRECTIONAL_RECOMPUTE"
+        }
       );
 
       v180UsdGDirectionalTarget.analysisPriority =
@@ -44216,8 +44303,12 @@ for (
       evidenceQualityProtectionV158(
         directionalTarget
       );
-      opportunityConfirmationCalibrationV252(
-        directionalTarget
+      opportunityConfirmationCalibrationV253(
+        directionalTarget,
+        {
+          refreshRaw: true,
+          phase: "DIRECTIONAL_RECOMPUTE"
+        }
       );
 
       directionalTarget.analysisPriority =
@@ -44332,8 +44423,12 @@ for (
       evidenceQualityProtectionV158(
         candidate
       );
-      opportunityConfirmationCalibrationV252(
-        candidate
+      opportunityConfirmationCalibrationV253(
+        candidate,
+        {
+          refreshRaw: true,
+          phase: "PONS_RECOMPUTE"
+        }
       );
 
       candidate.analysisPriority =
@@ -44421,6 +44516,24 @@ for (
           "NO_VERIFIED_PONS_CURVE_FLOW"
       };
     }
+
+    /*
+     * V253 final authoritative pass: V212 is now attached for every candidate.
+     * Only the confirmation ceiling is recalculated here.
+     */
+    opportunityConfirmationCalibrationV253(
+      candidate,
+      {
+        refreshRaw: false,
+        phase:
+          "POST_V212_AUTHORITATIVE_FINAL"
+      }
+    );
+
+    candidate.analysisPriority =
+      analysisPriority(
+        candidate
+      );
 
     candidate.telegramVerifiedUsdDiagnosticV213 =
       telegramVerifiedUsdDiagnosticV213(
