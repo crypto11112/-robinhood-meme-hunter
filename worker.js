@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V252 / V2.0:
+ * - CALIBRATION: very high Opportunity scores now require confirmation quality when Momentum is WEAK
+ * - Weak Momentum + no verified directional USD confirmation caps Opportunity at 79
+ * - Weak Momentum + verified bearish medium-window USD flow caps Opportunity at 74
+ * - Weak Momentum + verified positive 15m/1h USD confirmation may reach 84, preserving genuinely improving early candidates
+ * - Base Opportunity weights are unchanged; only the final high-score ceiling is calibrated
+ * - Preserves V251 provider/holder fixes, V249 backlog logic, Momentum maths, verified USD maths, confidence, Telegram thresholds and KV
  * V251:
  * - FIX: holder breadth preserves UNVERIFIED holder count instead of coercing null/missing evidence to 0
  * - FIX: Bitquery HTTP 402 quota exhaustion opens a provider-wide cooldown so repeated scans stop wasting requests
@@ -1001,7 +1008,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V251";
+const VERSION = "V252";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -34147,6 +34154,363 @@ function evidenceQualityProtectionV158(
 }
 
 
+
+/* =========================================================
+   V252 / V2.0 OPPORTUNITY CONFIRMATION CALIBRATION
+   ========================================================= */
+
+/*
+ * Live V1 validation exposed a repeated presentation mismatch:
+ * high raw Opportunity scores could coexist with WEAK Momentum and either
+ * missing or bearish candidate-specific verified USD flow.
+ *
+ * V252 deliberately leaves scoreOpportunity() and Momentum calculations
+ * untouched. It only constrains the very top of the final Opportunity range
+ * when confirmation is weak, so the bot still surfaces promising candidates.
+ */
+function opportunityConfirmationCalibrationV252(
+  candidate
+) {
+  const opportunity =
+    safeNumber(
+      candidate?.opportunity?.score
+    );
+
+  const momentumVerified =
+    candidate?.momentum?.verified ===
+      true;
+
+  const momentumScore =
+    safeNumber(
+      candidate?.momentum?.score
+    );
+
+  const weakMomentum =
+    !momentumVerified ||
+    momentumScore < 25;
+
+  const flow =
+    candidate?.market?.directionalFlow ||
+    {};
+
+  const verifiedWindow = key => {
+    const row =
+      flow?.[key];
+
+    if (
+      row?.verified !== true
+    ) {
+      return null;
+    }
+
+    const buyUsd =
+      Number(
+        row?.buyVolumeUsd
+      );
+
+    const sellUsd =
+      Number(
+        row?.sellVolumeUsd
+      );
+
+    const netUsd =
+      Number(
+        row?.netFlowUsd
+      );
+
+    const pressure =
+      Number(
+        row?.buyPressureUsd
+      );
+
+    if (
+      !Number.isFinite(buyUsd) ||
+      !Number.isFinite(sellUsd) ||
+      !Number.isFinite(netUsd) ||
+      !Number.isFinite(pressure)
+    ) {
+      return null;
+    }
+
+    return {
+      key,
+      buyUsd,
+      sellUsd,
+      totalUsd:
+        Math.max(0, buyUsd) +
+        Math.max(0, sellUsd),
+      netUsd,
+      buyPressureUsd:
+        pressure
+    };
+  };
+
+  const m5 =
+    verifiedWindow("m5");
+
+  const m15 =
+    verifiedWindow("m15");
+
+  const h1 =
+    verifiedWindow("h1");
+
+  const mediumWindow =
+    h1 ||
+    m15 ||
+    null;
+
+  const pons =
+    ponsConfirmationQualityV219(
+      candidate
+    );
+
+  const ponsUsable =
+    pons?.usable === true;
+
+  const ponsStrong =
+    pons?.strong === true;
+
+  const anyDirectionalVerified =
+    Boolean(
+      m5 ||
+      m15 ||
+      h1 ||
+      ponsUsable
+    );
+
+  /*
+   * Medium-window confirmation is intentionally preferred to 5m because a
+   * tiny immediate sample can reverse while the broader observed flow remains
+   * bearish. This matches the evidence exposed by the first V1 live alerts.
+   */
+  const positiveMediumUsd =
+    Boolean(
+      (
+        mediumWindow &&
+        mediumWindow.totalUsd >= 25 &&
+        mediumWindow.netUsd > 0 &&
+        mediumWindow.buyPressureUsd >= 55
+      ) ||
+      ponsStrong
+    );
+
+  const bearishMediumUsd =
+    Boolean(
+      mediumWindow &&
+      mediumWindow.totalUsd >= 25 &&
+      (
+        mediumWindow.netUsd < 0 ||
+        mediumWindow.buyPressureUsd < 45
+      )
+    );
+
+  const positiveImmediateUsd =
+    Boolean(
+      m5 &&
+      m5.totalUsd >= 25 &&
+      m5.netUsd > 0 &&
+      m5.buyPressureUsd >= 55
+    );
+
+  const bearishImmediateUsd =
+    Boolean(
+      m5 &&
+      m5.totalUsd >= 25 &&
+      (
+        m5.netUsd < 0 ||
+        m5.buyPressureUsd < 45
+      )
+    );
+
+  let cap =
+    null;
+
+  let classification =
+    "NO_CAP";
+
+  const reasons =
+    [];
+
+  if (
+    weakMomentum
+  ) {
+    if (
+      bearishMediumUsd
+    ) {
+      cap =
+        74;
+
+      classification =
+        "WEAK_MOMENTUM_BEARISH_VERIFIED_MEDIUM_USD";
+
+      reasons.push(
+        "Weak Momentum with bearish verified 15m/1h USD confirmation"
+      );
+    }
+
+    else if (
+      positiveMediumUsd
+    ) {
+      /*
+       * Positive verified 15m/1h flow is materially better evidence than raw
+       * transaction counts, but weak Momentum still prevents an 85-100 grade.
+       */
+      cap =
+        84;
+
+      classification =
+        "WEAK_MOMENTUM_POSITIVE_VERIFIED_MEDIUM_USD";
+
+      reasons.push(
+        "Weak Momentum but positive verified 15m/1h USD confirmation"
+      );
+    }
+
+    else if (
+      !anyDirectionalVerified
+    ) {
+      cap =
+        79;
+
+      classification =
+        "WEAK_MOMENTUM_DIRECTIONAL_USD_UNVERIFIED";
+
+      reasons.push(
+        "Weak Momentum with no verified directional USD confirmation"
+      );
+    }
+
+    else {
+      /*
+       * A verified 5m sample alone is useful but not enough to justify the
+       * very-high Opportunity band while broader confirmation is absent.
+       */
+      cap =
+        79;
+
+      classification =
+        positiveImmediateUsd
+          ? "WEAK_MOMENTUM_ONLY_POSITIVE_5M_USD"
+          : bearishImmediateUsd
+            ? "WEAK_MOMENTUM_BEARISH_5M_USD"
+            : "WEAK_MOMENTUM_LIMITED_DIRECTIONAL_USD";
+
+      reasons.push(
+        "Weak Momentum with only limited verified directional USD confirmation"
+      );
+    }
+  }
+
+  const originalOpportunity =
+    opportunity;
+
+  if (
+    cap !== null &&
+    candidate?.opportunity
+  ) {
+    candidate.opportunity.score =
+      Math.min(
+        originalOpportunity,
+        cap
+      );
+
+    if (
+      candidate.opportunity.score <
+      originalOpportunity
+    ) {
+      candidate.opportunity.reasons =
+        Array.isArray(
+          candidate.opportunity.reasons
+        )
+          ? [
+              ...candidate.opportunity.reasons,
+              "V252 confirmation-quality opportunity cap"
+            ]
+          : [
+              "V252 confirmation-quality opportunity cap"
+            ];
+    }
+  }
+
+  const telemetry = {
+    enabled:
+      true,
+
+    applied:
+      cap !== null &&
+      originalOpportunity > cap,
+
+    originalOpportunity,
+
+    finalOpportunity:
+      safeNumber(
+        candidate?.opportunity?.score
+      ),
+
+    cap,
+
+    classification,
+
+    momentumVerified,
+
+    momentumScore,
+
+    weakMomentum,
+
+    directionalUsd: {
+      anyVerified:
+        anyDirectionalVerified,
+
+      positiveMedium:
+        positiveMediumUsd,
+
+      bearishMedium:
+        bearishMediumUsd,
+
+      positiveImmediate:
+        positiveImmediateUsd,
+
+      bearishImmediate:
+        bearishImmediateUsd,
+
+      m5,
+
+      m15,
+
+      h1,
+
+      pons: {
+        usable:
+          ponsUsable,
+
+        strong:
+          ponsStrong,
+
+        window:
+          pons?.window ||
+          null,
+
+        netFlowUsd:
+          pons?.netFlowUsd ??
+          null,
+
+        buyPressureUsd:
+          pons?.buyPressureUsd ??
+          null
+      }
+    },
+
+    reasons
+  };
+
+  candidate
+    .opportunityConfirmationCalibrationV252 =
+    telemetry;
+
+  return telemetry;
+}
+
+
 /* =========================================================
    V219 PONS CONFIRMATION QUALITY
    ========================================================= */
@@ -37712,6 +38076,10 @@ async function analyzeToken(
     );
 
   evidenceQualityProtectionV158(
+    candidate
+  );
+
+  opportunityConfirmationCalibrationV252(
     candidate
   );
 
@@ -42358,6 +42726,7 @@ for (
           candidateConfidence(candidate);
 
         evidenceQualityProtectionV158(candidate);
+        opportunityConfirmationCalibrationV252(candidate);
 
         candidate.analysisPriority =
           analysisPriority(candidate);
@@ -43635,6 +44004,9 @@ for (
       evidenceQualityProtectionV158(
         v180UsdGDirectionalTarget
       );
+      opportunityConfirmationCalibrationV252(
+        v180UsdGDirectionalTarget
+      );
 
       v180UsdGDirectionalTarget.analysisPriority =
         analysisPriority(
@@ -43844,6 +44216,9 @@ for (
       evidenceQualityProtectionV158(
         directionalTarget
       );
+      opportunityConfirmationCalibrationV252(
+        directionalTarget
+      );
 
       directionalTarget.analysisPriority =
         analysisPriority(
@@ -43955,6 +44330,9 @@ for (
         );
 
       evidenceQualityProtectionV158(
+        candidate
+      );
+      opportunityConfirmationCalibrationV252(
         candidate
       );
 
