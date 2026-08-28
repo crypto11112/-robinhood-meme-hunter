@@ -4,7 +4,11 @@
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V206
+ * CURRENT BUILD: V207
+ * - V207 expands the EXISTING generic discovery eth_getLogs address filter to PoolManager + verified pools.trade emitters
+ * - No additional RPC call is added; request ceiling remains 42
+ * - Targeted PoolManager Initialize resolvers remain PoolManager-only
+ * - V205 launch-event recognizer can now actually receive verified pools.trade emitter logs
  * - V205 wires zero-request pools.trade launch-event recognition into existing discovery batches
  * - Only events from the verified V204 entry/factory/launchpad registry are accepted
  * - V205 does NOT guess token-address ABI positions; observed launch logs are surfaced for verification first
@@ -768,7 +772,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V206";
+const VERSION = "V207";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9535,8 +9539,12 @@ async function getLogsSingleProvider(
                 16
               ),
 
-            address:
-              POOL_MANAGER
+            address: [
+              POOL_MANAGER,
+              ...POOLS_TRADE_ENTRY_CONTRACTS_V204,
+              POOLS_TRADE_TOKEN_FACTORY_V204,
+              ...POOLS_TRADE_LAUNCHPADS_V204
+            ]
           }
         ],
 
