@@ -1,5 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V237: exact-PoolId realtime Bitquery liquidity evidence inside the existing shared request; zero extra HTTP; evidence-only until live-proven.
  * V236
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
@@ -966,7 +967,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V236";
+const VERSION = "V237";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1065,6 +1066,13 @@ const BITQUERY_RANKED_PAIR_EVIDENCE_MAX_AGE_MS_V234 =
 
 /* V235: separate market-evidence target may wait for the next shared Bitquery request. */
 const BITQUERY_MARKET_TARGET_MAX_AGE_MS_V235 =
+  6 * 60 * 60 * 1000;
+
+/* V237: exact-PoolId realtime Bitquery liquidity evidence; shares existing Bitquery HTTP request. */
+const BITQUERY_LIQUIDITY_EVIDENCE_MAX_AGE_MS_V237 =
+  10 * 60 * 1000;
+
+const BITQUERY_LIQUIDITY_TARGET_MAX_AGE_MS_V237 =
   6 * 60 * 60 * 1000;
 
 /* =========================================================
@@ -3171,6 +3179,18 @@ function newState() {
       status: "NONE"
     },
 
+    bitqueryLiquidityTargetV237: {
+      address: null,
+      poolId: null,
+      quoteAddress: null,
+      reason: null,
+      selectedAt: null,
+      analysisPriority: null,
+      symbol: null,
+      sourceVersion: "V237",
+      status: "NONE"
+    },
+
     bitqueryMarketEvidenceV233: {
       address: null,
       targetReason: null,
@@ -3215,6 +3235,32 @@ function newState() {
       source: "BITQUERY_TRADING_PAIRS_RANK1_V234",
       partialMarketOnly: true,
       liquidityVerified: false,
+      marketVerifiedPromoted: false,
+      externalRequestsAdded: 0
+    },
+
+    bitqueryLiquidityEvidenceV237: {
+      address: null,
+      poolId: null,
+      targetReason: null,
+      attempted: false,
+      verified: false,
+      status: "NOT_TARGETED",
+      fetchedAt: null,
+      snapshotTime: null,
+      snapshotAgeMs: null,
+      currencyAAddress: null,
+      currencyASymbol: null,
+      currencyBAddress: null,
+      currencyBSymbol: null,
+      amountCurrencyA: null,
+      amountCurrencyAInUSD: null,
+      amountCurrencyB: null,
+      amountCurrencyBInUSD: null,
+      liquidityUsd: null,
+      calculationMethod: null,
+      dataset: "realtime",
+      source: "BITQUERY_DEXPOOLEVENTS_POOLID_V237",
       marketVerifiedPromoted: false,
       externalRequestsAdded: 0
     },
@@ -3616,6 +3662,14 @@ async function readState(env) {
             : {})
         },
 
+        bitqueryLiquidityTargetV237: {
+          ...fresh.bitqueryLiquidityTargetV237,
+          ...(parsed.bitqueryLiquidityTargetV237 &&
+          typeof parsed.bitqueryLiquidityTargetV237 === "object"
+            ? parsed.bitqueryLiquidityTargetV237
+            : {})
+        },
+
         bitqueryMarketEvidenceV233: {
           ...fresh.bitqueryMarketEvidenceV233,
           ...(parsed.bitqueryMarketEvidenceV233 &&
@@ -3629,6 +3683,14 @@ async function readState(env) {
           ...(parsed.bitqueryRankedPairEvidenceV234 &&
           typeof parsed.bitqueryRankedPairEvidenceV234 === "object"
             ? parsed.bitqueryRankedPairEvidenceV234
+            : {})
+        },
+
+        bitqueryLiquidityEvidenceV237: {
+          ...fresh.bitqueryLiquidityEvidenceV237,
+          ...(parsed.bitqueryLiquidityEvidenceV237 &&
+          typeof parsed.bitqueryLiquidityEvidenceV237 === "object"
+            ? parsed.bitqueryLiquidityEvidenceV237
             : {})
         },
 
@@ -15966,7 +16028,8 @@ async function discoverVerifiedBagsLaunchesV210(
   state,
   budget,
   holderTargetV227 = null,
-  marketTargetV235 = null
+  marketTargetV235 = null,
+  liquidityTargetV237 = null
 ) {
   const telemetry =
     state.bagsDiscoveryV210 &&
@@ -16181,6 +16244,55 @@ async function discoverVerifiedBagsLaunchesV210(
       `
       : "";
 
+  /* V237: exact-PoolId live liquidity snapshot, independent from holder/market targets. */
+  const bitqueryLiquidityTargetAddressV237 =
+    isAddress(liquidityTargetV237?.address) && normalize(liquidityTargetV237?.address) !== ZERO
+      ? normalize(liquidityTargetV237.address)
+      : null;
+  const bitqueryLiquidityTargetPoolIdV237 =
+    /^0x[a-f0-9]{64}$/.test(normalize(liquidityTargetV237?.poolId))
+      ? normalize(liquidityTargetV237.poolId)
+      : null;
+  const bitqueryLiquidityTargetReasonV237 =
+    bitqueryLiquidityTargetAddressV237 && bitqueryLiquidityTargetPoolIdV237
+      ? String(liquidityTargetV237?.reason || "PERSISTED_EXACT_POOL_LIQUIDITY_TARGET_V237")
+      : null;
+
+  const bitqueryLiquidityGraphqlV237 =
+    bitqueryLiquidityTargetAddressV237 && bitqueryLiquidityTargetPoolIdV237
+      ? `
+      LiquidityEvidenceV237: EVM(network: robinhood) {
+        DEXPoolEvents(
+          limit: {count: 1}
+          orderBy: {descending: Block_Time}
+          where: {
+            PoolEvent: {
+              Pool: {PoolId: {is: "${bitqueryLiquidityTargetPoolIdV237}"}}
+            }
+          }
+        ) {
+          Block { Time Number }
+          Log { Signature { Name } }
+          PoolEvent {
+            Dex { ProtocolName ProtocolVersion }
+            Pool {
+              PoolId
+              SmartContract
+              CurrencyA { SmartContract Symbol Name }
+              CurrencyB { SmartContract Symbol Name }
+            }
+            Liquidity {
+              AmountCurrencyA
+              AmountCurrencyAInUSD
+              AmountCurrencyB
+              AmountCurrencyBInUSD
+            }
+          }
+        }
+      }
+      `
+      : "";
+
   const base = {
     enabled: true,
     provider: "BITQUERY",
@@ -16271,6 +16383,33 @@ async function discoverVerifiedBagsLaunchesV210(
       source: "BITQUERY_TRADING_PAIRS_RANK1_V234",
       partialMarketOnly: true,
       liquidityVerified: false,
+      marketVerifiedPromoted: false,
+      externalRequestsAdded: 0
+    },
+    bitqueryLiquidityEvidenceV237: {
+      targetAddress: bitqueryLiquidityTargetAddressV237,
+      poolId: bitqueryLiquidityTargetPoolIdV237,
+      targetReason: bitqueryLiquidityTargetReasonV237,
+      attempted: Boolean(bitqueryLiquidityTargetAddressV237 && bitqueryLiquidityTargetPoolIdV237),
+      verified: false,
+      status: bitqueryLiquidityTargetPoolIdV237 ? "PENDING_SHARED_QUERY" : "NOT_TARGETED",
+      snapshotTime: null,
+      snapshotAgeMs: null,
+      currencyAAddress: null,
+      currencyASymbol: null,
+      currencyBAddress: null,
+      currencyBSymbol: null,
+      amountCurrencyA: null,
+      amountCurrencyAInUSD: null,
+      amountCurrencyB: null,
+      amountCurrencyBInUSD: null,
+      liquidityUsd: null,
+      calculationMethod: null,
+      dataset: "realtime",
+      source: "BITQUERY_DEXPOOLEVENTS_POOLID_V237",
+      exactPoolIdRequired: true,
+      exactCandidateTokenRequired: true,
+      expectedQuoteRequired: true,
       marketVerifiedPromoted: false,
       externalRequestsAdded: 0
     },
@@ -16441,6 +16580,7 @@ async function discoverVerifiedBagsLaunchesV210(
       }
 
       ${bitqueryHolderGraphqlV227}
+      ${bitqueryLiquidityGraphqlV237}
 
       Trading {
         ${bitqueryMarketGraphqlV233}
@@ -16929,6 +17069,115 @@ async function discoverVerifiedBagsLaunchesV210(
       if (pairWatchedV234) {
         pairWatchedV234.bitqueryRankedPairEvidenceV234 = rankedPairEvidenceV234;
       }
+    }
+
+    /* V237: exact-PoolId realtime DEXPoolEvents liquidity evidence. */
+    const bitqueryLiquidityRowsV237 =
+      bitqueryLiquidityTargetPoolIdV237 &&
+      Array.isArray(payload?.data?.LiquidityEvidenceV237?.DEXPoolEvents)
+        ? payload.data.LiquidityEvidenceV237.DEXPoolEvents
+        : [];
+
+    if (bitqueryLiquidityTargetAddressV237 && bitqueryLiquidityTargetPoolIdV237) {
+      const rowV237 = bitqueryLiquidityRowsV237[0] || null;
+      const returnedPoolIdV237 = normalize(rowV237?.PoolEvent?.Pool?.PoolId);
+      const exactPoolIdMatchV237 = returnedPoolIdV237 === bitqueryLiquidityTargetPoolIdV237;
+      const rawAAddressV237 = String(rowV237?.PoolEvent?.Pool?.CurrencyA?.SmartContract || "").toLowerCase();
+      const rawBAddressV237 = String(rowV237?.PoolEvent?.Pool?.CurrencyB?.SmartContract || "").toLowerCase();
+      const currencyAAddressV237 = rawAAddressV237 === "0x" ? ZERO : normalize(rawAAddressV237);
+      const currencyBAddressV237 = rawBAddressV237 === "0x" ? ZERO : normalize(rawBAddressV237);
+      const exactCandidateTokenMatchV237 =
+        currencyAAddressV237 === bitqueryLiquidityTargetAddressV237 ||
+        currencyBAddressV237 === bitqueryLiquidityTargetAddressV237;
+      const quoteAddressV237 = currencyAAddressV237 === bitqueryLiquidityTargetAddressV237
+        ? currencyBAddressV237
+        : currencyBAddressV237 === bitqueryLiquidityTargetAddressV237
+          ? currencyAAddressV237
+          : null;
+      const expectedQuoteV237 =
+        quoteAddressV237 === ZERO ||
+        quoteAddressV237 === CANONICAL_WETH_V179 ||
+        quoteAddressV237 === CANONICAL_USDG_V179;
+      const snapshotTimeV237 = rowV237?.Block?.Time || null;
+      const parsedSnapshotTimeV237 = snapshotTimeV237 ? Date.parse(snapshotTimeV237) : NaN;
+      const snapshotAgeMsV237 = Number.isFinite(parsedSnapshotTimeV237)
+        ? Math.max(0, Date.now() - parsedSnapshotTimeV237)
+        : null;
+      const freshSnapshotV237 = snapshotAgeMsV237 !== null &&
+        snapshotAgeMsV237 <= BITQUERY_LIQUIDITY_EVIDENCE_MAX_AGE_MS_V237;
+      const amountAV237 = safeNumber(rowV237?.PoolEvent?.Liquidity?.AmountCurrencyA);
+      const amountAUsdV237 = safeNumber(rowV237?.PoolEvent?.Liquidity?.AmountCurrencyAInUSD);
+      const amountBV237 = safeNumber(rowV237?.PoolEvent?.Liquidity?.AmountCurrencyB);
+      const amountBUsdV237 = safeNumber(rowV237?.PoolEvent?.Liquidity?.AmountCurrencyBInUSD);
+
+      let liquidityUsdV237 = null;
+      let calculationMethodV237 = null;
+      if (amountAUsdV237 > 0 && amountBUsdV237 > 0) {
+        liquidityUsdV237 = amountAUsdV237 + amountBUsdV237;
+        calculationMethodV237 = "DIRECT_TWO_SIDED_USD_RESERVE_SUM_V237";
+      } else if (expectedQuoteV237) {
+        const quoteUsdV237 = currencyAAddressV237 === quoteAddressV237
+          ? amountAUsdV237
+          : amountBUsdV237;
+        if (quoteUsdV237 > 0) {
+          liquidityUsdV237 = quoteUsdV237 * 2;
+          calculationMethodV237 = "EXPECTED_QUOTE_SIDE_USD_X2_BALANCED_POOL_ESTIMATE_V237";
+        }
+      }
+
+      const verifiedLiquidityV237 = Boolean(
+        rowV237 && exactPoolIdMatchV237 && exactCandidateTokenMatchV237 &&
+        expectedQuoteV237 && freshSnapshotV237 && liquidityUsdV237 > 0
+      );
+      const statusV237 = verifiedLiquidityV237
+        ? "VERIFIED_EXACT_POOL_LIQUIDITY_V237"
+        : !rowV237
+          ? "NO_DEXPOOLEVENTS_LIQUIDITY_SNAPSHOT_V237"
+          : !exactPoolIdMatchV237
+            ? "POOL_IDENTITY_MISMATCH_V237"
+            : !exactCandidateTokenMatchV237
+              ? "CANDIDATE_TOKEN_NOT_IN_POOL_V237"
+              : !expectedQuoteV237
+                ? "UNEXPECTED_OR_UNVERIFIED_QUOTE_ASSET_V237"
+                : !freshSnapshotV237
+                  ? "STALE_LIQUIDITY_SNAPSHOT_V237"
+                  : "NO_USD_LIQUIDITY_VALUE_V237";
+
+      const liquidityEvidenceV237 = {
+        address: bitqueryLiquidityTargetAddressV237,
+        poolId: bitqueryLiquidityTargetPoolIdV237,
+        targetReason: bitqueryLiquidityTargetReasonV237,
+        attempted: true,
+        verified: verifiedLiquidityV237,
+        status: statusV237,
+        fetchedAt: Date.now(),
+        snapshotTime: snapshotTimeV237,
+        snapshotAgeMs: snapshotAgeMsV237,
+        currencyAAddress: currencyAAddressV237 || null,
+        currencyASymbol: rowV237?.PoolEvent?.Pool?.CurrencyA?.Symbol || null,
+        currencyBAddress: currencyBAddressV237 || null,
+        currencyBSymbol: rowV237?.PoolEvent?.Pool?.CurrencyB?.Symbol || null,
+        quoteAddress: quoteAddressV237,
+        expectedQuoteVerified: expectedQuoteV237,
+        amountCurrencyA: amountAV237 > 0 ? amountAV237 : null,
+        amountCurrencyAInUSD: amountAUsdV237 > 0 ? amountAUsdV237 : null,
+        amountCurrencyB: amountBV237 > 0 ? amountBV237 : null,
+        amountCurrencyBInUSD: amountBUsdV237 > 0 ? amountBUsdV237 : null,
+        liquidityUsd: liquidityUsdV237 > 0 ? liquidityUsdV237 : null,
+        calculationMethod: calculationMethodV237,
+        exactPoolIdMatch: exactPoolIdMatchV237,
+        exactCandidateTokenMatch: exactCandidateTokenMatchV237,
+        maxFreshAgeMs: BITQUERY_LIQUIDITY_EVIDENCE_MAX_AGE_MS_V237,
+        dataset: "realtime",
+        source: "BITQUERY_DEXPOOLEVENTS_POOLID_V237",
+        marketVerifiedPromoted: false,
+        externalRequestsAdded: 0
+      };
+      state.bitqueryLiquidityEvidenceV237 = liquidityEvidenceV237;
+      const liquidityWatchedV237 = state.watchedTokens.find(
+        watched => normalize(watched?.address) === bitqueryLiquidityTargetAddressV237
+      );
+      if (liquidityWatchedV237) liquidityWatchedV237.bitqueryLiquidityEvidenceV237 = liquidityEvidenceV237;
     }
 
     const launches = [];
@@ -18150,6 +18399,14 @@ async function discoverVerifiedBagsLaunchesV210(
             targetReason: bitqueryRankedPairTargetReasonV234
           }
         : base.bitqueryRankedPairEvidenceV234,
+      bitqueryLiquidityEvidenceV237: bitqueryLiquidityTargetPoolIdV237
+        ? {
+            ...(state.bitqueryLiquidityEvidenceV237 || base.bitqueryLiquidityEvidenceV237),
+            targetAddress: bitqueryLiquidityTargetAddressV237,
+            poolId: bitqueryLiquidityTargetPoolIdV237,
+            targetReason: bitqueryLiquidityTargetReasonV237
+          }
+        : base.bitqueryLiquidityEvidenceV237,
       ponsCurveTradesV216: {
         targetingVersion:
           "V217_NEWEST_VERIFIED_PONS_KV_TARGETING",
@@ -36588,13 +36845,62 @@ for (
       }
     : null;
 
+  /* V237: consume separately persisted exact-PoolId liquidity target. */
+  const persistedBitqueryLiquidityTargetV237 =
+    state.bitqueryLiquidityTargetV237 && typeof state.bitqueryLiquidityTargetV237 === "object"
+      ? state.bitqueryLiquidityTargetV237
+      : null;
+  const persistedBitqueryLiquidityTargetAddressV237 = isAddress(persistedBitqueryLiquidityTargetV237?.address)
+    ? normalize(persistedBitqueryLiquidityTargetV237.address)
+    : null;
+  const persistedBitqueryLiquidityTargetPoolIdV237 = /^0x[a-f0-9]{64}$/.test(normalize(persistedBitqueryLiquidityTargetV237?.poolId))
+    ? normalize(persistedBitqueryLiquidityTargetV237.poolId)
+    : null;
+  const persistedBitqueryLiquidityTargetAgeV237 =
+    persistedBitqueryLiquidityTargetAddressV237 && safeNumber(persistedBitqueryLiquidityTargetV237?.selectedAt)
+      ? Date.now() - safeNumber(persistedBitqueryLiquidityTargetV237.selectedAt)
+      : null;
+  const persistedBitqueryLiquidityWatchedV237 = persistedBitqueryLiquidityTargetAddressV237
+    ? state.watchedTokens.find(row => normalize(row?.address) === persistedBitqueryLiquidityTargetAddressV237) || null
+    : null;
+  const matchingLiquidityFreshV237 = Boolean(
+    persistedBitqueryLiquidityTargetAddressV237 && persistedBitqueryLiquidityTargetPoolIdV237 &&
+    state.bitqueryLiquidityEvidenceV237?.verified === true &&
+    normalize(state.bitqueryLiquidityEvidenceV237?.address) === persistedBitqueryLiquidityTargetAddressV237 &&
+    normalize(state.bitqueryLiquidityEvidenceV237?.poolId) === persistedBitqueryLiquidityTargetPoolIdV237 &&
+    safeNumber(state.bitqueryLiquidityEvidenceV237?.fetchedAt) > 0 &&
+    Date.now() - safeNumber(state.bitqueryLiquidityEvidenceV237.fetchedAt) <= BITQUERY_LIQUIDITY_EVIDENCE_MAX_AGE_MS_V237
+  );
+  const persistedBitqueryLiquidityTargetEligibleV237 = Boolean(
+    persistedBitqueryLiquidityTargetAddressV237 && persistedBitqueryLiquidityTargetPoolIdV237 &&
+    persistedBitqueryLiquidityWatchedV237 && persistedBitqueryLiquidityTargetAgeV237 !== null &&
+    persistedBitqueryLiquidityTargetAgeV237 <= BITQUERY_LIQUIDITY_TARGET_MAX_AGE_MS_V237 &&
+    !matchingLiquidityFreshV237 && !preMarketExcludedToken(persistedBitqueryLiquidityWatchedV237).excluded &&
+    !terminalPriorityRejectFromWatched(persistedBitqueryLiquidityWatchedV237).terminal
+  );
+  if (persistedBitqueryLiquidityTargetAddressV237 && !persistedBitqueryLiquidityTargetEligibleV237) {
+    state.bitqueryLiquidityTargetV237 = {
+      ...newState().bitqueryLiquidityTargetV237,
+      status: matchingLiquidityFreshV237 ? "CLEARED_MATCHING_FRESH_LIQUIDITY_EVIDENCE" : "CLEARED_STALE_OR_INELIGIBLE"
+    };
+  }
+  const bitqueryLiquidityTargetV237 = persistedBitqueryLiquidityTargetEligibleV237
+    ? {
+        address: persistedBitqueryLiquidityTargetAddressV237,
+        poolId: persistedBitqueryLiquidityTargetPoolIdV237,
+        quoteAddress: normalize(persistedBitqueryLiquidityTargetV237?.quoteAddress) || null,
+        reason: "PERSISTED_EXACT_POOL_LIQUIDITY_TARGET_V237"
+      }
+    : null;
+
   const bagsDiscoveryV210 =
     await discoverVerifiedBagsLaunchesV210(
       env,
       state,
       budget,
       bitqueryHolderTargetV227,
-      bitqueryMarketTargetV235
+      bitqueryMarketTargetV235,
+      bitqueryLiquidityTargetV237
     );
 
   for (const launch of bagsDiscoveryV210.launches || []) {
@@ -41376,6 +41682,66 @@ for (
     };
   }
 
+  /*
+   * V237 next-scan liquidity-target handoff. Require candidate-matched verified
+   * on-chain activity plus an exact pool registry mapping containing the token
+   * and a canonical ETH/WETH/USDG quote. No unidentified pool is targeted.
+   */
+  const bitqueryLiquidityTargetCandidatesV237 = candidates
+    .map(candidate => {
+      const address = normalize(candidate?.address);
+      if (!isAddress(address) || address === ZERO || candidate?.validERC20 !== true || candidate?.excludedReason) return null;
+      if (terminalPriorityReject(candidate)?.terminal === true) return null;
+      if (candidate?.market?.verified === true && safeNumber(candidate?.market?.liquidityUsd) > 0) return null;
+      const watched = state.watchedTokens.find(row => normalize(row?.address) === address) || null;
+      if (!watched || preMarketExcludedToken(watched).excluded || terminalPriorityRejectFromWatched(watched).terminal) return null;
+      const flow = candidate?.onChainVerifiedFlowV212;
+      if (flow?.verified !== true || safeNumber(flow?.recordCount) <= 0) return null;
+      const poolIds = Array.isArray(flow?.poolIds) ? flow.poolIds : [];
+      for (const rawPoolId of poolIds) {
+        const poolId = normalize(rawPoolId);
+        if (!/^0x[a-f0-9]{64}$/.test(poolId)) continue;
+        const reg = state.poolRegistry?.[poolId];
+        if (!reg) continue;
+        const c0 = normalize(reg?.currency0);
+        const c1 = normalize(reg?.currency1);
+        if (c0 !== address && c1 !== address) continue;
+        const quoteAddress = c0 === address ? c1 : c0;
+        if (![ZERO, CANONICAL_WETH_V179, CANONICAL_USDG_V179].includes(quoteAddress)) continue;
+        return {candidate, address, poolId, quoteAddress};
+      }
+      return null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => analysisPriority(b.candidate) - analysisPriority(a.candidate));
+
+  const nextBitqueryLiquidityTargetV237 = bitqueryLiquidityTargetCandidatesV237[0] || null;
+  if (nextBitqueryLiquidityTargetV237) {
+    const matchingFreshV237 = state.bitqueryLiquidityEvidenceV237?.verified === true &&
+      normalize(state.bitqueryLiquidityEvidenceV237?.address) === nextBitqueryLiquidityTargetV237.address &&
+      normalize(state.bitqueryLiquidityEvidenceV237?.poolId) === nextBitqueryLiquidityTargetV237.poolId &&
+      safeNumber(state.bitqueryLiquidityEvidenceV237?.fetchedAt) > 0 &&
+      Date.now() - safeNumber(state.bitqueryLiquidityEvidenceV237.fetchedAt) <= BITQUERY_LIQUIDITY_EVIDENCE_MAX_AGE_MS_V237;
+    state.bitqueryLiquidityTargetV237 = matchingFreshV237
+      ? {...newState().bitqueryLiquidityTargetV237, status: "NOT_QUEUED_MATCHING_FRESH_LIQUIDITY_EVIDENCE"}
+      : {
+          address: nextBitqueryLiquidityTargetV237.address,
+          poolId: nextBitqueryLiquidityTargetV237.poolId,
+          quoteAddress: nextBitqueryLiquidityTargetV237.quoteAddress,
+          reason: "POST_ANALYSIS_LIQUIDITY_UNVERIFIED_EXACT_POOL_WITH_VERIFIED_ACTIVITY_V237",
+          selectedAt: Date.now(),
+          analysisPriority: analysisPriority(nextBitqueryLiquidityTargetV237.candidate),
+          symbol: nextBitqueryLiquidityTargetV237.candidate?.symbol || null,
+          sourceVersion: "V237",
+          status: "QUEUED_FOR_NEXT_SHARED_BITQUERY_REQUEST"
+        };
+  } else if (!persistedBitqueryLiquidityTargetEligibleV237) {
+    state.bitqueryLiquidityTargetV237 = {
+      ...newState().bitqueryLiquidityTargetV237,
+      status: "NO_ELIGIBLE_EXACT_POOL_LIQUIDITY_TARGET"
+    };
+  }
+
   const save =
     await writeState(
       env,
@@ -41766,6 +42132,27 @@ for (
       liquidityVerified: false
     },
 
+    bitqueryLiquidityTargetHandoffV237: {
+      enabled: true,
+      independentFromHolderAndMarketTargets: true,
+      persistedTargetAtRequestStart: persistedBitqueryLiquidityTargetAddressV237 || null,
+      persistedPoolIdAtRequestStart: persistedBitqueryLiquidityTargetPoolIdV237 || null,
+      persistedTargetEligibleAtRequestStart: persistedBitqueryLiquidityTargetEligibleV237,
+      targetActuallySentToSharedRequest: bitqueryLiquidityTargetV237?.address || null,
+      poolIdActuallySentToSharedRequest: bitqueryLiquidityTargetV237?.poolId || null,
+      nextQueuedTarget: state.bitqueryLiquidityTargetV237?.address || null,
+      nextQueuedPoolId: state.bitqueryLiquidityTargetV237?.poolId || null,
+      nextQueuedSymbol: state.bitqueryLiquidityTargetV237?.symbol || null,
+      nextQueuedStatus: state.bitqueryLiquidityTargetV237?.status || "NONE",
+      exactPoolIdRequired: true,
+      canonicalQuoteRequired: true,
+      maxPersistAgeMs: BITQUERY_LIQUIDITY_TARGET_MAX_AGE_MS_V237,
+      externalRequestsAdded: 0,
+      momentumMathChanged: false,
+      verifiedUsdPathChanged: false,
+      marketVerifiedPromoted: false
+    },
+
     bitqueryHolderEvidenceV227: {
       enabled: true,
       sharedExistingBitqueryHttpRequest: true,
@@ -41843,6 +42230,40 @@ for (
       partialMarketOnly: true,
       total24hTokenVolumeInferred: false,
       liquidityVerified: false,
+      marketVerifiedPromoted: false,
+      fullMarketQualificationChanged: false,
+      momentumMathChanged: false,
+      verifiedUsdPathChanged: false
+    },
+
+    bitqueryLiquidityEvidenceV237: {
+      enabled: true,
+      sharedExistingBitqueryHttpRequest: true,
+      externalRequestsAdded: 0,
+      targetAddress: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.targetAddress || null,
+      poolId: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.poolId || null,
+      targetReason: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.targetReason || null,
+      attempted: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.attempted === true,
+      verified: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.verified === true,
+      status: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.status || "NOT_TARGETED",
+      snapshotTime: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.snapshotTime || null,
+      snapshotAgeMs: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.snapshotAgeMs ?? null,
+      currencyAAddress: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.currencyAAddress || null,
+      currencyASymbol: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.currencyASymbol || null,
+      currencyBAddress: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.currencyBAddress || null,
+      currencyBSymbol: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.currencyBSymbol || null,
+      amountCurrencyA: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.amountCurrencyA ?? null,
+      amountCurrencyAInUSD: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.amountCurrencyAInUSD ?? null,
+      amountCurrencyB: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.amountCurrencyB ?? null,
+      amountCurrencyBInUSD: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.amountCurrencyBInUSD ?? null,
+      liquidityUsd: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.liquidityUsd ?? null,
+      calculationMethod: bagsDiscoveryV210?.bitqueryLiquidityEvidenceV237?.calculationMethod || null,
+      source: "BITQUERY_DEXPOOLEVENTS_POOLID_V237",
+      dataset: "realtime",
+      exactPoolIdRequired: true,
+      exactCandidateTokenRequired: true,
+      canonicalQuoteRequired: true,
+      maxFreshAgeMs: BITQUERY_LIQUIDITY_EVIDENCE_MAX_AGE_MS_V237,
       marketVerifiedPromoted: false,
       fullMarketQualificationChanged: false,
       momentumMathChanged: false,
