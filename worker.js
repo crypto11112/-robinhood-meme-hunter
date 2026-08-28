@@ -1,5 +1,9 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V247:
+ * - FIX: verified Blockscout PRO token-counters fallback for holder count when public counters are unavailable
+ * - FIX: PRO HTTP-429 cooldown uses Retry-After / X-RateLimit-Reset when supplied
+ * - Preserves V246 BigInt-safe serialization and all existing holder-concentration verification
  * V246:
  * - HOTFIX: makes HTTP/KV/scheduled serialization BigInt-safe without changing internal BigInt arithmetic
  * - No discovery/backlog strategy, scoring, USD, Momentum, holder, Telegram or request-budget changes
@@ -977,7 +981,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V246";
+const VERSION = "V247";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1044,6 +1048,13 @@ const BLOCKSCOUT_PRO_CHAIN_ID =
 
 const BLOCKSCOUT_PRO_OUTAGE_COOLDOWN_MS_V145 =
   10 * 60 * 1000;
+
+/*
+ * V247: fallback only. Prefer provider supplied Retry-After / X-RateLimit-Reset
+ * when Blockscout PRO returns HTTP 429.
+ */
+const BLOCKSCOUT_PRO_429_FALLBACK_MS_V247 =
+  5 * 60 * 1000;
 
 const BLOCKSCOUT_PRO_404_RETRY_MS_V146 =
   5 * 60 * 1000;
@@ -25547,7 +25558,10 @@ function blockscoutProServiceV145(
       cooldownUntil: null,
       totalTransientFailures: 0,
       consecutiveTransientFailures: 0,
-      totalRequests: 0
+      totalRequests: 0,
+      total429sV247: 0,
+      last429AtV247: null,
+      lastRateLimitResetAtV247: null
     };
 
   return state.services.blockscoutPro;
@@ -25603,8 +25617,148 @@ function blockscoutProOutageTelemetryV145(
     totalRequests:
       safeNumber(
         service.totalRequests
-      )
+      ),
+    total429sV247:
+      safeNumber(
+        service.total429sV247
+      ),
+    last429AtV247:
+      safeNumber(
+        service.last429AtV247
+      ) || null,
+    lastRateLimitResetAtV247:
+      safeNumber(
+        service.lastRateLimitResetAtV247
+      ) || null
   };
+}
+
+/*
+ * V247: convert provider rate-limit headers into an absolute retry time.
+ * Header semantics vary between deployments, so impossible/expired values
+ * fall back to a conservative five-minute cooldown.
+ */
+function blockscoutProRateLimitResetAtV247(
+  response,
+  now = Date.now()
+) {
+  const retryAfter =
+    String(
+      response?.headers?.get?.(
+        "retry-after"
+      ) || ""
+    ).trim();
+
+  if (retryAfter) {
+    const seconds =
+      Number(retryAfter);
+
+    if (
+      Number.isFinite(seconds) &&
+      seconds >= 0
+    ) {
+      return now +
+        Math.ceil(seconds * 1000);
+    }
+
+    const dateMs =
+      Date.parse(retryAfter);
+
+    if (
+      Number.isFinite(dateMs) &&
+      dateMs > now
+    ) {
+      return dateMs;
+    }
+  }
+
+  const resetRaw =
+    String(
+      response?.headers?.get?.(
+        "x-ratelimit-reset"
+      ) || ""
+    ).trim();
+
+  if (resetRaw) {
+    const numeric =
+      Number(resetRaw);
+
+    if (
+      Number.isFinite(numeric) &&
+      numeric > 0
+    ) {
+      let resetAt = null;
+
+      if (numeric >= 1e12) {
+        resetAt = numeric;
+      }
+
+      else if (numeric >= 1e9) {
+        resetAt = numeric * 1000;
+      }
+
+      else {
+        resetAt = now +
+          numeric * 1000;
+      }
+
+      if (
+        Number.isFinite(resetAt) &&
+        resetAt > now
+      ) {
+        return Math.ceil(resetAt);
+      }
+    }
+  }
+
+  return now +
+    BLOCKSCOUT_PRO_429_FALLBACK_MS_V247;
+}
+
+function registerBlockscoutPro429V247(
+  state,
+  response
+) {
+  const service =
+    blockscoutProServiceV145(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  const resetAt =
+    blockscoutProRateLimitResetAtV247(
+      response,
+      now
+    );
+
+  service.total429sV247 =
+    safeNumber(
+      service.total429sV247
+    ) + 1;
+
+  service.last429AtV247 =
+    now;
+
+  service.lastRateLimitResetAtV247 =
+    resetAt;
+
+  service.lastStatus =
+    "HTTP_429";
+
+  service.lastFailureAt =
+    now;
+
+  service.cooldownUntil =
+    Math.max(
+      safeNumber(
+        service.cooldownUntil
+      ),
+      resetAt
+    );
+
+  return resetAt;
 }
 
 
@@ -25823,6 +25977,36 @@ async function blockscoutProHoldersV143(
       );
 
     if (
+      response.status ===
+      429
+    ) {
+      const retryAtV247 =
+        registerBlockscoutPro429V247(
+          state,
+          response
+        );
+
+      return {
+        configured: true,
+        attempted: true,
+        success: false,
+        status:
+          "BLOCKSCOUT_PRO_HTTP_429_V247",
+        httpStatus:
+          429,
+        cooldownUntil:
+          retryAtV247,
+        retryAfterMs:
+          Math.max(
+            0,
+            retryAtV247 -
+              Date.now()
+          ),
+        data: null
+      };
+    }
+
+    if (
       !response.ok
     ) {
       const status =
@@ -25972,6 +26156,274 @@ async function blockscoutProHoldersV143(
     };
   }
 }
+
+/*
+ * V247 VERIFIED BLOCKSCOUT PRO HOLDER-COUNT FALLBACK
+ *
+ * Public /api/v2/tokens/:token/counters remains first choice.
+ * This route is used only when the public counter did not produce a holder
+ * count. It does not infer the count from holder rows and it does not change
+ * concentration verification.
+ */
+async function blockscoutProCountersV247(
+  token,
+  budget,
+  env,
+  state
+) {
+  const apiKey =
+    String(
+      env?.BLOCKSCOUT_PRO_API_KEY ||
+      ""
+    ).trim();
+
+  const base = {
+    configured:
+      Boolean(apiKey),
+    attempted:
+      false,
+    success:
+      false,
+    verified:
+      false,
+    status:
+      apiKey
+        ? "NOT_ATTEMPTED"
+        : "BLOCKSCOUT_PRO_NOT_CONFIGURED",
+    httpStatus:
+      null,
+    holderCount:
+      null,
+    transferCount:
+      null,
+    cooldownUntil:
+      null,
+    retryAfterMs:
+      0
+  };
+
+  if (!apiKey) {
+    return base;
+  }
+
+  const service =
+    blockscoutProServiceV145(
+      state
+    );
+
+  const cooldownUntil =
+    safeNumber(
+      service.cooldownUntil
+    );
+
+  if (
+    cooldownUntil &&
+    cooldownUntil >
+      Date.now()
+  ) {
+    return {
+      ...base,
+      status:
+        "BLOCKSCOUT_PRO_COOLDOWN_V247",
+      cooldownUntil,
+      retryAfterMs:
+        cooldownUntil -
+        Date.now()
+    };
+  }
+
+  if (
+    !consumeBudget(
+      budget,
+      "analysis",
+      "BLOCKSCOUT_PRO_TOKEN_COUNTERS_V247"
+    )
+  ) {
+    return {
+      ...base,
+      status:
+        "ANALYSIS_BUDGET_UNAVAILABLE"
+    };
+  }
+
+  service.totalRequests =
+    safeNumber(
+      service.totalRequests
+    ) + 1;
+
+  try {
+    const url =
+      `${BLOCKSCOUT_PRO}/${BLOCKSCOUT_PRO_CHAIN_ID}/api/v2/tokens/${token}/counters?apikey=${encodeURIComponent(apiKey)}`;
+
+    const response =
+      await fetch(
+        url,
+        {
+          headers: {
+            accept:
+              "application/json"
+          }
+        }
+      );
+
+    if (
+      response.status ===
+      429
+    ) {
+      const retryAt =
+        registerBlockscoutPro429V247(
+          state,
+          response
+        );
+
+      return {
+        ...base,
+        attempted:
+          true,
+        status:
+          "BLOCKSCOUT_PRO_COUNTERS_HTTP_429_V247",
+        httpStatus:
+          429,
+        cooldownUntil:
+          retryAt,
+        retryAfterMs:
+          Math.max(
+            0,
+            retryAt -
+              Date.now()
+          )
+      };
+    }
+
+    if (
+      !response.ok
+    ) {
+      service.lastStatus =
+        `COUNTERS_HTTP_${response.status}`;
+
+      service.lastFailureAt =
+        Date.now();
+
+      return {
+        ...base,
+        attempted:
+          true,
+        status:
+          `BLOCKSCOUT_PRO_COUNTERS_HTTP_${response.status}_V247`,
+        httpStatus:
+          response.status
+      };
+    }
+
+    const payload =
+      await response.json();
+
+    const counters =
+      extractCounterData(
+        payload
+      );
+
+    const holderCount =
+      Number.isFinite(
+        Number(
+          counters.holderCount
+        )
+      ) &&
+      Number(
+        counters.holderCount
+      ) > 0
+        ? Math.floor(
+            Number(
+              counters.holderCount
+            )
+          )
+        : null;
+
+    const transferCount =
+      Number.isFinite(
+        Number(
+          counters.transferCount
+        )
+      ) &&
+      Number(
+        counters.transferCount
+      ) >= 0
+        ? Math.floor(
+            Number(
+              counters.transferCount
+            )
+          )
+        : null;
+
+    if (
+      holderCount ===
+        null
+    ) {
+      service.lastStatus =
+        "COUNTERS_NO_POSITIVE_HOLDER_COUNT_V247";
+
+      return {
+        ...base,
+        attempted:
+          true,
+        status:
+          "NO_VERIFIED_HOLDER_COUNT_IN_PRO_COUNTERS_V247",
+        httpStatus:
+          response.status,
+        transferCount
+      };
+    }
+
+    service.lastStatus =
+      "COUNTERS_VERIFIED_RESPONSE_V247";
+
+    service.lastSuccessAt =
+      Date.now();
+
+    service.cooldownUntil =
+      null;
+
+    service.consecutiveTransientFailures =
+      0;
+
+    return {
+      ...base,
+      attempted:
+        true,
+      success:
+        true,
+      verified:
+        true,
+      status:
+        "VERIFIED_PRO_COUNTERS_V247",
+      httpStatus:
+        response.status,
+      holderCount,
+      transferCount
+    };
+  }
+
+  catch (error) {
+    service.lastStatus =
+      "COUNTERS_FETCH_ERROR_V247";
+
+    service.lastFailureAt =
+      Date.now();
+
+    return {
+      ...base,
+      attempted:
+        true,
+      status:
+        "BLOCKSCOUT_PRO_COUNTERS_FETCH_ERROR_V247",
+      error:
+        errorString(
+          error
+        )
+    };
+  }
+}
+
 
 function extractCounterData(
   data
@@ -27717,6 +28169,23 @@ async function holderIntelligence(
   let legacyHolderRowsUnavailable =
     false;
 
+  let blockscoutProCounterFallbackV247 = {
+    configured:
+      blockscoutProConfiguredV164,
+    attempted: false,
+    success: false,
+    verified: false,
+    status:
+      blockscoutProConfiguredV164
+        ? "NOT_NEEDED_YET"
+        : "BLOCKSCOUT_PRO_NOT_CONFIGURED",
+    httpStatus: null,
+    holderCount: null,
+    transferCount: null,
+    cooldownUntil: null,
+    retryAfterMs: 0
+  };
+
   let blockscoutProHolderFallbackV143 = {
     configured:
       blockscoutProConfiguredV164,
@@ -28005,6 +28474,100 @@ async function holderIntelligence(
   }
 
   /*
+   * V247: the public counters endpoint already existed before V247.
+   * The missing route was the PRO counters equivalent. When the public
+   * counter is unavailable, make one verified PRO counters attempt for a
+   * priority candidate or whenever PRO holder rows were required.
+   *
+   * This request is still inside the existing analysis/global request budget.
+   */
+  if (
+    counterData.holderCount ===
+      null &&
+    blockscoutProConfiguredV164 &&
+    (
+      priorityCompletion ===
+        true ||
+      holders?.proV143 ===
+        true
+    )
+  ) {
+    if (
+      priorityCompletion ===
+      true
+    ) {
+      yieldV182ReserveToPriorityHolderEvidenceV226(
+        budget,
+        token,
+        "PRIORITY_HOLDER_COUNT_PRO_COUNTERS_V247"
+      );
+    }
+
+    if (
+      budgetAvailable(
+        budget,
+        "analysis"
+      )
+    ) {
+      const proCountersV247 =
+        await blockscoutProCountersV247(
+          token,
+          budget,
+          env,
+          state
+        );
+
+      blockscoutProCounterFallbackV247 = {
+        configured:
+          proCountersV247.configured,
+        attempted:
+          proCountersV247.attempted,
+        success:
+          proCountersV247.success,
+        verified:
+          proCountersV247.verified,
+        status:
+          proCountersV247.status,
+        httpStatus:
+          proCountersV247.httpStatus,
+        holderCount:
+          proCountersV247.holderCount,
+        transferCount:
+          proCountersV247.transferCount,
+        cooldownUntil:
+          proCountersV247.cooldownUntil,
+        retryAfterMs:
+          safeNumber(
+            proCountersV247.retryAfterMs
+          )
+      };
+
+      if (
+        proCountersV247.verified ===
+          true &&
+        proCountersV247.holderCount !==
+          null
+      ) {
+        counterData.holderCount =
+          proCountersV247.holderCount;
+
+        if (
+          counterData.transferCount ===
+            null &&
+          proCountersV247.transferCount !==
+            null
+        ) {
+          counterData.transferCount =
+            proCountersV247.transferCount;
+        }
+
+        counterSource =
+          "BLOCKSCOUT_PRO_COUNTERS_V247";
+      }
+    }
+  }
+
+  /*
    * V134/V143: open the same-run circuit only after the public holder-row
    * paths and any configured PRO fallback have failed. Token details/counters
    * may still be healthy and are not treated
@@ -28086,7 +28649,8 @@ async function holderIntelligence(
           "STALE_CACHE_BLOCKSCOUT_OUTAGE",
         blockscoutUnavailable:
           true,
-        blockscoutProHolderFallbackV143
+        blockscoutProHolderFallbackV143,
+        blockscoutProCounterFallbackV247
       };
     }
 
@@ -28108,7 +28672,8 @@ async function holderIntelligence(
 
       holderSource:
         "BLOCKSCOUT",
-      blockscoutProHolderFallbackV143
+      blockscoutProHolderFallbackV143,
+        blockscoutProCounterFallbackV247
     };
   }
 
@@ -28142,7 +28707,8 @@ async function holderIntelligence(
       holderSource:
         emptyHolderSourceV144,
 
-      blockscoutProHolderFallbackV143
+      blockscoutProHolderFallbackV143,
+        blockscoutProCounterFallbackV247
     };
   }
 
@@ -28228,6 +28794,7 @@ async function holderIntelligence(
       holderSource,
 
       blockscoutProHolderFallbackV143,
+      blockscoutProCounterFallbackV247,
 
       whale: {
         verified:
@@ -28389,6 +28956,7 @@ async function holderIntelligence(
       holderSource,
 
       blockscoutProHolderFallbackV143,
+      blockscoutProCounterFallbackV247,
 
       partialHolderStateV149: {
         status:
@@ -28509,6 +29077,7 @@ async function holderIntelligence(
       holderSource,
 
       blockscoutProHolderFallbackV143,
+      blockscoutProCounterFallbackV247,
 
       partialHolderStateV149: {
         status:
@@ -28644,6 +29213,7 @@ async function holderIntelligence(
     return {
     holderSource,
     blockscoutProHolderFallbackV143,
+      blockscoutProCounterFallbackV247,
       verified:
         countersVerified,
 
@@ -28784,6 +29354,7 @@ async function holderIntelligence(
     holderSource,
 
     blockscoutProHolderFallbackV143,
+      blockscoutProCounterFallbackV247,
 
     countersVerified,
 
