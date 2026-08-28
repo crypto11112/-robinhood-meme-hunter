@@ -4,7 +4,7 @@
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V205
+ * CURRENT BUILD: V206
  * - V205 wires zero-request pools.trade launch-event recognition into existing discovery batches
  * - Only events from the verified V204 entry/factory/launchpad registry are accepted
  * - V205 does NOT guess token-address ABI positions; observed launch logs are surfaced for verification first
@@ -768,7 +768,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V205";
+const VERSION = "V206";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -13297,9 +13297,33 @@ function resolvedPoolReplayDiagnosticV198(
 
                 return {
                   blockNumber:
-                    hexToNumber(
-                      log?.blockNumber
-                    ),
+                    (() => {
+                      try {
+                        const value =
+                          log?.blockNumber;
+
+                        if (
+                          value === null ||
+                          value === undefined
+                        ) {
+                          return null;
+                        }
+
+                        if (
+                          typeof value === "number"
+                        ) {
+                          return Number.isFinite(value)
+                            ? value
+                            : null;
+                        }
+
+                        return Number(
+                          BigInt(value)
+                        );
+                      } catch {
+                        return null;
+                      }
+                    })(),
                   transactionHash:
                     normalize(
                       log?.transactionHash
