@@ -1,10 +1,16 @@
 /**
  * Robinhood Chain Meme Hunter
- * V230
+ * V231
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V230
+ * V231 TELEGRAM PRESENTATION CLEANUP
+ * - Renames broad market transaction section to Market Activity Counts — NOT USD VERIFIED
+ * - Removes duplicated UNVERIFIED USD/net-flow fields from the broad count section
+ * - Preserves the stricter Verified On-chain USD section unchanged
+ * - No scoring, Momentum, verified USD, holder, qualification, KV or request-budget changes
+ *
+ * CURRENT BUILD: V231
  * - FIX: Bitquery holder fallback now uses dataset: realtime, matching the entitlement proven by V229 diagnostics
  * - FIX: removes the combined-dataset entitlement 403 that blocked the shared Bitquery launch/trading/holder request
  * - SAFETY: realtime holder rows are still exact-token matched, positive-balance filtered, freshness bounded and passed through existing holder-integrity maths before concentration can be verified
@@ -915,7 +921,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V230";
+const VERSION = "V231";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -33322,34 +33328,21 @@ function telegramMessage(
     `💧 Liquidity: <b>${market?.verified ? money(market.liquidityUsd) : "UNVERIFIED"}</b>`,
     `📊 24h Volume: <b>${market?.verified ? money(market.volume?.h24) : "UNVERIFIED"}</b>`,
     "",
-    "📊 <b>Trading Activity</b>",
-    `🟢 5m Buys: <b>${trade5m.buys}</b> — <b>${trade5m.buyUsd}</b>`,
-    `🔴 5m Sells: <b>${trade5m.sells}</b> — <b>${trade5m.sellUsd}</b>`,
-    `📈 5m Net Flow: <b>${trade5m.netUsd}</b>`,
-    `💵 5m USD Buy Pressure: <b>${trade5m.pressureUsd}</b>`,
+    "📊 <b>Market Activity Counts — NOT USD VERIFIED</b>",
+    `🟢 5m Buys: <b>${trade5m.buys}</b>`,
+    `🔴 5m Sells: <b>${trade5m.sells}</b>`,
     "",
-    `🟢 15m Buys: <b>${trade15m.buys}</b> — <b>${trade15m.buyUsd}</b>`,
-    `🔴 15m Sells: <b>${trade15m.sells}</b> — <b>${trade15m.sellUsd}</b>`,
-    `📈 15m Net Flow: <b>${trade15m.netUsd}</b>`,
-    `🟢 15m Buy Pressure: <b>${trade15m.pressure}</b>`,
-    `💵 15m USD Buy Pressure: <b>${trade15m.pressureUsd}</b>`,
+    `🟢 15m Buys: <b>${trade15m.buys}</b>`,
+    `🔴 15m Sells: <b>${trade15m.sells}</b>`,
     "",
-    `🟢 1h Buys: <b>${trade1h.buys}</b> — <b>${trade1h.buyUsd}</b>`,
-    `🔴 1h Sells: <b>${trade1h.sells}</b> — <b>${trade1h.sellUsd}</b>`,
-    `📈 1h Net Flow: <b>${trade1h.netUsd}</b>`,
-    `🟢 1h Buy Pressure: <b>${trade1h.pressure}</b>`,
-    `💵 1h USD Buy Pressure: <b>${trade1h.pressureUsd}</b>`,
+    `🟢 1h Buys: <b>${trade1h.buys}</b>`,
+    `🔴 1h Sells: <b>${trade1h.sells}</b>`,
     "",
-    `🟢 6h Buys: <b>${trade6h.buys}</b> — <b>${trade6h.buyUsd}</b>`,
-    `🔴 6h Sells: <b>${trade6h.sells}</b> — <b>${trade6h.sellUsd}</b>`,
-    `📈 6h Net Flow: <b>${trade6h.netUsd}</b>`,
-    `🟢 6h Buy Pressure: <b>${trade6h.pressure}</b>`,
-    `💵 6h USD Buy Pressure: <b>${trade6h.pressureUsd}</b>`,
+    `🟢 6h Buys: <b>${trade6h.buys}</b>`,
+    `🔴 6h Sells: <b>${trade6h.sells}</b>`,
     "",
-    `🟢 24h Buys: <b>${trade24h.buys}</b> — <b>${trade24h.buyUsd}</b>`,
-    `🔴 24h Sells: <b>${trade24h.sells}</b> — <b>${trade24h.sellUsd}</b>`,
-    `📈 24h Net Flow: <b>${trade24h.netUsd}</b>`,
-    `💵 24h USD Buy Pressure: <b>${trade24h.pressureUsd}</b>`,
+    `🟢 24h Buys: <b>${trade24h.buys}</b>`,
+    `🔴 24h Sells: <b>${trade24h.sells}</b>`,
     ...verifiedObservedLinesV212,
     ...ponsCurveLinesV216,
     "",
