@@ -1,8 +1,17 @@
 /**
  * Robinhood Chain Meme Hunter
- * V223
+ * V224
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
+ *
+ * CURRENT BUILD: V224
+ * - NEW: verified Clanker discovery using Bitquery exact factory + zero-address 100B launch mint
+ * - NEW: verified Virtuals discovery using Bitquery exact factory + zero-address mint without a fixed-supply assumption
+ * - NEW: Clanker/Virtuals launches enter watch/live/new-token priority in the same scan and inherit V223 verified launch-age/Telegram age support
+ * - SAFETY: separate supply-rule branches; no pool, DEX, quote or graduation model is guessed
+ * - Adds zero HTTP requests by sharing the existing Bitquery GraphQL request
+ * - Momentum, verified Pons/V4 USD, holder logic, Telegram thresholds and 42-request ceiling remain unchanged
+ * - Preserves full V223/V222 behavior and KV history
  *
  * CURRENT BUILD: V223
  * - NEW: verified launch age from persisted positive-identification launch timestamps
@@ -863,7 +872,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V223";
+const VERSION = "V224";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1007,6 +1016,17 @@ const FIXED_1B_LAUNCHPADS_V222 = {
     source: "BITQUERY_APE_STORE_FACTORY_MINT_V222"
   }
 };
+
+/* =========================================================
+   V224 VERIFIED CLANKER + VIRTUALS DISCOVERY
+   ========================================================= */
+const CLANKER_FACTORY_V224 =
+  "0xd3f2cc1731b7fd17f28798835c2e02f0a1839a94";
+const CLANKER_MINT_AMOUNT_V224 =
+  "100000000000";
+const VIRTUALS_FACTORY_V224 =
+  "0xd4ccbfa37e2f35611b3042e4096ad7a3459bd007";
+
 
 
 const PONS_V2_FACTORY_V215 =
@@ -2936,6 +2956,20 @@ function newState() {
       recentVerifiedLaunches: []
     },
 
+    clankerVirtualsDiscoveryV224: {
+      totalQueriesShared: 0,
+      totalLaunchesSeen: 0,
+      totalVerifiedTokensAdded: 0,
+      lastQueryAt: null,
+      lastStatus: null,
+      lastLaunchAt: null,
+      lastLaunchBlock: null,
+      lastVerifiedToken: null,
+      lastProtocol: null,
+      byProtocol: {},
+      recentVerifiedLaunches: []
+    },
+
     ponsCurveTradesV216: {
       totalRowsSeen: 0,
       totalVerifiedTrades: 0,
@@ -3302,6 +3336,20 @@ async function readState(env) {
             )
               ? parsed.fixedMintLaunchpadDiscoveryV222.recentVerifiedLaunches.slice(-50)
               : []
+        },
+
+
+        clankerVirtualsDiscoveryV224: {
+          ...fresh.clankerVirtualsDiscoveryV224,
+          ...(parsed.clankerVirtualsDiscoveryV224 && typeof parsed.clankerVirtualsDiscoveryV224 === "object"
+            ? parsed.clankerVirtualsDiscoveryV224 : {}),
+          byProtocol:
+            parsed.clankerVirtualsDiscoveryV224?.byProtocol &&
+            typeof parsed.clankerVirtualsDiscoveryV224.byProtocol === "object"
+              ? parsed.clankerVirtualsDiscoveryV224.byProtocol : {},
+          recentVerifiedLaunches:
+            Array.isArray(parsed.clankerVirtualsDiscoveryV224?.recentVerifiedLaunches)
+              ? parsed.clankerVirtualsDiscoveryV224.recentVerifiedLaunches.slice(-50) : []
         },
 
       ponsCurveTradesV216: {
@@ -15631,6 +15679,13 @@ async function discoverVerifiedBagsLaunchesV210(
   state.fixedMintLaunchpadDiscoveryV222 =
     fixedMintLaunchpadTelemetryV222;
 
+  const clankerVirtualsTelemetryV224 =
+    state.clankerVirtualsDiscoveryV224 &&
+    typeof state.clankerVirtualsDiscoveryV224 === "object"
+      ? state.clankerVirtualsDiscoveryV224
+      : newState().clankerVirtualsDiscoveryV224;
+  state.clankerVirtualsDiscoveryV224 = clankerVirtualsTelemetryV224;
+
   /*
    * V217: build a bounded target list from already-verified Pons launches
    * persisted before this request. Newly discovered launches in the current
@@ -15694,6 +15749,11 @@ async function discoverVerifiedBagsLaunchesV210(
     fixedMintLaunchpadVerifiedTokensAddedV222: 0,
     fixedMintLaunchpadLaunchesV222: [],
     fixedMintLaunchpadStatusV222: null,
+    clankerVirtualsLaunchesSeenV224: 0,
+    clankerVirtualsNewlyObservedV224: 0,
+    clankerVirtualsVerifiedTokensAddedV224: 0,
+    clankerVirtualsLaunchesV224: [],
+    clankerVirtualsStatusV224: null,
     status: null,
     httpStatus: null,
     error: null
@@ -15719,7 +15779,7 @@ async function discoverVerifiedBagsLaunchesV210(
     !consumeBudget(
       budget,
       "discovery-live",
-      "BITQUERY_SHARED_LAUNCH_DISCOVERY_V222"
+      "BITQUERY_SHARED_LAUNCH_DISCOVERY_V224"
     )
   ) {
     return {
@@ -15778,6 +15838,37 @@ async function discoverVerifiedBagsLaunchesV210(
               ProtocolName
             }
           }
+        }
+
+        ClankerLaunchesV224: Transfers(
+          orderBy: {descending: Block_Time}
+          limit: {count: 50}
+          where: {
+            Transaction: {To: {is: "${CLANKER_FACTORY_V224}"}}
+            Transfer: {
+              Amount: {eq: "${CLANKER_MINT_AMOUNT_V224}"}
+              Sender: {is: "${ZERO}"}
+            }
+          }
+        ) {
+          Block { Time Number }
+          Transaction { Hash From To }
+          TransactionStatus { Success }
+          Transfer { Amount Sender Receiver Currency { Name Symbol SmartContract Decimals Fungible Native ProtocolName } }
+        }
+
+        VirtualsLaunchesV224: Transfers(
+          orderBy: {descending: Block_Time}
+          limit: {count: 50}
+          where: {
+            Transaction: {To: {is: "${VIRTUALS_FACTORY_V224}"}}
+            Transfer: {Sender: {is: "${ZERO}"}}
+          }
+        ) {
+          Block { Time Number }
+          Transaction { Hash From To }
+          TransactionStatus { Success }
+          Transfer { Amount Sender Receiver Currency { Name Symbol SmartContract Decimals Fungible Native ProtocolName } }
         }
 
         PonsLaunches: Events(
@@ -15911,6 +16002,10 @@ async function discoverVerifiedBagsLaunchesV210(
   fixedMintLaunchpadTelemetryV222.lastQueryAt =
     Date.now();
 
+  clankerVirtualsTelemetryV224.totalQueriesShared =
+    safeNumber(clankerVirtualsTelemetryV224.totalQueriesShared) + 1;
+  clankerVirtualsTelemetryV224.lastQueryAt = Date.now();
+
   try {
     const response =
       await fetch(
@@ -15969,6 +16064,13 @@ async function discoverVerifiedBagsLaunchesV210(
         ? payload.data.EVM.Transfers
         : [];
 
+    const clankerRowsV224 =
+      Array.isArray(payload?.data?.EVM?.ClankerLaunchesV224)
+        ? payload.data.EVM.ClankerLaunchesV224 : [];
+    const virtualsRowsV224 =
+      Array.isArray(payload?.data?.EVM?.VirtualsLaunchesV224)
+        ? payload.data.EVM.VirtualsLaunchesV224 : [];
+
     const ponsRows =
       Array.isArray(payload?.data?.EVM?.PonsLaunches)
         ? payload.data.EVM.PonsLaunches
@@ -15984,12 +16086,14 @@ async function discoverVerifiedBagsLaunchesV210(
     const ponsLaunches = [];
     const launchHoodLaunchesV220 = [];
     const fixedMintLaunchpadLaunchesV222 = [];
+    const clankerVirtualsLaunchesV224 = [];
 
     let verifiedTokensAdded = 0;
     let flapVerifiedTokensAdded = 0;
     let ponsVerifiedTokensAdded = 0;
     let launchHoodVerifiedTokensAddedV220 = 0;
     let fixedMintLaunchpadVerifiedTokensAddedV222 = 0;
+    let clankerVirtualsVerifiedTokensAddedV224 = 0;
 
     for (const row of rows) {
       const success =
@@ -16262,6 +16366,59 @@ async function discoverVerifiedBagsLaunchesV210(
      * identities (token, curve, deployer) plus a valid pairToken. No V4
      * PoolId is invented here: Pons does not have a V4 pool until graduation.
      */
+    const processV224LaunchRows = (rowsV224, protocol, factory, verification) => {
+      for (const row of rowsV224) {
+        if (row?.TransactionStatus?.Success === false) continue;
+        const txTo = normalize(row?.Transaction?.To);
+        const sender = normalize(row?.Transfer?.Sender);
+        const tokenAddress = normalize(row?.Transfer?.Currency?.SmartContract);
+        if (txTo !== factory || sender !== ZERO || !isAddress(tokenAddress) || tokenAddress === ZERO || knownQuote(tokenAddress)) continue;
+        if (protocol === "Clanker" && String(row?.Transfer?.Amount ?? "") !== CLANKER_MINT_AMOUNT_V224) continue;
+
+        const launch = {
+          verified: true,
+          token: tokenAddress,
+          name: row?.Transfer?.Currency?.Name || null,
+          symbol: row?.Transfer?.Currency?.Symbol || null,
+          decimals: safeNumber(row?.Transfer?.Currency?.Decimals) || null,
+          receiver: normalize(row?.Transfer?.Receiver) || null,
+          creator: normalize(row?.Transaction?.From) || null,
+          transactionHash: normalize(row?.Transaction?.Hash) || null,
+          blockNumber: safeNumber(row?.Block?.Number) || null,
+          blockTime: row?.Block?.Time || null,
+          mintAmount: String(row?.Transfer?.Amount ?? "") || null,
+          source: `BITQUERY_${protocol.toUpperCase()}_VERIFIED_LAUNCH_V224`,
+          protocol,
+          factory,
+          verification,
+          venueModel: "UNVERIFIED_DO_NOT_GUESS",
+          poolId: null
+        };
+        clankerVirtualsLaunchesV224.push(launch);
+        const watched = addWatch(state, tokenAddress, null, `BITQUERY_${protocol.toUpperCase()}_VERIFIED_LAUNCH_V224`);
+        if (watched?.token) {
+          watched.token.launchpadV224 = {
+            verified: true,
+            protocol,
+            factory,
+            launchBlock: launch.blockNumber,
+            launchTime: launch.blockTime,
+            transactionHash: launch.transactionHash,
+            mintAmount: launch.mintAmount,
+            verification,
+            venueModel: launch.venueModel,
+            poolId: null
+          };
+        }
+        if (watched?.added) clankerVirtualsVerifiedTokensAddedV224++;
+      }
+    };
+
+    processV224LaunchRows(clankerRowsV224, "Clanker", CLANKER_FACTORY_V224,
+      "BITQUERY_ZERO_MINT_100B_TRANSACTION_TO_EXACT_FACTORY_V224");
+    processV224LaunchRows(virtualsRowsV224, "Virtuals", VIRTUALS_FACTORY_V224,
+      "BITQUERY_ZERO_MINT_EXACT_FACTORY_NO_FIXED_SUPPLY_ASSUMPTION_V224");
+
     const ponsArgumentValueV215 =
       (row, name) => {
         const arg =
@@ -17028,6 +17185,41 @@ async function discoverVerifiedBagsLaunchesV210(
         ? "VERIFIED_FIXED_1B_LAUNCHPAD_LAUNCHES_FOUND_V222"
         : "NO_FIXED_1B_LAUNCHPAD_LAUNCHES_RETURNED_V222";
 
+    clankerVirtualsTelemetryV224.recentVerifiedLaunches =
+      Array.isArray(clankerVirtualsTelemetryV224.recentVerifiedLaunches)
+        ? clankerVirtualsTelemetryV224.recentVerifiedLaunches : [];
+    clankerVirtualsTelemetryV224.byProtocol =
+      clankerVirtualsTelemetryV224.byProtocol && typeof clankerVirtualsTelemetryV224.byProtocol === "object"
+        ? clankerVirtualsTelemetryV224.byProtocol : {};
+    const knownV224 = new Set(clankerVirtualsTelemetryV224.recentVerifiedLaunches.map(
+      row => `${normalize(row?.token)}:${normalize(row?.transactionHash)}`));
+    let clankerVirtualsNewlyObservedV224 = 0;
+    for (const launch of clankerVirtualsLaunchesV224) {
+      const key = `${normalize(launch.token)}:${normalize(launch.transactionHash)}`;
+      if (knownV224.has(key)) continue;
+      knownV224.add(key);
+      clankerVirtualsNewlyObservedV224++;
+      clankerVirtualsTelemetryV224.lastLaunchAt = Date.now();
+      clankerVirtualsTelemetryV224.lastLaunchBlock = launch.blockNumber;
+      clankerVirtualsTelemetryV224.lastVerifiedToken = launch.token;
+      clankerVirtualsTelemetryV224.lastProtocol = launch.protocol;
+      const p = clankerVirtualsTelemetryV224.byProtocol[launch.protocol] && typeof clankerVirtualsTelemetryV224.byProtocol[launch.protocol] === "object"
+        ? clankerVirtualsTelemetryV224.byProtocol[launch.protocol]
+        : {totalLaunchesSeen: 0, lastLaunchAt: null, lastLaunchBlock: null, lastVerifiedToken: null};
+      p.totalLaunchesSeen = safeNumber(p.totalLaunchesSeen) + 1;
+      p.lastLaunchAt = Date.now();
+      p.lastLaunchBlock = launch.blockNumber;
+      p.lastVerifiedToken = launch.token;
+      clankerVirtualsTelemetryV224.byProtocol[launch.protocol] = p;
+      clankerVirtualsTelemetryV224.recentVerifiedLaunches.push(launch);
+    }
+    clankerVirtualsTelemetryV224.recentVerifiedLaunches = clankerVirtualsTelemetryV224.recentVerifiedLaunches.slice(-50);
+    clankerVirtualsTelemetryV224.totalLaunchesSeen = safeNumber(clankerVirtualsTelemetryV224.totalLaunchesSeen) + clankerVirtualsNewlyObservedV224;
+    clankerVirtualsTelemetryV224.totalVerifiedTokensAdded = safeNumber(clankerVirtualsTelemetryV224.totalVerifiedTokensAdded) + clankerVirtualsVerifiedTokensAddedV224;
+    clankerVirtualsTelemetryV224.lastStatus = clankerVirtualsLaunchesV224.length
+      ? "VERIFIED_CLANKER_VIRTUALS_LAUNCHES_FOUND_V224"
+      : "NO_CLANKER_VIRTUALS_LAUNCHES_RETURNED_V224";
+
     return {
       ...base,
       attempted: true,
@@ -17071,6 +17263,11 @@ async function discoverVerifiedBagsLaunchesV210(
         fixedMintLaunchpadLaunchesV222.slice(0, 50),
       fixedMintLaunchpadStatusV222:
         fixedMintLaunchpadTelemetryV222.lastStatus,
+      clankerVirtualsLaunchesSeenV224: clankerVirtualsLaunchesV224.length,
+      clankerVirtualsNewlyObservedV224,
+      clankerVirtualsVerifiedTokensAddedV224,
+      clankerVirtualsLaunchesV224: clankerVirtualsLaunchesV224.slice(0, 50),
+      clankerVirtualsStatusV224: clankerVirtualsTelemetryV224.lastStatus,
       ponsCurveTradesV216: {
         targetingVersion:
           "V217_NEWEST_VERIFIED_PONS_KV_TARGETING",
@@ -33439,7 +33636,8 @@ function verifiedLaunchAgeV223(
     watched?.launchpadV214,
     watched?.launchpadV215,
     watched?.launchpadV220,
-    watched?.launchpadV222
+    watched?.launchpadV222,
+    watched?.launchpadV224
   ]
     .filter(
       row =>
@@ -34915,6 +35113,13 @@ for (
       []
     )
   ) {
+    if (isAddress(launch?.token)) {
+      liveTokens.add(normalize(launch.token));
+      newTokens.add(normalize(launch.token));
+    }
+  }
+
+  for (const launch of (bagsDiscoveryV210.clankerVirtualsLaunchesV224 || [])) {
     if (isAddress(launch?.token)) {
       liveTokens.add(normalize(launch.token));
       newTokens.add(normalize(launch.token));
@@ -40043,7 +40248,7 @@ for (
       sharedExternalRequest: true,
       externalRequestsAddedVsV221: 0,
       transferRowLimit: 50,
-      intentionallyExcludedDifferentSupplyRules: [
+      differentSupplyRulesHandledSeparatelyV224: [
         "Virtuals",
         "Clanker"
       ]
@@ -40051,6 +40256,27 @@ for (
 
     fixedMintLaunchpadDiscoveryCumulativeV222:
       state.fixedMintLaunchpadDiscoveryV222,
+
+    clankerVirtualsDiscoveryV224: {
+      enabled: true,
+      verification: "BITQUERY_EXACT_FACTORY_ZERO_MINT_SUPPLY_RULE_PER_PROTOCOL_V224",
+      supportedLaunchpads: [
+        {protocol: "Clanker", factory: CLANKER_FACTORY_V224, mintAmount: CLANKER_MINT_AMOUNT_V224},
+        {protocol: "Virtuals", factory: VIRTUALS_FACTORY_V224, mintAmount: "ANY_NO_FIXED_SUPPLY"}
+      ],
+      launchesSeen: safeNumber(bagsDiscoveryV210?.clankerVirtualsLaunchesSeenV224),
+      newlyObserved: safeNumber(bagsDiscoveryV210?.clankerVirtualsNewlyObservedV224),
+      verifiedTokensAdded: safeNumber(bagsDiscoveryV210?.clankerVirtualsVerifiedTokensAddedV224),
+      launches: Array.isArray(bagsDiscoveryV210?.clankerVirtualsLaunchesV224) ? bagsDiscoveryV210.clankerVirtualsLaunchesV224 : [],
+      status: bagsDiscoveryV210?.clankerVirtualsStatusV224 || state.clankerVirtualsDiscoveryV224?.lastStatus || "NOT_RUN",
+      sameScanPriority: true,
+      launchAgeSupportedV223: true,
+      venueModelPolicy: "UNVERIFIED_DO_NOT_GUESS",
+      sharedExternalRequest: true,
+      externalRequestsAddedVsV223: 0
+    },
+    clankerVirtualsDiscoveryCumulativeV224:
+      state.clankerVirtualsDiscoveryV224,
 
     ponsVerifiedDiscoveryCumulativeV215:
       state.ponsDiscoveryV215,
