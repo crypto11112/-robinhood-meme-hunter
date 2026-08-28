@@ -1,10 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V216
+ * V217
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V216
+ * CURRENT BUILD: V217
+ * - V217 targets the existing Pons Trading query to the newest verified Pons token addresses already persisted in KV
+ * - Prevents older/high-activity Pons tokens from dominating the bounded 100-row trade result
+ * - Uses Pair.Token.Address in [...] and keeps newest trades first
+ * - Newly discovered Pons tokens become targetable on the next scan without adding a second request
+ * - Adds zero external requests and preserves V216 verified Pons USD, frozen V4 verified USD, Telegram protection and 42-request ceiling
  * - V216 adds verified Pons V2 bonding-curve trade tracking through Bitquery Trading
  * - Uses Protocol pons_v2 / ProtocolFamily Pons and exact known Pons token addresses only
  * - Uses AmountsInUsd.Quote as verified USD trade value; zero/missing USD rows are not promoted as verified
@@ -814,7 +819,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V216";
+const VERSION = "V217";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -15459,6 +15464,42 @@ async function discoverVerifiedBagsLaunchesV210(
   state.ponsDiscoveryV215 =
     ponsTelemetry;
 
+  /*
+   * V217: build a bounded target list from already-verified Pons launches
+   * persisted before this request. Newly discovered launches in the current
+   * GraphQL response are intentionally not targeted until the next scan so
+   * we do not add a second external request.
+   */
+  const ponsTradeTargetTokensV217 =
+    (
+      Array.isArray(
+        ponsTelemetry.recentVerifiedLaunches
+      )
+        ? ponsTelemetry.recentVerifiedLaunches
+        : []
+    )
+      .slice()
+      .sort(
+        (a, b) =>
+          safeNumber(b?.blockNumber) -
+          safeNumber(a?.blockNumber)
+      )
+      .map(row => normalize(row?.token))
+      .filter(
+        (token, index, all) =>
+          isAddress(token) &&
+          token !== ZERO &&
+          all.indexOf(token) === index
+      )
+      .slice(0, 20);
+
+  const ponsTradeTargetGraphqlV217 =
+    ponsTradeTargetTokensV217.length
+      ? ponsTradeTargetTokensV217
+          .map(token => `"${token}"`)
+          .join(", ")
+      : `"${ZERO}"`;
+
   const base = {
     enabled: true,
     provider: "BITQUERY",
@@ -15614,6 +15655,11 @@ async function discoverVerifiedBagsLaunchesV210(
           orderBy: {descending: Block_Time}
           where: {
             Pair: {
+              Token: {
+                Address: {
+                  in: [${ponsTradeTargetGraphqlV217}]
+                }
+              }
               Market: {
                 Protocol: {is: "pons_v2"}
                 ProtocolFamily: {is: "Pons"}
@@ -16141,34 +16187,9 @@ async function discoverVerifiedBagsLaunchesV210(
       Date.now();
 
     const verifiedPonsTokensV216 =
-      new Set();
-
-    for (
-      const launch
-      of (
-        Array.isArray(
-          ponsTelemetry.recentVerifiedLaunches
-        )
-          ? ponsTelemetry.recentVerifiedLaunches
-          : []
-      )
-    ) {
-      const token =
-        normalize(launch?.token);
-
-      if (isAddress(token)) {
-        verifiedPonsTokensV216.add(token);
-      }
-    }
-
-    for (const launch of ponsLaunches) {
-      const token =
-        normalize(launch?.token);
-
-      if (isAddress(token)) {
-        verifiedPonsTokensV216.add(token);
-      }
-    }
+      new Set(
+        ponsTradeTargetTokensV217
+      );
 
     const verifiedPonsTradesV216 = [];
 
@@ -16585,6 +16606,14 @@ async function discoverVerifiedBagsLaunchesV210(
       ponsStatus:
         ponsTelemetry.lastStatus,
       ponsCurveTradesV216: {
+        targetingVersion:
+          "V217_NEWEST_VERIFIED_PONS_KV_TARGETING",
+        targetTokenCount:
+          ponsTradeTargetTokensV217.length,
+        targetTokens:
+          ponsTradeTargetTokensV217,
+        currentScanLaunchesExcludedUntilNextScan:
+          true,
         rowsSeen:
           ponsTradeRowsV216.length,
         verifiedTrades:
@@ -38366,6 +38395,23 @@ for (
 
     ponsCurveTradesCumulativeV216:
       state.ponsCurveTradesV216,
+
+    ponsTradeTargetingV217: {
+      enabled: true,
+      strategy:
+        "NEWEST_VERIFIED_PONS_TOKENS_FROM_PERSISTED_KV",
+      targetTokenCount:
+        ponsTradeTargetTokensV217.length,
+      targetTokens:
+        ponsTradeTargetTokensV217,
+      maxTargetTokens: 20,
+      maxTradeRows: 100,
+      sort:
+        "Block_Time_DESC",
+      currentScanNewLaunchesTargetableNextScan:
+        true,
+      externalRequestsAddedVsV216: 0
+    },
 
     blockscoutDirectionalUsdV180,
 
