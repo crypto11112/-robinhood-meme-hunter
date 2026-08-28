@@ -1,5 +1,11 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V257 / V2.0:
+ * - FIX: verified-USD completion now prefers a candidate-matched CURRENT LIVE SWAP PoolId before an older stored verified PoolId
+ * - FIX: selected PoolId identity is resolved EXACTLY for that PoolId, preventing onChainPoolIdentityV153() from silently switching back to another watched pool
+ * - ZERO-REQUEST FIRST: current live swap rows are replayed against the exact selected live pool before any historical Blockscout request
+ * - SAFETY: live PoolId must already belong to the candidate watch/pool set; exact token + known/native quote identity remains mandatory
+ * - Preserves V254/V256 USD maths, V256 holder-count completion, V253 calibration, Telegram thresholds, KV and 42/21 request ceilings
  * V256 / V2.0:
  * - FEATURE: pre-Telegram Holder Count Completion Pass for already-qualifying candidates whose holder count is still UNVERIFIED
  * - Makes at most one final authenticated Blockscout PRO /counters attempt for one qualifying candidate per scan
@@ -1036,7 +1042,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V256";
+const VERSION = "V257";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -36931,6 +36937,155 @@ function v254MergeResolvedPoolIntoWatch(
 }
 
 
+/*
+ * V257 EXACT SELECTED-POOL IDENTITY
+ *
+ * onChainPoolIdentityV153() intentionally returns the newest eligible watched
+ * pool. V254 could therefore select a live PoolId and then silently switch
+ * back to a different stored PoolId when resolving identity.
+ *
+ * V257 resolves only the PoolId selected for completion. It uses the same
+ * candidate/known-quote safety rules as V153 and never guesses currencies.
+ */
+function exactCandidatePoolIdentityV257(
+  watched,
+  selectedPoolId
+) {
+  const token =
+    normalize(
+      watched?.address
+    );
+
+  const poolId =
+    normalize(
+      selectedPoolId
+    );
+
+  if (
+    !isAddress(token) ||
+    token === ZERO ||
+    knownQuote(token) ||
+    !/^0x[a-f0-9]{64}$/.test(
+      String(poolId || "")
+    )
+  ) {
+    return {
+      verified: false,
+      status:
+        "V257_SELECTED_POOL_NOT_ELIGIBLE",
+      poolId:
+        poolId || null
+    };
+  }
+
+  const pool =
+    (
+      Array.isArray(
+        watched?.pools
+      )
+        ? watched.pools
+        : []
+    ).find(
+      row =>
+        normalize(
+          row?.poolId
+        ) === poolId
+    );
+
+  if (!pool) {
+    return {
+      verified: false,
+      status:
+        "V257_SELECTED_POOL_NOT_IN_WATCH",
+      poolId
+    };
+  }
+
+  const currency0 =
+    normalize(
+      pool?.currency0
+    );
+
+  const currency1 =
+    normalize(
+      pool?.currency1
+    );
+
+  if (
+    !isAddress(currency0) ||
+    !isAddress(currency1)
+  ) {
+    return {
+      verified: false,
+      status:
+        "V257_SELECTED_POOL_CURRENCIES_UNVERIFIED",
+      poolId
+    };
+  }
+
+  const tokenIs0 =
+    currency0 === token;
+
+  const tokenIs1 =
+    currency1 === token;
+
+  if (!tokenIs0 && !tokenIs1) {
+    return {
+      verified: false,
+      status:
+        "V257_SELECTED_POOL_TOKEN_MISMATCH",
+      poolId
+    };
+  }
+
+  const quoteToken =
+    tokenIs0
+      ? currency1
+      : currency0;
+
+  if (
+    quoteToken !== ZERO &&
+    !knownQuote(
+      quoteToken
+    )
+  ) {
+    return {
+      verified: false,
+      status:
+        "V257_SELECTED_POOL_QUOTE_UNVERIFIED",
+      poolId,
+      quoteTokenAddress:
+        quoteToken || null
+    };
+  }
+
+  return {
+    verified: true,
+    status:
+      "ONCHAIN_V4_EXACT_SELECTED_POOL_IDENTITY_VERIFIED_V257",
+    source:
+      "UNISWAP_V4_INITIALIZE_EXACT_SELECTED_POOL_V257",
+    poolId,
+    pairAddress:
+      poolId,
+    candidateAddress:
+      token,
+    quoteTokenAddress:
+      quoteToken,
+    nativeQuote:
+      quoteToken === ZERO,
+    targetTokenSide:
+      "BASE",
+    blockNumber:
+      pool?.blockNumber ||
+      null,
+    transactionHash:
+      pool?.transactionHash ||
+      null
+  };
+}
+
+
 function persistVerifiedUsdTradesV254(
   state,
   candidateAddress,
@@ -37631,23 +37786,32 @@ async function verifiedUsdCompletionPassV254(
   output.attempted =
     true;
 
-  let poolId =
+  /*
+   * V257: prefer a PoolId that actually emitted a CURRENT live Swap for this
+   * candidate. v254PoolIdsForCandidate() only admits live PoolIds already in
+   * this candidate's watched pool set, so this cannot attach an unrelated pool.
+   */
+  const existingVerifiedPoolIdV257 =
     normalize(
       candidate
         ?.onChainPoolIdentityV153
         ?.poolId
     );
 
-  if (
-    !/^0x[a-f0-9]{64}$/.test(
-      String(poolId || "")
-    )
-  ) {
-    poolId =
-      pools.liveSwapPoolIds?.[0] ||
-      pools.poolIds?.[0] ||
-      null;
-  }
+  let poolId =
+    pools.liveSwapPoolIds?.[0] ||
+    (
+      /^0x[a-f0-9]{64}$/.test(
+        String(
+          existingVerifiedPoolIdV257 ||
+          ""
+        )
+      )
+        ? existingVerifiedPoolIdV257
+        : null
+    ) ||
+    pools.poolIds?.[0] ||
+    null;
 
   output.poolSelection = {
     poolId,
@@ -37655,13 +37819,26 @@ async function verifiedUsdCompletionPassV254(
       pools.poolIds,
     liveSwapPoolIds:
       pools.liveSwapPoolIds,
+    existingVerifiedPoolIdV257:
+      /^0x[a-f0-9]{64}$/.test(
+        String(
+          existingVerifiedPoolIdV257 ||
+          ""
+        )
+      )
+        ? existingVerifiedPoolIdV257
+        : null,
+    livePoolPreferredV257:
+      Boolean(
+        pools.liveSwapPoolIds
+          ?.length
+      ),
     selectedFrom:
       pools.liveSwapPoolIds
         ?.includes(poolId)
-        ? "CURRENT_LIVE_SWAP"
-        : candidate
-            ?.onChainPoolIdentityV153
-            ?.verified === true
+        ? "CURRENT_LIVE_SWAP_V257"
+        : poolId ===
+            existingVerifiedPoolIdV257
           ? "EXISTING_VERIFIED_IDENTITY"
           : "WATCHED_POOL"
   };
@@ -37686,12 +37863,17 @@ async function verifiedUsdCompletionPassV254(
     );
 
   /*
-   * If the identity is still unavailable, spend at most one EXISTING
-   * discovery-live request on the proven V184 exact-PoolId Initialize path.
+   * V257: resolve identity for the EXACT selected PoolId. Do not call the
+   * generic newest-pool selector here, because completion must replay the pool
+   * that was actually selected above.
+   *
+   * If exact identity is unavailable, spend at most one EXISTING discovery-live
+   * request on the proven V184 exact-PoolId Initialize path.
    */
   let identity =
-    onChainPoolIdentityV153(
-      pools.watched
+    exactCandidatePoolIdentityV257(
+      pools.watched,
+      poolId
     );
 
   if (
@@ -37838,11 +38020,17 @@ async function verifiedUsdCompletionPassV254(
     }
 
     identity =
-      onChainPoolIdentityV153(
-        pools.watched
+      exactCandidatePoolIdentityV257(
+        pools.watched,
+        poolId
       );
   }
 
+  /*
+   * Completion/history helpers already consume candidate.onChainPoolIdentityV153.
+   * V257 deliberately points that field at the exact selected pool for the
+   * remainder of this candidate's completion pass.
+   */
   candidate.onChainPoolIdentityV153 =
     identity;
 
@@ -49081,7 +49269,13 @@ for (
       marketCountUsdInference:
         false,
       candidateMatchedEvidenceRequired:
-        true
+        true,
+      liveSwapPoolPreferredV257:
+        true,
+      exactSelectedPoolIdentityV257:
+        true,
+      verifiedUsdMathChangedV257:
+        false
     },
 
     holderCountCompletionV256: {
