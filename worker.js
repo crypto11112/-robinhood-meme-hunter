@@ -1,8 +1,17 @@
 /**
  * Robinhood Chain Meme Hunter
- * V222
+ * V223
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
+ *
+ * CURRENT BUILD: V223
+ * - NEW: verified launch age from persisted positive-identification launch timestamps
+ * - NEW: scanner age is tracked separately from verified launch age
+ * - NEW: Telegram shows verified launch age and scanner age
+ * - SAFETY: scanner first-seen time is never substituted for launch time
+ * - SAFETY: missing/invalid launch timestamps remain UNVERIFIED
+ * - Adds zero external requests and does not alter Momentum, verified Pons/V4 USD, holder logic, Telegram thresholds or the 42-request ceiling
+ * - Preserves full V222 launchpad expansion and all prior protections
  *
  * CURRENT BUILD: V222
  * - V222 expands the existing shared Bitquery zero-address 1B mint discovery to four additional documented Robinhood launchpads
@@ -854,7 +863,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V222";
+const VERSION = "V223";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -32409,6 +32418,24 @@ function telegramMessage(
     );
   }
 
+  const verifiedLaunchAgeV223Data =
+    candidate?.verifiedLaunchAgeV223 ||
+    {
+      verified: false,
+      launchAgeDisplay: "UNVERIFIED",
+      scannerAgeDisplay: "UNVERIFIED",
+      protocol: null
+    };
+
+  const verifiedLaunchAgeTextV223 =
+    verifiedLaunchAgeV223Data?.verified === true
+      ? verifiedLaunchAgeV223Data.launchAgeDisplay
+      : "UNVERIFIED";
+
+  const scannerAgeTextV223 =
+    verifiedLaunchAgeV223Data?.scannerAgeDisplay ||
+    "UNVERIFIED";
+
   const lines = [
     `🚨 <b>Robinhood Chain Meme Hunter ${VERSION}</b>`,
     `📣 <b>${escapeHtml(alertClass.title)}</b>`,
@@ -32417,6 +32444,13 @@ function telegramMessage(
     "",
     "<b>Contract:</b>",
     `<code>${escapeHtml(candidate.address)}</code>`,
+    "",
+    `⏱ Verified launch age: <b>${escapeHtml(verifiedLaunchAgeTextV223)}</b>`,
+    `🔭 Scanner age: <b>${escapeHtml(scannerAgeTextV223)}</b>`,
+    verifiedLaunchAgeV223Data?.verified === true &&
+    verifiedLaunchAgeV223Data?.protocol
+      ? `🏷 Launch source: <b>${escapeHtml(verifiedLaunchAgeV223Data.protocol)}</b>`
+      : `🏷 Launch source: <b>UNVERIFIED</b>`,
     "",
     `🎯 Opportunity: <b>${candidate.opportunity.score}/100</b>`,
     `🚀 Momentum: <b>${candidate.momentum.score}/100 (${candidate.momentum.label})</b>`,
@@ -32860,6 +32894,11 @@ async function analyzeToken(
 
     launchStage:
       launch,
+
+    verifiedLaunchAgeV223:
+      verifiedLaunchAgeV223(
+        watched
+      ),
 
     whaleFlow,
 
@@ -33342,6 +33381,176 @@ function marketPairAgeMinutes(
     ) /
     60000
   );
+}
+
+function formatAgeV223(
+  ageMs
+) {
+  if (
+    !Number.isFinite(ageMs) ||
+    ageMs < 0
+  ) {
+    return "UNVERIFIED";
+  }
+
+  const totalSeconds =
+    Math.floor(ageMs / 1000);
+
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+
+  const totalMinutes =
+    Math.floor(totalSeconds / 60);
+  const seconds =
+    totalSeconds % 60;
+
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m ${seconds}s`;
+  }
+
+  const totalHours =
+    Math.floor(totalMinutes / 60);
+  const minutes =
+    totalMinutes % 60;
+
+  if (totalHours < 24) {
+    return `${totalHours}h ${minutes}m`;
+  }
+
+  const days =
+    Math.floor(totalHours / 24);
+  const hours =
+    totalHours % 24;
+
+  return `${days}d ${hours}h`;
+}
+
+function verifiedLaunchAgeV223(
+  watched
+) {
+  /*
+   * V223 only accepts timestamps attached to an already VERIFIED launchpad
+   * identity. firstSeenAt / scanner age is intentionally never used as a
+   * substitute for launch time.
+   */
+  const launchRecords = [
+    watched?.launchpadV210,
+    watched?.launchpadV214,
+    watched?.launchpadV215,
+    watched?.launchpadV220,
+    watched?.launchpadV222
+  ]
+    .filter(
+      row =>
+        row?.verified === true &&
+        row?.launchTime
+    )
+    .map(row => {
+      const parsed =
+        Date.parse(
+          String(row.launchTime)
+        );
+
+      return {
+        row,
+        timestamp:
+          Number.isFinite(parsed)
+            ? parsed
+            : null
+      };
+    })
+    .filter(
+      item =>
+        item.timestamp !== null &&
+        item.timestamp > 0
+    )
+    .sort(
+      (a, b) =>
+        a.timestamp - b.timestamp
+    );
+
+  const scannerFirstSeenAt =
+    safeNumber(
+      watched?.firstSeenAt
+    );
+
+  const scannerAgeMs =
+    scannerFirstSeenAt > 0
+      ? Math.max(
+          0,
+          Date.now() - scannerFirstSeenAt
+        )
+      : null;
+
+  if (!launchRecords.length) {
+    return {
+      verified: false,
+      source:
+        "VERIFIED_LAUNCH_TIMESTAMP_UNAVAILABLE",
+      protocol: null,
+      launchTime: null,
+      launchTimestampMs: null,
+      launchAgeMs: null,
+      launchAgeSeconds: null,
+      launchAgeMinutes: null,
+      launchAgeDisplay:
+        "UNVERIFIED",
+      scannerFirstSeenAt:
+        scannerFirstSeenAt || null,
+      scannerAgeMs,
+      scannerAgeSeconds:
+        scannerAgeMs !== null
+          ? Math.floor(scannerAgeMs / 1000)
+          : null,
+      scannerAgeDisplay:
+        scannerAgeMs !== null
+          ? formatAgeV223(scannerAgeMs)
+          : "UNVERIFIED",
+      scannerAgeIsNotLaunchAge: true
+    };
+  }
+
+  const selected =
+    launchRecords[0];
+  const launchAgeMs =
+    Math.max(
+      0,
+      Date.now() - selected.timestamp
+    );
+
+  return {
+    verified: true,
+    source:
+      "VERIFIED_LAUNCHPAD_EVENT_TIMESTAMP_V223",
+    protocol:
+      selected.row?.protocol ||
+      selected.row?.family ||
+      null,
+    launchTime:
+      selected.row.launchTime,
+    launchTimestampMs:
+      selected.timestamp,
+    launchAgeMs,
+    launchAgeSeconds:
+      Math.floor(launchAgeMs / 1000),
+    launchAgeMinutes:
+      launchAgeMs / 60000,
+    launchAgeDisplay:
+      formatAgeV223(launchAgeMs),
+    scannerFirstSeenAt:
+      scannerFirstSeenAt || null,
+    scannerAgeMs,
+    scannerAgeSeconds:
+      scannerAgeMs !== null
+        ? Math.floor(scannerAgeMs / 1000)
+        : null,
+    scannerAgeDisplay:
+      scannerAgeMs !== null
+        ? formatAgeV223(scannerAgeMs)
+        : "UNVERIFIED",
+    scannerAgeIsNotLaunchAge: true
+  };
 }
 
 function trueLaunchFreshness(
