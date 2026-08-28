@@ -1,5 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V240: promotes live-proven exact-token Bitquery market + exact-PoolId liquidity evidence into a conservative verified market fallback when Dex/Gecko are unavailable; zero extra HTTP.
  * V239: fixes V238 shared Bitquery GraphQL syntax by removing an invalid JavaScript-style block comment from inside the query string; no logic/request changes.
  * V238: verified Pons V2 graduation PoolId handoff via decoded PoolManager Initialize events filtered by the exact Pons hook; shares the existing Bitquery request; zero extra HTTP.
  * V237: exact-PoolId realtime Bitquery liquidity evidence inside the existing shared request; zero extra HTTP; evidence-only until live-proven.
@@ -969,7 +970,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V239";
+const VERSION = "V240";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -34493,6 +34494,231 @@ function telegramMessage(
    TOKEN ANALYSIS
    ========================================================= */
 
+/* =========================================================
+   V240 LIVE-PROVEN BITQUERY FULL-MARKET FALLBACK PROMOTION
+   ========================================================= */
+
+function bitqueryEvidenceEffectiveAgeMsV240(evidence) {
+  const fetchedAt = safeNumber(evidence?.fetchedAt);
+  const snapshotAgeAtFetch = safeNumber(evidence?.snapshotAgeMs);
+
+  if (fetchedAt <= 0) return Infinity;
+
+  const persistedAge = Math.max(0, Date.now() - fetchedAt);
+  return Math.max(0, snapshotAgeAtFetch) + persistedAge;
+}
+
+function promoteBitqueryMarketFallbackV240(
+  existingMarket,
+  watched,
+  state,
+  tokenAddress
+) {
+  const market = existingMarket && typeof existingMarket === "object"
+    ? existingMarket
+    : {verified: false, status: "LOOKUP_SKIPPED"};
+
+  const address = normalize(tokenAddress);
+
+  /* DexScreener / GeckoTerminal remain primary whenever already verified. */
+  if (market?.verified === true) {
+    return {
+      ...market,
+      bitqueryFallbackV240: {
+        eligible: false,
+        promoted: false,
+        reason: "PRIMARY_MARKET_ALREADY_VERIFIED_V240",
+        externalRequestsAdded: 0
+      }
+    };
+  }
+
+  const exactEvidence = (localValue, stateValue) => {
+    for (const value of [localValue, stateValue]) {
+      if (
+        value &&
+        typeof value === "object" &&
+        value.verified === true &&
+        normalize(value.address) === address
+      ) {
+        return value;
+      }
+    }
+    return null;
+  };
+
+  const tokensV233 = exactEvidence(
+    watched?.bitqueryMarketEvidenceV233,
+    state?.bitqueryMarketEvidenceV233
+  );
+
+  const pairV234 = exactEvidence(
+    watched?.bitqueryRankedPairEvidenceV234,
+    state?.bitqueryRankedPairEvidenceV234
+  );
+
+  const liquidityV237 = exactEvidence(
+    watched?.bitqueryLiquidityEvidenceV237,
+    state?.bitqueryLiquidityEvidenceV237
+  );
+
+  const tokensAgeMs = tokensV233
+    ? bitqueryEvidenceEffectiveAgeMsV240(tokensV233)
+    : Infinity;
+  const pairAgeMs = pairV234
+    ? bitqueryEvidenceEffectiveAgeMsV240(pairV234)
+    : Infinity;
+  const liquidityAgeMs = liquidityV237
+    ? bitqueryEvidenceEffectiveAgeMsV240(liquidityV237)
+    : Infinity;
+
+  const tokensFresh = Boolean(
+    tokensV233 &&
+    tokensAgeMs <= BITQUERY_MARKET_EVIDENCE_MAX_AGE_MS_V233
+  );
+
+  const pairFresh = Boolean(
+    pairV234 &&
+    pairAgeMs <= BITQUERY_RANKED_PAIR_EVIDENCE_MAX_AGE_MS_V234
+  );
+
+  const liquidityFresh = Boolean(
+    liquidityV237 &&
+    liquidityAgeMs <= BITQUERY_LIQUIDITY_EVIDENCE_MAX_AGE_MS_V237
+  );
+
+  const liquidityIdentityVerified = Boolean(
+    liquidityFresh &&
+    liquidityV237?.exactPoolIdMatch === true &&
+    liquidityV237?.exactCandidateTokenMatch === true &&
+    liquidityV237?.expectedQuoteVerified === true &&
+    /^0x[a-f0-9]{64}$/.test(normalize(liquidityV237?.poolId)) &&
+    safeNumber(liquidityV237?.liquidityUsd) > 0
+  );
+
+  const marketEvidenceAvailable = tokensFresh || pairFresh;
+
+  const priceUsd =
+    (pairFresh && safeNumber(pairV234?.priceUsd) > 0
+      ? safeNumber(pairV234.priceUsd)
+      : 0) ||
+    (tokensFresh && safeNumber(tokensV233?.priceUsd) > 0
+      ? safeNumber(tokensV233.priceUsd)
+      : 0);
+
+  const marketCap =
+    (tokensFresh && safeNumber(tokensV233?.marketCap) > 0
+      ? safeNumber(tokensV233.marketCap)
+      : 0) ||
+    (pairFresh && safeNumber(pairV234?.marketCap) > 0
+      ? safeNumber(pairV234.marketCap)
+      : 0) ||
+    null;
+
+  const fdv =
+    (tokensFresh && safeNumber(tokensV233?.fdv) > 0
+      ? safeNumber(tokensV233.fdv)
+      : 0) ||
+    (pairFresh && safeNumber(pairV234?.fdv) > 0
+      ? safeNumber(pairV234.fdv)
+      : 0) ||
+    null;
+
+  const volume24hUsd =
+    tokensFresh && safeNumber(tokensV233?.volume24hUsd) > 0
+      ? safeNumber(tokensV233.volume24hUsd)
+      : 0;
+
+  const canPromote = Boolean(
+    address &&
+    marketEvidenceAvailable &&
+    liquidityIdentityVerified &&
+    priceUsd > 0
+  );
+
+  if (!canPromote) {
+    return {
+      ...market,
+      bitqueryFallbackV240: {
+        eligible: true,
+        promoted: false,
+        reason:
+          !marketEvidenceAvailable
+            ? "NO_FRESH_EXACT_TOKEN_MARKET_EVIDENCE_V240"
+            : !liquidityIdentityVerified
+              ? "NO_FRESH_EXACT_POOL_LIQUIDITY_EVIDENCE_V240"
+              : priceUsd <= 0
+                ? "NO_VERIFIED_USD_PRICE_V240"
+                : "PROMOTION_REQUIREMENTS_NOT_MET_V240",
+        tokenEvidenceV233Fresh: tokensFresh,
+        rankedPairEvidenceV234Fresh: pairFresh,
+        exactPoolLiquidityV237Fresh: liquidityFresh,
+        externalRequestsAdded: 0
+      }
+    };
+  }
+
+  const evidenceAges = [
+    tokensFresh ? tokensAgeMs : 0,
+    pairFresh ? pairAgeMs : 0,
+    liquidityAgeMs
+  ].filter(value => Number.isFinite(value) && value >= 0);
+
+  const cacheAgeMs = evidenceAges.length
+    ? Math.max(...evidenceAges)
+    : 0;
+
+  return {
+    ...market,
+    verified: true,
+    status: "VERIFIED_BITQUERY_MARKET_LIQUIDITY_FALLBACK_V240",
+    cached: true,
+    cacheAgeMs,
+    source: "BITQUERY_VERIFIED_MARKET_LIQUIDITY_FALLBACK_V240",
+    priceUsd: String(priceUsd),
+    liquidityUsd: safeNumber(liquidityV237.liquidityUsd),
+    marketCap,
+    fdv,
+    volume: {
+      m5: 0,
+      h1: 0,
+      h24: volume24hUsd
+    },
+    bitqueryPoolIdV240: normalize(liquidityV237.poolId),
+    bitqueryLiquidityMethodV240: liquidityV237?.calculationMethod || null,
+    bitqueryFallbackV240: {
+      eligible: true,
+      promoted: true,
+      reason: "LIVE_PROVEN_EXACT_TOKEN_PLUS_EXACT_POOL_EVIDENCE_V240",
+      tokenEvidenceV233Fresh: tokensFresh,
+      rankedPairEvidenceV234Fresh: pairFresh,
+      exactPoolLiquidityV237Fresh: liquidityFresh,
+      priceSource:
+        pairFresh && safeNumber(pairV234?.priceUsd) > 0
+          ? "BITQUERY_TRADING_PAIRS_RANK1_V234"
+          : "BITQUERY_TRADING_TOKENS_V233",
+      marketCapSource:
+        tokensFresh && safeNumber(tokensV233?.marketCap) > 0
+          ? "BITQUERY_TRADING_TOKENS_V233"
+          : pairFresh && safeNumber(pairV234?.marketCap) > 0
+            ? "BITQUERY_TRADING_PAIRS_RANK1_V234"
+            : null,
+      volume24hSource:
+        volume24hUsd > 0
+          ? "BITQUERY_TRADING_TOKENS_V233"
+          : null,
+      liquiditySource: "BITQUERY_DEXPOOLEVENTS_POOLID_V237",
+      liquidityCalculationMethod: liquidityV237?.calculationMethod || null,
+      cacheAgeMs,
+      maxAgeMs: TELEGRAM_MARKET_EVIDENCE_MAX_AGE_MS_V168,
+      externalRequestsAdded: 0,
+      momentumMathChanged: false,
+      verifiedUsdMathChanged: false,
+      telegramThresholdsChanged: false
+    }
+  };
+}
+
 async function analyzeToken(
   env,
   budget,
@@ -34699,6 +34925,14 @@ async function analyzeToken(
         )
       );
   }
+
+  market =
+    promoteBitqueryMarketFallbackV240(
+      market,
+      watched,
+      state,
+      address
+    );
 
   const onChainPoolIdentity =
     onChainPoolIdentityV153(
