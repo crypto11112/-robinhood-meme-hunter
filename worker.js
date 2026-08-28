@@ -1,5 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V238: verified Pons V2 graduation PoolId handoff via decoded PoolManager Initialize events filtered by the exact Pons hook; shares the existing Bitquery request; zero extra HTTP.
  * V237: exact-PoolId realtime Bitquery liquidity evidence inside the existing shared request; zero extra HTTP; evidence-only until live-proven.
  * V236
  *
@@ -967,7 +968,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V237";
+const VERSION = "V238";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -16577,6 +16578,39 @@ async function discoverVerifiedBagsLaunchesV210(
             }
           }
         }
+
+        /*
+         * V238: Pons V2 graduation -> exact Uniswap v4 PoolId handoff.
+         * Bitquery documents the Pons meme hook as the invariant identity for
+         * graduated pools; Transaction.To is deliberately NOT used because
+         * graduation is permissionless. This alias shares the existing HTTP
+         * request and therefore adds zero external requests.
+         */
+        PonsGraduatedPoolsV238: Events(
+          limit: {count: 20}
+          orderBy: {descending: Block_Time}
+          where: {
+            LogHeader: {Address: {is: "${POOL_MANAGER}"}}
+            Log: {Signature: {Name: {is: "Initialize"}}}
+            Arguments: {includes: {
+              Name: {is: "hooks"}
+              Value: {Address: {is: "${PONS_V2_MEME_HOOK_V215}"}}
+            }}
+          }
+        ) {
+          Block {Time Number}
+          Transaction {Hash}
+          Arguments {
+            Name
+            Type
+            Value {
+              ... on EVM_ABI_Address_Value_Arg {address}
+              ... on EVM_ABI_BigInt_Value_Arg {bigInteger}
+              ... on EVM_ABI_Integer_Value_Arg {integer}
+              ... on EVM_ABI_Bytes_Value_Arg {hex}
+            }
+          }
+        }
       }
 
       ${bitqueryHolderGraphqlV227}
@@ -17722,6 +17756,136 @@ async function discoverVerifiedBagsLaunchesV210(
 
 
     /*
+     * V238: consume decoded Pons graduation Initialize rows from the SAME
+     * shared Bitquery response and register exact PoolId -> currencies only
+     * when the hook, known Pons token and canonical quote all verify.
+     */
+    const ponsGraduationRowsV238 = Array.isArray(payload?.data?.EVM?.PonsGraduatedPoolsV238)
+      ? payload.data.EVM.PonsGraduatedPoolsV238
+      : [];
+
+    const verifiedPonsTokensV238 = new Set(
+      [
+        ...(Array.isArray(ponsTelemetry.recentVerifiedLaunches) ? ponsTelemetry.recentVerifiedLaunches : []),
+        ...ponsLaunches
+      ]
+        .map(row => normalize(row?.token))
+        .filter(address => isAddress(address) && address !== ZERO)
+    );
+
+    const verifiedPonsGraduatedPoolsV238 = [];
+    let ponsGraduatedPoolsRegisteredV238 = 0;
+
+    for (const eventV238 of ponsGraduationRowsV238) {
+      const argsV238 = Array.isArray(eventV238?.Arguments) ? eventV238.Arguments : [];
+      const argV238 = name => argsV238.find(row => String(row?.Name || "").toLowerCase() === name) || null;
+      const addressArgV238 = name => {
+        const raw = String(argV238(name)?.Value?.address || "").toLowerCase();
+        if (raw === "0x") return ZERO;
+        const value = normalize(raw);
+        return isAddress(value) ? value : null;
+      };
+      const bytesArgV238 = name => normalize(argV238(name)?.Value?.hex);
+
+      const poolIdV238 = bytesArgV238("id") || bytesArgV238("poolid");
+      const currency0V238 = addressArgV238("currency0");
+      const currency1V238 = addressArgV238("currency1");
+      const hookV238 = addressArgV238("hooks");
+
+      if (!/^0x[a-f0-9]{64}$/.test(poolIdV238 || "")) continue;
+      if (!isAddress(currency0V238) || !isAddress(currency1V238)) continue;
+      if (hookV238 !== PONS_V2_MEME_HOOK_V215) continue;
+
+      let tokenV238 = null;
+      let quoteV238 = null;
+      if (verifiedPonsTokensV238.has(currency0V238) && [ZERO, CANONICAL_WETH_V179, CANONICAL_USDG_V179].includes(currency1V238)) {
+        tokenV238 = currency0V238;
+        quoteV238 = currency1V238;
+      } else if (verifiedPonsTokensV238.has(currency1V238) && [ZERO, CANONICAL_WETH_V179, CANONICAL_USDG_V179].includes(currency0V238)) {
+        tokenV238 = currency1V238;
+        quoteV238 = currency0V238;
+      } else {
+        continue;
+      }
+
+      const poolV238 = {
+        poolId: poolIdV238,
+        currency0: currency0V238,
+        currency1: currency1V238,
+        blockNumber: safeNumber(eventV238?.Block?.Number) || null,
+        transactionHash: normalize(eventV238?.Transaction?.Hash) || null,
+        source: "BITQUERY_PONS_HOOK_INITIALIZE_V238"
+      };
+
+      const registrationV238 = registerPoolMapping(state, poolV238);
+      if (registrationV238?.registered === true) ponsGraduatedPoolsRegisteredV238++;
+
+      const watchedV238 = state.watchedTokens.find(row => normalize(row?.address) === tokenV238) || null;
+      if (watchedV238) {
+        watchedV238.token = watchedV238.token && typeof watchedV238.token === "object" ? watchedV238.token : {};
+        watchedV238.token.launchpadV215 = watchedV238.token.launchpadV215 && typeof watchedV238.token.launchpadV215 === "object"
+          ? watchedV238.token.launchpadV215
+          : {};
+        watchedV238.token.launchpadV215.v4PoolVerified = true;
+        watchedV238.token.launchpadV215.v4PoolId = poolIdV238;
+        watchedV238.token.launchpadV215.v4QuoteAddress = quoteV238;
+        watchedV238.token.launchpadV215.graduationBlock = poolV238.blockNumber;
+        watchedV238.token.launchpadV215.graduationTime = eventV238?.Block?.Time || null;
+        watchedV238.token.launchpadV215.graduationTransactionHash = poolV238.transactionHash;
+        watchedV238.token.launchpadV215.lifecycle = "GRADUATED_UNISWAP_V4_VERIFIED_V238";
+      }
+
+      for (const launchV238 of ponsLaunches) {
+        if (normalize(launchV238?.token) !== tokenV238) continue;
+        launchV238.v4PoolVerified = true;
+        launchV238.poolId = poolIdV238;
+        launchV238.quoteAddress = quoteV238;
+        launchV238.lifecycle = "GRADUATED_UNISWAP_V4_VERIFIED_V238";
+      }
+      for (const launchV238 of Array.isArray(ponsTelemetry.recentVerifiedLaunches) ? ponsTelemetry.recentVerifiedLaunches : []) {
+        if (normalize(launchV238?.token) !== tokenV238) continue;
+        launchV238.v4PoolVerified = true;
+        launchV238.poolId = poolIdV238;
+        launchV238.quoteAddress = quoteV238;
+        launchV238.graduationBlock = poolV238.blockNumber;
+        launchV238.graduationTime = eventV238?.Block?.Time || null;
+        launchV238.graduationTransactionHash = poolV238.transactionHash;
+        launchV238.lifecycle = "GRADUATED_UNISWAP_V4_VERIFIED_V238";
+      }
+
+      verifiedPonsGraduatedPoolsV238.push({
+        verified: true,
+        token: tokenV238,
+        poolId: poolIdV238,
+        currency0: currency0V238,
+        currency1: currency1V238,
+        quoteAddress: quoteV238,
+        hook: hookV238,
+        blockNumber: poolV238.blockNumber,
+        blockTime: eventV238?.Block?.Time || null,
+        transactionHash: poolV238.transactionHash,
+        source: "BITQUERY_PONS_HOOK_INITIALIZE_V238"
+      });
+    }
+
+    ponsTelemetry.graduatedPoolsV238 = {
+      enabled: true,
+      exactHookRequired: true,
+      hook: PONS_V2_MEME_HOOK_V215,
+      poolManager: POOL_MANAGER,
+      rowsSeen: ponsGraduationRowsV238.length,
+      verifiedMappings: verifiedPonsGraduatedPoolsV238.length,
+      poolsRegistered: ponsGraduatedPoolsRegisteredV238,
+      pools: verifiedPonsGraduatedPoolsV238.slice(0, 20),
+      transactionToUsedForVerification: false,
+      sharedExistingBitqueryHttpRequest: true,
+      externalRequestsAdded: 0,
+      sourceVersion: "V238",
+      lastScanAt: Date.now()
+    };
+
+
+    /*
      * V216: verified Pons V2 curve-trade ingestion.
      *
      * Verification requirements:
@@ -18344,6 +18508,8 @@ async function discoverVerifiedBagsLaunchesV210(
       ponsVerifiedTokensAdded,
       ponsLaunches:
         ponsLaunches.slice(0, 10),
+      ponsGraduatedPoolsV238:
+        ponsTelemetry.graduatedPoolsV238 || null,
       ponsStatus:
         ponsTelemetry.lastStatus,
       launchHoodLaunchesSeenV220:
@@ -41696,8 +41862,17 @@ for (
       const watched = state.watchedTokens.find(row => normalize(row?.address) === address) || null;
       if (!watched || preMarketExcludedToken(watched).excluded || terminalPriorityRejectFromWatched(watched).terminal) return null;
       const flow = candidate?.onChainVerifiedFlowV212;
-      if (flow?.verified !== true || safeNumber(flow?.recordCount) <= 0) return null;
-      const poolIds = Array.isArray(flow?.poolIds) ? flow.poolIds : [];
+      const flowVerifiedV238 = flow?.verified === true && safeNumber(flow?.recordCount) > 0;
+      const ponsGraduatedPoolIdV238 =
+        watched?.token?.launchpadV215?.v4PoolVerified === true &&
+        /^0x[a-f0-9]{64}$/.test(normalize(watched?.token?.launchpadV215?.v4PoolId))
+          ? normalize(watched.token.launchpadV215.v4PoolId)
+          : null;
+      if (!flowVerifiedV238 && !ponsGraduatedPoolIdV238) return null;
+      const poolIds = [
+        ...(Array.isArray(flow?.poolIds) ? flow.poolIds : []),
+        ...(ponsGraduatedPoolIdV238 ? [ponsGraduatedPoolIdV238] : [])
+      ].filter((value, index, all) => all.indexOf(value) === index);
       for (const rawPoolId of poolIds) {
         const poolId = normalize(rawPoolId);
         if (!/^0x[a-f0-9]{64}$/.test(poolId)) continue;
@@ -41708,7 +41883,15 @@ for (
         if (c0 !== address && c1 !== address) continue;
         const quoteAddress = c0 === address ? c1 : c0;
         if (![ZERO, CANONICAL_WETH_V179, CANONICAL_USDG_V179].includes(quoteAddress)) continue;
-        return {candidate, address, poolId, quoteAddress};
+        return {
+          candidate,
+          address,
+          poolId,
+          quoteAddress,
+          identitySource: ponsGraduatedPoolIdV238 === poolId
+            ? "VERIFIED_PONS_GRADUATION_POOLID_V238"
+            : "VERIFIED_CANDIDATE_ONCHAIN_FLOW_POOLID_V237"
+        };
       }
       return null;
     })
@@ -41728,7 +41911,9 @@ for (
           address: nextBitqueryLiquidityTargetV237.address,
           poolId: nextBitqueryLiquidityTargetV237.poolId,
           quoteAddress: nextBitqueryLiquidityTargetV237.quoteAddress,
-          reason: "POST_ANALYSIS_LIQUIDITY_UNVERIFIED_EXACT_POOL_WITH_VERIFIED_ACTIVITY_V237",
+          reason: nextBitqueryLiquidityTargetV237.identitySource === "VERIFIED_PONS_GRADUATION_POOLID_V238"
+            ? "POST_ANALYSIS_LIQUIDITY_UNVERIFIED_VERIFIED_PONS_GRADUATION_POOL_V238"
+            : "POST_ANALYSIS_LIQUIDITY_UNVERIFIED_EXACT_POOL_WITH_VERIFIED_ACTIVITY_V237",
           selectedAt: Date.now(),
           analysisPriority: analysisPriority(nextBitqueryLiquidityTargetV237.candidate),
           symbol: nextBitqueryLiquidityTargetV237.candidate?.symbol || null,
@@ -42146,6 +42331,8 @@ for (
       nextQueuedStatus: state.bitqueryLiquidityTargetV237?.status || "NONE",
       exactPoolIdRequired: true,
       canonicalQuoteRequired: true,
+      acceptsVerifiedPonsGraduationPoolIdentityV238: true,
+      ponsGraduationIdentityRequiresExactHookV238: true,
       maxPersistAgeMs: BITQUERY_LIQUIDITY_TARGET_MAX_AGE_MS_V237,
       externalRequestsAdded: 0,
       momentumMathChanged: false,
@@ -42353,7 +42540,11 @@ for (
       preGraduationVenue:
         "PONS_V2_BONDING_CURVE",
       v4PoolPolicy:
-        "DO_NOT_ASSUME_V4_UNTIL_GRADUATION_VERIFIED"
+        "DO_NOT_ASSUME_V4_UNTIL_GRADUATION_VERIFIED",
+      graduatedPoolsV238:
+        bagsDiscoveryV210?.ponsGraduatedPoolsV238 ||
+        state.ponsDiscoveryV215?.graduatedPoolsV238 ||
+        null
     },
 
     launchHoodVerifiedDiscoveryV220: {
