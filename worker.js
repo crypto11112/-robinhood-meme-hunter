@@ -1,5 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V244: adds Blockscout-indexed historical backlog catch-up for verified Initialize and pools.trade launch events, with 1,000-row saturation protection and RPC fallback; live-first discovery and 42-request ceiling remain unchanged.
  * V243: Telegram transparency fix — always renders the Verified On-chain USD section; when candidate-matched exact-USD evidence is unavailable, windows are explicitly UNVERIFIED instead of silently omitted. No verified USD maths/qualification changes.
  * V242: makes PUBLIC RPC backlog catch-up adaptive after live 429 evidence: gentler proven-range growth, bounded public backlog bursts, and growth-streak reset on 429 while preserving Alchemy free-tier protection and the 42-request ceiling.
  * V241: accelerates PUBLIC RPC backlog convergence using faster proven-range learning while preserving Alchemy free-tier 10-block protection and the 42-request ceiling.
@@ -973,7 +974,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V243";
+const VERSION = "V244";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1554,6 +1555,24 @@ const V242_PUBLIC_BACKLOG_GROWTH_FRACTION = 0.25;
 const V242_PUBLIC_BACKLOG_GROWTH_MIN_BLOCKS = 5;
 const V242_PUBLIC_BACKLOG_GROWTH_MAX_BLOCKS = 20;
 const V242_PUBLIC_BACKLOG_MAX_REQUESTS_PER_PASS = 3;
+
+
+/*
+ * V244 indexed historical backlog transport.
+ * Blockscout is used only for historical discovery-critical logs:
+ * - PoolManager Initialize
+ * - verified pools.trade TokenCreated
+ * - verified pools.trade TokenLaunched
+ *
+ * Existing decoders remain authoritative. Exactly 1,000 rows is treated as
+ * potentially truncated and the range is subdivided before the cursor can
+ * advance. RPC remains the fallback for any incomplete/error range.
+ */
+const V244_BLOCKSCOUT_BACKLOG_RANGE_BLOCKS = 10000;
+const V244_BLOCKSCOUT_MAX_REQUESTS_PER_PASS = 9;
+const V244_BLOCKSCOUT_LOG_LIMIT = 1000;
+const V244_BLOCKSCOUT_MIN_REQUEST_SPACING_MS = 220;
+const V244_BLOCKSCOUT_429_COOLDOWN_MS = 5 * 60 * 1000;
 
 /* =========================================================
    DISCOVERY RPC COOLDOWN
@@ -11077,7 +11096,553 @@ async function scanLiveRange(
    V88 BACKLOG SCAN
    ========================================================= */
 
+function blockscoutBacklogServiceV244(state) {
+  state.blockscoutBacklogV244 =
+    state.blockscoutBacklogV244 &&
+    typeof state.blockscoutBacklogV244 === "object"
+      ? state.blockscoutBacklogV244
+      : {
+          totalRequests: 0,
+          total429s: 0,
+          cooldownUntil: null,
+          lastRequestAt: null,
+          lastStatus: null,
+          rangesCompleted: 0,
+          blocksCompleted: 0,
+          saturatedRanges: 0
+        };
+
+  return state.blockscoutBacklogV244;
+}
+
+function blockscoutBacklogCoolingV244(state) {
+  const service = blockscoutBacklogServiceV244(state);
+  const until = safeNumber(service.cooldownUntil) || 0;
+  return until > Date.now();
+}
+
+async function blockscoutBacklogSpacingV244(state) {
+  const service = blockscoutBacklogServiceV244(state);
+  const last = safeNumber(service.lastRequestAt) || 0;
+  const wait = Math.max(
+    0,
+    V244_BLOCKSCOUT_MIN_REQUEST_SPACING_MS - (Date.now() - last)
+  );
+
+  if (wait > 0) {
+    await new Promise(resolve => setTimeout(resolve, wait));
+  }
+}
+
+function normalizeBlockscoutBacklogLogV244(row) {
+  if (!row || typeof row !== "object") return null;
+
+  const topics = Array.isArray(row.topics)
+    ? row.topics.map(normalize).filter(Boolean)
+    : [];
+
+  const address = normalize(row.address);
+  const data = typeof row.data === "string" ? row.data : "0x";
+  const blockNumber = row.blockNumber ?? row.block_number ?? null;
+  const transactionHash = normalize(
+    row.transactionHash ?? row.transaction_hash ?? null
+  );
+
+  if (!address || !topics.length || blockNumber === null) return null;
+
+  return {
+    ...row,
+    address,
+    topics,
+    data,
+    blockNumber,
+    transactionHash
+  };
+}
+
+async function fetchBlockscoutBacklogTopicV244(
+  state,
+  budget,
+  fromBlock,
+  toBlock,
+  topic0,
+  address = null
+) {
+  const base = {
+    attempted: false,
+    success: false,
+    rows: [],
+    saturated: false,
+    httpStatus: null,
+    error: null
+  };
+
+  if (blockscoutBacklogCoolingV244(state)) {
+    return {
+      ...base,
+      error: "BLOCKSCOUT_BACKLOG_COOLDOWN_V244"
+    };
+  }
+
+  if (
+    !consumeBudget(
+      budget,
+      "discovery-backlog",
+      "BLOCKSCOUT_INDEXED_BACKLOG_V244"
+    )
+  ) {
+    return {
+      ...base,
+      error: "DISCOVERY_BACKLOG_BUDGET_PROTECTED"
+    };
+  }
+
+  await blockscoutBacklogSpacingV244(state);
+
+  const service = blockscoutBacklogServiceV244(state);
+  service.totalRequests = safeNumber(service.totalRequests) + 1;
+  service.lastRequestAt = Date.now();
+  service.lastStatus = "REQUESTING";
+
+  let url =
+    `${BLOCKSCOUT}/api?module=logs&action=getLogs` +
+    `&fromBlock=${fromBlock}` +
+    `&toBlock=${toBlock}` +
+    `&topic0=${encodeURIComponent(topic0)}`;
+
+  if (address) {
+    url += `&address=${encodeURIComponent(address)}`;
+  }
+
+  try {
+    const response = await fetch(url, {
+      headers: { accept: "application/json" }
+    });
+
+    if (response.status === 429) {
+      service.total429s = safeNumber(service.total429s) + 1;
+      service.cooldownUntil = Date.now() + V244_BLOCKSCOUT_429_COOLDOWN_MS;
+      service.lastStatus = "HTTP_429";
+      return {
+        ...base,
+        attempted: true,
+        httpStatus: 429,
+        error: "BLOCKSCOUT_HTTP_429"
+      };
+    }
+
+    if (!response.ok) {
+      service.lastStatus = `HTTP_${response.status}`;
+      return {
+        ...base,
+        attempted: true,
+        httpStatus: response.status,
+        error: `BLOCKSCOUT_HTTP_${response.status}`
+      };
+    }
+
+    let payload = null;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+
+    let rawRows = [];
+    if (Array.isArray(payload?.result)) {
+      rawRows = payload.result;
+    } else {
+      const text = String(payload?.result || payload?.message || "");
+      if (!/no\s+(records|logs)\s+found/i.test(text)) {
+        service.lastStatus = "INVALID_PAYLOAD";
+        return {
+          ...base,
+          attempted: true,
+          httpStatus: response.status,
+          error: "BLOCKSCOUT_INVALID_LOG_PAYLOAD_V244"
+        };
+      }
+    }
+
+    const rows = rawRows
+      .map(normalizeBlockscoutBacklogLogV244)
+      .filter(Boolean);
+
+    const normalizationFailures =
+      rawRows.length - rows.length;
+
+    if (normalizationFailures > 0) {
+      service.lastStatus = "RAW_LOG_NORMALIZATION_FAILED";
+      return {
+        ...base,
+        attempted: true,
+        httpStatus: response.status,
+        error: "BLOCKSCOUT_RAW_LOG_NORMALIZATION_FAILED_V244",
+        normalizationFailures
+      };
+    }
+
+    const saturated = rawRows.length >= V244_BLOCKSCOUT_LOG_LIMIT;
+    service.lastStatus = saturated ? "SATURATED" : "SUCCESS";
+
+    return {
+      ...base,
+      attempted: true,
+      success: true,
+      rows,
+      saturated,
+      httpStatus: response.status,
+      normalizationFailures: 0
+    };
+  } catch (error) {
+    service.lastStatus = "FETCH_ERROR";
+    return {
+      ...base,
+      attempted: true,
+      error: errorString(error)
+    };
+  }
+}
+
+function backlogPhaseRequestsRemainingV244(budget) {
+  return Math.max(
+    0,
+    safeNumber(budget?.discovery?.backlogLimit) -
+      safeNumber(budget?.discovery?.backlogUsed)
+  );
+}
+
+async function scanBacklogBlockscoutIndexedV244(
+  env,
+  state,
+  start,
+  targetLatest,
+  budget,
+  output
+) {
+  const startedAt = Date.now();
+  const service = blockscoutBacklogServiceV244(state);
+
+  let cursor = start;
+  let processedThrough = null;
+  const backlogUsedAtStartV244 = budget.discovery.backlogUsed;
+  let requestsUsed = 0;
+  let completedRanges = 0;
+  let saturatedRanges = 0;
+  let subdivisions = 0;
+  let error = null;
+  const rangeHistory = [];
+
+  if (blockscoutBacklogCoolingV244(state)) {
+    return {
+      success: false,
+      complete: false,
+      processedThrough: null,
+      nextBlock: cursor,
+      blocksProcessed: 0,
+      requestsUsed: 0,
+      completedRanges: 0,
+      saturatedRanges: 0,
+      subdivisions: 0,
+      rangeHistory,
+      durationMs: Date.now() - startedAt,
+      error: "BLOCKSCOUT_BACKLOG_COOLDOWN_V244"
+    };
+  }
+
+  let preferredSpan = V244_BLOCKSCOUT_BACKLOG_RANGE_BLOCKS;
+
+  while (
+    cursor <= targetLatest &&
+    budgetAvailable(budget, "discovery-backlog") &&
+    backlogPhaseRequestsRemainingV244(budget) >= 3 &&
+    requestsUsed <= V244_BLOCKSCOUT_MAX_REQUESTS_PER_PASS - 3
+  ) {
+    const remaining = Number(targetLatest - cursor + 1n);
+    let span = Math.max(1, Math.min(preferredSpan, remaining));
+    let rangeCompleted = false;
+
+    while (
+      !rangeCompleted &&
+      budgetAvailable(budget, "discovery-backlog") &&
+      backlogPhaseRequestsRemainingV244(budget) >= 3 &&
+      requestsUsed <= V244_BLOCKSCOUT_MAX_REQUESTS_PER_PASS - 3
+    ) {
+      const to = cursor + BigInt(span - 1);
+      const before = budget.discovery.backlogUsed;
+
+      const queries = [
+        {
+          label: "POOLMANAGER_INITIALIZE",
+          topic0: INITIALIZE_TOPIC,
+          address: POOL_MANAGER
+        },
+        {
+          label: "POOLS_TRADE_TOKEN_CREATED",
+          topic0: POOLS_TRADE_TOKEN_CREATED_TOPIC_V204,
+          address: null
+        },
+        {
+          label: "POOLS_TRADE_TOKEN_LAUNCHED",
+          topic0: POOLS_TRADE_TOKEN_LAUNCHED_TOPIC_V204,
+          address: null
+        }
+      ];
+
+      const collected = [];
+      let saturated = false;
+      let failed = null;
+      const queryTelemetry = [];
+
+      for (const query of queries) {
+        if (
+          requestsUsed >= V244_BLOCKSCOUT_MAX_REQUESTS_PER_PASS ||
+          !budgetAvailable(budget, "discovery-backlog")
+        ) {
+          failed = "BLOCKSCOUT_V244_REQUEST_BUDGET_EXHAUSTED";
+          break;
+        }
+
+        const result = await fetchBlockscoutBacklogTopicV244(
+          state,
+          budget,
+          Number(cursor),
+          Number(to),
+          query.topic0,
+          query.address
+        );
+
+        requestsUsed =
+          budget.discovery.backlogUsed -
+          backlogUsedAtStartV244;
+
+        const thisRequests = result.attempted ? 1 : 0;
+        queryTelemetry.push({
+          label: query.label,
+          rows: result.rows.length,
+          saturated: result.saturated,
+          success: result.success,
+          httpStatus: result.httpStatus,
+          error: result.error,
+          normalizationFailures:
+            safeNumber(result.normalizationFailures),
+          requestsUsed: thisRequests
+        });
+
+        if (!result.success) {
+          failed = result.error || "BLOCKSCOUT_BACKLOG_QUERY_FAILED_V244";
+          break;
+        }
+
+        if (result.saturated) {
+          saturated = true;
+          break;
+        }
+
+        collected.push(...result.rows);
+      }
+
+      if (failed) {
+        error = failed;
+        rangeHistory.push({
+          fromBlock: Number(cursor),
+          toBlock: Number(to),
+          blocks: span,
+          success: false,
+          saturated: false,
+          requestsUsed: budget.discovery.backlogUsed - before,
+          queries: queryTelemetry,
+          error: failed
+        });
+        break;
+      }
+
+      if (saturated) {
+        saturatedRanges++;
+        service.saturatedRanges = safeNumber(service.saturatedRanges) + 1;
+        rangeHistory.push({
+          fromBlock: Number(cursor),
+          toBlock: Number(to),
+          blocks: span,
+          success: false,
+          saturated: true,
+          requestsUsed: budget.discovery.backlogUsed - before,
+          queries: queryTelemetry,
+          error: "BLOCKSCOUT_1000_ROW_RANGE_REQUIRES_SUBDIVISION_V244"
+        });
+
+        if (span <= 1) {
+          error = "BLOCKSCOUT_SINGLE_BLOCK_SATURATED_V244";
+          break;
+        }
+
+        span = Math.max(1, Math.floor(span / 2));
+        preferredSpan = Math.min(preferredSpan, span);
+        subdivisions++;
+        continue;
+      }
+
+      output.logs.push(...collected);
+      output.ranges.push({
+        fromBlock: Number(cursor),
+        toBlock: Number(to),
+        blocks: span,
+        logs: collected.length,
+        provider: "BLOCKSCOUT",
+        phase: "discovery-backlog",
+        strategy: "V244_INDEXED_INITIALIZE_AND_VERIFIED_LAUNCH_EVENTS"
+      });
+
+      rangeHistory.push({
+        fromBlock: Number(cursor),
+        toBlock: Number(to),
+        blocks: span,
+        success: true,
+        saturated: false,
+        logs: collected.length,
+        requestsUsed: budget.discovery.backlogUsed - before,
+        queries: queryTelemetry
+      });
+
+      processedThrough = to;
+      cursor = to + 1n;
+      completedRanges++;
+      service.rangesCompleted = safeNumber(service.rangesCompleted) + 1;
+      service.blocksCompleted = safeNumber(service.blocksCompleted) + span;
+      rangeCompleted = true;
+    }
+
+    if (error) break;
+  }
+
+  // Exact request count from the shared request budget for this indexed pass.
+  requestsUsed = Math.max(
+    0,
+    budget.discovery.backlogUsed - backlogUsedAtStartV244
+  );
+
+  const blocksProcessed = processedThrough !== null
+    ? Number(processedThrough - start + 1n)
+    : 0;
+
+  return {
+    success: blocksProcessed > 0,
+    complete: cursor > targetLatest,
+    processedThrough,
+    nextBlock: cursor <= targetLatest ? cursor : null,
+    blocksProcessed,
+    requestsUsed,
+    completedRanges,
+    saturatedRanges,
+    subdivisions,
+    rangeHistory: rangeHistory.slice(-20),
+    durationMs: Date.now() - startedAt,
+    discoveryCoverage:
+      "POOLMANAGER_INITIALIZE_PLUS_VERIFIED_POOLS_TRADE_LAUNCH_EVENTS",
+    rawSwapHistoryIntentionallyNotRequiredForHistoricalDiscovery: true,
+    sameExistingDecodersAuthoritative: true,
+    cursorAdvancesOnlyAfterAllIndexedQueriesComplete: true,
+    rpcFallbackRequired: Boolean(error),
+    service: {
+      totalRequests: safeNumber(service.totalRequests),
+      total429s: safeNumber(service.total429s),
+      cooldownUntil: safeNumber(service.cooldownUntil) || null,
+      lastStatus: service.lastStatus || null,
+      rangesCompleted: safeNumber(service.rangesCompleted),
+      blocksCompleted: safeNumber(service.blocksCompleted),
+      saturatedRanges: safeNumber(service.saturatedRanges)
+    },
+    error
+  };
+}
+
 async function scanBacklogSequential(
+  env,
+  state,
+  start,
+  targetLatest,
+  budget,
+  output
+) {
+  const startedAtV244 = Date.now();
+
+  const indexed = await scanBacklogBlockscoutIndexedV244(
+    env,
+    state,
+    start,
+    targetLatest,
+    budget,
+    output
+  );
+
+  const rpcStart = indexed.processedThrough !== null
+    ? indexed.processedThrough + 1n
+    : start;
+
+  let rpc = null;
+
+  if (
+    rpcStart <= targetLatest &&
+    budgetAvailable(budget, "discovery-backlog")
+  ) {
+    rpc = await scanBacklogRpcSequentialV244(
+      env,
+      state,
+      rpcStart,
+      targetLatest,
+      budget,
+      output
+    );
+  }
+
+  const processedThrough =
+    rpc?.processedThrough !== null &&
+    rpc?.processedThrough !== undefined
+      ? rpc.processedThrough
+      : indexed.processedThrough;
+
+  const blocksProcessed = processedThrough !== null
+    ? Number(processedThrough - start + 1n)
+    : 0;
+
+  const durationMsV244 = Date.now() - startedAtV244;
+
+  return {
+    ...(rpc || {}),
+    success: blocksProcessed > 0,
+    complete: processedThrough !== null && processedThrough >= targetLatest,
+    processedThrough,
+    nextBlock:
+      processedThrough !== null && processedThrough < targetLatest
+        ? processedThrough + 1n
+        : null,
+    blocksProcessed,
+    durationMs: durationMsV244,
+    blocksPerSecond:
+      durationMsV244 > 0
+        ? (blocksProcessed / durationMsV244) * 1000
+        : 0,
+    indexedBacklogV244: indexed,
+    rpcFallbackV244: rpc
+      ? {
+          used: true,
+          startBlock: Number(rpcStart),
+          blocksProcessed: safeNumber(rpc.blocksProcessed),
+          error: rpc.error || null
+        }
+      : {
+          used: false,
+          startBlock: Number(rpcStart),
+          blocksProcessed: 0,
+          error: null
+        },
+    error:
+      rpc?.error ||
+      (blocksProcessed > 0 ? null : indexed.error)
+  };
+}
+
+async function scanBacklogRpcSequentialV244(
   env,
   state,
   start,
@@ -43256,7 +43821,17 @@ for (
                 ),
 
               strategy:
-                "V96_PROTECTED_ACCELERATED_PROVEN_RANGE",
+                "V244_BLOCKSCOUT_INDEXED_WITH_RPC_FALLBACK",
+
+              indexedBacklogV244:
+                backlogResult
+                  ?.indexedBacklogV244 ||
+                null,
+
+              rpcFallbackV244:
+                backlogResult
+                  ?.rpcFallbackV244 ||
+                null,
 
               publicLearnedChunk:
                 backlogResult
