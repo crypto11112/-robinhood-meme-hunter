@@ -1,5 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V239: fixes V238 shared Bitquery GraphQL syntax by removing an invalid JavaScript-style block comment from inside the query string; no logic/request changes.
  * V238: verified Pons V2 graduation PoolId handoff via decoded PoolManager Initialize events filtered by the exact Pons hook; shares the existing Bitquery request; zero extra HTTP.
  * V237: exact-PoolId realtime Bitquery liquidity evidence inside the existing shared request; zero extra HTTP; evidence-only until live-proven.
  * V236
@@ -968,7 +969,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V238";
+const VERSION = "V239";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -16579,13 +16580,6 @@ async function discoverVerifiedBagsLaunchesV210(
           }
         }
 
-        /*
-         * V238: Pons V2 graduation -> exact Uniswap v4 PoolId handoff.
-         * Bitquery documents the Pons meme hook as the invariant identity for
-         * graduated pools; Transaction.To is deliberately NOT used because
-         * graduation is permissionless. This alias shares the existing HTTP
-         * request and therefore adds zero external requests.
-         */
         PonsGraduatedPoolsV238: Events(
           limit: {count: 20}
           orderBy: {descending: Block_Time}
