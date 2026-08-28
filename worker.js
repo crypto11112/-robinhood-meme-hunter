@@ -1,9 +1,16 @@
 /**
  * Robinhood Chain Meme Hunter
- * V235
+ * V236
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
+ *
+ * V236 VERIFIED 12H BUY/SELL USD WINDOW
+ * - Adds a 12h aggregation window over the existing already-verified directional USD records
+ * - Adds 12h verified buys/sells, USD amounts, net flow and USD buy pressure to Telegram verified on-chain evidence
+ * - Adds the same 12h display for verified Pons V2 curve flow when available
+ * - Reuses the existing 24h retained evidence; zero extra HTTP requests and no new data source
+ * - Does NOT change swap decoding, BUY/SELL classification, exact USD maths, Momentum, scoring, qualification thresholds, KV or request ceilings
  *
  * V235 SEPARATE PERSISTED MARKET-EVIDENCE TARGET HANDOFF
  * - Separates Bitquery market targeting from the V228 unresolved-holder target
@@ -959,7 +966,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V235";
+const VERSION = "V236";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1443,6 +1450,7 @@ const V180_WINDOW_MS = Object.freeze({
   m15: 15 * 60 * 1000,
   h1: 60 * 60 * 1000,
   h6: 6 * 60 * 60 * 1000,
+  h12: 12 * 60 * 60 * 1000,
   h24: 24 * 60 * 60 * 1000
 });
 
@@ -33165,6 +33173,8 @@ function candidateVerifiedPonsCurveFlowV216(
       summarize(V180_WINDOW_MS.h1),
     h6:
       summarize(V180_WINDOW_MS.h6),
+    h12:
+      summarize(V180_WINDOW_MS.h12),
     h24:
       summarize(V180_WINDOW_MS.h24)
   };
@@ -33201,7 +33211,7 @@ function candidateVerifiedPonsCurveFlowV216(
  * V179 records are exact decoded V4 swaps with verified candidate identity
  * and verified USD amounts, but the live scanner does not prove that its
  * locally retained records represent every market trade in a 5m/15m/1h/6h/
- * 24h period. Therefore V212 exposes them as VERIFIED OBSERVED flow and does
+ * 12h/24h period. Therefore V212 exposes them as VERIFIED OBSERVED flow and does
  * not overwrite DexScreener/Gecko full-window counts or pretend partial
  * scanner coverage is complete.
  */
@@ -33352,6 +33362,8 @@ function candidateVerifiedOnChainFlowV212(
       summarize(V180_WINDOW_MS.h1),
     h6:
       summarize(V180_WINDOW_MS.h6),
+    h12:
+      summarize(V180_WINDOW_MS.h12),
     h24:
       summarize(V180_WINDOW_MS.h24)
   };
@@ -33424,6 +33436,7 @@ function telegramVerifiedUsdDiagnosticV213(
     ["m15", "15m"],
     ["h1", "1h"],
     ["h6", "6h"],
+    ["h12", "12h"],
     ["h24", "24h"]
   ];
 
@@ -33833,6 +33846,9 @@ function telegramMessage(
   const verifiedObserved6hV212 =
     verifiedObservedWindowV212("h6");
 
+  const verifiedObserved12hV236 =
+    verifiedObservedWindowV212("h12");
+
   const verifiedObserved24hV212 =
     verifiedObservedWindowV212("h24");
 
@@ -33883,6 +33899,7 @@ function telegramMessage(
     ponsWindowV216("15m", "m15");
     ponsWindowV216("1h", "h1");
     ponsWindowV216("6h", "h6");
+    ponsWindowV216("12h", "h12");
     ponsWindowV216("24h", "h24");
 
     ponsCurveLinesV216.push(
@@ -33951,6 +33968,10 @@ function telegramMessage(
     pushObserved(
       "6h",
       verifiedObserved6hV212
+    );
+    pushObserved(
+      "12h",
+      verifiedObserved12hV236
     );
     pushObserved(
       "24h",
