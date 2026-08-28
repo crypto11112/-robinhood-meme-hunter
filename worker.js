@@ -1,8 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V231
+ * V232
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
+ *
+ * V232 VERIFIED BEARISH-FLOW TELEGRAM PROTECTION
+ * - Adds a conservative Telegram-only suppression gate for strongly bearish candidate-matched verified on-chain USD flow
+ * - Requires Momentum <= 0 plus a meaningful verified short-term V4 sample before suppression can trigger
+ * - Does not alter Momentum scoring or any verified BUY/SELL USD calculation
+ * - Does not alter Opportunity, Confidence, holder maths, existing Telegram score/risk thresholds, KV or request budgets
+ * - Adds zero external requests and exposes the suppression reason in Telegram qualification diagnostics
  *
  * V231 TELEGRAM PRESENTATION CLEANUP
  * - Renames broad market transaction section to Market Activity Counts — NOT USD VERIFIED
@@ -921,7 +928,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V231";
+const VERSION = "V232";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -32055,6 +32062,168 @@ function telegramCoreEvidenceFreshnessV169(
   };
 }
 
+/* =========================================================
+   V232 VERIFIED BEARISH-FLOW TELEGRAM PROTECTION
+   ========================================================= */
+
+function telegramVerifiedBearishFlowProtectionV232(
+  candidate
+) {
+  const flow =
+    candidate?.onChainVerifiedFlowV212;
+
+  const empty = {
+    enabled: true,
+    suppresses: false,
+    reason: "NO_STRONG_VERIFIED_BEARISH_SHORT_TERM_FLOW_V232",
+    window: null,
+    momentumScore:
+      safeNumber(candidate?.momentum?.score),
+    observedTrades: 0,
+    buys: 0,
+    sells: 0,
+    buyVolumeUsd: 0,
+    sellVolumeUsd: 0,
+    totalObservedUsd: 0,
+    netFlowUsd: null,
+    buyPressureUsd: null,
+    minimumObservedTrades: 5,
+    minimumObservedUsd: 500,
+    minimumSellUsd: 500,
+    maximumBuyPressureUsd: 15,
+    maximumNetFlowUsd: -500,
+    verifiedUsdMathChanged: false,
+    momentumMathChanged: false,
+    externalRequestsAdded: 0
+  };
+
+  if (flow?.verified !== true) {
+    return {
+      ...empty,
+      reason:
+        "NO_CANDIDATE_MATCHED_VERIFIED_ONCHAIN_USD_V232"
+    };
+  }
+
+  /*
+   * Prefer the freshest verified short-term window. The underlying V212
+   * values are read only; V232 never recomputes or rewrites verified swaps.
+   */
+  const choices = [
+    ["m5", "5m"],
+    ["m15", "15m"]
+  ];
+
+  let row = null;
+  let windowLabel = null;
+
+  for (const [key, label] of choices) {
+    const current = flow?.windows?.[key];
+
+    if (
+      current?.verified === true &&
+      safeNumber(current?.observedTrades) > 0
+    ) {
+      row = current;
+      windowLabel = label;
+      break;
+    }
+  }
+
+  if (!row) {
+    return {
+      ...empty,
+      reason:
+        "NO_VERIFIED_5M_OR_15M_FLOW_WINDOW_V232"
+    };
+  }
+
+  const observedTrades =
+    safeNumber(row?.observedTrades);
+
+  const buys =
+    safeNumber(row?.buys);
+
+  const sells =
+    safeNumber(row?.sells);
+
+  const buyVolumeUsd =
+    Math.max(
+      0,
+      safeNumber(row?.buyVolumeUsd)
+    );
+
+  const sellVolumeUsd =
+    Math.max(
+      0,
+      safeNumber(row?.sellVolumeUsd)
+    );
+
+  const totalObservedUsd =
+    buyVolumeUsd + sellVolumeUsd;
+
+  const netFlowUsd =
+    Number.isFinite(Number(row?.netFlowUsd))
+      ? Number(row.netFlowUsd)
+      : buyVolumeUsd - sellVolumeUsd;
+
+  const buyPressureUsd =
+    Number.isFinite(Number(row?.buyPressureUsd))
+      ? Number(row.buyPressureUsd)
+      : totalObservedUsd > 0
+        ? (buyVolumeUsd / totalObservedUsd) * 100
+        : null;
+
+  const momentumScore =
+    safeNumber(candidate?.momentum?.score);
+
+  const meaningfulVerifiedSample =
+    observedTrades >= 5 &&
+    totalObservedUsd >= 500;
+
+  const stronglyBearishVerifiedFlow =
+    meaningfulVerifiedSample &&
+    sellVolumeUsd >= 500 &&
+    netFlowUsd <= -500 &&
+    buyPressureUsd !== null &&
+    buyPressureUsd <= 15 &&
+    sells >= 3 &&
+    sells >= buys * 2;
+
+  const suppresses =
+    momentumScore <= 0 &&
+    stronglyBearishVerifiedFlow;
+
+  return {
+    enabled: true,
+    suppresses,
+    reason:
+      suppresses
+        ? "VERIFIED_BEARISH_SHORT_TERM_FLOW_WITH_NO_POSITIVE_MOMENTUM_V232"
+        : meaningfulVerifiedSample
+          ? "VERIFIED_SHORT_TERM_FLOW_NOT_STRONGLY_BEARISH_ENOUGH_V232"
+          : "VERIFIED_SHORT_TERM_SAMPLE_BELOW_BEARISH_PROTECTION_THRESHOLD_V232",
+    window: windowLabel,
+    momentumScore,
+    observedTrades,
+    buys,
+    sells,
+    buyVolumeUsd,
+    sellVolumeUsd,
+    totalObservedUsd,
+    netFlowUsd,
+    buyPressureUsd,
+    minimumObservedTrades: 5,
+    minimumObservedUsd: 500,
+    minimumSellUsd: 500,
+    maximumBuyPressureUsd: 15,
+    maximumNetFlowUsd: -500,
+    verifiedUsdMathChanged: false,
+    momentumMathChanged: false,
+    externalRequestsAdded: 0
+  };
+}
+
 function qualifiesTelegram(
   candidate
 ) {
@@ -32138,6 +32307,18 @@ function qualifiesTelegram(
   if (
     !evidenceFreshnessV169
       .passes
+  ) {
+    return false;
+  }
+
+  const bearishFlowProtectionV232 =
+    telegramVerifiedBearishFlowProtectionV232(
+      candidate
+    );
+
+  if (
+    bearishFlowProtectionV232
+      .suppresses
   ) {
     return false;
   }
@@ -32287,6 +32468,20 @@ function telegramQualificationReasons(
     }
   }
 
+  const bearishFlowProtectionV232 =
+    telegramVerifiedBearishFlowProtectionV232(
+      candidate
+    );
+
+  if (
+    bearishFlowProtectionV232
+      .suppresses
+  ) {
+    reasons.push(
+      "VERIFIED_BEARISH_SHORT_TERM_FLOW_V232"
+    );
+  }
+
   if (
     safeNumber(
       candidate?.signalConfirmation?.signals
@@ -32339,7 +32534,11 @@ function buildTelegramQualificationDiagnostics(
       qualifies:
         reasons.length ===
         0,
-      reasons
+      reasons,
+      verifiedBearishFlowProtectionV232:
+        telegramVerifiedBearishFlowProtectionV232(
+          candidate
+        )
     });
   }
 
