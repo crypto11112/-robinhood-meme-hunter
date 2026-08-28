@@ -1,5 +1,10 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V250:
+ * - FIX: ambiguous holder count 0 can no longer be displayed as VERIFIED
+ * - FIX: positive verified holder counts and recent verified caches continue unchanged
+ * - FIX: zero stays UNVERIFIED unless a future source explicitly proves genuine zero-holder state
+ * - Preserves V249 backlog convergence/retry logic, V247 PRO holder-count recovery, Momentum/USD/scoring/Telegram/KV logic
  * V249:
  * - FIX: bounded backoff retry for transient Blockscout PRO backlog HTTP 500/502/503/504 responses
  * - FIX: every retry consumes the existing discovery-backlog request budget and respects the V244 9-request pass cap
@@ -991,7 +996,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V249";
+const VERSION = "V250";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -27295,6 +27300,61 @@ function extractCounterData(
    V225 VERIFIED HOLDER-COUNT DISPLAY RECOVERY
    ========================================================= */
 
+/*
+ * V250 HOLDER COUNT ZERO-INTEGRITY GUARD
+ *
+ * Some Blockscout token-detail/counter responses can surface a numeric zero
+ * when holder evidence is unavailable/incomplete. Zero is therefore not
+ * sufficient evidence of a genuine zero-holder token.
+ *
+ * Positive verified counts remain valid. Zero is accepted only if an upstream
+ * source explicitly marks zeroHolderCountVerifiedV250 === true.
+ */
+function verifiedHolderCountValueV250(
+  holderCount,
+  evidence = null
+) {
+  const value =
+    Number(holderCount);
+
+  if (
+    !Number.isFinite(value) ||
+    value < 0
+  ) {
+    return {
+      verified: false,
+      holderCount: null,
+      reason: "INVALID_HOLDER_COUNT"
+    };
+  }
+
+  if (value > 0) {
+    return {
+      verified: true,
+      holderCount: Math.floor(value),
+      reason: "POSITIVE_VERIFIED_COUNT"
+    };
+  }
+
+  if (
+    value === 0 &&
+    evidence?.zeroHolderCountVerifiedV250 === true
+  ) {
+    return {
+      verified: true,
+      holderCount: 0,
+      reason: "EXPLICIT_ZERO_VERIFIED_V250"
+    };
+  }
+
+  return {
+    verified: false,
+    holderCount: null,
+    reason: "AMBIGUOUS_ZERO_UNVERIFIED_V250"
+  };
+}
+
+
 function holderCountDisplayEvidenceV225(
   watched,
   holders,
@@ -27303,11 +27363,21 @@ function holderCountDisplayEvidenceV225(
 ) {
   const now = Date.now();
 
+  const currentCountEvidenceV250 =
+    holders?.countersVerified === true
+      ? verifiedHolderCountValueV250(
+          holders?.holderCount,
+          holders
+        )
+      : {
+          verified: false,
+          holderCount: null,
+          reason: "COUNTERS_NOT_VERIFIED"
+        };
+
   const currentCount =
-    holders?.countersVerified === true &&
-    holders?.holderCount !== null &&
-    Number.isFinite(Number(holders.holderCount))
-      ? Number(holders.holderCount)
+    currentCountEvidenceV250.verified === true
+      ? currentCountEvidenceV250.holderCount
       : null;
 
   if (currentCount !== null) {
@@ -27343,7 +27413,8 @@ function holderCountDisplayEvidenceV225(
     typeof directCache === "object" &&
     directCache.holderCount !== null &&
     directCache.holderCount !== undefined &&
-    Number.isFinite(Number(directCache.holderCount))
+    Number.isFinite(Number(directCache.holderCount)) &&
+    Number(directCache.holderCount) > 0
   ) {
     candidates.push({
       timestamp: safeNumber(directCache.timestamp),
@@ -27358,7 +27429,8 @@ function holderCountDisplayEvidenceV225(
     typeof holderCache === "object" &&
     holderCache.data?.countersVerified === true &&
     holderCache.data?.holderCount !== null &&
-    Number.isFinite(Number(holderCache.data.holderCount))
+    Number.isFinite(Number(holderCache.data.holderCount)) &&
+    Number(holderCache.data.holderCount) > 0
   ) {
     candidates.push({
       timestamp: safeNumber(holderCache.timestamp),
@@ -27381,6 +27453,7 @@ function holderCountDisplayEvidenceV225(
     if (
       row?.holderCount !== null &&
       Number.isFinite(Number(row?.holderCount)) &&
+      Number(row?.holderCount) > 0 &&
       safeNumber(row?.timestamp) > 0
     ) {
       candidates.push({
