@@ -1,10 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V203
+ * V204
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V203
+ * CURRENT BUILD: V204
+ * - V204 adds verified pools.trade launch infrastructure as a positive-identification registry
+ * - Tracks both active entry contracts and all four verified TokenLaunched emitters
+ * - PoolManager activity alone is explicitly NOT treated as pools.trade proof
+ * - This checkpoint does not yet alter scoring, decoding, Telegram, KV or request budgets
+ * - Preserves V196 verified USD path and all V203 safety gates
  * - V203 preserves the strict candidate/quote gate after V202 proved BOTH_SIDES_NONQUOTE dominates failures
  * - Adds explicit safety telemetry: token-to-token/non-meme V4 pools remain unresolved rather than guessed
  * - Does NOT add arbitrary ERC-20s or Robinhood Stock Tokens to knownQuote()
@@ -758,7 +763,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V203";
+const VERSION = "V204";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -860,6 +865,30 @@ const V3_STANDARD_FEES_V195 = [
 
 const ZERO =
   "0x0000000000000000000000000000000000000000";
+
+// V204: verified pools.trade launch infrastructure on Robinhood Chain.
+// Source identity is intentionally explicit: the shared V4 PoolManager alone
+// is NOT sufficient to classify a token as pools.trade.
+const POOLS_TRADE_ENTRY_CONTRACTS_V204 = [
+  "0x0000ffffbe8efe702c8703ae3477ff5de3d319c0",
+  "0x00004c4ccc709ef590f7c81102c0689f0263d4e9"
+];
+
+const POOLS_TRADE_TOKEN_FACTORY_V204 =
+  "0x000000e200088d55c39a11f609e5f667729ad49b";
+
+const POOLS_TRADE_LAUNCHPADS_V204 = [
+  "0x23f8209572b4a1c2ad88a42749e830791fb027f1",
+  "0xad44d55e7f8337c3ce113fbb591486e85be104b2",
+  "0xce57498d3474dcc244dfb6710ffbe6d4441cd2b2",
+  "0x60d73b21cdf2ea846ab3d58699bbbb8f29d72491"
+];
+
+const POOLS_TRADE_TOKEN_CREATED_TOPIC_V204 =
+  "0x2e2b3f61b70d2d131b2a807371103cc98d51adcaa5e9a8f9c32658ad8426e74e";
+
+const POOLS_TRADE_TOKEN_LAUNCHED_TOPIC_V204 =
+  "0x3b3d2bafdcae274a232217e1f80ee4305d3af6aa25c8b14b1681bd68d18042a4";
 
 const DEAD =
   "0x000000000000000000000000000000000000dead";
@@ -13876,7 +13905,26 @@ function collectOnChainDirectionalSwapsV179(
       v203ResearchGuard:
         "DO_NOT_PROMOTE_BOTH_SIDES_NONQUOTE_TO_KNOWN_QUOTE_WITHOUT_VERIFIED_IDENTITY",
       v203PoolsTradeIsolationRule:
-        "POOLMANAGER_ALONE_IS_NOT_A_POOLS_TRADE_FILTER"
+        "POOLMANAGER_ALONE_IS_NOT_A_POOLS_TRADE_FILTER",
+      poolsTradeLaunchRecognitionV204: {
+        enabled: true,
+        mode: "VERIFIED_INFRASTRUCTURE_REGISTRY",
+        entryContracts:
+          POOLS_TRADE_ENTRY_CONTRACTS_V204,
+        tokenFactory:
+          POOLS_TRADE_TOKEN_FACTORY_V204,
+        launchpads:
+          POOLS_TRADE_LAUNCHPADS_V204,
+        tokenCreatedTopic:
+          POOLS_TRADE_TOKEN_CREATED_TOPIC_V204,
+        tokenLaunchedTopic:
+          POOLS_TRADE_TOKEN_LAUNCHED_TOPIC_V204,
+        poolManagerAloneClassifiesPoolsTrade: false,
+        positiveIdentificationRequired: true,
+        scoringBehaviorChanged: false,
+        decoderBehaviorChanged: false,
+        externalRequestsAdded: 0
+      }
     },
 
     noExtraExternalRequests:
