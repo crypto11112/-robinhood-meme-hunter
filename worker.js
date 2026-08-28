@@ -1,5 +1,10 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V249:
+ * - FIX: bounded backoff retry for transient Blockscout PRO backlog HTTP 500/502/503/504 responses
+ * - FIX: every retry consumes the existing discovery-backlog request budget and respects the V244 9-request pass cap
+ * - FIX: exact failed range/query is retried; backlog cursor still advances only after all three range queries succeed
+ * - Preserves V248 10,000-block PRO indexed strategy, V247 holder fixes, Momentum/USD/scoring/Telegram/KV logic
  * V248:
  * - FIX: historical indexed backlog uses authenticated Blockscout PRO JSON-RPC eth_getLogs when configured
  * - FIX: PRO backlog is no longer blocked by the stale legacy Blockscout backlog cooldown
@@ -986,7 +991,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V248";
+const VERSION = "V249";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1590,6 +1595,24 @@ const V242_PUBLIC_BACKLOG_MAX_REQUESTS_PER_PASS = 3;
 const V244_BLOCKSCOUT_BACKLOG_RANGE_BLOCKS = 10000;
 const V244_BLOCKSCOUT_MAX_REQUESTS_PER_PASS = 9;
 const V244_BLOCKSCOUT_LOG_LIMIT = 1000;
+
+/*
+ * V249: Blockscout documents 5xx as transient and recommends capped retries
+ * with backoff. These are retries of the exact same eth_getLogs query.
+ */
+const V249_BLOCKSCOUT_TRANSIENT_HTTP = new Set([
+  500,
+  502,
+  503,
+  504
+]);
+
+const V249_BLOCKSCOUT_MAX_ATTEMPTS = 3;
+
+const V249_BLOCKSCOUT_RETRY_DELAYS_MS = [
+  450,
+  1100
+];
 const V244_BLOCKSCOUT_MIN_REQUEST_SPACING_MS = 220;
 const V244_BLOCKSCOUT_429_COOLDOWN_MS = 5 * 60 * 1000;
 
@@ -11694,6 +11717,182 @@ async function fetchBlockscoutBacklogTopicV248(
 }
 
 
+/*
+ * V249 TRANSIENT BLOCKSCOUT PRO BACKLOG RETRY
+ *
+ * - Retries only authenticated PRO JSON-RPC backlog requests.
+ * - Retries only HTTP 500/502/503/504.
+ * - Maximum three total attempts (initial + two retries).
+ * - Each attempt is an ordinary V248 request, so it consumes the same shared
+ *   discovery-backlog/global request budget and inherits spacing/429 handling.
+ * - Caller supplies a smaller maxAttempts when the V244 nine-request pass cap
+ *   or remaining discovery budget would otherwise be exceeded.
+ */
+async function fetchBlockscoutBacklogTopicV249(
+  env,
+  state,
+  budget,
+  fromBlock,
+  toBlock,
+  topic0,
+  address = null,
+  maxAttempts =
+    V249_BLOCKSCOUT_MAX_ATTEMPTS
+) {
+  const allowedAttempts =
+    Math.max(
+      1,
+      Math.min(
+        V249_BLOCKSCOUT_MAX_ATTEMPTS,
+        Math.floor(
+          safeNumber(
+            maxAttempts
+          ) || 1
+        )
+      )
+    );
+
+  let lastResult =
+    null;
+
+  const retryHistory =
+    [];
+
+  for (
+    let attempt = 1;
+    attempt <= allowedAttempts;
+    attempt++
+  ) {
+    const result =
+      await fetchBlockscoutBacklogTopicV248(
+        env,
+        state,
+        budget,
+        fromBlock,
+        toBlock,
+        topic0,
+        address
+      );
+
+    lastResult =
+      result;
+
+    retryHistory.push({
+      attempt,
+      httpStatus:
+        result.httpStatus ??
+        null,
+      success:
+        result.success ===
+        true,
+      error:
+        result.error ||
+        null
+    });
+
+    if (
+      result.success ===
+      true
+    ) {
+      return {
+        ...result,
+        attemptsUsedV249:
+          attempt,
+        retriesUsedV249:
+          attempt - 1,
+        retryHistoryV249:
+          retryHistory,
+        transientRetryRecoveredV249:
+          attempt > 1
+      };
+    }
+
+    const isPro =
+      result.provider ===
+        "BLOCKSCOUT_PRO_JSON_RPC_V248";
+
+    const isTransient5xx =
+      isPro &&
+      V249_BLOCKSCOUT_TRANSIENT_HTTP.has(
+        safeNumber(
+          result.httpStatus
+        )
+      );
+
+    if (
+      !isTransient5xx ||
+      attempt >=
+        allowedAttempts
+    ) {
+      break;
+    }
+
+    /*
+     * Do not retry if another request would violate the shared backlog budget.
+     * The caller additionally constrains allowedAttempts to the V244 pass cap.
+     */
+    if (
+      !budgetAvailable(
+        budget,
+        "discovery-backlog"
+      )
+    ) {
+      break;
+    }
+
+    const delayMs =
+      V249_BLOCKSCOUT_RETRY_DELAYS_MS[
+        Math.min(
+          attempt - 1,
+          V249_BLOCKSCOUT_RETRY_DELAYS_MS.length - 1
+        )
+      ];
+
+    if (
+      delayMs > 0
+    ) {
+      await new Promise(
+        resolve =>
+          setTimeout(
+            resolve,
+            delayMs
+          )
+      );
+    }
+  }
+
+  return {
+    ...(lastResult || {
+      attempted:
+        false,
+      success:
+        false,
+      rows:
+        [],
+      saturated:
+        false,
+      httpStatus:
+        null,
+      error:
+        "BLOCKSCOUT_V249_NO_RESULT",
+      provider:
+        "BLOCKSCOUT_PRO_JSON_RPC_V248"
+    }),
+    attemptsUsedV249:
+      retryHistory.length,
+    retriesUsedV249:
+      Math.max(
+        0,
+        retryHistory.length - 1
+      ),
+    retryHistoryV249:
+      retryHistory,
+    transientRetryRecoveredV249:
+      false
+  };
+}
+
+
 async function fetchBlockscoutBacklogTopicV244(
   state,
   budget,
@@ -11951,21 +12150,61 @@ async function scanBacklogBlockscoutIndexedV244(
           break;
         }
 
-        const result = await fetchBlockscoutBacklogTopicV248(
+        const remainingPassRequestsV249 =
+          Math.max(
+            1,
+            V244_BLOCKSCOUT_MAX_REQUESTS_PER_PASS -
+              requestsUsed
+          );
+
+        const remainingBudgetRequestsV249 =
+          Math.max(
+            1,
+            backlogPhaseRequestsRemainingV244(
+              budget
+            )
+          );
+
+        const maxAttemptsV249 =
+          Math.max(
+            1,
+            Math.min(
+              V249_BLOCKSCOUT_MAX_ATTEMPTS,
+              remainingPassRequestsV249,
+              remainingBudgetRequestsV249
+            )
+          );
+
+        const result = await fetchBlockscoutBacklogTopicV249(
           env,
           state,
           budget,
           Number(cursor),
           Number(to),
           query.topic0,
-          query.address
+          query.address,
+          maxAttemptsV249
         );
 
         requestsUsed =
           budget.discovery.backlogUsed -
           backlogUsedAtStartV244;
 
-        const thisRequests = result.attempted ? 1 : 0;
+        const thisRequests =
+          Number.isFinite(
+            Number(
+              result.attemptsUsedV249
+            )
+          )
+            ? Number(
+                result.attemptsUsedV249
+              )
+            : (
+                result.attempted
+                  ? 1
+                  : 0
+              );
+
         queryTelemetry.push({
           label: query.label,
           rows: result.rows.length,
@@ -11976,6 +12215,23 @@ async function scanBacklogBlockscoutIndexedV244(
           normalizationFailures:
             safeNumber(result.normalizationFailures),
           requestsUsed: thisRequests,
+          attemptsUsedV249:
+            safeNumber(
+              result.attemptsUsedV249
+            ),
+          retriesUsedV249:
+            safeNumber(
+              result.retriesUsedV249
+            ),
+          transientRetryRecoveredV249:
+            result.transientRetryRecoveredV249 ===
+              true,
+          retryHistoryV249:
+            Array.isArray(
+              result.retryHistoryV249
+            )
+              ? result.retryHistoryV249
+              : [],
           providerV248:
             result.provider ||
             null,
@@ -12106,6 +12362,26 @@ async function scanBacklogBlockscoutIndexedV244(
         env,
         state
       ),
+    transientRetryV249: {
+      enabled:
+        true,
+      statuses: [
+        500,
+        502,
+        503,
+        504
+      ],
+      maximumAttemptsPerExactQuery:
+        V249_BLOCKSCOUT_MAX_ATTEMPTS,
+      backoffMs:
+        V249_BLOCKSCOUT_RETRY_DELAYS_MS,
+      retriesConsumeExistingBudget:
+        true,
+      respectsNineRequestPassCap:
+        true,
+      cursorSafetyUnchanged:
+        true
+    },
     proJsonRpcBacklogV248: {
       enabled:
         blockscoutProBacklogConfiguredV248(
@@ -44980,7 +45256,7 @@ for (
                 ),
 
               strategy:
-                "V248_BLOCKSCOUT_PRO_INDEXED_WITH_RPC_FALLBACK",
+                "V249_BLOCKSCOUT_PRO_INDEXED_RETRY_WITH_RPC_FALLBACK",
 
               indexedBacklogV244:
                 backlogResult
