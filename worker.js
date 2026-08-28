@@ -1,10 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V220
+ * V221
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V220 CORRECTED
+ * CURRENT BUILD: V221
+ * - FIX: returns current-run LaunchHood V220 discovery fields from the shared Bitquery discovery result
+ * - FIX: verified LaunchHood launches now reach the existing same-scan liveTokens/newTokens priority handoff
+ * - FIX: /scan current-run LaunchHood telemetry no longer shows zero/empty solely because result fields were omitted
+ * - Preserves the persisted launchHoodDiscoveryV220 KV schema and all V220 verification semantics
+ * - Adds zero external requests; preserves scoring, Telegram thresholds, provider protections and 42-request ceiling
  * - FIX: removed discovery-result variables accidentally inserted into readState() migration scope
  * - FIX: KV migration now reads only persisted LaunchHood state and cannot fail on function-local discovery variables
  * - V220 adds verified LaunchHood launch discovery using Bitquery's documented zero-address 1B mint pattern
@@ -839,7 +844,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V220";
+const VERSION = "V221";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -16801,6 +16806,14 @@ async function discoverVerifiedBagsLaunchesV210(
         ponsLaunches.slice(0, 10),
       ponsStatus:
         ponsTelemetry.lastStatus,
+      launchHoodLaunchesSeenV220:
+        launchHoodLaunchesV220.length,
+      launchHoodNewlyObservedV220,
+      launchHoodVerifiedTokensAddedV220,
+      launchHoodLaunchesV220:
+        launchHoodLaunchesV220.slice(0, 10),
+      launchHoodStatusV220:
+        launchHoodTelemetryV220.lastStatus,
       ponsCurveTradesV216: {
         targetingVersion:
           "V217_NEWEST_VERIFIED_PONS_KV_TARGETING",
