@@ -1,8 +1,16 @@
 /**
  * Robinhood Chain Meme Hunter
- * V227
+ * V228
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
+ *
+ * CURRENT BUILD: V228
+ * - FIX: persists the best non-Pons candidate still missing verified holder concentration after analysis so the NEXT existing Bitquery shared request can target it
+ * - FIX: next-scan persisted holder target is selected before the older completion/live fallback, closing the V227 timing gap that produced NOT_TARGETED when candidates were selected after the shared request
+ * - SAFETY: persisted targets expire after 6 hours, must still be watched/non-terminal/non-excluded, and are cleared when matching fresh Bitquery holder evidence is already verified
+ * - SAFETY: Pons V2 remains excluded from Bitquery concentration targeting until its dynamic bonding-curve/locker infrastructure is explicitly reconciled
+ * - Adds zero HTTP requests; reuses the existing shared Bitquery request and preserves the 42-request / 21-analysis ceilings
+ * - Preserves V227 holder validation, V226 request allocation, V225 holder-count recovery, Momentum, verified BUY/SELL USD maths and Telegram thresholds
  *
  * CURRENT BUILD: V227
  * - NEW: Bitquery EVM.Holders evidence is folded into the existing shared Bitquery HTTP request for one priority/live target
@@ -896,7 +904,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V227";
+const VERSION = "V228";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -981,6 +989,9 @@ const BITQUERY_HOLDER_EVIDENCE_MAX_AGE_MS_V227 =
 
 const BITQUERY_HOLDER_ROW_LIMIT_V227 =
   25;
+
+const BITQUERY_HOLDER_TARGET_MAX_AGE_MS_V228 =
+  6 * 60 * 60 * 1000;
 
 /* =========================================================
    V210 VERIFIED BAGS.FM DISCOVERY
@@ -3065,6 +3076,16 @@ function newState() {
       externalRequestsAdded: 0
     },
 
+    bitqueryHolderTargetV228: {
+      address: null,
+      reason: null,
+      selectedAt: null,
+      analysisPriority: null,
+      symbol: null,
+      sourceVersion: "V228",
+      status: "NONE"
+    },
+
     launchHoodDiscoveryV220: {
       totalQueriesShared: 0,
       totalLaunchesSeen: 0,
@@ -3445,6 +3466,14 @@ async function readState(env) {
           rows: Array.isArray(parsed.bitqueryHolderEvidenceV227?.rows)
             ? parsed.bitqueryHolderEvidenceV227.rows.slice(0, BITQUERY_HOLDER_ROW_LIMIT_V227)
             : []
+        },
+
+        bitqueryHolderTargetV228: {
+          ...fresh.bitqueryHolderTargetV228,
+          ...(parsed.bitqueryHolderTargetV228 &&
+          typeof parsed.bitqueryHolderTargetV228 === "object"
+            ? parsed.bitqueryHolderTargetV228
+            : {})
         },
 
         launchHoodDiscoveryV220: {
@@ -35623,6 +35652,64 @@ for (
     newTokens.add(launchToken);
   }
 
+  /*
+   * V228: V227 could only target a candidate that already existed before this
+   * shared Bitquery request. Persist the best unresolved holder candidate from
+   * the previous scan and consume it here on the next existing request.
+   */
+  const persistedBitqueryHolderTargetV228 =
+    state.bitqueryHolderTargetV228 &&
+    typeof state.bitqueryHolderTargetV228 === "object"
+      ? state.bitqueryHolderTargetV228
+      : null;
+
+  const persistedBitqueryHolderTargetAddressV228 =
+    isAddress(persistedBitqueryHolderTargetV228?.address)
+      ? normalize(persistedBitqueryHolderTargetV228.address)
+      : null;
+
+  const persistedBitqueryHolderTargetAgeV228 =
+    persistedBitqueryHolderTargetAddressV228 &&
+    safeNumber(persistedBitqueryHolderTargetV228?.selectedAt)
+      ? Date.now() - safeNumber(persistedBitqueryHolderTargetV228.selectedAt)
+      : null;
+
+  const persistedBitqueryHolderWatchedV228 =
+    persistedBitqueryHolderTargetAddressV228
+      ? state.watchedTokens.find(
+          row => normalize(row?.address) === persistedBitqueryHolderTargetAddressV228
+        ) || null
+      : null;
+
+  const persistedBitqueryEvidenceAlreadyFreshV228 =
+    persistedBitqueryHolderTargetAddressV228 &&
+    state.bitqueryHolderEvidenceV227?.verified === true &&
+    normalize(state.bitqueryHolderEvidenceV227?.address) ===
+      persistedBitqueryHolderTargetAddressV228 &&
+    safeNumber(state.bitqueryHolderEvidenceV227?.fetchedAt) > 0 &&
+    Date.now() - safeNumber(state.bitqueryHolderEvidenceV227.fetchedAt) <=
+      BITQUERY_HOLDER_EVIDENCE_MAX_AGE_MS_V227;
+
+  const persistedBitqueryHolderTargetEligibleV228 = Boolean(
+    persistedBitqueryHolderTargetAddressV228 &&
+    persistedBitqueryHolderWatchedV228 &&
+    persistedBitqueryHolderTargetAgeV228 !== null &&
+    persistedBitqueryHolderTargetAgeV228 <= BITQUERY_HOLDER_TARGET_MAX_AGE_MS_V228 &&
+    !persistedBitqueryEvidenceAlreadyFreshV228 &&
+    !preMarketExcludedToken(persistedBitqueryHolderWatchedV228).excluded &&
+    !terminalPriorityRejectFromWatched(persistedBitqueryHolderWatchedV228).terminal &&
+    persistedBitqueryHolderWatchedV228?.launchpadV215?.verified !== true
+  );
+
+  if (persistedBitqueryHolderTargetAddressV228 && !persistedBitqueryHolderTargetEligibleV228) {
+    state.bitqueryHolderTargetV228 = {
+      ...newState().bitqueryHolderTargetV228,
+      status: persistedBitqueryEvidenceAlreadyFreshV228
+        ? "CLEARED_MATCHING_FRESH_EVIDENCE"
+        : "CLEARED_STALE_OR_INELIGIBLE"
+    };
+  }
+
   const persistedHolderTargetAddressV227 = completionCandidateAddress(state);
   const liveHolderTargetRowV227 = state.watchedTokens
     .filter(row => {
@@ -35636,11 +35723,16 @@ for (
       watchPriority(b, newTokens, liveTokens) - watchPriority(a, newTokens, liveTokens)
     )[0] || null;
 
-  const bitqueryHolderTargetV227 = isAddress(persistedHolderTargetAddressV227)
-    ? {address: persistedHolderTargetAddressV227, reason: "PERSISTED_PRIORITY_COMPLETION_V227"}
-    : isAddress(liveHolderTargetRowV227?.address)
-      ? {address: normalize(liveHolderTargetRowV227.address), reason: "HIGHEST_PRIORITY_CURRENT_LIVE_OR_NEW_V227"}
-      : null;
+  const bitqueryHolderTargetV227 = persistedBitqueryHolderTargetEligibleV228
+    ? {
+        address: persistedBitqueryHolderTargetAddressV228,
+        reason: "PERSISTED_UNRESOLVED_HOLDER_TARGET_V228"
+      }
+    : isAddress(persistedHolderTargetAddressV227)
+      ? {address: persistedHolderTargetAddressV227, reason: "PERSISTED_PRIORITY_COMPLETION_V227"}
+      : isAddress(liveHolderTargetRowV227?.address)
+        ? {address: normalize(liveHolderTargetRowV227.address), reason: "HIGHEST_PRIORITY_CURRENT_LIVE_OR_NEW_V227"}
+        : null;
 
   const bagsDiscoveryV210 =
     await discoverVerifiedBagsLaunchesV210(
@@ -40309,6 +40401,61 @@ for (
     }
   }
 
+  /*
+   * V228 next-scan holder-target handoff. Selection happens AFTER candidate
+   * analysis, which is exactly the timing gap V227 could not bridge. Only a
+   * viable non-Pons candidate still missing verified concentration is queued.
+   * The address is consumed by the next scan's already-existing Bitquery call.
+   */
+  const bitqueryHolderTargetCandidatesV228 = candidates
+    .filter(candidate => {
+      const address = normalize(candidate?.address);
+      if (!isAddress(address) || address === ZERO) return false;
+      if (candidate?.validERC20 !== true) return false;
+      if (candidate?.excludedReason) return false;
+      if (candidate?.holders?.concentrationVerified === true &&
+          candidate?.holders?.integrity?.verified === true) return false;
+      if (terminalPriorityReject(candidate)?.terminal === true) return false;
+      const watched = state.watchedTokens.find(row => normalize(row?.address) === address) || null;
+      if (!watched) return false;
+      if (watched?.launchpadV215?.verified === true) return false;
+      return true;
+    })
+    .slice()
+    .sort((a, b) => analysisPriority(b) - analysisPriority(a));
+
+  const nextBitqueryHolderTargetV228 = bitqueryHolderTargetCandidatesV228[0] || null;
+
+  if (nextBitqueryHolderTargetV228) {
+    const nextAddressV228 = normalize(nextBitqueryHolderTargetV228.address);
+    const matchingEvidenceFreshV228 =
+      state.bitqueryHolderEvidenceV227?.verified === true &&
+      normalize(state.bitqueryHolderEvidenceV227?.address) === nextAddressV228 &&
+      safeNumber(state.bitqueryHolderEvidenceV227?.fetchedAt) > 0 &&
+      Date.now() - safeNumber(state.bitqueryHolderEvidenceV227.fetchedAt) <=
+        BITQUERY_HOLDER_EVIDENCE_MAX_AGE_MS_V227;
+
+    state.bitqueryHolderTargetV228 = matchingEvidenceFreshV228
+      ? {
+          ...newState().bitqueryHolderTargetV228,
+          status: "NOT_QUEUED_MATCHING_FRESH_EVIDENCE"
+        }
+      : {
+          address: nextAddressV228,
+          reason: "POST_ANALYSIS_MISSING_VERIFIED_HOLDER_CONCENTRATION",
+          selectedAt: Date.now(),
+          analysisPriority: analysisPriority(nextBitqueryHolderTargetV228),
+          symbol: nextBitqueryHolderTargetV228?.symbol || null,
+          sourceVersion: "V228",
+          status: "QUEUED_FOR_NEXT_SHARED_BITQUERY_REQUEST"
+        };
+  } else if (!persistedBitqueryHolderTargetEligibleV228) {
+    state.bitqueryHolderTargetV228 = {
+      ...newState().bitqueryHolderTargetV228,
+      status: "NO_ELIGIBLE_UNRESOLVED_HOLDER_TARGET"
+    };
+  }
+
   const save =
     await writeState(
       env,
@@ -40660,6 +40807,22 @@ for (
 
     bagsVerifiedDiscoveryV210:
       bagsDiscoveryV210,
+
+    bitqueryHolderTargetHandoffV228: {
+      enabled: true,
+      persistedTargetAtRequestStart: persistedBitqueryHolderTargetAddressV228 || null,
+      persistedTargetEligibleAtRequestStart: persistedBitqueryHolderTargetEligibleV228,
+      targetActuallySentToSharedRequest: bitqueryHolderTargetV227?.address || null,
+      targetReasonSentToSharedRequest: bitqueryHolderTargetV227?.reason || null,
+      nextQueuedTarget: state.bitqueryHolderTargetV228?.address || null,
+      nextQueuedSymbol: state.bitqueryHolderTargetV228?.symbol || null,
+      nextQueuedReason: state.bitqueryHolderTargetV228?.reason || null,
+      nextQueuedStatus: state.bitqueryHolderTargetV228?.status || "NONE",
+      nextQueuedAnalysisPriority: state.bitqueryHolderTargetV228?.analysisPriority ?? null,
+      maxPersistAgeMs: BITQUERY_HOLDER_TARGET_MAX_AGE_MS_V228,
+      ponsV2ExcludedUntilDynamicInfrastructureReconciled: true,
+      externalRequestsAdded: 0
+    },
 
     bitqueryHolderEvidenceV227: {
       enabled: true,
