@@ -1,5 +1,10 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V248:
+ * - FIX: historical indexed backlog uses authenticated Blockscout PRO JSON-RPC eth_getLogs when configured
+ * - FIX: PRO backlog is no longer blocked by the stale legacy Blockscout backlog cooldown
+ * - FIX: Blockscout PRO backlog 429s feed the shared V247 provider cooldown/governor
+ * - Preserves V247 verified holder count, holder concentration, V246 safe serialization and RPC fallback safety
  * V247:
  * - FIX: verified Blockscout PRO token-counters fallback for holder count when public counters are unavailable
  * - FIX: PRO HTTP-429 cooldown uses Retry-After / X-RateLimit-Reset when supplied
@@ -981,7 +986,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V247";
+const VERSION = "V248";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -11218,6 +11223,477 @@ function normalizeBlockscoutBacklogLogV244(row) {
   };
 }
 
+/*
+ * V248 BLOCKSCOUT INDEXED BACKLOG PROVIDER
+ *
+ * The original V244 path used the public per-instance Etherscan-compatible
+ * logs API. That endpoint can remain in a persisted 429 cooldown even though
+ * this Worker has a configured Blockscout PRO key.
+ *
+ * V248 prefers the documented authenticated PRO JSON-RPC eth_getLogs route.
+ * The old public route remains a no-key fallback only.
+ */
+function blockscoutProBacklogConfiguredV248(env) {
+  return Boolean(
+    String(
+      env?.BLOCKSCOUT_PRO_API_KEY ||
+      ""
+    ).trim()
+  );
+}
+
+function blockscoutProCoolingV248(state) {
+  const service =
+    blockscoutProServiceV145(
+      state
+    );
+
+  const until =
+    safeNumber(
+      service.cooldownUntil
+    ) || 0;
+
+  return until >
+    Date.now();
+}
+
+function blockscoutIndexedBacklogProviderV248(
+  env,
+  state
+) {
+  const proConfigured =
+    blockscoutProBacklogConfiguredV248(
+      env
+    );
+
+  if (proConfigured) {
+    return {
+      mode:
+        "BLOCKSCOUT_PRO_JSON_RPC_V248",
+      configured:
+        true,
+      cooling:
+        blockscoutProCoolingV248(
+          state
+        ),
+      cooldownUntil:
+        safeNumber(
+          blockscoutProServiceV145(
+            state
+          ).cooldownUntil
+        ) || null
+    };
+  }
+
+  return {
+    mode:
+      "BLOCKSCOUT_LEGACY_LOGS_V244",
+    configured:
+      false,
+    cooling:
+      blockscoutBacklogCoolingV244(
+        state
+      ),
+    cooldownUntil:
+      safeNumber(
+        blockscoutBacklogServiceV244(
+          state
+        ).cooldownUntil
+      ) || null
+  };
+}
+
+async function fetchBlockscoutBacklogTopicV248(
+  env,
+  state,
+  budget,
+  fromBlock,
+  toBlock,
+  topic0,
+  address = null
+) {
+  const provider =
+    blockscoutIndexedBacklogProviderV248(
+      env,
+      state
+    );
+
+  /*
+   * No PRO key: preserve the proven V244 public implementation unchanged.
+   */
+  if (
+    provider.mode ===
+      "BLOCKSCOUT_LEGACY_LOGS_V244"
+  ) {
+    const legacy =
+      await fetchBlockscoutBacklogTopicV244(
+        state,
+        budget,
+        fromBlock,
+        toBlock,
+        topic0,
+        address
+      );
+
+    return {
+      ...legacy,
+      provider:
+        "BLOCKSCOUT_LEGACY_LOGS_V244"
+    };
+  }
+
+  const base = {
+    attempted: false,
+    success: false,
+    rows: [],
+    saturated: false,
+    httpStatus: null,
+    error: null,
+    provider:
+      "BLOCKSCOUT_PRO_JSON_RPC_V248",
+    rateLimitRemaining:
+      null,
+    rateLimitReset:
+      null
+  };
+
+  if (provider.cooling) {
+    return {
+      ...base,
+      error:
+        "BLOCKSCOUT_PRO_COOLDOWN_V248",
+      cooldownUntil:
+        provider.cooldownUntil
+    };
+  }
+
+  if (
+    !consumeBudget(
+      budget,
+      "discovery-backlog",
+      "BLOCKSCOUT_PRO_INDEXED_BACKLOG_V248"
+    )
+  ) {
+    return {
+      ...base,
+      error:
+        "DISCOVERY_BACKLOG_BUDGET_PROTECTED"
+    };
+  }
+
+  /*
+   * Keep the existing 220 ms spacing. Blockscout Free PRO documents 5 RPS;
+   * 220 ms is deliberately slightly slower than that ceiling.
+   */
+  await blockscoutBacklogSpacingV244(
+    state
+  );
+
+  const backlogService =
+    blockscoutBacklogServiceV244(
+      state
+    );
+
+  const proService =
+    blockscoutProServiceV145(
+      state
+    );
+
+  backlogService.totalRequests =
+    safeNumber(
+      backlogService.totalRequests
+    ) + 1;
+
+  backlogService.lastRequestAt =
+    Date.now();
+
+  backlogService.lastStatus =
+    "PRO_REQUESTING_V248";
+
+  proService.totalRequests =
+    safeNumber(
+      proService.totalRequests
+    ) + 1;
+
+  proService.lastRequestAtV248 =
+    Date.now();
+
+  const apiKey =
+    String(
+      env?.BLOCKSCOUT_PRO_API_KEY ||
+      ""
+    ).trim();
+
+  const filter = {
+    fromBlock:
+      `0x${BigInt(fromBlock).toString(16)}`,
+    toBlock:
+      `0x${BigInt(toBlock).toString(16)}`,
+    topics: [
+      topic0
+    ]
+  };
+
+  if (address) {
+    filter.address =
+      address;
+  }
+
+  try {
+    const response =
+      await fetch(
+        `${BLOCKSCOUT_PRO}/${BLOCKSCOUT_PRO_CHAIN_ID}/json-rpc`,
+        {
+          method:
+            "POST",
+          headers: {
+            accept:
+              "application/json",
+            "content-type":
+              "application/json",
+            authorization:
+              `Bearer ${apiKey}`
+          },
+          body:
+            JSON.stringify({
+              id:
+                248,
+              jsonrpc:
+                "2.0",
+              method:
+                "eth_getLogs",
+              params: [
+                filter
+              ]
+            })
+        }
+      );
+
+    const remainingHeader =
+      response.headers.get(
+        "x-ratelimit-remaining"
+      );
+
+    const resetHeader =
+      response.headers.get(
+        "x-ratelimit-reset"
+      );
+
+    const rateLimitRemaining =
+      remainingHeader !== null &&
+      Number.isFinite(
+        Number(
+          remainingHeader
+        )
+      )
+        ? Number(
+            remainingHeader
+          )
+        : null;
+
+    if (
+      response.status ===
+      429
+    ) {
+      backlogService.total429s =
+        safeNumber(
+          backlogService.total429s
+        ) + 1;
+
+      const resetAt =
+        registerBlockscoutPro429V247(
+          state,
+          response
+        );
+
+      backlogService.cooldownUntil =
+        resetAt;
+
+      backlogService.lastStatus =
+        "PRO_HTTP_429_V248";
+
+      return {
+        ...base,
+        attempted:
+          true,
+        httpStatus:
+          429,
+        rateLimitRemaining,
+        rateLimitReset:
+          resetHeader ||
+          null,
+        cooldownUntil:
+          resetAt,
+        error:
+          "BLOCKSCOUT_PRO_HTTP_429_V248"
+      };
+    }
+
+    if (
+      !response.ok
+    ) {
+      backlogService.lastStatus =
+        `PRO_HTTP_${response.status}_V248`;
+
+      proService.lastStatus =
+        `BACKLOG_HTTP_${response.status}_V248`;
+
+      proService.lastFailureAt =
+        Date.now();
+
+      return {
+        ...base,
+        attempted:
+          true,
+        httpStatus:
+          response.status,
+        rateLimitRemaining,
+        rateLimitReset:
+          resetHeader ||
+          null,
+        error:
+          `BLOCKSCOUT_PRO_HTTP_${response.status}_V248`
+      };
+    }
+
+    let payload =
+      null;
+
+    try {
+      payload =
+        await response.json();
+    }
+    catch {
+      payload =
+        null;
+    }
+
+    if (
+      payload?.error
+    ) {
+      backlogService.lastStatus =
+        "PRO_JSON_RPC_ERROR_V248";
+
+      proService.lastStatus =
+        "BACKLOG_JSON_RPC_ERROR_V248";
+
+      proService.lastFailureAt =
+        Date.now();
+
+      return {
+        ...base,
+        attempted:
+          true,
+        httpStatus:
+          response.status,
+        rateLimitRemaining,
+        rateLimitReset:
+          resetHeader ||
+          null,
+        error:
+          `BLOCKSCOUT_PRO_JSON_RPC_ERROR_V248:${String(
+            payload?.error?.message ||
+            payload?.error?.code ||
+            "UNKNOWN"
+          )}`
+      };
+    }
+
+    const rawRows =
+      Array.isArray(
+        payload?.result
+      )
+        ? payload.result
+        : [];
+
+    const rows =
+      rawRows
+        .map(
+          normalizeBlockscoutBacklogLogV244
+        )
+        .filter(
+          Boolean
+        );
+
+    const saturated =
+      rawRows.length >=
+        V244_BLOCKSCOUT_LOG_LIMIT;
+
+    backlogService.lastStatus =
+      saturated
+        ? "PRO_SATURATED_V248"
+        : "PRO_SUCCESS_V248";
+
+    proService.lastStatus =
+      "BACKLOG_SUCCESS_V248";
+
+    proService.lastSuccessAt =
+      Date.now();
+
+    proService.consecutiveTransientFailures =
+      0;
+
+    /*
+     * Do not clear a future provider cooldown here. A successful request only
+     * proves this request worked; another feature may have established a valid
+     * Retry-After window.
+     */
+    if (
+      safeNumber(
+        proService.cooldownUntil
+      ) <=
+        Date.now()
+    ) {
+      proService.cooldownUntil =
+        null;
+    }
+
+    return {
+      ...base,
+      attempted:
+        true,
+      success:
+        true,
+      rows,
+      saturated,
+      httpStatus:
+        response.status,
+      normalizationFailures:
+        Math.max(
+          0,
+          rawRows.length -
+            rows.length
+        ),
+      rateLimitRemaining,
+      rateLimitReset:
+        resetHeader ||
+        null
+    };
+  }
+
+  catch (error) {
+    backlogService.lastStatus =
+      "PRO_FETCH_ERROR_V248";
+
+    proService.lastStatus =
+      "BACKLOG_FETCH_ERROR_V248";
+
+    proService.lastFailureAt =
+      Date.now();
+
+    return {
+      ...base,
+      attempted:
+        true,
+      error:
+        errorString(
+          error
+        )
+    };
+  }
+}
+
+
 async function fetchBlockscoutBacklogTopicV244(
   state,
   budget,
@@ -11391,7 +11867,15 @@ async function scanBacklogBlockscoutIndexedV244(
   let error = null;
   const rangeHistory = [];
 
-  if (blockscoutBacklogCoolingV244(state)) {
+  const indexedProviderV248 =
+    blockscoutIndexedBacklogProviderV248(
+      env,
+      state
+    );
+
+  if (
+    indexedProviderV248.cooling
+  ) {
     return {
       success: false,
       complete: false,
@@ -11404,7 +11888,13 @@ async function scanBacklogBlockscoutIndexedV244(
       subdivisions: 0,
       rangeHistory,
       durationMs: Date.now() - startedAt,
-      error: "BLOCKSCOUT_BACKLOG_COOLDOWN_V244"
+      providerV248:
+        indexedProviderV248,
+      error:
+        indexedProviderV248.mode ===
+          "BLOCKSCOUT_PRO_JSON_RPC_V248"
+          ? "BLOCKSCOUT_PRO_COOLDOWN_V248"
+          : "BLOCKSCOUT_BACKLOG_COOLDOWN_V244"
     };
   }
 
@@ -11461,7 +11951,8 @@ async function scanBacklogBlockscoutIndexedV244(
           break;
         }
 
-        const result = await fetchBlockscoutBacklogTopicV244(
+        const result = await fetchBlockscoutBacklogTopicV248(
+          env,
           state,
           budget,
           Number(cursor),
@@ -11484,7 +11975,16 @@ async function scanBacklogBlockscoutIndexedV244(
           error: result.error,
           normalizationFailures:
             safeNumber(result.normalizationFailures),
-          requestsUsed: thisRequests
+          requestsUsed: thisRequests,
+          providerV248:
+            result.provider ||
+            null,
+          rateLimitRemainingV248:
+            result.rateLimitRemaining ??
+            null,
+          rateLimitResetV248:
+            result.rateLimitReset ??
+            null
         });
 
         if (!result.success) {
@@ -11601,6 +12101,39 @@ async function scanBacklogBlockscoutIndexedV244(
     subdivisions,
     rangeHistory: rangeHistory.slice(-20),
     durationMs: Date.now() - startedAt,
+    providerV248:
+      blockscoutIndexedBacklogProviderV248(
+        env,
+        state
+      ),
+    proJsonRpcBacklogV248: {
+      enabled:
+        blockscoutProBacklogConfiguredV248(
+          env
+        ),
+      endpoint:
+        blockscoutProBacklogConfiguredV248(
+          env
+        )
+          ? `${BLOCKSCOUT_PRO}/${BLOCKSCOUT_PRO_CHAIN_ID}/json-rpc`
+          : null,
+      method:
+        blockscoutProBacklogConfiguredV248(
+          env
+        )
+          ? "eth_getLogs"
+          : null,
+      bearerAuth:
+        blockscoutProBacklogConfiguredV248(
+          env
+        ),
+      thousandLogSaturationGuardPreserved:
+        true,
+      cursorAdvancesOnlyAfterAllThreeQueriesComplete:
+        true,
+      legacyPublicRouteOnlyWhenNoProKey:
+        true
+    },
     discoveryCoverage:
       "POOLMANAGER_INITIALIZE_PLUS_VERIFIED_POOLS_TRADE_LAUNCH_EVENTS",
     rawSwapHistoryIntentionallyNotRequiredForHistoricalDiscovery: true,
@@ -44447,7 +44980,7 @@ for (
                 ),
 
               strategy:
-                "V244_BLOCKSCOUT_INDEXED_WITH_RPC_FALLBACK",
+                "V248_BLOCKSCOUT_PRO_INDEXED_WITH_RPC_FALLBACK",
 
               indexedBacklogV244:
                 backlogResult
