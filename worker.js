@@ -1,10 +1,13 @@
 /**
  * Robinhood Chain Meme Hunter
- * V199
+ * V200
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V199
+ * CURRENT BUILD: V200
+ * - V200 normalizes Bitquery DEXPoolEvents native currency "0x" to canonical V4 ZERO
+ * - Normalization is restricted to the Bitquery PoolId-first identity boundary
+ * - Existing strict identity validation, registry persistence/replay, request budgets and V196 verified USD path are unchanged
  * - V192 adds strict native-ETH quote valuation without changing V191 resolution/replay
  * - Robinhood Chain native ETH (ZERO currency in Uniswap V4) is treated as 18-decimal ETH
  * - Native ETH uses the same canonical WETH/USDG on-chain reference via 1:1 ETH/WETH wrapping denomination
@@ -746,7 +749,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V199";
+const VERSION = "V200";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -4787,14 +4790,31 @@ async function getPoolIdentityBitqueryDexPoolEventsV199(
         ""
       );
 
+    // V200: Bitquery DEXPoolEvents uses "0x" for Robinhood native ETH.
+    // Normalize only this provider-specific representation to canonical
+    // Uniswap V4 native currency ZERO before the existing strict validation.
+    const normalizeBitqueryCurrencyV200 =
+      value => {
+        const raw =
+          String(value || "")
+            .trim()
+            .toLowerCase();
+
+        if (raw === "0x") {
+          return ZERO;
+        }
+
+        return normalize(raw);
+      };
+
     const currencyA =
-      normalize(
+      normalizeBitqueryCurrencyV200(
         row?.PoolEvent?.Pool
           ?.CurrencyA?.SmartContract
       );
 
     const currencyB =
-      normalize(
+      normalizeBitqueryCurrencyV200(
         row?.PoolEvent?.Pool
           ?.CurrencyB?.SmartContract
       );
