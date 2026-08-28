@@ -1,10 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V204
+ * V205
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V204
+ * CURRENT BUILD: V205
+ * - V205 wires zero-request pools.trade launch-event recognition into existing discovery batches
+ * - Only events from the verified V204 entry/factory/launchpad registry are accepted
+ * - V205 does NOT guess token-address ABI positions; observed launch logs are surfaced for verification first
+ * - Adds no external requests and preserves the 42-request ceiling
+ * - V196 verified USD, V200 native normalization, scoring, Telegram, KV and existing decoder are unchanged
  * - V204 adds verified pools.trade launch infrastructure as a positive-identification registry
  * - Tracks both active entry contracts and all four verified TokenLaunched emitters
  * - PoolManager activity alone is explicitly NOT treated as pools.trade proof
@@ -763,7 +768,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V204";
+const VERSION = "V205";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -889,6 +894,46 @@ const POOLS_TRADE_TOKEN_CREATED_TOPIC_V204 =
 
 const POOLS_TRADE_TOKEN_LAUNCHED_TOPIC_V204 =
   "0x3b3d2bafdcae274a232217e1f80ee4305d3af6aa25c8b14b1681bd68d18042a4";
+
+function poolsTradeEmitterV205(address) {
+  const a = normalize(address);
+  return (
+    POOLS_TRADE_ENTRY_CONTRACTS_V204.includes(a) ||
+    POOLS_TRADE_LAUNCHPADS_V204.includes(a) ||
+    a === POOLS_TRADE_TOKEN_FACTORY_V204
+  );
+}
+
+function recognizePoolsTradeLaunchLogsV205(logs) {
+  const recognized = [];
+
+  for (const log of logs || []) {
+    const emitter = normalize(log?.address);
+    const topic0 = normalize(log?.topics?.[0]);
+
+    if (!poolsTradeEmitterV205(emitter)) continue;
+
+    const event =
+      topic0 === POOLS_TRADE_TOKEN_CREATED_TOPIC_V204
+        ? "TokenCreated"
+        : topic0 === POOLS_TRADE_TOKEN_LAUNCHED_TOPIC_V204
+          ? "TokenLaunched"
+          : null;
+
+    if (!event) continue;
+
+    recognized.push({
+      event,
+      emitter,
+      blockNumber: log?.blockNumber || null,
+      transactionHash: normalize(log?.transactionHash) || null,
+      topicCount: Array.isArray(log?.topics) ? log.topics.length : 0,
+      source: "POOLS_TRADE_VERIFIED_EMITTER_V205"
+    });
+  }
+
+  return recognized;
+}
 
 const DEAD =
   "0x000000000000000000000000000000000000dead";
@@ -15132,9 +15177,24 @@ function processDiscoveryLogs(
     }
   }
 
+  const poolsTradeLaunchEventsV205 =
+    recognizePoolsTradeLaunchLogsV205(logs);
+
   return {
     rawLogs:
       logs.length,
+
+    poolsTradeLaunchEventsV205: {
+      enabled: true,
+      positiveEmitterVerification: true,
+      externalRequestsAdded: 0,
+      eventsSeen: poolsTradeLaunchEventsV205.length,
+      events: poolsTradeLaunchEventsV205.slice(0, 20),
+      tokenExtractionStatus:
+        poolsTradeLaunchEventsV205.length
+          ? "EVENT_SEEN_ABI_TOKEN_EXTRACTION_NOT_YET_ASSUMED"
+          : "NO_VERIFIED_LAUNCH_EVENT_IN_BATCH"
+    },
 
     initializeEvents,
 
