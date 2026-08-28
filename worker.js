@@ -1,10 +1,14 @@
 /**
  * Robinhood Chain Meme Hunter
- * V210
+ * V211
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V210
+ * CURRENT BUILD: V211
+ * - V211 gives newly verified pools.trade launch tokens immediate same-scan analysis priority
+ * - Newly verified launch PoolIds are carried directly into the live token priority set
+ * - Preserves V210 Bags discovery and the frozen verified BUY/SELL USD pipeline
+ * - Preserves KV history, Telegram protection and the 42-request hard ceiling
  * - V210 adds verified Bags.fm token discovery via Bitquery's documented factory mint-transfer pattern
  * - Bags tokens are source-labelled separately; bonding-curve trades are NOT passed into the Uniswap V4 decoder
  * - Uses the existing BITQUERY_ACCESS_TOKEN and existing request-budget protections
@@ -784,7 +788,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V210";
+const VERSION = "V211";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -31613,7 +31617,50 @@ async function scan(
       "LIVE"
     );
 
+  
+  /*
+   * V211: newly verified pools.trade launches must not wait behind ordinary
+   * watch/backlog ordering. The existing V208 recognizer has already
+   * validated emitter + event + PoolKey + token membership and registered
+   * the PoolId through registerPoolMapping(). We only promote already-
+   * verified launch outputs here; no inference and no extra external request.
+   */
+  const verifiedLaunchPriorityTokensV211 = new Set();
+  const verifiedLaunchPriorityPoolsV211 = new Set();
+
   for (
+    const launch
+    of (
+      liveDiscovery?.poolsTradeLaunchEventsV208?.events ||
+      liveDiscovery?.poolsTradeLaunchEventsV205?.events ||
+      []
+    )
+  ) {
+    if (!launch?.decodeVerified && launch?.verified !== true) {
+      continue;
+    }
+
+    const launchToken =
+      normalize(
+        launch?.token ||
+        launch?.tokenAddress
+      );
+
+    const launchPoolId =
+      normalize(
+        launch?.poolId
+      );
+
+    if (isAddress(launchToken)) {
+      verifiedLaunchPriorityTokensV211.add(launchToken);
+    }
+
+    if (/^0x[a-f0-9]{64}$/.test(launchPoolId)) {
+      verifiedLaunchPriorityPoolsV211.add(launchPoolId);
+    }
+  }
+
+for (
     const token
     of liveDiscovery.newTokens
   ) {
@@ -31629,6 +31676,64 @@ async function scan(
     liveTokens.add(
       token
     );
+  }
+
+
+  /*
+   * V211 fallback bridge: V209 persistent launch telemetry retains the
+   * latest verified pools.trade launch even when the compact per-batch
+   * telemetry does not expose a full events array. Only a launch observed
+   * in the current live block range is promoted from this fallback.
+   */
+  const liveFromV211 =
+    safeNumber(liveDiscovery?.fromBlock);
+  const liveToV211 =
+    safeNumber(liveDiscovery?.toBlock);
+
+  const recentPoolsTradeLaunchesV211 =
+    Array.isArray(
+      state?.poolsTradeLaunchTelemetryV209?.recentVerifiedLaunches
+    )
+      ? state.poolsTradeLaunchTelemetryV209.recentVerifiedLaunches
+      : [];
+
+  for (const launch of recentPoolsTradeLaunchesV211) {
+    const blockNumber =
+      safeNumber(launch?.blockNumber);
+
+    if (
+      !blockNumber ||
+      !liveFromV211 ||
+      !liveToV211 ||
+      blockNumber < liveFromV211 ||
+      blockNumber > liveToV211
+    ) {
+      continue;
+    }
+
+    const launchToken =
+      normalize(
+        launch?.token ||
+        launch?.tokenAddress
+      );
+
+    const launchPoolId =
+      normalize(launch?.poolId);
+
+    if (isAddress(launchToken)) {
+      verifiedLaunchPriorityTokensV211.add(launchToken);
+      liveTokens.add(launchToken);
+      newTokens.add(launchToken);
+    }
+
+    if (/^0x[a-f0-9]{64}$/.test(launchPoolId)) {
+      verifiedLaunchPriorityPoolsV211.add(launchPoolId);
+    }
+  }
+
+  for (const launchToken of verifiedLaunchPriorityTokensV211) {
+    liveTokens.add(launchToken);
+    newTokens.add(launchToken);
   }
 
   const bagsDiscoveryV210 =
@@ -36384,6 +36489,24 @@ async function scan(
 
     poolsTradeLaunchCumulativeV209:
       state.poolsTradeLaunchTelemetryV209,
+
+    verifiedLaunchPriorityV211: {
+      enabled: true,
+      sameScanPriority: true,
+      externalRequestsAdded: 0,
+      verifiedTokensPrioritized:
+        Array.from(verifiedLaunchPriorityTokensV211),
+      verifiedPoolIdsPrioritized:
+        Array.from(verifiedLaunchPriorityPoolsV211),
+      tokenCount:
+        verifiedLaunchPriorityTokensV211.size,
+      poolCount:
+        verifiedLaunchPriorityPoolsV211.size,
+      status:
+        verifiedLaunchPriorityTokensV211.size
+          ? "VERIFIED_LAUNCH_PROMOTED"
+          : "NO_CURRENT_LIVE_VERIFIED_LAUNCH"
+    },
 
     bagsVerifiedDiscoveryV210:
       bagsDiscoveryV210,
