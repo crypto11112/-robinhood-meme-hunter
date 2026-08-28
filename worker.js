@@ -4,7 +4,9 @@
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V220
+ * CURRENT BUILD: V220 CORRECTED
+ * - FIX: removed discovery-result variables accidentally inserted into readState() migration scope
+ * - FIX: KV migration now reads only persisted LaunchHood state and cannot fail on function-local discovery variables
  * - V220 adds verified LaunchHood launch discovery using Bitquery's documented zero-address 1B mint pattern
  * - Exact LaunchHood factory Transaction.To verification: 0x62b33a039d289cbda50ebeb72fe4261449e61bcf
  * - Shares the existing Bags/Flap launch-transfer GraphQL request, adding zero external requests versus V219
@@ -3207,15 +3209,6 @@ async function readState(env) {
               ? parsed.launchHoodDiscoveryV220.recentVerifiedLaunches.slice(-25)
               : []
         },
-
-        launchHoodLaunchesSeenV220:
-        launchHoodLaunchesV220.length,
-      launchHoodNewlyObservedV220,
-      launchHoodVerifiedTokensAddedV220,
-      launchHoodLaunchesV220:
-        launchHoodLaunchesV220.slice(0, 10),
-      launchHoodStatusV220:
-        launchHoodTelemetryV220.lastStatus,
 
       ponsCurveTradesV216: {
           ...fresh.ponsCurveTradesV216,
