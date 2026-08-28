@@ -1,10 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V212
+ * V213
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V212
+ * CURRENT BUILD: V213
+ * - V213 adds zero-request Telegram verified-USD observability
+ * - Per candidate exposes exact token match, verified PoolIds, verified record counts by window, and render eligibility
+ * - Adds explicit reason when Telegram verified-dollar section is not included
+ * - Does not change V212 Telegram wiring or the frozen verified BUY/SELL USD calculation
+ * - Preserves V211 launch priority, V210 Bags discovery, KV state, Telegram protection and 42-request ceiling
  * - V212 wires each candidate's existing verified on-chain V4 USD ledger into Telegram
  * - Adds VERIFIED OBSERVED on-chain BUY/SELL USD so partial scanner coverage is never misrepresented as a full market window
  * - Candidate matching is exact by token address; records retain their already-verified PoolId identity
@@ -793,7 +798,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V212";
+const VERSION = "V213";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -29484,6 +29489,128 @@ function applyCandidateVerifiedOnChainFlowV212(
 }
 
 
+
+function telegramVerifiedUsdDiagnosticV213(
+  candidate
+) {
+  const token =
+    normalize(candidate?.address);
+
+  const flow =
+    candidate?.onChainVerifiedFlowV212;
+
+  const windows = [
+    ["m5", "5m"],
+    ["m15", "15m"],
+    ["h1", "1h"],
+    ["h6", "6h"],
+    ["h24", "24h"]
+  ];
+
+  const perWindow = {};
+
+  for (const [key, label] of windows) {
+    const row =
+      flow?.windows?.[key];
+
+    perWindow[key] = {
+      label,
+      verified:
+        row?.verified === true,
+      observedTrades:
+        safeNumber(
+          row?.observedTrades
+        ),
+      buys:
+        safeNumber(row?.buys),
+      sells:
+        safeNumber(row?.sells),
+      buyVolumeUsd:
+        Number.isFinite(
+          Number(row?.buyVolumeUsd)
+        )
+          ? Number(row.buyVolumeUsd)
+          : null,
+      sellVolumeUsd:
+        Number.isFinite(
+          Number(row?.sellVolumeUsd)
+        )
+          ? Number(row.sellVolumeUsd)
+          : null,
+      netFlowUsd:
+        Number.isFinite(
+          Number(row?.netFlowUsd)
+        )
+          ? Number(row.netFlowUsd)
+          : null,
+      buyPressureUsd:
+        Number.isFinite(
+          Number(row?.buyPressureUsd)
+        )
+          ? Number(row.buyPressureUsd)
+          : null,
+      fullMarketCoverageVerified:
+        row?.fullMarketCoverageVerified === true
+    };
+  }
+
+  const verifiedWindows =
+    Object.entries(perWindow)
+      .filter(([, row]) => row.verified)
+      .map(([key]) => key);
+
+  const eligible =
+    flow?.verified === true &&
+    verifiedWindows.length > 0;
+
+  let reason = null;
+
+  if (!isAddress(token)) {
+    reason =
+      "INVALID_CANDIDATE_ADDRESS";
+  } else if (!flow) {
+    reason =
+      "V212_FLOW_NOT_ATTACHED_TO_CANDIDATE";
+  } else if (flow.verified !== true) {
+    reason =
+      "NO_CANDIDATE_MATCHED_VERIFIED_ONCHAIN_USD";
+  } else if (!verifiedWindows.length) {
+    reason =
+      "NO_VERIFIED_WINDOWS_AVAILABLE";
+  }
+
+  return {
+    enabled: true,
+    candidateAddress:
+      token || null,
+    exactTokenMatch:
+      isAddress(token) &&
+      normalize(flow?.tokenAddress) === token,
+    matchedPoolIds:
+      Array.isArray(flow?.poolIds)
+        ? flow.poolIds
+        : [],
+    totalVerifiedRecords:
+      safeNumber(
+        flow?.recordCount
+      ),
+    verifiedWindows,
+    windows:
+      perWindow,
+    telegramVerifiedUsdSectionEligible:
+      eligible,
+    telegramVerifiedUsdSectionReason:
+      eligible
+        ? "ELIGIBLE_AND_SHOULD_RENDER"
+        : reason,
+    interpretation:
+      "VERIFIED_OBSERVED_NOT_FULL_MARKET_WINDOW",
+    source:
+      flow?.source ||
+      "ONCHAIN_DIRECTIONAL_V179_CANDIDATE_MATCHED_V212"
+  };
+}
+
 /* =========================================================
    V88 RICH V77-STYLE TELEGRAM CALL
    ========================================================= */
@@ -29777,7 +29904,30 @@ function telegramMessage(
 
   const verifiedObservedLinesV212 = [];
 
-  if (verifiedObservedV212?.verified === true) {
+  const telegramVerifiedUsdDiagnosticV213 =
+    candidate?.telegramVerifiedUsdDiagnosticV213 ||
+    telegramVerifiedUsdDiagnosticV213(
+      candidate
+    );
+
+  const telegramVerifiedUsdWillRenderV213 =
+    verifiedObservedV212?.verified === true &&
+    telegramVerifiedUsdDiagnosticV213
+      ?.telegramVerifiedUsdSectionEligible === true;
+
+  telegramVerifiedUsdDiagnosticV213.telegramVerifiedUsdSectionRendered =
+    telegramVerifiedUsdWillRenderV213;
+
+  telegramVerifiedUsdDiagnosticV213.telegramVerifiedUsdRenderStatus =
+    telegramVerifiedUsdWillRenderV213
+      ? "RENDERED"
+      : (
+          telegramVerifiedUsdDiagnosticV213
+            ?.telegramVerifiedUsdSectionReason ||
+          "NOT_RENDERED"
+        );
+
+  if (telegramVerifiedUsdWillRenderV213) {
     verifiedObservedLinesV212.push(
       "",
       "✅ <b>Verified On-chain USD (observed by bot)</b>"
@@ -36086,6 +36236,11 @@ for (
         state
       );
 
+    candidate.telegramVerifiedUsdDiagnosticV213 =
+      telegramVerifiedUsdDiagnosticV213(
+        candidate
+      );
+
     if (verifiedFlowV212?.verified === true) {
       telegramVerifiedOnChainUsdV212.push({
         address:
@@ -36097,10 +36252,21 @@ for (
         poolIds:
           verifiedFlowV212.poolIds,
         windows:
-          verifiedFlowV212.windows
+          verifiedFlowV212.windows,
+        telegramDiagnosticV213:
+          candidate.telegramVerifiedUsdDiagnosticV213
       });
     }
   }
+
+  const telegramVerifiedUsdObservabilityV213 =
+    candidates.map(
+      candidate =>
+        candidate?.telegramVerifiedUsdDiagnosticV213 ||
+        telegramVerifiedUsdDiagnosticV213(
+          candidate
+        )
+    );
 
   const telegramQualificationDiagnostics =
     buildTelegramQualificationDiagnostics(
@@ -37922,6 +38088,12 @@ for (
     holderLookups,
 
     candidates,
+    telegramVerifiedUsdObservabilityV213: {
+      enabled: true,
+      externalRequestsAdded: 0,
+      verifiedUsdCalculationChanged: false,
+      candidates: telegramVerifiedUsdObservabilityV213
+    },
 
     qualifyingCandidates:
       candidates.filter(
