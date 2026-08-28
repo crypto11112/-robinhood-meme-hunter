@@ -4,7 +4,11 @@
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V207
+ * CURRENT BUILD: V208
+ * - V208 decodes verified pools.trade TokenCreated and TokenLaunched events from existing discovery logs
+ * - TokenLaunched validates PoolId + token + five-word PoolKey before registry/watchlist insertion
+ * - Verified launch candidates now feed the existing analysis pipeline with zero extra requests
+ * - /scan now exposes poolsTradeLaunchEventsV208 telemetry
  * - V207 expands the EXISTING generic discovery eth_getLogs address filter to PoolManager + verified pools.trade emitters
  * - No additional RPC call is added; request ceiling remains 42
  * - Targeted PoolManager Initialize resolvers remain PoolManager-only
@@ -772,7 +776,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V207";
+const VERSION = "V208";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -908,37 +912,159 @@ function poolsTradeEmitterV205(address) {
   );
 }
 
-function recognizePoolsTradeLaunchLogsV205(logs) {
-  const recognized = [];
-
-  for (const log of logs || []) {
-    const emitter = normalize(log?.address);
-    const topic0 = normalize(log?.topics?.[0]);
-
-    if (!poolsTradeEmitterV205(emitter)) continue;
-
-    const event =
-      topic0 === POOLS_TRADE_TOKEN_CREATED_TOPIC_V204
-        ? "TokenCreated"
-        : topic0 === POOLS_TRADE_TOKEN_LAUNCHED_TOPIC_V204
-          ? "TokenLaunched"
-          : null;
-
-    if (!event) continue;
-
-    recognized.push({
-      event,
-      emitter,
-      blockNumber: log?.blockNumber || null,
-      transactionHash: normalize(log?.transactionHash) || null,
-      topicCount: Array.isArray(log?.topics) ? log.topics.length : 0,
-      source: "POOLS_TRADE_VERIFIED_EMITTER_V205"
-    });
-  }
-
-  return recognized;
+function abiWordAddressV208(word) {
+  const raw = String(word || "").replace(/^0x/i, "").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(raw)) return null;
+  const address = "0x" + raw.slice(24);
+  return isAddress(address) ? normalize(address) : null;
 }
 
+function abiDataWordsV208(data) {
+  const raw = String(data || "").replace(/^0x/i, "").toLowerCase();
+  if (!raw || raw.length % 64 !== 0 || !/^[0-9a-f]+$/.test(raw)) return [];
+  const words = [];
+  for (let i = 0; i < raw.length; i += 64) words.push(raw.slice(i, i + 64));
+  return words;
+}
+
+function signedInt24WordV208(word) {
+  try {
+    const raw = BigInt("0x" + String(word || ""));
+    const v = Number(raw & 0xffffffn);
+    return v >= 0x800000 ? v - 0x1000000 : v;
+  } catch {
+    return null;
+  }
+}
+
+function decodePoolsTradeLaunchLogV208(log) {
+  const emitter = normalize(log?.address);
+  const topic0 = normalize(log?.topics?.[0]);
+  const topics = Array.isArray(log?.topics) ? log.topics.map(normalize) : [];
+
+  if (!poolsTradeEmitterV205(emitter)) return null;
+
+  if (
+    POOLS_TRADE_ENTRY_CONTRACTS_V204.includes(emitter) &&
+    topic0 === POOLS_TRADE_TOKEN_CREATED_TOPIC_V204
+  ) {
+    /*
+     * TokenCreated(address): accept the token only if it can be decoded
+     * unambiguously from one ABI address word, whether the deployed ABI
+     * places it in topic1 or data.
+     */
+    const candidates = [];
+    if (topics[1]) {
+      const a = abiWordAddressV208(topics[1]);
+      if (a) candidates.push(a);
+    }
+    for (const word of abiDataWordsV208(log?.data)) {
+      const a = abiWordAddressV208(word);
+      if (a) candidates.push(a);
+    }
+    const unique = [...new Set(candidates)].filter(a => a !== ZERO);
+    return {
+      event: "TokenCreated",
+      verifiedEmitter: true,
+      token: unique.length === 1 ? unique[0] : null,
+      decodeVerified: unique.length === 1,
+      decodeReason: unique.length === 1
+        ? "UNAMBIGUOUS_TOKEN_CREATED_ADDRESS"
+        : "TOKEN_CREATED_ADDRESS_NOT_UNAMBIGUOUS",
+      emitter,
+      blockNumber: log?.blockNumber || null,
+      transactionHash: normalize(log?.transactionHash) || null
+    };
+  }
+
+  if (
+    POOLS_TRADE_LAUNCHPADS_V204.includes(emitter) &&
+    topic0 === POOLS_TRADE_TOKEN_LAUNCHED_TOPIC_V204
+  ) {
+    /*
+     * Verified pools.trade ABI:
+     * TokenLaunched(bytes32,address,address,(address,address,uint24,int24,address))
+     * poolId/token/finalPositionRecipient are indexed; LogHeader.Data is the
+     * five-word PoolKey: currency0,currency1,fee,tickSpacing,hooks.
+     */
+    const words = abiDataWordsV208(log?.data);
+    const poolId = topics[1] && /^0x[0-9a-f]{64}$/.test(topics[1])
+      ? topics[1]
+      : null;
+    const token = topics[2] ? abiWordAddressV208(topics[2]) : null;
+    const finalPositionRecipient = topics[3]
+      ? abiWordAddressV208(topics[3])
+      : null;
+
+    if (words.length !== 5) {
+      return {
+        event: "TokenLaunched",
+        verifiedEmitter: true,
+        decodeVerified: false,
+        decodeReason: "POOLKEY_DATA_WORD_COUNT_NOT_5",
+        poolId,
+        token,
+        emitter,
+        dataWordCount: words.length,
+        blockNumber: log?.blockNumber || null,
+        transactionHash: normalize(log?.transactionHash) || null
+      };
+    }
+
+    const currency0 = abiWordAddressV208(words[0]);
+    const currency1 = abiWordAddressV208(words[1]);
+    let fee = null;
+    try { fee = Number(BigInt("0x" + words[2])); } catch {}
+    const tickSpacing = signedInt24WordV208(words[3]);
+    const hooks = abiWordAddressV208(words[4]);
+
+    const tokenMatchesPoolKey =
+      token && (token === currency0 || token === currency1);
+
+    const valid =
+      Boolean(
+        poolId &&
+        token &&
+        currency0 &&
+        currency1 &&
+        Number.isInteger(fee) &&
+        fee >= 0 &&
+        fee <= 0xffffff &&
+        Number.isInteger(tickSpacing) &&
+        hooks &&
+        tokenMatchesPoolKey
+      );
+
+    return {
+      event: "TokenLaunched",
+      verifiedEmitter: true,
+      decodeVerified: valid,
+      decodeReason: valid
+        ? "VERIFIED_POOLS_TRADE_TOKEN_LAUNCHED_POOLKEY"
+        : "TOKEN_LAUNCHED_VALIDATION_FAILED",
+      poolId,
+      token,
+      finalPositionRecipient,
+      currency0,
+      currency1,
+      fee,
+      tickSpacing,
+      hooks,
+      tokenMatchesPoolKey,
+      emitter,
+      blockNumber: log?.blockNumber || null,
+      transactionHash: normalize(log?.transactionHash) || null
+    };
+  }
+
+  return null;
+}
+
+function recognizePoolsTradeLaunchLogsV205(logs) {
+  return (logs || [])
+    .map(decodePoolsTradeLaunchLogV208)
+    .filter(Boolean);
+}
 const DEAD =
   "0x000000000000000000000000000000000000dead";
 
@@ -15212,6 +15338,59 @@ function processDiscoveryLogs(
   const poolsTradeLaunchEventsV205 =
     recognizePoolsTradeLaunchLogsV205(logs);
 
+  let poolsTradeVerifiedTokensAddedV208 = 0;
+  let poolsTradeVerifiedPoolsRegisteredV208 = 0;
+
+  for (const event of poolsTradeLaunchEventsV205) {
+    if (event?.decodeVerified !== true || !isAddress(event?.token)) continue;
+
+    if (event.event === "TokenLaunched") {
+      const pool = {
+        poolId: event.poolId,
+        currency0: event.currency0,
+        currency1: event.currency1,
+        blockNumber: event.blockNumber,
+        transactionHash: event.transactionHash,
+        source: "POOLS_TRADE_TOKEN_LAUNCHED_V208",
+        poolsTradeVerifiedV208: true
+      };
+
+      const registration = registerPoolMapping(state, pool);
+      if (registration?.registered === true) {
+        poolsTradeVerifiedPoolsRegisteredV208++;
+      }
+
+      const watched = addWatch(
+        state,
+        event.token,
+        pool,
+        source === "LIVE"
+          ? "LIVE_POOLS_TRADE_VERIFIED_V208"
+          : "BACKLOG_POOLS_TRADE_VERIFIED_V208"
+      );
+
+      if (watched?.token) seenTokens.add(normalize(event.token));
+      if (watched?.added) {
+        newTokens.add(normalize(event.token));
+        poolsTradeVerifiedTokensAddedV208++;
+      }
+    } else if (event.event === "TokenCreated") {
+      const watched = addWatch(
+        state,
+        event.token,
+        null,
+        source === "LIVE"
+          ? "LIVE_POOLS_TRADE_TOKEN_CREATED_V208"
+          : "BACKLOG_POOLS_TRADE_TOKEN_CREATED_V208"
+      );
+      if (watched?.token) seenTokens.add(normalize(event.token));
+      if (watched?.added) {
+        newTokens.add(normalize(event.token));
+        poolsTradeVerifiedTokensAddedV208++;
+      }
+    }
+  }
+
   return {
     rawLogs:
       logs.length,
@@ -15221,11 +15400,19 @@ function processDiscoveryLogs(
       positiveEmitterVerification: true,
       externalRequestsAdded: 0,
       eventsSeen: poolsTradeLaunchEventsV205.length,
+      decodedVerified:
+        poolsTradeLaunchEventsV205.filter(row => row?.decodeVerified === true).length,
+      verifiedTokensAdded:
+        poolsTradeVerifiedTokensAddedV208,
+      verifiedPoolsRegistered:
+        poolsTradeVerifiedPoolsRegisteredV208,
       events: poolsTradeLaunchEventsV205.slice(0, 20),
       tokenExtractionStatus:
-        poolsTradeLaunchEventsV205.length
-          ? "EVENT_SEEN_ABI_TOKEN_EXTRACTION_NOT_YET_ASSUMED"
-          : "NO_VERIFIED_LAUNCH_EVENT_IN_BATCH"
+        poolsTradeLaunchEventsV205.some(row => row?.decodeVerified === true)
+          ? "VERIFIED_ABI_DECODE_ACTIVE_V208"
+          : poolsTradeLaunchEventsV205.length
+            ? "EVENT_SEEN_BUT_VALIDATION_FAILED"
+            : "NO_VERIFIED_LAUNCH_EVENT_IN_BATCH"
     },
 
     initializeEvents,
@@ -35769,6 +35956,9 @@ async function scan(
 
         rawLogs:
           liveDiscovery.rawLogs,
+
+        poolsTradeLaunchEventsV208:
+          liveDiscovery.poolsTradeLaunchEventsV205,
 
         initializeEvents:
           liveDiscovery
