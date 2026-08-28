@@ -1,10 +1,20 @@
 /**
  * Robinhood Chain Meme Hunter
- * V221
+ * V222
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V221
+ * CURRENT BUILD: V222
+ * - V222 expands the existing shared Bitquery zero-address 1B mint discovery to four additional documented Robinhood launchpads
+ * - NEW: hood.fun current factory 0x5fcc1df0dc020cf454e742e9a8ae2554c37a452c
+ * - NEW: Klik Finance 0x16cf6788b762ee8969744586ed16fc5705140dd7
+ * - NEW: Bankr Bot 0xeb7c034704ef8dcd2d32324c1545f62fb4ad0862
+ * - NEW: Ape.store 0x6e4910ea5a04376032f6564da9a9e4e88b7a87c1
+ * - All V222 additions require exact Transaction.To + zero-address sender + decimal-normalized 1B launch mint
+ * - Verified V222 launches enter watch/live/new-token priority in the same scan; no pool, DEX, quote or graduation model is guessed
+ * - Shared transfer row cap raised from 10 to 50 to reduce cross-launchpad crowd-out as documented launch coverage expands
+ * - Adds zero external requests; preserves Momentum, verified Pons/V4 USD, holder logic, Telegram thresholds and 42-request ceiling
+ * - Clanker and Virtuals intentionally remain excluded from V222 because their documented mint-supply rules differ
  * - FIX: returns current-run LaunchHood V220 discovery fields from the shared Bitquery discovery result
  * - FIX: verified LaunchHood launches now reach the existing same-scan liveTokens/newTokens priority handoff
  * - FIX: /scan current-run LaunchHood telemetry no longer shows zero/empty solely because result fields were omitted
@@ -844,7 +854,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V221";
+const VERSION = "V222";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -953,6 +963,41 @@ const LAUNCHHOOD_FACTORY_V220 =
 
 const LAUNCHHOOD_PROTOCOL_V220 =
   "LaunchHood";
+
+/* =========================================================
+   V222 VERIFIED FIXED-1B LAUNCHPAD DISCOVERY
+   ========================================================= */
+
+const HOOD_FUN_FACTORY_V222 =
+  "0x5fcc1df0dc020cf454e742e9a8ae2554c37a452c";
+
+const KLIK_FINANCE_FACTORY_V222 =
+  "0x16cf6788b762ee8969744586ed16fc5705140dd7";
+
+const BANKR_BOT_FACTORY_V222 =
+  "0xeb7c034704ef8dcd2d32324c1545f62fb4ad0862";
+
+const APE_STORE_FACTORY_V222 =
+  "0x6e4910ea5a04376032f6564da9a9e4e88b7a87c1";
+
+const FIXED_1B_LAUNCHPADS_V222 = {
+  [HOOD_FUN_FACTORY_V222]: {
+    protocol: "hood.fun",
+    source: "BITQUERY_HOOD_FUN_FACTORY_MINT_V222"
+  },
+  [KLIK_FINANCE_FACTORY_V222]: {
+    protocol: "Klik Finance",
+    source: "BITQUERY_KLIK_FINANCE_FACTORY_MINT_V222"
+  },
+  [BANKR_BOT_FACTORY_V222]: {
+    protocol: "Bankr Bot",
+    source: "BITQUERY_BANKR_BOT_FACTORY_MINT_V222"
+  },
+  [APE_STORE_FACTORY_V222]: {
+    protocol: "Ape.store",
+    source: "BITQUERY_APE_STORE_FACTORY_MINT_V222"
+  }
+};
 
 
 const PONS_V2_FACTORY_V215 =
@@ -2868,6 +2913,20 @@ function newState() {
       recentVerifiedLaunches: []
     },
 
+    fixedMintLaunchpadDiscoveryV222: {
+      totalQueriesShared: 0,
+      totalLaunchesSeen: 0,
+      totalVerifiedTokensAdded: 0,
+      lastQueryAt: null,
+      lastStatus: null,
+      lastLaunchAt: null,
+      lastLaunchBlock: null,
+      lastVerifiedToken: null,
+      lastProtocol: null,
+      byProtocol: {},
+      recentVerifiedLaunches: []
+    },
+
     ponsCurveTradesV216: {
       totalRowsSeen: 0,
       totalVerifiedTrades: 0,
@@ -3212,6 +3271,27 @@ async function readState(env) {
               parsed.launchHoodDiscoveryV220?.recentVerifiedLaunches
             )
               ? parsed.launchHoodDiscoveryV220.recentVerifiedLaunches.slice(-25)
+              : []
+        },
+
+        fixedMintLaunchpadDiscoveryV222: {
+          ...fresh.fixedMintLaunchpadDiscoveryV222,
+          ...(
+            parsed.fixedMintLaunchpadDiscoveryV222 &&
+            typeof parsed.fixedMintLaunchpadDiscoveryV222 === "object"
+              ? parsed.fixedMintLaunchpadDiscoveryV222
+              : {}
+          ),
+          byProtocol:
+            parsed.fixedMintLaunchpadDiscoveryV222?.byProtocol &&
+            typeof parsed.fixedMintLaunchpadDiscoveryV222.byProtocol === "object"
+              ? parsed.fixedMintLaunchpadDiscoveryV222.byProtocol
+              : {},
+          recentVerifiedLaunches:
+            Array.isArray(
+              parsed.fixedMintLaunchpadDiscoveryV222?.recentVerifiedLaunches
+            )
+              ? parsed.fixedMintLaunchpadDiscoveryV222.recentVerifiedLaunches.slice(-50)
               : []
         },
 
@@ -15533,6 +15613,15 @@ async function discoverVerifiedBagsLaunchesV210(
   state.launchHoodDiscoveryV220 =
     launchHoodTelemetryV220;
 
+  const fixedMintLaunchpadTelemetryV222 =
+    state.fixedMintLaunchpadDiscoveryV222 &&
+    typeof state.fixedMintLaunchpadDiscoveryV222 === "object"
+      ? state.fixedMintLaunchpadDiscoveryV222
+      : newState().fixedMintLaunchpadDiscoveryV222;
+
+  state.fixedMintLaunchpadDiscoveryV222 =
+    fixedMintLaunchpadTelemetryV222;
+
   /*
    * V217: build a bounded target list from already-verified Pons launches
    * persisted before this request. Newly discovered launches in the current
@@ -15591,6 +15680,11 @@ async function discoverVerifiedBagsLaunchesV210(
     launchHoodLaunchesSeen: 0,
     launchHoodVerifiedTokensAdded: 0,
     launchHoodLaunches: [],
+    fixedMintLaunchpadLaunchesSeenV222: 0,
+    fixedMintLaunchpadNewlyObservedV222: 0,
+    fixedMintLaunchpadVerifiedTokensAddedV222: 0,
+    fixedMintLaunchpadLaunchesV222: [],
+    fixedMintLaunchpadStatusV222: null,
     status: null,
     httpStatus: null,
     error: null
@@ -15616,7 +15710,7 @@ async function discoverVerifiedBagsLaunchesV210(
     !consumeBudget(
       budget,
       "discovery-live",
-      "BITQUERY_BAGS_FLAP_VERIFIED_LAUNCHES_V214"
+      "BITQUERY_SHARED_LAUNCH_DISCOVERY_V222"
     )
   ) {
     return {
@@ -15630,13 +15724,17 @@ async function discoverVerifiedBagsLaunchesV210(
       EVM(network: robinhood) {
         Transfers(
           orderBy: {descending: Block_Time}
-          limit: {count: 10}
+          limit: {count: 50}
           where: {
             Transaction: {
               To: {in: [
                 "${BAGS_FACTORY_V210}",
                 "${FLAP_ROUTER_V214}",
-                "${LAUNCHHOOD_FACTORY_V220}"
+                "${LAUNCHHOOD_FACTORY_V220}",
+                "${HOOD_FUN_FACTORY_V222}",
+                "${KLIK_FINANCE_FACTORY_V222}",
+                "${BANKR_BOT_FACTORY_V222}",
+                "${APE_STORE_FACTORY_V222}"
               ]}
             }
             Transfer: {
@@ -15799,6 +15897,11 @@ async function discoverVerifiedBagsLaunchesV210(
   launchHoodTelemetryV220.lastQueryAt =
     Date.now();
 
+  fixedMintLaunchpadTelemetryV222.totalQueriesShared =
+    safeNumber(fixedMintLaunchpadTelemetryV222.totalQueriesShared) + 1;
+  fixedMintLaunchpadTelemetryV222.lastQueryAt =
+    Date.now();
+
   try {
     const response =
       await fetch(
@@ -15871,11 +15974,13 @@ async function discoverVerifiedBagsLaunchesV210(
     const flapLaunches = [];
     const ponsLaunches = [];
     const launchHoodLaunchesV220 = [];
+    const fixedMintLaunchpadLaunchesV222 = [];
 
     let verifiedTokensAdded = 0;
     let flapVerifiedTokensAdded = 0;
     let ponsVerifiedTokensAdded = 0;
     let launchHoodVerifiedTokensAddedV220 = 0;
+    let fixedMintLaunchpadVerifiedTokensAddedV222 = 0;
 
     for (const row of rows) {
       const success =
@@ -16035,6 +16140,55 @@ async function discoverVerifiedBagsLaunchesV210(
 
         if (watched?.added) {
           launchHoodVerifiedTokensAddedV220++;
+        }
+
+        continue;
+      }
+
+      const fixedMintLaunchpadV222 =
+        FIXED_1B_LAUNCHPADS_V222[txTo];
+
+      if (fixedMintLaunchpadV222) {
+        const launch = {
+          ...commonLaunch,
+          source: fixedMintLaunchpadV222.source,
+          protocol: fixedMintLaunchpadV222.protocol,
+          factory: txTo,
+          verification:
+            "BITQUERY_ZERO_MINT_1B_TRANSACTION_TO_EXACT_FACTORY_V222",
+          venueModel:
+            "UNVERIFIED_DO_NOT_GUESS",
+          poolId: null
+        };
+
+        fixedMintLaunchpadLaunchesV222.push(launch);
+
+        const watched =
+          addWatch(
+            state,
+            tokenAddress,
+            null,
+            `BITQUERY_${String(fixedMintLaunchpadV222.protocol)
+              .toUpperCase()
+              .replace(/[^A-Z0-9]+/g, "_")}_VERIFIED_LAUNCH_V222`
+          );
+
+        if (watched?.token) {
+          watched.token.launchpadV222 = {
+            verified: true,
+            protocol: fixedMintLaunchpadV222.protocol,
+            factory: txTo,
+            launchBlock: launch.blockNumber,
+            launchTime: launch.blockTime,
+            transactionHash: launch.transactionHash,
+            verification: launch.verification,
+            venueModel: launch.venueModel,
+            poolId: null
+          };
+        }
+
+        if (watched?.added) {
+          fixedMintLaunchpadVerifiedTokensAddedV222++;
         }
 
         continue;
@@ -16779,6 +16933,92 @@ async function discoverVerifiedBagsLaunchesV210(
         ? "VERIFIED_LAUNCHHOOD_LAUNCHES_FOUND"
         : "NO_LAUNCHHOOD_LAUNCHES_RETURNED";
 
+    fixedMintLaunchpadTelemetryV222.recentVerifiedLaunches =
+      Array.isArray(
+        fixedMintLaunchpadTelemetryV222.recentVerifiedLaunches
+      )
+        ? fixedMintLaunchpadTelemetryV222.recentVerifiedLaunches
+        : [];
+
+    fixedMintLaunchpadTelemetryV222.byProtocol =
+      fixedMintLaunchpadTelemetryV222.byProtocol &&
+      typeof fixedMintLaunchpadTelemetryV222.byProtocol === "object"
+        ? fixedMintLaunchpadTelemetryV222.byProtocol
+        : {};
+
+    const knownFixedMintV222 =
+      new Set(
+        fixedMintLaunchpadTelemetryV222.recentVerifiedLaunches.map(
+          row =>
+            `${normalize(row?.token)}:${normalize(row?.transactionHash)}`
+        )
+      );
+
+    let fixedMintLaunchpadNewlyObservedV222 = 0;
+
+    for (const launch of fixedMintLaunchpadLaunchesV222) {
+      const key =
+        `${normalize(launch.token)}:${normalize(launch.transactionHash)}`;
+
+      if (knownFixedMintV222.has(key)) {
+        continue;
+      }
+
+      knownFixedMintV222.add(key);
+      fixedMintLaunchpadNewlyObservedV222++;
+
+      fixedMintLaunchpadTelemetryV222.lastLaunchAt =
+        Date.now();
+      fixedMintLaunchpadTelemetryV222.lastLaunchBlock =
+        launch.blockNumber;
+      fixedMintLaunchpadTelemetryV222.lastVerifiedToken =
+        launch.token;
+      fixedMintLaunchpadTelemetryV222.lastProtocol =
+        launch.protocol;
+
+      const protocolState =
+        fixedMintLaunchpadTelemetryV222.byProtocol[launch.protocol] &&
+        typeof fixedMintLaunchpadTelemetryV222.byProtocol[launch.protocol] === "object"
+          ? fixedMintLaunchpadTelemetryV222.byProtocol[launch.protocol]
+          : {
+              totalLaunchesSeen: 0,
+              lastLaunchAt: null,
+              lastLaunchBlock: null,
+              lastVerifiedToken: null
+            };
+
+      protocolState.totalLaunchesSeen =
+        safeNumber(protocolState.totalLaunchesSeen) + 1;
+      protocolState.lastLaunchAt = Date.now();
+      protocolState.lastLaunchBlock = launch.blockNumber;
+      protocolState.lastVerifiedToken = launch.token;
+      fixedMintLaunchpadTelemetryV222.byProtocol[launch.protocol] =
+        protocolState;
+
+      fixedMintLaunchpadTelemetryV222.recentVerifiedLaunches.push(
+        launch
+      );
+    }
+
+    fixedMintLaunchpadTelemetryV222.recentVerifiedLaunches =
+      fixedMintLaunchpadTelemetryV222.recentVerifiedLaunches.slice(-50);
+
+    fixedMintLaunchpadTelemetryV222.totalLaunchesSeen =
+      safeNumber(
+        fixedMintLaunchpadTelemetryV222.totalLaunchesSeen
+      ) + fixedMintLaunchpadNewlyObservedV222;
+
+    fixedMintLaunchpadTelemetryV222.totalVerifiedTokensAdded =
+      safeNumber(
+        fixedMintLaunchpadTelemetryV222.totalVerifiedTokensAdded
+      ) + fixedMintLaunchpadVerifiedTokensAddedV222;
+
+
+    fixedMintLaunchpadTelemetryV222.lastStatus =
+      fixedMintLaunchpadLaunchesV222.length
+        ? "VERIFIED_FIXED_1B_LAUNCHPAD_LAUNCHES_FOUND_V222"
+        : "NO_FIXED_1B_LAUNCHPAD_LAUNCHES_RETURNED_V222";
+
     return {
       ...base,
       attempted: true,
@@ -16814,6 +17054,14 @@ async function discoverVerifiedBagsLaunchesV210(
         launchHoodLaunchesV220.slice(0, 10),
       launchHoodStatusV220:
         launchHoodTelemetryV220.lastStatus,
+      fixedMintLaunchpadLaunchesSeenV222:
+        fixedMintLaunchpadLaunchesV222.length,
+      fixedMintLaunchpadNewlyObservedV222,
+      fixedMintLaunchpadVerifiedTokensAddedV222,
+      fixedMintLaunchpadLaunchesV222:
+        fixedMintLaunchpadLaunchesV222.slice(0, 50),
+      fixedMintLaunchpadStatusV222:
+        fixedMintLaunchpadTelemetryV222.lastStatus,
       ponsCurveTradesV216: {
         targetingVersion:
           "V217_NEWEST_VERIFIED_PONS_KV_TARGETING",
@@ -34450,6 +34698,20 @@ for (
     }
   }
 
+  for (
+    const launch
+    of (
+      bagsDiscoveryV210
+        .fixedMintLaunchpadLaunchesV222 ||
+      []
+    )
+  ) {
+    if (isAddress(launch?.token)) {
+      liveTokens.add(normalize(launch.token));
+      newTokens.add(normalize(launch.token));
+    }
+  }
+
   /*
    * V98: a pool can be active in the 20-block live window while its
    * Initialize event sits just outside that window. Fetch one cheap,
@@ -39534,6 +39796,52 @@ for (
 
     launchHoodVerifiedDiscoveryCumulativeV220:
       state.launchHoodDiscoveryV220,
+
+    fixedMintLaunchpadDiscoveryV222: {
+      enabled: true,
+      verification:
+        "BITQUERY_ZERO_MINT_1B_TRANSACTION_TO_EXACT_FACTORY_V222",
+      supportedLaunchpads: [
+        {protocol: "hood.fun", factory: HOOD_FUN_FACTORY_V222},
+        {protocol: "Klik Finance", factory: KLIK_FINANCE_FACTORY_V222},
+        {protocol: "Bankr Bot", factory: BANKR_BOT_FACTORY_V222},
+        {protocol: "Ape.store", factory: APE_STORE_FACTORY_V222}
+      ],
+      launchesSeen:
+        safeNumber(
+          bagsDiscoveryV210?.fixedMintLaunchpadLaunchesSeenV222
+        ),
+      newlyObserved:
+        safeNumber(
+          bagsDiscoveryV210?.fixedMintLaunchpadNewlyObservedV222
+        ),
+      verifiedTokensAdded:
+        safeNumber(
+          bagsDiscoveryV210?.fixedMintLaunchpadVerifiedTokensAddedV222
+        ),
+      launches:
+        Array.isArray(
+          bagsDiscoveryV210?.fixedMintLaunchpadLaunchesV222
+        )
+          ? bagsDiscoveryV210.fixedMintLaunchpadLaunchesV222
+          : [],
+      status:
+        bagsDiscoveryV210?.fixedMintLaunchpadStatusV222 ||
+        state.fixedMintLaunchpadDiscoveryV222?.lastStatus ||
+        "NOT_RUN",
+      sameScanPriority: true,
+      venueModelPolicy: "UNVERIFIED_DO_NOT_GUESS",
+      sharedExternalRequest: true,
+      externalRequestsAddedVsV221: 0,
+      transferRowLimit: 50,
+      intentionallyExcludedDifferentSupplyRules: [
+        "Virtuals",
+        "Clanker"
+      ]
+    },
+
+    fixedMintLaunchpadDiscoveryCumulativeV222:
+      state.fixedMintLaunchpadDiscoveryV222,
 
     ponsVerifiedDiscoveryCumulativeV215:
       state.ponsDiscoveryV215,
