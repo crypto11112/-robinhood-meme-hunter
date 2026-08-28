@@ -1,10 +1,16 @@
 /**
  * Robinhood Chain Meme Hunter
- * V217
+ * V218
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V217 CORRECTED
+ * CURRENT BUILD: V218
+ * - V218 integrates verified Pons V2 curve evidence into Momentum scoring conservatively
+ * - Uses one canonical Pons window only (15m preferred, then 5m, then 1h) to avoid double-counting the same trades
+ * - Rewards breadth (unique traders), activity, meaningful verified USD buy pressure and positive net flow
+ * - Tiny samples / tiny USD flow are deliberately capped; trade count or volume alone cannot create strong momentum
+ * - Pons evidence can produce an EARLY score before a historical snapshot exists, but cannot create GOOD/STRONG momentum by itself
+ * - Preserves V217 targeting, V216 verified Pons USD, frozen V4 verified USD, Telegram protection and 42-request ceiling
  * - FIX: top-level Pons targeting telemetry now reads the function result instead of referencing a function-local variable
  * - V217 targets the existing Pons Trading query to the newest verified Pons token addresses already persisted in KV
  * - Prevents older/high-activity Pons tokens from dominating the bounded 100-row trade result
@@ -820,7 +826,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V217";
+const VERSION = "V218";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -26390,12 +26396,411 @@ function momentumAnalysis(
   previous,
   market,
   holders,
-  liveActivityV152 = null
+  liveActivityV152 = null,
+  ponsCurveFlowV216 = null
 ) {
+  /*
+   * V218 verified Pons V2 curve momentum.
+   *
+   * Research/safety rationale:
+   * - unique-trader breadth is more meaningful than raw trade count alone;
+   * - meme-token volume can be wash/manipulation-prone, so volume/activity
+   *   never produces a large score by itself;
+   * - one canonical window is used so the same trade is not counted in 5m,
+   *   15m, 1h, 6h and 24h simultaneously;
+   * - tiny USD samples cap directional-pressure points.
+   */
+  const ponsWindowsV218 =
+    ponsCurveFlowV216?.windows || {};
+
+  const ponsWindowOrderV218 = [
+    ["m15", "15m"],
+    ["m5", "5m"],
+    ["h1", "1h"]
+  ];
+
+  let ponsMomentumWindowKeyV218 =
+    null;
+
+  let ponsMomentumWindowLabelV218 =
+    null;
+
+  let ponsMomentumWindowV218 =
+    null;
+
+  for (
+    const [
+      key,
+      label
+    ]
+    of ponsWindowOrderV218
+  ) {
+    const row =
+      ponsWindowsV218?.[key];
+
+    if (
+      row?.verified === true &&
+      safeNumber(row?.observedTrades) > 0
+    ) {
+      ponsMomentumWindowKeyV218 =
+        key;
+      ponsMomentumWindowLabelV218 =
+        label;
+      ponsMomentumWindowV218 =
+        row;
+      break;
+    }
+  }
+
+  const ponsMomentumUsableV218 =
+    ponsCurveFlowV216?.verified === true &&
+    Boolean(
+      ponsMomentumWindowV218
+    );
+
+  const ponsMomentumEvidenceV218 =
+    (() => {
+      const empty = {
+        verified: false,
+        window: null,
+        scoreContribution: 0,
+        positiveSignals: 0,
+        observedTrades: 0,
+        uniqueTraders: 0,
+        buys: 0,
+        sells: 0,
+        totalUsd: 0,
+        buyVolumeUsd: 0,
+        sellVolumeUsd: 0,
+        netFlowUsd: 0,
+        buyPressureUsd: null,
+        sampleQuality: "NONE",
+        reasons: []
+      };
+
+      if (!ponsMomentumUsableV218) {
+        return empty;
+      }
+
+      const row =
+        ponsMomentumWindowV218;
+
+      const observedTrades =
+        safeNumber(
+          row?.observedTrades
+        );
+
+      const uniqueTraders =
+        safeNumber(
+          row?.uniqueTraders
+        );
+
+      const buys =
+        safeNumber(row?.buys);
+
+      const sells =
+        safeNumber(row?.sells);
+
+      const buyVolumeUsd =
+        Math.max(
+          0,
+          safeNumber(
+            row?.buyVolumeUsd
+          )
+        );
+
+      const sellVolumeUsd =
+        Math.max(
+          0,
+          safeNumber(
+            row?.sellVolumeUsd
+          )
+        );
+
+      const totalUsd =
+        buyVolumeUsd +
+        sellVolumeUsd;
+
+      const netFlowUsd =
+        buyVolumeUsd -
+        sellVolumeUsd;
+
+      const buyPressureUsd =
+        totalUsd > 0
+          ? (
+              buyVolumeUsd /
+              totalUsd
+            ) * 100
+          : null;
+
+      let contribution =
+        0;
+
+      let signals =
+        0;
+
+      const ponsReasons =
+        [];
+
+      /*
+       * Require at least 3 verified trades and 2 distinct traders before
+       * Pons contributes to momentum at all.
+       */
+      if (
+        observedTrades < 3 ||
+        uniqueTraders < 2
+      ) {
+        return {
+          ...empty,
+          verified: true,
+          window:
+            ponsMomentumWindowLabelV218,
+          observedTrades,
+          uniqueTraders,
+          buys,
+          sells,
+          totalUsd,
+          buyVolumeUsd,
+          sellVolumeUsd,
+          netFlowUsd,
+          buyPressureUsd,
+          sampleQuality:
+            "TOO_SMALL_TO_SCORE",
+          reasons: [
+            "Verified Pons activity present but sample too small to score"
+          ]
+        };
+      }
+
+      /*
+       * Breadth: capped at 12.
+       * This is intentionally worth more than raw trade count.
+       */
+      signals++;
+
+      const breadthPoints =
+        uniqueTraders >= 10
+          ? 12
+          : uniqueTraders >= 6
+            ? 9
+            : uniqueTraders >= 4
+              ? 7
+              : 4;
+
+      contribution +=
+        breadthPoints;
+
+      ponsReasons.push(
+        `Verified Pons trader breadth ${uniqueTraders} unique (${ponsMomentumWindowLabelV218})`
+      );
+
+      /*
+       * Activity: capped at 8. High transaction count alone is not enough
+       * for a strong score because meme launch activity can be synthetic.
+       */
+      const activityPoints =
+        observedTrades >= 20
+          ? 8
+          : observedTrades >= 10
+            ? 6
+            : observedTrades >= 6
+              ? 4
+              : 2;
+
+      contribution +=
+        activityPoints;
+
+      ponsReasons.push(
+        `Verified Pons activity ${observedTrades} trades (${ponsMomentumWindowLabelV218})`
+      );
+
+      /*
+       * Directional USD pressure: only scored with at least two buys and a
+       * non-trivial USD sample. Tiny dollar samples are heavily capped.
+       */
+      if (
+        buys >= 2 &&
+        buyPressureUsd !== null &&
+        buyPressureUsd >= 60 &&
+        totalUsd >= 10
+      ) {
+        signals++;
+
+        let pressurePoints =
+          buyPressureUsd >= 80
+            ? 12
+            : buyPressureUsd >= 70
+              ? 9
+              : 6;
+
+        if (totalUsd < 50) {
+          pressurePoints =
+            Math.min(
+              pressurePoints,
+              4
+            );
+        }
+
+        else if (totalUsd < 250) {
+          pressurePoints =
+            Math.min(
+              pressurePoints,
+              8
+            );
+        }
+
+        contribution +=
+          pressurePoints;
+
+        ponsReasons.push(
+          `Verified Pons USD buy pressure ${buyPressureUsd.toFixed(1)}% on $${totalUsd.toFixed(2)} observed flow`
+        );
+      }
+
+      /*
+       * Positive net flow: requires meaningful absolute dollars. The point
+       * cap prevents one small directional burst from dominating momentum.
+       */
+      if (
+        netFlowUsd > 0 &&
+        buyPressureUsd !== null &&
+        buyPressureUsd >= 55 &&
+        totalUsd >= 25
+      ) {
+        signals++;
+
+        const netPoints =
+          netFlowUsd >= 500
+            ? 10
+            : netFlowUsd >= 100
+              ? 7
+              : netFlowUsd >= 25
+                ? 4
+                : 2;
+
+        contribution +=
+          netPoints;
+
+        ponsReasons.push(
+          `Verified Pons positive net flow $${netFlowUsd.toFixed(2)} (${ponsMomentumWindowLabelV218})`
+        );
+      }
+
+      /*
+       * Strong sell pressure can subtract modestly. We do not punish a
+       * balanced book simply because sells exist.
+       */
+      if (
+        totalUsd >= 50 &&
+        buyPressureUsd !== null &&
+        buyPressureUsd <= 35 &&
+        sellVolumeUsd >
+          buyVolumeUsd
+      ) {
+        const penalty =
+          buyPressureUsd <= 20
+            ? 10
+            : 6;
+
+        contribution -=
+          penalty;
+
+        ponsReasons.push(
+          `Verified Pons sell pressure ${buyPressureUsd.toFixed(1)}% buy share`
+        );
+      }
+
+      /*
+       * Pons-only evidence is capped at 34 points. That allows a genuinely
+       * active launch to become EARLY before history exists, but never GOOD
+       * or STRONG without independent/historical confirmation.
+       */
+      contribution =
+        clamp(
+          contribution,
+          0,
+          34
+        );
+
+      const sampleQuality =
+        observedTrades >= 10 &&
+        uniqueTraders >= 6 &&
+        totalUsd >= 100
+          ? "GOOD"
+          : observedTrades >= 5 &&
+            uniqueTraders >= 3
+            ? "USABLE"
+            : "THIN";
+
+      return {
+        verified: true,
+        window:
+          ponsMomentumWindowLabelV218,
+        windowKey:
+          ponsMomentumWindowKeyV218,
+        scoreContribution:
+          contribution,
+        positiveSignals:
+          signals,
+        observedTrades,
+        uniqueTraders,
+        buys,
+        sells,
+        totalUsd,
+        buyVolumeUsd,
+        sellVolumeUsd,
+        netFlowUsd,
+        buyPressureUsd,
+        sampleQuality,
+        reasons:
+          ponsReasons
+      };
+    })();
+
   if (!previous) {
+    if (
+      ponsMomentumEvidenceV218
+        .verified === true &&
+      ponsMomentumEvidenceV218
+        .scoreContribution > 0
+    ) {
+      const ponsOnlyScoreV218 =
+        clamp(
+          ponsMomentumEvidenceV218
+            .scoreContribution,
+          0,
+          34
+        );
+
+      return {
+        verified: true,
+        score:
+          ponsOnlyScoreV218,
+        label:
+          ponsOnlyScoreV218 >= 25
+            ? "EARLY"
+            : "WEAK",
+        positiveSignals:
+          ponsMomentumEvidenceV218
+            .positiveSignals,
+        historyAgeMinutes:
+          null,
+        historyStatus:
+          "NO_HISTORICAL_SNAPSHOT_PONS_EVIDENCE_ONLY",
+        ponsCurveMomentumV218:
+          ponsMomentumEvidenceV218,
+        reasons: [
+          ...ponsMomentumEvidenceV218
+            .reasons,
+          "Historical snapshot still building; Pons-only momentum capped below GOOD"
+        ]
+      };
+    }
+
     return {
       verified:
-        false,
+        ponsMomentumEvidenceV218
+          .verified === true,
 
       score:
         0,
@@ -26405,6 +26810,9 @@ function momentumAnalysis(
 
       positiveSignals:
         0,
+
+      ponsCurveMomentumV218:
+        ponsMomentumEvidenceV218,
 
       reasons: [
         "Waiting for historical snapshot"
@@ -26422,9 +26830,50 @@ function momentumAnalysis(
     historyAgeMs <
     MOMENTUM_MIN_HISTORY_MS
   ) {
+    if (
+      ponsMomentumEvidenceV218
+        .verified === true &&
+      ponsMomentumEvidenceV218
+        .scoreContribution > 0
+    ) {
+      const ponsYoungHistoryScoreV218 =
+        clamp(
+          ponsMomentumEvidenceV218
+            .scoreContribution,
+          0,
+          34
+        );
+
+      return {
+        verified: true,
+        score:
+          ponsYoungHistoryScoreV218,
+        label:
+          ponsYoungHistoryScoreV218 >= 25
+            ? "EARLY"
+            : "WEAK",
+        positiveSignals:
+          ponsMomentumEvidenceV218
+            .positiveSignals,
+        historyAgeMinutes:
+          historyAgeMs /
+          60000,
+        historyStatus:
+          "HISTORY_TOO_RECENT_PONS_EVIDENCE_ONLY",
+        ponsCurveMomentumV218:
+          ponsMomentumEvidenceV218,
+        reasons: [
+          ...ponsMomentumEvidenceV218
+            .reasons,
+          "Historical snapshot too recent; Pons-only momentum capped below GOOD"
+        ]
+      };
+    }
+
     return {
       verified:
-        false,
+        ponsMomentumEvidenceV218
+          .verified === true,
 
       score:
         0,
@@ -26438,6 +26887,9 @@ function momentumAnalysis(
       historyAgeMinutes:
         historyAgeMs /
         60000,
+
+      ponsCurveMomentumV218:
+        ponsMomentumEvidenceV218,
 
       reasons: [
         "Historical snapshot too recent"
@@ -26837,6 +27289,31 @@ function momentumAnalysis(
     );
   }
 
+  /*
+   * V218: with mature historical context, verified Pons curve evidence can
+   * contribute alongside the existing independent signals. It remains
+   * capped at 34 and never replaces holder/liquidity/history evidence.
+   */
+  if (
+    ponsMomentumEvidenceV218
+      .verified === true &&
+    ponsMomentumEvidenceV218
+      .scoreContribution > 0
+  ) {
+    score +=
+      ponsMomentumEvidenceV218
+        .scoreContribution;
+
+    positiveSignals +=
+      ponsMomentumEvidenceV218
+        .positiveSignals;
+
+    reasons.push(
+      ...ponsMomentumEvidenceV218
+        .reasons
+    );
+  }
+
   if (
     positiveSignals >=
     4
@@ -26861,7 +27338,9 @@ function momentumAnalysis(
       Boolean(
         market?.verified ||
         countersUsable ||
-        onChainActivityUsableV152
+        onChainActivityUsableV152 ||
+        ponsMomentumEvidenceV218
+          .verified === true
       ),
 
     score,
@@ -26920,6 +27399,9 @@ function momentumAnalysis(
       directionInferred:
         false
     },
+
+    ponsCurveMomentumV218:
+      ponsMomentumEvidenceV218,
 
     directionalUsdPressureV151: {
       verified:
@@ -37491,6 +37973,95 @@ for (
         candidate,
         state
       );
+
+    /*
+     * V218: the main candidate was originally scored before V216 attached
+     * Pons curve data. Recompute only when verified Pons evidence exists,
+     * then refresh the downstream score/confidence gates from the same
+     * existing functions.
+     */
+    if (
+      candidate
+        ?.ponsCurveFlowV216
+        ?.verified === true
+    ) {
+      const historicalV218 =
+        getHistoricalSnapshot(
+          state,
+          candidate.address
+        );
+
+      candidate.momentum =
+        momentumAnalysis(
+          historicalV218,
+          candidate.market,
+          candidate.holders,
+          candidate.liveMomentumActivityV152,
+          candidate.ponsCurveFlowV216
+        );
+
+      candidate.opportunity =
+        scoreOpportunity(
+          candidate.validation,
+          candidate.market,
+          candidate.holders,
+          candidate.activity,
+          candidate.momentum,
+          candidate.marketQuality,
+          candidate.whaleFlow,
+          candidate.launchStage
+        );
+
+      candidate.signalConfirmation =
+        signalConfirmation(
+          candidate
+        );
+
+      candidate.confidence =
+        candidateConfidence(
+          candidate
+        );
+
+      evidenceQualityProtectionV158(
+        candidate
+      );
+
+      candidate.analysisPriority =
+        analysisPriority(
+          candidate
+        );
+
+      candidate.momentumPonsRecomputedV218 = {
+        applied: true,
+        source:
+          "VERIFIED_PONS_CURVE_FLOW_V216",
+        score:
+          safeNumber(
+            candidate?.momentum?.score
+          ),
+        label:
+          candidate?.momentum?.label ||
+          null,
+        ponsEvidence:
+          candidate
+            ?.momentum
+            ?.ponsCurveMomentumV218 ||
+          null
+      };
+    } else {
+      candidate.momentumPonsRecomputedV218 = {
+        applied: false,
+        source:
+          "NO_VERIFIED_PONS_CURVE_FLOW",
+        score:
+          safeNumber(
+            candidate?.momentum?.score
+          ),
+        label:
+          candidate?.momentum?.label ||
+          null
+      };
+    }
 
     candidate.telegramVerifiedUsdDiagnosticV213 =
       telegramVerifiedUsdDiagnosticV213(
