@@ -1,5 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V241: accelerates PUBLIC RPC backlog convergence using faster proven-range learning while preserving Alchemy free-tier 10-block protection and the 42-request ceiling.
  * V240: promotes live-proven exact-token Bitquery market + exact-PoolId liquidity evidence into a conservative verified market fallback when Dex/Gecko are unavailable; zero extra HTTP.
  * V239: fixes V238 shared Bitquery GraphQL syntax by removing an invalid JavaScript-style block comment from inside the query string; no logic/request changes.
  * V238: verified Pons V2 graduation PoolId handoff via decoded PoolManager Initialize events filtered by the exact Pons hook; shares the existing Bitquery request; zero extra HTTP.
@@ -970,7 +971,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V240";
+const VERSION = "V241";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1525,6 +1526,16 @@ const BACKLOG_LIVE_GUARD_BLOCKS =
 const BACKLOG_SUCCESS_PROBE_THRESHOLD = 12;
 
 const BACKLOG_PROBE_INCREMENT = 5;
+
+/*
+ * V241 PUBLIC-RPC backlog convergence.
+ * Alchemy Robinhood free tier remains intentionally fixed at its proven and
+ * documented 10-block eth_getLogs maximum. The public RPC may learn larger
+ * ranges only after repeated same-size successes. Existing 400 failed-upper
+ * bounds and 429 cooldowns remain authoritative.
+ */
+const V241_PUBLIC_BACKLOG_PROBE_SUCCESS_THRESHOLD = 3;
+const V241_PUBLIC_BACKLOG_GROWTH_MULTIPLIER = 2;
 
 /* =========================================================
    DISCOVERY RPC COOLDOWN
@@ -4167,13 +4178,24 @@ function setProviderSuccessfulBacklogSize(
   }
 
   else {
+    const previousPublicSizeV241 =
+      safeNumber(
+        service.publicBacklogChunkBlocks
+      ) || PUBLIC_BACKLOG_DEFAULT;
+
     service.publicBacklogChunkBlocks =
       size;
 
+    /*
+     * A successful larger probe starts a fresh proof streak at that size.
+     * We therefore prove stability before attempting the next increase.
+     */
     service.publicBacklogSuccessStreak =
-      safeNumber(
-        service.publicBacklogSuccessStreak
-      ) + 1;
+      size > previousPublicSizeV241
+        ? 1
+        : safeNumber(
+            service.publicBacklogSuccessStreak
+          ) + 1;
   }
 
   service.lastBacklogProvider =
@@ -11157,14 +11179,20 @@ async function scanBacklogSequential(
         "ALCHEMY" &&
       !temporaryOverride &&
       streak >=
-        BACKLOG_SUCCESS_PROBE_THRESHOLD
+        V241_PUBLIC_BACKLOG_PROBE_SUCCESS_THRESHOLD
     ) {
       const proposed =
         Math.min(
           BACKLOG_MAX_CHUNK_BLOCKS,
 
-          provenSize +
-          BACKLOG_PROBE_INCREMENT
+          Math.max(
+            provenSize +
+              BACKLOG_PROBE_INCREMENT,
+            Math.floor(
+              provenSize *
+                V241_PUBLIC_BACKLOG_GROWTH_MULTIPLIER
+            )
+          )
         );
 
       const probeKey =
@@ -42329,6 +42357,21 @@ for (
           discoveryRpc
             .alchemyBacklogChunkBlocks
         ),
+
+      publicBacklogFastLearningV241: {
+        enabled: true,
+        sameSizeSuccessesBeforeProbe:
+          V241_PUBLIC_BACKLOG_PROBE_SUCCESS_THRESHOLD,
+        growthMultiplier:
+          V241_PUBLIC_BACKLOG_GROWTH_MULTIPLIER,
+        maxChunkBlocks:
+          BACKLOG_MAX_CHUNK_BLOCKS,
+        alchemyFreeTierRangePreserved:
+          safeNumber(
+            discoveryRpc
+              .alchemyBacklogChunkBlocks
+          ) <= 10
+      },
 
       publicFailedUpperBound:
         discoveryRpc
