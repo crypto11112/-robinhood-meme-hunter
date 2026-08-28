@@ -1,10 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V213
+ * V214
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V213
+ * CURRENT BUILD: V214
+ * - V214 expands the existing single Bitquery launch-mint request to discover verified Flap.sh launches alongside Bags.fm
+ * - Uses Bitquery's documented Robinhood Flap.sh router mint pattern: zero-address mint, normalized 1B supply, Transaction.To router
+ * - Flap.sh tokens are source-labelled separately and are NOT passed into Uniswap V4 bonding-curve trade decoding
+ * - Adds zero external requests versus V213 by sharing the existing Bags Bitquery request
+ * - Preserves verified BUY/SELL USD, V213 Telegram observability, pools.trade, KV state, Telegram protection and 42-request ceiling
  * - V213 adds zero-request Telegram verified-USD observability
  * - Per candidate exposes exact token match, verified PoolIds, verified record counts by window, and render eligibility
  * - Adds explicit reason when Telegram verified-dollar section is not included
@@ -798,7 +803,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V213";
+const VERSION = "V214";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -890,6 +895,16 @@ const BAGS_PROTOCOL_FAMILY_V210 =
 
 const BAGS_PROTOCOL_V210 =
   "bags_v2";
+
+
+const FLAP_ROUTER_V214 =
+  "0x26605f322f7ff986f381bb9a6e3f5dab0beaeb09";
+
+const FLAP_PROTOCOL_FAMILY_V214 =
+  "Flap.sh";
+
+const FLAP_PROTOCOL_V214 =
+  "flap_sh";
 
 
 const UNISWAP_V3_FACTORY_V195 =
@@ -2774,6 +2789,18 @@ function newState() {
     unknownPools:
       {},
 
+    flapDiscoveryV214: {
+      totalQueriesShared: 0,
+      totalLaunchesSeen: 0,
+      totalVerifiedTokensAdded: 0,
+      lastQueryAt: null,
+      lastStatus: null,
+      lastLaunchAt: null,
+      lastLaunchBlock: null,
+      lastVerifiedToken: null,
+      recentVerifiedLaunches: []
+    },
+
     bagsDiscoveryV210: {
       totalQueries: 0,
       totalLaunchesSeen: 0,
@@ -3068,6 +3095,20 @@ async function readState(env) {
             "object"
             ? parsed.unknownPools
             : {},
+
+        flapDiscoveryV214: {
+          ...fresh.flapDiscoveryV214,
+          ...(
+            parsed.flapDiscoveryV214 &&
+            typeof parsed.flapDiscoveryV214 === "object"
+              ? parsed.flapDiscoveryV214
+              : {}
+          ),
+          recentVerifiedLaunches:
+            Array.isArray(parsed.flapDiscoveryV214?.recentVerifiedLaunches)
+              ? parsed.flapDiscoveryV214.recentVerifiedLaunches.slice(-25)
+              : []
+        },
 
         bagsDiscoveryV210: {
           ...fresh.bagsDiscoveryV210,
@@ -15314,6 +15355,15 @@ async function discoverVerifiedBagsLaunchesV210(
 
   state.bagsDiscoveryV210 = telemetry;
 
+  const flapTelemetry =
+    state.flapDiscoveryV214 &&
+    typeof state.flapDiscoveryV214 === "object"
+      ? state.flapDiscoveryV214
+      : newState().flapDiscoveryV214;
+
+  state.flapDiscoveryV214 =
+    flapTelemetry;
+
   const base = {
     enabled: true,
     provider: "BITQUERY",
@@ -15327,6 +15377,9 @@ async function discoverVerifiedBagsLaunchesV210(
     launchesSeen: 0,
     verifiedTokensAdded: 0,
     launches: [],
+    flapLaunchesSeen: 0,
+    flapVerifiedTokensAdded: 0,
+    flapLaunches: [],
     status: null,
     httpStatus: null,
     error: null
@@ -15352,7 +15405,7 @@ async function discoverVerifiedBagsLaunchesV210(
     !consumeBudget(
       budget,
       "discovery-live",
-      "BITQUERY_BAGS_VERIFIED_LAUNCHES_V210"
+      "BITQUERY_BAGS_FLAP_VERIFIED_LAUNCHES_V214"
     )
   ) {
     return {
@@ -15369,7 +15422,10 @@ async function discoverVerifiedBagsLaunchesV210(
           limit: {count: 10}
           where: {
             Transaction: {
-              To: {is: "${BAGS_FACTORY_V210}"}
+              To: {in: [
+                "${BAGS_FACTORY_V210}",
+                "${FLAP_ROUTER_V214}"
+              ]}
             }
             Transfer: {
               Amount: {eq: "1000000000"}
@@ -15411,6 +15467,10 @@ async function discoverVerifiedBagsLaunchesV210(
   telemetry.totalQueries =
     safeNumber(telemetry.totalQueries) + 1;
   telemetry.lastQueryAt = Date.now();
+
+  flapTelemetry.totalQueriesShared =
+    safeNumber(flapTelemetry.totalQueriesShared) + 1;
+  flapTelemetry.lastQueryAt = Date.now();
 
   try {
     const response =
@@ -15471,7 +15531,10 @@ async function discoverVerifiedBagsLaunchesV210(
         : [];
 
     const launches = [];
+    const flapLaunches = [];
+
     let verifiedTokensAdded = 0;
+    let flapVerifiedTokensAdded = 0;
 
     for (const row of rows) {
       const success =
@@ -15479,67 +15542,150 @@ async function discoverVerifiedBagsLaunchesV210(
 
       if (success === false) continue;
 
-      const txTo = normalize(row?.Transaction?.To);
-      const sender = normalize(row?.Transfer?.Sender);
-      const tokenAddress =
-        normalize(row?.Transfer?.Currency?.SmartContract);
-      const amount = String(row?.Transfer?.Amount ?? "");
+      const txTo =
+        normalize(row?.Transaction?.To);
 
-      if (
-        txTo !== BAGS_FACTORY_V210 ||
-        sender !== ZERO ||
-        amount !== "1000000000" ||
-        !isAddress(tokenAddress) ||
-        tokenAddress === ZERO ||
-        knownQuote(tokenAddress)
-      ) {
+      const sender =
+        normalize(row?.Transfer?.Sender);
+
+      const tokenAddress =
+        normalize(
+          row?.Transfer?.Currency?.SmartContract
+        );
+
+      const amount =
+        String(row?.Transfer?.Amount ?? "");
+
+      const commonVerifiedMint =
+        sender === ZERO &&
+        amount === "1000000000" &&
+        isAddress(tokenAddress) &&
+        tokenAddress !== ZERO &&
+        !knownQuote(tokenAddress);
+
+      if (!commonVerifiedMint) {
         continue;
       }
 
-      const launch = {
+      const commonLaunch = {
         verified: true,
-        source: "BITQUERY_BAGS_FACTORY_MINT_V210",
-        protocolFamily: BAGS_PROTOCOL_FAMILY_V210,
-        protocol: BAGS_PROTOCOL_V210,
-        factory: BAGS_FACTORY_V210,
         token: tokenAddress,
-        name: row?.Transfer?.Currency?.Name || null,
-        symbol: row?.Transfer?.Currency?.Symbol || null,
+        name:
+          row?.Transfer?.Currency?.Name || null,
+        symbol:
+          row?.Transfer?.Currency?.Symbol || null,
         decimals:
-          safeNumber(row?.Transfer?.Currency?.Decimals) || null,
-        receiver: normalize(row?.Transfer?.Receiver) || null,
-        creator: normalize(row?.Transaction?.From) || null,
+          safeNumber(
+            row?.Transfer?.Currency?.Decimals
+          ) || null,
+        receiver:
+          normalize(row?.Transfer?.Receiver) || null,
+        creator:
+          normalize(row?.Transaction?.From) || null,
         transactionHash:
           normalize(row?.Transaction?.Hash) || null,
         blockNumber:
           safeNumber(row?.Block?.Number) || null,
-        blockTime: row?.Block?.Time || null
+        blockTime:
+          row?.Block?.Time || null
       };
 
-      launches.push(launch);
-
-      const watched =
-        addWatch(
-          state,
-          tokenAddress,
-          null,
-          "BITQUERY_BAGS_VERIFIED_LAUNCH_V210"
-        );
-
-      if (watched?.token) {
-        watched.token.launchpadV210 = {
-          verified: true,
-          family: BAGS_PROTOCOL_FAMILY_V210,
-          protocol: BAGS_PROTOCOL_V210,
-          factory: BAGS_FACTORY_V210,
-          launchBlock: launch.blockNumber,
-          launchTime: launch.blockTime,
-          transactionHash: launch.transactionHash
+      if (txTo === BAGS_FACTORY_V210) {
+        const launch = {
+          ...commonLaunch,
+          source:
+            "BITQUERY_BAGS_FACTORY_MINT_V210",
+          protocolFamily:
+            BAGS_PROTOCOL_FAMILY_V210,
+          protocol:
+            BAGS_PROTOCOL_V210,
+          factory:
+            BAGS_FACTORY_V210
         };
+
+        launches.push(launch);
+
+        const watched =
+          addWatch(
+            state,
+            tokenAddress,
+            null,
+            "BITQUERY_BAGS_VERIFIED_LAUNCH_V210"
+          );
+
+        if (watched?.token) {
+          watched.token.launchpadV210 = {
+            verified: true,
+            family:
+              BAGS_PROTOCOL_FAMILY_V210,
+            protocol:
+              BAGS_PROTOCOL_V210,
+            factory:
+              BAGS_FACTORY_V210,
+            launchBlock:
+              launch.blockNumber,
+            launchTime:
+              launch.blockTime,
+            transactionHash:
+              launch.transactionHash
+          };
+        }
+
+        if (watched?.added) {
+          verifiedTokensAdded++;
+        }
+
+        continue;
       }
 
-      if (watched?.added) {
-        verifiedTokensAdded++;
+      if (txTo === FLAP_ROUTER_V214) {
+        const launch = {
+          ...commonLaunch,
+          source:
+            "BITQUERY_FLAP_ROUTER_MINT_V214",
+          protocolFamily:
+            FLAP_PROTOCOL_FAMILY_V214,
+          protocol:
+            FLAP_PROTOCOL_V214,
+          router:
+            FLAP_ROUTER_V214,
+          tradeDecoder:
+            "SEPARATE_BONDING_CURVE_DO_NOT_ASSUME_UNISWAP_V4"
+        };
+
+        flapLaunches.push(launch);
+
+        const watched =
+          addWatch(
+            state,
+            tokenAddress,
+            null,
+            "BITQUERY_FLAP_VERIFIED_LAUNCH_V214"
+          );
+
+        if (watched?.token) {
+          watched.token.launchpadV214 = {
+            verified: true,
+            family:
+              FLAP_PROTOCOL_FAMILY_V214,
+            protocol:
+              FLAP_PROTOCOL_V214,
+            router:
+              FLAP_ROUTER_V214,
+            launchBlock:
+              launch.blockNumber,
+            launchTime:
+              launch.blockTime,
+            transactionHash:
+              launch.transactionHash,
+            tradeDecoder:
+              "SEPARATE_BONDING_CURVE_DO_NOT_ASSUME_UNISWAP_V4"
+          };
+        }
+
+        if (watched?.added) {
+          flapVerifiedTokensAdded++;
+        }
       }
     }
 
@@ -15588,6 +15734,66 @@ async function discoverVerifiedBagsLaunchesV210(
     telemetry.lastStatus =
       launches.length ? "VERIFIED_LAUNCHES_FOUND" : "NO_LAUNCHES_RETURNED";
 
+    flapTelemetry.recentVerifiedLaunches =
+      Array.isArray(
+        flapTelemetry.recentVerifiedLaunches
+      )
+        ? flapTelemetry.recentVerifiedLaunches
+        : [];
+
+    const knownFlap =
+      new Set(
+        flapTelemetry.recentVerifiedLaunches.map(
+          row =>
+            `${normalize(row?.token)}:${normalize(row?.transactionHash)}`
+        )
+      );
+
+    let newlyObservedFlap = 0;
+
+    for (const launch of flapLaunches) {
+      const key =
+        `${normalize(launch.token)}:${normalize(launch.transactionHash)}`;
+
+      if (knownFlap.has(key)) {
+        continue;
+      }
+
+      knownFlap.add(key);
+      newlyObservedFlap++;
+
+      flapTelemetry.lastLaunchAt =
+        Date.now();
+      flapTelemetry.lastLaunchBlock =
+        launch.blockNumber;
+      flapTelemetry.lastVerifiedToken =
+        launch.token;
+
+      flapTelemetry.recentVerifiedLaunches.push(
+        launch
+      );
+    }
+
+    flapTelemetry.recentVerifiedLaunches =
+      flapTelemetry.recentVerifiedLaunches.slice(
+        -25
+      );
+
+    flapTelemetry.totalLaunchesSeen =
+      safeNumber(
+        flapTelemetry.totalLaunchesSeen
+      ) + newlyObservedFlap;
+
+    flapTelemetry.totalVerifiedTokensAdded =
+      safeNumber(
+        flapTelemetry.totalVerifiedTokensAdded
+      ) + flapVerifiedTokensAdded;
+
+    flapTelemetry.lastStatus =
+      flapLaunches.length
+        ? "VERIFIED_FLAP_LAUNCHES_FOUND"
+        : "NO_FLAP_LAUNCHES_RETURNED";
+
     return {
       ...base,
       attempted: true,
@@ -15597,6 +15803,15 @@ async function discoverVerifiedBagsLaunchesV210(
       newlyObserved,
       verifiedTokensAdded,
       launches: launches.slice(0, 10),
+      flapLaunchesSeen:
+        flapLaunches.length,
+      flapNewlyObserved:
+        newlyObservedFlap,
+      flapVerifiedTokensAdded,
+      flapLaunches:
+        flapLaunches.slice(0, 10),
+      flapStatus:
+        flapTelemetry.lastStatus,
       status: telemetry.lastStatus
     };
   } catch (error) {
@@ -32232,6 +32447,13 @@ for (
     }
   }
 
+  for (const launch of bagsDiscoveryV210.flapLaunches || []) {
+    if (isAddress(launch?.token)) {
+      liveTokens.add(normalize(launch.token));
+      newTokens.add(normalize(launch.token));
+    }
+  }
+
   /*
    * V98: a pool can be active in the 20-block live window while its
    * Initialize event sits just outside that window. Fetch one cheap,
@@ -37041,6 +37263,45 @@ for (
 
     bagsVerifiedDiscoveryCumulativeV210:
       state.bagsDiscoveryV210,
+
+    flapVerifiedDiscoveryV214: {
+      enabled: true,
+      verification:
+        "BITQUERY_ZERO_MINT_1B_TRANSACTION_TO_FLAP_ROUTER",
+      router:
+        FLAP_ROUTER_V214,
+      launchesSeen:
+        safeNumber(
+          bagsDiscoveryV210?.flapLaunchesSeen
+        ),
+      newlyObserved:
+        safeNumber(
+          bagsDiscoveryV210?.flapNewlyObserved
+        ),
+      verifiedTokensAdded:
+        safeNumber(
+          bagsDiscoveryV210?.flapVerifiedTokensAdded
+        ),
+      launches:
+        Array.isArray(
+          bagsDiscoveryV210?.flapLaunches
+        )
+          ? bagsDiscoveryV210.flapLaunches
+          : [],
+      status:
+        bagsDiscoveryV210?.flapStatus ||
+        state.flapDiscoveryV214?.lastStatus ||
+        "NOT_RUN",
+      sharedExternalRequest:
+        true,
+      externalRequestsAddedVsV213:
+        0,
+      bondingCurveTradeDecoder:
+        "NOT_ASSUMED"
+    },
+
+    flapVerifiedDiscoveryCumulativeV214:
+      state.flapDiscoveryV214,
 
     blockscoutDirectionalUsdV180,
 
