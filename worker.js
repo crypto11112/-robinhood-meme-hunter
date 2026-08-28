@@ -1,10 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V214
+ * V215
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V214
+ * CURRENT BUILD: V215
+ * - V215 adds verified Pons V2 TokenLaunched discovery using Bitquery's decoded factory event
+ * - Shares the existing Bags/Flap Bitquery GraphQL HTTP request, so no extra external request is added
+ * - Captures token, bonding-curve, deployer, pair token, launch config and graduation threshold
+ * - Pons bonding-curve activity stays separate from Uniswap V4 until graduation is positively identified
+ * - Preserves V214 Flap, V210 Bags, pools.trade, V213 Telegram diagnostics, verified USD, KV and 42-request ceiling
  * - V214 expands the existing single Bitquery launch-mint request to discover verified Flap.sh launches alongside Bags.fm
  * - Uses Bitquery's documented Robinhood Flap.sh router mint pattern: zero-address mint, normalized 1B supply, Transaction.To router
  * - Flap.sh tokens are source-labelled separately and are NOT passed into Uniswap V4 bonding-curve trade decoding
@@ -803,7 +808,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V214";
+const VERSION = "V215";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -905,6 +910,25 @@ const FLAP_PROTOCOL_FAMILY_V214 =
 
 const FLAP_PROTOCOL_V214 =
   "flap_sh";
+
+
+const PONS_V2_FACTORY_V215 =
+  "0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e";
+
+const PONS_V2_ROUTER_V215 =
+  "0xe33e9e479df8802cb0866d5d05258bec4cf62948";
+
+const PONS_V2_MEME_HOOK_V215 =
+  "0xe5e702641ea86f4ae6cc3cdaed2b886f976be044";
+
+const PONS_V2_TOKEN_LAUNCHED_TOPIC_V215 =
+  "0x8d4aad4953d0ca700d468f3753aa14432d1b35b43ec6409f051fb6aa43a89607";
+
+const PONS_V2_POOL_GRADUATED_TOPIC_V215 =
+  "0x0a44ef75df69c534f43cd6c1aa3ef8983065fe5fe79ef9e79f6494e6f258c259";
+
+const PONS_PROTOCOL_V215 =
+  "pons_v2";
 
 
 const UNISWAP_V3_FACTORY_V195 =
@@ -2789,6 +2813,20 @@ function newState() {
     unknownPools:
       {},
 
+    ponsDiscoveryV215: {
+      totalQueriesShared: 0,
+      totalLaunchesSeen: 0,
+      totalVerifiedTokensAdded: 0,
+      lastQueryAt: null,
+      lastStatus: null,
+      lastLaunchAt: null,
+      lastLaunchBlock: null,
+      lastVerifiedToken: null,
+      lastVerifiedCurve: null,
+      lastPairToken: null,
+      recentVerifiedLaunches: []
+    },
+
     flapDiscoveryV214: {
       totalQueriesShared: 0,
       totalLaunchesSeen: 0,
@@ -3095,6 +3133,22 @@ async function readState(env) {
             "object"
             ? parsed.unknownPools
             : {},
+
+        ponsDiscoveryV215: {
+          ...fresh.ponsDiscoveryV215,
+          ...(
+            parsed.ponsDiscoveryV215 &&
+            typeof parsed.ponsDiscoveryV215 === "object"
+              ? parsed.ponsDiscoveryV215
+              : {}
+          ),
+          recentVerifiedLaunches:
+            Array.isArray(
+              parsed.ponsDiscoveryV215?.recentVerifiedLaunches
+            )
+              ? parsed.ponsDiscoveryV215.recentVerifiedLaunches.slice(-25)
+              : []
+        },
 
         flapDiscoveryV214: {
           ...fresh.flapDiscoveryV214,
@@ -15364,6 +15418,15 @@ async function discoverVerifiedBagsLaunchesV210(
   state.flapDiscoveryV214 =
     flapTelemetry;
 
+  const ponsTelemetry =
+    state.ponsDiscoveryV215 &&
+    typeof state.ponsDiscoveryV215 === "object"
+      ? state.ponsDiscoveryV215
+      : newState().ponsDiscoveryV215;
+
+  state.ponsDiscoveryV215 =
+    ponsTelemetry;
+
   const base = {
     enabled: true,
     provider: "BITQUERY",
@@ -15380,6 +15443,9 @@ async function discoverVerifiedBagsLaunchesV210(
     flapLaunchesSeen: 0,
     flapVerifiedTokensAdded: 0,
     flapLaunches: [],
+    ponsLaunchesSeen: 0,
+    ponsVerifiedTokensAdded: 0,
+    ponsLaunches: [],
     status: null,
     httpStatus: null,
     error: null
@@ -15460,6 +15526,54 @@ async function discoverVerifiedBagsLaunchesV210(
             }
           }
         }
+
+        PonsLaunches: Events(
+          limit: {count: 10}
+          orderBy: {descending: Block_Time}
+          where: {
+            LogHeader: {
+              Address: {is: "${PONS_V2_FACTORY_V215}"}
+            }
+            Log: {
+              Signature: {
+                Name: {is: "TokenLaunched"}
+              }
+            }
+          }
+        ) {
+          Block {
+            Time
+            Number
+          }
+          Transaction {
+            Hash
+            From
+            To
+          }
+          Log {
+            Signature {
+              Name
+            }
+          }
+          Arguments {
+            Name
+            Type
+            Value {
+              ... on EVM_ABI_Address_Value_Arg {
+                address
+              }
+              ... on EVM_ABI_BigInt_Value_Arg {
+                bigInteger
+              }
+              ... on EVM_ABI_Integer_Value_Arg {
+                integer
+              }
+              ... on EVM_ABI_Bytes_Value_Arg {
+                hex
+              }
+            }
+          }
+        }
       }
     }
   `;
@@ -15471,6 +15585,10 @@ async function discoverVerifiedBagsLaunchesV210(
   flapTelemetry.totalQueriesShared =
     safeNumber(flapTelemetry.totalQueriesShared) + 1;
   flapTelemetry.lastQueryAt = Date.now();
+
+  ponsTelemetry.totalQueriesShared =
+    safeNumber(ponsTelemetry.totalQueriesShared) + 1;
+  ponsTelemetry.lastQueryAt = Date.now();
 
   try {
     const response =
@@ -15530,11 +15648,18 @@ async function discoverVerifiedBagsLaunchesV210(
         ? payload.data.EVM.Transfers
         : [];
 
+    const ponsRows =
+      Array.isArray(payload?.data?.EVM?.PonsLaunches)
+        ? payload.data.EVM.PonsLaunches
+        : [];
+
     const launches = [];
     const flapLaunches = [];
+    const ponsLaunches = [];
 
     let verifiedTokensAdded = 0;
     let flapVerifiedTokensAdded = 0;
+    let ponsVerifiedTokensAdded = 0;
 
     for (const row of rows) {
       const success =
@@ -15689,6 +15814,216 @@ async function discoverVerifiedBagsLaunchesV210(
       }
     }
 
+
+    /*
+     * V215 Pons V2 launch decoding.
+     * Bitquery's current Robinhood realtime decoder exposes the six
+     * TokenLaunched arguments by name. We require all three core indexed
+     * identities (token, curve, deployer) plus a valid pairToken. No V4
+     * PoolId is invented here: Pons does not have a V4 pool until graduation.
+     */
+    const ponsArgumentValueV215 =
+      (row, name) => {
+        const arg =
+          Array.isArray(row?.Arguments)
+            ? row.Arguments.find(
+                item =>
+                  String(item?.Name || "") === name
+              )
+            : null;
+
+        const value =
+          arg?.Value;
+
+        if (!value) {
+          return null;
+        }
+
+        if (
+          value.address !== undefined &&
+          value.address !== null
+        ) {
+          return normalize(value.address);
+        }
+
+        if (
+          value.bigInteger !== undefined &&
+          value.bigInteger !== null
+        ) {
+          return String(value.bigInteger);
+        }
+
+        if (
+          value.integer !== undefined &&
+          value.integer !== null
+        ) {
+          return String(value.integer);
+        }
+
+        if (
+          value.hex !== undefined &&
+          value.hex !== null
+        ) {
+          return String(value.hex);
+        }
+
+        return null;
+      };
+
+    for (const row of ponsRows) {
+      const signatureName =
+        String(
+          row?.Log?.Signature?.Name || ""
+        );
+
+      if (signatureName !== "TokenLaunched") {
+        continue;
+      }
+
+      const tokenAddress =
+        ponsArgumentValueV215(
+          row,
+          "token"
+        );
+
+      const curve =
+        ponsArgumentValueV215(
+          row,
+          "curve"
+        );
+
+      const deployer =
+        ponsArgumentValueV215(
+          row,
+          "deployer"
+        );
+
+      const rawPairToken =
+        ponsArgumentValueV215(
+          row,
+          "pairToken"
+        );
+
+      const pairToken =
+        String(rawPairToken || "").toLowerCase() === "0x"
+          ? ZERO
+          : normalize(rawPairToken);
+
+      const launchConfigId =
+        ponsArgumentValueV215(
+          row,
+          "launchConfigId"
+        );
+
+      const graduationThreshold =
+        ponsArgumentValueV215(
+          row,
+          "graduationThreshold"
+        );
+
+      if (
+        !isAddress(tokenAddress) ||
+        tokenAddress === ZERO ||
+        !isAddress(curve) ||
+        curve === ZERO ||
+        !isAddress(deployer) ||
+        !isAddress(pairToken) ||
+        pairToken === tokenAddress
+      ) {
+        continue;
+      }
+
+      const launch = {
+        verified: true,
+        source:
+          "BITQUERY_PONS_V2_TOKENLAUNCHED_V215",
+        protocol:
+          PONS_PROTOCOL_V215,
+        factory:
+          PONS_V2_FACTORY_V215,
+        router:
+          PONS_V2_ROUTER_V215,
+        memeHook:
+          PONS_V2_MEME_HOOK_V215,
+        token:
+          tokenAddress,
+        curve,
+        deployer,
+        pairToken,
+        launchConfigId:
+          launchConfigId !== null
+            ? String(launchConfigId)
+            : null,
+        graduationThreshold:
+          graduationThreshold !== null
+            ? String(graduationThreshold)
+            : null,
+        transactionHash:
+          normalize(
+            row?.Transaction?.Hash
+          ) || null,
+        blockNumber:
+          safeNumber(
+            row?.Block?.Number
+          ) || null,
+        blockTime:
+          row?.Block?.Time || null,
+        lifecycle:
+          "BONDING_CURVE_PRE_GRADUATION_UNLESS_SEPARATELY_PROVEN",
+        tradeDecoder:
+          "PONS_V2_SEPARATE_DO_NOT_ASSUME_UNISWAP_V4",
+        v4PoolVerified:
+          false
+      };
+
+      ponsLaunches.push(launch);
+
+      const watched =
+        addWatch(
+          state,
+          tokenAddress,
+          null,
+          "BITQUERY_PONS_V2_VERIFIED_LAUNCH_V215"
+        );
+
+      if (watched?.token) {
+        watched.token.launchpadV215 = {
+          verified: true,
+          protocol:
+            PONS_PROTOCOL_V215,
+          factory:
+            PONS_V2_FACTORY_V215,
+          router:
+            PONS_V2_ROUTER_V215,
+          memeHook:
+            PONS_V2_MEME_HOOK_V215,
+          curve,
+          deployer,
+          pairToken,
+          launchConfigId:
+            launch.launchConfigId,
+          graduationThreshold:
+            launch.graduationThreshold,
+          launchBlock:
+            launch.blockNumber,
+          launchTime:
+            launch.blockTime,
+          transactionHash:
+            launch.transactionHash,
+          lifecycle:
+            launch.lifecycle,
+          tradeDecoder:
+            launch.tradeDecoder,
+          v4PoolVerified:
+            false
+        };
+      }
+
+      if (watched?.added) {
+        ponsVerifiedTokensAdded++;
+      }
+    }
+
     /*
      * Deduplicate by token+tx because the bounded latest-launch query can
      * overlap between scans. Persistent totals count only launch identities
@@ -15794,6 +16129,70 @@ async function discoverVerifiedBagsLaunchesV210(
         ? "VERIFIED_FLAP_LAUNCHES_FOUND"
         : "NO_FLAP_LAUNCHES_RETURNED";
 
+    ponsTelemetry.recentVerifiedLaunches =
+      Array.isArray(
+        ponsTelemetry.recentVerifiedLaunches
+      )
+        ? ponsTelemetry.recentVerifiedLaunches
+        : [];
+
+    const knownPons =
+      new Set(
+        ponsTelemetry.recentVerifiedLaunches.map(
+          row =>
+            `${normalize(row?.token)}:${normalize(row?.transactionHash)}`
+        )
+      );
+
+    let newlyObservedPons = 0;
+
+    for (const launch of ponsLaunches) {
+      const key =
+        `${normalize(launch.token)}:${normalize(launch.transactionHash)}`;
+
+      if (knownPons.has(key)) {
+        continue;
+      }
+
+      knownPons.add(key);
+      newlyObservedPons++;
+
+      ponsTelemetry.lastLaunchAt =
+        Date.now();
+      ponsTelemetry.lastLaunchBlock =
+        launch.blockNumber;
+      ponsTelemetry.lastVerifiedToken =
+        launch.token;
+      ponsTelemetry.lastVerifiedCurve =
+        launch.curve;
+      ponsTelemetry.lastPairToken =
+        launch.pairToken;
+
+      ponsTelemetry.recentVerifiedLaunches.push(
+        launch
+      );
+    }
+
+    ponsTelemetry.recentVerifiedLaunches =
+      ponsTelemetry.recentVerifiedLaunches.slice(
+        -25
+      );
+
+    ponsTelemetry.totalLaunchesSeen =
+      safeNumber(
+        ponsTelemetry.totalLaunchesSeen
+      ) + newlyObservedPons;
+
+    ponsTelemetry.totalVerifiedTokensAdded =
+      safeNumber(
+        ponsTelemetry.totalVerifiedTokensAdded
+      ) + ponsVerifiedTokensAdded;
+
+    ponsTelemetry.lastStatus =
+      ponsLaunches.length
+        ? "VERIFIED_PONS_V2_LAUNCHES_FOUND"
+        : "NO_PONS_V2_LAUNCHES_RETURNED";
+
     return {
       ...base,
       attempted: true,
@@ -15812,6 +16211,15 @@ async function discoverVerifiedBagsLaunchesV210(
         flapLaunches.slice(0, 10),
       flapStatus:
         flapTelemetry.lastStatus,
+      ponsLaunchesSeen:
+        ponsLaunches.length,
+      ponsNewlyObserved:
+        newlyObservedPons,
+      ponsVerifiedTokensAdded,
+      ponsLaunches:
+        ponsLaunches.slice(0, 10),
+      ponsStatus:
+        ponsTelemetry.lastStatus,
       status: telemetry.lastStatus
     };
   } catch (error) {
@@ -32454,6 +32862,13 @@ for (
     }
   }
 
+  for (const launch of bagsDiscoveryV210.ponsLaunches || []) {
+    if (isAddress(launch?.token)) {
+      liveTokens.add(normalize(launch.token));
+      newTokens.add(normalize(launch.token));
+    }
+  }
+
   /*
    * V98: a pool can be active in the 20-block live window while its
    * Initialize event sits just outside that window. Fetch one cheap,
@@ -37302,6 +37717,53 @@ for (
 
     flapVerifiedDiscoveryCumulativeV214:
       state.flapDiscoveryV214,
+
+    ponsVerifiedDiscoveryV215: {
+      enabled: true,
+      protocol:
+        PONS_PROTOCOL_V215,
+      factory:
+        PONS_V2_FACTORY_V215,
+      router:
+        PONS_V2_ROUTER_V215,
+      memeHook:
+        PONS_V2_MEME_HOOK_V215,
+      verification:
+        "BITQUERY_DECODED_TOKENLAUNCHED_FROM_EXACT_PONS_V2_FACTORY",
+      launchesSeen:
+        safeNumber(
+          bagsDiscoveryV210?.ponsLaunchesSeen
+        ),
+      newlyObserved:
+        safeNumber(
+          bagsDiscoveryV210?.ponsNewlyObserved
+        ),
+      verifiedTokensAdded:
+        safeNumber(
+          bagsDiscoveryV210?.ponsVerifiedTokensAdded
+        ),
+      launches:
+        Array.isArray(
+          bagsDiscoveryV210?.ponsLaunches
+        )
+          ? bagsDiscoveryV210.ponsLaunches
+          : [],
+      status:
+        bagsDiscoveryV210?.ponsStatus ||
+        state.ponsDiscoveryV215?.lastStatus ||
+        "NOT_RUN",
+      sharedExternalRequest:
+        true,
+      externalRequestsAddedVsV214:
+        0,
+      preGraduationVenue:
+        "PONS_V2_BONDING_CURVE",
+      v4PoolPolicy:
+        "DO_NOT_ASSUME_V4_UNTIL_GRADUATION_VERIFIED"
+    },
+
+    ponsVerifiedDiscoveryCumulativeV215:
+      state.ponsDiscoveryV215,
 
     blockscoutDirectionalUsdV180,
 
