@@ -1,10 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V219
+ * V220
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V219
+ * CURRENT BUILD: V220
+ * - V220 adds verified LaunchHood launch discovery using Bitquery's documented zero-address 1B mint pattern
+ * - Exact LaunchHood factory Transaction.To verification: 0x62b33a039d289cbda50ebeb72fe4261449e61bcf
+ * - Shares the existing Bags/Flap launch-transfer GraphQL request, adding zero external requests versus V219
+ * - LaunchHood tokens enter the watch/new-token pipeline immediately, but no Uniswap pool/version is guessed
+ * - Preserves V219 momentum/confirmation, V217 Pons targeting, verified Pons/V4 USD, Telegram protection and 42-request ceiling
  * - V219 integrates verified Pons curve evidence into confirmation/confidence without double-counting Opportunity
  * - Opportunity keeps using Momentum only; no separate Pons opportunity bonus is added
  * - Adds conservative Pons confirmation based on verified trades + unique traders + real USD flow
@@ -832,7 +837,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V219";
+const VERSION = "V220";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -934,6 +939,13 @@ const FLAP_PROTOCOL_FAMILY_V214 =
 
 const FLAP_PROTOCOL_V214 =
   "flap_sh";
+
+
+const LAUNCHHOOD_FACTORY_V220 =
+  "0x62b33a039d289cbda50ebeb72fe4261449e61bcf";
+
+const LAUNCHHOOD_PROTOCOL_V220 =
+  "LaunchHood";
 
 
 const PONS_V2_FACTORY_V215 =
@@ -2837,6 +2849,18 @@ function newState() {
     unknownPools:
       {},
 
+    launchHoodDiscoveryV220: {
+      totalQueriesShared: 0,
+      totalLaunchesSeen: 0,
+      totalVerifiedTokensAdded: 0,
+      lastQueryAt: null,
+      lastStatus: null,
+      lastLaunchAt: null,
+      lastLaunchBlock: null,
+      lastVerifiedToken: null,
+      recentVerifiedLaunches: []
+    },
+
     ponsCurveTradesV216: {
       totalRowsSeen: 0,
       totalVerifiedTrades: 0,
@@ -3168,7 +3192,32 @@ async function readState(env) {
             ? parsed.unknownPools
             : {},
 
-        ponsCurveTradesV216: {
+        launchHoodDiscoveryV220: {
+          ...fresh.launchHoodDiscoveryV220,
+          ...(
+            parsed.launchHoodDiscoveryV220 &&
+            typeof parsed.launchHoodDiscoveryV220 === "object"
+              ? parsed.launchHoodDiscoveryV220
+              : {}
+          ),
+          recentVerifiedLaunches:
+            Array.isArray(
+              parsed.launchHoodDiscoveryV220?.recentVerifiedLaunches
+            )
+              ? parsed.launchHoodDiscoveryV220.recentVerifiedLaunches.slice(-25)
+              : []
+        },
+
+        launchHoodLaunchesSeenV220:
+        launchHoodLaunchesV220.length,
+      launchHoodNewlyObservedV220,
+      launchHoodVerifiedTokensAddedV220,
+      launchHoodLaunchesV220:
+        launchHoodLaunchesV220.slice(0, 10),
+      launchHoodStatusV220:
+        launchHoodTelemetryV220.lastStatus,
+
+      ponsCurveTradesV216: {
           ...fresh.ponsCurveTradesV216,
           ...(
             parsed.ponsCurveTradesV216 &&
@@ -15477,6 +15526,15 @@ async function discoverVerifiedBagsLaunchesV210(
   state.ponsDiscoveryV215 =
     ponsTelemetry;
 
+  const launchHoodTelemetryV220 =
+    state.launchHoodDiscoveryV220 &&
+    typeof state.launchHoodDiscoveryV220 === "object"
+      ? state.launchHoodDiscoveryV220
+      : newState().launchHoodDiscoveryV220;
+
+  state.launchHoodDiscoveryV220 =
+    launchHoodTelemetryV220;
+
   /*
    * V217: build a bounded target list from already-verified Pons launches
    * persisted before this request. Newly discovered launches in the current
@@ -15532,6 +15590,9 @@ async function discoverVerifiedBagsLaunchesV210(
     ponsLaunchesSeen: 0,
     ponsVerifiedTokensAdded: 0,
     ponsLaunches: [],
+    launchHoodLaunchesSeen: 0,
+    launchHoodVerifiedTokensAdded: 0,
+    launchHoodLaunches: [],
     status: null,
     httpStatus: null,
     error: null
@@ -15576,7 +15637,8 @@ async function discoverVerifiedBagsLaunchesV210(
             Transaction: {
               To: {in: [
                 "${BAGS_FACTORY_V210}",
-                "${FLAP_ROUTER_V214}"
+                "${FLAP_ROUTER_V214}",
+                "${LAUNCHHOOD_FACTORY_V220}"
               ]}
             }
             Transfer: {
@@ -15734,6 +15796,11 @@ async function discoverVerifiedBagsLaunchesV210(
     safeNumber(ponsTelemetry.totalQueriesShared) + 1;
   ponsTelemetry.lastQueryAt = Date.now();
 
+  launchHoodTelemetryV220.totalQueriesShared =
+    safeNumber(launchHoodTelemetryV220.totalQueriesShared) + 1;
+  launchHoodTelemetryV220.lastQueryAt =
+    Date.now();
+
   try {
     const response =
       await fetch(
@@ -15805,10 +15872,12 @@ async function discoverVerifiedBagsLaunchesV210(
     const launches = [];
     const flapLaunches = [];
     const ponsLaunches = [];
+    const launchHoodLaunchesV220 = [];
 
     let verifiedTokensAdded = 0;
     let flapVerifiedTokensAdded = 0;
     let ponsVerifiedTokensAdded = 0;
+    let launchHoodVerifiedTokensAddedV220 = 0;
 
     for (const row of rows) {
       const success =
@@ -15907,6 +15976,67 @@ async function discoverVerifiedBagsLaunchesV210(
 
         if (watched?.added) {
           verifiedTokensAdded++;
+        }
+
+        continue;
+      }
+
+      if (
+        txTo ===
+        LAUNCHHOOD_FACTORY_V220
+      ) {
+        const launch = {
+          ...commonLaunch,
+          source:
+            "BITQUERY_LAUNCHHOOD_FACTORY_MINT_V220",
+          protocol:
+            LAUNCHHOOD_PROTOCOL_V220,
+          factory:
+            LAUNCHHOOD_FACTORY_V220,
+          launchModel:
+            "DIRECT_TO_UNISWAP_AT_CREATION",
+          uniswapPoolVersion:
+            "UNVERIFIED_DO_NOT_GUESS",
+          poolId:
+            null
+        };
+
+        launchHoodLaunchesV220.push(
+          launch
+        );
+
+        const watched =
+          addWatch(
+            state,
+            tokenAddress,
+            null,
+            "BITQUERY_LAUNCHHOOD_VERIFIED_LAUNCH_V220"
+          );
+
+        if (watched?.token) {
+          watched.token.launchpadV220 = {
+            verified: true,
+            protocol:
+              LAUNCHHOOD_PROTOCOL_V220,
+            factory:
+              LAUNCHHOOD_FACTORY_V220,
+            launchBlock:
+              launch.blockNumber,
+            launchTime:
+              launch.blockTime,
+            transactionHash:
+              launch.transactionHash,
+            launchModel:
+              launch.launchModel,
+            uniswapPoolVersion:
+              launch.uniswapPoolVersion,
+            poolId:
+              null
+          };
+        }
+
+        if (watched?.added) {
+          launchHoodVerifiedTokensAddedV220++;
         }
 
         continue;
@@ -16590,6 +16720,66 @@ async function discoverVerifiedBagsLaunchesV210(
       ponsLaunches.length
         ? "VERIFIED_PONS_V2_LAUNCHES_FOUND"
         : "NO_PONS_V2_LAUNCHES_RETURNED";
+
+    launchHoodTelemetryV220.recentVerifiedLaunches =
+      Array.isArray(
+        launchHoodTelemetryV220.recentVerifiedLaunches
+      )
+        ? launchHoodTelemetryV220.recentVerifiedLaunches
+        : [];
+
+    const knownLaunchHoodV220 =
+      new Set(
+        launchHoodTelemetryV220.recentVerifiedLaunches.map(
+          row =>
+            `${normalize(row?.token)}:${normalize(row?.transactionHash)}`
+        )
+      );
+
+    let launchHoodNewlyObservedV220 = 0;
+
+    for (const launch of launchHoodLaunchesV220) {
+      const key =
+        `${normalize(launch.token)}:${normalize(launch.transactionHash)}`;
+
+      if (knownLaunchHoodV220.has(key)) {
+        continue;
+      }
+
+      knownLaunchHoodV220.add(key);
+      launchHoodNewlyObservedV220++;
+
+      launchHoodTelemetryV220.lastLaunchAt =
+        Date.now();
+      launchHoodTelemetryV220.lastLaunchBlock =
+        launch.blockNumber;
+      launchHoodTelemetryV220.lastVerifiedToken =
+        launch.token;
+
+      launchHoodTelemetryV220.recentVerifiedLaunches.push(
+        launch
+      );
+    }
+
+    launchHoodTelemetryV220.recentVerifiedLaunches =
+      launchHoodTelemetryV220.recentVerifiedLaunches.slice(
+        -25
+      );
+
+    launchHoodTelemetryV220.totalLaunchesSeen =
+      safeNumber(
+        launchHoodTelemetryV220.totalLaunchesSeen
+      ) + launchHoodNewlyObservedV220;
+
+    launchHoodTelemetryV220.totalVerifiedTokensAdded =
+      safeNumber(
+        launchHoodTelemetryV220.totalVerifiedTokensAdded
+      ) + launchHoodVerifiedTokensAddedV220;
+
+    launchHoodTelemetryV220.lastStatus =
+      launchHoodLaunchesV220.length
+        ? "VERIFIED_LAUNCHHOOD_LAUNCHES_FOUND"
+        : "NO_LAUNCHHOOD_LAUNCHES_RETURNED";
 
     return {
       ...base,
@@ -34236,6 +34426,24 @@ for (
     }
   }
 
+  for (
+    const launch
+    of (
+      bagsDiscoveryV210
+        .launchHoodLaunchesV220 ||
+      []
+    )
+  ) {
+    if (isAddress(launch?.token)) {
+      liveTokens.add(
+        normalize(launch.token)
+      );
+      newTokens.add(
+        normalize(launch.token)
+      );
+    }
+  }
+
   /*
    * V98: a pool can be active in the 20-block live window while its
    * Initialize event sits just outside that window. Fetch one cheap,
@@ -39272,6 +39480,54 @@ for (
       v4PoolPolicy:
         "DO_NOT_ASSUME_V4_UNTIL_GRADUATION_VERIFIED"
     },
+
+    launchHoodVerifiedDiscoveryV220: {
+      enabled: true,
+      verification:
+        "BITQUERY_ZERO_MINT_1B_TRANSACTION_TO_EXACT_LAUNCHHOOD_FACTORY",
+      factory:
+        LAUNCHHOOD_FACTORY_V220,
+      launchesSeen:
+        safeNumber(
+          bagsDiscoveryV210
+            ?.launchHoodLaunchesSeenV220
+        ),
+      newlyObserved:
+        safeNumber(
+          bagsDiscoveryV210
+            ?.launchHoodNewlyObservedV220
+        ),
+      verifiedTokensAdded:
+        safeNumber(
+          bagsDiscoveryV210
+            ?.launchHoodVerifiedTokensAddedV220
+        ),
+      launches:
+        Array.isArray(
+          bagsDiscoveryV210
+            ?.launchHoodLaunchesV220
+        )
+          ? bagsDiscoveryV210
+              .launchHoodLaunchesV220
+          : [],
+      status:
+        bagsDiscoveryV210
+          ?.launchHoodStatusV220 ||
+        state.launchHoodDiscoveryV220
+          ?.lastStatus ||
+        "NOT_RUN",
+      launchModel:
+        "DIRECT_TO_UNISWAP_AT_CREATION",
+      poolVersionPolicy:
+        "UNVERIFIED_DO_NOT_GUESS",
+      sharedExternalRequest:
+        true,
+      externalRequestsAddedVsV219:
+        0
+    },
+
+    launchHoodVerifiedDiscoveryCumulativeV220:
+      state.launchHoodDiscoveryV220,
 
     ponsVerifiedDiscoveryCumulativeV215:
       state.ponsDiscoveryV215,
