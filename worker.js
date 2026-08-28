@@ -1,8 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V228
+ * V230
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
+ *
+ * CURRENT BUILD: V230
+ * - FIX: Bitquery holder fallback now uses dataset: realtime, matching the entitlement proven by V229 diagnostics
+ * - FIX: removes the combined-dataset entitlement 403 that blocked the shared Bitquery launch/trading/holder request
+ * - SAFETY: realtime holder rows are still exact-token matched, positive-balance filtered, freshness bounded and passed through existing holder-integrity maths before concentration can be verified
+ * - SAFETY: Pons V2 remains excluded from Bitquery concentration promotion until dynamic protocol-owned balances are explicitly reconciled
+ * - Adds zero HTTP requests and preserves V228 holder-target handoff, V229 sanitized diagnostics, Momentum, verified BUY/SELL USD, Telegram thresholds and 42/21 request ceilings
  *
  * CURRENT BUILD: V229
  * - V229 adds sanitized Bitquery shared-request 401/403 diagnostics without exposing credentials
@@ -908,7 +915,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V229";
+const VERSION = "V230";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -3076,7 +3083,7 @@ function newState() {
       holderCount: null,
       rowCount: 0,
       rows: [],
-      dataset: "combined",
+      dataset: "realtime",
       externalRequestsAdded: 0
     },
 
@@ -15916,7 +15923,7 @@ async function discoverVerifiedBagsLaunchesV210(
   const bitqueryHolderGraphqlV227 =
     bitqueryHolderTargetAddressV227
       ? `
-      HolderEvidenceV227: EVM(network: robinhood, dataset: combined) {
+      HolderEvidenceV227: EVM(network: robinhood, dataset: realtime) {
         PriorityHolderRowsV227: Holders(
           limit: {count: ${BITQUERY_HOLDER_ROW_LIMIT_V227}}
           orderBy: {descending: Balance_Amount}
@@ -15979,7 +15986,7 @@ async function discoverVerifiedBagsLaunchesV210(
       status: bitqueryHolderTargetAddressV227 ? "PENDING_SHARED_QUERY" : "NOT_TARGETED",
       holderCount: null,
       rowCount: 0,
-      dataset: "combined",
+      dataset: "realtime",
       externalRequestsAdded: 0,
       sharedRequestHttpStatusV229: null,
       sharedRequestContentTypeV229: null,
@@ -16426,7 +16433,7 @@ async function discoverVerifiedBagsLaunchesV210(
         holderCount: bitqueryHolderCountV227,
         rowCount: bitqueryHolderRowsV227.length,
         rows: bitqueryHolderRowsV227,
-        dataset: "combined",
+        dataset: "realtime",
         source: "BITQUERY_EVM_HOLDERS_V227",
         externalRequestsAdded: 0,
         sharedRequestHttpStatusV229: response.status,
@@ -17640,7 +17647,7 @@ async function discoverVerifiedBagsLaunchesV210(
         rowCount: bitqueryHolderTargetAddressV227
           ? safeNumber(state.bitqueryHolderEvidenceV227?.rowCount)
           : 0,
-        dataset: "combined",
+        dataset: "realtime",
         externalRequestsAdded: 0
       },
       ponsCurveTradesV216: {
@@ -40914,14 +40921,14 @@ for (
       status: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.status || "NOT_TARGETED",
       holderCount: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.holderCount ?? null,
       rowCount: safeNumber(bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.rowCount),
-      dataset: "combined",
+      dataset: "realtime",
       sharedRequestHttpStatusV229: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.sharedRequestHttpStatusV229 ?? bagsDiscoveryV210?.httpStatus ?? null,
       sharedRequestContentTypeV229: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.sharedRequestContentTypeV229 || null,
       sharedRequestErrorClassV229: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.sharedRequestErrorClassV229 || null,
       sharedRequestErrorPreviewV229: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.sharedRequestErrorPreviewV229 || null,
       bearerHeaderConfiguredV229: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.bearerHeaderConfiguredV229 === true,
       endpointV229: bagsDiscoveryV210?.bitqueryHolderEvidenceV227?.endpointV229 || BITQUERY_GRAPHQL_V2,
-      holderQueryShapeV229: "EVM_ROBINHOOD_DATASET_COMBINED_HOLDERS_BALANCE_SELECTWHERE_GT_ZERO_UNIQ_HOLDER_ADDRESS",
+      holderQueryShapeV229: "EVM_ROBINHOOD_DATASET_REALTIME_HOLDERS_BALANCE_SELECTWHERE_GT_ZERO_UNIQ_HOLDER_ADDRESS",
       ponsConcentrationSafety: "BLOCKED_UNTIL_DYNAMIC_PROTOCOL_INFRASTRUCTURE_EXCLUSION_IS_EXPLICIT"
     },
 
