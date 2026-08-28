@@ -1,10 +1,16 @@
 /**
  * Robinhood Chain Meme Hunter
- * V215
+ * V216
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V215
+ * CURRENT BUILD: V216
+ * - V216 adds verified Pons V2 bonding-curve trade tracking through Bitquery Trading
+ * - Uses Protocol pons_v2 / ProtocolFamily Pons and exact known Pons token addresses only
+ * - Uses AmountsInUsd.Quote as verified USD trade value; zero/missing USD rows are not promoted as verified
+ * - Tracks BUY/SELL USD, net flow, USD buy pressure, trade count and unique traders in 5m/15m/1h/6h/24h windows
+ * - Shares the existing Bags/Flap/Pons Bitquery HTTP request, adding zero external requests versus V215
+ * - Does not alter the frozen Uniswap V4 verified-dollar calculation or force Pons curve trades through V4
  * - V215 adds verified Pons V2 TokenLaunched discovery using Bitquery's decoded factory event
  * - Shares the existing Bags/Flap Bitquery GraphQL HTTP request, so no extra external request is added
  * - Captures token, bonding-curve, deployer, pair token, launch config and graduation threshold
@@ -808,7 +814,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V215";
+const VERSION = "V216";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2813,6 +2819,16 @@ function newState() {
     unknownPools:
       {},
 
+    ponsCurveTradesV216: {
+      totalRowsSeen: 0,
+      totalVerifiedTrades: 0,
+      lastQueryAt: null,
+      lastStatus: null,
+      lastTradeAt: null,
+      lastToken: null,
+      recentTrades: []
+    },
+
     ponsDiscoveryV215: {
       totalQueriesShared: 0,
       totalLaunchesSeen: 0,
@@ -3133,6 +3149,22 @@ async function readState(env) {
             "object"
             ? parsed.unknownPools
             : {},
+
+        ponsCurveTradesV216: {
+          ...fresh.ponsCurveTradesV216,
+          ...(
+            parsed.ponsCurveTradesV216 &&
+            typeof parsed.ponsCurveTradesV216 === "object"
+              ? parsed.ponsCurveTradesV216
+              : {}
+          ),
+          recentTrades:
+            Array.isArray(
+              parsed.ponsCurveTradesV216?.recentTrades
+            )
+              ? parsed.ponsCurveTradesV216.recentTrades.slice(-500)
+              : []
+        },
 
         ponsDiscoveryV215: {
           ...fresh.ponsDiscoveryV215,
@@ -15575,6 +15607,59 @@ async function discoverVerifiedBagsLaunchesV210(
           }
         }
       }
+
+      Trading {
+        PonsTradesV216: Trades(
+          limit: {count: 100}
+          orderBy: {descending: Block_Time}
+          where: {
+            Pair: {
+              Market: {
+                Protocol: {is: "pons_v2"}
+                ProtocolFamily: {is: "Pons"}
+                Network: {is: "Robinhood"}
+              }
+            }
+          }
+        ) {
+          Block {
+            Time
+          }
+          Side
+          PriceInUsd
+          Amounts {
+            Base
+            Quote
+          }
+          AmountsInUsd {
+            Base
+            Quote
+          }
+          Trader {
+            Address
+          }
+          TransactionHeader {
+            Hash
+          }
+          Pair {
+            Token {
+              Address
+              Symbol
+              Name
+            }
+            QuoteToken {
+              Address
+              Symbol
+              Name
+            }
+            Market {
+              Protocol
+              ProtocolFamily
+              Network
+            }
+          }
+        }
+      }
     }
   `;
 
@@ -15651,6 +15736,11 @@ async function discoverVerifiedBagsLaunchesV210(
     const ponsRows =
       Array.isArray(payload?.data?.EVM?.PonsLaunches)
         ? payload.data.EVM.PonsLaunches
+        : [];
+
+    const ponsTradeRowsV216 =
+      Array.isArray(payload?.data?.Trading?.PonsTradesV216)
+        ? payload.data.Trading.PonsTradesV216
         : [];
 
     const launches = [];
@@ -16024,6 +16114,280 @@ async function discoverVerifiedBagsLaunchesV210(
       }
     }
 
+
+    /*
+     * V216: verified Pons V2 curve-trade ingestion.
+     *
+     * Verification requirements:
+     * - exact Trading market labels: Pons / pons_v2 / Robinhood
+     * - token must be in the verified Pons V2 launch set (persisted or found
+     *   in this same response)
+     * - Side must be BUY or SELL
+     * - AmountsInUsd.Quote must be finite and > 0
+     *
+     * We intentionally do not infer USD from EVM DEXTrades because Bitquery
+     * documents PriceInUSD=0 there for Pons curve trades.
+     */
+    const ponsCurveTelemetryV216 =
+      state.ponsCurveTradesV216 &&
+      typeof state.ponsCurveTradesV216 === "object"
+        ? state.ponsCurveTradesV216
+        : newState().ponsCurveTradesV216;
+
+    state.ponsCurveTradesV216 =
+      ponsCurveTelemetryV216;
+
+    ponsCurveTelemetryV216.lastQueryAt =
+      Date.now();
+
+    const verifiedPonsTokensV216 =
+      new Set();
+
+    for (
+      const launch
+      of (
+        Array.isArray(
+          ponsTelemetry.recentVerifiedLaunches
+        )
+          ? ponsTelemetry.recentVerifiedLaunches
+          : []
+      )
+    ) {
+      const token =
+        normalize(launch?.token);
+
+      if (isAddress(token)) {
+        verifiedPonsTokensV216.add(token);
+      }
+    }
+
+    for (const launch of ponsLaunches) {
+      const token =
+        normalize(launch?.token);
+
+      if (isAddress(token)) {
+        verifiedPonsTokensV216.add(token);
+      }
+    }
+
+    const verifiedPonsTradesV216 = [];
+
+    for (const row of ponsTradeRowsV216) {
+      const protocol =
+        String(
+          row?.Pair?.Market?.Protocol || ""
+        ).toLowerCase();
+
+      const family =
+        String(
+          row?.Pair?.Market?.ProtocolFamily || ""
+        ).toLowerCase();
+
+      const network =
+        String(
+          row?.Pair?.Market?.Network || ""
+        ).toLowerCase();
+
+      const tokenAddress =
+        normalize(
+          row?.Pair?.Token?.Address
+        );
+
+      const rawQuoteAddress =
+        String(
+          row?.Pair?.QuoteToken?.Address || ""
+        )
+          .trim()
+          .toLowerCase();
+
+      const quoteAddress =
+        rawQuoteAddress === "0x"
+          ? ZERO
+          : normalize(rawQuoteAddress);
+
+      const sideRaw =
+        String(row?.Side || "")
+          .trim()
+          .toLowerCase();
+
+      const side =
+        sideRaw === "buy"
+          ? "buy"
+          : (
+              sideRaw === "sell"
+                ? "sell"
+                : null
+            );
+
+      const quoteUsd =
+        Number(
+          row?.AmountsInUsd?.Quote
+        );
+
+      if (
+        protocol !== "pons_v2" ||
+        family !== "pons" ||
+        network !== "robinhood" ||
+        !isAddress(tokenAddress) ||
+        !verifiedPonsTokensV216.has(
+          tokenAddress
+        ) ||
+        !side ||
+        !Number.isFinite(quoteUsd) ||
+        quoteUsd <= 0
+      ) {
+        continue;
+      }
+
+      const txHash =
+        normalize(
+          row?.TransactionHeader?.Hash
+        );
+
+      if (
+        !/^0x[a-f0-9]{64}$/.test(txHash)
+      ) {
+        continue;
+      }
+
+      const trader =
+        normalize(
+          row?.Trader?.Address
+        );
+
+      const trade = {
+        verified: true,
+        source:
+          "BITQUERY_TRADING_PONS_V2_V216",
+        protocol:
+          "pons_v2",
+        protocolFamily:
+          "Pons",
+        network:
+          "Robinhood",
+        token:
+          tokenAddress,
+        tokenSymbol:
+          row?.Pair?.Token?.Symbol || null,
+        quoteToken:
+          isAddress(quoteAddress)
+            ? quoteAddress
+            : null,
+        quoteSymbol:
+          row?.Pair?.QuoteToken?.Symbol || null,
+        side,
+        tradeUsd:
+          quoteUsd,
+        quoteAmount:
+          Number.isFinite(
+            Number(row?.Amounts?.Quote)
+          )
+            ? Number(row.Amounts.Quote)
+            : null,
+        baseAmount:
+          Number.isFinite(
+            Number(row?.Amounts?.Base)
+          )
+            ? Number(row.Amounts.Base)
+            : null,
+        priceInUsd:
+          Number.isFinite(
+            Number(row?.PriceInUsd)
+          ) &&
+          Number(row.PriceInUsd) > 0
+            ? Number(row.PriceInUsd)
+            : null,
+        trader:
+          isAddress(trader)
+            ? trader
+            : null,
+        transactionHash:
+          txHash,
+        blockTime:
+          row?.Block?.Time || null,
+        observedAt:
+          Date.parse(
+            row?.Block?.Time || ""
+          ) || Date.now(),
+        usdVerification:
+          "BITQUERY_TRADING_AMOUNTSINUSD_QUOTE",
+        exactCandidateMatch:
+          true,
+        v4PoolVerified:
+          false
+      };
+
+      verifiedPonsTradesV216.push(
+        trade
+      );
+    }
+
+    ponsCurveTelemetryV216.recentTrades =
+      Array.isArray(
+        ponsCurveTelemetryV216.recentTrades
+      )
+        ? ponsCurveTelemetryV216.recentTrades
+        : [];
+
+    const knownPonsTradesV216 =
+      new Set(
+        ponsCurveTelemetryV216.recentTrades.map(
+          row =>
+            `${normalize(row?.transactionHash)}:${String(row?.side || "")}:${normalize(row?.token)}`
+        )
+      );
+
+    let newVerifiedPonsTradesV216 = 0;
+
+    for (const trade of verifiedPonsTradesV216) {
+      const key =
+        `${normalize(trade.transactionHash)}:${trade.side}:${normalize(trade.token)}`;
+
+      if (
+        knownPonsTradesV216.has(key)
+      ) {
+        continue;
+      }
+
+      knownPonsTradesV216.add(key);
+      newVerifiedPonsTradesV216++;
+
+      ponsCurveTelemetryV216.recentTrades.push(
+        trade
+      );
+
+      ponsCurveTelemetryV216.lastTradeAt =
+        trade.observedAt;
+      ponsCurveTelemetryV216.lastToken =
+        trade.token;
+    }
+
+    ponsCurveTelemetryV216.recentTrades =
+      ponsCurveTelemetryV216.recentTrades.slice(
+        -500
+      );
+
+    ponsCurveTelemetryV216.totalRowsSeen =
+      safeNumber(
+        ponsCurveTelemetryV216.totalRowsSeen
+      ) +
+      ponsTradeRowsV216.length;
+
+    ponsCurveTelemetryV216.totalVerifiedTrades =
+      safeNumber(
+        ponsCurveTelemetryV216.totalVerifiedTrades
+      ) +
+      newVerifiedPonsTradesV216;
+
+    ponsCurveTelemetryV216.lastStatus =
+      verifiedPonsTradesV216.length
+        ? "VERIFIED_PONS_V2_TRADES_FOUND"
+        : (
+            ponsTradeRowsV216.length
+              ? "ROWS_RETURNED_NONE_MATCHED_VERIFIED_PONS_TOKENS"
+              : "NO_PONS_V2_TRADES_RETURNED"
+          );
+
     /*
      * Deduplicate by token+tx because the bounded latest-launch query can
      * overlap between scans. Persistent totals count only launch identities
@@ -16220,6 +16584,20 @@ async function discoverVerifiedBagsLaunchesV210(
         ponsLaunches.slice(0, 10),
       ponsStatus:
         ponsTelemetry.lastStatus,
+      ponsCurveTradesV216: {
+        rowsSeen:
+          ponsTradeRowsV216.length,
+        verifiedTrades:
+          verifiedPonsTradesV216.length,
+        newlyObserved:
+          newVerifiedPonsTradesV216,
+        verifiedPonsTokenSetSize:
+          verifiedPonsTokensV216.size,
+        status:
+          ponsCurveTelemetryV216.lastStatus,
+        trades:
+          verifiedPonsTradesV216.slice(0, 25)
+      },
       status: telemetry.lastStatus
     };
   } catch (error) {
@@ -29895,6 +30273,158 @@ function buildTelegramQualificationDiagnostics(
 
 
 
+
+/* =========================================================
+   V216 VERIFIED PONS V2 CURVE FLOW
+   ========================================================= */
+
+function candidateVerifiedPonsCurveFlowV216(
+  candidate,
+  state
+) {
+  const token =
+    normalize(candidate?.address);
+
+  const records =
+    Array.isArray(
+      state?.ponsCurveTradesV216?.recentTrades
+    )
+      ? state.ponsCurveTradesV216.recentTrades
+      : [];
+
+  const valid =
+    records.filter(
+      row =>
+        row?.verified === true &&
+        normalize(row?.token) === token &&
+        row?.protocol === "pons_v2" &&
+        (
+          row?.side === "buy" ||
+          row?.side === "sell"
+        ) &&
+        Number.isFinite(
+          Number(row?.tradeUsd)
+        ) &&
+        Number(row.tradeUsd) > 0 &&
+        safeNumber(row?.observedAt) > 0
+    );
+
+  const now =
+    Date.now();
+
+  const summarize =
+    windowMs => {
+      const rows =
+        valid.filter(
+          row =>
+            safeNumber(row?.observedAt) >=
+              now - windowMs &&
+            safeNumber(row?.observedAt) <= now
+        );
+
+      let buys = 0;
+      let sells = 0;
+      let buyVolumeUsd = 0;
+      let sellVolumeUsd = 0;
+
+      const traders =
+        new Set();
+
+      for (const row of rows) {
+        const usd =
+          Number(row.tradeUsd);
+
+        if (row.side === "buy") {
+          buys++;
+          buyVolumeUsd += usd;
+        } else {
+          sells++;
+          sellVolumeUsd += usd;
+        }
+
+        const trader =
+          normalize(row?.trader);
+
+        if (isAddress(trader)) {
+          traders.add(trader);
+        }
+      }
+
+      const totalUsd =
+        buyVolumeUsd +
+        sellVolumeUsd;
+
+      return {
+        verified:
+          rows.length > 0,
+        observedTrades:
+          rows.length,
+        uniqueTraders:
+          traders.size,
+        buys,
+        sells,
+        buyVolumeUsd:
+          rows.length
+            ? buyVolumeUsd
+            : null,
+        sellVolumeUsd:
+          rows.length
+            ? sellVolumeUsd
+            : null,
+        netFlowUsd:
+          rows.length
+            ? buyVolumeUsd -
+              sellVolumeUsd
+            : null,
+        buyPressureUsd:
+          rows.length &&
+          totalUsd > 0
+            ? (
+                buyVolumeUsd /
+                totalUsd
+              ) * 100
+            : null,
+        source:
+          "BITQUERY_TRADING_PONS_V2_V216"
+      };
+    };
+
+  const windows = {
+    m5:
+      summarize(V180_WINDOW_MS.m5),
+    m15:
+      summarize(V180_WINDOW_MS.m15),
+    h1:
+      summarize(V180_WINDOW_MS.h1),
+    h6:
+      summarize(V180_WINDOW_MS.h6),
+    h24:
+      summarize(V180_WINDOW_MS.h24)
+  };
+
+  return {
+    verified:
+      Object.values(windows).some(
+        row => row.verified
+      ),
+    tokenAddress:
+      token || null,
+    protocol:
+      "pons_v2",
+    venue:
+      "PONS_BONDING_CURVE",
+    recordCount:
+      valid.length,
+    windows,
+    source:
+      "BITQUERY_TRADING_PONS_V2_V216",
+    status:
+      valid.length
+        ? "VERIFIED_PONS_CURVE_FLOW_AVAILABLE"
+        : "NO_VERIFIED_PONS_CURVE_FLOW"
+  };
+}
+
 /* =========================================================
    V212 CANDIDATE-MATCHED VERIFIED ON-CHAIN USD → TELEGRAM
    ========================================================= */
@@ -30527,6 +31057,58 @@ function telegramMessage(
 
   const verifiedObservedLinesV212 = [];
 
+  const ponsCurveFlowV216 =
+    candidate?.ponsCurveFlowV216;
+
+  const ponsCurveLinesV216 = [];
+
+  if (ponsCurveFlowV216?.verified === true) {
+    ponsCurveLinesV216.push(
+      "",
+      "🟣 <b>Verified Pons Curve USD</b>"
+    );
+
+    const ponsWindowV216 =
+      (
+        label,
+        key
+      ) => {
+        const row =
+          ponsCurveFlowV216
+            ?.windows
+            ?.[key];
+
+        if (row?.verified !== true) {
+          return;
+        }
+
+        ponsCurveLinesV216.push(
+          `🟢 ${label} Curve Buys: <b>${safeNumber(row.buys)}</b> — <b>${money(row.buyVolumeUsd)}</b>`,
+          `🔴 ${label} Curve Sells: <b>${safeNumber(row.sells)}</b> — <b>${money(row.sellVolumeUsd)}</b>`,
+          `📈 ${label} Curve Net: <b>${money(row.netFlowUsd)}</b>`,
+          `👤 ${label} Unique Traders: <b>${safeNumber(row.uniqueTraders)}</b>`,
+          `💵 ${label} USD Buy Pressure: <b>${
+            row.buyPressureUsd !== null &&
+            row.buyPressureUsd !== undefined
+              ? percentDisplay(
+                  row.buyPressureUsd
+                )
+              : "UNVERIFIED"
+          }</b>`
+        );
+      };
+
+    ponsWindowV216("5m", "m5");
+    ponsWindowV216("15m", "m15");
+    ponsWindowV216("1h", "h1");
+    ponsWindowV216("6h", "h6");
+    ponsWindowV216("24h", "h24");
+
+    ponsCurveLinesV216.push(
+      "ℹ️ <i>Verified Pons V2 bonding-curve trades from Bitquery Trading; kept separate from Uniswap V4.</i>"
+    );
+  }
+
   const telegramVerifiedUsdDiagnosticV213 =
     candidate?.telegramVerifiedUsdDiagnosticV213 ||
     telegramVerifiedUsdDiagnosticV213(
@@ -30647,6 +31229,7 @@ function telegramMessage(
     `📈 24h Net Flow: <b>${trade24h.netUsd}</b>`,
     `💵 24h USD Buy Pressure: <b>${trade24h.pressureUsd}</b>`,
     ...verifiedObservedLinesV212,
+    ...ponsCurveLinesV216,
     "",
     `👥 Holder count: <b>${holderText}</b>`,
     `🔎 Holder concentration: <b>${holderConcentrationStatusV144}</b>`,
@@ -36873,6 +37456,12 @@ for (
         state
       );
 
+    candidate.ponsCurveFlowV216 =
+      candidateVerifiedPonsCurveFlowV216(
+        candidate,
+        state
+      );
+
     candidate.telegramVerifiedUsdDiagnosticV213 =
       telegramVerifiedUsdDiagnosticV213(
         candidate
@@ -37764,6 +38353,19 @@ for (
 
     ponsVerifiedDiscoveryCumulativeV215:
       state.ponsDiscoveryV215,
+
+    ponsCurveTradesV216:
+      bagsDiscoveryV210?.ponsCurveTradesV216 || {
+        rowsSeen: 0,
+        verifiedTrades: 0,
+        newlyObserved: 0,
+        verifiedPonsTokenSetSize: 0,
+        status: "NOT_RUN",
+        trades: []
+      },
+
+    ponsCurveTradesCumulativeV216:
+      state.ponsCurveTradesV216,
 
     blockscoutDirectionalUsdV180,
 
