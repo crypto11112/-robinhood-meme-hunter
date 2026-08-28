@@ -1,10 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
- * V211
+ * V212
  *
  * COMPLETE DEPLOYABLE CLOUDFLARE WORKER
  *
- * CURRENT BUILD: V211
+ * CURRENT BUILD: V212
+ * - V212 wires each candidate's existing verified on-chain V4 USD ledger into Telegram
+ * - Adds VERIFIED OBSERVED on-chain BUY/SELL USD so partial scanner coverage is never misrepresented as a full market window
+ * - Candidate matching is exact by token address; records retain their already-verified PoolId identity
+ * - Adds zero external requests and does not alter the frozen V179/V187/V192 USD calculation
+ * - Preserves V211 launch priority, V210 Bags discovery, KV state, Telegram protection and the 42-request ceiling
  * - V211 gives newly verified pools.trade launch tokens immediate same-scan analysis priority
  * - Newly verified launch PoolIds are carried directly into the live token priority set
  * - Preserves V210 Bags discovery and the frozen verified BUY/SELL USD pipeline
@@ -788,7 +793,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V211";
+const VERSION = "V212";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -29261,6 +29266,224 @@ function buildTelegramQualificationDiagnostics(
 }
 
 
+
+/* =========================================================
+   V212 CANDIDATE-MATCHED VERIFIED ON-CHAIN USD → TELEGRAM
+   ========================================================= */
+
+/*
+ * Important truth rule:
+ * V179 records are exact decoded V4 swaps with verified candidate identity
+ * and verified USD amounts, but the live scanner does not prove that its
+ * locally retained records represent every market trade in a 5m/15m/1h/6h/
+ * 24h period. Therefore V212 exposes them as VERIFIED OBSERVED flow and does
+ * not overwrite DexScreener/Gecko full-window counts or pretend partial
+ * scanner coverage is complete.
+ */
+function candidateVerifiedOnChainFlowV212(
+  candidate,
+  state
+) {
+  const token =
+    normalize(candidate?.address);
+
+  const empty = {
+    verified: false,
+    source:
+      "ONCHAIN_DIRECTIONAL_V179_CANDIDATE_MATCHED_V212",
+    interpretation:
+      "VERIFIED_OBSERVED_NOT_FULL_MARKET_WINDOW",
+    tokenAddress:
+      token || null,
+    poolIds: [],
+    recordCount: 0,
+    windows: {},
+    status:
+      "NO_CANDIDATE_MATCHED_VERIFIED_ONCHAIN_USD"
+  };
+
+  if (!isAddress(token)) {
+    return empty;
+  }
+
+  const ledger =
+    onChainDirectionalStoreV179(state)?.[token];
+
+  if (
+    !ledger ||
+    !Array.isArray(ledger.records)
+  ) {
+    return empty;
+  }
+
+  const now =
+    Date.now();
+
+  const valid =
+    ledger.records.filter(
+      row =>
+        normalize(row?.candidateAddress) === token &&
+        (
+          row?.side === "buy" ||
+          row?.side === "sell"
+        ) &&
+        row?.exactUsdVerified === true &&
+        Number.isFinite(
+          Number(row?.exactUsdAmount)
+        ) &&
+        Number(row?.exactUsdAmount) > 0 &&
+        safeNumber(row?.observedAt) > 0
+    );
+
+  const summarize =
+    windowMs => {
+      const cutoff =
+        now - windowMs;
+
+      const rows =
+        valid.filter(
+          row =>
+            safeNumber(row?.observedAt) >= cutoff &&
+            safeNumber(row?.observedAt) <= now
+        );
+
+      let buys = 0;
+      let sells = 0;
+      let buyVolumeUsd = 0;
+      let sellVolumeUsd = 0;
+
+      const poolIds =
+        new Set();
+
+      for (const row of rows) {
+        const usd =
+          Number(row.exactUsdAmount);
+
+        if (row.side === "buy") {
+          buys++;
+          buyVolumeUsd += usd;
+        } else if (row.side === "sell") {
+          sells++;
+          sellVolumeUsd += usd;
+        }
+
+        const poolId =
+          normalize(row?.poolId);
+
+        if (
+          /^0x[a-f0-9]{64}$/.test(poolId)
+        ) {
+          poolIds.add(poolId);
+        }
+      }
+
+      const totalUsd =
+        buyVolumeUsd +
+        sellVolumeUsd;
+
+      return {
+        verified:
+          rows.length > 0,
+        fullMarketCoverageVerified:
+          false,
+        interpretation:
+          "VERIFIED_OBSERVED_BY_BOT",
+        observedTrades:
+          rows.length,
+        buys,
+        sells,
+        buyVolumeUsd:
+          rows.length
+            ? buyVolumeUsd
+            : null,
+        sellVolumeUsd:
+          rows.length
+            ? sellVolumeUsd
+            : null,
+        netFlowUsd:
+          rows.length
+            ? buyVolumeUsd -
+              sellVolumeUsd
+            : null,
+        buyPressureUsd:
+          rows.length &&
+          totalUsd > 0
+            ? (
+                buyVolumeUsd /
+                totalUsd
+              ) * 100
+            : null,
+        poolIds:
+          Array.from(poolIds)
+      };
+    };
+
+  const windows = {
+    m5:
+      summarize(V180_WINDOW_MS.m5),
+    m15:
+      summarize(V180_WINDOW_MS.m15),
+    h1:
+      summarize(V180_WINDOW_MS.h1),
+    h6:
+      summarize(V180_WINDOW_MS.h6),
+    h24:
+      summarize(V180_WINDOW_MS.h24)
+  };
+
+  const verifiedAnyWindow =
+    Object.values(windows).some(
+      row =>
+        row?.verified === true
+    );
+
+  return {
+    verified:
+      verifiedAnyWindow,
+    source:
+      "ONCHAIN_DIRECTIONAL_V179_CANDIDATE_MATCHED_V212",
+    interpretation:
+      "VERIFIED_OBSERVED_NOT_FULL_MARKET_WINDOW",
+    tokenAddress:
+      token,
+    poolIds:
+      Array.from(
+        new Set(
+          valid
+            .map(row => normalize(row?.poolId))
+            .filter(
+              poolId =>
+                /^0x[a-f0-9]{64}$/.test(poolId)
+            )
+        )
+      ),
+    recordCount:
+      valid.length,
+    windows,
+    status:
+      verifiedAnyWindow
+        ? "CANDIDATE_MATCHED_VERIFIED_ONCHAIN_USD_AVAILABLE"
+        : "NO_RECENT_CANDIDATE_MATCHED_VERIFIED_ONCHAIN_USD"
+  };
+}
+
+function applyCandidateVerifiedOnChainFlowV212(
+  candidate,
+  state
+) {
+  const flow =
+    candidateVerifiedOnChainFlowV212(
+      candidate,
+      state
+    );
+
+  candidate.onChainVerifiedFlowV212 =
+    flow;
+
+  return flow;
+}
+
+
 /* =========================================================
    V88 RICH V77-STYLE TELEGRAM CALL
    ========================================================= */
@@ -29495,6 +29718,114 @@ function telegramMessage(
   const trade24h =
     tradeWindow("h24");
 
+  const verifiedObservedV212 =
+    candidate?.onChainVerifiedFlowV212;
+
+  const verifiedObservedWindowV212 =
+    window => {
+      const row =
+        verifiedObservedV212
+          ?.windows
+          ?.[window];
+
+      if (
+        verifiedObservedV212?.verified !== true ||
+        row?.verified !== true
+      ) {
+        return null;
+      }
+
+      return {
+        buys:
+          safeNumber(row.buys),
+        sells:
+          safeNumber(row.sells),
+        buyUsd:
+          money(row.buyVolumeUsd),
+        sellUsd:
+          money(row.sellVolumeUsd),
+        netUsd:
+          money(row.netFlowUsd),
+        pressureUsd:
+          row.buyPressureUsd !== null &&
+          row.buyPressureUsd !== undefined
+            ? percentDisplay(
+                row.buyPressureUsd
+              )
+            : "UNVERIFIED",
+        observedTrades:
+          safeNumber(
+            row.observedTrades
+          )
+      };
+    };
+
+  const verifiedObserved5mV212 =
+    verifiedObservedWindowV212("m5");
+
+  const verifiedObserved15mV212 =
+    verifiedObservedWindowV212("m15");
+
+  const verifiedObserved1hV212 =
+    verifiedObservedWindowV212("h1");
+
+  const verifiedObserved6hV212 =
+    verifiedObservedWindowV212("h6");
+
+  const verifiedObserved24hV212 =
+    verifiedObservedWindowV212("h24");
+
+  const verifiedObservedLinesV212 = [];
+
+  if (verifiedObservedV212?.verified === true) {
+    verifiedObservedLinesV212.push(
+      "",
+      "✅ <b>Verified On-chain USD (observed by bot)</b>"
+    );
+
+    const pushObserved =
+      (
+        label,
+        row
+      ) => {
+        if (!row) {
+          return;
+        }
+
+        verifiedObservedLinesV212.push(
+          `🟢 ${label} Verified Buys: <b>${row.buys}</b> — <b>${row.buyUsd}</b>`,
+          `🔴 ${label} Verified Sells: <b>${row.sells}</b> — <b>${row.sellUsd}</b>`,
+          `📈 ${label} Verified Net: <b>${row.netUsd}</b>`,
+          `💵 ${label} Verified USD Buy Pressure: <b>${row.pressureUsd}</b>`
+        );
+      };
+
+    pushObserved(
+      "5m",
+      verifiedObserved5mV212
+    );
+    pushObserved(
+      "15m",
+      verifiedObserved15mV212
+    );
+    pushObserved(
+      "1h",
+      verifiedObserved1hV212
+    );
+    pushObserved(
+      "6h",
+      verifiedObserved6hV212
+    );
+    pushObserved(
+      "24h",
+      verifiedObserved24hV212
+    );
+
+    verifiedObservedLinesV212.push(
+      "ℹ️ <i>Verified exact V4 swaps observed by this bot; not claimed as complete market-window totals.</i>"
+    );
+  }
+
   const lines = [
     `🚨 <b>Robinhood Chain Meme Hunter ${VERSION}</b>`,
     `📣 <b>${escapeHtml(alertClass.title)}</b>`,
@@ -29542,6 +29873,7 @@ function telegramMessage(
     `🔴 24h Sells: <b>${trade24h.sells}</b> — <b>${trade24h.sellUsd}</b>`,
     `📈 24h Net Flow: <b>${trade24h.netUsd}</b>`,
     `💵 24h USD Buy Pressure: <b>${trade24h.pressureUsd}</b>`,
+    ...verifiedObservedLinesV212,
     "",
     `👥 Holder count: <b>${holderText}</b>`,
     `🔎 Holder concentration: <b>${holderConcentrationStatusV144}</b>`,
@@ -35738,6 +36070,36 @@ for (
       eligibleVerifiedMarketCandidates:
         preQualificationDirectionalPoolV151.length
     };
+  }
+
+  /*
+   * V212: zero-request candidate-specific bridge.
+   * This is intentionally applied after all discovery/enrichment so Telegram
+   * sees the freshest already-verified V179 records from this scan.
+   */
+  const telegramVerifiedOnChainUsdV212 = [];
+
+  for (const candidate of candidates) {
+    const verifiedFlowV212 =
+      applyCandidateVerifiedOnChainFlowV212(
+        candidate,
+        state
+      );
+
+    if (verifiedFlowV212?.verified === true) {
+      telegramVerifiedOnChainUsdV212.push({
+        address:
+          normalize(candidate?.address),
+        symbol:
+          candidate?.symbol || null,
+        recordCount:
+          verifiedFlowV212.recordCount,
+        poolIds:
+          verifiedFlowV212.poolIds,
+        windows:
+          verifiedFlowV212.windows
+      });
+    }
   }
 
   const telegramQualificationDiagnostics =
