@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V259 / V2.0:
+ * - FIX: launch-age completion is no longer limited to candidates about to send a fresh Telegram alert
+ * - PRIORITY: current Telegram qualifier -> recent previously-alerted watched token -> current analysed candidate
+ * - Recent alerted tokens can therefore recover and persist verified launch age on a later scan (e.g. after the original alert window)
+ * - Selection is zero-request; still completes at most ONE token per scan and uses only V258 exact-token verified launch evidence
+ * - No scanner-age, pair-age, generic V4 Initialize or guessed launch-time substitution
+ * - Preserves V258 launch verification rules, V257 live-pool USD fix, V256 holder completion, scoring/USD maths, KV and 42/21 ceilings
  * V258 / V2.0:
  * - FEATURE: verified launch-age completion for Telegram-qualifying candidates whose launch age is still UNVERIFIED
  * - Zero-request first: exact-token recovery from already-persisted VERIFIED launch telemetry (Bags, Flap, Pons V2, LaunchHood, fixed-1B launchpads, Clanker, Virtuals)
@@ -1049,7 +1056,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V258";
+const VERSION = "V259";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -47570,38 +47577,266 @@ for (
       });
   }
 
-  const launchAgeCompletionCandidatesV258 =
-    candidates
-      .filter(
-        candidate =>
-          qualifiesTelegram(
-            candidate
-          ) &&
-          candidate
-            ?.verifiedLaunchAgeV223
-            ?.verified !==
-          true
+  /*
+   * V259:
+   * V258 only considered a candidate if it qualified for Telegram in THIS
+   * scan. That made the recovery window too narrow: a token could alert with
+   * launch age UNVERIFIED, then never be eligible for launch completion again
+   * while its alert cooldown was active.
+   *
+   * V259 keeps the one-token-per-scan ceiling but expands the zero-request
+   * selection pool in a strict order:
+   *   1. current Telegram qualifier with missing launch age;
+   *   2. recent previously-alerted token still in the watchlist;
+   *   3. current analysed candidate with missing launch age.
+   *
+   * Actual recovery still goes through verifiedLaunchAgeCompletionPassV258(),
+   * so all V258 exact-token / verified-event safety gates remain authoritative.
+   */
+  const launchAgeTargetMapV259 =
+    new Map();
+
+  const addLaunchAgeTargetV259 = (
+    candidate,
+    targetClass,
+    priorityTier,
+    score
+  ) => {
+    const address =
+      normalize(
+        candidate?.address
+      );
+
+    if (!isAddress(address)) {
+      return;
+    }
+
+    const watched =
+      findWatched(
+        state,
+        address
+      );
+
+    if (!watched) {
+      return;
+    }
+
+    const launch =
+      verifiedLaunchAgeV223(
+        watched
+      );
+
+    if (
+      launch?.verified ===
+        true
+    ) {
+      return;
+    }
+
+    const existing =
+      launchAgeTargetMapV259
+        .get(address);
+
+    const target = {
+      candidate,
+      address,
+      targetClass,
+      priorityTier,
+      score:
+        safeNumber(score),
+      verifiedLaunchAgeV223:
+        launch
+    };
+
+    if (
+      !existing ||
+      priorityTier <
+        existing.priorityTier ||
+      (
+        priorityTier ===
+          existing.priorityTier &&
+        target.score >
+          existing.score
       )
+    ) {
+      launchAgeTargetMapV259
+        .set(
+          address,
+          target
+        );
+    }
+  };
+
+  /*
+   * Tier 1: preserve V258 pre-Telegram behaviour.
+   */
+  for (
+    const candidate
+    of candidates
+  ) {
+    if (
+      qualifiesTelegram(
+        candidate
+      )
+    ) {
+      addLaunchAgeTargetV259(
+        candidate,
+        "CURRENT_TELEGRAM_QUALIFIER",
+        1,
+        candidate
+          ?.opportunity
+          ?.score
+      );
+    }
+  }
+
+  /*
+   * Tier 2: recent successful-alert state is persisted by address. This lets
+   * an already-alerted token receive launch-age completion on a later scan even
+   * when it is not in the current analysis shortlist.
+   */
+  for (
+    const [
+      alertAddress,
+      alert
+    ]
+    of Object.entries(
+      state?.alerts &&
+      typeof state.alerts ===
+        "object"
+        ? state.alerts
+        : {}
+    )
+  ) {
+    const address =
+      normalize(
+        alertAddress
+      );
+
+    const watched =
+      findWatched(
+        state,
+        address
+      );
+
+    if (!watched) {
+      continue;
+    }
+
+    const symbol =
+      watched?.metadata?.symbol ||
+      watched?.validationCache
+        ?.data?.symbol ||
+      watched?.validation?.symbol ||
+      watched?.symbol ||
+      null;
+
+    const proxyCandidate = {
+      address,
+      symbol,
+      opportunity: {
+        score:
+          typeof alert ===
+            "object"
+            ? safeNumber(
+                alert?.score
+              )
+            : 0
+      },
+      verifiedLaunchAgeV223:
+        verifiedLaunchAgeV223(
+          watched
+        )
+    };
+
+    addLaunchAgeTargetV259(
+      proxyCandidate,
+      "RECENT_PREVIOUSLY_ALERTED_WATCHED_TOKEN",
+      2,
+      proxyCandidate
+        ?.opportunity
+        ?.score
+    );
+  }
+
+  /*
+   * Tier 3: current analysed candidates remain useful even if they are below
+   * Telegram threshold. Highest Opportunity score wins inside this tier.
+   */
+  for (
+    const candidate
+    of candidates
+  ) {
+    addLaunchAgeTargetV259(
+      candidate,
+      "CURRENT_ANALYSED_CANDIDATE",
+      3,
+      candidate
+        ?.opportunity
+        ?.score
+    );
+  }
+
+  const launchAgeCompletionTargetsV259 =
+    [
+      ...launchAgeTargetMapV259
+        .values()
+    ]
       .sort(
         (a, b) =>
-          safeNumber(
-            b?.opportunity?.score
-          ) -
-          safeNumber(
-            a?.opportunity?.score
+          a.priorityTier -
+            b.priorityTier ||
+          b.score -
+            a.score ||
+          a.address.localeCompare(
+            b.address
           )
-      )
+      );
+
+  const launchAgeCompletionCandidatesV258 =
+    launchAgeCompletionTargetsV259
       .slice(
         0,
         1
+      )
+      .map(
+        target => {
+          target.candidate
+            .launchAgeTargetSelectionV259 = {
+              targetClass:
+                target.targetClass,
+              priorityTier:
+                target.priorityTier,
+              score:
+                target.score,
+              address:
+                target.address
+            };
+
+          return target.candidate;
+        }
       );
 
   const launchAgeCompletionV258 = {
     enabled: true,
+    sourceVersion:
+      "V259",
     maxCandidatesPerScan: 1,
     candidatesEligible:
       launchAgeCompletionCandidatesV258
         .length,
+    candidatePoolSizeV259:
+      launchAgeCompletionTargetsV259
+        .length,
+    selectionPolicyV259:
+      "CURRENT_TELEGRAM_QUALIFIER_THEN_RECENT_ALERT_THEN_CURRENT_ANALYSED",
+    canRecoverPreviouslyAlertedTokenV259:
+      true,
+    selectedTargetV259:
+      launchAgeCompletionCandidatesV258
+        [0]
+        ?.launchAgeTargetSelectionV259 ||
+      null,
     attempted: 0,
     recovered: 0,
     externalRequestsUsed: 0,
@@ -47659,6 +47894,10 @@ for (
           ),
         symbol:
           candidate?.symbol ||
+          null,
+        targetSelectionV259:
+          candidate
+            ?.launchAgeTargetSelectionV259 ||
           null,
         status:
           completion?.status ||
@@ -50249,7 +50488,13 @@ for (
       pairCreatedAtNeverPromoted:
         true,
       genericV4InitializeNeverPromoted:
-        true
+        true,
+      previouslyAlertedRecoveryV259:
+        true,
+      oneTargetPerScanStillEnforcedV259:
+        true,
+      selectionAddsExternalRequestsV259:
+        false
     },
 
     telegramVerifiedUsdObservabilityV213: {
