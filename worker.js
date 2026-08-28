@@ -1,5 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V254 / V2.0:
+ * - FEATURE: protected pre-Telegram Verified USD Completion Pass for qualifying V4 candidates
+ * - Reuses current live V4 logs first with zero extra requests after repairing/confirming exact pool identity
+ * - If still unresolved, performs at most one exact-pool Blockscout recent-swap history request for one qualifying candidate per scan
+ * - Supports only cryptographically identified candidate pools quoted in canonical USDG, canonical WETH, or native ETH
+ * - WETH/native USD conversion still requires the already-verified on-chain WETH/USDG reference; no market-price inference is introduced
+ * - Historical rows retain Blockscout timestamps before entering the existing V179/V212 ledger; they are never stamped as current
+ * - May use one existing wide Initialize resolver request if the exact candidate pool identity is missing; never guesses pool identity
+ * - Uses the existing V182 protected analysis slot rather than increasing the 21-analysis / 42-global request ceilings
+ * - Preserves V253 scoring calibration, Momentum maths, verified USD maths, holder logic, Telegram thresholds, KV and provider protections
  * V253 / V2.0:
  * - FIX: Momentum exactly 25 is now inside the V2 confirmation-quality boundary
  * - FIX: final Opportunity calibration re-runs after authoritative candidate-matched V212 verified USD is attached
@@ -1014,7 +1024,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V253";
+const VERSION = "V254";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1663,6 +1673,20 @@ const ONCHAIN_DIRECTIONAL_RETENTION_MS_V179 =
   26 * 60 * 60 * 1000;
 
 const BLOCKSCOUT_LOGS_MAX_ROWS_V180 = 1000;
+
+/*
+ * V254 completion is intentionally narrow:
+ * - one candidate per scan;
+ * - one recent exact-pool history request maximum;
+ * - use already-fetched live logs before spending that request.
+ *
+ * The recent history range is NOT claimed as complete market history.
+ * V212 continues to label all resulting values as VERIFIED OBSERVED BY BOT.
+ */
+const VERIFIED_USD_COMPLETION_MAX_CANDIDATES_V254 = 1;
+const VERIFIED_USD_COMPLETION_RECENT_BLOCKS_V254 = 12000;
+const VERIFIED_USD_COMPLETION_MAX_HISTORY_REQUESTS_V254 = 1;
+
 
 const BLOCKSCOUT_DIRECTIONAL_429_BASE_MS_V183 =
   5 * 60 * 1000;
@@ -2792,6 +2816,9 @@ function consumeBudget(
   const protectedUsdGTypeV182 =
     "BLOCKSCOUT_V4_USDG_DIRECTIONAL_V180";
 
+  const protectedUsdCompletionTypeV254 =
+    "BLOCKSCOUT_V4_USD_COMPLETION_V254";
+
   if (
     phase ===
       "analysis" &&
@@ -2799,7 +2826,9 @@ function consumeBudget(
       ?.active ===
       true &&
     type !==
-      protectedUsdGTypeV182
+      protectedUsdGTypeV182 &&
+    type !==
+      protectedUsdCompletionTypeV254
   ) {
     const reservedRequestsV182 =
       Math.max(
@@ -2895,8 +2924,12 @@ function consumeBudget(
   if (
     phase ===
       "analysis" &&
-    type ===
-      "BLOCKSCOUT_V4_USDG_DIRECTIONAL_V180" &&
+    (
+      type ===
+        "BLOCKSCOUT_V4_USDG_DIRECTIONAL_V180" ||
+      type ===
+        "BLOCKSCOUT_V4_USD_COMPLETION_V254"
+    ) &&
     budget.analysis
       ?.blockscoutUsdGReserveV182
       ?.active ===
@@ -36601,6 +36634,1362 @@ function candidateVerifiedPonsCurveFlowV216(
  * not overwrite DexScreener/Gecko full-window counts or pretend partial
  * scanner coverage is complete.
  */
+
+/* =========================================================
+   V254 VERIFIED USD COMPLETION PASS
+   ========================================================= */
+
+function v254PriceableQuote(
+  quoteToken,
+  wethUsdGReference
+) {
+  const quote =
+    normalize(quoteToken);
+
+  if (
+    quote === CANONICAL_USDG_V179
+  ) {
+    return {
+      eligible: true,
+      quote,
+      mode: "CANONICAL_USDG_DIRECT"
+    };
+  }
+
+  if (
+    quote === CANONICAL_WETH_V179 ||
+    quote === ZERO
+  ) {
+    const price =
+      safeNumber(
+        wethUsdGReference
+          ?.priceUsdGPerWeth
+      );
+
+    return {
+      eligible:
+        wethUsdGReference
+          ?.verified === true &&
+        price > 0,
+      quote,
+      mode:
+        quote === ZERO
+          ? "NATIVE_ETH_X_VERIFIED_WETH_USDG"
+          : "CANONICAL_WETH_X_VERIFIED_WETH_USDG",
+      wethUsdGReferenceVerified:
+        wethUsdGReference
+          ?.verified === true,
+      priceUsdGPerWeth:
+        price > 0
+          ? price
+          : null
+    };
+  }
+
+  return {
+    eligible: false,
+    quote:
+      quote || null,
+    mode:
+      "QUOTE_NOT_SUPPORTED_FOR_EXACT_USD_V254"
+  };
+}
+
+
+function v254PoolIdsForCandidate(
+  candidate,
+  state,
+  liveLogs
+) {
+  const token =
+    normalize(
+      candidate?.address
+    );
+
+  const watched =
+    findWatched(
+      state,
+      token
+    );
+
+  if (!watched) {
+    return {
+      watched: null,
+      poolIds: [],
+      liveSwapPoolIds: []
+    };
+  }
+
+  const poolIds =
+    Array.from(
+      new Set(
+        (
+          Array.isArray(
+            watched?.pools
+          )
+            ? watched.pools
+            : []
+        )
+          .map(
+            pool =>
+              normalize(
+                pool?.poolId
+              )
+          )
+          .filter(
+            poolId =>
+              /^0x[a-f0-9]{64}$/.test(
+                String(poolId || "")
+              )
+          )
+      )
+    );
+
+  const poolSet =
+    new Set(poolIds);
+
+  const liveSwapPoolIds =
+    Array.from(
+      new Set(
+        (liveLogs || [])
+          .filter(
+            log =>
+              normalize(
+                log?.topics?.[0]
+              ) ===
+                SWAP_TOPIC &&
+              poolSet.has(
+                normalize(
+                  log?.topics?.[1]
+                )
+              )
+          )
+          .map(
+            log =>
+              normalize(
+                log?.topics?.[1]
+              )
+          )
+          .filter(Boolean)
+      )
+    );
+
+  return {
+    watched,
+    poolIds,
+    liveSwapPoolIds
+  };
+}
+
+
+function v254RepairLocalPoolRegistry(
+  state,
+  watched,
+  poolId
+) {
+  if (
+    state?.poolRegistry?.[
+      poolId
+    ]
+  ) {
+    return {
+      repaired: false,
+      source:
+        "POOL_REGISTRY_ALREADY_PRESENT"
+    };
+  }
+
+  const localPool =
+    (
+      Array.isArray(
+        watched?.pools
+      )
+        ? watched.pools
+        : []
+    ).find(
+      pool =>
+        normalize(
+          pool?.poolId
+        ) === poolId &&
+        isAddress(
+          normalize(
+            pool?.currency0
+          )
+        ) &&
+        isAddress(
+          normalize(
+            pool?.currency1
+          )
+        )
+    );
+
+  if (!localPool) {
+    return {
+      repaired: false,
+      source:
+        "NO_COMPLETE_LOCAL_POOL_OBJECT"
+    };
+  }
+
+  const registered =
+    registerPoolMapping(
+      state,
+      localPool
+    );
+
+  return {
+    repaired:
+      registered
+        ?.registered === true,
+    source:
+      "WATCHED_POOL_LOCAL_SELF_HEAL_V254"
+  };
+}
+
+
+function v254MergeResolvedPoolIntoWatch(
+  watched,
+  resolvedPool
+) {
+  if (
+    !watched ||
+    !resolvedPool
+  ) {
+    return false;
+  }
+
+  watched.pools =
+    Array.isArray(
+      watched.pools
+    )
+      ? watched.pools
+      : [];
+
+  const poolId =
+    normalize(
+      resolvedPool?.poolId
+    );
+
+  if (
+    !/^0x[a-f0-9]{64}$/.test(
+      String(poolId || "")
+    )
+  ) {
+    return false;
+  }
+
+  const existingIndex =
+    watched.pools.findIndex(
+      pool =>
+        normalize(
+          pool?.poolId
+        ) === poolId
+    );
+
+  if (
+    existingIndex >= 0
+  ) {
+    watched.pools[
+      existingIndex
+    ] = {
+      ...watched.pools[
+        existingIndex
+      ],
+      ...resolvedPool
+    };
+  } else {
+    watched.pools.push(
+      resolvedPool
+    );
+  }
+
+  return true;
+}
+
+
+function persistVerifiedUsdTradesV254(
+  state,
+  candidateAddress,
+  rows,
+  wethUsdGReference,
+  observedAtMode
+) {
+  const token =
+    normalize(
+      candidateAddress
+    );
+
+  const output = {
+    rowsSeen: 0,
+    decodedCandidateTrades: 0,
+    exactUsdTrades: 0,
+    inserted: 0,
+    deduplicated: 0,
+    timestampRejected: 0,
+    candidateMismatch: 0,
+    exactUsdRejected: 0,
+    poolIds: []
+  };
+
+  if (!isAddress(token)) {
+    return output;
+  }
+
+  const store =
+    onChainDirectionalStoreV179(
+      state
+    );
+
+  const previous =
+    store[token] &&
+    typeof store[token] ===
+      "object"
+      ? store[token]
+      : {};
+
+  const records =
+    Array.isArray(
+      previous.records
+    )
+      ? previous.records
+      : [];
+
+  const keys =
+    new Set(
+      records.map(
+        row =>
+          String(
+            row?.tradeKey ||
+            ""
+          )
+      )
+    );
+
+  const poolIds =
+    new Set(
+      Array.isArray(
+        previous?.poolIds
+      )
+        ? previous.poolIds
+            .map(normalize)
+            .filter(Boolean)
+        : []
+    );
+
+  const now =
+    Date.now();
+
+  for (const row of rows || []) {
+    output.rowsSeen++;
+
+    const trade =
+      decodeV4SwapDirectionalV179(
+        state,
+        row,
+        wethUsdGReference
+      );
+
+    if (
+      !trade?.verified
+    ) {
+      continue;
+    }
+
+    if (
+      normalize(
+        trade?.candidateAddress
+      ) !== token
+    ) {
+      output.candidateMismatch++;
+      continue;
+    }
+
+    output.decodedCandidateTrades++;
+
+    if (
+      trade?.exactUsdVerified !==
+        true ||
+      !Number.isFinite(
+        Number(
+          trade?.exactUsdAmount
+        )
+      ) ||
+      Number(
+        trade?.exactUsdAmount
+      ) <= 0
+    ) {
+      output.exactUsdRejected++;
+      continue;
+    }
+
+    output.exactUsdTrades++;
+
+    let observedAt =
+      null;
+
+    if (
+      observedAtMode ===
+        "LIVE_NOW"
+    ) {
+      observedAt =
+        now;
+    } else {
+      observedAt =
+        blockscoutLogTimestampMsV180(
+          row
+        );
+    }
+
+    if (
+      !safeNumber(
+        observedAt
+      )
+    ) {
+      output.timestampRejected++;
+      continue;
+    }
+
+    const tradeKey =
+      String(
+        trade?.tradeKey ||
+        ""
+      );
+
+    if (
+      !tradeKey ||
+      keys.has(
+        tradeKey
+      )
+    ) {
+      output.deduplicated++;
+      continue;
+    }
+
+    keys.add(
+      tradeKey
+    );
+
+    const poolId =
+      normalize(
+        trade?.poolId
+      );
+
+    if (
+      /^0x[a-f0-9]{64}$/.test(
+        String(poolId || "")
+      )
+    ) {
+      poolIds.add(
+        poolId
+      );
+    }
+
+    records.push({
+      ...trade,
+      observedAt:
+        safeNumber(
+          observedAt
+        ),
+      completionSourceV254:
+        observedAtMode ===
+          "LIVE_NOW"
+          ? "REPLAYED_CURRENT_LIVE_LOG_V254"
+          : "BLOCKSCOUT_TIMESTAMPED_EXACT_POOL_LOG_V254"
+    });
+
+    output.inserted++;
+  }
+
+  records.sort(
+    (a, b) =>
+      safeNumber(
+        a?.observedAt
+      ) -
+      safeNumber(
+        b?.observedAt
+      )
+  );
+
+  const cutoff =
+    Date.now() -
+    ONCHAIN_DIRECTIONAL_RETENTION_MS_V179;
+
+  const retained =
+    records.filter(
+      row =>
+        safeNumber(
+          row?.observedAt
+        ) >= cutoff
+    );
+
+  if (
+    retained.length >
+      ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179
+  ) {
+    retained.splice(
+      0,
+      retained.length -
+        ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179
+    );
+  }
+
+  if (
+    retained.length
+  ) {
+    store[token] = {
+      version:
+        "V254",
+      tokenAddress:
+        token,
+      firstSeenAt:
+        safeNumber(
+          previous?.firstSeenAt
+        ) ||
+        safeNumber(
+          retained?.[0]
+            ?.observedAt
+        ) ||
+        now,
+      lastSeenAt:
+        Math.max(
+          safeNumber(
+            previous?.lastSeenAt
+          ),
+          ...retained.map(
+            row =>
+              safeNumber(
+                row?.observedAt
+              )
+          )
+        ),
+      poolIds:
+        Array.from(
+          poolIds
+        ).slice(-8),
+      records:
+        retained
+    };
+  }
+
+  output.poolIds =
+    Array.from(
+      poolIds
+    );
+
+  return output;
+}
+
+
+async function blockscoutExactPoolUsdCompletionV254(
+  candidate,
+  budget,
+  state,
+  latestBlock,
+  wethUsdGReference
+) {
+  const base = {
+    enabled: true,
+    attempted: false,
+    externalRequestsUsed: 0,
+    provider:
+      "BLOCKSCOUT",
+    source:
+      "BLOCKSCOUT_EXACT_POOL_RECENT_SWAP_COMPLETION_V254",
+    status: null,
+    poolId: null,
+    quoteTokenAddress: null,
+    fromBlock: null,
+    toBlock: null,
+    returnedLogs: 0,
+    apiRowCeiling:
+      BLOCKSCOUT_LOGS_MAX_ROWS_V180,
+    saturated:
+      false,
+    completenessClaim:
+      "OBSERVED_ONLY_NOT_FULL_MARKET_WINDOW"
+  };
+
+  const identity =
+    candidate
+      ?.onChainPoolIdentityV153;
+
+  if (
+    identity?.verified !==
+      true
+  ) {
+    return {
+      ...base,
+      status:
+        "VERIFIED_POOL_IDENTITY_REQUIRED"
+    };
+  }
+
+  const poolId =
+    normalize(
+      identity?.poolId
+    );
+
+  const quote =
+    normalize(
+      identity
+        ?.quoteTokenAddress
+    );
+
+  const quoteEligibility =
+    v254PriceableQuote(
+      quote,
+      wethUsdGReference
+    );
+
+  if (
+    !quoteEligibility
+      ?.eligible
+  ) {
+    return {
+      ...base,
+      poolId,
+      quoteTokenAddress:
+        quote || null,
+      quoteEligibility,
+      status:
+        "QUOTE_USD_BASIS_UNVERIFIED"
+    };
+  }
+
+  const toBlock =
+    blockNumberFromAnyV180(
+      latestBlock
+    );
+
+  const identityBlock =
+    blockNumberFromAnyV180(
+      identity?.blockNumber
+    );
+
+  if (
+    !Number.isFinite(
+      toBlock
+    ) ||
+    toBlock <= 0
+  ) {
+    return {
+      ...base,
+      poolId,
+      quoteTokenAddress:
+        quote,
+      quoteEligibility,
+      status:
+        "LATEST_BLOCK_INVALID"
+    };
+  }
+
+  const recentFloor =
+    Math.max(
+      0,
+      toBlock -
+        VERIFIED_USD_COMPLETION_RECENT_BLOCKS_V254 +
+        1
+    );
+
+  const fromBlock =
+    Number.isFinite(
+      identityBlock
+    ) &&
+    identityBlock > 0
+      ? Math.max(
+          recentFloor,
+          identityBlock
+        )
+      : recentFloor;
+
+  const service =
+    blockscoutDirectionalUsdServiceV183(
+      state
+    );
+
+  const cooldownUntil =
+    safeNumber(
+      service?.cooldownUntil
+    );
+
+  if (
+    cooldownUntil >
+      Date.now()
+  ) {
+    return {
+      ...base,
+      poolId,
+      quoteTokenAddress:
+        quote,
+      quoteEligibility,
+      fromBlock,
+      toBlock,
+      status:
+        "BLOCKSCOUT_DIRECTIONAL_429_COOLDOWN_V183",
+      cooldownUntil,
+      retryAfterMs:
+        cooldownUntil -
+        Date.now()
+    };
+  }
+
+  if (
+    !consumeBudget(
+      budget,
+      "analysis",
+      "BLOCKSCOUT_V4_USD_COMPLETION_V254"
+    )
+  ) {
+    return {
+      ...base,
+      poolId,
+      quoteTokenAddress:
+        quote,
+      quoteEligibility,
+      fromBlock,
+      toBlock,
+      status:
+        "ANALYSIS_BUDGET_PROTECTED"
+    };
+  }
+
+  const url =
+    `${BLOCKSCOUT}/api?module=logs&action=getLogs` +
+    `&fromBlock=${fromBlock}` +
+    `&toBlock=${toBlock}` +
+    `&address=${POOL_MANAGER}` +
+    `&topic0=${SWAP_TOPIC}` +
+    `&topic1=${poolId}` +
+    `&topic0_1_opr=and`;
+
+  service.totalRequests =
+    safeNumber(
+      service.totalRequests
+    ) + 1;
+
+  service.lastRequestAt =
+    Date.now();
+
+  service.lastStatus =
+    "V254_REQUESTING";
+
+  try {
+    const response =
+      await fetch(
+        url,
+        {
+          headers: {
+            accept:
+              "application/json"
+          }
+        }
+      );
+
+    if (
+      response.status === 429
+    ) {
+      const backoffMs =
+        registerBlockscoutDirectional429V183(
+          state
+        );
+
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        poolId,
+        quoteTokenAddress:
+          quote,
+        quoteEligibility,
+        fromBlock,
+        toBlock,
+        status:
+          "BLOCKSCOUT_HTTP_429",
+        backoffMs,
+        cooldownUntil:
+          safeNumber(
+            blockscoutDirectionalUsdServiceV183(
+              state
+            )?.cooldownUntil
+          ) || null
+      };
+    }
+
+    if (!response.ok) {
+      service.lastStatus =
+        `V254_HTTP_${response.status}`;
+
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed: 1,
+        poolId,
+        quoteTokenAddress:
+          quote,
+        quoteEligibility,
+        fromBlock,
+        toBlock,
+        status:
+          `BLOCKSCOUT_HTTP_${response.status}`
+      };
+    }
+
+    registerBlockscoutDirectionalSuccessV183(
+      state
+    );
+
+    const payload =
+      await response.json();
+
+    const rows =
+      Array.isArray(
+        payload?.result
+      )
+        ? payload.result
+        : [];
+
+    return {
+      ...base,
+      attempted: true,
+      externalRequestsUsed: 1,
+      poolId,
+      quoteTokenAddress:
+        quote,
+      quoteEligibility,
+      fromBlock,
+      toBlock,
+      returnedLogs:
+        rows.length,
+      saturated:
+        rows.length >=
+          BLOCKSCOUT_LOGS_MAX_ROWS_V180,
+      rows,
+      status:
+        rows.length
+          ? "RECENT_EXACT_POOL_LOGS_RETURNED"
+          : "NO_RECENT_EXACT_POOL_LOGS"
+    };
+  } catch (error) {
+    service.lastStatus =
+      "V254_FETCH_ERROR";
+
+    return {
+      ...base,
+      attempted: true,
+      externalRequestsUsed: 1,
+      poolId,
+      quoteTokenAddress:
+        quote,
+      quoteEligibility,
+      fromBlock,
+      toBlock,
+      status:
+        "BLOCKSCOUT_FETCH_ERROR",
+      error:
+        errorString(
+          error
+        )
+    };
+  }
+}
+
+
+async function verifiedUsdCompletionPassV254(
+  candidate,
+  state,
+  budget,
+  latestBlock,
+  liveLogs,
+  wethUsdGReference
+) {
+  const token =
+    normalize(
+      candidate?.address
+    );
+
+  const before =
+    candidateVerifiedOnChainFlowV212(
+      candidate,
+      state
+    );
+
+  const output = {
+    enabled: true,
+    candidateAddress:
+      token || null,
+    attempted: false,
+    eligible: false,
+    status: null,
+    preExistingVerifiedUsd:
+      before?.verified === true,
+    activitySwaps:
+      safeNumber(
+        candidate?.activity?.swaps
+      ),
+    liveActivitySwaps:
+      safeNumber(
+        candidate
+          ?.liveMomentumActivityV152
+          ?.swaps
+      ),
+    poolSelection: null,
+    localRegistryRepair: null,
+    initializeResolution: null,
+    liveReplay: null,
+    history: null,
+    historyPersistence: null,
+    finalFlow: before,
+    verifiedUsdRecovered:
+      false,
+    externalRequestsUsed: 0,
+    requestCeilingUnchanged:
+      true,
+    noInference:
+      true
+  };
+
+  if (
+    !isAddress(token)
+  ) {
+    return {
+      ...output,
+      status:
+        "INVALID_CANDIDATE"
+    };
+  }
+
+  if (
+    before?.verified ===
+      true
+  ) {
+    return {
+      ...output,
+      status:
+        "ALREADY_HAS_VERIFIED_USD"
+    };
+  }
+
+  if (
+    safeNumber(
+      candidate
+        ?.activity
+        ?.swaps
+    ) <= 0
+  ) {
+    return {
+      ...output,
+      status:
+        "NO_V4_SWAP_ACTIVITY"
+    };
+  }
+
+  const pools =
+    v254PoolIdsForCandidate(
+      candidate,
+      state,
+      liveLogs
+    );
+
+  if (
+    !pools?.watched ||
+    !pools?.poolIds?.length
+  ) {
+    return {
+      ...output,
+      status:
+        "NO_CANDIDATE_POOL_ID"
+    };
+  }
+
+  output.eligible =
+    true;
+
+  output.attempted =
+    true;
+
+  let poolId =
+    normalize(
+      candidate
+        ?.onChainPoolIdentityV153
+        ?.poolId
+    );
+
+  if (
+    !/^0x[a-f0-9]{64}$/.test(
+      String(poolId || "")
+    )
+  ) {
+    poolId =
+      pools.liveSwapPoolIds?.[0] ||
+      pools.poolIds?.[0] ||
+      null;
+  }
+
+  output.poolSelection = {
+    poolId,
+    candidatePoolIds:
+      pools.poolIds,
+    liveSwapPoolIds:
+      pools.liveSwapPoolIds,
+    selectedFrom:
+      pools.liveSwapPoolIds
+        ?.includes(poolId)
+        ? "CURRENT_LIVE_SWAP"
+        : candidate
+            ?.onChainPoolIdentityV153
+            ?.verified === true
+          ? "EXISTING_VERIFIED_IDENTITY"
+          : "WATCHED_POOL"
+  };
+
+  if (
+    !/^0x[a-f0-9]{64}$/.test(
+      String(poolId || "")
+    )
+  ) {
+    return {
+      ...output,
+      status:
+        "SELECTED_POOL_ID_INVALID"
+    };
+  }
+
+  output.localRegistryRepair =
+    v254RepairLocalPoolRegistry(
+      state,
+      pools.watched,
+      poolId
+    );
+
+  /*
+   * If the identity is still unavailable, spend at most one EXISTING
+   * discovery-live request on the proven V184 exact-PoolId Initialize path.
+   */
+  let identity =
+    onChainPoolIdentityV153(
+      pools.watched
+    );
+
+  if (
+    identity?.verified !==
+      true
+  ) {
+    const livePoolLogs =
+      (liveLogs || [])
+        .filter(
+          log =>
+            normalize(
+              log?.topics?.[1]
+            ) === poolId
+        );
+
+    let firstActiveBlock =
+      safeNumber(
+        state
+          ?.unknownPools
+          ?.[poolId]
+          ?.firstActiveBlock
+      );
+
+    if (
+      firstActiveBlock <= 0
+    ) {
+      const blocks =
+        livePoolLogs
+          .map(
+            log =>
+              blockNumberFromAnyV180(
+                log?.blockNumber
+              )
+          )
+          .filter(
+            Number.isFinite
+          );
+
+      if (blocks.length) {
+        firstActiveBlock =
+          Math.min(
+            ...blocks
+          );
+      }
+    }
+
+    if (
+      firstActiveBlock <= 0
+    ) {
+      const watchedPool =
+        (
+          pools.watched.pools ||
+          []
+        ).find(
+          pool =>
+            normalize(
+              pool?.poolId
+            ) === poolId
+        );
+
+      firstActiveBlock =
+        blockNumberFromAnyV180(
+          watchedPool?.blockNumber
+        ) || 0;
+    }
+
+    if (
+      firstActiveBlock > 0
+    ) {
+      const beforeRequests =
+        safeNumber(
+          budget?.totalUsed
+        );
+
+      const initialize =
+        await blockscoutWideInitializeForPoolV184(
+          state,
+          budget,
+          poolId,
+          firstActiveBlock
+        );
+
+      output.externalRequestsUsed +=
+        Math.max(
+          0,
+          safeNumber(
+            budget?.totalUsed
+          ) -
+          beforeRequests
+        );
+
+      output.initializeResolution = {
+        attempted:
+          initialize
+            ?.attempted === true,
+        status:
+          initialize?.status ||
+          null,
+        provider:
+          initialize?.provider ||
+          null,
+        externalRequestsUsed:
+          safeNumber(
+            initialize
+              ?.externalRequestsUsed
+          ),
+        fromBlock:
+          initialize?.fromBlock ??
+          null,
+        toBlock:
+          initialize?.toBlock ??
+          null,
+        resolved:
+          Boolean(
+            initialize
+              ?.resolvedPool
+          )
+      };
+
+      if (
+        initialize
+          ?.resolvedPool
+      ) {
+        registerPoolMapping(
+          state,
+          initialize
+            .resolvedPool
+        );
+
+        v254MergeResolvedPoolIntoWatch(
+          pools.watched,
+          initialize
+            .resolvedPool
+        );
+      }
+    } else {
+      output.initializeResolution = {
+        attempted: false,
+        status:
+          "FIRST_ACTIVE_BLOCK_UNAVAILABLE",
+        externalRequestsUsed: 0,
+        resolved: false
+      };
+    }
+
+    identity =
+      onChainPoolIdentityV153(
+        pools.watched
+      );
+  }
+
+  candidate.onChainPoolIdentityV153 =
+    identity;
+
+  if (
+    identity?.verified !==
+      true
+  ) {
+    const finalFlow =
+      candidateVerifiedOnChainFlowV212(
+        candidate,
+        state
+      );
+
+    return {
+      ...output,
+      finalFlow,
+      status:
+        "POOL_IDENTITY_STILL_UNVERIFIED"
+    };
+  }
+
+  const quoteEligibility =
+    v254PriceableQuote(
+      identity
+        ?.quoteTokenAddress,
+      wethUsdGReference
+    );
+
+  if (
+    !quoteEligibility
+      ?.eligible
+  ) {
+    const finalFlow =
+      candidateVerifiedOnChainFlowV212(
+        candidate,
+        state
+      );
+
+    return {
+      ...output,
+      quoteEligibility,
+      finalFlow,
+      status:
+        "VERIFIED_POOL_BUT_USD_QUOTE_BASIS_UNAVAILABLE"
+    };
+  }
+
+  /*
+   * Zero-request first choice: replay only the CURRENT live batch for this
+   * exact pool. Those logs are current, so LIVE_NOW is truthful.
+   */
+  const exactLiveRows =
+    (liveLogs || [])
+      .filter(
+        log =>
+          normalize(
+            log?.topics?.[0]
+          ) ===
+            SWAP_TOPIC &&
+          normalize(
+            log?.topics?.[1]
+          ) ===
+            normalize(
+              identity?.poolId
+            )
+      );
+
+  output.liveReplay =
+    persistVerifiedUsdTradesV254(
+      state,
+      token,
+      exactLiveRows,
+      wethUsdGReference,
+      "LIVE_NOW"
+    );
+
+  let afterLiveReplay =
+    candidateVerifiedOnChainFlowV212(
+      candidate,
+      state
+    );
+
+  if (
+    afterLiveReplay?.verified ===
+      true
+  ) {
+    return {
+      ...output,
+      finalFlow:
+        afterLiveReplay,
+      verifiedUsdRecovered:
+        true,
+      status:
+        "VERIFIED_USD_RECOVERED_FROM_CURRENT_LIVE_LOGS"
+    };
+  }
+
+  /*
+   * One exact-pool recent history request maximum. This is observed evidence,
+   * never promoted to a claim of complete market-window coverage.
+   */
+  const beforeHistoryRequests =
+    safeNumber(
+      budget?.totalUsed
+    );
+
+  const history =
+    await blockscoutExactPoolUsdCompletionV254(
+      candidate,
+      budget,
+      state,
+      latestBlock,
+      wethUsdGReference
+    );
+
+  output.externalRequestsUsed +=
+    Math.max(
+      0,
+      safeNumber(
+        budget?.totalUsed
+      ) -
+      beforeHistoryRequests
+    );
+
+  output.history = {
+    ...history,
+    rows:
+      undefined
+  };
+
+  if (
+    Array.isArray(
+      history?.rows
+    ) &&
+    history.rows.length
+  ) {
+    output.historyPersistence =
+      persistVerifiedUsdTradesV254(
+        state,
+        token,
+        history.rows,
+        wethUsdGReference,
+        "BLOCKSCOUT_TIMESTAMP"
+      );
+  }
+
+  const finalFlow =
+    candidateVerifiedOnChainFlowV212(
+      candidate,
+      state
+    );
+
+  output.finalFlow =
+    finalFlow;
+
+  output.verifiedUsdRecovered =
+    finalFlow?.verified ===
+      true;
+
+  output.status =
+    output.verifiedUsdRecovered
+      ? "VERIFIED_USD_RECOVERED_FROM_EXACT_POOL_HISTORY"
+      : (
+          history?.status ||
+          "VERIFIED_USD_NOT_RECOVERED"
+        );
+
+  return output;
+}
+
+
 function candidateVerifiedOnChainFlowV212(
   candidate,
   state
@@ -44353,6 +45742,134 @@ for (
   }
 
   /*
+   * V254: one protected completion target per scan.
+   *
+   * Only a candidate that already qualifies under the existing Telegram
+   * thresholds is eligible. This cannot make a non-qualifying candidate alert;
+   * it only attempts to complete missing exact-USD evidence before the final
+   * V212/V253 pass.
+   */
+  const verifiedUsdCompletionCandidatesV254 =
+    candidates
+      .filter(
+        candidate =>
+          qualifiesTelegram(
+            candidate
+          ) &&
+          safeNumber(
+            candidate
+              ?.activity
+              ?.swaps
+          ) > 0 &&
+          candidateVerifiedOnChainFlowV212(
+            candidate,
+            state
+          )?.verified !== true
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.opportunity?.score
+          ) -
+          safeNumber(
+            a?.opportunity?.score
+          )
+      )
+      .slice(
+        0,
+        VERIFIED_USD_COMPLETION_MAX_CANDIDATES_V254
+      );
+
+  const verifiedUsdCompletionV254 = {
+    enabled: true,
+    maxCandidatesPerScan:
+      VERIFIED_USD_COMPLETION_MAX_CANDIDATES_V254,
+    maxHistoryRequestsPerScan:
+      VERIFIED_USD_COMPLETION_MAX_HISTORY_REQUESTS_V254,
+    recentLookbackBlocks:
+      VERIFIED_USD_COMPLETION_RECENT_BLOCKS_V254,
+    requestCeilingsUnchanged: true,
+    candidatesEligible:
+      verifiedUsdCompletionCandidatesV254
+        .length,
+    attempted: 0,
+    recovered: 0,
+    results: []
+  };
+
+  for (
+    const candidate
+    of verifiedUsdCompletionCandidatesV254
+  ) {
+    verifiedUsdCompletionV254
+      .attempted++;
+
+    const completion =
+      await verifiedUsdCompletionPassV254(
+        candidate,
+        state,
+        budget,
+        latestNumber,
+        liveOutput.logs,
+        onChainDirectionalV179
+          ?.wethUsdGReferenceV187 ||
+          null
+      );
+
+    candidate.verifiedUsdCompletionV254 =
+      completion;
+
+    verifiedUsdCompletionV254
+      .results.push({
+        address:
+          normalize(
+            candidate?.address
+          ),
+        symbol:
+          candidate?.symbol ||
+          null,
+        status:
+          completion?.status ||
+          null,
+        verifiedUsdRecovered:
+          completion
+            ?.verifiedUsdRecovered ===
+          true,
+        externalRequestsUsed:
+          safeNumber(
+            completion
+              ?.externalRequestsUsed
+          ),
+        poolSelection:
+          completion?.poolSelection ||
+          null,
+        initializeResolution:
+          completion
+            ?.initializeResolution ||
+          null,
+        liveReplay:
+          completion?.liveReplay ||
+          null,
+        history:
+          completion?.history ||
+          null,
+        historyPersistence:
+          completion
+            ?.historyPersistence ||
+          null
+      });
+
+    if (
+      completion
+        ?.verifiedUsdRecovered ===
+      true
+    ) {
+      verifiedUsdCompletionV254
+        .recovered++;
+    }
+  }
+
+  /*
    * V212: zero-request candidate-specific bridge.
    * This is intentionally applied after all discovery/enrichment so Telegram
    * sees the freshest already-verified V179 records from this scan.
@@ -47065,9 +48582,36 @@ for (
     holderLookups,
 
     candidates,
+
+    verifiedUsdCompletionV254: {
+      ...verifiedUsdCompletionV254,
+      preservedHardExternalRequestLimit:
+        MAX_EXTERNAL_REQUESTS,
+      preservedAnalysisRequestLimit:
+        ANALYSIS_REQUEST_LIMIT,
+      verifiedUsdMathChanged:
+        false,
+      marketCountUsdInference:
+        false,
+      candidateMatchedEvidenceRequired:
+        true
+    },
+
     telegramVerifiedUsdObservabilityV213: {
       enabled: true,
-      externalRequestsAdded: 0,
+      externalRequestsAdded:
+        safeNumber(
+          verifiedUsdCompletionV254
+            ?.results
+            ?.reduce(
+              (sum, row) =>
+                sum +
+                safeNumber(
+                  row?.externalRequestsUsed
+                ),
+              0
+            )
+        ),
       verifiedUsdCalculationChanged: false,
       candidates: telegramVerifiedUsdObservabilityV213
     },
