@@ -1,5 +1,11 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V275 / V2.0:
+ * - FIX: Telegram command handler used nonexistent loadState(); corrected to existing readState()
+ * - FIX: /call-performance had the same nonexistent loadState() reference; corrected to readState()
+ * - V274 diagnostics proved /help reached the Worker, matched the configured channel and parsed correctly before this failure
+ * - No scanner logic, scoring, Momentum, verified USD maths, Telegram thresholds or request budgets changed
+ * - Preserves V274 diagnostics, V273 webhook status, V272 channel posts, V271 commands and V270 performance tracking
  * V274 / V2.0:
  * - NEW: read-only Telegram getWebhookInfo diagnostics
  * - NEW ROUTE: /telegram-webhook-info shows Telegram's active webhook URL, allowed update types, pending update count, max connections and last delivery error
@@ -1170,7 +1176,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V274";
+const VERSION = "V275";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -59545,7 +59551,7 @@ async function telegramCommandReplyV271(
   }
 
   const loaded =
-    await loadState(env);
+    await readState(env);
 
   const state =
     loaded?.state ||
@@ -60522,7 +60528,7 @@ async function handleRequest(
     "/call-performance"
   ) {
     const loaded =
-      await loadState(
+      await readState(
         env
       );
 
