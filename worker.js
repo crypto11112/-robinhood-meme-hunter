@@ -1,5 +1,14 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V270 / V2.0:
+ * - NEW: automatic Call → ATH performance tracking for successful Telegram calls
+ * - Stores verified entry price / market cap at the successful alert moment when available
+ * - Updates verified post-call ATH price / market cap on later analysed scans
+ * - Calculates ATH X, current X, and drawdown from ATH separately for price and market cap
+ * - Never invents entry/ATH/current values; unverified market evidence leaves prior ATH unchanged
+ * - NEW ROUTE: /call-performance exposes the persistent performance registry
+ * - Zero provider/API requests added; telemetry only, no scoring/qualification/Momentum/Telegram changes
+ * - Preserves V269 holder integrity, V268 alert history, V267 follow-up tracking and 42/21 ceilings
  * V269 / V2.0:
  * - FIX: Telegram holder presentation now distinguishes fresh holder-count evidence from independent cached concentration evidence
  * - Cached concentration can no longer visually appear to be freshly verified by a newly recovered holder count
@@ -1130,7 +1139,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V269";
+const VERSION = "V270";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2267,6 +2276,8 @@ const FOLLOW_UP_BEARISH_NET_USD_V267 = -500;
 const FOLLOW_UP_BULLISH_NET_USD_V267 = 500;
 const FOLLOW_UP_BEARISH_BUY_PRESSURE_V267 = 40;
 const FOLLOW_UP_BULLISH_BUY_PRESSURE_V267 = 60;
+
+const CALL_PERFORMANCE_MAX_TRACKED_V270 = 100;
 
 
 const MIN_ALERT_SCORE = 60;
@@ -3652,6 +3663,9 @@ function newState() {
     followUpTrackingV267:
       {},
 
+    callPerformanceV270:
+      {},
+
     launchAgeRecoveryV260:
       {},
 
@@ -4139,6 +4153,13 @@ async function readState(env) {
           typeof parsed.followUpTrackingV267 ===
             "object"
             ? parsed.followUpTrackingV267
+            : {},
+
+        callPerformanceV270:
+          parsed.callPerformanceV270 &&
+          typeof parsed.callPerformanceV270 ===
+            "object"
+            ? parsed.callPerformanceV270
             : {},
 
         launchAgeRecoveryV260:
@@ -44782,6 +44803,546 @@ function shouldKeepCompletionCandidate(
    ========================================================= */
 
 
+
+/* =========================================================
+   V270 CALL → ATH PERFORMANCE TRACKING
+   ========================================================= */
+
+function verifiedMarketSnapshotV270(candidate) {
+  const market = candidate?.market;
+
+  if (market?.verified !== true) {
+    return {
+      verified: false,
+      priceUsd: null,
+      marketCap: null,
+      liquidityUsd: null,
+      source: market?.source || null
+    };
+  }
+
+  const price = Number(market?.priceUsd);
+  const cap = Number(market?.marketCap);
+  const liq = Number(market?.liquidityUsd);
+
+  return {
+    verified: true,
+    priceUsd:
+      Number.isFinite(price) && price > 0
+        ? price
+        : null,
+    marketCap:
+      Number.isFinite(cap) && cap > 0
+        ? cap
+        : null,
+    liquidityUsd:
+      Number.isFinite(liq) && liq > 0
+        ? liq
+        : null,
+    source:
+      market?.source || null
+  };
+}
+
+function multipleV270(entry, value) {
+  const a = Number(entry);
+  const b = Number(value);
+
+  if (
+    !Number.isFinite(a) ||
+    !Number.isFinite(b) ||
+    a <= 0 ||
+    b <= 0
+  ) {
+    return null;
+  }
+
+  return b / a;
+}
+
+function drawdownV270(ath, current) {
+  const a = Number(ath);
+  const b = Number(current);
+
+  if (
+    !Number.isFinite(a) ||
+    !Number.isFinite(b) ||
+    a <= 0 ||
+    b < 0
+  ) {
+    return null;
+  }
+
+  return (a - b) / a;
+}
+
+function buildCallPerformanceRecordV270(
+  candidate,
+  existing = null,
+  successfulAlert = false
+) {
+  const market =
+    verifiedMarketSnapshotV270(
+      candidate
+    );
+
+  const nowMs = Date.now();
+
+  const entryTimestamp =
+    existing?.entryTimestamp ||
+    (successfulAlert ? nowMs : null);
+
+  const entryPriceUsd =
+    existing?.entryPriceUsd ??
+    (
+      successfulAlert &&
+      market.verified
+        ? market.priceUsd
+        : null
+    );
+
+  const entryMarketCap =
+    existing?.entryMarketCap ??
+    (
+      successfulAlert &&
+      market.verified
+        ? market.marketCap
+        : null
+    );
+
+  let athPriceUsd =
+    existing?.athPriceUsd ??
+    entryPriceUsd ??
+    null;
+
+  let athPriceTimestamp =
+    existing?.athPriceTimestamp ??
+    (
+      athPriceUsd !== null
+        ? entryTimestamp
+        : null
+    );
+
+  let athMarketCap =
+    existing?.athMarketCap ??
+    entryMarketCap ??
+    null;
+
+  let athMarketCapTimestamp =
+    existing?.athMarketCapTimestamp ??
+    (
+      athMarketCap !== null
+        ? entryTimestamp
+        : null
+    );
+
+  let athPriceUpdated = false;
+  let athMarketCapUpdated = false;
+
+  if (
+    market.verified &&
+    market.priceUsd !== null &&
+    (
+      athPriceUsd === null ||
+      market.priceUsd > athPriceUsd
+    )
+  ) {
+    athPriceUsd = market.priceUsd;
+    athPriceTimestamp = nowMs;
+    athPriceUpdated = true;
+  }
+
+  if (
+    market.verified &&
+    market.marketCap !== null &&
+    (
+      athMarketCap === null ||
+      market.marketCap > athMarketCap
+    )
+  ) {
+    athMarketCap = market.marketCap;
+    athMarketCapTimestamp = nowMs;
+    athMarketCapUpdated = true;
+  }
+
+  const currentPriceUsd =
+    market.verified
+      ? market.priceUsd
+      : null;
+
+  const currentMarketCap =
+    market.verified
+      ? market.marketCap
+      : null;
+
+  return {
+    address:
+      normalize(candidate?.address),
+
+    symbol:
+      candidate?.symbol ||
+      existing?.symbol ||
+      null,
+
+    name:
+      candidate?.name ||
+      existing?.name ||
+      null,
+
+    sourceVersion: "V270",
+
+    entryTimestamp,
+    entryPriceUsd,
+    entryMarketCap,
+
+    entryMarketVerified:
+      entryPriceUsd !== null ||
+      entryMarketCap !== null,
+
+    currentObservationTimestamp:
+      nowMs,
+
+    currentMarketVerified:
+      market.verified,
+
+    currentPriceUsd,
+    currentMarketCap,
+
+    currentLiquidityUsd:
+      market.verified
+        ? market.liquidityUsd
+        : null,
+
+    currentMarketSource:
+      market.source,
+
+    athPriceUsd,
+    athPriceTimestamp,
+    athMarketCap,
+    athMarketCapTimestamp,
+
+    athPriceUpdated,
+    athMarketCapUpdated,
+
+    athMultipleByPrice:
+      multipleV270(
+        entryPriceUsd,
+        athPriceUsd
+      ),
+
+    athMultipleByMarketCap:
+      multipleV270(
+        entryMarketCap,
+        athMarketCap
+      ),
+
+    currentMultipleByPrice:
+      multipleV270(
+        entryPriceUsd,
+        currentPriceUsd
+      ),
+
+    currentMultipleByMarketCap:
+      multipleV270(
+        entryMarketCap,
+        currentMarketCap
+      ),
+
+    drawdownFromAthPrice:
+      drawdownV270(
+        athPriceUsd,
+        currentPriceUsd
+      ),
+
+    drawdownFromAthMarketCap:
+      drawdownV270(
+        athMarketCap,
+        currentMarketCap
+      ),
+
+    observationCount:
+      safeNumber(
+        existing?.observationCount
+      ) + 1,
+
+    verifiedOnly: true,
+    syntheticPriceUsed: false,
+    syntheticMarketCapUsed: false,
+
+    unverifiedCurrentMarketPreservesPriorAth:
+      market.verified !== true,
+
+    exactV270EntryBaseline:
+      existing?.exactV270EntryBaseline ===
+      true
+  };
+}
+
+function pruneCallPerformanceV270(state) {
+  if (
+    !state.callPerformanceV270 ||
+    typeof state.callPerformanceV270 !==
+      "object"
+  ) {
+    state.callPerformanceV270 = {};
+
+    return {
+      pruned: 0,
+      remaining: 0
+    };
+  }
+
+  const entries =
+    Object.entries(
+      state.callPerformanceV270
+    ).sort(
+      (
+        [, a],
+        [, b]
+      ) =>
+        safeNumber(
+          b?.currentObservationTimestamp
+        ) -
+        safeNumber(
+          a?.currentObservationTimestamp
+        )
+    );
+
+  const keep =
+    entries.slice(
+      0,
+      CALL_PERFORMANCE_MAX_TRACKED_V270
+    );
+
+  state.callPerformanceV270 =
+    Object.fromEntries(keep);
+
+  return {
+    pruned:
+      Math.max(
+        0,
+        entries.length -
+        keep.length
+      ),
+    remaining:
+      keep.length
+  };
+}
+
+function registerSuccessfulCallPerformanceV270(
+  candidate,
+  state
+) {
+  const address =
+    normalize(candidate?.address);
+
+  if (!address) {
+    return null;
+  }
+
+  if (
+    !state.callPerformanceV270 ||
+    typeof state.callPerformanceV270 !==
+      "object"
+  ) {
+    state.callPerformanceV270 = {};
+  }
+
+  const existing =
+    state.callPerformanceV270[
+      address
+    ] || null;
+
+  const record =
+    buildCallPerformanceRecordV270(
+      candidate,
+      existing,
+      true
+    );
+
+  record.lastSuccessfulAlertAt =
+    Date.now();
+
+  if (!existing?.entryTimestamp) {
+    record.exactV270EntryBaseline = true;
+  }
+
+  state.callPerformanceV270[
+    address
+  ] = record;
+
+  pruneCallPerformanceV270(state);
+
+  return {
+    address,
+    symbol: record.symbol,
+    exactV270EntryBaseline:
+      record.exactV270EntryBaseline,
+    entryTimestamp:
+      record.entryTimestamp,
+    entryPriceUsd:
+      record.entryPriceUsd,
+    entryMarketCap:
+      record.entryMarketCap,
+    athPriceUsd:
+      record.athPriceUsd,
+    athMarketCap:
+      record.athMarketCap,
+    athMultipleByPrice:
+      record.athMultipleByPrice,
+    athMultipleByMarketCap:
+      record.athMultipleByMarketCap
+  };
+}
+
+function updateCallPerformanceV270(
+  candidates,
+  state
+) {
+  if (
+    !state.callPerformanceV270 ||
+    typeof state.callPerformanceV270 !==
+      "object"
+  ) {
+    state.callPerformanceV270 = {};
+  }
+
+  const results = [];
+
+  for (const candidate of candidates || []) {
+    const address =
+      normalize(candidate?.address);
+
+    const existing =
+      state.callPerformanceV270[
+        address
+      ];
+
+    if (!address || !existing) {
+      continue;
+    }
+
+    const updated =
+      buildCallPerformanceRecordV270(
+        candidate,
+        existing,
+        false
+      );
+
+    updated.lastSuccessfulAlertAt =
+      existing?.lastSuccessfulAlertAt ||
+      null;
+
+    updated.exactV270EntryBaseline =
+      existing
+        ?.exactV270EntryBaseline ===
+      true;
+
+    state.callPerformanceV270[
+      address
+    ] = updated;
+
+    results.push({
+      address,
+      symbol: updated.symbol,
+      currentMarketVerified:
+        updated.currentMarketVerified,
+      entryMarketCap:
+        updated.entryMarketCap,
+      currentMarketCap:
+        updated.currentMarketCap,
+      athMarketCap:
+        updated.athMarketCap,
+      athMultipleByMarketCap:
+        updated.athMultipleByMarketCap,
+      currentMultipleByMarketCap:
+        updated.currentMultipleByMarketCap,
+      drawdownFromAthMarketCap:
+        updated.drawdownFromAthMarketCap,
+      entryPriceUsd:
+        updated.entryPriceUsd,
+      currentPriceUsd:
+        updated.currentPriceUsd,
+      athPriceUsd:
+        updated.athPriceUsd,
+      athMultipleByPrice:
+        updated.athMultipleByPrice,
+      currentMultipleByPrice:
+        updated.currentMultipleByPrice,
+      drawdownFromAthPrice:
+        updated.drawdownFromAthPrice,
+      athPriceUpdated:
+        updated.athPriceUpdated,
+      athMarketCapUpdated:
+        updated.athMarketCapUpdated
+    });
+  }
+
+  const pruning =
+    pruneCallPerformanceV270(state);
+
+  return {
+    enabled: true,
+    sourceVersion: "V270",
+    telemetryOnly: true,
+    verifiedMarketOnly: true,
+    externalRequestsAdded: 0,
+    scoringChanged: false,
+    qualificationChanged: false,
+    momentumChanged: false,
+    verifiedUsdMathChanged: false,
+    telegramThresholdsChanged: false,
+    trackedThisScan:
+      results.length,
+    results,
+    pruning
+  };
+}
+
+function callPerformanceReportV270(state) {
+  const registry =
+    state?.callPerformanceV270 &&
+    typeof state.callPerformanceV270 ===
+      "object"
+      ? state.callPerformanceV270
+      : {};
+
+  const entries =
+    Object.values(registry)
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.currentObservationTimestamp
+          ) -
+          safeNumber(
+            a?.currentObservationTimestamp
+          )
+      );
+
+  return {
+    agent:
+      "Robinhood Chain Meme Hunter",
+    version:
+      VERSION,
+    status:
+      entries.length
+        ? "CALL_PERFORMANCE_AVAILABLE"
+        : "NO_CALL_PERFORMANCE_SAVED",
+    maximumTrackedTokens:
+      CALL_PERFORMANCE_MAX_TRACKED_V270,
+    count:
+      entries.length,
+    verifiedMarketOnly:
+      true,
+    newestObservationFirst:
+      true,
+    entries,
+    timestamp:
+      now()
+  };
+}
+
+
 /* =========================================================
    V267 PERSISTENT POST-ALERT FOLLOW-UP TRACKING
    ========================================================= */
@@ -51275,6 +51836,16 @@ for (
   }
 
   /*
+   * V270: update previously registered calls using only verified market
+   * evidence already collected by this scan. No external requests added.
+   */
+  const callPerformanceV270 =
+    updateCallPerformanceV270(
+      candidates,
+      state
+    );
+
+  /*
    * V267: compare already-alerted candidates using only evidence that exists
    * in this scan. No request is made and no Telegram qualification changes.
    */
@@ -51419,6 +51990,17 @@ for (
     if (
       result.success
     ) {
+      const callPerformanceRegistrationV270 =
+        registerSuccessfulCallPerformanceV270(
+          candidate,
+          state
+        );
+
+      telegramResults[
+        telegramResults.length - 1
+      ].callPerformanceRegistrationV270 =
+        callPerformanceRegistrationV270;
+
       const sameRunVerifiedUsdCompletionV264 =
         verifiedUsdCompletionForAddressV264(
           verifiedUsdCompletionV254,
@@ -51476,6 +52058,12 @@ for (
           alertDiagnosticCandidateV264(
             candidate
           ),
+
+        callPerformanceV270:
+          state
+            ?.callPerformanceV270
+            ?.[address] ||
+          null,
 
         verifiedUsdCompletionV254:
           sameRunVerifiedUsdCompletionV264,
@@ -54045,6 +54633,32 @@ for (
         true
     },
 
+    callPerformanceTrackingV270: {
+      enabled: true,
+      telemetryOnly: true,
+      route: "/call-performance",
+      verifiedMarketOnly: true,
+      entryCapturedAtSuccessfulTelegramSend: true,
+      laterAnalysedScansUpdateAth: true,
+      athPriceAndMarketCapSeparate: true,
+      currentMultipleCalculated: true,
+      athMultipleCalculated: true,
+      drawdownFromAthCalculated: true,
+      unverifiedMarketPreservesPriorAth: true,
+      syntheticPriceUsed: false,
+      syntheticMarketCapUsed: false,
+      externalRequestsAdded: 0,
+      scoringChanged: false,
+      qualificationChanged: false,
+      momentumChanged: false,
+      verifiedUsdMathChanged: false,
+      telegramThresholdsChanged: false,
+      hardExternalRequestLimitPreserved:
+        MAX_EXTERNAL_REQUESTS,
+      analysisRequestLimitPreserved:
+        ANALYSIS_REQUEST_LIMIT
+    },
+
     holderPresentationIntegrityV269: {
       enabled: true,
       presentationOnly: true,
@@ -54427,6 +55041,26 @@ for (
                 null
             })
           )
+    },
+
+    callPerformanceV270: {
+      ...callPerformanceV270,
+      registrySize:
+        Object.keys(
+          state
+            ?.callPerformanceV270 ||
+          {}
+        ).length,
+      maximumTrackedTokens:
+        CALL_PERFORMANCE_MAX_TRACKED_V270,
+      verifiedMarketOnly: true,
+      noSyntheticPrice: true,
+      noSyntheticMarketCap: true,
+      noExtraExternalRequests: true,
+      scoringUnchanged: true,
+      qualificationUnchanged: true,
+      momentumUnchanged: true,
+      telegramThresholdsUnchanged: true
     },
 
     followUpTrackingV267: {
@@ -57323,7 +57957,8 @@ async function health(
       "/run-all",
       "/test-telegram",
       "/last-alert-scan",
-      "/alert-history"
+      "/alert-history",
+      "/call-performance"
     ],
 
     chain: {
@@ -58203,6 +58838,23 @@ async function handleRequest(
     );
   }
 
+  if (
+    path ===
+    "/call-performance"
+  ) {
+    const loaded =
+      await loadState(
+        env
+      );
+
+    return jsonResponse(
+      callPerformanceReportV270(
+        loaded?.state ||
+        newState()
+      )
+    );
+  }
+
   return jsonResponse(
     {
       agent:
@@ -58225,7 +58877,9 @@ async function handleRequest(
         "/diagnostics",
         "/run-all",
         "/test-telegram",
-        "/last-alert-scan"
+        "/last-alert-scan",
+        "/alert-history",
+        "/call-performance"
       ],
 
       timestamp:
