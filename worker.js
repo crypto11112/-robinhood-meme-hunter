@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V287 / V2.0:
+ * - VERIFIED USD RECOVERY: manual /analyse first bridges the existing candidate-matched V179/V212 verified on-chain USD ledger from its isolated state clone at zero request cost
+ * - VERIFIED USD RECOVERY: if no fresh stored flow exists, /analyse may spend remaining manual headroom on the existing strict exact-PoolId Blockscout V254/V263 recent-history reader even when the short V283 live window has zero swaps
+ * - SAFETY: recovered logs still pass the existing exact candidate/pool/quote/USD decoder and timestamp rules; broad market counts are never converted into USD
+ * - SAFETY: recovery mutates only the isolated manual clone; autonomous scanner state/watchlist, scoring, qualification, standard Telegram formatter, thresholds and 42/21 budgets remain unchanged
+ * - BUDGET: the 16-request /analyse ceiling is unchanged; Bitquery remains the final fallback only if verified USD is still unavailable and budget/provider state allows
+ * - Preserves V286 layout parity, V285 Bitquery fallback, V283 exact-pool live enrichment and all confirmed-working scanner behavior
  * V286 / V2.0:
  * - PRESENTATION: manual /analyse now mirrors the standard autonomous alert information sections without changing the autonomous telegramMessage() formatter
  * - ADDS TO MANUAL OUTPUT: launch source + scanner age, Market Activity Counts, holder count source, holder concentration/source, whale wallet details, accumulation/distribution/trend, smart-money candidate status, and pool V4 swap/liquidity-event counts
@@ -61185,6 +61192,16 @@ function telegramAnalyseResultMessageV276(
     )}</b> | requests <b>${safeNumber(
       telemetry?.manualLiveV4EnrichmentV283?.requestsUsed
     )}</b>`,
+    `💵 V287 verified USD recovery: <b>${escapeHtml(
+      telemetry?.manualVerifiedUsdRecoveryV287?.status ||
+      "NOT_ATTEMPTED"
+    )}</b> | requests <b>${safeNumber(
+      telemetry?.manualVerifiedUsdRecoveryV287?.requestsUsed
+    )}</b> | rows <b>${safeNumber(
+      telemetry?.manualVerifiedUsdRecoveryV287?.rows
+    )}</b> | exact USD <b>${safeNumber(
+      telemetry?.manualVerifiedUsdRecoveryV287?.exactUsdTrades
+    )}</b>`,
     `💵 V285 USD enrichment: <b>${escapeHtml(
       telemetry?.manualBitqueryUsdV285?.status ||
       "NOT_ATTEMPTED"
@@ -61573,6 +61590,122 @@ function applyManualLiveV4EnrichmentV283(
   return updated;
 }
 
+/* =========================================================
+   V287 MANUAL VERIFIED USD RECOVERY
+   ========================================================= */
+function attachManualStoredVerifiedUsdV287(
+  candidate,
+  state
+) {
+  const flow =
+    candidateVerifiedOnChainFlowV212(
+      candidate,
+      state
+    );
+
+  if (!candidate) {
+    return {candidate, flow, verified: false, status: "CANDIDATE_UNAVAILABLE"};
+  }
+
+  const updated = {
+    ...candidate,
+    onChainVerifiedFlowV212: flow
+  };
+
+  updated.telegramVerifiedUsdDiagnosticV213 =
+    telegramVerifiedUsdDiagnosticV213(updated);
+
+  const verified =
+    flow?.verified === true &&
+    updated?.telegramVerifiedUsdDiagnosticV213
+      ?.telegramVerifiedUsdSectionEligible === true;
+
+  return {
+    candidate: updated,
+    flow,
+    verified,
+    status: verified
+      ? "STORED_CANDIDATE_MATCHED_V179_USD_ATTACHED_V287"
+      : (flow?.status || "NO_STORED_VERIFIED_USD_V287")
+  };
+}
+
+async function manualVerifiedUsdRecoveryV287(
+  env, budget, state, candidate, manualLiveV4ResultV283
+) {
+  const base = {
+    attempted: false, verified: false, status: "NOT_ATTEMPTED",
+    requestsUsed: 0, storedFlowStatus: null, historyStatus: null,
+    provider: null, rows: 0, inserted: 0, deduplicated: 0,
+    exactUsdTrades: 0, candidate: candidate || null
+  };
+
+  const stored = attachManualStoredVerifiedUsdV287(candidate, state);
+  candidate = stored.candidate;
+
+  if (stored.verified === true) {
+    return {
+      ...base, verified: true,
+      status: "VERIFIED_FROM_EXISTING_V179_LEDGER_V287",
+      storedFlowStatus: stored.status, candidate
+    };
+  }
+
+  if (!candidate || candidate?.validERC20 !== true) {
+    return {...base, status: "CANDIDATE_NOT_ELIGIBLE", storedFlowStatus: stored.status, candidate};
+  }
+
+  if (candidate?.onChainPoolIdentityV153?.verified !== true) {
+    return {...base, status: "VERIFIED_POOL_IDENTITY_REQUIRED", storedFlowStatus: stored.status, candidate};
+  }
+
+  const latestBlock = blockNumberFromAnyV180(manualLiveV4ResultV283?.toBlock);
+  if (!Number.isFinite(latestBlock) || latestBlock <= 0) {
+    return {...base, status: "LATEST_BLOCK_UNAVAILABLE_FOR_HISTORY_V287", storedFlowStatus: stored.status, candidate};
+  }
+
+  const liveLogs = Array.isArray(manualLiveV4ResultV283?.logs)
+    ? manualLiveV4ResultV283.logs
+    : [];
+  const wethUsdGReferenceV287 =
+    deriveCanonicalWethUsdGReferenceV187(state, liveLogs);
+
+  const before = safeNumber(budget?.totalUsed);
+  const history = await blockscoutExactPoolUsdCompletionV254(
+    candidate, budget, state, latestBlock, wethUsdGReferenceV287, env
+  );
+  const requestsUsed = Math.max(0, safeNumber(budget?.totalUsed) - before);
+
+  let persistence = null;
+  if (Array.isArray(history?.rows) && history.rows.length) {
+    persistence = persistVerifiedUsdTradesV254(
+      state, candidate.address, history.rows, wethUsdGReferenceV287, "BLOCKSCOUT_TIMESTAMP"
+    );
+  }
+
+  const attached = attachManualStoredVerifiedUsdV287(candidate, state);
+  candidate = attached.candidate;
+  const verified = attached.verified === true;
+
+  return {
+    ...base,
+    attempted: history?.attempted === true || requestsUsed > 0,
+    verified,
+    status: verified
+      ? "VERIFIED_FROM_EXACT_POOL_BLOCKSCOUT_HISTORY_V287"
+      : (history?.status || attached?.status || "VERIFIED_USD_NOT_RECOVERED_V287"),
+    requestsUsed,
+    storedFlowStatus: attached?.status || stored?.status || null,
+    historyStatus: history?.status || null,
+    provider: history?.providerPathV263 || history?.provider || null,
+    rows: safeNumber(history?.returnedLogs),
+    inserted: safeNumber(persistence?.inserted),
+    deduplicated: safeNumber(persistence?.deduplicated),
+    exactUsdTrades: safeNumber(persistence?.exactUsdTrades),
+    candidate
+  };
+}
+
 async function telegramFreshAnalyseV276(
   env,
   state,
@@ -61832,6 +61965,19 @@ async function telegramFreshAnalyseV276(
       manualLiveV4ResultV283
     );
 
+  const manualVerifiedUsdRecoveryResultV287 =
+    await manualVerifiedUsdRecoveryV287(
+      env,
+      budget,
+      isolatedState,
+      candidate,
+      manualLiveV4ResultV283
+    );
+
+  candidate =
+    manualVerifiedUsdRecoveryResultV287?.candidate ||
+    candidate;
+
   const manualBitqueryUsdResultV285 =
     await manualBitqueryDirectionalUsdV285(
       env,
@@ -61987,6 +62133,19 @@ async function telegramFreshAnalyseV276(
         manualLiveV4ResultV283?.providerLogs || null,
       error:
         manualLiveV4ResultV283?.error || null
+    },
+    manualVerifiedUsdRecoveryV287: {
+      attempted: manualVerifiedUsdRecoveryResultV287?.attempted === true,
+      verified: manualVerifiedUsdRecoveryResultV287?.verified === true,
+      status: manualVerifiedUsdRecoveryResultV287?.status || null,
+      requestsUsed: safeNumber(manualVerifiedUsdRecoveryResultV287?.requestsUsed),
+      storedFlowStatus: manualVerifiedUsdRecoveryResultV287?.storedFlowStatus || null,
+      historyStatus: manualVerifiedUsdRecoveryResultV287?.historyStatus || null,
+      provider: manualVerifiedUsdRecoveryResultV287?.provider || null,
+      rows: safeNumber(manualVerifiedUsdRecoveryResultV287?.rows),
+      exactUsdTrades: safeNumber(manualVerifiedUsdRecoveryResultV287?.exactUsdTrades),
+      inserted: safeNumber(manualVerifiedUsdRecoveryResultV287?.inserted),
+      deduplicated: safeNumber(manualVerifiedUsdRecoveryResultV287?.deduplicated)
     },
     manualBitqueryUsdV285: {
       attempted: manualBitqueryUsdResultV285?.attempted === true,
