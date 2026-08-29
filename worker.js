@@ -1,5 +1,13 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V279 / V2.0:
+ * - NEW: manual /analyse request accounting now records the exact consumed request types inside the isolated 12-request command budget
+ * - NEW: /analyse reports a compact request-use breakdown so request waste can be removed from evidence instead of guessed at
+ * - CLARITY: manual Momentum keeps the proven multi-source score, but now states whether live V4 activity itself was verified
+ * - CLARITY: missing/zero positive USD liquidity from an otherwise verified market payload is explicitly labelled UNVERIFIED rather than treated as verified zero liquidity
+ * - SAFETY: request telemetry is enabled only for the isolated manual-analysis budget and cannot alter scanner accounting or provider behaviour
+ * - No scanner logic, scoring, Momentum maths, verified BUY/SELL USD maths, qualification, holder logic, Telegram thresholds, KV keys, provider protections or request ceilings changed
+ * - Preserves all confirmed-working V278 functionality and state/history
  * V278 / V2.0:
  * - FIX: Telegram /analyse and stored-call money formatting no longer calls undefined compactNumber()
  * - FIX: telegramMoneyV271 now reuses the existing proven formatNumber() helper
@@ -1200,7 +1208,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V278";
+const VERSION = "V279";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -3153,6 +3161,26 @@ function consumeBudget(
 
   budget.totalUsed +=
     amount;
+
+  /*
+   * V279: exact request-type accounting for the isolated Telegram /analyse
+   * budget only. This is observation-only telemetry and does not change any
+   * request allowance, ordering, provider state or scanner accounting.
+   */
+  if (
+    budget?.manualAnalyseTelemetryV279
+      ?.enabled === true
+  ) {
+    const key =
+      String(type || "UNKNOWN");
+
+    budget.manualAnalyseTelemetryV279
+      .consumed[key] =
+      safeNumber(
+        budget.manualAnalyseTelemetryV279
+          .consumed[key]
+      ) + amount;
+  }
 
   if (
     phase ===
@@ -59009,6 +59037,11 @@ function createTelegramAnalyseBudgetV276() {
   budget.notification.globalReserveActiveV174 =
     false;
 
+  budget.manualAnalyseTelemetryV279 = {
+    enabled: true,
+    consumed: {}
+  };
+
   return budget;
 }
 
@@ -60089,6 +60122,103 @@ function telegramRawScoreV277(
 }
 
 
+function telegramAnalyseRequestBreakdownV279(
+  telemetry
+) {
+  const consumed =
+    telemetry
+      ?.requestBreakdownV279
+      ?.consumed;
+
+  if (
+    !consumed ||
+    typeof consumed !==
+      "object"
+  ) {
+    return "UNAVAILABLE";
+  }
+
+  const entries =
+    Object.entries(consumed)
+      .filter(
+        ([, count]) =>
+          safeNumber(count) > 0
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(b[1]) -
+          safeNumber(a[1])
+      );
+
+  if (!entries.length) {
+    return "NONE";
+  }
+
+  return entries
+    .map(
+      ([type, count]) =>
+        `${escapeHtml(type)}×${safeNumber(count)}`
+    )
+    .join(" | ");
+}
+
+function telegramMomentumEvidenceV279(
+  candidate
+) {
+  const momentum =
+    candidate?.momentum || {};
+
+  if (momentum?.verified !== true) {
+    return "UNVERIFIED";
+  }
+
+  const evidence = [];
+
+  if (
+    candidate?.market?.verified ===
+      true
+  ) {
+    evidence.push("MARKET/HISTORY");
+  }
+
+  if (
+    candidate?.holders
+      ?.countersVerified === true
+  ) {
+    evidence.push("HOLDERS");
+  }
+
+  if (
+    momentum
+      ?.directionalUsdPressureV151
+      ?.verified === true
+  ) {
+    evidence.push("VERIFIED USD FLOW");
+  }
+
+  if (
+    momentum
+      ?.ponsCurveMomentumV218
+      ?.verified === true
+  ) {
+    evidence.push("PONS");
+  }
+
+  if (
+    candidate
+      ?.liveMomentumActivityV152
+      ?.verified === true
+  ) {
+    evidence.push("LIVE V4");
+  } else {
+    evidence.push("LIVE V4 UNVERIFIED");
+  }
+
+  return evidence.length
+    ? evidence.join(" + ")
+    : "VERIFIED SCORE; SOURCE DETAIL UNAVAILABLE";
+}
+
 function telegramAnalyseResultMessageV276(
   candidate,
   performance,
@@ -60263,6 +60393,11 @@ function telegramAnalyseResultMessageV276(
           )
         : "UNVERIFIED"
     }</b>`,
+    `🧭 Momentum evidence: <b>${escapeHtml(
+      telegramMomentumEvidenceV279(
+        candidate
+      )
+    )}</b>`,
     `🎯 Confidence: <b>${telegramRawScoreV277(
       confidence?.score,
       confidence?.label || "",
@@ -60303,11 +60438,14 @@ function telegramAnalyseResultMessageV276(
         : "UNVERIFIED"
     }</b>`,
     `💧 Liquidity: <b>${
-      market?.verified === true
+      market?.verified === true &&
+      Number(market?.liquidityUsd) > 0
         ? telegramMoneyV271(
             market?.liquidityUsd
           )
-        : "UNVERIFIED"
+        : market?.verified === true
+          ? "UNVERIFIED (NO POSITIVE USD LIQUIDITY RETURNED)"
+          : "UNVERIFIED"
     }</b>`,
     `📈 24h volume: <b>${
       market?.verified === true
@@ -60406,6 +60544,9 @@ function telegramAnalyseResultMessageV276(
     `🔌 Manual command requests: <b>${safeNumber(
       telemetry?.requestsUsed
     )}/${TELEGRAM_ANALYSE_MAX_REQUESTS_V276}</b>`,
+    `🧾 Request use: <b>${telegramAnalyseRequestBreakdownV279(
+      telemetry
+    )}</b>`,
     "✅ Scanner request budget consumed: <b>NO</b>",
     "",
     "<i>Fresh manual analysis. Missing evidence remains UNVERIFIED; the command does not add the token to the autonomous watchlist.</i>"
@@ -60719,6 +60860,34 @@ async function telegramFreshAnalyseV276(
       ...manualMarketPreparationV277,
       spacingMs:
         TELEGRAM_ANALYSE_MARKET_SPACING_MS_V277
+    },
+    requestBreakdownV279: {
+      consumed: {
+        ...(
+          budget
+            ?.manualAnalyseTelemetryV279
+            ?.consumed ||
+          {}
+        )
+      },
+      skipped: Array.isArray(
+        budget?.skipped
+      )
+        ? budget.skipped.map(
+            row => ({
+              phase:
+                row?.phase || null,
+              type:
+                row?.type || null,
+              amount:
+                safeNumber(
+                  row?.amount
+                ),
+              reason:
+                row?.reason || null
+            })
+          )
+        : []
     },
     evidenceCompletenessV277:
       manualEvidenceCompletenessV277(
