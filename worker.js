@@ -1,5 +1,13 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V268 / V2.0:
+ * - NEW: persistent successful-alert history so multiple Telegram calls can be inspected after the fact
+ * - Keeps the most recent 20 successful same-run alert diagnostic snapshots in a separate KV key
+ * - NEW ROUTE: /alert-history returns the bounded newest-first history
+ * - Existing /last-alert-scan remains unchanged and still returns only the latest successful alert
+ * - History is written only after successful Telegram sends and never fabricates missed historical snapshots
+ * - KV history writes add zero provider/API requests and do not consume the 42 external-request budget
+ * - Preserves V267 follow-up tracking, V266 priceable-pool selection, V265 diagnostics, V263 history enrichment, scoring, Momentum, verified USD maths and Telegram thresholds
  * V267 / V2.0:
  * - NEW: persistent zero-request follow-up tracking for successfully alerted tokens
  * - Stores an evidence snapshot at successful Telegram send and compares later analysed scans against the previous snapshot
@@ -1114,7 +1122,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V267";
+const VERSION = "V268";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1724,6 +1732,17 @@ const STATE_KEY =
  */
 const LAST_ALERT_SCAN_KEY_V264 =
   "robinhood-meme-hunter-last-alert-scan-v264";
+
+/*
+ * V268 bounded successful-alert history.
+ * Deliberately separate from both the main V69 state and the V264 latest-alert
+ * diagnostic key. /last-alert-scan therefore remains fully backward compatible.
+ */
+const ALERT_HISTORY_KEY_V268 =
+  "robinhood-meme-hunter-alert-history-v268";
+
+const ALERT_HISTORY_MAX_ENTRIES_V268 =
+  20;
 
 /* =========================================================
    KNOWN INFRASTRUCTURE / QUOTES
@@ -4896,6 +4915,407 @@ async function lastAlertScanV264(
     };
   }
 }
+
+
+/* =========================================================
+   V268 SUCCESSFUL ALERT HISTORY
+   ========================================================= */
+
+function normalizeAlertHistoryV268(
+  value
+) {
+  const entries =
+    Array.isArray(
+      value?.entries
+    )
+      ? value.entries
+      : [];
+
+  return {
+    schemaVersion:
+      "V268_ALERT_HISTORY_1",
+
+    maximumEntries:
+      ALERT_HISTORY_MAX_ENTRIES_V268,
+
+    entries:
+      entries
+        .filter(
+          item =>
+            item &&
+            typeof item ===
+              "object" &&
+            item?.snapshot &&
+            typeof item
+              .snapshot ===
+              "object"
+        )
+        .slice(
+          0,
+          ALERT_HISTORY_MAX_ENTRIES_V268
+        )
+  };
+}
+
+
+function alertHistoryEntryV268(
+  snapshot
+) {
+  const savedAt =
+    safeNumber(
+      snapshot?.savedAt
+    ) ||
+    Date.now();
+
+  const address =
+    normalize(
+      snapshot
+        ?.alert
+        ?.address
+    );
+
+  return {
+    id:
+      [
+        savedAt,
+        address ||
+          "unknown"
+      ].join(
+        ":"
+      ),
+
+    savedAt,
+
+    address:
+      address ||
+      null,
+
+    symbol:
+      snapshot
+        ?.alert
+        ?.symbol ||
+      null,
+
+    name:
+      snapshot
+        ?.alert
+        ?.name ||
+      null,
+
+    botVersion:
+      snapshot?.botVersion ||
+      VERSION,
+
+    snapshot
+  };
+}
+
+
+async function appendAlertHistoryV268(
+  env,
+  snapshot
+) {
+  const {
+    kv,
+    binding
+  } = getKV(
+    env
+  );
+
+  if (!kv) {
+    return {
+      saved: false,
+      binding: null,
+      key:
+        ALERT_HISTORY_KEY_V268,
+      maximumEntries:
+        ALERT_HISTORY_MAX_ENTRIES_V268,
+      entryCount: 0,
+      error:
+        "KV_NOT_CONFIGURED"
+    };
+  }
+
+  try {
+    let existingRaw =
+      null;
+
+    try {
+      existingRaw =
+        await kv.get(
+          ALERT_HISTORY_KEY_V268
+        );
+    }
+
+    catch (readError) {
+      return {
+        saved: false,
+        binding,
+        key:
+          ALERT_HISTORY_KEY_V268,
+        maximumEntries:
+          ALERT_HISTORY_MAX_ENTRIES_V268,
+        entryCount: null,
+        error:
+          "ALERT_HISTORY_READ_FAILED: " +
+          errorString(
+            readError
+          )
+      };
+    }
+
+    let existing = {
+      schemaVersion:
+        "V268_ALERT_HISTORY_1",
+      maximumEntries:
+        ALERT_HISTORY_MAX_ENTRIES_V268,
+      entries: []
+    };
+
+    if (
+      existingRaw
+    ) {
+      try {
+        existing =
+          normalizeAlertHistoryV268(
+            JSON.parse(
+              existingRaw
+            )
+          );
+      }
+
+      catch {
+        /*
+         * Corrupt diagnostic history must never block a successful alert.
+         * Start a new V268 diagnostic history rather than guessing content.
+         */
+        existing = {
+          schemaVersion:
+            "V268_ALERT_HISTORY_1",
+          maximumEntries:
+            ALERT_HISTORY_MAX_ENTRIES_V268,
+          entries: []
+        };
+      }
+    }
+
+    const entry =
+      alertHistoryEntryV268(
+        snapshot
+      );
+
+    const withoutDuplicate =
+      existing.entries.filter(
+        item =>
+          item?.id !==
+          entry.id
+      );
+
+    const entries = [
+      entry,
+      ...withoutDuplicate
+    ].slice(
+      0,
+      ALERT_HISTORY_MAX_ENTRIES_V268
+    );
+
+    const history = {
+      schemaVersion:
+        "V268_ALERT_HISTORY_1",
+
+      maximumEntries:
+        ALERT_HISTORY_MAX_ENTRIES_V268,
+
+      updatedAt:
+        Date.now(),
+
+      entries
+    };
+
+    await kv.put(
+      ALERT_HISTORY_KEY_V268,
+      jsonStringifySafeV246(
+        history,
+        0
+      )
+    );
+
+    return {
+      saved: true,
+      binding,
+      key:
+        ALERT_HISTORY_KEY_V268,
+      maximumEntries:
+        ALERT_HISTORY_MAX_ENTRIES_V268,
+      entryCount:
+        entries.length,
+      newestEntryId:
+        entry.id,
+      error: null
+    };
+  }
+
+  catch (error) {
+    return {
+      saved: false,
+      binding,
+      key:
+        ALERT_HISTORY_KEY_V268,
+      maximumEntries:
+        ALERT_HISTORY_MAX_ENTRIES_V268,
+      entryCount: null,
+      error:
+        errorString(
+          error
+        )
+    };
+  }
+}
+
+
+async function alertHistoryV268(
+  env
+) {
+  const {
+    kv,
+    binding
+  } = getKV(
+    env
+  );
+
+  if (!kv) {
+    return {
+      agent:
+        "Robinhood Chain Meme Hunter",
+      version:
+        VERSION,
+      status:
+        "KV_NOT_CONFIGURED",
+      key:
+        ALERT_HISTORY_KEY_V268,
+      binding:
+        null,
+      maximumEntries:
+        ALERT_HISTORY_MAX_ENTRIES_V268,
+      count: 0,
+      entries: [],
+      timestamp:
+        now()
+    };
+  }
+
+  try {
+    const raw =
+      await kv.get(
+        ALERT_HISTORY_KEY_V268
+      );
+
+    if (!raw) {
+      return {
+        agent:
+          "Robinhood Chain Meme Hunter",
+        version:
+          VERSION,
+        status:
+          "NO_ALERT_HISTORY_SAVED",
+        key:
+          ALERT_HISTORY_KEY_V268,
+        binding,
+        maximumEntries:
+          ALERT_HISTORY_MAX_ENTRIES_V268,
+        count: 0,
+        entries: [],
+        timestamp:
+          now()
+      };
+    }
+
+    let history =
+      null;
+
+    try {
+      history =
+        normalizeAlertHistoryV268(
+          JSON.parse(
+            raw
+          )
+        );
+    }
+
+    catch (parseError) {
+      return {
+        agent:
+          "Robinhood Chain Meme Hunter",
+        version:
+          VERSION,
+        status:
+          "ALERT_HISTORY_PARSE_ERROR",
+        key:
+          ALERT_HISTORY_KEY_V268,
+        binding,
+        maximumEntries:
+          ALERT_HISTORY_MAX_ENTRIES_V268,
+        count: 0,
+        entries: [],
+        error:
+          errorString(
+            parseError
+          ),
+        timestamp:
+          now()
+      };
+    }
+
+    return {
+      agent:
+        "Robinhood Chain Meme Hunter",
+      version:
+        VERSION,
+      status:
+        "ALERT_HISTORY_AVAILABLE",
+      key:
+        ALERT_HISTORY_KEY_V268,
+      binding,
+      schemaVersion:
+        history.schemaVersion,
+      maximumEntries:
+        ALERT_HISTORY_MAX_ENTRIES_V268,
+      count:
+        history.entries.length,
+      newestFirst:
+        true,
+      entries:
+        history.entries,
+      timestamp:
+        now()
+    };
+  }
+
+  catch (error) {
+    return {
+      agent:
+        "Robinhood Chain Meme Hunter",
+      version:
+        VERSION,
+      status:
+        "ALERT_HISTORY_READ_FAILED",
+      key:
+        ALERT_HISTORY_KEY_V268,
+      binding,
+      maximumEntries:
+        ALERT_HISTORY_MAX_ENTRIES_V268,
+      count: 0,
+      entries: [],
+      error:
+        errorString(
+          error
+        ),
+      timestamp:
+        now()
+    };
+  }
+}
+
 
 /* =========================================================
    PROVIDER-SPECIFIC LEARNING
@@ -50833,6 +51253,21 @@ for (
       ].lastAlertScanPersistenceV264 =
         lastAlertScanPersistenceV264;
 
+      /*
+       * V268 keeps the same exact successful-alert snapshot in a bounded
+       * history. Failure here is diagnostic-only and cannot undo Telegram.
+       */
+      const alertHistoryPersistenceV268 =
+        await appendAlertHistoryV268(
+          env,
+          lastAlertSnapshotV264
+        );
+
+      telegramResults[
+        telegramResults.length - 1
+      ].alertHistoryPersistenceV268 =
+        alertHistoryPersistenceV268;
+
       state.alerts[
         address
       ] = {
@@ -53270,6 +53705,47 @@ for (
         true,
       transientFailuresRemainRetryableV260:
         true
+    },
+
+    alertHistoryDiagnosticsV268: {
+      enabled: true,
+      route:
+        "/alert-history",
+      key:
+        ALERT_HISTORY_KEY_V268,
+      maximumEntries:
+        ALERT_HISTORY_MAX_ENTRIES_V268,
+      newestFirst:
+        true,
+      storesOnlySuccessfulTelegramAlerts:
+        true,
+      storesExactSameRunDiagnosticSnapshot:
+        true,
+      existingLastAlertRoutePreserved:
+        "/last-alert-scan",
+      existingLastAlertKeyPreserved:
+        LAST_ALERT_SCAN_KEY_V264,
+      mainStateKeyUntouched:
+        STATE_KEY ===
+        "robinhood-meme-hunter-v69-state",
+      addsProviderApiRequests:
+        false,
+      consumesExternalRequestBudget:
+        false,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      verifiedUsdMathChanged:
+        false,
+      telegramThresholdsChanged:
+        false,
+      followUpTrackingChanged:
+        false,
+      hardExternalRequestLimitPreserved:
+        MAX_EXTERNAL_REQUESTS,
+      analysisRequestLimitPreserved:
+        ANALYSIS_REQUEST_LIMIT
     },
 
     lastAlertScanDiagnosticsV265: {
@@ -56485,7 +56961,8 @@ async function health(
       "/diagnostics",
       "/run-all",
       "/test-telegram",
-      "/last-alert-scan"
+      "/last-alert-scan",
+      "/alert-history"
     ],
 
     chain: {
@@ -57349,6 +57826,17 @@ async function handleRequest(
   ) {
     return jsonResponse(
       await lastAlertScanV264(
+        env
+      )
+    );
+  }
+
+  if (
+    path ===
+    "/alert-history"
+  ) {
+    return jsonResponse(
+      await alertHistoryV268(
         env
       )
     );
