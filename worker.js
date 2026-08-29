@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V263 / V2.0:
+ * - PROVIDER: exact-pool verified-USD history prefers Blockscout PRO universal Etherscan-compatible logs when configured
+ * - FALLBACK: existing public Blockscout logs route remains fallback when PRO is unavailable/fails and budget remains
+ * - TELEMETRY: separates verifiedUsdAvailable from coverageEnriched so unchanged pre-existing evidence is never counted as recovered
+ * - NAMING: market-count comparison is explicitly a coverage proxy, not an exact full-market coverage claim
+ * - One completion candidate remains; PRO/public fallback may use at most two provider attempts inside the existing 42/21 ceilings
+ * - Preserves exact token/PoolId/quote verification, real timestamps, verified BUY/SELL USD maths, V261 headlines, V260 launch logic and KV key
  * V262 / V2.0:
  * - COVERAGE: qualifying candidates with only a thin verified-USD sample can now use the existing exact-pool history completion path
  * - FIX: V254 previously stopped as soon as ANY verified USD trade existed, so 1-2 live swaps could prevent the historical completion request entirely
@@ -1078,7 +1085,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V262";
+const VERSION = "V263";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -37508,7 +37515,8 @@ async function blockscoutExactPoolUsdCompletionV254(
   budget,
   state,
   latestBlock,
-  wethUsdGReference
+  wethUsdGReference,
+  env
 ) {
   const base = {
     enabled: true,
@@ -37516,6 +37524,14 @@ async function blockscoutExactPoolUsdCompletionV254(
     externalRequestsUsed: 0,
     provider:
       "BLOCKSCOUT",
+    providerPathV263:
+      null,
+    providerAttemptsV263:
+      [],
+    proConfiguredV263:
+      Boolean(
+        env?.BLOCKSCOUT_PRO_API_KEY
+      ),
     source:
       "BLOCKSCOUT_EXACT_POOL_RECENT_SWAP_COMPLETION_V254",
     status: null,
@@ -37656,27 +37672,7 @@ async function blockscoutExactPoolUsdCompletionV254(
     };
   }
 
-  if (
-    !consumeBudget(
-      budget,
-      "analysis",
-      "BLOCKSCOUT_V4_USD_COMPLETION_V254"
-    )
-  ) {
-    return {
-      ...base,
-      poolId,
-      quoteTokenAddress:
-        quote,
-      quoteEligibility,
-      fromBlock,
-      toBlock,
-      status:
-        "ANALYSIS_BUDGET_PROTECTED"
-    };
-  }
-
-  const url =
+  const buildPublicUrlV263 = () =>
     `${BLOCKSCOUT}/api?module=logs&action=getLogs` +
     `&fromBlock=${fromBlock}` +
     `&toBlock=${toBlock}` +
@@ -37685,137 +37681,254 @@ async function blockscoutExactPoolUsdCompletionV254(
     `&topic1=${poolId}` +
     `&topic0_1_opr=and`;
 
-  service.totalRequests =
-    safeNumber(
-      service.totalRequests
-    ) + 1;
+  const buildProUrlV263 = () =>
+    `${BLOCKSCOUT_PRO}/v2/api?chain_id=${BLOCKSCOUT_PRO_CHAIN_ID}` +
+    `&module=logs&action=getLogs` +
+    `&fromBlock=${fromBlock}` +
+    `&toBlock=${toBlock}` +
+    `&address=${POOL_MANAGER}` +
+    `&topic0=${SWAP_TOPIC}` +
+    `&topic1=${poolId}` +
+    `&topic0_1_opr=and` +
+    `&apikey=${encodeURIComponent(env.BLOCKSCOUT_PRO_API_KEY)}`;
 
-  service.lastRequestAt =
-    Date.now();
+  const providerPlanV263 = [];
 
-  service.lastStatus =
-    "V254_REQUESTING";
+  if (
+    env?.BLOCKSCOUT_PRO_API_KEY
+  ) {
+    providerPlanV263.push({
+      name:
+        "BLOCKSCOUT_PRO_UNIVERSAL_V2",
+      url:
+        buildProUrlV263()
+    });
+  }
 
-  try {
-    const response =
-      await fetch(
-        url,
-        {
-          headers: {
-            accept:
-              "application/json"
-          }
-        }
-      );
+  providerPlanV263.push({
+    name:
+      "BLOCKSCOUT_PUBLIC",
+    url:
+      buildPublicUrlV263()
+  });
 
+  let requestsUsedV263 = 0;
+  let lastFailureV263 = null;
+
+  for (
+    const provider
+    of providerPlanV263
+  ) {
     if (
-      response.status === 429
+      !consumeBudget(
+        budget,
+        "analysis",
+        `BLOCKSCOUT_V4_USD_COMPLETION_V263_${provider.name}`
+      )
     ) {
-      const backoffMs =
-        registerBlockscoutDirectional429V183(
-          state
+      if (
+        requestsUsedV263 ===
+          0
+      ) {
+        return {
+          ...base,
+          poolId,
+          quoteTokenAddress:
+            quote,
+          quoteEligibility,
+          fromBlock,
+          toBlock,
+          status:
+            "ANALYSIS_BUDGET_PROTECTED"
+        };
+      }
+
+      break;
+    }
+
+    requestsUsedV263++;
+
+    service.totalRequests =
+      safeNumber(
+        service.totalRequests
+      ) + 1;
+
+    service.lastRequestAt =
+      Date.now();
+
+    service.lastStatus =
+      `V263_REQUESTING_${provider.name}`;
+
+    try {
+      const response =
+        await fetch(
+          provider.url,
+          {
+            headers: {
+              accept:
+                "application/json"
+            }
+          }
         );
 
+      base.providerAttemptsV263
+        .push({
+          provider:
+            provider.name,
+          httpStatus:
+            response.status
+        });
+
+      if (
+        response.status === 429
+      ) {
+        const backoffMs =
+          registerBlockscoutDirectional429V183(
+            state
+          );
+
+        lastFailureV263 = {
+          status:
+            `${provider.name}_HTTP_429`,
+          backoffMs,
+          cooldownUntil:
+            safeNumber(
+              blockscoutDirectionalUsdServiceV183(
+                state
+              )?.cooldownUntil
+            ) || null
+        };
+
+        // Shared directional cooldown: do not immediately hit fallback.
+        break;
+      }
+
+      if (!response.ok) {
+        service.lastStatus =
+          `V263_${provider.name}_HTTP_${response.status}`;
+
+        lastFailureV263 = {
+          status:
+            `${provider.name}_HTTP_${response.status}`
+        };
+
+        if (
+          provider.name ===
+            "BLOCKSCOUT_PRO_UNIVERSAL_V2"
+        ) {
+          continue;
+        }
+
+        break;
+      }
+
+      const payload =
+        await response.json();
+
+      const rows =
+        Array.isArray(
+          payload?.result
+        )
+          ? payload.result
+          : [];
+
+      registerBlockscoutDirectionalSuccessV183(
+        state
+      );
+
       return {
         ...base,
         attempted: true,
-        externalRequestsUsed: 1,
+        externalRequestsUsed:
+          requestsUsedV263,
+        provider:
+          provider.name,
+        providerPathV263:
+          provider.name,
         poolId,
         quoteTokenAddress:
           quote,
         quoteEligibility,
         fromBlock,
         toBlock,
+        returnedLogs:
+          rows.length,
+        saturated:
+          rows.length >=
+            BLOCKSCOUT_LOGS_MAX_ROWS_V180,
+        rows,
         status:
-          "BLOCKSCOUT_HTTP_429",
-        backoffMs,
-        cooldownUntil:
-          safeNumber(
-            blockscoutDirectionalUsdServiceV183(
-              state
-            )?.cooldownUntil
-          ) || null
+          rows.length
+            ? "RECENT_EXACT_POOL_LOGS_RETURNED"
+            : "NO_RECENT_EXACT_POOL_LOGS"
       };
     }
 
-    if (!response.ok) {
+    catch (error) {
       service.lastStatus =
-        `V254_HTTP_${response.status}`;
+        `V263_${provider.name}_FETCH_ERROR`;
 
-      return {
-        ...base,
-        attempted: true,
-        externalRequestsUsed: 1,
-        poolId,
-        quoteTokenAddress:
-          quote,
-        quoteEligibility,
-        fromBlock,
-        toBlock,
-        status:
-          `BLOCKSCOUT_HTTP_${response.status}`
-      };
-    }
-
-    registerBlockscoutDirectionalSuccessV183(
-      state
-    );
-
-    const payload =
-      await response.json();
-
-    const rows =
-      Array.isArray(
-        payload?.result
-      )
-        ? payload.result
-        : [];
-
-    return {
-      ...base,
-      attempted: true,
-      externalRequestsUsed: 1,
-      poolId,
-      quoteTokenAddress:
-        quote,
-      quoteEligibility,
-      fromBlock,
-      toBlock,
-      returnedLogs:
-        rows.length,
-      saturated:
-        rows.length >=
-          BLOCKSCOUT_LOGS_MAX_ROWS_V180,
-      rows,
-      status:
-        rows.length
-          ? "RECENT_EXACT_POOL_LOGS_RETURNED"
-          : "NO_RECENT_EXACT_POOL_LOGS"
-    };
-  } catch (error) {
-    service.lastStatus =
-      "V254_FETCH_ERROR";
-
-    return {
-      ...base,
-      attempted: true,
-      externalRequestsUsed: 1,
-      poolId,
-      quoteTokenAddress:
-        quote,
-      quoteEligibility,
-      fromBlock,
-      toBlock,
-      status:
-        "BLOCKSCOUT_FETCH_ERROR",
-      error:
+      const message =
         errorString(
           error
-        )
-    };
-  }
-}
+        );
 
+      base.providerAttemptsV263
+        .push({
+          provider:
+            provider.name,
+          error:
+            message
+        });
+
+      lastFailureV263 = {
+        status:
+          `${provider.name}_FETCH_ERROR`,
+        error:
+          message
+      };
+
+      if (
+        provider.name ===
+          "BLOCKSCOUT_PRO_UNIVERSAL_V2"
+      ) {
+        continue;
+      }
+
+      break;
+    }
+  }
+
+  return {
+    ...base,
+    attempted:
+      requestsUsedV263 > 0,
+    externalRequestsUsed:
+      requestsUsedV263,
+    poolId,
+    quoteTokenAddress:
+      quote,
+    quoteEligibility,
+    fromBlock,
+    toBlock,
+    status:
+      lastFailureV263
+        ?.status ||
+      "BLOCKSCOUT_HISTORY_UNAVAILABLE_V263",
+    backoffMs:
+      lastFailureV263
+        ?.backoffMs ||
+      null,
+    cooldownUntil:
+      lastFailureV263
+        ?.cooldownUntil ||
+      null,
+    error:
+      lastFailureV263
+        ?.error ||
+      null
+  };
+}
 
 /* =========================================================
    V262 VERIFIED USD COVERAGE ENRICHMENT
@@ -37938,12 +38051,20 @@ function verifiedUsdCoverageV262(
       null,
     reportedTransactions,
     verifiedObservedTrades,
+    coverageProxyRatioV263:
+      ratio,
+    coverageProxyPercentV263:
+      ratio !== null
+        ? ratio * 100
+        : null,
     coverageRatio:
       ratio,
     coveragePercent:
       ratio !== null
         ? ratio * 100
         : null,
+    coveragePopulationNoteV263:
+      "PROXY_ONLY_MARKET_COUNTS_AND_EXACT_POOL_LOGS_MAY_DIFFER",
     minimumDesiredObserved,
     noVerifiedUsd,
     materiallyThin,
@@ -37964,7 +38085,8 @@ async function verifiedUsdCompletionPassV254(
   budget,
   latestBlock,
   liveLogs,
-  wethUsdGReference
+  wethUsdGReference,
+  env
 ) {
   const token =
     normalize(
@@ -38015,6 +38137,10 @@ async function verifiedUsdCompletionPassV254(
     historyPersistence: null,
     finalFlow: before,
     verifiedUsdRecovered:
+      false,
+    verifiedUsdAvailableV263:
+      before?.verified === true,
+    coverageEnrichedV263:
       false,
     externalRequestsUsed: 0,
     requestCeilingUnchanged:
@@ -38447,9 +38573,31 @@ async function verifiedUsdCompletionPassV254(
       finalFlow:
         afterLiveReplay,
       verifiedUsdRecovered:
+        safeNumber(
+          output
+            .coverageAfterLiveReplayV262
+            ?.verifiedObservedTrades
+        ) >
+        safeNumber(
+          output
+            .coverageBeforeV262
+            ?.verifiedObservedTrades
+        ),
+      verifiedUsdAvailableV263:
         true,
+      coverageEnrichedV263:
+        safeNumber(
+          output
+            .coverageAfterLiveReplayV262
+            ?.verifiedObservedTrades
+        ) >
+        safeNumber(
+          output
+            .coverageBeforeV262
+            ?.verifiedObservedTrades
+        ),
       status:
-        "VERIFIED_USD_COVERAGE_ADEQUATE_AFTER_LIVE_REPLAY_V262"
+        "VERIFIED_USD_COVERAGE_ADEQUATE_AFTER_LIVE_REPLAY_V263"
     };
   }
 
@@ -38468,7 +38616,8 @@ async function verifiedUsdCompletionPassV254(
       budget,
       state,
       latestBlock,
-      wethUsdGReference
+      wethUsdGReference,
+      env
     );
 
   output.externalRequestsUsed +=
@@ -38517,25 +38666,39 @@ async function verifiedUsdCompletionPassV254(
   output.finalFlow =
     finalFlow;
 
-  output.verifiedUsdRecovered =
+  output.verifiedUsdAvailableV263 =
     finalFlow?.verified ===
       true;
 
+  output.coverageEnrichedV263 =
+    safeNumber(
+      output
+        .coverageAfterHistoryV262
+        ?.verifiedObservedTrades
+    ) >
+    safeNumber(
+      output
+        .coverageBeforeV262
+        ?.verifiedObservedTrades
+    );
+
+  /*
+   * Backward-compatible field: V263 uses "recovered" only when the completion
+   * pass actually added verified evidence.
+   */
+  output.verifiedUsdRecovered =
+    output.coverageEnrichedV263;
+
   output.status =
-    output.verifiedUsdRecovered
-      ? (
-          output
-            .coverageAfterHistoryV262
-            ?.verifiedObservedTrades >
-          output
-            .coverageBeforeV262
-            ?.verifiedObservedTrades
-            ? "VERIFIED_USD_COVERAGE_ENRICHED_FROM_EXACT_POOL_HISTORY_V262"
-            : "VERIFIED_USD_AVAILABLE_AFTER_EXACT_POOL_HISTORY_V262"
-        )
+    output.coverageEnrichedV263
+      ? "VERIFIED_USD_COVERAGE_ENRICHED_FROM_EXACT_POOL_HISTORY_V263"
       : (
-          history?.status ||
-          "VERIFIED_USD_NOT_RECOVERED"
+          output.verifiedUsdAvailableV263
+            ? "VERIFIED_USD_AVAILABLE_BUT_NOT_ENRICHED_V263"
+            : (
+                history?.status ||
+                "VERIFIED_USD_NOT_RECOVERED"
+              )
         );
 
   return output;
@@ -47900,7 +48063,8 @@ for (
         liveOutput.logs,
         onChainDirectionalV179
           ?.wethUsdGReferenceV187 ||
-          null
+          null,
+        env
       );
 
     candidate.verifiedUsdCompletionV254 =
@@ -47959,7 +48123,28 @@ for (
         historyEnrichmentReasonV262:
           completion
             ?.historyEnrichmentReasonV262 ||
-          null
+          null,
+        verifiedUsdAvailableV263:
+          completion
+            ?.verifiedUsdAvailableV263 ===
+          true,
+        coverageEnrichedV263:
+          completion
+            ?.coverageEnrichedV263 ===
+          true,
+        historyProviderPathV263:
+          completion
+            ?.history
+            ?.providerPathV263 ||
+          completion
+            ?.history
+            ?.provider ||
+          null,
+        historyProviderAttemptsV263:
+          completion
+            ?.history
+            ?.providerAttemptsV263 ||
+          []
       });
 
     if (
@@ -51273,6 +51458,24 @@ for (
         true,
       transientFailuresRemainRetryableV260:
         true
+    },
+
+    verifiedUsdHistoryProviderV263: {
+      enabled: true,
+      blockscoutProUniversalV2PreferredWhenConfigured: true,
+      proUrlShape:
+        "https://api.blockscout.com/v2/api?chain_id=4663&module=logs&action=getLogs",
+      publicBlockscoutFallbackPreserved: true,
+      maxCompletionCandidatesPerScan:
+        VERIFIED_USD_COMPLETION_MAX_CANDIDATES_V254,
+      maxProviderAttemptsForSingleCompletionV263: 2,
+      coverageMetricExplicitlyProxy: true,
+      verifiedUsdAvailableSeparatedFromCoverageEnriched: true,
+      broaderMarketCountsNeverConvertedToUsd: true,
+      exactPoolAndQuoteVerificationPreserved: true,
+      hardExternalRequestLimitPreserved: 42,
+      analysisRequestLimitPreserved: 21,
+      verifiedUsdMathChanged: false
     },
 
     verifiedUsdCoverageEnrichmentV262: {
