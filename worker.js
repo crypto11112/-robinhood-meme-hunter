@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V285 / V2.0:
+ * - MANUAL USD ENRICHMENT: /analyse can spend one remaining protected request on Bitquery Trading.Trades when its normal candidate-matched USD windows are still unavailable
+ * - SAFETY: exact token + Robinhood network only; known-quote rows only; Bitquery's documented Robinhood duplicate-leg key is applied before aggregation
+ * - SAFETY: routed multi-leg ambiguity, row-cap coverage gaps, empty results, HTTP/GraphQL errors and missing exact USD all remain UNVERIFIED
+ * - SAME LAYOUT: successful evidence fills the existing V212-shaped 5m/15m/1h/6h/12h/24h structure already rendered by V284; it does not alter scanner scoring or Momentum
+ * - ISOLATION: at most one extra manual request; autonomous 42/21 budgets, scanner state, KV keys, holder logic, Telegram thresholds and provider protections are unchanged
+ * - Preserves all confirmed-working V284/V283 functionality
  * V284 / V2.0:
  * - MANUAL USD PARITY: /analyse now renders the same verified on-chain USD time windows as the normal Telegram alert: 5m, 15m, 1h, 6h, 12h and 24h
  * - SAME EVIDENCE: the manual layout reads the existing onChainVerifiedFlowV212 windows and the same telegramVerifiedUsdDiagnosticV213 eligibility gate used by normal alerts; no separate USD maths or inferred values are introduced
@@ -1244,7 +1251,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V284";
+const VERSION = "V285";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -59894,15 +59901,329 @@ function telegramAnalyseVerifiedUsdLinesV284(
   pushWindow("12h", "h12");
   pushWindow("24h", "h24");
 
+  const source = String(observed?.source || "");
+
   lines.push(
-    eligible
-      ? "ℹ️ <i>Verified exact V4 swaps observed by this bot; not claimed as complete market-window totals.</i>"
-      : "ℹ️ <i>No candidate-matched exact-USD V4 swaps were verified for this analysis; dollar amounts are not inferred from unverified market activity counts.</i>"
+    eligible && source === "BITQUERY_TRADING_TRADES_MANUAL_V285"
+      ? "ℹ️ <i>Verified candidate-matched Bitquery Robinhood trades. Documented duplicate legs are removed; incomplete or routed-ambiguous windows remain UNVERIFIED.</i>"
+      : eligible
+        ? "ℹ️ <i>Verified exact V4 swaps observed by this bot; not claimed as complete market-window totals.</i>"
+        : "ℹ️ <i>No candidate-matched exact-USD evidence was verified for this analysis; dollar amounts are not inferred from unverified market activity counts.</i>"
   );
 
   return lines;
 }
 
+
+
+
+/* =========================================================
+   V285 MANUAL BITQUERY DIRECTIONAL USD
+   ========================================================= */
+
+const TELEGRAM_ANALYSE_BITQUERY_TRADE_LIMIT_V285 = 300;
+
+function manualBitqueryWindowV285(rows, windowMs, nowMs, coverageComplete) {
+  const selected = rows.filter(
+    row => row.observedAt >= nowMs - windowMs && row.observedAt <= nowMs
+  );
+
+  const unverified = (status, observedTrades = 0) => ({
+    verified: false,
+    status,
+    observedTrades,
+    buys: 0,
+    sells: 0,
+    buyVolumeUsd: null,
+    sellVolumeUsd: null,
+    netFlowUsd: null,
+    buyPressureUsd: null,
+    fullMarketCoverageVerified: false
+  });
+
+  if (!coverageComplete) return unverified("WINDOW_COVERAGE_INCOMPLETE_V285");
+  if (!selected.length) return unverified("NO_INDEXED_TRADES_IN_WINDOW_V285");
+
+  /*
+   * After Bitquery's documented duplicate-leg key is applied, more than one
+   * candidate leg with the same tx+side can still be routed activity. Do not
+   * sum it: routed-leg inflation is explicitly documented on Robinhood.
+   */
+  const txSides = new Map();
+  for (const row of selected) {
+    const key = `${row.txHash}|${row.side}`;
+    txSides.set(key, (txSides.get(key) || 0) + 1);
+  }
+  if ([...txSides.values()].some(count => count > 1)) {
+    return unverified("ROUTED_MULTI_LEG_AMBIGUITY_V285", selected.length);
+  }
+
+  let buys = 0, sells = 0, buyVolumeUsd = 0, sellVolumeUsd = 0;
+  for (const row of selected) {
+    if (row.side === "buy") {
+      buys++;
+      buyVolumeUsd += row.usd;
+    } else {
+      sells++;
+      sellVolumeUsd += row.usd;
+    }
+  }
+
+  const total = buyVolumeUsd + sellVolumeUsd;
+  if (!(buys + sells) || !(total > 0)) {
+    return unverified("NO_POSITIVE_EXACT_USD_ROWS_V285");
+  }
+
+  return {
+    verified: true,
+    status: "VERIFIED_BITQUERY_INDEXED_WINDOW_V285",
+    observedTrades: buys + sells,
+    buys,
+    sells,
+    buyVolumeUsd,
+    sellVolumeUsd,
+    netFlowUsd: buyVolumeUsd - sellVolumeUsd,
+    buyPressureUsd: (buyVolumeUsd / total) * 100,
+    fullMarketCoverageVerified: false
+  };
+}
+
+async function manualBitqueryDirectionalUsdV285(env, budget, state, candidate) {
+  const base = {
+    attempted: false,
+    verified: false,
+    status: "NOT_ATTEMPTED",
+    requestsUsed: 0,
+    httpStatus: null,
+    rawRows: 0,
+    rows: 0,
+    duplicatesRemoved: 0,
+    error: null,
+    flow: null
+  };
+
+  const currentDiagnostic =
+    candidate?.telegramVerifiedUsdDiagnosticV213 ||
+    telegramVerifiedUsdDiagnosticV213(candidate);
+
+  if (
+    candidate?.onChainVerifiedFlowV212?.verified === true &&
+    currentDiagnostic?.telegramVerifiedUsdSectionEligible === true
+  ) {
+    return {...base, status: "ALREADY_HAS_VERIFIED_DIRECTIONAL_USD"};
+  }
+
+  const address = normalize(candidate?.address);
+  const token = String(env.BITQUERY_ACCESS_TOKEN || "").trim();
+
+  if (candidate?.validERC20 !== true || !isAddress(address) || knownQuote(address)) {
+    return {...base, status: "CANDIDATE_NOT_ELIGIBLE"};
+  }
+  if (!token) return {...base, status: "BITQUERY_NOT_CONFIGURED"};
+  if (bitquery402CoolingV251(state)) {
+    return {...base, status: "BITQUERY_402_COOLDOWN_ACTIVE"};
+  }
+  if (!budgetAvailable(budget, "analysis")) {
+    return {...base, status: "NO_SPARE_MANUAL_BUDGET"};
+  }
+
+  const before = safeNumber(budget.totalUsed);
+  if (!consumeBudget(budget, "analysis", "BITQUERY_MANUAL_DIRECTIONAL_USD_V285")) {
+    return {...base, status: "MANUAL_BUDGET_PROTECTED"};
+  }
+
+  const query = `{
+    Trading {
+      ManualDirectionalV285: Trades(
+        limit: {count: ${TELEGRAM_ANALYSE_BITQUERY_TRADE_LIMIT_V285}}
+        orderBy: {descending: Block_Time}
+        where: {
+          Block: {Time: {since_relative: {hours_ago: 24}}}
+          Pair: {
+            Token: {Address: {is: "${address}"}}
+            Market: {NetworkBid: {is: "bid:robinhood"}}
+          }
+        }
+      ) {
+        Block {Time}
+        Side
+        Amounts {Base}
+        AmountsInUsd {Base}
+        Trader {Address}
+        TransactionHeader {Hash}
+        Pair {
+          Token {Address}
+          QuoteToken {Address Symbol}
+          Market {Protocol ProtocolFamily Network}
+        }
+      }
+    }
+  }`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4500);
+  let response, payload;
+
+  try {
+    response = await fetch(BITQUERY_GRAPHQL_V2, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json",
+        authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({query}),
+      signal: controller.signal
+    });
+    try { payload = await response.json(); } catch (_) { payload = null; }
+  } catch (error) {
+    return {
+      ...base,
+      attempted: true,
+      requestsUsed: safeNumber(budget.totalUsed) - before,
+      status: "BITQUERY_REQUEST_FAILED_V285",
+      error: errorString(error)
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response.ok) {
+    if (response.status === 402) registerBitquery402V251(state);
+    return {
+      ...base,
+      attempted: true,
+      requestsUsed: safeNumber(budget.totalUsed) - before,
+      httpStatus: response.status,
+      status: `BITQUERY_HTTP_${response.status}_V285`,
+      error: payload?.errors?.[0]?.message || "BITQUERY_HTTP_ERROR_V285"
+    };
+  }
+
+  registerBitqueryHttpSuccessV251(state);
+
+  if (Array.isArray(payload?.errors) && payload.errors.length) {
+    return {
+      ...base,
+      attempted: true,
+      requestsUsed: safeNumber(budget.totalUsed) - before,
+      httpStatus: response.status,
+      status: "BITQUERY_GRAPHQL_ERROR_V285",
+      error: payload.errors.map(row => row?.message).filter(Boolean).join(" | ").slice(0, 320)
+    };
+  }
+
+  const raw = Array.isArray(payload?.data?.Trading?.ManualDirectionalV285)
+    ? payload.data.Trading.ManualDirectionalV285
+    : [];
+
+  const accepted = [];
+  for (const row of raw) {
+    const returned = normalize(row?.Pair?.Token?.Address);
+    const quoteAddress = normalize(row?.Pair?.QuoteToken?.Address);
+    const quoteSymbol = row?.Pair?.QuoteToken?.Symbol || null;
+    const side = String(row?.Side || "").toLowerCase();
+    const usd = Number(row?.AmountsInUsd?.Base);
+    const timeText = String(row?.Block?.Time || "");
+    const observedAt = Date.parse(timeText);
+    const txHash = String(row?.TransactionHeader?.Hash || "").toLowerCase();
+    const trader = String(row?.Trader?.Address || "").toLowerCase();
+    const baseAmount = String(row?.Amounts?.Base ?? "");
+
+    if (
+      returned !== address ||
+      !knownQuoteMetadata(quoteAddress, quoteSymbol) ||
+      !["buy", "sell"].includes(side) ||
+      !/^0x[a-f0-9]{64}$/.test(txHash) ||
+      !Number.isFinite(usd) || usd <= 0 ||
+      !Number.isFinite(observedAt)
+    ) continue;
+
+    accepted.push({
+      side, usd, observedAt, txHash, trader, baseAmount,
+      timeText, quoteSymbol: String(quoteSymbol || "").toUpperCase()
+    });
+  }
+
+  /*
+   * Bitquery documents this exact Robinhood Trading.Trades dedup tuple:
+   * hash + block time + side + base amount + quote symbol + trader.
+   */
+  const unique = new Map();
+  for (const row of accepted) {
+    const key = [
+      row.txHash, row.timeText, row.side, row.baseAmount, row.quoteSymbol, row.trader
+    ].join("|");
+    if (!unique.has(key)) unique.set(key, row);
+  }
+  const rows = [...unique.values()].sort((a, b) => b.observedAt - a.observedAt);
+
+  const times = raw
+    .map(row => Date.parse(String(row?.Block?.Time || "")))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+
+  const oldest = times.length ? times[0] : null;
+  const hitCap = raw.length >= TELEGRAM_ANALYSE_BITQUERY_TRADE_LIMIT_V285;
+  const nowMs = Date.now();
+  const covered = ms => !hitCap || (Number.isFinite(oldest) && oldest <= nowMs - ms);
+
+  const windows = {
+    m5: manualBitqueryWindowV285(rows, V180_WINDOW_MS.m5, nowMs, covered(V180_WINDOW_MS.m5)),
+    m15: manualBitqueryWindowV285(rows, V180_WINDOW_MS.m15, nowMs, covered(V180_WINDOW_MS.m15)),
+    h1: manualBitqueryWindowV285(rows, V180_WINDOW_MS.h1, nowMs, covered(V180_WINDOW_MS.h1)),
+    h6: manualBitqueryWindowV285(rows, V180_WINDOW_MS.h6, nowMs, covered(V180_WINDOW_MS.h6)),
+    h12: manualBitqueryWindowV285(rows, V180_WINDOW_MS.h12, nowMs, covered(V180_WINDOW_MS.h12)),
+    h24: manualBitqueryWindowV285(rows, V180_WINDOW_MS.h24, nowMs, covered(V180_WINDOW_MS.h24))
+  };
+
+  const verifiedWindows = Object.entries(windows)
+    .filter(([, row]) => row?.verified === true)
+    .map(([key]) => key);
+
+  const flow = {
+    verified: verifiedWindows.length > 0,
+    source: "BITQUERY_TRADING_TRADES_MANUAL_V285",
+    interpretation: "VERIFIED_INDEXED_OBSERVED_NOT_FULL_MARKET_WINDOW",
+    tokenAddress: address,
+    poolIds: [],
+    recordCount: rows.length,
+    windows,
+    verifiedWindows,
+    status: verifiedWindows.length
+      ? "CANDIDATE_MATCHED_VERIFIED_BITQUERY_USD_AVAILABLE_V285"
+      : raw.length
+        ? "NO_SAFE_VERIFIED_BITQUERY_WINDOWS_V285"
+        : "NO_BITQUERY_TRADES_RETURNED_V285"
+  };
+
+  return {
+    ...base,
+    attempted: true,
+    verified: flow.verified,
+    status: flow.status,
+    requestsUsed: safeNumber(budget.totalUsed) - before,
+    httpStatus: response.status,
+    rawRows: raw.length,
+    rows: rows.length,
+    duplicatesRemoved: Math.max(0, accepted.length - rows.length),
+    flow
+  };
+}
+
+function applyManualBitqueryDirectionalUsdV285(candidate, result) {
+  if (!candidate || result?.verified !== true || result?.flow?.verified !== true) {
+    return candidate;
+  }
+  const updated = {
+    ...candidate,
+    onChainVerifiedFlowV212: result.flow,
+    manualBitqueryDirectionalUsdV285: true
+  };
+  updated.telegramVerifiedUsdDiagnosticV213 =
+    telegramVerifiedUsdDiagnosticV213(updated);
+  return updated;
+}
 
 
 async function historicalAlertEvidenceV277(
@@ -60777,6 +61098,14 @@ function telegramAnalyseResultMessageV276(
     )}</b> | requests <b>${safeNumber(
       telemetry?.manualLiveV4EnrichmentV283?.requestsUsed
     )}</b>`,
+    `💵 V285 USD enrichment: <b>${escapeHtml(
+      telemetry?.manualBitqueryUsdV285?.status ||
+      "NOT_ATTEMPTED"
+    )}</b> | requests <b>${safeNumber(
+      telemetry?.manualBitqueryUsdV285?.requestsUsed
+    )}</b> | rows <b>${safeNumber(
+      telemetry?.manualBitqueryUsdV285?.rows
+    )}</b>`,
     `🔌 Manual command requests: <b>${safeNumber(
       telemetry?.requestsUsed
     )}/${TELEGRAM_ANALYSE_MAX_REQUESTS_V276}</b>`,
@@ -61416,6 +61745,20 @@ async function telegramFreshAnalyseV276(
       manualLiveV4ResultV283
     );
 
+  const manualBitqueryUsdResultV285 =
+    await manualBitqueryDirectionalUsdV285(
+      env,
+      budget,
+      isolatedState,
+      candidate
+    );
+
+  candidate =
+    applyManualBitqueryDirectionalUsdV285(
+      candidate,
+      manualBitqueryUsdResultV285
+    );
+
   const performance =
     state
       ?.callPerformanceV270
@@ -61557,6 +61900,17 @@ async function telegramFreshAnalyseV276(
         manualLiveV4ResultV283?.providerLogs || null,
       error:
         manualLiveV4ResultV283?.error || null
+    },
+    manualBitqueryUsdV285: {
+      attempted: manualBitqueryUsdResultV285?.attempted === true,
+      verified: manualBitqueryUsdResultV285?.verified === true,
+      status: manualBitqueryUsdResultV285?.status || null,
+      requestsUsed: safeNumber(manualBitqueryUsdResultV285?.requestsUsed),
+      httpStatus: manualBitqueryUsdResultV285?.httpStatus || null,
+      rawRows: safeNumber(manualBitqueryUsdResultV285?.rawRows),
+      rows: safeNumber(manualBitqueryUsdResultV285?.rows),
+      duplicatesRemoved: safeNumber(manualBitqueryUsdResultV285?.duplicatesRemoved),
+      error: manualBitqueryUsdResultV285?.error || null
     },
     evidenceCompletenessV277:
       manualEvidenceCompletenessV277(
