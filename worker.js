@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V281 / V2.0:
+ * - RESEARCH FIX: disables the unproven V280 manual holder-count skip so /analyse returns to the confirmed V279 holder request path
+ * - DIAGNOSTIC: historical V268 alert lookup now reports KV status, retained-entry count and whether the requested address was present
+ * - CLARITY: /analyse shows the V268 history lookup result so a rolling-history eviction cannot be mistaken for a pool-resolution regression
+ * - FINDING: V268 alert history is a capped rolling list; absence from that list is not treated as proof that the token was never alerted
+ * - SAFETY: autonomous scanner holder logic, scoring, Momentum maths, verified BUY/SELL USD maths, Telegram thresholds, KV keys and provider protections are unchanged
+ * - Preserves all confirmed-working V280 scanner functionality while reverting only the ineffective manual holder optimization activation
  * V280 / V2.0:
  * - OPTIMIZE: isolated Telegram /analyse can reuse a still-valid verified holder-count display cache instead of spending a redundant Blockscout PRO counters request after holder rows are already recovered
  * - SAFETY: the optimization is manual-analysis only; autonomous scanner holder logic and request ordering are unchanged
@@ -1216,7 +1223,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V280";
+const VERSION = "V281";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -59807,7 +59814,13 @@ async function historicalAlertEvidenceV277(
       found: false,
       entry: null,
       status:
-        "INVALID_ADDRESS"
+        "INVALID_ADDRESS",
+      historyStatus: null,
+      retainedCount: 0,
+      maximumEntries:
+        ALERT_HISTORY_MAX_ENTRIES_V268,
+      key:
+        ALERT_HISTORY_KEY_V268
     };
   }
 
@@ -59846,7 +59859,25 @@ async function historicalAlertEvidenceV277(
         : (
             report?.status ||
             "NO_HISTORICAL_ALERT"
-          )
+          ),
+    historyStatus:
+      report?.status || null,
+    retainedCount:
+      safeNumber(report?.count),
+    maximumEntries:
+      safeNumber(
+        report?.maximumEntries
+      ) ||
+      ALERT_HISTORY_MAX_ENTRIES_V268,
+    key:
+      report?.key ||
+      ALERT_HISTORY_KEY_V268,
+    binding:
+      report?.binding || null,
+    targetAddress:
+      target,
+    targetPresentInRetainedHistory:
+      Boolean(entry)
   };
 }
 
@@ -60634,6 +60665,15 @@ function telegramAnalyseResultMessageV276(
 
   lines.push(
     "",
+    `🗂 V268 history lookup: <b>${escapeHtml(
+      telemetry?.historicalAlertV277?.historyStatus ||
+      telemetry?.historicalAlertV277?.status ||
+      "UNVERIFIED"
+    )}</b> | retained <b>${safeNumber(
+      telemetry?.historicalAlertV277?.retainedCount
+    )}/${safeNumber(
+      telemetry?.historicalAlertV277?.maximumEntries
+    ) || ALERT_HISTORY_MAX_ENTRIES_V268}</b>`,
     `🔌 Manual command requests: <b>${safeNumber(
       telemetry?.requestsUsed
     )}/${TELEGRAM_ANALYSE_MAX_REQUESTS_V276}</b>`,
@@ -60846,7 +60886,7 @@ async function telegramFreshAnalyseV276(
           holderPriorityCompletion:
             true,
           manualAnalyseOptimizationV280:
-            true,
+            false,
           liveMomentumActivityV152: {
             swaps:
               0,
@@ -60939,6 +60979,33 @@ async function telegramFreshAnalyseV276(
       status:
         historicalAlertV277
           ?.status ||
+        null,
+      historyStatus:
+        historicalAlertV277
+          ?.historyStatus ||
+        null,
+      retainedCount:
+        safeNumber(
+          historicalAlertV277
+            ?.retainedCount
+        ),
+      maximumEntries:
+        safeNumber(
+          historicalAlertV277
+            ?.maximumEntries
+        ) ||
+        ALERT_HISTORY_MAX_ENTRIES_V268,
+      targetPresentInRetainedHistory:
+        historicalAlertV277
+          ?.targetPresentInRetainedHistory ===
+        true,
+      key:
+        historicalAlertV277
+          ?.key ||
+        ALERT_HISTORY_KEY_V268,
+      binding:
+        historicalAlertV277
+          ?.binding ||
         null
     },
     historicalPoolHydrationV277: {
