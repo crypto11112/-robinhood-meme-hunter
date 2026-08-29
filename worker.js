@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V273 / V2.0:
+ * - NEW: Telegram webhook diagnostics for troubleshooting non-replying channel commands
+ * - Persists the last inbound Telegram webhook update/result in a separate KV diagnostic key
+ * - NEW ROUTE: /telegram-webhook-status shows update type, chat ID, text, authorization, parsed command, reply attempt and Telegram result
+ * - Diagnostic persistence occurs outside scanner request accounting and adds zero provider/API requests
+ * - Does not change Telegram command behavior, scanner logic, scoring, Momentum, verified USD maths or thresholds
+ * - Preserves V272 channel_post support, V271 commands, V270 performance tracking, V269 holder integrity, V268 history and V267 follow-up
  * V272 / V2.0:
  * - FIX: Telegram commands now work when typed directly into the configured Telegram channel
  * - Adds channel_post and edited_channel_post webhook update support
@@ -1157,7 +1164,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V272";
+const VERSION = "V273";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1775,6 +1782,9 @@ const LAST_ALERT_SCAN_KEY_V264 =
  */
 const ALERT_HISTORY_KEY_V268 =
   "robinhood-meme-hunter-alert-history-v268";
+
+const TELEGRAM_WEBHOOK_DIAGNOSTIC_KEY_V273 =
+  "robinhood-meme-hunter-telegram-webhook-status-v273";
 
 const ALERT_HISTORY_MAX_ENTRIES_V268 =
   20;
@@ -54651,6 +54661,44 @@ for (
         true
     },
 
+    telegramWebhookDiagnosticsV273: {
+      enabled: true,
+      statusRoute:
+        "/telegram-webhook-status",
+      key:
+        TELEGRAM_WEBHOOK_DIAGNOSTIC_KEY_V273,
+      storesLastInboundUpdateOnly:
+        true,
+      capturesUpdateType:
+        true,
+      capturesReceivedChatId:
+        true,
+      capturesConfiguredChatId:
+        true,
+      capturesAuthorizationResult:
+        true,
+      capturesCommandParsing:
+        true,
+      capturesReplyAttempt:
+        true,
+      capturesTelegramReplyResult:
+        true,
+      scannerBudgetConsumed:
+        false,
+      externalProviderRequestsAdded:
+        0,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      momentumChanged:
+        false,
+      verifiedUsdMathChanged:
+        false,
+      telegramThresholdsChanged:
+        false
+    },
+
     telegramCommandsV272: {
       enabled: true,
       preservesV271Commands: true,
@@ -58007,6 +58055,7 @@ async function health(
       "/test-telegram",
       "/telegram-webhook",
       "/telegram-webhook-setup",
+      "/telegram-webhook-status",
       "/last-alert-scan",
       "/alert-history",
       "/call-performance"
@@ -58609,6 +58658,167 @@ async function diagnostics(
 }
 
 
+
+/* =========================================================
+   V273 TELEGRAM WEBHOOK DIAGNOSTICS
+   ========================================================= */
+
+function telegramUpdateTypeV273(
+  update
+) {
+  if (update?.message) {
+    return "message";
+  }
+
+  if (update?.edited_message) {
+    return "edited_message";
+  }
+
+  if (update?.channel_post) {
+    return "channel_post";
+  }
+
+  if (update?.edited_channel_post) {
+    return "edited_channel_post";
+  }
+
+  return "UNKNOWN";
+}
+
+function telegramMessageFromUpdateV273(
+  update
+) {
+  return (
+    update?.message ||
+    update?.edited_message ||
+    update?.channel_post ||
+    update?.edited_channel_post ||
+    null
+  );
+}
+
+async function persistTelegramWebhookDiagnosticV273(
+  env,
+  snapshot
+) {
+  try {
+    const binding =
+      env.MEME_HUNTER_STATE;
+
+    if (
+      !binding ||
+      typeof binding.put !==
+        "function"
+    ) {
+      return {
+        persisted: false,
+        reason:
+          "MEME_HUNTER_STATE_KV_UNAVAILABLE"
+      };
+    }
+
+    await binding.put(
+      TELEGRAM_WEBHOOK_DIAGNOSTIC_KEY_V273,
+      JSON.stringify(
+        snapshot
+      )
+    );
+
+    return {
+      persisted: true,
+      key:
+        TELEGRAM_WEBHOOK_DIAGNOSTIC_KEY_V273
+    };
+  } catch (error) {
+    return {
+      persisted: false,
+      reason:
+        "KV_WRITE_FAILED",
+      error:
+        errorString(error)
+    };
+  }
+}
+
+async function telegramWebhookStatusV273(
+  env
+) {
+  const binding =
+    env.MEME_HUNTER_STATE;
+
+  if (
+    !binding ||
+    typeof binding.get !==
+      "function"
+  ) {
+    return {
+      agent:
+        "Robinhood Chain Meme Hunter",
+      version:
+        VERSION,
+      status:
+        "TELEGRAM_WEBHOOK_DIAGNOSTIC_KV_UNAVAILABLE",
+      key:
+        TELEGRAM_WEBHOOK_DIAGNOSTIC_KEY_V273,
+      timestamp:
+        now()
+    };
+  }
+
+  const raw =
+    await binding.get(
+      TELEGRAM_WEBHOOK_DIAGNOSTIC_KEY_V273
+    );
+
+  if (!raw) {
+    return {
+      agent:
+        "Robinhood Chain Meme Hunter",
+      version:
+        VERSION,
+      status:
+        "NO_TELEGRAM_WEBHOOK_UPDATE_SAVED",
+      key:
+        TELEGRAM_WEBHOOK_DIAGNOSTIC_KEY_V273,
+      timestamp:
+        now()
+    };
+  }
+
+  try {
+    return {
+      agent:
+        "Robinhood Chain Meme Hunter",
+      version:
+        VERSION,
+      status:
+        "TELEGRAM_WEBHOOK_UPDATE_AVAILABLE",
+      key:
+        TELEGRAM_WEBHOOK_DIAGNOSTIC_KEY_V273,
+      snapshot:
+        JSON.parse(raw),
+      timestamp:
+        now()
+    };
+  } catch (error) {
+    return {
+      agent:
+        "Robinhood Chain Meme Hunter",
+      version:
+        VERSION,
+      status:
+        "TELEGRAM_WEBHOOK_DIAGNOSTIC_PARSE_FAILED",
+      key:
+        TELEGRAM_WEBHOOK_DIAGNOSTIC_KEY_V273,
+      error:
+        errorString(error),
+      timestamp:
+        now()
+    };
+  }
+}
+
+
 /* =========================================================
    V271 TELEGRAM CALL ANALYSIS COMMANDS
    ========================================================= */
@@ -59158,7 +59368,8 @@ function parseTelegramCommandV271(
 
 async function telegramCommandReplyV271(
   env,
-  update
+  update,
+  diagnosticV273 = null
 ) {
   const message =
     update?.message ||
@@ -59166,6 +59377,38 @@ async function telegramCommandReplyV271(
     update?.channel_post ||
     update?.edited_channel_post ||
     null;
+
+  if (diagnosticV273) {
+    diagnosticV273.updateType =
+      telegramUpdateTypeV273(
+        update
+      );
+
+    diagnosticV273.messagePresent =
+      message !== null;
+
+    diagnosticV273.messageText =
+      message?.text !==
+        undefined &&
+      message?.text !==
+        null
+        ? String(
+            message.text
+          )
+        : null;
+
+    diagnosticV273.chatType =
+      message?.chat?.type ||
+      null;
+
+    diagnosticV273.chatTitle =
+      message?.chat?.title ||
+      null;
+
+    diagnosticV273.chatUsername =
+      message?.chat?.username ||
+      null;
+  }
 
   const chatId =
     message?.chat?.id !==
@@ -59187,12 +59430,38 @@ async function telegramCommandReplyV271(
         )
       : null;
 
+  if (diagnosticV273) {
+    diagnosticV273.receivedChatId =
+      chatId;
+
+    diagnosticV273.configuredChatId =
+      configuredChatId;
+
+    diagnosticV273.authorized =
+      Boolean(
+        message &&
+        chatId &&
+        configuredChatId &&
+        chatId ===
+          configuredChatId
+      );
+  }
+
   if (
     !message ||
     !chatId ||
     !configuredChatId ||
     chatId !== configuredChatId
   ) {
+    if (diagnosticV273) {
+      diagnosticV273.commandParsed =
+        false;
+      diagnosticV273.replyAttempted =
+        false;
+      diagnosticV273.result =
+        "UNAUTHORIZED_OR_UNSUPPORTED_CHAT";
+    }
+
     return {
       success: true,
       ignored: true,
@@ -59206,7 +59475,25 @@ async function telegramCommandReplyV271(
       message?.text
     );
 
+  if (diagnosticV273) {
+    diagnosticV273.commandParsed =
+      parsed !== null;
+    diagnosticV273.command =
+      parsed?.command ||
+      null;
+    diagnosticV273.argument =
+      parsed?.argument ||
+      null;
+  }
+
   if (!parsed) {
+    if (diagnosticV273) {
+      diagnosticV273.replyAttempted =
+        false;
+      diagnosticV273.result =
+        "NOT_A_COMMAND";
+    }
+
     return {
       success: true,
       ignored: true,
@@ -59310,6 +59597,11 @@ async function telegramCommandReplyV271(
       telegramHelpV271();
   }
 
+  if (diagnosticV273) {
+    diagnosticV273.replyAttempted =
+      true;
+  }
+
   const result =
     await sendTelegram(
       env,
@@ -59317,6 +59609,30 @@ async function telegramCommandReplyV271(
       null,
       null
     );
+
+  if (diagnosticV273) {
+    diagnosticV273.replySuccess =
+      result?.success ===
+      true;
+
+    diagnosticV273.telegramStatus =
+      result?.status ||
+      null;
+
+    diagnosticV273.telegramMode =
+      result?.mode ||
+      null;
+
+    diagnosticV273.telegramError =
+      result?.error ||
+      null;
+
+    diagnosticV273.result =
+      result?.success ===
+        true
+        ? "REPLY_SENT"
+        : "REPLY_FAILED";
+  }
 
   return {
     success:
@@ -59343,32 +59659,136 @@ async function telegramWebhookV271(
   request,
   env
 ) {
+  const diagnosticV273 = {
+    schemaVersion:
+      "V273_TELEGRAM_WEBHOOK_DIAGNOSTIC_1",
+    receivedAt:
+      Date.now(),
+    botVersion:
+      VERSION,
+    webhookPath:
+      "/telegram-webhook",
+    scannerBudgetConsumed:
+      false,
+    externalProviderRequestsAdded:
+      0,
+    updateType:
+      null,
+    messagePresent:
+      null,
+    messageText:
+      null,
+    receivedChatId:
+      null,
+    configuredChatId:
+      env.TELEGRAM_CHAT_ID !==
+        undefined &&
+      env.TELEGRAM_CHAT_ID !==
+        null
+        ? String(
+            env.TELEGRAM_CHAT_ID
+          )
+        : null,
+    authorized:
+      null,
+    commandParsed:
+      null,
+    command:
+      null,
+    argument:
+      null,
+    replyAttempted:
+      null,
+    replySuccess:
+      null,
+    telegramStatus:
+      null,
+    telegramMode:
+      null,
+    telegramError:
+      null,
+    result:
+      null
+  };
+
   try {
     const update =
       await request.json();
 
+    diagnosticV273.updateType =
+      telegramUpdateTypeV273(
+        update
+      );
+
+    const message =
+      telegramMessageFromUpdateV273(
+        update
+      );
+
+    diagnosticV273.messageText =
+      message?.text !==
+        undefined &&
+      message?.text !==
+        null
+        ? String(
+            message.text
+          )
+        : null;
+
+    diagnosticV273.receivedChatId =
+      message?.chat?.id !==
+        undefined &&
+      message?.chat?.id !==
+        null
+        ? String(
+            message.chat.id
+          )
+        : null;
+
     const result =
       await telegramCommandReplyV271(
         env,
-        update
+        update,
+        diagnosticV273
+      );
+
+    diagnosticV273.commandResult =
+      result;
+
+    const persistence =
+      await persistTelegramWebhookDiagnosticV273(
+        env,
+        diagnosticV273
       );
 
     return jsonResponse({
       ok: true,
       version: VERSION,
-      webhook: "V271",
+      webhook: "V273_DIAGNOSTIC",
       result,
+      diagnosticPersistence:
+        persistence,
       timestamp: now()
     });
   } catch (error) {
+    diagnosticV273.result =
+      "WEBHOOK_HANDLER_ERROR";
+
+    diagnosticV273.error =
+      errorString(error);
+
+    await persistTelegramWebhookDiagnosticV273(
+      env,
+      diagnosticV273
+    );
+
     /*
      * Telegram expects a 2xx response to avoid repeated delivery storms.
-     * Preserve error telemetry in body without asking Telegram to retry.
      */
     return jsonResponse({
       ok: true,
       version: VERSION,
-      webhook: "V271",
+      webhook: "V273_DIAGNOSTIC",
       handledWithError: true,
       error:
         errorString(error),
@@ -59767,6 +60187,17 @@ async function handleRequest(
 
   if (
     path ===
+    "/telegram-webhook-status"
+  ) {
+    return jsonResponse(
+      await telegramWebhookStatusV273(
+        env
+      )
+    );
+  }
+
+  if (
+    path ===
     "/last-alert-scan"
   ) {
     return jsonResponse(
@@ -59828,6 +60259,7 @@ async function handleRequest(
         "/test-telegram",
         "/telegram-webhook",
         "/telegram-webhook-setup",
+        "/telegram-webhook-status",
         "/last-alert-scan",
         "/alert-history",
         "/call-performance"
