@@ -1,5 +1,13 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V269 / V2.0:
+ * - FIX: Telegram holder presentation now distinguishes fresh holder-count evidence from independent cached concentration evidence
+ * - Cached concentration can no longer visually appear to be freshly verified by a newly recovered holder count
+ * - Top-holder / Top-10 / concentration values are explicitly labelled CACHED when their verified source is cached
+ * - If fresh verified holder count is extremely thin (<=10) while concentration comes from cache, Telegram marks the concentration relationship as INDEPENDENT / NOT CROSS-VERIFIED
+ * - Adds a zero-request holder-presentation diagnostic to same-run alert snapshots for exact post-alert inspection
+ * - Presentation only: scoring, qualification, holder maths, Momentum, verified USD maths, Telegram thresholds and 42/21 ceilings are unchanged
+ * - Preserves V268 alert history and V267 follow-up tracking unchanged
  * V268 / V2.0:
  * - NEW: persistent successful-alert history so multiple Telegram calls can be inspected after the fact
  * - Keeps the most recent 20 successful same-run alert diagnostic snapshots in a separate KV key
@@ -1122,7 +1130,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V268";
+const VERSION = "V269";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -4725,6 +4733,13 @@ function alertDiagnosticCandidateV264(
     holderEvidence:
       candidate?.holderEvidence ||
       null,
+
+    telegramHolderPresentationV269:
+      candidate
+        ?.telegramHolderPresentationV269 ||
+      telegramHolderPresentationV269(
+        candidate
+      ),
 
     whaleFlow:
       candidate?.whaleFlow ||
@@ -40657,6 +40672,304 @@ function formatHolderCountV261(
 }
 
 
+
+/* =========================================================
+   V269 HOLDER PRESENTATION INTEGRITY
+   ========================================================= */
+
+function telegramHolderPresentationV269(
+  candidate
+) {
+  const holders =
+    candidate?.holders ||
+    {};
+
+  const whale =
+    holders?.whale ||
+    {};
+
+  const holderCountCompletionV256 =
+    holders
+      ?.holderCountCompletionV256;
+
+  const holderCountDisplayV225 =
+    holders
+      ?.holderCountDisplayV225;
+
+  const freshCompletionCountVerified =
+    holderCountCompletionV256
+      ?.verified === true &&
+    holderCountCompletionV256
+      ?.holderCount !== null &&
+    Number.isFinite(
+      Number(
+        holderCountCompletionV256
+          ?.holderCount
+      )
+    ) &&
+    Number(
+      holderCountCompletionV256
+        ?.holderCount
+    ) >= 0;
+
+  const directCounterCountVerified =
+    holders
+      ?.countersVerified === true &&
+    holders
+      ?.holderCount !== null &&
+    Number.isFinite(
+      Number(
+        holders?.holderCount
+      )
+    ) &&
+    Number(
+      holders?.holderCount
+    ) >= 0;
+
+  const cachedCountVerified =
+    holderCountDisplayV225
+      ?.verified === true &&
+    holderCountDisplayV225
+      ?.holderCount !== null &&
+    Number.isFinite(
+      Number(
+        holderCountDisplayV225
+          ?.holderCount
+      )
+    ) &&
+    Number(
+      holderCountDisplayV225
+        ?.holderCount
+    ) >= 0;
+
+  const holderCount =
+    freshCompletionCountVerified
+      ? Number(
+          holderCountCompletionV256
+            ?.holderCount
+        )
+      : directCounterCountVerified
+        ? Number(
+            holders?.holderCount
+          )
+        : cachedCountVerified
+          ? Number(
+              holderCountDisplayV225
+                ?.holderCount
+            )
+          : null;
+
+  const holderCountFresh =
+    freshCompletionCountVerified ||
+    directCounterCountVerified;
+
+  const holderCountSource =
+    freshCompletionCountVerified
+      ? (
+          holderCountCompletionV256
+            ?.source ||
+          "BLOCKSCOUT_PRO_COUNTERS_V256"
+        )
+      : directCounterCountVerified
+        ? (
+            holders?.counterSource ||
+            holders?.holderSource ||
+            "BLOCKSCOUT"
+          )
+        : cachedCountVerified
+          ? (
+              holderCountDisplayV225
+                ?.source ||
+              "VERIFIED_CACHE"
+            )
+          : "UNVERIFIED";
+
+  const concentrationMathVerified =
+    holders
+      ?.concentrationVerified ===
+      true &&
+    holders
+      ?.integrity
+      ?.verified === true &&
+    whale?.verified === true;
+
+  const holderSource =
+    String(
+      holders?.holderSource ||
+      ""
+    );
+
+  const holderSourceUpper =
+    holderSource.toUpperCase();
+
+  const concentrationCached =
+    concentrationMathVerified &&
+    (
+      holders?.cached === true ||
+      holderSourceUpper ===
+        "CACHE" ||
+      holderSourceUpper.startsWith(
+        "STALE_CACHE"
+      ) ||
+      holderSourceUpper.includes(
+        "CACHED"
+      )
+    );
+
+  const holderCacheAgeMs =
+    concentrationCached
+      ? safeNumber(
+          holders
+            ?.holderCacheAgeMs
+        )
+      : 0;
+
+  const concentrationFreshness =
+    !concentrationMathVerified
+      ? "UNVERIFIED"
+      : concentrationCached
+        ? (
+            holderCacheAgeMs >
+              TELEGRAM_HOLDER_EVIDENCE_MAX_AGE_MS_V168
+              ? "STALE_CACHE"
+              : "CACHED"
+          )
+        : "FRESH";
+
+  /*
+   * V269 does NOT invalidate either evidence source.
+   * It only refuses to visually imply that a newly recovered count and an
+   * independent cached concentration snapshot were verified together.
+   */
+  const freshThinCountWithCachedConcentration =
+    holderCountFresh &&
+    holderCount !== null &&
+    holderCount <= 10 &&
+    concentrationCached;
+
+  const relationship =
+    !concentrationMathVerified
+      ? "CONCENTRATION_UNVERIFIED"
+      : freshThinCountWithCachedConcentration
+        ? "INDEPENDENT_EVIDENCE_NOT_CROSS_VERIFIED"
+        : concentrationCached
+          ? "CACHED_CONCENTRATION_INDEPENDENT_OF_CURRENT_COUNT"
+          : "CURRENT_CONCENTRATION_EVIDENCE";
+
+  const concentrationStatusText =
+    !concentrationMathVerified
+      ? "UNVERIFIED"
+      : freshThinCountWithCachedConcentration
+        ? "VERIFIED CACHE — NOT CROSS-VERIFIED WITH FRESH COUNT"
+        : concentrationFreshness ===
+            "STALE_CACHE"
+          ? "VERIFIED — STALE CACHE"
+          : concentrationFreshness ===
+              "CACHED"
+            ? "VERIFIED — CACHED"
+            : "VERIFIED — FRESH";
+
+  const providerText =
+    concentrationMathVerified
+      ? (
+          holderSource ||
+          (
+            concentrationCached
+              ? "CACHED_VERIFIED_HOLDER_DATA"
+              : "VERIFIED_HOLDER_DATA"
+          )
+        )
+      : "UNVERIFIED";
+
+  const valueSuffix =
+    concentrationCached
+      ? " (CACHED)"
+      : "";
+
+  const whaleWallets =
+    concentrationMathVerified
+      ? `${String(
+          safeNumber(
+            whale?.whaleCount
+          )
+        )}${valueSuffix}`
+      : "UNVERIFIED";
+
+  const topHolder =
+    concentrationMathVerified
+      ? `${percentDisplay(
+          whale?.top1Percent
+        )}${valueSuffix}`
+      : "UNVERIFIED";
+
+  const top10 =
+    concentrationMathVerified
+      ? `${percentDisplay(
+          whale?.top10Percent
+        )}${valueSuffix}`
+      : "UNVERIFIED";
+
+  const concentration =
+    concentrationMathVerified
+      ? `${String(
+          whale
+            ?.concentrationRisk ||
+          "UNVERIFIED"
+        )}${valueSuffix}`
+      : "UNVERIFIED";
+
+  return {
+    enabled: true,
+    presentationOnly: true,
+    scoringChanged: false,
+    qualificationChanged: false,
+    holderMathChanged: false,
+    holderCountMathChanged: false,
+    momentumChanged: false,
+    verifiedUsdMathChanged: false,
+    telegramThresholdsChanged: false,
+    externalRequestsAdded: 0,
+
+    holderCount: {
+      verified:
+        holderCount !== null,
+      fresh:
+        holderCountFresh,
+      count:
+        holderCount,
+      source:
+        holderCountSource
+    },
+
+    concentration: {
+      verified:
+        concentrationMathVerified,
+      cached:
+        concentrationCached,
+      freshness:
+        concentrationFreshness,
+      cacheAgeMs:
+        concentrationCached
+          ? holderCacheAgeMs
+          : 0,
+      source:
+        providerText,
+      relationship,
+      freshThinCountWithCachedConcentration
+    },
+
+    display: {
+      concentrationStatusText,
+      providerText,
+      whaleWallets,
+      topHolder,
+      top10,
+      concentration
+    }
+  };
+}
+
+
 function telegramMessage(
   candidate
 ) {
@@ -40723,39 +41036,53 @@ function telegramMessage(
           ? (holderCountDisplayV225?.source || "VERIFIED_CACHE")
           : "UNVERIFIED";
 
-  const holderConcentrationStatusV144 =
-    holders?.concentrationVerified === true &&
-    holders?.integrity?.verified === true
-      ? "VERIFIED"
-      : "UNVERIFIED";
-
-  const holderProviderV144 =
-    holders?.holderSource ||
-    (
-      holders?.cached
-        ? "CACHED_VERIFIED_HOLDER_DATA"
-        : "UNVERIFIED"
+  const holderPresentationV269 =
+    telegramHolderPresentationV269(
+      candidate
     );
 
+  /*
+   * Persist the exact presentation interpretation in-memory so both
+   * /last-alert-scan and /alert-history can explain what Telegram rendered.
+   */
+  candidate.telegramHolderPresentationV269 =
+    holderPresentationV269;
+
+  const holderConcentrationStatusV144 =
+    holderPresentationV269
+      ?.display
+      ?.concentrationStatusText ||
+    "UNVERIFIED";
+
+  const holderProviderV144 =
+    holderPresentationV269
+      ?.display
+      ?.providerText ||
+    "UNVERIFIED";
+
   const whaleWallets =
-    holders?.concentrationVerified && whale?.verified
-      ? String(whale.whaleCount)
-      : "UNVERIFIED";
+    holderPresentationV269
+      ?.display
+      ?.whaleWallets ||
+    "UNVERIFIED";
 
   const topHolder =
-    holders?.concentrationVerified && whale?.verified
-      ? percentDisplay(whale.top1Percent)
-      : "UNVERIFIED";
+    holderPresentationV269
+      ?.display
+      ?.topHolder ||
+    "UNVERIFIED";
 
   const top10 =
-    holders?.concentrationVerified && whale?.verified
-      ? percentDisplay(whale.top10Percent)
-      : "UNVERIFIED";
+    holderPresentationV269
+      ?.display
+      ?.top10 ||
+    "UNVERIFIED";
 
   const concentration =
-    holders?.concentrationVerified && whale?.verified
-      ? whale.concentrationRisk
-      : "UNVERIFIED";
+    holderPresentationV269
+      ?.display
+      ?.concentration ||
+    "UNVERIFIED";
 
   const tradeWindow = window => {
     if (!market?.verified) {
@@ -41117,8 +41444,13 @@ function telegramMessage(
     "",
     `👥 Holder count: <b>${escapeHtml(holderText)}</b>`,
     `🧾 Holder count source: <b>${escapeHtml(holderCountSourceTextV225)}</b>`,
-    `🔎 Holder concentration: <b>${holderConcentrationStatusV144}</b>`,
+    `🔎 Holder concentration: <b>${escapeHtml(holderConcentrationStatusV144)}</b>`,
     `🛰 Holder data source: <b>${escapeHtml(holderProviderV144)}</b>`,
+    holderPresentationV269
+      ?.concentration
+      ?.freshThinCountWithCachedConcentration === true
+      ? "ℹ️ <i>Fresh holder count and cached concentration are separate evidence snapshots; concentration is not cross-verified against the fresh count.</i>"
+      : null,
     "",
     `🐋 Whale wallets: <b>${whaleWallets}</b>`,
     `🐋 Top holder: <b>${topHolder}</b>`,
@@ -41139,7 +41471,13 @@ function telegramMessage(
     `⚠️ <b>${escapeHtml(alertClass.footer)}</b>`
   ];
 
-  return lines.join("\n");
+  return lines
+    .filter(
+      line =>
+        line !== null &&
+        line !== undefined
+    )
+    .join("\n");
 }
 
 /* =========================================================
@@ -53705,6 +54043,29 @@ for (
         true,
       transientFailuresRemainRetryableV260:
         true
+    },
+
+    holderPresentationIntegrityV269: {
+      enabled: true,
+      presentationOnly: true,
+      freshHolderCountSeparatedFromCachedConcentration: true,
+      cachedConcentrationValuesExplicitlyLabelled: true,
+      thinFreshCountCachedConcentrationCrossVerificationPrevented: true,
+      sameRunDiagnosticIncluded: true,
+      externalRequestsAdded: 0,
+      scoringChanged: false,
+      qualificationChanged: false,
+      holderMathChanged: false,
+      holderCountMathChanged: false,
+      momentumChanged: false,
+      verifiedUsdMathChanged: false,
+      telegramThresholdsChanged: false,
+      alertHistoryChanged: false,
+      followUpTrackingChanged: false,
+      hardExternalRequestLimitPreserved:
+        MAX_EXTERNAL_REQUESTS,
+      analysisRequestLimitPreserved:
+        ANALYSIS_REQUEST_LIMIT
     },
 
     alertHistoryDiagnosticsV268: {
