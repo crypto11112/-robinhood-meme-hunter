@@ -1,5 +1,13 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V277 / V2.0:
+ * - FIX: manual /analyse now restores verified historical pool identity from V268 alert history when available
+ * - FIX: manual /analyse distinguishes a historical bot alert from a V270+ performance baseline
+ * - FIX: manual market evidence can perform one isolated DexScreener fresh attempt when Dex itself is not in 429 cooldown
+ * - SAFETY: manual fresh-market override has its own 60-second provider spacing and never mutates scanner provider state
+ * - SAFETY: cross-provider recovery staggering is bypassed only inside the isolated manual clone; actual Dex 429 cooldown remains enforced
+ * - PRESENTATION: raw Opportunity/Confidence/Market Quality/Rug scores are explicitly marked PROVISIONAL when core market evidence is missing
+ * - No scoring, Momentum, verified BUY/SELL USD, qualification, holder, Telegram alert threshold or scanner-budget math changed
  * V276 / V2.0:
  * - NEW: /analyse <ticker|address> performs a fresh Robinhood Chain token analysis from Telegram
  * - Address input works for any valid EVM token address; ticker input first resolves exact known symbols, then uses one bounded DexScreener Robinhood search if needed
@@ -1186,7 +1194,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V276";
+const VERSION = "V277";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2333,6 +2341,11 @@ const TELEGRAM_ANALYSE_MAX_REQUESTS_V276 = 12;
 const TELEGRAM_ANALYSE_COOLDOWN_MS_V276 = 20000;
 const TELEGRAM_ANALYSE_STATE_KEY_V276 =
   "robinhood-meme-hunter-telegram-analyse-v276";
+
+const TELEGRAM_ANALYSE_MARKET_STATE_KEY_V277 =
+  "robinhood-meme-hunter-telegram-analyse-market-v277";
+const TELEGRAM_ANALYSE_MARKET_SPACING_MS_V277 =
+  60 * 1000;
 
 
 const MIN_ALERT_SCORE = 60;
@@ -54688,6 +54701,42 @@ for (
         true
     },
 
+    telegramManualEvidenceCompletionV277: {
+      enabled: true,
+      historicalAlertRecovery:
+        true,
+      verifiedHistoricalPoolIdentityRecovery:
+        true,
+      historicalAlertSeparateFromV270Performance:
+        true,
+      isolatedManualDexFreshAttempt:
+        true,
+      manualDexFreshSpacingMs:
+        TELEGRAM_ANALYSE_MARKET_SPACING_MS_V277,
+      actualDex429CooldownPreserved:
+        true,
+      scannerProviderStateMutated:
+        false,
+      incompleteCoreScoresMarkedProvisional:
+        true,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      momentumMathChanged:
+        false,
+      verifiedUsdMathChanged:
+        false,
+      holderMathChanged:
+        false,
+      telegramThresholdsChanged:
+        false,
+      scannerRequestCeilingChanged:
+        false,
+      scannerAnalysisCeilingChanged:
+        false
+    },
+
     telegramFreshAnalysisV276: {
       enabled: true,
       commands: [
@@ -59613,10 +59662,432 @@ function telegramAnalyseDirectionalV276(
 }
 
 
+
+async function historicalAlertEvidenceV277(
+  env,
+  address
+) {
+  const target =
+    normalize(address);
+
+  if (!target) {
+    return {
+      found: false,
+      entry: null,
+      status:
+        "INVALID_ADDRESS"
+    };
+  }
+
+  const report =
+    await alertHistoryV268(
+      env
+    );
+
+  const entries =
+    Array.isArray(
+      report?.entries
+    )
+      ? report.entries
+      : [];
+
+  const entry =
+    entries.find(
+      item =>
+        normalize(
+          item?.address ||
+          item?.snapshot
+            ?.alert
+            ?.address
+        ) ===
+        target
+    ) ||
+    null;
+
+  return {
+    found:
+      Boolean(entry),
+    entry,
+    status:
+      entry
+        ? "HISTORICAL_ALERT_FOUND"
+        : (
+            report?.status ||
+            "NO_HISTORICAL_ALERT"
+          )
+  };
+}
+
+
+function hydrateManualWatchedFromAlertV277(
+  watched,
+  historical
+) {
+  const hydrated =
+    watched &&
+    typeof watched ===
+      "object"
+      ? watched
+      : {};
+
+  const entry =
+    historical?.entry ||
+    null;
+
+  const snapshot =
+    entry?.snapshot ||
+    null;
+
+  const candidate =
+    snapshot?.candidate ||
+    null;
+
+  const identity =
+    candidate
+      ?.onChainPoolIdentityV153 ||
+    null;
+
+  if (
+    !hydrated.metadata &&
+    (
+      entry?.symbol ||
+      entry?.name
+    )
+  ) {
+    hydrated.metadata = {
+      validERC20: true,
+      symbol:
+        entry?.symbol ||
+        null,
+      name:
+        entry?.name ||
+        null,
+      source:
+        "V268_VERIFIED_ALERT_HISTORY_V277",
+      recoveredAt:
+        Date.now()
+    };
+  }
+
+  const poolId =
+    normalize(
+      identity?.poolId ||
+      identity?.pairAddress
+    );
+
+  const quote =
+    normalize(
+      identity
+        ?.quoteTokenAddress
+    );
+
+  const token =
+    normalize(
+      hydrated?.address
+    );
+
+  const canRestorePool =
+    identity?.verified ===
+      true &&
+    /^0x[0-9a-f]{64}$/.test(
+      String(poolId || "")
+    ) &&
+    isAddress(token) &&
+    isAddress(quote) &&
+    (
+      quote === ZERO ||
+      knownQuote(quote)
+    );
+
+  if (canRestorePool) {
+    hydrated.pools =
+      Array.isArray(
+        hydrated.pools
+      )
+        ? hydrated.pools
+        : [];
+
+    const exists =
+      hydrated.pools.some(
+        pool =>
+          normalize(
+            pool?.poolId
+          ) ===
+          poolId
+      );
+
+    if (!exists) {
+      /*
+       * The V268 alert snapshot already verified candidate + known-quote
+       * membership for this exact PoolId. Currency order is not used as
+       * trade direction here; onChainPoolIdentityV153 only requires the
+       * candidate and a verified quote to be members of the PoolId.
+       */
+      hydrated.pools.push({
+        poolId,
+        currency0:
+          token,
+        currency1:
+          quote,
+        blockNumber:
+          identity?.blockNumber ||
+          null,
+        transactionHash:
+          identity
+            ?.transactionHash ||
+          null,
+        source:
+          "V268_VERIFIED_ALERT_POOL_RESTORED_V277",
+        historicalVerified:
+          true
+      });
+    }
+  }
+
+  return {
+    watched:
+      hydrated,
+    historicalAlertFound:
+      historical?.found ===
+      true,
+    restoredPoolIdentity:
+      canRestorePool,
+    restoredPoolId:
+      canRestorePool
+        ? poolId
+        : null
+  };
+}
+
+
+async function manualMarketFreshGateV277(
+  env,
+  consume = false
+) {
+  const {
+    kv
+  } = getKV(
+    env
+  );
+
+  if (!kv) {
+    return {
+      allowed: true,
+      remainingMs: 0,
+      persisted: false
+    };
+  }
+
+  let lastAt = 0;
+
+  try {
+    const raw =
+      await kv.get(
+        TELEGRAM_ANALYSE_MARKET_STATE_KEY_V277
+      );
+
+    if (raw) {
+      const parsed =
+        JSON.parse(raw);
+
+      lastAt =
+        safeNumber(
+          parsed
+            ?.lastFreshMarketAt
+        );
+    }
+  } catch (_) {
+    lastAt = 0;
+  }
+
+  const elapsed =
+    Date.now() -
+    lastAt;
+
+  if (
+    lastAt > 0 &&
+    elapsed <
+      TELEGRAM_ANALYSE_MARKET_SPACING_MS_V277
+  ) {
+    return {
+      allowed: false,
+      remainingMs:
+        TELEGRAM_ANALYSE_MARKET_SPACING_MS_V277 -
+        elapsed,
+      persisted: true
+    };
+  }
+
+  if (consume) {
+    try {
+      await kv.put(
+        TELEGRAM_ANALYSE_MARKET_STATE_KEY_V277,
+        JSON.stringify({
+          lastFreshMarketAt:
+            Date.now()
+        })
+      );
+    } catch (_) {}
+  }
+
+  return {
+    allowed: true,
+    remainingMs: 0,
+    persisted: true
+  };
+}
+
+
+function prepareManualMarketStateV277(
+  isolatedState,
+  originalState,
+  marketGate
+) {
+  const originalDex =
+    dexService(
+      originalState
+    );
+
+  const isolatedDex =
+    dexService(
+      isolatedState
+    );
+
+  const actualCooldownUntil =
+    safeNumber(
+      originalDex
+        ?.cooldownUntil
+    );
+
+  const actual429Cooldown =
+    actualCooldownUntil >
+    Date.now();
+
+  if (
+    marketGate?.allowed !==
+      true ||
+    actual429Cooldown
+  ) {
+    return {
+      freshOverrideEnabled:
+        false,
+      reason:
+        actual429Cooldown
+          ? "DEXSCREENER_429_COOLDOWN_PRESERVED"
+          : "MANUAL_MARKET_SPACING_V277",
+      actualDexCooldownUntil:
+        actualCooldownUntil ||
+        null
+    };
+  }
+
+  /*
+   * The manual command has its own provider spacing and operates on a
+   * cloned state. Clear scanner scheduling guards only inside that clone.
+   * Real provider 429 cooldown is checked above and never bypassed.
+   */
+  isolatedDex.lastRequestAt =
+    0;
+
+  isolatedDex
+    .priorityFreshReservation =
+    {
+      address: null,
+      reservedAt: null,
+      eligibleAt: null,
+      lastServedAt: null,
+      attempts: 0
+    };
+
+  const recovery =
+    marketProviderRecoveryV157(
+      isolatedState
+    );
+
+  recovery.blockDexUntil =
+    null;
+
+  recovery
+    .recoveringProviderUsedThisScan =
+    null;
+
+  return {
+    freshOverrideEnabled:
+      true,
+    reason:
+      "ISOLATED_MANUAL_FRESH_MARKET_V277",
+    actualDexCooldownUntil:
+      actualCooldownUntil ||
+      null
+  };
+}
+
+
+function manualEvidenceCompletenessV277(
+  candidate
+) {
+  const marketVerified =
+    candidate
+      ?.market
+      ?.verified ===
+    true;
+
+  const poolVerified =
+    candidate
+      ?.onChainPoolIdentityV153
+      ?.verified ===
+    true;
+
+  const erc20Verified =
+    candidate
+      ?.validERC20 ===
+    true;
+
+  const directionalVerified =
+    telegramAnalyseDirectionalV276(
+      candidate
+    )?.verified ===
+    true;
+
+  const coreComplete =
+    erc20Verified &&
+    marketVerified;
+
+  return {
+    erc20Verified,
+    marketVerified,
+    poolVerified,
+    directionalVerified,
+    coreComplete,
+    scoringPresentation:
+      coreComplete
+        ? "NORMAL"
+        : "PROVISIONAL_CORE_MARKET_UNVERIFIED"
+  };
+}
+
+
+function telegramRawScoreV277(
+  value,
+  suffix,
+  completeness
+) {
+  const raw =
+    `${safeNumber(value)}/100${suffix ? ` ${escapeHtml(suffix)}` : ""}`;
+
+  return completeness
+    ?.coreComplete ===
+      true
+      ? raw
+      : `${raw} — PROVISIONAL`;
+}
+
+
 function telegramAnalyseResultMessageV276(
   candidate,
   performance,
-  telemetry
+  telemetry,
+  historicalAlertV277 = null
 ) {
   if (
     !candidate ||
@@ -59687,6 +60158,11 @@ function telegramAnalyseResultMessageV276(
   const quality =
     candidate?.marketQuality ||
     {};
+
+  const completenessV277 =
+    manualEvidenceCompletenessV277(
+      candidate
+    );
 
   const directionalV276 =
     telegramAnalyseDirectionalV276(
@@ -59767,28 +60243,42 @@ function telegramAnalyseResultMessageV276(
     )}</b>`,
     "",
     `✅ ERC-20: <b>VERIFIED</b>`,
-    `📊 Opportunity: <b>${safeNumber(
-      opportunity?.score
-    )}/100</b>`,
+    `📊 Opportunity: <b>${telegramRawScoreV277(
+      opportunity?.score,
+      "",
+      completenessV277
+    )}</b>`,
     `⚡ Momentum: <b>${
       momentum?.verified === true
-        ? `${safeNumber(momentum?.score)}/100 ${escapeHtml(momentum?.label || "")}`
+        ? telegramRawScoreV277(
+            momentum?.score,
+            momentum?.label || "",
+            completenessV277
+          )
         : "UNVERIFIED"
     }</b>`,
-    `🎯 Confidence: <b>${safeNumber(
-      confidence?.score
-    )}/100 ${escapeHtml(
-      confidence?.label ||
-      ""
+    `🎯 Confidence: <b>${telegramRawScoreV277(
+      confidence?.score,
+      confidence?.label || "",
+      completenessV277
     )}</b>`,
-    `🏪 Market Quality: <b>${safeNumber(
-      quality?.score
-    )}/100</b>`,
+    `🏪 Market Quality: <b>${telegramRawScoreV277(
+      quality?.score,
+      "",
+      completenessV277
+    )}</b>`,
     `🛡 Rug Risk: <b>${
       risk?.verified === true
-        ? `${safeNumber(risk?.score)}/100 ${escapeHtml(risk?.label || "")}`
+        ? telegramRawScoreV277(
+            risk?.score,
+            risk?.label || "",
+            completenessV277
+          )
         : "UNVERIFIED"
     }</b>`,
+    completenessV277?.coreComplete === true
+      ? null
+      : "⚠️ <b>Core market evidence is incomplete — raw scores are provisional, not a final assessment.</b>",
     "",
     `💰 Price: <b>${
       market?.verified === true &&
@@ -59896,7 +60386,12 @@ function telegramAnalyseResultMessageV276(
   } else {
     lines.push(
       "",
-      "📚 Previous bot call: <b>NO V270+ PERFORMANCE RECORD</b>"
+      historicalAlertV277?.found === true
+        ? "📚 Previous bot alert: <b>YES — HISTORICAL ALERT FOUND</b>"
+        : "📚 Previous bot alert: <b>NO STORED ALERT FOUND</b>",
+      historicalAlertV277?.found === true
+        ? "📈 V270+ performance baseline: <b>NOT AVAILABLE FOR THIS HISTORICAL ALERT</b>"
+        : "📈 V270+ performance baseline: <b>NOT AVAILABLE</b>"
     );
   }
 
@@ -60024,6 +60519,12 @@ async function telegramFreshAnalyseV276(
     true
   );
 
+  const historicalAlertV277 =
+    await historicalAlertEvidenceV277(
+      env,
+      resolved.address
+    );
+
   const isolatedState =
     cloneStateForTelegramAnalyseV276(
       state
@@ -60040,6 +60541,39 @@ async function telegramFreshAnalyseV276(
       temporaryWatchedTokenV276(
         resolved.address
       );
+  }
+
+  const hydrationV277 =
+    hydrateManualWatchedFromAlertV277(
+      watched,
+      historicalAlertV277
+    );
+
+  watched =
+    hydrationV277.watched;
+
+  const manualMarketGateV277 =
+    await manualMarketFreshGateV277(
+      env,
+      false
+    );
+
+  const manualMarketPreparationV277 =
+    prepareManualMarketStateV277(
+      isolatedState,
+      state,
+      manualMarketGateV277
+    );
+
+  if (
+    manualMarketPreparationV277
+      ?.freshOverrideEnabled ===
+    true
+  ) {
+    await manualMarketFreshGateV277(
+      env,
+      true
+    );
   }
 
   const activity =
@@ -60155,7 +60689,35 @@ async function telegramFreshAnalyseV276(
     scannerStateMutated:
       false,
     autonomousWatchlistChanged:
-      false
+      false,
+    historicalAlertV277: {
+      found:
+        historicalAlertV277
+          ?.found === true,
+      status:
+        historicalAlertV277
+          ?.status ||
+        null
+    },
+    historicalPoolHydrationV277: {
+      restored:
+        hydrationV277
+          ?.restoredPoolIdentity ===
+        true,
+      poolId:
+        hydrationV277
+          ?.restoredPoolId ||
+        null
+    },
+    manualMarketFreshV277: {
+      ...manualMarketPreparationV277,
+      spacingMs:
+        TELEGRAM_ANALYSE_MARKET_SPACING_MS_V277
+    },
+    evidenceCompletenessV277:
+      manualEvidenceCompletenessV277(
+        candidate
+      )
   };
 
   return {
@@ -60163,7 +60725,8 @@ async function telegramFreshAnalyseV276(
       telegramAnalyseResultMessageV276(
         candidate,
         performance,
-        telemetry
+        telemetry,
+        historicalAlertV277
       ),
     telemetry
   };
