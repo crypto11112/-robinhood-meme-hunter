@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V264 / V2.0:
+ * - DIAGNOSTICS: every successfully sent Telegram opportunity alert now persists an exact same-run diagnostic snapshot in KV
+ * - ROUTE: /last-alert-scan returns the most recently persisted successful-alert snapshot even after later scheduled scans have run
+ * - The diagnostic key is separate from the protected main STATE_KEY; existing V69+ state/history is untouched
+ * - Snapshot includes alert token, block/run metadata, final candidate evidence, verified-USD completion before/after/provider telemetry, request budget-at-send and Telegram interpretation
+ * - KV diagnostic write/read does not consume the 42 external-network-request budget and cannot qualify or send an alert
+ * - Preserves V263 PRO-first USD history, V261 headline protection, V260 launch verification, scoring, Momentum, Telegram thresholds and verified USD maths
  * V263 / V2.0:
  * - PROVIDER: exact-pool verified-USD history prefers Blockscout PRO universal Etherscan-compatible logs when configured
  * - FALLBACK: existing public Blockscout logs route remains fallback when PRO is unavailable/fails and budget remains
@@ -1085,7 +1092,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V263";
+const VERSION = "V264";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1687,6 +1694,14 @@ const DEAD =
  */
 const STATE_KEY =
   "robinhood-meme-hunter-v69-state";
+
+/*
+ * V264 diagnostic-only KV record.
+ * IMPORTANT: this is deliberately separate from STATE_KEY so the existing
+ * V69+ persistent bot state/history remains untouched.
+ */
+const LAST_ALERT_SCAN_KEY_V264 =
+  "robinhood-meme-hunter-last-alert-scan-v264";
 
 /* =========================================================
    KNOWN INFRASTRUCTURE / QUOTES
@@ -4475,6 +4490,364 @@ function discoveryService(state) {
   };
 
   return state.services.discoveryRpc;
+}
+
+
+/* =========================================================
+   V264 SAME-RUN ALERT DIAGNOSTICS
+   ========================================================= */
+
+function requestBudgetSnapshotV264(
+  budget
+) {
+  if (!budget) {
+    return null;
+  }
+
+  return {
+    used:
+      safeNumber(
+        budget?.used
+      ),
+    limit:
+      safeNumber(
+        budget?.limit
+      ),
+    remaining:
+      Math.max(
+        0,
+        safeNumber(
+          budget?.limit
+        ) -
+        safeNumber(
+          budget?.used
+        )
+      ),
+    system: {
+      used:
+        safeNumber(
+          budget?.system?.used
+        ),
+      limit:
+        safeNumber(
+          budget?.system?.limit
+        )
+    },
+    discovery: {
+      used:
+        safeNumber(
+          budget?.discovery?.used
+        ),
+      limit:
+        safeNumber(
+          budget?.discovery?.limit
+        )
+    },
+    analysis: {
+      used:
+        safeNumber(
+          budget?.analysis?.used
+        ),
+      limit:
+        safeNumber(
+          budget?.analysis?.limit
+        )
+    },
+    notification: {
+      used:
+        safeNumber(
+          budget?.notification?.used
+        ),
+      limit:
+        safeNumber(
+          budget?.notification?.limit
+        )
+    }
+  };
+}
+
+
+function verifiedUsdCompletionForAddressV264(
+  verifiedUsdCompletionV254,
+  address
+) {
+  const target =
+    normalize(
+      address
+    );
+
+  return (
+    verifiedUsdCompletionV254
+      ?.results ||
+    []
+  ).find(
+    item =>
+      normalize(
+        item?.address
+      ) ===
+      target
+  ) || null;
+}
+
+
+function alertDiagnosticCandidateV264(
+  candidate
+) {
+  if (!candidate) {
+    return null;
+  }
+
+  return {
+    address:
+      normalize(
+        candidate?.address
+      ),
+    symbol:
+      candidate?.symbol ||
+      null,
+    name:
+      candidate?.name ||
+      null,
+
+    opportunity:
+      candidate?.opportunity ||
+      null,
+    momentum:
+      candidate?.momentum ||
+      null,
+    confidence:
+      candidate?.confidence ||
+      null,
+    marketQuality:
+      candidate?.marketQuality ||
+      null,
+    rugRisk:
+      candidate?.rugRisk ||
+      null,
+
+    market:
+      candidate?.market ||
+      null,
+    activity:
+      candidate?.activity ||
+      null,
+
+    onChainPoolIdentityV153:
+      candidate
+        ?.onChainPoolIdentityV153 ||
+      null,
+
+    onChainVerifiedFlowV212:
+      candidate
+        ?.onChainVerifiedFlowV212 ||
+      null,
+
+    telegramOpportunityInterpretationV261:
+      candidate
+        ?.telegramOpportunityInterpretationV261 ||
+      telegramOpportunityInterpretationV261(
+        candidate
+      ),
+
+    trueLaunch:
+      candidate?.trueLaunch ||
+      null,
+
+    holderCountEvidence:
+      candidate?.holderCountEvidence ||
+      null,
+    holderEvidence:
+      candidate?.holderEvidence ||
+      null,
+
+    whaleFlow:
+      candidate?.whaleFlow ||
+      null,
+
+    smartMoney:
+      candidate?.smartMoney ||
+      null
+  };
+}
+
+
+async function writeLastAlertScanV264(
+  env,
+  snapshot
+) {
+  const {
+    kv,
+    binding
+  } = getKV(
+    env
+  );
+
+  if (!kv) {
+    return {
+      saved: false,
+      binding: null,
+      key:
+        LAST_ALERT_SCAN_KEY_V264,
+      error:
+        "KV_NOT_CONFIGURED"
+    };
+  }
+
+  try {
+    await kv.put(
+      LAST_ALERT_SCAN_KEY_V264,
+      jsonStringifySafeV246(
+        snapshot,
+        0
+      )
+    );
+
+    return {
+      saved: true,
+      binding,
+      key:
+        LAST_ALERT_SCAN_KEY_V264,
+      error: null
+    };
+  }
+
+  catch (error) {
+    return {
+      saved: false,
+      binding,
+      key:
+        LAST_ALERT_SCAN_KEY_V264,
+      error:
+        errorString(
+          error
+        )
+    };
+  }
+}
+
+
+async function lastAlertScanV264(
+  env
+) {
+  const {
+    kv,
+    binding
+  } = getKV(
+    env
+  );
+
+  if (!kv) {
+    return {
+      agent:
+        "Robinhood Chain Meme Hunter",
+      version:
+        VERSION,
+      status:
+        "KV_NOT_CONFIGURED",
+      key:
+        LAST_ALERT_SCAN_KEY_V264,
+      binding:
+        null,
+      snapshot:
+        null,
+      timestamp:
+        now()
+    };
+  }
+
+  try {
+    const raw =
+      await kv.get(
+        LAST_ALERT_SCAN_KEY_V264
+      );
+
+    if (!raw) {
+      return {
+        agent:
+          "Robinhood Chain Meme Hunter",
+        version:
+          VERSION,
+        status:
+          "NO_ALERT_SCAN_SAVED",
+        key:
+          LAST_ALERT_SCAN_KEY_V264,
+        binding,
+        snapshot:
+          null,
+        timestamp:
+          now()
+      };
+    }
+
+    let snapshot =
+      null;
+
+    try {
+      snapshot =
+        JSON.parse(
+          raw
+        );
+    }
+
+    catch (parseError) {
+      return {
+        agent:
+          "Robinhood Chain Meme Hunter",
+        version:
+          VERSION,
+        status:
+          "SAVED_ALERT_SCAN_PARSE_ERROR",
+        key:
+          LAST_ALERT_SCAN_KEY_V264,
+        binding,
+        snapshot:
+          null,
+        error:
+          errorString(
+            parseError
+          ),
+        timestamp:
+          now()
+      };
+    }
+
+    return {
+      agent:
+        "Robinhood Chain Meme Hunter",
+      version:
+        VERSION,
+      status:
+        "LAST_ALERT_SCAN_AVAILABLE",
+      key:
+        LAST_ALERT_SCAN_KEY_V264,
+      binding,
+      snapshot,
+      timestamp:
+        now()
+    };
+  }
+
+  catch (error) {
+    return {
+      agent:
+        "Robinhood Chain Meme Hunter",
+      version:
+        VERSION,
+      status:
+        "LAST_ALERT_SCAN_READ_FAILED",
+      key:
+        LAST_ALERT_SCAN_KEY_V264,
+      binding,
+      snapshot:
+        null,
+      error:
+        errorString(
+          error
+        ),
+      timestamp:
+        now()
+    };
+  }
 }
 
 /* =========================================================
@@ -49032,6 +49405,170 @@ for (
     if (
       result.success
     ) {
+      const sameRunVerifiedUsdCompletionV264 =
+        verifiedUsdCompletionForAddressV264(
+          verifiedUsdCompletionV254,
+          address
+        );
+
+      const lastAlertSnapshotV264 = {
+        schemaVersion:
+          "V264_LAST_ALERT_SCAN_1",
+        botVersion:
+          VERSION,
+        savedAt:
+          Date.now(),
+
+        scan: {
+          scheduled:
+            scheduled === true,
+          startedAt,
+          latestBlock:
+            latestNumber,
+          rpcProvider:
+            latest?.provider ||
+            null,
+          scannerStatus:
+            status
+        },
+
+        alert: {
+          address,
+          symbol:
+            candidate?.symbol ||
+            null,
+          name:
+            candidate?.name ||
+            null,
+          sent:
+            true,
+          telegramMode:
+            result?.mode ||
+            null,
+          telegramStatus:
+            result?.status ||
+            null
+        },
+
+        candidate:
+          alertDiagnosticCandidateV264(
+            candidate
+          ),
+
+        verifiedUsdCompletionV254:
+          sameRunVerifiedUsdCompletionV264,
+
+        verifiedUsdCoverageV262:
+          verifiedUsdCoverageV262(
+            candidate,
+            state
+          ),
+
+        verifiedUsdV263: {
+          verifiedUsdAvailable:
+            sameRunVerifiedUsdCompletionV264
+              ?.verifiedUsdAvailableV263 ===
+            true,
+          coverageEnriched:
+            sameRunVerifiedUsdCompletionV264
+              ?.coverageEnrichedV263 ===
+            true,
+          historyProviderPath:
+            sameRunVerifiedUsdCompletionV264
+              ?.historyProviderPathV263 ||
+            null,
+          historyProviderAttempts:
+            sameRunVerifiedUsdCompletionV264
+              ?.historyProviderAttemptsV263 ||
+            [],
+          coverageBefore:
+            sameRunVerifiedUsdCompletionV264
+              ?.coverageBeforeV262 ||
+            null,
+          coverageAfterLiveReplay:
+            sameRunVerifiedUsdCompletionV264
+              ?.coverageAfterLiveReplayV262 ||
+            null,
+          coverageAfterHistory:
+            sameRunVerifiedUsdCompletionV264
+              ?.coverageAfterHistoryV262 ||
+            null,
+          historyEnrichmentReason:
+            sameRunVerifiedUsdCompletionV264
+              ?.historyEnrichmentReasonV262 ||
+            null
+        },
+
+        telegramInterpretationV261:
+          candidate
+            ?.telegramOpportunityInterpretationV261 ||
+          telegramOpportunityInterpretationV261(
+            candidate
+          ),
+
+        holderCountCompletionV256:
+          (
+            holderCountCompletionV256
+              ?.results ||
+            []
+          ).find(
+            item =>
+              normalize(
+                item?.address
+              ) ===
+              address
+          ) || null,
+
+        launchAgeCompletionV258:
+          (
+            launchAgeCompletionV258
+              ?.results ||
+            []
+          ).find(
+            item =>
+              normalize(
+                item?.address
+              ) ===
+              address
+          ) || null,
+
+        requestBudgetAtSuccessfulSendV264:
+          requestBudgetSnapshotV264(
+            budget
+          ),
+
+        guaranteesV264: {
+          mainStateKeyUntouched:
+            STATE_KEY ===
+            "robinhood-meme-hunter-v69-state",
+          separateDiagnosticKey:
+            LAST_ALERT_SCAN_KEY_V264,
+          scoringChanged:
+            false,
+          momentumChanged:
+            false,
+          verifiedUsdMathChanged:
+            false,
+          telegramThresholdsChanged:
+            false,
+          externalRequestLimitChanged:
+            false,
+          analysisRequestLimitChanged:
+            false
+        }
+      };
+
+      const lastAlertScanPersistenceV264 =
+        await writeLastAlertScanV264(
+          env,
+          lastAlertSnapshotV264
+        );
+
+      telegramResults[
+        telegramResults.length - 1
+      ].lastAlertScanPersistenceV264 =
+        lastAlertScanPersistenceV264;
+
       state.alerts[
         address
       ] = {
@@ -51458,6 +51995,26 @@ for (
         true,
       transientFailuresRemainRetryableV260:
         true
+    },
+
+    lastAlertScanDiagnosticsV264: {
+      enabled: true,
+      route:
+        "/last-alert-scan",
+      key:
+        LAST_ALERT_SCAN_KEY_V264,
+      separateFromMainStateKey: true,
+      persistsOnlyAfterSuccessfulTelegramSend: true,
+      survivesLaterScheduledScans: true,
+      includesSameRunVerifiedUsdCompletion: true,
+      includesRequestBudgetAtSend: true,
+      addsExternalNetworkRequests: false,
+      scoringChanged: false,
+      momentumChanged: false,
+      verifiedUsdMathChanged: false,
+      telegramThresholdsChanged: false,
+      hardExternalRequestLimitPreserved: 42,
+      analysisRequestLimitPreserved: 21
     },
 
     verifiedUsdHistoryProviderV263: {
@@ -54592,7 +55149,8 @@ async function health(
       "/state",
       "/diagnostics",
       "/run-all",
-      "/test-telegram"
+      "/test-telegram",
+      "/last-alert-scan"
     ],
 
     chain: {
@@ -55450,6 +56008,17 @@ async function handleRequest(
     );
   }
 
+  if (
+    path ===
+    "/last-alert-scan"
+  ) {
+    return jsonResponse(
+      await lastAlertScanV264(
+        env
+      )
+    );
+  }
+
   return jsonResponse(
     {
       agent:
@@ -55471,7 +56040,8 @@ async function handleRequest(
         "/state",
         "/diagnostics",
         "/run-all",
-        "/test-telegram"
+        "/test-telegram",
+        "/last-alert-scan"
       ],
 
       timestamp:
