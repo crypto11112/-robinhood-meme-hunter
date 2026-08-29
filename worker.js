@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V261 / V2.0:
+ * - PRESENTATION: evidence-aware Telegram opportunity headline protection
+ * - High scores no longer render HIGH-CONVICTION/STRONG when authoritative 15m/1h verified USD evidence materially conflicts
+ * - Thin verified directional samples render WATCH — BUILDING CONFIRMATION instead of overstating conviction
+ * - Numeric Opportunity score, Momentum, qualification thresholds and verified BUY/SELL USD maths are unchanged
+ * - FIX: verified holder counts below 1,000 render as integers (e.g. 572, not 572.00)
+ * - Preserves V260 launch-age fair rotation/cooldown, V257 pool identity fix, V256 holder completion, KV key and 42/21 ceilings
  * V260 / V2.0:
  * - FIX: fair launch-age recovery rotation prevents a no-evidence token from monopolising the one completion slot
  * - Persists per-token launch-age recovery state in existing KV state; NO_VERIFIED_LAUNCH_EVENT_EVIDENCE enters a 30-minute retry cooldown
@@ -1063,7 +1070,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V260";
+const VERSION = "V261";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -39072,6 +39079,225 @@ function telegramOpportunityLabelV255(
 }
 
 
+/* =========================================================
+   V261 EVIDENCE-AWARE TELEGRAM HEADLINE
+   ========================================================= */
+
+/*
+ * Presentation-only protection.
+ *
+ * The raw Opportunity score and Momentum remain authoritative and unchanged.
+ * V261 only prevents the Telegram headline from implying high conviction when
+ * the bot's own candidate-matched verified USD evidence is either:
+ *   - materially bearish in a meaningful 15m/1h sample; or
+ *   - too thin to justify a STRONG/HIGH-CONVICTION wording.
+ *
+ * The thresholds below affect ONLY the wording shown in Telegram.
+ */
+function telegramOpportunityInterpretationV261(
+  candidate
+) {
+  const baseLabel =
+    telegramOpportunityLabelV255(
+      candidate
+    );
+
+  const score =
+    safeNumber(
+      candidate?.opportunity?.score
+    );
+
+  const momentumScore =
+    safeNumber(
+      candidate?.momentum?.score
+    );
+
+  const authoritative =
+    candidate?.onChainVerifiedFlowV212
+      ?.windows ||
+    {};
+
+  const fallback =
+    candidate?.market
+      ?.directionalFlow ||
+    {};
+
+  const verifiedWindow = key => {
+    const exact =
+      authoritative?.[key];
+
+    const prior =
+      fallback?.[key];
+
+    const row =
+      exact?.verified === true
+        ? exact
+        : prior?.verified === true
+          ? prior
+          : null;
+
+    if (!row) {
+      return null;
+    }
+
+    const buyUsd =
+      Number(
+        row?.buyVolumeUsd
+      );
+
+    const sellUsd =
+      Number(
+        row?.sellVolumeUsd
+      );
+
+    const netUsd =
+      Number(
+        row?.netFlowUsd
+      );
+
+    const buyPressureUsd =
+      Number(
+        row?.buyPressureUsd
+      );
+
+    if (
+      !Number.isFinite(buyUsd) ||
+      !Number.isFinite(sellUsd) ||
+      !Number.isFinite(netUsd) ||
+      !Number.isFinite(
+        buyPressureUsd
+      )
+    ) {
+      return null;
+    }
+
+    return {
+      key,
+      source:
+        exact?.verified === true
+          ? "ONCHAIN_VERIFIED_FLOW_V212"
+          : "MARKET_DIRECTIONAL_FLOW",
+      buyUsd,
+      sellUsd,
+      totalUsd:
+        Math.max(0, buyUsd) +
+        Math.max(0, sellUsd),
+      netUsd,
+      buyPressureUsd,
+      observedTrades:
+        safeNumber(
+          row?.observedTrades
+        )
+    };
+  };
+
+  /*
+   * Prefer 1h because it is the broader confirmed window; otherwise use 15m.
+   * This mirrors the existing V253 preference without changing V253 itself.
+   */
+  const medium =
+    verifiedWindow("h1") ||
+    verifiedWindow("m15");
+
+  const mediumSampleMeaningful =
+    Boolean(
+      medium &&
+      medium.totalUsd >= 500 &&
+      medium.observedTrades >= 4
+    );
+
+  const materiallyBearish =
+    Boolean(
+      mediumSampleMeaningful &&
+      medium.netUsd <= -500 &&
+      medium.buyPressureUsd <= 35
+    );
+
+  const thinConfirmation =
+    score >= 75 &&
+    (
+      !medium ||
+      medium.totalUsd < 500 ||
+      medium.observedTrades < 4
+    );
+
+  let label =
+    baseLabel;
+
+  let reason =
+    "BASE_SCORE_LABEL_V255";
+
+  if (
+    score >= 75 &&
+    materiallyBearish
+  ) {
+    label =
+      momentumScore >= 50
+        ? "STRONG MOMENTUM — BEARISH VERIFIED FLOW"
+        : "WATCH — BEARISH VERIFIED FLOW";
+
+    reason =
+      "MATERIAL_VERIFIED_MEDIUM_WINDOW_BEARISH_CONFLICT_V261";
+  }
+
+  else if (
+    thinConfirmation
+  ) {
+    label =
+      "WATCH — BUILDING CONFIRMATION";
+
+    reason =
+      "VERIFIED_DIRECTIONAL_SAMPLE_TOO_THIN_FOR_STRONG_HEADLINE_V261";
+  }
+
+  return {
+    label,
+    baseLabel,
+    reason,
+    presentationOnly:
+      true,
+    scoreChanged:
+      false,
+    momentumChanged:
+      false,
+    telegramThresholdsChanged:
+      false,
+    verifiedUsdMathChanged:
+      false,
+    mediumWindow:
+      medium,
+    mediumSampleMeaningful,
+    materiallyBearish,
+    thinConfirmation
+  };
+}
+
+
+function formatHolderCountV261(
+  value
+) {
+  const n =
+    Number(
+      value
+    );
+
+  if (
+    !Number.isFinite(n) ||
+    n < 0
+  ) {
+    return "UNVERIFIED";
+  }
+
+  if (n < 1000) {
+    return String(
+      Math.round(n)
+    );
+  }
+
+  return formatNumber(n);
+}
+
+
 function telegramMessage(
   candidate
 ) {
@@ -39083,6 +39309,18 @@ function telegramMessage(
   const holders = candidate.holders;
   const whale = holders?.whale;
   const market = candidate.market;
+
+  const opportunityInterpretationV261 =
+    telegramOpportunityInterpretationV261(
+      candidate
+    );
+
+  /*
+   * Expose the presentation diagnostic in the same in-memory candidate so the
+   * /scan response can show exactly why a Telegram headline was protected.
+   */
+  candidate.telegramOpportunityInterpretationV261 =
+    opportunityInterpretationV261;
 
   const riskScore =
     candidate.risk?.verified &&
@@ -39104,13 +39342,13 @@ function telegramMessage(
   const holderText =
     holderCountCompletionV256?.verified === true &&
     holderCountCompletionV256?.holderCount !== null
-      ? `${formatNumber(holderCountCompletionV256.holderCount)} (VERIFIED)`
+      ? `${formatHolderCountV261(holderCountCompletionV256.holderCount)} (VERIFIED)`
       : holders?.countersVerified &&
         holders?.holderCount !== null
-        ? `${formatNumber(holders.holderCount)} (VERIFIED)`
+        ? `${formatHolderCountV261(holders.holderCount)} (VERIFIED)`
         : holderCountDisplayV225?.verified === true &&
           holderCountDisplayV225?.holderCount !== null
-          ? `${formatNumber(holderCountDisplayV225.holderCount)} (VERIFIED CACHE)`
+          ? `${formatHolderCountV261(holderCountDisplayV225.holderCount)} (VERIFIED CACHE)`
           : "UNVERIFIED";
 
   const holderCountSourceTextV225 =
@@ -39489,7 +39727,7 @@ function telegramMessage(
       ? `🏷 Launch source: <b>${escapeHtml(verifiedLaunchAgeV223Data.protocol)}</b>`
       : `🏷 Launch source: <b>UNVERIFIED</b>`,
     "",
-    `🎯 Opportunity: <b>${telegramOpportunityLabelV255(candidate)}</b>`,
+    `🎯 Opportunity: <b>${escapeHtml(opportunityInterpretationV261.label)}</b>`,
     `📊 Opportunity Score: <b>${candidate.opportunity.score}/100</b>`,
     `🚀 Momentum: <b>${candidate.momentum.score}/100 (${candidate.momentum.label})</b>`,
     `🔎 Confidence: <b>${candidate.confidence.score}/100 (${candidate.confidence.label})</b>`,
@@ -50807,6 +51045,20 @@ for (
         true,
       transientFailuresRemainRetryableV260:
         true
+    },
+
+    telegramHeadlineProtectionV261: {
+      enabled: true,
+      presentationOnly: true,
+      opportunityScoreChanged: false,
+      momentumChanged: false,
+      verifiedUsdMathChanged: false,
+      telegramThresholdsChanged: false,
+      mediumWindowMinimumUsdForStrongHeadline: 500,
+      mediumWindowMinimumObservedTradesForStrongHeadline: 4,
+      bearishConflictMaximumBuyPressureUsd: 35,
+      bearishConflictMaximumNetFlowUsd: -500,
+      holderCountIntegerFormattingBelow1000: true
     },
 
     telegramVerifiedUsdObservabilityV213: {
