@@ -1,5 +1,11 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V286 / V2.0:
+ * - PRESENTATION: manual /analyse now mirrors the standard autonomous alert information sections without changing the autonomous telegramMessage() formatter
+ * - ADDS TO MANUAL OUTPUT: launch source + scanner age, Market Activity Counts, holder count source, holder concentration/source, whale wallet details, accumulation/distribution/trend, smart-money candidate status, and pool V4 swap/liquidity-event counts
+ * - SAFETY: presentation-only reuse of already-collected candidate evidence; adds zero provider requests and does not mutate scanner state/watchlist
+ * - SAFETY: standard autonomous Telegram alert formatter, scanner scoring, Momentum maths, verified USD maths, qualification, thresholds, KV keys, provider protections and 42/21 scanner budgets unchanged
+ * - Preserves V285 strict manual Bitquery USD enrichment and all V284/V283 manual-analysis protections
  * V285 / V2.0:
  * - MANUAL USD ENRICHMENT: /analyse can spend one remaining protected request on Bitquery Trading.Trades when its normal candidate-matched USD windows are still unavailable
  * - SAFETY: exact token + Robinhood network only; known-quote rows only; Bitquery's documented Robinhood duplicate-leg key is applied before aggregation
@@ -1251,7 +1257,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V285";
+const VERSION = "V286";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -60911,6 +60917,85 @@ function telegramAnalyseResultMessageV276(
         )
       : "UNVERIFIED";
 
+  /* V286 manual presentation parity only.
+   * Reuses evidence already present on the isolated manual candidate.
+   * No provider calls, scoring, qualification or autonomous formatter changes.
+   */
+  const manualMarketActivityV286 = window => {
+    if (market?.verified !== true) {
+      return {buys: "UNVERIFIED", sells: "UNVERIFIED"};
+    }
+
+    const tx = market?.transactions?.[window] || {};
+    const flow = market?.directionalFlow?.[window] || {};
+    const derivedDirectionalWindow =
+      window === "m15" || window === "h6";
+    const verifiedDerivedCounts =
+      !derivedDirectionalWindow || flow?.verified === true;
+
+    return {
+      buys: verifiedDerivedCounts && tx?.buys !== null && tx?.buys !== undefined
+        ? safeNumber(tx.buys)
+        : "UNVERIFIED",
+      sells: verifiedDerivedCounts && tx?.sells !== null && tx?.sells !== undefined
+        ? safeNumber(tx.sells)
+        : "UNVERIFIED"
+    };
+  };
+
+  const manualTrade5mV286 = manualMarketActivityV286("m5");
+  const manualTrade15mV286 = manualMarketActivityV286("m15");
+  const manualTrade1hV286 = manualMarketActivityV286("h1");
+  const manualTrade6hV286 = manualMarketActivityV286("h6");
+  const manualTrade24hV286 = manualMarketActivityV286("h24");
+
+  const holderCountSourceV286 =
+    holderPresentationV269?.holderCount?.source ||
+    holders?.holderCountCompletionV256?.source ||
+    holders?.counterSource ||
+    holders?.holderCountDisplayV225?.source ||
+    "UNVERIFIED";
+
+  const holderConcentrationStatusV286 =
+    holderPresentationV269?.display?.concentrationStatusText ||
+    (concentrationVerified ? "VERIFIED" : "UNVERIFIED");
+
+  const holderDataSourceV286 =
+    holderPresentationV269?.display?.providerText ||
+    holders?.holderSource ||
+    "UNVERIFIED";
+
+  const whaleWalletsV286 =
+    holderPresentationV269?.display?.whaleWallets ||
+    (concentrationVerified && Number.isFinite(Number(whale?.whaleWallets))
+      ? safeNumber(whale.whaleWallets)
+      : "UNVERIFIED");
+
+  const smartMoneyCandidateV286 =
+    holders?.concentrationVerified === true && whale?.verified === true
+      ? yesNo(whale?.smartMoneyCandidate)
+      : "NO";
+
+  const verifiedLaunchV286 =
+    candidate?.verifiedLaunchAgeV223 || {};
+
+  const launchAgeV286 =
+    verifiedLaunchV286?.verified === true
+      ? (verifiedLaunchV286?.launchAgeDisplay ||
+         (Number.isFinite(Number(verifiedLaunchV286?.ageMs))
+           ? formatAgeV223(verifiedLaunchV286.ageMs)
+           : "UNVERIFIED"))
+      : "UNVERIFIED";
+
+  const scannerAgeV286 =
+    verifiedLaunchV286?.scannerAgeDisplay ||
+    "UNVERIFIED";
+
+  const launchSourceV286 =
+    verifiedLaunchV286?.verified === true && verifiedLaunchV286?.protocol
+      ? verifiedLaunchV286.protocol
+      : "UNVERIFIED";
+
   const lines = [
     `🔎 <b>Fresh Robinhood Analysis — ${escapeHtml(
       candidate?.symbol ||
@@ -61003,53 +61088,55 @@ function telegramAnalyseResultMessageV276(
         : "UNVERIFIED"
     }</b>`,
     "",
+    "📊 <b>Market Activity Counts — NOT USD VERIFIED</b>",
+    `🟢 5m Buys: <b>${manualTrade5mV286.buys}</b>`,
+    `🔴 5m Sells: <b>${manualTrade5mV286.sells}</b>`,
+    "",
+    `🟢 15m Buys: <b>${manualTrade15mV286.buys}</b>`,
+    `🔴 15m Sells: <b>${manualTrade15mV286.sells}</b>`,
+    "",
+    `🟢 1h Buys: <b>${manualTrade1hV286.buys}</b>`,
+    `🔴 1h Sells: <b>${manualTrade1hV286.sells}</b>`,
+    "",
+    `🟢 6h Buys: <b>${manualTrade6hV286.buys}</b>`,
+    `🔴 6h Sells: <b>${manualTrade6hV286.sells}</b>`,
+    "",
+    `🟢 24h Buys: <b>${manualTrade24hV286.buys}</b>`,
+    `🔴 24h Sells: <b>${manualTrade24hV286.sells}</b>`,
     ...telegramAnalyseVerifiedUsdLinesV284(
       candidate
     ),
     "",
-    `👥 Holder count: <b>${escapeHtml(
-      holderCount
-    )}</b>`,
+    `👥 Holder count: <b>${escapeHtml(holderCount)}</b>`,
+    `🧾 Holder count source: <b>${escapeHtml(holderCountSourceV286)}</b>`,
+    `🔎 Holder concentration: <b>${escapeHtml(holderConcentrationStatusV286)}</b>`,
+    `🛰 Holder data source: <b>${escapeHtml(holderDataSourceV286)}</b>`,
+    "",
+    `🐋 Whale wallets: <b>${escapeHtml(String(whaleWalletsV286))}</b>`,
     `🐋 Top holder: <b>${top1}</b>`,
     `🐋 Top 10: <b>${top10}</b>`,
-    `📊 Concentration: <b>${escapeHtml(
-      concentration
-    )}</b>`,
-    `🐳 Whale Flow: <b>${escapeHtml(
-      candidate?.whaleFlow?.flow ||
-      "UNVERIFIED"
-    )}</b>`,
+    `🐋 Concentration: <b>${escapeHtml(concentration)}</b>`,
     "",
-    `🛰 V4 pool identity: <b>${
-      candidate
-        ?.onChainPoolIdentityV153
-        ?.verified === true
-        ? "VERIFIED"
-        : "UNVERIFIED"
-    }</b>`,
+    `🐋 Whale Flow: <b>${escapeHtml(candidate?.whaleFlow?.flow || "UNVERIFIED")}</b>`,
+    `📥 Accumulation: <b>${escapeHtml(candidate?.whaleFlow?.accumulation || "NOT_OBSERVED")}</b>`,
+    `📤 Distribution: <b>${escapeHtml(candidate?.whaleFlow?.distribution || "NOT_OBSERVED")}</b>`,
+    `📊 Concentration Trend: <b>${escapeHtml(candidate?.whaleFlow?.concentrationTrend || "NOT_VERIFIED")}</b>`,
+    "",
+    `🧠 Smart-money candidate: <b>${escapeHtml(smartMoneyCandidateV286)}</b>`,
+    "🧠 Smart-money identity verified: <b>NO</b>",
+    "",
+    `📡 Pool V4 swaps: <b>${safeNumber(candidate?.activity?.swaps)}</b>`,
+    `💦 Pool liquidity events: <b>${safeNumber(candidate?.activity?.liquidityEvents)}</b>`,
+    `🛰 V4 pool identity: <b>${candidate?.onChainPoolIdentityV153?.verified === true ? "VERIFIED" : "UNVERIFIED"}</b>`,
     `🛰 Live V4 swaps in this manual analysis: <b>${
-      candidate
-        ?.liveMomentumActivityV152
-        ?.verified === true
-        ? `${safeNumber(
-            candidate
-              .liveMomentumActivityV152
-              .swaps
-          )} (VERIFIED)`
+      candidate?.liveMomentumActivityV152?.verified === true
+        ? `${safeNumber(candidate.liveMomentumActivityV152.swaps)} (VERIFIED)`
         : "UNVERIFIED"
     }</b>`,
     "",
-    `🕒 Launch age: <b>${escapeHtml(
-      candidate
-        ?.verifiedLaunchAgeV223
-        ?.verified === true
-        ? formatAgeV223(
-            candidate
-              .verifiedLaunchAgeV223
-              .ageMs
-          )
-        : "UNVERIFIED"
-    )}</b>`
+    `⏱ Verified launch age: <b>${escapeHtml(launchAgeV286)}</b>`,
+    `🔭 Scanner age: <b>${escapeHtml(scannerAgeV286)}</b>`,
+    `🏷 Launch source: <b>${escapeHtml(launchSourceV286)}</b>`
   ];
 
   if (performance) {
