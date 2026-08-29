@@ -1,5 +1,11 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V274 / V2.0:
+ * - NEW: read-only Telegram getWebhookInfo diagnostics
+ * - NEW ROUTE: /telegram-webhook-info shows Telegram's active webhook URL, allowed update types, pending update count, max connections and last delivery error
+ * - Does not modify the webhook and does not alter Telegram command behavior
+ * - Runs outside scanner request accounting; scanner 42/21 ceilings are unchanged
+ * - Preserves V273 inbound webhook diagnostics, V272 channel_post support, V271 commands, V270 performance tracking, V269 holder integrity, V268 history and V267 follow-up
  * V273 / V2.0:
  * - NEW: Telegram webhook diagnostics for troubleshooting non-replying channel commands
  * - Persists the last inbound Telegram webhook update/result in a separate KV diagnostic key
@@ -1164,7 +1170,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V273";
+const VERSION = "V274";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -54661,6 +54667,41 @@ for (
         true
     },
 
+    telegramWebhookInfoV274: {
+      enabled: true,
+      route:
+        "/telegram-webhook-info",
+      readOnly: true,
+      telegramMethod:
+        "getWebhookInfo",
+      exposesActiveWebhookUrl:
+        true,
+      exposesAllowedUpdates:
+        true,
+      exposesPendingUpdateCount:
+        true,
+      exposesLastDeliveryError:
+        true,
+      exposesMaxConnections:
+        true,
+      modifiesWebhook:
+        false,
+      scannerBudgetConsumed:
+        false,
+      scannerProviderRequestsAdded:
+        0,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      momentumChanged:
+        false,
+      verifiedUsdMathChanged:
+        false,
+      telegramThresholdsChanged:
+        false
+    },
+
     telegramWebhookDiagnosticsV273: {
       enabled: true,
       statusRoute:
@@ -58056,6 +58097,7 @@ async function health(
       "/telegram-webhook",
       "/telegram-webhook-setup",
       "/telegram-webhook-status",
+      "/telegram-webhook-info",
       "/last-alert-scan",
       "/alert-history",
       "/call-performance"
@@ -59881,6 +59923,252 @@ async function telegramWebhookSetupV271(
 }
 
 
+
+/* =========================================================
+   V274 TELEGRAM GETWEBHOOKINFO DIAGNOSTIC
+   ========================================================= */
+
+async function telegramWebhookInfoV274(
+  env
+) {
+  if (!env.TELEGRAM_BOT_TOKEN) {
+    return {
+      agent:
+        "Robinhood Chain Meme Hunter",
+      version:
+        VERSION,
+      success:
+        false,
+      status:
+        "TELEGRAM_BOT_TOKEN_NOT_CONFIGURED",
+      scannerBudgetConsumed:
+        false,
+      timestamp:
+        now()
+    };
+  }
+
+  try {
+    const response =
+      await fetch(
+        `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getWebhookInfo`
+      );
+
+    let data = null;
+
+    try {
+      data =
+        await response.json();
+    } catch (_) {
+      data = null;
+    }
+
+    const result =
+      data?.result ||
+      {};
+
+    const lastErrorDate =
+      Number(
+        result?.last_error_date
+      );
+
+    return {
+      agent:
+        "Robinhood Chain Meme Hunter",
+      version:
+        VERSION,
+
+      success:
+        response.ok &&
+        data?.ok === true,
+
+      status:
+        response.ok &&
+        data?.ok === true
+          ? "TELEGRAM_WEBHOOK_INFO_AVAILABLE"
+          : "TELEGRAM_WEBHOOK_INFO_FAILED",
+
+      telegramStatus:
+        response.status,
+
+      webhook: {
+        url:
+          result?.url ||
+          null,
+
+        hasCustomCertificate:
+          result
+            ?.has_custom_certificate ===
+          true,
+
+        pendingUpdateCount:
+          Number.isFinite(
+            Number(
+              result
+                ?.pending_update_count
+            )
+          )
+            ? Number(
+                result
+                  ?.pending_update_count
+              )
+            : null,
+
+        maxConnections:
+          Number.isFinite(
+            Number(
+              result?.max_connections
+            )
+          )
+            ? Number(
+                result
+                  ?.max_connections
+              )
+            : null,
+
+        ipAddress:
+          result?.ip_address ||
+          null,
+
+        allowedUpdates:
+          Array.isArray(
+            result?.allowed_updates
+          )
+            ? result.allowed_updates
+            : [],
+
+        lastErrorDateUnix:
+          Number.isFinite(
+            lastErrorDate
+          ) &&
+          lastErrorDate > 0
+            ? lastErrorDate
+            : null,
+
+        lastErrorDateIso:
+          Number.isFinite(
+            lastErrorDate
+          ) &&
+          lastErrorDate > 0
+            ? new Date(
+                lastErrorDate *
+                1000
+              ).toISOString()
+            : null,
+
+        lastErrorMessage:
+          result
+            ?.last_error_message ||
+          null,
+
+        lastSynchronizationErrorDateUnix:
+          Number.isFinite(
+            Number(
+              result
+                ?.last_synchronization_error_date
+            )
+          )
+            ? Number(
+                result
+                  ?.last_synchronization_error_date
+              )
+            : null
+      },
+
+      expected: {
+        webhookUrlSuffix:
+          "/telegram-webhook",
+
+        shouldAllow:
+          [
+            "message",
+            "edited_message",
+            "channel_post",
+            "edited_channel_post"
+          ]
+      },
+
+      interpretation: {
+        activeWebhookConfigured:
+          typeof result?.url ===
+            "string" &&
+          result.url.length > 0,
+
+        pointsToThisWorker:
+          typeof result?.url ===
+            "string" &&
+          result.url.endsWith(
+            "/telegram-webhook"
+          ),
+
+        channelPostAllowed:
+          Array.isArray(
+            result?.allowed_updates
+          ) &&
+          result.allowed_updates.includes(
+            "channel_post"
+          ),
+
+        editedChannelPostAllowed:
+          Array.isArray(
+            result?.allowed_updates
+          ) &&
+          result.allowed_updates.includes(
+            "edited_channel_post"
+          ),
+
+        hasPendingUpdates:
+          Number(
+            result
+              ?.pending_update_count
+          ) > 0,
+
+        hasRecordedDeliveryError:
+          Boolean(
+            result
+              ?.last_error_message
+          )
+      },
+
+      rawTelegramOk:
+        data?.ok === true,
+
+      rawTelegramDescription:
+        data?.description ||
+        null,
+
+      scannerBudgetConsumed:
+        false,
+
+      scannerProviderRequestsAdded:
+        0,
+
+      timestamp:
+        now()
+    };
+  } catch (error) {
+    return {
+      agent:
+        "Robinhood Chain Meme Hunter",
+      version:
+        VERSION,
+      success:
+        false,
+      status:
+        "TELEGRAM_WEBHOOK_INFO_REQUEST_ERROR",
+      error:
+        errorString(error),
+      scannerBudgetConsumed:
+        false,
+      scannerProviderRequestsAdded:
+        0,
+      timestamp:
+        now()
+    };
+  }
+}
+
+
 /* =========================================================
    TELEGRAM TEST
    ========================================================= */
@@ -60198,6 +60486,17 @@ async function handleRequest(
 
   if (
     path ===
+    "/telegram-webhook-info"
+  ) {
+    return jsonResponse(
+      await telegramWebhookInfoV274(
+        env
+      )
+    );
+  }
+
+  if (
+    path ===
     "/last-alert-scan"
   ) {
     return jsonResponse(
@@ -60260,6 +60559,7 @@ async function handleRequest(
         "/telegram-webhook",
         "/telegram-webhook-setup",
         "/telegram-webhook-status",
+        "/telegram-webhook-info",
         "/last-alert-scan",
         "/alert-history",
         "/call-performance"
