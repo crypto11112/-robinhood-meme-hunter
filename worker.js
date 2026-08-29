@@ -1,5 +1,11 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V278 / V2.0:
+ * - FIX: Telegram /analyse and stored-call money formatting no longer calls undefined compactNumber()
+ * - FIX: telegramMoneyV271 now reuses the existing proven formatNumber() helper
+ * - RESULT: prevents WEBHOOK_HANDLER_ERROR "compactNumber is not defined" before Telegram reply delivery
+ * - No scanner logic, scoring, Momentum, verified BUY/SELL USD, qualification, holder logic, Telegram thresholds, KV keys, provider protections or request budgets changed
+ * - Preserves all confirmed-working V277 functionality and state/history
  * V277 / V2.0:
  * - FIX: manual /analyse now restores verified historical pool identity from V268 alert history when available
  * - FIX: manual /analyse distinguishes a historical bot alert from a V270+ performance baseline
@@ -1194,7 +1200,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V277";
+const VERSION = "V278";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -60760,7 +60766,7 @@ function telegramMoneyV271(
     return "UNVERIFIED";
   }
 
-  return `$${compactNumber(n)}`;
+  return `$${formatNumber(n)}`;
 }
 
 function telegramMultipleV271(
