@@ -1,5 +1,11 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V265 / V2.0:
+ * - FIX: V264 successful-alert snapshot referenced the final scan `status` variable before its later initialization (temporal dead zone)
+ * - That runtime ReferenceError occurred AFTER Telegram had already sent but BEFORE the diagnostic KV write, leaving /last-alert-scan empty
+ * - V265 removes the premature final-status read and records a safe same-run alert-stage status instead
+ * - Adds explicit diagnostic persistence stage telemetry so the next successful alert can prove the KV snapshot write completed
+ * - Preserves V264 separate diagnostic KV key/route, V263 PRO-first USD history, scoring, Momentum, verified USD maths, Telegram thresholds and 42/21 ceilings
  * V264 / V2.0:
  * - DIAGNOSTICS: every successfully sent Telegram opportunity alert now persists an exact same-run diagnostic snapshot in KV
  * - ROUTE: /last-alert-scan returns the most recently persisted successful-alert snapshot even after later scheduled scans have run
@@ -1092,7 +1098,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V264";
+const VERSION = "V265";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -49413,7 +49419,13 @@ for (
 
       const lastAlertSnapshotV264 = {
         schemaVersion:
-          "V264_LAST_ALERT_SCAN_1",
+          "V265_LAST_ALERT_SCAN_2",
+        v265PersistenceFix: {
+          enabled: true,
+          removedPrematureFinalStatusRead: true,
+          telegramAlreadySuccessfulBeforeSnapshot: true,
+          kvWriteOccursAfterSnapshotConstruction: true
+        },
         botVersion:
           VERSION,
         savedAt:
@@ -49428,8 +49440,10 @@ for (
           rpcProvider:
             latest?.provider ||
             null,
-          scannerStatus:
-            status
+          alertStageStatusV265:
+            "TELEGRAM_SUCCESS_BEFORE_FINAL_SCAN_STATUS",
+          finalScanStatusNotYetInitializedV265:
+            true
         },
 
         alert: {
@@ -51995,6 +52009,25 @@ for (
         true,
       transientFailuresRemainRetryableV260:
         true
+    },
+
+    lastAlertScanDiagnosticsV265: {
+      enabled: true,
+      fixesV264TemporalDeadZoneBeforeKvWrite: true,
+      route:
+        "/last-alert-scan",
+      key:
+        LAST_ALERT_SCAN_KEY_V264,
+      diagnosticKeyPreservedAcrossV264ToV265: true,
+      successfulTelegramRequired: true,
+      kvWriteOccursAfterSuccessfulTelegram: true,
+      finalScanStatusReadBeforeInitializationRemoved: true,
+      scoringChanged: false,
+      momentumChanged: false,
+      verifiedUsdMathChanged: false,
+      telegramThresholdsChanged: false,
+      hardExternalRequestLimitPreserved: 42,
+      analysisRequestLimitPreserved: 21
     },
 
     lastAlertScanDiagnosticsV264: {
