@@ -1,5 +1,9 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V293 / V2.0:
+ * - FIX: replace the two undefined now() calls in the verified WETH/USDG reference persistence paths with the existing now() helper, preventing /analyse WEBHOOK_HANDLER_ERROR after successful reference verification
+ * - No scanner logic, verified USD maths, request ceilings, Telegram thresholds, KV keys or provider protections changed
+ * - Preserves all V292 functionality
  * V292 / V2.0:
  * - FIX: manual /analyse replies are split on line boundaries below Telegram's 4096-character sendMessage ceiling, preventing diagnostic-rich replies from failing with HTTP 400
  * - FIX: V291 direct WETH/USDG verification now uses a paced, bounded multi-provider RPC reader for eth_getCode/eth_call instead of binding the whole attempt to one rate-limited endpoint
@@ -1305,7 +1309,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V292";
+const VERSION = "V293";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -15962,7 +15966,7 @@ async function getV3WethUsdGReferenceV195(
       priceUsdGPerWeth:
         price,
       verifiedAt:
-        nowIso()
+        now()
     };
 
     return {
@@ -62185,7 +62189,7 @@ async function verifyDirectV3WethUsdGCandidateV291(
     liquidity: liquidity.toString(),
     sqrtPriceX96: sqrtPriceX96.toString(),
     priceUsdGPerWeth: price,
-    verifiedAt: nowIso(),
+    verifiedAt: now(),
     verifiedByV291: true
   };
 
