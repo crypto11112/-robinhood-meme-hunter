@@ -1,5 +1,13 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V280 / V2.0:
+ * - OPTIMIZE: isolated Telegram /analyse can reuse a still-valid verified holder-count display cache instead of spending a redundant Blockscout PRO counters request after holder rows are already recovered
+ * - SAFETY: the optimization is manual-analysis only; autonomous scanner holder logic and request ordering are unchanged
+ * - SAFETY: cached holder count remains display evidence only and is NOT promoted into fresh countersVerified/scoring evidence
+ * - TELEMETRY: successful holder analysis records whether the V280 manual holder-count request was skipped and why
+ * - RESULT: preserves the 12-request ceiling while leaving spare manual capacity when verified cached holder-count evidence already exists
+ * - No scanner scoring, Momentum maths, verified BUY/SELL USD maths, qualification, Telegram thresholds, KV keys, provider protections or autonomous holder logic changed
+ * - Preserves all confirmed-working V279 functionality and state/history
  * V279 / V2.0:
  * - NEW: manual /analyse request accounting now records the exact consumed request types inside the isolated 12-request command budget
  * - NEW: /analyse reports a compact request-use breakdown so request waste can be removed from evidence instead of guessed at
@@ -1208,7 +1216,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V279";
+const VERSION = "V280";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -30352,7 +30360,8 @@ async function holderIntelligence(
   priorityCompletion = false,
   env = null,
   state = null,
-  tokenDecimals = null
+  tokenDecimals = null,
+  manualAnalyseOptimizationV280 = false
 ) {
   if (
     !totalSupply
@@ -30877,6 +30886,83 @@ async function holderIntelligence(
   }
 
   /*
+   * V280 manual-analysis holder-count budget guard.
+   *
+   * The autonomous scanner keeps the exact existing V247 behaviour. For the
+   * isolated /analyse clone only, if holder rows have already been recovered
+   * and a still-valid VERIFIED display-count cache exists, do not spend an
+   * additional PRO counters request merely to refresh that display count.
+   *
+   * Critical safety rule: this does NOT copy the cached count into
+   * counterData and therefore cannot turn cached display evidence into fresh
+   * countersVerified/scoring evidence. holderCountDisplayV225 later restores
+   * the verified cached display value exactly as before.
+   */
+  let manualHolderCountOptimizationV280 = {
+    enabled: manualAnalyseOptimizationV280 === true,
+    checked: false,
+    skippedProCounters: false,
+    reason: null,
+    cachedHolderCount: null,
+    cacheFreshness: null,
+    cacheSource: null
+  };
+
+  if (
+    manualAnalyseOptimizationV280 === true &&
+    counterData.holderCount === null &&
+    holders &&
+    Array.isArray(holders.items)
+  ) {
+    manualHolderCountOptimizationV280.checked = true;
+
+    const cachedDisplayCountV280 =
+      holderCountDisplayEvidenceV225(
+        watched,
+        {
+          countersVerified: false,
+          holderCount: null,
+          holderSource:
+            holders?.proV143
+              ? "BLOCKSCOUT_PRO_V143"
+              : holders?.legacy
+                ? "BLOCKSCOUT_LEGACY"
+                : holders?.bitqueryV227
+                  ? "BITQUERY_EVM_HOLDERS_V227"
+                  : "BLOCKSCOUT_V2"
+        },
+        state,
+        token
+      );
+
+    if (
+      cachedDisplayCountV280?.verified === true &&
+      cachedDisplayCountV280?.cached === true &&
+      Number.isFinite(
+        Number(cachedDisplayCountV280?.holderCount)
+      ) &&
+      Number(cachedDisplayCountV280?.holderCount) > 0
+    ) {
+      manualHolderCountOptimizationV280 = {
+        ...manualHolderCountOptimizationV280,
+        skippedProCounters: true,
+        reason: "VERIFIED_DISPLAY_COUNT_CACHE_AVAILABLE_V280",
+        cachedHolderCount:
+          Math.floor(
+            Number(cachedDisplayCountV280.holderCount)
+          ),
+        cacheFreshness:
+          cachedDisplayCountV280.freshness || null,
+        cacheSource:
+          cachedDisplayCountV280.source || null
+      };
+    } else {
+      manualHolderCountOptimizationV280.reason =
+        "NO_VERIFIED_DISPLAY_COUNT_CACHE_V280";
+    }
+  }
+
+  /*
    * V247: the public counters endpoint already existed before V247.
    * The missing route was the PRO counters equivalent. When the public
    * counter is unavailable, make one verified PRO counters attempt for a
@@ -30887,6 +30973,8 @@ async function holderIntelligence(
   if (
     counterData.holderCount ===
       null &&
+    manualHolderCountOptimizationV280
+      .skippedProCounters !== true &&
     blockscoutProConfiguredV164 &&
     (
       priorityCompletion ===
@@ -31753,6 +31841,8 @@ async function holderIntelligence(
   const result = {
     verified:
       true,
+
+    manualHolderCountOptimizationV280,
 
     holderSource,
 
@@ -42093,7 +42183,10 @@ async function analyzeToken(
         ),
         env,
         state,
-        validation.decimals
+        validation.decimals,
+        Boolean(
+          options?.manualAnalyseOptimizationV280
+        )
       );
   }
 
@@ -60751,6 +60844,8 @@ async function telegramFreshAnalyseV276(
           marketPriority:
             true,
           holderPriorityCompletion:
+            true,
+          manualAnalyseOptimizationV280:
             true,
           liveMomentumActivityV152: {
             swaps:
