@@ -1,5 +1,16 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V271 / V2.0:
+ * - NEW: Telegram command interface for stored bot calls and V270 performance telemetry
+ * - Commands: /call, /ath, /stats, /calls, /best, /performance, /help
+ * - /call <symbol|address> returns the stored entry, current, ATH X and drawdown for one successful call
+ * - /calls lists recent tracked calls; /best ranks calls by verified ATH market-cap multiple
+ * - /performance summarizes the verified V270 call-performance registry without inventing missing values
+ * - NEW: POST /telegram-webhook receives Telegram updates; only the configured TELEGRAM_CHAT_ID is authorized
+ * - NEW: GET /telegram-webhook-setup registers this Worker's /telegram-webhook URL with Telegram
+ * - Telegram command replies run outside scanner request accounting and do not consume the scan's 42/21 budget
+ * - Commands read persisted evidence only in V271; they do not trigger a fresh blockchain/market scan
+ * - Preserves V270 Call → ATH tracking, V269 holder integrity, V268 alert history and V267 follow-up tracking
  * V270 / V2.0:
  * - NEW: automatic Call → ATH performance tracking for successful Telegram calls
  * - Stores verified entry price / market cap at the successful alert moment when available
@@ -1139,7 +1150,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V270";
+const VERSION = "V271";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -54633,6 +54644,33 @@ for (
         true
     },
 
+    telegramCommandsV271: {
+      enabled: true,
+      webhookRoute:
+        "/telegram-webhook",
+      setupRoute:
+        "/telegram-webhook-setup",
+      authorizedChatOnly: true,
+      optionalWebhookSecretSupported: true,
+      commands: [
+        "/call",
+        "/ath",
+        "/stats",
+        "/calls",
+        "/best",
+        "/performance",
+        "/help"
+      ],
+      readsStoredEvidenceOnly: true,
+      triggersFreshMarketScan: false,
+      scannerBudgetConsumed: false,
+      scoringChanged: false,
+      qualificationChanged: false,
+      momentumChanged: false,
+      verifiedUsdMathChanged: false,
+      telegramThresholdsChanged: false
+    },
+
     callPerformanceTrackingV270: {
       enabled: true,
       telemetryOnly: true,
@@ -57956,6 +57994,8 @@ async function health(
       "/diagnostics",
       "/run-all",
       "/test-telegram",
+      "/telegram-webhook",
+      "/telegram-webhook-setup",
       "/last-alert-scan",
       "/alert-history",
       "/call-performance"
@@ -58557,6 +58597,855 @@ async function diagnostics(
   };
 }
 
+
+/* =========================================================
+   V271 TELEGRAM CALL ANALYSIS COMMANDS
+   ========================================================= */
+
+function telegramPlainNumberV271(
+  value,
+  digits = 2
+) {
+  const n = Number(value);
+
+  return Number.isFinite(n)
+    ? n.toFixed(digits)
+    : "UNVERIFIED";
+}
+
+function telegramMoneyV271(
+  value
+) {
+  const n = Number(value);
+
+  if (
+    !Number.isFinite(n) ||
+    n <= 0
+  ) {
+    return "UNVERIFIED";
+  }
+
+  return `$${compactNumber(n)}`;
+}
+
+function telegramMultipleV271(
+  value
+) {
+  const n = Number(value);
+
+  if (
+    !Number.isFinite(n) ||
+    n <= 0
+  ) {
+    return "UNVERIFIED";
+  }
+
+  return `${n.toFixed(
+    n >= 100
+      ? 1
+      : 2
+  )}x`;
+}
+
+function telegramDrawdownV271(
+  value
+) {
+  const n = Number(value);
+
+  if (
+    !Number.isFinite(n) ||
+    n < 0
+  ) {
+    return "UNVERIFIED";
+  }
+
+  return `${(n * 100).toFixed(2)}%`;
+}
+
+function telegramDateV271(
+  value
+) {
+  const n = Number(value);
+
+  if (
+    !Number.isFinite(n) ||
+    n <= 0
+  ) {
+    return "UNVERIFIED";
+  }
+
+  try {
+    return new Date(n)
+      .toISOString()
+      .replace("T", " ")
+      .replace(".000Z", " UTC");
+  } catch (_) {
+    return "UNVERIFIED";
+  }
+}
+
+function callPerformanceEntriesV271(
+  state
+) {
+  const registry =
+    state?.callPerformanceV270 &&
+    typeof state.callPerformanceV270 ===
+      "object"
+      ? state.callPerformanceV270
+      : {};
+
+  return Object.values(registry);
+}
+
+function resolveCallPerformanceV271(
+  state,
+  query
+) {
+  const q =
+    String(query || "")
+      .trim()
+      .toLowerCase();
+
+  if (!q) {
+    return {
+      status: "MISSING_QUERY",
+      record: null,
+      matches: []
+    };
+  }
+
+  const entries =
+    callPerformanceEntriesV271(
+      state
+    );
+
+  const exactAddress =
+    entries.find(
+      record =>
+        normalize(
+          record?.address
+        ) ===
+        normalize(q)
+    );
+
+  if (exactAddress) {
+    return {
+      status: "MATCHED_ADDRESS",
+      record: exactAddress,
+      matches: [exactAddress]
+    };
+  }
+
+  const symbolMatches =
+    entries.filter(
+      record =>
+        String(
+          record?.symbol || ""
+        )
+          .trim()
+          .toLowerCase() ===
+        q
+    );
+
+  if (
+    symbolMatches.length ===
+    1
+  ) {
+    return {
+      status: "MATCHED_SYMBOL",
+      record: symbolMatches[0],
+      matches: symbolMatches
+    };
+  }
+
+  if (
+    symbolMatches.length >
+    1
+  ) {
+    return {
+      status: "AMBIGUOUS_SYMBOL",
+      record: null,
+      matches: symbolMatches
+    };
+  }
+
+  return {
+    status: "NOT_FOUND",
+    record: null,
+    matches: []
+  };
+}
+
+function callPerformanceMessageV271(
+  record
+) {
+  if (!record) {
+    return (
+      "❌ <b>Call not found</b>\n\n" +
+      "Use <code>/calls</code> to see tracked V270+ calls."
+    );
+  }
+
+  const symbol =
+    escapeHtml(
+      record?.symbol ||
+      "UNKNOWN"
+    );
+
+  const address =
+    escapeHtml(
+      record?.address ||
+      "UNVERIFIED"
+    );
+
+  const entryMc =
+    telegramMoneyV271(
+      record?.entryMarketCap
+    );
+
+  const currentMc =
+    telegramMoneyV271(
+      record?.currentMarketCap
+    );
+
+  const athMc =
+    telegramMoneyV271(
+      record?.athMarketCap
+    );
+
+  const athX =
+    telegramMultipleV271(
+      record?.athMultipleByMarketCap
+    );
+
+  const currentX =
+    telegramMultipleV271(
+      record?.currentMultipleByMarketCap
+    );
+
+  const drawdown =
+    telegramDrawdownV271(
+      record?.drawdownFromAthMarketCap
+    );
+
+  const entryPrice =
+    record?.entryPriceUsd !== null &&
+    record?.entryPriceUsd !== undefined
+      ? `$${telegramPlainNumberV271(
+          record.entryPriceUsd,
+          10
+        )}`
+      : "UNVERIFIED";
+
+  const athPrice =
+    record?.athPriceUsd !== null &&
+    record?.athPriceUsd !== undefined
+      ? `$${telegramPlainNumberV271(
+          record.athPriceUsd,
+          10
+        )}`
+      : "UNVERIFIED";
+
+  const currentPrice =
+    record?.currentPriceUsd !== null &&
+    record?.currentPriceUsd !== undefined
+      ? `$${telegramPlainNumberV271(
+          record.currentPriceUsd,
+          10
+        )}`
+      : "UNVERIFIED";
+
+  return [
+    `📊 <b>${symbol} — Call Performance</b>`,
+    "",
+    `Contract: <code>${address}</code>`,
+    "",
+    `🎯 Entry MC: <b>${entryMc}</b>`,
+    `📍 Current MC: <b>${currentMc}</b>`,
+    `🏆 ATH MC since call: <b>${athMc}</b>`,
+    `🚀 ATH from call: <b>${athX}</b>`,
+    `📈 Current from call: <b>${currentX}</b>`,
+    `📉 Drawdown from ATH: <b>${drawdown}</b>`,
+    "",
+    `💵 Entry price: <b>${entryPrice}</b>`,
+    `💵 Current price: <b>${currentPrice}</b>`,
+    `💵 ATH price: <b>${athPrice}</b>`,
+    "",
+    `🕒 Entry: <b>${escapeHtml(
+      telegramDateV271(
+        record?.entryTimestamp
+      )
+    )}</b>`,
+    `🏆 ATH MC time: <b>${escapeHtml(
+      telegramDateV271(
+        record?.athMarketCapTimestamp
+      )
+    )}</b>`,
+    `🔄 Observations: <b>${safeNumber(
+      record?.observationCount
+    )}</b>`,
+    "",
+    record?.currentMarketVerified === true
+      ? "✅ Latest market observation: VERIFIED"
+      : "⚠️ Latest market observation: UNVERIFIED — stored ATH preserved",
+    "",
+    "<i>V271 uses stored verified V270 market evidence. This command does not trigger a fresh market scan.</i>"
+  ].join("\n");
+}
+
+function callsListMessageV271(
+  state
+) {
+  const entries =
+    callPerformanceEntriesV271(
+      state
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.entryTimestamp
+          ) -
+          safeNumber(
+            a?.entryTimestamp
+          )
+      )
+      .slice(0, 15);
+
+  if (!entries.length) {
+    return (
+      "📭 <b>No V270+ call-performance records yet.</b>\n\n" +
+      "The next successful Telegram call will create the first exact baseline."
+    );
+  }
+
+  const lines = [
+    `📚 <b>Tracked Calls (${callPerformanceEntriesV271(state).length})</b>`,
+    ""
+  ];
+
+  for (const record of entries) {
+    lines.push(
+      `• <b>${escapeHtml(
+        record?.symbol ||
+        "UNKNOWN"
+      )}</b> — ATH ${telegramMultipleV271(
+        record?.athMultipleByMarketCap
+      )} | Current ${telegramMultipleV271(
+        record?.currentMultipleByMarketCap
+      )}`
+    );
+  }
+
+  lines.push(
+    "",
+    "Use <code>/call SYMBOL</code> for full details."
+  );
+
+  return lines.join("\n");
+}
+
+function bestCallsMessageV271(
+  state
+) {
+  const ranked =
+    callPerformanceEntriesV271(
+      state
+    )
+      .filter(
+        record =>
+          Number.isFinite(
+            Number(
+              record
+                ?.athMultipleByMarketCap
+            )
+          ) &&
+          Number(
+            record
+              ?.athMultipleByMarketCap
+          ) > 0
+      )
+      .sort(
+        (a, b) =>
+          Number(
+            b?.athMultipleByMarketCap
+          ) -
+          Number(
+            a?.athMultipleByMarketCap
+          )
+      )
+      .slice(0, 10);
+
+  if (!ranked.length) {
+    return (
+      "🏆 <b>No verified ATH multiples available yet.</b>"
+    );
+  }
+
+  const lines = [
+    "🏆 <b>Best Calls by Verified ATH MC Multiple</b>",
+    ""
+  ];
+
+  ranked.forEach(
+    (record, index) => {
+      lines.push(
+        `${index + 1}. <b>${escapeHtml(
+          record?.symbol ||
+          "UNKNOWN"
+        )}</b> — ${telegramMultipleV271(
+          record?.athMultipleByMarketCap
+        )} ATH`
+      );
+    }
+  );
+
+  return lines.join("\n");
+}
+
+function performanceSummaryV271(
+  state
+) {
+  const entries =
+    callPerformanceEntriesV271(
+      state
+    );
+
+  const verifiedAth =
+    entries.filter(
+      record =>
+        Number.isFinite(
+          Number(
+            record?.athMultipleByMarketCap
+          )
+        ) &&
+        Number(
+          record?.athMultipleByMarketCap
+        ) > 0
+    );
+
+  if (!entries.length) {
+    return (
+      "📊 <b>Performance Summary</b>\n\n" +
+      "No exact V270+ call baselines have been stored yet."
+    );
+  }
+
+  const multiples =
+    verifiedAth.map(
+      record =>
+        Number(
+          record?.athMultipleByMarketCap
+        )
+    );
+
+  const averageAthX =
+    multiples.length
+      ? multiples.reduce(
+          (sum, value) =>
+            sum + value,
+          0
+        ) / multiples.length
+      : null;
+
+  const reached2x =
+    multiples.filter(
+      value =>
+        value >= 2
+    ).length;
+
+  const reached5x =
+    multiples.filter(
+      value =>
+        value >= 5
+    ).length;
+
+  const reached10x =
+    multiples.filter(
+      value =>
+        value >= 10
+    ).length;
+
+  const best =
+    verifiedAth
+      .slice()
+      .sort(
+        (a, b) =>
+          Number(
+            b?.athMultipleByMarketCap
+          ) -
+          Number(
+            a?.athMultipleByMarketCap
+          )
+      )[0] ||
+    null;
+
+  return [
+    "📊 <b>Bot Call Performance</b>",
+    "",
+    `Tracked calls: <b>${entries.length}</b>`,
+    `Verified ATH records: <b>${verifiedAth.length}</b>`,
+    `Average verified ATH: <b>${telegramMultipleV271(
+      averageAthX
+    )}</b>`,
+    `Reached 2x+: <b>${reached2x}</b>`,
+    `Reached 5x+: <b>${reached5x}</b>`,
+    `Reached 10x+: <b>${reached10x}</b>`,
+    best
+      ? `Best call: <b>${escapeHtml(
+          best?.symbol ||
+          "UNKNOWN"
+        )}</b> — <b>${telegramMultipleV271(
+          best?.athMultipleByMarketCap
+        )}</b>`
+      : "Best call: <b>UNVERIFIED</b>",
+    "",
+    "<i>Statistics use verified stored V270+ call observations only.</i>"
+  ].join("\n");
+}
+
+function telegramHelpV271() {
+  return [
+    "🤖 <b>Robinhood Meme Hunter Commands</b>",
+    "",
+    "<code>/call GUS</code> — full stored performance for a call",
+    "<code>/ath GUS</code> — same call/ATH report",
+    "<code>/stats GUS</code> — same call/ATH report",
+    "<code>/calls</code> — recent tracked calls",
+    "<code>/best</code> — highest verified ATH X calls",
+    "<code>/performance</code> — overall tracked-call summary",
+    "<code>/help</code> — command list",
+    "",
+    "<i>V271 commands read stored evidence; they do not trigger a fresh chain scan.</i>"
+  ].join("\n");
+}
+
+function parseTelegramCommandV271(
+  text
+) {
+  const raw =
+    String(text || "")
+      .trim();
+
+  if (!raw.startsWith("/")) {
+    return null;
+  }
+
+  const parts =
+    raw.split(/\s+/);
+
+  const command =
+    String(parts.shift() || "")
+      .split("@")[0]
+      .toLowerCase();
+
+  return {
+    command,
+    argument:
+      parts.join(" ").trim()
+  };
+}
+
+async function telegramCommandReplyV271(
+  env,
+  update
+) {
+  const message =
+    update?.message ||
+    update?.edited_message ||
+    null;
+
+  const chatId =
+    message?.chat?.id !==
+      undefined &&
+    message?.chat?.id !==
+      null
+      ? String(
+          message.chat.id
+        )
+      : null;
+
+  const configuredChatId =
+    env.TELEGRAM_CHAT_ID !==
+      undefined &&
+    env.TELEGRAM_CHAT_ID !==
+      null
+      ? String(
+          env.TELEGRAM_CHAT_ID
+        )
+      : null;
+
+  if (
+    !message ||
+    !chatId ||
+    !configuredChatId ||
+    chatId !== configuredChatId
+  ) {
+    return {
+      success: true,
+      ignored: true,
+      reason:
+        "UNAUTHORIZED_OR_UNSUPPORTED_CHAT"
+    };
+  }
+
+  const parsed =
+    parseTelegramCommandV271(
+      message?.text
+    );
+
+  if (!parsed) {
+    return {
+      success: true,
+      ignored: true,
+      reason:
+        "NOT_A_COMMAND"
+    };
+  }
+
+  const loaded =
+    await loadState(env);
+
+  const state =
+    loaded?.state ||
+    newState();
+
+  let reply;
+
+  if (
+    parsed.command ===
+      "/call" ||
+    parsed.command ===
+      "/ath" ||
+    parsed.command ===
+      "/stats"
+  ) {
+    const resolved =
+      resolveCallPerformanceV271(
+        state,
+        parsed.argument
+      );
+
+    if (
+      resolved.status ===
+      "MISSING_QUERY"
+    ) {
+      reply =
+        "ℹ️ Use <code>/call SYMBOL</code> or <code>/call 0xADDRESS</code>.";
+    } else if (
+      resolved.status ===
+      "AMBIGUOUS_SYMBOL"
+    ) {
+      reply = [
+        "⚠️ <b>More than one call uses that symbol.</b>",
+        "",
+        "Use the contract address instead:",
+        ...resolved.matches
+          .slice(0, 10)
+          .map(
+            record =>
+              `<code>${escapeHtml(
+                record?.address ||
+                ""
+              )}</code>`
+          )
+      ].join("\n");
+    } else if (
+      resolved.record
+    ) {
+      reply =
+        callPerformanceMessageV271(
+          resolved.record
+        );
+    } else {
+      reply =
+        "❌ <b>Call not found.</b>\n\nUse <code>/calls</code> to see stored V270+ calls.";
+    }
+  } else if (
+    parsed.command ===
+    "/calls"
+  ) {
+    reply =
+      callsListMessageV271(
+        state
+      );
+  } else if (
+    parsed.command ===
+    "/best"
+  ) {
+    reply =
+      bestCallsMessageV271(
+        state
+      );
+  } else if (
+    parsed.command ===
+    "/performance"
+  ) {
+    reply =
+      performanceSummaryV271(
+        state
+      );
+  } else if (
+    parsed.command ===
+      "/help" ||
+    parsed.command ===
+      "/start"
+  ) {
+    reply =
+      telegramHelpV271();
+  } else {
+    reply =
+      telegramHelpV271();
+  }
+
+  const result =
+    await sendTelegram(
+      env,
+      reply,
+      null,
+      null
+    );
+
+  return {
+    success:
+      result?.success ===
+      true,
+    ignored:
+      false,
+    command:
+      parsed.command,
+    argument:
+      parsed.argument,
+    telegramStatus:
+      result?.status ||
+      null,
+    telegramMode:
+      result?.mode ||
+      null,
+    scannerBudgetConsumed:
+      false
+  };
+}
+
+async function telegramWebhookV271(
+  request,
+  env
+) {
+  try {
+    const update =
+      await request.json();
+
+    const result =
+      await telegramCommandReplyV271(
+        env,
+        update
+      );
+
+    return jsonResponse({
+      ok: true,
+      version: VERSION,
+      webhook: "V271",
+      result,
+      timestamp: now()
+    });
+  } catch (error) {
+    /*
+     * Telegram expects a 2xx response to avoid repeated delivery storms.
+     * Preserve error telemetry in body without asking Telegram to retry.
+     */
+    return jsonResponse({
+      ok: true,
+      version: VERSION,
+      webhook: "V271",
+      handledWithError: true,
+      error:
+        errorString(error),
+      timestamp: now()
+    });
+  }
+}
+
+async function telegramWebhookSetupV271(
+  request,
+  env
+) {
+  if (!env.TELEGRAM_BOT_TOKEN) {
+    return {
+      success: false,
+      status:
+        "TELEGRAM_BOT_TOKEN_NOT_CONFIGURED"
+    };
+  }
+
+  const requestUrl =
+    new URL(request.url);
+
+  const webhookUrl =
+    `${requestUrl.origin}/telegram-webhook`;
+
+  const payload = {
+    url:
+      webhookUrl,
+    allowed_updates: [
+      "message",
+      "edited_message"
+    ],
+    drop_pending_updates:
+      false
+  };
+
+  if (
+    env.TELEGRAM_WEBHOOK_SECRET
+  ) {
+    payload.secret_token =
+      String(
+        env.TELEGRAM_WEBHOOK_SECRET
+      );
+  }
+
+  const response =
+    await fetch(
+      `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/setWebhook`,
+      {
+        method: "POST",
+        headers: {
+          "content-type":
+            "application/json"
+        },
+        body:
+          JSON.stringify(
+            payload
+          )
+      }
+    );
+
+  let data = null;
+
+  try {
+    data =
+      await response.json();
+  } catch (_) {
+    data = null;
+  }
+
+  return {
+    success:
+      response.ok &&
+      data?.ok === true,
+    version:
+      VERSION,
+    webhookUrl,
+    telegramStatus:
+      response.status,
+    telegramResponse:
+      data,
+    scannerBudgetConsumed:
+      false,
+    timestamp:
+      now()
+  };
+}
+
+
 /* =========================================================
    TELEGRAM TEST
    ========================================================= */
@@ -58698,12 +59587,45 @@ async function handleRequest(
             "*",
 
           "access-control-allow-methods":
-            "GET, OPTIONS",
+            "GET, POST, OPTIONS",
 
           "access-control-allow-headers":
             "content-type"
         }
       }
+    );
+  }
+
+  if (
+    path ===
+      "/telegram-webhook" &&
+    request.method ===
+      "POST"
+  ) {
+    if (
+      env.TELEGRAM_WEBHOOK_SECRET &&
+      request.headers.get(
+        "x-telegram-bot-api-secret-token"
+      ) !==
+        String(
+          env.TELEGRAM_WEBHOOK_SECRET
+        )
+    ) {
+      return jsonResponse(
+        {
+          ok: true,
+          version: VERSION,
+          ignored: true,
+          reason:
+            "WEBHOOK_SECRET_MISMATCH",
+          timestamp: now()
+        }
+      );
+    }
+
+    return await telegramWebhookV271(
+      request,
+      env
     );
   }
 
@@ -58818,6 +59740,18 @@ async function handleRequest(
 
   if (
     path ===
+    "/telegram-webhook-setup"
+  ) {
+    return jsonResponse(
+      await telegramWebhookSetupV271(
+        request,
+        env
+      )
+    );
+  }
+
+  if (
+    path ===
     "/last-alert-scan"
   ) {
     return jsonResponse(
@@ -58877,6 +59811,8 @@ async function handleRequest(
         "/diagnostics",
         "/run-all",
         "/test-telegram",
+        "/telegram-webhook",
+        "/telegram-webhook-setup",
         "/last-alert-scan",
         "/alert-history",
         "/call-performance"
