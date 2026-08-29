@@ -1,5 +1,15 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V276 / V2.0:
+ * - NEW: /analyse <ticker|address> performs a fresh Robinhood Chain token analysis from Telegram
+ * - Address input works for any valid EVM token address; ticker input first resolves exact known symbols, then uses one bounded DexScreener Robinhood search if needed
+ * - Ambiguous ticker symbols are never guessed; the bot returns matching contract addresses and asks for the address
+ * - Fresh Telegram analysis has its own strict 12-request command budget and 20-second global cooldown
+ * - Command analysis uses an isolated cloned state so scanner caches/provider cooldown state are not mutated by manual analyses
+ * - Reuses the existing verified ERC20, market, holder, whale, risk, Momentum, quality and opportunity engines
+ * - Includes stored Call→ATH performance when the analysed token was previously called by V270+
+ * - Manual /analyse does not add the token to the autonomous watchlist and does not affect Telegram alert qualification
+ * - Preserves V275 command fix, V274/V273 diagnostics, V272 channel posts, V271 commands and V270 performance tracking
  * V275 / V2.0:
  * - FIX: Telegram command handler used nonexistent loadState(); corrected to existing readState()
  * - FIX: /call-performance had the same nonexistent loadState() reference; corrected to readState()
@@ -1176,7 +1186,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V275";
+const VERSION = "V276";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2318,6 +2328,11 @@ const FOLLOW_UP_BEARISH_BUY_PRESSURE_V267 = 40;
 const FOLLOW_UP_BULLISH_BUY_PRESSURE_V267 = 60;
 
 const CALL_PERFORMANCE_MAX_TRACKED_V270 = 100;
+
+const TELEGRAM_ANALYSE_MAX_REQUESTS_V276 = 12;
+const TELEGRAM_ANALYSE_COOLDOWN_MS_V276 = 20000;
+const TELEGRAM_ANALYSE_STATE_KEY_V276 =
+  "robinhood-meme-hunter-telegram-analyse-v276";
 
 
 const MIN_ALERT_SCORE = 60;
@@ -54673,6 +54688,46 @@ for (
         true
     },
 
+    telegramFreshAnalysisV276: {
+      enabled: true,
+      commands: [
+        "/analyse",
+        "/analyze"
+      ],
+      acceptsAddress:
+        true,
+      acceptsTicker:
+        true,
+      ambiguousTickerNeverGuessed:
+        true,
+      commandRequestLimit:
+        TELEGRAM_ANALYSE_MAX_REQUESTS_V276,
+      cooldownMs:
+        TELEGRAM_ANALYSE_COOLDOWN_MS_V276,
+      scannerBudgetConsumed:
+        false,
+      scannerStateMutated:
+        false,
+      autonomousWatchlistChanged:
+        false,
+      isolatedStateClone:
+        true,
+      reusesExistingAnalysisEngine:
+        true,
+      includesStoredCallPerformance:
+        true,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      momentumMathChanged:
+        false,
+      verifiedUsdMathChanged:
+        false,
+      telegramThresholdsChanged:
+        false
+    },
+
     telegramWebhookInfoV274: {
       enabled: true,
       route:
@@ -58867,6 +58922,1254 @@ async function telegramWebhookStatusV273(
 }
 
 
+
+/* =========================================================
+   V276 FRESH TELEGRAM TOKEN ANALYSIS
+   ========================================================= */
+
+function createTelegramAnalyseBudgetV276() {
+  const budget =
+    createBudget();
+
+  budget.totalUsed = 0;
+  budget.totalLimit =
+    TELEGRAM_ANALYSE_MAX_REQUESTS_V276;
+
+  budget.system.used = 0;
+  budget.system.limit = 0;
+
+  budget.discovery.used = 0;
+  budget.discovery.limit = 0;
+  budget.discovery.liveUsed = 0;
+  budget.discovery.liveLimit = 0;
+  budget.discovery.backlogUsed = 0;
+  budget.discovery.backlogLimit = 0;
+
+  budget.analysis.used = 0;
+  budget.analysis.limit =
+    TELEGRAM_ANALYSE_MAX_REQUESTS_V276;
+
+  budget.notification.used = 0;
+  budget.notification.limit = 0;
+  budget.notification.globalReserveActiveV174 =
+    false;
+
+  return budget;
+}
+
+function cloneStateForTelegramAnalyseV276(
+  state
+) {
+  try {
+    if (
+      typeof structuredClone ===
+      "function"
+    ) {
+      return structuredClone(
+        state
+      );
+    }
+  } catch (_) {}
+
+  try {
+    return JSON.parse(
+      JSON.stringify(
+        state
+      )
+    );
+  } catch (_) {
+    return newState();
+  }
+}
+
+function temporaryWatchedTokenV276(
+  address
+) {
+  return {
+    address:
+      normalize(address),
+    firstSeenAt:
+      Date.now(),
+    lastSeenAt:
+      Date.now(),
+    lastLiveSeenAt:
+      null,
+    lastCheckedAt:
+      null,
+    checks:
+      0,
+    invalidChecks:
+      0,
+    lastValidationReason:
+      null,
+    excludedReason:
+      null,
+    pools:
+      [],
+    metadata:
+      null,
+    marketCache:
+      null,
+    holderCache:
+      null,
+    discoverySource:
+      "TELEGRAM_MANUAL_ANALYSIS_V276"
+  };
+}
+
+async function telegramAnalyseCooldownV276(
+  env,
+  consume = false
+) {
+  const binding =
+    env.MEME_HUNTER_STATE;
+
+  if (
+    !binding ||
+    typeof binding.get !==
+      "function" ||
+    typeof binding.put !==
+      "function"
+  ) {
+    return {
+      allowed: true,
+      remainingMs: 0,
+      persisted: false
+    };
+  }
+
+  let lastAt = 0;
+
+  try {
+    const raw =
+      await binding.get(
+        TELEGRAM_ANALYSE_STATE_KEY_V276
+      );
+
+    if (raw) {
+      const parsed =
+        JSON.parse(raw);
+
+      lastAt =
+        safeNumber(
+          parsed?.lastAnalyseAt
+        );
+    }
+  } catch (_) {
+    lastAt = 0;
+  }
+
+  const elapsed =
+    Date.now() -
+    lastAt;
+
+  if (
+    lastAt > 0 &&
+    elapsed <
+      TELEGRAM_ANALYSE_COOLDOWN_MS_V276
+  ) {
+    return {
+      allowed: false,
+      remainingMs:
+        TELEGRAM_ANALYSE_COOLDOWN_MS_V276 -
+        elapsed,
+      persisted: true
+    };
+  }
+
+  if (consume) {
+    try {
+      await binding.put(
+        TELEGRAM_ANALYSE_STATE_KEY_V276,
+        JSON.stringify({
+          lastAnalyseAt:
+            Date.now()
+        })
+      );
+    } catch (_) {}
+  }
+
+  return {
+    allowed: true,
+    remainingMs: 0,
+    persisted: true
+  };
+}
+
+function exactKnownSymbolMatchesV276(
+  state,
+  symbol
+) {
+  const q =
+    String(symbol || "")
+      .trim()
+      .toLowerCase();
+
+  if (!q) {
+    return [];
+  }
+
+  const matches =
+    [];
+
+  for (
+    const watched
+    of (
+      state?.watchedTokens ||
+      []
+    )
+  ) {
+    const watchedSymbol =
+      String(
+        watched?.metadata?.symbol ||
+        watched?.symbol ||
+        ""
+      )
+        .trim()
+        .toLowerCase();
+
+    const address =
+      normalize(
+        watched?.address
+      );
+
+    if (
+      watchedSymbol === q &&
+      isAddress(address) &&
+      !knownQuote(address)
+    ) {
+      matches.push({
+        address,
+        symbol:
+          watched?.metadata?.symbol ||
+          watched?.symbol ||
+          null,
+        name:
+          watched?.metadata?.name ||
+          watched?.name ||
+          null,
+        source:
+          "PERSISTED_WATCHLIST_V276"
+      });
+    }
+  }
+
+  const unique =
+    new Map();
+
+  for (const row of matches) {
+    unique.set(
+      row.address,
+      row
+    );
+  }
+
+  return [
+    ...unique.values()
+  ];
+}
+
+async function dexResolveSymbolV276(
+  symbol,
+  budget
+) {
+  const q =
+    String(symbol || "")
+      .trim();
+
+  if (!q) {
+    return {
+      status:
+        "MISSING_SYMBOL",
+      matches:
+        []
+    };
+  }
+
+  if (
+    !consumeBudget(
+      budget,
+      "analysis",
+      "DEXSCREENER_SYMBOL_RESOLUTION_V276"
+    )
+  ) {
+    return {
+      status:
+        "COMMAND_BUDGET_EXHAUSTED",
+      matches:
+        []
+    };
+  }
+
+  try {
+    const controller =
+      new AbortController();
+
+    const timer =
+      setTimeout(
+        () =>
+          controller.abort(),
+        4500
+      );
+
+    let response;
+
+    try {
+      response =
+        await fetch(
+          `${DEXSCREENER_BASE}/latest/dex/search?q=${encodeURIComponent(q)}`,
+          {
+            signal:
+              controller.signal
+          }
+        );
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!response.ok) {
+      return {
+        status:
+          `DEXSCREENER_HTTP_${response.status}`,
+        matches:
+          []
+      };
+    }
+
+    const data =
+      await response.json();
+
+    const pairs =
+      Array.isArray(
+        data?.pairs
+      )
+        ? data.pairs
+        : [];
+
+    const target =
+      q.toLowerCase();
+
+    const candidateRows =
+      [];
+
+    for (const pair of pairs) {
+      if (
+        String(
+          pair?.chainId ||
+          ""
+        ).toLowerCase() !==
+        "robinhood"
+      ) {
+        continue;
+      }
+
+      const sides = [
+        pair?.baseToken,
+        pair?.quoteToken
+      ];
+
+      for (const token of sides) {
+        const tokenSymbol =
+          String(
+            token?.symbol ||
+            ""
+          )
+            .trim()
+            .toLowerCase();
+
+        const address =
+          normalize(
+            token?.address
+          );
+
+        if (
+          tokenSymbol !== target ||
+          !isAddress(address) ||
+          address === ZERO ||
+          knownQuote(address)
+        ) {
+          continue;
+        }
+
+        candidateRows.push({
+          address,
+          symbol:
+            token?.symbol ||
+            q,
+          name:
+            token?.name ||
+            null,
+          liquidityUsd:
+            safeNumber(
+              pair?.liquidity?.usd
+            ),
+          source:
+            "DEXSCREENER_EXACT_SYMBOL_ROBINHOOD_V276"
+        });
+      }
+    }
+
+    const byAddress =
+      new Map();
+
+    for (const row of candidateRows) {
+      const prior =
+        byAddress.get(
+          row.address
+        );
+
+      if (
+        !prior ||
+        safeNumber(
+          row?.liquidityUsd
+        ) >
+        safeNumber(
+          prior?.liquidityUsd
+        )
+      ) {
+        byAddress.set(
+          row.address,
+          row
+        );
+      }
+    }
+
+    return {
+      status:
+        byAddress.size
+          ? "EXACT_SYMBOL_MATCHES_FOUND"
+          : "NO_EXACT_ROBINHOOD_SYMBOL_MATCH",
+      matches:
+        [
+          ...byAddress.values()
+        ].sort(
+          (a, b) =>
+            safeNumber(
+              b?.liquidityUsd
+            ) -
+            safeNumber(
+              a?.liquidityUsd
+            )
+        )
+    };
+  } catch (error) {
+    return {
+      status:
+        "DEXSCREENER_SYMBOL_RESOLUTION_ERROR",
+      error:
+        errorString(error),
+      matches:
+        []
+    };
+  }
+}
+
+async function resolveTelegramAnalyseTargetV276(
+  query,
+  state,
+  budget
+) {
+  const raw =
+    String(query || "")
+      .trim();
+
+  if (!raw) {
+    return {
+      status:
+        "MISSING_QUERY",
+      address:
+        null,
+      matches:
+        []
+    };
+  }
+
+  const normalized =
+    normalize(raw);
+
+  if (
+    isAddress(normalized)
+  ) {
+    return {
+      status:
+        "MATCHED_ADDRESS",
+      address:
+        normalized,
+      matches: [
+        {
+          address:
+            normalized,
+          source:
+            "DIRECT_ADDRESS_V276"
+        }
+      ]
+    };
+  }
+
+  const known =
+    exactKnownSymbolMatchesV276(
+      state,
+      raw
+    );
+
+  if (
+    known.length ===
+    1
+  ) {
+    return {
+      status:
+        "MATCHED_KNOWN_SYMBOL",
+      address:
+        known[0].address,
+      matches:
+        known
+    };
+  }
+
+  if (
+    known.length >
+    1
+  ) {
+    return {
+      status:
+        "AMBIGUOUS_SYMBOL",
+      address:
+        null,
+      matches:
+        known
+    };
+  }
+
+  const dex =
+    await dexResolveSymbolV276(
+      raw,
+      budget
+    );
+
+  if (
+    dex.matches.length ===
+    1
+  ) {
+    return {
+      status:
+        "MATCHED_DEXSCREENER_SYMBOL",
+      address:
+        dex.matches[0].address,
+      matches:
+        dex.matches,
+      resolverStatus:
+        dex.status
+    };
+  }
+
+  if (
+    dex.matches.length >
+    1
+  ) {
+    return {
+      status:
+        "AMBIGUOUS_SYMBOL",
+      address:
+        null,
+      matches:
+        dex.matches,
+      resolverStatus:
+        dex.status
+    };
+  }
+
+  return {
+    status:
+      dex.status ||
+      "NOT_FOUND",
+    address:
+      null,
+    matches:
+      []
+  };
+}
+
+function telegramAnalyseAmbiguousMessageV276(
+  query,
+  matches
+) {
+  const lines = [
+    `⚠️ <b>More than one Robinhood token uses ${escapeHtml(String(query || ""))}.</b>`,
+    "",
+    "I won't guess. Use the contract address:",
+    ""
+  ];
+
+  for (
+    const row
+    of (
+      matches ||
+      []
+    ).slice(0, 8)
+  ) {
+    lines.push(
+      `✅ ${escapeHtml(
+        row?.symbol ||
+        "TOKEN"
+      )} — <code>${escapeHtml(
+        row?.address ||
+        ""
+      )}</code>`
+    );
+  }
+
+  return lines.join("\n");
+}
+
+
+function telegramAnalyseDirectionalV276(
+  candidate
+) {
+  const exact =
+    candidate
+      ?.onChainVerifiedFlowV212
+      ?.windows ||
+    {};
+
+  const market =
+    candidate
+      ?.market
+      ?.directionalFlow ||
+    {};
+
+  for (
+    const key
+    of [
+      "h1",
+      "m15",
+      "m5",
+      "h24"
+    ]
+  ) {
+    const row =
+      exact?.[key]?.verified ===
+        true
+        ? exact[key]
+        : market?.[key]?.verified ===
+            true
+          ? market[key]
+          : null;
+
+    if (!row) {
+      continue;
+    }
+
+    const buy =
+      Number(
+        row?.buyVolumeUsd
+      );
+
+    const sell =
+      Number(
+        row?.sellVolumeUsd
+      );
+
+    const net =
+      Number(
+        row?.netFlowUsd
+      );
+
+    const pressure =
+      Number(
+        row?.buyPressureUsd
+      );
+
+    if (
+      Number.isFinite(buy) &&
+      Number.isFinite(sell) &&
+      Number.isFinite(net) &&
+      Number.isFinite(pressure)
+    ) {
+      return {
+        verified: true,
+        window: key,
+        buyVolumeUsd: buy,
+        sellVolumeUsd: sell,
+        netFlowUsd: net,
+        buyPressureUsd: pressure,
+        source:
+          exact?.[key]?.verified ===
+            true
+            ? "ONCHAIN_VERIFIED_FLOW"
+            : "MARKET_DIRECTIONAL_FLOW"
+      };
+    }
+  }
+
+  return {
+    verified: false,
+    window: null,
+    buyVolumeUsd: null,
+    sellVolumeUsd: null,
+    netFlowUsd: null,
+    buyPressureUsd: null,
+    source: null
+  };
+}
+
+
+function telegramAnalyseResultMessageV276(
+  candidate,
+  performance,
+  telemetry
+) {
+  if (
+    !candidate ||
+    candidate?.analysisDeferred
+  ) {
+    return [
+      "⚠️ <b>Fresh analysis incomplete</b>",
+      "",
+      `Reason: <b>${escapeHtml(
+        candidate?.validation?.reason ||
+        candidate?.reason ||
+        "COMMAND_BUDGET_OR_PROVIDER_LIMIT"
+      )}</b>`,
+      "",
+      `<i>V276 used ${safeNumber(
+        telemetry?.requestsUsed
+      )}/${TELEGRAM_ANALYSE_MAX_REQUESTS_V276} command requests. No scanner budget was consumed.</i>`
+    ].join("\n");
+  }
+
+  if (
+    candidate?.validERC20 !==
+      true
+  ) {
+    return [
+      "❌ <b>Token analysis failed validation</b>",
+      "",
+      `Contract: <code>${escapeHtml(
+        candidate?.address ||
+        ""
+      )}</code>`,
+      `Reason: <b>${escapeHtml(
+        candidate?.reason ||
+        candidate?.validation?.reason ||
+        "NOT_VERIFIED_ERC20"
+      )}</b>`
+    ].join("\n");
+  }
+
+  const market =
+    candidate?.market ||
+    {};
+
+  const holders =
+    candidate?.holders ||
+    {};
+
+  const whale =
+    holders?.whale ||
+    {};
+
+  const risk =
+    candidate?.risk ||
+    {};
+
+  const opportunity =
+    candidate?.opportunity ||
+    {};
+
+  const confidence =
+    candidate?.confidence ||
+    {};
+
+  const momentum =
+    candidate?.momentum ||
+    {};
+
+  const quality =
+    candidate?.marketQuality ||
+    {};
+
+  const directionalV276 =
+    telegramAnalyseDirectionalV276(
+      candidate
+    );
+
+  const holderPresentationV269 =
+    telegramHolderPresentationV269(
+      candidate
+    );
+
+  const holderCount =
+    holderPresentationV269
+      ?.holderCount
+      ?.verified === true &&
+    holderPresentationV269
+      ?.holderCount
+      ?.count !== null
+      ? `${formatHolderCountV261(
+          holderPresentationV269
+            .holderCount
+            .count
+        )} (${
+          holderPresentationV269
+            ?.holderCount
+            ?.fresh === true
+            ? "VERIFIED"
+            : "VERIFIED CACHE"
+        })`
+      : "UNVERIFIED";
+
+  const concentrationVerified =
+    holders
+      ?.concentrationVerified ===
+      true &&
+    holders
+      ?.integrity
+      ?.verified ===
+      true &&
+    whale?.verified ===
+      true;
+
+  const top1 =
+    concentrationVerified
+      ? percentDisplay(
+          whale?.top1Percent
+        )
+      : "UNVERIFIED";
+
+  const top10 =
+    concentrationVerified
+      ? percentDisplay(
+          whale?.top10Percent
+        )
+      : "UNVERIFIED";
+
+  const concentration =
+    concentrationVerified
+      ? (
+          whale?.concentrationRisk ||
+          "UNVERIFIED"
+        )
+      : "UNVERIFIED";
+
+  const lines = [
+    `🔎 <b>Fresh Robinhood Analysis — ${escapeHtml(
+      candidate?.symbol ||
+      "UNKNOWN"
+    )}</b>`,
+    "",
+    `Contract: <code>${escapeHtml(
+      candidate?.address ||
+      ""
+    )}</code>`,
+    `Name: <b>${escapeHtml(
+      candidate?.name ||
+      "UNVERIFIED"
+    )}</b>`,
+    "",
+    `✅ ERC-20: <b>VERIFIED</b>`,
+    `📊 Opportunity: <b>${safeNumber(
+      opportunity?.score
+    )}/100</b>`,
+    `⚡ Momentum: <b>${
+      momentum?.verified === true
+        ? `${safeNumber(momentum?.score)}/100 ${escapeHtml(momentum?.label || "")}`
+        : "UNVERIFIED"
+    }</b>`,
+    `🎯 Confidence: <b>${safeNumber(
+      confidence?.score
+    )}/100 ${escapeHtml(
+      confidence?.label ||
+      ""
+    )}</b>`,
+    `🏪 Market Quality: <b>${safeNumber(
+      quality?.score
+    )}/100</b>`,
+    `🛡 Rug Risk: <b>${
+      risk?.verified === true
+        ? `${safeNumber(risk?.score)}/100 ${escapeHtml(risk?.label || "")}`
+        : "UNVERIFIED"
+    }</b>`,
+    "",
+    `💰 Price: <b>${
+      market?.verified === true &&
+      Number(market?.priceUsd) > 0
+        ? `$${telegramPlainNumberV271(
+            market.priceUsd,
+            10
+          )}`
+        : "UNVERIFIED"
+    }</b>`,
+    `💎 Market cap: <b>${
+      market?.verified === true
+        ? telegramMoneyV271(
+            market?.marketCap
+          )
+        : "UNVERIFIED"
+    }</b>`,
+    `💧 Liquidity: <b>${
+      market?.verified === true
+        ? telegramMoneyV271(
+            market?.liquidityUsd
+          )
+        : "UNVERIFIED"
+    }</b>`,
+    `📈 24h volume: <b>${
+      market?.verified === true
+        ? telegramMoneyV271(
+            market?.volume?.h24
+          )
+        : "UNVERIFIED"
+    }</b>`,
+    "",
+    directionalV276?.verified === true
+      ? `💵 Verified USD (${escapeHtml(
+          directionalV276.window
+        )}): BUY <b>${telegramMoneyV271(
+          directionalV276.buyVolumeUsd
+        )}</b> | SELL <b>${telegramMoneyV271(
+          directionalV276.sellVolumeUsd
+        )}</b>`
+      : "💵 Verified BUY/SELL USD: <b>UNVERIFIED</b>",
+    directionalV276?.verified === true
+      ? `⚖️ Net flow: <b>${directionalV276.netFlowUsd >= 0 ? "+" : "-"}${telegramMoneyV271(
+          Math.abs(
+            directionalV276.netFlowUsd
+          )
+        )}</b> | Buy pressure: <b>${telegramPlainNumberV271(
+          directionalV276.buyPressureUsd,
+          2
+        )}%</b>`
+      : null,
+    "",
+    `👥 Holder count: <b>${escapeHtml(
+      holderCount
+    )}</b>`,
+    `🐋 Top holder: <b>${top1}</b>`,
+    `🐋 Top 10: <b>${top10}</b>`,
+    `📊 Concentration: <b>${escapeHtml(
+      concentration
+    )}</b>`,
+    `🐳 Whale Flow: <b>${escapeHtml(
+      candidate?.whaleFlow?.flow ||
+      "UNVERIFIED"
+    )}</b>`,
+    "",
+    `🛰 V4 pool identity: <b>${
+      candidate
+        ?.onChainPoolIdentityV153
+        ?.verified === true
+        ? "VERIFIED"
+        : "UNVERIFIED"
+    }</b>`,
+    `🛰 Live V4 swaps in this manual analysis: <b>UNVERIFIED</b>`,
+    "",
+    `🕒 Launch age: <b>${escapeHtml(
+      candidate
+        ?.verifiedLaunchAgeV223
+        ?.verified === true
+        ? formatAgeV223(
+            candidate
+              .verifiedLaunchAgeV223
+              .ageMs
+          )
+        : "UNVERIFIED"
+    )}</b>`
+  ];
+
+  if (performance) {
+    lines.push(
+      "",
+      "📚 <b>Previous Bot Call</b>",
+      `🎯 Entry MC: <b>${telegramMoneyV271(
+        performance?.entryMarketCap
+      )}</b>`,
+      `🏆 ATH since call: <b>${telegramMultipleV271(
+        performance?.athMultipleByMarketCap
+      )}</b>`,
+      `📈 Current from call: <b>${telegramMultipleV271(
+        performance?.currentMultipleByMarketCap
+      )}</b>`,
+      `📉 Drawdown from ATH: <b>${telegramDrawdownV271(
+        performance?.drawdownFromAthMarketCap
+      )}</b>`
+    );
+  } else {
+    lines.push(
+      "",
+      "📚 Previous bot call: <b>NO V270+ PERFORMANCE RECORD</b>"
+    );
+  }
+
+  lines.push(
+    "",
+    `🔌 Manual command requests: <b>${safeNumber(
+      telemetry?.requestsUsed
+    )}/${TELEGRAM_ANALYSE_MAX_REQUESTS_V276}</b>`,
+    "✅ Scanner request budget consumed: <b>NO</b>",
+    "",
+    "<i>Fresh manual analysis. Missing evidence remains UNVERIFIED; the command does not add the token to the autonomous watchlist.</i>"
+  );
+
+  return lines
+    .filter(
+      line =>
+        line !== null &&
+        line !== undefined
+    )
+    .join("\n");
+}
+
+async function telegramFreshAnalyseV276(
+  env,
+  state,
+  query
+) {
+  const cooldown =
+    await telegramAnalyseCooldownV276(
+      env,
+      false
+    );
+
+  if (!cooldown.allowed) {
+    return {
+      reply:
+        `⏳ <b>Fresh analysis cooldown</b>\n\nTry again in ${Math.max(
+          1,
+          Math.ceil(
+            safeNumber(
+              cooldown?.remainingMs
+            ) / 1000
+          )
+        )} seconds.`,
+      telemetry: {
+        status:
+          "COOLDOWN",
+        requestsUsed:
+          0
+      }
+    };
+  }
+
+  const budget =
+    createTelegramAnalyseBudgetV276();
+
+  const resolved =
+    await resolveTelegramAnalyseTargetV276(
+      query,
+      state,
+      budget
+    );
+
+  if (
+    resolved.status ===
+      "MISSING_QUERY"
+  ) {
+    return {
+      reply:
+        "ℹ️ Use <code>/analyse TICKER</code> or <code>/analyse 0xADDRESS</code>.",
+      telemetry: {
+        status:
+          resolved.status,
+        requestsUsed:
+          safeNumber(
+            budget.totalUsed
+          )
+      }
+    };
+  }
+
+  if (
+    resolved.status ===
+      "AMBIGUOUS_SYMBOL"
+  ) {
+    return {
+      reply:
+        telegramAnalyseAmbiguousMessageV276(
+          query,
+          resolved.matches
+        ),
+      telemetry: {
+        status:
+          resolved.status,
+        requestsUsed:
+          safeNumber(
+            budget.totalUsed
+          )
+      }
+    };
+  }
+
+  if (!resolved.address) {
+    return {
+      reply:
+        `❌ <b>Robinhood token not resolved.</b>\n\nQuery: <code>${escapeHtml(
+          String(query || "")
+        )}</code>\nStatus: <b>${escapeHtml(
+          resolved.status ||
+          "NOT_FOUND"
+        )}</b>\n\nTry the contract address for an exact analysis.`,
+      telemetry: {
+        status:
+          resolved.status,
+        requestsUsed:
+          safeNumber(
+            budget.totalUsed
+          )
+      }
+    };
+  }
+
+  await telegramAnalyseCooldownV276(
+    env,
+    true
+  );
+
+  const isolatedState =
+    cloneStateForTelegramAnalyseV276(
+      state
+    );
+
+  let watched =
+    findWatched(
+      isolatedState,
+      resolved.address
+    );
+
+  if (!watched) {
+    watched =
+      temporaryWatchedTokenV276(
+        resolved.address
+      );
+  }
+
+  const activity =
+    activityForToken(
+      watched,
+      []
+    );
+
+  let candidate;
+
+  try {
+    candidate =
+      await analyzeToken(
+        env,
+        budget,
+        isolatedState,
+        watched,
+        activity,
+        {
+          newlyDiscovered:
+            false,
+          liveDiscovery:
+            false,
+          marketFreshEligible:
+            true,
+          priorityCompletion:
+            true,
+          marketPriority:
+            true,
+          holderPriorityCompletion:
+            true,
+          liveMomentumActivityV152: {
+            swaps:
+              0,
+            liquidityEvents:
+              0,
+            poolSpecific:
+              false,
+            verified:
+              false
+          }
+        }
+      );
+  } catch (error) {
+    return {
+      reply: [
+        "⚠️ <b>Fresh analysis could not complete</b>",
+        "",
+        `Contract: <code>${escapeHtml(
+          resolved.address
+        )}</code>`,
+        `Error: <b>${escapeHtml(
+          errorString(error)
+        )}</b>`,
+        "",
+        `Requests used: <b>${safeNumber(
+          budget.totalUsed
+        )}/${TELEGRAM_ANALYSE_MAX_REQUESTS_V276}</b>`,
+        "Scanner budget consumed: <b>NO</b>"
+      ].join("\n"),
+      telemetry: {
+        status:
+          "ANALYSIS_ERROR",
+        error:
+          errorString(error),
+        address:
+          normalize(
+            resolved.address
+          ),
+        requestsUsed:
+          safeNumber(
+            budget.totalUsed
+          ),
+        requestLimit:
+          TELEGRAM_ANALYSE_MAX_REQUESTS_V276,
+        scannerBudgetConsumed:
+          false
+      }
+    };
+  }
+
+  const performance =
+    state
+      ?.callPerformanceV270
+      ?.[
+        normalize(
+          resolved.address
+        )
+      ] ||
+    null;
+
+  const telemetry = {
+    status:
+      "ANALYSIS_COMPLETE",
+    resolvedBy:
+      resolved.status,
+    address:
+      normalize(
+        resolved.address
+      ),
+    requestsUsed:
+      safeNumber(
+        budget.totalUsed
+      ),
+    requestLimit:
+      TELEGRAM_ANALYSE_MAX_REQUESTS_V276,
+    analysisRequestsUsed:
+      safeNumber(
+        budget?.analysis?.used
+      ),
+    scannerBudgetConsumed:
+      false,
+    scannerStateMutated:
+      false,
+    autonomousWatchlistChanged:
+      false
+  };
+
+  return {
+    reply:
+      telegramAnalyseResultMessageV276(
+        candidate,
+        performance,
+        telemetry
+      ),
+    telemetry
+  };
+}
+
+
 /* =========================================================
    V271 TELEGRAM CALL ANALYSIS COMMANDS
    ========================================================= */
@@ -59376,6 +60679,8 @@ function telegramHelpV271() {
   return [
     "🤖 <b>Robinhood Meme Hunter Commands</b>",
     "",
+    "<code>/analyse GUS</code> — fresh live analysis of any Robinhood token",
+    "<code>/analyse 0xADDRESS</code> — exact fresh analysis by contract",
     "<code>/call GUS</code> — full stored performance for a call",
     "<code>/ath GUS</code> — same call/ATH report",
     "<code>/stats GUS</code> — same call/ATH report",
@@ -59384,7 +60689,7 @@ function telegramHelpV271() {
     "<code>/performance</code> — overall tracked-call summary",
     "<code>/help</code> — command list",
     "",
-    "<i>V271 commands read stored evidence; they do not trigger a fresh chain scan.</i>"
+    "<i>/analyse performs a fresh bounded analysis. Other V271 commands read stored evidence and do not trigger a fresh chain scan.</i>"
   ].join("\n");
 }
 
@@ -59607,6 +60912,27 @@ async function telegramCommandReplyV271(
     } else {
       reply =
         "❌ <b>Call not found.</b>\n\nUse <code>/calls</code> to see stored V270+ calls.";
+    }
+  } else if (
+    parsed.command ===
+    "/analyse" ||
+    parsed.command ===
+    "/analyze"
+  ) {
+    const fresh =
+      await telegramFreshAnalyseV276(
+        env,
+        state,
+        parsed.argument
+      );
+
+    reply =
+      fresh.reply;
+
+    if (diagnosticV273) {
+      diagnosticV273
+        .telegramAnalyseV276 =
+        fresh.telemetry;
     }
   } else if (
     parsed.command ===
