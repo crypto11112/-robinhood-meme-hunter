@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V282 / V2.0:
+ * - MANUAL EVIDENCE: raises only the isolated Telegram /analyse request ceiling from 12 to 16 so missing evidence can use up to four additional provider requests
+ * - SAFETY: autonomous scanner hard limit remains 42 and analysis limit remains 21; /analyse still uses its separate cloned state and never consumes scanner budget
+ * - SAFETY: existing provider-specific cooldowns, 429/402 protections, request accounting, Telegram cooldown and manual Dex fresh-spacing protections are unchanged
+ * - SAFETY: holder logic, scoring, Momentum maths, verified BUY/SELL USD maths, alert qualification, Telegram thresholds and all KV keys are unchanged
+ * - TELEMETRY: existing request-use breakdown automatically exposes exactly what the four additional manual slots are used for
+ * - Preserves V281 historical-alert diagnostics and all confirmed-working V281 scanner functionality
  * V281 / V2.0:
  * - RESEARCH FIX: disables the unproven V280 manual holder-count skip so /analyse returns to the confirmed V279 holder request path
  * - DIAGNOSTIC: historical V268 alert lookup now reports KV status, retained-entry count and whether the requested address was present
@@ -1223,7 +1230,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V281";
+const VERSION = "V282";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2366,7 +2373,7 @@ const FOLLOW_UP_BULLISH_BUY_PRESSURE_V267 = 60;
 
 const CALL_PERFORMANCE_MAX_TRACKED_V270 = 100;
 
-const TELEGRAM_ANALYSE_MAX_REQUESTS_V276 = 12;
+const TELEGRAM_ANALYSE_MAX_REQUESTS_V276 = 16;
 const TELEGRAM_ANALYSE_COOLDOWN_MS_V276 = 20000;
 const TELEGRAM_ANALYSE_STATE_KEY_V276 =
   "robinhood-meme-hunter-telegram-analyse-v276";
