@@ -1,5 +1,14 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V291 / V2.0:
+ * - RESOLVER: manual /analyse now tests both independently documented Robinhood WETH/USDG V3 pool candidates (fee 100 and fee 500) instead of trusting a single discovery address
+ * - BYTECODE FIRST: each candidate must first return deployed bytecode before any V3 interface call is attempted; no-code candidates are rejected without wasting factory/token/slot0 calls
+ * - STRICT ON-CHAIN IDENTITY: a candidate is accepted only when factory(), token0(), token1(), fee(), slot0() and liquidity() all verify the configured canonical Uniswap V3 factory, canonical WETH+USDG pair, expected fee, positive liquidity and a finite positive USDG/WETH price
+ * - DIAGNOSTICS: preserves the actual RPC/HTTP/fetch failure status and error text for each candidate instead of collapsing the first failing call to RPC_ERROR
+ * - FALLBACK: if neither direct candidate verifies, the existing V195 factory getPool() resolver remains unchanged and can still recover the reference when budget permits
+ * - SAFETY: candidate addresses remain discovery hints only; no third-party price, symbol, market count or unverified pool is promoted to verified USD
+ * - BUDGET: isolated manual /analyse remains capped at 24 requests; autonomous scanner remains 42 global / 21 analysis and standard alert logic is untouched
+ * - Preserves all V290/V289/V288/V287 manual-analysis protections and confirmed-working scanner functionality
  * V290 / V2.0:
  * - FIX/VERIFY: manual /analyse no longer depends only on V195 factory getPool() discovery for the canonical WETH/USDG reference after V289 proved all four standard fee-tier lookups returned no verified pool
  * - VERIFIED FALLBACK: before retrying V195 discovery, V290 probes the currently documented Robinhood WETH/USDG 0.01% pool candidate 0x52e65B17fB6E5BA00Ed806f37Afcd2DaA50271Ca and trusts it ONLY if on-chain calls prove factory(), token0(), token1(), fee(), slot0() and liquidity()
@@ -1288,7 +1297,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V290";
+const VERSION = "V291";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1673,9 +1682,23 @@ const PONS_PROTOCOL_V215 =
 const UNISWAP_V3_FACTORY_V195 =
   "0x1f7d7550b1b028f7571e69a784071f0205fd2efa";
 
-/* V290 discovery candidate only; every trust property is re-verified on-chain. */
+/* V291 discovery candidates only; every trust property is re-verified on-chain. */
+const V291_CANONICAL_WETH_USDG_POOL_CANDIDATES = [
+  {
+    address: "0x52e65b17fb6e5ba00ed806f37afcd2daa50271ca",
+    fee: 100,
+    discoverySource: "DOCUMENTED_WETH_USDG_V3_100"
+  },
+  {
+    address: "0x69bfaf19c9f377bb306a89aed9f6b07e2c1a8d9a",
+    fee: 500,
+    discoverySource: "DOCUMENTED_WETH_USDG_V3_500"
+  }
+];
+
+/* Backward-compatible telemetry fallback only. */
 const V290_CANONICAL_WETH_USDG_POOL_CANDIDATE =
-  "0x52e65b17fb6e5ba00ed806f37afcd2daa50271ca";
+  V291_CANONICAL_WETH_USDG_POOL_CANDIDATES[0].address;
 const V290_CANONICAL_WETH_USDG_POOL_FEE = 100;
 
 const UNISWAP_TRADE_API_V196 =
@@ -61249,21 +61272,35 @@ function telegramAnalyseResultMessageV276(
     }</b> | requests <b>${safeNumber(
       telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.requestsUsed
     )}</b>`,
-    `🧪 V290 direct WETH/USDG pool: <b>${escapeHtml(
+    `🧪 V291 WETH/USDG resolver: <b>${escapeHtml(
+      telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.resolverV291?.status ||
       telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.directV290?.status ||
       "NOT_ATTEMPTED"
-    )}</b> | pool <code>${escapeHtml(
-      telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.directV290?.poolAddress ||
-      V290_CANONICAL_WETH_USDG_POOL_CANDIDATE
-    )}</code> | factory <b>${
-      telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.directV290?.factoryMatch === true ? "YES" : "NO"
-    }</b> | tokens <b>${
-      telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.directV290?.tokenPairMatch === true ? "YES" : "NO"
-    }</b> | fee <b>${escapeHtml(String(
-      telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.directV290?.fee ?? "UNVERIFIED"
+    )}</b> | selected <code>${escapeHtml(
+      telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.resolverV291?.poolAddress ||
+      "NONE"
+    )}</code> | fee <b>${escapeHtml(String(
+      telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.resolverV291?.fee ?? "UNVERIFIED"
     ))}</b> | requests <b>${safeNumber(
-      telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.directV290?.requestsUsed
+      telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.resolverV291?.requestsUsed
     )}</b>`,
+    ...(
+      Array.isArray(telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.resolverV291?.candidates)
+        ? telemetry.manualVerifiedUsdRecoveryV289.wethReferenceV289.resolverV291.candidates.map((row) =>
+            `🧪 V291 candidate fee ${escapeHtml(String(row?.expectedFee ?? "?"))}: code <b>${
+              row?.bytecodePresent === true ? "YES" : "NO"
+            }</b> | status <b>${escapeHtml(row?.status || "UNVERIFIED")}</b> | factory <b>${
+              row?.factoryMatch === true ? "YES" : "NO"
+            }</b> | tokens <b>${
+              row?.tokenPairMatch === true ? "YES" : "NO"
+            }</b> | fee match <b>${
+              row?.feeMatch === true ? "YES" : "NO"
+            }</b> | error <b>${escapeHtml(
+              row?.failureError || row?.checks?.code?.error || "NONE"
+            )}</b>`
+          )
+        : []
+    ),
     `🧾 V288 quote token: <code>${escapeHtml(
       telemetry?.manualVerifiedUsdRecoveryV289?.quoteDiagnosticsV288?.quoteTokenAddress ||
       "UNVERIFIED"
@@ -61769,12 +61806,94 @@ function manualQuoteDiagnosticsV288(candidate, wethUsdGReference) {
   };
 }
 
-async function manualDirectV3WethUsdGReferenceV290(
+async function ethGetCodeV291(
+  env,
+  budget,
+  address,
+  label
+) {
+  if (!budgetAvailable(budget, "analysis")) {
+    return {
+      ok: false,
+      status: "ANALYSIS_BUDGET_PROTECTED",
+      codePresent: false,
+      code: null,
+      externalRequestsUsed: 0,
+      error: null
+    };
+  }
+
+  if (!consumeBudget(budget, "analysis", label)) {
+    return {
+      ok: false,
+      status: "ANALYSIS_BUDGET_PROTECTED",
+      codePresent: false,
+      code: null,
+      externalRequestsUsed: 0,
+      error: null
+    };
+  }
+
+  const rpcUrl = String(
+    env.ALCHEMY_RPC_URL ||
+    env.ROBINHOOD_RPC_URL ||
+    PUBLIC_RPC
+  ).trim();
+
+  try {
+    const response = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "eth_getCode",
+        params: [address, "latest"]
+      })
+    });
+
+    const payload = await response.json();
+    if (!response.ok || payload?.error) {
+      return {
+        ok: false,
+        status: payload?.error ? "RPC_ERROR" : `HTTP_${response.status}`,
+        codePresent: false,
+        code: null,
+        externalRequestsUsed: 1,
+        error: payload?.error?.message || null
+      };
+    }
+
+    const code = String(payload?.result || "");
+    const codePresent = code !== "" && code !== "0x" && code !== "0x0";
+    return {
+      ok: true,
+      status: codePresent ? "BYTECODE_PRESENT" : "NO_CONTRACT_BYTECODE",
+      codePresent,
+      code: codePresent ? code : null,
+      externalRequestsUsed: 1,
+      error: null
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: "FETCH_ERROR",
+      codePresent: false,
+      code: null,
+      externalRequestsUsed: 1,
+      error: errorString(error)
+    };
+  }
+}
+
+async function verifyDirectV3WethUsdGCandidateV291(
   env,
   state,
-  budget
+  budget,
+  candidate
 ) {
-  const pool = normalize(V290_CANONICAL_WETH_USDG_POOL_CANDIDATE);
+  const pool = normalize(candidate?.address);
+  const expectedFee = Math.max(0, Math.floor(safeNumber(candidate?.fee)));
   const expectedFactory = normalize(UNISWAP_V3_FACTORY_V195);
   const before = safeNumber(budget?.totalUsed);
 
@@ -61782,9 +61901,12 @@ async function manualDirectV3WethUsdGReferenceV290(
     attempted: false,
     verified: false,
     status: "NOT_ATTEMPTED",
-    source: "UNISWAP_V3_WETH_USDG_DIRECT_ONCHAIN_VERIFY_V290",
+    source: "UNISWAP_V3_WETH_USDG_DIRECT_ONCHAIN_VERIFY_V291",
+    discoverySource: candidate?.discoverySource || null,
     poolAddress: isAddress(pool) ? pool : null,
     expectedFactory: isAddress(expectedFactory) ? expectedFactory : null,
+    expectedFee,
+    bytecodePresent: false,
     factory: null,
     factoryMatch: false,
     token0: null,
@@ -61796,7 +61918,8 @@ async function manualDirectV3WethUsdGReferenceV290(
     sqrtPriceX96: null,
     priceUsdGPerWeth: null,
     requestsUsed: 0,
-    checks: {}
+    checks: {},
+    failureError: null
   };
 
   const finish = (status, extra = {}) => ({
@@ -61806,37 +61929,65 @@ async function manualDirectV3WethUsdGReferenceV290(
     requestsUsed: Math.max(0, safeNumber(budget?.totalUsed) - before)
   });
 
-  if (!isAddress(pool) || !isAddress(expectedFactory)) {
-    return finish("DIRECT_V3_CONFIGURATION_INVALID_V290");
+  if (!isAddress(pool) || !isAddress(expectedFactory) || expectedFee <= 0) {
+    return finish("DIRECT_V3_CONFIGURATION_INVALID_V291");
+  }
+
+  const code = await ethGetCodeV291(
+    env,
+    budget,
+    pool,
+    `V291_DIRECT_V3_CODE_${expectedFee}`
+  );
+  output.attempted = true;
+  output.bytecodePresent = code?.codePresent === true;
+  output.checks.code = {
+    ok: code?.ok === true,
+    status: code?.status || null,
+    error: code?.error || null
+  };
+  if (!code?.ok) {
+    output.failureError = code?.error || null;
+    return finish(code?.status || "DIRECT_V3_CODE_CHECK_FAILED_V291");
+  }
+  if (!code?.codePresent) {
+    return finish("NO_CONTRACT_BYTECODE_V291");
   }
 
   const rpc = async (name, selector) => {
     const row = await ethCallV195(
-      env, state, budget, pool, selector,
-      `V290_DIRECT_V3_${name.toUpperCase()}`
+      env,
+      state,
+      budget,
+      pool,
+      selector,
+      `V291_DIRECT_V3_${expectedFee}_${name.toUpperCase()}`
     );
-    output.attempted = true;
     output.checks[name] = {
       ok: row?.ok === true,
-      status: row?.status || null
+      status: row?.status || null,
+      error: row?.error || null
     };
+    if (!row?.ok && !output.failureError) {
+      output.failureError = row?.error || null;
+    }
     return row;
   };
 
   const factoryCall = await rpc("factory", "0xc45a0155");
   if (!factoryCall?.ok) {
-    return finish(factoryCall?.status || "DIRECT_V3_FACTORY_CALL_FAILED_V290");
+    return finish(factoryCall?.status || "DIRECT_V3_FACTORY_CALL_FAILED_V291");
   }
   output.factory = decodeAddressWordV195(factoryCall.result);
   output.factoryMatch = output.factory === expectedFactory;
   if (!output.factoryMatch) {
-    return finish("DIRECT_V3_FACTORY_MISMATCH_V290");
+    return finish("DIRECT_V3_FACTORY_MISMATCH_V291");
   }
 
   const token0Call = await rpc("token0", "0x0dfe1681");
   const token1Call = await rpc("token1", "0xd21220a7");
   if (!token0Call?.ok || !token1Call?.ok) {
-    return finish("DIRECT_V3_TOKEN_CALL_FAILED_V290");
+    return finish("DIRECT_V3_TOKEN_CALL_FAILED_V291");
   }
   output.token0 = decodeAddressWordV195(token0Call.result);
   output.token1 = decodeAddressWordV195(token1Call.result);
@@ -61844,25 +61995,25 @@ async function manualDirectV3WethUsdGReferenceV290(
     (output.token0 === CANONICAL_WETH_V179 && output.token1 === CANONICAL_USDG_V179) ||
     (output.token0 === CANONICAL_USDG_V179 && output.token1 === CANONICAL_WETH_V179);
   if (!output.tokenPairMatch) {
-    return finish("DIRECT_V3_TOKEN_PAIR_MISMATCH_V290");
+    return finish("DIRECT_V3_TOKEN_PAIR_MISMATCH_V291");
   }
 
   const feeCall = await rpc("fee", "0xddca3f43");
   if (!feeCall?.ok) {
-    return finish(feeCall?.status || "DIRECT_V3_FEE_CALL_FAILED_V290");
+    return finish(feeCall?.status || "DIRECT_V3_FEE_CALL_FAILED_V291");
   }
   const feeRaw = decodeUint256WordV195(feeCall.result, 0);
   const feeNumber = feeRaw !== null ? Number(feeRaw) : null;
   output.fee = Number.isFinite(feeNumber) ? feeNumber : null;
-  output.feeMatch = output.fee === V290_CANONICAL_WETH_USDG_POOL_FEE;
+  output.feeMatch = output.fee === expectedFee;
   if (!output.feeMatch) {
-    return finish("DIRECT_V3_FEE_MISMATCH_V290");
+    return finish("DIRECT_V3_FEE_MISMATCH_V291");
   }
 
   const slot0Call = await rpc("slot0", "0x3850c7bd");
   const liquidityCall = await rpc("liquidity", "0x1a686502");
   if (!slot0Call?.ok || !liquidityCall?.ok) {
-    return finish("DIRECT_V3_STATE_CALL_FAILED_V290");
+    return finish("DIRECT_V3_STATE_CALL_FAILED_V291");
   }
 
   const sqrtPriceX96 = decodeUint256WordV195(slot0Call.result, 0);
@@ -61870,9 +62021,7 @@ async function manualDirectV3WethUsdGReferenceV290(
   output.sqrtPriceX96 = sqrtPriceX96 !== null ? sqrtPriceX96.toString() : null;
   output.liquidity = liquidity !== null ? liquidity.toString() : null;
   const price = sqrtPriceX96 !== null
-    ? sqrtPriceX96ToUsdGPerWethV195(
-        sqrtPriceX96, output.token0, output.token1
-      )
+    ? sqrtPriceX96ToUsdGPerWethV195(sqrtPriceX96, output.token0, output.token1)
     : null;
   output.priceUsdGPerWeth = Number.isFinite(price) && price > 0 ? price : null;
 
@@ -61880,7 +62029,7 @@ async function manualDirectV3WethUsdGReferenceV290(
     liquidity === null || liquidity <= 0n ||
     !Number.isFinite(price) || price <= 0
   ) {
-    return finish("DIRECT_V3_PRICE_OR_LIQUIDITY_INVALID_V290");
+    return finish("DIRECT_V3_PRICE_OR_LIQUIDITY_INVALID_V291");
   }
 
   state.v3WethUsdGReferenceV195 = {
@@ -61893,13 +62042,55 @@ async function manualDirectV3WethUsdGReferenceV290(
     sqrtPriceX96: sqrtPriceX96.toString(),
     priceUsdGPerWeth: price,
     verifiedAt: nowIso(),
-    verifiedByV290: true
+    verifiedByV291: true
   };
 
   output.verified = true;
-  return finish("VERIFIED_DIRECT_ONCHAIN_WETH_USDG_POOL_V290", {
+  return finish("VERIFIED_DIRECT_ONCHAIN_WETH_USDG_POOL_V291", {
     verified: true
   });
+}
+
+async function manualResolveV3WethUsdGReferenceV291(
+  env,
+  state,
+  budget
+) {
+  const before = safeNumber(budget?.totalUsed);
+  const candidates = [];
+
+  for (const candidate of V291_CANONICAL_WETH_USDG_POOL_CANDIDATES) {
+    if (!budgetAvailable(budget, "analysis")) break;
+    const result = await verifyDirectV3WethUsdGCandidateV291(
+      env,
+      state,
+      budget,
+      candidate
+    );
+    candidates.push(result);
+    if (result?.verified === true) {
+      return {
+        ...result,
+        status: "VERIFIED_DIRECT_ONCHAIN_WETH_USDG_POOL_V291",
+        candidates,
+        requestsUsed: Math.max(0, safeNumber(budget?.totalUsed) - before)
+      };
+    }
+  }
+
+  return {
+    attempted: candidates.some(row => row?.attempted === true),
+    verified: false,
+    status: candidates.length
+      ? "NO_DIRECT_WETH_USDG_CANDIDATE_VERIFIED_V291"
+      : "NO_DIRECT_WETH_USDG_CANDIDATE_ATTEMPTED_V291",
+    source: "UNISWAP_V3_WETH_USDG_DIRECT_RESOLVER_V291",
+    poolAddress: null,
+    fee: null,
+    priceUsdGPerWeth: null,
+    candidates,
+    requestsUsed: Math.max(0, safeNumber(budget?.totalUsed) - before)
+  };
 }
 
 async function manualWethUsdGReferenceV289(
@@ -61959,25 +62150,26 @@ async function manualWethUsdGReferenceV289(
 
   const before = safeNumber(budget?.totalUsed);
 
-  const directV290 = await manualDirectV3WethUsdGReferenceV290(
+  const resolverV291 = await manualResolveV3WethUsdGReferenceV291(
     env, state, budget
   );
 
-  if (directV290?.verified === true) {
+  if (resolverV291?.verified === true) {
     const requestsUsed = Math.max(0, safeNumber(budget?.totalUsed) - before);
     return {
       ...base,
       attempted: true,
       verified: true,
-      status: "VERIFIED_DIRECT_ONCHAIN_WETH_USDG_POOL_V290",
-      source: directV290.source,
-      priceUsdGPerWeth: Number(directV290.priceUsdGPerWeth),
+      status: "VERIFIED_DIRECT_ONCHAIN_WETH_USDG_POOL_V291",
+      source: resolverV291.source,
+      priceUsdGPerWeth: Number(resolverV291.priceUsdGPerWeth),
       requestsUsed,
-      v3Status: directV290.status,
-      v3PoolAddress: directV290.poolAddress || null,
-      v3SelectedFee: directV290.fee ?? null,
-      directV290,
-      reference: directV290
+      v3Status: resolverV291.status,
+      v3PoolAddress: resolverV291.poolAddress || null,
+      v3SelectedFee: resolverV291.fee ?? null,
+      resolverV291,
+      directV290: resolverV291,
+      reference: resolverV291
     };
   }
 
@@ -62003,7 +62195,8 @@ async function manualWethUsdGReferenceV289(
       v3Status: v3?.status || null,
       v3PoolAddress: v3?.poolAddress || null,
       v3SelectedFee: v3?.selectedFee ?? null,
-      directV290,
+      resolverV291,
+      directV290: resolverV291,
       reference: v3
     };
   }
@@ -62018,7 +62211,8 @@ async function manualWethUsdGReferenceV289(
     v3Status: v3?.status || null,
     v3PoolAddress: v3?.poolAddress || null,
     v3SelectedFee: v3?.selectedFee ?? null,
-    directV290,
+    resolverV291,
+    directV290: resolverV291,
     reference: v3 || sameBatch
   };
 }
@@ -62117,6 +62311,7 @@ async function manualVerifiedUsdRecoveryV289(
       v3Status: wethReferenceV289?.v3Status || null,
       v3PoolAddress: wethReferenceV289?.v3PoolAddress || null,
       v3SelectedFee: wethReferenceV289?.v3SelectedFee ?? null,
+      resolverV291: wethReferenceV289?.resolverV291 || null,
       directV290: wethReferenceV289?.directV290 || null
     },
     candidate
