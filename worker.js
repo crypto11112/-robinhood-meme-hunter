@@ -1,5 +1,13 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V262 / V2.0:
+ * - COVERAGE: qualifying candidates with only a thin verified-USD sample can now use the existing exact-pool history completion path
+ * - FIX: V254 previously stopped as soon as ANY verified USD trade existed, so 1-2 live swaps could prevent the historical completion request entirely
+ * - V262 measures verified swap coverage against the broader reported 5m activity count (1h fallback) and enriches only when coverage is materially thin
+ * - Reuses the existing ONE exact-pool Blockscout history request maximum; no request-ceiling increase and no inferred USD values
+ * - Exact token, exact PoolId, verified quote basis, real block timestamps and existing V254/V257 decoders remain mandatory
+ * - Adds before/after coverage telemetry so live scans can prove whether enrichment increased the verified sample
+ * - Preserves V261 headline protection, V260 launch-age rotation, scoring, Momentum, verified BUY/SELL USD maths, KV key and 42/21 ceilings
  * V261 / V2.0:
  * - PRESENTATION: evidence-aware Telegram opportunity headline protection
  * - High scores no longer render HIGH-CONVICTION/STRONG when authoritative 15m/1h verified USD evidence materially conflicts
@@ -1070,7 +1078,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V261";
+const VERSION = "V262";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -37809,6 +37817,147 @@ async function blockscoutExactPoolUsdCompletionV254(
 }
 
 
+/* =========================================================
+   V262 VERIFIED USD COVERAGE ENRICHMENT
+   ========================================================= */
+
+/*
+ * V254 correctly required exact on-chain evidence, but it treated the first
+ * verified USD record as "completion". In live alerts this could leave only
+ * 1-2 decoded swaps while the market feed reported hundreds of transactions.
+ *
+ * V262 does NOT turn market counts into USD evidence. The counts are used only
+ * to decide whether the already-existing exact-PoolId history reader should be
+ * given its single protected opportunity to collect more independently
+ * verified swaps.
+ */
+function verifiedUsdCoverageV262(
+  candidate,
+  state
+) {
+  const flow =
+    candidateVerifiedOnChainFlowV212(
+      candidate,
+      state
+    );
+
+  const market =
+    candidate?.market;
+
+  const marketCount = key => {
+    const row =
+      market?.transactions?.[key];
+
+    if (!row) {
+      return 0;
+    }
+
+    return (
+      safeNumber(
+        row?.buys
+      ) +
+      safeNumber(
+        row?.sells
+      )
+    );
+  };
+
+  const windowKey =
+    marketCount("m5") > 0
+      ? "m5"
+      : marketCount("h1") > 0
+        ? "h1"
+        : null;
+
+  const reportedTransactions =
+    windowKey
+      ? marketCount(windowKey)
+      : 0;
+
+  const verifiedObservedTrades =
+    windowKey
+      ? safeNumber(
+          flow
+            ?.windows
+            ?.[windowKey]
+            ?.observedTrades
+        )
+      : safeNumber(
+          flow?.recordCount
+        );
+
+  const ratio =
+    reportedTransactions > 0
+      ? verifiedObservedTrades /
+        reportedTransactions
+      : null;
+
+  /*
+   * Only call a sample "materially thin" when the broad feed itself shows a
+   * meaningful activity base. This avoids spending history requests merely
+   * because a quiet token has only a couple of trades.
+   *
+   * For active markets we want at least 10% coverage, capped at a practical
+   * minimum sample target of 8 and maximum target of 20 observed swaps.
+   */
+  const minimumDesiredObserved =
+    reportedTransactions >= 20
+      ? Math.min(
+          20,
+          Math.max(
+            8,
+            Math.ceil(
+              reportedTransactions *
+              0.10
+            )
+          )
+        )
+      : 0;
+
+  const noVerifiedUsd =
+    flow?.verified !==
+      true;
+
+  const materiallyThin =
+    reportedTransactions >= 20 &&
+    (
+      verifiedObservedTrades <
+        minimumDesiredObserved ||
+      (
+        ratio !== null &&
+        ratio < 0.10
+      )
+    );
+
+  return {
+    enabled: true,
+    sourceVersion:
+      "V262",
+    windowKey:
+      windowKey ||
+      null,
+    reportedTransactions,
+    verifiedObservedTrades,
+    coverageRatio:
+      ratio,
+    coveragePercent:
+      ratio !== null
+        ? ratio * 100
+        : null,
+    minimumDesiredObserved,
+    noVerifiedUsd,
+    materiallyThin,
+    needsEnrichment:
+      noVerifiedUsd ||
+      materiallyThin,
+    marketCountsNeverPromotedToUsd:
+      true,
+    fullMarketCoverageClaimed:
+      false
+  };
+}
+
+
 async function verifiedUsdCompletionPassV254(
   candidate,
   state,
@@ -37837,6 +37986,17 @@ async function verifiedUsdCompletionPassV254(
     status: null,
     preExistingVerifiedUsd:
       before?.verified === true,
+    coverageBeforeV262:
+      verifiedUsdCoverageV262(
+        candidate,
+        state
+      ),
+    coverageAfterLiveReplayV262:
+      null,
+    coverageAfterHistoryV262:
+      null,
+    historyEnrichmentReasonV262:
+      null,
     activitySwaps:
       safeNumber(
         candidate?.activity?.swaps
@@ -37873,16 +38033,30 @@ async function verifiedUsdCompletionPassV254(
     };
   }
 
+  /*
+   * V262: verified-but-thin is no longer considered complete. A candidate with
+   * adequate verified coverage still exits exactly as V254 did, while a thin
+   * sample may continue to the existing exact-pool history path.
+   */
   if (
     before?.verified ===
+      true &&
+    output
+      .coverageBeforeV262
+      ?.needsEnrichment !==
       true
   ) {
     return {
       ...output,
       status:
-        "ALREADY_HAS_VERIFIED_USD"
+        "VERIFIED_USD_COVERAGE_ALREADY_ADEQUATE_V262"
     };
   }
+
+  output.historyEnrichmentReasonV262 =
+    before?.verified === true
+      ? "EXISTING_VERIFIED_USD_SAMPLE_THIN_V262"
+      : "NO_VERIFIED_USD_V254";
 
   if (
     safeNumber(
@@ -38249,8 +38423,23 @@ async function verifiedUsdCompletionPassV254(
       state
     );
 
+  output.coverageAfterLiveReplayV262 =
+    verifiedUsdCoverageV262(
+      candidate,
+      state
+    );
+
+  /*
+   * Preserve the zero-request win when current live replay gives a sufficiently
+   * representative sample. If it is still materially thin, V262 deliberately
+   * continues to the existing single exact-pool history request.
+   */
   if (
     afterLiveReplay?.verified ===
+      true &&
+    output
+      .coverageAfterLiveReplayV262
+      ?.needsEnrichment !==
       true
   ) {
     return {
@@ -38260,7 +38449,7 @@ async function verifiedUsdCompletionPassV254(
       verifiedUsdRecovered:
         true,
       status:
-        "VERIFIED_USD_RECOVERED_FROM_CURRENT_LIVE_LOGS"
+        "VERIFIED_USD_COVERAGE_ADEQUATE_AFTER_LIVE_REPLAY_V262"
     };
   }
 
@@ -38319,6 +38508,12 @@ async function verifiedUsdCompletionPassV254(
       state
     );
 
+  output.coverageAfterHistoryV262 =
+    verifiedUsdCoverageV262(
+      candidate,
+      state
+    );
+
   output.finalFlow =
     finalFlow;
 
@@ -38328,7 +38523,16 @@ async function verifiedUsdCompletionPassV254(
 
   output.status =
     output.verifiedUsdRecovered
-      ? "VERIFIED_USD_RECOVERED_FROM_EXACT_POOL_HISTORY"
+      ? (
+          output
+            .coverageAfterHistoryV262
+            ?.verifiedObservedTrades >
+          output
+            .coverageBeforeV262
+            ?.verifiedObservedTrades
+            ? "VERIFIED_USD_COVERAGE_ENRICHED_FROM_EXACT_POOL_HISTORY_V262"
+            : "VERIFIED_USD_AVAILABLE_AFTER_EXACT_POOL_HISTORY_V262"
+        )
       : (
           history?.status ||
           "VERIFIED_USD_NOT_RECOVERED"
@@ -47636,10 +47840,10 @@ for (
               ?.activity
               ?.swaps
           ) > 0 &&
-          candidateVerifiedOnChainFlowV212(
+          verifiedUsdCoverageV262(
             candidate,
             state
-          )?.verified !== true
+          )?.needsEnrichment === true
       )
       .sort(
         (a, b) =>
@@ -47657,6 +47861,14 @@ for (
 
   const verifiedUsdCompletionV254 = {
     enabled: true,
+    sourceVersion:
+      "V262",
+    thinCoverageEnrichmentEnabledV262:
+      true,
+    marketActivityCountsUsedForUsdV262:
+      false,
+    exactPoolHistoryOnlyV262:
+      true,
     maxCandidatesPerScan:
       VERIFIED_USD_COMPLETION_MAX_CANDIDATES_V254,
     maxHistoryRequestsPerScan:
@@ -47731,6 +47943,22 @@ for (
         historyPersistence:
           completion
             ?.historyPersistence ||
+          null,
+        coverageBeforeV262:
+          completion
+            ?.coverageBeforeV262 ||
+          null,
+        coverageAfterLiveReplayV262:
+          completion
+            ?.coverageAfterLiveReplayV262 ||
+          null,
+        coverageAfterHistoryV262:
+          completion
+            ?.coverageAfterHistoryV262 ||
+          null,
+        historyEnrichmentReasonV262:
+          completion
+            ?.historyEnrichmentReasonV262 ||
           null
       });
 
@@ -51045,6 +51273,24 @@ for (
         true,
       transientFailuresRemainRetryableV260:
         true
+    },
+
+    verifiedUsdCoverageEnrichmentV262: {
+      enabled: true,
+      presentationOnly: false,
+      exactVerifiedUsdOnly: true,
+      broaderMarketCountsUsedOnlyForCoverageDecision: true,
+      broaderMarketCountsNeverConvertedToUsd: true,
+      preferredCoverageWindow: "5m_WITH_1h_FALLBACK",
+      activeMarketMinimumReportedTransactions: 20,
+      desiredCoverageRatio: 0.10,
+      desiredObservedTradeFloor: 8,
+      desiredObservedTradeCeiling: 20,
+      maxHistoryRequestsPerScan:
+        VERIFIED_USD_COMPLETION_MAX_HISTORY_REQUESTS_V254,
+      hardExternalRequestLimitPreserved: 42,
+      analysisRequestLimitPreserved: 21,
+      verifiedUsdMathChanged: false
     },
 
     telegramHeadlineProtectionV261: {
