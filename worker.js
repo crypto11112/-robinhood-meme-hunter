@@ -1,5 +1,14 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V267 / V2.0:
+ * - NEW: persistent zero-request follow-up tracking for successfully alerted tokens
+ * - Stores an evidence snapshot at successful Telegram send and compares later analysed scans against the previous snapshot
+ * - Follow-up state is evidence-only: ACCELERATING / STABLE / DETERIORATING / MIXED / BASELINE_ESTABLISHED
+ * - Tracks opportunity, Momentum, verified 5m/15m/1h USD flow, liquidity, market cap when verified, holder count/concentration, whale flow and rug risk
+ * - Deterioration/acceleration flags are telemetry only in V267; they DO NOT send new Telegram messages or change qualification
+ * - No extra external requests: V267 reuses candidate evidence already collected by the existing scan
+ * - Keeps a bounded persistent follow-up registry (max 100 alerted tokens) to protect KV state size
+ * - Preserves V266 priceable-pool selection, V265 alert diagnostics, V263 history enrichment, verified USD maths, scoring, Momentum, Telegram thresholds and 42/21 ceilings
  * V266 / V2.0:
  * - FIX: verified-USD completion no longer blindly prefers a CURRENT live V4 PoolId when that pool's quote side is not canonically priceable
  * - V266 locally evaluates already-known candidate PoolIds through the strict V257 identity gate before spending any request
@@ -1105,7 +1114,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V266";
+const VERSION = "V267";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2217,6 +2226,21 @@ const HOLDER_PARTIAL_RETRY_MS_V149 =
 
 const ALERT_COOLDOWN =
   6 * 60 * 60 * 1000;
+
+/*
+ * V267 persistent post-alert evidence tracking.
+ * This registry is deliberately bounded and uses ZERO external requests.
+ */
+const FOLLOW_UP_MAX_TRACKED_TOKENS_V267 = 100;
+const FOLLOW_UP_SCORE_DELTA_V267 = 10;
+const FOLLOW_UP_MOMENTUM_DELTA_V267 = 15;
+const FOLLOW_UP_LIQUIDITY_DROP_RATIO_V267 = 0.20;
+const FOLLOW_UP_MARKET_CAP_MOVE_RATIO_V267 = 0.25;
+const FOLLOW_UP_BEARISH_NET_USD_V267 = -500;
+const FOLLOW_UP_BULLISH_NET_USD_V267 = 500;
+const FOLLOW_UP_BEARISH_BUY_PRESSURE_V267 = 40;
+const FOLLOW_UP_BULLISH_BUY_PRESSURE_V267 = 60;
+
 
 const MIN_ALERT_SCORE = 60;
 
@@ -3598,6 +3622,9 @@ function newState() {
     alerts:
       {},
 
+    followUpTrackingV267:
+      {},
+
     launchAgeRecoveryV260:
       {},
 
@@ -4078,6 +4105,13 @@ async function readState(env) {
           typeof parsed.alerts ===
             "object"
             ? parsed.alerts
+            : {},
+
+        followUpTrackingV267:
+          parsed.followUpTrackingV267 &&
+          typeof parsed.followUpTrackingV267 ===
+            "object"
+            ? parsed.followUpTrackingV267
             : {},
 
         launchAgeRecoveryV260:
@@ -43989,6 +44023,1053 @@ function shouldKeepCompletionCandidate(
    MAIN SCAN
    ========================================================= */
 
+
+/* =========================================================
+   V267 PERSISTENT POST-ALERT FOLLOW-UP TRACKING
+   ========================================================= */
+
+function finiteOrNullV267(
+  value
+) {
+  const n =
+    Number(value);
+
+  return Number.isFinite(n)
+    ? n
+    : null;
+}
+
+function verifiedFlowWindowSnapshotV267(
+  candidate,
+  key
+) {
+  const row =
+    candidate
+      ?.onChainVerifiedFlowV212
+      ?.windows
+      ?.[key];
+
+  if (
+    row?.verified !==
+      true
+  ) {
+    return {
+      verified: false,
+      observedTrades: 0,
+      buys: 0,
+      sells: 0,
+      buyVolumeUsd: null,
+      sellVolumeUsd: null,
+      netFlowUsd: null,
+      buyPressureUsd: null
+    };
+  }
+
+  return {
+    verified: true,
+    observedTrades:
+      safeNumber(
+        row?.observedTrades
+      ),
+    buys:
+      safeNumber(
+        row?.buys
+      ),
+    sells:
+      safeNumber(
+        row?.sells
+      ),
+    buyVolumeUsd:
+      finiteOrNullV267(
+        row?.buyVolumeUsd
+      ),
+    sellVolumeUsd:
+      finiteOrNullV267(
+        row?.sellVolumeUsd
+      ),
+    netFlowUsd:
+      finiteOrNullV267(
+        row?.netFlowUsd
+      ),
+    buyPressureUsd:
+      finiteOrNullV267(
+        row?.buyPressureUsd
+      )
+  };
+}
+
+function holderCountSnapshotV267(
+  candidate
+) {
+  const evidence =
+    holderCountFreshlyVerifiedV256(
+      candidate
+    );
+
+  return {
+    verified:
+      evidence?.verified ===
+        true,
+    count:
+      evidence?.verified ===
+        true
+        ? safeNumber(
+            evidence
+              ?.holderCount
+          )
+        : null,
+    source:
+      evidence?.source ||
+      null
+  };
+}
+
+function followUpEvidenceSnapshotV267(
+  candidate
+) {
+  const marketVerified =
+    candidate?.market?.verified ===
+      true;
+
+  const holderCount =
+    holderCountSnapshotV267(
+      candidate
+    );
+
+  return {
+    capturedAt:
+      Date.now(),
+
+    address:
+      normalize(
+        candidate?.address
+      ),
+
+    symbol:
+      candidate?.symbol ||
+      null,
+
+    name:
+      candidate?.name ||
+      null,
+
+    opportunityScore:
+      safeNumber(
+        candidate
+          ?.opportunity
+          ?.score
+      ),
+
+    momentumScore:
+      safeNumber(
+        candidate
+          ?.momentum
+          ?.score
+      ),
+
+    momentumLabel:
+      candidate
+        ?.momentum
+        ?.label ||
+      null,
+
+    confidenceScore:
+      safeNumber(
+        candidate
+          ?.confidence
+          ?.score
+      ),
+
+    rugRiskScore:
+      safeNumber(
+        candidate
+          ?.rugRisk
+          ?.score
+      ),
+
+    market: {
+      verified:
+        marketVerified,
+
+      marketCap:
+        marketVerified &&
+        safeNumber(
+          candidate
+            ?.market
+            ?.marketCap
+        ) > 0
+          ? safeNumber(
+              candidate
+                ?.market
+                ?.marketCap
+            )
+          : null,
+
+      liquidityUsd:
+        marketVerified &&
+        safeNumber(
+          candidate
+            ?.market
+            ?.liquidityUsd
+        ) > 0
+          ? safeNumber(
+              candidate
+                ?.market
+                ?.liquidityUsd
+            )
+          : null,
+
+      volume24hUsd:
+        marketVerified &&
+        safeNumber(
+          candidate
+            ?.market
+            ?.volume24hUsd
+        ) > 0
+          ? safeNumber(
+              candidate
+                ?.market
+                ?.volume24hUsd
+            )
+          : null
+    },
+
+    holderCount,
+
+    holderConcentration: {
+      verified:
+        candidate
+          ?.holders
+          ?.verified ===
+          true ||
+        candidate
+          ?.holderEvidence
+          ?.verified ===
+          true,
+
+      top1Percent:
+        finiteOrNullV267(
+          candidate
+            ?.holders
+            ?.top1Percent ??
+          candidate
+            ?.holderEvidence
+            ?.top1Percent
+        ),
+
+      top10Percent:
+        finiteOrNullV267(
+          candidate
+            ?.holders
+            ?.top10Percent ??
+          candidate
+            ?.holderEvidence
+            ?.top10Percent
+        ),
+
+      concentration:
+        candidate
+          ?.holders
+          ?.concentration ||
+        candidate
+          ?.holderEvidence
+          ?.concentration ||
+        null
+    },
+
+    whaleFlow:
+      candidate
+        ?.whaleFlow
+        ?.flow ||
+      null,
+
+    verifiedUsd: {
+      m5:
+        verifiedFlowWindowSnapshotV267(
+          candidate,
+          "m5"
+        ),
+
+      m15:
+        verifiedFlowWindowSnapshotV267(
+          candidate,
+          "m15"
+        ),
+
+      h1:
+        verifiedFlowWindowSnapshotV267(
+          candidate,
+          "h1"
+        )
+    }
+  };
+}
+
+function ratioDeltaV267(
+  previous,
+  current
+) {
+  const a =
+    Number(previous);
+
+  const b =
+    Number(current);
+
+  if (
+    !Number.isFinite(a) ||
+    !Number.isFinite(b) ||
+    a <= 0
+  ) {
+    return null;
+  }
+
+  return (
+    b - a
+  ) / a;
+}
+
+function followUpComparisonV267(
+  previous,
+  current
+) {
+  if (
+    !previous ||
+    !current
+  ) {
+    return {
+      classification:
+        "BASELINE_ESTABLISHED",
+      acceleratingReasons: [],
+      deterioratingReasons: [],
+      mixedReasons: [],
+      deltas: {}
+    };
+  }
+
+  const acceleratingReasons = [];
+  const deterioratingReasons = [];
+  const mixedReasons = [];
+
+  const scoreDelta =
+    safeNumber(
+      current?.opportunityScore
+    ) -
+    safeNumber(
+      previous?.opportunityScore
+    );
+
+  const momentumDelta =
+    safeNumber(
+      current?.momentumScore
+    ) -
+    safeNumber(
+      previous?.momentumScore
+    );
+
+  if (
+    scoreDelta >=
+      FOLLOW_UP_SCORE_DELTA_V267
+  ) {
+    acceleratingReasons.push(
+      "OPPORTUNITY_SCORE_IMPROVED"
+    );
+  } else if (
+    scoreDelta <=
+      -FOLLOW_UP_SCORE_DELTA_V267
+  ) {
+    deterioratingReasons.push(
+      "OPPORTUNITY_SCORE_DROPPED"
+    );
+  }
+
+  if (
+    momentumDelta >=
+      FOLLOW_UP_MOMENTUM_DELTA_V267
+  ) {
+    acceleratingReasons.push(
+      "MOMENTUM_IMPROVED"
+    );
+  } else if (
+    momentumDelta <=
+      -FOLLOW_UP_MOMENTUM_DELTA_V267
+  ) {
+    deterioratingReasons.push(
+      "MOMENTUM_DROPPED"
+    );
+  }
+
+  const liquidityDeltaRatio =
+    ratioDeltaV267(
+      previous
+        ?.market
+        ?.liquidityUsd,
+      current
+        ?.market
+        ?.liquidityUsd
+    );
+
+  if (
+    liquidityDeltaRatio !==
+      null &&
+    liquidityDeltaRatio <=
+      -FOLLOW_UP_LIQUIDITY_DROP_RATIO_V267
+  ) {
+    deterioratingReasons.push(
+      "LIQUIDITY_DROPPED_20_PERCENT_OR_MORE"
+    );
+  }
+
+  const marketCapDeltaRatio =
+    ratioDeltaV267(
+      previous
+        ?.market
+        ?.marketCap,
+      current
+        ?.market
+        ?.marketCap
+    );
+
+  if (
+    marketCapDeltaRatio !==
+      null &&
+    marketCapDeltaRatio >=
+      FOLLOW_UP_MARKET_CAP_MOVE_RATIO_V267
+  ) {
+    acceleratingReasons.push(
+      "MARKET_CAP_UP_25_PERCENT_OR_MORE"
+    );
+  } else if (
+    marketCapDeltaRatio !==
+      null &&
+    marketCapDeltaRatio <=
+      -FOLLOW_UP_MARKET_CAP_MOVE_RATIO_V267
+  ) {
+    deterioratingReasons.push(
+      "MARKET_CAP_DOWN_25_PERCENT_OR_MORE"
+    );
+  }
+
+  const currentM15 =
+    current
+      ?.verifiedUsd
+      ?.m15;
+
+  if (
+    currentM15?.verified ===
+      true &&
+    safeNumber(
+      currentM15
+        ?.observedTrades
+    ) >=
+      4
+  ) {
+    const net =
+      finiteOrNullV267(
+        currentM15
+          ?.netFlowUsd
+      );
+
+    const pressure =
+      finiteOrNullV267(
+        currentM15
+          ?.buyPressureUsd
+      );
+
+    if (
+      net !== null &&
+      pressure !== null &&
+      net >=
+        FOLLOW_UP_BULLISH_NET_USD_V267 &&
+      pressure >=
+        FOLLOW_UP_BULLISH_BUY_PRESSURE_V267
+    ) {
+      acceleratingReasons.push(
+        "VERIFIED_15M_BUY_FLOW_STRONG"
+      );
+    } else if (
+      net !== null &&
+      pressure !== null &&
+      net <=
+        FOLLOW_UP_BEARISH_NET_USD_V267 &&
+      pressure <=
+        FOLLOW_UP_BEARISH_BUY_PRESSURE_V267
+    ) {
+      deterioratingReasons.push(
+        "VERIFIED_15M_SELL_FLOW_STRONG"
+      );
+    }
+  }
+
+  if (
+    current?.whaleFlow ===
+      "NET_ACCUMULATION" &&
+    previous?.whaleFlow !==
+      "NET_ACCUMULATION"
+  ) {
+    acceleratingReasons.push(
+      "NEW_WHALE_ACCUMULATION"
+    );
+  }
+
+  if (
+    current?.whaleFlow ===
+      "NET_DISTRIBUTION" &&
+    previous?.whaleFlow !==
+      "NET_DISTRIBUTION"
+  ) {
+    deterioratingReasons.push(
+      "NEW_WHALE_DISTRIBUTION"
+    );
+  }
+
+  const previousTop10 =
+    finiteOrNullV267(
+      previous
+        ?.holderConcentration
+        ?.top10Percent
+    );
+
+  const currentTop10 =
+    finiteOrNullV267(
+      current
+        ?.holderConcentration
+        ?.top10Percent
+    );
+
+  if (
+    previousTop10 !==
+      null &&
+    currentTop10 !==
+      null
+  ) {
+    const top10Delta =
+      currentTop10 -
+      previousTop10;
+
+    if (
+      top10Delta >=
+        5
+    ) {
+      deterioratingReasons.push(
+        "TOP10_CONCENTRATION_INCREASED_5_POINTS"
+      );
+    } else if (
+      top10Delta <=
+        -5
+    ) {
+      acceleratingReasons.push(
+        "TOP10_CONCENTRATION_DECREASED_5_POINTS"
+      );
+    }
+  }
+
+  const rugDelta =
+    safeNumber(
+      current?.rugRiskScore
+    ) -
+    safeNumber(
+      previous?.rugRiskScore
+    );
+
+  if (
+    rugDelta >= 15
+  ) {
+    deterioratingReasons.push(
+      "RUG_RISK_INCREASED"
+    );
+  }
+
+  let classification =
+    "STABLE";
+
+  if (
+    acceleratingReasons.length &&
+    deterioratingReasons.length
+  ) {
+    classification =
+      "MIXED";
+    mixedReasons.push(
+      "BULLISH_AND_BEARISH_FOLLOW_UP_EVIDENCE_PRESENT"
+    );
+  } else if (
+    deterioratingReasons.length
+  ) {
+    classification =
+      "DETERIORATING";
+  } else if (
+    acceleratingReasons.length
+  ) {
+    classification =
+      "ACCELERATING";
+  }
+
+  return {
+    classification,
+    acceleratingReasons,
+    deterioratingReasons,
+    mixedReasons,
+
+    deltas: {
+      opportunityScore:
+        scoreDelta,
+
+      momentum:
+        momentumDelta,
+
+      liquidityRatio:
+        liquidityDeltaRatio,
+
+      marketCapRatio:
+        marketCapDeltaRatio,
+
+      rugRisk:
+        rugDelta,
+
+      holderCount:
+        (
+          previous
+            ?.holderCount
+            ?.verified ===
+            true &&
+          current
+            ?.holderCount
+            ?.verified ===
+            true
+        )
+          ? safeNumber(
+              current
+                ?.holderCount
+                ?.count
+            ) -
+            safeNumber(
+              previous
+                ?.holderCount
+                ?.count
+            )
+          : null,
+
+      top10Percent:
+        (
+          previousTop10 !==
+            null &&
+          currentTop10 !==
+            null
+        )
+          ? currentTop10 -
+            previousTop10
+          : null
+    }
+  };
+}
+
+function pruneFollowUpTrackingV267(
+  state
+) {
+  const registry =
+    state
+      ?.followUpTrackingV267;
+
+  if (
+    !registry ||
+    typeof registry !==
+      "object"
+  ) {
+    state.followUpTrackingV267 =
+      {};
+
+    return {
+      pruned: 0,
+      remaining: 0
+    };
+  }
+
+  const entries =
+    Object.entries(
+      registry
+    )
+      .sort(
+        (
+          [, a],
+          [, b]
+        ) =>
+          safeNumber(
+            b?.lastSeenAt
+          ) -
+          safeNumber(
+            a?.lastSeenAt
+          )
+      );
+
+  const keep =
+    entries.slice(
+      0,
+      FOLLOW_UP_MAX_TRACKED_TOKENS_V267
+    );
+
+  const pruned =
+    Math.max(
+      0,
+      entries.length -
+      keep.length
+    );
+
+  state.followUpTrackingV267 =
+    Object.fromEntries(
+      keep
+    );
+
+  return {
+    pruned,
+    remaining:
+      keep.length
+  };
+}
+
+function updatePreviouslyAlertedFollowUpsV267(
+  candidates,
+  state
+) {
+  if (
+    !state.followUpTrackingV267 ||
+    typeof state.followUpTrackingV267 !==
+      "object"
+  ) {
+    state.followUpTrackingV267 =
+      {};
+  }
+
+  const results = [];
+
+  for (
+    const candidate
+    of candidates || []
+  ) {
+    const address =
+      normalize(
+        candidate?.address
+      );
+
+    if (
+      !address ||
+      !state?.alerts?.[address]
+    ) {
+      continue;
+    }
+
+    const current =
+      followUpEvidenceSnapshotV267(
+        candidate
+      );
+
+    const existing =
+      state
+        .followUpTrackingV267[
+          address
+        ];
+
+    const previous =
+      existing?.latestSnapshot ||
+      existing?.initialAlertSnapshot ||
+      null;
+
+    const comparison =
+      followUpComparisonV267(
+        previous,
+        current
+      );
+
+    const firstAlertAt =
+      safeNumber(
+        existing?.firstAlertAt
+      ) ||
+      (
+        typeof state.alerts[address] ===
+          "object"
+          ? safeNumber(
+              state
+                .alerts[
+                  address
+                ]
+                ?.timestamp
+            )
+          : safeNumber(
+              state
+                .alerts[
+                  address
+                ]
+            )
+      ) ||
+      Date.now();
+
+    state.followUpTrackingV267[
+      address
+    ] = {
+      address,
+
+      symbol:
+        current?.symbol ||
+        existing?.symbol ||
+        null,
+
+      name:
+        current?.name ||
+        existing?.name ||
+        null,
+
+      firstAlertAt,
+
+      initialAlertSnapshot:
+        existing
+          ?.initialAlertSnapshot ||
+        current,
+
+      previousSnapshot:
+        previous,
+
+      latestSnapshot:
+        current,
+
+      lastComparison:
+        comparison,
+
+      lastSeenAt:
+        current.capturedAt,
+
+      observationCount:
+        safeNumber(
+          existing
+            ?.observationCount
+        ) +
+        1,
+
+      sourceVersion:
+        "V267",
+
+      initialSnapshotMayPostdateOriginalAlert:
+        existing
+          ?.initialAlertSnapshot
+          ? existing
+              ?.initialSnapshotMayPostdateOriginalAlert ===
+            true
+          : true
+    };
+
+    results.push({
+      address,
+      symbol:
+        current?.symbol ||
+        null,
+      classification:
+        comparison
+          ?.classification ||
+        null,
+      comparison,
+      observationCount:
+        state
+          .followUpTrackingV267[
+            address
+          ]
+          ?.observationCount ||
+        1,
+      initialSnapshotMayPostdateOriginalAlert:
+        state
+          .followUpTrackingV267[
+            address
+          ]
+          ?.initialSnapshotMayPostdateOriginalAlert ===
+        true
+    });
+  }
+
+  const pruning =
+    pruneFollowUpTrackingV267(
+      state
+    );
+
+  return {
+    enabled: true,
+    sourceVersion:
+      "V267",
+    externalRequestsAdded:
+      0,
+    telegramMessagesAdded:
+      0,
+    qualificationChanged:
+      false,
+    scoringChanged:
+      false,
+    momentumChanged:
+      false,
+    verifiedUsdMathChanged:
+      false,
+    evidenceOnly:
+      true,
+    trackedThisScan:
+      results.length,
+    results,
+    pruning
+  };
+}
+
+function registerSuccessfulAlertFollowUpV267(
+  candidate,
+  state
+) {
+  const address =
+    normalize(
+      candidate?.address
+    );
+
+  if (
+    !address
+  ) {
+    return null;
+  }
+
+  if (
+    !state.followUpTrackingV267 ||
+    typeof state.followUpTrackingV267 !==
+      "object"
+  ) {
+    state.followUpTrackingV267 =
+      {};
+  }
+
+  const current =
+    followUpEvidenceSnapshotV267(
+      candidate
+    );
+
+  const existing =
+    state
+      .followUpTrackingV267[
+        address
+      ];
+
+  /*
+   * A V267-era successful call gets an exact alert-time initial snapshot.
+   * Older calls already being tracked keep their historical V267 baseline.
+   */
+  const initialAlertSnapshot =
+    existing
+      ?.initialAlertSnapshot ||
+    current;
+
+  const exactV267AlertBaseline =
+    !existing
+      ?.initialAlertSnapshot;
+
+  state.followUpTrackingV267[
+    address
+  ] = {
+    address,
+
+    symbol:
+      current?.symbol ||
+      existing?.symbol ||
+      null,
+
+    name:
+      current?.name ||
+      existing?.name ||
+      null,
+
+    firstAlertAt:
+      safeNumber(
+        existing?.firstAlertAt
+      ) ||
+      Date.now(),
+
+    lastSuccessfulAlertAt:
+      Date.now(),
+
+    initialAlertSnapshot,
+
+    previousSnapshot:
+      existing
+        ?.latestSnapshot ||
+      null,
+
+    latestSnapshot:
+      current,
+
+    lastComparison:
+      existing
+        ?.latestSnapshot
+        ? followUpComparisonV267(
+            existing.latestSnapshot,
+            current
+          )
+        : {
+            classification:
+              "BASELINE_ESTABLISHED",
+            acceleratingReasons: [],
+            deterioratingReasons: [],
+            mixedReasons: [],
+            deltas: {}
+          },
+
+    lastSeenAt:
+      current.capturedAt,
+
+    observationCount:
+      Math.max(
+        1,
+        safeNumber(
+          existing
+            ?.observationCount
+        )
+      ),
+
+    sourceVersion:
+      "V267",
+
+    exactV267AlertBaseline,
+
+    initialSnapshotMayPostdateOriginalAlert:
+      exactV267AlertBaseline
+        ? false
+        : existing
+            ?.initialSnapshotMayPostdateOriginalAlert ===
+          true
+  };
+
+  pruneFollowUpTrackingV267(
+    state
+  );
+
+  return {
+    address,
+    symbol:
+      current?.symbol ||
+      null,
+    exactV267AlertBaseline,
+    firstAlertAt:
+      state
+        .followUpTrackingV267[
+          address
+        ]
+        ?.firstAlertAt ||
+      null,
+    lastSuccessfulAlertAt:
+      state
+        .followUpTrackingV267[
+          address
+        ]
+        ?.lastSuccessfulAlertAt ||
+      null,
+    classification:
+      state
+        .followUpTrackingV267[
+          address
+        ]
+        ?.lastComparison
+        ?.classification ||
+      "BASELINE_ESTABLISHED"
+  };
+}
+
+
 async function scan(
   env,
   options = {}
@@ -49435,6 +50516,16 @@ for (
       });
   }
 
+  /*
+   * V267: compare already-alerted candidates using only evidence that exists
+   * in this scan. No request is made and no Telegram qualification changes.
+   */
+  const followUpTrackingV267 =
+    updatePreviouslyAlertedFollowUpsV267(
+      candidates,
+      state
+    );
+
   const telegramQualificationDiagnostics =
     buildTelegramQualificationDiagnostics(
       candidates
@@ -49760,6 +50851,17 @@ for (
           candidate.whaleFlow
             .flow
       };
+
+      const followUpAlertRegistrationV267 =
+        registerSuccessfulAlertFollowUpV267(
+          candidate,
+          state
+        );
+
+      telegramResults[
+        telegramResults.length - 1
+      ].followUpAlertRegistrationV267 =
+        followUpAlertRegistrationV267;
     }
   }
 
@@ -52490,11 +53592,52 @@ for (
           )
     },
 
+    followUpTrackingV267: {
+      ...followUpTrackingV267,
+      registrySize:
+        Object.keys(
+          state
+            ?.followUpTrackingV267 ||
+          {}
+        ).length,
+      maximumTrackedTokens:
+        FOLLOW_UP_MAX_TRACKED_TOKENS_V267,
+      classifications:
+        [
+          "BASELINE_ESTABLISHED",
+          "ACCELERATING",
+          "STABLE",
+          "DETERIORATING",
+          "MIXED"
+        ],
+      followUpTelegramAlertsEnabled:
+        false,
+      automaticTradingEnabled:
+        false,
+      paperTradingEnabled:
+        false,
+      noExtraExternalRequests:
+        true,
+      existingTelegramCooldownUnchanged:
+        true,
+      existingQualificationUnchanged:
+        true
+    },
+
     telegramQualificationDiagnostics,
 
     telegramResults,
 
     intelligence: {
+      persistentPostAlertFollowUpTracking:
+        "ENABLED_V267",
+
+      followUpSignalsAreTelemetryOnly:
+        true,
+
+      followUpExternalRequestsAdded:
+        0,
+
       trueLiveFirstScanning:
         "ENABLED_V96",
 
