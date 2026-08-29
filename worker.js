@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V266 / V2.0:
+ * - FIX: verified-USD completion no longer blindly prefers a CURRENT live V4 PoolId when that pool's quote side is not canonically priceable
+ * - V266 locally evaluates already-known candidate PoolIds through the strict V257 identity gate before spending any request
+ * - Selection order: verified/priceable live pool -> verified/priceable known candidate pool -> original V257 live-first resolution fallback
+ * - Unknown/non-canonical quote assets are never promoted to USD; ZERO/WETH/USDG quote trust rules remain unchanged
+ * - FIX: same-run alert request-budget diagnostics now read totalUsed/totalLimit, matching createBudget()
+ * - Preserves V265 persistence fix, V263 PRO-first exact-pool history, verified USD maths, scoring, Momentum, Telegram thresholds and 42/21 ceilings
  * V265 / V2.0:
  * - FIX: V264 successful-alert snapshot referenced the final scan `status` variable before its later initialization (temporal dead zone)
  * - That runtime ReferenceError occurred AFTER Telegram had already sent but BEFORE the diagnostic KV write, leaving /last-alert-scan empty
@@ -1098,7 +1105,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V265";
+const VERSION = "V266";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -4513,20 +4520,20 @@ function requestBudgetSnapshotV264(
   return {
     used:
       safeNumber(
-        budget?.used
+        budget?.totalUsed
       ),
     limit:
       safeNumber(
-        budget?.limit
+        budget?.totalLimit
       ),
     remaining:
       Math.max(
         0,
         safeNumber(
-          budget?.limit
+          budget?.totalLimit
         ) -
         safeNumber(
-          budget?.used
+          budget?.totalUsed
         )
       ),
     system: {
@@ -38458,6 +38465,133 @@ function verifiedUsdCoverageV262(
 }
 
 
+/*
+ * V266 PRICEABLE EXACT-POOL SELECTION
+ *
+ * A token can trade in several V4 pools. V257 intentionally preferred the
+ * PoolId that emitted a CURRENT live swap, but the V265 same-run diagnostics
+ * proved that a live pool can use a non-canonical quote while another already
+ * known candidate pool has a strict ZERO/WETH/USDG quote.
+ *
+ * V266 adds NO quote trust and NO price inference. It evaluates only PoolIds
+ * already attached to this candidate and only through
+ * exactCandidatePoolIdentityV257(). Therefore a selection is "priceable" here
+ * only when the existing V257 gate already proves candidate identity and the
+ * quote side is ZERO/WETH/USDG.
+ *
+ * External requests added: ZERO.
+ */
+function priceableCandidatePoolSelectionV266(
+  watched,
+  candidatePoolIds,
+  liveSwapPoolIds
+) {
+  const allIds =
+    Array.from(
+      new Set(
+        (candidatePoolIds || [])
+          .map(normalize)
+          .filter(
+            id =>
+              /^0x[a-f0-9]{64}$/.test(
+                String(id || "")
+              )
+          )
+      )
+    );
+
+  const liveIds =
+    Array.from(
+      new Set(
+        (liveSwapPoolIds || [])
+          .map(normalize)
+          .filter(
+            id =>
+              allIds.includes(id)
+          )
+      )
+    );
+
+  const evaluated = [];
+
+  const evaluate =
+    poolId => {
+      const identity =
+        exactCandidatePoolIdentityV257(
+          watched,
+          poolId
+        );
+
+      evaluated.push({
+        poolId,
+        verified:
+          identity?.verified === true,
+        status:
+          identity?.status || null,
+        quoteTokenAddress:
+          normalize(
+            identity?.quoteTokenAddress
+          ) || null,
+        nativeQuote:
+          identity?.nativeQuote === true
+      });
+
+      return identity;
+    };
+
+  for (const poolId of liveIds) {
+    const identity =
+      evaluate(poolId);
+
+    if (
+      identity?.verified === true
+    ) {
+      return {
+        poolId,
+        identity,
+        selectedFrom:
+          "CURRENT_LIVE_PRICEABLE_POOL_V266",
+        evaluated,
+        externalRequestsAdded: 0
+      };
+    }
+  }
+
+  for (const poolId of allIds) {
+    if (
+      liveIds.includes(poolId)
+    ) {
+      continue;
+    }
+
+    const identity =
+      evaluate(poolId);
+
+    if (
+      identity?.verified === true
+    ) {
+      return {
+        poolId,
+        identity,
+        selectedFrom:
+          "KNOWN_PRICEABLE_POOL_V266",
+        evaluated,
+        externalRequestsAdded: 0
+      };
+    }
+  }
+
+  return {
+    poolId: null,
+    identity: null,
+    selectedFrom:
+      "NO_LOCALLY_VERIFIED_PRICEABLE_POOL_V266",
+    evaluated,
+    externalRequestsAdded: 0
+  };
+}
+
+
 async function verifiedUsdCompletionPassV254(
   candidate,
   state,
@@ -38602,9 +38736,10 @@ async function verifiedUsdCompletionPassV254(
     true;
 
   /*
-   * V257: prefer a PoolId that actually emitted a CURRENT live Swap for this
-   * candidate. v254PoolIdsForCandidate() only admits live PoolIds already in
-   * this candidate's watched pool set, so this cannot attach an unrelated pool.
+   * V266: prefer an already-known exact candidate pool that is locally
+   * verified AND canonically priceable. If none exists, retain V257's
+   * live-first fallback so the proven exact-PoolId Initialize resolver can
+   * still attempt to resolve the current live pool.
    */
   const existingVerifiedPoolIdV257 =
     normalize(
@@ -38613,7 +38748,16 @@ async function verifiedUsdCompletionPassV254(
         ?.poolId
     );
 
+  const priceableSelectionV266 =
+    priceableCandidatePoolSelectionV266(
+      pools.watched,
+      pools.poolIds,
+      pools.liveSwapPoolIds
+    );
+
   let poolId =
+    priceableSelectionV266
+      ?.poolId ||
     pools.liveSwapPoolIds?.[0] ||
     (
       /^0x[a-f0-9]{64}$/.test(
@@ -38648,14 +38792,20 @@ async function verifiedUsdCompletionPassV254(
         pools.liveSwapPoolIds
           ?.length
       ),
+    priceablePoolSelectionV266:
+      priceableSelectionV266,
     selectedFrom:
-      pools.liveSwapPoolIds
-        ?.includes(poolId)
-        ? "CURRENT_LIVE_SWAP_V257"
-        : poolId ===
-            existingVerifiedPoolIdV257
-          ? "EXISTING_VERIFIED_IDENTITY"
-          : "WATCHED_POOL"
+      priceableSelectionV266
+        ?.poolId === poolId
+        ? priceableSelectionV266
+            ?.selectedFrom
+        : pools.liveSwapPoolIds
+            ?.includes(poolId)
+          ? "CURRENT_LIVE_SWAP_V257_FALLBACK"
+          : poolId ===
+              existingVerifiedPoolIdV257
+            ? "EXISTING_VERIFIED_IDENTITY_FALLBACK"
+            : "WATCHED_POOL_FALLBACK"
   };
 
   if (
@@ -38686,10 +38836,19 @@ async function verifiedUsdCompletionPassV254(
    * request on the proven V184 exact-PoolId Initialize path.
    */
   let identity =
-    exactCandidatePoolIdentityV257(
-      pools.watched,
-      poolId
-    );
+    (
+      priceableSelectionV266
+        ?.poolId === poolId &&
+      priceableSelectionV266
+        ?.identity
+        ?.verified === true
+    )
+      ? priceableSelectionV266
+          .identity
+      : exactCandidatePoolIdentityV257(
+          pools.watched,
+          poolId
+        );
 
   if (
     identity?.verified !==
