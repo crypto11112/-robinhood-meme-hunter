@@ -1,5 +1,13 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V292 / V2.0:
+ * - FIX: manual /analyse replies are split on line boundaries below Telegram's 4096-character sendMessage ceiling, preventing diagnostic-rich replies from failing with HTTP 400
+ * - FIX: V291 direct WETH/USDG verification now uses a paced, bounded multi-provider RPC reader for eth_getCode/eth_call instead of binding the whole attempt to one rate-limited endpoint
+ * - 429 SAFETY: only genuine rate-limit / transient provider failures can fall through to the next already-configured RPC; deterministic contract/RPC errors are preserved and never converted into verified evidence
+ * - EFFICIENCY: the fee-100 candidate remains first and a successfully verified candidate stops resolution immediately, preserving manual headroom for exact-PoolId history
+ * - SAFETY: no third-party price is trusted; factory/token pair/fee/slot0/liquidity must still all verify on-chain before native ETH can receive a USD basis
+ * - BUDGET: isolated manual /analyse remains capped at 24 requests; every fallback attempt is counted; autonomous 42/21 ceilings and standard alert formatter remain unchanged
+ * - Preserves all V291 diagnostics and confirmed-working scanner functionality
  * V291 / V2.0:
  * - RESOLVER: manual /analyse now tests both independently documented Robinhood WETH/USDG V3 pool candidates (fee 100 and fee 500) instead of trusting a single discovery address
  * - BYTECODE FIRST: each candidate must first return deployed bytecode before any V3 interface call is attempted; no-code candidates are rejected without wasting factory/token/slot0 calls
@@ -1297,7 +1305,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V291";
+const VERSION = "V292";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -61806,84 +61814,217 @@ function manualQuoteDiagnosticsV288(candidate, wethUsdGReference) {
   };
 }
 
+const V292_MANUAL_RPC_PACE_MS = 325;
+const V292_TELEGRAM_SAFE_CHUNK_CHARS = 3800;
+
+function sleepV292(ms) {
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, safeNumber(ms))));
+}
+
+function manualRpcProvidersV292(env) {
+  const candidates = [
+    { name: "ALCHEMY_RPC_URL", url: String(env?.ALCHEMY_RPC_URL || "").trim() },
+    { name: "ALCHEMY", url: env?.ALCHEMY_API_KEY ? `${ALCHEMY_BASE}${env.ALCHEMY_API_KEY}` : "" },
+    { name: "ROBINHOOD_RPC_URL", url: String(env?.ROBINHOOD_RPC_URL || "").trim() },
+    { name: "ROBINHOOD_PUBLIC_RPC", url: PUBLIC_RPC }
+  ];
+  const seen = new Set();
+  return candidates.filter(row => {
+    if (!row.url || seen.has(row.url)) return false;
+    seen.add(row.url);
+    return true;
+  });
+}
+
+function manualRpcRetryableV292(status, error) {
+  const text = `${String(status || "")} ${String(error || "")}`.toLowerCase();
+  return (
+    text.includes("429") ||
+    text.includes("too many requests") ||
+    text.includes("rate limit") ||
+    text.includes("timeout") ||
+    text.includes("timed out") ||
+    text.includes("fetch_error") ||
+    text.includes("network") ||
+    text.includes("temporarily unavailable") ||
+    text.includes("503") ||
+    text.includes("502") ||
+    text.includes("504")
+  );
+}
+
+async function manualRpcReadV292(env, budget, method, params, label) {
+  const providers = manualRpcProvidersV292(env);
+  const attempts = [];
+
+  for (let i = 0; i < providers.length; i++) {
+    if (!budgetAvailable(budget, "analysis")) break;
+    const provider = providers[i];
+
+    if (attempts.length > 0) {
+      await sleepV292(V292_MANUAL_RPC_PACE_MS);
+    }
+
+    if (!consumeBudget(budget, "analysis", `${label}_${provider.name}`)) {
+      break;
+    }
+
+    try {
+      const response = await fetch(provider.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params })
+      });
+
+      let payload = null;
+      try { payload = await response.json(); } catch (_) {}
+
+      const status = payload?.error
+        ? "RPC_ERROR"
+        : (response.ok ? "OK" : `HTTP_${response.status}`);
+      const error = payload?.error?.message || (!response.ok ? `HTTP_${response.status}` : null);
+      attempts.push({ provider: provider.name, status, httpStatus: response.status, error });
+
+      if (response.ok && !payload?.error) {
+        return {
+          ok: true,
+          status: "OK",
+          result: payload?.result ?? null,
+          provider: provider.name,
+          externalRequestsUsed: attempts.length,
+          attempts,
+          error: null
+        };
+      }
+
+      if (!manualRpcRetryableV292(status, error)) {
+        return {
+          ok: false,
+          status,
+          result: null,
+          provider: provider.name,
+          externalRequestsUsed: attempts.length,
+          attempts,
+          error
+        };
+      }
+    } catch (error) {
+      const message = errorString(error);
+      attempts.push({ provider: provider.name, status: "FETCH_ERROR", httpStatus: null, error: message });
+      if (!manualRpcRetryableV292("FETCH_ERROR", message)) break;
+    }
+  }
+
+  const last = attempts[attempts.length - 1] || null;
+  return {
+    ok: false,
+    status: last?.status || "ANALYSIS_BUDGET_PROTECTED",
+    result: null,
+    provider: last?.provider || null,
+    externalRequestsUsed: attempts.length,
+    attempts,
+    error: last?.error || null
+  };
+}
+
+function telegramChunksV292(message, maxChars = V292_TELEGRAM_SAFE_CHUNK_CHARS) {
+  const text = String(message || "");
+  if (text.length <= maxChars) return [text];
+
+  const chunks = [];
+  let current = "";
+  for (const line of text.split("\n")) {
+    const addition = current ? `\n${line}` : line;
+    if ((current.length + addition.length) <= maxChars) {
+      current += addition;
+      continue;
+    }
+    if (current) chunks.push(current);
+    if (line.length <= maxChars) {
+      current = line;
+      continue;
+    }
+    // Formatter lines are normally short/self-contained. This is a final guard.
+    let rest = line;
+    while (rest.length > maxChars) {
+      chunks.push(rest.slice(0, maxChars));
+      rest = rest.slice(maxChars);
+    }
+    current = rest;
+  }
+  if (current) chunks.push(current);
+  return chunks.filter(Boolean);
+}
+
+async function sendTelegramManualReplyV292(env, message) {
+  const chunks = telegramChunksV292(message);
+  const results = [];
+  for (let i = 0; i < chunks.length; i++) {
+    if (i > 0) await sleepV292(125);
+    const result = await sendTelegram(env, chunks[i], null, null);
+    results.push(result);
+    if (result?.success !== true) {
+      return {
+        success: false,
+        status: result?.status || null,
+        mode: "TEXT_CHUNKED_V292",
+        error: result?.error || result?.reason || null,
+        chunksAttempted: i + 1,
+        chunksTotal: chunks.length,
+        results
+      };
+    }
+  }
+  return {
+    success: true,
+    status: results[results.length - 1]?.status || 200,
+    mode: chunks.length > 1 ? "TEXT_CHUNKED_V292" : (results[0]?.mode || "TEXT"),
+    error: null,
+    chunksAttempted: chunks.length,
+    chunksTotal: chunks.length,
+    results
+  };
+}
+
 async function ethGetCodeV291(
   env,
   budget,
   address,
   label
 ) {
-  if (!budgetAvailable(budget, "analysis")) {
+  const row = await manualRpcReadV292(
+    env,
+    budget,
+    "eth_getCode",
+    [address, "latest"],
+    label
+  );
+
+  if (!row?.ok) {
     return {
       ok: false,
-      status: "ANALYSIS_BUDGET_PROTECTED",
+      status: row?.status || "RPC_ERROR",
       codePresent: false,
       code: null,
-      externalRequestsUsed: 0,
-      error: null
+      externalRequestsUsed: safeNumber(row?.externalRequestsUsed),
+      provider: row?.provider || null,
+      attempts: row?.attempts || [],
+      error: row?.error || null
     };
   }
 
-  if (!consumeBudget(budget, "analysis", label)) {
-    return {
-      ok: false,
-      status: "ANALYSIS_BUDGET_PROTECTED",
-      codePresent: false,
-      code: null,
-      externalRequestsUsed: 0,
-      error: null
-    };
-  }
-
-  const rpcUrl = String(
-    env.ALCHEMY_RPC_URL ||
-    env.ROBINHOOD_RPC_URL ||
-    PUBLIC_RPC
-  ).trim();
-
-  try {
-    const response = await fetch(rpcUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "eth_getCode",
-        params: [address, "latest"]
-      })
-    });
-
-    const payload = await response.json();
-    if (!response.ok || payload?.error) {
-      return {
-        ok: false,
-        status: payload?.error ? "RPC_ERROR" : `HTTP_${response.status}`,
-        codePresent: false,
-        code: null,
-        externalRequestsUsed: 1,
-        error: payload?.error?.message || null
-      };
-    }
-
-    const code = String(payload?.result || "");
-    const codePresent = code !== "" && code !== "0x" && code !== "0x0";
-    return {
-      ok: true,
-      status: codePresent ? "BYTECODE_PRESENT" : "NO_CONTRACT_BYTECODE",
-      codePresent,
-      code: codePresent ? code : null,
-      externalRequestsUsed: 1,
-      error: null
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      status: "FETCH_ERROR",
-      codePresent: false,
-      code: null,
-      externalRequestsUsed: 1,
-      error: errorString(error)
-    };
-  }
+  const code = String(row?.result || "");
+  const codePresent = code !== "" && code !== "0x" && code !== "0x0";
+  return {
+    ok: true,
+    status: codePresent ? "BYTECODE_PRESENT" : "NO_CONTRACT_BYTECODE",
+    codePresent,
+    code: codePresent ? code : null,
+    externalRequestsUsed: safeNumber(row?.externalRequestsUsed),
+    provider: row?.provider || null,
+    attempts: row?.attempts || [],
+    error: null
+  };
 }
 
 async function verifyDirectV3WethUsdGCandidateV291(
@@ -61944,6 +62085,8 @@ async function verifyDirectV3WethUsdGCandidateV291(
   output.checks.code = {
     ok: code?.ok === true,
     status: code?.status || null,
+    provider: code?.provider || null,
+    attempts: code?.attempts || [],
     error: code?.error || null
   };
   if (!code?.ok) {
@@ -61955,17 +62098,18 @@ async function verifyDirectV3WethUsdGCandidateV291(
   }
 
   const rpc = async (name, selector) => {
-    const row = await ethCallV195(
+    const row = await manualRpcReadV292(
       env,
-      state,
       budget,
-      pool,
-      selector,
+      "eth_call",
+      [{ to: pool, data: selector }, "latest"],
       `V291_DIRECT_V3_${expectedFee}_${name.toUpperCase()}`
     );
     output.checks[name] = {
       ok: row?.ok === true,
       status: row?.status || null,
+      provider: row?.provider || null,
+      attempts: row?.attempts || [],
       error: row?.error || null
     };
     if (!row?.ok && !output.failureError) {
@@ -63598,12 +63742,14 @@ async function telegramCommandReplyV271(
   }
 
   const result =
-    await sendTelegram(
-      env,
-      reply,
-      null,
-      null
-    );
+    (parsed.command === "/analyse" || parsed.command === "/analyze")
+      ? await sendTelegramManualReplyV292(env, reply)
+      : await sendTelegram(
+          env,
+          reply,
+          null,
+          null
+        );
 
   if (diagnosticV273) {
     diagnosticV273.replySuccess =
