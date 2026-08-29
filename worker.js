@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V294 / V2.0:
+ * - PARITY: manual /analyse now renders through the proven standard telegramMessage(candidate) alert formatter after all manual enrichment is complete
+ * - SAME DATA SHAPE: Opportunity, Momentum, Confidence, Market Quality, Rug Risk, market data, market activity counts, verified on-chain USD windows, holders, whales, smart-money and V4 activity use the same presentation logic as autonomous alerts
+ * - MANUAL IDENTITY: only the first two header lines are replaced with a clear manual-analysis header so a custom request is never mislabeled as a new autonomous launch alert
+ * - CLEAN OUTPUT: V288-V293 engineering diagnostics remain in telemetry/routes but are removed from the normal /analyse Telegram body
+ * - SAFETY: missing evidence remains UNVERIFIED; no market counts are promoted to USD; manual analysis remains isolated and does not add the token to the autonomous watchlist
+ * - PRESERVES: V293 now() crash fix, V292 chunked manual Telegram delivery/RPC pacing, V291 direct verified WETH/USDG resolver, V289 exact-PoolId USD recovery, scanner 42/21 ceilings and standard autonomous alert behavior
  * V293 / V2.0:
  * - FIX: replace the two undefined now() calls in the verified WETH/USDG reference persistence paths with the existing now() helper, preventing /analyse WEBHOOK_HANDLER_ERROR after successful reference verification
  * - No scanner logic, verified USD maths, request ceilings, Telegram thresholds, KV keys or provider protections changed
@@ -1309,7 +1316,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V293";
+const VERSION = "V294";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -62466,6 +62473,28 @@ async function manualVerifiedUsdRecoveryV289(
   };
 }
 
+function telegramAnalyseParityMessageV294(candidate) {
+  const standard = telegramMessage(candidate);
+  const lines = String(standard || "").split("\n");
+
+  /*
+   * V294 intentionally reuses the standard autonomous presentation formatter.
+   * Only the alert identity/header is changed so a manual request cannot be
+   * mistaken for a newly-qualified autonomous launch alert.
+   */
+  if (lines.length >= 2) {
+    lines[0] = `🔎 <b>Robinhood Chain Meme Hunter ${VERSION}</b>`;
+    lines[1] = "🧪 <b>Fresh Manual Analysis</b>";
+  }
+
+  lines.push(
+    "",
+    "ℹ️ <i>Fresh manual analysis. Missing evidence remains UNVERIFIED; this command does not add the token to the autonomous watchlist.</i>"
+  );
+
+  return lines.join("\n");
+}
+
 async function telegramFreshAnalyseV276(
   env,
   state,
@@ -62928,11 +62957,8 @@ async function telegramFreshAnalyseV276(
 
   return {
     reply:
-      telegramAnalyseResultMessageV276(
-        candidate,
-        performance,
-        telemetry,
-        historicalAlertV277
+      telegramAnalyseParityMessageV294(
+        candidate
       ),
     telemetry
   };
