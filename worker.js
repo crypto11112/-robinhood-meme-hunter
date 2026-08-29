@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V284 / V2.0:
+ * - MANUAL USD PARITY: /analyse now renders the same verified on-chain USD time windows as the normal Telegram alert: 5m, 15m, 1h, 6h, 12h and 24h
+ * - SAME EVIDENCE: the manual layout reads the existing onChainVerifiedFlowV212 windows and the same telegramVerifiedUsdDiagnosticV213 eligibility gate used by normal alerts; no separate USD maths or inferred values are introduced
+ * - SAME SAFETY: each unavailable window remains explicitly UNVERIFIED and zero is shown only when that window is genuinely verified
+ * - NO EXTRA REQUESTS: V284 is presentation/evidence-parity only; it does not spend the two remaining /analyse requests or change V283 live enrichment
+ * - SAFETY: autonomous scanner logic, 42/21 budgets, scoring, Momentum maths, holder logic, provider protections, KV keys and Telegram qualification thresholds are unchanged
+ * - Preserves all confirmed-working V283 functionality
  * V283 / V2.0:
  * - MANUAL ENRICHMENT: /analyse now uses spare protected command budget for one bounded exact-pool live V4 evidence pass after the normal analysis when a verified historical/local PoolId is available
  * - VERIFIED LIVE WINDOW: enrichment fetches the current head plus at most the last 10 blocks of PoolManager Swap/ModifyLiquidity logs for that exact PoolId, then marks live V4 evidence VERIFIED only when the RPC log query itself succeeds
@@ -1237,7 +1244,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V283";
+const VERSION = "V284";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -59815,6 +59822,88 @@ function telegramAnalyseDirectionalV276(
 }
 
 
+/* =========================================================
+   V284 MANUAL VERIFIED-USD TELEGRAM PARITY
+   ========================================================= */
+
+function telegramAnalyseVerifiedUsdLinesV284(
+  candidate
+) {
+  const observed =
+    candidate?.onChainVerifiedFlowV212;
+
+  const diagnostic =
+    candidate?.telegramVerifiedUsdDiagnosticV213 ||
+    telegramVerifiedUsdDiagnosticV213(
+      candidate
+    );
+
+  const eligible =
+    observed?.verified === true &&
+    diagnostic
+      ?.telegramVerifiedUsdSectionEligible === true;
+
+  const money = value =>
+    value !== null &&
+    value !== undefined
+      ? telegramMoneyV271(value)
+      : "UNVERIFIED";
+
+  const percent = value =>
+    value !== null &&
+    value !== undefined
+      ? percentDisplay(value)
+      : "UNVERIFIED";
+
+  const lines = [
+    "✅ <b>Verified On-chain USD (observed by bot)</b>"
+  ];
+
+  const pushWindow = (
+    label,
+    key
+  ) => {
+    const row =
+      observed?.windows?.[key];
+
+    if (
+      eligible &&
+      row?.verified === true
+    ) {
+      lines.push(
+        `🟢 ${label} Verified Buys: <b>${safeNumber(row.buys)}</b> — <b>${money(row.buyVolumeUsd)}</b>`,
+        `🔴 ${label} Verified Sells: <b>${safeNumber(row.sells)}</b> — <b>${money(row.sellVolumeUsd)}</b>`,
+        `📈 ${label} Verified Net: <b>${money(row.netFlowUsd)}</b>`,
+        `💵 ${label} Verified USD Buy Pressure: <b>${percent(row.buyPressureUsd)}</b>`
+      );
+      return;
+    }
+
+    lines.push(
+      `🟢 ${label} Verified Buys: <b>UNVERIFIED</b>`,
+      `🔴 ${label} Verified Sells: <b>UNVERIFIED</b>`,
+      `📈 ${label} Verified Net: <b>UNVERIFIED</b>`,
+      `💵 ${label} Verified USD Buy Pressure: <b>UNVERIFIED</b>`
+    );
+  };
+
+  pushWindow("5m", "m5");
+  pushWindow("15m", "m15");
+  pushWindow("1h", "h1");
+  pushWindow("6h", "h6");
+  pushWindow("12h", "h12");
+  pushWindow("24h", "h24");
+
+  lines.push(
+    eligible
+      ? "ℹ️ <i>Verified exact V4 swaps observed by this bot; not claimed as complete market-window totals.</i>"
+      : "ℹ️ <i>No candidate-matched exact-USD V4 swaps were verified for this analysis; dollar amounts are not inferred from unverified market activity counts.</i>"
+  );
+
+  return lines;
+}
+
+
 
 async function historicalAlertEvidenceV277(
   env,
@@ -60593,25 +60682,9 @@ function telegramAnalyseResultMessageV276(
         : "UNVERIFIED"
     }</b>`,
     "",
-    directionalV276?.verified === true
-      ? `💵 Verified USD (${escapeHtml(
-          directionalV276.window
-        )}): BUY <b>${telegramMoneyV271(
-          directionalV276.buyVolumeUsd
-        )}</b> | SELL <b>${telegramMoneyV271(
-          directionalV276.sellVolumeUsd
-        )}</b>`
-      : "💵 Verified BUY/SELL USD: <b>UNVERIFIED</b>",
-    directionalV276?.verified === true
-      ? `⚖️ Net flow: <b>${directionalV276.netFlowUsd >= 0 ? "+" : "-"}${telegramMoneyV271(
-          Math.abs(
-            directionalV276.netFlowUsd
-          )
-        )}</b> | Buy pressure: <b>${telegramPlainNumberV271(
-          directionalV276.buyPressureUsd,
-          2
-        )}%</b>`
-      : null,
+    ...telegramAnalyseVerifiedUsdLinesV284(
+      candidate
+    ),
     "",
     `👥 Holder count: <b>${escapeHtml(
       holderCount
