@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V283 / V2.0:
+ * - MANUAL ENRICHMENT: /analyse now uses spare protected command budget for one bounded exact-pool live V4 evidence pass after the normal analysis when a verified historical/local PoolId is available
+ * - VERIFIED LIVE WINDOW: enrichment fetches the current head plus at most the last 10 blocks of PoolManager Swap/ModifyLiquidity logs for that exact PoolId, then marks live V4 evidence VERIFIED only when the RPC log query itself succeeds
+ * - RESCORE: only after verified live evidence is obtained, Momentum/Risk/Opportunity and on-chain activity evidence are recomputed from the existing candidate evidence plus the verified live pool window; no ERC20/market/holder requests are repeated
+ * - TELEGRAM: live V4 swap count now displays the verified count instead of a hard-coded UNVERIFIED label, and enrichment telemetry reports status/range/requests used
+ * - SAFETY: enrichment requires spare manual budget, never mutates scanner state, never touches scanner 42/21 ceilings, and does not alter provider cooldowns, holder logic, market logic, thresholds, KV keys or verified USD maths
+ * - Preserves all confirmed-working V282/V281 functionality
  * V282 / V2.0:
  * - MANUAL EVIDENCE: raises only the isolated Telegram /analyse request ceiling from 12 to 16 so missing evidence can use up to four additional provider requests
  * - SAFETY: autonomous scanner hard limit remains 42 and analysis limit remains 21; /analyse still uses its separate cloned state and never consumes scanner budget
@@ -1230,7 +1237,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V282";
+const VERSION = "V283";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -60626,7 +60633,17 @@ function telegramAnalyseResultMessageV276(
         ? "VERIFIED"
         : "UNVERIFIED"
     }</b>`,
-    `🛰 Live V4 swaps in this manual analysis: <b>UNVERIFIED</b>`,
+    `🛰 Live V4 swaps in this manual analysis: <b>${
+      candidate
+        ?.liveMomentumActivityV152
+        ?.verified === true
+        ? `${safeNumber(
+            candidate
+              .liveMomentumActivityV152
+              .swaps
+          )} (VERIFIED)`
+        : "UNVERIFIED"
+    }</b>`,
     "",
     `🕒 Launch age: <b>${escapeHtml(
       candidate
@@ -60681,6 +60698,12 @@ function telegramAnalyseResultMessageV276(
     )}/${safeNumber(
       telemetry?.historicalAlertV277?.maximumEntries
     ) || ALERT_HISTORY_MAX_ENTRIES_V268}</b>`,
+    `🧪 V283 live enrichment: <b>${escapeHtml(
+      telemetry?.manualLiveV4EnrichmentV283?.status ||
+      "NOT_ATTEMPTED"
+    )}</b> | requests <b>${safeNumber(
+      telemetry?.manualLiveV4EnrichmentV283?.requestsUsed
+    )}</b>`,
     `🔌 Manual command requests: <b>${safeNumber(
       telemetry?.requestsUsed
     )}/${TELEGRAM_ANALYSE_MAX_REQUESTS_V276}</b>`,
@@ -60699,6 +60722,366 @@ function telegramAnalyseResultMessageV276(
         line !== undefined
     )
     .join("\n");
+}
+
+
+/* =========================================================
+   V283 MANUAL EXACT-POOL LIVE V4 ENRICHMENT
+   ========================================================= */
+
+async function manualLiveV4EnrichmentV283(
+  env,
+  budget,
+  watched,
+  candidate
+) {
+  const base = {
+    attempted: false,
+    verified: false,
+    status: "NOT_ATTEMPTED",
+    poolId: null,
+    fromBlock: null,
+    toBlock: null,
+    swaps: null,
+    liquidityEvents: null,
+    requestsUsed: 0,
+    providerHead: null,
+    providerLogs: null,
+    error: null
+  };
+
+  if (
+    !candidate ||
+    candidate?.validERC20 !== true ||
+    candidate?.liveMomentumActivityV152?.verified === true
+  ) {
+    return {
+      ...base,
+      status:
+        candidate?.liveMomentumActivityV152?.verified === true
+          ? "ALREADY_VERIFIED"
+          : "CANDIDATE_NOT_ELIGIBLE"
+    };
+  }
+
+  const poolId =
+    normalize(
+      candidate?.onChainPoolIdentityV153?.poolId ||
+      candidate?.onChainPoolIdentityV153?.pairAddress ||
+      (Array.isArray(watched?.pools)
+        ? watched.pools
+            .map(pool => normalize(pool?.poolId))
+            .find(value => /^0x[a-f0-9]{64}$/.test(String(value || "")))
+        : null)
+    );
+
+  if (!/^0x[a-f0-9]{64}$/.test(String(poolId || ""))) {
+    return {
+      ...base,
+      status: "NO_VERIFIED_POOL_ID"
+    };
+  }
+
+  const spare =
+    Math.max(
+      0,
+      safeNumber(budget?.totalLimit) -
+      safeNumber(budget?.totalUsed)
+    );
+
+  /*
+   * One logical head request + one logical exact-pool log request are needed.
+   * rpc() may consume an additional request only when falling back providers;
+   * the manual hard ceiling remains authoritative.
+   */
+  if (spare < 2 || !budgetAvailable(budget, "analysis")) {
+    return {
+      ...base,
+      poolId,
+      status: "INSUFFICIENT_SPARE_MANUAL_BUDGET"
+    };
+  }
+
+  const usedBefore =
+    safeNumber(budget?.totalUsed);
+
+  const head =
+    await rpc(
+      env,
+      "eth_blockNumber",
+      [],
+      budget,
+      "analysis"
+    );
+
+  if (!head?.result) {
+    return {
+      ...base,
+      attempted: true,
+      poolId,
+      requestsUsed:
+        Math.max(
+          0,
+          safeNumber(budget?.totalUsed) - usedBefore
+        ),
+      providerHead:
+        head?.provider || null,
+      status: "HEAD_UNVERIFIED",
+      error:
+        head?.error || "ETH_BLOCKNUMBER_UNVERIFIED"
+    };
+  }
+
+  let toBlock;
+
+  try {
+    toBlock =
+      Number(BigInt(head.result));
+  } catch (_) {
+    toBlock = null;
+  }
+
+  if (!Number.isFinite(toBlock) || toBlock <= 0) {
+    return {
+      ...base,
+      attempted: true,
+      poolId,
+      requestsUsed:
+        Math.max(
+          0,
+          safeNumber(budget?.totalUsed) - usedBefore
+        ),
+      providerHead:
+        head?.provider || null,
+      status: "HEAD_INVALID",
+      error: "ETH_BLOCKNUMBER_INVALID"
+    };
+  }
+
+  const fromBlock =
+    Math.max(0, toBlock - 9);
+
+  if (!budgetAvailable(budget, "analysis")) {
+    return {
+      ...base,
+      attempted: true,
+      poolId,
+      fromBlock,
+      toBlock,
+      requestsUsed:
+        Math.max(
+          0,
+          safeNumber(budget?.totalUsed) - usedBefore
+        ),
+      providerHead:
+        head?.provider || null,
+      status: "LOG_REQUEST_BUDGET_EXHAUSTED"
+    };
+  }
+
+  const logsResult =
+    await rpc(
+      env,
+      "eth_getLogs",
+      [
+        {
+          fromBlock:
+            "0x" + fromBlock.toString(16),
+          toBlock:
+            "0x" + toBlock.toString(16),
+          address:
+            POOL_MANAGER,
+          topics: [
+            [
+              SWAP_TOPIC,
+              MODIFY_LIQUIDITY_TOPIC
+            ],
+            poolId
+          ]
+        }
+      ],
+      budget,
+      "analysis"
+    );
+
+  if (!Array.isArray(logsResult?.result)) {
+    return {
+      ...base,
+      attempted: true,
+      poolId,
+      fromBlock,
+      toBlock,
+      requestsUsed:
+        Math.max(
+          0,
+          safeNumber(budget?.totalUsed) - usedBefore
+        ),
+      providerHead:
+        head?.provider || null,
+      providerLogs:
+        logsResult?.provider || null,
+      status: "LIVE_LOGS_UNVERIFIED",
+      error:
+        logsResult?.error || "ETH_GETLOGS_UNVERIFIED"
+    };
+  }
+
+  const liveActivity =
+    activityForToken(
+      watched,
+      logsResult.result
+    );
+
+  return {
+    ...base,
+    attempted: true,
+    verified:
+      liveActivity?.poolSpecific === true,
+    status:
+      liveActivity?.poolSpecific === true
+        ? "VERIFIED_EXACT_POOL_LIVE_WINDOW"
+        : "POOL_NOT_PRESENT_IN_WATCHED_IDENTITY",
+    poolId,
+    fromBlock,
+    toBlock,
+    swaps:
+      safeNumber(liveActivity?.swaps),
+    liquidityEvents:
+      safeNumber(liveActivity?.liquidityEvents),
+    requestsUsed:
+      Math.max(
+        0,
+        safeNumber(budget?.totalUsed) - usedBefore
+      ),
+    providerHead:
+      head?.provider || null,
+    providerLogs:
+      logsResult?.provider || null,
+    logs:
+      logsResult.result
+  };
+}
+
+function applyManualLiveV4EnrichmentV283(
+  candidate,
+  watched,
+  state,
+  enrichment
+) {
+  if (
+    !candidate ||
+    enrichment?.verified !== true ||
+    !Array.isArray(enrichment?.logs)
+  ) {
+    return candidate;
+  }
+
+  const activity =
+    activityForToken(
+      watched,
+      enrichment.logs
+    );
+
+  const liveMomentumActivityV152 = {
+    ...activity,
+    verified: true,
+    source:
+      "TELEGRAM_MANUAL_EXACT_POOL_10_BLOCK_WINDOW_V283",
+    fromBlock:
+      enrichment.fromBlock,
+    toBlock:
+      enrichment.toBlock
+  };
+
+  const market = {
+    ...(candidate?.market || {}),
+    onChainEvidence:
+      onChainV4MarketEvidence(
+        watched,
+        activity
+      )
+  };
+
+  market.onChainMarketVerified =
+    market?.onChainEvidence?.verified === true;
+
+  const momentum =
+    momentumAnalysis(
+      getHistoricalSnapshot(
+        state,
+        candidate.address
+      ),
+      market,
+      candidate.holders,
+      liveMomentumActivityV152
+    );
+
+  const risk =
+    scoreRisk(
+      candidate.validation,
+      market,
+      candidate.holders,
+      activity,
+      candidate.whaleFlow
+    );
+
+  const opportunity =
+    scoreOpportunity(
+      candidate.validation,
+      market,
+      candidate.holders,
+      activity,
+      momentum,
+      candidate.marketQuality,
+      candidate.whaleFlow,
+      candidate.launchStage
+    );
+
+  const updated = {
+    ...candidate,
+    market,
+    activity,
+    liveMomentumActivityV152,
+    momentum,
+    risk,
+    opportunity,
+    manualLiveV4EnrichedV283: true
+  };
+
+  updated.signalConfirmation =
+    signalConfirmation(
+      updated
+    );
+
+  updated.confidence =
+    candidateConfidence(
+      updated
+    );
+
+  evidenceQualityProtectionV158(
+    updated
+  );
+
+  opportunityConfirmationCalibrationV253(
+    updated,
+    {
+      refreshRaw: true,
+      phase:
+        "MANUAL_LIVE_V4_ENRICHMENT_V283"
+    }
+  );
+
+  updated.holderBreadthV136 =
+    healthyHolderBreadthV136(
+      updated.holders
+    );
+
+  updated.analysisPriority =
+    analysisPriority(
+      updated
+    );
+
+  return updated;
 }
 
 async function telegramFreshAnalyseV276(
@@ -60944,6 +61327,22 @@ async function telegramFreshAnalyseV276(
     };
   }
 
+  const manualLiveV4ResultV283 =
+    await manualLiveV4EnrichmentV283(
+      env,
+      budget,
+      watched,
+      candidate
+    );
+
+  candidate =
+    applyManualLiveV4EnrichmentV283(
+      candidate,
+      watched,
+      isolatedState,
+      manualLiveV4ResultV283
+    );
+
   const performance =
     state
       ?.callPerformanceV270
@@ -61057,6 +61456,34 @@ async function telegramFreshAnalyseV276(
             })
           )
         : []
+    },
+    manualLiveV4EnrichmentV283: {
+      attempted:
+        manualLiveV4ResultV283?.attempted === true,
+      verified:
+        manualLiveV4ResultV283?.verified === true,
+      status:
+        manualLiveV4ResultV283?.status || null,
+      poolId:
+        manualLiveV4ResultV283?.poolId || null,
+      fromBlock:
+        manualLiveV4ResultV283?.fromBlock ?? null,
+      toBlock:
+        manualLiveV4ResultV283?.toBlock ?? null,
+      swaps:
+        manualLiveV4ResultV283?.swaps ?? null,
+      liquidityEvents:
+        manualLiveV4ResultV283?.liquidityEvents ?? null,
+      requestsUsed:
+        safeNumber(
+          manualLiveV4ResultV283?.requestsUsed
+        ),
+      providerHead:
+        manualLiveV4ResultV283?.providerHead || null,
+      providerLogs:
+        manualLiveV4ResultV283?.providerLogs || null,
+      error:
+        manualLiveV4ResultV283?.error || null
     },
     evidenceCompletenessV277:
       manualEvidenceCompletenessV277(
