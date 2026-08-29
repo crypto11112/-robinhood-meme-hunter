@@ -1,5 +1,14 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V290 / V2.0:
+ * - FIX/VERIFY: manual /analyse no longer depends only on V195 factory getPool() discovery for the canonical WETH/USDG reference after V289 proved all four standard fee-tier lookups returned no verified pool
+ * - VERIFIED FALLBACK: before retrying V195 discovery, V290 probes the currently documented Robinhood WETH/USDG 0.01% pool candidate 0x52e65B17fB6E5BA00Ed806f37Afcd2DaA50271Ca and trusts it ONLY if on-chain calls prove factory(), token0(), token1(), fee(), slot0() and liquidity()
+ * - SAFETY: the candidate address is discovery-only; it is never accepted merely because it is hard-coded or named by a third party. Factory must equal the existing configured Robinhood Uniswap V3 factory, tokens must be exactly canonical WETH+USDG, fee must equal 100, liquidity must be positive and slot0 must produce a positive finite WETH/USDG price
+ * - EFFICIENCY: successful direct verification avoids the four V195 getPool fee-tier probes and leaves manual budget for the exact candidate PoolId Blockscout history request
+ * - FALLBACK: if the direct candidate cannot be independently verified, the existing V195 factory path remains available unchanged; no ETH price, symbol, DexScreener count or third-party price is promoted to verified USD
+ * - TELEMETRY: /analyse reports the V290 direct-pool verification status, address, factory/token/fee checks, derived price and request use
+ * - Autonomous scanner 42/21 ceilings, standard Telegram formatter, scoring, Momentum, holder logic, KV keys, provider protections and verified USD maths remain unchanged
+ * - Preserves all V289/V288/V287 manual-analysis protections and confirmed-working scanner functionality
  * V289 / V2.0:
  * - FIX: manual /analyse now reuses the existing canonical WETH/USDG V195 on-chain verifier when a verified candidate pool is quoted in WETH or native ETH but the short V187 same-batch reference is unavailable
  * - VERIFIED PATH: same-batch V187 reference remains first; otherwise V195 resolves the canonical WETH/USDG Uniswap V3 pool through the configured factory, verifies token0/token1, slot0 and non-zero liquidity, then derives USDG per WETH
@@ -1279,7 +1288,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V289";
+const VERSION = "V290";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1663,6 +1672,11 @@ const PONS_PROTOCOL_V215 =
 
 const UNISWAP_V3_FACTORY_V195 =
   "0x1f7d7550b1b028f7571e69a784071f0205fd2efa";
+
+/* V290 discovery candidate only; every trust property is re-verified on-chain. */
+const V290_CANONICAL_WETH_USDG_POOL_CANDIDATE =
+  "0x52e65b17fb6e5ba00ed806f37afcd2daa50271ca";
+const V290_CANONICAL_WETH_USDG_POOL_FEE = 100;
 
 const UNISWAP_TRADE_API_V196 =
   "https://trade-api.gateway.uniswap.org/v1/quote";
@@ -61235,6 +61249,21 @@ function telegramAnalyseResultMessageV276(
     }</b> | requests <b>${safeNumber(
       telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.requestsUsed
     )}</b>`,
+    `🧪 V290 direct WETH/USDG pool: <b>${escapeHtml(
+      telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.directV290?.status ||
+      "NOT_ATTEMPTED"
+    )}</b> | pool <code>${escapeHtml(
+      telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.directV290?.poolAddress ||
+      V290_CANONICAL_WETH_USDG_POOL_CANDIDATE
+    )}</code> | factory <b>${
+      telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.directV290?.factoryMatch === true ? "YES" : "NO"
+    }</b> | tokens <b>${
+      telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.directV290?.tokenPairMatch === true ? "YES" : "NO"
+    }</b> | fee <b>${escapeHtml(String(
+      telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.directV290?.fee ?? "UNVERIFIED"
+    ))}</b> | requests <b>${safeNumber(
+      telemetry?.manualVerifiedUsdRecoveryV289?.wethReferenceV289?.directV290?.requestsUsed
+    )}</b>`,
     `🧾 V288 quote token: <code>${escapeHtml(
       telemetry?.manualVerifiedUsdRecoveryV289?.quoteDiagnosticsV288?.quoteTokenAddress ||
       "UNVERIFIED"
@@ -61740,6 +61769,139 @@ function manualQuoteDiagnosticsV288(candidate, wethUsdGReference) {
   };
 }
 
+async function manualDirectV3WethUsdGReferenceV290(
+  env,
+  state,
+  budget
+) {
+  const pool = normalize(V290_CANONICAL_WETH_USDG_POOL_CANDIDATE);
+  const expectedFactory = normalize(UNISWAP_V3_FACTORY_V195);
+  const before = safeNumber(budget?.totalUsed);
+
+  const output = {
+    attempted: false,
+    verified: false,
+    status: "NOT_ATTEMPTED",
+    source: "UNISWAP_V3_WETH_USDG_DIRECT_ONCHAIN_VERIFY_V290",
+    poolAddress: isAddress(pool) ? pool : null,
+    expectedFactory: isAddress(expectedFactory) ? expectedFactory : null,
+    factory: null,
+    factoryMatch: false,
+    token0: null,
+    token1: null,
+    tokenPairMatch: false,
+    fee: null,
+    feeMatch: false,
+    liquidity: null,
+    sqrtPriceX96: null,
+    priceUsdGPerWeth: null,
+    requestsUsed: 0,
+    checks: {}
+  };
+
+  const finish = (status, extra = {}) => ({
+    ...output,
+    ...extra,
+    status,
+    requestsUsed: Math.max(0, safeNumber(budget?.totalUsed) - before)
+  });
+
+  if (!isAddress(pool) || !isAddress(expectedFactory)) {
+    return finish("DIRECT_V3_CONFIGURATION_INVALID_V290");
+  }
+
+  const rpc = async (name, selector) => {
+    const row = await ethCallV195(
+      env, state, budget, pool, selector,
+      `V290_DIRECT_V3_${name.toUpperCase()}`
+    );
+    output.attempted = true;
+    output.checks[name] = {
+      ok: row?.ok === true,
+      status: row?.status || null
+    };
+    return row;
+  };
+
+  const factoryCall = await rpc("factory", "0xc45a0155");
+  if (!factoryCall?.ok) {
+    return finish(factoryCall?.status || "DIRECT_V3_FACTORY_CALL_FAILED_V290");
+  }
+  output.factory = decodeAddressWordV195(factoryCall.result);
+  output.factoryMatch = output.factory === expectedFactory;
+  if (!output.factoryMatch) {
+    return finish("DIRECT_V3_FACTORY_MISMATCH_V290");
+  }
+
+  const token0Call = await rpc("token0", "0x0dfe1681");
+  const token1Call = await rpc("token1", "0xd21220a7");
+  if (!token0Call?.ok || !token1Call?.ok) {
+    return finish("DIRECT_V3_TOKEN_CALL_FAILED_V290");
+  }
+  output.token0 = decodeAddressWordV195(token0Call.result);
+  output.token1 = decodeAddressWordV195(token1Call.result);
+  output.tokenPairMatch =
+    (output.token0 === CANONICAL_WETH_V179 && output.token1 === CANONICAL_USDG_V179) ||
+    (output.token0 === CANONICAL_USDG_V179 && output.token1 === CANONICAL_WETH_V179);
+  if (!output.tokenPairMatch) {
+    return finish("DIRECT_V3_TOKEN_PAIR_MISMATCH_V290");
+  }
+
+  const feeCall = await rpc("fee", "0xddca3f43");
+  if (!feeCall?.ok) {
+    return finish(feeCall?.status || "DIRECT_V3_FEE_CALL_FAILED_V290");
+  }
+  const feeRaw = decodeUint256WordV195(feeCall.result, 0);
+  const feeNumber = feeRaw !== null ? Number(feeRaw) : null;
+  output.fee = Number.isFinite(feeNumber) ? feeNumber : null;
+  output.feeMatch = output.fee === V290_CANONICAL_WETH_USDG_POOL_FEE;
+  if (!output.feeMatch) {
+    return finish("DIRECT_V3_FEE_MISMATCH_V290");
+  }
+
+  const slot0Call = await rpc("slot0", "0x3850c7bd");
+  const liquidityCall = await rpc("liquidity", "0x1a686502");
+  if (!slot0Call?.ok || !liquidityCall?.ok) {
+    return finish("DIRECT_V3_STATE_CALL_FAILED_V290");
+  }
+
+  const sqrtPriceX96 = decodeUint256WordV195(slot0Call.result, 0);
+  const liquidity = decodeUint256WordV195(liquidityCall.result, 0);
+  output.sqrtPriceX96 = sqrtPriceX96 !== null ? sqrtPriceX96.toString() : null;
+  output.liquidity = liquidity !== null ? liquidity.toString() : null;
+  const price = sqrtPriceX96 !== null
+    ? sqrtPriceX96ToUsdGPerWethV195(
+        sqrtPriceX96, output.token0, output.token1
+      )
+    : null;
+  output.priceUsdGPerWeth = Number.isFinite(price) && price > 0 ? price : null;
+
+  if (
+    liquidity === null || liquidity <= 0n ||
+    !Number.isFinite(price) || price <= 0
+  ) {
+    return finish("DIRECT_V3_PRICE_OR_LIQUIDITY_INVALID_V290");
+  }
+
+  state.v3WethUsdGReferenceV195 = {
+    factory: expectedFactory,
+    poolAddress: pool,
+    fee: output.fee,
+    token0: output.token0,
+    token1: output.token1,
+    liquidity: liquidity.toString(),
+    sqrtPriceX96: sqrtPriceX96.toString(),
+    priceUsdGPerWeth: price,
+    verifiedAt: nowIso(),
+    verifiedByV290: true
+  };
+
+  output.verified = true;
+  return finish("VERIFIED_DIRECT_ONCHAIN_WETH_USDG_POOL_V290", {
+    verified: true
+  });
+}
+
 async function manualWethUsdGReferenceV289(
   env, budget, state, candidate, liveLogs
 ) {
@@ -61796,6 +61958,29 @@ async function manualWethUsdGReferenceV289(
   }
 
   const before = safeNumber(budget?.totalUsed);
+
+  const directV290 = await manualDirectV3WethUsdGReferenceV290(
+    env, state, budget
+  );
+
+  if (directV290?.verified === true) {
+    const requestsUsed = Math.max(0, safeNumber(budget?.totalUsed) - before);
+    return {
+      ...base,
+      attempted: true,
+      verified: true,
+      status: "VERIFIED_DIRECT_ONCHAIN_WETH_USDG_POOL_V290",
+      source: directV290.source,
+      priceUsdGPerWeth: Number(directV290.priceUsdGPerWeth),
+      requestsUsed,
+      v3Status: directV290.status,
+      v3PoolAddress: directV290.poolAddress || null,
+      v3SelectedFee: directV290.fee ?? null,
+      directV290,
+      reference: directV290
+    };
+  }
+
   const v3 = await getV3WethUsdGReferenceV195(
     env,
     state,
@@ -61818,6 +62003,7 @@ async function manualWethUsdGReferenceV289(
       v3Status: v3?.status || null,
       v3PoolAddress: v3?.poolAddress || null,
       v3SelectedFee: v3?.selectedFee ?? null,
+      directV290,
       reference: v3
     };
   }
@@ -61832,6 +62018,7 @@ async function manualWethUsdGReferenceV289(
     v3Status: v3?.status || null,
     v3PoolAddress: v3?.poolAddress || null,
     v3SelectedFee: v3?.selectedFee ?? null,
+    directV290,
     reference: v3 || sameBatch
   };
 }
@@ -61929,7 +62116,8 @@ async function manualVerifiedUsdRecoveryV289(
       requestsUsed: safeNumber(wethReferenceV289?.requestsUsed),
       v3Status: wethReferenceV289?.v3Status || null,
       v3PoolAddress: wethReferenceV289?.v3PoolAddress || null,
-      v3SelectedFee: wethReferenceV289?.v3SelectedFee ?? null
+      v3SelectedFee: wethReferenceV289?.v3SelectedFee ?? null,
+      directV290: wethReferenceV289?.directV290 || null
     },
     candidate
   };
