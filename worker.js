@@ -1,5 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V272 / V2.0:
+ * - FIX: Telegram commands now work when typed directly into the configured Telegram channel
+ * - Adds channel_post and edited_channel_post webhook update support
+ * - Preserves configured TELEGRAM_CHAT_ID authorization; commands from other chats remain ignored
+ * - Webhook setup now subscribes to message, edited_message, channel_post and edited_channel_post
+ * - No scanner/provider requests added and no scoring/Momentum/USD/threshold changes
+ * - Preserves V271 command set, V270 performance tracking, V269 holder integrity, V268 history and V267 follow-up
  * V271 / V2.0:
  * - NEW: Telegram command interface for stored bot calls and V270 performance telemetry
  * - Commands: /call, /ath, /stats, /calls, /best, /performance, /help
@@ -1150,7 +1157,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V271";
+const VERSION = "V272";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -54644,13 +54651,17 @@ for (
         true
     },
 
-    telegramCommandsV271: {
+    telegramCommandsV272: {
       enabled: true,
+      preservesV271Commands: true,
       webhookRoute:
         "/telegram-webhook",
       setupRoute:
         "/telegram-webhook-setup",
       authorizedChatOnly: true,
+      channelPostsSupported: true,
+      editedChannelPostsSupported: true,
+      normalMessagesSupported: true,
       optionalWebhookSecretSupported: true,
       commands: [
         "/call",
@@ -59152,6 +59163,8 @@ async function telegramCommandReplyV271(
   const message =
     update?.message ||
     update?.edited_message ||
+    update?.channel_post ||
+    update?.edited_channel_post ||
     null;
 
   const chatId =
@@ -59387,7 +59400,9 @@ async function telegramWebhookSetupV271(
       webhookUrl,
     allowed_updates: [
       "message",
-      "edited_message"
+      "edited_message",
+      "channel_post",
+      "edited_channel_post"
     ],
     drop_pending_updates:
       false
