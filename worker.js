@@ -1452,7 +1452,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V357";
+const VERSION = "V358";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -68228,6 +68228,93 @@ async function v3PublicRangeCapabilityDiagnosticV357(env, tokenInput) {
   return out;
 }
 
+
+
+/* ============================================================
+   V358 — BLOCKSCOUT INDEXED V3 LOG RANGE CAPABILITY
+   ============================================================
+   HTTP-only / read-only diagnostic. No KV writes and no collector,
+   /analyse, scoring or Telegram mutation. This measures whether the
+   existing Robinhood Blockscout indexed logs API can retrieve exact V3
+   Swap logs across much wider ranges than Alchemy Free's 10-block cap.
+*/
+const V358_BLOCKSCOUT_RANGE_TESTS = [10000, 50000, 100000, 250000, 500000, 1000000];
+const V358_BLOCKSCOUT_TIMEOUT_MS = 7000;
+const V358_BLOCKSCOUT_SATURATION_ROWS = 1000;
+
+async function v358BlockscoutLogsRequest(pair, fromBlock, toBlock) {
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), V358_BLOCKSCOUT_TIMEOUT_MS);
+  const url = `${BLOCKSCOUT}/api?module=logs&action=getLogs` +
+    `&fromBlock=${Math.max(0, Math.trunc(fromBlock))}` +
+    `&toBlock=${Math.max(0, Math.trunc(toBlock))}` +
+    `&address=${encodeURIComponent(pair)}` +
+    `&topic0=${encodeURIComponent(UNISWAP_V3_SWAP_TOPIC_V326)}`;
+  try {
+    const response = await fetch(url, {headers:{accept:"application/json"}, signal:controller.signal});
+    let payload=null, parseError=null;
+    try { payload=await response.json(); } catch(error){ parseError=String(error?.message||error); }
+    let rows=[];
+    if(Array.isArray(payload?.result)) rows=payload.result;
+    const message=String(payload?.message||payload?.result||"");
+    const noRecords=!rows.length && /no\s+(records|logs)\s+found/i.test(message);
+    const payloadOk=Array.isArray(payload?.result) || noRecords;
+    let firstLogBlock=null,lastLogBlock=null;
+    if(rows.length){
+      const blocks=rows.map(r=>rpcBlockNumberV331(r?.blockNumber)).filter(Number.isFinite);
+      if(blocks.length){ firstLogBlock=Math.min(...blocks); lastLogBlock=Math.max(...blocks); }
+    }
+    return {
+      ok:response.ok && !parseError && payloadOk,
+      httpStatus:response.status,
+      logs:rows.length,
+      saturated:rows.length>=V358_BLOCKSCOUT_SATURATION_ROWS,
+      firstLogBlock,lastLogBlock,
+      error:parseError || (!response.ok?`HTTP_${response.status}`:(!payloadOk?message.slice(0,240)||"INVALID_PAYLOAD":null)),
+      elapsedMs:Date.now()-startedAt
+    };
+  } catch(error){
+    return {ok:false,httpStatus:null,logs:null,saturated:false,firstLogBlock:null,lastLogBlock:null,error:String(error?.name||"")==="AbortError"?`TIMEOUT_${V358_BLOCKSCOUT_TIMEOUT_MS}MS`:String(error?.message||error).slice(0,260),elapsedMs:Date.now()-startedAt};
+  } finally { clearTimeout(timer); }
+}
+
+async function v3BlockscoutRangeCapabilityDiagnosticV358(env, tokenInput){
+  const startedAt=Date.now();
+  const token=normalize(tokenInput);
+  const out={version:VERSION,diagnostic:"BLOCKSCOUT_INDEXED_V3_LOG_RANGE_CAPABILITY_V358",safe:true,writes:0,kvWrites:0,collectorMutated:false,analyseMutated:false,token,pair:null,topic:UNISWAP_V3_SWAP_TOPIC_V326,provider:"ROBINHOOD_BLOCKSCOUT_INDEXED_LOGS",endpoint:`${BLOCKSCOUT}/api?module=logs&action=getLogs`,timeoutPerRequestMs:V358_BLOCKSCOUT_TIMEOUT_MS,saturationRows:V358_BLOCKSCOUT_SATURATION_ROWS,requestedRanges:V358_BLOCKSCOUT_RANGE_TESTS,externalRequests:0,headBlock:null,tests:[],timestamp:now(),elapsedMs:null};
+  if(!isAddress(token)){out.status="INVALID_TOKEN_ADDRESS_V358";out.elapsedMs=Date.now()-startedAt;return out;}
+  try{
+    const pairCache=await loadVerifiedV3PairIdentityV329(env,token);
+    const pair=normalize(pairCache?.record?.pairAddress);
+    out.pairStatus=pairCache?.status||null;
+    if(pairCache?.valid!==true||!isAddress(pair)){out.status="VERIFIED_V3_PAIR_UNAVAILABLE_V358";out.elapsedMs=Date.now()-startedAt;return out;}
+    out.pair=pair;
+    // Head is obtained from Alchemy through the existing bounded RPC helper only
+    // so the public RPC 429 observed in V357 cannot invalidate this test.
+    const budget=createNativeV3CollectorBudgetV333();
+    const head=await rpc(env,"eth_blockNumber",[],budget,"analysis");
+    out.externalRequests++;
+    try{if(head?.result) out.headBlock=Number(BigInt(head.result));}catch(_){}
+    if(!Number.isFinite(out.headBlock)){out.status="HEAD_UNVERIFIED_V358";out.elapsedMs=Date.now()-startedAt;return out;}
+    for(const blocks of V358_BLOCKSCOUT_RANGE_TESTS){
+      const fromBlock=Math.max(0,out.headBlock-blocks+1);
+      const call=await v358BlockscoutLogsRequest(pair,fromBlock,out.headBlock);
+      out.externalRequests++;
+      out.tests.push({blocks,fromBlock,toBlock:out.headBlock,ok:call.ok,httpStatus:call.httpStatus,elapsedMs:call.elapsedMs,logs:call.logs,saturated:call.saturated,firstLogBlock:call.firstLogBlock,lastLogBlock:call.lastLogBlock,error:call.error});
+      if(!call.ok){out.stoppedAfterFailure=true;break;}
+      if(call.saturated){out.stoppedAfterSaturation=true;break;}
+    }
+    const successful=out.tests.filter(t=>t.ok&&!t.saturated).map(t=>t.blocks);
+    out.largestUnsaturatedSuccessfulRange=successful.length?Math.max(...successful):null;
+    out.anySuccessful=out.tests.some(t=>t.ok);
+    out.anySaturated=out.tests.some(t=>t.saturated);
+    out.status=out.anySuccessful?"BLOCKSCOUT_INDEXED_RANGE_CAPABILITY_MEASURED_V358":"BLOCKSCOUT_INDEXED_RANGE_TESTS_FAILED_V358";
+  }catch(error){out.status="DIAGNOSTIC_ERROR_V358";out.error=String(error?.message||error).slice(0,300);}
+  out.elapsedMs=Date.now()-startedAt;
+  return out;
+}
+
 /* =========================================================
    ROUTER
    ========================================================= */
@@ -68398,6 +68485,19 @@ async function handleRequest(
   ) {
     return jsonResponse(
       await v3PublicRangeCapabilityDiagnosticV357(
+        env,
+        url.searchParams.get("token") || ""
+      )
+    );
+  }
+
+
+  if (
+    path ===
+    "/v3blockscout-range-diagnostic"
+  ) {
+    return jsonResponse(
+      await v3BlockscoutRangeCapabilityDiagnosticV358(
         env,
         url.searchParams.get("token") || ""
       )
