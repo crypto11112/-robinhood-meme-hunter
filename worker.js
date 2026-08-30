@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V346: CLEAN RESTORE BUILD from confirmed-working V337 Step 3A logic. No V338+ USD resolver/enrichment code is included.
+ * V347: SAFE STEP 3B BRIDGE from clean V346. Reuses the scanner's already-verified WETH/USDG reference only after the normal scheduled scan, persists it to KV, and enriches native V3 ledger quote-ready rows in the scheduled/background path. /analyse performs zero V347 pricing/provider/RPC calls and only reads persisted ledger evidence. WETH valuations are explicitly CURRENT/SAME-CYCLE reference valuations, NOT exact historical-block USD. Canonical USDG quote rows remain exact 1:1 USDG evidence.
  * V337: Step 3A verification layer. Preserves V336/V334 behavior and adds zero-request visibility for exact quote-side amounts already persisted on newly captured V3 swaps. Reports quote-ready ledger coverage (WETH/USDG) without converting historical swaps to USD or guessing missing quote evidence.
  * V336: Step 3A safe repair: preserves V334 command/reply path unchanged and adds only exact quote-side amount persistence to newly captured V3 swap records. No extra provider calls, no new Telegram formatter dependency, no historical USD guessing.
  * V331: Persistent native V3 swap-evidence ledger + dynamic exact-pool sweep. Reuses V330 verified pair identity, scans bounded 10-block chunks within remaining manual budget, deduplicates exact tx/log evidence in KV, and explicitly reports coverage gaps. No complete timeframe claim is made from ingestion timestamps.
@@ -1448,7 +1448,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V346";
+const VERSION = "V347";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64592,6 +64592,17 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       if(safeNumber(rolling?.quoteReadyRecordsV337)>0){
         evidence.push(`↔️ Quote-ready direction: <b>${safeNumber(rolling?.quoteReadyBuysV337)} buys / ${safeNumber(rolling?.quoteReadySellsV337)} sells</b>`);
       }
+      const usdCount=safeNumber(rolling?.sameCycleUsdVerifiedRecordsV347);
+      if(usdCount>0){
+        evidence.push(`💲 Persisted USD evidence: <b>${usdCount}/${safeNumber(rolling?.totalRecords)} records</b> (${safeNumber(rolling?.sameCycleUsdWethRecordsV347)} WETH-current-ref / ${safeNumber(rolling?.sameCycleUsdUsdgRecordsV347)} exact USDG)`);
+        evidence.push(`⚖️ WETH valuation basis: <b>VERIFIED CURRENT REFERENCE — NOT EXACT HISTORICAL BLOCK</b>`);
+        const uw=rolling?.usdWindowsV347||{};
+        for(const label of ["5m","15m","1h","6h","24h"]){
+          const x=uw?.[label]; if(!x||safeNumber(x?.verifiedRecords)<=0) continue;
+          const bp=Number(x?.buyPressurePct);
+          evidence.push(`• ${label} USD: 🟢 <b>${money(x?.buyUsd)}</b> / 🔴 <b>${money(x?.sellUsd)}</b> | Net <b>${money(x?.netUsd)}</b> | Buy pressure <b>${Number.isFinite(bp)?bp.toFixed(1)+"%":"UNVERIFIED"}</b> (${safeNumber(x?.verifiedRecords)} records)`);
+        }
+      }
     }
 
     if (v3?.usdVerified === true) {
@@ -67597,6 +67608,127 @@ async function handleRequest(
 }
 
 
+
+/* ============================================================
+   V347 STEP 3B — BACKGROUND-ONLY VERIFIED USD BRIDGE
+   ============================================================
+   SAFETY / EVIDENCE CONTRACT:
+   - Runs only after the normal scheduled scan has already completed.
+   - Reuses the scanner's selected, verified canonical WETH/USDG reference.
+   - Adds ZERO external provider/RPC requests to /analyse.
+   - /analyse only reads values already persisted in the V331 ledger.
+   - WETH quote valuations use a verified CURRENT/SAME-CYCLE reference and
+     are NEVER labelled exact historical-block USD.
+   - Canonical USDG quote amounts are exact 1:1 USDG evidence.
+*/
+const NATIVE_V3_WETH_USDG_REFERENCE_KEY_V347 = "robinhood-meme-hunter-v347-weth-usdg-reference";
+const NATIVE_V3_WETH_USDG_REFERENCE_MAX_AGE_MS_V347 = 15 * 60 * 1000;
+
+function verifiedWethUsdGReferenceFromScanV347(scanResult) {
+  const ref = scanResult?.onChainDirectionalV179?.wethUsdGReferenceV187 || null;
+  const price = Number(ref?.priceUsdGPerWeth);
+  if (ref?.verified !== true || !Number.isFinite(price) || price <= 0) return null;
+  return {
+    schema: "VERIFIED_WETH_USDG_REFERENCE_V347",
+    verified: true,
+    priceUsdGPerWeth: price,
+    source: String(ref?.source || "VERIFIED_CANONICAL_WETH_USDG_REFERENCE").slice(0, 180),
+    upstreamStatus: ref?.status ? String(ref.status).slice(0, 120) : null,
+    observedAt: Date.now(),
+    chainId: 4663,
+    weth: CANONICAL_WETH_V179,
+    usdg: CANONICAL_USDG_V179,
+    historicalExactBlock: false,
+    evidenceBasis: "VERIFIED_CURRENT_OR_SAME_SCAN_CANONICAL_WETH_USDG_REFERENCE_V347"
+  };
+}
+
+async function persistVerifiedWethUsdGReferenceV347(env, scanResult) {
+  const {kv, binding} = getKV(env);
+  const reference = verifiedWethUsdGReferenceFromScanV347(scanResult);
+  if (!kv) return {saved:false,status:"KV_UNAVAILABLE_V347",binding:binding||null,reference:null};
+  if (!reference) return {saved:false,status:"NO_VERIFIED_WETH_USDG_REFERENCE_IN_SCAN_V347",binding:binding||null,reference:null};
+  try {
+    await kv.put(NATIVE_V3_WETH_USDG_REFERENCE_KEY_V347, JSON.stringify(reference));
+    return {saved:true,status:"VERIFIED_WETH_USDG_REFERENCE_PERSISTED_V347",binding:binding||null,reference};
+  } catch (error) {
+    return {saved:false,status:"WETH_USDG_REFERENCE_WRITE_ERROR_V347",binding:binding||null,reference:null,error:String(error?.message||error).slice(0,180)};
+  }
+}
+
+async function loadVerifiedWethUsdGReferenceV347(env, nowMs = Date.now()) {
+  const {kv, binding} = getKV(env);
+  const base={found:false,verified:false,fresh:false,status:!kv?"KV_UNAVAILABLE_V347":"NOT_FOUND_V347",binding:binding||null,reference:null,ageMs:null};
+  if(!kv) return base;
+  try {
+    const raw=await kv.get(NATIVE_V3_WETH_USDG_REFERENCE_KEY_V347);
+    if(!raw) return base;
+    const ref=JSON.parse(raw);
+    const price=Number(ref?.priceUsdGPerWeth), observedAt=Number(ref?.observedAt), ageMs=Number.isFinite(observedAt)?Math.max(0,nowMs-observedAt):null;
+    const verified=ref?.verified===true && Number.isFinite(price) && price>0 && normalize(ref?.weth)===CANONICAL_WETH_V179 && normalize(ref?.usdg)===CANONICAL_USDG_V179;
+    const fresh=verified && Number.isFinite(ageMs) && ageMs<=NATIVE_V3_WETH_USDG_REFERENCE_MAX_AGE_MS_V347;
+    return {found:true,verified,fresh,status:fresh?"VERIFIED_FRESH_WETH_USDG_REFERENCE_V347":(verified?"VERIFIED_STALE_WETH_USDG_REFERENCE_V347":"INVALID_WETH_USDG_REFERENCE_V347"),binding:binding||null,reference:verified?ref:null,ageMs};
+  } catch(error){
+    return {...base,found:true,status:"WETH_USDG_REFERENCE_READ_ERROR_V347",error:String(error?.message||error).slice(0,180)};
+  }
+}
+
+async function enrichNativeV3LedgerUsdV347(env, tokenAddress, pairAddress, referenceState) {
+  const token=normalize(tokenAddress), pair=normalize(pairAddress);
+  const {kv, binding}=getKV(env);
+  const base={saved:false,status:!kv?"KV_UNAVAILABLE_V347":"NOT_SAVED_V347",binding:binding||null,token,pair,eligible:0,enriched:0,wethEnriched:0,usdgEnriched:0,records:0};
+  if(!kv||!isAddress(token)||!isAddress(pair)) return {...base,status:"LEDGER_IDENTITY_INVALID_V347"};
+  const ledger=await loadNativeV3SwapLedgerV331(env,token,pair);
+  if(ledger?.valid!==true) return {...base,status:ledger?.status||"LEDGER_UNAVAILABLE_V347"};
+  const key=nativeV3SwapLedgerKeyV331(token);
+  let raw=null, parsed=null;
+  try{ raw=await kv.get(key); parsed=raw?JSON.parse(raw):null; }catch(error){ return {...base,status:"LEDGER_READ_ERROR_V347",error:String(error?.message||error).slice(0,180)}; }
+  if(!parsed||normalize(parsed?.pairAddress)!==pair) return {...base,status:"LEDGER_PAIR_MISMATCH_V347"};
+  const rows=Array.isArray(parsed?.records)?parsed.records:[];
+  const refFresh=referenceState?.fresh===true && referenceState?.verified===true;
+  const ref=referenceState?.reference||null;
+  const wethPrice=refFresh?Number(ref?.priceUsdGPerWeth):null;
+  const refObservedAt=refFresh?Number(ref?.observedAt):null;
+  let changed=false,eligible=0,enriched=0,wethEnriched=0,usdgEnriched=0;
+  for(const row of rows){
+    const quote=normalize(row?.quoteTokenAddress), amount=Number(row?.quoteAmount);
+    const quoteReady=row?.quoteAmountVerifiedV336===true && Number.isFinite(amount) && amount>0 && (quote===CANONICAL_WETH_V179||quote===CANONICAL_USDG_V179);
+    if(!quoteReady) continue;
+    eligible++;
+    if(row?.sameCycleUsdVerifiedV347===true && Number.isFinite(Number(row?.sameCycleUsdV347)) && Number(row.sameCycleUsdV347)>0) continue;
+    if(quote===CANONICAL_USDG_V179){
+      row.sameCycleUsdV347=amount;
+      row.sameCycleUsdVerifiedV347=true;
+      row.sameCycleUsdBasisV347="EXACT_CANONICAL_USDG_QUOTE_1_TO_1_V347";
+      row.sameCycleUsdReferencePriceV347=1;
+      row.sameCycleUsdReferenceObservedAtV347=Number(row?.blockTimestampMs)||Number(row?.observedAt)||Date.now();
+      row.sameCycleUsdReferenceSourceV347="CANONICAL_USDG_EXACT_QUOTE_AMOUNT_V347";
+      row.sameCycleUsdHistoricalExactBlockV347=true;
+      changed=true; enriched++; usdgEnriched++;
+      continue;
+    }
+    if(quote===CANONICAL_WETH_V179 && refFresh && Number.isFinite(wethPrice) && wethPrice>0){
+      const usd=amount*wethPrice;
+      if(!Number.isFinite(usd)||usd<=0) continue;
+      row.sameCycleUsdV347=usd;
+      row.sameCycleUsdVerifiedV347=true;
+      row.sameCycleUsdBasisV347="EXACT_WETH_QUOTE_X_VERIFIED_CURRENT_REFERENCE_V347";
+      row.sameCycleUsdReferencePriceV347=wethPrice;
+      row.sameCycleUsdReferenceObservedAtV347=refObservedAt;
+      row.sameCycleUsdReferenceSourceV347=String(ref?.source||"VERIFIED_WETH_USDG_REFERENCE_V347").slice(0,180);
+      row.sameCycleUsdHistoricalExactBlockV347=false;
+      changed=true; enriched++; wethEnriched++;
+    }
+  }
+  if(!changed) return {...base,saved:false,status:eligible?"NO_NEW_USD_ENRICHMENT_V347":"NO_QUOTE_READY_RECORDS_V347",eligible,enriched,wethEnriched,usdgEnriched,records:rows.length};
+  parsed.updatedAt=Date.now();
+  parsed.v347UsdEnrichment={updatedAt:Date.now(),referenceStatus:referenceState?.status||null,referenceAgeMs:Number.isFinite(Number(referenceState?.ageMs))?Number(referenceState.ageMs):null,referencePriceUsdGPerWeth:refFresh?wethPrice:null,referenceSource:refFresh?String(ref?.source||"").slice(0,180):null,historicalExactBlock:false};
+  try{
+    await kv.put(key,JSON.stringify(parsed));
+    return {...base,saved:true,status:"NATIVE_V3_LEDGER_USD_ENRICHED_V347",eligible,enriched,wethEnriched,usdgEnriched,records:rows.length};
+  }catch(error){return {...base,status:"LEDGER_USD_WRITE_ERROR_V347",eligible,enriched,wethEnriched,usdgEnriched,records:rows.length,error:String(error?.message||error).slice(0,180)};}
+}
+
 /* ============================================================
    V333 STEP 1A — AUTONOMOUS NATIVE V3 COLLECTOR
    ============================================================
@@ -67722,6 +67854,32 @@ function nativeV3RollingWindowsV334(records,nowMs=Date.now()){
     else if(row?.side==="SELL") quoteReadySellsV337++;
   }
 
+  /* V347: aggregate only persisted background USD evidence. No pricing call
+     occurs here or in /analyse. WETH rows remain explicitly current-reference
+     valuations rather than exact historical-block valuations. */
+  let sameCycleUsdVerifiedRecordsV347=0,sameCycleUsdWethRecordsV347=0,sameCycleUsdUsdgRecordsV347=0;
+  const usdWindowsV347={};
+  for(const [label,ms] of defs){
+    let buyUsd=0,sellUsd=0,verifiedRecords=0;
+    for(const row of allRows){
+      const ts=nativeV3VerifiedTimestampMsV334(row);
+      const usd=Number(row?.sameCycleUsdV347);
+      if(!ts||ts<nowMs-ms||ts>nowMs||row?.sameCycleUsdVerifiedV347!==true||!Number.isFinite(usd)||usd<=0) continue;
+      verifiedRecords++;
+      if(row?.side==="BUY") buyUsd+=usd; else if(row?.side==="SELL") sellUsd+=usd;
+    }
+    const totalUsd=buyUsd+sellUsd;
+    usdWindowsV347[label]={buyUsd,sellUsd,netUsd:buyUsd-sellUsd,buyPressurePct:totalUsd>0?(buyUsd/totalUsd)*100:null,verifiedRecords};
+  }
+  for(const row of allRows){
+    const usd=Number(row?.sameCycleUsdV347);
+    if(row?.sameCycleUsdVerifiedV347!==true||!Number.isFinite(usd)||usd<=0) continue;
+    sameCycleUsdVerifiedRecordsV347++;
+    const quote=normalize(row?.quoteTokenAddress);
+    if(quote===CANONICAL_WETH_V179) sameCycleUsdWethRecordsV347++;
+    if(quote===CANONICAL_USDG_V179) sameCycleUsdUsdgRecordsV347++;
+  }
+
   return {
     verifiedTimestampRecords:rows.length,
     totalRecords:allRows.length,
@@ -67731,7 +67889,11 @@ function nativeV3RollingWindowsV334(records,nowMs=Date.now()){
     wethQuoteRecordsV337,
     usdgQuoteRecordsV337,
     quoteReadyBuysV337,
-    quoteReadySellsV337
+    quoteReadySellsV337,
+    sameCycleUsdVerifiedRecordsV347,
+    sameCycleUsdWethRecordsV347,
+    sameCycleUsdUsdgRecordsV347,
+    usdWindowsV347
   };
 }
 
@@ -67794,7 +67956,22 @@ async function scheduledNativeV3CollectorV333(env){
   if(!Number.isFinite(headBlock)) return {status:"COLLECTOR_HEAD_UNVERIFIED_V333",tokens:selected.length,requestsUsed:safeNumber(budget.totalUsed),results:[]};
   const results=[];
   for(const row of selected){ if(!budgetAvailable(budget,"analysis"))break; results.push(await collectOneNativeV3TokenV333(env,budget,row,headBlock)); }
-  return {status:"SCHEDULED_NATIVE_V3_COLLECTOR_COMPLETE_V333",headBlock,tokens:selected.length,processed:results.length,requestsUsed:safeNumber(budget.totalUsed),requestLimit:NATIVE_V3_COLLECTOR_REQUEST_LIMIT_V333,results};
+
+  /* V347 background-only USD bridge. KV reads/writes only: no provider/RPC
+     request is introduced here. This also runs for CAUGHT_UP tokens so older
+     V336 quote-ready rows can be progressively enriched. */
+  const referenceV347=await loadVerifiedWethUsdGReferenceV347(env);
+  const usdEnrichmentV347=[];
+  for(const row of selected){
+    const token=normalize(row?.tokenAddress);
+    if(!isAddress(token)) continue;
+    const pairCache=await loadVerifiedV3PairIdentityV329(env,token);
+    const pair=normalize(pairCache?.record?.pairAddress);
+    if(pairCache?.valid!==true||!isAddress(pair)){ usdEnrichmentV347.push({token,status:pairCache?.status||"PAIR_CACHE_UNAVAILABLE_V347"}); continue; }
+    usdEnrichmentV347.push(await enrichNativeV3LedgerUsdV347(env,token,pair,referenceV347));
+  }
+
+  return {status:"SCHEDULED_NATIVE_V3_COLLECTOR_COMPLETE_V333",headBlock,tokens:selected.length,processed:results.length,requestsUsed:safeNumber(budget.totalUsed),requestLimit:NATIVE_V3_COLLECTOR_REQUEST_LIMIT_V333,results,referenceV347:{status:referenceV347?.status||null,verified:referenceV347?.verified===true,fresh:referenceV347?.fresh===true,ageMs:Number.isFinite(Number(referenceV347?.ageMs))?Number(referenceV347.ageMs):null,priceUsdGPerWeth:referenceV347?.fresh===true?Number(referenceV347?.reference?.priceUsdGPerWeth)||null:null,source:referenceV347?.fresh===true?referenceV347?.reference?.source||null:null},usdEnrichmentV347};
 }
 
 /* =========================================================
@@ -67812,6 +67989,17 @@ async function scheduledScan(
           true
       }
     );
+
+  /* V347: persist the verified reference already obtained by the normal scan.
+   * This is a KV write only and makes no new external request. The collector
+   * below may then use it without touching /analyse. */
+  let verifiedWethUsdGReferencePersistenceV347;
+  try {
+    verifiedWethUsdGReferencePersistenceV347 = await persistVerifiedWethUsdGReferenceV347(env,result);
+  } catch (error) {
+    verifiedWethUsdGReferencePersistenceV347 = {saved:false,status:"WETH_USDG_REFERENCE_PERSIST_ERROR_V347",error:String(error?.message||error).slice(0,180)};
+  }
+  result.verifiedWethUsdGReferencePersistenceV347 = verifiedWethUsdGReferencePersistenceV347;
 
   /* V333 Step 1A: autonomous native V3 collection is isolated from the
    * scanner budget and fails open so it cannot stop the normal scheduled scan. */
