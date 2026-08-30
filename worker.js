@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V385
- * AUTHORITATIVE RUNTIME VERSION: V385
+ * Robinhood Chain Meme Hunter — V386
+ * AUTHORITATIVE RUNTIME VERSION: V386
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V385";
+const VERSION = "V386";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -69707,6 +69707,7 @@ async function handleRequest(
       );
 
       const candidatePools = [];
+      const candidateSwapEvidenceV386 = [];
 
       for (const log of swapLogs) {
         const pool = normalize(log?.address || "");
@@ -69749,6 +69750,13 @@ async function handleRequest(
 
         if (meta.candidateInPool && meta.factoryVerified) {
           candidatePools.push(pool);
+          candidateSwapEvidenceV386.push({
+            pool,
+            logIndex: log?.logIndex ?? null,
+            blockNumber: log?.blockNumber ?? receiptCall.result?.blockNumber ?? null,
+            topics: Array.isArray(log?.topics) ? log.topics.slice(0, 4) : [],
+            data: String(log?.data || "0x")
+          });
         }
       }
 
@@ -69757,7 +69765,11 @@ async function handleRequest(
         receiptFound: true,
         blockNumber: rpcBlockNumberV331(receiptCall.result?.blockNumber),
         v3SwapLogs: swapLogs.length,
-        candidatePools: [...new Set(candidatePools)]
+        candidatePools: [...new Set(candidatePools)],
+        // V386: bounded evidence captured from the receipt already fetched above.
+        // This is read-only and lets route aggregation reuse evidence without
+        // issuing a duplicate eth_getTransactionReceipt request.
+        candidateSwapEvidenceV386
       });
     }
 
@@ -70011,14 +70023,15 @@ async function handleRequest(
       ? discovery.pools.filter(p => p?.factoryVerified === true && isAddress(p?.pool))
       : [];
 
-    const alchemyUrlV384 = v356AlchemyUrl(env);
-
     const poolByAddress = new Map(
       verifiedPools.map(p => [normalize(p.pool), p])
     );
 
     const txs = Array.isArray(discovery?.transactions)
-      ? discovery.transactions.filter(t => t?.receiptFound === true && /^0x[0-9a-fA-F]{64}$/.test(String(t?.txHash || "")))
+      ? discovery.transactions.filter(t =>
+          t?.receiptFound === true &&
+          /^0x[0-9a-fA-F]{64}$/.test(String(t?.txHash || ""))
+        )
       : [];
 
     const poolStats = {};
@@ -70045,55 +70058,51 @@ async function handleRequest(
     }
 
     const transactionResults = [];
-    let receiptRequests = 0;
+    let receiptRequests = 0; // V386 deliberately makes zero second-pass receipt requests.
+    let reusedReceiptEvidence = 0;
     let totalCandidateSwapLogs = 0;
     let routeMultiPoolTransactions = 0;
     let routeSinglePoolTransactions = 0;
     let routeUnknownTransactions = 0;
 
-    for (const tx of txs) {
-      let receipt = null;
-      let receiptError = null;
-      try {
-        receiptRequests++;
-        if (!alchemyUrlV384) {
-          receiptError = "ALCHEMY_NOT_CONFIGURED_V384";
-        } else {
-          const receiptCall = await v356RawAlchemyRpc(
-            alchemyUrlV384,
-            "eth_getTransactionReceipt",
-            [tx.txHash],
-            6000
-          );
-          if (receiptCall?.ok && receiptCall?.result) {
-            receipt = receiptCall.result;
-          } else {
-            receiptError = receiptCall?.error || "RECEIPT_UNAVAILABLE_V384";
-          }
-        }
-      } catch (e) {
-        receiptError = String(e?.message || e || "RECEIPT_EXCEPTION_V384");
-      }
+    const decodeSigned256V386 = (word) => {
+      let x = BigInt("0x" + word);
+      if (x >= (1n << 255n)) x -= (1n << 256n);
+      return x;
+    };
 
-      if (!receipt || !Array.isArray(receipt.logs)) {
+    for (const tx of txs) {
+      const evidence = Array.isArray(tx?.candidateSwapEvidenceV386)
+        ? tx.candidateSwapEvidenceV386
+        : [];
+
+      if (evidence.length === 0) {
         transactionResults.push({
           txHash: tx.txHash,
-          receiptFound: false,
+          blockNumber: tx?.blockNumber ?? null,
+          receiptFound: true,
+          evidenceReusedV386: false,
           candidatePoolsTouched: [],
           candidatePoolCount: 0,
-          routeClass: "RECEIPT_UNAVAILABLE_V384",
-          error: receiptError || "RECEIPT_UNAVAILABLE_V384"
+          routeClass: "NO_REUSABLE_CANDIDATE_SWAP_EVIDENCE_V386",
+          candidateSwapLogs: 0,
+          decodedSwaps: []
         });
+        routeUnknownTransactions++;
         continue;
       }
 
+      reusedReceiptEvidence++;
       const perTxPools = new Set();
       const decodedSwaps = [];
 
-      for (const log of receipt.logs) {
+      for (const log of evidence) {
         const topic0 = normalize(log?.topics?.[0] || "");
-        const emitter = normalize(log?.address || "");
-        if (topic0 !== normalize(UNISWAP_V3_SWAP_TOPIC_V326) || !poolByAddress.has(emitter)) continue;
+        const emitter = normalize(log?.pool || "");
+        if (
+          topic0 !== normalize(UNISWAP_V3_SWAP_TOPIC_V326) ||
+          !poolByAddress.has(emitter)
+        ) continue;
 
         const meta = poolByAddress.get(emitter);
         const token0 = normalize(meta?.token0 || "");
@@ -70104,27 +70113,19 @@ async function handleRequest(
 
         const dataHex = String(log?.data || "");
         if (!/^0x[0-9a-fA-F]{128,}$/.test(dataHex)) continue;
-
         const words = dataHex.slice(2).match(/.{64}/g) || [];
         if (words.length < 2) continue;
 
-        const decodeSigned256 = (word) => {
-          let x = BigInt("0x" + word);
-          if (x >= (1n << 255n)) x -= (1n << 256n);
-          return x;
-        };
-
         let amount0, amount1;
         try {
-          amount0 = decodeSigned256(words[0]);
-          amount1 = decodeSigned256(words[1]);
+          amount0 = decodeSigned256V386(words[0]);
+          amount1 = decodeSigned256V386(words[1]);
         } catch {
           continue;
         }
 
         const candidateDelta = candidateIs0 ? amount0 : amount1;
         const quoteDelta = candidateIs0 ? amount1 : amount0;
-
         const side = candidateDelta < 0n
           ? "BUY"
           : candidateDelta > 0n
@@ -70170,12 +70171,12 @@ async function handleRequest(
         if (poolStats[pool]) poolStats[pool].transactionsTouched++;
       }
 
-      let routeClass = "NO_VERIFIED_CANDIDATE_POOL_SWAP_V381";
+      let routeClass = "NO_VERIFIED_CANDIDATE_POOL_SWAP_V386";
       if (perTxPools.size === 1) {
-        routeClass = "SINGLE_VERIFIED_CANDIDATE_POOL_V381";
+        routeClass = "SINGLE_VERIFIED_CANDIDATE_POOL_V386";
         routeSinglePoolTransactions++;
       } else if (perTxPools.size > 1) {
-        routeClass = "MULTI_VERIFIED_CANDIDATE_POOL_ROUTE_V381";
+        routeClass = "MULTI_VERIFIED_CANDIDATE_POOL_ROUTE_V386";
         routeMultiPoolTransactions++;
       } else {
         routeUnknownTransactions++;
@@ -70183,8 +70184,9 @@ async function handleRequest(
 
       transactionResults.push({
         txHash: tx.txHash,
-        blockNumber: receipt.blockNumber ? Number.parseInt(receipt.blockNumber, 16) : null,
+        blockNumber: tx?.blockNumber ?? null,
         receiptFound: true,
+        evidenceReusedV386: true,
         candidatePoolsTouched: Array.from(perTxPools),
         candidatePoolCount: perTxPools.size,
         routeClass,
@@ -70217,6 +70219,10 @@ async function handleRequest(
       sampleLimit: maxTx,
       sampledTransactions: txs.length,
       receiptRequests,
+      duplicateReceiptRequestsAvoidedV386: txs.length,
+      reusedReceiptEvidenceV386: reusedReceiptEvidence,
+      discoveryReceiptRequests: Number(discovery?.receiptRequests || 0),
+      discoveryMetadataRequests: Number(discovery?.metadataRequests || 0),
       verifiedCandidatePools: pools.length,
       routeSummary: {
         tokenLevelTransactions,
@@ -70231,24 +70237,27 @@ async function handleRequest(
       pools,
       transactions: transactionResults,
       receiptEvidence: {
-        requested: receiptRequests,
+        requestedSecondPassV386: receiptRequests,
+        discoveryReceiptsRequested: Number(discovery?.receiptRequests || 0),
+        reusableReceiptTransactions: reusedReceiptEvidence,
         usableReceipts: transactionResults.filter(x => x.receiptFound === true).length,
         failedReceipts: transactionResults.filter(x => x.receiptFound !== true).length,
         candidateSwapLogsDecoded: totalCandidateSwapLogs,
-        multiPoolRoutesDecoded: routeMultiPoolTransactions
+        multiPoolRoutesDecoded: routeMultiPoolTransactions,
+        duplicateReceiptFetchesEliminatedV386: true
       },
-      coverageNote: "OBSERVED_RETAINED_ROUTE_SAMPLE_ONLY_NOT_EXHAUSTIVE_POOL_ENUMERATION_V384",
+      coverageNote: "OBSERVED_RETAINED_ROUTE_SAMPLE_ONLY_NOT_EXHAUSTIVE_POOL_ENUMERATION_V386",
       status:
         transactionResults.filter(x => x.receiptFound === true).length === 0
           ? "RECEIPT_EVIDENCE_UNAVAILABLE_V384"
           : totalCandidateSwapLogs === 0
             ? "RECEIPTS_AVAILABLE_BUT_NO_CANDIDATE_SWAPS_DECODED_V384"
             : pools.length > 1 && routeMultiPoolTransactions > 0
-              ? "MULTI_POOL_ROUTE_AWARE_AGGREGATION_PROVEN_V384"
+              ? "MULTI_POOL_ROUTE_AWARE_AGGREGATION_PROVEN_V386"
               : pools.length > 1
-                ? "MULTIPLE_VERIFIED_POOLS_KNOWN_ROUTE_AGGREGATION_SAMPLE_SINGLE_POOL_ONLY_V384"
+                ? "MULTIPLE_VERIFIED_POOLS_KNOWN_ROUTE_AGGREGATION_SAMPLE_SINGLE_POOL_ONLY_V386"
                 : pools.length === 1
-                  ? "SINGLE_VERIFIED_POOL_ROUTE_AGGREGATION_PROVEN_V384"
+                  ? "SINGLE_VERIFIED_POOL_ROUTE_AGGREGATION_PROVEN_V386"
                   : "NO_VERIFIED_CANDIDATE_POOLS_OBSERVED_V384",
       interpretation:
         transactionResults.filter(x => x.receiptFound === true).length === 0
