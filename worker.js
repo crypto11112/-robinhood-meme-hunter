@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V376
- * AUTHORITATIVE RUNTIME VERSION: V376
+ * Robinhood Chain Meme Hunter — V377
+ * AUTHORITATIVE RUNTIME VERSION: V377
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V376";
+const VERSION = "V377";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -70334,7 +70334,7 @@ export class V3LiveCollectorV363 {
 
       for (let bucket = oldestBucket; bucket <= newestBucket; bucket += bucketMs) {
         bucketsChecked++;
-        const rows = await this.ctx.storage.get(`v364:trade-bucket:${bucket}`);
+        const rows = await this.state.storage.get(`v364:trade-bucket:${bucket}`);
         if (!Array.isArray(rows) || rows.length === 0) continue;
         populatedBuckets++;
         recordsChecked += rows.length;
