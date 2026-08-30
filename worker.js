@@ -1445,7 +1445,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V332";
+const VERSION = "V333";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64916,6 +64916,12 @@ async function telegramFreshAnalyseV276(
 
   candidate.nativeV3DirectionalV326 = manualNativeV3ResultV326;
 
+  /* V333: once /analyse has independently proven a V3 pair, register the token
+   * for autonomous scheduled collection. KV-only; no external request. */
+  if (manualNativeV3ResultV326?.protocolEvidence === "ONCHAIN_TOKEN0_TOKEN1_FEE_V329" && isAddress(manualNativeV3ResultV326?.pairAddress)) {
+    await registerNativeV3CollectorTokenV333(env, resolved.address, candidate?.decimals);
+  }
+
   const manualLiveV4ResultV283 =
     await manualLiveV4EnrichmentV283(
       env,
@@ -67556,6 +67562,112 @@ async function handleRequest(
   );
 }
 
+
+/* ============================================================
+   V333 STEP 1A — AUTONOMOUS NATIVE V3 COLLECTOR
+   ============================================================
+   Forward-only extension of the V331 ledger.
+   - Runs after the normal scheduled scan with its OWN small request budget.
+   - Reads only V329 on-chain-verified V3 pair identities registered in KV.
+   - Captures exact Swap logs from the next bounded 10-block range.
+   - Persists exact tx/log evidence through the existing V331 ledger writer.
+   - Never claims complete coverage when the collector is behind.
+   - Does not alter scanner scoring, qualification, alert thresholds or the
+     scanner's existing request budget.
+*/
+const NATIVE_V3_COLLECTOR_REGISTRY_KEY_V333 = "robinhood-meme-hunter-v333-v3-collector-registry";
+const NATIVE_V3_COLLECTOR_MAX_TOKENS_PER_RUN_V333 = 4;
+const NATIVE_V3_COLLECTOR_BLOCKS_PER_RUN_V333 = 10;
+const NATIVE_V3_COLLECTOR_REQUEST_LIMIT_V333 = 6;
+
+async function registerNativeV3CollectorTokenV333(env, tokenAddress, decimals = null) {
+  const token = normalize(tokenAddress);
+  const {kv} = getKV(env);
+  if (!kv || !isAddress(token)) return {saved:false,status:"COLLECTOR_REGISTRY_UNAVAILABLE_V333"};
+  try {
+    let rows=[];
+    const raw=await kv.get(NATIVE_V3_COLLECTOR_REGISTRY_KEY_V333);
+    if(raw){ try{ const parsed=JSON.parse(raw); if(Array.isArray(parsed)) rows=parsed; }catch(_){} }
+    const nowMs=Date.now();
+    const d=Number(decimals);
+    const existing=rows.find(r=>normalize(r?.tokenAddress)===token);
+    if(existing){ existing.lastRegisteredAt=nowMs; if(Number.isInteger(d)&&d>=0&&d<=36) existing.decimals=d; }
+    else rows.push({tokenAddress:token,decimals:Number.isInteger(d)&&d>=0&&d<=36?d:null,firstRegisteredAt:nowMs,lastRegisteredAt:nowMs});
+    rows=rows.filter(r=>isAddress(normalize(r?.tokenAddress))).slice(-100);
+    await kv.put(NATIVE_V3_COLLECTOR_REGISTRY_KEY_V333,JSON.stringify(rows));
+    return {saved:true,status:"COLLECTOR_TOKEN_REGISTERED_V333",count:rows.length};
+  }catch(error){return {saved:false,status:"COLLECTOR_REGISTRY_WRITE_ERROR_V333",error:String(error?.message||error).slice(0,160)};}
+}
+
+async function loadNativeV3CollectorRegistryV333(env) {
+  const {kv} = getKV(env);
+  if(!kv) return [];
+  try{ const raw=await kv.get(NATIVE_V3_COLLECTOR_REGISTRY_KEY_V333); const rows=raw?JSON.parse(raw):[]; return Array.isArray(rows)?rows:[]; }catch(_){return [];}
+}
+
+function createNativeV3CollectorBudgetV333(){
+  const b=createBudget();
+  b.totalUsed=0; b.totalLimit=NATIVE_V3_COLLECTOR_REQUEST_LIMIT_V333;
+  b.system.used=0; b.system.limit=0;
+  b.discovery.used=0; b.discovery.limit=0; b.discovery.liveUsed=0; b.discovery.liveLimit=0; b.discovery.backlogUsed=0; b.discovery.backlogLimit=0;
+  b.analysis.used=0; b.analysis.limit=NATIVE_V3_COLLECTOR_REQUEST_LIMIT_V333;
+  b.notification.used=0; b.notification.limit=0; b.notification.globalReserveActiveV174=false;
+  return b;
+}
+
+async function collectOneNativeV3TokenV333(env,budget,row,headBlock){
+  const token=normalize(row?.tokenAddress);
+  const pairCache=await loadVerifiedV3PairIdentityV329(env,token);
+  if(!pairCache?.valid) return {token,status:pairCache?.status||"PAIR_CACHE_UNAVAILABLE_V333",requestsUsed:0};
+  const pair=normalize(pairCache.record?.pairAddress), token0=normalize(pairCache.record?.token0), token1=normalize(pairCache.record?.token1);
+  let decimals=Number(row?.decimals);
+  if(!Number.isInteger(decimals)||decimals<0||decimals>36) return {token,pair,status:"TOKEN_DECIMALS_UNVERIFIED_V333",requestsUsed:0};
+  const ledger=await loadNativeV3SwapLedgerV331(env,token,pair);
+  const priorLast=Number.isFinite(Number(ledger?.lastObservedBlock))?Number(ledger.lastObservedBlock):null;
+  const toBlock=Math.trunc(headBlock);
+  let fromBlock;
+  let coverageGap=false;
+  if(Number.isFinite(priorLast)&&priorLast<toBlock){
+    fromBlock=priorLast+1;
+    if(toBlock-fromBlock+1>NATIVE_V3_COLLECTOR_BLOCKS_PER_RUN_V333) coverageGap=true;
+  }else if(Number.isFinite(priorLast)&&priorLast>=toBlock){
+    return {token,pair,status:"COLLECTOR_CAUGHT_UP_V333",fromBlock:null,toBlock,swaps:0,coverageGap:false,requestsUsed:0};
+  }else{
+    fromBlock=Math.max(0,toBlock-NATIVE_V3_COLLECTOR_BLOCKS_PER_RUN_V333+1);
+    coverageGap=true;
+  }
+  const rangeTo=Math.min(toBlock,fromBlock+NATIVE_V3_COLLECTOR_BLOCKS_PER_RUN_V333-1);
+  if(!budgetAvailable(budget,"analysis")) return {token,pair,status:"COLLECTOR_BUDGET_EXHAUSTED_V333",requestsUsed:0};
+  const before=safeNumber(budget.totalUsed);
+  const logsResult=await rpc(env,"eth_getLogs",[{fromBlock:"0x"+fromBlock.toString(16),toBlock:"0x"+rangeTo.toString(16),address:pair,topics:[UNISWAP_V3_SWAP_TOPIC_V326]}],budget,"analysis");
+  if(!Array.isArray(logsResult?.result)) return {token,pair,status:"COLLECTOR_LOGS_UNVERIFIED_V333",fromBlock,toBlock:rangeTo,coverageGap,requestsUsed:Math.max(0,safeNumber(budget.totalUsed)-before),error:logsResult?.error||null};
+  const unique=new Map();
+  for(const log of logsResult.result){
+    const data=String(log?.data||"").replace(/^0x/i,""); if(data.length<128)continue;
+    const amount0=signedInt256V326(data.slice(0,64)),amount1=signedInt256V326(data.slice(64,128)); if(typeof amount0!=="bigint"||typeof amount1!=="bigint")continue;
+    const raw=token===token0?amount0:(token===token1?amount1:null); if(typeof raw!=="bigint"||raw===0n)continue;
+    const amount=decimalFromSignedRawV326(raw,decimals); if(!Number.isFinite(amount)||amount===0)continue;
+    const txHash=String(log?.transactionHash||"").toLowerCase(),logIndex=String(log?.logIndex??""); const tradeKey=`${txHash}|${logIndex}`; if(!txHash||unique.has(tradeKey))continue;
+    unique.set(tradeKey,{tradeKey,transactionHash:txHash,logIndex,blockNumber:rpcBlockNumberV331(log?.blockNumber),pairAddress:pair,side:raw<0n?"BUY":"SELL",tokenAmount:Math.abs(amount),usd:null,usdVerified:false,priceUsd:null,observedAt:Date.now(),timestampBasis:"INGESTION_TIME_ONLY_V333"});
+  }
+  const scannedRange={fromBlock,toBlock:rangeTo,observedAt:Date.now(),swaps:logsResult.result.length,source:"SCHEDULED_NATIVE_V3_COLLECTOR_V333"};
+  const write=await persistNativeV3SwapLedgerV331(env,token,pair,[...unique.values()],[scannedRange]);
+  return {token,pair,status:unique.size?"COLLECTOR_SWAPS_PERSISTED_V333":"COLLECTOR_ZERO_SWAPS_RANGE_PERSISTED_V333",fromBlock,toBlock:rangeTo,swaps:unique.size,coverageGap,ledgerWriteStatus:write?.status||null,requestsUsed:Math.max(0,safeNumber(budget.totalUsed)-before)};
+}
+
+async function scheduledNativeV3CollectorV333(env){
+  const budget=createNativeV3CollectorBudgetV333();
+  const registry=await loadNativeV3CollectorRegistryV333(env);
+  const selected=registry.slice(-NATIVE_V3_COLLECTOR_MAX_TOKENS_PER_RUN_V333);
+  if(!selected.length) return {status:"NO_REGISTERED_V3_TOKENS_V333",tokens:0,requestsUsed:0,results:[]};
+  const head=await rpc(env,"eth_blockNumber",[],budget,"analysis");
+  let headBlock=null; try{if(head?.result)headBlock=Number(BigInt(head.result));}catch(_){}
+  if(!Number.isFinite(headBlock)) return {status:"COLLECTOR_HEAD_UNVERIFIED_V333",tokens:selected.length,requestsUsed:safeNumber(budget.totalUsed),results:[]};
+  const results=[];
+  for(const row of selected){ if(!budgetAvailable(budget,"analysis"))break; results.push(await collectOneNativeV3TokenV333(env,budget,row,headBlock)); }
+  return {status:"SCHEDULED_NATIVE_V3_COLLECTOR_COMPLETE_V333",headBlock,tokens:selected.length,processed:results.length,requestsUsed:safeNumber(budget.totalUsed),requestLimit:NATIVE_V3_COLLECTOR_REQUEST_LIMIT_V333,results};
+}
+
 /* =========================================================
    SCHEDULED
    ========================================================= */
@@ -67571,6 +67683,16 @@ async function scheduledScan(
           true
       }
     );
+
+  /* V333 Step 1A: autonomous native V3 collection is isolated from the
+   * scanner budget and fails open so it cannot stop the normal scheduled scan. */
+  let nativeV3CollectorV333;
+  try {
+    nativeV3CollectorV333 = await scheduledNativeV3CollectorV333(env);
+  } catch (error) {
+    nativeV3CollectorV333 = {status:"SCHEDULED_NATIVE_V3_COLLECTOR_ERROR_V333",error:String(error?.message||error).slice(0,180)};
+  }
+  result.nativeV3CollectorV333 = nativeV3CollectorV333;
 
   console.log(
     jsonStringifySafeV246({
@@ -67638,6 +67760,9 @@ async function scheduledScan(
         result.requestBudget
           ?.notification
           ?.used,
+
+      nativeV3CollectorV333:
+        result.nativeV3CollectorV333,
 
       timestamp:
         now()
