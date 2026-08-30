@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V348: DIAGNOSTIC-ONLY build from confirmed-working V346. /analyse, scheduled scan, collector, scoring and persistence paths are unchanged. Adds only GET /v347-diagnostic to inspect persisted V347 KV/reference/ledger state with zero writes and zero external RPC/provider calls.
+ * V351: HTTP-ONLY USD aggregation diagnostic built from confirmed-safe V348. /analyse, Telegram routing, scheduled scan, collector, scoring and persistence paths are unchanged. Adds only GET /v3usd-diagnostic?token=0xADDRESS to aggregate already-persisted V347 USD evidence with KV reads only and zero writes/external requests.
  * V346: CLEAN RESTORE BUILD from confirmed-working V337 Step 3A logic. No V338+ USD resolver/enrichment code is included.
  * V337: Step 3A verification layer. Preserves V336/V334 behavior and adds zero-request visibility for exact quote-side amounts already persisted on newly captured V3 swaps. Reports quote-ready ledger coverage (WETH/USDG) without converting historical swaps to USD or guessing missing quote evidence.
  * V336: Step 3A safe repair: preserves V334 command/reply path unchanged and adds only exact quote-side amount persistence to newly captured V3 swap records. No extra provider calls, no new Telegram formatter dependency, no historical USD guessing.
@@ -1449,7 +1449,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V348";
+const VERSION = "V351";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -67433,6 +67433,122 @@ async function v347StateDiagnosticV348(env) {
   return out;
 }
 
+
+/* ============================================================
+   V351 — HTTP-ONLY PERSISTED V3 USD AGGREGATION DIAGNOSTIC
+   ============================================================
+   Deliberately isolated from Telegram /analyse and scheduled execution.
+   - address-only query parameter: ?token=0x...
+   - existing pair-cache + ledger KV reads only
+   - zero KV writes
+   - zero RPC/provider/API/pricing requests
+   - aggregates only already-persisted V347 same-cycle USD evidence
+*/
+async function v3UsdDiagnosticV351(env, tokenInput) {
+  const startedAt = Date.now();
+  const token = normalize(tokenInput);
+  const out = {
+    version: VERSION,
+    diagnostic: "PERSISTED_V3_USD_HTTP_ONLY_V351",
+    safe: true,
+    writes: 0,
+    externalRequests: 0,
+    token,
+    pair: null,
+    evidenceBasis: "V347_SAME_CYCLE_CURRENT_REFERENCE_NOT_EXACT_HISTORICAL_BLOCK",
+    coverage: "PARTIAL",
+    ledgerRecords: 0,
+    usdVerifiedRecords: 0,
+    windows: {},
+    elapsedMs: null,
+    timestamp: now()
+  };
+
+  if (!isAddress(token)) {
+    out.status = "INVALID_TOKEN_ADDRESS_V351";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  const { kv } = getKV(env);
+  if (!kv) {
+    out.status = "KV_UNAVAILABLE_V351";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  try {
+    const pairCache = await loadVerifiedV3PairIdentityV329(env, token);
+    const pair = normalize(pairCache?.record?.pairAddress);
+    out.pairStatus = pairCache?.status || null;
+    if (pairCache?.valid !== true || !isAddress(pair)) {
+      out.status = "VERIFIED_V3_PAIR_UNAVAILABLE_V351";
+      out.elapsedMs = Date.now() - startedAt;
+      return out;
+    }
+    out.pair = pair;
+
+    const ledger = await loadNativeV3SwapLedgerV331(env, token, pair);
+    const rows = Array.isArray(ledger?.records) ? ledger.records : [];
+    out.ledgerRecords = rows.length;
+    out.verifiedRanges = Array.isArray(ledger?.scannedRanges) ? ledger.scannedRanges.length : null;
+
+    const windows = [
+      ["5m", 5 * 60 * 1000],
+      ["15m", 15 * 60 * 1000],
+      ["1h", 60 * 60 * 1000],
+      ["6h", 6 * 60 * 60 * 1000],
+      ["24h", 24 * 60 * 60 * 1000]
+    ];
+    const nowMs = Date.now();
+    const verifiedRows = [];
+
+    for (const r of rows) {
+      const usd = Number(r?.sameCycleUsdV347);
+      const ts = Number(r?.blockTimestampMs);
+      const side = String(r?.side || "").toUpperCase();
+      if (
+        r?.sameCycleUsdVerifiedV347 === true &&
+        Number.isFinite(usd) && usd > 0 &&
+        Number.isFinite(ts) && ts > 0 &&
+        (side === "BUY" || side === "SELL")
+      ) {
+        verifiedRows.push({ usd, ts, side });
+      }
+    }
+
+    out.usdVerifiedRecords = verifiedRows.length;
+
+    for (const [label, ageMs] of windows) {
+      let buyUsd = 0, sellUsd = 0, buys = 0, sells = 0;
+      for (const r of verifiedRows) {
+        if (r.ts > nowMs || nowMs - r.ts > ageMs) continue;
+        if (r.side === "BUY") { buyUsd += r.usd; buys++; }
+        else { sellUsd += r.usd; sells++; }
+      }
+      const total = buyUsd + sellUsd;
+      out.windows[label] = {
+        buys,
+        sells,
+        buyUsd: Number(buyUsd.toFixed(6)),
+        sellUsd: Number(sellUsd.toFixed(6)),
+        netUsd: Number((buyUsd - sellUsd).toFixed(6)),
+        buyPressurePct: total > 0 ? Number(((buyUsd / total) * 100).toFixed(2)) : null
+      };
+    }
+
+    out.status = verifiedRows.length > 0
+      ? "PERSISTED_USD_AGGREGATION_VERIFIED_V351"
+      : "PERSISTED_USD_EVIDENCE_UNAVAILABLE_V351";
+  } catch (error) {
+    out.status = "DIAGNOSTIC_ERROR_V351";
+    out.error = String(error?.message || error).slice(0, 240);
+  }
+
+  out.elapsedMs = Date.now() - startedAt;
+  return out;
+}
+
 /* =========================================================
    ROUTER
    ========================================================= */
@@ -67557,6 +67673,18 @@ async function handleRequest(
     return jsonResponse(
       await v347StateDiagnosticV348(
         env
+      )
+    );
+  }
+
+  if (
+    path ===
+    "/v3usd-diagnostic"
+  ) {
+    return jsonResponse(
+      await v3UsdDiagnosticV351(
+        env,
+        url.searchParams.get("token") || ""
       )
     );
   }
