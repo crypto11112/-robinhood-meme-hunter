@@ -1,5 +1,23 @@
 {
   "name": "robinhood-meme-hunter",
   "main": "worker.js",
-  "compatibility_date": "2026-08-23"
+  "compatibility_date": "2026-08-23",
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "V3_LIVE_COLLECTOR",
+        "class_name": "V3LiveCollectorV363"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v363-live-collector-1",
+      "new_sqlite_classes": [
+        "V3LiveCollectorV363"
+      ]
+    }
+  ]
 }
