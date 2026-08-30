@@ -1452,7 +1452,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V356";
+const VERSION = "V357";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -68059,6 +68059,175 @@ async function v3RangeCapabilityDiagnosticV356(env, tokenInput) {
   return out;
 }
 
+
+
+/* ============================================================
+   V357 — ROBINHOOD PUBLIC RPC V3 eth_getLogs RANGE CAPABILITY
+   ============================================================
+   HTTP-only / read-only diagnostic. It does NOT modify /analyse,
+   scheduled collection, scoring, alerts, ledgers, ranges or KV state.
+   Purpose: measure whether the Robinhood public RPC can provide wider
+   exact V3 Swap-log ranges than the 10-block Alchemy Free-tier limit.
+*/
+const V357_PUBLIC_RANGE_TESTS = [10, 100, 1000, 5000, 10000, 50000];
+const V357_PUBLIC_RANGE_TIMEOUT_MS = 6500;
+
+async function v357RawPublicRpc(method, params, timeoutMs = V357_PUBLIC_RANGE_TIMEOUT_MS) {
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(500, Number(timeoutMs) || V357_PUBLIC_RANGE_TIMEOUT_MS));
+  try {
+    const response = await fetch(PUBLIC_RPC, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
+      signal: controller.signal
+    });
+    let payload = null;
+    let parseError = null;
+    try { payload = await response.json(); } catch (error) { parseError = String(error?.message || error); }
+    const rpcError = payload?.error || null;
+    return {
+      ok: response.ok && !rpcError && !parseError,
+      httpStatus: response.status,
+      result: response.ok && !rpcError ? (payload?.result ?? null) : null,
+      rpcErrorCode: Number.isFinite(Number(rpcError?.code)) ? Number(rpcError.code) : null,
+      error: rpcError?.message || parseError || (!response.ok ? `HTTP_${response.status}` : null),
+      elapsedMs: Date.now() - startedAt
+    };
+  } catch (error) {
+    const name = String(error?.name || "");
+    return {
+      ok: false,
+      httpStatus: null,
+      result: null,
+      rpcErrorCode: null,
+      error: name === "AbortError" ? `TIMEOUT_${timeoutMs}MS` : String(error?.message || error).slice(0, 300),
+      elapsedMs: Date.now() - startedAt
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function v3PublicRangeCapabilityDiagnosticV357(env, tokenInput) {
+  const startedAt = Date.now();
+  const token = normalize(tokenInput);
+  const out = {
+    version: VERSION,
+    diagnostic: "ROBINHOOD_PUBLIC_RPC_V3_ETH_GETLOGS_RANGE_CAPABILITY_V357",
+    safe: true,
+    writes: 0,
+    kvWrites: 0,
+    collectorMutated: false,
+    analyseMutated: false,
+    token,
+    pair: null,
+    topic: UNISWAP_V3_SWAP_TOPIC_V326,
+    provider: "ROBINHOOD_PUBLIC_RPC_ONLY",
+    rpc: PUBLIC_RPC,
+    timeoutPerRequestMs: V357_PUBLIC_RANGE_TIMEOUT_MS,
+    requestedRanges: V357_PUBLIC_RANGE_TESTS,
+    externalRequests: 0,
+    headBlock: null,
+    tests: [],
+    timestamp: now(),
+    elapsedMs: null
+  };
+
+  if (!isAddress(token)) {
+    out.status = "INVALID_TOKEN_ADDRESS_V357";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  try {
+    const pairCache = await loadVerifiedV3PairIdentityV329(env, token);
+    const pair = normalize(pairCache?.record?.pairAddress);
+    out.pairStatus = pairCache?.status || null;
+    if (pairCache?.valid !== true || !isAddress(pair)) {
+      out.status = "VERIFIED_V3_PAIR_UNAVAILABLE_V357";
+      out.elapsedMs = Date.now() - startedAt;
+      return out;
+    }
+    out.pair = pair;
+
+    const head = await v357RawPublicRpc("eth_blockNumber", []);
+    out.externalRequests++;
+    if (!head.ok) {
+      out.status = "PUBLIC_RPC_HEAD_FAILED_V357";
+      out.headRequest = { ok:false, httpStatus:head.httpStatus, rpcErrorCode:head.rpcErrorCode, error:head.error, elapsedMs:head.elapsedMs };
+      out.elapsedMs = Date.now() - startedAt;
+      return out;
+    }
+
+    const headBlock = v356BlockNumber(head.result);
+    if (!Number.isFinite(headBlock)) {
+      out.status = "PUBLIC_RPC_HEAD_INVALID_V357";
+      out.elapsedMs = Date.now() - startedAt;
+      return out;
+    }
+    out.headBlock = headBlock;
+    out.headRequest = { ok:true, httpStatus:head.httpStatus, elapsedMs:head.elapsedMs };
+
+    for (const blocks of V357_PUBLIC_RANGE_TESTS) {
+      const fromBlock = Math.max(0, headBlock - blocks + 1);
+      const toBlock = headBlock;
+      const call = await v357RawPublicRpc("eth_getLogs", [{
+        fromBlock: `0x${fromBlock.toString(16)}`,
+        toBlock: `0x${toBlock.toString(16)}`,
+        address: pair,
+        topics: [UNISWAP_V3_SWAP_TOPIC_V326]
+      }]);
+      out.externalRequests++;
+      const logs = Array.isArray(call.result) ? call.result : null;
+      let firstLogBlock = null;
+      let lastLogBlock = null;
+      if (logs?.length) {
+        const nums = logs.map(x => v356BlockNumber(x?.blockNumber)).filter(Number.isFinite);
+        if (nums.length) {
+          firstLogBlock = Math.min(...nums);
+          lastLogBlock = Math.max(...nums);
+        }
+      }
+      out.tests.push({
+        blocks,
+        fromBlock,
+        toBlock,
+        ok: call.ok && Array.isArray(logs),
+        httpStatus: call.httpStatus,
+        rpcErrorCode: call.rpcErrorCode,
+        error: call.error,
+        elapsedMs: call.elapsedMs,
+        logs: logs ? logs.length : null,
+        firstLogBlock,
+        lastLogBlock
+      });
+
+      // Stop escalating after the first public-RPC failure. This avoids
+      // hammering the endpoint with even larger ranges once a ceiling is known.
+      if (!(call.ok && Array.isArray(logs))) {
+        out.stoppedAfterFailure = true;
+        break;
+      }
+    }
+
+    const successful = out.tests.filter(t => t.ok).map(t => t.blocks);
+    out.largestSuccessfulRange = successful.length ? Math.max(...successful) : null;
+    out.allAttemptedRangesPassed = out.tests.length > 0 && out.tests.every(t => t.ok);
+    out.testedAllRequestedRanges = out.tests.length === V357_PUBLIC_RANGE_TESTS.length;
+    out.status = successful.length
+      ? "PUBLIC_RPC_RANGE_CAPABILITY_MEASURED_V357"
+      : "PUBLIC_RPC_RANGE_TESTS_ALL_FAILED_V357";
+  } catch (error) {
+    out.status = "DIAGNOSTIC_ERROR_V357";
+    out.error = String(error?.message || error).slice(0, 300);
+  }
+
+  out.elapsedMs = Date.now() - startedAt;
+  return out;
+}
+
 /* =========================================================
    ROUTER
    ========================================================= */
@@ -68217,6 +68386,18 @@ async function handleRequest(
   ) {
     return jsonResponse(
       await v3RangeCapabilityDiagnosticV356(
+        env,
+        url.searchParams.get("token") || ""
+      )
+    );
+  }
+
+  if (
+    path ===
+    "/v3public-range-diagnostic"
+  ) {
+    return jsonResponse(
+      await v3PublicRangeCapabilityDiagnosticV357(
         env,
         url.searchParams.get("token") || ""
       )
