@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V374
- * AUTHORITATIVE RUNTIME VERSION: V374
+ * Robinhood Chain Meme Hunter — V375
+ * AUTHORITATIVE RUNTIME VERSION: V375
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V374";
+const VERSION = "V375";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -68897,6 +68897,304 @@ async function v3AlchemyWebSocketDiagnosticV360(env, tokenInput) {
 }
 
 
+
+/* ============================================================
+   V375 — EXACT TRANSACTION V3 ROUTE / POOL RECONCILIATION
+   Read-only diagnostic for a known transaction hash.
+   Purpose:
+   - fetch the exact transaction receipt from Alchemy
+   - enumerate every Uniswap V3 Swap log in that transaction
+   - verify emitting pool token0/token1/fee/factory on-chain
+   - compare each pool with the bot's currently monitored verified pair
+   - decode candidate-token BUY/SELL direction and exact quote amount
+   - determine whether a reported buy used the monitored pool, another V3 pool,
+     multiple V3 pools, or no V3 Swap log at all
+   No scoring changes. No KV writes. No Durable Object trade writes.
+   ============================================================ */
+
+const UNISWAP_V3_FACTORY_SELECTOR_V375 = "0xc45a0155";
+
+function decodeUintWordV375(value) {
+  const text = String(value || "").replace(/^0x/i, "");
+  if (!/^[a-fA-F0-9]{64}$/.test(text)) return null;
+  try {
+    const n = BigInt("0x" + text);
+    return n <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(n) : n.toString();
+  } catch (_) {
+    return null;
+  }
+}
+
+function isTxHashV375(value) {
+  return /^0x[a-fA-F0-9]{64}$/.test(String(value || ""));
+}
+
+async function v375EthCallRaw(alchemyUrl, to, data) {
+  if (!isAddress(normalize(to))) return { ok:false, result:null, error:"INVALID_TO_ADDRESS" };
+  return v356RawAlchemyRpc(
+    alchemyUrl,
+    "eth_call",
+    [{ to: normalize(to), data }, "latest"],
+    4500
+  );
+}
+
+async function v3ExactTxDiagnosticV375(env, tokenInput, txInput) {
+  const startedAt = Date.now();
+  const token = normalize(tokenInput || "");
+  const txHash = String(txInput || "").toLowerCase();
+
+  const out = {
+    version: VERSION,
+    diagnostic: "EXACT_TRANSACTION_V3_ROUTE_RECONCILIATION_V375",
+    safe: true,
+    readOnly: true,
+    workersKvWrites: 0,
+    durableObjectTradeWrites: 0,
+    scoringMutated: false,
+    token,
+    txHash,
+    monitoredPair: null,
+    receiptFound: false,
+    transactionSucceeded: null,
+    blockNumber: null,
+    receiptLogCount: 0,
+    v3SwapLogCount: 0,
+    uniqueV3Pools: 0,
+    monitoredPairSwapCount: 0,
+    otherV3PoolSwapCount: 0,
+    candidateV3SwapCount: 0,
+    candidateBuys: 0,
+    candidateSells: 0,
+    candidateBuyQuoteByToken: {},
+    candidateSellQuoteByToken: {},
+    pools: [],
+    swapLogs: [],
+    conclusion: "UNVERIFIED",
+    timestamp: now()
+  };
+
+  if (!isAddress(token)) {
+    out.status = "INVALID_TOKEN_V375";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+  if (!isTxHashV375(txHash)) {
+    out.status = "INVALID_TX_HASH_V375";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  const cfg = await v3LiveCollectorConfigV363(env, token);
+  if (cfg?.ok && isAddress(cfg?.pair)) out.monitoredPair = normalize(cfg.pair);
+
+  const alchemyUrl = v356AlchemyUrl(env);
+  if (!alchemyUrl) {
+    out.status = "ALCHEMY_NOT_CONFIGURED_V375";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  const receiptCall = await v356RawAlchemyRpc(
+    alchemyUrl,
+    "eth_getTransactionReceipt",
+    [txHash],
+    6000
+  );
+
+  if (!receiptCall?.ok) {
+    out.status = "TX_RECEIPT_RPC_FAILED_V375";
+    out.rpcError = receiptCall?.error || null;
+    out.httpStatus = receiptCall?.httpStatus ?? null;
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  const receipt = receiptCall.result;
+  if (!receipt || typeof receipt !== "object") {
+    out.status = "TX_RECEIPT_NOT_FOUND_V375";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  out.receiptFound = true;
+  out.blockNumber = rpcBlockNumberV331(receipt?.blockNumber);
+  out.transactionSucceeded =
+    String(receipt?.status || "").toLowerCase() === "0x1" ? true :
+    String(receipt?.status || "").toLowerCase() === "0x0" ? false : null;
+
+  const receiptLogs = Array.isArray(receipt?.logs) ? receipt.logs : [];
+  out.receiptLogCount = receiptLogs.length;
+
+  const v3Logs = receiptLogs.filter(log =>
+    String(log?.topics?.[0] || "").toLowerCase() === UNISWAP_V3_SWAP_TOPIC_V326
+  );
+  out.v3SwapLogCount = v3Logs.length;
+
+  const emitters = [...new Set(
+    v3Logs
+      .map(log => normalize(log?.address || ""))
+      .filter(isAddress)
+  )].slice(0, 8);
+
+  const poolMeta = new Map();
+
+  for (const pool of emitters) {
+    const [t0r, t1r, feeR, factoryR] = await Promise.all([
+      v375EthCallRaw(alchemyUrl, pool, UNISWAP_V3_TOKEN0_SELECTOR_V326),
+      v375EthCallRaw(alchemyUrl, pool, UNISWAP_V3_TOKEN1_SELECTOR_V326),
+      v375EthCallRaw(alchemyUrl, pool, UNISWAP_V3_FEE_SELECTOR_V328),
+      v375EthCallRaw(alchemyUrl, pool, UNISWAP_V3_FACTORY_SELECTOR_V375)
+    ]);
+
+    const token0 = t0r?.ok ? decodeEthCallAddressV326(t0r.result) : null;
+    const token1 = t1r?.ok ? decodeEthCallAddressV326(t1r.result) : null;
+    const factory = factoryR?.ok ? decodeEthCallAddressV326(factoryR.result) : null;
+    const fee = feeR?.ok ? decodeUintWordV375(feeR.result) : null;
+
+    const candidateInPool = token0 === token || token1 === token;
+    const isMonitoredPair = out.monitoredPair === pool;
+
+    const meta = {
+      pool,
+      token0,
+      token1,
+      fee,
+      factory,
+      candidateInPool,
+      isMonitoredPair,
+      metadataVerified:
+        isAddress(token0) &&
+        isAddress(token1) &&
+        fee !== null &&
+        isAddress(factory),
+      metadataErrors: {
+        token0: t0r?.ok ? null : (t0r?.error || "UNVERIFIED"),
+        token1: t1r?.ok ? null : (t1r?.error || "UNVERIFIED"),
+        fee: feeR?.ok ? null : (feeR?.error || "UNVERIFIED"),
+        factory: factoryR?.ok ? null : (factoryR?.error || "UNVERIFIED")
+      }
+    };
+
+    poolMeta.set(pool, meta);
+    out.pools.push(meta);
+  }
+
+  out.uniqueV3Pools = out.pools.length;
+
+  for (const log of v3Logs) {
+    const pool = normalize(log?.address || "");
+    const meta = poolMeta.get(pool) || null;
+    const data = String(log?.data || "").replace(/^0x/i, "");
+
+    const amount0Raw =
+      data.length >= 128 ? signedInt256V326(data.slice(0, 64)) : null;
+    const amount1Raw =
+      data.length >= 128 ? signedInt256V326(data.slice(64, 128)) : null;
+
+    let side = null;
+    let quoteToken = null;
+    let quoteAmount = null;
+    let candidateRaw = null;
+    let quoteRaw = null;
+
+    if (meta?.candidateInPool && typeof amount0Raw === "bigint" && typeof amount1Raw === "bigint") {
+      candidateRaw = meta.token0 === token ? amount0Raw : amount1Raw;
+      quoteRaw = meta.token0 === token ? amount1Raw : amount0Raw;
+      quoteToken = meta.token0 === token ? meta.token1 : meta.token0;
+
+      if (candidateRaw !== 0n) side = candidateRaw < 0n ? "BUY" : "SELL";
+
+      const quoteDecimals =
+        quoteToken === CANONICAL_WETH_V179 ? 18 :
+        quoteToken === CANONICAL_USDG_V179 ? CANONICAL_USDG_DECIMALS_V179 :
+        null;
+
+      if (Number.isInteger(quoteDecimals)) {
+        const q = decimalFromSignedRawV326(quoteRaw, quoteDecimals);
+        if (Number.isFinite(q)) quoteAmount = Math.abs(q);
+      }
+    }
+
+    const row = {
+      transactionHash: String(log?.transactionHash || txHash).toLowerCase(),
+      logIndex: String(log?.logIndex ?? ""),
+      blockNumber: rpcBlockNumberV331(log?.blockNumber),
+      pool,
+      isMonitoredPair: meta?.isMonitoredPair === true,
+      candidateInPool: meta?.candidateInPool === true,
+      token0: meta?.token0 || null,
+      token1: meta?.token1 || null,
+      fee: meta?.fee ?? null,
+      factory: meta?.factory || null,
+      side,
+      quoteToken,
+      quoteSymbol:
+        quoteToken === CANONICAL_WETH_V179 ? "WETH" :
+        quoteToken === CANONICAL_USDG_V179 ? "USDG" :
+        null,
+      quoteAmount,
+      amount0Raw: typeof amount0Raw === "bigint" ? amount0Raw.toString() : null,
+      amount1Raw: typeof amount1Raw === "bigint" ? amount1Raw.toString() : null
+    };
+
+    out.swapLogs.push(row);
+
+    if (row.isMonitoredPair) out.monitoredPairSwapCount++;
+    else out.otherV3PoolSwapCount++;
+
+    if (row.candidateInPool) {
+      out.candidateV3SwapCount++;
+      if (side === "BUY") out.candidateBuys++;
+      if (side === "SELL") out.candidateSells++;
+
+      if (Number.isFinite(quoteAmount) && quoteToken) {
+        const target =
+          side === "BUY" ? out.candidateBuyQuoteByToken :
+          side === "SELL" ? out.candidateSellQuoteByToken :
+          null;
+        if (target) {
+          target[quoteToken] = Number(
+            ((Number(target[quoteToken]) || 0) + quoteAmount).toFixed(12)
+          );
+        }
+      }
+    }
+  }
+
+  if (out.v3SwapLogCount === 0) {
+    out.status = "NO_V3_SWAP_LOGS_IN_TRANSACTION_V375";
+    out.conclusion = "NO_UNISWAP_V3_SWAP_TOPIC_FOUND";
+  } else if (out.candidateV3SwapCount === 0) {
+    out.status = "V3_SWAPS_FOUND_BUT_NOT_FOR_CANDIDATE_V375";
+    out.conclusion = "V3_ACTIVITY_EXISTS_BUT_CANDIDATE_NOT_IN_VERIFIED_EMITTING_POOLS";
+  } else {
+    const candidateRows = out.swapLogs.filter(r => r.candidateInPool);
+    const monitoredCandidateRows = candidateRows.filter(r => r.isMonitoredPair);
+    const otherCandidateRows = candidateRows.filter(r => !r.isMonitoredPair);
+
+    if (monitoredCandidateRows.length > 0 && otherCandidateRows.length === 0) {
+      out.status = "CANDIDATE_SWAP_USED_MONITORED_PAIR_V375";
+      out.conclusion =
+        out.candidateBuys > 0
+          ? "REPORTED_BUY_EXECUTED_IN_MONITORED_V3_PAIR"
+          : out.candidateSells > 0
+            ? "CANDIDATE_SWAP_EXECUTED_IN_MONITORED_V3_PAIR"
+            : "MONITORED_PAIR_SWAP_DIRECTION_UNVERIFIED";
+    } else if (monitoredCandidateRows.length === 0 && otherCandidateRows.length > 0) {
+      out.status = "CANDIDATE_SWAP_USED_OTHER_V3_POOL_V375";
+      out.conclusion = "ADDITIONAL_CANDIDATE_V3_POOL_NOT_CURRENTLY_MONITORED";
+    } else {
+      out.status = "CANDIDATE_SWAP_USED_MULTIPLE_V3_POOLS_V375";
+      out.conclusion = "MULTI_POOL_V3_ROUTE_INCLUDING_MONITORED_AND_OTHER_POOL";
+    }
+  }
+
+  out.elapsedMs = Date.now() - startedAt;
+  return out;
+}
+
+
 /* ============================================================
    V374 — LIVE V3 WEBSOCKET vs DIRECT eth_getLogs RECONCILIATION
    Read-only diagnostic. No scoring mutation, no KV writes, no DO trade writes.
@@ -69281,6 +69579,18 @@ async function handleRequest(
       await v3AlchemyWebSocketDiagnosticV360(
         env,
         url.searchParams.get("token") || ""
+      )
+    );
+  }
+
+
+
+  if (path === "/v3tx-diagnostic") {
+    return jsonResponse(
+      await v3ExactTxDiagnosticV375(
+        env,
+        url.searchParams.get("token") || "",
+        url.searchParams.get("tx") || ""
       )
     );
   }
