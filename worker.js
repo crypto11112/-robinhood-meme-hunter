@@ -6,7 +6,8 @@
  */
 /**
  * Robinhood Chain Meme Hunter
- * V310: frozen-entry snapshot inspection + successful-call KV checkpoint.
+ * V311: frozen V309 entry-snapshot parity fix for Telegram opportunity + verified holder concentration fields.
+ * V311: frozen-entry snapshot inspection + successful-call KV checkpoint.
  * - Adds read-only /callinfo SYMBOL|0xADDRESS using stored entrySignalSnapshotV309 only.
  * - Pre-V309 calls are never backfilled: /callinfo reports snapshot unavailable.
  * - After a successful Telegram alert and V270 registration, checkpoints main state immediately before diagnostic/history work.
@@ -1388,7 +1389,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V310";
+const VERSION = "V311";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -46159,10 +46160,24 @@ function buildEntrySignalSnapshotV309(candidate, capturedAt) {
   };
 
   const verifiedMarket = market?.verified === true;
-  const concentrationVerified = holders?.concentrationVerified === true;
+
+  /*
+   * V311 snapshot parity fix:
+   * Freeze the same presentation-safe opportunity + holder interpretation that
+   * the Telegram alert uses. This avoids reading older/raw holder field names
+   * that can differ from the verified V269 presentation model.
+   * No provider requests, scoring changes, qualification changes, or backfill.
+   */
+  const opportunityPresentationV311 =
+    telegramOpportunityInterpretationV261(candidate);
+  const holderPresentationV311 =
+    telegramHolderPresentationV269(candidate);
+
+  const concentrationVerified =
+    holderPresentationV311?.concentration?.verified === true;
   const holderCountVerified =
-    holders?.countersVerified === true &&
-    finiteOrNull(holders?.holderCount) !== null;
+    holderPresentationV311?.holderCount?.verified === true &&
+    finiteOrNull(holderPresentationV311?.holderCount?.count) !== null;
 
   const flowSnapshot = {};
   for (const window of ["m5", "m15", "h1", "h6", "h12", "h24"]) {
@@ -46185,7 +46200,7 @@ function buildEntrySignalSnapshotV309(candidate, capturedAt) {
 
     opportunity: {
       score: finiteOrNull(candidate?.opportunity?.score),
-      label: candidate?.opportunity?.label || null
+      label: opportunityPresentationV311?.label || candidate?.opportunity?.label || null
     },
     momentum: {
       score: finiteOrNull(candidate?.momentum?.score),
@@ -46230,12 +46245,22 @@ function buildEntrySignalSnapshotV309(candidate, capturedAt) {
 
     holders: {
       holderCountVerified,
-      holderCount: holderCountVerified ? finiteOrNull(holders?.holderCount) : null,
-      holderSource: holders?.holderSource || holders?.counterSource || null,
+      holderCount: holderCountVerified
+        ? finiteOrNull(holderPresentationV311?.holderCount?.count)
+        : null,
+      holderSource: holderCountVerified
+        ? (holderPresentationV311?.holderCount?.source || null)
+        : null,
       concentrationVerified,
-      topHolderPct: concentrationVerified ? finiteOrNull(whale?.topHolderPct) : null,
-      top10Pct: concentrationVerified ? finiteOrNull(whale?.top10Pct) : null,
-      concentration: concentrationVerified ? (whale?.concentration || null) : null,
+      concentrationFreshness: concentrationVerified
+        ? (holderPresentationV311?.concentration?.freshness || null)
+        : null,
+      concentrationSource: concentrationVerified
+        ? (holderPresentationV311?.concentration?.source || null)
+        : null,
+      topHolderPct: concentrationVerified ? finiteOrNull(whale?.top1Percent) : null,
+      top10Pct: concentrationVerified ? finiteOrNull(whale?.top10Percent) : null,
+      concentration: concentrationVerified ? (whale?.concentrationRisk || null) : null,
       smartMoneyCandidate: concentrationVerified && whale?.verified === true
         ? whale?.smartMoneyCandidate === true
         : null
@@ -53444,21 +53469,21 @@ for (
         callPerformanceRegistrationV270;
 
       /*
-       * V310 successful-call checkpoint. The call-performance record and its
+       * V311 successful-call checkpoint. The call-performance record and its
        * frozen V309 entry snapshot are written immediately after Telegram
        * success instead of waiting for the end of the scan. This is a KV-only
        * persistence checkpoint and consumes no scanner/provider request budget.
        */
-      const callPerformanceCheckpointV310 =
+      const callPerformanceCheckpointV311 =
         await writeState(env, state);
 
       telegramResults[
         telegramResults.length - 1
-      ].callPerformanceCheckpointV310 = {
+      ].callPerformanceCheckpointV311 = {
         attempted: true,
-        saved: callPerformanceCheckpointV310?.saved === true,
-        binding: callPerformanceCheckpointV310?.binding || null,
-        error: callPerformanceCheckpointV310?.error || null,
+        saved: callPerformanceCheckpointV311?.saved === true,
+        binding: callPerformanceCheckpointV311?.binding || null,
+        error: callPerformanceCheckpointV311?.error || null,
         address,
         snapshotCaptured:
           callPerformanceRegistrationV270?.entrySignalSnapshotV309?.captured === true,
@@ -64421,7 +64446,7 @@ function callPerformanceMessageV271(
   ].join("\n");
 }
 
-function callInfoMessageV310(record) {
+function callInfoMessageV311(record) {
   if (!record) {
     return "❌ <b>Call not found.</b>";
   }
@@ -65163,7 +65188,7 @@ async function telegramCommandReplyV271(
         )
       ].join("\n");
     } else if (resolved.record) {
-      reply = callInfoMessageV310(resolved.record);
+      reply = callInfoMessageV311(resolved.record);
     } else {
       reply = "❌ <b>Call not found.</b>\n\nUse <code>/calls</code> to see stored calls.";
     }
