@@ -1,4 +1,10 @@
 /**
+ * V308 / V2.0:
+ * - VERIFIED PERFORMANCE TIMING: records the first verified observation at/above 1.25x, 1.5x, 2x, 5x and 10x market-cap milestones.
+ * - HISTORICAL-SAFE: older calls seed milestones only from their already-stored verified ATH observation timestamp and display ≤ elapsed time, never an invented exact crossing time.
+ * - READ-ONLY PRESENTATION: /best shows compact “Verified by” milestone timing; no extra provider requests, no ATH maths changes, no scoring changes and no request-budget changes.
+ */
+/**
  * Robinhood Chain Meme Hunter
  * V306
  * - /best PERFORMANCE SUMMARY ONLY: adds verified call hit-rates (1.25x/1.5x/2x/5x/10x), median ATH multiple and average ATH multiple from the existing stored call registry
@@ -1376,7 +1382,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V307";
+const VERSION = "V308";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -27473,6 +27479,9 @@ function applyDexPerformanceBatchV295(state, pairs, targetToken) {
       next.currentPriceUsd
     );
 
+    seedHistoricalPerformanceMilestonesV308(next);
+    capturePerformanceMilestonesV308(next, nowMs);
+
     state.callPerformanceV270[address] = next;
     observed++;
   }
@@ -46414,6 +46423,11 @@ function registerSuccessfulCallPerformanceV270(
     record.exactV270EntryBaseline = true;
   }
 
+  capturePerformanceMilestonesV308(
+    record,
+    Number(record?.athMarketCapTimestamp) || Date.now()
+  );
+
   state.callPerformanceV270[
     address
   ] = record;
@@ -46484,6 +46498,11 @@ function updateCallPerformanceV270(
       existing
         ?.exactV270EntryBaseline ===
       true;
+
+    capturePerformanceMilestonesV308(
+      updated,
+      Number(updated?.athMarketCapTimestamp) || Date.now()
+    );
 
     state.callPerformanceV270[
       address
@@ -64329,6 +64348,67 @@ function callTimestampTextV306(timestamp) {
   return `${clock} — ${age} ago`;
 }
 
+const PERFORMANCE_MILESTONES_V308 = [1.25, 1.5, 2, 5, 10];
+
+function capturePerformanceMilestonesV308(record, observedAt = Date.now()) {
+  if (!record || typeof record !== "object") return record;
+
+  const entryAt = Number(record?.entryTimestamp);
+  const athMultiple = Number(record?.athMultipleByMarketCap);
+  if (!Number.isFinite(entryAt) || entryAt <= 0 || !Number.isFinite(athMultiple) || athMultiple <= 0) {
+    return record;
+  }
+
+  const existing =
+    record.performanceMilestonesV308 &&
+    typeof record.performanceMilestonesV308 === "object"
+      ? { ...record.performanceMilestonesV308 }
+      : {};
+
+  const verifiedAt =
+    Number.isFinite(Number(observedAt)) && Number(observedAt) >= entryAt
+      ? Number(observedAt)
+      : Date.now();
+
+  for (const threshold of PERFORMANCE_MILESTONES_V308) {
+    const key = String(threshold);
+    if (athMultiple < threshold || existing[key]?.verifiedAt) continue;
+
+    existing[key] = {
+      threshold,
+      verifiedAt,
+      elapsedMs: Math.max(0, verifiedAt - entryAt),
+      evidence: "VERIFIED_MARKET_CAP_OBSERVATION",
+      exactCrossingTimeKnown: false
+    };
+  }
+
+  record.performanceMilestonesV308 = existing;
+  return record;
+}
+
+function seedHistoricalPerformanceMilestonesV308(record) {
+  if (!record || typeof record !== "object") return record;
+  const observedAt = Number(record?.athMarketCapTimestamp);
+  if (!Number.isFinite(observedAt) || observedAt <= 0) return record;
+  return capturePerformanceMilestonesV308(record, observedAt);
+}
+
+function performanceMilestoneLineV308(record) {
+  seedHistoricalPerformanceMilestonesV308(record);
+  const milestones = record?.performanceMilestonesV308 || {};
+  const parts = [];
+
+  for (const threshold of PERFORMANCE_MILESTONES_V308) {
+    const milestone = milestones[String(threshold)];
+    const elapsed = Number(milestone?.elapsedMs);
+    if (!Number.isFinite(elapsed) || elapsed < 0) continue;
+    parts.push(`≥${threshold}x ≤${compactCallAgeV307(elapsed)}`);
+  }
+
+  return parts.length ? `   ⚡ Verified by: ${parts.join(" | ")}` : null;
+}
+
 function bestCallsMessageV271(
   state
 ) {
@@ -64455,6 +64535,8 @@ function bestCallsMessageV271(
       lines.push(
         `   Current MC ${currentMc} | ${belowAth} below ATH`
       );
+      const milestoneLineV308 = performanceMilestoneLineV308(record);
+      if (milestoneLineV308) lines.push(milestoneLineV308);
       lines.push("");
     }
   );
