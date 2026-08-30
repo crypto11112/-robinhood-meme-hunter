@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V324 — directional USD provider-path diagnostics (no extra provider requests)
+ * V325 — guaranteed manual Telegram directional diagnostics passthrough
  * - Exposes GeckoTerminal/Bitquery attempt status, HTTP status and row counts in manual /analyse.
  * - Diagnostic-only provider-path visibility; preserves V323/V322 behavior.
  *
@@ -1440,7 +1440,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V324";
+const VERSION = "V325";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -42908,7 +42908,7 @@ function telegramMessage(
     `🔴 24h Sells: <b>${trade24h.sells}</b>`,
     `💵 24h Total Volume: <b>${market?.verified ? money(market?.volume?.h24) : "UNVERIFIED"}</b>`,
     dexProviderReportedV320
-      ? "ℹ️ <i>DexScreener counts/total volume are provider-reported. V324 never estimates buy-USD/sell-USD from them.</i>"
+      ? "ℹ️ <i>DexScreener counts/total volume are provider-reported. V325 never estimates buy-USD/sell-USD from them.</i>"
       : "ℹ️ <i>Provider-reported counts/total volume are separate from verified directional USD evidence.</i>",
     "",
     "💵 <b>Verified Directional USD — INDEXED TRADE FEED</b>",
@@ -42939,7 +42939,7 @@ function telegramMessage(
       ? ""
       : null,
     candidate?.manualDirectionalDiagnosticsV324
-      ? "🔧 <b>Directional USD diagnostics — V324</b>"
+      ? "🔧 <b>Directional USD diagnostics — V325</b>"
       : null,
     candidate?.manualDirectionalDiagnosticsV324
       ? `GeckoTerminal: <b>${candidate.manualDirectionalDiagnosticsV324.gecko.attempted ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(candidate.manualDirectionalDiagnosticsV324.gecko.status)}</b> | HTTP <b>${escapeHtml(candidate.manualDirectionalDiagnosticsV324.gecko.httpStatus ?? "N/A")}</b> | returned <b>${safeNumber(candidate.manualDirectionalDiagnosticsV324.gecko.returnedCount)}</b> | accepted <b>${safeNumber(candidate.manualDirectionalDiagnosticsV324.gecko.acceptedCount)}</b>`
@@ -63942,7 +63942,7 @@ async function manualVerifiedUsdRecoveryV289(
   };
 }
 
-function telegramAnalyseParityMessageV294(candidate) {
+function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 = null) {
   const standard = telegramMessage(candidate);
   const lines = String(standard || "").split("\n");
 
@@ -63950,10 +63950,28 @@ function telegramAnalyseParityMessageV294(candidate) {
    * V294 intentionally reuses the standard autonomous presentation formatter.
    * Only the alert identity/header is changed so a manual request cannot be
    * mistaken for a newly-qualified autonomous launch alert.
+   *
+   * V325: pass the already-computed provider diagnostics explicitly into this
+   * manual formatter and append them near the end of the Telegram message.
+   * This is presentation-only and adds zero provider requests.
    */
   if (lines.length >= 2) {
     lines[0] = `🔎 <b>Robinhood Chain Meme Hunter ${VERSION}</b>`;
     lines[1] = "🧪 <b>Fresh Manual Analysis</b>";
+  }
+
+  const d = directionalDiagnosticsV325 || candidate?.manualDirectionalDiagnosticsV324 || null;
+  if (d && !lines.some(line => String(line).includes("Directional USD diagnostics — V325"))) {
+    lines.push(
+      "",
+      "🔧 <b>Directional USD diagnostics — V325</b>",
+      `GeckoTerminal: <b>${d?.gecko?.attempted === true ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(d?.gecko?.status || "NO_STATUS")}</b> | HTTP <b>${escapeHtml(d?.gecko?.httpStatus ?? "N/A")}</b> | returned <b>${safeNumber(d?.gecko?.returnedCount)}</b> | accepted <b>${safeNumber(d?.gecko?.acceptedCount)}</b>`,
+      `Bitquery: <b>${d?.bitquery?.attempted === true ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(d?.bitquery?.status || "NO_STATUS")}</b> | HTTP <b>${escapeHtml(d?.bitquery?.httpStatus ?? "N/A")}</b> | raw rows <b>${safeNumber(d?.bitquery?.rawRows)}</b> | accepted <b>${safeNumber(d?.bitquery?.rows)}</b>`,
+      d?.gecko?.poolAddress
+        ? `Selected pool: <code>${escapeHtml(d.gecko.poolAddress)}</code>`
+        : "Selected pool: <b>UNVERIFIED</b>",
+      `Result: <b>${d?.gecko?.verifiedAnyWindow === true || d?.bitquery?.verified === true ? "VERIFIED_DIRECTIONAL_DATA" : "NO_VERIFIED_DIRECTIONAL_DATA"}</b>`
+    );
   }
 
   lines.push(
@@ -64504,7 +64522,8 @@ async function telegramFreshAnalyseV276(
   return {
     reply:
       telegramAnalyseParityMessageV294(
-        candidate
+        candidate,
+        candidate?.manualDirectionalDiagnosticsV324 || null
       ),
     telemetry
   };
