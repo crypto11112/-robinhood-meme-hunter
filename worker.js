@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V377
- * AUTHORITATIVE RUNTIME VERSION: V377
+ * Robinhood Chain Meme Hunter — V378
+ * AUTHORITATIVE RUNTIME VERSION: V378
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V377";
+const VERSION = "V378";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -69586,6 +69586,140 @@ async function handleRequest(
 
 
 
+
+  if (path === "/v3aggregation-diagnostic") {
+    const token = normalize(url.searchParams.get("token") || "");
+    if (!isAddress(token)) {
+      return jsonResponse({
+        version: VERSION,
+        diagnostic: "V3_ROLLING_USD_AGGREGATION_RECONCILIATION_V378",
+        safe: true,
+        readOnly: true,
+        status: "INVALID_TOKEN_V378"
+      }, 400);
+    }
+
+    if (!env?.V3_LIVE_COLLECTOR) {
+      return jsonResponse({
+        version: VERSION,
+        diagnostic: "V3_ROLLING_USD_AGGREGATION_RECONCILIATION_V378",
+        safe: true,
+        readOnly: true,
+        status: "V3_LIVE_COLLECTOR_BINDING_UNAVAILABLE_V378"
+      }, 503);
+    }
+
+    const auditNow = Date.now();
+    const id = env.V3_LIVE_COLLECTOR.idFromName(token);
+    const stub = env.V3_LIVE_COLLECTOR.get(id);
+
+    let rawAudit = null;
+    let normalWindows = null;
+    const errors = [];
+
+    try {
+      const r = await stub.fetch(
+        "https://v3-live.internal/aggregation-audit-v378?now=" + auditNow
+      );
+      rawAudit = await r.json();
+    } catch (e) {
+      errors.push("RAW_AUDIT:" + String(e?.message || e || "UNKNOWN_ERROR"));
+    }
+
+    try {
+      const r = await stub.fetch("https://v3-live.internal/windows");
+      normalWindows = await r.json();
+    } catch (e) {
+      errors.push("NORMAL_WINDOWS:" + String(e?.message || e || "UNKNOWN_ERROR"));
+    }
+
+    const normalMap = normalWindows?.windows || {};
+    const rawMap = rawAudit?.windows || {};
+    const labels = ["5m", "15m", "1h", "6h", "24h"];
+    const comparison = {};
+
+    const pickNum = (obj, keys) => {
+      for (const k of keys) {
+        const n = Number(obj?.[k]);
+        if (Number.isFinite(n)) return n;
+      }
+      return null;
+    };
+
+    for (const label of labels) {
+      const raw = rawMap?.[label] || null;
+      const normal = normalMap?.[label] || null;
+
+      const normalBuys = pickNum(normal, ["buys", "buyCount", "buyTrades"]);
+      const normalSells = pickNum(normal, ["sells", "sellCount", "sellTrades"]);
+      const normalBuyUsd = pickNum(normal, ["buyUsd", "buyUSD", "buyUsdTotal"]);
+      const normalSellUsd = pickNum(normal, ["sellUsd", "sellUSD", "sellUsdTotal"]);
+
+      comparison[label] = {
+        raw: raw ? {
+          buys: raw.buys,
+          sells: raw.sells,
+          buyUsd: raw.buyUsd,
+          sellUsd: raw.sellUsd,
+          netUsd: raw.netUsd,
+          buyPressurePct: raw.buyPressurePct,
+          duplicateEventRows: raw.duplicateEventRows,
+          usdValued: raw.usdValued,
+          rawRows: raw.rawRows
+        } : null,
+        normal: normal || null,
+        comparableFields: {
+          buysMatch: raw && normalBuys !== null ? raw.buys === normalBuys : null,
+          sellsMatch: raw && normalSells !== null ? raw.sells === normalSells : null,
+          buyUsdDelta: raw && normalBuyUsd !== null
+            ? Number((raw.buyUsd - normalBuyUsd).toFixed(12))
+            : null,
+          sellUsdDelta: raw && normalSellUsd !== null
+            ? Number((raw.sellUsd - normalSellUsd).toFixed(12))
+            : null
+        }
+      };
+    }
+
+    const comparable = Object.values(comparison).flatMap(x => [
+      x?.comparableFields?.buysMatch,
+      x?.comparableFields?.sellsMatch,
+      x?.comparableFields?.buyUsdDelta === null ? null : Math.abs(x.comparableFields.buyUsdDelta) < 0.000001,
+      x?.comparableFields?.sellUsdDelta === null ? null : Math.abs(x.comparableFields.sellUsdDelta) < 0.000001
+    ]).filter(v => v !== null);
+
+    const allMatch = comparable.length > 0 && comparable.every(Boolean);
+
+    return jsonResponse({
+      version: VERSION,
+      diagnostic: "V3_ROLLING_USD_AGGREGATION_RECONCILIATION_V378",
+      safe: true,
+      readOnly: true,
+      workersKvWrites: 0,
+      durableObjectTradeWrites: 0,
+      scoringMutated: false,
+      token,
+      auditNow,
+      rawAudit,
+      normalWindows,
+      comparison,
+      comparableChecks: comparable.length,
+      allComparableChecksMatch: allMatch,
+      errors,
+      status: errors.length
+        ? "AGGREGATION_DIAGNOSTIC_PARTIAL_V378"
+        : allMatch
+          ? "RAW_AND_ROLLING_AGGREGATION_MATCH_V378"
+          : "RAW_AND_ROLLING_AGGREGATION_DIFFER_V378",
+      interpretation: errors.length
+        ? "One or more read-only audit paths failed; do not infer an aggregation mismatch from incomplete evidence."
+        : allMatch
+          ? "Independent recomputation from retained raw trade buckets matches the collector's normal rolling-window aggregation for all comparable fields."
+          : "At least one comparable rolling-window field differs from an independent recomputation of retained raw trade buckets. Inspect per-window deltas before changing collector logic.",
+      timestamp: now()
+    });
+  }
+
   if (path === "/v3live-tx-lookup") {
     const token = normalize(url.searchParams.get("token") || "");
     const txHash = String(url.searchParams.get("tx") || "").toLowerCase();
@@ -70306,6 +70440,151 @@ export class V3LiveCollectorV363 {
     }
     if (url.pathname === "/status") return Response.json(await this.status());
     
+
+    // V378 — raw retained-trade vs rolling-window aggregation audit.
+    // Recomputes windows independently from the existing V364 trade buckets,
+    // then compares them with the collector's normal /windows response.
+    // Read-only: no KV writes, no DO writes, no scoring mutation.
+    if (url.pathname === "/aggregation-audit-v378") {
+      const nowMs = Date.now();
+      const requestedNow = Number(url.searchParams.get("now"));
+      const auditNow = Number.isFinite(requestedNow) && requestedNow > 0 ? requestedNow : nowMs;
+
+      const windowDefs = [
+        ["5m", 5 * 60 * 1000],
+        ["15m", 15 * 60 * 1000],
+        ["1h", 60 * 60 * 1000],
+        ["6h", 6 * 60 * 60 * 1000],
+        ["24h", 24 * 60 * 60 * 1000]
+      ];
+
+      const bucketMs = 5 * 60 * 1000;
+      const oldestNeeded = auditNow - (24 * 60 * 60 * 1000);
+      const firstBucket = Math.floor(oldestNeeded / bucketMs) * bucketMs;
+      const lastBucket = Math.floor(auditNow / bucketMs) * bucketMs;
+
+      const raw = [];
+      let bucketsChecked = 0;
+      let populatedBuckets = 0;
+
+      for (let bucket = firstBucket; bucket <= lastBucket; bucket += bucketMs) {
+        bucketsChecked++;
+        const rows = await this.state.storage.get(`v364:trade-bucket:${bucket}`);
+        if (!Array.isArray(rows) || rows.length === 0) continue;
+        populatedBuckets++;
+        for (const row of rows) raw.push(row);
+      }
+
+      const rowTime = (row) => {
+        const candidates = [
+          row?.capturedAt,
+          row?.timestamp,
+          row?.observedAt,
+          row?.time,
+          row?.ts
+        ];
+        for (const v of candidates) {
+          const n = Number(v);
+          if (Number.isFinite(n) && n > 0) return n;
+        }
+        return null;
+      };
+
+      const rowTx = (row) => String(
+        row?.transactionHash || row?.txHash || row?.hash || ""
+      ).toLowerCase();
+
+      const rowLogIndex = (row) => String(row?.logIndex ?? "");
+
+      const audit = {};
+      for (const [label, durationMs] of windowDefs) {
+        const cutoff = auditNow - durationMs;
+        const rows = raw.filter(row => {
+          const t = rowTime(row);
+          return Number.isFinite(t) && t >= cutoff && t <= auditNow;
+        });
+
+        let buys = 0, sells = 0;
+        let buyUsd = 0, sellUsd = 0;
+        let buyQuote = 0, sellQuote = 0;
+        let usdValued = 0, quoteValued = 0;
+        let unknownSide = 0, missingTime = 0;
+        const uniqueEventKeys = new Set();
+        let duplicateEventRows = 0;
+
+        for (const row of rows) {
+          const side = String(row?.side || "").toUpperCase();
+          const usd = Number(row?.usd ?? row?.usdValue);
+          const quote = Number(row?.quoteAmount);
+          const key = `${rowTx(row)}|${rowLogIndex(row)}`;
+
+          if (rowTx(row) && rowLogIndex(row) !== "") {
+            if (uniqueEventKeys.has(key)) duplicateEventRows++;
+            else uniqueEventKeys.add(key);
+          }
+
+          if (side === "BUY") buys++;
+          else if (side === "SELL") sells++;
+          else unknownSide++;
+
+          if (Number.isFinite(usd) && usd >= 0) {
+            usdValued++;
+            if (side === "BUY") buyUsd += usd;
+            if (side === "SELL") sellUsd += usd;
+          }
+
+          if (Number.isFinite(quote) && quote >= 0) {
+            quoteValued++;
+            if (side === "BUY") buyQuote += quote;
+            if (side === "SELL") sellQuote += quote;
+          }
+
+          if (!Number.isFinite(rowTime(row))) missingTime++;
+        }
+
+        const totalUsd = buyUsd + sellUsd;
+        audit[label] = {
+          durationMs,
+          cutoff,
+          rawRows: rows.length,
+          buys,
+          sells,
+          unknownSide,
+          usdValued,
+          quoteValued,
+          buyUsd: Number(buyUsd.toFixed(12)),
+          sellUsd: Number(sellUsd.toFixed(12)),
+          netUsd: Number((buyUsd - sellUsd).toFixed(12)),
+          buyPressurePct: totalUsd > 0
+            ? Number(((buyUsd / totalUsd) * 100).toFixed(4))
+            : null,
+          buyQuote: Number(buyQuote.toFixed(12)),
+          sellQuote: Number(sellQuote.toFixed(12)),
+          uniqueEventKeys: uniqueEventKeys.size,
+          duplicateEventRows,
+          missingTime
+        };
+      }
+
+      return jsonResponse({
+        version: VERSION,
+        diagnostic: "RAW_TRADE_BUCKET_AGGREGATION_AUDIT_V378",
+        safe: true,
+        readOnly: true,
+        workersKvWrites: 0,
+        durableObjectTradeWrites: 0,
+        scoringMutated: false,
+        auditNow,
+        retentionWindowHours: 24,
+        bucketsChecked,
+        populatedBuckets,
+        rawRecordsLoaded: raw.length,
+        windows: audit,
+        status: "RAW_AGGREGATION_RECOMPUTED_V378",
+        timestamp: now()
+      });
+    }
+
     // V376 — exact transaction lookup across retained V364 live trade buckets.
     // Read-only: no KV writes, no DO writes, no collector/scoring mutation.
     if (url.pathname === "/tx-lookup-v376") {
