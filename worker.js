@@ -6,8 +6,9 @@
  */
 /**
  * Robinhood Chain Meme Hunter
- * V313: read-only learning sample-quality protection; no scoring changes, provider requests or hindsight backfill.
- * - /learning now shows sample strength, >=1.25x hit/below counts, top-performer impact and average excluding the top performer.
+ * V314: targeted /learning Telegram delivery repair; no scanner/scoring/budget changes.
+ * - Preserves V313 learning analytics.
+ * - Routes /learning through the proven V292 chunked Telegram sender so reports over Telegram's single-message limit are delivered safely instead of silently failing.
  * - Tiny groups remain visible but are explicitly labelled TOO_SMALL/VERY_SMALL/SMALL until enough frozen calls accumulate.
  * - Descriptive only: never auto-adjusts weights/thresholds; missing/unverified frozen fields remain excluded rather than inferred.
  * V312: read-only frozen-entry learning report; compares frozen V309+ entry signals with later verified ATH outcomes.
@@ -1394,7 +1395,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V313";
+const VERSION = "V314";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -65023,7 +65024,7 @@ function frozenLearningMessageV312(state) {
 
   if (!records.length) {
     return [
-      '🧠 <b>Frozen Entry Learning — V313</b>',
+      '🧠 <b>Frozen Entry Learning — V314</b>',
       '',
       'No frozen V309+ entry snapshots with verified ATH outcomes are stored yet.',
       '',
@@ -65076,7 +65077,7 @@ function frozenLearningMessageV312(state) {
   });
 
   const lines = [
-    '🧠 <b>Frozen Entry Learning — V313</b>',
+    '🧠 <b>Frozen Entry Learning — V314</b>',
     '',
     `Frozen calls analysed: <b>${records.length}</b> / ${all.length} tracked`,
     `Overall: <b>${learningStatsTextV312(overall)}</b>`,
@@ -65089,7 +65090,7 @@ function frozenLearningMessageV312(state) {
     ...marketQuality, '',
     ...rugRisk, '',
     '📏 Sample strength: TOO_SMALL <3 | VERY_SMALL 3–9 | SMALL 10–29 | BUILDING 30–99 | STRONGER 100+',
-    '⚠️ <b>DESCRIPTIVE ONLY</b> — V313 does not change scoring, weights, thresholds or qualification.',
+    '⚠️ <b>DESCRIPTIVE ONLY</b> — V314 does not change scoring, weights, thresholds or qualification.',
     '<i>Only frozen call-time fields are compared with later verified ATH multiples. Missing entry evidence is excluded, never backfilled.</i>'
   ];
 
@@ -65433,8 +65434,17 @@ async function telegramCommandReplyV271(
       true;
   }
 
+  // V314: /learning can exceed Telegram's single-message text ceiling as
+  // sample-quality sections grow. Reuse the already-proven V292 line-safe
+  // chunked sender. This is delivery-only: zero provider requests and no
+  // learning/scanner/scoring changes.
+  const needsChunkedReplyV314 =
+    parsed.command === "/analyse" ||
+    parsed.command === "/analyze" ||
+    parsed.command === "/learning";
+
   const result =
-    (parsed.command === "/analyse" || parsed.command === "/analyze")
+    needsChunkedReplyV314
       ? await sendTelegramManualReplyV292(env, reply)
       : await sendTelegram(
           env,
