@@ -1436,7 +1436,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V322";
+const VERSION = "V323";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -42797,11 +42797,27 @@ function telegramMessage(
    * estimated into buy/sell USD.
    */
   const indexedDirectionalV322 = window => {
-    const row = market?.directionalFlow?.[window];
-    const source = String(row?.source || "");
-    const sourceVerified =
-      row?.verified === true &&
-      (source === "GECKOTERMINAL_POOL_TRADES" || source.startsWith("GECKOTERMINAL_"));
+    /* V323: accept either the verified GeckoTerminal pool-trade window or the
+     * existing strict Bitquery Trading.Trades manual fallback. Both are
+     * candidate-matched indexed trade evidence; DexScreener totals are never
+     * split or estimated.
+     */
+    const geckoRow = market?.directionalFlow?.[window];
+    const bitqueryFlow = candidate?.onChainVerifiedFlowV212;
+    const bitqueryRow = bitqueryFlow?.windows?.[window];
+    const bitquerySource = String(bitqueryFlow?.source || "");
+    const geckoSource = String(geckoRow?.source || "");
+
+    const geckoVerified =
+      geckoRow?.verified === true &&
+      (geckoSource === "GECKOTERMINAL_POOL_TRADES" || geckoSource.startsWith("GECKOTERMINAL_"));
+    const bitqueryVerified =
+      bitqueryRow?.verified === true &&
+      bitquerySource === "BITQUERY_TRADING_TRADES_MANUAL_V285";
+
+    const row = geckoVerified ? geckoRow : bitqueryVerified ? bitqueryRow : null;
+    const source = geckoVerified ? geckoSource : bitqueryVerified ? bitquerySource : "";
+    const sourceVerified = Boolean(row && source);
 
     if (!sourceVerified) {
       return {verified: false, buyUsd: "UNVERIFIED", sellUsd: "UNVERIFIED", netUsd: "UNVERIFIED", source: null};
@@ -42888,12 +42904,12 @@ function telegramMessage(
     `🔴 24h Sells: <b>${trade24h.sells}</b>`,
     `💵 24h Total Volume: <b>${market?.verified ? money(market?.volume?.h24) : "UNVERIFIED"}</b>`,
     dexProviderReportedV320
-      ? "ℹ️ <i>DexScreener counts/total volume are provider-reported. V322 never estimates buy-USD/sell-USD from them.</i>"
+      ? "ℹ️ <i>DexScreener counts/total volume are provider-reported. V323 never estimates buy-USD/sell-USD from them.</i>"
       : "ℹ️ <i>Provider-reported counts/total volume are separate from verified directional USD evidence.</i>",
     "",
     "💵 <b>Verified Directional USD — INDEXED TRADE FEED</b>",
     indexedDirectionalAnyV322
-      ? "🛰 Source: <b>GECKOTERMINAL_POOL_TRADES</b>"
+      ? `🛰 Source: <b>${escapeHtml([indexedM5V322, indexedM15V322, indexedH1V322, indexedH6V322, indexedH24V322].find(row => row.verified)?.source || "VERIFIED_INDEXED_TRADE_FEED")}</b>`
       : "🛰 Source: <b>UNVERIFIED</b>",
     `🟢 5m Buy USD: <b>${indexedM5V322.buyUsd}</b>`,
     `🔴 5m Sell USD: <b>${indexedM5V322.sellUsd}</b>`,
