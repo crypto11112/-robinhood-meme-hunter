@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V383
- * AUTHORITATIVE RUNTIME VERSION: V383
+ * Robinhood Chain Meme Hunter — V384
+ * AUTHORITATIVE RUNTIME VERSION: V384
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V383";
+const VERSION = "V384";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -70011,6 +70011,8 @@ async function handleRequest(
       ? discovery.pools.filter(p => p?.factoryVerified === true && isAddress(p?.pool))
       : [];
 
+    const alchemyUrlV384 = v356AlchemyUrl(env);
+
     const poolByAddress = new Map(
       verifiedPools.map(p => [normalize(p.pool), p])
     );
@@ -70051,11 +70053,27 @@ async function handleRequest(
 
     for (const tx of txs) {
       let receipt = null;
+      let receiptError = null;
       try {
         receiptRequests++;
-        const rpc = await rpcCall(env, "eth_getTransactionReceipt", [tx.txHash]);
-        receipt = rpc?.result || null;
-      } catch {}
+        if (!alchemyUrlV384) {
+          receiptError = "ALCHEMY_NOT_CONFIGURED_V384";
+        } else {
+          const receiptCall = await v356RawAlchemyRpc(
+            alchemyUrlV384,
+            "eth_getTransactionReceipt",
+            [tx.txHash],
+            6000
+          );
+          if (receiptCall?.ok && receiptCall?.result) {
+            receipt = receiptCall.result;
+          } else {
+            receiptError = receiptCall?.error || "RECEIPT_UNAVAILABLE_V384";
+          }
+        }
+      } catch (e) {
+        receiptError = String(e?.message || e || "RECEIPT_EXCEPTION_V384");
+      }
 
       if (!receipt || !Array.isArray(receipt.logs)) {
         transactionResults.push({
@@ -70063,7 +70081,8 @@ async function handleRequest(
           receiptFound: false,
           candidatePoolsTouched: [],
           candidatePoolCount: 0,
-          routeClass: "RECEIPT_UNAVAILABLE_V381"
+          routeClass: "RECEIPT_UNAVAILABLE_V384",
+          error: receiptError || "RECEIPT_UNAVAILABLE_V384"
         });
         continue;
       }
@@ -70211,15 +70230,34 @@ async function handleRequest(
       },
       pools,
       transactions: transactionResults,
-      coverageNote: "OBSERVED_RETAINED_ROUTE_SAMPLE_ONLY_NOT_EXHAUSTIVE_POOL_ENUMERATION_V381",
-      status: pools.length > 1
-        ? "MULTI_POOL_ROUTE_AWARE_AGGREGATION_PROVEN_V381"
-        : pools.length === 1
-          ? "SINGLE_VERIFIED_POOL_OBSERVED_IN_SAMPLE_V381"
-          : "NO_VERIFIED_CANDIDATE_POOLS_OBSERVED_V381",
-      interpretation: pools.length > 1
-        ? "Multiple factory-verified candidate pools were observed. Per-pool swap counts are kept separate from route-aware token-level transaction counts so routed transactions are not double-counted."
-        : "This sample did not prove multiple candidate pools. No collector or scoring changes were made.",
+      receiptEvidence: {
+        requested: receiptRequests,
+        usableReceipts: transactionResults.filter(x => x.receiptFound === true).length,
+        failedReceipts: transactionResults.filter(x => x.receiptFound !== true).length,
+        candidateSwapLogsDecoded: totalCandidateSwapLogs,
+        multiPoolRoutesDecoded: routeMultiPoolTransactions
+      },
+      coverageNote: "OBSERVED_RETAINED_ROUTE_SAMPLE_ONLY_NOT_EXHAUSTIVE_POOL_ENUMERATION_V384",
+      status:
+        transactionResults.filter(x => x.receiptFound === true).length === 0
+          ? "RECEIPT_EVIDENCE_UNAVAILABLE_V384"
+          : totalCandidateSwapLogs === 0
+            ? "RECEIPTS_AVAILABLE_BUT_NO_CANDIDATE_SWAPS_DECODED_V384"
+            : pools.length > 1 && routeMultiPoolTransactions > 0
+              ? "MULTI_POOL_ROUTE_AWARE_AGGREGATION_PROVEN_V384"
+              : pools.length > 1
+                ? "MULTIPLE_VERIFIED_POOLS_KNOWN_ROUTE_AGGREGATION_SAMPLE_SINGLE_POOL_ONLY_V384"
+                : pools.length === 1
+                  ? "SINGLE_VERIFIED_POOL_ROUTE_AGGREGATION_PROVEN_V384"
+                  : "NO_VERIFIED_CANDIDATE_POOLS_OBSERVED_V384",
+      interpretation:
+        transactionResults.filter(x => x.receiptFound === true).length === 0
+          ? "DATA UNVERIFIED: no usable transaction receipts were returned, so route-aware aggregation is not proven in this run."
+          : totalCandidateSwapLogs === 0
+            ? "DATA UNVERIFIED: receipts were returned but no verified candidate-pool swaps were decoded."
+            : pools.length > 1 && routeMultiPoolTransactions > 0
+              ? "Route-aware aggregation is proven in this sample: multiple factory-verified candidate pools were decoded in at least one transaction, while token-level transaction counts remain deduplicated from pool-level swap counts."
+              : "Receipt and swap evidence was decoded, but this sample did not contain a decoded multi-pool candidate route. No collector or scoring changes were made.",
       timestamp: now()
     });
   }
