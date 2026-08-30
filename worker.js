@@ -1,8 +1,8 @@
 /**
- * Robinhood Chain Meme Hunter — V360
- * AUTHORITATIVE RUNTIME VERSION: V360
- * V360 preserves V359/V358/V355 confirmed functionality and adds the read-only Alchemy Robinhood WebSocket V3 Swap subscription capability diagnostic.
- * No scanner, pricing, scoring, Telegram, collector, or KV persistence behavior is changed by the V360 diagnostic.
+ * Robinhood Chain Meme Hunter — V361
+ * AUTHORITATIVE RUNTIME VERSION: V361
+ * V361 preserves V359/V358/V355 confirmed functionality and adds the read-only Alchemy Robinhood WebSocket V3 Swap subscription capability diagnostic.
+ * No scanner, pricing, scoring, Telegram, collector, or KV persistence behavior is changed by the V361 diagnostic.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Robinhood Chain Meme Hunter
  * V351: HTTP-ONLY USD aggregation diagnostic built from confirmed-safe V348. /analyse, Telegram routing, scheduled scan, collector, scoring and persistence paths are unchanged. Adds only GET /v3usd-diagnostic?token=0xADDRESS to aggregate already-persisted V347 USD evidence with KV reads only and zero writes/external requests.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V360";
+const VERSION = "V361";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -68564,7 +68564,7 @@ async function v3AlchemyWebSocketDiagnosticV360(env, tokenInput) {
     analyseMutated: false,
     token: token || null,
     pair: null,
-    topic: V3_SWAP_TOPIC,
+    topic: UNISWAP_V3_SWAP_TOPIC_V326,
     provider: "ALCHEMY_ROBINHOOD_WEBSOCKET_ONLY",
     apiKeyConfigured: Boolean(env.ALCHEMY_API_KEY),
     websocketUrlExposed: false,
@@ -68642,7 +68642,7 @@ async function v3AlchemyWebSocketDiagnosticV360(env, tokenInput) {
               "logs",
               {
                 address: pair,
-                topics: [V3_SWAP_TOPIC]
+                topics: [UNISWAP_V3_SWAP_TOPIC_V326]
               }
             ]
           }));
@@ -68679,7 +68679,7 @@ async function v3AlchemyWebSocketDiagnosticV360(env, tokenInput) {
           const log = msg.params.result;
           const address = normalize(log?.address || "");
           const topic0 = normalize(log?.topics?.[0] || "");
-          if (address === pair && topic0 === normalize(V3_SWAP_TOPIC)) {
+          if (address === pair && topic0 === normalize(UNISWAP_V3_SWAP_TOPIC_V326)) {
             out.matchingLogObservedDuringTest = true;
             out.observedLog = {
               blockNumber: log?.blockNumber || null,
