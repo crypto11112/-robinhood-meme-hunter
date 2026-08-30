@@ -1,6 +1,7 @@
 /**
  * Robinhood Chain Meme Hunter
  * V331: Persistent native V3 swap-evidence ledger + dynamic exact-pool sweep. Reuses V330 verified pair identity, scans bounded 10-block chunks within remaining manual budget, deduplicates exact tx/log evidence in KV, and explicitly reports coverage gaps. No complete timeframe claim is made from ingestion timestamps.
+ * V335: Step 3A begins verified USD-flow groundwork: exposes the already strict on-chain WETH/USDG reference in /analyse and persists verified quote-side amounts for newly captured native V3 swaps when the quote asset is canonical WETH/USDG. No historical USD is guessed; existing records remain unvalued until independently enriched.
  * V330: Canonical Uniswap V3 factory getPool bootstrap removes first-run DexScreener dependency for candidate/WETH standard-fee pools; discovered pools still require on-chain token0/token1/fee proof before persistence/use.
  * V329: Persistent on-chain-verified Uniswap V3 pair identity fallback. DexScreener cooldown no longer erases a previously proven V3 pool identity; cached identity is re-verified on-chain before use.
  * V328: On-chain Uniswap V3 pool proof + market-path diagnostics. Preserves V327 fail-open isolation and all earlier working behavior.
@@ -1445,7 +1446,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V334";
+const VERSION = "V335";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64447,9 +64448,13 @@ async function manualNativeV3DirectionalV326(env, budget, candidate) {
     const candidateRaw=token===token0?amount0:amount1; if(candidateRaw===0n)continue;
     const candidateAmount=decimalFromSignedRawV326(candidateRaw,decimals); if(!Number.isFinite(candidateAmount)||candidateAmount===0)continue;
     const side=candidateRaw<0n?"BUY":"SELL"; const usd=priceUsdVerified?Math.abs(candidateAmount)*priceUsd:null;
+    const quoteTokenAddress=token===token0?token1:token0;
+    const quoteRaw=token===token0?amount1:amount0;
+    const quoteDecimals=quoteTokenAddress===CANONICAL_WETH_V179?18:(quoteTokenAddress===CANONICAL_USDG_V179?CANONICAL_USDG_DECIMALS_V179:null);
+    const quoteAmount=Number.isInteger(quoteDecimals)?decimalFromSignedRawV326(quoteRaw,quoteDecimals):null;
     const txHash=String(log?.transactionHash||"").toLowerCase(), logIndex=String(log?.logIndex??"");
     const tradeKey=`${txHash}|${logIndex}`; if(!txHash||unique.has(tradeKey))continue;
-    unique.set(tradeKey,{tradeKey,transactionHash:txHash,logIndex,blockNumber:rpcBlockNumberV331(log?.blockNumber),pairAddress,side,tokenAmount:Math.abs(candidateAmount),usd:Number.isFinite(usd)&&usd>0?usd:null,usdVerified:priceUsdVerified===true,priceUsd:priceUsdVerified?priceUsd:null,observedAt:Date.now(),timestampBasis:"INGESTION_TIME_ONLY_V331"});
+    unique.set(tradeKey,{tradeKey,transactionHash:txHash,logIndex,blockNumber:rpcBlockNumberV331(log?.blockNumber),pairAddress,side,tokenAmount:Math.abs(candidateAmount),quoteTokenAddress:isAddress(quoteTokenAddress)?quoteTokenAddress:null,quoteAmount:Number.isFinite(quoteAmount)&&quoteAmount!==0?Math.abs(quoteAmount):null,quoteAmountVerifiedV335:Number.isFinite(quoteAmount)&&quoteAmount!==0,quoteAmountBasisV335:Number.isFinite(quoteAmount)&&quoteAmount!==0?"EXACT_V3_SWAP_QUOTE_DELTA_V335":null,usd:Number.isFinite(usd)&&usd>0?usd:null,usdVerified:priceUsdVerified===true,priceUsd:priceUsdVerified?priceUsd:null,observedAt:Date.now(),timestampBasis:"INGESTION_TIME_ONLY_V331"});
   }
 
   let buys=0,sells=0,buyUsd=0,sellUsd=0,buyTokenAmount=0,sellTokenAmount=0;
@@ -64581,6 +64586,14 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       evidence.push(`• 1h: <b>${safeNumber(w?.["1h"]?.buys)} buys / ${safeNumber(w?.["1h"]?.sells)} sells</b>`);
       evidence.push(`• 6h: <b>${safeNumber(w?.["6h"]?.buys)} buys / ${safeNumber(w?.["6h"]?.sells)} sells</b>`);
       evidence.push(`• 24h: <b>${safeNumber(w?.["24h"]?.buys)} buys / ${safeNumber(w?.["24h"]?.sells)} sells</b>`);
+    }
+
+    const refV335=candidate?.step3WethUsdGReferenceV335 || null;
+    if(refV335?.verified===true && Number.isFinite(Number(refV335?.priceUsdGPerWeth)) && Number(refV335.priceUsdGPerWeth)>0){
+      evidence.push(`💱 WETH/USDG reference: <b>VERIFIED ON-CHAIN</b> | <b>${Number(refV335.priceUsdGPerWeth).toFixed(2)} USDG/WETH</b>`);
+      if(refV335?.v3PoolAddress) evidence.push(`🔗 WETH/USDG pool: <code>${escapeHtml(refV335.v3PoolAddress)}</code>`);
+    } else {
+      evidence.push(`💱 WETH/USDG reference: <b>UNVERIFIED</b>`);
     }
 
     if (v3?.usdVerified === true) {
@@ -64973,6 +64986,11 @@ async function telegramFreshAnalyseV276(
   candidate =
     manualVerifiedUsdRecoveryResultV289?.candidate ||
     candidate;
+
+  /* V335 Step 3A: surface the strict existing on-chain WETH/USDG reference
+   * to the compact manual evidence summary. This does not promote USDG to USD
+   * and does not value historical swaps without exact quote-side evidence. */
+  candidate.step3WethUsdGReferenceV335 = manualVerifiedUsdRecoveryResultV289?.wethReferenceV289 || null;
 
   const manualBitqueryUsdResultV285 =
     manualGeckoDirectionalResultV322?.verifiedAnyWindow === true
@@ -67727,7 +67745,11 @@ async function collectOneNativeV3TokenV333(env,budget,row,headBlock){
     const raw=token===token0?amount0:(token===token1?amount1:null); if(typeof raw!=="bigint"||raw===0n)continue;
     const amount=decimalFromSignedRawV326(raw,decimals); if(!Number.isFinite(amount)||amount===0)continue;
     const txHash=String(log?.transactionHash||"").toLowerCase(),logIndex=String(log?.logIndex??""); const tradeKey=`${txHash}|${logIndex}`; if(!txHash||unique.has(tradeKey))continue;
-    unique.set(tradeKey,{tradeKey,transactionHash:txHash,logIndex,blockNumber:rpcBlockNumberV331(log?.blockNumber),pairAddress:pair,side:raw<0n?"BUY":"SELL",tokenAmount:Math.abs(amount),usd:null,usdVerified:false,priceUsd:null,observedAt:Date.now(),blockTimestampMs:null,timestampVerifiedV334:false,timestampBasis:"INGESTION_TIME_ONLY_V333"});
+    const quoteTokenAddress=token===token0?token1:token0;
+    const quoteRaw=token===token0?amount1:amount0;
+    const quoteDecimals=quoteTokenAddress===CANONICAL_WETH_V179?18:(quoteTokenAddress===CANONICAL_USDG_V179?CANONICAL_USDG_DECIMALS_V179:null);
+    const quoteAmount=Number.isInteger(quoteDecimals)?decimalFromSignedRawV326(quoteRaw,quoteDecimals):null;
+    unique.set(tradeKey,{tradeKey,transactionHash:txHash,logIndex,blockNumber:rpcBlockNumberV331(log?.blockNumber),pairAddress:pair,side:raw<0n?"BUY":"SELL",tokenAmount:Math.abs(amount),quoteTokenAddress:isAddress(quoteTokenAddress)?quoteTokenAddress:null,quoteAmount:Number.isFinite(quoteAmount)&&quoteAmount!==0?Math.abs(quoteAmount):null,quoteAmountVerifiedV335:Number.isFinite(quoteAmount)&&quoteAmount!==0,quoteAmountBasisV335:Number.isFinite(quoteAmount)&&quoteAmount!==0?"EXACT_V3_SWAP_QUOTE_DELTA_V335":null,usd:null,usdVerified:false,priceUsd:null,observedAt:Date.now(),blockTimestampMs:null,timestampVerifiedV334:false,timestampBasis:"INGESTION_TIME_ONLY_V333"});
   }
   const scannedRange={fromBlock,toBlock:rangeTo,observedAt:Date.now(),swaps:logsResult.result.length,source:"SCHEDULED_NATIVE_V3_COLLECTOR_V333"};
   /* V334 Step 2A: hydrate exact on-chain block timestamps. New swaps are
