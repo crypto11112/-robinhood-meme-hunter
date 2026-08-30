@@ -1,7 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V366
- * AUTHORITATIVE RUNTIME VERSION: V366
- * V366 adds continuous live-coverage integrity to the proven V365/V364 Durable Object collector. Each 5m/15m/1h/6h/24h window becomes FULL only after an uninterrupted accepted WebSocket subscription has covered that entire duration. Disconnects reset continuous coverage; no historical backfill is inferred. Existing collector, /analyse, Telegram, scoring, KV and Durable Object binding/class are preserved.
+ * Robinhood Chain Meme Hunter — V367
+ * AUTHORITATIVE RUNTIME VERSION: V367
+ * V367 builds directly on the confirmed V366 baseline and adds a coverage-aware live V3 evidence gate for /analyse. Only FULL_CONTINUOUS live windows qualify as complete/scoring-grade evidence; PARTIAL windows remain visible but provisional. Existing WebSocket collector, continuous-coverage tracking, Telegram analysis, scoring formulas, KV behavior, and Durable Object binding/class are preserved.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Robinhood Chain Meme Hunter
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V366";
+const VERSION = "V367";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64637,6 +64637,10 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     const coverageMinutesV366 = Math.floor(safeNumber(liveV3V365?.continuousCoverageMs) / 60000);
     evidence.push(`🟢 Coverage clock: <b>${liveV3V365?.coverageActive===true ? "ACTIVE" : "INTERRUPTED"}</b> | continuous <b>${coverageMinutesV366}m</b> | pre-V364 history not backfilled`);
     evidence.push(`🧮 Live swaps captured: <b>${safeNumber(liveV3V365?.swapsCaptured)}</b> | Workers KV writes: <b>${safeNumber(liveV3V365?.workersKvWrites)}</b> | interruptions: <b>${safeNumber(liveV3V365?.interruptionsSinceV366)}</b>`);
+    const coverageGateV367 = candidate?.liveV3CoverageEvidenceV367 || null;
+    const completeV367 = Array.isArray(coverageGateV367?.completeWindows) ? coverageGateV367.completeWindows : [];
+    evidence.push(`🛡 Coverage gate V367: <b>${completeV367.length ? completeV367.join(", ") : "NO FULL WINDOWS YET"}</b> eligible as complete evidence`);
+    evidence.push(`🧠 Scoring safety: <b>PARTIAL WINDOWS EXCLUDED</b> | live-flow score mutation <b>OFF</b>`);
     const liveWindows = liveV3V365.windows || {};
     for (const label of ["5m", "15m", "1h", "6h", "24h"]) {
       const row = liveWindows?.[label] || {};
@@ -65119,6 +65123,43 @@ async function telegramFreshAnalyseV276(
     };
   }
   candidate.liveV3WindowsV365 = liveV3WindowsV365;
+
+  /* V367: coverage-aware live-flow evidence gate.
+   * Only windows explicitly proven FULL_CONTINUOUS_V366 are eligible to be
+   * treated as complete live V3 evidence. PARTIAL windows remain visible for
+   * observation but are never promoted to complete/scoring-grade evidence.
+   * V367 intentionally does not alter the established opportunity/momentum
+   * formulas yet; it exposes a safe qualification layer for later scoring. */
+  const liveDefsV367 = ["5m", "15m", "1h", "6h", "24h"];
+  const liveCoverageEvidenceV367 = {
+    status: "LIVE_V3_COVERAGE_GATE_V367",
+    scoringPolicy: "FULL_WINDOWS_ONLY_V367",
+    scoringMutationApplied: false,
+    completeWindows: [],
+    partialWindows: [],
+    windows: {}
+  };
+  for (const label of liveDefsV367) {
+    const row = liveV3WindowsV365?.windows?.[label] || null;
+    const full = row?.fullCoverage === true && row?.coverage === "FULL_CONTINUOUS_V366";
+    const qualified = full && liveV3WindowsV365?.coverageActive === true;
+    liveCoverageEvidenceV367.windows[label] = {
+      complete: qualified,
+      scoringEligible: qualified,
+      coverage: row?.coverage || "UNVERIFIED",
+      trades: safeNumber(row?.trades),
+      buys: safeNumber(row?.buys),
+      sells: safeNumber(row?.sells),
+      buyUsd: qualified ? safeNumber(row?.buyUsd) : null,
+      sellUsd: qualified ? safeNumber(row?.sellUsd) : null,
+      netUsd: qualified ? safeNumber(row?.netUsd) : null,
+      buyPressurePct: qualified && Number.isFinite(Number(row?.buyPressurePct)) ? Number(row.buyPressurePct) : null
+    };
+    (qualified ? liveCoverageEvidenceV367.completeWindows : liveCoverageEvidenceV367.partialWindows).push(label);
+  }
+  liveCoverageEvidenceV367.bestCompleteWindow =
+    [...liveCoverageEvidenceV367.completeWindows].reverse()[0] || null;
+  candidate.liveV3CoverageEvidenceV367 = liveCoverageEvidenceV367;
 
   const telemetry = {
     status:
