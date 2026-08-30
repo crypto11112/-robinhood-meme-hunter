@@ -1,5 +1,11 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V322 — verified indexed buy-USD / sell-USD presentation + manual Gecko directional enrichment
+ * - Manual /analyse may use the existing guarded GeckoTerminal pool-trades feed when a verified pool identity exists.
+ * - Shows separate verified BUY USD and SELL USD from indexed trade rows when coverage is complete.
+ * - Never derives directional USD from DexScreener transaction counts or total volume.
+ * - Preserves V321 protocol clarity, V319 fixed-horizon tracker fix, scoring, thresholds, KV keys and scanner request ceilings.
+ *
  * V321 — DexScreener protocol-version clarity + directional-USD evidence guard
  * Preserves V320/V319 fixed-horizon and provider-market behavior.
  * - Adds pair labels to verified DexScreener market evidence.
@@ -1430,7 +1436,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V321";
+const VERSION = "V322";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -42786,6 +42792,44 @@ function telegramMessage(
       ? formatAgeV223(Math.max(0, Date.now() - Number(market.pairCreatedAt)))
       : "UNVERIFIED";
 
+  /* V322: directional USD is displayed only from an explicitly verified
+   * indexed trade feed. DexScreener counts/total volume are never split or
+   * estimated into buy/sell USD.
+   */
+  const indexedDirectionalV322 = window => {
+    const row = market?.directionalFlow?.[window];
+    const source = String(row?.source || "");
+    const sourceVerified =
+      row?.verified === true &&
+      (source === "GECKOTERMINAL_POOL_TRADES" || source.startsWith("GECKOTERMINAL_"));
+
+    if (!sourceVerified) {
+      return {verified: false, buyUsd: "UNVERIFIED", sellUsd: "UNVERIFIED", netUsd: "UNVERIFIED", source: null};
+    }
+
+    const buy = Number(row?.buyVolumeUsd);
+    const sell = Number(row?.sellVolumeUsd);
+    const net = Number(row?.netFlowUsd);
+    if (![buy, sell, net].every(Number.isFinite) || buy < 0 || sell < 0) {
+      return {verified: false, buyUsd: "UNVERIFIED", sellUsd: "UNVERIFIED", netUsd: "UNVERIFIED", source: null};
+    }
+
+    return {
+      verified: true,
+      buyUsd: money(buy),
+      sellUsd: money(sell),
+      netUsd: money(net),
+      source
+    };
+  };
+
+  const indexedM5V322 = indexedDirectionalV322("m5");
+  const indexedM15V322 = indexedDirectionalV322("m15");
+  const indexedH1V322 = indexedDirectionalV322("h1");
+  const indexedH6V322 = indexedDirectionalV322("h6");
+  const indexedH24V322 = indexedDirectionalV322("h24");
+  const indexedDirectionalAnyV322 = [indexedM5V322, indexedM15V322, indexedH1V322, indexedH6V322, indexedH24V322].some(row => row.verified);
+
   const lines = [
     `🚨 <b>Robinhood Chain Meme Hunter ${VERSION}</b>`,
     `📣 <b>${escapeHtml(alertClass.title)}</b>`,
@@ -42844,11 +42888,33 @@ function telegramMessage(
     `🔴 24h Sells: <b>${trade24h.sells}</b>`,
     `💵 24h Total Volume: <b>${market?.verified ? money(market?.volume?.h24) : "UNVERIFIED"}</b>`,
     dexProviderReportedV320
-      ? "💵 Provider Buy USD / Sell USD split: <b>UNVERIFIED</b>"
-      : null,
-    dexProviderReportedV320
-      ? "ℹ️ <i>The current official DexScreener pair API exposes transaction counts and total timeframe volume, not separate buy-USD/sell-USD totals; V321 does not estimate the split.</i>"
-      : "ℹ️ <i>Provider-reported counts/total volume are separate from the bot-verified on-chain USD evidence below.</i>",
+      ? "ℹ️ <i>DexScreener counts/total volume are provider-reported. V322 never estimates buy-USD/sell-USD from them.</i>"
+      : "ℹ️ <i>Provider-reported counts/total volume are separate from verified directional USD evidence.</i>",
+    "",
+    "💵 <b>Verified Directional USD — INDEXED TRADE FEED</b>",
+    indexedDirectionalAnyV322
+      ? "🛰 Source: <b>GECKOTERMINAL_POOL_TRADES</b>"
+      : "🛰 Source: <b>UNVERIFIED</b>",
+    `🟢 5m Buy USD: <b>${indexedM5V322.buyUsd}</b>`,
+    `🔴 5m Sell USD: <b>${indexedM5V322.sellUsd}</b>`,
+    `📈 5m Net USD: <b>${indexedM5V322.netUsd}</b>`,
+    "",
+    `🟢 15m Buy USD: <b>${indexedM15V322.buyUsd}</b>`,
+    `🔴 15m Sell USD: <b>${indexedM15V322.sellUsd}</b>`,
+    `📈 15m Net USD: <b>${indexedM15V322.netUsd}</b>`,
+    "",
+    `🟢 1h Buy USD: <b>${indexedH1V322.buyUsd}</b>`,
+    `🔴 1h Sell USD: <b>${indexedH1V322.sellUsd}</b>`,
+    `📈 1h Net USD: <b>${indexedH1V322.netUsd}</b>`,
+    "",
+    `🟢 6h Buy USD: <b>${indexedH6V322.buyUsd}</b>`,
+    `🔴 6h Sell USD: <b>${indexedH6V322.sellUsd}</b>`,
+    `📈 6h Net USD: <b>${indexedH6V322.netUsd}</b>`,
+    "",
+    `🟢 24h Buy USD: <b>${indexedH24V322.buyUsd}</b>`,
+    `🔴 24h Sell USD: <b>${indexedH24V322.sellUsd}</b>`,
+    `📈 24h Net USD: <b>${indexedH24V322.netUsd}</b>`,
+    "ℹ️ <i>Only complete verified indexed-trade windows are shown. Missing/partial coverage remains UNVERIFIED.</i>",
     ...verifiedObservedLinesV212,
     ...ponsCurveLinesV216,
     "",
@@ -64103,6 +64169,38 @@ async function telegramFreshAnalyseV276(
     };
   }
 
+  /* V322: /analyse can use the already-proven guarded GeckoTerminal
+   * pool-trades reader to obtain real individual BUY USD / SELL USD rows for
+   * verified pool identities. This uses the isolated manual budget/state only.
+   */
+  let manualGeckoDirectionalResultV322 = {
+    attempted: false,
+    verifiedAnyWindow: false,
+    status: "NOT_ELIGIBLE_OR_NOT_ATTEMPTED_V322"
+  };
+
+  if (
+    candidate?.validERC20 === true &&
+    (
+      (candidate?.market?.verified === true && Boolean(candidate?.market?.pairAddress)) ||
+      candidate?.onChainPoolIdentityV153?.verified === true
+    )
+  ) {
+    manualGeckoDirectionalResultV322 =
+      await geckoDirectionalTradeFlow(
+        candidate,
+        budget,
+        isolatedState
+      );
+
+    if (manualGeckoDirectionalResultV322?.verifiedAnyWindow === true) {
+      candidate = applyDirectionalTradeFlow(
+        candidate,
+        manualGeckoDirectionalResultV322
+      );
+    }
+  }
+
   const manualLiveV4ResultV283 =
     await manualLiveV4EnrichmentV283(
       env,
@@ -64133,12 +64231,20 @@ async function telegramFreshAnalyseV276(
     candidate;
 
   const manualBitqueryUsdResultV285 =
-    await manualBitqueryDirectionalUsdV285(
-      env,
-      budget,
-      isolatedState,
-      candidate
-    );
+    manualGeckoDirectionalResultV322?.verifiedAnyWindow === true
+      ? {
+          attempted: false,
+          verified: false,
+          status: "SKIPPED_GECKO_DIRECTIONAL_USD_VERIFIED_V322",
+          requestsUsed: 0,
+          flow: null
+        }
+      : await manualBitqueryDirectionalUsdV285(
+          env,
+          budget,
+          isolatedState,
+          candidate
+        );
 
   candidate =
     applyManualBitqueryDirectionalUsdV285(
@@ -64302,6 +64408,17 @@ async function telegramFreshAnalyseV276(
       deduplicated: safeNumber(manualVerifiedUsdRecoveryResultV289?.deduplicated),
       quoteDiagnosticsV288: manualVerifiedUsdRecoveryResultV289?.quoteDiagnosticsV288 || null,
       wethReferenceV289: manualVerifiedUsdRecoveryResultV289?.wethReferenceV289 || null
+    },
+    manualGeckoDirectionalV322: {
+      attempted: manualGeckoDirectionalResultV322?.attempted === true,
+      verifiedAnyWindow: manualGeckoDirectionalResultV322?.verifiedAnyWindow === true,
+      status: manualGeckoDirectionalResultV322?.status || null,
+      source: manualGeckoDirectionalResultV322?.source || null,
+      poolAddress: manualGeckoDirectionalResultV322?.poolAddress || null,
+      returnedCount: safeNumber(manualGeckoDirectionalResultV322?.returnedCount),
+      verifiedWindows: Object.entries(manualGeckoDirectionalResultV322?.windows || {})
+        .filter(([, row]) => row?.verified === true)
+        .map(([key]) => key)
     },
     manualBitqueryUsdV285: {
       attempted: manualBitqueryUsdResultV285?.attempted === true,
