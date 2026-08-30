@@ -1,11 +1,24 @@
 /**
- * V308 / V2.0:
+ * Robinhood Chain Meme Hunter
+ * V319 — fixed-horizon first-success tracker initialisation fix
+ *
+ * CURRENT EXECUTABLE VERSION: V319
+ * - Preserves the complete V318/V317 scanner, scoring, qualification, Telegram, KV, provider, holder, whale, Momentum, ATH, learning and request-budget behaviour.
+ * - FIX: a token that already has a preliminary callPerformanceV270 record now receives fixedHorizonOutcomesV317 on its FIRST successful alert, provided it had no prior frozen entryTimestamp.
+ * - Preserves forward-only semantics: records with an existing entryTimestamp are NOT retroactively initialised or backfilled.
+ * - Keeps /horizon diagnostics from V318.
+ *
+ * HISTORICAL V308 / V2.0 NOTES:
  * - VERIFIED PERFORMANCE TIMING: records the first verified observation at/above 1.25x, 1.5x, 2x, 5x and 10x market-cap milestones.
  * - HISTORICAL-SAFE: older calls seed milestones only from their already-stored verified ATH observation timestamp and display ≤ elapsed time, never an invented exact crossing time.
  * - READ-ONLY PRESENTATION: /best shows compact “Verified by” milestone timing; no extra provider requests, no ATH maths changes, no scoring changes and no request-budget changes.
  */
 /**
  * Robinhood Chain Meme Hunter
+ * V319: fixed-horizon tracker first-success initialisation fix.
+ * - First successful alert initialises fixedHorizonOutcomesV317 when the existing preliminary record has no entryTimestamp.
+ * - Existing records that already have an entryTimestamp remain untouched: no retrospective tracker seeding and no hindsight backfill.
+ * - Keeps V318 /horizon diagnostics; zero extra provider requests; no scoring, thresholds, qualification, Momentum, ATH maths, learning maths or request-budget changes.
  * V318: read-only fixed-horizon diagnostics for V317 forward-only outcome capture.
  * - Adds /horizon SYMBOL|0xADDRESS to expose tracker presence, target maturity, last verified observation, capture state and exact no-capture reason.
  * - Diagnostic only: zero provider requests; no scoring, thresholds, qualification, Momentum, ATH maths, horizon maths, provider cadence or request-budget changes.
@@ -1408,7 +1421,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V318";
+const VERSION = "V319";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -46372,9 +46385,21 @@ function buildCallPerformanceRecordV270(
         : null
     );
 
+  /*
+   * V319 FIX — first successful alert may already have a preliminary
+   * callPerformanceV270 record created by normal observation tracking.
+   *
+   * V317 used `successfulAlert && !existing`, which incorrectly blocked
+   * fixed-horizon tracker creation whenever that harmless preliminary record
+   * existed.  The frozen entryTimestamp is the reliable boundary:
+   * - no existing entryTimestamp => this is the first successful call, safe to
+   *   initialise forward-only horizons now;
+   * - existing entryTimestamp => this call already has a historical frozen
+   *   entry, so do NOT seed/backfill a tracker.
+   */
   const fixedHorizonOutcomesV317 =
     existing?.fixedHorizonOutcomesV317 ??
-    (successfulAlert && !existing
+    (successfulAlert && !existing?.entryTimestamp
       ? initialiseFixedHorizonOutcomesV317(entryTimestamp || nowMs)
       : null);
 
