@@ -1,5 +1,10 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V320 — DexScreener provider-market + protocol-awareness upgrade
+ * Preserves V319 fixed-horizon initialization fix and all prior working behavior.
+ */
+/**
+ * Robinhood Chain Meme Hunter
  * V319 — fixed-horizon first-success tracker initialisation fix
  *
  * CURRENT EXECUTABLE VERSION: V319
@@ -1421,7 +1426,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V319";
+const VERSION = "V320";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -28659,6 +28664,9 @@ async function marketData(
     const txH1 =
       txWindow("h1");
 
+    const txH6 =
+      txWindow("h6");
+
     const txH24 =
       txWindow("h24");
 
@@ -28761,6 +28769,11 @@ async function marketData(
             pair?.volume?.h1
           ),
 
+        h6:
+          safeNumber(
+            pair?.volume?.h6
+          ),
+
         h24:
           safeNumber(
             pair?.volume?.h24
@@ -28770,6 +28783,7 @@ async function marketData(
       transactions: {
         m5: txM5,
         h1: txH1,
+        h6: txH6,
         h24: txH24
       },
 
@@ -28803,6 +28817,16 @@ async function marketData(
           netFlowUsd:
             txH1.netFlowUsd
         },
+        h6: {
+          verified:
+            txH6.directionalUsdVerified,
+          buyVolumeUsd:
+            txH6.buyVolumeUsd,
+          sellVolumeUsd:
+            txH6.sellVolumeUsd,
+          netFlowUsd:
+            txH6.netFlowUsd
+        },
         h24: {
           verified:
             txH24.directionalUsdVerified,
@@ -28814,6 +28838,14 @@ async function marketData(
             txH24.netFlowUsd
         }
       },
+
+      dexId:
+        pair?.dexId ||
+        null,
+
+      pairAddress:
+        pair?.pairAddress ||
+        null,
 
       pairCreatedAt:
         safeNumber(
@@ -42420,8 +42452,7 @@ function telegramMessage(
       {};
 
     const derivedDirectionalWindow =
-      window === "m15" ||
-      window === "h6";
+      window === "m15";
 
     const verifiedDerivedCounts =
       !derivedDirectionalWindow ||
@@ -42711,6 +42742,20 @@ function telegramMessage(
     verifiedLaunchAgeV223Data?.scannerAgeDisplay ||
     "UNVERIFIED";
 
+  const dexProviderReportedV320 =
+    market?.verified === true &&
+    String(market?.source || "").toUpperCase().includes("DEXSCREENER");
+
+  const dexProtocolV320 =
+    dexProviderReportedV320 && market?.dexId
+      ? String(market.dexId).toUpperCase()
+      : "UNVERIFIED";
+
+  const dexPairAgeV320 =
+    dexProviderReportedV320 && Number.isFinite(Number(market?.pairCreatedAt))
+      ? formatAgeV223(Math.max(0, Date.now() - Number(market.pairCreatedAt)))
+      : "UNVERIFIED";
+
   const lines = [
     `🚨 <b>Robinhood Chain Meme Hunter ${VERSION}</b>`,
     `📣 <b>${escapeHtml(alertClass.title)}</b>`,
@@ -42738,21 +42783,34 @@ function telegramMessage(
     `💧 Liquidity: <b>${market?.verified ? money(market.liquidityUsd) : "UNVERIFIED"}</b>`,
     `📊 24h Volume: <b>${market?.verified ? money(market.volume?.h24) : "UNVERIFIED"}</b>`,
     "",
-    "📊 <b>Market Activity Counts — NOT USD VERIFIED</b>",
+    dexProviderReportedV320
+      ? "📊 <b>DexScreener Market Activity — PROVIDER REPORTED</b>"
+      : "📊 <b>Market Activity Counts — PROVIDER REPORTED / NOT USD VERIFIED</b>",
+    dexProviderReportedV320
+      ? `🏪 Primary DEX: <b>${escapeHtml(dexProtocolV320)}</b>`
+      : null,
+    dexProviderReportedV320
+      ? `🕒 Pair age: <b>${escapeHtml(dexPairAgeV320)}</b>`
+      : null,
     `🟢 5m Buys: <b>${trade5m.buys}</b>`,
     `🔴 5m Sells: <b>${trade5m.sells}</b>`,
+    `💵 5m Total Volume: <b>${market?.verified ? money(market?.volume?.m5) : "UNVERIFIED"}</b>`,
     "",
     `🟢 15m Buys: <b>${trade15m.buys}</b>`,
     `🔴 15m Sells: <b>${trade15m.sells}</b>`,
     "",
     `🟢 1h Buys: <b>${trade1h.buys}</b>`,
     `🔴 1h Sells: <b>${trade1h.sells}</b>`,
+    `💵 1h Total Volume: <b>${market?.verified ? money(market?.volume?.h1) : "UNVERIFIED"}</b>`,
     "",
     `🟢 6h Buys: <b>${trade6h.buys}</b>`,
     `🔴 6h Sells: <b>${trade6h.sells}</b>`,
+    `💵 6h Total Volume: <b>${market?.verified ? money(market?.volume?.h6) : "UNVERIFIED"}</b>`,
     "",
     `🟢 24h Buys: <b>${trade24h.buys}</b>`,
     `🔴 24h Sells: <b>${trade24h.sells}</b>`,
+    `💵 24h Total Volume: <b>${market?.verified ? money(market?.volume?.h24) : "UNVERIFIED"}</b>`,
+    "ℹ️ <i>Provider-reported counts/total volume are separate from the bot-verified on-chain USD evidence below.</i>",
     ...verifiedObservedLinesV212,
     ...ponsCurveLinesV216,
     "",
