@@ -1,5 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V331: Persistent native V3 swap-evidence ledger + dynamic exact-pool sweep. Reuses V330 verified pair identity, scans bounded 10-block chunks within remaining manual budget, deduplicates exact tx/log evidence in KV, and explicitly reports coverage gaps. No complete timeframe claim is made from ingestion timestamps.
  * V330: Canonical Uniswap V3 factory getPool bootstrap removes first-run DexScreener dependency for candidate/WETH standard-fee pools; discovered pools still require on-chain token0/token1/fee proof before persistence/use.
  * V329: Persistent on-chain-verified Uniswap V3 pair identity fallback. DexScreener cooldown no longer erases a previously proven V3 pool identity; cached identity is re-verified on-chain before use.
  * V328: On-chain Uniswap V3 pool proof + market-path diagnostics. Preserves V327 fail-open isolation and all earlier working behavior.
@@ -1444,7 +1445,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V330";
+const VERSION = "V331";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2640,6 +2641,19 @@ const VERIFIED_V3_PAIR_CACHE_MAX_AGE_MS_V329 =
   180 * 24 * 60 * 60 * 1000;
 const VERIFIED_V3_PAIR_CACHE_REFRESH_MS_V329 =
   7 * 24 * 60 * 60 * 1000;
+
+/*
+ * V331 persistent native V3 swap evidence.
+ * This ledger stores exact pool/tx/log/block evidence. observedAt is ingestion time
+ * only and is NEVER promoted to an exact block timestamp or complete 5m/1h/etc window.
+ */
+const NATIVE_V3_SWAP_LEDGER_PREFIX_V331 =
+  "robinhood-meme-hunter-v331-v3-swaps:";
+const NATIVE_V3_SWAP_LEDGER_MAX_RECORDS_V331 = 2000;
+const NATIVE_V3_SWAP_LEDGER_MAX_RANGES_V331 = 128;
+const NATIVE_V3_SWEEP_BLOCKS_PER_CHUNK_V331 = 10;
+const NATIVE_V3_SWEEP_MAX_CHUNKS_V331 = 4;
+const NATIVE_V3_SWEEP_REQUEST_RESERVE_V331 = 2;
 
 
 const MIN_ALERT_SCORE = 60;
@@ -42956,7 +42970,7 @@ function telegramMessage(
       ? ""
       : null,
     candidate?.manualDirectionalDiagnosticsV324
-      ? "🔧 <b>Directional USD diagnostics — V330</b>"
+      ? "🔧 <b>Directional USD diagnostics — V331</b>"
       : null,
     candidate?.manualDirectionalDiagnosticsV324
       ? `GeckoTerminal: <b>${candidate.manualDirectionalDiagnosticsV324.gecko.attempted ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(candidate.manualDirectionalDiagnosticsV324.gecko.status)}</b> | HTTP <b>${escapeHtml(candidate.manualDirectionalDiagnosticsV324.gecko.httpStatus ?? "N/A")}</b> | returned <b>${safeNumber(candidate.manualDirectionalDiagnosticsV324.gecko.returnedCount)}</b> | accepted <b>${safeNumber(candidate.manualDirectionalDiagnosticsV324.gecko.acceptedCount)}</b>`
@@ -64210,6 +64224,106 @@ async function discoverNativeV3PairFromFactoryV330(env, budget, tokenAddress) {
   };
 }
 
+function nativeV3SwapLedgerKeyV331(tokenAddress) {
+  const token = normalize(tokenAddress);
+  return isAddress(token) ? `${NATIVE_V3_SWAP_LEDGER_PREFIX_V331}${token}` : null;
+}
+
+function rpcBlockNumberV331(value) {
+  try {
+    if (typeof value === "number" && Number.isFinite(value)) return Math.trunc(value);
+    const text = String(value ?? "");
+    if (/^0x[a-fA-F0-9]+$/.test(text)) return Number(BigInt(text));
+    if (/^\d+$/.test(text)) return Number(text);
+  } catch (_) {}
+  return null;
+}
+
+async function loadNativeV3SwapLedgerV331(env, tokenAddress, pairAddress) {
+  const key = nativeV3SwapLedgerKeyV331(tokenAddress);
+  const {kv, binding} = getKV(env);
+  const empty = {
+    found: false, valid: false, status: !key ? "INVALID_TOKEN" : (!kv ? "KV_UNAVAILABLE" : "NOT_FOUND"),
+    key, binding: binding || null, records: [], ranges: [], lastObservedBlock: null, firstObservedBlock: null
+  };
+  if (!key || !kv) return empty;
+  try {
+    const raw = await kv.get(key);
+    if (!raw) return empty;
+    const parsed = JSON.parse(raw);
+    const token = normalize(parsed?.tokenAddress);
+    const pair = normalize(parsed?.pairAddress);
+    const requestedPair = normalize(pairAddress);
+    const records = Array.isArray(parsed?.records) ? parsed.records : [];
+    const ranges = Array.isArray(parsed?.ranges) ? parsed.ranges : [];
+    const valid = token === normalize(tokenAddress) && isAddress(pair) && (!isAddress(requestedPair) || pair === requestedPair);
+    if (!valid) return {...empty, found: true, status: "PAIR_LEDGER_IDENTITY_MISMATCH_V331"};
+    const blocks = records.map(r => rpcBlockNumberV331(r?.blockNumber)).filter(Number.isFinite);
+    const rangeTo = ranges.map(r => rpcBlockNumberV331(r?.toBlock)).filter(Number.isFinite);
+    const rangeFrom = ranges.map(r => rpcBlockNumberV331(r?.fromBlock)).filter(Number.isFinite);
+    return {
+      found: true, valid: true, status: "PERSISTED_NATIVE_V3_LEDGER_AVAILABLE_V331", key, binding: binding || null,
+      records, ranges,
+      lastObservedBlock: rangeTo.length ? Math.max(...rangeTo) : (blocks.length ? Math.max(...blocks) : null),
+      firstObservedBlock: rangeFrom.length ? Math.min(...rangeFrom) : (blocks.length ? Math.min(...blocks) : null),
+      updatedAt: safeNumber(parsed?.updatedAt) || null
+    };
+  } catch (error) {
+    return {...empty, found: true, status: "NATIVE_V3_LEDGER_READ_ERROR_V331", error: String(error?.message || error).slice(0,160)};
+  }
+}
+
+async function persistNativeV3SwapLedgerV331(env, tokenAddress, pairAddress, rows, scannedRanges) {
+  const token = normalize(tokenAddress);
+  const pair = normalize(pairAddress);
+  const key = nativeV3SwapLedgerKeyV331(token);
+  const {kv, binding} = getKV(env);
+  const base = {saved:false, status:!kv ? "KV_UNAVAILABLE" : "NOT_SAVED", key, binding:binding||null, inserted:0, deduplicated:0, records:0, ranges:0};
+  if (!key || !kv || !isAddress(token) || !isAddress(pair)) return {...base, status:"LEDGER_IDENTITY_INVALID_V331"};
+
+  let existing = null;
+  try { const raw = await kv.get(key); if (raw) existing = JSON.parse(raw); } catch (_) {}
+  if (existing && normalize(existing?.pairAddress) !== pair) {
+    existing = null; // exact pair changed; never merge evidence across pools
+  }
+  const records = Array.isArray(existing?.records) ? existing.records.slice() : [];
+  const ranges = Array.isArray(existing?.ranges) ? existing.ranges.slice() : [];
+  const keys = new Set(records.map(r => String(r?.tradeKey || "")).filter(Boolean));
+  let inserted = 0, deduplicated = 0;
+  for (const row of rows || []) {
+    const tradeKey = String(row?.tradeKey || "");
+    if (!tradeKey || keys.has(tradeKey)) { if (tradeKey) deduplicated++; continue; }
+    keys.add(tradeKey);
+    records.push(row);
+    inserted++;
+  }
+  records.sort((a,b) => (rpcBlockNumberV331(a?.blockNumber) ?? 0) - (rpcBlockNumberV331(b?.blockNumber) ?? 0));
+  if (records.length > NATIVE_V3_SWAP_LEDGER_MAX_RECORDS_V331) records.splice(0, records.length - NATIVE_V3_SWAP_LEDGER_MAX_RECORDS_V331);
+
+  const rangeKeys = new Set(ranges.map(r => `${rpcBlockNumberV331(r?.fromBlock)}:${rpcBlockNumberV331(r?.toBlock)}`));
+  for (const r of scannedRanges || []) {
+    const fromBlock = rpcBlockNumberV331(r?.fromBlock), toBlock = rpcBlockNumberV331(r?.toBlock);
+    if (!Number.isFinite(fromBlock) || !Number.isFinite(toBlock) || toBlock < fromBlock) continue;
+    const rk = `${fromBlock}:${toBlock}`;
+    if (rangeKeys.has(rk)) continue;
+    rangeKeys.add(rk);
+    ranges.push({fromBlock,toBlock,observedAt:safeNumber(r?.observedAt)||Date.now(),swaps:safeNumber(r?.swaps)});
+  }
+  ranges.sort((a,b) => (rpcBlockNumberV331(a?.fromBlock) ?? 0) - (rpcBlockNumberV331(b?.fromBlock) ?? 0));
+  if (ranges.length > NATIVE_V3_SWAP_LEDGER_MAX_RANGES_V331) ranges.splice(0, ranges.length - NATIVE_V3_SWAP_LEDGER_MAX_RANGES_V331);
+
+  const record = {
+    schema:"NATIVE_UNISWAP_V3_SWAP_EVIDENCE_V331", tokenAddress:token, pairAddress:pair,
+    records, ranges, updatedAt:Date.now()
+  };
+  try {
+    await kv.put(key, JSON.stringify(record));
+    return {...base, saved:true, status:"NATIVE_V3_LEDGER_SAVED_V331", inserted, deduplicated, records:records.length, ranges:ranges.length};
+  } catch (error) {
+    return {...base, status:"NATIVE_V3_LEDGER_WRITE_ERROR_V331", inserted, deduplicated, records:records.length, ranges:ranges.length, error:String(error?.message||error).slice(0,160)};
+  }
+}
+
 async function manualNativeV3DirectionalV326(env, budget, candidate) {
   const market = candidate?.market || {};
   const token = normalize(candidate?.address);
@@ -64219,252 +64333,129 @@ async function manualNativeV3DirectionalV326(env, budget, candidate) {
     : [];
   const freshDexId = String(market?.dexId || "").toLowerCase();
 
-  const freshPairUsable =
-    market?.verified === true &&
-    freshDexId.includes("uniswap") &&
-    isAddress(freshMarketPair);
-
+  const freshPairUsable = market?.verified === true && freshDexId.includes("uniswap") && isAddress(freshMarketPair);
   const persistedPairV329 = freshPairUsable
-    ? {found: false, valid: false, status: "FRESH_MARKET_PAIR_PREFERRED_V329", record: null, ageMs: null}
+    ? {found:false,valid:false,status:"FRESH_MARKET_PAIR_PREFERRED_V329",record:null,ageMs:null}
     : await loadVerifiedV3PairIdentityV329(env, token);
-
   const persisted = persistedPairV329?.valid === true ? persistedPairV329.record : null;
+
   let factoryBootstrapV330 = null;
   let pairAddress = freshPairUsable ? freshMarketPair : normalize(persisted?.pairAddress);
-  let labelsArray = freshPairUsable
-    ? freshLabelsArray
-    : (Array.isArray(persisted?.pairLabels) ? persisted.pairLabels.map(v => String(v)).filter(Boolean) : []);
+  let labelsArray = freshPairUsable ? freshLabelsArray : (Array.isArray(persisted?.pairLabels) ? persisted.pairLabels.map(v=>String(v)).filter(Boolean) : []);
   let dexId = String(freshPairUsable ? market?.dexId : (persisted?.dexId || "uniswap")).toLowerCase();
-  let pairIdentitySource = freshPairUsable
-    ? "FRESH_VERIFIED_MARKET_PAIR_V329"
-    : (persisted ? "PERSISTED_ONCHAIN_VERIFIED_PAIR_V329" : "UNVERIFIED");
+  let pairIdentitySource = freshPairUsable ? "FRESH_VERIFIED_MARKET_PAIR_V329" : (persisted ? "PERSISTED_ONCHAIN_VERIFIED_PAIR_V329" : "UNVERIFIED");
 
   if (!isAddress(pairAddress)) {
-    factoryBootstrapV330 = await discoverNativeV3PairFromFactoryV330(env, budget, token);
+    factoryBootstrapV330 = await discoverNativeV3PairFromFactoryV330(env,budget,token);
     if (factoryBootstrapV330?.verifiedFactoryLookup === true && isAddress(factoryBootstrapV330?.pairAddress)) {
       pairAddress = normalize(factoryBootstrapV330.pairAddress);
-      labelsArray = ["v3", "factory-bootstrap-v330", "weth"];
+      labelsArray = ["v3","factory-bootstrap-v330","weth"];
       dexId = "uniswap";
       pairIdentitySource = "CANONICAL_V3_FACTORY_GETPOOL_V330";
     }
   }
   const labels = labelsArray.join(" ").toLowerCase();
-
   const currentPriceUsd = Number(market?.priceUsd);
   const priceUsdVerified = market?.verified === true && Number.isFinite(currentPriceUsd) && currentPriceUsd > 0;
   const priceUsd = priceUsdVerified ? currentPriceUsd : null;
   const decimals = Number(candidate?.decimals);
 
   const base = {
-    attempted: false,
-    verified: false,
-    usdVerified: false,
-    status: "NOT_ELIGIBLE",
-    source: "NATIVE_UNISWAP_V3_ETH_GETLOGS_V329",
-    pairAddress: pairAddress || null,
-    pairIdentitySource,
-    factoryBootstrapStatusV330: factoryBootstrapV330?.status || null,
-    factoryBootstrapFeeV330: Number.isInteger(Number(factoryBootstrapV330?.fee)) ? Number(factoryBootstrapV330.fee) : null,
-    factoryBootstrapFeesCheckedV330: Array.isArray(factoryBootstrapV330?.feeTiersChecked) ? factoryBootstrapV330.feeTiersChecked : [],
-    factoryBootstrapRequestsV330: safeNumber(factoryBootstrapV330?.requestsUsed),
-    persistedPairCacheStatus: persistedPairV329?.status || null,
-    persistedPairAgeMs: Number.isFinite(Number(persistedPairV329?.ageMs)) ? Number(persistedPairV329.ageMs) : null,
-    token0: null,
-    token1: null,
-    fee: null,
-    protocolEvidence: null,
-    pairCacheWriteStatus: null,
-    marketVerified: market?.verified === true,
-    marketStatus: market?.status || null,
-    marketSource: market?.source || null,
-    marketPriceVerified: priceUsdVerified,
-    priceUsd,
-    dexId: freshPairUsable ? (market?.dexId || null) : (persisted?.dexId || null),
-    pairLabels: labelsArray,
-    fromBlock: null,
-    toBlock: null,
-    swaps: 0,
-    buys: 0,
-    sells: 0,
-    buyTokenAmount: null,
-    sellTokenAmount: null,
-    buyUsd: null,
-    sellUsd: null,
-    netUsd: null,
-    requestsUsed: 0
+    attempted:false,verified:false,usdVerified:false,status:"NOT_ELIGIBLE",source:"NATIVE_UNISWAP_V3_ETH_GETLOGS_V331",
+    pairAddress:pairAddress||null,pairIdentitySource,
+    factoryBootstrapStatusV330:factoryBootstrapV330?.status||null,
+    factoryBootstrapFeeV330:Number.isInteger(Number(factoryBootstrapV330?.fee))?Number(factoryBootstrapV330.fee):null,
+    factoryBootstrapFeesCheckedV330:Array.isArray(factoryBootstrapV330?.feeTiersChecked)?factoryBootstrapV330.feeTiersChecked:[],
+    factoryBootstrapRequestsV330:safeNumber(factoryBootstrapV330?.requestsUsed),
+    persistedPairCacheStatus:persistedPairV329?.status||null,
+    persistedPairAgeMs:Number.isFinite(Number(persistedPairV329?.ageMs))?Number(persistedPairV329.ageMs):null,
+    token0:null,token1:null,fee:null,protocolEvidence:null,pairCacheWriteStatus:null,
+    marketVerified:market?.verified===true,marketStatus:market?.status||null,marketSource:market?.source||null,
+    marketPriceVerified:priceUsdVerified,priceUsd,dexId:freshPairUsable?(market?.dexId||null):(persisted?.dexId||null),pairLabels:labelsArray,
+    fromBlock:null,toBlock:null,swaps:0,buys:0,sells:0,buyTokenAmount:null,sellTokenAmount:null,buyUsd:null,sellUsd:null,netUsd:null,requestsUsed:0,
+    sweepStatusV331:"NOT_ATTEMPTED",sweepChunksV331:0,sweepBlocksV331:0,sweepGapV331:false,
+    ledgerStatusV331:"NOT_ATTEMPTED",ledgerWriteStatusV331:null,ledgerRecordsV331:0,ledgerRangesV331:0,ledgerInsertedV331:0,ledgerDeduplicatedV331:0,
+    ledgerFirstBlockV331:null,ledgerLastBlockV331:null
   };
 
-  if (!candidate?.validERC20 || !isAddress(token)) {
-    return {...base, status: "TOKEN_NOT_VERIFIED_ERC20"};
+  if (!candidate?.validERC20 || !isAddress(token)) return {...base,status:"TOKEN_NOT_VERIFIED_ERC20"};
+  if (!isAddress(pairAddress)) return {...base,status:market?.verified===true?"VERIFIED_MARKET_PAIR_ADDRESS_MISSING":(factoryBootstrapV330?.attempted===true?factoryBootstrapV330.status:(persistedPairV329?.found===true?"MARKET_UNVERIFIED_PAIR_CACHE_UNUSABLE_V329":"MARKET_UNVERIFIED_NO_PERSISTED_V3_PAIR_V329"))};
+  if (!dexId.includes("uniswap")) return {...base,status:"PAIR_IDENTITY_NOT_UNISWAP"};
+  const explicitlyV2=/(^|[^a-z0-9])v2([^a-z0-9]|$)/i.test(labels), explicitlyV4=/(^|[^a-z0-9])v4([^a-z0-9]|$)/i.test(labels);
+  if (explicitlyV2||explicitlyV4) return {...base,status:explicitlyV2?"PAIR_IDENTITY_UNISWAP_V2":"PAIR_IDENTITY_UNISWAP_V4"};
+  if (!Number.isInteger(decimals)||decimals<0||decimals>36) return {...base,status:"TOKEN_DECIMALS_UNVERIFIED"};
+
+  const spare=Math.max(0,safeNumber(budget?.totalLimit)-safeNumber(budget?.totalUsed));
+  if (spare<5||!budgetAvailable(budget,"analysis")) return {...base,status:"INSUFFICIENT_SPARE_MANUAL_BUDGET"};
+  const before=safeNumber(budget?.totalUsed);
+  const call=async data=>rpc(env,"eth_call",[{to:pairAddress,data},"latest"],budget,"analysis");
+  const t0r=await call(UNISWAP_V3_TOKEN0_SELECTOR_V326);
+  const t1r=await call(UNISWAP_V3_TOKEN1_SELECTOR_V326);
+  const feeResult=await call(UNISWAP_V3_FEE_SELECTOR_V328);
+  const token0=decodeEthCallAddressV326(t0r?.result), token1=decodeEthCallAddressV326(t1r?.result);
+  let fee=null; try { const raw=String(feeResult?.result||""); if(/^0x[a-fA-F0-9]{1,64}$/.test(raw)) fee=Number(BigInt(raw)); } catch(_){}
+  if(!token0||!token1||(token!==token0&&token!==token1)) return {...base,attempted:true,pairAddress,token0,token1,fee,requestsUsed:Math.max(0,safeNumber(budget?.totalUsed)-before),status:"POOL_TOKEN_IDENTITY_UNVERIFIED"};
+  if(!Number.isInteger(fee)||fee<=0||fee>1_000_000) return {...base,attempted:true,pairAddress,token0,token1,fee,requestsUsed:Math.max(0,safeNumber(budget?.totalUsed)-before),status:"UNISWAP_V3_FEE_CALL_UNVERIFIED"};
+
+  const pairCacheWriteV329=await persistVerifiedV3PairIdentityV329(env,{tokenAddress:token,pairAddress,token0,token1,fee,dexId:freshPairUsable?(market?.dexId||"uniswap"):(persisted?.dexId||"uniswap"),pairLabels:labelsArray.length?labelsArray:["v3"],marketSource:freshPairUsable?(market?.source||null):(persisted?.marketSource||(factoryBootstrapV330?.verifiedFactoryLookup===true?"CANONICAL_UNISWAP_V3_FACTORY_V330":null))});
+
+  const head=await rpc(env,"eth_blockNumber",[],budget,"analysis");
+  let toBlock=null; try{if(head?.result)toBlock=Number(BigInt(head.result));}catch(_){}
+  if(!Number.isFinite(toBlock)||toBlock<=0) return {...base,attempted:true,pairAddress,token0,token1,fee,protocolEvidence:"ONCHAIN_TOKEN0_TOKEN1_FEE_V329",pairCacheWriteStatus:pairCacheWriteV329?.status||null,requestsUsed:Math.max(0,safeNumber(budget?.totalUsed)-before),status:"HEAD_UNVERIFIED"};
+
+  const ledgerBefore=await loadNativeV3SwapLedgerV331(env,token,pairAddress);
+  const priorLast=Number.isFinite(Number(ledgerBefore?.lastObservedBlock))?Number(ledgerBefore.lastObservedBlock):null;
+  const availableLogRequests=Math.max(0,Math.min(NATIVE_V3_SWEEP_MAX_CHUNKS_V331,Math.floor(Math.max(0,safeNumber(budget?.totalLimit)-safeNumber(budget?.totalUsed)-NATIVE_V3_SWEEP_REQUEST_RESERVE_V331))));
+  if(availableLogRequests<1) return {...base,attempted:true,pairAddress,token0,token1,fee,protocolEvidence:"ONCHAIN_TOKEN0_TOKEN1_FEE_V329",pairCacheWriteStatus:pairCacheWriteV329?.status||null,requestsUsed:Math.max(0,safeNumber(budget?.totalUsed)-before),status:"V3_SWEEP_BUDGET_UNAVAILABLE_V331",ledgerStatusV331:ledgerBefore?.status||null};
+
+  const maxBlocks=availableLogRequests*NATIVE_V3_SWEEP_BLOCKS_PER_CHUNK_V331;
+  let sweepStart;
+  let sweepGap=false;
+  if(Number.isFinite(priorLast)&&priorLast<toBlock&&(toBlock-priorLast)<=maxBlocks){ sweepStart=priorLast+1; }
+  else if(Number.isFinite(priorLast)&&priorLast>=toBlock){ sweepStart=Math.max(0,toBlock-NATIVE_V3_SWEEP_BLOCKS_PER_CHUNK_V331+1); }
+  else { sweepStart=Math.max(0,toBlock-maxBlocks+1); if(Number.isFinite(priorLast)&&priorLast<sweepStart-1)sweepGap=true; }
+
+  const ranges=[];
+  for(let from=sweepStart;from<=toBlock&&ranges.length<availableLogRequests;from+=NATIVE_V3_SWEEP_BLOCKS_PER_CHUNK_V331){
+    ranges.push({fromBlock:from,toBlock:Math.min(toBlock,from+NATIVE_V3_SWEEP_BLOCKS_PER_CHUNK_V331-1)});
   }
-
-  if (!isAddress(pairAddress)) {
-    return {
-      ...base,
-      status: market?.verified === true
-        ? "VERIFIED_MARKET_PAIR_ADDRESS_MISSING"
-        : (factoryBootstrapV330?.attempted === true
-            ? factoryBootstrapV330.status
-            : (persistedPairV329?.found === true ? "MARKET_UNVERIFIED_PAIR_CACHE_UNUSABLE_V329" : "MARKET_UNVERIFIED_NO_PERSISTED_V3_PAIR_V329"))
-    };
-  }
-
-  if (!dexId.includes("uniswap")) {
-    return {...base, status: "PAIR_IDENTITY_NOT_UNISWAP"};
-  }
-
-  const explicitlyV2 = /(^|[^a-z0-9])v2([^a-z0-9]|$)/i.test(labels);
-  const explicitlyV4 = /(^|[^a-z0-9])v4([^a-z0-9]|$)/i.test(labels);
-  if (explicitlyV2 || explicitlyV4) {
-    return {...base, status: explicitlyV2 ? "PAIR_IDENTITY_UNISWAP_V2" : "PAIR_IDENTITY_UNISWAP_V4"};
-  }
-
-  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
-    return {...base, status: "TOKEN_DECIMALS_UNVERIFIED"};
-  }
-
-  const spare = Math.max(0, safeNumber(budget?.totalLimit) - safeNumber(budget?.totalUsed));
-  if (spare < 5 || !budgetAvailable(budget, "analysis")) {
-    return {...base, status: "INSUFFICIENT_SPARE_MANUAL_BUDGET"};
-  }
-
-  const before = safeNumber(budget?.totalUsed);
-  const call = async data => rpc(env, "eth_call", [{to: pairAddress, data}, "latest"], budget, "analysis");
-
-  const t0r = await call(UNISWAP_V3_TOKEN0_SELECTOR_V326);
-  const t1r = await call(UNISWAP_V3_TOKEN1_SELECTOR_V326);
-  const feeResult = await call(UNISWAP_V3_FEE_SELECTOR_V328);
-  const token0 = decodeEthCallAddressV326(t0r?.result);
-  const token1 = decodeEthCallAddressV326(t1r?.result);
-
-  let fee = null;
-  try {
-    const raw = String(feeResult?.result || "");
-    if (/^0x[a-fA-F0-9]{1,64}$/.test(raw)) fee = Number(BigInt(raw));
-  } catch (_) {}
-
-  if (!token0 || !token1 || (token !== token0 && token !== token1)) {
-    return {
-      ...base, attempted: true, pairAddress, token0, token1, fee,
-      requestsUsed: Math.max(0, safeNumber(budget?.totalUsed) - before),
-      status: "POOL_TOKEN_IDENTITY_UNVERIFIED"
-    };
-  }
-
-  if (!Number.isInteger(fee) || fee <= 0 || fee > 1_000_000) {
-    return {
-      ...base, attempted: true, pairAddress, token0, token1, fee,
-      requestsUsed: Math.max(0, safeNumber(budget?.totalUsed) - before),
-      status: "UNISWAP_V3_FEE_CALL_UNVERIFIED"
-    };
-  }
-
-  const pairCacheWriteV329 = await persistVerifiedV3PairIdentityV329(env, {
-    tokenAddress: token,
-    pairAddress,
-    token0,
-    token1,
-    fee,
-    dexId: freshPairUsable ? (market?.dexId || "uniswap") : (persisted?.dexId || "uniswap"),
-    pairLabels: labelsArray.length ? labelsArray : ["v3"],
-    marketSource: freshPairUsable ? (market?.source || null) : (persisted?.marketSource || (factoryBootstrapV330?.verifiedFactoryLookup === true ? "CANONICAL_UNISWAP_V3_FACTORY_V330" : null))
-  });
-
-  const head = await rpc(env, "eth_blockNumber", [], budget, "analysis");
-  let toBlock = null;
-  try { if (head?.result) toBlock = Number(BigInt(head.result)); } catch (_) {}
-  if (!Number.isFinite(toBlock) || toBlock <= 0) {
-    return {
-      ...base, attempted: true, pairAddress, token0, token1, fee,
-      protocolEvidence: "ONCHAIN_TOKEN0_TOKEN1_FEE_V329",
-      pairCacheWriteStatus: pairCacheWriteV329?.status || null,
-      requestsUsed: Math.max(0, safeNumber(budget?.totalUsed) - before),
-      status: "HEAD_UNVERIFIED"
-    };
-  }
-
-  const fromBlock = Math.max(0, toBlock - 9);
-  const logsResult = await rpc(
-    env,
-    "eth_getLogs",
-    [{
-      fromBlock: "0x" + fromBlock.toString(16),
-      toBlock: "0x" + toBlock.toString(16),
-      address: pairAddress,
-      topics: [UNISWAP_V3_SWAP_TOPIC_V326]
-    }],
-    budget,
-    "analysis"
-  );
-
-  if (!Array.isArray(logsResult?.result)) {
-    return {
-      ...base, attempted: true, pairAddress, token0, token1, fee,
-      protocolEvidence: "ONCHAIN_TOKEN0_TOKEN1_FEE_V329",
-      pairCacheWriteStatus: pairCacheWriteV329?.status || null,
-      fromBlock, toBlock,
-      requestsUsed: Math.max(0, safeNumber(budget?.totalUsed) - before),
-      status: "V3_LOGS_UNVERIFIED",
-      error: logsResult?.error || null
-    };
-  }
-
-  const unique = new Map();
-  for (const log of logsResult.result) {
-    const data = String(log?.data || "").replace(/^0x/i, "");
-    if (data.length < 128) continue;
-    const amount0 = signedInt256V326(data.slice(0, 64));
-    const amount1 = signedInt256V326(data.slice(64, 128));
-    if (typeof amount0 !== "bigint" || typeof amount1 !== "bigint") continue;
-    const candidateRaw = token === token0 ? amount0 : amount1;
-    if (candidateRaw === 0n) continue;
-    const candidateAmount = decimalFromSignedRawV326(candidateRaw, decimals);
-    if (!Number.isFinite(candidateAmount) || candidateAmount === 0) continue;
-    const side = candidateRaw < 0n ? "BUY" : "SELL";
-    const usd = priceUsdVerified ? Math.abs(candidateAmount) * priceUsd : null;
-    const key = `${String(log?.transactionHash || "").toLowerCase()}|${String(log?.logIndex ?? "")}`;
-    if (!unique.has(key)) unique.set(key, {
-      side,
-      tokenAmount: Math.abs(candidateAmount),
-      usd: Number.isFinite(usd) && usd > 0 ? usd : null
-    });
-  }
-
-  let buys = 0, sells = 0, buyUsd = 0, sellUsd = 0, buyTokenAmount = 0, sellTokenAmount = 0;
-  for (const row of unique.values()) {
-    if (row.side === "BUY") {
-      buys++;
-      buyTokenAmount += safeNumber(row.tokenAmount);
-      if (priceUsdVerified) buyUsd += safeNumber(row.usd);
-    } else if (row.side === "SELL") {
-      sells++;
-      sellTokenAmount += safeNumber(row.tokenAmount);
-      if (priceUsdVerified) sellUsd += safeNumber(row.usd);
+  const allLogs=[]; const scannedRanges=[];
+  for(const range of ranges){
+    if(!budgetAvailable(budget,"analysis")) break;
+    const logsResult=await rpc(env,"eth_getLogs",[{fromBlock:"0x"+range.fromBlock.toString(16),toBlock:"0x"+range.toBlock.toString(16),address:pairAddress,topics:[UNISWAP_V3_SWAP_TOPIC_V326]}],budget,"analysis");
+    if(!Array.isArray(logsResult?.result)){
+      return {...base,attempted:true,pairAddress,token0,token1,fee,protocolEvidence:"ONCHAIN_TOKEN0_TOKEN1_FEE_V329",pairCacheWriteStatus:pairCacheWriteV329?.status||null,fromBlock:ranges[0]?.fromBlock??null,toBlock:range.toBlock,requestsUsed:Math.max(0,safeNumber(budget?.totalUsed)-before),status:"V3_LOGS_UNVERIFIED",error:logsResult?.error||null,sweepStatusV331:"PARTIAL_PROVIDER_FAILURE_V331",sweepChunksV331:scannedRanges.length,sweepBlocksV331:scannedRanges.reduce((n,r)=>n+(r.toBlock-r.fromBlock+1),0),sweepGapV331:sweepGap,ledgerStatusV331:ledgerBefore?.status||null};
     }
+    allLogs.push(...logsResult.result);
+    scannedRanges.push({...range,observedAt:Date.now(),swaps:logsResult.result.length});
   }
 
-  const usdVerified = priceUsdVerified;
-  const status = !unique.size
-    ? "VERIFIED_ZERO_SWAPS_RECENT_WINDOW_V329"
-    : (usdVerified ? "VERIFIED_RECENT_EXACT_POOL_WINDOW_V329" : "VERIFIED_RECENT_EXACT_POOL_SWAPS_USD_UNVERIFIED_V329");
+  const unique=new Map();
+  for(const log of allLogs){
+    const data=String(log?.data||"").replace(/^0x/i,""); if(data.length<128)continue;
+    const amount0=signedInt256V326(data.slice(0,64)), amount1=signedInt256V326(data.slice(64,128)); if(typeof amount0!=="bigint"||typeof amount1!=="bigint")continue;
+    const candidateRaw=token===token0?amount0:amount1; if(candidateRaw===0n)continue;
+    const candidateAmount=decimalFromSignedRawV326(candidateRaw,decimals); if(!Number.isFinite(candidateAmount)||candidateAmount===0)continue;
+    const side=candidateRaw<0n?"BUY":"SELL"; const usd=priceUsdVerified?Math.abs(candidateAmount)*priceUsd:null;
+    const txHash=String(log?.transactionHash||"").toLowerCase(), logIndex=String(log?.logIndex??"");
+    const tradeKey=`${txHash}|${logIndex}`; if(!txHash||unique.has(tradeKey))continue;
+    unique.set(tradeKey,{tradeKey,transactionHash:txHash,logIndex,blockNumber:rpcBlockNumberV331(log?.blockNumber),pairAddress,side,tokenAmount:Math.abs(candidateAmount),usd:Number.isFinite(usd)&&usd>0?usd:null,usdVerified:priceUsdVerified===true,priceUsd:priceUsdVerified?priceUsd:null,observedAt:Date.now(),timestampBasis:"INGESTION_TIME_ONLY_V331"});
+  }
 
-  return {
-    ...base,
-    attempted: true,
-    verified: true,
-    usdVerified,
-    status,
-    pairAddress, token0, token1, fee,
-    protocolEvidence: "ONCHAIN_TOKEN0_TOKEN1_FEE_V329",
-    pairCacheWriteStatus: pairCacheWriteV329?.status || null,
-    fromBlock, toBlock,
-    swaps: unique.size, buys, sells,
-    buyTokenAmount, sellTokenAmount,
-    buyUsd: usdVerified ? buyUsd : null,
-    sellUsd: usdVerified ? sellUsd : null,
-    netUsd: usdVerified ? buyUsd - sellUsd : null,
-    requestsUsed: Math.max(0, safeNumber(budget?.totalUsed) - before)
-  };
+  let buys=0,sells=0,buyUsd=0,sellUsd=0,buyTokenAmount=0,sellTokenAmount=0;
+  for(const row of unique.values()){
+    if(row.side==="BUY"){buys++;buyTokenAmount+=safeNumber(row.tokenAmount);if(priceUsdVerified)buyUsd+=safeNumber(row.usd);}else if(row.side==="SELL"){sells++;sellTokenAmount+=safeNumber(row.tokenAmount);if(priceUsdVerified)sellUsd+=safeNumber(row.usd);}
+  }
+  const ledgerWrite=await persistNativeV3SwapLedgerV331(env,token,pairAddress,[...unique.values()],scannedRanges);
+  const ledgerAfter=await loadNativeV3SwapLedgerV331(env,token,pairAddress);
+  const usdVerified=priceUsdVerified;
+  const status=!unique.size?"VERIFIED_ZERO_SWAPS_BOUNDED_SWEEP_V331":(usdVerified?"VERIFIED_BOUNDED_EXACT_POOL_SWEEP_V331":"VERIFIED_BOUNDED_EXACT_POOL_SWAPS_USD_UNVERIFIED_V331");
+  const observedFrom=scannedRanges.length?scannedRanges[0].fromBlock:null, observedTo=scannedRanges.length?scannedRanges[scannedRanges.length-1].toBlock:null;
+
+  return {...base,attempted:true,verified:true,usdVerified,status,pairAddress,token0,token1,fee,protocolEvidence:"ONCHAIN_TOKEN0_TOKEN1_FEE_V329",pairCacheWriteStatus:pairCacheWriteV329?.status||null,
+    fromBlock:observedFrom,toBlock:observedTo,swaps:unique.size,buys,sells,buyTokenAmount,sellTokenAmount,buyUsd:usdVerified?buyUsd:null,sellUsd:usdVerified?sellUsd:null,netUsd:usdVerified?buyUsd-sellUsd:null,requestsUsed:Math.max(0,safeNumber(budget?.totalUsed)-before),
+    sweepStatusV331:scannedRanges.length===ranges.length?"BOUNDED_SWEEP_COMPLETE_V331":"BOUNDED_SWEEP_PARTIAL_V331",sweepChunksV331:scannedRanges.length,sweepBlocksV331:scannedRanges.reduce((n,r)=>n+(r.toBlock-r.fromBlock+1),0),sweepGapV331:sweepGap,
+    ledgerStatusV331:ledgerAfter?.status||ledgerBefore?.status||null,ledgerWriteStatusV331:ledgerWrite?.status||null,ledgerRecordsV331:Array.isArray(ledgerAfter?.records)?ledgerAfter.records.length:safeNumber(ledgerWrite?.records),ledgerRangesV331:Array.isArray(ledgerAfter?.ranges)?ledgerAfter.ranges.length:safeNumber(ledgerWrite?.ranges),ledgerInsertedV331:safeNumber(ledgerWrite?.inserted),ledgerDeduplicatedV331:safeNumber(ledgerWrite?.deduplicated),ledgerFirstBlockV331:Number.isFinite(Number(ledgerAfter?.firstObservedBlock))?Number(ledgerAfter.firstObservedBlock):null,ledgerLastBlockV331:Number.isFinite(Number(ledgerAfter?.lastObservedBlock))?Number(ledgerAfter.lastObservedBlock):null};
 }
 
 function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 = null) {
@@ -64486,10 +64477,10 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   }
 
   const d = directionalDiagnosticsV325 || candidate?.manualDirectionalDiagnosticsV324 || null;
-  if (d && !lines.some(line => String(line).includes("Directional USD diagnostics — V330"))) {
+  if (d && !lines.some(line => String(line).includes("Directional USD diagnostics — V331"))) {
     lines.push(
       "",
-      "🔧 <b>Directional USD diagnostics — V330</b>",
+      "🔧 <b>Directional USD diagnostics — V331</b>",
       `GeckoTerminal: <b>${d?.gecko?.attempted === true ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(d?.gecko?.status || "NO_STATUS")}</b> | HTTP <b>${escapeHtml(d?.gecko?.httpStatus ?? "N/A")}</b> | returned <b>${safeNumber(d?.gecko?.returnedCount)}</b> | accepted <b>${safeNumber(d?.gecko?.acceptedCount)}</b>`,
       `Bitquery: <b>${d?.bitquery?.attempted === true ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(d?.bitquery?.status || "NO_STATUS")}</b> | HTTP <b>${escapeHtml(d?.bitquery?.httpStatus ?? "N/A")}</b> | raw rows <b>${safeNumber(d?.bitquery?.rawRows)}</b> | accepted <b>${safeNumber(d?.bitquery?.rows)}</b>`,
       d?.gecko?.poolAddress
@@ -64503,7 +64494,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   if (v3) {
     lines.push(
       "",
-      "🧱 <b>Native Uniswap V3 Directional USD — V330</b>",
+      "🧱 <b>Native Uniswap V3 Directional USD — V331</b>",
       `Status: <b>${escapeHtml(v3?.status || "UNVERIFIED")}</b>`,
       `Market path: <b>${v3?.marketVerified === true ? "VERIFIED" : "UNVERIFIED"}</b> | source <b>${escapeHtml(v3?.marketSource || "UNVERIFIED")}</b> | status <b>${escapeHtml(v3?.marketStatus || "UNVERIFIED")}</b>`,
       `Pair identity: <b>${escapeHtml(v3?.pairIdentitySource || "UNVERIFIED")}</b>${Number.isFinite(Number(v3?.persistedPairAgeMs)) ? ` | cache age <b>${formatAgeV223(Number(v3.persistedPairAgeMs))}</b>` : ""}`,
@@ -64513,8 +64504,11 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       v3?.protocolEvidence ? `V3 proof: <b>${escapeHtml(v3.protocolEvidence)}</b>${Number.isInteger(Number(v3?.fee)) ? ` | fee <b>${safeNumber(v3.fee)}</b>` : ""}` : "V3 proof: <b>UNVERIFIED</b>",
       v3?.pairAddress ? `Pool: <code>${escapeHtml(v3.pairAddress)}</code>` : "Pool: <b>UNVERIFIED</b>",
       v3?.verified === true && Number.isFinite(Number(v3?.fromBlock)) && Number.isFinite(Number(v3?.toBlock))
-        ? `Observed exact block window: <b>${safeNumber(v3.fromBlock)}–${safeNumber(v3.toBlock)}</b> | swaps <b>${safeNumber(v3.swaps)}</b> (${safeNumber(v3.buys)} buys / ${safeNumber(v3.sells)} sells)`
-        : "Observed exact block window: <b>UNVERIFIED</b>",
+        ? `Observed exact block sweep: <b>${safeNumber(v3.fromBlock)}–${safeNumber(v3.toBlock)}</b> | <b>${safeNumber(v3?.sweepBlocksV331)}</b> blocks / <b>${safeNumber(v3?.sweepChunksV331)}</b> chunks | swaps <b>${safeNumber(v3.swaps)}</b> (${safeNumber(v3.buys)} buys / ${safeNumber(v3.sells)} sells)`
+        : "Observed exact block sweep: <b>UNVERIFIED</b>",
+      `Sweep coverage: <b>${escapeHtml(v3?.sweepStatusV331 || "UNVERIFIED")}</b> | prior-gap <b>${v3?.sweepGapV331 === true ? "YES — NOT COMPLETE" : "NO DETECTED GAP"}</b>`,
+      `Persistent V3 ledger: <b>${escapeHtml(v3?.ledgerStatusV331 || "UNVERIFIED")}</b> | records <b>${safeNumber(v3?.ledgerRecordsV331)}</b> | ranges <b>${safeNumber(v3?.ledgerRangesV331)}</b>`,
+      `Ledger write: <b>${escapeHtml(v3?.ledgerWriteStatusV331 || "UNVERIFIED")}</b> | new <b>${safeNumber(v3?.ledgerInsertedV331)}</b> | deduped <b>${safeNumber(v3?.ledgerDeduplicatedV331)}</b>`,
       v3?.usdVerified === true
         ? `🟢 Observed Buy USD: <b>${money(v3.buyUsd)}</b> (${safeNumber(v3.buys)} swaps)`
         : "🟢 Observed Buy USD: <b>UNVERIFIED</b>",
@@ -64526,7 +64520,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
         : "📈 Observed Net USD: <b>UNVERIFIED</b>",
       `USD price evidence: <b>${v3?.marketPriceVerified === true ? "CURRENT_VERIFIED_MARKET_PRICE" : "UNVERIFIED"}</b>`,
       `Requests used: <b>${safeNumber(v3?.requestsUsed)}</b>`,
-      "ℹ️ <i>Native V3 direction/counts are exact-pool on-chain evidence. USD is shown only with a current verified market price. This bounded window is not claimed as a complete 5m/1h/6h/24h total.</i>"
+      "ℹ️ <i>Native V3 direction/counts are exact-pool on-chain evidence. V331 persists deduplicated tx/log/block evidence across analyses. Ledger observedAt is ingestion time only, so it is not claimed as complete 5m/1h/6h/24h coverage. USD is shown only with a current verified market price.</i>"
     );
   }
 
