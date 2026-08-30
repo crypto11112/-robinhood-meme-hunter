@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V373
- * AUTHORITATIVE RUNTIME VERSION: V373
+ * Robinhood Chain Meme Hunter — V374
+ * AUTHORITATIVE RUNTIME VERSION: V374
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V373";
+const VERSION = "V374";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -68896,6 +68896,181 @@ async function v3AlchemyWebSocketDiagnosticV360(env, tokenInput) {
   return out;
 }
 
+
+/* ============================================================
+   V374 — LIVE V3 WEBSOCKET vs DIRECT eth_getLogs RECONCILIATION
+   Read-only diagnostic. No scoring mutation, no KV writes, no DO trade writes.
+   Uses Alchemy's proven free-tier 10-block eth_getLogs limit.
+   ============================================================ */
+
+async function v3ReconcileDiagnosticV374(env, tokenInput, requestedBlocks=40) {
+  const startedAt = Date.now();
+  const token = normalize(tokenInput || "");
+  const blocks = Math.max(10, Math.min(100, Math.trunc(Number(requestedBlocks) || 40)));
+  const out = {
+    version: VERSION,
+    diagnostic: "V3_LIVE_VS_DIRECT_GETLOGS_RECONCILIATION_V374",
+    safe: true,
+    readOnly: true,
+    workersKvWrites: 0,
+    durableObjectTradeWrites: 0,
+    scoringMutated: false,
+    token,
+    requestedBlocks: blocks,
+    providerChunkSize: 10,
+    pair: null,
+    headBlock: null,
+    fromBlock: null,
+    toBlock: null,
+    directLogs: 0,
+    liveStoredLogs: 0,
+    matched: 0,
+    missedByLiveCollector: 0,
+    liveOnly: 0,
+    directBuys: 0,
+    directSells: 0,
+    directBuyQuote: 0,
+    directSellQuote: 0,
+    liveBuys: 0,
+    liveSells: 0,
+    chunks: [],
+    missingExamples: [],
+    timestamp: now()
+  };
+
+  if (!isAddress(token)) {
+    out.status = "INVALID_TOKEN_V374";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  const cfg = await v3LiveCollectorConfigV363(env, token);
+  if (!cfg?.ok) {
+    out.status = cfg?.status || "LIVE_CONFIG_UNAVAILABLE_V374";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+  out.pair = cfg.pair;
+
+  const alchemyUrl = v356AlchemyUrl(env);
+  if (!alchemyUrl) {
+    out.status = "ALCHEMY_NOT_CONFIGURED_V374";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  const headCall = await v356RawAlchemyRpc(alchemyUrl, "eth_blockNumber", [], 4500);
+  const head = v356BlockNumber(headCall?.result);
+  if (!headCall?.ok || !Number.isFinite(head)) {
+    out.status = "HEAD_UNAVAILABLE_V374";
+    out.headError = headCall?.error || null;
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  const toBlock = head;
+  const fromBlock = Math.max(0, toBlock - blocks + 1);
+  out.headBlock = head;
+  out.fromBlock = fromBlock;
+  out.toBlock = toBlock;
+
+  const direct = [];
+  for (let from = fromBlock; from <= toBlock; from += 10) {
+    const to = Math.min(toBlock, from + 9);
+    const call = await v356RawAlchemyRpc(alchemyUrl, "eth_getLogs", [{
+      fromBlock: "0x" + from.toString(16),
+      toBlock: "0x" + to.toString(16),
+      address: cfg.pair,
+      topics: [UNISWAP_V3_SWAP_TOPIC_V326]
+    }], 4500);
+    const rows = call?.ok && Array.isArray(call.result) ? call.result : [];
+    out.chunks.push({
+      fromBlock: from,
+      toBlock: to,
+      ok: call?.ok === true,
+      httpStatus: call?.httpStatus ?? null,
+      rpcErrorCode: call?.rpcErrorCode ?? null,
+      error: call?.error || null,
+      logs: rows.length
+    });
+    if (!call?.ok) {
+      out.status = "DIRECT_GETLOGS_CHUNK_FAILED_V374";
+      out.elapsedMs = Date.now() - startedAt;
+      return out;
+    }
+    direct.push(...rows);
+  }
+
+  // Ask the existing DO for only already-stored live rows in this exact block range.
+  const ns = env?.[V3_LIVE_DO_BINDING_V363];
+  if (!ns || typeof ns.idFromName !== "function" || typeof ns.get !== "function") {
+    out.status = "DURABLE_OBJECT_BINDING_REQUIRED_V374";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+  const stub = ns.get(ns.idFromName(token));
+  const u = new URL("https://v3-live.internal/reconcile-v374");
+  u.searchParams.set("fromBlock", String(fromBlock));
+  u.searchParams.set("toBlock", String(toBlock));
+  const rr = await stub.fetch(u.toString());
+  const livePayload = await rr.json();
+  const liveRows = Array.isArray(livePayload?.rows) ? livePayload.rows : [];
+
+  const keyOf = (r) => `${String(r?.transactionHash || "").toLowerCase()}|${String(r?.logIndex ?? "")}`;
+  const directMap = new Map();
+  for (const log of direct) {
+    const key = keyOf(log);
+    const data = String(log?.data || "").replace(/^0x/i, "");
+    const a0 = data.length >= 128 ? signedInt256V326(data.slice(0,64)) : null;
+    const a1 = data.length >= 128 ? signedInt256V326(data.slice(64,128)) : null;
+    const raw = cfg.token === cfg.token0 ? a0 : (cfg.token === cfg.token1 ? a1 : null);
+    const quoteRaw = cfg.token === cfg.token0 ? a1 : a0;
+    const quoteToken = cfg.token === cfg.token0 ? cfg.token1 : cfg.token0;
+    const quoteDecimals = quoteToken === CANONICAL_WETH_V179 ? 18 : (quoteToken === CANONICAL_USDG_V179 ? CANONICAL_USDG_DECIMALS_V179 : null);
+    const quote = Number.isInteger(quoteDecimals) && typeof quoteRaw === "bigint" ? decimalFromSignedRawV326(quoteRaw, quoteDecimals) : null;
+    const side = typeof raw === "bigint" && raw !== 0n ? (raw < 0n ? "BUY" : "SELL") : null;
+    const row = {
+      tradeKey: key,
+      transactionHash: String(log?.transactionHash || "").toLowerCase(),
+      logIndex: String(log?.logIndex ?? ""),
+      blockNumber: rpcBlockNumberV331(log?.blockNumber),
+      side,
+      quoteTokenAddress: quoteToken,
+      quoteAmount: Number.isFinite(quote) ? Math.abs(quote) : null
+    };
+    directMap.set(key, row);
+    if (side === "BUY") { out.directBuys++; if (Number.isFinite(row.quoteAmount)) out.directBuyQuote += row.quoteAmount; }
+    if (side === "SELL") { out.directSells++; if (Number.isFinite(row.quoteAmount)) out.directSellQuote += row.quoteAmount; }
+  }
+
+  const liveMap = new Map(liveRows.map(r => [String(r.tradeKey || keyOf(r)), r]));
+  for (const r of liveRows) {
+    if (r?.side === "BUY") out.liveBuys++;
+    if (r?.side === "SELL") out.liveSells++;
+  }
+
+  const missing = [...directMap.entries()].filter(([k]) => !liveMap.has(k)).map(([,v]) => v);
+  const liveOnly = [...liveMap.keys()].filter(k => !directMap.has(k));
+
+  out.directLogs = directMap.size;
+  out.liveStoredLogs = liveMap.size;
+  out.matched = directMap.size - missing.length;
+  out.missedByLiveCollector = missing.length;
+  out.liveOnly = liveOnly.length;
+  out.capturePct = directMap.size > 0 ? Number(((out.matched / directMap.size) * 100).toFixed(2)) : 100;
+  out.directBuyQuote = Number(out.directBuyQuote.toFixed(12));
+  out.directSellQuote = Number(out.directSellQuote.toFixed(12));
+  out.missingExamples = missing.slice(0, 12);
+  out.status = missing.length === 0
+    ? "DIRECT_SAMPLE_FULLY_CAPTURED_V374"
+    : "LIVE_COLLECTOR_MISSED_DIRECT_LOGS_V374";
+  out.interpretation = missing.length === 0
+    ? "No missed Swap logs in this sampled exact-pool range. Repeat samples are needed before claiming continuous completeness."
+    : "Direct eth_getLogs found exact-pool Swap logs absent from Durable Object live storage. Live totals are incomplete for this sampled range.";
+  out.elapsedMs = Date.now() - startedAt;
+  return out;
+}
+
 /* =========================================================
    ROUTER
    ========================================================= */
@@ -69106,6 +69281,17 @@ async function handleRequest(
       await v3AlchemyWebSocketDiagnosticV360(
         env,
         url.searchParams.get("token") || ""
+      )
+    );
+  }
+
+
+  if (path === "/v3reconcile-diagnostic") {
+    return jsonResponse(
+      await v3ReconcileDiagnosticV374(
+        env,
+        url.searchParams.get("token") || "",
+        url.searchParams.get("blocks") || "40"
       )
     );
   }
@@ -69724,6 +69910,11 @@ export class V3LiveCollectorV363 {
       return Response.json(await this.status("STOPPED_V363"));
     }
     if (url.pathname === "/status") return Response.json(await this.status());
+    if (url.pathname === "/reconcile-v374") {
+      const fromBlock = Math.max(0, Math.trunc(Number(url.searchParams.get("fromBlock")) || 0));
+      const toBlock = Math.max(fromBlock, Math.trunc(Number(url.searchParams.get("toBlock")) || fromBlock));
+      return Response.json(await this.reconcileRangeV374(fromBlock, toBlock));
+    }
     if (url.pathname === "/windows") return Response.json(await this.liveWindowsV364());
     return Response.json({version:VERSION,status:"NOT_FOUND_V364"},{status:404});
   }
@@ -69968,6 +70159,46 @@ export class V3LiveCollectorV363 {
     const oldStart = bucketStart - (25 * 60 * 60 * 1000);
     try { await this.state.storage.delete(`v364:trade-bucket:${oldStart}`); } catch (_) {}
     return {inserted:1,deduped:false};
+  }
+
+  async reconcileRangeV374(fromBlock, toBlock) {
+    const nowMs = Date.now();
+    const bucketMs = 5 * 60 * 1000;
+    const current = Math.floor(nowMs / bucketMs) * bucketMs;
+    const earliest = nowMs - 25 * 60 * 60 * 1000;
+    const keys = [];
+    for (let t=current; t>=Math.floor(earliest/bucketMs)*bucketMs; t-=bucketMs) keys.push(`v364:trade-bucket:${t}`);
+    const got = await this.state.storage.get(keys);
+    const rows = [];
+    if (got && typeof got.forEach === "function") {
+      got.forEach(v => {
+        if (!Array.isArray(v)) return;
+        for (const r of v) {
+          const b = Number(r?.blockNumber);
+          if (Number.isFinite(b) && b >= fromBlock && b <= toBlock) {
+            rows.push({
+              tradeKey: String(r?.tradeKey || `${String(r?.transactionHash || "").toLowerCase()}|${String(r?.logIndex ?? "")}`),
+              transactionHash: String(r?.transactionHash || "").toLowerCase(),
+              logIndex: String(r?.logIndex ?? ""),
+              blockNumber: b,
+              side: r?.side || null,
+              quoteAmount: Number.isFinite(Number(r?.quoteAmount)) ? Number(r.quoteAmount) : null,
+              usd: Number.isFinite(Number(r?.usd)) ? Number(r.usd) : null,
+              usdVerified: r?.usdVerified === true,
+              observedAt: Number.isFinite(Number(r?.observedAt)) ? Number(r.observedAt) : null
+            });
+          }
+        }
+      });
+    }
+    return {
+      version: VERSION,
+      status: "LIVE_STORED_RANGE_V374",
+      readOnly: true,
+      fromBlock,
+      toBlock,
+      rows
+    };
   }
 
   async liveWindowsV364() {
