@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V381
- * AUTHORITATIVE RUNTIME VERSION: V381
+ * Robinhood Chain Meme Hunter — V382
+ * AUTHORITATIVE RUNTIME VERSION: V382
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V381";
+const VERSION = "V382";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -69993,7 +69993,7 @@ async function handleRequest(
         method: "GET",
         headers: request.headers
       });
-      const resp = await handleRequest(req, env, ctx);
+      const resp = await handleRequest(req, env);
       discovery = await resp.json();
     } catch (e) {
       return jsonResponse({
