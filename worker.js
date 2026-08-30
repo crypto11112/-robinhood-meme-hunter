@@ -1445,7 +1445,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V331";
+const VERSION = "V332";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64460,76 +64460,139 @@ async function manualNativeV3DirectionalV326(env, budget, candidate) {
 
 function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 = null) {
   const standard = telegramMessage(candidate);
-  const lines = String(standard || "").split("\n");
+  const sourceLines = String(standard || "").split("\n");
 
   /*
-   * V294 intentionally reuses the standard autonomous presentation formatter.
-   * Only the alert identity/header is changed so a manual request cannot be
-   * mistaken for a newly-qualified autonomous launch alert.
+   * V332 PRESENTATION CLEANUP ONLY.
    *
-   * V325: pass the already-computed provider diagnostics explicitly into this
-   * manual formatter and append them near the end of the Telegram message.
-   * This is presentation-only and adds zero provider requests.
+   * The standard autonomous formatter still builds and retains the complete
+   * evidence payload. Manual /analyse now removes verbose provider/debug
+   * sections from the user-facing Telegram message and replaces the long
+   * native-V3 diagnostic block with a compact evidence summary.
+   *
+   * No scanner, qualification, provider, request-budget, holder, learning,
+   * factory-bootstrap, pair-cache or V3-ledger behaviour is changed here.
    */
-  if (lines.length >= 2) {
-    lines[0] = `🔎 <b>Robinhood Chain Meme Hunter ${VERSION}</b>`;
-    lines[1] = "🧪 <b>Fresh Manual Analysis</b>";
+  const out = [];
+  let skip = null;
+
+  const beginsVerboseSectionV332 = line => {
+    const text = String(line || "");
+    if (text.includes("📊 <b>DexScreener Market Activity")) return "MARKET_ACTIVITY";
+    if (text.includes("📊 <b>Market Activity Counts")) return "MARKET_ACTIVITY";
+    if (text.includes("💵 <b>Verified Directional USD — INDEXED TRADE FEED")) return "INDEXED_DIRECTIONAL";
+    if (text.includes("🔧 <b>Directional USD diagnostics")) return "DIRECTIONAL_DEBUG";
+    if (text.includes("✅ <b>Verified On-chain USD (observed by bot)</b>")) return "VERIFIED_ONCHAIN_VERBOSE";
+    return null;
+  };
+
+  const shouldResumeV332 = (mode, line) => {
+    const text = String(line || "");
+    if (mode === "MARKET_ACTIVITY") {
+      return text.includes("💵 <b>Verified Directional USD — INDEXED TRADE FEED");
+    }
+    if (mode === "INDEXED_DIRECTIONAL") {
+      return text.includes("🔧 <b>Directional USD diagnostics") ||
+             text.includes("✅ <b>Verified On-chain USD (observed by bot)</b>") ||
+             text.includes("🟣 <b>Verified Pons Curve USD</b>") ||
+             text.includes("👥 Holder count:");
+    }
+    if (mode === "DIRECTIONAL_DEBUG") {
+      return text.includes("✅ <b>Verified On-chain USD (observed by bot)</b>") ||
+             text.includes("🟣 <b>Verified Pons Curve USD</b>") ||
+             text.includes("👥 Holder count:");
+    }
+    if (mode === "VERIFIED_ONCHAIN_VERBOSE") {
+      return text.includes("🟣 <b>Verified Pons Curve USD</b>") ||
+             text.includes("👥 Holder count:");
+    }
+    return false;
+  };
+
+  for (const originalLine of sourceLines) {
+    const line = String(originalLine || "");
+
+    if (skip) {
+      if (!shouldResumeV332(skip, line)) continue;
+      skip = null;
+    }
+
+    const newSkip = beginsVerboseSectionV332(line);
+    if (newSkip) {
+      skip = newSkip;
+      continue;
+    }
+
+    /* V332 fixes the stray literal "%n" artefact seen in V331 Telegram output. */
+    const cleaned = line.replace(/%n(?=<\/b>|\s|$)/g, "%");
+    out.push(cleaned);
+  }
+
+  if (out.length >= 2) {
+    out[0] = `🔎 <b>Robinhood Chain Meme Hunter ${VERSION}</b>`;
+    out[1] = "🧪 <b>Fresh Manual Analysis</b>";
+  }
+
+  const v3 = candidate?.nativeV3DirectionalV326 || null;
+  const evidence = [];
+  evidence.push("", "🔬 <b>Evidence Summary</b>");
+
+  if (v3) {
+    const pairVerified = v3?.verified === true || Boolean(v3?.protocolEvidence);
+    const protocolName = pairVerified ? "Uniswap V3 — VERIFIED ON-CHAIN" : "Uniswap V3 — UNVERIFIED";
+    evidence.push(`🏊 Pool protocol: <b>${protocolName}</b>`);
+
+    if (v3?.pairAddress) {
+      evidence.push(`🧱 Pool: <code>${escapeHtml(v3.pairAddress)}</code>`);
+    }
+
+    if (v3?.verified === true && Number.isFinite(Number(v3?.fromBlock)) && Number.isFinite(Number(v3?.toBlock))) {
+      evidence.push(
+        `🔁 Native V3 sweep: <b>${safeNumber(v3?.sweepBlocksV331)} blocks</b> | <b>${safeNumber(v3?.swaps)} swaps</b> (${safeNumber(v3?.buys)} buys / ${safeNumber(v3?.sells)} sells)`
+      );
+    } else {
+      evidence.push(`🔁 Native V3 sweep: <b>${escapeHtml(v3?.status || "UNVERIFIED")}</b>`);
+    }
+
+    if (v3?.ledgerStatusV331) {
+      evidence.push(
+        `🗃 V3 ledger: <b>${safeNumber(v3?.ledgerRecordsV331)} records</b> | <b>${safeNumber(v3?.ledgerRangesV331)} verified ranges</b>${v3?.sweepGapV331 === true ? " | coverage <b>PARTIAL</b>" : ""}`
+      );
+    }
+
+    if (v3?.usdVerified === true) {
+      evidence.push(
+        `💵 Native V3 flow: 🟢 <b>${money(v3?.buyUsd)}</b> | 🔴 <b>${money(v3?.sellUsd)}</b> | Net <b>${money(v3?.netUsd)}</b>`
+      );
+    } else {
+      evidence.push("💵 Native V3 directional USD: <b>UNVERIFIED</b>");
+    }
+  } else {
+    evidence.push("🏊 Native V3 evidence: <b>UNVERIFIED</b>");
   }
 
   const d = directionalDiagnosticsV325 || candidate?.manualDirectionalDiagnosticsV324 || null;
-  if (d && !lines.some(line => String(line).includes("Directional USD diagnostics — V331"))) {
-    lines.push(
-      "",
-      "🔧 <b>Directional USD diagnostics — V331</b>",
-      `GeckoTerminal: <b>${d?.gecko?.attempted === true ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(d?.gecko?.status || "NO_STATUS")}</b> | HTTP <b>${escapeHtml(d?.gecko?.httpStatus ?? "N/A")}</b> | returned <b>${safeNumber(d?.gecko?.returnedCount)}</b> | accepted <b>${safeNumber(d?.gecko?.acceptedCount)}</b>`,
-      `Bitquery: <b>${d?.bitquery?.attempted === true ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(d?.bitquery?.status || "NO_STATUS")}</b> | HTTP <b>${escapeHtml(d?.bitquery?.httpStatus ?? "N/A")}</b> | raw rows <b>${safeNumber(d?.bitquery?.rawRows)}</b> | accepted <b>${safeNumber(d?.bitquery?.rows)}</b>`,
-      d?.gecko?.poolAddress
-        ? `Selected pool: <code>${escapeHtml(d.gecko.poolAddress)}</code>`
-        : "Selected pool: <b>UNVERIFIED</b>",
-      `Result: <b>${d?.gecko?.verifiedAnyWindow === true || d?.bitquery?.verified === true ? "VERIFIED_DIRECTIONAL_DATA" : "NO_VERIFIED_DIRECTIONAL_DATA"}</b>`
-    );
-  }
+  const indexedVerified = d?.gecko?.verifiedAnyWindow === true || d?.bitquery?.verified === true;
+  evidence.push(`🛰 Indexed directional feed: <b>${indexedVerified ? "VERIFIED" : "UNVERIFIED"}</b>`);
 
-  const v3 = candidate?.nativeV3DirectionalV326;
-  if (v3) {
-    lines.push(
-      "",
-      "🧱 <b>Native Uniswap V3 Directional USD — V331</b>",
-      `Status: <b>${escapeHtml(v3?.status || "UNVERIFIED")}</b>`,
-      `Market path: <b>${v3?.marketVerified === true ? "VERIFIED" : "UNVERIFIED"}</b> | source <b>${escapeHtml(v3?.marketSource || "UNVERIFIED")}</b> | status <b>${escapeHtml(v3?.marketStatus || "UNVERIFIED")}</b>`,
-      `Pair identity: <b>${escapeHtml(v3?.pairIdentitySource || "UNVERIFIED")}</b>${Number.isFinite(Number(v3?.persistedPairAgeMs)) ? ` | cache age <b>${formatAgeV223(Number(v3.persistedPairAgeMs))}</b>` : ""}`,
-      `Factory bootstrap: <b>${escapeHtml(v3?.factoryBootstrapStatusV330 || "NOT_NEEDED")}</b>${Number.isInteger(Number(v3?.factoryBootstrapFeeV330)) ? ` | fee <b>${safeNumber(v3.factoryBootstrapFeeV330)}</b>` : ""}${safeNumber(v3?.factoryBootstrapRequestsV330) > 0 ? ` | requests <b>${safeNumber(v3.factoryBootstrapRequestsV330)}</b>` : ""}`,
-      `Pair cache: <b>${escapeHtml(v3?.persistedPairCacheStatus || "UNVERIFIED")}</b>${v3?.pairCacheWriteStatus ? ` | write <b>${escapeHtml(v3.pairCacheWriteStatus)}</b>` : ""}`,
-      `DEX evidence: <b>${escapeHtml(v3?.dexId || "UNVERIFIED")}</b> | labels <b>${escapeHtml(Array.isArray(v3?.pairLabels) && v3.pairLabels.length ? v3.pairLabels.join(" / ") : "UNVERIFIED")}</b>`,
-      v3?.protocolEvidence ? `V3 proof: <b>${escapeHtml(v3.protocolEvidence)}</b>${Number.isInteger(Number(v3?.fee)) ? ` | fee <b>${safeNumber(v3.fee)}</b>` : ""}` : "V3 proof: <b>UNVERIFIED</b>",
-      v3?.pairAddress ? `Pool: <code>${escapeHtml(v3.pairAddress)}</code>` : "Pool: <b>UNVERIFIED</b>",
-      v3?.verified === true && Number.isFinite(Number(v3?.fromBlock)) && Number.isFinite(Number(v3?.toBlock))
-        ? `Observed exact block sweep: <b>${safeNumber(v3.fromBlock)}–${safeNumber(v3.toBlock)}</b> | <b>${safeNumber(v3?.sweepBlocksV331)}</b> blocks / <b>${safeNumber(v3?.sweepChunksV331)}</b> chunks | swaps <b>${safeNumber(v3.swaps)}</b> (${safeNumber(v3.buys)} buys / ${safeNumber(v3.sells)} sells)`
-        : "Observed exact block sweep: <b>UNVERIFIED</b>",
-      `Sweep coverage: <b>${escapeHtml(v3?.sweepStatusV331 || "UNVERIFIED")}</b> | prior-gap <b>${v3?.sweepGapV331 === true ? "YES — NOT COMPLETE" : "NO DETECTED GAP"}</b>`,
-      `Persistent V3 ledger: <b>${escapeHtml(v3?.ledgerStatusV331 || "UNVERIFIED")}</b> | records <b>${safeNumber(v3?.ledgerRecordsV331)}</b> | ranges <b>${safeNumber(v3?.ledgerRangesV331)}</b>`,
-      `Ledger write: <b>${escapeHtml(v3?.ledgerWriteStatusV331 || "UNVERIFIED")}</b> | new <b>${safeNumber(v3?.ledgerInsertedV331)}</b> | deduped <b>${safeNumber(v3?.ledgerDeduplicatedV331)}</b>`,
-      v3?.usdVerified === true
-        ? `🟢 Observed Buy USD: <b>${money(v3.buyUsd)}</b> (${safeNumber(v3.buys)} swaps)`
-        : "🟢 Observed Buy USD: <b>UNVERIFIED</b>",
-      v3?.usdVerified === true
-        ? `🔴 Observed Sell USD: <b>${money(v3.sellUsd)}</b> (${safeNumber(v3.sells)} swaps)`
-        : "🔴 Observed Sell USD: <b>UNVERIFIED</b>",
-      v3?.usdVerified === true
-        ? `📈 Observed Net USD: <b>${money(v3.netUsd)}</b>`
-        : "📈 Observed Net USD: <b>UNVERIFIED</b>",
-      `USD price evidence: <b>${v3?.marketPriceVerified === true ? "CURRENT_VERIFIED_MARKET_PRICE" : "UNVERIFIED"}</b>`,
-      `Requests used: <b>${safeNumber(v3?.requestsUsed)}</b>`,
-      "ℹ️ <i>Native V3 direction/counts are exact-pool on-chain evidence. V331 persists deduplicated tx/log/block evidence across analyses. Ledger observedAt is ingestion time only, so it is not claimed as complete 5m/1h/6h/24h coverage. USD is shown only with a current verified market price.</i>"
-    );
-  }
+  /* Insert the compact evidence summary immediately before the standard risk footer. */
+  let footerIndex = out.findIndex(line => String(line).includes("⚠️ <b>"));
+  if (footerIndex < 0) footerIndex = out.length;
+  out.splice(footerIndex, 0, ...evidence);
 
-  lines.push(
+  out.push(
     "",
     "ℹ️ <i>Fresh manual analysis. Missing evidence remains UNVERIFIED; this command does not add the token to the autonomous watchlist.</i>"
   );
 
-  return lines.join("\n");
+  /* Remove accidental repeated blank lines created by section filtering. */
+  const compact = [];
+  for (const line of out) {
+    if (line === "" && compact.length && compact[compact.length - 1] === "") continue;
+    compact.push(line);
+  }
+
+  return compact.join("\n");
 }
 
 async function telegramFreshAnalyseV276(
