@@ -1,7 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V362
- * AUTHORITATIVE RUNTIME VERSION: V362
- * V362 preserves V361 confirmed functionality and repairs only the WebSocket diagnostic pair-cache reader wiring. No scanner, pricing, scoring, Telegram, collector, or KV persistence behavior is changed.
+ * Robinhood Chain Meme Hunter — V363
+ * AUTHORITATIVE RUNTIME VERSION: V363
+ * V363 adds the opt-in Durable Object live V3 WebSocket collector while preserving V362 scanner, Telegram, scoring, scheduled collector and diagnostics.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Robinhood Chain Meme Hunter
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V362";
+const VERSION = "V363";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -68954,6 +68954,17 @@ async function handleRequest(
     );
   }
 
+
+  if (path === "/v3live-start") {
+    return jsonResponse(await v3LiveCollectorRouteV363(env, url.searchParams.get("token") || "", "start"));
+  }
+  if (path === "/v3live-status") {
+    return jsonResponse(await v3LiveCollectorRouteV363(env, url.searchParams.get("token") || "", "status"));
+  }
+  if (path === "/v3live-stop") {
+    return jsonResponse(await v3LiveCollectorRouteV363(env, url.searchParams.get("token") || "", "stop"));
+  }
+
   if (
     path ===
     "/rpc-test"
@@ -69440,6 +69451,190 @@ async function scheduledScan(
 
   return result;
 }
+
+
+/* =========================================================
+   V363 — DURABLE OBJECT LIVE V3 WEBSOCKET COLLECTOR
+   Opt-in only. Existing scheduled collector remains unchanged.
+   Requires a Durable Object binding named V3_LIVE_COLLECTOR.
+   ========================================================= */
+
+const V3_LIVE_DO_BINDING_V363 = "V3_LIVE_COLLECTOR";
+const V3_LIVE_RECONNECT_MS_V363 = 15000;
+
+async function v3LiveCollectorConfigV363(env, tokenInput) {
+  const token = normalize(tokenInput || "");
+  if (!isAddress(token)) return {ok:false,status:"INVALID_TOKEN_V363"};
+  const pairCache = await loadVerifiedV3PairIdentityV329(env, token);
+  const rec = pairCache?.record || null;
+  const pair = normalize(rec?.pairAddress || "");
+  const token0 = normalize(rec?.token0 || "");
+  const token1 = normalize(rec?.token1 || "");
+  if (pairCache?.valid !== true || !isAddress(pair) || !isAddress(token0) || !isAddress(token1) || (token !== token0 && token !== token1)) {
+    return {ok:false,status:"VERIFIED_V3_PAIR_CONFIG_UNAVAILABLE_V363",pairStatus:pairCache?.status||null};
+  }
+  let decimals = null;
+  try {
+    const registry = await loadNativeV3CollectorRegistryV333(env);
+    const row = registry.find(r => normalize(r?.tokenAddress) === token);
+    const d = Number(row?.decimals);
+    if (Number.isInteger(d) && d >= 0 && d <= 36) decimals = d;
+  } catch (_) {}
+  if (!Number.isInteger(decimals)) return {ok:false,status:"TOKEN_DECIMALS_UNAVAILABLE_V363",pair,pairStatus:pairCache?.status||null};
+  return {ok:true,status:"LIVE_CONFIG_VERIFIED_V363",token,pair,token0,token1,decimals,pairStatus:pairCache?.status||null};
+}
+
+async function v3LiveCollectorRouteV363(env, tokenInput, action) {
+  const token = normalize(tokenInput || "");
+  const ns = env?.[V3_LIVE_DO_BINDING_V363];
+  if (!ns || typeof ns.idFromName !== "function" || typeof ns.get !== "function") {
+    return {version:VERSION,status:"DURABLE_OBJECT_BINDING_REQUIRED_V363",binding:V3_LIVE_DO_BINDING_V363,configured:false,token:token||null,action};
+  }
+  if (!isAddress(token)) return {version:VERSION,status:"INVALID_TOKEN_V363",configured:true,token:token||null,action};
+  const id = ns.idFromName(token);
+  const stub = ns.get(id);
+  if (action === "start") {
+    const cfg = await v3LiveCollectorConfigV363(env, token);
+    if (!cfg.ok) return {version:VERSION,configured:true,action,...cfg};
+    const u = new URL("https://v3-live.internal/start");
+    for (const k of ["token","pair","token0","token1","decimals"]) u.searchParams.set(k,String(cfg[k]));
+    const r = await stub.fetch(u.toString());
+    return await r.json();
+  }
+  if (action === "stop") {
+    const r = await stub.fetch("https://v3-live.internal/stop");
+    return await r.json();
+  }
+  const r = await stub.fetch("https://v3-live.internal/status");
+  return await r.json();
+}
+
+export class V3LiveCollectorV363 {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.ws = null;
+    this.config = null;
+    this.subscriptionId = null;
+    this.processing = Promise.resolve();
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname === "/start") {
+      const cfg = {
+        token: normalize(url.searchParams.get("token") || ""),
+        pair: normalize(url.searchParams.get("pair") || ""),
+        token0: normalize(url.searchParams.get("token0") || ""),
+        token1: normalize(url.searchParams.get("token1") || ""),
+        decimals: Number(url.searchParams.get("decimals"))
+      };
+      if (!isAddress(cfg.token)||!isAddress(cfg.pair)||!isAddress(cfg.token0)||!isAddress(cfg.token1)||!Number.isInteger(cfg.decimals)) {
+        return Response.json({version:VERSION,status:"INVALID_LIVE_CONFIG_V363"},{status:400});
+      }
+      this.config = cfg;
+      await this.state.storage.put("config", cfg);
+      await this.state.storage.put("enabled", true);
+      await this.connect();
+      return Response.json(await this.status("START_REQUESTED_V363"));
+    }
+    if (url.pathname === "/stop") {
+      await this.state.storage.put("enabled", false);
+      try { this.ws?.close(1000,"V363 stopped"); } catch (_) {}
+      this.ws = null; this.subscriptionId = null;
+      await this.state.storage.put("connection", {connected:false,subscriptionAccepted:false,stoppedAt:Date.now()});
+      return Response.json(await this.status("STOPPED_V363"));
+    }
+    if (url.pathname === "/status") return Response.json(await this.status());
+    return Response.json({version:VERSION,status:"NOT_FOUND_V363"},{status:404});
+  }
+
+  async alarm() {
+    const enabled = await this.state.storage.get("enabled");
+    if (enabled === true) await this.connect();
+  }
+
+  async status(overrideStatus=null) {
+    const enabled = await this.state.storage.get("enabled");
+    const cfg = this.config || await this.state.storage.get("config") || null;
+    const conn = await this.state.storage.get("connection") || {};
+    const stats = await this.state.storage.get("stats") || {};
+    return {version:VERSION,collector:"DURABLE_OBJECT_ALCHEMY_V3_LIVE_V363",status:overrideStatus||conn.status||"IDLE_V363",enabled:enabled===true,token:cfg?.token||null,pair:cfg?.pair||null,connectionOpened:conn.connected===true,subscriptionAccepted:conn.subscriptionAccepted===true,subscriptionIdPresent:Boolean(conn.subscriptionIdPresent),lastConnectedAt:conn.lastConnectedAt||null,lastMessageAt:conn.lastMessageAt||null,lastSwapAt:stats.lastSwapAt||null,lastTrade:stats.lastTrade||null,swapsCaptured:safeNumber(stats.swapsCaptured),buysCaptured:safeNumber(stats.buysCaptured),sellsCaptured:safeNumber(stats.sellsCaptured),usdVerifiedCaptured:safeNumber(stats.usdVerifiedCaptured),reconnects:safeNumber(stats.reconnects),lastError:conn.lastError||null,kvBinding:getKV(this.env)?.binding||null};
+  }
+
+  async connect() {
+    const enabled = await this.state.storage.get("enabled");
+    if (enabled !== true) return;
+    if (!this.config) this.config = await this.state.storage.get("config");
+    if (!this.config || !this.env.ALCHEMY_API_KEY) {
+      await this.state.storage.put("connection",{status:"CONFIG_OR_ALCHEMY_KEY_MISSING_V363",connected:false,lastError:"Missing config or ALCHEMY_API_KEY"});
+      return;
+    }
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+    let ws;
+    try { ws = new WebSocket(`wss://robinhood-mainnet.g.alchemy.com/v2/${String(this.env.ALCHEMY_API_KEY)}`); }
+    catch (e) { await this.scheduleReconnect(String(e?.message||e)); return; }
+    this.ws = ws;
+    ws.addEventListener("open", async () => {
+      await this.state.storage.put("connection",{status:"WEBSOCKET_OPEN_SUBSCRIBING_V363",connected:true,subscriptionAccepted:false,lastConnectedAt:Date.now(),subscriptionIdPresent:false});
+      ws.send(JSON.stringify({jsonrpc:"2.0",id:363,method:"eth_subscribe",params:["logs",{address:this.config.pair,topics:[UNISWAP_V3_SWAP_TOPIC_V326]}]}));
+    });
+    ws.addEventListener("message", event => {
+      this.processing = this.processing.then(()=>this.handleMessage(event)).catch(async e=>{
+        const c=await this.state.storage.get("connection")||{}; c.lastError=String(e?.message||e).slice(0,240); c.status="MESSAGE_PROCESSING_ERROR_V363"; await this.state.storage.put("connection",c);
+      });
+    });
+    ws.addEventListener("close", ()=>{ this.ws=null; this.subscriptionId=null; this.scheduleReconnect("WEBSOCKET_CLOSED_V363"); });
+    ws.addEventListener("error", ()=>{ this.scheduleReconnect("WEBSOCKET_ERROR_V363"); });
+  }
+
+  async scheduleReconnect(error) {
+    const enabled = await this.state.storage.get("enabled");
+    const stats = await this.state.storage.get("stats") || {};
+    stats.reconnects=safeNumber(stats.reconnects)+1; await this.state.storage.put("stats",stats);
+    await this.state.storage.put("connection",{status:"RECONNECT_SCHEDULED_V363",connected:false,subscriptionAccepted:false,subscriptionIdPresent:false,lastError:String(error||"").slice(0,240)});
+    if (enabled === true) await this.state.storage.setAlarm(Date.now()+V3_LIVE_RECONNECT_MS_V363);
+  }
+
+  async handleMessage(event) {
+    let msg; try { msg=JSON.parse(typeof event.data==="string"?event.data:""); } catch (_) { return; }
+    const conn=await this.state.storage.get("connection")||{}; conn.lastMessageAt=Date.now();
+    if (msg?.id===363) {
+      if (typeof msg.result==="string" && msg.result.length>2) { this.subscriptionId=msg.result; conn.status="LIVE_SUBSCRIPTION_ACTIVE_V363"; conn.connected=true; conn.subscriptionAccepted=true; conn.subscriptionIdPresent=true; conn.lastError=null; await this.state.storage.put("connection",conn); return; }
+      if (msg?.error) { conn.status="SUBSCRIPTION_REJECTED_V363"; conn.lastError=JSON.stringify(msg.error).slice(0,240); await this.state.storage.put("connection",conn); return; }
+    }
+    await this.state.storage.put("connection",conn);
+    if (msg?.method!=="eth_subscription" || !msg?.params?.result) return;
+    const log=msg.params.result;
+    if (log?.removed===true || normalize(log?.address||"")!==this.config.pair || normalize(log?.topics?.[0]||"")!==normalize(UNISWAP_V3_SWAP_TOPIC_V326)) return;
+    await this.persistSwap(log);
+  }
+
+  async persistSwap(log) {
+    const data=String(log?.data||"").replace(/^0x/i,""); if(data.length<128)return;
+    const amount0=signedInt256V326(data.slice(0,64)), amount1=signedInt256V326(data.slice(64,128)); if(typeof amount0!=="bigint"||typeof amount1!=="bigint")return;
+    const {token,pair,token0,token1,decimals}=this.config;
+    const raw=token===token0?amount0:(token===token1?amount1:null); if(typeof raw!=="bigint"||raw===0n)return;
+    const amount=decimalFromSignedRawV326(raw,decimals); if(!Number.isFinite(amount)||amount===0)return;
+    const quoteTokenAddress=token===token0?token1:token0;
+    const quoteRaw=token===token0?amount1:amount0;
+    const quoteDecimals=quoteTokenAddress===CANONICAL_WETH_V179?18:(quoteTokenAddress===CANONICAL_USDG_V179?CANONICAL_USDG_DECIMALS_V179:null);
+    const quoteAmount=Number.isInteger(quoteDecimals)?decimalFromSignedRawV326(quoteRaw,quoteDecimals):null;
+    const txHash=String(log?.transactionHash||"").toLowerCase(), logIndex=String(log?.logIndex??""); if(!txHash)return;
+    const tradeKey=`${txHash}|${logIndex}`;
+    let usd=null, usdVerified=false, usdBasis=null, priceUsd=null;
+    const {kv}=getKV(this.env);
+    if(kv && quoteTokenAddress===CANONICAL_USDG_V179 && Number.isFinite(quoteAmount) && quoteAmount!==0){usd=Math.abs(quoteAmount);usdVerified=true;usdBasis="EXACT_CANONICAL_USDG_QUOTE_V363";}
+    else if(kv && quoteTokenAddress===CANONICAL_WETH_V179 && Number.isFinite(quoteAmount) && quoteAmount!==0){
+      try{const rawRef=await kv.get(V347_REFERENCE_DIAGNOSTIC_KEY_V348);if(rawRef){const ref=JSON.parse(rawRef);const p=Number(ref?.priceUsdGPerWeth);if(ref?.verified===true&&Number.isFinite(p)&&p>0){priceUsd=p;usd=Math.abs(quoteAmount)*p;usdVerified=true;usdBasis="EXACT_WETH_QUOTE_X_VERIFIED_CURRENT_REFERENCE_V363";}}}catch(_){}
+    }
+    const row={tradeKey,transactionHash:txHash,logIndex,blockNumber:rpcBlockNumberV331(log?.blockNumber),pairAddress:pair,side:raw<0n?"BUY":"SELL",tokenAmount:Math.abs(amount),quoteTokenAddress,quoteAmount:Number.isFinite(quoteAmount)&&quoteAmount!==0?Math.abs(quoteAmount):null,quoteAmountVerifiedV336:Number.isFinite(quoteAmount)&&quoteAmount!==0,quoteAmountBasisV336:Number.isFinite(quoteAmount)&&quoteAmount!==0?"EXACT_V3_SWAP_QUOTE_DELTA_V336":null,usd:Number.isFinite(usd)&&usd>0?usd:null,usdVerified,priceUsd:Number.isFinite(priceUsd)?priceUsd:null,sameCycleUsdV347:Number.isFinite(usd)&&usd>0?usd:null,sameCycleUsdVerifiedV347:usdVerified,sameCycleUsdBasisV347:usdBasis,observedAt:Date.now(),blockTimestampMs:null,timestampVerifiedV334:false,timestampBasis:"LIVE_WEBSOCKET_INGESTION_TIME_V363",captureBasis:"ALCHEMY_ETH_SUBSCRIBE_EXACT_V3_SWAP_V363"};
+    const write=await persistNativeV3SwapLedgerV331(this.env,token,pair,[row],[]);
+    const stats=await this.state.storage.get("stats")||{};
+    if(safeNumber(write?.inserted)>0){stats.swapsCaptured=safeNumber(stats.swapsCaptured)+1;if(row.side==="BUY")stats.buysCaptured=safeNumber(stats.buysCaptured)+1;else stats.sellsCaptured=safeNumber(stats.sellsCaptured)+1;if(usdVerified)stats.usdVerifiedCaptured=safeNumber(stats.usdVerifiedCaptured)+1;stats.lastSwapAt=Date.now();stats.lastTrade={side:row.side,usd:row.usd,usdVerified:row.usdVerified,quoteAmount:row.quoteAmount,quoteTokenAddress:row.quoteTokenAddress,tokenAmount:row.tokenAmount,transactionHash:row.transactionHash,blockNumber:row.blockNumber,observedAt:row.observedAt};await this.state.storage.put("stats",stats);}
+  }
+}
+
 
 /* =========================================================
    CLOUDFLARE EXPORT
