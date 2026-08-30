@@ -1,5 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V329: Persistent on-chain-verified Uniswap V3 pair identity fallback. DexScreener cooldown no longer erases a previously proven V3 pool identity; cached identity is re-verified on-chain before use.
  * V328: On-chain Uniswap V3 pool proof + market-path diagnostics. Preserves V327 fail-open isolation and all earlier working behavior.
  * V326: Native Uniswap V3 exact-pool directional USD groundwork (bounded 10-block manual observation; no Bitquery dependency).
  * V325 — guaranteed manual Telegram directional diagnostics passthrough
@@ -1442,7 +1443,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V328";
+const VERSION = "V329";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2625,6 +2626,19 @@ const TELEGRAM_ANALYSE_MARKET_STATE_KEY_V277 =
   "robinhood-meme-hunter-telegram-analyse-market-v277";
 const TELEGRAM_ANALYSE_MARKET_SPACING_MS_V277 =
   60 * 1000;
+
+/*
+ * V329 persistent Uniswap V3 pair identity.
+ * Separate KV keys deliberately preserve the long-standing V69 main-state key.
+ * A cached record is only created after token0(), token1() and fee() succeed
+ * on-chain. Every fallback use re-verifies those immutables before reading logs.
+ */
+const VERIFIED_V3_PAIR_CACHE_PREFIX_V329 =
+  "robinhood-meme-hunter-v329-v3-pair:";
+const VERIFIED_V3_PAIR_CACHE_MAX_AGE_MS_V329 =
+  180 * 24 * 60 * 60 * 1000;
+const VERIFIED_V3_PAIR_CACHE_REFRESH_MS_V329 =
+  7 * 24 * 60 * 60 * 1000;
 
 
 const MIN_ALERT_SCORE = 60;
@@ -42941,7 +42955,7 @@ function telegramMessage(
       ? ""
       : null,
     candidate?.manualDirectionalDiagnosticsV324
-      ? "🔧 <b>Directional USD diagnostics — V328</b>"
+      ? "🔧 <b>Directional USD diagnostics — V329</b>"
       : null,
     candidate?.manualDirectionalDiagnosticsV324
       ? `GeckoTerminal: <b>${candidate.manualDirectionalDiagnosticsV324.gecko.attempted ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(candidate.manualDirectionalDiagnosticsV324.gecko.status)}</b> | HTTP <b>${escapeHtml(candidate.manualDirectionalDiagnosticsV324.gecko.httpStatus ?? "N/A")}</b> | returned <b>${safeNumber(candidate.manualDirectionalDiagnosticsV324.gecko.returnedCount)}</b> | accepted <b>${safeNumber(candidate.manualDirectionalDiagnosticsV324.gecko.acceptedCount)}</b>`
@@ -63947,15 +63961,20 @@ async function manualVerifiedUsdRecoveryV289(
 
 
 /* ============================================================
-   V326 NATIVE UNISWAP V3 DIRECTIONAL USD — MANUAL GROUNDWORK
+   V329 NATIVE UNISWAP V3 DIRECTIONAL USD — PERSISTENT PAIR IDENTITY
    ============================================================
    - Zero Bitquery dependency.
-   - Uses the DexScreener-selected pair ONLY when protocol is verified Uniswap V3.
-   - Verifies pool token0/token1 on-chain before decoding Swap events.
-   - Reads a bounded 10-block exact-pool window to preserve existing provider limits.
+   - Fresh verified DexScreener pair identity is preferred when available.
+   - A previously ON-CHAIN-VERIFIED V3 pool can be recovered from dedicated KV
+     during a DexScreener cooldown/outage.
+   - Cached identity is never blindly trusted: token0(), token1() and fee() are
+     re-verified on-chain on every fallback use.
+   - Reads a bounded 10-block exact-pool window to preserve free-tier log limits.
    - BUY/SELL is derived from the signed candidate-token pool delta.
-   - USD is derived only when the candidate has a verified positive USD market price.
-   - This is explicitly a recent observed window, NOT a claimed complete 5m/1h/24h total.
+   - USD is shown only when a current verified positive candidate USD price exists.
+     If price is unavailable, swap direction/counts remain verified but USD stays
+     explicitly UNVERIFIED.
+   - This is a recent observed window, NOT a claimed complete 5m/1h/24h total.
 */
 const UNISWAP_V3_SWAP_TOPIC_V326 =
   "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67";
@@ -63991,78 +64010,214 @@ function decimalFromSignedRawV326(raw, decimals) {
   const scale = 10n ** BigInt(d);
   const whole = abs / scale;
   const frac = abs % scale;
-  // Number conversion is intentionally bounded through a decimal string.
   const fracText = d > 0 ? frac.toString().padStart(d, "0").slice(0, 12) : "";
   const value = Number(`${negative ? "-" : ""}${whole.toString()}${d > 0 ? "." + fracText : ""}`);
   return Number.isFinite(value) ? value : null;
 }
 
+function verifiedV3PairCacheKeyV329(tokenAddress) {
+  const token = normalize(tokenAddress);
+  return isAddress(token)
+    ? `${VERIFIED_V3_PAIR_CACHE_PREFIX_V329}${token}`
+    : null;
+}
+
+async function loadVerifiedV3PairIdentityV329(env, tokenAddress) {
+  const key = verifiedV3PairCacheKeyV329(tokenAddress);
+  const {kv, binding} = getKV(env);
+  const empty = {
+    found: false,
+    valid: false,
+    status: !key ? "INVALID_TOKEN" : (!kv ? "KV_UNAVAILABLE" : "NOT_FOUND"),
+    binding: binding || null,
+    key,
+    ageMs: null,
+    record: null
+  };
+  if (!key || !kv) return empty;
+
+  try {
+    const raw = await kv.get(key);
+    if (!raw) return empty;
+    const record = JSON.parse(raw);
+    const token = normalize(record?.tokenAddress);
+    const pairAddress = normalize(record?.pairAddress);
+    const token0 = normalize(record?.token0);
+    const token1 = normalize(record?.token1);
+    const fee = Number(record?.fee);
+    const verifiedAt = safeNumber(record?.verifiedAt);
+    const ageMs = verifiedAt > 0 ? Math.max(0, Date.now() - verifiedAt) : null;
+    const valid =
+      token === normalize(tokenAddress) &&
+      isAddress(pairAddress) &&
+      isAddress(token0) &&
+      isAddress(token1) &&
+      (token === token0 || token === token1) &&
+      Number.isInteger(fee) && fee > 0 && fee <= 1_000_000 &&
+      Number.isFinite(ageMs) && ageMs <= VERIFIED_V3_PAIR_CACHE_MAX_AGE_MS_V329;
+
+    return {
+      found: true,
+      valid,
+      status: valid ? "ONCHAIN_VERIFIED_PAIR_CACHE_AVAILABLE_V329" : "PAIR_CACHE_INVALID_OR_EXPIRED_V329",
+      binding: binding || null,
+      key,
+      ageMs,
+      record: valid ? {...record, tokenAddress: token, pairAddress, token0, token1, fee} : null
+    };
+  } catch (error) {
+    return {...empty, found: true, status: "PAIR_CACHE_READ_ERROR_V329", error: String(error?.message || error).slice(0, 160)};
+  }
+}
+
+async function persistVerifiedV3PairIdentityV329(env, evidence) {
+  const token = normalize(evidence?.tokenAddress);
+  const pairAddress = normalize(evidence?.pairAddress);
+  const token0 = normalize(evidence?.token0);
+  const token1 = normalize(evidence?.token1);
+  const fee = Number(evidence?.fee);
+  const key = verifiedV3PairCacheKeyV329(token);
+  const {kv, binding} = getKV(env);
+
+  if (!key || !kv || !isAddress(pairAddress) || !isAddress(token0) || !isAddress(token1) ||
+      (token !== token0 && token !== token1) || !Number.isInteger(fee) || fee <= 0 || fee > 1_000_000) {
+    return {saved: false, status: !kv ? "KV_UNAVAILABLE" : "PAIR_EVIDENCE_NOT_VERIFIED", key, binding: binding || null};
+  }
+
+  let existing = null;
+  try {
+    const raw = await kv.get(key);
+    if (raw) existing = JSON.parse(raw);
+  } catch (_) {}
+
+  const samePair = normalize(existing?.pairAddress) === pairAddress &&
+    normalize(existing?.token0) === token0 && normalize(existing?.token1) === token1 &&
+    Number(existing?.fee) === fee;
+  const existingAt = safeNumber(existing?.verifiedAt);
+  const existingAge = existingAt > 0 ? Math.max(0, Date.now() - existingAt) : Infinity;
+
+  if (samePair && existingAge < VERIFIED_V3_PAIR_CACHE_REFRESH_MS_V329) {
+    return {saved: false, status: "PAIR_CACHE_ALREADY_FRESH_V329", key, binding: binding || null};
+  }
+
+  const now = Date.now();
+  const record = {
+    schema: "ONCHAIN_VERIFIED_UNISWAP_V3_PAIR_V329",
+    tokenAddress: token,
+    pairAddress,
+    token0,
+    token1,
+    fee,
+    dexId: evidence?.dexId || existing?.dexId || "uniswap",
+    pairLabels: Array.isArray(evidence?.pairLabels) ? evidence.pairLabels.slice(0, 8) : (Array.isArray(existing?.pairLabels) ? existing.pairLabels.slice(0, 8) : []),
+    marketSource: evidence?.marketSource || existing?.marketSource || null,
+    firstVerifiedAt: safeNumber(existing?.firstVerifiedAt) || existingAt || now,
+    verifiedAt: now,
+    proof: "ONCHAIN_TOKEN0_TOKEN1_FEE_V329"
+  };
+
+  try {
+    await kv.put(key, JSON.stringify(record));
+    return {saved: true, status: "PAIR_CACHE_SAVED_V329", key, binding: binding || null, record};
+  } catch (error) {
+    return {saved: false, status: "PAIR_CACHE_WRITE_ERROR_V329", key, binding: binding || null, error: String(error?.message || error).slice(0, 160)};
+  }
+}
+
 async function manualNativeV3DirectionalV326(env, budget, candidate) {
   const market = candidate?.market || {};
   const token = normalize(candidate?.address);
-  const pairAddress = normalize(market?.pairAddress);
-  const labelsArray = Array.isArray(market?.pairLabels)
+  const freshMarketPair = normalize(market?.pairAddress);
+  const freshLabelsArray = Array.isArray(market?.pairLabels)
     ? market.pairLabels.map(v => String(v)).filter(Boolean)
     : [];
+  const freshDexId = String(market?.dexId || "").toLowerCase();
+
+  const freshPairUsable =
+    market?.verified === true &&
+    freshDexId.includes("uniswap") &&
+    isAddress(freshMarketPair);
+
+  const persistedPairV329 = freshPairUsable
+    ? {found: false, valid: false, status: "FRESH_MARKET_PAIR_PREFERRED_V329", record: null, ageMs: null}
+    : await loadVerifiedV3PairIdentityV329(env, token);
+
+  const persisted = persistedPairV329?.valid === true ? persistedPairV329.record : null;
+  const pairAddress = freshPairUsable ? freshMarketPair : normalize(persisted?.pairAddress);
+  const labelsArray = freshPairUsable
+    ? freshLabelsArray
+    : (Array.isArray(persisted?.pairLabels) ? persisted.pairLabels.map(v => String(v)).filter(Boolean) : []);
   const labels = labelsArray.join(" ").toLowerCase();
-  const dexId = String(market?.dexId || "").toLowerCase();
+  const dexId = String(freshPairUsable ? market?.dexId : (persisted?.dexId || "uniswap")).toLowerCase();
+  const pairIdentitySource = freshPairUsable
+    ? "FRESH_VERIFIED_MARKET_PAIR_V329"
+    : (persisted ? "PERSISTED_ONCHAIN_VERIFIED_PAIR_V329" : "UNVERIFIED");
+
+  const currentPriceUsd = Number(market?.priceUsd);
+  const priceUsdVerified = market?.verified === true && Number.isFinite(currentPriceUsd) && currentPriceUsd > 0;
+  const priceUsd = priceUsdVerified ? currentPriceUsd : null;
+  const decimals = Number(candidate?.decimals);
 
   const base = {
     attempted: false,
     verified: false,
+    usdVerified: false,
     status: "NOT_ELIGIBLE",
-    source: "NATIVE_UNISWAP_V3_ETH_GETLOGS_V328",
+    source: "NATIVE_UNISWAP_V3_ETH_GETLOGS_V329",
     pairAddress: pairAddress || null,
+    pairIdentitySource,
+    persistedPairCacheStatus: persistedPairV329?.status || null,
+    persistedPairAgeMs: Number.isFinite(Number(persistedPairV329?.ageMs)) ? Number(persistedPairV329.ageMs) : null,
     token0: null,
     token1: null,
     fee: null,
     protocolEvidence: null,
+    pairCacheWriteStatus: null,
     marketVerified: market?.verified === true,
     marketStatus: market?.status || null,
     marketSource: market?.source || null,
-    dexId: market?.dexId || null,
+    marketPriceVerified: priceUsdVerified,
+    priceUsd,
+    dexId: freshPairUsable ? (market?.dexId || null) : (persisted?.dexId || null),
     pairLabels: labelsArray,
     fromBlock: null,
     toBlock: null,
     swaps: 0,
     buys: 0,
     sells: 0,
+    buyTokenAmount: null,
+    sellTokenAmount: null,
     buyUsd: null,
     sellUsd: null,
     netUsd: null,
     requestsUsed: 0
   };
 
-  if (!candidate?.validERC20 || !/^0x[a-f0-9]{40}$/.test(String(token || ""))) {
+  if (!candidate?.validERC20 || !isAddress(token)) {
     return {...base, status: "TOKEN_NOT_VERIFIED_ERC20"};
   }
 
-  if (market?.verified !== true) {
-    return {...base, status: "MARKET_UNVERIFIED_NO_PAIR_FOR_NATIVE_V3"};
+  if (!isAddress(pairAddress)) {
+    return {
+      ...base,
+      status: market?.verified === true
+        ? "VERIFIED_MARKET_PAIR_ADDRESS_MISSING"
+        : (persistedPairV329?.found === true ? "MARKET_UNVERIFIED_PAIR_CACHE_UNUSABLE_V329" : "MARKET_UNVERIFIED_NO_PERSISTED_V3_PAIR_V329")
+    };
   }
 
   if (!dexId.includes("uniswap")) {
-    return {...base, status: "PRIMARY_DEX_NOT_UNISWAP"};
+    return {...base, status: "PAIR_IDENTITY_NOT_UNISWAP"};
   }
 
-  if (!/^0x[a-f0-9]{40}$/.test(String(pairAddress || ""))) {
-    return {...base, status: "VERIFIED_MARKET_PAIR_ADDRESS_MISSING"};
-  }
-
-  /* If DexScreener explicitly identifies a non-V3 Uniswap version, respect it.
-   * If the version label is absent/ambiguous, V328 proves V3 directly on-chain
-   * using fee(), token0() and token1() instead of guessing from labels.
-   */
   const explicitlyV2 = /(^|[^a-z0-9])v2([^a-z0-9]|$)/i.test(labels);
   const explicitlyV4 = /(^|[^a-z0-9])v4([^a-z0-9]|$)/i.test(labels);
   if (explicitlyV2 || explicitlyV4) {
-    return {...base, status: explicitlyV2 ? "DEXSCREENER_IDENTIFIED_UNISWAP_V2" : "DEXSCREENER_IDENTIFIED_UNISWAP_V4"};
+    return {...base, status: explicitlyV2 ? "PAIR_IDENTITY_UNISWAP_V2" : "PAIR_IDENTITY_UNISWAP_V4"};
   }
 
-  const priceUsd = Number(market?.priceUsd);
-  const decimals = Number(candidate?.decimals);
-  if (!Number.isFinite(priceUsd) || priceUsd <= 0 || !Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
-    return {...base, status: "TOKEN_PRICE_OR_DECIMALS_UNVERIFIED"};
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
+    return {...base, status: "TOKEN_DECIMALS_UNVERIFIED"};
   }
 
   const spare = Math.max(0, safeNumber(budget?.totalLimit) - safeNumber(budget?.totalUsed));
@@ -64101,13 +64256,25 @@ async function manualNativeV3DirectionalV326(env, budget, candidate) {
     };
   }
 
+  const pairCacheWriteV329 = await persistVerifiedV3PairIdentityV329(env, {
+    tokenAddress: token,
+    pairAddress,
+    token0,
+    token1,
+    fee,
+    dexId: freshPairUsable ? (market?.dexId || "uniswap") : (persisted?.dexId || "uniswap"),
+    pairLabels: labelsArray.length ? labelsArray : ["v3"],
+    marketSource: freshPairUsable ? (market?.source || null) : (persisted?.marketSource || null)
+  });
+
   const head = await rpc(env, "eth_blockNumber", [], budget, "analysis");
   let toBlock = null;
   try { if (head?.result) toBlock = Number(BigInt(head.result)); } catch (_) {}
   if (!Number.isFinite(toBlock) || toBlock <= 0) {
     return {
       ...base, attempted: true, pairAddress, token0, token1, fee,
-      protocolEvidence: "ONCHAIN_TOKEN0_TOKEN1_FEE_V328",
+      protocolEvidence: "ONCHAIN_TOKEN0_TOKEN1_FEE_V329",
+      pairCacheWriteStatus: pairCacheWriteV329?.status || null,
       requestsUsed: Math.max(0, safeNumber(budget?.totalUsed) - before),
       status: "HEAD_UNVERIFIED"
     };
@@ -64130,7 +64297,8 @@ async function manualNativeV3DirectionalV326(env, budget, candidate) {
   if (!Array.isArray(logsResult?.result)) {
     return {
       ...base, attempted: true, pairAddress, token0, token1, fee,
-      protocolEvidence: "ONCHAIN_TOKEN0_TOKEN1_FEE_V328",
+      protocolEvidence: "ONCHAIN_TOKEN0_TOKEN1_FEE_V329",
+      pairCacheWriteStatus: pairCacheWriteV329?.status || null,
       fromBlock, toBlock,
       requestsUsed: Math.max(0, safeNumber(budget?.totalUsed) - before),
       status: "V3_LOGS_UNVERIFIED",
@@ -64149,28 +64317,49 @@ async function manualNativeV3DirectionalV326(env, budget, candidate) {
     if (candidateRaw === 0n) continue;
     const candidateAmount = decimalFromSignedRawV326(candidateRaw, decimals);
     if (!Number.isFinite(candidateAmount) || candidateAmount === 0) continue;
-    const usd = Math.abs(candidateAmount) * priceUsd;
-    if (!Number.isFinite(usd) || usd <= 0) continue;
     const side = candidateRaw < 0n ? "BUY" : "SELL";
+    const usd = priceUsdVerified ? Math.abs(candidateAmount) * priceUsd : null;
     const key = `${String(log?.transactionHash || "").toLowerCase()}|${String(log?.logIndex ?? "")}`;
-    if (!unique.has(key)) unique.set(key, {side, usd});
+    if (!unique.has(key)) unique.set(key, {
+      side,
+      tokenAmount: Math.abs(candidateAmount),
+      usd: Number.isFinite(usd) && usd > 0 ? usd : null
+    });
   }
 
-  let buys = 0, sells = 0, buyUsd = 0, sellUsd = 0;
+  let buys = 0, sells = 0, buyUsd = 0, sellUsd = 0, buyTokenAmount = 0, sellTokenAmount = 0;
   for (const row of unique.values()) {
-    if (row.side === "BUY") { buys++; buyUsd += row.usd; }
-    else if (row.side === "SELL") { sells++; sellUsd += row.usd; }
+    if (row.side === "BUY") {
+      buys++;
+      buyTokenAmount += safeNumber(row.tokenAmount);
+      if (priceUsdVerified) buyUsd += safeNumber(row.usd);
+    } else if (row.side === "SELL") {
+      sells++;
+      sellTokenAmount += safeNumber(row.tokenAmount);
+      if (priceUsdVerified) sellUsd += safeNumber(row.usd);
+    }
   }
+
+  const usdVerified = priceUsdVerified;
+  const status = !unique.size
+    ? "VERIFIED_ZERO_SWAPS_RECENT_WINDOW_V329"
+    : (usdVerified ? "VERIFIED_RECENT_EXACT_POOL_WINDOW_V329" : "VERIFIED_RECENT_EXACT_POOL_SWAPS_USD_UNVERIFIED_V329");
 
   return {
     ...base,
     attempted: true,
     verified: true,
-    status: unique.size ? "VERIFIED_RECENT_EXACT_POOL_WINDOW" : "VERIFIED_ZERO_SWAPS_RECENT_WINDOW",
+    usdVerified,
+    status,
     pairAddress, token0, token1, fee,
-    protocolEvidence: "ONCHAIN_TOKEN0_TOKEN1_FEE_V328",
+    protocolEvidence: "ONCHAIN_TOKEN0_TOKEN1_FEE_V329",
+    pairCacheWriteStatus: pairCacheWriteV329?.status || null,
     fromBlock, toBlock,
-    swaps: unique.size, buys, sells, buyUsd, sellUsd, netUsd: buyUsd - sellUsd,
+    swaps: unique.size, buys, sells,
+    buyTokenAmount, sellTokenAmount,
+    buyUsd: usdVerified ? buyUsd : null,
+    sellUsd: usdVerified ? sellUsd : null,
+    netUsd: usdVerified ? buyUsd - sellUsd : null,
     requestsUsed: Math.max(0, safeNumber(budget?.totalUsed) - before)
   };
 }
@@ -64194,10 +64383,10 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   }
 
   const d = directionalDiagnosticsV325 || candidate?.manualDirectionalDiagnosticsV324 || null;
-  if (d && !lines.some(line => String(line).includes("Directional USD diagnostics — V328"))) {
+  if (d && !lines.some(line => String(line).includes("Directional USD diagnostics — V329"))) {
     lines.push(
       "",
-      "🔧 <b>Directional USD diagnostics — V328</b>",
+      "🔧 <b>Directional USD diagnostics — V329</b>",
       `GeckoTerminal: <b>${d?.gecko?.attempted === true ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(d?.gecko?.status || "NO_STATUS")}</b> | HTTP <b>${escapeHtml(d?.gecko?.httpStatus ?? "N/A")}</b> | returned <b>${safeNumber(d?.gecko?.returnedCount)}</b> | accepted <b>${safeNumber(d?.gecko?.acceptedCount)}</b>`,
       `Bitquery: <b>${d?.bitquery?.attempted === true ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(d?.bitquery?.status || "NO_STATUS")}</b> | HTTP <b>${escapeHtml(d?.bitquery?.httpStatus ?? "N/A")}</b> | raw rows <b>${safeNumber(d?.bitquery?.rawRows)}</b> | accepted <b>${safeNumber(d?.bitquery?.rows)}</b>`,
       d?.gecko?.poolAddress
@@ -64211,26 +64400,29 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   if (v3) {
     lines.push(
       "",
-      "🧱 <b>Native Uniswap V3 Directional USD — V328</b>",
+      "🧱 <b>Native Uniswap V3 Directional USD — V329</b>",
       `Status: <b>${escapeHtml(v3?.status || "UNVERIFIED")}</b>`,
       `Market path: <b>${v3?.marketVerified === true ? "VERIFIED" : "UNVERIFIED"}</b> | source <b>${escapeHtml(v3?.marketSource || "UNVERIFIED")}</b> | status <b>${escapeHtml(v3?.marketStatus || "UNVERIFIED")}</b>`,
+      `Pair identity: <b>${escapeHtml(v3?.pairIdentitySource || "UNVERIFIED")}</b>${Number.isFinite(Number(v3?.persistedPairAgeMs)) ? ` | cache age <b>${formatAgeV223(Number(v3.persistedPairAgeMs))}</b>` : ""}`,
+      `Pair cache: <b>${escapeHtml(v3?.persistedPairCacheStatus || "UNVERIFIED")}</b>${v3?.pairCacheWriteStatus ? ` | write <b>${escapeHtml(v3.pairCacheWriteStatus)}</b>` : ""}`,
       `DEX evidence: <b>${escapeHtml(v3?.dexId || "UNVERIFIED")}</b> | labels <b>${escapeHtml(Array.isArray(v3?.pairLabels) && v3.pairLabels.length ? v3.pairLabels.join(" / ") : "UNVERIFIED")}</b>`,
       v3?.protocolEvidence ? `V3 proof: <b>${escapeHtml(v3.protocolEvidence)}</b>${Number.isInteger(Number(v3?.fee)) ? ` | fee <b>${safeNumber(v3.fee)}</b>` : ""}` : "V3 proof: <b>UNVERIFIED</b>",
       v3?.pairAddress ? `Pool: <code>${escapeHtml(v3.pairAddress)}</code>` : "Pool: <b>UNVERIFIED</b>",
       v3?.verified === true && Number.isFinite(Number(v3?.fromBlock)) && Number.isFinite(Number(v3?.toBlock))
-        ? `Observed exact block window: <b>${safeNumber(v3.fromBlock)}–${safeNumber(v3.toBlock)}</b>`
+        ? `Observed exact block window: <b>${safeNumber(v3.fromBlock)}–${safeNumber(v3.toBlock)}</b> | swaps <b>${safeNumber(v3.swaps)}</b> (${safeNumber(v3.buys)} buys / ${safeNumber(v3.sells)} sells)`
         : "Observed exact block window: <b>UNVERIFIED</b>",
-      v3?.verified === true
+      v3?.usdVerified === true
         ? `🟢 Observed Buy USD: <b>${money(v3.buyUsd)}</b> (${safeNumber(v3.buys)} swaps)`
         : "🟢 Observed Buy USD: <b>UNVERIFIED</b>",
-      v3?.verified === true
+      v3?.usdVerified === true
         ? `🔴 Observed Sell USD: <b>${money(v3.sellUsd)}</b> (${safeNumber(v3.sells)} swaps)`
         : "🔴 Observed Sell USD: <b>UNVERIFIED</b>",
-      v3?.verified === true
+      v3?.usdVerified === true
         ? `📈 Observed Net USD: <b>${money(v3.netUsd)}</b>`
         : "📈 Observed Net USD: <b>UNVERIFIED</b>",
+      `USD price evidence: <b>${v3?.marketPriceVerified === true ? "CURRENT_VERIFIED_MARKET_PRICE" : "UNVERIFIED"}</b>`,
       `Requests used: <b>${safeNumber(v3?.requestsUsed)}</b>`,
-      "ℹ️ <i>Native V3 values cover only this bounded exact-pool observation window; they are not claimed as complete 5m/1h/6h/24h totals.</i>"
+      "ℹ️ <i>Native V3 direction/counts are exact-pool on-chain evidence. USD is shown only with a current verified market price. This bounded window is not claimed as a complete 5m/1h/6h/24h total.</i>"
     );
   }
 
@@ -64531,8 +64723,8 @@ async function telegramFreshAnalyseV276(
       new Promise(resolve => setTimeout(() => resolve({
         attempted: true,
         verified: false,
-        status: "V3_PROBE_TIMEOUT_FAIL_OPEN_V328",
-        source: "NATIVE_UNISWAP_V3_ETH_GETLOGS_V328",
+        status: "V3_PROBE_TIMEOUT_FAIL_OPEN_V329",
+        source: "NATIVE_UNISWAP_V3_ETH_GETLOGS_V329",
         pairAddress: normalize(candidate?.market?.pairAddress),
         swaps: 0,
         buys: 0,
@@ -64547,8 +64739,8 @@ async function telegramFreshAnalyseV276(
     manualNativeV3ResultV326 = {
       attempted: true,
       verified: false,
-      status: "V3_PROBE_ERROR_FAIL_OPEN_V328",
-      source: "NATIVE_UNISWAP_V3_ETH_GETLOGS_V328",
+      status: "V3_PROBE_ERROR_FAIL_OPEN_V329",
+      source: "NATIVE_UNISWAP_V3_ETH_GETLOGS_V329",
       pairAddress: normalize(candidate?.market?.pairAddress),
       swaps: 0,
       buys: 0,
