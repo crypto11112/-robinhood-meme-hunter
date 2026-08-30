@@ -1,5 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V341: isolated USD-reference diagnostic. Preserves V338 /analyse behavior, adds strict RPC timeouts and a separate /usdtest command to diagnose the canonical WETH/USDG V3 reference without blocking normal analysis.
  * V338: Step 3B historical USD valuation layer. Reuses the already-verified canonical WETH/USDG reference path, prices quote-ready V3 swaps at their exact swap block via historical slot0(), persists only independently verified USD values, and exposes rolling verified USD flow with PARTIAL-COVERAGE truthfulness.
  * V337: Step 3A verification layer. Preserves V336/V334 behavior and adds zero-request visibility for exact quote-side amounts already persisted on newly captured V3 swaps. Reports quote-ready ledger coverage (WETH/USDG) without converting historical swaps to USD or guessing missing quote evidence.
  * V336: Step 3A safe repair: preserves V334 command/reply path unchanged and adds only exact quote-side amount persistence to newly captured V3 swap records. No extra provider calls, no new Telegram formatter dependency, no historical USD guessing.
@@ -1448,7 +1449,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V338";
+const VERSION = "V341";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -63384,11 +63385,22 @@ async function manualRpcReadV292(env, budget, method, params, label) {
     }
 
     try {
-      const response = await fetch(provider.url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params })
-      });
+      /* V341: strict per-attempt timeout. A stalled RPC must never hold a
+         Telegram command open indefinitely. This does not change trust rules;
+         timeout simply fails the evidence open to UNVERIFIED. */
+      const controllerV341 = new AbortController();
+      const timeoutV341 = setTimeout(() => controllerV341.abort(), 2200);
+      let response;
+      try {
+        response = await fetch(provider.url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
+          signal: controllerV341.signal
+        });
+      } finally {
+        clearTimeout(timeoutV341);
+      }
 
       let payload = null;
       try { payload = await response.json(); } catch (_) {}
@@ -66628,6 +66640,10 @@ async function telegramCommandReplyV271(
       reply = "❌ <b>Call not found.</b>\n\nUse <code>/calls</code> to see stored calls.";
     }
   } else if (
+    parsed.command === "/usdtest"
+  ) {
+    reply = await usdReferenceDiagnosticMessageV341(env, state);
+  } else if (
     parsed.command ===
     "/analyse" ||
     parsed.command ===
@@ -66760,6 +66776,60 @@ async function telegramCommandReplyV271(
     scannerBudgetConsumed:
       false
   };
+}
+
+
+function createUsdDiagnosticBudgetV341(){
+  const b=createBudget();
+  b.totalUsed=0; b.totalLimit=12;
+  b.system.used=0; b.system.limit=0;
+  b.discovery.used=0; b.discovery.limit=0; b.discovery.liveUsed=0; b.discovery.liveLimit=0; b.discovery.backlogUsed=0; b.discovery.backlogLimit=0;
+  b.analysis.used=0; b.analysis.limit=12;
+  b.notification.used=0; b.notification.limit=0; b.notification.globalReserveActiveV174=false;
+  return b;
+}
+
+async function usdReferenceDiagnosticMessageV341(env,state){
+  const started=Date.now();
+  const budget=createUsdDiagnosticBudgetV341();
+  let result=null;
+  try{
+    result=await manualResolveV3WethUsdGReferenceV291(env,state,budget);
+  }catch(error){
+    result={attempted:true,verified:false,status:"USD_DIAGNOSTIC_EXCEPTION_V341",error:errorString(error),candidates:[]};
+  }
+  const elapsed=Date.now()-started;
+  const lines=[
+    "🧪 <b>V341 WETH/USDG Diagnostic</b>",
+    "",
+    `Result: <b>${escapeHtml(result?.verified===true?"VERIFIED":"UNVERIFIED")}</b>`,
+    `Status: <code>${escapeHtml(result?.status||"UNKNOWN")}</code>`,
+    `Elapsed: <b>${escapeHtml(String(elapsed))} ms</b>`,
+    `Requests: <b>${escapeHtml(String(safeNumber(result?.requestsUsed ?? budget?.totalUsed)))}/12</b>`,
+    `Pool: <code>${escapeHtml(result?.poolAddress||"UNVERIFIED")}</code>`,
+    `Fee: <b>${escapeHtml(String(result?.fee ?? "UNVERIFIED"))}</b>`,
+    `WETH/USDG: <b>${Number.isFinite(Number(result?.priceUsdGPerWeth))&&Number(result.priceUsdGPerWeth)>0 ? "$"+escapeHtml(Number(result.priceUsdGPerWeth).toFixed(2)) : "UNVERIFIED"}</b>`
+  ];
+  const candidates=Array.isArray(result?.candidates)?result.candidates:[];
+  for(const row of candidates.slice(0,2)){
+    lines.push("");
+    lines.push(`Pool ${escapeHtml(String(row?.expectedFee??"?"))}: <code>${escapeHtml(row?.poolAddress||"UNVERIFIED")}</code>`);
+    lines.push(`• status: <code>${escapeHtml(row?.status||"UNKNOWN")}</code>`);
+    lines.push(`• code: <b>${row?.bytecodePresent===true?"YES":row?.bytecodePresent===false?"NO":"UNVERIFIED"}</b>`);
+    lines.push(`• factory: <b>${row?.factoryMatch===true?"MATCH":row?.factoryMatch===false?"NO_MATCH":"UNVERIFIED"}</b>`);
+    lines.push(`• token pair: <b>${row?.tokenPairMatch===true?"MATCH":row?.tokenPairMatch===false?"NO_MATCH":"UNVERIFIED"}</b>`);
+    lines.push(`• fee: <b>${row?.feeMatch===true?"MATCH":row?.feeMatch===false?"NO_MATCH":"UNVERIFIED"}</b>`);
+    lines.push(`• requests: <b>${escapeHtml(String(safeNumber(row?.requestsUsed)))}</b>`);
+    if(row?.failureError) lines.push(`• error: <code>${escapeHtml(String(row.failureError).slice(0,180))}</code>`);
+    const checks=row?.checks||{};
+    for(const name of ["code","factory","token0","token1","fee","slot0","liquidity"]){
+      const c=checks[name]; if(!c) continue;
+      lines.push(`  ${name}: ${escapeHtml(c?.status||"UNKNOWN")} via ${escapeHtml(c?.provider||"NONE")}`);
+    }
+  }
+  lines.push("");
+  lines.push("ℹ️ Isolated diagnostic only. It does not run historical USD enrichment and does not change /analyse scoring or evidence.");
+  return lines.join("\n");
 }
 
 async function telegramWebhookV271(
