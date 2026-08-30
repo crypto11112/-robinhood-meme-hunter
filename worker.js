@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V382
- * AUTHORITATIVE RUNTIME VERSION: V382
+ * Robinhood Chain Meme Hunter — V383
+ * AUTHORITATIVE RUNTIME VERSION: V383
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V382";
+const VERSION = "V383";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -70016,7 +70016,7 @@ async function handleRequest(
     );
 
     const txs = Array.isArray(discovery?.transactions)
-      ? discovery.transactions.filter(t => t?.receiptFound === true && isHash(t?.txHash))
+      ? discovery.transactions.filter(t => t?.receiptFound === true && /^0x[0-9a-fA-F]{64}$/.test(String(t?.txHash || "")))
       : [];
 
     const poolStats = {};
