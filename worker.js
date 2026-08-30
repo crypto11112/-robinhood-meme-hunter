@@ -1,5 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V330: Canonical Uniswap V3 factory getPool bootstrap removes first-run DexScreener dependency for candidate/WETH standard-fee pools; discovered pools still require on-chain token0/token1/fee proof before persistence/use.
  * V329: Persistent on-chain-verified Uniswap V3 pair identity fallback. DexScreener cooldown no longer erases a previously proven V3 pool identity; cached identity is re-verified on-chain before use.
  * V328: On-chain Uniswap V3 pool proof + market-path diagnostics. Preserves V327 fail-open isolation and all earlier working behavior.
  * V326: Native Uniswap V3 exact-pool directional USD groundwork (bounded 10-block manual observation; no Bitquery dependency).
@@ -1443,7 +1444,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V329";
+const VERSION = "V330";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -42955,7 +42956,7 @@ function telegramMessage(
       ? ""
       : null,
     candidate?.manualDirectionalDiagnosticsV324
-      ? "🔧 <b>Directional USD diagnostics — V329</b>"
+      ? "🔧 <b>Directional USD diagnostics — V330</b>"
       : null,
     candidate?.manualDirectionalDiagnosticsV324
       ? `GeckoTerminal: <b>${candidate.manualDirectionalDiagnosticsV324.gecko.attempted ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(candidate.manualDirectionalDiagnosticsV324.gecko.status)}</b> | HTTP <b>${escapeHtml(candidate.manualDirectionalDiagnosticsV324.gecko.httpStatus ?? "N/A")}</b> | returned <b>${safeNumber(candidate.manualDirectionalDiagnosticsV324.gecko.returnedCount)}</b> | accepted <b>${safeNumber(candidate.manualDirectionalDiagnosticsV324.gecko.acceptedCount)}</b>`
@@ -64124,6 +64125,91 @@ async function persistVerifiedV3PairIdentityV329(env, evidence) {
   }
 }
 
+
+/* ============================================================
+   V330 NATIVE V3 FACTORY BOOTSTRAP
+   ============================================================
+   Resolves a candidate/WETH V3 pool directly from the canonical Robinhood
+   Uniswap V3 factory when DexScreener is unavailable and no V329 pair cache
+   exists. This is deterministic factory state, not a third-party market guess.
+
+   Request discipline:
+   - WETH is tried first because it is the canonical wrapped native asset and
+     the dominant meme-token quote route on Robinhood Chain.
+   - Fee tiers are ordered 1%, 0.3%, 0.05%, 0.01% so active meme pools such as
+     IF/WETH can resolve early without scanning history.
+   - The first non-zero pool is returned; V329/V330 then independently proves
+     token0(), token1() and fee() before the pool can be persisted or used.
+*/
+const UNISWAP_V3_GETPOOL_SELECTOR_V330 = "1698ee82";
+const V3_BOOTSTRAP_FEES_V330 = [10000, 3000, 500, 100];
+
+function encodeAddressWordV330(address) {
+  const a = normalize(address);
+  return isAddress(a) ? a.slice(2).padStart(64, "0") : null;
+}
+
+function encodeUint24WordV330(value) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0 || n > 0xffffff) return null;
+  return n.toString(16).padStart(64, "0");
+}
+
+async function discoverNativeV3PairFromFactoryV330(env, budget, tokenAddress) {
+  const token = normalize(tokenAddress);
+  const factory = normalize(UNISWAP_V3_FACTORY_V195);
+  const quote = normalize(CANONICAL_WETH_V179);
+  const base = {
+    attempted: false,
+    verifiedFactoryLookup: false,
+    status: "NOT_ATTEMPTED",
+    factory,
+    quoteToken: quote,
+    quoteClass: "WETH",
+    pairAddress: null,
+    fee: null,
+    feeTiersChecked: [],
+    requestsUsed: 0
+  };
+  if (!isAddress(token) || !isAddress(factory) || !isAddress(quote)) {
+    return {...base, status: "BOOTSTRAP_IDENTITY_INVALID_V330"};
+  }
+  const tokenWord = encodeAddressWordV330(token);
+  const quoteWord = encodeAddressWordV330(quote);
+  if (!tokenWord || !quoteWord) return {...base, status: "BOOTSTRAP_ENCODING_FAILED_V330"};
+
+  const before = safeNumber(budget?.totalUsed);
+  for (const fee of V3_BOOTSTRAP_FEES_V330) {
+    if (!budgetAvailable(budget, "analysis")) {
+      return {...base, attempted: true, status: "BOOTSTRAP_ANALYSIS_BUDGET_EXHAUSTED_V330", requestsUsed: Math.max(0, safeNumber(budget?.totalUsed)-before)};
+    }
+    const feeWord = encodeUint24WordV330(fee);
+    const data = "0x" + UNISWAP_V3_GETPOOL_SELECTOR_V330 + tokenWord + quoteWord + feeWord;
+    const result = await rpc(env, "eth_call", [{to: factory, data}, "latest"], budget, "analysis");
+    const pool = decodeEthCallAddressV326(result?.result);
+    const nonZero = isAddress(pool) && pool !== ZERO;
+    base.feeTiersChecked.push({fee, status: nonZero ? "POOL_FOUND" : (result?.result ? "NO_POOL" : "RPC_UNVERIFIED")});
+    if (nonZero) {
+      return {
+        ...base,
+        attempted: true,
+        verifiedFactoryLookup: true,
+        status: "FACTORY_POOL_FOUND_V330",
+        pairAddress: pool,
+        fee,
+        requestsUsed: Math.max(0, safeNumber(budget?.totalUsed)-before)
+      };
+    }
+  }
+  return {
+    ...base,
+    attempted: true,
+    verifiedFactoryLookup: true,
+    status: "NO_WETH_V3_POOL_STANDARD_FEES_V330",
+    requestsUsed: Math.max(0, safeNumber(budget?.totalUsed)-before)
+  };
+}
+
 async function manualNativeV3DirectionalV326(env, budget, candidate) {
   const market = candidate?.market || {};
   const token = normalize(candidate?.address);
@@ -64143,15 +64229,26 @@ async function manualNativeV3DirectionalV326(env, budget, candidate) {
     : await loadVerifiedV3PairIdentityV329(env, token);
 
   const persisted = persistedPairV329?.valid === true ? persistedPairV329.record : null;
-  const pairAddress = freshPairUsable ? freshMarketPair : normalize(persisted?.pairAddress);
-  const labelsArray = freshPairUsable
+  let factoryBootstrapV330 = null;
+  let pairAddress = freshPairUsable ? freshMarketPair : normalize(persisted?.pairAddress);
+  let labelsArray = freshPairUsable
     ? freshLabelsArray
     : (Array.isArray(persisted?.pairLabels) ? persisted.pairLabels.map(v => String(v)).filter(Boolean) : []);
-  const labels = labelsArray.join(" ").toLowerCase();
-  const dexId = String(freshPairUsable ? market?.dexId : (persisted?.dexId || "uniswap")).toLowerCase();
-  const pairIdentitySource = freshPairUsable
+  let dexId = String(freshPairUsable ? market?.dexId : (persisted?.dexId || "uniswap")).toLowerCase();
+  let pairIdentitySource = freshPairUsable
     ? "FRESH_VERIFIED_MARKET_PAIR_V329"
     : (persisted ? "PERSISTED_ONCHAIN_VERIFIED_PAIR_V329" : "UNVERIFIED");
+
+  if (!isAddress(pairAddress)) {
+    factoryBootstrapV330 = await discoverNativeV3PairFromFactoryV330(env, budget, token);
+    if (factoryBootstrapV330?.verifiedFactoryLookup === true && isAddress(factoryBootstrapV330?.pairAddress)) {
+      pairAddress = normalize(factoryBootstrapV330.pairAddress);
+      labelsArray = ["v3", "factory-bootstrap-v330", "weth"];
+      dexId = "uniswap";
+      pairIdentitySource = "CANONICAL_V3_FACTORY_GETPOOL_V330";
+    }
+  }
+  const labels = labelsArray.join(" ").toLowerCase();
 
   const currentPriceUsd = Number(market?.priceUsd);
   const priceUsdVerified = market?.verified === true && Number.isFinite(currentPriceUsd) && currentPriceUsd > 0;
@@ -64166,6 +64263,10 @@ async function manualNativeV3DirectionalV326(env, budget, candidate) {
     source: "NATIVE_UNISWAP_V3_ETH_GETLOGS_V329",
     pairAddress: pairAddress || null,
     pairIdentitySource,
+    factoryBootstrapStatusV330: factoryBootstrapV330?.status || null,
+    factoryBootstrapFeeV330: Number.isInteger(Number(factoryBootstrapV330?.fee)) ? Number(factoryBootstrapV330.fee) : null,
+    factoryBootstrapFeesCheckedV330: Array.isArray(factoryBootstrapV330?.feeTiersChecked) ? factoryBootstrapV330.feeTiersChecked : [],
+    factoryBootstrapRequestsV330: safeNumber(factoryBootstrapV330?.requestsUsed),
     persistedPairCacheStatus: persistedPairV329?.status || null,
     persistedPairAgeMs: Number.isFinite(Number(persistedPairV329?.ageMs)) ? Number(persistedPairV329.ageMs) : null,
     token0: null,
@@ -64202,7 +64303,9 @@ async function manualNativeV3DirectionalV326(env, budget, candidate) {
       ...base,
       status: market?.verified === true
         ? "VERIFIED_MARKET_PAIR_ADDRESS_MISSING"
-        : (persistedPairV329?.found === true ? "MARKET_UNVERIFIED_PAIR_CACHE_UNUSABLE_V329" : "MARKET_UNVERIFIED_NO_PERSISTED_V3_PAIR_V329")
+        : (factoryBootstrapV330?.attempted === true
+            ? factoryBootstrapV330.status
+            : (persistedPairV329?.found === true ? "MARKET_UNVERIFIED_PAIR_CACHE_UNUSABLE_V329" : "MARKET_UNVERIFIED_NO_PERSISTED_V3_PAIR_V329"))
     };
   }
 
@@ -64264,7 +64367,7 @@ async function manualNativeV3DirectionalV326(env, budget, candidate) {
     fee,
     dexId: freshPairUsable ? (market?.dexId || "uniswap") : (persisted?.dexId || "uniswap"),
     pairLabels: labelsArray.length ? labelsArray : ["v3"],
-    marketSource: freshPairUsable ? (market?.source || null) : (persisted?.marketSource || null)
+    marketSource: freshPairUsable ? (market?.source || null) : (persisted?.marketSource || (factoryBootstrapV330?.verifiedFactoryLookup === true ? "CANONICAL_UNISWAP_V3_FACTORY_V330" : null))
   });
 
   const head = await rpc(env, "eth_blockNumber", [], budget, "analysis");
@@ -64383,10 +64486,10 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   }
 
   const d = directionalDiagnosticsV325 || candidate?.manualDirectionalDiagnosticsV324 || null;
-  if (d && !lines.some(line => String(line).includes("Directional USD diagnostics — V329"))) {
+  if (d && !lines.some(line => String(line).includes("Directional USD diagnostics — V330"))) {
     lines.push(
       "",
-      "🔧 <b>Directional USD diagnostics — V329</b>",
+      "🔧 <b>Directional USD diagnostics — V330</b>",
       `GeckoTerminal: <b>${d?.gecko?.attempted === true ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(d?.gecko?.status || "NO_STATUS")}</b> | HTTP <b>${escapeHtml(d?.gecko?.httpStatus ?? "N/A")}</b> | returned <b>${safeNumber(d?.gecko?.returnedCount)}</b> | accepted <b>${safeNumber(d?.gecko?.acceptedCount)}</b>`,
       `Bitquery: <b>${d?.bitquery?.attempted === true ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(d?.bitquery?.status || "NO_STATUS")}</b> | HTTP <b>${escapeHtml(d?.bitquery?.httpStatus ?? "N/A")}</b> | raw rows <b>${safeNumber(d?.bitquery?.rawRows)}</b> | accepted <b>${safeNumber(d?.bitquery?.rows)}</b>`,
       d?.gecko?.poolAddress
@@ -64400,10 +64503,11 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   if (v3) {
     lines.push(
       "",
-      "🧱 <b>Native Uniswap V3 Directional USD — V329</b>",
+      "🧱 <b>Native Uniswap V3 Directional USD — V330</b>",
       `Status: <b>${escapeHtml(v3?.status || "UNVERIFIED")}</b>`,
       `Market path: <b>${v3?.marketVerified === true ? "VERIFIED" : "UNVERIFIED"}</b> | source <b>${escapeHtml(v3?.marketSource || "UNVERIFIED")}</b> | status <b>${escapeHtml(v3?.marketStatus || "UNVERIFIED")}</b>`,
       `Pair identity: <b>${escapeHtml(v3?.pairIdentitySource || "UNVERIFIED")}</b>${Number.isFinite(Number(v3?.persistedPairAgeMs)) ? ` | cache age <b>${formatAgeV223(Number(v3.persistedPairAgeMs))}</b>` : ""}`,
+      `Factory bootstrap: <b>${escapeHtml(v3?.factoryBootstrapStatusV330 || "NOT_NEEDED")}</b>${Number.isInteger(Number(v3?.factoryBootstrapFeeV330)) ? ` | fee <b>${safeNumber(v3.factoryBootstrapFeeV330)}</b>` : ""}${safeNumber(v3?.factoryBootstrapRequestsV330) > 0 ? ` | requests <b>${safeNumber(v3.factoryBootstrapRequestsV330)}</b>` : ""}`,
       `Pair cache: <b>${escapeHtml(v3?.persistedPairCacheStatus || "UNVERIFIED")}</b>${v3?.pairCacheWriteStatus ? ` | write <b>${escapeHtml(v3.pairCacheWriteStatus)}</b>` : ""}`,
       `DEX evidence: <b>${escapeHtml(v3?.dexId || "UNVERIFIED")}</b> | labels <b>${escapeHtml(Array.isArray(v3?.pairLabels) && v3.pairLabels.length ? v3.pairLabels.join(" / ") : "UNVERIFIED")}</b>`,
       v3?.protocolEvidence ? `V3 proof: <b>${escapeHtml(v3.protocolEvidence)}</b>${Number.isInteger(Number(v3?.fee)) ? ` | fee <b>${safeNumber(v3.fee)}</b>` : ""}` : "V3 proof: <b>UNVERIFIED</b>",
