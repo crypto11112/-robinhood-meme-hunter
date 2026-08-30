@@ -1,4 +1,5 @@
 /**
+ * V352 DIAGNOSTIC ONLY: adds persisted /analyse stage checkpoints around state read, fresh analysis, and Telegram send. No scanner/USD/scoring changes.
  * Robinhood Chain Meme Hunter
  * V351: HTTP-ONLY USD aggregation diagnostic built from confirmed-safe V348. /analyse, Telegram routing, scheduled scan, collector, scoring and persistence paths are unchanged. Adds only GET /v3usd-diagnostic?token=0xADDRESS to aggregate already-persisted V347 USD evidence with KV reads only and zero writes/external requests.
  * V346: CLEAN RESTORE BUILD from confirmed-working V337 Step 3A logic. No V338+ USD resolver/enrichment code is included.
@@ -1449,7 +1450,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V351";
+const VERSION = "V352";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -66340,6 +66341,37 @@ function parseTelegramCommandV271(
   };
 }
 
+async function telegramAnalyseCheckpointV352(
+  env,
+  diagnosticV273,
+  stage,
+  extra = null
+) {
+  if (!diagnosticV273) {
+    return { persisted: false, reason: "NO_DIAGNOSTIC_OBJECT" };
+  }
+
+  const startedAt =
+    Number(diagnosticV273.receivedAt) ||
+    Date.now();
+
+  diagnosticV273.telegramAnalyseStageV352 =
+    String(stage || "UNKNOWN");
+  diagnosticV273.telegramAnalyseStageAtV352 =
+    Date.now();
+  diagnosticV273.telegramAnalyseElapsedMsV352 =
+    Math.max(0, Date.now() - startedAt);
+
+  if (extra && typeof extra === "object") {
+    diagnosticV273.telegramAnalyseStageExtraV352 = extra;
+  }
+
+  return await persistTelegramWebhookDiagnosticV273(
+    env,
+    diagnosticV273
+  );
+}
+
 async function telegramCommandReplyV271(
   env,
   update,
@@ -66476,12 +66508,32 @@ async function telegramCommandReplyV271(
     };
   }
 
+  const isFreshAnalyseV352 =
+    parsed.command === "/analyse" ||
+    parsed.command === "/analyze";
+
+  if (isFreshAnalyseV352) {
+    await telegramAnalyseCheckpointV352(
+      env,
+      diagnosticV273,
+      "BEFORE_READ_STATE"
+    );
+  }
+
   const loaded =
     await readState(env);
 
   const state =
     loaded?.state ||
     newState();
+
+  if (isFreshAnalyseV352) {
+    await telegramAnalyseCheckpointV352(
+      env,
+      diagnosticV273,
+      "AFTER_READ_STATE"
+    );
+  }
 
   let reply;
 
@@ -66592,12 +66644,31 @@ async function telegramCommandReplyV271(
     parsed.command ===
     "/analyze"
   ) {
+    await telegramAnalyseCheckpointV352(
+      env,
+      diagnosticV273,
+      "BEFORE_FRESH_ANALYSE"
+    );
+
+    const freshStartedAtV352 = Date.now();
     const fresh =
       await telegramFreshAnalyseV276(
         env,
         state,
         parsed.argument
       );
+
+    await telegramAnalyseCheckpointV352(
+      env,
+      diagnosticV273,
+      "AFTER_FRESH_ANALYSE",
+      {
+        freshAnalyseElapsedMs:
+          Date.now() - freshStartedAtV352,
+        replyChars:
+          String(fresh?.reply || "").length
+      }
+    );
 
     reply =
       fresh.reply;
@@ -66666,6 +66737,16 @@ async function telegramCommandReplyV271(
     parsed.command === "/analyze" ||
     parsed.command === "/learning";
 
+  if (isFreshAnalyseV352) {
+    await telegramAnalyseCheckpointV352(
+      env,
+      diagnosticV273,
+      "BEFORE_TELEGRAM_SEND",
+      { replyChars: String(reply || "").length }
+    );
+  }
+
+  const telegramSendStartedAtV352 = Date.now();
   const result =
     needsChunkedReplyV316
       ? await sendTelegramManualReplyV292(env, reply)
@@ -66675,6 +66756,22 @@ async function telegramCommandReplyV271(
           null,
           null
         );
+
+  if (isFreshAnalyseV352) {
+    await telegramAnalyseCheckpointV352(
+      env,
+      diagnosticV273,
+      "AFTER_TELEGRAM_SEND",
+      {
+        telegramSendElapsedMs:
+          Date.now() - telegramSendStartedAtV352,
+        success: result?.success === true,
+        status: result?.status || null,
+        mode: result?.mode || null,
+        error: result?.error || null
+      }
+    );
+  }
 
   if (diagnosticV273) {
     diagnosticV273.replySuccess =
