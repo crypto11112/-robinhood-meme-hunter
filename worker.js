@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V375
- * AUTHORITATIVE RUNTIME VERSION: V375
+ * Robinhood Chain Meme Hunter — V376
+ * AUTHORITATIVE RUNTIME VERSION: V376
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V375";
+const VERSION = "V376";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -69585,6 +69585,91 @@ async function handleRequest(
 
 
 
+
+  if (path === "/v3live-tx-lookup") {
+    const token = normalize(url.searchParams.get("token") || "");
+    const txHash = String(url.searchParams.get("tx") || "").toLowerCase();
+
+    if (!isAddress(token)) {
+      return jsonResponse({
+        version: VERSION,
+        diagnostic: "V3_LIVE_EXACT_TX_STORAGE_RECONCILIATION_V376",
+        safe: true,
+        readOnly: true,
+        status: "INVALID_TOKEN_V376"
+      }, 400);
+    }
+
+    if (!/^0x[a-f0-9]{64}$/.test(txHash)) {
+      return jsonResponse({
+        version: VERSION,
+        diagnostic: "V3_LIVE_EXACT_TX_STORAGE_RECONCILIATION_V376",
+        safe: true,
+        readOnly: true,
+        status: "INVALID_TX_HASH_V376"
+      }, 400);
+    }
+
+    if (!env?.V3_LIVE_COLLECTOR) {
+      return jsonResponse({
+        version: VERSION,
+        diagnostic: "V3_LIVE_EXACT_TX_STORAGE_RECONCILIATION_V376",
+        safe: true,
+        readOnly: true,
+        status: "V3_LIVE_COLLECTOR_BINDING_UNAVAILABLE_V376"
+      }, 503);
+    }
+
+    const id = env.V3_LIVE_COLLECTOR.idFromName(token);
+    const stub = env.V3_LIVE_COLLECTOR.get(id);
+    const internalUrl =
+      "https://v3-live.internal/tx-lookup-v376?tx=" + encodeURIComponent(txHash);
+
+    let storageResult = null;
+    try {
+      const response = await stub.fetch(internalUrl);
+      storageResult = await response.json();
+    } catch (e) {
+      return jsonResponse({
+        version: VERSION,
+        diagnostic: "V3_LIVE_EXACT_TX_STORAGE_RECONCILIATION_V376",
+        safe: true,
+        readOnly: true,
+        workersKvWrites: 0,
+        durableObjectTradeWrites: 0,
+        scoringMutated: false,
+        token,
+        txHash,
+        status: "LIVE_STORAGE_LOOKUP_FAILED_V376",
+        error: String(e?.message || e || "UNKNOWN_ERROR"),
+        timestamp: now()
+      }, 502);
+    }
+
+    return jsonResponse({
+      version: VERSION,
+      diagnostic: "V3_LIVE_EXACT_TX_STORAGE_RECONCILIATION_V376",
+      safe: true,
+      readOnly: true,
+      workersKvWrites: 0,
+      durableObjectTradeWrites: 0,
+      scoringMutated: false,
+      token,
+      txHash,
+      storage: storageResult,
+      found: storageResult?.found === true,
+      matchesFound: Number(storageResult?.matchesFound || 0),
+      matches: Array.isArray(storageResult?.matches) ? storageResult.matches : [],
+      status: storageResult?.found === true
+        ? "EXACT_TX_FOUND_IN_LIVE_COLLECTOR_V376"
+        : "EXACT_TX_NOT_FOUND_IN_LIVE_COLLECTOR_V376",
+      interpretation: storageResult?.found === true
+        ? "The exact transaction is present in retained Durable Object live storage."
+        : "The exact transaction is absent from retained Durable Object live storage. Check whether its block/time falls inside healthy continuous collector coverage before classifying this as a missed live event.",
+      timestamp: now()
+    });
+  }
+
   if (path === "/v3tx-diagnostic") {
     return jsonResponse(
       await v3ExactTxDiagnosticV375(
@@ -70220,7 +70305,93 @@ export class V3LiveCollectorV363 {
       return Response.json(await this.status("STOPPED_V363"));
     }
     if (url.pathname === "/status") return Response.json(await this.status());
-    if (url.pathname === "/reconcile-v374") {
+    
+    // V376 — exact transaction lookup across retained V364 live trade buckets.
+    // Read-only: no KV writes, no DO writes, no collector/scoring mutation.
+    if (url.pathname === "/tx-lookup-v376") {
+      const txHash = String(url.searchParams.get("tx") || "").toLowerCase();
+      if (!/^0x[a-f0-9]{64}$/.test(txHash)) {
+        return jsonResponse({
+          version: VERSION,
+          diagnostic: "LIVE_STORAGE_EXACT_TX_LOOKUP_V376",
+          safe: true,
+          readOnly: true,
+          error: "INVALID_TX_HASH",
+          txHash
+        }, 400);
+      }
+
+      const nowMs = Date.now();
+      const bucketMs = 5 * 60 * 1000;
+      const retentionMs = 25 * 60 * 60 * 1000;
+      const oldestBucket = Math.floor((nowMs - retentionMs) / bucketMs) * bucketMs;
+      const newestBucket = Math.floor(nowMs / bucketMs) * bucketMs;
+
+      const matches = [];
+      let bucketsChecked = 0;
+      let populatedBuckets = 0;
+      let recordsChecked = 0;
+
+      for (let bucket = oldestBucket; bucket <= newestBucket; bucket += bucketMs) {
+        bucketsChecked++;
+        const rows = await this.ctx.storage.get(`v364:trade-bucket:${bucket}`);
+        if (!Array.isArray(rows) || rows.length === 0) continue;
+        populatedBuckets++;
+        recordsChecked += rows.length;
+
+        for (const row of rows) {
+          const rowTx = String(
+            row?.transactionHash ||
+            row?.txHash ||
+            row?.hash ||
+            ""
+          ).toLowerCase();
+
+          if (rowTx === txHash) {
+            matches.push({
+              bucketStart: bucket,
+              transactionHash: rowTx,
+              logIndex: row?.logIndex ?? null,
+              blockNumber: row?.blockNumber ?? null,
+              pool: row?.pool || row?.pair || row?.address || null,
+              side: row?.side || null,
+              quoteToken: row?.quoteToken || null,
+              quoteSymbol: row?.quoteSymbol || null,
+              quoteAmount: row?.quoteAmount ?? null,
+              usd: row?.usd ?? row?.usdValue ?? null,
+              capturedAt: row?.capturedAt ?? row?.timestamp ?? row?.observedAt ?? null
+            });
+          }
+        }
+      }
+
+      return jsonResponse({
+        version: VERSION,
+        diagnostic: "LIVE_STORAGE_EXACT_TX_LOOKUP_V376",
+        safe: true,
+        readOnly: true,
+        workersKvWrites: 0,
+        durableObjectTradeWrites: 0,
+        scoringMutated: false,
+        txHash,
+        retentionHours: 25,
+        bucketsChecked,
+        populatedBuckets,
+        recordsChecked,
+        matchesFound: matches.length,
+        found: matches.length > 0,
+        matches,
+        status: matches.length > 0
+          ? "EXACT_TX_FOUND_IN_LIVE_STORAGE_V376"
+          : "EXACT_TX_NOT_FOUND_IN_RETAINED_LIVE_STORAGE_V376",
+        interpretation: matches.length > 0
+          ? "The live collector retained this exact transaction. Compare pool/logIndex/side with the V375 receipt diagnostic."
+          : "This exact transaction is not present in currently retained live trade buckets. This alone does not prove a collector miss unless the transaction time was inside the collector's healthy continuous-coverage interval.",
+        timestamp: now()
+      });
+    }
+
+if (url.pathname === "/reconcile-v374") {
       const fromBlock = Math.max(0, Math.trunc(Number(url.searchParams.get("fromBlock")) || 0));
       const toBlock = Math.max(fromBlock, Math.trunc(Number(url.searchParams.get("toBlock")) || fromBlock));
       return Response.json(await this.reconcileRangeV374(fromBlock, toBlock));
