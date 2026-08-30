@@ -6,10 +6,11 @@
  */
 /**
  * Robinhood Chain Meme Hunter
- * V312: read-only frozen-entry learning report; no scoring changes, provider requests or hindsight backfill.
- * - Adds /learning to compare frozen V309+ entry signals with later verified ATH outcomes.
- * - Descriptive only: reports sample sizes, medians, averages and hit rates; never auto-adjusts weights/thresholds.
- * - Missing/unverified frozen fields are excluded per signal rather than inferred.
+ * V313: read-only learning sample-quality protection; no scoring changes, provider requests or hindsight backfill.
+ * - /learning now shows sample strength, >=1.25x hit/below counts, top-performer impact and average excluding the top performer.
+ * - Tiny groups remain visible but are explicitly labelled TOO_SMALL/VERY_SMALL/SMALL until enough frozen calls accumulate.
+ * - Descriptive only: never auto-adjusts weights/thresholds; missing/unverified frozen fields remain excluded rather than inferred.
+ * V312: read-only frozen-entry learning report; compares frozen V309+ entry signals with later verified ATH outcomes.
  * V311: frozen V309 entry-snapshot parity fix for Telegram opportunity + verified holder concentration fields.
  * V311: frozen-entry snapshot inspection + successful-call KV checkpoint.
  * - Adds read-only /callinfo SYMBOL|0xADDRESS using stored entrySignalSnapshotV309 only.
@@ -1393,7 +1394,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V312";
+const VERSION = "V313";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64934,7 +64935,7 @@ function performanceSummaryV271(
 
 
 /* =========================================================
-   V312 READ-ONLY FROZEN-SNAPSHOT LEARNING REPORT
+   V313 READ-ONLY FROZEN-SNAPSHOT LEARNING + SAMPLE QUALITY
    ========================================================= */
 function medianV312(values) {
   const clean = (Array.isArray(values) ? values : [])
@@ -64946,21 +64947,59 @@ function medianV312(values) {
   return clean.length % 2 ? clean[mid] : (clean[mid - 1] + clean[mid]) / 2;
 }
 
+function learningSampleStrengthV313(n) {
+  const count = Number(n) || 0;
+  if (count < 3) return 'TOO_SMALL';
+  if (count < 10) return 'VERY_SMALL';
+  if (count < 30) return 'SMALL';
+  if (count < 100) return 'BUILDING';
+  return 'STRONGER';
+}
+
 function learningGroupStatsV312(records) {
   const multiples = (Array.isArray(records) ? records : [])
     .map(record => Number(record?.athMultipleByMarketCap))
     .filter(value => Number.isFinite(value) && value > 0);
   if (!multiples.length) return null;
-  const average = multiples.reduce((sum, value) => sum + value, 0) / multiples.length;
+
+  const total = multiples.reduce((sum, value) => sum + value, 0);
+  const average = total / multiples.length;
   const median = medianV312(multiples);
   const hit125 = multiples.filter(value => value >= 1.25).length;
   const hit2 = multiples.filter(value => value >= 2).length;
-  return { n: multiples.length, average, median, hit125, hit2 };
+  const below125 = multiples.length - hit125;
+  const top = Math.max(...multiples);
+  const topSharePct = total > 0 ? (top / total) * 100 : null;
+  const averageExTop = multiples.length > 1 ? (total - top) / (multiples.length - 1) : null;
+
+  return {
+    n: multiples.length,
+    average,
+    median,
+    hit125,
+    hit2,
+    below125,
+    top,
+    topSharePct,
+    averageExTop,
+    sampleStrength: learningSampleStrengthV313(multiples.length)
+  };
 }
 
 function learningStatsTextV312(stats) {
   if (!stats) return 'n=0';
-  return `n=${stats.n} | med ${telegramMultipleV271(stats.median)} | avg ${telegramMultipleV271(stats.average)} | ≥1.25x ${stats.hit125}/${stats.n} | ≥2x ${stats.hit2}/${stats.n}`;
+  return `n=${stats.n} [${stats.sampleStrength}] | med ${telegramMultipleV271(stats.median)} | avg ${telegramMultipleV271(stats.average)} | ≥1.25x ${stats.hit125}/${stats.n} | <1.25x ${stats.below125}/${stats.n} | ≥2x ${stats.hit2}/${stats.n}`;
+}
+
+function learningOutlierTextV313(stats) {
+  if (!stats) return 'Outlier check: UNVERIFIED';
+  const share = Number.isFinite(Number(stats.topSharePct))
+    ? `${Number(stats.topSharePct).toFixed(1)}%`
+    : 'UNVERIFIED';
+  const exTop = Number.isFinite(Number(stats.averageExTop))
+    ? telegramMultipleV271(stats.averageExTop)
+    : 'N/A';
+  return `top ${telegramMultipleV271(stats.top)} = ${share} of summed multiples | avg excl top ${exTop}`;
 }
 
 function learningBandV312(value, bands) {
@@ -64984,7 +65023,7 @@ function frozenLearningMessageV312(state) {
 
   if (!records.length) {
     return [
-      '🧠 <b>Frozen Entry Learning — V312</b>',
+      '🧠 <b>Frozen Entry Learning — V313</b>',
       '',
       'No frozen V309+ entry snapshots with verified ATH outcomes are stored yet.',
       '',
@@ -65004,7 +65043,9 @@ function frozenLearningMessageV312(state) {
     if (!groups.size) return [];
     const lines = [`<b>${title}</b>`];
     for (const [key, items] of groups.entries()) {
-      lines.push(`• ${escapeHtml(String(key))}: ${learningStatsTextV312(learningGroupStatsV312(items))}`);
+      const stats = learningGroupStatsV312(items);
+      lines.push(`• ${escapeHtml(String(key))}: ${learningStatsTextV312(stats)}`);
+      if (stats?.n >= 2) lines.push(`  ↳ ${learningOutlierTextV313(stats)}`);
     }
     return lines;
   };
@@ -65035,10 +65076,11 @@ function frozenLearningMessageV312(state) {
   });
 
   const lines = [
-    '🧠 <b>Frozen Entry Learning — V312</b>',
+    '🧠 <b>Frozen Entry Learning — V313</b>',
     '',
     `Frozen calls analysed: <b>${records.length}</b> / ${all.length} tracked`,
     `Overall: <b>${learningStatsTextV312(overall)}</b>`,
+    `📐 Outlier impact: ${learningOutlierTextV313(overall)}`,
     '',
     ...confidence, '',
     ...momentum, '',
@@ -65046,7 +65088,8 @@ function frozenLearningMessageV312(state) {
     ...concentration, '',
     ...marketQuality, '',
     ...rugRisk, '',
-    '⚠️ <b>DESCRIPTIVE ONLY</b> — small samples can be misleading. V312 does not change scoring, weights, thresholds or qualification.',
+    '📏 Sample strength: TOO_SMALL <3 | VERY_SMALL 3–9 | SMALL 10–29 | BUILDING 30–99 | STRONGER 100+',
+    '⚠️ <b>DESCRIPTIVE ONLY</b> — V313 does not change scoring, weights, thresholds or qualification.',
     '<i>Only frozen call-time fields are compared with later verified ATH multiples. Missing entry evidence is excluded, never backfilled.</i>'
   ];
 
@@ -65066,7 +65109,7 @@ function telegramHelpV271() {
     "<code>/calls</code> — recent tracked calls",
     "<code>/best</code> — highest verified ATH X calls",
     "<code>/performance</code> — overall tracked-call summary",
-    "<code>/learning</code> — frozen entry signals vs verified ATH outcomes",
+    "<code>/learning</code> — frozen signals, outcomes + sample quality",
     "<code>/help</code> — command list",
     "",
     "<i>/analyse performs a fresh bounded analysis. Other V271 commands read stored evidence and do not trigger a fresh chain scan.</i>"
