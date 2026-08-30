@@ -1452,7 +1452,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V355";
+const VERSION = "V356";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -67882,6 +67882,183 @@ async function v3LedgerDiagnosticV355(env, tokenInput) {
   return out;
 }
 
+
+/* ============================================================
+   V356 — ALCHEMY V3 eth_getLogs RANGE CAPABILITY DIAGNOSTIC
+   ============================================================
+   HTTP-only / read-only diagnostic. It does NOT modify /analyse,
+   scheduled collection, scoring, alerts, ledgers, ranges or KV state.
+   Purpose: measure the largest reliable contiguous Alchemy eth_getLogs
+   range for one already-verified V3 pool before changing collector size.
+*/
+const V356_RANGE_TESTS = [10, 100, 1000, 5000, 10000];
+const V356_RANGE_TIMEOUT_MS = 4500;
+
+function v356AlchemyUrl(env) {
+  const explicit = String(env?.ALCHEMY_RPC_URL || "").trim();
+  if (explicit) return explicit;
+  return env?.ALCHEMY_API_KEY ? `${ALCHEMY_BASE}${env.ALCHEMY_API_KEY}` : null;
+}
+
+async function v356RawAlchemyRpc(url, method, params, timeoutMs = V356_RANGE_TIMEOUT_MS) {
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(500, Number(timeoutMs) || V356_RANGE_TIMEOUT_MS));
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
+      signal: controller.signal
+    });
+    let payload = null;
+    let parseError = null;
+    try { payload = await response.json(); } catch (error) { parseError = String(error?.message || error); }
+    const rpcError = payload?.error || null;
+    return {
+      ok: response.ok && !rpcError && !parseError,
+      httpStatus: response.status,
+      result: response.ok && !rpcError ? (payload?.result ?? null) : null,
+      rpcErrorCode: Number.isFinite(Number(rpcError?.code)) ? Number(rpcError.code) : null,
+      error: rpcError?.message || parseError || (!response.ok ? `HTTP_${response.status}` : null),
+      elapsedMs: Date.now() - startedAt
+    };
+  } catch (error) {
+    const name = String(error?.name || "");
+    return {
+      ok: false,
+      httpStatus: null,
+      result: null,
+      rpcErrorCode: null,
+      error: name === "AbortError" ? `TIMEOUT_${timeoutMs}MS` : String(error?.message || error).slice(0, 260),
+      elapsedMs: Date.now() - startedAt
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function v356BlockNumber(value) {
+  try {
+    if (typeof value === "string" && /^0x[0-9a-f]+$/i.test(value)) return Number(BigInt(value));
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.trunc(n) : null;
+  } catch (_) { return null; }
+}
+
+async function v3RangeCapabilityDiagnosticV356(env, tokenInput) {
+  const startedAt = Date.now();
+  const token = normalize(tokenInput);
+  const out = {
+    version: VERSION,
+    diagnostic: "ALCHEMY_V3_ETH_GETLOGS_RANGE_CAPABILITY_V356",
+    safe: true,
+    writes: 0,
+    kvWrites: 0,
+    collectorMutated: false,
+    analyseMutated: false,
+    token,
+    pair: null,
+    topic: UNISWAP_V3_SWAP_TOPIC_V326,
+    provider: "ALCHEMY_ONLY",
+    timeoutPerRequestMs: V356_RANGE_TIMEOUT_MS,
+    requestedRanges: V356_RANGE_TESTS,
+    externalRequests: 0,
+    headBlock: null,
+    tests: [],
+    timestamp: now(),
+    elapsedMs: null
+  };
+
+  if (!isAddress(token)) {
+    out.status = "INVALID_TOKEN_ADDRESS_V356";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  const alchemyUrl = v356AlchemyUrl(env);
+  if (!alchemyUrl) {
+    out.status = "ALCHEMY_NOT_CONFIGURED_V356";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  try {
+    // Existing verified pair-cache read only. No write and no pair discovery RPC.
+    const pairCache = await loadVerifiedV3PairIdentityV329(env, token);
+    const pair = normalize(pairCache?.record?.pairAddress);
+    out.pairStatus = pairCache?.status || null;
+    if (pairCache?.valid !== true || !isAddress(pair)) {
+      out.status = "VERIFIED_V3_PAIR_UNAVAILABLE_V356";
+      out.elapsedMs = Date.now() - startedAt;
+      return out;
+    }
+    out.pair = pair;
+
+    const head = await v356RawAlchemyRpc(alchemyUrl, "eth_blockNumber", []);
+    out.externalRequests++;
+    if (!head.ok) {
+      out.status = "ALCHEMY_HEAD_FAILED_V356";
+      out.headRequest = { ok:false, httpStatus:head.httpStatus, error:head.error, elapsedMs:head.elapsedMs };
+      out.elapsedMs = Date.now() - startedAt;
+      return out;
+    }
+    const headBlock = v356BlockNumber(head.result);
+    if (!Number.isFinite(headBlock)) {
+      out.status = "ALCHEMY_HEAD_INVALID_V356";
+      out.elapsedMs = Date.now() - startedAt;
+      return out;
+    }
+    out.headBlock = headBlock;
+    out.headRequest = { ok:true, httpStatus:head.httpStatus, elapsedMs:head.elapsedMs };
+
+    for (const blocks of V356_RANGE_TESTS) {
+      const fromBlock = Math.max(0, headBlock - blocks + 1);
+      const toBlock = headBlock;
+      const call = await v356RawAlchemyRpc(alchemyUrl, "eth_getLogs", [{
+        fromBlock: `0x${fromBlock.toString(16)}`,
+        toBlock: `0x${toBlock.toString(16)}`,
+        address: pair,
+        topics: [UNISWAP_V3_SWAP_TOPIC_V326]
+      }]);
+      out.externalRequests++;
+      const logs = Array.isArray(call.result) ? call.result : null;
+      let firstLogBlock = null, lastLogBlock = null;
+      if (logs?.length) {
+        const nums = logs.map(x => v356BlockNumber(x?.blockNumber)).filter(Number.isFinite);
+        if (nums.length) { firstLogBlock = Math.min(...nums); lastLogBlock = Math.max(...nums); }
+      }
+      out.tests.push({
+        blocks,
+        fromBlock,
+        toBlock,
+        ok: call.ok && Array.isArray(logs),
+        httpStatus: call.httpStatus,
+        rpcErrorCode: call.rpcErrorCode,
+        error: call.error,
+        elapsedMs: call.elapsedMs,
+        logs: logs ? logs.length : null,
+        firstLogBlock,
+        lastLogBlock
+      });
+    }
+
+    const successful = out.tests.filter(t => t.ok).map(t => t.blocks);
+    out.largestSuccessfulRange = successful.length ? Math.max(...successful) : null;
+    const failed = out.tests.filter(t => !t.ok);
+    out.allRangesPassed = failed.length === 0;
+    out.status = successful.length
+      ? "ALCHEMY_RANGE_CAPABILITY_MEASURED_V356"
+      : "ALCHEMY_RANGE_TESTS_ALL_FAILED_V356";
+  } catch (error) {
+    out.status = "DIAGNOSTIC_ERROR_V356";
+    out.error = String(error?.message || error).slice(0, 260);
+  }
+
+  out.elapsedMs = Date.now() - startedAt;
+  return out;
+}
+
 /* =========================================================
    ROUTER
    ========================================================= */
@@ -68028,6 +68205,18 @@ async function handleRequest(
   ) {
     return jsonResponse(
       await v3LedgerDiagnosticV355(
+        env,
+        url.searchParams.get("token") || ""
+      )
+    );
+  }
+
+  if (
+    path ===
+    "/v3range-diagnostic"
+  ) {
+    return jsonResponse(
+      await v3RangeCapabilityDiagnosticV356(
         env,
         url.searchParams.get("token") || ""
       )
