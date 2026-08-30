@@ -1445,7 +1445,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V333";
+const VERSION = "V334";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64289,11 +64289,21 @@ async function persistNativeV3SwapLedgerV331(env, tokenAddress, pairAddress, row
   const records = Array.isArray(existing?.records) ? existing.records.slice() : [];
   const ranges = Array.isArray(existing?.ranges) ? existing.ranges.slice() : [];
   const keys = new Set(records.map(r => String(r?.tradeKey || "")).filter(Boolean));
+  const recordIndex = new Map(records.map((r,i)=>[String(r?.tradeKey||""),i]).filter(([k])=>Boolean(k)));
   let inserted = 0, deduplicated = 0;
   for (const row of rows || []) {
     const tradeKey = String(row?.tradeKey || "");
-    if (!tradeKey || keys.has(tradeKey)) { if (tradeKey) deduplicated++; continue; }
+    if (!tradeKey) continue;
+    if (keys.has(tradeKey)) {
+      deduplicated++;
+      const i=recordIndex.get(tradeKey);
+      if(Number.isInteger(i)&&i>=0&&nativeV3VerifiedTimestampMsV334(row)&&!nativeV3VerifiedTimestampMsV334(records[i])){
+        records[i]={...records[i],blockTimestampMs:row.blockTimestampMs,timestampVerifiedV334:true,timestampBasis:"ONCHAIN_BLOCK_TIMESTAMP_V334"};
+      }
+      continue;
+    }
     keys.add(tradeKey);
+    recordIndex.set(tradeKey,records.length);
     records.push(row);
     inserted++;
   }
@@ -64448,6 +64458,7 @@ async function manualNativeV3DirectionalV326(env, budget, candidate) {
   }
   const ledgerWrite=await persistNativeV3SwapLedgerV331(env,token,pairAddress,[...unique.values()],scannedRanges);
   const ledgerAfter=await loadNativeV3SwapLedgerV331(env,token,pairAddress);
+  const rollingV334=nativeV3RollingWindowsV334(ledgerAfter?.records,Date.now());
   const usdVerified=priceUsdVerified;
   const status=!unique.size?"VERIFIED_ZERO_SWAPS_BOUNDED_SWEEP_V331":(usdVerified?"VERIFIED_BOUNDED_EXACT_POOL_SWEEP_V331":"VERIFIED_BOUNDED_EXACT_POOL_SWAPS_USD_UNVERIFIED_V331");
   const observedFrom=scannedRanges.length?scannedRanges[0].fromBlock:null, observedTo=scannedRanges.length?scannedRanges[scannedRanges.length-1].toBlock:null;
@@ -64455,7 +64466,7 @@ async function manualNativeV3DirectionalV326(env, budget, candidate) {
   return {...base,attempted:true,verified:true,usdVerified,status,pairAddress,token0,token1,fee,protocolEvidence:"ONCHAIN_TOKEN0_TOKEN1_FEE_V329",pairCacheWriteStatus:pairCacheWriteV329?.status||null,
     fromBlock:observedFrom,toBlock:observedTo,swaps:unique.size,buys,sells,buyTokenAmount,sellTokenAmount,buyUsd:usdVerified?buyUsd:null,sellUsd:usdVerified?sellUsd:null,netUsd:usdVerified?buyUsd-sellUsd:null,requestsUsed:Math.max(0,safeNumber(budget?.totalUsed)-before),
     sweepStatusV331:scannedRanges.length===ranges.length?"BOUNDED_SWEEP_COMPLETE_V331":"BOUNDED_SWEEP_PARTIAL_V331",sweepChunksV331:scannedRanges.length,sweepBlocksV331:scannedRanges.reduce((n,r)=>n+(r.toBlock-r.fromBlock+1),0),sweepGapV331:sweepGap,
-    ledgerStatusV331:ledgerAfter?.status||ledgerBefore?.status||null,ledgerWriteStatusV331:ledgerWrite?.status||null,ledgerRecordsV331:Array.isArray(ledgerAfter?.records)?ledgerAfter.records.length:safeNumber(ledgerWrite?.records),ledgerRangesV331:Array.isArray(ledgerAfter?.ranges)?ledgerAfter.ranges.length:safeNumber(ledgerWrite?.ranges),ledgerInsertedV331:safeNumber(ledgerWrite?.inserted),ledgerDeduplicatedV331:safeNumber(ledgerWrite?.deduplicated),ledgerFirstBlockV331:Number.isFinite(Number(ledgerAfter?.firstObservedBlock))?Number(ledgerAfter.firstObservedBlock):null,ledgerLastBlockV331:Number.isFinite(Number(ledgerAfter?.lastObservedBlock))?Number(ledgerAfter.lastObservedBlock):null};
+    ledgerStatusV331:ledgerAfter?.status||ledgerBefore?.status||null,ledgerWriteStatusV331:ledgerWrite?.status||null,ledgerRecordsV331:Array.isArray(ledgerAfter?.records)?ledgerAfter.records.length:safeNumber(ledgerWrite?.records),ledgerRangesV331:Array.isArray(ledgerAfter?.ranges)?ledgerAfter.ranges.length:safeNumber(ledgerWrite?.ranges),ledgerInsertedV331:safeNumber(ledgerWrite?.inserted),ledgerDeduplicatedV331:safeNumber(ledgerWrite?.deduplicated),ledgerFirstBlockV331:Number.isFinite(Number(ledgerAfter?.firstObservedBlock))?Number(ledgerAfter.firstObservedBlock):null,ledgerLastBlockV331:Number.isFinite(Number(ledgerAfter?.lastObservedBlock))?Number(ledgerAfter.lastObservedBlock):null,rollingV334};
 }
 
 function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 = null) {
@@ -64558,6 +64569,18 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       evidence.push(
         `🗃 V3 ledger: <b>${safeNumber(v3?.ledgerRecordsV331)} records</b> | <b>${safeNumber(v3?.ledgerRangesV331)} verified ranges</b>${v3?.sweepGapV331 === true ? " | coverage <b>PARTIAL</b>" : ""}`
       );
+    }
+
+    const rolling=v3?.rollingV334;
+    if(rolling){
+      evidence.push(`🕒 Verified block timestamps: <b>${safeNumber(rolling?.verifiedTimestampRecords)}/${safeNumber(rolling?.totalRecords)} records</b>`);
+      const w=rolling?.windows||{};
+      evidence.push(`⏱ V3 rolling counts — PARTIAL COVERAGE`);
+      evidence.push(`• 5m: <b>${safeNumber(w?.["5m"]?.buys)} buys / ${safeNumber(w?.["5m"]?.sells)} sells</b>`);
+      evidence.push(`• 15m: <b>${safeNumber(w?.["15m"]?.buys)} buys / ${safeNumber(w?.["15m"]?.sells)} sells</b>`);
+      evidence.push(`• 1h: <b>${safeNumber(w?.["1h"]?.buys)} buys / ${safeNumber(w?.["1h"]?.sells)} sells</b>`);
+      evidence.push(`• 6h: <b>${safeNumber(w?.["6h"]?.buys)} buys / ${safeNumber(w?.["6h"]?.sells)} sells</b>`);
+      evidence.push(`• 24h: <b>${safeNumber(w?.["24h"]?.buys)} buys / ${safeNumber(w?.["24h"]?.sells)} sells</b>`);
     }
 
     if (v3?.usdVerified === true) {
@@ -67578,7 +67601,8 @@ async function handleRequest(
 const NATIVE_V3_COLLECTOR_REGISTRY_KEY_V333 = "robinhood-meme-hunter-v333-v3-collector-registry";
 const NATIVE_V3_COLLECTOR_MAX_TOKENS_PER_RUN_V333 = 4;
 const NATIVE_V3_COLLECTOR_BLOCKS_PER_RUN_V333 = 10;
-const NATIVE_V3_COLLECTOR_REQUEST_LIMIT_V333 = 6;
+const NATIVE_V3_COLLECTOR_REQUEST_LIMIT_V333 = 8;
+const NATIVE_V3_TIMESTAMP_HYDRATE_MAX_PER_RUN_V334 = 3;
 
 async function registerNativeV3CollectorTokenV333(env, tokenAddress, decimals = null) {
   const token = normalize(tokenAddress);
@@ -67615,6 +67639,61 @@ function createNativeV3CollectorBudgetV333(){
   return b;
 }
 
+function nativeV3VerifiedTimestampMsV334(row){
+  const ms=Number(row?.blockTimestampMs);
+  return row?.timestampVerifiedV334===true && Number.isFinite(ms) && ms>0 ? ms : null;
+}
+
+async function hydrateNativeV3TradeTimestampsV334(env,budget,rows,maxLookups=NATIVE_V3_TIMESTAMP_HYDRATE_MAX_PER_RUN_V334){
+  const input=Array.isArray(rows)?rows:[];
+  const byBlock=new Map();
+  for(const row of input){
+    if(nativeV3VerifiedTimestampMsV334(row)) continue;
+    const block=rpcBlockNumberV331(row?.blockNumber);
+    if(!Number.isFinite(block)||byBlock.has(block)) continue;
+    byBlock.set(block,[]);
+  }
+  for(const row of input){
+    const block=rpcBlockNumberV331(row?.blockNumber);
+    if(Number.isFinite(block)&&byBlock.has(block)) byBlock.get(block).push(row);
+  }
+  let lookups=0,verified=0;
+  for(const [block,blockRows] of byBlock){
+    if(lookups>=maxLookups||!budgetAvailable(budget,"analysis")) break;
+    const result=await rpc(env,"eth_getBlockByNumber",["0x"+block.toString(16),false],budget,"analysis");
+    lookups++;
+    let timestampMs=null;
+    try{
+      const raw=String(result?.result?.timestamp||"");
+      if(/^0x[a-fA-F0-9]+$/.test(raw)) timestampMs=Number(BigInt(raw))*1000;
+    }catch(_){}
+    if(!Number.isFinite(timestampMs)||timestampMs<=0) continue;
+    for(const row of blockRows){
+      row.blockTimestampMs=timestampMs;
+      row.timestampVerifiedV334=true;
+      row.timestampBasis="ONCHAIN_BLOCK_TIMESTAMP_V334";
+      verified++;
+    }
+  }
+  return {rows:input,lookups,verified};
+}
+
+function nativeV3RollingWindowsV334(records,nowMs=Date.now()){
+  const rows=(Array.isArray(records)?records:[]).filter(r=>nativeV3VerifiedTimestampMsV334(r));
+  const defs=[["5m",5*60*1000],["15m",15*60*1000],["1h",60*60*1000],["6h",6*60*60*1000],["24h",24*60*60*1000]];
+  const windows={};
+  for(const [label,ms] of defs){
+    let buys=0,sells=0;
+    for(const row of rows){
+      const ts=nativeV3VerifiedTimestampMsV334(row);
+      if(!ts||ts<nowMs-ms||ts>nowMs) continue;
+      if(row?.side==="BUY") buys++; else if(row?.side==="SELL") sells++;
+    }
+    windows[label]={buys,sells,swaps:buys+sells};
+  }
+  return {verifiedTimestampRecords:rows.length,totalRecords:Array.isArray(records)?records.length:0,windows,coverage:"PARTIAL"};
+}
+
 async function collectOneNativeV3TokenV333(env,budget,row,headBlock){
   const token=normalize(row?.tokenAddress);
   const pairCache=await loadVerifiedV3PairIdentityV329(env,token);
@@ -67648,11 +67727,16 @@ async function collectOneNativeV3TokenV333(env,budget,row,headBlock){
     const raw=token===token0?amount0:(token===token1?amount1:null); if(typeof raw!=="bigint"||raw===0n)continue;
     const amount=decimalFromSignedRawV326(raw,decimals); if(!Number.isFinite(amount)||amount===0)continue;
     const txHash=String(log?.transactionHash||"").toLowerCase(),logIndex=String(log?.logIndex??""); const tradeKey=`${txHash}|${logIndex}`; if(!txHash||unique.has(tradeKey))continue;
-    unique.set(tradeKey,{tradeKey,transactionHash:txHash,logIndex,blockNumber:rpcBlockNumberV331(log?.blockNumber),pairAddress:pair,side:raw<0n?"BUY":"SELL",tokenAmount:Math.abs(amount),usd:null,usdVerified:false,priceUsd:null,observedAt:Date.now(),timestampBasis:"INGESTION_TIME_ONLY_V333"});
+    unique.set(tradeKey,{tradeKey,transactionHash:txHash,logIndex,blockNumber:rpcBlockNumberV331(log?.blockNumber),pairAddress:pair,side:raw<0n?"BUY":"SELL",tokenAmount:Math.abs(amount),usd:null,usdVerified:false,priceUsd:null,observedAt:Date.now(),blockTimestampMs:null,timestampVerifiedV334:false,timestampBasis:"INGESTION_TIME_ONLY_V333"});
   }
   const scannedRange={fromBlock,toBlock:rangeTo,observedAt:Date.now(),swaps:logsResult.result.length,source:"SCHEDULED_NATIVE_V3_COLLECTOR_V333"};
-  const write=await persistNativeV3SwapLedgerV331(env,token,pair,[...unique.values()],[scannedRange]);
-  return {token,pair,status:unique.size?"COLLECTOR_SWAPS_PERSISTED_V333":"COLLECTOR_ZERO_SWAPS_RANGE_PERSISTED_V333",fromBlock,toBlock:rangeTo,swaps:unique.size,coverageGap,ledgerWriteStatus:write?.status||null,requestsUsed:Math.max(0,safeNumber(budget.totalUsed)-before)};
+  /* V334 Step 2A: hydrate exact on-chain block timestamps. New swaps are
+     prioritised, then older ledger rows are progressively upgraded. */
+  const existingMissing=(Array.isArray(ledger?.records)?ledger.records:[]).filter(r=>!nativeV3VerifiedTimestampMsV334(r));
+  const hydrateInput=[...unique.values(),...existingMissing];
+  const hydrated=await hydrateNativeV3TradeTimestampsV334(env,budget,hydrateInput,NATIVE_V3_TIMESTAMP_HYDRATE_MAX_PER_RUN_V334);
+  const write=await persistNativeV3SwapLedgerV331(env,token,pair,hydrated.rows,[scannedRange]);
+  return {token,pair,status:unique.size?"COLLECTOR_SWAPS_PERSISTED_V333":"COLLECTOR_ZERO_SWAPS_RANGE_PERSISTED_V333",fromBlock,toBlock:rangeTo,swaps:unique.size,coverageGap,ledgerWriteStatus:write?.status||null,timestampLookupsV334:hydrated.lookups,timestampsVerifiedV334:hydrated.verified,requestsUsed:Math.max(0,safeNumber(budget.totalUsed)-before)};
 }
 
 async function scheduledNativeV3CollectorV333(env){
