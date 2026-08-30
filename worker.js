@@ -6,6 +6,10 @@
  */
 /**
  * Robinhood Chain Meme Hunter
+ * V312: read-only frozen-entry learning report; no scoring changes, provider requests or hindsight backfill.
+ * - Adds /learning to compare frozen V309+ entry signals with later verified ATH outcomes.
+ * - Descriptive only: reports sample sizes, medians, averages and hit rates; never auto-adjusts weights/thresholds.
+ * - Missing/unverified frozen fields are excluded per signal rather than inferred.
  * V311: frozen V309 entry-snapshot parity fix for Telegram opportunity + verified holder concentration fields.
  * V311: frozen-entry snapshot inspection + successful-call KV checkpoint.
  * - Adds read-only /callinfo SYMBOL|0xADDRESS using stored entrySignalSnapshotV309 only.
@@ -1389,7 +1393,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V311";
+const VERSION = "V312";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64927,6 +64931,128 @@ function performanceSummaryV271(
   ].join("\n");
 }
 
+
+
+/* =========================================================
+   V312 READ-ONLY FROZEN-SNAPSHOT LEARNING REPORT
+   ========================================================= */
+function medianV312(values) {
+  const clean = (Array.isArray(values) ? values : [])
+    .map(Number)
+    .filter(value => Number.isFinite(value) && value > 0)
+    .sort((a, b) => a - b);
+  if (!clean.length) return null;
+  const mid = Math.floor(clean.length / 2);
+  return clean.length % 2 ? clean[mid] : (clean[mid - 1] + clean[mid]) / 2;
+}
+
+function learningGroupStatsV312(records) {
+  const multiples = (Array.isArray(records) ? records : [])
+    .map(record => Number(record?.athMultipleByMarketCap))
+    .filter(value => Number.isFinite(value) && value > 0);
+  if (!multiples.length) return null;
+  const average = multiples.reduce((sum, value) => sum + value, 0) / multiples.length;
+  const median = medianV312(multiples);
+  const hit125 = multiples.filter(value => value >= 1.25).length;
+  const hit2 = multiples.filter(value => value >= 2).length;
+  return { n: multiples.length, average, median, hit125, hit2 };
+}
+
+function learningStatsTextV312(stats) {
+  if (!stats) return 'n=0';
+  return `n=${stats.n} | med ${telegramMultipleV271(stats.median)} | avg ${telegramMultipleV271(stats.average)} | ≥1.25x ${stats.hit125}/${stats.n} | ≥2x ${stats.hit2}/${stats.n}`;
+}
+
+function learningBandV312(value, bands) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  for (const band of bands) {
+    if (n >= band.min && n <= band.max) return band.label;
+  }
+  return null;
+}
+
+function frozenLearningMessageV312(state) {
+  const all = callPerformanceEntriesV271(state);
+  const records = all.filter(record => {
+    const snap = record?.entrySignalSnapshotV309;
+    const ath = Number(record?.athMultipleByMarketCap);
+    return snap?.frozenAtSuccessfulCall === true &&
+      snap?.laterEvidenceBackfillAllowed === false &&
+      Number.isFinite(ath) && ath > 0;
+  });
+
+  if (!records.length) {
+    return [
+      '🧠 <b>Frozen Entry Learning — V312</b>',
+      '',
+      'No frozen V309+ entry snapshots with verified ATH outcomes are stored yet.',
+      '',
+      '<i>Read-only. No scoring changes and zero provider requests.</i>'
+    ].join('\n');
+  }
+
+  const overall = learningGroupStatsV312(records);
+  const groupLines = (title, extractor) => {
+    const groups = new Map();
+    for (const record of records) {
+      const key = extractor(record?.entrySignalSnapshotV309, record);
+      if (!key) continue;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(record);
+    }
+    if (!groups.size) return [];
+    const lines = [`<b>${title}</b>`];
+    for (const [key, items] of groups.entries()) {
+      lines.push(`• ${escapeHtml(String(key))}: ${learningStatsTextV312(learningGroupStatsV312(items))}`);
+    }
+    return lines;
+  };
+
+  const confidence = groupLines('🔎 Confidence at entry', snap => snap?.confidence?.label || null);
+  const momentum = groupLines('🚀 Momentum at entry', snap => snap?.momentum?.label || null);
+  const whaleFlow = groupLines('🐋 Whale flow at entry', snap => snap?.whaleFlow?.flow || null);
+  const concentration = groupLines('👥 Concentration at entry', snap =>
+    snap?.holders?.concentrationVerified === true ? (snap?.holders?.concentration || null) : null
+  );
+  const marketQuality = groupLines('🧪 Market Quality band', snap => {
+    if (snap?.marketQuality?.verified !== true) return null;
+    return learningBandV312(snap?.marketQuality?.score, [
+      { min: 0, max: 24.999, label: '0–24' },
+      { min: 25, max: 49.999, label: '25–49' },
+      { min: 50, max: 74.999, label: '50–74' },
+      { min: 75, max: 100, label: '75–100' }
+    ]);
+  });
+  const rugRisk = groupLines('🛡 Rug Risk band', snap => {
+    if (snap?.rugRisk?.verified !== true) return null;
+    return learningBandV312(snap?.rugRisk?.score, [
+      { min: 0, max: 24.999, label: '0–24' },
+      { min: 25, max: 49.999, label: '25–49' },
+      { min: 50, max: 74.999, label: '50–74' },
+      { min: 75, max: 100, label: '75–100' }
+    ]);
+  });
+
+  const lines = [
+    '🧠 <b>Frozen Entry Learning — V312</b>',
+    '',
+    `Frozen calls analysed: <b>${records.length}</b> / ${all.length} tracked`,
+    `Overall: <b>${learningStatsTextV312(overall)}</b>`,
+    '',
+    ...confidence, '',
+    ...momentum, '',
+    ...whaleFlow, '',
+    ...concentration, '',
+    ...marketQuality, '',
+    ...rugRisk, '',
+    '⚠️ <b>DESCRIPTIVE ONLY</b> — small samples can be misleading. V312 does not change scoring, weights, thresholds or qualification.',
+    '<i>Only frozen call-time fields are compared with later verified ATH multiples. Missing entry evidence is excluded, never backfilled.</i>'
+  ];
+
+  return lines.filter((line, index, arr) => !(line === '' && arr[index - 1] === '')).join('\n');
+}
+
 function telegramHelpV271() {
   return [
     "🤖 <b>Robinhood Meme Hunter Commands</b>",
@@ -64940,6 +65066,7 @@ function telegramHelpV271() {
     "<code>/calls</code> — recent tracked calls",
     "<code>/best</code> — highest verified ATH X calls",
     "<code>/performance</code> — overall tracked-call summary",
+    "<code>/learning</code> — frozen entry signals vs verified ATH outcomes",
     "<code>/help</code> — command list",
     "",
     "<i>/analyse performs a fresh bounded analysis. Other V271 commands read stored evidence and do not trigger a fresh chain scan.</i>"
@@ -65235,6 +65362,14 @@ async function telegramCommandReplyV271(
   ) {
     reply =
       performanceSummaryV271(
+        state
+      );
+  } else if (
+    parsed.command ===
+    "/learning"
+  ) {
+    reply =
+      frozenLearningMessageV312(
         state
       );
   } else if (
