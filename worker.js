@@ -1,5 +1,18 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V297 / V2.0:
+ * - ATH FRESHNESS: /best now shows the exact last successful ATH batch-check time plus its age
+ * - ATH CHANGE TIME: /best separately shows the last time any tracked call actually recorded a new verified ATH
+ * - TRUTHFUL TIMESTAMPS: blocked/429/failed attempts do not advance the successful-check time, and a successful check with zero new highs does not advance the ATH-updated time
+ * - PRESERVES: V296 diagnostics, V295 zero-extra-request batch ATH coverage, frozen entry baselines, verified-only ATH increases, scanner 42/21 ceilings and all autonomous alert/scoring/provider protections
+ * V296 / V2.0:
+ * - ATH FOLLOW-UP DIAGNOSTICS: records the real V295 piggyback lifecycle in persistent DexScreener service telemetry so /scan and /best-calls can prove whether a follow-up batch was blocked, rate-limited, successful, observed or ATH-updating
+ * - NO GUESSING: V270 trackedThisScan is no longer treated as evidence of V295 batch execution; V296 exposes the separate batch requested/observed/athUpdated counters directly
+ * - RATE-LIMIT VISIBILITY: cooldown, fresh-guard, recovery-stagger, scan-limit, budget-protection, HTTP 429, non-OK response, no-market and successful batch outcomes are recorded without adding requests
+ * - LEADERBOARD STATUS: /best-calls now shows the last ATH follow-up status and batch counts, making 1.00x distinguishable from a batch that simply has not completed successfully yet
+ * - PRESERVES: V295 zero-extra-request 30-address DexScreener piggyback design, frozen entry MC, verified-only ATH increases, scanner 42/21 ceilings, provider cooldowns, scoring, Momentum, holders, Telegram thresholds and KV history
+ *
+ * Robinhood Chain Meme Hunter
  * V295 / V2.0:
  * - ATH COVERAGE: every normal fresh DexScreener market request can piggyback up to 29 previously alerted token addresses using DexScreener's documented multi-token /tokens/v1 route
  * - ZERO EXTRA REQUESTS: the scanner still spends the same single protected DexScreener fresh-market request; no request ceiling or provider cadence is increased
@@ -1325,7 +1338,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V295";
+const VERSION = "V297";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9294,6 +9307,15 @@ async function blockscoutWideInitializeForPoolV184(
     if (
       !response.ok
     ) {
+      setAthFollowUpStatusV296(service, {
+        status: `HTTP_${response.status}`,
+        attempted: true,
+        requestedAddresses: v295BatchAddresses.length,
+        observed: 0,
+        athUpdated: 0,
+        httpStatus: response.status
+      });
+
       service.lastStatus =
         `HTTP_${response.status}`;
 
@@ -13043,6 +13065,14 @@ async function fetchBlockscoutBacklogTopicV248(
       response.status ===
       429
     ) {
+      setAthFollowUpStatusV296(service, {
+        status: "HTTP_429",
+        attempted: true,
+        requestedAddresses: v295BatchAddresses.length,
+        observed: 0,
+        athUpdated: 0,
+        httpStatus: 429
+      });
       backlogService.total429s =
         safeNumber(
           backlogService.total429s
@@ -23213,6 +23243,25 @@ function dexService(state) {
   return state.services.dexscreener;
 }
 
+function setAthFollowUpStatusV296(service, patch = {}) {
+  if (!service || typeof service !== "object") return null;
+
+  const prior =
+    service.athFollowUpV296 &&
+    typeof service.athFollowUpV296 === "object"
+      ? service.athFollowUpV296
+      : {};
+
+  service.athFollowUpV296 = {
+    ...prior,
+    ...patch,
+    updatedAt: Date.now(),
+    sourceVersion: "V296",
+    zeroExtraRequests: true
+  };
+
+  return service.athFollowUpV296;
+}
 
 
 function marketProviderRecoveryV157(
@@ -27240,6 +27289,12 @@ async function marketData(
     Date.now() <
       cooldownUntil
   ) {
+    setAthFollowUpStatusV296(service, {
+      status: "BLOCKED_DEXSCREENER_COOLDOWN",
+      attempted: false,
+      cooldownUntil
+    });
+
     const stale =
       cachedMarket(
         watched,
@@ -27298,6 +27353,11 @@ async function marketData(
    * receive verified cached/stale intelligence when available.
    */
   if (!allowFresh) {
+    setAthFollowUpStatusV296(service, {
+      status: "BLOCKED_FRESH_RESERVED_FOR_PRIORITY",
+      attempted: false
+    });
+
     const stale =
       cachedMarket(
         watched,
@@ -27341,6 +27401,12 @@ async function marketData(
     sinceLastFreshRequest <
       DEXSCREENER_MIN_FRESH_INTERVAL_MS
   ) {
+    setAthFollowUpStatusV296(service, {
+      status: "BLOCKED_DEXSCREENER_FRESH_GUARD",
+      attempted: false,
+      retryAfterMs: Math.max(0, DEXSCREENER_MIN_FRESH_INTERVAL_MS - sinceLastFreshRequest)
+    });
+
     const stale =
       cachedMarket(
         watched,
@@ -27403,6 +27469,13 @@ async function marketData(
       .eligible !==
       true
   ) {
+    setAthFollowUpStatusV296(service, {
+      status: "BLOCKED_RECOVERY_STAGGER",
+      attempted: false,
+      recoveryReason: dexRecoveryV157?.reason || null,
+      recoveryEligibleAt: dexRecoveryV157?.eligibleAt || null
+    });
+
     const originalV157 = {
       verified:
         false,
@@ -27440,6 +27513,11 @@ async function marketData(
     budget.analysis.dexFreshUsed >=
     DEXSCREENER_MAX_FRESH_PER_SCAN
   ) {
+    setAthFollowUpStatusV296(service, {
+      status: "BLOCKED_SCAN_FRESH_LIMIT",
+      attempted: false
+    });
+
     const stale =
       cachedMarket(
         watched,
@@ -27477,6 +27555,11 @@ async function marketData(
       "DEXSCREENER"
     )
   ) {
+    setAthFollowUpStatusV296(service, {
+      status: "BLOCKED_ANALYSIS_BUDGET",
+      attempted: false
+    });
+
     return {
       verified:
         false,
@@ -27518,6 +27601,16 @@ async function marketData(
         state,
         token
       );
+
+    setAthFollowUpStatusV296(service, {
+      status: "REQUESTING",
+      attempted: true,
+      targetToken: normalize(token),
+      requestedAddresses: v295BatchAddresses.length,
+      observed: 0,
+      athUpdated: 0,
+      httpStatus: null
+    });
 
     const response =
       await fetch(
@@ -27644,6 +27737,22 @@ async function marketData(
         allPairsV295,
         token
       );
+
+    const athFollowUpCompletedAtV297 = Date.now();
+
+    setAthFollowUpStatusV296(service, {
+      status: "HTTP_200_BATCH_PROCESSED",
+      attempted: true,
+      requestedAddresses: v295BatchAddresses.length,
+      returnedPairs: allPairsV295.length,
+      observed: safeNumber(performanceBatchV295?.observed),
+      athUpdated: safeNumber(performanceBatchV295?.athUpdated),
+      httpStatus: response.status,
+      lastSuccessfulCheckAt: athFollowUpCompletedAtV297,
+      ...(safeNumber(performanceBatchV295?.athUpdated) > 0
+        ? { lastAthUpdatedAt: athFollowUpCompletedAtV297 }
+        : {})
+    });
 
     const pairs =
       allPairsV295.filter(
@@ -55745,7 +55854,9 @@ for (
       scoringUnchanged: true,
       qualificationUnchanged: true,
       momentumUnchanged: true,
-      telegramThresholdsUnchanged: true
+      telegramThresholdsUnchanged: true,
+      athFollowUpV296:
+        state?.services?.dexscreener?.athFollowUpV296 || null
     },
 
     followUpTrackingV267: {
@@ -63502,6 +63613,28 @@ function callsListMessageV271(
   return lines.join("\n");
 }
 
+function athTimestampTextV297(timestamp) {
+  const ms = Number(timestamp);
+  if (!Number.isFinite(ms) || ms <= 0) return "NEVER";
+
+  let clock = null;
+  try {
+    clock = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/London",
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }).format(new Date(ms));
+  } catch {
+    clock = new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  }
+
+  const age = formatAgeV223(Math.max(0, Date.now() - ms));
+  return `${clock} — ${age} ago`;
+}
+
 function bestCallsMessageV271(
   state
 ) {
@@ -63539,8 +63672,17 @@ function bestCallsMessageV271(
     );
   }
 
+  const followUpV296 =
+    state?.services?.dexscreener?.athFollowUpV296 || null;
+
   const lines = [
     "🏆 <b>Best Calls by Verified ATH MC Multiple</b>",
+    "",
+    followUpV296
+      ? `🔄 ATH follow-up: <b>${escapeHtml(followUpV296.status || "UNVERIFIED")}</b> | requested ${safeNumber(followUpV296.requestedAddresses)} | observed ${safeNumber(followUpV296.observed)} | ATH updated ${safeNumber(followUpV296.athUpdated)}`
+      : "🔄 ATH follow-up: <b>NO V297 BATCH RESULT YET</b>",
+    `🕒 Last successful ATH check: <b>${escapeHtml(athTimestampTextV297(followUpV296?.lastSuccessfulCheckAt))}</b>`,
+    `📈 Last verified ATH update: <b>${escapeHtml(athTimestampTextV297(followUpV296?.lastAthUpdatedAt))}</b>`,
     ""
   ];
 
