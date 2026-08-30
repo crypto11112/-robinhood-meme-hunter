@@ -1,7 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V371
- * AUTHORITATIVE RUNTIME VERSION: V371
- * V371 builds from the confirmed V370 collector and corrects the newHeads integrity model: skipped head numbers are recorded as notification gaps, not automatically treated as missing V3 Swap logs. A separate V371 integrity epoch is protected by dual-subscription acceptance plus a 30-second newHeads liveness watchdog. Socket/subscription failure or a genuinely stale head stream resets coverage. Existing bindings, Durable Object trade storage, zero per-swap Workers KV writes, and unchanged scoring are preserved.
+ * Robinhood Chain Meme Hunter — V372
+ * AUTHORITATIVE RUNTIME VERSION: V372
+ * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Robinhood Chain Meme Hunter
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V371";
+const VERSION = "V372";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -62707,9 +62707,10 @@ function telegramAnalyseResultMessageV276(
     `🐋 Concentration: <b>${escapeHtml(concentration)}</b>`,
     "",
     `🐋 Whale Flow: <b>${escapeHtml(candidate?.whaleFlow?.flow || "UNVERIFIED")}</b>`,
-    `📥 Accumulation: <b>${escapeHtml(candidate?.whaleFlow?.accumulation || "NOT_OBSERVED")}</b>`,
-    `📤 Distribution: <b>${escapeHtml(candidate?.whaleFlow?.distribution || "NOT_OBSERVED")}</b>`,
+    `📥 Accumulation: <b>${escapeHtml(candidate?.verifiedAccumulationDistributionV372?.accumulation || "NOT_VERIFIED")}</b>`,
+    `📤 Distribution: <b>${escapeHtml(candidate?.verifiedAccumulationDistributionV372?.distribution || "NOT_VERIFIED")}</b>`,
     `📊 Concentration Trend: <b>${escapeHtml(candidate?.whaleFlow?.concentrationTrend || "NOT_VERIFIED")}</b>`,
+    `🔗 Flow verification V372: <b>${escapeHtml(candidate?.verifiedAccumulationDistributionV372?.status || "UNVERIFIED")}</b> | wallet <b>${escapeHtml(candidate?.verifiedAccumulationDistributionV372?.walletDirection || "UNVERIFIED")}</b> | FULL V3 window <b>${escapeHtml(candidate?.verifiedAccumulationDistributionV372?.marketWindow || "NONE")}</b> | market <b>${escapeHtml(candidate?.verifiedAccumulationDistributionV372?.marketDirection || "UNVERIFIED")}</b>`,
     "",
     `🧠 Smart-money candidate: <b>${escapeHtml(smartMoneyCandidateV286)}</b>`,
     "🧠 Smart-money identity verified: <b>NO</b>",
@@ -64640,8 +64641,12 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     evidence.push(`🧱 V371 head-liveness guard: <b>${liveV3V365?.headSubscriptionAccepted===true ? "ACTIVE" : "UNVERIFIED"}</b> | heads <b>${safeNumber(liveV3V365?.headsObserved)}</b> | head notification gaps <b>${safeNumber(liveV3V365?.headGapsDetected)}</b>${Number.isFinite(Number(liveV3V365?.lastHeadBlock)) ? ` | head <b>${safeNumber(liveV3V365.lastHeadBlock)}</b>` : ""}`);
     const coverageGateV367 = candidate?.liveV3CoverageEvidenceV367 || null;
     const completeV367 = Array.isArray(coverageGateV367?.completeWindows) ? coverageGateV367.completeWindows : [];
-    evidence.push(`🛡 Integrity coverage gate V369: <b>${completeV367.length ? completeV367.join(", ") : "NO FULL WINDOWS YET"}</b> eligible as integrity-complete evidence`);
+    evidence.push(`🛡 Integrity coverage gate V372: <b>${completeV367.length ? completeV367.join(", ") : "NO FULL WINDOWS YET"}</b> eligible as integrity-complete evidence`);
     evidence.push(`🧠 Scoring safety: <b>PARTIAL WINDOWS EXCLUDED</b> | live-flow score mutation <b>OFF</b>`);
+    const flowVerifyV372 = candidate?.verifiedAccumulationDistributionV372 || null;
+    if (flowVerifyV372) {
+      evidence.push(`🐋 V372 accumulation/distribution proof: <b>${escapeHtml(flowVerifyV372.status || "UNVERIFIED")}</b> | tracked whales <b>${safeNumber(flowVerifyV372.trackedWallets)}</b> | wallet <b>${escapeHtml(flowVerifyV372.walletDirection || "UNVERIFIED")}</b> | market <b>${escapeHtml(flowVerifyV372.marketDirection || "UNVERIFIED")}</b>`);
+    }
     const liveWindows = liveV3V365.windows || {};
     for (const label of ["5m", "15m", "1h", "6h", "24h"]) {
       const row = liveWindows?.[label] || {};
@@ -65142,7 +65147,7 @@ async function telegramFreshAnalyseV276(
   };
   for (const label of liveDefsV367) {
     const row = liveV3WindowsV365?.windows?.[label] || null;
-    const full = row?.fullCoverage === true && row?.coverage === "FULL_CONTINUOUS_V366";
+    const full = row?.fullCoverage === true && ["FULL_INTEGRITY_V371", "FULL_CONTINUOUS_V366"].includes(row?.coverage);
     const qualified = full && liveV3WindowsV365?.coverageActive === true;
     liveCoverageEvidenceV367.windows[label] = {
       complete: qualified,
@@ -65161,6 +65166,78 @@ async function telegramFreshAnalyseV276(
   liveCoverageEvidenceV367.bestCompleteWindow =
     [...liveCoverageEvidenceV367.completeWindows].reverse()[0] || null;
   candidate.liveV3CoverageEvidenceV367 = liveCoverageEvidenceV367;
+
+  /* V372: verified accumulation/distribution corroboration layer.
+   * This is deliberately read-only and does not mutate opportunity, momentum,
+   * risk, confidence, thresholds, watchlists or persistence. A strong label
+   * requires BOTH (a) comparable tracked-whale wallet balance history and
+   * (b) an integrity-complete live V3 USD window pointing the same way.
+   * A FULL window with no trades is valid coverage but insufficient flow
+   * evidence, so the result remains BUILDING/UNVERIFIED rather than guessed. */
+  const whaleV372 = candidate?.whaleFlow || {};
+  const fullOrderV372 = ["24h", "6h", "1h", "15m", "5m"];
+  const selectedWindowV372 = fullOrderV372.find(label =>
+    liveCoverageEvidenceV367?.windows?.[label]?.scoringEligible === true
+  ) || null;
+  const marketRowV372 = selectedWindowV372
+    ? liveV3WindowsV365?.windows?.[selectedWindowV372] || null
+    : null;
+  const marketTradesV372 = safeNumber(marketRowV372?.trades);
+  const marketUsdVerifiedV372 = safeNumber(marketRowV372?.usdVerifiedTrades);
+  const marketUsdCompleteV372 =
+    Boolean(selectedWindowV372) &&
+    marketTradesV372 > 0 &&
+    marketUsdVerifiedV372 === marketTradesV372;
+  const marketNetUsdV372 = marketUsdCompleteV372 ? safeNumber(marketRowV372?.netUsd) : null;
+  const marketPressureV372 = marketUsdCompleteV372 && Number.isFinite(Number(marketRowV372?.buyPressurePct))
+    ? Number(marketRowV372.buyPressurePct)
+    : null;
+  const marketDirectionV372 = !marketUsdCompleteV372
+    ? "UNVERIFIED"
+    : marketNetUsdV372 > 0 && marketPressureV372 !== null && marketPressureV372 >= 55
+      ? "NET_BUYING"
+      : marketNetUsdV372 < 0 && marketPressureV372 !== null && marketPressureV372 <= 45
+        ? "NET_SELLING"
+        : "MIXED";
+  const trackedWalletsV372 = safeNumber(whaleV372?.trackedWallets);
+  const walletDirectionV372 = whaleV372?.verified === true && trackedWalletsV372 >= 2
+    ? (whaleV372?.flow === "NET_ACCUMULATION" ? "NET_ACCUMULATION"
+      : whaleV372?.flow === "NET_DISTRIBUTION" ? "NET_DISTRIBUTION"
+      : "MIXED")
+    : "UNVERIFIED";
+  const accumulationVerifiedV372 =
+    walletDirectionV372 === "NET_ACCUMULATION" && marketDirectionV372 === "NET_BUYING";
+  const distributionVerifiedV372 =
+    walletDirectionV372 === "NET_DISTRIBUTION" && marketDirectionV372 === "NET_SELLING";
+  const conflictingV372 =
+    (walletDirectionV372 === "NET_ACCUMULATION" && marketDirectionV372 === "NET_SELLING") ||
+    (walletDirectionV372 === "NET_DISTRIBUTION" && marketDirectionV372 === "NET_BUYING");
+  candidate.verifiedAccumulationDistributionV372 = {
+    status: accumulationVerifiedV372
+      ? "VERIFIED_ACCUMULATION_V372"
+      : distributionVerifiedV372
+        ? "VERIFIED_DISTRIBUTION_V372"
+        : conflictingV372
+          ? "MIXED_CONFLICTING_EVIDENCE_V372"
+          : "BUILDING_VERIFICATION_V372",
+    verified: accumulationVerifiedV372 || distributionVerifiedV372,
+    accumulation: accumulationVerifiedV372 ? "VERIFIED" : "NOT_VERIFIED",
+    distribution: distributionVerifiedV372 ? "VERIFIED" : "NOT_VERIFIED",
+    walletDirection: walletDirectionV372,
+    trackedWallets: trackedWalletsV372,
+    increasingWallets: safeNumber(whaleV372?.increasingWallets),
+    decreasingWallets: safeNumber(whaleV372?.decreasingWallets),
+    marketWindow: selectedWindowV372,
+    marketDirection: marketDirectionV372,
+    marketTrades: marketTradesV372,
+    marketUsdVerifiedTrades: marketUsdVerifiedV372,
+    marketNetUsd: marketNetUsdV372,
+    marketBuyPressurePct: marketPressureV372,
+    concentrationTrend: whaleV372?.concentrationTrend || "NOT_VERIFIED",
+    scoringMutationApplied: false,
+    externalRequestsAdded: 0,
+    workersKvWritesAdded: 0
+  };
 
   const telemetry = {
     status:
