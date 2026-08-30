@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V378
- * AUTHORITATIVE RUNTIME VERSION: V378
+ * Robinhood Chain Meme Hunter — V379
+ * AUTHORITATIVE RUNTIME VERSION: V379
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V378";
+const VERSION = "V379";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -69587,6 +69587,239 @@ async function handleRequest(
 
 
 
+
+  if (path === "/v3multipool-diagnostic") {
+    const token = normalize(url.searchParams.get("token") || "");
+    const requestedMaxTx = Number(url.searchParams.get("maxTx") || 12);
+    const maxTx = Math.max(1, Math.min(20, Number.isFinite(requestedMaxTx) ? Math.floor(requestedMaxTx) : 12));
+
+    if (!isAddress(token)) {
+      return jsonResponse({
+        version: VERSION,
+        diagnostic: "V3_CANDIDATE_MULTI_POOL_DISCOVERY_V379",
+        safe: true,
+        readOnly: true,
+        status: "INVALID_TOKEN_V379"
+      }, 400);
+    }
+
+    if (!env?.V3_LIVE_COLLECTOR) {
+      return jsonResponse({
+        version: VERSION,
+        diagnostic: "V3_CANDIDATE_MULTI_POOL_DISCOVERY_V379",
+        safe: true,
+        readOnly: true,
+        status: "V3_LIVE_COLLECTOR_BINDING_UNAVAILABLE_V379"
+      }, 503);
+    }
+
+    const cfg = await v3LiveCollectorConfigV363(env, token);
+    const monitoredPair = cfg?.ok && isAddress(cfg?.pair) ? normalize(cfg.pair) : null;
+    const alchemyUrl = v356AlchemyUrl(env);
+
+    if (!alchemyUrl) {
+      return jsonResponse({
+        version: VERSION,
+        diagnostic: "V3_CANDIDATE_MULTI_POOL_DISCOVERY_V379",
+        safe: true,
+        readOnly: true,
+        token,
+        monitoredPair,
+        status: "ALCHEMY_NOT_CONFIGURED_V379"
+      }, 503);
+    }
+
+    const id = env.V3_LIVE_COLLECTOR.idFromName(token);
+    const stub = env.V3_LIVE_COLLECTOR.get(id);
+
+    // Read retained raw rows through the proven V378 audit path.
+    let rawAudit;
+    try {
+      const r = await stub.fetch(
+        "https://v3-live.internal/aggregation-audit-v378?now=" + Date.now()
+      );
+      rawAudit = await r.json();
+    } catch (e) {
+      return jsonResponse({
+        version: VERSION,
+        diagnostic: "V3_CANDIDATE_MULTI_POOL_DISCOVERY_V379",
+        safe: true,
+        readOnly: true,
+        token,
+        monitoredPair,
+        status: "LIVE_STORAGE_READ_FAILED_V379",
+        error: String(e?.message || e || "UNKNOWN_ERROR"),
+        timestamp: now()
+      }, 502);
+    }
+
+    // The V378 endpoint intentionally returns aggregates, not raw rows.
+    // Pull a bounded set of exact known transaction hashes from retained buckets
+    // using a new read-only DO endpoint below.
+    let sample;
+    try {
+      const r = await stub.fetch(
+        "https://v3-live.internal/recent-tx-sample-v379?maxTx=" + maxTx
+      );
+      sample = await r.json();
+    } catch (e) {
+      return jsonResponse({
+        version: VERSION,
+        diagnostic: "V3_CANDIDATE_MULTI_POOL_DISCOVERY_V379",
+        safe: true,
+        readOnly: true,
+        token,
+        monitoredPair,
+        status: "RECENT_TX_SAMPLE_FAILED_V379",
+        error: String(e?.message || e || "UNKNOWN_ERROR"),
+        timestamp: now()
+      }, 502);
+    }
+
+    const txHashes = Array.isArray(sample?.txHashes) ? sample.txHashes : [];
+    const pools = new Map();
+    const transactions = [];
+    let receiptRequests = 0;
+    let metadataRequests = 0;
+
+    for (const txHash of txHashes) {
+      receiptRequests++;
+      const receiptCall = await v356RawAlchemyRpc(
+        alchemyUrl,
+        "eth_getTransactionReceipt",
+        [txHash],
+        6000
+      );
+
+      if (!receiptCall?.ok || !receiptCall?.result) {
+        transactions.push({
+          txHash,
+          receiptFound: false,
+          candidatePools: [],
+          error: receiptCall?.error || "RECEIPT_UNAVAILABLE"
+        });
+        continue;
+      }
+
+      const logs = Array.isArray(receiptCall.result.logs) ? receiptCall.result.logs : [];
+      const swapLogs = logs.filter(log =>
+        String(log?.topics?.[0] || "").toLowerCase() === UNISWAP_V3_SWAP_TOPIC_V326
+      );
+
+      const candidatePools = [];
+
+      for (const log of swapLogs) {
+        const pool = normalize(log?.address || "");
+        if (!isAddress(pool)) continue;
+
+        let meta = pools.get(pool);
+        if (!meta) {
+          // Four bounded metadata calls, cached per unique pool during this diagnostic.
+          const [t0r, t1r, feeR, factoryR] = await Promise.all([
+            v375EthCallRaw(alchemyUrl, pool, UNISWAP_V3_TOKEN0_SELECTOR_V326),
+            v375EthCallRaw(alchemyUrl, pool, UNISWAP_V3_TOKEN1_SELECTOR_V326),
+            v375EthCallRaw(alchemyUrl, pool, UNISWAP_V3_FEE_SELECTOR_V328),
+            v375EthCallRaw(alchemyUrl, pool, UNISWAP_V3_FACTORY_SELECTOR_V375)
+          ]);
+          metadataRequests += 4;
+
+          const token0 = t0r?.ok ? decodeEthCallAddressV326(t0r.result) : null;
+          const token1 = t1r?.ok ? decodeEthCallAddressV326(t1r.result) : null;
+          const fee = feeR?.ok ? decodeUintWordV375(feeR.result) : null;
+          const factory = factoryR?.ok ? decodeEthCallAddressV326(factoryR.result) : null;
+
+          meta = {
+            pool,
+            token0,
+            token1,
+            fee,
+            factory,
+            factoryVerified: factory === UNISWAP_V3_FACTORY_V326,
+            candidateInPool: token0 === token || token1 === token,
+            quoteToken: token0 === token ? token1 : token1 === token ? token0 : null,
+            isMonitoredPair: monitoredPair === pool,
+            observedSwapLogs: 0,
+            observedTransactions: new Set()
+          };
+          pools.set(pool, meta);
+        }
+
+        meta.observedSwapLogs++;
+        meta.observedTransactions.add(txHash);
+
+        if (meta.candidateInPool && meta.factoryVerified) {
+          candidatePools.push(pool);
+        }
+      }
+
+      transactions.push({
+        txHash,
+        receiptFound: true,
+        blockNumber: rpcBlockNumberV331(receiptCall.result?.blockNumber),
+        v3SwapLogs: swapLogs.length,
+        candidatePools: [...new Set(candidatePools)]
+      });
+    }
+
+    const discoveredPools = [...pools.values()]
+      .filter(p => p.candidateInPool && p.factoryVerified)
+      .map(p => ({
+        pool: p.pool,
+        token0: p.token0,
+        token1: p.token1,
+        fee: p.fee,
+        factory: p.factory,
+        factoryVerified: p.factoryVerified,
+        quoteToken: p.quoteToken,
+        quoteSymbol:
+          p.quoteToken === CANONICAL_WETH_V179 ? "WETH" :
+          p.quoteToken === CANONICAL_USDG_V179 ? "USDG" :
+          null,
+        isMonitoredPair: p.isMonitoredPair,
+        observedSwapLogs: p.observedSwapLogs,
+        observedTransactions: p.observedTransactions.size
+      }))
+      .sort((a, b) =>
+        Number(b.isMonitoredPair) - Number(a.isMonitoredPair) ||
+        b.observedSwapLogs - a.observedSwapLogs
+      );
+
+    const additionalPools = discoveredPools.filter(p => !p.isMonitoredPair);
+
+    return jsonResponse({
+      version: VERSION,
+      diagnostic: "V3_CANDIDATE_MULTI_POOL_DISCOVERY_V379",
+      safe: true,
+      readOnly: true,
+      workersKvWrites: 0,
+      durableObjectTradeWrites: 0,
+      scoringMutated: false,
+      collectorMutated: false,
+      token,
+      monitoredPair,
+      sampleSource: "RETAINED_LIVE_TRANSACTION_RECEIPTS_V379",
+      sampleLimit: maxTx,
+      sampledTransactions: txHashes.length,
+      receiptRequests,
+      metadataRequests,
+      totalDiagnosticRpcRequests: receiptRequests + metadataRequests,
+      discoveredVerifiedCandidatePools: discoveredPools.length,
+      additionalVerifiedCandidatePools: additionalPools.length,
+      pools: discoveredPools,
+      transactions,
+      coverageNote: "OBSERVED_ROUTE_DISCOVERY_ONLY_NOT_EXHAUSTIVE_FACTORY_ENUMERATION_V379",
+      status: additionalPools.length > 0
+        ? "ADDITIONAL_VERIFIED_V3_POOLS_DISCOVERED_V379"
+        : discoveredPools.length > 0
+          ? "ONLY_MONITORED_VERIFIED_V3_POOL_OBSERVED_V379"
+          : "NO_VERIFIED_CANDIDATE_V3_POOL_OBSERVED_IN_SAMPLE_V379",
+      interpretation: additionalPools.length > 0
+        ? "One or more additional factory-verified Uniswap V3 pools containing the candidate token were observed in retained live transaction routes. This is discovery evidence only; no subscriptions or scoring were changed."
+        : "No additional candidate V3 pool was observed in this bounded retained-transaction sample. This does not prove no other pools exist.",
+      timestamp: now()
+    });
+  }
+
   if (path === "/v3aggregation-diagnostic") {
     const token = normalize(url.searchParams.get("token") || "");
     if (!isAddress(token)) {
@@ -70440,6 +70673,55 @@ export class V3LiveCollectorV363 {
     }
     if (url.pathname === "/status") return Response.json(await this.status());
     
+
+
+    // V379 — bounded recent unique transaction sample from retained live buckets.
+    // Read-only and intentionally capped to protect provider usage.
+    if (url.pathname === "/recent-tx-sample-v379") {
+      const requested = Number(url.searchParams.get("maxTx") || 12);
+      const maxTx = Math.max(1, Math.min(20, Number.isFinite(requested) ? Math.floor(requested) : 12));
+      const nowMs = Date.now();
+      const bucketMs = 5 * 60 * 1000;
+      const retentionMs = 25 * 60 * 60 * 1000;
+      const oldestBucket = Math.floor((nowMs - retentionMs) / bucketMs) * bucketMs;
+      const newestBucket = Math.floor(nowMs / bucketMs) * bucketMs;
+
+      const rows = [];
+      let bucketsChecked = 0;
+      for (let bucket = newestBucket; bucket >= oldestBucket && rows.length < maxTx * 4; bucket -= bucketMs) {
+        bucketsChecked++;
+        const bucketRows = await this.state.storage.get(`v364:trade-bucket:${bucket}`);
+        if (!Array.isArray(bucketRows) || bucketRows.length === 0) continue;
+        for (let i = bucketRows.length - 1; i >= 0; i--) {
+          rows.push(bucketRows[i]);
+          if (rows.length >= maxTx * 4) break;
+        }
+      }
+
+      const seen = new Set();
+      const txHashes = [];
+      for (const row of rows) {
+        const tx = String(row?.transactionHash || row?.txHash || row?.hash || "").toLowerCase();
+        if (!/^0x[a-f0-9]{64}$/.test(tx) || seen.has(tx)) continue;
+        seen.add(tx);
+        txHashes.push(tx);
+        if (txHashes.length >= maxTx) break;
+      }
+
+      return jsonResponse({
+        version: VERSION,
+        diagnostic: "RECENT_RETAINED_LIVE_TX_SAMPLE_V379",
+        safe: true,
+        readOnly: true,
+        workersKvWrites: 0,
+        durableObjectTradeWrites: 0,
+        maxTx,
+        bucketsChecked,
+        txHashes,
+        status: "RECENT_TX_SAMPLE_READY_V379",
+        timestamp: now()
+      });
+    }
 
     // V378 — raw retained-trade vs rolling-window aggregation audit.
     // Recomputes windows independently from the existing V364 trade buckets,
