@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V338: Step 3B historical USD valuation layer. Reuses the already-verified canonical WETH/USDG reference path, prices quote-ready V3 swaps at their exact swap block via historical slot0(), persists only independently verified USD values, and exposes rolling verified USD flow with PARTIAL-COVERAGE truthfulness.
+ * V339: Step 3B WETH/USDG reference recovery fix. Preserves V338 and independently reuses the already verified/cached canonical WETH/USDG V3 identity for quote-ready native-V3 rows; if the ordinary manual recovery path did not request that reference, V339 performs the existing strict V291 on-chain resolver before historical slot0 valuation. No inferred USD values.
  * V337: Step 3A verification layer. Preserves V336/V334 behavior and adds zero-request visibility for exact quote-side amounts already persisted on newly captured V3 swaps. Reports quote-ready ledger coverage (WETH/USDG) without converting historical swaps to USD or guessing missing quote evidence.
  * V336: Step 3A safe repair: preserves V334 command/reply path unchanged and adds only exact quote-side amount persistence to newly captured V3 swap records. No extra provider calls, no new Telegram formatter dependency, no historical USD guessing.
  * V331: Persistent native V3 swap-evidence ledger + dynamic exact-pool sweep. Reuses V330 verified pair identity, scans bounded 10-block chunks within remaining manual budget, deduplicates exact tx/log evidence in KV, and explicitly reports coverage gaps. No complete timeframe claim is made from ingestion timestamps.
@@ -1448,7 +1448,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V338";
+const VERSION = "V339";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -67825,13 +67825,52 @@ async function enrichNativeV3HistoricalUsdV338(env,budget,state,candidate,recove
   }
 
   const wethRows=pending.filter(row=>normalize(row?.quoteTokenAddress)===CANONICAL_WETH_V179);
-  const ref=recoveryV289?.wethReferenceV289||null;
-  const resolver=ref?.resolverV291||ref?.directV290||null;
-  const referencePool=normalize(ref?.v3PoolAddress||resolver?.poolAddress);
-  const token0=normalize(resolver?.token0||state?.v3WethUsdGReferenceV195?.token0);
-  const token1=normalize(resolver?.token1||state?.v3WethUsdGReferenceV195?.token1);
-  const referenceVerified=ref?.verified===true && isAddress(referencePool) &&
-    ((token0===CANONICAL_WETH_V179&&token1===CANONICAL_USDG_V179)||(token0===CANONICAL_USDG_V179&&token1===CANONICAL_WETH_V179));
+  let ref=recoveryV289?.wethReferenceV289||null;
+  let resolver=ref?.resolverV291||ref?.directV290||null;
+
+  /* V339: V338 depended on manualVerifiedUsdRecoveryV289 having needed a
+     WETH reference for the candidate's older provider path. A native-V3 ledger
+     row can independently be WETH-quoted even when that older path did not ask
+     for WETH/USDG, leaving a valid quote-ready row stranded as UNVERIFIED.
+
+     First reuse the strict V291-verified in-memory/cache identity when present.
+     If it is absent, invoke the existing V291 resolver itself. This resolver
+     cryptographically checks factory(), token0(), token1(), fee(), slot0() and
+     liquidity(); a documented address alone is never trusted. */
+  let cachedRef=state?.v3WethUsdGReferenceV195||null;
+  const cachedPool=normalize(cachedRef?.poolAddress);
+  const cachedToken0=normalize(cachedRef?.token0);
+  const cachedToken1=normalize(cachedRef?.token1);
+  const cachedIdentityVerified=
+    cachedRef?.verifiedByV291===true && isAddress(cachedPool) &&
+    ((cachedToken0===CANONICAL_WETH_V179&&cachedToken1===CANONICAL_USDG_V179)||
+     (cachedToken0===CANONICAL_USDG_V179&&cachedToken1===CANONICAL_WETH_V179));
+
+  let referencePool=normalize(ref?.v3PoolAddress||resolver?.poolAddress||(cachedIdentityVerified?cachedPool:null));
+  let token0=normalize(resolver?.token0||(cachedIdentityVerified?cachedToken0:null));
+  let token1=normalize(resolver?.token1||(cachedIdentityVerified?cachedToken1:null));
+  let referenceVerified=(
+    (ref?.verified===true || cachedIdentityVerified) && isAddress(referencePool) &&
+    ((token0===CANONICAL_WETH_V179&&token1===CANONICAL_USDG_V179)||
+     (token0===CANONICAL_USDG_V179&&token1===CANONICAL_WETH_V179))
+  );
+
+  let v339Resolver=null;
+  if(wethRows.length && !referenceVerified && budgetAvailable(budget,"analysis")){
+    v339Resolver=await manualResolveV3WethUsdGReferenceV291(env,state,budget);
+    if(v339Resolver?.verified===true){
+      resolver=v339Resolver;
+      referencePool=normalize(v339Resolver?.poolAddress);
+      token0=normalize(v339Resolver?.token0);
+      token1=normalize(v339Resolver?.token1);
+      referenceVerified=isAddress(referencePool) &&
+        ((token0===CANONICAL_WETH_V179&&token1===CANONICAL_USDG_V179)||
+         (token0===CANONICAL_USDG_V179&&token1===CANONICAL_WETH_V179));
+      if(referenceVerified){
+        ref={...(ref||{}),attempted:true,verified:true,status:v339Resolver?.status||"VERIFIED_DIRECT_ONCHAIN_WETH_USDG_POOL_V291",source:v339Resolver?.source||"UNISWAP_V3_WETH_USDG_DIRECT_RESOLVER_V291",priceUsdGPerWeth:v339Resolver?.priceUsdGPerWeth,v3PoolAddress:referencePool,resolverV291:v339Resolver,directV290:v339Resolver};
+      }
+    }
+  }
 
   let wethValued=0;
   if(wethRows.length && referenceVerified){
@@ -67857,7 +67896,7 @@ async function enrichNativeV3HistoricalUsdV338(env,budget,state,candidate,recove
   const after=await loadNativeV3SwapLedgerV331(env,token,pair);
   const rolling=nativeV3RollingWindowsV334(after?.records,Date.now());
   if(candidate?.nativeV3DirectionalV326){
-    candidate.nativeV3DirectionalV326={...candidate.nativeV3DirectionalV326,rollingV334:rolling,historicalUsdV338:{attempted:true,verified:upgrades.length>0,status:upgrades.length?"HISTORICAL_USD_ROWS_VERIFIED_V338":(wethRows.length&&!referenceVerified?"WETH_USDG_REFERENCE_UNAVAILABLE_V338":"NO_USD_ROWS_VERIFIED_V338"),eligible:pending.length,valued:upgrades.length,wethValued,usdgValued:upgrades.length-wethValued,requestsUsed:Math.max(0,safeNumber(budget?.totalUsed)-before),referenceStatus:ref?.status||null,referencePool:referenceVerified?referencePool:null}};
+    candidate.nativeV3DirectionalV326={...candidate.nativeV3DirectionalV326,rollingV334:rolling,historicalUsdV338:{attempted:true,verified:upgrades.length>0,status:upgrades.length?"HISTORICAL_USD_ROWS_VERIFIED_V339":(wethRows.length&&!referenceVerified?"WETH_USDG_REFERENCE_UNAVAILABLE_V339":"NO_USD_ROWS_VERIFIED_V339"),eligible:pending.length,valued:upgrades.length,wethValued,usdgValued:upgrades.length-wethValued,requestsUsed:Math.max(0,safeNumber(budget?.totalUsed)-before),referenceStatus:ref?.status||v339Resolver?.status||null,referencePool:referenceVerified?referencePool:null,resolverRecoveryV339:v339Resolver?{attempted:v339Resolver?.attempted===true,verified:v339Resolver?.verified===true,status:v339Resolver?.status||null,poolAddress:v339Resolver?.poolAddress||null,fee:v339Resolver?.fee??null,requestsUsed:safeNumber(v339Resolver?.requestsUsed)}:null}};
   }
   return candidate?.nativeV3DirectionalV326?.historicalUsdV338||{...base,attempted:true,status:"V338_ATTACH_FAILED",eligible:pending.length,valued:upgrades.length,requestsUsed:Math.max(0,safeNumber(budget?.totalUsed)-before)};
 }
