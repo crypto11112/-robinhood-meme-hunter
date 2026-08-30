@@ -1,8 +1,8 @@
 /**
- * Robinhood Chain Meme Hunter — V361
- * AUTHORITATIVE RUNTIME VERSION: V361
- * V361 preserves V359/V358/V355 confirmed functionality and adds the read-only Alchemy Robinhood WebSocket V3 Swap subscription capability diagnostic.
- * No scanner, pricing, scoring, Telegram, collector, or KV persistence behavior is changed by the V361 diagnostic.
+ * Robinhood Chain Meme Hunter — V362
+ * AUTHORITATIVE RUNTIME VERSION: V362
+ * V362 preserves V361 confirmed functionality and repairs only the WebSocket diagnostic pair-cache reader wiring. No scanner, pricing, scoring, Telegram, collector, or KV persistence behavior is changed.
+ * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Robinhood Chain Meme Hunter
  * V351: HTTP-ONLY USD aggregation diagnostic built from confirmed-safe V348. /analyse, Telegram routing, scheduled scan, collector, scoring and persistence paths are unchanged. Adds only GET /v3usd-diagnostic?token=0xADDRESS to aggregate already-persisted V347 USD evidence with KV reads only and zero writes/external requests.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V361";
+const VERSION = "V362";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -68592,8 +68592,8 @@ async function v3AlchemyWebSocketDiagnosticV360(env, tokenInput) {
   }
 
   try {
-    const pairCache = await readV3PairCacheV329(env, token);
-    const pair = normalize(pairCache?.pair || pairCache?.pool || "");
+    const pairCache = await loadVerifiedV3PairIdentityV329(env, token);
+    const pair = normalize(pairCache?.record?.pairAddress || "");
     out.pairStatus = pairCache?.status || null;
 
     if (!/^0x[a-f0-9]{40}$/.test(pair)) {
