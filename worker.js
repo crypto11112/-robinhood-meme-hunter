@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V386
- * AUTHORITATIVE RUNTIME VERSION: V386
+ * Robinhood Chain Meme Hunter — V387
+ * AUTHORITATIVE RUNTIME VERSION: V387
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V386";
+const VERSION = "V387";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -69796,6 +69796,28 @@ async function handleRequest(
         b.observedSwapLogs - a.observedSwapLogs
       );
 
+    // V387: verified multi-pool registry PREVIEW only.
+    // No persistence yet: validate schema/evidence before introducing KV writes.
+    const verifiedMultiPoolRegistryPreviewV387 = discoveredPools.map(p => ({
+      pool: normalize(p.pool || ""),
+      token0: normalize(p.token0 || ""),
+      token1: normalize(p.token1 || ""),
+      quoteToken: normalize(p.quoteToken || ""),
+      quoteSymbol: p.quoteSymbol || "UNVERIFIED",
+      fee: p.fee ?? null,
+      factory: normalize(p.factory || ""),
+      factoryVerified: p.factoryVerified === true,
+      candidateToken: token,
+      isMonitoredPair: !!p.isMonitoredPair,
+      observedSwapLogs: Number(p.observedSwapLogs || 0),
+      observedTransactions: Number(p.observedTransactions || 0),
+      registryStatus: "VERIFIED_OBSERVED_POOL_V387"
+    })).filter(p =>
+      isAddress(p.pool) &&
+      p.factoryVerified === true &&
+      (p.token0 === token || p.token1 === token)
+    );
+
     const additionalPools = discoveredPools.filter(p => !p.isMonitoredPair);
 
     return jsonResponse({
@@ -69817,6 +69839,21 @@ async function handleRequest(
       totalDiagnosticRpcRequests: receiptRequests + metadataRequests,
       discoveredVerifiedCandidatePools: discoveredPools.length,
       additionalVerifiedCandidatePools: additionalPools.length,
+      verifiedMultiPoolRegistryPreviewV387,
+      registryPreviewV387: {
+        enabled: true,
+        readOnly: true,
+        persistent: false,
+        schemaVersion: "V387",
+        eligiblePools: verifiedMultiPoolRegistryPreviewV387.length,
+        factoryVerifiedOnly: true,
+        candidatePoolsOnly: true,
+        workersKvWrites: 0,
+        durableObjectWrites: 0,
+        scoringMutated: false,
+        collectorMutated: false,
+        persistenceDeferredUntilValidated: true
+      },
       pools: discoveredPools,
       transactions,
       coverageNote: "OBSERVED_ROUTE_DISCOVERY_ONLY_NOT_EXHAUSTIVE_FACTORY_ENUMERATION_V379",
