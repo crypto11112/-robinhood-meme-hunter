@@ -1,7 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V365
- * AUTHORITATIVE RUNTIME VERSION: V365
- * V365 safely surfaces the proven V364 Durable Object live V3 rolling USD windows inside manual /analyse while preserving the working live collector, scanner, Telegram routing, scoring, scheduled collector and historical evidence paths.
+ * Robinhood Chain Meme Hunter — V366
+ * AUTHORITATIVE RUNTIME VERSION: V366
+ * V366 adds continuous live-coverage integrity to the proven V365/V364 Durable Object collector. Each 5m/15m/1h/6h/24h window becomes FULL only after an uninterrupted accepted WebSocket subscription has covered that entire duration. Disconnects reset continuous coverage; no historical backfill is inferred. Existing collector, /analyse, Telegram, scoring, KV and Durable Object binding/class are preserved.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Robinhood Chain Meme Hunter
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V365";
+const VERSION = "V366";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64634,8 +64634,9 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   const liveV3V365 = candidate?.liveV3WindowsV365 || null;
   if (liveV3V365?.status === "LIVE_ROLLING_WINDOWS_V364" && liveV3V365?.windows) {
     evidence.push("", "📡 <b>Live V3 WebSocket Flow — VERIFIED</b>");
-    evidence.push("🟢 Coverage: <b>LIVE SINCE V364 ONLY</b> — pre-listener history not backfilled");
-    evidence.push(`🧮 Live swaps captured: <b>${safeNumber(liveV3V365?.swapsCaptured)}</b> | Workers KV writes: <b>${safeNumber(liveV3V365?.workersKvWrites)}</b>`);
+    const coverageMinutesV366 = Math.floor(safeNumber(liveV3V365?.continuousCoverageMs) / 60000);
+    evidence.push(`🟢 Coverage clock: <b>${liveV3V365?.coverageActive===true ? "ACTIVE" : "INTERRUPTED"}</b> | continuous <b>${coverageMinutesV366}m</b> | pre-V364 history not backfilled`);
+    evidence.push(`🧮 Live swaps captured: <b>${safeNumber(liveV3V365?.swapsCaptured)}</b> | Workers KV writes: <b>${safeNumber(liveV3V365?.workersKvWrites)}</b> | interruptions: <b>${safeNumber(liveV3V365?.interruptionsSinceV366)}</b>`);
     const liveWindows = liveV3V365.windows || {};
     for (const label of ["5m", "15m", "1h", "6h", "24h"]) {
       const row = liveWindows?.[label] || {};
@@ -64644,7 +64645,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
         ? `${Number(row.buyPressurePct).toFixed(2)}%`
         : (totalUsd === 0 ? "0.00%" : "UNVERIFIED");
       evidence.push(
-        `• ${label}: <b>${safeNumber(row?.buys)}B/${safeNumber(row?.sells)}S</b> | 🟢 <b>${formatUsdV353(row?.buyUsd)}</b> | 🔴 <b>${formatUsdV353(row?.sellUsd)}</b> | Net <b>${formatUsdV353(row?.netUsd)}</b> | Buy pressure <b>${pressure}</b>`
+        `• ${label} [${row?.fullCoverage===true ? "FULL" : "PARTIAL"}]: <b>${safeNumber(row?.buys)}B/${safeNumber(row?.sells)}S</b> | 🟢 <b>${formatUsdV353(row?.buyUsd)}</b> | 🔴 <b>${formatUsdV353(row?.sellUsd)}</b> | Net <b>${formatUsdV353(row?.netUsd)}</b> | Buy pressure <b>${pressure}</b>`
       );
     }
   } else if (liveV3V365?.status && liveV3V365?.status !== "DURABLE_OBJECT_BINDING_REQUIRED_V363") {
@@ -69583,6 +69584,7 @@ export class V3LiveCollectorV363 {
     }
     if (url.pathname === "/stop") {
       await this.state.storage.put("enabled", false);
+      await this.markCoverageGapV366("MANUAL_STOP_V366");
       try { this.ws?.close(1000,"V363 stopped"); } catch (_) {}
       this.ws = null; this.subscriptionId = null;
       await this.state.storage.put("connection", {connected:false,subscriptionAccepted:false,stoppedAt:Date.now()});
@@ -69603,7 +69605,38 @@ export class V3LiveCollectorV363 {
     const cfg = this.config || await this.state.storage.get("config") || null;
     const conn = await this.state.storage.get("connection") || {};
     const stats = await this.state.storage.get("stats") || {};
-    return {version:VERSION,collector:"DURABLE_OBJECT_ALCHEMY_V3_LIVE_V364",status:overrideStatus||conn.status||"IDLE_V363",enabled:enabled===true,token:cfg?.token||null,pair:cfg?.pair||null,connectionOpened:conn.connected===true,subscriptionAccepted:conn.subscriptionAccepted===true,subscriptionIdPresent:Boolean(conn.subscriptionIdPresent),lastConnectedAt:conn.lastConnectedAt||null,lastMessageAt:conn.lastMessageAt||null,lastSwapAt:stats.lastSwapAt||null,lastTrade:stats.lastTrade||null,swapsCaptured:safeNumber(stats.swapsCaptured),buysCaptured:safeNumber(stats.buysCaptured),sellsCaptured:safeNumber(stats.sellsCaptured),usdVerifiedCaptured:safeNumber(stats.usdVerifiedCaptured),reconnects:safeNumber(stats.reconnects),lastError:conn.lastError||null,kvBinding:getKV(this.env)?.binding||null};
+    const cov=await this.state.storage.get("v366:coverage")||{}; const coverageActive=cov.active===true&&conn.connected===true&&conn.subscriptionAccepted===true; const coverageStartAt=coverageActive&&Number.isFinite(Number(cov.continuousStartAt))?Number(cov.continuousStartAt):null; return {version:VERSION,collector:"DURABLE_OBJECT_ALCHEMY_V3_LIVE_V364",status:overrideStatus||conn.status||"IDLE_V363",enabled:enabled===true,token:cfg?.token||null,pair:cfg?.pair||null,connectionOpened:conn.connected===true,subscriptionAccepted:conn.subscriptionAccepted===true,subscriptionIdPresent:Boolean(conn.subscriptionIdPresent),lastConnectedAt:conn.lastConnectedAt||null,lastMessageAt:conn.lastMessageAt||null,lastSwapAt:stats.lastSwapAt||null,lastTrade:stats.lastTrade||null,swapsCaptured:safeNumber(stats.swapsCaptured),buysCaptured:safeNumber(stats.buysCaptured),sellsCaptured:safeNumber(stats.sellsCaptured),usdVerifiedCaptured:safeNumber(stats.usdVerifiedCaptured),reconnects:safeNumber(stats.reconnects),lastError:conn.lastError||null,coverageActive,continuousCoverageStartAt:coverageStartAt,continuousCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,continuousCoverageMs:coverageStartAt!==null?Math.max(0,Date.now()-coverageStartAt):0,interruptionsSinceV366:safeNumber(cov.interruptions),lastCoverageGapAt:cov.lastGapAt||null,lastCoverageGapReason:cov.lastGapReason||null,kvBinding:getKV(this.env)?.binding||null};
+  }
+
+  async markCoverageConnectedV366() {
+    const now = Date.now();
+    const cov = await this.state.storage.get("v366:coverage") || {};
+    if (cov.active !== true || !Number.isFinite(Number(cov.continuousStartAt))) {
+      cov.continuousStartAt = now;
+      cov.segmentStartedAt = now;
+    }
+    cov.active = true;
+    cov.lastAcceptedAt = now;
+    cov.versionStarted = "V366";
+    if (!Number.isFinite(Number(cov.interruptions))) cov.interruptions = 0;
+    await this.state.storage.put("v366:coverage", cov);
+    return cov;
+  }
+
+  async markCoverageGapV366(reason) {
+    const now = Date.now();
+    const cov = await this.state.storage.get("v366:coverage") || {};
+    // Count/reset only once per active continuous segment. WebSocket error + close may both fire.
+    if (cov.active === true) {
+      cov.active = false;
+      cov.lastGapAt = now;
+      cov.lastGapReason = String(reason || "LIVE_CONNECTION_GAP_V366").slice(0, 160);
+      cov.interruptions = safeNumber(cov.interruptions) + 1;
+      cov.previousContinuousStartAt = Number.isFinite(Number(cov.continuousStartAt)) ? Number(cov.continuousStartAt) : null;
+      cov.continuousStartAt = null;
+      await this.state.storage.put("v366:coverage", cov);
+    }
+    return cov;
   }
 
   async connect() {
@@ -69633,6 +69666,7 @@ export class V3LiveCollectorV363 {
   }
 
   async scheduleReconnect(error) {
+    await this.markCoverageGapV366(error || "RECONNECT_REQUIRED_V366");
     const enabled = await this.state.storage.get("enabled");
     const stats = await this.state.storage.get("stats") || {};
     stats.reconnects=safeNumber(stats.reconnects)+1; await this.state.storage.put("stats",stats);
@@ -69644,7 +69678,7 @@ export class V3LiveCollectorV363 {
     let msg; try { msg=JSON.parse(typeof event.data==="string"?event.data:""); } catch (_) { return; }
     const conn=await this.state.storage.get("connection")||{}; conn.lastMessageAt=Date.now();
     if (msg?.id===363) {
-      if (typeof msg.result==="string" && msg.result.length>2) { this.subscriptionId=msg.result; conn.status="LIVE_SUBSCRIPTION_ACTIVE_V363"; conn.connected=true; conn.subscriptionAccepted=true; conn.subscriptionIdPresent=true; conn.lastError=null; await this.state.storage.put("connection",conn); return; }
+      if (typeof msg.result==="string" && msg.result.length>2) { this.subscriptionId=msg.result; conn.status="LIVE_SUBSCRIPTION_ACTIVE_V363"; conn.connected=true; conn.subscriptionAccepted=true; conn.subscriptionIdPresent=true; conn.lastError=null; await this.state.storage.put("connection",conn); await this.markCoverageConnectedV366(); return; }
       if (msg?.error) { conn.status="SUBSCRIPTION_REJECTED_V363"; conn.lastError=JSON.stringify(msg.error).slice(0,240); await this.state.storage.put("connection",conn); return; }
     }
     await this.state.storage.put("connection",conn);
@@ -69692,11 +69726,23 @@ export class V3LiveCollectorV363 {
         if (r?.usdVerified===true && Number.isFinite(u) && u>=0) { usdVerifiedTrades++; if(r?.side==="BUY") buyUsd+=u; else if(r?.side==="SELL") sellUsd+=u; }
       }
       const totalUsd=buyUsd+sellUsd;
-      windows[name]={trades:rows.length,buys,sells,usdVerifiedTrades,buyUsd:Number(buyUsd.toFixed(6)),sellUsd:Number(sellUsd.toFixed(6)),netUsd:Number((buyUsd-sellUsd).toFixed(6)),buyPressurePct:totalUsd>0?Number((buyUsd/totalUsd*100).toFixed(2)):null,coverage:"LIVE_SINCE_V364_ONLY"};
+      windows[name]={trades:rows.length,buys,sells,usdVerifiedTrades,buyUsd:Number(buyUsd.toFixed(6)),sellUsd:Number(sellUsd.toFixed(6)),netUsd:Number((buyUsd-sellUsd).toFixed(6)),buyPressurePct:totalUsd>0?Number((buyUsd/totalUsd*100).toFixed(2)):null,coverage:"PENDING_V366"};
     }
     const cfg=this.config||await this.state.storage.get("config")||null;
     const stats=await this.state.storage.get("stats")||{};
-    return {version:VERSION,collector:"DURABLE_OBJECT_ALCHEMY_V3_LIVE_V364",status:"LIVE_ROLLING_WINDOWS_V364",safe:true,workersKvWrites:0,storage:"DURABLE_OBJECT_5_MINUTE_TRADE_BUCKETS_V364",token:cfg?.token||null,pair:cfg?.pair||null,coverage:"LIVE_ONLY_PRE_V364_HISTORY_NOT_BACKFILLED",windowClockBasis:"WEBSOCKET_INGESTION_TIME_V364",windows,lastTrade:stats.lastTrade||null,swapsCaptured:safeNumber(stats.swapsCaptured),timestamp:new Date(nowMs).toISOString()};
+    const conn=await this.state.storage.get("connection")||{};
+    const cov=await this.state.storage.get("v366:coverage")||{};
+    const coverageActive = cov.active===true && conn.connected===true && conn.subscriptionAccepted===true;
+    const coverageStartAt = coverageActive && Number.isFinite(Number(cov.continuousStartAt)) ? Number(cov.continuousStartAt) : null;
+    const continuousCoverageMs = coverageStartAt!==null ? Math.max(0,nowMs-coverageStartAt) : 0;
+    for (const [name,ms] of defs) {
+      const full = coverageActive && continuousCoverageMs>=ms;
+      windows[name].coverage = full ? "FULL_CONTINUOUS_V366" : "PARTIAL_CONTINUOUS_V366";
+      windows[name].fullCoverage = full;
+      windows[name].requiredCoverageMs = ms;
+      windows[name].continuousCoverageMs = Math.min(continuousCoverageMs,ms);
+    }
+    return {version:VERSION,collector:"DURABLE_OBJECT_ALCHEMY_V3_LIVE_V364",status:"LIVE_ROLLING_WINDOWS_V364",safe:true,workersKvWrites:0,storage:"DURABLE_OBJECT_5_MINUTE_TRADE_BUCKETS_V364",token:cfg?.token||null,pair:cfg?.pair||null,coverage:coverageActive?"CONTINUOUS_LIVE_COVERAGE_TRACKED_V366":"LIVE_COVERAGE_INTERRUPTED_OR_INACTIVE_V366",historicalCoverage:"PRE_V364_HISTORY_NOT_BACKFILLED",windowClockBasis:"WEBSOCKET_INGESTION_TIME_V364",coverageClockBasis:"ACCEPTED_WEBSOCKET_SUBSCRIPTION_CONTINUITY_V366",coverageActive,continuousCoverageStartAt:coverageStartAt,continuousCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,continuousCoverageMs,interruptionsSinceV366:safeNumber(cov.interruptions),lastCoverageGapAt:cov.lastGapAt||null,lastCoverageGapReason:cov.lastGapReason||null,windows,lastTrade:stats.lastTrade||null,swapsCaptured:safeNumber(stats.swapsCaptured),timestamp:new Date(nowMs).toISOString()};
   }
 
   async persistSwap(log) {
