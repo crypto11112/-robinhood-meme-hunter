@@ -64989,7 +64989,7 @@ function learningGroupStatsV312(records) {
 
 function learningStatsTextV312(stats) {
   if (!stats) return 'n=0';
-  return `n=${stats.n} [${stats.sampleStrength}] | med ${telegramMultipleV271(stats.median)} | avg ${telegramMultipleV271(stats.average)} | ≥1.25x ${stats.hit125}/${stats.n} | <1.25x ${stats.below125}/${stats.n} | ≥2x ${stats.hit2}/${stats.n}`;
+  return `n=${stats.n} [${stats.sampleStrength}] | med ${telegramMultipleV271(stats.median)} | avg ${telegramMultipleV271(stats.average)} | ≥1.25x ${stats.hit125}/${stats.n} | &lt;1.25x ${stats.below125}/${stats.n} | ≥2x ${stats.hit2}/${stats.n}`;
 }
 
 function learningOutlierTextV313(stats) {
@@ -65024,7 +65024,7 @@ function frozenLearningMessageV312(state) {
 
   if (!records.length) {
     return [
-      '🧠 <b>Frozen Entry Learning — V314</b>',
+      '🧠 <b>Frozen Entry Learning — V315</b>',
       '',
       'No frozen V309+ entry snapshots with verified ATH outcomes are stored yet.',
       '',
@@ -65077,7 +65077,7 @@ function frozenLearningMessageV312(state) {
   });
 
   const lines = [
-    '🧠 <b>Frozen Entry Learning — V314</b>',
+    '🧠 <b>Frozen Entry Learning — V315</b>',
     '',
     `Frozen calls analysed: <b>${records.length}</b> / ${all.length} tracked`,
     `Overall: <b>${learningStatsTextV312(overall)}</b>`,
@@ -65089,8 +65089,8 @@ function frozenLearningMessageV312(state) {
     ...concentration, '',
     ...marketQuality, '',
     ...rugRisk, '',
-    '📏 Sample strength: TOO_SMALL <3 | VERY_SMALL 3–9 | SMALL 10–29 | BUILDING 30–99 | STRONGER 100+',
-    '⚠️ <b>DESCRIPTIVE ONLY</b> — V314 does not change scoring, weights, thresholds or qualification.',
+    '📏 Sample strength: TOO_SMALL &lt;3 | VERY_SMALL 3–9 | SMALL 10–29 | BUILDING 30–99 | STRONGER 100+',
+    '⚠️ <b>DESCRIPTIVE ONLY</b> — V315 does not change scoring, weights, thresholds or qualification.',
     '<i>Only frozen call-time fields are compared with later verified ATH multiples. Missing entry evidence is excluded, never backfilled.</i>'
   ];
 
@@ -65434,17 +65434,17 @@ async function telegramCommandReplyV271(
       true;
   }
 
-  // V314: /learning can exceed Telegram's single-message text ceiling as
+  // V315: /learning preserves chunked delivery and escapes literal '<' text for Telegram HTML as
   // sample-quality sections grow. Reuse the already-proven V292 line-safe
-  // chunked sender. This is delivery-only: zero provider requests and no
-  // learning/scanner/scoring changes.
-  const needsChunkedReplyV314 =
+  // chunked sender. Literal comparison text uses &lt; so Telegram parse_mode=HTML
+  // cannot misread it as a malformed tag. Zero provider/scanner/scoring changes.
+  const needsChunkedReplyV315 =
     parsed.command === "/analyse" ||
     parsed.command === "/analyze" ||
     parsed.command === "/learning";
 
   const result =
-    needsChunkedReplyV314
+    needsChunkedReplyV315
       ? await sendTelegramManualReplyV292(env, reply)
       : await sendTelegram(
           env,
