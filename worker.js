@@ -1,7 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V363
- * AUTHORITATIVE RUNTIME VERSION: V363
- * V363 adds the opt-in Durable Object live V3 WebSocket collector while preserving V362 scanner, Telegram, scoring, scheduled collector and diagnostics.
+ * Robinhood Chain Meme Hunter — V365
+ * AUTHORITATIVE RUNTIME VERSION: V365
+ * V365 safely surfaces the proven V364 Durable Object live V3 rolling USD windows inside manual /analyse while preserving the working live collector, scanner, Telegram routing, scoring, scheduled collector and historical evidence paths.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Robinhood Chain Meme Hunter
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V364";
+const VERSION = "V365";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64631,6 +64631,26 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     evidence.push("🏊 Native V3 evidence: <b>UNVERIFIED</b>");
   }
 
+  const liveV3V365 = candidate?.liveV3WindowsV365 || null;
+  if (liveV3V365?.status === "LIVE_ROLLING_WINDOWS_V364" && liveV3V365?.windows) {
+    evidence.push("", "📡 <b>Live V3 WebSocket Flow — VERIFIED</b>");
+    evidence.push("🟢 Coverage: <b>LIVE SINCE V364 ONLY</b> — pre-listener history not backfilled");
+    evidence.push(`🧮 Live swaps captured: <b>${safeNumber(liveV3V365?.swapsCaptured)}</b> | Workers KV writes: <b>${safeNumber(liveV3V365?.workersKvWrites)}</b>`);
+    const liveWindows = liveV3V365.windows || {};
+    for (const label of ["5m", "15m", "1h", "6h", "24h"]) {
+      const row = liveWindows?.[label] || {};
+      const totalUsd = safeNumber(row?.buyUsd) + safeNumber(row?.sellUsd);
+      const pressure = Number.isFinite(Number(row?.buyPressurePct))
+        ? `${Number(row.buyPressurePct).toFixed(2)}%`
+        : (totalUsd === 0 ? "0.00%" : "UNVERIFIED");
+      evidence.push(
+        `• ${label}: <b>${safeNumber(row?.buys)}B/${safeNumber(row?.sells)}S</b> | 🟢 <b>${formatUsdV353(row?.buyUsd)}</b> | 🔴 <b>${formatUsdV353(row?.sellUsd)}</b> | Net <b>${formatUsdV353(row?.netUsd)}</b> | Buy pressure <b>${pressure}</b>`
+      );
+    }
+  } else if (liveV3V365?.status && liveV3V365?.status !== "DURABLE_OBJECT_BINDING_REQUIRED_V363") {
+    evidence.push("", `📡 Live V3 WebSocket Flow: <b>${escapeHtml(liveV3V365.status)}</b>`);
+  }
+
   const d = directionalDiagnosticsV325 || candidate?.manualDirectionalDiagnosticsV324 || null;
   const indexedVerified = d?.gecko?.verifiedAnyWindow === true || d?.bitquery?.verified === true;
   evidence.push(`🛰 Indexed directional feed: <b>${indexedVerified ? "VERIFIED" : "UNVERIFIED"}</b>`);
@@ -65082,6 +65102,22 @@ async function telegramFreshAnalyseV276(
     };
   }
   candidate.persistedV3UsdV354 = persistedV3UsdV354;
+
+  /* V365: read-only Durable Object live V3 windows for manual /analyse.
+   * No Workers KV writes and no external provider/RPC/API requests are added.
+   * Failure is fail-open so the confirmed V354/V364 analysis path remains usable.
+   * Historical partial ledger evidence remains separate and is never merged into
+   * the live-only V364 windows. */
+  let liveV3WindowsV365 = null;
+  try {
+    liveV3WindowsV365 = await v3LiveCollectorRouteV363(env, resolved.address, "analysewindows");
+  } catch (error) {
+    liveV3WindowsV365 = {
+      status: "LIVE_V3_WINDOWS_READ_FAIL_OPEN_V365",
+      error: String(error?.message || error || "UNKNOWN_V365_ERROR").slice(0, 180)
+    };
+  }
+  candidate.liveV3WindowsV365 = liveV3WindowsV365;
 
   const telemetry = {
     status:
@@ -69508,7 +69544,7 @@ async function v3LiveCollectorRouteV363(env, tokenInput, action) {
     const r = await stub.fetch("https://v3-live.internal/stop");
     return await r.json();
   }
-  if (action === "windows") {
+  if (action === "windows" || action === "analysewindows") {
     const r = await stub.fetch("https://v3-live.internal/windows");
     return await r.json();
   }
