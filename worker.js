@@ -2,6 +2,7 @@
  * V352 DIAGNOSTIC ONLY: adds persisted /analyse stage checkpoints around state read, fresh analysis, and Telegram send. No scanner/USD/scoring changes.
  * Robinhood Chain Meme Hunter
  * V351: HTTP-ONLY USD aggregation diagnostic built from confirmed-safe V348. /analyse, Telegram routing, scheduled scan, collector, scoring and persistence paths are unchanged. Adds only GET /v3usd-diagnostic?token=0xADDRESS to aggregate already-persisted V347 USD evidence with KV reads only and zero writes/external requests.
+ * V353: Adds isolated Telegram /v3usd address-only reader using the already-proven V351 persisted USD diagnostic. Fixes V350 ReferenceError by using a dedicated V353 USD formatter (no out-of-scope money helper). /analyse path remains unchanged.
  * V346: CLEAN RESTORE BUILD from confirmed-working V337 Step 3A logic. No V338+ USD resolver/enrichment code is included.
  * V337: Step 3A verification layer. Preserves V336/V334 behavior and adds zero-request visibility for exact quote-side amounts already persisted on newly captured V3 swaps. Reports quote-ready ledger coverage (WETH/USDG) without converting historical swaps to USD or guessing missing quote evidence.
  * V336: Step 3A safe repair: preserves V334 command/reply path unchanged and adds only exact quote-side amount persistence to newly captured V3 swap records. No extra provider calls, no new Telegram formatter dependency, no historical USD guessing.
@@ -1450,7 +1451,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V352";
+const VERSION = "V353";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -66294,6 +66295,53 @@ function frozenLearningMessageV312(state) {
   return lines.filter((line, index, arr) => !(line === '' && arr[index - 1] === '')).join('\n');
 }
 
+function formatUsdV353(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "UNVERIFIED";
+  const sign = n < 0 ? "-" : "";
+  return `${sign}$${Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function v3UsdTelegramMessageV353(result) {
+  if (!result || result.status !== "PERSISTED_USD_AGGREGATION_VERIFIED_V351") {
+    return [
+      "💵 <b>Native V3 USD Evidence</b>",
+      "",
+      `Status: <b>${escapeHtml(result?.status || "UNVERIFIED")}</b>`,
+      `Contract: <code>${escapeHtml(result?.token || "")}</code>`,
+      "",
+      "<i>Persisted evidence only. No fresh pricing/RPC request was triggered.</i>"
+    ].join("\n");
+  }
+
+  const lines = [
+    `💵 <b>Native V3 USD Evidence — ${VERSION}</b>`,
+    "",
+    `Contract: <code>${escapeHtml(result.token || "")}</code>`,
+    result.pair ? `Pool: <code>${escapeHtml(result.pair)}</code>` : null,
+    `Evidence: <b>${safeNumber(result.usdVerifiedRecords)}/${safeNumber(result.ledgerRecords)} USD-valued records</b>`,
+    "Coverage: <b>PARTIAL</b>",
+    "Basis: <b>VERIFIED SAME-CYCLE WETH/USDG REFERENCE</b>",
+    "Historical exact-block price: <b>NO</b>",
+    "",
+    "📊 <b>Rolling Native V3 USD Flow</b>"
+  ].filter(Boolean);
+
+  for (const label of ["5m", "15m", "1h", "6h", "24h"]) {
+    const row = result?.windows?.[label] || {};
+    const pressure = Number.isFinite(Number(row.buyPressurePct)) ? `${Number(row.buyPressurePct).toFixed(2)}%` : "UNVERIFIED";
+    lines.push(
+      `• ${label}: 🟢 ${formatUsdV353(row.buyUsd)} | 🔴 ${formatUsdV353(row.sellUsd)} | Net <b>${formatUsdV353(row.netUsd)}</b> | Buy pressure <b>${pressure}</b>`
+    );
+  }
+
+  lines.push(
+    "",
+    `<i>Read-only persisted evidence. ${safeNumber(result.elapsedMs)} ms aggregation; no pricing/API/RPC call and no KV write from /v3usd.</i>`
+  );
+  return lines.join("\n");
+}
+
 function telegramHelpV271() {
   return [
     "🤖 <b>Robinhood Meme Hunter Commands</b>",
@@ -66309,6 +66357,7 @@ function telegramHelpV271() {
     "<code>/performance</code> — overall tracked-call summary",
     "<code>/learning</code> — frozen signals, outcomes + sample quality",
     "<code>/horizon GUS</code> — fixed-horizon capture diagnostics",
+    "<code>/v3usd 0xADDRESS</code> — persisted native V3 USD flow (read-only)",
     "<code>/help</code> — command list",
     "",
     "<i>/analyse performs a fresh bounded analysis. Other V271 commands read stored evidence and do not trigger a fresh chain scan.</i>"
@@ -66511,6 +66560,51 @@ async function telegramCommandReplyV271(
   const isFreshAnalyseV352 =
     parsed.command === "/analyse" ||
     parsed.command === "/analyze";
+
+
+  /* V353: isolated address-only persisted USD reader.
+   * Deliberately handled before readState so it cannot enter the fresh /analyse path.
+   * Reuses the already-proven V351 HTTP aggregation function: KV reads only,
+   * zero KV writes and zero external provider/pricing/RPC requests.
+   */
+  if (parsed.command === "/v3usd") {
+    let replyV353;
+    if (!isAddress(normalize(parsed.argument))) {
+      replyV353 = "ℹ️ Use <code>/v3usd 0xADDRESS</code>. V353 is deliberately address-only.";
+    } else {
+      const usdV353 = await v3UsdDiagnosticV351(env, parsed.argument);
+      replyV353 = v3UsdTelegramMessageV353(usdV353);
+      if (diagnosticV273) {
+        diagnosticV273.v3UsdV353 = {
+          status: usdV353?.status || null,
+          elapsedMs: usdV353?.elapsedMs ?? null,
+          ledgerRecords: usdV353?.ledgerRecords ?? null,
+          usdVerifiedRecords: usdV353?.usdVerifiedRecords ?? null,
+          writes: 0,
+          externalRequests: 0
+        };
+      }
+    }
+
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const resultV353 = await sendTelegram(env, replyV353, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = resultV353?.success === true;
+      diagnosticV273.telegramStatus = resultV353?.status || null;
+      diagnosticV273.telegramMode = resultV353?.mode || null;
+      diagnosticV273.telegramError = resultV353?.error || null;
+      diagnosticV273.result = resultV353?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {
+      success: resultV353?.success === true,
+      ignored: false,
+      command: parsed.command,
+      argument: parsed.argument,
+      telegramStatus: resultV353?.status || null,
+      telegramMode: resultV353?.mode || null,
+      scannerBudgetConsumed: false
+    };
+  }
 
   if (isFreshAnalyseV352) {
     await telegramAnalyseCheckpointV352(
