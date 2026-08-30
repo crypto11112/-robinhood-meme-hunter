@@ -1,5 +1,5 @@
 /**
- * V352 DIAGNOSTIC ONLY: adds persisted /analyse stage checkpoints around state read, fresh analysis, and Telegram send. No scanner/USD/scoring changes.
+ * V355 — confirmed V354 functionality plus read-only native V3 ledger diagnostic. Preserves inherited V352 Telegram diagnostic checkpoints. No scanner/pricing/scoring changes.
  * Robinhood Chain Meme Hunter
  * V351: HTTP-ONLY USD aggregation diagnostic built from confirmed-safe V348. /analyse, Telegram routing, scheduled scan, collector, scoring and persistence paths are unchanged. Adds only GET /v3usd-diagnostic?token=0xADDRESS to aggregate already-persisted V347 USD evidence with KV reads only and zero writes/external requests.
  * V353: Adds isolated Telegram /v3usd address-only reader using the already-proven V351 persisted USD diagnostic. Fixes V350 ReferenceError by using a dedicated V353 USD formatter (no out-of-scope money helper). /analyse path remains unchanged.
@@ -1452,7 +1452,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V354";
+const VERSION = "V355";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -67773,6 +67773,115 @@ async function v3UsdDiagnosticV351(env, tokenInput) {
   return out;
 }
 
+
+/* ============================================================
+   V355 — READ-ONLY NATIVE V3 SWAP LEDGER INSPECTOR
+   ============================================================
+   Evidence-only diagnostic for comparing captured swaps with known buys.
+   - address-only query parameter: ?token=0x...
+   - pair-cache + ledger KV reads only
+   - zero KV writes
+   - zero RPC/API/pricing requests
+   - exposes each captured ledger record without claiming missing trades
+*/
+async function v3LedgerDiagnosticV355(env, tokenInput) {
+  const startedAt = Date.now();
+  const token = normalize(tokenInput);
+  const out = {
+    version: VERSION,
+    diagnostic: "NATIVE_V3_LEDGER_RECORDS_READ_ONLY_V355",
+    safe: true,
+    writes: 0,
+    externalRequests: 0,
+    token,
+    pair: null,
+    coverage: "PARTIAL",
+    verifiedRanges: null,
+    ledgerRecords: 0,
+    buys: 0,
+    sells: 0,
+    quoteReady: 0,
+    usdVerified: 0,
+    records: [],
+    timestamp: now(),
+    elapsedMs: null
+  };
+
+  if (!isAddress(token)) {
+    out.status = "INVALID_TOKEN_ADDRESS_V355";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  const { kv } = getKV(env);
+  if (!kv) {
+    out.status = "KV_UNAVAILABLE_V355";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  try {
+    const pairCache = await loadVerifiedV3PairIdentityV329(env, token);
+    const pair = normalize(pairCache?.record?.pairAddress);
+    out.pairStatus = pairCache?.status || null;
+    if (pairCache?.valid !== true || !isAddress(pair)) {
+      out.status = "VERIFIED_V3_PAIR_UNAVAILABLE_V355";
+      out.elapsedMs = Date.now() - startedAt;
+      return out;
+    }
+    out.pair = pair;
+
+    const ledger = await loadNativeV3SwapLedgerV331(env, token, pair);
+    const rows = Array.isArray(ledger?.records) ? ledger.records : [];
+    out.ledgerRecords = rows.length;
+    out.verifiedRanges = Array.isArray(ledger?.scannedRanges) ? ledger.scannedRanges.length : null;
+
+    const mapped = rows.map((r) => {
+      const side = String(r?.side || "").toUpperCase();
+      const quoteToken = normalize(r?.quoteTokenAddress);
+      const quoteAmount = Number(r?.quoteAmount);
+      const usd = Number(r?.sameCycleUsdV347);
+      const ts = Number(r?.blockTimestampMs);
+      const quoteVerified = r?.quoteAmountVerifiedV336 === true && Number.isFinite(quoteAmount) && quoteAmount > 0;
+      const usdVerified = r?.sameCycleUsdVerifiedV347 === true && Number.isFinite(usd) && usd > 0;
+      if (side === "BUY") out.buys++;
+      if (side === "SELL") out.sells++;
+      if (quoteVerified) out.quoteReady++;
+      if (usdVerified) out.usdVerified++;
+      return {
+        blockNumber: Number.isFinite(Number(r?.blockNumber)) ? Number(r.blockNumber) : null,
+        blockTimestampMs: Number.isFinite(ts) && ts > 0 ? ts : null,
+        blockTimeIso: Number.isFinite(ts) && ts > 0 ? new Date(ts).toISOString() : null,
+        txHash: r?.txHash || null,
+        logIndex: Number.isFinite(Number(r?.logIndex)) ? Number(r.logIndex) : null,
+        side: side === "BUY" || side === "SELL" ? side : null,
+        tokenAmount: Number.isFinite(Number(r?.tokenAmount)) ? Number(r.tokenAmount) : null,
+        quoteTokenAddress: isAddress(quoteToken) ? quoteToken : null,
+        quoteSymbol: quoteToken === CANONICAL_WETH_V179 ? "WETH" : (quoteToken === CANONICAL_USDG_V179 ? "USDG" : null),
+        quoteAmount: quoteVerified ? quoteAmount : null,
+        quoteVerified,
+        usdValue: usdVerified ? Number(usd.toFixed(6)) : null,
+        usdVerified,
+        usdBasis: r?.sameCycleUsdBasisV347 || r?.sameCycleUsdSourceV347 || null,
+        historicalExactBlockPrice: false,
+        pool: pair,
+        captureBasis: r?.captureBasis || r?.source || r?.basis || "NATIVE_V3_LEDGER_V331",
+        missingUsdReason: usdVerified ? null : (quoteVerified ? "PERSISTED_USD_NOT_AVAILABLE_FOR_RECORD" : "EXACT_QUOTE_NOT_AVAILABLE_FOR_RECORD")
+      };
+    });
+
+    mapped.sort((a,b) => (b.blockTimestampMs || 0) - (a.blockTimestampMs || 0) || (b.blockNumber || 0) - (a.blockNumber || 0));
+    out.records = mapped;
+    out.status = "NATIVE_V3_LEDGER_RECORDS_AVAILABLE_V355";
+  } catch (error) {
+    out.status = "DIAGNOSTIC_ERROR_V355";
+    out.error = String(error?.message || error).slice(0, 240);
+  }
+
+  out.elapsedMs = Date.now() - startedAt;
+  return out;
+}
+
 /* =========================================================
    ROUTER
    ========================================================= */
@@ -67907,6 +68016,18 @@ async function handleRequest(
   ) {
     return jsonResponse(
       await v3UsdDiagnosticV351(
+        env,
+        url.searchParams.get("token") || ""
+      )
+    );
+  }
+
+  if (
+    path ===
+    "/v3ledger-diagnostic"
+  ) {
+    return jsonResponse(
+      await v3LedgerDiagnosticV355(
         env,
         url.searchParams.get("token") || ""
       )
