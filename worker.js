@@ -6,6 +6,10 @@
  */
 /**
  * Robinhood Chain Meme Hunter
+ * V317: forward-only fixed-horizon verified outcomes at 1h/6h/24h; no hindsight backfill.
+ * - New successful calls initialise fixedHorizonOutcomesV317. First verified market-cap observation at/after each horizon is frozen with observation lag.
+ * - Existing pre-V317 calls are never retroactively seeded. /learning reports fixed-horizon coverage separately from lifetime ATH.
+ * - Zero extra provider requests; no scanner, scoring, thresholds, qualification, Momentum, ATH maths, snapshots or request-budget changes.
  * V316: read-only learning maturity cohorts; prevents brand-new calls at 1.00x from being mistaken for settled underperformers.
  * - /learning now reports outcome-age cohorts at >=1h, >=6h and >=24h using the frozen entryTimestamp only.
  * - Cohorts are descriptive and right-censoring aware; no call is removed from the overall raw view, and no outcome is inferred.
@@ -1400,7 +1404,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V316";
+const VERSION = "V317";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -27499,6 +27503,7 @@ function applyDexPerformanceBatchV295(state, pairs, targetToken) {
 
     seedHistoricalPerformanceMilestonesV308(next);
     capturePerformanceMilestonesV308(next, nowMs);
+    captureFixedHorizonOutcomesV317(next, nowMs, marketCap, "DEXSCREENER_TOKENS_V1_BATCH_V295");
 
     state.callPerformanceV270[address] = next;
     observed++;
@@ -46313,6 +46318,32 @@ function buildEntrySignalSnapshotV309(candidate, capturedAt) {
   };
 }
 
+const FIXED_HORIZONS_V317 = Object.freeze({ h1: 60 * 60 * 1000, h6: 6 * 60 * 60 * 1000, h24: 24 * 60 * 60 * 1000 });
+
+function initialiseFixedHorizonOutcomesV317(entryTimestamp) {
+  const entryAt = Number(entryTimestamp);
+  if (!Number.isFinite(entryAt) || entryAt <= 0) return null;
+  return { version: "V317", forwardOnly: true, hindsightBackfillAllowed: false, initialisedAt: Date.now(), entryTimestamp: entryAt, outcomes: { h1: null, h6: null, h24: null } };
+}
+
+function captureFixedHorizonOutcomesV317(record, observedAt, marketCap, source = null) {
+  const tracker = record?.fixedHorizonOutcomesV317;
+  if (!tracker || tracker?.forwardOnly !== true || tracker?.hindsightBackfillAllowed !== false) return record;
+  const entryAt = Number(record?.entryTimestamp ?? tracker?.entryTimestamp);
+  const observed = Number(observedAt);
+  const mc = Number(marketCap);
+  const entryMc = Number(record?.entryMarketCap);
+  if (![entryAt, observed, mc, entryMc].every(Number.isFinite) || entryAt <= 0 || observed < entryAt || mc <= 0 || entryMc <= 0) return record;
+  tracker.outcomes = tracker.outcomes && typeof tracker.outcomes === "object" ? tracker.outcomes : { h1: null, h6: null, h24: null };
+  for (const [key, horizonMs] of Object.entries(FIXED_HORIZONS_V317)) {
+    if (tracker.outcomes[key]) continue;
+    const targetAt = entryAt + horizonMs;
+    if (observed < targetAt) continue;
+    tracker.outcomes[key] = { targetAt, observedAt: observed, observationLagMs: observed - targetAt, marketCap: mc, multipleByMarketCap: mc / entryMc, source: source || null, verified: true, frozen: true };
+  }
+  return record;
+}
+
 function buildCallPerformanceRecordV270(
   candidate,
   existing = null,
@@ -46336,6 +46367,12 @@ function buildCallPerformanceRecordV270(
         ? buildEntrySignalSnapshotV309(candidate, entryTimestamp || nowMs)
         : null
     );
+
+  const fixedHorizonOutcomesV317 =
+    existing?.fixedHorizonOutcomesV317 ??
+    (successfulAlert && !existing
+      ? initialiseFixedHorizonOutcomesV317(entryTimestamp || nowMs)
+      : null);
 
   const entryPriceUsd =
     existing?.entryPriceUsd ??
@@ -46420,7 +46457,7 @@ function buildCallPerformanceRecordV270(
       ? market.marketCap
       : null;
 
-  return {
+  const performanceRecordV317 = {
     address:
       normalize(candidate?.address),
 
@@ -46440,6 +46477,7 @@ function buildCallPerformanceRecordV270(
     entryPriceUsd,
     entryMarketCap,
     entrySignalSnapshotV309,
+    fixedHorizonOutcomesV317,
 
     entryMarketVerified:
       entryPriceUsd !== null ||
@@ -46522,6 +46560,11 @@ function buildCallPerformanceRecordV270(
       existing?.exactV270EntryBaseline ===
       true
   };
+
+  if (market.verified) {
+    captureFixedHorizonOutcomesV317(performanceRecordV317, nowMs, market.marketCap, market.source);
+  }
+  return performanceRecordV317;
 }
 
 function pruneCallPerformanceV270(state) {
@@ -65030,6 +65073,22 @@ function learningMaturityLineV316(label, records) {
   return `• ${label}: ${learningStatsTextV312(stats)} | avg excl top ${Number.isFinite(Number(stats.averageExTop)) ? telegramMultipleV271(stats.averageExTop) : 'N/A'}`;
 }
 
+function fixedHorizonLearningStatsV317(records, key) {
+  const rows = [];
+  for (const record of Array.isArray(records) ? records : []) {
+    const outcome = record?.fixedHorizonOutcomesV317?.outcomes?.[key];
+    const multiple = Number(outcome?.multipleByMarketCap);
+    if (outcome?.verified === true && outcome?.frozen === true && Number.isFinite(multiple) && multiple > 0) rows.push({ ...record, athMultipleByMarketCap: multiple });
+  }
+  return learningGroupStatsV312(rows);
+}
+
+function fixedHorizonLearningLineV317(label, records, key) {
+  const stats = fixedHorizonLearningStatsV317(records, key);
+  if (!stats) return `• ${label}: n=0 — no forward-only verified outcomes captured yet`;
+  return `• ${label}: ${learningStatsTextV312(stats)} | avg excl top ${Number.isFinite(Number(stats.averageExTop)) ? telegramMultipleV271(stats.averageExTop) : 'N/A'}`;
+}
+
 function frozenLearningMessageV312(state) {
   const all = callPerformanceEntriesV271(state);
   const records = all.filter(record => {
@@ -65042,7 +65101,7 @@ function frozenLearningMessageV312(state) {
 
   if (!records.length) {
     return [
-      '🧠 <b>Frozen Entry Learning — V316</b>',
+      '🧠 <b>Frozen Entry Learning — V317</b>',
       '',
       'No frozen V309+ entry snapshots with verified ATH outcomes are stored yet.',
       '',
@@ -65095,7 +65154,7 @@ function frozenLearningMessageV312(state) {
   });
 
   const lines = [
-    '🧠 <b>Frozen Entry Learning — V316</b>',
+    '🧠 <b>Frozen Entry Learning — V317</b>',
     '',
     `Frozen calls analysed: <b>${records.length}</b> / ${all.length} tracked`,
     `Overall: <b>${learningStatsTextV312(overall)}</b>`,
@@ -65107,6 +65166,12 @@ function frozenLearningMessageV312(state) {
     learningMaturityLineV316('≥24h old', learningMaturityCohortV316(records, 24 * 60 * 60 * 1000)),
     '<i>Age cohorts reduce right-censoring: very new 1.00x calls are not treated as if they already had equal time to perform.</i>',
     '',
+    '<b>🎯 Forward-only fixed-horizon outcomes — V317</b>',
+    fixedHorizonLearningLineV317('1h outcome', records, 'h1'),
+    fixedHorizonLearningLineV317('6h outcome', records, 'h6'),
+    fixedHorizonLearningLineV317('24h outcome', records, 'h24'),
+    '<i>First verified market-cap observation at/after each target is frozen. Observation lag is preserved; pre-V317 calls are never backfilled.</i>',
+    '',
     ...confidence, '',
     ...momentum, '',
     ...whaleFlow, '',
@@ -65114,7 +65179,7 @@ function frozenLearningMessageV312(state) {
     ...marketQuality, '',
     ...rugRisk, '',
     '📏 Sample strength: TOO_SMALL &lt;3 | VERY_SMALL 3–9 | SMALL 10–29 | BUILDING 30–99 | STRONGER 100+',
-    '⚠️ <b>DESCRIPTIVE ONLY</b> — V316 does not change scoring, weights, thresholds or qualification.',
+    '⚠️ <b>DESCRIPTIVE ONLY</b> — V317 does not change scoring, weights, thresholds or qualification.',
     '<i>Only frozen call-time fields are compared with later verified ATH multiples. Missing entry evidence is excluded, never backfilled.</i>'
   ];
 
@@ -65458,7 +65523,7 @@ async function telegramCommandReplyV271(
       true;
   }
 
-  // V316: /learning preserves chunked delivery and escapes literal '<' text for Telegram HTML as
+  // V317: /learning preserves chunked delivery and escapes literal '<' text for Telegram HTML as
   // sample-quality sections grow. Reuse the already-proven V292 line-safe
   // chunked sender. Literal comparison text uses &lt; so Telegram parse_mode=HTML
   // cannot misread it as a malformed tag. Zero provider/scanner/scoring changes.
