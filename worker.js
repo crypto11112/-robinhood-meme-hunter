@@ -6,6 +6,11 @@
  */
 /**
  * Robinhood Chain Meme Hunter
+ * V316: read-only learning maturity cohorts; prevents brand-new calls at 1.00x from being mistaken for settled underperformers.
+ * - /learning now reports outcome-age cohorts at >=1h, >=6h and >=24h using the frozen entryTimestamp only.
+ * - Cohorts are descriptive and right-censoring aware; no call is removed from the overall raw view, and no outcome is inferred.
+ * - Zero provider requests; no scanner, scoring, thresholds, qualification, Momentum, ATH maths, snapshots or request-budget changes.
+ * V315: /learning Telegram HTML safety repair; preserves V314 chunked delivery and escapes literal < text.
  * V314: targeted /learning Telegram delivery repair; no scanner/scoring/budget changes.
  * - Preserves V313 learning analytics.
  * - Routes /learning through the proven V292 chunked Telegram sender so reports over Telegram's single-message limit are delivered safely instead of silently failing.
@@ -1395,7 +1400,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V314";
+const VERSION = "V316";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -65012,6 +65017,19 @@ function learningBandV312(value, bands) {
   return null;
 }
 
+function learningMaturityCohortV316(records, minAgeMs, nowMs = Date.now()) {
+  return (Array.isArray(records) ? records : []).filter(record => {
+    const entryAt = Number(record?.entryTimestamp);
+    return Number.isFinite(entryAt) && entryAt > 0 && (nowMs - entryAt) >= minAgeMs;
+  });
+}
+
+function learningMaturityLineV316(label, records) {
+  const stats = learningGroupStatsV312(records);
+  if (!stats) return `• ${label}: n=0 — no eligible frozen calls yet`;
+  return `• ${label}: ${learningStatsTextV312(stats)} | avg excl top ${Number.isFinite(Number(stats.averageExTop)) ? telegramMultipleV271(stats.averageExTop) : 'N/A'}`;
+}
+
 function frozenLearningMessageV312(state) {
   const all = callPerformanceEntriesV271(state);
   const records = all.filter(record => {
@@ -65024,7 +65042,7 @@ function frozenLearningMessageV312(state) {
 
   if (!records.length) {
     return [
-      '🧠 <b>Frozen Entry Learning — V315</b>',
+      '🧠 <b>Frozen Entry Learning — V316</b>',
       '',
       'No frozen V309+ entry snapshots with verified ATH outcomes are stored yet.',
       '',
@@ -65077,11 +65095,17 @@ function frozenLearningMessageV312(state) {
   });
 
   const lines = [
-    '🧠 <b>Frozen Entry Learning — V315</b>',
+    '🧠 <b>Frozen Entry Learning — V316</b>',
     '',
     `Frozen calls analysed: <b>${records.length}</b> / ${all.length} tracked`,
     `Overall: <b>${learningStatsTextV312(overall)}</b>`,
     `📐 Outlier impact: ${learningOutlierTextV313(overall)}`,
+    '',
+    '<b>⏳ Outcome maturity cohorts</b>',
+    learningMaturityLineV316('≥1h old', learningMaturityCohortV316(records, 60 * 60 * 1000)),
+    learningMaturityLineV316('≥6h old', learningMaturityCohortV316(records, 6 * 60 * 60 * 1000)),
+    learningMaturityLineV316('≥24h old', learningMaturityCohortV316(records, 24 * 60 * 60 * 1000)),
+    '<i>Age cohorts reduce right-censoring: very new 1.00x calls are not treated as if they already had equal time to perform.</i>',
     '',
     ...confidence, '',
     ...momentum, '',
@@ -65090,7 +65114,7 @@ function frozenLearningMessageV312(state) {
     ...marketQuality, '',
     ...rugRisk, '',
     '📏 Sample strength: TOO_SMALL &lt;3 | VERY_SMALL 3–9 | SMALL 10–29 | BUILDING 30–99 | STRONGER 100+',
-    '⚠️ <b>DESCRIPTIVE ONLY</b> — V315 does not change scoring, weights, thresholds or qualification.',
+    '⚠️ <b>DESCRIPTIVE ONLY</b> — V316 does not change scoring, weights, thresholds or qualification.',
     '<i>Only frozen call-time fields are compared with later verified ATH multiples. Missing entry evidence is excluded, never backfilled.</i>'
   ];
 
@@ -65434,17 +65458,17 @@ async function telegramCommandReplyV271(
       true;
   }
 
-  // V315: /learning preserves chunked delivery and escapes literal '<' text for Telegram HTML as
+  // V316: /learning preserves chunked delivery and escapes literal '<' text for Telegram HTML as
   // sample-quality sections grow. Reuse the already-proven V292 line-safe
   // chunked sender. Literal comparison text uses &lt; so Telegram parse_mode=HTML
   // cannot misread it as a malformed tag. Zero provider/scanner/scoring changes.
-  const needsChunkedReplyV315 =
+  const needsChunkedReplyV316 =
     parsed.command === "/analyse" ||
     parsed.command === "/analyze" ||
     parsed.command === "/learning";
 
   const result =
-    needsChunkedReplyV315
+    needsChunkedReplyV316
       ? await sendTelegramManualReplyV292(env, reply)
       : await sendTelegram(
           env,
