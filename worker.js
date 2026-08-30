@@ -1452,7 +1452,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V358";
+const VERSION = "V359";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -68315,6 +68315,230 @@ async function v3BlockscoutRangeCapabilityDiagnosticV358(env, tokenInput){
   return out;
 }
 
+
+
+/* ============================================================
+   V359 — BLOCKSCOUT V2 POOL ACTIVITY CAPABILITY DIAGNOSTIC
+   ============================================================
+   Read-only capability probe against the per-instance Blockscout V2 REST API.
+   This does NOT alter the collector or /analyse. It checks whether V2 can
+   expose pool activity and, when a transaction hash is available, whether
+   transaction logs can expose the exact V3 Swap topic without RPC getLogs.
+*/
+const V359_BLOCKSCOUT_V2_TIMEOUT_MS = 7000;
+
+async function v359BlockscoutV2Get(path) {
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), V359_BLOCKSCOUT_V2_TIMEOUT_MS);
+  const url = `${BLOCKSCOUT}${path}`;
+  try {
+    const response = await fetch(url, {
+      headers: { accept: "application/json" },
+      signal: controller.signal
+    });
+    const text = await response.text();
+    let payload = null;
+    let parseError = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch (error) {
+      parseError = String(error?.message || error).slice(0, 220);
+    }
+    return {
+      ok: response.ok && !parseError,
+      httpStatus: response.status,
+      payload,
+      parseError,
+      contentType: response.headers.get("content-type") || null,
+      bodyPrefix: parseError ? String(text || "").slice(0, 140) : null,
+      elapsedMs: Date.now() - startedAt,
+      url
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      httpStatus: null,
+      payload: null,
+      parseError: null,
+      contentType: null,
+      bodyPrefix: null,
+      error: String(error?.name || "") === "AbortError"
+        ? `TIMEOUT_${V359_BLOCKSCOUT_V2_TIMEOUT_MS}MS`
+        : String(error?.message || error).slice(0, 260),
+      elapsedMs: Date.now() - startedAt,
+      url
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function v359ExtractItems(payload) {
+  if (Array.isArray(payload?.items)) return payload.items;
+  if (Array.isArray(payload)) return payload;
+  return [];
+}
+
+function v359TxHash(row) {
+  const values = [row?.hash, row?.transaction_hash, row?.transactionHash, row?.tx_hash, row?.txHash];
+  for (const v of values) {
+    const x = String(v || "").trim();
+    if (/^0x[0-9a-fA-F]{64}$/.test(x)) return x.toLowerCase();
+  }
+  return null;
+}
+
+function v359LogTopic0(row) {
+  if (Array.isArray(row?.topics) && row.topics.length) return String(row.topics[0] || "").toLowerCase();
+  const x = row?.topic0 || row?.first_topic;
+  return x ? String(x).toLowerCase() : null;
+}
+
+async function v3BlockscoutV2ActivityDiagnosticV359(env, tokenInput) {
+  const startedAt = Date.now();
+  const token = normalize(tokenInput);
+  const out = {
+    version: VERSION,
+    diagnostic: "BLOCKSCOUT_V2_POOL_ACTIVITY_CAPABILITY_V359",
+    safe: true,
+    writes: 0,
+    kvWrites: 0,
+    collectorMutated: false,
+    analyseMutated: false,
+    token,
+    pair: null,
+    provider: "ROBINHOOD_BLOCKSCOUT_V2_REST",
+    base: BLOCKSCOUT,
+    timeoutPerRequestMs: V359_BLOCKSCOUT_V2_TIMEOUT_MS,
+    externalRequests: 0,
+    probes: [],
+    transactionHashTested: null,
+    transactionLogProbe: null,
+    exactV3SwapLogsFound: 0,
+    timestamp: now(),
+    elapsedMs: null
+  };
+
+  if (!isAddress(token)) {
+    out.status = "INVALID_TOKEN_ADDRESS_V359";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  try {
+    const pairCache = await loadVerifiedV3PairIdentityV329(env, token);
+    const pair = normalize(pairCache?.record?.pairAddress);
+    out.pairStatus = pairCache?.status || null;
+    if (pairCache?.valid !== true || !isAddress(pair)) {
+      out.status = "VERIFIED_V3_PAIR_UNAVAILABLE_V359";
+      out.elapsedMs = Date.now() - startedAt;
+      return out;
+    }
+    out.pair = pair;
+
+    const probePaths = [
+      { name: "ADDRESS_TRANSACTIONS", path: `/api/v2/addresses/${pair}/transactions` },
+      { name: "ADDRESS_INTERNAL_TRANSACTIONS", path: `/api/v2/addresses/${pair}/internal-transactions` },
+      { name: "ADDRESS_TOKEN_TRANSFERS", path: `/api/v2/addresses/${pair}/token-transfers` }
+    ];
+
+    let candidateTxHash = null;
+
+    for (const p of probePaths) {
+      const r = await v359BlockscoutV2Get(p.path);
+      out.externalRequests++;
+      const items = v359ExtractItems(r.payload);
+      const nextPage = r.payload?.next_page_params || null;
+      const hashes = [];
+      for (const item of items.slice(0, 50)) {
+        const h = v359TxHash(item);
+        if (h && !hashes.includes(h)) hashes.push(h);
+      }
+      if (!candidateTxHash && hashes.length) candidateTxHash = hashes[0];
+      out.probes.push({
+        name: p.name,
+        path: p.path,
+        ok: r.ok,
+        httpStatus: r.httpStatus,
+        elapsedMs: r.elapsedMs,
+        items: items.length,
+        hasNextPage: Boolean(nextPage),
+        nextPageParams: nextPage,
+        transactionHashesFound: hashes.length,
+        firstTransactionHash: hashes[0] || null,
+        payloadKeys: r.payload && typeof r.payload === "object" ? Object.keys(r.payload).slice(0, 20) : [],
+        parseError: r.parseError,
+        error: r.error || (!r.ok && !r.parseError ? `HTTP_${r.httpStatus}` : null),
+        bodyPrefix: r.bodyPrefix
+      });
+    }
+
+    if (candidateTxHash) {
+      out.transactionHashTested = candidateTxHash;
+      const logPath = `/api/v2/transactions/${candidateTxHash}/logs`;
+      const r = await v359BlockscoutV2Get(logPath);
+      out.externalRequests++;
+      const logs = v359ExtractItems(r.payload);
+      const exact = logs.filter(row => {
+        const address = normalize(row?.address?.hash || row?.address_hash || row?.address || "");
+        const topic0 = v359LogTopic0(row);
+        return address === pair && topic0 === String(UNISWAP_V3_SWAP_TOPIC_V326).toLowerCase();
+      });
+      out.exactV3SwapLogsFound = exact.length;
+      out.transactionLogProbe = {
+        path: logPath,
+        ok: r.ok,
+        httpStatus: r.httpStatus,
+        elapsedMs: r.elapsedMs,
+        logs: logs.length,
+        exactPoolV3SwapLogs: exact.length,
+        hasNextPage: Boolean(r.payload?.next_page_params),
+        payloadKeys: r.payload && typeof r.payload === "object" ? Object.keys(r.payload).slice(0, 20) : [],
+        sampleExactSwapLog: exact.length ? {
+          address: normalize(exact[0]?.address?.hash || exact[0]?.address_hash || exact[0]?.address || "") || null,
+          topic0: v359LogTopic0(exact[0]),
+          blockNumber: safeNumber(exact[0]?.block_number || exact[0]?.blockNumber) || null,
+          transactionHash: v359TxHash(exact[0]),
+          index: exact[0]?.index ?? exact[0]?.log_index ?? exact[0]?.logIndex ?? null,
+          dataPresent: typeof exact[0]?.data === "string" && exact[0].data.length > 2
+        } : null,
+        parseError: r.parseError,
+        error: r.error || (!r.ok && !r.parseError ? `HTTP_${r.httpStatus}` : null),
+        bodyPrefix: r.bodyPrefix
+      };
+    }
+
+    const successful = out.probes.filter(p => p.ok);
+    const activityRows = successful.reduce((n, p) => n + safeNumber(p.items), 0);
+    const paginated = successful.some(p => p.hasNextPage);
+
+    out.v2Reachable = successful.length > 0;
+    out.activityRowsReturned = activityRows;
+    out.paginationAvailable = paginated;
+    out.transactionLogsReachable = out.transactionLogProbe?.ok === true;
+    out.exactSwapEventReachable = out.exactV3SwapLogsFound > 0;
+
+    if (out.exactSwapEventReachable) {
+      out.status = "BLOCKSCOUT_V2_EXACT_V3_SWAP_LOG_PATH_VERIFIED_V359";
+    } else if (out.transactionLogsReachable) {
+      out.status = "BLOCKSCOUT_V2_TRANSACTION_LOGS_REACHABLE_NO_SWAP_IN_TEST_TX_V359";
+    } else if (out.v2Reachable && activityRows > 0) {
+      out.status = "BLOCKSCOUT_V2_POOL_ACTIVITY_REACHABLE_V359";
+    } else if (out.v2Reachable) {
+      out.status = "BLOCKSCOUT_V2_REACHABLE_NO_POOL_ACTIVITY_ROWS_V359";
+    } else {
+      out.status = "BLOCKSCOUT_V2_POOL_ACTIVITY_UNAVAILABLE_V359";
+    }
+  } catch (error) {
+    out.status = "DIAGNOSTIC_ERROR_V359";
+    out.error = String(error?.message || error).slice(0, 300);
+  }
+
+  out.elapsedMs = Date.now() - startedAt;
+  return out;
+}
+
 /* =========================================================
    ROUTER
    ========================================================= */
@@ -68498,6 +68722,18 @@ async function handleRequest(
   ) {
     return jsonResponse(
       await v3BlockscoutRangeCapabilityDiagnosticV358(
+        env,
+        url.searchParams.get("token") || ""
+      )
+    );
+  }
+
+  if (
+    path ===
+    "/v3blockscout-v2-diagnostic"
+  ) {
+    return jsonResponse(
+      await v3BlockscoutV2ActivityDiagnosticV359(
         env,
         url.searchParams.get("token") || ""
       )
