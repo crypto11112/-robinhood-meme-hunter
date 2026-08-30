@@ -1,12 +1,16 @@
 /**
  * Robinhood Chain Meme Hunter
- * V299 / V2.0:
+ * V300 / V2.0:
  * - ATH FAIR-SLOT REFRESH: if a scan finishes without using its single protected fresh DexScreener slot, V299 can use that otherwise-unused slot to refresh tracked-call ATHs instead of letting follow-up coverage starve behind candidate priority
  * - CANDIDATE FIRST: discovery/priority candidates keep first right to the existing fresh DexScreener slot; ATH follow-up runs only after candidate analysis and only when dexFreshUsed is still zero
  * - RATE-LIMIT SAFE: fair-slot refresh obeys the existing DexScreener cooldown, 5-minute fresh guard, V157 recovery stagger, one-fresh-request-per-scan ceiling and analysis request budget
  * - CONSERVATIVE FALLBACK CADENCE: an ATH-only fair-slot request is attempted at most once per 15 minutes; successful normal piggyback requests can still refresh ATHs more frequently
  * - VERIFIED ONLY: exact base-token match, finite positive marketCap, frozen entry baseline and strictly-higher ATH rules remain unchanged
  * - TELEMETRY: /best and /scan expose FAIR_SLOT_* terminal outcomes separately; successful-check and ATH-update timestamps remain truthful
+ * - V300 PROVIDER RECOVERY: honours DexScreener Retry-After when HTTP 429 supplies it, rather than relying only on the local exponential timer
+ * - V300 SETTLE BUFFER: adds a bounded 60-second recovery cushion after a 429 before another DexScreener probe can be attempted
+ * - V300 DIAGNOSTICS: persists Retry-After/header/effective-backoff telemetry so repeated 429s can be distinguished from ordinary scanner cadence
+ * - NO EXTRA LOAD: preserves one fresh DexScreener request per scan, 5-minute fresh spacing, V299 fair-slot rules and the existing 42/21 request ceilings
  * - PRESERVES: V298 request finalization, V297 timestamps, V296 diagnostics, V295 batch coverage, scanner 42/21 ceilings, scoring, Momentum, holders, Telegram thresholds, KV history and provider protections
  * V298 / V2.0:
  * - ATH REQUEST FINALIZATION: every V295/V296 DexScreener batch attempt now replaces REQUESTING with a terminal outcome on HTTP 429, other non-OK HTTP responses, or fetch/JSON exceptions
@@ -1349,7 +1353,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V299";
+const VERSION = "V300";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2372,6 +2376,13 @@ const DEXSCREENER_MAX_429_COOLDOWN_MS_V147 =
 
 const DEXSCREENER_429_CHAIN_WINDOW_MS_V147 =
   30 * 60 * 1000;
+
+/* V300: honour provider Retry-After and avoid probing at the exact cooldown edge.
+ * This only extends protection; it never creates or accelerates a request. */
+const DEXSCREENER_429_SETTLE_BUFFER_MS_V300 =
+  60 * 1000;
+const DEXSCREENER_MAX_SERVER_RETRY_AFTER_MS_V300 =
+  2 * 60 * 60 * 1000;
 
 const MARKET_PROVIDER_CROSS_STAGGER_MS_V157 =
   2 * 60 * 1000;
@@ -23681,8 +23692,59 @@ function marketProviderRecoveryTelemetryV157(
 }
 
 
+function parseDexRetryAfterMsV300(response, nowMs = Date.now()) {
+  try {
+    const raw = String(response?.headers?.get?.("retry-after") || "").trim();
+    if (!raw) {
+      return {
+        raw: null,
+        retryAfterMs: 0,
+        source: "NONE"
+      };
+    }
+
+    const seconds = Number(raw);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return {
+        raw,
+        retryAfterMs: Math.min(
+          DEXSCREENER_MAX_SERVER_RETRY_AFTER_MS_V300,
+          Math.ceil(seconds * 1000)
+        ),
+        source: "SECONDS"
+      };
+    }
+
+    const retryAt = Date.parse(raw);
+    if (Number.isFinite(retryAt)) {
+      return {
+        raw,
+        retryAfterMs: Math.min(
+          DEXSCREENER_MAX_SERVER_RETRY_AFTER_MS_V300,
+          Math.max(0, retryAt - nowMs)
+        ),
+        source: "HTTP_DATE"
+      };
+    }
+
+    return {
+      raw,
+      retryAfterMs: 0,
+      source: "UNPARSEABLE"
+    };
+  }
+  catch {
+    return {
+      raw: null,
+      retryAfterMs: 0,
+      source: "HEADER_READ_FAILED"
+    };
+  }
+}
+
 function registerDex429V147(
-  service
+  service,
+  response = null
 ) {
   const now =
     Date.now();
@@ -23716,7 +23778,7 @@ function registerDex429V147(
     level = 1;
   }
 
-  const backoffMs =
+  const adaptiveBackoffMs =
     Math.min(
       DEXSCREENER_MAX_429_COOLDOWN_MS_V147,
       DEXSCREENER_429_COOLDOWN_MS *
@@ -23729,16 +23791,49 @@ function registerDex429V147(
         )
     );
 
+  const retryAfterV300 =
+    parseDexRetryAfterMsV300(
+      response,
+      now
+    );
+
+  const providerBackoffMs =
+    safeNumber(
+      retryAfterV300.retryAfterMs
+    );
+
+  /* Never retry at the exact server/local expiry boundary after a 429. */
+  const effectiveBackoffMs =
+    Math.max(
+      adaptiveBackoffMs,
+      providerBackoffMs
+    ) +
+    DEXSCREENER_429_SETTLE_BUFFER_MS_V300;
+
   service.consecutive429s =
     level;
   service.last429At =
     now;
   service.cooldownUntil =
-    now + backoffMs;
+    now + effectiveBackoffMs;
   service.lastBackoffMs =
-    backoffMs;
+    adaptiveBackoffMs;
   service.lastStatus =
     "HTTP_429";
+
+  /* V300 provider-response diagnostics. */
+  service.retryAfterHeaderV300 =
+    retryAfterV300.raw;
+  service.retryAfterSourceV300 =
+    retryAfterV300.source;
+  service.serverRetryAfterMsV300 =
+    providerBackoffMs;
+  service.settleBufferMsV300 =
+    DEXSCREENER_429_SETTLE_BUFFER_MS_V300;
+  service.effectiveBackoffMsV300 =
+    effectiveBackoffMs;
+  service.effectiveRetryAtV300 =
+    service.cooldownUntil;
 
   service.recoveryProbePendingV157 =
     true;
@@ -23751,7 +23846,7 @@ function registerDex429V147(
       service.total429s
     ) + 1;
 
-  return backoffMs;
+  return effectiveBackoffMs;
 }
 
 function registerDexSuccessV147(
@@ -27458,7 +27553,7 @@ async function athFairSlotRefreshV299(
     );
 
     if (response.status === 429) {
-      const dexBackoffMsV147 = registerDex429V147(service);
+      const dexBackoffMsV147 = registerDex429V147(service, response);
       markMarket429V157(state, "DEX");
 
       setAthFollowUpStatusV296(service, {
@@ -27469,7 +27564,11 @@ async function athFairSlotRefreshV299(
         athUpdated: 0,
         httpStatus: 429,
         cooldownUntil: service.cooldownUntil,
-        adaptiveBackoffMsV147: dexBackoffMsV147,
+        adaptiveBackoffMsV147: safeNumber(service.lastBackoffMs),
+        effectiveBackoffMsV300: safeNumber(service.effectiveBackoffMsV300),
+        retryAfterHeaderV300: service.retryAfterHeaderV300 || null,
+        serverRetryAfterMsV300: safeNumber(service.serverRetryAfterMsV300),
+        settleBufferMsV300: safeNumber(service.settleBufferMsV300),
         error: null,
         zeroExtraRequests: false,
         fairSlotV299: true
@@ -27936,7 +28035,8 @@ async function marketData(
     ) {
       const dexBackoffMsV147 =
         registerDex429V147(
-          service
+          service,
+          response
         );
 
       markMarket429V157(
@@ -27952,7 +28052,11 @@ async function marketData(
         athUpdated: 0,
         httpStatus: response.status,
         cooldownUntil: service.cooldownUntil,
-        adaptiveBackoffMsV147: dexBackoffMsV147,
+        adaptiveBackoffMsV147: safeNumber(service.lastBackoffMs),
+        effectiveBackoffMsV300: safeNumber(service.effectiveBackoffMsV300),
+        retryAfterHeaderV300: service.retryAfterHeaderV300 || null,
+        serverRetryAfterMsV300: safeNumber(service.serverRetryAfterMsV300),
+        settleBufferMsV300: safeNumber(service.settleBufferMsV300),
         error: null
       });
 
@@ -28128,7 +28232,8 @@ async function marketData(
               429
           ) {
             registerDex429V147(
-              service
+              service,
+              fallbackResponse
             );
 
             markMarket429V157(
