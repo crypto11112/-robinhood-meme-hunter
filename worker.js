@@ -1,5 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V326: Native Uniswap V3 exact-pool directional USD groundwork (bounded 10-block manual observation; no Bitquery dependency).
  * V325 — guaranteed manual Telegram directional diagnostics passthrough
  * - Exposes GeckoTerminal/Bitquery attempt status, HTTP status and row counts in manual /analyse.
  * - Diagnostic-only provider-path visibility; preserves V323/V322 behavior.
@@ -1440,7 +1441,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V325";
+const VERSION = "V326";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -42908,7 +42909,7 @@ function telegramMessage(
     `🔴 24h Sells: <b>${trade24h.sells}</b>`,
     `💵 24h Total Volume: <b>${market?.verified ? money(market?.volume?.h24) : "UNVERIFIED"}</b>`,
     dexProviderReportedV320
-      ? "ℹ️ <i>DexScreener counts/total volume are provider-reported. V325 never estimates buy-USD/sell-USD from them.</i>"
+      ? "ℹ️ <i>DexScreener counts/total volume are provider-reported. V326 never estimates buy-USD/sell-USD from them.</i>"
       : "ℹ️ <i>Provider-reported counts/total volume are separate from verified directional USD evidence.</i>",
     "",
     "💵 <b>Verified Directional USD — INDEXED TRADE FEED</b>",
@@ -42939,7 +42940,7 @@ function telegramMessage(
       ? ""
       : null,
     candidate?.manualDirectionalDiagnosticsV324
-      ? "🔧 <b>Directional USD diagnostics — V325</b>"
+      ? "🔧 <b>Directional USD diagnostics — V326</b>"
       : null,
     candidate?.manualDirectionalDiagnosticsV324
       ? `GeckoTerminal: <b>${candidate.manualDirectionalDiagnosticsV324.gecko.attempted ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(candidate.manualDirectionalDiagnosticsV324.gecko.status)}</b> | HTTP <b>${escapeHtml(candidate.manualDirectionalDiagnosticsV324.gecko.httpStatus ?? "N/A")}</b> | returned <b>${safeNumber(candidate.manualDirectionalDiagnosticsV324.gecko.returnedCount)}</b> | accepted <b>${safeNumber(candidate.manualDirectionalDiagnosticsV324.gecko.acceptedCount)}</b>`
@@ -63942,6 +63943,188 @@ async function manualVerifiedUsdRecoveryV289(
   };
 }
 
+
+
+/* ============================================================
+   V326 NATIVE UNISWAP V3 DIRECTIONAL USD — MANUAL GROUNDWORK
+   ============================================================
+   - Zero Bitquery dependency.
+   - Uses the DexScreener-selected pair ONLY when protocol is verified Uniswap V3.
+   - Verifies pool token0/token1 on-chain before decoding Swap events.
+   - Reads a bounded 10-block exact-pool window to preserve existing provider limits.
+   - BUY/SELL is derived from the signed candidate-token pool delta.
+   - USD is derived only when the candidate has a verified positive USD market price.
+   - This is explicitly a recent observed window, NOT a claimed complete 5m/1h/24h total.
+*/
+const UNISWAP_V3_SWAP_TOPIC_V326 =
+  "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67";
+const UNISWAP_V3_TOKEN0_SELECTOR_V326 = "0x0dfe1681";
+const UNISWAP_V3_TOKEN1_SELECTOR_V326 = "0xd21220a7";
+
+function decodeEthCallAddressV326(value) {
+  const text = String(value || "").toLowerCase();
+  if (!/^0x[a-f0-9]{64}$/.test(text)) return null;
+  const address = "0x" + text.slice(-40);
+  return /^0x[a-f0-9]{40}$/.test(address) ? address : null;
+}
+
+function signedInt256V326(word) {
+  const text = String(word || "").replace(/^0x/i, "");
+  if (!/^[a-fA-F0-9]{64}$/.test(text)) return null;
+  try {
+    const raw = BigInt("0x" + text);
+    const sign = 1n << 255n;
+    return (raw & sign) !== 0n ? raw - (1n << 256n) : raw;
+  } catch (_) {
+    return null;
+  }
+}
+
+function decimalFromSignedRawV326(raw, decimals) {
+  if (typeof raw !== "bigint") return null;
+  const d = Number(decimals);
+  if (!Number.isInteger(d) || d < 0 || d > 36) return null;
+  const negative = raw < 0n;
+  const abs = negative ? -raw : raw;
+  const scale = 10n ** BigInt(d);
+  const whole = abs / scale;
+  const frac = abs % scale;
+  // Number conversion is intentionally bounded through a decimal string.
+  const fracText = d > 0 ? frac.toString().padStart(d, "0").slice(0, 12) : "";
+  const value = Number(`${negative ? "-" : ""}${whole.toString()}${d > 0 ? "." + fracText : ""}`);
+  return Number.isFinite(value) ? value : null;
+}
+
+async function manualNativeV3DirectionalV326(env, budget, candidate) {
+  const base = {
+    attempted: false,
+    verified: false,
+    status: "NOT_ELIGIBLE",
+    source: "NATIVE_UNISWAP_V3_ETH_GETLOGS_V326",
+    pairAddress: null,
+    token0: null,
+    token1: null,
+    fromBlock: null,
+    toBlock: null,
+    swaps: 0,
+    buys: 0,
+    sells: 0,
+    buyUsd: null,
+    sellUsd: null,
+    netUsd: null,
+    requestsUsed: 0
+  };
+
+  const market = candidate?.market;
+  const token = normalize(candidate?.address);
+  const pairAddress = normalize(market?.pairAddress);
+  const labels = Array.isArray(market?.pairLabels) ? market.pairLabels.join(" ").toLowerCase() : "";
+  const dexId = String(market?.dexId || "").toLowerCase();
+  const isVerifiedV3 =
+    market?.verified === true &&
+    dexId.includes("uniswap") &&
+    /(^|[^a-z0-9])v3([^a-z0-9]|$)/i.test(labels) &&
+    /^0x[a-f0-9]{40}$/.test(String(pairAddress || ""));
+
+  if (!candidate?.validERC20 || !isVerifiedV3 || !/^0x[a-f0-9]{40}$/.test(String(token || ""))) {
+    return {...base, pairAddress, status: "NO_VERIFIED_UNISWAP_V3_PAIR"};
+  }
+
+  const priceUsd = Number(market?.priceUsd);
+  const decimals = Number(candidate?.decimals);
+  if (!Number.isFinite(priceUsd) || priceUsd <= 0 || !Number.isInteger(decimals) || decimals < 0 || decimals > 36) {
+    return {...base, pairAddress, status: "TOKEN_PRICE_OR_DECIMALS_UNVERIFIED"};
+  }
+
+  const spare = Math.max(0, safeNumber(budget?.totalLimit) - safeNumber(budget?.totalUsed));
+  if (spare < 4 || !budgetAvailable(budget, "analysis")) {
+    return {...base, pairAddress, status: "INSUFFICIENT_SPARE_MANUAL_BUDGET"};
+  }
+
+  const before = safeNumber(budget?.totalUsed);
+  const call = async data => rpc(env, "eth_call", [{to: pairAddress, data}, "latest"], budget, "analysis");
+  const t0r = await call(UNISWAP_V3_TOKEN0_SELECTOR_V326);
+  const t1r = await call(UNISWAP_V3_TOKEN1_SELECTOR_V326);
+  const token0 = decodeEthCallAddressV326(t0r?.result);
+  const token1 = decodeEthCallAddressV326(t1r?.result);
+
+  if (!token0 || !token1 || (token !== token0 && token !== token1)) {
+    return {
+      ...base, attempted: true, pairAddress, token0, token1,
+      requestsUsed: Math.max(0, safeNumber(budget?.totalUsed) - before),
+      status: "POOL_TOKEN_IDENTITY_UNVERIFIED"
+    };
+  }
+
+  const head = await rpc(env, "eth_blockNumber", [], budget, "analysis");
+  let toBlock = null;
+  try { if (head?.result) toBlock = Number(BigInt(head.result)); } catch (_) {}
+  if (!Number.isFinite(toBlock) || toBlock <= 0) {
+    return {
+      ...base, attempted: true, pairAddress, token0, token1,
+      requestsUsed: Math.max(0, safeNumber(budget?.totalUsed) - before),
+      status: "HEAD_UNVERIFIED"
+    };
+  }
+
+  const fromBlock = Math.max(0, toBlock - 9);
+  const logsResult = await rpc(
+    env,
+    "eth_getLogs",
+    [{
+      fromBlock: "0x" + fromBlock.toString(16),
+      toBlock: "0x" + toBlock.toString(16),
+      address: pairAddress,
+      topics: [UNISWAP_V3_SWAP_TOPIC_V326]
+    }],
+    budget,
+    "analysis"
+  );
+
+  if (!Array.isArray(logsResult?.result)) {
+    return {
+      ...base, attempted: true, pairAddress, token0, token1, fromBlock, toBlock,
+      requestsUsed: Math.max(0, safeNumber(budget?.totalUsed) - before),
+      status: "V3_LOGS_UNVERIFIED",
+      error: logsResult?.error || null
+    };
+  }
+
+  const unique = new Map();
+  for (const log of logsResult.result) {
+    const data = String(log?.data || "").replace(/^0x/i, "");
+    if (data.length < 128) continue;
+    const amount0 = signedInt256V326(data.slice(0, 64));
+    const amount1 = signedInt256V326(data.slice(64, 128));
+    if (typeof amount0 !== "bigint" || typeof amount1 !== "bigint") continue;
+    const candidateRaw = token === token0 ? amount0 : amount1;
+    if (candidateRaw === 0n) continue;
+    const candidateAmount = decimalFromSignedRawV326(candidateRaw, decimals);
+    if (!Number.isFinite(candidateAmount) || candidateAmount === 0) continue;
+    const usd = Math.abs(candidateAmount) * priceUsd;
+    if (!Number.isFinite(usd) || usd <= 0) continue;
+    const side = candidateRaw < 0n ? "BUY" : "SELL"; // pool sends token => trader buys token
+    const key = `${String(log?.transactionHash || "").toLowerCase()}|${String(log?.logIndex ?? "")}`;
+    if (!unique.has(key)) unique.set(key, {side, usd});
+  }
+
+  let buys = 0, sells = 0, buyUsd = 0, sellUsd = 0;
+  for (const row of unique.values()) {
+    if (row.side === "BUY") { buys++; buyUsd += row.usd; }
+    else if (row.side === "SELL") { sells++; sellUsd += row.usd; }
+  }
+
+  return {
+    ...base,
+    attempted: true,
+    verified: true,
+    status: unique.size ? "VERIFIED_RECENT_EXACT_POOL_WINDOW" : "VERIFIED_ZERO_SWAPS_RECENT_WINDOW",
+    pairAddress, token0, token1, fromBlock, toBlock,
+    swaps: unique.size, buys, sells, buyUsd, sellUsd, netUsd: buyUsd - sellUsd,
+    requestsUsed: Math.max(0, safeNumber(budget?.totalUsed) - before)
+  };
+}
+
 function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 = null) {
   const standard = telegramMessage(candidate);
   const lines = String(standard || "").split("\n");
@@ -63961,16 +64144,40 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   }
 
   const d = directionalDiagnosticsV325 || candidate?.manualDirectionalDiagnosticsV324 || null;
-  if (d && !lines.some(line => String(line).includes("Directional USD diagnostics — V325"))) {
+  if (d && !lines.some(line => String(line).includes("Directional USD diagnostics — V326"))) {
     lines.push(
       "",
-      "🔧 <b>Directional USD diagnostics — V325</b>",
+      "🔧 <b>Directional USD diagnostics — V326</b>",
       `GeckoTerminal: <b>${d?.gecko?.attempted === true ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(d?.gecko?.status || "NO_STATUS")}</b> | HTTP <b>${escapeHtml(d?.gecko?.httpStatus ?? "N/A")}</b> | returned <b>${safeNumber(d?.gecko?.returnedCount)}</b> | accepted <b>${safeNumber(d?.gecko?.acceptedCount)}</b>`,
       `Bitquery: <b>${d?.bitquery?.attempted === true ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(d?.bitquery?.status || "NO_STATUS")}</b> | HTTP <b>${escapeHtml(d?.bitquery?.httpStatus ?? "N/A")}</b> | raw rows <b>${safeNumber(d?.bitquery?.rawRows)}</b> | accepted <b>${safeNumber(d?.bitquery?.rows)}</b>`,
       d?.gecko?.poolAddress
         ? `Selected pool: <code>${escapeHtml(d.gecko.poolAddress)}</code>`
         : "Selected pool: <b>UNVERIFIED</b>",
       `Result: <b>${d?.gecko?.verifiedAnyWindow === true || d?.bitquery?.verified === true ? "VERIFIED_DIRECTIONAL_DATA" : "NO_VERIFIED_DIRECTIONAL_DATA"}</b>`
+    );
+  }
+
+  const v3 = candidate?.nativeV3DirectionalV326;
+  if (v3) {
+    lines.push(
+      "",
+      "🧱 <b>Native Uniswap V3 Directional USD — V326</b>",
+      `Status: <b>${escapeHtml(v3?.status || "UNVERIFIED")}</b>`,
+      v3?.pairAddress ? `Pool: <code>${escapeHtml(v3.pairAddress)}</code>` : "Pool: <b>UNVERIFIED</b>",
+      v3?.verified === true && Number.isFinite(Number(v3?.fromBlock)) && Number.isFinite(Number(v3?.toBlock))
+        ? `Observed exact block window: <b>${safeNumber(v3.fromBlock)}–${safeNumber(v3.toBlock)}</b>`
+        : "Observed exact block window: <b>UNVERIFIED</b>",
+      v3?.verified === true
+        ? `🟢 Observed Buy USD: <b>${money(v3.buyUsd)}</b> (${safeNumber(v3.buys)} swaps)`
+        : "🟢 Observed Buy USD: <b>UNVERIFIED</b>",
+      v3?.verified === true
+        ? `🔴 Observed Sell USD: <b>${money(v3.sellUsd)}</b> (${safeNumber(v3.sells)} swaps)`
+        : "🔴 Observed Sell USD: <b>UNVERIFIED</b>",
+      v3?.verified === true
+        ? `📈 Observed Net USD: <b>${money(v3.netUsd)}</b>`
+        : "📈 Observed Net USD: <b>UNVERIFIED</b>",
+      `Requests used: <b>${safeNumber(v3?.requestsUsed)}</b>`,
+      "ℹ️ <i>Native V3 values cover only this bounded exact-pool observation window; they are not claimed as complete 5m/1h/6h/24h totals.</i>"
     );
   }
 
@@ -64256,6 +64463,18 @@ async function telegramFreshAnalyseV276(
       );
     }
   }
+
+  /* V326: independent native Uniswap V3 exact-pool observation.
+   * This does not alter qualification/scoring and does not claim historical completeness.
+   */
+  const manualNativeV3ResultV326 =
+    await manualNativeV3DirectionalV326(
+      env,
+      budget,
+      candidate
+    );
+
+  candidate.nativeV3DirectionalV326 = manualNativeV3ResultV326;
 
   const manualLiveV4ResultV283 =
     await manualLiveV4EnrichmentV283(
