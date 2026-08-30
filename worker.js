@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V380
- * AUTHORITATIVE RUNTIME VERSION: V380
+ * Robinhood Chain Meme Hunter — V381
+ * AUTHORITATIVE RUNTIME VERSION: V381
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V380";
+const VERSION = "V381";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -69949,6 +69949,277 @@ async function handleRequest(
         : allMatch
           ? "Independent recomputation from retained raw trade buckets matches the collector's normal rolling-window aggregation for all comparable fields."
           : "At least one comparable rolling-window field differs from an independent recomputation of retained raw trade buckets. Inspect per-window deltas before changing collector logic.",
+      timestamp: now()
+    });
+  }
+
+
+  if (path === "/v3route-aggregation-diagnostic") {
+    const token = normalize(url.searchParams.get("token") || "");
+    const maxTxRaw = Number(url.searchParams.get("maxTx"));
+    const maxTx = Number.isFinite(maxTxRaw)
+      ? Math.max(1, Math.min(20, Math.trunc(maxTxRaw)))
+      : 12;
+
+    if (!isAddress(token)) {
+      return jsonResponse({
+        version: VERSION,
+        diagnostic: "V3_MULTI_POOL_ROUTE_AWARE_AGGREGATION_V381",
+        safe: true,
+        readOnly: true,
+        status: "INVALID_TOKEN_V381"
+      }, 400);
+    }
+
+    if (!env?.V3_LIVE_COLLECTOR) {
+      return jsonResponse({
+        version: VERSION,
+        diagnostic: "V3_MULTI_POOL_ROUTE_AWARE_AGGREGATION_V381",
+        safe: true,
+        readOnly: true,
+        status: "V3_LIVE_COLLECTOR_BINDING_UNAVAILABLE_V381"
+      }, 503);
+    }
+
+    // Reuse the already-proven V379 discovery path first.
+    const discoveryUrl = new URL(url.toString());
+    discoveryUrl.pathname = "/v3multipool-diagnostic";
+    discoveryUrl.searchParams.set("token", token);
+    discoveryUrl.searchParams.set("maxTx", String(maxTx));
+
+    let discovery;
+    try {
+      const req = new Request(discoveryUrl.toString(), {
+        method: "GET",
+        headers: request.headers
+      });
+      const resp = await handleRequest(req, env, ctx);
+      discovery = await resp.json();
+    } catch (e) {
+      return jsonResponse({
+        version: VERSION,
+        diagnostic: "V3_MULTI_POOL_ROUTE_AWARE_AGGREGATION_V381",
+        safe: true,
+        readOnly: true,
+        token,
+        error: String(e?.message || e || "DISCOVERY_FAILED"),
+        status: "MULTI_POOL_DISCOVERY_FAILED_V381"
+      }, 500);
+    }
+
+    const verifiedPools = Array.isArray(discovery?.pools)
+      ? discovery.pools.filter(p => p?.factoryVerified === true && isAddress(p?.pool))
+      : [];
+
+    const poolByAddress = new Map(
+      verifiedPools.map(p => [normalize(p.pool), p])
+    );
+
+    const txs = Array.isArray(discovery?.transactions)
+      ? discovery.transactions.filter(t => t?.receiptFound === true && isHash(t?.txHash))
+      : [];
+
+    const poolStats = {};
+    for (const p of verifiedPools) {
+      const key = normalize(p.pool);
+      poolStats[key] = {
+        pool: key,
+        token0: normalize(p.token0 || ""),
+        token1: normalize(p.token1 || ""),
+        quoteToken: normalize(p.quoteToken || ""),
+        quoteSymbol: p.quoteSymbol || "UNVERIFIED",
+        fee: p.fee ?? null,
+        isMonitoredPair: !!p.isMonitoredPair,
+        transactionsTouched: 0,
+        candidateSwapLogs: 0,
+        buys: 0,
+        sells: 0,
+        unknownDirection: 0,
+        candidateInRaw: 0,
+        candidateOutRaw: 0,
+        quoteInRaw: 0,
+        quoteOutRaw: 0
+      };
+    }
+
+    const transactionResults = [];
+    let receiptRequests = 0;
+    let totalCandidateSwapLogs = 0;
+    let routeMultiPoolTransactions = 0;
+    let routeSinglePoolTransactions = 0;
+    let routeUnknownTransactions = 0;
+
+    for (const tx of txs) {
+      let receipt = null;
+      try {
+        receiptRequests++;
+        const rpc = await rpcCall(env, "eth_getTransactionReceipt", [tx.txHash]);
+        receipt = rpc?.result || null;
+      } catch {}
+
+      if (!receipt || !Array.isArray(receipt.logs)) {
+        transactionResults.push({
+          txHash: tx.txHash,
+          receiptFound: false,
+          candidatePoolsTouched: [],
+          candidatePoolCount: 0,
+          routeClass: "RECEIPT_UNAVAILABLE_V381"
+        });
+        continue;
+      }
+
+      const perTxPools = new Set();
+      const decodedSwaps = [];
+
+      for (const log of receipt.logs) {
+        const topic0 = normalize(log?.topics?.[0] || "");
+        const emitter = normalize(log?.address || "");
+        if (topic0 !== normalize(UNISWAP_V3_SWAP_TOPIC) || !poolByAddress.has(emitter)) continue;
+
+        const meta = poolByAddress.get(emitter);
+        const token0 = normalize(meta?.token0 || "");
+        const token1 = normalize(meta?.token1 || "");
+        const candidateIs0 = token0 === token;
+        const candidateIs1 = token1 === token;
+        if (!candidateIs0 && !candidateIs1) continue;
+
+        const dataHex = String(log?.data || "");
+        if (!/^0x[0-9a-fA-F]{128,}$/.test(dataHex)) continue;
+
+        const words = dataHex.slice(2).match(/.{64}/g) || [];
+        if (words.length < 2) continue;
+
+        const decodeSigned256 = (word) => {
+          let x = BigInt("0x" + word);
+          if (x >= (1n << 255n)) x -= (1n << 256n);
+          return x;
+        };
+
+        let amount0, amount1;
+        try {
+          amount0 = decodeSigned256(words[0]);
+          amount1 = decodeSigned256(words[1]);
+        } catch {
+          continue;
+        }
+
+        const candidateDelta = candidateIs0 ? amount0 : amount1;
+        const quoteDelta = candidateIs0 ? amount1 : amount0;
+
+        const side = candidateDelta < 0n
+          ? "BUY"
+          : candidateDelta > 0n
+            ? "SELL"
+            : "UNKNOWN";
+
+        perTxPools.add(emitter);
+        totalCandidateSwapLogs++;
+
+        const ps = poolStats[emitter];
+        if (ps) {
+          ps.candidateSwapLogs++;
+          if (side === "BUY") ps.buys++;
+          else if (side === "SELL") ps.sells++;
+          else ps.unknownDirection++;
+
+          if (candidateDelta > 0n) ps.candidateInRaw += Number(candidateDelta > BigInt(Number.MAX_SAFE_INTEGER) ? 0n : candidateDelta);
+          if (candidateDelta < 0n) {
+            const v = -candidateDelta;
+            ps.candidateOutRaw += Number(v > BigInt(Number.MAX_SAFE_INTEGER) ? 0n : v);
+          }
+          if (quoteDelta > 0n) ps.quoteInRaw += Number(quoteDelta > BigInt(Number.MAX_SAFE_INTEGER) ? 0n : quoteDelta);
+          if (quoteDelta < 0n) {
+            const v = -quoteDelta;
+            ps.quoteOutRaw += Number(v > BigInt(Number.MAX_SAFE_INTEGER) ? 0n : v);
+          }
+        }
+
+        decodedSwaps.push({
+          pool: emitter,
+          logIndex: log?.logIndex ?? null,
+          side,
+          candidateTokenIs: candidateIs0 ? "token0" : "token1",
+          amount0Raw: amount0.toString(),
+          amount1Raw: amount1.toString(),
+          candidateDeltaRaw: candidateDelta.toString(),
+          quoteDeltaRaw: quoteDelta.toString(),
+          quoteSymbol: meta?.quoteSymbol || "UNVERIFIED"
+        });
+      }
+
+      for (const pool of perTxPools) {
+        if (poolStats[pool]) poolStats[pool].transactionsTouched++;
+      }
+
+      let routeClass = "NO_VERIFIED_CANDIDATE_POOL_SWAP_V381";
+      if (perTxPools.size === 1) {
+        routeClass = "SINGLE_VERIFIED_CANDIDATE_POOL_V381";
+        routeSinglePoolTransactions++;
+      } else if (perTxPools.size > 1) {
+        routeClass = "MULTI_VERIFIED_CANDIDATE_POOL_ROUTE_V381";
+        routeMultiPoolTransactions++;
+      } else {
+        routeUnknownTransactions++;
+      }
+
+      transactionResults.push({
+        txHash: tx.txHash,
+        blockNumber: receipt.blockNumber ? Number.parseInt(receipt.blockNumber, 16) : null,
+        receiptFound: true,
+        candidatePoolsTouched: Array.from(perTxPools),
+        candidatePoolCount: perTxPools.size,
+        routeClass,
+        candidateSwapLogs: decodedSwaps.length,
+        decodedSwaps
+      });
+    }
+
+    const pools = Object.values(poolStats);
+    const aggregateBuys = pools.reduce((a, p) => a + p.buys, 0);
+    const aggregateSells = pools.reduce((a, p) => a + p.sells, 0);
+
+    // Route-aware token-level count: one touched transaction = one routed token-flow event,
+    // regardless of how many candidate pools were traversed in that transaction.
+    const tokenLevelTransactions = transactionResults.filter(
+      x => x.receiptFound && x.candidatePoolCount > 0
+    ).length;
+
+    return jsonResponse({
+      version: VERSION,
+      diagnostic: "V3_MULTI_POOL_ROUTE_AWARE_AGGREGATION_V381",
+      safe: true,
+      readOnly: true,
+      workersKvWrites: 0,
+      durableObjectTradeWrites: 0,
+      scoringMutated: false,
+      collectorMutated: false,
+      token,
+      discoverySource: "V379_FACTORY_VERIFIED_OBSERVED_ROUTE_DISCOVERY",
+      sampleLimit: maxTx,
+      sampledTransactions: txs.length,
+      receiptRequests,
+      verifiedCandidatePools: pools.length,
+      routeSummary: {
+        tokenLevelTransactions,
+        singlePoolTransactions: routeSinglePoolTransactions,
+        multiPoolTransactions: routeMultiPoolTransactions,
+        noVerifiedCandidatePoolTransactions: routeUnknownTransactions,
+        totalCandidateSwapLogs,
+        poolLevelBuySwapLogs: aggregateBuys,
+        poolLevelSellSwapLogs: aggregateSells,
+        warning: "POOL_LEVEL_SWAP_COUNTS_ARE_NOT_TOKEN_LEVEL_TRANSACTION_COUNTS_V381"
+      },
+      pools,
+      transactions: transactionResults,
+      coverageNote: "OBSERVED_RETAINED_ROUTE_SAMPLE_ONLY_NOT_EXHAUSTIVE_POOL_ENUMERATION_V381",
+      status: pools.length > 1
+        ? "MULTI_POOL_ROUTE_AWARE_AGGREGATION_PROVEN_V381"
+        : pools.length === 1
+          ? "SINGLE_VERIFIED_POOL_OBSERVED_IN_SAMPLE_V381"
+          : "NO_VERIFIED_CANDIDATE_POOLS_OBSERVED_V381",
+      interpretation: pools.length > 1
+        ? "Multiple factory-verified candidate pools were observed. Per-pool swap counts are kept separate from route-aware token-level transaction counts so routed transactions are not double-counted."
+        : "This sample did not prove multiple candidate pools. No collector or scoring changes were made.",
       timestamp: now()
     });
   }
