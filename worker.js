@@ -1382,7 +1382,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V308";
+const VERSION = "V309";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -46132,6 +46132,145 @@ function drawdownV270(ath, current) {
   return (a - b) / a;
 }
 
+/* =========================================================
+   V309 FROZEN ENTRY-SIGNAL SNAPSHOT
+   ========================================================= */
+
+/*
+ * Freeze what the bot actually knew when a successful call was registered.
+ * This is outcome-learning telemetry only. It adds no provider requests and
+ * never backfills missing entry evidence from later observations.
+ */
+function buildEntrySignalSnapshotV309(candidate, capturedAt) {
+  const market = candidate?.market;
+  const holders = candidate?.holders;
+  const whale = holders?.whale;
+  const launch = candidate?.verifiedLaunchAgeV223;
+
+  const finiteOrNull = value => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const verifiedMarket = market?.verified === true;
+  const concentrationVerified = holders?.concentrationVerified === true;
+  const holderCountVerified =
+    holders?.countersVerified === true &&
+    finiteOrNull(holders?.holderCount) !== null;
+
+  const flowSnapshot = {};
+  for (const window of ["m5", "m15", "h1", "h6", "h12", "h24"]) {
+    const flow = market?.directionalFlow?.[window];
+    if (!flow || flow?.verified !== true) continue;
+    flowSnapshot[window] = {
+      verified: true,
+      buyVolumeUsd: finiteOrNull(flow?.buyVolumeUsd),
+      sellVolumeUsd: finiteOrNull(flow?.sellVolumeUsd),
+      netFlowUsd: finiteOrNull(flow?.netFlowUsd),
+      buyPressureUsd: finiteOrNull(flow?.buyPressureUsd)
+    };
+  }
+
+  return {
+    snapshotVersion: "V309",
+    capturedAt: finiteOrNull(capturedAt) || Date.now(),
+    frozenAtSuccessfulCall: true,
+    laterEvidenceBackfillAllowed: false,
+
+    opportunity: {
+      score: finiteOrNull(candidate?.opportunity?.score),
+      label: candidate?.opportunity?.label || null
+    },
+    momentum: {
+      score: finiteOrNull(candidate?.momentum?.score),
+      label: candidate?.momentum?.label || null,
+      verified: candidate?.momentum?.verified === true
+    },
+    confidence: {
+      score: finiteOrNull(candidate?.confidence?.score),
+      label: candidate?.confidence?.label || null
+    },
+    marketQuality: {
+      verified: candidate?.marketQuality?.verified === true,
+      score: candidate?.marketQuality?.verified === true
+        ? finiteOrNull(candidate?.marketQuality?.score)
+        : null
+    },
+    rugRisk: {
+      verified: candidate?.risk?.verified === true,
+      score: candidate?.risk?.verified === true
+        ? finiteOrNull(candidate?.risk?.score)
+        : null,
+      label: candidate?.risk?.verified === true
+        ? (candidate?.risk?.label || null)
+        : null
+    },
+
+    market: {
+      verified: verifiedMarket,
+      source: verifiedMarket ? (market?.source || null) : null,
+      priceUsd: verifiedMarket ? finiteOrNull(market?.priceUsd) : null,
+      marketCap: verifiedMarket ? finiteOrNull(market?.marketCap) : null,
+      liquidityUsd: verifiedMarket ? finiteOrNull(market?.liquidityUsd) : null,
+      volume24hUsd: verifiedMarket ? finiteOrNull(market?.volume?.h24) : null,
+      buys5m: verifiedMarket ? finiteOrNull(market?.transactions?.m5?.buys) : null,
+      sells5m: verifiedMarket ? finiteOrNull(market?.transactions?.m5?.sells) : null,
+      buys1h: verifiedMarket ? finiteOrNull(market?.transactions?.h1?.buys) : null,
+      sells1h: verifiedMarket ? finiteOrNull(market?.transactions?.h1?.sells) : null,
+      buys24h: verifiedMarket ? finiteOrNull(market?.transactions?.h24?.buys) : null,
+      sells24h: verifiedMarket ? finiteOrNull(market?.transactions?.h24?.sells) : null,
+      directionalUsdVerifiedWindows: flowSnapshot
+    },
+
+    holders: {
+      holderCountVerified,
+      holderCount: holderCountVerified ? finiteOrNull(holders?.holderCount) : null,
+      holderSource: holders?.holderSource || holders?.counterSource || null,
+      concentrationVerified,
+      topHolderPct: concentrationVerified ? finiteOrNull(whale?.topHolderPct) : null,
+      top10Pct: concentrationVerified ? finiteOrNull(whale?.top10Pct) : null,
+      concentration: concentrationVerified ? (whale?.concentration || null) : null,
+      smartMoneyCandidate: concentrationVerified && whale?.verified === true
+        ? whale?.smartMoneyCandidate === true
+        : null
+    },
+
+    whaleFlow: {
+      flow: candidate?.whaleFlow?.flow || null,
+      accumulation: candidate?.whaleFlow?.accumulation || null,
+      distribution: candidate?.whaleFlow?.distribution || null,
+      concentrationTrend: candidate?.whaleFlow?.concentrationTrend || null
+    },
+
+    activity: {
+      swaps: finiteOrNull(candidate?.activity?.swaps),
+      liquidityEvents: finiteOrNull(candidate?.activity?.liquidityEvents)
+    },
+
+    launch: {
+      verified: launch?.verified === true,
+      launchTime: launch?.verified === true ? (launch?.launchTime || null) : null,
+      launchAgeDisplay: launch?.verified === true ? (launch?.launchAgeDisplay || null) : null,
+      protocol: launch?.verified === true ? (launch?.protocol || null) : null,
+      scannerAgeDisplay: launch?.scannerAgeDisplay || null
+    },
+
+    evidenceQualityProtectionV158:
+      candidate?.evidenceQualityProtectionV158
+        ? {
+            applied: candidate.evidenceQualityProtectionV158?.applied === true,
+            originalOpportunity: finiteOrNull(candidate.evidenceQualityProtectionV158?.originalOpportunity),
+            finalOpportunity: finiteOrNull(candidate.evidenceQualityProtectionV158?.finalOpportunity),
+            originalConfidence: finiteOrNull(candidate.evidenceQualityProtectionV158?.originalConfidence),
+            finalConfidence: finiteOrNull(candidate.evidenceQualityProtectionV158?.finalConfidence),
+            reasons: Array.isArray(candidate.evidenceQualityProtectionV158?.reasons)
+              ? candidate.evidenceQualityProtectionV158.reasons.slice(0, 20)
+              : []
+          }
+        : null
+  };
+}
+
 function buildCallPerformanceRecordV270(
   candidate,
   existing = null,
@@ -46147,6 +46286,14 @@ function buildCallPerformanceRecordV270(
   const entryTimestamp =
     existing?.entryTimestamp ||
     (successfulAlert ? nowMs : null);
+
+  const entrySignalSnapshotV309 =
+    existing?.entrySignalSnapshotV309 ??
+    (
+      successfulAlert
+        ? buildEntrySignalSnapshotV309(candidate, entryTimestamp || nowMs)
+        : null
+    );
 
   const entryPriceUsd =
     existing?.entryPriceUsd ??
@@ -46250,6 +46397,7 @@ function buildCallPerformanceRecordV270(
     entryTimestamp,
     entryPriceUsd,
     entryMarketCap,
+    entrySignalSnapshotV309,
 
     entryMarketVerified:
       entryPriceUsd !== null ||
@@ -46445,6 +46593,14 @@ function registerSuccessfulCallPerformanceV270(
       record.entryPriceUsd,
     entryMarketCap:
       record.entryMarketCap,
+    entrySignalSnapshotV309:
+      record.entrySignalSnapshotV309
+        ? {
+            captured: true,
+            snapshotVersion: record.entrySignalSnapshotV309.snapshotVersion,
+            capturedAt: record.entrySignalSnapshotV309.capturedAt
+          }
+        : { captured: false },
     athPriceUsd:
       record.athPriceUsd,
     athMarketCap:
