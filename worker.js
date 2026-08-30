@@ -1,6 +1,9 @@
 /**
  * Robinhood Chain Meme Hunter
- * V297 / V2.0:
+ * V298 / V2.0:
+ * - ATH REQUEST FINALIZATION: every V295/V296 DexScreener batch attempt now replaces REQUESTING with a terminal outcome on HTTP 429, other non-OK HTTP responses, or fetch/JSON exceptions
+ * - DIAGNOSTIC ONLY: no extra requests, no cadence changes, no request-budget changes, no ATH maths changes and no provider-protection changes
+ * - TIMESTAMP INTEGRITY: lastSuccessfulCheckAt still changes only after HTTP 200 batch processing; lastAthUpdatedAt still changes only when a higher verified ATH is actually stored
  * - ATH FRESHNESS: /best now shows the exact last successful ATH batch-check time plus its age
  * - ATH CHANGE TIME: /best separately shows the last time any tracked call actually recorded a new verified ATH
  * - TRUTHFUL TIMESTAMPS: blocked/429/failed attempts do not advance the successful-check time, and a successful check with zero new highs does not advance the ATH-updated time
@@ -1338,7 +1341,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V297";
+const VERSION = "V298";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -27638,6 +27641,18 @@ async function marketData(
         "DEX"
       );
 
+      setAthFollowUpStatusV296(service, {
+        status: "HTTP_429",
+        attempted: true,
+        requestedAddresses: v295BatchAddresses.length,
+        observed: 0,
+        athUpdated: 0,
+        httpStatus: response.status,
+        cooldownUntil: service.cooldownUntil,
+        adaptiveBackoffMsV147: dexBackoffMsV147,
+        error: null
+      });
+
       const stale =
         cachedMarket(
           watched,
@@ -27711,6 +27726,16 @@ async function marketData(
     ) {
       service.lastStatus =
         `HTTP_${response.status}`;
+
+      setAthFollowUpStatusV296(service, {
+        status: `HTTP_${response.status}`,
+        attempted: true,
+        requestedAddresses: v295BatchAddresses.length,
+        observed: 0,
+        athUpdated: 0,
+        httpStatus: response.status,
+        error: null
+      });
 
       return {
         verified:
@@ -28170,6 +28195,15 @@ async function marketData(
   catch (error) {
     service.lastStatus =
       "DEXSCREENER_ERROR";
+
+    setAthFollowUpStatusV296(service, {
+      status: "REQUEST_FAILED",
+      attempted: true,
+      observed: 0,
+      athUpdated: 0,
+      httpStatus: null,
+      error: errorString(error)
+    });
 
     return {
       verified:
