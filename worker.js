@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V384
- * AUTHORITATIVE RUNTIME VERSION: V384
+ * Robinhood Chain Meme Hunter — V385
+ * AUTHORITATIVE RUNTIME VERSION: V385
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V384";
+const VERSION = "V385";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -70093,7 +70093,7 @@ async function handleRequest(
       for (const log of receipt.logs) {
         const topic0 = normalize(log?.topics?.[0] || "");
         const emitter = normalize(log?.address || "");
-        if (topic0 !== normalize(UNISWAP_V3_SWAP_TOPIC) || !poolByAddress.has(emitter)) continue;
+        if (topic0 !== normalize(UNISWAP_V3_SWAP_TOPIC_V326) || !poolByAddress.has(emitter)) continue;
 
         const meta = poolByAddress.get(emitter);
         const token0 = normalize(meta?.token0 || "");
