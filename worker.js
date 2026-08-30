@@ -1,5 +1,9 @@
 /**
- * V355 — confirmed V354 functionality plus read-only native V3 ledger diagnostic. Preserves inherited V352 Telegram diagnostic checkpoints. No scanner/pricing/scoring changes.
+ * Robinhood Chain Meme Hunter — V360
+ * AUTHORITATIVE RUNTIME VERSION: V360
+ * V360 preserves V359/V358/V355 confirmed functionality and adds the read-only Alchemy Robinhood WebSocket V3 Swap subscription capability diagnostic.
+ * No scanner, pricing, scoring, Telegram, collector, or KV persistence behavior is changed by the V360 diagnostic.
+ * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Robinhood Chain Meme Hunter
  * V351: HTTP-ONLY USD aggregation diagnostic built from confirmed-safe V348. /analyse, Telegram routing, scheduled scan, collector, scoring and persistence paths are unchanged. Adds only GET /v3usd-diagnostic?token=0xADDRESS to aggregate already-persisted V347 USD evidence with KV reads only and zero writes/external requests.
  * V353: Adds isolated Telegram /v3usd address-only reader using the already-proven V351 persisted USD diagnostic. Fixes V350 ReferenceError by using a dedicated V353 USD formatter (no out-of-scope money helper). /analyse path remains unchanged.
@@ -33,7 +37,7 @@
  * Robinhood Chain Meme Hunter
  * V319 — fixed-horizon first-success tracker initialisation fix
  *
- * CURRENT EXECUTABLE VERSION: V324
+ * HISTORICAL V324 SECTION (not current runtime version)
  * - Preserves the complete V318/V317 scanner, scoring, qualification, Telegram, KV, provider, holder, whale, Momentum, ATH, learning and request-budget behaviour.
  * - FIX: a token that already has a preliminary callPerformanceV270 record now receives fixedHorizonOutcomesV317 on its FIRST successful alert, provided it had no prior frozen entryTimestamp.
  * - Preserves forward-only semantics: records with an existing entryTimestamp are NOT retroactively initialised or backfilled.
@@ -1452,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V359";
+const VERSION = "V360";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -68539,6 +68543,203 @@ async function v3BlockscoutV2ActivityDiagnosticV359(env, tokenInput) {
   return out;
 }
 
+
+/* =========================================================
+   V360 — ALCHEMY ROBINHOOD WEBSOCKET SUBSCRIPTION CAPABILITY
+   Read-only capability diagnostic. No KV writes, no collector mutation.
+   Proves whether the configured Alchemy Robinhood endpoint accepts an
+   exact Uniswap V3 Swap log subscription for the verified token pool.
+   ========================================================= */
+
+async function v3AlchemyWebSocketDiagnosticV360(env, tokenInput) {
+  const startedAt = Date.now();
+  const token = normalize(tokenInput || "");
+  const out = {
+    version: VERSION,
+    diagnostic: "ALCHEMY_ROBINHOOD_V3_WEBSOCKET_CAPABILITY_V360",
+    safe: true,
+    writes: 0,
+    kvWrites: 0,
+    collectorMutated: false,
+    analyseMutated: false,
+    token: token || null,
+    pair: null,
+    topic: V3_SWAP_TOPIC,
+    provider: "ALCHEMY_ROBINHOOD_WEBSOCKET_ONLY",
+    apiKeyConfigured: Boolean(env.ALCHEMY_API_KEY),
+    websocketUrlExposed: false,
+    timeoutMs: 5000,
+    connectionOpened: false,
+    subscriptionAccepted: false,
+    subscriptionIdPresent: false,
+    matchingLogObservedDuringTest: false,
+    observedLog: null,
+    messagesReceived: 0,
+    status: "UNTESTED_V360",
+    timestamp: now()
+  };
+
+  if (!/^0x[a-f0-9]{40}$/.test(token)) {
+    out.status = "INVALID_TOKEN_ADDRESS_V360";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  if (!env.ALCHEMY_API_KEY) {
+    out.status = "ALCHEMY_API_KEY_NOT_CONFIGURED_V360";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  try {
+    const pairCache = await readV3PairCacheV329(env, token);
+    const pair = normalize(pairCache?.pair || pairCache?.pool || "");
+    out.pairStatus = pairCache?.status || null;
+
+    if (!/^0x[a-f0-9]{40}$/.test(pair)) {
+      out.status = "VERIFIED_V3_PAIR_NOT_AVAILABLE_V360";
+      out.elapsedMs = Date.now() - startedAt;
+      return out;
+    }
+
+    out.pair = pair;
+
+    const wsUrl = `wss://robinhood-mainnet.g.alchemy.com/v2/${String(env.ALCHEMY_API_KEY)}`;
+    let ws;
+
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch (error) {
+      out.status = "WEBSOCKET_CONSTRUCTOR_FAILED_V360";
+      out.error = String(error?.message || error).slice(0, 300);
+      out.elapsedMs = Date.now() - startedAt;
+      return out;
+    }
+
+    const result = await new Promise((resolve) => {
+      let finished = false;
+      let subscriptionId = null;
+      const finish = (extra = {}) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        try { ws.close(1000, "V360 diagnostic complete"); } catch (_) {}
+        resolve(extra);
+      };
+
+      const timer = setTimeout(() => {
+        finish({ timeout: true });
+      }, 5000);
+
+      ws.addEventListener("open", () => {
+        out.connectionOpened = true;
+        try {
+          ws.send(JSON.stringify({
+            jsonrpc: "2.0",
+            id: 360,
+            method: "eth_subscribe",
+            params: [
+              "logs",
+              {
+                address: pair,
+                topics: [V3_SWAP_TOPIC]
+              }
+            ]
+          }));
+        } catch (error) {
+          finish({ sendError: String(error?.message || error).slice(0, 300) });
+        }
+      });
+
+      ws.addEventListener("message", (event) => {
+        out.messagesReceived += 1;
+        let msg = null;
+        try {
+          msg = JSON.parse(typeof event.data === "string" ? event.data : "");
+        } catch (_) {
+          return;
+        }
+
+        if (msg?.id === 360) {
+          if (typeof msg.result === "string" && msg.result.length > 2) {
+            subscriptionId = msg.result;
+            out.subscriptionAccepted = true;
+            out.subscriptionIdPresent = true;
+            // Capability is proven by the subscription acknowledgement.
+            finish({ subscriptionIdLength: subscriptionId.length });
+            return;
+          }
+          if (msg?.error) {
+            finish({ rpcError: msg.error });
+            return;
+          }
+        }
+
+        if (msg?.method === "eth_subscription" && msg?.params?.result) {
+          const log = msg.params.result;
+          const address = normalize(log?.address || "");
+          const topic0 = normalize(log?.topics?.[0] || "");
+          if (address === pair && topic0 === normalize(V3_SWAP_TOPIC)) {
+            out.matchingLogObservedDuringTest = true;
+            out.observedLog = {
+              blockNumber: log?.blockNumber || null,
+              transactionHash: log?.transactionHash || null,
+              logIndex: log?.logIndex || null,
+              removed: log?.removed === true,
+              dataPresent: typeof log?.data === "string" && log.data.length > 2
+            };
+            finish({ liveLog: true });
+          }
+        }
+      });
+
+      ws.addEventListener("error", () => {
+        finish({ websocketError: "WEBSOCKET_ERROR_EVENT" });
+      });
+
+      ws.addEventListener("close", (event) => {
+        if (!finished) {
+          finish({
+            closedBeforeResult: true,
+            closeCode: event?.code ?? null,
+            closeReason: event?.reason || null
+          });
+        }
+      });
+    });
+
+    if (result?.rpcError) {
+      out.rpcErrorCode = result.rpcError?.code ?? null;
+      out.error = String(result.rpcError?.message || "RPC_SUBSCRIPTION_ERROR").slice(0, 300);
+      out.status = "ALCHEMY_WEBSOCKET_SUBSCRIPTION_REJECTED_V360";
+    } else if (result?.sendError) {
+      out.error = result.sendError;
+      out.status = "ALCHEMY_WEBSOCKET_SUBSCRIBE_SEND_FAILED_V360";
+    } else if (result?.websocketError) {
+      out.error = result.websocketError;
+      out.status = "ALCHEMY_WEBSOCKET_CONNECTION_FAILED_V360";
+    } else if (result?.closedBeforeResult) {
+      out.closeCode = result.closeCode;
+      out.closeReason = result.closeReason;
+      out.status = "ALCHEMY_WEBSOCKET_CLOSED_BEFORE_ACK_V360";
+    } else if (out.subscriptionAccepted) {
+      out.status = "ALCHEMY_V3_LOG_SUBSCRIPTION_VERIFIED_V360";
+    } else if (result?.timeout) {
+      out.status = out.connectionOpened
+        ? "ALCHEMY_WEBSOCKET_OPEN_NO_SUBSCRIPTION_ACK_V360"
+        : "ALCHEMY_WEBSOCKET_CONNECTION_TIMEOUT_V360";
+    } else {
+      out.status = "ALCHEMY_WEBSOCKET_CAPABILITY_UNRESOLVED_V360";
+    }
+  } catch (error) {
+    out.status = "DIAGNOSTIC_ERROR_V360";
+    out.error = String(error?.message || error).slice(0, 300);
+  }
+
+  out.elapsedMs = Date.now() - startedAt;
+  return out;
+}
+
 /* =========================================================
    ROUTER
    ========================================================= */
@@ -68734,6 +68935,19 @@ async function handleRequest(
   ) {
     return jsonResponse(
       await v3BlockscoutV2ActivityDiagnosticV359(
+        env,
+        url.searchParams.get("token") || ""
+      )
+    );
+  }
+
+
+  if (
+    path ===
+    "/v3websocket-diagnostic"
+  ) {
+    return jsonResponse(
+      await v3AlchemyWebSocketDiagnosticV360(
         env,
         url.searchParams.get("token") || ""
       )
