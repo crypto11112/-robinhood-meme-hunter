@@ -1449,7 +1449,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V350";
+const VERSION = "V348";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -66308,147 +66308,10 @@ function telegramHelpV271() {
     "<code>/performance</code> — overall tracked-call summary",
     "<code>/learning</code> — frozen signals, outcomes + sample quality",
     "<code>/horizon GUS</code> — fixed-horizon capture diagnostics",
-    "<code>/v3usd 0xADDRESS</code> — isolated persisted native V3 USD flow",
     "<code>/help</code> — command list",
     "",
     "<i>/analyse performs a fresh bounded analysis. Other V271 commands read stored evidence and do not trigger a fresh chain scan.</i>"
   ].join("\n");
-}
-
-
-/* ============================================================
-   V350 — ISOLATED PERSISTED NATIVE V3 USD READER
-   ============================================================
-   Safety boundary:
-   - address-only lookup; does not resolve symbols through scanner state
-   - one KV ledger read only
-   - zero KV writes
-   - zero RPC/provider/API/pricing requests
-   - does not invoke /analyse, V196, V291, slot0, or scheduled enrichment
-   - reads only already-persisted V347 same-cycle USD evidence
-*/
-async function isolatedNativeV3UsdMessageV350(env, argument) {
-  const startedAt = Date.now();
-  const token = normalize(String(argument || "").trim());
-  if (!isAddress(token)) {
-    return [
-      "ℹ️ <b>V350 isolated V3 USD reader</b>",
-      "",
-      "Use <code>/v3usd 0xADDRESS</code>.",
-      "",
-      "<i>Address-only by design so this diagnostic never loads scanner state or triggers token discovery.</i>"
-    ].join("\n");
-  }
-
-  const { kv } = getKV(env);
-  if (!kv) {
-    return "❌ <b>V350 V3 USD reader:</b> KV unavailable.";
-  }
-
-  const key = nativeV3SwapLedgerKeyV331(token);
-  if (!key) {
-    return "❌ <b>V350 V3 USD reader:</b> invalid ledger key.";
-  }
-
-  let parsed = null;
-  try {
-    const raw = await kv.get(key);
-    if (!raw) {
-      return [
-        "🧪 <b>V350 Isolated Native V3 USD</b>",
-        `Contract: <code>${escapeHtml(token)}</code>`,
-        "",
-        "Ledger: <b>NOT FOUND</b>",
-        "External requests: <b>0</b> | KV writes: <b>0</b>"
-      ].join("\n");
-    }
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    return [
-      "🧪 <b>V350 Isolated Native V3 USD</b>",
-      `Contract: <code>${escapeHtml(token)}</code>`,
-      "",
-      `Ledger read: <b>ERROR</b> — ${escapeHtml(String(error?.message || error).slice(0, 160))}`,
-      "External requests: <b>0</b> | KV writes: <b>0</b>"
-    ].join("\n");
-  }
-
-  const records = Array.isArray(parsed?.records) ? parsed.records : [];
-  const verified = records.filter(row =>
-    row?.sameCycleUsdVerifiedV347 === true &&
-    Number.isFinite(Number(row?.sameCycleUsdV347)) &&
-    Number(row.sameCycleUsdV347) > 0
-  );
-  const quoteReady = records.filter(row =>
-    row?.quoteAmountVerifiedV336 === true &&
-    Number.isFinite(Number(row?.quoteAmount)) &&
-    Number(row.quoteAmount) > 0
-  );
-  const timestamped = records.filter(row => nativeV3VerifiedTimestampMsV334(row));
-
-  const windows = [
-    ["5m", 5 * 60 * 1000],
-    ["15m", 15 * 60 * 1000],
-    ["1h", 60 * 60 * 1000],
-    ["6h", 6 * 60 * 60 * 1000],
-    ["24h", 24 * 60 * 60 * 1000]
-  ];
-  const nowMs = Date.now();
-
-  function aggregate(rows) {
-    let buyUsd = 0, sellUsd = 0, buys = 0, sells = 0;
-    for (const row of rows) {
-      const usd = Number(row?.sameCycleUsdV347);
-      if (!Number.isFinite(usd) || usd <= 0 || row?.sameCycleUsdVerifiedV347 !== true) continue;
-      const side = String(row?.side || "").toUpperCase();
-      if (side === "BUY") { buyUsd += usd; buys++; }
-      else if (side === "SELL") { sellUsd += usd; sells++; }
-    }
-    const total = buyUsd + sellUsd;
-    return {
-      buyUsd, sellUsd, buys, sells,
-      netUsd: buyUsd - sellUsd,
-      buyPressure: total > 0 ? (buyUsd / total) * 100 : null
-    };
-  }
-
-  const all = aggregate(verified);
-  const lines = [
-    "🧪 <b>V350 Isolated Native V3 USD</b>",
-    `Contract: <code>${escapeHtml(token)}</code>`,
-    "",
-    `🗃 Ledger: <b>${records.length} records</b>`,
-    `🕒 Verified timestamps: <b>${timestamped.length}/${records.length}</b>`,
-    `🧾 Exact quote evidence: <b>${quoteReady.length}/${records.length}</b>`,
-    `💲 Persisted same-cycle USD: <b>${verified.length}/${records.length} VERIFIED</b>`,
-    "",
-    `🟢 BUY USD: <b>${money(all.buyUsd)}</b> (${all.buys})`,
-    `🔴 SELL USD: <b>${money(all.sellUsd)}</b> (${all.sells})`,
-    `↔️ NET: <b>${money(all.netUsd)}</b>`,
-    `📊 Buy pressure: <b>${Number.isFinite(all.buyPressure) ? all.buyPressure.toFixed(2) + "%" : "UNVERIFIED"}</b>`,
-    "",
-    "⏱ <b>Rolling verified USD — PARTIAL COVERAGE</b>"
-  ];
-
-  for (const [label, span] of windows) {
-    const rows = verified.filter(row => {
-      const ts = nativeV3VerifiedTimestampMsV334(row);
-      return Number.isFinite(ts) && ts <= nowMs && (nowMs - ts) <= span;
-    });
-    const a = aggregate(rows);
-    lines.push(
-      `• ${label}: 🟢 ${money(a.buyUsd)} | 🔴 ${money(a.sellUsd)} | Net ${money(a.netUsd)} | BP ${Number.isFinite(a.buyPressure) ? a.buyPressure.toFixed(1) + "%" : "UNVERIFIED"} (${rows.length})`
-    );
-  }
-
-  const bases = [...new Set(verified.map(r => String(r?.sameCycleUsdBasisV347 || r?.usdBasisV347 || "VERIFIED_SAME_CYCLE_REFERENCE_V347")).filter(Boolean))];
-  lines.push(
-    "",
-    `Evidence basis: <b>${escapeHtml(bases.slice(0, 2).join(" + ") || "VERIFIED_SAME_CYCLE_REFERENCE_V347")}</b>`,
-    "⚠️ <i>Verified persisted same-cycle/current-reference valuation; NOT exact historical-block USD.</i>",
-    `🔒 Isolation: <b>1 KV read | 0 KV writes | 0 external requests</b> | ${Date.now() - startedAt} ms`
-  );
-  return lines.join("\n");
 }
 
 function parseTelegramCommandV271(
@@ -66610,35 +66473,6 @@ async function telegramCommandReplyV271(
       ignored: true,
       reason:
         "NOT_A_COMMAND"
-    };
-  }
-
-  /* V350: isolate /v3usd before the normal scanner-state read. */
-  if (parsed.command === "/v3usd") {
-    const reply = await isolatedNativeV3UsdMessageV350(env, parsed.argument);
-    if (diagnosticV273) {
-      diagnosticV273.replyAttempted = true;
-      diagnosticV273.scannerBudgetConsumed = false;
-      diagnosticV273.externalProviderRequestsAdded = 0;
-    }
-    const result = await sendTelegramManualReplyV292(env, reply);
-    if (diagnosticV273) {
-      diagnosticV273.replySuccess = result?.success === true;
-      diagnosticV273.telegramStatus = result?.status || null;
-      diagnosticV273.telegramMode = result?.mode || null;
-      diagnosticV273.telegramError = result?.error || null;
-      diagnosticV273.result = result?.success === true ? "V350_V3USD_REPLY_SENT" : "V350_V3USD_REPLY_FAILED";
-    }
-    return {
-      success: result?.success === true,
-      ignored: false,
-      command: parsed.command,
-      argument: parsed.argument,
-      telegramStatus: result?.status || null,
-      telegramMode: result?.mode || null,
-      scannerBudgetConsumed: false,
-      externalProviderRequestsAdded: 0,
-      v350Isolation: "ONE_LEDGER_KV_READ_ONLY"
     };
   }
 
