@@ -1,7 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V370
- * AUTHORITATIVE RUNTIME VERSION: V370
- * V369 builds directly on the confirmed V368 baseline and fixes integrity-era accounting. V369 creates a separate block-gap-protected coverage epoch that starts only when V369 has both the exact V3 Swap-log subscription and newHeads subscription accepted. Older V366/V367 continuous time can no longer make a V369 integrity window FULL. Any reconnect, rejected head subscription, manual stop, or detected head gap resets the V369 integrity epoch. No paid provider, new binding, per-swap Workers KV write, historical backfill, or live-flow score mutation is added.
+ * Robinhood Chain Meme Hunter — V371
+ * AUTHORITATIVE RUNTIME VERSION: V371
+ * V371 builds from the confirmed V370 collector and corrects the newHeads integrity model: skipped head numbers are recorded as notification gaps, not automatically treated as missing V3 Swap logs. A separate V371 integrity epoch is protected by dual-subscription acceptance plus a 30-second newHeads liveness watchdog. Socket/subscription failure or a genuinely stale head stream resets coverage. Existing bindings, Durable Object trade storage, zero per-swap Workers KV writes, and unchanged scoring are preserved.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Robinhood Chain Meme Hunter
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V370";
+const VERSION = "V371";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64637,7 +64637,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     const coverageMinutesV366 = Math.floor(safeNumber(liveV3V365?.continuousCoverageMs) / 60000);
     evidence.push(`🟢 Coverage clock: <b>${liveV3V365?.coverageActive===true ? "ACTIVE" : "INTERRUPTED"}</b> | continuous <b>${coverageMinutesV366}m</b> | pre-V364 history not backfilled`);
     evidence.push(`🧮 Live swaps captured: <b>${safeNumber(liveV3V365?.swapsCaptured)}</b> | Workers KV writes: <b>${safeNumber(liveV3V365?.workersKvWrites)}</b> | interruptions: <b>${safeNumber(liveV3V365?.interruptionsSinceV366)}</b>`);
-    evidence.push(`🧱 V369 block-gap guard: <b>${liveV3V365?.headSubscriptionAccepted===true ? "ACTIVE" : "UNVERIFIED"}</b> | heads <b>${safeNumber(liveV3V365?.headsObserved)}</b> | detected gaps <b>${safeNumber(liveV3V365?.headGapsDetected)}</b>${Number.isFinite(Number(liveV3V365?.lastHeadBlock)) ? ` | head <b>${safeNumber(liveV3V365.lastHeadBlock)}</b>` : ""}`);
+    evidence.push(`🧱 V371 head-liveness guard: <b>${liveV3V365?.headSubscriptionAccepted===true ? "ACTIVE" : "UNVERIFIED"}</b> | heads <b>${safeNumber(liveV3V365?.headsObserved)}</b> | head notification gaps <b>${safeNumber(liveV3V365?.headGapsDetected)}</b>${Number.isFinite(Number(liveV3V365?.lastHeadBlock)) ? ` | head <b>${safeNumber(liveV3V365.lastHeadBlock)}</b>` : ""}`);
     const coverageGateV367 = candidate?.liveV3CoverageEvidenceV367 || null;
     const completeV367 = Array.isArray(coverageGateV367?.completeWindows) ? coverageGateV367.completeWindows : [];
     evidence.push(`🛡 Integrity coverage gate V369: <b>${completeV367.length ? completeV367.join(", ") : "NO FULL WINDOWS YET"}</b> eligible as integrity-complete evidence`);
@@ -69543,6 +69543,8 @@ async function scheduledScan(
 
 const V3_LIVE_DO_BINDING_V363 = "V3_LIVE_COLLECTOR";
 const V3_LIVE_RECONNECT_MS_V363 = 15000;
+const V3_HEAD_STALE_MS_V371 = 30000;
+const V3_HEAD_WATCHDOG_MS_V371 = 15000;
 
 async function v3LiveCollectorConfigV363(env, tokenInput) {
   const token = normalize(tokenInput || "");
@@ -69604,6 +69606,7 @@ export class V3LiveCollectorV363 {
     this.subscriptionId = null;
     this.headSubscriptionId = null;
     this.processing = Promise.resolve();
+    this.reconnectPending = false;
   }
 
   async fetch(request) {
@@ -69623,19 +69626,21 @@ export class V3LiveCollectorV363 {
       await this.state.storage.put("config", cfg);
       await this.state.storage.put("enabled", true);
       await this.connect();
-      // V369 deployment-safe epoch bootstrap: if an already-open dual subscription survives the
-      // start request, begin the V369 integrity clock now rather than inheriting pre-V369 time.
+      // V371 starts a fresh integrity epoch under the liveness-watchdog model.
+      // Never inherit V369/V370 elapsed integrity time into V371.
       const connAfterStart = await this.state.storage.get("connection") || {};
       if (connAfterStart.connected===true && connAfterStart.logSubscriptionAccepted===true && connAfterStart.headSubscriptionAccepted===true) {
-        const integrity = await this.state.storage.get("v369:integrityCoverage") || {};
-        if (integrity.active!==true || !Number.isFinite(Number(integrity.continuousStartAt))) await this.markIntegrityConnectedV369("V369_START_BOOTSTRAP_DUAL_ALREADY_ACCEPTED");
+        const integrity = await this.state.storage.get("v371:integrityCoverage") || {};
+        if (integrity.active!==true || !Number.isFinite(Number(integrity.continuousStartAt))) await this.markIntegrityConnectedV371("V371_START_BOOTSTRAP_DUAL_ALREADY_ACCEPTED");
+        await this.state.storage.setAlarm(Date.now()+V3_HEAD_WATCHDOG_MS_V371);
       }
-      return Response.json(await this.status("START_REQUESTED_V369"));
+      return Response.json(await this.status("START_REQUESTED_V371"));
     }
     if (url.pathname === "/stop") {
       await this.state.storage.put("enabled", false);
       await this.markCoverageGapV366("MANUAL_STOP_V366");
       await this.markIntegrityGapV369("MANUAL_STOP_V369");
+      await this.markIntegrityGapV371("MANUAL_STOP_V371");
       try { this.ws?.close(1000,"V363 stopped"); } catch (_) {}
       this.ws = null; this.subscriptionId = null; this.headSubscriptionId = null;
       await this.state.storage.put("connection", {connected:false,subscriptionAccepted:false,logSubscriptionAccepted:false,headSubscriptionAccepted:false,stoppedAt:Date.now()});
@@ -69648,7 +69653,23 @@ export class V3LiveCollectorV363 {
 
   async alarm() {
     const enabled = await this.state.storage.get("enabled");
-    if (enabled === true) await this.connect();
+    if (enabled !== true) return;
+    const conn = await this.state.storage.get("connection") || {};
+    const heads = await this.state.storage.get("v368:heads") || {};
+    const dualAccepted = conn.connected===true && conn.logSubscriptionAccepted===true && conn.headSubscriptionAccepted===true;
+    const lastHeadAt = Number(heads.lastHeadAt);
+    const headAgeMs = Number.isFinite(lastHeadAt) ? Math.max(0,Date.now()-lastHeadAt) : null;
+    if (dualAccepted && headAgeMs!==null && headAgeMs > V3_HEAD_STALE_MS_V371) {
+      await this.markCoverageGapV366(`NEWHEADS_STALE_V371_${Math.round(headAgeMs)}MS`);
+      await this.markIntegrityGapV369(`NEWHEADS_STALE_V371_${Math.round(headAgeMs)}MS`);
+      await this.markIntegrityGapV371(`NEWHEADS_STALE_V371_${Math.round(headAgeMs)}MS`);
+      try { this.ws?.close(1012,"V371 head stream stale"); } catch (_) {}
+      this.ws=null; this.subscriptionId=null; this.headSubscriptionId=null;
+      await this.scheduleReconnect(`NEWHEADS_STALE_V371_${Math.round(headAgeMs)}MS`);
+      return;
+    }
+    if (!dualAccepted || !this.ws || this.ws.readyState!==WebSocket.OPEN) await this.connect();
+    await this.state.storage.setAlarm(Date.now()+V3_HEAD_WATCHDOG_MS_V371);
   }
 
   async status(overrideStatus=null) {
@@ -69658,12 +69679,12 @@ export class V3LiveCollectorV363 {
     const stats = await this.state.storage.get("stats") || {};
     const cov=await this.state.storage.get("v366:coverage")||{};
     const heads=await this.state.storage.get("v368:heads")||{};
-    const integrity=await this.state.storage.get("v369:integrityCoverage")||{};
+    const integrity=await this.state.storage.get("v371:integrityCoverage")||{};
     const dualAccepted=conn.connected===true&&conn.logSubscriptionAccepted===true&&conn.headSubscriptionAccepted===true;
     const coverageActive=integrity.active===true&&dualAccepted;
     const coverageStartAt=coverageActive&&Number.isFinite(Number(integrity.continuousStartAt))?Number(integrity.continuousStartAt):null;
     const legacyCoverageStartAt=cov.active===true&&Number.isFinite(Number(cov.continuousStartAt))?Number(cov.continuousStartAt):null;
-    return {version:VERSION,collector:"DURABLE_OBJECT_ALCHEMY_V3_LIVE_V369",status:overrideStatus||conn.status||"IDLE_V363",enabled:enabled===true,token:cfg?.token||null,pair:cfg?.pair||null,connectionOpened:conn.connected===true,subscriptionAccepted:conn.subscriptionAccepted===true,subscriptionIdPresent:Boolean(conn.subscriptionIdPresent),logSubscriptionAccepted:conn.logSubscriptionAccepted===true,headSubscriptionAccepted:conn.headSubscriptionAccepted===true,headSubscriptionIdPresent:Boolean(conn.headSubscriptionIdPresent),lastHeadBlock:Number.isFinite(Number(heads.lastHeadBlock))?Number(heads.lastHeadBlock):null,headsObserved:safeNumber(heads.headsObserved),headGapsDetected:safeNumber(heads.gapsDetected),lastHeadGapAt:heads.lastGapAt||null,lastHeadGapFrom:heads.lastGapFrom??null,lastHeadGapTo:heads.lastGapTo??null,lastConnectedAt:conn.lastConnectedAt||null,lastMessageAt:conn.lastMessageAt||null,lastSwapAt:stats.lastSwapAt||null,lastTrade:stats.lastTrade||null,swapsCaptured:safeNumber(stats.swapsCaptured),buysCaptured:safeNumber(stats.buysCaptured),sellsCaptured:safeNumber(stats.sellsCaptured),usdVerifiedCaptured:safeNumber(stats.usdVerifiedCaptured),reconnects:safeNumber(stats.reconnects),lastError:conn.lastError||null,coverageActive,continuousCoverageStartAt:coverageStartAt,continuousCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,continuousCoverageMs:coverageStartAt!==null?Math.max(0,Date.now()-coverageStartAt):0,integrityCoverageStartAt:coverageStartAt,integrityCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,integrityCoverageMs:coverageStartAt!==null?Math.max(0,Date.now()-coverageStartAt):0,integrityInterruptionsSinceV369:safeNumber(integrity.interruptions),lastIntegrityGapAt:integrity.lastGapAt||null,lastIntegrityGapReason:integrity.lastGapReason||null,legacyV366CoverageStartAt:legacyCoverageStartAt,legacyV366CoverageStartIso:legacyCoverageStartAt!==null?new Date(legacyCoverageStartAt).toISOString():null,interruptionsSinceV366:safeNumber(cov.interruptions),lastCoverageGapAt:cov.lastGapAt||null,lastCoverageGapReason:cov.lastGapReason||null,coverageIntegrity:"V369_EPOCH_PLUS_V3_LOGS_PLUS_NEWHEADS_CONTINUITY",kvBinding:getKV(this.env)?.binding||null};
+    return {version:VERSION,collector:"DURABLE_OBJECT_ALCHEMY_V3_LIVE_V371",status:overrideStatus||conn.status||"IDLE_V363",enabled:enabled===true,token:cfg?.token||null,pair:cfg?.pair||null,connectionOpened:conn.connected===true,subscriptionAccepted:conn.subscriptionAccepted===true,subscriptionIdPresent:Boolean(conn.subscriptionIdPresent),logSubscriptionAccepted:conn.logSubscriptionAccepted===true,headSubscriptionAccepted:conn.headSubscriptionAccepted===true,headSubscriptionIdPresent:Boolean(conn.headSubscriptionIdPresent),lastHeadBlock:Number.isFinite(Number(heads.lastHeadBlock))?Number(heads.lastHeadBlock):null,headsObserved:safeNumber(heads.headsObserved),headGapsDetected:safeNumber(heads.gapsDetected),lastHeadGapAt:heads.lastGapAt||null,lastHeadGapFrom:heads.lastGapFrom??null,lastHeadGapTo:heads.lastGapTo??null,lastHeadGapSize:safeNumber(heads.lastGapSize),lastHeadGapClassification:heads.lastGapClassification||null,headAgeMs:Number.isFinite(Number(heads.lastHeadAt))?Math.max(0,Date.now()-Number(heads.lastHeadAt)):null,headStaleThresholdMs:V3_HEAD_STALE_MS_V371,lastConnectedAt:conn.lastConnectedAt||null,lastMessageAt:conn.lastMessageAt||null,lastSwapAt:stats.lastSwapAt||null,lastTrade:stats.lastTrade||null,swapsCaptured:safeNumber(stats.swapsCaptured),buysCaptured:safeNumber(stats.buysCaptured),sellsCaptured:safeNumber(stats.sellsCaptured),usdVerifiedCaptured:safeNumber(stats.usdVerifiedCaptured),reconnects:safeNumber(stats.reconnects),lastError:conn.lastError||null,coverageActive,continuousCoverageStartAt:coverageStartAt,continuousCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,continuousCoverageMs:coverageStartAt!==null?Math.max(0,Date.now()-coverageStartAt):0,integrityCoverageStartAt:coverageStartAt,integrityCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,integrityCoverageMs:coverageStartAt!==null?Math.max(0,Date.now()-coverageStartAt):0,integrityInterruptionsSinceV371:safeNumber(integrity.interruptions),lastIntegrityGapAt:integrity.lastGapAt||null,lastIntegrityGapReason:integrity.lastGapReason||null,legacyV366CoverageStartAt:legacyCoverageStartAt,legacyV366CoverageStartIso:legacyCoverageStartAt!==null?new Date(legacyCoverageStartAt).toISOString():null,interruptionsSinceV366:safeNumber(cov.interruptions),lastCoverageGapAt:cov.lastGapAt||null,lastCoverageGapReason:cov.lastGapReason||null,coverageIntegrity:"V371_DUAL_SUBSCRIPTIONS_PLUS_HEAD_LIVENESS_WATCHDOG",kvBinding:getKV(this.env)?.binding||null};
   }
 
   async markCoverageConnectedV366() {
@@ -69728,6 +69749,37 @@ export class V3LiveCollectorV363 {
     return integrity;
   }
 
+  async markIntegrityConnectedV371(reason="DUAL_SUBSCRIPTIONS_ACCEPTED_V371") {
+    const now = Date.now();
+    const integrity = await this.state.storage.get("v371:integrityCoverage") || {};
+    if (integrity.active !== true || !Number.isFinite(Number(integrity.continuousStartAt))) {
+      integrity.continuousStartAt = now;
+      integrity.segmentStartedAt = now;
+    }
+    integrity.active = true;
+    integrity.lastAcceptedAt = now;
+    integrity.lastAcceptedReason = String(reason || "DUAL_SUBSCRIPTIONS_ACCEPTED_V371").slice(0,160);
+    integrity.versionStarted = "V371";
+    if (!Number.isFinite(Number(integrity.interruptions))) integrity.interruptions = 0;
+    await this.state.storage.put("v371:integrityCoverage", integrity);
+    return integrity;
+  }
+
+  async markIntegrityGapV371(reason) {
+    const now = Date.now();
+    const integrity = await this.state.storage.get("v371:integrityCoverage") || {};
+    if (integrity.active === true) {
+      integrity.active = false;
+      integrity.lastGapAt = now;
+      integrity.lastGapReason = String(reason || "INTEGRITY_GAP_V371").slice(0,160);
+      integrity.interruptions = safeNumber(integrity.interruptions) + 1;
+      integrity.previousContinuousStartAt = Number.isFinite(Number(integrity.continuousStartAt)) ? Number(integrity.continuousStartAt) : null;
+      integrity.continuousStartAt = null;
+      await this.state.storage.put("v371:integrityCoverage", integrity);
+    }
+    return integrity;
+  }
+
   async connect() {
     const enabled = await this.state.storage.get("enabled");
     if (enabled !== true) return;
@@ -69742,6 +69794,7 @@ export class V3LiveCollectorV363 {
     catch (e) { await this.scheduleReconnect(String(e?.message||e)); return; }
     this.ws = ws;
     ws.addEventListener("open", async () => {
+      this.reconnectPending = false;
       await this.state.storage.put("connection",{status:"WEBSOCKET_OPEN_SUBSCRIBING_V368",connected:true,subscriptionAccepted:false,logSubscriptionAccepted:false,headSubscriptionAccepted:false,lastConnectedAt:Date.now(),subscriptionIdPresent:false,headSubscriptionIdPresent:false});
       // V368 uses two narrow/free WebSocket subscriptions: exact V3 Swap logs + chain heads.
       ws.send(JSON.stringify({jsonrpc:"2.0",id:363,method:"eth_subscribe",params:["logs",{address:this.config.pair,topics:[UNISWAP_V3_SWAP_TOPIC_V326]}]}));
@@ -69757,8 +69810,11 @@ export class V3LiveCollectorV363 {
   }
 
   async scheduleReconnect(error) {
+    if (this.reconnectPending === true) return;
+    this.reconnectPending = true;
     await this.markCoverageGapV366(error || "RECONNECT_REQUIRED_V366");
     await this.markIntegrityGapV369(error || "RECONNECT_REQUIRED_V369");
+    await this.markIntegrityGapV371(error || "RECONNECT_REQUIRED_V371");
     const enabled = await this.state.storage.get("enabled");
     const stats = await this.state.storage.get("stats") || {};
     stats.reconnects=safeNumber(stats.reconnects)+1; await this.state.storage.put("stats",stats);
@@ -69777,14 +69833,14 @@ export class V3LiveCollectorV363 {
     if (msg?.id===368) {
       if (typeof msg.result==="string" && msg.result.length>2) {
         this.headSubscriptionId=msg.result; conn.headSubscriptionAccepted=true; conn.headSubscriptionIdPresent=true; conn.lastError=null;
-      } else if (msg?.error) { conn.status="HEAD_SUBSCRIPTION_REJECTED_V368"; conn.lastError=JSON.stringify(msg.error).slice(0,240); await this.state.storage.put("connection",conn); await this.markCoverageGapV366("HEAD_SUBSCRIPTION_REJECTED_V368"); await this.markIntegrityGapV369("HEAD_SUBSCRIPTION_REJECTED_V369"); return; }
+      } else if (msg?.error) { conn.status="HEAD_SUBSCRIPTION_REJECTED_V368"; conn.lastError=JSON.stringify(msg.error).slice(0,240); await this.state.storage.put("connection",conn); await this.markCoverageGapV366("HEAD_SUBSCRIPTION_REJECTED_V368"); await this.markIntegrityGapV369("HEAD_SUBSCRIPTION_REJECTED_V369"); await this.markIntegrityGapV371("HEAD_SUBSCRIPTION_REJECTED_V371"); return; }
     }
     if (msg?.id===363 || msg?.id===368) {
       conn.connected=true;
       conn.subscriptionAccepted=conn.logSubscriptionAccepted===true && conn.headSubscriptionAccepted===true;
       conn.status=conn.subscriptionAccepted ? "LIVE_DUAL_SUBSCRIPTION_ACTIVE_V368" : "WEBSOCKET_WAITING_FOR_DUAL_SUBSCRIPTIONS_V368";
       await this.state.storage.put("connection",conn);
-      if (conn.subscriptionAccepted) { await this.markCoverageConnectedV366(); await this.markIntegrityConnectedV369("DUAL_SUBSCRIPTIONS_ACCEPTED_V369"); }
+      if (conn.subscriptionAccepted) { await this.markCoverageConnectedV366(); await this.markIntegrityConnectedV369("DUAL_SUBSCRIPTIONS_ACCEPTED_V369"); await this.markIntegrityConnectedV371("DUAL_SUBSCRIPTIONS_ACCEPTED_V371"); await this.state.storage.setAlarm(Date.now()+V3_HEAD_WATCHDOG_MS_V371); }
       return;
     }
     await this.state.storage.put("connection",conn);
@@ -69805,16 +69861,15 @@ export class V3LiveCollectorV363 {
     const previous = Number(heads.lastHeadBlock);
     heads.headsObserved = safeNumber(heads.headsObserved) + 1;
     heads.lastHeadAt = now;
-    // A forward jump means at least one head notification was not observed. We do not guess or backfill here:
-    // invalidate the continuous segment and immediately begin a fresh verified segment from this observed head.
+    // V371: a numeric jump proves only that one or more newHeads notifications were not observed.
+    // The filtered V3 Swap subscription is independent, so do NOT call this a proven swap-data gap.
+    // Record it as a notification-gap diagnostic. Coverage resets only on socket/subscription failure
+    // or when the newHeads stream itself becomes genuinely stale for the watchdog threshold.
     if (Number.isFinite(previous) && block > previous + 1) {
       heads.gapsDetected = safeNumber(heads.gapsDetected) + 1;
       heads.lastGapAt = now; heads.lastGapFrom = previous; heads.lastGapTo = block;
-      await this.state.storage.put("v368:heads", heads);
-      await this.markCoverageGapV366(`NEWHEADS_GAP_V368_${previous}_TO_${block}`);
-      await this.markIntegrityGapV369(`NEWHEADS_GAP_V369_${previous}_TO_${block}`);
-      await this.markCoverageConnectedV366();
-      await this.markIntegrityConnectedV369("POST_HEAD_GAP_RESTART_V369");
+      heads.lastGapSize = block - previous - 1;
+      heads.lastGapClassification = "HEAD_NOTIFICATION_GAP_ONLY_V371";
     }
     // Same/lower heads can occur around reorgs or duplicate delivery; do not falsely advance continuity.
     if (!Number.isFinite(previous) || block > previous) heads.lastHeadBlock = block;
@@ -69866,7 +69921,7 @@ export class V3LiveCollectorV363 {
     const conn=await this.state.storage.get("connection")||{};
     const cov=await this.state.storage.get("v366:coverage")||{};
     const heads=await this.state.storage.get("v368:heads")||{};
-    const integrity=await this.state.storage.get("v369:integrityCoverage")||{};
+    const integrity=await this.state.storage.get("v371:integrityCoverage")||{};
     const dualAccepted = conn.connected===true && conn.logSubscriptionAccepted===true && conn.headSubscriptionAccepted===true;
     const coverageActive = integrity.active===true && dualAccepted;
     const coverageStartAt = coverageActive && Number.isFinite(Number(integrity.continuousStartAt)) ? Number(integrity.continuousStartAt) : null;
@@ -69874,13 +69929,13 @@ export class V3LiveCollectorV363 {
     const legacyCoverageStartAt = cov.active===true && Number.isFinite(Number(cov.continuousStartAt)) ? Number(cov.continuousStartAt) : null;
     for (const [name,ms] of defs) {
       const full = coverageActive && continuousCoverageMs>=ms;
-      windows[name].coverage = full ? "FULL_INTEGRITY_V369" : "PARTIAL_INTEGRITY_V369";
+      windows[name].coverage = full ? "FULL_INTEGRITY_V371" : "PARTIAL_INTEGRITY_V371";
       windows[name].fullCoverage = full;
       windows[name].requiredCoverageMs = ms;
       windows[name].continuousCoverageMs = Math.min(continuousCoverageMs,ms);
       windows[name].integrityCoverageMs = Math.min(continuousCoverageMs,ms);
     }
-    return {version:VERSION,collector:"DURABLE_OBJECT_ALCHEMY_V3_LIVE_V369",status:"LIVE_ROLLING_WINDOWS_V369",safe:true,workersKvWrites:0,storage:"DURABLE_OBJECT_5_MINUTE_TRADE_BUCKETS_V364",token:cfg?.token||null,pair:cfg?.pair||null,coverage:coverageActive?"V369_INTEGRITY_COVERAGE_ACTIVE":"V369_INTEGRITY_COVERAGE_PARTIAL_OR_INACTIVE",historicalCoverage:"PRE_V364_HISTORY_NOT_BACKFILLED",windowClockBasis:"WEBSOCKET_INGESTION_TIME_V364",coverageClockBasis:"V369_EPOCH_PLUS_V3_LOGS_PLUS_NEWHEADS_CONTINUITY",coverageIntegrity:"BLOCK_HEAD_GAP_GUARD_EPOCH_RESET_V369",logSubscriptionAccepted:conn.logSubscriptionAccepted===true,headSubscriptionAccepted:conn.headSubscriptionAccepted===true,lastHeadBlock:Number.isFinite(Number(heads.lastHeadBlock))?Number(heads.lastHeadBlock):null,headsObserved:safeNumber(heads.headsObserved),headGapsDetected:safeNumber(heads.gapsDetected),lastHeadGapAt:heads.lastGapAt||null,coverageActive,continuousCoverageStartAt:coverageStartAt,continuousCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,continuousCoverageMs,integrityCoverageStartAt:coverageStartAt,integrityCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,integrityCoverageMs:continuousCoverageMs,integrityInterruptionsSinceV369:safeNumber(integrity.interruptions),lastIntegrityGapAt:integrity.lastGapAt||null,lastIntegrityGapReason:integrity.lastGapReason||null,legacyV366CoverageStartAt:legacyCoverageStartAt,legacyV366CoverageStartIso:legacyCoverageStartAt!==null?new Date(legacyCoverageStartAt).toISOString():null,interruptionsSinceV366:safeNumber(cov.interruptions),lastCoverageGapAt:cov.lastGapAt||null,lastCoverageGapReason:cov.lastGapReason||null,windows,lastTrade:stats.lastTrade||null,swapsCaptured:safeNumber(stats.swapsCaptured),timestamp:new Date(nowMs).toISOString()};
+    return {version:VERSION,collector:"DURABLE_OBJECT_ALCHEMY_V3_LIVE_V371",status:"LIVE_ROLLING_WINDOWS_V371",safe:true,workersKvWrites:0,storage:"DURABLE_OBJECT_5_MINUTE_TRADE_BUCKETS_V364",token:cfg?.token||null,pair:cfg?.pair||null,coverage:coverageActive?"V371_INTEGRITY_COVERAGE_ACTIVE":"V371_INTEGRITY_COVERAGE_PARTIAL_OR_INACTIVE",historicalCoverage:"PRE_V364_HISTORY_NOT_BACKFILLED",windowClockBasis:"WEBSOCKET_INGESTION_TIME_V364",coverageClockBasis:"V371_DUAL_SUBSCRIPTIONS_PLUS_HEAD_LIVENESS_WATCHDOG",coverageIntegrity:"HEAD_NOTIFICATION_DIAGNOSTIC_PLUS_STALE_STREAM_RESET_V371",logSubscriptionAccepted:conn.logSubscriptionAccepted===true,headSubscriptionAccepted:conn.headSubscriptionAccepted===true,lastHeadBlock:Number.isFinite(Number(heads.lastHeadBlock))?Number(heads.lastHeadBlock):null,headsObserved:safeNumber(heads.headsObserved),headGapsDetected:safeNumber(heads.gapsDetected),lastHeadGapAt:heads.lastGapAt||null,lastHeadGapSize:safeNumber(heads.lastGapSize),lastHeadGapClassification:heads.lastGapClassification||null,headAgeMs:Number.isFinite(Number(heads.lastHeadAt))?Math.max(0,nowMs-Number(heads.lastHeadAt)):null,headStaleThresholdMs:V3_HEAD_STALE_MS_V371,coverageActive,continuousCoverageStartAt:coverageStartAt,continuousCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,continuousCoverageMs,integrityCoverageStartAt:coverageStartAt,integrityCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,integrityCoverageMs:continuousCoverageMs,integrityInterruptionsSinceV371:safeNumber(integrity.interruptions),lastIntegrityGapAt:integrity.lastGapAt||null,lastIntegrityGapReason:integrity.lastGapReason||null,legacyV366CoverageStartAt:legacyCoverageStartAt,legacyV366CoverageStartIso:legacyCoverageStartAt!==null?new Date(legacyCoverageStartAt).toISOString():null,interruptionsSinceV366:safeNumber(cov.interruptions),lastCoverageGapAt:cov.lastGapAt||null,lastCoverageGapReason:cov.lastGapReason||null,windows,lastTrade:stats.lastTrade||null,swapsCaptured:safeNumber(stats.swapsCaptured),timestamp:new Date(nowMs).toISOString()};
   }
 
   async persistSwap(log) {
