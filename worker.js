@@ -1,5 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V337: Step 3A verification layer. Preserves V336/V334 behavior and adds zero-request visibility for exact quote-side amounts already persisted on newly captured V3 swaps. Reports quote-ready ledger coverage (WETH/USDG) without converting historical swaps to USD or guessing missing quote evidence.
  * V336: Step 3A safe repair: preserves V334 command/reply path unchanged and adds only exact quote-side amount persistence to newly captured V3 swap records. No extra provider calls, no new Telegram formatter dependency, no historical USD guessing.
  * V331: Persistent native V3 swap-evidence ledger + dynamic exact-pool sweep. Reuses V330 verified pair identity, scans bounded 10-block chunks within remaining manual budget, deduplicates exact tx/log evidence in KV, and explicitly reports coverage gaps. No complete timeframe claim is made from ingestion timestamps.
  * V330: Canonical Uniswap V3 factory getPool bootstrap removes first-run DexScreener dependency for candidate/WETH standard-fee pools; discovered pools still require on-chain token0/token1/fee proof before persistence/use.
@@ -1446,7 +1447,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V336";
+const VERSION = "V337";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64586,6 +64587,10 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       evidence.push(`• 1h: <b>${safeNumber(w?.["1h"]?.buys)} buys / ${safeNumber(w?.["1h"]?.sells)} sells</b>`);
       evidence.push(`• 6h: <b>${safeNumber(w?.["6h"]?.buys)} buys / ${safeNumber(w?.["6h"]?.sells)} sells</b>`);
       evidence.push(`• 24h: <b>${safeNumber(w?.["24h"]?.buys)} buys / ${safeNumber(w?.["24h"]?.sells)} sells</b>`);
+      evidence.push(`🧾 Exact quote evidence: <b>${safeNumber(rolling?.quoteReadyRecordsV337)}/${safeNumber(rolling?.totalRecords)} records</b> (${safeNumber(rolling?.wethQuoteRecordsV337)} WETH / ${safeNumber(rolling?.usdgQuoteRecordsV337)} USDG)`);
+      if(safeNumber(rolling?.quoteReadyRecordsV337)>0){
+        evidence.push(`↔️ Quote-ready direction: <b>${safeNumber(rolling?.quoteReadyBuysV337)} buys / ${safeNumber(rolling?.quoteReadySellsV337)} sells</b>`);
+      }
     }
 
     if (v3?.usdVerified === true) {
@@ -67684,7 +67689,8 @@ async function hydrateNativeV3TradeTimestampsV334(env,budget,rows,maxLookups=NAT
 }
 
 function nativeV3RollingWindowsV334(records,nowMs=Date.now()){
-  const rows=(Array.isArray(records)?records:[]).filter(r=>nativeV3VerifiedTimestampMsV334(r));
+  const allRows=Array.isArray(records)?records:[];
+  const rows=allRows.filter(r=>nativeV3VerifiedTimestampMsV334(r));
   const defs=[["5m",5*60*1000],["15m",15*60*1000],["1h",60*60*1000],["6h",6*60*60*1000],["24h",24*60*60*1000]];
   const windows={};
   for(const [label,ms] of defs){
@@ -67696,7 +67702,36 @@ function nativeV3RollingWindowsV334(records,nowMs=Date.now()){
     }
     windows[label]={buys,sells,swaps:buys+sells};
   }
-  return {verifiedTimestampRecords:rows.length,totalRecords:Array.isArray(records)?records.length:0,windows,coverage:"PARTIAL"};
+
+  /* V337 Step 3A verification: zero-request audit of the exact quote-side
+     amount fields introduced in V336. This is evidence readiness only; it
+     intentionally does NOT promote WETH or USDG amounts to historical USD. */
+  let quoteReadyRecordsV337=0,wethQuoteRecordsV337=0,usdgQuoteRecordsV337=0;
+  let quoteReadyBuysV337=0,quoteReadySellsV337=0;
+  for(const row of allRows){
+    const quote=normalize(row?.quoteTokenAddress);
+    const amount=Number(row?.quoteAmount);
+    const ready=row?.quoteAmountVerifiedV336===true && Number.isFinite(amount) && amount>0 &&
+      (quote===CANONICAL_WETH_V179 || quote===CANONICAL_USDG_V179);
+    if(!ready) continue;
+    quoteReadyRecordsV337++;
+    if(quote===CANONICAL_WETH_V179) wethQuoteRecordsV337++;
+    if(quote===CANONICAL_USDG_V179) usdgQuoteRecordsV337++;
+    if(row?.side==="BUY") quoteReadyBuysV337++;
+    else if(row?.side==="SELL") quoteReadySellsV337++;
+  }
+
+  return {
+    verifiedTimestampRecords:rows.length,
+    totalRecords:allRows.length,
+    windows,
+    coverage:"PARTIAL",
+    quoteReadyRecordsV337,
+    wethQuoteRecordsV337,
+    usdgQuoteRecordsV337,
+    quoteReadyBuysV337,
+    quoteReadySellsV337
+  };
 }
 
 async function collectOneNativeV3TokenV333(env,budget,row,headBlock){
