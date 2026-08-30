@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V379
- * AUTHORITATIVE RUNTIME VERSION: V379
+ * Robinhood Chain Meme Hunter — V380
+ * AUTHORITATIVE RUNTIME VERSION: V380
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V379";
+const VERSION = "V380";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -69734,7 +69734,7 @@ async function handleRequest(
             token1,
             fee,
             factory,
-            factoryVerified: factory === UNISWAP_V3_FACTORY_V326,
+            factoryVerified: factory === UNISWAP_V3_FACTORY_V195,
             candidateInPool: token0 === token || token1 === token,
             quoteToken: token0 === token ? token1 : token1 === token ? token0 : null,
             isMonitoredPair: monitoredPair === pool,
