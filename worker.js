@@ -1376,7 +1376,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V306";
+const VERSION = "V307";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64288,6 +64288,24 @@ function athTimestampTextV297(timestamp) {
   return `${clock} — ${age} ago`;
 }
 
+function compactCallAgeV307(ageMs) {
+  if (!Number.isFinite(ageMs) || ageMs < 0) return "UNVERIFIED";
+
+  const totalMinutes = Math.floor(ageMs / 60000);
+  if (totalMinutes < 1) return "<1m";
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+
+  const totalHours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (totalHours < 24) {
+    return minutes > 0 ? `${totalHours}h ${minutes}m` : `${totalHours}h`;
+  }
+
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
+  return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+}
+
 function callTimestampTextV306(timestamp) {
   const ms = Number(timestamp);
   if (!Number.isFinite(ms) || ms <= 0) return "UNVERIFIED";
@@ -64307,7 +64325,7 @@ function callTimestampTextV306(timestamp) {
     clock = new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
   }
 
-  const age = formatAgeV223(Math.max(0, Date.now() - ms));
+  const age = compactCallAgeV307(Math.max(0, Date.now() - ms));
   return `${clock} — ${age} ago`;
 }
 
