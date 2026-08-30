@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V340: Step 3B background USD valuation hardening. Preserves the confirmed-working V338 manual /analyse path and moves canonical WETH/USDG reference resolution + exact-block quote valuation into the scheduled background path so Telegram never waits on reference discovery. Persists only independently verified exact-block USD values; missing proof remains UNVERIFIED.
+ * V338: Step 3B historical USD valuation layer. Reuses the already-verified canonical WETH/USDG reference path, prices quote-ready V3 swaps at their exact swap block via historical slot0(), persists only independently verified USD values, and exposes rolling verified USD flow with PARTIAL-COVERAGE truthfulness.
  * V337: Step 3A verification layer. Preserves V336/V334 behavior and adds zero-request visibility for exact quote-side amounts already persisted on newly captured V3 swaps. Reports quote-ready ledger coverage (WETH/USDG) without converting historical swaps to USD or guessing missing quote evidence.
  * V336: Step 3A safe repair: preserves V334 command/reply path unchanged and adds only exact quote-side amount persistence to newly captured V3 swap records. No extra provider calls, no new Telegram formatter dependency, no historical USD guessing.
  * V331: Persistent native V3 swap-evidence ledger + dynamic exact-pool sweep. Reuses V330 verified pair identity, scans bounded 10-block chunks within remaining manual budget, deduplicates exact tx/log evidence in KV, and explicitly reports coverage gaps. No complete timeframe claim is made from ingestion timestamps.
@@ -1448,7 +1448,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V340";
+const VERSION = "V338";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -67924,147 +67924,6 @@ async function scheduledNativeV3CollectorV333(env){
   return {status:"SCHEDULED_NATIVE_V3_COLLECTOR_COMPLETE_V333",headBlock,tokens:selected.length,processed:results.length,requestsUsed:safeNumber(budget.totalUsed),requestLimit:NATIVE_V3_COLLECTOR_REQUEST_LIMIT_V333,results};
 }
 
-
-/* ============================================================
-   V340 STEP 3B — BACKGROUND EXACT-BLOCK USD ENRICHMENT
-   ============================================================
-   - Never runs in /analyse; scheduled path only.
-   - Uses an isolated request budget so the normal scanner/collector budgets
-     are untouched.
-   - Resolves the canonical WETH/USDG V3 reference on-chain once, then caches
-     only the independently verified immutable pool identity in dedicated KV.
-   - Values WETH quote deltas from slot0() at the EXACT swap block.
-   - Canonical USDG quote deltas remain exact 1:1 USD under the existing rule.
-   - Upgrades existing V331 ledger rows in-place; trade-key dedupe is preserved.
-   - Any failure is fail-open: USD remains UNVERIFIED and Telegram stays fast.
-*/
-const NATIVE_V3_USD_REFERENCE_KEY_V340 =
-  "robinhood-meme-hunter-v340-weth-usdg-reference";
-const NATIVE_V3_USD_BACKGROUND_REQUEST_LIMIT_V340 = 12;
-const NATIVE_V3_USD_BACKGROUND_MAX_ROWS_V340 = 2;
-const NATIVE_V3_USD_REFERENCE_MAX_AGE_MS_V340 = 7 * 24 * 60 * 60 * 1000;
-
-function createNativeV3UsdBackgroundBudgetV340(){
-  const b=createBudget();
-  b.totalUsed=0; b.totalLimit=NATIVE_V3_USD_BACKGROUND_REQUEST_LIMIT_V340;
-  b.system.used=0; b.system.limit=0;
-  b.discovery.used=0; b.discovery.limit=0; b.discovery.liveUsed=0; b.discovery.liveLimit=0; b.discovery.backlogUsed=0; b.discovery.backlogLimit=0;
-  b.analysis.used=0; b.analysis.limit=NATIVE_V3_USD_BACKGROUND_REQUEST_LIMIT_V340;
-  b.notification.used=0; b.notification.limit=0; b.notification.globalReserveActiveV174=false;
-  return b;
-}
-
-async function loadVerifiedWethUsdGReferenceV340(env){
-  const {kv}=getKV(env);
-  if(!kv) return {valid:false,status:"KV_UNAVAILABLE_V340",record:null};
-  try{
-    const raw=await kv.get(NATIVE_V3_USD_REFERENCE_KEY_V340);
-    if(!raw) return {valid:false,status:"REFERENCE_NOT_CACHED_V340",record:null};
-    const r=JSON.parse(raw);
-    const poolAddress=normalize(r?.poolAddress), token0=normalize(r?.token0), token1=normalize(r?.token1);
-    const verifiedAt=safeNumber(r?.verifiedAt);
-    const pairOk=(token0===CANONICAL_WETH_V179&&token1===CANONICAL_USDG_V179)||(token0===CANONICAL_USDG_V179&&token1===CANONICAL_WETH_V179);
-    const age=verifiedAt?Math.max(0,Date.now()-verifiedAt):Infinity;
-    if(!isAddress(poolAddress)||!pairOk||r?.verifiedOnChainV340!==true||age>NATIVE_V3_USD_REFERENCE_MAX_AGE_MS_V340){
-      return {valid:false,status:age>NATIVE_V3_USD_REFERENCE_MAX_AGE_MS_V340?"REFERENCE_CACHE_EXPIRED_V340":"REFERENCE_CACHE_INVALID_V340",record:r||null,ageMs:age};
-    }
-    return {valid:true,status:"VERIFIED_REFERENCE_CACHE_AVAILABLE_V340",record:r,ageMs:age};
-  }catch(error){
-    return {valid:false,status:"REFERENCE_CACHE_READ_ERROR_V340",record:null,error:String(error?.message||error).slice(0,160)};
-  }
-}
-
-async function saveVerifiedWethUsdGReferenceV340(env,resolver){
-  const {kv}=getKV(env);
-  if(!kv||resolver?.verified!==true) return {saved:false,status:"REFERENCE_NOT_SAVED_V340"};
-  const poolAddress=normalize(resolver?.poolAddress), token0=normalize(resolver?.token0), token1=normalize(resolver?.token1);
-  const pairOk=(token0===CANONICAL_WETH_V179&&token1===CANONICAL_USDG_V179)||(token0===CANONICAL_USDG_V179&&token1===CANONICAL_WETH_V179);
-  if(!isAddress(poolAddress)||!pairOk) return {saved:false,status:"REFERENCE_IDENTITY_INVALID_V340"};
-  const record={
-    schema:"CANONICAL_WETH_USDG_V3_REFERENCE_V340",
-    poolAddress,token0,token1,fee:Number.isFinite(Number(resolver?.fee))?Number(resolver.fee):null,
-    source:resolver?.source||"UNISWAP_V3_WETH_USDG_DIRECT_RESOLVER_V291",
-    verifiedOnChainV340:true,verifiedAt:Date.now()
-  };
-  try{await kv.put(NATIVE_V3_USD_REFERENCE_KEY_V340,JSON.stringify(record)); return {saved:true,status:"VERIFIED_REFERENCE_CACHED_V340",record};}
-  catch(error){return {saved:false,status:"REFERENCE_CACHE_WRITE_ERROR_V340",error:String(error?.message||error).slice(0,160)};}
-}
-
-async function resolveBackgroundWethUsdGReferenceV340(env,budget){
-  const cached=await loadVerifiedWethUsdGReferenceV340(env);
-  if(cached?.valid===true) return {verified:true,status:cached.status,source:"PERSISTED_ONCHAIN_VERIFIED_REFERENCE_V340",...cached.record,requestsUsed:0};
-  let state;
-  try{ state=(await readState(env))?.state || newState(); }catch(_){ state=newState(); }
-  const before=safeNumber(budget?.totalUsed);
-  const resolver=await manualResolveV3WethUsdGReferenceV291(env,state,budget);
-  if(resolver?.verified!==true){
-    return {verified:false,status:resolver?.status||"WETH_USDG_REFERENCE_UNVERIFIED_V340",requestsUsed:Math.max(0,safeNumber(budget?.totalUsed)-before),resolver};
-  }
-  const saved=await saveVerifiedWethUsdGReferenceV340(env,resolver);
-  return {verified:true,status:saved?.status||"VERIFIED_DIRECT_ONCHAIN_WETH_USDG_POOL_V340",source:resolver?.source||null,poolAddress:normalize(resolver?.poolAddress),token0:normalize(resolver?.token0),token1:normalize(resolver?.token1),fee:resolver?.fee??null,requestsUsed:Math.max(0,safeNumber(budget?.totalUsed)-before),resolver};
-}
-
-async function scheduledNativeV3UsdEnrichmentV340(env){
-  const budget=createNativeV3UsdBackgroundBudgetV340();
-  const registry=(await loadNativeV3CollectorRegistryV333(env)).slice(-NATIVE_V3_COLLECTOR_MAX_TOKENS_PER_RUN_V333);
-  if(!registry.length) return {status:"NO_REGISTERED_V3_TOKENS_V340",processedRows:0,valuedRows:0,requestsUsed:0};
-
-  const pending=[];
-  for(const reg of registry){
-    const token=normalize(reg?.tokenAddress);
-    const pairCache=await loadVerifiedV3PairIdentityV329(env,token);
-    if(!pairCache?.valid) continue;
-    const pair=normalize(pairCache?.record?.pairAddress);
-    const ledger=await loadNativeV3SwapLedgerV331(env,token,pair);
-    if(!ledger?.valid) continue;
-    for(const row of Array.isArray(ledger.records)?ledger.records:[]){
-      const quote=normalize(row?.quoteTokenAddress), amount=Number(row?.quoteAmount);
-      if(row?.usdVerifiedV338===true||row?.quoteAmountVerifiedV336!==true||!Number.isFinite(amount)||amount<=0||!nativeV3VerifiedTimestampMsV334(row)) continue;
-      if(quote!==CANONICAL_WETH_V179&&quote!==CANONICAL_USDG_V179) continue;
-      pending.push({token,pair,row});
-    }
-  }
-  if(!pending.length) return {status:"NO_TIMESTAMPED_QUOTE_READY_ROWS_V340",processedRows:0,valuedRows:0,requestsUsed:0};
-
-  const selected=pending.slice(-NATIVE_V3_USD_BACKGROUND_MAX_ROWS_V340);
-  const needsWeth=selected.some(x=>normalize(x?.row?.quoteTokenAddress)===CANONICAL_WETH_V179);
-  const ref=needsWeth?await resolveBackgroundWethUsdGReferenceV340(env,budget):null;
-  let valuedRows=0,wethValued=0,usdgValued=0;
-  const perToken=new Map();
-  for(const item of selected){
-    const row=item.row, quote=normalize(row?.quoteTokenAddress), quoteAmount=Number(row?.quoteAmount), block=rpcBlockNumberV331(row?.blockNumber);
-    let upgrade=null;
-    if(quote===CANONICAL_USDG_V179){
-      upgrade={...row,usd:quoteAmount,usdVerified:true,usdVerifiedV338:true,priceUsd:1,priceUsdHistoricalV338:1,priceBlockNumberV338:block,usdBasisV338:"EXACT_V3_USDG_QUOTE_DELTA_1_TO_1_V340",usdVerifiedAtV338:Date.now(),referencePoolV338:null};
-      usdgValued++;
-    }else if(quote===CANONICAL_WETH_V179 && ref?.verified===true && isAddress(ref?.poolAddress) && Number.isFinite(block) && budgetAvailable(budget,"analysis")){
-      const call=await manualRpcReadV292(env,budget,"eth_call",[{to:normalize(ref.poolAddress),data:"0x3850c7bd"},"0x"+block.toString(16)],`V340_BACKGROUND_HISTORICAL_WETH_USDG_SLOT0_${block}`);
-      if(call?.ok===true){
-        const sqrt=decodeUint256WordV195(call.result,0);
-        const price=sqrt!==null?sqrtPriceX96ToUsdGPerWethV195(sqrt,normalize(ref.token0),normalize(ref.token1)):null;
-        const usd=Number.isFinite(price)&&price>0?quoteAmount*price:null;
-        if(Number.isFinite(usd)&&usd>0){
-          upgrade={...row,usd,usdVerified:true,usdVerifiedV338:true,priceUsd:price,priceUsdHistoricalV338:price,priceBlockNumberV338:block,usdBasisV338:"EXACT_V3_WETH_QUOTE_X_CANONICAL_WETH_USDG_SLOT0_AT_SWAP_BLOCK_V340",usdVerifiedAtV338:Date.now(),referencePoolV338:normalize(ref.poolAddress)};
-          wethValued++;
-        }
-      }
-    }
-    if(upgrade){
-      const key=`${item.token}|${item.pair}`;
-      if(!perToken.has(key)) perToken.set(key,{token:item.token,pair:item.pair,rows:[]});
-      perToken.get(key).rows.push(upgrade); valuedRows++;
-    }
-  }
-  const writes=[];
-  for(const g of perToken.values()) writes.push(await persistNativeV3SwapLedgerV331(env,g.token,g.pair,g.rows,[]));
-  return {
-    status:valuedRows?"BACKGROUND_EXACT_BLOCK_USD_PERSISTED_V340":(needsWeth&&ref?.verified!==true?(ref?.status||"WETH_USDG_REFERENCE_UNVERIFIED_V340"):"NO_USD_ROWS_VERIFIED_V340"),
-    pendingRows:pending.length,processedRows:selected.length,valuedRows,wethValued,usdgValued,
-    referenceVerified:ref?.verified===true,referenceStatus:ref?.status||null,referencePool:ref?.verified===true?normalize(ref?.poolAddress):null,
-    requestsUsed:safeNumber(budget?.totalUsed),requestLimit:NATIVE_V3_USD_BACKGROUND_REQUEST_LIMIT_V340,writes:writes.map(w=>({status:w?.status,inserted:w?.inserted,deduplicated:w?.deduplicated,records:w?.records}))
-  };
-}
-
 /* =========================================================
    SCHEDULED
    ========================================================= */
@@ -68090,16 +67949,6 @@ async function scheduledScan(
     nativeV3CollectorV333 = {status:"SCHEDULED_NATIVE_V3_COLLECTOR_ERROR_V333",error:String(error?.message||error).slice(0,180)};
   }
   result.nativeV3CollectorV333 = nativeV3CollectorV333;
-
-  /* V340: USD reference discovery and exact-block WETH valuation are background-only.
-   * This must never delay /analyse. It has its own isolated request budget and fails open. */
-  let nativeV3UsdEnrichmentV340;
-  try {
-    nativeV3UsdEnrichmentV340 = await scheduledNativeV3UsdEnrichmentV340(env);
-  } catch (error) {
-    nativeV3UsdEnrichmentV340 = {status:"SCHEDULED_NATIVE_V3_USD_ERROR_V340",error:String(error?.message||error).slice(0,180)};
-  }
-  result.nativeV3UsdEnrichmentV340 = nativeV3UsdEnrichmentV340;
 
   console.log(
     jsonStringifySafeV246({
@@ -68170,9 +68019,6 @@ async function scheduledScan(
 
       nativeV3CollectorV333:
         result.nativeV3CollectorV333,
-
-      nativeV3UsdEnrichmentV340:
-        result.nativeV3UsdEnrichmentV340,
 
       timestamp:
         now()
