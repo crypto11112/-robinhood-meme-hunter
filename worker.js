@@ -1,5 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V327: Fail-open native V3 manual probe. Strict timeout/error isolation so V3 telemetry can never block /analyze.
  * V326: Native Uniswap V3 exact-pool directional USD groundwork (bounded 10-block manual observation; no Bitquery dependency).
  * V325 — guaranteed manual Telegram directional diagnostics passthrough
  * - Exposes GeckoTerminal/Bitquery attempt status, HTTP status and row counts in manual /analyse.
@@ -1441,7 +1442,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V326";
+const VERSION = "V327";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -42909,7 +42910,7 @@ function telegramMessage(
     `🔴 24h Sells: <b>${trade24h.sells}</b>`,
     `💵 24h Total Volume: <b>${market?.verified ? money(market?.volume?.h24) : "UNVERIFIED"}</b>`,
     dexProviderReportedV320
-      ? "ℹ️ <i>DexScreener counts/total volume are provider-reported. V326 never estimates buy-USD/sell-USD from them.</i>"
+      ? "ℹ️ <i>DexScreener counts/total volume are provider-reported. V327 never estimates buy-USD/sell-USD from them.</i>"
       : "ℹ️ <i>Provider-reported counts/total volume are separate from verified directional USD evidence.</i>",
     "",
     "💵 <b>Verified Directional USD — INDEXED TRADE FEED</b>",
@@ -42940,7 +42941,7 @@ function telegramMessage(
       ? ""
       : null,
     candidate?.manualDirectionalDiagnosticsV324
-      ? "🔧 <b>Directional USD diagnostics — V326</b>"
+      ? "🔧 <b>Directional USD diagnostics — V327</b>"
       : null,
     candidate?.manualDirectionalDiagnosticsV324
       ? `GeckoTerminal: <b>${candidate.manualDirectionalDiagnosticsV324.gecko.attempted ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(candidate.manualDirectionalDiagnosticsV324.gecko.status)}</b> | HTTP <b>${escapeHtml(candidate.manualDirectionalDiagnosticsV324.gecko.httpStatus ?? "N/A")}</b> | returned <b>${safeNumber(candidate.manualDirectionalDiagnosticsV324.gecko.returnedCount)}</b> | accepted <b>${safeNumber(candidate.manualDirectionalDiagnosticsV324.gecko.acceptedCount)}</b>`
@@ -64144,10 +64145,10 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   }
 
   const d = directionalDiagnosticsV325 || candidate?.manualDirectionalDiagnosticsV324 || null;
-  if (d && !lines.some(line => String(line).includes("Directional USD diagnostics — V326"))) {
+  if (d && !lines.some(line => String(line).includes("Directional USD diagnostics — V327"))) {
     lines.push(
       "",
-      "🔧 <b>Directional USD diagnostics — V326</b>",
+      "🔧 <b>Directional USD diagnostics — V327</b>",
       `GeckoTerminal: <b>${d?.gecko?.attempted === true ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(d?.gecko?.status || "NO_STATUS")}</b> | HTTP <b>${escapeHtml(d?.gecko?.httpStatus ?? "N/A")}</b> | returned <b>${safeNumber(d?.gecko?.returnedCount)}</b> | accepted <b>${safeNumber(d?.gecko?.acceptedCount)}</b>`,
       `Bitquery: <b>${d?.bitquery?.attempted === true ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(d?.bitquery?.status || "NO_STATUS")}</b> | HTTP <b>${escapeHtml(d?.bitquery?.httpStatus ?? "N/A")}</b> | raw rows <b>${safeNumber(d?.bitquery?.rawRows)}</b> | accepted <b>${safeNumber(d?.bitquery?.rows)}</b>`,
       d?.gecko?.poolAddress
@@ -64161,7 +64162,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   if (v3) {
     lines.push(
       "",
-      "🧱 <b>Native Uniswap V3 Directional USD — V326</b>",
+      "🧱 <b>Native Uniswap V3 Directional USD — V327</b>",
       `Status: <b>${escapeHtml(v3?.status || "UNVERIFIED")}</b>`,
       v3?.pairAddress ? `Pool: <code>${escapeHtml(v3.pairAddress)}</code>` : "Pool: <b>UNVERIFIED</b>",
       v3?.verified === true && Number.isFinite(Number(v3?.fromBlock)) && Number.isFinite(Number(v3?.toBlock))
@@ -64467,12 +64468,46 @@ async function telegramFreshAnalyseV276(
   /* V326: independent native Uniswap V3 exact-pool observation.
    * This does not alter qualification/scoring and does not claim historical completeness.
    */
-  const manualNativeV3ResultV326 =
-    await manualNativeV3DirectionalV326(
-      env,
-      budget,
-      candidate
-    );
+  let manualNativeV3ResultV326;
+  try {
+    manualNativeV3ResultV326 = await Promise.race([
+      manualNativeV3DirectionalV326(
+        env,
+        budget,
+        candidate
+      ),
+      new Promise(resolve => setTimeout(() => resolve({
+        attempted: true,
+        verified: false,
+        status: "V3_PROBE_TIMEOUT_FAIL_OPEN_V327",
+        source: "NATIVE_UNISWAP_V3_ETH_GETLOGS_V326",
+        pairAddress: normalize(candidate?.market?.pairAddress),
+        swaps: 0,
+        buys: 0,
+        sells: 0,
+        buyUsd: null,
+        sellUsd: null,
+        netUsd: null,
+        requestsUsed: 0
+      }), 4500))
+    ]);
+  } catch (error) {
+    manualNativeV3ResultV326 = {
+      attempted: true,
+      verified: false,
+      status: "V3_PROBE_ERROR_FAIL_OPEN_V327",
+      source: "NATIVE_UNISWAP_V3_ETH_GETLOGS_V326",
+      pairAddress: normalize(candidate?.market?.pairAddress),
+      swaps: 0,
+      buys: 0,
+      sells: 0,
+      buyUsd: null,
+      sellUsd: null,
+      netUsd: null,
+      requestsUsed: 0,
+      error: String(error?.message || error || "UNKNOWN_V3_PROBE_ERROR").slice(0, 180)
+    };
+  }
 
   candidate.nativeV3DirectionalV326 = manualNativeV3ResultV326;
 
