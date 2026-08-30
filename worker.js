@@ -1,5 +1,9 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V324 — directional USD provider-path diagnostics (no extra provider requests)
+ * - Exposes GeckoTerminal/Bitquery attempt status, HTTP status and row counts in manual /analyse.
+ * - Diagnostic-only provider-path visibility; preserves V323/V322 behavior.
+ *
  * V322 — verified indexed buy-USD / sell-USD presentation + manual Gecko directional enrichment
  * - Manual /analyse may use the existing guarded GeckoTerminal pool-trades feed when a verified pool identity exists.
  * - Shows separate verified BUY USD and SELL USD from indexed trade rows when coverage is complete.
@@ -17,7 +21,7 @@
  * Robinhood Chain Meme Hunter
  * V319 — fixed-horizon first-success tracker initialisation fix
  *
- * CURRENT EXECUTABLE VERSION: V321
+ * CURRENT EXECUTABLE VERSION: V324
  * - Preserves the complete V318/V317 scanner, scoring, qualification, Telegram, KV, provider, holder, whale, Momentum, ATH, learning and request-budget behaviour.
  * - FIX: a token that already has a preliminary callPerformanceV270 record now receives fixedHorizonOutcomesV317 on its FIRST successful alert, provided it had no prior frozen entryTimestamp.
  * - Preserves forward-only semantics: records with an existing entryTimestamp are NOT retroactively initialised or backfilled.
@@ -1436,7 +1440,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V323";
+const VERSION = "V324";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -42904,7 +42908,7 @@ function telegramMessage(
     `🔴 24h Sells: <b>${trade24h.sells}</b>`,
     `💵 24h Total Volume: <b>${market?.verified ? money(market?.volume?.h24) : "UNVERIFIED"}</b>`,
     dexProviderReportedV320
-      ? "ℹ️ <i>DexScreener counts/total volume are provider-reported. V323 never estimates buy-USD/sell-USD from them.</i>"
+      ? "ℹ️ <i>DexScreener counts/total volume are provider-reported. V324 never estimates buy-USD/sell-USD from them.</i>"
       : "ℹ️ <i>Provider-reported counts/total volume are separate from verified directional USD evidence.</i>",
     "",
     "💵 <b>Verified Directional USD — INDEXED TRADE FEED</b>",
@@ -42931,6 +42935,24 @@ function telegramMessage(
     `🔴 24h Sell USD: <b>${indexedH24V322.sellUsd}</b>`,
     `📈 24h Net USD: <b>${indexedH24V322.netUsd}</b>`,
     "ℹ️ <i>Only complete verified indexed-trade windows are shown. Missing/partial coverage remains UNVERIFIED.</i>",
+    candidate?.manualDirectionalDiagnosticsV324
+      ? ""
+      : null,
+    candidate?.manualDirectionalDiagnosticsV324
+      ? "🔧 <b>Directional USD diagnostics — V324</b>"
+      : null,
+    candidate?.manualDirectionalDiagnosticsV324
+      ? `GeckoTerminal: <b>${candidate.manualDirectionalDiagnosticsV324.gecko.attempted ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(candidate.manualDirectionalDiagnosticsV324.gecko.status)}</b> | HTTP <b>${escapeHtml(candidate.manualDirectionalDiagnosticsV324.gecko.httpStatus ?? "N/A")}</b> | returned <b>${safeNumber(candidate.manualDirectionalDiagnosticsV324.gecko.returnedCount)}</b> | accepted <b>${safeNumber(candidate.manualDirectionalDiagnosticsV324.gecko.acceptedCount)}</b>`
+      : null,
+    candidate?.manualDirectionalDiagnosticsV324
+      ? `Bitquery: <b>${candidate.manualDirectionalDiagnosticsV324.bitquery.attempted ? "ATTEMPTED" : "NOT_ATTEMPTED"}</b> | status <b>${escapeHtml(candidate.manualDirectionalDiagnosticsV324.bitquery.status)}</b> | HTTP <b>${escapeHtml(candidate.manualDirectionalDiagnosticsV324.bitquery.httpStatus ?? "N/A")}</b> | raw rows <b>${safeNumber(candidate.manualDirectionalDiagnosticsV324.bitquery.rawRows)}</b> | accepted <b>${safeNumber(candidate.manualDirectionalDiagnosticsV324.bitquery.rows)}</b>`
+      : null,
+    candidate?.manualDirectionalDiagnosticsV324?.gecko?.poolAddress
+      ? `Selected pool: <code>${escapeHtml(candidate.manualDirectionalDiagnosticsV324.gecko.poolAddress)}</code>`
+      : null,
+    candidate?.manualDirectionalDiagnosticsV324
+      ? `Result: <b>${candidate.manualDirectionalDiagnosticsV324.gecko.verifiedAnyWindow || candidate.manualDirectionalDiagnosticsV324.bitquery.verified ? "VERIFIED_DIRECTIONAL_DATA" : "NO_VERIFIED_DIRECTIONAL_DATA"}</b>`
+      : null,
     ...verifiedObservedLinesV212,
     ...ponsCurveLinesV216,
     "",
@@ -64267,6 +64289,32 @@ async function telegramFreshAnalyseV276(
       candidate,
       manualBitqueryUsdResultV285
     );
+
+  /* V324 read-only provider-path diagnostics for /analyse.
+   * No provider calls are added here: this only exposes results from the
+   * GeckoTerminal and Bitquery attempts already made above.
+   */
+  candidate.manualDirectionalDiagnosticsV324 = {
+    gecko: {
+      attempted: manualGeckoDirectionalResultV322?.attempted === true,
+      status: manualGeckoDirectionalResultV322?.status || "NO_STATUS",
+      source: manualGeckoDirectionalResultV322?.source || null,
+      poolAddress: manualGeckoDirectionalResultV322?.poolAddress || null,
+      httpStatus: manualGeckoDirectionalResultV322?.httpStatus ?? null,
+      returnedCount: safeNumber(manualGeckoDirectionalResultV322?.returnedCount),
+      acceptedCount: safeNumber(manualGeckoDirectionalResultV322?.acceptedCount),
+      verifiedAnyWindow: manualGeckoDirectionalResultV322?.verifiedAnyWindow === true
+    },
+    bitquery: {
+      attempted: manualBitqueryUsdResultV285?.attempted === true,
+      status: manualBitqueryUsdResultV285?.status || "NO_STATUS",
+      httpStatus: manualBitqueryUsdResultV285?.httpStatus ?? null,
+      rawRows: safeNumber(manualBitqueryUsdResultV285?.rawRows),
+      rows: safeNumber(manualBitqueryUsdResultV285?.rows),
+      verified: manualBitqueryUsdResultV285?.verified === true,
+      error: manualBitqueryUsdResultV285?.error || null
+    }
+  };
 
   const performance =
     state
