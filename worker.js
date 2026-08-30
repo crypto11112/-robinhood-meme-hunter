@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V372
- * AUTHORITATIVE RUNTIME VERSION: V372
+ * Robinhood Chain Meme Hunter — V373
+ * AUTHORITATIVE RUNTIME VERSION: V373
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V372";
+const VERSION = "V373";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64633,7 +64633,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   }
 
   const liveV3V365 = candidate?.liveV3WindowsV365 || null;
-  if (liveV3V365?.status === "LIVE_ROLLING_WINDOWS_V364" && liveV3V365?.windows) {
+  if ((liveV3V365?.status === "LIVE_ROLLING_WINDOWS_V364" || liveV3V365?.status === "LIVE_ROLLING_WINDOWS_V371") && liveV3V365?.windows) {
     evidence.push("", "📡 <b>Live V3 WebSocket Flow — VERIFIED</b>");
     const coverageMinutesV366 = Math.floor(safeNumber(liveV3V365?.continuousCoverageMs) / 60000);
     evidence.push(`🟢 Coverage clock: <b>${liveV3V365?.coverageActive===true ? "ACTIVE" : "INTERRUPTED"}</b> | continuous <b>${coverageMinutesV366}m</b> | pre-V364 history not backfilled`);
