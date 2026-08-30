@@ -1364,7 +1364,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V301";
+const VERSION = "V302";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -27472,6 +27472,45 @@ function applyDexPerformanceBatchV295(state, pairs, targetToken) {
   };
 }
 
+function dexTrackedCoverageV302(state, pairs, requestedAddresses = []) {
+  const registry =
+    state?.callPerformanceV270 &&
+    typeof state.callPerformanceV270 === "object"
+      ? state.callPerformanceV270
+      : {};
+
+  const requested = [...new Set(
+    (Array.isArray(requestedAddresses) ? requestedAddresses : [])
+      .map(address => normalize(address))
+      .filter(Boolean)
+  )];
+
+  const requestedTracked = requested.filter(address => Boolean(registry[address]));
+  const observedTracked = new Set();
+
+  for (const pair of Array.isArray(pairs) ? pairs : []) {
+    const address = normalize(pair?.baseToken?.address);
+    if (!address || !registry[address] || !requestedTracked.includes(address)) continue;
+
+    const marketCap = Number(pair?.marketCap);
+    if (!Number.isFinite(marketCap) || marketCap <= 0) continue;
+    observedTracked.add(address);
+  }
+
+  const missingTrackedAddresses = requestedTracked.filter(
+    address => !observedTracked.has(address)
+  );
+
+  return {
+    requestedTracked: requestedTracked.length,
+    observedTracked: observedTracked.size,
+    allTrackedCovered:
+      requestedTracked.length > 0 &&
+      observedTracked.size === requestedTracked.length,
+    missingTrackedAddresses
+  };
+}
+
 async function athFairSlotRefreshV299(
   state,
   budget
@@ -27721,6 +27760,12 @@ async function athFairSlotRefreshV299(
       null
     );
 
+    const trackedCoverageV302 = dexTrackedCoverageV302(
+      state,
+      allPairs,
+      batchAddresses
+    );
+
     registerDexSuccessV147(service);
 
     const completedAt = Date.now();
@@ -27733,6 +27778,13 @@ async function athFairSlotRefreshV299(
       observed: safeNumber(result?.observed),
       athUpdated: safeNumber(result?.athUpdated),
       httpStatus: response.status,
+      lastSuccessfulRequestedTrackedV302: safeNumber(trackedCoverageV302?.requestedTracked),
+      lastSuccessfulObservedTrackedV302: safeNumber(trackedCoverageV302?.observedTracked),
+      lastSuccessfulAllTrackedCoveredV302: trackedCoverageV302?.allTrackedCovered === true,
+      lastSuccessfulMissingTrackedAddressesV302:
+        Array.isArray(trackedCoverageV302?.missingTrackedAddresses)
+          ? trackedCoverageV302.missingTrackedAddresses.slice(0, 10)
+          : [],
       lastSuccessfulCheckAt: completedAt,
       ...(safeNumber(result?.athUpdated) > 0
         ? { lastAthUpdatedAt: completedAt }
@@ -28284,6 +28336,12 @@ async function marketData(
         token
       );
 
+    const trackedCoverageV302 = dexTrackedCoverageV302(
+      state,
+      allPairsV295,
+      v295BatchAddresses
+    );
+
     const athFollowUpCompletedAtV297 = Date.now();
 
     setAthFollowUpStatusV296(service, {
@@ -28294,6 +28352,13 @@ async function marketData(
       observed: safeNumber(performanceBatchV295?.observed),
       athUpdated: safeNumber(performanceBatchV295?.athUpdated),
       httpStatus: response.status,
+      lastSuccessfulRequestedTrackedV302: safeNumber(trackedCoverageV302?.requestedTracked),
+      lastSuccessfulObservedTrackedV302: safeNumber(trackedCoverageV302?.observedTracked),
+      lastSuccessfulAllTrackedCoveredV302: trackedCoverageV302?.allTrackedCovered === true,
+      lastSuccessfulMissingTrackedAddressesV302:
+        Array.isArray(trackedCoverageV302?.missingTrackedAddresses)
+          ? trackedCoverageV302.missingTrackedAddresses.slice(0, 10)
+          : [],
       lastSuccessfulCheckAt: athFollowUpCompletedAtV297,
       ...(safeNumber(performanceBatchV295?.athUpdated) > 0
         ? { lastAthUpdatedAt: athFollowUpCompletedAtV297 }
@@ -64258,6 +64323,9 @@ function bestCallsMessageV271(
       ? `🔄 ATH follow-up: <b>${escapeHtml(followUpV296.status || "UNVERIFIED")}</b> | requested ${safeNumber(followUpV296.requestedAddresses)} | observed ${safeNumber(followUpV296.observed)} | ATH updated ${safeNumber(followUpV296.athUpdated)}`
       : "🔄 ATH follow-up: <b>NO V297 BATCH RESULT YET</b>",
     `🕒 Last successful ATH check: <b>${escapeHtml(athTimestampTextV297(followUpV296?.lastSuccessfulCheckAt))}</b>`,
+    followUpV296?.lastSuccessfulCheckAt && safeNumber(followUpV296?.lastSuccessfulRequestedTrackedV302) > 0
+      ? `✅ Last successful tracked coverage: <b>${safeNumber(followUpV296?.lastSuccessfulObservedTrackedV302)}/${safeNumber(followUpV296?.lastSuccessfulRequestedTrackedV302)}</b>${followUpV296?.lastSuccessfulAllTrackedCoveredV302 === true ? " — ALL CHECKED" : " — PARTIAL"}`
+      : `✅ Last successful tracked coverage: <b>V302 DATA PENDING</b>`,
     `📈 Last verified ATH update: <b>${escapeHtml(athTimestampTextV297(followUpV296?.lastAthUpdatedAt))}</b>`,
     ""
   ];
