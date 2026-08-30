@@ -1,5 +1,16 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V301 / V2.0:
+ * - ATH ANALYSIS RESERVE: when the ATH fair-slot is genuinely due and DexScreener is eligible, protect one EXISTING analysis request so late analysis work cannot starve it
+ * - NO BUDGET INCREASE: global 42 / analysis 21 remain unchanged
+ * - CANDIDATE FIRST: normal scanner DEXSCREENER is allowed to consume the reserve first and releases it immediately
+ * - FAIR-SLOT ACCESS: ATH fair-slot may use the existing V182 protected capacity when reached
+ * - DYNAMIC: reserve activates only with tracked calls, no Dex cooldown, clear 5-minute guard, and due 15-minute fair interval
+ * - TELEMETRY: exposes athFairSlotReserveV301 state and consumption source
+ * - PRESERVES: V300 Retry-After, V299 fair-slot, V298 terminal statuses, V297 timestamps, V295 verified ATH math, provider guards, scoring, Momentum, holders, Telegram and KV history
+ */
+/**
+ * Robinhood Chain Meme Hunter
  * V300 / V2.0:
  * - ATH FAIR-SLOT REFRESH: if a scan finishes without using its single protected fresh DexScreener slot, V299 can use that otherwise-unused slot to refresh tracked-call ATHs instead of letting follow-up coverage starve behind candidate priority
  * - CANDIDATE FIRST: discovery/priority candidates keep first right to the existing fresh DexScreener slot; ATH follow-up runs only after candidate analysis and only when dexFreshUsed is still zero
@@ -1353,7 +1364,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V300";
+const VERSION = "V301";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -3016,6 +3027,21 @@ function createBudget() {
         yieldedAt: null,
         reserveWasBlocking: false
       }
+,
+
+      athFairSlotReserveV301: {
+        enabled: true,
+        active: false,
+        reservedRequests: 1,
+        activatedAt: null,
+        reason: null,
+        trackedCalls: 0,
+        consumed: false,
+        consumedAt: null,
+        consumedBy: null,
+        releasedAt: null,
+        releaseReason: null
+      }
     },
 
     notification: {
@@ -3209,6 +3235,58 @@ function yieldV182ReserveToPriorityHolderEvidenceV226(budget, token, reason) {
   return true;
 }
 
+function configureAthFairSlotReserveV301(state, budget) {
+  const reserve = budget?.analysis?.athFairSlotReserveV301;
+  if (!reserve) return null;
+
+  const registry = state?.callPerformanceV270 && typeof state.callPerformanceV270 === "object"
+    ? state.callPerformanceV270
+    : {};
+  const trackedCalls = Object.values(registry)
+    .filter(record => Boolean(normalize(record?.address))).length;
+  reserve.trackedCalls = trackedCalls;
+
+  if (!trackedCalls) { reserve.active = false; reserve.reason = "NO_TRACKED_CALLS"; return reserve; }
+
+  const service = dexService(state);
+  const nowMs = Date.now();
+  const cooldownUntil = safeNumber(service?.cooldownUntil);
+  if (cooldownUntil && nowMs < cooldownUntil) {
+    reserve.active = false; reserve.reason = "DEXSCREENER_COOLDOWN"; return reserve;
+  }
+
+  const lastRequestAt = safeNumber(service?.lastRequestAt);
+  if (lastRequestAt && nowMs - lastRequestAt < DEXSCREENER_MIN_FRESH_INTERVAL_MS) {
+    reserve.active = false; reserve.reason = "FRESH_GUARD"; return reserve;
+  }
+
+  const lastFairAttemptAt = safeNumber(service?.lastAthFairSlotAttemptAtV299);
+  if (lastFairAttemptAt && nowMs - lastFairAttemptAt < ATH_FAIR_SLOT_MIN_INTERVAL_MS_V299) {
+    reserve.active = false; reserve.reason = "FAIR_SLOT_INTERVAL"; return reserve;
+  }
+
+  reserve.active = true;
+  reserve.activatedAt = nowMs;
+  reserve.reason = "ATH_FAIR_SLOT_DUE";
+  return reserve;
+}
+
+function athFairSlotReserveBlocksAnalysisV301(budget, type, amount = 1) {
+  const reserve = budget?.analysis?.athFairSlotReserveV301;
+  if (reserve?.active !== true || safeNumber(reserve?.reservedRequests) <= 0) return false;
+
+  if (type === "DEXSCREENER" || type === "DEXSCREENER_ATH_FAIR_SLOT_V299") return false;
+
+  const reserved = Math.max(0, safeNumber(reserve.reservedRequests));
+  const notificationReserveRemaining = budget?.notification?.globalReserveActiveV174 === true
+    ? Math.max(0, safeNumber(budget?.notification?.limit) - safeNumber(budget?.notification?.used))
+    : 0;
+  const preTelegramGlobalLimit = Math.max(0, safeNumber(budget?.totalLimit) - notificationReserveRemaining);
+  const analysisBlocked = safeNumber(budget?.analysis?.used) + amount > Math.max(0, safeNumber(budget?.analysis?.limit) - reserved);
+  const globalBlocked = safeNumber(budget?.totalUsed) + amount > Math.max(0, preTelegramGlobalLimit - reserved);
+  return analysisBlocked || globalBlocked;
+}
+
 function consumeBudget(
   budget,
   phase,
@@ -3245,7 +3323,9 @@ function consumeBudget(
     type !==
       protectedUsdCompletionTypeV254 &&
     type !==
-      protectedHolderCountCompletionTypeV256
+      protectedHolderCountCompletionTypeV256 &&
+    type !==
+      "DEXSCREENER_ATH_FAIR_SLOT_V299"
   ) {
     const reservedRequestsV182 =
       Math.max(
@@ -3317,6 +3397,19 @@ function consumeBudget(
   }
 
   if (
+    phase === "analysis" &&
+    athFairSlotReserveBlocksAnalysisV301(budget, type, amount)
+  ) {
+    budget.skipped.push({
+      phase,
+      type,
+      amount,
+      reason: "V301_ATH_FAIR_SLOT_REQUEST_RESERVED"
+    });
+    return false;
+  }
+
+  if (
     !budgetAvailable(
       budget,
       phase,
@@ -3337,6 +3430,24 @@ function consumeBudget(
 
   budget.totalUsed +=
     amount;
+
+  if (
+    phase === "analysis" &&
+    budget.analysis?.athFairSlotReserveV301?.active === true &&
+    (type === "DEXSCREENER" || type === "DEXSCREENER_ATH_FAIR_SLOT_V299")
+  ) {
+    const reserve = budget.analysis.athFairSlotReserveV301;
+    reserve.active = false;
+    reserve.consumed = true;
+    reserve.consumedAt = Date.now();
+    reserve.consumedBy = type === "DEXSCREENER"
+      ? "SCANNER_FRESH_DEXSCREENER"
+      : "ATH_FAIR_SLOT";
+    reserve.releasedAt = reserve.consumedAt;
+    reserve.releaseReason = type === "DEXSCREENER"
+      ? "CANDIDATE_FIRST_RIGHT_USED"
+      : "ATH_FAIR_SLOT_USED";
+  }
 
   /*
    * V279: exact request-type accounting for the isolated Telegram /analyse
@@ -3682,6 +3793,9 @@ function budgetTelemetry(
           yieldedAt: null,
           reserveWasBlocking: false
         },
+
+      athFairSlotReserveV301:
+        budget.analysis?.athFairSlotReserveV301 || null,
 
       blockscoutUsdGReserveV182: {
         active:
@@ -47483,6 +47597,9 @@ async function scan(
     startedAt
   );
 
+  const athFairSlotReserveV301 =
+    configureAthFairSlotReserveV301(state, budget);
+
   const scheduled =
     Boolean(
       options.scheduled
@@ -56312,7 +56429,10 @@ for (
         state?.services?.dexscreener?.athFollowUpV296 || null,
 
       athFairSlotV299:
-        athFairSlotV299 || null
+        athFairSlotV299 || null,
+
+      athFairSlotReserveV301:
+        athFairSlotReserveV301 || null
     },
 
     followUpTrackingV267: {
