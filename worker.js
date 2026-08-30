@@ -1,6 +1,7 @@
 /**
  * Robinhood Chain Meme Hunter
- * V341: isolated USD-reference diagnostic. Preserves V338 /analyse behavior, adds strict RPC timeouts and a separate /usdtest command to diagnose the canonical WETH/USDG V3 reference without blocking normal analysis.
+ * V342: fixes V341 regression by restoring the exact V338 shared RPC helper for /analyse. Keeps /usdtest isolated as a diagnostic command; no global RPC timeout changes affect normal analysis.
+ * V341: isolated USD-reference diagnostic. Adds a separate /usdtest command to diagnose the canonical WETH/USDG V3 reference.
  * V338: Step 3B historical USD valuation layer. Reuses the already-verified canonical WETH/USDG reference path, prices quote-ready V3 swaps at their exact swap block via historical slot0(), persists only independently verified USD values, and exposes rolling verified USD flow with PARTIAL-COVERAGE truthfulness.
  * V337: Step 3A verification layer. Preserves V336/V334 behavior and adds zero-request visibility for exact quote-side amounts already persisted on newly captured V3 swaps. Reports quote-ready ledger coverage (WETH/USDG) without converting historical swaps to USD or guessing missing quote evidence.
  * V336: Step 3A safe repair: preserves V334 command/reply path unchanged and adds only exact quote-side amount persistence to newly captured V3 swap records. No extra provider calls, no new Telegram formatter dependency, no historical USD guessing.
@@ -1449,7 +1450,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V341";
+const VERSION = "V342";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -63385,22 +63386,11 @@ async function manualRpcReadV292(env, budget, method, params, label) {
     }
 
     try {
-      /* V341: strict per-attempt timeout. A stalled RPC must never hold a
-         Telegram command open indefinitely. This does not change trust rules;
-         timeout simply fails the evidence open to UNVERIFIED. */
-      const controllerV341 = new AbortController();
-      const timeoutV341 = setTimeout(() => controllerV341.abort(), 2200);
-      let response;
-      try {
-        response = await fetch(provider.url, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
-          signal: controllerV341.signal
-        });
-      } finally {
-        clearTimeout(timeoutV341);
-      }
+      const response = await fetch(provider.url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params })
+      });
 
       let payload = null;
       try { payload = await response.json(); } catch (_) {}
