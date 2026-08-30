@@ -1,5 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V348: DIAGNOSTIC-ONLY build from confirmed-working V346. /analyse, scheduled scan, collector, scoring and persistence paths are unchanged. Adds only GET /v347-diagnostic to inspect persisted V347 KV/reference/ledger state with zero writes and zero external RPC/provider calls.
  * V346: CLEAN RESTORE BUILD from confirmed-working V337 Step 3A logic. No V338+ USD resolver/enrichment code is included.
  * V337: Step 3A verification layer. Preserves V336/V334 behavior and adds zero-request visibility for exact quote-side amounts already persisted on newly captured V3 swaps. Reports quote-ready ledger coverage (WETH/USDG) without converting historical swaps to USD or guessing missing quote evidence.
  * V336: Step 3A safe repair: preserves V334 command/reply path unchanged and adds only exact quote-side amount persistence to newly captured V3 swap records. No extra provider calls, no new Telegram formatter dependency, no historical USD guessing.
@@ -1448,7 +1449,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V346";
+const VERSION = "V348";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -67297,6 +67298,141 @@ async function runAll(
   };
 }
 
+
+/* ============================================================
+   V348 — READ-ONLY V347 STATE DIAGNOSTIC
+   ============================================================
+   Deliberately isolated from /analyse and scheduled execution.
+   - KV reads only
+   - zero KV writes
+   - zero RPC/provider/API requests
+   - inspects any V347 state left in the existing KV namespace
+*/
+const V347_REFERENCE_DIAGNOSTIC_KEY_V348 = "robinhood-meme-hunter-v347-weth-usdg-reference";
+
+async function v347StateDiagnosticV348(env) {
+  const startedAt = Date.now();
+  const { kv, binding } = getKV(env);
+  const out = {
+    version: VERSION,
+    diagnostic: "V347_PERSISTED_STATE_READ_ONLY_V348",
+    safe: true,
+    writes: 0,
+    externalRequests: 0,
+    kvBinding: binding || null,
+    reference: { found: false, parseOk: false },
+    registry: { found: false, parseOk: false, tokens: 0, rows: [] },
+    elapsedMs: null,
+    timestamp: now()
+  };
+  if (!kv) {
+    out.status = "KV_UNAVAILABLE_V348";
+    out.elapsedMs = Date.now() - startedAt;
+    return out;
+  }
+
+  try {
+    const raw = await kv.get(V347_REFERENCE_DIAGNOSTIC_KEY_V348);
+    if (raw) {
+      out.reference.found = true;
+      try {
+        const ref = JSON.parse(raw);
+        const observedAt = Number(ref?.observedAt);
+        out.reference = {
+          found: true,
+          parseOk: true,
+          verified: ref?.verified === true,
+          schema: ref?.schema || null,
+          priceUsdGPerWeth: Number.isFinite(Number(ref?.priceUsdGPerWeth)) ? Number(ref.priceUsdGPerWeth) : null,
+          source: ref?.source || null,
+          observedAt: Number.isFinite(observedAt) ? observedAt : null,
+          ageMs: Number.isFinite(observedAt) ? Math.max(0, Date.now() - observedAt) : null,
+          weth: ref?.weth || null,
+          usdg: ref?.usdg || null,
+          historicalExactBlock: ref?.historicalExactBlock === true
+        };
+      } catch (error) {
+        out.reference.parseError = String(error?.message || error).slice(0, 180);
+        out.reference.rawLength = raw.length;
+      }
+    }
+  } catch (error) {
+    out.reference.readError = String(error?.message || error).slice(0, 180);
+  }
+
+  let registryRows = [];
+  try {
+    const raw = await kv.get(NATIVE_V3_COLLECTOR_REGISTRY_KEY_V333);
+    if (raw) {
+      out.registry.found = true;
+      try {
+        const parsed = JSON.parse(raw);
+        registryRows = Array.isArray(parsed) ? parsed : [];
+        out.registry.parseOk = Array.isArray(parsed);
+        out.registry.tokens = registryRows.length;
+      } catch (error) {
+        out.registry.parseError = String(error?.message || error).slice(0, 180);
+        out.registry.rawLength = raw.length;
+      }
+    }
+  } catch (error) {
+    out.registry.readError = String(error?.message || error).slice(0, 180);
+  }
+
+  for (const row of registryRows.slice(-NATIVE_V3_COLLECTOR_MAX_TOKENS_PER_RUN_V333)) {
+    const token = normalize(row?.tokenAddress);
+    const item = { token, pair: null, pairStatus: null, ledger: null };
+    if (!isAddress(token)) {
+      item.pairStatus = "TOKEN_INVALID";
+      out.registry.rows.push(item);
+      continue;
+    }
+    try {
+      const pairCache = await loadVerifiedV3PairIdentityV329(env, token);
+      const pair = normalize(pairCache?.record?.pairAddress);
+      item.pairStatus = pairCache?.status || null;
+      item.pair = isAddress(pair) ? pair : null;
+      if (pairCache?.valid === true && isAddress(pair)) {
+        const ledger = await loadNativeV3SwapLedgerV331(env, token, pair);
+        const rows = Array.isArray(ledger?.records) ? ledger.records : [];
+        let quoteReady = 0, wethQuote = 0, usdgQuote = 0, v347Usd = 0, v347WethUsd = 0, v347UsdgUsd = 0;
+        for (const r of rows) {
+          const q = normalize(r?.quoteTokenAddress);
+          if (r?.quoteAmountVerifiedV336 === true && Number.isFinite(Number(r?.quoteAmount)) && Number(r.quoteAmount) > 0) {
+            quoteReady++;
+            if (q === CANONICAL_WETH_V179) wethQuote++;
+            if (q === CANONICAL_USDG_V179) usdgQuote++;
+          }
+          if (r?.sameCycleUsdVerifiedV347 === true && Number.isFinite(Number(r?.sameCycleUsdV347)) && Number(r.sameCycleUsdV347) > 0) {
+            v347Usd++;
+            if (q === CANONICAL_WETH_V179) v347WethUsd++;
+            if (q === CANONICAL_USDG_V179) v347UsdgUsd++;
+          }
+        }
+        item.ledger = {
+          status: ledger?.status || null,
+          valid: ledger?.valid === true,
+          records: rows.length,
+          verifiedRanges: Array.isArray(ledger?.scannedRanges) ? ledger.scannedRanges.length : null,
+          quoteReady,
+          wethQuote,
+          usdgQuote,
+          v347UsdVerified: v347Usd,
+          v347WethUsdVerified: v347WethUsd,
+          v347UsdgUsdVerified: v347UsdgUsd
+        };
+      }
+    } catch (error) {
+      item.error = String(error?.message || error).slice(0, 180);
+    }
+    out.registry.rows.push(item);
+  }
+
+  out.status = "DIAGNOSTIC_COMPLETE_V348";
+  out.elapsedMs = Date.now() - startedAt;
+  return out;
+}
+
 /* =========================================================
    ROUTER
    ========================================================= */
@@ -67409,6 +67545,17 @@ async function handleRequest(
   ) {
     return jsonResponse(
       await health(
+        env
+      )
+    );
+  }
+
+  if (
+    path ===
+    "/v347-diagnostic"
+  ) {
+    return jsonResponse(
+      await v347StateDiagnosticV348(
         env
       )
     );
