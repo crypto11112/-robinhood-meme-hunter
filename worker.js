@@ -1,5 +1,13 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V299 / V2.0:
+ * - ATH FAIR-SLOT REFRESH: if a scan finishes without using its single protected fresh DexScreener slot, V299 can use that otherwise-unused slot to refresh tracked-call ATHs instead of letting follow-up coverage starve behind candidate priority
+ * - CANDIDATE FIRST: discovery/priority candidates keep first right to the existing fresh DexScreener slot; ATH follow-up runs only after candidate analysis and only when dexFreshUsed is still zero
+ * - RATE-LIMIT SAFE: fair-slot refresh obeys the existing DexScreener cooldown, 5-minute fresh guard, V157 recovery stagger, one-fresh-request-per-scan ceiling and analysis request budget
+ * - CONSERVATIVE FALLBACK CADENCE: an ATH-only fair-slot request is attempted at most once per 15 minutes; successful normal piggyback requests can still refresh ATHs more frequently
+ * - VERIFIED ONLY: exact base-token match, finite positive marketCap, frozen entry baseline and strictly-higher ATH rules remain unchanged
+ * - TELEMETRY: /best and /scan expose FAIR_SLOT_* terminal outcomes separately; successful-check and ATH-update timestamps remain truthful
+ * - PRESERVES: V298 request finalization, V297 timestamps, V296 diagnostics, V295 batch coverage, scanner 42/21 ceilings, scoring, Momentum, holders, Telegram thresholds, KV history and provider protections
  * V298 / V2.0:
  * - ATH REQUEST FINALIZATION: every V295/V296 DexScreener batch attempt now replaces REQUESTING with a terminal outcome on HTTP 429, other non-OK HTTP responses, or fetch/JSON exceptions
  * - DIAGNOSTIC ONLY: no extra requests, no cadence changes, no request-budget changes, no ATH maths changes and no provider-protection changes
@@ -1341,7 +1349,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V298";
+const VERSION = "V299";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2375,6 +2383,11 @@ const DEXSCREENER_MIN_FRESH_INTERVAL_MS =
   5 * 60 * 1000;
 
 const DEXSCREENER_MAX_FRESH_PER_SCAN = 1;
+
+/* V299: ATH-only fallback may use an otherwise-unused fresh slot, but no more
+ * than once per 15 minutes. Normal candidate piggyback remains preferred. */
+const ATH_FAIR_SLOT_MIN_INTERVAL_MS_V299 =
+  15 * 60 * 1000;
 
 /* V116 priority fresh-market reservation. */
 const PRIORITY_FRESH_RESERVATION_MAX_AGE_MS =
@@ -23259,8 +23272,13 @@ function setAthFollowUpStatusV296(service, patch = {}) {
     ...prior,
     ...patch,
     updatedAt: Date.now(),
-    sourceVersion: "V296",
-    zeroExtraRequests: true
+    sourceVersion: VERSION,
+    zeroExtraRequests:
+      patch.zeroExtraRequests !== undefined
+        ? patch.zeroExtraRequests
+        : (prior.zeroExtraRequests !== undefined
+            ? prior.zeroExtraRequests
+            : true)
   };
 
   return service.athFollowUpV296;
@@ -27243,6 +27261,291 @@ function applyDexPerformanceBatchV295(state, pairs, targetToken) {
     observed,
     athUpdated
   };
+}
+
+async function athFairSlotRefreshV299(
+  state,
+  budget
+) {
+  const service = dexService(state);
+  const registry =
+    state?.callPerformanceV270 &&
+    typeof state.callPerformanceV270 === "object"
+      ? state.callPerformanceV270
+      : {};
+
+  const trackedAddresses = Object.values(registry)
+    .map(record => normalize(record?.address))
+    .filter(Boolean)
+    .filter((address, index, all) => all.indexOf(address) === index);
+
+  if (!trackedAddresses.length) {
+    return {
+      attempted: false,
+      status: "FAIR_SLOT_NO_TRACKED_CALLS",
+      requestedAddresses: 0,
+      observed: 0,
+      athUpdated: 0
+    };
+  }
+
+  budget.analysis.dexFreshUsed =
+    safeNumber(budget?.analysis?.dexFreshUsed);
+
+  /* Candidate discovery always keeps first right to the one fresh slot. */
+  if (
+    budget.analysis.dexFreshUsed >=
+    DEXSCREENER_MAX_FRESH_PER_SCAN
+  ) {
+    return {
+      attempted: false,
+      status: "FAIR_SLOT_ALREADY_USED_BY_SCANNER",
+      requestedAddresses: Math.min(30, trackedAddresses.length),
+      observed: 0,
+      athUpdated: 0
+    };
+  }
+
+  const nowMs = Date.now();
+  const cooldownUntil = safeNumber(service.cooldownUntil);
+
+  if (cooldownUntil && nowMs < cooldownUntil) {
+    setAthFollowUpStatusV296(service, {
+      status: "FAIR_SLOT_BLOCKED_DEXSCREENER_COOLDOWN",
+      attempted: false,
+      requestedAddresses: Math.min(30, trackedAddresses.length),
+      observed: 0,
+      athUpdated: 0,
+      cooldownUntil,
+      zeroExtraRequests: false,
+      fairSlotV299: true
+    });
+
+    return service.athFollowUpV296;
+  }
+
+  const sinceLastFreshRequest =
+    nowMs - safeNumber(service.lastRequestAt);
+
+  if (
+    safeNumber(service.lastRequestAt) &&
+    sinceLastFreshRequest < DEXSCREENER_MIN_FRESH_INTERVAL_MS
+  ) {
+    setAthFollowUpStatusV296(service, {
+      status: "FAIR_SLOT_BLOCKED_FRESH_GUARD",
+      attempted: false,
+      requestedAddresses: Math.min(30, trackedAddresses.length),
+      observed: 0,
+      athUpdated: 0,
+      retryAfterMs: Math.max(
+        0,
+        DEXSCREENER_MIN_FRESH_INTERVAL_MS - sinceLastFreshRequest
+      ),
+      zeroExtraRequests: false,
+      fairSlotV299: true
+    });
+
+    return service.athFollowUpV296;
+  }
+
+  const lastFairAttemptAt =
+    safeNumber(service.lastAthFairSlotAttemptAtV299);
+
+  if (
+    lastFairAttemptAt &&
+    nowMs - lastFairAttemptAt < ATH_FAIR_SLOT_MIN_INTERVAL_MS_V299
+  ) {
+    setAthFollowUpStatusV296(service, {
+      status: "FAIR_SLOT_WAITING_INTERVAL",
+      attempted: false,
+      requestedAddresses: Math.min(30, trackedAddresses.length),
+      observed: 0,
+      athUpdated: 0,
+      retryAfterMs: Math.max(
+        0,
+        ATH_FAIR_SLOT_MIN_INTERVAL_MS_V299 - (nowMs - lastFairAttemptAt)
+      ),
+      zeroExtraRequests: false,
+      fairSlotV299: true
+    });
+
+    return service.athFollowUpV296;
+  }
+
+  const dexRecoveryV157 =
+    marketProviderRecoveryEligibilityV157(
+      state,
+      "DEX"
+    );
+
+  if (dexRecoveryV157?.eligible !== true) {
+    setAthFollowUpStatusV296(service, {
+      status: "FAIR_SLOT_BLOCKED_RECOVERY_STAGGER",
+      attempted: false,
+      requestedAddresses: Math.min(30, trackedAddresses.length),
+      observed: 0,
+      athUpdated: 0,
+      recoveryReason: dexRecoveryV157?.reason || null,
+      recoveryEligibleAt: dexRecoveryV157?.eligibleAt || null,
+      zeroExtraRequests: false,
+      fairSlotV299: true
+    });
+
+    return service.athFollowUpV296;
+  }
+
+  if (!budgetAvailable(budget, "analysis")) {
+    setAthFollowUpStatusV296(service, {
+      status: "FAIR_SLOT_BLOCKED_ANALYSIS_BUDGET",
+      attempted: false,
+      requestedAddresses: Math.min(30, trackedAddresses.length),
+      observed: 0,
+      athUpdated: 0,
+      zeroExtraRequests: false,
+      fairSlotV299: true
+    });
+
+    return service.athFollowUpV296;
+  }
+
+  if (!consumeBudget(budget, "analysis", "DEXSCREENER_ATH_FAIR_SLOT_V299")) {
+    setAthFollowUpStatusV296(service, {
+      status: "FAIR_SLOT_BLOCKED_ANALYSIS_BUDGET",
+      attempted: false,
+      requestedAddresses: Math.min(30, trackedAddresses.length),
+      observed: 0,
+      athUpdated: 0,
+      zeroExtraRequests: false,
+      fairSlotV299: true
+    });
+
+    return service.athFollowUpV296;
+  }
+
+  budget.analysis.dexFreshUsed++;
+  service.lastAthFairSlotAttemptAtV299 = nowMs;
+  service.lastRequestAt = nowMs;
+
+  markMarketRecoveryProbeV157(state, "DEX");
+
+  const targetAddress = trackedAddresses[0];
+  const batchAddresses =
+    dexPerformanceBatchAddressesV295(
+      state,
+      targetAddress
+    );
+
+  setAthFollowUpStatusV296(service, {
+    status: "FAIR_SLOT_REQUESTING",
+    attempted: true,
+    targetToken: targetAddress,
+    requestedAddresses: batchAddresses.length,
+    observed: 0,
+    athUpdated: 0,
+    httpStatus: null,
+    zeroExtraRequests: false,
+    fairSlotV299: true
+  });
+
+  try {
+    const response = await fetch(
+      `${DEXSCREENER_BASE}/tokens/v1/robinhood/${batchAddresses.join(",")}`,
+      {
+        headers: {
+          accept: "application/json"
+        }
+      }
+    );
+
+    if (response.status === 429) {
+      const dexBackoffMsV147 = registerDex429V147(service);
+      markMarket429V157(state, "DEX");
+
+      setAthFollowUpStatusV296(service, {
+        status: "FAIR_SLOT_HTTP_429",
+        attempted: true,
+        requestedAddresses: batchAddresses.length,
+        observed: 0,
+        athUpdated: 0,
+        httpStatus: 429,
+        cooldownUntil: service.cooldownUntil,
+        adaptiveBackoffMsV147: dexBackoffMsV147,
+        error: null,
+        zeroExtraRequests: false,
+        fairSlotV299: true
+      });
+
+      return service.athFollowUpV296;
+    }
+
+    markMarketNon429V157(state, "DEX");
+
+    if (!response.ok) {
+      service.lastStatus = `HTTP_${response.status}`;
+
+      setAthFollowUpStatusV296(service, {
+        status: `FAIR_SLOT_HTTP_${response.status}`,
+        attempted: true,
+        requestedAddresses: batchAddresses.length,
+        observed: 0,
+        athUpdated: 0,
+        httpStatus: response.status,
+        error: null,
+        zeroExtraRequests: false,
+        fairSlotV299: true
+      });
+
+      return service.athFollowUpV296;
+    }
+
+    const data = await response.json();
+    const allPairs = Array.isArray(data) ? data : [];
+
+    /* null target means every returned tracked base-token may update. */
+    const result = applyDexPerformanceBatchV295(
+      state,
+      allPairs,
+      null
+    );
+
+    registerDexSuccessV147(service);
+
+    const completedAt = Date.now();
+
+    setAthFollowUpStatusV296(service, {
+      status: "FAIR_SLOT_HTTP_200_BATCH_PROCESSED",
+      attempted: true,
+      requestedAddresses: batchAddresses.length,
+      returnedPairs: allPairs.length,
+      observed: safeNumber(result?.observed),
+      athUpdated: safeNumber(result?.athUpdated),
+      httpStatus: response.status,
+      lastSuccessfulCheckAt: completedAt,
+      ...(safeNumber(result?.athUpdated) > 0
+        ? { lastAthUpdatedAt: completedAt }
+        : {}),
+      error: null,
+      zeroExtraRequests: false,
+      fairSlotV299: true
+    });
+
+    return service.athFollowUpV296;
+  }
+  catch (error) {
+    setAthFollowUpStatusV296(service, {
+      status: "FAIR_SLOT_REQUEST_FAILED",
+      attempted: true,
+      requestedAddresses: batchAddresses.length,
+      observed: 0,
+      athUpdated: 0,
+      httpStatus: null,
+      error: errorString(error),
+      zeroExtraRequests: false,
+      fairSlotV299: true
+    });
+
+    return service.athFollowUpV296;
+  }
 }
 
 async function marketData(
@@ -52484,8 +52787,19 @@ for (
   }
 
   /*
+   * V299: candidate discovery keeps first right to the scarce fresh-market
+   * slot. If that slot is still unused after candidate analysis, allow a
+   * conservative ATH-only refresh using the same one-request-per-scan ceiling.
+   */
+  const athFairSlotV299 =
+    await athFairSlotRefreshV299(
+      state,
+      budget
+    );
+
+  /*
    * V270: update previously registered calls using only verified market
-   * evidence already collected by this scan. No external requests added.
+   * evidence already collected by this scan. No V270 external requests added.
    */
   const callPerformanceV270 =
     updateCallPerformanceV270(
@@ -55890,7 +56204,10 @@ for (
       momentumUnchanged: true,
       telegramThresholdsUnchanged: true,
       athFollowUpV296:
-        state?.services?.dexscreener?.athFollowUpV296 || null
+        state?.services?.dexscreener?.athFollowUpV296 || null,
+
+      athFairSlotV299:
+        athFairSlotV299 || null
     },
 
     followUpTrackingV267: {
