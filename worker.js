@@ -6,6 +6,12 @@
  */
 /**
  * Robinhood Chain Meme Hunter
+ * V310: frozen-entry snapshot inspection + successful-call KV checkpoint.
+ * - Adds read-only /callinfo SYMBOL|0xADDRESS using stored entrySignalSnapshotV309 only.
+ * - Pre-V309 calls are never backfilled: /callinfo reports snapshot unavailable.
+ * - After a successful Telegram alert and V270 registration, checkpoints main state immediately before diagnostic/history work.
+ * - Preserves original entryTimestamp/entry MC/snapshot on repeat alerts; no provider requests, scoring, thresholds, ATH maths or request ceilings changed.
+ *
  * V306
  * - /best PERFORMANCE SUMMARY ONLY: adds verified call hit-rates (1.25x/1.5x/2x/5x/10x), median ATH multiple and average ATH multiple from the existing stored call registry
  * - READ-ONLY: no extra provider requests, no ATH/entry/current-MC math changes, no scanner/scoring/budget/alert changes
@@ -1382,7 +1388,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V309";
+const VERSION = "V310";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -53437,6 +53443,31 @@ for (
       ].callPerformanceRegistrationV270 =
         callPerformanceRegistrationV270;
 
+      /*
+       * V310 successful-call checkpoint. The call-performance record and its
+       * frozen V309 entry snapshot are written immediately after Telegram
+       * success instead of waiting for the end of the scan. This is a KV-only
+       * persistence checkpoint and consumes no scanner/provider request budget.
+       */
+      const callPerformanceCheckpointV310 =
+        await writeState(env, state);
+
+      telegramResults[
+        telegramResults.length - 1
+      ].callPerformanceCheckpointV310 = {
+        attempted: true,
+        saved: callPerformanceCheckpointV310?.saved === true,
+        binding: callPerformanceCheckpointV310?.binding || null,
+        error: callPerformanceCheckpointV310?.error || null,
+        address,
+        snapshotCaptured:
+          callPerformanceRegistrationV270?.entrySignalSnapshotV309?.captured === true,
+        snapshotVersion:
+          callPerformanceRegistrationV270?.entrySignalSnapshotV309?.snapshotVersion || null,
+        snapshotCapturedAt:
+          callPerformanceRegistrationV270?.entrySignalSnapshotV309?.capturedAt || null
+      };
+
       const sameRunVerifiedUsdCompletionV264 =
         verifiedUsdCompletionForAddressV264(
           verifiedUsdCompletionV254,
@@ -64390,6 +64421,76 @@ function callPerformanceMessageV271(
   ].join("\n");
 }
 
+function callInfoMessageV310(record) {
+  if (!record) {
+    return "❌ <b>Call not found.</b>";
+  }
+
+  const snap = record?.entrySignalSnapshotV309 || null;
+  const symbol = escapeHtml(record?.symbol || "UNKNOWN");
+  const address = escapeHtml(record?.address || "UNVERIFIED");
+
+  if (!snap) {
+    return [
+      `🧊 <b>${symbol} — Frozen Entry Snapshot</b>`,
+      "",
+      `Contract: <code>${address}</code>`,
+      "",
+      "⚠️ <b>NO V309 ENTRY SNAPSHOT</b>",
+      "This call predates frozen V309 entry snapshots (or no snapshot was persisted).",
+      "No later evidence will be backfilled into the entry snapshot.",
+      "",
+      `🎯 Frozen entry MC: <b>${telegramMoneyV271(record?.entryMarketCap)}</b>`,
+      `🏆 Verified ATH MC: <b>${telegramMoneyV271(record?.athMarketCap)}</b>`,
+      `🚀 Verified ATH: <b>${telegramMultipleV271(record?.athMultipleByMarketCap)}</b>`,
+      "",
+      "<i>Read-only stored evidence. Zero provider requests.</i>"
+    ].join("\n");
+  }
+
+  const money = value => Number.isFinite(Number(value)) && Number(value) > 0
+    ? telegramMoneyV271(Number(value))
+    : "UNVERIFIED";
+  const score = value => Number.isFinite(Number(value)) ? `${Number(value)}/100` : "UNVERIFIED";
+  const pct = value => Number.isFinite(Number(value)) ? `${Number(value).toFixed(2)}%` : "UNVERIFIED";
+  const text = value => value !== null && value !== undefined && String(value).trim()
+    ? escapeHtml(String(value))
+    : "UNVERIFIED";
+
+  const lines = [
+    `🧊 <b>${symbol} — Frozen V309 Entry Snapshot</b>`,
+    "",
+    `Contract: <code>${address}</code>`,
+    `📅 Captured: <b>${escapeHtml(telegramDateV271(snap?.capturedAt))}</b>`,
+    `🔒 Frozen: <b>${snap?.frozenAtSuccessfulCall === true ? "YES" : "UNVERIFIED"}</b> | Later backfill: <b>${snap?.laterEvidenceBackfillAllowed === false ? "NO" : "UNVERIFIED"}</b>`,
+    "",
+    `🎯 Opportunity: <b>${score(snap?.opportunity?.score)}</b> — ${text(snap?.opportunity?.label)}`,
+    `🚀 Momentum: <b>${score(snap?.momentum?.score)}</b> — ${text(snap?.momentum?.label)}`,
+    `🔎 Confidence: <b>${score(snap?.confidence?.score)}</b> — ${text(snap?.confidence?.label)}`,
+    `🧪 Market Quality: <b>${snap?.marketQuality?.verified === true ? score(snap?.marketQuality?.score) : "UNVERIFIED"}</b>`,
+    `🛡 Rug Risk: <b>${snap?.rugRisk?.verified === true ? score(snap?.rugRisk?.score) : "UNVERIFIED"}</b> — ${snap?.rugRisk?.verified === true ? text(snap?.rugRisk?.label) : "UNVERIFIED"}`,
+    "",
+    `💰 Entry MC: <b>${money(snap?.market?.marketCap)}</b>`,
+    `💧 Entry liquidity: <b>${money(snap?.market?.liquidityUsd)}</b>`,
+    `📊 Entry 24h volume: <b>${money(snap?.market?.volume24hUsd)}</b>`,
+    `👥 Holders: <b>${snap?.holders?.holderCountVerified === true ? telegramPlainNumberV271(snap?.holders?.holderCount, 2) : "UNVERIFIED"}</b>`,
+    `🐋 Top holder: <b>${snap?.holders?.concentrationVerified === true ? pct(snap?.holders?.topHolderPct) : "UNVERIFIED"}</b> | Top 10: <b>${snap?.holders?.concentrationVerified === true ? pct(snap?.holders?.top10Pct) : "UNVERIFIED"}</b>`,
+    `🐋 Concentration: <b>${snap?.holders?.concentrationVerified === true ? text(snap?.holders?.concentration) : "UNVERIFIED"}</b>`,
+    `🐋 Whale Flow: <b>${text(snap?.whaleFlow?.flow)}</b>`,
+    `🧠 Smart-money candidate: <b>${snap?.holders?.smartMoneyCandidate === true ? "YES" : snap?.holders?.smartMoneyCandidate === false ? "NO" : "UNVERIFIED"}</b>`,
+    "",
+    `⏱ Verified launch: <b>${snap?.launch?.verified === true ? text(snap?.launch?.launchAgeDisplay) : "UNVERIFIED"}</b>`,
+    `🏷 Launch source: <b>${snap?.launch?.verified === true ? text(snap?.launch?.protocol) : "UNVERIFIED"}</b>`,
+    `🔭 Scanner age at call: <b>${text(snap?.launch?.scannerAgeDisplay)}</b>`,
+    "",
+    `🏆 Current stored ATH: <b>${telegramMoneyV271(record?.athMarketCap)}</b> — <b>${telegramMultipleV271(record?.athMultipleByMarketCap)}</b>`,
+    "",
+    "<i>Frozen call-time evidence only. Read-only; zero provider requests and no hindsight backfill.</i>"
+  ];
+
+  return lines.join("\n");
+}
+
 function callsListMessageV271(
   state
 ) {
@@ -64808,6 +64909,7 @@ function telegramHelpV271() {
     "<code>/analyse GUS</code> — fresh live analysis of any Robinhood token",
     "<code>/analyse 0xADDRESS</code> — exact fresh analysis by contract",
     "<code>/call GUS</code> — full stored performance for a call",
+    "<code>/callinfo GUS</code> — frozen V309 entry snapshot",
     "<code>/ath GUS</code> — same call/ATH report",
     "<code>/stats GUS</code> — same call/ATH report",
     "<code>/calls</code> — recent tracked calls",
@@ -65038,6 +65140,32 @@ async function telegramCommandReplyV271(
     } else {
       reply =
         "❌ <b>Call not found.</b>\n\nUse <code>/calls</code> to see stored V270+ calls.";
+    }
+  } else if (
+    parsed.command ===
+    "/callinfo"
+  ) {
+    const resolved =
+      resolveCallPerformanceV271(
+        state,
+        parsed.argument
+      );
+
+    if (resolved.status === "MISSING_QUERY") {
+      reply = "ℹ️ Use <code>/callinfo SYMBOL</code> or <code>/callinfo 0xADDRESS</code>.";
+    } else if (resolved.status === "AMBIGUOUS_SYMBOL") {
+      reply = [
+        "⚠️ <b>More than one call uses that symbol.</b>",
+        "",
+        "Use the contract address instead:",
+        ...resolved.matches.slice(0, 10).map(record =>
+          `<code>${escapeHtml(record?.address || "")}</code>`
+        )
+      ].join("\n");
+    } else if (resolved.record) {
+      reply = callInfoMessageV310(resolved.record);
+    } else {
+      reply = "❌ <b>Call not found.</b>\n\nUse <code>/calls</code> to see stored calls.";
     }
   } else if (
     parsed.command ===
