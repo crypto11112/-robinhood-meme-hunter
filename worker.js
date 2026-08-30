@@ -1,5 +1,14 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V295 / V2.0:
+ * - ATH COVERAGE: every normal fresh DexScreener market request can piggyback up to 29 previously alerted token addresses using DexScreener's documented multi-token /tokens/v1 route
+ * - ZERO EXTRA REQUESTS: the scanner still spends the same single protected DexScreener fresh-market request; no request ceiling or provider cadence is increased
+ * - VERIFIED ONLY: post-alert ATH market cap updates require an exact Robinhood base-token address match and a finite positive DexScreener marketCap; the highest-liquidity returned pair is used per tracked token
+ * - ENTRY FROZEN: original alert entry market cap is never rewritten; only a strictly higher verified observed ATH can replace the stored ATH
+ * - SAFE FALLBACK: if no tracked calls are eligible, the request still uses the documented /tokens/v1 route for the target token only; target market parsing remains isolated from piggyback pairs
+ * - PRESERVES: V294 manual/autonomous Telegram parity, V293-V289 verified USD work, scanner 42/21 ceilings, DexScreener 5-minute spacing/429 cooldown, scoring, Momentum, holders, Telegram thresholds and KV history
+
+ * Robinhood Chain Meme Hunter
  * V294 / V2.0:
  * - PARITY: manual /analyse now renders through the proven standard telegramMessage(candidate) alert formatter after all manual enrichment is complete
  * - SAME DATA SHAPE: Opportunity, Momentum, Confidence, Market Quality, Rug Risk, market data, market activity counts, verified on-chain USD windows, holders, whales, smart-money and V4 activity use the same presentation logic as autonomous alerts
@@ -1316,7 +1325,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V294";
+const VERSION = "V295";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -27028,6 +27037,162 @@ function applyDirectionalTradeFlow(
   return candidate;
 }
 
+function dexPerformanceBatchAddressesV295(state, targetToken) {
+  const target = normalize(targetToken);
+  const registry =
+    state?.callPerformanceV270 &&
+    typeof state.callPerformanceV270 === "object"
+      ? state.callPerformanceV270
+      : {};
+
+  const tracked = Object.values(registry)
+    .filter(record => {
+      const address = normalize(record?.address);
+      return Boolean(address) && address !== target;
+    })
+    .sort(
+      (a, b) =>
+        safeNumber(a?.currentObservationTimestamp) -
+        safeNumber(b?.currentObservationTimestamp)
+    )
+    .slice(0, 29)
+    .map(record => normalize(record.address));
+
+  return [target, ...tracked]
+    .filter(Boolean)
+    .filter((address, index, all) => all.indexOf(address) === index)
+    .slice(0, 30);
+}
+
+function applyDexPerformanceBatchV295(state, pairs, targetToken) {
+  if (
+    !state?.callPerformanceV270 ||
+    typeof state.callPerformanceV270 !== "object" ||
+    !Array.isArray(pairs) ||
+    !pairs.length
+  ) {
+    return {
+      enabled: true,
+      observed: 0,
+      athUpdated: 0
+    };
+  }
+
+  const target = normalize(targetToken);
+  const bestByToken = new Map();
+
+  for (const pair of pairs) {
+    const address = normalize(pair?.baseToken?.address);
+    if (!address || address === target || !state.callPerformanceV270[address]) {
+      continue;
+    }
+
+    const marketCap = Number(pair?.marketCap);
+    if (!Number.isFinite(marketCap) || marketCap <= 0) {
+      continue;
+    }
+
+    const liquidityUsd = Number(pair?.liquidity?.usd);
+    const previous = bestByToken.get(address);
+    if (
+      !previous ||
+      safeNumber(liquidityUsd) > safeNumber(previous?.liquidity?.usd)
+    ) {
+      bestByToken.set(address, pair);
+    }
+  }
+
+  let observed = 0;
+  let athUpdated = 0;
+  const nowMs = Date.now();
+
+  for (const [address, pair] of bestByToken.entries()) {
+    const existing = state.callPerformanceV270[address];
+    if (!existing) continue;
+
+    const marketCap = Number(pair.marketCap);
+    const priceUsd = Number(pair?.priceUsd);
+    const liquidityUsd = Number(pair?.liquidity?.usd);
+    const priorAth = Number(existing?.athMarketCap);
+
+    const next = {
+      ...existing,
+      currentObservationTimestamp: nowMs,
+      currentMarketVerified: true,
+      currentMarketCap: marketCap,
+      currentPriceUsd:
+        Number.isFinite(priceUsd) && priceUsd > 0
+          ? priceUsd
+          : null,
+      currentLiquidityUsd:
+        Number.isFinite(liquidityUsd) && liquidityUsd > 0
+          ? liquidityUsd
+          : null,
+      currentMarketSource: "DEXSCREENER_TOKENS_V1_BATCH_V295",
+      observationCount: safeNumber(existing?.observationCount) + 1,
+      verifiedOnly: true,
+      syntheticPriceUsed: false,
+      syntheticMarketCapUsed: false,
+      unverifiedCurrentMarketPreservesPriorAth: false,
+      athMarketCapUpdated: false,
+      athPriceUpdated: false
+    };
+
+    if (!Number.isFinite(priorAth) || priorAth <= 0 || marketCap > priorAth) {
+      next.athMarketCap = marketCap;
+      next.athMarketCapTimestamp = nowMs;
+      next.athMarketCapUpdated = true;
+      athUpdated++;
+    }
+
+    if (
+      Number.isFinite(priceUsd) &&
+      priceUsd > 0 &&
+      (!Number.isFinite(Number(existing?.athPriceUsd)) ||
+        Number(existing?.athPriceUsd) <= 0 ||
+        priceUsd > Number(existing.athPriceUsd))
+    ) {
+      next.athPriceUsd = priceUsd;
+      next.athPriceTimestamp = nowMs;
+      next.athPriceUpdated = true;
+    }
+
+    next.athMultipleByMarketCap = multipleV270(
+      next.entryMarketCap,
+      next.athMarketCap
+    );
+    next.currentMultipleByMarketCap = multipleV270(
+      next.entryMarketCap,
+      next.currentMarketCap
+    );
+    next.drawdownFromAthMarketCap = drawdownV270(
+      next.athMarketCap,
+      next.currentMarketCap
+    );
+    next.athMultipleByPrice = multipleV270(
+      next.entryPriceUsd,
+      next.athPriceUsd
+    );
+    next.currentMultipleByPrice = multipleV270(
+      next.entryPriceUsd,
+      next.currentPriceUsd
+    );
+    next.drawdownFromAthPrice = drawdownV270(
+      next.athPriceUsd,
+      next.currentPriceUsd
+    );
+
+    state.callPerformanceV270[address] = next;
+    observed++;
+  }
+
+  return {
+    enabled: true,
+    observed,
+    athUpdated
+  };
+}
+
 async function marketData(
   token,
   budget,
@@ -27348,9 +27513,15 @@ async function marketData(
   }
 
   try {
+    const v295BatchAddresses =
+      dexPerformanceBatchAddressesV295(
+        state,
+        token
+      );
+
     const response =
       await fetch(
-        `${DEXSCREENER_BASE}/token-pairs/v1/robinhood/${token}`,
+        `${DEXSCREENER_BASE}/tokens/v1/robinhood/${v295BatchAddresses.join(",")}`,
 
         {
           headers: {
@@ -27460,12 +27631,26 @@ async function marketData(
     const data =
       await response.json();
 
-    const pairs =
+    const allPairsV295 =
       Array.isArray(
         data
       )
         ? data
         : [];
+
+    const performanceBatchV295 =
+      applyDexPerformanceBatchV295(
+        state,
+        allPairsV295,
+        token
+      );
+
+    const pairs =
+      allPairsV295.filter(
+        pair =>
+          normalize(pair?.baseToken?.address) === normalize(token) ||
+          normalize(pair?.quoteToken?.address) === normalize(token)
+      );
 
     if (
       !pairs.length
@@ -27706,10 +27891,16 @@ async function marketData(
         false,
 
       source:
-        service.lastStatus ===
-          "VERIFIED_TOKEN_FALLBACK"
-          ? "DEXSCREENER_TOKENS_V1_FALLBACK"
-          : "DEXSCREENER",
+        "DEXSCREENER_TOKENS_V1_BATCH_V295",
+
+      performanceBatchV295: {
+        requestedAddresses:
+          v295BatchAddresses.length,
+        observed:
+          safeNumber(performanceBatchV295?.observed),
+        athUpdated:
+          safeNumber(performanceBatchV295?.athUpdated)
+      },
 
       pairAddress:
         pair?.pairAddress ||
