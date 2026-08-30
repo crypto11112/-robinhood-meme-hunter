@@ -1,6 +1,6 @@
 /**
  * Robinhood Chain Meme Hunter
- * V349: Built from V348/V346-safe runtime. Adds read-only presentation/aggregation of already-persisted V347 same-cycle USD ledger evidence. No new RPC/API calls, no pricing resolver, no new KV writes, and no scheduled USD enrichment.
+ * V348: DIAGNOSTIC-ONLY build from confirmed-working V346. /analyse, scheduled scan, collector, scoring and persistence paths are unchanged. Adds only GET /v347-diagnostic to inspect persisted V347 KV/reference/ledger state with zero writes and zero external RPC/provider calls.
  * V346: CLEAN RESTORE BUILD from confirmed-working V337 Step 3A logic. No V338+ USD resolver/enrichment code is included.
  * V337: Step 3A verification layer. Preserves V336/V334 behavior and adds zero-request visibility for exact quote-side amounts already persisted on newly captured V3 swaps. Reports quote-ready ledger coverage (WETH/USDG) without converting historical swaps to USD or guessing missing quote evidence.
  * V336: Step 3A safe repair: preserves V334 command/reply path unchanged and adds only exact quote-side amount persistence to newly captured V3 swap records. No extra provider calls, no new Telegram formatter dependency, no historical USD guessing.
@@ -1449,7 +1449,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V349";
+const VERSION = "V348";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64595,24 +64595,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       }
     }
 
-    const persistedUsdCountV349=safeNumber(rolling?.sameCycleUsdVerifiedRecordsV349);
-    if(persistedUsdCountV349>0){
-      evidence.push(`💲 Persisted same-cycle USD evidence: <b>${persistedUsdCountV349}/${safeNumber(rolling?.totalRecords)} records VERIFIED</b>`);
-      evidence.push(`🧭 USD basis: <b>VERIFIED_SAME_CYCLE_REFERENCE</b> — NOT exact historical-block pricing`);
-      const uw=rolling?.usdWindowsV349||{};
-      const labels=["5m","15m","1h","6h","24h"];
-      evidence.push(`💵 Native V3 USD flow — PARTIAL COVERAGE`);
-      for(const label of labels){
-        const x=uw?.[label]||{};
-        const n=safeNumber(x?.verifiedRecords);
-        if(n>0){
-          const pressure=Number(x?.buyPressurePct);
-          evidence.push(`• ${label}: 🟢 <b>${money(x?.buyUsd)}</b> | 🔴 <b>${money(x?.sellUsd)}</b> | Net <b>${money(x?.netUsd)}</b> | Buy pressure <b>${Number.isFinite(pressure)?pressure.toFixed(1)+"%":"UNVERIFIED"}</b> (${n} USD-valued)`);
-        }else{
-          evidence.push(`• ${label}: <b>NO USD-VALUED SWAPS IN WINDOW</b>`);
-        }
-      }
-    } else if (v3?.usdVerified === true) {
+    if (v3?.usdVerified === true) {
       evidence.push(
         `💵 Native V3 flow: 🟢 <b>${money(v3?.buyUsd)}</b> | 🔴 <b>${money(v3?.sellUsd)}</b> | Net <b>${money(v3?.netUsd)}</b>`
       );
@@ -67317,7 +67300,7 @@ async function runAll(
 
 
 /* ============================================================
-   V349 — READ-ONLY PERSISTED V347 USD DISPLAY
+   V348 — READ-ONLY V347 STATE DIAGNOSTIC
    ============================================================
    Deliberately isolated from /analyse and scheduled execution.
    - KV reads only
@@ -67868,41 +67851,6 @@ function nativeV3RollingWindowsV334(records,nowMs=Date.now()){
     windows[label]={buys,sells,swaps:buys+sells};
   }
 
-  /* V349 Step 3C: READ ONLY the same-cycle USD evidence that V347 already
-     persisted into the V3 ledger. This performs no KV writes and no external
-     pricing/RPC/API requests. Historical exact-block pricing is NOT claimed. */
-  let sameCycleUsdVerifiedRecordsV349=0;
-  let sameCycleUsdBuysV349=0,sameCycleUsdSellsV349=0;
-  for(const row of allRows){
-    const usd=Number(row?.sameCycleUsdV347);
-    const verified=row?.sameCycleUsdVerifiedV347===true && Number.isFinite(usd) && usd>0;
-    if(!verified) continue;
-    sameCycleUsdVerifiedRecordsV349++;
-    if(row?.side==="BUY") sameCycleUsdBuysV349++;
-    else if(row?.side==="SELL") sameCycleUsdSellsV349++;
-  }
-  const usdWindowsV349={};
-  for(const [label,ms] of defs){
-    let buyUsd=0,sellUsd=0,verifiedRecords=0;
-    for(const row of allRows){
-      const ts=nativeV3VerifiedTimestampMsV334(row);
-      if(!ts||ts<nowMs-ms||ts>nowMs) continue;
-      const usd=Number(row?.sameCycleUsdV347);
-      if(row?.sameCycleUsdVerifiedV347!==true||!Number.isFinite(usd)||usd<=0) continue;
-      verifiedRecords++;
-      if(row?.side==="BUY") buyUsd+=usd;
-      else if(row?.side==="SELL") sellUsd+=usd;
-    }
-    const totalUsd=buyUsd+sellUsd;
-    usdWindowsV349[label]={
-      verifiedRecords,
-      buyUsd,
-      sellUsd,
-      netUsd:buyUsd-sellUsd,
-      buyPressurePct:totalUsd>0?(buyUsd/totalUsd)*100:null
-    };
-  }
-
   /* V337 Step 3A verification: zero-request audit of the exact quote-side
      amount fields introduced in V336. This is evidence readiness only; it
      intentionally does NOT promote WETH or USDG amounts to historical USD. */
@@ -67930,11 +67878,7 @@ function nativeV3RollingWindowsV334(records,nowMs=Date.now()){
     wethQuoteRecordsV337,
     usdgQuoteRecordsV337,
     quoteReadyBuysV337,
-    quoteReadySellsV337,
-    sameCycleUsdVerifiedRecordsV349,
-    sameCycleUsdBuysV349,
-    sameCycleUsdSellsV349,
-    usdWindowsV349
+    quoteReadySellsV337
   };
 }
 
