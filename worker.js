@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V363";
+const VERSION = "V364";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -68961,6 +68961,9 @@ async function handleRequest(
   if (path === "/v3live-status") {
     return jsonResponse(await v3LiveCollectorRouteV363(env, url.searchParams.get("token") || "", "status"));
   }
+  if (path === "/v3live-windows") {
+    return jsonResponse(await v3LiveCollectorRouteV363(env, url.searchParams.get("token") || "", "windows"));
+  }
   if (path === "/v3live-stop") {
     return jsonResponse(await v3LiveCollectorRouteV363(env, url.searchParams.get("token") || "", "stop"));
   }
@@ -69454,7 +69457,7 @@ async function scheduledScan(
 
 
 /* =========================================================
-   V363 — DURABLE OBJECT LIVE V3 WEBSOCKET COLLECTOR
+   V364 — DURABLE OBJECT LIVE V3 WEBSOCKET COLLECTOR + ROLLING WINDOWS
    Opt-in only. Existing scheduled collector remains unchanged.
    Requires a Durable Object binding named V3_LIVE_COLLECTOR.
    ========================================================= */
@@ -69505,6 +69508,10 @@ async function v3LiveCollectorRouteV363(env, tokenInput, action) {
     const r = await stub.fetch("https://v3-live.internal/stop");
     return await r.json();
   }
+  if (action === "windows") {
+    const r = await stub.fetch("https://v3-live.internal/windows");
+    return await r.json();
+  }
   const r = await stub.fetch("https://v3-live.internal/status");
   return await r.json();
 }
@@ -69546,7 +69553,8 @@ export class V3LiveCollectorV363 {
       return Response.json(await this.status("STOPPED_V363"));
     }
     if (url.pathname === "/status") return Response.json(await this.status());
-    return Response.json({version:VERSION,status:"NOT_FOUND_V363"},{status:404});
+    if (url.pathname === "/windows") return Response.json(await this.liveWindowsV364());
+    return Response.json({version:VERSION,status:"NOT_FOUND_V364"},{status:404});
   }
 
   async alarm() {
@@ -69559,7 +69567,7 @@ export class V3LiveCollectorV363 {
     const cfg = this.config || await this.state.storage.get("config") || null;
     const conn = await this.state.storage.get("connection") || {};
     const stats = await this.state.storage.get("stats") || {};
-    return {version:VERSION,collector:"DURABLE_OBJECT_ALCHEMY_V3_LIVE_V363",status:overrideStatus||conn.status||"IDLE_V363",enabled:enabled===true,token:cfg?.token||null,pair:cfg?.pair||null,connectionOpened:conn.connected===true,subscriptionAccepted:conn.subscriptionAccepted===true,subscriptionIdPresent:Boolean(conn.subscriptionIdPresent),lastConnectedAt:conn.lastConnectedAt||null,lastMessageAt:conn.lastMessageAt||null,lastSwapAt:stats.lastSwapAt||null,lastTrade:stats.lastTrade||null,swapsCaptured:safeNumber(stats.swapsCaptured),buysCaptured:safeNumber(stats.buysCaptured),sellsCaptured:safeNumber(stats.sellsCaptured),usdVerifiedCaptured:safeNumber(stats.usdVerifiedCaptured),reconnects:safeNumber(stats.reconnects),lastError:conn.lastError||null,kvBinding:getKV(this.env)?.binding||null};
+    return {version:VERSION,collector:"DURABLE_OBJECT_ALCHEMY_V3_LIVE_V364",status:overrideStatus||conn.status||"IDLE_V363",enabled:enabled===true,token:cfg?.token||null,pair:cfg?.pair||null,connectionOpened:conn.connected===true,subscriptionAccepted:conn.subscriptionAccepted===true,subscriptionIdPresent:Boolean(conn.subscriptionIdPresent),lastConnectedAt:conn.lastConnectedAt||null,lastMessageAt:conn.lastMessageAt||null,lastSwapAt:stats.lastSwapAt||null,lastTrade:stats.lastTrade||null,swapsCaptured:safeNumber(stats.swapsCaptured),buysCaptured:safeNumber(stats.buysCaptured),sellsCaptured:safeNumber(stats.sellsCaptured),usdVerifiedCaptured:safeNumber(stats.usdVerifiedCaptured),reconnects:safeNumber(stats.reconnects),lastError:conn.lastError||null,kvBinding:getKV(this.env)?.binding||null};
   }
 
   async connect() {
@@ -69610,6 +69618,51 @@ export class V3LiveCollectorV363 {
     await this.persistSwap(log);
   }
 
+  async storeLiveTradeV364(row) {
+    const ts = Number(row?.observedAt) || Date.now();
+    const bucketMs = 5 * 60 * 1000;
+    const bucketStart = Math.floor(ts / bucketMs) * bucketMs;
+    const key = `v364:trade-bucket:${bucketStart}`;
+    let bucket = await this.state.storage.get(key);
+    if (!Array.isArray(bucket)) bucket = [];
+    const tradeKey = String(row?.tradeKey || "");
+    if (tradeKey && bucket.some(x => String(x?.tradeKey || "") === tradeKey)) return {inserted:0,deduped:true};
+    bucket.push({tradeKey,transactionHash:row.transactionHash,logIndex:row.logIndex,blockNumber:row.blockNumber,side:row.side,tokenAmount:row.tokenAmount,quoteTokenAddress:row.quoteTokenAddress,quoteAmount:row.quoteAmount,usd:row.usd,usdVerified:row.usdVerified===true,usdBasis:row.sameCycleUsdBasisV347||null,observedAt:ts});
+    await this.state.storage.put(key,bucket);
+    // Delete one bucket older than 25h. This is Durable Object storage, not Workers KV.
+    const oldStart = bucketStart - (25 * 60 * 60 * 1000);
+    try { await this.state.storage.delete(`v364:trade-bucket:${oldStart}`); } catch (_) {}
+    return {inserted:1,deduped:false};
+  }
+
+  async liveWindowsV364() {
+    const nowMs = Date.now();
+    const bucketMs = 5 * 60 * 1000;
+    const current = Math.floor(nowMs / bucketMs) * bucketMs;
+    const earliest = nowMs - 24 * 60 * 60 * 1000;
+    const keys = [];
+    for (let t=current; t>=Math.floor(earliest/bucketMs)*bucketMs; t-=bucketMs) keys.push(`v364:trade-bucket:${t}`);
+    const got = await this.state.storage.get(keys);
+    const trades = [];
+    if (got && typeof got.forEach === "function") got.forEach(v => { if (Array.isArray(v)) trades.push(...v); });
+    const defs = [["5m",5*60*1000],["15m",15*60*1000],["1h",60*60*1000],["6h",6*60*60*1000],["24h",24*60*60*1000]];
+    const windows = {};
+    for (const [name,ms] of defs) {
+      const rows = trades.filter(r => Number(r?.observedAt)>=nowMs-ms && Number(r?.observedAt)<=nowMs);
+      let buys=0,sells=0,buyUsd=0,sellUsd=0,usdVerifiedTrades=0;
+      for (const r of rows) {
+        if (r?.side==="BUY") buys++; else if (r?.side==="SELL") sells++;
+        const u=Number(r?.usd);
+        if (r?.usdVerified===true && Number.isFinite(u) && u>=0) { usdVerifiedTrades++; if(r?.side==="BUY") buyUsd+=u; else if(r?.side==="SELL") sellUsd+=u; }
+      }
+      const totalUsd=buyUsd+sellUsd;
+      windows[name]={trades:rows.length,buys,sells,usdVerifiedTrades,buyUsd:Number(buyUsd.toFixed(6)),sellUsd:Number(sellUsd.toFixed(6)),netUsd:Number((buyUsd-sellUsd).toFixed(6)),buyPressurePct:totalUsd>0?Number((buyUsd/totalUsd*100).toFixed(2)):null,coverage:"LIVE_SINCE_V364_ONLY"};
+    }
+    const cfg=this.config||await this.state.storage.get("config")||null;
+    const stats=await this.state.storage.get("stats")||{};
+    return {version:VERSION,collector:"DURABLE_OBJECT_ALCHEMY_V3_LIVE_V364",status:"LIVE_ROLLING_WINDOWS_V364",safe:true,workersKvWrites:0,storage:"DURABLE_OBJECT_5_MINUTE_TRADE_BUCKETS_V364",token:cfg?.token||null,pair:cfg?.pair||null,coverage:"LIVE_ONLY_PRE_V364_HISTORY_NOT_BACKFILLED",windowClockBasis:"WEBSOCKET_INGESTION_TIME_V364",windows,lastTrade:stats.lastTrade||null,swapsCaptured:safeNumber(stats.swapsCaptured),timestamp:new Date(nowMs).toISOString()};
+  }
+
   async persistSwap(log) {
     const data=String(log?.data||"").replace(/^0x/i,""); if(data.length<128)return;
     const amount0=signedInt256V326(data.slice(0,64)), amount1=signedInt256V326(data.slice(64,128)); if(typeof amount0!=="bigint"||typeof amount1!=="bigint")return;
@@ -69629,7 +69682,9 @@ export class V3LiveCollectorV363 {
       try{const rawRef=await kv.get(V347_REFERENCE_DIAGNOSTIC_KEY_V348);if(rawRef){const ref=JSON.parse(rawRef);const p=Number(ref?.priceUsdGPerWeth);if(ref?.verified===true&&Number.isFinite(p)&&p>0){priceUsd=p;usd=Math.abs(quoteAmount)*p;usdVerified=true;usdBasis="EXACT_WETH_QUOTE_X_VERIFIED_CURRENT_REFERENCE_V363";}}}catch(_){}
     }
     const row={tradeKey,transactionHash:txHash,logIndex,blockNumber:rpcBlockNumberV331(log?.blockNumber),pairAddress:pair,side:raw<0n?"BUY":"SELL",tokenAmount:Math.abs(amount),quoteTokenAddress,quoteAmount:Number.isFinite(quoteAmount)&&quoteAmount!==0?Math.abs(quoteAmount):null,quoteAmountVerifiedV336:Number.isFinite(quoteAmount)&&quoteAmount!==0,quoteAmountBasisV336:Number.isFinite(quoteAmount)&&quoteAmount!==0?"EXACT_V3_SWAP_QUOTE_DELTA_V336":null,usd:Number.isFinite(usd)&&usd>0?usd:null,usdVerified,priceUsd:Number.isFinite(priceUsd)?priceUsd:null,sameCycleUsdV347:Number.isFinite(usd)&&usd>0?usd:null,sameCycleUsdVerifiedV347:usdVerified,sameCycleUsdBasisV347:usdBasis,observedAt:Date.now(),blockTimestampMs:null,timestampVerifiedV334:false,timestampBasis:"LIVE_WEBSOCKET_INGESTION_TIME_V363",captureBasis:"ALCHEMY_ETH_SUBSCRIBE_EXACT_V3_SWAP_V363"};
-    const write=await persistNativeV3SwapLedgerV331(this.env,token,pair,[row],[]);
+    // V364: live trades persist in Durable Object storage, not Workers KV per swap.
+    // Existing scheduled/manual V3 ledger remains untouched for historical/backfill evidence.
+    const write=await this.storeLiveTradeV364(row);
     const stats=await this.state.storage.get("stats")||{};
     if(safeNumber(write?.inserted)>0){stats.swapsCaptured=safeNumber(stats.swapsCaptured)+1;if(row.side==="BUY")stats.buysCaptured=safeNumber(stats.buysCaptured)+1;else stats.sellsCaptured=safeNumber(stats.sellsCaptured)+1;if(usdVerified)stats.usdVerifiedCaptured=safeNumber(stats.usdVerifiedCaptured)+1;stats.lastSwapAt=Date.now();stats.lastTrade={side:row.side,usd:row.usd,usdVerified:row.usdVerified,quoteAmount:row.quoteAmount,quoteTokenAddress:row.quoteTokenAddress,tokenAmount:row.tokenAmount,transactionHash:row.transactionHash,blockNumber:row.blockNumber,observedAt:row.observedAt};await this.state.storage.put("stats",stats);}
   }
