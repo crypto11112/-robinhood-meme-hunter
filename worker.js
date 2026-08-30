@@ -6,6 +6,10 @@
  */
 /**
  * Robinhood Chain Meme Hunter
+ * V318: read-only fixed-horizon diagnostics for V317 forward-only outcome capture.
+ * - Adds /horizon SYMBOL|0xADDRESS to expose tracker presence, target maturity, last verified observation, capture state and exact no-capture reason.
+ * - Diagnostic only: zero provider requests; no scoring, thresholds, qualification, Momentum, ATH maths, horizon maths, provider cadence or request-budget changes.
+ * - Preserves V317 forward-only semantics: pre-V317 calls are never backfilled and existing frozen outcomes are never rewritten.
  * V317: forward-only fixed-horizon verified outcomes at 1h/6h/24h; no hindsight backfill.
  * - New successful calls initialise fixedHorizonOutcomesV317. First verified market-cap observation at/after each horizon is frozen with observation lag.
  * - Existing pre-V317 calls are never retroactively seeded. /learning reports fixed-horizon coverage separately from lifetime ATH.
@@ -1404,7 +1408,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V317";
+const VERSION = "V318";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64570,6 +64574,88 @@ function callInfoMessageV311(record) {
   return lines.join("\n");
 }
 
+function horizonDiagnosticsMessageV318(record, nowMs = Date.now()) {
+  if (!record) {
+    return "❌ <b>Call not found.</b>";
+  }
+
+  const symbol = escapeHtml(record?.symbol || "UNKNOWN");
+  const address = escapeHtml(record?.address || "UNVERIFIED");
+  const tracker = record?.fixedHorizonOutcomesV317 || null;
+  const entryAt = Number(record?.entryTimestamp);
+  const entryMc = Number(record?.entryMarketCap);
+  const currentObservedAt = Number(record?.currentObservationTimestamp);
+  const currentMc = Number(record?.currentMarketCap);
+  const currentVerified = record?.currentMarketVerified === true;
+
+  const fmtTime = value => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0
+      ? escapeHtml(telegramDateV271(n))
+      : "UNVERIFIED";
+  };
+
+  const fmtMc = value => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0
+      ? telegramMoneyV271(n)
+      : "UNVERIFIED";
+  };
+
+  const lines = [
+    `🎯 <b>${symbol} — Fixed-Horizon Diagnostics V318</b>`,
+    "",
+    `Contract: <code>${address}</code>`,
+    `🕒 Entry: <b>${fmtTime(entryAt)}</b>`,
+    `💰 Entry MC: <b>${fmtMc(entryMc)}</b>`,
+    `🧩 V317 tracker present: <b>${tracker ? "YES" : "NO"}</b>`,
+    `🔒 Forward-only: <b>${tracker?.forwardOnly === true ? "YES" : tracker ? "INVALID" : "N/A"}</b>`,
+    `↩️ Hindsight backfill allowed: <b>${tracker?.hindsightBackfillAllowed === false ? "NO" : tracker ? "INVALID" : "N/A"}</b>`,
+    "",
+    `✅ Latest verified observation: <b>${currentVerified ? "YES" : "NO"}</b>`,
+    `🕒 Latest observation: <b>${fmtTime(currentObservedAt)}</b>`,
+    `💰 Latest MC: <b>${currentVerified ? fmtMc(currentMc) : "UNVERIFIED"}</b>`,
+    `🏷 Latest source: <b>${escapeHtml(record?.currentMarketSource || "UNVERIFIED")}</b>`,
+    ""
+  ];
+
+  for (const [key, horizonMs] of Object.entries(FIXED_HORIZONS_V317)) {
+    const label = key === "h1" ? "1h" : key === "h6" ? "6h" : "24h";
+    const targetAt = Number.isFinite(entryAt) && entryAt > 0 ? entryAt + horizonMs : null;
+    const mature = Number.isFinite(targetAt) ? nowMs >= targetAt : false;
+    const outcome = tracker?.outcomes?.[key] || null;
+
+    let reason = "CAPTURED";
+    if (!outcome) {
+      if (!tracker) reason = "NO_V317_TRACKER_PRE_V317_OR_NOT_INITIALISED";
+      else if (tracker?.forwardOnly !== true || tracker?.hindsightBackfillAllowed !== false) reason = "INVALID_TRACKER_GUARD";
+      else if (!Number.isFinite(entryAt) || entryAt <= 0) reason = "INVALID_ENTRY_TIMESTAMP";
+      else if (!Number.isFinite(entryMc) || entryMc <= 0) reason = "ENTRY_MARKET_CAP_UNVERIFIED";
+      else if (!mature) reason = "TARGET_NOT_REACHED_YET";
+      else if (!currentVerified) reason = "NO_VERIFIED_POST_TARGET_MARKET_OBSERVATION";
+      else if (!Number.isFinite(currentObservedAt) || currentObservedAt < targetAt) reason = "LATEST_VERIFIED_OBSERVATION_BEFORE_TARGET";
+      else if (!Number.isFinite(currentMc) || currentMc <= 0) reason = "LATEST_MARKET_CAP_INVALID";
+      else reason = "ELIGIBLE_OBSERVATION_EXISTS_BUT_OUTCOME_NOT_FROZEN_CHECK_PERSISTENCE_OR_CAPTURE_PATH";
+    }
+
+    lines.push(`⏱ <b>${label} horizon</b>`);
+    lines.push(`   Target: <b>${fmtTime(targetAt)}</b> | Reached: <b>${mature ? "YES" : "NO"}</b>`);
+    lines.push(`   Captured: <b>${outcome?.verified === true && outcome?.frozen === true ? "YES" : "NO"}</b>`);
+    if (outcome) {
+      lines.push(`   Observed: <b>${fmtTime(outcome?.observedAt)}</b> | MC <b>${fmtMc(outcome?.marketCap)}</b> | ${telegramMultipleV271(outcome?.multipleByMarketCap)}`);
+      lines.push(`   Lag: <b>${compactCallAgeV307(safeNumber(outcome?.observationLagMs))}</b> | Source: <b>${escapeHtml(outcome?.source || "UNVERIFIED")}</b>`);
+    }
+    lines.push(`   Reason: <code>${escapeHtml(reason)}</code>`);
+  }
+
+  lines.push(
+    "",
+    "<i>Read-only stored-state diagnostic. Zero provider requests. V317 outcomes are not backfilled or rewritten.</i>"
+  );
+
+  return lines.join("\n");
+}
+
 function callsListMessageV271(
   state
 ) {
@@ -65200,6 +65286,7 @@ function telegramHelpV271() {
     "<code>/best</code> — highest verified ATH X calls",
     "<code>/performance</code> — overall tracked-call summary",
     "<code>/learning</code> — frozen signals, outcomes + sample quality",
+    "<code>/horizon GUS</code> — fixed-horizon capture diagnostics",
     "<code>/help</code> — command list",
     "",
     "<i>/analyse performs a fresh bounded analysis. Other V271 commands read stored evidence and do not trigger a fresh chain scan.</i>"
@@ -65449,6 +65536,32 @@ async function telegramCommandReplyV271(
       ].join("\n");
     } else if (resolved.record) {
       reply = callInfoMessageV311(resolved.record);
+    } else {
+      reply = "❌ <b>Call not found.</b>\n\nUse <code>/calls</code> to see stored calls.";
+    }
+  } else if (
+    parsed.command ===
+    "/horizon"
+  ) {
+    const resolved =
+      resolveCallPerformanceV271(
+        state,
+        parsed.argument
+      );
+
+    if (resolved.status === "MISSING_QUERY") {
+      reply = "ℹ️ Use <code>/horizon SYMBOL</code> or <code>/horizon 0xADDRESS</code>.";
+    } else if (resolved.status === "AMBIGUOUS_SYMBOL") {
+      reply = [
+        "⚠️ <b>More than one call uses that symbol.</b>",
+        "",
+        "Use the contract address instead:",
+        ...resolved.matches.slice(0, 10).map(record =>
+          `<code>${escapeHtml(record?.address || "")}</code>`
+        )
+      ].join("\n");
+    } else if (resolved.record) {
+      reply = horizonDiagnosticsMessageV318(resolved.record);
     } else {
       reply = "❌ <b>Call not found.</b>\n\nUse <code>/calls</code> to see stored calls.";
     }
