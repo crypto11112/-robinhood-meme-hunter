@@ -1,5 +1,14 @@
 /**
  * Robinhood Chain Meme Hunter
+ * V303 / V2.0:
+ * - /best DETAIL UPGRADE ONLY: each ranked call now shows frozen verified entry MC, verified ATH MC, latest verified current MC, and percentage below ATH
+ * - VERIFIED ONLY: values come exclusively from the existing V270/V295 verified call-performance record; missing values remain UNVERIFIED
+ * - NO HISTORY REWRITE: entry MC stays frozen and ATH only changes through the existing strictly-higher verified observation path
+ * - ZERO EXTRA REQUESTS: no provider calls, cadence, DexScreener limits, request budgets, scoring, Momentum, holders, qualification, Telegram alert thresholds, KV key, or autonomous scanner behavior changed
+ * - PRESERVES: confirmed V302 17/17 tracked coverage telemetry and all V301/V300 provider protections
+ */
+/**
+ * Robinhood Chain Meme Hunter
  * V301 / V2.0:
  * - ATH ANALYSIS RESERVE: when the ATH fair-slot is genuinely due and DexScreener is eligible, protect one EXISTING analysis request so late analysis work cannot starve it
  * - NO BUDGET INCREASE: global 42 / analysis 21 remain unchanged
@@ -1364,7 +1373,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V302";
+const VERSION = "V303";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64332,6 +64341,20 @@ function bestCallsMessageV271(
 
   ranked.forEach(
     (record, index) => {
+      const entryMc = telegramMoneyV271(record?.entryMarketCap);
+      const athMc = telegramMoneyV271(record?.athMarketCap);
+      const currentMc =
+        record?.currentMarketVerified === true
+          ? telegramMoneyV271(record?.currentMarketCap)
+          : "UNVERIFIED";
+      const drawdown = Number(record?.drawdownFromAthMarketCap);
+      const belowAth =
+        record?.currentMarketVerified === true &&
+        Number.isFinite(drawdown) &&
+        drawdown >= 0
+          ? `${Math.max(0, drawdown * 100).toFixed(1)}%`
+          : "UNVERIFIED";
+
       lines.push(
         `${index + 1}. <b>${escapeHtml(
           record?.symbol ||
@@ -64339,6 +64362,9 @@ function bestCallsMessageV271(
         )}</b> — ${telegramMultipleV271(
           record?.athMultipleByMarketCap
         )} ATH`
+      );
+      lines.push(
+        `   Entry ${entryMc} | ATH ${athMc} | Current ${currentMc} | ${belowAth} below ATH`
       );
     }
   );
