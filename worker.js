@@ -3,6 +3,7 @@
  * Robinhood Chain Meme Hunter
  * V351: HTTP-ONLY USD aggregation diagnostic built from confirmed-safe V348. /analyse, Telegram routing, scheduled scan, collector, scoring and persistence paths are unchanged. Adds only GET /v3usd-diagnostic?token=0xADDRESS to aggregate already-persisted V347 USD evidence with KV reads only and zero writes/external requests.
  * V353: Adds isolated Telegram /v3usd address-only reader using the already-proven V351 persisted USD diagnostic. Fixes V350 ReferenceError by using a dedicated V353 USD formatter (no out-of-scope money helper). /analyse path remains unchanged.
+ * V354: Safely surfaces the already-proven persisted V3 USD aggregation inside /analyse. Uses KV-only V351 reader after fresh analysis, zero external pricing/RPC/API requests, zero writes, fail-open, and the in-scope V353 USD formatter (never the old out-of-scope money helper).
  * V346: CLEAN RESTORE BUILD from confirmed-working V337 Step 3A logic. No V338+ USD resolver/enrichment code is included.
  * V337: Step 3A verification layer. Preserves V336/V334 behavior and adds zero-request visibility for exact quote-side amounts already persisted on newly captured V3 swaps. Reports quote-ready ledger coverage (WETH/USDG) without converting historical swaps to USD or guessing missing quote evidence.
  * V336: Step 3A safe repair: preserves V334 command/reply path unchanged and adds only exact quote-side amount persistence to newly captured V3 swap records. No extra provider calls, no new Telegram formatter dependency, no historical USD guessing.
@@ -1451,7 +1452,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V353";
+const VERSION = "V354";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64597,9 +64598,27 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       }
     }
 
-    if (v3?.usdVerified === true) {
+    const persistedUsdV354 = candidate?.persistedV3UsdV354 || null;
+    if (persistedUsdV354?.status === "PERSISTED_USD_AGGREGATION_VERIFIED_V351" && safeNumber(persistedUsdV354?.usdVerifiedRecords) > 0) {
       evidence.push(
-        `💵 Native V3 flow: 🟢 <b>${money(v3?.buyUsd)}</b> | 🔴 <b>${money(v3?.sellUsd)}</b> | Net <b>${money(v3?.netUsd)}</b>`
+        `💵 Native V3 USD evidence: <b>${safeNumber(persistedUsdV354?.usdVerifiedRecords)}/${safeNumber(persistedUsdV354?.ledgerRecords)} VERIFIED</b> — PARTIAL COVERAGE`
+      );
+      evidence.push(`💱 Basis: <b>SAME-CYCLE WETH/USDG REFERENCE</b> — not exact historical-block price`);
+      const usdWindowsV354 = persistedUsdV354?.windows || {};
+      for (const label of ["5m", "15m", "1h", "6h", "24h"]) {
+        const row = usdWindowsV354?.[label] || {};
+        const totalUsd = safeNumber(row?.buyUsd) + safeNumber(row?.sellUsd);
+        const pressure = Number.isFinite(Number(row?.buyPressurePct))
+          ? `${Number(row.buyPressurePct).toFixed(2)}%`
+          : (totalUsd === 0 ? "0.00%" : "UNVERIFIED");
+        evidence.push(
+          `• ${label} USD: 🟢 <b>${formatUsdV353(row?.buyUsd)}</b> | 🔴 <b>${formatUsdV353(row?.sellUsd)}</b> | Net <b>${formatUsdV353(row?.netUsd)}</b> | Buy pressure <b>${pressure}</b>`
+        );
+      }
+    } else if (v3?.usdVerified === true) {
+      /* Preserve legacy path, but use the proven in-scope formatter. */
+      evidence.push(
+        `💵 Native V3 flow: 🟢 <b>${formatUsdV353(v3?.buyUsd)}</b> | 🔴 <b>${formatUsdV353(v3?.sellUsd)}</b> | Net <b>${formatUsdV353(v3?.netUsd)}</b>`
       );
     } else {
       evidence.push("💵 Native V3 directional USD: <b>UNVERIFIED</b>");
@@ -65045,6 +65064,20 @@ async function telegramFreshAnalyseV276(
         )
       ] ||
     null;
+
+  /* V354: read-only persisted native V3 USD evidence for presentation only.
+   * This deliberately runs after the existing fresh analysis work and adds
+   * zero external requests / zero writes. Failure is fail-open. */
+  let persistedV3UsdV354 = null;
+  try {
+    persistedV3UsdV354 = await v3UsdDiagnosticV351(env, resolved.address);
+  } catch (error) {
+    persistedV3UsdV354 = {
+      status: "PERSISTED_USD_READ_FAIL_OPEN_V354",
+      error: String(error?.message || error || "UNKNOWN_V354_ERROR").slice(0, 180)
+    };
+  }
+  candidate.persistedV3UsdV354 = persistedV3UsdV354;
 
   const telemetry = {
     status:
