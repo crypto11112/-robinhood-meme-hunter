@@ -1,6 +1,9 @@
 /**
  * Robinhood Chain Meme Hunter
- * V303 / V2.0:
+ * V304
+ * - /best PERFORMANCE SUMMARY ONLY: adds verified call hit-rates (1.25x/1.5x/2x/5x/10x), median ATH multiple and average ATH multiple from the existing stored call registry
+ * - READ-ONLY: no extra provider requests, no ATH/entry/current-MC math changes, no scanner/scoring/budget/alert changes
+ * V304 / V2.0:
  * - /best DETAIL UPGRADE ONLY: each ranked call now shows frozen verified entry MC, verified ATH MC, latest verified current MC, and percentage below ATH
  * - VERIFIED ONLY: values come exclusively from the existing V270/V295 verified call-performance record; missing values remain UNVERIFIED
  * - NO HISTORY REWRITE: entry MC stays frozen and ATH only changes through the existing strictly-higher verified observation path
@@ -1373,7 +1376,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V303";
+const VERSION = "V304";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -64288,7 +64291,7 @@ function athTimestampTextV297(timestamp) {
 function bestCallsMessageV271(
   state
 ) {
-  const ranked =
+  const verifiedEntriesV304 =
     callPerformanceEntriesV271(
       state
     )
@@ -64304,7 +64307,11 @@ function bestCallsMessageV271(
             record
               ?.athMultipleByMarketCap
           ) > 0
-      )
+      );
+
+  const ranked =
+    verifiedEntriesV304
+      .slice()
       .sort(
         (a, b) =>
           Number(
@@ -64325,6 +64332,37 @@ function bestCallsMessageV271(
   const followUpV296 =
     state?.services?.dexscreener?.athFollowUpV296 || null;
 
+  const multiplesV304 =
+    verifiedEntriesV304
+      .map(record => Number(record?.athMultipleByMarketCap))
+      .filter(value => Number.isFinite(value) && value > 0)
+      .sort((a, b) => a - b);
+
+  const averageV304 =
+    multiplesV304.length
+      ? multiplesV304.reduce((sum, value) => sum + value, 0) / multiplesV304.length
+      : null;
+
+  const medianV304 = (() => {
+    const count = multiplesV304.length;
+    if (!count) return null;
+    const middle = Math.floor(count / 2);
+    return count % 2 === 1
+      ? multiplesV304[middle]
+      : (multiplesV304[middle - 1] + multiplesV304[middle]) / 2;
+  })();
+
+  const reachedV304 = threshold =>
+    multiplesV304.filter(value => value >= threshold).length;
+
+  const hitRateV304 = threshold => {
+    const count = reachedV304(threshold);
+    const rate = multiplesV304.length
+      ? (count / multiplesV304.length) * 100
+      : 0;
+    return `${count}/${multiplesV304.length} (${rate.toFixed(1)}%)`;
+  };
+
   const lines = [
     "🏆 <b>Best Calls by Verified ATH MC Multiple</b>",
     "",
@@ -64336,6 +64374,10 @@ function bestCallsMessageV271(
       ? `✅ Last successful tracked coverage: <b>${safeNumber(followUpV296?.lastSuccessfulObservedTrackedV302)}/${safeNumber(followUpV296?.lastSuccessfulRequestedTrackedV302)}</b>${followUpV296?.lastSuccessfulAllTrackedCoveredV302 === true ? " — ALL CHECKED" : " — PARTIAL"}`
       : `✅ Last successful tracked coverage: <b>V302 DATA PENDING</b>`,
     `📈 Last verified ATH update: <b>${escapeHtml(athTimestampTextV297(followUpV296?.lastAthUpdatedAt))}</b>`,
+    "",
+    `📊 Verified performance: <b>${multiplesV304.length} calls</b> | Median <b>${telegramMultipleV271(medianV304)}</b> | Average <b>${telegramMultipleV271(averageV304)}</b>`,
+    `🎯 ≥1.25x <b>${hitRateV304(1.25)}</b> | ≥1.5x <b>${hitRateV304(1.5)}</b> | ≥2x <b>${hitRateV304(2)}</b>`,
+    `🚀 ≥5x <b>${hitRateV304(5)}</b> | ≥10x <b>${hitRateV304(10)}</b>`,
     ""
   ];
 
