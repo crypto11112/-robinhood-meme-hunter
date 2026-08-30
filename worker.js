@@ -1,13 +1,17 @@
 /**
  * Robinhood Chain Meme Hunter
- * V320 — DexScreener provider-market + protocol-awareness upgrade
- * Preserves V319 fixed-horizon initialization fix and all prior working behavior.
+ * V321 — DexScreener protocol-version clarity + directional-USD evidence guard
+ * Preserves V320/V319 fixed-horizon and provider-market behavior.
+ * - Adds pair labels to verified DexScreener market evidence.
+ * - Identifies Uniswap V2/V3/V4 only when DexScreener pair labels verify the version.
+ * - Makes clear that DexScreener API total volume is NOT a buy-USD/sell-USD split.
+ * - Relabels V4 telemetry so zero V4 swaps cannot be mistaken for zero total trading.
  */
 /**
  * Robinhood Chain Meme Hunter
  * V319 — fixed-horizon first-success tracker initialisation fix
  *
- * CURRENT EXECUTABLE VERSION: V319
+ * CURRENT EXECUTABLE VERSION: V321
  * - Preserves the complete V318/V317 scanner, scoring, qualification, Telegram, KV, provider, holder, whale, Momentum, ATH, learning and request-budget behaviour.
  * - FIX: a token that already has a preliminary callPerformanceV270 record now receives fixedHorizonOutcomesV317 on its FIRST successful alert, provided it had no prior frozen entryTimestamp.
  * - Preserves forward-only semantics: records with an existing entryTimestamp are NOT retroactively initialised or backfilled.
@@ -1426,7 +1430,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V320";
+const VERSION = "V321";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -28843,6 +28847,11 @@ async function marketData(
         pair?.dexId ||
         null,
 
+      pairLabels:
+        Array.isArray(pair?.labels)
+          ? pair.labels.map(label => String(label)).filter(Boolean)
+          : [],
+
       pairAddress:
         pair?.pairAddress ||
         null,
@@ -42751,6 +42760,27 @@ function telegramMessage(
       ? String(market.dexId).toUpperCase()
       : "UNVERIFIED";
 
+  const dexPairLabelsV321 =
+    dexProviderReportedV320 && Array.isArray(market?.pairLabels)
+      ? market.pairLabels.map(label => String(label).trim()).filter(Boolean)
+      : [];
+
+  const dexPairLabelTextV321 = dexPairLabelsV321.join(" ").toLowerCase();
+  const dexIdLowerV321 = String(market?.dexId || "").toLowerCase();
+
+  const dexProtocolVersionV321 = (() => {
+    if (!dexProviderReportedV320 || !market?.dexId) return "UNVERIFIED";
+
+    if (dexIdLowerV321.includes("uniswap")) {
+      if (/(^|[^a-z0-9])v4([^a-z0-9]|$)/i.test(dexPairLabelTextV321)) return "Uniswap V4";
+      if (/(^|[^a-z0-9])v3([^a-z0-9]|$)/i.test(dexPairLabelTextV321)) return "Uniswap V3";
+      if (/(^|[^a-z0-9])v2([^a-z0-9]|$)/i.test(dexPairLabelTextV321)) return "Uniswap V2";
+      return "Uniswap — VERSION UNVERIFIED";
+    }
+
+    return String(market.dexId).toUpperCase();
+  })();
+
   const dexPairAgeV320 =
     dexProviderReportedV320 && Number.isFinite(Number(market?.pairCreatedAt))
       ? formatAgeV223(Math.max(0, Date.now() - Number(market.pairCreatedAt)))
@@ -42790,6 +42820,9 @@ function telegramMessage(
       ? `🏪 Primary DEX: <b>${escapeHtml(dexProtocolV320)}</b>`
       : null,
     dexProviderReportedV320
+      ? `🧩 Primary protocol: <b>${escapeHtml(dexProtocolVersionV321)}</b>`
+      : null,
+    dexProviderReportedV320
       ? `🕒 Pair age: <b>${escapeHtml(dexPairAgeV320)}</b>`
       : null,
     `🟢 5m Buys: <b>${trade5m.buys}</b>`,
@@ -42810,7 +42843,12 @@ function telegramMessage(
     `🟢 24h Buys: <b>${trade24h.buys}</b>`,
     `🔴 24h Sells: <b>${trade24h.sells}</b>`,
     `💵 24h Total Volume: <b>${market?.verified ? money(market?.volume?.h24) : "UNVERIFIED"}</b>`,
-    "ℹ️ <i>Provider-reported counts/total volume are separate from the bot-verified on-chain USD evidence below.</i>",
+    dexProviderReportedV320
+      ? "💵 Provider Buy USD / Sell USD split: <b>UNVERIFIED</b>"
+      : null,
+    dexProviderReportedV320
+      ? "ℹ️ <i>The current official DexScreener pair API exposes transaction counts and total timeframe volume, not separate buy-USD/sell-USD totals; V321 does not estimate the split.</i>"
+      : "ℹ️ <i>Provider-reported counts/total volume are separate from the bot-verified on-chain USD evidence below.</i>",
     ...verifiedObservedLinesV212,
     ...ponsCurveLinesV216,
     "",
@@ -42837,8 +42875,8 @@ function telegramMessage(
     `🧠 Smart-money candidate: <b>${smartMoneyCandidate}</b>`,
     "🧠 Smart-money identity verified: <b>NO</b>",
     "",
-    `📡 Pool V4 swaps: <b>${candidate.activity.swaps}</b>`,
-    `💦 Pool liquidity events: <b>${candidate.activity.liquidityEvents}</b>`,
+    `📡 Bot V4 telemetry — swaps: <b>${candidate.activity.swaps}</b>`,
+    `💦 Bot V4 telemetry — liquidity events: <b>${candidate.activity.liquidityEvents}</b>`,
     "",
     `⚠️ <b>${escapeHtml(alertClass.footer)}</b>`
   ];
@@ -62530,7 +62568,7 @@ function telegramAnalyseResultMessageV276(
     `🧠 Smart-money candidate: <b>${escapeHtml(smartMoneyCandidateV286)}</b>`,
     "🧠 Smart-money identity verified: <b>NO</b>",
     "",
-    `📡 Pool V4 swaps: <b>${safeNumber(candidate?.activity?.swaps)}</b>`,
+    `📡 Bot V4 telemetry — swaps: <b>${safeNumber(candidate?.activity?.swaps)}</b>`,
     `💦 Pool liquidity events: <b>${safeNumber(candidate?.activity?.liquidityEvents)}</b>`,
     `🛰 V4 pool identity: <b>${candidate?.onChainPoolIdentityV153?.verified === true ? "VERIFIED" : "UNVERIFIED"}</b>`,
     `🛰 Live V4 swaps in this manual analysis: <b>${
