@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V405
- * AUTHORITATIVE RUNTIME VERSION: V405
+ * Robinhood Chain Meme Hunter — V406
+ * AUTHORITATIVE RUNTIME VERSION: V406
+ * V406 fixes the V405 usage-meter first-read initialization bug: an empty/new-day meter is now persisted once on first /usage read, so monitorStartedAt no longer moves on every zero-usage query. The initialization row is included in the estimate. Scanner, scoring, collectors, batching, alerts, request budgets and UK reset display are unchanged.
  * V405 builds directly forward from V404. It changes only the /usage reset-time presentation: the actual meter still resets exactly at 00:00 UTC, while Telegram now also displays the equivalent Europe/London local time (automatically BST/GMT-aware). Scanner, scoring, alerts, collectors, V403 write batching, V404 usage accounting, request budgets and persistence logic are unchanged.
  * V404 builds directly forward from V403. It preserves the V402/V403 write-efficiency changes and adds a conservative internal Durable Object row-write monitor. All V3 live-collector storage puts/deletes are counted through tracked wrappers, per-collector deltas are aggregated into one singleton meter at most once per 5 minutes, the meter resets automatically at 00:00 UTC, and /usage exposes estimated rows written, percentage, hourly rate, 24h projection and SAFE/WARNING/DANGER status. The meter is diagnostic only: no scanner/scoring/qualification/provider/Telegram threshold logic is changed.
  * V403 builds directly forward from write-efficient V402. It preserves all V402 scanner/scoring/qualification/Telegram/integrity/multi-pool behavior while batching high-frequency Durable Object trade/stat persistence on the existing 15-second watchdog cadence. Live and shadow trade evidence remain immediately available from in-memory hot caches, are deduplicated before persistence, and are flushed before graceful reconnect/stop paths. Unexpected runtime loss is treated conservatively as an integrity gap before reconnect so uncheckpointed evidence can never be presented as full continuous coverage. No provider requests, scoring rules, thresholds, historical backfill, or Workers KV write paths are added.
@@ -1460,7 +1461,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V405";
+const VERSION = "V406";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71614,7 +71615,13 @@ export class V3LiveCollectorV363 {
   async usageMeterSnapshotV404() {
     const nowMs=Date.now(), day=utcDayKeyV404(nowMs), dayStart=utcDayStartMsV404(nowMs);
     let meter=await this.state.storage.get("v404:durableUsageMeter")||{};
-    if(meter.utcDay!==day)meter={utcDay:day,monitorStartedAt:nowMs,estimatedRowsWritten:0,puts:0,deletes:0,alarmsSet:0,aggregationWrites:0,ingests:0,lastUpdatedAt:null};
+    if(meter.utcDay!==day){
+      // V406: persist the fresh daily meter on first read instead of returning
+      // a temporary zero object. This keeps monitorStartedAt stable across
+      // repeated /usage calls and counts this initialization row itself.
+      meter={utcDay:day,monitorStartedAt:nowMs,estimatedRowsWritten:1,puts:0,deletes:0,alarmsSet:0,aggregationWrites:1,ingests:0,lastUpdatedAt:nowMs};
+      await this.state.storage.put("v404:durableUsageMeter",meter);
+    }
     const used=Math.max(0,safeNumber(meter.estimatedRowsWritten)), limit=DURABLE_ROWS_WRITTEN_FREE_LIMIT_V404;
     const startedAt=Math.max(dayStart,safeNumber(meter.monitorStartedAt)||nowMs), elapsedMs=Math.max(1,nowMs-startedAt);
     const rowsPerHour=used>0?used/(elapsedMs/3600000):0, projected24hRows=used>0?rowsPerHour*24:0;
