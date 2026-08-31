@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V389
- * AUTHORITATIVE RUNTIME VERSION: V389
+ * Robinhood Chain Meme Hunter — V390
+ * AUTHORITATIVE RUNTIME VERSION: V390
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V389";
+const VERSION = "V390";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -69411,6 +69411,39 @@ async function v388ReadPoolRegistry(env, token) {
   }
 }
 
+
+function v390RegistryComparable(entries) {
+  return (Array.isArray(entries) ? entries : []).map(e => ({
+    pool: normalize(e?.pool || ""),
+    token0: normalize(e?.token0 || ""),
+    token1: normalize(e?.token1 || ""),
+    quoteToken: normalize(e?.quoteToken || ""),
+    quoteSymbol: e?.quoteSymbol || "UNVERIFIED",
+    fee: e?.fee ?? null,
+    factory: normalize(e?.factory || ""),
+    factoryVerified: e?.factoryVerified === true,
+    candidateToken: normalize(e?.candidateToken || ""),
+    isMonitoredPair: !!e?.isMonitoredPair,
+    firstObservedAt: Number(e?.firstObservedAt || 0),
+    lastObservedAt: Number(e?.lastObservedAt || 0),
+    observationPasses: Number(e?.observationPasses || 0),
+    observedTransactionsTotal: Number(e?.observedTransactionsTotal || 0),
+    observedSwapLogsTotal: Number(e?.observedSwapLogsTotal || 0),
+    lastSampleObservedTransactions: Number(e?.lastSampleObservedTransactions || 0),
+    lastSampleObservedSwapLogs: Number(e?.lastSampleObservedSwapLogs || 0),
+    registryStatus: e?.registryStatus || null
+  })).sort((a,b) => String(a.pool).localeCompare(String(b.pool)));
+}
+
+function v390RegistryMeaningfullyChanged(beforeEntries, afterEntries) {
+  try {
+    return JSON.stringify(v390RegistryComparable(beforeEntries)) !==
+           JSON.stringify(v390RegistryComparable(afterEntries));
+  } catch {
+    return true;
+  }
+}
+
 async function v388MergeVerifiedPoolRegistry(env, token, observedPools) {
   const now = Date.now();
   const { kv, binding } = getKV(env);
@@ -69422,7 +69455,12 @@ async function v388MergeVerifiedPoolRegistry(env, token, observedPools) {
     if (!isAddress(pool)) continue;
     if (old?.factoryVerified !== true) continue;
     if (normalize(old?.candidateToken || "") !== normalize(token)) continue;
-    map.set(pool, { ...old, pool });
+    map.set(pool, {
+      ...old,
+      pool,
+      observedInCurrentSampleV390: false,
+      registryStatus: "VERIFIED_REMEMBERED_POOL_V390"
+    });
   }
 
   let newlyAdded = 0;
@@ -69459,7 +69497,8 @@ async function v388MergeVerifiedPoolRegistry(env, token, observedPools) {
       observedSwapLogsTotal: Number(prev?.observedSwapLogsTotal || 0) + observedLogs,
       lastSampleObservedTransactions: observedTx,
       lastSampleObservedSwapLogs: observedLogs,
-      registryStatus: "VERIFIED_PERSISTED_POOL_V388"
+      observedInCurrentSampleV390: true,
+      registryStatus: "VERIFIED_OBSERVED_AND_PERSISTED_POOL_V390"
     });
   }
 
@@ -69469,12 +69508,22 @@ async function v388MergeVerifiedPoolRegistry(env, token, observedPools) {
     String(a.pool).localeCompare(String(b.pool))
   );
 
-  let writeAttempted = false, writeSuccess = false, writeError = null;
-  if (kv && isAddress(token) && entries.length) {
+  const meaningfulChangeV390 = v390RegistryMeaningfullyChanged(before.entries, entries);
+  let writeAttempted = false, writeSuccess = false, writeError = null, writeSkippedReasonV390 = null;
+
+  if (!kv) {
+    writeSkippedReasonV390 = "KV_UNAVAILABLE";
+  } else if (!isAddress(token)) {
+    writeSkippedReasonV390 = "INVALID_TOKEN";
+  } else if (!entries.length) {
+    writeSkippedReasonV390 = "NO_ELIGIBLE_REGISTRY_ENTRIES";
+  } else if (!meaningfulChangeV390) {
+    writeSkippedReasonV390 = "NO_MEANINGFUL_CHANGE";
+  } else {
     writeAttempted = true;
     try {
       await kv.put(v388PoolRegistryKey(token), JSON.stringify({
-        schemaVersion: "V388",
+        schemaVersion: "V390",
         token: normalize(token),
         updatedAt: now,
         entries
@@ -69486,7 +69535,7 @@ async function v388MergeVerifiedPoolRegistry(env, token, observedPools) {
   }
 
   return {
-    schemaVersion: "V388",
+    schemaVersion: "V390",
     key: v388PoolRegistryKey(token),
     binding: binding || before.binding || null,
     readError: before.readError,
@@ -69495,8 +69544,10 @@ async function v388MergeVerifiedPoolRegistry(env, token, observedPools) {
     newlyAdded,
     refreshed,
     entries,
+    meaningfulChangeV390,
     writeAttempted,
     writeSuccess,
+    writeSkippedReasonV390,
     writeError,
     scoringMutated: false,
     collectorMutated: false
@@ -70004,8 +70055,10 @@ async function handleRequest(
         refreshed: persistentRegistryV388.refreshed,
         registryEntries: persistentRegistryV388.entries.length,
         entries: persistentRegistryV388.entries,
+        meaningfulChangeV390: persistentRegistryV388.meaningfulChangeV390,
         writeAttempted: persistentRegistryV388.writeAttempted,
         writeSuccess: persistentRegistryV388.writeSuccess,
+        writeSkippedReasonV390: persistentRegistryV388.writeSkippedReasonV390,
         writeError: persistentRegistryV388.writeError,
         scoringMutated: false,
         collectorMutated: false,
