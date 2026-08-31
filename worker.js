@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V394
- * AUTHORITATIVE RUNTIME VERSION: V394
+ * Robinhood Chain Meme Hunter — V395
+ * AUTHORITATIVE RUNTIME VERSION: V395
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V394";
+const VERSION = "V395";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71926,8 +71926,11 @@ if (url.pathname === "/reconcile-v374") {
     ws.addEventListener("close",async()=>{
       this.shadowWsV394=null;this.shadowSubscriptionIdV394=null;
       const c=await this.state.storage.get("v394:shadowConnection")||{};
-      c.connected=false;c.subscriptionAccepted=false;c.status="SHADOW_SOCKET_CLOSED_V394";c.closedAt=Date.now();
+      c.connected=false;c.subscriptionAccepted=false;c.status="SHADOW_SOCKET_CLOSED_V395";c.closedAt=Date.now();
       await this.state.storage.put("v394:shadowConnection",c);
+      const pc=await this.state.storage.get("v395:poolCoverage")||{};
+      for(const p of Object.keys(pc)){if(pc[p]?.active===true){pc[p].active=false;pc[p].lastGapAt=Date.now();pc[p].lastGapReason="SHADOW_SOCKET_CLOSED_V395";pc[p].interruptions=safeNumber(pc[p].interruptions)+1;pc[p].continuousStartAt=null;}}
+      await this.state.storage.put("v395:poolCoverage",pc);
     });
     ws.addEventListener("error",async()=>{
       const c=await this.state.storage.get("v394:shadowConnection")||{};
@@ -71942,7 +71945,16 @@ if (url.pathname === "/reconcile-v374") {
     conn.lastMessageAt=Date.now();
     if (msg?.id===394) {
       if (typeof msg.result==="string" && msg.result.length>2) {
-        this.shadowSubscriptionIdV394=msg.result;conn.subscriptionAccepted=true;conn.connected=true;conn.status="SHADOW_MULTI_POOL_SUBSCRIPTION_ACTIVE_V394";conn.acceptedAt=Date.now();conn.lastError=null;
+        this.shadowSubscriptionIdV394=msg.result;conn.subscriptionAccepted=true;conn.connected=true;conn.status="SHADOW_MULTI_POOL_SUBSCRIPTION_ACTIVE_V395";conn.acceptedAt=Date.now();conn.lastError=null;
+        const cfg=await this.state.storage.get("v394:shadowConfig")||{};
+        const previous=await this.state.storage.get("v395:poolCoverage")||{};
+        const next={};
+        for(const address of (cfg.addresses||[])){
+          const p=normalize(address);
+          const prior=previous[p];
+          next[p]={pool:p,active:true,continuousStartAt:(prior?.active===true&&Number.isFinite(Number(prior?.continuousStartAt)))?Number(prior.continuousStartAt):Date.now(),lastAcceptedAt:Date.now(),interruptions:safeNumber(prior?.interruptions)};
+        }
+        await this.state.storage.put("v395:poolCoverage",next);
       } else if (msg?.error) {conn.subscriptionAccepted=false;conn.status="SHADOW_MULTI_POOL_SUBSCRIPTION_REJECTED_V394";conn.lastError=JSON.stringify(msg.error).slice(0,240);}
       await this.state.storage.put("v394:shadowConnection",conn); return;
     }
@@ -71959,14 +71971,47 @@ if (url.pathname === "/reconcile-v374") {
     const key=`${txHash}|${logIndex}`;
     const recent=await this.state.storage.get("v394:shadowRecent")||[];
     if (recent.some(x=>x?.tradeKey===key)) return;
-    recent.push({tradeKey:key,transactionHash:txHash,logIndex,blockNumber:rpcBlockNumberV331(log?.blockNumber),pool,quoteToken:normalize(meta.quoteToken||""),quoteSymbol:meta.quoteSymbol||"UNVERIFIED",observedAt:Date.now()});
-    while(recent.length>200) recent.shift();
+    const data=String(log?.data||"").replace(/^0x/i,"");
+    if(data.length<128)return;
+    const amount0=signedInt256V326(data.slice(0,64)), amount1=signedInt256V326(data.slice(64,128));
+    if(typeof amount0!=="bigint"||typeof amount1!=="bigint")return;
+    const token=normalize(cfg.token||""), token0=normalize(meta.token0||""), token1=normalize(meta.token1||"");
+    const candidateRaw=token===token0?amount0:(token===token1?amount1:null);
+    if(typeof candidateRaw!=="bigint"||candidateRaw===0n)return;
+    const quoteRaw=token===token0?amount1:amount0;
+    const candidateAmount=decimalFromSignedRawV326(candidateRaw,Number(cfg.decimals));
+    const quoteToken=normalize(meta.quoteToken||"");
+    const quoteDecimals=quoteToken===normalize(CANONICAL_WETH_V179)?18:(quoteToken===normalize(CANONICAL_USDG_V179)?CANONICAL_USDG_DECIMALS_V179:null);
+    const quoteSigned=Number.isInteger(quoteDecimals)?decimalFromSignedRawV326(quoteRaw,quoteDecimals):null;
+    const quoteAmount=Number.isFinite(quoteSigned)&&quoteSigned!==0?Math.abs(quoteSigned):null;
+    let usd=null,usdVerified=false,usdBasis=null,referencePriceUsd=null;
+    if(quoteToken===normalize(CANONICAL_USDG_V179)&&Number.isFinite(quoteAmount)&&quoteAmount>0){
+      usd=quoteAmount;usdVerified=true;usdBasis="EXACT_CANONICAL_USDG_QUOTE_V395";
+    } else if(quoteToken===normalize(CANONICAL_WETH_V179)&&Number.isFinite(quoteAmount)&&quoteAmount>0){
+      try{
+        const {kv}=getKV(this.env);
+        const rawRef=kv?await kv.get(V347_REFERENCE_DIAGNOSTIC_KEY_V348):null;
+        if(rawRef){const ref=JSON.parse(rawRef);const p=Number(ref?.priceUsdGPerWeth);if(ref?.verified===true&&Number.isFinite(p)&&p>0){referencePriceUsd=p;usd=quoteAmount*p;usdVerified=true;usdBasis="EXACT_WETH_QUOTE_X_VERIFIED_CURRENT_REFERENCE_V395";}}
+      }catch(_){}
+    }
+    const row={tradeKey:key,transactionHash:txHash,logIndex,blockNumber:rpcBlockNumberV331(log?.blockNumber),pool,
+      side:candidateRaw<0n?"BUY":"SELL",candidateAmount:Number.isFinite(candidateAmount)?Math.abs(candidateAmount):null,
+      quoteToken,quoteSymbol:meta.quoteSymbol||"UNVERIFIED",quoteAmount,quoteAmountVerified:Number.isFinite(quoteAmount)&&quoteAmount>0,
+      usd:Number.isFinite(usd)&&usd>0?usd:null,usdVerified,usdBasis,referencePriceUsd:Number.isFinite(referencePriceUsd)?referencePriceUsd:null,
+      historicalUsdExact:quoteToken===normalize(CANONICAL_USDG_V179)&&usdVerified===true,currentReferenceUsd:quoteToken===normalize(CANONICAL_WETH_V179)&&usdVerified===true,
+      observedAt:Date.now()};
+    recent.push(row);
+    while(recent.length>500) recent.shift();
     await this.state.storage.put("v394:shadowRecent",recent);
     const stats=await this.state.storage.get("v394:shadowStats")||{swapsCaptured:0,byPool:{}};
     stats.swapsCaptured=safeNumber(stats.swapsCaptured)+1;
     stats.byPool=stats.byPool||{};
-    stats.byPool[pool]=safeNumber(stats.byPool[pool])+1;
-    stats.lastSwapAt=Date.now();stats.lastTrade=recent[recent.length-1];
+    const ps=(stats.byPool[pool]&&typeof stats.byPool[pool]==="object")?stats.byPool[pool]:{swaps:0,buys:0,sells:0,buyUsd:0,sellUsd:0,usdVerifiedSwaps:0};
+    ps.swaps=safeNumber(ps.swaps)+1;
+    if(row.side==="BUY")ps.buys=safeNumber(ps.buys)+1;else ps.sells=safeNumber(ps.sells)+1;
+    if(row.usdVerified&&Number.isFinite(row.usd)){ps.usdVerifiedSwaps=safeNumber(ps.usdVerifiedSwaps)+1;if(row.side==="BUY")ps.buyUsd=safeNumber(ps.buyUsd)+row.usd;else ps.sellUsd=safeNumber(ps.sellUsd)+row.usd;}
+    ps.lastSwapAt=row.observedAt;stats.byPool[pool]=ps;
+    stats.lastSwapAt=row.observedAt;stats.lastTrade=row;
     await this.state.storage.put("v394:shadowStats",stats);
   }
 
@@ -71975,12 +72020,39 @@ if (url.pathname === "/reconcile-v374") {
     const conn=await this.state.storage.get("v394:shadowConnection")||{};
     const stats=await this.state.storage.get("v394:shadowStats")||{swapsCaptured:0,byPool:{}};
     const recent=await this.state.storage.get("v394:shadowRecent")||[];
-    return {version:VERSION,collector:"SHADOW_MULTI_POOL_ALCHEMY_V3_V394",safe:true,shadowOnly:true,scoringMutated:false,normalTradeBucketsMutated:false,existingSinglePoolCollectorUntouched:true,
+    const pc=await this.state.storage.get("v395:poolCoverage")||{};
+    const nowMs=Date.now(), defs=[["5m",300000],["15m",900000],["1h",3600000],["6h",21600000],["24h",86400000]];
+    const perPoolCoverage={};
+    for(const p of (cfg?.addresses||[])){
+      const pool=normalize(p), c=pc[pool]||{}, active=c.active===true&&conn.subscriptionAccepted===true;
+      const start=active&&Number.isFinite(Number(c.continuousStartAt))?Number(c.continuousStartAt):null;
+      const age=start===null?0:Math.max(0,nowMs-start), windows={};
+      for(const [name,ms] of defs)windows[name]={full:active&&age>=ms,coverage:active&&age>=ms?"FULL_SHADOW_POOL_V395":"PARTIAL_SHADOW_POOL_V395",continuousCoverageMs:Math.min(age,ms),requiredCoverageMs:ms};
+      perPoolCoverage[pool]={active,continuousStartAt:start,continuousStartIso:start?new Date(start).toISOString():null,continuousCoverageMs:age,interruptions:safeNumber(c.interruptions),lastGapAt:c.lastGapAt||null,lastGapReason:c.lastGapReason||null,windows};
+    }
+    const aggregate={swapLogs:recent.length,uniqueTransactions:0,buys:0,sells:0,buyUsd:0,sellUsd:0,netUsd:0,usdVerifiedSwapLogs:0,multiPoolTransactions:0};
+    const txMap=new Map();
+    for(const r of recent){
+      if(r?.side==="BUY")aggregate.buys++;else if(r?.side==="SELL")aggregate.sells++;
+      if(r?.usdVerified===true&&Number.isFinite(Number(r?.usd))){aggregate.usdVerifiedSwapLogs++;if(r.side==="BUY")aggregate.buyUsd+=Number(r.usd);else aggregate.sellUsd+=Number(r.usd);}
+      const tx=String(r?.transactionHash||"");if(tx){if(!txMap.has(tx))txMap.set(tx,new Set());txMap.get(tx).add(normalize(r?.pool||""));}
+    }
+    aggregate.uniqueTransactions=txMap.size;
+    aggregate.multiPoolTransactions=[...txMap.values()].filter(x=>x.size>1).length;
+    aggregate.buyUsd=Number(aggregate.buyUsd.toFixed(6));aggregate.sellUsd=Number(aggregate.sellUsd.toFixed(6));aggregate.netUsd=Number((aggregate.buyUsd-aggregate.sellUsd).toFixed(6));
+    const allPools=(cfg?.addresses||[]).map(normalize);
+    const aggregateCoverage={};
+    for(const [name] of defs){const full=allPools.length>0&&allPools.every(p=>perPoolCoverage[p]?.windows?.[name]?.full===true);aggregateCoverage[name]={full,coverage:full?"FULL_ALL_INCLUDED_POOLS_V395":"PARTIAL_ONE_OR_MORE_POOLS_V395"};}
+    return {version:VERSION,collector:"SHADOW_MULTI_POOL_ALCHEMY_V3_V395",safe:true,shadowOnly:true,scoringMutated:false,normalTradeBucketsMutated:false,existingSinglePoolCollectorUntouched:true,
       reason,enabled:(await this.state.storage.get("v394:shadowEnabled"))===true,token:cfg?.token||null,basePair:cfg?.basePair||null,
       addresses:cfg?.addresses||[],addressCount:Array.isArray(cfg?.addresses)?cfg.addresses.length:0,pools:cfg?.pools||[],
       connection:conn,swapsCaptured:safeNumber(stats.swapsCaptured),byPool:stats.byPool||{},lastTrade:stats.lastTrade||null,
-      recentUniqueSwapEvidence:recent.slice(-20),dedupeIdentity:"TRANSACTION_HASH_PLUS_LOG_INDEX",
-      coverage:"SHADOW_OBSERVATION_ONLY_NOT_FULL_COVERAGE_V394",status:conn.subscriptionAccepted===true?"SHADOW_MULTI_POOL_ACTIVE_V394":"SHADOW_MULTI_POOL_NOT_YET_ACTIVE_V394",timestamp:now()};
+      recentUniqueSwapEvidence:recent.slice(-20),swapDedupeIdentity:"TRANSACTION_HASH_PLUS_LOG_INDEX",tokenTransactionIdentity:"TRANSACTION_HASH",
+      decodedEvidenceV395:{enabled:true,directionFromSignedCandidatePoolDelta:true,quoteAmountFromExactV3SwapDelta:true,usdgUsdBasis:"EXACT_CANONICAL_USDG_QUOTE",wethUsdBasis:"CURRENT_VERIFIED_WETH_USDG_REFERENCE_NOT_HISTORICAL_BLOCK_PRICE"},
+      tokenAggregateShadowV395:aggregate,perPoolCoverageV395:perPoolCoverage,tokenAggregateCoverageV395:aggregateCoverage,
+      coverageRuleV395:"FULL_REQUIRES_EVERY_INCLUDED_POOL_TO_HAVE_CONTINUOUS_COVERAGE_FOR_WINDOW",
+      scoringGateV395:"SHADOW_ONLY_DO_NOT_USE_FOR_SCORING",
+      status:conn.subscriptionAccepted===true?"SHADOW_MULTI_POOL_DECODE_ACTIVE_V395":"SHADOW_MULTI_POOL_NOT_YET_ACTIVE_V395",timestamp:new Date(nowMs).toISOString()};
   }
 
   async connect() {
