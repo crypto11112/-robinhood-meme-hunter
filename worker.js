@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V400
- * AUTHORITATIVE RUNTIME VERSION: V400
+ * Robinhood Chain Meme Hunter — V401
+ * AUTHORITATIVE RUNTIME VERSION: V401
+ * V401 builds directly forward from confirmed V400. It preserves V400 generic N-pool reconciliation and all V399 pool-set/runtime protections, and adds shadow multi-pool dual-subscription integrity: filtered V3 Swap logs + newHeads, head freshness telemetry, stale-head watchdog revocation of coverage, and safe reconnect. Shadow remains read-only and scoring-ineligible; production single-pool collector remains untouched.
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1457,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V400";
+const VERSION = "V401";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71424,6 +71425,7 @@ export class V3LiveCollectorV363 {
     this.reconnectPending = false;
     this.shadowWsV394 = null;
     this.shadowSubscriptionIdV394 = null;
+    this.shadowHeadSubscriptionIdV401 = null;
     this.shadowProcessingV394 = Promise.resolve();
   }
 
@@ -71485,21 +71487,22 @@ export class V3LiveCollectorV363 {
         try{ if(this.shadowWsV394){ this.shadowWsV394.close(1000,"V396_VERSION_RECYCLE"); } }catch(_){}
         this.shadowWsV394=null;
         this.shadowSubscriptionIdV394=null;
+        this.shadowHeadSubscriptionIdV401=null;
         const pc=await this.state.storage.get("v395:poolCoverage")||{};
         for(const p of Object.keys(pc)){
           if(pc[p]?.active===true){
             pc[p].active=false;
             pc[p].lastGapAt=Date.now();
-            pc[p].lastGapReason=staleRuntime?"VERSION_RECYCLE_V400":"POOL_SET_RECYCLE_V400";
+            pc[p].lastGapReason=staleRuntime?"VERSION_RECYCLE_V401":"POOL_SET_RECYCLE_V401";
             pc[p].interruptions=safeNumber(pc[p].interruptions)+1;
             pc[p].continuousStartAt=null;
           }
         }
         await this.state.storage.put("v395:poolCoverage",pc);
-        await this.state.storage.put("v394:shadowConnection",{connected:false,subscriptionAccepted:false,status:staleRuntime?"SHADOW_VERSION_RECYCLE_PENDING_V400":"SHADOW_POOL_SET_RECYCLE_PENDING_V400",previousRuntimeVersion:activeRuntimeVersion||null,previousConfigFingerprintV399:activeConfigFingerprintV399||null,desiredConfigFingerprintV399,recycleRequestedAt:Date.now(),lastError:null});
+        await this.state.storage.put("v394:shadowConnection",{connected:false,subscriptionAccepted:false,status:staleRuntime?"SHADOW_VERSION_RECYCLE_PENDING_V401":"SHADOW_POOL_SET_RECYCLE_PENDING_V401",previousRuntimeVersion:activeRuntimeVersion||null,previousConfigFingerprintV399:activeConfigFingerprintV399||null,desiredConfigFingerprintV399,recycleRequestedAt:Date.now(),lastError:null});
       }
       await this.connectShadowV394(true);
-      return Response.json(await this.shadowStatusV394("SHADOW_MULTI_POOL_START_REQUESTED_V400"));
+      return Response.json(await this.shadowStatusV394("SHADOW_MULTI_POOL_START_REQUESTED_V401"));
     }
     if (url.pathname === "/shadow-multipool-status-v394") {
       return Response.json(await this.shadowStatusV394());
@@ -71806,23 +71809,39 @@ if (url.pathname === "/reconcile-v374") {
   }
 
   async alarm() {
-    const enabled = await this.state.storage.get("enabled");
-    if (enabled !== true) return;
-    const conn = await this.state.storage.get("connection") || {};
-    const heads = await this.state.storage.get("v368:heads") || {};
-    const dualAccepted = conn.connected===true && conn.logSubscriptionAccepted===true && conn.headSubscriptionAccepted===true;
-    const lastHeadAt = Number(heads.lastHeadAt);
-    const headAgeMs = Number.isFinite(lastHeadAt) ? Math.max(0,Date.now()-lastHeadAt) : null;
-    if (dualAccepted && headAgeMs!==null && headAgeMs > V3_HEAD_STALE_MS_V371) {
-      await this.markCoverageGapV366(`NEWHEADS_STALE_V371_${Math.round(headAgeMs)}MS`);
-      await this.markIntegrityGapV369(`NEWHEADS_STALE_V371_${Math.round(headAgeMs)}MS`);
-      await this.markIntegrityGapV371(`NEWHEADS_STALE_V371_${Math.round(headAgeMs)}MS`);
-      try { this.ws?.close(1012,"V371 head stream stale"); } catch (_) {}
-      this.ws=null; this.subscriptionId=null; this.headSubscriptionId=null;
-      await this.scheduleReconnect(`NEWHEADS_STALE_V371_${Math.round(headAgeMs)}MS`);
-      return;
+    const productionEnabled = await this.state.storage.get("enabled");
+    const shadowEnabled = await this.state.storage.get("v394:shadowEnabled");
+    if (productionEnabled !== true && shadowEnabled !== true) return;
+
+    // Preserve the confirmed V371 production single-pool watchdog behavior.
+    // V401 only shares the Durable Object alarm so the shadow collector can
+    // independently prove that its newHeads stream remains live.
+    if (productionEnabled === true) {
+      const conn = await this.state.storage.get("connection") || {};
+      const heads = await this.state.storage.get("v368:heads") || {};
+      const dualAccepted = conn.connected===true && conn.logSubscriptionAccepted===true && conn.headSubscriptionAccepted===true;
+      const lastHeadAt = Number(heads.lastHeadAt);
+      const acceptedAt = Number(conn.lastConnectedAt || conn.acceptedAt);
+      const basisAt = Number.isFinite(lastHeadAt) ? lastHeadAt : (Number.isFinite(acceptedAt) ? acceptedAt : null);
+      const headAgeMs = basisAt!==null ? Math.max(0,Date.now()-basisAt) : null;
+      if (dualAccepted && headAgeMs!==null && headAgeMs > V3_HEAD_STALE_MS_V371) {
+        await this.markCoverageGapV366(`NEWHEADS_STALE_V371_${Math.round(headAgeMs)}MS`);
+        await this.markIntegrityGapV369(`NEWHEADS_STALE_V371_${Math.round(headAgeMs)}MS`);
+        await this.markIntegrityGapV371(`NEWHEADS_STALE_V371_${Math.round(headAgeMs)}MS`);
+        try { this.ws?.close(1012,"V371 head stream stale"); } catch (_) {}
+        this.ws=null; this.subscriptionId=null; this.headSubscriptionId=null;
+        await this.scheduleReconnect(`NEWHEADS_STALE_V371_${Math.round(headAgeMs)}MS`);
+      } else if (!dualAccepted || !this.ws || this.ws.readyState!==WebSocket.OPEN) {
+        await this.connect();
+      }
     }
-    if (!dualAccepted || !this.ws || this.ws.readyState!==WebSocket.OPEN) await this.connect();
+
+    if (shadowEnabled === true) {
+      await this.shadowWatchdogV401();
+    }
+
+    // Keep checking while either collector is enabled. Fifteen seconds is the
+    // already-proven V371 cadence; V401 does not increase provider requests.
     await this.state.storage.setAlarm(Date.now()+V3_HEAD_WATCHDOG_MS_V371);
   }
 
@@ -71935,50 +71954,93 @@ if (url.pathname === "/reconcile-v374") {
   }
 
 
+  async markShadowCoverageGapV401(reason) {
+    const now = Date.now();
+    const pc = await this.state.storage.get("v395:poolCoverage") || {};
+    let changed = false;
+    for (const p of Object.keys(pc)) {
+      if (pc[p]?.active === true) {
+        pc[p].active = false;
+        pc[p].lastGapAt = now;
+        pc[p].lastGapReason = String(reason || "SHADOW_INTEGRITY_GAP_V401").slice(0,160);
+        pc[p].interruptions = safeNumber(pc[p].interruptions) + 1;
+        pc[p].previousContinuousStartAt = Number.isFinite(Number(pc[p].continuousStartAt)) ? Number(pc[p].continuousStartAt) : null;
+        pc[p].continuousStartAt = null;
+        changed = true;
+      }
+    }
+    if (changed) await this.state.storage.put("v395:poolCoverage",pc);
+    return pc;
+  }
+
+  async markShadowCoverageConnectedV401() {
+    const cfg = await this.state.storage.get("v394:shadowConfig") || {};
+    const previous = await this.state.storage.get("v395:poolCoverage") || {};
+    const next = {};
+    const now = Date.now();
+    for (const address of (cfg.addresses||[])) {
+      const p = normalize(address);
+      const prior = previous[p] || {};
+      next[p] = {
+        pool:p,
+        active:true,
+        continuousStartAt:(prior.active===true && Number.isFinite(Number(prior.continuousStartAt))) ? Number(prior.continuousStartAt) : now,
+        lastAcceptedAt:now,
+        interruptions:safeNumber(prior.interruptions),
+        lastGapAt:prior.lastGapAt||null,
+        lastGapReason:prior.lastGapReason||null
+      };
+    }
+    await this.state.storage.put("v395:poolCoverage",next);
+    return next;
+  }
+
   async connectShadowV394(force=false) {
     const enabled=await this.state.storage.get("v394:shadowEnabled");
     const cfg=await this.state.storage.get("v394:shadowConfig");
     if (enabled!==true || !cfg || !Array.isArray(cfg.addresses) || cfg.addresses.length<1 || !this.env.ALCHEMY_API_KEY) return;
     if (this.shadowWsV394 && this.shadowWsV394.readyState===WebSocket.OPEN && force!==true) {
       const c=await this.state.storage.get("v394:shadowConnection")||{};
-      if(c?.runtimeVersion===VERSION && c?.subscriptionAccepted===true) return;
+      if(c?.runtimeVersion===VERSION && c?.subscriptionAccepted===true && c?.logSubscriptionAccepted===true && c?.headSubscriptionAccepted===true) return;
     }
     if(force===true && this.shadowWsV394){
-      try{this.shadowWsV394.close(1000,"V400_FORCE_RECONNECT");}catch(_){}
-      this.shadowWsV394=null;this.shadowSubscriptionIdV394=null;
+      try{this.shadowWsV394.close(1000,"V401_FORCE_RECONNECT");}catch(_){}
+      this.shadowWsV394=null;this.shadowSubscriptionIdV394=null;this.shadowHeadSubscriptionIdV401=null;
     }
     let ws;
     try { ws=new WebSocket(`wss://robinhood-mainnet.g.alchemy.com/v2/${String(this.env.ALCHEMY_API_KEY)}`); }
-    catch(e){ await this.state.storage.put("v394:shadowConnection",{connected:false,status:"SHADOW_SOCKET_CREATE_FAILED_V394",lastError:String(e?.message||e).slice(0,240)}); return; }
+    catch(e){ await this.state.storage.put("v394:shadowConnection",{connected:false,subscriptionAccepted:false,logSubscriptionAccepted:false,headSubscriptionAccepted:false,status:"SHADOW_SOCKET_CREATE_FAILED_V401",runtimeVersion:VERSION,lastError:String(e?.message||e).slice(0,240)}); await this.markShadowCoverageGapV401("SHADOW_SOCKET_CREATE_FAILED_V401"); return; }
     this.shadowWsV394=ws;
     ws.addEventListener("open",async()=>{
       if(this.shadowWsV394!==ws)return;
-      await this.state.storage.put("v394:shadowConnection",{connected:true,subscriptionAccepted:false,status:"SHADOW_SOCKET_OPEN_SUBSCRIBING_V400",runtimeVersion:VERSION,configFingerprintV399:String(cfg.configFingerprintV399||""),openedAt:Date.now(),addressCount:cfg.addresses.length});
+      await this.state.storage.put("v394:shadowConnection",{connected:true,subscriptionAccepted:false,logSubscriptionAccepted:false,headSubscriptionAccepted:false,subscriptionIdPresent:false,headSubscriptionIdPresent:false,status:"SHADOW_DUAL_SUBSCRIPTION_SUBSCRIBING_V401",runtimeVersion:VERSION,configFingerprintV399:String(cfg.configFingerprintV399||""),openedAt:Date.now(),addressCount:cfg.addresses.length,lastError:null});
       ws.send(JSON.stringify({jsonrpc:"2.0",id:394,method:"eth_subscribe",params:["logs",{address:cfg.addresses,topics:[UNISWAP_V3_SWAP_TOPIC_V326]}]}));
+      ws.send(JSON.stringify({jsonrpc:"2.0",id:401,method:"eth_subscribe",params:["newHeads"]}));
     });
     ws.addEventListener("message",event=>{
       if(this.shadowWsV394!==ws)return;
       this.shadowProcessingV394=this.shadowProcessingV394.then(()=>this.handleShadowMessageV394(event)).catch(async e=>{
+        if(this.shadowWsV394!==ws)return;
         const c=await this.state.storage.get("v394:shadowConnection")||{};
-        c.lastError=String(e?.message||e).slice(0,240);c.status="SHADOW_MESSAGE_ERROR_V394";
+        c.lastError=String(e?.message||e).slice(0,240);c.status="SHADOW_MESSAGE_ERROR_V401";
         await this.state.storage.put("v394:shadowConnection",c);
       });
     });
     ws.addEventListener("close",async()=>{
       if(this.shadowWsV394!==ws)return;
-      this.shadowWsV394=null;this.shadowSubscriptionIdV394=null;
+      this.shadowWsV394=null;this.shadowSubscriptionIdV394=null;this.shadowHeadSubscriptionIdV401=null;
       const c=await this.state.storage.get("v394:shadowConnection")||{};
-      c.connected=false;c.subscriptionAccepted=false;c.status="SHADOW_SOCKET_CLOSED_V395";c.closedAt=Date.now();
+      c.connected=false;c.subscriptionAccepted=false;c.logSubscriptionAccepted=false;c.headSubscriptionAccepted=false;c.subscriptionIdPresent=false;c.headSubscriptionIdPresent=false;c.status="SHADOW_SOCKET_CLOSED_V401";c.closedAt=Date.now();
       await this.state.storage.put("v394:shadowConnection",c);
-      const pc=await this.state.storage.get("v395:poolCoverage")||{};
-      for(const p of Object.keys(pc)){if(pc[p]?.active===true){pc[p].active=false;pc[p].lastGapAt=Date.now();pc[p].lastGapReason="SHADOW_SOCKET_CLOSED_V395";pc[p].interruptions=safeNumber(pc[p].interruptions)+1;pc[p].continuousStartAt=null;}}
-      await this.state.storage.put("v395:poolCoverage",pc);
+      await this.markShadowCoverageGapV401("SHADOW_SOCKET_CLOSED_V401");
+      if((await this.state.storage.get("v394:shadowEnabled"))===true) await this.state.storage.setAlarm(Date.now()+V3_LIVE_RECONNECT_MS_V363);
     });
     ws.addEventListener("error",async()=>{
       if(this.shadowWsV394!==ws)return;
       const c=await this.state.storage.get("v394:shadowConnection")||{};
-      c.lastError="SHADOW_WEBSOCKET_ERROR_V394";c.status="SHADOW_WEBSOCKET_ERROR_V394";
+      c.lastError="SHADOW_WEBSOCKET_ERROR_V401";c.status="SHADOW_WEBSOCKET_ERROR_V401";
       await this.state.storage.put("v394:shadowConnection",c);
+      await this.markShadowCoverageGapV401("SHADOW_WEBSOCKET_ERROR_V401");
     });
   }
 
@@ -71986,24 +72048,50 @@ if (url.pathname === "/reconcile-v374") {
     let msg; try { msg=JSON.parse(typeof event.data==="string"?event.data:""); } catch(_){return;}
     const conn=await this.state.storage.get("v394:shadowConnection")||{};
     conn.lastMessageAt=Date.now();
+
     if (msg?.id===394) {
       if (typeof msg.result==="string" && msg.result.length>2) {
-        this.shadowSubscriptionIdV394=msg.result;conn.subscriptionAccepted=true;conn.connected=true;conn.runtimeVersion=VERSION;conn.status="SHADOW_MULTI_POOL_SUBSCRIPTION_ACTIVE_V400";conn.acceptedAt=Date.now();conn.lastError=null;
-        const acceptedCfgV399=await this.state.storage.get("v394:shadowConfig")||{};conn.configFingerprintV399=String(acceptedCfgV399.configFingerprintV399||"");
-        const cfg=await this.state.storage.get("v394:shadowConfig")||{};
-        const previous=await this.state.storage.get("v395:poolCoverage")||{};
-        const next={};
-        for(const address of (cfg.addresses||[])){
-          const p=normalize(address);
-          const prior=previous[p];
-          next[p]={pool:p,active:true,continuousStartAt:(prior?.active===true&&Number.isFinite(Number(prior?.continuousStartAt)))?Number(prior.continuousStartAt):Date.now(),lastAcceptedAt:Date.now(),interruptions:safeNumber(prior?.interruptions)};
-        }
-        await this.state.storage.put("v395:poolCoverage",next);
-      } else if (msg?.error) {conn.subscriptionAccepted=false;conn.status="SHADOW_MULTI_POOL_SUBSCRIPTION_REJECTED_V394";conn.lastError=JSON.stringify(msg.error).slice(0,240);}
-      await this.state.storage.put("v394:shadowConnection",conn); return;
+        this.shadowSubscriptionIdV394=msg.result;
+        conn.logSubscriptionAccepted=true;conn.subscriptionIdPresent=true;conn.connected=true;conn.runtimeVersion=VERSION;conn.lastError=null;
+      } else if (msg?.error) {
+        conn.logSubscriptionAccepted=false;conn.subscriptionIdPresent=false;conn.subscriptionAccepted=false;conn.status="SHADOW_LOG_SUBSCRIPTION_REJECTED_V401";conn.lastError=JSON.stringify(msg.error).slice(0,240);
+        await this.markShadowCoverageGapV401("SHADOW_LOG_SUBSCRIPTION_REJECTED_V401");
+      }
     }
+    if (msg?.id===401) {
+      if (typeof msg.result==="string" && msg.result.length>2) {
+        this.shadowHeadSubscriptionIdV401=msg.result;
+        conn.headSubscriptionAccepted=true;conn.headSubscriptionIdPresent=true;conn.connected=true;conn.runtimeVersion=VERSION;conn.lastError=null;
+      } else if (msg?.error) {
+        conn.headSubscriptionAccepted=false;conn.headSubscriptionIdPresent=false;conn.subscriptionAccepted=false;conn.status="SHADOW_HEAD_SUBSCRIPTION_REJECTED_V401";conn.lastError=JSON.stringify(msg.error).slice(0,240);
+        await this.markShadowCoverageGapV401("SHADOW_HEAD_SUBSCRIPTION_REJECTED_V401");
+      }
+    }
+    if (msg?.id===394 || msg?.id===401) {
+      conn.subscriptionAccepted=conn.logSubscriptionAccepted===true && conn.headSubscriptionAccepted===true;
+      if (conn.subscriptionAccepted) {
+        conn.status="SHADOW_MULTI_POOL_DUAL_SUBSCRIPTION_ACTIVE_V401";
+        conn.acceptedAt=conn.acceptedAt||Date.now();
+        const acceptedCfgV399=await this.state.storage.get("v394:shadowConfig")||{};
+        conn.configFingerprintV399=String(acceptedCfgV399.configFingerprintV399||"");
+        // V401: dual acceptance is necessary but not sufficient for coverage.
+        // The first actual newHeads notification starts the fresh integrity epoch.
+        await this.state.storage.setAlarm(Date.now()+V3_HEAD_WATCHDOG_MS_V371);
+      } else if (!String(conn.status||"").includes("REJECTED")) {
+        conn.status="SHADOW_WAITING_FOR_DUAL_SUBSCRIPTIONS_V401";
+      }
+      await this.state.storage.put("v394:shadowConnection",conn);
+      return;
+    }
+
     await this.state.storage.put("v394:shadowConnection",conn);
-    if (msg?.method!=="eth_subscription" || msg?.params?.subscription!==this.shadowSubscriptionIdV394 || !msg?.params?.result) return;
+    if (msg?.method!=="eth_subscription" || !msg?.params?.result) return;
+    if (msg?.params?.subscription===this.shadowHeadSubscriptionIdV401) {
+      await this.handleShadowHeadV401(msg.params.result);
+      return;
+    }
+    if (msg?.params?.subscription!==this.shadowSubscriptionIdV394) return;
+
     const log=msg.params.result;
     if (log?.removed===true || normalize(log?.topics?.[0]||"")!==normalize(UNISWAP_V3_SWAP_TOPIC_V326)) return;
     const cfg=await this.state.storage.get("v394:shadowConfig")||{};
@@ -72059,16 +72147,78 @@ if (url.pathname === "/reconcile-v374") {
     await this.state.storage.put("v394:shadowStats",stats);
   }
 
+  async handleShadowHeadV401(head) {
+    const raw=head?.number;
+    const block=typeof raw==="string"&&/^0x[0-9a-f]+$/i.test(raw)?parseInt(raw,16):Number(raw);
+    if(!Number.isFinite(block)||block<0)return;
+    const now=Date.now();
+    const heads=await this.state.storage.get("v401:shadowHeads")||{};
+    const previous=Number(heads.lastHeadBlock);
+    heads.headsObserved=safeNumber(heads.headsObserved)+1;
+    heads.lastHeadAt=now;
+    if(Number.isFinite(previous)&&block>previous+1){
+      heads.gapsDetected=safeNumber(heads.gapsDetected)+1;
+      heads.lastGapAt=now;
+      heads.lastGapFrom=previous;
+      heads.lastGapTo=block;
+      heads.lastGapSize=block-previous-1;
+      heads.lastGapClassification="NEWHEADS_NOTIFICATION_JUMP_NOT_PROVEN_SWAP_GAP_V401";
+    }
+    if(!Number.isFinite(previous)||block>=previous)heads.lastHeadBlock=block;
+    await this.state.storage.put("v401:shadowHeads",heads);
+    const conn=await this.state.storage.get("v394:shadowConnection")||{};
+    const dualAccepted=conn.connected===true&&conn.subscriptionAccepted===true&&conn.logSubscriptionAccepted===true&&conn.headSubscriptionAccepted===true;
+    if(dualAccepted){
+      const pc=await this.state.storage.get("v395:poolCoverage")||{};
+      const cfg=await this.state.storage.get("v394:shadowConfig")||{};
+      const needsStart=(cfg.addresses||[]).some(a=>pc[normalize(a)]?.active!==true||!Number.isFinite(Number(pc[normalize(a)]?.continuousStartAt)));
+      if(needsStart) await this.markShadowCoverageConnectedV401();
+    }
+  }
+
+  async shadowWatchdogV401() {
+    const enabled=await this.state.storage.get("v394:shadowEnabled");
+    if(enabled!==true)return;
+    const conn=await this.state.storage.get("v394:shadowConnection")||{};
+    const heads=await this.state.storage.get("v401:shadowHeads")||{};
+    const dualAccepted=conn.connected===true&&conn.logSubscriptionAccepted===true&&conn.headSubscriptionAccepted===true&&conn.subscriptionAccepted===true;
+    const lastHeadAt=Number(heads.lastHeadAt);
+    const acceptedAt=Number(conn.acceptedAt||conn.openedAt);
+    const basisAt=Number.isFinite(lastHeadAt)?lastHeadAt:(Number.isFinite(acceptedAt)?acceptedAt:null);
+    const headAgeMs=basisAt!==null?Math.max(0,Date.now()-basisAt):null;
+    if(dualAccepted&&headAgeMs!==null&&headAgeMs>V3_HEAD_STALE_MS_V371){
+      const reason=`SHADOW_NEWHEADS_STALE_V401_${Math.round(headAgeMs)}MS`;
+      await this.markShadowCoverageGapV401(reason);
+      conn.connected=false;conn.subscriptionAccepted=false;conn.logSubscriptionAccepted=false;conn.headSubscriptionAccepted=false;conn.subscriptionIdPresent=false;conn.headSubscriptionIdPresent=false;conn.status="SHADOW_HEAD_STALE_RECONNECT_V401";conn.lastError=reason;conn.lastIntegrityGapAt=Date.now();
+      await this.state.storage.put("v394:shadowConnection",conn);
+      try{this.shadowWsV394?.close(1012,"V401 shadow head stale");}catch(_){}
+      this.shadowWsV394=null;this.shadowSubscriptionIdV394=null;this.shadowHeadSubscriptionIdV401=null;
+      await this.connectShadowV394(false);
+      return;
+    }
+    if(!dualAccepted||!this.shadowWsV394||this.shadowWsV394.readyState!==WebSocket.OPEN){
+      await this.connectShadowV394(false);
+    }
+  }
+
   async shadowStatusV394(reason=null) {
     const cfg=await this.state.storage.get("v394:shadowConfig")||null;
     const conn=await this.state.storage.get("v394:shadowConnection")||{};
     const stats=await this.state.storage.get("v394:shadowStats")||{swapsCaptured:0,byPool:{}};
     const recent=await this.state.storage.get("v394:shadowRecent")||[];
     const pc=await this.state.storage.get("v395:poolCoverage")||{};
+    const shadowHeadsV401=await this.state.storage.get("v401:shadowHeads")||{};
+    const shadowDualAcceptedV401=conn.connected===true&&conn.subscriptionAccepted===true&&conn.logSubscriptionAccepted===true&&conn.headSubscriptionAccepted===true;
+    const shadowLastHeadAtV401=Number(shadowHeadsV401.lastHeadAt);
+    const shadowAcceptedAtV401=Number(conn.acceptedAt||conn.openedAt);
+    const shadowHeadObservedAfterAcceptanceV401=Number.isFinite(shadowLastHeadAtV401)&&Number.isFinite(shadowAcceptedAtV401)&&shadowLastHeadAtV401>=shadowAcceptedAtV401;
+    const shadowHeadBasisAtV401=shadowHeadObservedAfterAcceptanceV401?shadowLastHeadAtV401:(Number.isFinite(shadowAcceptedAtV401)?shadowAcceptedAtV401:null);
+    const shadowHeadAgeMsV401=shadowHeadBasisAtV401!==null?Math.max(0,Date.now()-shadowHeadBasisAtV401):null;
+    const shadowHeadFreshV401=shadowDualAcceptedV401&&shadowHeadObservedAfterAcceptanceV401&&shadowHeadAgeMsV401!==null&&shadowHeadAgeMsV401<=V3_HEAD_STALE_MS_V371;
     const nowMs=Date.now(), defs=[["5m",300000],["15m",900000],["1h",3600000],["6h",21600000],["24h",86400000]];
     const perPoolCoverage={};
     for(const p of (cfg?.addresses||[])){
-      const pool=normalize(p), c=pc[pool]||{}, active=c.active===true&&conn.subscriptionAccepted===true;
+      const pool=normalize(p), c=pc[pool]||{}, active=c.active===true&&shadowHeadFreshV401;
       const start=active&&Number.isFinite(Number(c.continuousStartAt))?Number(c.continuousStartAt):null;
       const age=start===null?0:Math.max(0,nowMs-start), windows={};
       for(const [name,ms] of defs)windows[name]={full:active&&age>=ms,coverage:active&&age>=ms?"FULL_SHADOW_POOL_V395":"PARTIAL_SHADOW_POOL_V395",continuousCoverageMs:Math.min(age,ms),requiredCoverageMs:ms};
@@ -72237,10 +72387,12 @@ if (url.pathname === "/reconcile-v374") {
       };
     }
     const reconciliationAllWindowsPassV400=Object.values(reconciliationV400).every(x=>x?.pass===true);
-    return {version:VERSION,collector:"SHADOW_MULTI_POOL_ALCHEMY_V3_V400",safe:true,shadowOnly:true,scoringMutated:false,normalTradeBucketsMutated:false,existingSinglePoolCollectorUntouched:true,
+    return {version:VERSION,collector:"SHADOW_MULTI_POOL_ALCHEMY_V3_V401",safe:true,shadowOnly:true,scoringMutated:false,normalTradeBucketsMutated:false,existingSinglePoolCollectorUntouched:true,
       reason,enabled:(await this.state.storage.get("v394:shadowEnabled"))===true,token:cfg?.token||null,basePair:cfg?.basePair||null,
       addresses:cfg?.addresses||[],addressCount:Array.isArray(cfg?.addresses)?cfg.addresses.length:0,pools:cfg?.pools||[],
-      connection:conn,activeRuntimeVersion:conn?.runtimeVersion||null,desiredRuntimeVersion:VERSION,
+      connection:conn,
+      headIntegrityV401:{enabled:true,dualSubscriptionRequired:true,logSubscriptionAccepted:conn?.logSubscriptionAccepted===true,headSubscriptionAccepted:conn?.headSubscriptionAccepted===true,headSubscriptionIdPresent:Boolean(conn?.headSubscriptionIdPresent),lastHeadBlock:Number.isFinite(Number(shadowHeadsV401.lastHeadBlock))?Number(shadowHeadsV401.lastHeadBlock):null,headsObserved:safeNumber(shadowHeadsV401.headsObserved),headGapsDetected:safeNumber(shadowHeadsV401.gapsDetected),lastHeadGapAt:shadowHeadsV401.lastGapAt||null,lastHeadGapFrom:shadowHeadsV401.lastGapFrom??null,lastHeadGapTo:shadowHeadsV401.lastGapTo??null,lastHeadGapSize:safeNumber(shadowHeadsV401.lastGapSize),lastHeadGapClassification:shadowHeadsV401.lastGapClassification||null,headAgeMs:shadowHeadAgeMsV401,headStaleThresholdMs:V3_HEAD_STALE_MS_V371,headObservedAfterAcceptance:shadowHeadObservedAfterAcceptanceV401,headFresh:shadowHeadFreshV401,coverageRequiresFreshHead:true,numericHeadJumpIsNotProvenSwapGap:true},
+      activeRuntimeVersion:conn?.runtimeVersion||null,desiredRuntimeVersion:VERSION,
       runtimeVersionMatch:conn?.runtimeVersion===VERSION,activeConfigFingerprintV399:conn?.configFingerprintV399||null,desiredConfigFingerprintV399:cfg?.configFingerprintV399||null,
       configFingerprintMatchV399:String(conn?.configFingerprintV399||"")===String(cfg?.configFingerprintV399||""),swapsCaptured:safeNumber(stats.swapsCaptured),byPool:stats.byPool||{},lastTrade:stats.lastTrade||null,
       recentUniqueSwapEvidence:recent.slice(-20),swapDedupeIdentity:"TRANSACTION_HASH_PLUS_LOG_INDEX",tokenTransactionIdentity:"TRANSACTION_HASH",
@@ -72307,7 +72459,19 @@ if (url.pathname === "/reconcile-v374") {
         normalTradeBucketsMutated:false,
         productionSinglePoolCollectorUntouched:true
       },
-      status:conn.subscriptionAccepted===true&&conn.runtimeVersion===VERSION&&String(conn?.configFingerprintV399||"")===String(cfg?.configFingerprintV399||"")&&reconciliationAllWindowsPassV398&&reconciliationAllWindowsPassV400?"SHADOW_MULTI_POOL_RECONCILIATION_GENERIC_ACTIVE_V400":"SHADOW_MULTI_POOL_NOT_YET_ACTIVE_V400",timestamp:new Date(nowMs).toISOString()};
+      validationGateV401:{
+        shadowDualSubscriptions:true,
+        filteredSwapLogsPlusNewHeads:true,
+        headFreshnessRequiredForCoverage:true,
+        staleHeadRevokesCoverage:true,
+        numericHeadJumpDiagnosticOnly:true,
+        safeReconnectOnStaleHead:true,
+        V400GenericNPoolReconciliationPreserved:true,
+        scoringMutated:false,
+        normalTradeBucketsMutated:false,
+        productionSinglePoolCollectorUntouched:true
+      },
+      status:conn.subscriptionAccepted===true&&conn.runtimeVersion===VERSION&&String(conn?.configFingerprintV399||"")===String(cfg?.configFingerprintV399||"")&&reconciliationAllWindowsPassV398&&reconciliationAllWindowsPassV400&&shadowHeadFreshV401?"SHADOW_MULTI_POOL_HEAD_INTEGRITY_ACTIVE_V401":"SHADOW_MULTI_POOL_NOT_YET_ACTIVE_V401",timestamp:new Date(nowMs).toISOString()};
   }
 
   async connect() {
