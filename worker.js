@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V399
- * AUTHORITATIVE RUNTIME VERSION: V399
+ * Robinhood Chain Meme Hunter — V400
+ * AUTHORITATIVE RUNTIME VERSION: V400
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V399";
+const VERSION = "V400";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71490,16 +71490,16 @@ export class V3LiveCollectorV363 {
           if(pc[p]?.active===true){
             pc[p].active=false;
             pc[p].lastGapAt=Date.now();
-            pc[p].lastGapReason=staleRuntime?"VERSION_RECYCLE_V399":"POOL_SET_RECYCLE_V399";
+            pc[p].lastGapReason=staleRuntime?"VERSION_RECYCLE_V400":"POOL_SET_RECYCLE_V400";
             pc[p].interruptions=safeNumber(pc[p].interruptions)+1;
             pc[p].continuousStartAt=null;
           }
         }
         await this.state.storage.put("v395:poolCoverage",pc);
-        await this.state.storage.put("v394:shadowConnection",{connected:false,subscriptionAccepted:false,status:staleRuntime?"SHADOW_VERSION_RECYCLE_PENDING_V399":"SHADOW_POOL_SET_RECYCLE_PENDING_V399",previousRuntimeVersion:activeRuntimeVersion||null,previousConfigFingerprintV399:activeConfigFingerprintV399||null,desiredConfigFingerprintV399,recycleRequestedAt:Date.now(),lastError:null});
+        await this.state.storage.put("v394:shadowConnection",{connected:false,subscriptionAccepted:false,status:staleRuntime?"SHADOW_VERSION_RECYCLE_PENDING_V400":"SHADOW_POOL_SET_RECYCLE_PENDING_V400",previousRuntimeVersion:activeRuntimeVersion||null,previousConfigFingerprintV399:activeConfigFingerprintV399||null,desiredConfigFingerprintV399,recycleRequestedAt:Date.now(),lastError:null});
       }
       await this.connectShadowV394(true);
-      return Response.json(await this.shadowStatusV394("SHADOW_MULTI_POOL_START_REQUESTED_V399"));
+      return Response.json(await this.shadowStatusV394("SHADOW_MULTI_POOL_START_REQUESTED_V400"));
     }
     if (url.pathname === "/shadow-multipool-status-v394") {
       return Response.json(await this.shadowStatusV394());
@@ -71944,7 +71944,7 @@ if (url.pathname === "/reconcile-v374") {
       if(c?.runtimeVersion===VERSION && c?.subscriptionAccepted===true) return;
     }
     if(force===true && this.shadowWsV394){
-      try{this.shadowWsV394.close(1000,"V399_FORCE_RECONNECT");}catch(_){}
+      try{this.shadowWsV394.close(1000,"V400_FORCE_RECONNECT");}catch(_){}
       this.shadowWsV394=null;this.shadowSubscriptionIdV394=null;
     }
     let ws;
@@ -71953,7 +71953,7 @@ if (url.pathname === "/reconcile-v374") {
     this.shadowWsV394=ws;
     ws.addEventListener("open",async()=>{
       if(this.shadowWsV394!==ws)return;
-      await this.state.storage.put("v394:shadowConnection",{connected:true,subscriptionAccepted:false,status:"SHADOW_SOCKET_OPEN_SUBSCRIBING_V399",runtimeVersion:VERSION,configFingerprintV399:String(cfg.configFingerprintV399||""),openedAt:Date.now(),addressCount:cfg.addresses.length});
+      await this.state.storage.put("v394:shadowConnection",{connected:true,subscriptionAccepted:false,status:"SHADOW_SOCKET_OPEN_SUBSCRIBING_V400",runtimeVersion:VERSION,configFingerprintV399:String(cfg.configFingerprintV399||""),openedAt:Date.now(),addressCount:cfg.addresses.length});
       ws.send(JSON.stringify({jsonrpc:"2.0",id:394,method:"eth_subscribe",params:["logs",{address:cfg.addresses,topics:[UNISWAP_V3_SWAP_TOPIC_V326]}]}));
     });
     ws.addEventListener("message",event=>{
@@ -71988,7 +71988,7 @@ if (url.pathname === "/reconcile-v374") {
     conn.lastMessageAt=Date.now();
     if (msg?.id===394) {
       if (typeof msg.result==="string" && msg.result.length>2) {
-        this.shadowSubscriptionIdV394=msg.result;conn.subscriptionAccepted=true;conn.connected=true;conn.runtimeVersion=VERSION;conn.status="SHADOW_MULTI_POOL_SUBSCRIPTION_ACTIVE_V399";conn.acceptedAt=Date.now();conn.lastError=null;
+        this.shadowSubscriptionIdV394=msg.result;conn.subscriptionAccepted=true;conn.connected=true;conn.runtimeVersion=VERSION;conn.status="SHADOW_MULTI_POOL_SUBSCRIPTION_ACTIVE_V400";conn.acceptedAt=Date.now();conn.lastError=null;
         const acceptedCfgV399=await this.state.storage.get("v394:shadowConfig")||{};conn.configFingerprintV399=String(acceptedCfgV399.configFingerprintV399||"");
         const cfg=await this.state.storage.get("v394:shadowConfig")||{};
         const previous=await this.state.storage.get("v395:poolCoverage")||{};
@@ -72167,7 +72167,77 @@ if (url.pathname === "/reconcile-v374") {
       };
     }
     const reconciliationAllWindowsPassV398=Object.values(reconciliationV398).every(x=>x?.pass===true);
-    return {version:VERSION,collector:"SHADOW_MULTI_POOL_ALCHEMY_V3_V399",safe:true,shadowOnly:true,scoringMutated:false,normalTradeBucketsMutated:false,existingSinglePoolCollectorUntouched:true,
+
+    // V400: generic N-pool transaction-incidence reconciliation.
+    // This is derived independently from retained deduped swap evidence for each
+    // window. It deliberately separates the number of multi-pool transactions
+    // from extra pool incidences, which are only equal in the special case where
+    // every multi-pool transaction touches exactly two pools. Read-only/shadow.
+    const reconciliationV400={};
+    for(const [name,ms] of defs){
+      const cutoff=nowMs-ms;
+      const rows=recent.filter(r=>Number(r?.observedAt)>=cutoff);
+      const w=rollingWindowsV397[name]||{};
+      const txPools=new Map();
+      const poolTxSets=new Map();
+      for(const p of allPools)poolTxSets.set(p,new Set());
+      for(const r of rows){
+        const tx=String(r?.transactionHash||"").toLowerCase();
+        const pool=normalize(r?.pool||"");
+        if(!tx||!pool)continue;
+        if(!txPools.has(tx))txPools.set(tx,new Set());
+        txPools.get(tx).add(pool);
+        if(!poolTxSets.has(pool))poolTxSets.set(pool,new Set());
+        poolTxSets.get(pool).add(tx);
+      }
+      const independentTokenUniqueTransactions=txPools.size;
+      const independentMultiPoolTransactions=[...txPools.values()].filter(set=>set.size>1).length;
+      const poolIncidenceSum=[...txPools.values()].reduce((a,set)=>a+set.size,0);
+      const extraPoolIncidences=[...txPools.values()].reduce((a,set)=>a+Math.max(0,set.size-1),0);
+      const summedPerPoolUniqueTransactions=[...poolTxSets.values()].reduce((a,set)=>a+set.size,0);
+      const transactionsByPoolCount={};
+      for(const set of txPools.values()){
+        const n=set.size;
+        const key=n===1?"1":n===2?"2":n===3?"3":"4+";
+        transactionsByPoolCount[key]=safeNumber(transactionsByPoolCount[key])+1;
+      }
+      for(const key of ["1","2","3","4+"])if(transactionsByPoolCount[key]===undefined)transactionsByPoolCount[key]=0;
+      const checks={
+        tokenUniqueTransactionsMatchIndependentTxMap:safeNumber(w?.uniqueTransactions)===independentTokenUniqueTransactions,
+        multiPoolTransactionsMatchIndependentTxMap:safeNumber(w?.multiPoolTransactions)===independentMultiPoolTransactions,
+        summedPerPoolUniqueTransactionsMatchPoolIncidenceSum:summedPerPoolUniqueTransactions===poolIncidenceSum,
+        extraPoolIncidencesIdentityHolds:extraPoolIncidences===Math.max(0,poolIncidenceSum-independentTokenUniqueTransactions),
+        transactionDistributionMatchesUniqueTotal:Object.values(transactionsByPoolCount).reduce((a,n)=>a+safeNumber(n),0)===independentTokenUniqueTransactions,
+        multiPoolDistributionMatchesMultiPoolTotal:(safeNumber(transactionsByPoolCount["2"])+safeNumber(transactionsByPoolCount["3"])+safeNumber(transactionsByPoolCount["4+"]))===independentMultiPoolTransactions
+      };
+      reconciliationV400[name]={
+        pass:Object.values(checks).every(Boolean),
+        fullCoverage:w?.full===true,
+        coverage:w?.coverage||"UNVERIFIED",
+        checks,
+        independent:{
+          tokenUniqueTransactions:independentTokenUniqueTransactions,
+          multiPoolTransactions:independentMultiPoolTransactions,
+          poolIncidenceSum,
+          extraPoolIncidences,
+          transactionsByPoolCount
+        },
+        rolling:{
+          tokenUniqueTransactions:safeNumber(w?.uniqueTransactions),
+          multiPoolTransactions:safeNumber(w?.multiPoolTransactions),
+          summedPerPoolUniqueTransactions
+        },
+        semantics:{
+          multiPoolTransactions:"COUNT_OF_TRANSACTIONS_TOUCHING_MORE_THAN_ONE_POOL",
+          extraPoolIncidences:"SUM_OVER_TRANSACTIONS_OF_POOL_COUNT_MINUS_ONE",
+          neverEquateMultiPoolTransactionsWithExtraPoolIncidences:true,
+          genericForThreeOrMorePools:true
+        },
+        scoringEligible:false
+      };
+    }
+    const reconciliationAllWindowsPassV400=Object.values(reconciliationV400).every(x=>x?.pass===true);
+    return {version:VERSION,collector:"SHADOW_MULTI_POOL_ALCHEMY_V3_V400",safe:true,shadowOnly:true,scoringMutated:false,normalTradeBucketsMutated:false,existingSinglePoolCollectorUntouched:true,
       reason,enabled:(await this.state.storage.get("v394:shadowEnabled"))===true,token:cfg?.token||null,basePair:cfg?.basePair||null,
       addresses:cfg?.addresses||[],addressCount:Array.isArray(cfg?.addresses)?cfg.addresses.length:0,pools:cfg?.pools||[],
       connection:conn,activeRuntimeVersion:conn?.runtimeVersion||null,desiredRuntimeVersion:VERSION,
@@ -72178,6 +72248,16 @@ if (url.pathname === "/reconcile-v374") {
       tokenAggregateShadowV395:aggregate,perPoolCoverageV395:perPoolCoverage,tokenAggregateCoverageV395:aggregateCoverage,
       rollingMultiPoolWindowsV397:rollingWindowsV397,
       rawWindowReconciliationV398:reconciliationV398,
+      rawWindowReconciliationV400:reconciliationV400,
+      reconciliationSummaryV400:{
+        allWindowsPass:reconciliationAllWindowsPassV400,
+        independentFromRollingAggregation:true,
+        independentFromScoring:true,
+        readOnly:true,
+        genericForThreeOrMorePools:true,
+        scoringEligible:false,
+        rule:"TX_TO_POOL_SET_MUST_RECONCILE_UNIQUE_TX_MULTI_POOL_TX_POOL_INCIDENCES_AND_EXTRA_POOL_INCIDENCES"
+      },
       reconciliationSummaryV398:{
         allWindowsPass:reconciliationAllWindowsPassV398,
         independentFromScoring:true,
@@ -72217,7 +72297,17 @@ if (url.pathname === "/reconcile-v374") {
         normalTradeBucketsMutated:false,
         productionSinglePoolCollectorUntouched:true
       },
-      status:conn.subscriptionAccepted===true&&conn.runtimeVersion===VERSION&&String(conn?.configFingerprintV399||"")===String(cfg?.configFingerprintV399||"")&&reconciliationAllWindowsPassV398?"SHADOW_MULTI_POOL_HARDENED_ACTIVE_V399":"SHADOW_MULTI_POOL_NOT_YET_ACTIVE_V399",timestamp:new Date(nowMs).toISOString()};
+      validationGateV400:{
+        genericNPoolTransactionReconciliation:true,
+        independentTxToPoolSet:true,
+        multiPoolTransactionsSeparatedFromExtraPoolIncidences:true,
+        transactionPoolCountDistribution:true,
+        legacyV398ReconciliationPreserved:true,
+        scoringMutated:false,
+        normalTradeBucketsMutated:false,
+        productionSinglePoolCollectorUntouched:true
+      },
+      status:conn.subscriptionAccepted===true&&conn.runtimeVersion===VERSION&&String(conn?.configFingerprintV399||"")===String(cfg?.configFingerprintV399||"")&&reconciliationAllWindowsPassV398&&reconciliationAllWindowsPassV400?"SHADOW_MULTI_POOL_RECONCILIATION_GENERIC_ACTIVE_V400":"SHADOW_MULTI_POOL_NOT_YET_ACTIVE_V400",timestamp:new Date(nowMs).toISOString()};
   }
 
   async connect() {
