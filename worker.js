@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V391
- * AUTHORITATIVE RUNTIME VERSION: V391
+ * Robinhood Chain Meme Hunter — V392
+ * AUTHORITATIVE RUNTIME VERSION: V392
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V391";
+const VERSION = "V392";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -70046,17 +70046,39 @@ async function handleRequest(
         persistent: true,
         mergeNotReplace: true,
         schemaVersion: persistentRegistryV388.schemaVersion,
+        diagnosticSemanticsVersion: "V392",
         binding: persistentRegistryV388.binding,
         previousEntries: persistentRegistryV388.previousEntries,
         observedEligiblePools: persistentRegistryV388.observedEligiblePools,
         newlyAdded: persistentRegistryV388.newlyAdded,
         refreshed: persistentRegistryV388.refreshed,
         registryEntries: persistentRegistryV388.entries.length,
-        entries: persistentRegistryV388.entries,
+        entries: (persistentRegistryV388.entries || []).map(entry => ({
+          ...entry,
+          evidenceSemanticsV392: {
+            observedTransactionsTotalIsUniqueLifetime: false,
+            observedSwapLogsTotalIsUniqueLifetime: false,
+            verifiedUniqueLifetimeTransactions: null,
+            verifiedUniqueLifetimeSwapLogs: null,
+            activityUse: "DO_NOT_USE_FOR_SCORING_OR_LIVE_FLOW_TOTALS",
+            registryUse: "VERIFIED_POOL_MEMBERSHIP_AND_METADATA_ONLY"
+          }
+        })),
         accountingV391: {
           lifetimeCountersAreUnique: false,
           counterMode: "NON_INFLATING_HIGH_WATER_UNTIL_UNIQUE_IDS_PERSISTED",
           volatileObservationFieldsExcludedFromWriteDecision: true
+        },
+        registrySemanticsV392: {
+          observedTransactionsTotalMeaning: "LEGACY_NON_UNIQUE_HIGH_WATER_EVIDENCE_DO_NOT_USE_AS_LIFETIME_ACTIVITY",
+          observedSwapLogsTotalMeaning: "LEGACY_NON_UNIQUE_HIGH_WATER_EVIDENCE_DO_NOT_USE_AS_LIFETIME_ACTIVITY",
+          verifiedUniqueLifetimeTransactions: null,
+          verifiedUniqueLifetimeSwapLogs: null,
+          uniqueLifetimeEvidenceStatus: "UNVERIFIED_UNTIL_UNIQUE_TX_LOG_IDENTITIES_ARE_PERSISTED",
+          safeForScoring: false,
+          safeForLiveFlowTotals: false,
+          safeForPoolMembership: true,
+          safeForVerifiedPoolMetadata: true
         },
         meaningfulChangeV390: persistentRegistryV388.meaningfulChangeV390,
         writeAttempted: persistentRegistryV388.writeAttempted,
