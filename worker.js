@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V404
- * AUTHORITATIVE RUNTIME VERSION: V404
+ * Robinhood Chain Meme Hunter — V405
+ * AUTHORITATIVE RUNTIME VERSION: V405
+ * V405 builds directly forward from V404. It changes only the /usage reset-time presentation: the actual meter still resets exactly at 00:00 UTC, while Telegram now also displays the equivalent Europe/London local time (automatically BST/GMT-aware). Scanner, scoring, alerts, collectors, V403 write batching, V404 usage accounting, request budgets and persistence logic are unchanged.
  * V404 builds directly forward from V403. It preserves the V402/V403 write-efficiency changes and adds a conservative internal Durable Object row-write monitor. All V3 live-collector storage puts/deletes are counted through tracked wrappers, per-collector deltas are aggregated into one singleton meter at most once per 5 minutes, the meter resets automatically at 00:00 UTC, and /usage exposes estimated rows written, percentage, hourly rate, 24h projection and SAFE/WARNING/DANGER status. The meter is diagnostic only: no scanner/scoring/qualification/provider/Telegram threshold logic is changed.
  * V403 builds directly forward from write-efficient V402. It preserves all V402 scanner/scoring/qualification/Telegram/integrity/multi-pool behavior while batching high-frequency Durable Object trade/stat persistence on the existing 15-second watchdog cadence. Live and shadow trade evidence remain immediately available from in-memory hot caches, are deduplicated before persistence, and are flushed before graceful reconnect/stop paths. Unexpected runtime loss is treated conservatively as an integrity gap before reconnect so uncheckpointed evidence can never be presented as full continuous coverage. No provider requests, scoring rules, thresholds, historical backfill, or Workers KV write paths are added.
  * V402 builds directly forward from confirmed V401. It preserves V401 dual-subscription/head-integrity protection and V400 generic N-pool reconciliation, while removing per-newHead Durable Object storage writes. Head telemetry and last-message timestamps are maintained in the live Durable Object instance and checkpointed on the existing 15-second watchdog cadence. This prevents high-frequency newHeads traffic from exhausting the Durable Objects free-tier row-write allowance. No scoring mutation, no historical backfill, and no new persistent trade-bucket scheme are introduced.
@@ -1459,7 +1460,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V404";
+const VERSION = "V405";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71424,10 +71425,39 @@ async function durableUsageSnapshotV404(env) {
   }
 }
 
+function ukResetDisplayV405(resetAtIso) {
+  const raw = String(resetAtIso || "").trim();
+  const d = raw ? new Date(raw) : null;
+  if (!d || !Number.isFinite(d.getTime())) {
+    return "UK local time unavailable (00:00 UTC)";
+  }
+  try {
+    const datePart = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/London",
+      day: "2-digit",
+      month: "short",
+      year: "numeric"
+    }).format(d);
+    const timePart = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/London",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true
+    }).format(d).replace("am", "am").replace("pm", "pm");
+    const zonePart = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/London",
+      timeZoneName: "short"
+    }).formatToParts(d).find(p => p.type === "timeZoneName")?.value || "UK";
+    return `${timePart}, ${datePart} (${zonePart})`;
+  } catch (_) {
+    return "UK local time unavailable (00:00 UTC)";
+  }
+}
+
 function durableUsageTelegramMessageV404(result) {
   if (!result || result.available !== true) {
     return [
-      "📊 <b>Durable Object Usage — V404</b>",
+      "📊 <b>Durable Object Usage — V405</b>",
       "",
       `Status: <b>${escapeHtml(result?.status || "UNAVAILABLE")}</b>`,
       "<i>Internal estimate unavailable. Cloudflare dashboard remains authoritative.</i>"
@@ -71435,7 +71465,7 @@ function durableUsageTelegramMessageV404(result) {
   }
   const pct=Number(result.usedPct), perHour=Number(result.rowsPerHour), projected=Number(result.projected24hRows), remaining=Number(result.remainingRows);
   return [
-    "📊 <b>Durable Object Usage — V404</b>",
+    "📊 <b>Durable Object Usage — V405</b>",
     "",
     `Rows written: <b>${safeNumber(result.estimatedRowsWritten).toLocaleString("en-US")} / ${safeNumber(result.freeTierRowsWrittenLimit).toLocaleString("en-US")}</b>`,
     `Used: <b>${Number.isFinite(pct)?pct.toFixed(2):"0.00"}%</b>`,
@@ -71443,9 +71473,10 @@ function durableUsageTelegramMessageV404(result) {
     `Writes/hour: <b>${Number.isFinite(perHour)?perHour.toFixed(1):"UNVERIFIED"}</b>`,
     `Projected 24h: <b>${Number.isFinite(projected)?Math.round(projected).toLocaleString("en-US"):"UNVERIFIED"}</b>`,
     `Status: <b>${escapeHtml(result.statusLabel || "UNVERIFIED")}</b>`,
-    `Reset: <b>${escapeHtml(result.resetAtIso || "00:00 UTC")}</b>`,
+    `Reset (UK): <b>${escapeHtml(ukResetDisplayV405(result.resetAtIso))}</b>`,
+    `Cloudflare reset: <b>00:00 UTC</b>`,
     "",
-    `<i>Bot-side estimate since ${escapeHtml(result.monitorStartedAtIso || "meter start")}. Resets automatically at 00:00 UTC. Cloudflare's dashboard is the official billing counter.</i>`
+    `<i>Bot-side estimate since ${escapeHtml(result.monitorStartedAtIso || "meter start")}. Resets automatically at 00:00 UTC (shown above in UK local time). Cloudflare's dashboard is the official billing counter.</i>`
   ].join("\n");
 }
 
