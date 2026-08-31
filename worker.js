@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V392
- * AUTHORITATIVE RUNTIME VERSION: V392
+ * Robinhood Chain Meme Hunter — V393
+ * AUTHORITATIVE RUNTIME VERSION: V393
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V392";
+const VERSION = "V393";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -69442,6 +69442,136 @@ function v390RegistryMeaningfullyChanged(beforeEntries, afterEntries) {
   }
 }
 
+
+// -----------------------------------------------------------------------------
+// V393 — registry-driven multi-pool live-subscription PLAN (read-only shadow)
+// No WebSocket mutation, no collector mutation, no scoring mutation.
+// Uses only persisted factory-verified candidate pools admitted by V388+.
+// -----------------------------------------------------------------------------
+async function v393MultiPoolSubscriptionPlan(env, tokenInput) {
+  const token = normalize(tokenInput || "");
+  if (!isAddress(token)) {
+    return {
+      version: VERSION,
+      diagnostic: "V3_MULTI_POOL_SUBSCRIPTION_PLAN_V393",
+      safe: true,
+      readOnly: true,
+      token: token || null,
+      status: "INVALID_TOKEN_V393"
+    };
+  }
+
+  const registry = await v388ReadPoolRegistry(env, token);
+  const eligible = (Array.isArray(registry?.entries) ? registry.entries : [])
+    .filter(e => {
+      const pool = normalize(e?.pool || "");
+      const token0 = normalize(e?.token0 || "");
+      const token1 = normalize(e?.token1 || "");
+      const factory = normalize(e?.factory || "");
+      return isAddress(pool) &&
+        e?.factoryVerified === true &&
+        normalize(e?.candidateToken || "") === token &&
+        (token0 === token || token1 === token) &&
+        factory === normalize(UNISWAP_V3_FACTORY_V195);
+    })
+    .map(e => ({
+      pool: normalize(e.pool),
+      token0: normalize(e.token0 || ""),
+      token1: normalize(e.token1 || ""),
+      quoteToken: normalize(e.quoteToken || ""),
+      quoteSymbol: e?.quoteSymbol || "UNVERIFIED",
+      fee: e?.fee ?? null,
+      factory: normalize(e.factory || ""),
+      factoryVerified: true,
+      candidateToken: token,
+      isMonitoredPair: e?.isMonitoredPair === true,
+      registryStatus: e?.registryStatus || null,
+      activityCountersTrustedForFlow: false
+    }))
+    .sort((a,b) =>
+      Number(b.isMonitoredPair) - Number(a.isMonitoredPair) ||
+      String(a.pool).localeCompare(String(b.pool))
+    );
+
+  const addresses = [...new Set(eligible.map(e => e.pool))];
+  const supportedQuotes = eligible.filter(e =>
+    e.quoteToken === normalize(CANONICAL_WETH_V179) ||
+    e.quoteToken === normalize(CANONICAL_USDG_V179)
+  );
+  const unsupportedQuotes = eligible.filter(e =>
+    e.quoteToken !== normalize(CANONICAL_WETH_V179) &&
+    e.quoteToken !== normalize(CANONICAL_USDG_V179)
+  );
+
+  return {
+    version: VERSION,
+    diagnostic: "V3_MULTI_POOL_SUBSCRIPTION_PLAN_V393",
+    safe: true,
+    readOnly: true,
+    workersKvWrites: 0,
+    durableObjectWrites: 0,
+    scoringMutated: false,
+    collectorMutated: false,
+    liveSubscriptionMutated: false,
+    token,
+    registry: {
+      binding: registry?.binding || null,
+      readError: registry?.readError || null,
+      persistedEntries: Array.isArray(registry?.entries) ? registry.entries.length : 0,
+      eligibleFactoryVerifiedCandidatePools: eligible.length
+    },
+    proposedSubscription: {
+      method: "eth_subscribe",
+      type: "logs",
+      addressMode: "ADDRESS_ARRAY_SINGLE_LOG_SUBSCRIPTION_V393",
+      addresses,
+      addressCount: addresses.length,
+      topics: [UNISWAP_V3_SWAP_TOPIC_V326],
+      headSubscriptionPreserved: true,
+      oneLogSubscriptionPlanned: true,
+      applied: false
+    },
+    pools: eligible,
+    quoteSupport: {
+      supportedPoolCount: supportedQuotes.length,
+      unsupportedPoolCount: unsupportedQuotes.length,
+      supportedQuotes: ["WETH", "USDG"],
+      unsupportedPools: unsupportedQuotes.map(e => ({
+        pool: e.pool,
+        quoteToken: e.quoteToken || null,
+        quoteSymbol: e.quoteSymbol || "UNVERIFIED"
+      }))
+    },
+    coverageDesignV393: {
+      existingSinglePoolCoverageInheritedByNewPools: false,
+      perPoolCoverageRequiredBeforeFull: true,
+      tokenAggregateFullRequiresAllIncludedPoolsFull: true,
+      newlyAddedPoolStartsPartial: true,
+      currentCollectorCoverageUntouched: true
+    },
+    dedupeDesignV393: {
+      swapIdentity: "TRANSACTION_HASH_PLUS_LOG_INDEX",
+      routeIdentity: "TRANSACTION_HASH",
+      preserveEveryPoolSwapLog: true,
+      tokenLevelTransactionDedupRequired: true,
+      legacyRegistryCountersUsedForFlow: false
+    },
+    safetyGateV393: {
+      registryUsedForMembershipOnly: true,
+      scoringEnabled: false,
+      liveFlowScoringEnabled: false,
+      subscriptionMutationEnabled: false,
+      nextGate: "VALIDATE_PLAN_THEN_ENABLE_SHADOW_MULTI_POOL_SUBSCRIPTION"
+    },
+    status: addresses.length >= 2
+      ? "MULTI_POOL_SUBSCRIPTION_PLAN_READY_V393"
+      : addresses.length === 1
+        ? "SINGLE_POOL_REGISTRY_PLAN_ONLY_V393"
+        : "NO_VERIFIED_REGISTRY_POOLS_V393",
+    timestamp: now()
+  };
+}
+
 async function v388MergeVerifiedPoolRegistry(env, token, observedPools) {
   const now = Date.now();
   const { kv, binding } = getKV(env);
@@ -70648,6 +70778,15 @@ async function handleRequest(
     );
   }
 
+
+  if (path === "/v3multipool-plan") {
+    return jsonResponse(
+      await v393MultiPoolSubscriptionPlan(
+        env,
+        url.searchParams.get("token") || ""
+      )
+    );
+  }
 
   if (path === "/v3live-start") {
     return jsonResponse(await v3LiveCollectorRouteV363(env, url.searchParams.get("token") || "", "start"));
