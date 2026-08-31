@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V397
- * AUTHORITATIVE RUNTIME VERSION: V397
+ * Robinhood Chain Meme Hunter — V398
+ * AUTHORITATIVE RUNTIME VERSION: V398
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V397";
+const VERSION = "V398";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71486,16 +71486,16 @@ export class V3LiveCollectorV363 {
           if(pc[p]?.active===true){
             pc[p].active=false;
             pc[p].lastGapAt=Date.now();
-            pc[p].lastGapReason="VERSION_RECYCLE_V396";
+            pc[p].lastGapReason="VERSION_RECYCLE_V398";
             pc[p].interruptions=safeNumber(pc[p].interruptions)+1;
             pc[p].continuousStartAt=null;
           }
         }
         await this.state.storage.put("v395:poolCoverage",pc);
-        await this.state.storage.put("v394:shadowConnection",{connected:false,subscriptionAccepted:false,status:"SHADOW_VERSION_RECYCLE_PENDING_V396",previousRuntimeVersion:activeRuntimeVersion||null,recycleRequestedAt:Date.now(),lastError:null});
+        await this.state.storage.put("v394:shadowConnection",{connected:false,subscriptionAccepted:false,status:"SHADOW_VERSION_RECYCLE_PENDING_V398",previousRuntimeVersion:activeRuntimeVersion||null,recycleRequestedAt:Date.now(),lastError:null});
       }
       await this.connectShadowV394(true);
-      return Response.json(await this.shadowStatusV394("SHADOW_MULTI_POOL_START_REQUESTED_V396"));
+      return Response.json(await this.shadowStatusV394("SHADOW_MULTI_POOL_START_REQUESTED_V398"));
     }
     if (url.pathname === "/shadow-multipool-status-v394") {
       return Response.json(await this.shadowStatusV394());
@@ -71940,7 +71940,7 @@ if (url.pathname === "/reconcile-v374") {
       if(c?.runtimeVersion===VERSION && c?.subscriptionAccepted===true) return;
     }
     if(force===true && this.shadowWsV394){
-      try{this.shadowWsV394.close(1000,"V396_FORCE_RECONNECT");}catch(_){}
+      try{this.shadowWsV394.close(1000,"V398_FORCE_RECONNECT");}catch(_){}
       this.shadowWsV394=null;this.shadowSubscriptionIdV394=null;
     }
     let ws;
@@ -71948,7 +71948,7 @@ if (url.pathname === "/reconcile-v374") {
     catch(e){ await this.state.storage.put("v394:shadowConnection",{connected:false,status:"SHADOW_SOCKET_CREATE_FAILED_V394",lastError:String(e?.message||e).slice(0,240)}); return; }
     this.shadowWsV394=ws;
     ws.addEventListener("open",async()=>{
-      await this.state.storage.put("v394:shadowConnection",{connected:true,subscriptionAccepted:false,status:"SHADOW_SOCKET_OPEN_SUBSCRIBING_V396",runtimeVersion:VERSION,openedAt:Date.now(),addressCount:cfg.addresses.length});
+      await this.state.storage.put("v394:shadowConnection",{connected:true,subscriptionAccepted:false,status:"SHADOW_SOCKET_OPEN_SUBSCRIBING_V398",runtimeVersion:VERSION,openedAt:Date.now(),addressCount:cfg.addresses.length});
       ws.send(JSON.stringify({jsonrpc:"2.0",id:394,method:"eth_subscribe",params:["logs",{address:cfg.addresses,topics:[UNISWAP_V3_SWAP_TOPIC_V326]}]}));
     });
     ws.addEventListener("message",event=>{
@@ -71980,7 +71980,7 @@ if (url.pathname === "/reconcile-v374") {
     conn.lastMessageAt=Date.now();
     if (msg?.id===394) {
       if (typeof msg.result==="string" && msg.result.length>2) {
-        this.shadowSubscriptionIdV394=msg.result;conn.subscriptionAccepted=true;conn.connected=true;conn.runtimeVersion=VERSION;conn.status="SHADOW_MULTI_POOL_SUBSCRIPTION_ACTIVE_V396";conn.acceptedAt=Date.now();conn.lastError=null;
+        this.shadowSubscriptionIdV394=msg.result;conn.subscriptionAccepted=true;conn.connected=true;conn.runtimeVersion=VERSION;conn.status="SHADOW_MULTI_POOL_SUBSCRIPTION_ACTIVE_V398";conn.acceptedAt=Date.now();conn.lastError=null;
         const cfg=await this.state.storage.get("v394:shadowConfig")||{};
         const previous=await this.state.storage.get("v395:poolCoverage")||{};
         const next={};
@@ -72120,7 +72120,45 @@ if (url.pathname === "/reconcile-v374") {
         byPool
       };
     }
-    return {version:VERSION,collector:"SHADOW_MULTI_POOL_ALCHEMY_V3_V397",safe:true,shadowOnly:true,scoringMutated:false,normalTradeBucketsMutated:false,existingSinglePoolCollectorUntouched:true,
+
+    // V398: independent, read-only reconciliation of rolling token totals
+    // against the sum of their per-pool components and raw tx/log identities.
+    const reconciliationV398={};
+    const epsilon=0.000002;
+    for(const [name] of defs){
+      const w=rollingWindowsV397[name]||{};
+      const pools=Object.values(w.byPool||{});
+      const poolSwapLogs=pools.reduce((a,p)=>a+safeNumber(p?.swapLogs),0);
+      const poolBuys=pools.reduce((a,p)=>a+safeNumber(p?.buys),0);
+      const poolSells=pools.reduce((a,p)=>a+safeNumber(p?.sells),0);
+      const poolBuyUsd=Number(pools.reduce((a,p)=>a+safeNumber(p?.buyUsd),0).toFixed(6));
+      const poolSellUsd=Number(pools.reduce((a,p)=>a+safeNumber(p?.sellUsd),0).toFixed(6));
+      const poolNetUsd=Number((poolBuyUsd-poolSellUsd).toFixed(6));
+      const tokenBuyUsd=Number(safeNumber(w?.buyUsd).toFixed(6));
+      const tokenSellUsd=Number(safeNumber(w?.sellUsd).toFixed(6));
+      const tokenNetUsd=Number(safeNumber(w?.netUsd).toFixed(6));
+      const checks={
+        swapLogsMatch:poolSwapLogs===safeNumber(w?.retainedSwapLogs),
+        buysMatch:poolBuys===safeNumber(w?.buys),
+        sellsMatch:poolSells===safeNumber(w?.sells),
+        buyUsdMatch:Math.abs(poolBuyUsd-tokenBuyUsd)<=epsilon,
+        sellUsdMatch:Math.abs(poolSellUsd-tokenSellUsd)<=epsilon,
+        netUsdMatch:Math.abs(poolNetUsd-tokenNetUsd)<=epsilon,
+        tokenUniqueTransactionsNotGreaterThanPoolUniqueSum:safeNumber(w?.uniqueTransactions)<=pools.reduce((a,p)=>a+safeNumber(p?.uniqueTransactions),0),
+        multiPoolTxConsistent:safeNumber(w?.multiPoolTransactions)===Math.max(0,pools.reduce((a,p)=>a+safeNumber(p?.uniqueTransactions),0)-safeNumber(w?.uniqueTransactions))
+      };
+      reconciliationV398[name]={
+        pass:Object.values(checks).every(Boolean),
+        fullCoverage:w?.full===true,
+        coverage:w?.coverage||"UNVERIFIED",
+        checks,
+        token:{swapLogs:safeNumber(w?.retainedSwapLogs),uniqueTransactions:safeNumber(w?.uniqueTransactions),multiPoolTransactions:safeNumber(w?.multiPoolTransactions),buys:safeNumber(w?.buys),sells:safeNumber(w?.sells),buyUsd:tokenBuyUsd,sellUsd:tokenSellUsd,netUsd:tokenNetUsd},
+        summedPools:{swapLogs:poolSwapLogs,uniqueTransactions:pools.reduce((a,p)=>a+safeNumber(p?.uniqueTransactions),0),buys:poolBuys,sells:poolSells,buyUsd:poolBuyUsd,sellUsd:poolSellUsd,netUsd:poolNetUsd},
+        scoringEligible:false
+      };
+    }
+    const reconciliationAllWindowsPassV398=Object.values(reconciliationV398).every(x=>x?.pass===true);
+    return {version:VERSION,collector:"SHADOW_MULTI_POOL_ALCHEMY_V3_V398",safe:true,shadowOnly:true,scoringMutated:false,normalTradeBucketsMutated:false,existingSinglePoolCollectorUntouched:true,
       reason,enabled:(await this.state.storage.get("v394:shadowEnabled"))===true,token:cfg?.token||null,basePair:cfg?.basePair||null,
       addresses:cfg?.addresses||[],addressCount:Array.isArray(cfg?.addresses)?cfg.addresses.length:0,pools:cfg?.pools||[],
       connection:conn,activeRuntimeVersion:conn?.runtimeVersion||null,desiredRuntimeVersion:VERSION,
@@ -72129,6 +72167,15 @@ if (url.pathname === "/reconcile-v374") {
       decodedEvidenceV395:{enabled:true,directionFromSignedCandidatePoolDelta:true,quoteAmountFromExactV3SwapDelta:true,usdgUsdBasis:"EXACT_CANONICAL_USDG_QUOTE",wethUsdBasis:"CURRENT_VERIFIED_WETH_USDG_REFERENCE_NOT_HISTORICAL_BLOCK_PRICE"},
       tokenAggregateShadowV395:aggregate,perPoolCoverageV395:perPoolCoverage,tokenAggregateCoverageV395:aggregateCoverage,
       rollingMultiPoolWindowsV397:rollingWindowsV397,
+      rawWindowReconciliationV398:reconciliationV398,
+      reconciliationSummaryV398:{
+        allWindowsPass:reconciliationAllWindowsPassV398,
+        independentFromScoring:true,
+        readOnly:true,
+        toleranceUsd:epsilon,
+        scoringEligible:false,
+        rule:"TOKEN_TOTALS_MUST_RECONCILE_WITH_SUMMED_PER_POOL_TOTALS_AND_ROUTE_AWARE_TX_IDENTITIES"
+      },
       rollingWindowSemanticsV397:{
         source:"RETAINED_DEDUPED_SHADOW_SWAP_EVIDENCE",
         swapIdentity:"TRANSACTION_HASH_PLUS_LOG_INDEX",
@@ -72143,7 +72190,15 @@ if (url.pathname === "/reconcile-v374") {
       scoringGateV395:"SHADOW_ONLY_DO_NOT_USE_FOR_SCORING",
       upgradeGateV396:{versionAwareShadowSocket:true,stalePriorVersionSocketRecycled:true,coverageStartsOnlyAfterFreshSubscriptionAcceptance:true,legacyUndecodedRowsExcluded:true,productionSinglePoolCollectorUntouched:true},
       validationGateV397:{rollingWindowsShadowOnly:true,perPoolAndTokenTotals:true,routeAwareTransactionDedup:true,coverageGated:true,scoringMutated:false,productionSinglePoolCollectorUntouched:true},
-      status:conn.subscriptionAccepted===true&&conn.runtimeVersion===VERSION?"SHADOW_MULTI_POOL_WINDOWS_ACTIVE_V397":"SHADOW_MULTI_POOL_NOT_YET_ACTIVE_V397",timestamp:new Date(nowMs).toISOString()};
+      validationGateV398:{
+        connectionLabelsVersionAligned:true,
+        rawWindowReconciliation:true,
+        allWindowsReconciled:reconciliationAllWindowsPassV398,
+        scoringMutated:false,
+        normalTradeBucketsMutated:false,
+        productionSinglePoolCollectorUntouched:true
+      },
+      status:conn.subscriptionAccepted===true&&conn.runtimeVersion===VERSION&&reconciliationAllWindowsPassV398?"SHADOW_MULTI_POOL_RECONCILIATION_ACTIVE_V398":"SHADOW_MULTI_POOL_NOT_YET_ACTIVE_V398",timestamp:new Date(nowMs).toISOString()};
   }
 
   async connect() {
