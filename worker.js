@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V387
- * AUTHORITATIVE RUNTIME VERSION: V387
+ * Robinhood Chain Meme Hunter — V388
+ * AUTHORITATIVE RUNTIME VERSION: V388
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V387";
+const VERSION = "V388";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -69373,6 +69373,125 @@ async function v3ReconcileDiagnosticV374(env, tokenInput, requestedBlocks=40) {
    ROUTER
    ========================================================= */
 
+
+// -----------------------------------------------------------------------------
+// V388 — persistent factory-verified V3 candidate-pool registry
+// Additive only. Discovery remains authoritative for admission.
+// Registry persistence never changes scoring or the live collector.
+// -----------------------------------------------------------------------------
+const V388_POOL_REGISTRY_PREFIX = "robinhood-meme-hunter-v388-v3-pool-registry:";
+
+function v388PoolRegistryKey(token) {
+  return V388_POOL_REGISTRY_PREFIX + normalize(token || "");
+}
+
+async function v388ReadPoolRegistry(env, token) {
+  const kv = getKV(env);
+  if (!kv || !isAddress(token)) {
+    return { available: !!kv, entries: [], readError: kv ? "INVALID_TOKEN" : "KV_UNAVAILABLE" };
+  }
+  try {
+    const raw = await kv.get(v388PoolRegistryKey(token));
+    if (!raw) return { available: true, entries: [], readError: null };
+    const parsed = JSON.parse(raw);
+    const entries = Array.isArray(parsed?.entries) ? parsed.entries : [];
+    return { available: true, entries, readError: null };
+  } catch (e) {
+    return { available: true, entries: [], readError: String(e?.message || e || "UNKNOWN_ERROR") };
+  }
+}
+
+async function v388MergeVerifiedPoolRegistry(env, token, observedPools) {
+  const now = Date.now();
+  const kv = getKV(env);
+  const before = await v388ReadPoolRegistry(env, token);
+  const map = new Map();
+
+  for (const old of before.entries || []) {
+    const pool = normalize(old?.pool || "");
+    if (!isAddress(pool)) continue;
+    if (old?.factoryVerified !== true) continue;
+    if (normalize(old?.candidateToken || "") !== normalize(token)) continue;
+    map.set(pool, { ...old, pool });
+  }
+
+  let newlyAdded = 0;
+  let refreshed = 0;
+  for (const p of Array.isArray(observedPools) ? observedPools : []) {
+    const pool = normalize(p?.pool || "");
+    const token0 = normalize(p?.token0 || "");
+    const token1 = normalize(p?.token1 || "");
+    if (!isAddress(pool) || p?.factoryVerified !== true) continue;
+    if (token0 !== normalize(token) && token1 !== normalize(token)) continue;
+
+    const prev = map.get(pool);
+    if (!prev) newlyAdded++;
+    else refreshed++;
+
+    const observedTx = Number(p?.observedTransactions || 0);
+    const observedLogs = Number(p?.observedSwapLogs || 0);
+    map.set(pool, {
+      ...(prev || {}),
+      pool,
+      token0,
+      token1,
+      quoteToken: normalize(p?.quoteToken || prev?.quoteToken || ""),
+      quoteSymbol: p?.quoteSymbol || prev?.quoteSymbol || "UNVERIFIED",
+      fee: p?.fee ?? prev?.fee ?? null,
+      factory: normalize(p?.factory || prev?.factory || ""),
+      factoryVerified: true,
+      candidateToken: normalize(token),
+      isMonitoredPair: !!p?.isMonitoredPair || !!prev?.isMonitoredPair,
+      firstObservedAt: prev?.firstObservedAt || now,
+      lastObservedAt: now,
+      observationPasses: Number(prev?.observationPasses || 0) + 1,
+      observedTransactionsTotal: Number(prev?.observedTransactionsTotal || 0) + observedTx,
+      observedSwapLogsTotal: Number(prev?.observedSwapLogsTotal || 0) + observedLogs,
+      lastSampleObservedTransactions: observedTx,
+      lastSampleObservedSwapLogs: observedLogs,
+      registryStatus: "VERIFIED_PERSISTED_POOL_V388"
+    });
+  }
+
+  const entries = [...map.values()].sort((a,b) =>
+    Number(b.isMonitoredPair) - Number(a.isMonitoredPair) ||
+    Number(b.lastObservedAt || 0) - Number(a.lastObservedAt || 0) ||
+    String(a.pool).localeCompare(String(b.pool))
+  );
+
+  let writeAttempted = false, writeSuccess = false, writeError = null;
+  if (kv && isAddress(token) && entries.length) {
+    writeAttempted = true;
+    try {
+      await kv.put(v388PoolRegistryKey(token), JSON.stringify({
+        schemaVersion: "V388",
+        token: normalize(token),
+        updatedAt: now,
+        entries
+      }));
+      writeSuccess = true;
+    } catch (e) {
+      writeError = String(e?.message || e || "UNKNOWN_ERROR");
+    }
+  }
+
+  return {
+    schemaVersion: "V388",
+    key: v388PoolRegistryKey(token),
+    readError: before.readError,
+    previousEntries: before.entries.length,
+    observedEligiblePools: Array.isArray(observedPools) ? observedPools.length : 0,
+    newlyAdded,
+    refreshed,
+    entries,
+    writeAttempted,
+    writeSuccess,
+    writeError,
+    scoringMutated: false,
+    collectorMutated: false
+  };
+}
+
 async function handleRequest(
   request,
   env
@@ -69820,12 +69939,20 @@ async function handleRequest(
 
     const additionalPools = discoveredPools.filter(p => !p.isMonitoredPair);
 
+    // V388: merge; never replace the registry with only the latest bounded sample.
+    // Admission is restricted to the V387 factory-verified candidate-pool preview.
+    const persistentRegistryV388 = await v388MergeVerifiedPoolRegistry(
+      env,
+      token,
+      verifiedMultiPoolRegistryPreviewV387
+    );
+
     return jsonResponse({
       version: VERSION,
       diagnostic: "V3_CANDIDATE_MULTI_POOL_DISCOVERY_V379",
       safe: true,
       readOnly: true,
-      workersKvWrites: 0,
+      workersKvWrites: persistentRegistryV388.writeSuccess ? 1 : 0,
       durableObjectTradeWrites: 0,
       scoringMutated: false,
       collectorMutated: false,
@@ -69853,6 +69980,24 @@ async function handleRequest(
         scoringMutated: false,
         collectorMutated: false,
         persistenceDeferredUntilValidated: true
+      },
+      persistentRegistryV388: {
+        enabled: true,
+        persistent: true,
+        mergeNotReplace: true,
+        schemaVersion: persistentRegistryV388.schemaVersion,
+        previousEntries: persistentRegistryV388.previousEntries,
+        observedEligiblePools: persistentRegistryV388.observedEligiblePools,
+        newlyAdded: persistentRegistryV388.newlyAdded,
+        refreshed: persistentRegistryV388.refreshed,
+        registryEntries: persistentRegistryV388.entries.length,
+        entries: persistentRegistryV388.entries,
+        writeAttempted: persistentRegistryV388.writeAttempted,
+        writeSuccess: persistentRegistryV388.writeSuccess,
+        writeError: persistentRegistryV388.writeError,
+        scoringMutated: false,
+        collectorMutated: false,
+        liveSubscriptionMutated: false
       },
       pools: discoveredPools,
       transactions,
