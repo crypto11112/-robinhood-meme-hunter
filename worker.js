@@ -1,7 +1,8 @@
 /**
- * Robinhood Chain Meme Hunter — V401
- * AUTHORITATIVE RUNTIME VERSION: V401
- * V401 builds directly forward from confirmed V400. It preserves V400 generic N-pool reconciliation and all V399 pool-set/runtime protections, and adds shadow multi-pool dual-subscription integrity: filtered V3 Swap logs + newHeads, head freshness telemetry, stale-head watchdog revocation of coverage, and safe reconnect. Shadow remains read-only and scoring-ineligible; production single-pool collector remains untouched.
+ * Robinhood Chain Meme Hunter — V403
+ * AUTHORITATIVE RUNTIME VERSION: V403
+ * V403 builds directly forward from write-efficient V402. It preserves all V402 scanner/scoring/qualification/Telegram/integrity/multi-pool behavior while batching high-frequency Durable Object trade/stat persistence on the existing 15-second watchdog cadence. Live and shadow trade evidence remain immediately available from in-memory hot caches, are deduplicated before persistence, and are flushed before graceful reconnect/stop paths. Unexpected runtime loss is treated conservatively as an integrity gap before reconnect so uncheckpointed evidence can never be presented as full continuous coverage. No provider requests, scoring rules, thresholds, historical backfill, or Workers KV write paths are added.
+ * V402 builds directly forward from confirmed V401. It preserves V401 dual-subscription/head-integrity protection and V400 generic N-pool reconciliation, while removing per-newHead Durable Object storage writes. Head telemetry and last-message timestamps are maintained in the live Durable Object instance and checkpointed on the existing 15-second watchdog cadence. This prevents high-frequency newHeads traffic from exhausting the Durable Objects free-tier row-write allowance. No scoring mutation, no historical backfill, and no new persistent trade-bucket scheme are introduced.
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1457,7 +1458,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V401";
+const VERSION = "V403";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71427,6 +71428,31 @@ export class V3LiveCollectorV363 {
     this.shadowSubscriptionIdV394 = null;
     this.shadowHeadSubscriptionIdV401 = null;
     this.shadowProcessingV394 = Promise.resolve();
+
+    // V402 write-efficiency layer:
+    // newHeads can arrive many times per second. Persisting both connection
+    // telemetry and head telemetry on every notification can exhaust the
+    // Durable Objects free-tier row-write allowance. Keep hot telemetry in
+    // memory and checkpoint it on the already-existing watchdog cadence.
+    this.headsV402 = null;
+    this.shadowHeadsV402 = null;
+    this.lastMessageAtV402 = null;
+    this.shadowLastMessageAtV402 = null;
+    this.headsDirtyV402 = false;
+    this.shadowHeadsDirtyV402 = false;
+
+    // V403 Durable Object write-efficiency layer. Hot trade/state caches are
+    // persisted on the existing 15-second watchdog cadence instead of on every
+    // swap. Reads inside this live instance use the hot caches immediately.
+    this.liveBucketCacheV403 = new Map();
+    this.liveBucketDirtyV403 = new Set();
+    this.liveStatsV403 = null;
+    this.liveStatsDirtyV403 = false;
+    this.shadowRecentV403 = null;
+    this.shadowStatsV403 = null;
+    this.shadowRecentDirtyV403 = false;
+    this.shadowStatsDirtyV403 = false;
+    this.lastCleanupBucketV403 = null;
   }
 
   async fetch(request) {
@@ -71458,6 +71484,7 @@ export class V3LiveCollectorV363 {
     }
 
     if (url.pathname === "/shadow-multipool-start-v394") {
+      await this.flushTradeStateV403();
       let pools=[];
       try { pools=JSON.parse(url.searchParams.get("pools")||"[]"); } catch (_) {}
       const token=normalize(url.searchParams.get("token")||"");
@@ -71499,7 +71526,7 @@ export class V3LiveCollectorV363 {
           }
         }
         await this.state.storage.put("v395:poolCoverage",pc);
-        await this.state.storage.put("v394:shadowConnection",{connected:false,subscriptionAccepted:false,status:staleRuntime?"SHADOW_VERSION_RECYCLE_PENDING_V401":"SHADOW_POOL_SET_RECYCLE_PENDING_V401",previousRuntimeVersion:activeRuntimeVersion||null,previousConfigFingerprintV399:activeConfigFingerprintV399||null,desiredConfigFingerprintV399,recycleRequestedAt:Date.now(),lastError:null});
+        await this.state.storage.put("v394:shadowConnection",{connected:false,subscriptionAccepted:false,status:staleRuntime?"SHADOW_VERSION_RECYCLE_PENDING_V402":"SHADOW_POOL_SET_RECYCLE_PENDING_V402",previousRuntimeVersion:activeRuntimeVersion||null,previousConfigFingerprintV399:activeConfigFingerprintV399||null,desiredConfigFingerprintV399,recycleRequestedAt:Date.now(),lastError:null});
       }
       await this.connectShadowV394(true);
       return Response.json(await this.shadowStatusV394("SHADOW_MULTI_POOL_START_REQUESTED_V401"));
@@ -71509,6 +71536,7 @@ export class V3LiveCollectorV363 {
     }
 
     if (url.pathname === "/stop") {
+      await this.flushTradeStateV403();
       await this.state.storage.put("enabled", false);
       await this.markCoverageGapV366("MANUAL_STOP_V366");
       await this.markIntegrityGapV369("MANUAL_STOP_V369");
@@ -71537,7 +71565,7 @@ export class V3LiveCollectorV363 {
       let bucketsChecked = 0;
       for (let bucket = newestBucket; bucket >= oldestBucket && rows.length < maxTx * 4; bucket -= bucketMs) {
         bucketsChecked++;
-        const bucketRows = await this.state.storage.get(`v364:trade-bucket:${bucket}`);
+        const bucketRows = await this.getLiveBucketV403(`v364:trade-bucket:${bucket}`);
         if (!Array.isArray(bucketRows) || bucketRows.length === 0) continue;
         for (let i = bucketRows.length - 1; i >= 0; i--) {
           rows.push(bucketRows[i]);
@@ -71598,7 +71626,7 @@ export class V3LiveCollectorV363 {
 
       for (let bucket = firstBucket; bucket <= lastBucket; bucket += bucketMs) {
         bucketsChecked++;
-        const rows = await this.state.storage.get(`v364:trade-bucket:${bucket}`);
+        const rows = await this.getLiveBucketV403(`v364:trade-bucket:${bucket}`);
         if (!Array.isArray(rows) || rows.length === 0) continue;
         populatedBuckets++;
         for (const row of rows) raw.push(row);
@@ -71742,7 +71770,7 @@ export class V3LiveCollectorV363 {
 
       for (let bucket = oldestBucket; bucket <= newestBucket; bucket += bucketMs) {
         bucketsChecked++;
-        const rows = await this.state.storage.get(`v364:trade-bucket:${bucket}`);
+        const rows = await this.getLiveBucketV403(`v364:trade-bucket:${bucket}`);
         if (!Array.isArray(rows) || rows.length === 0) continue;
         populatedBuckets++;
         recordsChecked += rows.length;
@@ -71808,17 +71836,76 @@ if (url.pathname === "/reconcile-v374") {
     return Response.json({version:VERSION,status:"NOT_FOUND_V364"},{status:404});
   }
 
+  async flushTradeStateV403() {
+    // Persist each touched 5-minute production bucket at most once per watchdog
+    // cycle, regardless of how many swaps arrived during that cycle.
+    const dirtyKeys = [...this.liveBucketDirtyV403];
+    for (const key of dirtyKeys) {
+      const bucket = this.liveBucketCacheV403.get(key);
+      if (Array.isArray(bucket)) await this.state.storage.put(key, bucket);
+      this.liveBucketDirtyV403.delete(key);
+    }
+
+    if (this.liveStatsDirtyV403 === true && this.liveStatsV403) {
+      await this.state.storage.put("stats", this.liveStatsV403);
+      this.liveStatsDirtyV403 = false;
+    }
+
+    if (this.shadowRecentDirtyV403 === true && Array.isArray(this.shadowRecentV403)) {
+      await this.state.storage.put("v394:shadowRecent", this.shadowRecentV403);
+      this.shadowRecentDirtyV403 = false;
+    }
+    if (this.shadowStatsDirtyV403 === true && this.shadowStatsV403) {
+      await this.state.storage.put("v394:shadowStats", this.shadowStatsV403);
+      this.shadowStatsDirtyV403 = false;
+    }
+
+    // Retention cleanup is bucket-scoped, not swap-scoped. At most one delete
+    // is attempted when the active 5-minute bucket changes.
+    const bucketMs = 5 * 60 * 1000;
+    const currentBucket = Math.floor(Date.now() / bucketMs) * bucketMs;
+    if (this.lastCleanupBucketV403 !== currentBucket) {
+      this.lastCleanupBucketV403 = currentBucket;
+      const oldStart = currentBucket - (25 * 60 * 60 * 1000);
+      try { await this.state.storage.delete(`v364:trade-bucket:${oldStart}`); } catch (_) {}
+    }
+  }
+
+  async getLiveBucketV403(key) {
+    const hot = this.liveBucketCacheV403.get(key);
+    if (Array.isArray(hot)) return hot;
+    const stored = await this.state.storage.get(key);
+    return Array.isArray(stored) ? stored : [];
+  }
+
+  async checkpointHeadTelemetryV402() {
+    // At most one persisted head row per collector per watchdog cycle,
+    // instead of one or more rows per blockchain head notification.
+    if (this.headsDirtyV402 === true && this.headsV402) {
+      await this.state.storage.put("v368:heads", this.headsV402);
+      this.headsDirtyV402 = false;
+    }
+    if (this.shadowHeadsDirtyV402 === true && this.shadowHeadsV402) {
+      await this.state.storage.put("v401:shadowHeads", this.shadowHeadsV402);
+      this.shadowHeadsDirtyV402 = false;
+    }
+  }
+
   async alarm() {
     const productionEnabled = await this.state.storage.get("enabled");
     const shadowEnabled = await this.state.storage.get("v394:shadowEnabled");
     if (productionEnabled !== true && shadowEnabled !== true) return;
+
+    // V403: persist hot swap/stat state once per watchdog cycle before any
+    // reconnect decision. This keeps persisted evidence at most ~15s behind.
+    await this.flushTradeStateV403();
 
     // Preserve the confirmed V371 production single-pool watchdog behavior.
     // V401 only shares the Durable Object alarm so the shadow collector can
     // independently prove that its newHeads stream remains live.
     if (productionEnabled === true) {
       const conn = await this.state.storage.get("connection") || {};
-      const heads = await this.state.storage.get("v368:heads") || {};
+      const heads = this.headsV402 || await this.state.storage.get("v368:heads") || {};
       const dualAccepted = conn.connected===true && conn.logSubscriptionAccepted===true && conn.headSubscriptionAccepted===true;
       const lastHeadAt = Number(heads.lastHeadAt);
       const acceptedAt = Number(conn.lastConnectedAt || conn.acceptedAt);
@@ -71832,6 +71919,15 @@ if (url.pathname === "/reconcile-v374") {
         this.ws=null; this.subscriptionId=null; this.headSubscriptionId=null;
         await this.scheduleReconnect(`NEWHEADS_STALE_V371_${Math.round(headAgeMs)}MS`);
       } else if (!dualAccepted || !this.ws || this.ws.readyState!==WebSocket.OPEN) {
+        // V403: if persisted state says coverage was active but this runtime no
+        // longer owns the live socket, conservatively reset the integrity epoch.
+        // This prevents an unexpected isolate restart from hiding up to one
+        // checkpoint interval of unflushed trade evidence.
+        if (dualAccepted && (!this.ws || this.ws.readyState!==WebSocket.OPEN)) {
+          await this.markCoverageGapV366("V403_RUNTIME_SOCKET_LOSS");
+          await this.markIntegrityGapV369("V403_RUNTIME_SOCKET_LOSS");
+          await this.markIntegrityGapV371("V403_RUNTIME_SOCKET_LOSS");
+        }
         await this.connect();
       }
     }
@@ -71840,8 +71936,12 @@ if (url.pathname === "/reconcile-v374") {
       await this.shadowWatchdogV401();
     }
 
+    // V402: checkpoint hot head telemetry once per watchdog cycle. This
+    // preserves restart-safe diagnostics without per-head storage writes.
+    await this.checkpointHeadTelemetryV402();
+
     // Keep checking while either collector is enabled. Fifteen seconds is the
-    // already-proven V371 cadence; V401 does not increase provider requests.
+    // already-proven V371 cadence; V402 does not increase provider requests.
     await this.state.storage.setAlarm(Date.now()+V3_HEAD_WATCHDOG_MS_V371);
   }
 
@@ -71851,13 +71951,13 @@ if (url.pathname === "/reconcile-v374") {
     const conn = await this.state.storage.get("connection") || {};
     const stats = await this.state.storage.get("stats") || {};
     const cov=await this.state.storage.get("v366:coverage")||{};
-    const heads=await this.state.storage.get("v368:heads")||{};
+    const heads=this.headsV402 || await this.state.storage.get("v368:heads")||{};
     const integrity=await this.state.storage.get("v371:integrityCoverage")||{};
     const dualAccepted=conn.connected===true&&conn.logSubscriptionAccepted===true&&conn.headSubscriptionAccepted===true;
     const coverageActive=integrity.active===true&&dualAccepted;
     const coverageStartAt=coverageActive&&Number.isFinite(Number(integrity.continuousStartAt))?Number(integrity.continuousStartAt):null;
     const legacyCoverageStartAt=cov.active===true&&Number.isFinite(Number(cov.continuousStartAt))?Number(cov.continuousStartAt):null;
-    return {version:VERSION,collector:"DURABLE_OBJECT_ALCHEMY_V3_LIVE_V371",status:overrideStatus||conn.status||"IDLE_V363",enabled:enabled===true,token:cfg?.token||null,pair:cfg?.pair||null,connectionOpened:conn.connected===true,subscriptionAccepted:conn.subscriptionAccepted===true,subscriptionIdPresent:Boolean(conn.subscriptionIdPresent),logSubscriptionAccepted:conn.logSubscriptionAccepted===true,headSubscriptionAccepted:conn.headSubscriptionAccepted===true,headSubscriptionIdPresent:Boolean(conn.headSubscriptionIdPresent),lastHeadBlock:Number.isFinite(Number(heads.lastHeadBlock))?Number(heads.lastHeadBlock):null,headsObserved:safeNumber(heads.headsObserved),headGapsDetected:safeNumber(heads.gapsDetected),lastHeadGapAt:heads.lastGapAt||null,lastHeadGapFrom:heads.lastGapFrom??null,lastHeadGapTo:heads.lastGapTo??null,lastHeadGapSize:safeNumber(heads.lastGapSize),lastHeadGapClassification:heads.lastGapClassification||null,headAgeMs:Number.isFinite(Number(heads.lastHeadAt))?Math.max(0,Date.now()-Number(heads.lastHeadAt)):null,headStaleThresholdMs:V3_HEAD_STALE_MS_V371,lastConnectedAt:conn.lastConnectedAt||null,lastMessageAt:conn.lastMessageAt||null,lastSwapAt:stats.lastSwapAt||null,lastTrade:stats.lastTrade||null,swapsCaptured:safeNumber(stats.swapsCaptured),buysCaptured:safeNumber(stats.buysCaptured),sellsCaptured:safeNumber(stats.sellsCaptured),usdVerifiedCaptured:safeNumber(stats.usdVerifiedCaptured),reconnects:safeNumber(stats.reconnects),lastError:conn.lastError||null,coverageActive,continuousCoverageStartAt:coverageStartAt,continuousCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,continuousCoverageMs:coverageStartAt!==null?Math.max(0,Date.now()-coverageStartAt):0,integrityCoverageStartAt:coverageStartAt,integrityCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,integrityCoverageMs:coverageStartAt!==null?Math.max(0,Date.now()-coverageStartAt):0,integrityInterruptionsSinceV371:safeNumber(integrity.interruptions),lastIntegrityGapAt:integrity.lastGapAt||null,lastIntegrityGapReason:integrity.lastGapReason||null,legacyV366CoverageStartAt:legacyCoverageStartAt,legacyV366CoverageStartIso:legacyCoverageStartAt!==null?new Date(legacyCoverageStartAt).toISOString():null,interruptionsSinceV366:safeNumber(cov.interruptions),lastCoverageGapAt:cov.lastGapAt||null,lastCoverageGapReason:cov.lastGapReason||null,coverageIntegrity:"V371_DUAL_SUBSCRIPTIONS_PLUS_HEAD_LIVENESS_WATCHDOG",kvBinding:getKV(this.env)?.binding||null};
+    return {version:VERSION,collector:"DURABLE_OBJECT_ALCHEMY_V3_LIVE_V371",status:overrideStatus||conn.status||"IDLE_V363",enabled:enabled===true,token:cfg?.token||null,pair:cfg?.pair||null,connectionOpened:conn.connected===true,subscriptionAccepted:conn.subscriptionAccepted===true,subscriptionIdPresent:Boolean(conn.subscriptionIdPresent),logSubscriptionAccepted:conn.logSubscriptionAccepted===true,headSubscriptionAccepted:conn.headSubscriptionAccepted===true,headSubscriptionIdPresent:Boolean(conn.headSubscriptionIdPresent),lastHeadBlock:Number.isFinite(Number(heads.lastHeadBlock))?Number(heads.lastHeadBlock):null,headsObserved:safeNumber(heads.headsObserved),headGapsDetected:safeNumber(heads.gapsDetected),lastHeadGapAt:heads.lastGapAt||null,lastHeadGapFrom:heads.lastGapFrom??null,lastHeadGapTo:heads.lastGapTo??null,lastHeadGapSize:safeNumber(heads.lastGapSize),lastHeadGapClassification:heads.lastGapClassification||null,headAgeMs:Number.isFinite(Number(heads.lastHeadAt))?Math.max(0,Date.now()-Number(heads.lastHeadAt)):null,headStaleThresholdMs:V3_HEAD_STALE_MS_V371,lastConnectedAt:conn.lastConnectedAt||null,lastMessageAt:this.lastMessageAtV402||conn.lastMessageAt||null,lastSwapAt:stats.lastSwapAt||null,lastTrade:stats.lastTrade||null,swapsCaptured:safeNumber(stats.swapsCaptured),buysCaptured:safeNumber(stats.buysCaptured),sellsCaptured:safeNumber(stats.sellsCaptured),usdVerifiedCaptured:safeNumber(stats.usdVerifiedCaptured),reconnects:safeNumber(stats.reconnects),lastError:conn.lastError||null,coverageActive,continuousCoverageStartAt:coverageStartAt,continuousCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,continuousCoverageMs:coverageStartAt!==null?Math.max(0,Date.now()-coverageStartAt):0,integrityCoverageStartAt:coverageStartAt,integrityCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,integrityCoverageMs:coverageStartAt!==null?Math.max(0,Date.now()-coverageStartAt):0,integrityInterruptionsSinceV371:safeNumber(integrity.interruptions),lastIntegrityGapAt:integrity.lastGapAt||null,lastIntegrityGapReason:integrity.lastGapReason||null,legacyV366CoverageStartAt:legacyCoverageStartAt,legacyV366CoverageStartIso:legacyCoverageStartAt!==null?new Date(legacyCoverageStartAt).toISOString():null,interruptionsSinceV366:safeNumber(cov.interruptions),lastCoverageGapAt:cov.lastGapAt||null,lastCoverageGapReason:cov.lastGapReason||null,coverageIntegrity:"V371_DUAL_SUBSCRIPTIONS_PLUS_HEAD_LIVENESS_WATCHDOG",kvBinding:getKV(this.env)?.binding||null};
   }
 
   async markCoverageConnectedV366() {
@@ -72028,6 +72128,7 @@ if (url.pathname === "/reconcile-v374") {
     });
     ws.addEventListener("close",async()=>{
       if(this.shadowWsV394!==ws)return;
+      await this.flushTradeStateV403();
       this.shadowWsV394=null;this.shadowSubscriptionIdV394=null;this.shadowHeadSubscriptionIdV401=null;
       const c=await this.state.storage.get("v394:shadowConnection")||{};
       c.connected=false;c.subscriptionAccepted=false;c.logSubscriptionAccepted=false;c.headSubscriptionAccepted=false;c.subscriptionIdPresent=false;c.headSubscriptionIdPresent=false;c.status="SHADOW_SOCKET_CLOSED_V401";c.closedAt=Date.now();
@@ -72037,6 +72138,7 @@ if (url.pathname === "/reconcile-v374") {
     });
     ws.addEventListener("error",async()=>{
       if(this.shadowWsV394!==ws)return;
+      await this.flushTradeStateV403();
       const c=await this.state.storage.get("v394:shadowConnection")||{};
       c.lastError="SHADOW_WEBSOCKET_ERROR_V401";c.status="SHADOW_WEBSOCKET_ERROR_V401";
       await this.state.storage.put("v394:shadowConnection",c);
@@ -72047,7 +72149,7 @@ if (url.pathname === "/reconcile-v374") {
   async handleShadowMessageV394(event) {
     let msg; try { msg=JSON.parse(typeof event.data==="string"?event.data:""); } catch(_){return;}
     const conn=await this.state.storage.get("v394:shadowConnection")||{};
-    conn.lastMessageAt=Date.now();
+    this.shadowLastMessageAtV402=Date.now();
 
     if (msg?.id===394) {
       if (typeof msg.result==="string" && msg.result.length>2) {
@@ -72084,7 +72186,8 @@ if (url.pathname === "/reconcile-v374") {
       return;
     }
 
-    await this.state.storage.put("v394:shadowConnection",conn);
+    // V402: do not rewrite shadow connection state for every head/swap
+    // notification. Acceptance/error/close/watchdog transitions still persist.
     if (msg?.method!=="eth_subscription" || !msg?.params?.result) return;
     if (msg?.params?.subscription===this.shadowHeadSubscriptionIdV401) {
       await this.handleShadowHeadV401(msg.params.result);
@@ -72101,7 +72204,8 @@ if (url.pathname === "/reconcile-v374") {
     const txHash=String(log?.transactionHash||"").toLowerCase(), logIndex=String(log?.logIndex??"");
     if (!/^0x[a-f0-9]{64}$/.test(txHash)) return;
     const key=`${txHash}|${logIndex}`;
-    const recent=await this.state.storage.get("v394:shadowRecent")||[];
+    if (!Array.isArray(this.shadowRecentV403)) this.shadowRecentV403=await this.state.storage.get("v394:shadowRecent")||[];
+    const recent=this.shadowRecentV403;
     if (recent.some(x=>x?.tradeKey===key)) return;
     const data=String(log?.data||"").replace(/^0x/i,"");
     if(data.length<128)return;
@@ -72134,8 +72238,9 @@ if (url.pathname === "/reconcile-v374") {
       observedAt:Date.now()};
     recent.push(row);
     while(recent.length>500) recent.shift();
-    await this.state.storage.put("v394:shadowRecent",recent);
-    const stats=await this.state.storage.get("v394:shadowStats")||{swapsCaptured:0,byPool:{}};
+    this.shadowRecentDirtyV403=true;
+    if (!this.shadowStatsV403) this.shadowStatsV403=await this.state.storage.get("v394:shadowStats")||{swapsCaptured:0,byPool:{}};
+    const stats=this.shadowStatsV403;
     stats.swapsCaptured=safeNumber(stats.swapsCaptured)+1;
     stats.byPool=stats.byPool||{};
     const ps=(stats.byPool[pool]&&typeof stats.byPool[pool]==="object")?stats.byPool[pool]:{swaps:0,buys:0,sells:0,buyUsd:0,sellUsd:0,usdVerifiedSwaps:0};
@@ -72144,7 +72249,7 @@ if (url.pathname === "/reconcile-v374") {
     if(row.usdVerified&&Number.isFinite(row.usd)){ps.usdVerifiedSwaps=safeNumber(ps.usdVerifiedSwaps)+1;if(row.side==="BUY")ps.buyUsd=safeNumber(ps.buyUsd)+row.usd;else ps.sellUsd=safeNumber(ps.sellUsd)+row.usd;}
     ps.lastSwapAt=row.observedAt;stats.byPool[pool]=ps;
     stats.lastSwapAt=row.observedAt;stats.lastTrade=row;
-    await this.state.storage.put("v394:shadowStats",stats);
+    this.shadowStatsDirtyV403=true;
   }
 
   async handleShadowHeadV401(head) {
@@ -72152,7 +72257,8 @@ if (url.pathname === "/reconcile-v374") {
     const block=typeof raw==="string"&&/^0x[0-9a-f]+$/i.test(raw)?parseInt(raw,16):Number(raw);
     if(!Number.isFinite(block)||block<0)return;
     const now=Date.now();
-    const heads=await this.state.storage.get("v401:shadowHeads")||{};
+    if(!this.shadowHeadsV402) this.shadowHeadsV402=await this.state.storage.get("v401:shadowHeads")||{};
+    const heads=this.shadowHeadsV402;
     const previous=Number(heads.lastHeadBlock);
     heads.headsObserved=safeNumber(heads.headsObserved)+1;
     heads.lastHeadAt=now;
@@ -72165,7 +72271,8 @@ if (url.pathname === "/reconcile-v374") {
       heads.lastGapClassification="NEWHEADS_NOTIFICATION_JUMP_NOT_PROVEN_SWAP_GAP_V401";
     }
     if(!Number.isFinite(previous)||block>=previous)heads.lastHeadBlock=block;
-    await this.state.storage.put("v401:shadowHeads",heads);
+    this.shadowHeadsV402=heads;
+    this.shadowHeadsDirtyV402=true;
     const conn=await this.state.storage.get("v394:shadowConnection")||{};
     const dualAccepted=conn.connected===true&&conn.subscriptionAccepted===true&&conn.logSubscriptionAccepted===true&&conn.headSubscriptionAccepted===true;
     if(dualAccepted){
@@ -72180,7 +72287,7 @@ if (url.pathname === "/reconcile-v374") {
     const enabled=await this.state.storage.get("v394:shadowEnabled");
     if(enabled!==true)return;
     const conn=await this.state.storage.get("v394:shadowConnection")||{};
-    const heads=await this.state.storage.get("v401:shadowHeads")||{};
+    const heads=this.shadowHeadsV402 || await this.state.storage.get("v401:shadowHeads")||{};
     const dualAccepted=conn.connected===true&&conn.logSubscriptionAccepted===true&&conn.headSubscriptionAccepted===true&&conn.subscriptionAccepted===true;
     const lastHeadAt=Number(heads.lastHeadAt);
     const acceptedAt=Number(conn.acceptedAt||conn.openedAt);
@@ -72197,6 +72304,9 @@ if (url.pathname === "/reconcile-v374") {
       return;
     }
     if(!dualAccepted||!this.shadowWsV394||this.shadowWsV394.readyState!==WebSocket.OPEN){
+      if(dualAccepted&&(!this.shadowWsV394||this.shadowWsV394.readyState!==WebSocket.OPEN)){
+        await this.markShadowCoverageGapV401("V403_SHADOW_RUNTIME_SOCKET_LOSS");
+      }
       await this.connectShadowV394(false);
     }
   }
@@ -72204,10 +72314,10 @@ if (url.pathname === "/reconcile-v374") {
   async shadowStatusV394(reason=null) {
     const cfg=await this.state.storage.get("v394:shadowConfig")||null;
     const conn=await this.state.storage.get("v394:shadowConnection")||{};
-    const stats=await this.state.storage.get("v394:shadowStats")||{swapsCaptured:0,byPool:{}};
-    const recent=await this.state.storage.get("v394:shadowRecent")||[];
+    const stats=this.shadowStatsV403 || await this.state.storage.get("v394:shadowStats")||{swapsCaptured:0,byPool:{}};
+    const recent=Array.isArray(this.shadowRecentV403) ? this.shadowRecentV403 : await this.state.storage.get("v394:shadowRecent")||[];
     const pc=await this.state.storage.get("v395:poolCoverage")||{};
-    const shadowHeadsV401=await this.state.storage.get("v401:shadowHeads")||{};
+    const shadowHeadsV401=this.shadowHeadsV402 || await this.state.storage.get("v401:shadowHeads")||{};
     const shadowDualAcceptedV401=conn.connected===true&&conn.subscriptionAccepted===true&&conn.logSubscriptionAccepted===true&&conn.headSubscriptionAccepted===true;
     const shadowLastHeadAtV401=Number(shadowHeadsV401.lastHeadAt);
     const shadowAcceptedAtV401=Number(conn.acceptedAt||conn.openedAt);
@@ -72459,7 +72569,7 @@ if (url.pathname === "/reconcile-v374") {
         normalTradeBucketsMutated:false,
         productionSinglePoolCollectorUntouched:true
       },
-      validationGateV401:{
+      validationGateV403:{perSwapDurableObjectWritesBatched:true,tradeCheckpointCadenceMs:V3_HEAD_WATCHDOG_MS_V371,hotCacheReadThrough:true,unexpectedRuntimeLossResetsIntegrity:true,scoringMutated:false,providerRequestsAdded:0,workersKvWritesAdded:0},validationGateV402:{perHeadDurableObjectWritesRemoved:true,headTelemetryCheckpointedOnWatchdog:true,connectionRowNotWrittenPerSubscriptionNotification:true,freeTierWriteProtection:true,scoringMutated:false,productionTradeBucketsMutated:false},validationGateV401:{
         shadowDualSubscriptions:true,
         filteredSwapLogsPlusNewHeads:true,
         headFreshnessRequiredForCoverage:true,
@@ -72471,7 +72581,7 @@ if (url.pathname === "/reconcile-v374") {
         normalTradeBucketsMutated:false,
         productionSinglePoolCollectorUntouched:true
       },
-      status:conn.subscriptionAccepted===true&&conn.runtimeVersion===VERSION&&String(conn?.configFingerprintV399||"")===String(cfg?.configFingerprintV399||"")&&reconciliationAllWindowsPassV398&&reconciliationAllWindowsPassV400&&shadowHeadFreshV401?"SHADOW_MULTI_POOL_HEAD_INTEGRITY_ACTIVE_V401":"SHADOW_MULTI_POOL_NOT_YET_ACTIVE_V401",timestamp:new Date(nowMs).toISOString()};
+      status:conn.subscriptionAccepted===true&&conn.runtimeVersion===VERSION&&String(conn?.configFingerprintV399||"")===String(cfg?.configFingerprintV399||"")&&reconciliationAllWindowsPassV398&&reconciliationAllWindowsPassV400&&shadowHeadFreshV401?"SHADOW_MULTI_POOL_WRITE_EFFICIENT_ACTIVE_V402":"SHADOW_MULTI_POOL_NOT_YET_ACTIVE_V401",timestamp:new Date(nowMs).toISOString()};
   }
 
   async connect() {
@@ -72506,6 +72616,7 @@ if (url.pathname === "/reconcile-v374") {
   async scheduleReconnect(error) {
     if (this.reconnectPending === true) return;
     this.reconnectPending = true;
+    await this.flushTradeStateV403();
     await this.markCoverageGapV366(error || "RECONNECT_REQUIRED_V366");
     await this.markIntegrityGapV369(error || "RECONNECT_REQUIRED_V369");
     await this.markIntegrityGapV371(error || "RECONNECT_REQUIRED_V371");
@@ -72518,7 +72629,8 @@ if (url.pathname === "/reconcile-v374") {
 
   async handleMessage(event) {
     let msg; try { msg=JSON.parse(typeof event.data==="string"?event.data:""); } catch (_) { return; }
-    const conn=await this.state.storage.get("connection")||{}; conn.lastMessageAt=Date.now();
+    const conn=await this.state.storage.get("connection")||{};
+    this.lastMessageAtV402=Date.now();
     if (msg?.id===363) {
       if (typeof msg.result==="string" && msg.result.length>2) {
         this.subscriptionId=msg.result; conn.logSubscriptionAccepted=true; conn.subscriptionIdPresent=true; conn.lastError=null;
@@ -72537,7 +72649,8 @@ if (url.pathname === "/reconcile-v374") {
       if (conn.subscriptionAccepted) { await this.markCoverageConnectedV366(); await this.markIntegrityConnectedV369("DUAL_SUBSCRIPTIONS_ACCEPTED_V369"); await this.markIntegrityConnectedV371("DUAL_SUBSCRIPTIONS_ACCEPTED_V371"); await this.state.storage.setAlarm(Date.now()+V3_HEAD_WATCHDOG_MS_V371); }
       return;
     }
-    await this.state.storage.put("connection",conn);
+    // V402: ordinary eth_subscription notifications do not rewrite the
+    // connection row. Subscription acceptance/error paths above still persist.
     if (msg?.method!=="eth_subscription" || !msg?.params?.result) return;
     if (msg?.params?.subscription===this.headSubscriptionId) { await this.handleHeadV368(msg.params.result); return; }
     if (msg?.params?.subscription!==this.subscriptionId) return;
@@ -72551,7 +72664,8 @@ if (url.pathname === "/reconcile-v374") {
     const block = typeof raw === "string" && /^0x[0-9a-f]+$/i.test(raw) ? parseInt(raw,16) : Number(raw);
     if (!Number.isFinite(block) || block < 0) return;
     const now = Date.now();
-    const heads = await this.state.storage.get("v368:heads") || {};
+    if (!this.headsV402) this.headsV402 = await this.state.storage.get("v368:heads") || {};
+    const heads = this.headsV402;
     const previous = Number(heads.lastHeadBlock);
     heads.headsObserved = safeNumber(heads.headsObserved) + 1;
     heads.lastHeadAt = now;
@@ -72567,7 +72681,8 @@ if (url.pathname === "/reconcile-v374") {
     }
     // Same/lower heads can occur around reorgs or duplicate delivery; do not falsely advance continuity.
     if (!Number.isFinite(previous) || block > previous) heads.lastHeadBlock = block;
-    await this.state.storage.put("v368:heads", heads);
+    this.headsV402 = heads;
+    this.headsDirtyV402 = true;
   }
 
   async storeLiveTradeV364(row) {
@@ -72575,15 +72690,19 @@ if (url.pathname === "/reconcile-v374") {
     const bucketMs = 5 * 60 * 1000;
     const bucketStart = Math.floor(ts / bucketMs) * bucketMs;
     const key = `v364:trade-bucket:${bucketStart}`;
-    let bucket = await this.state.storage.get(key);
-    if (!Array.isArray(bucket)) bucket = [];
+
+    let bucket = this.liveBucketCacheV403.get(key);
+    if (!Array.isArray(bucket)) {
+      bucket = await this.state.storage.get(key);
+      if (!Array.isArray(bucket)) bucket = [];
+      this.liveBucketCacheV403.set(key, bucket);
+    }
+
     const tradeKey = String(row?.tradeKey || "");
     if (tradeKey && bucket.some(x => String(x?.tradeKey || "") === tradeKey)) return {inserted:0,deduped:true};
+
     bucket.push({tradeKey,transactionHash:row.transactionHash,logIndex:row.logIndex,blockNumber:row.blockNumber,side:row.side,tokenAmount:row.tokenAmount,quoteTokenAddress:row.quoteTokenAddress,quoteAmount:row.quoteAmount,usd:row.usd,usdVerified:row.usdVerified===true,usdBasis:row.sameCycleUsdBasisV347||null,observedAt:ts});
-    await this.state.storage.put(key,bucket);
-    // Delete one bucket older than 25h. This is Durable Object storage, not Workers KV.
-    const oldStart = bucketStart - (25 * 60 * 60 * 1000);
-    try { await this.state.storage.delete(`v364:trade-bucket:${oldStart}`); } catch (_) {}
+    this.liveBucketDirtyV403.add(key);
     return {inserted:1,deduped:false};
   }
 
@@ -72596,26 +72715,27 @@ if (url.pathname === "/reconcile-v374") {
     for (let t=current; t>=Math.floor(earliest/bucketMs)*bucketMs; t-=bucketMs) keys.push(`v364:trade-bucket:${t}`);
     const got = await this.state.storage.get(keys);
     const rows = [];
-    if (got && typeof got.forEach === "function") {
-      got.forEach(v => {
-        if (!Array.isArray(v)) return;
-        for (const r of v) {
-          const b = Number(r?.blockNumber);
-          if (Number.isFinite(b) && b >= fromBlock && b <= toBlock) {
-            rows.push({
-              tradeKey: String(r?.tradeKey || `${String(r?.transactionHash || "").toLowerCase()}|${String(r?.logIndex ?? "")}`),
-              transactionHash: String(r?.transactionHash || "").toLowerCase(),
-              logIndex: String(r?.logIndex ?? ""),
-              blockNumber: b,
-              side: r?.side || null,
-              quoteAmount: Number.isFinite(Number(r?.quoteAmount)) ? Number(r.quoteAmount) : null,
-              usd: Number.isFinite(Number(r?.usd)) ? Number(r.usd) : null,
-              usdVerified: r?.usdVerified === true,
-              observedAt: Number.isFinite(Number(r?.observedAt)) ? Number(r.observedAt) : null
-            });
-          }
+    for (const key of keys) {
+      const hot = this.liveBucketCacheV403.get(key);
+      const bucketRows = Array.isArray(hot)
+        ? hot
+        : (got && typeof got.get === "function" && Array.isArray(got.get(key)) ? got.get(key) : []);
+      for (const r of bucketRows) {
+        const b = Number(r?.blockNumber);
+        if (Number.isFinite(b) && b >= fromBlock && b <= toBlock) {
+          rows.push({
+            tradeKey: String(r?.tradeKey || `${String(r?.transactionHash || "").toLowerCase()}|${String(r?.logIndex ?? "")}`),
+            transactionHash: String(r?.transactionHash || "").toLowerCase(),
+            logIndex: String(r?.logIndex ?? ""),
+            blockNumber: b,
+            side: r?.side || null,
+            quoteAmount: Number.isFinite(Number(r?.quoteAmount)) ? Number(r.quoteAmount) : null,
+            usd: Number.isFinite(Number(r?.usd)) ? Number(r.usd) : null,
+            usdVerified: r?.usdVerified === true,
+            observedAt: Number.isFinite(Number(r?.observedAt)) ? Number(r.observedAt) : null
+          });
         }
-      });
+      }
     }
     return {
       version: VERSION,
@@ -72636,7 +72756,12 @@ if (url.pathname === "/reconcile-v374") {
     for (let t=current; t>=Math.floor(earliest/bucketMs)*bucketMs; t-=bucketMs) keys.push(`v364:trade-bucket:${t}`);
     const got = await this.state.storage.get(keys);
     const trades = [];
-    if (got && typeof got.forEach === "function") got.forEach(v => { if (Array.isArray(v)) trades.push(...v); });
+    for (const key of keys) {
+      const hot = this.liveBucketCacheV403.get(key);
+      if (Array.isArray(hot)) { trades.push(...hot); continue; }
+      const stored = got && typeof got.get === "function" ? got.get(key) : null;
+      if (Array.isArray(stored)) trades.push(...stored);
+    }
     const defs = [["5m",5*60*1000],["15m",15*60*1000],["1h",60*60*1000],["6h",6*60*60*1000],["24h",24*60*60*1000]];
     const windows = {};
     for (const [name,ms] of defs) {
@@ -72651,10 +72776,10 @@ if (url.pathname === "/reconcile-v374") {
       windows[name]={trades:rows.length,buys,sells,usdVerifiedTrades,buyUsd:Number(buyUsd.toFixed(6)),sellUsd:Number(sellUsd.toFixed(6)),netUsd:Number((buyUsd-sellUsd).toFixed(6)),buyPressurePct:totalUsd>0?Number((buyUsd/totalUsd*100).toFixed(2)):null,coverage:"PENDING_V366"};
     }
     const cfg=this.config||await this.state.storage.get("config")||null;
-    const stats=await this.state.storage.get("stats")||{};
+    const stats=this.liveStatsV403 || await this.state.storage.get("stats")||{};
     const conn=await this.state.storage.get("connection")||{};
     const cov=await this.state.storage.get("v366:coverage")||{};
-    const heads=await this.state.storage.get("v368:heads")||{};
+    const heads=this.headsV402 || await this.state.storage.get("v368:heads")||{};
     const integrity=await this.state.storage.get("v371:integrityCoverage")||{};
     const dualAccepted = conn.connected===true && conn.logSubscriptionAccepted===true && conn.headSubscriptionAccepted===true;
     const coverageActive = integrity.active===true && dualAccepted;
@@ -72691,11 +72816,20 @@ if (url.pathname === "/reconcile-v374") {
       try{const rawRef=await kv.get(V347_REFERENCE_DIAGNOSTIC_KEY_V348);if(rawRef){const ref=JSON.parse(rawRef);const p=Number(ref?.priceUsdGPerWeth);if(ref?.verified===true&&Number.isFinite(p)&&p>0){priceUsd=p;usd=Math.abs(quoteAmount)*p;usdVerified=true;usdBasis="EXACT_WETH_QUOTE_X_VERIFIED_CURRENT_REFERENCE_V363";}}}catch(_){}
     }
     const row={tradeKey,transactionHash:txHash,logIndex,blockNumber:rpcBlockNumberV331(log?.blockNumber),pairAddress:pair,side:raw<0n?"BUY":"SELL",tokenAmount:Math.abs(amount),quoteTokenAddress,quoteAmount:Number.isFinite(quoteAmount)&&quoteAmount!==0?Math.abs(quoteAmount):null,quoteAmountVerifiedV336:Number.isFinite(quoteAmount)&&quoteAmount!==0,quoteAmountBasisV336:Number.isFinite(quoteAmount)&&quoteAmount!==0?"EXACT_V3_SWAP_QUOTE_DELTA_V336":null,usd:Number.isFinite(usd)&&usd>0?usd:null,usdVerified,priceUsd:Number.isFinite(priceUsd)?priceUsd:null,sameCycleUsdV347:Number.isFinite(usd)&&usd>0?usd:null,sameCycleUsdVerifiedV347:usdVerified,sameCycleUsdBasisV347:usdBasis,observedAt:Date.now(),blockTimestampMs:null,timestampVerifiedV334:false,timestampBasis:"LIVE_WEBSOCKET_INGESTION_TIME_V363",captureBasis:"ALCHEMY_ETH_SUBSCRIBE_EXACT_V3_SWAP_V363"};
-    // V364: live trades persist in Durable Object storage, not Workers KV per swap.
+    // V403: live trades enter the same Durable Object 5-minute bucket evidence
+    // immediately in the hot cache and are checkpointed on the watchdog cadence.
     // Existing scheduled/manual V3 ledger remains untouched for historical/backfill evidence.
     const write=await this.storeLiveTradeV364(row);
-    const stats=await this.state.storage.get("stats")||{};
-    if(safeNumber(write?.inserted)>0){stats.swapsCaptured=safeNumber(stats.swapsCaptured)+1;if(row.side==="BUY")stats.buysCaptured=safeNumber(stats.buysCaptured)+1;else stats.sellsCaptured=safeNumber(stats.sellsCaptured)+1;if(usdVerified)stats.usdVerifiedCaptured=safeNumber(stats.usdVerifiedCaptured)+1;stats.lastSwapAt=Date.now();stats.lastTrade={side:row.side,usd:row.usd,usdVerified:row.usdVerified,quoteAmount:row.quoteAmount,quoteTokenAddress:row.quoteTokenAddress,tokenAmount:row.tokenAmount,transactionHash:row.transactionHash,blockNumber:row.blockNumber,observedAt:row.observedAt};await this.state.storage.put("stats",stats);}
+    if(safeNumber(write?.inserted)>0){
+      if(!this.liveStatsV403) this.liveStatsV403=await this.state.storage.get("stats")||{};
+      const stats=this.liveStatsV403;
+      stats.swapsCaptured=safeNumber(stats.swapsCaptured)+1;
+      if(row.side==="BUY")stats.buysCaptured=safeNumber(stats.buysCaptured)+1;else stats.sellsCaptured=safeNumber(stats.sellsCaptured)+1;
+      if(usdVerified)stats.usdVerifiedCaptured=safeNumber(stats.usdVerifiedCaptured)+1;
+      stats.lastSwapAt=Date.now();
+      stats.lastTrade={side:row.side,usd:row.usd,usdVerified:row.usdVerified,quoteAmount:row.quoteAmount,quoteTokenAddress:row.quoteTokenAddress,tokenAmount:row.tokenAmount,transactionHash:row.transactionHash,blockNumber:row.blockNumber,observedAt:row.observedAt};
+      this.liveStatsDirtyV403=true;
+    }
   }
 }
 
