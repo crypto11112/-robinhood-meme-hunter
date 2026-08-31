@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V396
- * AUTHORITATIVE RUNTIME VERSION: V396
+ * Robinhood Chain Meme Hunter — V397
+ * AUTHORITATIVE RUNTIME VERSION: V397
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V396";
+const VERSION = "V397";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -72078,7 +72078,49 @@ if (url.pathname === "/reconcile-v374") {
     const allPools=(cfg?.addresses||[]).map(normalize);
     const aggregateCoverage={};
     for(const [name] of defs){const full=allPools.length>0&&allPools.every(p=>perPoolCoverage[p]?.windows?.[name]?.full===true);aggregateCoverage[name]={full,coverage:full?"FULL_ALL_INCLUDED_POOLS_V395":"PARTIAL_ONE_OR_MORE_POOLS_V395"};}
-    return {version:VERSION,collector:"SHADOW_MULTI_POOL_ALCHEMY_V3_V396",safe:true,shadowOnly:true,scoringMutated:false,normalTradeBucketsMutated:false,existingSinglePoolCollectorUntouched:true,
+
+    // V397: derive rolling token-wide and per-pool flow strictly from retained,
+    // deduped shadow swap evidence. No scoring mutation.
+    const rollingWindowsV397={};
+    for(const [name,ms] of defs){
+      const cutoff=nowMs-ms;
+      const rows=recent.filter(r=>Number(r?.observedAt)>=cutoff);
+      const byPool={};
+      for(const p of allPools)byPool[p]={swapLogs:0,buys:0,sells:0,buyUsd:0,sellUsd:0,netUsd:0,usdVerifiedSwapLogs:0,uniqueTransactions:0};
+      const poolTx=new Map(), tokenTx=new Map();
+      let buys=0,sells=0,buyUsd=0,sellUsd=0,usdVerifiedSwapLogs=0;
+      for(const r of rows){
+        const pool=normalize(r?.pool||"");
+        if(!byPool[pool])byPool[pool]={swapLogs:0,buys:0,sells:0,buyUsd:0,sellUsd:0,netUsd:0,usdVerifiedSwapLogs:0,uniqueTransactions:0};
+        const ps=byPool[pool]; ps.swapLogs++;
+        if(r?.side==="BUY"){ps.buys++;buys++;}else if(r?.side==="SELL"){ps.sells++;sells++;}
+        if(r?.usdVerified===true&&Number.isFinite(Number(r?.usd))){
+          const u=Number(r.usd);ps.usdVerifiedSwapLogs++;usdVerifiedSwapLogs++;
+          if(r.side==="BUY"){ps.buyUsd+=u;buyUsd+=u;}else if(r.side==="SELL"){ps.sellUsd+=u;sellUsd+=u;}
+        }
+        const tx=String(r?.transactionHash||"").toLowerCase();
+        if(tx){
+          if(!poolTx.has(pool))poolTx.set(pool,new Set());poolTx.get(pool).add(tx);
+          if(!tokenTx.has(tx))tokenTx.set(tx,new Set());tokenTx.get(tx).add(pool);
+        }
+      }
+      for(const [p,ps] of Object.entries(byPool)){
+        ps.uniqueTransactions=poolTx.get(p)?.size||0;
+        ps.buyUsd=Number(ps.buyUsd.toFixed(6));ps.sellUsd=Number(ps.sellUsd.toFixed(6));ps.netUsd=Number((ps.buyUsd-ps.sellUsd).toFixed(6));
+      }
+      const uniqueTransactions=tokenTx.size;
+      const multiPoolTransactions=[...tokenTx.values()].filter(set=>set.size>1).length;
+      const ratio=sellUsd>0?buyUsd/sellUsd:(buyUsd>0?null:null);
+      rollingWindowsV397[name]={
+        windowMs:ms,coverage:aggregateCoverage[name]?.coverage||"UNVERIFIED",full:aggregateCoverage[name]?.full===true,
+        retainedSwapLogs:rows.length,uniqueTransactions,multiPoolTransactions,buys,sells,
+        buyUsd:Number(buyUsd.toFixed(6)),sellUsd:Number(sellUsd.toFixed(6)),netUsd:Number((buyUsd-sellUsd).toFixed(6)),
+        buySellUsdRatio:Number.isFinite(ratio)?Number(ratio.toFixed(6)):(buyUsd>0&&sellUsd===0?"NO_SELL_USD_DENOMINATOR":null),
+        usdVerifiedSwapLogs,allSwapLogsUsdVerified:rows.length>0&&usdVerifiedSwapLogs===rows.length,
+        byPool
+      };
+    }
+    return {version:VERSION,collector:"SHADOW_MULTI_POOL_ALCHEMY_V3_V397",safe:true,shadowOnly:true,scoringMutated:false,normalTradeBucketsMutated:false,existingSinglePoolCollectorUntouched:true,
       reason,enabled:(await this.state.storage.get("v394:shadowEnabled"))===true,token:cfg?.token||null,basePair:cfg?.basePair||null,
       addresses:cfg?.addresses||[],addressCount:Array.isArray(cfg?.addresses)?cfg.addresses.length:0,pools:cfg?.pools||[],
       connection:conn,activeRuntimeVersion:conn?.runtimeVersion||null,desiredRuntimeVersion:VERSION,
@@ -72086,10 +72128,22 @@ if (url.pathname === "/reconcile-v374") {
       recentUniqueSwapEvidence:recent.slice(-20),swapDedupeIdentity:"TRANSACTION_HASH_PLUS_LOG_INDEX",tokenTransactionIdentity:"TRANSACTION_HASH",
       decodedEvidenceV395:{enabled:true,directionFromSignedCandidatePoolDelta:true,quoteAmountFromExactV3SwapDelta:true,usdgUsdBasis:"EXACT_CANONICAL_USDG_QUOTE",wethUsdBasis:"CURRENT_VERIFIED_WETH_USDG_REFERENCE_NOT_HISTORICAL_BLOCK_PRICE"},
       tokenAggregateShadowV395:aggregate,perPoolCoverageV395:perPoolCoverage,tokenAggregateCoverageV395:aggregateCoverage,
+      rollingMultiPoolWindowsV397:rollingWindowsV397,
+      rollingWindowSemanticsV397:{
+        source:"RETAINED_DEDUPED_SHADOW_SWAP_EVIDENCE",
+        swapIdentity:"TRANSACTION_HASH_PLUS_LOG_INDEX",
+        tokenTransactionIdentity:"TRANSACTION_HASH",
+        preserveDistinctSwapLogsAcrossPools:true,
+        tokenTransactionsDedupedAcrossPools:true,
+        fullCoverageRequiresEveryIncludedPool:true,
+        noHistoricalBackfill:true,
+        scoringEnabled:false
+      },
       coverageRuleV395:"FULL_REQUIRES_EVERY_INCLUDED_POOL_TO_HAVE_CONTINUOUS_COVERAGE_FOR_WINDOW",
       scoringGateV395:"SHADOW_ONLY_DO_NOT_USE_FOR_SCORING",
       upgradeGateV396:{versionAwareShadowSocket:true,stalePriorVersionSocketRecycled:true,coverageStartsOnlyAfterFreshSubscriptionAcceptance:true,legacyUndecodedRowsExcluded:true,productionSinglePoolCollectorUntouched:true},
-      status:conn.subscriptionAccepted===true&&conn.runtimeVersion===VERSION?"SHADOW_MULTI_POOL_DECODE_ACTIVE_V396":"SHADOW_MULTI_POOL_NOT_YET_ACTIVE_V396",timestamp:new Date(nowMs).toISOString()};
+      validationGateV397:{rollingWindowsShadowOnly:true,perPoolAndTokenTotals:true,routeAwareTransactionDedup:true,coverageGated:true,scoringMutated:false,productionSinglePoolCollectorUntouched:true},
+      status:conn.subscriptionAccepted===true&&conn.runtimeVersion===VERSION?"SHADOW_MULTI_POOL_WINDOWS_ACTIVE_V397":"SHADOW_MULTI_POOL_NOT_YET_ACTIVE_V397",timestamp:new Date(nowMs).toISOString()};
   }
 
   async connect() {
