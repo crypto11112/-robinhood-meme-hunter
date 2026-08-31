@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V388
- * AUTHORITATIVE RUNTIME VERSION: V388
+ * Robinhood Chain Meme Hunter — V389
+ * AUTHORITATIVE RUNTIME VERSION: V389
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V388";
+const VERSION = "V389";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -69386,24 +69386,34 @@ function v388PoolRegistryKey(token) {
 }
 
 async function v388ReadPoolRegistry(env, token) {
-  const kv = getKV(env);
+  const { kv, binding } = getKV(env);
   if (!kv || !isAddress(token)) {
-    return { available: !!kv, entries: [], readError: kv ? "INVALID_TOKEN" : "KV_UNAVAILABLE" };
+    return {
+      available: !!kv,
+      binding: binding || null,
+      entries: [],
+      readError: kv ? "INVALID_TOKEN" : "KV_UNAVAILABLE"
+    };
   }
   try {
     const raw = await kv.get(v388PoolRegistryKey(token));
-    if (!raw) return { available: true, entries: [], readError: null };
+    if (!raw) return { available: true, binding, entries: [], readError: null };
     const parsed = JSON.parse(raw);
     const entries = Array.isArray(parsed?.entries) ? parsed.entries : [];
-    return { available: true, entries, readError: null };
+    return { available: true, binding, entries, readError: null };
   } catch (e) {
-    return { available: true, entries: [], readError: String(e?.message || e || "UNKNOWN_ERROR") };
+    return {
+      available: true,
+      binding,
+      entries: [],
+      readError: String(e?.message || e || "UNKNOWN_ERROR")
+    };
   }
 }
 
 async function v388MergeVerifiedPoolRegistry(env, token, observedPools) {
   const now = Date.now();
-  const kv = getKV(env);
+  const { kv, binding } = getKV(env);
   const before = await v388ReadPoolRegistry(env, token);
   const map = new Map();
 
@@ -69478,6 +69488,7 @@ async function v388MergeVerifiedPoolRegistry(env, token, observedPools) {
   return {
     schemaVersion: "V388",
     key: v388PoolRegistryKey(token),
+    binding: binding || before.binding || null,
     readError: before.readError,
     previousEntries: before.entries.length,
     observedEligiblePools: Array.isArray(observedPools) ? observedPools.length : 0,
@@ -69986,6 +69997,7 @@ async function handleRequest(
         persistent: true,
         mergeNotReplace: true,
         schemaVersion: persistentRegistryV388.schemaVersion,
+        binding: persistentRegistryV388.binding,
         previousEntries: persistentRegistryV388.previousEntries,
         observedEligiblePools: persistentRegistryV388.observedEligiblePools,
         newlyAdded: persistentRegistryV388.newlyAdded,
