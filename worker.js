@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V393
- * AUTHORITATIVE RUNTIME VERSION: V393
+ * Robinhood Chain Meme Hunter — V394
+ * AUTHORITATIVE RUNTIME VERSION: V394
  * V372 builds from confirmed V371. It preserves the live collector and scoring, fixes the coverage-evidence gate for V371 FULL_INTEGRITY windows, and adds a read-only verified accumulation/distribution corroboration layer combining historical tracked-whale balance direction with integrity-complete live V3 USD flow. No scoring mutation, no extra provider requests, and no per-swap Workers KV writes are added.
  * Historical V361/V360/V355/V352/etc labels below refer to inherited components and are not the runtime version.
  * Historical V355/V352/etc labels below refer to inherited components and are not the runtime version.
@@ -1456,7 +1456,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V393";
+const VERSION = "V394";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -70788,6 +70788,13 @@ async function handleRequest(
     );
   }
 
+  if (path === "/v3multipool-shadow-start") {
+    return jsonResponse(await v3LiveCollectorRouteV363(env, url.searchParams.get("token") || "", "shadowstart"));
+  }
+  if (path === "/v3multipool-shadow-status") {
+    return jsonResponse(await v3LiveCollectorRouteV363(env, url.searchParams.get("token") || "", "shadowstatus"));
+  }
+
   if (path === "/v3live-start") {
     return jsonResponse(await v3LiveCollectorRouteV363(env, url.searchParams.get("token") || "", "start"));
   }
@@ -71322,6 +71329,45 @@ async function v3LiveCollectorConfigV363(env, tokenInput) {
   return {ok:true,status:"LIVE_CONFIG_VERIFIED_V363",token,pair,token0,token1,decimals,pairStatus:pairCache?.status||null};
 }
 
+
+async function v394ShadowMultiPoolConfig(env, tokenInput) {
+  const token = normalize(tokenInput || "");
+  if (!isAddress(token)) return {ok:false,status:"INVALID_TOKEN_V394"};
+  const base = await v3LiveCollectorConfigV363(env, token);
+  if (!base?.ok) return {ok:false,status:"BASE_LIVE_CONFIG_UNAVAILABLE_V394",baseStatus:base?.status||null};
+
+  const registry = await v388ReadPoolRegistry(env, token);
+  const pools = (Array.isArray(registry?.entries) ? registry.entries : [])
+    .filter(e => {
+      const pool=normalize(e?.pool||""), token0=normalize(e?.token0||""), token1=normalize(e?.token1||"");
+      return isAddress(pool) && e?.factoryVerified===true &&
+        normalize(e?.candidateToken||"")===token &&
+        (token0===token || token1===token) &&
+        normalize(e?.factory||"")===normalize(UNISWAP_V3_FACTORY_V195);
+    })
+    .map(e => ({
+      pool: normalize(e.pool),
+      token0: normalize(e.token0||""),
+      token1: normalize(e.token1||""),
+      quoteToken: normalize(e.quoteToken||""),
+      quoteSymbol: e?.quoteSymbol||"UNVERIFIED",
+      fee: e?.fee??null,
+      factoryVerified: true,
+      isMonitoredPair: normalize(e.pool)===normalize(base.pair)
+    }));
+  const unique=[];
+  const seen=new Set();
+  for (const p of pools) if (!seen.has(p.pool)) { seen.add(p.pool); unique.push(p); }
+  if (!unique.some(p=>p.pool===normalize(base.pair))) {
+    unique.unshift({pool:normalize(base.pair),token0:normalize(base.token0),token1:normalize(base.token1),
+      quoteToken:token===normalize(base.token0)?normalize(base.token1):normalize(base.token0),
+      quoteSymbol:(token===normalize(base.token0)?normalize(base.token1):normalize(base.token0))===normalize(CANONICAL_WETH_V179)?"WETH":
+        ((token===normalize(base.token0)?normalize(base.token1):normalize(base.token0))===normalize(CANONICAL_USDG_V179)?"USDG":"UNVERIFIED"),
+      fee:null,factoryVerified:true,isMonitoredPair:true});
+  }
+  return {ok:true,status:"SHADOW_MULTI_POOL_CONFIG_READY_V394",token,decimals:base.decimals,basePair:normalize(base.pair),pools:unique};
+}
+
 async function v3LiveCollectorRouteV363(env, tokenInput, action) {
   const token = normalize(tokenInput || "");
   const ns = env?.[V3_LIVE_DO_BINDING_V363];
@@ -71337,6 +71383,21 @@ async function v3LiveCollectorRouteV363(env, tokenInput, action) {
     const u = new URL("https://v3-live.internal/start");
     for (const k of ["token","pair","token0","token1","decimals"]) u.searchParams.set(k,String(cfg[k]));
     const r = await stub.fetch(u.toString());
+    return await r.json();
+  }
+  if (action === "shadowstart") {
+    const cfg = await v394ShadowMultiPoolConfig(env, token);
+    if (!cfg.ok) return {version:VERSION,configured:true,action,...cfg};
+    const u = new URL("https://v3-live.internal/shadow-multipool-start-v394");
+    u.searchParams.set("token", cfg.token);
+    u.searchParams.set("decimals", String(cfg.decimals));
+    u.searchParams.set("basePair", cfg.basePair);
+    u.searchParams.set("pools", JSON.stringify(cfg.pools));
+    const r = await stub.fetch(u.toString());
+    return await r.json();
+  }
+  if (action === "shadowstatus") {
+    const r = await stub.fetch("https://v3-live.internal/shadow-multipool-status-v394");
     return await r.json();
   }
   if (action === "stop") {
@@ -71361,6 +71422,9 @@ export class V3LiveCollectorV363 {
     this.headSubscriptionId = null;
     this.processing = Promise.resolve();
     this.reconnectPending = false;
+    this.shadowWsV394 = null;
+    this.shadowSubscriptionIdV394 = null;
+    this.shadowProcessingV394 = Promise.resolve();
   }
 
   async fetch(request) {
@@ -71390,6 +71454,25 @@ export class V3LiveCollectorV363 {
       }
       return Response.json(await this.status("START_REQUESTED_V371"));
     }
+
+    if (url.pathname === "/shadow-multipool-start-v394") {
+      let pools=[];
+      try { pools=JSON.parse(url.searchParams.get("pools")||"[]"); } catch (_) {}
+      const token=normalize(url.searchParams.get("token")||"");
+      const decimals=Number(url.searchParams.get("decimals"));
+      const basePair=normalize(url.searchParams.get("basePair")||"");
+      pools=(Array.isArray(pools)?pools:[]).filter(p=>isAddress(normalize(p?.pool||"")) && p?.factoryVerified===true);
+      if (!isAddress(token)||!Number.isInteger(decimals)||pools.length<1) return Response.json({version:VERSION,status:"INVALID_SHADOW_MULTI_POOL_CONFIG_V394"},{status:400});
+      const cfg={token,decimals,basePair,pools,addresses:[...new Set(pools.map(p=>normalize(p.pool)))]};
+      await this.state.storage.put("v394:shadowConfig",cfg);
+      await this.state.storage.put("v394:shadowEnabled",true);
+      await this.connectShadowV394();
+      return Response.json(await this.shadowStatusV394("SHADOW_MULTI_POOL_START_REQUESTED_V394"));
+    }
+    if (url.pathname === "/shadow-multipool-status-v394") {
+      return Response.json(await this.shadowStatusV394());
+    }
+
     if (url.pathname === "/stop") {
       await this.state.storage.put("enabled", false);
       await this.markCoverageGapV366("MANUAL_STOP_V366");
@@ -71817,6 +71900,87 @@ if (url.pathname === "/reconcile-v374") {
       await this.state.storage.put("v371:integrityCoverage", integrity);
     }
     return integrity;
+  }
+
+
+  async connectShadowV394() {
+    const enabled=await this.state.storage.get("v394:shadowEnabled");
+    const cfg=await this.state.storage.get("v394:shadowConfig");
+    if (enabled!==true || !cfg || !Array.isArray(cfg.addresses) || cfg.addresses.length<1 || !this.env.ALCHEMY_API_KEY) return;
+    if (this.shadowWsV394 && this.shadowWsV394.readyState===WebSocket.OPEN) return;
+    let ws;
+    try { ws=new WebSocket(`wss://robinhood-mainnet.g.alchemy.com/v2/${String(this.env.ALCHEMY_API_KEY)}`); }
+    catch(e){ await this.state.storage.put("v394:shadowConnection",{connected:false,status:"SHADOW_SOCKET_CREATE_FAILED_V394",lastError:String(e?.message||e).slice(0,240)}); return; }
+    this.shadowWsV394=ws;
+    ws.addEventListener("open",async()=>{
+      await this.state.storage.put("v394:shadowConnection",{connected:true,subscriptionAccepted:false,status:"SHADOW_SOCKET_OPEN_SUBSCRIBING_V394",openedAt:Date.now(),addressCount:cfg.addresses.length});
+      ws.send(JSON.stringify({jsonrpc:"2.0",id:394,method:"eth_subscribe",params:["logs",{address:cfg.addresses,topics:[UNISWAP_V3_SWAP_TOPIC_V326]}]}));
+    });
+    ws.addEventListener("message",event=>{
+      this.shadowProcessingV394=this.shadowProcessingV394.then(()=>this.handleShadowMessageV394(event)).catch(async e=>{
+        const c=await this.state.storage.get("v394:shadowConnection")||{};
+        c.lastError=String(e?.message||e).slice(0,240);c.status="SHADOW_MESSAGE_ERROR_V394";
+        await this.state.storage.put("v394:shadowConnection",c);
+      });
+    });
+    ws.addEventListener("close",async()=>{
+      this.shadowWsV394=null;this.shadowSubscriptionIdV394=null;
+      const c=await this.state.storage.get("v394:shadowConnection")||{};
+      c.connected=false;c.subscriptionAccepted=false;c.status="SHADOW_SOCKET_CLOSED_V394";c.closedAt=Date.now();
+      await this.state.storage.put("v394:shadowConnection",c);
+    });
+    ws.addEventListener("error",async()=>{
+      const c=await this.state.storage.get("v394:shadowConnection")||{};
+      c.lastError="SHADOW_WEBSOCKET_ERROR_V394";c.status="SHADOW_WEBSOCKET_ERROR_V394";
+      await this.state.storage.put("v394:shadowConnection",c);
+    });
+  }
+
+  async handleShadowMessageV394(event) {
+    let msg; try { msg=JSON.parse(typeof event.data==="string"?event.data:""); } catch(_){return;}
+    const conn=await this.state.storage.get("v394:shadowConnection")||{};
+    conn.lastMessageAt=Date.now();
+    if (msg?.id===394) {
+      if (typeof msg.result==="string" && msg.result.length>2) {
+        this.shadowSubscriptionIdV394=msg.result;conn.subscriptionAccepted=true;conn.connected=true;conn.status="SHADOW_MULTI_POOL_SUBSCRIPTION_ACTIVE_V394";conn.acceptedAt=Date.now();conn.lastError=null;
+      } else if (msg?.error) {conn.subscriptionAccepted=false;conn.status="SHADOW_MULTI_POOL_SUBSCRIPTION_REJECTED_V394";conn.lastError=JSON.stringify(msg.error).slice(0,240);}
+      await this.state.storage.put("v394:shadowConnection",conn); return;
+    }
+    await this.state.storage.put("v394:shadowConnection",conn);
+    if (msg?.method!=="eth_subscription" || msg?.params?.subscription!==this.shadowSubscriptionIdV394 || !msg?.params?.result) return;
+    const log=msg.params.result;
+    if (log?.removed===true || normalize(log?.topics?.[0]||"")!==normalize(UNISWAP_V3_SWAP_TOPIC_V326)) return;
+    const cfg=await this.state.storage.get("v394:shadowConfig")||{};
+    const pool=normalize(log?.address||"");
+    const meta=(cfg.pools||[]).find(p=>normalize(p?.pool||"")===pool);
+    if (!meta) return;
+    const txHash=String(log?.transactionHash||"").toLowerCase(), logIndex=String(log?.logIndex??"");
+    if (!/^0x[a-f0-9]{64}$/.test(txHash)) return;
+    const key=`${txHash}|${logIndex}`;
+    const recent=await this.state.storage.get("v394:shadowRecent")||[];
+    if (recent.some(x=>x?.tradeKey===key)) return;
+    recent.push({tradeKey:key,transactionHash:txHash,logIndex,blockNumber:rpcBlockNumberV331(log?.blockNumber),pool,quoteToken:normalize(meta.quoteToken||""),quoteSymbol:meta.quoteSymbol||"UNVERIFIED",observedAt:Date.now()});
+    while(recent.length>200) recent.shift();
+    await this.state.storage.put("v394:shadowRecent",recent);
+    const stats=await this.state.storage.get("v394:shadowStats")||{swapsCaptured:0,byPool:{}};
+    stats.swapsCaptured=safeNumber(stats.swapsCaptured)+1;
+    stats.byPool=stats.byPool||{};
+    stats.byPool[pool]=safeNumber(stats.byPool[pool])+1;
+    stats.lastSwapAt=Date.now();stats.lastTrade=recent[recent.length-1];
+    await this.state.storage.put("v394:shadowStats",stats);
+  }
+
+  async shadowStatusV394(reason=null) {
+    const cfg=await this.state.storage.get("v394:shadowConfig")||null;
+    const conn=await this.state.storage.get("v394:shadowConnection")||{};
+    const stats=await this.state.storage.get("v394:shadowStats")||{swapsCaptured:0,byPool:{}};
+    const recent=await this.state.storage.get("v394:shadowRecent")||[];
+    return {version:VERSION,collector:"SHADOW_MULTI_POOL_ALCHEMY_V3_V394",safe:true,shadowOnly:true,scoringMutated:false,normalTradeBucketsMutated:false,existingSinglePoolCollectorUntouched:true,
+      reason,enabled:(await this.state.storage.get("v394:shadowEnabled"))===true,token:cfg?.token||null,basePair:cfg?.basePair||null,
+      addresses:cfg?.addresses||[],addressCount:Array.isArray(cfg?.addresses)?cfg.addresses.length:0,pools:cfg?.pools||[],
+      connection:conn,swapsCaptured:safeNumber(stats.swapsCaptured),byPool:stats.byPool||{},lastTrade:stats.lastTrade||null,
+      recentUniqueSwapEvidence:recent.slice(-20),dedupeIdentity:"TRANSACTION_HASH_PLUS_LOG_INDEX",
+      coverage:"SHADOW_OBSERVATION_ONLY_NOT_FULL_COVERAGE_V394",status:conn.subscriptionAccepted===true?"SHADOW_MULTI_POOL_ACTIVE_V394":"SHADOW_MULTI_POOL_NOT_YET_ACTIVE_V394",timestamp:now()};
   }
 
   async connect() {
