@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V408
- * AUTHORITATIVE RUNTIME VERSION: V408
+ * Robinhood Chain Meme Hunter — V409
+ * AUTHORITATIVE RUNTIME VERSION: V409
+ * V409 is a diagnostic-only Durable Object usage-meter verification build. /usage now exposes collector ingests, tracked storage PUTs/DELETEs, aggregation-row writes, last collector update, last source token and an explicit meter-confidence/feed status. A stuck initialization-only count is labelled UNVERIFIED until the first collector delta reaches the singleton meter. Tiny percentages below 0.01% render with three decimals. No scanner, scoring, qualification, alerts, market/age logic, provider requests, V403 batching, V407 learning/performance, or V408 age evidence is changed.
  * V407 adds read-only entry-quality analytics and forward-only post-call drawdown tracking. Existing verified ATH history can safely classify whether a call ever exceeded its frozen entry level; no historical low is invented. New/ongoing V407 observations track the lowest verified market cap from the V407 tracking start onward, explicitly marked forward-only. /best, /performance, /learning and /call surface the new metrics. V407 also prevents the Durable Object usage projection from showing false DANGER during the first 15 minutes by reporting CALIBRATING until a meaningful observation window exists. Scanner, scoring, qualification, alerts, provider requests, V403 batching and V404/V406 usage counting remain unchanged.
  * V408 adds evidence-separated age reporting. Strict protocol launch age remains VERIFIED only from an exact supported launch event; verified DexScreener pairCreatedAt is now surfaced separately as VERIFIED MARKET/PAIR AGE with its provider source, and scanner age remains separate. No pair age, scanner age, token deployment time, or generic V4 Initialize timestamp is promoted to protocol launch age. Adds zero external requests and changes no scanner, scoring, qualification, alert threshold, provider budget, V403 batching, V404/V406 usage-meter, or V407 learning/performance logic.
  * V406 fixes the V405 usage-meter first-read initialization bug: an empty/new-day meter is now persisted once on first /usage read, so monitorStartedAt no longer moves on every zero-usage query. The initialization row is included in the estimate. Scanner, scoring, collectors, batching, alerts, request budgets and UK reset display are unchanged.
@@ -1463,7 +1464,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V408";
+const VERSION = "V409";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71583,19 +71584,45 @@ function durableUsageTelegramMessageV404(result) {
     ].join("\n");
   }
   const pct=Number(result.usedPct), perHour=result?.rowsPerHour===null?null:Number(result.rowsPerHour), projected=result?.projected24hRows===null?null:Number(result.projected24hRows), remaining=Number(result.remainingRows);
+  const pctText=Number.isFinite(pct)?(pct>0&&pct<0.01?pct.toFixed(3):pct.toFixed(2)):"0.00";
+  const ingestAge=Number(result?.lastIngestAgeMsV409);
+  const lastCollectorUpdate=result?.lastIngestAtIsoV409
+    ? `${escapeHtml(result.lastIngestAtIsoV409)}${Number.isFinite(ingestAge)?` (${escapeHtml(formatAgeV223(Math.max(0,ingestAge)))} ago)`:""}`
+    : "NEVER";
+  const lastSource=isAddress(normalize(result?.lastIngestSourceV409||""))?normalize(result.lastIngestSourceV409):"UNVERIFIED";
+  const confidence=result?.meterConfidenceV409||"UNVERIFIED";
+  const feed=result?.collectorFeedStatusV409||"UNVERIFIED";
+  const warning=result?.initializationOnlyV409===true
+    ? "⚠️ <b>Meter confidence: UNVERIFIED</b> — only the meter initialization row has been observed; no collector delta has reached the singleton yet."
+    : result?.ingests>0
+      ? "✅ <b>Meter ingest path verified</b> — at least one collector usage delta has reached the singleton meter."
+      : "⚠️ <b>Meter ingest path not yet verified.</b>";
   return [
     `📊 <b>Durable Object Usage — ${VERSION}</b>`,
     "",
     `Rows written: <b>${safeNumber(result.estimatedRowsWritten).toLocaleString("en-US")} / ${safeNumber(result.freeTierRowsWrittenLimit).toLocaleString("en-US")}</b>`,
-    `Used: <b>${Number.isFinite(pct)?pct.toFixed(2):"0.00"}%</b>`,
+    `Used: <b>${pctText}%</b>`,
     `Remaining: <b>${Number.isFinite(remaining)?Math.max(0,Math.round(remaining)).toLocaleString("en-US"):"UNVERIFIED"}</b>`,
     `Writes/hour: <b>${Number.isFinite(perHour)?perHour.toFixed(1):"CALIBRATING"}</b>`,
     `Projected 24h: <b>${Number.isFinite(projected)?Math.round(projected).toLocaleString("en-US"):"CALIBRATING"}</b>`,
     `Status: <b>${escapeHtml(result.statusLabel || "UNVERIFIED")}</b>`,
+    "",
+    "🔎 <b>V409 meter verification</b>",
+    `Collector ingests: <b>${safeNumber(result.ingests).toLocaleString("en-US")}</b>`,
+    `Tracked storage PUTs: <b>${safeNumber(result.puts).toLocaleString("en-US")}</b>`,
+    `Tracked storage DELETEs: <b>${safeNumber(result.deletes).toLocaleString("en-US")}</b>`,
+    `Meter aggregation writes: <b>${safeNumber(result.aggregationWrites).toLocaleString("en-US")}</b>`,
+    `Accounting check: <b>${result.accountingMatchesV409===true?"MATCH":"MISMATCH"}</b>`,
+    `Collector feed: <b>${escapeHtml(feed)}</b>`,
+    `Meter confidence: <b>${escapeHtml(confidence)}</b>`,
+    `Last collector update: <b>${lastCollectorUpdate}</b>`,
+    `Last collector source: <code>${escapeHtml(lastSource)}</code>`,
+    warning,
+    "",
     `Reset (UK): <b>${escapeHtml(ukResetDisplayV405(result.resetAtIso))}</b>`,
     `Cloudflare reset: <b>00:00 UTC</b>`,
     "",
-    `<i>Bot-side estimate since ${escapeHtml(result.monitorStartedAtIso || "meter start")}. Resets automatically at 00:00 UTC (shown above in UK local time). Cloudflare's dashboard is the official billing counter.</i>`
+    `<i>Bot-side estimate since ${escapeHtml(result.monitorStartedAtIso || "meter start")}. V409 does not treat an initialization-only count as proof of low collector usage. Cloudflare's dashboard is the official billing counter.</i>`
   ].join("\n");
 }
 
@@ -71722,12 +71749,19 @@ export class V3LiveCollectorV363 {
     let body={}; try{body=await request.json();}catch(_){}
     const nowMs=Date.now(), day=utcDayKeyV404(nowMs);
     let meter=await this.state.storage.get("v404:durableUsageMeter")||{};
-    if(meter.utcDay!==day)meter={utcDay:day,monitorStartedAt:nowMs,estimatedRowsWritten:0,puts:0,deletes:0,alarmsSet:0,aggregationWrites:0,ingests:0,lastUpdatedAt:null};
+    if(meter.utcDay!==day)meter={utcDay:day,monitorStartedAt:nowMs,estimatedRowsWritten:0,puts:0,deletes:0,alarmsSet:0,aggregationWrites:0,ingests:0,lastUpdatedAt:null,lastIngestAtV409:null,lastIngestSourceV409:null,lastIngestPayloadV409:null};
     const puts=Math.max(0,safeNumber(body?.puts)), deletes=Math.max(0,safeNumber(body?.deletes)), alarms=Math.max(0,safeNumber(body?.alarms));
+    const sourceToken=isAddress(normalize(body?.sourceToken||""))?normalize(body.sourceToken):null;
+    const sentAt=safeNumber(body?.sentAt)>0?safeNumber(body.sentAt):null;
     meter.puts=safeNumber(meter.puts)+puts; meter.deletes=safeNumber(meter.deletes)+deletes; meter.alarmsSet=safeNumber(meter.alarmsSet)+alarms; meter.aggregationWrites=safeNumber(meter.aggregationWrites)+1;
     meter.estimatedRowsWritten=safeNumber(meter.estimatedRowsWritten)+puts+deletes+1; meter.ingests=safeNumber(meter.ingests)+1; meter.lastUpdatedAt=nowMs;
+    // V409: persist proof that an actual collector delta reached the singleton.
+    // This adds no extra row write: the fields ride on the existing aggregation put.
+    meter.lastIngestAtV409=nowMs;
+    meter.lastIngestSourceV409=sourceToken;
+    meter.lastIngestPayloadV409={puts,deletes,alarms,sentAt,receivedAt:nowMs};
     await this.state.storage.put("v404:durableUsageMeter",meter);
-    return Response.json({ok:true,version:VERSION,status:"USAGE_DELTA_ACCEPTED_V404"});
+    return Response.json({ok:true,version:VERSION,status:"USAGE_DELTA_ACCEPTED_V409"});
   }
 
   async usageMeterSnapshotV404() {
@@ -71737,7 +71771,7 @@ export class V3LiveCollectorV363 {
       // V406: persist the fresh daily meter on first read instead of returning
       // a temporary zero object. This keeps monitorStartedAt stable across
       // repeated /usage calls and counts this initialization row itself.
-      meter={utcDay:day,monitorStartedAt:nowMs,estimatedRowsWritten:1,puts:0,deletes:0,alarmsSet:0,aggregationWrites:1,ingests:0,lastUpdatedAt:nowMs};
+      meter={utcDay:day,monitorStartedAt:nowMs,estimatedRowsWritten:1,puts:0,deletes:0,alarmsSet:0,aggregationWrites:1,ingests:0,lastUpdatedAt:nowMs,lastIngestAtV409:null,lastIngestSourceV409:null,lastIngestPayloadV409:null};
       await this.state.storage.put("v404:durableUsageMeter",meter);
     }
     const used=Math.max(0,safeNumber(meter.estimatedRowsWritten)), limit=DURABLE_ROWS_WRITTEN_FREE_LIMIT_V404;
@@ -71750,7 +71784,25 @@ export class V3LiveCollectorV363 {
     const projectedPct=Number.isFinite(projected24hRows)&&limit>0?(projected24hRows/limit)*100:null;
     const statusLabel=!calibratedV407 && usedPct<70?"CALIBRATING":usedPct>=95||(Number.isFinite(projectedPct)&&projectedPct>=100)?"DANGER":usedPct>=85||(Number.isFinite(projectedPct)&&projectedPct>=85)?"WARNING":usedPct>=70||(Number.isFinite(projectedPct)&&projectedPct>=70)?"WATCH":"SAFE";
     const resetAt=dayStart+86400000;
-    return{version:VERSION,available:true,estimated:true,status:"DURABLE_USAGE_ESTIMATE_READY_V404",statusLabel,utcDay:day,freeTierRowsWrittenLimit:limit,estimatedRowsWritten:used,remainingRows:Math.max(0,limit-used),usedPct,puts:safeNumber(meter.puts),deletes:safeNumber(meter.deletes),aggregationWrites:safeNumber(meter.aggregationWrites),alarmsSet:safeNumber(meter.alarmsSet),ingests:safeNumber(meter.ingests),rowsPerHour,projected24hRows,projectedPct,calibratedV407,calibrationMinutesRequiredV407:15,monitorStartedAt:startedAt,monitorStartedAtIso:new Date(startedAt).toISOString(),lastUpdatedAt:meter.lastUpdatedAt||null,lastUpdatedAtIso:meter.lastUpdatedAt?new Date(meter.lastUpdatedAt).toISOString():null,resetAt,resetAtIso:new Date(resetAt).toISOString(),resetBoundary:"00:00 UTC",interpretation:"Bot-side estimate of Durable Object rows written by this Worker. Cloudflare dashboard remains authoritative.",alarmOperationsExcludedFromRowsWrittenEstimate:true};
+
+    // V409 diagnostic confidence. A meter that contains only its own first-read
+    // initialization row is NOT presented as proof of low collector usage.
+    const ingests=Math.max(0,safeNumber(meter.ingests));
+    const puts=Math.max(0,safeNumber(meter.puts));
+    const deletes=Math.max(0,safeNumber(meter.deletes));
+    const aggregationWrites=Math.max(0,safeNumber(meter.aggregationWrites));
+    const accountedRowsV409=puts+deletes+aggregationWrites;
+    const accountingMatchesV409=Math.abs(accountedRowsV409-used)<0.000001;
+    const lastIngestAtV409=ingests>0
+      ? (safeNumber(meter.lastIngestAtV409)||safeNumber(meter.lastUpdatedAt)||null)
+      : null;
+    const lastIngestAgeMsV409=lastIngestAtV409?Math.max(0,nowMs-lastIngestAtV409):null;
+    const collectorFeedStatusV409=ingests<=0
+      ? (elapsedMs>=10*60*1000?"UNVERIFIED_NO_COLLECTOR_INGESTS":"WAITING_FOR_FIRST_COLLECTOR_INGEST")
+      : (lastIngestAgeMsV409!==null&&lastIngestAgeMsV409<=10*60*1000?"RECEIVING_COLLECTOR_INGESTS":"NO_RECENT_INGEST_MAY_BE_IDLE");
+    const meterConfidenceV409=ingests>0?"VERIFIED_INTERNAL_INGEST_PATH_ACTIVE":"UNVERIFIED_UNTIL_FIRST_COLLECTOR_INGEST";
+
+    return{version:VERSION,available:true,estimated:true,status:"DURABLE_USAGE_ESTIMATE_READY_V409",statusLabel,utcDay:day,freeTierRowsWrittenLimit:limit,estimatedRowsWritten:used,remainingRows:Math.max(0,limit-used),usedPct,puts,deletes,aggregationWrites,alarmsSet:safeNumber(meter.alarmsSet),ingests,rowsPerHour,projected24hRows,projectedPct,calibratedV407,calibrationMinutesRequiredV407:15,monitorStartedAt:startedAt,monitorStartedAtIso:new Date(startedAt).toISOString(),lastUpdatedAt:meter.lastUpdatedAt||null,lastUpdatedAtIso:meter.lastUpdatedAt?new Date(meter.lastUpdatedAt).toISOString():null,lastIngestAtV409,lastIngestAtIsoV409:lastIngestAtV409?new Date(lastIngestAtV409).toISOString():null,lastIngestAgeMsV409,lastIngestSourceV409:meter.lastIngestSourceV409||null,lastIngestPayloadV409:meter.lastIngestPayloadV409||null,collectorFeedStatusV409,meterConfidenceV409,accountedRowsV409,accountingMatchesV409,initializationOnlyV409:ingests===0&&used===1&&puts===0&&deletes===0&&aggregationWrites===1,resetAt,resetAtIso:new Date(resetAt).toISOString(),resetBoundary:"00:00 UTC",interpretation:"Bot-side estimate of Durable Object rows written by this Worker. V409 requires at least one collector ingest before treating the internal collector accounting path as verified. Cloudflare dashboard remains authoritative.",alarmOperationsExcludedFromRowsWrittenEstimate:true};
   }
 
   async fetch(request) {
