@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V415
- * AUTHORITATIVE RUNTIME VERSION: V415
+ * Robinhood Chain Meme Hunter — V416
+ * AUTHORITATIVE RUNTIME VERSION: V416
+ * V416 builds directly on V415 Scanner Funnel / Provider Resilience. It adds bounded ADAPTIVE ANALYSIS HEADROOM: after the discovery pass has finished for the current scan, genuinely unused discovery capacity may be lent to analysis for the current run only, capped at 8 requests. The configured base analysis limit remains 21, the global hard ceiling remains 42, the 2-request Telegram reserve remains protected, provider cooldowns and every real per-request budget check remain authoritative, and unused capacity is never pre-spent or invented. This directly addresses live V415 evidence where analysis reached 20/21 while substantial global capacity remained unused and viable candidates were deferred. The borrowed allowance expires with the scan and can reduce only later optional backlog reclaim, never the already-completed live discovery pass. V416 adds explicit base/effective/borrowed analysis-budget telemetry. No Opportunity/Momentum/confidence/liquidity/risk/Telegram threshold is changed, and all V414 breakout/live-learning/data-health plus V415 retry/funnel logic is preserved.
  * V415 builds directly on the complete V414 Final Learning/Data-Health build. It improves scanner-funnel resilience without lowering any Opportunity, Momentum, confidence, liquidity, holder, risk or Telegram qualification threshold. Budget-deferred viable candidates gain a small bounded secondary retry queue so one exhausted scan does not silently lose them; only one secondary retry is injected per scan so fresh/live discovery keeps capacity. The analysis preflight becomes provider-aware for the protected priority candidate: when market providers are already known unavailable/cooling, a bounded residual-budget attempt may still reuse cached/on-chain evidence and complete metadata rather than being rejected solely by the conservative full-cost estimate. Every real network request remains governed by the existing per-request budget checks; the 42 global / 21 analysis / 2 notification ceilings are unchanged. V415 also adds read-only scanner-funnel telemetry (discovered -> selected -> analysis attempted -> budget deferred -> market verified -> holder verified -> Telegram qualified -> Telegram sent) and retry-queue diagnostics. V414 breakout/live-horizon/learning/data-health logic is preserved unchanged. No evidence is invented; missing market, holder, directional USD or provider data remains UNVERIFIED.
  */
 /**
@@ -1484,7 +1485,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V415";
+const VERSION = "V416";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2380,6 +2381,15 @@ const V415_ANALYSIS_RETRY_MAX_ATTEMPTS = 6;
 const V415_ANALYSIS_RETRY_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 const V415_MIN_BOUNDED_PRIORITY_REQUESTS = 3;
 
+/*
+ * V416 adaptive analysis headroom.
+ * The 21-request analysis limit remains the configured BASE. Once the current
+ * discovery pass is complete, only genuinely unused discovery capacity may be
+ * lent to analysis for this scan. The hard 42-request ceiling and Telegram
+ * reserve remain authoritative.
+ */
+const V416_MAX_ADAPTIVE_ANALYSIS_BORROW = 8;
+
 const NOTIFICATION_REQUEST_LIMIT = 2;
 
 /* V90: protect downstream intelligence even while accelerating backlog catch-up. */
@@ -3151,6 +3161,20 @@ function createBudget() {
       limit:
         ANALYSIS_REQUEST_LIMIT,
 
+      baseLimitV416:
+        ANALYSIS_REQUEST_LIMIT,
+
+      adaptiveHeadroomV416: {
+        enabled: true,
+        activated: false,
+        borrowedRequests: 0,
+        maxBorrowRequests: V416_MAX_ADAPTIVE_ANALYSIS_BORROW,
+        unusedDiscoveryAtActivation: 0,
+        preTelegramGlobalRemainingAtActivation: 0,
+        activatedAt: null,
+        reason: "NOT_CONFIGURED_YET"
+      },
+
       blockscoutUsdGReserveV182: {
         enabled:
           true,
@@ -3221,6 +3245,81 @@ function createBudget() {
   };
 }
 
+function effectiveAnalysisLimitV416(budget) {
+  const configuredLimit = Math.max(
+    0,
+    safeNumber(budget?.analysis?.limit)
+  );
+
+  const baseLimit = Math.max(
+    0,
+    safeNumber(budget?.analysis?.baseLimitV416) || configuredLimit
+  );
+
+  const borrowed =
+    budget?.analysis?.adaptiveHeadroomV416?.activated === true
+      ? Math.max(0, safeNumber(budget.analysis.adaptiveHeadroomV416.borrowedRequests))
+      : 0;
+
+  /* Manual /analyse can intentionally replace analysis.limit; never shrink it. */
+  return Math.max(configuredLimit, baseLimit + borrowed);
+}
+
+function configureAdaptiveAnalysisHeadroomV416(budget, analysisQueueLength = 0) {
+  const telemetry = budget?.analysis?.adaptiveHeadroomV416;
+  if (!telemetry?.enabled) return telemetry || null;
+
+  const unusedDiscovery = Math.max(
+    0,
+    safeNumber(budget?.discovery?.limit) - safeNumber(budget?.discovery?.used)
+  );
+
+  const notificationReserveRemaining =
+    budget?.notification?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(budget?.notification?.limit) - safeNumber(budget?.notification?.used)
+        )
+      : 0;
+
+  const preTelegramGlobalRemaining = Math.max(
+    0,
+    safeNumber(budget?.totalLimit) -
+      safeNumber(budget?.totalUsed) -
+      notificationReserveRemaining
+  );
+
+  const borrowed =
+    safeNumber(analysisQueueLength) > 0
+      ? Math.max(
+          0,
+          Math.min(
+            V416_MAX_ADAPTIVE_ANALYSIS_BORROW,
+            unusedDiscovery,
+            preTelegramGlobalRemaining
+          )
+        )
+      : 0;
+
+  telemetry.borrowedRequests = borrowed;
+  telemetry.unusedDiscoveryAtActivation = unusedDiscovery;
+  telemetry.preTelegramGlobalRemainingAtActivation = preTelegramGlobalRemaining;
+  telemetry.activated = borrowed > 0;
+  telemetry.activatedAt = borrowed > 0 ? Date.now() : null;
+  telemetry.reason =
+    borrowed > 0
+      ? "UNUSED_DISCOVERY_CAPACITY_LENT_AFTER_DISCOVERY_PASS"
+      : safeNumber(analysisQueueLength) <= 0
+        ? "NO_ANALYSIS_QUEUE"
+        : unusedDiscovery <= 0
+          ? "NO_UNUSED_DISCOVERY_CAPACITY"
+          : preTelegramGlobalRemaining <= 0
+            ? "NO_PRE_TELEGRAM_GLOBAL_HEADROOM"
+            : "NO_ADAPTIVE_HEADROOM_AVAILABLE";
+
+  return telemetry;
+}
+
 function budgetAvailable(
   budget,
   phase,
@@ -3287,7 +3386,7 @@ function budgetAvailable(
     return (
       budget.analysis.used +
         amount <=
-      budget.analysis.limit
+      effectiveAnalysisLimitV416(budget)
     );
   }
 
@@ -3368,7 +3467,7 @@ function v182ReserveBlocksAnalysisRequestV226(
       ? Math.max(0, safeNumber(budget?.notification?.limit) - safeNumber(budget?.notification?.used))
       : 0;
   const preTelegramGlobalLimit = Math.max(0, safeNumber(budget?.totalLimit) - notificationReserveRemaining);
-  const analysisBlocked = safeNumber(budget?.analysis?.used) + amount > Math.max(0, safeNumber(budget?.analysis?.limit) - reserved);
+  const analysisBlocked = safeNumber(budget?.analysis?.used) + amount > Math.max(0, effectiveAnalysisLimitV416(budget) - reserved);
   const globalBlocked = safeNumber(budget?.totalUsed) + amount > Math.max(0, preTelegramGlobalLimit - reserved);
   return analysisBlocked || globalBlocked;
 }
@@ -3440,7 +3539,7 @@ function athFairSlotReserveBlocksAnalysisV301(budget, type, amount = 1) {
     ? Math.max(0, safeNumber(budget?.notification?.limit) - safeNumber(budget?.notification?.used))
     : 0;
   const preTelegramGlobalLimit = Math.max(0, safeNumber(budget?.totalLimit) - notificationReserveRemaining);
-  const analysisBlocked = safeNumber(budget?.analysis?.used) + amount > Math.max(0, safeNumber(budget?.analysis?.limit) - reserved);
+  const analysisBlocked = safeNumber(budget?.analysis?.used) + amount > Math.max(0, effectiveAnalysisLimitV416(budget) - reserved);
   const globalBlocked = safeNumber(budget?.totalUsed) + amount > Math.max(0, preTelegramGlobalLimit - reserved);
   return analysisBlocked || globalBlocked;
 }
@@ -3525,7 +3624,7 @@ function consumeBudget(
         amount <=
       Math.max(
         0,
-        budget.analysis.limit -
+        effectiveAnalysisLimitV416(budget) -
           reservedRequestsV182
       );
 
@@ -3817,6 +3916,10 @@ function activatePostAnalysisBacklogReclaimV170(
       budget.analysis.used,
     analysisLimit:
       budget.analysis.limit,
+    effectiveAnalysisLimitV416:
+      effectiveAnalysisLimitV416(budget),
+    adaptiveAnalysisBorrowedV416:
+      safeNumber(budget.analysis?.adaptiveHeadroomV416?.borrowedRequests),
     notificationUsed:
       budget.notification.used,
     notificationLimit:
@@ -3928,12 +4031,21 @@ function budgetTelemetry(
         budget.analysis.used,
 
       limit:
-        budget.analysis.limit,
+        effectiveAnalysisLimitV416(budget),
+
+      baseLimitV416:
+        safeNumber(budget.analysis?.baseLimitV416) || budget.analysis.limit,
+
+      adaptiveBorrowedV416:
+        safeNumber(budget.analysis?.adaptiveHeadroomV416?.borrowedRequests),
+
+      adaptiveHeadroomV416:
+        budget.analysis?.adaptiveHeadroomV416 || null,
 
       remaining:
         Math.max(
           0,
-          budget.analysis.limit -
+          effectiveAnalysisLimitV416(budget) -
             budget.analysis.used
         ),
 
@@ -50571,6 +50683,12 @@ for (
   let topCandidateDeferredReason =
     null;
 
+  const adaptiveAnalysisHeadroomV416 =
+    configureAdaptiveAnalysisHeadroomV416(
+      budget,
+      analysisSelected.length
+    );
+
   const scannerFunnelV415 = {
     enabled: true,
     discoveredNewAddresses: newTokens.size,
@@ -50592,6 +50710,19 @@ for (
     retryQueueAfterAnalysis: null,
     protectedPriorityBoundedAttempts: 0,
     providerConstrainedPriorityAttempts: 0,
+    adaptiveAnalysisHeadroomV416: {
+      enabled: adaptiveAnalysisHeadroomV416?.enabled === true,
+      activated: adaptiveAnalysisHeadroomV416?.activated === true,
+      baseAnalysisLimit: ANALYSIS_REQUEST_LIMIT,
+      borrowedRequests: safeNumber(adaptiveAnalysisHeadroomV416?.borrowedRequests),
+      effectiveAnalysisLimit: effectiveAnalysisLimitV416(budget),
+      unusedDiscoveryAtActivation: safeNumber(adaptiveAnalysisHeadroomV416?.unusedDiscoveryAtActivation),
+      preTelegramGlobalRemainingAtActivation: safeNumber(adaptiveAnalysisHeadroomV416?.preTelegramGlobalRemainingAtActivation),
+      maxBorrowRequests: V416_MAX_ADAPTIVE_ANALYSIS_BORROW,
+      reason: adaptiveAnalysisHeadroomV416?.reason || null,
+      hardGlobalLimitUnchanged: true,
+      notificationReserveProtected: true
+    },
     requestLimitsUnchanged: {
       global: MAX_EXTERNAL_REQUESTS,
       analysis: ANALYSIS_REQUEST_LIMIT,
@@ -50645,7 +50776,8 @@ for (
     boundedAttempts: 0,
     candidates: [],
     hardRequestLimitUnchanged: true,
-    analysisPhaseLimitUnchanged: true,
+    analysisBaseLimitUnchanged: true,
+    adaptiveAnalysisHeadroomV416: true,
     perRequestBudgetChecksAuthoritative: true,
     noExternalRequestRateIncrease: true,
     telegramThresholdsUnchanged: true
@@ -51187,7 +51319,7 @@ for (
 
     const v165AnalysisRemaining = Math.max(
       0,
-      safeNumber(budget?.analysis?.limit) -
+      effectiveAnalysisLimitV416(budget) -
         safeNumber(budget?.analysis?.used)
     );
 
