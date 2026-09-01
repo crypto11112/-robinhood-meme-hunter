@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V425
- * AUTHORITATIVE RUNTIME VERSION: V425
+ * Robinhood Chain Meme Hunter — V426
+ * AUTHORITATIVE RUNTIME VERSION: V426
+ * V426 builds safely on the complete V425 hotfix and persists short-lived provider+method RPC health across scans. A fresh scan no longer forgets that a provider/method combination was just rate-limited. One HTTP-429 now opens a bounded SOFT cooldown for that exact provider+method, Retry-After is honoured when supplied, Robinhood Public uses a deliberately short default cooldown because V423 proved same-scan recovery, Alchemy uses a longer cooldown because two diagnostics showed repeated analysis 429s with no success, and successful responses immediately rehabilitate the combination. Only recent rate-limit health is restored on the next scan; stale evidence expires automatically. Persistence piggybacks on the existing state write and adds zero external requests. V426 preserves V425/V424 health weighting, V423 diagnostics, V422 holder recovery, V421 independent ERC-20 fallback, V420 circuit breaker, V419 checkpoints, all request ceilings, scoring, qualification, Telegram thresholds, and V414 learning/breakout behavior.
  * V425 is the SAFE HOTFIX for the broken V424 deployment. V424 accidentally removed a large inherited source section while replacing rpc(), causing runtime ReferenceError: latestBlock is not defined. V425 rebuilds from the complete syntax-proven V423 source, then reapplies the intended V424 analysis-only provider+method health routing without deleting inherited functions. Robinhood Public RPC receives a small evidence-based initial preference; repeated provider+method HTTP-429 combinations receive bounded scan-local cooldowns; Retry-After is honoured; successful responses immediately rehabilitate that provider+method; and V421 remains the independent ERC-20 read fallback when both normal read paths are unavailable due to proven 429 state. No provider, request ceiling, scoring rule, qualification rule, Telegram threshold, holder requirement, V422 recovery behavior, or V414 breakout/learning behavior is changed.
  * V423 is a DIAGNOSTIC-ONLY provider-health build on V422. It instruments every scanner-budget JSON-RPC call already being made and records provider, RPC method, scanner phase, HTTP status, latency, Retry-After when exposed, success/RPC-error/transport-error classification, first/last 429 time, repeated same-scan calls after a provider's first 429, and bounded recent-attempt evidence. It adds zero external requests, makes no routing/cooldown/order changes, does not add another provider, and preserves V422 holder recovery, V421 third read fallback, V420 circuit breaker, V419 checkpoints, V418 transport classification, V417 progressive completion, V416 adaptive analysis headroom, V415 retry funnel and all V414 breakout/learning logic. The purpose is to prove which provider/method/phase is actually creating rate-limit pressure before V424 changes routing. Scoring, Momentum, qualification, Telegram thresholds, provider order, request ceilings and validation rules are unchanged.
  * V422 builds directly on V421 and targets the final scan→Telegram blocker exposed by FORUM: a fully verified ERC-20 + market candidate reached Telegram qualification but was blocked only because Blockscout returned a successful holder response with zero holder rows. V422 treats that exact condition as HOLDER_INDEXING_LAG rather than a terminal holder failure, persists a bounded holder-evidence retry target, retries the verified Blockscout PRO holder-row path first when the retry becomes due, reuses all existing V417/V419 checkpoints and market/metadata caches, and keeps the candidate eligible for later qualification without weakening the holder requirement. A retry that is still empty is re-scheduled without fabricating holder count/concentration; a successful later holder response must still pass the existing integrity/concentration/whale checks before Telegram can alert. V422 adds no new provider, does not raise the 42-request global ceiling or base 21-request analysis ceiling, and changes no Opportunity/Momentum/confidence/liquidity/risk/qualification/Telegram threshold.
@@ -1499,7 +1500,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V425";
+const VERSION = "V426";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -4446,6 +4447,14 @@ function newState() {
     launchAgeRecoveryV260:
       {},
 
+    rpcHealthPersistentV426: {
+      schemaVersion: "V426_1",
+      updatedAt: null,
+      providerMethod: {},
+      restoredIntoScanCount: 0,
+      expiredRowsDropped: 0
+    },
+
     snapshots:
       {},
 
@@ -4945,6 +4954,21 @@ async function readState(env) {
             "object"
             ? parsed.launchAgeRecoveryV260
             : {},
+
+        rpcHealthPersistentV426: {
+          ...fresh.rpcHealthPersistentV426,
+          ...(
+            parsed.rpcHealthPersistentV426 &&
+            typeof parsed.rpcHealthPersistentV426 === "object"
+              ? parsed.rpcHealthPersistentV426
+              : {}
+          ),
+          providerMethod:
+            parsed.rpcHealthPersistentV426?.providerMethod &&
+            typeof parsed.rpcHealthPersistentV426.providerMethod === "object"
+              ? parsed.rpcHealthPersistentV426.providerMethod
+              : {}
+        },
 
         snapshots:
           parsed.snapshots &&
@@ -12241,6 +12265,416 @@ function addWatch(
 }
 
 /* =========================================================
+   V426 PERSISTENT RPC HEALTH + SOFT 429 COOLDOWNS
+   ========================================================= */
+
+const V426_PERSISTED_RPC_HEALTH_MAX_AGE_MS =
+  10 * 60 * 1000;
+
+const V426_ALCHEMY_FIRST_429_COOLDOWN_MS =
+  45 * 1000;
+
+const V426_ROBINHOOD_FIRST_429_COOLDOWN_MS =
+  3 * 1000;
+
+const V426_OTHER_FIRST_429_COOLDOWN_MS =
+  15 * 1000;
+
+function first429CooldownMsV426(provider) {
+  if (provider === "ALCHEMY") {
+    return V426_ALCHEMY_FIRST_429_COOLDOWN_MS;
+  }
+
+  if (provider === "ROBINHOOD_PUBLIC_RPC") {
+    return V426_ROBINHOOD_FIRST_429_COOLDOWN_MS;
+  }
+
+  return V426_OTHER_FIRST_429_COOLDOWN_MS;
+}
+
+function hydrateRpcHealthV426(
+  state,
+  budget
+) {
+  const root =
+    rpcRoutingRootV424(budget);
+
+  const persisted =
+    state?.rpcHealthPersistentV426;
+
+  const telemetry = {
+    enabled: true,
+    restoredRows: 0,
+    expiredRowsDropped: 0,
+    restoredCoolingRows: 0,
+    sourceUpdatedAt:
+      safeNumber(persisted?.updatedAt) || null,
+    maxAgeMs:
+      V426_PERSISTED_RPC_HEALTH_MAX_AGE_MS
+  };
+
+  if (
+    !root ||
+    !persisted ||
+    typeof persisted !== "object" ||
+    !persisted.providerMethod ||
+    typeof persisted.providerMethod !== "object"
+  ) {
+    return telemetry;
+  }
+
+  const nowMs = Date.now();
+
+  for (
+    const [key, saved]
+    of Object.entries(
+      persisted.providerMethod
+    )
+  ) {
+    if (
+      !saved ||
+      typeof saved !== "object"
+    ) {
+      continue;
+    }
+
+    const evidenceAt =
+      Math.max(
+        safeNumber(saved.lastAttemptAt),
+        safeNumber(saved.last429At),
+        safeNumber(saved.lastSuccessAt)
+      );
+
+    if (
+      !evidenceAt ||
+      nowMs - evidenceAt >
+        V426_PERSISTED_RPC_HEALTH_MAX_AGE_MS
+    ) {
+      telemetry.expiredRowsDropped++;
+      continue;
+    }
+
+    const provider =
+      saved.provider ||
+      String(key).split("::")[0] ||
+      "UNKNOWN";
+
+    const method =
+      saved.method ||
+      String(key).split("::")[1] ||
+      "UNKNOWN";
+
+    const row =
+      ensureProviderMethodHealthV424(
+        budget,
+        provider,
+        method
+      );
+
+    if (!row) continue;
+
+    /*
+     * Carry only health evidence useful for short-lived routing.
+     * Lifetime counters are intentionally bounded so old scans cannot dominate
+     * routing indefinitely.
+     */
+    row.attempts =
+      Math.min(
+        20,
+        safeNumber(saved.attempts)
+      );
+
+    row.successes =
+      Math.min(
+        10,
+        safeNumber(saved.successes)
+      );
+
+    row.http429 =
+      Math.min(
+        10,
+        safeNumber(saved.http429)
+      );
+
+    row.consecutive429 =
+      Math.min(
+        4,
+        safeNumber(saved.consecutive429)
+      );
+
+    row.lastAttemptAt =
+      safeNumber(saved.lastAttemptAt) ||
+      null;
+
+    row.lastSuccessAt =
+      safeNumber(saved.lastSuccessAt) ||
+      null;
+
+    row.last429At =
+      safeNumber(saved.last429At) ||
+      null;
+
+    row.lastOutcome =
+      saved.lastOutcome ||
+      null;
+
+    row.lastLatencyMs =
+      Number.isFinite(
+        Number(saved.lastLatencyMs)
+      )
+        ? Number(saved.lastLatencyMs)
+        : null;
+
+    const savedCooldownUntil =
+      safeNumber(saved.cooldownUntil);
+
+    row.cooldownUntil =
+      savedCooldownUntil > nowMs
+        ? savedCooldownUntil
+        : null;
+
+    row.cooldownReason =
+      row.cooldownUntil
+        ? (
+            saved.cooldownReason ||
+            "PERSISTED_429_COOLDOWN_V426"
+          )
+        : null;
+
+    telemetry.restoredRows++;
+
+    if (row.cooldownUntil) {
+      telemetry.restoredCoolingRows++;
+    }
+  }
+
+  root.persistedHealthV426 = {
+    ...telemetry,
+    hydratedAt:
+      nowMs
+  };
+
+  if (
+    state.rpcHealthPersistentV426 &&
+    typeof state.rpcHealthPersistentV426 === "object"
+  ) {
+    state.rpcHealthPersistentV426
+      .restoredIntoScanCount =
+        safeNumber(
+          state.rpcHealthPersistentV426
+            .restoredIntoScanCount
+        ) + 1;
+
+    state.rpcHealthPersistentV426
+      .expiredRowsDropped =
+        safeNumber(
+          state.rpcHealthPersistentV426
+            .expiredRowsDropped
+        ) +
+        telemetry.expiredRowsDropped;
+  }
+
+  return telemetry;
+}
+
+function persistRpcHealthV426(
+  state,
+  budget
+) {
+  if (
+    !state ||
+    typeof state !== "object"
+  ) {
+    return {
+      savedRows: 0,
+      droppedRows: 0
+    };
+  }
+
+  const root =
+    rpcRoutingRootV424(budget);
+
+  const nowMs = Date.now();
+
+  const providerMethod = {};
+
+  let savedRows = 0;
+  let droppedRows = 0;
+
+  for (
+    const [key, row]
+    of Object.entries(
+      root?.providerMethod || {}
+    )
+  ) {
+    const evidenceAt =
+      Math.max(
+        safeNumber(row?.lastAttemptAt),
+        safeNumber(row?.last429At),
+        safeNumber(row?.lastSuccessAt)
+      );
+
+    if (
+      !evidenceAt ||
+      nowMs - evidenceAt >
+        V426_PERSISTED_RPC_HEALTH_MAX_AGE_MS
+    ) {
+      droppedRows++;
+      continue;
+    }
+
+    providerMethod[key] = {
+      provider:
+        row.provider ||
+        null,
+      method:
+        row.method ||
+        null,
+      attempts:
+        Math.min(
+          20,
+          safeNumber(row.attempts)
+        ),
+      successes:
+        Math.min(
+          10,
+          safeNumber(row.successes)
+        ),
+      http429:
+        Math.min(
+          10,
+          safeNumber(row.http429)
+        ),
+      consecutive429:
+        Math.min(
+          4,
+          safeNumber(row.consecutive429)
+        ),
+      cooldownUntil:
+        safeNumber(row.cooldownUntil) ||
+        null,
+      cooldownReason:
+        row.cooldownReason ||
+        null,
+      lastAttemptAt:
+        safeNumber(row.lastAttemptAt) ||
+        null,
+      lastSuccessAt:
+        safeNumber(row.lastSuccessAt) ||
+        null,
+      last429At:
+        safeNumber(row.last429At) ||
+        null,
+      lastOutcome:
+        row.lastOutcome ||
+        null,
+      lastLatencyMs:
+        Number.isFinite(
+          Number(row.lastLatencyMs)
+        )
+          ? Number(row.lastLatencyMs)
+          : null
+    };
+
+    savedRows++;
+  }
+
+  const previous =
+    state.rpcHealthPersistentV426 &&
+    typeof state.rpcHealthPersistentV426 === "object"
+      ? state.rpcHealthPersistentV426
+      : {};
+
+  state.rpcHealthPersistentV426 = {
+    schemaVersion:
+      "V426_1",
+    updatedAt:
+      nowMs,
+    providerMethod,
+    restoredIntoScanCount:
+      safeNumber(
+        previous.restoredIntoScanCount
+      ),
+    expiredRowsDropped:
+      safeNumber(
+        previous.expiredRowsDropped
+      ) +
+      droppedRows,
+    lastPersistSummary: {
+      savedRows,
+      droppedRows,
+      persistedAt:
+        nowMs
+    }
+  };
+
+  if (root) {
+    root.persistedHealthV426 = {
+      ...(
+        root.persistedHealthV426 ||
+        {}
+      ),
+      lastPersistSummary: {
+        savedRows,
+        droppedRows,
+        persistedAt:
+          nowMs
+      }
+    };
+  }
+
+  return {
+    savedRows,
+    droppedRows,
+    persistedAt:
+      nowMs
+  };
+}
+
+function rpcPersistentHealthTelemetryV426(
+  state,
+  budget
+) {
+  const root =
+    rpcRoutingRootV424(budget);
+
+  return {
+    enabled: true,
+    maxAgeMs:
+      V426_PERSISTED_RPC_HEALTH_MAX_AGE_MS,
+    softCooldownOnFirst429:
+      true,
+    first429DefaultCooldownMs: {
+      ALCHEMY:
+        V426_ALCHEMY_FIRST_429_COOLDOWN_MS,
+      ROBINHOOD_PUBLIC_RPC:
+        V426_ROBINHOOD_FIRST_429_COOLDOWN_MS,
+      OTHER:
+        V426_OTHER_FIRST_429_COOLDOWN_MS
+    },
+    hydration:
+      root?.persistedHealthV426 ||
+      null,
+    persistedStateUpdatedAt:
+      safeNumber(
+        state?.rpcHealthPersistentV426
+          ?.updatedAt
+      ) ||
+      null,
+    persistedRows:
+      Object.keys(
+        state?.rpcHealthPersistentV426
+          ?.providerMethod ||
+        {}
+      ).length,
+    externalRequestsAdded:
+      0,
+    stateWriteAdded:
+      false
+  };
+}
+
+/* =========================================================
    V424/V425 HEALTH-WEIGHTED ANALYSIS RPC ROUTING
    ========================================================= */
 
@@ -12331,20 +12765,42 @@ function updateRpcRoutingHealthV424(
     row.last429At = at;
 
     const explicit = safeNumber(retryAfterMs);
-    if (explicit > 0 || row.consecutive429 >= V424_REPEATED_429_THRESHOLD) {
-      const cooldownMs =
-        explicit > 0 ? explicit : default429CooldownMsV424(provider);
-      const wasCooling = safeNumber(row.cooldownUntil) > at;
-      row.cooldownUntil =
-        Math.max(safeNumber(row.cooldownUntil), at + cooldownMs);
-      row.cooldownReason =
-        explicit > 0
-          ? "HTTP_429_RETRY_AFTER_V424"
-          : "REPEATED_METHOD_429_V424";
-      if (!wasCooling) {
-        root.total429CooldownsOpened =
-          safeNumber(root.total429CooldownsOpened) + 1;
-      }
+
+    /*
+     * V426: one fresh 429 is enough for a short, method-specific SOFT
+     * cooldown. Repeated 429s extend to the stronger V424 duration.
+     */
+    const repeated =
+      row.consecutive429 >=
+      V424_REPEATED_429_THRESHOLD;
+
+    const cooldownMs =
+      explicit > 0
+        ? explicit
+        : repeated
+          ? default429CooldownMsV424(provider)
+          : first429CooldownMsV426(provider);
+
+    const wasCooling =
+      safeNumber(row.cooldownUntil) >
+      at;
+
+    row.cooldownUntil =
+      Math.max(
+        safeNumber(row.cooldownUntil),
+        at + cooldownMs
+      );
+
+    row.cooldownReason =
+      explicit > 0
+        ? "HTTP_429_RETRY_AFTER_V426"
+        : repeated
+          ? "REPEATED_METHOD_429_V424"
+          : "FIRST_METHOD_429_SOFT_COOLDOWN_V426";
+
+    if (!wasCooling) {
+      root.total429CooldownsOpened =
+        safeNumber(root.total429CooldownsOpened) + 1;
     }
   }
 }
@@ -50709,6 +51165,12 @@ async function scan(
   const state =
     stateResult.state;
 
+  const rpcHealthHydrationV426 =
+    hydrateRpcHealthV426(
+      state,
+      budget
+    );
+
   /*
    * V186 local identity recovery must happen BEFORE pruneState so a valid
    * pool mapping already persisted inside watchedTokens[].pools can be
@@ -52672,6 +53134,18 @@ for (
       completedEvidence: 0,
       minimumStageBudgetProtected: 0,
       candidates: []
+    },
+    rpcPersistentHealthV426: {
+      enabled: true,
+      softCooldownOnFirst429: true,
+      crossScanPersistence: true,
+      maxAgeMs:
+        V426_PERSISTED_RPC_HEALTH_MAX_AGE_MS,
+      externalRequestsAdded: 0,
+      additionalStateWrites: 0,
+      scoringChanged: false,
+      qualificationChanged: false,
+      telegramThresholdChanged: false
     },
     rpcHealthRoutingV424: {
       enabled: true,
@@ -57643,6 +58117,12 @@ for (
     };
   }
 
+  const rpcHealthPersistenceV426 =
+    persistRpcHealthV426(
+      state,
+      budget
+    );
+
   const save =
     await writeState(
       env,
@@ -58014,6 +58494,17 @@ for (
       rpcHealthRoutingTelemetryV424(
         budget
       ),
+
+    rpcPersistentHealthV426: {
+      ...rpcPersistentHealthTelemetryV426(
+        state,
+        budget
+      ),
+      hydrationThisScan:
+        rpcHealthHydrationV426,
+      persistenceThisScan:
+        rpcHealthPersistenceV426
+    },
 
     notificationReserveReleaseV174,
 
@@ -60006,6 +60497,11 @@ for (
           ),
         rpcHealthRoutingV424:
           rpcHealthRoutingTelemetryV424(
+            budget
+          ),
+        rpcPersistentHealthV426:
+          rpcPersistentHealthTelemetryV426(
+            state,
             budget
           )
       }
@@ -63044,6 +63540,12 @@ async function health(
 
   const state =
     result.state;
+
+  const rpcHealthHydrationV426 =
+    hydrateRpcHealthV426(
+      state,
+      budget
+    );
 
   pruneState(
     state,
