@@ -1,6 +1,12 @@
 /**
- * Robinhood Chain Meme Hunter — V413
- * AUTHORITATIVE RUNTIME VERSION: V413
+ * Robinhood Chain Meme Hunter — V415
+ * AUTHORITATIVE RUNTIME VERSION: V415
+ * V415 builds directly on the complete V414 Final Learning/Data-Health build. It improves scanner-funnel resilience without lowering any Opportunity, Momentum, confidence, liquidity, holder, risk or Telegram qualification threshold. Budget-deferred viable candidates gain a small bounded secondary retry queue so one exhausted scan does not silently lose them; only one secondary retry is injected per scan so fresh/live discovery keeps capacity. The analysis preflight becomes provider-aware for the protected priority candidate: when market providers are already known unavailable/cooling, a bounded residual-budget attempt may still reuse cached/on-chain evidence and complete metadata rather than being rejected solely by the conservative full-cost estimate. Every real network request remains governed by the existing per-request budget checks; the 42 global / 21 analysis / 2 notification ceilings are unchanged. V415 also adds read-only scanner-funnel telemetry (discovered -> selected -> analysis attempted -> budget deferred -> market verified -> holder verified -> Telegram qualified -> Telegram sent) and retry-queue diagnostics. V414 breakout/live-horizon/learning/data-health logic is preserved unchanged. No evidence is invented; missing market, holder, directional USD or provider data remains UNVERIFIED.
+ */
+/**
+ * Robinhood Chain Meme Hunter — V414
+ * AUTHORITATIVE RUNTIME VERSION: V414
+ * V414 builds directly on V413 and reuses the same once-per-minute batched fresh DexScreener horizon poll to maintain a compact rolling market history for genuine Telegram-proven active calls. The V414 breakout layer is intentionally LOWER-TIMEFRAME FIRST: 1m/5m price-market-cap structure, rolling-5m volume/transaction acceleration, 5m buy-count pressure and 15m/30m structure confirmation are primary; 1h values are retained only as context. FINAL LEARNING/DATA-HEALTH HARDENING pins one provider pair per tracked token, requires minimum rolling-history coverage before stronger breakout states, uses two-sample breakout persistence/hysteresis, tracks higher-low structure, suppresses breakout states during material liquidity deterioration, verifies sampling-cadence continuity, reports evidence confidence/action readiness, tracks sampled new-high frequency and drawdown from the rolling high, exposes momentum deterioration, adds a formal DATA_HEALTHY/DATA_DEGRADED circuit breaker, and adds a read-only 0-100 Breakout Strength measurement score. Breakout state transitions are now frozen with 5m/15m/30m/1h forward-only outcome learning and merged into the persistent call-performance record, so the Hunter can later prove whether BUILDING/IMMINENT/CONFIRMED states had predictive value. /live also surfaces verified observed trade-flow hooks from the existing exact-USD ledger when such evidence exists; it never promotes that observed sample to complete-market coverage. V414 adds zero extra external provider requests beyond V413, does not alter Opportunity/Momentum/scoring/qualification/alerts/trading, never infers unique buyers or missing trade-size evidence, and exposes read-only /live SYMBOL|0xADDRESS diagnostics. Rolling history and breakout learning piggyback on the existing V413 active-entry row so no separate per-minute storage write is introduced.
  * V413 adds a low-write live horizon observation layer for genuine V412+ Telegram-proven entries.
  * A singleton Durable Object polls one batched fresh DexScreener tokens-v1 request per minute for active calls,
  * freezes the first verified market-cap observation at/after 5m/15m/30m/1h/6h/24h, and exposes those frozen
@@ -1478,7 +1484,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V413";
+const VERSION = "V415";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2361,6 +2367,18 @@ const BACKLOG_DISCOVERY_REQUEST_LIMIT = 12;
 const V170_POST_ANALYSIS_BACKLOG_RECLAIM_MAX_REQUESTS = 5;
 
 const ANALYSIS_REQUEST_LIMIT = 21;
+
+/*
+ * V415 bounded secondary analysis-retry queue.
+ * One retry is injected per scan so deferred viable candidates survive a
+ * temporarily exhausted/provider-constrained scan without crowding out new
+ * live discovery. This adds no requests and changes no request ceiling.
+ */
+const V415_ANALYSIS_RETRY_QUEUE_MAX = 4;
+const V415_ANALYSIS_RETRY_INJECT_PER_SCAN = 1;
+const V415_ANALYSIS_RETRY_MAX_ATTEMPTS = 6;
+const V415_ANALYSIS_RETRY_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+const V415_MIN_BOUNDED_PRIORITY_REQUESTS = 3;
 
 const NOTIFICATION_REQUEST_LIMIT = 2;
 
@@ -23118,6 +23136,132 @@ function estimatedAnalysisCost(
   return env.ALCHEMY_API_KEY
     ? FRESH_ANALYSIS_COST_ALCHEMY
     : FRESH_ANALYSIS_COST_FALLBACK;
+}
+
+/* =========================================================
+   V415 SCANNER FUNNEL / PROVIDER RESILIENCE
+   ========================================================= */
+
+function providerConstrainedForPriorityV415(state, watched) {
+  const availability = marketProviderAvailabilityV147(
+    state,
+    watched?.address || null
+  );
+
+  return {
+    constrained: availability?.bothUnavailable === true,
+    availability
+  };
+}
+
+function queueDeferredAnalysisV415(
+  state,
+  watched,
+  reason,
+  priorityScore = null
+) {
+  const address = normalize(watched?.address);
+  if (!address) return null;
+
+  const nowMs = Date.now();
+  const existingRows = Array.isArray(state?.analysisRetryQueueV415)
+    ? state.analysisRetryQueueV415
+    : [];
+
+  const previous = existingRows.find(
+    row => normalize(row?.address) === address
+  ) || null;
+
+  const next = {
+    address,
+    symbol: watched?.metadata?.symbol || watched?.symbol || previous?.symbol || null,
+    firstQueuedAt: safeNumber(previous?.firstQueuedAt) || nowMs,
+    lastDeferredAt: nowMs,
+    attempts: safeNumber(previous?.attempts) + 1,
+    reason: reason || "ANALYSIS_DEFERRED",
+    priorityScore: Number.isFinite(Number(priorityScore))
+      ? Number(priorityScore)
+      : safeNumber(previous?.priorityScore),
+    lastLiveSeenAt: safeNumber(watched?.lastLiveSeenAt) || null,
+    lastSeenAt: safeNumber(watched?.lastSeenAt) || null
+  };
+
+  const merged = [
+    next,
+    ...existingRows.filter(row => normalize(row?.address) !== address)
+  ]
+    .filter(row => {
+      const age = nowMs - safeNumber(row?.firstQueuedAt);
+      return (
+        normalize(row?.address) &&
+        safeNumber(row?.attempts) <= V415_ANALYSIS_RETRY_MAX_ATTEMPTS &&
+        age >= 0 &&
+        age <= V415_ANALYSIS_RETRY_MAX_AGE_MS
+      );
+    })
+    .sort((a, b) => {
+      const scoreDiff = safeNumber(b?.priorityScore) - safeNumber(a?.priorityScore);
+      if (scoreDiff) return scoreDiff;
+      return safeNumber(a?.firstQueuedAt) - safeNumber(b?.firstQueuedAt);
+    })
+    .slice(0, V415_ANALYSIS_RETRY_QUEUE_MAX);
+
+  state.analysisRetryQueueV415 = merged;
+  return next;
+}
+
+function clearDeferredAnalysisV415(state, address) {
+  const target = normalize(address);
+  if (!target) return;
+
+  state.analysisRetryQueueV415 = (
+    Array.isArray(state?.analysisRetryQueueV415)
+      ? state.analysisRetryQueueV415
+      : []
+  ).filter(row => normalize(row?.address) !== target);
+}
+
+function analysisRetryTokensV415(state) {
+  const nowMs = Date.now();
+  const watched = Array.isArray(state?.watchedTokens)
+    ? state.watchedTokens
+    : [];
+  const watchedByAddress = new Map(
+    watched
+      .map(token => [normalize(token?.address), token])
+      .filter(([address]) => Boolean(address))
+  );
+
+  const kept = [];
+  const tokens = [];
+
+  for (const row of Array.isArray(state?.analysisRetryQueueV415)
+    ? state.analysisRetryQueueV415
+    : []) {
+    const address = normalize(row?.address);
+    const age = nowMs - safeNumber(row?.firstQueuedAt);
+    const token = watchedByAddress.get(address);
+
+    if (
+      !address ||
+      !token ||
+      age < 0 ||
+      age > V415_ANALYSIS_RETRY_MAX_AGE_MS ||
+      safeNumber(row?.attempts) > V415_ANALYSIS_RETRY_MAX_ATTEMPTS ||
+      !completionCandidateStillEligible(token) ||
+      !preMarketCandidateAllowed(token)
+    ) {
+      continue;
+    }
+
+    kept.push(row);
+    if (tokens.length < V415_ANALYSIS_RETRY_INJECT_PER_SCAN) {
+      tokens.push(token);
+    }
+  }
+
+  state.analysisRetryQueueV415 = kept.slice(0, V415_ANALYSIS_RETRY_QUEUE_MAX);
+  return tokens;
 }
 
 async function verifyERC20(
@@ -49463,6 +49607,11 @@ for (
       MAX_WATCHED_TOKENS
     );
 
+  const retryTokensV415 =
+    analysisRetryTokensV415(
+      state
+    );
+
   const selectedBase =
     state.watchedTokens.slice(
       0,
@@ -49540,21 +49689,14 @@ for (
       : pendingCompletionTokenRaw;
 
   const selected =
-    pendingCompletionToken
-      ? uniqueBy(
-          [
-            pendingCompletionToken,
-            ...selectedBase
-          ],
-          token =>
-            normalize(
-              token.address
-            )
-        ).slice(
-          0,
-          MAX_TOKEN_CHECKS
-        )
-      : selectedBase;
+    uniqueBy(
+      [
+        ...(pendingCompletionToken ? [pendingCompletionToken] : []),
+        ...retryTokensV415,
+        ...selectedBase
+      ],
+      token => normalize(token?.address)
+    ).slice(0, MAX_TOKEN_CHECKS);
 
   /*
    * V116:
@@ -50429,6 +50571,35 @@ for (
   let topCandidateDeferredReason =
     null;
 
+  const scannerFunnelV415 = {
+    enabled: true,
+    discoveredNewAddresses: newTokens.size,
+    liveAddressesObserved: liveTokens.size,
+    watchedAfterTrim: state.watchedTokens.length,
+    selectedForAnalysis: analysisSelected.length,
+    analysisQueueLength: analysisSelected.length,
+    analysisLoopEntered: 0,
+    budgetDeferred: 0,
+    returnedCandidates: 0,
+    marketVerified: 0,
+    holderEvidenceVerified: 0,
+    telegramQualified: 0,
+    telegramSent: 0,
+    secondaryRetryInjected: retryTokensV415.map(token => normalize(token?.address)).filter(Boolean),
+    retryQueueBeforeAnalysis: Array.isArray(state?.analysisRetryQueueV415)
+      ? state.analysisRetryQueueV415.length
+      : 0,
+    retryQueueAfterAnalysis: null,
+    protectedPriorityBoundedAttempts: 0,
+    providerConstrainedPriorityAttempts: 0,
+    requestLimitsUnchanged: {
+      global: MAX_EXTERNAL_REQUESTS,
+      analysis: ANALYSIS_REQUEST_LIMIT,
+      notification: NOTIFICATION_REQUEST_LIMIT
+    },
+    thresholdsChanged: false
+  };
+
   const v135AnalysisQueue =
     [
       ...analysisSelected
@@ -50678,6 +50849,8 @@ for (
       normalize(
         watched.address
       );
+
+    scannerFunnelV415.analysisLoopEntered++;
 
     if (
       address
@@ -50975,6 +51148,14 @@ for (
       topCandidateAnalysisDeferred
     ) {
       deferredAnalysis++;
+      scannerFunnelV415.budgetDeferred++;
+
+      queueDeferredAnalysisV415(
+        state,
+        watched,
+        "TOP_CANDIDATE_COMPLETION_BUDGET_PROTECTED",
+        marketFreshPriorityScore(watched, newTokens, liveTokens)
+      );
 
       validationResults.push({
         address:
@@ -51031,15 +51212,37 @@ for (
         required
       );
 
+    const providerConstraintV415 =
+      providerConstrainedForPriorityV415(
+        state,
+        watched
+      );
+
+    const v415ProtectedPriorityResidualAttempt =
+      !v165FullEstimateAffordable &&
+      isPriorityCompletion &&
+      providerConstraintV415.constrained &&
+      v165ResidualAllowance >=
+        V415_MIN_BOUNDED_PRIORITY_REQUESTS;
+
     const v165BoundedReplacementAttempt =
       !v165FullEstimateAffordable &&
       v165ProtectedReplacement &&
       v165ResidualAllowance >=
         V165_MIN_BOUNDED_REPLACEMENT_REQUESTS;
 
+    const v415BoundedAnalysisAttempt =
+      v165BoundedReplacementAttempt ||
+      v415ProtectedPriorityResidualAttempt;
+
+    if (v415ProtectedPriorityResidualAttempt) {
+      scannerFunnelV415.protectedPriorityBoundedAttempts++;
+      scannerFunnelV415.providerConstrainedPriorityAttempts++;
+    }
+
     if (
       !v165FullEstimateAffordable &&
-      !v165BoundedReplacementAttempt
+      !v415BoundedAnalysisAttempt
     ) {
       deferredAnalysis++;
 
@@ -51052,6 +51255,15 @@ for (
         topCandidateDeferredReason =
           "FULL_ANALYSIS_BUDGET_PROTECTED";
       }
+
+      scannerFunnelV415.budgetDeferred++;
+
+      queueDeferredAnalysisV415(
+        state,
+        watched,
+        "FULL_ANALYSIS_BUDGET_PROTECTED",
+        marketFreshPriorityScore(watched, newTokens, liveTokens)
+      );
 
       validationResults.push({
         address:
@@ -51090,7 +51302,7 @@ for (
       safeNumber(budget?.analysis?.used);
 
     if (
-      v165BoundedReplacementAttempt
+      v415BoundedAnalysisAttempt
     ) {
       terminalReplacementBudgetRecoveryV165
         .boundedAttempts++;
@@ -51107,6 +51319,10 @@ for (
           residualAllowanceBefore:
             v165ResidualAllowance,
           boundedAttempt: true,
+          providerConstrainedPriorityV415:
+            v415ProtectedPriorityResidualAttempt,
+          providerAvailabilityV415:
+            providerConstraintV415.availability || null,
           actualAnalysisRequestsUsed: null,
           candidateReturned: false,
           analysisDeferred: null
@@ -51186,7 +51402,7 @@ for (
       );
 
     if (
-      v165BoundedReplacementAttempt
+      v415BoundedAnalysisAttempt
     ) {
       const v165TelemetryRow =
         terminalReplacementBudgetRecoveryV165
@@ -51232,6 +51448,14 @@ for (
           "ANALYSIS_DEFERRED";
       }
 
+      scannerFunnelV415.budgetDeferred++;
+      queueDeferredAnalysisV415(
+        state,
+        watched,
+        candidate?.validation?.reason || candidate?.reason || "ANALYSIS_DEFERRED",
+        marketFreshPriorityScore(watched, newTokens, liveTokens)
+      );
+
       validationResults.push({
         address,
 
@@ -51249,6 +51473,11 @@ for (
 
       continue;
     }
+
+    clearDeferredAnalysisV415(
+      state,
+      address
+    );
 
     watched.lastCheckedAt =
       Date.now();
@@ -51881,6 +52110,18 @@ for (
     candidates.push(
       candidate
     );
+
+    scannerFunnelV415.returnedCandidates++;
+    if (candidate?.market?.verified === true) {
+      scannerFunnelV415.marketVerified++;
+    }
+    if (
+      candidate?.holders?.integrity?.verified === true &&
+      candidate?.holders?.concentrationVerified === true &&
+      candidate?.holders?.whale?.verified === true
+    ) {
+      scannerFunnelV415.holderEvidenceVerified++;
+    }
   }
 
   candidates.sort(
@@ -54021,6 +54262,9 @@ for (
 
   const telegramResults =
     [];
+
+  scannerFunnelV415.telegramQualified =
+    candidates.filter(qualifiesTelegram).length;
 
   for (
     const candidate
@@ -57222,6 +57466,24 @@ for (
         ),
       verifiedUsdCalculationChanged: false,
       candidates: telegramVerifiedUsdObservabilityV213
+    },
+
+    scannerFunnelV415: {
+      ...scannerFunnelV415,
+      telegramQualified:
+        candidates.filter(qualifiesTelegram).length,
+      telegramSent:
+        telegramResults.filter(row => row?.sent === true).length,
+      retryQueueAfterAnalysis:
+        Array.isArray(state?.analysisRetryQueueV415)
+          ? state.analysisRetryQueueV415.length
+          : 0,
+      providersAtEnd: {
+        market:
+          marketProviderAvailabilityV147(state, effectiveMarketFreshTargetAddress || marketFreshTargetAddress || null),
+        bitqueryQuota:
+          bitquery402CooldownTelemetryV251(state)
+      }
     },
 
     qualifyingCandidates:
@@ -67044,6 +67306,7 @@ function telegramHelpV271() {
     "<code>/performance</code> — overall tracked-call summary",
     "<code>/learning</code> — frozen signals, outcomes + sample quality",
     "<code>/horizon GUS</code> — fixed-horizon capture diagnostics",
+    "<code>/live GUS</code> — V414 lower-timeframe rolling signals + breakout state (read-only)",
     "<code>/v3usd 0xADDRESS</code> — persisted native V3 USD flow (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/help</code> — command list",
@@ -67437,6 +67700,26 @@ async function telegramCommandReplyV271(
       ].join("\n");
     } else if (resolved.record) {
       reply = horizonDiagnosticsMessageV318(resolved.record);
+    } else {
+      reply = "❌ <b>Call not found.</b>\n\nUse <code>/calls</code> to see stored calls.";
+    }
+  } else if (
+    parsed.command ===
+    "/live"
+  ) {
+    const resolved = resolveCallPerformanceV271(state, parsed.argument);
+    if (resolved.status === "MISSING_QUERY") {
+      reply = "ℹ️ Use <code>/live SYMBOL</code> or <code>/live 0xADDRESS</code>.";
+    } else if (resolved.status === "AMBIGUOUS_SYMBOL") {
+      reply = [
+        "⚠️ <b>More than one call uses that symbol.</b>","",
+        "Use the contract address instead:",
+        ...resolved.matches.slice(0,10).map(record=>`<code>${escapeHtml(record?.address||"")}</code>`)
+      ].join("\n");
+    } else if (resolved.record) {
+      const liveV414 = await liveSignalSnapshotV414(env, resolved.record?.address, state);
+      reply = liveSignalTelegramMessageV414(liveV414);
+      if (diagnosticV273) diagnosticV273.liveSignalsV414 = {available:liveV414?.available===true,points:liveV414?.points??0,state:liveV414?.signals?.state||null,scannerBudgetConsumed:false,externalProviderRequests:0};
     } else {
       reply = "❌ <b>Call not found.</b>\n\nUse <code>/calls</code> to see stored calls.";
     }
@@ -72063,6 +72346,411 @@ const HORIZON_LIVE_WINDOWS_V413 = Object.freeze({
   h24: 24 * 60 * 60 * 1000
 });
 
+// V414 rolling-signal layer. These points are derived only from the same fresh
+// DexScreener response already required by V413, so no extra provider request
+// is introduced. The bounded history is persisted inside the existing active
+// horizon row and therefore piggybacks on the same storage mutation.
+const LIVE_ROLLING_MAX_POINTS_V414 = 75; // ~75 minutes at the V413 60s cadence
+const LIVE_BREAKOUT_LOOKBACK_MS_V414 = 30 * 60 * 1000;
+
+function finiteV414(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function pctDeltaV414(before, after) {
+  const a = finiteV414(before), b = finiteV414(after);
+  if (a === null || b === null || a === 0) return null;
+  return ((b - a) / Math.abs(a)) * 100;
+}
+
+function pointAtOrBeforeV414(points, targetAt) {
+  if (!Array.isArray(points) || !Number.isFinite(Number(targetAt))) return null;
+  let best = null;
+  for (const p of points) {
+    const t = Number(p?.observedAt);
+    if (!Number.isFinite(t) || t > targetAt) continue;
+    if (!best || t > Number(best.observedAt)) best = p;
+  }
+  return best;
+}
+
+const BREAKOUT_LEARNING_WINDOWS_V414 = Object.freeze({m5:5*60*1000,m15:15*60*1000,m30:30*60*1000,h1:60*60*1000});
+const BREAKOUT_LEARNING_STATES_V414 = new Set(["BREAKOUT_BUILDING","BREAKOUT_IMMINENT","BREAKOUT_CONFIRMED","FAILED_BREAKOUT"]);
+
+function updateBreakoutLearningV414(row, observedAt, marketCap) {
+  if (!row || !Number.isFinite(Number(observedAt)) || !Number.isFinite(Number(marketCap)) || Number(marketCap)<=0) return row;
+  row.breakoutLearningV414 = row.breakoutLearningV414 && typeof row.breakoutLearningV414 === "object"
+    ? row.breakoutLearningV414
+    : {version:"V414",forwardOnly:true,hindsightBackfillAllowed:false,events:[]};
+  const learning=row.breakoutLearningV414;
+  learning.events=Array.isArray(learning.events)?learning.events:[];
+  const signal=row?.liveSignalsV414;
+  const state=String(signal?.state||"");
+  const previousState=String(learning?.lastObservedState||"");
+
+  // Freeze a new transition only when the state genuinely changes. We keep the
+  // latest 24 events, enough for research without allowing unbounded DO growth.
+  if (BREAKOUT_LEARNING_STATES_V414.has(state) && state!==previousState) {
+    learning.events.push({
+      eventId:`${state}:${Math.trunc(Number(observedAt))}`,
+      state,
+      observedAt:Number(observedAt),
+      marketCap:Number(marketCap),
+      breakoutStrength:Number.isFinite(Number(signal?.breakoutStrength))?Number(signal.breakoutStrength):null,
+      evidenceConfidence:signal?.evidenceConfidence||null,
+      evidenceCoveragePct:Number.isFinite(Number(signal?.evidenceCoveragePct))?Number(signal.evidenceCoveragePct):null,
+      reason:signal?.reason||null,
+      dataHealthStatus:signal?.dataHealth?.status||null,
+      outcomes:{m5:null,m15:null,m30:null,h1:null},
+      forwardOnly:true,
+      frozen:true
+    });
+    learning.events=learning.events.slice(-24);
+  }
+  learning.lastObservedState=state||null;
+  learning.lastUpdatedAt=Number(observedAt);
+
+  for (const event of learning.events) {
+    if (!event || event?.forwardOnly!==true || event?.frozen!==true) continue;
+    event.outcomes=event.outcomes&&typeof event.outcomes==="object"?event.outcomes:{m5:null,m15:null,m30:null,h1:null};
+    const baseAt=Number(event.observedAt), baseMc=Number(event.marketCap);
+    if (!Number.isFinite(baseAt)||!Number.isFinite(baseMc)||baseMc<=0) continue;
+    for (const [key,delay] of Object.entries(BREAKOUT_LEARNING_WINDOWS_V414)) {
+      if (event.outcomes[key]) continue;
+      const targetAt=baseAt+delay;
+      if (Number(observedAt)<targetAt) continue;
+      event.outcomes[key]={
+        targetAt,
+        observedAt:Number(observedAt),
+        observationLagMs:Number(observedAt)-targetAt,
+        marketCap:Number(marketCap),
+        multipleByMarketCap:Number(marketCap)/baseMc,
+        source:"DEXSCREENER_LIVE_BREAKOUT_LEARNING_V414",
+        verified:true,
+        frozen:true
+      };
+    }
+  }
+  return row;
+}
+
+function verifiedObservedTradeFlowV414(state, address, nowMs=Date.now()) {
+  const token=normalize(address||"");
+  if (!isAddress(token) || !state) return {verified:false,reason:"NO_TOKEN_OR_STATE_V414"};
+  const ledger=onChainDirectionalStoreV179(state)?.[token];
+  const records=Array.isArray(ledger?.records)?ledger.records:[];
+  const exact=records.filter(r=>normalize(r?.candidateAddress||"")===token && r?.exactUsdVerified===true && Number.isFinite(Number(r?.exactUsdAmount)) && Number(r.exactUsdAmount)>0 && Number.isFinite(Number(r?.timestamp||r?.observedAt||r?.blockTimestampMs)));
+  if (!exact.length) return {verified:false,reason:"NO_EXACT_USD_OBSERVED_TRADES_V414",completeMarketCoverage:false};
+  const windows={m5:5*60*1000,m15:15*60*1000};
+  const out={verified:true,source:"BOT_OBSERVED_EXACT_USD_LEDGER_V179_V414",completeMarketCoverage:false,windows:{}};
+  for (const [key,ms] of Object.entries(windows)) {
+    const rows=exact.filter(r=>{
+      const t=Number(r?.timestamp||r?.observedAt||r?.blockTimestampMs);
+      return Number.isFinite(t)&&nowMs-t>=0&&nowMs-t<=ms;
+    });
+    let buyUsd=0,sellUsd=0,buyTrades=0,sellTrades=0,maxBuyUsd=0,maxSellUsd=0;
+    for (const r of rows) {
+      const usd=Number(r.exactUsdAmount);
+      const direction=String(r?.direction||r?.side||"").toUpperCase();
+      if (direction.includes("BUY")) { buyUsd+=usd; buyTrades++; maxBuyUsd=Math.max(maxBuyUsd,usd); }
+      else if (direction.includes("SELL")) { sellUsd+=usd; sellTrades++; maxSellUsd=Math.max(maxSellUsd,usd); }
+    }
+    const total=buyUsd+sellUsd;
+    out.windows[key]={verified:rows.length>0,buyUsd,sellUsd,netUsd:buyUsd-sellUsd,buyTrades,sellTrades,buyPressurePct:total>0?buyUsd/total*100:null,maxBuyUsd,maxSellUsd,observedTrades:rows.length};
+  }
+  return out;
+}
+
+function computeLiveSignalsV414(points, previousSignals = null) {
+  const rows = Array.isArray(points) ? points.filter(Boolean).sort((a,b)=>safeNumber(a?.observedAt)-safeNumber(b?.observedAt)) : [];
+  const current = rows[rows.length - 1] || null;
+  if (!current) return {version:"V414",measurementOnly:true,affectsScoring:false,verified:false,state:"UNVERIFIED",reason:"NO_ROLLING_MARKET_POINTS_V414"};
+
+  const now = Number(current.observedAt);
+  const oldestAt = Number(rows[0]?.observedAt);
+  const historyAgeMs = Number.isFinite(oldestAt) ? Math.max(0, now-oldestAt) : 0;
+  const sampleCount = rows.length;
+
+  // V414 lower-timeframe first. ~60s polling means p1 is the closest practical
+  // one-minute comparison; p5 is the primary fast window. 15m/30m are
+  // confirmation/context. We never manufacture exact interval volume from a
+  // provider rolling window.
+  const p1 = pointAtOrBeforeV414(rows, now - 1*60*1000);
+  const p3 = pointAtOrBeforeV414(rows, now - 3*60*1000);
+  const p5 = pointAtOrBeforeV414(rows, now - 5*60*1000);
+  const p15 = pointAtOrBeforeV414(rows, now - 15*60*1000);
+  const p30 = pointAtOrBeforeV414(rows, now - 30*60*1000);
+
+  const mc = finiteV414(current.marketCap);
+  const liq = finiteV414(current.liquidityUsd);
+  const volM5 = finiteV414(current.volumeM5);
+  const volH1 = finiteV414(current.volumeH1);
+  const txM5 = finiteV414(current.txM5);
+  const txH1 = finiteV414(current.txH1);
+  const buysM5 = finiteV414(current.buysM5);
+  const sellsM5 = finiteV414(current.sellsM5);
+  const buysH1 = finiteV414(current.buysH1);
+  const sellsH1 = finiteV414(current.sellsH1);
+
+  const mc1 = pctDeltaV414(p1?.marketCap, mc);
+  const mc3 = pctDeltaV414(p3?.marketCap, mc);
+  const mc5 = pctDeltaV414(p5?.marketCap, mc);
+  const mc15 = pctDeltaV414(p15?.marketCap, mc);
+  const mc30 = pctDeltaV414(p30?.marketCap, mc);
+  const liq1 = pctDeltaV414(p1?.liquidityUsd, liq);
+  const liq5 = pctDeltaV414(p5?.liquidityUsd, liq);
+  const liq15 = pctDeltaV414(p15?.liquidityUsd, liq);
+
+  // Primary activity acceleration: how the provider's *rolling 5m* value is
+  // changing from one sampled minute / five sampled minutes ago. These are not
+  // claimed as exact 1m or exact 5m interval totals.
+  const volM5Change1 = pctDeltaV414(p1?.volumeM5, volM5);
+  const volM5Change5 = pctDeltaV414(p5?.volumeM5, volM5);
+  const txM5Change1 = pctDeltaV414(p1?.txM5, txM5);
+  const txM5Change5 = pctDeltaV414(p5?.txM5, txM5);
+
+  // 1h provider values remain context only, never the primary breakout trigger.
+  const volH1Change5 = pctDeltaV414(p5?.volumeH1, volH1);
+  const txH1Change5 = pctDeltaV414(p5?.txH1, txH1);
+
+  const priorRows = rows.filter(p => Number(p?.observedAt) < now && now-Number(p?.observedAt) <= LIVE_BREAKOUT_LOOKBACK_MS_V414);
+  const priorMc = priorRows.map(p=>finiteV414(p?.marketCap)).filter(v=>v!==null&&v>0);
+  const priorHigh = priorMc.length ? Math.max(...priorMc) : null;
+  const distanceToPriorHighPct = priorHigh && mc ? ((mc-priorHigh)/priorHigh)*100 : null;
+
+  // Higher-low structure: compare the sampled low of the most recent ~7.5m with
+  // the preceding ~7.5m. This is deliberately tolerant of ~60s polling jitter.
+  const recentLowRows = rows.filter(p => now-Number(p?.observedAt) <= 7.5*60*1000);
+  const priorLowRows = rows.filter(p => {
+    const age = now-Number(p?.observedAt);
+    return age > 7.5*60*1000 && age <= 15*60*1000;
+  });
+  const recentLowVals = recentLowRows.map(p=>finiteV414(p?.marketCap)).filter(v=>v!==null&&v>0);
+  const priorLowVals = priorLowRows.map(p=>finiteV414(p?.marketCap)).filter(v=>v!==null&&v>0);
+  const recentLow = recentLowVals.length ? Math.min(...recentLowVals) : null;
+  const priorLow = priorLowVals.length ? Math.min(...priorLowVals) : null;
+  const higherLowPct = priorLow && recentLow ? ((recentLow-priorLow)/priorLow)*100 : null;
+  const higherLowHealthy = higherLowPct === null ? null : higherLowPct >= -0.5;
+
+  const m5Total = buysM5 !== null && sellsM5 !== null ? buysM5+sellsM5 : null;
+  const h1Total = buysH1 !== null && sellsH1 !== null ? buysH1+sellsH1 : null;
+  const providerBuyCountPressureM5 = m5Total && m5Total>0 ? buysM5/m5Total*100 : null;
+  const providerBuyCountPressureH1 = h1Total && h1Total>0 ? buysH1/h1Total*100 : null;
+
+  const fastVolumePositive = volM5Change1 !== null ? volM5Change1 > 0 : (volM5Change5 !== null && volM5Change5 > 0);
+  const fastTxPositive = txM5Change1 !== null ? txM5Change1 > 0 : (txM5Change5 !== null && txM5Change5 > 0);
+  const fastPressureHealthy = providerBuyCountPressureM5 !== null && providerBuyCountPressureM5 >= 48;
+  const fastPressureStrong = providerBuyCountPressureM5 !== null && providerBuyCountPressureM5 >= 52;
+  const fastPricePositive = (mc1 !== null && mc1 > 0) || (mc5 !== null && mc5 > 0);
+  const structure15Healthy = mc15 === null || mc15 > -3;
+  const liquidityDeteriorating = (liq5 !== null && liq5 <= -5) || (liq15 !== null && liq15 <= -10);
+
+  // Evidence gates. Strong states cannot be produced from a handful of samples.
+  const coverageBuilding = sampleCount >= 5 && historyAgeMs >= 4*60*1000;
+  const coverageImminent = sampleCount >= 9 && historyAgeMs >= 8*60*1000;
+  const coverageConfirmed = sampleCount >= 12 && historyAgeMs >= 11*60*1000;
+  const history30mMature = historyAgeMs >= 28*60*1000;
+
+  // Pair-stability proof. A single pinned pair should remain constant through
+  // the rolling history. Any mixed pair history suppresses stronger states.
+  const pairAddresses = [...new Set(rows.map(p=>normalize(p?.pairAddress||"")).filter(Boolean))];
+  const pairStable = pairAddresses.length <= 1 && pairAddresses.length > 0;
+  const pinnedPairAddress = pairAddresses[0] || normalize(current?.pairAddress||"") || null;
+
+  // Sampling-integrity guard. A nominal ~60s poll is allowed reasonable jitter,
+  // but a large hole means short-timeframe acceleration/structure is no longer
+  // continuous enough for a strong breakout classification.
+  const gapsMs = [];
+  for (let i=1;i<rows.length;i++) {
+    const a=Number(rows[i-1]?.observedAt), b=Number(rows[i]?.observedAt);
+    if (Number.isFinite(a) && Number.isFinite(b) && b>=a) gapsMs.push(b-a);
+  }
+  const maxSampleGapMs = gapsMs.length ? Math.max(...gapsMs) : null;
+  const averageSampleGapMs = gapsMs.length ? gapsMs.reduce((a,b)=>a+b,0)/gapsMs.length : null;
+  const cadenceHealthy = maxSampleGapMs === null ? sampleCount <= 1 : maxSampleGapMs <= 150*1000;
+
+  // Sampled price structure beyond a single resistance distance. Count fresh
+  // highs in the last ~10m and expose current drawdown from the sampled 30m
+  // high. This is measurement-only and does not claim candle-level precision.
+  const tenMinuteRows = rows.filter(p => now-Number(p?.observedAt) <= 10*60*1000);
+  let sampledNewHighCount10m = 0;
+  let runningHigh10m = null;
+  for (const p of tenMinuteRows) {
+    const v=finiteV414(p?.marketCap);
+    if (v===null || v<=0) continue;
+    if (runningHigh10m===null) { runningHigh10m=v; continue; }
+    if (v > runningHigh10m*1.0025) { sampledNewHighCount10m++; runningHigh10m=v; }
+    else if (v > runningHigh10m) runningHigh10m=v;
+  }
+  const drawdownFromSampledHighPct = priorHigh && mc ? ((mc-priorHigh)/priorHigh)*100 : null;
+
+  const fastEvidenceAvailable = [mc5, volM5Change1 ?? volM5Change5, txM5Change1 ?? txM5Change5, providerBuyCountPressureM5, liq5].filter(v=>v!==null && Number.isFinite(Number(v))).length;
+  const fastEvidenceCoveragePct = Math.round(fastEvidenceAvailable/5*100);
+  const evidenceConfidence = !pairStable || !cadenceHealthy || sampleCount < 5
+    ? "LOW"
+    : coverageConfirmed && fastEvidenceCoveragePct >= 80
+      ? "HIGH"
+      : coverageImminent && fastEvidenceCoveragePct >= 60
+        ? "MEDIUM"
+        : "LOW";
+
+  // Formal circuit breaker for future automated-use research. A degraded feed
+  // can still be displayed, but it is never allowed to produce a strong state.
+  const dataHealthReasons=[];
+  if (!pairStable) dataHealthReasons.push("PAIR_UNSTABLE_OR_UNVERIFIED");
+  if (!cadenceHealthy) dataHealthReasons.push("SAMPLE_CADENCE_GAP");
+  if (sampleCount<5) dataHealthReasons.push("INSUFFICIENT_HISTORY");
+  if (fastEvidenceCoveragePct<60) dataHealthReasons.push("FAST_EVIDENCE_INCOMPLETE");
+  if (liquidityDeteriorating) dataHealthReasons.push("LIQUIDITY_DETERIORATING");
+  const dataHealthStatus=dataHealthReasons.length?"DATA_DEGRADED":"DATA_HEALTHY";
+  const dataHealthCircuitBreakerActive=dataHealthStatus!=="DATA_HEALTHY";
+
+  const momentumDeteriorating = (mc1!==null && mc1 < -1.5) &&
+    ((volM5Change1!==null && volM5Change1 < 0) || (txM5Change1!==null && txM5Change1 < 0)) &&
+    (providerBuyCountPressureM5===null || providerBuyCountPressureM5 < 48);
+
+  let pendingBreakoutLevel = finiteV414(previousSignals?.pendingBreakoutLevel);
+  let breakoutAboveSamples = Math.max(0, safeNumber(previousSignals?.breakoutAboveSamples));
+  let confirmedLevel = finiteV414(previousSignals?.confirmedLevel);
+  let failedBelowSamples = Math.max(0, safeNumber(previousSignals?.failedBelowSamples));
+  const prevState = String(previousSignals?.state || "");
+
+  // Freeze the candidate resistance level on the first valid break attempt so
+  // the next sample is compared with the same level, not a moving prior high.
+  const breakoutEvidenceComplete = fastPricePositive && fastVolumePositive && fastTxPositive && fastPressureHealthy && structure15Healthy && !liquidityDeteriorating && pairStable && cadenceHealthy && evidenceConfidence !== "LOW";
+  const rawAboveResistance = priorHigh && mc && mc > priorHigh * 1.005;
+  if (!pendingBreakoutLevel && rawAboveResistance && breakoutEvidenceComplete && coverageImminent) {
+    pendingBreakoutLevel = priorHigh;
+    breakoutAboveSamples = 1;
+  } else if (pendingBreakoutLevel && mc && mc > pendingBreakoutLevel * 1.005 && breakoutEvidenceComplete) {
+    breakoutAboveSamples = Math.min(10, breakoutAboveSamples + 1);
+  } else if (pendingBreakoutLevel && mc && mc < pendingBreakoutLevel * 0.995) {
+    pendingBreakoutLevel = null;
+    breakoutAboveSamples = 0;
+  }
+
+  // Failed breakout also uses persistence: two consecutive samples materially
+  // below the confirmed level before changing state.
+  if (confirmedLevel && mc && mc < confirmedLevel * 0.95) failedBelowSamples += 1;
+  else if (confirmedLevel && mc && mc >= confirmedLevel * 0.97) failedBelowSamples = 0;
+
+  let state = "NO_SETUP";
+  let reason = "INSUFFICIENT_LOWER_TIMEFRAME_ALIGNMENT_V414";
+
+  if (dataHealthCircuitBreakerActive && (!pairStable || !cadenceHealthy || sampleCount<5 || fastEvidenceCoveragePct<60)) {
+    state = "DATA_DEGRADED";
+    reason = `DATA_HEALTH_CIRCUIT_BREAKER_V414:${dataHealthReasons.join("|")}`;
+  } else if (momentumDeteriorating) {
+    state = "NO_SETUP";
+    reason = "FAST_MOMENTUM_DETERIORATION_V414";
+  } else if (liquidityDeteriorating) {
+    state = "NO_SETUP";
+    reason = "LIQUIDITY_DETERIORATION_SUPPRESSES_BREAKOUT_V414";
+  } else if (confirmedLevel && failedBelowSamples >= 2) {
+    state = "FAILED_BREAKOUT";
+    reason = "TWO_SAMPLES_BELOW_95PCT_OF_CONFIRMED_LEVEL_V414";
+  } else if (
+    pendingBreakoutLevel && breakoutAboveSamples >= 2 && coverageConfirmed && evidenceConfidence === "HIGH" &&
+    fastVolumePositive && fastTxPositive && fastPressureHealthy &&
+    structure15Healthy && higherLowHealthy !== false
+  ) {
+    state = "BREAKOUT_CONFIRMED";
+    reason = "TWO_SAMPLE_BREAK_ABOVE_PINNED_RESISTANCE_WITH_COMPLETE_FAST_EVIDENCE_V414";
+    confirmedLevel = pendingBreakoutLevel;
+  } else if (
+    pendingBreakoutLevel && breakoutAboveSamples >= 1 && coverageImminent && evidenceConfidence !== "LOW" &&
+    fastVolumePositive && fastTxPositive && fastPressureStrong &&
+    structure15Healthy && higherLowHealthy !== false
+  ) {
+    state = "BREAKOUT_IMMINENT";
+    reason = "FIRST_BREAK_SAMPLE_WITH_FAST_EVIDENCE_AWAITING_PERSISTENCE_V414";
+  } else if (
+    coverageImminent && evidenceConfidence !== "LOW" && distanceToPriorHighPct !== null && distanceToPriorHighPct >= -1.0 && distanceToPriorHighPct <= 0.5 &&
+    fastPricePositive && fastVolumePositive && fastTxPositive && fastPressureStrong &&
+    structure15Healthy && higherLowHealthy !== false
+  ) {
+    state = "BREAKOUT_IMMINENT";
+    reason = "WITHIN_1PCT_OF_RESISTANCE_WITH_COMPLETE_FAST_ALIGNMENT_V414";
+  } else if (
+    coverageBuilding && distanceToPriorHighPct !== null && distanceToPriorHighPct >= -3.0 &&
+    mc5 !== null && mc5 > 0 &&
+    (liq5 === null || liq5 >= -2) &&
+    fastPressureHealthy && (fastVolumePositive || fastTxPositive)
+  ) {
+    state = "BREAKOUT_BUILDING";
+    reason = "WITHIN_3PCT_OF_SAMPLED_HIGH_WITH_POSITIVE_5M_STRUCTURE_V414";
+  }
+
+  // Measurement-only 0-100 breakout strength. Missing evidence contributes 0;
+  // the separate evidenceCoveragePct prevents a high score being mistaken for
+  // complete evidence when inputs are sparse.
+  let breakoutStrength = 0;
+  let evidenceItems = 0, evidencePresent = 0;
+  const addEvidence = (available, points) => { evidenceItems++; if (available) { evidencePresent++; breakoutStrength += points; } };
+  addEvidence(mc5 !== null && mc5 > 0, 15);
+  addEvidence(distanceToPriorHighPct !== null && distanceToPriorHighPct >= -3, 15);
+  addEvidence(fastVolumePositive, 15);
+  addEvidence(fastTxPositive, 15);
+  addEvidence(fastPressureStrong, 15);
+  addEvidence(liq5 !== null && liq5 >= -2, 10);
+  addEvidence(higherLowHealthy === true, 10);
+  addEvidence(coverageImminent && pairStable, 5);
+  if (liquidityDeteriorating) breakoutStrength = Math.min(breakoutStrength, 25);
+  breakoutStrength = Math.max(0, Math.min(100, Math.round(breakoutStrength)));
+  const evidenceCoveragePct = evidenceItems ? Math.round(evidencePresent/evidenceItems*100) : 0;
+
+  // Read-only readiness label for humans/future execution research. This never
+  // places a trade and is intentionally conservative when evidence is partial.
+  let actionStatus = "NOT_READY";
+  if (state === "DATA_DEGRADED") actionStatus = "NO_ACTION_DATA_DEGRADED";
+  else if (state === "FAILED_BREAKOUT") actionStatus = "AVOID_OR_REVIEW_FAILED_BREAKOUT";
+  else if (state === "BREAKOUT_CONFIRMED" && evidenceConfidence === "HIGH") actionStatus = "CONFIRMED_MEASUREMENT_ONLY";
+  else if (state === "BREAKOUT_IMMINENT" && evidenceConfidence !== "LOW") actionStatus = "WATCH_CLOSELY_MEASUREMENT_ONLY";
+  else if (state === "BREAKOUT_BUILDING") actionStatus = "WATCH_BUILDING_MEASUREMENT_ONLY";
+  else if (momentumDeteriorating) actionStatus = "DETERIORATING_MEASUREMENT_ONLY";
+
+  return {
+    version:"V414", measurementOnly:true, affectsScoring:false, verified:mc!==null,
+    capturedAt:now, points:rows.length, historyAgeMs, state, reason,
+    breakoutStrength, evidenceCoveragePct, evidenceConfidence, fastEvidenceCoveragePct, actionStatus,
+    dataHealth:{status:dataHealthStatus,circuitBreakerActive:dataHealthCircuitBreakerActive,reasons:dataHealthReasons},
+    pendingBreakoutLevel, breakoutAboveSamples, confirmedLevel, failedBelowSamples,
+    marketCap:mc, liquidityUsd:liq,
+    marketCapChangePct:{m1:mc1,m3:mc3,m5:mc5,m15:mc15,m30:mc30},
+    liquidityChangePct:{m1:liq1,m5:liq5,m15:liq15},
+    providerRollingM5ChangePct:{
+      volume1mSample:volM5Change1,
+      volume5mSample:volM5Change5,
+      transactions1mSample:txM5Change1,
+      transactions5mSample:txM5Change5
+    },
+    providerRollingH1ContextChangePct:{volume5mSample:volH1Change5,transactions5mSample:txH1Change5},
+    providerCountPressurePct:{m5:providerBuyCountPressureM5,h1Context:providerBuyCountPressureH1},
+    structure:{priorSampledHigh30m:priorHigh,distanceToPriorHighPct,drawdownFromSampledHighPct,sampledNewHighCount10m,recentLow7m:recentLow,priorLow7m:priorLow,higherLowPct,higherLowHealthy,history30mMature},
+    deterioration:{momentumDeteriorating,liquidityDeteriorating},
+    coverage:{sampleCount,historyAgeMs,buildingReady:coverageBuilding,imminentReady:coverageImminent,confirmedReady:coverageConfirmed,pairStable,pinnedPairAddress,pairCountObserved:pairAddresses.length,cadenceHealthy,maxSampleGapMs,averageSampleGapMs},
+    exactDirectionalUsdVerified:false, uniqueBuyerEvidenceVerified:false,
+    primarySignalWindows:["~1m","5m","15m"], confirmationWindow:"30m", contextWindow:"1h",
+    evidence:"DEXSCREENER_FRESH_BATCH_REUSED_FROM_V413_PINNED_PAIR_V414",
+    caveat:"Provider m5/h1 fields are rolling-window telemetry sampled about once per minute; they are not exact interval totals. Pair identity is pinned and sample-gap integrity is checked. Directional USD, large-trade imbalance and unique buyers are not inferred. Breakout Strength/action status are measurement-only and do not affect trading/scoring."
+  };
+}
+
+function liveSignalMoneyV414(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "UNVERIFIED";
+  if (Math.abs(n)>=1e9) return `$${(n/1e9).toFixed(2)}B`;
+  if (Math.abs(n)>=1e6) return `$${(n/1e6).toFixed(2)}M`;
+  if (Math.abs(n)>=1e3) return `$${(n/1e3).toFixed(2)}K`;
+  return `$${n.toFixed(2)}`;
+}
+
+function liveSignalPctV414(value) {
+  const n=Number(value);
+  return Number.isFinite(n) ? `${n>=0?"+":""}${n.toFixed(2)}%` : "UNVERIFIED";
+}
+
 async function registerLiveHorizonV413(env, registration) {
   const ns = env?.[V3_LIVE_DO_BINDING_V363];
   const address = normalize(registration?.address || "");
@@ -72183,6 +72871,17 @@ async function mergeLiveHorizonSnapshotsV413(state, env) {
       touched = true;
     }
 
+    if (live?.breakoutLearningV414 && typeof live.breakoutLearningV414 === "object") {
+      const incoming=live.breakoutLearningV414;
+      const current=record?.breakoutLearningV414;
+      const incomingUpdated=Number(incoming?.lastUpdatedAt)||0;
+      const currentUpdated=Number(current?.lastUpdatedAt)||0;
+      if (!current || incomingUpdated>currentUpdated) {
+        record.breakoutLearningV414=JSON.parse(JSON.stringify(incoming));
+        touched=true;
+      }
+    }
+
     if (touched) recordsTouched++;
   }
 
@@ -72197,6 +72896,67 @@ async function mergeLiveHorizonSnapshotsV413(state, env) {
     lastStatus: snapshot?.lastStatus || null,
     source: "V413_DURABLE_SINGLETON_LIVE_HORIZON"
   };
+}
+
+async function liveSignalSnapshotV414(env, address, state = null) {
+  const ns = env?.[V3_LIVE_DO_BINDING_V363];
+  const token = normalize(address || "");
+  if (!isAddress(token)) return {available:false,reason:"INVALID_ADDRESS_V414",address:token};
+  if (!ns || typeof ns.idFromName !== "function" || typeof ns.get !== "function") return {available:false,reason:"V414_DO_BINDING_UNAVAILABLE",address:token};
+  try {
+    const stub = ns.get(ns.idFromName(HORIZON_LIVE_SINGLETON_NAME_V413));
+    const response = await stub.fetch("https://v3-live.internal/horizon-snapshots-v413");
+    const snap = await response.json().catch(()=>({}));
+    const row = snap?.entries?.[token] || null;
+    if (!response.ok) return {available:false,reason:`V414_SNAPSHOT_HTTP_${response.status}`,address:token};
+    if (!row) return {available:false,reason:"NOT_ACTIVE_IN_V413_V414_TRACKER",address:token,lastPollAt:snap?.lastPollAt||null};
+    return {available:true,address:token,symbol:row?.symbol||null,entryTimestamp:row?.entryTimestamp||null,entryMarketCap:row?.entryMarketCap||null,latestObservation:row?.latestObservation||null,signals:row?.liveSignalsV414||null,points:Array.isArray(row?.rollingMarketV414)?row.rollingMarketV414.length:0,pinnedProviderPairV414:row?.pinnedProviderPairV414||null,pairMissesV414:safeNumber(row?.pairMissesV414),breakoutLearningV414:row?.breakoutLearningV414||null,verifiedObservedTradeFlowV414:verifiedObservedTradeFlowV414(state,token),lastPollAt:snap?.lastPollAt||null,lastStatus:snap?.lastStatus||null};
+  } catch (error) {
+    return {available:false,reason:"V414_LIVE_SNAPSHOT_FETCH_FAILED",address:token,error:errorString(error)};
+  }
+}
+
+function liveSignalTelegramMessageV414(result) {
+  if (result?.available !== true) return [
+    `📡 <b>Live Rolling Signals — ${VERSION}</b>`,"",
+    `Contract: <code>${escapeHtml(result?.address||"")}</code>`,
+    `Status: <b>${escapeHtml(result?.reason||"UNAVAILABLE")}</b>`,"",
+    "<i>Only genuine active V413+ Telegram-proven calls are tracked. Read-only; zero fresh provider requests from /live.</i>"
+  ].join("\n");
+  const x=result?.signals||{};
+  const obs=result?.latestObservation||{};
+  const pair=result?.pinnedProviderPairV414||{};
+  const ageMin=Number.isFinite(Number(x?.historyAgeMs)) ? Math.floor(Number(x.historyAgeMs)/60000) : null;
+  return [
+    `📡 <b>${escapeHtml(result?.symbol||"TOKEN")} — Live Rolling Signals ${VERSION}</b>`,"",
+    `Contract: <code>${escapeHtml(result.address||"")}</code>`,
+    `Rolling points: <b>${safeNumber(result?.points)}</b> | History: <b>${ageMin===null?"UNVERIFIED":ageMin+"m"}</b> | Poll: <b>~60s</b>`,
+    `Pinned pair: <code>${escapeHtml(pair?.pairAddress||"UNVERIFIED")}</code>`,
+    `Pair misses: <b>${safeNumber(result?.pairMissesV414)}</b> | Pair stable: <b>${x?.coverage?.pairStable===true?"YES":"UNVERIFIED"}</b>`,
+    `Latest MC: <b>${liveSignalMoneyV414(obs?.marketCap)}</b>`,
+    `Breakout state: <b>${escapeHtml(x?.state||"UNVERIFIED")}</b>`,
+    `Breakout Strength: <b>${Number.isFinite(Number(x?.breakoutStrength))?Math.round(Number(x.breakoutStrength))+"/100":"UNVERIFIED"}</b> | Evidence coverage: <b>${Number.isFinite(Number(x?.evidenceCoveragePct))?Math.round(Number(x.evidenceCoveragePct))+"%":"UNVERIFIED"}</b>`,
+    `Evidence confidence: <b>${escapeHtml(x?.evidenceConfidence||"UNVERIFIED")}</b> | Action status: <b>${escapeHtml(x?.actionStatus||"NOT_READY")}</b>`,
+    `Data health: <b>${escapeHtml(x?.dataHealth?.status||"UNVERIFIED")}</b> | Circuit breaker: <b>${x?.dataHealth?.circuitBreakerActive===true?"ACTIVE":x?.dataHealth?.circuitBreakerActive===false?"CLEAR":"UNVERIFIED"}</b>`,
+    `Cadence healthy: <b>${x?.coverage?.cadenceHealthy===true?"YES":x?.coverage?.cadenceHealthy===false?"NO":"UNVERIFIED"}</b> | Max sample gap: <b>${Number.isFinite(Number(x?.coverage?.maxSampleGapMs))?Math.round(Number(x.coverage.maxSampleGapMs)/1000)+"s":"UNVERIFIED"}</b>`,
+    `Breakout reason: <b>${escapeHtml(x?.reason||"UNVERIFIED")}</b>`,"",
+    "📈 <b>Lower-timeframe rolling movement</b>",
+    `MC ~1m: <b>${liveSignalPctV414(x?.marketCapChangePct?.m1)}</b> | 5m: <b>${liveSignalPctV414(x?.marketCapChangePct?.m5)}</b> | 15m: <b>${liveSignalPctV414(x?.marketCapChangePct?.m15)}</b>`,
+    `MC 30m confirmation: <b>${liveSignalPctV414(x?.marketCapChangePct?.m30)}</b>`,
+    `Liquidity ~1m: <b>${liveSignalPctV414(x?.liquidityChangePct?.m1)}</b> | 5m: <b>${liveSignalPctV414(x?.liquidityChangePct?.m5)}</b> | 15m: <b>${liveSignalPctV414(x?.liquidityChangePct?.m15)}</b>`,
+    `Rolling-5m volume acceleration — 1m sample: <b>${liveSignalPctV414(x?.providerRollingM5ChangePct?.volume1mSample)}</b> | 5m sample: <b>${liveSignalPctV414(x?.providerRollingM5ChangePct?.volume5mSample)}</b>`,
+    `Rolling-5m tx acceleration — 1m sample: <b>${liveSignalPctV414(x?.providerRollingM5ChangePct?.transactions1mSample)}</b> | 5m sample: <b>${liveSignalPctV414(x?.providerRollingM5ChangePct?.transactions5mSample)}</b>`,
+    `Provider buy-count pressure 5m: <b>${liveSignalPctV414(x?.providerCountPressurePct?.m5)}</b>`,
+    `Higher-low structure (~15m): <b>${x?.structure?.higherLowHealthy===true?"HEALTHY":x?.structure?.higherLowHealthy===false?"WEAK":"UNVERIFIED"}</b> | Δ low: <b>${liveSignalPctV414(x?.structure?.higherLowPct)}</b>`,
+    `Distance to sampled resistance: <b>${liveSignalPctV414(x?.structure?.distanceToPriorHighPct)}</b> | Drawdown from sampled high: <b>${liveSignalPctV414(x?.structure?.drawdownFromSampledHighPct)}</b>`,
+    `Sampled new highs (~10m): <b>${Number.isFinite(Number(x?.structure?.sampledNewHighCount10m))?Math.round(Number(x.structure.sampledNewHighCount10m)):"UNVERIFIED"}</b> | Momentum deterioration: <b>${x?.deterioration?.momentumDeteriorating===true?"YES":x?.deterioration?.momentumDeteriorating===false?"NO":"UNVERIFIED"}</b>`,
+    `1h context — volume: <b>${liveSignalPctV414(x?.providerRollingH1ContextChangePct?.volume5mSample)}</b> | tx: <b>${liveSignalPctV414(x?.providerRollingH1ContextChangePct?.transactions5mSample)}</b> | buy pressure: <b>${liveSignalPctV414(x?.providerCountPressurePct?.h1Context)}</b>`,"",
+    `💵 Bot-observed exact USD 5m: <b>${result?.verifiedObservedTradeFlowV414?.windows?.m5?.verified===true ? `Buy ${liveSignalMoneyV414(result.verifiedObservedTradeFlowV414.windows.m5.buyUsd)} / Sell ${liveSignalMoneyV414(result.verifiedObservedTradeFlowV414.windows.m5.sellUsd)} / Net ${liveSignalMoneyV414(result.verifiedObservedTradeFlowV414.windows.m5.netUsd)}` : "UNVERIFIED"}</b>`,
+    `🐳 Largest observed exact trade 5m: <b>${result?.verifiedObservedTradeFlowV414?.windows?.m5?.verified===true ? `Buy ${liveSignalMoneyV414(result.verifiedObservedTradeFlowV414.windows.m5.maxBuyUsd)} / Sell ${liveSignalMoneyV414(result.verifiedObservedTradeFlowV414.windows.m5.maxSellUsd)}` : "UNVERIFIED"}</b>`,
+    `🧪 Breakout learning events: <b>${Array.isArray(result?.breakoutLearningV414?.events)?result.breakoutLearningV414.events.length:0}</b> | Forward-only: <b>${result?.breakoutLearningV414?.forwardOnly===true?"YES":"UNVERIFIED"}</b>`,
+    "👤 Unique/repeat buyers: <b>UNVERIFIED BY THIS V414 LIVE LAYER</b>",
+    "<i>Measurement-only. Uses the V413 fresh batch on one pinned pair. Exact-USD lines are only swaps actually verified/observed by the bot and are NOT complete-market totals. Stronger breakout states require healthy data, minimum history, cadence, confidence and persistence. Does not affect scoring, qualification, alerts or trading.</i>"
+  ].join("\n");
 }
 
 export class V3LiveCollectorV363 {
@@ -72495,6 +73255,11 @@ export class V3LiveCollectorV363 {
         registeredAt: Number(body?.registeredAt) || Date.now(),
         latestObservation: null,
         outcomes: {m5:null,m15:null,m30:null,h1:null,h6:null,h24:null},
+        rollingMarketV414: [],
+        liveSignalsV414: null,
+        breakoutLearningV414: {version:"V414",forwardOnly:true,hindsightBackfillAllowed:false,events:[],lastObservedState:null,lastUpdatedAt:null},
+        pinnedProviderPairV414: null,
+        pairMissesV414: 0,
         completed: false
       };
     }
@@ -72517,6 +73282,7 @@ export class V3LiveCollectorV363 {
       version: VERSION,
       available: true,
       tracker: "DURABLE_SINGLETON_PRIORITY_HORIZON_V413",
+      rollingSignals: "V414_MEASUREMENT_ONLY_REUSES_V413_FRESH_BATCH",
       pollIntervalMs: HORIZON_LIVE_POLL_MS_V413,
       entries,
       activeEntries: Object.keys(entries).length,
@@ -72556,7 +73322,7 @@ export class V3LiveCollectorV363 {
       let response;
       try {
         response = await fetch(`${DEXSCREENER_BASE}/tokens/v1/robinhood/${addresses.join(",")}`, {
-          headers: {"accept":"application/json","user-agent":"Robinhood-Meme-Hunter-V413-Horizon/1.0"}
+          headers: {"accept":"application/json","user-agent":"Robinhood-Meme-Hunter-V414-HorizonSignals/1.0"}
         });
         lastHttpStatus = response.status;
       } catch (error) {
@@ -72571,26 +73337,81 @@ export class V3LiveCollectorV363 {
       try { pairs=await response.json(); } catch (error) { lastError=errorString(error); continue; }
       if (!Array.isArray(pairs)) continue;
 
-      const best = new Map();
+      const byToken = new Map();
       for (const pair of pairs) {
         const address = normalize(pair?.baseToken?.address || "");
         if (!addresses.includes(address)) continue;
         const marketCap = Number(pair?.marketCap);
         if (!Number.isFinite(marketCap) || marketCap <= 0) continue;
-        const liq = Number(pair?.liquidity?.usd);
-        const prev = best.get(address);
-        if (!prev || safeNumber(liq) > safeNumber(prev?.liquidity?.usd)) best.set(address,pair);
+        if (!byToken.has(address)) byToken.set(address, []);
+        byToken.get(address).push(pair);
       }
 
       const observedAt = Date.now();
       for (const row of batch) {
         const address = normalize(row.address);
-        const pair = best.get(address);
-        if (!pair) continue;
+        const candidates = byToken.get(address) || [];
+        let pair = null;
+        const pinnedAddress = normalize(row?.pinnedProviderPairV414?.pairAddress || "");
+        if (pinnedAddress) {
+          pair = candidates.find(p => normalize(p?.pairAddress || "") === pinnedAddress) || null;
+          if (!pair) {
+            row.pairMissesV414 = Math.max(0, safeNumber(row?.pairMissesV414)) + 1;
+            entries[address] = row;
+            anyChanged = true;
+            continue; // Never silently jump pools; wait for the pinned pair to return.
+          }
+          row.pairMissesV414 = 0;
+        } else {
+          pair = candidates.sort((a,b)=>safeNumber(b?.liquidity?.usd)-safeNumber(a?.liquidity?.usd))[0] || null;
+          if (!pair) continue;
+          const pairAddress = normalize(pair?.pairAddress || "");
+          if (!pairAddress) continue;
+          row.pinnedProviderPairV414 = {
+            pairAddress,
+            dexId: pair?.dexId || null,
+            labels: Array.isArray(pair?.labels) ? pair.labels.slice(0,5) : [],
+            baseToken: normalize(pair?.baseToken?.address || "") || null,
+            quoteToken: normalize(pair?.quoteToken?.address || "") || null,
+            pinnedAt: observedAt,
+            source: "DEXSCREENER_FIRST_FRESH_PAIR_PIN_V414"
+          };
+          row.pairMissesV414 = 0;
+        }
         const marketCap = Number(pair?.marketCap);
         if (!Number.isFinite(marketCap) || marketCap <= 0) continue;
         verifiedObservations++;
         row.latestObservation = {verified:true,observedAt,marketCap,source:"DEXSCREENER_LIVE_HORIZON_V413"};
+
+        // V414: reuse this exact fresh pair response for rolling signals. No
+        // second HTTP call is made. Keep a bounded ~75 minute history.
+        const txM5 = pair?.txns?.m5 || {};
+        const txH1 = pair?.txns?.h1 || {};
+        const rollingPointV414 = {
+          observedAt,
+          marketCap,
+          priceUsd: finiteV414(pair?.priceUsd),
+          liquidityUsd: finiteV414(pair?.liquidity?.usd),
+          volumeM5: finiteV414(pair?.volume?.m5),
+          volumeH1: finiteV414(pair?.volume?.h1),
+          volumeH24: finiteV414(pair?.volume?.h24),
+          buysM5: finiteV414(txM5?.buys),
+          sellsM5: finiteV414(txM5?.sells),
+          txM5: (finiteV414(txM5?.buys)!==null && finiteV414(txM5?.sells)!==null) ? finiteV414(txM5?.buys)+finiteV414(txM5?.sells) : null,
+          buysH1: finiteV414(txH1?.buys),
+          sellsH1: finiteV414(txH1?.sells),
+          txH1: (finiteV414(txH1?.buys)!==null && finiteV414(txH1?.sells)!==null) ? finiteV414(txH1?.buys)+finiteV414(txH1?.sells) : null,
+          pairAddress: normalize(pair?.pairAddress || "") || null,
+          dexId: pair?.dexId || null,
+          pairCreatedAt: Number(pair?.pairCreatedAt) || null,
+          source:"DEXSCREENER_FRESH_BATCH_REUSED_PINNED_PAIR_V414"
+        };
+        const historyV414 = Array.isArray(row?.rollingMarketV414) ? row.rollingMarketV414 : [];
+        historyV414.push(rollingPointV414);
+        row.rollingMarketV414 = historyV414.slice(-LIVE_ROLLING_MAX_POINTS_V414);
+        row.liveSignalsV414 = computeLiveSignalsV414(row.rollingMarketV414, row.liveSignalsV414);
+        updateBreakoutLearningV414(row, observedAt, marketCap);
+
         row.outcomes = row.outcomes && typeof row.outcomes === "object" ? row.outcomes : {m5:null,m15:null,m30:null,h1:null,h6:null,h24:null};
         for (const [key,horizonMs] of Object.entries(HORIZON_LIVE_WINDOWS_V413)) {
           if (row.outcomes[key]) continue;
