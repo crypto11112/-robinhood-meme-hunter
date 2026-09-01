@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V421
- * AUTHORITATIVE RUNTIME VERSION: V421
+ * Robinhood Chain Meme Hunter — V422
+ * AUTHORITATIVE RUNTIME VERSION: V422
+ * V422 builds directly on V421 and targets the final scan→Telegram blocker exposed by FORUM: a fully verified ERC-20 + market candidate reached Telegram qualification but was blocked only because Blockscout returned a successful holder response with zero holder rows. V422 treats that exact condition as HOLDER_INDEXING_LAG rather than a terminal holder failure, persists a bounded holder-evidence retry target, retries the verified Blockscout PRO holder-row path first when the retry becomes due, reuses all existing V417/V419 checkpoints and market/metadata caches, and keeps the candidate eligible for later qualification without weakening the holder requirement. A retry that is still empty is re-scheduled without fabricating holder count/concentration; a successful later holder response must still pass the existing integrity/concentration/whale checks before Telegram can alert. V422 adds no new provider, does not raise the 42-request global ceiling or base 21-request analysis ceiling, and changes no Opportunity/Momentum/confidence/liquidity/risk/qualification/Telegram threshold.
  * V421 builds directly on V420 and adds a narrowly-scoped third independent RPC fallback for ERC-20 identity READS only. When every normal configured analysis RPC is HTTP-429 rate-limited, V421 may use one documented Robinhood Chain mainnet public RPC fallback for eth_getCode/eth_call so a carried candidate can continue verification instead of waiting for both primary providers to recover. The fallback is never used for writes, transaction submission, discovery crawling, market data, holders, or scoring; it remains subject to the existing analysis/global request budgets. V419 checkpoints are preserved, V420's scan-wide circuit opens only after the fallback also cannot provide usable evidence, the >=3-of-4 ERC-20 verification rule is unchanged, missing evidence remains UNVERIFIED, and no Opportunity/Momentum/confidence/liquidity/risk/qualification/Telegram threshold is changed.
  * V420 builds directly on V419 and adds a scan-wide ERC-20 RPC circuit breaker for confirmed all-provider HTTP 429 conditions. When every configured analysis RPC is rate-limited on an ERC-20 identity probe, the shared scan budget opens a short in-scan circuit: remaining candidate ERC-20 identity checks are deferred without spending another RPC request, while V419 bytecode/method checkpoints remain intact for the next scheduled scan. The circuit is scan-local only, never converts missing evidence into validity, adds zero provider requests, preserves the same >=3-of-4 ERC-20 verification rule, the 42 global ceiling, V416 adaptive headroom, V417 progressive completion, V418 transport-vs-deterministic classification, all V414 live/breakout/learning work, and changes no Opportunity/Momentum/confidence/liquidity/risk/qualification/Telegram thresholds.
  * V419 builds directly on V418 and adds RPC-aware ERC-20 checkpointing/early-stop protection without weakening token verification. Successful bytecode proof and successful ERC-20 method responses are checkpointed on the watched candidate for bounded reuse; once a retryable RPC/provider/budget failure is observed, remaining ERC-20 probes are skipped for that scan and the candidate is deferred into the existing retry queue. This prevents repeated name/symbol/decimals/totalSupply calls while both RPC providers are already rate-limited. V419 adds zero provider requests, preserves the same >=3-of-4 ERC-20 verification rule, the 42 global ceiling, V416 adaptive headroom, V417 progressive completion, V418 transport-vs-deterministic classification, all V414 live/breakout/learning work, and changes no Opportunity/Momentum/confidence/liquidity/risk/qualification/Telegram thresholds. Missing evidence remains UNVERIFIED. V417 live scans proved that newly discovered candidates were repeatedly being labelled ERC20_METHODS_NOT_VERIFIED or NO_CONTRACT_BYTECODE while RPC providers were simultaneously rate-limited. The old verifier swallowed per-method RPC failures, so a transport/provider failure could be indistinguishable from a genuine non-ERC20 contract. V418 makes bytecode and each ERC-20 probe evidence-aware: provider/RPC/budget failures are recorded separately and are DEFERRED for the existing bounded retry queue, while NO_CONTRACT_BYTECODE is emitted only after a successful eth_getCode response explicitly returns empty code. Genuine method absence/revert still fails verification under the same >=3-of-4 ERC-20 evidence rule. /scan scanner-funnel telemetry now exposes exact method success/failure, provider/error class, discovery source and whether a candidate was deferred because identity evidence was unavailable. V418 adds no provider requests, changes no 42/21 base limits, preserves V416 adaptive borrowing and V417 progressive completion, and changes no Opportunity/Momentum/confidence/liquidity/risk/qualification/Telegram thresholds. Missing evidence remains UNVERIFIED; transport failure is never promoted to token validity.
@@ -1496,7 +1497,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V421";
+const VERSION = "V422";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2678,6 +2679,19 @@ const HOLDER_STALE_CACHE_MS =
  */
 const HOLDER_COUNT_DISPLAY_CACHE_MS_V225 =
   2 * 60 * 60 * 1000;
+
+/*
+ * V422 holder-index lag recovery.
+ * A verified Blockscout response containing zero holder rows is not proof that
+ * the token has no holders. Fresh launches can reach market verification before
+ * the explorer holder index has populated. Persist that exact state and retry
+ * later; never promote it to verified concentration.
+ */
+const HOLDER_INDEX_LAG_RETRY_MS_V422 =
+  2 * 60 * 1000;
+
+const HOLDER_INDEX_LAG_MAX_AGE_MS_V422 =
+  45 * 60 * 1000;
 
 const HOLDER_PARTIAL_RETRY_MS_V149 =
   5 * 60 * 1000;
@@ -32367,6 +32381,134 @@ function activePartialHolderRetryBlockerV166(
   };
 }
 
+
+/* =========================================================
+   V422 HOLDER INDEX-LAG RECOVERY
+   ========================================================= */
+
+function holderIndexLagStateV422(watched) {
+  const row = watched?.holderIndexLagV422;
+  if (!row || typeof row !== "object") {
+    return {
+      active: false,
+      due: false,
+      firstSeenAt: null,
+      lastSeenAt: null,
+      nextRetryAt: null,
+      retryAfterMs: 0,
+      attempts: 0,
+      lastSource: null,
+      lastStatus: null
+    };
+  }
+
+  const firstSeenAt = safeNumber(row.firstSeenAt);
+  const lastSeenAt = safeNumber(row.lastSeenAt);
+  const nextRetryAt = safeNumber(row.nextRetryAt);
+
+  if (
+    !firstSeenAt ||
+    Date.now() - firstSeenAt >
+      HOLDER_INDEX_LAG_MAX_AGE_MS_V422
+  ) {
+    return {
+      active: false,
+      expired: true,
+      due: false,
+      firstSeenAt: firstSeenAt || null,
+      lastSeenAt: lastSeenAt || null,
+      nextRetryAt: nextRetryAt || null,
+      retryAfterMs: 0,
+      attempts: safeNumber(row.attempts),
+      lastSource: row.lastSource || null,
+      lastStatus: row.lastStatus || null
+    };
+  }
+
+  return {
+    active: true,
+    expired: false,
+    due:
+      !nextRetryAt ||
+      nextRetryAt <= Date.now(),
+    firstSeenAt,
+    lastSeenAt: lastSeenAt || null,
+    nextRetryAt: nextRetryAt || null,
+    retryAfterMs:
+      nextRetryAt
+        ? Math.max(0, nextRetryAt - Date.now())
+        : 0,
+    attempts: safeNumber(row.attempts),
+    lastSource: row.lastSource || null,
+    lastStatus: row.lastStatus || null
+  };
+}
+
+function registerHolderIndexLagV422(
+  watched,
+  source,
+  status = "NO_HOLDER_ROWS"
+) {
+  if (!watched || typeof watched !== "object") {
+    return null;
+  }
+
+  const previous =
+    watched.holderIndexLagV422 &&
+    typeof watched.holderIndexLagV422 === "object"
+      ? watched.holderIndexLagV422
+      : {};
+
+  const nowMs = Date.now();
+
+  watched.holderIndexLagV422 = {
+    firstSeenAt:
+      safeNumber(previous.firstSeenAt) || nowMs,
+    lastSeenAt: nowMs,
+    nextRetryAt:
+      nowMs + HOLDER_INDEX_LAG_RETRY_MS_V422,
+    attempts:
+      safeNumber(previous.attempts) + 1,
+    lastSource: source || null,
+    lastStatus: status || "NO_HOLDER_ROWS",
+    verifiedEmptyResponse: true,
+    concentrationStillUnverified: true,
+    qualificationRequirementUnchanged: true
+  };
+
+  return holderIndexLagStateV422(watched);
+}
+
+function clearHolderIndexLagV422(watched) {
+  if (
+    watched &&
+    watched.holderIndexLagV422
+  ) {
+    delete watched.holderIndexLagV422;
+    return true;
+  }
+  return false;
+}
+
+function holderEvidenceVerifiedForAlertV422(candidate) {
+  return (
+    candidate?.holders?.integrity?.verified === true &&
+    candidate?.holders?.concentrationVerified === true &&
+    candidate?.holders?.whale?.verified === true
+  );
+}
+
+function holderOnlyTelegramBlockerV422(candidate) {
+  if (!candidate) return false;
+  const reasons =
+    telegramQualificationReasons(candidate);
+  return (
+    Array.isArray(reasons) &&
+    reasons.length === 1 &&
+    reasons[0] === "HOLDER_EVIDENCE_UNVERIFIED"
+  );
+}
+
 /* =========================================================
    V227 BITQUERY HOLDER FALLBACK — ZERO EXTRA HTTP REQUESTS
    ========================================================= */
@@ -32492,6 +32634,33 @@ async function holderIntelligence(
           market.pairAddress
         )
       : null;
+
+  const holderIndexLagBeforeV422 =
+    holderIndexLagStateV422(
+      watched
+    );
+
+  /*
+   * V422: before the retry is due, do not repeatedly hit holder indexers for
+   * the same verified-empty response. This state is explicitly UNVERIFIED and
+   * cannot satisfy scoring or Telegram qualification.
+   */
+  if (
+    holderIndexLagBeforeV422.active === true &&
+    holderIndexLagBeforeV422.due !== true &&
+    priorityCompletion !== true
+  ) {
+    return {
+      ...unverifiedHolders(
+        "HOLDER_INDEXING_LAG_WAIT_V422"
+      ),
+      holderSource:
+        holderIndexLagBeforeV422.lastSource ||
+        "BLOCKSCOUT_INDEXING_LAG_V422",
+      holderIndexLagV422:
+        holderIndexLagBeforeV422
+    };
+  }
 
   const freshHolderCache =
     cachedHolderIntelligence(
@@ -32698,7 +32867,136 @@ async function holderIntelligence(
         : "BLOCKSCOUT_PRO_NOT_CONFIGURED"
   };
 
+  let holderIndexLagRetryV422 = {
+    enabled: true,
+    priorState:
+      holderIndexLagBeforeV422,
+    eligible:
+      holderIndexLagBeforeV422.active === true &&
+      holderIndexLagBeforeV422.due === true &&
+      priorityCompletion === true,
+    attempted: false,
+    recoveredRows: false,
+    stillEmpty: false,
+    source: null,
+    status: null,
+    externalRequestsUsed: 0
+  };
+
+  /*
+   * V422 PRO-first retry:
+   * On a carried priority candidate whose previous response was a verified
+   * empty holder page, retry the authenticated holder-row route first. If the
+   * index has populated, this avoids re-spending the public/legacy sequence.
+   */
   if (
+    holderIndexLagRetryV422.eligible &&
+    blockscoutProConfiguredV164 &&
+    budgetAvailable(
+      budget,
+      "analysis"
+    )
+  ) {
+    const beforeV422 =
+      safeNumber(budget?.totalUsed);
+
+    const retryV422 =
+      await blockscoutProHoldersV143(
+        token,
+        budget,
+        env,
+        state,
+        watched
+      );
+
+    holderIndexLagRetryV422.attempted =
+      retryV422?.attempted === true;
+    holderIndexLagRetryV422.externalRequestsUsed =
+      Math.max(
+        0,
+        safeNumber(budget?.totalUsed) -
+        beforeV422
+      );
+    holderIndexLagRetryV422.status =
+      retryV422?.status || null;
+    holderIndexLagRetryV422.source =
+      "BLOCKSCOUT_PRO_V143";
+
+    blockscoutProHolderFallbackV143 = {
+      configured:
+        retryV422?.configured === true,
+      attempted:
+        retryV422?.attempted === true,
+      success:
+        retryV422?.success === true,
+      status:
+        retryV422?.status || null,
+      transientOutageV145:
+        Boolean(retryV422?.transientOutageV145),
+      cooldownUntil:
+        retryV422?.cooldownUntil ?? null,
+      retryAfterMs:
+        safeNumber(retryV422?.retryAfterMs),
+      http404V146:
+        Boolean(retryV422?.http404V146),
+      httpStatus:
+        safeNumber(retryV422?.httpStatus) || null,
+      retryUntilV146:
+        retryV422?.retryUntilV146 ?? null
+    };
+
+    if (
+      retryV422?.success === true &&
+      Array.isArray(
+        retryV422?.data?.items
+      ) &&
+      retryV422.data.items.length > 0
+    ) {
+      holders =
+        retryV422.data;
+      v2HolderRowsUnavailable =
+        false;
+      legacyHolderRowsUnavailable =
+        false;
+      holderIndexLagRetryV422.recoveredRows =
+        true;
+      clearHolderIndexLagV422(
+        watched
+      );
+    } else if (
+      retryV422?.success === true &&
+      Array.isArray(
+        retryV422?.data?.items
+      ) &&
+      retryV422.data.items.length === 0
+    ) {
+      holderIndexLagRetryV422.stillEmpty =
+        true;
+
+      const nextStateV422 =
+        registerHolderIndexLagV422(
+          watched,
+          "BLOCKSCOUT_PRO_V143",
+          "VERIFIED_EMPTY_RETRY_V422"
+        );
+
+      return {
+        ...unverifiedHolders(
+          "HOLDER_INDEXING_LAG_RETRY_EMPTY_V422"
+        ),
+        holderSource:
+          "BLOCKSCOUT_PRO_V143",
+        blockscoutProHolderFallbackV143,
+        blockscoutProCounterFallbackV247,
+        holderIndexLagV422:
+          nextStateV422,
+        holderIndexLagRetryV422
+      };
+    }
+  }
+
+  if (
+    !holders &&
     budgetAvailable(
       budget,
       "analysis"
@@ -33265,6 +33563,13 @@ async function holderIntelligence(
           ? "BLOCKSCOUT_LEGACY"
           : "BLOCKSCOUT_V2";
 
+    const holderIndexLagV422 =
+      registerHolderIndexLagV422(
+        watched,
+        emptyHolderSourceV144,
+        "NO_HOLDER_ROWS"
+      );
+
     return {
       ...unverifiedHolders(
         "NO_HOLDER_ROWS"
@@ -33283,6 +33588,9 @@ async function holderIntelligence(
 
       holderSource:
         emptyHolderSourceV144,
+
+      holderIndexLagV422,
+      holderIndexLagRetryV422,
 
       blockscoutProHolderFallbackV143,
         blockscoutProCounterFallbackV247
@@ -34021,6 +34329,18 @@ async function holderIntelligence(
   clearPartialHolderStateV149(
     watched
   );
+
+  clearHolderIndexLagV422(
+    watched
+  );
+
+  result.holderIndexLagV422 = {
+    recovered: true,
+    priorState:
+      holderIndexLagBeforeV422,
+    retry:
+      holderIndexLagRetryV422
+  };
 
   saveHolderIntelligence(
     watched,
@@ -50912,15 +51232,55 @@ for (
       ? carriedAnalysisTargetV159
       : null;
 
+  const pendingHolderEvidenceAddressV422 =
+    normalize(
+      state?.holderEvidenceRetryV422?.address
+    );
+
+  const pendingHolderEvidenceTokenV422 =
+    pendingHolderEvidenceAddressV422
+      ? (
+          state.watchedTokens.find(
+            token =>
+              normalize(token?.address) ===
+              pendingHolderEvidenceAddressV422
+          ) || null
+        )
+      : null;
+
+  const pendingHolderEvidenceDueV422 =
+    pendingHolderEvidenceTokenV422
+      ? holderIndexLagStateV422(
+          pendingHolderEvidenceTokenV422
+        )
+      : null;
+
+  const holderEvidenceRetryTokenV422 =
+    (
+      pendingHolderEvidenceTokenV422 &&
+      (
+        pendingHolderEvidenceDueV422?.active !== true ||
+        pendingHolderEvidenceDueV422?.due === true
+      )
+    )
+      ? pendingHolderEvidenceTokenV422
+      : null;
+
   const analysisSelectedRawV142 =
     marketFreshTarget ||
     protectedCarriedAnalysisTargetV178 ||
+    holderEvidenceRetryTokenV422 ||
     pendingDirectionalUsdTokenV176
       ? uniqueBy(
           [
             ...(
               protectedCarriedAnalysisTargetV178
                 ? [protectedCarriedAnalysisTargetV178]
+                : []
+            ),
+            ...(
+              holderEvidenceRetryTokenV422
+                ? [holderEvidenceRetryTokenV422]
                 : []
             ),
             ...(
@@ -51341,6 +51701,20 @@ for (
       completedEvidence: 0,
       minimumStageBudgetProtected: 0,
       candidates: []
+    },
+    holderEvidenceRecoveryV422: {
+      enabled: true,
+      holderOnlyTelegramBlockers: 0,
+      indexLagDetected: 0,
+      indexLagRetryDue: 0,
+      indexLagRetryRecovered: 0,
+      indexLagRetryStillEmpty: 0,
+      persistedRetryAddress: null,
+      persistedRetrySymbol: null,
+      retryAt: null,
+      qualificationRequirementChanged: false,
+      inferredHolderEvidence: false,
+      externalProviderAdded: false
     },
     erc20IdentityV421: {
       enabled: true,
@@ -54655,6 +55029,171 @@ for (
           candidate
         )
     );
+
+  /*
+   * V422: persist one candidate that would pass Telegram qualification except
+   * for holder evidence. This does not qualify or alert the token. It only
+   * guarantees that a verified-empty explorer response receives a future
+   * holder-evidence retry instead of disappearing behind fresh discoveries.
+   */
+  const holderOnlyCandidatesV422 =
+    candidates
+      .filter(
+        candidate =>
+          holderOnlyTelegramBlockerV422(
+            candidate
+          )
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.opportunity?.score
+          ) -
+          safeNumber(
+            a?.opportunity?.score
+          )
+      );
+
+  scannerFunnelV415
+    .holderEvidenceRecoveryV422
+    .holderOnlyTelegramBlockers =
+      holderOnlyCandidatesV422.length;
+
+  const holderRetryCandidateV422 =
+    holderOnlyCandidatesV422[0] ||
+    null;
+
+  if (holderRetryCandidateV422) {
+    const holderRetryAddressV422 =
+      normalize(
+        holderRetryCandidateV422.address
+      );
+
+    const holderRetryWatchedV422 =
+      findWatched(
+        state,
+        holderRetryAddressV422
+      );
+
+    const lagStateV422 =
+      holderIndexLagStateV422(
+        holderRetryWatchedV422
+      );
+
+    scannerFunnelV415
+      .holderEvidenceRecoveryV422
+      .indexLagDetected +=
+        lagStateV422.active === true
+          ? 1
+          : 0;
+
+    scannerFunnelV415
+      .holderEvidenceRecoveryV422
+      .indexLagRetryDue +=
+        lagStateV422.active === true &&
+        lagStateV422.due === true
+          ? 1
+          : 0;
+
+    if (
+      holderRetryCandidateV422
+        ?.holders
+        ?.holderIndexLagRetryV422
+        ?.recoveredRows === true
+    ) {
+      scannerFunnelV415
+        .holderEvidenceRecoveryV422
+        .indexLagRetryRecovered++;
+    }
+
+    if (
+      holderRetryCandidateV422
+        ?.holders
+        ?.holderIndexLagRetryV422
+        ?.stillEmpty === true
+    ) {
+      scannerFunnelV415
+        .holderEvidenceRecoveryV422
+        .indexLagRetryStillEmpty++;
+    }
+
+    state.holderEvidenceRetryV422 = {
+      address:
+        holderRetryAddressV422,
+      symbol:
+        holderRetryCandidateV422.symbol ||
+        null,
+      firstQueuedAt:
+        safeNumber(
+          state?.holderEvidenceRetryV422
+            ?.firstQueuedAt
+        ) ||
+        Date.now(),
+      lastQueuedAt:
+        Date.now(),
+      reason:
+        "HOLDER_EVIDENCE_UNVERIFIED",
+      holderStatus:
+        holderRetryCandidateV422
+          ?.holders
+          ?.integrity
+          ?.status ||
+        null,
+      nextRetryAt:
+        lagStateV422.nextRetryAt ||
+        Date.now()
+    };
+
+    scannerFunnelV415
+      .holderEvidenceRecoveryV422
+      .persistedRetryAddress =
+        holderRetryAddressV422;
+
+    scannerFunnelV415
+      .holderEvidenceRecoveryV422
+      .persistedRetrySymbol =
+        holderRetryCandidateV422.symbol ||
+        null;
+
+    scannerFunnelV415
+      .holderEvidenceRecoveryV422
+      .retryAt =
+        lagStateV422.nextRetryAt ||
+        null;
+  } else if (
+    state?.holderEvidenceRetryV422?.address
+  ) {
+    const priorAddressV422 =
+      normalize(
+        state.holderEvidenceRetryV422.address
+      );
+
+    const priorCandidateV422 =
+      candidates.find(
+        candidate =>
+          normalize(candidate?.address) ===
+          priorAddressV422
+      ) ||
+      null;
+
+    if (
+      priorCandidateV422 &&
+      (
+        holderEvidenceVerifiedForAlertV422(
+          priorCandidateV422
+        ) ||
+        !completionCandidateStillEligible(
+          findWatched(
+            state,
+            priorAddressV422
+          )
+        )
+      )
+    ) {
+      state.holderEvidenceRetryV422 =
+        null;
+    }
+  }
 
   /*
    * V256: after all score/confirmation work is final, select at most one
@@ -58014,6 +58553,14 @@ for (
         true,
       verifiedUsdMathChangedV257:
         false
+    },
+
+    holderEvidenceRecoveryV422: {
+      ...scannerFunnelV415
+        .holderEvidenceRecoveryV422,
+      persistedState:
+        state?.holderEvidenceRetryV422 ||
+        null
     },
 
     holderCountCompletionV256: {
