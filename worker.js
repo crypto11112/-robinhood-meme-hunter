@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V427
- * AUTHORITATIVE RUNTIME VERSION: V427
+ * Robinhood Chain Meme Hunter — V428
+ * AUTHORITATIVE RUNTIME VERSION: V428
+ * V428 is a DIAGNOSTIC-ONLY market-provider pressure build on the complete V427 source. It instruments the existing scanner DexScreener and GeckoTerminal HTTP requests without adding any request, changing any provider order, changing cooldowns, or changing qualification. For each already-existing market request it records provider, feature/call-site, request path class, scanner phase, start time, latency, HTTP status, Retry-After when exposed, 429/non-429 outcome, and the provider eligibility/cooldown state immediately before the request. It also aggregates request counts and 429s by provider and by feature so we can prove whether pressure comes from candidate market lookup, ATH follow-up, Gecko fallback, or Gecko directional enrichment before changing the market-data scheduler. V428 preserves V427 adaptive RPC backoff, V426 persistence, V425/V424 routing, V423 RPC diagnostics, V422 holder recovery, V421 fallback, V420 circuit breaker, all request ceilings, scoring, qualification, Telegram thresholds, and V414 learning/breakout behavior.
  * V427 builds directly on V426 and makes the persisted provider+method 429 cooldown adaptive across scans. Repeated rate limits no longer reset to the same short delay: each provider+method keeps a bounded failure streak, escalates cooldown duration when a later scan hits the same 429 again, and immediately de-escalates on a successful response. Default backoff ladder: first 429 = 30s, second = 2m, third = 5m, fourth+ = 10m maximum. Robinhood Public retains a recovery-friendly cap of 2m unless Retry-After explicitly requires longer; Alchemy and other analysis RPCs can escalate to the full 10m cap. Only HTTP-429 evidence participates in the adaptive streak; deterministic RPC errors and transport failures do not. Retry-After remains authoritative when longer than the calculated backoff. V427 persists this streak in the same existing state write, adds zero external requests and zero additional state-write cycles, and preserves V426 persistence, V425/V424 routing, V423 diagnostics, V422 holder recovery, V421 fallback, V420 circuit breaker, V419 checkpoints, all request ceilings, scoring, qualification, Telegram thresholds, and V414 learning/breakout behavior.
  * V426 builds safely on the complete V425 hotfix and persists short-lived provider+method RPC health across scans. A fresh scan no longer forgets that a provider/method combination was just rate-limited. One HTTP-429 now opens a bounded SOFT cooldown for that exact provider+method, Retry-After is honoured when supplied, Robinhood Public uses a deliberately short default cooldown because V423 proved same-scan recovery, Alchemy uses a longer cooldown because two diagnostics showed repeated analysis 429s with no success, and successful responses immediately rehabilitate the combination. Only recent rate-limit health is restored on the next scan; stale evidence expires automatically. Persistence piggybacks on the existing state write and adds zero external requests. V426 preserves V425/V424 health weighting, V423 diagnostics, V422 holder recovery, V421 independent ERC-20 fallback, V420 circuit breaker, V419 checkpoints, all request ceilings, scoring, qualification, Telegram thresholds, and V414 learning/breakout behavior.
  * V425 is the SAFE HOTFIX for the broken V424 deployment. V424 accidentally removed a large inherited source section while replacing rpc(), causing runtime ReferenceError: latestBlock is not defined. V425 rebuilds from the complete syntax-proven V423 source, then reapplies the intended V424 analysis-only provider+method health routing without deleting inherited functions. Robinhood Public RPC receives a small evidence-based initial preference; repeated provider+method HTTP-429 combinations receive bounded scan-local cooldowns; Retry-After is honoured; successful responses immediately rehabilitate that provider+method; and V421 remains the independent ERC-20 read fallback when both normal read paths are unavailable due to proven 429 state. No provider, request ceiling, scoring rule, qualification rule, Telegram threshold, holder requirement, V422 recovery behavior, or V414 breakout/learning behavior is changed.
@@ -1501,7 +1502,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V427";
+const VERSION = "V428";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -3201,6 +3202,23 @@ function createBudget() {
         "V423_TWO_LIVE_SCANS_ALCHEMY_REPEATED_429_ROBINHOOD_INTERMITTENT_RECOVERY"
     },
 
+    marketProviderPressureV428: {
+      enabled: true,
+      diagnosticOnly: true,
+      externalRequestsAdded: 0,
+      providerOrderChanged: false,
+      cooldownBehaviourChanged: false,
+      marketSelectionChanged: false,
+      startedAt: Date.now(),
+      totalRequests: 0,
+      total429: 0,
+      totalSuccess: 0,
+      totalOtherHttpErrors: 0,
+      byProvider: {},
+      byFeature: {},
+      recentRequests: []
+    },
+
     system: {
       used:
         0,
@@ -4062,6 +4080,12 @@ function budgetTelemetry(
     rpcHealthRoutingV424:
       rpcHealthRoutingTelemetryV424(
         budget
+      ),
+
+    marketProviderPressureV428:
+      marketProviderPressureTelemetryV428(
+        budget,
+        null
       ),
 
     remaining:
@@ -26679,6 +26703,418 @@ function registerDexSuccessV147(
   }
 }
 
+/* =========================================================
+   V428 MARKET PROVIDER PRESSURE DIAGNOSTIC
+   ========================================================= */
+
+function marketPressureRootV428(budget) {
+  return budget?.marketProviderPressureV428 || null;
+}
+
+function marketPressureIncrementV428(object, key, field) {
+  object[key] =
+    object[key] &&
+    typeof object[key] === "object"
+      ? object[key]
+      : {};
+
+  object[key][field] =
+    safeNumber(object[key][field]) + 1;
+}
+
+function marketProviderBeforeStateV428(
+  state,
+  provider
+) {
+  const nowMs = Date.now();
+
+  if (provider === "DEXSCREENER") {
+    const service = dexService(state);
+    const availability =
+      marketProviderAvailabilityV147(
+        state,
+        null
+      );
+
+    return {
+      eligible:
+        availability?.dex?.eligible === true,
+      eligibleAt:
+        safeNumber(
+          availability?.dex?.eligibleAt
+        ) || null,
+      cooldownUntil:
+        safeNumber(
+          service?.cooldownUntil
+        ) || null,
+      lastRequestAt:
+        safeNumber(
+          service?.lastRequestAt
+        ) || null,
+      msSinceLastRequest:
+        safeNumber(service?.lastRequestAt)
+          ? Math.max(
+              0,
+              nowMs -
+                safeNumber(
+                  service.lastRequestAt
+                )
+            )
+          : null,
+      consecutive429s:
+        safeNumber(
+          service?.consecutive429s
+        ),
+      lastBackoffMs:
+        safeNumber(
+          service?.lastBackoffMs
+        ),
+      effectiveBackoffMsV300:
+        safeNumber(
+          service?.effectiveBackoffMsV300
+        ),
+      retryAfterHeaderV300:
+        service?.retryAfterHeaderV300 ||
+        null
+    };
+  }
+
+  if (provider === "GECKOTERMINAL") {
+    const service = geckoService(state);
+    const eligibility =
+      geckoFreshEligibility(state);
+
+    return {
+      eligible:
+        eligibility?.eligible === true,
+      eligibleAt:
+        safeNumber(
+          eligibility?.eligibleAt
+        ) || null,
+      reason:
+        eligibility?.reason || null,
+      cooldownUntil:
+        safeNumber(
+          service?.cooldownUntil
+        ) || null,
+      lastRequestAt:
+        safeNumber(
+          service?.lastRequestAt
+        ) || null,
+      msSinceLastRequest:
+        safeNumber(service?.lastRequestAt)
+          ? Math.max(
+              0,
+              nowMs -
+                safeNumber(
+                  service.lastRequestAt
+                )
+            )
+          : null,
+      consecutive429s:
+        safeNumber(
+          service?.consecutive429s
+        )
+    };
+  }
+
+  return {};
+}
+
+function retryAfterMsMarketV428(response) {
+  if (!response?.headers) return null;
+
+  const raw =
+    response.headers.get("retry-after");
+
+  if (!raw) return null;
+
+  const seconds = Number(raw);
+
+  if (
+    Number.isFinite(seconds) &&
+    seconds >= 0
+  ) {
+    return Math.round(seconds * 1000);
+  }
+
+  const parsed = Date.parse(raw);
+
+  return Number.isFinite(parsed)
+    ? Math.max(0, parsed - Date.now())
+    : null;
+}
+
+async function marketFetchV428(
+  url,
+  options,
+  budget,
+  state,
+  {
+    provider,
+    feature,
+    phase = "analysis",
+    pathClass = null
+  }
+) {
+  const root =
+    marketPressureRootV428(budget);
+
+  const startedAt = Date.now();
+
+  const before =
+    marketProviderBeforeStateV428(
+      state,
+      provider
+    );
+
+  try {
+    const response =
+      await fetch(url, options);
+
+    const latencyMs =
+      Date.now() - startedAt;
+
+    const status =
+      safeNumber(response?.status) || null;
+
+    const outcome =
+      status === 429
+        ? "HTTP_429"
+        : response?.ok
+          ? "SUCCESS"
+          : "HTTP_ERROR";
+
+    const retryAfterMs =
+      retryAfterMsMarketV428(
+        response
+      );
+
+    if (root?.enabled) {
+      root.totalRequests =
+        safeNumber(root.totalRequests) + 1;
+
+      if (outcome === "HTTP_429") {
+        root.total429 =
+          safeNumber(root.total429) + 1;
+      } else if (outcome === "SUCCESS") {
+        root.totalSuccess =
+          safeNumber(root.totalSuccess) + 1;
+      } else {
+        root.totalOtherHttpErrors =
+          safeNumber(
+            root.totalOtherHttpErrors
+          ) + 1;
+      }
+
+      marketPressureIncrementV428(
+        root.byProvider,
+        provider || "UNKNOWN",
+        "requests"
+      );
+
+      marketPressureIncrementV428(
+        root.byFeature,
+        feature || "UNKNOWN",
+        "requests"
+      );
+
+      if (outcome === "HTTP_429") {
+        marketPressureIncrementV428(
+          root.byProvider,
+          provider || "UNKNOWN",
+          "http429"
+        );
+
+        marketPressureIncrementV428(
+          root.byFeature,
+          feature || "UNKNOWN",
+          "http429"
+        );
+      }
+
+      if (outcome === "SUCCESS") {
+        marketPressureIncrementV428(
+          root.byProvider,
+          provider || "UNKNOWN",
+          "successes"
+        );
+
+        marketPressureIncrementV428(
+          root.byFeature,
+          feature || "UNKNOWN",
+          "successes"
+        );
+      }
+
+      root.recentRequests =
+        Array.isArray(root.recentRequests)
+          ? root.recentRequests
+          : [];
+
+      root.recentRequests.push({
+        at:
+          startedAt,
+        provider:
+          provider || "UNKNOWN",
+        feature:
+          feature || "UNKNOWN",
+        phase:
+          phase || null,
+        pathClass:
+          pathClass || null,
+        latencyMs,
+        httpStatus:
+          status,
+        outcome,
+        retryAfterMs:
+          safeNumber(retryAfterMs) || null,
+        before
+      });
+
+      if (
+        root.recentRequests.length >
+        40
+      ) {
+        root.recentRequests =
+          root.recentRequests.slice(-40);
+      }
+    }
+
+    return response;
+  }
+
+  catch (error) {
+    if (root?.enabled) {
+      root.totalRequests =
+        safeNumber(root.totalRequests) + 1;
+
+      root.totalOtherHttpErrors =
+        safeNumber(
+          root.totalOtherHttpErrors
+        ) + 1;
+
+      marketPressureIncrementV428(
+        root.byProvider,
+        provider || "UNKNOWN",
+        "requests"
+      );
+
+      marketPressureIncrementV428(
+        root.byFeature,
+        feature || "UNKNOWN",
+        "requests"
+      );
+
+      marketPressureIncrementV428(
+        root.byProvider,
+        provider || "UNKNOWN",
+        "transportErrors"
+      );
+
+      marketPressureIncrementV428(
+        root.byFeature,
+        feature || "UNKNOWN",
+        "transportErrors"
+      );
+
+      root.recentRequests =
+        Array.isArray(root.recentRequests)
+          ? root.recentRequests
+          : [];
+
+      root.recentRequests.push({
+        at:
+          startedAt,
+        provider:
+          provider || "UNKNOWN",
+        feature:
+          feature || "UNKNOWN",
+        phase:
+          phase || null,
+        pathClass:
+          pathClass || null,
+        latencyMs:
+          Date.now() - startedAt,
+        httpStatus:
+          null,
+        outcome:
+          "TRANSPORT_ERROR",
+        retryAfterMs:
+          null,
+        before,
+        error:
+          errorString(error).slice(0, 180)
+      });
+
+      if (
+        root.recentRequests.length >
+        40
+      ) {
+        root.recentRequests =
+          root.recentRequests.slice(-40);
+      }
+    }
+
+    throw error;
+  }
+}
+
+function marketProviderPressureTelemetryV428(
+  budget,
+  state
+) {
+  const root =
+    marketPressureRootV428(budget);
+
+  if (!root) return null;
+
+  return {
+    enabled: true,
+    diagnosticOnly: true,
+    externalRequestsAdded: 0,
+    providerOrderChanged: false,
+    cooldownBehaviourChanged: false,
+    marketSelectionChanged: false,
+    elapsedMs:
+      root.startedAt
+        ? Date.now() -
+          safeNumber(root.startedAt)
+        : null,
+    totalRequests:
+      safeNumber(root.totalRequests),
+    total429:
+      safeNumber(root.total429),
+    totalSuccess:
+      safeNumber(root.totalSuccess),
+    totalOtherHttpErrors:
+      safeNumber(
+        root.totalOtherHttpErrors
+      ),
+    byProvider:
+      root.byProvider || {},
+    byFeature:
+      root.byFeature || {},
+    providerAvailabilityAtEnd:
+      marketProviderAvailabilityV147(
+        state,
+        null
+      ),
+    recentRequests:
+      Array.isArray(root.recentRequests)
+        ? root.recentRequests
+        : [],
+    interpretation: {
+      purpose:
+        "IDENTIFY_MARKET_PROVIDER_429_CALL_SITES_BEFORE_ROUTING_CHANGE",
+      noExtraRequests:
+        true,
+      noQualificationChange:
+        true
+    }
+  };
+}
+
 function marketProviderAvailabilityV147(
   state,
   address = null
@@ -27796,7 +28232,7 @@ async function geckoTerminalMarketData(
 
   try {
     const response =
-      await fetch(
+      await marketFetchV428(
         `${GECKOTERMINAL_BASE}/networks/${GECKOTERMINAL_NETWORK}/tokens/${token}/pools`,
 
         {
@@ -27804,6 +28240,19 @@ async function geckoTerminalMarketData(
             accept:
               "application/json;version=20230203"
           }
+        },
+
+        budget,
+        state,
+        {
+          provider:
+            "GECKOTERMINAL",
+          feature:
+            "GECKO_MARKET_FALLBACK",
+          phase:
+            "analysis",
+          pathClass:
+            "TOKEN_POOLS"
         }
       );
 
@@ -29429,7 +29878,7 @@ async function geckoDirectionalTradeFlow(
 
   try {
     const response =
-      await fetch(
+      await marketFetchV428(
         `${GECKOTERMINAL_BASE}/networks/${GECKOTERMINAL_NETWORK}/pools/${poolAddress}/trades`,
 
         {
@@ -29437,6 +29886,19 @@ async function geckoDirectionalTradeFlow(
             accept:
               "application/json;version=20230203"
           }
+        },
+
+        budget,
+        state,
+        {
+          provider:
+            "GECKOTERMINAL",
+          feature:
+            "GECKO_DIRECTIONAL_TRADES",
+          phase:
+            "analysis",
+          pathClass:
+            "POOL_TRADES"
         }
       );
 
@@ -30384,12 +30846,20 @@ async function athFairSlotRefreshV299(
   });
 
   try {
-    const response = await fetch(
+    const response = await marketFetchV428(
       `${DEXSCREENER_BASE}/tokens/v1/robinhood/${batchAddresses.join(",")}`,
       {
         headers: {
           accept: "application/json"
         }
+      },
+      budget,
+      state,
+      {
+        provider: "DEXSCREENER",
+        feature: "DEX_ATH_FAIR_SLOT",
+        phase: "analysis",
+        pathClass: "TOKENS_V1_BATCH"
       }
     );
 
@@ -30872,7 +31342,7 @@ async function marketData(
     });
 
     const response =
-      await fetch(
+      await marketFetchV428(
         `${DEXSCREENER_BASE}/tokens/v1/robinhood/${v295BatchAddresses.join(",")}`,
 
         {
@@ -30880,6 +31350,19 @@ async function marketData(
             accept:
               "application/json"
           }
+        },
+
+        budget,
+        state,
+        {
+          provider:
+            "DEXSCREENER",
+          feature:
+            "DEX_CANDIDATE_MARKET",
+          phase:
+            "analysis",
+          pathClass:
+            "TOKENS_V1_BATCH"
         }
       );
 
@@ -31084,13 +31567,25 @@ async function marketData(
       ) {
         try {
           const fallbackResponse =
-            await fetch(
+            await marketFetchV428(
               `${DEXSCREENER_BASE}/tokens/v1/robinhood/${token}`,
               {
                 headers: {
                   accept:
                     "application/json"
                 }
+              },
+              budget,
+              state,
+              {
+                provider:
+                  "DEXSCREENER",
+                feature:
+                  "DEX_DISABLED_TOKEN_FALLBACK",
+                phase:
+                  "analysis",
+                pathClass:
+                  "TOKENS_V1_SINGLE"
               }
             );
 
@@ -53368,6 +53863,16 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    marketProviderPressureV428: {
+      enabled: true,
+      diagnosticOnly: true,
+      externalRequestsAdded: 0,
+      providerOrderChanged: false,
+      cooldownBehaviourChanged: false,
+      scoringChanged: false,
+      qualificationChanged: false,
+      telegramThresholdChanged: false
+    },
     rpcAdaptiveBackoffV427: {
       enabled: true,
       crossScanAdaptive429Streak: true,
@@ -58758,6 +59263,12 @@ for (
         budget
       ),
 
+    marketProviderPressureV428:
+      marketProviderPressureTelemetryV428(
+        budget,
+        state
+      ),
+
     notificationReserveReleaseV174,
 
     postAnalysisBacklogReclaimV170,
@@ -60760,6 +61271,11 @@ for (
           rpcAdaptiveBackoffTelemetryV427(
             state,
             budget
+          ),
+        marketProviderPressureV428:
+          marketProviderPressureTelemetryV428(
+            budget,
+            state
           )
       }
     },
