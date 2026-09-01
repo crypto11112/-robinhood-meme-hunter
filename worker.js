@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V434
- * AUTHORITATIVE RUNTIME VERSION: V434
+ * Robinhood Chain Meme Hunter — V435
+ * AUTHORITATIVE RUNTIME VERSION: V435
+ * V435 is a narrow live-discovery reliability build on V434. Chainstack is now the preferred provider for LIVE discovery eth_getLogs only, using the already-configured CHAINSTACK_RPC_URL and the existing discovery-live request/global budgets. Robinhood Public RPC and Alchemy remain bounded fallbacks. Backlog discovery/provider learning is deliberately left unchanged so existing public/Alchemy proven-range logic cannot be regressed by this change. V435 adds an independent live-discovery Chainstack cooldown on HTTP 429 and live-provider telemetry. No extra request ceiling, no additional scheduled scans, no scoring/qualification/Telegram/holder/market changes, and no weakening of verification requirements.
  * V434 builds directly on V433 and adds a read-only Telegram command, /chainstack, for the V433 Chainstack bot-side usage meter. The command reads persisted state only, triggers no scanner run, makes zero external provider/RPC requests, and performs no state write. It reports observed calendar-month Chainstack requests, latest-scan requests, scans using Chainstack, average/day, projected 30-day usage, planning allowance, percentage used/projected, and remaining planning allowance. It clearly labels the values as bot-side estimates and the Chainstack dashboard as authoritative. No RPC, market-data, scoring, qualification, Telegram alert threshold, request-budget, holder, learning, or V433 fallback behavior is changed.
  * V433 builds narrowly on the proven V432/V431 path. It adds two targeted improvements only. First, when DexScreener market verification is unavailable because of fresh Dex rate-limit evidence, GeckoTerminal market verification may bypass only the V157 cross-provider stagger once Gecko's own cooldown and fresh-spacing rules are satisfied. Optional Gecko directional enrichment remains governed by V432 and cannot consume the market-recovery opportunity. Second, V433 adds a bot-side Chainstack usage meter that counts actual CHAINSTACK RPC attempts observed by this Worker and persists the count using the existing state write. The meter is planning telemetry only, not billing-authoritative, and reports calendar-month observed requests, average/day, projected 30-day requests, configured planning allowance and percentage. No extra external requests, no additional state-write cycle, no request-ceiling increase, and no scoring, qualification, Telegram, holder, DexScreener, or RPC-rule changes.
  * V432 is a narrow market-data resilience build on the proven V431 Chainstack integration. The V428 diagnostic showed DexScreener candidate market lookup succeeding while GeckoTerminal directional-trade enrichment returned HTTP 429. V432 therefore preserves GeckoTerminal as a market-verification fallback, but defers optional Gecko directional-trade enrichment whenever Gecko has unresolved/recent rate-limit evidence and no later success has rehabilitated it. This prevents optional enrichment from wasting analysis budget or provoking repeated 429s while preserving all required market verification paths. A later successful Gecko request automatically rehabilitates the provider and allows directional enrichment again after the existing fresh-spacing gate. V432 also corrects V428 diagnostic timing so the captured provider state represents the moment BEFORE lastRequestAt is mutated for the request. No RPC logic, Chainstack routing, scoring, qualification, Telegram threshold, holder requirement, DexScreener behavior, request ceiling, or market-verification requirement is changed.
@@ -1508,7 +1509,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V434";
+const VERSION = "V435";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -4349,6 +4350,18 @@ function getKV(env) {
 
 function defaultDiscoveryRpcState() {
   return {
+    chainstackLiveCooldownUntilV435:
+      null,
+
+    chainstackLiveLast429AtV435:
+      null,
+
+    chainstackLiveTotal429sV435:
+      0,
+
+    chainstackLiveLastSuccessAtV435:
+      null,
+
     publicCooldownUntil:
       null,
 
@@ -6404,6 +6417,22 @@ function markDiscovery429(
 
   if (
     provider ===
+    "CHAINSTACK"
+  ) {
+    service.chainstackLiveLast429AtV435 =
+      Date.now();
+
+    service.chainstackLiveCooldownUntilV435 =
+      until;
+
+    service.chainstackLiveTotal429sV435 =
+      safeNumber(
+        service.chainstackLiveTotal429sV435
+      ) + 1;
+  }
+
+  if (
+    provider ===
     "ROBINHOOD_PUBLIC_RPC"
   ) {
     service.publicLast429At =
@@ -6477,6 +6506,162 @@ function discoveryProviderCooling(
   }
 
   return false;
+}
+
+function chainstackLiveDiscoveryCoolingV435(
+  state
+) {
+  const service =
+    discoveryService(
+      state
+    );
+
+  return (
+    safeNumber(
+      service.chainstackLiveCooldownUntilV435
+    ) >
+    Date.now()
+  );
+}
+
+function preferredLiveDiscoveryProviderV435(
+  env,
+  state
+) {
+  if (
+    chainstackConfiguredV431(env) &&
+    !chainstackLiveDiscoveryCoolingV435(
+      state
+    )
+  ) {
+    return "CHAINSTACK";
+  }
+
+  /*
+   * Preserve the proven legacy ordering as fallback only.
+   */
+  return preferredDiscoveryProvider(
+    env,
+    state
+  );
+}
+
+function alternateLiveDiscoveryProviderV435(
+  env,
+  state,
+  current
+) {
+  if (
+    current !== "CHAINSTACK" &&
+    chainstackConfiguredV431(env) &&
+    !chainstackLiveDiscoveryCoolingV435(
+      state
+    )
+  ) {
+    return "CHAINSTACK";
+  }
+
+  if (
+    current !== "ROBINHOOD_PUBLIC_RPC" &&
+    !discoveryProviderCooling(
+      state,
+      "ROBINHOOD_PUBLIC_RPC"
+    )
+  ) {
+    return "ROBINHOOD_PUBLIC_RPC";
+  }
+
+  if (
+    current !== "ALCHEMY" &&
+    env.ALCHEMY_API_KEY &&
+    !discoveryProviderCooling(
+      state,
+      "ALCHEMY"
+    )
+  ) {
+    return "ALCHEMY";
+  }
+
+  return null;
+}
+
+function liveDiscoveryTelemetryV435(
+  env,
+  state,
+  liveScan,
+  liveOutput
+) {
+  const service =
+    discoveryService(
+      state
+    );
+
+  const ranges =
+    Array.isArray(
+      liveOutput?.ranges
+    )
+      ? liveOutput.ranges
+      : [];
+
+  const byProvider = {};
+
+  for (const row of ranges) {
+    const provider =
+      row?.provider ||
+      "UNKNOWN";
+
+    byProvider[provider] =
+      safeNumber(
+        byProvider[provider]
+      ) + 1;
+  }
+
+  return {
+    enabled: true,
+    scope:
+      "LIVE_DISCOVERY_ETH_GETLOGS_ONLY",
+    chainstackConfigured:
+      chainstackConfiguredV431(env),
+    preferredProvider:
+      chainstackConfiguredV431(env)
+        ? "CHAINSTACK"
+        : "LEGACY_DISCOVERY_ORDER",
+    actualSuccessfulRangeProviders:
+      byProvider,
+    lastLiveProvider:
+      service.lastLiveProvider ||
+      null,
+    chainstackCooling:
+      chainstackLiveDiscoveryCoolingV435(
+        state
+      ),
+    chainstackCooldownUntil:
+      safeNumber(
+        service.chainstackLiveCooldownUntilV435
+      ) || null,
+    chainstackLast429At:
+      safeNumber(
+        service.chainstackLiveLast429AtV435
+      ) || null,
+    chainstackTotal429s:
+      safeNumber(
+        service.chainstackLiveTotal429sV435
+      ),
+    chainstackLastSuccessAt:
+      safeNumber(
+        service.chainstackLiveLastSuccessAtV435
+      ) || null,
+    liveSuccess:
+      liveScan?.success === true,
+    liveError:
+      liveScan?.error || null,
+    backlogProviderLogicChanged:
+      false,
+    requestCeilingChanged:
+      false,
+    externalRequestsAdded:
+      0
+  };
 }
 
 function preferredDiscoveryProvider(
@@ -14873,6 +15058,15 @@ function rpcProviderUrl(
 ) {
   if (
     provider ===
+    "CHAINSTACK"
+  ) {
+    return chainstackRpcUrlV431(
+      env
+    );
+  }
+
+  if (
+    provider ===
     "ROBINHOOD_PUBLIC_RPC"
   ) {
     return PUBLIC_RPC;
@@ -15073,7 +15267,7 @@ async function scanLiveRange(
     }
 
     let provider =
-      preferredDiscoveryProvider(
+      preferredLiveDiscoveryProviderV435(
         env,
         state
       );
@@ -15211,7 +15405,7 @@ async function scanLiveRange(
         abortRecoveryAttemptsV156++;
 
         const alternate =
-          alternateDiscoveryProvider(
+          alternateLiveDiscoveryProviderV435(
             env,
             state,
             provider
@@ -15386,6 +15580,20 @@ async function scanLiveRange(
 
       service.lastLiveProvider =
         response.provider;
+
+      if (
+        response.provider ===
+        "CHAINSTACK"
+      ) {
+        service.chainstackLiveLastSuccessAtV435 =
+          Date.now();
+
+        /*
+         * Any successful live read rehabilitates Chainstack immediately.
+         */
+        service.chainstackLiveCooldownUntilV435 =
+          null;
+      }
 
       service.liveChunkBlocks =
         chunkSize;
@@ -54767,6 +54975,15 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    chainstackLiveDiscoveryV435: {
+      enabled: true,
+      preferredProvider: "CHAINSTACK",
+      scope: "LIVE_DISCOVERY_ETH_GETLOGS_ONLY",
+      legacyFallbacksPreserved: true,
+      backlogProviderLogicChanged: false,
+      externalRequestsAdded: 0,
+      requestCeilingChanged: false
+    },
     chainstackUsageMeterV433: {
       enabled: true,
       botObservedOnly: true,
@@ -60327,6 +60544,14 @@ for (
       externalProviderRequests: 0,
       stateWrites: 0
     },
+
+    chainstackLiveDiscoveryV435:
+      liveDiscoveryTelemetryV435(
+        env,
+        state,
+        liveScan,
+        liveOutput
+      ),
 
     notificationReserveReleaseV174,
 
