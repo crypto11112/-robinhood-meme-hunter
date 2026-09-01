@@ -1,7 +1,8 @@
 /**
- * Robinhood Chain Meme Hunter — V407
- * AUTHORITATIVE RUNTIME VERSION: V407
+ * Robinhood Chain Meme Hunter — V408
+ * AUTHORITATIVE RUNTIME VERSION: V408
  * V407 adds read-only entry-quality analytics and forward-only post-call drawdown tracking. Existing verified ATH history can safely classify whether a call ever exceeded its frozen entry level; no historical low is invented. New/ongoing V407 observations track the lowest verified market cap from the V407 tracking start onward, explicitly marked forward-only. /best, /performance, /learning and /call surface the new metrics. V407 also prevents the Durable Object usage projection from showing false DANGER during the first 15 minutes by reporting CALIBRATING until a meaningful observation window exists. Scanner, scoring, qualification, alerts, provider requests, V403 batching and V404/V406 usage counting remain unchanged.
+ * V408 adds evidence-separated age reporting. Strict protocol launch age remains VERIFIED only from an exact supported launch event; verified DexScreener pairCreatedAt is now surfaced separately as VERIFIED MARKET/PAIR AGE with its provider source, and scanner age remains separate. No pair age, scanner age, token deployment time, or generic V4 Initialize timestamp is promoted to protocol launch age. Adds zero external requests and changes no scanner, scoring, qualification, alert threshold, provider budget, V403 batching, V404/V406 usage-meter, or V407 learning/performance logic.
  * V406 fixes the V405 usage-meter first-read initialization bug: an empty/new-day meter is now persisted once on first /usage read, so monitorStartedAt no longer moves on every zero-usage query. The initialization row is included in the estimate. Scanner, scoring, collectors, batching, alerts, request budgets and UK reset display are unchanged.
  * V405 builds directly forward from V404. It changes only the /usage reset-time presentation: the actual meter still resets exactly at 00:00 UTC, while Telegram now also displays the equivalent Europe/London local time (automatically BST/GMT-aware). Scanner, scoring, alerts, collectors, V403 write batching, V404 usage accounting, request budgets and persistence logic are unchanged.
  * V404 builds directly forward from V403. It preserves the V402/V403 write-efficiency changes and adds a conservative internal Durable Object row-write monitor. All V3 live-collector storage puts/deletes are counted through tracked wrappers, per-collector deltas are aggregated into one singleton meter at most once per 5 minutes, the meter resets automatically at 00:00 UTC, and /usage exposes estimated rows written, percentage, hourly rate, 24h projection and SAFE/WARNING/DANGER status. The meter is diagnostic only: no scanner/scoring/qualification/provider/Telegram threshold logic is changed.
@@ -1462,7 +1463,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V407";
+const VERSION = "V408";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -42844,6 +42845,20 @@ function telegramMessage(
       ? formatAgeV223(Math.max(0, Date.now() - Number(market.pairCreatedAt)))
       : "UNVERIFIED";
 
+  /* V408: pairCreatedAt is useful verified market-age evidence, but it is
+   * deliberately NOT promoted to protocol launch age. This is presentation
+   * only and adds zero provider/RPC requests.
+   */
+  const verifiedMarketAgeV408 =
+    dexProviderReportedV320 && Number.isFinite(Number(market?.pairCreatedAt)) && Number(market.pairCreatedAt) > 0
+      ? dexPairAgeV320
+      : "UNVERIFIED";
+
+  const verifiedMarketAgeSourceV408 =
+    verifiedMarketAgeV408 !== "UNVERIFIED"
+      ? "DEXSCREENER pairCreatedAt"
+      : "UNVERIFIED";
+
   /* V322: directional USD is displayed only from an explicitly verified
    * indexed trade feed. DexScreener counts/total volume are never split or
    * estimated into buy/sell USD.
@@ -42908,6 +42923,8 @@ function telegramMessage(
     `<code>${escapeHtml(candidate.address)}</code>`,
     "",
     `⏱ Verified launch age: <b>${escapeHtml(verifiedLaunchAgeTextV223)}</b>`,
+    `🕒 Verified market age: <b>${escapeHtml(verifiedMarketAgeV408)}</b>`,
+    `🏪 Market-age source: <b>${escapeHtml(verifiedMarketAgeSourceV408)}</b>`,
     `🔭 Scanner age: <b>${escapeHtml(scannerAgeTextV223)}</b>`,
     verifiedLaunchAgeV223Data?.verified === true &&
     verifiedLaunchAgeV223Data?.protocol
@@ -42935,7 +42952,7 @@ function telegramMessage(
       ? `🧩 Primary protocol: <b>${escapeHtml(dexProtocolVersionV321)}</b>`
       : null,
     dexProviderReportedV320
-      ? `🕒 Pair age: <b>${escapeHtml(dexPairAgeV320)}</b>`
+      ? `🧩 Provider pair age: <b>${escapeHtml(dexPairAgeV320)}</b>`
       : null,
     `🟢 5m Buys: <b>${trade5m.buys}</b>`,
     `🔴 5m Sells: <b>${trade5m.sells}</b>`,
@@ -62636,6 +62653,25 @@ function telegramAnalyseResultMessageV276(
       ? verifiedLaunchV286.protocol
       : "UNVERIFIED";
 
+  /* V408 manual-analysis age evidence: verified market/pair age is shown
+   * separately from strict protocol launch age and is never substituted for it.
+   */
+  const manualMarketAgeVerifiedV408 =
+    market?.verified === true &&
+    String(market?.source || "").toUpperCase().includes("DEXSCREENER") &&
+    Number.isFinite(Number(market?.pairCreatedAt)) &&
+    Number(market.pairCreatedAt) > 0;
+
+  const manualMarketAgeV408 =
+    manualMarketAgeVerifiedV408
+      ? formatAgeV223(Math.max(0, Date.now() - Number(market.pairCreatedAt)))
+      : "UNVERIFIED";
+
+  const manualMarketAgeSourceV408 =
+    manualMarketAgeVerifiedV408
+      ? "DEXSCREENER pairCreatedAt"
+      : "UNVERIFIED";
+
   const lines = [
     `🔎 <b>Fresh Robinhood Analysis — ${escapeHtml(
       candidate?.symbol ||
@@ -62776,6 +62812,8 @@ function telegramAnalyseResultMessageV276(
     }</b>`,
     "",
     `⏱ Verified launch age: <b>${escapeHtml(launchAgeV286)}</b>`,
+    `🕒 Verified market age: <b>${escapeHtml(manualMarketAgeV408)}</b>`,
+    `🏪 Market-age source: <b>${escapeHtml(manualMarketAgeSourceV408)}</b>`,
     `🔭 Scanner age: <b>${escapeHtml(scannerAgeV286)}</b>`,
     `🏷 Launch source: <b>${escapeHtml(launchSourceV286)}</b>`
   ];
