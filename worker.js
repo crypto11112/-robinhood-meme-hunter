@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V432
- * AUTHORITATIVE RUNTIME VERSION: V432
+ * Robinhood Chain Meme Hunter — V433
+ * AUTHORITATIVE RUNTIME VERSION: V433
+ * V433 builds narrowly on the proven V432/V431 path. It adds two targeted improvements only. First, when DexScreener market verification is unavailable because of fresh Dex rate-limit evidence, GeckoTerminal market verification may bypass only the V157 cross-provider stagger once Gecko's own cooldown and fresh-spacing rules are satisfied. Optional Gecko directional enrichment remains governed by V432 and cannot consume the market-recovery opportunity. Second, V433 adds a bot-side Chainstack usage meter that counts actual CHAINSTACK RPC attempts observed by this Worker and persists the count using the existing state write. The meter is planning telemetry only, not billing-authoritative, and reports calendar-month observed requests, average/day, projected 30-day requests, configured planning allowance and percentage. No extra external requests, no additional state-write cycle, no request-ceiling increase, and no scoring, qualification, Telegram, holder, DexScreener, or RPC-rule changes.
  * V432 is a narrow market-data resilience build on the proven V431 Chainstack integration. The V428 diagnostic showed DexScreener candidate market lookup succeeding while GeckoTerminal directional-trade enrichment returned HTTP 429. V432 therefore preserves GeckoTerminal as a market-verification fallback, but defers optional Gecko directional-trade enrichment whenever Gecko has unresolved/recent rate-limit evidence and no later success has rehabilitated it. This prevents optional enrichment from wasting analysis budget or provoking repeated 429s while preserving all required market verification paths. A later successful Gecko request automatically rehabilitates the provider and allows directional enrichment again after the existing fresh-spacing gate. V432 also corrects V428 diagnostic timing so the captured provider state represents the moment BEFORE lastRequestAt is mutated for the request. No RPC logic, Chainstack routing, scoring, qualification, Telegram threshold, holder requirement, DexScreener behavior, request ceiling, or market-verification requirement is changed.
  * V431 integrates an optional managed Chainstack Robinhood Mainnet HTTPS RPC through the Cloudflare secret CHAINSTACK_RPC_URL. The endpoint is never hard-coded into this source. When configured, Chainstack becomes the preferred normal RPC for system eth_blockNumber and analysis reads, while Robinhood Public and Alchemy remain normal fallbacks and the existing BlockReq V421 path remains the independent ERC-20/system emergency fallback. Chainstack participates in the existing V423 diagnostics, V424 method-aware health routing, V426 cross-scan persistence and V427 adaptive 429 backoff. The V421/V429 all-normal-RPC rate-limit tests include Chainstack when configured so BlockReq only takes over after every configured normal RPC has supplied rate-limit evidence. No token scoring, Opportunity/Momentum logic, qualification, Telegram threshold, holder rule, market-data behavior, request ceiling, or V428 diagnostic behavior is changed.
  * V430 is a narrow hotfix for the V428 market-pressure telemetry crash exposed under V429. The crash was caused by marketProviderPressureTelemetryV428() being called from budget telemetry with state=null and then unconditionally calling marketProviderAvailabilityV147(state), whose service helpers expect a real state object. V430 makes that telemetry null-safe: providerAvailabilityAtEnd is only calculated when a valid scanner state object exists, otherwise it is reported as null/STATE_NOT_AVAILABLE_IN_BUDGET_TELEMETRY. No market request behavior, RPC routing, cooldown, provider order, scoring, qualification, Telegram threshold, request ceiling, or V429 system-head fallback behavior changes.
@@ -1506,7 +1507,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V432";
+const VERSION = "V433";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -4484,6 +4485,18 @@ function newState() {
       expiredRowsDropped: 0
     },
 
+    chainstackUsageMeterV433: {
+      schemaVersion: "V433_1",
+      calendarMonthKey: null,
+      monthStartedAt: null,
+      requestsThisMonth: 0,
+      scansWithChainstack: 0,
+      firstObservedAt: null,
+      lastObservedAt: null,
+      lastScanRequests: 0,
+      totalObservedRequests: 0
+    },
+
     snapshots:
       {},
 
@@ -4997,6 +5010,16 @@ async function readState(env) {
             typeof parsed.rpcHealthPersistentV426.providerMethod === "object"
               ? parsed.rpcHealthPersistentV426.providerMethod
               : {}
+        },
+
+        chainstackUsageMeterV433: {
+          ...fresh.chainstackUsageMeterV433,
+          ...(
+            parsed.chainstackUsageMeterV433 &&
+            typeof parsed.chainstackUsageMeterV433 === "object"
+              ? parsed.chainstackUsageMeterV433
+              : {}
+          )
         },
 
         snapshots:
@@ -12931,6 +12954,24 @@ function rpcPersistentHealthTelemetryV426(
    V431 CHAINSTACK MANAGED RPC
    ========================================================= */
 
+const V433_CHAINSTACK_PLANNING_ALLOWANCE_DEFAULT =
+  3_000_000;
+
+function chainstackPlanningAllowanceV433(env) {
+  const configured =
+    Number(
+      env?.CHAINSTACK_MONTHLY_REQUEST_UNIT_ALLOWANCE
+    );
+
+  return (
+    Number.isFinite(configured) &&
+    configured > 0
+  )
+    ? Math.floor(configured)
+    : V433_CHAINSTACK_PLANNING_ALLOWANCE_DEFAULT;
+}
+
+
 function chainstackRpcUrlV431(env) {
   const value =
     String(
@@ -13239,6 +13280,244 @@ function rpcHealthRoutingTelemetryV424(budget) {
       qualificationChanged: false,
       telegramThresholdChanged: false
     }
+  };
+}
+
+/* =========================================================
+   V433 CHAINSTACK BOT-SIDE USAGE METER
+   ========================================================= */
+
+function calendarMonthKeyV433(timestamp = Date.now()) {
+  const date = new Date(timestamp);
+  return `${date.getUTCFullYear()}-${String(
+    date.getUTCMonth() + 1
+  ).padStart(2, "0")}`;
+}
+
+function calendarMonthStartV433(timestamp = Date.now()) {
+  const date = new Date(timestamp);
+  return Date.UTC(
+    date.getUTCFullYear(),
+    date.getUTCMonth(),
+    1,
+    0,
+    0,
+    0,
+    0
+  );
+}
+
+function chainstackRequestsThisScanV433(budget) {
+  return safeNumber(
+    budget
+      ?.rpcProviderHealthV423
+      ?.providers
+      ?.CHAINSTACK
+      ?.attempts
+  );
+}
+
+function updateChainstackUsageMeterV433(
+  state,
+  budget,
+  env
+) {
+  if (!state || typeof state !== "object") {
+    return null;
+  }
+
+  const now = Date.now();
+  const key = calendarMonthKeyV433(now);
+
+  const previous =
+    state.chainstackUsageMeterV433 &&
+    typeof state.chainstackUsageMeterV433 === "object"
+      ? state.chainstackUsageMeterV433
+      : {};
+
+  const sameMonth =
+    previous.calendarMonthKey === key;
+
+  const scanRequests =
+    chainstackRequestsThisScanV433(
+      budget
+    );
+
+  const meter = {
+    schemaVersion: "V433_1",
+    calendarMonthKey: key,
+    monthStartedAt:
+      sameMonth &&
+      safeNumber(previous.monthStartedAt)
+        ? safeNumber(previous.monthStartedAt)
+        : calendarMonthStartV433(now),
+    requestsThisMonth:
+      (
+        sameMonth
+          ? safeNumber(
+              previous.requestsThisMonth
+            )
+          : 0
+      ) + scanRequests,
+    scansWithChainstack:
+      (
+        sameMonth
+          ? safeNumber(
+              previous.scansWithChainstack
+            )
+          : 0
+      ) +
+      (
+        scanRequests > 0
+          ? 1
+          : 0
+      ),
+    firstObservedAt:
+      sameMonth &&
+      safeNumber(previous.firstObservedAt)
+        ? safeNumber(previous.firstObservedAt)
+        : (
+            scanRequests > 0
+              ? now
+              : null
+          ),
+    lastObservedAt:
+      scanRequests > 0
+        ? now
+        : (
+            sameMonth
+              ? safeNumber(
+                  previous.lastObservedAt
+                ) || null
+              : null
+          ),
+    lastScanRequests:
+      scanRequests,
+    totalObservedRequests:
+      safeNumber(
+        previous.totalObservedRequests
+      ) +
+      scanRequests
+  };
+
+  state.chainstackUsageMeterV433 =
+    meter;
+
+  return meter;
+}
+
+function chainstackUsageTelemetryV433(
+  state,
+  budget,
+  env
+) {
+  const stored =
+    state?.chainstackUsageMeterV433 ||
+    {};
+
+  const allowance =
+    chainstackPlanningAllowanceV433(
+      env
+    );
+
+  const now = Date.now();
+
+  const monthStart =
+    safeNumber(
+      stored.monthStartedAt
+    ) ||
+    calendarMonthStartV433(now);
+
+  const elapsedDays =
+    Math.max(
+      1 / 24,
+      (
+        now - monthStart
+      ) /
+      (24 * 60 * 60 * 1000)
+    );
+
+  const used =
+    safeNumber(
+      stored.requestsThisMonth
+    );
+
+  const averagePerDay =
+    used / elapsedDays;
+
+  const projected30Day =
+    Math.round(
+      averagePerDay * 30
+    );
+
+  return {
+    enabled: true,
+    source:
+      "BOT_OBSERVED_CHAINSTACK_RPC_ATTEMPTS",
+    billingAuthoritative:
+      false,
+    calendarMonthPlanningMeter:
+      true,
+    calendarMonthKey:
+      stored.calendarMonthKey ||
+      calendarMonthKeyV433(now),
+    requestsThisMonth:
+      used,
+    lastScanRequests:
+      safeNumber(
+        stored.lastScanRequests
+      ),
+    scansWithChainstack:
+      safeNumber(
+        stored.scansWithChainstack
+      ),
+    averageRequestsPerDay:
+      Number(
+        averagePerDay.toFixed(2)
+      ),
+    projected30DayRequests:
+      projected30Day,
+    planningAllowance:
+      allowance,
+    planningPercentUsed:
+      allowance > 0
+        ? Number(
+            (
+              used /
+              allowance *
+              100
+            ).toFixed(4)
+          )
+        : null,
+    projected30DayPercent:
+      allowance > 0
+        ? Number(
+            (
+              projected30Day /
+              allowance *
+              100
+            ).toFixed(2)
+          )
+        : null,
+    remainingPlanningAllowance:
+      allowance > 0
+        ? Math.max(
+            0,
+            allowance - used
+          )
+        : null,
+    firstObservedAt:
+      safeNumber(
+        stored.firstObservedAt
+      ) || null,
+    lastObservedAt:
+      safeNumber(
+        stored.lastObservedAt
+      ) || null,
+    note:
+      "BOT_SIDE_ESTIMATE_ONLY_CHAINSTACK_DASHBOARD_IS_AUTHORITATIVE",
+    externalRequestsAdded: 0,
+    additionalStateWrites: 0
   };
 }
 
@@ -28513,6 +28792,115 @@ function parseGeckoPoolMarket(
   };
 }
 
+function geckoMarketFreshEligibilityV433(
+  state
+) {
+  const service =
+    geckoService(
+      state
+    );
+
+  const dex =
+    dexService(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  const dexLast429At =
+    safeNumber(
+      dex.last429At
+    );
+
+  const dexLastSuccessAt =
+    safeNumber(
+      dex.lastSuccessAt
+    );
+
+  const dexRateLimited =
+    (
+      safeNumber(
+        dex.cooldownUntil
+      ) > now
+    ) ||
+    (
+      dexLast429At >
+      dexLastSuccessAt
+    );
+
+  if (!dexRateLimited) {
+    return {
+      ...geckoFreshEligibility(
+        state
+      ),
+      v433Priority:
+        false
+    };
+  }
+
+  /*
+   * V433 bypasses only V157's cross-provider stagger for MARKET VERIFICATION.
+   * Gecko's own cooldown, fresh spacing, and one-fresh-request-per-scan rule
+   * remain unchanged.
+   */
+  const cooldownUntil =
+    safeNumber(
+      service.cooldownUntil
+    );
+
+  if (
+    cooldownUntil &&
+    now < cooldownUntil
+  ) {
+    return {
+      eligible: false,
+      reason:
+        "GECKOTERMINAL_COOLDOWN",
+      eligibleAt:
+        cooldownUntil,
+      v433Priority:
+        true
+    };
+  }
+
+  const lastRequestAt =
+    safeNumber(
+      service.lastRequestAt
+    );
+
+  const spacingEligibleAt =
+    lastRequestAt
+      ? lastRequestAt +
+        GECKOTERMINAL_MIN_FRESH_INTERVAL_MS
+      : 0;
+
+  if (
+    spacingEligibleAt &&
+    now < spacingEligibleAt
+  ) {
+    return {
+      eligible: false,
+      reason:
+        "GECKOTERMINAL_FRESH_SPACING",
+      eligibleAt:
+        spacingEligibleAt,
+      v433Priority:
+        true
+    };
+  }
+
+  return {
+    eligible: true,
+    reason: null,
+    eligibleAt: now,
+    v433Priority: true,
+    bypassedOnly:
+      "V157_CROSS_PROVIDER_STAGGER_FOR_MARKET_VERIFICATION",
+    dexRateLimited: true
+  };
+}
+
 async function geckoTerminalMarketData(
   token,
   budget,
@@ -28526,7 +28914,7 @@ async function geckoTerminalMarketData(
     );
 
   const freshEligibility =
-    geckoFreshEligibility(
+    geckoMarketFreshEligibilityV433(
       state
     );
 
@@ -28846,10 +29234,17 @@ async function priorityMarketFallback(
       token
     );
 
+  const geckoMarketEligibilityV433 =
+    geckoMarketFreshEligibilityV433(
+      state
+    );
+
   if (
     !availabilityV147
       .gecko
-      .eligible
+      .eligible &&
+    geckoMarketEligibilityV433
+      .eligible !== true
   ) {
     return {
       ...original,
@@ -54371,6 +54766,24 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    chainstackUsageMeterV433: {
+      enabled: true,
+      botObservedOnly: true,
+      calendarMonthPlanningMeter: true,
+      externalRequestsAdded: 0,
+      additionalStateWrites: 0
+    },
+    geckoMarketFallbackPriorityV433: {
+      enabled: true,
+      marketVerificationOnly: true,
+      bypassesOnlyCrossProviderStaggerWhenDexRateLimited: true,
+      geckoOwnCooldownPreserved: true,
+      geckoFreshSpacingPreserved: true,
+      optionalDirectionalStillDeferred: true,
+      requestCeilingChanged: false,
+      scoringChanged: false,
+      qualificationChanged: false
+    },
     geckoDirectionalDeferV432: {
       enabled: true,
       optionalDirectionalOnly: true,
@@ -59420,6 +59833,13 @@ for (
       budget
     );
 
+  const chainstackUsageUpdateV433 =
+    updateChainstackUsageMeterV433(
+      state,
+      budget,
+      env
+    );
+
   const save =
     await writeState(
       env,
@@ -59867,6 +60287,34 @@ for (
       scoringChanged: false,
       qualificationChanged: false,
       telegramThresholdChanged: false
+    },
+
+    chainstackUsageMeterV433: {
+      ...chainstackUsageTelemetryV433(
+        state,
+        budget,
+        env
+      ),
+      updateThisScan:
+        chainstackUsageUpdateV433
+    },
+
+    geckoMarketFallbackPriorityV433: {
+      enabled: true,
+      eligibility:
+        geckoMarketFreshEligibilityV433(
+          state
+        ),
+      optionalDirectionalStillDeferred:
+        true,
+      bypassScope:
+        "V157_CROSS_PROVIDER_STAGGER_ONLY_WHEN_DEX_RATE_LIMITED",
+      geckoOwnCooldownPreserved:
+        true,
+      geckoFreshSpacingPreserved:
+        true,
+      requestCeilingChanged:
+        false
     },
 
     notificationReserveReleaseV174,
@@ -61871,6 +62319,12 @@ for (
           rpcAdaptiveBackoffTelemetryV427(
             state,
             budget
+          ),
+        chainstackUsageMeterV433:
+          chainstackUsageTelemetryV433(
+            state,
+            budget,
+            env
           ),
         marketProviderPressureV428:
           marketProviderPressureTelemetryV428(
