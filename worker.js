@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V431
- * AUTHORITATIVE RUNTIME VERSION: V431
+ * Robinhood Chain Meme Hunter — V432
+ * AUTHORITATIVE RUNTIME VERSION: V432
+ * V432 is a narrow market-data resilience build on the proven V431 Chainstack integration. The V428 diagnostic showed DexScreener candidate market lookup succeeding while GeckoTerminal directional-trade enrichment returned HTTP 429. V432 therefore preserves GeckoTerminal as a market-verification fallback, but defers optional Gecko directional-trade enrichment whenever Gecko has unresolved/recent rate-limit evidence and no later success has rehabilitated it. This prevents optional enrichment from wasting analysis budget or provoking repeated 429s while preserving all required market verification paths. A later successful Gecko request automatically rehabilitates the provider and allows directional enrichment again after the existing fresh-spacing gate. V432 also corrects V428 diagnostic timing so the captured provider state represents the moment BEFORE lastRequestAt is mutated for the request. No RPC logic, Chainstack routing, scoring, qualification, Telegram threshold, holder requirement, DexScreener behavior, request ceiling, or market-verification requirement is changed.
  * V431 integrates an optional managed Chainstack Robinhood Mainnet HTTPS RPC through the Cloudflare secret CHAINSTACK_RPC_URL. The endpoint is never hard-coded into this source. When configured, Chainstack becomes the preferred normal RPC for system eth_blockNumber and analysis reads, while Robinhood Public and Alchemy remain normal fallbacks and the existing BlockReq V421 path remains the independent ERC-20/system emergency fallback. Chainstack participates in the existing V423 diagnostics, V424 method-aware health routing, V426 cross-scan persistence and V427 adaptive 429 backoff. The V421/V429 all-normal-RPC rate-limit tests include Chainstack when configured so BlockReq only takes over after every configured normal RPC has supplied rate-limit evidence. No token scoring, Opportunity/Momentum logic, qualification, Telegram threshold, holder rule, market-data behavior, request ceiling, or V428 diagnostic behavior is changed.
  * V430 is a narrow hotfix for the V428 market-pressure telemetry crash exposed under V429. The crash was caused by marketProviderPressureTelemetryV428() being called from budget telemetry with state=null and then unconditionally calling marketProviderAvailabilityV147(state), whose service helpers expect a real state object. V430 makes that telemetry null-safe: providerAvailabilityAtEnd is only calculated when a valid scanner state object exists, otherwise it is reported as null/STATE_NOT_AVAILABLE_IN_BUDGET_TELEMETRY. No market request behavior, RPC routing, cooldown, provider order, scoring, qualification, Telegram threshold, request ceiling, or V429 system-head fallback behavior changes.
  * V429 is a targeted hotfix on V428 for the newly exposed startup failure where both normal SYSTEM eth_blockNumber providers return HTTP 429 before the market-pressure diagnostic can run. The normal system path remains Robinhood Public RPC then Alchemy and still uses the existing two-request system budget. Only when both configured normal system RPCs have explicitly returned rate-limit evidence does latestBlock() attempt the already-configured V421 independent BlockReq read endpoint once, using one available analysis-budget slot while remaining inside the unchanged 42-request global ceiling. The fallback is read-only, eth_blockNumber-only, does not change discovery provider routing, does not weaken any validation, and records explicit telemetry. If the independent endpoint also fails, the scan still fails safely rather than guessing a chain head. V429 preserves the V428 market-pressure diagnostic, V427 adaptive RPC backoff, V426 persistence, V424 routing, V422 holder recovery, all scoring/qualification/Telegram rules, and all existing request ceilings.
@@ -1505,7 +1506,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V431";
+const VERSION = "V432";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -27219,7 +27220,8 @@ async function marketFetchV428(
     provider,
     feature,
     phase = "analysis",
-    pathClass = null
+    pathClass = null,
+    beforeStateV432 = null
   }
 ) {
   const root =
@@ -27228,10 +27230,15 @@ async function marketFetchV428(
   const startedAt = Date.now();
 
   const before =
-    marketProviderBeforeStateV428(
-      state,
-      provider
-    );
+    (
+      beforeStateV432 &&
+      typeof beforeStateV432 === "object"
+    )
+      ? beforeStateV432
+      : marketProviderBeforeStateV428(
+          state,
+          provider
+        );
 
   try {
     const response =
@@ -30056,6 +30063,79 @@ function rollingDirectionalWindow(
   };
 }
 
+function geckoDirectionalEligibilityV432(
+  state
+) {
+  const service =
+    geckoService(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  const last429At =
+    safeNumber(
+      service?.last429At
+    );
+
+  const lastSuccessAt =
+    safeNumber(
+      service?.lastSuccessAt
+    );
+
+  /*
+   * A success after the most recent 429 rehabilitates Gecko immediately.
+   */
+  if (
+    lastSuccessAt &&
+    (
+      !last429At ||
+      lastSuccessAt >
+        last429At
+    )
+  ) {
+    return {
+      eligible: true,
+      reason: null,
+      last429At:
+        last429At || null,
+      lastSuccessAt
+    };
+  }
+
+  /*
+   * Directional trades are optional enrichment. If Gecko currently carries
+   * unresolved rate-limit evidence, preserve the provider for the more
+   * important market-verification fallback instead of spending another call.
+   */
+  if (last429At) {
+    return {
+      eligible: false,
+      reason:
+        "GECKO_DIRECTIONAL_DEFER_UNRESOLVED_429_V432",
+      last429At,
+      lastSuccessAt:
+        lastSuccessAt || null,
+      ageSince429Ms:
+        Math.max(
+          0,
+          now - last429At
+        ),
+      marketFallbackPreserved:
+        true
+    };
+  }
+
+  return {
+    eligible: true,
+    reason: null,
+    last429At: null,
+    lastSuccessAt:
+      lastSuccessAt || null
+  };
+}
+
 async function geckoDirectionalTradeFlow(
   candidate,
   budget,
@@ -30169,6 +30249,44 @@ async function geckoDirectionalTradeFlow(
       state
     );
 
+  const directionalEligibilityV432 =
+    geckoDirectionalEligibilityV432(
+      state
+    );
+
+  if (
+    directionalEligibilityV432
+      .eligible !== true
+  ) {
+    return {
+      attempted:
+        false,
+
+      verifiedAnyWindow:
+        false,
+
+      status:
+        directionalEligibilityV432
+          .reason,
+
+      v432: {
+        optionalDirectionalDeferred:
+          true,
+        marketFallbackPreserved:
+          true,
+        last429At:
+          directionalEligibilityV432
+            .last429At,
+        lastSuccessAt:
+          directionalEligibilityV432
+            .lastSuccessAt,
+        ageSince429Ms:
+          directionalEligibilityV432
+            .ageSince429Ms ?? null
+      }
+    };
+  }
+
   const freshEligibility =
     geckoFreshEligibility(
       state
@@ -30244,6 +30362,12 @@ async function geckoDirectionalTradeFlow(
 
   budget.analysis.geckoFreshUsed++;
 
+  const geckoBeforeRequestV432 =
+    marketProviderBeforeStateV428(
+      state,
+      "GECKOTERMINAL"
+    );
+
   markMarketRecoveryProbeV157(
     state,
     "GECKO"
@@ -30280,7 +30404,9 @@ async function geckoDirectionalTradeFlow(
           phase:
             "analysis",
           pathClass:
-            "POOL_TRADES"
+            "POOL_TRADES",
+          beforeStateV432:
+            geckoBeforeRequestV432
         }
       );
 
@@ -54245,6 +54371,15 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    geckoDirectionalDeferV432: {
+      enabled: true,
+      optionalDirectionalOnly: true,
+      marketFallbackPreserved: true,
+      externalRequestsAdded: 0,
+      requestCeilingChanged: false,
+      scoringChanged: false,
+      qualificationChanged: false
+    },
     managedRpcV431: {
       enabled: true,
       envSecret:
@@ -59717,6 +59852,21 @@ for (
         false,
       qualificationChanged:
         false
+    },
+
+    geckoDirectionalDeferV432: {
+      enabled: true,
+      optionalDirectionalOnly: true,
+      marketFallbackPreserved: true,
+      unresolved429DefersDirectional:
+        true,
+      laterSuccessRehabilitates:
+        true,
+      externalRequestsAdded: 0,
+      requestCeilingChanged: false,
+      scoringChanged: false,
+      qualificationChanged: false,
+      telegramThresholdChanged: false
     },
 
     notificationReserveReleaseV174,
