@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V428
- * AUTHORITATIVE RUNTIME VERSION: V428
+ * Robinhood Chain Meme Hunter — V429
+ * AUTHORITATIVE RUNTIME VERSION: V429
+ * V429 is a targeted hotfix on V428 for the newly exposed startup failure where both normal SYSTEM eth_blockNumber providers return HTTP 429 before the market-pressure diagnostic can run. The normal system path remains Robinhood Public RPC then Alchemy and still uses the existing two-request system budget. Only when both configured normal system RPCs have explicitly returned rate-limit evidence does latestBlock() attempt the already-configured V421 independent BlockReq read endpoint once, using one available analysis-budget slot while remaining inside the unchanged 42-request global ceiling. The fallback is read-only, eth_blockNumber-only, does not change discovery provider routing, does not weaken any validation, and records explicit telemetry. If the independent endpoint also fails, the scan still fails safely rather than guessing a chain head. V429 preserves the V428 market-pressure diagnostic, V427 adaptive RPC backoff, V426 persistence, V424 routing, V422 holder recovery, all scoring/qualification/Telegram rules, and all existing request ceilings.
  * V428 is a DIAGNOSTIC-ONLY market-provider pressure build on the complete V427 source. It instruments the existing scanner DexScreener and GeckoTerminal HTTP requests without adding any request, changing any provider order, changing cooldowns, or changing qualification. For each already-existing market request it records provider, feature/call-site, request path class, scanner phase, start time, latency, HTTP status, Retry-After when exposed, 429/non-429 outcome, and the provider eligibility/cooldown state immediately before the request. It also aggregates request counts and 429s by provider and by feature so we can prove whether pressure comes from candidate market lookup, ATH follow-up, Gecko fallback, or Gecko directional enrichment before changing the market-data scheduler. V428 preserves V427 adaptive RPC backoff, V426 persistence, V425/V424 routing, V423 RPC diagnostics, V422 holder recovery, V421 fallback, V420 circuit breaker, all request ceilings, scoring, qualification, Telegram thresholds, and V414 learning/breakout behavior.
  * V427 builds directly on V426 and makes the persisted provider+method 429 cooldown adaptive across scans. Repeated rate limits no longer reset to the same short delay: each provider+method keeps a bounded failure streak, escalates cooldown duration when a later scan hits the same 429 again, and immediately de-escalates on a successful response. Default backoff ladder: first 429 = 30s, second = 2m, third = 5m, fourth+ = 10m maximum. Robinhood Public retains a recovery-friendly cap of 2m unless Retry-After explicitly requires longer; Alchemy and other analysis RPCs can escalate to the full 10m cap. Only HTTP-429 evidence participates in the adaptive streak; deterministic RPC errors and transport failures do not. Retry-After remains authoritative when longer than the calculated backoff. V427 persists this streak in the same existing state write, adds zero external requests and zero additional state-write cycles, and preserves V426 persistence, V425/V424 routing, V423 diagnostics, V422 holder recovery, V421 fallback, V420 circuit breaker, V419 checkpoints, all request ceilings, scoring, qualification, Telegram thresholds, and V414 learning/breakout behavior.
  * V426 builds safely on the complete V425 hotfix and persists short-lived provider+method RPC health across scans. A fresh scan no longer forgets that a provider/method combination was just rate-limited. One HTTP-429 now opens a bounded SOFT cooldown for that exact provider+method, Retry-After is honoured when supplied, Robinhood Public uses a deliberately short default cooldown because V423 proved same-scan recovery, Alchemy uses a longer cooldown because two diagnostics showed repeated analysis 429s with no success, and successful responses immediately rehabilitate the combination. Only recent rate-limit health is restored on the next scan; stale evidence expires automatically. Persistence piggybacks on the existing state write and adds zero external requests. V426 preserves V425/V424 health weighting, V423 diagnostics, V422 holder recovery, V421 independent ERC-20 fallback, V420 circuit breaker, V419 checkpoints, all request ceilings, scoring, qualification, Telegram thresholds, and V414 learning/breakout behavior.
@@ -1502,7 +1503,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V428";
+const VERSION = "V429";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -14108,6 +14109,72 @@ async function rpc(
   };
 }
 
+function latestBlockFallbackTelemetryV429(
+  budget
+) {
+  budget.latestBlockFallbackV429 =
+    budget.latestBlockFallbackV429 &&
+    typeof budget.latestBlockFallbackV429 === "object"
+      ? budget.latestBlockFallbackV429
+      : {
+          enabled: true,
+          scope: "ETH_BLOCKNUMBER_ONLY",
+          attempted: 0,
+          succeeded: 0,
+          failed: 0,
+          rateLimited: 0,
+          analysisBudgetUsed: 0,
+          lastAttemptAt: null,
+          lastSuccessAt: null,
+          lastError: null,
+          normalProviderError: null,
+          fallbackProvider: "BLOCKREQ_PUBLIC_V421",
+          globalLimitChanged: false,
+          systemLimitChanged: false
+        };
+
+  return budget.latestBlockFallbackV429;
+}
+
+function normalSystemRpcsAll429V429(
+  env,
+  error
+) {
+  const message =
+    String(error || "")
+      .toUpperCase();
+
+  const configured = [
+    "ROBINHOOD_PUBLIC_RPC"
+  ];
+
+  if (
+    String(
+      env?.ALCHEMY_API_KEY || ""
+    ).trim()
+  ) {
+    configured.push(
+      "ALCHEMY"
+    );
+  }
+
+  return (
+    configured.length > 0 &&
+    configured.every(
+      provider =>
+        message.includes(
+          `${provider}: HTTP_429`
+        ) ||
+        message.includes(
+          `${provider}: RATE_LIMIT`
+        ) ||
+        message.includes(
+          `${provider}: TOO MANY`
+        )
+    )
+  );
+}
+
 async function latestBlock(
   env,
   budget
@@ -14122,23 +14189,167 @@ async function latestBlock(
     );
 
   if (
-    !response.result
+    response?.result !== null &&
+    response?.result !== undefined
+  ) {
+    return {
+      block:
+        BigInt(
+          response.result
+        ),
+      provider:
+        response.provider
+    };
+  }
+
+  const primaryError =
+    response?.error ||
+    "BLOCK_NUMBER_FAILED";
+
+  const telemetry =
+    latestBlockFallbackTelemetryV429(
+      budget
+    );
+
+  telemetry.normalProviderError =
+    primaryError;
+
+  /*
+   * V429: only use the independent endpoint when BOTH normal configured
+   * system RPCs explicitly supplied rate-limit evidence. Other failures keep
+   * the old fail-safe behavior.
+   */
+  if (
+    !normalSystemRpcsAll429V429(
+      env,
+      primaryError
+    )
   ) {
     throw new Error(
-      response.error ||
-      "BLOCK_NUMBER_FAILED"
+      primaryError
     );
   }
 
-  return {
-    block:
-      BigInt(
-        response.result
-      ),
+  if (
+    !budgetAvailable(
+      budget,
+      "analysis",
+      1
+    )
+  ) {
+    telemetry.lastError =
+      "REQUEST_BUDGET_EXHAUSTED_ANALYSIS";
 
-    provider:
-      response.provider
-  };
+    throw new Error(
+      `${primaryError} | BLOCKREQ_PUBLIC_V421: REQUEST_BUDGET_EXHAUSTED_ANALYSIS`
+    );
+  }
+
+  telemetry.attempted =
+    safeNumber(
+      telemetry.attempted
+    ) + 1;
+
+  telemetry.lastAttemptAt =
+    Date.now();
+
+  const beforeUsed =
+    safeNumber(
+      budget?.analysis?.used
+    );
+
+  try {
+    const result =
+      await rpcCall(
+        v421ReadRpcUrl(env),
+        "eth_blockNumber",
+        [],
+        budget,
+        "analysis"
+      );
+
+    telemetry.analysisBudgetUsed +=
+      Math.max(
+        0,
+        safeNumber(
+          budget?.analysis?.used
+        ) -
+        beforeUsed
+      );
+
+    if (
+      result === null ||
+      result === undefined
+    ) {
+      throw new Error(
+        "EMPTY_BLOCK_NUMBER_RESULT"
+      );
+    }
+
+    telemetry.succeeded =
+      safeNumber(
+        telemetry.succeeded
+      ) + 1;
+
+    telemetry.lastSuccessAt =
+      Date.now();
+
+    telemetry.lastError =
+      null;
+
+    return {
+      block:
+        BigInt(
+          result
+        ),
+      provider:
+        "BLOCKREQ_PUBLIC_V421"
+    };
+  }
+
+  catch (error) {
+    const fallbackError =
+      errorString(
+        error
+      );
+
+    telemetry.analysisBudgetUsed +=
+      Math.max(
+        0,
+        safeNumber(
+          budget?.analysis?.used
+        ) -
+        beforeUsed -
+        safeNumber(
+          telemetry.analysisBudgetUsed
+        )
+      );
+
+    telemetry.failed =
+      safeNumber(
+        telemetry.failed
+      ) + 1;
+
+    if (
+      String(
+        fallbackError
+      ).toUpperCase().includes(
+        "429"
+      )
+    ) {
+      telemetry.rateLimited =
+        safeNumber(
+          telemetry.rateLimited
+        ) + 1;
+    }
+
+    telemetry.lastError =
+      fallbackError;
+
+    throw new Error(
+      `${primaryError} | BLOCKREQ_PUBLIC_V421: ${fallbackError}`
+    );
+  }
 }
 
 function isBeyondProviderHeadError(
@@ -53863,6 +54074,18 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    latestBlockFallbackV429: {
+      enabled: true,
+      scope: "SYSTEM_ETH_BLOCKNUMBER_ONLY",
+      independentProvider:
+        "BLOCKREQ_PUBLIC_V421",
+      trigger:
+        "BOTH_NORMAL_SYSTEM_RPCS_RATE_LIMITED",
+      globalLimitChanged: false,
+      systemLimitChanged: false,
+      scoringChanged: false,
+      qualificationChanged: false
+    },
     marketProviderPressureV428: {
       enabled: true,
       diagnosticOnly: true,
@@ -59269,6 +59492,11 @@ for (
         state
       ),
 
+    latestBlockFallbackV429:
+      latestBlockFallbackTelemetryV429(
+        budget
+      ),
+
     notificationReserveReleaseV174,
 
     postAnalysisBacklogReclaimV170,
@@ -61276,6 +61504,10 @@ for (
           marketProviderPressureTelemetryV428(
             budget,
             state
+          ),
+        latestBlockFallbackV429:
+          latestBlockFallbackTelemetryV429(
+            budget
           )
       }
     },
