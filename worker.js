@@ -1,4 +1,9 @@
 /**
+ * Robinhood Chain Meme Hunter — V418
+ * AUTHORITATIVE RUNTIME VERSION: V418
+ * V418 builds directly on V417 and repairs ERC-20 discovery identity classification without weakening token verification. V417 live scans proved that newly discovered candidates were repeatedly being labelled ERC20_METHODS_NOT_VERIFIED or NO_CONTRACT_BYTECODE while RPC providers were simultaneously rate-limited. The old verifier swallowed per-method RPC failures, so a transport/provider failure could be indistinguishable from a genuine non-ERC20 contract. V418 makes bytecode and each ERC-20 probe evidence-aware: provider/RPC/budget failures are recorded separately and are DEFERRED for the existing bounded retry queue, while NO_CONTRACT_BYTECODE is emitted only after a successful eth_getCode response explicitly returns empty code. Genuine method absence/revert still fails verification under the same >=3-of-4 ERC-20 evidence rule. /scan scanner-funnel telemetry now exposes exact method success/failure, provider/error class, discovery source and whether a candidate was deferred because identity evidence was unavailable. V418 adds no provider requests, changes no 42/21 base limits, preserves V416 adaptive borrowing and V417 progressive completion, and changes no Opportunity/Momentum/confidence/liquidity/risk/qualification/Telegram thresholds. Missing evidence remains UNVERIFIED; transport failure is never promoted to token validity.
+ */
+/**
  * Robinhood Chain Meme Hunter — V417
  * AUTHORITATIVE RUNTIME VERSION: V417
  * V417 builds directly on V416. It adds progressive candidate completion for the single protected priority/carried candidate when the conservative full-analysis estimate cannot fit inside the remaining adaptive analysis headroom. Instead of discarding useful partial work, V417 may start only when enough budget exists to complete the next mandatory stage (5 requests for uncached ERC-20 verification, or 1 request when verified metadata is reusable). Successfully verified ERC-20 metadata is checkpointed immediately onto the watched token so a later scan does not pay the same 5-request verification cost again. Existing market and holder caches continue to checkpoint through their proven paths. If a bounded progressive attempt returns with market or holder evidence still incomplete, the candidate remains in the bounded V415 retry queue for forward completion rather than being silently treated as finished. Every network request remains subject to the existing per-request budget guards, V416 adaptive borrowing, the absolute 42-request global ceiling and the protected Telegram reserve. No scoring, Opportunity, Momentum, confidence, liquidity, risk, qualification, alert threshold, provider trust rule or UNVERIFIED semantics are loosened.
@@ -1489,7 +1494,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V417";
+const VERSION = "V418";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -23433,238 +23438,287 @@ function progressiveEvidenceIncompleteV417(candidate) {
   return !(marketComplete && holdersComplete);
 }
 
-async function verifyERC20(
-  env,
-  address,
-  budget,
-  watched
-) {
-  const cached =
-    reusableMetadata(
-      watched
-    );
-
-  if (cached) {
-    return cached;
-  }
-
+function erc20RpcFailureClassV418(error) {
+  const message = String(error || "").toUpperCase();
+  if (!message) return "NONE";
+  if (message.includes("REQUEST_BUDGET_EXHAUSTED")) return "BUDGET";
+  if (message.includes("HTTP_429") || message.includes("RATE") || message.includes("TOO MANY")) return "RATE_LIMIT";
   if (
-    !budgetAvailable(
-      budget,
-      "analysis",
-      5
-    )
-  ) {
+    message.includes("HTTP_500") || message.includes("HTTP_502") ||
+    message.includes("HTTP_503") || message.includes("HTTP_504") ||
+    message.includes("TIMEOUT") || message.includes("TIMED OUT") ||
+    message.includes("FETCH") || message.includes("NETWORK") ||
+    message.includes("CONNECTION")
+  ) return "TRANSIENT_PROVIDER";
+  if (message.includes("REVERT") || message.includes("INVALID OPCODE")) return "DETERMINISTIC_CALL_FAILURE";
+  return "RPC_ERROR";
+}
+
+function erc20RetryableFailureV418(error) {
+  const cls = erc20RpcFailureClassV418(error);
+  return cls === "BUDGET" || cls === "RATE_LIMIT" || cls === "TRANSIENT_PROVIDER";
+}
+
+async function erc20ProbeV418(env, address, data, label, budget) {
+  const response = await rpc(
+    env,
+    "eth_call",
+    [{ to: address, data }, "latest"],
+    budget,
+    "analysis"
+  );
+  const raw = response?.result ?? null;
+  const error = response?.error || null;
+  return {
+    label,
+    ok: raw !== null && raw !== undefined,
+    raw,
+    provider: response?.provider || null,
+    error,
+    failureClass: erc20RpcFailureClassV418(error),
+    retryableFailure: erc20RetryableFailureV418(error)
+  };
+}
+
+function persistErc20IdentityV418(watched, diagnostic) {
+  if (!watched || !diagnostic) return;
+  watched.erc20IdentityV418 = { ...diagnostic, recordedAt: Date.now() };
+}
+
+async function verifyERC20(env, address, budget, watched) {
+  const cached = reusableMetadata(watched);
+  if (cached) return cached;
+
+  if (!budgetAvailable(budget, "analysis", 5)) {
     return {
-      validERC20:
-        false,
-
-      deferred:
-        true,
-
-      reason:
-        "ANALYSIS_BUDGET_PROTECTED",
-
-      requiredRequests:
-        5
+      validERC20: false,
+      deferred: true,
+      reason: "ANALYSIS_BUDGET_PROTECTED",
+      requiredRequests: 5
     };
   }
 
-  const code =
-    await rpc(
-      env,
-      "eth_getCode",
+  const code = await rpc(
+    env,
+    "eth_getCode",
+    [address, "latest"],
+    budget,
+    "analysis"
+  );
 
-      [
-        address,
-        "latest"
-      ],
+  const codeError = code?.error || null;
+  const codeFailureClass = erc20RpcFailureClassV418(codeError);
 
-      budget,
-      "analysis"
-    );
-
-  if (
-    !code.result ||
-    code.result ===
-      "0x" ||
-    code.result ===
-      "0x0"
-  ) {
+  /* V418: null RPC result is unavailable evidence, not proof of empty code. */
+  if (code?.result === null || code?.result === undefined) {
+    const diagnostic = {
+      status: "IDENTITY_EVIDENCE_DEFERRED",
+      discoverySource: watched?.discoverySource || null,
+      poolCount: Array.isArray(watched?.pools) ? watched.pools.length : 0,
+      code: {
+        verifiedResponse: false,
+        provider: code?.provider || null,
+        error: codeError,
+        failureClass: codeFailureClass
+      },
+      methods: [],
+      score: 0,
+      decision: "DEFER_RETRY",
+      reason: "ERC20_CODE_RPC_UNAVAILABLE_V418"
+    };
+    persistErc20IdentityV418(watched, diagnostic);
     return {
-      validERC20:
-        false,
-
-      deferred:
-        false,
-
-      reason:
-        "NO_CONTRACT_BYTECODE"
+      validERC20: false,
+      deferred: true,
+      reason: "ERC20_CODE_RPC_UNAVAILABLE_V418",
+      requiredRequests: 1,
+      erc20IdentityV418: diagnostic
     };
   }
 
-  let name =
-    null;
-
-  let symbol =
-    null;
-
-  let decimals =
-    null;
-
-  let totalSupply =
-    null;
-
-  try {
-    name =
-      decodeString(
-        await ethCall(
-          env,
-          address,
-          "0x06fdde03",
-          budget
-        )
-      );
+  if (code.result === "0x" || code.result === "0x0") {
+    const diagnostic = {
+      status: "VERIFIED_NON_CONTRACT",
+      discoverySource: watched?.discoverySource || null,
+      poolCount: Array.isArray(watched?.pools) ? watched.pools.length : 0,
+      code: {
+        verifiedResponse: true,
+        hasBytecode: false,
+        provider: code?.provider || null,
+        error: null,
+        failureClass: "NONE"
+      },
+      methods: [],
+      score: 0,
+      decision: "REJECT",
+      reason: "NO_CONTRACT_BYTECODE"
+    };
+    persistErc20IdentityV418(watched, diagnostic);
+    return {
+      validERC20: false,
+      deferred: false,
+      reason: "NO_CONTRACT_BYTECODE",
+      erc20IdentityV418: diagnostic
+    };
   }
 
-  catch {}
+  const probes = [];
+  const nameProbe = await erc20ProbeV418(env, address, "0x06fdde03", "name", budget);
+  probes.push(nameProbe);
+  const symbolProbe = await erc20ProbeV418(env, address, "0x95d89b41", "symbol", budget);
+  probes.push(symbolProbe);
+  const decimalsProbe = await erc20ProbeV418(env, address, "0x313ce567", "decimals", budget);
+  probes.push(decimalsProbe);
+  const totalSupplyProbe = await erc20ProbeV418(env, address, "0x18160ddd", "totalSupply", budget);
+  probes.push(totalSupplyProbe);
 
+  let name = null;
+  let symbol = null;
+  let decimals = null;
+  let totalSupply = null;
+
+  try { if (nameProbe.ok) name = decodeString(nameProbe.raw); } catch {}
+  try { if (symbolProbe.ok) symbol = decodeString(symbolProbe.raw); } catch {}
   try {
-    symbol =
-      decodeString(
-        await ethCall(
-          env,
-          address,
-          "0x95d89b41",
-          budget
-        )
-      );
-  }
-
-  catch {}
-
-  try {
-    const value =
-      decodeUint(
-        await ethCall(
-          env,
-          address,
-          "0x313ce567",
-          budget
-        )
-      );
-
-    if (
-      value !==
-      null
-    ) {
-      decimals =
-        Number(
-          value
-        );
+    if (decimalsProbe.ok) {
+      const value = decodeUint(decimalsProbe.raw);
+      if (value !== null) decimals = Number(value);
     }
-  }
+  } catch {}
+  try { if (totalSupplyProbe.ok) totalSupply = decodeUint(totalSupplyProbe.raw); } catch {}
 
-  catch {}
-
-  try {
-    totalSupply =
-      decodeUint(
-        await ethCall(
-          env,
-          address,
-          "0x18160ddd",
-          budget
-        )
-      );
-  }
-
-  catch {}
+  const evidence = {
+    name: Boolean(name),
+    symbol: Boolean(symbol),
+    decimals: Number.isFinite(decimals),
+    totalSupply: totalSupply !== null && totalSupply > 0n
+  };
 
   const score =
-    (
-      name
-        ? 1
-        : 0
-    ) +
-    (
-      symbol
-        ? 1
-        : 0
-    ) +
-    (
-      Number.isFinite(
-        decimals
-      )
-        ? 1
-        : 0
-    ) +
-    (
-      totalSupply !==
-        null &&
-      totalSupply >
-        0n
-        ? 1
-        : 0
-    );
+    (evidence.name ? 1 : 0) +
+    (evidence.symbol ? 1 : 0) +
+    (evidence.decimals ? 1 : 0) +
+    (evidence.totalSupply ? 1 : 0);
 
-  if (
-    score <
-    3
-  ) {
+  const retryableFailures = probes.filter(row => row.retryableFailure === true);
+  const deterministicFailures = probes.filter(
+    row => row.ok !== true && row.retryableFailure !== true
+  );
+
+  const methodDiagnostics = probes.map(row => ({
+    method: row.label,
+    rpcReturned: row.ok === true,
+    provider: row.provider || null,
+    error: row.error || null,
+    failureClass: row.failureClass,
+    retryableFailure: row.retryableFailure === true,
+    decodedVerified:
+      row.label === "name" ? evidence.name :
+      row.label === "symbol" ? evidence.symbol :
+      row.label === "decimals" ? evidence.decimals :
+      row.label === "totalSupply" ? evidence.totalSupply : false
+  }));
+
+  if (score < 3) {
+    if (retryableFailures.length > 0) {
+      const diagnostic = {
+        status: "IDENTITY_EVIDENCE_DEFERRED",
+        discoverySource: watched?.discoverySource || null,
+        poolCount: Array.isArray(watched?.pools) ? watched.pools.length : 0,
+        code: {
+          verifiedResponse: true,
+          hasBytecode: true,
+          provider: code?.provider || null,
+          error: null,
+          failureClass: "NONE"
+        },
+        methods: methodDiagnostics,
+        score,
+        requiredScore: 3,
+        retryableFailureCount: retryableFailures.length,
+        deterministicFailureCount: deterministicFailures.length,
+        decision: "DEFER_RETRY",
+        reason: "ERC20_METHODS_RPC_UNAVAILABLE_RETRY_V418"
+      };
+      persistErc20IdentityV418(watched, diagnostic);
+      return {
+        validERC20: false,
+        deferred: true,
+        reason: "ERC20_METHODS_RPC_UNAVAILABLE_RETRY_V418",
+        requiredRequests: Math.max(1, retryableFailures.length),
+        name,
+        symbol,
+        decimals,
+        totalSupply: totalSupply !== null ? totalSupply.toString() : null,
+        erc20IdentityV418: diagnostic
+      };
+    }
+
+    const diagnostic = {
+      status: "IDENTITY_VERIFIED_INSUFFICIENT_ERC20_METHODS",
+      discoverySource: watched?.discoverySource || null,
+      poolCount: Array.isArray(watched?.pools) ? watched.pools.length : 0,
+      code: {
+        verifiedResponse: true,
+        hasBytecode: true,
+        provider: code?.provider || null,
+        error: null,
+        failureClass: "NONE"
+      },
+      methods: methodDiagnostics,
+      score,
+      requiredScore: 3,
+      retryableFailureCount: 0,
+      deterministicFailureCount: deterministicFailures.length,
+      decision: "REJECT",
+      reason: "ERC20_METHODS_NOT_VERIFIED"
+    };
+    persistErc20IdentityV418(watched, diagnostic);
     return {
-      validERC20:
-        false,
-
-      deferred:
-        false,
-
-      reason:
-        "ERC20_METHODS_NOT_VERIFIED",
-
+      validERC20: false,
+      deferred: false,
+      reason: "ERC20_METHODS_NOT_VERIFIED",
       name,
-
       symbol,
-
       decimals,
-
-      totalSupply:
-        totalSupply !==
-          null
-          ? totalSupply.toString()
-          : null
+      totalSupply: totalSupply !== null ? totalSupply.toString() : null,
+      erc20IdentityV418: diagnostic
     };
   }
 
+  const diagnostic = {
+    status: "ERC20_VERIFIED",
+    discoverySource: watched?.discoverySource || null,
+    poolCount: Array.isArray(watched?.pools) ? watched.pools.length : 0,
+    code: {
+      verifiedResponse: true,
+      hasBytecode: true,
+      provider: code?.provider || null,
+      error: null,
+      failureClass: "NONE"
+    },
+    methods: methodDiagnostics,
+    score,
+    requiredScore: 3,
+    retryableFailureCount: retryableFailures.length,
+    deterministicFailureCount: deterministicFailures.length,
+    decision: "ACCEPT",
+    reason: "VERIFIED"
+  };
+  persistErc20IdentityV418(watched, diagnostic);
+
   return {
-    validERC20:
-      true,
-
-    deferred:
-      false,
-
-    reason:
-      "VERIFIED",
-
+    validERC20: true,
+    deferred: false,
+    reason: "VERIFIED",
     address,
-
     name,
-
     symbol,
-
     decimals,
-
-    totalSupply:
-      totalSupply !==
-        null
-        ? totalSupply.toString()
-        : null,
-
-    verifiedAt:
-      Date.now(),
-
-    reused:
-      false
+    totalSupply: totalSupply !== null ? totalSupply.toString() : null,
+    verifiedAt: Date.now(),
+    reused: false,
+    erc20IdentityV418: diagnostic
   };
 }
 
@@ -50786,6 +50840,18 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    erc20IdentityV418: {
+      enabled: true,
+      checked: 0,
+      verified: 0,
+      deferredProviderOrBudget: 0,
+      verifiedNoBytecode: 0,
+      deterministicMethodRejects: 0,
+      transportFailureMisclassificationPrevented: 0,
+      candidates: [],
+      verificationRuleChanged: false,
+      externalRequestsAdded: 0
+    },
     adaptiveAnalysisHeadroomV416: {
       enabled: adaptiveAnalysisHeadroomV416?.enabled === true,
       activated: adaptiveAnalysisHeadroomV416?.activated === true,
@@ -51635,6 +51701,44 @@ for (
           liveMomentumActivityV152
         }
       );
+
+    const erc20IdentityDiagnosticV418 =
+      candidate?.validation?.erc20IdentityV418 ||
+      watched?.erc20IdentityV418 ||
+      null;
+
+    if (erc20IdentityDiagnosticV418) {
+      scannerFunnelV415.erc20IdentityV418.checked++;
+      if (candidate?.validation?.validERC20 === true) {
+        scannerFunnelV415.erc20IdentityV418.verified++;
+      }
+      if (
+        candidate?.validation?.reason === "ERC20_CODE_RPC_UNAVAILABLE_V418" ||
+        candidate?.validation?.reason === "ERC20_METHODS_RPC_UNAVAILABLE_RETRY_V418"
+      ) {
+        scannerFunnelV415.erc20IdentityV418.deferredProviderOrBudget++;
+        scannerFunnelV415.erc20IdentityV418.transportFailureMisclassificationPrevented++;
+      }
+      if (candidate?.validation?.reason === "NO_CONTRACT_BYTECODE") {
+        scannerFunnelV415.erc20IdentityV418.verifiedNoBytecode++;
+      }
+      if (candidate?.validation?.reason === "ERC20_METHODS_NOT_VERIFIED") {
+        scannerFunnelV415.erc20IdentityV418.deterministicMethodRejects++;
+      }
+      scannerFunnelV415.erc20IdentityV418.candidates.push({
+        address,
+        discoverySource: watched?.discoverySource || null,
+        reason: candidate?.validation?.reason || null,
+        deferred: candidate?.validation?.deferred === true,
+        score: safeNumber(erc20IdentityDiagnosticV418?.score),
+        requiredScore: safeNumber(erc20IdentityDiagnosticV418?.requiredScore) || 3,
+        code: erc20IdentityDiagnosticV418?.code || null,
+        methods: Array.isArray(erc20IdentityDiagnosticV418?.methods)
+          ? erc20IdentityDiagnosticV418.methods
+          : [],
+        decision: erc20IdentityDiagnosticV418?.decision || null
+      });
+    }
 
     if (v417ProgressivePriorityAttempt) {
       const metadataReusableAfterV417 =
