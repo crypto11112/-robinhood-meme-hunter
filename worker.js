@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V410
- * AUTHORITATIVE RUNTIME VERSION: V410
+ * Robinhood Chain Meme Hunter — V411
+ * AUTHORITATIVE RUNTIME VERSION: V411
+ * V411 starts the measurement-only signal expansion from V410. It adds forward-only 5m/15m/30m entry-timing outcomes for new V411-era successful calls, plus frozen call-time measurement telemetry for holder-growth velocity, liquidity growth, volume acceleration, transaction acceleration, verified observed trade-size distribution, and verified unique/repeat-buyer breadth where wallet-level Pons evidence exists. All new fields are descriptive/learning-only: Opportunity scoring, Momentum scoring, qualification, Telegram alert thresholds, provider request ceilings, V403 Durable Object batching, V410 usage accounting, and existing V317 1h/6h/24h outcomes are unchanged. Missing evidence remains UNVERIFIED and is never inferred.
  * V410 repairs the Durable Object collector → singleton usage-meter feed. Collector write counters are now maintained as per-day cumulative totals, piggybacked into the existing V402 head checkpoints, and sent as absolute snapshots to the singleton. The singleton deduplicates/reconciles each source and persists at most once per 5-minute source interval (unless an explicit forced start/stop flush is requested), so isolate hibernation cannot silently discard an in-memory delta. /usage exposes source count, deferred probes, tracked PUTs/DELETEs, aggregation writes and last collector update. No scanner, scoring, qualification, alerts, market/age logic, provider requests, V403 batching, V407 learning/performance, or V408 age evidence is changed.
  * V407 adds read-only entry-quality analytics and forward-only post-call drawdown tracking. Existing verified ATH history can safely classify whether a call ever exceeded its frozen entry level; no historical low is invented. New/ongoing V407 observations track the lowest verified market cap from the V407 tracking start onward, explicitly marked forward-only. /best, /performance, /learning and /call surface the new metrics. V407 also prevents the Durable Object usage projection from showing false DANGER during the first 15 minutes by reporting CALIBRATING until a meaningful observation window exists. Scanner, scoring, qualification, alerts, provider requests, V403 batching and V404/V406 usage counting remain unchanged.
  * V408 adds evidence-separated age reporting. Strict protocol launch age remains VERIFIED only from an exact supported launch event; verified DexScreener pairCreatedAt is now surfaced separately as VERIFIED MARKET/PAIR AGE with its provider source, and scanner age remains separate. No pair age, scanner age, token deployment time, or generic V4 Initialize timestamp is promoted to protocol launch age. Adds zero external requests and changes no scanner, scoring, qualification, alert threshold, provider budget, V403 batching, V404/V406 usage-meter, or V407 learning/performance logic.
@@ -1464,7 +1465,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V410";
+const VERSION = "V411";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -27590,6 +27591,7 @@ function applyDexPerformanceBatchV295(state, pairs, targetToken) {
     seedHistoricalPerformanceMilestonesV308(next);
     capturePerformanceMilestonesV308(next, nowMs);
     captureFixedHorizonOutcomesV317(next, nowMs, marketCap, "DEXSCREENER_TOKENS_V1_BATCH_V295");
+    captureEntryTimingOutcomesV411(next, nowMs, marketCap, "DEXSCREENER_TOKENS_V1_BATCH_V295");
 
     state.callPerformanceV270[address] = next;
     observed++;
@@ -46447,6 +46449,151 @@ function drawdownV270(ath, current) {
  * This is outcome-learning telemetry only. It adds no provider requests and
  * never backfills missing entry evidence from later observations.
  */
+function percentileV411(values, p) {
+  const rows = (Array.isArray(values) ? values : [])
+    .map(Number)
+    .filter(v => Number.isFinite(v) && v > 0)
+    .sort((a,b) => a-b);
+  if (!rows.length) return null;
+  if (rows.length === 1) return rows[0];
+  const index = (rows.length - 1) * p;
+  const lo = Math.floor(index), hi = Math.ceil(index);
+  if (lo === hi) return rows[lo];
+  return rows[lo] + (rows[hi] - rows[lo]) * (index - lo);
+}
+
+function measurementSignalsV411(candidate, state, capturedAt = Date.now()) {
+  const finite = value => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  };
+  const percentDelta = (before, after) => {
+    const a = Number(before), b = Number(after);
+    return Number.isFinite(a) && Number.isFinite(b) && a > 0
+      ? ((b-a)/a)*100
+      : null;
+  };
+
+  const previous = getHistoricalSnapshot(state, candidate?.address);
+  const previousAt = finite(previous?.timestamp);
+  const nowMs = finite(capturedAt) || Date.now();
+  const elapsedHours = previousAt !== null && nowMs > previousAt
+    ? (nowMs - previousAt) / 3600000
+    : null;
+
+  const holderCountNow = candidate?.holders?.countersVerified === true
+    ? finite(candidate?.holders?.holderCount)
+    : null;
+  const holderCountBefore = previous ? finite(previous?.holderCount) : null;
+  const holderDelta = holderCountNow !== null && holderCountBefore !== null
+    ? holderCountNow - holderCountBefore
+    : null;
+  const holderGrowthPct = percentDelta(holderCountBefore, holderCountNow);
+
+  const liqNow = candidate?.market?.verified === true ? finite(candidate?.market?.liquidityUsd) : null;
+  const volH1Now = candidate?.market?.verified === true ? finite(candidate?.market?.volume?.h1) : null;
+  const txH1Now = candidate?.market?.verified === true
+    ? finite(safeNumber(candidate?.market?.transactions?.h1?.buys) + safeNumber(candidate?.market?.transactions?.h1?.sells))
+    : null;
+  const liqBefore = previous ? finite(previous?.liquidityUsd) : null;
+  const volH1Before = previous ? finite(previous?.volumeH1) : null;
+  const txH1Before = previous
+    ? finite(safeNumber(previous?.buysH1) + safeNumber(previous?.sellsH1))
+    : null;
+
+  // Verified wallet breadth is only claimed when the stored Pons V2 trade feed
+  // carries an exact trader address. Generic V4 swap logs do not expose the
+  // end-user buyer identity, so V411 deliberately leaves that path UNVERIFIED.
+  const token = normalize(candidate?.address);
+  const ponsRows = Array.isArray(state?.ponsCurveTradesV216?.recentTrades)
+    ? state.ponsCurveTradesV216.recentTrades.filter(row =>
+        row?.verified === true && normalize(row?.token) === token &&
+        row?.protocol === "pons_v2" && row?.side === "buy" &&
+        safeNumber(row?.observedAt) >= nowMs - V180_WINDOW_MS.m15 &&
+        safeNumber(row?.observedAt) <= nowMs && isAddress(normalize(row?.trader)))
+    : [];
+  const uniqueBuyers = new Set(ponsRows.map(row => normalize(row?.trader)));
+  const buyerBreadthVerified = ponsRows.length > 0;
+  const repeatBuyTrades = buyerBreadthVerified ? Math.max(0, ponsRows.length - uniqueBuyers.size) : null;
+  const repeatBuyerRatioPct = buyerBreadthVerified && ponsRows.length > 0
+    ? (repeatBuyTrades / ponsRows.length) * 100
+    : null;
+
+  // Trade-size distribution uses exact candidate-matched USD records only.
+  // It is observed-by-bot telemetry and never claims complete market coverage.
+  const ledger = onChainDirectionalStoreV179(state)?.[token];
+  const tradeRows = Array.isArray(ledger?.records)
+    ? ledger.records.filter(row =>
+        normalize(row?.candidateAddress) === token && row?.exactUsdVerified === true &&
+        Number.isFinite(Number(row?.exactUsdAmount)) && Number(row.exactUsdAmount) > 0 &&
+        safeNumber(row?.observedAt) >= nowMs - V180_WINDOW_MS.m15 && safeNumber(row?.observedAt) <= nowMs
+      )
+    : [];
+  const tradeSizes = tradeRows.map(row => Number(row.exactUsdAmount));
+  const buySizes = tradeRows.filter(row => row?.side === "buy").map(row => Number(row.exactUsdAmount));
+  const sellSizes = tradeRows.filter(row => row?.side === "sell").map(row => Number(row.exactUsdAmount));
+  const avg = rows => rows.length ? rows.reduce((a,b)=>a+b,0)/rows.length : null;
+
+  return {
+    version: "V411",
+    measurementOnly: true,
+    affectsScoring: false,
+    capturedAt: nowMs,
+    comparisonSnapshotAt: previousAt,
+    comparisonAgeMs: previousAt !== null ? Math.max(0, nowMs-previousAt) : null,
+    holderGrowth: {
+      verified: holderCountNow !== null && holderCountBefore !== null && elapsedHours !== null && elapsedHours > 0,
+      previous: holderCountBefore,
+      current: holderCountNow,
+      absoluteGrowth: holderDelta,
+      growthPct: holderGrowthPct,
+      holdersPerHour: holderDelta !== null && elapsedHours > 0 ? holderDelta / elapsedHours : null
+    },
+    liquidityGrowth: {
+      verified: liqNow !== null && liqBefore !== null,
+      previousUsd: liqBefore,
+      currentUsd: liqNow,
+      growthPct: percentDelta(liqBefore, liqNow)
+    },
+    volumeAcceleration: {
+      verified: volH1Now !== null && volH1Before !== null,
+      previousH1Usd: volH1Before,
+      currentH1Usd: volH1Now,
+      growthPct: percentDelta(volH1Before, volH1Now)
+    },
+    transactionAcceleration: {
+      verified: txH1Now !== null && txH1Before !== null,
+      previousH1Transactions: txH1Before,
+      currentH1Transactions: txH1Now,
+      growthPct: percentDelta(txH1Before, txH1Now)
+    },
+    buyerBreadth: {
+      verified: buyerBreadthVerified,
+      source: buyerBreadthVerified ? "VERIFIED_PONS_V2_TRADER_ADDRESSES_V411" : null,
+      window: "15m",
+      buyTrades: buyerBreadthVerified ? ponsRows.length : null,
+      uniqueBuyers: buyerBreadthVerified ? uniqueBuyers.size : null,
+      repeatBuyTrades,
+      repeatBuyerRatioPct,
+      genericV4BuyerIdentityAvailable: false
+    },
+    tradeSizeDistribution: {
+      verified: tradeRows.length > 0,
+      fullMarketCoverageVerified: false,
+      source: tradeRows.length ? "CANDIDATE_MATCHED_EXACT_USD_OBSERVED_BY_BOT_V411" : null,
+      window: "15m",
+      trades: tradeRows.length,
+      medianUsd: percentileV411(tradeSizes, 0.5),
+      p25Usd: percentileV411(tradeSizes, 0.25),
+      p75Usd: percentileV411(tradeSizes, 0.75),
+      averageUsd: avg(tradeSizes),
+      averageBuyUsd: avg(buySizes),
+      averageSellUsd: avg(sellSizes),
+      maxUsd: tradeSizes.length ? Math.max(...tradeSizes) : null
+    }
+  };
+}
+
 function buildEntrySignalSnapshotV309(candidate, capturedAt) {
   const market = candidate?.market;
   const holders = candidate?.holders;
@@ -46585,6 +46732,11 @@ function buildEntrySignalSnapshotV309(candidate, capturedAt) {
       scannerAgeDisplay: launch?.scannerAgeDisplay || null
     },
 
+    measurementSignalsV411:
+      candidate?.measurementSignalsV411 && typeof candidate.measurementSignalsV411 === "object"
+        ? candidate.measurementSignalsV411
+        : null,
+
     evidenceQualityProtectionV158:
       candidate?.evidenceQualityProtectionV158
         ? {
@@ -46599,6 +46751,54 @@ function buildEntrySignalSnapshotV309(candidate, capturedAt) {
           }
         : null
   };
+}
+
+const ENTRY_TIMING_HORIZONS_V411 = Object.freeze({
+  m5: 5 * 60 * 1000,
+  m15: 15 * 60 * 1000,
+  m30: 30 * 60 * 1000
+});
+
+function initialiseEntryTimingOutcomesV411(entryTimestamp) {
+  const entryAt = Number(entryTimestamp);
+  if (!Number.isFinite(entryAt) || entryAt <= 0) return null;
+  return {
+    version: "V411",
+    forwardOnly: true,
+    hindsightBackfillAllowed: false,
+    initialisedAt: Date.now(),
+    entryTimestamp: entryAt,
+    outcomes: { m5: null, m15: null, m30: null }
+  };
+}
+
+function captureEntryTimingOutcomesV411(record, observedAt, marketCap, source = null) {
+  const tracker = record?.entryTimingOutcomesV411;
+  if (!tracker || tracker?.forwardOnly !== true || tracker?.hindsightBackfillAllowed !== false) return record;
+  const entryAt = Number(record?.entryTimestamp ?? tracker?.entryTimestamp);
+  const observed = Number(observedAt);
+  const mc = Number(marketCap);
+  const entryMc = Number(record?.entryMarketCap);
+  if (![entryAt, observed, mc, entryMc].every(Number.isFinite) || entryAt <= 0 || observed < entryAt || mc <= 0 || entryMc <= 0) return record;
+  tracker.outcomes = tracker.outcomes && typeof tracker.outcomes === "object"
+    ? tracker.outcomes
+    : { m5: null, m15: null, m30: null };
+  for (const [key, horizonMs] of Object.entries(ENTRY_TIMING_HORIZONS_V411)) {
+    if (tracker.outcomes[key]) continue;
+    const targetAt = entryAt + horizonMs;
+    if (observed < targetAt) continue;
+    tracker.outcomes[key] = {
+      targetAt,
+      observedAt: observed,
+      observationLagMs: observed - targetAt,
+      marketCap: mc,
+      multipleByMarketCap: mc / entryMc,
+      source: source || null,
+      verified: true,
+      frozen: true
+    };
+  }
+  return record;
 }
 
 const FIXED_HORIZONS_V317 = Object.freeze({ h1: 60 * 60 * 1000, h6: 6 * 60 * 60 * 1000, h24: 24 * 60 * 60 * 1000 });
@@ -46667,6 +46867,14 @@ function buildCallPerformanceRecordV270(
     existing?.fixedHorizonOutcomesV317 ??
     (successfulAlert && !existing?.entryTimestamp
       ? initialiseFixedHorizonOutcomesV317(entryTimestamp || nowMs)
+      : null);
+
+  // V411 is intentionally a separate forward-only tracker so the established
+  // V317 1h/6h/24h history is never rewritten or backfilled.
+  const entryTimingOutcomesV411 =
+    existing?.entryTimingOutcomesV411 ??
+    (successfulAlert && !existing?.entryTimestamp
+      ? initialiseEntryTimingOutcomesV411(entryTimestamp || nowMs)
       : null);
 
   const entryPriceUsd =
@@ -46812,6 +47020,7 @@ function buildCallPerformanceRecordV270(
     entryMarketCap,
     entrySignalSnapshotV309,
     fixedHorizonOutcomesV317,
+    entryTimingOutcomesV411,
     drawdownTrackerV407,
 
     entryMarketVerified:
@@ -46898,6 +47107,7 @@ function buildCallPerformanceRecordV270(
 
   if (market.verified) {
     captureFixedHorizonOutcomesV317(performanceRecordV317, nowMs, market.marketCap, market.source);
+    captureEntryTimingOutcomesV411(performanceRecordV317, nowMs, market.marketCap, market.source);
   }
   return performanceRecordV317;
 }
@@ -53850,6 +54060,15 @@ for (
     if (
       result.success
     ) {
+      // V411 measurement-only entry telemetry. This reuses evidence already in
+      // state/candidate and performs zero external requests. It cannot change
+      // qualification because Telegram has already succeeded at this point.
+      candidate.measurementSignalsV411 = measurementSignalsV411(
+        candidate,
+        state,
+        Date.now()
+      );
+
       const callPerformanceRegistrationV270 =
         registerSuccessfulCallPerformanceV270(
           candidate,
@@ -65888,6 +66107,15 @@ function callInfoMessageV311(record) {
     `🏷 Launch source: <b>${snap?.launch?.verified === true ? text(snap?.launch?.protocol) : "UNVERIFIED"}</b>`,
     `🔭 Scanner age at call: <b>${text(snap?.launch?.scannerAgeDisplay)}</b>`,
     "",
+    "📐 <b>V411 Measurement-only Signals</b>",
+    `👥 Holder growth/hr: <b>${snap?.measurementSignalsV411?.holderGrowth?.verified === true && Number.isFinite(Number(snap?.measurementSignalsV411?.holderGrowth?.holdersPerHour)) ? Number(snap.measurementSignalsV411.holderGrowth.holdersPerHour).toFixed(2) : "UNVERIFIED"}</b>`,
+    `💧 Liquidity growth: <b>${snap?.measurementSignalsV411?.liquidityGrowth?.verified === true && Number.isFinite(Number(snap?.measurementSignalsV411?.liquidityGrowth?.growthPct)) ? Number(snap.measurementSignalsV411.liquidityGrowth.growthPct).toFixed(2) + "%" : "UNVERIFIED"}</b>`,
+    `📊 1h volume acceleration: <b>${snap?.measurementSignalsV411?.volumeAcceleration?.verified === true && Number.isFinite(Number(snap?.measurementSignalsV411?.volumeAcceleration?.growthPct)) ? Number(snap.measurementSignalsV411.volumeAcceleration.growthPct).toFixed(2) + "%" : "UNVERIFIED"}</b>`,
+    `🔁 1h transaction acceleration: <b>${snap?.measurementSignalsV411?.transactionAcceleration?.verified === true && Number.isFinite(Number(snap?.measurementSignalsV411?.transactionAcceleration?.growthPct)) ? Number(snap.measurementSignalsV411.transactionAcceleration.growthPct).toFixed(2) + "%" : "UNVERIFIED"}</b>`,
+    `👤 Unique buyers (15m): <b>${snap?.measurementSignalsV411?.buyerBreadth?.verified === true ? safeNumber(snap.measurementSignalsV411.buyerBreadth.uniqueBuyers) : "UNVERIFIED"}</b> | Repeat ratio: <b>${snap?.measurementSignalsV411?.buyerBreadth?.verified === true && Number.isFinite(Number(snap?.measurementSignalsV411?.buyerBreadth?.repeatBuyerRatioPct)) ? Number(snap.measurementSignalsV411.buyerBreadth.repeatBuyerRatioPct).toFixed(2) + "%" : "UNVERIFIED"}</b>`,
+    `💵 Verified observed median trade (15m): <b>${snap?.measurementSignalsV411?.tradeSizeDistribution?.verified === true ? telegramMoneyV271(snap.measurementSignalsV411.tradeSizeDistribution.medianUsd) : "UNVERIFIED"}</b>`,
+    "<i>V411 measurements do not affect scoring or qualification.</i>",
+    "",
     `🏆 Current stored ATH: <b>${telegramMoneyV271(record?.athMarketCap)}</b> — <b>${telegramMultipleV271(record?.athMultipleByMarketCap)}</b>`,
     "",
     "<i>Frozen call-time evidence only. Read-only; zero provider requests and no hindsight backfill.</i>"
@@ -65904,6 +66132,7 @@ function horizonDiagnosticsMessageV318(record, nowMs = Date.now()) {
   const symbol = escapeHtml(record?.symbol || "UNKNOWN");
   const address = escapeHtml(record?.address || "UNVERIFIED");
   const tracker = record?.fixedHorizonOutcomesV317 || null;
+  const timingTrackerV411 = record?.entryTimingOutcomesV411 || null;
   const entryAt = Number(record?.entryTimestamp);
   const entryMc = Number(record?.entryMarketCap);
   const currentObservedAt = Number(record?.currentObservationTimestamp);
@@ -65941,6 +66170,35 @@ function horizonDiagnosticsMessageV318(record, nowMs = Date.now()) {
     ""
   ];
 
+  for (const [key, horizonMs] of Object.entries(ENTRY_TIMING_HORIZONS_V411)) {
+    const label = key === "m5" ? "5m" : key === "m15" ? "15m" : "30m";
+    const targetAt = Number.isFinite(entryAt) && entryAt > 0 ? entryAt + horizonMs : null;
+    const mature = Number.isFinite(targetAt) ? nowMs >= targetAt : false;
+    const outcome = timingTrackerV411?.outcomes?.[key] || null;
+    let reason = "CAPTURED";
+    if (!outcome) {
+      if (!timingTrackerV411) reason = "NO_V411_ENTRY_TIMING_TRACKER_PRE_V411_OR_NOT_INITIALISED";
+      else if (timingTrackerV411?.forwardOnly !== true || timingTrackerV411?.hindsightBackfillAllowed !== false) reason = "INVALID_V411_TRACKER_GUARD";
+      else if (!Number.isFinite(entryAt) || entryAt <= 0) reason = "INVALID_ENTRY_TIMESTAMP";
+      else if (!Number.isFinite(entryMc) || entryMc <= 0) reason = "ENTRY_MARKET_CAP_UNVERIFIED";
+      else if (!mature) reason = "TARGET_NOT_REACHED_YET";
+      else if (!currentVerified) reason = "NO_VERIFIED_POST_TARGET_MARKET_OBSERVATION";
+      else if (!Number.isFinite(currentObservedAt) || currentObservedAt < targetAt) reason = "LATEST_VERIFIED_OBSERVATION_BEFORE_TARGET";
+      else if (!Number.isFinite(currentMc) || currentMc <= 0) reason = "LATEST_MARKET_CAP_INVALID";
+      else reason = "ELIGIBLE_OBSERVATION_EXISTS_BUT_OUTCOME_NOT_FROZEN_CHECK_CAPTURE_PATH";
+    }
+    lines.push(`⏱ <b>${label} entry-timing horizon (V411)</b>`);
+    lines.push(`   Target: <b>${fmtTime(targetAt)}</b> | Reached: <b>${mature ? "YES" : "NO"}</b>`);
+    lines.push(`   Captured: <b>${outcome?.verified === true && outcome?.frozen === true ? "YES" : "NO"}</b>`);
+    if (outcome) {
+      lines.push(`   Observed: <b>${fmtTime(outcome?.observedAt)}</b> | MC <b>${fmtMc(outcome?.marketCap)}</b> | ${telegramMultipleV271(outcome?.multipleByMarketCap)}`);
+      lines.push(`   Lag: <b>${compactCallAgeV307(safeNumber(outcome?.observationLagMs))}</b> | Source: <b>${escapeHtml(outcome?.source || "UNVERIFIED")}</b>`);
+    }
+    lines.push(`   Reason: <code>${escapeHtml(reason)}</code>`);
+  }
+
+  lines.push("");
+
   for (const [key, horizonMs] of Object.entries(FIXED_HORIZONS_V317)) {
     const label = key === "h1" ? "1h" : key === "h6" ? "6h" : "24h";
     const targetAt = Number.isFinite(entryAt) && entryAt > 0 ? entryAt + horizonMs : null;
@@ -65972,7 +66230,7 @@ function horizonDiagnosticsMessageV318(record, nowMs = Date.now()) {
 
   lines.push(
     "",
-    "<i>Read-only stored-state diagnostic. Zero provider requests. V317 outcomes are not backfilled or rewritten.</i>"
+    "<i>Read-only stored-state diagnostic. Zero provider requests. V411 5m/15m/30m and V317 1h/6h/24h outcomes are forward-only and are never historically backfilled.</i>"
   );
 
   return lines.join("\n");
