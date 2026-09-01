@@ -1,4 +1,16 @@
 /**
+ * Robinhood Chain Meme Hunter — V413
+ * AUTHORITATIVE RUNTIME VERSION: V413
+ * V413 adds a low-write live horizon observation layer for genuine V412+ Telegram-proven entries.
+ * A singleton Durable Object polls one batched fresh DexScreener tokens-v1 request per minute for active calls,
+ * freezes the first verified market-cap observation at/after 5m/15m/30m/1h/6h/24h, and exposes those frozen
+ * observations back to the main scanner for merge into the existing forward-only V411/V317 trackers.
+ * This is measurement/learning only: no Opportunity/Momentum scoring, qualification, Telegram thresholds,
+ * scanner candidate logic, provider request ceilings inside the scanner, V403 batching, V410 usage accounting,
+ * or V412 Telegram provenance semantics are changed. Horizon observations never use stale cache and never backfill
+ * a point from before its target. Expected extra DO storage is about one compact row write/minute while active.
+ */
+/**
  * Robinhood Chain Meme Hunter — V412
  * AUTHORITATIVE RUNTIME VERSION: V412
  * V412 adds hard Telegram delivery provenance for successful calls. New V412-era first entries freeze Telegram message_id, chat id, Telegram timestamp, bot version, delivery mode and local receipt time alongside the entry snapshot. Repeat alerts record a separate latest-success proof without overwriting the original entry proof. Legacy entries remain explicitly provenance-unverified rather than being silently rewritten. This closes the ambiguity exposed by AI while preserving genuine historical calls, V411 measurement-only signals/outcomes, scanner/scoring/qualification/alerts/request budgets, V403 batching and V410 usage accounting.
@@ -1466,7 +1478,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V412";
+const VERSION = "V413";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -53979,6 +53991,16 @@ for (
     );
 
   /*
+   * V413: merge independently captured near-live horizon observations from the
+   * singleton Durable Object. Internal read only; adds no scanner provider request.
+   */
+  const liveHorizonMergeV413 =
+    await mergeLiveHorizonSnapshotsV413(
+      state,
+      env
+    );
+
+  /*
    * V267: compare already-alerted candidates using only evidence that exists
    * in this scan. No request is made and no Telegram qualification changes.
    */
@@ -54148,6 +54170,17 @@ for (
         telegramResults.length - 1
       ].callPerformanceRegistrationV270 =
         callPerformanceRegistrationV270;
+
+
+      // V413: only a genuine newly frozen entry with verified V412 Telegram
+      // delivery proof is registered for priority live horizon observations.
+      const liveHorizonRegistrationV413 =
+        await registerLiveHorizonV413(
+          env,
+          callPerformanceRegistrationV270
+        );
+      telegramResults[telegramResults.length - 1].liveHorizonRegistrationV413 =
+        liveHorizonRegistrationV413;
 
       /*
        * V311 successful-call checkpoint. The call-performance record and its
@@ -72008,6 +72041,164 @@ async function v3LiveCollectorRouteV363(env, tokenInput, action) {
   return await r.json();
 }
 
+
+
+/* =========================================================
+   V413 — LIVE FIXED-HORIZON OBSERVATION LAYER
+   ========================================================= */
+const HORIZON_LIVE_SINGLETON_NAME_V413 = "robinhood-horizon-live-v413";
+const HORIZON_LIVE_ENTRIES_KEY_V413 = "v413:horizonEntries";
+const HORIZON_LIVE_ENABLED_KEY_V413 = "v413:horizonEnabled";
+const HORIZON_LIVE_LAST_STATUS_KEY_V413 = "v413:horizonLastStatus";
+const HORIZON_LIVE_POLL_MS_V413 = 60 * 1000;
+const HORIZON_LIVE_MAX_ACTIVE_V413 = 60;
+const HORIZON_LIVE_MAX_BATCH_V413 = 30;
+const HORIZON_LIVE_RETENTION_MS_V413 = 25 * 60 * 60 * 1000;
+const HORIZON_LIVE_WINDOWS_V413 = Object.freeze({
+  m5: 5 * 60 * 1000,
+  m15: 15 * 60 * 1000,
+  m30: 30 * 60 * 1000,
+  h1: 60 * 60 * 1000,
+  h6: 6 * 60 * 60 * 1000,
+  h24: 24 * 60 * 60 * 1000
+});
+
+async function registerLiveHorizonV413(env, registration) {
+  const ns = env?.[V3_LIVE_DO_BINDING_V363];
+  const address = normalize(registration?.address || "");
+  const entryTimestamp = Number(registration?.entryTimestamp);
+  const entryMarketCap = Number(registration?.entryMarketCap);
+  const entryProof = registration?.entryTelegramDeliveryProofV412 || null;
+  const latestProof = registration?.latestSuccessfulTelegramDeliveryV412 || null;
+  const genuineNewEntry =
+    entryProof?.verified === true &&
+    latestProof?.verified === true &&
+    Number(entryProof?.messageId) > 0 &&
+    Number(entryProof?.messageId) === Number(latestProof?.messageId);
+
+  if (!ns || typeof ns.idFromName !== "function" || typeof ns.get !== "function") {
+    return { registered: false, reason: "V413_DO_BINDING_UNAVAILABLE" };
+  }
+  if (!isAddress(address) || !Number.isFinite(entryTimestamp) || entryTimestamp <= 0 ||
+      !Number.isFinite(entryMarketCap) || entryMarketCap <= 0 || !genuineNewEntry) {
+    return { registered: false, reason: "V413_NOT_GENUINE_NEW_VERIFIED_ENTRY" };
+  }
+
+  try {
+    const stub = ns.get(ns.idFromName(HORIZON_LIVE_SINGLETON_NAME_V413));
+    const response = await stub.fetch("https://v3-live.internal/horizon-register-v413", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        address,
+        symbol: registration?.symbol || null,
+        entryTimestamp,
+        entryMarketCap,
+        telegramMessageId: Number(entryProof.messageId),
+        registeredAt: Date.now()
+      })
+    });
+    const result = await response.json().catch(() => ({}));
+    return { registered: response.ok && result?.registered === true, ...result };
+  } catch (error) {
+    return { registered: false, reason: "V413_REGISTER_FETCH_FAILED", error: errorString(error) };
+  }
+}
+
+async function readLiveHorizonSnapshotsV413(env) {
+  const ns = env?.[V3_LIVE_DO_BINDING_V363];
+  if (!ns || typeof ns.idFromName !== "function" || typeof ns.get !== "function") {
+    return { available: false, entries: {}, reason: "V413_DO_BINDING_UNAVAILABLE" };
+  }
+  try {
+    const stub = ns.get(ns.idFromName(HORIZON_LIVE_SINGLETON_NAME_V413));
+    const response = await stub.fetch("https://v3-live.internal/horizon-snapshots-v413");
+    const result = await response.json().catch(() => ({}));
+    return response.ok ? result : { available: false, entries: {}, reason: `V413_SNAPSHOT_HTTP_${response.status}` };
+  } catch (error) {
+    return { available: false, entries: {}, reason: "V413_SNAPSHOT_FETCH_FAILED", error: errorString(error) };
+  }
+}
+
+async function mergeLiveHorizonSnapshotsV413(state, env) {
+  const snapshot = await readLiveHorizonSnapshotsV413(env);
+  const entries = snapshot?.entries && typeof snapshot.entries === "object" ? snapshot.entries : {};
+  let recordsTouched = 0;
+  let outcomesMerged = 0;
+  let latestObservationsMerged = 0;
+
+  for (const [rawAddress, live] of Object.entries(entries)) {
+    const address = normalize(rawAddress);
+    const record = state?.callPerformanceV270?.[address];
+    if (!record || !live || typeof live !== "object") continue;
+    if (Number(record?.entryTimestamp) !== Number(live?.entryTimestamp)) continue;
+
+    const liveOutcomes = live?.outcomes && typeof live.outcomes === "object" ? live.outcomes : {};
+    let touched = false;
+
+    for (const key of ["m5", "m15", "m30"]) {
+      const outcome = liveOutcomes[key];
+      const tracker = record?.entryTimingOutcomesV411;
+      if (!tracker || tracker?.forwardOnly !== true || tracker?.hindsightBackfillAllowed !== false) continue;
+      tracker.outcomes = tracker.outcomes && typeof tracker.outcomes === "object" ? tracker.outcomes : {m5:null,m15:null,m30:null};
+      if (!tracker.outcomes[key] && outcome?.verified === true && outcome?.frozen === true) {
+        tracker.outcomes[key] = { ...outcome };
+        outcomesMerged++;
+        touched = true;
+      }
+    }
+
+    for (const key of ["h1", "h6", "h24"]) {
+      const outcome = liveOutcomes[key];
+      const tracker = record?.fixedHorizonOutcomesV317;
+      if (!tracker || tracker?.forwardOnly !== true || tracker?.hindsightBackfillAllowed !== false) continue;
+      tracker.outcomes = tracker.outcomes && typeof tracker.outcomes === "object" ? tracker.outcomes : {h1:null,h6:null,h24:null};
+      if (!tracker.outcomes[key] && outcome?.verified === true && outcome?.frozen === true) {
+        tracker.outcomes[key] = { ...outcome };
+        outcomesMerged++;
+        touched = true;
+      }
+    }
+
+    const observedAt = Number(live?.latestObservation?.observedAt);
+    const marketCap = Number(live?.latestObservation?.marketCap);
+    if (live?.latestObservation?.verified === true && Number.isFinite(observedAt) && observedAt > Number(record?.currentObservationTimestamp || 0) && Number.isFinite(marketCap) && marketCap > 0) {
+      record.currentObservationTimestamp = observedAt;
+      record.currentMarketVerified = true;
+      record.currentMarketCap = marketCap;
+      record.currentMarketSource = "DEXSCREENER_LIVE_HORIZON_V413";
+      record.observationCount = safeNumber(record?.observationCount) + 1;
+      const priorAth = Number(record?.athMarketCap);
+      if (!Number.isFinite(priorAth) || priorAth <= 0 || marketCap > priorAth) {
+        record.athMarketCap = marketCap;
+        record.athMarketCapTimestamp = observedAt;
+        record.athMarketCapUpdated = true;
+      }
+      record.athMultipleByMarketCap = multipleV270(record?.entryMarketCap, record?.athMarketCap);
+      record.currentMultipleByMarketCap = multipleV270(record?.entryMarketCap, record?.currentMarketCap);
+      record.drawdownFromAthMarketCap = drawdownV270(record?.athMarketCap, record?.currentMarketCap);
+      seedHistoricalPerformanceMilestonesV308(record);
+      capturePerformanceMilestonesV308(record, observedAt);
+      latestObservationsMerged++;
+      touched = true;
+    }
+
+    if (touched) recordsTouched++;
+  }
+
+  return {
+    enabled: true,
+    available: snapshot?.available === true,
+    recordsTouched,
+    outcomesMerged,
+    latestObservationsMerged,
+    activeEntries: Object.keys(entries).length,
+    lastPollAt: snapshot?.lastPollAt || null,
+    lastStatus: snapshot?.lastStatus || null,
+    source: "V413_DURABLE_SINGLETON_LIVE_HORIZON"
+  };
+}
+
 export class V3LiveCollectorV363 {
   constructor(state, env) {
     this.state = state;
@@ -72280,10 +72471,178 @@ export class V3LiveCollectorV363 {
     return{version:VERSION,available:true,estimated:true,status:"DURABLE_USAGE_ESTIMATE_READY_V410",statusLabel,utcDay:day,freeTierRowsWrittenLimit:limit,estimatedRowsWritten:used,remainingRows:Math.max(0,limit-used),usedPct,puts,deletes,aggregationWrites,alarmsSet:safeNumber(meter.alarmsSet),ingests,sourceCountV410,deferredProbesV410:safeNumber(meter.deferredProbesV410),rowsPerHour,projected24hRows,projectedPct,calibratedV407,calibrationMinutesRequiredV407:15,monitorStartedAt:startedAt,monitorStartedAtIso:new Date(startedAt).toISOString(),lastUpdatedAt:meter.lastUpdatedAt||null,lastUpdatedAtIso:meter.lastUpdatedAt?new Date(meter.lastUpdatedAt).toISOString():null,lastIngestAtV409,lastIngestAtIsoV409:lastIngestAtV409?new Date(lastIngestAtV409).toISOString():null,lastIngestAgeMsV409,lastIngestSourceV409:meter.lastIngestSourceV409||null,lastIngestPayloadV409:meter.lastIngestPayloadV409||null,collectorFeedStatusV409,meterConfidenceV409,accountedRowsV409,accountingMatchesV409,initializationOnlyV409:ingests===0&&used===1&&puts===0&&deletes===0&&aggregationWrites===1,resetAt,resetAtIso:new Date(resetAt).toISOString(),resetBoundary:"00:00 UTC",interpretation:"Bot-side estimate of Durable Object rows written by this Worker. V410 uses per-source cumulative collector snapshots and singleton-side 5-minute reconciliation so collector hibernation cannot silently discard an in-memory delta. Cloudflare dashboard remains authoritative.",alarmOperationsExcludedFromRowsWrittenEstimate:true};
   }
 
+
+  async horizonRegisterV413(request) {
+    let body = {};
+    try { body = await request.json(); } catch (_) {}
+    const address = normalize(body?.address || "");
+    const entryTimestamp = Number(body?.entryTimestamp);
+    const entryMarketCap = Number(body?.entryMarketCap);
+    const telegramMessageId = Number(body?.telegramMessageId);
+    if (!isAddress(address) || !Number.isFinite(entryTimestamp) || entryTimestamp <= 0 || !Number.isFinite(entryMarketCap) || entryMarketCap <= 0 || !Number.isFinite(telegramMessageId) || telegramMessageId <= 0) {
+      return Response.json({version:VERSION,registered:false,status:"INVALID_HORIZON_REGISTRATION_V413"},{status:400});
+    }
+
+    const entries = await this.state.storage.get(HORIZON_LIVE_ENTRIES_KEY_V413) || {};
+    const existing = entries[address];
+    if (!existing || Number(existing?.entryTimestamp) !== entryTimestamp) {
+      entries[address] = {
+        address,
+        symbol: body?.symbol || null,
+        entryTimestamp,
+        entryMarketCap,
+        telegramMessageId,
+        registeredAt: Number(body?.registeredAt) || Date.now(),
+        latestObservation: null,
+        outcomes: {m5:null,m15:null,m30:null,h1:null,h6:null,h24:null},
+        completed: false
+      };
+    }
+
+    const rows = Object.values(entries)
+      .filter(Boolean)
+      .sort((a,b)=>safeNumber(b?.registeredAt)-safeNumber(a?.registeredAt))
+      .slice(0,HORIZON_LIVE_MAX_ACTIVE_V413);
+    const pruned = Object.fromEntries(rows.map(row=>[normalize(row.address),row]));
+    await this.doPutV404(HORIZON_LIVE_ENTRIES_KEY_V413, pruned);
+    await this.doPutV404(HORIZON_LIVE_ENABLED_KEY_V413, true);
+    await this.doSetAlarmV404(Date.now()+1000);
+    return Response.json({version:VERSION,registered:true,status:"LIVE_HORIZON_REGISTERED_V413",address,entryTimestamp,entryMarketCap,telegramMessageId,activeEntries:Object.keys(pruned).length});
+  }
+
+  async horizonSnapshotV413() {
+    const entries = await this.state.storage.get(HORIZON_LIVE_ENTRIES_KEY_V413) || {};
+    const last = await this.state.storage.get(HORIZON_LIVE_LAST_STATUS_KEY_V413) || {};
+    return {
+      version: VERSION,
+      available: true,
+      tracker: "DURABLE_SINGLETON_PRIORITY_HORIZON_V413",
+      pollIntervalMs: HORIZON_LIVE_POLL_MS_V413,
+      entries,
+      activeEntries: Object.keys(entries).length,
+      lastPollAt: last?.lastPollAt || null,
+      lastStatus: last?.status || "WAITING_FOR_FIRST_POLL_V413",
+      lastHttpStatus: last?.httpStatus || null,
+      lastError: last?.error || null
+    };
+  }
+
+  async pollLiveHorizonsV413() {
+    const nowMs = Date.now();
+    let entries = await this.state.storage.get(HORIZON_LIVE_ENTRIES_KEY_V413) || {};
+    const liveRows = Object.values(entries).filter(row => {
+      const entryAt = Number(row?.entryTimestamp);
+      return isAddress(normalize(row?.address||"")) && Number.isFinite(entryAt) && entryAt > 0 && nowMs-entryAt <= HORIZON_LIVE_RETENTION_MS_V413 && row?.completed !== true;
+    });
+
+    if (!liveRows.length) {
+      await this.doPutV404(HORIZON_LIVE_ENABLED_KEY_V413, false);
+      await this.doPutV404(HORIZON_LIVE_LAST_STATUS_KEY_V413,{lastPollAt:nowMs,status:"NO_ACTIVE_HORIZONS_V413",httpStatus:null,error:null});
+      return {active:false,status:"NO_ACTIVE_HORIZONS_V413"};
+    }
+
+    let anyChanged = false;
+    let requests = 0;
+    let verifiedObservations = 0;
+    let captures = 0;
+    let lastHttpStatus = null;
+    let lastError = null;
+
+    for (let i=0;i<liveRows.length;i+=HORIZON_LIVE_MAX_BATCH_V413) {
+      const batch = liveRows.slice(i,i+HORIZON_LIVE_MAX_BATCH_V413);
+      const addresses = batch.map(row=>normalize(row.address)).filter(Boolean);
+      if (!addresses.length) continue;
+      requests++;
+      let response;
+      try {
+        response = await fetch(`${DEXSCREENER_BASE}/tokens/v1/robinhood/${addresses.join(",")}`, {
+          headers: {"accept":"application/json","user-agent":"Robinhood-Meme-Hunter-V413-Horizon/1.0"}
+        });
+        lastHttpStatus = response.status;
+      } catch (error) {
+        lastError = errorString(error);
+        continue;
+      }
+      if (!response.ok) {
+        lastError = `DEXSCREENER_HTTP_${response.status}`;
+        continue;
+      }
+      let pairs=[];
+      try { pairs=await response.json(); } catch (error) { lastError=errorString(error); continue; }
+      if (!Array.isArray(pairs)) continue;
+
+      const best = new Map();
+      for (const pair of pairs) {
+        const address = normalize(pair?.baseToken?.address || "");
+        if (!addresses.includes(address)) continue;
+        const marketCap = Number(pair?.marketCap);
+        if (!Number.isFinite(marketCap) || marketCap <= 0) continue;
+        const liq = Number(pair?.liquidity?.usd);
+        const prev = best.get(address);
+        if (!prev || safeNumber(liq) > safeNumber(prev?.liquidity?.usd)) best.set(address,pair);
+      }
+
+      const observedAt = Date.now();
+      for (const row of batch) {
+        const address = normalize(row.address);
+        const pair = best.get(address);
+        if (!pair) continue;
+        const marketCap = Number(pair?.marketCap);
+        if (!Number.isFinite(marketCap) || marketCap <= 0) continue;
+        verifiedObservations++;
+        row.latestObservation = {verified:true,observedAt,marketCap,source:"DEXSCREENER_LIVE_HORIZON_V413"};
+        row.outcomes = row.outcomes && typeof row.outcomes === "object" ? row.outcomes : {m5:null,m15:null,m30:null,h1:null,h6:null,h24:null};
+        for (const [key,horizonMs] of Object.entries(HORIZON_LIVE_WINDOWS_V413)) {
+          if (row.outcomes[key]) continue;
+          const targetAt = Number(row.entryTimestamp)+horizonMs;
+          if (observedAt < targetAt) continue;
+          row.outcomes[key] = {
+            targetAt,
+            observedAt,
+            observationLagMs: observedAt-targetAt,
+            marketCap,
+            multipleByMarketCap: marketCap/Number(row.entryMarketCap),
+            source:"DEXSCREENER_LIVE_HORIZON_V413",
+            verified:true,
+            frozen:true
+          };
+          captures++;
+        }
+        row.completed = ["m5","m15","m30","h1","h6","h24"].every(key=>row.outcomes[key]?.verified===true&&row.outcomes[key]?.frozen===true);
+        entries[address]=row;
+        anyChanged = true;
+      }
+    }
+
+    // Drop expired/completed records only after 25h; completed outcomes remain
+    // available for the main scanner to merge during the retention window.
+    for (const [address,row] of Object.entries(entries)) {
+      const entryAt = Number(row?.entryTimestamp);
+      if (!Number.isFinite(entryAt) || nowMs-entryAt > HORIZON_LIVE_RETENTION_MS_V413) {
+        delete entries[address];
+        anyChanged = true;
+      }
+    }
+
+    if (anyChanged) await this.doPutV404(HORIZON_LIVE_ENTRIES_KEY_V413, entries);
+    await this.doPutV404(HORIZON_LIVE_LAST_STATUS_KEY_V413,{
+      lastPollAt:Date.now(),
+      status:verifiedObservations>0?"LIVE_HORIZON_POLL_OK_V413":(lastError||"NO_VERIFIED_MARKETS_V413"),
+      httpStatus:lastHttpStatus,
+      requests,
+      verifiedObservations,
+      captures,
+      error:lastError
+    });
+    return {active:true,requests,verifiedObservations,captures,lastHttpStatus,lastError};
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === "/usage-ingest-v404" && request.method === "POST") return await this.usageMeterIngestV404(request);
     if (url.pathname === "/usage-v404") return Response.json(await this.usageMeterSnapshotV404());
+    if (url.pathname === "/horizon-register-v413" && request.method === "POST") return await this.horizonRegisterV413(request);
+    if (url.pathname === "/horizon-snapshots-v413") return Response.json(await this.horizonSnapshotV413());
     if (url.pathname === "/start") {
       const cfg = {
         token: normalize(url.searchParams.get("token") || ""),
@@ -72724,9 +73083,22 @@ if (url.pathname === "/reconcile-v374") {
   }
 
   async alarm() {
+    const horizonEnabledV413 = await this.state.storage.get(HORIZON_LIVE_ENABLED_KEY_V413);
+    if (horizonEnabledV413 === true) {
+      const horizonPollV413 = await this.pollLiveHorizonsV413();
+      if (horizonPollV413?.active === true) {
+        await this.doSetAlarmV404(Date.now()+HORIZON_LIVE_POLL_MS_V413);
+      }
+    }
+
     const productionEnabled = await this.state.storage.get("enabled");
     const shadowEnabled = await this.state.storage.get("v394:shadowEnabled");
-    if (productionEnabled !== true && shadowEnabled !== true) return;
+    if (productionEnabled !== true && shadowEnabled !== true) {
+      // V413 singleton still reports its own compact storage mutations into the
+      // existing V410 usage meter, so /usage remains conservative/meaningful.
+      if (horizonEnabledV413 === true) await this.flushUsageDeltaV404(false);
+      return;
+    }
 
     // V403: persist hot swap/stat state once per watchdog cycle before any
     // reconnect decision. This keeps persisted evidence at most ~15s behind.
