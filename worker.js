@@ -1,7 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V409
- * AUTHORITATIVE RUNTIME VERSION: V409
- * V409 is a diagnostic-only Durable Object usage-meter verification build. /usage now exposes collector ingests, tracked storage PUTs/DELETEs, aggregation-row writes, last collector update, last source token and an explicit meter-confidence/feed status. A stuck initialization-only count is labelled UNVERIFIED until the first collector delta reaches the singleton meter. Tiny percentages below 0.01% render with three decimals. No scanner, scoring, qualification, alerts, market/age logic, provider requests, V403 batching, V407 learning/performance, or V408 age evidence is changed.
+ * Robinhood Chain Meme Hunter — V410
+ * AUTHORITATIVE RUNTIME VERSION: V410
+ * V410 repairs the Durable Object collector → singleton usage-meter feed. Collector write counters are now maintained as per-day cumulative totals, piggybacked into the existing V402 head checkpoints, and sent as absolute snapshots to the singleton. The singleton deduplicates/reconciles each source and persists at most once per 5-minute source interval (unless an explicit forced start/stop flush is requested), so isolate hibernation cannot silently discard an in-memory delta. /usage exposes source count, deferred probes, tracked PUTs/DELETEs, aggregation writes and last collector update. No scanner, scoring, qualification, alerts, market/age logic, provider requests, V403 batching, V407 learning/performance, or V408 age evidence is changed.
  * V407 adds read-only entry-quality analytics and forward-only post-call drawdown tracking. Existing verified ATH history can safely classify whether a call ever exceeded its frozen entry level; no historical low is invented. New/ongoing V407 observations track the lowest verified market cap from the V407 tracking start onward, explicitly marked forward-only. /best, /performance, /learning and /call surface the new metrics. V407 also prevents the Durable Object usage projection from showing false DANGER during the first 15 minutes by reporting CALIBRATING until a meaningful observation window exists. Scanner, scoring, qualification, alerts, provider requests, V403 batching and V404/V406 usage counting remain unchanged.
  * V408 adds evidence-separated age reporting. Strict protocol launch age remains VERIFIED only from an exact supported launch event; verified DexScreener pairCreatedAt is now surfaced separately as VERIFIED MARKET/PAIR AGE with its provider source, and scanner age remains separate. No pair age, scanner age, token deployment time, or generic V4 Initialize timestamp is promoted to protocol launch age. Adds zero external requests and changes no scanner, scoring, qualification, alert threshold, provider budget, V403 batching, V404/V406 usage-meter, or V407 learning/performance logic.
  * V406 fixes the V405 usage-meter first-read initialization bug: an empty/new-day meter is now persisted once on first /usage read, so monitorStartedAt no longer moves on every zero-usage query. The initialization row is included in the estimate. Scanner, scoring, collectors, batching, alerts, request budgets and UK reset display are unchanged.
@@ -1464,7 +1464,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V409";
+const VERSION = "V410";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71607,8 +71607,9 @@ function durableUsageTelegramMessageV404(result) {
     `Projected 24h: <b>${Number.isFinite(projected)?Math.round(projected).toLocaleString("en-US"):"CALIBRATING"}</b>`,
     `Status: <b>${escapeHtml(result.statusLabel || "UNVERIFIED")}</b>`,
     "",
-    "🔎 <b>V409 meter verification</b>",
+    "🔎 <b>V410 meter verification</b>",
     `Collector ingests: <b>${safeNumber(result.ingests).toLocaleString("en-US")}</b>`,
+    `Collector sources seen: <b>${safeNumber(result.sourceCountV410).toLocaleString("en-US")}</b>`,
     `Tracked storage PUTs: <b>${safeNumber(result.puts).toLocaleString("en-US")}</b>`,
     `Tracked storage DELETEs: <b>${safeNumber(result.deletes).toLocaleString("en-US")}</b>`,
     `Meter aggregation writes: <b>${safeNumber(result.aggregationWrites).toLocaleString("en-US")}</b>`,
@@ -71622,7 +71623,7 @@ function durableUsageTelegramMessageV404(result) {
     `Reset (UK): <b>${escapeHtml(ukResetDisplayV405(result.resetAtIso))}</b>`,
     `Cloudflare reset: <b>00:00 UTC</b>`,
     "",
-    `<i>Bot-side estimate since ${escapeHtml(result.monitorStartedAtIso || "meter start")}. V409 does not treat an initialization-only count as proof of low collector usage. Cloudflare's dashboard is the official billing counter.</i>`
+    `<i>Bot-side estimate since ${escapeHtml(result.monitorStartedAtIso || "meter start")}. V410 does not treat an initialization-only count as proof of low collector usage. Cloudflare's dashboard is the official billing counter.</i>`
   ].join("\n");
 }
 
@@ -71711,57 +71712,194 @@ export class V3LiveCollectorV363 {
     this.shadowStatsDirtyV403 = false;
     this.lastCleanupBucketV403 = null;
 
-    // V404 per-instance usage delta; centrally aggregated at most every 5m.
-    this.usagePendingV404 = { puts: 0, deletes: 0, alarms: 0 };
-    this.lastUsagePushAtV404 = 0;
+    // V410: per-day cumulative usage counters. These are recovered from the
+    // existing V402 head checkpoints and piggybacked back into those same rows.
+    // This avoids relying on an in-memory 5-minute delta that can disappear when
+    // a Durable Object isolate hibernates between alarms.
+    this.usageTotalsV410 = null;
+    this.usageTotalsLoadedV410 = false;
+    this.usagePendingV404 = { puts: 0, deletes: 0, alarms: 0 }; // legacy telemetry only
+    this.lastUsagePushAtV404 = 0; // legacy telemetry only
+  }
+
+  async ensureUsageTotalsV410() {
+    const day = utcDayKeyV404();
+    if (this.usageTotalsLoadedV410 === true && this.usageTotalsV410?.utcDay === day) {
+      return this.usageTotalsV410;
+    }
+
+    let prod = {};
+    let shadow = {};
+    try { prod = await this.state.storage.get("v368:heads") || {}; } catch (_) {}
+    try { shadow = await this.state.storage.get("v401:shadowHeads") || {}; } catch (_) {}
+
+    const candidates = [prod?.usageTotalsV410, shadow?.usageTotalsV410]
+      .filter(row => row && typeof row === "object" && row.utcDay === day);
+
+    const best = candidates.sort((a,b) =>
+      (safeNumber(b.puts)+safeNumber(b.deletes)) - (safeNumber(a.puts)+safeNumber(a.deletes))
+    )[0] || null;
+
+    this.usageTotalsV410 = best
+      ? {
+          utcDay: day,
+          puts: Math.max(0,safeNumber(best.puts)),
+          deletes: Math.max(0,safeNumber(best.deletes)),
+          alarms: Math.max(0,safeNumber(best.alarms)),
+          firstCountedAt: safeNumber(best.firstCountedAt) || Date.now(),
+          updatedAt: safeNumber(best.updatedAt) || Date.now()
+        }
+      : {utcDay:day,puts:0,deletes:0,alarms:0,firstCountedAt:Date.now(),updatedAt:Date.now()};
+
+    this.usageTotalsLoadedV410 = true;
+    return this.usageTotalsV410;
   }
 
   async noteDurableMutationV404(kind) {
+    const totals = await this.ensureUsageTotalsV410();
+    if (kind === "put") totals.puts = safeNumber(totals.puts) + 1;
+    else if (kind === "delete") totals.deletes = safeNumber(totals.deletes) + 1;
+    else if (kind === "alarm") totals.alarms = safeNumber(totals.alarms) + 1;
+    totals.updatedAt = Date.now();
+
+    // Preserve legacy pending telemetry for compatibility, but V410 does not
+    // depend on it for correctness.
     if (!this.usagePendingV404 || typeof this.usagePendingV404 !== "object") this.usagePendingV404={puts:0,deletes:0,alarms:0};
     if (kind === "put") this.usagePendingV404.puts=safeNumber(this.usagePendingV404.puts)+1;
     else if (kind === "delete") this.usagePendingV404.deletes=safeNumber(this.usagePendingV404.deletes)+1;
     else if (kind === "alarm") this.usagePendingV404.alarms=safeNumber(this.usagePendingV404.alarms)+1;
+    return totals;
   }
 
-  async doPutV404(key,value) { await this.state.storage.put(key,value); await this.noteDurableMutationV404("put"); }
-  async doDeleteV404(key) { const r=await this.state.storage.delete(key); await this.noteDurableMutationV404("delete"); return r; }
-  async doSetAlarmV404(timestamp) { const r=await this.state.storage.setAlarm(timestamp); await this.noteDurableMutationV404("alarm"); return r; }
+  usageTotalsSnapshotV410() {
+    const t = this.usageTotalsV410 || {utcDay:utcDayKeyV404(),puts:0,deletes:0,alarms:0,firstCountedAt:Date.now(),updatedAt:Date.now()};
+    return {utcDay:t.utcDay,puts:safeNumber(t.puts),deletes:safeNumber(t.deletes),alarms:safeNumber(t.alarms),firstCountedAt:safeNumber(t.firstCountedAt)||null,updatedAt:safeNumber(t.updatedAt)||Date.now()};
+  }
+
+  async doPutV404(key,value) {
+    await this.noteDurableMutationV404("put");
+    if ((key === "v368:heads" || key === "v401:shadowHeads") && value && typeof value === "object") {
+      value.usageTotalsV410 = this.usageTotalsSnapshotV410();
+    }
+    await this.state.storage.put(key,value);
+  }
+
+  async doDeleteV404(key) {
+    await this.noteDurableMutationV404("delete");
+    return await this.state.storage.delete(key);
+  }
+
+  async doSetAlarmV404(timestamp) {
+    await this.noteDurableMutationV404("alarm");
+    return await this.state.storage.setAlarm(timestamp);
+  }
 
   async flushUsageDeltaV404(force=false) {
-    const nowMs=Date.now();
-    const pending=this.usagePendingV404||{puts:0,deletes:0,alarms:0};
-    const total=safeNumber(pending.puts)+safeNumber(pending.deletes)+safeNumber(pending.alarms);
-    if(total<=0)return{sent:false,reason:"NO_PENDING_USAGE_V404"};
-    if(!force&&nowMs-safeNumber(this.lastUsagePushAtV404)<DURABLE_USAGE_PUSH_INTERVAL_MS_V404)return{sent:false,reason:"USAGE_PUSH_INTERVAL_ACTIVE_V404"};
-    const ns=this.env?.[V3_LIVE_DO_BINDING_V363];
-    if(!ns||typeof ns.idFromName!=="function"||typeof ns.get!=="function")return{sent:false,reason:"USAGE_METER_BINDING_UNAVAILABLE_V404"};
-    const payload={utcDay:utcDayKeyV404(nowMs),puts:safeNumber(pending.puts),deletes:safeNumber(pending.deletes),alarms:safeNumber(pending.alarms),sourceToken:normalize(this.config?.token||""),sentAt:nowMs};
-    try{
+    const nowMs = Date.now();
+    const totals = await this.ensureUsageTotalsV410();
+    const ns = this.env?.[V3_LIVE_DO_BINDING_V363];
+    if(!ns||typeof ns.idFromName!=="function"||typeof ns.get!=="function")return{sent:false,reason:"USAGE_METER_BINDING_UNAVAILABLE_V410"};
+
+    let cfg = this.config;
+    if (!cfg) {
+      try { cfg = await this.state.storage.get("config") || null; } catch (_) {}
+    }
+    const sourceToken = isAddress(normalize(cfg?.token||"")) ? normalize(cfg.token) : null;
+    let sourceId = null;
+    try { sourceId = this.state?.id ? String(this.state.id) : null; } catch (_) {}
+    const sourceKey = sourceToken || sourceId || "UNRESOLVED_COLLECTOR";
+    const payload = {
+      mode:"ABSOLUTE_CUMULATIVE_V410",
+      utcDay:utcDayKeyV404(nowMs),
+      puts:safeNumber(totals.puts),
+      deletes:safeNumber(totals.deletes),
+      alarms:safeNumber(totals.alarms),
+      sourceToken,
+      sourceKey,
+      force:force===true,
+      sentAt:nowMs
+    };
+
+    try {
       const stub=ns.get(ns.idFromName(DURABLE_USAGE_METER_NAME_V404));
       const r=await stub.fetch("https://v3-live.internal/usage-ingest-v404",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(payload)});
-      if(!r.ok)return{sent:false,reason:`USAGE_METER_HTTP_${r.status}_V404`};
-      this.usagePendingV404={puts:0,deletes:0,alarms:0}; this.lastUsagePushAtV404=nowMs;
-      return{sent:true,status:"USAGE_DELTA_AGGREGATED_V404"};
-    }catch(error){return{sent:false,reason:"USAGE_METER_PUSH_FAILED_V404",error:errorString(error)};}
+      if(!r.ok)return{sent:false,reason:`USAGE_METER_HTTP_${r.status}_V410`};
+      const result=await r.json().catch(()=>({}));
+      this.usagePendingV404={puts:0,deletes:0,alarms:0};
+      this.lastUsagePushAtV404=nowMs;
+      return{sent:true,status:result?.status||"USAGE_ABSOLUTE_SNAPSHOT_SENT_V410",meter:result};
+    } catch(error) {
+      return{sent:false,reason:"USAGE_METER_PUSH_FAILED_V410",error:errorString(error)};
+    }
   }
 
   async usageMeterIngestV404(request) {
     let body={}; try{body=await request.json();}catch(_){}
     const nowMs=Date.now(), day=utcDayKeyV404(nowMs);
     let meter=await this.state.storage.get("v404:durableUsageMeter")||{};
-    if(meter.utcDay!==day)meter={utcDay:day,monitorStartedAt:nowMs,estimatedRowsWritten:0,puts:0,deletes:0,alarmsSet:0,aggregationWrites:0,ingests:0,lastUpdatedAt:null,lastIngestAtV409:null,lastIngestSourceV409:null,lastIngestPayloadV409:null};
-    const puts=Math.max(0,safeNumber(body?.puts)), deletes=Math.max(0,safeNumber(body?.deletes)), alarms=Math.max(0,safeNumber(body?.alarms));
+    if(meter.utcDay!==day)meter={utcDay:day,monitorStartedAt:nowMs,estimatedRowsWritten:0,puts:0,deletes:0,alarmsSet:0,aggregationWrites:0,ingests:0,deferredProbesV410:0,lastUpdatedAt:null,lastIngestAtV409:null,lastIngestSourceV409:null,lastIngestPayloadV409:null,sourcesV410:{}};
+
+    const mode=String(body?.mode||"");
+    const cumulativeMode=mode==="ABSOLUTE_CUMULATIVE_V410";
     const sourceToken=isAddress(normalize(body?.sourceToken||""))?normalize(body.sourceToken):null;
+    const sourceKey=String(body?.sourceKey||sourceToken||"").slice(0,160) || null;
     const sentAt=safeNumber(body?.sentAt)>0?safeNumber(body.sentAt):null;
+    const force=body?.force===true;
+
+    if(cumulativeMode && sourceKey){
+      meter.sourcesV410=meter.sourcesV410&&typeof meter.sourcesV410==="object"?meter.sourcesV410:{};
+      const previous=meter.sourcesV410[sourceKey]&&typeof meter.sourcesV410[sourceKey]==="object"?meter.sourcesV410[sourceKey]:null;
+      const currentPuts=Math.max(0,safeNumber(body?.puts));
+      const currentDeletes=Math.max(0,safeNumber(body?.deletes));
+      const currentAlarms=Math.max(0,safeNumber(body?.alarms));
+      const lastAcceptedAt=safeNumber(previous?.lastAcceptedAt)||0;
+
+      // A collector may probe every watchdog alarm. The singleton does not write
+      // a row for those probes until the source's 5-minute aggregation interval
+      // expires. Absolute counters mean hibernation/retries cannot lose or double
+      // count the intervening mutations.
+      if(previous && !force && nowMs-lastAcceptedAt<DURABLE_USAGE_PUSH_INTERVAL_MS_V404){
+        return Response.json({ok:true,version:VERSION,status:"USAGE_PROBE_DEFERRED_NO_METER_WRITE_V410",sourceKey,nextEligibleAt:lastAcceptedAt+DURABLE_USAGE_PUSH_INTERVAL_MS_V404});
+      }
+
+      let deltaPuts=0, deltaDeletes=0, deltaAlarms=0;
+      if(previous && previous.utcDay===day){
+        // Normal monotonic cumulative path. If a runtime recovered a slightly
+        // older checkpoint, never invent a negative delta; a later snapshot will
+        // catch up once its cumulative high-water mark is exceeded.
+        deltaPuts=Math.max(0,currentPuts-safeNumber(previous.puts));
+        deltaDeletes=Math.max(0,currentDeletes-safeNumber(previous.deletes));
+        deltaAlarms=Math.max(0,currentAlarms-safeNumber(previous.alarms));
+      } else {
+        deltaPuts=currentPuts;
+        deltaDeletes=currentDeletes;
+        deltaAlarms=currentAlarms;
+      }
+
+      meter.puts=safeNumber(meter.puts)+deltaPuts;
+      meter.deletes=safeNumber(meter.deletes)+deltaDeletes;
+      meter.alarmsSet=safeNumber(meter.alarmsSet)+deltaAlarms;
+      meter.aggregationWrites=safeNumber(meter.aggregationWrites)+1;
+      meter.estimatedRowsWritten=safeNumber(meter.estimatedRowsWritten)+deltaPuts+deltaDeletes+1;
+      meter.ingests=safeNumber(meter.ingests)+1;
+      meter.lastUpdatedAt=nowMs;
+      meter.lastIngestAtV409=nowMs;
+      meter.lastIngestSourceV409=sourceToken||sourceKey;
+      meter.lastIngestPayloadV409={mode,deltaPuts,deltaDeletes,deltaAlarms,cumulativePuts:currentPuts,cumulativeDeletes:currentDeletes,cumulativeAlarms:currentAlarms,sentAt,receivedAt:nowMs};
+      meter.sourcesV410[sourceKey]={utcDay:day,sourceToken,puts:Math.max(currentPuts,safeNumber(previous?.puts)),deletes:Math.max(currentDeletes,safeNumber(previous?.deletes)),alarms:Math.max(currentAlarms,safeNumber(previous?.alarms)),lastAcceptedAt:nowMs,lastSeenAt:nowMs};
+      await this.state.storage.put("v404:durableUsageMeter",meter);
+      return Response.json({ok:true,version:VERSION,status:"USAGE_ABSOLUTE_SNAPSHOT_ACCEPTED_V410",sourceKey,deltaPuts,deltaDeletes,deltaAlarms});
+    }
+
+    // Backward-compatible V404/V409 delta payload acceptance.
+    const puts=Math.max(0,safeNumber(body?.puts)), deletes=Math.max(0,safeNumber(body?.deletes)), alarms=Math.max(0,safeNumber(body?.alarms));
     meter.puts=safeNumber(meter.puts)+puts; meter.deletes=safeNumber(meter.deletes)+deletes; meter.alarmsSet=safeNumber(meter.alarmsSet)+alarms; meter.aggregationWrites=safeNumber(meter.aggregationWrites)+1;
     meter.estimatedRowsWritten=safeNumber(meter.estimatedRowsWritten)+puts+deletes+1; meter.ingests=safeNumber(meter.ingests)+1; meter.lastUpdatedAt=nowMs;
-    // V409: persist proof that an actual collector delta reached the singleton.
-    // This adds no extra row write: the fields ride on the existing aggregation put.
     meter.lastIngestAtV409=nowMs;
     meter.lastIngestSourceV409=sourceToken;
-    meter.lastIngestPayloadV409={puts,deletes,alarms,sentAt,receivedAt:nowMs};
+    meter.lastIngestPayloadV409={mode:"LEGACY_DELTA",puts,deletes,alarms,sentAt,receivedAt:nowMs};
     await this.state.storage.put("v404:durableUsageMeter",meter);
-    return Response.json({ok:true,version:VERSION,status:"USAGE_DELTA_ACCEPTED_V409"});
+    return Response.json({ok:true,version:VERSION,status:"USAGE_DELTA_ACCEPTED_LEGACY_V410"});
   }
 
   async usageMeterSnapshotV404() {
@@ -71771,7 +71909,7 @@ export class V3LiveCollectorV363 {
       // V406: persist the fresh daily meter on first read instead of returning
       // a temporary zero object. This keeps monitorStartedAt stable across
       // repeated /usage calls and counts this initialization row itself.
-      meter={utcDay:day,monitorStartedAt:nowMs,estimatedRowsWritten:1,puts:0,deletes:0,alarmsSet:0,aggregationWrites:1,ingests:0,lastUpdatedAt:nowMs,lastIngestAtV409:null,lastIngestSourceV409:null,lastIngestPayloadV409:null};
+      meter={utcDay:day,monitorStartedAt:nowMs,estimatedRowsWritten:1,puts:0,deletes:0,alarmsSet:0,aggregationWrites:1,ingests:0,deferredProbesV410:0,lastUpdatedAt:nowMs,lastIngestAtV409:null,lastIngestSourceV409:null,lastIngestPayloadV409:null,sourcesV410:{}};
       await this.state.storage.put("v404:durableUsageMeter",meter);
     }
     const used=Math.max(0,safeNumber(meter.estimatedRowsWritten)), limit=DURABLE_ROWS_WRITTEN_FREE_LIMIT_V404;
@@ -71800,9 +71938,10 @@ export class V3LiveCollectorV363 {
     const collectorFeedStatusV409=ingests<=0
       ? (elapsedMs>=10*60*1000?"UNVERIFIED_NO_COLLECTOR_INGESTS":"WAITING_FOR_FIRST_COLLECTOR_INGEST")
       : (lastIngestAgeMsV409!==null&&lastIngestAgeMsV409<=10*60*1000?"RECEIVING_COLLECTOR_INGESTS":"NO_RECENT_INGEST_MAY_BE_IDLE");
-    const meterConfidenceV409=ingests>0?"VERIFIED_INTERNAL_INGEST_PATH_ACTIVE":"UNVERIFIED_UNTIL_FIRST_COLLECTOR_INGEST";
+    const meterConfidenceV409=ingests>0?"VERIFIED_INTERNAL_INGEST_PATH_ACTIVE_V410":"UNVERIFIED_UNTIL_FIRST_COLLECTOR_INGEST_V410";
+    const sourceCountV410=Object.keys(meter.sourcesV410&&typeof meter.sourcesV410==="object"?meter.sourcesV410:{}).length;
 
-    return{version:VERSION,available:true,estimated:true,status:"DURABLE_USAGE_ESTIMATE_READY_V409",statusLabel,utcDay:day,freeTierRowsWrittenLimit:limit,estimatedRowsWritten:used,remainingRows:Math.max(0,limit-used),usedPct,puts,deletes,aggregationWrites,alarmsSet:safeNumber(meter.alarmsSet),ingests,rowsPerHour,projected24hRows,projectedPct,calibratedV407,calibrationMinutesRequiredV407:15,monitorStartedAt:startedAt,monitorStartedAtIso:new Date(startedAt).toISOString(),lastUpdatedAt:meter.lastUpdatedAt||null,lastUpdatedAtIso:meter.lastUpdatedAt?new Date(meter.lastUpdatedAt).toISOString():null,lastIngestAtV409,lastIngestAtIsoV409:lastIngestAtV409?new Date(lastIngestAtV409).toISOString():null,lastIngestAgeMsV409,lastIngestSourceV409:meter.lastIngestSourceV409||null,lastIngestPayloadV409:meter.lastIngestPayloadV409||null,collectorFeedStatusV409,meterConfidenceV409,accountedRowsV409,accountingMatchesV409,initializationOnlyV409:ingests===0&&used===1&&puts===0&&deletes===0&&aggregationWrites===1,resetAt,resetAtIso:new Date(resetAt).toISOString(),resetBoundary:"00:00 UTC",interpretation:"Bot-side estimate of Durable Object rows written by this Worker. V409 requires at least one collector ingest before treating the internal collector accounting path as verified. Cloudflare dashboard remains authoritative.",alarmOperationsExcludedFromRowsWrittenEstimate:true};
+    return{version:VERSION,available:true,estimated:true,status:"DURABLE_USAGE_ESTIMATE_READY_V410",statusLabel,utcDay:day,freeTierRowsWrittenLimit:limit,estimatedRowsWritten:used,remainingRows:Math.max(0,limit-used),usedPct,puts,deletes,aggregationWrites,alarmsSet:safeNumber(meter.alarmsSet),ingests,sourceCountV410,deferredProbesV410:safeNumber(meter.deferredProbesV410),rowsPerHour,projected24hRows,projectedPct,calibratedV407,calibrationMinutesRequiredV407:15,monitorStartedAt:startedAt,monitorStartedAtIso:new Date(startedAt).toISOString(),lastUpdatedAt:meter.lastUpdatedAt||null,lastUpdatedAtIso:meter.lastUpdatedAt?new Date(meter.lastUpdatedAt).toISOString():null,lastIngestAtV409,lastIngestAtIsoV409:lastIngestAtV409?new Date(lastIngestAtV409).toISOString():null,lastIngestAgeMsV409,lastIngestSourceV409:meter.lastIngestSourceV409||null,lastIngestPayloadV409:meter.lastIngestPayloadV409||null,collectorFeedStatusV409,meterConfidenceV409,accountedRowsV409,accountingMatchesV409,initializationOnlyV409:ingests===0&&used===1&&puts===0&&deletes===0&&aggregationWrites===1,resetAt,resetAtIso:new Date(resetAt).toISOString(),resetBoundary:"00:00 UTC",interpretation:"Bot-side estimate of Durable Object rows written by this Worker. V410 uses per-source cumulative collector snapshots and singleton-side 5-minute reconciliation so collector hibernation cannot silently discard an in-memory delta. Cloudflare dashboard remains authoritative.",alarmOperationsExcludedFromRowsWrittenEstimate:true};
   }
 
   async fetch(request) {
@@ -71832,6 +71971,7 @@ export class V3LiveCollectorV363 {
         if (integrity.active!==true || !Number.isFinite(Number(integrity.continuousStartAt))) await this.markIntegrityConnectedV371("V371_START_BOOTSTRAP_DUAL_ALREADY_ACCEPTED");
         await this.doSetAlarmV404(Date.now()+V3_HEAD_WATCHDOG_MS_V371);
       }
+      await this.flushUsageDeltaV404(true);
       return Response.json(await this.status("START_REQUESTED_V371"));
     }
 
@@ -71882,6 +72022,7 @@ export class V3LiveCollectorV363 {
         await this.doPutV404("v394:shadowConnection",{connected:false,subscriptionAccepted:false,status:staleRuntime?"SHADOW_VERSION_RECYCLE_PENDING_V402":"SHADOW_POOL_SET_RECYCLE_PENDING_V402",previousRuntimeVersion:activeRuntimeVersion||null,previousConfigFingerprintV399:activeConfigFingerprintV399||null,desiredConfigFingerprintV399,recycleRequestedAt:Date.now(),lastError:null});
       }
       await this.connectShadowV394(true);
+      await this.flushUsageDeltaV404(true);
       return Response.json(await this.shadowStatusV394("SHADOW_MULTI_POOL_START_REQUESTED_V401"));
     }
     if (url.pathname === "/shadow-multipool-status-v394") {
@@ -71898,6 +72039,7 @@ export class V3LiveCollectorV363 {
       try { this.ws?.close(1000,"V363 stopped"); } catch (_) {}
       this.ws = null; this.subscriptionId = null; this.headSubscriptionId = null;
       await this.doPutV404("connection", {connected:false,subscriptionAccepted:false,logSubscriptionAccepted:false,headSubscriptionAccepted:false,stoppedAt:Date.now()});
+      await this.flushUsageDeltaV404(true);
       return Response.json(await this.status("STOPPED_V363"));
     }
     if (url.pathname === "/status") return Response.json(await this.status());
@@ -72294,8 +72436,9 @@ if (url.pathname === "/reconcile-v374") {
     // preserves restart-safe diagnostics without per-head storage writes.
     await this.checkpointHeadTelemetryV402();
 
-    // V404: publish this collector's accumulated write/delete delta at most
-    // once per 5 minutes. The singleton meter write counts itself.
+    // V410: send an absolute cumulative usage probe. The singleton itself
+    // reconciles each collector at most once per 5 minutes, so isolate
+    // hibernation cannot erase the accounting delta.
     await this.flushUsageDeltaV404(false);
 
     // Keep checking while either collector is enabled. Fifteen seconds is the
