@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V430
- * AUTHORITATIVE RUNTIME VERSION: V430
+ * Robinhood Chain Meme Hunter — V431
+ * AUTHORITATIVE RUNTIME VERSION: V431
+ * V431 integrates an optional managed Chainstack Robinhood Mainnet HTTPS RPC through the Cloudflare secret CHAINSTACK_RPC_URL. The endpoint is never hard-coded into this source. When configured, Chainstack becomes the preferred normal RPC for system eth_blockNumber and analysis reads, while Robinhood Public and Alchemy remain normal fallbacks and the existing BlockReq V421 path remains the independent ERC-20/system emergency fallback. Chainstack participates in the existing V423 diagnostics, V424 method-aware health routing, V426 cross-scan persistence and V427 adaptive 429 backoff. The V421/V429 all-normal-RPC rate-limit tests include Chainstack when configured so BlockReq only takes over after every configured normal RPC has supplied rate-limit evidence. No token scoring, Opportunity/Momentum logic, qualification, Telegram threshold, holder rule, market-data behavior, request ceiling, or V428 diagnostic behavior is changed.
  * V430 is a narrow hotfix for the V428 market-pressure telemetry crash exposed under V429. The crash was caused by marketProviderPressureTelemetryV428() being called from budget telemetry with state=null and then unconditionally calling marketProviderAvailabilityV147(state), whose service helpers expect a real state object. V430 makes that telemetry null-safe: providerAvailabilityAtEnd is only calculated when a valid scanner state object exists, otherwise it is reported as null/STATE_NOT_AVAILABLE_IN_BUDGET_TELEMETRY. No market request behavior, RPC routing, cooldown, provider order, scoring, qualification, Telegram threshold, request ceiling, or V429 system-head fallback behavior changes.
  * V429 is a targeted hotfix on V428 for the newly exposed startup failure where both normal SYSTEM eth_blockNumber providers return HTTP 429 before the market-pressure diagnostic can run. The normal system path remains Robinhood Public RPC then Alchemy and still uses the existing two-request system budget. Only when both configured normal system RPCs have explicitly returned rate-limit evidence does latestBlock() attempt the already-configured V421 independent BlockReq read endpoint once, using one available analysis-budget slot while remaining inside the unchanged 42-request global ceiling. The fallback is read-only, eth_blockNumber-only, does not change discovery provider routing, does not weaken any validation, and records explicit telemetry. If the independent endpoint also fails, the scan still fails safely rather than guessing a chain head. V429 preserves the V428 market-pressure diagnostic, V427 adaptive RPC backoff, V426 persistence, V424 routing, V422 holder recovery, all scoring/qualification/Telegram rules, and all existing request ceilings.
  * V428 is a DIAGNOSTIC-ONLY market-provider pressure build on the complete V427 source. It instruments the existing scanner DexScreener and GeckoTerminal HTTP requests without adding any request, changing any provider order, changing cooldowns, or changing qualification. For each already-existing market request it records provider, feature/call-site, request path class, scanner phase, start time, latency, HTTP status, Retry-After when exposed, 429/non-429 outcome, and the provider eligibility/cooldown state immediately before the request. It also aggregates request counts and 429s by provider and by feature so we can prove whether pressure comes from candidate market lookup, ATH follow-up, Gecko fallback, or Gecko directional enrichment before changing the market-data scheduler. V428 preserves V427 adaptive RPC backoff, V426 persistence, V425/V424 routing, V423 RPC diagnostics, V422 holder recovery, V421 fallback, V420 circuit breaker, all request ceilings, scoring, qualification, Telegram thresholds, and V414 learning/breakout behavior.
@@ -1504,7 +1505,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V430";
+const VERSION = "V431";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -12926,6 +12927,27 @@ function rpcPersistentHealthTelemetryV426(
 }
 
 /* =========================================================
+   V431 CHAINSTACK MANAGED RPC
+   ========================================================= */
+
+function chainstackRpcUrlV431(env) {
+  const value =
+    String(
+      env?.CHAINSTACK_RPC_URL || ""
+    ).trim();
+
+  return /^https:\/\/.+/i.test(value)
+    ? value
+    : null;
+}
+
+function chainstackConfiguredV431(env) {
+  return Boolean(
+    chainstackRpcUrlV431(env)
+  );
+}
+
+/* =========================================================
    V424/V425 HEALTH-WEIGHTED ANALYSIS RPC ROUTING
    ========================================================= */
 
@@ -13085,7 +13107,14 @@ function providerScoreV424(budget, provider, method, originalIndex) {
   if (h.cooling) return -1000000 - safeNumber(h.remainingMs);
 
   let score = 0;
+
+  /*
+   * V431: managed Chainstack gets the strongest initial preference when
+   * configured. Dynamic health evidence still overrides this preference.
+   */
+  if (provider === "CHAINSTACK") score += 60;
   if (provider === "ROBINHOOD_PUBLIC_RPC") score += 15;
+
   score += safeNumber(h.successes) * 40;
   score -= safeNumber(h.consecutive429) * 35;
   score -= safeNumber(h.http429) * 8;
@@ -13219,6 +13248,17 @@ function rpcHealthRoutingTelemetryV424(budget) {
 function rpcProviderNameV423(url) {
   const value =
     String(url || "").toLowerCase();
+
+  if (
+    value.includes(
+      "robinhood-mainnet.core.chainstack.com"
+    ) ||
+    value.includes(
+      "chainstack.com"
+    )
+  ) {
+    return "CHAINSTACK";
+  }
 
   if (
     value.includes(
@@ -14021,6 +14061,9 @@ async function rpc(
   budget,
   phase
 ) {
+  const chainstackUrl =
+    chainstackRpcUrlV431(env);
+
   const alchemyUrl =
     env.ALCHEMY_API_KEY
       ? ALCHEMY_BASE + env.ALCHEMY_API_KEY
@@ -14029,27 +14072,49 @@ async function rpc(
   const originalProviders =
     phase === "analysis"
       ? [
-          {name: "ALCHEMY", url: alchemyUrl},
-          {name: "ROBINHOOD_PUBLIC_RPC", url: PUBLIC_RPC}
+          {name: "CHAINSTACK", url: chainstackUrl},
+          {name: "ROBINHOOD_PUBLIC_RPC", url: PUBLIC_RPC},
+          {name: "ALCHEMY", url: alchemyUrl}
         ]
       : [
+          {name: "CHAINSTACK", url: chainstackUrl},
           {name: "ROBINHOOD_PUBLIC_RPC", url: PUBLIC_RPC},
           ...(alchemyUrl ? [{name: "ALCHEMY", url: alchemyUrl}] : [])
         ];
 
-  let providers = originalProviders.filter(p => Boolean(p?.url));
+  let providers =
+    originalProviders.filter(
+      provider =>
+        Boolean(provider?.url)
+    );
+
   let coolingV424 = [];
 
   if (phase === "analysis") {
-    const routed = orderAnalysisProvidersV424(budget, providers, method);
-    providers = routed.usable;
-    coolingV424 = routed.cooling;
+    const routed =
+      orderAnalysisProvidersV424(
+        budget,
+        providers,
+        method
+      );
+
+    providers =
+      routed.usable;
+
+    coolingV424 =
+      routed.cooling;
 
     if (!providers.length) {
-      const root = rpcRoutingRootV424(budget);
+      const root =
+        rpcRoutingRootV424(
+          budget
+        );
+
       if (root) {
         root.fallbackEligibilityFromCooling =
-          safeNumber(root.fallbackEligibilityFromCooling) + 1;
+          safeNumber(
+            root.fallbackEligibilityFromCooling
+          ) + 1;
       }
 
       return {
@@ -14058,7 +14123,10 @@ async function rpc(
         error:
           coolingV424.length
             ? coolingV424
-                .map(row => `${row.name}: V424_METHOD_COOLDOWN_AFTER_429`)
+                .map(
+                  row =>
+                    `${row.name}: V424_METHOD_COOLDOWN_AFTER_429`
+                )
                 .join(" | ")
             : "NO_CONFIGURED_ANALYSIS_RPC"
       };
@@ -14067,36 +14135,66 @@ async function rpc(
 
   const errors = [];
 
-  for (const provider of providers) {
-    if (!budgetAvailable(budget, phase)) break;
-
-    try {
-      const result = await rpcCall(
-        provider.url,
-        method,
-        params,
+  for (
+    const provider
+    of providers
+  ) {
+    if (
+      !budgetAvailable(
         budget,
         phase
-      );
+      )
+    ) {
+      break;
+    }
+
+    try {
+      const result =
+        await rpcCall(
+          provider.url,
+          method,
+          params,
+          budget,
+          phase
+        );
 
       return {
         result,
-        provider: provider.name,
+        provider:
+          provider.name,
         error: null
       };
-    } catch (error) {
-      const message = errorString(error);
-      errors.push(`${provider.name}: ${message}`);
+    }
 
-      if (message.startsWith("REQUEST_BUDGET_EXHAUSTED")) {
+    catch (error) {
+      const message =
+        errorString(error);
+
+      errors.push(
+        `${provider.name}: ${message}`
+      );
+
+      if (
+        message.startsWith(
+          "REQUEST_BUDGET_EXHAUSTED"
+        )
+      ) {
         break;
       }
     }
   }
 
-  if (phase === "analysis" && coolingV424.length) {
-    for (const row of coolingV424) {
-      errors.push(`${row.name}: V424_METHOD_COOLDOWN_AFTER_429`);
+  if (
+    phase === "analysis" &&
+    coolingV424.length
+  ) {
+    for (
+      const row
+      of coolingV424
+    ) {
+      errors.push(
+        `${row.name}: V424_METHOD_COOLDOWN_AFTER_429`
+      );
     }
   }
 
@@ -14148,6 +14246,14 @@ function normalSystemRpcsAll429V429(
   const configured = [
     "ROBINHOOD_PUBLIC_RPC"
   ];
+
+  if (
+    chainstackConfiguredV431(env)
+  ) {
+    configured.unshift(
+      "CHAINSTACK"
+    );
+  }
 
   if (
     String(
@@ -25416,17 +25522,50 @@ function v421ReadRpcUrl(env) {
 }
 
 function normalAnalysisRpcsAll429V421(env, error) {
-  const message = String(error || "").toUpperCase();
-  const configured = ["ROBINHOOD_PUBLIC_RPC"];
-  if (String(env?.ALCHEMY_API_KEY || "").trim()) configured.push("ALCHEMY");
+  const message =
+    String(error || "")
+      .toUpperCase();
 
-  return configured.length > 0 &&
-    configured.every(provider =>
-      message.includes(`${provider}: HTTP_429`) ||
-      message.includes(`${provider}: RATE_LIMIT`) ||
-      message.includes(`${provider}: TOO MANY`) ||
-      message.includes(`${provider}: V424_METHOD_COOLDOWN_AFTER_429`)
+  const configured = [
+    "ROBINHOOD_PUBLIC_RPC"
+  ];
+
+  if (
+    chainstackConfiguredV431(env)
+  ) {
+    configured.unshift(
+      "CHAINSTACK"
     );
+  }
+
+  if (
+    String(
+      env?.ALCHEMY_API_KEY || ""
+    ).trim()
+  ) {
+    configured.push(
+      "ALCHEMY"
+    );
+  }
+
+  return (
+    configured.length > 0 &&
+    configured.every(
+      provider =>
+        message.includes(
+          `${provider}: HTTP_429`
+        ) ||
+        message.includes(
+          `${provider}: RATE_LIMIT`
+        ) ||
+        message.includes(
+          `${provider}: TOO MANY`
+        ) ||
+        message.includes(
+          `${provider}: V424_METHOD_COOLDOWN_AFTER_429`
+        )
+    )
+  );
 }
 
 /*
@@ -54106,6 +54245,23 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    managedRpcV431: {
+      enabled: true,
+      envSecret:
+        "CHAINSTACK_RPC_URL",
+      chainstackPreferredWhenConfigured:
+        true,
+      normalFallbacksPreserved:
+        true,
+      independentBlockReqFallbackPreserved:
+        true,
+      requestCeilingChanged:
+        false,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false
+    },
     latestBlockFallbackV429: {
       enabled: true,
       scope: "SYSTEM_ETH_BLOCKNUMBER_ONLY",
@@ -59535,6 +59691,32 @@ for (
       marketRequestBehaviorChanged: false,
       providerOrderChanged: false,
       cooldownBehaviorChanged: false
+    },
+
+    managedRpcV431: {
+      chainstackConfigured:
+        chainstackConfiguredV431(env),
+      primaryForSystemWhenConfigured:
+        "CHAINSTACK",
+      primaryForAnalysisWhenConfigured:
+        "CHAINSTACK",
+      secretName:
+        "CHAINSTACK_RPC_URL",
+      endpointExposed:
+        false,
+      normalFallbacks:
+        [
+          "ROBINHOOD_PUBLIC_RPC",
+          "ALCHEMY"
+        ],
+      independentFallback:
+        "BLOCKREQ_PUBLIC_V421_WHEN_ELIGIBLE",
+      globalRequestLimitChanged:
+        false,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false
     },
 
     notificationReserveReleaseV174,
