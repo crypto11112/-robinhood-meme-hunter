@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V422
- * AUTHORITATIVE RUNTIME VERSION: V422
+ * Robinhood Chain Meme Hunter — V423
+ * AUTHORITATIVE RUNTIME VERSION: V423
+ * V423 is a DIAGNOSTIC-ONLY provider-health build on V422. It instruments every scanner-budget JSON-RPC call already being made and records provider, RPC method, scanner phase, HTTP status, latency, Retry-After when exposed, success/RPC-error/transport-error classification, first/last 429 time, repeated same-scan calls after a provider's first 429, and bounded recent-attempt evidence. It adds zero external requests, makes no routing/cooldown/order changes, does not add another provider, and preserves V422 holder recovery, V421 third read fallback, V420 circuit breaker, V419 checkpoints, V418 transport classification, V417 progressive completion, V416 adaptive analysis headroom, V415 retry funnel and all V414 breakout/learning logic. The purpose is to prove which provider/method/phase is actually creating rate-limit pressure before V424 changes routing. Scoring, Momentum, qualification, Telegram thresholds, provider order, request ceilings and validation rules are unchanged.
  * V422 builds directly on V421 and targets the final scan→Telegram blocker exposed by FORUM: a fully verified ERC-20 + market candidate reached Telegram qualification but was blocked only because Blockscout returned a successful holder response with zero holder rows. V422 treats that exact condition as HOLDER_INDEXING_LAG rather than a terminal holder failure, persists a bounded holder-evidence retry target, retries the verified Blockscout PRO holder-row path first when the retry becomes due, reuses all existing V417/V419 checkpoints and market/metadata caches, and keeps the candidate eligible for later qualification without weakening the holder requirement. A retry that is still empty is re-scheduled without fabricating holder count/concentration; a successful later holder response must still pass the existing integrity/concentration/whale checks before Telegram can alert. V422 adds no new provider, does not raise the 42-request global ceiling or base 21-request analysis ceiling, and changes no Opportunity/Momentum/confidence/liquidity/risk/qualification/Telegram threshold.
  * V421 builds directly on V420 and adds a narrowly-scoped third independent RPC fallback for ERC-20 identity READS only. When every normal configured analysis RPC is HTTP-429 rate-limited, V421 may use one documented Robinhood Chain mainnet public RPC fallback for eth_getCode/eth_call so a carried candidate can continue verification instead of waiting for both primary providers to recover. The fallback is never used for writes, transaction submission, discovery crawling, market data, holders, or scoring; it remains subject to the existing analysis/global request budgets. V419 checkpoints are preserved, V420's scan-wide circuit opens only after the fallback also cannot provide usable evidence, the >=3-of-4 ERC-20 verification rule is unchanged, missing evidence remains UNVERIFIED, and no Opportunity/Momentum/confidence/liquidity/risk/qualification/Telegram threshold is changed.
  * V420 builds directly on V419 and adds a scan-wide ERC-20 RPC circuit breaker for confirmed all-provider HTTP 429 conditions. When every configured analysis RPC is rate-limited on an ERC-20 identity probe, the shared scan budget opens a short in-scan circuit: remaining candidate ERC-20 identity checks are deferred without spending another RPC request, while V419 bytecode/method checkpoints remain intact for the next scheduled scan. The circuit is scan-local only, never converts missing evidence into validity, adds zero provider requests, preserves the same >=3-of-4 ERC-20 verification rule, the 42 global ceiling, V416 adaptive headroom, V417 progressive completion, V418 transport-vs-deterministic classification, all V414 live/breakout/learning work, and changes no Opportunity/Momentum/confidence/liquidity/risk/qualification/Telegram thresholds.
@@ -1497,7 +1498,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V422";
+const VERSION = "V423";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -3159,6 +3160,27 @@ function createBudget() {
     totalLimit:
       MAX_EXTERNAL_REQUESTS,
 
+    rpcProviderHealthV423: {
+      enabled: true,
+      diagnosticOnly: true,
+      externalRequestsAdded: 0,
+      routingChanged: false,
+      cooldownBehaviourChanged: false,
+      providerOrderChanged: false,
+      startedAt: Date.now(),
+      totalRpcAttempts: 0,
+      totalRpcSuccesses: 0,
+      totalHttp429: 0,
+      totalOtherHttpErrors: 0,
+      totalRpcPayloadErrors: 0,
+      totalTransportErrors: 0,
+      repeatAttemptsAfterFirst429: 0,
+      providers: {},
+      byPhase: {},
+      byMethod: {},
+      recentAttempts: []
+    },
+
     system: {
       used:
         0,
@@ -4011,6 +4033,11 @@ function budgetTelemetry(
 
     limit:
       budget.totalLimit,
+
+    rpcProviderHealthV423:
+      rpcProviderHealthTelemetryV423(
+        budget
+      ),
 
     remaining:
       Math.max(
@@ -12191,6 +12218,518 @@ function addWatch(
 }
 
 /* =========================================================
+   V423 RPC PROVIDER HEALTH DIAGNOSTIC
+   ========================================================= */
+
+function rpcProviderNameV423(url) {
+  const value =
+    String(url || "").toLowerCase();
+
+  if (
+    value.includes(
+      "robinhood-mainnet.g.alchemy.com"
+    )
+  ) {
+    return "ALCHEMY";
+  }
+
+  if (
+    value.includes(
+      "rpc.mainnet.chain.robinhood.com"
+    )
+  ) {
+    return "ROBINHOOD_PUBLIC_RPC";
+  }
+
+  if (
+    value.includes(
+      "robinhood-mainnet-rpc.blockreq.com"
+    )
+  ) {
+    return "BLOCKREQ_PUBLIC_V421";
+  }
+
+  try {
+    const host =
+      new URL(String(url)).hostname;
+    return host
+      ? `OTHER:${host}`
+      : "OTHER_RPC";
+  } catch {
+    return "OTHER_RPC";
+  }
+}
+
+function retryAfterMsV423(response) {
+  if (!response?.headers) return null;
+
+  const raw =
+    response.headers.get("retry-after");
+
+  if (!raw) return null;
+
+  const seconds =
+    Number(raw);
+
+  if (
+    Number.isFinite(seconds) &&
+    seconds >= 0
+  ) {
+    return Math.round(
+      seconds * 1000
+    );
+  }
+
+  const parsed =
+    Date.parse(raw);
+
+  if (Number.isFinite(parsed)) {
+    return Math.max(
+      0,
+      parsed - Date.now()
+    );
+  }
+
+  return null;
+}
+
+function rpcHealthRootV423(budget) {
+  return budget?.rpcProviderHealthV423 || null;
+}
+
+function ensureRpcHealthProviderV423(
+  budget,
+  provider
+) {
+  const root =
+    rpcHealthRootV423(budget);
+
+  if (!root) return null;
+
+  root.providers =
+    root.providers &&
+    typeof root.providers === "object"
+      ? root.providers
+      : {};
+
+  if (!root.providers[provider]) {
+    root.providers[provider] = {
+      attempts: 0,
+      successes: 0,
+      http429: 0,
+      otherHttpErrors: 0,
+      rpcPayloadErrors: 0,
+      transportErrors: 0,
+      firstAttemptAt: null,
+      lastAttemptAt: null,
+      first429At: null,
+      last429At: null,
+      retryAfterMsLast429: null,
+      attemptsAfterFirst429: 0,
+      successesAfterFirst429: 0,
+      latencyMsTotal: 0,
+      latencySamples: 0,
+      latencyMsMin: null,
+      latencyMsMax: null,
+      lastLatencyMs: null,
+      lastHttpStatus: null,
+      lastMethod: null,
+      lastPhase: null,
+      lastOutcome: null,
+      lastError: null,
+      byMethod: {},
+      byPhase: {}
+    };
+  }
+
+  return root.providers[provider];
+}
+
+function incrementMapCounterV423(
+  object,
+  key,
+  field
+) {
+  object[key] =
+    object[key] &&
+    typeof object[key] === "object"
+      ? object[key]
+      : {};
+
+  object[key][field] =
+    safeNumber(
+      object[key][field]
+    ) + 1;
+}
+
+function recordRpcAttemptV423(
+  budget,
+  {
+    provider,
+    method,
+    phase,
+    startedAt,
+    latencyMs,
+    outcome,
+    httpStatus = null,
+    retryAfterMs = null,
+    error = null
+  }
+) {
+  const root =
+    rpcHealthRootV423(budget);
+
+  if (!root?.enabled) return;
+
+  const nowMs = Date.now();
+  const providerRow =
+    ensureRpcHealthProviderV423(
+      budget,
+      provider
+    );
+
+  if (!providerRow) return;
+
+  root.totalRpcAttempts =
+    safeNumber(
+      root.totalRpcAttempts
+    ) + 1;
+
+  providerRow.attempts =
+    safeNumber(
+      providerRow.attempts
+    ) + 1;
+
+  providerRow.firstAttemptAt =
+    providerRow.firstAttemptAt ||
+    startedAt ||
+    nowMs;
+
+  providerRow.lastAttemptAt =
+    nowMs;
+  providerRow.lastLatencyMs =
+    Number.isFinite(latencyMs)
+      ? latencyMs
+      : null;
+  providerRow.lastHttpStatus =
+    safeNumber(httpStatus) || null;
+  providerRow.lastMethod =
+    method || null;
+  providerRow.lastPhase =
+    phase || null;
+  providerRow.lastOutcome =
+    outcome || null;
+  providerRow.lastError =
+    error
+      ? String(error).slice(0, 220)
+      : null;
+
+  if (
+    Number.isFinite(latencyMs) &&
+    latencyMs >= 0
+  ) {
+    providerRow.latencyMsTotal +=
+      latencyMs;
+    providerRow.latencySamples += 1;
+    providerRow.latencyMsMin =
+      providerRow.latencyMsMin === null
+        ? latencyMs
+        : Math.min(
+            providerRow.latencyMsMin,
+            latencyMs
+          );
+    providerRow.latencyMsMax =
+      providerRow.latencyMsMax === null
+        ? latencyMs
+        : Math.max(
+            providerRow.latencyMsMax,
+            latencyMs
+          );
+  }
+
+  incrementMapCounterV423(
+    providerRow.byMethod,
+    method || "UNKNOWN",
+    "attempts"
+  );
+  incrementMapCounterV423(
+    providerRow.byPhase,
+    phase || "UNKNOWN",
+    "attempts"
+  );
+
+  root.byPhase =
+    root.byPhase &&
+    typeof root.byPhase === "object"
+      ? root.byPhase
+      : {};
+  root.byMethod =
+    root.byMethod &&
+    typeof root.byMethod === "object"
+      ? root.byMethod
+      : {};
+
+  incrementMapCounterV423(
+    root.byPhase,
+    phase || "UNKNOWN",
+    "attempts"
+  );
+  incrementMapCounterV423(
+    root.byMethod,
+    method || "UNKNOWN",
+    "attempts"
+  );
+
+  if (
+    providerRow.first429At &&
+    outcome !== "HTTP_429"
+  ) {
+    providerRow.attemptsAfterFirst429 =
+      safeNumber(
+        providerRow.attemptsAfterFirst429
+      ) + 1;
+
+    root.repeatAttemptsAfterFirst429 =
+      safeNumber(
+        root.repeatAttemptsAfterFirst429
+      ) + 1;
+  }
+
+  if (outcome === "SUCCESS") {
+    root.totalRpcSuccesses =
+      safeNumber(
+        root.totalRpcSuccesses
+      ) + 1;
+    providerRow.successes =
+      safeNumber(
+        providerRow.successes
+      ) + 1;
+
+    incrementMapCounterV423(
+      providerRow.byMethod,
+      method || "UNKNOWN",
+      "successes"
+    );
+    incrementMapCounterV423(
+      providerRow.byPhase,
+      phase || "UNKNOWN",
+      "successes"
+    );
+    incrementMapCounterV423(
+      root.byPhase,
+      phase || "UNKNOWN",
+      "successes"
+    );
+    incrementMapCounterV423(
+      root.byMethod,
+      method || "UNKNOWN",
+      "successes"
+    );
+
+    if (providerRow.first429At) {
+      providerRow.successesAfterFirst429 =
+        safeNumber(
+          providerRow.successesAfterFirst429
+        ) + 1;
+    }
+  }
+
+  if (outcome === "HTTP_429") {
+    root.totalHttp429 =
+      safeNumber(
+        root.totalHttp429
+      ) + 1;
+    providerRow.http429 =
+      safeNumber(
+        providerRow.http429
+      ) + 1;
+    providerRow.first429At =
+      providerRow.first429At ||
+      nowMs;
+    providerRow.last429At =
+      nowMs;
+    providerRow.retryAfterMsLast429 =
+      safeNumber(
+        retryAfterMs
+      ) || null;
+
+    incrementMapCounterV423(
+      providerRow.byMethod,
+      method || "UNKNOWN",
+      "http429"
+    );
+    incrementMapCounterV423(
+      providerRow.byPhase,
+      phase || "UNKNOWN",
+      "http429"
+    );
+    incrementMapCounterV423(
+      root.byPhase,
+      phase || "UNKNOWN",
+      "http429"
+    );
+    incrementMapCounterV423(
+      root.byMethod,
+      method || "UNKNOWN",
+      "http429"
+    );
+  } else if (outcome === "HTTP_ERROR") {
+    root.totalOtherHttpErrors =
+      safeNumber(
+        root.totalOtherHttpErrors
+      ) + 1;
+    providerRow.otherHttpErrors =
+      safeNumber(
+        providerRow.otherHttpErrors
+      ) + 1;
+  } else if (outcome === "RPC_PAYLOAD_ERROR") {
+    root.totalRpcPayloadErrors =
+      safeNumber(
+        root.totalRpcPayloadErrors
+      ) + 1;
+    providerRow.rpcPayloadErrors =
+      safeNumber(
+        providerRow.rpcPayloadErrors
+      ) + 1;
+  } else if (outcome === "TRANSPORT_ERROR") {
+    root.totalTransportErrors =
+      safeNumber(
+        root.totalTransportErrors
+      ) + 1;
+    providerRow.transportErrors =
+      safeNumber(
+        providerRow.transportErrors
+      ) + 1;
+  }
+
+  root.recentAttempts =
+    Array.isArray(root.recentAttempts)
+      ? root.recentAttempts
+      : [];
+
+  root.recentAttempts.push({
+    at: nowMs,
+    provider,
+    method,
+    phase,
+    latencyMs:
+      Number.isFinite(latencyMs)
+        ? latencyMs
+        : null,
+    outcome,
+    httpStatus:
+      safeNumber(httpStatus) || null,
+    retryAfterMs:
+      safeNumber(retryAfterMs) || null,
+    error:
+      error
+        ? String(error).slice(0, 160)
+        : null
+  });
+
+  if (root.recentAttempts.length > 40) {
+    root.recentAttempts =
+      root.recentAttempts.slice(-40);
+  }
+}
+
+function rpcProviderHealthTelemetryV423(
+  budget
+) {
+  const root =
+    rpcHealthRootV423(budget);
+
+  if (!root) return null;
+
+  const providers = {};
+
+  for (
+    const [name, row]
+    of Object.entries(
+      root.providers || {}
+    )
+  ) {
+    providers[name] = {
+      ...row,
+      avgLatencyMs:
+        safeNumber(row.latencySamples) > 0
+          ? Number(
+              (
+                safeNumber(
+                  row.latencyMsTotal
+                ) /
+                safeNumber(
+                  row.latencySamples
+                )
+              ).toFixed(1)
+            )
+          : null,
+      post429PressureDetected:
+        safeNumber(
+          row.attemptsAfterFirst429
+        ) > 0
+    };
+  }
+
+  return {
+    enabled: true,
+    diagnosticOnly: true,
+    externalRequestsAdded: 0,
+    routingChanged: false,
+    cooldownBehaviourChanged: false,
+    providerOrderChanged: false,
+    startedAt:
+      root.startedAt || null,
+    elapsedMs:
+      root.startedAt
+        ? Date.now() -
+          safeNumber(root.startedAt)
+        : null,
+    totalRpcAttempts:
+      safeNumber(root.totalRpcAttempts),
+    totalRpcSuccesses:
+      safeNumber(root.totalRpcSuccesses),
+    totalHttp429:
+      safeNumber(root.totalHttp429),
+    totalOtherHttpErrors:
+      safeNumber(
+        root.totalOtherHttpErrors
+      ),
+    totalRpcPayloadErrors:
+      safeNumber(
+        root.totalRpcPayloadErrors
+      ),
+    totalTransportErrors:
+      safeNumber(
+        root.totalTransportErrors
+      ),
+    repeatAttemptsAfterFirst429:
+      safeNumber(
+        root.repeatAttemptsAfterFirst429
+      ),
+    providers,
+    byPhase:
+      root.byPhase || {},
+    byMethod:
+      root.byMethod || {},
+    recentAttempts:
+      Array.isArray(root.recentAttempts)
+        ? root.recentAttempts
+        : [],
+    interpretation: {
+      purpose:
+        "MEASURE_BEFORE_V424_ROUTING_CHANGE",
+      publicEndpointsMayBeRateLimited:
+        true,
+      noProviderHealthClaimBeyondThisScan:
+        true,
+      noAutomaticRoutingDecision:
+        true
+    }
+  };
+}
+
+/* =========================================================
    RPC
    ========================================================= */
 
@@ -12219,6 +12758,12 @@ async function rpcCall(
         )}`
     );
   }
+
+  const providerV423 =
+    rpcProviderNameV423(url);
+
+  const startedAtV423 =
+    Date.now();
 
   const controller =
     new AbortController();
@@ -12261,27 +12806,197 @@ async function rpcCall(
         }
       );
 
+    const latencyMsV423 =
+      Date.now() -
+      startedAtV423;
+
+    const retryAfterV423 =
+      retryAfterMsV423(
+        response
+      );
+
     if (
       !response.ok
     ) {
+      recordRpcAttemptV423(
+        budget,
+        {
+          provider:
+            providerV423,
+          method,
+          phase,
+          startedAt:
+            startedAtV423,
+          latencyMs:
+            latencyMsV423,
+          outcome:
+            response.status === 429
+              ? "HTTP_429"
+              : "HTTP_ERROR",
+          httpStatus:
+            response.status,
+          retryAfterMs:
+            retryAfterV423,
+          error:
+            `HTTP_${response.status}`
+        }
+      );
+
       throw new Error(
         `HTTP_${response.status}`
       );
     }
 
-    const body =
-      await response.json();
+    let body;
+
+    try {
+      body =
+        await response.json();
+    } catch (error) {
+      recordRpcAttemptV423(
+        budget,
+        {
+          provider:
+            providerV423,
+          method,
+          phase,
+          startedAt:
+            startedAtV423,
+          latencyMs:
+            latencyMsV423,
+          outcome:
+            "TRANSPORT_ERROR",
+          httpStatus:
+            response.status,
+          retryAfterMs:
+            retryAfterV423,
+          error:
+            `JSON_PARSE:${errorString(error)}`
+        }
+      );
+      throw error;
+    }
 
     if (
       body.error
     ) {
-      throw new Error(
+      const rpcErrorV423 =
         body.error.message ||
-        "RPC_ERROR"
+        "RPC_ERROR";
+
+      recordRpcAttemptV423(
+        budget,
+        {
+          provider:
+            providerV423,
+          method,
+          phase,
+          startedAt:
+            startedAtV423,
+          latencyMs:
+            latencyMsV423,
+          outcome:
+            "RPC_PAYLOAD_ERROR",
+          httpStatus:
+            response.status,
+          retryAfterMs:
+            retryAfterV423,
+          error:
+            rpcErrorV423
+        }
+      );
+
+      throw new Error(
+        rpcErrorV423
       );
     }
 
+    recordRpcAttemptV423(
+      budget,
+      {
+        provider:
+          providerV423,
+        method,
+        phase,
+        startedAt:
+          startedAtV423,
+        latencyMs:
+          latencyMsV423,
+        outcome:
+          "SUCCESS",
+        httpStatus:
+          response.status,
+        retryAfterMs:
+          retryAfterV423,
+        error:
+          null
+      }
+    );
+
     return body.result;
+  }
+
+  catch (error) {
+    /*
+     * HTTP / payload / JSON failures above were already recorded. Only record
+     * errors that escaped before an HTTP response could be classified.
+     */
+    const messageV423 =
+      errorString(error);
+
+    const rootV423 =
+      rpcHealthRootV423(
+        budget
+      );
+
+    const recentV423 =
+      Array.isArray(
+        rootV423?.recentAttempts
+      )
+        ? rootV423.recentAttempts[
+            rootV423.recentAttempts.length - 1
+          ]
+        : null;
+
+    const alreadyRecordedV423 =
+      recentV423 &&
+      recentV423.provider ===
+        providerV423 &&
+      recentV423.method ===
+        method &&
+      recentV423.phase ===
+        phase &&
+      safeNumber(
+        recentV423.at
+      ) >=
+        startedAtV423;
+
+    if (!alreadyRecordedV423) {
+      recordRpcAttemptV423(
+        budget,
+        {
+          provider:
+            providerV423,
+          method,
+          phase,
+          startedAt:
+            startedAtV423,
+          latencyMs:
+            Date.now() -
+            startedAtV423,
+          outcome:
+            "TRANSPORT_ERROR",
+          httpStatus:
+            null,
+          retryAfterMs:
+            null,
+          error:
+            messageV423
+        }
+      );
+    }
+
+    throw error;
   }
 
   finally {
@@ -51702,6 +52417,14 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    rpcProviderHealthV423: {
+      enabled: true,
+      diagnosticOnly: true,
+      externalRequestsAdded: 0,
+      routingChanged: false,
+      cooldownBehaviourChanged: false,
+      providerOrderChanged: false
+    },
     holderEvidenceRecoveryV422: {
       enabled: true,
       holderOnlyTelegramBlockers: 0,
@@ -57016,6 +57739,11 @@ for (
         budget
       ),
 
+    rpcProviderHealthV423:
+      rpcProviderHealthTelemetryV423(
+        budget
+      ),
+
     notificationReserveReleaseV174,
 
     postAnalysisBacklogReclaimV170,
@@ -59000,7 +59728,11 @@ for (
         market:
           marketProviderAvailabilityV147(state, effectiveMarketFreshTargetAddress || marketFreshTargetAddress || null),
         bitqueryQuota:
-          bitquery402CooldownTelemetryV251(state)
+          bitquery402CooldownTelemetryV251(state),
+        rpcProviderHealthV423:
+          rpcProviderHealthTelemetryV423(
+            budget
+          )
       }
     },
 
