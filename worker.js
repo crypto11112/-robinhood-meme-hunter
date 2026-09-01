@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V429
- * AUTHORITATIVE RUNTIME VERSION: V429
+ * Robinhood Chain Meme Hunter — V430
+ * AUTHORITATIVE RUNTIME VERSION: V430
+ * V430 is a narrow hotfix for the V428 market-pressure telemetry crash exposed under V429. The crash was caused by marketProviderPressureTelemetryV428() being called from budget telemetry with state=null and then unconditionally calling marketProviderAvailabilityV147(state), whose service helpers expect a real state object. V430 makes that telemetry null-safe: providerAvailabilityAtEnd is only calculated when a valid scanner state object exists, otherwise it is reported as null/STATE_NOT_AVAILABLE_IN_BUDGET_TELEMETRY. No market request behavior, RPC routing, cooldown, provider order, scoring, qualification, Telegram threshold, request ceiling, or V429 system-head fallback behavior changes.
  * V429 is a targeted hotfix on V428 for the newly exposed startup failure where both normal SYSTEM eth_blockNumber providers return HTTP 429 before the market-pressure diagnostic can run. The normal system path remains Robinhood Public RPC then Alchemy and still uses the existing two-request system budget. Only when both configured normal system RPCs have explicitly returned rate-limit evidence does latestBlock() attempt the already-configured V421 independent BlockReq read endpoint once, using one available analysis-budget slot while remaining inside the unchanged 42-request global ceiling. The fallback is read-only, eth_blockNumber-only, does not change discovery provider routing, does not weaken any validation, and records explicit telemetry. If the independent endpoint also fails, the scan still fails safely rather than guessing a chain head. V429 preserves the V428 market-pressure diagnostic, V427 adaptive RPC backoff, V426 persistence, V424 routing, V422 holder recovery, all scoring/qualification/Telegram rules, and all existing request ceilings.
  * V428 is a DIAGNOSTIC-ONLY market-provider pressure build on the complete V427 source. It instruments the existing scanner DexScreener and GeckoTerminal HTTP requests without adding any request, changing any provider order, changing cooldowns, or changing qualification. For each already-existing market request it records provider, feature/call-site, request path class, scanner phase, start time, latency, HTTP status, Retry-After when exposed, 429/non-429 outcome, and the provider eligibility/cooldown state immediately before the request. It also aggregates request counts and 429s by provider and by feature so we can prove whether pressure comes from candidate market lookup, ATH follow-up, Gecko fallback, or Gecko directional enrichment before changing the market-data scheduler. V428 preserves V427 adaptive RPC backoff, V426 persistence, V425/V424 routing, V423 RPC diagnostics, V422 holder recovery, V421 fallback, V420 circuit breaker, all request ceilings, scoring, qualification, Telegram thresholds, and V414 learning/breakout behavior.
  * V427 builds directly on V426 and makes the persisted provider+method 429 cooldown adaptive across scans. Repeated rate limits no longer reset to the same short delay: each provider+method keeps a bounded failure streak, escalates cooldown duration when a later scan hits the same 429 again, and immediately de-escalates on a successful response. Default backoff ladder: first 429 = 30s, second = 2m, third = 5m, fourth+ = 10m maximum. Robinhood Public retains a recovery-friendly cap of 2m unless Retry-After explicitly requires longer; Alchemy and other analysis RPCs can escalate to the full 10m cap. Only HTTP-429 evidence participates in the adaptive streak; deterministic RPC errors and transport failures do not. Retry-After remains authoritative when longer than the calculated backoff. V427 persists this streak in the same existing state write, adds zero external requests and zero additional state-write cycles, and preserves V426 persistence, V425/V424 routing, V423 diagnostics, V422 holder recovery, V421 fallback, V420 circuit breaker, V419 checkpoints, all request ceilings, scoring, qualification, Telegram thresholds, and V414 learning/breakout behavior.
@@ -1503,7 +1504,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V429";
+const VERSION = "V430";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -26939,6 +26940,20 @@ function marketProviderBeforeStateV428(
 ) {
   const nowMs = Date.now();
 
+  if (
+    !state ||
+    typeof state !== "object" ||
+    !state.services ||
+    typeof state.services !== "object"
+  ) {
+    return {
+      eligible: null,
+      stateAvailable: false,
+      status:
+        "STATE_NOT_AVAILABLE_V430"
+    };
+  }
+
   if (provider === "DEXSCREENER") {
     const service = dexService(state);
     const availability =
@@ -27307,10 +27322,27 @@ function marketProviderPressureTelemetryV428(
     byFeature:
       root.byFeature || {},
     providerAvailabilityAtEnd:
-      marketProviderAvailabilityV147(
-        state,
-        null
-      ),
+      (
+        state &&
+        typeof state === "object" &&
+        state.services &&
+        typeof state.services === "object"
+      )
+        ? marketProviderAvailabilityV147(
+            state,
+            null
+          )
+        : null,
+
+    providerAvailabilityAtEndStatus:
+      (
+        state &&
+        typeof state === "object" &&
+        state.services &&
+        typeof state.services === "object"
+      )
+        ? "AVAILABLE"
+        : "STATE_NOT_AVAILABLE_IN_BUDGET_TELEMETRY_V430",
     recentRequests:
       Array.isArray(root.recentRequests)
         ? root.recentRequests
@@ -59496,6 +59528,14 @@ for (
       latestBlockFallbackTelemetryV429(
         budget
       ),
+
+    marketTelemetryNullSafetyV430: {
+      enabled: true,
+      budgetTelemetryStateNullable: true,
+      marketRequestBehaviorChanged: false,
+      providerOrderChanged: false,
+      cooldownBehaviorChanged: false
+    },
 
     notificationReserveReleaseV174,
 
