@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V420
- * AUTHORITATIVE RUNTIME VERSION: V420
+ * Robinhood Chain Meme Hunter — V421
+ * AUTHORITATIVE RUNTIME VERSION: V421
+ * V421 builds directly on V420 and adds a narrowly-scoped third independent RPC fallback for ERC-20 identity READS only. When every normal configured analysis RPC is HTTP-429 rate-limited, V421 may use one documented Robinhood Chain mainnet public RPC fallback for eth_getCode/eth_call so a carried candidate can continue verification instead of waiting for both primary providers to recover. The fallback is never used for writes, transaction submission, discovery crawling, market data, holders, or scoring; it remains subject to the existing analysis/global request budgets. V419 checkpoints are preserved, V420's scan-wide circuit opens only after the fallback also cannot provide usable evidence, the >=3-of-4 ERC-20 verification rule is unchanged, missing evidence remains UNVERIFIED, and no Opportunity/Momentum/confidence/liquidity/risk/qualification/Telegram threshold is changed.
  * V420 builds directly on V419 and adds a scan-wide ERC-20 RPC circuit breaker for confirmed all-provider HTTP 429 conditions. When every configured analysis RPC is rate-limited on an ERC-20 identity probe, the shared scan budget opens a short in-scan circuit: remaining candidate ERC-20 identity checks are deferred without spending another RPC request, while V419 bytecode/method checkpoints remain intact for the next scheduled scan. The circuit is scan-local only, never converts missing evidence into validity, adds zero provider requests, preserves the same >=3-of-4 ERC-20 verification rule, the 42 global ceiling, V416 adaptive headroom, V417 progressive completion, V418 transport-vs-deterministic classification, all V414 live/breakout/learning work, and changes no Opportunity/Momentum/confidence/liquidity/risk/qualification/Telegram thresholds.
  * V419 builds directly on V418 and adds RPC-aware ERC-20 checkpointing/early-stop protection without weakening token verification. Successful bytecode proof and successful ERC-20 method responses are checkpointed on the watched candidate for bounded reuse; once a retryable RPC/provider/budget failure is observed, remaining ERC-20 probes are skipped for that scan and the candidate is deferred into the existing retry queue. This prevents repeated name/symbol/decimals/totalSupply calls while both RPC providers are already rate-limited. V419 adds zero provider requests, preserves the same >=3-of-4 ERC-20 verification rule, the 42 global ceiling, V416 adaptive headroom, V417 progressive completion, V418 transport-vs-deterministic classification, all V414 live/breakout/learning work, and changes no Opportunity/Momentum/confidence/liquidity/risk/qualification/Telegram thresholds. Missing evidence remains UNVERIFIED. V417 live scans proved that newly discovered candidates were repeatedly being labelled ERC20_METHODS_NOT_VERIFIED or NO_CONTRACT_BYTECODE while RPC providers were simultaneously rate-limited. The old verifier swallowed per-method RPC failures, so a transport/provider failure could be indistinguishable from a genuine non-ERC20 contract. V418 makes bytecode and each ERC-20 probe evidence-aware: provider/RPC/budget failures are recorded separately and are DEFERRED for the existing bounded retry queue, while NO_CONTRACT_BYTECODE is emitted only after a successful eth_getCode response explicitly returns empty code. Genuine method absence/revert still fails verification under the same >=3-of-4 ERC-20 evidence rule. /scan scanner-funnel telemetry now exposes exact method success/failure, provider/error class, discovery source and whether a candidate was deferred because identity evidence was unavailable. V418 adds no provider requests, changes no 42/21 base limits, preserves V416 adaptive borrowing and V417 progressive completion, and changes no Opportunity/Momentum/confidence/liquidity/risk/qualification/Telegram thresholds. Missing evidence remains UNVERIFIED; transport failure is never promoted to token validity.
  */
@@ -1495,7 +1496,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V420";
+const VERSION = "V421";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -1505,6 +1506,16 @@ const PUBLIC_RPC =
 
 const ALCHEMY_BASE =
   "https://robinhood-mainnet.g.alchemy.com/v2/";
+
+/*
+ * V421: independent read-only fallback.
+ * BlockReq currently documents this public endpoint as Robinhood Chain
+ * mainnet (chainId 4663). It is used ONLY for ERC-20 eth_getCode/eth_call
+ * after every normal configured analysis RPC has returned HTTP 429.
+ * A user-supplied V421_READ_RPC_URL may override it without changing code.
+ */
+const V421_READ_RPC_DEFAULT =
+  "https://robinhood-mainnet-rpc.blockreq.com/v1/rpc/public";
 
 const DEXSCREENER_BASE =
   "https://api.dexscreener.com";
@@ -3187,6 +3198,20 @@ function createBudget() {
         preTelegramGlobalRemainingAtActivation: 0,
         activatedAt: null,
         reason: "NOT_CONFIGURED_YET"
+      },
+
+      erc20RpcFallbackV421: {
+        enabled: true,
+        attempted: 0,
+        succeeded: 0,
+        failed: 0,
+        rateLimited: 0,
+        lastProvider: null,
+        lastMethod: null,
+        lastAddress: null,
+        lastError: null,
+        lastAttemptAt: null,
+        lastSuccessAt: null
       },
 
       erc20RpcCircuitV420: {
@@ -23474,16 +23499,201 @@ function erc20RetryableFailureV418(error) {
   return cls === "BUDGET" || cls === "RATE_LIMIT" || cls === "TRANSIENT_PROVIDER";
 }
 
-function allConfiguredAnalysisRpcRateLimitedV420(env, error) {
+function erc20RpcFallbackTelemetryV421(budget) {
+  return budget?.analysis?.erc20RpcFallbackV421 || null;
+}
+
+function v421ReadRpcUrl(env) {
+  const configured = String(env?.V421_READ_RPC_URL || "").trim();
+  return configured || V421_READ_RPC_DEFAULT;
+}
+
+function normalAnalysisRpcsAll429V421(env, error) {
   const message = String(error || "").toUpperCase();
   const configured = ["ROBINHOOD_PUBLIC_RPC"];
   if (String(env?.ALCHEMY_API_KEY || "").trim()) configured.push("ALCHEMY");
-  if (!configured.length) return false;
-  return configured.every(provider =>
+  return configured.length > 0 && configured.every(provider =>
     message.includes(`${provider}: HTTP_429`) ||
     message.includes(`${provider}: RATE_LIMIT`) ||
     message.includes(`${provider}: TOO MANY`)
   );
+}
+
+/*
+ * V421 deliberately does NOT alter generic rpc().  Only ERC-20 identity
+ * reads may use this fallback, and only after all normal analysis RPCs
+ * have positively returned rate-limit evidence.  This prevents the
+ * fallback from silently becoming a new primary provider.
+ */
+async function erc20ReadRpcV421(
+  env,
+  method,
+  params,
+  budget,
+  address,
+  stage
+) {
+  const primary = await rpc(
+    env,
+    method,
+    params,
+    budget,
+    "analysis"
+  );
+
+  if (
+    primary?.result !== null &&
+    primary?.result !== undefined
+  ) {
+    return {
+      ...primary,
+      v421FallbackAttempted: false,
+      v421FallbackUsed: false,
+      v421PrimaryError: null
+    };
+  }
+
+  const primaryError = primary?.error || null;
+
+  if (
+    !normalAnalysisRpcsAll429V421(
+      env,
+      primaryError
+    )
+  ) {
+    return {
+      ...primary,
+      v421FallbackAttempted: false,
+      v421FallbackUsed: false,
+      v421PrimaryError: primaryError
+    };
+  }
+
+  if (!budgetAvailable(budget, "analysis", 1)) {
+    return {
+      result: null,
+      provider: null,
+      error:
+        `${primaryError || "PRIMARY_RPC_UNAVAILABLE"} | V421_READ_FALLBACK: REQUEST_BUDGET_EXHAUSTED_ANALYSIS`,
+      v421FallbackAttempted: false,
+      v421FallbackUsed: false,
+      v421PrimaryError: primaryError,
+      v421FallbackError: "REQUEST_BUDGET_EXHAUSTED_ANALYSIS"
+    };
+  }
+
+  const telemetry =
+    erc20RpcFallbackTelemetryV421(budget);
+
+  if (telemetry?.enabled !== true) {
+    return {
+      ...primary,
+      v421FallbackAttempted: false,
+      v421FallbackUsed: false,
+      v421PrimaryError: primaryError
+    };
+  }
+
+  const fallbackUrl =
+    v421ReadRpcUrl(env);
+
+  telemetry.attempted =
+    safeNumber(telemetry.attempted) + 1;
+  telemetry.lastMethod = method;
+  telemetry.lastAddress =
+    normalize(address) || null;
+  telemetry.lastAttemptAt = Date.now();
+
+  try {
+    const result = await rpcCall(
+      fallbackUrl,
+      method,
+      params,
+      budget,
+      "analysis"
+    );
+
+    telemetry.succeeded =
+      safeNumber(telemetry.succeeded) + 1;
+    telemetry.lastProvider =
+      "BLOCKREQ_PUBLIC_V421";
+    telemetry.lastError = null;
+    telemetry.lastSuccessAt = Date.now();
+
+    return {
+      result,
+      provider: "BLOCKREQ_PUBLIC_V421",
+      error: null,
+      v421FallbackAttempted: true,
+      v421FallbackUsed: true,
+      v421PrimaryError: primaryError,
+      v421FallbackError: null,
+      v421Stage: stage || null
+    };
+  } catch (error) {
+    const fallbackError =
+      errorString(error);
+
+    telemetry.failed =
+      safeNumber(telemetry.failed) + 1;
+    if (
+      erc20RpcFailureClassV418(
+        fallbackError
+      ) === "RATE_LIMIT"
+    ) {
+      telemetry.rateLimited =
+        safeNumber(telemetry.rateLimited) + 1;
+    }
+    telemetry.lastProvider =
+      "BLOCKREQ_PUBLIC_V421";
+    telemetry.lastError =
+      fallbackError;
+
+    return {
+      result: null,
+      provider: null,
+      error:
+        `${primaryError || "PRIMARY_RPC_UNAVAILABLE"} | BLOCKREQ_PUBLIC_V421: ${fallbackError}`,
+      v421FallbackAttempted: true,
+      v421FallbackUsed: false,
+      v421PrimaryError: primaryError,
+      v421FallbackError: fallbackError,
+      v421Stage: stage || null
+    };
+  }
+}
+
+function allConfiguredAnalysisRpcRateLimitedV420(env, error) {
+  const message = String(error || "").toUpperCase();
+  const normalAll429 =
+    normalAnalysisRpcsAll429V421(
+      env,
+      error
+    );
+
+  if (!normalAll429) return false;
+
+  /*
+   * V421: if the independent read fallback was actually attempted, the
+   * scan-wide circuit may open only when that fallback also supplied no
+   * usable evidence. A fallback HTTP 429 is the strongest circuit signal;
+   * other retryable transport failures still remain deferred by V418/V419.
+   */
+  if (
+    message.includes(
+      "BLOCKREQ_PUBLIC_V421: HTTP_429"
+    ) ||
+    message.includes(
+      "BLOCKREQ_PUBLIC_V421: RATE_LIMIT"
+    ) ||
+    message.includes(
+      "BLOCKREQ_PUBLIC_V421: TOO MANY"
+    )
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 function erc20RpcCircuitV420(budget) {
@@ -23547,12 +23757,13 @@ function deferForErc20RpcCircuitV420(watched, budget, address) {
 }
 
 async function erc20ProbeV418(env, address, data, label, budget) {
-  const response = await rpc(
+  const response = await erc20ReadRpcV421(
     env,
     "eth_call",
     [{ to: address, data }, "latest"],
     budget,
-    "analysis"
+    address,
+    label
   );
   const raw = response?.result ?? null;
   const error = response?.error || null;
@@ -23564,7 +23775,15 @@ async function erc20ProbeV418(env, address, data, label, budget) {
     error,
     failureClass: erc20RpcFailureClassV418(error),
     retryableFailure: erc20RetryableFailureV418(error),
-    reusedProofV419: false
+    reusedProofV419: false,
+    v421FallbackAttempted:
+      response?.v421FallbackAttempted === true,
+    v421FallbackUsed:
+      response?.v421FallbackUsed === true,
+    v421PrimaryError:
+      response?.v421PrimaryError || null,
+    v421FallbackError:
+      response?.v421FallbackError || null
   };
 }
 
@@ -23641,12 +23860,13 @@ async function verifyERC20(env, address, budget, watched) {
 
   let codeProvider = progress?.codeProvider || null;
   if (!reusedCodeProofV419) {
-    const code = await rpc(
+    const code = await erc20ReadRpcV421(
       env,
       "eth_getCode",
       [address, "latest"],
       budget,
-      "analysis"
+      address,
+      "eth_getCode"
     );
 
     const codeError = code?.error || null;
@@ -23663,7 +23883,11 @@ async function verifyERC20(env, address, budget, watched) {
           provider: code?.provider || null,
           error: codeError,
           failureClass: codeFailureClass,
-          reusedProofV419: false
+          reusedProofV419: false,
+          v421FallbackAttempted: code?.v421FallbackAttempted === true,
+          v421FallbackUsed: code?.v421FallbackUsed === true,
+          v421PrimaryError: code?.v421PrimaryError || null,
+          v421FallbackError: code?.v421FallbackError || null
         },
         methods: [],
         score: 0,
@@ -23693,7 +23917,11 @@ async function verifyERC20(env, address, budget, watched) {
           provider: code?.provider || null,
           error: null,
           failureClass: "NONE",
-          reusedProofV419: false
+          reusedProofV419: false,
+          v421FallbackAttempted: code?.v421FallbackAttempted === true,
+          v421FallbackUsed: code?.v421FallbackUsed === true,
+          v421PrimaryError: code?.v421PrimaryError || null,
+          v421FallbackError: code?.v421FallbackError || null
         },
         methods: [],
         score: 0,
@@ -23862,7 +24090,15 @@ async function verifyERC20(env, address, budget, watched) {
     retryableFailure: row.retryableFailure === true,
     reusedProofV419: row.reusedProofV419 === true,
     skippedV419: row.skippedV419 === true,
-    decodedVerified: evidence[row.label] === true
+    decodedVerified: evidence[row.label] === true,
+    v421FallbackAttempted:
+      row?.v421FallbackAttempted === true,
+    v421FallbackUsed:
+      row?.v421FallbackUsed === true,
+    v421PrimaryError:
+      row?.v421PrimaryError || null,
+    v421FallbackError:
+      row?.v421FallbackError || null
   }));
 
   if (score < 3) {
@@ -23877,7 +24113,9 @@ async function verifyERC20(env, address, budget, watched) {
           provider: codeProvider,
           error: null,
           failureClass: "NONE",
-          reusedProofV419: reusedCodeProofV419
+          reusedProofV419: reusedCodeProofV419,
+          v421FallbackAttempted: false,
+          v421FallbackUsed: codeProvider === "BLOCKREQ_PUBLIC_V421"
         },
         methods: methodDiagnostics,
         score,
@@ -51104,6 +51342,20 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    erc20IdentityV421: {
+      enabled: true,
+      fallbackProvider: "BLOCKREQ_PUBLIC_V421",
+      fallbackScope: "ERC20_ETH_GETCODE_ETH_CALL_ONLY_AFTER_NORMAL_RPCS_ALL_429",
+      attempted: 0,
+      succeeded: 0,
+      failed: 0,
+      rateLimited: 0,
+      lastMethod: null,
+      lastAddress: null,
+      lastError: null,
+      externalRequestsAddedOnlyWhenPrimaries429: true,
+      verificationRuleChanged: false
+    },
     erc20IdentityV420: {
       enabled: true,
       circuitOpened: false,
@@ -52033,6 +52285,29 @@ for (
           : [],
         decision: erc20IdentityDiagnosticV418?.decision || null
       });
+    }
+
+    {
+      const fallbackV421 =
+        erc20RpcFallbackTelemetryV421(
+          budget
+        );
+      if (fallbackV421) {
+        scannerFunnelV415.erc20IdentityV421.attempted =
+          safeNumber(fallbackV421.attempted);
+        scannerFunnelV415.erc20IdentityV421.succeeded =
+          safeNumber(fallbackV421.succeeded);
+        scannerFunnelV415.erc20IdentityV421.failed =
+          safeNumber(fallbackV421.failed);
+        scannerFunnelV415.erc20IdentityV421.rateLimited =
+          safeNumber(fallbackV421.rateLimited);
+        scannerFunnelV415.erc20IdentityV421.lastMethod =
+          fallbackV421.lastMethod || null;
+        scannerFunnelV415.erc20IdentityV421.lastAddress =
+          fallbackV421.lastAddress || null;
+        scannerFunnelV415.erc20IdentityV421.lastError =
+          fallbackV421.lastError || null;
+      }
     }
 
     {
