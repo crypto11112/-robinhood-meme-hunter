@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V435
- * AUTHORITATIVE RUNTIME VERSION: V435
+ * Robinhood Chain Meme Hunter — V436
+ * AUTHORITATIVE RUNTIME VERSION: V436
+ * V436 is a diagnostic-only build on the proven V435 live-discovery fix. It adds a zero-request, zero-write candidate blocker diagnostic for returned candidates so each analysed candidate exposes the exact market, holder, and Telegram gating evidence that stopped or allowed progression. The diagnostic records Dex/Gecko market outcome already attached to the candidate, provider availability/cooldown evidence already present, holder integrity/source/Blockscout fallback evidence, and the exact existing Telegram qualification reasons. No provider order, retry cadence, request ceiling, scoring, qualification, holder requirement, market verification rule, Telegram threshold, or learning behavior is changed.
  * V435 is a narrow live-discovery reliability build on V434. Chainstack is now the preferred provider for LIVE discovery eth_getLogs only, using the already-configured CHAINSTACK_RPC_URL and the existing discovery-live request/global budgets. Robinhood Public RPC and Alchemy remain bounded fallbacks. Backlog discovery/provider learning is deliberately left unchanged so existing public/Alchemy proven-range logic cannot be regressed by this change. V435 adds an independent live-discovery Chainstack cooldown on HTTP 429 and live-provider telemetry. No extra request ceiling, no additional scheduled scans, no scoring/qualification/Telegram/holder/market changes, and no weakening of verification requirements.
  * V434 builds directly on V433 and adds a read-only Telegram command, /chainstack, for the V433 Chainstack bot-side usage meter. The command reads persisted state only, triggers no scanner run, makes zero external provider/RPC requests, and performs no state write. It reports observed calendar-month Chainstack requests, latest-scan requests, scans using Chainstack, average/day, projected 30-day usage, planning allowance, percentage used/projected, and remaining planning allowance. It clearly labels the values as bot-side estimates and the Chainstack dashboard as authoritative. No RPC, market-data, scoring, qualification, Telegram alert threshold, request-budget, holder, learning, or V433 fallback behavior is changed.
  * V433 builds narrowly on the proven V432/V431 path. It adds two targeted improvements only. First, when DexScreener market verification is unavailable because of fresh Dex rate-limit evidence, GeckoTerminal market verification may bypass only the V157 cross-provider stagger once Gecko's own cooldown and fresh-spacing rules are satisfied. Optional Gecko directional enrichment remains governed by V432 and cannot consume the market-recovery opportunity. Second, V433 adds a bot-side Chainstack usage meter that counts actual CHAINSTACK RPC attempts observed by this Worker and persists the count using the existing state write. The meter is planning telemetry only, not billing-authoritative, and reports calendar-month observed requests, average/day, projected 30-day requests, configured planning allowance and percentage. No extra external requests, no additional state-write cycle, no request-ceiling increase, and no scoring, qualification, Telegram, holder, DexScreener, or RPC-rule changes.
@@ -1509,7 +1510,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V435";
+const VERSION = "V436";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -43422,6 +43423,380 @@ function buildTelegramQualificationDiagnostics(
 
 
 
+
+function returnedCandidateBlockerDiagnosticV436(
+  candidates
+) {
+  const rows =
+    [];
+
+  for (
+    const candidate
+    of Array.isArray(candidates)
+      ? candidates
+      : []
+  ) {
+    const market =
+      candidate?.market || {};
+
+    const holders =
+      candidate?.holders || {};
+
+    const telegramReasons =
+      telegramQualificationReasons(
+        candidate
+      );
+
+    const availability =
+      market
+        ?.marketProviderAvailabilityV147 ||
+      null;
+
+    const alternative =
+      market
+        ?.alternativeMarketData ||
+      null;
+
+    const dexStatus =
+      market?.status ||
+      market?.dexStatus ||
+      (
+        market?.verified === true
+          ? "VERIFIED"
+          : null
+      );
+
+    const holderIntegrity =
+      holders?.integrity || {};
+
+    const blockscoutPro =
+      holders
+        ?.blockscoutProHolderFallbackV143 ||
+      {};
+
+    const holderIndexLag =
+      holders
+        ?.holderIndexLagRetryV422 ||
+      null;
+
+    rows.push({
+      address:
+        normalize(
+          candidate?.address
+        ),
+
+      symbol:
+        candidate?.symbol ||
+        candidate?.validation?.symbol ||
+        null,
+
+      returnedCandidate:
+        true,
+
+      market: {
+        verified:
+          market?.verified === true,
+
+        source:
+          market?.source ||
+          null,
+
+        status:
+          dexStatus,
+
+        cached:
+          market?.cached === true,
+
+        liquidityUsd:
+          market?.verified === true
+            ? safeNumber(
+                market?.liquidityUsd
+              )
+            : null,
+
+        marketCap:
+          market?.verified === true
+            ? safeNumber(
+                market?.marketCap
+              )
+            : null,
+
+        dexProvider: {
+          eligible:
+            availability?.dex?.eligible ??
+            null,
+
+          reason:
+            availability?.dex?.reason ||
+            null,
+
+          cooldownUntil:
+            availability?.dex
+              ?.cooldownUntil ||
+            null,
+
+          eligibleAt:
+            availability?.dex
+              ?.eligibleAt ||
+            null
+        },
+
+        geckoProvider: {
+          eligible:
+            availability?.gecko
+              ?.eligible ??
+            null,
+
+          reason:
+            availability?.gecko
+              ?.reason ||
+            null,
+
+          cooldownUntil:
+            availability?.gecko
+              ?.cooldownUntil ||
+            null,
+
+          eligibleAt:
+            availability?.gecko
+              ?.eligibleAt ||
+            null
+        },
+
+        alternativeMarketData: {
+          attempted:
+            alternative?.attempted ===
+              true,
+
+          requestSent:
+            alternative?.requestSent ===
+              true,
+
+          source:
+            alternative?.source ||
+            null,
+
+          status:
+            alternative?.status ||
+            null,
+
+          fallbackTrigger:
+            alternative
+              ?.fallbackTrigger ||
+            null,
+
+          cooldownUntil:
+            alternative
+              ?.cooldownUntil ||
+            null,
+
+          freshEligibleAt:
+            alternative
+              ?.freshEligibleAt ||
+            null,
+
+          bothProvidersUnavailable:
+            alternative
+              ?.bothProvidersUnavailable ??
+            null,
+
+          earliestMarketRetryAt:
+            alternative
+              ?.earliestMarketRetryAt ||
+            null,
+
+          retryAfterMs:
+            alternative
+              ?.retryAfterMs ??
+            null
+        },
+
+        primaryBlocker:
+          market?.verified === true
+            ? null
+            : (
+                alternative?.status ||
+                market?.status ||
+                availability?.dex
+                  ?.reason ||
+                availability?.gecko
+                  ?.reason ||
+                "MARKET_UNVERIFIED"
+              )
+      },
+
+      holders: {
+        fullyVerified:
+          holders?.integrity?.verified ===
+            true &&
+          holders
+            ?.concentrationVerified ===
+            true &&
+          holders?.whale?.verified ===
+            true,
+
+        integrityVerified:
+          holderIntegrity?.verified ===
+            true,
+
+        integrityStatus:
+          holderIntegrity?.status ||
+          null,
+
+        holderSource:
+          holders?.holderSource ||
+          null,
+
+        countersVerified:
+          holders?.countersVerified ===
+            true,
+
+        holderCount:
+          holders?.countersVerified ===
+            true
+            ? safeNumber(
+                holders?.holderCount
+              )
+            : null,
+
+        concentrationVerified:
+          holders
+            ?.concentrationVerified ===
+            true,
+
+        whaleVerified:
+          holders?.whale?.verified ===
+            true,
+
+        blockscoutPro: {
+          configured:
+            blockscoutPro?.configured ===
+              true,
+
+          attempted:
+            blockscoutPro?.attempted ===
+              true,
+
+          success:
+            blockscoutPro?.success ===
+              true,
+
+          status:
+            blockscoutPro?.status ||
+            null,
+
+          httpStatus:
+            blockscoutPro?.httpStatus ??
+            null,
+
+          transientOutage:
+            blockscoutPro
+              ?.transientOutageV145 ===
+              true,
+
+          cooldownUntil:
+            blockscoutPro
+              ?.cooldownUntil ||
+            null
+        },
+
+        holderIndexLagRetryV422:
+          holderIndexLag,
+
+        primaryBlocker:
+          (
+            holders?.integrity?.verified ===
+              true &&
+            holders
+              ?.concentrationVerified ===
+              true &&
+            holders?.whale?.verified ===
+              true
+          )
+            ? null
+            : (
+                holderIntegrity?.status ||
+                blockscoutPro?.status ||
+                "HOLDER_EVIDENCE_UNVERIFIED"
+              )
+      },
+
+      telegram: {
+        qualifies:
+          telegramReasons.length ===
+          0,
+
+        reasons:
+          telegramReasons,
+
+        primaryBlocker:
+          telegramReasons[0] ||
+          null
+      }
+    });
+  }
+
+  return {
+    enabled: true,
+    diagnosticOnly: true,
+    returnedCandidates:
+      rows.length,
+
+    marketVerified:
+      rows.filter(
+        row =>
+          row.market.verified
+      ).length,
+
+    holderEvidenceVerified:
+      rows.filter(
+        row =>
+          row.holders
+            .fullyVerified
+      ).length,
+
+    telegramQualified:
+      rows.filter(
+        row =>
+          row.telegram.qualifies
+      ).length,
+
+    candidates:
+      rows.slice(
+        0,
+        10
+      ),
+
+    externalRequestsAdded:
+      0,
+
+    stateWritesAdded:
+      0,
+
+    providerOrderChanged:
+      false,
+
+    retryCadenceChanged:
+      false,
+
+    scoringChanged:
+      false,
+
+    qualificationChanged:
+      false,
+
+    holderRequirementsChanged:
+      false,
+
+    marketVerificationChanged:
+      false,
+
+    telegramThresholdChanged:
+      false
+  };
+}
+
+
 /* =========================================================
    V216 VERIFIED PONS V2 CURVE FLOW
    ========================================================= */
@@ -54975,6 +55350,17 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    returnedCandidateBlockerDiagnosticV436: {
+      enabled: true,
+      diagnosticOnly: true,
+      scope: "RETURNED_CANDIDATES_MARKET_HOLDER_TELEGRAM",
+      externalRequestsAdded: 0,
+      stateWritesAdded: 0,
+      providerOrderChanged: false,
+      retryCadenceChanged: false,
+      scoringChanged: false,
+      qualificationChanged: false
+    },
     chainstackLiveDiscoveryV435: {
       enabled: true,
       preferredProvider: "CHAINSTACK",
@@ -59157,6 +59543,11 @@ for (
       candidates
     );
 
+  const candidateBlockersV436 =
+    returnedCandidateBlockerDiagnosticV436(
+      candidates
+    );
+
   /* =======================================================
      TELEGRAM
      ======================================================= */
@@ -60552,6 +60943,9 @@ for (
         liveScan,
         liveOutput
       ),
+
+    returnedCandidateBlockerDiagnosticV436:
+      candidateBlockersV436,
 
     notificationReserveReleaseV174,
 
@@ -62099,6 +62493,9 @@ for (
         state?.holderEvidenceRetryV422 ||
         null
     },
+
+    returnedCandidateBlockerDiagnosticV436:
+      candidateBlockersV436,
 
     holderCountCompletionV256: {
       ...holderCountCompletionV256,
