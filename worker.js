@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V433
- * AUTHORITATIVE RUNTIME VERSION: V433
+ * Robinhood Chain Meme Hunter — V434
+ * AUTHORITATIVE RUNTIME VERSION: V434
+ * V434 builds directly on V433 and adds a read-only Telegram command, /chainstack, for the V433 Chainstack bot-side usage meter. The command reads persisted state only, triggers no scanner run, makes zero external provider/RPC requests, and performs no state write. It reports observed calendar-month Chainstack requests, latest-scan requests, scans using Chainstack, average/day, projected 30-day usage, planning allowance, percentage used/projected, and remaining planning allowance. It clearly labels the values as bot-side estimates and the Chainstack dashboard as authoritative. No RPC, market-data, scoring, qualification, Telegram alert threshold, request-budget, holder, learning, or V433 fallback behavior is changed.
  * V433 builds narrowly on the proven V432/V431 path. It adds two targeted improvements only. First, when DexScreener market verification is unavailable because of fresh Dex rate-limit evidence, GeckoTerminal market verification may bypass only the V157 cross-provider stagger once Gecko's own cooldown and fresh-spacing rules are satisfied. Optional Gecko directional enrichment remains governed by V432 and cannot consume the market-recovery opportunity. Second, V433 adds a bot-side Chainstack usage meter that counts actual CHAINSTACK RPC attempts observed by this Worker and persists the count using the existing state write. The meter is planning telemetry only, not billing-authoritative, and reports calendar-month observed requests, average/day, projected 30-day requests, configured planning allowance and percentage. No extra external requests, no additional state-write cycle, no request-ceiling increase, and no scoring, qualification, Telegram, holder, DexScreener, or RPC-rule changes.
  * V432 is a narrow market-data resilience build on the proven V431 Chainstack integration. The V428 diagnostic showed DexScreener candidate market lookup succeeding while GeckoTerminal directional-trade enrichment returned HTTP 429. V432 therefore preserves GeckoTerminal as a market-verification fallback, but defers optional Gecko directional-trade enrichment whenever Gecko has unresolved/recent rate-limit evidence and no later success has rehabilitated it. This prevents optional enrichment from wasting analysis budget or provoking repeated 429s while preserving all required market verification paths. A later successful Gecko request automatically rehabilitates the provider and allows directional enrichment again after the existing fresh-spacing gate. V432 also corrects V428 diagnostic timing so the captured provider state represents the moment BEFORE lastRequestAt is mutated for the request. No RPC logic, Chainstack routing, scoring, qualification, Telegram threshold, holder requirement, DexScreener behavior, request ceiling, or market-verification requirement is changed.
  * V431 integrates an optional managed Chainstack Robinhood Mainnet HTTPS RPC through the Cloudflare secret CHAINSTACK_RPC_URL. The endpoint is never hard-coded into this source. When configured, Chainstack becomes the preferred normal RPC for system eth_blockNumber and analysis reads, while Robinhood Public and Alchemy remain normal fallbacks and the existing BlockReq V421 path remains the independent ERC-20/system emergency fallback. Chainstack participates in the existing V423 diagnostics, V424 method-aware health routing, V426 cross-scan persistence and V427 adaptive 429 backoff. The V421/V429 all-normal-RPC rate-limit tests include Chainstack when configured so BlockReq only takes over after every configured normal RPC has supplied rate-limit evidence. No token scoring, Opportunity/Momentum logic, qualification, Telegram threshold, holder rule, market-data behavior, request ceiling, or V428 diagnostic behavior is changed.
@@ -1507,7 +1508,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V433";
+const VERSION = "V434";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -60317,6 +60318,16 @@ for (
         false
     },
 
+    chainstackTelegramCommandV434: {
+      enabled: true,
+      command: "/chainstack",
+      alias: "/chainstackusage",
+      readOnly: true,
+      scannerBudgetConsumed: false,
+      externalProviderRequests: 0,
+      stateWrites: 0
+    },
+
     notificationReserveReleaseV174,
 
     postAnalysisBacklogReclaimV170,
@@ -62077,6 +62088,7 @@ for (
         "/best",
         "/performance",
         "/usage",
+        "/chainstack",
         "/help"
       ],
       readsStoredEvidenceOnly: true,
@@ -72149,6 +72161,101 @@ function v3UsdTelegramMessageV353(result) {
   return lines.join("\n");
 }
 
+function chainstackUsageTelegramMessageV434(
+  state,
+  env
+) {
+  const meter =
+    chainstackUsageTelemetryV433(
+      state,
+      null,
+      env
+    );
+
+  const fmt =
+    value =>
+      Number.isFinite(
+        Number(value)
+      )
+        ? Number(value).toLocaleString(
+            "en-GB"
+          )
+        : "0";
+
+  const pct =
+    value =>
+      Number.isFinite(
+        Number(value)
+      )
+        ? `${Number(value).toFixed(2)}%`
+        : "UNVERIFIED";
+
+  const projectedStatus =
+    Number.isFinite(
+      Number(
+        meter?.projected30DayPercent
+      )
+    )
+      ? (
+          Number(
+            meter.projected30DayPercent
+          ) < 50
+            ? "SAFE"
+            : Number(
+                meter.projected30DayPercent
+              ) < 80
+              ? "WATCH"
+              : Number(
+                  meter.projected30DayPercent
+                ) < 100
+                ? "WARNING"
+                : "OVER PLANNING ALLOWANCE"
+        )
+      : "UNVERIFIED";
+
+  return [
+    `📡 <b>Chainstack Usage — ${VERSION}</b>`,
+    "",
+    `Month: <b>${escapeHtml(
+      meter?.calendarMonthKey ||
+      "UNVERIFIED"
+    )}</b>`,
+    `Requests observed: <b>${fmt(
+      meter?.requestsThisMonth
+    )}</b>`,
+    `Last scan: <b>${fmt(
+      meter?.lastScanRequests
+    )}</b>`,
+    `Scans using Chainstack: <b>${fmt(
+      meter?.scansWithChainstack
+    )}</b>`,
+    "",
+    `Average/day: <b>${fmt(
+      meter?.averageRequestsPerDay
+    )}</b>`,
+    `Projected 30 days: <b>${fmt(
+      meter?.projected30DayRequests
+    )}</b>`,
+    "",
+    `Planning allowance: <b>${fmt(
+      meter?.planningAllowance
+    )}</b>`,
+    `Used: <b>${pct(
+      meter?.planningPercentUsed
+    )}</b>`,
+    `Projected: <b>${pct(
+      meter?.projected30DayPercent
+    )}</b>`,
+    `Remaining: <b>${fmt(
+      meter?.remainingPlanningAllowance
+    )}</b>`,
+    `Status: <b>${projectedStatus}</b>`,
+    "",
+    "ℹ️ <i>Bot-side estimate only. Chainstack's dashboard is authoritative for billing/usage.</i>",
+    "<i>Read-only command: no scan, RPC request or state write.</i>"
+  ].join("\n");
+}
+
 function telegramHelpV271() {
   return [
     "🤖 <b>Robinhood Meme Hunter Commands</b>",
@@ -72167,6 +72274,7 @@ function telegramHelpV271() {
     "<code>/live GUS</code> — V414 lower-timeframe rolling signals + breakout state (read-only)",
     "<code>/v3usd 0xADDRESS</code> — persisted native V3 USD flow (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
+    "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/help</code> — command list",
     "",
     "<i>/analyse performs a fresh bounded analysis. Other commands read stored evidence/diagnostics and do not trigger a fresh chain scan.</i>"
@@ -72461,6 +72569,53 @@ async function telegramCommandReplyV271(
   let reply;
 
   if (
+    parsed.command ===
+      "/chainstack" ||
+    parsed.command ===
+      "/chainstackusage"
+  ) {
+    reply =
+      chainstackUsageTelegramMessageV434(
+        state,
+        env
+      );
+
+    if (diagnosticV273) {
+      const meterV434 =
+        chainstackUsageTelemetryV433(
+          state,
+          null,
+          env
+        );
+
+      diagnosticV273.chainstackUsageV434 = {
+        requestsThisMonth:
+          meterV434?.requestsThisMonth ??
+          null,
+        lastScanRequests:
+          meterV434?.lastScanRequests ??
+          null,
+        projected30DayRequests:
+          meterV434
+            ?.projected30DayRequests ??
+          null,
+        planningPercentUsed:
+          meterV434
+            ?.planningPercentUsed ??
+          null,
+        projected30DayPercent:
+          meterV434
+            ?.projected30DayPercent ??
+          null,
+        scannerBudgetConsumed:
+          false,
+        externalProviderRequests:
+          0,
+        stateWrites:
+          0
+      };
+    }
+  } else if (
     parsed.command ===
       "/call" ||
     parsed.command ===
