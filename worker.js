@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V411
- * AUTHORITATIVE RUNTIME VERSION: V411
+ * Robinhood Chain Meme Hunter — V412
+ * AUTHORITATIVE RUNTIME VERSION: V412
+ * V412 adds hard Telegram delivery provenance for successful calls. New V412-era first entries freeze Telegram message_id, chat id, Telegram timestamp, bot version, delivery mode and local receipt time alongside the entry snapshot. Repeat alerts record a separate latest-success proof without overwriting the original entry proof. Legacy entries remain explicitly provenance-unverified rather than being silently rewritten. This closes the ambiguity exposed by AI while preserving genuine historical calls, V411 measurement-only signals/outcomes, scanner/scoring/qualification/alerts/request budgets, V403 batching and V410 usage accounting.
  * V411 starts the measurement-only signal expansion from V410. It adds forward-only 5m/15m/30m entry-timing outcomes for new V411-era successful calls, plus frozen call-time measurement telemetry for holder-growth velocity, liquidity growth, volume acceleration, transaction acceleration, verified observed trade-size distribution, and verified unique/repeat-buyer breadth where wallet-level Pons evidence exists. All new fields are descriptive/learning-only: Opportunity scoring, Momentum scoring, qualification, Telegram alert thresholds, provider request ceilings, V403 Durable Object batching, V410 usage accounting, and existing V317 1h/6h/24h outcomes are unchanged. Missing evidence remains UNVERIFIED and is never inferred.
  * V410 repairs the Durable Object collector → singleton usage-meter feed. Collector write counters are now maintained as per-day cumulative totals, piggybacked into the existing V402 head checkpoints, and sent as absolute snapshots to the singleton. The singleton deduplicates/reconciles each source and persists at most once per 5-minute source interval (unless an explicit forced start/stop flush is requested), so isolate hibernation cannot silently discard an in-memory delta. /usage exposes source count, deferred probes, tracked PUTs/DELETEs, aggregation writes and last collector update. No scanner, scoring, qualification, alerts, market/age logic, provider requests, V403 batching, V407 learning/performance, or V408 age evidence is changed.
  * V407 adds read-only entry-quality analytics and forward-only post-call drawdown tracking. Existing verified ATH history can safely classify whether a call ever exceeded its frozen entry level; no historical low is invented. New/ongoing V407 observations track the lowest verified market cap from the V407 tracking start onward, explicitly marked forward-only. /best, /performance, /learning and /call surface the new metrics. V407 also prevents the Durable Object usage projection from showing false DANGER during the first 15 minutes by reporting CALIBRATING until a meaningful observation window exists. Scanner, scoring, qualification, alerts, provider requests, V403 batching and V404/V406 usage counting remain unchanged.
@@ -1465,7 +1466,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V411";
+const VERSION = "V412";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -38127,6 +38128,38 @@ async function sendTelegram(
   }
 }
 
+
+/* =========================================================
+   V412 — TELEGRAM DELIVERY PROVENANCE
+   ========================================================= */
+function telegramDeliveryProofV412(result, fallbackChatId = null) {
+  if (result?.success !== true || result?.data?.ok !== true) return null;
+
+  const message = result?.data?.result || null;
+  const messageId = Number(message?.message_id);
+  const telegramDateSeconds = Number(message?.date);
+  const chatIdRaw = message?.chat?.id ?? fallbackChatId ?? null;
+  const chatId = chatIdRaw !== null && chatIdRaw !== undefined ? String(chatIdRaw) : null;
+
+  if (!Number.isFinite(messageId) || messageId <= 0 || !chatId) return null;
+
+  return {
+    version: "V412",
+    verified: true,
+    source: "TELEGRAM_SEND_API_RESULT_V412",
+    botVersion: VERSION,
+    messageId,
+    chatId,
+    telegramSentAt:
+      Number.isFinite(telegramDateSeconds) && telegramDateSeconds > 0
+        ? telegramDateSeconds * 1000
+        : null,
+    workerConfirmedAt: Date.now(),
+    mode: result?.mode || null,
+    httpStatus: Number.isFinite(Number(result?.status)) ? Number(result.status) : null
+  };
+}
+
 function sameRunTerminalReject(
   candidate
 ) {
@@ -46643,6 +46676,10 @@ function buildEntrySignalSnapshotV309(candidate, capturedAt) {
     capturedAt: finiteOrNull(capturedAt) || Date.now(),
     frozenAtSuccessfulCall: true,
     laterEvidenceBackfillAllowed: false,
+    telegramDeliveryProofV412:
+      candidate?.telegramDeliveryProofV412?.verified === true
+        ? { ...candidate.telegramDeliveryProofV412 }
+        : null,
 
     opportunity: {
       score: finiteOrNull(candidate?.opportunity?.score),
@@ -46851,6 +46888,20 @@ function buildCallPerformanceRecordV270(
         : null
     );
 
+  // V412 provenance is entry-scoped: a repeat alert can never be attached to
+  // an older frozen entry. New successful deliveries also retain a separate
+  // latest-success proof for diagnostics without mutating the entry proof.
+  const entryTelegramDeliveryProofV412 =
+    existing?.entryTelegramDeliveryProofV412 ??
+    (successfulAlert && !existing?.entryTimestamp && candidate?.telegramDeliveryProofV412?.verified === true
+      ? { ...candidate.telegramDeliveryProofV412 }
+      : null);
+
+  const latestSuccessfulTelegramDeliveryV412 =
+    successfulAlert && candidate?.telegramDeliveryProofV412?.verified === true
+      ? { ...candidate.telegramDeliveryProofV412 }
+      : (existing?.latestSuccessfulTelegramDeliveryV412 ?? null);
+
   /*
    * V319 FIX — first successful alert may already have a preliminary
    * callPerformanceV270 record created by normal observation tracking.
@@ -47019,6 +47070,12 @@ function buildCallPerformanceRecordV270(
     entryPriceUsd,
     entryMarketCap,
     entrySignalSnapshotV309,
+    entryTelegramDeliveryProofV412,
+    latestSuccessfulTelegramDeliveryV412,
+    entryTelegramProvenanceStatusV412:
+      entryTelegramDeliveryProofV412?.verified === true
+        ? "VERIFIED_TELEGRAM_DELIVERY_V412"
+        : (existing?.entryTimestamp ? "LEGACY_ENTRY_TELEGRAM_PROVENANCE_UNVERIFIED" : "NO_FROZEN_ENTRY"),
     fixedHorizonOutcomesV317,
     entryTimingOutcomesV411,
     drawdownTrackerV407,
@@ -47231,6 +47288,12 @@ function registerSuccessfulCallPerformanceV270(
             capturedAt: record.entrySignalSnapshotV309.capturedAt
           }
         : { captured: false },
+    entryTelegramProvenanceStatusV412:
+      record.entryTelegramProvenanceStatusV412 || null,
+    entryTelegramDeliveryProofV412:
+      record.entryTelegramDeliveryProofV412 || null,
+    latestSuccessfulTelegramDeliveryV412:
+      record.latestSuccessfulTelegramDeliveryV412 || null,
     athPriceUsd:
       record.athPriceUsd,
     athMarketCap:
@@ -54060,6 +54123,12 @@ for (
     if (
       result.success
     ) {
+      // V412: bind this exact successful Telegram API delivery to the candidate
+      // before call registration. The proof is only entry-frozen when there is
+      // no pre-existing frozen entryTimestamp; repeat alerts remain separate.
+      candidate.telegramDeliveryProofV412 =
+        telegramDeliveryProofV412(result, env.TELEGRAM_CHAT_ID);
+
       // V411 measurement-only entry telemetry. This reuses evidence already in
       // state/candidate and performs zero external requests. It cannot change
       // qualification because Telegram has already succeeded at this point.
@@ -54102,7 +54171,13 @@ for (
         snapshotVersion:
           callPerformanceRegistrationV270?.entrySignalSnapshotV309?.snapshotVersion || null,
         snapshotCapturedAt:
-          callPerformanceRegistrationV270?.entrySignalSnapshotV309?.capturedAt || null
+          callPerformanceRegistrationV270?.entrySignalSnapshotV309?.capturedAt || null,
+        telegramEntryProvenanceV412:
+          callPerformanceRegistrationV270?.entryTelegramProvenanceStatusV412 || null,
+        telegramEntryMessageIdV412:
+          callPerformanceRegistrationV270?.entryTelegramDeliveryProofV412?.messageId || null,
+        latestSuccessfulTelegramMessageIdV412:
+          callPerformanceRegistrationV270?.latestSuccessfulTelegramDeliveryV412?.messageId || null
       };
 
       const sameRunVerifiedUsdCompletionV264 =
@@ -66087,6 +66162,9 @@ function callInfoMessageV311(record) {
     `Contract: <code>${address}</code>`,
     `📅 Captured: <b>${escapeHtml(telegramDateV271(snap?.capturedAt))}</b>`,
     `🔒 Frozen: <b>${snap?.frozenAtSuccessfulCall === true ? "YES" : "UNVERIFIED"}</b> | Later backfill: <b>${snap?.laterEvidenceBackfillAllowed === false ? "NO" : "UNVERIFIED"}</b>`,
+    `📨 Entry Telegram proof: <b>${record?.entryTelegramDeliveryProofV412?.verified === true ? "VERIFIED" : "UNVERIFIED (LEGACY/NO V412 PROOF)"}</b>`,
+    `🆔 Entry Telegram message ID: <b>${record?.entryTelegramDeliveryProofV412?.verified === true ? text(record.entryTelegramDeliveryProofV412.messageId) : "UNVERIFIED"}</b>`,
+    `📬 Latest successful Telegram message ID: <b>${record?.latestSuccessfulTelegramDeliveryV412?.verified === true ? text(record.latestSuccessfulTelegramDeliveryV412.messageId) : "UNVERIFIED"}</b>`,
     "",
     `🎯 Opportunity: <b>${score(snap?.opportunity?.score)}</b> — ${text(snap?.opportunity?.label)}`,
     `🚀 Momentum: <b>${score(snap?.momentum?.score)}</b> — ${text(snap?.momentum?.label)}`,
