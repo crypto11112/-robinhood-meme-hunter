@@ -1,4 +1,8 @@
 /**
+ * Robinhood Chain Meme Hunter — V417
+ * AUTHORITATIVE RUNTIME VERSION: V417
+ * V417 builds directly on V416. It adds progressive candidate completion for the single protected priority/carried candidate when the conservative full-analysis estimate cannot fit inside the remaining adaptive analysis headroom. Instead of discarding useful partial work, V417 may start only when enough budget exists to complete the next mandatory stage (5 requests for uncached ERC-20 verification, or 1 request when verified metadata is reusable). Successfully verified ERC-20 metadata is checkpointed immediately onto the watched token so a later scan does not pay the same 5-request verification cost again. Existing market and holder caches continue to checkpoint through their proven paths. If a bounded progressive attempt returns with market or holder evidence still incomplete, the candidate remains in the bounded V415 retry queue for forward completion rather than being silently treated as finished. Every network request remains subject to the existing per-request budget guards, V416 adaptive borrowing, the absolute 42-request global ceiling and the protected Telegram reserve. No scoring, Opportunity, Momentum, confidence, liquidity, risk, qualification, alert threshold, provider trust rule or UNVERIFIED semantics are loosened.
+ *
  * Robinhood Chain Meme Hunter — V416
  * AUTHORITATIVE RUNTIME VERSION: V416
  * V416 builds directly on V415 Scanner Funnel / Provider Resilience. It adds bounded ADAPTIVE ANALYSIS HEADROOM: after the discovery pass has finished for the current scan, genuinely unused discovery capacity may be lent to analysis for the current run only, capped at 8 requests. The configured base analysis limit remains 21, the global hard ceiling remains 42, the 2-request Telegram reserve remains protected, provider cooldowns and every real per-request budget check remain authoritative, and unused capacity is never pre-spent or invented. This directly addresses live V415 evidence where analysis reached 20/21 while substantial global capacity remained unused and viable candidates were deferred. The borrowed allowance expires with the scan and can reduce only later optional backlog reclaim, never the already-completed live discovery pass. V416 adds explicit base/effective/borrowed analysis-budget telemetry. No Opportunity/Momentum/confidence/liquidity/risk/Telegram threshold is changed, and all V414 breakout/live-learning/data-health plus V415 retry/funnel logic is preserved.
@@ -1485,7 +1489,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V416";
+const VERSION = "V417";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2389,6 +2393,10 @@ const V415_MIN_BOUNDED_PRIORITY_REQUESTS = 3;
  * reserve remain authoritative.
  */
 const V416_MAX_ADAPTIVE_ANALYSIS_BORROW = 8;
+
+/* V417: progressive completion starts only when the next mandatory stage can finish. */
+const V417_MIN_UNCACHED_METADATA_STAGE_REQUESTS = 5;
+const V417_MIN_CACHED_PROGRESS_STAGE_REQUESTS = 1;
 
 const NOTIFICATION_REQUEST_LIMIT = 2;
 
@@ -23376,6 +23384,55 @@ function analysisRetryTokensV415(state) {
   return tokens;
 }
 
+function checkpointVerifiedMetadataV417(watched, validation) {
+  if (
+    !watched ||
+    validation?.validERC20 !== true
+  ) {
+    return false;
+  }
+
+  const verifiedAt =
+    safeNumber(validation?.verifiedAt) ||
+    Date.now();
+
+  watched.metadata = {
+    validERC20: true,
+    name: validation?.name || null,
+    symbol: validation?.symbol || null,
+    decimals: Number.isFinite(Number(validation?.decimals))
+      ? Number(validation.decimals)
+      : null,
+    totalSupply: validation?.totalSupply ?? null,
+    verifiedAt
+  };
+
+  return true;
+}
+
+function progressiveStageMinimumV417(watched) {
+  return reusableMetadata(watched)
+    ? V417_MIN_CACHED_PROGRESS_STAGE_REQUESTS
+    : V417_MIN_UNCACHED_METADATA_STAGE_REQUESTS;
+}
+
+function progressiveEvidenceIncompleteV417(candidate) {
+  if (!candidate || candidate?.analysisDeferred === true) {
+    return true;
+  }
+
+  const marketComplete =
+    candidate?.market?.verified === true ||
+    candidate?.market?.onChainMarketVerified === true;
+
+  const holdersComplete =
+    candidate?.holders?.integrity?.verified === true ||
+    candidate?.holders?.countersVerified === true ||
+    candidate?.holders?.concentrationVerified === true;
+
+  return !(marketComplete && holdersComplete);
+}
+
 async function verifyERC20(
   env,
   address,
@@ -43702,6 +43759,17 @@ async function analyzeToken(
     };
   }
 
+  /*
+   * V417 progressive checkpoint: once ERC-20 identity is verified, persist it
+   * immediately on the watched token. If a later market/holder stage cannot
+   * finish this scan, the next retry reuses this verified metadata instead of
+   * spending the same five RPC calls again.
+   */
+  checkpointVerifiedMetadataV417(
+    watched,
+    validation
+  );
+
   if (
     knownQuoteMetadata(
       address,
@@ -50710,6 +50778,14 @@ for (
     retryQueueAfterAnalysis: null,
     protectedPriorityBoundedAttempts: 0,
     providerConstrainedPriorityAttempts: 0,
+    progressiveCompletionV417: {
+      attempted: 0,
+      metadataCheckpointed: 0,
+      incompleteRequeued: 0,
+      completedEvidence: 0,
+      minimumStageBudgetProtected: 0,
+      candidates: []
+    },
     adaptiveAnalysisHeadroomV416: {
       enabled: adaptiveAnalysisHeadroomV416?.enabled === true,
       activated: adaptiveAnalysisHeadroomV416?.activated === true,
@@ -51357,6 +51433,15 @@ for (
       v165ResidualAllowance >=
         V415_MIN_BOUNDED_PRIORITY_REQUESTS;
 
+    const v417MinimumStageRequests =
+      progressiveStageMinimumV417(watched);
+
+    const v417ProgressivePriorityAttempt =
+      !v165FullEstimateAffordable &&
+      isPriorityCompletion &&
+      v165ResidualAllowance >=
+        v417MinimumStageRequests;
+
     const v165BoundedReplacementAttempt =
       !v165FullEstimateAffordable &&
       v165ProtectedReplacement &&
@@ -51365,11 +51450,22 @@ for (
 
     const v415BoundedAnalysisAttempt =
       v165BoundedReplacementAttempt ||
-      v415ProtectedPriorityResidualAttempt;
+      v415ProtectedPriorityResidualAttempt ||
+      v417ProgressivePriorityAttempt;
 
     if (v415ProtectedPriorityResidualAttempt) {
       scannerFunnelV415.protectedPriorityBoundedAttempts++;
       scannerFunnelV415.providerConstrainedPriorityAttempts++;
+    }
+
+    if (v417ProgressivePriorityAttempt) {
+      scannerFunnelV415.progressiveCompletionV417.attempted++;
+    } else if (
+      !v165FullEstimateAffordable &&
+      isPriorityCompletion &&
+      v165ResidualAllowance < v417MinimumStageRequests
+    ) {
+      scannerFunnelV415.progressiveCompletionV417.minimumStageBudgetProtected++;
     }
 
     if (
@@ -51453,6 +51549,10 @@ for (
           boundedAttempt: true,
           providerConstrainedPriorityV415:
             v415ProtectedPriorityResidualAttempt,
+          progressivePriorityV417:
+            v417ProgressivePriorityAttempt,
+          progressiveMinimumStageRequestsV417:
+            v417MinimumStageRequests,
           providerAvailabilityV415:
             providerConstraintV415.availability || null,
           actualAnalysisRequestsUsed: null,
@@ -51494,6 +51594,9 @@ for (
         null
     };
 
+    const v417MetadataWasReusableBefore =
+      Boolean(reusableMetadata(watched));
+
     const candidate =
       await analyzeToken(
         env,
@@ -51532,6 +51635,39 @@ for (
           liveMomentumActivityV152
         }
       );
+
+    if (v417ProgressivePriorityAttempt) {
+      const metadataReusableAfterV417 =
+        Boolean(reusableMetadata(watched));
+
+      if (
+        !v417MetadataWasReusableBefore &&
+        metadataReusableAfterV417
+      ) {
+        scannerFunnelV415.progressiveCompletionV417.metadataCheckpointed++;
+      }
+
+      scannerFunnelV415.progressiveCompletionV417.candidates.push({
+        address,
+        symbol:
+          candidate?.symbol ||
+          candidate?.validation?.symbol ||
+          watched?.metadata?.symbol ||
+          watched?.symbol ||
+          null,
+        residualAllowanceBefore: v165ResidualAllowance,
+        minimumStageRequests: v417MinimumStageRequests,
+        metadataReusableBefore: v417MetadataWasReusableBefore,
+        metadataReusableAfter: metadataReusableAfterV417,
+        analysisDeferred: Boolean(candidate?.analysisDeferred),
+        marketVerified: candidate?.market?.verified === true,
+        onChainMarketVerified: candidate?.market?.onChainMarketVerified === true,
+        holderEvidenceVerified:
+          candidate?.holders?.integrity?.verified === true ||
+          candidate?.holders?.countersVerified === true ||
+          candidate?.holders?.concentrationVerified === true
+      });
+    }
 
     if (
       v415BoundedAnalysisAttempt
@@ -51606,10 +51742,27 @@ for (
       continue;
     }
 
-    clearDeferredAnalysisV415(
-      state,
-      address
-    );
+    const v417IncompleteProgress =
+      v417ProgressivePriorityAttempt &&
+      progressiveEvidenceIncompleteV417(candidate);
+
+    if (v417IncompleteProgress) {
+      queueDeferredAnalysisV415(
+        state,
+        watched,
+        "PROGRESSIVE_EVIDENCE_INCOMPLETE_V417",
+        marketFreshPriorityScore(watched, newTokens, liveTokens)
+      );
+      scannerFunnelV415.progressiveCompletionV417.incompleteRequeued++;
+    } else {
+      clearDeferredAnalysisV415(
+        state,
+        address
+      );
+      if (v417ProgressivePriorityAttempt) {
+        scannerFunnelV415.progressiveCompletionV417.completedEvidence++;
+      }
+    }
 
     watched.lastCheckedAt =
       Date.now();
