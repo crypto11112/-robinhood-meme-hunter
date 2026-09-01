@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V426
- * AUTHORITATIVE RUNTIME VERSION: V426
+ * Robinhood Chain Meme Hunter — V427
+ * AUTHORITATIVE RUNTIME VERSION: V427
+ * V427 builds directly on V426 and makes the persisted provider+method 429 cooldown adaptive across scans. Repeated rate limits no longer reset to the same short delay: each provider+method keeps a bounded failure streak, escalates cooldown duration when a later scan hits the same 429 again, and immediately de-escalates on a successful response. Default backoff ladder: first 429 = 30s, second = 2m, third = 5m, fourth+ = 10m maximum. Robinhood Public retains a recovery-friendly cap of 2m unless Retry-After explicitly requires longer; Alchemy and other analysis RPCs can escalate to the full 10m cap. Only HTTP-429 evidence participates in the adaptive streak; deterministic RPC errors and transport failures do not. Retry-After remains authoritative when longer than the calculated backoff. V427 persists this streak in the same existing state write, adds zero external requests and zero additional state-write cycles, and preserves V426 persistence, V425/V424 routing, V423 diagnostics, V422 holder recovery, V421 fallback, V420 circuit breaker, V419 checkpoints, all request ceilings, scoring, qualification, Telegram thresholds, and V414 learning/breakout behavior.
  * V426 builds safely on the complete V425 hotfix and persists short-lived provider+method RPC health across scans. A fresh scan no longer forgets that a provider/method combination was just rate-limited. One HTTP-429 now opens a bounded SOFT cooldown for that exact provider+method, Retry-After is honoured when supplied, Robinhood Public uses a deliberately short default cooldown because V423 proved same-scan recovery, Alchemy uses a longer cooldown because two diagnostics showed repeated analysis 429s with no success, and successful responses immediately rehabilitate the combination. Only recent rate-limit health is restored on the next scan; stale evidence expires automatically. Persistence piggybacks on the existing state write and adds zero external requests. V426 preserves V425/V424 health weighting, V423 diagnostics, V422 holder recovery, V421 independent ERC-20 fallback, V420 circuit breaker, V419 checkpoints, all request ceilings, scoring, qualification, Telegram thresholds, and V414 learning/breakout behavior.
  * V425 is the SAFE HOTFIX for the broken V424 deployment. V424 accidentally removed a large inherited source section while replacing rpc(), causing runtime ReferenceError: latestBlock is not defined. V425 rebuilds from the complete syntax-proven V423 source, then reapplies the intended V424 analysis-only provider+method health routing without deleting inherited functions. Robinhood Public RPC receives a small evidence-based initial preference; repeated provider+method HTTP-429 combinations receive bounded scan-local cooldowns; Retry-After is honoured; successful responses immediately rehabilitate that provider+method; and V421 remains the independent ERC-20 read fallback when both normal read paths are unavailable due to proven 429 state. No provider, request ceiling, scoring rule, qualification rule, Telegram threshold, holder requirement, V422 recovery behavior, or V414 breakout/learning behavior is changed.
  * V423 is a DIAGNOSTIC-ONLY provider-health build on V422. It instruments every scanner-budget JSON-RPC call already being made and records provider, RPC method, scanner phase, HTTP status, latency, Retry-After when exposed, success/RPC-error/transport-error classification, first/last 429 time, repeated same-scan calls after a provider's first 429, and bounded recent-attempt evidence. It adds zero external requests, makes no routing/cooldown/order changes, does not add another provider, and preserves V422 holder recovery, V421 third read fallback, V420 circuit breaker, V419 checkpoints, V418 transport classification, V417 progressive completion, V416 adaptive analysis headroom, V415 retry funnel and all V414 breakout/learning logic. The purpose is to prove which provider/method/phase is actually creating rate-limit pressure before V424 changes routing. Scoring, Momentum, qualification, Telegram thresholds, provider order, request ceilings and validation rules are unchanged.
@@ -1500,7 +1501,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V426";
+const VERSION = "V427";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -12265,6 +12266,191 @@ function addWatch(
 }
 
 /* =========================================================
+   V427 ADAPTIVE PERSISTENT 429 BACKOFF
+   ========================================================= */
+
+const V427_BACKOFF_LADDER_MS = [
+  30 * 1000,
+  2 * 60 * 1000,
+  5 * 60 * 1000,
+  10 * 60 * 1000
+];
+
+const V427_ROBINHOOD_MAX_BACKOFF_MS =
+  2 * 60 * 1000;
+
+const V427_DEFAULT_MAX_BACKOFF_MS =
+  10 * 60 * 1000;
+
+const V427_STREAK_RESET_AFTER_MS =
+  20 * 60 * 1000;
+
+function adaptive429BackoffMsV427(
+  provider,
+  streak,
+  retryAfterMs = null
+) {
+  const normalizedStreak =
+    Math.max(
+      1,
+      Math.min(
+        4,
+        safeNumber(streak)
+      )
+    );
+
+  const ladderMs =
+    V427_BACKOFF_LADDER_MS[
+      normalizedStreak - 1
+    ];
+
+  const providerCap =
+    provider ===
+      "ROBINHOOD_PUBLIC_RPC"
+      ? V427_ROBINHOOD_MAX_BACKOFF_MS
+      : V427_DEFAULT_MAX_BACKOFF_MS;
+
+  const calculated =
+    Math.min(
+      ladderMs,
+      providerCap
+    );
+
+  const explicit =
+    safeNumber(
+      retryAfterMs
+    );
+
+  /*
+   * Provider Retry-After is authoritative even if longer than our normal cap.
+   */
+  return explicit > 0
+    ? Math.max(
+        calculated,
+        explicit
+      )
+    : calculated;
+}
+
+function normalizeAdaptiveStreakV427(
+  row,
+  nowMs = Date.now()
+) {
+  const last429At =
+    safeNumber(
+      row?.last429At
+    );
+
+  const stored =
+    safeNumber(
+      row?.persistent429StreakV427
+    );
+
+  if (
+    !last429At ||
+    nowMs - last429At >
+      V427_STREAK_RESET_AFTER_MS
+  ) {
+    return 0;
+  }
+
+  return Math.max(
+    0,
+    Math.min(
+      4,
+      stored
+    )
+  );
+}
+
+function rpcAdaptiveBackoffTelemetryV427(
+  state,
+  budget
+) {
+  const root =
+    rpcRoutingRootV424(
+      budget
+    );
+
+  const rows = {};
+
+  for (
+    const [key, row]
+    of Object.entries(
+      root?.providerMethod || {}
+    )
+  ) {
+    rows[key] = {
+      provider:
+        row.provider ||
+        null,
+      method:
+        row.method ||
+        null,
+      persistent429StreakV427:
+        safeNumber(
+          row.persistent429StreakV427
+        ),
+      lastAdaptiveBackoffMsV427:
+        safeNumber(
+          row.lastAdaptiveBackoffMsV427
+        ) ||
+        null,
+      cooldownUntil:
+        safeNumber(
+          row.cooldownUntil
+        ) ||
+        null,
+      cooling:
+        safeNumber(
+          row.cooldownUntil
+        ) >
+        Date.now(),
+      last429At:
+        safeNumber(
+          row.last429At
+        ) ||
+        null,
+      lastSuccessAt:
+        safeNumber(
+          row.lastSuccessAt
+        ) ||
+        null
+    };
+  }
+
+  return {
+    enabled: true,
+    ladderMs:
+      V427_BACKOFF_LADDER_MS,
+    robinhoodMaxBackoffMs:
+      V427_ROBINHOOD_MAX_BACKOFF_MS,
+    defaultMaxBackoffMs:
+      V427_DEFAULT_MAX_BACKOFF_MS,
+    streakResetAfterMs:
+      V427_STREAK_RESET_AFTER_MS,
+    providerMethod:
+      rows,
+    persistedRows:
+      Object.keys(
+        state?.rpcHealthPersistentV426
+          ?.providerMethod ||
+        {}
+      ).length,
+    externalRequestsAdded:
+      0,
+    additionalStateWrites:
+      0,
+    scoringChanged:
+      false,
+    qualificationChanged:
+      false,
+    telegramThresholdChanged:
+      false
+  };
+}
+
+/* =========================================================
    V426 PERSISTENT RPC HEALTH + SOFT 429 COOLDOWNS
    ========================================================= */
 
@@ -12425,6 +12611,30 @@ function hydrateRpcHealthV426(
         ? Number(saved.lastLatencyMs)
         : null;
 
+    row.persistent429StreakV427 =
+      (
+        safeNumber(saved.last429At) &&
+        nowMs -
+          safeNumber(saved.last429At) <=
+          V427_STREAK_RESET_AFTER_MS
+      )
+        ? Math.max(
+            0,
+            Math.min(
+              4,
+              safeNumber(
+                saved.persistent429StreakV427
+              )
+            )
+          )
+        : 0;
+
+    row.lastAdaptiveBackoffMsV427 =
+      safeNumber(
+        saved.lastAdaptiveBackoffMsV427
+      ) ||
+      null;
+
     const savedCooldownUntil =
       safeNumber(saved.cooldownUntil);
 
@@ -12573,7 +12783,22 @@ function persistRpcHealthV426(
           Number(row.lastLatencyMs)
         )
           ? Number(row.lastLatencyMs)
-          : null
+          : null,
+      persistent429StreakV427:
+        Math.max(
+          0,
+          Math.min(
+            4,
+            safeNumber(
+              row.persistent429StreakV427
+            )
+          )
+        ),
+      lastAdaptiveBackoffMsV427:
+        safeNumber(
+          row.lastAdaptiveBackoffMsV427
+        ) ||
+        null
     };
 
     savedRows++;
@@ -12713,7 +12938,9 @@ function ensureProviderMethodHealthV424(budget, provider, method) {
       lastSuccessAt: null,
       last429At: null,
       lastOutcome: null,
-      lastLatencyMs: null
+      lastLatencyMs: null,
+      persistent429StreakV427: 0,
+      lastAdaptiveBackoffMsV427: null
     };
   }
   return root.providerMethod[key];
@@ -12747,6 +12974,8 @@ function updateRpcRoutingHealthV424(
       safeNumber(row.cooldownUntil) > at;
     row.successes = safeNumber(row.successes) + 1;
     row.consecutive429 = 0;
+    row.persistent429StreakV427 = 0;
+    row.lastAdaptiveBackoffMsV427 = null;
     row.lastSuccessAt = at;
     row.cooldownUntil = null;
     row.cooldownReason = null;
@@ -12762,24 +12991,30 @@ function updateRpcRoutingHealthV424(
   if (outcome === "HTTP_429") {
     row.http429 = safeNumber(row.http429) + 1;
     row.consecutive429 = safeNumber(row.consecutive429) + 1;
+
+    const previousStreakV427 =
+      normalizeAdaptiveStreakV427(
+        row,
+        at
+      );
+
     row.last429At = at;
 
-    const explicit = safeNumber(retryAfterMs);
-
-    /*
-     * V426: one fresh 429 is enough for a short, method-specific SOFT
-     * cooldown. Repeated 429s extend to the stronger V424 duration.
-     */
-    const repeated =
-      row.consecutive429 >=
-      V424_REPEATED_429_THRESHOLD;
+    row.persistent429StreakV427 =
+      Math.min(
+        4,
+        previousStreakV427 + 1
+      );
 
     const cooldownMs =
-      explicit > 0
-        ? explicit
-        : repeated
-          ? default429CooldownMsV424(provider)
-          : first429CooldownMsV426(provider);
+      adaptive429BackoffMsV427(
+        provider,
+        row.persistent429StreakV427,
+        retryAfterMs
+      );
+
+    row.lastAdaptiveBackoffMsV427 =
+      cooldownMs;
 
     const wasCooling =
       safeNumber(row.cooldownUntil) >
@@ -12792,11 +13027,9 @@ function updateRpcRoutingHealthV424(
       );
 
     row.cooldownReason =
-      explicit > 0
-        ? "HTTP_429_RETRY_AFTER_V426"
-        : repeated
-          ? "REPEATED_METHOD_429_V424"
-          : "FIRST_METHOD_429_SOFT_COOLDOWN_V426";
+      safeNumber(retryAfterMs) > 0
+        ? "HTTP_429_RETRY_AFTER_V427"
+        : `ADAPTIVE_429_STREAK_${row.persistent429StreakV427}_V427`;
 
     if (!wasCooling) {
       root.total429CooldownsOpened =
@@ -53135,6 +53368,19 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    rpcAdaptiveBackoffV427: {
+      enabled: true,
+      crossScanAdaptive429Streak: true,
+      maxBackoffMs:
+        V427_DEFAULT_MAX_BACKOFF_MS,
+      robinhoodRecoveryCapMs:
+        V427_ROBINHOOD_MAX_BACKOFF_MS,
+      externalRequestsAdded: 0,
+      additionalStateWrites: 0,
+      scoringChanged: false,
+      qualificationChanged: false,
+      telegramThresholdChanged: false
+    },
     rpcPersistentHealthV426: {
       enabled: true,
       softCooldownOnFirst429: true,
@@ -58506,6 +58752,12 @@ for (
         rpcHealthPersistenceV426
     },
 
+    rpcAdaptiveBackoffV427:
+      rpcAdaptiveBackoffTelemetryV427(
+        state,
+        budget
+      ),
+
     notificationReserveReleaseV174,
 
     postAnalysisBacklogReclaimV170,
@@ -60501,6 +60753,11 @@ for (
           ),
         rpcPersistentHealthV426:
           rpcPersistentHealthTelemetryV426(
+            state,
+            budget
+          ),
+        rpcAdaptiveBackoffV427:
+          rpcAdaptiveBackoffTelemetryV427(
             state,
             budget
           )
