@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V406
- * AUTHORITATIVE RUNTIME VERSION: V406
+ * Robinhood Chain Meme Hunter — V407
+ * AUTHORITATIVE RUNTIME VERSION: V407
+ * V407 adds read-only entry-quality analytics and forward-only post-call drawdown tracking. Existing verified ATH history can safely classify whether a call ever exceeded its frozen entry level; no historical low is invented. New/ongoing V407 observations track the lowest verified market cap from the V407 tracking start onward, explicitly marked forward-only. /best, /performance, /learning and /call surface the new metrics. V407 also prevents the Durable Object usage projection from showing false DANGER during the first 15 minutes by reporting CALIBRATING until a meaningful observation window exists. Scanner, scoring, qualification, alerts, provider requests, V403 batching and V404/V406 usage counting remain unchanged.
  * V406 fixes the V405 usage-meter first-read initialization bug: an empty/new-day meter is now persisted once on first /usage read, so monitorStartedAt no longer moves on every zero-usage query. The initialization row is included in the estimate. Scanner, scoring, collectors, batching, alerts, request budgets and UK reset display are unchanged.
  * V405 builds directly forward from V404. It changes only the /usage reset-time presentation: the actual meter still resets exactly at 00:00 UTC, while Telegram now also displays the equivalent Europe/London local time (automatically BST/GMT-aware). Scanner, scoring, alerts, collectors, V403 write batching, V404 usage accounting, request budgets and persistence logic are unchanged.
  * V404 builds directly forward from V403. It preserves the V402/V403 write-efficiency changes and adds a conservative internal Durable Object row-write monitor. All V3 live-collector storage puts/deletes are counted through tracked wrappers, per-collector deltas are aggregated into one singleton meter at most once per 5 minutes, the meter resets automatically at 00:00 UTC, and /usage exposes estimated rows written, percentage, hourly rate, 24h projection and SAFE/WARNING/DANGER status. The meter is diagnostic only: no scanner/scoring/qualification/provider/Telegram threshold logic is changed.
@@ -1461,7 +1462,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V406";
+const VERSION = "V407";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -46733,6 +46734,45 @@ function buildCallPerformanceRecordV270(
       ? market.marketCap
       : null;
 
+  // V407 forward-only lowest-market-cap tracker. Historical lows are never guessed.
+  let drawdownTrackerV407 =
+    existing?.drawdownTrackerV407 &&
+    typeof existing.drawdownTrackerV407 === "object"
+      ? { ...existing.drawdownTrackerV407 }
+      : null;
+
+  if (entryMarketCap !== null && Number.isFinite(Number(entryMarketCap)) && Number(entryMarketCap) > 0) {
+    if (!drawdownTrackerV407) {
+      const baselineMc =
+        successfulAlert && !existing?.entryTimestamp
+          ? Number(entryMarketCap)
+          : (market.verified && Number.isFinite(Number(currentMarketCap)) && Number(currentMarketCap) > 0
+              ? Number(currentMarketCap)
+              : null);
+      if (baselineMc !== null) {
+        drawdownTrackerV407 = {
+          version: "V407",
+          forwardOnly: true,
+          historicalBackfillAllowed: false,
+          startedAt: nowMs,
+          startedAtEntry: successfulAlert && !existing?.entryTimestamp,
+          lowestMarketCap: baselineMc,
+          lowestObservedAt: nowMs,
+          lowestMultipleByMarketCap: baselineMc / Number(entryMarketCap)
+        };
+      }
+    } else if (market.verified && Number.isFinite(Number(currentMarketCap)) && Number(currentMarketCap) > 0) {
+      const mcNow = Number(currentMarketCap);
+      const priorLow = Number(drawdownTrackerV407.lowestMarketCap);
+      if (!Number.isFinite(priorLow) || priorLow <= 0 || mcNow < priorLow) {
+        drawdownTrackerV407.lowestMarketCap = mcNow;
+        drawdownTrackerV407.lowestObservedAt = nowMs;
+      }
+      drawdownTrackerV407.lowestMultipleByMarketCap =
+        Number(drawdownTrackerV407.lowestMarketCap) / Number(entryMarketCap);
+    }
+  }
+
   const performanceRecordV317 = {
     address:
       normalize(candidate?.address),
@@ -46754,6 +46794,7 @@ function buildCallPerformanceRecordV270(
     entryMarketCap,
     entrySignalSnapshotV309,
     fixedHorizonOutcomesV317,
+    drawdownTrackerV407,
 
     entryMarketVerified:
       entryPriceUsd !== null ||
@@ -47042,6 +47083,10 @@ function updateCallPerformanceV270(
         updated.currentMultipleByMarketCap,
       drawdownFromAthMarketCap:
         updated.drawdownFromAthMarketCap,
+      lowestMarketCapV407:
+        updated?.drawdownTrackerV407?.lowestMarketCap ?? null,
+      lowestMultipleByMarketCapV407:
+        updated?.drawdownTrackerV407?.lowestMultipleByMarketCap ?? null,
       entryPriceUsd:
         updated.entryPriceUsd,
       currentPriceUsd:
@@ -65688,6 +65733,17 @@ function callPerformanceMessageV271(
         )}`
       : "UNVERIFIED";
 
+  const athEntryX = Number(record?.athMultipleByMarketCap);
+  const everAboveEntryV407 = Number.isFinite(athEntryX) && athEntryX > 1.000001;
+  const entryOutcomeV407 = Number.isFinite(athEntryX)
+    ? (everAboveEntryV407 ? "YES" : "NO")
+    : "UNVERIFIED";
+  const lowestMcV407 = record?.drawdownTrackerV407?.lowestMarketCap;
+  const lowestXV407 = record?.drawdownTrackerV407?.lowestMultipleByMarketCap;
+  const lowestTextV407 = Number.isFinite(Number(lowestXV407)) && Number(lowestXV407) > 0
+    ? `${telegramMoneyV271(lowestMcV407)} (${telegramMultipleV271(lowestXV407)})`
+    : "UNVERIFIED";
+
   return [
     `📊 <b>${symbol} — Call Performance</b>`,
     "",
@@ -65699,6 +65755,11 @@ function callPerformanceMessageV271(
     `🚀 ATH from call: <b>${athX}</b>`,
     `📈 Current from call: <b>${currentX}</b>`,
     `📉 Drawdown from ATH: <b>${drawdown}</b>`,
+    `↗️ Ever above entry: <b>${entryOutcomeV407}</b>`,
+    `⬇️ Lowest verified MC (V407+): <b>${lowestTextV407}</b>`,
+    record?.drawdownTrackerV407?.forwardOnly === true
+      ? "<i>Lowest-MC tracking is forward-only from V407; historical lows are never backfilled.</i>"
+      : "<i>Lowest-MC tracking: not initialised yet.</i>",
     "",
     `💵 Entry price: <b>${entryPrice}</b>`,
     `💵 Current price: <b>${currentPrice}</b>`,
@@ -66128,6 +66189,10 @@ function bestCallsMessageV271(
     return `${count}/${multiplesV305.length} (${rate.toFixed(1)}%)`;
   };
 
+  const neverAboveEntryV407 = multiplesV305.filter(value => value <= 1.000001).length;
+  const wentAboveEntryV407 = multiplesV305.filter(value => value > 1.000001).length;
+  const entryRateV407 = count => `${count}/${multiplesV305.length} (${(multiplesV305.length ? (count / multiplesV305.length) * 100 : 0).toFixed(1)}%)`;
+
   const lines = [
     "🏆 <b>Best Calls by Verified ATH MC Multiple</b>",
     "",
@@ -66141,6 +66206,7 @@ function bestCallsMessageV271(
     `📈 Last verified ATH update: <b>${escapeHtml(athTimestampTextV297(followUpV296?.lastAthUpdatedAt))}</b>`,
     "",
     `📊 Tracked-call performance: <b>${multiplesV305.length} calls</b> | Median <b>${telegramMultipleV271(medianV305)}</b> | Average <b>${telegramMultipleV271(averageV305)}</b>`,
+    `↗️ Went above entry: <b>${entryRateV407(wentAboveEntryV407)}</b> | Never above entry: <b>${entryRateV407(neverAboveEntryV407)}</b>`,
     `🎯 ≥1.25x <b>${hitRateV305(1.25)}</b> | ≥1.5x <b>${hitRateV305(1.5)}</b> | ≥2x <b>${hitRateV305(2)}</b>`,
     `🚀 ≥5x <b>${hitRateV305(5)}</b> | ≥10x <b>${hitRateV305(10)}</b>`,
     ""
@@ -66233,6 +66299,11 @@ function performanceSummaryV271(
         ) / multiples.length
       : null;
 
+  const neverAboveEntryV407 = multiples.filter(value => value <= 1.000001).length;
+  const wentAboveEntryV407 = multiples.filter(value => value > 1.000001).length;
+  const reached125x = multiples.filter(value => value >= 1.25).length;
+  const reached15x = multiples.filter(value => value >= 1.5).length;
+
   const reached2x =
     multiples.filter(
       value =>
@@ -66273,6 +66344,10 @@ function performanceSummaryV271(
     `Average verified ATH: <b>${telegramMultipleV271(
       averageAthX
     )}</b>`,
+    `Went above entry: <b>${wentAboveEntryV407}/${verifiedAth.length}</b>`,
+    `Never above entry: <b>${neverAboveEntryV407}/${verifiedAth.length}</b>`,
+    `Reached 1.25x+: <b>${reached125x}</b>`,
+    `Reached 1.5x+: <b>${reached15x}</b>`,
     `Reached 2x+: <b>${reached2x}</b>`,
     `Reached 5x+: <b>${reached5x}</b>`,
     `Reached 10x+: <b>${reached10x}</b>`,
@@ -66285,7 +66360,7 @@ function performanceSummaryV271(
         )}</b>`
       : "Best call: <b>UNVERIFIED</b>",
     "",
-    "<i>Statistics use verified stored V270+ call observations only.</i>"
+    "<i>Never-above-entry uses the already-stored verified ATH record. Lowest-MC/drawdown tracking is forward-only from V407 and is never historically guessed.</i>"
   ].join("\n");
 }
 
@@ -66325,6 +66400,8 @@ function learningGroupStatsV312(records) {
   const hit125 = multiples.filter(value => value >= 1.25).length;
   const hit2 = multiples.filter(value => value >= 2).length;
   const below125 = multiples.length - hit125;
+  const neverAboveEntryV407 = multiples.filter(value => value <= 1.000001).length;
+  const wentAboveEntryV407 = multiples.filter(value => value > 1.000001).length;
   const top = Math.max(...multiples);
   const topSharePct = total > 0 ? (top / total) * 100 : null;
   const averageExTop = multiples.length > 1 ? (total - top) / (multiples.length - 1) : null;
@@ -66336,6 +66413,8 @@ function learningGroupStatsV312(records) {
     hit125,
     hit2,
     below125,
+    neverAboveEntryV407,
+    wentAboveEntryV407,
     top,
     topSharePct,
     averageExTop,
@@ -66466,6 +66545,7 @@ function frozenLearningMessageV312(state) {
     '',
     `Frozen calls analysed: <b>${records.length}</b> / ${all.length} tracked`,
     `Overall: <b>${learningStatsTextV312(overall)}</b>`,
+    `↗️ Entry quality: went above entry <b>${overall?.wentAboveEntryV407 || 0}/${overall?.n || 0}</b> | never above entry <b>${overall?.neverAboveEntryV407 || 0}/${overall?.n || 0}</b>`,
     `📐 Outlier impact: ${learningOutlierTextV313(overall)}`,
     '',
     '<b>⏳ Outcome maturity cohorts</b>',
@@ -71458,21 +71538,21 @@ function ukResetDisplayV405(resetAtIso) {
 function durableUsageTelegramMessageV404(result) {
   if (!result || result.available !== true) {
     return [
-      "📊 <b>Durable Object Usage — V405</b>",
+      `📊 <b>Durable Object Usage — ${VERSION}</b>`,
       "",
       `Status: <b>${escapeHtml(result?.status || "UNAVAILABLE")}</b>`,
       "<i>Internal estimate unavailable. Cloudflare dashboard remains authoritative.</i>"
     ].join("\n");
   }
-  const pct=Number(result.usedPct), perHour=Number(result.rowsPerHour), projected=Number(result.projected24hRows), remaining=Number(result.remainingRows);
+  const pct=Number(result.usedPct), perHour=result?.rowsPerHour===null?null:Number(result.rowsPerHour), projected=result?.projected24hRows===null?null:Number(result.projected24hRows), remaining=Number(result.remainingRows);
   return [
-    "📊 <b>Durable Object Usage — V405</b>",
+    `📊 <b>Durable Object Usage — ${VERSION}</b>`,
     "",
     `Rows written: <b>${safeNumber(result.estimatedRowsWritten).toLocaleString("en-US")} / ${safeNumber(result.freeTierRowsWrittenLimit).toLocaleString("en-US")}</b>`,
     `Used: <b>${Number.isFinite(pct)?pct.toFixed(2):"0.00"}%</b>`,
     `Remaining: <b>${Number.isFinite(remaining)?Math.max(0,Math.round(remaining)).toLocaleString("en-US"):"UNVERIFIED"}</b>`,
-    `Writes/hour: <b>${Number.isFinite(perHour)?perHour.toFixed(1):"UNVERIFIED"}</b>`,
-    `Projected 24h: <b>${Number.isFinite(projected)?Math.round(projected).toLocaleString("en-US"):"UNVERIFIED"}</b>`,
+    `Writes/hour: <b>${Number.isFinite(perHour)?perHour.toFixed(1):"CALIBRATING"}</b>`,
+    `Projected 24h: <b>${Number.isFinite(projected)?Math.round(projected).toLocaleString("en-US"):"CALIBRATING"}</b>`,
     `Status: <b>${escapeHtml(result.statusLabel || "UNVERIFIED")}</b>`,
     `Reset (UK): <b>${escapeHtml(ukResetDisplayV405(result.resetAtIso))}</b>`,
     `Cloudflare reset: <b>00:00 UTC</b>`,
@@ -71624,11 +71704,15 @@ export class V3LiveCollectorV363 {
     }
     const used=Math.max(0,safeNumber(meter.estimatedRowsWritten)), limit=DURABLE_ROWS_WRITTEN_FREE_LIMIT_V404;
     const startedAt=Math.max(dayStart,safeNumber(meter.monitorStartedAt)||nowMs), elapsedMs=Math.max(1,nowMs-startedAt);
-    const rowsPerHour=used>0?used/(elapsedMs/3600000):0, projected24hRows=used>0?rowsPerHour*24:0;
-    const usedPct=limit>0?(used/limit)*100:0, projectedPct=limit>0?(projected24hRows/limit)*100:0;
-    const statusLabel=usedPct>=95||projectedPct>=100?"DANGER":usedPct>=85||projectedPct>=85?"WARNING":usedPct>=70||projectedPct>=70?"WATCH":"SAFE";
+    const calibrationMsV407 = 15 * 60 * 1000;
+    const calibratedV407 = elapsedMs >= calibrationMsV407;
+    const rowsPerHour=calibratedV407 && used>0?used/(elapsedMs/3600000):null;
+    const projected24hRows=calibratedV407 && Number.isFinite(rowsPerHour)?rowsPerHour*24:null;
+    const usedPct=limit>0?(used/limit)*100:0;
+    const projectedPct=Number.isFinite(projected24hRows)&&limit>0?(projected24hRows/limit)*100:null;
+    const statusLabel=!calibratedV407 && usedPct<70?"CALIBRATING":usedPct>=95||(Number.isFinite(projectedPct)&&projectedPct>=100)?"DANGER":usedPct>=85||(Number.isFinite(projectedPct)&&projectedPct>=85)?"WARNING":usedPct>=70||(Number.isFinite(projectedPct)&&projectedPct>=70)?"WATCH":"SAFE";
     const resetAt=dayStart+86400000;
-    return{version:VERSION,available:true,estimated:true,status:"DURABLE_USAGE_ESTIMATE_READY_V404",statusLabel,utcDay:day,freeTierRowsWrittenLimit:limit,estimatedRowsWritten:used,remainingRows:Math.max(0,limit-used),usedPct,puts:safeNumber(meter.puts),deletes:safeNumber(meter.deletes),aggregationWrites:safeNumber(meter.aggregationWrites),alarmsSet:safeNumber(meter.alarmsSet),ingests:safeNumber(meter.ingests),rowsPerHour,projected24hRows,projectedPct,monitorStartedAt:startedAt,monitorStartedAtIso:new Date(startedAt).toISOString(),lastUpdatedAt:meter.lastUpdatedAt||null,lastUpdatedAtIso:meter.lastUpdatedAt?new Date(meter.lastUpdatedAt).toISOString():null,resetAt,resetAtIso:new Date(resetAt).toISOString(),resetBoundary:"00:00 UTC",interpretation:"Bot-side estimate of Durable Object rows written by this Worker. Cloudflare dashboard remains authoritative.",alarmOperationsExcludedFromRowsWrittenEstimate:true};
+    return{version:VERSION,available:true,estimated:true,status:"DURABLE_USAGE_ESTIMATE_READY_V404",statusLabel,utcDay:day,freeTierRowsWrittenLimit:limit,estimatedRowsWritten:used,remainingRows:Math.max(0,limit-used),usedPct,puts:safeNumber(meter.puts),deletes:safeNumber(meter.deletes),aggregationWrites:safeNumber(meter.aggregationWrites),alarmsSet:safeNumber(meter.alarmsSet),ingests:safeNumber(meter.ingests),rowsPerHour,projected24hRows,projectedPct,calibratedV407,calibrationMinutesRequiredV407:15,monitorStartedAt:startedAt,monitorStartedAtIso:new Date(startedAt).toISOString(),lastUpdatedAt:meter.lastUpdatedAt||null,lastUpdatedAtIso:meter.lastUpdatedAt?new Date(meter.lastUpdatedAt).toISOString():null,resetAt,resetAtIso:new Date(resetAt).toISOString(),resetBoundary:"00:00 UTC",interpretation:"Bot-side estimate of Durable Object rows written by this Worker. Cloudflare dashboard remains authoritative.",alarmOperationsExcludedFromRowsWrittenEstimate:true};
   }
 
   async fetch(request) {
