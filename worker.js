@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V419
- * AUTHORITATIVE RUNTIME VERSION: V419
+ * Robinhood Chain Meme Hunter — V420
+ * AUTHORITATIVE RUNTIME VERSION: V420
+ * V420 builds directly on V419 and adds a scan-wide ERC-20 RPC circuit breaker for confirmed all-provider HTTP 429 conditions. When every configured analysis RPC is rate-limited on an ERC-20 identity probe, the shared scan budget opens a short in-scan circuit: remaining candidate ERC-20 identity checks are deferred without spending another RPC request, while V419 bytecode/method checkpoints remain intact for the next scheduled scan. The circuit is scan-local only, never converts missing evidence into validity, adds zero provider requests, preserves the same >=3-of-4 ERC-20 verification rule, the 42 global ceiling, V416 adaptive headroom, V417 progressive completion, V418 transport-vs-deterministic classification, all V414 live/breakout/learning work, and changes no Opportunity/Momentum/confidence/liquidity/risk/qualification/Telegram thresholds.
  * V419 builds directly on V418 and adds RPC-aware ERC-20 checkpointing/early-stop protection without weakening token verification. Successful bytecode proof and successful ERC-20 method responses are checkpointed on the watched candidate for bounded reuse; once a retryable RPC/provider/budget failure is observed, remaining ERC-20 probes are skipped for that scan and the candidate is deferred into the existing retry queue. This prevents repeated name/symbol/decimals/totalSupply calls while both RPC providers are already rate-limited. V419 adds zero provider requests, preserves the same >=3-of-4 ERC-20 verification rule, the 42 global ceiling, V416 adaptive headroom, V417 progressive completion, V418 transport-vs-deterministic classification, all V414 live/breakout/learning work, and changes no Opportunity/Momentum/confidence/liquidity/risk/qualification/Telegram thresholds. Missing evidence remains UNVERIFIED. V417 live scans proved that newly discovered candidates were repeatedly being labelled ERC20_METHODS_NOT_VERIFIED or NO_CONTRACT_BYTECODE while RPC providers were simultaneously rate-limited. The old verifier swallowed per-method RPC failures, so a transport/provider failure could be indistinguishable from a genuine non-ERC20 contract. V418 makes bytecode and each ERC-20 probe evidence-aware: provider/RPC/budget failures are recorded separately and are DEFERRED for the existing bounded retry queue, while NO_CONTRACT_BYTECODE is emitted only after a successful eth_getCode response explicitly returns empty code. Genuine method absence/revert still fails verification under the same >=3-of-4 ERC-20 evidence rule. /scan scanner-funnel telemetry now exposes exact method success/failure, provider/error class, discovery source and whether a candidate was deferred because identity evidence was unavailable. V418 adds no provider requests, changes no 42/21 base limits, preserves V416 adaptive borrowing and V417 progressive completion, and changes no Opportunity/Momentum/confidence/liquidity/risk/qualification/Telegram thresholds. Missing evidence remains UNVERIFIED; transport failure is never promoted to token validity.
  */
 /**
@@ -1494,7 +1495,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V419";
+const VERSION = "V420";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -3186,6 +3187,18 @@ function createBudget() {
         preTelegramGlobalRemainingAtActivation: 0,
         activatedAt: null,
         reason: "NOT_CONFIGURED_YET"
+      },
+
+      erc20RpcCircuitV420: {
+        enabled: true,
+        open: false,
+        openedAt: null,
+        reason: null,
+        triggeringAddress: null,
+        triggeringStage: null,
+        triggeringError: null,
+        deferredCandidates: 0,
+        estimatedRpcRequestsSaved: 0
       },
 
       blockscoutUsdGReserveV182: {
@@ -23461,6 +23474,78 @@ function erc20RetryableFailureV418(error) {
   return cls === "BUDGET" || cls === "RATE_LIMIT" || cls === "TRANSIENT_PROVIDER";
 }
 
+function allConfiguredAnalysisRpcRateLimitedV420(env, error) {
+  const message = String(error || "").toUpperCase();
+  const configured = ["ROBINHOOD_PUBLIC_RPC"];
+  if (String(env?.ALCHEMY_API_KEY || "").trim()) configured.push("ALCHEMY");
+  if (!configured.length) return false;
+  return configured.every(provider =>
+    message.includes(`${provider}: HTTP_429`) ||
+    message.includes(`${provider}: RATE_LIMIT`) ||
+    message.includes(`${provider}: TOO MANY`)
+  );
+}
+
+function erc20RpcCircuitV420(budget) {
+  return budget?.analysis?.erc20RpcCircuitV420 || null;
+}
+
+function openErc20RpcCircuitV420(env, budget, address, stage, error) {
+  if (!allConfiguredAnalysisRpcRateLimitedV420(env, error)) return false;
+  const circuit = erc20RpcCircuitV420(budget);
+  if (!circuit?.enabled) return false;
+  if (circuit.open !== true) {
+    circuit.open = true;
+    circuit.openedAt = Date.now();
+    circuit.reason = "ALL_CONFIGURED_ANALYSIS_RPCS_HTTP_429";
+    circuit.triggeringAddress = normalize(address) || null;
+    circuit.triggeringStage = stage || null;
+    circuit.triggeringError = String(error || "").slice(0, 500) || null;
+  }
+  return true;
+}
+
+function deferForErc20RpcCircuitV420(watched, budget, address) {
+  const circuit = erc20RpcCircuitV420(budget);
+  if (circuit?.enabled !== true || circuit?.open !== true) return null;
+  circuit.deferredCandidates = safeNumber(circuit.deferredCandidates) + 1;
+  /* One normal rpc() identity probe can consume up to both configured providers.
+     This is diagnostic only and does not alter any request ceiling. */
+  circuit.estimatedRpcRequestsSaved = safeNumber(circuit.estimatedRpcRequestsSaved) + 2;
+  const progress = reusableErc20ProgressV419(watched);
+  const diagnostic = {
+    status: "IDENTITY_EVIDENCE_DEFERRED",
+    discoverySource: watched?.discoverySource || null,
+    poolCount: Array.isArray(watched?.pools) ? watched.pools.length : 0,
+    code: {
+      verifiedResponse: progress?.codeHasBytecode === true,
+      hasBytecode: progress?.codeHasBytecode === true ? true : null,
+      provider: progress?.codeProvider || null,
+      error: null,
+      failureClass: "SCAN_RPC_CIRCUIT_OPEN",
+      reusedProofV419: progress?.codeHasBytecode === true
+    },
+    methods: [],
+    score: 0,
+    requiredScore: 3,
+    decision: "DEFER_RETRY",
+    reason: "ERC20_SCAN_RPC_CIRCUIT_OPEN_V420",
+    earlyStoppedV419: true,
+    stoppedAfterV419: "SCAN_WIDE_CIRCUIT_V420",
+    circuitDeferredV420: true,
+    circuitReasonV420: circuit.reason || null,
+    circuitOpenedAtV420: circuit.openedAt || null
+  };
+  persistErc20IdentityV418(watched, diagnostic);
+  return {
+    validERC20: false,
+    deferred: true,
+    reason: "ERC20_SCAN_RPC_CIRCUIT_OPEN_V420",
+    requiredRequests: 0,
+    erc20IdentityV418: diagnostic
+  };
+}
+
 async function erc20ProbeV418(env, address, data, label, budget) {
   const response = await rpc(
     env,
@@ -23539,6 +23624,9 @@ async function verifyERC20(env, address, budget, watched) {
   const cached = reusableMetadata(watched);
   if (cached) return cached;
 
+  const circuitDeferredV420 = deferForErc20RpcCircuitV420(watched, budget, address);
+  if (circuitDeferredV420) return circuitDeferredV420;
+
   let progress = reusableErc20ProgressV419(watched);
   const reusedCodeProofV419 = progress?.codeHasBytecode === true;
 
@@ -23563,6 +23651,7 @@ async function verifyERC20(env, address, budget, watched) {
 
     const codeError = code?.error || null;
     const codeFailureClass = erc20RpcFailureClassV418(codeError);
+    openErc20RpcCircuitV420(env, budget, address, "eth_getCode", codeError);
 
     if (code?.result === null || code?.result === undefined) {
       const diagnostic = {
@@ -23678,6 +23767,7 @@ async function verifyERC20(env, address, budget, watched) {
 
     const probe = await erc20ProbeV418(env, address, data, label, budget);
     probes.push(probe);
+    openErc20RpcCircuitV420(env, budget, address, label, probe.error);
 
     if (probe.ok === true) {
       checkpointErc20ProgressV419(watched, {
@@ -51014,6 +51104,17 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    erc20IdentityV420: {
+      enabled: true,
+      circuitOpened: false,
+      circuitReason: null,
+      triggeringAddress: null,
+      triggeringStage: null,
+      circuitDeferredCandidates: 0,
+      estimatedRpcRequestsSaved: 0,
+      externalRequestsAdded: 0,
+      verificationRuleChanged: false
+    },
     erc20IdentityV419: {
       enabled: true,
       earlyStops: 0,
@@ -51907,7 +52008,8 @@ for (
       }
       if (
         candidate?.validation?.reason === "ERC20_CODE_RPC_UNAVAILABLE_V418" ||
-        candidate?.validation?.reason === "ERC20_METHODS_RPC_UNAVAILABLE_RETRY_V418"
+        candidate?.validation?.reason === "ERC20_METHODS_RPC_UNAVAILABLE_RETRY_V418" ||
+        candidate?.validation?.reason === "ERC20_SCAN_RPC_CIRCUIT_OPEN_V420"
       ) {
         scannerFunnelV415.erc20IdentityV418.deferredProviderOrBudget++;
         scannerFunnelV415.erc20IdentityV418.transportFailureMisclassificationPrevented++;
@@ -51931,6 +52033,18 @@ for (
           : [],
         decision: erc20IdentityDiagnosticV418?.decision || null
       });
+    }
+
+    {
+      const circuitV420 = erc20RpcCircuitV420(budget);
+      if (circuitV420) {
+        scannerFunnelV415.erc20IdentityV420.circuitOpened = circuitV420.open === true;
+        scannerFunnelV415.erc20IdentityV420.circuitReason = circuitV420.reason || null;
+        scannerFunnelV415.erc20IdentityV420.triggeringAddress = circuitV420.triggeringAddress || null;
+        scannerFunnelV415.erc20IdentityV420.triggeringStage = circuitV420.triggeringStage || null;
+        scannerFunnelV415.erc20IdentityV420.circuitDeferredCandidates = safeNumber(circuitV420.deferredCandidates);
+        scannerFunnelV415.erc20IdentityV420.estimatedRpcRequestsSaved = safeNumber(circuitV420.estimatedRpcRequestsSaved);
+      }
     }
 
     if (v417ProgressivePriorityAttempt) {
