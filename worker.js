@@ -1,6 +1,19 @@
 /**
- * Robinhood Chain Meme Hunter — V473
- * AUTHORITATIVE RUNTIME VERSION: V473
+ * Robinhood Chain Meme Hunter — V474
+ * AUTHORITATIVE RUNTIME VERSION: V474
+ *
+ * V474 MEASUREMENT-ONLY LAUNCH-COVERAGE FUNNEL:
+ * - measures the gap between current/live token observation, positively verified
+ *   launch evidence, analysis, returned candidates, Telegram qualification/sends;
+ * - explicitly separates "launch source unverified" from "unsupported launch":
+ *   missing proof is never promoted into a guessed unsupported-source claim;
+ * - records current-scan and cumulative funnel counters using existing in-memory
+ *   evidence only; zero extra provider/API requests;
+ * - adds /launchcoverage Telegram command (read-only, zero provider requests);
+ * - preserves V473 launch-meter persistence fix and V470 verified launch meter;
+ * - preserves V469 fresh-candidate analysis priority and V466/V468 completion;
+ * - no scoring, Momentum, qualification, market/holder proof rule, Telegram
+ *   threshold, provider routing, or request ceiling changes.
  *
  * V473 VERIFIED-LAUNCH-METER AGE PERSISTENCE HOTFIX:
  * - ensures verifiedLaunchMeterV470 is initialized/pruned BEFORE the normal
@@ -1725,7 +1738,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V473";
+const VERSION = "V474";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9138,6 +9151,25 @@ function newState() {
       lastVerifiedProtocol: null
     },
 
+    launchCoverageCumulativeV474: {
+      enabled: true,
+      monitorStartedAt: null,
+      scansObserved: 0,
+      liveAddressesObserved: 0,
+      discoveredNewAddresses: 0,
+      positivelyVerifiedLaunches: 0,
+      selectedCurrentLiveForAnalysis: 0,
+      currentLiveAnalysisLoopEntered: 0,
+      currentLiveBudgetDeferred: 0,
+      currentLiveReturnedCandidates: 0,
+      returnedCurrentLiveWithVerifiedLaunchSource: 0,
+      returnedCurrentLiveWithUnverifiedLaunchSource: 0,
+      currentLiveTelegramQualified: 0,
+      currentLiveTelegramSent: 0,
+      lastUpdatedAt: null,
+      lastScan: null
+    },
+
     scheduler: {
       scheduledRunCount:
         0,
@@ -9646,6 +9678,21 @@ async function readState(env) {
             Array.isArray(parsed.verifiedLaunchMeterV470?.records)
               ? parsed.verifiedLaunchMeterV470.records.slice(-10000)
               : []
+        },
+
+        launchCoverageCumulativeV474: {
+          ...fresh.launchCoverageCumulativeV474,
+          ...(
+            parsed.launchCoverageCumulativeV474 &&
+            typeof parsed.launchCoverageCumulativeV474 === "object"
+              ? parsed.launchCoverageCumulativeV474
+              : {}
+          ),
+          lastScan:
+            parsed.launchCoverageCumulativeV474?.lastScan &&
+            typeof parsed.launchCoverageCumulativeV474.lastScan === "object"
+              ? parsed.launchCoverageCumulativeV474.lastScan
+              : null
         },
 
         scheduler: {
@@ -69287,6 +69334,31 @@ for (
     Date.now()
   );
 
+  /*
+   * V474: build the launch-coverage funnel only after Telegram evaluation is
+   * complete, then persist its compact cumulative counters in the SAME existing
+   * state write. No extra write and no external request is added.
+   */
+  const launchCoverageFunnelV474 =
+    buildLaunchCoverageFunnelV474({
+      state,
+      startedAt,
+      newTokens,
+      liveTokens,
+      analysisSelected,
+      analysedAddresses:
+        v141AnalysedAddresses,
+      validationResults,
+      candidates,
+      telegramResults
+    });
+
+  const launchCoverageCumulativeV474 =
+    updateLaunchCoverageCumulativeV474(
+      state,
+      launchCoverageFunnelV474
+    );
+
   const save =
     await writeState(
       env,
@@ -69980,6 +70052,10 @@ for (
       verifiedLaunchMeterSnapshotV470(
         state
       ),
+
+    launchCoverageFunnelV474,
+
+    launchCoverageCumulativeV474,
 
     verifiedLaunchPriorityV211: {
       enabled: true,
@@ -71735,6 +71811,7 @@ for (
         "/best",
         "/performance",
         "/launches",
+        "/launchcoverage",
         "/usage",
         "/chainstack",
         "/help"
@@ -82084,6 +82161,402 @@ function chainstackUsageTelegramMessageV434(
 }
 
 
+
+function ensureLaunchCoverageCumulativeV474(state) {
+  const base =
+    newState().launchCoverageCumulativeV474;
+
+  state.launchCoverageCumulativeV474 =
+    state?.launchCoverageCumulativeV474 &&
+    typeof state.launchCoverageCumulativeV474 === "object"
+      ? {
+          ...base,
+          ...state.launchCoverageCumulativeV474
+        }
+      : {...base};
+
+  if (
+    !safeNumber(
+      state.launchCoverageCumulativeV474.monitorStartedAt
+    )
+  ) {
+    state.launchCoverageCumulativeV474.monitorStartedAt =
+      Date.now();
+  }
+
+  return state.launchCoverageCumulativeV474;
+}
+
+function buildLaunchCoverageFunnelV474({
+  state,
+  startedAt,
+  newTokens,
+  liveTokens,
+  analysisSelected,
+  analysedAddresses,
+  validationResults,
+  candidates,
+  telegramResults
+}) {
+  const addressSet =
+    values =>
+      new Set(
+        Array.from(values || [])
+          .map(value =>
+            normalize(
+              typeof value === "string"
+                ? value
+                : value?.address
+            )
+          )
+          .filter(isAddress)
+      );
+
+  const liveSet =
+    addressSet(liveTokens);
+  const newSet =
+    addressSet(newTokens);
+  const selectedSet =
+    addressSet(analysisSelected);
+  const analysedSet =
+    addressSet(analysedAddresses);
+
+  const currentLiveSelected =
+    Array.from(selectedSet)
+      .filter(address =>
+        liveSet.has(address)
+      );
+
+  const currentLiveAnalysed =
+    Array.from(analysedSet)
+      .filter(address =>
+        liveSet.has(address)
+      );
+
+  const deferredCurrentLive =
+    (Array.isArray(validationResults)
+      ? validationResults
+      : []
+    ).filter(row => {
+      const address =
+        normalize(row?.address);
+      return (
+        row?.deferred === true &&
+        isAddress(address) &&
+        liveSet.has(address)
+      );
+    });
+
+  const currentLiveCandidates =
+    (Array.isArray(candidates)
+      ? candidates
+      : []
+    ).filter(candidate =>
+      liveSet.has(
+        normalize(candidate?.address)
+      )
+    );
+
+  const verifiedLaunchCandidates =
+    currentLiveCandidates
+      .filter(candidate =>
+        candidate?.verifiedLaunchAgeV223?.verified === true
+      );
+
+  const unverifiedLaunchCandidates =
+    currentLiveCandidates
+      .filter(candidate =>
+        candidate?.verifiedLaunchAgeV223?.verified !== true
+      );
+
+  const telegramQualified =
+    currentLiveCandidates
+      .filter(qualifiesTelegram);
+
+  const sentAddresses =
+    new Set(
+      (Array.isArray(telegramResults)
+        ? telegramResults
+        : []
+      )
+        .filter(row =>
+          row?.sent === true
+        )
+        .map(row =>
+          normalize(row?.address)
+        )
+        .filter(isAddress)
+    );
+
+  const currentLiveTelegramSent =
+    Array.from(sentAddresses)
+      .filter(address =>
+        liveSet.has(address)
+      ).length;
+
+  const meter =
+    ensureVerifiedLaunchMeterV470(state);
+
+  const verifiedLaunchesThisScan =
+    (Array.isArray(meter?.records)
+      ? meter.records
+      : []
+    ).filter(row => {
+      const firstObservedAt =
+        safeNumber(row?.firstObservedAt);
+      return (
+        firstObservedAt >=
+          safeNumber(startedAt) &&
+        firstObservedAt <=
+          Date.now() &&
+        isAddress(
+          normalize(row?.token)
+        )
+      );
+    });
+
+  const verifiedLaunchTokensThisScan =
+    verifiedLaunchesThisScan
+      .map(row =>
+        normalize(row?.token)
+      )
+      .filter(isAddress);
+
+  const recentMarketCandidates =
+    currentLiveCandidates
+      .filter(candidate => {
+        const age =
+          safeNumber(
+            candidate?.market?.pairAgeMs ??
+            candidate?.market?.ageMs
+          );
+        return (
+          candidate?.market?.verified === true &&
+          age > 0 &&
+          age <= 6 * 60 * 60 * 1000
+        );
+      });
+
+  const funnel = {
+    enabled: true,
+    version: "V474",
+    measurementOnly: true,
+    externalRequestsAdded: 0,
+    stateWritesAddedPerScan: 0,
+    scoringChanged: false,
+    momentumChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false,
+    requestCeilingsChanged: false,
+
+    scope: {
+      liveCurrentMeans:
+        "ADDRESS_OBSERVED_IN_CURRENT_LIVE_DISCOVERY_OR_EXISTING_SHARED_VERIFIED_LAUNCH_FEED",
+      discoveredNewAddressesIncludesBacklog:
+        true,
+      positiveLaunchVerificationRequired:
+        true,
+      unknownLaunchSourceIsNotAutomaticallyUnsupported:
+        true,
+      chainWideLaunchTotalClaimed:
+        false
+    },
+
+    funnel: {
+      liveAddressesObserved:
+        liveSet.size,
+      discoveredNewAddresses:
+        newSet.size,
+      positivelyVerifiedLaunchesThisScan:
+        verifiedLaunchTokensThisScan.length,
+      selectedCurrentLiveForAnalysis:
+        currentLiveSelected.length,
+      currentLiveAnalysisLoopEntered:
+        currentLiveAnalysed.length,
+      currentLiveBudgetDeferred:
+        deferredCurrentLive.length,
+      currentLiveReturnedCandidates:
+        currentLiveCandidates.length,
+      returnedCurrentLiveWithVerifiedLaunchSource:
+        verifiedLaunchCandidates.length,
+      returnedCurrentLiveWithUnverifiedLaunchSource:
+        unverifiedLaunchCandidates.length,
+      currentLiveTelegramQualified:
+        telegramQualified.length,
+      currentLiveTelegramSent:
+        currentLiveTelegramSent
+    },
+
+    diagnosticOnly: {
+      recentMarketCandidatesUpTo6h:
+        recentMarketCandidates.length,
+      probableLaunchCount:
+        "DATA UNVERIFIED",
+      unsupportedLaunchSourceCount:
+        "DATA UNVERIFIED",
+      reason:
+        "MARKET_AGE_OR_FIRST_SEEN_IS_NOT_PROOF_OF_A_LAUNCH_EVENT"
+    },
+
+    verifiedLaunchesThisScan:
+      verifiedLaunchesThisScan
+        .slice(-25)
+        .map(row => ({
+          token:
+            normalize(row?.token),
+          symbol:
+            row?.symbol || null,
+          protocol:
+            row?.protocol || null,
+          launchedAt:
+            row?.launchedAt || null,
+          timeBasis:
+            row?.timeBasis || null
+        })),
+
+    returnedCurrentLiveCandidates:
+      currentLiveCandidates
+        .slice(0, 10)
+        .map(candidate => ({
+          address:
+            normalize(candidate?.address),
+          symbol:
+            candidate?.symbol || null,
+          verifiedLaunchSource:
+            candidate?.verifiedLaunchAgeV223?.verified === true,
+          launchProtocol:
+            candidate?.verifiedLaunchAgeV223?.verified === true
+              ? candidate?.verifiedLaunchAgeV223?.protocol || null
+              : null,
+          launchEvidenceStatus:
+            candidate?.verifiedLaunchAgeV223?.verified === true
+              ? "VERIFIED"
+              : "UNVERIFIED",
+          marketVerified:
+            candidate?.market?.verified === true,
+          scannerAgeMs:
+            candidate?.verifiedLaunchAgeV223?.scannerAgeMs ?? null,
+          telegramQualified:
+            qualifiesTelegram(candidate)
+        }))
+  };
+
+  return funnel;
+}
+
+function updateLaunchCoverageCumulativeV474(
+  state,
+  funnel
+) {
+  const cumulative =
+    ensureLaunchCoverageCumulativeV474(state);
+
+  const row =
+    funnel?.funnel || {};
+
+  cumulative.scansObserved =
+    safeNumber(cumulative.scansObserved) + 1;
+
+  for (const key of [
+    "liveAddressesObserved",
+    "discoveredNewAddresses",
+    "positivelyVerifiedLaunches",
+    "selectedCurrentLiveForAnalysis",
+    "currentLiveAnalysisLoopEntered",
+    "currentLiveBudgetDeferred",
+    "currentLiveReturnedCandidates",
+    "returnedCurrentLiveWithVerifiedLaunchSource",
+    "returnedCurrentLiveWithUnverifiedLaunchSource",
+    "currentLiveTelegramQualified",
+    "currentLiveTelegramSent"
+  ]) {
+    const sourceKey =
+      key === "positivelyVerifiedLaunches"
+        ? "positivelyVerifiedLaunchesThisScan"
+        : key;
+
+    cumulative[key] =
+      safeNumber(cumulative[key]) +
+      safeNumber(row?.[sourceKey]);
+  }
+
+  cumulative.lastUpdatedAt =
+    Date.now();
+
+  cumulative.lastScan = {
+    capturedAt:
+      cumulative.lastUpdatedAt,
+    ...row,
+    recentMarketCandidatesUpTo6h:
+      safeNumber(
+        funnel?.diagnosticOnly
+          ?.recentMarketCandidatesUpTo6h
+      )
+  };
+
+  return cumulative;
+}
+
+function launchCoverageTelegramMessageV474(state) {
+  const c =
+    ensureLaunchCoverageCumulativeV474(state);
+
+  const last =
+    c?.lastScan || {};
+
+  const fmt =
+    value =>
+      Number(
+        safeNumber(value)
+      ).toLocaleString("en-GB");
+
+  const ratio =
+    (a, b) => {
+      const numerator =
+        safeNumber(a);
+      const denominator =
+        safeNumber(b);
+      if (denominator <= 0) return "UNVERIFIED";
+      return `${(
+        numerator /
+        denominator *
+        100
+      ).toFixed(1)}%`;
+    };
+
+  return [
+    `🔭 <b>Launch Coverage Funnel — ${escapeHtml(VERSION)}</b>`,
+    "",
+    "<b>Latest scan</b>",
+    `Live addresses observed: <b>${fmt(last.liveAddressesObserved)}</b>`,
+    `New addresses discovered*: <b>${fmt(last.discoveredNewAddresses)}</b>`,
+    `Positively verified launches: <b>${fmt(last.positivelyVerifiedLaunchesThisScan)}</b>`,
+    `Current/live selected for analysis: <b>${fmt(last.selectedCurrentLiveForAnalysis)}</b>`,
+    `Current/live analysis loop entered: <b>${fmt(last.currentLiveAnalysisLoopEntered)}</b>`,
+    `Current/live budget deferred: <b>${fmt(last.currentLiveBudgetDeferred)}</b>`,
+    `Current/live returned candidates: <b>${fmt(last.currentLiveReturnedCandidates)}</b>`,
+    `Returned with verified launch source: <b>${fmt(last.returnedCurrentLiveWithVerifiedLaunchSource)}</b>`,
+    `Returned with launch source UNVERIFIED: <b>${fmt(last.returnedCurrentLiveWithUnverifiedLaunchSource)}</b>`,
+    `Telegram qualified: <b>${fmt(last.currentLiveTelegramQualified)}</b>`,
+    `Telegram sent: <b>${fmt(last.currentLiveTelegramSent)}</b>`,
+    "",
+    "<b>Cumulative since V474</b>",
+    `Scans observed: <b>${fmt(c.scansObserved)}</b>`,
+    `Live addresses observed: <b>${fmt(c.liveAddressesObserved)}</b>`,
+    `Positively verified launches: <b>${fmt(c.positivelyVerifiedLaunches)}</b>`,
+    `Current/live returned candidates: <b>${fmt(c.currentLiveReturnedCandidates)}</b>`,
+    `Launch-source verification among returned current/live candidates: <b>${ratio(c.returnedCurrentLiveWithVerifiedLaunchSource, c.currentLiveReturnedCandidates)}</b>`,
+    `Telegram sent: <b>${fmt(c.currentLiveTelegramSent)}</b>`,
+    "",
+    "⚠️ <b>Probable launches: DATA UNVERIFIED</b>",
+    "⚠️ <b>Unsupported launch sources: DATA UNVERIFIED</b>",
+    "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
+    "",
+    "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
+    "<i>Measurement only. Zero additional provider requests and no scoring/threshold changes.</i>"
+  ].join("\\n");
+}
+
 function verifiedLaunchMeterTelegramMessageV470(state) {
   const meter =
     verifiedLaunchMeterSnapshotV470(
@@ -82191,6 +82664,7 @@ function telegramHelpV271() {
     "<code>/live GUS</code> — V414 lower-timeframe rolling signals + breakout state (read-only)",
     "<code>/v3usd 0xADDRESS</code> — persisted native V3 USD flow (read-only)",
     "<code>/launches</code> — verified rolling 24h launch meter",
+    "<code>/launchcoverage</code> — launch discovery-to-Telegram coverage funnel",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/help</code> — command list",
@@ -82487,6 +82961,32 @@ async function telegramCommandReplyV271(
   let reply;
 
   if (
+    parsed.command ===
+      "/launchcoverage" ||
+    parsed.command ===
+      "/coverage"
+  ) {
+    reply =
+      launchCoverageTelegramMessageV474(
+        state
+      );
+
+    if (diagnosticV273) {
+      diagnosticV273.launchCoverageV474 = {
+        scannerBudgetConsumed:
+          false,
+        externalProviderRequests:
+          0,
+        stateWrites:
+          0,
+        scansObserved:
+          safeNumber(
+            state?.launchCoverageCumulativeV474
+              ?.scansObserved
+          )
+      };
+    }
+  } else if (
     parsed.command ===
       "/launches" ||
     parsed.command ===
