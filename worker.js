@@ -1,6 +1,30 @@
 /**
- * Robinhood Chain Meme Hunter — V502
- * AUTHORITATIVE RUNTIME VERSION: V502
+ * Robinhood Chain Meme Hunter — V503
+ * AUTHORITATIVE RUNTIME VERSION: V503
+ *
+ * V503 RECURRING-CREATOR EXACT ATTRIBUTION:
+ * - preserves V502 unknown-source diversification and all confirmed-working
+ *   launch detectors / scoring / qualification / request protections;
+ * - suppresses generic ERC-20 transfer selector 0xa9059cbb alongside approve
+ *   0x095ea7b3 from mechanism-candidate method evidence;
+ * - automatically selects the strongest recurring creator cluster with 2+
+ *   independently verified token origins, excluding already-solved exact RWA
+ *   deployment source evidence;
+ * - Stage A profiles the recurring creator with authenticated Blockscout V2
+ *   address identity using ONE existing secondary diagnostic slot;
+ * - Stage B, on a later eligible scan, fingerprints that exact creator's
+ *   transaction page using ONE existing secondary diagnostic slot;
+ * - transaction fingerprint records exact incoming callers, outgoing targets,
+ *   methods/selectors and sample transaction hashes without assuming page order;
+ * - generic approve/transfer selectors are suppressed from V503 mechanism leads;
+ * - creator recurrence, identity, methods, selectors and counterparties are
+ *   NEVER sufficient for launch-source promotion;
+ * - next proof requirement remains exact token creation / trigger transaction
+ *   linkage before any source can be promoted or detector activated;
+ * - ZERO increase to per-scan external request ceiling; one secondary diagnostic
+ *   request maximum remains enforced; hard global request limit remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, verified-USD,
+ *   dense-pool completion, RWA detector or launch-meter changes.
  *
  * V502 UNKNOWN-SOURCE TARGET DIVERSIFICATION:
  * - resumes launch-source discovery after the RWA mechanism was confirmed/frozen;
@@ -2345,7 +2369,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V502";
+const VERSION = "V503";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71788,7 +71812,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71815,6 +71839,49 @@ for (
         false
     },
 
+    recurringCreatorExactAttributionV503: {
+      enabled: true,
+      measurementOnly: true,
+      objective:
+        "TURN_RECURRING_CREATOR_CLUSTERS_INTO_EXACT_MECHANISM_EVIDENCE",
+      strongestCreatorFirst:
+        true,
+      minimumDistinctVerifiedTokenOrigins:
+        2,
+      stageA:
+        "AUTHENTICATED_BLOCKSCOUT_CREATOR_ADDRESS_IDENTITY",
+      stageB:
+        "AUTHENTICATED_BLOCKSCOUT_CREATOR_TRANSACTION_FINGERPRINT",
+      stageRequestsPerScanMax:
+        1,
+      sameScanTwoStageExecution:
+        false,
+      genericSelectorsSuppressed: [
+        "0x095ea7b3",
+        "0xa9059cbb"
+      ],
+      recurringCreatorMeansLaunchpad:
+        false,
+      transactionFingerprintMeansLaunchpad:
+        false,
+      exactCreationOrTriggerLinkageRequiredBeforePromotion:
+        true,
+      externalRequestCeilingChanged:
+        false,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false,
+      rwaDetectorChanged:
+        false
+    },
+
     unknownSourceTargetDiversificationV502: {
       enabled: true,
       measurementOnly: true,
@@ -71832,8 +71899,10 @@ for (
         604800000,
       recurringMechanismCandidateThreshold:
         "2_OR_MORE_DISTINCT_TOKEN_FINGERPRINTS",
-      genericApproveSelectorSuppressed:
+      genericSelectorsSuppressed: [
         "0x095ea7b3",
+        "0xa9059cbb"
+      ],
       candidateMechanismMeansProof:
         false,
       exactProofStillRequiredBeforePromotion:
@@ -88221,6 +88290,100 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
   };
 
   /*
+   * V503 RECURRING-CREATOR ATTRIBUTION ROUTE:
+   * Lower evidence than exact V489 internal-creation work, but higher value than
+   * retrying generic raw-trace backlog. Stage A profiles the strongest recurring
+   * creator, Stage B fingerprints its transaction activity on a later scan.
+   */
+  const recurringCreatorWorkV503 =
+    selectRecurringCreatorWorkV503(
+      state
+    );
+
+  if (recurringCreatorWorkV503) {
+    const creatorV503 =
+      await runRecurringCreatorAttributionV503({
+        env,
+        state,
+        budget
+      });
+
+    telemetry.recurringCreatorAttributionV503 =
+      creatorV503;
+
+    telemetry.selectedFromPersistedVerifiedOrigins =
+      true;
+    telemetry.selectedToken =
+      creatorV503
+        ?.evidenceTokens?.[0] ||
+      null;
+    telemetry.selectedCreator =
+      creatorV503
+        ?.selectedCreator ||
+      null;
+    telemetry.selectedCreationTransactionHash =
+      creatorV503
+        ?.identityResult
+        ?.sourceCreationTransactionHash ||
+      null;
+    telemetry.attempted =
+      creatorV503?.attempted ===
+      true;
+    telemetry.requestConsumed =
+      creatorV503
+        ?.requestConsumed === true;
+    telemetry.processedAfterAttempt =
+      creatorV503
+        ?.processedAfterAttempt ===
+      true;
+    telemetry.status =
+      creatorV503?.status ||
+      "V503_STATUS_UNAVAILABLE";
+
+    if (
+      creatorV503?.attempted === true &&
+      v483DeferredForFairnessV487
+    ) {
+      telemetry.fairnessV487
+        .fairnessGrantThisScan = true;
+
+      fairness.fairnessGrants =
+        safeNumber(
+          fairness.fairnessGrants
+        ) + 1;
+
+      fairness.lastFairnessGrantAt =
+        Date.now();
+
+      fairness.lastFairnessGrantToken =
+        telemetry.selectedToken ||
+        null;
+
+      fairness.consecutiveV483BlocksOfV486 =
+        0;
+
+      fairness.lastDecision =
+        "V503_FAIRNESS_GRANTED_TO_RECURRING_CREATOR_ATTRIBUTION";
+
+      fairness.lastDecisionAt =
+        Date.now();
+    }
+
+    root.lastStatus =
+      `V486_ROUTED_TO_V503:${telemetry.status}`;
+
+    return telemetry;
+  }
+
+  telemetry.recurringCreatorAttributionV503 = {
+    enabled: true,
+    measurementOnly: true,
+    attempted: false,
+    status:
+      "V503_NO_UNPROCESSED_RECURRING_CREATOR_WORK"
+  };
+
+  /*
    * V488 Chainstack debug tracing remains in the codebase for evidence/history
    * but automatic execution is intentionally disabled on the confirmed free
    * plan because it returns HTTP 403. Do not burn another request here.
@@ -94061,6 +94224,786 @@ function exactCreationTriggerLinkageSnapshotV492(
   };
 }
 
+
+function ensureRecurringCreatorAttributionV503(
+  state
+) {
+  state.recurringCreatorAttributionV503 =
+    state.recurringCreatorAttributionV503 &&
+    typeof state.recurringCreatorAttributionV503 === "object"
+      ? state.recurringCreatorAttributionV503
+      : {
+          enabled: true,
+          measurementOnly: true,
+          monitorStartedAt: Date.now(),
+          scansObserved: 0,
+          identityRequestsAttempted: 0,
+          identityRequestsSucceeded: 0,
+          transactionRequestsAttempted: 0,
+          transactionRequestsSucceeded: 0,
+          creatorProfiles: {},
+          processedIdentityCreators: {},
+          processedTransactionCreators: {},
+          lastSelectedCreator: null,
+          lastSelectedStage: null,
+          lastStatus: null,
+          lastHttpStatus: null
+        };
+
+  const root =
+    state.recurringCreatorAttributionV503;
+
+  root.creatorProfiles =
+    root.creatorProfiles &&
+    typeof root.creatorProfiles === "object"
+      ? root.creatorProfiles
+      : {};
+
+  root.processedIdentityCreators =
+    root.processedIdentityCreators &&
+    typeof root.processedIdentityCreators === "object"
+      ? root.processedIdentityCreators
+      : {};
+
+  root.processedTransactionCreators =
+    root.processedTransactionCreators &&
+    typeof root.processedTransactionCreators === "object"
+      ? root.processedTransactionCreators
+      : {};
+
+  return root;
+}
+
+function recurringCreatorCandidatesV503(
+  state
+) {
+  const origin =
+    pruneTokenOriginTraceV477(
+      state
+    );
+
+  const root =
+    ensureRecurringCreatorAttributionV503(
+      state
+    );
+
+  const solvedExactSources =
+    new Set([
+      normalize(
+        RWA_LAUNCH_TOKEN_DEPLOYER_V495
+      ),
+      normalize(
+        RWA_LAUNCHPAD_FACTORY_V495
+      )
+    ].filter(isAddress));
+
+  return Object.values(
+    origin?.creatorClusters || {}
+  )
+    .filter(row => {
+      const creator =
+        normalize(
+          row?.creator
+        );
+
+      return (
+        isAddress(creator) &&
+        safeNumber(
+          row?.distinctTokens
+        ) >= 2 &&
+        !solvedExactSources.has(
+          creator
+        )
+      );
+    })
+    .map(row => {
+      const creator =
+        normalize(
+          row?.creator
+        );
+
+      return {
+        creator,
+        distinctTokens:
+          safeNumber(
+            row?.distinctTokens
+          ),
+        tokens:
+          Array.isArray(row?.tokens)
+            ? row.tokens
+                .map(normalize)
+                .filter(isAddress)
+                .slice(0, 30)
+            : [],
+        firstVerifiedAt:
+          safeNumber(
+            row?.firstVerifiedAt
+          ) || null,
+        lastVerifiedAt:
+          safeNumber(
+            row?.lastVerifiedAt
+          ) || null,
+        identityProcessed:
+          Boolean(
+            root
+              .processedIdentityCreators[
+                creator
+              ]
+          ),
+        transactionsProcessed:
+          Boolean(
+            root
+              .processedTransactionCreators[
+                creator
+              ]
+          ),
+        profile:
+          root.creatorProfiles[
+            creator
+          ] || null
+      };
+    })
+    .sort(
+      (a, b) =>
+        b.distinctTokens -
+          a.distinctTokens ||
+        safeNumber(
+          b.lastVerifiedAt
+        ) -
+          safeNumber(
+            a.lastVerifiedAt
+          )
+    );
+}
+
+function selectRecurringCreatorWorkV503(
+  state
+) {
+  const rows =
+    recurringCreatorCandidatesV503(
+      state
+    );
+
+  const identity =
+    rows.find(
+      row =>
+        row.identityProcessed !== true
+    );
+
+  if (identity) {
+    return {
+      stage:
+        "IDENTITY",
+      candidate:
+        identity
+    };
+  }
+
+  const transactions =
+    rows.find(row => {
+      const profile =
+        row?.profile;
+
+      return (
+        row.identityProcessed === true &&
+        row.transactionsProcessed !== true &&
+        profile &&
+        typeof profile === "object"
+      );
+    });
+
+  if (transactions) {
+    return {
+      stage:
+        "TRANSACTIONS",
+      candidate:
+        transactions
+    };
+  }
+
+  return null;
+}
+
+function filterGenericCreatorMechanismRowsV503(
+  rows
+) {
+  const generic =
+    new Set([
+      "0x095ea7b3",
+      "0xa9059cbb",
+      "approve",
+      "approve(address,uint256)",
+      "transfer",
+      "transfer(address,uint256)"
+    ]);
+
+  return (
+    Array.isArray(rows)
+      ? rows
+      : []
+  ).filter(row => {
+    const key =
+      String(
+        row?.key || ""
+      )
+        .trim()
+        .toLowerCase();
+
+    return (
+      key &&
+      !generic.has(key)
+    );
+  });
+}
+
+async function runRecurringCreatorAttributionV503({
+  env,
+  state,
+  budget
+}) {
+  const root =
+    ensureRecurringCreatorAttributionV503(
+      state
+    );
+
+  root.scansObserved =
+    safeNumber(
+      root.scansObserved
+    ) + 1;
+
+  const work =
+    selectRecurringCreatorWorkV503(
+      state
+    );
+
+  const telemetry = {
+    enabled: true,
+    measurementOnly: true,
+    promotionAllowed: false,
+    attempted: false,
+    requestConsumed: false,
+    selectedStage: null,
+    selectedCreator: null,
+    distinctTokens: 0,
+    evidenceTokens: [],
+    provider:
+      "BLOCKSCOUT_PRO",
+    httpStatus: null,
+    identityResult: null,
+    transactionFingerprint: null,
+    processedAfterAttempt: false,
+    hardRequestLimit: 42,
+    maxRequestsThisScan: 1,
+    genericSelectorsSuppressed: [
+      "0x095ea7b3",
+      "0xa9059cbb"
+    ],
+    launchSourcePromoted: false,
+    nextExactProofRequired:
+      "EXACT_CREATION_OR_TRIGGER_TRANSACTION_LINKAGE",
+    status: null
+  };
+
+  if (!work?.candidate) {
+    telemetry.status =
+      "V503_NO_UNPROCESSED_RECURRING_CREATOR_WORK";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const candidate =
+    work.candidate;
+
+  const creator =
+    normalize(
+      candidate?.creator
+    );
+
+  telemetry.selectedStage =
+    work.stage;
+  telemetry.selectedCreator =
+    creator;
+  telemetry.distinctTokens =
+    safeNumber(
+      candidate?.distinctTokens
+    );
+  telemetry.evidenceTokens =
+    Array.isArray(
+      candidate?.tokens
+    )
+      ? candidate.tokens
+          .slice(0, 30)
+      : [];
+
+  root.lastSelectedCreator =
+    creator;
+  root.lastSelectedStage =
+    work.stage;
+
+  let url = null;
+  let requestLabel = null;
+
+  if (
+    work.stage ===
+      "IDENTITY"
+  ) {
+    url =
+      blockscoutProOriginTraceUrlV480(
+        env,
+        creator
+      );
+
+    requestLabel =
+      "BLOCKSCOUT_PRO_RECURRING_CREATOR_IDENTITY_V503";
+  } else {
+    url =
+      blockscoutProAddressTransactionsUrlV491(
+        env,
+        creator
+      );
+
+    requestLabel =
+      "BLOCKSCOUT_PRO_RECURRING_CREATOR_TRANSACTIONS_V503";
+  }
+
+  if (!url) {
+    telemetry.status =
+      "V503_BLOCKSCOUT_PRO_NOT_CONFIGURED_OR_URL_UNAVAILABLE";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const spare =
+    consumeReleasedGlobalSpareV478(
+      budget,
+      requestLabel,
+      1
+    );
+
+  if (spare?.ok !== true) {
+    telemetry.status =
+      `V503_BUDGET_UNAVAILABLE:${spare?.reason || "UNKNOWN"}`;
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  telemetry.attempted = true;
+  telemetry.requestConsumed = true;
+
+  const attemptedAt =
+    Date.now();
+
+  if (
+    work.stage ===
+      "IDENTITY"
+  ) {
+    root.identityRequestsAttempted =
+      safeNumber(
+        root.identityRequestsAttempted
+      ) + 1;
+  } else {
+    root.transactionRequestsAttempted =
+      safeNumber(
+        root.transactionRequestsAttempted
+      ) + 1;
+  }
+
+  const controller =
+    new AbortController();
+
+  const timer =
+    setTimeout(
+      () => controller.abort(),
+      6000
+    );
+
+  try {
+    const response =
+      await fetch(
+        url,
+        {
+          method: "GET",
+          headers: {
+            accept:
+              "application/json"
+          },
+          signal:
+            controller.signal
+        }
+      );
+
+    telemetry.httpStatus =
+      response.status;
+    root.lastHttpStatus =
+      response.status;
+
+    if (!response.ok) {
+      telemetry.status =
+        `V503_${work.stage}_HTTP_${response.status}`;
+
+      root.lastStatus =
+        telemetry.status;
+
+      const processed = {
+        creator,
+        attemptedAt,
+        httpStatus:
+          response.status,
+        status:
+          telemetry.status,
+        processedOnce:
+          true,
+        retryAutomatically:
+          false
+      };
+
+      if (
+        work.stage ===
+          "IDENTITY"
+      ) {
+        root.processedIdentityCreators[
+          creator
+        ] = processed;
+      } else {
+        root.processedTransactionCreators[
+          creator
+        ] = processed;
+      }
+
+      telemetry.processedAfterAttempt =
+        true;
+
+      return telemetry;
+    }
+
+    const body =
+      await response.json();
+
+    if (
+      work.stage ===
+        "IDENTITY"
+    ) {
+      root.identityRequestsSucceeded =
+        safeNumber(
+          root.identityRequestsSucceeded
+        ) + 1;
+
+      const identity =
+        parseDeploymentSourceIdentityV490({
+          body,
+          source:
+            creator,
+          token:
+            candidate?.tokens?.[0] ||
+            null,
+          creationKind:
+            null,
+          creationTransactionHash:
+            null
+        });
+
+      const profile = {
+        ...identity,
+        creator,
+        recurringTokenCount:
+          safeNumber(
+            candidate?.distinctTokens
+          ),
+        recurringTokens:
+          Array.isArray(
+            candidate?.tokens
+          )
+            ? candidate.tokens
+                .slice(0, 30)
+            : [],
+        observedAt:
+          attemptedAt,
+        provider:
+          "BLOCKSCOUT_PRO_V2_ADDRESS_INFO_V503",
+        evidenceStandard:
+          "RECURRING_CREATOR_ACROSS_2_PLUS_VERIFIED_TOKEN_ORIGINS_PLUS_ADDRESS_PROFILE_V503",
+        recurringCreatorMeansLaunchpad:
+          false,
+        launchSource:
+          "DATA UNVERIFIED"
+      };
+
+      root.creatorProfiles[
+        creator
+      ] = profile;
+
+      root.processedIdentityCreators[
+        creator
+      ] = {
+        creator,
+        attemptedAt,
+        httpStatus:
+          response.status,
+        isContract:
+          identity?.isContract ===
+          true,
+        contractName:
+          identity?.contractName ||
+          null,
+        sourceCreator:
+          identity?.sourceCreator ||
+          null,
+        sourceCreationTransactionHash:
+          identity
+            ?.sourceCreationTransactionHash ||
+          null,
+        status:
+          identity?.isContract ===
+          true
+            ? "V503_RECURRING_CREATOR_IDENTITY_CONTRACT_PROFILED"
+            : "V503_RECURRING_CREATOR_IDENTITY_WALLET_PROFILED",
+        processedOnce:
+          true
+      };
+
+      telemetry.identityResult =
+        profile;
+      telemetry.processedAfterAttempt =
+        true;
+      telemetry.status =
+        root
+          .processedIdentityCreators[
+            creator
+          ].status;
+    } else {
+      root.transactionRequestsSucceeded =
+        safeNumber(
+          root.transactionRequestsSucceeded
+        ) + 1;
+
+      const profile =
+        root.creatorProfiles[
+          creator
+        ] || {};
+
+      const parsed =
+        parseSourceMechanismTransactionsV491({
+          body,
+          source:
+            creator,
+          evidenceToken:
+            candidate?.tokens?.[0] ||
+            null,
+          contractName:
+            profile?.contractName ||
+            null,
+          exactV489CreationKind:
+            null
+        });
+
+      const fingerprint = {
+        ...parsed,
+        recurringCreator:
+          creator,
+        recurringTokenCount:
+          safeNumber(
+            candidate?.distinctTokens
+          ),
+        recurringTokens:
+          Array.isArray(
+            candidate?.tokens
+          )
+            ? candidate.tokens
+                .slice(0, 30)
+            : [],
+        topIncomingMethodsNonGeneric:
+          filterGenericCreatorMechanismRowsV503(
+            parsed
+              ?.topIncomingMethods
+          ),
+        topOutgoingMethodsNonGeneric:
+          filterGenericCreatorMechanismRowsV503(
+            parsed
+              ?.topOutgoingMethods
+          ),
+        topIncomingSelectorsNonGeneric:
+          filterGenericCreatorMechanismRowsV503(
+            parsed
+              ?.topIncomingSelectors
+          ),
+        topOutgoingSelectorsNonGeneric:
+          filterGenericCreatorMechanismRowsV503(
+            parsed
+              ?.topOutgoingSelectors
+          ),
+        genericSelectorsSuppressed: [
+          "0x095ea7b3",
+          "0xa9059cbb"
+        ],
+        evidenceMeaning:
+          "RECURRING_CREATOR_TRANSACTION_FINGERPRINT_ONLY",
+        launchSource:
+          "DATA UNVERIFIED",
+        exactTriggerOrCreationLinkage:
+          false,
+        promotionAllowed:
+          false
+      };
+
+      root.creatorProfiles[
+        creator
+      ] = {
+        ...profile,
+        transactionFingerprint:
+          fingerprint,
+        transactionFingerprintObservedAt:
+          attemptedAt
+      };
+
+      root.processedTransactionCreators[
+        creator
+      ] = {
+        creator,
+        attemptedAt,
+        httpStatus:
+          response.status,
+        transactionRowsReturned:
+          safeNumber(
+            parsed
+              ?.transactionRowsReturned
+          ),
+        status:
+          "V503_RECURRING_CREATOR_TRANSACTION_FINGERPRINT_CAPTURED",
+        processedOnce:
+          true
+      };
+
+      telemetry.transactionFingerprint =
+        fingerprint;
+      telemetry.processedAfterAttempt =
+        true;
+      telemetry.status =
+        "V503_RECURRING_CREATOR_TRANSACTION_FINGERPRINT_CAPTURED";
+    }
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  } catch (error) {
+    telemetry.status =
+      `V503_${work.stage}_FETCH_ERROR:${errorString(error)}`;
+
+    root.lastStatus =
+      telemetry.status;
+
+    /*
+     * Transport failure is intentionally not marked processed so the exact
+     * recurring creator remains eligible on a later scan.
+     */
+    telemetry.processedAfterAttempt =
+      false;
+
+    return telemetry;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function recurringCreatorAttributionSnapshotV503(
+  state
+) {
+  const root =
+    ensureRecurringCreatorAttributionV503(
+      state
+    );
+
+  const candidates =
+    recurringCreatorCandidatesV503(
+      state
+    );
+
+  const profiles =
+    Object.values(
+      root.creatorProfiles || {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.recurringTokenCount
+          ) -
+          safeNumber(
+            a?.recurringTokenCount
+          )
+      )
+      .slice(0, 20);
+
+  return {
+    enabled: true,
+    measurementOnly: true,
+    monitorStartedAt:
+      safeNumber(
+        root.monitorStartedAt
+      ) || null,
+    scansObserved:
+      safeNumber(
+        root.scansObserved
+      ),
+    identityRequestsAttempted:
+      safeNumber(
+        root.identityRequestsAttempted
+      ),
+    identityRequestsSucceeded:
+      safeNumber(
+        root.identityRequestsSucceeded
+      ),
+    transactionRequestsAttempted:
+      safeNumber(
+        root.transactionRequestsAttempted
+      ),
+    transactionRequestsSucceeded:
+      safeNumber(
+        root.transactionRequestsSucceeded
+      ),
+    eligibleRecurringCreatorCount:
+      candidates.length,
+    strongestRecurringCreators:
+      candidates.slice(0, 10),
+    retainedCreatorProfiles:
+      profiles,
+    lastSelectedCreator:
+      root.lastSelectedCreator ||
+      null,
+    lastSelectedStage:
+      root.lastSelectedStage ||
+      null,
+    lastStatus:
+      root.lastStatus ||
+      null,
+    lastHttpStatus:
+      root.lastHttpStatus ??
+      null,
+    genericSelectorsSuppressed: [
+      "0x095ea7b3",
+      "0xa9059cbb"
+    ],
+    evidenceMeaning:
+      "RECURRING_CREATOR_AND_TRANSACTION_FINGERPRINT_NOT_LAUNCHPAD_PROOF",
+    exactProofRequiredBeforePromotion:
+      true,
+    launchSourcePromotion:
+      false,
+    maxRequestsPerScan:
+      1,
+    hardGlobalLimitUnchanged:
+      42
+  };
+}
+
 function ensureDeploymentSourceMechanismFingerprintV491(
   state
 ) {
@@ -98628,7 +99571,10 @@ function mechanismCandidateSnapshotV502(
     new Set([
       "0x095ea7b3",
       "approve",
-      "approve(address,uint256)"
+      "approve(address,uint256)",
+      "0xa9059cbb",
+      "transfer",
+      "transfer(address,uint256)"
     ]);
 
   const recurringCounterparties =
@@ -98682,7 +99628,8 @@ function mechanismCandidateSnapshotV502(
     recurringNonGenericMethodCandidates:
       recurringNonGenericMethods,
     genericMethodsSuppressed: [
-      "0x095ea7b3"
+      "0x095ea7b3",
+      "0xa9059cbb"
     ],
     interpretation:
       "MECHANISM_CANDIDATES_ONLY_NOT_LAUNCH_SOURCE_PROOF",
@@ -99624,6 +100571,10 @@ function tokenOriginTraceSnapshotV477(state) {
       mechanismFingerprintSnapshotV483(state),
     unknownSourceTargetRouterV502:
       unknownSourceTargetRouterSnapshotV502(
+        state
+      ),
+    recurringCreatorAttributionV503:
+      recurringCreatorAttributionSnapshotV503(
         state
       ),
     exactCreationMechanismAttributionV485:
