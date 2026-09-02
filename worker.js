@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V437
- * AUTHORITATIVE RUNTIME VERSION: V437
+ * Robinhood Chain Meme Hunter — V438
+ * AUTHORITATIVE RUNTIME VERSION: V438
+ * V438 begins the independent on-chain market-verification path without weakening existing market/liquidity gates. It reuses the bot's existing exact-pool V4 directional ledger (V179+) and only accepts candidate-matched swaps whose quote value is already independently exact-USD verified through canonical USDG or canonical WETH/native ETH with the existing verified WETH/USDG reference. From those real executed swaps, V438 derives a bounded recent observed execution-price sample, median observed USD price, fully-diluted supply valuation from the already-verified ERC-20 totalSupply/decimals, and the largest verified observed USD trade as an execution-capacity observation. These values are kept in a separate nested evidence object and DO NOT set market.verified, DO NOT populate core liquidityUsd, and DO NOT bypass the existing minimum-liquidity or Telegram gates. This is the safe foundation for removing DexScreener/Gecko dependence: it tells us whether the bot already has enough exact on-chain price evidence, while explicitly identifying USD liquidity as the remaining proof requirement. No extra external requests, no new provider, no scoring change, no Telegram threshold change, no request-ceiling increase, and no holder/RPC behavior change.
  * V437 is a narrow holder-evidence recovery upgrade based on V436 diagnostics. It preserves the existing V422 verified-empty holder retry and extends that same bounded retry mechanism to Blockscout holder-endpoint unavailable/404 evidence. Zero-row responses keep the existing 2-minute retry cadence; holder endpoint unavailable/404 uses a slower 5-minute retry cadence. The retry remains forward-only and bounded by the existing V422 45-minute maximum age. A retry never promotes holder evidence unless real holder rows are later returned and the existing integrity/concentration/whale checks pass. No holder data is fabricated and no scoring, market verification, Telegram threshold, request ceiling, Chainstack/RPC behavior, or provider trust rule is weakened.
  * V436 is a diagnostic-only build on the proven V435 live-discovery fix. It adds a zero-request, zero-write candidate blocker diagnostic for returned candidates so each analysed candidate exposes the exact market, holder, and Telegram gating evidence that stopped or allowed progression. The diagnostic records Dex/Gecko market outcome already attached to the candidate, provider availability/cooldown evidence already present, holder integrity/source/Blockscout fallback evidence, and the exact existing Telegram qualification reasons. No provider order, retry cadence, request ceiling, scoring, qualification, holder requirement, market verification rule, Telegram threshold, or learning behavior is changed.
  * V435 is a narrow live-discovery reliability build on V434. Chainstack is now the preferred provider for LIVE discovery eth_getLogs only, using the already-configured CHAINSTACK_RPC_URL and the existing discovery-live request/global budgets. Robinhood Public RPC and Alchemy remain bounded fallbacks. Backlog discovery/provider learning is deliberately left unchanged so existing public/Alchemy proven-range logic cannot be regressed by this change. V435 adds an independent live-discovery Chainstack cooldown on HTTP 429 and live-provider telemetry. No extra request ceiling, no additional scheduled scans, no scoring/qualification/Telegram/holder/market changes, and no weakening of verification requirements.
@@ -1511,7 +1512,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V437";
+const VERSION = "V438";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2530,6 +2531,476 @@ function onChainV4MarketEvidence(
 
     usdLiquidityVerified:
       false
+  };
+}
+
+/* =========================================================
+   V438 INDEPENDENT ON-CHAIN MARKET VERIFICATION FOUNDATION
+   ========================================================= */
+
+const ONCHAIN_MARKET_PRICE_MAX_AGE_MS_V438 =
+  30 * 60 * 1000;
+
+const ONCHAIN_MARKET_PRICE_MAX_SAMPLES_V438 =
+  7;
+
+function decimalRawToNumberV438(
+  raw,
+  decimals
+) {
+  try {
+    const value =
+      BigInt(
+        String(raw)
+      );
+
+    const d =
+      Number(decimals);
+
+    if (
+      value <= 0n ||
+      !Number.isInteger(d) ||
+      d < 0 ||
+      d > 36
+    ) {
+      return null;
+    }
+
+    return bigintDecimalToNumberV187(
+      value,
+      d
+    );
+  } catch {
+    return null;
+  }
+}
+
+function verifiedCandidatePoolIdsV438(
+  watched
+) {
+  const ids =
+    new Set();
+
+  for (
+    const value
+    of [
+      watched?.poolId,
+      watched?.primaryPoolId,
+      watched?.lastPoolId
+    ]
+  ) {
+    const id =
+      normalize(value);
+
+    if (
+      /^0x[a-f0-9]{64}$/.test(
+        String(id || "")
+      )
+    ) {
+      ids.add(id);
+    }
+  }
+
+  for (
+    const pool
+    of Array.isArray(watched?.pools)
+      ? watched.pools
+      : []
+  ) {
+    const id =
+      normalize(
+        pool?.poolId ||
+        pool?.id
+      );
+
+    if (
+      /^0x[a-f0-9]{64}$/.test(
+        String(id || "")
+      )
+    ) {
+      ids.add(id);
+    }
+  }
+
+  return ids;
+}
+
+function onChainMarketFoundationV438(
+  state,
+  watched,
+  validation,
+  address
+) {
+  const token =
+    normalize(address);
+
+  const decimals =
+    Number(
+      validation?.decimals
+    );
+
+  const totalSupplyRaw =
+    validation?.totalSupply ??
+    null;
+
+  const base = {
+    enabled: true,
+    verifiedObservedExecutionPrice:
+      false,
+    source:
+      "ONCHAIN_V4_EXACT_USD_EXECUTIONS_V438",
+    candidateAddress:
+      token || null,
+    poolIdentityRequired:
+      true,
+    exactUsdRequired:
+      true,
+    maxSampleAgeMs:
+      ONCHAIN_MARKET_PRICE_MAX_AGE_MS_V438,
+    sampleCount: 0,
+    medianObservedPriceUsd:
+      null,
+    latestObservedPriceUsd:
+      null,
+    latestObservedAt:
+      null,
+    fullyDilutedValuationUsd:
+      null,
+    totalSupplyVerified:
+      false,
+    decimalsVerified:
+      false,
+    largestObservedExactUsdTrade:
+      null,
+    executionCapacityInterpretation:
+      "OBSERVED_EXECUTED_TRADE_SIZE_NOT_POOL_LIQUIDITY",
+    usdLiquidityVerified:
+      false,
+    fullMarketPromotionEligible:
+      false,
+    remainingRequirement:
+      "INDEPENDENT_EXACT_POOL_USD_LIQUIDITY_PROOF",
+    externalRequestsAdded:
+      0,
+    marketVerifiedChanged:
+      false,
+    liquidityGateChanged:
+      false,
+    telegramThresholdChanged:
+      false
+  };
+
+  if (
+    !isAddress(token) ||
+    token === ZERO
+  ) {
+    return {
+      ...base,
+      status:
+        "TOKEN_IDENTITY_UNVERIFIED"
+    };
+  }
+
+  if (
+    !Number.isInteger(decimals) ||
+    decimals < 0 ||
+    decimals > 36
+  ) {
+    return {
+      ...base,
+      status:
+        "TOKEN_DECIMALS_UNVERIFIED"
+    };
+  }
+
+  let totalSupply =
+    null;
+
+  try {
+    totalSupply =
+      totalSupplyRaw !== null &&
+      totalSupplyRaw !== undefined
+        ? decimalRawToNumberV438(
+            totalSupplyRaw,
+            decimals
+          )
+        : null;
+  } catch {
+    totalSupply = null;
+  }
+
+  const ledger =
+    state
+      ?.onChainDirectionalV179
+      ?.[token];
+
+  const records =
+    Array.isArray(
+      ledger?.records
+    )
+      ? ledger.records
+      : [];
+
+  const allowedPoolIds =
+    verifiedCandidatePoolIdsV438(
+      watched
+    );
+
+  const nowMs =
+    Date.now();
+
+  const samples =
+    [];
+
+  for (
+    const row
+    of records
+  ) {
+    const poolId =
+      normalize(
+        row?.poolId
+      );
+
+    if (
+      allowedPoolIds.size > 0 &&
+      !allowedPoolIds.has(poolId)
+    ) {
+      continue;
+    }
+
+    if (
+      row?.exactUsdVerified !==
+        true ||
+      !Number.isFinite(
+        Number(
+          row?.exactUsdAmount
+        )
+      ) ||
+      Number(
+        row.exactUsdAmount
+      ) <= 0
+    ) {
+      continue;
+    }
+
+    const observedAt =
+      safeNumber(
+        row?.observedAt
+      );
+
+    if (
+      observedAt <= 0 ||
+      nowMs - observedAt >
+        ONCHAIN_MARKET_PRICE_MAX_AGE_MS_V438
+    ) {
+      continue;
+    }
+
+    const candidateAmount =
+      decimalRawToNumberV438(
+        row?.candidateAmountRaw,
+        decimals
+      );
+
+    if (
+      !Number.isFinite(
+        candidateAmount
+      ) ||
+      candidateAmount <= 0
+    ) {
+      continue;
+    }
+
+    const exactUsd =
+      Number(
+        row.exactUsdAmount
+      );
+
+    const executionPriceUsd =
+      exactUsd /
+      candidateAmount;
+
+    if (
+      !Number.isFinite(
+        executionPriceUsd
+      ) ||
+      executionPriceUsd <= 0
+    ) {
+      continue;
+    }
+
+    samples.push({
+      poolId,
+      observedAt,
+      blockNumber:
+        safeNumber(
+          row?.blockNumber
+        ) || null,
+      transactionHash:
+        normalize(
+          row?.transactionHash
+        ) || null,
+      side:
+        row?.side || null,
+      exactUsdAmount:
+        exactUsd,
+      exactUsdSource:
+        row?.exactUsdSource ||
+        null,
+      candidateAmount,
+      executionPriceUsd
+    });
+  }
+
+  samples.sort(
+    (a, b) =>
+      safeNumber(
+        b.observedAt
+      ) -
+      safeNumber(
+        a.observedAt
+      )
+  );
+
+  const bounded =
+    samples.slice(
+      0,
+      ONCHAIN_MARKET_PRICE_MAX_SAMPLES_V438
+    );
+
+  const prices =
+    bounded.map(
+      row =>
+        row.executionPriceUsd
+    );
+
+  const medianPrice =
+    medianNumberV187(
+      prices
+    );
+
+  const latest =
+    bounded[0] ||
+    null;
+
+  const largestObservedTrade =
+    bounded.reduce(
+      (max, row) =>
+        safeNumber(
+          row?.exactUsdAmount
+        ) >
+        safeNumber(
+          max?.exactUsdAmount
+        )
+          ? row
+          : max,
+      null
+    );
+
+  const priceVerified =
+    bounded.length > 0 &&
+    Number.isFinite(
+      medianPrice
+    ) &&
+    medianPrice > 0;
+
+  const fdv =
+    priceVerified &&
+    Number.isFinite(
+      totalSupply
+    ) &&
+    totalSupply > 0
+      ? medianPrice *
+        totalSupply
+      : null;
+
+  return {
+    ...base,
+    status:
+      priceVerified
+        ? "VERIFIED_OBSERVED_EXECUTION_PRICE_V438"
+        : "NO_RECENT_EXACT_USD_EXECUTION_PRICE_V438",
+    verifiedObservedExecutionPrice:
+      priceVerified,
+    sampleCount:
+      bounded.length,
+    medianObservedPriceUsd:
+      priceVerified
+        ? medianPrice
+        : null,
+    latestObservedPriceUsd:
+      latest
+        ?.executionPriceUsd ??
+      null,
+    latestObservedAt:
+      latest?.observedAt ||
+      null,
+    latestPoolId:
+      latest?.poolId ||
+      null,
+    latestExactUsdSource:
+      latest?.exactUsdSource ||
+      null,
+    totalSupplyVerified:
+      Number.isFinite(
+        totalSupply
+      ) &&
+      totalSupply > 0,
+    decimalsVerified:
+      true,
+    fullyDilutedValuationUsd:
+      Number.isFinite(fdv) &&
+      fdv > 0
+        ? fdv
+        : null,
+    largestObservedExactUsdTrade:
+      largestObservedTrade
+        ? {
+            usd:
+              largestObservedTrade
+                .exactUsdAmount,
+            observedAt:
+              largestObservedTrade
+                .observedAt,
+            poolId:
+              largestObservedTrade
+                .poolId,
+            transactionHash:
+              largestObservedTrade
+                .transactionHash
+          }
+        : null,
+    samples:
+      bounded.map(
+        row => ({
+          poolId:
+            row.poolId,
+          observedAt:
+            row.observedAt,
+          blockNumber:
+            row.blockNumber,
+          transactionHash:
+            row.transactionHash,
+          side:
+            row.side,
+          exactUsdAmount:
+            row.exactUsdAmount,
+          exactUsdSource:
+            row.exactUsdSource,
+          candidateAmount:
+            row.candidateAmount,
+          executionPriceUsd:
+            row.executionPriceUsd
+        })
+      ),
+    usdLiquidityVerified:
+      false,
+    fullMarketPromotionEligible:
+      false,
+    remainingRequirement:
+      priceVerified
+        ? "INDEPENDENT_EXACT_POOL_USD_LIQUIDITY_PROOF"
+        : "RECENT_EXACT_USD_EXECUTION_PRICE_AND_LIQUIDITY_PROOF"
   };
 }
 
@@ -43728,17 +44199,35 @@ function returnedCandidateBlockerDiagnosticV436(
             null
         },
 
+        onChainMarketFoundationV438:
+          market
+            ?.onChainMarketFoundationV438 ||
+          null,
+
         primaryBlocker:
           market?.verified === true
             ? null
             : (
-                alternative?.status ||
-                market?.status ||
-                availability?.dex
-                  ?.reason ||
-                availability?.gecko
-                  ?.reason ||
-                "MARKET_UNVERIFIED"
+                (
+                  market
+                    ?.onChainMarketFoundationV438
+                    ?.verifiedObservedExecutionPrice ===
+                    true &&
+                  market
+                    ?.onChainMarketFoundationV438
+                    ?.usdLiquidityVerified !==
+                    true
+                )
+                  ? "ONCHAIN_PRICE_VERIFIED_USD_LIQUIDITY_STILL_REQUIRED_V438"
+                  : (
+                      alternative?.status ||
+                      market?.status ||
+                      availability?.dex
+                        ?.reason ||
+                      availability?.gecko
+                        ?.reason ||
+                      "MARKET_UNVERIFIED"
+                    )
               )
       },
 
@@ -48536,6 +49025,20 @@ async function analyzeToken(
       address
     );
 
+  const onChainMarketFoundation =
+    onChainMarketFoundationV438(
+      state,
+      watched,
+      validation,
+      address
+    );
+
+  market = {
+    ...market,
+    onChainMarketFoundationV438:
+      onChainMarketFoundation
+  };
+
   const onChainPoolIdentity =
     onChainPoolIdentityV153(
       watched
@@ -48558,6 +49061,14 @@ async function analyzeToken(
         .verified ===
       true
   };
+
+  if (
+    watched &&
+    typeof watched === "object"
+  ) {
+    watched.onChainMarketFoundationV438 =
+      onChainMarketFoundation;
+  }
 
   let holders =
     unverifiedHolders();
@@ -55493,6 +56004,15 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    onChainMarketVerificationFoundationV438: {
+      enabled: true,
+      exactUsdSwapLedgerOnly: true,
+      observedExecutionPriceOnly: true,
+      liquidityStillRequired: true,
+      marketPromotionChanged: false,
+      externalRequestsAdded: 0,
+      requestCeilingChanged: false
+    },
     holderEvidenceRecoveryUpgradeV437: {
       enabled: true,
       zeroRowsRetryMs: 120000,
@@ -61117,6 +61637,34 @@ for (
       externalRequestsAdded:
         0,
       requestCeilingChanged:
+        false
+    },
+
+    onChainMarketVerificationFoundationV438: {
+      enabled: true,
+      source:
+        "EXISTING_V179_EXACT_USD_SWAP_LEDGER",
+      derives:
+        [
+          "OBSERVED_EXECUTION_PRICE_USD",
+          "FULLY_DILUTED_SUPPLY_VALUATION",
+          "LARGEST_OBSERVED_EXACT_USD_TRADE"
+        ],
+      coreMarketVerifiedPromoted:
+        false,
+      coreLiquidityUsdPromoted:
+        false,
+      remainingRequirement:
+        "INDEPENDENT_EXACT_POOL_USD_LIQUIDITY_PROOF",
+      externalRequestsAdded:
+        0,
+      requestCeilingChanged:
+        false,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
         false
     },
 
