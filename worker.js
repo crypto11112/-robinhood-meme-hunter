@@ -1,6 +1,15 @@
 /**
- * Robinhood Chain Meme Hunter — V470
- * AUTHORITATIVE RUNTIME VERSION: V470
+ * Robinhood Chain Meme Hunter — V471
+ * AUTHORITATIVE RUNTIME VERSION: V471
+ *
+ * V471 HOTFIX ONLY:
+ * - fixes /launches Telegram formatting so newline separators render as real
+ *   line breaks instead of literal backslash-n text;
+ * - V470 verified launch-meter counting, dedupe, persistence and source rules
+ *   are unchanged;
+ * - V469 fresh-candidate analysis priority is unchanged;
+ * - no scoring, qualification, request-budget, provider or Telegram threshold
+ *   behavior changes.
  *
  * V470 adds a forward-only VERIFIED LAUNCH METER on top of confirmed V469.
  *
@@ -1698,7 +1707,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V470";
+const VERSION = "V471";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -82128,7 +82137,7 @@ function verifiedLaunchMeterTelegramMessageV470(state) {
     "✅ Counts only positively verified launch evidence from supported sources.",
     "⚠️ Chain-wide total: <b>DATA UNVERIFIED</b> — unsupported launch mechanisms or provider/scanner gaps are not guessed.",
     "<i>Forward-only from V470 deployment. /launches is read-only and makes zero provider requests.</i>"
-  ].join("\\n");
+  ].join("\n");
 }
 
 function telegramHelpV271() {
