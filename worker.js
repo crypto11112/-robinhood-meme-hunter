@@ -1,4 +1,35 @@
 /**
+ * Robinhood Chain Meme Hunter — V469
+ * AUTHORITATIVE RUNTIME VERSION: V469
+ *
+ * V469 is a narrow fresh-candidate analysis-priority build on confirmed-working V468.
+ *
+ * Evidence from consecutive V468 scans showed the same throughput pattern:
+ * many newly discovered/live addresses, four candidates selected for analysis,
+ * three deferred, while an OLD successful-alert exact-pool completion job held
+ * a protected completion envelope. V466/V468 already proved historical exact-pool
+ * jobs can safely persist and resume, so historical measurement work no longer
+ * needs first claim on analysis capacity.
+ *
+ * V469 changes ORDERING only:
+ * - successful-alert/historical V458/V466 completion reserve activation is deferred
+ *   until AFTER the fresh/current analysis queue has run;
+ * - a current-scan Telegram-qualified exact-pool candidate also does not activate
+ *   its measurement-only completion reserve inside the analysis loop;
+ * - after fresh/current analysis is complete, the highest-ranked current qualified
+ *   exact-pool candidate gets first completion priority; only when none exists may
+ *   the stored successful-alert fallback reserve the remaining capacity;
+ * - V468 partial-reserve behavior is retained for the historical fallback;
+ * - historical V466 progress remains persisted/resumable and is never discarded;
+ * - no Opportunity/Momentum/qualification/Telegram threshold is changed;
+ * - no provider trust rule is weakened;
+ * - no request ceiling is raised: global 42, base analysis 21, V416 adaptive
+ *   borrowing and Telegram reserve remain unchanged.
+ *
+ * This is a priority/throughput fix only: fresh opportunities are analysed before
+ * measurement-only historical completion consumes spare capacity.
+ */
+ /**
  * Robinhood Chain Meme Hunter — V468
  * AUTHORITATIVE RUNTIME VERSION: V468
  *
@@ -1643,7 +1674,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V468";
+const VERSION = "V469";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -51232,14 +51263,36 @@ function activateCompleteExactPoolReserveV459(
         notificationReserveRemaining
     );
 
-  if (
-    analysisRemaining < reserved ||
-    globalRemainingBeforeTelegram < reserved
-  ) {
+  /*
+   * V469: this function is now called only after the fresh/current analysis
+   * queue. Completion is resumable under V466, so protect whatever existing
+   * post-analysis capacity remains, capped by the unchanged full envelope.
+   */
+  const availableCurrentCompletionCapacityV469 =
+    Math.max(
+      0,
+      Math.min(
+        reserved,
+        analysisRemaining,
+        globalRemainingBeforeTelegram
+      )
+    );
+
+  if (availableCurrentCompletionCapacityV469 < 1) {
     reserve.releaseReason =
-      "QUALIFIER_FOUND_BUT_RESERVATION_CAPACITY_ALREADY_UNAVAILABLE_V459";
+      "CURRENT_QUALIFIER_NO_POST_ANALYSIS_COMPLETION_CAPACITY_V469";
+    reserve.availableCurrentCompletionCapacityV469 = 0;
+    reserve.partialCurrentReserveV469 = false;
     return reserve;
   }
+
+  reserve.fullEnvelopeRequestsV469 = reserved;
+  reserve.availableCurrentCompletionCapacityV469 =
+    availableCurrentCompletionCapacityV469;
+  reserve.partialCurrentReserveV469 =
+    availableCurrentCompletionCapacityV469 < reserved;
+  reserve.reservedRequests =
+    availableCurrentCompletionCapacityV469;
 
   reserve.active = true;
   reserve.targetAddress =
@@ -51249,6 +51302,12 @@ function activateCompleteExactPoolReserveV459(
   reserve.poolId = poolId;
   reserve.activatedAt = Date.now();
   reserve.releaseReason = null;
+  reserve.reservePolicyV469 =
+    reserve.partialCurrentReserveV469 === true
+      ? "POST_ANALYSIS_AVAILABLE_CAPACITY_PARTIAL_V469"
+      : "POST_ANALYSIS_FULL_ENVELOPE_V469";
+  reserve.freshAnalysisPriorityPreservedV469 = true;
+  reserve.requestCeilingsChangedV469 = false;
 
   return reserve;
 }
@@ -62634,6 +62693,19 @@ for (
     retryQueueAfterAnalysis: null,
     protectedPriorityBoundedAttempts: 0,
     providerConstrainedPriorityAttempts: 0,
+    freshCandidatePriorityV469: {
+      enabled: true,
+      analysisBeforeHistoricalCompletion: true,
+      currentQualifiedCompletionReserveDeferredUntilAfterAnalysis: true,
+      historicalCompletionReserveDeferredUntilAfterAnalysis: true,
+      requestCeilingsChanged: false,
+      scoringChanged: false,
+      qualificationChanged: false,
+      telegramThresholdChanged: false,
+      currentQualifiedTargetsFound: 0,
+      postAnalysisReserveSource: null,
+      postAnalysisReservedRequests: 0
+    },
     progressiveCompletionV417: {
       attempted: 0,
       metadataCheckpointed: 0,
@@ -63469,10 +63541,18 @@ for (
         null
     );
 
-  activateLastAlertFallbackReserveV460(
-    budget,
-    lastAlertExactPoolFallbackV460
-  );
+  /*
+   * V469: do NOT activate the historical successful-alert completion reserve
+   * before the fresh/current analysis queue. V466 makes that work resumable,
+   * so it may safely use only post-analysis spare capacity.
+   */
+  if (lastAlertExactPoolFallbackV460?.eligible === true) {
+    scannerFunnelV415.freshCandidatePriorityV469
+      .historicalFallbackAvailable = true;
+    scannerFunnelV415.freshCandidatePriorityV469
+      .historicalFallbackAddress =
+        normalize(lastAlertExactPoolFallbackV460?.candidate?.address) || null;
+  }
 
   for (
     let v135Index = 0;
@@ -64905,10 +64985,19 @@ for (
       );
     }
 
-    activateCompleteExactPoolReserveV459(
-      budget,
-      candidate
-    );
+    /*
+     * V469: completion is measurement-only and can persist/resume. Do not let
+     * a candidate that qualifies early in this loop reserve capacity away from
+     * other fresh/current candidates that still need analysis.
+     */
+    if (
+      qualifiesTelegram(candidate) === true &&
+      candidate?.validERC20 === true &&
+      candidate?.onChainPoolIdentityV153?.verified === true
+    ) {
+      scannerFunnelV415.freshCandidatePriorityV469
+        .currentQualifiedTargetsFound++;
+    }
 
     candidates.push(
       candidate
@@ -67328,14 +67417,17 @@ for (
     });
 
 
-  const completeExactPoolReserveTargetV459 =
-    normalize(
-      budget
-        ?.analysis
-        ?.completeExactPoolReserveV459
-        ?.targetAddress
-    );
-
+  /*
+   * V469 post-analysis completion priority.
+   *
+   * Fresh/current analysis has now had first claim on the existing budget.
+   * Choose a completion target only now:
+   *   1) highest-Opportunity CURRENT Telegram-qualified exact-pool candidate;
+   *   2) otherwise the eligible stored successful-alert fallback.
+   *
+   * The reserve can only protect capacity that is still available. No request
+   * ceiling is changed and V466 historical progress remains resumable.
+   */
   const liveCompleteExactPoolCandidatesV460 =
     (Array.isArray(candidates) ? candidates : [])
       .filter(
@@ -67345,28 +67437,50 @@ for (
           candidate?.onChainPoolIdentityV153?.verified === true
       )
       .sort(
-        (a, b) => {
-          const aReserved =
-            normalize(a?.address) ===
-              completeExactPoolReserveTargetV459
-              ? 1
-              : 0;
-          const bReserved =
-            normalize(b?.address) ===
-              completeExactPoolReserveTargetV459
-              ? 1
-              : 0;
-
-          if (aReserved !== bReserved) {
-            return bReserved - aReserved;
-          }
-
-          return (
-            safeNumber(b?.opportunity?.score) -
-            safeNumber(a?.opportunity?.score)
-          );
-        }
+        (a, b) =>
+          safeNumber(b?.opportunity?.score) -
+          safeNumber(a?.opportunity?.score)
       );
+
+  if (liveCompleteExactPoolCandidatesV460.length > 0) {
+    activateCompleteExactPoolReserveV459(
+      budget,
+      liveCompleteExactPoolCandidatesV460[0]
+    );
+
+    scannerFunnelV415.freshCandidatePriorityV469
+      .postAnalysisReserveSource =
+        "CURRENT_SCAN_QUALIFIED_CANDIDATE_V469";
+  } else {
+    activateLastAlertFallbackReserveV460(
+      budget,
+      lastAlertExactPoolFallbackV460
+    );
+
+    if (
+      budget?.analysis?.completeExactPoolReserveV459?.active === true
+    ) {
+      scannerFunnelV415.freshCandidatePriorityV469
+        .postAnalysisReserveSource =
+          "HISTORICAL_SUCCESSFUL_ALERT_FALLBACK_V469";
+    }
+  }
+
+  scannerFunnelV415.freshCandidatePriorityV469
+    .postAnalysisReservedRequests =
+      budget?.analysis?.completeExactPoolReserveV459?.active === true
+        ? safeNumber(
+            budget.analysis.completeExactPoolReserveV459.reservedRequests
+          )
+        : 0;
+
+  const completeExactPoolReserveTargetV459 =
+    normalize(
+      budget
+        ?.analysis
+        ?.completeExactPoolReserveV459
+        ?.targetAddress
+    );
 
   const completeExactPoolCandidatesV458 =
     (
