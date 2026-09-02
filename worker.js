@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V462
- * AUTHORITATIVE RUNTIME VERSION: V462
+ * Robinhood Chain Meme Hunter — V463
+ * AUTHORITATIVE RUNTIME VERSION: V463
+ * V463 stabilises the exact-pool completion lane proven under V462. Older successful-alert snapshots did not explicitly persist ERC-20 identity fields, so V463 never invents that missing proof: when the newest structurally completion-capable historical alert lacks reusable metadata, V463 may perform at most ONE normal strict V418/V419/V421 ERC-20 verification using the existing analysis/global budget and unchanged >=3-of-4 method rule, then checkpoints the verified metadata through the existing V417 path. Separately, once a V458 target is eligible, V463 reserves the FULL existing V461 completion envelope (1 timestamp lookup + up to 5 exact-pool log requests = 6 analysis slots) before lower-priority analysis can consume it. This is request ordering only: the 42-request global ceiling, 21-request base analysis ceiling, V416 adaptive ceiling, notification reserve, provider protections, scoring, qualification, holder rules and Telegram thresholds are unchanged. If six slots are not available, the lane stays protected/UNVERIFIED rather than borrowing imaginary capacity.
  * V462 fixes the successful-alert fallback selection gap exposed after V461. The completion lane no longer gives up just because the single /last-alert-scan snapshot is completion-ineligible. V462 reads the already-existing bounded V268 successful-alert history, evaluates recent successful snapshots newest-first through the unchanged strict V460 completion eligibility gate, deduplicates the latest snapshot against history, and selects the newest alert that still has verified reusable ERC-20 metadata plus verified exact-pool identity. Ineligible newer alerts are skipped with explicit telemetry; nothing is fabricated or backfilled. The existing 24h age limit, per-address retry cooldown, exact-pool identity rules, V461 bounded pagination, 42-request global ceiling, adaptive analysis ceiling, scoring, qualification, holder rules and Telegram thresholds are unchanged. V462 adds only the already-existing KV history read; it adds zero external provider/RPC requests.
  * V461 closes the exact-pool 24h saturation blocker proven by the V460 NUDES scan. When the first exact PoolId Swap-history query reaches Blockscout's 1,000-row cap, V461 may spend only still-available EXISTING analysis/global headroom to split that exact block range into smaller non-overlapping subranges. Each subrange remains filtered by PoolManager + Swap topic + exact PoolId; rows are deduplicated by tx/log identity; complete coverage is accepted only if every required subrange is fetched without saturation and every returned row is candidate-matched and exactly USD-decodable. If headroom runs out, any child range still saturates, or any row cannot be exactly decoded, coverage remains UNVERIFIED. The 42-request global ceiling, adaptive analysis ceiling, scoring, qualification, holder rules and Telegram thresholds are unchanged.
  * V460 closes the timing gap exposed by the NUDES alert. When the current scan has no fresh V458-eligible candidate, the bot can reuse the most recent successfully persisted Telegram alert as the exact-pool USD-completion target. The fallback requires a successful alert snapshot, recent alert age, previously verified ERC-20 metadata from the watchlist, and a verified exact PoolId either from the alert snapshot or the persisted V237 exact-pool target backed by the pool registry. V460 reserves the same two existing V458 request slots before the analysis loop when such a recent alert target exists, preventing later low-priority analysis from consuming them. Successful/attempted completion is persisted per address with a cooldown so the same alert is not hammered every scan. No request ceilings, scoring, qualification, holder rules, Telegram thresholds, or V455/V457 logic are changed.
@@ -1536,7 +1537,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V462";
+const VERSION = "V463";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -50311,6 +50312,270 @@ async function selectEligibleSuccessfulAlertFallbackV462(
   };
 }
 
+
+
+/* =========================================================
+   V463 COMPLETION-LANE STABILISATION
+   ========================================================= */
+
+const V463_FULL_COMPLETION_RESERVE_REQUESTS =
+  VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_TOTAL_REQUESTS_V461;
+const V463_MAX_HISTORY_ERC20_REVERIFY_PER_SCAN = 1;
+
+function structuralLastAlertEligibilityV463(
+  state,
+  lastAlertSnapshot
+) {
+  const base = {
+    eligible: false,
+    reason: "LAST_ALERT_STRUCTURAL_NOT_ELIGIBLE_V463",
+    address: null,
+    symbol: null,
+    savedAt: null,
+    ageMs: null,
+    watched: null,
+    identity: null
+  };
+
+  if (!lastAlertSnapshot || lastAlertSnapshot?.alert?.sent !== true) {
+    return {...base, reason:"NO_SUCCESSFUL_ALERT_SNAPSHOT_V463"};
+  }
+
+  const address = normalize(
+    lastAlertSnapshot?.alert?.address ||
+    lastAlertSnapshot?.candidate?.address
+  );
+  if (!isAddress(address)) {
+    return {...base, address, reason:"LAST_ALERT_ADDRESS_INVALID_V463"};
+  }
+
+  const savedAt = safeNumber(lastAlertSnapshot?.savedAt);
+  const ageMs = savedAt > 0 ? Date.now() - savedAt : Infinity;
+  if (
+    !Number.isFinite(ageMs) ||
+    ageMs < 0 ||
+    ageMs > LAST_ALERT_EXACT_POOL_FALLBACK_MAX_AGE_MS_V460
+  ) {
+    return {
+      ...base, address, savedAt:savedAt || null,
+      ageMs:Number.isFinite(ageMs)?ageMs:null,
+      reason:"LAST_ALERT_TOO_OLD_FOR_24H_COMPLETION_V463"
+    };
+  }
+
+  const watched = findWatched(state, address);
+  if (!watched) {
+    return {...base, address, savedAt, ageMs, reason:"LAST_ALERT_WATCH_STATE_UNAVAILABLE_V463"};
+  }
+
+  const identity = exactPoolIdentityFromAlertV460(
+    state,
+    address,
+    lastAlertSnapshot?.candidate
+  );
+  if (identity?.verified !== true) {
+    return {
+      ...base, address, savedAt, ageMs, watched,
+      reason:"LAST_ALERT_EXACT_POOL_IDENTITY_UNVERIFIED_V463"
+    };
+  }
+
+  state.completeExactPoolCompletionV460 =
+    state.completeExactPoolCompletionV460 &&
+    typeof state.completeExactPoolCompletionV460 === "object"
+      ? state.completeExactPoolCompletionV460
+      : {};
+
+  const previous = state.completeExactPoolCompletionV460?.[address] || null;
+  const samePool = normalize(previous?.poolId) === normalize(identity?.poolId);
+  if (samePool && previous?.verified === true && safeNumber(previous?.completedAt) > 0) {
+    return {
+      ...base, address, savedAt, ageMs, watched, identity,
+      reason:"LAST_ALERT_EXACT_POOL_ALREADY_COMPLETED_V463"
+    };
+  }
+  if (
+    samePool &&
+    safeNumber(previous?.attemptedAt) > 0 &&
+    Date.now() - safeNumber(previous?.attemptedAt) < LAST_ALERT_EXACT_POOL_RETRY_COOLDOWN_MS_V460
+  ) {
+    return {
+      ...base, address, savedAt, ageMs, watched, identity,
+      reason:"LAST_ALERT_EXACT_POOL_RETRY_COOLDOWN_V463"
+    };
+  }
+
+  return {
+    eligible:true,
+    reason:"LAST_ALERT_STRUCTURALLY_ELIGIBLE_V463",
+    address,
+    symbol:lastAlertSnapshot?.alert?.symbol || lastAlertSnapshot?.candidate?.symbol || watched?.metadata?.symbol || null,
+    savedAt,
+    ageMs,
+    watched,
+    identity
+  };
+}
+
+async function selectEligibleSuccessfulAlertFallbackV463(
+  env,
+  state,
+  budget
+) {
+  const latestLoad = await loadLastSuccessfulAlertSnapshotV460(env);
+  const history = await alertHistoryV268(env);
+  const snapshots = [];
+  const seen = new Set();
+
+  const addSnapshot = (snapshot, source, historyIndex=null) => {
+    if (!snapshot || snapshot?.alert?.sent !== true) return;
+    const address = normalize(snapshot?.alert?.address || snapshot?.candidate?.address);
+    const savedAt = safeNumber(snapshot?.savedAt);
+    const key = `${savedAt || 0}:${address || "unknown"}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    snapshots.push({snapshot,source,historyIndex,savedAt:savedAt||null,address:address||null});
+  };
+
+  if (latestLoad?.available === true && latestLoad?.snapshot) {
+    addSnapshot(latestLoad.snapshot,"LAST_ALERT_SCAN_V264",null);
+  }
+  if (history?.status === "ALERT_HISTORY_AVAILABLE" && Array.isArray(history?.entries)) {
+    history.entries.forEach((entry,index)=>addSnapshot(entry?.snapshot||null,"ALERT_HISTORY_V268",index));
+  }
+  snapshots.sort((a,b)=>safeNumber(b?.savedAt)-safeNumber(a?.savedAt));
+
+  const evaluated=[];
+  let selected=null;
+  let reverificationAttempts=0;
+  let reverificationResult=null;
+
+  for (const row of snapshots) {
+    let fallback = buildLastAlertExactPoolCandidateV460(state,row.snapshot);
+    const structural = structuralLastAlertEligibilityV463(state,row.snapshot);
+    let reverifiedThisRow=false;
+    let reverifyStatus=null;
+    let metadataCheckpointed=false;
+
+    if (
+      fallback?.eligible !== true &&
+      fallback?.reason === "LAST_ALERT_ERC20_METADATA_NOT_VERIFIED_V460" &&
+      structural?.eligible === true &&
+      reverificationAttempts < V463_MAX_HISTORY_ERC20_REVERIFY_PER_SCAN
+    ) {
+      reverificationAttempts++;
+      reverifiedThisRow=true;
+
+      /* Require capacity for the worst-case strict verifier before starting.
+         verifyERC20 still consumes one request at a time through normal guards. */
+      if (!budgetAvailable(budget,"analysis",5)) {
+        reverifyStatus="V463_ERC20_REVERIFY_CAPACITY_UNAVAILABLE";
+      } else {
+        const verification = await verifyERC20(
+          env,
+          structural.address,
+          budget,
+          structural.watched
+        );
+        reverificationResult={
+          address:structural.address,
+          symbol:structural.symbol,
+          validERC20:verification?.validERC20===true,
+          deferred:verification?.deferred===true,
+          reason:verification?.reason||null,
+          decimals:Number.isFinite(Number(verification?.decimals))?Number(verification.decimals):null,
+          hasTotalSupply:verification?.totalSupply!==null && verification?.totalSupply!==undefined,
+          identityStatus:verification?.erc20IdentityV418?.status||null
+        };
+        reverifyStatus=verification?.reason||null;
+        if (verification?.validERC20 === true) {
+          metadataCheckpointed = checkpointVerifiedMetadataV417(
+            structural.watched,
+            verification
+          );
+          fallback = buildLastAlertExactPoolCandidateV460(state,row.snapshot);
+        }
+      }
+    }
+
+    const diagnostic={
+      source:row.source,
+      historyIndex:row.historyIndex,
+      savedAt:row.savedAt,
+      address:row.address,
+      symbol:row.snapshot?.alert?.symbol || row.snapshot?.candidate?.symbol || null,
+      structurallyEligible:structural?.eligible===true,
+      structuralReason:structural?.reason||null,
+      eligible:fallback?.eligible===true,
+      reason:fallback?.reason||null,
+      identitySource:fallback?.identitySource || structural?.identity?.sourceV460 || null,
+      exactPoolId:normalize(
+        fallback?.candidate?.onChainPoolIdentityV153?.poolId || structural?.identity?.poolId
+      ) || null,
+      erc20ReverifiedV463:reverifiedThisRow,
+      erc20ReverifyStatusV463:reverifyStatus,
+      metadataCheckpointedV463:metadataCheckpointed
+    };
+    evaluated.push(diagnostic);
+
+    if (fallback?.eligible===true && fallback?.candidate) {
+      selected={snapshot:row.snapshot,fallback,source:row.source,historyIndex:row.historyIndex,savedAt:row.savedAt,address:row.address};
+      break;
+    }
+
+    /* One bounded fresh identity attempt per scan. If it was needed and failed,
+       do not spend more RPC budget walking older metadata-missing alerts. */
+    if (reverifiedThisRow && fallback?.eligible !== true) {
+      continue;
+    }
+  }
+
+  return {
+    enabled:true,
+    selectionMode:"NEWEST_ELIGIBLE_WITH_ONE_STRICT_ERC20_REVERIFY_V463",
+    latestLoad,
+    historyStatus:history?.status||null,
+    historyCount:safeNumber(history?.count),
+    snapshotsConsidered:evaluated.length,
+    selected:Boolean(selected),
+    selectedSource:selected?.source||null,
+    selectedHistoryIndex:selected?.historyIndex??null,
+    selectedSavedAt:selected?.savedAt||null,
+    selectedAddress:selected?.address||null,
+    selectedSymbol:selected?.snapshot?.alert?.symbol || selected?.snapshot?.candidate?.symbol || null,
+    selectedSnapshot:selected?.snapshot||null,
+    selectedFallback:selected?.fallback||null,
+    evaluated,
+    erc20ReverificationV463:{
+      maxPerScan:V463_MAX_HISTORY_ERC20_REVERIFY_PER_SCAN,
+      attempts:reverificationAttempts,
+      result:reverificationResult,
+      verificationRuleChanged:false,
+      freshProofRequiredWhenOldSnapshotLacksExplicitMetadata:true
+    },
+    addsExternalRequestsOnlyForOneStrictReverification:true,
+    requestCeilingsChanged:false,
+    scoringChanged:false,
+    qualificationChanged:false,
+    telegramThresholdChanged:false
+  };
+}
+
+function upgradeCompleteExactPoolReserveV463(budget, source) {
+  const reserve=budget?.analysis?.completeExactPoolReserveV459;
+  if (!reserve?.enabled) return reserve||null;
+  reserve.reservedRequests=Math.max(
+    safeNumber(reserve.reservedRequests),
+    V463_FULL_COMPLETION_RESERVE_REQUESTS
+  );
+  reserve.fullPaginationEnvelopeV463=true;
+  reserve.reserveSourceV463=source||null;
+  reserve.timestampRequestsProtectedV463=1;
+  reserve.maxLogRequestsProtectedV463=VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461;
+  reserve.requestCeilingsChangedV463=false;
+  return reserve;
+}
+
 function activateLastAlertFallbackReserveV460(
   budget,
   fallback
@@ -50319,6 +50584,11 @@ function activateLastAlertFallbackReserveV460(
     budget
       ?.analysis
       ?.completeExactPoolReserveV459;
+
+  upgradeCompleteExactPoolReserveV463(
+    budget,
+    "LAST_ALERT_FALLBACK_V463"
+  );
 
   if (
     !reserve?.enabled ||
@@ -50414,6 +50684,11 @@ function activateCompleteExactPoolReserveV459(
   const reserve =
     budget?.analysis
       ?.completeExactPoolReserveV459;
+
+  upgradeCompleteExactPoolReserveV463(
+    budget,
+    "CURRENT_SCAN_QUALIFIED_V463"
+  );
 
   if (
     !reserve?.enabled ||
@@ -62330,14 +62605,19 @@ for (
     return true;
   };
 
-  const eligibleAlertSelectionV462 =
-    await selectEligibleSuccessfulAlertFallbackV462(
+  const eligibleAlertSelectionV463 =
+    await selectEligibleSuccessfulAlertFallbackV463(
       env,
-      state
+      state,
+      budget
     );
 
+  /* Backward-compatible telemetry alias. */
+  const eligibleAlertSelectionV462 =
+    eligibleAlertSelectionV463;
+
   const lastSuccessfulAlertLoadV460 =
-    eligibleAlertSelectionV462?.latestLoad ||
+    eligibleAlertSelectionV463?.latestLoad ||
     {
       available: false,
       status: "LAST_ALERT_UNAVAILABLE_V462",
@@ -62345,7 +62625,7 @@ for (
     };
 
   const lastAlertExactPoolFallbackV460 =
-    eligibleAlertSelectionV462?.selectedFallback ||
+    eligibleAlertSelectionV463?.selectedFallback ||
     buildLastAlertExactPoolCandidateV460(
       state,
       lastSuccessfulAlertLoadV460
@@ -70434,38 +70714,56 @@ for (
           ?.symbol ||
         null
     },
-    eligibleAlertSelectionV462: {
+    eligibleAlertSelectionV463: {
       enabled:
-        eligibleAlertSelectionV462?.enabled === true,
+        eligibleAlertSelectionV463?.enabled === true,
       selectionMode:
-        eligibleAlertSelectionV462?.selectionMode || null,
+        eligibleAlertSelectionV463?.selectionMode || null,
       historyStatus:
-        eligibleAlertSelectionV462?.historyStatus || null,
+        eligibleAlertSelectionV463?.historyStatus || null,
       historyCount:
-        safeNumber(eligibleAlertSelectionV462?.historyCount),
+        safeNumber(eligibleAlertSelectionV463?.historyCount),
       snapshotsConsidered:
-        safeNumber(eligibleAlertSelectionV462?.snapshotsConsidered),
+        safeNumber(eligibleAlertSelectionV463?.snapshotsConsidered),
       selected:
-        eligibleAlertSelectionV462?.selected === true,
+        eligibleAlertSelectionV463?.selected === true,
       selectedSource:
-        eligibleAlertSelectionV462?.selectedSource || null,
+        eligibleAlertSelectionV463?.selectedSource || null,
       selectedHistoryIndex:
-        eligibleAlertSelectionV462?.selectedHistoryIndex ?? null,
+        eligibleAlertSelectionV463?.selectedHistoryIndex ?? null,
       selectedSavedAt:
-        eligibleAlertSelectionV462?.selectedSavedAt || null,
+        eligibleAlertSelectionV463?.selectedSavedAt || null,
       selectedAddress:
-        eligibleAlertSelectionV462?.selectedAddress || null,
+        eligibleAlertSelectionV463?.selectedAddress || null,
       selectedSymbol:
-        eligibleAlertSelectionV462?.selectedSymbol || null,
+        eligibleAlertSelectionV463?.selectedSymbol || null,
       evaluated:
-        Array.isArray(eligibleAlertSelectionV462?.evaluated)
-          ? eligibleAlertSelectionV462.evaluated
+        Array.isArray(eligibleAlertSelectionV463?.evaluated)
+          ? eligibleAlertSelectionV463.evaluated
           : [],
-      addsExternalRequests: 0,
+      erc20ReverificationV463:
+        eligibleAlertSelectionV463?.erc20ReverificationV463 || null,
+      fullCompletionReserveRequestsV463:
+        V463_FULL_COMPLETION_RESERVE_REQUESTS,
+      maxPaginationLogRequestsV461:
+        VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461,
       requestCeilingsChanged: false,
       scoringChanged: false,
       qualificationChanged: false,
       telegramThresholdChanged: false
+    },
+    eligibleAlertSelectionV462: {
+      backwardCompatibleAliasOf: "eligibleAlertSelectionV463",
+      enabled:
+        eligibleAlertSelectionV462?.enabled === true,
+      selectionMode:
+        eligibleAlertSelectionV462?.selectionMode || null,
+      selected:
+        eligibleAlertSelectionV462?.selected === true,
+      selectedAddress:
+        eligibleAlertSelectionV462?.selectedAddress || null,
+      selectedSymbol:
+        eligibleAlertSelectionV462?.selectedSymbol || null
     },
     lastAlertExactPoolFallbackV460: {
       eligible:
@@ -87825,4 +88123,3 @@ export default {
     );
   }
 };
-
