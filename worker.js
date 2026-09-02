@@ -1,6 +1,36 @@
 /**
- * Robinhood Chain Meme Hunter — V487
- * AUTHORITATIVE RUNTIME VERSION: V487
+ * Robinhood Chain Meme Hunter — V488
+ * AUTHORITATIVE RUNTIME VERSION: V488
+ *
+ * V488 CHAINSTACK CALL-TRACE FALLBACK FOR EMPTY/UNUSABLE BLOCKSCOUT RAW TRACE:
+ * - preserves all confirmed-working V487/V486/V485/V484/V483 behaviour;
+ * - when a persisted V486 origin has already consumed the Blockscout V485 raw
+ *   trace and produced HTTP 200 but NO exact CREATE/CREATE2 token match, V488
+ *   makes that origin eligible for a later one-request Chainstack fallback;
+ * - V488 uses the already-configured CHAINSTACK_RPC_URL and calls:
+ *     debug_traceTransaction(txHash, { tracer: "callTracer" })
+ * - callTracer is parsed recursively and verification requires an exact
+ *   CREATE/CREATE2 frame whose `to` address equals the candidate token;
+ * - the exact frame `from` address becomes VERIFIED DEPLOYMENT SOURCE evidence;
+ * - the parent frame target is retained where available for mechanism research;
+ * - verified deployment source still does NOT automatically mean launchpad,
+ *   factory, router, or verified launch source;
+ * - V488 fallback runs on a LATER fairness/backlog slot, never immediately
+ *   after the Blockscout request, so the one-secondary-request-per-scan rule is
+ *   preserved;
+ * - V488 fallback candidates are processed once after a real Chainstack RPC
+ *   attempt so unsupported/archive-unavailable transactions cannot burn quota
+ *   indefinitely;
+ * - V488 fallback has priority over starting another unprocessed V486
+ *   Blockscout origin because it is one evidence step closer to exact proof;
+ * - Chainstack attempts are added to the existing V423 RPC health telemetry so
+ *   the V433 bot-side Chainstack usage meter continues counting them;
+ * - current/live V485 remains absolute priority; V487 fairness behaviour is
+ *   preserved; current/live V483 remains normal priority between fairness
+ *   grants;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, launch-meter,
+ *   V476 source-promotion or fresh-analysis-order changes.
  *
  * V487 FAIRNESS ROUTING FOR PERSISTED VERIFIED-ORIGIN ATTRIBUTION:
  * - preserves all confirmed-working V486/V485/V484/V483 behaviour;
@@ -2006,7 +2036,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V487";
+const VERSION = "V488";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71152,6 +71182,17 @@ for (
         state
       ),
 
+    chainstackCreationTraceFallbackV488:
+      {
+        ...chainstackCreationTraceFallbackSnapshotV488(
+          state
+        ),
+        chainstackConfigured:
+          chainstackConfiguredV431(
+            env
+          )
+      },
+
     postTelegramGlobalSpareV478:
       budget.postTelegramGlobalSpareV478 || {
         enabled: true,
@@ -71329,7 +71370,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_OLDEST_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_OLDEST_V486_OR_V488_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71353,6 +71394,61 @@ for (
       telegramThresholdChanged:
         false,
       launchSourcePromotion:
+        false
+    },
+
+    chainstackExactCreationTraceFallbackV488: {
+      enabled: true,
+      measurementOnly: true,
+      provider:
+        "CHAINSTACK",
+      rpcMethod:
+        "debug_traceTransaction",
+      tracer:
+        "callTracer",
+      trigger:
+        "V486_BLOCKSCOUT_HTTP_200_NO_EXACT_TOKEN_CREATE_MATCH",
+      runsSameScanAsBlockscoutFailure:
+        false,
+      laterFairnessSlotRequired:
+        true,
+      fallbackPriority:
+        "BEFORE_NEXT_UNPROCESSED_V486_ORIGIN",
+      exactProofStandard:
+        "CREATE_OR_CREATE2_FRAME_TO_EQUALS_TOKEN",
+      deploymentSource:
+        "EXACT_CREATE_FRAME_FROM",
+      parentCallTargetCaptured:
+        true,
+      rpcHealthAccountingV423:
+        true,
+      chainstackUsageMeterV433Preserved:
+        true,
+      archiveOrDebugAvailability:
+        "RUNTIME_VERIFIED_ONLY",
+      processedOnceAfterRealAttempt:
+        true,
+      automaticRetry:
+        false,
+      deploymentSourceMeansLaunchpad:
+        false,
+      maxRequestsPerFallbackScan:
+        1,
+      maxSecondaryOriginDiagnosticRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      launchSourcePromotion:
+        false,
+      launchMeterMutation:
+        false,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
         false
     },
 
@@ -86489,6 +86585,98 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
     return telemetry;
   }
 
+  /*
+   * V488: a prior Blockscout raw-trace HTTP-200/no-exact-match origin is one
+   * evidence step closer to resolution, so service that fallback before
+   * starting another unprocessed V486 Blockscout origin.
+   */
+  const chainstackFallbackCandidateV488 =
+    selectOldestChainstackFallbackCandidateV488(
+      state
+    );
+
+  if (chainstackFallbackCandidateV488) {
+    const fallbackV488 =
+      await runChainstackCreationTraceFallbackV488({
+        env,
+        state,
+        budget,
+        candidate:
+          chainstackFallbackCandidateV488
+      });
+
+    telemetry.chainstackFallbackV488 =
+      fallbackV488;
+
+    telemetry.selectedFromPersistedVerifiedOrigins =
+      true;
+    telemetry.selectedToken =
+      fallbackV488?.selectedToken ||
+      null;
+    telemetry.selectedCreator =
+      fallbackV488?.selectedCreator ||
+      null;
+    telemetry.selectedCreationTransactionHash =
+      fallbackV488
+        ?.selectedCreationTransactionHash ||
+      null;
+    telemetry.attempted =
+      fallbackV488?.attempted ===
+      true;
+    telemetry.requestConsumed =
+      fallbackV488
+        ?.requestConsumed === true;
+    telemetry.processedAfterAttempt =
+      fallbackV488
+        ?.processedAfterAttempt ===
+      true;
+    telemetry.status =
+      fallbackV488?.status ||
+      "V488_FALLBACK_STATUS_UNAVAILABLE";
+
+    if (
+      fallbackV488?.attempted === true &&
+      v483DeferredForFairnessV487
+    ) {
+      telemetry.fairnessV487
+        .fairnessGrantThisScan = true;
+
+      fairness.fairnessGrants =
+        safeNumber(
+          fairness.fairnessGrants
+        ) + 1;
+
+      fairness.lastFairnessGrantAt =
+        Date.now();
+
+      fairness.lastFairnessGrantToken =
+        fallbackV488?.selectedToken ||
+        null;
+
+      fairness.consecutiveV483BlocksOfV486 =
+        0;
+
+      fairness.lastDecision =
+        "V488_FAIRNESS_GRANTED_TO_CHAINSTACK_FALLBACK";
+
+      fairness.lastDecisionAt =
+        Date.now();
+    }
+
+    root.lastStatus =
+      `V486_ROUTED_TO_V488:${telemetry.status}`;
+
+    return telemetry;
+  }
+
+  telemetry.chainstackFallbackV488 = {
+    enabled: true,
+    measurementOnly: true,
+    attempted: false,
+    status:
+      "V488_NO_ELIGIBLE_BLOCKSCOUT_NO_MATCH_FALLBACK"
+  };
+
   const selected =
     selectOldestUnprocessedVerifiedOriginV486(
       state
@@ -86937,6 +87125,1240 @@ function persistedOriginRawTraceBacklogSnapshotV486(
 }
 
 
+
+function ensureChainstackCreationTraceFallbackV488(
+  state
+) {
+  if (
+    !state.chainstackCreationTraceFallbackV488 ||
+    typeof state.chainstackCreationTraceFallbackV488 !==
+      "object"
+  ) {
+    state.chainstackCreationTraceFallbackV488 = {
+      enabled: true,
+      measurementOnly: true,
+      monitorStartedAt: Date.now(),
+      scansObserved: 0,
+      requestsAttempted: 0,
+      requestsSucceeded: 0,
+      exactTokenCreationsVerified: 0,
+      processedFallbacks: {},
+      tokenAttributions: {},
+      sourceClusters: {},
+      lastTarget: null,
+      lastTransactionHash: null,
+      lastStatus: null,
+      lastRpcError: null,
+      lastAttemptAt: null
+    };
+  }
+
+  const root =
+    state.chainstackCreationTraceFallbackV488;
+
+  root.processedFallbacks =
+    root.processedFallbacks &&
+    typeof root.processedFallbacks === "object"
+      ? root.processedFallbacks
+      : {};
+
+  root.tokenAttributions =
+    root.tokenAttributions &&
+    typeof root.tokenAttributions === "object"
+      ? root.tokenAttributions
+      : {};
+
+  root.sourceClusters =
+    root.sourceClusters &&
+    typeof root.sourceClusters === "object"
+      ? root.sourceClusters
+      : {};
+
+  return root;
+}
+
+function pruneChainstackCreationTraceFallbackV488(
+  state
+) {
+  const root =
+    ensureChainstackCreationTraceFallbackV488(
+      state
+    );
+
+  const now = Date.now();
+  const maxAgeMs =
+    7 * 24 * 60 * 60 * 1000;
+
+  root.processedFallbacks =
+    Object.fromEntries(
+      Object.entries(
+        root.processedFallbacks || {}
+      )
+        .filter(([, row]) => {
+          const at =
+            safeNumber(
+              row?.attemptedAt
+            );
+
+          return (
+            at > 0 &&
+            now - at <= maxAgeMs
+          );
+        })
+        .sort(
+          (a, b) =>
+            safeNumber(
+              b?.[1]?.attemptedAt
+            ) -
+            safeNumber(
+              a?.[1]?.attemptedAt
+            )
+        )
+        .slice(0, 200)
+    );
+
+  root.tokenAttributions =
+    Object.fromEntries(
+      Object.entries(
+        root.tokenAttributions || {}
+      )
+        .filter(([, row]) => {
+          const at =
+            safeNumber(
+              row?.verifiedAt
+            );
+
+          return (
+            at > 0 &&
+            now - at <= maxAgeMs
+          );
+        })
+        .sort(
+          (a, b) =>
+            safeNumber(
+              b?.[1]?.verifiedAt
+            ) -
+            safeNumber(
+              a?.[1]?.verifiedAt
+            )
+        )
+        .slice(0, 100)
+    );
+
+  root.sourceClusters = {};
+
+  for (
+    const attribution of
+    Object.values(
+      root.tokenAttributions || {}
+    )
+  ) {
+    if (
+      attribution
+        ?.exactTokenCreateVerified !==
+        true
+    ) {
+      continue;
+    }
+
+    const source =
+      normalize(
+        attribution
+          ?.verifiedDeploymentSource
+      );
+
+    const token =
+      normalize(
+        attribution?.token
+      );
+
+    if (
+      !isAddress(source) ||
+      !isAddress(token)
+    ) {
+      continue;
+    }
+
+    const cluster =
+      root.sourceClusters[source] || {
+        sourceAddress: source,
+        distinctTokens: 0,
+        tokens: [],
+        createCount: 0,
+        create2Count: 0,
+        creatorConsistencyCount: 0,
+        interpretation:
+          "RECURRING_VERIFIED_DEPLOYMENT_SOURCE_NOT_AUTOMATICALLY_LAUNCHPAD_V488"
+      };
+
+    if (
+      !cluster.tokens.includes(token)
+    ) {
+      cluster.tokens.push(token);
+      cluster.distinctTokens++;
+    }
+
+    if (
+      attribution?.creationKind ===
+      "CREATE2"
+    ) {
+      cluster.create2Count++;
+    } else if (
+      attribution?.creationKind ===
+      "CREATE"
+    ) {
+      cluster.createCount++;
+    }
+
+    if (
+      attribution
+        ?.creatorMatchesTraceSource ===
+        true
+    ) {
+      cluster.creatorConsistencyCount++;
+    }
+
+    root.sourceClusters[source] =
+      cluster;
+  }
+
+  return root;
+}
+
+function flattenCallTracerFramesV488(
+  frame,
+  parent = null,
+  path = [],
+  output = []
+) {
+  if (
+    !frame ||
+    typeof frame !== "object"
+  ) {
+    return output;
+  }
+
+  output.push({
+    frame,
+    parent,
+    path
+  });
+
+  const calls =
+    Array.isArray(frame?.calls)
+      ? frame.calls
+      : [];
+
+  for (
+    let i = 0;
+    i < calls.length;
+    i++
+  ) {
+    flattenCallTracerFramesV488(
+      calls[i],
+      frame,
+      [...path, i],
+      output
+    );
+  }
+
+  return output;
+}
+
+function parseChainstackCallTraceV488({
+  trace,
+  token,
+  verifiedCreator,
+  creationTransactionHash
+}) {
+  const cleanToken =
+    normalize(token);
+
+  const cleanCreator =
+    normalize(verifiedCreator);
+
+  const frames =
+    flattenCallTracerFramesV488(
+      trace
+    );
+
+  const creationFrames =
+    frames.filter(({ frame }) => {
+      const type =
+        String(
+          frame?.type || ""
+        )
+          .trim()
+          .toUpperCase();
+
+      return (
+        type === "CREATE" ||
+        type === "CREATE2"
+      );
+    });
+
+  const exact =
+    creationFrames.filter(({ frame }) => {
+      const to =
+        normalize(
+          frame?.to || ""
+        );
+
+      return (
+        isAddress(to) &&
+        to === cleanToken &&
+        !frame?.error
+      );
+    });
+
+  const match =
+    exact.length === 1
+      ? exact[0]
+      : null;
+
+  const source =
+    match
+      ? normalize(
+          match.frame?.from || ""
+        )
+      : null;
+
+  const parentTo =
+    match?.parent
+      ? normalize(
+          match.parent?.to || ""
+        )
+      : null;
+
+  const creatorMatches =
+    Boolean(
+      isAddress(cleanCreator) &&
+      isAddress(source) &&
+      cleanCreator === source
+    );
+
+  const verified =
+    Boolean(
+      match &&
+      exact.length === 1 &&
+      isAddress(source)
+    );
+
+  return {
+    token:
+      isAddress(cleanToken)
+        ? cleanToken
+        : null,
+    creationTransactionHash:
+      /^0x[a-f0-9]{64}$/.test(
+        String(
+          creationTransactionHash ||
+          ""
+        ).toLowerCase()
+      )
+        ? String(
+            creationTransactionHash
+          ).toLowerCase()
+        : null,
+    callFramesObserved:
+      frames.length,
+    createOrCreate2FramesObserved:
+      creationFrames.length,
+    exactTokenCreateMatches:
+      exact.length,
+    exactTokenCreateVerified:
+      verified,
+    creationKind:
+      match
+        ? String(
+            match.frame?.type ||
+            ""
+          )
+            .trim()
+            .toUpperCase()
+        : null,
+    tracePath:
+      match?.path || null,
+    verifiedDeploymentSource:
+      verified
+        ? source
+        : null,
+    v480VerifiedCreator:
+      isAddress(cleanCreator)
+        ? cleanCreator
+        : null,
+    creatorMatchesTraceSource:
+      creatorMatches,
+    parentCallFrom:
+      match?.parent &&
+      isAddress(
+        normalize(
+          match.parent?.from ||
+          ""
+        )
+      )
+        ? normalize(
+            match.parent.from
+          )
+        : null,
+    parentCallTo:
+      isAddress(parentTo)
+        ? parentTo
+        : null,
+    deploymentSourceRole:
+      verified
+        ? "VERIFIED_DEPLOYMENT_SOURCE_ADDRESS_ONLY"
+        : "DATA_UNVERIFIED",
+    deploymentSourceIsLaunchpad:
+      "DATA UNVERIFIED",
+    deploymentSourceIsFactory:
+      "DATA UNVERIFIED",
+    deploymentSourceIsRouter:
+      "DATA UNVERIFIED",
+    launchSourcePromoted:
+      false,
+    evidenceStandard:
+      verified
+        ? "CHAINSTACK_CALLTRACER_EXACT_CREATE_OR_CREATE2_TO_TOKEN_V488"
+        : "NO_EXACT_CHAINSTACK_CALLTRACER_TOKEN_CREATION_PROOF_V488"
+  };
+}
+
+function selectOldestChainstackFallbackCandidateV488(
+  state
+) {
+  const v486 =
+    prunePersistedOriginRawTraceBacklogV486(
+      state
+    );
+
+  const root =
+    pruneChainstackCreationTraceFallbackV488(
+      state
+    );
+
+  const candidates =
+    Object.entries(
+      v486.processedOrigins || {}
+    )
+      .map(([key, row]) => ({
+        key,
+        row
+      }))
+      .filter(({ key, row }) => {
+        const token =
+          normalize(
+            row?.token
+          );
+
+        const creator =
+          normalize(
+            row?.verifiedCreator
+          );
+
+        const tx =
+          String(
+            row?.creationTransactionHash ||
+            ""
+          )
+            .trim()
+            .toLowerCase();
+
+        const noExactProof =
+          row
+            ?.exactTokenCreateVerified !==
+            true;
+
+        const blockscoutNoMatch =
+          String(
+            row?.attributionStatus ||
+            ""
+          ).includes(
+            "V485_HTTP_200_NO_EXACT_TOKEN_CREATE_MATCH"
+          );
+
+        return (
+          noExactProof &&
+          blockscoutNoMatch &&
+          isAddress(token) &&
+          isAddress(creator) &&
+          /^0x[a-f0-9]{64}$/.test(tx) &&
+          !root
+            ?.processedFallbacks?.[
+              key
+            ]
+        );
+      })
+      .sort(
+        (a, b) =>
+          safeNumber(
+            a?.row?.attemptedAt
+          ) -
+          safeNumber(
+            b?.row?.attemptedAt
+          )
+      );
+
+  return candidates[0] || null;
+}
+
+function eligibleChainstackFallbackCountV488(
+  state
+) {
+  const v486 =
+    prunePersistedOriginRawTraceBacklogV486(
+      state
+    );
+
+  const root =
+    pruneChainstackCreationTraceFallbackV488(
+      state
+    );
+
+  let count = 0;
+
+  for (
+    const [key, row] of
+    Object.entries(
+      v486.processedOrigins || {}
+    )
+  ) {
+    if (
+      row
+        ?.exactTokenCreateVerified !==
+        true &&
+      String(
+        row?.attributionStatus ||
+        ""
+      ).includes(
+        "V485_HTTP_200_NO_EXACT_TOKEN_CREATE_MATCH"
+      ) &&
+      isAddress(
+        normalize(
+          row?.token
+        )
+      ) &&
+      isAddress(
+        normalize(
+          row?.verifiedCreator
+        )
+      ) &&
+      /^0x[a-f0-9]{64}$/.test(
+        String(
+          row?.creationTransactionHash ||
+          ""
+        )
+          .trim()
+          .toLowerCase()
+      ) &&
+      !root
+        ?.processedFallbacks?.[
+          key
+        ]
+    ) {
+      count++;
+    }
+  }
+
+  return count;
+}
+
+async function chainstackDebugTraceTransactionV488({
+  env,
+  budget,
+  transactionHash
+}) {
+  const url =
+    chainstackRpcUrlV431(env);
+
+  const tx =
+    String(
+      transactionHash ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  if (!url) {
+    return {
+      attempted: false,
+      requestConsumed: false,
+      httpStatus: null,
+      result: null,
+      rpcError: null,
+      status:
+        "V488_CHAINSTACK_NOT_CONFIGURED"
+    };
+  }
+
+  if (
+    !/^0x[a-f0-9]{64}$/.test(tx)
+  ) {
+    return {
+      attempted: false,
+      requestConsumed: false,
+      httpStatus: null,
+      result: null,
+      rpcError: null,
+      status:
+        "V488_INVALID_TRANSACTION_HASH"
+    };
+  }
+
+  const spare =
+    consumeReleasedGlobalSpareV478(
+      budget,
+      "CHAINSTACK_DEBUG_TRACE_TRANSACTION_CALLTRACER_V488",
+      1
+    );
+
+  if (spare?.ok !== true) {
+    return {
+      attempted: false,
+      requestConsumed: false,
+      httpStatus: null,
+      result: null,
+      rpcError: null,
+      status:
+        `V488_BUDGET_UNAVAILABLE:${spare?.reason || "UNKNOWN"}`
+    };
+  }
+
+  const startedAt =
+    Date.now();
+
+  const controller =
+    new AbortController();
+
+  const timer =
+    setTimeout(
+      () =>
+        controller.abort(),
+      8000
+    );
+
+  try {
+    const response =
+      await fetch(
+        url,
+        {
+          method: "POST",
+          headers: {
+            "content-type":
+              "application/json"
+          },
+          body:
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: Date.now(),
+              method:
+                "debug_traceTransaction",
+              params: [
+                tx,
+                {
+                  tracer:
+                    "callTracer"
+                }
+              ]
+            }),
+          signal:
+            controller.signal
+        }
+      );
+
+    const latencyMs =
+      Date.now() -
+      startedAt;
+
+    const retryAfterMs =
+      retryAfterMsV423(
+        response
+      );
+
+    if (!response.ok) {
+      recordRpcAttemptV423(
+        budget,
+        {
+          provider:
+            "CHAINSTACK",
+          method:
+            "debug_traceTransaction",
+          phase:
+            "post-telegram-v488",
+          startedAt,
+          latencyMs,
+          outcome:
+            response.status === 429
+              ? "HTTP_429"
+              : "HTTP_ERROR",
+          httpStatus:
+            response.status,
+          retryAfterMs,
+          error:
+            `HTTP_${response.status}`
+        }
+      );
+
+      return {
+        attempted: true,
+        requestConsumed: true,
+        httpStatus:
+          response.status,
+        result: null,
+        rpcError: null,
+        status:
+          `V488_CHAINSTACK_HTTP_${response.status}`
+      };
+    }
+
+    const body =
+      await response.json();
+
+    if (body?.error) {
+      const rpcError =
+        typeof body.error ===
+        "object"
+          ? {
+              code:
+                body.error?.code ??
+                null,
+              message:
+                String(
+                  body.error?.message ||
+                  "RPC_ERROR"
+                ).slice(
+                  0,
+                  300
+                )
+            }
+          : {
+              code: null,
+              message:
+                String(
+                  body.error
+                ).slice(
+                  0,
+                  300
+                )
+            };
+
+      recordRpcAttemptV423(
+        budget,
+        {
+          provider:
+            "CHAINSTACK",
+          method:
+            "debug_traceTransaction",
+          phase:
+            "post-telegram-v488",
+          startedAt,
+          latencyMs,
+          outcome:
+            "RPC_PAYLOAD_ERROR",
+          httpStatus:
+            response.status,
+          error:
+            rpcError.message
+        }
+      );
+
+      return {
+        attempted: true,
+        requestConsumed: true,
+        httpStatus:
+          response.status,
+        result: null,
+        rpcError,
+        status:
+          "V488_CHAINSTACK_RPC_ERROR"
+      };
+    }
+
+    recordRpcAttemptV423(
+      budget,
+      {
+        provider:
+          "CHAINSTACK",
+        method:
+          "debug_traceTransaction",
+        phase:
+          "post-telegram-v488",
+        startedAt,
+        latencyMs,
+        outcome:
+          "SUCCESS",
+        httpStatus:
+          response.status
+      }
+    );
+
+    return {
+      attempted: true,
+      requestConsumed: true,
+      httpStatus:
+        response.status,
+      result:
+        body?.result ?? null,
+      rpcError: null,
+      status:
+        "V488_CHAINSTACK_TRACE_RETURNED"
+    };
+  } catch (error) {
+    const latencyMs =
+      Date.now() -
+      startedAt;
+
+    recordRpcAttemptV423(
+      budget,
+      {
+        provider:
+          "CHAINSTACK",
+        method:
+          "debug_traceTransaction",
+        phase:
+          "post-telegram-v488",
+        startedAt,
+        latencyMs,
+        outcome:
+          "TRANSPORT_ERROR",
+        error:
+          errorString(error)
+      }
+    );
+
+    return {
+      attempted: true,
+      requestConsumed: true,
+      httpStatus: null,
+      result: null,
+      rpcError: {
+        code: null,
+        message:
+          errorString(error)
+      },
+      status:
+        "V488_CHAINSTACK_TRANSPORT_ERROR"
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runChainstackCreationTraceFallbackV488({
+  env,
+  state,
+  budget,
+  candidate
+}) {
+  const root =
+    pruneChainstackCreationTraceFallbackV488(
+      state
+    );
+
+  root.scansObserved =
+    safeNumber(
+      root.scansObserved
+    ) + 1;
+
+  const telemetry = {
+    enabled: true,
+    measurementOnly: true,
+    promotionAllowed: false,
+    selectedFromV486ProcessedNoMatch:
+      Boolean(candidate),
+    selectedToken: null,
+    selectedCreator: null,
+    selectedCreationTransactionHash: null,
+    attempted: false,
+    requestConsumed: false,
+    provider:
+      "CHAINSTACK",
+    method:
+      "debug_traceTransaction",
+    tracer:
+      "callTracer",
+    attributionResult: null,
+    rpcError: null,
+    httpStatus: null,
+    processedAfterAttempt: false,
+    maxRequestsThisScan: 1,
+    hardRequestLimit: 42,
+    launchSourcePromoted: false,
+    launchMeterMutation: false,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false,
+    status: null
+  };
+
+  if (!candidate) {
+    telemetry.status =
+      "V488_NO_ELIGIBLE_BLOCKSCOUT_NO_MATCH_FALLBACK";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const key =
+    candidate.key;
+
+  const row =
+    candidate.row || {};
+
+  const token =
+    normalize(
+      row?.token
+    );
+
+  const creator =
+    normalize(
+      row?.verifiedCreator
+    );
+
+  const tx =
+    String(
+      row?.creationTransactionHash ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  telemetry.selectedToken =
+    token;
+  telemetry.selectedCreator =
+    creator;
+  telemetry.selectedCreationTransactionHash =
+    tx;
+
+  root.lastTarget =
+    token;
+  root.lastTransactionHash =
+    tx;
+
+  const rpcResult =
+    await chainstackDebugTraceTransactionV488({
+      env,
+      budget,
+      transactionHash:
+        tx
+    });
+
+  telemetry.attempted =
+    rpcResult?.attempted === true;
+  telemetry.requestConsumed =
+    rpcResult?.requestConsumed === true;
+  telemetry.httpStatus =
+    rpcResult?.httpStatus ??
+    null;
+  telemetry.rpcError =
+    rpcResult?.rpcError ||
+    null;
+
+  if (
+    rpcResult?.attempted !== true
+  ) {
+    telemetry.status =
+      rpcResult?.status ||
+      "V488_NOT_ATTEMPTED";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const attemptedAt =
+    Date.now();
+
+  root.requestsAttempted =
+    safeNumber(
+      root.requestsAttempted
+    ) + 1;
+
+  root.lastAttemptAt =
+    attemptedAt;
+
+  if (
+    rpcResult?.status ===
+    "V488_CHAINSTACK_TRACE_RETURNED"
+  ) {
+    root.requestsSucceeded =
+      safeNumber(
+        root.requestsSucceeded
+      ) + 1;
+  }
+
+  let attribution = null;
+
+  if (
+    rpcResult?.result &&
+    typeof rpcResult.result ===
+      "object"
+  ) {
+    attribution =
+      parseChainstackCallTraceV488({
+        trace:
+          rpcResult.result,
+        token,
+        verifiedCreator:
+          creator,
+        creationTransactionHash:
+          tx
+      });
+
+    telemetry.attributionResult =
+      attribution;
+
+    if (
+      attribution
+        ?.exactTokenCreateVerified ===
+        true
+    ) {
+      root.exactTokenCreationsVerified =
+        safeNumber(
+          root
+            .exactTokenCreationsVerified
+        ) + 1;
+
+      const persisted = {
+        ...attribution,
+        verifiedAt:
+          attemptedAt,
+        source:
+          "CHAINSTACK_DEBUG_TRACE_TRANSACTION_CALLTRACER_V488",
+        evidenceMeaning:
+          "VERIFIED_DEPLOYMENT_SOURCE_ADDRESS_ONLY_NOT_LAUNCHPAD_IDENTITY"
+      };
+
+      root.tokenAttributions[
+        token
+      ] = persisted;
+
+      const originRoot =
+        ensureTokenOriginTraceV477(
+          state
+        );
+
+      const origin =
+        originRoot
+          ?.tokenOrigins?.[
+            token
+          ];
+
+      if (
+        origin &&
+        origin?.verified === true
+      ) {
+        origin
+          .chainstackCreationMechanismV488 =
+          persisted;
+      }
+
+      const v485Root =
+        ensureCreationMechanismAttributionV485(
+          state
+        );
+
+      /*
+       * Keep V485/Blockscout evidence distinct, but expose the stronger
+       * fallback attribution alongside it for downstream research.
+       */
+      v485Root.chainstackFallbackV488 =
+        v485Root.chainstackFallbackV488 &&
+        typeof v485Root.chainstackFallbackV488 ===
+          "object"
+          ? v485Root.chainstackFallbackV488
+          : {};
+
+      v485Root.chainstackFallbackV488[
+        token
+      ] = persisted;
+    }
+  }
+
+  pruneChainstackCreationTraceFallbackV488(
+    state
+  );
+
+  if (key) {
+    root.processedFallbacks[
+      key
+    ] = {
+      token,
+      verifiedCreator:
+        creator,
+      creationTransactionHash:
+        tx,
+      attemptedAt,
+      provider:
+        "CHAINSTACK",
+      method:
+        "debug_traceTransaction",
+      tracer:
+        "callTracer",
+      httpStatus:
+        rpcResult?.httpStatus ??
+        null,
+      rpcStatus:
+        rpcResult?.status ||
+        null,
+      rpcError:
+        rpcResult?.rpcError ||
+        null,
+      exactTokenCreateVerified:
+        attribution
+          ?.exactTokenCreateVerified ===
+        true,
+      verifiedDeploymentSource:
+        attribution
+          ?.verifiedDeploymentSource ||
+        null,
+      processedOnce:
+        true,
+      retryAutomatically:
+        false
+    };
+
+    telemetry.processedAfterAttempt =
+      true;
+  }
+
+  root.lastRpcError =
+    rpcResult?.rpcError ||
+    null;
+
+  telemetry.status =
+    attribution
+      ?.exactTokenCreateVerified ===
+      true
+      ? "V488_CHAINSTACK_EXACT_TOKEN_CREATION_TRACE_VERIFIED"
+      : (
+          rpcResult?.status ===
+          "V488_CHAINSTACK_TRACE_RETURNED"
+            ? "V488_CHAINSTACK_TRACE_RETURNED_NO_EXACT_TOKEN_CREATE_MATCH"
+            : `V488_PROCESSED:${rpcResult?.status || "UNKNOWN"}`
+        );
+
+  root.lastStatus =
+    telemetry.status;
+
+  return telemetry;
+}
+
+function chainstackCreationTraceFallbackSnapshotV488(
+  state
+) {
+  const root =
+    pruneChainstackCreationTraceFallbackV488(
+      state
+    );
+
+  const processed =
+    Object.values(
+      root.processedFallbacks ||
+      {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.attemptedAt
+          ) -
+          safeNumber(
+            a?.attemptedAt
+          )
+      );
+
+  const recurring =
+    Object.values(
+      root.sourceClusters || {}
+    )
+      .filter(
+        row =>
+          safeNumber(
+            row?.distinctTokens
+          ) >= 2
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.distinctTokens
+          ) -
+          safeNumber(
+            a?.distinctTokens
+          )
+      );
+
+  return {
+    enabled: true,
+    measurementOnly: true,
+    monitorStartedAt:
+      safeNumber(
+        root.monitorStartedAt
+      ) || null,
+    scansObserved:
+      safeNumber(
+        root.scansObserved
+      ),
+    requestsAttempted:
+      safeNumber(
+        root.requestsAttempted
+      ),
+    requestsSucceeded:
+      safeNumber(
+        root.requestsSucceeded
+      ),
+    exactTokenCreationsVerified:
+      safeNumber(
+        root
+          .exactTokenCreationsVerified
+      ),
+    processedFallbackCount:
+      processed.length,
+    remainingEligibleFallbackCount:
+      eligibleChainstackFallbackCountV488(
+        state
+      ),
+    retainedTokenAttributions:
+      Object.keys(
+        root.tokenAttributions ||
+        {}
+      ).length,
+    recurringVerifiedDeploymentSourceCount:
+      recurring.length,
+    recurringVerifiedDeploymentSources:
+      recurring.slice(0, 20),
+    recentProcessedFallbacks:
+      processed.slice(0, 20),
+    lastTarget:
+      root.lastTarget || null,
+    lastTransactionHash:
+      root.lastTransactionHash ||
+      null,
+    lastStatus:
+      root.lastStatus || null,
+    lastRpcError:
+      root.lastRpcError || null,
+    lastAttemptAt:
+      safeNumber(
+        root.lastAttemptAt
+      ) || null,
+    chainstackConfigured:
+      null,
+    archiveOrDebugAvailability:
+      "RUNTIME_VERIFIED_ONLY",
+    deploymentSourceMeansLaunchpad:
+      false,
+    launchSourcePromotionAllowed:
+      false,
+    oneSecondaryDiagnosticPerScan:
+      true,
+    hardGlobalLimitUnchanged:
+      42
+  };
+}
+
 function ensureOriginDiagnosticFairnessV487(
   state
 ) {
@@ -87029,7 +88451,12 @@ function eligiblePersistedOriginBacklogCountV487(
     }
   }
 
-  return count;
+  return (
+    count +
+    eligibleChainstackFallbackCountV488(
+      state
+    )
+  );
 }
 
 function shouldReserveSecondarySlotForV486FairnessV487(
