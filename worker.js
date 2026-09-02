@@ -1,6 +1,16 @@
 /**
- * Robinhood Chain Meme Hunter — V472
- * AUTHORITATIVE RUNTIME VERSION: V472
+ * Robinhood Chain Meme Hunter — V473
+ * AUTHORITATIVE RUNTIME VERSION: V473
+ *
+ * V473 VERIFIED-LAUNCH-METER AGE PERSISTENCE HOTFIX:
+ * - ensures verifiedLaunchMeterV470 is initialized/pruned BEFORE the normal
+ *   scan state write, even when the scan observes zero verified launches;
+ * - fixes /launches repeatedly showing Meter age: 0h 0m because the previous
+ *   lazy initialization occurred while constructing scan output after state save;
+ * - /launches remains read-only and still performs zero state writes/provider calls;
+ * - launch counting/dedupe/source verification is unchanged;
+ * - V469 fresh-candidate priority, V466/V468 completion, scoring, qualification,
+ *   request ceilings, provider routing and Telegram thresholds are unchanged.
  *
  * V472 COSMETIC HOTFIX ONLY:
  * - /launches heading now uses the runtime VERSION constant instead of a
@@ -1715,7 +1725,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V472";
+const VERSION = "V473";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -69261,6 +69271,21 @@ for (
       budget,
       env
     );
+
+  /*
+   * V473: initialize/prune the forward-only verified-launch meter BEFORE the
+   * authoritative scan state write. In V470-V472, a zero-launch scan could
+   * first initialize monitorStartedAt while constructing the returned telemetry
+   * below, which occurs after writeState(). Because /launches is deliberately
+   * read-only, that timestamp was then never persisted and its age restarted.
+   */
+  ensureVerifiedLaunchMeterV470(
+    state
+  );
+  pruneVerifiedLaunchMeterV470(
+    state,
+    Date.now()
+  );
 
   const save =
     await writeState(
