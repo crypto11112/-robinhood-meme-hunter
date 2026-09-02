@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V451
- * AUTHORITATIVE RUNTIME VERSION: V451
+ * Robinhood Chain Meme Hunter — V452
+ * AUTHORITATIVE RUNTIME VERSION: V452
+ * V452 fixes the blocker proven by the V451 CULT scan: V196 already returned a VERIFIED native ETH -> canonical USDG price in the same scan, but V441 ReservesLens valuation only consulted the persisted V195 cache.  * V452 bridges already-verified same-scan WETH/USDG evidence into a bounded persisted reference consumed by V441. Priority is verified same-batch canonical WETH/USDG swap evidence, then verified V196 native ETH->canonical USDG quote, then verified V195 V3 reference.  * The bridge adds zero external requests and never invents a price. Reuse is capped at 30 minutes. Native ETH follows the existing 1:1 WETH denomination policy.  * No scoring, qualification, market promotion, liquidity threshold, Telegram behavior, provider routing or request ceilings change.
  * V451 fixes the liquidity cross-check definition after research and V448 evidence showed that V449 compared different Uniswap V4 pools for the same token.  * ReservesLens computes fee-excluded liquidity principal for one exact PoolKey/PoolId. A provider liquidity value is therefore comparable only when its pairAddress/pool identity matches that exact ReservesLens PoolId.  * V451 requires exact normalized pool identity equality before calculating liquidity ratios or divergence. Same-token/different-pool values are explicitly classified DIFFERENT_POOL_NOT_COMPARABLE_V451 and can never be used to validate or reject ReservesLens liquidity.  * Existing ReservesLens promotion remains disabled. No scoring, qualification, Telegram, provider routing, request budgets or liquidity thresholds change.
  * V450 removes historical PoolKey recovery from the live critical scan path. V447/V448/V449 proved that optional historical eth_getLogs recovery is unreliable across providers (Chainstack/Blockscout 403s) and can waste analysis budget without improving current-launch handling. V450 therefore does not call recoverHistoricalPoolKeyV443 during normal /scan execution. ReservesLens runs only when a complete PoolKey is already safely persisted from V441+ Initialize observation or other previously verified complete state. Older incomplete watched pools remain fully eligible for the rest of the scanner, but are skipped for independent ReservesLens liquidity rather than triggering historical recovery. The V448/V443 recovery code is retained but dormant for backwards compatibility/diagnostics; it is not part of the live critical path. V449 liquidity cross-checks, V447 valuation-ready target selection, V442 Chainstack ReservesLens routing, scoring, qualification, alert cooldowns, Telegram thresholds and request ceilings are unchanged.
  * V449 is a measurement-only cross-check and Telegram send-status clarity build. V448 proved independent ReservesLens USD liquidity on Yosh, but that same scan showed the reconstructed core-pool USD liquidity was materially different from the already-verified provider liquidity. V449 therefore does NOT promote ReservesLens liquidity into market.verified yet. It cross-checks on-chain core liquidity versus already-verified provider liquidity whenever both exist and records ratio/divergence classes with zero new network requests. V449 also makes Telegram funnel telemetry distinguish qualification from actual send eligibility: ALERT_COOLDOWN is reported as an intentional cooldown suppression rather than appearing like an unexplained send failure. Existing alert cooldown duration and duplicate-alert protection remain unchanged. No scoring, qualification, market promotion, liquidity threshold, provider routing or request ceiling changes.
@@ -1525,7 +1526,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V451";
+const VERSION = "V452";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -3852,9 +3853,182 @@ function decimalFromRawUnsignedV441(
   );
 }
 
+function persistVerifiedWethUsdGReferenceV452(
+  state,
+  {
+    sameBatch = null,
+    uniswapV196 = null,
+    v3V195 = null
+  } = {}
+) {
+  if (!state || typeof state !== "object") {
+    return {
+      persisted: false,
+      status: "STATE_UNAVAILABLE_V452",
+      source: null,
+      priceUsdGPerWeth: null,
+      externalRequestsAdded: 0
+    };
+  }
+
+  const candidates = [
+    {
+      row: sameBatch,
+      source:
+        sameBatch?.source ||
+        "SAME_BATCH_CANONICAL_WETH_USDG_V452",
+      trust:
+        "VERIFIED_SAME_BATCH_CANONICAL_SWAP"
+    },
+    {
+      row: uniswapV196,
+      source:
+        uniswapV196?.source ||
+        "UNISWAP_AGGREGATED_NATIVE_ETH_TO_CANONICAL_USDG_QUOTE_V196",
+      trust:
+        "VERIFIED_NATIVE_ETH_TO_CANONICAL_USDG_QUOTE"
+    },
+    {
+      row: v3V195,
+      source:
+        v3V195?.source ||
+        "UNISWAP_V3_CANONICAL_WETH_USDG_SLOT0_V195",
+      trust:
+        "VERIFIED_CANONICAL_V3_WETH_USDG"
+    }
+  ];
+
+  for (const candidate of candidates) {
+    const row = candidate.row;
+    const price =
+      safeNumber(
+        row?.priceUsdGPerWeth
+      );
+
+    if (
+      row?.verified !== true ||
+      !Number.isFinite(price) ||
+      price <= 0
+    ) {
+      continue;
+    }
+
+    const verifiedAt = Date.now();
+
+    state.verifiedWethUsdGReferenceV452 = {
+      verified: true,
+      priceUsdGPerWeth: price,
+      verifiedAt,
+      source: candidate.source,
+      trust: candidate.trust,
+      poolAddress:
+        normalize(row?.poolAddress) || null,
+      poolId:
+        /^0x[a-f0-9]{64}$/.test(
+          normalize(row?.poolId)
+        )
+          ? normalize(row.poolId)
+          : null,
+      fee:
+        row?.fee ?? null,
+      routing:
+        row?.routing ?? null,
+      originalStatus:
+        row?.status || null,
+      bridgeVersion: "V452"
+    };
+
+    return {
+      persisted: true,
+      status:
+        "VERIFIED_WETH_USDG_REFERENCE_BRIDGED_V452",
+      source: candidate.source,
+      trust: candidate.trust,
+      priceUsdGPerWeth: price,
+      verifiedAt,
+      externalRequestsAdded: 0
+    };
+  }
+
+  return {
+    persisted: false,
+    status:
+      "NO_VERIFIED_REFERENCE_AVAILABLE_TO_BRIDGE_V452",
+    source: null,
+    trust: null,
+    priceUsdGPerWeth: null,
+    verifiedAt: null,
+    externalRequestsAdded: 0
+  };
+}
+
 function bestVerifiedWethUsdGReferenceV195(
   state
 ) {
+  const maxAgeMs =
+    30 * 60 * 1000;
+
+  const bridgedV452 =
+    state
+      ?.verifiedWethUsdGReferenceV452;
+
+  const bridgedPrice =
+    safeNumber(
+      bridgedV452
+        ?.priceUsdGPerWeth
+    );
+
+  const bridgedVerifiedAt =
+    safeNumber(
+      bridgedV452
+        ?.verifiedAt
+    );
+
+  const bridgedAgeMs =
+    bridgedVerifiedAt > 0
+      ? Math.max(
+          0,
+          Date.now() -
+          bridgedVerifiedAt
+        )
+      : null;
+
+  if (
+    bridgedV452?.verified === true &&
+    Number.isFinite(bridgedPrice) &&
+    bridgedPrice > 0 &&
+    bridgedVerifiedAt > 0 &&
+    bridgedAgeMs !== null &&
+    bridgedAgeMs <= maxAgeMs
+  ) {
+    return {
+      verified: true,
+      source:
+        bridgedV452?.source ||
+        "VERIFIED_WETH_USDG_REFERENCE_BRIDGE_V452",
+      trust:
+        bridgedV452?.trust || null,
+      priceUsdGPerWeth:
+        bridgedPrice,
+      verifiedAt:
+        bridgedVerifiedAt,
+      ageMs:
+        bridgedAgeMs,
+      poolAddress:
+        normalize(
+          bridgedV452?.poolAddress
+        ) || null,
+      poolId:
+        bridgedV452?.poolId || null,
+      fee:
+        bridgedV452?.fee ?? null,
+      routing:
+        bridgedV452?.routing ?? null,
+      bridgeVersion: "V452",
+      externalRequestsUsed: 0
+    };
+  }
+
   const cachedV3 =
     state
       ?.v3WethUsdGReferenceV195;
@@ -3870,15 +4044,6 @@ function bestVerifiedWethUsdGReferenceV195(
       cachedV3
         ?.verifiedAt
     );
-
-  /*
-   * Bounded local reuse only.
-   * V195 already verified the canonical token pair, factory-returned pool,
-   * non-zero liquidity and slot0-derived price before persisting this state.
-   * Do not infer freshness forever: require a real timestamp and cap reuse.
-   */
-  const maxAgeMs =
-    30 * 60 * 1000;
 
   const ageMs =
     verifiedAt > 0
@@ -3899,26 +4064,17 @@ function bestVerifiedWethUsdGReferenceV195(
     return {
       verified: true,
       source:
-        cachedV3
-          ?.verifiedByV291 ===
-          true
+        cachedV3?.verifiedByV291 === true
           ? "CACHED_VERIFIED_DIRECT_ONCHAIN_WETH_USDG_V291_V446"
           : "CACHED_VERIFIED_V3_WETH_USDG_REFERENCE_V195_V446",
-      priceUsdGPerWeth:
-        price,
+      priceUsdGPerWeth: price,
       verifiedAt,
       ageMs,
       poolAddress:
-        normalize(
-          cachedV3
-            ?.poolAddress
-        ) ||
-        null,
+        normalize(cachedV3?.poolAddress) || null,
       fee:
-        cachedV3?.fee ??
-        null,
-      externalRequestsUsed:
-        0
+        cachedV3?.fee ?? null,
+      externalRequestsUsed: 0
     };
   }
 
@@ -57505,6 +57661,19 @@ for (
           budget
         );
 
+  const verifiedWethUsdGReferenceBridgeV452 =
+    persistVerifiedWethUsdGReferenceV452(
+      state,
+      {
+        sameBatch:
+          sameBatchWethUsdGReferencePrecheckV194,
+        uniswapV196:
+          uniswapEthUsdGReferenceV196,
+        v3V195:
+          v3WethUsdGReferenceV195
+      }
+    );
+
   const bitqueryWethUsdGReferenceV194 =
     (
       sameBatchWethUsdGReferencePrecheckV194
@@ -57566,6 +57735,10 @@ for (
   onChainDirectionalV179
     .uniswapEthUsdGReferenceV196 =
       uniswapEthUsdGReferenceV196;
+
+  onChainDirectionalV179
+    .verifiedWethUsdGReferenceBridgeV452 =
+      verifiedWethUsdGReferenceBridgeV452;
 
   onChainDirectionalV179
     .resolvedPoolReplayDiagnosticV198 =
@@ -58878,6 +59051,24 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    verifiedEthUsdGReferenceBridgeV452: {
+      enabled: true,
+      sourcePriority: [
+        "SAME_BATCH_CANONICAL_WETH_USDG",
+        "VERIFIED_V196_NATIVE_ETH_TO_CANONICAL_USDG",
+        "VERIFIED_V195_CANONICAL_V3_WETH_USDG"
+      ],
+      maximumReuseAgeMs: 1800000,
+      nativeEthOneToOneWethDenomination: true,
+      addsExternalRequests: 0,
+      guessingEnabled: false,
+      marketPromotionChanged: false,
+      liquidityThresholdChanged: false,
+      scoringChanged: false,
+      qualificationChanged: false,
+      telegramBehaviourChanged: false
+    },
+
     exactPoolLiquidityCrosscheckV451: {
       enabled: true,
       exactPoolIdentityRequired: true,
