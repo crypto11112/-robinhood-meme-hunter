@@ -1,6 +1,14 @@
 /**
- * Robinhood Chain Meme Hunter — V474
- * AUTHORITATIVE RUNTIME VERSION: V474
+ * Robinhood Chain Meme Hunter — V475
+ * AUTHORITATIVE RUNTIME VERSION: V475
+ *
+ * V475 TELEGRAM FORMATTING HOTFIX ONLY:
+ * - fixes /launchcoverage so newline separators render as real Telegram line
+ *   breaks instead of literal backslash-n text;
+ * - V474 launch-coverage funnel logic and cumulative counters are unchanged;
+ * - V473 launch-meter persistence, V470 launch meter, V469 fresh-candidate
+ *   priority, scoring, qualification, provider routing, request ceilings and
+ *   Telegram thresholds are unchanged.
  *
  * V474 MEASUREMENT-ONLY LAUNCH-COVERAGE FUNNEL:
  * - measures the gap between current/live token observation, positively verified
@@ -1738,7 +1746,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V474";
+const VERSION = "V475";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -82554,7 +82562,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "<i>Measurement only. Zero additional provider requests and no scoring/threshold changes.</i>"
-  ].join("\\n");
+  ].join("\n");
 }
 
 function verifiedLaunchMeterTelegramMessageV470(state) {
