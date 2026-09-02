@@ -1,6 +1,19 @@
 /**
- * Robinhood Chain Meme Hunter — V500
- * AUTHORITATIVE RUNTIME VERSION: V500
+ * Robinhood Chain Meme Hunter — V501
+ * AUTHORITATIVE RUNTIME VERSION: V501
+ *
+ * V501 /launchsources RWA ACTIVE-STATE DISPLAY FIX:
+ * - fixes V500 display logic that incorrectly required the non-persisted
+ *   snapshot-only field rwaExactLiveDetectorV495.liveDetectorActive;
+ * - persisted detector activation authority is rwaExactLiveDetectorV495.activePattern;
+ * - /launchsources now reports RWAERC20LaunchpadFactory EXACT LIVE DETECTOR ACTIVE
+ *   whenever the persisted exact event pattern is present;
+ * - does not promote or infer any launch source: it only reflects already
+ *   confirmed V495 persisted evidence;
+ * - /launchsources remains read-only with zero provider requests and zero
+ *   additional state writes;
+ * - V500 Telegram delivery fallback, V498 Chainstack receipt routing, V495
+ *   detector logic, scoring, thresholds, USD, completion and hard limit 42 unchanged.
  *
  * V500 /launchsources TELEGRAM DELIVERY HOTFIX:
  * - fixes V499 Telegram HTML rejection caused by an unmatched closing </b>;
@@ -2311,7 +2324,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V500";
+const VERSION = "V501";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71781,6 +71794,28 @@ for (
         false
     },
 
+    telegramLaunchSourcesRwaStateFixV501: {
+      enabled: true,
+      bug:
+        "V500_CHECKED_SNAPSHOT_ONLY_liveDetectorActive_FIELD",
+      persistedActivationAuthority:
+        "rwaExactLiveDetectorV495.activePattern",
+      launchSourcePromotionChanged:
+        false,
+      externalProviderRequests:
+        0,
+      additionalPersistentStateWrites:
+        0,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false
+    },
+
     telegramLaunchSourcesDeliveryHotfixV500: {
       enabled: true,
       fixes: [
@@ -99574,9 +99609,10 @@ function launchSourcesTelegramMessageV499(
         : "BUILDING FORWARD-ONLY WINDOW";
 
   const rwaActive =
-    rwa?.liveDetectorActive === true &&
-    rwa?.activePattern &&
-    typeof rwa.activePattern === "object";
+    Boolean(
+      rwa?.activePattern &&
+      typeof rwa.activePattern === "object"
+    );
 
   const activeLines =
     active.length
@@ -100145,8 +100181,6 @@ async function telegramCommandReplyV271(
             coverageV499?.returnedCurrentLiveWithVerifiedLaunchSource
           ),
         rwaExactLiveDetectorActive:
-          state?.rwaExactLiveDetectorV495
-            ?.liveDetectorActive === true &&
           Boolean(
             state?.rwaExactLiveDetectorV495
               ?.activePattern
