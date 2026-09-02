@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V453
- * AUTHORITATIVE RUNTIME VERSION: V453
+ * Robinhood Chain Meme Hunter — V454
+ * AUTHORITATIVE RUNTIME VERSION: V454
+ * V454 closes the false-positive semantic path exposed by the V453 SIM scan. The V453 classifier could label a candidate as CORE_AMM_LIQUIDITY_NO_CUSTOM_ACCOUNTING even when that candidate had no ReservesLens result, no verified PoolKey and no PoolId. V454 now requires real ReservesLens evidence and a verified complete PoolKey before ANY liquidity semantic classification may become usable. Missing ReservesLens evidence is classified NO_RESERVESLENS_LIQUIDITY_EVIDENCE_V454 and blocked. Incomplete or unverified PoolKey evidence is classified RESERVESLENS_POOLKEY_UNVERIFIED_V454 and blocked. Only then can a verified ordinary/no-custom-accounting pool become usable, or the specifically identified Pons V2 fee-accounting hook become usable under the researched V453 semantics. Unknown custom-accounting hooks remain blocked. This remains diagnostic-only and does not promote market verification, change liquidity gates, scoring, qualification, Telegram behavior, provider routing or request ceilings.
  * V453 resolves the generic custom-accounting ambiguity for the verified Pons V2 meme hook. Research confirms Pons V2 graduated pools use one permanently locked full-range Uniswap v4 position; the hook charges/accrues post-swap fees but does not replace the core AMM curve or custody trading principal between swaps. ReservesLens generically marks the hook as hasCustomAccounting because its hook permissions include a return-delta accounting flag, but for this specifically identified protocol that flag represents fee accounting rather than hook-managed replacement liquidity. V453 therefore adds a strict semantic classifier for the canonical Pons V2 hook address only. It labels its ReservesLens core principal as semantically usable independent pool-liquidity evidence while keeping hook-held accrued fees separate and excluded. This build remains diagnostic-only: it does NOT yet promote market.verified, change liquidity gates, scoring, qualification, Telegram behavior, provider routing, or request ceilings. Unknown/custom hooks remain blocked exactly as before.
  * V452 fixes the blocker proven by the V451 CULT scan: V196 already returned a VERIFIED native ETH -> canonical USDG price in the same scan, but V441 ReservesLens valuation only consulted the persisted V195 cache.  * V452 bridges already-verified same-scan WETH/USDG evidence into a bounded persisted reference consumed by V441. Priority is verified same-batch canonical WETH/USDG swap evidence, then verified V196 native ETH->canonical USDG quote, then verified V195 V3 reference.  * The bridge adds zero external requests and never invents a price. Reuse is capped at 30 minutes. Native ETH follows the existing 1:1 WETH denomination policy.  * No scoring, qualification, market promotion, liquidity threshold, Telegram behavior, provider routing or request ceilings change.
  * V451 fixes the liquidity cross-check definition after research and V448 evidence showed that V449 compared different Uniswap V4 pools for the same token.  * ReservesLens computes fee-excluded liquidity principal for one exact PoolKey/PoolId. A provider liquidity value is therefore comparable only when its pairAddress/pool identity matches that exact ReservesLens PoolId.  * V451 requires exact normalized pool identity equality before calculating liquidity ratios or divergence. Same-token/different-pool values are explicitly classified DIFFERENT_POOL_NOT_COMPARABLE_V451 and can never be used to validate or reject ReservesLens liquidity.  * Existing ReservesLens promotion remains disabled. No scoring, qualification, Telegram, provider routing, request budgets or liquidity thresholds change.
@@ -1527,7 +1528,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V453";
+const VERSION = "V454";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -4858,12 +4859,156 @@ const PONS_V2_MEME_HOOK_V453 =
 function classifyHookLiquiditySemanticsV453(
   reservesLens
 ) {
+  const hasEvidence =
+    Boolean(
+      reservesLens &&
+      typeof reservesLens === "object" &&
+      (
+        reservesLens?.attempted === true ||
+        reservesLens?.requestSent === true ||
+        reservesLens?.poolId ||
+        reservesLens?.poolKey
+      )
+    );
+
+  if (!hasEvidence) {
+    return {
+      enabled: true,
+      strictEvidenceGuardV454: true,
+      evidencePresent: false,
+      poolKeyVerified: false,
+      identified: false,
+      protocol: null,
+      hook: null,
+      classification:
+        "NO_RESERVESLENS_LIQUIDITY_EVIDENCE_V454",
+      coreLiquiditySemanticallyUsable:
+        false,
+      hookManagedTradingPrincipalIncluded:
+        null,
+      hookAccruedFeesExcluded:
+        null,
+      rationale:
+        "NO_RESERVESLENS_RESULT_OR_POOL_IDENTITY_EVIDENCE",
+      genericHasCustomAccounting:
+        null,
+      promotionAllowed:
+        false,
+      diagnosticOnly:
+        true
+    };
+  }
+
+  const poolKeyVerified =
+    reservesLens
+      ?.poolKey
+      ?.verified ===
+      true;
+
+  const poolId =
+    normalize(
+      reservesLens
+        ?.poolId ||
+      reservesLens
+        ?.poolKey
+        ?.poolId
+    );
+
+  const currency0 =
+    normalize(
+      reservesLens
+        ?.poolKey
+        ?.currency0
+    );
+
+  const currency1 =
+    normalize(
+      reservesLens
+        ?.poolKey
+        ?.currency1
+    );
+
   const hook =
     normalize(
       reservesLens
         ?.poolKey
         ?.hooks
     );
+
+  const completePoolKey =
+    Boolean(
+      poolKeyVerified &&
+      /^0x[a-f0-9]{64}$/.test(
+        String(
+          poolId || ""
+        )
+      ) &&
+      /^0x[a-f0-9]{40}$/.test(
+        String(
+          currency0 || ""
+        )
+      ) &&
+      /^0x[a-f0-9]{40}$/.test(
+        String(
+          currency1 || ""
+        )
+      ) &&
+      /^0x[a-f0-9]{40}$/.test(
+        String(
+          hook || ""
+        )
+      ) &&
+      Number.isFinite(
+        safeNumber(
+          reservesLens
+            ?.poolKey
+            ?.fee
+        )
+      ) &&
+      Number.isFinite(
+        safeNumber(
+          reservesLens
+            ?.poolKey
+            ?.tickSpacing
+        )
+      )
+    );
+
+  if (!completePoolKey) {
+    return {
+      enabled: true,
+      strictEvidenceGuardV454: true,
+      evidencePresent: true,
+      poolKeyVerified:
+        poolKeyVerified,
+      completePoolKey: false,
+      poolId:
+        poolId || null,
+      identified: false,
+      protocol: null,
+      hook:
+        hook || null,
+      classification:
+        "RESERVESLENS_POOLKEY_UNVERIFIED_V454",
+      coreLiquiditySemanticallyUsable:
+        false,
+      hookManagedTradingPrincipalIncluded:
+        null,
+      hookAccruedFeesExcluded:
+        null,
+      rationale:
+        "VERIFIED_COMPLETE_POOLKEY_REQUIRED_BEFORE_LIQUIDITY_SEMANTICS",
+      genericHasCustomAccounting:
+        reservesLens
+          ?.decoded
+          ?.hasCustomAccounting ??
+        null,
+      promotionAllowed:
+        false,
+      diagnosticOnly:
+        true
+    };
+  }
 
   const hasCustomAccounting =
     reservesLens
@@ -4877,6 +5022,11 @@ function classifyHookLiquiditySemanticsV453(
   ) {
     return {
       enabled: true,
+      strictEvidenceGuardV454: true,
+      evidencePresent: true,
+      poolKeyVerified: true,
+      completePoolKey: true,
+      poolId,
       identified: true,
       protocol:
         "PONS_V2",
@@ -4903,9 +5053,14 @@ function classifyHookLiquiditySemanticsV453(
   if (hasCustomAccounting) {
     return {
       enabled: true,
+      strictEvidenceGuardV454: true,
+      evidencePresent: true,
+      poolKeyVerified: true,
+      completePoolKey: true,
+      poolId,
       identified: false,
       protocol: null,
-      hook: hook || null,
+      hook,
       classification:
         "UNKNOWN_CUSTOM_ACCOUNTING_REMAINS_BLOCKED_V453",
       coreLiquiditySemanticallyUsable:
@@ -4927,6 +5082,11 @@ function classifyHookLiquiditySemanticsV453(
 
   return {
     enabled: true,
+    strictEvidenceGuardV454: true,
+    evidencePresent: true,
+    poolKeyVerified: true,
+    completePoolKey: true,
+    poolId,
     identified:
       hook ===
       "0x0000000000000000000000000000000000000000",
@@ -4935,7 +5095,7 @@ function classifyHookLiquiditySemanticsV453(
       "0x0000000000000000000000000000000000000000"
         ? "NO_HOOK"
         : null,
-    hook: hook || null,
+    hook,
     classification:
       "CORE_AMM_LIQUIDITY_NO_CUSTOM_ACCOUNTING_V453",
     coreLiquiditySemanticallyUsable:
@@ -4945,7 +5105,7 @@ function classifyHookLiquiditySemanticsV453(
     hookAccruedFeesExcluded:
       true,
     rationale:
-      "RESERVESLENS_CORE_PRINCIPAL_NO_CUSTOM_ACCOUNTING_FLAG",
+      "VERIFIED_COMPLETE_POOLKEY_AND_NO_CUSTOM_ACCOUNTING_FLAG",
     genericHasCustomAccounting:
       false,
     promotionAllowed:
@@ -59155,6 +59315,38 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    strictReservesLensSemanticGuardV454: {
+      enabled: true,
+      requiresReservesLensEvidence: true,
+      requiresVerifiedCompletePoolKey: true,
+      missingEvidenceClassification:
+        "NO_RESERVESLENS_LIQUIDITY_EVIDENCE_V454",
+      incompletePoolKeyClassification:
+        "RESERVESLENS_POOLKEY_UNVERIFIED_V454",
+      missingEvidenceUsable:
+        false,
+      incompletePoolKeyUsable:
+        false,
+      ponsV2SemanticsPreserved:
+        true,
+      unknownCustomHooksRemainBlocked:
+        true,
+      diagnosticOnly:
+        true,
+      addsExternalRequests:
+        0,
+      marketPromotionChanged:
+        false,
+      liquidityThresholdChanged:
+        false,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramBehaviourChanged:
+        false
+    },
+
     ponsV2HookLiquiditySemanticsV453: {
       enabled: true,
       canonicalPonsV2Hook:
