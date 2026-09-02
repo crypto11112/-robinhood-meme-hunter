@@ -1,6 +1,28 @@
 /**
- * Robinhood Chain Meme Hunter — V480
- * AUTHORITATIVE RUNTIME VERSION: V480
+ * Robinhood Chain Meme Hunter — V481
+ * AUTHORITATIVE RUNTIME VERSION: V481
+ *
+ * V481 AUTHENTICATED GETCONTRACTCREATION DIAGNOSTIC:
+ * - preserves V480 authenticated Blockscout PRO V2 address-info origin lookup;
+ * - ONLY when V480 returns HTTP 200 / contract confirmed but omits creator and/or
+ *   creation transaction, V481 may spend ONE additional released post-Telegram
+ *   spare request to test Blockscout PRO's Etherscan-compatible endpoint:
+ *     https://api.blockscout.com/v2/api
+ *       ?chain_id=4663
+ *       &module=contract
+ *       &action=getcontractcreation
+ *       &contractaddresses={address}
+ *       &apikey=...
+ * - diagnostic is measurement-only: even a valid creator/tx result is NOT
+ *   promoted into launch-source identity, scoring, qualification, Telegram,
+ *   creator clustering, or persisted authoritative origin evidence in V481;
+ * - records HTTP status, Blockscout status/message, result count, exact requested
+ *   address match, creator/creation-tx presence and strict validation result;
+ * - V481 diagnostic fallback max ONE extra request, only after V480 incomplete
+ *   HTTP-200 response, only after Telegram reserve release, and only if global
+ *   capacity remains; hard global ceiling stays 42;
+ * - V476 Pons launch detection, V474 funnel, V469 priority, V478 spare routing,
+ *   scoring, Momentum, qualification and Telegram thresholds unchanged.
  *
  * V480 AUTHENTICATED BLOCKSCOUT PRO ORIGIN TRACE:
  * - fixes V479 public Blockscout V2 HTTP 403 by reusing the bot's existing,
@@ -1832,7 +1854,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V480";
+const VERSION = "V481";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -70957,6 +70979,29 @@ for (
         requests: []
       },
 
+    authenticatedGetContractCreationDiagnosticV481: {
+      enabled: true,
+      diagnosticOnly: true,
+      endpoint:
+        "BLOCKSCOUT_PRO_ETHERSCAN_COMPAT_GETCONTRACTCREATION",
+      runsOnlyAfterV480IncompleteHttp200:
+        true,
+      maxAdditionalRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      authoritativeOriginPromotion:
+        false,
+      launchSourcePromotion:
+        false,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false
+    },
+
     launchCoverageFunnelV474,
 
     launchCoverageCumulativeV474,
@@ -83418,6 +83463,335 @@ function consumeReleasedGlobalSpareV478(
   };
 }
 
+
+function blockscoutProGetContractCreationUrlV481(
+  env,
+  address
+) {
+  const clean =
+    normalize(address);
+
+  const apiKey =
+    String(
+      env?.BLOCKSCOUT_PRO_API_KEY ||
+      ""
+    ).trim();
+
+  if (
+    !isAddress(clean) ||
+    !apiKey
+  ) {
+    return null;
+  }
+
+  const query =
+    new URLSearchParams({
+      chain_id:
+        String(BLOCKSCOUT_PRO_CHAIN_ID),
+      module:
+        "contract",
+      action:
+        "getcontractcreation",
+      contractaddresses:
+        clean,
+      apikey:
+        apiKey
+    });
+
+  return `${BLOCKSCOUT_PRO}/v2/api?${query.toString()}`;
+}
+
+function parseBlockscoutProGetContractCreationV481(
+  body,
+  requestedAddress
+) {
+  const requested =
+    normalize(requestedAddress);
+
+  const status =
+    body?.status !== undefined &&
+    body?.status !== null
+      ? String(body.status)
+      : null;
+
+  const message =
+    body?.message !== undefined &&
+    body?.message !== null
+      ? String(body.message)
+      : null;
+
+  const rows =
+    Array.isArray(body?.result)
+      ? body.result
+      : [];
+
+  const matches =
+    rows
+      .map(row => {
+        const contractAddress =
+          normalize(
+            row?.contractAddress ||
+            row?.contract_address ||
+            null
+          );
+
+        const contractCreator =
+          normalize(
+            row?.contractCreator ||
+            row?.contract_creator ||
+            null
+          );
+
+        const creationTransactionHash =
+          normalize(
+            row?.txHash ||
+            row?.tx_hash ||
+            row?.creationTransactionHash ||
+            row?.creation_transaction_hash ||
+            null
+          );
+
+        const requestedAddressMatch =
+          isAddress(contractAddress) &&
+          contractAddress === requested;
+
+        const creatorValid =
+          isAddress(contractCreator);
+
+        const creationTransactionValid =
+          /^0x[a-f0-9]{64}$/.test(
+            creationTransactionHash || ""
+          );
+
+        return {
+          contractAddress:
+            contractAddress || null,
+          contractCreator:
+            creatorValid
+              ? contractCreator
+              : null,
+          creationTransactionHash:
+            creationTransactionValid
+              ? creationTransactionHash
+              : null,
+          requestedAddressMatch,
+          creatorValid,
+          creationTransactionValid,
+          strictlyVerified:
+            requestedAddressMatch &&
+            creatorValid &&
+            creationTransactionValid
+        };
+      })
+      .filter(row =>
+        row.requestedAddressMatch
+      );
+
+  const exact =
+    matches.find(row =>
+      row.strictlyVerified
+    ) ||
+    matches[0] ||
+    null;
+
+  return {
+    blockscoutStatus:
+      status,
+    blockscoutMessage:
+      message,
+    resultCount:
+      rows.length,
+    exactAddressMatches:
+      matches.length,
+    exactResult:
+      exact,
+    strictlyVerified:
+      exact?.strictlyVerified === true,
+    source:
+      "BLOCKSCOUT_PRO_ETHERSCAN_COMPAT_GETCONTRACTCREATION_DIAGNOSTIC_V481"
+  };
+}
+
+async function runBlockscoutProOriginDiagnosticV481({
+  env,
+  budget,
+  address
+}) {
+  const clean =
+    normalize(address);
+
+  const telemetry = {
+    enabled: true,
+    diagnosticOnly: true,
+    promotionAllowed: false,
+    targetAddress:
+      isAddress(clean)
+        ? clean
+        : null,
+    prerequisite:
+      "V480_HTTP_200_CONTRACT_CONFIRMED_ORIGIN_FIELDS_INCOMPLETE",
+    attempted: false,
+    requestConsumed: false,
+    budgetRouteV481: null,
+    endpointV481:
+      "https://api.blockscout.com/v2/api?chain_id=4663&module=contract&action=getcontractcreation&contractaddresses={address}&apikey=[REDACTED]",
+    maxAdditionalRequestsPerScan: 1,
+    hardRequestLimit: 42,
+    httpStatus: null,
+    blockscoutStatus: null,
+    blockscoutMessage: null,
+    resultCount: 0,
+    exactAddressMatches: 0,
+    creatorReturned: false,
+    creationTransactionReturned: false,
+    strictlyVerifiedDiagnosticResult: false,
+    diagnosticCreator: null,
+    diagnosticCreationTransactionHash: null,
+    authoritativeOriginPromoted: false,
+    launchSourcePromoted: false,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false,
+    status: null
+  };
+
+  if (!isAddress(clean)) {
+    telemetry.status =
+      "V481_DIAGNOSTIC_INVALID_TARGET";
+    return telemetry;
+  }
+
+  const url =
+    blockscoutProGetContractCreationUrlV481(
+      env,
+      clean
+    );
+
+  if (!url) {
+    telemetry.status =
+      "V481_DIAGNOSTIC_BLOCKSCOUT_PRO_NOT_CONFIGURED";
+    return telemetry;
+  }
+
+  /*
+   * Diagnostic runs after Telegram release from inside V480's post-Telegram
+   * origin trace. It may use only one additional global-spare request.
+   */
+  const spare =
+    consumeReleasedGlobalSpareV478(
+      budget,
+      "BLOCKSCOUT_PRO_GETCONTRACTCREATION_DIAGNOSTIC_V481",
+      1
+    );
+
+  if (spare?.ok !== true) {
+    telemetry.status =
+      `V481_DIAGNOSTIC_BUDGET_UNAVAILABLE:${spare?.reason || "UNKNOWN"}`;
+    telemetry.budgetRouteV481 =
+      "NONE";
+    return telemetry;
+  }
+
+  telemetry.attempted = true;
+  telemetry.requestConsumed = true;
+  telemetry.budgetRouteV481 =
+    "POST_TELEGRAM_GLOBAL_SPARE_V478";
+
+  const controller =
+    new AbortController();
+
+  const timer =
+    setTimeout(
+      () => controller.abort(),
+      4500
+    );
+
+  try {
+    const response =
+      await fetch(
+        url,
+        {
+          method: "GET",
+          headers: {
+            accept: "application/json"
+          },
+          signal: controller.signal
+        }
+      );
+
+    telemetry.httpStatus =
+      response.status;
+
+    if (!response.ok) {
+      telemetry.status =
+        `V481_DIAGNOSTIC_HTTP_${response.status}`;
+      return telemetry;
+    }
+
+    const body =
+      await response.json();
+
+    const parsed =
+      parseBlockscoutProGetContractCreationV481(
+        body,
+        clean
+      );
+
+    telemetry.blockscoutStatus =
+      parsed.blockscoutStatus;
+
+    telemetry.blockscoutMessage =
+      parsed.blockscoutMessage;
+
+    telemetry.resultCount =
+      parsed.resultCount;
+
+    telemetry.exactAddressMatches =
+      parsed.exactAddressMatches;
+
+    telemetry.creatorReturned =
+      Boolean(
+        parsed.exactResult?.contractCreator
+      );
+
+    telemetry.creationTransactionReturned =
+      Boolean(
+        parsed.exactResult
+          ?.creationTransactionHash
+      );
+
+    telemetry.strictlyVerifiedDiagnosticResult =
+      parsed.strictlyVerified === true;
+
+    telemetry.diagnosticCreator =
+      parsed.strictlyVerified
+        ? parsed.exactResult
+            ?.contractCreator ||
+          null
+        : null;
+
+    telemetry.diagnosticCreationTransactionHash =
+      parsed.strictlyVerified
+        ? parsed.exactResult
+            ?.creationTransactionHash ||
+          null
+        : null;
+
+    telemetry.status =
+      parsed.strictlyVerified
+        ? "V481_DIAGNOSTIC_VERIFIED_CREATOR_AND_CREATION_TX_FOUND"
+        : "V481_DIAGNOSTIC_NO_STRICT_ORIGIN_RESULT";
+
+    return telemetry;
+  } catch (error) {
+    telemetry.status =
+      `V481_DIAGNOSTIC_FETCH_ERROR:${errorString(error)}`;
+    return telemetry;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function traceUnknownLiveOriginsV477({
   env,
   state,
@@ -83511,6 +83885,13 @@ async function traceUnknownLiveOriginsV477({
     verifiedOrigins: [],
     unverifiedAddresses: [],
     recurringCreators: [],
+    originDiagnosticV481: {
+      enabled: true,
+      diagnosticOnly: true,
+      attempted: false,
+      status:
+        "NOT_NEEDED_OR_NOT_RUN_V481"
+    },
     launchpadIdentityInferred: false,
     status: null
   };
@@ -83674,6 +84055,27 @@ async function traceUnknownLiveOriginsV477({
           row?.source ||
           "BLOCKSCOUT_PRO_V2_ORIGIN_INCOMPLETE_V480"
       };
+
+      /*
+       * V481 diagnostic only. The result is intentionally NOT copied into
+       * root.tokenOrigins, watched.originTraceV477, creatorClusters or launch
+       * source evidence in this version.
+       */
+      if (
+        Boolean(row?.isContract) &&
+        (
+          !row?.contractCreator ||
+          !row?.creationTransactionHash
+        )
+      ) {
+        telemetry.originDiagnosticV481 =
+          await runBlockscoutProOriginDiagnosticV481({
+            env,
+            budget,
+            address:
+              targetAddress
+          });
+      }
     } else {
       const evidence = {
         verified: true,
@@ -83738,6 +84140,62 @@ async function traceUnknownLiveOriginsV477({
         source:
           "BLOCKSCOUT_PRO_V2_ADDRESS_INFO_V480"
       };
+    }
+
+    root.originDiagnosticV481 =
+      root.originDiagnosticV481 &&
+      typeof root.originDiagnosticV481 === "object"
+        ? root.originDiagnosticV481
+        : {
+            enabled: true,
+            diagnosticOnly: true,
+            attempts: 0,
+            http200: 0,
+            strictVerifiedResults: 0,
+            lastStatus: null,
+            lastHttpStatus: null,
+            lastAttemptAt: null
+          };
+
+    if (
+      telemetry.originDiagnosticV481
+        ?.attempted === true
+    ) {
+      root.originDiagnosticV481.attempts =
+        safeNumber(
+          root.originDiagnosticV481.attempts
+        ) + 1;
+
+      root.originDiagnosticV481.lastAttemptAt =
+        Date.now();
+
+      root.originDiagnosticV481.lastStatus =
+        telemetry.originDiagnosticV481.status ||
+        null;
+
+      root.originDiagnosticV481.lastHttpStatus =
+        telemetry.originDiagnosticV481.httpStatus ??
+        null;
+
+      if (
+        telemetry.originDiagnosticV481
+          ?.httpStatus === 200
+      ) {
+        root.originDiagnosticV481.http200 =
+          safeNumber(
+            root.originDiagnosticV481.http200
+          ) + 1;
+      }
+
+      if (
+        telemetry.originDiagnosticV481
+          ?.strictlyVerifiedDiagnosticResult === true
+      ) {
+        root.originDiagnosticV481.strictVerifiedResults =
+          safeNumber(
+            root.originDiagnosticV481.strictVerifiedResults
+          ) + 1;
+      }
     }
 
     root.requestsSucceeded =
@@ -83823,6 +84281,35 @@ function tokenOriginTraceSnapshotV477(state) {
       root.lastStatus || null,
     lastHttpStatus:
       root.lastHttpStatus ?? null,
+    originDiagnosticV481: {
+      enabled: true,
+      diagnosticOnly: true,
+      attempts:
+        safeNumber(
+          root?.originDiagnosticV481?.attempts
+        ),
+      http200:
+        safeNumber(
+          root?.originDiagnosticV481?.http200
+        ),
+      strictVerifiedResults:
+        safeNumber(
+          root?.originDiagnosticV481
+            ?.strictVerifiedResults
+        ),
+      lastStatus:
+        root?.originDiagnosticV481
+          ?.lastStatus ||
+        null,
+      lastHttpStatus:
+        root?.originDiagnosticV481
+          ?.lastHttpStatus ??
+        null,
+      authoritativeOriginPromotion:
+        false,
+      launchSourcePromotion:
+        false
+    },
     interpretation: {
       contractCreatorVerifiedFromBlockscoutV2:
         true,
