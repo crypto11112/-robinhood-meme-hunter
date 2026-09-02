@@ -1,6 +1,11 @@
 /**
- * Robinhood Chain Meme Hunter — V466
- * AUTHORITATIVE RUNTIME VERSION: V466
+ * Robinhood Chain Meme Hunter — V467
+ * AUTHORITATIVE RUNTIME VERSION: V467
+ *
+ * V467 HOTFIX:
+ * - fixes one V466 telemetry identifier typo in the final multi-scan completion return;
+ * - returnedLogsThisScanV466 now correctly receives the already-declared returnedLogsThisScan counter;
+ * - no completion logic, persistence, pagination, request budget, scoring, qualification, Telegram, holder, discovery or provider behavior changes.
  *
  * V466 is a narrow persisted multi-scan exact-pool completion build based on the live V465
  * NUDES/RETAIL diagnostics. V465 proved exact PoolId selection, strict ERC-20 recovery, request
@@ -1613,7 +1618,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V466";
+const VERSION = "V467";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -51995,7 +52000,7 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
     identityBlock:identityBlock || null,
     queryCoversFullPoolLifetime,
     returnedLogs:cumulativeRows,
-    returnedLogsThisScanV466,
+    returnedLogsThisScanV466: returnedLogsThisScan,
     saturated:progress.pendingRangesV466.length > 0,
     allReturnedRowsExactUsdDecoded:allRowsExact,
     fullExactPool24hCoverageVerified:verified,
