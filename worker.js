@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V445
- * AUTHORITATIVE RUNTIME VERSION: V445
+ * Robinhood Chain Meme Hunter — V446
+ * AUTHORITATIVE RUNTIME VERSION: V446
+ * V446 fixes the V445 runtime failure caused by the V441 ReservesLens valuation calling a helper name that does not exist in the inherited codebase: bestVerifiedWethUsdGReferenceV195. V446 adds that missing bounded local helper and reuses only already-persisted verified WETH/USDG reference evidence; it makes zero external requests. The helper accepts the existing cached V3 canonical WETH/USDG reference only when it contains a positive price and a bounded verifiedAt timestamp, and returns it in the same shape expected by V441. If no valid cached reference exists, it returns null and V441 safely leaves USD liquidity incomplete rather than guessing. No V443 recovery logic, V442 Chainstack routing, V441 reserve reconstruction, budgets, scoring, qualification, liquidity thresholds or Telegram behavior are changed.
  * V445 fixes the remaining temporal-dead-zone bug by removing the historicalPoolKeyRecoveryResultV443 runtime value from the early scannerFunnelV415 object, which is created before candidate analysis and before that result exists. The early funnel now keeps only the static V443 capability descriptor. The actual recovery result is exposed only in the final scan response after the recovery call has completed. No PoolKey recovery logic, ReservesLens logic, Chainstack routing, request budgets, scoring, qualification, liquidity rules or Telegram behavior are changed.
  * V444 is a narrow runtime fix for the V443 temporal-dead-zone error. The V443 logic itself was valid, but the runtime result variable was named historicalPoolKeyRecoveryV443, the same identifier used by the top-level telemetry property shorthand before that const had been initialized in the scan function. V444 renames only the runtime result variable to historicalPoolKeyRecoveryResultV443 and updates the telemetry reference. No recovery logic, RPC routing, request budgets, scoring, qualification, liquidity rules or Telegram behavior are changed.
  * V443 is a narrow historical PoolKey recovery build based on the V442 test. V442 proved the ReservesLens routing fix was ready, but the test candidate could not be queried because older persisted pool records pre-dated V441 and therefore contained PoolId/currencies without the immutable fee, tickSpacing and hooks fields required by ReservesLens. V443 recovers that missing immutable PoolKey from the exact historical PoolManager Initialize event when an older returned candidate has an incomplete persisted key and a known Initialize-derived block number. Recovery uses one exact single-block eth_getLogs request through the existing managed analysis RPC router (Chainstack preferred), filtered by PoolManager + Initialize topic + exact PoolId. A recovered event is decoded with the existing V441 full Initialize decoder, written into the existing poolRegistry, and merged into the watched token's existing pool row before the V441 ReservesLens diagnostic runs. At most one recovery request is attempted per scan and only within the existing analysis/global budgets. No request ceiling, scoring, qualification, liquidity threshold or Telegram rule is changed, and no PoolKey field is guessed.
@@ -1519,7 +1520,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V445";
+const VERSION = "V446";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -3423,6 +3424,79 @@ function decimalFromRawUnsignedV441(
     raw,
     decimals
   );
+}
+
+function bestVerifiedWethUsdGReferenceV195(
+  state
+) {
+  const cachedV3 =
+    state
+      ?.v3WethUsdGReferenceV195;
+
+  const price =
+    safeNumber(
+      cachedV3
+        ?.priceUsdGPerWeth
+    );
+
+  const verifiedAt =
+    safeNumber(
+      cachedV3
+        ?.verifiedAt
+    );
+
+  /*
+   * Bounded local reuse only.
+   * V195 already verified the canonical token pair, factory-returned pool,
+   * non-zero liquidity and slot0-derived price before persisting this state.
+   * Do not infer freshness forever: require a real timestamp and cap reuse.
+   */
+  const maxAgeMs =
+    30 * 60 * 1000;
+
+  const ageMs =
+    verifiedAt > 0
+      ? Math.max(
+          0,
+          Date.now() -
+          verifiedAt
+        )
+      : null;
+
+  if (
+    Number.isFinite(price) &&
+    price > 0 &&
+    verifiedAt > 0 &&
+    ageMs !== null &&
+    ageMs <= maxAgeMs
+  ) {
+    return {
+      verified: true,
+      source:
+        cachedV3
+          ?.verifiedByV291 ===
+          true
+          ? "CACHED_VERIFIED_DIRECT_ONCHAIN_WETH_USDG_V291_V446"
+          : "CACHED_VERIFIED_V3_WETH_USDG_REFERENCE_V195_V446",
+      priceUsdGPerWeth:
+        price,
+      verifiedAt,
+      ageMs,
+      poolAddress:
+        normalize(
+          cachedV3
+            ?.poolAddress
+        ) ||
+        null,
+      fee:
+        cachedV3?.fee ??
+        null,
+      externalRequestsUsed:
+        0
+    };
+  }
+
+  return null;
 }
 
 function reservesLensUsdValuationV441(
@@ -63801,6 +63875,24 @@ for (
 
     historicalPoolKeyRecoveryV443:
       historicalPoolKeyRecoveryResultV443,
+
+    wethUsdGReferenceReuseFixV446: {
+      enabled: true,
+      source:
+        "EXISTING_VERIFIED_V3_CACHE_ONLY",
+      maximumCacheAgeMs:
+        1800000,
+      externalRequestsAdded:
+        0,
+      guessingEnabled:
+        false,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      liquidityThresholdChanged:
+        false
+    },
 
     holderEvidenceRecoveryUpgradeV437: {
       enabled: true,
