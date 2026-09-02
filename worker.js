@@ -1,6 +1,31 @@
 /**
- * Robinhood Chain Meme Hunter — V485
- * AUTHORITATIVE RUNTIME VERSION: V485
+ * Robinhood Chain Meme Hunter — V486
+ * AUTHORITATIVE RUNTIME VERSION: V486
+ *
+ * V486 PERSISTED VERIFIED-ORIGIN RAW-TRACE BACKLOG:
+ * - preserves all confirmed-working V485/V484/V483 behaviour;
+ * - removes V485's dependence on creator + creation-tx evidence appearing in
+ *   the SAME scan;
+ * - after fresh analysis + Telegram + current/live origin work, V486 may take
+ *   the OLDEST unprocessed persisted V480 verified-origin record and run the
+ *   existing V485 exact creation-transaction raw-trace attribution on it;
+ * - CURRENT/LIVE V485 attribution always has priority over backlog;
+ * - CURRENT/LIVE V483 fingerprinting also has priority over backlog;
+ * - max ONE secondary origin diagnostic request per scan across
+ *   V483 / current-live V485 / persisted-backlog V486;
+ * - a persisted origin is marked processed only after V486 actually consumes
+ *   the raw-trace request, preventing repeated spending on the same
+ *   token+creation-transaction pair;
+ * - already V485-attributed origins are automatically excluded;
+ * - HTTP failures/no exact CREATE match are retained as processed diagnostic
+ *   outcomes, not silently retried forever;
+ * - exact verification standard remains unchanged:
+ *   CREATE/CREATE2 result address must equal the candidate token;
+ * - verified deployment source still does NOT automatically mean launchpad,
+ *   factory or router;
+ * - hard request ceiling remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, verified-launch
+ *   meter, V476 launch-source promotion, or live-analysis ordering changes.
  *
  * V485 EXACT CREATION-TRANSACTION RAW-TRACE ATTRIBUTION:
  * - preserves all confirmed-working V484 behaviour;
@@ -1960,7 +1985,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V485";
+const VERSION = "V486";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -69866,6 +69891,22 @@ for (
       );
 
   /*
+   * V486:
+   * If current/live origin work did NOT consume the single secondary origin
+   * diagnostic slot, work one persisted verified-origin record oldest-first.
+   * Fresh analysis and Telegram are already complete, and all spending still
+   * goes through the authoritative released-global-spare + hard-42 guard.
+   */
+  const persistedOriginRawTraceBacklogThisScanV486 =
+    await runPersistedVerifiedOriginRawTraceBacklogV486({
+      env,
+      state,
+      budget,
+      currentOriginTraceTelemetry:
+        tokenOriginTraceThisScanV477
+    });
+
+  /*
    * =======================================================
    * V170 POST-ANALYSIS RESIDUAL BACKLOG CATCH-UP
    * =======================================================
@@ -71078,6 +71119,13 @@ for (
         state
       ),
 
+    persistedOriginRawTraceBacklogThisScanV486,
+
+    persistedOriginRawTraceBacklogV486:
+      persistedOriginRawTraceBacklogSnapshotV486(
+        state
+      ),
+
     postTelegramGlobalSpareV478:
       budget.postTelegramGlobalSpareV478 || {
         enabled: true,
@@ -71209,6 +71257,45 @@ for (
       creationMechanismAttributionSnapshotV485(
         state
       ),
+
+    persistedVerifiedOriginRawTraceBacklogV486: {
+      enabled: true,
+      measurementOnly: true,
+      trigger:
+        "NO_CURRENT_LIVE_V483_OR_V485_SECONDARY_REQUEST_USED",
+      source:
+        "PERSISTED_V480_VERIFIED_ORIGINS",
+      selection:
+        "OLDEST_UNPROCESSED_FIRST",
+      exactProofStandard:
+        "UNCHANGED_V485_CREATE_OR_CREATE2_RESULT_ADDRESS_EQUALS_TOKEN",
+      currentLiveV485Priority:
+        true,
+      currentLiveV483Priority:
+        true,
+      processedOnlyAfterRequestConsumed:
+        true,
+      automaticRetryOfProcessedOrigins:
+        false,
+      alreadyAttributedOriginsExcluded:
+        true,
+      maxBacklogRawTraceRequestsPerScan:
+        1,
+      maxSecondaryOriginDiagnosticRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      launchSourcePromotion:
+        false,
+      launchMeterMutation:
+        false,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false
+    },
 
     launchCoverageFunnelV474,
 
@@ -86001,6 +86088,646 @@ function creationMechanismAttributionSnapshotV485(
       false,
     hardGlobalLimitUnchanged:
       42
+  };
+}
+
+
+function ensurePersistedOriginRawTraceBacklogV486(
+  state
+) {
+  if (
+    !state.persistedOriginRawTraceBacklogV486 ||
+    typeof state.persistedOriginRawTraceBacklogV486 !==
+      "object"
+  ) {
+    state.persistedOriginRawTraceBacklogV486 = {
+      enabled: true,
+      measurementOnly: true,
+      monitorStartedAt: Date.now(),
+      scansObserved: 0,
+      requestsAttempted: 0,
+      requestsSucceeded: 0,
+      exactTokenCreationsVerified: 0,
+      processedOrigins: {},
+      lastSelectedToken: null,
+      lastSelectedCreationTransactionHash: null,
+      lastStatus: null,
+      lastHttpStatus: null,
+      lastAttemptAt: null
+    };
+  }
+
+  const root =
+    state.persistedOriginRawTraceBacklogV486;
+
+  root.processedOrigins =
+    root.processedOrigins &&
+    typeof root.processedOrigins === "object"
+      ? root.processedOrigins
+      : {};
+
+  return root;
+}
+
+function prunePersistedOriginRawTraceBacklogV486(
+  state
+) {
+  const root =
+    ensurePersistedOriginRawTraceBacklogV486(
+      state
+    );
+
+  const now = Date.now();
+  const maxAgeMs =
+    7 * 24 * 60 * 60 * 1000;
+
+  const retained =
+    Object.entries(
+      root.processedOrigins || {}
+    )
+      .filter(([, row]) => {
+        const at =
+          safeNumber(
+            row?.attemptedAt
+          );
+
+        return (
+          at > 0 &&
+          now - at <= maxAgeMs
+        );
+      })
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.[1]?.attemptedAt
+          ) -
+          safeNumber(
+            a?.[1]?.attemptedAt
+          )
+      )
+      .slice(0, 200);
+
+  root.processedOrigins =
+    Object.fromEntries(retained);
+
+  return root;
+}
+
+function persistedOriginKeyV486(
+  token,
+  creationTransactionHash
+) {
+  const cleanToken =
+    normalize(token);
+
+  const tx =
+    String(
+      creationTransactionHash ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  if (
+    !isAddress(cleanToken) ||
+    !/^0x[a-f0-9]{64}$/.test(tx)
+  ) {
+    return null;
+  }
+
+  return `${cleanToken}:${tx}`;
+}
+
+function selectOldestUnprocessedVerifiedOriginV486(
+  state
+) {
+  const originRoot =
+    pruneTokenOriginTraceV477(
+      state
+    );
+
+  const attributionRoot =
+    pruneCreationMechanismAttributionV485(
+      state
+    );
+
+  const backlogRoot =
+    prunePersistedOriginRawTraceBacklogV486(
+      state
+    );
+
+  const candidates =
+    Object.entries(
+      originRoot.tokenOrigins || {}
+    )
+      .map(([token, row]) => ({
+        token:
+          normalize(token),
+        row
+      }))
+      .filter(({ token, row }) => {
+        const creator =
+          normalize(
+            row?.contractCreator
+          );
+
+        const tx =
+          String(
+            row?.creationTransactionHash ||
+            ""
+          )
+            .trim()
+            .toLowerCase();
+
+        const key =
+          persistedOriginKeyV486(
+            token,
+            tx
+          );
+
+        if (
+          row?.verified !== true ||
+          !isAddress(token) ||
+          !isAddress(creator) ||
+          !/^0x[a-f0-9]{64}$/.test(tx) ||
+          !key
+        ) {
+          return false;
+        }
+
+        if (
+          attributionRoot
+            ?.tokenAttributions?.[
+              token
+            ]
+            ?.exactTokenCreateVerified ===
+          true
+        ) {
+          return false;
+        }
+
+        if (
+          backlogRoot
+            ?.processedOrigins?.[
+              key
+            ]
+        ) {
+          return false;
+        }
+
+        return true;
+      })
+      .sort((a, b) => {
+        const aAt =
+          safeNumber(
+            a?.row?.verifiedAt
+          ) ||
+          safeNumber(
+            a?.row?.observedAt
+          );
+
+        const bAt =
+          safeNumber(
+            b?.row?.verifiedAt
+          ) ||
+          safeNumber(
+            b?.row?.observedAt
+          );
+
+        if (aAt !== bAt) {
+          return aAt - bAt;
+        }
+
+        return a.token.localeCompare(
+          b.token
+        );
+      });
+
+  return candidates[0] || null;
+}
+
+async function runPersistedVerifiedOriginRawTraceBacklogV486({
+  env,
+  state,
+  budget,
+  currentOriginTraceTelemetry
+}) {
+  const root =
+    prunePersistedOriginRawTraceBacklogV486(
+      state
+    );
+
+  root.scansObserved =
+    safeNumber(
+      root.scansObserved
+    ) + 1;
+
+  const currentV485Attempted =
+    currentOriginTraceTelemetry
+      ?.exactCreationMechanismAttributionV485
+      ?.attempted === true;
+
+  const currentV483Attempted =
+    currentOriginTraceTelemetry
+      ?.unknownLaunchMechanismFingerprintV483
+      ?.attempted === true;
+
+  const telemetry = {
+    enabled: true,
+    measurementOnly: true,
+    promotionAllowed: false,
+    currentLiveV485Priority: true,
+    currentLiveV483Priority: true,
+    currentLiveV485Attempted:
+      currentV485Attempted,
+    currentLiveV483Attempted:
+      currentV483Attempted,
+    selectedFromPersistedVerifiedOrigins:
+      false,
+    selectionPolicy:
+      "OLDEST_UNPROCESSED_VERIFIED_ORIGIN_FIRST_V486",
+    selectedToken: null,
+    selectedCreator: null,
+    selectedCreationTransactionHash: null,
+    selectedOriginVerifiedAt: null,
+    attempted: false,
+    requestConsumed: false,
+    budgetRouteV486: null,
+    attributionResult: null,
+    processedAfterAttempt: false,
+    maxBacklogRawTraceRequestsPerScan: 1,
+    maxSecondaryOriginDiagnosticRequestsPerScan: 1,
+    hardRequestLimit: 42,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false,
+    launchSourcePromoted: false,
+    launchMeterMutation: false,
+    status: null
+  };
+
+  /*
+   * A current/live V483 fingerprint or current/live V485 raw trace already
+   * consumed the one secondary origin-diagnostic slot. Fresh evidence wins.
+   */
+  if (
+    currentV485Attempted ||
+    currentV483Attempted
+  ) {
+    telemetry.status =
+      currentV485Attempted
+        ? "V486_SKIPPED_CURRENT_LIVE_V485_USED_SECONDARY_SLOT"
+        : "V486_SKIPPED_CURRENT_LIVE_V483_USED_SECONDARY_SLOT";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const selected =
+    selectOldestUnprocessedVerifiedOriginV486(
+      state
+    );
+
+  if (!selected) {
+    telemetry.status =
+      "V486_NO_UNPROCESSED_VERIFIED_ORIGIN";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const token =
+    normalize(
+      selected.token
+    );
+
+  const creator =
+    normalize(
+      selected?.row?.contractCreator
+    );
+
+  const tx =
+    String(
+      selected?.row
+        ?.creationTransactionHash ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  const key =
+    persistedOriginKeyV486(
+      token,
+      tx
+    );
+
+  telemetry.selectedFromPersistedVerifiedOrigins =
+    true;
+  telemetry.selectedToken =
+    token;
+  telemetry.selectedCreator =
+    creator;
+  telemetry.selectedCreationTransactionHash =
+    tx;
+  telemetry.selectedOriginVerifiedAt =
+    safeNumber(
+      selected?.row?.verifiedAt
+    ) || null;
+
+  root.lastSelectedToken =
+    token;
+  root.lastSelectedCreationTransactionHash =
+    tx;
+
+  const attribution =
+    await runExactCreationMechanismAttributionV485({
+      env,
+      state,
+      budget,
+      token,
+      verifiedCreator:
+        creator,
+      creationTransactionHash:
+        tx
+    });
+
+  telemetry.attributionResult =
+    attribution;
+
+  telemetry.attempted =
+    attribution?.attempted === true;
+
+  telemetry.requestConsumed =
+    attribution?.requestConsumed === true;
+
+  telemetry.budgetRouteV486 =
+    attribution?.budgetRouteV485 ||
+    null;
+
+  if (
+    attribution?.attempted !== true
+  ) {
+    telemetry.status =
+      attribution?.status
+        ? `V486_NOT_ATTEMPTED:${attribution.status}`
+        : "V486_NOT_ATTEMPTED";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  /*
+   * Mark only after the raw-trace request was actually consumed.
+   * This is deliberate: a temporary budget shortage does not burn the origin,
+   * while a real HTTP/no-match result is retained so we do not pay repeatedly.
+   */
+  const attemptedAt =
+    Date.now();
+
+  root.requestsAttempted =
+    safeNumber(
+      root.requestsAttempted
+    ) + 1;
+
+  root.lastAttemptAt =
+    attemptedAt;
+
+  root.lastHttpStatus =
+    attribution?.httpStatus ??
+    null;
+
+  if (
+    attribution?.httpStatus === 200
+  ) {
+    root.requestsSucceeded =
+      safeNumber(
+        root.requestsSucceeded
+      ) + 1;
+  }
+
+  if (
+    attribution
+      ?.exactCreationTrace
+      ?.exactTokenCreateVerified ===
+      true
+  ) {
+    root.exactTokenCreationsVerified =
+      safeNumber(
+        root
+          .exactTokenCreationsVerified
+      ) + 1;
+  }
+
+  if (key) {
+    root.processedOrigins[
+      key
+    ] = {
+      token,
+      verifiedCreator:
+        creator,
+      creationTransactionHash:
+        tx,
+      originVerifiedAt:
+        safeNumber(
+          selected?.row?.verifiedAt
+        ) || null,
+      attemptedAt,
+      httpStatus:
+        attribution?.httpStatus ??
+        null,
+      attributionStatus:
+        attribution?.status ||
+        null,
+      exactTokenCreateVerified:
+        attribution
+          ?.exactCreationTrace
+          ?.exactTokenCreateVerified ===
+        true,
+      verifiedDeploymentSource:
+        attribution
+          ?.exactCreationTrace
+          ?.verifiedDeploymentSource ||
+        null,
+      processedOnce:
+        true,
+      retryAutomatically:
+        false
+    };
+
+    telemetry.processedAfterAttempt =
+      true;
+  }
+
+  telemetry.status =
+    attribution
+      ?.exactCreationTrace
+      ?.exactTokenCreateVerified ===
+      true
+      ? "V486_PERSISTED_ORIGIN_EXACT_CREATION_TRACE_VERIFIED"
+      : `V486_PERSISTED_ORIGIN_PROCESSED:${attribution?.status || "UNKNOWN"}`;
+
+  root.lastStatus =
+    telemetry.status;
+
+  return telemetry;
+}
+
+function persistedOriginRawTraceBacklogSnapshotV486(
+  state
+) {
+  const root =
+    prunePersistedOriginRawTraceBacklogV486(
+      state
+    );
+
+  const processed =
+    Object.values(
+      root.processedOrigins || {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.attemptedAt
+          ) -
+          safeNumber(
+            a?.attemptedAt
+          )
+      );
+
+  const exact =
+    processed.filter(
+      row =>
+        row
+          ?.exactTokenCreateVerified ===
+        true
+    );
+
+  return {
+    enabled: true,
+    measurementOnly: true,
+    monitorStartedAt:
+      safeNumber(
+        root.monitorStartedAt
+      ) || null,
+    scansObserved:
+      safeNumber(
+        root.scansObserved
+      ),
+    requestsAttempted:
+      safeNumber(
+        root.requestsAttempted
+      ),
+    requestsSucceeded:
+      safeNumber(
+        root.requestsSucceeded
+      ),
+    exactTokenCreationsVerified:
+      safeNumber(
+        root
+          .exactTokenCreationsVerified
+      ),
+    processedOriginCount:
+      processed.length,
+    exactVerifiedProcessedCount:
+      exact.length,
+    remainingEligibleBacklogCount:
+      (() => {
+        const originRoot =
+          pruneTokenOriginTraceV477(
+            state
+          );
+
+        const attributionRoot =
+          pruneCreationMechanismAttributionV485(
+            state
+          );
+
+        let count = 0;
+
+        for (
+          const [token, row] of
+          Object.entries(
+            originRoot.tokenOrigins || {}
+          )
+        ) {
+          const cleanToken =
+            normalize(token);
+
+          const tx =
+            String(
+              row?.creationTransactionHash ||
+              ""
+            )
+              .trim()
+              .toLowerCase();
+
+          const key =
+            persistedOriginKeyV486(
+              cleanToken,
+              tx
+            );
+
+          if (
+            row?.verified === true &&
+            isAddress(cleanToken) &&
+            isAddress(
+              normalize(
+                row?.contractCreator
+              )
+            ) &&
+            /^0x[a-f0-9]{64}$/.test(tx) &&
+            key &&
+            attributionRoot
+              ?.tokenAttributions?.[
+                cleanToken
+              ]
+              ?.exactTokenCreateVerified !==
+              true &&
+            !root
+              ?.processedOrigins?.[
+                key
+              ]
+          ) {
+            count++;
+          }
+        }
+
+        return count;
+      })(),
+    recentProcessedOrigins:
+      processed.slice(0, 20),
+    lastSelectedToken:
+      root.lastSelectedToken ||
+      null,
+    lastSelectedCreationTransactionHash:
+      root.lastSelectedCreationTransactionHash ||
+      null,
+    lastStatus:
+      root.lastStatus ||
+      null,
+    lastHttpStatus:
+      root.lastHttpStatus ??
+      null,
+    lastAttemptAt:
+      safeNumber(
+        root.lastAttemptAt
+      ) || null,
+    currentLivePriorityPreserved:
+      true,
+    automaticRetryOfProcessedOrigins:
+      false,
+    maxBacklogRawTraceRequestsPerScan:
+      1,
+    hardGlobalLimitUnchanged:
+      42,
+    launchSourcePromotionAllowed:
+      false
   };
 }
 
