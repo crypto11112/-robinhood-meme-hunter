@@ -1,6 +1,22 @@
 /**
- * Robinhood Chain Meme Hunter — V504
- * AUTHORITATIVE RUNTIME VERSION: V504
+ * Robinhood Chain Meme Hunter — V505
+ * AUTHORITATIVE RUNTIME VERSION: V505
+ *
+ * V505 STRONG RECURRING-CREATOR PRIORITY:
+ * - preserves V504 solved-RWA backlog exclusion and all confirmed-working logic;
+ * - when an unresolved creator reaches >= 6 independently verified token origins,
+ *   creator-level V503 attribution gets the one secondary diagnostic slot before
+ *   another V485 per-token exact-creation attempt from the SAME creator cluster;
+ * - this prevents repeated V485 HTTP-200/no-exact-create results from starving the
+ *   higher-value recurring-creator investigation;
+ * - per-token V485 remains available for tokens whose creators are not yet strong
+ *   recurring clusters and remains available after creator-level work is exhausted;
+ * - no creator or source is promoted from recurrence alone;
+ * - exact creation/trigger linkage remains mandatory before source promotion;
+ * - one secondary diagnostic request maximum per scan remains enforced;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, verified-USD,
+ *   dense-pool completion, launch-meter, RWA detector, or alert-cadence changes.
  *
  * V504 SOLVED-RWA BACKLOG EXCLUSION + V503 SLOT RELEASE:
  * - preserves the confirmed RWA exact live detector and all V503/V502 logic;
@@ -2382,7 +2398,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V504";
+const VERSION = "V505";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71825,7 +71841,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71849,6 +71865,36 @@ for (
       telegramThresholdChanged:
         false,
       launchSourcePromotion:
+        false
+    },
+
+    strongRecurringCreatorPriorityV505: {
+      enabled: true,
+      thresholdDistinctVerifiedTokenOrigins:
+        6,
+      purpose:
+        "PREVENT_REPEAT_SAME_CLUSTER_V485_NO_MATCHES_FROM_STARVING_CREATOR_LEVEL_ATTRIBUTION",
+      priority:
+        "V503_BEFORE_V485_ONLY_WHEN_CURRENT_TOKEN_BELONGS_TO_SAME_STRONG_RECURRING_CREATOR",
+      v485GloballyDisabled:
+        false,
+      recurrenceAlonePromotesSource:
+        false,
+      exactCreationOrTriggerProofStillRequired:
+        true,
+      maxSecondaryDiagnosticRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false,
+      rwaDetectorChanged:
         false
     },
 
@@ -88608,6 +88654,99 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
   root.lastSelectedCreationTransactionHash =
     tx;
 
+
+  const recurringCreatorPriorityV505 =
+    shouldPrioritizeRecurringCreatorOverV485V505({
+      state,
+      token:
+        telemetry?.selectedToken ||
+        selected?.token ||
+        selected?.address ||
+        targetToken ||
+        null
+    });
+
+  if (
+    recurringCreatorPriorityV505
+      .prioritizeCreator === true
+  ) {
+    const creatorV503 =
+      await runRecurringCreatorAttributionV503({
+        env,
+        state,
+        budget
+      });
+
+    telemetry.recurringCreatorPriorityV505 = {
+      applied: true,
+      reason:
+        recurringCreatorPriorityV505
+          .reason,
+      thresholdDistinctTokens:
+        strongRecurringCreatorThresholdV505(),
+      creator:
+        recurringCreatorPriorityV505
+          ?.tokenCreatorMatch
+          ?.creator ||
+        recurringCreatorPriorityV505
+          ?.pendingCreatorWork
+          ?.creator ||
+        null,
+      distinctTokens:
+        safeNumber(
+          recurringCreatorPriorityV505
+            ?.tokenCreatorMatch
+            ?.distinctTokens ||
+          recurringCreatorPriorityV505
+            ?.pendingCreatorWork
+            ?.distinctTokens
+        ),
+      v485DeferredForSameCluster:
+        true,
+      creatorAttributionResult:
+        creatorV503
+    };
+
+    telemetry.status =
+      `V505_ROUTED_STRONG_CLUSTER_TO_V503:${creatorV503?.status || "DATA_UNVERIFIED"}`;
+
+    telemetry.attempted =
+      creatorV503?.attempted === true;
+
+    telemetry.requestConsumed =
+      creatorV503?.requestConsumed === true;
+
+    telemetry.processedAfterAttempt =
+      creatorV503?.processedAfterAttempt === true;
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  telemetry.recurringCreatorPriorityV505 = {
+    applied: false,
+    reason:
+      recurringCreatorPriorityV505
+        .reason,
+    thresholdDistinctTokens:
+      strongRecurringCreatorThresholdV505(),
+    creator:
+      recurringCreatorPriorityV505
+        ?.tokenCreatorMatch
+        ?.creator ||
+      null,
+    distinctTokens:
+      safeNumber(
+        recurringCreatorPriorityV505
+          ?.tokenCreatorMatch
+          ?.distinctTokens
+      ),
+    v485DeferredForSameCluster:
+      false
+  };
+
   const attribution =
     await runExactCreationMechanismAttributionV485({
       env,
@@ -94550,6 +94689,161 @@ function filterGenericCreatorMechanismRowsV503(
   });
 }
 
+
+function strongRecurringCreatorThresholdV505() {
+  return 6;
+}
+
+function strongRecurringCreatorCandidateV505(
+  state
+) {
+  const rows =
+    recurringCreatorCandidatesV503(
+      state
+    );
+
+  return (
+    rows.find(
+      row =>
+        safeNumber(
+          row?.distinctTokens
+        ) >=
+          strongRecurringCreatorThresholdV505() &&
+        (
+          row?.identityProcessed !== true ||
+          row?.transactionsProcessed !== true
+        )
+    ) || null
+  );
+}
+
+function tokenBelongsToStrongRecurringCreatorV505(
+  state,
+  token
+) {
+  const cleanToken =
+    normalize(token);
+
+  if (!isAddress(cleanToken)) {
+    return {
+      matched: false,
+      creator: null,
+      distinctTokens: 0
+    };
+  }
+
+  const rows =
+    recurringCreatorCandidatesV503(
+      state
+    );
+
+  for (const row of rows) {
+    if (
+      safeNumber(
+        row?.distinctTokens
+      ) <
+      strongRecurringCreatorThresholdV505()
+    ) {
+      continue;
+    }
+
+    const tokens =
+      Array.isArray(
+        row?.tokens
+      )
+        ? row.tokens
+            .map(normalize)
+            .filter(isAddress)
+        : [];
+
+    if (
+      tokens.includes(
+        cleanToken
+      )
+    ) {
+      return {
+        matched: true,
+        creator:
+          normalize(
+            row?.creator
+          ),
+        distinctTokens:
+          safeNumber(
+            row?.distinctTokens
+          ),
+        identityProcessed:
+          row?.identityProcessed === true,
+        transactionsProcessed:
+          row?.transactionsProcessed === true
+      };
+    }
+  }
+
+  return {
+    matched: false,
+    creator: null,
+    distinctTokens: 0
+  };
+}
+
+function shouldPrioritizeRecurringCreatorOverV485V505({
+  state,
+  token
+}) {
+  const match =
+    tokenBelongsToStrongRecurringCreatorV505(
+      state,
+      token
+    );
+
+  const pendingCreatorWork =
+    strongRecurringCreatorCandidateV505(
+      state
+    );
+
+  if (
+    !match.matched ||
+    !pendingCreatorWork
+  ) {
+    return {
+      prioritizeCreator: false,
+      reason:
+        "V505_NO_STRONG_RECURRING_CREATOR_PRIORITY",
+      tokenCreatorMatch:
+        match,
+      pendingCreatorWork
+    };
+  }
+
+  const sameCreator =
+    normalize(
+      match.creator
+    ) ===
+    normalize(
+      pendingCreatorWork.creator
+    );
+
+  const incomplete =
+    pendingCreatorWork
+      ?.identityProcessed !== true ||
+    pendingCreatorWork
+      ?.transactionsProcessed !== true;
+
+  return {
+    prioritizeCreator:
+      sameCreator &&
+      incomplete,
+    reason:
+      sameCreator &&
+      incomplete
+        ? "V505_STRONG_RECURRING_CREATOR_PRIORITY_OVER_SAME_CLUSTER_V485"
+        : "V505_STRONG_CLUSTER_EXISTS_BUT_NOT_SAME_CREATOR",
+    tokenCreatorMatch:
+      match,
+    pendingCreatorWork
+  };
+}
+
 async function runRecurringCreatorAttributionV503({
   env,
   state,
@@ -95093,6 +95387,19 @@ function recurringCreatorAttributionSnapshotV503(
       false,
     maxRequestsPerScan:
       1,
+    strongRecurringCreatorPriorityV505: {
+      enabled: true,
+      thresholdDistinctVerifiedTokenOrigins:
+        strongRecurringCreatorThresholdV505(),
+      currentStrongestPending:
+        strongRecurringCreatorCandidateV505(
+          state
+        ),
+      priorityRule:
+        "V503_CREATOR_LEVEL_ATTRIBUTION_BEFORE_REPEAT_V485_FOR_SAME_STRONG_CREATOR_CLUSTER",
+      recurrenceAloneMeansLaunchSource:
+        false
+    },
     hardGlobalLimitUnchanged:
       42
   };
