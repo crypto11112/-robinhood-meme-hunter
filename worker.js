@@ -1,4 +1,29 @@
 /**
+ * Robinhood Chain Meme Hunter — V468
+ * AUTHORITATIVE RUNTIME VERSION: V468
+ *
+ * V468 is a narrow completion-reserve integration fix on V467.
+ * V467 proved the V466 multi-scan lane no longer crashes, but the first NUDES
+ * attempt exposed an inherited V459/V463 reservation mismatch: a resumable
+ * multi-scan job was denied ALL protection unless the full 10-request
+ * completion envelope was still available.
+ *
+ * V468 keeps every request ceiling unchanged and changes only fallback-job
+ * reservation activation:
+ * - the full protected envelope remains 10 requests when capacity exists;
+ * - when less than 10 existing analysis/global slots remain, an eligible
+ *   successful-alert fallback may reserve the smaller AVAILABLE capacity;
+ * - at least one existing slot must remain, otherwise no reserve is activated;
+ * - protected V458/V466 timestamp/log requests may consume that capacity;
+ * - lower-priority analysis is blocked from consuming the active partial reserve;
+ * - no new request is created and the 42 global / V416 adaptive / Telegram
+ *   reserve ceilings are unchanged.
+ *
+ * This matches V466's persisted multi-scan architecture: a dense pool no longer
+ * needs to finish all 24h coverage in one scan, so refusing all protection
+ * merely because fewer than 10 slots remain is counterproductive.
+ */
+ /**
  * Robinhood Chain Meme Hunter — V467
  * AUTHORITATIVE RUNTIME VERSION: V467
  *
@@ -1618,7 +1643,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V467";
+const VERSION = "V468";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -51049,14 +51074,42 @@ function activateLastAlertFallbackReserveV460(
         notificationReserveRemaining
     );
 
+  /*
+   * V468:
+   * V466 made this lane resumable across scans. A historical fallback therefore
+   * does not need the entire 10-request completion envelope to make safe
+   * forward progress. Protect whatever EXISTING capacity is still available,
+   * capped by the normal V463/V464 envelope. This changes priority only; it
+   * never raises the analysis/global ceilings.
+   */
+  const availableCompletionCapacityV468 =
+    Math.max(
+      0,
+      Math.min(
+        reserved,
+        analysisRemaining,
+        globalRemainingBeforeTelegram
+      )
+    );
+
   if (
-    analysisRemaining < reserved ||
-    globalRemainingBeforeTelegram < reserved
+    availableCompletionCapacityV468 < 1
   ) {
     reserve.releaseReason =
-      "LAST_ALERT_FALLBACK_RESERVATION_CAPACITY_UNAVAILABLE_V460";
+      "LAST_ALERT_FALLBACK_NO_COMPLETION_CAPACITY_V468";
+    reserve.availableCompletionCapacityV468 = 0;
+    reserve.partialReserveV468 = false;
     return reserve;
   }
+
+  reserve.fullEnvelopeRequestsV468 =
+    reserved;
+  reserve.availableCompletionCapacityV468 =
+    availableCompletionCapacityV468;
+  reserve.partialReserveV468 =
+    availableCompletionCapacityV468 < reserved;
+  reserve.reservedRequests =
+    availableCompletionCapacityV468;
 
   reserve.active = true;
   reserve.targetAddress =
@@ -51079,6 +51132,12 @@ function activateLastAlertFallbackReserveV460(
     null;
   reserve.sourceV460 =
     "LAST_SUCCESSFUL_ALERT_FALLBACK";
+  reserve.reservePolicyV468 =
+    reserve.partialReserveV468 === true
+      ? "AVAILABLE_CAPACITY_PARTIAL_RESERVE_V468"
+      : "FULL_ENVELOPE_RESERVE_V468";
+  reserve.requestCeilingsChangedV468 =
+    false;
 
   return reserve;
 }
