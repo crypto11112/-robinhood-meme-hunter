@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V457
- * AUTHORITATIVE RUNTIME VERSION: V457
+ * Robinhood Chain Meme Hunter — V458
+ * AUTHORITATIVE RUNTIME VERSION: V458
+ * V458 adds bounded complete exact-pool directional-USD coverage for one already Telegram-qualified candidate per scan. It resolves the exact 24h cutoff with Blockscout getblocknobytime, then reads exact PoolManager Swap logs for one verified PoolId. Completeness is accepted only when the query is non-saturated and every returned swap is candidate-matched and exactly USD-decodable. This is exact-pool completeness only, never full token-market coverage across other pools. Existing scoring and qualification remain unchanged.
  * V457 fixes the V456 telemetry placement bug. Final scannerFunnelV415 counts are now calculated directly in the final response object from the post-V455 candidate state and final Telegram results. This makes marketVerified include successful V455 on-chain fallback promotions. No scanner discovery, scoring, qualification, provider routing, request budgets, holder rules, Telegram thresholds, or V455 fallback evidence logic changes.
  * V456 fixes scanner funnel telemetry only: marketVerified and related final funnel counts are refreshed after V455 on-chain market fallback promotion, so telemetry reflects the final candidate state rather than the pre-promotion snapshot. No scanner discovery, scoring, qualification, provider routing, request budgeting, Telegram thresholds, holder rules, V455 fallback eligibility, or market evidence logic changes.
  * V455 activates the first strict independent on-chain market fallback. It may promote candidate.market only when normal provider market evidence is still unverified AND one exact Uniswap V4 PoolId has all required independent evidence: recent candidate-matched V438 exact-USD executions from that exact PoolId, a verified complete Initialize-derived PoolKey, a successful V441 ReservesLens USD valuation for the same PoolId, and a V454 semantic classification that explicitly marks the core liquidity as usable. The V438 price is recalculated from only the exact PoolId being promoted; mixed-pool median prices are never used. Unknown custom-accounting hooks, missing ReservesLens evidence, incomplete PoolKeys, stale/no exact-USD execution samples, non-positive price/liquidity, or PoolId mismatches remain blocked. The fallback exposes verified priceUsd and exact-pool core liquidityUsd, plus FDV when verified totalSupply/decimals allow it. It deliberately does not invent circulating market cap, provider volume, buy pressure or pair-created age. After a successful promotion V455 refreshes the existing downstream momentum/market-quality/risk/opportunity/signal/confidence pipeline using the same established functions and protections; alert thresholds themselves are unchanged. No provider routing, holder standards, Telegram thresholds or request ceilings change, and V455 adds zero external requests.
@@ -1531,7 +1532,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V457";
+const VERSION = "V458";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2244,6 +2245,11 @@ const BLOCKSCOUT_LOGS_MAX_ROWS_V180 = 1000;
 const VERIFIED_USD_COMPLETION_MAX_CANDIDATES_V254 = 1;
 const VERIFIED_USD_COMPLETION_RECENT_BLOCKS_V254 = 12000;
 const VERIFIED_USD_COMPLETION_MAX_HISTORY_REQUESTS_V254 = 1;
+
+const VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_CANDIDATES_V458 = 1;
+const VERIFIED_USD_COMPLETE_EXACT_POOL_LOOKBACK_MS_V458 =
+  24 * 60 * 60 * 1000;
+const VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_REQUESTS_V458 = 2;
 
 /* V256: display-only holder-count completion. */
 const HOLDER_COUNT_COMPLETION_MAX_CANDIDATES_V256 = 1;
@@ -49594,6 +49600,611 @@ async function blockscoutExactPoolUsdCompletionV254(
   };
 }
 
+
+/* =========================================================
+   V458 COMPLETE EXACT-POOL 24H DIRECTIONAL USD COVERAGE
+   ========================================================= */
+
+function summarizeExactPoolRowsV458(
+  state,
+  candidateAddress,
+  poolId,
+  rows,
+  wethUsdGReference,
+  rangeStartMs,
+  rangeEndMs,
+  exactPoolCoverageVerified
+) {
+  const token = normalize(candidateAddress);
+  const exactPoolId = normalize(poolId);
+  const decoded = [];
+  const rejected = [];
+
+  for (const row of rows || []) {
+    const trade = decodeV4SwapDirectionalV179(
+      state,
+      row,
+      wethUsdGReference
+    );
+
+    const observedAt =
+      blockscoutLogTimestampMsV180(row);
+
+    if (
+      trade?.verified !== true ||
+      trade?.exactUsdVerified !== true ||
+      normalize(trade?.candidateAddress) !== token ||
+      normalize(trade?.poolId) !== exactPoolId ||
+      !Number.isFinite(Number(trade?.exactUsdAmount)) ||
+      Number(trade?.exactUsdAmount) <= 0 ||
+      !safeNumber(observedAt)
+    ) {
+      rejected.push({
+        transactionHash:
+          String(
+            row?.transactionHash ||
+            row?.transaction_hash ||
+            ""
+          ).toLowerCase() || null,
+        blockNumber:
+          blockNumberFromAnyV180(
+            row?.blockNumber ??
+            row?.block_number
+          ) || null,
+        reason:
+          !safeNumber(observedAt)
+            ? "TIMESTAMP_UNVERIFIED"
+            : "EXACT_USD_OR_CANDIDATE_DECODE_REJECTED"
+      });
+      continue;
+    }
+
+    decoded.push({
+      ...trade,
+      observedAt: safeNumber(observedAt)
+    });
+  }
+
+  decoded.sort(
+    (a, b) =>
+      safeNumber(a?.observedAt) -
+      safeNumber(b?.observedAt)
+  );
+
+  const now =
+    safeNumber(rangeEndMs) || Date.now();
+
+  const summarize = (key, windowMs, label) => {
+    const cutoff = now - windowMs;
+    const covered =
+      exactPoolCoverageVerified === true &&
+      safeNumber(rangeStartMs) <= cutoff &&
+      safeNumber(rangeEndMs) >= now;
+
+    const selected =
+      decoded.filter(
+        row =>
+          safeNumber(row?.observedAt) >= cutoff &&
+          safeNumber(row?.observedAt) <= now
+      );
+
+    let buys = 0;
+    let sells = 0;
+    let buyVolumeUsd = 0;
+    let sellVolumeUsd = 0;
+
+    for (const row of selected) {
+      const usd = Number(row?.exactUsdAmount);
+      if (row?.side === "buy") {
+        buys++;
+        buyVolumeUsd += usd;
+      } else if (row?.side === "sell") {
+        sells++;
+        sellVolumeUsd += usd;
+      }
+    }
+
+    const totalUsd = buyVolumeUsd + sellVolumeUsd;
+
+    return {
+      key,
+      label,
+      verified: covered,
+      fullExactPoolCoverageVerified: covered,
+      fullMarketCoverageVerified: false,
+      exactPoolOnly: true,
+      observedTrades: selected.length,
+      buys,
+      sells,
+      buyVolumeUsd: covered ? buyVolumeUsd : null,
+      sellVolumeUsd: covered ? sellVolumeUsd : null,
+      netFlowUsd: covered ? buyVolumeUsd - sellVolumeUsd : null,
+      buyPressureUsd:
+        covered && totalUsd > 0
+          ? (buyVolumeUsd / totalUsd) * 100
+          : covered
+            ? 0
+            : null
+    };
+  };
+
+  const windows = {
+    m5: summarize("m5", V180_WINDOW_MS.m5, "5m"),
+    m15: summarize("m15", V180_WINDOW_MS.m15, "15m"),
+    h1: summarize("h1", V180_WINDOW_MS.h1, "1h"),
+    h6: summarize("h6", V180_WINDOW_MS.h6, "6h"),
+    h12: summarize("h12", V180_WINDOW_MS.h12, "12h"),
+    h24: summarize("h24", V180_WINDOW_MS.h24, "24h")
+  };
+
+  const verifiedWindows =
+    Object.entries(windows)
+      .filter(([, row]) =>
+        row?.fullExactPoolCoverageVerified === true
+      )
+      .map(([key]) => key);
+
+  return {
+    verified:
+      exactPoolCoverageVerified === true &&
+      rejected.length === 0 &&
+      verifiedWindows.length > 0,
+    source:
+      "BLOCKSCOUT_COMPLETE_EXACT_V4_POOL_LOG_RANGE_V458",
+    interpretation:
+      "COMPLETE_EXACT_POOL_ONLY_NOT_FULL_TOKEN_MARKET",
+    tokenAddress: token || null,
+    poolId: exactPoolId || null,
+    rangeStartMs: safeNumber(rangeStartMs) || null,
+    rangeEndMs: safeNumber(rangeEndMs) || null,
+    rowsReturned: Array.isArray(rows) ? rows.length : 0,
+    rowsDecodedExactUsd: decoded.length,
+    rejectedRows: rejected.length,
+    rejected: rejected.slice(0, 10),
+    verifiedWindows,
+    windows,
+    fullTokenMarketCoverageVerified: false,
+    otherPoolsIncluded: false
+  };
+}
+
+async function blockscoutCompleteExactPoolDirectionalUsdV458(
+  candidate,
+  budget,
+  state,
+  latestBlock,
+  wethUsdGReference,
+  env
+) {
+  const base = {
+    enabled: true,
+    measurementOnly: true,
+    attempted: false,
+    verified: false,
+    status: "NOT_ATTEMPTED_V458",
+    source:
+      "BLOCKSCOUT_COMPLETE_EXACT_V4_POOL_LOG_RANGE_V458",
+    candidateAddress:
+      normalize(candidate?.address) || null,
+    poolId: null,
+    requestsUsed: 0,
+    timestampLookupRequestSent: false,
+    logRequestSent: false,
+    cutoffTimestampSec: null,
+    cutoffBlock: null,
+    fromBlock: null,
+    toBlock: null,
+    identityBlock: null,
+    queryCoversFullPoolLifetime: false,
+    returnedLogs: 0,
+    saturated: false,
+    allReturnedRowsExactUsdDecoded: false,
+    fullExactPool24hCoverageVerified: false,
+    fullTokenMarketCoverageVerified: false,
+    flow: null,
+    requestCeilingsChanged: false,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false
+  };
+
+  const token = normalize(candidate?.address);
+  const identity = candidate?.onChainPoolIdentityV153;
+
+  if (
+    candidate?.validERC20 !== true ||
+    !isAddress(token)
+  ) {
+    return {...base, status: "CANDIDATE_NOT_ELIGIBLE_V458"};
+  }
+
+  if (identity?.verified !== true) {
+    return {
+      ...base,
+      status: "VERIFIED_EXACT_POOL_IDENTITY_REQUIRED_V458"
+    };
+  }
+
+  const poolId = normalize(identity?.poolId);
+
+  if (!/^0x[a-f0-9]{64}$/.test(String(poolId || ""))) {
+    return {
+      ...base,
+      poolId: poolId || null,
+      status: "EXACT_POOL_ID_INVALID_V458"
+    };
+  }
+
+  const quoteEligibility =
+    v254PriceableQuote(
+      identity?.quoteTokenAddress,
+      wethUsdGReference
+    );
+
+  if (quoteEligibility?.eligible !== true) {
+    return {
+      ...base,
+      poolId,
+      status:
+        "EXACT_POOL_USD_QUOTE_BASIS_UNVERIFIED_V458"
+    };
+  }
+
+  const toBlock = blockNumberFromAnyV180(latestBlock);
+  if (!Number.isFinite(toBlock) || toBlock <= 0) {
+    return {...base, poolId, status: "LATEST_BLOCK_INVALID_V458"};
+  }
+
+  const identityBlock =
+    blockNumberFromAnyV180(identity?.blockNumber);
+
+  const nowMs = Date.now();
+  const cutoffMs =
+    nowMs -
+    VERIFIED_USD_COMPLETE_EXACT_POOL_LOOKBACK_MS_V458;
+  const cutoffTimestampSec =
+    Math.floor(cutoffMs / 1000);
+
+  const provider =
+    env?.BLOCKSCOUT_PRO_API_KEY
+      ? "BLOCKSCOUT_PRO_UNIVERSAL_V2"
+      : "BLOCKSCOUT_PUBLIC";
+
+  const apiBase =
+    provider === "BLOCKSCOUT_PRO_UNIVERSAL_V2"
+      ? `${BLOCKSCOUT_PRO}/v2/api?chain_id=${BLOCKSCOUT_PRO_CHAIN_ID}`
+      : `${BLOCKSCOUT}/api`;
+
+  const separator =
+    apiBase.includes("?")
+      ? "&"
+      : "?";
+
+  const apiKeySuffix =
+    provider === "BLOCKSCOUT_PRO_UNIVERSAL_V2"
+      ? `&apikey=${encodeURIComponent(env.BLOCKSCOUT_PRO_API_KEY)}`
+      : "";
+
+  let requestsUsed = 0;
+
+  if (
+    !consumeBudget(
+      budget,
+      "analysis",
+      "BLOCKSCOUT_V458_TIMESTAMP_TO_BLOCK"
+    )
+  ) {
+    return {
+      ...base,
+      poolId,
+      toBlock,
+      identityBlock: identityBlock || null,
+      status:
+        "ANALYSIS_BUDGET_PROTECTED_TIMESTAMP_LOOKUP_V458"
+    };
+  }
+
+  requestsUsed++;
+
+  const timestampUrl =
+    `${apiBase}${separator}` +
+    `module=block` +
+    `&action=getblocknobytime` +
+    `&timestamp=${cutoffTimestampSec}` +
+    `&closest=before` +
+    apiKeySuffix;
+
+  let cutoffBlock = null;
+
+  try {
+    const response =
+      await fetch(timestampUrl, {
+        headers: {accept: "application/json"}
+      });
+
+    if (!response.ok) {
+      return {
+        ...base,
+        attempted: true,
+        poolId,
+        requestsUsed,
+        timestampLookupRequestSent: true,
+        cutoffTimestampSec,
+        toBlock,
+        identityBlock: identityBlock || null,
+        status:
+          `BLOCKSCOUT_TIMESTAMP_LOOKUP_HTTP_${response.status}_V458`
+      };
+    }
+
+    const payload = await response.json();
+    cutoffBlock =
+      blockNumberFromAnyV180(
+        payload?.result?.blockNumber ??
+        payload?.result
+      );
+
+    if (!Number.isFinite(cutoffBlock) || cutoffBlock < 0) {
+      return {
+        ...base,
+        attempted: true,
+        poolId,
+        requestsUsed,
+        timestampLookupRequestSent: true,
+        cutoffTimestampSec,
+        toBlock,
+        identityBlock: identityBlock || null,
+        status:
+          "BLOCKSCOUT_TIMESTAMP_LOOKUP_INVALID_RESULT_V458"
+      };
+    }
+  } catch (error) {
+    return {
+      ...base,
+      attempted: true,
+      poolId,
+      requestsUsed,
+      timestampLookupRequestSent: true,
+      cutoffTimestampSec,
+      toBlock,
+      identityBlock: identityBlock || null,
+      status:
+        "BLOCKSCOUT_TIMESTAMP_LOOKUP_FETCH_ERROR_V458",
+      error: errorString(error)
+    };
+  }
+
+  const fromBlock =
+    Number.isFinite(identityBlock) && identityBlock > 0
+      ? Math.max(cutoffBlock, identityBlock)
+      : cutoffBlock;
+
+  const queryCoversFullPoolLifetime =
+    Number.isFinite(identityBlock) &&
+    identityBlock > 0 &&
+    identityBlock >= cutoffBlock;
+
+  if (
+    !consumeBudget(
+      budget,
+      "analysis",
+      "BLOCKSCOUT_V458_COMPLETE_EXACT_POOL_24H_LOGS"
+    )
+  ) {
+    return {
+      ...base,
+      attempted: true,
+      poolId,
+      requestsUsed,
+      timestampLookupRequestSent: true,
+      cutoffTimestampSec,
+      cutoffBlock,
+      fromBlock,
+      toBlock,
+      identityBlock: identityBlock || null,
+      queryCoversFullPoolLifetime,
+      status:
+        "ANALYSIS_BUDGET_PROTECTED_LOG_QUERY_V458"
+    };
+  }
+
+  requestsUsed++;
+
+  const logsUrl =
+    `${apiBase}${separator}` +
+    `module=logs` +
+    `&action=getLogs` +
+    `&fromBlock=${fromBlock}` +
+    `&toBlock=${toBlock}` +
+    `&address=${POOL_MANAGER}` +
+    `&topic0=${SWAP_TOPIC}` +
+    `&topic1=${poolId}` +
+    `&topic0_1_opr=and` +
+    apiKeySuffix;
+
+  try {
+    const response =
+      await fetch(logsUrl, {
+        headers: {accept: "application/json"}
+      });
+
+    if (!response.ok) {
+      return {
+        ...base,
+        attempted: true,
+        poolId,
+        requestsUsed,
+        timestampLookupRequestSent: true,
+        logRequestSent: true,
+        cutoffTimestampSec,
+        cutoffBlock,
+        fromBlock,
+        toBlock,
+        identityBlock: identityBlock || null,
+        queryCoversFullPoolLifetime,
+        status:
+          `BLOCKSCOUT_EXACT_POOL_LOGS_HTTP_${response.status}_V458`
+      };
+    }
+
+    const payload = await response.json();
+    const rows =
+      Array.isArray(payload?.result)
+        ? payload.result
+        : [];
+
+    const saturated =
+      rows.length >= BLOCKSCOUT_LOGS_MAX_ROWS_V180;
+
+    const persisted =
+      persistVerifiedUsdTradesV254(
+        state,
+        token,
+        rows,
+        wethUsdGReference,
+        "BLOCKSCOUT_TIMESTAMP"
+      );
+
+    const allReturnedRowsExactUsdDecoded =
+      rows.length === 0
+        ? true
+        : (
+            safeNumber(persisted?.exactUsdTrades) === rows.length &&
+            safeNumber(persisted?.candidateMismatch) === 0 &&
+            safeNumber(persisted?.exactUsdRejected) === 0 &&
+            safeNumber(persisted?.timestampRejected) === 0
+          );
+
+    const exactPoolCoverageVerified =
+      !saturated &&
+      allReturnedRowsExactUsdDecoded;
+
+    const flow =
+      summarizeExactPoolRowsV458(
+        state,
+        token,
+        poolId,
+        rows,
+        wethUsdGReference,
+        cutoffMs,
+        nowMs,
+        exactPoolCoverageVerified
+      );
+
+    const fullExactPool24hCoverageVerified =
+      flow?.windows?.h24
+        ?.fullExactPoolCoverageVerified === true &&
+      flow?.verified === true;
+
+    return {
+      ...base,
+      attempted: true,
+      verified: fullExactPool24hCoverageVerified,
+      status:
+        fullExactPool24hCoverageVerified
+          ? "COMPLETE_EXACT_POOL_24H_USD_VERIFIED_V458"
+          : saturated
+            ? "EXACT_POOL_24H_QUERY_SATURATED_V458"
+            : !allReturnedRowsExactUsdDecoded
+              ? "EXACT_POOL_24H_ROWS_NOT_ALL_EXACT_USD_DECODABLE_V458"
+              : "EXACT_POOL_24H_COVERAGE_NOT_VERIFIED_V458",
+      provider,
+      poolId,
+      requestsUsed,
+      timestampLookupRequestSent: true,
+      logRequestSent: true,
+      cutoffTimestampSec,
+      cutoffBlock,
+      fromBlock,
+      toBlock,
+      identityBlock: identityBlock || null,
+      queryCoversFullPoolLifetime,
+      returnedLogs: rows.length,
+      saturated,
+      allReturnedRowsExactUsdDecoded,
+      fullExactPool24hCoverageVerified,
+      fullTokenMarketCoverageVerified: false,
+      persistence: persisted,
+      flow
+    };
+  } catch (error) {
+    return {
+      ...base,
+      attempted: true,
+      poolId,
+      requestsUsed,
+      timestampLookupRequestSent: true,
+      logRequestSent: true,
+      cutoffTimestampSec,
+      cutoffBlock,
+      fromBlock,
+      toBlock,
+      identityBlock: identityBlock || null,
+      queryCoversFullPoolLifetime,
+      status:
+        "BLOCKSCOUT_EXACT_POOL_LOGS_FETCH_ERROR_V458",
+      error: errorString(error)
+    };
+  }
+}
+
+function telegramCompleteExactPoolUsdLinesV458(candidate) {
+  const result =
+    candidate?.completeExactPoolDirectionalUsdV458;
+
+  if (
+    result?.verified !== true ||
+    result?.flow?.verified !== true
+  ) {
+    return [];
+  }
+
+  const windows = result.flow.windows || {};
+  const moneyV458 = value =>
+    Number.isFinite(Number(value))
+      ? money(Number(value))
+      : "UNVERIFIED";
+
+  const lines = [
+    "",
+    "🔒 <b>Complete Exact-Pool USD — BLOCKSCOUT VERIFIED</b>"
+  ];
+
+  for (const [key, label] of [
+    ["m5", "5m"],
+    ["m15", "15m"],
+    ["h1", "1h"],
+    ["h6", "6h"],
+    ["h12", "12h"],
+    ["h24", "24h"]
+  ]) {
+    const row = windows?.[key];
+
+    if (
+      row?.fullExactPoolCoverageVerified !== true
+    ) {
+      lines.push(
+        `🟢 ${label} Buy USD: <b>UNVERIFIED</b>`,
+        `🔴 ${label} Sell USD: <b>UNVERIFIED</b>`
+      );
+      continue;
+    }
+
+    lines.push(
+      `🟢 ${label} Buy USD: <b>${moneyV458(row.buyVolumeUsd)}</b>`,
+      `🔴 ${label} Sell USD: <b>${moneyV458(row.sellVolumeUsd)}</b>`,
+      `📈 ${label} Net USD: <b>${moneyV458(row.netFlowUsd)}</b>`,
+      `💵 ${label} Buy Pressure: <b>${percentDisplay(row.buyPressureUsd)}</b>`
+    );
+  }
+
+  lines.push(
+    "ℹ️ <i>Complete for this verified exact V4 PoolId only. It is not claimed as complete token-market coverage across other pools.</i>"
+  );
+
+  return lines;
+}
+
 /* =========================================================
    V262 VERIFIED USD COVERAGE ENRICHMENT
    ========================================================= */
@@ -52414,6 +53025,7 @@ function telegramMessage(
       ? `Result: <b>${candidate.manualDirectionalDiagnosticsV324.gecko.verifiedAnyWindow || candidate.manualDirectionalDiagnosticsV324.bitquery.verified ? "VERIFIED_DIRECTIONAL_DATA" : "NO_VERIFIED_DIRECTIONAL_DATA"}</b>`
       : null,
     ...verifiedObservedLinesV212,
+    ...telegramCompleteExactPoolUsdLinesV458(candidate),
     ...ponsCurveLinesV216,
     "",
     `👥 Holder count: <b>${escapeHtml(holderText)}</b>`,
@@ -60076,6 +60688,30 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    completeExactPoolDirectionalUsdCoverageV458: {
+      enabled: true,
+      measurementOnly: true,
+      selection:
+        "ONE_ALREADY_TELEGRAM_QUALIFIED_CANDIDATE",
+      timestampCutoffSource:
+        "BLOCKSCOUT_GETBLOCKNOBYTIME_CLOSEST_BEFORE",
+      exactPoolLogSource:
+        "BLOCKSCOUT_LOGS_POOLMANAGER_SWAP_TOPIC_EXACT_POOLID",
+      exactLookback: "24H",
+      maximumLogRows:
+        BLOCKSCOUT_LOGS_MAX_ROWS_V180,
+      saturationBlocksCompleteness: true,
+      allRowsMustDecodeExactUsd: true,
+      completeExactPoolOnly: true,
+      completeTokenMarketClaimed: false,
+      maximumAdditionalAnalysisRequests:
+        VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_REQUESTS_V458,
+      requestCeilingsChanged: false,
+      scoringChanged: false,
+      qualificationChanged: false,
+      telegramThresholdChanged: false
+    },
+
     finalScannerFunnelTelemetryFixV456: {
       enabled: true,
       countsFinalCandidateState:
@@ -64639,6 +65275,88 @@ for (
       };
     });
 
+
+  const completeExactPoolCandidatesV458 =
+    (Array.isArray(candidates) ? candidates : [])
+      .filter(
+        candidate =>
+          qualifiesTelegram(candidate) &&
+          candidate?.validERC20 === true &&
+          candidate?.onChainPoolIdentityV153?.verified === true
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(b?.opportunity?.score) -
+          safeNumber(a?.opportunity?.score)
+      )
+      .slice(
+        0,
+        VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_CANDIDATES_V458
+      );
+
+  const completeExactPoolDirectionalUsdV458 = {
+    enabled: true,
+    measurementOnly: true,
+    exactPoolOnly: true,
+    fullTokenMarketCoverageClaimed: false,
+    maxCandidatesPerScan:
+      VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_CANDIDATES_V458,
+    maxRequestsPerCandidate:
+      VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_REQUESTS_V458,
+    requestCeilingsChanged: false,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false,
+    candidatesEligible:
+      completeExactPoolCandidatesV458.length,
+    attempted: 0,
+    verified: 0,
+    results: []
+  };
+
+  for (const candidate of completeExactPoolCandidatesV458) {
+    completeExactPoolDirectionalUsdV458.attempted++;
+
+    const result =
+      await blockscoutCompleteExactPoolDirectionalUsdV458(
+        candidate,
+        budget,
+        state,
+        latestNumber,
+        onChainDirectionalV179?.wethUsdGReferenceV187 ||
+          bestVerifiedWethUsdGReferenceV195(state),
+        env
+      );
+
+    candidate.completeExactPoolDirectionalUsdV458 = result;
+
+    if (result?.verified === true) {
+      completeExactPoolDirectionalUsdV458.verified++;
+    }
+
+    completeExactPoolDirectionalUsdV458.results.push({
+      address: normalize(candidate?.address),
+      symbol: candidate?.symbol || null,
+      verified: result?.verified === true,
+      status: result?.status || null,
+      provider: result?.provider || null,
+      poolId: result?.poolId || null,
+      requestsUsed: safeNumber(result?.requestsUsed),
+      cutoffBlock: result?.cutoffBlock ?? null,
+      fromBlock: result?.fromBlock ?? null,
+      toBlock: result?.toBlock ?? null,
+      returnedLogs: safeNumber(result?.returnedLogs),
+      saturated: result?.saturated === true,
+      allReturnedRowsExactUsdDecoded:
+        result?.allReturnedRowsExactUsdDecoded === true,
+      fullExactPool24hCoverageVerified:
+        result?.fullExactPool24hCoverageVerified === true,
+      fullTokenMarketCoverageVerified: false,
+      verifiedWindows:
+        result?.flow?.verifiedWindows || []
+    });
+  }
+
   const liquidityCrosschecksV449 =
     (
       Array.isArray(candidates)
@@ -68606,6 +69324,7 @@ for (
 
     hookLiquiditySemanticsV453,
     onChainMarketFallbackResultsV455,
+    completeExactPoolDirectionalUsdV458,
 
     liquidityCrosschecksV449,
     exactPoolLiquidityCrosschecksV451:
@@ -73017,6 +73736,10 @@ function telegramAnalyseVerifiedUsdLinesV284(
       : eligible
         ? "ℹ️ <i>Verified exact V4 swaps observed by this bot; not claimed as complete market-window totals.</i>"
         : "ℹ️ <i>No candidate-matched exact-USD evidence was verified for this analysis; dollar amounts are not inferred from unverified market activity counts.</i>"
+  );
+
+  lines.push(
+    ...telegramCompleteExactPoolUsdLinesV458(candidate)
   );
 
   return lines;
