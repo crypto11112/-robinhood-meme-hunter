@@ -1,6 +1,36 @@
 /**
- * Robinhood Chain Meme Hunter — V494
- * AUTHORITATIVE RUNTIME VERSION: V494
+ * Robinhood Chain Meme Hunter — V495
+ * AUTHORITATIVE RUNTIME VERSION: V495
+ *
+ * V495 CONFIRMED RWA LAUNCHPAD EXACT LIVE DETECTOR:
+ * - preserves all confirmed-working V494/V493/V492/V491/V490/V489/V488/V487/V486/V485/V484/V483;
+ * - consumes the already-confirmed recurring mechanism:
+ *     RWAERC20LaunchpadFactory 0xce9c48cfa068947f77738c81be406b53338e5b0d
+ *     createLaunch selector 0x3feab1d8
+ *     LaunchTokenDeployer 0xf86dfdb678d8e5d932100ef479a59fa65a82a5eb
+ *     CREATE2 token deployment;
+ * - bootstraps an exact reusable event decoder from transaction receipts of
+ *   independently proven creation transactions instead of guessing an ABI/event;
+ * - searches only logs emitted by the verified factory/deployer and requires
+ *   the independently known created-contract address to appear in an exact
+ *   indexed topic slot or ABI data-word slot;
+ * - an event pattern becomes ACTIVE only after the same emitter + topic0 +
+ *   token-address slot is independently observed in at least TWO distinct
+ *   proven creation transactions with TWO distinct created contracts;
+ * - adds the verified factory + deployer addresses to the EXISTING live
+ *   eth_getLogs address array, adding ZERO extra live-discovery requests;
+ * - once the two-transaction receipt proof activates the event pattern, current
+ *   LIVE logs are decoded into exact launch tokens, inserted into the watchlist,
+ *   prioritized as live/new tokens and recorded in the existing V470 verified
+ *   launch meter;
+ * - BACKLOG exact events may be retained as source evidence but are never
+ *   assigned today's launch timestamp;
+ * - receipt bootstrap uses at most ONE secondary diagnostic request per scan
+ *   under existing V487 fairness and the hard 42-request ceiling;
+ * - if receipts do not expose a reusable exact address-bearing event, the
+ *   detector stays inactive and reports DATA UNVERIFIED rather than guessing;
+ * - no scoring, Momentum, qualification, Telegram threshold, verified-USD,
+ *   dense-pool completion, launch-meter semantics, or scheduled cadence changes.
  *
  * V494 RECURRING EXACT LAUNCH-MECHANISM CONFIRMATION:
  * - preserves all confirmed-working V493/V492/V491/V490/V489/V488/V487/V486/V485/V484/V483;
@@ -2193,7 +2223,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V494";
+const VERSION = "V495";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2606,6 +2636,26 @@ const DIRECT_ONCHAIN_LAUNCH_FACTORIES_V476 = [
   PONS_V2_FACTORY_V215,
   PONS_V1_ACTIVE_FACTORY_V476,
   PONS_V1_LEGACY_FACTORY_V476
+];
+
+/*
+ * V495: independently proven recurring RWA launch mechanism.
+ * These addresses are added to the EXISTING live log filter only. They do not
+ * become launch sources merely because they emit a log; the learned event
+ * pattern below must first satisfy the two-independent-creation proof.
+ */
+const RWA_LAUNCHPAD_FACTORY_V495 =
+  "0xce9c48cfa068947f77738c81be406b53338e5b0d";
+
+const RWA_LAUNCH_TOKEN_DEPLOYER_V495 =
+  "0xf86dfdb678d8e5d932100ef479a59fa65a82a5eb";
+
+const RWA_CREATE_LAUNCH_SELECTOR_V495 =
+  "0x3feab1d8";
+
+const VERIFIED_RWA_LAUNCH_LOG_EMITTERS_V495 = [
+  RWA_LAUNCHPAD_FACTORY_V495,
+  RWA_LAUNCH_TOKEN_DEPLOYER_V495
 ];
 
 
@@ -20212,7 +20262,8 @@ async function getLogsSingleProvider(
               ...POOLS_TRADE_ENTRY_CONTRACTS_V204,
               POOLS_TRADE_TOKEN_FACTORY_V204,
               ...POOLS_TRADE_LAUNCHPADS_V204,
-              ...DIRECT_ONCHAIN_LAUNCH_FACTORIES_V476
+              ...DIRECT_ONCHAIN_LAUNCH_FACTORIES_V476,
+              ...VERIFIED_RWA_LAUNCH_LOG_EMITTERS_V495
             ]
           }
         ],
@@ -30429,6 +30480,7 @@ function verifiedLaunchMeterSnapshotV470(
       "Pons V2",
       "Pons V1",
       "Pons V1 Legacy",
+      "RWAERC20LaunchpadFactory",
       "LaunchHood",
       "hood.fun",
       "Klik Finance",
@@ -30751,6 +30803,7 @@ function verifiedLaunchSourceIdentityV476(
   watched
 ) {
   const launchpads = [
+    watched?.launchpadV495,
     watched?.launchpadV476,
     watched?.launchpadV210,
     watched?.launchpadV214,
@@ -30960,6 +31013,33 @@ function processDiscoveryLogs(
         );
       }
     }
+  }
+
+  /*
+   * V495: zero-extra-request exact RWA launch detector. The factory/deployer
+   * addresses are already included in the existing discovery eth_getLogs call.
+   * No event is decoded until two independent proven creation receipts have
+   * confirmed the same emitter/topic/token-address slot.
+   */
+  const rwaExactLaunchV495 =
+    processRwaExactLaunchLogsV495(
+      state,
+      logs,
+      source
+    );
+
+  for (
+    const token
+    of rwaExactLaunchV495.newTokens
+  ) {
+    newTokens.add(token);
+  }
+
+  for (
+    const token
+    of rwaExactLaunchV495.seenTokens
+  ) {
+    seenTokens.add(token);
   }
 
   const directOnChainLaunchEventsV476 =
@@ -62640,6 +62720,25 @@ async function scan(
   for (
     const launch
     of (
+      liveDiscovery
+        ?.rwaExactLaunchDetectorV495
+        ?.events ||
+      []
+    )
+  ) {
+    if (
+      launch?.decodeVerified === true &&
+      isAddress(launch?.token)
+    ) {
+      verifiedLaunchPriorityTokensV211.add(
+        normalize(launch.token)
+      );
+    }
+  }
+
+  for (
+    const launch
+    of (
       liveDiscovery?.poolsTradeLaunchEventsV208?.events ||
       liveDiscovery?.poolsTradeLaunchEventsV205?.events ||
       []
@@ -71339,6 +71438,11 @@ for (
         state
       ),
 
+    rwaExactLiveDetectorV495:
+      rwaExactLiveDetectorSnapshotV495(
+        state
+      ),
+
     recurringLaunchMechanismV494:
       recurringLaunchMechanismSnapshotV494(
         state
@@ -71561,7 +71665,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71585,6 +71689,54 @@ for (
       telegramThresholdChanged:
         false,
       launchSourcePromotion:
+        false
+    },
+
+    confirmedRwaExactLiveDetectorV495: {
+      enabled: true,
+      mechanismEvidence:
+        "V494_RECURRING_EXACT_DEPLOYMENT_PATH_CONFIRMED",
+      factory:
+        "0xce9c48cfa068947f77738c81be406b53338e5b0d",
+      factoryName:
+        "RWAERC20LaunchpadFactory",
+      method:
+        "createLaunch",
+      selector:
+        "0x3feab1d8",
+      deployer:
+        "0xf86dfdb678d8e5d932100ef479a59fa65a82a5eb",
+      deployerName:
+        "LaunchTokenDeployer",
+      deployment:
+        "CREATE2",
+      liveLogEmittersAddedToExistingDiscoveryRequest:
+        2,
+      extraLiveDiscoveryRequests:
+        0,
+      receiptBootstrapRequirement:
+        "TWO_DISTINCT_PROVEN_CREATION_TXS_SAME_EMITTER_TOPIC_TOKEN_ADDRESS_SLOT",
+      receiptBootstrapMaxRequestsPerScan:
+        1,
+      exactEventDecoderAutoActivatesOnlyAfterTwoReceiptProofs:
+        true,
+      backlogAssignedCurrentLaunchTime:
+        false,
+      launchMeterUsesLiveExactEventsOnly:
+        true,
+      priority:
+        "BEFORE_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+      maxSecondaryOriginDiagnosticRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
         false
     },
 
@@ -87053,6 +87205,103 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
   }
 
   /*
+   * V495 EXACT LIVE EVENT BOOTSTRAP:
+   * Before doing lower-evidence mechanism work, inspect one already-proven
+   * creation receipt. Two independent matching receipt patterns activate the
+   * zero-extra-request live event decoder.
+   */
+  const receiptBootstrapCandidateV495 =
+    selectReceiptBootstrapCandidateV495(
+      state
+    );
+
+  if (receiptBootstrapCandidateV495) {
+    const bootstrapV495 =
+      await runReceiptBootstrapV495({
+        env,
+        state,
+        budget,
+        candidate:
+          receiptBootstrapCandidateV495
+      });
+
+    telemetry.rwaExactLiveDetectorBootstrapV495 =
+      bootstrapV495;
+
+    telemetry.selectedFromPersistedVerifiedOrigins =
+      true;
+    telemetry.selectedToken =
+      bootstrapV495
+        ?.selectedCreatedContract ||
+      null;
+    telemetry.selectedCreator =
+      RWA_LAUNCHPAD_FACTORY_V495;
+    telemetry.selectedCreationTransactionHash =
+      bootstrapV495
+        ?.selectedTransactionHash ||
+      null;
+    telemetry.attempted =
+      bootstrapV495?.attempted ===
+      true;
+    telemetry.requestConsumed =
+      bootstrapV495
+        ?.requestConsumed === true;
+    telemetry.processedAfterAttempt =
+      bootstrapV495
+        ?.processedAfterAttempt ===
+      true;
+    telemetry.status =
+      bootstrapV495?.status ||
+      "V495_STATUS_UNAVAILABLE";
+
+    if (
+      bootstrapV495?.attempted === true &&
+      v483DeferredForFairnessV487
+    ) {
+      telemetry.fairnessV487
+        .fairnessGrantThisScan = true;
+
+      fairness.fairnessGrants =
+        safeNumber(
+          fairness.fairnessGrants
+        ) + 1;
+
+      fairness.lastFairnessGrantAt =
+        Date.now();
+
+      fairness.lastFairnessGrantToken =
+        bootstrapV495
+          ?.selectedCreatedContract ||
+        null;
+
+      fairness.consecutiveV483BlocksOfV486 =
+        0;
+
+      fairness.lastDecision =
+        "V495_FAIRNESS_GRANTED_TO_EXACT_LIVE_EVENT_RECEIPT_BOOTSTRAP";
+
+      fairness.lastDecisionAt =
+        Date.now();
+    }
+
+    root.lastStatus =
+      `V486_ROUTED_TO_V495:${telemetry.status}`;
+
+    return telemetry;
+  }
+
+  telemetry.rwaExactLiveDetectorBootstrapV495 = {
+    enabled: true,
+    attempted: false,
+    status:
+      ensureRwaExactLiveDetectorV495(
+        state
+      ).activePattern
+        ? "V495_LIVE_EVENT_PATTERN_ALREADY_ACTIVE"
+        : "V495_NO_UNPROCESSED_EXACT_CREATION_RECEIPT"
+  };
+
+  /*
    * V494 RECURRING EXACT MECHANISM ROUTE:
    * First discover another transaction using the same exact target+selector;
    * on a later eligible scan verify its internal created_contract path from the
@@ -88167,6 +88416,1393 @@ function persistedOriginRawTraceBacklogSnapshotV486(
 
 
 
+
+
+function ensureRwaExactLiveDetectorV495(
+  state
+) {
+  if (
+    !state.rwaExactLiveDetectorV495 ||
+    typeof state.rwaExactLiveDetectorV495 !== "object"
+  ) {
+    state.rwaExactLiveDetectorV495 = {
+      enabled: true,
+      measurementOnlyUntilPatternConfirmed: true,
+      monitorStartedAt: Date.now(),
+      receiptScansObserved: 0,
+      receiptRequestsAttempted: 0,
+      receiptRequestsSucceeded: 0,
+      processedReceiptTransactions: {},
+      receiptProofs: {},
+      patternClusters: {},
+      activePattern: null,
+      exactLiveEventsDecoded: 0,
+      exactLiveTokensAdded: 0,
+      exactBacklogEventsDecoded: 0,
+      lastLiveToken: null,
+      lastLiveTransactionHash: null,
+      lastLiveBlock: null,
+      lastBootstrapStatus: null,
+      lastBootstrapTransactionHash: null,
+      lastHttpStatus: null,
+      lastAttemptAt: null
+    };
+  }
+
+  const root =
+    state.rwaExactLiveDetectorV495;
+
+  for (const key of [
+    "processedReceiptTransactions",
+    "receiptProofs",
+    "patternClusters"
+  ]) {
+    root[key] =
+      root[key] &&
+      typeof root[key] === "object"
+        ? root[key]
+        : {};
+  }
+
+  return root;
+}
+
+function normalizeTxHashV495(
+  value
+) {
+  const tx =
+    String(value || "")
+      .trim()
+      .toLowerCase();
+
+  return /^0x[a-f0-9]{64}$/.test(tx)
+    ? tx
+    : null;
+}
+
+function addressAbiWordV495(
+  address
+) {
+  const clean =
+    normalize(address);
+
+  if (!isAddress(clean)) {
+    return null;
+  }
+
+  return (
+    "0x" +
+    clean
+      .slice(2)
+      .padStart(64, "0")
+  );
+}
+
+function abiDataWordsV495(
+  data
+) {
+  const raw =
+    String(data || "")
+      .trim()
+      .toLowerCase()
+      .replace(/^0x/, "");
+
+  if (
+    raw.length === 0 ||
+    raw.length % 64 !== 0 ||
+    !/^[a-f0-9]*$/.test(raw)
+  ) {
+    return [];
+  }
+
+  const out = [];
+
+  for (
+    let i = 0;
+    i < raw.length;
+    i += 64
+  ) {
+    out.push(
+      "0x" +
+      raw.slice(i, i + 64)
+    );
+  }
+
+  return out;
+}
+
+function extractAddressFromAbiWordV495(
+  word
+) {
+  const raw =
+    String(word || "")
+      .trim()
+      .toLowerCase()
+      .replace(/^0x/, "");
+
+  if (!/^[a-f0-9]{64}$/.test(raw)) {
+    return null;
+  }
+
+  const address =
+    "0x" +
+    raw.slice(24);
+
+  return isAddress(address)
+    ? normalize(address)
+    : null;
+}
+
+function pruneRwaExactLiveDetectorV495(
+  state
+) {
+  const root =
+    ensureRwaExactLiveDetectorV495(
+      state
+    );
+
+  const now = Date.now();
+  const maxAgeMs =
+    30 * 24 * 60 * 60 * 1000;
+
+  const pruneMap = (
+    map,
+    field,
+    maxRows
+  ) =>
+    Object.fromEntries(
+      Object.entries(map || {})
+        .filter(([, row]) => {
+          const at =
+            safeNumber(row?.[field]);
+
+          return (
+            at > 0 &&
+            now - at <= maxAgeMs
+          );
+        })
+        .sort(
+          (a, b) =>
+            safeNumber(b?.[1]?.[field]) -
+            safeNumber(a?.[1]?.[field])
+        )
+        .slice(0, maxRows)
+    );
+
+  root.processedReceiptTransactions =
+    pruneMap(
+      root.processedReceiptTransactions,
+      "attemptedAt",
+      100
+    );
+
+  root.receiptProofs =
+    pruneMap(
+      root.receiptProofs,
+      "observedAt",
+      100
+    );
+
+  root.patternClusters = {};
+
+  for (
+    const proof of
+    Object.values(
+      root.receiptProofs || {}
+    )
+  ) {
+    if (
+      proof?.exactCreatedAddressLocated !==
+      true
+    ) {
+      continue;
+    }
+
+    const emitter =
+      normalize(proof?.emitter);
+
+    const topic0 =
+      normalize(proof?.topic0);
+
+    const locationType =
+      String(
+        proof?.addressLocationType ||
+        ""
+      );
+
+    const locationIndex =
+      safeNumber(
+        proof?.addressLocationIndex
+      );
+
+    if (
+      !VERIFIED_RWA_LAUNCH_LOG_EMITTERS_V495
+        .includes(emitter) ||
+      !/^0x[a-f0-9]{64}$/.test(topic0) ||
+      !["TOPIC", "DATA_WORD"].includes(
+        locationType
+      ) ||
+      locationIndex < 0
+    ) {
+      continue;
+    }
+
+    const key =
+      `${emitter}:${topic0}:${locationType}:${locationIndex}`;
+
+    const cluster =
+      root.patternClusters[key] || {
+        emitter,
+        topic0,
+        addressLocationType:
+          locationType,
+        addressLocationIndex:
+          locationIndex,
+        transactionHashes: [],
+        createdContracts: [],
+        distinctTransactions: 0,
+        distinctCreatedContracts: 0,
+        sourceMechanism:
+          "RWAERC20LaunchpadFactory_CREATE_LAUNCH_TO_LaunchTokenDeployer_CREATE2",
+        reusableExactEventPatternConfirmed:
+          false
+      };
+
+    const tx =
+      normalizeTxHashV495(
+        proof?.transactionHash
+      );
+
+    const created =
+      normalize(
+        proof?.createdContract
+      );
+
+    if (
+      tx &&
+      !cluster.transactionHashes.includes(tx)
+    ) {
+      cluster.transactionHashes.push(tx);
+      cluster.distinctTransactions++;
+    }
+
+    if (
+      isAddress(created) &&
+      !cluster.createdContracts.includes(created)
+    ) {
+      cluster.createdContracts.push(created);
+      cluster.distinctCreatedContracts++;
+    }
+
+    cluster.reusableExactEventPatternConfirmed =
+      cluster.distinctTransactions >= 2 &&
+      cluster.distinctCreatedContracts >= 2;
+
+    root.patternClusters[key] =
+      cluster;
+  }
+
+  const confirmed =
+    Object.values(
+      root.patternClusters || {}
+    )
+      .filter(
+        row =>
+          row
+            ?.reusableExactEventPatternConfirmed ===
+          true
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.distinctTransactions
+          ) -
+          safeNumber(
+            a?.distinctTransactions
+          )
+      );
+
+  /*
+   * Activate only one unambiguous pattern. Multiple independently confirmed
+   * patterns remain visible but do not auto-select one.
+   */
+  root.activePattern =
+    confirmed.length === 1
+      ? {
+          ...confirmed[0],
+          activatedAt:
+            root.activePattern
+              ?.activatedAt ||
+            Date.now(),
+          evidenceStandard:
+            "TWO_DISTINCT_EXACT_CREATION_RECEIPTS_SAME_EMITTER_TOPIC_AND_ADDRESS_SLOT_V495"
+        }
+      : null;
+
+  return root;
+}
+
+function receiptBootstrapCandidatesV495(
+  state
+) {
+  const root =
+    pruneRwaExactLiveDetectorV495(
+      state
+    );
+
+  const out = [];
+
+  /*
+   * First independently proven token from V489/V492.
+   */
+  const v492 =
+    pruneExactCreationTriggerLinkageV492(
+      state
+    );
+
+  for (
+    const row of
+    Object.values(
+      v492.triggerLinkages || {}
+    )
+  ) {
+    const tx =
+      normalizeTxHashV495(
+        row?.creationTransactionHash
+      );
+
+    const token =
+      normalize(row?.token);
+
+    if (
+      row?.exactCreationTransactionLinked === true &&
+      tx &&
+      isAddress(token) &&
+      normalize(row?.outerTarget) ===
+        RWA_LAUNCHPAD_FACTORY_V495 &&
+      String(
+        row?.outerSelector ||
+        ""
+      )
+        .toLowerCase() ===
+        RWA_CREATE_LAUNCH_SELECTOR_V495 &&
+      !root.processedReceiptTransactions[tx]
+    ) {
+      out.push({
+        transactionHash:
+          tx,
+        createdContract:
+          token,
+        evidenceType:
+          "FIRST_V492_V489_EXACT_TOKEN_CREATION",
+        evidenceAt:
+          safeNumber(
+            row?.verifiedAt
+          )
+      });
+    }
+  }
+
+  /*
+   * Independently recurring exact deployment(s) from V494.
+   */
+  const v494 =
+    pruneRecurringLaunchMechanismV494(
+      state
+    );
+
+  for (
+    const row of
+    Object.values(
+      v494.confirmedDeployments || {}
+    )
+  ) {
+    const tx =
+      normalizeTxHashV495(
+        row?.transactionHash
+      );
+
+    const created =
+      normalize(
+        row?.createdContract
+      );
+
+    if (
+      row?.exactRecurringPathVerified === true &&
+      tx &&
+      isAddress(created) &&
+      normalize(row?.target) ===
+        RWA_LAUNCHPAD_FACTORY_V495 &&
+      String(
+        row?.selector ||
+        ""
+      )
+        .toLowerCase() ===
+        RWA_CREATE_LAUNCH_SELECTOR_V495 &&
+      normalize(
+        row?.verifiedDeploymentSource
+      ) ===
+        RWA_LAUNCH_TOKEN_DEPLOYER_V495 &&
+      !root.processedReceiptTransactions[tx]
+    ) {
+      out.push({
+        transactionHash:
+          tx,
+        createdContract:
+          created,
+        evidenceType:
+          "RECURRING_V494_EXACT_CREATE2_PATH",
+        evidenceAt:
+          safeNumber(
+            row?.verifiedAt
+          )
+      });
+    }
+  }
+
+  const unique = new Map();
+
+  for (const row of out) {
+    if (
+      !unique.has(
+        row.transactionHash
+      )
+    ) {
+      unique.set(
+        row.transactionHash,
+        row
+      );
+    }
+  }
+
+  return [
+    ...unique.values()
+  ].sort(
+    (a, b) =>
+      safeNumber(a?.evidenceAt) -
+      safeNumber(b?.evidenceAt)
+  );
+}
+
+function selectReceiptBootstrapCandidateV495(
+  state
+) {
+  return (
+    receiptBootstrapCandidatesV495(
+      state
+    )[0] || null
+  );
+}
+
+function eligibleReceiptBootstrapCountV495(
+  state
+) {
+  const root =
+    pruneRwaExactLiveDetectorV495(
+      state
+    );
+
+  if (root.activePattern) {
+    return 0;
+  }
+
+  return receiptBootstrapCandidatesV495(
+    state
+  ).length;
+}
+
+function findCreatedAddressInReceiptLogsV495(
+  receipt,
+  createdContract
+) {
+  const created =
+    normalize(createdContract);
+
+  const createdWord =
+    addressAbiWordV495(created);
+
+  if (
+    !isAddress(created) ||
+    !createdWord
+  ) {
+    return {
+      exactMatches: [],
+      exactCreatedAddressLocated:
+        false,
+      ambiguous:
+        false
+    };
+  }
+
+  const logs =
+    Array.isArray(receipt?.logs)
+      ? receipt.logs
+      : [];
+
+  const matches = [];
+
+  for (
+    let logIndex = 0;
+    logIndex < logs.length;
+    logIndex++
+  ) {
+    const log =
+      logs[logIndex] || {};
+
+    const emitter =
+      normalize(log?.address);
+
+    if (
+      !VERIFIED_RWA_LAUNCH_LOG_EMITTERS_V495
+        .includes(emitter)
+    ) {
+      continue;
+    }
+
+    const topics =
+      Array.isArray(log?.topics)
+        ? log.topics.map(normalize)
+        : [];
+
+    const topic0 =
+      topics[0] || null;
+
+    if (
+      !/^0x[a-f0-9]{64}$/.test(
+        String(topic0 || "")
+      )
+    ) {
+      continue;
+    }
+
+    for (
+      let topicIndex = 1;
+      topicIndex < topics.length;
+      topicIndex++
+    ) {
+      if (
+        normalize(topics[topicIndex]) ===
+        createdWord
+      ) {
+        matches.push({
+          logIndex,
+          emitter,
+          topic0,
+          addressLocationType:
+            "TOPIC",
+          addressLocationIndex:
+            topicIndex,
+          createdContract:
+            created
+        });
+      }
+    }
+
+    const words =
+      abiDataWordsV495(
+        log?.data
+      );
+
+    for (
+      let wordIndex = 0;
+      wordIndex < words.length;
+      wordIndex++
+    ) {
+      if (
+        normalize(words[wordIndex]) ===
+        createdWord
+      ) {
+        matches.push({
+          logIndex,
+          emitter,
+          topic0,
+          addressLocationType:
+            "DATA_WORD",
+          addressLocationIndex:
+            wordIndex,
+          createdContract:
+            created
+        });
+      }
+    }
+  }
+
+  return {
+    exactMatches:
+      matches,
+    exactCreatedAddressLocated:
+      matches.length > 0,
+    ambiguous:
+      matches.length !== 1
+  };
+}
+
+async function runReceiptBootstrapV495({
+  env,
+  state,
+  budget,
+  candidate
+}) {
+  const root =
+    pruneRwaExactLiveDetectorV495(
+      state
+    );
+
+  root.receiptScansObserved =
+    safeNumber(
+      root.receiptScansObserved
+    ) + 1;
+
+  const telemetry = {
+    enabled: true,
+    measurementOnlyUntilPatternConfirmed:
+      true,
+    attempted: false,
+    requestConsumed: false,
+    selectedTransactionHash:
+      null,
+    selectedCreatedContract:
+      null,
+    evidenceType:
+      null,
+    provider:
+      "ROBINHOOD_PUBLIC_RPC",
+    method:
+      "eth_getTransactionReceipt",
+    httpStatus:
+      null,
+    receiptStatus:
+      null,
+    matchingLogCount:
+      0,
+    exactMatch:
+      null,
+    ambiguous:
+      false,
+    processedAfterAttempt:
+      false,
+    activePatternAfterAttempt:
+      null,
+    maxRequestsThisScan:
+      1,
+    hardRequestLimit:
+      42,
+    status:
+      null
+  };
+
+  if (!candidate) {
+    telemetry.status =
+      "V495_NO_UNPROCESSED_EXACT_CREATION_RECEIPT";
+
+    root.lastBootstrapStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const tx =
+    normalizeTxHashV495(
+      candidate?.transactionHash
+    );
+
+  const created =
+    normalize(
+      candidate?.createdContract
+    );
+
+  telemetry.selectedTransactionHash =
+    tx;
+  telemetry.selectedCreatedContract =
+    isAddress(created)
+      ? created
+      : null;
+  telemetry.evidenceType =
+    candidate?.evidenceType ||
+    null;
+
+  root.lastBootstrapTransactionHash =
+    tx;
+
+  if (
+    !tx ||
+    !isAddress(created)
+  ) {
+    telemetry.status =
+      "V495_INVALID_BOOTSTRAP_CANDIDATE";
+
+    root.lastBootstrapStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const spare =
+    consumeReleasedGlobalSpareV478(
+      budget,
+      "RWA_EXACT_CREATION_RECEIPT_BOOTSTRAP_V495",
+      1
+    );
+
+  if (spare?.ok !== true) {
+    telemetry.status =
+      `V495_BUDGET_UNAVAILABLE:${spare?.reason || "UNKNOWN"}`;
+
+    root.lastBootstrapStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  telemetry.attempted = true;
+  telemetry.requestConsumed = true;
+
+  root.receiptRequestsAttempted =
+    safeNumber(
+      root.receiptRequestsAttempted
+    ) + 1;
+
+  const attemptedAt =
+    Date.now();
+
+  root.lastAttemptAt =
+    attemptedAt;
+
+  const controller =
+    new AbortController();
+
+  const timer =
+    setTimeout(
+      () =>
+        controller.abort(),
+      6000
+    );
+
+  try {
+    const response =
+      await fetch(
+        PUBLIC_RPC,
+        {
+          method:
+            "POST",
+          headers: {
+            "content-type":
+              "application/json"
+          },
+          body:
+            JSON.stringify({
+              jsonrpc:
+                "2.0",
+              id:
+                495,
+              method:
+                "eth_getTransactionReceipt",
+              params: [
+                tx
+              ]
+            }),
+          signal:
+            controller.signal
+        }
+      );
+
+    telemetry.httpStatus =
+      response.status;
+
+    root.lastHttpStatus =
+      response.status;
+
+    if (!response.ok) {
+      telemetry.status =
+        `V495_RECEIPT_HTTP_${response.status}`;
+
+      root.processedReceiptTransactions[
+        tx
+      ] = {
+        transactionHash:
+          tx,
+        createdContract:
+          created,
+        attemptedAt,
+        httpStatus:
+          response.status,
+        status:
+          telemetry.status,
+        processedOnce:
+          true
+      };
+
+      telemetry.processedAfterAttempt =
+        true;
+      root.lastBootstrapStatus =
+        telemetry.status;
+
+      return telemetry;
+    }
+
+    const body =
+      await response.json();
+
+    const receipt =
+      body?.result &&
+      typeof body.result ===
+        "object"
+        ? body.result
+        : null;
+
+    if (!receipt) {
+      telemetry.receiptStatus =
+        "NO_RECEIPT_RESULT";
+      telemetry.status =
+        "V495_HTTP_200_RECEIPT_UNAVAILABLE";
+
+      root.processedReceiptTransactions[
+        tx
+      ] = {
+        transactionHash:
+          tx,
+        createdContract:
+          created,
+        attemptedAt,
+        httpStatus:
+          response.status,
+        status:
+          telemetry.status,
+        processedOnce:
+          true
+      };
+
+      telemetry.processedAfterAttempt =
+        true;
+      root.lastBootstrapStatus =
+        telemetry.status;
+
+      return telemetry;
+    }
+
+    root.receiptRequestsSucceeded =
+      safeNumber(
+        root.receiptRequestsSucceeded
+      ) + 1;
+
+    telemetry.receiptStatus =
+      receipt?.status ||
+      null;
+
+    const found =
+      findCreatedAddressInReceiptLogsV495(
+        receipt,
+        created
+      );
+
+    telemetry.matchingLogCount =
+      found.exactMatches.length;
+    telemetry.ambiguous =
+      found.ambiguous === true;
+
+    /*
+     * Persist only an unambiguous exact address-bearing log pattern. Ambiguous
+     * receipts remain visible but cannot activate the live decoder.
+     */
+    if (
+      found.exactMatches.length ===
+      1
+    ) {
+      const exact =
+        found.exactMatches[0];
+
+      const proof = {
+        ...exact,
+        transactionHash:
+          tx,
+        createdContract:
+          created,
+        evidenceType:
+          candidate?.evidenceType ||
+          null,
+        exactCreatedAddressLocated:
+          true,
+        observedAt:
+          attemptedAt,
+        provider:
+          "ROBINHOOD_PUBLIC_RPC_TRANSACTION_RECEIPT_V495",
+        evidenceStandard:
+          "KNOWN_CREATED_CONTRACT_EXACTLY_LOCATED_IN_VERIFIED_FACTORY_OR_DEPLOYER_RECEIPT_LOG_V495"
+      };
+
+      root.receiptProofs[
+        tx
+      ] = proof;
+
+      telemetry.exactMatch =
+        proof;
+    }
+
+    root.processedReceiptTransactions[
+      tx
+    ] = {
+      transactionHash:
+        tx,
+      createdContract:
+        created,
+      attemptedAt,
+      httpStatus:
+        response.status,
+      matchingLogCount:
+        found.exactMatches.length,
+      unambiguousExactPattern:
+        found.exactMatches.length ===
+        1,
+      status:
+        found.exactMatches.length ===
+        1
+          ? "V495_EXACT_RECEIPT_EVENT_PATTERN_OBSERVED"
+          : found.exactMatches.length > 1
+            ? "V495_RECEIPT_EVENT_PATTERN_AMBIGUOUS"
+            : "V495_NO_CREATED_ADDRESS_IN_VERIFIED_EMITTER_LOG",
+      processedOnce:
+        true
+    };
+
+    telemetry.processedAfterAttempt =
+      true;
+
+    pruneRwaExactLiveDetectorV495(
+      state
+    );
+
+    telemetry.activePatternAfterAttempt =
+      root.activePattern;
+
+    telemetry.status =
+      root.activePattern
+        ? "V495_TWO_RECEIPT_EXACT_EVENT_PATTERN_CONFIRMED"
+        : root
+            .processedReceiptTransactions[
+              tx
+            ].status;
+
+    root.lastBootstrapStatus =
+      telemetry.status;
+
+    return telemetry;
+  } catch (error) {
+    telemetry.status =
+      `V495_RECEIPT_FETCH_ERROR:${errorString(error)}`;
+
+    root.lastBootstrapStatus =
+      telemetry.status;
+
+    return telemetry;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function decodeRwaExactLaunchLogV495(
+  state,
+  log
+) {
+  const root =
+    pruneRwaExactLiveDetectorV495(
+      state
+    );
+
+  const pattern =
+    root.activePattern;
+
+  if (!pattern) {
+    return null;
+  }
+
+  const emitter =
+    normalize(log?.address);
+
+  const topics =
+    Array.isArray(log?.topics)
+      ? log.topics.map(normalize)
+      : [];
+
+  const topic0 =
+    topics[0] || null;
+
+  if (
+    emitter !==
+      normalize(pattern?.emitter) ||
+    topic0 !==
+      normalize(pattern?.topic0)
+  ) {
+    return null;
+  }
+
+  let token =
+    null;
+
+  if (
+    pattern?.addressLocationType ===
+    "TOPIC"
+  ) {
+    const word =
+      topics[
+        safeNumber(
+          pattern?.addressLocationIndex
+        )
+      ];
+
+    token =
+      extractAddressFromAbiWordV495(
+        word
+      );
+  } else if (
+    pattern?.addressLocationType ===
+    "DATA_WORD"
+  ) {
+    const words =
+      abiDataWordsV495(
+        log?.data
+      );
+
+    const word =
+      words[
+        safeNumber(
+          pattern?.addressLocationIndex
+        )
+      ];
+
+    token =
+      extractAddressFromAbiWordV495(
+        word
+      );
+  }
+
+  if (
+    !isAddress(token) ||
+    token === ZERO ||
+    knownQuote(token)
+  ) {
+    return null;
+  }
+
+  return {
+    verified: true,
+    decodeVerified: true,
+    event:
+      "createLaunch-linked exact launch event",
+    protocol:
+      "RWAERC20LaunchpadFactory",
+    protocolKey:
+      "rwa_erc20_launchpad_factory_v495",
+    factory:
+      RWA_LAUNCHPAD_FACTORY_V495,
+    deployer:
+      RWA_LAUNCH_TOKEN_DEPLOYER_V495,
+    createLaunchSelector:
+      RWA_CREATE_LAUNCH_SELECTOR_V495,
+    eventEmitter:
+      emitter,
+    eventTopic0:
+      topic0,
+    token,
+    transactionHash:
+      normalize(
+        log?.transactionHash
+      ) || null,
+    blockNumber:
+      blockNumberFromLogV476(log),
+    verification:
+      "TWO_INDEPENDENT_EXACT_CREATION_RECEIPTS_CONFIRMED_EVENT_EMITTER_TOPIC_TOKEN_SLOT_V495",
+    source:
+      "DIRECT_ONCHAIN_RWA_EXACT_LIVE_LAUNCH_V495"
+  };
+}
+
+function processRwaExactLaunchLogsV495(
+  state,
+  logs,
+  source
+) {
+  const root =
+    pruneRwaExactLiveDetectorV495(
+      state
+    );
+
+  const events = [];
+  const newTokens =
+    new Set();
+  const seenTokens =
+    new Set();
+
+  if (!root.activePattern) {
+    return {
+      enabled: true,
+      active:
+        false,
+      status:
+        "V495_EVENT_PATTERN_NOT_YET_CONFIRMED",
+      events,
+      newTokens,
+      seenTokens
+    };
+  }
+
+  for (const log of logs || []) {
+    const event =
+      decodeRwaExactLaunchLogV495(
+        state,
+        log
+      );
+
+    if (!event) {
+      continue;
+    }
+
+    events.push(event);
+
+    const watched =
+      addWatch(
+        state,
+        event.token,
+        null,
+        source === "LIVE"
+          ? "LIVE_RWA_EXACT_VERIFIED_LAUNCH_V495"
+          : "BACKLOG_RWA_EXACT_VERIFIED_LAUNCH_V495"
+      );
+
+    if (watched?.token) {
+      seenTokens.add(
+        normalize(event.token)
+      );
+
+      watched.token.launchpadV495 = {
+        verified: true,
+        protocol:
+          event.protocol,
+        protocolKey:
+          event.protocolKey,
+        factory:
+          event.factory,
+        deployer:
+          event.deployer,
+        createLaunchSelector:
+          event.createLaunchSelector,
+        eventEmitter:
+          event.eventEmitter,
+        eventTopic0:
+          event.eventTopic0,
+        launchBlock:
+          event.blockNumber ||
+          null,
+        launchTime:
+          null,
+        transactionHash:
+          event.transactionHash ||
+          null,
+        event:
+          event.event,
+        source:
+          event.source,
+        verification:
+          event.verification,
+        timestampRecoveredFromBlockV258:
+          false
+      };
+    }
+
+    if (watched?.added) {
+      newTokens.add(
+        normalize(event.token)
+      );
+    }
+
+    if (source === "LIVE") {
+      root.exactLiveEventsDecoded =
+        safeNumber(
+          root.exactLiveEventsDecoded
+        ) + 1;
+
+      if (watched?.added) {
+        root.exactLiveTokensAdded =
+          safeNumber(
+            root.exactLiveTokensAdded
+          ) + 1;
+      }
+
+      root.lastLiveToken =
+        event.token;
+      root.lastLiveTransactionHash =
+        event.transactionHash ||
+        null;
+      root.lastLiveBlock =
+        event.blockNumber ||
+        null;
+
+      recordVerifiedLaunchV470(
+        state,
+        {
+          ...event,
+          verified:
+            true,
+          blockTime:
+            null
+        },
+        event.protocol,
+        {
+          verified:
+            true,
+          allowObservedFallback:
+            true,
+          timeBasis:
+            "LIVE_SCAN_OBSERVED_AT",
+          verification:
+            event.verification
+        }
+      );
+    } else {
+      root.exactBacklogEventsDecoded =
+        safeNumber(
+          root.exactBacklogEventsDecoded
+        ) + 1;
+    }
+  }
+
+  return {
+    enabled: true,
+    active:
+      true,
+    status:
+      events.length > 0
+        ? "V495_EXACT_RWA_LAUNCH_EVENTS_DECODED"
+        : "V495_ACTIVE_NO_MATCHING_EVENTS_THIS_RANGE",
+    eventCount:
+      events.length,
+    events,
+    newTokens,
+    seenTokens
+  };
+}
+
+function rwaExactLiveDetectorSnapshotV495(
+  state
+) {
+  const root =
+    pruneRwaExactLiveDetectorV495(
+      state
+    );
+
+  const clusters =
+    Object.values(
+      root.patternClusters || {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.distinctTransactions
+          ) -
+          safeNumber(
+            a?.distinctTransactions
+          )
+      );
+
+  return {
+    enabled: true,
+    monitorStartedAt:
+      safeNumber(
+        root.monitorStartedAt
+      ) || null,
+    receiptScansObserved:
+      safeNumber(
+        root.receiptScansObserved
+      ),
+    receiptRequestsAttempted:
+      safeNumber(
+        root.receiptRequestsAttempted
+      ),
+    receiptRequestsSucceeded:
+      safeNumber(
+        root.receiptRequestsSucceeded
+      ),
+    processedReceiptTransactionCount:
+      Object.keys(
+        root.processedReceiptTransactions ||
+        {}
+      ).length,
+    remainingReceiptBootstrapCount:
+      eligibleReceiptBootstrapCountV495(
+        state
+      ),
+    retainedReceiptProofs:
+      Object.keys(
+        root.receiptProofs ||
+        {}
+      ).length,
+    patternClusters:
+      clusters.slice(0, 10),
+    activePattern:
+      root.activePattern,
+    liveDetectorActive:
+      Boolean(
+        root.activePattern
+      ),
+    exactLiveEventsDecoded:
+      safeNumber(
+        root.exactLiveEventsDecoded
+      ),
+    exactLiveTokensAdded:
+      safeNumber(
+        root.exactLiveTokensAdded
+      ),
+    exactBacklogEventsDecoded:
+      safeNumber(
+        root.exactBacklogEventsDecoded
+      ),
+    lastLiveToken:
+      root.lastLiveToken ||
+      null,
+    lastLiveTransactionHash:
+      root.lastLiveTransactionHash ||
+      null,
+    lastLiveBlock:
+      safeNumber(
+        root.lastLiveBlock
+      ) || null,
+    lastBootstrapStatus:
+      root.lastBootstrapStatus ||
+      null,
+    lastBootstrapTransactionHash:
+      root.lastBootstrapTransactionHash ||
+      null,
+    lastHttpStatus:
+      root.lastHttpStatus ??
+      null,
+    exactMechanism:
+      {
+        factory:
+          RWA_LAUNCHPAD_FACTORY_V495,
+        factoryName:
+          "RWAERC20LaunchpadFactory",
+        method:
+          "createLaunch",
+        selector:
+          RWA_CREATE_LAUNCH_SELECTOR_V495,
+        deployer:
+          RWA_LAUNCH_TOKEN_DEPLOYER_V495,
+        deployerName:
+          "LaunchTokenDeployer",
+        deployment:
+          "CREATE2",
+        recurringPathConfirmedV494:
+          true
+      },
+    liveDiscoveryRequestsAdded:
+      0,
+    receiptBootstrapMaxRequestsPerScan:
+      1,
+    hardGlobalLimitUnchanged:
+      42,
+    chainWideCoverage:
+      "DATA UNVERIFIED"
+  };
+}
 
 function ensureRecurringLaunchMechanismV494(
   state
@@ -96015,6 +97651,9 @@ function eligiblePersistedOriginBacklogCountV487(
       state
     ) +
     eligibleRecurringLaunchMechanismCountV494(
+      state
+    ) +
+    eligibleReceiptBootstrapCountV495(
       state
     )
   );
