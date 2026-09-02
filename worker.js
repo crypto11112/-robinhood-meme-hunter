@@ -1,6 +1,27 @@
 /**
- * Robinhood Chain Meme Hunter — V496
- * AUTHORITATIVE RUNTIME VERSION: V496
+ * Robinhood Chain Meme Hunter — V497
+ * AUTHORITATIVE RUNTIME VERSION: V497
+ *
+ * V497 CHAINSTACK RECEIPT PROVIDER:
+ * - preserves V496 transient receipt retry protection and the confirmed V495
+ *   exact-live-detector architecture;
+ * - adds CHAINSTACK as the preferred provider for eth_getTransactionReceipt;
+ * - this uses the standard receipt RPC only and does NOT use debug/trace;
+ * - observed same-scan evidence showed Chainstack healthy while Alchemy/public
+ *   RPC were rate-limited, so receipt routing is now:
+ *     CHAINSTACK -> ALCHEMY -> ROBINHOOD_PUBLIC_RPC;
+ * - existing per-provider cooldown/health state is respected;
+ * - still selects exactly ONE provider per eligible scan;
+ * - no same-scan fallback and no extra receipt request if the chosen provider
+ *   fails;
+ * - HTTP 429/500/502/503/504 and transport errors remain retryable and cannot
+ *   burn either independently proven creation receipt;
+ * - a 429 marks the existing provider cooldown;
+ * - exact two-independent-receipt event-pattern proof remains unchanged;
+ * - zero extra LIVE discovery requests remain unchanged;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, verified-USD,
+ *   dense-pool completion, launch-meter semantics, or cadence changes.
  *
  * V496 RECEIPT-BOOTSTRAP 429 RESILIENCE:
  * - preserves the confirmed V495 exact-live-detector architecture and every
@@ -2246,7 +2267,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V496";
+const VERSION = "V497";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -13910,6 +13931,7 @@ async function getInitializeForPoolBlockHashV188(
   }
 
   const providers = [
+    "CHAINSTACK",
     "ALCHEMY",
     "ROBINHOOD_PUBLIC_RPC"
   ];
@@ -71688,7 +71710,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71715,6 +71737,45 @@ for (
         false
     },
 
+    chainstackReceiptProviderV497: {
+      enabled: true,
+      purpose:
+        "EXACT_CREATION_RECEIPT_BOOTSTRAP_ONLY",
+      providerOrder: [
+        "CHAINSTACK",
+        "ALCHEMY",
+        "ROBINHOOD_PUBLIC_RPC"
+      ],
+      chainstackRpcMethod:
+        "eth_getTransactionReceipt",
+      chainstackDebugOrTraceApiUsed:
+        false,
+      chainstackPaidDebugTraceRequired:
+        false,
+      respectsExistingProviderCooldowns:
+        true,
+      sameScanFallback:
+        false,
+      maxReceiptRequestsPerScan:
+        1,
+      transientFailuresRemainRetryable:
+        true,
+      evidenceStandardChanged:
+        false,
+      liveDiscoveryRequestsAdded:
+        0,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false
+    },
+
     receiptBootstrap429ResilienceV496: {
       enabled: true,
       observedFailureFixed:
@@ -71722,7 +71783,7 @@ for (
       prior429ReceiptAutomaticallyRevived:
         true,
       providerPolicy:
-        "ALCHEMY_IF_CONFIGURED_AND_HEALTHY_ELSE_ROBINHOOD_PUBLIC_RPC",
+        "CHAINSTACK_IF_CONFIGURED_AND_HEALTHY_ELSE_ALCHEMY_ELSE_ROBINHOOD_PUBLIC_RPC",
       existingProviderCooldownsRespected:
         true,
       newlyObserved429MarksExistingCooldown:
@@ -88553,8 +88614,8 @@ function selectReceiptRpcProviderV496(
   state
 ) {
   /*
-   * Prefer configured Alchemy for this tiny proof request so the Robinhood
-   * public endpoint is not hammered immediately after the observed 429.
+   * Prefer configured Chainstack for this standard receipt request. Chainstack
+   * was healthy in the same scans where Alchemy/public RPC were cooling.
    * Still only ONE provider is called in a scan.
    */
   const providers = [
@@ -89249,7 +89310,11 @@ async function runReceiptBootstrapV495({
     provider:
       null,
     providerSelection:
-      "ONE_HEALTHY_CONFIGURED_RPC_PER_SCAN_V496",
+      "ONE_HEALTHY_CONFIGURED_RPC_PER_SCAN_V497_CHAINSTACK_FIRST",
+    chainstackStandardReceiptOnly:
+      true,
+    chainstackDebugTraceUsed:
+      false,
     method:
       "eth_getTransactionReceipt",
     httpStatus:
@@ -89355,6 +89420,22 @@ async function runReceiptBootstrapV495({
 
   telemetry.provider =
     selectedProviderV496.provider;
+
+  telemetry.providerRouteV497 = {
+    selected:
+      selectedProviderV496.provider,
+    order: [
+      "CHAINSTACK",
+      "ALCHEMY",
+      "ROBINHOOD_PUBLIC_RPC"
+    ],
+    sameScanFallback:
+      false,
+    standardRpcOnly:
+      true,
+    method:
+      "eth_getTransactionReceipt"
+  };
 
   telemetry.attempted = true;
   telemetry.requestConsumed = true;
@@ -90083,10 +90164,19 @@ function rwaExactLiveDetectorSnapshotV495(
       0,
     receiptBootstrapMaxRequestsPerScan:
       1,
-    receiptProviderRoutingV496:
+    receiptProviderRoutingV497:
       {
         providerPolicy:
-          "ALCHEMY_IF_CONFIGURED_AND_HEALTHY_ELSE_PUBLIC_RPC",
+          "CHAINSTACK_IF_CONFIGURED_AND_HEALTHY_ELSE_ALCHEMY_ELSE_PUBLIC_RPC",
+        providerOrder: [
+          "CHAINSTACK",
+          "ALCHEMY",
+          "ROBINHOOD_PUBLIC_RPC"
+        ],
+        chainstackMethod:
+          "eth_getTransactionReceipt",
+        chainstackDebugTraceRequired:
+          false,
         sameScanFallback:
           false,
         transient429BurnsProof:
