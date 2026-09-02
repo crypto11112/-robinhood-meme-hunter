@@ -1,6 +1,15 @@
 /**
- * Robinhood Chain Meme Hunter — V499
- * AUTHORITATIVE RUNTIME VERSION: V499
+ * Robinhood Chain Meme Hunter — V500
+ * AUTHORITATIVE RUNTIME VERSION: V500
+ *
+ * V500 /launchsources TELEGRAM DELIVERY HOTFIX:
+ * - fixes V499 Telegram HTML rejection caused by an unmatched closing </b>;
+ * - fixes V499 literal backslash-n separators so real Telegram line breaks are used;
+ * - adds a one-shot plain-text fallback only if Telegram rejects/fails the HTML reply;
+ * - /launchsources remains read-only: zero provider/RPC requests and zero state writes;
+ * - preserves V498 Chainstack receipt routing and V495 exact live detector;
+ * - no scanner scoring, Momentum, qualification, alert threshold, USD,
+ *   dense-pool completion, cadence, or request-budget changes.
  *
  * V499 /launchsources READ-ONLY TELEGRAM COMMAND:
  * - adds the Telegram command /launchsources already exposed in BotFather;
@@ -2302,7 +2311,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V499";
+const VERSION = "V500";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71772,6 +71781,34 @@ for (
         false
     },
 
+    telegramLaunchSourcesDeliveryHotfixV500: {
+      enabled: true,
+      fixes: [
+        "V499_UNMATCHED_CLOSING_B_TAG",
+        "V499_LITERAL_BACKSLASH_N_LINE_SEPARATORS"
+      ],
+      primaryDelivery:
+        "TELEGRAM_HTML",
+      fallbackDelivery:
+        "PLAIN_TEXT_ON_PRIMARY_FAILURE_ONLY",
+      fallbackScannerBudgetConsumed:
+        false,
+      fallbackExternalProviderRequests:
+        0,
+      readOnlyState:
+        true,
+      additionalPersistentStateWrites:
+        0,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false
+    },
+
     telegramLaunchSourcesV499: {
       enabled: true,
       command: "/launchsources",
@@ -99592,7 +99629,7 @@ function launchSourcesTelegramMessageV499(
     "",
     `<b>Bot-supported verified source labels:</b> ${fmt(supported.length)}`,
     `<b>Observed active in rolling 24h:</b> ${fmt(active.length)}`,
-    `<b>Verified launches observed in rolling 24h:</b> ${fmt(meter?.rolling24hUniqueVerifiedLaunches)}</b>`,
+    `<b>Verified launches observed in rolling 24h:</b> ${fmt(meter?.rolling24hUniqueVerifiedLaunches)}`,
     `Meter status: <b>${escapeHtml(meterAgeStatus)}</b>`,
     "",
     "<b>Active verified sources — rolling 24h</b>",
@@ -99610,7 +99647,132 @@ function launchSourcesTelegramMessageV499(
     "Chain-wide launchpad total: <b>DATA UNVERIFIED</b>",
     "",
     "<i>/launchsources is read-only: 0 provider requests and 0 persistent state writes.</i>"
-  ].join("\\n");
+  ].join("\n");
+}
+
+
+function stripTelegramHtmlV500(
+  message
+) {
+  return String(message || "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/?(?:b|i|code|pre|u|s|strong|em)>/gi, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+async function sendLaunchSourcesTelegramV500(
+  env,
+  htmlMessage
+) {
+  const first =
+    await sendTelegram(
+      env,
+      htmlMessage,
+      null,
+      null
+    );
+
+  if (
+    first?.success === true
+  ) {
+    return {
+      ...first,
+      launchSourcesDeliveryV500:
+        "HTML_PRIMARY_SUCCESS",
+      fallbackAttempted:
+        false
+    };
+  }
+
+  if (
+    !env.TELEGRAM_BOT_TOKEN ||
+    !env.TELEGRAM_CHAT_ID
+  ) {
+    return {
+      ...first,
+      launchSourcesDeliveryV500:
+        "HTML_FAILED_NO_TELEGRAM_CONFIG",
+      fallbackAttempted:
+        false
+    };
+  }
+
+  const plain =
+    stripTelegramHtmlV500(
+      htmlMessage
+    );
+
+  const telegramBase =
+    `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
+
+  try {
+    const response =
+      await fetch(
+        `${telegramBase}/sendMessage`,
+        {
+          method: "POST",
+          headers: {
+            "content-type":
+              "application/json"
+          },
+          body: JSON.stringify({
+            chat_id:
+              env.TELEGRAM_CHAT_ID,
+            text:
+              plain,
+            disable_web_page_preview:
+              true
+          })
+        }
+      );
+
+    const data =
+      await response.json();
+
+    return {
+      success:
+        response.ok &&
+        Boolean(data?.ok),
+      status:
+        response.status,
+      mode:
+        "TEXT_PLAIN_FALLBACK_V500",
+      data,
+      launchSourcesDeliveryV500:
+        response.ok &&
+        Boolean(data?.ok)
+          ? "PLAIN_TEXT_FALLBACK_SUCCESS"
+          : "PLAIN_TEXT_FALLBACK_FAILED",
+      fallbackAttempted:
+        true,
+      primaryHtmlStatus:
+        first?.status || null,
+      primaryHtmlError:
+        first?.error ||
+        first?.data?.description ||
+        null
+    };
+  } catch (error) {
+    return {
+      success: false,
+      mode:
+        "TEXT_PLAIN_FALLBACK_V500",
+      error:
+        errorString(error),
+      launchSourcesDeliveryV500:
+        "PLAIN_TEXT_FALLBACK_EXCEPTION",
+      fallbackAttempted:
+        true,
+      primaryHtmlStatus:
+        first?.status || null,
+      primaryHtmlError:
+        first?.error ||
+        first?.data?.description ||
+        null
+    };
+  }
 }
 
 function telegramHelpV271() {
@@ -100335,14 +100497,24 @@ async function telegramCommandReplyV271(
 
   const telegramSendStartedAtV352 = Date.now();
   const result =
-    needsChunkedReplyV316
-      ? await sendTelegramManualReplyV292(env, reply)
-      : await sendTelegram(
+    (
+      parsed.command ===
+        "/launchsources" ||
+      parsed.command ===
+        "/sources"
+    )
+      ? await sendLaunchSourcesTelegramV500(
           env,
-          reply,
-          null,
-          null
-        );
+          reply
+        )
+      : needsChunkedReplyV316
+        ? await sendTelegramManualReplyV292(env, reply)
+        : await sendTelegram(
+            env,
+            reply,
+            null,
+            null
+          );
 
   if (isFreshAnalyseV352) {
     await telegramAnalyseCheckpointV352(
