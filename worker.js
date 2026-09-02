@@ -1,6 +1,25 @@
 /**
- * Robinhood Chain Meme Hunter — V475
- * AUTHORITATIVE RUNTIME VERSION: V475
+ * Robinhood Chain Meme Hunter — V476
+ * AUTHORITATIVE RUNTIME VERSION: V476
+ *
+ * V476 DIRECT ON-CHAIN LAUNCH-SOURCE EXPANSION:
+ * - expands the EXISTING live eth_getLogs address array with positively known
+ *   Pons V2 + Pons V1 active/legacy launch factories; zero extra RPC requests;
+ * - decodes exact factory TokenLaunched events client-side from topic0/topics/data;
+ * - validates exact factory emitter, exact event topic, ABI word count, token/
+ *   deployer/curve/pair/pool identities and (for Pons V1) canonical Robinhood
+ *   Uniswap V3 factory + WETH quote before accepting launch evidence;
+ * - persists verified launch-source identity separately from launch timestamp,
+ *   so Telegram can show a VERIFIED source even while launch age remains
+ *   UNVERIFIED until the existing V258 timestamp-completion path succeeds;
+ * - LIVE positively verified factory events feed V470 launch meter and V474
+ *   coverage funnel without Bitquery; backlog evidence is never assigned today's
+ *   launch time;
+ * - adds compact directOnChainLaunchTelemetryV476 diagnostics;
+ * - no generic V4 Initialize, pair age, scanner firstSeenAt or token deployment
+ *   time is promoted into launch proof;
+ * - no new request class, no higher request ceiling, no scoring/qualification/
+ *   Telegram threshold change; V469 fresh-candidate priority remains preserved.
  *
  * V475 TELEGRAM FORMATTING HOTFIX ONLY:
  * - fixes /launchcoverage so newline separators render as real Telegram line
@@ -1746,7 +1765,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V475";
+const VERSION = "V476";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2136,6 +2155,30 @@ const PONS_V2_POOL_GRADUATED_TOPIC_V215 =
 
 const PONS_PROTOCOL_V215 =
   "pons_v2";
+
+/* =========================================================
+   V476 DIRECT ON-CHAIN PONS LAUNCH DISCOVERY
+   ========================================================= */
+
+/*
+ * These addresses/topics are only used as exact-positive launch evidence.
+ * V2 matches the existing PONS_V2_FACTORY_V215. V1 active/legacy are separate
+ * verified factories that emit the documented V1 TokenLaunched ABI.
+ */
+const PONS_V1_ACTIVE_FACTORY_V476 =
+  "0xa5aab3f0c6eeadf30ef1d3eb997108e976351feb";
+
+const PONS_V1_LEGACY_FACTORY_V476 =
+  "0x0c37a24f5d23a486fa692d1500881d698b1f77a4";
+
+const PONS_V1_TOKEN_LAUNCHED_TOPIC_V476 =
+  "0xdb51ea9ad51ab453a65a4cb7e60c3cb378c9501bb002609f8f97778fb6c4235a";
+
+const DIRECT_ONCHAIN_LAUNCH_FACTORIES_V476 = [
+  PONS_V2_FACTORY_V215,
+  PONS_V1_ACTIVE_FACTORY_V476,
+  PONS_V1_LEGACY_FACTORY_V476
+];
 
 
 const UNISWAP_V3_FACTORY_V195 =
@@ -9142,6 +9185,21 @@ function newState() {
       recentVerifiedLaunches: []
     },
 
+    directOnChainLaunchTelemetryV476: {
+      enabled: true,
+      totalFactoryLogsSeen: 0,
+      totalDecodedVerifiedLaunches: 0,
+      totalVerifiedTokensAdded: 0,
+      ponsV2Verified: 0,
+      ponsV1ActiveVerified: 0,
+      ponsV1LegacyVerified: 0,
+      lastVerifiedLaunchAt: null,
+      lastVerifiedLaunchBlock: null,
+      lastVerifiedToken: null,
+      lastProtocol: null,
+      recentVerifiedLaunches: []
+    },
+
     verifiedLaunchMeterV470: {
       enabled: true,
       monitorStartedAt: null,
@@ -9671,6 +9729,20 @@ async function readState(env) {
           recentVerifiedLaunches:
             Array.isArray(parsed.poolsTradeLaunchTelemetryV209?.recentVerifiedLaunches)
               ? parsed.poolsTradeLaunchTelemetryV209.recentVerifiedLaunches.slice(-25)
+              : []
+        },
+
+        directOnChainLaunchTelemetryV476: {
+          ...fresh.directOnChainLaunchTelemetryV476,
+          ...(
+            parsed.directOnChainLaunchTelemetryV476 &&
+            typeof parsed.directOnChainLaunchTelemetryV476 === "object"
+              ? parsed.directOnChainLaunchTelemetryV476
+              : {}
+          ),
+          recentVerifiedLaunches:
+            Array.isArray(parsed.directOnChainLaunchTelemetryV476?.recentVerifiedLaunches)
+              ? parsed.directOnChainLaunchTelemetryV476.recentVerifiedLaunches.slice(-50)
               : []
         },
 
@@ -19669,7 +19741,8 @@ async function getLogsSingleProvider(
               POOL_MANAGER,
               ...POOLS_TRADE_ENTRY_CONTRACTS_V204,
               POOLS_TRADE_TOKEN_FACTORY_V204,
-              ...POOLS_TRADE_LAUNCHPADS_V204
+              ...POOLS_TRADE_LAUNCHPADS_V204,
+              ...DIRECT_ONCHAIN_LAUNCH_FACTORIES_V476
             ]
           }
         ],
@@ -29884,6 +29957,8 @@ function verifiedLaunchMeterSnapshotV470(
       "Bags",
       "Flap",
       "Pons V2",
+      "Pons V1",
+      "Pons V1 Legacy",
       "LaunchHood",
       "hood.fun",
       "Klik Finance",
@@ -29913,6 +29988,380 @@ function verifiedLaunchMeterSnapshotV470(
       false,
     telegramThresholdChanged:
       false
+  };
+}
+
+
+function uint256WordV476(word) {
+  const raw =
+    String(word || "")
+      .replace(/^0x/i, "")
+      .toLowerCase();
+
+  if (!/^[0-9a-f]{64}$/.test(raw)) {
+    return null;
+  }
+
+  try {
+    return BigInt("0x" + raw).toString();
+  } catch {
+    return null;
+  }
+}
+
+function blockNumberFromLogV476(log) {
+  try {
+    if (
+      log?.blockNumber === null ||
+      log?.blockNumber === undefined
+    ) {
+      return null;
+    }
+    const n = Number(BigInt(log.blockNumber));
+    return Number.isSafeInteger(n) && n > 0
+      ? n
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function decodeDirectOnChainLaunchV476(log) {
+  const emitter =
+    normalize(log?.address);
+
+  const topics =
+    Array.isArray(log?.topics)
+      ? log.topics.map(normalize)
+      : [];
+
+  const topic0 =
+    topics[0] || null;
+
+  const words =
+    abiDataWordsV208(log?.data);
+
+  /*
+   * Pons V2:
+   * TokenLaunched(
+   *   address indexed token,
+   *   address indexed curve,
+   *   address indexed deployer,
+   *   address pairToken,
+   *   uint256 launchConfigId,
+   *   uint256 graduationThreshold
+   * )
+   */
+  if (
+    emitter === PONS_V2_FACTORY_V215 &&
+    topic0 === PONS_V2_TOKEN_LAUNCHED_TOPIC_V215
+  ) {
+    const token =
+      topics[1]
+        ? abiWordAddressV208(topics[1])
+        : null;
+    const curve =
+      topics[2]
+        ? abiWordAddressV208(topics[2])
+        : null;
+    const deployer =
+      topics[3]
+        ? abiWordAddressV208(topics[3])
+        : null;
+    const pairToken =
+      words[0]
+        ? abiWordAddressV208(words[0])
+        : null;
+    const launchConfigId =
+      words[1]
+        ? uint256WordV476(words[1])
+        : null;
+    const graduationThreshold =
+      words[2]
+        ? uint256WordV476(words[2])
+        : null;
+
+    const verified =
+      topics.length === 4 &&
+      words.length === 3 &&
+      isAddress(token) &&
+      token !== ZERO &&
+      !knownQuote(token) &&
+      isAddress(curve) &&
+      curve !== ZERO &&
+      isAddress(deployer) &&
+      deployer !== ZERO &&
+      isAddress(pairToken) &&
+      pairToken !== token &&
+      launchConfigId !== null &&
+      graduationThreshold !== null;
+
+    return {
+      event: "TokenLaunched",
+      protocol: "Pons V2",
+      protocolKey: "pons_v2",
+      factory: emitter,
+      token,
+      curve,
+      deployer,
+      pairToken,
+      launchConfigId,
+      graduationThreshold,
+      transactionHash:
+        normalize(log?.transactionHash) || null,
+      blockNumber:
+        blockNumberFromLogV476(log),
+      decodeVerified: verified,
+      verification:
+        verified
+          ? "EXACT_FACTORY_TOPIC_AND_ABI_DECODE_PONS_V2_V476"
+          : "PONS_V2_FACTORY_LOG_FAILED_STRICT_ABI_VALIDATION_V476",
+      source:
+        "DIRECT_ONCHAIN_PONS_V2_TOKENLAUNCHED_V476"
+    };
+  }
+
+  /*
+   * Pons V1 active + legacy:
+   * TokenLaunched(
+   *   address indexed token,
+   *   address indexed deployer,
+   *   address indexed dexFactory,
+   *   address pairToken,
+   *   address pool,
+   *   uint256 dexId,
+   *   uint256 launchConfigId,
+   *   uint256 positionId,
+   *   uint256 restrictionsEndBlock,
+   *   uint256 initialBuyAmount
+   * )
+   *
+   * Robinhood Pons V1 is WETH-only and launches into the canonical V3 factory;
+   * require both facts rather than merely trusting the emitter/topic.
+   */
+  if (
+    (
+      emitter === PONS_V1_ACTIVE_FACTORY_V476 ||
+      emitter === PONS_V1_LEGACY_FACTORY_V476
+    ) &&
+    topic0 === PONS_V1_TOKEN_LAUNCHED_TOPIC_V476
+  ) {
+    const token =
+      topics[1]
+        ? abiWordAddressV208(topics[1])
+        : null;
+    const deployer =
+      topics[2]
+        ? abiWordAddressV208(topics[2])
+        : null;
+    const dexFactory =
+      topics[3]
+        ? abiWordAddressV208(topics[3])
+        : null;
+
+    const pairToken =
+      words[0]
+        ? abiWordAddressV208(words[0])
+        : null;
+    const pool =
+      words[1]
+        ? abiWordAddressV208(words[1])
+        : null;
+
+    const dexId =
+      words[2]
+        ? uint256WordV476(words[2])
+        : null;
+    const launchConfigId =
+      words[3]
+        ? uint256WordV476(words[3])
+        : null;
+    const positionId =
+      words[4]
+        ? uint256WordV476(words[4])
+        : null;
+    const restrictionsEndBlock =
+      words[5]
+        ? uint256WordV476(words[5])
+        : null;
+    const initialBuyAmount =
+      words[6]
+        ? uint256WordV476(words[6])
+        : null;
+
+    const verified =
+      topics.length === 4 &&
+      words.length === 7 &&
+      isAddress(token) &&
+      token !== ZERO &&
+      !knownQuote(token) &&
+      isAddress(deployer) &&
+      deployer !== ZERO &&
+      dexFactory ===
+        normalize(UNISWAP_V3_FACTORY_V195) &&
+      pairToken ===
+        normalize(CANONICAL_WETH_V179) &&
+      isAddress(pool) &&
+      pool !== ZERO &&
+      dexId !== null &&
+      launchConfigId !== null &&
+      positionId !== null &&
+      restrictionsEndBlock !== null &&
+      initialBuyAmount !== null;
+
+    const active =
+      emitter === PONS_V1_ACTIVE_FACTORY_V476;
+
+    return {
+      event: "TokenLaunched",
+      protocol:
+        active
+          ? "Pons V1"
+          : "Pons V1 Legacy",
+      protocolKey:
+        active
+          ? "pons_v1"
+          : "pons_v1_legacy",
+      factory: emitter,
+      token,
+      deployer,
+      dexFactory,
+      pairToken,
+      pool,
+      dexId,
+      launchConfigId,
+      positionId,
+      restrictionsEndBlock,
+      initialBuyAmount,
+      transactionHash:
+        normalize(log?.transactionHash) || null,
+      blockNumber:
+        blockNumberFromLogV476(log),
+      decodeVerified: verified,
+      verification:
+        verified
+          ? "EXACT_FACTORY_TOPIC_ABI_V3_FACTORY_WETH_PONS_V1_V476"
+          : "PONS_V1_FACTORY_LOG_FAILED_STRICT_ABI_VALIDATION_V476",
+      source:
+        active
+          ? "DIRECT_ONCHAIN_PONS_V1_TOKENLAUNCHED_V476"
+          : "DIRECT_ONCHAIN_PONS_V1_LEGACY_TOKENLAUNCHED_V476"
+    };
+  }
+
+  return null;
+}
+
+function recognizeDirectOnChainLaunchLogsV476(logs) {
+  const out = [];
+
+  for (const log of logs || []) {
+    const emitter =
+      normalize(log?.address);
+
+    if (
+      !DIRECT_ONCHAIN_LAUNCH_FACTORIES_V476
+        .includes(emitter)
+    ) {
+      continue;
+    }
+
+    const decoded =
+      decodeDirectOnChainLaunchV476(log);
+
+    if (decoded) {
+      out.push(decoded);
+    }
+  }
+
+  return out;
+}
+
+function verifiedLaunchSourceIdentityV476(
+  watched
+) {
+  const launchpads = [
+    watched?.launchpadV476,
+    watched?.launchpadV210,
+    watched?.launchpadV214,
+    watched?.launchpadV215,
+    watched?.launchpadV220,
+    watched?.launchpadV222,
+    watched?.launchpadV224,
+    watched?.launchpadV258
+  ];
+
+  for (const row of launchpads) {
+    if (
+      row?.verified !== true
+    ) {
+      continue;
+    }
+
+    /*
+     * V258 may contain pools.trade TokenCreated evidence in older state.
+     * Do not treat it as a launch source unless it is TokenLaunched or its
+     * source is another already-verified protocol launch event.
+     */
+    if (
+      row?.protocol === "pools.trade" &&
+      row?.event &&
+      row.event !== "TokenLaunched"
+    ) {
+      continue;
+    }
+
+    const protocol =
+      row?.protocol ||
+      row?.family ||
+      null;
+
+    if (!protocol) {
+      continue;
+    }
+
+    return {
+      verified: true,
+      protocol,
+      factory:
+        normalize(
+          row?.factory
+        ) || null,
+      event:
+        row?.event ||
+        "TokenLaunched",
+      launchBlock:
+        safeNumber(
+          row?.launchBlock
+        ) || null,
+      launchTime:
+        row?.launchTime ||
+        null,
+      transactionHash:
+        normalize(
+          row?.transactionHash
+        ) || null,
+      source:
+        row?.source ||
+        "VERIFIED_LAUNCHPAD_IDENTITY_V476",
+      timestampVerified:
+        Boolean(
+          row?.launchTime
+        )
+    };
+  }
+
+  return {
+    verified: false,
+    protocol: null,
+    factory: null,
+    event: null,
+    launchBlock: null,
+    launchTime: null,
+    transactionHash: null,
+    source:
+      "VERIFIED_LAUNCH_SOURCE_UNAVAILABLE_V476",
+    timestampVerified: false
   };
 }
 
@@ -30042,6 +30491,204 @@ function processDiscoveryLogs(
       }
     }
   }
+
+  const directOnChainLaunchEventsV476 =
+    recognizeDirectOnChainLaunchLogsV476(
+      logs
+    );
+
+  let directOnChainVerifiedTokensAddedV476 = 0;
+
+  state.directOnChainLaunchTelemetryV476 =
+    state.directOnChainLaunchTelemetryV476 &&
+    typeof state.directOnChainLaunchTelemetryV476 === "object"
+      ? state.directOnChainLaunchTelemetryV476
+      : newState().directOnChainLaunchTelemetryV476;
+
+  const directTelemetryV476 =
+    state.directOnChainLaunchTelemetryV476;
+
+  directTelemetryV476.totalFactoryLogsSeen =
+    safeNumber(
+      directTelemetryV476.totalFactoryLogsSeen
+    ) +
+    directOnChainLaunchEventsV476.length;
+
+  for (const event of directOnChainLaunchEventsV476) {
+    if (
+      event?.decodeVerified !== true ||
+      !isAddress(event?.token)
+    ) {
+      continue;
+    }
+
+    const watched =
+      addWatch(
+        state,
+        event.token,
+        null,
+        source === "LIVE"
+          ? "LIVE_DIRECT_ONCHAIN_VERIFIED_LAUNCH_V476"
+          : "BACKLOG_DIRECT_ONCHAIN_VERIFIED_LAUNCH_V476"
+      );
+
+    if (watched?.token) {
+      seenTokens.add(
+        normalize(event.token)
+      );
+
+      watched.token.launchpadV476 = {
+        verified: true,
+        protocol:
+          event.protocol,
+        protocolKey:
+          event.protocolKey ||
+          null,
+        factory:
+          event.factory ||
+          null,
+        launchBlock:
+          event.blockNumber ||
+          null,
+        launchTime:
+          null,
+        transactionHash:
+          event.transactionHash ||
+          null,
+        event:
+          "TokenLaunched",
+        source:
+          event.source,
+        verification:
+          event.verification,
+        pairToken:
+          event.pairToken ||
+          null,
+        deployer:
+          event.deployer ||
+          null,
+        curve:
+          event.curve ||
+          null,
+        pool:
+          event.pool ||
+          null,
+        dexFactory:
+          event.dexFactory ||
+          null,
+        timestampRecoveredFromBlockV258:
+          false
+      };
+    }
+
+    if (watched?.added) {
+      newTokens.add(
+        normalize(event.token)
+      );
+      directOnChainVerifiedTokensAddedV476++;
+    }
+
+    /*
+     * Only LIVE exact factory launch events enter the rolling launch meter.
+     * BACKLOG rows remain verified launch evidence but are not assigned today's
+     * observation timestamp.
+     */
+    if (source === "LIVE") {
+      recordVerifiedLaunchV470(
+        state,
+        {
+          ...event,
+          verified: true,
+          blockTime: null
+        },
+        event.protocol,
+        {
+          verified: true,
+          allowObservedFallback: true,
+          timeBasis:
+            "LIVE_SCAN_OBSERVED_AT",
+          verification:
+            event.verification
+        }
+      );
+    }
+
+    directTelemetryV476.totalDecodedVerifiedLaunches =
+      safeNumber(
+        directTelemetryV476.totalDecodedVerifiedLaunches
+      ) + 1;
+
+    if (event.protocolKey === "pons_v2") {
+      directTelemetryV476.ponsV2Verified =
+        safeNumber(
+          directTelemetryV476.ponsV2Verified
+        ) + 1;
+    } else if (event.protocolKey === "pons_v1") {
+      directTelemetryV476.ponsV1ActiveVerified =
+        safeNumber(
+          directTelemetryV476.ponsV1ActiveVerified
+        ) + 1;
+    } else if (event.protocolKey === "pons_v1_legacy") {
+      directTelemetryV476.ponsV1LegacyVerified =
+        safeNumber(
+          directTelemetryV476.ponsV1LegacyVerified
+        ) + 1;
+    }
+
+    directTelemetryV476.lastVerifiedLaunchAt =
+      Date.now();
+    directTelemetryV476.lastVerifiedLaunchBlock =
+      event.blockNumber ||
+      null;
+    directTelemetryV476.lastVerifiedToken =
+      event.token;
+    directTelemetryV476.lastProtocol =
+      event.protocol;
+
+    directTelemetryV476.recentVerifiedLaunches =
+      Array.isArray(
+        directTelemetryV476.recentVerifiedLaunches
+      )
+        ? directTelemetryV476.recentVerifiedLaunches
+        : [];
+
+    directTelemetryV476.recentVerifiedLaunches.push({
+      verified: true,
+      event:
+        "TokenLaunched",
+      token:
+        event.token,
+      protocol:
+        event.protocol,
+      factory:
+        event.factory ||
+        null,
+      blockNumber:
+        event.blockNumber ||
+        null,
+      blockTime:
+        null,
+      transactionHash:
+        event.transactionHash ||
+        null,
+      source:
+        event.source,
+      verification:
+        event.verification,
+      seenAt:
+        Date.now()
+    });
+
+    directTelemetryV476.recentVerifiedLaunches =
+      directTelemetryV476.recentVerifiedLaunches
+        .slice(-50);
+  }
+
+  directTelemetryV476.totalVerifiedTokensAdded =
+    safeNumber(
+      directTelemetryV476.totalVerifiedTokensAdded
+    ) +
+    directOnChainVerifiedTokensAddedV476;
 
   const poolsTradeLaunchEventsV205 =
     recognizePoolsTradeLaunchLogsV205(logs);
@@ -30231,6 +30878,32 @@ function processDiscoveryLogs(
   return {
     rawLogs:
       logs.length,
+
+    directOnChainLaunchEventsV476: {
+      enabled: true,
+      zeroExtraRequests: true,
+      factoriesInExistingLiveAddressFilter:
+        DIRECT_ONCHAIN_LAUNCH_FACTORIES_V476,
+      factoryLogsSeen:
+        directOnChainLaunchEventsV476.length,
+      decodedVerified:
+        directOnChainLaunchEventsV476
+          .filter(row => row?.decodeVerified === true)
+          .length,
+      verifiedTokensAdded:
+        directOnChainVerifiedTokensAddedV476,
+      events:
+        directOnChainLaunchEventsV476
+          .slice(0, 25),
+      genericInitializePromotedToLaunch:
+        false,
+      pairAgePromotedToLaunch:
+        false,
+      scannerFirstSeenPromotedToLaunch:
+        false,
+      externalRequestsAdded:
+        0
+    },
 
     poolsTradeLaunchEventsV205: {
       enabled: true,
@@ -55489,6 +56162,13 @@ function telegramMessage(
       : "ℹ️ <i>No candidate-matched exact-USD V4 swaps were verified for this alert; dollar amounts are not inferred from unverified market activity counts.</i>"
   );
 
+  const verifiedLaunchSourceV476Data =
+    candidate?.verifiedLaunchSourceV476 ||
+    {
+      verified: false,
+      protocol: null
+    };
+
   const verifiedLaunchAgeV223Data =
     candidate?.verifiedLaunchAgeV223 ||
     {
@@ -55623,10 +56303,13 @@ function telegramMessage(
     `🕒 Verified market age: <b>${escapeHtml(verifiedMarketAgeV408)}</b>`,
     `🏪 Market-age source: <b>${escapeHtml(verifiedMarketAgeSourceV408)}</b>`,
     `🔭 Scanner age: <b>${escapeHtml(scannerAgeTextV223)}</b>`,
-    verifiedLaunchAgeV223Data?.verified === true &&
-    verifiedLaunchAgeV223Data?.protocol
-      ? `🏷 Launch source: <b>${escapeHtml(verifiedLaunchAgeV223Data.protocol)}</b>`
-      : `🏷 Launch source: <b>UNVERIFIED</b>`,
+    verifiedLaunchSourceV476Data?.verified === true &&
+    verifiedLaunchSourceV476Data?.protocol
+      ? `🏷 Launch source: <b>${escapeHtml(verifiedLaunchSourceV476Data.protocol)}</b>`
+      : verifiedLaunchAgeV223Data?.verified === true &&
+        verifiedLaunchAgeV223Data?.protocol
+        ? `🏷 Launch source: <b>${escapeHtml(verifiedLaunchAgeV223Data.protocol)}</b>`
+        : `🏷 Launch source: <b>UNVERIFIED</b>`,
     "",
     `🎯 Opportunity: <b>${escapeHtml(opportunityInterpretationV261.label)}</b>`,
     `📊 Opportunity Score: <b>${candidate.opportunity.score}/100</b>`,
@@ -56422,6 +57105,11 @@ async function analyzeToken(
         watched
       ),
 
+    verifiedLaunchSourceV476:
+      verifiedLaunchSourceIdentityV476(
+        watched
+      ),
+
     whaleFlow,
 
     risk,
@@ -56965,6 +57653,7 @@ function verifiedLaunchAgeV223(
    * substitute for launch time.
    */
   const launchRecords = [
+    watched?.launchpadV476,
     watched?.launchpadV210,
     watched?.launchpadV214,
     watched?.launchpadV215,
@@ -57299,6 +57988,13 @@ function verifiedLaunchTelemetryCandidatesV258(
   }
 
   const sources = [
+    {
+      key: "directOnChainLaunchTelemetryV476",
+      protocol: null,
+      rows:
+        state?.directOnChainLaunchTelemetryV476
+          ?.recentVerifiedLaunches
+    },
     {
       key: "bagsDiscoveryV210",
       protocol: "Bags.fm",
@@ -57805,6 +58501,49 @@ async function verifiedLaunchAgeCompletionPassV258(
   const persistedV258 =
     watched?.launchpadV258;
 
+  const persistedDirectV476 =
+    watched?.launchpadV476;
+
+  const persistedEvidenceV476 =
+    (
+      persistedDirectV476?.verified === true &&
+      persistedDirectV476?.launchBlock
+    )
+      ? {
+          verified: true,
+          token,
+          protocol:
+            persistedDirectV476?.protocol ||
+            null,
+          telemetryKey:
+            "watched.launchpadV476",
+          event:
+            persistedDirectV476?.event ||
+            "TokenLaunched",
+          source:
+            persistedDirectV476?.source ||
+            "DIRECT_ONCHAIN_VERIFIED_LAUNCH_V476",
+          blockNumber:
+            safeNumber(
+              persistedDirectV476?.launchBlock
+            ) || null,
+          launchTime:
+            persistedDirectV476?.launchTime ||
+            null,
+          launchTimestampMs:
+            persistedDirectV476?.launchTime
+              ? Date.parse(
+                  String(
+                    persistedDirectV476.launchTime
+                  )
+                )
+              : null,
+          transactionHash:
+            persistedDirectV476?.transactionHash ||
+            null
+        }
+      : null;
+
   const persistedEvidenceV258 =
     (
       persistedV258?.verified ===
@@ -57851,6 +58590,13 @@ async function verifiedLaunchAgeCompletionPassV258(
       : null;
 
   const evidenceRows = [
+    ...(
+      persistedEvidenceV476
+        ? [
+            persistedEvidenceV476
+          ]
+        : []
+    ),
     ...(
       persistedEvidenceV258
         ? [
@@ -70061,6 +70807,9 @@ for (
         state
       ),
 
+    directOnChainLaunchTelemetryV476:
+      state.directOnChainLaunchTelemetryV476,
+
     launchCoverageFunnelV474,
 
     launchCoverageCumulativeV474,
@@ -82268,12 +83017,14 @@ function buildLaunchCoverageFunnelV474({
   const verifiedLaunchCandidates =
     currentLiveCandidates
       .filter(candidate =>
+        candidate?.verifiedLaunchSourceV476?.verified === true ||
         candidate?.verifiedLaunchAgeV223?.verified === true
       );
 
   const unverifiedLaunchCandidates =
     currentLiveCandidates
       .filter(candidate =>
+        candidate?.verifiedLaunchSourceV476?.verified !== true &&
         candidate?.verifiedLaunchAgeV223?.verified !== true
       );
 
@@ -82431,15 +83182,20 @@ function buildLaunchCoverageFunnelV474({
           symbol:
             candidate?.symbol || null,
           verifiedLaunchSource:
+            candidate?.verifiedLaunchSourceV476?.verified === true ||
             candidate?.verifiedLaunchAgeV223?.verified === true,
           launchProtocol:
-            candidate?.verifiedLaunchAgeV223?.verified === true
-              ? candidate?.verifiedLaunchAgeV223?.protocol || null
-              : null,
+            candidate?.verifiedLaunchSourceV476?.verified === true
+              ? candidate?.verifiedLaunchSourceV476?.protocol || null
+              : candidate?.verifiedLaunchAgeV223?.verified === true
+                ? candidate?.verifiedLaunchAgeV223?.protocol || null
+                : null,
           launchEvidenceStatus:
-            candidate?.verifiedLaunchAgeV223?.verified === true
-              ? "VERIFIED"
-              : "UNVERIFIED",
+            candidate?.verifiedLaunchSourceV476?.verified === true
+              ? "VERIFIED_SOURCE_IDENTITY_V476"
+              : candidate?.verifiedLaunchAgeV223?.verified === true
+                ? "VERIFIED_SOURCE_AND_TIMESTAMP_V223"
+                : "UNVERIFIED",
           marketVerified:
             candidate?.market?.verified === true,
           scannerAgeMs:
