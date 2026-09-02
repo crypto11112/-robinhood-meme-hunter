@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V449
- * AUTHORITATIVE RUNTIME VERSION: V449
+ * Robinhood Chain Meme Hunter — V450
+ * AUTHORITATIVE RUNTIME VERSION: V450
+ * V450 removes historical PoolKey recovery from the live critical scan path. V447/V448/V449 proved that optional historical eth_getLogs recovery is unreliable across providers (Chainstack/Blockscout 403s) and can waste analysis budget without improving current-launch handling. V450 therefore does not call recoverHistoricalPoolKeyV443 during normal /scan execution. ReservesLens runs only when a complete PoolKey is already safely persisted from V441+ Initialize observation or other previously verified complete state. Older incomplete watched pools remain fully eligible for the rest of the scanner, but are skipped for independent ReservesLens liquidity rather than triggering historical recovery. The V448/V443 recovery code is retained but dormant for backwards compatibility/diagnostics; it is not part of the live critical path. V449 liquidity cross-checks, V447 valuation-ready target selection, V442 Chainstack ReservesLens routing, scoring, qualification, alert cooldowns, Telegram thresholds and request ceilings are unchanged.
  * V449 is a measurement-only cross-check and Telegram send-status clarity build. V448 proved independent ReservesLens USD liquidity on Yosh, but that same scan showed the reconstructed core-pool USD liquidity was materially different from the already-verified provider liquidity. V449 therefore does NOT promote ReservesLens liquidity into market.verified yet. It cross-checks on-chain core liquidity versus already-verified provider liquidity whenever both exist and records ratio/divergence classes with zero new network requests. V449 also makes Telegram funnel telemetry distinguish qualification from actual send eligibility: ALERT_COOLDOWN is reported as an intentional cooldown suppression rather than appearing like an unexplained send failure. Existing alert cooldown duration and duplicate-alert protection remain unchanged. No scoring, qualification, market promotion, liquidity threshold, provider routing or request ceiling changes.
  * V448 replaces the optional historical PoolKey recovery transport that Chainstack has proven to reject with HTTP_403. Historical immutable PoolKey recovery now uses the already-integrated Blockscout logs API as the primary/only indexed recovery source for one exact PoolManager Initialize event: exact persisted block, exact PoolManager address, exact Initialize topic and exact PoolId topic. The response is decoded by the existing V441 Initialize decoder, so fee, tickSpacing and hooks are accepted only when emitted by the canonical event; no fields are guessed. V448 reuses the existing V184 Blockscout wide-initialize service state/cooldown for 429 protection, consumes at most one existing analysis-budget request per scan, and does not fan out to Chainstack/Robinhood/Alchemy for historical recovery. The V447 Chainstack historical-log guard remains preserved as telemetry/history but is no longer the primary recovery path. V441 ReservesLens valuation-ready targeting remains unchanged. No scoring, qualification, market promotion, liquidity threshold, Telegram rule or global request ceiling changes.
  * V447 is a narrow completion/reliability build based on the successful V446 ReservesLens decode. First, historical PoolKey recovery no longer fans out across Chainstack, Robinhood Public and Alchemy when an old-block eth_getLogs request is rejected. It now performs at most one Chainstack-only historical Initialize lookup, records HTTP_403 as a bounded historical-log capability cooldown in existing state, and skips further historical-log attempts while that cooldown is active. This prevents one optional recovery from consuming three analysis requests when public/Alchemy fallbacks are already rate-limited. Second, V441 ReservesLens target selection now explicitly prioritizes valuation-ready candidates: verified V438 exact-USD execution price plus a directly USD-valued quote (canonical USDG) or a fresh already-verified cached WETH/USDG reference. If no valuation-ready complete PoolKey exists, reserve reconstruction remains diagnostic-only on the best available candidate. No market promotion, scoring, qualification, liquidity threshold, Telegram rule, global request ceiling, scheduled cadence or provider secret is changed.
@@ -1523,7 +1524,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V449";
+const VERSION = "V450";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -58785,6 +58786,20 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    liveOnlyCompletePoolKeyPathV450: {
+      enabled: true,
+      historicalRecoveryInCriticalPath: false,
+      reservesLensRequiresAlreadyCompletePoolKey: true,
+      olderIncompletePoolsStillScannable: true,
+      olderIncompletePoolsReservesLensSkipped: true,
+      historicalRecoveryExternalRequestsPerScan: 0,
+      requestCeilingChanged: false,
+      scoringChanged: false,
+      qualificationChanged: false,
+      marketPromotionChanged: false,
+      telegramBehaviourChanged: false
+    },
+
     liquidityValidationAndTelegramSendStatusV449: {
       enabled: true,
       crosschecksVerifiedProviderLiquidity: true,
@@ -58797,11 +58812,12 @@ for (
     },
 
     blockscoutHistoricalPoolKeyRecoveryV448: {
-      enabled: true,
+      enabled: false,
+      dormantUnderV450: true,
       provider: "BLOCKSCOUT",
       exactBlockOnly: true,
       exactPoolIdTopic: true,
-      maxRequestsPerScan: 1,
+      maxRequestsPerScan: 0,
       usesExistingV184Cooldown: true,
       chainstackFallback: false,
       poolKeyFieldsGuessed: false,
@@ -63080,13 +63096,30 @@ for (
       state
     );
 
-  const historicalPoolKeyRecoveryResultV443 =
-    await recoverHistoricalPoolKeyV443(
-      env,
-      state,
-      budget,
-      candidates
-    );
+  const historicalPoolKeyRecoveryResultV443 = {
+    enabled: false,
+    attempted: false,
+    requestSent: false,
+    maxCandidatesPerScan: 0,
+    maxRecoveryRequestsPerScan: 0,
+    providerPreference: null,
+    candidateAddress: null,
+    symbol: null,
+    poolId: null,
+    blockNumber: null,
+    persistedSource: null,
+    status:
+      "DISABLED_FROM_LIVE_CRITICAL_PATH_V450",
+    provider: null,
+    logsReturned: 0,
+    resolved: false,
+    recoveredPoolKey: null,
+    externalRequestsUsed: 0,
+    poolKeyFieldsGuessed: false,
+    requestCeilingChanged: false,
+    reason:
+      "USE_ONLY_ALREADY_VERIFIED_COMPLETE_POOLKEYS_V450"
+  };
 
   const reservesLensLiquidityResultV441 =
     await reservesLensLiquidityDiagnosticV441(
@@ -64537,7 +64570,9 @@ for (
       historicalPoolKeyRecoveryResultV443,
 
     blockscoutHistoricalPoolKeyRecoveryV448: {
-      enabled: true,
+      enabled: false,
+      dormantUnderV450:
+        true,
       provider:
         "BLOCKSCOUT",
       exactBlockOnly:
@@ -64547,7 +64582,7 @@ for (
       canonicalInitializeDecoder:
         true,
       maxRequestsPerScan:
-        1,
+        0,
       usesExistingV184Cooldown:
         true,
       chainstackHistoricalFallbackUsed:
