@@ -1,6 +1,33 @@
 /**
- * Robinhood Chain Meme Hunter — V481
- * AUTHORITATIVE RUNTIME VERSION: V481
+ * Robinhood Chain Meme Hunter — V482
+ * AUTHORITATIVE RUNTIME VERSION: V482
+ *
+ * V482 EXACT HISTORICAL PONS V2 LAUNCH-EVENT DIAGNOSTIC:
+ * - preserves V480 authenticated Blockscout PRO V2 address-info origin lookup;
+ * - retires the V481 getcontractcreation diagnostic from active execution after
+ *   it returned authenticated HTTP 200 / OK but zero rows for the target;
+ * - when V480 confirms an unknown-source contract but creator/creation-tx fields
+ *   remain absent, V482 may spend ONE released post-Telegram spare request to
+ *   test the exact known Pons V2 launch event through authenticated Blockscout
+ *   PRO Etherscan-compatible logs:
+ *     chain_id=4663
+ *     module=logs
+ *     action=getLogs
+ *     address=<exact Pons V2 factory>
+ *     topic0=<exact Pons V2 TokenLaunched signature>
+ *     topic1=<exact indexed candidate token>
+ * - reuses the already-confirmed V476 strict Pons V2 ABI decoder; an event is
+ *   considered a strict diagnostic match only when exact factory + topic +
+ *   indexed token + full ABI validation all pass;
+ * - V482 remains measurement-only: even a strict match is NOT yet promoted into
+ *   persisted authoritative launch-source identity, scoring, qualification,
+ *   Telegram, or launch meter state. Promotion can follow only after the live
+ *   diagnostic proves the endpoint/result shape;
+ * - V481 dead-end diagnostic no longer consumes a request;
+ * - max ONE V482 diagnostic request per scan, only after Telegram release and
+ *   only if spare global capacity exists; hard global ceiling remains 42;
+ * - V476 live Pons discovery, V474 funnel, V469 fresh priority, V478 routing,
+ *   scoring, Momentum, qualification and Telegram thresholds remain unchanged.
  *
  * V481 AUTHENTICATED GETCONTRACTCREATION DIAGNOSTIC:
  * - preserves V480 authenticated Blockscout PRO V2 address-info origin lookup;
@@ -1854,7 +1881,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V481";
+const VERSION = "V482";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -70980,19 +71007,37 @@ for (
       },
 
     authenticatedGetContractCreationDiagnosticV481: {
+      enabled: false,
+      retiredV482: true,
+      diagnosticOnly: true,
+      retirementReason:
+        "AUTHENTICATED_HTTP_200_OK_ZERO_ROWS_FOR_TARGET",
+      activeRequestsPerScan:
+        0
+    },
+
+    exactHistoricalPonsV2LaunchDiagnosticV482: {
       enabled: true,
       diagnosticOnly: true,
       endpoint:
-        "BLOCKSCOUT_PRO_ETHERSCAN_COMPAT_GETCONTRACTCREATION",
-      runsOnlyAfterV480IncompleteHttp200:
+        "BLOCKSCOUT_PRO_ETHERSCAN_COMPAT_LOGS",
+      exactFactory:
+        PONS_V2_FACTORY_V215,
+      exactTopic0:
+        PONS_V2_TOKEN_LAUNCHED_TOPIC_V215,
+      candidateRequiredAsIndexedTopic1:
         true,
+      strictDecoderReused:
+        "decodeDirectOnChainLaunchV476",
       maxAdditionalRequestsPerScan:
         1,
+      replacesV481DiagnosticRequest:
+        true,
       hardGlobalRequestLimitUnchanged:
         42,
-      authoritativeOriginPromotion:
+      authoritativeLaunchSourcePromotion:
         false,
-      launchSourcePromotion:
+      launchMeterMutation:
         false,
       scoringChanged:
         false,
@@ -83464,6 +83509,403 @@ function consumeReleasedGlobalSpareV478(
 }
 
 
+
+function indexedAddressTopicV482(address) {
+  const clean =
+    normalize(address);
+
+  if (!isAddress(clean)) {
+    return null;
+  }
+
+  return (
+    "0x" +
+    clean
+      .slice(2)
+      .padStart(64, "0")
+  );
+}
+
+function blockscoutProExactPonsV2LaunchUrlV482(
+  env,
+  address
+) {
+  const clean =
+    normalize(address);
+
+  const apiKey =
+    String(
+      env?.BLOCKSCOUT_PRO_API_KEY ||
+      ""
+    ).trim();
+
+  const tokenTopic =
+    indexedAddressTopicV482(clean);
+
+  if (
+    !isAddress(clean) ||
+    !apiKey ||
+    !tokenTopic
+  ) {
+    return null;
+  }
+
+  const query =
+    new URLSearchParams({
+      chain_id:
+        String(BLOCKSCOUT_PRO_CHAIN_ID),
+      module:
+        "logs",
+      action:
+        "getLogs",
+      fromBlock:
+        "0",
+      toBlock:
+        "latest",
+      address:
+        PONS_V2_FACTORY_V215,
+      topic0:
+        PONS_V2_TOKEN_LAUNCHED_TOPIC_V215,
+      topic1:
+        tokenTopic,
+      topic0_1_opr:
+        "and",
+      apikey:
+        apiKey
+    });
+
+  return `${BLOCKSCOUT_PRO}/v2/api?${query.toString()}`;
+}
+
+function normalizeBlockscoutLogForV476V482(row) {
+  if (
+    !row ||
+    typeof row !== "object"
+  ) {
+    return null;
+  }
+
+  const topics =
+    Array.isArray(row?.topics)
+      ? row.topics.map(value =>
+          normalize(value)
+        )
+      : [
+          row?.topic0,
+          row?.topic1,
+          row?.topic2,
+          row?.topic3
+        ]
+          .filter(Boolean)
+          .map(value =>
+            normalize(value)
+          );
+
+  return {
+    address:
+      normalize(
+        row?.address?.hash ||
+        row?.address_hash ||
+        row?.address ||
+        ""
+      ),
+    topics,
+    data:
+      typeof row?.data === "string"
+        ? row.data
+        : "0x",
+    transactionHash:
+      normalize(
+        row?.transactionHash ||
+        row?.transaction_hash ||
+        row?.hash ||
+        ""
+      ),
+    blockNumber:
+      row?.blockNumber ??
+      row?.block_number ??
+      null
+  };
+}
+
+function parseBlockscoutProExactPonsV2LaunchV482(
+  body,
+  requestedAddress
+) {
+  const requested =
+    normalize(requestedAddress);
+
+  const status =
+    body?.status !== undefined &&
+    body?.status !== null
+      ? String(body.status)
+      : null;
+
+  const message =
+    body?.message !== undefined &&
+    body?.message !== null
+      ? String(body.message)
+      : null;
+
+  const rows =
+    Array.isArray(body?.result)
+      ? body.result
+      : [];
+
+  const decoded = [];
+
+  for (const raw of rows) {
+    const normalizedLog =
+      normalizeBlockscoutLogForV476V482(
+        raw
+      );
+
+    if (!normalizedLog) {
+      continue;
+    }
+
+    const event =
+      decodeDirectOnChainLaunchV476(
+        normalizedLog
+      );
+
+    if (
+      event?.decodeVerified === true &&
+      event?.protocolKey === "pons_v2" &&
+      normalize(event?.factory) ===
+        normalize(PONS_V2_FACTORY_V215) &&
+      normalize(event?.token) ===
+        requested
+    ) {
+      decoded.push(event);
+    }
+  }
+
+  const exact =
+    decoded[0] || null;
+
+  return {
+    blockscoutStatus:
+      status,
+    blockscoutMessage:
+      message,
+    resultCount:
+      rows.length,
+    strictDecodedMatches:
+      decoded.length,
+    exact,
+    strictlyVerified:
+      Boolean(exact),
+    source:
+      "BLOCKSCOUT_PRO_EXACT_PONS_V2_TOKENLAUNCHED_DIAGNOSTIC_V482"
+  };
+}
+
+async function runExactPonsV2LaunchDiagnosticV482({
+  env,
+  budget,
+  address
+}) {
+  const clean =
+    normalize(address);
+
+  const telemetry = {
+    enabled: true,
+    diagnosticOnly: true,
+    promotionAllowed: false,
+    targetAddress:
+      isAddress(clean)
+        ? clean
+        : null,
+    hypothesis:
+      "TEST_EXACT_KNOWN_PONS_V2_FACTORY_EVENT_ONLY",
+    inferenceFromExternalSignalAllowed:
+      false,
+    proofRequirement:
+      "EXACT_FACTORY_TOPIC_INDEXED_TOKEN_AND_STRICT_V476_ABI_DECODE",
+    attempted: false,
+    requestConsumed: false,
+    budgetRouteV482: null,
+    endpointV482:
+      "https://api.blockscout.com/v2/api?chain_id=4663&module=logs&action=getLogs&fromBlock=0&toBlock=latest&address={PONS_V2_FACTORY}&topic0={TOKENLAUNCHED}&topic1={INDEXED_TOKEN}&topic0_1_opr=and&apikey=[REDACTED]",
+    factory:
+      PONS_V2_FACTORY_V215,
+    eventTopic0:
+      PONS_V2_TOKEN_LAUNCHED_TOPIC_V215,
+    indexedTokenTopic1:
+      isAddress(clean)
+        ? indexedAddressTopicV482(clean)
+        : null,
+    maxAdditionalRequestsPerScan: 1,
+    hardRequestLimit: 42,
+    httpStatus: null,
+    blockscoutStatus: null,
+    blockscoutMessage: null,
+    resultCount: 0,
+    strictDecodedMatches: 0,
+    strictMatch: null,
+    authoritativeLaunchSourcePromoted: false,
+    launchMeterMutated: false,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false,
+    status: null
+  };
+
+  if (!isAddress(clean)) {
+    telemetry.status =
+      "V482_DIAGNOSTIC_INVALID_TARGET";
+    return telemetry;
+  }
+
+  const url =
+    blockscoutProExactPonsV2LaunchUrlV482(
+      env,
+      clean
+    );
+
+  if (!url) {
+    telemetry.status =
+      "V482_DIAGNOSTIC_BLOCKSCOUT_PRO_NOT_CONFIGURED";
+    return telemetry;
+  }
+
+  const spare =
+    consumeReleasedGlobalSpareV478(
+      budget,
+      "BLOCKSCOUT_PRO_EXACT_PONS_V2_TOKENLAUNCHED_DIAGNOSTIC_V482",
+      1
+    );
+
+  if (spare?.ok !== true) {
+    telemetry.status =
+      `V482_DIAGNOSTIC_BUDGET_UNAVAILABLE:${spare?.reason || "UNKNOWN"}`;
+    telemetry.budgetRouteV482 =
+      "NONE";
+    return telemetry;
+  }
+
+  telemetry.attempted = true;
+  telemetry.requestConsumed = true;
+  telemetry.budgetRouteV482 =
+    "POST_TELEGRAM_GLOBAL_SPARE_V478";
+
+  const controller =
+    new AbortController();
+
+  const timer =
+    setTimeout(
+      () => controller.abort(),
+      5000
+    );
+
+  try {
+    const response =
+      await fetch(
+        url,
+        {
+          method: "GET",
+          headers: {
+            accept: "application/json"
+          },
+          signal: controller.signal
+        }
+      );
+
+    telemetry.httpStatus =
+      response.status;
+
+    if (!response.ok) {
+      telemetry.status =
+        `V482_DIAGNOSTIC_HTTP_${response.status}`;
+      return telemetry;
+    }
+
+    const body =
+      await response.json();
+
+    const parsed =
+      parseBlockscoutProExactPonsV2LaunchV482(
+        body,
+        clean
+      );
+
+    telemetry.blockscoutStatus =
+      parsed.blockscoutStatus;
+
+    telemetry.blockscoutMessage =
+      parsed.blockscoutMessage;
+
+    telemetry.resultCount =
+      parsed.resultCount;
+
+    telemetry.strictDecodedMatches =
+      parsed.strictDecodedMatches;
+
+    if (
+      parsed.strictlyVerified === true &&
+      parsed.exact
+    ) {
+      telemetry.strictMatch = {
+        token:
+          normalize(
+            parsed.exact.token
+          ),
+        protocol:
+          parsed.exact.protocol,
+        factory:
+          normalize(
+            parsed.exact.factory
+          ),
+        curve:
+          normalize(
+            parsed.exact.curve
+          ) || null,
+        deployer:
+          normalize(
+            parsed.exact.deployer
+          ) || null,
+        pairToken:
+          normalize(
+            parsed.exact.pairToken
+          ) || null,
+        launchConfigId:
+          parsed.exact.launchConfigId ??
+          null,
+        graduationThreshold:
+          parsed.exact
+            .graduationThreshold ??
+          null,
+        transactionHash:
+          normalize(
+            parsed.exact
+              .transactionHash
+          ) || null,
+        blockNumber:
+          parsed.exact.blockNumber ??
+          null,
+        verification:
+          parsed.exact.verification,
+        source:
+          parsed.source
+      };
+    }
+
+    telemetry.status =
+      parsed.strictlyVerified
+        ? "V482_DIAGNOSTIC_EXACT_PONS_V2_TOKENLAUNCHED_PROVEN"
+        : "V482_DIAGNOSTIC_NO_EXACT_PONS_V2_LAUNCH_EVENT";
+
+    return telemetry;
+  } catch (error) {
+    telemetry.status =
+      `V482_DIAGNOSTIC_FETCH_ERROR:${errorString(error)}`;
+    return telemetry;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function blockscoutProGetContractCreationUrlV481(
   env,
   address
@@ -83886,11 +84328,20 @@ async function traceUnknownLiveOriginsV477({
     unverifiedAddresses: [],
     recurringCreators: [],
     originDiagnosticV481: {
-      enabled: true,
+      enabled: false,
       diagnosticOnly: true,
+      retiredV482: true,
       attempted: false,
       status:
-        "NOT_NEEDED_OR_NOT_RUN_V481"
+        "RETIRED_AFTER_HTTP_200_OK_ZERO_ROWS_V482"
+    },
+    exactPonsV2LaunchDiagnosticV482: {
+      enabled: true,
+      diagnosticOnly: true,
+      promotionAllowed: false,
+      attempted: false,
+      status:
+        "NOT_NEEDED_OR_NOT_RUN_V482"
     },
     launchpadIdentityInferred: false,
     status: null
@@ -84057,9 +84508,12 @@ async function traceUnknownLiveOriginsV477({
       };
 
       /*
-       * V481 diagnostic only. The result is intentionally NOT copied into
-       * root.tokenOrigins, watched.originTraceV477, creatorClusters or launch
-       * source evidence in this version.
+       * V482 diagnostic only. V481 getcontractcreation is retired from active
+       * execution after returning HTTP 200 / OK with zero rows.
+       *
+       * V482 tests one exact known Pons V2 TokenLaunched event using:
+       * factory + topic0 + indexed candidate topic1 + strict V476 ABI decode.
+       * The result is intentionally NOT promoted in V482.
        */
       if (
         Boolean(row?.isContract) &&
@@ -84068,8 +84522,8 @@ async function traceUnknownLiveOriginsV477({
           !row?.creationTransactionHash
         )
       ) {
-        telemetry.originDiagnosticV481 =
-          await runBlockscoutProOriginDiagnosticV481({
+        telemetry.exactPonsV2LaunchDiagnosticV482 =
+          await runExactPonsV2LaunchDiagnosticV482({
             env,
             budget,
             address:
@@ -84142,59 +84596,75 @@ async function traceUnknownLiveOriginsV477({
       };
     }
 
-    root.originDiagnosticV481 =
-      root.originDiagnosticV481 &&
-      typeof root.originDiagnosticV481 === "object"
-        ? root.originDiagnosticV481
+    /*
+     * Preserve historical V481 counters for audit, but do not run/increment
+     * V481 after V482.
+     */
+    root.exactPonsV2LaunchDiagnosticV482 =
+      root.exactPonsV2LaunchDiagnosticV482 &&
+      typeof root.exactPonsV2LaunchDiagnosticV482 === "object"
+        ? root.exactPonsV2LaunchDiagnosticV482
         : {
             enabled: true,
             diagnosticOnly: true,
             attempts: 0,
             http200: 0,
-            strictVerifiedResults: 0,
+            exactMatches: 0,
             lastStatus: null,
             lastHttpStatus: null,
-            lastAttemptAt: null
+            lastAttemptAt: null,
+            lastMatchedToken: null
           };
 
     if (
-      telemetry.originDiagnosticV481
+      telemetry.exactPonsV2LaunchDiagnosticV482
         ?.attempted === true
     ) {
-      root.originDiagnosticV481.attempts =
+      const diag =
+        telemetry.exactPonsV2LaunchDiagnosticV482;
+
+      root.exactPonsV2LaunchDiagnosticV482.attempts =
         safeNumber(
-          root.originDiagnosticV481.attempts
+          root.exactPonsV2LaunchDiagnosticV482
+            .attempts
         ) + 1;
 
-      root.originDiagnosticV481.lastAttemptAt =
+      root.exactPonsV2LaunchDiagnosticV482.lastAttemptAt =
         Date.now();
 
-      root.originDiagnosticV481.lastStatus =
-        telemetry.originDiagnosticV481.status ||
-        null;
+      root.exactPonsV2LaunchDiagnosticV482.lastStatus =
+        diag.status || null;
 
-      root.originDiagnosticV481.lastHttpStatus =
-        telemetry.originDiagnosticV481.httpStatus ??
-        null;
+      root.exactPonsV2LaunchDiagnosticV482.lastHttpStatus =
+        diag.httpStatus ?? null;
 
-      if (
-        telemetry.originDiagnosticV481
-          ?.httpStatus === 200
-      ) {
-        root.originDiagnosticV481.http200 =
+      if (diag.httpStatus === 200) {
+        root.exactPonsV2LaunchDiagnosticV482.http200 =
           safeNumber(
-            root.originDiagnosticV481.http200
+            root.exactPonsV2LaunchDiagnosticV482
+              .http200
           ) + 1;
       }
 
       if (
-        telemetry.originDiagnosticV481
-          ?.strictlyVerifiedDiagnosticResult === true
+        diag.status ===
+          "V482_DIAGNOSTIC_EXACT_PONS_V2_TOKENLAUNCHED_PROVEN" &&
+        isAddress(
+          normalize(
+            diag?.strictMatch?.token
+          )
+        )
       ) {
-        root.originDiagnosticV481.strictVerifiedResults =
+        root.exactPonsV2LaunchDiagnosticV482.exactMatches =
           safeNumber(
-            root.originDiagnosticV481.strictVerifiedResults
+            root.exactPonsV2LaunchDiagnosticV482
+              .exactMatches
           ) + 1;
+
+        root.exactPonsV2LaunchDiagnosticV482.lastMatchedToken =
+          normalize(
+            diag.strictMatch.token
+          );
       }
     }
 
@@ -84282,7 +84752,8 @@ function tokenOriginTraceSnapshotV477(state) {
     lastHttpStatus:
       root.lastHttpStatus ?? null,
     originDiagnosticV481: {
-      enabled: true,
+      enabled: false,
+      retiredV482: true,
       diagnosticOnly: true,
       attempts:
         safeNumber(
@@ -84308,6 +84779,41 @@ function tokenOriginTraceSnapshotV477(state) {
       authoritativeOriginPromotion:
         false,
       launchSourcePromotion:
+        false
+    },
+    exactPonsV2LaunchDiagnosticV482: {
+      enabled: true,
+      diagnosticOnly: true,
+      attempts:
+        safeNumber(
+          root?.exactPonsV2LaunchDiagnosticV482
+            ?.attempts
+        ),
+      http200:
+        safeNumber(
+          root?.exactPonsV2LaunchDiagnosticV482
+            ?.http200
+        ),
+      exactMatches:
+        safeNumber(
+          root?.exactPonsV2LaunchDiagnosticV482
+            ?.exactMatches
+        ),
+      lastStatus:
+        root?.exactPonsV2LaunchDiagnosticV482
+          ?.lastStatus ||
+        null,
+      lastHttpStatus:
+        root?.exactPonsV2LaunchDiagnosticV482
+          ?.lastHttpStatus ??
+        null,
+      lastMatchedToken:
+        root?.exactPonsV2LaunchDiagnosticV482
+          ?.lastMatchedToken ||
+        null,
+      authoritativeLaunchSourcePromotion:
+        false,
+      launchMeterMutation:
         false
     },
     interpretation: {
