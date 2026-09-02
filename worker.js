@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V458
- * AUTHORITATIVE RUNTIME VERSION: V458
+ * Robinhood Chain Meme Hunter — V459
+ * AUTHORITATIVE RUNTIME VERSION: V459
+ * V459 reserves two existing analysis-budget slots as soon as the first already-qualified candidate with verified exact V4 pool identity is produced during the analysis loop. Those slots are reserved only for V458's timestamp-to-block lookup and exact-pool Swap-history request, preventing lower-priority later analysis from consuming them. The reserve is dynamic: it is inactive when there is no eligible qualified candidate, it does not raise the 42-request hard ceiling or the adaptive analysis ceiling, and it is released/consumed when the V458 lane finishes. V459 also explicitly allows the two V458 protected request types through the older V182 USDG reservation guard. Scoring, qualification, Telegram thresholds, holder rules and V455 fallback logic are unchanged.
  * V458 adds bounded complete exact-pool directional-USD coverage for one already Telegram-qualified candidate per scan. It resolves the exact 24h cutoff with Blockscout getblocknobytime, then reads exact PoolManager Swap logs for one verified PoolId. Completeness is accepted only when the query is non-saturated and every returned swap is candidate-matched and exactly USD-decodable. This is exact-pool completeness only, never full token-market coverage across other pools. Existing scoring and qualification remain unchanged.
  * V457 fixes the V456 telemetry placement bug. Final scannerFunnelV415 counts are now calculated directly in the final response object from the post-V455 candidate state and final Telegram results. This makes marketVerified include successful V455 on-chain fallback promotions. No scanner discovery, scoring, qualification, provider routing, request budgets, holder rules, Telegram thresholds, or V455 fallback evidence logic changes.
  * V456 fixes scanner funnel telemetry only: marketVerified and related final funnel counts are refreshed after V455 on-chain market fallback promotion, so telemetry reflects the final candidate state rather than the pre-promotion snapshot. No scanner discovery, scoring, qualification, provider routing, request budgeting, Telegram thresholds, holder rules, V455 fallback eligibility, or market evidence logic changes.
@@ -1532,7 +1533,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V458";
+const VERSION = "V459";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -7358,6 +7359,26 @@ function createBudget() {
         estimatedRpcRequestsSaved: 0
       },
 
+      completeExactPoolReserveV459: {
+        enabled: true,
+        active: false,
+        reservedRequests:
+          VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_REQUESTS_V458,
+        targetAddress: null,
+        targetSymbol: null,
+        activatedAt: null,
+        consumed: false,
+        consumedAt: null,
+        releasedWithoutUse: false,
+        releasedAt: null,
+        releaseReason: null,
+        lowerPriorityRequestsBlocked: 0,
+        requestTypes: [
+          "BLOCKSCOUT_V458_TIMESTAMP_TO_BLOCK",
+          "BLOCKSCOUT_V458_COMPLETE_EXACT_POOL_24H_LOGS"
+        ]
+      },
+
       blockscoutUsdGReserveV182: {
         enabled:
           true,
@@ -7752,6 +7773,102 @@ function consumeBudget(
   const protectedHolderCountCompletionTypeV256 =
     "BLOCKSCOUT_PRO_HOLDER_COUNT_COMPLETION_V256";
 
+  const protectedV458TimestampTypeV459 =
+    "BLOCKSCOUT_V458_TIMESTAMP_TO_BLOCK";
+
+  const protectedV458LogsTypeV459 =
+    "BLOCKSCOUT_V458_COMPLETE_EXACT_POOL_24H_LOGS";
+
+  /*
+   * V459: once a genuinely qualified exact-pool candidate exists, protect two
+   * existing analysis slots from LOWER-PRIORITY work. The two V458 requests
+   * themselves bypass this guard. No ceiling is raised.
+   */
+  const completeExactPoolReserveV459 =
+    budget.analysis
+      ?.completeExactPoolReserveV459;
+
+  if (
+    phase === "analysis" &&
+    completeExactPoolReserveV459?.active === true &&
+    type !== protectedV458TimestampTypeV459 &&
+    type !== protectedV458LogsTypeV459
+  ) {
+    const reservedRequestsV459 =
+      Math.max(
+        0,
+        safeNumber(
+          completeExactPoolReserveV459
+            ?.reservedRequests
+        )
+      );
+
+    const notificationReserveRemainingV459 =
+      budget.notification
+        ?.globalReserveActiveV174 === true
+        ? Math.max(
+            0,
+            safeNumber(
+              budget.notification?.limit
+            ) -
+            safeNumber(
+              budget.notification?.used
+            )
+          )
+        : 0;
+
+    const preTelegramGlobalLimitV459 =
+      Math.max(
+        0,
+        safeNumber(budget.totalLimit) -
+          notificationReserveRemainingV459
+      );
+
+    const analysisCapacityProtectedV459 =
+      safeNumber(budget.analysis?.used) +
+        amount <=
+      Math.max(
+        0,
+        effectiveAnalysisLimitV416(budget) -
+          reservedRequestsV459
+      );
+
+    const globalCapacityProtectedV459 =
+      safeNumber(budget.totalUsed) +
+        amount <=
+      Math.max(
+        0,
+        preTelegramGlobalLimitV459 -
+          reservedRequestsV459
+      );
+
+    if (
+      !analysisCapacityProtectedV459 ||
+      !globalCapacityProtectedV459
+    ) {
+      completeExactPoolReserveV459
+        .lowerPriorityRequestsBlocked =
+        safeNumber(
+          completeExactPoolReserveV459
+            .lowerPriorityRequestsBlocked
+        ) + 1;
+
+      budget.skipped.push({
+        phase,
+        type,
+        amount,
+        reason:
+          "V459_COMPLETE_EXACT_POOL_REQUESTS_RESERVED",
+        reservedFor:
+          completeExactPoolReserveV459
+            ?.targetAddress ||
+          null
+      });
+
+      return false;
+    }
+  }
+
   if (
     phase ===
       "analysis" &&
@@ -7764,6 +7881,10 @@ function consumeBudget(
       protectedUsdCompletionTypeV254 &&
     type !==
       protectedHolderCountCompletionTypeV256 &&
+    type !==
+      protectedV458TimestampTypeV459 &&
+    type !==
+      protectedV458LogsTypeV459 &&
     type !==
       "DEXSCREENER_ATH_FAIR_SLOT_V299"
   ) {
@@ -8240,6 +8361,8 @@ function budgetTelemetry(
 
       adaptiveHeadroomV416:
         budget.analysis?.adaptiveHeadroomV416 || null,
+      completeExactPoolReserveV459:
+        budget.analysis?.completeExactPoolReserveV459 || null,
 
       remaining:
         Math.max(
@@ -49602,6 +49725,144 @@ async function blockscoutExactPoolUsdCompletionV254(
 
 
 /* =========================================================
+   V459 QUALIFIED-CANDIDATE V458 REQUEST RESERVATION
+   ========================================================= */
+
+function activateCompleteExactPoolReserveV459(
+  budget,
+  candidate
+) {
+  const reserve =
+    budget?.analysis
+      ?.completeExactPoolReserveV459;
+
+  if (
+    !reserve?.enabled ||
+    reserve?.active === true ||
+    reserve?.consumed === true
+  ) {
+    return reserve || null;
+  }
+
+  if (
+    !candidate ||
+    qualifiesTelegram(candidate) !== true ||
+    candidate?.validERC20 !== true ||
+    candidate
+      ?.onChainPoolIdentityV153
+      ?.verified !== true
+  ) {
+    return reserve;
+  }
+
+  const poolId =
+    normalize(
+      candidate
+        ?.onChainPoolIdentityV153
+        ?.poolId
+    );
+
+  if (
+    !/^0x[a-f0-9]{64}$/.test(
+      String(poolId || "")
+    )
+  ) {
+    return reserve;
+  }
+
+  const reserved =
+    Math.max(
+      0,
+      safeNumber(
+        reserve.reservedRequests
+      )
+    );
+
+  const notificationReserveRemaining =
+    budget.notification
+      ?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(
+            budget.notification?.limit
+          ) -
+          safeNumber(
+            budget.notification?.used
+          )
+        )
+      : 0;
+
+  const analysisRemaining =
+    Math.max(
+      0,
+      effectiveAnalysisLimitV416(budget) -
+        safeNumber(
+          budget.analysis?.used
+        )
+    );
+
+  const globalRemainingBeforeTelegram =
+    Math.max(
+      0,
+      safeNumber(budget.totalLimit) -
+        safeNumber(budget.totalUsed) -
+        notificationReserveRemaining
+    );
+
+  if (
+    analysisRemaining < reserved ||
+    globalRemainingBeforeTelegram < reserved
+  ) {
+    reserve.releaseReason =
+      "QUALIFIER_FOUND_BUT_RESERVATION_CAPACITY_ALREADY_UNAVAILABLE_V459";
+    return reserve;
+  }
+
+  reserve.active = true;
+  reserve.targetAddress =
+    normalize(candidate?.address);
+  reserve.targetSymbol =
+    candidate?.symbol || null;
+  reserve.poolId = poolId;
+  reserve.activatedAt = Date.now();
+  reserve.releaseReason = null;
+
+  return reserve;
+}
+
+function releaseCompleteExactPoolReserveV459(
+  budget,
+  reason,
+  consumed = false
+) {
+  const reserve =
+    budget?.analysis
+      ?.completeExactPoolReserveV459;
+
+  if (!reserve?.enabled) {
+    return reserve || null;
+  }
+
+  reserve.active = false;
+  reserve.releasedAt = Date.now();
+  reserve.releaseReason =
+    reason || null;
+
+  if (consumed) {
+    reserve.consumed = true;
+    reserve.consumedAt =
+      reserve.releasedAt;
+    reserve.releasedWithoutUse =
+      false;
+  } else {
+    reserve.releasedWithoutUse =
+      true;
+  }
+
+  return reserve;
+}
+
+/* =========================================================
    V458 COMPLETE EXACT-POOL 24H DIRECTIONAL USD COVERAGE
    ========================================================= */
 
@@ -60688,6 +60949,34 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    qualifiedCandidateUsdCoverageReservationV459: {
+      enabled: true,
+      activatesOnlyAfterQualifiedExactPoolCandidate:
+        true,
+      reservedRequests:
+        VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_REQUESTS_V458,
+      protectedRequestTypes: [
+        "BLOCKSCOUT_V458_TIMESTAMP_TO_BLOCK",
+        "BLOCKSCOUT_V458_COMPLETE_EXACT_POOL_24H_LOGS"
+      ],
+      lowerPriorityAnalysisBlockedWhenNecessary:
+        true,
+      inactiveWithoutEligibleQualifiedCandidate:
+        true,
+      requestCeilingsChanged:
+        false,
+      hardRequestLimit:
+        MAX_EXTERNAL_REQUESTS,
+      baseAnalysisLimit:
+        ANALYSIS_REQUEST_LIMIT,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false
+    },
+
     completeExactPoolDirectionalUsdCoverageV458: {
       enabled: true,
       measurementOnly: true,
@@ -62857,6 +63146,11 @@ for (
         1
       );
     }
+
+    activateCompleteExactPoolReserveV459(
+      budget,
+      candidate
+    );
 
     candidates.push(
       candidate
@@ -65276,6 +65570,14 @@ for (
     });
 
 
+  const completeExactPoolReserveTargetV459 =
+    normalize(
+      budget
+        ?.analysis
+        ?.completeExactPoolReserveV459
+        ?.targetAddress
+    );
+
   const completeExactPoolCandidatesV458 =
     (Array.isArray(candidates) ? candidates : [])
       .filter(
@@ -65285,9 +65587,27 @@ for (
           candidate?.onChainPoolIdentityV153?.verified === true
       )
       .sort(
-        (a, b) =>
-          safeNumber(b?.opportunity?.score) -
-          safeNumber(a?.opportunity?.score)
+        (a, b) => {
+          const aReserved =
+            normalize(a?.address) ===
+              completeExactPoolReserveTargetV459
+              ? 1
+              : 0;
+          const bReserved =
+            normalize(b?.address) ===
+              completeExactPoolReserveTargetV459
+              ? 1
+              : 0;
+
+          if (aReserved !== bReserved) {
+            return bReserved - aReserved;
+          }
+
+          return (
+            safeNumber(b?.opportunity?.score) -
+            safeNumber(a?.opportunity?.score)
+          );
+        }
       )
       .slice(
         0,
@@ -65356,6 +65676,43 @@ for (
         result?.flow?.verifiedWindows || []
     });
   }
+
+  const completeExactPoolReserveResultV459 =
+    (() => {
+      const reserve =
+        budget
+          ?.analysis
+          ?.completeExactPoolReserveV459;
+
+      const targetResult =
+        completeExactPoolDirectionalUsdV458
+          ?.results
+          ?.find(
+            row =>
+              normalize(row?.address) ===
+              normalize(
+                reserve?.targetAddress
+              )
+          ) ||
+        completeExactPoolDirectionalUsdV458
+          ?.results?.[0] ||
+        null;
+
+      const consumed =
+        safeNumber(
+          targetResult?.requestsUsed
+        ) > 0;
+
+      return releaseCompleteExactPoolReserveV459(
+        budget,
+        consumed
+          ? "V458_PROTECTED_LANE_EXECUTED_V459"
+          : completeExactPoolCandidatesV458.length === 0
+            ? "NO_ELIGIBLE_V458_TARGET_RELEASED_V459"
+            : "V458_TARGET_DID_NOT_CONSUME_PROTECTED_REQUESTS_V459",
+        consumed
+      );
+    })();
 
   const liquidityCrosschecksV449 =
     (
@@ -69325,6 +69682,7 @@ for (
     hookLiquiditySemanticsV453,
     onChainMarketFallbackResultsV455,
     completeExactPoolDirectionalUsdV458,
+    completeExactPoolReserveResultV459,
 
     liquidityCrosschecksV449,
     exactPoolLiquidityCrosschecksV451:
