@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V450
- * AUTHORITATIVE RUNTIME VERSION: V450
+ * Robinhood Chain Meme Hunter — V451
+ * AUTHORITATIVE RUNTIME VERSION: V451
+ * V451 fixes the liquidity cross-check definition after research and V448 evidence showed that V449 compared different Uniswap V4 pools for the same token.  * ReservesLens computes fee-excluded liquidity principal for one exact PoolKey/PoolId. A provider liquidity value is therefore comparable only when its pairAddress/pool identity matches that exact ReservesLens PoolId.  * V451 requires exact normalized pool identity equality before calculating liquidity ratios or divergence. Same-token/different-pool values are explicitly classified DIFFERENT_POOL_NOT_COMPARABLE_V451 and can never be used to validate or reject ReservesLens liquidity.  * Existing ReservesLens promotion remains disabled. No scoring, qualification, Telegram, provider routing, request budgets or liquidity thresholds change.
  * V450 removes historical PoolKey recovery from the live critical scan path. V447/V448/V449 proved that optional historical eth_getLogs recovery is unreliable across providers (Chainstack/Blockscout 403s) and can waste analysis budget without improving current-launch handling. V450 therefore does not call recoverHistoricalPoolKeyV443 during normal /scan execution. ReservesLens runs only when a complete PoolKey is already safely persisted from V441+ Initialize observation or other previously verified complete state. Older incomplete watched pools remain fully eligible for the rest of the scanner, but are skipped for independent ReservesLens liquidity rather than triggering historical recovery. The V448/V443 recovery code is retained but dormant for backwards compatibility/diagnostics; it is not part of the live critical path. V449 liquidity cross-checks, V447 valuation-ready target selection, V442 Chainstack ReservesLens routing, scoring, qualification, alert cooldowns, Telegram thresholds and request ceilings are unchanged.
  * V449 is a measurement-only cross-check and Telegram send-status clarity build. V448 proved independent ReservesLens USD liquidity on Yosh, but that same scan showed the reconstructed core-pool USD liquidity was materially different from the already-verified provider liquidity. V449 therefore does NOT promote ReservesLens liquidity into market.verified yet. It cross-checks on-chain core liquidity versus already-verified provider liquidity whenever both exist and records ratio/divergence classes with zero new network requests. V449 also makes Telegram funnel telemetry distinguish qualification from actual send eligibility: ALERT_COOLDOWN is reported as an intentional cooldown suppression rather than appearing like an unexplained send failure. Existing alert cooldown duration and duplicate-alert protection remain unchanged. No scoring, qualification, market promotion, liquidity threshold, provider routing or request ceiling changes.
  * V448 replaces the optional historical PoolKey recovery transport that Chainstack has proven to reject with HTTP_403. Historical immutable PoolKey recovery now uses the already-integrated Blockscout logs API as the primary/only indexed recovery source for one exact PoolManager Initialize event: exact persisted block, exact PoolManager address, exact Initialize topic and exact PoolId topic. The response is decoded by the existing V441 Initialize decoder, so fee, tickSpacing and hooks are accepted only when emitted by the canonical event; no fields are guessed. V448 reuses the existing V184 Blockscout wide-initialize service state/cooldown for 429 protection, consumes at most one existing analysis-budget request per scan, and does not fan out to Chainstack/Robinhood/Alchemy for historical recovery. The V447 Chainstack historical-log guard remains preserved as telemetry/history but is no longer the primary recovery path. V441 ReservesLens valuation-ready targeting remains unchanged. No scoring, qualification, market promotion, liquidity threshold, Telegram rule or global request ceiling changes.
@@ -1524,7 +1525,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V450";
+const VERSION = "V451";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -4694,11 +4695,45 @@ async function reservesLensLiquidityDiagnosticV441(
    V449 LIQUIDITY CROSS-CHECK + TELEGRAM SEND-STATUS DIAGNOSTICS
    ========================================================= */
 
+function providerPoolIdentityV451(candidate) {
+  const market =
+    candidate?.market || {};
+
+  const values = [
+    market?.pairAddress,
+    market?.pairId,
+    market?.poolId,
+    market?.dexPair?.pairAddress,
+    market?.dexPair?.pairId,
+    market?.dexPair?.poolId,
+    candidate?.pairAddress,
+    candidate?.pairId
+  ];
+
+  for (const value of values) {
+    const normalized =
+      normalize(value);
+
+    if (
+      /^0x[a-f0-9]{64}$/.test(
+        String(normalized || "")
+      )
+    ) {
+      return normalized;
+    }
+  }
+
+  return null;
+}
+
 function liquidityCrosscheckV449(candidate) {
+  const lens =
+    candidate
+      ?.reservesLensLiquidityDiagnosticV441;
+
   const onChainUsd =
     safeNumber(
-      candidate
-        ?.reservesLensLiquidityDiagnosticV441
+      lens
         ?.usdValuation
         ?.totalCoreLiquidityUsd
     );
@@ -4711,8 +4746,7 @@ function liquidityCrosscheckV449(candidate) {
     );
 
   const onChainVerified =
-    candidate
-      ?.reservesLensLiquidityDiagnosticV441
+    lens
       ?.usdValuation
       ?.verified === true &&
     onChainUsd > 0;
@@ -4723,14 +4757,38 @@ function liquidityCrosscheckV449(candidate) {
       ?.verified === true &&
     providerLiquidityUsd > 0;
 
+  const onChainPoolId =
+    normalize(
+      lens?.poolId ||
+      lens?.poolKey?.poolId
+    );
+
+  const providerPoolId =
+    providerPoolIdentityV451(
+      candidate
+    );
+
+  const exactPoolIdentityMatched =
+    Boolean(
+      onChainPoolId &&
+      providerPoolId &&
+      onChainPoolId === providerPoolId
+    );
+
   if (!onChainVerified || !providerVerified) {
     return {
       enabled: true,
+      identityAwareV451: true,
       comparable: false,
       status:
         !onChainVerified
           ? "ONCHAIN_LIQUIDITY_NOT_VERIFIED_V449"
           : "PROVIDER_LIQUIDITY_NOT_VERIFIED_V449",
+      onChainPoolId:
+        onChainPoolId || null,
+      providerPoolId:
+        providerPoolId || null,
+      exactPoolIdentityMatched,
       onChainCoreLiquidityUsd:
         onChainVerified ? onChainUsd : null,
       providerLiquidityUsd:
@@ -4740,6 +4798,33 @@ function liquidityCrosscheckV449(candidate) {
       percentageDifferenceVsProvider: null,
       agreementClass: "NOT_COMPARABLE",
       promotionAllowed: false
+    };
+  }
+
+  if (!exactPoolIdentityMatched) {
+    return {
+      enabled: true,
+      identityAwareV451: true,
+      comparable: false,
+      status:
+        providerPoolId
+          ? "DIFFERENT_POOL_NOT_COMPARABLE_V451"
+          : "PROVIDER_POOL_IDENTITY_UNVERIFIED_V451",
+      onChainPoolId:
+        onChainPoolId || null,
+      providerPoolId:
+        providerPoolId || null,
+      exactPoolIdentityMatched: false,
+      onChainCoreLiquidityUsd:
+        onChainUsd,
+      providerLiquidityUsd,
+      ratioOnChainToProvider: null,
+      absoluteDifferenceUsd: null,
+      percentageDifferenceVsProvider: null,
+      agreementClass: "NOT_COMPARABLE",
+      promotionAllowed: false,
+      interpretation:
+        "SAME_TOKEN_DOES_NOT_IMPLY_SAME_POOL_V451"
     };
   }
 
@@ -4778,17 +4863,24 @@ function liquidityCrosscheckV449(candidate) {
 
   return {
     enabled: true,
+    identityAwareV451: true,
     comparable: true,
-    status: "CROSSCHECK_COMPLETE_V449",
-    onChainCoreLiquidityUsd: onChainUsd,
+    status:
+      "EXACT_POOL_CROSSCHECK_COMPLETE_V451",
+    onChainPoolId,
+    providerPoolId,
+    exactPoolIdentityMatched: true,
+    onChainCoreLiquidityUsd:
+      onChainUsd,
     providerLiquidityUsd,
-    ratioOnChainToProvider: ratio,
+    ratioOnChainToProvider:
+      ratio,
     absoluteDifferenceUsd,
     percentageDifferenceVsProvider,
     agreementClass,
     promotionAllowed: false,
     interpretation:
-      "DIAGNOSTIC_ONLY_DO_NOT_PROMOTE_CORE_RESERVES_AS_PROVIDER_TVL_UNTIL_VALIDATED"
+      "EXACT_POOL_ONLY_DIAGNOSTIC_V451"
   };
 }
 
@@ -58786,6 +58878,19 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    exactPoolLiquidityCrosscheckV451: {
+      enabled: true,
+      exactPoolIdentityRequired: true,
+      sameTokenDifferentPoolComparable: false,
+      providerPairAddressMustMatchReservesLensPoolId: true,
+      addsExternalRequests: 0,
+      marketPromotionChanged: false,
+      liquidityThresholdChanged: false,
+      scoringChanged: false,
+      qualificationChanged: false,
+      telegramBehaviourChanged: false
+    },
+
     liveOnlyCompletePoolKeyPathV450: {
       enabled: true,
       historicalRecoveryInCriticalPath: false,
@@ -67058,6 +67163,8 @@ for (
     telegramResults,
 
     liquidityCrosschecksV449,
+    exactPoolLiquidityCrosschecksV451:
+      liquidityCrosschecksV449,
 
     intelligence: {
       persistentPostAlertFollowUpTracking:
