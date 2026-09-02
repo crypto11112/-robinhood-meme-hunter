@@ -1,6 +1,30 @@
 /**
- * Robinhood Chain Meme Hunter — V469
- * AUTHORITATIVE RUNTIME VERSION: V469
+ * Robinhood Chain Meme Hunter — V470
+ * AUTHORITATIVE RUNTIME VERSION: V470
+ *
+ * V470 adds a forward-only VERIFIED LAUNCH METER on top of confirmed V469.
+ *
+ * - Records unique verified token launches from already-supported positively
+ *   verified launch sources only: pools.trade TokenLaunched (LIVE only), Bags,
+ *   Flap, Pons V2, LaunchHood, hood.fun, Klik Finance, Bankr Bot, Ape.store,
+ *   Clanker and Virtuals.
+ * - Deduplicates globally by token address so the same token is not counted
+ *   twice when evidence overlaps.
+ * - Persists compact launch records for a bounded 48-hour window and reports
+ *   rolling 24h + UTC-today unique verified counts and per-protocol breakdown.
+ * - pools.trade backlog observations are deliberately NOT counted as "today"
+ *   because those historical logs do not carry canonical block time in this
+ *   path; only current LIVE positively decoded TokenLaunched events count.
+ * - Bitquery-backed launch rows use their returned blockTime.
+ * - Adds /launches Telegram command (read-only, zero provider requests/writes).
+ * - Adds verifiedLaunchMeterV470 to /scan diagnostics.
+ * - Starts forward-only at V470 deployment; no guessed historical backfill.
+ * - If the bounded record capacity is ever exceeded, completeness is explicitly
+ *   downgraded rather than silently claiming a complete count.
+ * - "chain-wide total" remains DATA UNVERIFIED: this meter is the verified total
+ *   observed by the bot across its supported positively verified launch sources.
+ * - V469 fresh-candidate priority, V466/V468 completion, scoring, qualification,
+ *   Telegram thresholds and the 42-request ceiling are unchanged.
  *
  * V469 is a narrow fresh-candidate analysis-priority build on confirmed-working V468.
  *
@@ -1674,7 +1698,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V469";
+const VERSION = "V470";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9070,6 +9094,23 @@ function newState() {
       recentVerifiedLaunches: []
     },
 
+    verifiedLaunchMeterV470: {
+      enabled: true,
+      monitorStartedAt: null,
+      lastUpdatedAt: null,
+      records: [],
+      maxRecords: 10000,
+      retentionMs: 172800000,
+      droppedForCapacity: 0,
+      capacityTruncated: false,
+      totalUniqueRecordedSinceV470: 0,
+      duplicateObservationsIgnored: 0,
+      invalidOrUnverifiedIgnored: 0,
+      lastVerifiedLaunchAt: null,
+      lastVerifiedToken: null,
+      lastVerifiedProtocol: null
+    },
+
     scheduler: {
       scheduledRunCount:
         0,
@@ -9563,6 +9604,20 @@ async function readState(env) {
           recentVerifiedLaunches:
             Array.isArray(parsed.poolsTradeLaunchTelemetryV209?.recentVerifiedLaunches)
               ? parsed.poolsTradeLaunchTelemetryV209.recentVerifiedLaunches.slice(-25)
+              : []
+        },
+
+        verifiedLaunchMeterV470: {
+          ...fresh.verifiedLaunchMeterV470,
+          ...(
+            parsed.verifiedLaunchMeterV470 &&
+            typeof parsed.verifiedLaunchMeterV470 === "object"
+              ? parsed.verifiedLaunchMeterV470
+              : {}
+          ),
+          records:
+            Array.isArray(parsed.verifiedLaunchMeterV470?.records)
+              ? parsed.verifiedLaunchMeterV470.records.slice(-10000)
               : []
         },
 
@@ -29265,6 +29320,520 @@ async function discoverVerifiedBagsLaunchesV210(
   }
 }
 
+
+const VERIFIED_LAUNCH_METER_RETENTION_MS_V470 = 48 * 60 * 60 * 1000;
+const VERIFIED_LAUNCH_METER_MAX_RECORDS_V470 = 10000;
+const VERIFIED_LAUNCH_METER_WINDOW_MS_V470 = 24 * 60 * 60 * 1000;
+
+function ensureVerifiedLaunchMeterV470(state) {
+  const base =
+    newState().verifiedLaunchMeterV470;
+
+  state.verifiedLaunchMeterV470 =
+    state?.verifiedLaunchMeterV470 &&
+    typeof state.verifiedLaunchMeterV470 === "object"
+      ? state.verifiedLaunchMeterV470
+      : {...base};
+
+  const meter =
+    state.verifiedLaunchMeterV470;
+
+  meter.records =
+    Array.isArray(meter.records)
+      ? meter.records
+      : [];
+
+  meter.maxRecords =
+    VERIFIED_LAUNCH_METER_MAX_RECORDS_V470;
+  meter.retentionMs =
+    VERIFIED_LAUNCH_METER_RETENTION_MS_V470;
+
+  if (!safeNumber(meter.monitorStartedAt)) {
+    meter.monitorStartedAt = Date.now();
+  }
+
+  return meter;
+}
+
+function launchTimeMsV470(launch, allowObservedFallback = false) {
+  const candidates = [
+    launch?.blockTime,
+    launch?.launchTime,
+    launch?.timestamp,
+    launch?.time
+  ];
+
+  for (const raw of candidates) {
+    if (raw === null || raw === undefined || raw === "") continue;
+    const parsed =
+      typeof raw === "number"
+        ? raw
+        : Date.parse(String(raw));
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+
+  if (allowObservedFallback) {
+    return Date.now();
+  }
+
+  return null;
+}
+
+function verifiedLaunchProtocolV470(launch, fallbackProtocol) {
+  const raw =
+    launch?.protocol ||
+    launch?.protocolFamily ||
+    fallbackProtocol ||
+    "UNKNOWN_VERIFIED_SOURCE";
+
+  return String(raw || "UNKNOWN_VERIFIED_SOURCE")
+    .trim()
+    .slice(0, 80);
+}
+
+function pruneVerifiedLaunchMeterV470(state, nowMs = Date.now()) {
+  const meter = ensureVerifiedLaunchMeterV470(state);
+  const cutoff =
+    nowMs - VERIFIED_LAUNCH_METER_RETENTION_MS_V470;
+
+  meter.records =
+    meter.records
+      .filter(row => {
+        const at = safeNumber(row?.launchedAt);
+        return (
+          isAddress(normalize(row?.token)) &&
+          at > 0 &&
+          at >= cutoff &&
+          at <= nowMs + 5 * 60 * 1000
+        );
+      })
+      .sort(
+        (a, b) =>
+          safeNumber(a?.launchedAt) -
+          safeNumber(b?.launchedAt)
+      );
+
+  if (
+    meter.records.length >
+    VERIFIED_LAUNCH_METER_MAX_RECORDS_V470
+  ) {
+    const excess =
+      meter.records.length -
+      VERIFIED_LAUNCH_METER_MAX_RECORDS_V470;
+
+    meter.records =
+      meter.records.slice(
+        -VERIFIED_LAUNCH_METER_MAX_RECORDS_V470
+      );
+
+    meter.droppedForCapacity =
+      safeNumber(meter.droppedForCapacity) + excess;
+    meter.capacityTruncated = true;
+  }
+
+  return meter;
+}
+
+function recordVerifiedLaunchV470(
+  state,
+  launch,
+  fallbackProtocol,
+  options = {}
+) {
+  const meter =
+    pruneVerifiedLaunchMeterV470(
+      state,
+      Date.now()
+    );
+
+  const explicitlyVerified =
+    launch?.verified === true ||
+    launch?.decodeVerified === true ||
+    options?.verified === true;
+
+  const token =
+    normalize(
+      launch?.token ||
+      launch?.tokenAddress
+    );
+
+  if (
+    !explicitlyVerified ||
+    !isAddress(token) ||
+    token === ZERO ||
+    knownQuote(token)
+  ) {
+    meter.invalidOrUnverifiedIgnored =
+      safeNumber(meter.invalidOrUnverifiedIgnored) + 1;
+    return {
+      recorded: false,
+      reason:
+        "UNVERIFIED_OR_INVALID_LAUNCH_V470"
+    };
+  }
+
+  const launchedAt =
+    launchTimeMsV470(
+      launch,
+      options?.allowObservedFallback === true
+    );
+
+  const nowMs = Date.now();
+
+  if (
+    !safeNumber(launchedAt) ||
+    launchedAt >
+      nowMs + 5 * 60 * 1000 ||
+    launchedAt <
+      nowMs -
+        VERIFIED_LAUNCH_METER_RETENTION_MS_V470
+  ) {
+    meter.invalidOrUnverifiedIgnored =
+      safeNumber(meter.invalidOrUnverifiedIgnored) + 1;
+    return {
+      recorded: false,
+      reason:
+        "VERIFIED_LAUNCH_TIME_OUTSIDE_METER_WINDOW_V470"
+    };
+  }
+
+  const protocol =
+    verifiedLaunchProtocolV470(
+      launch,
+      fallbackProtocol
+    );
+
+  const source =
+    String(
+      launch?.source ||
+      options?.source ||
+      protocol
+    ).slice(0, 120);
+
+  const tx =
+    normalize(
+      launch?.transactionHash
+    ) || null;
+
+  const blockNumber =
+    (() => {
+      try {
+        if (
+          launch?.blockNumber ===
+            null ||
+          launch?.blockNumber ===
+            undefined
+        ) {
+          return null;
+        }
+        return Number(
+          BigInt(
+            launch.blockNumber
+          )
+        );
+      } catch {
+        return safeNumber(
+          launch?.blockNumber
+        ) || null;
+      }
+    })();
+
+  const existingIndex =
+    meter.records.findIndex(
+      row =>
+        normalize(row?.token) === token
+    );
+
+  if (existingIndex >= 0) {
+    meter.duplicateObservationsIgnored =
+      safeNumber(
+        meter.duplicateObservationsIgnored
+      ) + 1;
+
+    const existing =
+      meter.records[existingIndex];
+
+    /*
+     * Prefer a real returned blockTime over a LIVE-observed fallback timestamp.
+     * This refines the record without increasing the unique launch count.
+     */
+    if (
+      options?.timeBasis ===
+        "BLOCK_TIME_VERIFIED" &&
+      existing?.timeBasis !==
+        "BLOCK_TIME_VERIFIED"
+    ) {
+      meter.records[existingIndex] = {
+        ...existing,
+        launchedAt,
+        protocol,
+        source,
+        transactionHash:
+          tx ||
+          existing?.transactionHash ||
+          null,
+        blockNumber:
+          blockNumber ||
+          existing?.blockNumber ||
+          null,
+        timeBasis:
+          "BLOCK_TIME_VERIFIED",
+        lastObservedAt:
+          nowMs
+      };
+    } else {
+      meter.records[existingIndex] = {
+        ...existing,
+        lastObservedAt:
+          nowMs
+      };
+    }
+
+    meter.lastUpdatedAt = nowMs;
+
+    return {
+      recorded: false,
+      duplicate: true,
+      reason:
+        "VERIFIED_TOKEN_ALREADY_COUNTED_V470"
+    };
+  }
+
+  meter.records.push({
+    token,
+    symbol:
+      launch?.symbol ||
+      null,
+    protocol,
+    source,
+    transactionHash:
+      tx,
+    blockNumber,
+    launchedAt,
+    firstObservedAt:
+      nowMs,
+    lastObservedAt:
+      nowMs,
+    timeBasis:
+      options?.timeBasis ||
+      "BLOCK_TIME_VERIFIED",
+    verification:
+      options?.verification ||
+      launch?.verification ||
+      (
+        launch?.decodeVerified === true
+          ? "POSITIVELY_DECODED_CHAIN_EVENT"
+          : "POSITIVELY_VERIFIED_LAUNCH_SOURCE"
+      )
+  });
+
+  meter.totalUniqueRecordedSinceV470 =
+    safeNumber(
+      meter.totalUniqueRecordedSinceV470
+    ) + 1;
+  meter.lastVerifiedLaunchAt =
+    launchedAt;
+  meter.lastVerifiedToken =
+    token;
+  meter.lastVerifiedProtocol =
+    protocol;
+  meter.lastUpdatedAt =
+    nowMs;
+
+  pruneVerifiedLaunchMeterV470(
+    state,
+    nowMs
+  );
+
+  return {
+    recorded: true,
+    token,
+    protocol,
+    launchedAt
+  };
+}
+
+function verifiedLaunchMeterSnapshotV470(
+  state,
+  nowMs = Date.now()
+) {
+  const meter =
+    pruneVerifiedLaunchMeterV470(
+      state,
+      nowMs
+    );
+
+  const records =
+    Array.isArray(meter.records)
+      ? meter.records
+      : [];
+
+  const rollingCutoff =
+    nowMs -
+    VERIFIED_LAUNCH_METER_WINDOW_MS_V470;
+
+  const utcStart =
+    Date.UTC(
+      new Date(nowMs).getUTCFullYear(),
+      new Date(nowMs).getUTCMonth(),
+      new Date(nowMs).getUTCDate()
+    );
+
+  const rolling24h =
+    records.filter(
+      row =>
+        safeNumber(row?.launchedAt) >=
+          rollingCutoff &&
+        safeNumber(row?.launchedAt) <=
+          nowMs
+    );
+
+  const todayUtc =
+    records.filter(
+      row =>
+        safeNumber(row?.launchedAt) >=
+          utcStart &&
+        safeNumber(row?.launchedAt) <=
+          nowMs
+    );
+
+  const summarizeProtocols =
+    rows => {
+      const map = {};
+      for (const row of rows) {
+        const key =
+          String(
+            row?.protocol ||
+            "UNKNOWN_VERIFIED_SOURCE"
+          );
+        map[key] =
+          safeNumber(map[key]) + 1;
+      }
+      return Object.fromEntries(
+        Object.entries(map)
+          .sort(
+            (a, b) =>
+              safeNumber(b[1]) -
+              safeNumber(a[1])
+          )
+      );
+    };
+
+  const ageMs =
+    safeNumber(
+      meter.monitorStartedAt
+    ) > 0
+      ? Math.max(
+          0,
+          nowMs -
+          safeNumber(
+            meter.monitorStartedAt
+          )
+        )
+      : 0;
+
+  const fullObservationAge =
+    ageMs >=
+    VERIFIED_LAUNCH_METER_WINDOW_MS_V470;
+
+  const capacityComplete =
+    meter.capacityTruncated !== true;
+
+  return {
+    enabled: true,
+    version: "V470",
+    forwardOnly: true,
+    monitorStartedAt:
+      meter.monitorStartedAt ||
+      null,
+    monitorAgeMs:
+      ageMs,
+    full24hObservationAge:
+      fullObservationAge,
+    rolling24hUniqueVerifiedLaunches:
+      rolling24h.length,
+    todayUtcUniqueVerifiedLaunches:
+      todayUtc.length,
+    retained48hUniqueVerifiedLaunches:
+      records.length,
+    totalUniqueRecordedSinceV470:
+      safeNumber(
+        meter.totalUniqueRecordedSinceV470
+      ),
+    rolling24hByProtocol:
+      summarizeProtocols(
+        rolling24h
+      ),
+    todayUtcByProtocol:
+      summarizeProtocols(
+        todayUtc
+      ),
+    lastVerifiedLaunchAt:
+      meter.lastVerifiedLaunchAt ||
+      null,
+    lastVerifiedToken:
+      meter.lastVerifiedToken ||
+      null,
+    lastVerifiedProtocol:
+      meter.lastVerifiedProtocol ||
+      null,
+    capacity: {
+      maxRecords:
+        VERIFIED_LAUNCH_METER_MAX_RECORDS_V470,
+      retained:
+        records.length,
+      truncated:
+        meter.capacityTruncated === true,
+      dropped:
+        safeNumber(
+          meter.droppedForCapacity
+        )
+    },
+    dedupe: {
+      globalUniqueKey:
+        "TOKEN_ADDRESS",
+      duplicateObservationsIgnored:
+        safeNumber(
+          meter.duplicateObservationsIgnored
+        )
+    },
+    supportedVerifiedSources: [
+      "pools.trade",
+      "Bags",
+      "Flap",
+      "Pons V2",
+      "LaunchHood",
+      "hood.fun",
+      "Klik Finance",
+      "Bankr Bot",
+      "Ape.store",
+      "Clanker",
+      "Virtuals"
+    ],
+    poolsTradeBacklogCountedAsToday:
+      false,
+    chainWideTotal:
+      "DATA UNVERIFIED",
+    interpretation:
+      fullObservationAge &&
+      capacityComplete
+        ? "VERIFIED_BOT_OBSERVED_24H_WINDOW_V470"
+        : !capacityComplete
+          ? "CAPACITY_TRUNCATED_COUNT_INCOMPLETE_V470"
+          : "BUILDING_FORWARD_ONLY_24H_WINDOW_V470",
+    claim:
+      "VERIFIED_LAUNCHES_OBSERVED_BY_SUPPORTED_POSITIVELY_VERIFIED_SOURCES_ONLY",
+    requestCeilingsChanged:
+      false,
+    scoringChanged:
+      false,
+    qualificationChanged:
+      false,
+    telegramThresholdChanged:
+      false
+  };
+}
+
 function processDiscoveryLogs(
   state,
   logs,
@@ -29402,6 +29971,33 @@ function processDiscoveryLogs(
     if (event?.decodeVerified !== true || !isAddress(event?.token)) continue;
 
     if (event.event === "TokenLaunched") {
+      /*
+       * V470: only LIVE positively decoded pools.trade TokenLaunched events
+       * enter the daily meter. BACKLOG observations are not assigned today's
+       * date because this discovery path has no canonical blockTime here.
+       */
+      if (source === "LIVE") {
+        recordVerifiedLaunchV470(
+          state,
+          {
+            ...event,
+            verified: true,
+            protocol: "pools.trade",
+            source:
+              "POOLS_TRADE_TOKEN_LAUNCHED_V208"
+          },
+          "pools.trade",
+          {
+            verified: true,
+            allowObservedFallback: true,
+            timeBasis:
+              "LIVE_SCAN_OBSERVED_AT",
+            verification:
+              "POSITIVE_EMITTER_EVENT_POOLKEY_TOKEN_MEMBERSHIP_V208"
+          }
+        );
+      }
+
       const pool = {
         poolId: event.poolId,
         currency0: event.currency0,
@@ -61067,6 +61663,42 @@ for (
       bitqueryLiquidityTargetV237
     );
 
+  /*
+   * V470: ingest only positively verified launch rows already returned by the
+   * existing shared discovery request. This adds zero external requests.
+   * Each of these rows carries Bitquery blockTime, which is used as launch time.
+   */
+  const verifiedLaunchSourcesV470 = [
+    ["Bags", bagsDiscoveryV210.launches || []],
+    ["Flap", bagsDiscoveryV210.flapLaunches || []],
+    ["Pons V2", bagsDiscoveryV210.ponsLaunches || []],
+    ["LaunchHood", bagsDiscoveryV210.launchHoodLaunchesV220 || []],
+    ["FIXED_MINT_LAUNCHPAD", bagsDiscoveryV210.fixedMintLaunchpadLaunchesV222 || []],
+    ["CLANKER_VIRTUALS", bagsDiscoveryV210.clankerVirtualsLaunchesV224 || []]
+  ];
+
+  for (const [fallbackProtocolV470, rowsV470] of verifiedLaunchSourcesV470) {
+    for (const launchV470 of rowsV470) {
+      recordVerifiedLaunchV470(
+        state,
+        launchV470,
+        fallbackProtocolV470,
+        {
+          verified:
+            launchV470?.verified === true,
+          allowObservedFallback:
+            false,
+          timeBasis:
+            "BLOCK_TIME_VERIFIED",
+          verification:
+            launchV470?.verification ||
+            launchV470?.source ||
+            "BITQUERY_POSITIVELY_VERIFIED_LAUNCH_V470"
+        }
+      );
+    }
+  }
+
   for (const launch of bagsDiscoveryV210.launches || []) {
     if (isAddress(launch?.token)) {
       liveTokens.add(normalize(launch.token));
@@ -69302,6 +69934,11 @@ for (
     poolsTradeLaunchCumulativeV209:
       state.poolsTradeLaunchTelemetryV209,
 
+    verifiedLaunchMeterV470:
+      verifiedLaunchMeterSnapshotV470(
+        state
+      ),
+
     verifiedLaunchPriorityV211: {
       enabled: true,
       sameScanPriority: true,
@@ -71055,6 +71692,7 @@ for (
         "/calls",
         "/best",
         "/performance",
+        "/launches",
         "/usage",
         "/chainstack",
         "/help"
@@ -81403,6 +82041,96 @@ function chainstackUsageTelegramMessageV434(
   ].join("\n");
 }
 
+
+function verifiedLaunchMeterTelegramMessageV470(state) {
+  const meter =
+    verifiedLaunchMeterSnapshotV470(
+      state
+    );
+
+  const fmtCount =
+    value =>
+      Number(
+        safeNumber(value)
+      ).toLocaleString(
+        "en-GB"
+      );
+
+  const duration =
+    ms => {
+      const totalMinutes =
+        Math.max(
+          0,
+          Math.floor(
+            safeNumber(ms) /
+            60000
+          )
+        );
+      const hours =
+        Math.floor(
+          totalMinutes / 60
+        );
+      const minutes =
+        totalMinutes % 60;
+      return `${hours}h ${minutes}m`;
+    };
+
+  const protocolLines =
+    Object.entries(
+      meter?.rolling24hByProtocol ||
+      {}
+    )
+      .slice(0, 12)
+      .map(
+        ([name, count]) =>
+          `• ${escapeHtml(name)}: <b>${fmtCount(count)}</b>`
+      );
+
+  const status =
+    meter?.interpretation ===
+      "VERIFIED_BOT_OBSERVED_24H_WINDOW_V470"
+      ? "24H WINDOW BUILT"
+      : meter?.interpretation ===
+          "CAPACITY_TRUNCATED_COUNT_INCOMPLETE_V470"
+        ? "INCOMPLETE — CAPACITY TRUNCATED"
+        : "BUILDING";
+
+  return [
+    "🚀 <b>Verified Robinhood Launch Meter — V470</b>",
+    "",
+    `Rolling 24h: <b>${fmtCount(
+      meter?.rolling24hUniqueVerifiedLaunches
+    )}</b> unique verified launches`,
+    `Today (UTC): <b>${fmtCount(
+      meter?.todayUtcUniqueVerifiedLaunches
+    )}</b>`,
+    `Meter age: <b>${duration(
+      meter?.monitorAgeMs
+    )}</b>`,
+    `Status: <b>${status}</b>`,
+    "",
+    "<b>Rolling 24h by verified source/protocol</b>",
+    ...(
+      protocolLines.length
+        ? protocolLines
+        : ["• No verified launches recorded yet"]
+    ),
+    "",
+    `Retained 48h records: <b>${fmtCount(
+      meter?.retained48hUniqueVerifiedLaunches
+    )}</b> / ${fmtCount(
+      meter?.capacity?.maxRecords
+    )}`,
+    `Duplicate observations ignored: <b>${fmtCount(
+      meter?.dedupe?.duplicateObservationsIgnored
+    )}</b>`,
+    "",
+    "✅ Counts only positively verified launch evidence from supported sources.",
+    "⚠️ Chain-wide total: <b>DATA UNVERIFIED</b> — unsupported launch mechanisms or provider/scanner gaps are not guessed.",
+    "<i>Forward-only from V470 deployment. /launches is read-only and makes zero provider requests.</i>"
+  ].join("\\n");
+}
+
 function telegramHelpV271() {
   return [
     "🤖 <b>Robinhood Meme Hunter Commands</b>",
@@ -81420,6 +82148,7 @@ function telegramHelpV271() {
     "<code>/horizon GUS</code> — fixed-horizon capture diagnostics",
     "<code>/live GUS</code> — V414 lower-timeframe rolling signals + breakout state (read-only)",
     "<code>/v3usd 0xADDRESS</code> — persisted native V3 USD flow (read-only)",
+    "<code>/launches</code> — verified rolling 24h launch meter",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/help</code> — command list",
@@ -81716,6 +82445,44 @@ async function telegramCommandReplyV271(
   let reply;
 
   if (
+    parsed.command ===
+      "/launches" ||
+    parsed.command ===
+      "/launchmeter"
+  ) {
+    reply =
+      verifiedLaunchMeterTelegramMessageV470(
+        state
+      );
+
+    if (diagnosticV273) {
+      const launchMeterV470 =
+        verifiedLaunchMeterSnapshotV470(
+          state
+        );
+
+      diagnosticV273.verifiedLaunchMeterV470 = {
+        rolling24h:
+          launchMeterV470
+            ?.rolling24hUniqueVerifiedLaunches ??
+          null,
+        todayUtc:
+          launchMeterV470
+            ?.todayUtcUniqueVerifiedLaunches ??
+          null,
+        interpretation:
+          launchMeterV470
+            ?.interpretation ||
+          null,
+        scannerBudgetConsumed:
+          false,
+        externalProviderRequests:
+          0,
+        stateWrites:
+          0
+      };
+    }
+  } else if (
     parsed.command ===
       "/chainstack" ||
     parsed.command ===
