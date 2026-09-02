@@ -1,6 +1,19 @@
 /**
- * Robinhood Chain Meme Hunter — V503
- * AUTHORITATIVE RUNTIME VERSION: V503
+ * Robinhood Chain Meme Hunter — V504
+ * AUTHORITATIVE RUNTIME VERSION: V504
+ *
+ * V504 SOLVED-RWA BACKLOG EXCLUSION + V503 SLOT RELEASE:
+ * - preserves the confirmed RWA exact live detector and all V503/V502 logic;
+ * - prevents already-solved RWA factory/deployer evidence from consuming the
+ *   generic persisted-origin / historical mechanism diagnostic slot;
+ * - historical verified origins whose creator is the confirmed RWA factory or
+ *   LaunchTokenDeployer are skipped by the generic V486 backlog selector;
+ * - no historical RWA evidence is deleted and the live RWA detector is unchanged;
+ * - released capacity can flow to V503 recurring-creator attribution;
+ * - one secondary diagnostic request maximum per scan remains enforced;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, verified-USD,
+ *   dense-pool completion, launch-meter, or discovery-cadence changes.
  *
  * V503 RECURRING-CREATOR EXACT ATTRIBUTION:
  * - preserves V502 unknown-source diversification and all confirmed-working
@@ -2369,7 +2382,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V503";
+const VERSION = "V504";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71812,7 +71825,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71836,6 +71849,36 @@ for (
       telegramThresholdChanged:
         false,
       launchSourcePromotion:
+        false
+    },
+
+    solvedRwaBacklogExclusionV504: {
+      enabled: true,
+      purpose:
+        "STOP_REINVESTIGATING_ALREADY_CONFIRMED_RWA_MECHANISM_IN_GENERIC_BACKLOG",
+      excludedSolvedAddresses: [
+        RWA_LAUNCHPAD_FACTORY_V495,
+        RWA_LAUNCH_TOKEN_DEPLOYER_V495
+      ],
+      historicalEvidenceDeleted:
+        false,
+      rwaExactLiveDetectorChanged:
+        false,
+      releasesSecondaryDiagnosticCapacity:
+        true,
+      preferredReleasedConsumer:
+        "V503_RECURRING_CREATOR_ATTRIBUTION",
+      maxSecondaryDiagnosticRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
         false
     },
 
@@ -87460,6 +87503,19 @@ function selectOldestUnprocessedVerifiedOriginV486(
           return false;
         }
 
+        /*
+         * V504: the RWA mechanism is already independently proven and has an
+         * active exact live detector. Do not spend generic historical
+         * attribution slots on its factory/deployer again.
+         */
+        if (
+          isSolvedExactLaunchMechanismAddressV504(
+            creator
+          )
+        ) {
+          return false;
+        }
+
         if (
           backlogRoot
             ?.processedOrigins?.[
@@ -87564,7 +87620,18 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
     selectedFromPersistedVerifiedOrigins:
       false,
     selectionPolicy:
-      "OLDEST_UNPROCESSED_VERIFIED_ORIGIN_FIRST_V486",
+      "OLDEST_UNPROCESSED_VERIFIED_ORIGIN_FIRST_V486_WITH_SOLVED_RWA_EXCLUSION_V504",
+    solvedExactMechanismBacklogExclusionV504: {
+      enabled: true,
+      excludedCreatorAddresses: [
+        RWA_LAUNCHPAD_FACTORY_V495,
+        RWA_LAUNCH_TOKEN_DEPLOYER_V495
+      ],
+      evidenceDeleted: false,
+      rwaLiveDetectorChanged: false,
+      purpose:
+        "RELEASE_GENERIC_HISTORICAL_DIAGNOSTIC_CAPACITY_FOR_UNRESOLVED_SOURCES"
+    },
     selectedToken: null,
     selectedCreator: null,
     selectedCreationTransactionHash: null,
@@ -94224,6 +94291,33 @@ function exactCreationTriggerLinkageSnapshotV492(
   };
 }
 
+
+
+function solvedExactLaunchMechanismAddressesV504() {
+  return new Set(
+    [
+      normalize(
+        RWA_LAUNCHPAD_FACTORY_V495
+      ),
+      normalize(
+        RWA_LAUNCH_TOKEN_DEPLOYER_V495
+      )
+    ].filter(isAddress)
+  );
+}
+
+function isSolvedExactLaunchMechanismAddressV504(
+  address
+) {
+  const clean =
+    normalize(address);
+
+  return (
+    isAddress(clean) &&
+    solvedExactLaunchMechanismAddressesV504()
+      .has(clean)
+  );
+}
 
 function ensureRecurringCreatorAttributionV503(
   state
