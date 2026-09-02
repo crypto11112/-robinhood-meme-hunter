@@ -1,6 +1,24 @@
 /**
- * Robinhood Chain Meme Hunter — V498
- * AUTHORITATIVE RUNTIME VERSION: V498
+ * Robinhood Chain Meme Hunter — V499
+ * AUTHORITATIVE RUNTIME VERSION: V499
+ *
+ * V499 /launchsources READ-ONLY TELEGRAM COMMAND:
+ * - adds the Telegram command /launchsources already exposed in BotFather;
+ * - reads only persisted bot evidence already available in MEME_HUNTER_STATE;
+ * - zero external provider/RPC requests;
+ * - zero additional persistent state writes;
+ * - reports bot-supported verified source labels and which were observed active
+ *   in the rolling 24h verified-launch meter;
+ * - reports rolling-24h launches by source/protocol;
+ * - reports returned-candidate launch-source verification coverage using the
+ *   existing V474 cumulative funnel, labelled precisely as candidate coverage;
+ * - reports the newly confirmed RWAERC20LaunchpadFactory detector as ACTIVE only
+ *   when V495 activePattern is present and liveDetectorActive is true;
+ * - probable/unconfirmed launch mechanisms remain DATA UNVERIFIED unless there
+ *   is explicit persisted proof classification;
+ * - chain-wide launchpad total remains DATA UNVERIFIED;
+ * - no scoring, Momentum, qualification, Telegram threshold, verified-USD,
+ *   dense-pool completion, discovery cadence, or request-budget changes.
  *
  * V498 CHAINSTACK RECEIPT ROUTING HOTFIX:
  * - fixes a V497 implementation mismatch where telemetry/documentation stated
@@ -2284,7 +2302,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V498";
+const VERSION = "V499";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71727,7 +71745,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71752,6 +71770,26 @@ for (
         false,
       launchSourcePromotion:
         false
+    },
+
+    telegramLaunchSourcesV499: {
+      enabled: true,
+      command: "/launchsources",
+      alias: "/sources",
+      readOnly: true,
+      persistedEvidenceOnly: true,
+      externalProviderRequests: 0,
+      additionalPersistentStateWrites: 0,
+      supportedSourceLabelsFrom: "V470_SUPPORTED_VERIFIED_SOURCES",
+      active24hFrom: "V470_ROLLING_24H_BY_PROTOCOL",
+      candidateSourceCoverageFrom: "V474_CUMULATIVE_FUNNEL",
+      rwaDetectorStatusFrom: "V495_ACTIVE_PATTERN",
+      chainWideLaunchpadTotal: "DATA UNVERIFIED",
+      probableUnconfirmedMechanisms: "DATA UNVERIFIED",
+      scoringChanged: false,
+      momentumChanged: false,
+      qualificationChanged: false,
+      telegramThresholdChanged: false
     },
 
     chainstackReceiptRoutingHotfixV498: {
@@ -74007,6 +74045,7 @@ for (
         "/best",
         "/performance",
         "/launches",
+        "/launchsources",
         "/launchcoverage",
         "/usage",
         "/chainstack",
@@ -99415,6 +99454,165 @@ function verifiedLaunchMeterTelegramMessageV470(state) {
   ].join("\n");
 }
 
+
+function launchSourcesTelegramMessageV499(
+  state
+) {
+  const meter =
+    verifiedLaunchMeterSnapshotV470(
+      state
+    );
+
+  const coverage =
+    state?.launchCoverageCumulativeV474 &&
+    typeof state.launchCoverageCumulativeV474 === "object"
+      ? state.launchCoverageCumulativeV474
+      : {};
+
+  const rwa =
+    state?.rwaExactLiveDetectorV495 &&
+    typeof state.rwaExactLiveDetectorV495 === "object"
+      ? state.rwaExactLiveDetectorV495
+      : {};
+
+  const supported =
+    Array.isArray(
+      meter?.supportedVerifiedSources
+    )
+      ? meter.supportedVerifiedSources
+      : [];
+
+  const rolling =
+    meter?.rolling24hByProtocol &&
+    typeof meter.rolling24hByProtocol === "object"
+      ? meter.rolling24hByProtocol
+      : {};
+
+  const active =
+    Object.entries(rolling)
+      .filter(
+        ([, count]) =>
+          safeNumber(count) > 0
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(b[1]) -
+          safeNumber(a[1])
+      );
+
+  const fmt =
+    value =>
+      Number(
+        safeNumber(value)
+      ).toLocaleString("en-GB");
+
+  const verifiedReturned =
+    safeNumber(
+      coverage
+        ?.returnedCurrentLiveWithVerifiedLaunchSource
+    );
+
+  const totalReturned =
+    safeNumber(
+      coverage
+        ?.currentLiveReturnedCandidates
+    );
+
+  const sourceCoverage =
+    totalReturned > 0
+      ? `${(
+          verifiedReturned /
+          totalReturned *
+          100
+        ).toFixed(1)}%`
+      : "UNVERIFIED";
+
+  const meterAgeStatus =
+    meter?.interpretation ===
+      "VERIFIED_BOT_OBSERVED_24H_WINDOW_V470"
+      ? "FULL 24H BOT WINDOW"
+      : meter?.interpretation ===
+          "CAPACITY_TRUNCATED_COUNT_INCOMPLETE_V470"
+        ? "INCOMPLETE — CAPACITY TRUNCATED"
+        : "BUILDING FORWARD-ONLY WINDOW";
+
+  const rwaActive =
+    rwa?.liveDetectorActive === true &&
+    rwa?.activePattern &&
+    typeof rwa.activePattern === "object";
+
+  const activeLines =
+    active.length
+      ? active.map(
+          ([name, count]) =>
+            `• ${escapeHtml(name)}: <b>${fmt(count)}</b>`
+        )
+      : [
+          "• No supported verified source recorded a launch in the rolling 24h window"
+        ];
+
+  const supportedLines =
+    supported.length
+      ? supported.map(name => {
+          const count =
+            safeNumber(
+              rolling?.[name]
+            );
+
+          const status =
+            count > 0
+              ? `ACTIVE 24H — ${fmt(count)} launch${count === 1 ? "" : "es"}`
+              : "SUPPORTED — NO 24H VERIFIED LAUNCH OBSERVED";
+
+          if (
+            name ===
+            "RWAERC20LaunchpadFactory"
+          ) {
+            return (
+              `• ${escapeHtml(name)}: <b>${
+                rwaActive
+                  ? "EXACT LIVE DETECTOR ACTIVE"
+                  : "SUPPORTED — EXACT LIVE DETECTOR NOT ACTIVE"
+              }</b>${
+                count > 0
+                  ? ` — ${fmt(count)} launch${count === 1 ? "" : "es"} / 24h`
+                  : ""
+              }`
+            );
+          }
+
+          return `• ${escapeHtml(name)}: <b>${status}</b>`;
+        })
+      : [
+          "• DATA UNVERIFIED"
+        ];
+
+  return [
+    `🛰 <b>Launch Source Coverage — ${escapeHtml(VERSION)}</b>`,
+    "",
+    `<b>Bot-supported verified source labels:</b> ${fmt(supported.length)}`,
+    `<b>Observed active in rolling 24h:</b> ${fmt(active.length)}`,
+    `<b>Verified launches observed in rolling 24h:</b> ${fmt(meter?.rolling24hUniqueVerifiedLaunches)}</b>`,
+    `Meter status: <b>${escapeHtml(meterAgeStatus)}</b>`,
+    "",
+    "<b>Active verified sources — rolling 24h</b>",
+    ...activeLines,
+    "",
+    "<b>Supported source status</b>",
+    ...supportedLines,
+    "",
+    "<b>Discovery attribution coverage</b>",
+    `Returned current/live candidates with verified source: <b>${fmt(verifiedReturned)} / ${fmt(totalReturned)} (${escapeHtml(sourceCoverage)})</b>`,
+    `<i>This percentage is candidate source-attribution coverage, not chain-wide launchpad coverage.</i>`,
+    "",
+    `RWA recurring deployment mechanism: <b>${rwaActive ? "CONFIRMED + LIVE DETECTOR ACTIVE" : "DATA UNVERIFIED / NOT ACTIVE"}</b>`,
+    "Probable/unconfirmed launch mechanisms: <b>DATA UNVERIFIED</b>",
+    "Chain-wide launchpad total: <b>DATA UNVERIFIED</b>",
+    "",
+    "<i>/launchsources is read-only: 0 provider requests and 0 persistent state writes.</i>"
+  ].join("\\n");
+}
+
 function telegramHelpV271() {
   return [
     "🤖 <b>Robinhood Meme Hunter Commands</b>",
@@ -99433,6 +99631,7 @@ function telegramHelpV271() {
     "<code>/live GUS</code> — V414 lower-timeframe rolling signals + breakout state (read-only)",
     "<code>/v3usd 0xADDRESS</code> — persisted native V3 USD flow (read-only)",
     "<code>/launches</code> — verified rolling 24h launch meter",
+    "<code>/launchsources</code> — verified launch-source coverage + active sources",
     "<code>/launchcoverage</code> — launch discovery-to-Telegram coverage funnel",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
@@ -99730,6 +99929,71 @@ async function telegramCommandReplyV271(
   let reply;
 
   if (
+    parsed.command ===
+      "/launchsources" ||
+    parsed.command ===
+      "/sources"
+  ) {
+    reply =
+      launchSourcesTelegramMessageV499(
+        state
+      );
+
+    if (diagnosticV273) {
+      const meterV499 =
+        verifiedLaunchMeterSnapshotV470(
+          state
+        );
+
+      const coverageV499 =
+        state?.launchCoverageCumulativeV474 ||
+        {};
+
+      diagnosticV273.launchSourcesV499 = {
+        scannerBudgetConsumed:
+          false,
+        externalProviderRequests:
+          0,
+        stateWrites:
+          0,
+        supportedVerifiedSourceLabels:
+          Array.isArray(
+            meterV499?.supportedVerifiedSources
+          )
+            ? meterV499.supportedVerifiedSources.length
+            : 0,
+        activeRolling24hSources:
+          Object.values(
+            meterV499?.rolling24hByProtocol ||
+            {}
+          ).filter(
+            count =>
+              safeNumber(count) > 0
+          ).length,
+        rolling24hVerifiedLaunches:
+          safeNumber(
+            meterV499?.rolling24hUniqueVerifiedLaunches
+          ),
+        returnedCurrentLiveCandidates:
+          safeNumber(
+            coverageV499?.currentLiveReturnedCandidates
+          ),
+        returnedWithVerifiedSource:
+          safeNumber(
+            coverageV499?.returnedCurrentLiveWithVerifiedLaunchSource
+          ),
+        rwaExactLiveDetectorActive:
+          state?.rwaExactLiveDetectorV495
+            ?.liveDetectorActive === true &&
+          Boolean(
+            state?.rwaExactLiveDetectorV495
+              ?.activePattern
+          ),
+        chainWideLaunchpadTotal:
+          "DATA UNVERIFIED"
+      };
+    }
+  } else if (
     parsed.command ===
       "/launchcoverage" ||
     parsed.command ===
