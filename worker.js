@@ -1,6 +1,29 @@
 /**
- * Robinhood Chain Meme Hunter — V508
- * AUTHORITATIVE RUNTIME VERSION: V508
+ * Robinhood Chain Meme Hunter — V509
+ * AUTHORITATIVE RUNTIME VERSION: V509
+ *
+ * V509 DIRECT PONS V2 CREATION-RECEIPT PROOF:
+ * - replaces V508's unavailable historical-overlap dependency with direct proof;
+ * - selects verified V480 token origins created by the Blockscout-verified
+ *   PonsV2LaunchDeployer recurring creator;
+ * - fetches at most ONE known token creation transaction receipt per eligible scan;
+ * - uses existing V498 receipt provider routing:
+ *     CHAINSTACK -> ALCHEMY -> ROBINHOOD_PUBLIC_RPC;
+ * - requires the SAME creation transaction receipt to contain a strictly decoded
+ *   canonical Pons V2 TokenLaunched event for the SAME token;
+ * - strict proof therefore binds:
+ *     verified token creator -> exact creation transaction -> canonical Pons V2
+ *     factory -> exact TokenLaunched ABI decode -> same token;
+ * - requires >=2 distinct tokens / creation transactions before confirming the
+ *   creator-level Pons V2 deployer linkage;
+ * - transient receipt failures remain retryable and cannot burn proof candidates;
+ * - once confirmed, verified V480 origins from that exact creator may receive
+ *   Pons V2 source attribution; launch time/block/tx remain UNVERIFIED unless
+ *   directly present in exact evidence;
+ * - no new launchpad is invented: this links the creator to existing Pons V2;
+ * - one secondary diagnostic request maximum per scan and hard global limit 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, verified-USD,
+ *   dense-pool completion, RWA detector, launch-meter, or discovery-cadence changes.
  *
  * V508 EXACT PONS V2 DEPLOYER LINKAGE:
  * - closes the large recurring-creator cluster without trusting a contract name alone;
@@ -2452,7 +2475,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V508";
+const VERSION = "V509";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9905,6 +9928,24 @@ function newState() {
       lastVerifiedToken: null,
       lastProtocol: null,
       recentVerifiedLaunches: []
+    },
+
+    ponsV2CreationReceiptProofV509: {
+      enabled: true,
+      measurementOnlyUntilProof: true,
+      monitorStartedAt: null,
+      scansObserved: 0,
+      receiptRequestsAttempted: 0,
+      receiptRequestsSucceeded: 0,
+      processedReceipts: {},
+      proofs: {},
+      confirmedCreator: null,
+      confirmedAt: null,
+      lastSelectedToken: null,
+      lastSelectedTransactionHash: null,
+      lastProvider: null,
+      lastHttpStatus: null,
+      lastStatus: "NOT_EVALUATED_YET_V509"
     },
 
     ponsV2DeployerLinkageV508: {
@@ -31047,6 +31088,7 @@ function verifiedLaunchSourceIdentityV476(
   const launchpads = [
     watched?.launchpadV495,
     watched?.launchpadV476,
+    watched?.launchpadV509,
     watched?.launchpadV508,
     watched?.launchpadV210,
     watched?.launchpadV214,
@@ -70466,6 +70508,19 @@ for (
     );
 
   /*
+   * V509 finalization is zero-request. If the second exact receipt proof arrived
+   * in this scan, apply verified creator-level Pons V2 attribution immediately.
+   */
+  finalizePonsV2CreationReceiptProofV509(
+    state
+  );
+
+  const ponsV2CreationReceiptProofThisScanV509 =
+    ponsV2CreationReceiptProofSnapshotV509(
+      state
+    );
+
+  /*
    * =======================================================
    * V170 POST-ANALYSIS RESIDUAL BACKLOG CATCH-UP
    * =======================================================
@@ -71678,6 +71733,13 @@ for (
         state
       ),
 
+    ponsV2CreationReceiptProofThisScanV509,
+
+    ponsV2CreationReceiptProofV509:
+      ponsV2CreationReceiptProofSnapshotV509(
+        state
+      ),
+
     tokenOriginTraceThisScanV477,
 
     tokenOriginTraceV477:
@@ -71924,7 +71986,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V508_V507_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V509_V508_V507_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71948,6 +72010,59 @@ for (
       telegramThresholdChanged:
         false,
       launchSourcePromotion:
+        false
+    },
+
+    directPonsV2CreationReceiptProofV509: {
+      enabled: true,
+      objective:
+        "PROVE_PONSV2LAUNCHDEPLOYER_LINKAGE_DIRECTLY_FROM_KNOWN_TOKEN_CREATION_RECEIPTS",
+      minimumDistinctProofTokens:
+        2,
+      minimumDistinctProofTransactions:
+        2,
+      requiresVerifiedV480CreatorOrigin:
+        true,
+      requiresBlockscoutVerifiedCreatorContractName:
+        "PonsV2LaunchDeployer",
+      requiresSameCreationTransaction:
+        true,
+      requiresCanonicalPonsV2Factory:
+        PONS_V2_FACTORY_V215,
+      requiresExactTokenLaunchedTopic:
+        PONS_V2_TOKEN_LAUNCHED_TOPIC_V215,
+      requiresStrictV476AbiDecode:
+        true,
+      requiresDecodedTokenEqualsVerifiedOriginToken:
+        true,
+      receiptProviderOrder: [
+        "CHAINSTACK",
+        "ALCHEMY",
+        "ROBINHOOD_PUBLIC_RPC"
+      ],
+      sameScanProviderFallback:
+        false,
+      transientFailuresRetryable:
+        true,
+      sourceAttributionOnlyAfterProof:
+        true,
+      launchTimingInferred:
+        false,
+      newLaunchpadCreated:
+        false,
+      maxSecondaryDiagnosticRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false,
+      rwaDetectorChanged:
         false
     },
 
@@ -84909,6 +85024,1073 @@ function ensureLaunchCoverageCumulativeV474(state) {
 
 
 
+
+function ensurePonsV2CreationReceiptProofV509(
+  state
+) {
+  state.ponsV2CreationReceiptProofV509 =
+    state?.ponsV2CreationReceiptProofV509 &&
+    typeof state.ponsV2CreationReceiptProofV509 === "object"
+      ? state.ponsV2CreationReceiptProofV509
+      : {
+          enabled: true,
+          measurementOnlyUntilProof: true,
+          monitorStartedAt: Date.now(),
+          scansObserved: 0,
+          receiptRequestsAttempted: 0,
+          receiptRequestsSucceeded: 0,
+          processedReceipts: {},
+          proofs: {},
+          confirmedCreator: null,
+          confirmedAt: null,
+          lastSelectedToken: null,
+          lastSelectedTransactionHash: null,
+          lastProvider: null,
+          lastHttpStatus: null,
+          lastStatus: "NOT_EVALUATED_YET_V509"
+        };
+
+  const root =
+    state.ponsV2CreationReceiptProofV509;
+
+  if (!safeNumber(root.monitorStartedAt)) {
+    root.monitorStartedAt = Date.now();
+  }
+
+  root.processedReceipts =
+    root.processedReceipts &&
+    typeof root.processedReceipts === "object"
+      ? root.processedReceipts
+      : {};
+
+  root.proofs =
+    root.proofs &&
+    typeof root.proofs === "object"
+      ? root.proofs
+      : {};
+
+  return root;
+}
+
+function ponsV2LaunchDeployerCreatorV509(
+  state
+) {
+  const profiles =
+    state?.recurringCreatorAttributionV503
+      ?.creatorProfiles &&
+    typeof state.recurringCreatorAttributionV503
+      .creatorProfiles === "object"
+      ? state.recurringCreatorAttributionV503.creatorProfiles
+      : {};
+
+  const matches =
+    Object.entries(profiles)
+      .map(([address, profile]) => ({
+        address: normalize(address),
+        profile
+      }))
+      .filter(row =>
+        isAddress(row.address) &&
+        row?.profile?.isContract === true &&
+        row?.profile?.blockscoutVerifiedContract === true &&
+        String(
+          row?.profile?.contractName || ""
+        ).trim() === "PonsV2LaunchDeployer"
+      );
+
+  if (matches.length !== 1) {
+    return null;
+  }
+
+  return matches[0].address;
+}
+
+function receiptProofRetryableV509(
+  row
+) {
+  return (
+    row?.retryEligible === true ||
+    row?.processedOnce !== true
+  );
+}
+
+function selectPonsV2CreationReceiptCandidateV509(
+  state
+) {
+  const root =
+    ensurePonsV2CreationReceiptProofV509(
+      state
+    );
+
+  if (
+    isAddress(
+      normalize(root.confirmedCreator)
+    )
+  ) {
+    return null;
+  }
+
+  const creator =
+    ponsV2LaunchDeployerCreatorV509(
+      state
+    );
+
+  if (!isAddress(creator)) {
+    return null;
+  }
+
+  const origin =
+    pruneTokenOriginTraceV477(
+      state
+    );
+
+  const rows =
+    Object.entries(
+      origin?.tokenOrigins || {}
+    )
+      .map(([token, row]) => ({
+        token:
+          normalize(token),
+        row
+      }))
+      .filter(item => {
+        const token =
+          item.token;
+
+        const row =
+          item.row;
+
+        const tx =
+          normalizeTxHashV495(
+            row?.creationTransactionHash
+          );
+
+        if (
+          !isAddress(token) ||
+          row?.verified !== true ||
+          normalize(
+            row?.contractCreator
+          ) !== creator ||
+          !tx
+        ) {
+          return false;
+        }
+
+        const processed =
+          root.processedReceipts?.[tx];
+
+        return (
+          !processed ||
+          receiptProofRetryableV509(
+            processed
+          )
+        );
+      })
+      .sort(
+        (a, b) =>
+          safeNumber(
+            a?.row?.verifiedAt
+          ) -
+          safeNumber(
+            b?.row?.verifiedAt
+          )
+      );
+
+  const selected =
+    rows[0];
+
+  if (!selected) {
+    return null;
+  }
+
+  return {
+    token:
+      selected.token,
+    creator,
+    transactionHash:
+      normalizeTxHashV495(
+        selected?.row
+          ?.creationTransactionHash
+      ),
+    originVerifiedAt:
+      safeNumber(
+        selected?.row?.verifiedAt
+      ) || null,
+    originSource:
+      selected?.row?.source ||
+      "BLOCKSCOUT_PRO_V2_ADDRESS_INFO_V480"
+  };
+}
+
+function findExactPonsV2LaunchInReceiptV509({
+  receipt,
+  token,
+  transactionHash
+}) {
+  const cleanToken =
+    normalize(token);
+
+  const tx =
+    normalizeTxHashV495(
+      transactionHash
+    );
+
+  const logs =
+    Array.isArray(
+      receipt?.logs
+    )
+      ? receipt.logs
+      : [];
+
+  const exactMatches = [];
+
+  for (const log of logs) {
+    if (
+      normalize(log?.address) !==
+      PONS_V2_FACTORY_V215
+    ) {
+      continue;
+    }
+
+    const topics =
+      Array.isArray(log?.topics)
+        ? log.topics.map(normalize)
+        : [];
+
+    if (
+      topics[0] !==
+      PONS_V2_TOKEN_LAUNCHED_TOPIC_V215
+    ) {
+      continue;
+    }
+
+    const decoded =
+      decodeDirectOnChainLaunchV476(
+        log
+      );
+
+    if (
+      !decoded ||
+      decoded?.decodeVerified !== true ||
+      decoded?.protocolKey !==
+        "pons_v2" ||
+      normalize(decoded?.factory) !==
+        PONS_V2_FACTORY_V215 ||
+      normalize(decoded?.token) !==
+        cleanToken
+    ) {
+      continue;
+    }
+
+    const logTx =
+      normalizeTxHashV495(
+        decoded?.transactionHash ||
+        log?.transactionHash
+      );
+
+    /*
+     * Receipt logs can omit transactionHash in some RPC implementations.
+     * If present it must exactly match; otherwise the enclosing receipt itself
+     * already binds this log to the requested transaction hash.
+     */
+    if (
+      logTx &&
+      tx &&
+      logTx !== tx
+    ) {
+      continue;
+    }
+
+    exactMatches.push({
+      token:
+        cleanToken,
+      creator:
+        null,
+      factory:
+        PONS_V2_FACTORY_V215,
+      event:
+        "TokenLaunched",
+      protocol:
+        "Pons V2",
+      protocolKey:
+        "pons_v2",
+      transactionHash:
+        tx,
+      blockNumber:
+        safeNumber(
+          decoded?.blockNumber
+        ) || null,
+      curve:
+        normalize(
+          decoded?.curve
+        ) || null,
+      eventDeployer:
+        normalize(
+          decoded?.deployer
+        ) || null,
+      pairToken:
+        normalize(
+          decoded?.pairToken
+        ) || null,
+      verification:
+        decoded?.verification ||
+        "EXACT_FACTORY_TOPIC_AND_ABI_DECODE_PONS_V2_V476",
+      source:
+        "CREATION_TRANSACTION_RECEIPT_EXACT_PONS_V2_TOKENLAUNCHED_V509"
+    });
+  }
+
+  return {
+    exactMatches,
+    exactMatchCount:
+      exactMatches.length,
+    unambiguous:
+      exactMatches.length === 1
+  };
+}
+
+function applyConfirmedPonsV2CreatorAttributionV509(
+  state
+) {
+  const root =
+    ensurePonsV2CreationReceiptProofV509(
+      state
+    );
+
+  const creator =
+    normalize(
+      root.confirmedCreator
+    );
+
+  if (!isAddress(creator)) {
+    return 0;
+  }
+
+  const origin =
+    pruneTokenOriginTraceV477(
+      state
+    );
+
+  let attributed = 0;
+
+  for (
+    const [tokenKey, row]
+    of Object.entries(
+      origin?.tokenOrigins || {}
+    )
+  ) {
+    const token =
+      normalize(tokenKey);
+
+    if (
+      !isAddress(token) ||
+      row?.verified !== true ||
+      normalize(
+        row?.contractCreator
+      ) !== creator
+    ) {
+      continue;
+    }
+
+    const watched =
+      findWatched(
+        state,
+        token
+      );
+
+    if (!watched) {
+      continue;
+    }
+
+    const tx =
+      normalizeTxHashV495(
+        row?.creationTransactionHash
+      );
+
+    const directProof =
+      tx
+        ? root.proofs?.[tx] || null
+        : null;
+
+    watched.launchpadV509 = {
+      verified: true,
+      protocol:
+        "Pons V2",
+      protocolKey:
+        "pons_v2",
+      factory:
+        PONS_V2_FACTORY_V215,
+      event:
+        "TokenLaunched",
+      launchBlock:
+        safeNumber(
+          directProof?.blockNumber
+        ) || null,
+      launchTime:
+        null,
+      transactionHash:
+        directProof?.transactionHash ||
+        tx ||
+        null,
+      creator:
+        creator,
+      source:
+        directProof
+          ? "EXACT_CREATION_RECEIPT_PONS_V2_LINKAGE_V509"
+          : "VERIFIED_ORIGIN_TO_CONFIRMED_PONS_V2_LAUNCH_DEPLOYER_V509",
+      verification:
+        directProof
+          ? "V480_CREATOR_PLUS_SAME_CREATION_TX_EXACT_PONS_V2_TOKENLAUNCHED_RECEIPT_V509"
+          : "VERIFIED_V480_CREATOR_TO_TWO_RECEIPT_CONFIRMED_PONS_V2_LAUNCH_DEPLOYER_V509",
+      sourceAttributionVerified:
+        true,
+      timestampVerified:
+        false,
+      launchTimingInferred:
+        false,
+      proofTransactionCount:
+        Object.keys(
+          root.proofs || {}
+        ).length
+    };
+
+    attributed++;
+  }
+
+  return attributed;
+}
+
+function finalizePonsV2CreationReceiptProofV509(
+  state
+) {
+  const root =
+    ensurePonsV2CreationReceiptProofV509(
+      state
+    );
+
+  const proofs =
+    Object.values(
+      root.proofs || {}
+    )
+      .filter(row =>
+        row?.exactPonsV2Launch === true &&
+        isAddress(
+          normalize(row?.token)
+        ) &&
+        isAddress(
+          normalize(row?.creator)
+        ) &&
+        normalize(row?.factory) ===
+          PONS_V2_FACTORY_V215
+      );
+
+  const byCreator =
+    new Map();
+
+  for (const proof of proofs) {
+    const creator =
+      normalize(proof.creator);
+
+    const cluster =
+      byCreator.get(creator) || {
+        creator,
+        tokens: new Set(),
+        transactions: new Set()
+      };
+
+    cluster.tokens.add(
+      normalize(proof.token)
+    );
+
+    const tx =
+      normalizeTxHashV495(
+        proof.transactionHash
+      );
+
+    if (tx) {
+      cluster.transactions.add(tx);
+    }
+
+    byCreator.set(
+      creator,
+      cluster
+    );
+  }
+
+  const confirmed =
+    Array.from(
+      byCreator.values()
+    )
+      .filter(row =>
+        row.tokens.size >= 2 &&
+        row.transactions.size >= 2
+      )
+      .sort(
+        (a, b) =>
+          b.tokens.size -
+          a.tokens.size
+      )[0] || null;
+
+  if (confirmed) {
+    root.confirmedCreator =
+      confirmed.creator;
+
+    root.confirmedAt =
+      safeNumber(
+        root.confirmedAt
+      ) ||
+      Date.now();
+
+    root.lastStatus =
+      "V509_TWO_INDEPENDENT_CREATION_RECEIPTS_CONFIRM_PONS_V2_DEPLOYER_LINKAGE";
+
+    applyConfirmedPonsV2CreatorAttributionV509(
+      state
+    );
+  }
+
+  return confirmed;
+}
+
+async function runPonsV2CreationReceiptProofV509({
+  env,
+  state,
+  budget,
+  candidate
+}) {
+  const root =
+    ensurePonsV2CreationReceiptProofV509(
+      state
+    );
+
+  root.scansObserved =
+    safeNumber(
+      root.scansObserved
+    ) + 1;
+
+  const telemetry = {
+    enabled: true,
+    measurementOnlyUntilProof:
+      true,
+    attempted: false,
+    requestConsumed: false,
+    selectedToken:
+      candidate?.token || null,
+    selectedCreator:
+      candidate?.creator || null,
+    selectedTransactionHash:
+      candidate?.transactionHash || null,
+    provider: null,
+    httpStatus: null,
+    receiptStatus: null,
+    exactPonsV2LaunchMatchCount: 0,
+    exactPonsV2LaunchMatch: null,
+    proofStored: false,
+    processedAfterAttempt: false,
+    confirmedCreatorAfterAttempt:
+      root.confirmedCreator || null,
+    attributedVerifiedOriginsAfterConfirmation:
+      0,
+    method:
+      "eth_getTransactionReceipt",
+    providerOrder: [
+      "CHAINSTACK",
+      "ALCHEMY",
+      "ROBINHOOD_PUBLIC_RPC"
+    ],
+    sameScanFallback:
+      false,
+    maxRequestsThisScan:
+      1,
+    hardRequestLimit:
+      42,
+    status: null
+  };
+
+  if (!candidate) {
+    telemetry.status =
+      root.confirmedCreator
+        ? "V509_PONS_V2_DEPLOYER_LINKAGE_ALREADY_CONFIRMED"
+        : "V509_NO_ELIGIBLE_CREATION_RECEIPT_CANDIDATE";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const token =
+    normalize(
+      candidate.token
+    );
+
+  const creator =
+    normalize(
+      candidate.creator
+    );
+
+  const tx =
+    normalizeTxHashV495(
+      candidate.transactionHash
+    );
+
+  root.lastSelectedToken =
+    token;
+  root.lastSelectedTransactionHash =
+    tx;
+
+  if (
+    !isAddress(token) ||
+    !isAddress(creator) ||
+    !tx
+  ) {
+    telemetry.status =
+      "V509_INVALID_CREATION_RECEIPT_CANDIDATE";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const spare =
+    consumeReleasedGlobalSpareV478(
+      budget,
+      "PONS_V2_CREATION_RECEIPT_PROOF_V509",
+      1
+    );
+
+  if (spare?.ok !== true) {
+    telemetry.status =
+      `V509_BUDGET_UNAVAILABLE:${spare?.reason || "UNKNOWN"}`;
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const selectedProvider =
+    selectReceiptRpcProviderV496(
+      env,
+      state
+    );
+
+  telemetry.providerDecisions =
+    selectedProvider?.decisions || [];
+
+  if (
+    !selectedProvider?.provider ||
+    !selectedProvider?.url
+  ) {
+    telemetry.status =
+      "V509_NO_HEALTHY_RECEIPT_RPC_PROVIDER";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  telemetry.provider =
+    selectedProvider.provider;
+  root.lastProvider =
+    selectedProvider.provider;
+
+  telemetry.attempted = true;
+  telemetry.requestConsumed = true;
+
+  root.receiptRequestsAttempted =
+    safeNumber(
+      root.receiptRequestsAttempted
+    ) + 1;
+
+  const attemptedAt =
+    Date.now();
+
+  const controller =
+    new AbortController();
+
+  const timer =
+    setTimeout(
+      () => controller.abort(),
+      6000
+    );
+
+  try {
+    const response =
+      await fetch(
+        selectedProvider.url,
+        {
+          method:
+            "POST",
+          headers: {
+            "content-type":
+              "application/json"
+          },
+          body:
+            JSON.stringify({
+              jsonrpc:
+                "2.0",
+              id:
+                509,
+              method:
+                "eth_getTransactionReceipt",
+              params: [
+                tx
+              ]
+            }),
+          signal:
+            controller.signal
+        }
+      );
+
+    telemetry.httpStatus =
+      response.status;
+
+    root.lastHttpStatus =
+      response.status;
+
+    if (!response.ok) {
+      if (
+        response.status === 429
+      ) {
+        markDiscovery429(
+          state,
+          selectedProvider.provider
+        );
+      }
+
+      const transient =
+        isTransientReceiptHttpStatusV496(
+          response.status
+        );
+
+      root.processedReceipts[tx] = {
+        token,
+        creator,
+        transactionHash:
+          tx,
+        attemptedAt,
+        provider:
+          selectedProvider.provider,
+        httpStatus:
+          response.status,
+        processedOnce:
+          !transient,
+        retryEligible:
+          transient,
+        status:
+          transient
+            ? `V509_TRANSIENT_HTTP_${response.status}_RETRY_PRESERVED`
+            : `V509_FINAL_HTTP_${response.status}`
+      };
+
+      telemetry.processedAfterAttempt =
+        !transient;
+
+      telemetry.status =
+        root.processedReceipts[
+          tx
+        ].status;
+
+      root.lastStatus =
+        telemetry.status;
+
+      return telemetry;
+    }
+
+    const body =
+      await response.json();
+
+    const receipt =
+      body?.result &&
+      typeof body.result === "object"
+        ? body.result
+        : null;
+
+    if (!receipt) {
+      root.processedReceipts[tx] = {
+        token,
+        creator,
+        transactionHash:
+          tx,
+        attemptedAt,
+        provider:
+          selectedProvider.provider,
+        httpStatus:
+          response.status,
+        processedOnce:
+          false,
+        retryEligible:
+          true,
+        status:
+          "V509_HTTP_200_RECEIPT_UNAVAILABLE_RETRY_PRESERVED"
+      };
+
+      telemetry.status =
+        root.processedReceipts[
+          tx
+        ].status;
+
+      root.lastStatus =
+        telemetry.status;
+
+      return telemetry;
+    }
+
+    root.receiptRequestsSucceeded =
+      safeNumber(
+        root.receiptRequestsSucceeded
+      ) + 1;
+
+    telemetry.receiptStatus =
+      receipt?.status || null;
+
+    const found =
+      findExactPonsV2LaunchInReceiptV509({
+        receipt,
+        token,
+        transactionHash:
+          tx
+      });
+
+    telemetry.exactPonsV2LaunchMatchCount =
+      found.exactMatchCount;
+
+    if (
+      found.unambiguous === true
+    ) {
+      const exact =
+        found.exactMatches[0];
+
+      const proof = {
+        ...exact,
+        creator,
+        originSource:
+          candidate?.originSource ||
+          "BLOCKSCOUT_PRO_V2_ADDRESS_INFO_V480",
+        originVerifiedAt:
+          candidate?.originVerifiedAt ||
+          null,
+        exactPonsV2Launch:
+          true,
+        observedAt:
+          attemptedAt,
+        provider:
+          `${selectedProvider.provider}_TRANSACTION_RECEIPT_V509`,
+        evidenceStandard:
+          "V480_VERIFIED_CREATOR_AND_EXACT_CREATION_TX_CONTAINS_CANONICAL_PONS_V2_TOKENLAUNCHED_FOR_SAME_TOKEN_V509"
+      };
+
+      root.proofs[tx] =
+        proof;
+
+      telemetry.exactPonsV2LaunchMatch =
+        proof;
+
+      telemetry.proofStored =
+        true;
+    }
+
+    root.processedReceipts[tx] = {
+      token,
+      creator,
+      transactionHash:
+        tx,
+      attemptedAt,
+      provider:
+        selectedProvider.provider,
+      httpStatus:
+        response.status,
+      receiptStatus:
+        receipt?.status || null,
+      exactPonsV2LaunchMatchCount:
+        found.exactMatchCount,
+      exactPonsV2Launch:
+        found.unambiguous === true,
+      processedOnce:
+        true,
+      retryEligible:
+        false,
+      status:
+        found.unambiguous === true
+          ? "V509_EXACT_PONS_V2_CREATION_RECEIPT_PROOF_STORED"
+          : found.exactMatchCount > 1
+            ? "V509_AMBIGUOUS_MULTIPLE_EXACT_PONS_V2_EVENTS"
+            : "V509_NO_EXACT_PONS_V2_TOKENLAUNCHED_IN_CREATION_RECEIPT"
+    };
+
+    telemetry.processedAfterAttempt =
+      true;
+
+    const confirmed =
+      finalizePonsV2CreationReceiptProofV509(
+        state
+      );
+
+    telemetry.confirmedCreatorAfterAttempt =
+      confirmed?.creator ||
+      root.confirmedCreator ||
+      null;
+
+    if (root.confirmedCreator) {
+      telemetry.attributedVerifiedOriginsAfterConfirmation =
+        applyConfirmedPonsV2CreatorAttributionV509(
+          state
+        );
+    }
+
+    telemetry.status =
+      root.confirmedCreator
+        ? "V509_TWO_INDEPENDENT_CREATION_RECEIPTS_CONFIRM_PONS_V2_DEPLOYER_LINKAGE"
+        : root.processedReceipts[
+            tx
+          ].status;
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  } catch (error) {
+    telemetry.status =
+      `V509_RECEIPT_FETCH_ERROR_RETRY_PRESERVED:${errorString(error)}`;
+
+    telemetry.processedAfterAttempt =
+      false;
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function ponsV2CreationReceiptProofSnapshotV509(
+  state
+) {
+  const root =
+    ensurePonsV2CreationReceiptProofV509(
+      state
+    );
+
+  const proofs =
+    Object.values(
+      root.proofs || {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.observedAt
+          ) -
+          safeNumber(
+            a?.observedAt
+          )
+      );
+
+  const processed =
+    Object.values(
+      root.processedReceipts || {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.attemptedAt
+          ) -
+          safeNumber(
+            a?.attemptedAt
+          )
+      );
+
+  return {
+    enabled: true,
+    measurementOnlyUntilProof:
+      true,
+    monitorStartedAt:
+      safeNumber(
+        root.monitorStartedAt
+      ) || null,
+    scansObserved:
+      safeNumber(
+        root.scansObserved
+      ),
+    receiptRequestsAttempted:
+      safeNumber(
+        root.receiptRequestsAttempted
+      ),
+    receiptRequestsSucceeded:
+      safeNumber(
+        root.receiptRequestsSucceeded
+      ),
+    retainedProofCount:
+      proofs.length,
+    distinctProofTokens:
+      Array.from(
+        new Set(
+          proofs
+            .map(row =>
+              normalize(row?.token)
+            )
+            .filter(isAddress)
+        )
+      ).length,
+    distinctProofTransactions:
+      Array.from(
+        new Set(
+          proofs
+            .map(row =>
+              normalizeTxHashV495(
+                row?.transactionHash
+              )
+            )
+            .filter(Boolean)
+        )
+      ).length,
+    confirmedCreator:
+      root.confirmedCreator ||
+      null,
+    confirmedAt:
+      safeNumber(
+        root.confirmedAt
+      ) || null,
+    recentProofs:
+      proofs.slice(0, 10),
+    recentProcessedReceipts:
+      processed.slice(0, 10),
+    lastSelectedToken:
+      root.lastSelectedToken ||
+      null,
+    lastSelectedTransactionHash:
+      root.lastSelectedTransactionHash ||
+      null,
+    lastProvider:
+      root.lastProvider ||
+      null,
+    lastHttpStatus:
+      root.lastHttpStatus ??
+      null,
+    lastStatus:
+      root.lastStatus ||
+      null,
+    proofThreshold:
+      "2_DISTINCT_TOKENS_AND_2_DISTINCT_CREATION_TRANSACTIONS",
+    exactReceiptRequirement:
+      "CANONICAL_PONS_V2_FACTORY_TOKENLAUNCHED_STRICT_V476_DECODE_FOR_SAME_TOKEN_IN_VERIFIED_CREATION_TX",
+    externalRequestsPerEligibleScanMax:
+      1,
+    sameScanFallback:
+      false,
+    hardGlobalLimitUnchanged:
+      42,
+    sourcePromotionWithoutProof:
+      false,
+    newLaunchpadCreated:
+      false
+  };
+}
+
 function ensurePonsV2DeployerLinkageV508(
   state
 ) {
@@ -88484,6 +89666,103 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
       ).activePattern
         ? "V495_LIVE_EVENT_PATTERN_ALREADY_ACTIVE"
         : "V495_NO_UNPROCESSED_EXACT_CREATION_RECEIPT"
+  };
+
+  /*
+   * V509 DIRECT PONS V2 CREATION-RECEIPT PROOF:
+   * Exact source-proof work outranks lower-evidence historical fingerprinting.
+   * One verified creation receipt per eligible scan maximum.
+   */
+  const ponsReceiptCandidateV509 =
+    selectPonsV2CreationReceiptCandidateV509(
+      state
+    );
+
+  if (ponsReceiptCandidateV509) {
+    const ponsReceiptV509 =
+      await runPonsV2CreationReceiptProofV509({
+        env,
+        state,
+        budget,
+        candidate:
+          ponsReceiptCandidateV509
+      });
+
+    telemetry.ponsV2CreationReceiptProofV509 =
+      ponsReceiptV509;
+
+    telemetry.selectedFromPersistedVerifiedOrigins =
+      true;
+    telemetry.selectedToken =
+      ponsReceiptV509?.selectedToken ||
+      null;
+    telemetry.selectedCreator =
+      ponsReceiptV509?.selectedCreator ||
+      null;
+    telemetry.selectedCreationTransactionHash =
+      ponsReceiptV509
+        ?.selectedTransactionHash ||
+      null;
+    telemetry.attempted =
+      ponsReceiptV509?.attempted ===
+      true;
+    telemetry.requestConsumed =
+      ponsReceiptV509
+        ?.requestConsumed === true;
+    telemetry.processedAfterAttempt =
+      ponsReceiptV509
+        ?.processedAfterAttempt ===
+      true;
+    telemetry.status =
+      ponsReceiptV509?.status ||
+      "V509_STATUS_UNAVAILABLE";
+
+    if (
+      ponsReceiptV509?.attempted === true &&
+      v483DeferredForFairnessV487
+    ) {
+      telemetry.fairnessV487
+        .fairnessGrantThisScan =
+          true;
+
+      fairness.fairnessGrants =
+        safeNumber(
+          fairness.fairnessGrants
+        ) + 1;
+
+      fairness.lastFairnessGrantAt =
+        Date.now();
+
+      fairness.lastFairnessGrantToken =
+        telemetry.selectedToken ||
+        null;
+
+      fairness.consecutiveV483BlocksOfV486 =
+        0;
+
+      fairness.lastDecision =
+        "V509_FAIRNESS_GRANTED_TO_EXACT_PONS_V2_CREATION_RECEIPT_PROOF";
+
+      fairness.lastDecisionAt =
+        Date.now();
+    }
+
+    root.lastStatus =
+      `V486_ROUTED_TO_V509:${telemetry.status}`;
+
+    return telemetry;
+  }
+
+  telemetry.ponsV2CreationReceiptProofV509 = {
+    enabled: true,
+    measurementOnlyUntilProof: true,
+    attempted: false,
+    status:
+      ensurePonsV2CreationReceiptProofV509(
+        state
+      ).confirmedCreator
+        ? "V509_PONS_V2_DEPLOYER_LINKAGE_ALREADY_CONFIRMED"
+        : "V509_NO_ELIGIBLE_CREATION_RECEIPT_CANDIDATE"
   };
 
   /*
