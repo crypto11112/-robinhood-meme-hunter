@@ -1,6 +1,24 @@
 /**
- * Robinhood Chain Meme Hunter — V479
- * AUTHORITATIVE RUNTIME VERSION: V479
+ * Robinhood Chain Meme Hunter — V480
+ * AUTHORITATIVE RUNTIME VERSION: V480
+ *
+ * V480 AUTHENTICATED BLOCKSCOUT PRO ORIGIN TRACE:
+ * - fixes V479 public Blockscout V2 HTTP 403 by reusing the bot's existing,
+ *   already-proven authenticated multichain Blockscout PRO REST configuration;
+ * - origin endpoint:
+ *     https://api.blockscout.com/4663/api/v2/addresses/{address}?apikey=...
+ * - uses existing env.BLOCKSCOUT_PRO_API_KEY only; the key is never logged;
+ * - if PRO is not configured, origin trace returns a precise NOT_CONFIGURED
+ *   status and consumes no network request;
+ * - keeps V479 one-address-per-request behaviour and V478 post-Telegram spare
+ *   budget fallback;
+ * - maximum ONE origin request per scan, hard global ceiling remains 42;
+ * - validates returned address, creator_address_hash, creation_transaction_hash,
+ *   contract status and successful creation status before origin is VERIFIED;
+ * - creator/factory/launchpad identity remains DATA UNVERIFIED until exact
+ *   mechanism proof; recurring creator clustering remains measurement-only;
+ * - V476 direct Pons launch detection, V474 coverage funnel, V469 priority,
+ *   scoring, Momentum, qualification and Telegram thresholds unchanged.
  *
  * V479 BLOCKSCOUT V2 ORIGIN-PROVENANCE ROUTE FIX:
  * - replaces the rejected legacy Etherscan-compatible getcontractcreation
@@ -1814,7 +1832,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V479";
+const VERSION = "V480";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -69710,6 +69728,15 @@ for (
       liveTokens
     });
 
+  ensureTokenOriginTraceV477(state)
+    .blockscoutProConfiguredV480 =
+      Boolean(
+        String(
+          env?.BLOCKSCOUT_PRO_API_KEY ||
+          ""
+        ).trim()
+      );
+
   /*
    * =======================================================
    * V170 POST-ANALYSIS RESIDUAL BACKLOG CATCH-UP
@@ -83182,18 +83209,34 @@ function pruneTokenOriginTraceV477(state) {
   return root;
 }
 
-function blockscoutOriginTraceUrlV479(address) {
+function blockscoutProOriginTraceUrlV480(
+  env,
+  address
+) {
   const clean =
     normalize(address);
 
-  if (!isAddress(clean)) {
+  const apiKey =
+    String(
+      env?.BLOCKSCOUT_PRO_API_KEY ||
+      ""
+    ).trim();
+
+  if (
+    !isAddress(clean) ||
+    !apiKey
+  ) {
     return null;
   }
 
-  return `${BLOCKSCOUT}/api/v2/addresses/${clean}`;
+  return (
+    `${BLOCKSCOUT_PRO}/${BLOCKSCOUT_PRO_CHAIN_ID}` +
+    `/api/v2/addresses/${clean}` +
+    `?apikey=${encodeURIComponent(apiKey)}`
+  );
 }
 
-function parseBlockscoutAddressOriginV479(
+function parseBlockscoutProAddressOriginV480(
   body,
   requestedAddress
 ) {
@@ -83258,8 +83301,8 @@ function parseBlockscoutAddressOriginV479(
     verified,
     source:
       verified
-        ? "BLOCKSCOUT_V2_ADDRESS_INFO_V479"
-        : "BLOCKSCOUT_V2_ORIGIN_INCOMPLETE_V479"
+        ? "BLOCKSCOUT_PRO_V2_ADDRESS_INFO_V480"
+        : "BLOCKSCOUT_PRO_V2_ORIGIN_INCOMPLETE_V480"
   };
 }
 
@@ -83434,19 +83477,28 @@ async function traceUnknownLiveOriginsV477({
     enabled: true,
     measurementOnly: true,
     source:
-      "BLOCKSCOUT_V2_ADDRESS_CREATION_PROVENANCE_V479",
+      "BLOCKSCOUT_PRO_V2_ADDRESS_CREATION_PROVENANCE_V480",
     selectedAddresses: addresses,
     selectedCount: addresses.length,
     attempted: false,
     requestConsumed: false,
     requestType:
-      "BLOCKSCOUT_V2_ADDRESS_ORIGIN_V479",
+      "BLOCKSCOUT_PRO_V2_ADDRESS_ORIGIN_V480",
     maxAddressesPerRequest: 1,
     maxExternalRequestsPerScan: 1,
-    endpointV479:
-      "/api/v2/addresses/{address_hash}",
-    endpointModeV479:
-      "ONE_ADDRESS_PER_REQUEST",
+    endpointV480:
+      "https://api.blockscout.com/4663/api/v2/addresses/{address_hash}?apikey=[REDACTED]",
+    endpointModeV480:
+      "BLOCKSCOUT_PRO_AUTHENTICATED_ONE_ADDRESS_PER_REQUEST",
+    blockscoutProConfiguredV480:
+      Boolean(
+        String(
+          env?.BLOCKSCOUT_PRO_API_KEY ||
+          ""
+        ).trim()
+      ),
+    publicOriginRouteDisabledV480:
+      true,
     legacyGetContractCreationDisabledV479:
       true,
     requestCeilingChanged: false,
@@ -83473,14 +83525,30 @@ async function traceUnknownLiveOriginsV477({
   const targetAddress =
     addresses[0] || null;
 
+  const blockscoutProApiKeyV480 =
+    String(
+      env?.BLOCKSCOUT_PRO_API_KEY ||
+      ""
+    ).trim();
+
+  if (!blockscoutProApiKeyV480) {
+    root.lastStatus =
+      "BLOCKSCOUT_PRO_NOT_CONFIGURED_ORIGIN_V480";
+    root.lastHttpStatus = null;
+    telemetry.status = root.lastStatus;
+    telemetry.blockscoutProConfiguredV480 = false;
+    return telemetry;
+  }
+
   const url =
-    blockscoutOriginTraceUrlV479(
+    blockscoutProOriginTraceUrlV480(
+      env,
       targetAddress
     );
 
   if (!url) {
     root.lastStatus =
-      "ORIGIN_TRACE_URL_UNAVAILABLE_V477";
+      "BLOCKSCOUT_PRO_ORIGIN_URL_UNAVAILABLE_V480";
     telemetry.status = root.lastStatus;
     return telemetry;
   }
@@ -83497,7 +83565,7 @@ async function traceUnknownLiveOriginsV477({
     consumeBudget(
       budget,
       "analysis",
-      "BLOCKSCOUT_V2_ADDRESS_ORIGIN_V479",
+      "BLOCKSCOUT_PRO_V2_ADDRESS_ORIGIN_V480",
       1
     );
 
@@ -83505,7 +83573,7 @@ async function traceUnknownLiveOriginsV477({
     const spare =
       consumeReleasedGlobalSpareV478(
         budget,
-        "BLOCKSCOUT_V2_ADDRESS_ORIGIN_V479",
+        "BLOCKSCOUT_PRO_V2_ADDRESS_ORIGIN_V480",
         1
       );
 
@@ -83565,7 +83633,7 @@ async function traceUnknownLiveOriginsV477({
 
     if (!response.ok) {
       root.lastStatus =
-        `BLOCKSCOUT_V2_ADDRESS_HTTP_${response.status}_V479`;
+        `BLOCKSCOUT_PRO_V2_ADDRESS_HTTP_${response.status}_V480`;
       telemetry.status = root.lastStatus;
       return telemetry;
     }
@@ -83573,7 +83641,7 @@ async function traceUnknownLiveOriginsV477({
     const body = await response.json();
 
     const row =
-      parseBlockscoutAddressOriginV479(
+      parseBlockscoutProAddressOriginV480(
         body,
         targetAddress
       );
@@ -83604,7 +83672,7 @@ async function traceUnknownLiveOriginsV477({
         verified: false,
         source:
           row?.source ||
-          "BLOCKSCOUT_V2_ORIGIN_INCOMPLETE_V479"
+          "BLOCKSCOUT_PRO_V2_ORIGIN_INCOMPLETE_V480"
       };
     } else {
       const evidence = {
@@ -83618,7 +83686,7 @@ async function traceUnknownLiveOriginsV477({
         creationStatus:
           row.creationStatus || null,
         source:
-          "BLOCKSCOUT_V2_ADDRESS_INFO_V479",
+          "BLOCKSCOUT_PRO_V2_ADDRESS_INFO_V480",
         evidenceMeaning:
           "VERIFIED_CONTRACT_CREATOR_AND_CREATION_TX_ONLY",
         creatorIsLaunchpad:
@@ -83668,7 +83736,7 @@ async function traceUnknownLiveOriginsV477({
         creationTransactionReturned: true,
         verified: true,
         source:
-          "BLOCKSCOUT_V2_ADDRESS_INFO_V479"
+          "BLOCKSCOUT_PRO_V2_ADDRESS_INFO_V480"
       };
     }
 
@@ -83677,8 +83745,8 @@ async function traceUnknownLiveOriginsV477({
     root.lastSuccessAt = now;
     root.lastStatus =
       telemetry.verifiedOrigins.length
-        ? "VERIFIED_ORIGIN_PROVENANCE_FOUND_V479"
-        : "NO_VERIFIED_ORIGIN_DATA_RETURNED_V479";
+        ? "VERIFIED_ORIGIN_PROVENANCE_FOUND_V480"
+        : "NO_VERIFIED_ORIGIN_DATA_RETURNED_V480";
 
     telemetry.status = root.lastStatus;
 
@@ -83699,7 +83767,7 @@ async function traceUnknownLiveOriginsV477({
     return telemetry;
   } catch (error) {
     root.lastStatus =
-      `BLOCKSCOUT_V2_ADDRESS_FETCH_ERROR_V479:${errorString(error)}`;
+      `BLOCKSCOUT_PRO_V2_ADDRESS_FETCH_ERROR_V480:${errorString(error)}`;
     telemetry.status = root.lastStatus;
     return telemetry;
   } finally {
@@ -83768,6 +83836,7 @@ function tokenOriginTraceSnapshotV477(state) {
         "DATA UNVERIFIED_UNTIL_EXACT_MECHANISM_PROVEN"
     },
     maxExternalRequestsPerScan: 1,
+    blockscoutProAuthenticatedOriginV480: true,
     postTelegramGlobalSpareFallbackV478: true,
     hardGlobalLimitUnchangedV478: 42,
     requestCeilingChanged: false,
