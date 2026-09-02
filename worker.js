@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V456
- * AUTHORITATIVE RUNTIME VERSION: V456
+ * Robinhood Chain Meme Hunter — V457
+ * AUTHORITATIVE RUNTIME VERSION: V457
+ * V457 fixes the V456 telemetry placement bug. Final scannerFunnelV415 counts are now calculated directly in the final response object from the post-V455 candidate state and final Telegram results. This makes marketVerified include successful V455 on-chain fallback promotions. No scanner discovery, scoring, qualification, provider routing, request budgets, holder rules, Telegram thresholds, or V455 fallback evidence logic changes.
  * V456 fixes scanner funnel telemetry only: marketVerified and related final funnel counts are refreshed after V455 on-chain market fallback promotion, so telemetry reflects the final candidate state rather than the pre-promotion snapshot. No scanner discovery, scoring, qualification, provider routing, request budgeting, Telegram thresholds, holder rules, V455 fallback eligibility, or market evidence logic changes.
  * V455 activates the first strict independent on-chain market fallback. It may promote candidate.market only when normal provider market evidence is still unverified AND one exact Uniswap V4 PoolId has all required independent evidence: recent candidate-matched V438 exact-USD executions from that exact PoolId, a verified complete Initialize-derived PoolKey, a successful V441 ReservesLens USD valuation for the same PoolId, and a V454 semantic classification that explicitly marks the core liquidity as usable. The V438 price is recalculated from only the exact PoolId being promoted; mixed-pool median prices are never used. Unknown custom-accounting hooks, missing ReservesLens evidence, incomplete PoolKeys, stale/no exact-USD execution samples, non-positive price/liquidity, or PoolId mismatches remain blocked. The fallback exposes verified priceUsd and exact-pool core liquidityUsd, plus FDV when verified totalSupply/decimals allow it. It deliberately does not invent circulating market cap, provider volume, buy pressure or pair-created age. After a successful promotion V455 refreshes the existing downstream momentum/market-quality/risk/opportunity/signal/confidence pipeline using the same established functions and protections; alert thresholds themselves are unchanged. No provider routing, holder standards, Telegram thresholds or request ceilings change, and V455 adds zero external requests.
  * V454 closes the false-positive semantic path exposed by the V453 SIM scan. The V453 classifier could label a candidate as CORE_AMM_LIQUIDITY_NO_CUSTOM_ACCOUNTING even when that candidate had no ReservesLens result, no verified PoolKey and no PoolId. V454 now requires real ReservesLens evidence and a verified complete PoolKey before ANY liquidity semantic classification may become usable. Missing ReservesLens evidence is classified NO_RESERVESLENS_LIQUIDITY_EVIDENCE_V454 and blocked. Incomplete or unverified PoolKey evidence is classified RESERVESLENS_POOLKEY_UNVERIFIED_V454 and blocked. Only then can a verified ordinary/no-custom-accounting pool become usable, or the specifically identified Pons V2 fee-accounting hook become usable under the researched V453 semantics. Unknown custom-accounting hooks remain blocked. This remains diagnostic-only and does not promote market verification, change liquidity gates, scoring, qualification, Telegram behavior, provider routing or request ceilings.
@@ -1530,7 +1531,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V456";
+const VERSION = "V457";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -67520,16 +67521,6 @@ for (
               return null;
             }
 
-  const finalScannerFunnelTelemetryV456 =
-    refreshScannerFunnelFinalCountsV456(
-      scannerFunnelV415,
-    finalScannerFunnelTelemetryV456,
-      candidates,
-      telegramResults
-    );
-
-
-
             return {
               address:
                 normalize(
@@ -68243,6 +68234,25 @@ for (
 
     scannerFunnelV415: {
       ...scannerFunnelV415,
+      returnedCandidates:
+        candidates.length,
+      marketVerified:
+        candidates.filter(
+          candidate =>
+            candidate?.market?.verified === true
+        ).length,
+      holderEvidenceVerified:
+        candidates.filter(candidate => {
+          const holders =
+            candidate?.holders || {};
+          return (
+            holders?.fullyVerified === true ||
+            (
+              holders?.integrityVerified === true &&
+              holders?.concentrationVerified === true
+            )
+          );
+        }).length,
       telegramQualified:
         candidates.filter(qualifiesTelegram).length,
       telegramSendEligibleV449:
@@ -68253,6 +68263,24 @@ for (
         telegramSendStatusV449?.otherNotSent || 0,
       telegramSent:
         telegramResults.filter(row => row?.sent === true).length,
+      finalStateTelemetryV457: {
+        applied: true,
+        source: "FINAL_RESPONSE_POST_V455_CANDIDATE_STATE",
+        marketVerifiedIncludesV455Promotions: true,
+        fallbackPromotedCount:
+          candidates.filter(
+            candidate =>
+              candidate
+                ?.market
+                ?.onChainMarketFallbackV455
+                ?.promoted === true
+          ).length,
+        countsReflectFinalCandidateState: true,
+        scoringChanged: false,
+        qualificationChanged: false,
+        thresholdsChanged: false,
+        externalRequestsAdded: 0
+      },
       retryQueueAfterAnalysis:
         Array.isArray(state?.analysisRetryQueueV415)
           ? state.analysisRetryQueueV415.length
