@@ -1,6 +1,25 @@
 /**
- * Robinhood Chain Meme Hunter — V507
- * AUTHORITATIVE RUNTIME VERSION: V507
+ * Robinhood Chain Meme Hunter — V508
+ * AUTHORITATIVE RUNTIME VERSION: V508
+ *
+ * V508 EXACT PONS V2 DEPLOYER LINKAGE:
+ * - closes the large recurring-creator cluster without trusting a contract name alone;
+ * - correlates VERIFIED token-origin creator evidence with already-persisted exact
+ *   Pons V2 V476 TokenLaunched evidence for the SAME token;
+ * - requires >=2 distinct independently verified tokens for the same creator;
+ * - additionally requires the creator profile to be a Blockscout-verified contract
+ *   named PonsV2LaunchDeployer before creator-level Pons V2 attribution is activated;
+ * - exact Pons evidence must use the canonical V2 factory, canonical TokenLaunched
+ *   decode verification, and protocol key pons_v2;
+ * - once confirmed, tokens with independently VERIFIED V480 creator provenance to
+ *   that proven deployer may receive Pons V2 source attribution even when their
+ *   exact launch event was outside the bot's live observation window;
+ * - this is source attribution only: it does NOT invent launch time, launch block,
+ *   launch transaction, or a new launchpad; unknown fields remain UNVERIFIED/null;
+ * - existing exact Pons V2 live detector remains authoritative for live launches;
+ * - ZERO external requests; ZERO additional state saves beyond existing scan save;
+ * - no scoring, Momentum, qualification, Telegram threshold, verified-USD,
+ *   dense-pool completion, RWA detector, launch-meter, or hard-42 changes.
  *
  * V507 DETERMINISTIC TARGETED CREATOR ATTRIBUTION:
  * - preserves V506 pre-V485 strong-creator routing;
@@ -2433,7 +2452,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V507";
+const VERSION = "V508";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9886,6 +9905,18 @@ function newState() {
       lastVerifiedToken: null,
       lastProtocol: null,
       recentVerifiedLaunches: []
+    },
+
+    ponsV2DeployerLinkageV508: {
+      enabled: true,
+      measurementOnlyUntilProof: true,
+      monitorStartedAt: null,
+      evaluations: 0,
+      confirmedCreatorCount: 0,
+      creators: {},
+      lastEvaluatedAt: null,
+      lastConfirmedCreator: null,
+      lastStatus: "NOT_EVALUATED_YET_V508"
     },
 
     tokenOriginTraceV477: {
@@ -31016,6 +31047,7 @@ function verifiedLaunchSourceIdentityV476(
   const launchpads = [
     watched?.launchpadV495,
     watched?.launchpadV476,
+    watched?.launchpadV508,
     watched?.launchpadV210,
     watched?.launchpadV214,
     watched?.launchpadV215,
@@ -70425,6 +70457,15 @@ for (
     });
 
   /*
+   * V508: zero-request exact correlation between verified creator origins and
+   * canonical Pons V2 TokenLaunched evidence already held in state.
+   */
+  const ponsV2DeployerLinkageThisScanV508 =
+    evaluatePonsV2DeployerLinkageV508(
+      state
+    );
+
+  /*
    * =======================================================
    * V170 POST-ANALYSIS RESIDUAL BACKLOG CATCH-UP
    * =======================================================
@@ -71630,6 +71671,13 @@ for (
     directOnChainLaunchTelemetryV476:
       state.directOnChainLaunchTelemetryV476,
 
+    ponsV2DeployerLinkageThisScanV508,
+
+    ponsV2DeployerLinkageV508:
+      ponsV2DeployerLinkageSnapshotV508(
+        state
+      ),
+
     tokenOriginTraceThisScanV477,
 
     tokenOriginTraceV477:
@@ -71876,7 +71924,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V507_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V508_V507_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71900,6 +71948,46 @@ for (
       telegramThresholdChanged:
         false,
       launchSourcePromotion:
+        false
+    },
+
+    exactPonsV2DeployerLinkageV508: {
+      enabled: true,
+      objective:
+        "PROVE_RECURRING_CREATOR_IS_EXISTING_PONS_V2_DEPLOYER_WITHOUT_TRUSTING_NAME_ALONE",
+      minimumDistinctExactLaunchTokens:
+        2,
+      requiresVerifiedV480CreatorOrigin:
+        true,
+      requiresBlockscoutVerifiedContractIdentity:
+        true,
+      requiredContractName:
+        "PonsV2LaunchDeployer",
+      requiresCanonicalPonsV2Factory:
+        PONS_V2_FACTORY_V215,
+      requiresExactTokenLaunchedDecode:
+        "EXACT_FACTORY_TOPIC_AND_ABI_DECODE_PONS_V2_V476",
+      sourceAttributionOnlyAfterProof:
+        true,
+      launchTimingInferred:
+        false,
+      newLaunchpadCreated:
+        false,
+      externalRequestsAdded:
+        0,
+      additionalPerScanStateWrites:
+        0,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false,
+      rwaDetectorChanged:
         false
     },
 
@@ -84819,6 +84907,465 @@ function ensureLaunchCoverageCumulativeV474(state) {
   return state.launchCoverageCumulativeV474;
 }
 
+
+
+function ensurePonsV2DeployerLinkageV508(
+  state
+) {
+  state.ponsV2DeployerLinkageV508 =
+    state?.ponsV2DeployerLinkageV508 &&
+    typeof state.ponsV2DeployerLinkageV508 === "object"
+      ? state.ponsV2DeployerLinkageV508
+      : {
+          enabled: true,
+          measurementOnlyUntilProof: true,
+          monitorStartedAt: Date.now(),
+          evaluations: 0,
+          confirmedCreatorCount: 0,
+          creators: {},
+          lastEvaluatedAt: null,
+          lastConfirmedCreator: null,
+          lastStatus: "NOT_EVALUATED_YET_V508"
+        };
+
+  const root =
+    state.ponsV2DeployerLinkageV508;
+
+  if (!safeNumber(root.monitorStartedAt)) {
+    root.monitorStartedAt = Date.now();
+  }
+
+  root.creators =
+    root.creators &&
+    typeof root.creators === "object"
+      ? root.creators
+      : {};
+
+  return root;
+}
+
+function exactPonsV2LaunchEvidenceForTokenV508(
+  state,
+  token
+) {
+  const clean = normalize(token);
+
+  if (!isAddress(clean)) {
+    return null;
+  }
+
+  const watched =
+    findWatched(
+      state,
+      clean
+    );
+
+  const row =
+    watched?.launchpadV476;
+
+  if (
+    row?.verified !== true ||
+    row?.protocol !== "Pons V2" ||
+    row?.protocolKey !== "pons_v2" ||
+    normalize(row?.factory) !==
+      PONS_V2_FACTORY_V215 ||
+    row?.event !== "TokenLaunched" ||
+    row?.verification !==
+      "EXACT_FACTORY_TOPIC_AND_ABI_DECODE_PONS_V2_V476"
+  ) {
+    return null;
+  }
+
+  return {
+    token: clean,
+    factory:
+      normalize(row.factory),
+    event:
+      row.event,
+    transactionHash:
+      normalize(
+        row?.transactionHash
+      ) || null,
+    launchBlock:
+      safeNumber(
+        row?.launchBlock
+      ) || null,
+    eventDeployer:
+      normalize(
+        row?.deployer
+      ) || null,
+    curve:
+      normalize(
+        row?.curve
+      ) || null,
+    verification:
+      row.verification,
+    source:
+      row.source ||
+      "DIRECT_ONCHAIN_PONS_V2_TOKENLAUNCHED_V476"
+  };
+}
+
+function evaluatePonsV2DeployerLinkageV508(
+  state
+) {
+  const root =
+    ensurePonsV2DeployerLinkageV508(
+      state
+    );
+
+  const origin =
+    pruneTokenOriginTraceV477(
+      state
+    );
+
+  const creatorProfiles =
+    state?.recurringCreatorAttributionV503
+      ?.creatorProfiles &&
+    typeof state.recurringCreatorAttributionV503
+      .creatorProfiles === "object"
+      ? state.recurringCreatorAttributionV503.creatorProfiles
+      : {};
+
+  const now = Date.now();
+  root.evaluations =
+    safeNumber(root.evaluations) + 1;
+  root.lastEvaluatedAt = now;
+
+  let confirmedCreatorCount = 0;
+  let newestConfirmedCreator = null;
+
+  for (
+    const cluster
+    of Object.values(
+      origin?.creatorClusters || {}
+    )
+  ) {
+    const creator =
+      normalize(
+        cluster?.creator
+      );
+
+    if (
+      !isAddress(creator) ||
+      safeNumber(
+        cluster?.distinctTokens
+      ) < 2
+    ) {
+      continue;
+    }
+
+    const profile =
+      creatorProfiles[creator] ||
+      null;
+
+    const verifiedContractIdentity =
+      profile?.isContract === true &&
+      profile?.blockscoutVerifiedContract === true &&
+      String(
+        profile?.contractName || ""
+      ).trim() ===
+        "PonsV2LaunchDeployer";
+
+    const exactMatches = [];
+
+    for (
+      const token
+      of Array.isArray(cluster?.tokens)
+        ? cluster.tokens
+        : []
+    ) {
+      const cleanToken =
+        normalize(token);
+
+      const originRow =
+        origin?.tokenOrigins?.[
+          cleanToken
+        ];
+
+      if (
+        originRow?.verified !== true ||
+        normalize(
+          originRow?.contractCreator
+        ) !== creator
+      ) {
+        continue;
+      }
+
+      const pons =
+        exactPonsV2LaunchEvidenceForTokenV508(
+          state,
+          cleanToken
+        );
+
+      if (pons) {
+        exactMatches.push({
+          ...pons,
+          verifiedCreator:
+            creator,
+          originVerification:
+            originRow?.source ||
+            "BLOCKSCOUT_PRO_V2_ADDRESS_INFO_V480"
+        });
+      }
+    }
+
+    const distinctExactTokens =
+      Array.from(
+        new Set(
+          exactMatches
+            .map(row => row.token)
+            .filter(isAddress)
+        )
+      );
+
+    const eventDeployerMatches =
+      exactMatches.filter(
+        row =>
+          normalize(
+            row?.eventDeployer
+          ) === creator
+      );
+
+    const confirmed =
+      verifiedContractIdentity &&
+      distinctExactTokens.length >= 2;
+
+    const previous =
+      root.creators?.[creator] ||
+      {};
+
+    root.creators[creator] = {
+      creator,
+      contractName:
+        profile?.contractName ||
+        null,
+      blockscoutVerifiedContract:
+        profile?.blockscoutVerifiedContract === true,
+      recurringOriginTokenCount:
+        safeNumber(
+          cluster?.distinctTokens
+        ),
+      exactPonsV2TokenCount:
+        distinctExactTokens.length,
+      exactPonsV2Tokens:
+        distinctExactTokens.slice(0, 30),
+      exactMatches:
+        exactMatches.slice(-20),
+      exactEventDeployerFieldMatchesCreatorCount:
+        eventDeployerMatches.length,
+      proofThreshold:
+        2,
+      verifiedContractIdentityRequired:
+        true,
+      exactCanonicalFactoryRequired:
+        PONS_V2_FACTORY_V215,
+      exactTokenLaunchedDecodeRequired:
+        "EXACT_FACTORY_TOPIC_AND_ABI_DECODE_PONS_V2_V476",
+      confirmed,
+      firstConfirmedAt:
+        confirmed
+          ? safeNumber(
+              previous?.firstConfirmedAt
+            ) || now
+          : null,
+      lastConfirmedAt:
+        confirmed
+          ? now
+          : null,
+      evidenceStandard:
+        confirmed
+          ? "2_PLUS_DISTINCT_V480_CREATOR_ORIGINS_MATCH_EXACT_PONS_V2_V476_TOKENLAUNCHED_EVENTS_AND_VERIFIED_PONSV2LAUNCHDEPLOYER_IDENTITY_V508"
+          : "INSUFFICIENT_EXACT_PONS_V2_DEPLOYER_LINKAGE_EVIDENCE_V508",
+      sourceAttributionAllowed:
+        confirmed,
+      newLaunchpadCreated:
+        false,
+      linkedExistingProtocol:
+        confirmed
+          ? "Pons V2"
+          : null
+    };
+
+    if (!confirmed) {
+      continue;
+    }
+
+    confirmedCreatorCount++;
+    newestConfirmedCreator = creator;
+
+    /*
+     * Apply creator-level source attribution only to tokens with independently
+     * VERIFIED V480 creator provenance to this exact proven deployer. We do not
+     * manufacture launch time/block/transaction when the exact event was absent.
+     */
+    for (
+      const token
+      of Array.isArray(cluster?.tokens)
+        ? cluster.tokens
+        : []
+    ) {
+      const cleanToken =
+        normalize(token);
+      const originRow =
+        origin?.tokenOrigins?.[
+          cleanToken
+        ];
+
+      if (
+        originRow?.verified !== true ||
+        normalize(
+          originRow?.contractCreator
+        ) !== creator
+      ) {
+        continue;
+      }
+
+      const watched =
+        findWatched(
+          state,
+          cleanToken
+        );
+
+      if (!watched) {
+        continue;
+      }
+
+      const exact =
+        exactPonsV2LaunchEvidenceForTokenV508(
+          state,
+          cleanToken
+        );
+
+      watched.launchpadV508 = {
+        verified: true,
+        protocol:
+          "Pons V2",
+        protocolKey:
+          "pons_v2",
+        factory:
+          PONS_V2_FACTORY_V215,
+        event:
+          exact?.event ||
+          "TokenLaunched",
+        launchBlock:
+          exact?.launchBlock ||
+          null,
+        launchTime:
+          null,
+        transactionHash:
+          exact?.transactionHash ||
+          null,
+        source:
+          exact
+            ? "EXACT_PONS_V2_EVENT_PLUS_DEPLOYER_LINKAGE_V508"
+            : "VERIFIED_PONS_V2_DEPLOYER_ORIGIN_LINKAGE_V508",
+        verification:
+          exact
+            ? "EXACT_FACTORY_EVENT_AND_VERIFIED_DEPLOYER_CREATOR_LINK_V508"
+            : "VERIFIED_CREATOR_TO_PROVEN_PONS_V2_LAUNCH_DEPLOYER_V508",
+        creator:
+          creator,
+        proofTokenCount:
+          distinctExactTokens.length,
+        timestampVerified:
+          false,
+        sourceAttributionVerified:
+          true,
+        launchTimingInferred:
+          false
+      };
+    }
+  }
+
+  root.confirmedCreatorCount =
+    confirmedCreatorCount;
+  root.lastConfirmedCreator =
+    newestConfirmedCreator ||
+    root.lastConfirmedCreator ||
+    null;
+  root.lastStatus =
+    confirmedCreatorCount > 0
+      ? "V508_PONS_V2_DEPLOYER_LINKAGE_CONFIRMED"
+      : "V508_PONS_V2_DEPLOYER_LINKAGE_NOT_YET_PROVEN";
+
+  return ponsV2DeployerLinkageSnapshotV508(
+    state
+  );
+}
+
+function ponsV2DeployerLinkageSnapshotV508(
+  state
+) {
+  const root =
+    ensurePonsV2DeployerLinkageV508(
+      state
+    );
+
+  const creators =
+    Object.values(
+      root.creators || {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.exactPonsV2TokenCount
+          ) -
+          safeNumber(
+            a?.exactPonsV2TokenCount
+          )
+      )
+      .slice(0, 20);
+
+  return {
+    enabled: true,
+    measurementOnlyUntilProof: true,
+    monitorStartedAt:
+      safeNumber(
+        root.monitorStartedAt
+      ) || null,
+    evaluations:
+      safeNumber(
+        root.evaluations
+      ),
+    confirmedCreatorCount:
+      safeNumber(
+        root.confirmedCreatorCount
+      ),
+    confirmedCreators:
+      creators.filter(
+        row => row?.confirmed === true
+      ),
+    candidates:
+      creators,
+    lastEvaluatedAt:
+      safeNumber(
+        root.lastEvaluatedAt
+      ) || null,
+    lastConfirmedCreator:
+      root.lastConfirmedCreator ||
+      null,
+    lastStatus:
+      root.lastStatus ||
+      null,
+    minimumIndependentExactTokens:
+      2,
+    canonicalPonsV2Factory:
+      PONS_V2_FACTORY_V215,
+    exactDecodeRequired:
+      "EXACT_FACTORY_TOPIC_AND_ABI_DECODE_PONS_V2_V476",
+    contractIdentityRequired:
+      "BLOCKSCOUT_VERIFIED_PonsV2LaunchDeployer",
+    externalRequestsAdded:
+      0,
+    launchSourcePromotionWithoutProof:
+      false,
+    newLaunchpadCreated:
+      false,
+    protocolLinkedIfConfirmed:
+      "Pons V2"
+  };
+}
 
 function ensureTokenOriginTraceV477(state) {
   state.tokenOriginTraceV477 =
