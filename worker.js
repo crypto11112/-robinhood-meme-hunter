@@ -1,6 +1,23 @@
 /**
- * Robinhood Chain Meme Hunter — V497
- * AUTHORITATIVE RUNTIME VERSION: V497
+ * Robinhood Chain Meme Hunter — V498
+ * AUTHORITATIVE RUNTIME VERSION: V498
+ *
+ * V498 CHAINSTACK RECEIPT ROUTING HOTFIX:
+ * - fixes a V497 implementation mismatch where telemetry/documentation stated
+ *   CHAINSTACK-first but selectReceiptRpcProviderV496() still executed the
+ *   old [ALCHEMY, ROBINHOOD_PUBLIC_RPC] provider array;
+ * - executable receipt routing is now exactly:
+ *     CHAINSTACK -> ALCHEMY -> ROBINHOOD_PUBLIC_RPC;
+ * - adds runtime telemetry exposing the actual executable provider order so
+ *   this mismatch cannot hide again;
+ * - Chainstack uses standard eth_getTransactionReceipt only; no debug/trace;
+ * - preserves V496 transient retry behavior: 429/5xx/transport failures do not
+ *   burn either proof transaction;
+ * - still one receipt request max per scan, no same-scan fallback, hard limit 42;
+ * - exact two-independent-receipt pattern proof unchanged;
+ * - zero extra LIVE discovery requests unchanged;
+ * - no scoring, Momentum, qualification, Telegram threshold, verified-USD,
+ *   dense-pool completion, launch-meter semantics, or cadence changes.
  *
  * V497 CHAINSTACK RECEIPT PROVIDER:
  * - preserves V496 transient receipt retry protection and the confirmed V495
@@ -2267,7 +2284,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V497";
+const VERSION = "V498";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71710,7 +71727,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71734,6 +71751,43 @@ for (
       telegramThresholdChanged:
         false,
       launchSourcePromotion:
+        false
+    },
+
+    chainstackReceiptRoutingHotfixV498: {
+      enabled: true,
+      fixes:
+        "V497_TELEMETRY_SAID_CHAINSTACK_FIRST_BUT_EXECUTABLE_ARRAY_OMITTED_CHAINSTACK",
+      executableProviderOrder: [
+        "CHAINSTACK",
+        "ALCHEMY",
+        "ROBINHOOD_PUBLIC_RPC"
+      ],
+      executableSelector:
+        "selectReceiptRpcProviderV496",
+      chainstackCooldownSource:
+        "chainstackLiveDiscoveryCoolingV435",
+      alchemyPublicCooldownSource:
+        "discoveryProviderCooling",
+      standardRpcMethod:
+        "eth_getTransactionReceipt",
+      debugTraceUsed:
+        false,
+      sameScanFallback:
+        false,
+      maxReceiptRequestsPerScan:
+        1,
+      transientFailureBurnsProof:
+        false,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
         false
     },
 
@@ -88614,14 +88668,16 @@ function selectReceiptRpcProviderV496(
   state
 ) {
   /*
-   * Prefer configured Chainstack for this standard receipt request. Chainstack
-   * was healthy in the same scans where Alchemy/public RPC were cooling.
-   * Still only ONE provider is called in a scan.
+   * V498 authoritative executable provider order.
+   * One provider is selected. There is no same-scan fallback.
    */
   const providers = [
+    "CHAINSTACK",
     "ALCHEMY",
     "ROBINHOOD_PUBLIC_RPC"
   ];
+
+  const decisions = [];
 
   for (
     const provider of providers
@@ -88633,25 +88689,61 @@ function selectReceiptRpcProviderV496(
       );
 
     if (!url) {
+      decisions.push({
+        provider,
+        configured: false,
+        cooling: false,
+        eligible: false,
+        reason: "NOT_CONFIGURED"
+      });
       continue;
     }
 
-    if (
-      discoveryProviderCooling(
-        state,
-        provider
-      )
-    ) {
+    const cooling =
+      provider === "CHAINSTACK"
+        ? chainstackLiveDiscoveryCoolingV435(
+            state
+          )
+        : discoveryProviderCooling(
+            state,
+            provider
+          );
+
+    if (cooling) {
+      decisions.push({
+        provider,
+        configured: true,
+        cooling: true,
+        eligible: false,
+        reason: "PROVIDER_COOLING"
+      });
       continue;
     }
+
+    decisions.push({
+      provider,
+      configured: true,
+      cooling: false,
+      eligible: true,
+      reason: "SELECTED"
+    });
 
     return {
       provider,
-      url
+      url,
+      executableOrderV498:
+        providers,
+      decisions
     };
   }
 
-  return null;
+  return {
+    provider: null,
+    url: null,
+    executableOrderV498:
+      providers,
+    decisions
+  };
 }
 
 function ensureRwaExactLiveDetectorV495(
@@ -89310,7 +89402,7 @@ async function runReceiptBootstrapV495({
     provider:
       null,
     providerSelection:
-      "ONE_HEALTHY_CONFIGURED_RPC_PER_SCAN_V497_CHAINSTACK_FIRST",
+      "ONE_HEALTHY_CONFIGURED_RPC_PER_SCAN_V498_EXECUTABLE_CHAINSTACK_FIRST",
     chainstackStandardReceiptOnly:
       true,
     chainstackDebugTraceUsed:
@@ -89408,9 +89500,25 @@ async function runReceiptBootstrapV495({
       state
     );
 
-  if (!selectedProviderV496) {
+  telemetry.executableReceiptProviderOrderV498 =
+    selectedProviderV496
+      ?.executableOrderV498 || [
+        "CHAINSTACK",
+        "ALCHEMY",
+        "ROBINHOOD_PUBLIC_RPC"
+      ];
+
+  telemetry.receiptProviderDecisionsV498 =
+    selectedProviderV496
+      ?.decisions || [];
+
+  if (
+    !selectedProviderV496 ||
+    !selectedProviderV496.provider ||
+    !selectedProviderV496.url
+  ) {
     telemetry.status =
-      "V496_NO_HEALTHY_RECEIPT_RPC_PROVIDER";
+      "V498_NO_HEALTHY_RECEIPT_RPC_PROVIDER";
 
     root.lastBootstrapStatus =
       telemetry.status;
@@ -90164,7 +90272,7 @@ function rwaExactLiveDetectorSnapshotV495(
       0,
     receiptBootstrapMaxRequestsPerScan:
       1,
-    receiptProviderRoutingV497:
+    receiptProviderRoutingV498:
       {
         providerPolicy:
           "CHAINSTACK_IF_CONFIGURED_AND_HEALTHY_ELSE_ALCHEMY_ELSE_PUBLIC_RPC",
@@ -90173,6 +90281,10 @@ function rwaExactLiveDetectorSnapshotV495(
           "ALCHEMY",
           "ROBINHOOD_PUBLIC_RPC"
         ],
+        executableSelectorFunction:
+          "selectReceiptRpcProviderV496",
+        executableOrderVerifiedV498:
+          true,
         chainstackMethod:
           "eth_getTransactionReceipt",
         chainstackDebugTraceRequired:
