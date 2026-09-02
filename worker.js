@@ -1,6 +1,29 @@
 /**
- * Robinhood Chain Meme Hunter — V495
- * AUTHORITATIVE RUNTIME VERSION: V495
+ * Robinhood Chain Meme Hunter — V496
+ * AUTHORITATIVE RUNTIME VERSION: V496
+ *
+ * V496 RECEIPT-BOOTSTRAP 429 RESILIENCE:
+ * - preserves the confirmed V495 exact-live-detector architecture and every
+ *   confirmed-working earlier component;
+ * - fixes the observed V495 public-RPC HTTP 429 without weakening evidence;
+ * - a receipt HTTP 429 is TRANSIENT and can no longer burn one of the two
+ *   independently proven creation transactions;
+ * - automatically revives the V495 receipt that was persisted as
+ *   V495_RECEIPT_HTTP_429, so no state reset/backfill is required;
+ * - selects ONE healthy configured receipt provider per eligible scan:
+ *     Alchemy when configured/healthy, otherwise Robinhood public RPC;
+ * - provider selection respects existing persistent discovery 429 cooldowns;
+ * - a newly observed receipt 429 marks the existing provider cooldown and leaves
+ *   the transaction eligible for a later scan;
+ * - HTTP 500/502/503/504 and fetch/timeout failures are also treated as
+ *   transient and do not burn the receipt proof;
+ * - non-transient HTTP failures remain processed once to prevent request loops;
+ * - still max ONE receipt provider request per scan, no same-scan fallback,
+ *   preserving the one-secondary-diagnostic rule and hard global ceiling 42;
+ * - exact two-receipt event-pattern proof remains unchanged;
+ * - zero extra LIVE discovery requests remain unchanged;
+ * - no scoring, Momentum, qualification, Telegram threshold, verified-USD,
+ *   dense-pool completion, launch-meter semantics, or cadence changes.
  *
  * V495 CONFIRMED RWA LAUNCHPAD EXACT LIVE DETECTOR:
  * - preserves all confirmed-working V494/V493/V492/V491/V490/V489/V488/V487/V486/V485/V484/V483;
@@ -2223,7 +2246,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V495";
+const VERSION = "V496";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71665,7 +71688,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71689,6 +71712,46 @@ for (
       telegramThresholdChanged:
         false,
       launchSourcePromotion:
+        false
+    },
+
+    receiptBootstrap429ResilienceV496: {
+      enabled: true,
+      observedFailureFixed:
+        "V495_RECEIPT_HTTP_429",
+      prior429ReceiptAutomaticallyRevived:
+        true,
+      providerPolicy:
+        "ALCHEMY_IF_CONFIGURED_AND_HEALTHY_ELSE_ROBINHOOD_PUBLIC_RPC",
+      existingProviderCooldownsRespected:
+        true,
+      newlyObserved429MarksExistingCooldown:
+        true,
+      sameScanProviderFallback:
+        false,
+      maxReceiptRequestsPerScan:
+        1,
+      transientHttpStatuses:
+        [429, 500, 502, 503, 504],
+      transientFailureBurnsReceiptProof:
+        false,
+      transportFailureBurnsReceiptProof:
+        false,
+      finalNonTransientHttpProcessedOnce:
+        true,
+      exactEvidenceStandardChanged:
+        false,
+      liveDiscoveryRequestsAdded:
+        0,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
         false
     },
 
@@ -88418,6 +88481,118 @@ function persistedOriginRawTraceBacklogSnapshotV486(
 
 
 
+
+function isTransientReceiptHttpStatusV496(
+  status
+) {
+  const code =
+    safeNumber(status);
+
+  return (
+    code === 429 ||
+    code === 500 ||
+    code === 502 ||
+    code === 503 ||
+    code === 504
+  );
+}
+
+function receiptProcessedRecordIsRetryableV496(
+  row
+) {
+  if (
+    !row ||
+    typeof row !== "object"
+  ) {
+    return false;
+  }
+
+  const status =
+    String(row?.status || "");
+
+  const http =
+    safeNumber(
+      row?.httpStatus
+    );
+
+  return (
+    isTransientReceiptHttpStatusV496(
+      http
+    ) ||
+    status ===
+      "V495_RECEIPT_HTTP_429" ||
+    status.startsWith(
+      "V496_RECEIPT_TRANSIENT_HTTP_"
+    ) ||
+    status.startsWith(
+      "V496_RECEIPT_FETCH_ERROR:"
+    )
+  );
+}
+
+function receiptAlreadyFinalizedV496(
+  root,
+  tx
+) {
+  const row =
+    root
+      ?.processedReceiptTransactions
+      ?.[tx];
+
+  if (!row) {
+    return false;
+  }
+
+  return !receiptProcessedRecordIsRetryableV496(
+    row
+  );
+}
+
+function selectReceiptRpcProviderV496(
+  env,
+  state
+) {
+  /*
+   * Prefer configured Alchemy for this tiny proof request so the Robinhood
+   * public endpoint is not hammered immediately after the observed 429.
+   * Still only ONE provider is called in a scan.
+   */
+  const providers = [
+    "ALCHEMY",
+    "ROBINHOOD_PUBLIC_RPC"
+  ];
+
+  for (
+    const provider of providers
+  ) {
+    const url =
+      rpcProviderUrl(
+        env,
+        provider
+      );
+
+    if (!url) {
+      continue;
+    }
+
+    if (
+      discoveryProviderCooling(
+        state,
+        provider
+      )
+    ) {
+      continue;
+    }
+
+    return {
+      provider,
+      url
+    };
+  }
+
+  return null;
+}
+
 function ensureRwaExactLiveDetectorV495(
   state
 ) {
@@ -88786,7 +88961,10 @@ function receiptBootstrapCandidatesV495(
       )
         .toLowerCase() ===
         RWA_CREATE_LAUNCH_SELECTOR_V495 &&
-      !root.processedReceiptTransactions[tx]
+      !receiptAlreadyFinalizedV496(
+        root,
+        tx
+      )
     ) {
       out.push({
         transactionHash:
@@ -88843,7 +89021,10 @@ function receiptBootstrapCandidatesV495(
         row?.verifiedDeploymentSource
       ) ===
         RWA_LAUNCH_TOKEN_DEPLOYER_V495 &&
-      !root.processedReceiptTransactions[tx]
+      !receiptAlreadyFinalizedV496(
+        root,
+        tx
+      )
     ) {
       out.push({
         transactionHash:
@@ -89066,7 +89247,9 @@ async function runReceiptBootstrapV495({
     evidenceType:
       null,
     provider:
-      "ROBINHOOD_PUBLIC_RPC",
+      null,
+    providerSelection:
+      "ONE_HEALTHY_CONFIGURED_RPC_PER_SCAN_V496",
     method:
       "eth_getTransactionReceipt",
     httpStatus:
@@ -89154,6 +89337,25 @@ async function runReceiptBootstrapV495({
     return telemetry;
   }
 
+  const selectedProviderV496 =
+    selectReceiptRpcProviderV496(
+      env,
+      state
+    );
+
+  if (!selectedProviderV496) {
+    telemetry.status =
+      "V496_NO_HEALTHY_RECEIPT_RPC_PROVIDER";
+
+    root.lastBootstrapStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  telemetry.provider =
+    selectedProviderV496.provider;
+
   telemetry.attempted = true;
   telemetry.requestConsumed = true;
 
@@ -89181,7 +89383,7 @@ async function runReceiptBootstrapV495({
   try {
     const response =
       await fetch(
-        PUBLIC_RPC,
+        selectedProviderV496.url,
         {
           method:
             "POST",
@@ -89213,8 +89415,57 @@ async function runReceiptBootstrapV495({
       response.status;
 
     if (!response.ok) {
+      if (
+        response.status === 429
+      ) {
+        markDiscovery429(
+          state,
+          selectedProviderV496.provider
+        );
+      }
+
+      if (
+        isTransientReceiptHttpStatusV496(
+          response.status
+        )
+      ) {
+        telemetry.status =
+          `V496_RECEIPT_TRANSIENT_HTTP_${response.status}_RETRY_PRESERVED`;
+
+        /*
+         * Preserve diagnostic history but deliberately keep this transaction
+         * eligible. receiptAlreadyFinalizedV496() treats this row as retryable.
+         */
+        root.processedReceiptTransactions[
+          tx
+        ] = {
+          transactionHash:
+            tx,
+          createdContract:
+            created,
+          attemptedAt,
+          httpStatus:
+            response.status,
+          provider:
+            selectedProviderV496.provider,
+          status:
+            telemetry.status,
+          processedOnce:
+            false,
+          retryEligible:
+            true
+        };
+
+        telemetry.processedAfterAttempt =
+          false;
+        root.lastBootstrapStatus =
+          telemetry.status;
+
+        return telemetry;
+      }
+
       telemetry.status =
-        `V495_RECEIPT_HTTP_${response.status}`;
+        `V496_RECEIPT_FINAL_HTTP_${response.status}`;
 
       root.processedReceiptTransactions[
         tx
@@ -89226,10 +89477,14 @@ async function runReceiptBootstrapV495({
         attemptedAt,
         httpStatus:
           response.status,
+        provider:
+          selectedProviderV496.provider,
         status:
           telemetry.status,
         processedOnce:
-          true
+          true,
+        retryEligible:
+          false
       };
 
       telemetry.processedAfterAttempt =
@@ -89266,6 +89521,8 @@ async function runReceiptBootstrapV495({
         attemptedAt,
         httpStatus:
           response.status,
+        provider:
+          selectedProviderV496.provider,
         status:
           telemetry.status,
         processedOnce:
@@ -89325,7 +89582,7 @@ async function runReceiptBootstrapV495({
         observedAt:
           attemptedAt,
         provider:
-          "ROBINHOOD_PUBLIC_RPC_TRANSACTION_RECEIPT_V495",
+          `${selectedProviderV496.provider}_TRANSACTION_RECEIPT_V496`,
         evidenceStandard:
           "KNOWN_CREATED_CONTRACT_EXACTLY_LOCATED_IN_VERIFIED_FACTORY_OR_DEPLOYER_RECEIPT_LOG_V495"
       };
@@ -89348,6 +89605,8 @@ async function runReceiptBootstrapV495({
       attemptedAt,
       httpStatus:
         response.status,
+      provider:
+        selectedProviderV496.provider,
       matchingLogCount:
         found.exactMatches.length,
       unambiguousExactPattern:
@@ -89388,7 +89647,14 @@ async function runReceiptBootstrapV495({
     return telemetry;
   } catch (error) {
     telemetry.status =
-      `V495_RECEIPT_FETCH_ERROR:${errorString(error)}`;
+      `V496_RECEIPT_FETCH_ERROR:${errorString(error)}`;
+
+    /*
+     * No processed row is written on transport failure. The exact proven
+     * creation transaction remains eligible for a later scan.
+     */
+    telemetry.processedAfterAttempt =
+      false;
 
     root.lastBootstrapStatus =
       telemetry.status;
@@ -89726,6 +89992,26 @@ function rwaExactLiveDetectorSnapshotV495(
         root.processedReceiptTransactions ||
         {}
       ).length,
+    retryableReceiptTransactionCount:
+      Object.values(
+        root.processedReceiptTransactions ||
+        {}
+      ).filter(
+        row =>
+          receiptProcessedRecordIsRetryableV496(
+            row
+          )
+      ).length,
+    finalizedReceiptTransactionCount:
+      Object.values(
+        root.processedReceiptTransactions ||
+        {}
+      ).filter(
+        row =>
+          !receiptProcessedRecordIsRetryableV496(
+            row
+          )
+      ).length,
     remainingReceiptBootstrapCount:
       eligibleReceiptBootstrapCountV495(
         state
@@ -89797,6 +90083,21 @@ function rwaExactLiveDetectorSnapshotV495(
       0,
     receiptBootstrapMaxRequestsPerScan:
       1,
+    receiptProviderRoutingV496:
+      {
+        providerPolicy:
+          "ALCHEMY_IF_CONFIGURED_AND_HEALTHY_ELSE_PUBLIC_RPC",
+        sameScanFallback:
+          false,
+        transient429BurnsProof:
+          false,
+        transient5xxBurnsProof:
+          false,
+        transportFailureBurnsProof:
+          false,
+        priorV495Http429AutomaticallyRevived:
+          true
+      },
     hardGlobalLimitUnchanged:
       42,
     chainWideCoverage:
