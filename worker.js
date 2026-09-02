@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V442
- * AUTHORITATIVE RUNTIME VERSION: V442
+ * Robinhood Chain Meme Hunter — V443
+ * AUTHORITATIVE RUNTIME VERSION: V443
+ * V443 is a narrow historical PoolKey recovery build based on the V442 test. V442 proved the ReservesLens routing fix was ready, but the test candidate could not be queried because older persisted pool records pre-dated V441 and therefore contained PoolId/currencies without the immutable fee, tickSpacing and hooks fields required by ReservesLens. V443 recovers that missing immutable PoolKey from the exact historical PoolManager Initialize event when an older returned candidate has an incomplete persisted key and a known Initialize-derived block number. Recovery uses one exact single-block eth_getLogs request through the existing managed analysis RPC router (Chainstack preferred), filtered by PoolManager + Initialize topic + exact PoolId. A recovered event is decoded with the existing V441 full Initialize decoder, written into the existing poolRegistry, and merged into the watched token's existing pool row before the V441 ReservesLens diagnostic runs. At most one recovery request is attempted per scan and only within the existing analysis/global budgets. No request ceiling, scoring, qualification, liquidity threshold or Telegram rule is changed, and no PoolKey field is guessed.
  * V442 is a narrow routing correction for the V441 ReservesLens liquidity diagnostic. The V441 test proved PoolKey reconstruction works, but its single ReservesLens eth_call used the legacy V292 manual-RPC helper, which prefers Alchemy and hit an exhausted Alchemy monthly-capacity limit. V442 routes the ReservesLens read through the bot's existing managed analysis RPC path instead: Chainstack is preferred, Robinhood Public remains fallback, and Alchemy remains bounded fallback under the existing V423/V424/V426/V427 provider-health logic. No new RPC provider is added, no request ceiling is raised, and the diagnostic still consumes at most the existing analysis budget. All V441 liquidity calculations remain diagnostic-only; market.verified, liquidityUsd, scoring, qualification and Telegram thresholds remain unchanged.
  * V441 is a narrow independent-liquidity diagnostic based on V438/V440 evidence. It integrates the canonical Uniswap v4 ReservesLens as a read-only diagnostic for at most one returned candidate per scan, using the already-proven canonical Robinhood PoolManager and the candidate's exact Initialize-derived PoolKey. The lens reconstructs fee-excluded coreAmount0/coreAmount1 from PoolManager liquidity/tick state and self-checks reconstructed active liquidity against PoolManager state. V441 decodes the returned core reserves, current sqrtPrice/tick/activeLiquidity, hook-permission/custom-accounting flags, and computes USD liquidity ONLY when the candidate quote side is canonical USDG or WETH/native with the existing verified WETH/USDG reference. For custom-accounting hook pools the result is explicitly diagnostic/approximate and is never promoted. V441 DOES NOT change market.verified, liquidityUsd, Opportunity/Confidence/Risk, Telegram qualification, or thresholds. It uses at most one existing analysis-budget RPC request and never raises the global or phase request ceilings. V441 also enriches the existing Initialize decoder/registry/watch-pool merge with the already-emitted fee, tickSpacing, hooks, sqrtPriceX96 and initial tick so the complete immutable PoolKey is preserved rather than discarded.
  * V440 is a narrow evidence-completion prioritisation build based on the V439 split-evidence scan. It does not add requests or weaken any qualification rule. When the scarce fresh-market slot is being ranked, a candidate with fully verified cached holder evidence but no verified usable market cache receives a bounded completion bonus, so candidates already one major evidence component away from a full decision are favoured over equally viable incomplete candidates. Existing V422/V437/V439 holder-retry candidates remain separately protected and are still inserted before ordinary analysis when their retry is due. Existing V139 fairness, V159 fresh-market handoff, V166 partial-holder release, terminal pruning, request ceilings, scoring outputs and Telegram thresholds remain unchanged. V440 adds telemetry showing which selected tokens had market-ready/holder-ready evidence and whether the fresh-market target received the evidence-completion bonus.
@@ -1516,7 +1517,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V442";
+const VERSION = "V443";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2535,6 +2536,503 @@ function onChainV4MarketEvidence(
 
     usdLiquidityVerified:
       false
+  };
+}
+
+/* =========================================================
+   V443 HISTORICAL IMMUTABLE POOLKEY RECOVERY
+   ========================================================= */
+
+function historicalPoolKeyRecoveryTargetV443(
+  state,
+  candidates
+) {
+  const rows =
+    Array.isArray(candidates)
+      ? candidates
+      : [];
+
+  const ranked =
+    rows
+      .map(
+        candidate => {
+          const address =
+            normalize(
+              candidate?.address
+            );
+
+          const watched =
+            findWatched(
+              state,
+              address
+            );
+
+          const candidatePoolIds =
+            new Set();
+
+          for (
+            const value
+            of [
+              candidate
+                ?.onChainPoolIdentityV153
+                ?.poolId,
+              candidate
+                ?.market
+                ?.onChainMarketFoundationV438
+                ?.latestPoolId,
+              watched?.poolId,
+              watched?.primaryPoolId,
+              watched?.lastPoolId
+            ]
+          ) {
+            const id =
+              normalize(value);
+
+            if (
+              /^0x[a-f0-9]{64}$/.test(
+                String(id || "")
+              )
+            ) {
+              candidatePoolIds.add(
+                id
+              );
+            }
+          }
+
+          for (
+            const pool
+            of Array.isArray(
+              watched?.pools
+            )
+              ? watched.pools
+              : []
+          ) {
+            const id =
+              normalize(
+                pool?.poolId
+              );
+
+            if (
+              /^0x[a-f0-9]{64}$/.test(
+                String(id || "")
+              )
+            ) {
+              candidatePoolIds.add(
+                id
+              );
+            }
+          }
+
+          let best =
+            null;
+
+          for (
+            const poolId
+            of candidatePoolIds
+          ) {
+            const persisted =
+              state
+                ?.poolRegistry
+                ?.[poolId] ||
+              null;
+
+            const watchedPool =
+              (
+                Array.isArray(
+                  watched?.pools
+                )
+                  ? watched.pools
+                  : []
+              ).find(
+                pool =>
+                  normalize(
+                    pool?.poolId
+                  ) ===
+                  poolId
+              ) ||
+              null;
+
+            const merged = {
+              ...(
+                persisted &&
+                typeof persisted ===
+                  "object"
+                  ? persisted
+                  : {}
+              ),
+              ...(
+                watchedPool &&
+                typeof watchedPool ===
+                  "object"
+                  ? watchedPool
+                  : {}
+              ),
+              poolId
+            };
+
+            const alreadyComplete =
+              completePoolKeyV441(
+                state,
+                {
+                  address,
+                  onChainPoolIdentityV153: {
+                    poolId
+                  }
+                }
+              )?.verified ===
+              true;
+
+            if (alreadyComplete) {
+              continue;
+            }
+
+            const blockNumber =
+              safeNumber(
+                merged?.blockNumber
+              );
+
+            if (
+              blockNumber <= 0
+            ) {
+              continue;
+            }
+
+            const priceVerified =
+              candidate
+                ?.market
+                ?.onChainMarketFoundationV438
+                ?.verifiedObservedExecutionPrice ===
+                true;
+
+            const marketVerified =
+              candidate
+                ?.market
+                ?.verified ===
+                true;
+
+            const score =
+              (priceVerified ? 1000 : 0) +
+              (marketVerified ? 200 : 0) +
+              safeNumber(
+                candidate?.analysisPriority
+              );
+
+            const row = {
+              candidate,
+              address,
+              watched,
+              poolId,
+              blockNumber,
+              score,
+              persistedSource:
+                persisted
+                  ? "POOL_REGISTRY"
+                  : (
+                      watchedPool
+                        ? "WATCHED_POOL"
+                        : null
+                    )
+            };
+
+            if (
+              !best ||
+              row.score >
+                best.score
+            ) {
+              best = row;
+            }
+          }
+
+          return best;
+        }
+      )
+      .filter(Boolean)
+      .sort(
+        (a, b) =>
+          b.score -
+          a.score
+      );
+
+  return ranked[0] || null;
+}
+
+async function recoverHistoricalPoolKeyV443(
+  env,
+  state,
+  budget,
+  candidates
+) {
+  const base = {
+    enabled: true,
+    attempted: false,
+    requestSent: false,
+    maxCandidatesPerScan: 1,
+    maxRecoveryRequestsPerScan: 1,
+    providerPreference:
+      "CHAINSTACK_MANAGED_ANALYSIS_ROUTER",
+    candidateAddress: null,
+    symbol: null,
+    poolId: null,
+    blockNumber: null,
+    persistedSource: null,
+    status:
+      "NO_ELIGIBLE_INCOMPLETE_HISTORICAL_POOLKEY_V443",
+    provider: null,
+    logsReturned: 0,
+    resolved: false,
+    recoveredPoolKey: null,
+    externalRequestsUsed: 0,
+    poolKeyFieldsGuessed: false,
+    requestCeilingChanged: false
+  };
+
+  const target =
+    historicalPoolKeyRecoveryTargetV443(
+      state,
+      candidates
+    );
+
+  if (!target) {
+    return base;
+  }
+
+  const {
+    candidate,
+    address,
+    poolId,
+    blockNumber,
+    persistedSource
+  } = target;
+
+  if (
+    !budgetAvailable(
+      budget,
+      "analysis"
+    )
+  ) {
+    return {
+      ...base,
+      candidateAddress:
+        address,
+      symbol:
+        candidate?.symbol ||
+        null,
+      poolId,
+      blockNumber,
+      persistedSource,
+      status:
+        "ANALYSIS_BUDGET_UNAVAILABLE_V443"
+    };
+  }
+
+  const before =
+    safeNumber(
+      budget?.totalUsed
+    );
+
+  const blockHex =
+    "0x" +
+    BigInt(
+      Math.floor(
+        blockNumber
+      )
+    ).toString(16);
+
+  const call =
+    await rpc(
+      env,
+      "eth_getLogs",
+      [{
+        fromBlock:
+          blockHex,
+        toBlock:
+          blockHex,
+        address:
+          POOL_MANAGER,
+        topics: [
+          INITIALIZE_TOPIC,
+          poolId
+        ]
+      }],
+      budget,
+      "analysis"
+    );
+
+  const used =
+    Math.max(
+      0,
+      safeNumber(
+        budget?.totalUsed
+      ) - before
+    );
+
+  if (
+    call?.result === null ||
+    call?.result === undefined
+  ) {
+    return {
+      ...base,
+      attempted: true,
+      requestSent:
+        used > 0,
+      candidateAddress:
+        address,
+      symbol:
+        candidate?.symbol ||
+        null,
+      poolId,
+      blockNumber,
+      persistedSource,
+      status:
+        "HISTORICAL_INITIALIZE_RPC_FAILED_V443",
+      provider:
+        call?.provider ||
+        null,
+      error:
+        call?.error ||
+        null,
+      externalRequestsUsed:
+        used
+    };
+  }
+
+  const logs =
+    Array.isArray(
+      call.result
+    )
+      ? call.result
+      : [];
+
+  let resolvedPool =
+    null;
+
+  for (
+    const log
+    of logs
+  ) {
+    const decoded =
+      decodeInitialize(
+        log
+      );
+
+    if (
+      decoded &&
+      normalize(
+        decoded.poolId
+      ) ===
+        poolId &&
+      decoded
+        ?.poolKeyCompleteV441 ===
+        true
+    ) {
+      resolvedPool =
+        decoded;
+      break;
+    }
+  }
+
+  if (!resolvedPool) {
+    return {
+      ...base,
+      attempted: true,
+      requestSent: true,
+      candidateAddress:
+        address,
+      symbol:
+        candidate?.symbol ||
+        null,
+      poolId,
+      blockNumber,
+      persistedSource,
+      status:
+        logs.length
+          ? "INITIALIZE_FOUND_BUT_POOLKEY_INCOMPLETE_V443"
+          : "NO_INITIALIZE_AT_PERSISTED_BLOCK_V443",
+      provider:
+        call?.provider ||
+        null,
+      logsReturned:
+        logs.length,
+      externalRequestsUsed:
+        used
+    };
+  }
+
+  registerPoolMapping(
+    state,
+    resolvedPool
+  );
+
+  for (
+    const tokenAddress
+    of [
+      resolvedPool.currency0,
+      resolvedPool.currency1
+    ]
+  ) {
+    if (
+      !isAddress(
+        tokenAddress
+      ) ||
+      tokenAddress === ZERO ||
+      knownQuote(
+        tokenAddress
+      )
+    ) {
+      continue;
+    }
+
+    addWatch(
+      state,
+      tokenAddress,
+      resolvedPool,
+      "V443_HISTORICAL_INITIALIZE_POOLKEY_RECOVERY"
+    );
+  }
+
+  const recoveredKey =
+    completePoolKeyV441(
+      state,
+      {
+        address,
+        onChainPoolIdentityV153: {
+          poolId
+        }
+      }
+    );
+
+  return {
+    ...base,
+    attempted: true,
+    requestSent: true,
+    candidateAddress:
+      address,
+    symbol:
+      candidate?.symbol ||
+      null,
+    poolId,
+    blockNumber,
+    persistedSource,
+    status:
+      recoveredKey
+        ?.verified === true
+        ? "HISTORICAL_POOLKEY_RECOVERED_V443"
+        : "HISTORICAL_INITIALIZE_DECODED_BUT_REGISTRY_INCOMPLETE_V443",
+    provider:
+      call?.provider ||
+      null,
+    logsReturned:
+      logs.length,
+    resolved:
+      recoveredKey
+        ?.verified === true,
+    recoveredPoolKey:
+      recoveredKey
+        ?.verified === true
+        ? recoveredKey
+        : null,
+    externalRequestsUsed:
+      used
   };
 }
 
@@ -57611,6 +58109,20 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    historicalPoolKeyRecoveryV443:
+      historicalPoolKeyRecoveryV443,
+
+    historicalPoolKeyRecoveryV443: {
+      enabled: true,
+      exactPoolIdInitializeFilter: true,
+      exactSingleBlockLookup: true,
+      maxCandidatesPerScan: 1,
+      maxRecoveryRequestsPerScan: 1,
+      usesExistingAnalysisBudget: true,
+      providerPreference: "CHAINSTACK",
+      poolKeyFieldsGuessed: false,
+      requestCeilingChanged: false
+    },
     reservesLensManagedRpcRoutingV442: {
       enabled: true,
       preferredProvider:
@@ -61861,6 +62373,14 @@ for (
     updatePreviouslyAlertedFollowUpsV267(
       candidates,
       state
+    );
+
+  const historicalPoolKeyRecoveryV443 =
+    await recoverHistoricalPoolKeyV443(
+      env,
+      state,
+      budget,
+      candidates
     );
 
   const reservesLensLiquidityResultV441 =
