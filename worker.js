@@ -1,6 +1,32 @@
 /**
- * Robinhood Chain Meme Hunter — V482
- * AUTHORITATIVE RUNTIME VERSION: V482
+ * Robinhood Chain Meme Hunter — V483
+ * AUTHORITATIVE RUNTIME VERSION: V483
+ *
+ * V483 UNKNOWN-LAUNCH MECHANISM FINGERPRINTING:
+ * - preserves V480 authenticated Blockscout PRO address-info provenance lookup;
+ * - retires V482's repeated Pons-only historical diagnostic from active
+ *   execution after an unknown-source candidate returned an exact no-match;
+ * - for ONE highest-priority current/live unknown-source candidate, when V480
+ *   confirms the address is a contract but creator/creation-tx metadata is
+ *   incomplete, V483 may spend ONE released post-Telegram spare request on:
+ *     /4663/api/v2/addresses/{token}/transactions?apikey=...
+ * - fingerprints only hard returned evidence: transaction hashes/blocks,
+ *   from/to counterparties, method names/selectors when supplied, contract-
+ *   creation flags when supplied, repeated counterparties, and page bounds;
+ * - also records zero-extra-request structural fields already present in the
+ *   V480 address-info response (proxy type / implementation addresses when
+ *   Blockscout supplies them); missing fields remain null/UNVERIFIED;
+ * - persists bounded per-token fingerprints and cross-token counterparty/method
+ *   clusters so recurring mechanisms can emerge across scans;
+ * - recurring counterparties/methods are MEASUREMENT ONLY and are never called
+ *   a launchpad/factory/router without exact event/creation proof;
+ * - V483 does NOT promote launch source, creator, scoring, qualification,
+ *   Momentum, Telegram, or launch-meter evidence;
+ * - V482 historical Pons diagnostic state is preserved for audit but consumes
+ *   zero requests in V483;
+ * - max ONE V483 diagnostic request per scan, hard global ceiling remains 42;
+ * - V476 live Pons detection, V474 funnel, V469 fresh priority, V478 routing,
+ *   and all confirmed-working scanner/completion behaviour remain unchanged.
  *
  * V482 EXACT HISTORICAL PONS V2 LAUNCH-EVENT DIAGNOSTIC:
  * - preserves V480 authenticated Blockscout PRO V2 address-info origin lookup;
@@ -1881,7 +1907,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V482";
+const VERSION = "V483";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71017,28 +71043,35 @@ for (
     },
 
     exactHistoricalPonsV2LaunchDiagnosticV482: {
-      enabled: true,
+      enabled: false,
+      retiredV483: true,
       diagnosticOnly: true,
+      activeRequestsPerScan: 0,
+      retirementReason:
+        "UNKNOWN_SOURCE_EXACT_PONS_V2_NO_MATCH_OBSERVED"
+    },
+
+    unknownLaunchMechanismFingerprintingV483: {
+      enabled: true,
+      measurementOnly: true,
       endpoint:
-        "BLOCKSCOUT_PRO_ETHERSCAN_COMPAT_LOGS",
-      exactFactory:
-        PONS_V2_FACTORY_V215,
-      exactTopic0:
-        PONS_V2_TOKEN_LAUNCHED_TOPIC_V215,
-      candidateRequiredAsIndexedTopic1:
+        "BLOCKSCOUT_PRO_ADDRESS_TRANSACTIONS",
+      addressInfoReusedWithoutExtraRequest:
         true,
-      strictDecoderReused:
-        "decodeDirectOnChainLaunchV476",
+      highestPriorityUnknownLiveOnly:
+        true,
       maxAdditionalRequestsPerScan:
         1,
-      replacesV481DiagnosticRequest:
+      persistentCrossTokenClustering:
         true,
+      recurringCounterpartyIsLaunchpad:
+        false,
+      recurringMethodIsLaunchMechanism:
+        false,
+      launchSourcePromotion:
+        false,
       hardGlobalRequestLimitUnchanged:
         42,
-      authoritativeLaunchSourcePromotion:
-        false,
-      launchMeterMutation:
-        false,
       scoringChanged:
         false,
       qualificationChanged:
@@ -83510,6 +83543,618 @@ function consumeReleasedGlobalSpareV478(
 
 
 
+
+function blockscoutProAddressTransactionsUrlV483(
+  env,
+  address
+) {
+  const clean = normalize(address);
+  const apiKey =
+    String(env?.BLOCKSCOUT_PRO_API_KEY || "").trim();
+
+  if (!isAddress(clean) || !apiKey) {
+    return null;
+  }
+
+  return (
+    `${BLOCKSCOUT_PRO}/${BLOCKSCOUT_PRO_CHAIN_ID}` +
+    `/api/v2/addresses/${clean}/transactions` +
+    `?apikey=${encodeURIComponent(apiKey)}`
+  );
+}
+
+function addressFromAnyV483(value) {
+  const candidate =
+    normalize(
+      value?.hash ||
+      value?.address_hash ||
+      value?.address ||
+      value ||
+      ""
+    );
+  return isAddress(candidate) ? candidate : null;
+}
+
+function txHashV483(row) {
+  const value =
+    normalize(
+      row?.hash ||
+      row?.transaction_hash ||
+      row?.transactionHash ||
+      ""
+    );
+  return /^0x[a-f0-9]{64}$/.test(value || "")
+    ? value
+    : null;
+}
+
+function blockNumberV483(row) {
+  const raw =
+    row?.block_number ??
+    row?.blockNumber ??
+    row?.block?.number ??
+    null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
+function methodFingerprintV483(row) {
+  const method =
+    String(
+      row?.method ||
+      row?.method_name ||
+      row?.decoded_input?.method_call ||
+      ""
+    ).trim();
+
+  const selectorRaw =
+    String(
+      row?.raw_input ||
+      row?.input ||
+      ""
+    ).trim().toLowerCase();
+
+  const selector =
+    /^0x[a-f0-9]{8}/.test(selectorRaw)
+      ? selectorRaw.slice(0, 10)
+      : null;
+
+  return {
+    method: method || null,
+    selector
+  };
+}
+
+function parseAddressTransactionsFingerprintV483(
+  body,
+  targetAddress
+) {
+  const target = normalize(targetAddress);
+  const items =
+    Array.isArray(body?.items)
+      ? body.items
+      : Array.isArray(body)
+        ? body
+        : [];
+
+  const counterparties = new Map();
+  const methods = new Map();
+  const blocks = [];
+  const txHashes = [];
+  let creationLikeRows = 0;
+
+  for (const row of items.slice(0, 50)) {
+    const hash = txHashV483(row);
+    if (hash && !txHashes.includes(hash)) {
+      txHashes.push(hash);
+    }
+
+    const block = blockNumberV483(row);
+    if (block !== null) {
+      blocks.push(block);
+    }
+
+    const from = addressFromAnyV483(
+      row?.from ||
+      row?.from_address ||
+      row?.from_address_hash
+    );
+    const to = addressFromAnyV483(
+      row?.to ||
+      row?.to_address ||
+      row?.to_address_hash
+    );
+
+    for (const address of [from, to]) {
+      if (
+        isAddress(address) &&
+        address !== target
+      ) {
+        counterparties.set(
+          address,
+          safeNumber(counterparties.get(address)) + 1
+        );
+      }
+    }
+
+    const method = methodFingerprintV483(row);
+    const methodKey =
+      method.method ||
+      method.selector ||
+      null;
+    if (methodKey) {
+      methods.set(
+        methodKey,
+        safeNumber(methods.get(methodKey)) + 1
+      );
+    }
+
+    if (
+      row?.created_contract ||
+      row?.created_contract_address_hash ||
+      row?.to === null ||
+      row?.to_address === null
+    ) {
+      creationLikeRows++;
+    }
+  }
+
+  const topCounterparties =
+    Array.from(counterparties.entries())
+      .map(([address, count]) => ({
+        address,
+        count
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+
+  const topMethods =
+    Array.from(methods.entries())
+      .map(([methodOrSelector, count]) => ({
+        methodOrSelector,
+        count
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+
+  return {
+    itemsReturned: items.length,
+    rowsSampled: Math.min(items.length, 50),
+    hasNextPage:
+      Boolean(body?.next_page_params),
+    minBlockInReturnedPage:
+      blocks.length ? Math.min(...blocks) : null,
+    maxBlockInReturnedPage:
+      blocks.length ? Math.max(...blocks) : null,
+    transactionHashesObserved:
+      txHashes.length,
+    sampleTransactionHashes:
+      txHashes.slice(0, 5),
+    creationLikeRows,
+    topCounterparties,
+    topMethods,
+    source:
+      "BLOCKSCOUT_PRO_ADDRESS_TRANSACTIONS_FINGERPRINT_V483"
+  };
+}
+
+function addressInfoStructuralFingerprintV483(
+  body
+) {
+  const implementations =
+    Array.isArray(body?.implementations)
+      ? body.implementations
+          .map(row =>
+            addressFromAnyV483(
+              row?.address ||
+              row?.address_hash ||
+              row
+            )
+          )
+          .filter(isAddress)
+          .slice(0, 10)
+      : [];
+
+  return {
+    proxyType:
+      typeof body?.proxy_type === "string"
+        ? body.proxy_type
+        : null,
+    implementationAddresses:
+      implementations,
+    isContract:
+      body?.is_contract === true,
+    creationStatus:
+      typeof body?.creation_status === "string"
+        ? body.creation_status
+        : null,
+    creatorPresent:
+      isAddress(
+        normalize(body?.creator_address_hash)
+      ),
+    creationTransactionPresent:
+      /^0x[a-f0-9]{64}$/.test(
+        normalize(body?.creation_transaction_hash) || ""
+      ),
+    source:
+      "BLOCKSCOUT_PRO_V2_ADDRESS_INFO_ZERO_EXTRA_REQUEST_V483"
+  };
+}
+
+function ensureMechanismFingerprintV483(state) {
+  state.unknownLaunchMechanismFingerprintV483 =
+    state.unknownLaunchMechanismFingerprintV483 &&
+    typeof state.unknownLaunchMechanismFingerprintV483 === "object"
+      ? state.unknownLaunchMechanismFingerprintV483
+      : {
+          enabled: true,
+          measurementOnly: true,
+          monitorStartedAt: Date.now(),
+          scansObserved: 0,
+          requestsAttempted: 0,
+          requestsSucceeded: 0,
+          fingerprintsCaptured: 0,
+          tokenFingerprints: {},
+          counterpartyClusters: {},
+          methodClusters: {},
+          lastStatus: null,
+          lastHttpStatus: null,
+          lastTarget: null,
+          lastUpdatedAt: null
+        };
+
+  const root =
+    state.unknownLaunchMechanismFingerprintV483;
+
+  root.tokenFingerprints =
+    root.tokenFingerprints &&
+    typeof root.tokenFingerprints === "object"
+      ? root.tokenFingerprints
+      : {};
+  root.counterpartyClusters =
+    root.counterpartyClusters &&
+    typeof root.counterpartyClusters === "object"
+      ? root.counterpartyClusters
+      : {};
+  root.methodClusters =
+    root.methodClusters &&
+    typeof root.methodClusters === "object"
+      ? root.methodClusters
+      : {};
+
+  return root;
+}
+
+function pruneMechanismFingerprintV483(state) {
+  const root = ensureMechanismFingerprintV483(state);
+  const now = Date.now();
+  const maxAge = 7 * 24 * 60 * 60 * 1000;
+
+  const entries =
+    Object.entries(root.tokenFingerprints)
+      .filter(([, row]) =>
+        safeNumber(row?.capturedAt) > 0 &&
+        now - safeNumber(row.capturedAt) <= maxAge
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(b[1]?.capturedAt) -
+          safeNumber(a[1]?.capturedAt)
+      )
+      .slice(0, 100);
+
+  root.tokenFingerprints =
+    Object.fromEntries(entries);
+
+  // Rebuild clusters from retained fingerprints so stale evidence disappears.
+  root.counterpartyClusters = {};
+  root.methodClusters = {};
+
+  for (const [token, fp] of entries) {
+    for (const row of fp?.transactions?.topCounterparties || []) {
+      const address = normalize(row?.address);
+      if (!isAddress(address)) continue;
+      const cluster =
+        root.counterpartyClusters[address] || {
+          address,
+          distinctTokens: 0,
+          totalObservedInteractions: 0,
+          tokens: [],
+          interpretation:
+            "RECURRING_COUNTERPARTY_NOT_PROOF_OF_LAUNCHPAD"
+        };
+      if (!cluster.tokens.includes(token)) {
+        cluster.tokens.push(token);
+        cluster.distinctTokens++;
+      }
+      cluster.totalObservedInteractions +=
+        safeNumber(row?.count);
+      root.counterpartyClusters[address] = cluster;
+    }
+
+    for (const row of fp?.transactions?.topMethods || []) {
+      const key =
+        String(row?.methodOrSelector || "").trim();
+      if (!key) continue;
+      const cluster =
+        root.methodClusters[key] || {
+          methodOrSelector: key,
+          distinctTokens: 0,
+          totalObserved: 0,
+          tokens: [],
+          interpretation:
+            "RECURRING_METHOD_NOT_PROOF_OF_LAUNCH_MECHANISM"
+        };
+      if (!cluster.tokens.includes(token)) {
+        cluster.tokens.push(token);
+        cluster.distinctTokens++;
+      }
+      cluster.totalObserved += safeNumber(row?.count);
+      root.methodClusters[key] = cluster;
+    }
+  }
+
+  return root;
+}
+
+async function runUnknownLaunchMechanismFingerprintV483({
+  env,
+  state,
+  budget,
+  address,
+  addressInfoBody
+}) {
+  const clean = normalize(address);
+  const root = pruneMechanismFingerprintV483(state);
+  root.scansObserved =
+    safeNumber(root.scansObserved) + 1;
+
+  const telemetry = {
+    enabled: true,
+    measurementOnly: true,
+    promotionAllowed: false,
+    targetAddress:
+      isAddress(clean) ? clean : null,
+    attempted: false,
+    requestConsumed: false,
+    budgetRouteV483: null,
+    endpointV483:
+      "https://api.blockscout.com/4663/api/v2/addresses/{address}/transactions?apikey=[REDACTED]",
+    maxAdditionalRequestsPerScan: 1,
+    hardRequestLimit: 42,
+    addressInfoStructuralFingerprint:
+      addressInfoStructuralFingerprintV483(
+        addressInfoBody || {}
+      ),
+    transactions: null,
+    recurringCounterparties: [],
+    recurringMethods: [],
+    launchpadIdentityInferred: false,
+    factoryIdentityInferred: false,
+    routerIdentityInferred: false,
+    launchSourcePromoted: false,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false,
+    httpStatus: null,
+    status: null
+  };
+
+  if (!isAddress(clean)) {
+    telemetry.status =
+      "V483_INVALID_TARGET";
+    root.lastStatus = telemetry.status;
+    return telemetry;
+  }
+
+  const url =
+    blockscoutProAddressTransactionsUrlV483(
+      env,
+      clean
+    );
+
+  if (!url) {
+    telemetry.status =
+      "V483_BLOCKSCOUT_PRO_NOT_CONFIGURED";
+    root.lastStatus = telemetry.status;
+    return telemetry;
+  }
+
+  const spare =
+    consumeReleasedGlobalSpareV478(
+      budget,
+      "BLOCKSCOUT_PRO_UNKNOWN_LAUNCH_TRANSACTION_FINGERPRINT_V483",
+      1
+    );
+
+  if (spare?.ok !== true) {
+    telemetry.status =
+      `V483_BUDGET_UNAVAILABLE:${spare?.reason || "UNKNOWN"}`;
+    telemetry.budgetRouteV483 = "NONE";
+    root.lastStatus = telemetry.status;
+    return telemetry;
+  }
+
+  telemetry.attempted = true;
+  telemetry.requestConsumed = true;
+  telemetry.budgetRouteV483 =
+    "POST_TELEGRAM_GLOBAL_SPARE_V478";
+  root.requestsAttempted =
+    safeNumber(root.requestsAttempted) + 1;
+  root.lastTarget = clean;
+
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(),
+    5000
+  );
+
+  try {
+    const response = await fetch(
+      url,
+      {
+        method: "GET",
+        headers: {
+          accept: "application/json"
+        },
+        signal: controller.signal
+      }
+    );
+
+    telemetry.httpStatus = response.status;
+    root.lastHttpStatus = response.status;
+
+    if (!response.ok) {
+      telemetry.status =
+        `V483_HTTP_${response.status}`;
+      root.lastStatus = telemetry.status;
+      return telemetry;
+    }
+
+    const body = await response.json();
+    const txFingerprint =
+      parseAddressTransactionsFingerprintV483(
+        body,
+        clean
+      );
+
+    telemetry.transactions = txFingerprint;
+
+    const fingerprint = {
+      token: clean,
+      capturedAt: Date.now(),
+      addressInfo:
+        telemetry.addressInfoStructuralFingerprint,
+      transactions:
+        txFingerprint,
+      evidenceMeaning:
+        "MECHANISM_FINGERPRINT_ONLY_NOT_LAUNCH_SOURCE_PROOF",
+      launchSource:
+        "DATA UNVERIFIED"
+    };
+
+    root.tokenFingerprints[clean] =
+      fingerprint;
+    root.requestsSucceeded =
+      safeNumber(root.requestsSucceeded) + 1;
+    root.fingerprintsCaptured =
+      safeNumber(root.fingerprintsCaptured) + 1;
+    root.lastUpdatedAt = fingerprint.capturedAt;
+
+    pruneMechanismFingerprintV483(state);
+
+    telemetry.recurringCounterparties =
+      Object.values(root.counterpartyClusters || {})
+        .filter(row =>
+          safeNumber(row?.distinctTokens) >= 2
+        )
+        .sort(
+          (a, b) =>
+            safeNumber(b?.distinctTokens) -
+            safeNumber(a?.distinctTokens)
+        )
+        .slice(0, 10);
+
+    telemetry.recurringMethods =
+      Object.values(root.methodClusters || {})
+        .filter(row =>
+          safeNumber(row?.distinctTokens) >= 2
+        )
+        .sort(
+          (a, b) =>
+            safeNumber(b?.distinctTokens) -
+            safeNumber(a?.distinctTokens)
+        )
+        .slice(0, 10);
+
+    telemetry.status =
+      txFingerprint.itemsReturned > 0
+        ? "V483_TRANSACTION_FINGERPRINT_CAPTURED"
+        : "V483_HTTP_200_NO_TRANSACTION_ROWS";
+
+    root.lastStatus = telemetry.status;
+    return telemetry;
+  } catch (error) {
+    telemetry.status =
+      `V483_FETCH_ERROR:${errorString(error)}`;
+    root.lastStatus = telemetry.status;
+    return telemetry;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function mechanismFingerprintSnapshotV483(state) {
+  const root = pruneMechanismFingerprintV483(state);
+
+  const recurringCounterparties =
+    Object.values(root.counterpartyClusters || {})
+      .filter(row =>
+        safeNumber(row?.distinctTokens) >= 2
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(b?.distinctTokens) -
+          safeNumber(a?.distinctTokens)
+      )
+      .slice(0, 20);
+
+  const recurringMethods =
+    Object.values(root.methodClusters || {})
+      .filter(row =>
+        safeNumber(row?.distinctTokens) >= 2
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(b?.distinctTokens) -
+          safeNumber(a?.distinctTokens)
+      )
+      .slice(0, 20);
+
+  return {
+    enabled: true,
+    measurementOnly: true,
+    monitorStartedAt:
+      safeNumber(root.monitorStartedAt) || null,
+    scansObserved:
+      safeNumber(root.scansObserved),
+    requestsAttempted:
+      safeNumber(root.requestsAttempted),
+    requestsSucceeded:
+      safeNumber(root.requestsSucceeded),
+    fingerprintsCaptured:
+      safeNumber(root.fingerprintsCaptured),
+    retainedTokenFingerprints:
+      Object.keys(root.tokenFingerprints || {}).length,
+    recurringCounterpartyCount:
+      recurringCounterparties.length,
+    recurringCounterparties,
+    recurringMethodCount:
+      recurringMethods.length,
+    recurringMethods,
+    recentFingerprints:
+      Object.values(root.tokenFingerprints || {})
+        .sort(
+          (a, b) =>
+            safeNumber(b?.capturedAt) -
+            safeNumber(a?.capturedAt)
+        )
+        .slice(0, 10),
+    lastStatus:
+      root.lastStatus || null,
+    lastHttpStatus:
+      root.lastHttpStatus ?? null,
+    lastTarget:
+      root.lastTarget || null,
+    launchpadIdentityInferenceAllowed:
+      false,
+    launchSourcePromotionAllowed:
+      false,
+    hardGlobalLimitUnchanged:
+      42
+  };
+}
+
 function indexedAddressTopicV482(address) {
   const clean =
     normalize(address);
@@ -84336,12 +84981,21 @@ async function traceUnknownLiveOriginsV477({
         "RETIRED_AFTER_HTTP_200_OK_ZERO_ROWS_V482"
     },
     exactPonsV2LaunchDiagnosticV482: {
-      enabled: true,
+      enabled: false,
+      retiredV483: true,
       diagnosticOnly: true,
       promotionAllowed: false,
       attempted: false,
       status:
-        "NOT_NEEDED_OR_NOT_RUN_V482"
+        "RETIRED_AFTER_EXACT_UNKNOWN_SOURCE_NO_MATCH_V483"
+    },
+    unknownLaunchMechanismFingerprintV483: {
+      enabled: true,
+      measurementOnly: true,
+      promotionAllowed: false,
+      attempted: false,
+      status:
+        "NOT_NEEDED_OR_NOT_RUN_V483"
     },
     launchpadIdentityInferred: false,
     status: null
@@ -84508,12 +85162,10 @@ async function traceUnknownLiveOriginsV477({
       };
 
       /*
-       * V482 diagnostic only. V481 getcontractcreation is retired from active
-       * execution after returning HTTP 200 / OK with zero rows.
-       *
-       * V482 tests one exact known Pons V2 TokenLaunched event using:
-       * factory + topic0 + indexed candidate topic1 + strict V476 ABI decode.
-       * The result is intentionally NOT promoted in V482.
+       * V483 mechanism fingerprinting replaces repeated Pons-only testing.
+       * It reuses the already-fetched V480 address-info body at zero extra
+       * cost, plus at most ONE post-Telegram address-transactions request.
+       * No result is promoted to launch-source proof in V483.
        */
       if (
         Boolean(row?.isContract) &&
@@ -84522,12 +85174,15 @@ async function traceUnknownLiveOriginsV477({
           !row?.creationTransactionHash
         )
       ) {
-        telemetry.exactPonsV2LaunchDiagnosticV482 =
-          await runExactPonsV2LaunchDiagnosticV482({
+        telemetry.unknownLaunchMechanismFingerprintV483 =
+          await runUnknownLaunchMechanismFingerprintV483({
             env,
+            state,
             budget,
             address:
-              targetAddress
+              targetAddress,
+            addressInfoBody:
+              body
           });
       }
     } else {
@@ -84600,73 +85255,11 @@ async function traceUnknownLiveOriginsV477({
      * Preserve historical V481 counters for audit, but do not run/increment
      * V481 after V482.
      */
-    root.exactPonsV2LaunchDiagnosticV482 =
-      root.exactPonsV2LaunchDiagnosticV482 &&
-      typeof root.exactPonsV2LaunchDiagnosticV482 === "object"
-        ? root.exactPonsV2LaunchDiagnosticV482
-        : {
-            enabled: true,
-            diagnosticOnly: true,
-            attempts: 0,
-            http200: 0,
-            exactMatches: 0,
-            lastStatus: null,
-            lastHttpStatus: null,
-            lastAttemptAt: null,
-            lastMatchedToken: null
-          };
-
-    if (
-      telemetry.exactPonsV2LaunchDiagnosticV482
-        ?.attempted === true
-    ) {
-      const diag =
-        telemetry.exactPonsV2LaunchDiagnosticV482;
-
-      root.exactPonsV2LaunchDiagnosticV482.attempts =
-        safeNumber(
-          root.exactPonsV2LaunchDiagnosticV482
-            .attempts
-        ) + 1;
-
-      root.exactPonsV2LaunchDiagnosticV482.lastAttemptAt =
-        Date.now();
-
-      root.exactPonsV2LaunchDiagnosticV482.lastStatus =
-        diag.status || null;
-
-      root.exactPonsV2LaunchDiagnosticV482.lastHttpStatus =
-        diag.httpStatus ?? null;
-
-      if (diag.httpStatus === 200) {
-        root.exactPonsV2LaunchDiagnosticV482.http200 =
-          safeNumber(
-            root.exactPonsV2LaunchDiagnosticV482
-              .http200
-          ) + 1;
-      }
-
-      if (
-        diag.status ===
-          "V482_DIAGNOSTIC_EXACT_PONS_V2_TOKENLAUNCHED_PROVEN" &&
-        isAddress(
-          normalize(
-            diag?.strictMatch?.token
-          )
-        )
-      ) {
-        root.exactPonsV2LaunchDiagnosticV482.exactMatches =
-          safeNumber(
-            root.exactPonsV2LaunchDiagnosticV482
-              .exactMatches
-          ) + 1;
-
-        root.exactPonsV2LaunchDiagnosticV482.lastMatchedToken =
-          normalize(
-            diag.strictMatch.token
-          );
-      }
-    }
+    /*
+     * V482 diagnostic counters are retained in state for audit but no longer
+     * incremented in V483. V483 persists its own bounded fingerprint state
+     * inside runUnknownLaunchMechanismFingerprintV483().
+     */
 
     root.requestsSucceeded =
       safeNumber(root.requestsSucceeded) + 1;
@@ -84816,6 +85409,8 @@ function tokenOriginTraceSnapshotV477(state) {
       launchMeterMutation:
         false
     },
+    unknownLaunchMechanismFingerprintV483:
+      mechanismFingerprintSnapshotV483(state),
     interpretation: {
       contractCreatorVerifiedFromBlockscoutV2:
         true,
