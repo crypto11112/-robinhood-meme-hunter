@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V436
- * AUTHORITATIVE RUNTIME VERSION: V436
+ * Robinhood Chain Meme Hunter — V437
+ * AUTHORITATIVE RUNTIME VERSION: V437
+ * V437 is a narrow holder-evidence recovery upgrade based on V436 diagnostics. It preserves the existing V422 verified-empty holder retry and extends that same bounded retry mechanism to Blockscout holder-endpoint unavailable/404 evidence. Zero-row responses keep the existing 2-minute retry cadence; holder endpoint unavailable/404 uses a slower 5-minute retry cadence. The retry remains forward-only and bounded by the existing V422 45-minute maximum age. A retry never promotes holder evidence unless real holder rows are later returned and the existing integrity/concentration/whale checks pass. No holder data is fabricated and no scoring, market verification, Telegram threshold, request ceiling, Chainstack/RPC behavior, or provider trust rule is weakened.
  * V436 is a diagnostic-only build on the proven V435 live-discovery fix. It adds a zero-request, zero-write candidate blocker diagnostic for returned candidates so each analysed candidate exposes the exact market, holder, and Telegram gating evidence that stopped or allowed progression. The diagnostic records Dex/Gecko market outcome already attached to the candidate, provider availability/cooldown evidence already present, holder integrity/source/Blockscout fallback evidence, and the exact existing Telegram qualification reasons. No provider order, retry cadence, request ceiling, scoring, qualification, holder requirement, market verification rule, Telegram threshold, or learning behavior is changed.
  * V435 is a narrow live-discovery reliability build on V434. Chainstack is now the preferred provider for LIVE discovery eth_getLogs only, using the already-configured CHAINSTACK_RPC_URL and the existing discovery-live request/global budgets. Robinhood Public RPC and Alchemy remain bounded fallbacks. Backlog discovery/provider learning is deliberately left unchanged so existing public/Alchemy proven-range logic cannot be regressed by this change. V435 adds an independent live-discovery Chainstack cooldown on HTTP 429 and live-provider telemetry. No extra request ceiling, no additional scheduled scans, no scoring/qualification/Telegram/holder/market changes, and no weakening of verification requirements.
  * V434 builds directly on V433 and adds a read-only Telegram command, /chainstack, for the V433 Chainstack bot-side usage meter. The command reads persisted state only, triggers no scanner run, makes zero external provider/RPC requests, and performs no state write. It reports observed calendar-month Chainstack requests, latest-scan requests, scans using Chainstack, average/day, projected 30-day usage, planning allowance, percentage used/projected, and remaining planning allowance. It clearly labels the values as bot-side estimates and the Chainstack dashboard as authoritative. No RPC, market-data, scoring, qualification, Telegram alert threshold, request-budget, holder, learning, or V433 fallback behavior is changed.
@@ -1510,7 +1511,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V436";
+const VERSION = "V437";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2702,6 +2703,9 @@ const HOLDER_COUNT_DISPLAY_CACHE_MS_V225 =
  */
 const HOLDER_INDEX_LAG_RETRY_MS_V422 =
   2 * 60 * 1000;
+
+const HOLDER_ENDPOINT_UNAVAILABLE_RETRY_MS_V437 =
+  5 * 60 * 1000;
 
 const HOLDER_INDEX_LAG_MAX_AGE_MS_V422 =
   45 * 60 * 1000;
@@ -35666,7 +35670,8 @@ function holderIndexLagStateV422(watched) {
       retryAfterMs: 0,
       attempts: 0,
       lastSource: null,
-      lastStatus: null
+      lastStatus: null,
+      failureClassV437: null
     };
   }
 
@@ -35689,7 +35694,9 @@ function holderIndexLagStateV422(watched) {
       retryAfterMs: 0,
       attempts: safeNumber(row.attempts),
       lastSource: row.lastSource || null,
-      lastStatus: row.lastStatus || null
+      lastStatus: row.lastStatus || null,
+      failureClassV437:
+        row.failureClassV437 || null
     };
   }
 
@@ -35708,14 +35715,19 @@ function holderIndexLagStateV422(watched) {
         : 0,
     attempts: safeNumber(row.attempts),
     lastSource: row.lastSource || null,
-    lastStatus: row.lastStatus || null
+    lastStatus: row.lastStatus || null,
+    failureClassV437:
+      row.failureClassV437 || null
   };
 }
 
 function registerHolderIndexLagV422(
   watched,
   source,
-  status = "NO_HOLDER_ROWS"
+  status = "NO_HOLDER_ROWS",
+  retryMs =
+    HOLDER_INDEX_LAG_RETRY_MS_V422,
+  failureClassV437 = null
 ) {
   if (!watched || typeof watched !== "object") {
     return null;
@@ -35734,12 +35746,26 @@ function registerHolderIndexLagV422(
       safeNumber(previous.firstSeenAt) || nowMs,
     lastSeenAt: nowMs,
     nextRetryAt:
-      nowMs + HOLDER_INDEX_LAG_RETRY_MS_V422,
+      nowMs +
+      Math.max(
+        HOLDER_INDEX_LAG_RETRY_MS_V422,
+        safeNumber(retryMs)
+      ),
     attempts:
       safeNumber(previous.attempts) + 1,
     lastSource: source || null,
     lastStatus: status || "NO_HOLDER_ROWS",
-    verifiedEmptyResponse: true,
+    failureClassV437:
+      failureClassV437 ||
+      previous.failureClassV437 ||
+      (
+        status === "NO_HOLDER_ROWS"
+          ? "ZERO_ROWS_INDEXING_LAG"
+          : null
+      ),
+    verifiedEmptyResponse:
+      status === "NO_HOLDER_ROWS" ||
+      status === "VERIFIED_EMPTY_RETRY_V422",
     concentrationStillUnverified: true,
     qualificationRequirementUnchanged: true
   };
@@ -35774,6 +35800,22 @@ function holderOnlyTelegramBlockerV422(candidate) {
     Array.isArray(reasons) &&
     reasons.length === 1 &&
     reasons[0] === "HOLDER_EVIDENCE_UNVERIFIED"
+  );
+}
+
+function registerHolderEndpointUnavailableV437(
+  watched,
+  source,
+  status
+) {
+  return registerHolderIndexLagV422(
+    watched,
+    source ||
+      "BLOCKSCOUT",
+    status ||
+      "BLOCKSCOUT_HOLDERS_UNAVAILABLE",
+    HOLDER_ENDPOINT_UNAVAILABLE_RETRY_MS_V437,
+    "HOLDER_ENDPOINT_UNAVAILABLE"
   );
 }
 
@@ -36259,6 +36301,45 @@ async function holderIntelligence(
         holderIndexLagV422:
           nextStateV422,
         holderIndexLagRetryV422
+      };
+    } else if (
+      retryV422?.success !== true &&
+      (
+        retryV422?.http404V146 === true ||
+        retryV422?.httpStatus === 404 ||
+        retryV422?.status ===
+          "BLOCKSCOUT_PRO_HOLDER_DATA_UNAVAILABLE_404_V146"
+      )
+    ) {
+      const nextStateV437 =
+        registerHolderEndpointUnavailableV437(
+          watched,
+          "BLOCKSCOUT_PRO_V143",
+          retryV422?.status ||
+            "BLOCKSCOUT_PRO_HOLDER_DATA_UNAVAILABLE_404_V146"
+        );
+
+      return {
+        ...unverifiedHolders(
+          "HOLDER_ENDPOINT_UNAVAILABLE_RETRY_V437"
+        ),
+        holderSource:
+          "BLOCKSCOUT_PRO_V143",
+        blockscoutProHolderFallbackV143,
+        blockscoutProCounterFallbackV247,
+        holderIndexLagV422:
+          nextStateV437,
+        holderIndexLagRetryV422: {
+          ...holderIndexLagRetryV422,
+          status:
+            retryV422?.status ||
+            "BLOCKSCOUT_PRO_HOLDER_DATA_UNAVAILABLE_404_V146",
+          rescheduledByV437:
+            true,
+          nextRetryAt:
+            nextStateV437?.nextRetryAt ||
+            null
+        }
       };
     }
   }
@@ -36797,6 +36878,21 @@ async function holderIntelligence(
       };
     }
 
+    const holderEndpointRetryV437 =
+      (
+        blockscoutProHolderFallbackV143?.http404V146 === true ||
+        blockscoutProHolderFallbackV143?.httpStatus === 404 ||
+        blockscoutProHolderFallbackV143?.status ===
+          "BLOCKSCOUT_PRO_HOLDER_DATA_UNAVAILABLE_404_V146"
+      )
+        ? registerHolderEndpointUnavailableV437(
+            watched,
+            "BLOCKSCOUT_PRO_V143",
+            blockscoutProHolderFallbackV143?.status ||
+              "BLOCKSCOUT_HOLDERS_UNAVAILABLE"
+          )
+        : null;
+
     return {
       ...unverifiedHolders(
         "BLOCKSCOUT_HOLDERS_UNAVAILABLE"
@@ -36815,8 +36911,29 @@ async function holderIntelligence(
 
       holderSource:
         "BLOCKSCOUT",
+
+      holderIndexLagV422:
+        holderEndpointRetryV437,
+
+      holderEndpointRecoveryV437:
+        holderEndpointRetryV437
+          ? {
+              enabled: true,
+              failureClass:
+                "HOLDER_ENDPOINT_UNAVAILABLE",
+              retryAfterMs:
+                holderEndpointRetryV437.retryAfterMs,
+              nextRetryAt:
+                holderEndpointRetryV437.nextRetryAt,
+              maxAgeMs:
+                HOLDER_INDEX_LAG_MAX_AGE_MS_V422,
+              qualificationRequirementUnchanged:
+                true
+            }
+          : null,
+
       blockscoutProHolderFallbackV143,
-        blockscoutProCounterFallbackV247
+      blockscoutProCounterFallbackV247
     };
   }
 
@@ -43702,6 +43819,32 @@ function returnedCandidateBlockerDiagnosticV436(
 
         holderIndexLagRetryV422:
           holderIndexLag,
+
+        holderEndpointRecoveryV437:
+          holders
+            ?.holderEndpointRecoveryV437 ||
+          (
+            holders
+              ?.holderIndexLagV422
+              ?.failureClassV437 ===
+              "HOLDER_ENDPOINT_UNAVAILABLE"
+              ? {
+                  enabled: true,
+                  failureClass:
+                    "HOLDER_ENDPOINT_UNAVAILABLE",
+                  nextRetryAt:
+                    holders
+                      ?.holderIndexLagV422
+                      ?.nextRetryAt ||
+                    null,
+                  retryAfterMs:
+                    holders
+                      ?.holderIndexLagV422
+                      ?.retryAfterMs ||
+                    0
+                }
+              : null
+          ),
 
         primaryBlocker:
           (
@@ -55350,6 +55493,16 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    holderEvidenceRecoveryUpgradeV437: {
+      enabled: true,
+      zeroRowsRetryMs: 120000,
+      endpointUnavailableRetryMs: 300000,
+      maxRetryAgeMs: 2700000,
+      endpoint404NowUsesBoundedRetry: true,
+      holderVerificationStandardsChanged: false,
+      externalRequestsAdded: 0,
+      requestCeilingChanged: false
+    },
     returnedCandidateBlockerDiagnosticV436: {
       enabled: true,
       diagnosticOnly: true,
@@ -60946,6 +61099,26 @@ for (
 
     returnedCandidateBlockerDiagnosticV436:
       candidateBlockersV436,
+
+    holderEvidenceRecoveryUpgradeV437: {
+      enabled: true,
+      zeroRowsRetryMs:
+        HOLDER_INDEX_LAG_RETRY_MS_V422,
+      endpointUnavailableRetryMs:
+        HOLDER_ENDPOINT_UNAVAILABLE_RETRY_MS_V437,
+      maxRetryAgeMs:
+        HOLDER_INDEX_LAG_MAX_AGE_MS_V422,
+      zeroRowsUsesExistingV422Path:
+        true,
+      endpoint404NowUsesBoundedRetry:
+        true,
+      holderVerificationStandardsChanged:
+        false,
+      externalRequestsAdded:
+        0,
+      requestCeilingChanged:
+        false
+    },
 
     notificationReserveReleaseV174,
 
