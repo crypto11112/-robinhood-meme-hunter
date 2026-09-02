@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V439
- * AUTHORITATIVE RUNTIME VERSION: V439
+ * Robinhood Chain Meme Hunter — V440
+ * AUTHORITATIVE RUNTIME VERSION: V440
+ * V440 is a narrow evidence-completion prioritisation build based on the V439 split-evidence scan. It does not add requests or weaken any qualification rule. When the scarce fresh-market slot is being ranked, a candidate with fully verified cached holder evidence but no verified usable market cache receives a bounded completion bonus, so candidates already one major evidence component away from a full decision are favoured over equally viable incomplete candidates. Existing V422/V437/V439 holder-retry candidates remain separately protected and are still inserted before ordinary analysis when their retry is due. Existing V139 fairness, V159 fresh-market handoff, V166 partial-holder release, terminal pruning, request ceilings, scoring outputs and Telegram thresholds remain unchanged. V440 adds telemetry showing which selected tokens had market-ready/holder-ready evidence and whether the fresh-market target received the evidence-completion bonus.
  * V439 is a narrow holder-recovery fix based on the V438 scan where a market-verified candidate was blocked only because Blockscout Pro was already in cooldown. V439 extends the existing bounded V422/V437 holder retry state to Blockscout Pro cooldown responses. If the authenticated holder provider is cooling, the candidate is retained with a retry scheduled no earlier than the provider's own cooldown expiry (plus a small safety margin), rather than returning HOLDER_EVIDENCE_UNVERIFIED without a retry state. The same behavior applies when a due V422/V437 holder retry encounters an active Blockscout Pro cooldown. No provider is called early, no cooldown is bypassed, no holder evidence is fabricated, and the existing 45-minute holder-recovery maximum age remains. No market/RPC/Chainstack/scoring/qualification/Telegram/request-ceiling behavior changes.
  * V438 begins the independent on-chain market-verification path without weakening existing market/liquidity gates. It reuses the bot's existing exact-pool V4 directional ledger (V179+) and only accepts candidate-matched swaps whose quote value is already independently exact-USD verified through canonical USDG or canonical WETH/native ETH with the existing verified WETH/USDG reference. From those real executed swaps, V438 derives a bounded recent observed execution-price sample, median observed USD price, fully-diluted supply valuation from the already-verified ERC-20 totalSupply/decimals, and the largest verified observed USD trade as an execution-capacity observation. These values are kept in a separate nested evidence object and DO NOT set market.verified, DO NOT populate core liquidityUsd, and DO NOT bypass the existing minimum-liquidity or Telegram gates. This is the safe foundation for removing DexScreener/Gecko dependence: it tells us whether the bot already has enough exact on-chain price evidence, while explicitly identifying USD liquidity as the remaining proof requirement. No extra external requests, no new provider, no scoring change, no Telegram threshold change, no request-ceiling increase, and no holder/RPC behavior change.
  * V437 is a narrow holder-evidence recovery upgrade based on V436 diagnostics. It preserves the existing V422 verified-empty holder retry and extends that same bounded retry mechanism to Blockscout holder-endpoint unavailable/404 evidence. Zero-row responses keep the existing 2-minute retry cadence; holder endpoint unavailable/404 uses a slower 5-minute retry cadence. The retry remains forward-only and bounded by the existing V422 45-minute maximum age. A retry never promotes holder evidence unless real holder rows are later returned and the existing integrity/concentration/whale checks pass. No holder data is fabricated and no scoring, market verification, Telegram threshold, request ceiling, Chainstack/RPC behavior, or provider trust rule is weakened.
@@ -1513,7 +1514,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V439";
+const VERSION = "V440";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -51248,6 +51249,57 @@ function freshUsableVerifiedMarketCacheV159(
   );
 }
 
+const EVIDENCE_COMPLETION_MARKET_BONUS_V440 =
+  140;
+
+function evidenceCompletionStateV440(
+  token
+) {
+  const marketVerified =
+    freshUsableVerifiedMarketCacheV159(
+      token
+    );
+
+  const holders =
+    token
+      ?.holderCache
+      ?.data;
+
+  const holderVerified =
+    holders
+      ?.integrity
+      ?.verified ===
+      true &&
+    holders
+      ?.concentrationVerified ===
+      true &&
+    holders
+      ?.whale
+      ?.verified ===
+      true;
+
+  const holderRetry =
+    holderIndexLagStateV422(
+      token
+    );
+
+  return {
+    marketVerified,
+    holderVerified,
+    missingMarketOnlyMajorEvidence:
+      holderVerified &&
+      !marketVerified,
+    missingHolderOnlyMajorEvidence:
+      marketVerified &&
+      !holderVerified,
+    holderRetryActive:
+      holderRetry?.active === true,
+    holderRetryDue:
+      holderRetry?.active === true &&
+      holderRetry?.due === true
+  };
+}
+
 function marketFreshPriorityScore(
   token,
   newTokens,
@@ -51296,6 +51348,11 @@ function marketFreshPriorityScore(
       ?.verified ===
       true;
 
+  const evidenceCompletionV440 =
+    evidenceCompletionStateV440(
+      token
+    );
+
   const concentration =
     holders
       ?.whale
@@ -51325,6 +51382,22 @@ function marketFreshPriorityScore(
   else {
     score -=
       160;
+  }
+
+  /*
+   * V440:
+   * The scarce fresh-market slot should preferentially complete a candidate
+   * that already has fully verified holder/concentration/whale evidence.
+   * This is ranking only. It does not alter the final Opportunity score,
+   * Confidence, Risk, liquidity requirement, or Telegram qualification.
+   */
+  if (
+    evidenceCompletionV440
+      .missingMarketOnlyMajorEvidence ===
+      true
+  ) {
+    score +=
+      EVIDENCE_COMPLETION_MARKET_BONUS_V440;
   }
 
   if (
@@ -55211,16 +55284,33 @@ for (
           )
       )
       .map(
-        token => ({
-          token,
+        token => {
+          const completionV440 =
+            evidenceCompletionStateV440(
+              token
+            );
 
-          score:
-            marketFreshPriorityScore(
-              token,
-              newTokens,
-              liveTokens
-            )
-        })
+          return {
+            token,
+
+            score:
+              marketFreshPriorityScore(
+                token,
+                newTokens,
+                liveTokens
+              ),
+
+            evidenceCompletionV440:
+              completionV440,
+
+            evidenceCompletionBonusV440:
+              completionV440
+                .missingMarketOnlyMajorEvidence ===
+                true
+                ? EVIDENCE_COMPLETION_MARKET_BONUS_V440
+                : 0
+          };
+        }
       )
       .sort(
         (a, b) =>
@@ -55456,6 +55546,88 @@ for (
     normalize(
       marketFreshTarget?.address
     );
+
+  const selectedMarketFreshRowV440 =
+    marketFreshTargetAddress
+      ? (
+          rankedMarketFreshCandidates
+            .find(
+              row =>
+                normalize(
+                  row?.token?.address
+                ) ===
+                  marketFreshTargetAddress
+            ) ||
+          null
+        )
+      : null;
+
+  const priorityEvidenceCompletionV440 = {
+    enabled: true,
+    marketCompletionBonus:
+      EVIDENCE_COMPLETION_MARKET_BONUS_V440,
+    selectedFreshMarketAddress:
+      marketFreshTargetAddress ||
+      null,
+    selectedFreshMarketSymbol:
+      marketFreshTarget
+        ?.metadata?.symbol ||
+      marketFreshTarget
+        ?.symbol ||
+      null,
+    selectedReceivedCompletionBonus:
+      safeNumber(
+        selectedMarketFreshRowV440
+          ?.evidenceCompletionBonusV440
+      ) > 0,
+    selectedCompletionState:
+      selectedMarketFreshRowV440
+        ?.evidenceCompletionV440 ||
+      (
+        marketFreshTarget
+          ? evidenceCompletionStateV440(
+              marketFreshTarget
+            )
+          : null
+      ),
+    rankedCandidates:
+      rankedMarketFreshCandidates
+        .slice(0, MAX_TOKEN_CHECKS)
+        .map(
+          row => ({
+            address:
+              normalize(
+                row?.token?.address
+              ) ||
+              null,
+            symbol:
+              row?.token?.metadata?.symbol ||
+              row?.token?.symbol ||
+              null,
+            priorityScore:
+              safeNumber(
+                row?.score
+              ),
+            completionBonus:
+              safeNumber(
+                row?.evidenceCompletionBonusV440
+              ),
+            completionState:
+              row?.evidenceCompletionV440 ||
+              null
+          })
+        ),
+    holderRetryStillSeparatelyProtected:
+      true,
+    scoringOutputsChanged:
+      false,
+    qualificationChanged:
+      false,
+    requestCeilingChanged:
+      false,
+    externalRequestsAdded:
+      0
+  };
 
   const retryPersistenceAddressV139 =
     retryFairnessOverrideV139 ||
@@ -56143,6 +56315,21 @@ for (
       completedEvidence: 0,
       minimumStageBudgetProtected: 0,
       candidates: []
+    },
+    priorityEvidenceCompletionV440: {
+      enabled: true,
+      marketCompletionBonus:
+        EVIDENCE_COMPLETION_MARKET_BONUS_V440,
+      holderRetryStillSeparatelyProtected:
+        true,
+      scoringOutputsChanged:
+        false,
+      qualificationChanged:
+        false,
+      externalRequestsAdded:
+        0,
+      requestCeilingChanged:
+        false
     },
     holderProviderCooldownRecoveryV439: {
       enabled: true,
@@ -61787,6 +61974,9 @@ for (
       requestCeilingChanged:
         false
     },
+
+    priorityEvidenceCompletionV440:
+      priorityEvidenceCompletionV440,
 
     holderProviderCooldownRecoveryV439: {
       enabled: true,
