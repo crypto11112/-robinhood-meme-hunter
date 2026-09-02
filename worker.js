@@ -1,6 +1,35 @@
 /**
- * Robinhood Chain Meme Hunter — V493
- * AUTHORITATIVE RUNTIME VERSION: V493
+ * Robinhood Chain Meme Hunter — V494
+ * AUTHORITATIVE RUNTIME VERSION: V494
+ *
+ * V494 RECURRING EXACT LAUNCH-MECHANISM CONFIRMATION:
+ * - preserves all confirmed-working V493/V492/V491/V490/V489/V488/V487/V486/V485/V484/V483;
+ * - consumes V493's exact verified trigger-target contract profile;
+ * - uses the exact V492 target + method + selector as the recurrence signature:
+ *     target 0xce9c48cfa068947f77738c81be406b53338e5b0d
+ *     method createLaunch
+ *     selector 0x3feab1d8
+ * - stage A queries the authenticated Blockscout Pro target transaction page
+ *   and records distinct successful createLaunch transactions to that exact target;
+ * - the already-proven V492 creation transaction is excluded from recurrence;
+ * - stage B, on a later eligible scan, queries one candidate transaction's
+ *   internal-transactions endpoint and requires an exact created_contract row
+ *   whose source is the already-verified LaunchTokenDeployer;
+ * - records CREATE/CREATE2 only when Blockscout explicitly supplies that type;
+ * - a second distinct exact created-contract deployment through the same
+ *   target + selector + verified deployer upgrades the mechanism to
+ *   RECURRING_EXACT_DEPLOYMENT_PATH_CONFIRMED, but still does not label the
+ *   created address ERC20 unless existing bot evidence independently proves it;
+ * - if the created address is already a bot-verified ERC20 in retained evidence,
+ *   V494 records SECOND_INDEPENDENT_VERIFIED_TOKEN_PATH_CONFIRMED;
+ * - one provider page is not treated as exhaustive and provider ordering is
+ *   not assumed;
+ * - max ONE secondary diagnostic request per scan remains;
+ * - V494 gets priority before V493/V492/V491/V490/V489/V486 backlog work;
+ * - current/live V485 stays absolute priority; V487 fairness stays authoritative;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, launch meter,
+ *   V476 source promotion, or fresh-analysis-order changes.
  *
  * V493 EXACT LAUNCH-TRIGGER TARGET CONTRACT IDENTITY:
  * - preserves all confirmed-working V492/V491/V490/V489/V488/V487/V486/V485/V484/V483;
@@ -2164,7 +2193,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V493";
+const VERSION = "V494";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71310,6 +71339,11 @@ for (
         state
       ),
 
+    recurringLaunchMechanismV494:
+      recurringLaunchMechanismSnapshotV494(
+        state
+      ),
+
     launchTriggerTargetIdentityV493:
       launchTriggerTargetIdentitySnapshotV493(
         state
@@ -71527,7 +71561,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71551,6 +71585,55 @@ for (
       telegramThresholdChanged:
         false,
       launchSourcePromotion:
+        false
+    },
+
+    recurringExactLaunchMechanismConfirmationV494: {
+      enabled: true,
+      measurementOnly: true,
+      inputEvidence:
+        "V493_VERIFIED_TARGET_CONTRACT_PLUS_V492_EXACT_TARGET_SELECTOR_LINK",
+      exactTarget:
+        "0xce9c48cfa068947f77738c81be406b53338e5b0d",
+      exactMethod:
+        "createLaunch",
+      exactSelector:
+        "0x3feab1d8",
+      firstVerifiedTokenExcludedFromRecurrence:
+        true,
+      stageA:
+        "TARGET_TRANSACTION_PAGE_DISCOVERY",
+      stageB:
+        "ONE_CANDIDATE_INTERNAL_CREATED_CONTRACT_VERIFICATION",
+      recurringPathRequirement:
+        "SAME_TARGET_SELECTOR_PLUS_CREATED_CONTRACT_FROM_VERIFIED_LAUNCHTOKENDEPLOYER",
+      createdContractAutomaticallyMeansERC20:
+        false,
+      existingBotERC20EvidenceCanUpgradeSecondTokenProof:
+        true,
+      providerPageOrderingAssumed:
+        false,
+      providerPageExhaustiveClaim:
+        false,
+      priority:
+        "BEFORE_V493_V492_V491_V490_V489_V486_BACKLOG",
+      maxRequestsPerScan:
+        1,
+      maxSecondaryOriginDiagnosticRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      automaticLaunchSourcePromotion:
+        false,
+      launchMeterMutation:
+        false,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
         false
     },
 
@@ -86970,6 +87053,98 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
   }
 
   /*
+   * V494 RECURRING EXACT MECHANISM ROUTE:
+   * First discover another transaction using the same exact target+selector;
+   * on a later eligible scan verify its internal created_contract path from the
+   * already-proven LaunchTokenDeployer. One request maximum per scan.
+   */
+  if (
+    eligibleRecurringLaunchMechanismCountV494(
+      state
+    ) > 0
+  ) {
+    const recurringV494 =
+      await runRecurringLaunchMechanismV494({
+        env,
+        state,
+        budget
+      });
+
+    telemetry.recurringLaunchMechanismV494 =
+      recurringV494;
+
+    telemetry.selectedFromPersistedVerifiedOrigins =
+      true;
+    telemetry.selectedToken =
+      recurringV494
+        ?.confirmationResult
+        ?.createdContract ||
+      null;
+    telemetry.selectedCreator =
+      recurringV494?.selectedTarget ||
+      null;
+    telemetry.selectedCreationTransactionHash =
+      recurringV494
+        ?.selectedCandidateTransactionHash ||
+      null;
+    telemetry.attempted =
+      recurringV494?.attempted ===
+      true;
+    telemetry.requestConsumed =
+      recurringV494
+        ?.requestConsumed === true;
+    telemetry.processedAfterAttempt =
+      recurringV494
+        ?.processedAfterAttempt ===
+      true;
+    telemetry.status =
+      recurringV494?.status ||
+      "V494_STATUS_UNAVAILABLE";
+
+    if (
+      recurringV494?.attempted === true &&
+      v483DeferredForFairnessV487
+    ) {
+      telemetry.fairnessV487
+        .fairnessGrantThisScan = true;
+
+      fairness.fairnessGrants =
+        safeNumber(
+          fairness.fairnessGrants
+        ) + 1;
+
+      fairness.lastFairnessGrantAt =
+        Date.now();
+
+      fairness.lastFairnessGrantToken =
+        telemetry.selectedToken ||
+        null;
+
+      fairness.consecutiveV483BlocksOfV486 =
+        0;
+
+      fairness.lastDecision =
+        "V494_FAIRNESS_GRANTED_TO_RECURRING_LAUNCH_MECHANISM_CONFIRMATION";
+
+      fairness.lastDecisionAt =
+        Date.now();
+    }
+
+    root.lastStatus =
+      `V486_ROUTED_TO_V494:${telemetry.status}`;
+
+    return telemetry;
+  }
+
+  telemetry.recurringLaunchMechanismV494 = {
+    enabled: true,
+    measurementOnly: true,
+    attempted: false,
+    status:
+      "V494_NO_UNPROCESSED_RECURRING_MECHANISM_WORK"
+  };
+
+  /*
    * V493 EXACT TRIGGER-TARGET IDENTITY ROUTE:
    * Once V492 binds an exact token-creation transaction to an outer target and
    * selector, profile that exact target before lower-evidence backlog work.
@@ -87991,6 +88166,1617 @@ function persistedOriginRawTraceBacklogSnapshotV486(
 
 
 
+
+
+function ensureRecurringLaunchMechanismV494(
+  state
+) {
+  if (
+    !state.recurringLaunchMechanismV494 ||
+    typeof state.recurringLaunchMechanismV494 !==
+      "object"
+  ) {
+    state.recurringLaunchMechanismV494 = {
+      enabled: true,
+      measurementOnly: true,
+      monitorStartedAt: Date.now(),
+      scansObserved: 0,
+      requestsAttempted: 0,
+      requestsSucceeded: 0,
+      discoveryPagesFetched: 0,
+      candidateTransactions: {},
+      processedCandidateTransactions: {},
+      confirmedDeployments: {},
+      mechanismClusters: {},
+      targetDiscoveryProcessed: {},
+      lastTarget: null,
+      lastCandidateTransactionHash: null,
+      lastStatus: null,
+      lastHttpStatus: null,
+      lastAttemptAt: null
+    };
+  }
+
+  const root =
+    state.recurringLaunchMechanismV494;
+
+  for (const key of [
+    "candidateTransactions",
+    "processedCandidateTransactions",
+    "confirmedDeployments",
+    "mechanismClusters",
+    "targetDiscoveryProcessed"
+  ]) {
+    root[key] =
+      root[key] &&
+      typeof root[key] === "object"
+        ? root[key]
+        : {};
+  }
+
+  return root;
+}
+
+function pruneRecurringLaunchMechanismV494(
+  state
+) {
+  const root =
+    ensureRecurringLaunchMechanismV494(
+      state
+    );
+
+  const now = Date.now();
+  const maxAgeMs =
+    21 * 24 * 60 * 60 * 1000;
+
+  const pruneMap = (
+    map,
+    field,
+    maxRows
+  ) =>
+    Object.fromEntries(
+      Object.entries(map || {})
+        .filter(([, row]) => {
+          const at =
+            safeNumber(row?.[field]);
+          return (
+            at > 0 &&
+            now - at <= maxAgeMs
+          );
+        })
+        .sort(
+          (a, b) =>
+            safeNumber(b?.[1]?.[field]) -
+            safeNumber(a?.[1]?.[field])
+        )
+        .slice(0, maxRows)
+    );
+
+  root.candidateTransactions =
+    pruneMap(
+      root.candidateTransactions,
+      "discoveredAt",
+      300
+    );
+
+  root.processedCandidateTransactions =
+    pruneMap(
+      root.processedCandidateTransactions,
+      "attemptedAt",
+      300
+    );
+
+  root.confirmedDeployments =
+    pruneMap(
+      root.confirmedDeployments,
+      "verifiedAt",
+      200
+    );
+
+  root.targetDiscoveryProcessed =
+    pruneMap(
+      root.targetDiscoveryProcessed,
+      "attemptedAt",
+      100
+    );
+
+  root.mechanismClusters = {};
+
+  for (
+    const row of
+    Object.values(
+      root.confirmedDeployments || {}
+    )
+  ) {
+    if (
+      row?.exactRecurringPathVerified !==
+      true
+    ) {
+      continue;
+    }
+
+    const target =
+      normalize(row?.target);
+    const selector =
+      String(row?.selector || "")
+        .trim()
+        .toLowerCase();
+    const deployer =
+      normalize(
+        row?.verifiedDeploymentSource
+      );
+
+    if (
+      !isAddress(target) ||
+      !/^0x[a-f0-9]{8}$/.test(selector) ||
+      !isAddress(deployer)
+    ) {
+      continue;
+    }
+
+    const key =
+      `${target}:${selector}:${deployer}`;
+
+    const cluster =
+      root.mechanismClusters[key] || {
+        target,
+        selector,
+        verifiedDeploymentSource:
+          deployer,
+        methodNames: [],
+        transactionHashes: [],
+        createdContracts: [],
+        botVerifiedErc20CreatedContracts: [],
+        distinctConfirmedTransactions: 0,
+        distinctCreatedContracts: 0,
+        distinctBotVerifiedErc20s: 0,
+        recurringExactDeploymentPathConfirmed:
+          false,
+        secondIndependentVerifiedTokenPathConfirmed:
+          false,
+        interpretation:
+          "EXACT_RECURRING_TARGET_SELECTOR_DEPLOYER_PATH_ONLY"
+      };
+
+    const tx =
+      String(
+        row?.transactionHash || ""
+      )
+        .trim()
+        .toLowerCase();
+
+    if (
+      /^0x[a-f0-9]{64}$/.test(tx) &&
+      !cluster.transactionHashes.includes(tx)
+    ) {
+      cluster.transactionHashes.push(tx);
+      cluster.distinctConfirmedTransactions++;
+    }
+
+    const created =
+      normalize(
+        row?.createdContract
+      );
+
+    if (
+      isAddress(created) &&
+      !cluster.createdContracts.includes(created)
+    ) {
+      cluster.createdContracts.push(created);
+      cluster.distinctCreatedContracts++;
+    }
+
+    if (
+      row?.botVerifiedErc20 === true &&
+      isAddress(created) &&
+      !cluster
+        .botVerifiedErc20CreatedContracts
+        .includes(created)
+    ) {
+      cluster
+        .botVerifiedErc20CreatedContracts
+        .push(created);
+      cluster.distinctBotVerifiedErc20s++;
+    }
+
+    if (
+      row?.method &&
+      !cluster.methodNames.includes(row.method)
+    ) {
+      cluster.methodNames.push(row.method);
+    }
+
+    cluster.recurringExactDeploymentPathConfirmed =
+      cluster.distinctConfirmedTransactions >= 1;
+
+    cluster.secondIndependentVerifiedTokenPathConfirmed =
+      cluster.distinctBotVerifiedErc20s >= 1;
+
+    /*
+     * The original V492/V489 token is the first independently proven token.
+     * Any V494 confirmed deployment is therefore a second distinct transaction.
+     */
+    root.mechanismClusters[key] =
+      cluster;
+  }
+
+  return root;
+}
+
+function knownExactCreationTransactionsV494(
+  state
+) {
+  const known = new Set();
+
+  const v492 =
+    pruneExactCreationTriggerLinkageV492(
+      state
+    );
+
+  for (
+    const row of
+    Object.values(
+      v492.triggerLinkages || {}
+    )
+  ) {
+    const tx =
+      String(
+        row?.creationTransactionHash ||
+        ""
+      )
+        .trim()
+        .toLowerCase();
+
+    if (
+      /^0x[a-f0-9]{64}$/.test(tx)
+    ) {
+      known.add(tx);
+    }
+  }
+
+  return known;
+}
+
+function successfulTransactionV494(
+  row
+) {
+  const status =
+    String(
+      row?.status ?? ""
+    )
+      .trim()
+      .toLowerCase();
+
+  if (
+    status === "error" ||
+    status === "failed"
+  ) {
+    return false;
+  }
+
+  if (
+    row?.success === false ||
+    row?.error
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function transactionSelectorV494(
+  row
+) {
+  return selectorFromInputV491(
+    String(
+      row?.raw_input ??
+      row?.input ??
+      ""
+    )
+  );
+}
+
+function transactionMethodV494(
+  row
+) {
+  return transactionMethodNameV492(
+    row
+  );
+}
+
+function botVerifiedErc20EvidenceV494(
+  state,
+  address
+) {
+  const token =
+    normalize(address);
+
+  if (!isAddress(token)) {
+    return {
+      verified: false,
+      evidencePath: null
+    };
+  }
+
+  const visited =
+    new Set();
+
+  function searchNode(
+    node,
+    path,
+    depth
+  ) {
+    if (
+      depth > 7 ||
+      node == null
+    ) {
+      return null;
+    }
+
+    if (
+      typeof node !== "object"
+    ) {
+      return null;
+    }
+
+    if (visited.has(node)) {
+      return null;
+    }
+    visited.add(node);
+
+    if (
+      !Array.isArray(node)
+    ) {
+      const addressCandidates = [
+        node.address,
+        node.token,
+        node.tokenAddress,
+        node.contract,
+        node.contractAddress
+      ]
+        .map(normalize)
+        .filter(isAddress);
+
+      const sameToken =
+        addressCandidates.includes(token);
+
+      if (sameToken) {
+        const strictFlags = [
+          node.validERC20,
+          node.validErc20,
+          node.erc20Verified,
+          node.strictERC20Verified,
+          node.strictErc20Verified
+        ];
+
+        if (
+          strictFlags.some(
+            value => value === true
+          )
+        ) {
+          return path;
+        }
+      }
+
+      for (
+        const [key, value] of
+        Object.entries(node)
+      ) {
+        const keyAddress =
+          normalize(key);
+
+        if (
+          keyAddress === token &&
+          value &&
+          typeof value === "object"
+        ) {
+          const flags = [
+            value.validERC20,
+            value.validErc20,
+            value.erc20Verified,
+            value.strictERC20Verified,
+            value.strictErc20Verified
+          ];
+
+          if (
+            flags.some(
+              flag => flag === true
+            )
+          ) {
+            return `${path}.${key}`;
+          }
+        }
+      }
+    }
+
+    const entries =
+      Array.isArray(node)
+        ? node.entries()
+        : Object.entries(node);
+
+    for (
+      const [key, value] of entries
+    ) {
+      const found =
+        searchNode(
+          value,
+          `${path}.${key}`,
+          depth + 1
+        );
+
+      if (found) {
+        return found;
+      }
+    }
+
+    return null;
+  }
+
+  /*
+   * Bound search to the state object already in memory; no extra network request.
+   */
+  const evidencePath =
+    searchNode(
+      state,
+      "state",
+      0
+    );
+
+  return {
+    verified:
+      Boolean(evidencePath),
+    evidencePath
+  };
+}
+
+function recurringMechanismTargetsV494(
+  state
+) {
+  const v493 =
+    pruneLaunchTriggerTargetIdentityV493(
+      state
+    );
+
+  const v492 =
+    pruneExactCreationTriggerLinkageV492(
+      state
+    );
+
+  const root =
+    pruneRecurringLaunchMechanismV494(
+      state
+    );
+
+  const rows = [];
+
+  for (
+    const [target, profile] of
+    Object.entries(
+      v493.targetProfiles || {}
+    )
+  ) {
+    const cleanTarget =
+      normalize(target);
+
+    if (
+      !isAddress(cleanTarget) ||
+      profile?.isContract !== true
+    ) {
+      continue;
+    }
+
+    const linkedRows =
+      Object.values(
+        v492.triggerLinkages || {}
+      )
+        .filter(
+          row =>
+            row?.exactCreationTransactionLinked === true &&
+            normalize(row?.outerTarget) ===
+              cleanTarget &&
+            /^0x[a-f0-9]{8}$/.test(
+              String(
+                row?.outerSelector ||
+                ""
+              )
+            )
+        )
+        .sort(
+          (a, b) =>
+            safeNumber(a?.verifiedAt) -
+            safeNumber(b?.verifiedAt)
+        );
+
+    const linkage =
+      linkedRows[0];
+
+    if (!linkage) {
+      continue;
+    }
+
+    const key =
+      `${cleanTarget}:${String(
+        linkage.outerSelector
+      ).toLowerCase()}`;
+
+    rows.push({
+      key,
+      target:
+        cleanTarget,
+      contractName:
+        profile?.contractName ||
+        null,
+      selector:
+        String(
+          linkage.outerSelector
+        ).toLowerCase(),
+      method:
+        linkage?.outerMethod ||
+        null,
+      verifiedDeploymentSource:
+        normalize(
+          linkage
+            ?.verifiedDeploymentSource ||
+          ""
+        ),
+      verifiedDeploymentSourceName:
+        linkage
+          ?.verifiedDeploymentSourceName ||
+        null,
+      firstVerifiedToken:
+        normalize(
+          linkage?.token ||
+          ""
+        ),
+      firstVerifiedCreationTransactionHash:
+        String(
+          linkage
+            ?.creationTransactionHash ||
+          ""
+        )
+          .trim()
+          .toLowerCase(),
+      identityObservedAt:
+        safeNumber(
+          profile?.observedAt
+        ),
+      discoveryAlreadyProcessed:
+        Boolean(
+          root.targetDiscoveryProcessed[
+            key
+          ]
+        )
+    });
+  }
+
+  rows.sort(
+    (a, b) =>
+      safeNumber(
+        a?.identityObservedAt
+      ) -
+      safeNumber(
+        b?.identityObservedAt
+      )
+  );
+
+  return rows;
+}
+
+function pendingRecurringMechanismCandidateV494(
+  state
+) {
+  const root =
+    pruneRecurringLaunchMechanismV494(
+      state
+    );
+
+  const rows =
+    Object.values(
+      root.candidateTransactions ||
+      {}
+    )
+      .filter(row => {
+        const tx =
+          String(
+            row?.transactionHash ||
+            ""
+          )
+            .trim()
+            .toLowerCase();
+
+        return (
+          /^0x[a-f0-9]{64}$/.test(tx) &&
+          !root
+            .processedCandidateTransactions[
+              tx
+            ]
+        );
+      })
+      .sort(
+        (a, b) =>
+          safeNumber(
+            a?.discoveredAt
+          ) -
+          safeNumber(
+            b?.discoveredAt
+          )
+      );
+
+  return rows[0] || null;
+}
+
+function targetDiscoveryCandidateV494(
+  state
+) {
+  return (
+    recurringMechanismTargetsV494(
+      state
+    ).find(
+      row =>
+        row
+          ?.discoveryAlreadyProcessed !==
+        true
+    ) || null
+  );
+}
+
+function eligibleRecurringLaunchMechanismCountV494(
+  state
+) {
+  if (
+    pendingRecurringMechanismCandidateV494(
+      state
+    )
+  ) {
+    return 1;
+  }
+
+  return targetDiscoveryCandidateV494(
+    state
+  )
+    ? 1
+    : 0;
+}
+
+function parseTargetCreateLaunchTransactionsV494({
+  body,
+  targetInfo,
+  knownTransactions
+}) {
+  const rows =
+    Array.isArray(body?.items)
+      ? body.items
+      : (
+          Array.isArray(body)
+            ? body
+            : []
+        );
+
+  const target =
+    normalize(
+      targetInfo?.target
+    );
+
+  const selector =
+    String(
+      targetInfo?.selector ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  const expectedMethod =
+    String(
+      targetInfo?.method ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  const matches = [];
+
+  for (
+    let index = 0;
+    index < rows.length;
+    index++
+  ) {
+    const row =
+      rows[index] || {};
+
+    const tx =
+      String(
+        row?.hash || ""
+      )
+        .trim()
+        .toLowerCase();
+
+    const to =
+      transactionAddressHashV491(
+        row?.to
+      );
+
+    const from =
+      transactionAddressHashV491(
+        row?.from
+      );
+
+    const rowSelector =
+      transactionSelectorV494(
+        row
+      );
+
+    const method =
+      transactionMethodV494(
+        row
+      );
+
+    const methodMatch =
+      expectedMethod &&
+      String(method || "")
+        .trim()
+        .toLowerCase() ===
+        expectedMethod;
+
+    const selectorMatch =
+      /^0x[a-f0-9]{8}$/.test(
+        selector
+      ) &&
+      rowSelector === selector;
+
+    if (
+      !/^0x[a-f0-9]{64}$/.test(tx) ||
+      knownTransactions.has(tx) ||
+      to !== target ||
+      !successfulTransactionV494(row) ||
+      !(
+        selectorMatch ||
+        methodMatch
+      )
+    ) {
+      continue;
+    }
+
+    matches.push({
+      transactionHash:
+        tx,
+      target,
+      caller:
+        isAddress(from)
+          ? from
+          : null,
+      method:
+        method || null,
+      selector:
+        rowSelector || null,
+      blockNumber:
+        safeNumber(
+          row?.block ??
+          row?.block_number
+        ) || null,
+      timestamp:
+        row?.timestamp ||
+        row?.block_timestamp ||
+        null,
+      discoveredIndex:
+        index,
+      discoveryEvidence:
+        selectorMatch
+          ? "EXACT_TARGET_AND_SELECTOR_MATCH_V494"
+          : "EXACT_TARGET_AND_DECODED_METHOD_MATCH_V494"
+    });
+  }
+
+  return {
+    transactionRowsReturned:
+      rows.length,
+    matchingCreateLaunchTransactions:
+      matches,
+    providerPageHasNext:
+      Boolean(
+        body?.next_page_params
+      ),
+    providerPageOrdering:
+      "NOT_ASSUMED",
+    exhaustiveHistoryClaimed:
+      false
+  };
+}
+
+function parseRecurringInternalCreationV494({
+  body,
+  candidate
+}) {
+  const rows =
+    Array.isArray(body?.items)
+      ? body.items
+      : (
+          Array.isArray(body)
+            ? body
+            : []
+        );
+
+  const expectedDeployer =
+    normalize(
+      candidate
+        ?.verifiedDeploymentSource
+    );
+
+  const parsed =
+    rows.map(
+      (row, index) => ({
+        index,
+        createdContract:
+          internalTransactionCreatedContractV489(
+            row
+          ),
+        from:
+          internalTransactionFromV489(
+            row
+          ),
+        creationKind:
+          internalTransactionTypeV489(
+            row
+          ),
+        success:
+          row?.success !== false &&
+          !row?.error,
+        error:
+          row?.error != null
+            ? String(row.error)
+            : null
+      })
+    );
+
+  const exactSourceCreates =
+    parsed.filter(
+      row =>
+        row.success === true &&
+        isAddress(
+          row.createdContract
+        ) &&
+        isAddress(row.from) &&
+        row.from ===
+          expectedDeployer
+    );
+
+  const uniqueCreated =
+    [
+      ...new Set(
+        exactSourceCreates.map(
+          row =>
+            row.createdContract
+        )
+      )
+    ];
+
+  const exact =
+    uniqueCreated.length === 1
+      ? exactSourceCreates.find(
+          row =>
+            row.createdContract ===
+            uniqueCreated[0]
+        )
+      : null;
+
+  return {
+    transactionHash:
+      candidate?.transactionHash ||
+      null,
+    target:
+      candidate?.target ||
+      null,
+    caller:
+      candidate?.caller ||
+      null,
+    method:
+      candidate?.method ||
+      null,
+    selector:
+      candidate?.selector ||
+      null,
+    internalTransactionRowsReturned:
+      rows.length,
+    rowsWithCreatedContract:
+      parsed.filter(
+        row =>
+          isAddress(
+            row.createdContract
+          )
+      ).length,
+    createdContractsFromVerifiedDeployer:
+      uniqueCreated,
+    exactSingleCreatedContractFromVerifiedDeployer:
+      Boolean(exact),
+    createdContract:
+      exact?.createdContract ||
+      null,
+    creationKind:
+      exact?.creationKind ||
+      null,
+    matchingInternalTransactionIndex:
+      exact?.index ?? null,
+    verifiedDeploymentSource:
+      isAddress(
+        expectedDeployer
+      )
+        ? expectedDeployer
+        : null,
+    exactRecurringPathVerified:
+      Boolean(exact),
+    evidenceStandard:
+      exact
+        ? "SAME_TARGET_SELECTOR_TX_PLUS_INTERNAL_CREATED_CONTRACT_FROM_VERIFIED_DEPLOYER_V494"
+        : "NO_SINGLE_EXACT_CREATED_CONTRACT_FROM_VERIFIED_DEPLOYER_V494"
+  };
+}
+
+async function runRecurringLaunchMechanismV494({
+  env,
+  state,
+  budget
+}) {
+  const root =
+    pruneRecurringLaunchMechanismV494(
+      state
+    );
+
+  root.scansObserved =
+    safeNumber(
+      root.scansObserved
+    ) + 1;
+
+  const telemetry = {
+    enabled: true,
+    measurementOnly: true,
+    promotionAllowed: false,
+    stage: null,
+    attempted: false,
+    requestConsumed: false,
+    provider:
+      "BLOCKSCOUT_PRO",
+    selectedTarget: null,
+    selectedCandidateTransactionHash:
+      null,
+    discoveryResult: null,
+    confirmationResult: null,
+    httpStatus: null,
+    processedAfterAttempt: false,
+    maxRequestsThisScan: 1,
+    hardRequestLimit: 42,
+    launchSourcePromoted: false,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false,
+    status: null
+  };
+
+  const pending =
+    pendingRecurringMechanismCandidateV494(
+      state
+    );
+
+  if (pending) {
+    telemetry.stage =
+      "CONFIRM_CANDIDATE_INTERNAL_CREATION";
+    telemetry.selectedTarget =
+      pending?.target || null;
+    telemetry.selectedCandidateTransactionHash =
+      pending?.transactionHash ||
+      null;
+
+    const url =
+      blockscoutProInternalTransactionsUrlV489(
+        env,
+        pending?.transactionHash
+      );
+
+    if (!url) {
+      telemetry.status =
+        "V494_BLOCKSCOUT_PRO_NOT_CONFIGURED";
+
+      root.lastStatus =
+        telemetry.status;
+
+      return telemetry;
+    }
+
+    const spare =
+      consumeReleasedGlobalSpareV478(
+        budget,
+        "BLOCKSCOUT_PRO_RECURRING_LAUNCH_INTERNAL_TX_V494",
+        1
+      );
+
+    if (spare?.ok !== true) {
+      telemetry.status =
+        `V494_BUDGET_UNAVAILABLE:${spare?.reason || "UNKNOWN"}`;
+
+      root.lastStatus =
+        telemetry.status;
+
+      return telemetry;
+    }
+
+    telemetry.attempted = true;
+    telemetry.requestConsumed = true;
+    root.requestsAttempted =
+      safeNumber(
+        root.requestsAttempted
+      ) + 1;
+
+    const attemptedAt =
+      Date.now();
+
+    root.lastAttemptAt =
+      attemptedAt;
+    root.lastTarget =
+      pending?.target || null;
+    root.lastCandidateTransactionHash =
+      pending?.transactionHash ||
+      null;
+
+    const controller =
+      new AbortController();
+
+    const timer =
+      setTimeout(
+        () => controller.abort(),
+        6000
+      );
+
+    try {
+      const response =
+        await fetch(
+          url,
+          {
+            method: "GET",
+            headers: {
+              accept:
+                "application/json"
+            },
+            signal:
+              controller.signal
+          }
+        );
+
+      telemetry.httpStatus =
+        response.status;
+      root.lastHttpStatus =
+        response.status;
+
+      if (!response.ok) {
+        telemetry.status =
+          `V494_CONFIRM_HTTP_${response.status}`;
+
+        root.processedCandidateTransactions[
+          pending.transactionHash
+        ] = {
+          ...pending,
+          attemptedAt,
+          httpStatus:
+            response.status,
+          exactRecurringPathVerified:
+            false,
+          status:
+            telemetry.status,
+          processedOnce:
+            true,
+          retryAutomatically:
+            false
+        };
+
+        telemetry.processedAfterAttempt =
+          true;
+        root.lastStatus =
+          telemetry.status;
+
+        return telemetry;
+      }
+
+      const body =
+        await response.json();
+
+      root.requestsSucceeded =
+        safeNumber(
+          root.requestsSucceeded
+        ) + 1;
+
+      const confirmation =
+        parseRecurringInternalCreationV494({
+          body,
+          candidate:
+            pending
+        });
+
+      if (
+        confirmation
+          ?.exactRecurringPathVerified ===
+        true
+      ) {
+        const erc20 =
+          botVerifiedErc20EvidenceV494(
+            state,
+            confirmation.createdContract
+          );
+
+        confirmation.botVerifiedErc20 =
+          erc20.verified === true;
+        confirmation.botVerifiedErc20EvidencePath =
+          erc20.evidencePath;
+
+        const persisted = {
+          ...confirmation,
+          verifiedAt:
+            attemptedAt,
+          provider:
+            "BLOCKSCOUT_PRO_INTERNAL_TRANSACTIONS_V494",
+          firstKnownExactTransactionExcluded:
+            true
+        };
+
+        root.confirmedDeployments[
+          pending.transactionHash
+        ] = persisted;
+      }
+
+      root.processedCandidateTransactions[
+        pending.transactionHash
+      ] = {
+        ...pending,
+        attemptedAt,
+        httpStatus:
+          response.status,
+        exactRecurringPathVerified:
+          confirmation
+            ?.exactRecurringPathVerified ===
+          true,
+        createdContract:
+          confirmation?.createdContract ||
+          null,
+        creationKind:
+          confirmation?.creationKind ||
+          null,
+        status:
+          confirmation
+            ?.exactRecurringPathVerified ===
+          true
+            ? "V494_RECURRING_EXACT_DEPLOYMENT_PATH_CONFIRMED"
+            : "V494_HTTP_200_NO_RECURRING_EXACT_DEPLOYMENT_PATH",
+        processedOnce:
+          true,
+        retryAutomatically:
+          false
+      };
+
+      telemetry.confirmationResult =
+        confirmation;
+      telemetry.processedAfterAttempt =
+        true;
+
+      telemetry.status =
+        root
+          .processedCandidateTransactions[
+            pending.transactionHash
+          ].status;
+
+      root.lastStatus =
+        telemetry.status;
+
+      pruneRecurringLaunchMechanismV494(
+        state
+      );
+
+      const updated =
+        root.confirmedDeployments[
+          pending.transactionHash
+        ];
+
+      if (
+        updated
+          ?.botVerifiedErc20 ===
+        true
+      ) {
+        telemetry.status =
+          "V494_SECOND_INDEPENDENT_VERIFIED_TOKEN_PATH_CONFIRMED";
+        root.lastStatus =
+          telemetry.status;
+      }
+
+      return telemetry;
+    } catch (error) {
+      telemetry.status =
+        `V494_CONFIRM_FETCH_ERROR:${errorString(error)}`;
+      root.lastStatus =
+        telemetry.status;
+      return telemetry;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  const targetInfo =
+    targetDiscoveryCandidateV494(
+      state
+    );
+
+  if (!targetInfo) {
+    telemetry.stage =
+      "NO_PENDING_WORK";
+    telemetry.status =
+      "V494_NO_UNPROCESSED_RECURRING_MECHANISM_WORK";
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  }
+
+  telemetry.stage =
+    "DISCOVER_RECURRING_CREATE_LAUNCH_TRANSACTIONS";
+  telemetry.selectedTarget =
+    targetInfo.target;
+
+  const url =
+    blockscoutProAddressTransactionsUrlV491(
+      env,
+      targetInfo.target
+    );
+
+  if (!url) {
+    telemetry.status =
+      "V494_BLOCKSCOUT_PRO_NOT_CONFIGURED";
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  }
+
+  const spare =
+    consumeReleasedGlobalSpareV478(
+      budget,
+      "BLOCKSCOUT_PRO_LAUNCH_TARGET_TRANSACTIONS_V494",
+      1
+    );
+
+  if (spare?.ok !== true) {
+    telemetry.status =
+      `V494_BUDGET_UNAVAILABLE:${spare?.reason || "UNKNOWN"}`;
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  }
+
+  telemetry.attempted = true;
+  telemetry.requestConsumed = true;
+  root.requestsAttempted =
+    safeNumber(
+      root.requestsAttempted
+    ) + 1;
+
+  const attemptedAt =
+    Date.now();
+
+  root.lastAttemptAt =
+    attemptedAt;
+  root.lastTarget =
+    targetInfo.target;
+
+  const controller =
+    new AbortController();
+
+  const timer =
+    setTimeout(
+      () => controller.abort(),
+      6000
+    );
+
+  try {
+    const response =
+      await fetch(
+        url,
+        {
+          method: "GET",
+          headers: {
+            accept:
+              "application/json"
+          },
+          signal:
+            controller.signal
+        }
+      );
+
+    telemetry.httpStatus =
+      response.status;
+    root.lastHttpStatus =
+      response.status;
+
+    const discoveryKey =
+      targetInfo.key;
+
+    if (!response.ok) {
+      telemetry.status =
+        `V494_DISCOVERY_HTTP_${response.status}`;
+
+      root.targetDiscoveryProcessed[
+        discoveryKey
+      ] = {
+        target:
+          targetInfo.target,
+        selector:
+          targetInfo.selector,
+        attemptedAt,
+        httpStatus:
+          response.status,
+        matchingTransactions:
+          0,
+        status:
+          telemetry.status,
+        processedOnce:
+          true,
+        retryAutomatically:
+          false
+      };
+
+      telemetry.processedAfterAttempt =
+        true;
+      root.lastStatus =
+        telemetry.status;
+      return telemetry;
+    }
+
+    const body =
+      await response.json();
+
+    root.requestsSucceeded =
+      safeNumber(
+        root.requestsSucceeded
+      ) + 1;
+
+    root.discoveryPagesFetched =
+      safeNumber(
+        root.discoveryPagesFetched
+      ) + 1;
+
+    const parsed =
+      parseTargetCreateLaunchTransactionsV494({
+        body,
+        targetInfo,
+        knownTransactions:
+          knownExactCreationTransactionsV494(
+            state
+          )
+      });
+
+    for (
+      const row of
+      parsed.matchingCreateLaunchTransactions
+    ) {
+      if (
+        root
+          .processedCandidateTransactions[
+            row.transactionHash
+          ] ||
+        root
+          .candidateTransactions[
+            row.transactionHash
+          ]
+      ) {
+        continue;
+      }
+
+      root.candidateTransactions[
+        row.transactionHash
+      ] = {
+        ...row,
+        verifiedDeploymentSource:
+          targetInfo
+            .verifiedDeploymentSource,
+        verifiedDeploymentSourceName:
+          targetInfo
+            .verifiedDeploymentSourceName,
+        launchTargetContractName:
+          targetInfo.contractName,
+        firstVerifiedToken:
+          targetInfo
+            .firstVerifiedToken,
+        firstVerifiedCreationTransactionHash:
+          targetInfo
+            .firstVerifiedCreationTransactionHash,
+        discoveredAt:
+          attemptedAt,
+        provider:
+          "BLOCKSCOUT_PRO_TARGET_TRANSACTIONS_V494"
+      };
+    }
+
+    root.targetDiscoveryProcessed[
+      discoveryKey
+    ] = {
+      target:
+        targetInfo.target,
+      selector:
+        targetInfo.selector,
+      method:
+        targetInfo.method,
+      attemptedAt,
+      httpStatus:
+        response.status,
+      transactionRowsReturned:
+        parsed.transactionRowsReturned,
+      matchingTransactions:
+        parsed
+          .matchingCreateLaunchTransactions
+          .length,
+      providerPageHasNext:
+        parsed.providerPageHasNext,
+      exhaustiveHistoryClaimed:
+        false,
+      status:
+        parsed
+          .matchingCreateLaunchTransactions
+          .length > 0
+          ? "V494_RECURRING_TRIGGER_CANDIDATES_DISCOVERED"
+          : "V494_NO_RECURRING_TRIGGER_CANDIDATES_ON_PROVIDER_PAGE",
+      processedOnce:
+        true,
+      retryAutomatically:
+        false
+    };
+
+    telemetry.discoveryResult =
+      parsed;
+    telemetry.processedAfterAttempt =
+      true;
+
+    telemetry.status =
+      root.targetDiscoveryProcessed[
+        discoveryKey
+      ].status;
+
+    root.lastStatus =
+      telemetry.status;
+
+    pruneRecurringLaunchMechanismV494(
+      state
+    );
+
+    return telemetry;
+  } catch (error) {
+    telemetry.status =
+      `V494_DISCOVERY_FETCH_ERROR:${errorString(error)}`;
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function recurringLaunchMechanismSnapshotV494(
+  state
+) {
+  const root =
+    pruneRecurringLaunchMechanismV494(
+      state
+    );
+
+  const confirmed =
+    Object.values(
+      root.confirmedDeployments || {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(b?.verifiedAt) -
+          safeNumber(a?.verifiedAt)
+      );
+
+  const clusters =
+    Object.values(
+      root.mechanismClusters || {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.distinctConfirmedTransactions
+          ) -
+          safeNumber(
+            a?.distinctConfirmedTransactions
+          )
+      );
+
+  const pending =
+    Object.values(
+      root.candidateTransactions || {}
+    )
+      .filter(
+        row =>
+          !root
+            .processedCandidateTransactions[
+              row?.transactionHash
+            ]
+      );
+
+  return {
+    enabled: true,
+    measurementOnly: true,
+    monitorStartedAt:
+      safeNumber(
+        root.monitorStartedAt
+      ) || null,
+    scansObserved:
+      safeNumber(
+        root.scansObserved
+      ),
+    requestsAttempted:
+      safeNumber(
+        root.requestsAttempted
+      ),
+    requestsSucceeded:
+      safeNumber(
+        root.requestsSucceeded
+      ),
+    discoveryPagesFetched:
+      safeNumber(
+        root.discoveryPagesFetched
+      ),
+    pendingCandidateTransactionCount:
+      pending.length,
+    processedCandidateTransactionCount:
+      Object.keys(
+        root.processedCandidateTransactions ||
+        {}
+      ).length,
+    exactRecurringDeploymentsConfirmed:
+      confirmed.length,
+    secondIndependentVerifiedTokenPathsConfirmed:
+      confirmed.filter(
+        row =>
+          row?.botVerifiedErc20 ===
+          true
+      ).length,
+    recurringMechanismClusterCount:
+      clusters.filter(
+        row =>
+          row
+            ?.recurringExactDeploymentPathConfirmed ===
+          true
+      ).length,
+    confirmedDeployments:
+      confirmed.slice(0, 20),
+    mechanismClusters:
+      clusters.slice(0, 20),
+    recentPendingCandidates:
+      pending
+        .sort(
+          (a, b) =>
+            safeNumber(a?.discoveredAt) -
+            safeNumber(b?.discoveredAt)
+        )
+        .slice(0, 20),
+    lastTarget:
+      root.lastTarget || null,
+    lastCandidateTransactionHash:
+      root.lastCandidateTransactionHash ||
+      null,
+    lastStatus:
+      root.lastStatus || null,
+    lastHttpStatus:
+      root.lastHttpStatus ?? null,
+    lastAttemptAt:
+      safeNumber(
+        root.lastAttemptAt
+      ) || null,
+    oneProviderPageIsExhaustive:
+      false,
+    recurringPathMeansCreatedContractIsERC20:
+      false,
+    secondIndependentBotVerifiedErc20Preferred:
+      true,
+    automaticLaunchSourcePromotionAllowed:
+      false,
+    oneSecondaryDiagnosticPerScan:
+      true,
+    hardGlobalLimitUnchanged:
+      42
+  };
+}
 
 function ensureLaunchTriggerTargetIdentityV493(
   state
@@ -94226,6 +96012,9 @@ function eligiblePersistedOriginBacklogCountV487(
       state
     ) +
     eligibleLaunchTriggerTargetIdentityCountV493(
+      state
+    ) +
+    eligibleRecurringLaunchMechanismCountV494(
       state
     )
   );
