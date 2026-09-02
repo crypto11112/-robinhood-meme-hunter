@@ -1,6 +1,24 @@
 /**
- * Robinhood Chain Meme Hunter — V506
- * AUTHORITATIVE RUNTIME VERSION: V506
+ * Robinhood Chain Meme Hunter — V507
+ * AUTHORITATIVE RUNTIME VERSION: V507
+ *
+ * V507 DETERMINISTIC TARGETED CREATOR ATTRIBUTION:
+ * - preserves V506 pre-V485 strong-creator routing;
+ * - fixes the V506->V503 handoff so the creator chosen by V506 is passed
+ *   explicitly into V503 instead of V503 re-running its generic creator selector;
+ * - when a forced creator is supplied, V503 performs the next unfinished stage
+ *   for THAT exact creator only: IDENTITY first, then TRANSACTIONS;
+ * - if the forced creator is already fully processed, V503 returns a bounded
+ *   no-work status and does not silently switch to another creator;
+ * - generic/non-forced V503 routing remains unchanged for normal background work;
+ * - preserves the newly profiled DopplerERC20V1Factory evidence for later exact proof;
+ * - recurrence / verified contract name / transaction fingerprint never alone
+ *   promote a launch source;
+ * - exact creation/trigger linkage remains mandatory before source promotion;
+ * - one secondary diagnostic request maximum per scan remains enforced;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, verified-USD,
+ *   dense-pool completion, launch-meter, RWA detector, or alert-cadence changes.
  *
  * V506 PRE-V485 STRONG-CREATOR ROUTING FIX:
  * - fixes V505 priority placement: the decision is now made in the CURRENT/LIVE
@@ -2415,7 +2433,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V506";
+const VERSION = "V507";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71858,7 +71876,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V507_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71882,6 +71900,40 @@ for (
       telegramThresholdChanged:
         false,
       launchSourcePromotion:
+        false
+    },
+
+    deterministicCreatorHandoffV507: {
+      enabled: true,
+      fixes:
+        "V506_SELECTED_CREATOR_COULD_BE_REPLACED_BY_GENERIC_V503_SELECTOR",
+      forcedCreatorPassedIntoV503:
+        true,
+      v503GenericReselectionWhenForced:
+        false,
+      exactForcedCreatorStageOrder:
+        "IDENTITY_THEN_TRANSACTIONS",
+      fullyProcessedForcedCreatorFallsThroughToAnotherCreator:
+        false,
+      preservesDopplerFactoryEvidence:
+        true,
+      recurrenceAlonePromotesSource:
+        false,
+      exactCreationOrTriggerProofStillRequired:
+        true,
+      maxSecondaryDiagnosticRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false,
+      rwaDetectorChanged:
         false
     },
 
@@ -88471,7 +88523,15 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
       await runRecurringCreatorAttributionV503({
         env,
         state,
-        budget
+        budget,
+        forcedCreator:
+          recurringCreatorPriorityV505
+            ?.pendingCreatorWork
+            ?.creator ||
+          recurringCreatorPriorityV505
+            ?.tokenCreatorMatch
+            ?.creator ||
+          null
       });
 
     telemetry.recurringCreatorAttributionV503 =
@@ -94976,10 +95036,90 @@ function shouldPrioritizeVerifiedCreatorBeforeV485V506({
   };
 }
 
+
+function selectSpecificRecurringCreatorWorkV507(
+  state,
+  forcedCreator
+) {
+  const creator =
+    normalize(
+      forcedCreator
+    );
+
+  if (!isAddress(creator)) {
+    return null;
+  }
+
+  const rows =
+    recurringCreatorCandidatesV503(
+      state
+    );
+
+  const candidate =
+    rows.find(
+      row =>
+        normalize(
+          row?.creator
+        ) === creator
+    );
+
+  if (!candidate) {
+    return {
+      stage:
+        "NOT_ELIGIBLE",
+      candidate: {
+        creator,
+        distinctTokens: 0,
+        tokens: [],
+        identityProcessed: false,
+        transactionsProcessed: false,
+        profile: null
+      },
+      status:
+        "V507_FORCED_CREATOR_NOT_IN_ELIGIBLE_RECURRING_SET"
+    };
+  }
+
+  if (
+    candidate
+      ?.identityProcessed !== true
+  ) {
+    return {
+      stage:
+        "IDENTITY",
+      candidate,
+      status:
+        "V507_FORCED_CREATOR_IDENTITY_PENDING"
+    };
+  }
+
+  if (
+    candidate
+      ?.transactionsProcessed !== true
+  ) {
+    return {
+      stage:
+        "TRANSACTIONS",
+      candidate,
+      status:
+        "V507_FORCED_CREATOR_TRANSACTIONS_PENDING"
+    };
+  }
+
+  return {
+    stage:
+      "COMPLETE",
+    candidate,
+    status:
+      "V507_FORCED_CREATOR_FULLY_PROCESSED"
+  };
+}
+
 async function runRecurringCreatorAttributionV503({
   env,
   state,
-  budget
+  budget,
+  forcedCreator = null
 }) {
   const root =
     ensureRecurringCreatorAttributionV503(
@@ -94991,7 +95131,20 @@ async function runRecurringCreatorAttributionV503({
       root.scansObserved
     ) + 1;
 
+  const targetedWorkV507 =
+    isAddress(
+      normalize(
+        forcedCreator
+      )
+    )
+      ? selectSpecificRecurringCreatorWorkV507(
+          state,
+          forcedCreator
+        )
+      : null;
+
   const work =
+    targetedWorkV507 ||
     selectRecurringCreatorWorkV503(
       state
     );
@@ -95004,6 +95157,28 @@ async function runRecurringCreatorAttributionV503({
     requestConsumed: false,
     selectedStage: null,
     selectedCreator: null,
+    forcedCreatorV507:
+      isAddress(
+        normalize(
+          forcedCreator
+        )
+      )
+        ? normalize(
+            forcedCreator
+          )
+        : null,
+    targetedCreatorBindingV507:
+      isAddress(
+        normalize(
+          forcedCreator
+        )
+      ),
+    genericSelectorAllowedV507:
+      !isAddress(
+        normalize(
+          forcedCreator
+        )
+      ),
     distinctTokens: 0,
     evidenceTokens: [],
     provider:
@@ -95028,6 +95203,59 @@ async function runRecurringCreatorAttributionV503({
     telemetry.status =
       "V503_NO_UNPROCESSED_RECURRING_CREATOR_WORK";
 
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  if (
+    targetedWorkV507 &&
+    (
+      targetedWorkV507.stage ===
+        "NOT_ELIGIBLE" ||
+      targetedWorkV507.stage ===
+        "COMPLETE"
+    )
+  ) {
+    telemetry.selectedStage =
+      targetedWorkV507.stage;
+    telemetry.selectedCreator =
+      normalize(
+        targetedWorkV507
+          ?.candidate
+          ?.creator
+      );
+    telemetry.distinctTokens =
+      safeNumber(
+        targetedWorkV507
+          ?.candidate
+          ?.distinctTokens
+      );
+    telemetry.evidenceTokens =
+      Array.isArray(
+        targetedWorkV507
+          ?.candidate
+          ?.tokens
+      )
+        ? targetedWorkV507
+            .candidate
+            .tokens
+            .slice(0, 30)
+        : [];
+    telemetry.status =
+      targetedWorkV507.status;
+    telemetry.attempted =
+      false;
+    telemetry.requestConsumed =
+      false;
+
+    root.lastSelectedCreator =
+      telemetry.selectedCreator ||
+      null;
+    root.lastSelectedStage =
+      telemetry.selectedStage ||
+      null;
     root.lastStatus =
       telemetry.status;
 
@@ -95062,6 +95290,44 @@ async function runRecurringCreatorAttributionV503({
     creator;
   root.lastSelectedStage =
     work.stage;
+
+  telemetry.targetingV507 = {
+    forced:
+      isAddress(
+        normalize(
+          forcedCreator
+        )
+      ),
+    forcedCreator:
+      isAddress(
+        normalize(
+          forcedCreator
+        )
+      )
+        ? normalize(
+            forcedCreator
+          )
+        : null,
+    actualSelectedCreator:
+      creator,
+    exactMatch:
+      !isAddress(
+        normalize(
+          forcedCreator
+        )
+      ) ||
+      normalize(
+        forcedCreator
+      ) === creator,
+    selectorMode:
+      isAddress(
+        normalize(
+          forcedCreator
+        )
+      )
+        ? "EXACT_FORCED_CREATOR_V507"
+        : "GENERIC_V503_SELECTOR"
+  };
 
   let url = null;
   let requestLabel = null;
@@ -95535,6 +95801,15 @@ function recurringCreatorAttributionSnapshotV503(
           "VERIFIED_CREATOR_ADDRESS",
         decisionPoint:
           "AFTER_V480_ORIGIN_PROOF_BEFORE_V485_REQUEST_CONSUMPTION"
+      },
+      deterministicCreatorHandoffV507: {
+        enabled: true,
+        forcedCreatorBinding:
+          true,
+        v503MaySwitchCreatorWhenForced:
+          false,
+        stageOrder:
+          "IDENTITY_THEN_TRANSACTIONS_FOR_EXACT_FORCED_CREATOR"
       },
       recurrenceAloneMeansLaunchSource:
         false
@@ -100950,7 +101225,11 @@ async function traceUnknownLiveOriginsV477({
           await runRecurringCreatorAttributionV503({
             env,
             state,
-            budget
+            budget,
+            forcedCreator:
+              strongCreatorPriorityV506
+                .pendingCreator ||
+              row.contractCreator
           });
 
         telemetry.recurringCreatorAttributionV503 =
