@@ -1,6 +1,29 @@
 /**
- * Robinhood Chain Meme Hunter — V491
- * AUTHORITATIVE RUNTIME VERSION: V491
+ * Robinhood Chain Meme Hunter — V492
+ * AUTHORITATIVE RUNTIME VERSION: V492
+ *
+ * V492 EXACT TOKEN-CREATION TRANSACTION TRIGGER LINKAGE:
+ * - preserves all confirmed-working V491/V490/V489/V488/V487/V486/V485/V484/V483;
+ * - consumes the exact V489 token creation transaction whose internal CREATE2
+ *   already proved LaunchTokenDeployer as the deployment source;
+ * - queries the authenticated Blockscout Pro transaction-details route:
+ *     GET /4663/api/v2/transactions/{creationTxHash}?apikey=...
+ * - binds the exact creation transaction to its outer caller, outer target,
+ *   decoded method name, raw input selector, status, block and timestamp;
+ * - because the transaction hash is already independently tied to the exact
+ *   token CREATE2, the outer method/selector becomes an exact-transaction-linked
+ *   launch-trigger candidate, not merely a generic source activity fingerprint;
+ * - V492 still does NOT automatically promote a launchpad/factory/router from
+ *   one token. A reusable live detector still requires target-contract identity
+ *   and preferably a second independently verified token using the same trigger;
+ * - V492 is one request, processed once after a real provider response, and
+ *   gets backlog priority before lower-evidence V491/V490/V489/V486 work;
+ * - V487 fairness remains authoritative; current/live V485 stays absolute
+ *   priority and fresh V483 keeps normal priority between fairness grants;
+ * - max ONE secondary origin/source diagnostic request per scan remains;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, launch meter,
+ *   V476 source promotion, or fresh-analysis-order changes.
  *
  * V491 VERIFIED DEPLOYMENT-SOURCE TRANSACTION MECHANISM FINGERPRINT:
  * - preserves all confirmed-working V490/V489/V488/V487/V486/V485/V484/V483;
@@ -2119,7 +2142,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V491";
+const VERSION = "V492";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71265,6 +71288,11 @@ for (
         state
       ),
 
+    exactCreationTriggerLinkageV492:
+      exactCreationTriggerLinkageSnapshotV492(
+        state
+      ),
+
     deploymentSourceMechanismFingerprintV491:
       deploymentSourceMechanismFingerprintSnapshotV491(
         state
@@ -71472,7 +71500,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71496,6 +71524,51 @@ for (
       telegramThresholdChanged:
         false,
       launchSourcePromotion:
+        false
+    },
+
+    exactCreationTransactionTriggerLinkageV492: {
+      enabled: true,
+      measurementOnly: true,
+      inputEvidence:
+        "V489_EXACT_INTERNAL_TOKEN_CREATION_VERIFIED",
+      provider:
+        "BLOCKSCOUT_PRO",
+      endpoint:
+        "/api/v2/transactions/{exactCreationTransactionHash}",
+      binds:
+        "EXACT_TOKEN_CREATION_TX_TO_OUTER_CALLER_TARGET_METHOD_SELECTOR",
+      exactCreate2EvidencePreserved:
+        true,
+      methodSelectorMeaning:
+        "EXACT_TRANSACTION_LINKED_TRIGGER_CANDIDATE_NOT_AUTO_LAUNCHPAD_PROOF",
+      targetContractIdentityStillRequired:
+        true,
+      secondIndependentTokenPreferred:
+        true,
+      triggerClusterKey:
+        "OUTER_TARGET_PLUS_SELECTOR",
+      priority:
+        "BEFORE_V491_V490_V489_V486_BACKLOG",
+      processedOnceAfterRealResponse:
+        true,
+      maxRequestsPerScan:
+        1,
+      maxSecondaryOriginDiagnosticRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      launchSourcePromotion:
+        false,
+      launchMeterMutation:
+        false,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
         false
     },
 
@@ -86829,6 +86902,99 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
   }
 
   /*
+   * V492 EXACT CREATION-TRIGGER LINKAGE ROUTE:
+   * The exact transaction already proven by V489 to contain the token CREATE2
+   * is higher-value than generic source activity. Bind its outer call first.
+   */
+  const exactCreationTriggerCandidateV492 =
+    selectOldestExactCreationTriggerCandidateV492(
+      state
+    );
+
+  if (exactCreationTriggerCandidateV492) {
+    const triggerV492 =
+      await runExactCreationTriggerLinkageV492({
+        env,
+        state,
+        budget,
+        candidate:
+          exactCreationTriggerCandidateV492
+      });
+
+    telemetry.exactCreationTriggerLinkageV492 =
+      triggerV492;
+
+    telemetry.selectedFromPersistedVerifiedOrigins =
+      true;
+    telemetry.selectedToken =
+      triggerV492?.selectedToken ||
+      null;
+    telemetry.selectedCreator =
+      triggerV492
+        ?.selectedDeploymentSource ||
+      null;
+    telemetry.selectedCreationTransactionHash =
+      triggerV492
+        ?.selectedCreationTransactionHash ||
+      null;
+    telemetry.attempted =
+      triggerV492?.attempted ===
+      true;
+    telemetry.requestConsumed =
+      triggerV492
+        ?.requestConsumed === true;
+    telemetry.processedAfterAttempt =
+      triggerV492
+        ?.processedAfterAttempt ===
+      true;
+    telemetry.status =
+      triggerV492?.status ||
+      "V492_STATUS_UNAVAILABLE";
+
+    if (
+      triggerV492?.attempted === true &&
+      v483DeferredForFairnessV487
+    ) {
+      telemetry.fairnessV487
+        .fairnessGrantThisScan = true;
+
+      fairness.fairnessGrants =
+        safeNumber(
+          fairness.fairnessGrants
+        ) + 1;
+
+      fairness.lastFairnessGrantAt =
+        Date.now();
+
+      fairness.lastFairnessGrantToken =
+        triggerV492?.selectedToken ||
+        null;
+
+      fairness.consecutiveV483BlocksOfV486 =
+        0;
+
+      fairness.lastDecision =
+        "V492_FAIRNESS_GRANTED_TO_EXACT_CREATION_TRIGGER_LINKAGE";
+
+      fairness.lastDecisionAt =
+        Date.now();
+    }
+
+    root.lastStatus =
+      `V486_ROUTED_TO_V492:${telemetry.status}`;
+
+    return telemetry;
+  }
+
+  telemetry.exactCreationTriggerLinkageV492 = {
+    enabled: true,
+    measurementOnly: true,
+    attempted: false,
+    status:
+      "V492_NO_UNPROCESSED_EXACT_CREATION_TRANSACTION"
+  };
+
+  /*
    * V491 SOURCE-MECHANISM FINGERPRINT ROUTE:
    * A V490-proven source contract is one evidence step closer to becoming a
    * reusable live detector. Capture its contract transaction activity before
@@ -87663,6 +87829,986 @@ function persistedOriginRawTraceBacklogSnapshotV486(
 
 
 
+
+
+function ensureExactCreationTriggerLinkageV492(
+  state
+) {
+  if (
+    !state.exactCreationTriggerLinkageV492 ||
+    typeof state.exactCreationTriggerLinkageV492 !==
+      "object"
+  ) {
+    state.exactCreationTriggerLinkageV492 = {
+      enabled: true,
+      measurementOnly: true,
+      monitorStartedAt: Date.now(),
+      scansObserved: 0,
+      requestsAttempted: 0,
+      requestsSucceeded: 0,
+      processedTransactions: {},
+      triggerLinkages: {},
+      triggerClusters: {},
+      lastToken: null,
+      lastCreationTransactionHash: null,
+      lastStatus: null,
+      lastHttpStatus: null,
+      lastAttemptAt: null
+    };
+  }
+
+  const root =
+    state.exactCreationTriggerLinkageV492;
+
+  root.processedTransactions =
+    root.processedTransactions &&
+    typeof root.processedTransactions === "object"
+      ? root.processedTransactions
+      : {};
+
+  root.triggerLinkages =
+    root.triggerLinkages &&
+    typeof root.triggerLinkages === "object"
+      ? root.triggerLinkages
+      : {};
+
+  root.triggerClusters =
+    root.triggerClusters &&
+    typeof root.triggerClusters === "object"
+      ? root.triggerClusters
+      : {};
+
+  return root;
+}
+
+function pruneExactCreationTriggerLinkageV492(
+  state
+) {
+  const root =
+    ensureExactCreationTriggerLinkageV492(
+      state
+    );
+
+  const now = Date.now();
+  const maxAgeMs =
+    14 * 24 * 60 * 60 * 1000;
+
+  root.processedTransactions =
+    Object.fromEntries(
+      Object.entries(
+        root.processedTransactions || {}
+      )
+        .filter(([, row]) => {
+          const at =
+            safeNumber(row?.attemptedAt);
+
+          return (
+            at > 0 &&
+            now - at <= maxAgeMs
+          );
+        })
+        .sort(
+          (a, b) =>
+            safeNumber(b?.[1]?.attemptedAt) -
+            safeNumber(a?.[1]?.attemptedAt)
+        )
+        .slice(0, 200)
+    );
+
+  root.triggerLinkages =
+    Object.fromEntries(
+      Object.entries(
+        root.triggerLinkages || {}
+      )
+        .filter(([, row]) => {
+          const at =
+            safeNumber(row?.verifiedAt);
+
+          return (
+            at > 0 &&
+            now - at <= maxAgeMs
+          );
+        })
+        .sort(
+          (a, b) =>
+            safeNumber(b?.[1]?.verifiedAt) -
+            safeNumber(a?.[1]?.verifiedAt)
+        )
+        .slice(0, 100)
+    );
+
+  root.triggerClusters = {};
+
+  for (
+    const linkage of
+    Object.values(
+      root.triggerLinkages || {}
+    )
+  ) {
+    if (
+      linkage?.exactCreationTransactionLinked !==
+      true
+    ) {
+      continue;
+    }
+
+    const target =
+      normalize(
+        linkage?.outerTarget
+      );
+
+    const selector =
+      String(
+        linkage?.outerSelector ||
+        ""
+      )
+        .trim()
+        .toLowerCase();
+
+    if (
+      !isAddress(target) ||
+      !/^0x[a-f0-9]{8}$/.test(selector)
+    ) {
+      continue;
+    }
+
+    const key =
+      `${target}:${selector}`;
+
+    const cluster =
+      root.triggerClusters[key] || {
+        target,
+        selector,
+        methodNames: [],
+        tokens: [],
+        distinctTokens: 0,
+        transactionHashes: [],
+        exactCreate2Count: 0,
+        interpretation:
+          "RECURRING_EXACT_CREATION_TRANSACTION_TRIGGER_CANDIDATE_NOT_YET_AUTO_PROMOTED_V492"
+      };
+
+    const token =
+      normalize(
+        linkage?.token
+      );
+
+    if (
+      isAddress(token) &&
+      !cluster.tokens.includes(token)
+    ) {
+      cluster.tokens.push(token);
+      cluster.distinctTokens++;
+    }
+
+    if (
+      linkage?.outerMethod &&
+      !cluster.methodNames.includes(
+        linkage.outerMethod
+      )
+    ) {
+      cluster.methodNames.push(
+        linkage.outerMethod
+      );
+    }
+
+    const tx =
+      String(
+        linkage?.creationTransactionHash ||
+        ""
+      )
+        .trim()
+        .toLowerCase();
+
+    if (
+      /^0x[a-f0-9]{64}$/.test(tx) &&
+      !cluster.transactionHashes.includes(tx)
+    ) {
+      cluster.transactionHashes.push(tx);
+    }
+
+    if (
+      linkage?.creationKind ===
+      "CREATE2"
+    ) {
+      cluster.exactCreate2Count++;
+    }
+
+    root.triggerClusters[key] =
+      cluster;
+  }
+
+  return root;
+}
+
+function exactCreationTriggerCandidatesV492(
+  state
+) {
+  const v489 =
+    pruneBlockscoutInternalCreationAttributionV489(
+      state
+    );
+
+  const root =
+    pruneExactCreationTriggerLinkageV492(
+      state
+    );
+
+  const rows = [];
+
+  for (
+    const [token, attribution] of
+    Object.entries(
+      v489.tokenAttributions || {}
+    )
+  ) {
+    if (
+      attribution?.exactTokenCreateVerified !==
+      true
+    ) {
+      continue;
+    }
+
+    const cleanToken =
+      normalize(token);
+
+    const tx =
+      String(
+        attribution?.creationTransactionHash ||
+        ""
+      )
+        .trim()
+        .toLowerCase();
+
+    const source =
+      normalize(
+        attribution?.verifiedDeploymentSource
+      );
+
+    if (
+      !isAddress(cleanToken) ||
+      !isAddress(source) ||
+      !/^0x[a-f0-9]{64}$/.test(tx) ||
+      root.processedTransactions[tx]
+    ) {
+      continue;
+    }
+
+    const sourceProfile =
+      state
+        ?.deploymentSourceIdentityV490
+        ?.sourceProfiles?.[
+          source
+        ] || null;
+
+    rows.push({
+      token:
+        cleanToken,
+      creationTransactionHash:
+        tx,
+      verifiedDeploymentSource:
+        source,
+      creationKind:
+        attribution?.creationKind ||
+        null,
+      verifiedAt:
+        safeNumber(
+          attribution?.verifiedAt
+        ),
+      sourceContractName:
+        typeof sourceProfile
+          ?.contractName ===
+          "string"
+          ? sourceProfile.contractName
+          : null
+    });
+  }
+
+  rows.sort((a, b) => {
+    const aAt =
+      safeNumber(a?.verifiedAt);
+
+    const bAt =
+      safeNumber(b?.verifiedAt);
+
+    if (aAt !== bAt) {
+      return aAt - bAt;
+    }
+
+    return a
+      .creationTransactionHash
+      .localeCompare(
+        b.creationTransactionHash
+      );
+  });
+
+  return rows;
+}
+
+function selectOldestExactCreationTriggerCandidateV492(
+  state
+) {
+  return (
+    exactCreationTriggerCandidatesV492(
+      state
+    )[0] || null
+  );
+}
+
+function eligibleExactCreationTriggerCountV492(
+  state
+) {
+  return exactCreationTriggerCandidatesV492(
+    state
+  ).length;
+}
+
+function blockscoutProTransactionDetailsUrlV492(
+  env,
+  transactionHash
+) {
+  const key =
+    String(
+      env?.BLOCKSCOUT_PRO_API_KEY ||
+      ""
+    ).trim();
+
+  const tx =
+    String(
+      transactionHash ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  if (
+    !key ||
+    !/^0x[a-f0-9]{64}$/.test(tx)
+  ) {
+    return null;
+  }
+
+  return (
+    `https://api.blockscout.com/4663/api/v2/transactions/${tx}` +
+    `?apikey=${encodeURIComponent(key)}`
+  );
+}
+
+function transactionMethodNameV492(
+  body
+) {
+  const candidates = [
+    body?.method,
+    body?.method_name,
+    body?.decoded_input?.method_call,
+    body?.decoded_input?.method_id
+  ];
+
+  for (const value of candidates) {
+    if (
+      typeof value ===
+        "string" &&
+      value.trim()
+    ) {
+      return value
+        .trim()
+        .slice(0, 180);
+    }
+  }
+
+  return null;
+}
+
+function parseExactCreationTriggerV492({
+  body,
+  candidate
+}) {
+  const token =
+    normalize(
+      candidate?.token
+    );
+
+  const source =
+    normalize(
+      candidate
+        ?.verifiedDeploymentSource
+    );
+
+  const tx =
+    String(
+      candidate
+        ?.creationTransactionHash ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  const responseHash =
+    String(
+      body?.hash || ""
+    )
+      .trim()
+      .toLowerCase();
+
+  const outerCaller =
+    transactionAddressHashV491(
+      body?.from
+    );
+
+  const outerTarget =
+    transactionAddressHashV491(
+      body?.to
+    );
+
+  const input =
+    String(
+      body?.raw_input ??
+      body?.input ??
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  const selector =
+    selectorFromInputV491(
+      input
+    );
+
+  const method =
+    transactionMethodNameV492(
+      body
+    );
+
+  const statusRaw =
+    String(
+      body?.status ??
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  const success =
+    statusRaw === "ok" ||
+    statusRaw === "success" ||
+    body?.success === true ||
+    (
+      !body?.error &&
+      statusRaw !== "error" &&
+      statusRaw !== "failed"
+    );
+
+  const hashMatches =
+    /^0x[a-f0-9]{64}$/.test(
+      responseHash
+    ) &&
+    responseHash === tx;
+
+  const exactLink =
+    Boolean(
+      hashMatches &&
+      success &&
+      isAddress(token) &&
+      isAddress(source)
+    );
+
+  return {
+    token:
+      isAddress(token)
+        ? token
+        : null,
+    creationTransactionHash:
+      /^0x[a-f0-9]{64}$/.test(tx)
+        ? tx
+        : null,
+    transactionResponseHash:
+      /^0x[a-f0-9]{64}$/.test(
+        responseHash
+      )
+        ? responseHash
+        : null,
+    transactionHashMatches:
+      hashMatches,
+    exactCreationTransactionLinked:
+      exactLink,
+    verifiedDeploymentSource:
+      isAddress(source)
+        ? source
+        : null,
+    verifiedDeploymentSourceName:
+      candidate?.sourceContractName ||
+      null,
+    creationKind:
+      candidate?.creationKind ||
+      null,
+    exactCreate2EvidencePreserved:
+      candidate?.creationKind ===
+      "CREATE2",
+    outerCaller:
+      isAddress(outerCaller)
+        ? outerCaller
+        : null,
+    outerTarget:
+      isAddress(outerTarget)
+        ? outerTarget
+        : null,
+    outerMethod:
+      method,
+    outerSelector:
+      selector,
+    blockNumber:
+      safeNumber(
+        body?.block ??
+        body?.block_number
+      ) || null,
+    timestamp:
+      body?.timestamp ||
+      body?.block_timestamp ||
+      null,
+    success,
+    error:
+      body?.error != null
+        ? String(
+            body.error
+          ).slice(
+            0,
+            250
+          )
+        : null,
+    decodedInputAvailable:
+      Boolean(
+        body?.decoded_input
+      ),
+    triggerCandidateStrength:
+      exactLink &&
+      isAddress(outerTarget) &&
+      /^0x[a-f0-9]{8}$/.test(
+        String(selector || "")
+      )
+        ? "EXACT_TX_LINKED_TARGET_AND_SELECTOR"
+        : (
+            exactLink
+              ? "EXACT_TX_LINKED_PARTIAL_TRIGGER"
+              : "DATA_UNVERIFIED"
+          ),
+    reusableMechanismProof:
+      false,
+    targetContractIdentity:
+      "DATA UNVERIFIED",
+    launchpadIdentity:
+      "DATA UNVERIFIED",
+    factoryIdentity:
+      "DATA UNVERIFIED",
+    routerIdentity:
+      "DATA UNVERIFIED",
+    launchSourcePromoted:
+      false,
+    evidenceStandard:
+      exactLink
+        ? "EXACT_V489_CREATE_TRANSACTION_HASH_LINKED_TO_BLOCKSCOUT_OUTER_TX_V492"
+        : "NO_EXACT_OUTER_TRANSACTION_LINK_V492"
+  };
+}
+
+async function runExactCreationTriggerLinkageV492({
+  env,
+  state,
+  budget,
+  candidate
+}) {
+  const root =
+    pruneExactCreationTriggerLinkageV492(
+      state
+    );
+
+  root.scansObserved =
+    safeNumber(
+      root.scansObserved
+    ) + 1;
+
+  const telemetry = {
+    enabled: true,
+    measurementOnly: true,
+    promotionAllowed: false,
+    selectedToken: null,
+    selectedCreationTransactionHash:
+      null,
+    selectedDeploymentSource:
+      null,
+    attempted: false,
+    requestConsumed: false,
+    provider:
+      "BLOCKSCOUT_PRO",
+    endpointV492:
+      "https://api.blockscout.com/4663/api/v2/transactions/{creationTxHash}?apikey=[REDACTED]",
+    triggerLinkage: null,
+    httpStatus: null,
+    processedAfterAttempt: false,
+    maxRequestsThisScan: 1,
+    hardRequestLimit: 42,
+    launchSourcePromoted: false,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false,
+    status: null
+  };
+
+  if (!candidate) {
+    telemetry.status =
+      "V492_NO_UNPROCESSED_EXACT_CREATION_TRANSACTION";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const token =
+    normalize(
+      candidate?.token
+    );
+
+  const source =
+    normalize(
+      candidate
+        ?.verifiedDeploymentSource
+    );
+
+  const tx =
+    String(
+      candidate
+        ?.creationTransactionHash ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  telemetry.selectedToken =
+    token;
+  telemetry.selectedCreationTransactionHash =
+    tx;
+  telemetry.selectedDeploymentSource =
+    source;
+
+  root.lastToken =
+    token;
+  root.lastCreationTransactionHash =
+    tx;
+
+  const url =
+    blockscoutProTransactionDetailsUrlV492(
+      env,
+      tx
+    );
+
+  if (!url) {
+    telemetry.status =
+      "V492_BLOCKSCOUT_PRO_NOT_CONFIGURED";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const spare =
+    consumeReleasedGlobalSpareV478(
+      budget,
+      "BLOCKSCOUT_PRO_EXACT_CREATION_TRANSACTION_DETAILS_V492",
+      1
+    );
+
+  if (spare?.ok !== true) {
+    telemetry.status =
+      `V492_BUDGET_UNAVAILABLE:${spare?.reason || "UNKNOWN"}`;
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  telemetry.attempted = true;
+  telemetry.requestConsumed = true;
+
+  root.requestsAttempted =
+    safeNumber(
+      root.requestsAttempted
+    ) + 1;
+
+  const attemptedAt =
+    Date.now();
+
+  root.lastAttemptAt =
+    attemptedAt;
+
+  const controller =
+    new AbortController();
+
+  const timer =
+    setTimeout(
+      () =>
+        controller.abort(),
+      6000
+    );
+
+  try {
+    const response =
+      await fetch(
+        url,
+        {
+          method: "GET",
+          headers: {
+            accept:
+              "application/json"
+          },
+          signal:
+            controller.signal
+        }
+      );
+
+    telemetry.httpStatus =
+      response.status;
+
+    root.lastHttpStatus =
+      response.status;
+
+    if (!response.ok) {
+      telemetry.status =
+        `V492_HTTP_${response.status}`;
+
+      root.lastStatus =
+        telemetry.status;
+
+      root.processedTransactions[
+        tx
+      ] = {
+        token,
+        creationTransactionHash:
+          tx,
+        attemptedAt,
+        httpStatus:
+          response.status,
+        status:
+          telemetry.status,
+        exactCreationTransactionLinked:
+          false,
+        processedOnce:
+          true,
+        retryAutomatically:
+          false
+      };
+
+      telemetry.processedAfterAttempt =
+        true;
+
+      return telemetry;
+    }
+
+    const body =
+      await response.json();
+
+    root.requestsSucceeded =
+      safeNumber(
+        root.requestsSucceeded
+      ) + 1;
+
+    const linkage =
+      parseExactCreationTriggerV492({
+        body,
+        candidate
+      });
+
+    telemetry.triggerLinkage =
+      linkage;
+
+    if (
+      linkage
+        ?.exactCreationTransactionLinked ===
+        true
+    ) {
+      root.triggerLinkages[
+        tx
+      ] = {
+        ...linkage,
+        verifiedAt:
+          attemptedAt,
+        provider:
+          "BLOCKSCOUT_PRO_TRANSACTION_DETAILS_V492"
+      };
+    }
+
+    root.processedTransactions[
+      tx
+    ] = {
+      token,
+      creationTransactionHash:
+        tx,
+      attemptedAt,
+      httpStatus:
+        response.status,
+      status:
+        linkage
+          ?.exactCreationTransactionLinked ===
+          true
+          ? "V492_EXACT_CREATION_TRANSACTION_TRIGGER_LINKED"
+          : "V492_HTTP_200_NO_EXACT_TRIGGER_LINK",
+      exactCreationTransactionLinked:
+        linkage
+          ?.exactCreationTransactionLinked ===
+        true,
+      outerCaller:
+        linkage?.outerCaller ||
+        null,
+      outerTarget:
+        linkage?.outerTarget ||
+        null,
+      outerMethod:
+        linkage?.outerMethod ||
+        null,
+      outerSelector:
+        linkage?.outerSelector ||
+        null,
+      processedOnce:
+        true,
+      retryAutomatically:
+        false
+    };
+
+    telemetry.processedAfterAttempt =
+      true;
+
+    telemetry.status =
+      root.processedTransactions[
+        tx
+      ].status;
+
+    root.lastStatus =
+      telemetry.status;
+
+    pruneExactCreationTriggerLinkageV492(
+      state
+    );
+
+    return telemetry;
+  } catch (error) {
+    telemetry.status =
+      `V492_FETCH_ERROR:${errorString(error)}`;
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function exactCreationTriggerLinkageSnapshotV492(
+  state
+) {
+  const root =
+    pruneExactCreationTriggerLinkageV492(
+      state
+    );
+
+  const linkages =
+    Object.values(
+      root.triggerLinkages || {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.verifiedAt
+          ) -
+          safeNumber(
+            a?.verifiedAt
+          )
+      );
+
+  const clusters =
+    Object.values(
+      root.triggerClusters || {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.distinctTokens
+          ) -
+          safeNumber(
+            a?.distinctTokens
+          )
+      );
+
+  return {
+    enabled: true,
+    measurementOnly: true,
+    monitorStartedAt:
+      safeNumber(
+        root.monitorStartedAt
+      ) || null,
+    scansObserved:
+      safeNumber(
+        root.scansObserved
+      ),
+    requestsAttempted:
+      safeNumber(
+        root.requestsAttempted
+      ),
+    requestsSucceeded:
+      safeNumber(
+        root.requestsSucceeded
+      ),
+    processedTransactionCount:
+      Object.keys(
+        root.processedTransactions ||
+        {}
+      ).length,
+    remainingEligibleTransactionCount:
+      eligibleExactCreationTriggerCountV492(
+        state
+      ),
+    retainedExactTriggerLinkages:
+      linkages.length,
+    recentExactTriggerLinkages:
+      linkages.slice(0, 20),
+    triggerClusterCount:
+      clusters.length,
+    recurringTriggerClusterCount:
+      clusters.filter(
+        row =>
+          safeNumber(
+            row?.distinctTokens
+          ) >= 2
+      ).length,
+    triggerClusters:
+      clusters.slice(0, 20),
+    lastToken:
+      root.lastToken || null,
+    lastCreationTransactionHash:
+      root.lastCreationTransactionHash ||
+      null,
+    lastStatus:
+      root.lastStatus || null,
+    lastHttpStatus:
+      root.lastHttpStatus ?? null,
+    lastAttemptAt:
+      safeNumber(
+        root.lastAttemptAt
+      ) || null,
+    exactTriggerLinkMeansLaunchpad:
+      false,
+    targetContractIdentityStillRequired:
+      true,
+    secondIndependentTokenPreferred:
+      true,
+    launchSourcePromotionAllowed:
+      false,
+    oneSecondaryDiagnosticPerScan:
+      true,
+    hardGlobalLimitUnchanged:
+      42
+  };
+}
 
 function ensureDeploymentSourceMechanismFingerprintV491(
   state
@@ -91921,6 +93067,9 @@ function eligiblePersistedOriginBacklogCountV487(
       state
     ) +
     eligibleSourceMechanismFingerprintCountV491(
+      state
+    ) +
+    eligibleExactCreationTriggerCountV492(
       state
     )
   );
