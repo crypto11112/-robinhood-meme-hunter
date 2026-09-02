@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V447
- * AUTHORITATIVE RUNTIME VERSION: V447
+ * Robinhood Chain Meme Hunter — V448
+ * AUTHORITATIVE RUNTIME VERSION: V448
+ * V448 replaces the optional historical PoolKey recovery transport that Chainstack has proven to reject with HTTP_403. Historical immutable PoolKey recovery now uses the already-integrated Blockscout logs API as the primary/only indexed recovery source for one exact PoolManager Initialize event: exact persisted block, exact PoolManager address, exact Initialize topic and exact PoolId topic. The response is decoded by the existing V441 Initialize decoder, so fee, tickSpacing and hooks are accepted only when emitted by the canonical event; no fields are guessed. V448 reuses the existing V184 Blockscout wide-initialize service state/cooldown for 429 protection, consumes at most one existing analysis-budget request per scan, and does not fan out to Chainstack/Robinhood/Alchemy for historical recovery. The V447 Chainstack historical-log guard remains preserved as telemetry/history but is no longer the primary recovery path. V441 ReservesLens valuation-ready targeting remains unchanged. No scoring, qualification, market promotion, liquidity threshold, Telegram rule or global request ceiling changes.
  * V447 is a narrow completion/reliability build based on the successful V446 ReservesLens decode. First, historical PoolKey recovery no longer fans out across Chainstack, Robinhood Public and Alchemy when an old-block eth_getLogs request is rejected. It now performs at most one Chainstack-only historical Initialize lookup, records HTTP_403 as a bounded historical-log capability cooldown in existing state, and skips further historical-log attempts while that cooldown is active. This prevents one optional recovery from consuming three analysis requests when public/Alchemy fallbacks are already rate-limited. Second, V441 ReservesLens target selection now explicitly prioritizes valuation-ready candidates: verified V438 exact-USD execution price plus a directly USD-valued quote (canonical USDG) or a fresh already-verified cached WETH/USDG reference. If no valuation-ready complete PoolKey exists, reserve reconstruction remains diagnostic-only on the best available candidate. No market promotion, scoring, qualification, liquidity threshold, Telegram rule, global request ceiling, scheduled cadence or provider secret is changed.
  * V446 fixes the V445 runtime failure caused by the V441 ReservesLens valuation calling a helper name that does not exist in the inherited codebase: bestVerifiedWethUsdGReferenceV195. V446 adds that missing bounded local helper and reuses only already-persisted verified WETH/USDG reference evidence; it makes zero external requests. The helper accepts the existing cached V3 canonical WETH/USDG reference only when it contains a positive price and a bounded verifiedAt timestamp, and returns it in the same shape expected by V441. If no valid cached reference exists, it returns null and V441 safely leaves USD liquidity incomplete rather than guessing. No V443 recovery logic, V442 Chainstack routing, V441 reserve reconstruction, budgets, scoring, qualification, liquidity thresholds or Telegram behavior are changed.
  * V445 fixes the remaining temporal-dead-zone bug by removing the historicalPoolKeyRecoveryResultV443 runtime value from the early scannerFunnelV415 object, which is created before candidate analysis and before that result exists. The early funnel now keeps only the static V443 capability descriptor. The actual recovery result is exposed only in the final scan response after the recovery call has completed. No PoolKey recovery logic, ReservesLens logic, Chainstack routing, request budgets, scoring, qualification, liquidity rules or Telegram behavior are changed.
@@ -1521,7 +1522,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V447";
+const VERSION = "V448";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2971,6 +2972,281 @@ function historicalPoolKeyRecoveryTargetV443(
   return ranked[0] || null;
 }
 
+async function blockscoutExactHistoricalInitializeV448(
+  state,
+  budget,
+  poolId,
+  blockNumber
+) {
+  const base = {
+    attempted: false,
+    requestSent: false,
+    provider: "BLOCKSCOUT",
+    poolId:
+      normalize(poolId),
+    blockNumber:
+      safeNumber(blockNumber) || null,
+    status: null,
+    httpStatus: null,
+    resolvedPool: null,
+    logsReturned: 0,
+    externalRequestsUsed: 0,
+    cooldownUntil: null,
+    error: null
+  };
+
+  const normalizedPoolId =
+    normalize(poolId);
+
+  const targetBlock =
+    safeNumber(blockNumber);
+
+  if (
+    !/^0x[a-f0-9]{64}$/.test(
+      String(normalizedPoolId || "")
+    ) ||
+    targetBlock <= 0
+  ) {
+    return {
+      ...base,
+      status:
+        "INVALID_POOL_OR_BLOCK_V448"
+    };
+  }
+
+  const service =
+    blockscoutWideInitializeServiceV184(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  const cooldownUntil =
+    safeNumber(
+      service?.cooldownUntil
+    );
+
+  if (
+    cooldownUntil > now
+  ) {
+    return {
+      ...base,
+      status:
+        "BLOCKSCOUT_HISTORICAL_INITIALIZE_COOLDOWN_V448",
+      cooldownUntil
+    };
+  }
+
+  if (
+    !budgetAvailable(
+      budget,
+      "analysis"
+    ) ||
+    !consumeBudget(
+      budget,
+      "analysis",
+      "BLOCKSCOUT_EXACT_HISTORICAL_INITIALIZE_V448"
+    )
+  ) {
+    return {
+      ...base,
+      status:
+        "ANALYSIS_BUDGET_UNAVAILABLE_V448"
+    };
+  }
+
+  const exactBlock =
+    Math.floor(
+      targetBlock
+    );
+
+  const url =
+    `${BLOCKSCOUT}/api?module=logs&action=getLogs` +
+    `&fromBlock=${exactBlock}` +
+    `&toBlock=${exactBlock}` +
+    `&address=${POOL_MANAGER}` +
+    `&topic0=${INITIALIZE_TOPIC}` +
+    `&topic1=${normalizedPoolId}` +
+    `&topic0_1_opr=and`;
+
+  service.totalRequests =
+    safeNumber(
+      service.totalRequests
+    ) + 1;
+
+  service.lastRequestAt =
+    Date.now();
+
+  service.lastStatus =
+    "REQUESTING_V448";
+
+  try {
+    const response =
+      await fetch(
+        url,
+        {
+          headers: {
+            accept:
+              "application/json"
+          }
+        }
+      );
+
+    const httpStatus =
+      response.status;
+
+    if (
+      httpStatus === 429
+    ) {
+      const backoffMs =
+        registerBlockscoutWideInitialize429V184(
+          state
+        );
+
+      return {
+        ...base,
+        attempted: true,
+        requestSent: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        status:
+          "BLOCKSCOUT_HTTP_429_V448",
+        cooldownUntil:
+          Date.now() +
+          backoffMs
+      };
+    }
+
+    if (!response.ok) {
+      service.lastStatus =
+        `HTTP_${httpStatus}_V448`;
+
+      return {
+        ...base,
+        attempted: true,
+        requestSent: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        status:
+          `BLOCKSCOUT_HTTP_${httpStatus}_V448`
+      };
+    }
+
+    let payload =
+      null;
+
+    try {
+      payload =
+        await response.json();
+    } catch (error) {
+      service.lastStatus =
+        "JSON_DECODE_FAILED_V448";
+
+      return {
+        ...base,
+        attempted: true,
+        requestSent: true,
+        externalRequestsUsed: 1,
+        httpStatus,
+        status:
+          "BLOCKSCOUT_JSON_DECODE_FAILED_V448",
+        error:
+          errorString(error)
+      };
+    }
+
+    const rows =
+      Array.isArray(
+        payload?.result
+      )
+        ? payload.result
+        : [];
+
+    let resolvedPool =
+      null;
+
+    for (
+      const row
+      of rows
+    ) {
+      const decoded =
+        decodeInitialize(
+          row
+        );
+
+      if (
+        decoded &&
+        normalize(
+          decoded.poolId
+        ) ===
+          normalizedPoolId &&
+        decoded
+          ?.poolKeyCompleteV441 ===
+          true
+      ) {
+        resolvedPool =
+          decoded;
+        break;
+      }
+    }
+
+    service.lastSuccessAt =
+      Date.now();
+
+    service.consecutive429s =
+      0;
+
+    service.cooldownUntil =
+      null;
+
+    service.lastBackoffMs =
+      null;
+
+    service.lastStatus =
+      resolvedPool
+        ? "RESOLVED_V448"
+        : (
+            rows.length
+              ? "FOUND_LOG_POOLKEY_INCOMPLETE_V448"
+              : "EMPTY_V448"
+          );
+
+    return {
+      ...base,
+      attempted: true,
+      requestSent: true,
+      externalRequestsUsed: 1,
+      httpStatus,
+      status:
+        resolvedPool
+          ? "RESOLVED_V448"
+          : (
+              rows.length
+                ? "FOUND_LOG_POOLKEY_INCOMPLETE_V448"
+                : "EMPTY_V448"
+            ),
+      resolvedPool,
+      logsReturned:
+        rows.length
+    };
+  } catch (error) {
+    service.lastStatus =
+      "FETCH_ERROR_V448";
+
+    return {
+      ...base,
+      attempted: true,
+      requestSent: true,
+      externalRequestsUsed: 1,
+      status:
+        "BLOCKSCOUT_FETCH_ERROR_V448",
+      error:
+        errorString(error)
+    };
+  }
+}
+
 async function recoverHistoricalPoolKeyV443(
   env,
   state,
@@ -3040,147 +3316,36 @@ async function recoverHistoricalPoolKeyV443(
     };
   }
 
-  if (
-    historicalLogChainstackBlockedV447(
-      state
-    )
-  ) {
-    const capability =
-      historicalLogCapabilityRootV447(
-        state
-      );
-
-    return {
-      ...base,
-      candidateAddress:
-        address,
-      symbol:
-        candidate?.symbol ||
-        null,
-      poolId,
-      blockNumber,
-      persistedSource,
-      status:
-        "CHAINSTACK_HISTORICAL_LOGS_403_COOLDOWN_V447",
-      provider:
-        "CHAINSTACK",
-      externalRequestsUsed:
-        0,
-      chainstackBlockedUntil:
-        capability
-          ?.chainstackBlockedUntil ||
-        null
-    };
-  }
-
-  const chainstackUrl =
-    chainstackRpcUrlV431(
-      env
-    );
-
-  if (!chainstackUrl) {
-    return {
-      ...base,
-      candidateAddress:
-        address,
-      symbol:
-        candidate?.symbol ||
-        null,
-      poolId,
-      blockNumber,
-      persistedSource,
-      status:
-        "CHAINSTACK_NOT_CONFIGURED_FOR_HISTORICAL_LOG_RECOVERY_V447"
-    };
-  }
-
-  const before =
-    safeNumber(
-      budget?.totalUsed
-    );
-
-  const blockHex =
-    "0x" +
-    BigInt(
-      Math.floor(
-        blockNumber
-      )
-    ).toString(16);
-
-  let rawResult =
-    null;
-
-  let callError =
-    null;
-
-  try {
-    rawResult =
-      await rpcCall(
-        chainstackUrl,
-        "eth_getLogs",
-        [{
-          fromBlock:
-            blockHex,
-          toBlock:
-            blockHex,
-          address:
-            POOL_MANAGER,
-          topics: [
-            INITIALIZE_TOPIC,
-            poolId
-          ]
-        }],
-        budget,
-        "analysis"
-      );
-
-    recordHistoricalLogResultV447(
+  const recoveryV448 =
+    await blockscoutExactHistoricalInitializeV448(
       state,
-      {
-        success: true
-      }
+      budget,
+      poolId,
+      blockNumber
     );
-  } catch (error) {
-    callError =
-      errorString(error);
-
-    const http403 =
-      String(
-        callError || ""
-      ).includes(
-        "HTTP_403"
-      );
-
-    recordHistoricalLogResultV447(
-      state,
-      {
-        success: false,
-        http403,
-        error:
-          callError
-      }
-    );
-  }
 
   const used =
-    Math.max(
-      0,
-      safeNumber(
-        budget?.totalUsed
-      ) - before
+    safeNumber(
+      recoveryV448
+        ?.externalRequestsUsed
     );
 
-  if (callError) {
-    const capability =
-      historicalLogCapabilityRootV447(
-        state
-      );
-
+  if (
+    recoveryV448
+      ?.resolvedPool
+      ?.poolKeyCompleteV441 !==
+      true
+  ) {
     return {
       ...base,
-      attempted: true,
+      attempted:
+        recoveryV448
+          ?.attempted ===
+          true,
       requestSent:
-        used > 0,
+        recoveryV448
+          ?.requestSent ===
+          true,
       candidateAddress:
         address,
       symbol:
@@ -3190,88 +3355,30 @@ async function recoverHistoricalPoolKeyV443(
       blockNumber,
       persistedSource,
       status:
-        String(
-          callError
-        ).includes(
-          "HTTP_403"
-        )
-          ? "CHAINSTACK_HISTORICAL_LOGS_HTTP_403_GUARDED_V447"
-          : "HISTORICAL_INITIALIZE_CHAINSTACK_ONLY_FAILED_V447",
+        recoveryV448
+          ?.status ||
+        "BLOCKSCOUT_HISTORICAL_POOLKEY_UNRESOLVED_V448",
       provider:
-        "CHAINSTACK",
-      error:
-        callError,
+        "BLOCKSCOUT",
+      logsReturned:
+        safeNumber(
+          recoveryV448
+            ?.logsReturned
+        ),
+      resolved: false,
+      recoveredPoolKey: null,
       externalRequestsUsed:
         used,
-      fallbackProvidersAttempted:
-        0,
-      chainstackBlockedUntil:
-        capability
-          ?.chainstackBlockedUntil ||
-        null
+      poolKeyFieldsGuessed:
+        false,
+      blockscoutRecoveryV448:
+        recoveryV448
     };
   }
 
-  const logs =
-    Array.isArray(
-      rawResult
-    )
-      ? rawResult
-      : [];
-
-  let resolvedPool =
-    null;
-
-  for (
-    const log
-    of logs
-  ) {
-    const decoded =
-      decodeInitialize(
-        log
-      );
-
-    if (
-      decoded &&
-      normalize(
-        decoded.poolId
-      ) ===
-        poolId &&
-      decoded
-        ?.poolKeyCompleteV441 ===
-        true
-    ) {
-      resolvedPool =
-        decoded;
-      break;
-    }
-  }
-
-  if (!resolvedPool) {
-    return {
-      ...base,
-      attempted: true,
-      requestSent: true,
-      candidateAddress:
-        address,
-      symbol:
-        candidate?.symbol ||
-        null,
-      poolId,
-      blockNumber,
-      persistedSource,
-      status:
-        logs.length
-          ? "INITIALIZE_FOUND_BUT_POOLKEY_INCOMPLETE_V443"
-          : "NO_INITIALIZE_AT_PERSISTED_BLOCK_V443",
-      provider:
-        "CHAINSTACK",
-      logsReturned:
-        logs.length,
-      externalRequestsUsed:
-        used
-    };
-  }
+  const resolvedPool =
+    recoveryV448
+      .resolvedPool;
 
   registerPoolMapping(
     state,
@@ -3331,12 +3438,15 @@ async function recoverHistoricalPoolKeyV443(
     status:
       recoveredKey
         ?.verified === true
-        ? "HISTORICAL_POOLKEY_RECOVERED_V443"
-        : "HISTORICAL_INITIALIZE_DECODED_BUT_REGISTRY_INCOMPLETE_V443",
+        ? "HISTORICAL_POOLKEY_RECOVERED_BLOCKSCOUT_V448"
+        : "HISTORICAL_INITIALIZE_DECODED_BUT_REGISTRY_INCOMPLETE_V448",
     provider:
-      "CHAINSTACK",
+      "BLOCKSCOUT",
     logsReturned:
-      logs.length,
+      safeNumber(
+        recoveryV448
+          ?.logsReturned
+      ),
     resolved:
       recoveredKey
         ?.verified === true,
@@ -3346,7 +3456,9 @@ async function recoverHistoricalPoolKeyV443(
         ? recoveredKey
         : null,
     externalRequestsUsed:
-      used
+      used,
+    blockscoutRecoveryV448:
+      recoveryV448
   };
 }
 
@@ -58532,9 +58644,20 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    blockscoutHistoricalPoolKeyRecoveryV448: {
+      enabled: true,
+      provider: "BLOCKSCOUT",
+      exactBlockOnly: true,
+      exactPoolIdTopic: true,
+      maxRequestsPerScan: 1,
+      usesExistingV184Cooldown: true,
+      chainstackFallback: false,
+      poolKeyFieldsGuessed: false,
+      requestCeilingChanged: false
+    },
     historicalLogGuardAndValuationTargetingV447: {
       enabled: true,
-      historicalProvider: "CHAINSTACK_ONLY",
+      historicalProvider: "BLOCKSCOUT_PRIMARY_V448",
       maxHistoricalRequestsPerScan: 1,
       historical403CooldownMs:
         V447_HISTORICAL_LOG_403_COOLDOWN_MS,
@@ -64233,16 +64356,46 @@ for (
     historicalPoolKeyRecoveryV443:
       historicalPoolKeyRecoveryResultV443,
 
+    blockscoutHistoricalPoolKeyRecoveryV448: {
+      enabled: true,
+      provider:
+        "BLOCKSCOUT",
+      exactBlockOnly:
+        true,
+      exactPoolIdTopic:
+        true,
+      canonicalInitializeDecoder:
+        true,
+      maxRequestsPerScan:
+        1,
+      usesExistingV184Cooldown:
+        true,
+      chainstackHistoricalFallbackUsed:
+        false,
+      poolKeyFieldsGuessed:
+        false,
+      requestCeilingChanged:
+        false,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      marketPromotionChanged:
+        false
+    },
+
     historicalLogGuardAndValuationTargetingV447: {
       enabled: true,
       historicalRecoveryProvider:
-        "CHAINSTACK_ONLY",
+        "BLOCKSCOUT_PRIMARY_V448",
       historicalRecoveryFallbackFanout:
         false,
       historical403CooldownMs:
         V447_HISTORICAL_LOG_403_COOLDOWN_MS,
       maxHistoricalRecoveryRequestsPerScan:
         1,
+      chainstackHistoricalRecoveryActive:
+        false,
       reservesLensValuationReadyPriority:
         true,
       requiresV438PriceForFullIndependentValuation:
