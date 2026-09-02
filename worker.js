@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V455
- * AUTHORITATIVE RUNTIME VERSION: V455
+ * Robinhood Chain Meme Hunter — V456
+ * AUTHORITATIVE RUNTIME VERSION: V456
+ * V456 fixes scanner funnel telemetry only: marketVerified and related final funnel counts are refreshed after V455 on-chain market fallback promotion, so telemetry reflects the final candidate state rather than the pre-promotion snapshot. No scanner discovery, scoring, qualification, provider routing, request budgeting, Telegram thresholds, holder rules, V455 fallback eligibility, or market evidence logic changes.
  * V455 activates the first strict independent on-chain market fallback. It may promote candidate.market only when normal provider market evidence is still unverified AND one exact Uniswap V4 PoolId has all required independent evidence: recent candidate-matched V438 exact-USD executions from that exact PoolId, a verified complete Initialize-derived PoolKey, a successful V441 ReservesLens USD valuation for the same PoolId, and a V454 semantic classification that explicitly marks the core liquidity as usable. The V438 price is recalculated from only the exact PoolId being promoted; mixed-pool median prices are never used. Unknown custom-accounting hooks, missing ReservesLens evidence, incomplete PoolKeys, stale/no exact-USD execution samples, non-positive price/liquidity, or PoolId mismatches remain blocked. The fallback exposes verified priceUsd and exact-pool core liquidityUsd, plus FDV when verified totalSupply/decimals allow it. It deliberately does not invent circulating market cap, provider volume, buy pressure or pair-created age. After a successful promotion V455 refreshes the existing downstream momentum/market-quality/risk/opportunity/signal/confidence pipeline using the same established functions and protections; alert thresholds themselves are unchanged. No provider routing, holder standards, Telegram thresholds or request ceilings change, and V455 adds zero external requests.
  * V454 closes the false-positive semantic path exposed by the V453 SIM scan. The V453 classifier could label a candidate as CORE_AMM_LIQUIDITY_NO_CUSTOM_ACCOUNTING even when that candidate had no ReservesLens result, no verified PoolKey and no PoolId. V454 now requires real ReservesLens evidence and a verified complete PoolKey before ANY liquidity semantic classification may become usable. Missing ReservesLens evidence is classified NO_RESERVESLENS_LIQUIDITY_EVIDENCE_V454 and blocked. Incomplete or unverified PoolKey evidence is classified RESERVESLENS_POOLKEY_UNVERIFIED_V454 and blocked. Only then can a verified ordinary/no-custom-accounting pool become usable, or the specifically identified Pons V2 fee-accounting hook become usable under the researched V453 semantics. Unknown custom-accounting hooks remain blocked. This remains diagnostic-only and does not promote market verification, change liquidity gates, scoring, qualification, Telegram behavior, provider routing or request ceilings.
  * V453 resolves the generic custom-accounting ambiguity for the verified Pons V2 meme hook. Research confirms Pons V2 graduated pools use one permanently locked full-range Uniswap v4 position; the hook charges/accrues post-swap fees but does not replace the core AMM curve or custody trading principal between swaps. ReservesLens generically marks the hook as hasCustomAccounting because its hook permissions include a return-delta accounting flag, but for this specifically identified protocol that flag represents fee accounting rather than hook-managed replacement liquidity. V453 therefore adds a strict semantic classifier for the canonical Pons V2 hook address only. It labels its ReservesLens core principal as semantically usable independent pool-liquidity evidence while keeping hook-held accrued fees separate and excluded. This build remains diagnostic-only: it does NOT yet promote market.verified, change liquidity gates, scoring, qualification, Telegram behavior, provider routing, or request ceilings. Unknown/custom hooks remain blocked exactly as before.
@@ -1529,7 +1530,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V455";
+const VERSION = "V456";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -5601,6 +5602,124 @@ function promoteStrictOnChainMarketFallbackV455(
       candidate
         .onChainMarketFallbackV455
   };
+}
+
+
+function refreshScannerFunnelFinalCountsV456(
+  scannerFunnel,
+  candidates,
+  telegramResults
+) {
+  if (
+    !scannerFunnel ||
+    typeof scannerFunnel !== "object"
+  ) {
+    return null;
+  }
+
+  const returned =
+    Array.isArray(candidates)
+      ? candidates.filter(
+          candidate =>
+            candidate &&
+            candidate.returnedCandidate !==
+              false
+        )
+      : [];
+
+  const marketVerified =
+    returned.filter(
+      candidate =>
+        candidate
+          ?.market
+          ?.verified === true
+    ).length;
+
+  const holderEvidenceVerified =
+    returned.filter(candidate => {
+      const holders =
+        candidate?.holders || {};
+
+      return (
+        holders
+          ?.fullyVerified ===
+          true ||
+        (
+          holders
+            ?.integrityVerified ===
+            true &&
+          holders
+            ?.concentrationVerified ===
+            true
+        )
+      );
+    }).length;
+
+  const telegramQualified =
+    returned.filter(
+      candidate =>
+        candidate
+          ?.telegram
+          ?.qualifies === true
+    ).length;
+
+  const telegramSent =
+    Array.isArray(
+      telegramResults
+    )
+      ? telegramResults.filter(
+          result =>
+            result?.sent === true
+        ).length
+      : safeNumber(
+          scannerFunnel
+            ?.telegramSent
+        );
+
+  scannerFunnel.marketVerified =
+    marketVerified;
+
+  scannerFunnel.holderEvidenceVerified =
+    holderEvidenceVerified;
+
+  scannerFunnel.telegramQualified =
+    telegramQualified;
+
+  scannerFunnel.telegramSent =
+    telegramSent;
+
+  scannerFunnel.finalStateTelemetryV456 = {
+    applied: true,
+    source:
+      "POST_V455_FINAL_CANDIDATE_STATE",
+    returnedCandidates:
+      returned.length,
+    marketVerified,
+    holderEvidenceVerified,
+    telegramQualified,
+    telegramSent,
+    fallbackPromotedCount:
+      returned.filter(
+        candidate =>
+          candidate
+            ?.market
+            ?.onChainMarketFallbackV455
+            ?.promoted === true
+      ).length,
+    countsReflectPostFallbackState:
+      true,
+    scoringChanged:
+      false,
+    qualificationChanged:
+      false,
+    thresholdsChanged:
+      false,
+    externalRequestsAdded:
+      0
+  };
+
+  return scannerFunnel
+    .finalStateTelemetryV456;
 }
 
 function refreshCandidateAfterMarketPromotionV455(
@@ -59956,6 +60075,28 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    finalScannerFunnelTelemetryFixV456: {
+      enabled: true,
+      countsFinalCandidateState:
+        true,
+      runsAfterV455FallbackPromotion:
+        true,
+      marketVerifiedIncludesV455Promotions:
+        true,
+      telegramSentUsesFinalTelegramResults:
+        true,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      thresholdsChanged:
+        false,
+      requestRoutingChanged:
+        false,
+      externalRequestsAdded:
+        0
+    },
+
     strictIndependentOnChainMarketFallbackV455: {
       enabled: true,
       providerMarketMustBeUnverified:
@@ -67378,6 +67519,16 @@ for (
             ) {
               return null;
             }
+
+  const finalScannerFunnelTelemetryV456 =
+    refreshScannerFunnelFinalCountsV456(
+      scannerFunnelV415,
+    finalScannerFunnelTelemetryV456,
+      candidates,
+      telegramResults
+    );
+
+
 
             return {
               address:
