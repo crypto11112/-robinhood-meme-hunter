@@ -1,6 +1,32 @@
 /**
- * Robinhood Chain Meme Hunter — V484
- * AUTHORITATIVE RUNTIME VERSION: V484
+ * Robinhood Chain Meme Hunter — V485
+ * AUTHORITATIVE RUNTIME VERSION: V485
+ *
+ * V485 EXACT CREATION-TRANSACTION RAW-TRACE ATTRIBUTION:
+ * - preserves all confirmed-working V484 behaviour;
+ * - when V480 returns a VERIFIED creator + creation transaction for the one
+ *   current/live unknown-source target, V485 may spend ONE released
+ *   post-Telegram spare request on the exact authenticated Blockscout PRO route:
+ *     /4663/api/v2/transactions/{creationTxHash}/raw-trace?apikey=...
+ * - parses the returned execution trace and requires an exact CREATE/CREATE2
+ *   row whose created/result address equals the candidate token;
+ * - records the exact CREATE/CREATE2 source address (action.from), trace path,
+ *   parent call target where available, and consistency with V480's verified
+ *   contractCreator;
+ * - a source address is called VERIFIED DEPLOYMENT SOURCE only when the raw
+ *   trace exactly creates the candidate token; it is NOT automatically called
+ *   a launchpad/factory/router;
+ * - persists bounded per-token raw-trace attributions and cross-token source
+ *   clusters so recurring deployment sources can be proven across scans;
+ * - generic calls, approvals, pair age, first-seen time, creator repetition,
+ *   and unmatched traces NEVER promote a launch source;
+ * - V485 is measurement/attribution only: no Opportunity score, Momentum,
+ *   qualification, Telegram threshold, verified-launch meter or V476 source
+ *   promotion changes;
+ * - V485 and V483 are mutually exclusive on a target: V483 runs only when V480
+ *   provenance is incomplete; V485 runs only when V480 provenance is complete.
+ *   Therefore the new lane remains max ONE extra diagnostic request per scan;
+ * - hard global request ceiling remains 42.
  *
  * V484 FRESH UNKNOWN-LAUNCH TARGET ROUTING + CONTRACT-EVIDENCE RECONCILIATION:
  * - preserves V483 unknown-launch mechanism fingerprinting;
@@ -1934,7 +1960,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V484";
+const VERSION = "V485";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71142,6 +71168,48 @@ for (
         false
     },
 
+    exactCreationTransactionMechanismAttributionV485: {
+      enabled: true,
+      measurementOnly: true,
+      provider:
+        "BLOCKSCOUT_PRO",
+      endpoint:
+        "TRANSACTION_RAW_TRACE",
+      trigger:
+        "V480_VERIFIED_CREATOR_AND_CREATION_TRANSACTION",
+      exactProofRequired:
+        "CREATE_OR_CREATE2_RESULT_ADDRESS_EQUALS_TOKEN",
+      deploymentSource:
+        "RAW_TRACE_CREATE_ACTION_FROM",
+      parentCallTargetCaptured:
+        true,
+      persistentCrossTokenSourceClustering:
+        true,
+      recurringDeploymentSourceMeansLaunchpad:
+        false,
+      v483MutuallyExclusive:
+        true,
+      maxAdditionalRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      launchSourcePromotion:
+        false,
+      launchMeterMutation:
+        false,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false
+    },
+
+    creationMechanismAttributionV485:
+      creationMechanismAttributionSnapshotV485(
+        state
+      ),
+
     launchCoverageFunnelV474,
 
     launchCoverageCumulativeV474,
@@ -85015,6 +85083,927 @@ function launchFingerprintAgeLabelV484(candidate) {
   ][tier] || "MARKET_AGE_UNVERIFIED";
 }
 
+
+function blockscoutProCreationRawTraceUrlV485(
+  env,
+  transactionHash
+) {
+  const key =
+    String(
+      env?.BLOCKSCOUT_PRO_API_KEY ||
+      ""
+    ).trim();
+
+  const tx =
+    String(transactionHash || "")
+      .trim()
+      .toLowerCase();
+
+  if (
+    !key ||
+    !/^0x[a-f0-9]{64}$/.test(tx)
+  ) {
+    return null;
+  }
+
+  return (
+    `https://api.blockscout.com/4663/api/v2/transactions/${tx}/raw-trace` +
+    `?apikey=${encodeURIComponent(key)}`
+  );
+}
+
+function traceAddressV485(row) {
+  const raw =
+    row?.traceAddress ??
+    row?.trace_address ??
+    [];
+
+  return Array.isArray(raw)
+    ? raw
+        .map(value => Number(value))
+        .filter(Number.isFinite)
+    : [];
+}
+
+function sameTraceAddressV485(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) {
+    return false;
+  }
+
+  if (a.length !== b.length) {
+    return false;
+  }
+
+  for (let i = 0; i < a.length; i++) {
+    if (Number(a[i]) !== Number(b[i])) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function rawTraceRowsV485(body) {
+  if (Array.isArray(body)) {
+    return body;
+  }
+
+  if (Array.isArray(body?.items)) {
+    return body.items;
+  }
+
+  if (Array.isArray(body?.data)) {
+    return body.data;
+  }
+
+  if (Array.isArray(body?.result)) {
+    return body.result;
+  }
+
+  return [];
+}
+
+function rawTraceCreatedAddressV485(row) {
+  return normalize(
+    row?.result?.address ??
+    row?.result?.contractAddress ??
+    row?.result?.contract_address ??
+    row?.action?.address ??
+    row?.action?.createdAddress ??
+    row?.action?.created_address ??
+    ""
+  );
+}
+
+function rawTraceActionFromV485(row) {
+  return normalize(
+    row?.action?.from ??
+    row?.from?.hash ??
+    row?.from ??
+    ""
+  );
+}
+
+function rawTraceActionToV485(row) {
+  return normalize(
+    row?.action?.to ??
+    row?.to?.hash ??
+    row?.to ??
+    ""
+  );
+}
+
+function rawTraceTypeV485(row) {
+  return String(
+    row?.type ??
+    row?.trace_type ??
+    ""
+  )
+    .trim()
+    .toLowerCase();
+}
+
+function rawTraceCreationKindV485(row) {
+  const type =
+    rawTraceTypeV485(row);
+
+  const callType =
+    String(
+      row?.action?.callType ??
+      row?.action?.call_type ??
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  const creationMethod =
+    String(
+      row?.action?.creationMethod ??
+      row?.action?.creation_method ??
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  const combined =
+    `${type}|${callType}|${creationMethod}`;
+
+  if (
+    combined.includes("create2")
+  ) {
+    return "CREATE2";
+  }
+
+  if (
+    type === "create" ||
+    combined.includes("|create")
+  ) {
+    return "CREATE";
+  }
+
+  return null;
+}
+
+function parseExactCreationRawTraceV485({
+  body,
+  token,
+  verifiedCreator,
+  creationTransactionHash
+}) {
+  const cleanToken =
+    normalize(token);
+
+  const cleanCreator =
+    normalize(verifiedCreator);
+
+  const rows =
+    rawTraceRowsV485(body);
+
+  const parsedRows =
+    rows.map((row, index) => {
+      const traceAddress =
+        traceAddressV485(row);
+
+      return {
+        index,
+        row,
+        type:
+          rawTraceTypeV485(row),
+        creationKind:
+          rawTraceCreationKindV485(row),
+        traceAddress,
+        from:
+          rawTraceActionFromV485(row),
+        to:
+          rawTraceActionToV485(row),
+        createdAddress:
+          rawTraceCreatedAddressV485(row),
+        error:
+          row?.error != null
+            ? String(row.error)
+            : null
+      };
+    });
+
+  const exactCreates =
+    parsedRows.filter(row =>
+      row.creationKind &&
+      isAddress(row.createdAddress) &&
+      row.createdAddress === cleanToken &&
+      !row.error
+    );
+
+  const exact =
+    exactCreates.length === 1
+      ? exactCreates[0]
+      : null;
+
+  let parent = null;
+
+  if (
+    exact &&
+    exact.traceAddress.length > 0
+  ) {
+    const parentPath =
+      exact.traceAddress.slice(
+        0,
+        -1
+      );
+
+    parent =
+      parsedRows.find(row =>
+        sameTraceAddressV485(
+          row.traceAddress,
+          parentPath
+        )
+      ) || null;
+  }
+
+  const deploymentSource =
+    exact && isAddress(exact.from)
+      ? exact.from
+      : null;
+
+  const parentCallTarget =
+    parent && isAddress(parent.to)
+      ? parent.to
+      : null;
+
+  const creatorConsistency =
+    Boolean(
+      exact &&
+      isAddress(cleanCreator) &&
+      isAddress(deploymentSource) &&
+      cleanCreator === deploymentSource
+    );
+
+  const exactTokenCreateVerified =
+    Boolean(
+      exact &&
+      exactCreates.length === 1 &&
+      isAddress(deploymentSource)
+    );
+
+  const result = {
+    token:
+      isAddress(cleanToken)
+        ? cleanToken
+        : null,
+    creationTransactionHash:
+      /^0x[a-f0-9]{64}$/.test(
+        String(
+          creationTransactionHash ||
+          ""
+        ).toLowerCase()
+      )
+        ? String(
+            creationTransactionHash
+          ).toLowerCase()
+        : null,
+    traceRowsReturned:
+      rows.length,
+    createRowsObserved:
+      parsedRows.filter(
+        row =>
+          Boolean(
+            row.creationKind
+          )
+      ).length,
+    exactTokenCreateMatches:
+      exactCreates.length,
+    exactTokenCreateVerified,
+    creationKind:
+      exact?.creationKind || null,
+    traceAddress:
+      exact?.traceAddress || null,
+    verifiedDeploymentSource:
+      exactTokenCreateVerified
+        ? deploymentSource
+        : null,
+    v480VerifiedCreator:
+      isAddress(cleanCreator)
+        ? cleanCreator
+        : null,
+    creatorMatchesRawTraceSource:
+      creatorConsistency,
+    parentTraceType:
+      parent?.type || null,
+    parentCallFrom:
+      parent &&
+      isAddress(parent.from)
+        ? parent.from
+        : null,
+    parentCallTo:
+      parentCallTarget,
+    deploymentSourceRole:
+      exactTokenCreateVerified
+        ? "VERIFIED_DEPLOYMENT_SOURCE_ADDRESS_ONLY"
+        : "DATA_UNVERIFIED",
+    deploymentSourceIsLaunchpad:
+      "DATA UNVERIFIED",
+    deploymentSourceIsFactory:
+      "DATA UNVERIFIED",
+    deploymentSourceIsRouter:
+      "DATA UNVERIFIED",
+    launchSourcePromoted:
+      false,
+    evidenceStandard:
+      exactTokenCreateVerified
+        ? "EXACT_RAW_TRACE_CREATE_OR_CREATE2_TOKEN_ADDRESS_MATCH_V485"
+        : "NO_EXACT_RAW_TRACE_TOKEN_CREATION_PROOF_V485"
+  };
+
+  return result;
+}
+
+function ensureCreationMechanismAttributionV485(
+  state
+) {
+  if (
+    !state.creationMechanismAttributionV485 ||
+    typeof state.creationMechanismAttributionV485 !==
+      "object"
+  ) {
+    state.creationMechanismAttributionV485 = {
+      enabled: true,
+      measurementOnly: true,
+      monitorStartedAt: Date.now(),
+      scansObserved: 0,
+      requestsAttempted: 0,
+      requestsSucceeded: 0,
+      exactTokenCreationsVerified: 0,
+      tokenAttributions: {},
+      sourceClusters: {},
+      lastTarget: null,
+      lastTransactionHash: null,
+      lastStatus: null,
+      lastHttpStatus: null,
+      lastUpdatedAt: null
+    };
+  }
+
+  const root =
+    state.creationMechanismAttributionV485;
+
+  if (
+    !root.tokenAttributions ||
+    typeof root.tokenAttributions !==
+      "object"
+  ) {
+    root.tokenAttributions = {};
+  }
+
+  if (
+    !root.sourceClusters ||
+    typeof root.sourceClusters !==
+      "object"
+  ) {
+    root.sourceClusters = {};
+  }
+
+  return root;
+}
+
+function pruneCreationMechanismAttributionV485(
+  state
+) {
+  const root =
+    ensureCreationMechanismAttributionV485(
+      state
+    );
+
+  const now = Date.now();
+  const maxAge =
+    7 * 24 * 60 * 60 * 1000;
+
+  const retained =
+    Object.entries(
+      root.tokenAttributions || {}
+    )
+      .filter(([, row]) => {
+        const at =
+          safeNumber(row?.verifiedAt) ||
+          safeNumber(row?.capturedAt);
+
+        return (
+          at > 0 &&
+          now - at <= maxAge
+        );
+      })
+      .sort(
+        (a, b) =>
+          (
+            safeNumber(
+              b?.[1]?.verifiedAt
+            ) ||
+            safeNumber(
+              b?.[1]?.capturedAt
+            )
+          ) -
+          (
+            safeNumber(
+              a?.[1]?.verifiedAt
+            ) ||
+            safeNumber(
+              a?.[1]?.capturedAt
+            )
+          )
+      )
+      .slice(0, 100);
+
+  root.tokenAttributions =
+    Object.fromEntries(retained);
+
+  root.sourceClusters = {};
+
+  for (
+    const attribution of
+    Object.values(
+      root.tokenAttributions
+    )
+  ) {
+    if (
+      attribution
+        ?.exactTokenCreateVerified !==
+        true
+    ) {
+      continue;
+    }
+
+    const source =
+      normalize(
+        attribution
+          ?.verifiedDeploymentSource
+      );
+
+    const token =
+      normalize(
+        attribution?.token
+      );
+
+    if (
+      !isAddress(source) ||
+      !isAddress(token)
+    ) {
+      continue;
+    }
+
+    const cluster =
+      root.sourceClusters[source] || {
+        sourceAddress: source,
+        distinctTokens: 0,
+        tokens: [],
+        createCount: 0,
+        create2Count: 0,
+        creatorConsistencyCount: 0,
+        interpretation:
+          "RECURRING_VERIFIED_DEPLOYMENT_SOURCE_NOT_AUTOMATICALLY_LAUNCHPAD_V485"
+      };
+
+    if (!cluster.tokens.includes(token)) {
+      cluster.tokens.push(token);
+      cluster.distinctTokens++;
+    }
+
+    if (
+      attribution?.creationKind ===
+      "CREATE2"
+    ) {
+      cluster.create2Count++;
+    } else if (
+      attribution?.creationKind ===
+      "CREATE"
+    ) {
+      cluster.createCount++;
+    }
+
+    if (
+      attribution
+        ?.creatorMatchesRawTraceSource ===
+        true
+    ) {
+      cluster.creatorConsistencyCount++;
+    }
+
+    root.sourceClusters[source] =
+      cluster;
+  }
+
+  return root;
+}
+
+async function runExactCreationMechanismAttributionV485({
+  env,
+  state,
+  budget,
+  token,
+  verifiedCreator,
+  creationTransactionHash
+}) {
+  const cleanToken =
+    normalize(token);
+
+  const cleanCreator =
+    normalize(verifiedCreator);
+
+  const txHash =
+    String(
+      creationTransactionHash ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  const root =
+    pruneCreationMechanismAttributionV485(
+      state
+    );
+
+  root.scansObserved =
+    safeNumber(root.scansObserved) + 1;
+
+  const telemetry = {
+    enabled: true,
+    measurementOnly: true,
+    promotionAllowed: false,
+    targetAddress:
+      isAddress(cleanToken)
+        ? cleanToken
+        : null,
+    verifiedCreator:
+      isAddress(cleanCreator)
+        ? cleanCreator
+        : null,
+    creationTransactionHash:
+      /^0x[a-f0-9]{64}$/.test(txHash)
+        ? txHash
+        : null,
+    attempted: false,
+    requestConsumed: false,
+    budgetRouteV485: null,
+    endpointV485:
+      "https://api.blockscout.com/4663/api/v2/transactions/{creationTxHash}/raw-trace?apikey=[REDACTED]",
+    maxAdditionalRequestsPerScan: 1,
+    hardRequestLimit: 42,
+    exactCreationTrace: null,
+    recurringVerifiedDeploymentSources: [],
+    launchpadIdentityInferred: false,
+    factoryIdentityInferred: false,
+    routerIdentityInferred: false,
+    launchSourcePromoted: false,
+    launchMeterMutation: false,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false,
+    httpStatus: null,
+    status: null
+  };
+
+  if (
+    !isAddress(cleanToken) ||
+    !isAddress(cleanCreator) ||
+    !/^0x[a-f0-9]{64}$/.test(
+      txHash
+    )
+  ) {
+    telemetry.status =
+      "V485_INVALID_VERIFIED_ORIGIN_INPUT";
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  }
+
+  const url =
+    blockscoutProCreationRawTraceUrlV485(
+      env,
+      txHash
+    );
+
+  if (!url) {
+    telemetry.status =
+      "V485_BLOCKSCOUT_PRO_NOT_CONFIGURED";
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  }
+
+  const spare =
+    consumeReleasedGlobalSpareV478(
+      budget,
+      "BLOCKSCOUT_PRO_EXACT_CREATION_RAW_TRACE_V485",
+      1
+    );
+
+  if (spare?.ok !== true) {
+    telemetry.status =
+      `V485_BUDGET_UNAVAILABLE:${spare?.reason || "UNKNOWN"}`;
+    telemetry.budgetRouteV485 =
+      "NONE";
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  }
+
+  telemetry.attempted = true;
+  telemetry.requestConsumed = true;
+  telemetry.budgetRouteV485 =
+    "POST_TELEGRAM_GLOBAL_SPARE_V478";
+
+  root.requestsAttempted =
+    safeNumber(
+      root.requestsAttempted
+    ) + 1;
+
+  root.lastTarget =
+    cleanToken;
+  root.lastTransactionHash =
+    txHash;
+
+  const controller =
+    new AbortController();
+
+  const timer =
+    setTimeout(
+      () =>
+        controller.abort(),
+      6000
+    );
+
+  try {
+    const response =
+      await fetch(
+        url,
+        {
+          method: "GET",
+          headers: {
+            accept:
+              "application/json"
+          },
+          signal:
+            controller.signal
+        }
+      );
+
+    telemetry.httpStatus =
+      response.status;
+
+    root.lastHttpStatus =
+      response.status;
+
+    if (!response.ok) {
+      telemetry.status =
+        `V485_HTTP_${response.status}`;
+      root.lastStatus =
+        telemetry.status;
+      return telemetry;
+    }
+
+    const body =
+      await response.json();
+
+    const attribution =
+      parseExactCreationRawTraceV485({
+        body,
+        token:
+          cleanToken,
+        verifiedCreator:
+          cleanCreator,
+        creationTransactionHash:
+          txHash
+      });
+
+    telemetry.exactCreationTrace =
+      attribution;
+
+    root.requestsSucceeded =
+      safeNumber(
+        root.requestsSucceeded
+      ) + 1;
+
+    if (
+      attribution
+        ?.exactTokenCreateVerified ===
+        true
+    ) {
+      const verifiedAt =
+        Date.now();
+
+      const persisted = {
+        ...attribution,
+        verifiedAt,
+        source:
+          "BLOCKSCOUT_PRO_EXACT_CREATION_RAW_TRACE_V485",
+        evidenceMeaning:
+          "VERIFIED_DEPLOYMENT_SOURCE_ADDRESS_ONLY_NOT_LAUNCHPAD_IDENTITY"
+      };
+
+      root.tokenAttributions[
+        cleanToken
+      ] = persisted;
+
+      root.exactTokenCreationsVerified =
+        safeNumber(
+          root
+            .exactTokenCreationsVerified
+        ) + 1;
+
+      root.lastUpdatedAt =
+        verifiedAt;
+
+      const originRoot =
+        ensureTokenOriginTraceV477(
+          state
+        );
+
+      const existingOrigin =
+        originRoot?.tokenOrigins?.[
+          cleanToken
+        ];
+
+      if (
+        existingOrigin &&
+        existingOrigin
+          ?.verified === true
+      ) {
+        existingOrigin
+          .creationMechanismV485 =
+          persisted;
+      }
+
+      const watched =
+        Array.isArray(
+          state?.watchedTokens
+        )
+          ? state.watchedTokens.find(
+              item =>
+                normalize(
+                  item?.address
+                ) ===
+                cleanToken
+            )
+          : null;
+
+      if (watched) {
+        watched
+          .creationMechanismV485 =
+          persisted;
+      }
+    }
+
+    pruneCreationMechanismAttributionV485(
+      state
+    );
+
+    telemetry
+      .recurringVerifiedDeploymentSources =
+      Object.values(
+        root.sourceClusters || {}
+      )
+        .filter(
+          row =>
+            safeNumber(
+              row?.distinctTokens
+            ) >= 2
+        )
+        .sort(
+          (a, b) =>
+            safeNumber(
+              b?.distinctTokens
+            ) -
+            safeNumber(
+              a?.distinctTokens
+            )
+        )
+        .slice(0, 10);
+
+    telemetry.status =
+      attribution
+        ?.exactTokenCreateVerified ===
+        true
+        ? "V485_EXACT_TOKEN_CREATION_TRACE_VERIFIED"
+        : "V485_HTTP_200_NO_EXACT_TOKEN_CREATE_MATCH";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  } catch (error) {
+    telemetry.status =
+      `V485_FETCH_ERROR:${errorString(error)}`;
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function creationMechanismAttributionSnapshotV485(
+  state
+) {
+  const root =
+    pruneCreationMechanismAttributionV485(
+      state
+    );
+
+  const recurring =
+    Object.values(
+      root.sourceClusters || {}
+    )
+      .filter(
+        row =>
+          safeNumber(
+            row?.distinctTokens
+          ) >= 2
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.distinctTokens
+          ) -
+          safeNumber(
+            a?.distinctTokens
+          )
+      )
+      .slice(0, 20);
+
+  const recent =
+    Object.values(
+      root.tokenAttributions || {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.verifiedAt
+          ) -
+          safeNumber(
+            a?.verifiedAt
+          )
+      )
+      .slice(0, 20);
+
+  return {
+    enabled: true,
+    measurementOnly: true,
+    monitorStartedAt:
+      safeNumber(
+        root.monitorStartedAt
+      ) || null,
+    scansObserved:
+      safeNumber(
+        root.scansObserved
+      ),
+    requestsAttempted:
+      safeNumber(
+        root.requestsAttempted
+      ),
+    requestsSucceeded:
+      safeNumber(
+        root.requestsSucceeded
+      ),
+    exactTokenCreationsVerified:
+      safeNumber(
+        root
+          .exactTokenCreationsVerified
+      ),
+    retainedTokenAttributions:
+      Object.keys(
+        root.tokenAttributions || {}
+      ).length,
+    recurringVerifiedDeploymentSourceCount:
+      recurring.length,
+    recurringVerifiedDeploymentSources:
+      recurring,
+    recentVerifiedCreationMechanisms:
+      recent,
+    lastTarget:
+      root.lastTarget || null,
+    lastTransactionHash:
+      root.lastTransactionHash ||
+      null,
+    lastStatus:
+      root.lastStatus || null,
+    lastHttpStatus:
+      root.lastHttpStatus ?? null,
+    lastUpdatedAt:
+      safeNumber(
+        root.lastUpdatedAt
+      ) || null,
+    deploymentSourceMeansLaunchpad:
+      false,
+    deploymentSourceMeansFactory:
+      false,
+    deploymentSourceMeansRouter:
+      false,
+    launchSourcePromotionAllowed:
+      false,
+    launchMeterMutation:
+      false,
+    hardGlobalLimitUnchanged:
+      42
+  };
+}
+
 async function traceUnknownLiveOriginsV477({
   env,
   state,
@@ -85182,6 +86171,14 @@ async function traceUnknownLiveOriginsV477({
       attempted: false,
       status:
         "NOT_NEEDED_OR_NOT_RUN_V483"
+    },
+    exactCreationMechanismAttributionV485: {
+      enabled: true,
+      measurementOnly: true,
+      promotionAllowed: false,
+      attempted: false,
+      status:
+        "NOT_NEEDED_OR_NOT_RUN_V485"
     },
     launchpadIdentityInferred: false,
     status: null
@@ -85488,6 +86485,27 @@ async function traceUnknownLiveOriginsV477({
         evidence
       );
 
+      /*
+       * V485 exact creation-mechanism attribution:
+       * V480 has already proved the creator + exact creation transaction.
+       * Spend at most ONE released post-Telegram spare request on the raw
+       * execution trace and require an exact CREATE/CREATE2 token-address match.
+       * This is mutually exclusive with V483 because V483 runs only when V480
+       * provenance is incomplete.
+       */
+      telemetry.exactCreationMechanismAttributionV485 =
+        await runExactCreationMechanismAttributionV485({
+          env,
+          state,
+          budget,
+          token:
+            targetAddress,
+          verifiedCreator:
+            row.contractCreator,
+          creationTransactionHash:
+            row.creationTransactionHash
+        });
+
       telemetry.v2AddressResponseV479 = {
         token:
           targetAddress,
@@ -85662,6 +86680,10 @@ function tokenOriginTraceSnapshotV477(state) {
     },
     unknownLaunchMechanismFingerprintV483:
       mechanismFingerprintSnapshotV483(state),
+    exactCreationMechanismAttributionV485:
+      creationMechanismAttributionSnapshotV485(
+        state
+      ),
     interpretation: {
       contractCreatorVerifiedFromBlockscoutV2:
         true,
@@ -85674,7 +86696,10 @@ function tokenOriginTraceSnapshotV477(state) {
       launchMechanism:
         "DATA UNVERIFIED_UNTIL_EXACT_MECHANISM_PROVEN"
     },
-    maxExternalRequestsPerScan: 1,
+    maxExternalRequestsPerScan: 2,
+    secondaryDiagnosticRequestsPerScanMax: 1,
+    secondaryDiagnosticMutuallyExclusive:
+      "V483_OR_V485",
     blockscoutProAuthenticatedOriginV480: true,
     postTelegramGlobalSpareFallbackV478: true,
     hardGlobalLimitUnchangedV478: 42,
