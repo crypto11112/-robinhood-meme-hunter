@@ -1,6 +1,32 @@
 /**
- * Robinhood Chain Meme Hunter — V489
- * AUTHORITATIVE RUNTIME VERSION: V489
+ * Robinhood Chain Meme Hunter — V490
+ * AUTHORITATIVE RUNTIME VERSION: V490
+ *
+ * V490 VERIFIED DEPLOYMENT-SOURCE IDENTITY PROBE:
+ * - preserves all confirmed-working V489/V488/V487/V486/V485/V484/V483 logic;
+ * - consumes the exact deployment-source evidence produced by V489;
+ * - deduplicates by deployment-source address, not token, so the same source is
+ *   never repeatedly probed merely because it deployed multiple tokens;
+ * - queries the already-proven authenticated Blockscout Pro address-info route:
+ *     GET /4663/api/v2/addresses/{deploymentSource}?apikey=...
+ * - records only fields Blockscout actually returns: contract/wallet status,
+ *   creator, creation transaction, creation status, verification flag, name,
+ *   proxy type, implementation addresses, token metadata and public tags;
+ * - if V489 proved CREATE/CREATE2, that opcode evidence is retained alongside
+ *   Blockscout identity evidence but is NOT used to invent a launchpad name;
+ * - no deployment source is promoted to launchpad/factory/router from a single
+ *   token deployment or from `is_contract` alone;
+ * - recurring V489 deployment-source clusters remain the stronger route toward
+ *   proving a reusable launch mechanism;
+ * - V490 source-identity work is one request, processed once after a real
+ *   Blockscout response, and gets backlog priority before another V489/V486
+ *   origin because it is one step closer to source classification;
+ * - V487 fairness remains authoritative: after two consecutive V483 blocks,
+ *   the next secondary slot may service V490/V489/V486 work;
+ * - max ONE secondary origin/source diagnostic request per scan remains;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, launch meter,
+ *   V476 promotion, or fresh-analysis-order changes.
  *
  * V489 FREE-PLAN BLOCKSCOUT INTERNAL-TRANSACTION CREATION ATTRIBUTION:
  * - preserves all confirmed-working V488/V487/V486/V485/V484/V483 behaviour;
@@ -2066,7 +2092,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V489";
+const VERSION = "V490";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71212,6 +71238,11 @@ for (
         state
       ),
 
+    deploymentSourceIdentityV490:
+      deploymentSourceIdentitySnapshotV490(
+        state
+      ),
+
     blockscoutInternalCreationAttributionV489:
       blockscoutInternalCreationAttributionSnapshotV489(
         state
@@ -71409,7 +71440,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_OLDEST_V486_OR_V488_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71433,6 +71464,51 @@ for (
       telegramThresholdChanged:
         false,
       launchSourcePromotion:
+        false
+    },
+
+    verifiedDeploymentSourceIdentityProbeV490: {
+      enabled: true,
+      measurementOnly: true,
+      inputEvidence:
+        "V489_EXACT_INTERNAL_TOKEN_CREATION_VERIFIED",
+      provider:
+        "BLOCKSCOUT_PRO",
+      endpoint:
+        "/api/v2/addresses/{verifiedDeploymentSource}",
+      dedupeKey:
+        "VERIFIED_DEPLOYMENT_SOURCE_ADDRESS",
+      records:
+        "CONTRACT_STATUS_CREATOR_CREATION_TX_VERIFICATION_NAME_PROXY_IMPLEMENTATIONS_TAGS",
+      exactCreateOpcodeEvidencePreserved:
+        true,
+      sourceIdentityMeansLaunchpad:
+        false,
+      sourceIdentityMeansFactory:
+        false,
+      recurringDeploymentEvidenceStillRequired:
+        true,
+      priority:
+        "BEFORE_NEW_V489_OR_V486_ORIGIN_WORK",
+      processedOnceAfterRealResponse:
+        true,
+      maxRequestsPerScan:
+        1,
+      maxSecondaryOriginDiagnosticRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      launchSourcePromotion:
+        false,
+      launchMeterMutation:
+        false,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
         false
     },
 
@@ -86676,6 +86752,99 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
   }
 
   /*
+   * V490 SOURCE-IDENTITY ROUTE:
+   * Once V489 has produced an exact deployment source, profile that source
+   * before starting another lower-evidence origin. This is one request and
+   * deduplicated by deployment-source address.
+   */
+  const deploymentSourceIdentityCandidateV490 =
+    selectOldestDeploymentSourceIdentityCandidateV490(
+      state
+    );
+
+  if (deploymentSourceIdentityCandidateV490) {
+    const identityV490 =
+      await runDeploymentSourceIdentityProbeV490({
+        env,
+        state,
+        budget,
+        candidate:
+          deploymentSourceIdentityCandidateV490
+      });
+
+    telemetry.deploymentSourceIdentityV490 =
+      identityV490;
+
+    telemetry.selectedFromPersistedVerifiedOrigins =
+      true;
+    telemetry.selectedToken =
+      identityV490?.evidenceToken ||
+      null;
+    telemetry.selectedCreator =
+      identityV490?.selectedSource ||
+      null;
+    telemetry.selectedCreationTransactionHash =
+      deploymentSourceIdentityCandidateV490
+        ?.creationTransactionHash ||
+      null;
+    telemetry.attempted =
+      identityV490?.attempted ===
+      true;
+    telemetry.requestConsumed =
+      identityV490
+        ?.requestConsumed === true;
+    telemetry.processedAfterAttempt =
+      identityV490
+        ?.processedAfterAttempt ===
+      true;
+    telemetry.status =
+      identityV490?.status ||
+      "V490_STATUS_UNAVAILABLE";
+
+    if (
+      identityV490?.attempted === true &&
+      v483DeferredForFairnessV487
+    ) {
+      telemetry.fairnessV487
+        .fairnessGrantThisScan = true;
+
+      fairness.fairnessGrants =
+        safeNumber(
+          fairness.fairnessGrants
+        ) + 1;
+
+      fairness.lastFairnessGrantAt =
+        Date.now();
+
+      fairness.lastFairnessGrantToken =
+        identityV490?.evidenceToken ||
+        null;
+
+      fairness.consecutiveV483BlocksOfV486 =
+        0;
+
+      fairness.lastDecision =
+        "V490_FAIRNESS_GRANTED_TO_DEPLOYMENT_SOURCE_IDENTITY";
+
+      fairness.lastDecisionAt =
+        Date.now();
+    }
+
+    root.lastStatus =
+      `V486_ROUTED_TO_V490:${telemetry.status}`;
+
+    return telemetry;
+  }
+
+  telemetry.deploymentSourceIdentityV490 = {
+    enabled: true,
+    measurementOnly: true,
+    attempted: false,
+    status:
+      "V490_NO_UNPROCESSED_VERIFIED_DEPLOYMENT_SOURCE"
+  };
+
+  /*
    * V489 FREE-PLAN ROUTE:
    * A prior V485 Blockscout raw-trace HTTP-200/no-match origin is first sent
    * to Blockscout's documented transaction internal-transactions endpoint.
@@ -87321,6 +87490,918 @@ function persistedOriginRawTraceBacklogSnapshotV486(
 
 
 
+
+
+function ensureDeploymentSourceIdentityV490(
+  state
+) {
+  if (
+    !state.deploymentSourceIdentityV490 ||
+    typeof state.deploymentSourceIdentityV490 !==
+      "object"
+  ) {
+    state.deploymentSourceIdentityV490 = {
+      enabled: true,
+      measurementOnly: true,
+      monitorStartedAt: Date.now(),
+      scansObserved: 0,
+      requestsAttempted: 0,
+      requestsSucceeded: 0,
+      contractSourcesVerified: 0,
+      walletSourcesObserved: 0,
+      processedSources: {},
+      sourceProfiles: {},
+      lastSource: null,
+      lastToken: null,
+      lastStatus: null,
+      lastHttpStatus: null,
+      lastAttemptAt: null
+    };
+  }
+
+  const root =
+    state.deploymentSourceIdentityV490;
+
+  root.processedSources =
+    root.processedSources &&
+    typeof root.processedSources === "object"
+      ? root.processedSources
+      : {};
+
+  root.sourceProfiles =
+    root.sourceProfiles &&
+    typeof root.sourceProfiles === "object"
+      ? root.sourceProfiles
+      : {};
+
+  return root;
+}
+
+function pruneDeploymentSourceIdentityV490(
+  state
+) {
+  const root =
+    ensureDeploymentSourceIdentityV490(
+      state
+    );
+
+  const now = Date.now();
+  const maxAgeMs =
+    14 * 24 * 60 * 60 * 1000;
+
+  root.processedSources =
+    Object.fromEntries(
+      Object.entries(
+        root.processedSources || {}
+      )
+        .filter(([, row]) => {
+          const at =
+            safeNumber(
+              row?.attemptedAt
+            );
+
+          return (
+            at > 0 &&
+            now - at <= maxAgeMs
+          );
+        })
+        .sort(
+          (a, b) =>
+            safeNumber(
+              b?.[1]?.attemptedAt
+            ) -
+            safeNumber(
+              a?.[1]?.attemptedAt
+            )
+        )
+        .slice(0, 200)
+    );
+
+  root.sourceProfiles =
+    Object.fromEntries(
+      Object.entries(
+        root.sourceProfiles || {}
+      )
+        .filter(([, row]) => {
+          const at =
+            safeNumber(
+              row?.observedAt
+            );
+
+          return (
+            at > 0 &&
+            now - at <= maxAgeMs
+          );
+        })
+        .sort(
+          (a, b) =>
+            safeNumber(
+              b?.[1]?.observedAt
+            ) -
+            safeNumber(
+              a?.[1]?.observedAt
+            )
+        )
+        .slice(0, 100)
+    );
+
+  return root;
+}
+
+function sourceIdentityCandidateRowsV490(
+  state
+) {
+  const v489 =
+    pruneBlockscoutInternalCreationAttributionV489(
+      state
+    );
+
+  const root =
+    pruneDeploymentSourceIdentityV490(
+      state
+    );
+
+  const rows = [];
+
+  for (
+    const [token, attribution] of
+    Object.entries(
+      v489.tokenAttributions || {}
+    )
+  ) {
+    if (
+      attribution
+        ?.exactTokenCreateVerified !==
+        true
+    ) {
+      continue;
+    }
+
+    const source =
+      normalize(
+        attribution
+          ?.verifiedDeploymentSource
+      );
+
+    const cleanToken =
+      normalize(token);
+
+    if (
+      !isAddress(source) ||
+      !isAddress(cleanToken) ||
+      root.processedSources[source]
+    ) {
+      continue;
+    }
+
+    rows.push({
+      source,
+      token:
+        cleanToken,
+      verifiedAt:
+        safeNumber(
+          attribution?.verifiedAt
+        ),
+      creationKind:
+        attribution
+          ?.creationKind ||
+        null,
+      creatorMatchesInternalTxSource:
+        attribution
+          ?.creatorMatchesInternalTxSource ===
+        true,
+      creationTransactionHash:
+        String(
+          attribution
+            ?.creationTransactionHash ||
+          ""
+        )
+          .trim()
+          .toLowerCase()
+    });
+  }
+
+  rows.sort((a, b) => {
+    const aAt =
+      safeNumber(a?.verifiedAt);
+
+    const bAt =
+      safeNumber(b?.verifiedAt);
+
+    if (aAt !== bAt) {
+      return aAt - bAt;
+    }
+
+    return a.source.localeCompare(
+      b.source
+    );
+  });
+
+  return rows;
+}
+
+function selectOldestDeploymentSourceIdentityCandidateV490(
+  state
+) {
+  return (
+    sourceIdentityCandidateRowsV490(
+      state
+    )[0] || null
+  );
+}
+
+function eligibleDeploymentSourceIdentityCountV490(
+  state
+) {
+  return sourceIdentityCandidateRowsV490(
+    state
+  ).length;
+}
+
+function blockscoutAddressObjectHashV490(
+  value
+) {
+  if (typeof value === "string") {
+    const clean =
+      normalize(value);
+
+    return isAddress(clean)
+      ? clean
+      : null;
+  }
+
+  const clean =
+    normalize(
+      value?.hash ||
+      value?.address ||
+      ""
+    );
+
+  return isAddress(clean)
+    ? clean
+    : null;
+}
+
+function blockscoutTagNamesV490(
+  body
+) {
+  const pools = [
+    body?.public_tags,
+    body?.publicTags,
+    body?.watchlist_names,
+    body?.watchlistNames
+  ];
+
+  const out = [];
+
+  for (const list of pools) {
+    if (!Array.isArray(list)) {
+      continue;
+    }
+
+    for (const item of list) {
+      const name =
+        String(
+          item?.display_name ??
+          item?.name ??
+          item?.label ??
+          item ??
+          ""
+        ).trim();
+
+      if (
+        name &&
+        !out.includes(name)
+      ) {
+        out.push(name);
+      }
+    }
+  }
+
+  return out.slice(0, 20);
+}
+
+function parseDeploymentSourceIdentityV490({
+  body,
+  source,
+  token,
+  creationKind,
+  creationTransactionHash
+}) {
+  const cleanSource =
+    normalize(source);
+
+  const responseHash =
+    normalize(
+      body?.hash ||
+      cleanSource
+    );
+
+  const creator =
+    normalize(
+      body?.creator_address_hash ||
+      body?.creator_address?.hash ||
+      ""
+    );
+
+  const creationTx =
+    String(
+      body?.creation_transaction_hash ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  const implementationCandidates = [];
+
+  const implementationPools = [
+    body?.implementations,
+    body?.implementation,
+    body?.implementation_address,
+    body?.implementation_address_hash
+  ];
+
+  for (
+    const item of
+    implementationPools
+  ) {
+    if (Array.isArray(item)) {
+      for (const child of item) {
+        const address =
+          blockscoutAddressObjectHashV490(
+            child
+          );
+
+        if (
+          address &&
+          !implementationCandidates
+            .includes(address)
+        ) {
+          implementationCandidates
+            .push(address);
+        }
+      }
+    } else {
+      const address =
+        blockscoutAddressObjectHashV490(
+          item
+        );
+
+      if (
+        address &&
+        !implementationCandidates
+          .includes(address)
+      ) {
+        implementationCandidates
+          .push(address);
+      }
+    }
+  }
+
+  const tokenMeta =
+    body?.token &&
+    typeof body.token === "object"
+      ? {
+          address:
+            blockscoutAddressObjectHashV490(
+              body.token
+            ),
+          name:
+            typeof body.token?.name ===
+              "string"
+              ? body.token.name
+              : null,
+          symbol:
+            typeof body.token?.symbol ===
+              "string"
+              ? body.token.symbol
+              : null,
+          type:
+            typeof body.token?.type ===
+              "string"
+              ? body.token.type
+              : null
+        }
+      : null;
+
+  const isContract =
+    body?.is_contract === true ||
+    Boolean(
+      isAddress(creator)
+    ) ||
+    Boolean(
+      /^0x[a-f0-9]{64}$/.test(
+        creationTx
+      )
+    );
+
+  const responseMatchesSource =
+    isAddress(responseHash) &&
+    responseHash === cleanSource;
+
+  const contractName =
+    typeof body?.name === "string"
+      ? body.name
+      : (
+          typeof body
+            ?.smart_contract?.name ===
+            "string"
+            ? body.smart_contract.name
+            : null
+        );
+
+  const isVerified =
+    body?.is_verified === true ||
+    body?.verified === true ||
+    body?.smart_contract
+      ?.is_verified === true;
+
+  const proxyType =
+    typeof body?.proxy_type ===
+      "string"
+      ? body.proxy_type
+      : (
+          typeof body
+            ?.smart_contract
+            ?.proxy_type ===
+            "string"
+            ? body
+                .smart_contract
+                .proxy_type
+            : null
+        );
+
+  const tags =
+    blockscoutTagNamesV490(
+      body
+    );
+
+  const exactV489Opcode =
+    creationKind === "CREATE" ||
+    creationKind === "CREATE2"
+      ? creationKind
+      : null;
+
+  return {
+    deploymentSource:
+      isAddress(cleanSource)
+        ? cleanSource
+        : null,
+    sourceAddressResponseMatches:
+      responseMatchesSource,
+    deployedToken:
+      isAddress(
+        normalize(token)
+      )
+        ? normalize(token)
+        : null,
+    tokenCreationTransactionHash:
+      /^0x[a-f0-9]{64}$/.test(
+        String(
+          creationTransactionHash ||
+          ""
+        ).toLowerCase()
+      )
+        ? String(
+            creationTransactionHash
+          ).toLowerCase()
+        : null,
+    exactV489CreationKind:
+      exactV489Opcode,
+    exactV489Create2ExecutionEvidence:
+      exactV489Opcode ===
+      "CREATE2",
+    isContract,
+    addressKind:
+      isContract
+        ? "CONTRACT"
+        : "WALLET_OR_NON_CONTRACT",
+    blockscoutVerifiedContract:
+      isVerified,
+    contractName:
+      contractName || null,
+    proxyType:
+      proxyType || null,
+    implementationAddresses:
+      implementationCandidates,
+    sourceCreator:
+      isAddress(creator)
+        ? creator
+        : null,
+    sourceCreationTransactionHash:
+      /^0x[a-f0-9]{64}$/.test(
+        creationTx
+      )
+        ? creationTx
+        : null,
+    sourceCreationStatus:
+      typeof body?.creation_status ===
+        "string"
+        ? body.creation_status
+        : null,
+    tokenMetadata:
+      tokenMeta,
+    publicTags:
+      tags,
+    evidenceMeaning:
+      isContract
+        ? "VERIFIED_DEPLOYMENT_SOURCE_ADDRESS_PROFILE_CONTRACT_STATUS_ONLY"
+        : "VERIFIED_DEPLOYMENT_SOURCE_ADDRESS_PROFILE_NON_CONTRACT_STATUS_ONLY",
+    launchpadIdentity:
+      "DATA UNVERIFIED",
+    factoryIdentity:
+      "DATA UNVERIFIED",
+    routerIdentity:
+      "DATA UNVERIFIED",
+    launchSourcePromoted:
+      false
+  };
+}
+
+async function runDeploymentSourceIdentityProbeV490({
+  env,
+  state,
+  budget,
+  candidate
+}) {
+  const root =
+    pruneDeploymentSourceIdentityV490(
+      state
+    );
+
+  root.scansObserved =
+    safeNumber(
+      root.scansObserved
+    ) + 1;
+
+  const telemetry = {
+    enabled: true,
+    measurementOnly: true,
+    promotionAllowed: false,
+    selectedSource: null,
+    evidenceToken: null,
+    evidenceCreationKind: null,
+    attempted: false,
+    requestConsumed: false,
+    provider:
+      "BLOCKSCOUT_PRO",
+    endpointV490:
+      "https://api.blockscout.com/4663/api/v2/addresses/{deploymentSource}?apikey=[REDACTED]",
+    identityResult: null,
+    httpStatus: null,
+    processedAfterAttempt: false,
+    maxRequestsThisScan: 1,
+    hardRequestLimit: 42,
+    launchSourcePromoted: false,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false,
+    status: null
+  };
+
+  if (!candidate) {
+    telemetry.status =
+      "V490_NO_UNPROCESSED_VERIFIED_DEPLOYMENT_SOURCE";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const source =
+    normalize(
+      candidate?.source
+    );
+
+  const token =
+    normalize(
+      candidate?.token
+    );
+
+  telemetry.selectedSource =
+    source;
+  telemetry.evidenceToken =
+    token;
+  telemetry.evidenceCreationKind =
+    candidate?.creationKind ||
+    null;
+
+  root.lastSource =
+    source;
+  root.lastToken =
+    token;
+
+  const url =
+    blockscoutProOriginTraceUrlV480(
+      env,
+      source
+    );
+
+  if (!url) {
+    telemetry.status =
+      "V490_BLOCKSCOUT_PRO_NOT_CONFIGURED";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const spare =
+    consumeReleasedGlobalSpareV478(
+      budget,
+      "BLOCKSCOUT_PRO_DEPLOYMENT_SOURCE_IDENTITY_V490",
+      1
+    );
+
+  if (spare?.ok !== true) {
+    telemetry.status =
+      `V490_BUDGET_UNAVAILABLE:${spare?.reason || "UNKNOWN"}`;
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  telemetry.attempted = true;
+  telemetry.requestConsumed = true;
+
+  root.requestsAttempted =
+    safeNumber(
+      root.requestsAttempted
+    ) + 1;
+
+  const attemptedAt =
+    Date.now();
+
+  root.lastAttemptAt =
+    attemptedAt;
+
+  const controller =
+    new AbortController();
+
+  const timer =
+    setTimeout(
+      () =>
+        controller.abort(),
+      6000
+    );
+
+  try {
+    const response =
+      await fetch(
+        url,
+        {
+          method: "GET",
+          headers: {
+            accept:
+              "application/json"
+          },
+          signal:
+            controller.signal
+        }
+      );
+
+    telemetry.httpStatus =
+      response.status;
+
+    root.lastHttpStatus =
+      response.status;
+
+    if (!response.ok) {
+      telemetry.status =
+        `V490_HTTP_${response.status}`;
+
+      root.lastStatus =
+        telemetry.status;
+
+      root.processedSources[
+        source
+      ] = {
+        source,
+        evidenceToken:
+          token,
+        attemptedAt,
+        httpStatus:
+          response.status,
+        status:
+          telemetry.status,
+        processedOnce:
+          true,
+        retryAutomatically:
+          false
+      };
+
+      telemetry.processedAfterAttempt =
+        true;
+
+      return telemetry;
+    }
+
+    const body =
+      await response.json();
+
+    root.requestsSucceeded =
+      safeNumber(
+        root.requestsSucceeded
+      ) + 1;
+
+    const identity =
+      parseDeploymentSourceIdentityV490({
+        body,
+        source,
+        token,
+        creationKind:
+          candidate?.creationKind ||
+          null,
+        creationTransactionHash:
+          candidate
+            ?.creationTransactionHash ||
+          null
+      });
+
+    telemetry.identityResult =
+      identity;
+
+    if (
+      identity?.isContract === true
+    ) {
+      root.contractSourcesVerified =
+        safeNumber(
+          root.contractSourcesVerified
+        ) + 1;
+    } else {
+      root.walletSourcesObserved =
+        safeNumber(
+          root.walletSourcesObserved
+        ) + 1;
+    }
+
+    const profile = {
+      ...identity,
+      observedAt:
+        attemptedAt,
+      provider:
+        "BLOCKSCOUT_PRO_V2_ADDRESS_INFO_V490",
+      evidenceStandard:
+        "V489_EXACT_DEPLOYMENT_SOURCE_PLUS_BLOCKSCOUT_SOURCE_ADDRESS_PROFILE_V490"
+    };
+
+    root.sourceProfiles[
+      source
+    ] = profile;
+
+    root.processedSources[
+      source
+    ] = {
+      source,
+      evidenceToken:
+        token,
+      attemptedAt,
+      httpStatus:
+        response.status,
+      isContract:
+        identity?.isContract ===
+        true,
+      contractName:
+        identity?.contractName ||
+        null,
+      blockscoutVerifiedContract:
+        identity
+          ?.blockscoutVerifiedContract ===
+        true,
+      status:
+        identity?.isContract ===
+        true
+          ? "V490_VERIFIED_DEPLOYMENT_SOURCE_IS_CONTRACT"
+          : "V490_VERIFIED_DEPLOYMENT_SOURCE_PROFILED_NON_CONTRACT",
+      processedOnce:
+        true,
+      retryAutomatically:
+        false
+    };
+
+    telemetry.processedAfterAttempt =
+      true;
+
+    telemetry.status =
+      root.processedSources[
+        source
+      ].status;
+
+    root.lastStatus =
+      telemetry.status;
+
+    pruneDeploymentSourceIdentityV490(
+      state
+    );
+
+    return telemetry;
+  } catch (error) {
+    telemetry.status =
+      `V490_FETCH_ERROR:${errorString(error)}`;
+
+    root.lastStatus =
+      telemetry.status;
+
+    /*
+     * Transport failures remain retryable because no authoritative provider
+     * response was received.
+     */
+    return telemetry;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function deploymentSourceIdentitySnapshotV490(
+  state
+) {
+  const root =
+    pruneDeploymentSourceIdentityV490(
+      state
+    );
+
+  const profiles =
+    Object.values(
+      root.sourceProfiles || {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.observedAt
+          ) -
+          safeNumber(
+            a?.observedAt
+          )
+      );
+
+  return {
+    enabled: true,
+    measurementOnly: true,
+    monitorStartedAt:
+      safeNumber(
+        root.monitorStartedAt
+      ) || null,
+    scansObserved:
+      safeNumber(
+        root.scansObserved
+      ),
+    requestsAttempted:
+      safeNumber(
+        root.requestsAttempted
+      ),
+    requestsSucceeded:
+      safeNumber(
+        root.requestsSucceeded
+      ),
+    contractSourcesVerified:
+      safeNumber(
+        root.contractSourcesVerified
+      ),
+    walletSourcesObserved:
+      safeNumber(
+        root.walletSourcesObserved
+      ),
+    processedSourceCount:
+      Object.keys(
+        root.processedSources ||
+        {}
+      ).length,
+    remainingEligibleSourceCount:
+      eligibleDeploymentSourceIdentityCountV490(
+        state
+      ),
+    retainedSourceProfiles:
+      profiles.length,
+    recentSourceProfiles:
+      profiles.slice(0, 20),
+    lastSource:
+      root.lastSource || null,
+    lastToken:
+      root.lastToken || null,
+    lastStatus:
+      root.lastStatus || null,
+    lastHttpStatus:
+      root.lastHttpStatus ?? null,
+    lastAttemptAt:
+      safeNumber(
+        root.lastAttemptAt
+      ) || null,
+    sourceIdentityMeansLaunchpad:
+      false,
+    recurringDeploymentSourceStillRequiredForStrongMechanismEvidence:
+      true,
+    launchSourcePromotionAllowed:
+      false,
+    oneSecondaryDiagnosticPerScan:
+      true,
+    hardGlobalLimitUnchanged:
+      42
+  };
+}
 
 function ensureBlockscoutInternalCreationAttributionV489(
   state
@@ -89635,6 +90716,9 @@ function eligiblePersistedOriginBacklogCountV487(
   return (
     count +
     eligibleBlockscoutInternalCandidateCountV489(
+      state
+    ) +
+    eligibleDeploymentSourceIdentityCountV490(
       state
     )
   );
