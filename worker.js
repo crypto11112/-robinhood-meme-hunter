@@ -1,6 +1,22 @@
 /**
- * Robinhood Chain Meme Hunter — V478
- * AUTHORITATIVE RUNTIME VERSION: V478
+ * Robinhood Chain Meme Hunter — V479
+ * AUTHORITATIVE RUNTIME VERSION: V479
+ *
+ * V479 BLOCKSCOUT V2 ORIGIN-PROVENANCE ROUTE FIX:
+ * - replaces the rejected legacy Etherscan-compatible getcontractcreation
+ *   endpoint with Blockscout's supported V2 address endpoint:
+ *     /api/v2/addresses/{address_hash}
+ * - reads creator_address_hash + creation_transaction_hash only when returned
+ *   directly by Blockscout V2 and validates both before marking origin VERIFIED;
+ * - Blockscout V2 address-info is one address per request, so V479 traces the
+ *   single highest-priority eligible CURRENT/LIVE unknown-source token per scan;
+ * - preserves V478 post-Telegram global-spare routing: max ONE origin request
+ *   per scan, only after fresh analysis and Telegram reserve release;
+ * - hard global request ceiling remains 42; no added request-rate allowance;
+ * - recurring creator clustering stays measurement-only and creator/factory/
+ *   launchpad identity remains DATA UNVERIFIED until exact mechanism proof;
+ * - V476 direct Pons detection, V474 funnel, V469 priority, scoring, Momentum,
+ *   qualification and Telegram thresholds unchanged.
  *
  * V478 POST-TELEGRAM ORIGIN-TRACE BUDGET ROUTING HOTFIX:
  * - fixes V477 origin tracing being blocked by analysis-phase exhaustion even
@@ -19,7 +35,7 @@
  * V477 VERIFIED TOKEN-ORIGIN TRACING / CREATOR CLUSTERING:
  * - traces up to four CURRENT/LIVE returned candidates whose launch source is
  *   still UNVERIFIED using Blockscout's contract-creation provenance endpoint;
- * - ONE batched external request maximum per scan (up to 4 token addresses);
+ * - ONE external request maximum per scan (single highest-priority token via Blockscout V2);
  * - request consumes the EXISTING analysis/global budget and respects all
  *   existing reserve guards; the 42 hard ceiling is unchanged;
  * - records only Blockscout-returned contractCreator + creation txHash as
@@ -1798,7 +1814,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V478";
+const VERSION = "V479";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -83166,79 +83182,85 @@ function pruneTokenOriginTraceV477(state) {
   return root;
 }
 
-function blockscoutOriginTraceUrlV477(addresses) {
+function blockscoutOriginTraceUrlV479(address) {
   const clean =
-    Array.from(
-      new Set(
-        (addresses || [])
-          .map(normalize)
-          .filter(isAddress)
-      )
-    ).slice(0, 4);
+    normalize(address);
 
-  if (!clean.length) return null;
+  if (!isAddress(clean)) {
+    return null;
+  }
 
-  const query =
-    new URLSearchParams({
-      module: "contract",
-      action: "getcontractcreation",
-      contractaddresses: clean.join(",")
-    });
-
-  return `${BLOCKSCOUT}/api?${query.toString()}`;
+  return `${BLOCKSCOUT}/api/v2/addresses/${clean}`;
 }
 
-function parseBlockscoutOriginRowsV477(body) {
-  const rows =
-    Array.isArray(body?.result)
-      ? body.result
-      : [];
+function parseBlockscoutAddressOriginV479(
+  body,
+  requestedAddress
+) {
+  const token =
+    normalize(
+      body?.hash ||
+      requestedAddress ||
+      null
+    );
 
-  return rows
-    .map(row => {
-      const token =
-        normalize(
-          row?.contractAddress ||
-          row?.contract_address ||
-          null
-        );
+  const contractCreator =
+    normalize(
+      body?.creator_address_hash ||
+      null
+    );
 
-      const contractCreator =
-        normalize(
-          row?.contractCreator ||
-          row?.contract_creator ||
-          null
-        );
+  const creationTransactionHash =
+    normalize(
+      body?.creation_transaction_hash ||
+      null
+    );
 
-      const creationTransactionHash =
-        normalize(
-          row?.txHash ||
-          row?.tx_hash ||
-          row?.creationTransactionHash ||
-          null
-        );
+  const isContract =
+    body?.is_contract === true ||
+    Boolean(contractCreator) ||
+    Boolean(creationTransactionHash);
 
-      const verified =
-        isAddress(token) &&
-        isAddress(contractCreator) &&
-        /^0x[a-f0-9]{64}$/.test(
-          creationTransactionHash || ""
-        );
+  const creationStatus =
+    typeof body?.creation_status === "string"
+      ? body.creation_status
+      : null;
 
-      return {
-        token: token || null,
-        contractCreator:
-          contractCreator || null,
-        creationTransactionHash:
-          creationTransactionHash || null,
-        verified,
-        source:
-          verified
-            ? "BLOCKSCOUT_GETCONTRACTCREATION_V477"
-            : "BLOCKSCOUT_ORIGIN_ROW_INCOMPLETE_V477"
-      };
-    })
-    .filter(row => isAddress(row.token));
+  const verified =
+    isAddress(token) &&
+    token === normalize(requestedAddress) &&
+    isContract &&
+    isAddress(contractCreator) &&
+    /^0x[a-f0-9]{64}$/.test(
+      creationTransactionHash || ""
+    ) &&
+    (
+      !creationStatus ||
+      creationStatus === "success"
+    );
+
+  return {
+    token: isAddress(token)
+      ? token
+      : normalize(requestedAddress) || null,
+    contractCreator:
+      isAddress(contractCreator)
+        ? contractCreator
+        : null,
+    creationTransactionHash:
+      /^0x[a-f0-9]{64}$/.test(
+        creationTransactionHash || ""
+      )
+        ? creationTransactionHash
+        : null,
+    creationStatus,
+    isContract,
+    verified,
+    source:
+      verified
+        ? "BLOCKSCOUT_V2_ADDRESS_INFO_V479"
+        : "BLOCKSCOUT_V2_ORIGIN_INCOMPLETE_V479"
+  };
 }
 
 
@@ -83401,7 +83423,7 @@ async function traceUnknownLiveOriginsV477({
       })
       .slice()
       .sort((a, b) => analysisPriority(b) - analysisPriority(a))
-      .slice(0, 4);
+      .slice(0, 1);
 
   const addresses =
     selected
@@ -83412,15 +83434,21 @@ async function traceUnknownLiveOriginsV477({
     enabled: true,
     measurementOnly: true,
     source:
-      "BLOCKSCOUT_CONTRACT_CREATION_PROVENANCE",
+      "BLOCKSCOUT_V2_ADDRESS_CREATION_PROVENANCE_V479",
     selectedAddresses: addresses,
     selectedCount: addresses.length,
     attempted: false,
     requestConsumed: false,
     requestType:
-      "BLOCKSCOUT_CONTRACT_ORIGIN_BATCH_V477",
-    maxAddressesPerBatch: 4,
+      "BLOCKSCOUT_V2_ADDRESS_ORIGIN_V479",
+    maxAddressesPerRequest: 1,
     maxExternalRequestsPerScan: 1,
+    endpointV479:
+      "/api/v2/addresses/{address_hash}",
+    endpointModeV479:
+      "ONE_ADDRESS_PER_REQUEST",
+    legacyGetContractCreationDisabledV479:
+      true,
     requestCeilingChanged: false,
     hardRequestLimit:
       safeNumber(budget?.totalLimit),
@@ -83442,8 +83470,13 @@ async function traceUnknownLiveOriginsV477({
     return telemetry;
   }
 
+  const targetAddress =
+    addresses[0] || null;
+
   const url =
-    blockscoutOriginTraceUrlV477(addresses);
+    blockscoutOriginTraceUrlV479(
+      targetAddress
+    );
 
   if (!url) {
     root.lastStatus =
@@ -83464,7 +83497,7 @@ async function traceUnknownLiveOriginsV477({
     consumeBudget(
       budget,
       "analysis",
-      "BLOCKSCOUT_CONTRACT_ORIGIN_BATCH_V477",
+      "BLOCKSCOUT_V2_ADDRESS_ORIGIN_V479",
       1
     );
 
@@ -83472,7 +83505,7 @@ async function traceUnknownLiveOriginsV477({
     const spare =
       consumeReleasedGlobalSpareV478(
         budget,
-        "BLOCKSCOUT_CONTRACT_ORIGIN_BATCH_V477",
+        "BLOCKSCOUT_V2_ADDRESS_ORIGIN_V479",
         1
       );
 
@@ -83532,42 +83565,60 @@ async function traceUnknownLiveOriginsV477({
 
     if (!response.ok) {
       root.lastStatus =
-        `BLOCKSCOUT_ORIGIN_HTTP_${response.status}_V477`;
+        `BLOCKSCOUT_V2_ADDRESS_HTTP_${response.status}_V479`;
       telemetry.status = root.lastStatus;
       return telemetry;
     }
 
     const body = await response.json();
 
-    const parsed =
-      parseBlockscoutOriginRowsV477(body);
-
-    const byToken =
-      new Map(
-        parsed.map(row => [normalize(row.token), row])
+    const row =
+      parseBlockscoutAddressOriginV479(
+        body,
+        targetAddress
       );
 
     const now = Date.now();
 
-    for (const address of addresses) {
-      const row = byToken.get(address);
+    if (!row?.verified) {
+      root.originsUnverified =
+        safeNumber(root.originsUnverified) + 1;
 
-      if (!row?.verified) {
-        root.originsUnverified =
-          safeNumber(root.originsUnverified) + 1;
-        telemetry.unverifiedAddresses.push(address);
-        continue;
-      }
+      telemetry.unverifiedAddresses.push(
+        targetAddress
+      );
 
+      telemetry.v2AddressResponseV479 = {
+        token:
+          row?.token || targetAddress,
+        isContract:
+          Boolean(row?.isContract),
+        creationStatus:
+          row?.creationStatus || null,
+        creatorReturned:
+          Boolean(row?.contractCreator),
+        creationTransactionReturned:
+          Boolean(
+            row?.creationTransactionHash
+          ),
+        verified: false,
+        source:
+          row?.source ||
+          "BLOCKSCOUT_V2_ORIGIN_INCOMPLETE_V479"
+      };
+    } else {
       const evidence = {
         verified: true,
-        token: address,
+        token:
+          targetAddress,
         contractCreator:
           row.contractCreator,
         creationTransactionHash:
           row.creationTransactionHash,
+        creationStatus:
+          row.creationStatus || null,
         source:
-          "BLOCKSCOUT_GETCONTRACTCREATION_V477",
+          "BLOCKSCOUT_V2_ADDRESS_INFO_V479",
         evidenceMeaning:
           "VERIFIED_CONTRACT_CREATOR_AND_CREATION_TX_ONLY",
         creatorIsLaunchpad:
@@ -83579,25 +83630,46 @@ async function traceUnknownLiveOriginsV477({
         verifiedAt: now
       };
 
-      root.tokenOrigins[address] = evidence;
+      root.tokenOrigins[targetAddress] =
+        evidence;
+
       root.originsVerified =
         safeNumber(root.originsVerified) + 1;
 
-      root.recentVerifiedOrigins.push(evidence);
+      root.recentVerifiedOrigins.push(
+        evidence
+      );
 
       const watched =
         Array.isArray(state?.watchedTokens)
           ? state.watchedTokens.find(
               item =>
-                normalize(item?.address) === address
+                normalize(item?.address) ===
+                targetAddress
             )
           : null;
 
       if (watched) {
-        watched.originTraceV477 = evidence;
+        watched.originTraceV477 =
+          evidence;
       }
 
-      telemetry.verifiedOrigins.push(evidence);
+      telemetry.verifiedOrigins.push(
+        evidence
+      );
+
+      telemetry.v2AddressResponseV479 = {
+        token:
+          targetAddress,
+        isContract: true,
+        creationStatus:
+          row.creationStatus || null,
+        creatorReturned: true,
+        creationTransactionReturned: true,
+        verified: true,
+        source:
+          "BLOCKSCOUT_V2_ADDRESS_INFO_V479"
+      };
     }
 
     root.requestsSucceeded =
@@ -83605,8 +83677,8 @@ async function traceUnknownLiveOriginsV477({
     root.lastSuccessAt = now;
     root.lastStatus =
       telemetry.verifiedOrigins.length
-        ? "VERIFIED_ORIGIN_PROVENANCE_FOUND_V477"
-        : "NO_VERIFIED_ORIGIN_ROWS_RETURNED_V477";
+        ? "VERIFIED_ORIGIN_PROVENANCE_FOUND_V479"
+        : "NO_VERIFIED_ORIGIN_DATA_RETURNED_V479";
 
     telemetry.status = root.lastStatus;
 
@@ -83627,7 +83699,7 @@ async function traceUnknownLiveOriginsV477({
     return telemetry;
   } catch (error) {
     root.lastStatus =
-      `BLOCKSCOUT_ORIGIN_FETCH_ERROR_V477:${errorString(error)}`;
+      `BLOCKSCOUT_V2_ADDRESS_FETCH_ERROR_V479:${errorString(error)}`;
     telemetry.status = root.lastStatus;
     return telemetry;
   } finally {
@@ -83684,9 +83756,9 @@ function tokenOriginTraceSnapshotV477(state) {
     lastHttpStatus:
       root.lastHttpStatus ?? null,
     interpretation: {
-      contractCreatorVerifiedFromBlockscout:
+      contractCreatorVerifiedFromBlockscoutV2:
         true,
-      creationTransactionHashVerifiedFromBlockscout:
+      creationTransactionHashVerifiedFromBlockscoutV2:
         true,
       recurringCreatorMeansLaunchpad:
         false,
