@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V459
- * AUTHORITATIVE RUNTIME VERSION: V459
+ * Robinhood Chain Meme Hunter — V460
+ * AUTHORITATIVE RUNTIME VERSION: V460
+ * V460 closes the timing gap exposed by the NUDES alert. When the current scan has no fresh V458-eligible candidate, the bot can reuse the most recent successfully persisted Telegram alert as the exact-pool USD-completion target. The fallback requires a successful alert snapshot, recent alert age, previously verified ERC-20 metadata from the watchlist, and a verified exact PoolId either from the alert snapshot or the persisted V237 exact-pool target backed by the pool registry. V460 reserves the same two existing V458 request slots before the analysis loop when such a recent alert target exists, preventing later low-priority analysis from consuming them. Successful/attempted completion is persisted per address with a cooldown so the same alert is not hammered every scan. No request ceilings, scoring, qualification, holder rules, Telegram thresholds, or V455/V457 logic are changed.
  * V459 reserves two existing analysis-budget slots as soon as the first already-qualified candidate with verified exact V4 pool identity is produced during the analysis loop. Those slots are reserved only for V458's timestamp-to-block lookup and exact-pool Swap-history request, preventing lower-priority later analysis from consuming them. The reserve is dynamic: it is inactive when there is no eligible qualified candidate, it does not raise the 42-request hard ceiling or the adaptive analysis ceiling, and it is released/consumed when the V458 lane finishes. V459 also explicitly allows the two V458 protected request types through the older V182 USDG reservation guard. Scoring, qualification, Telegram thresholds, holder rules and V455 fallback logic are unchanged.
  * V458 adds bounded complete exact-pool directional-USD coverage for one already Telegram-qualified candidate per scan. It resolves the exact 24h cutoff with Blockscout getblocknobytime, then reads exact PoolManager Swap logs for one verified PoolId. Completeness is accepted only when the query is non-saturated and every returned swap is candidate-matched and exactly USD-decodable. This is exact-pool completeness only, never full token-market coverage across other pools. Existing scoring and qualification remain unchanged.
  * V457 fixes the V456 telemetry placement bug. Final scannerFunnelV415 counts are now calculated directly in the final response object from the post-V455 candidate state and final Telegram results. This makes marketVerified include successful V455 on-chain fallback promotions. No scanner discovery, scoring, qualification, provider routing, request budgets, holder rules, Telegram thresholds, or V455 fallback evidence logic changes.
@@ -1533,7 +1534,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V459";
+const VERSION = "V460";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2251,6 +2252,11 @@ const VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_CANDIDATES_V458 = 1;
 const VERIFIED_USD_COMPLETE_EXACT_POOL_LOOKBACK_MS_V458 =
   24 * 60 * 60 * 1000;
 const VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_REQUESTS_V458 = 2;
+
+const LAST_ALERT_EXACT_POOL_FALLBACK_MAX_AGE_MS_V460 =
+  24 * 60 * 60 * 1000;
+const LAST_ALERT_EXACT_POOL_RETRY_COOLDOWN_MS_V460 =
+  15 * 60 * 1000;
 
 /* V256: display-only holder-count completion. */
 const HOLDER_COUNT_COMPLETION_MAX_CANDIDATES_V256 = 1;
@@ -8657,6 +8663,9 @@ function newState() {
       {},
 
     followUpTrackingV267:
+      {},
+
+    completeExactPoolCompletionV460:
       {},
 
     callPerformanceV270:
@@ -49725,6 +49734,469 @@ async function blockscoutExactPoolUsdCompletionV254(
 
 
 /* =========================================================
+   V460 LAST SUCCESSFUL ALERT EXACT-POOL FALLBACK
+   ========================================================= */
+
+async function loadLastSuccessfulAlertSnapshotV460(env) {
+  const result =
+    await lastAlertScanV264(env);
+
+  if (
+    result?.status !==
+      "LAST_ALERT_SCAN_AVAILABLE" ||
+    !result?.snapshot ||
+    result?.snapshot?.alert?.sent !== true
+  ) {
+    return {
+      available: false,
+      status:
+        result?.status ||
+        "LAST_ALERT_UNAVAILABLE_V460",
+      snapshot: null
+    };
+  }
+
+  return {
+    available: true,
+    status:
+      "LAST_SUCCESSFUL_ALERT_AVAILABLE_V460",
+    snapshot:
+      result.snapshot
+  };
+}
+
+function exactPoolIdentityFromAlertV460(
+  state,
+  address,
+  snapshotCandidate
+) {
+  const direct =
+    snapshotCandidate
+      ?.onChainPoolIdentityV153;
+
+  if (
+    direct?.verified === true &&
+    /^0x[a-f0-9]{64}$/.test(
+      normalize(direct?.poolId)
+    )
+  ) {
+    return {
+      ...direct,
+      sourceV460:
+        "LAST_ALERT_SNAPSHOT_VERIFIED_IDENTITY"
+    };
+  }
+
+  const persisted =
+    state?.bitqueryLiquidityTargetV237;
+
+  const persistedPoolId =
+    normalize(
+      persisted?.poolId
+    );
+
+  if (
+    normalize(persisted?.address) !==
+      normalize(address) ||
+    !/^0x[a-f0-9]{64}$/.test(
+      persistedPoolId
+    )
+  ) {
+    return null;
+  }
+
+  const reg =
+    state?.poolRegistry
+      ?.[persistedPoolId];
+
+  if (!reg) {
+    return null;
+  }
+
+  const c0 =
+    normalize(reg?.currency0);
+  const c1 =
+    normalize(reg?.currency1);
+  const token =
+    normalize(address);
+
+  if (
+    c0 !== token &&
+    c1 !== token
+  ) {
+    return null;
+  }
+
+  const quoteTokenAddress =
+    c0 === token
+      ? c1
+      : c0;
+
+  if (
+    ![
+      ZERO,
+      CANONICAL_WETH_V179,
+      CANONICAL_USDG_V179
+    ].includes(
+      quoteTokenAddress
+    )
+  ) {
+    return null;
+  }
+
+  return {
+    verified: true,
+    status:
+      "PERSISTED_EXACT_POOL_REGISTRY_IDENTITY_V460",
+    poolId:
+      persistedPoolId,
+    quoteTokenAddress,
+    quoteTokenSymbol:
+      quoteTokenAddress ===
+        CANONICAL_USDG_V179
+        ? "USDG"
+        : quoteTokenAddress ===
+            CANONICAL_WETH_V179
+          ? "WETH"
+          : "ETH",
+    blockNumber:
+      blockNumberFromAnyV180(
+        reg?.blockNumber ??
+        reg?.initializeBlock ??
+        reg?.createdBlock
+      ) || null,
+    currency0:
+      c0,
+    currency1:
+      c1,
+    sourceV460:
+      "V237_TARGET_PLUS_POOL_REGISTRY"
+  };
+}
+
+function buildLastAlertExactPoolCandidateV460(
+  state,
+  lastAlertSnapshot
+) {
+  const base = {
+    eligible: false,
+    reason:
+      "LAST_ALERT_FALLBACK_NOT_ELIGIBLE_V460",
+    candidate: null,
+    address: null,
+    symbol: null,
+    savedAt: null,
+    ageMs: null,
+    identitySource: null
+  };
+
+  if (
+    !lastAlertSnapshot ||
+    lastAlertSnapshot?.alert?.sent !== true
+  ) {
+    return {
+      ...base,
+      reason:
+        "NO_SUCCESSFUL_ALERT_SNAPSHOT_V460"
+    };
+  }
+
+  const address =
+    normalize(
+      lastAlertSnapshot
+        ?.alert
+        ?.address ||
+      lastAlertSnapshot
+        ?.candidate
+        ?.address
+    );
+
+  if (!isAddress(address)) {
+    return {
+      ...base,
+      reason:
+        "LAST_ALERT_ADDRESS_INVALID_V460"
+    };
+  }
+
+  const savedAt =
+    safeNumber(
+      lastAlertSnapshot?.savedAt
+    );
+
+  const ageMs =
+    savedAt > 0
+      ? Date.now() - savedAt
+      : Infinity;
+
+  if (
+    !Number.isFinite(ageMs) ||
+    ageMs < 0 ||
+    ageMs >
+      LAST_ALERT_EXACT_POOL_FALLBACK_MAX_AGE_MS_V460
+  ) {
+    return {
+      ...base,
+      address,
+      savedAt:
+        savedAt || null,
+      ageMs:
+        Number.isFinite(ageMs)
+          ? ageMs
+          : null,
+      reason:
+        "LAST_ALERT_TOO_OLD_FOR_24H_COMPLETION_V460"
+    };
+  }
+
+  const watched =
+    findWatched(
+      state,
+      address
+    );
+
+  if (
+    watched
+      ?.metadata
+      ?.validERC20 !== true
+  ) {
+    return {
+      ...base,
+      address,
+      savedAt,
+      ageMs,
+      reason:
+        "LAST_ALERT_ERC20_METADATA_NOT_VERIFIED_V460"
+    };
+  }
+
+  const identity =
+    exactPoolIdentityFromAlertV460(
+      state,
+      address,
+      lastAlertSnapshot?.candidate
+    );
+
+  if (
+    identity?.verified !== true
+  ) {
+    return {
+      ...base,
+      address,
+      savedAt,
+      ageMs,
+      reason:
+        "LAST_ALERT_EXACT_POOL_IDENTITY_UNVERIFIED_V460"
+    };
+  }
+
+  state.completeExactPoolCompletionV460 =
+    state.completeExactPoolCompletionV460 &&
+    typeof state.completeExactPoolCompletionV460 ===
+      "object"
+      ? state.completeExactPoolCompletionV460
+      : {};
+
+  const previous =
+    state
+      .completeExactPoolCompletionV460
+      ?.[address] ||
+    null;
+
+  const samePool =
+    normalize(previous?.poolId) ===
+      normalize(identity?.poolId);
+
+  if (
+    samePool &&
+    previous?.verified === true &&
+    safeNumber(previous?.completedAt) > 0
+  ) {
+    return {
+      ...base,
+      address,
+      savedAt,
+      ageMs,
+      identitySource:
+        identity?.sourceV460 ||
+        null,
+      reason:
+        "LAST_ALERT_EXACT_POOL_ALREADY_COMPLETED_V460"
+    };
+  }
+
+  if (
+    samePool &&
+    safeNumber(previous?.attemptedAt) > 0 &&
+    Date.now() -
+      safeNumber(previous?.attemptedAt) <
+      LAST_ALERT_EXACT_POOL_RETRY_COOLDOWN_MS_V460
+  ) {
+    return {
+      ...base,
+      address,
+      savedAt,
+      ageMs,
+      identitySource:
+        identity?.sourceV460 ||
+        null,
+      reason:
+        "LAST_ALERT_EXACT_POOL_RETRY_COOLDOWN_V460"
+    };
+  }
+
+  const snapshotCandidate =
+    lastAlertSnapshot?.candidate ||
+    {};
+
+  const candidate = {
+    ...snapshotCandidate,
+    address,
+    name:
+      snapshotCandidate?.name ||
+      lastAlertSnapshot?.alert?.name ||
+      watched?.metadata?.name ||
+      null,
+    symbol:
+      snapshotCandidate?.symbol ||
+      lastAlertSnapshot?.alert?.symbol ||
+      watched?.metadata?.symbol ||
+      null,
+    validERC20: true,
+    decimals:
+      Number.isFinite(
+        Number(
+          watched?.metadata?.decimals
+        )
+      )
+        ? Number(
+            watched.metadata.decimals
+          )
+        : null,
+    totalSupply:
+      watched?.metadata?.totalSupply ??
+      null,
+    onChainPoolIdentityV153:
+      identity,
+    successfulTelegramAlertFallbackV460:
+      {
+        verified: true,
+        savedAt,
+        ageMs,
+        source:
+          "LAST_ALERT_SCAN_V264"
+      }
+  };
+
+  return {
+    eligible: true,
+    reason:
+      "LAST_ALERT_EXACT_POOL_FALLBACK_ELIGIBLE_V460",
+    candidate,
+    address,
+    symbol:
+      candidate?.symbol || null,
+    savedAt,
+    ageMs,
+    identitySource:
+      identity?.sourceV460 ||
+      null
+  };
+}
+
+function activateLastAlertFallbackReserveV460(
+  budget,
+  fallback
+) {
+  const reserve =
+    budget
+      ?.analysis
+      ?.completeExactPoolReserveV459;
+
+  if (
+    !reserve?.enabled ||
+    reserve?.active === true ||
+    reserve?.consumed === true ||
+    fallback?.eligible !== true ||
+    !fallback?.candidate
+  ) {
+    return reserve || null;
+  }
+
+  const reserved =
+    Math.max(
+      0,
+      safeNumber(
+        reserve?.reservedRequests
+      )
+    );
+
+  const notificationReserveRemaining =
+    budget.notification
+      ?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(
+            budget.notification?.limit
+          ) -
+          safeNumber(
+            budget.notification?.used
+          )
+        )
+      : 0;
+
+  const analysisRemaining =
+    Math.max(
+      0,
+      effectiveAnalysisLimitV416(budget) -
+        safeNumber(
+          budget.analysis?.used
+        )
+    );
+
+  const globalRemainingBeforeTelegram =
+    Math.max(
+      0,
+      safeNumber(budget.totalLimit) -
+        safeNumber(budget.totalUsed) -
+        notificationReserveRemaining
+    );
+
+  if (
+    analysisRemaining < reserved ||
+    globalRemainingBeforeTelegram < reserved
+  ) {
+    reserve.releaseReason =
+      "LAST_ALERT_FALLBACK_RESERVATION_CAPACITY_UNAVAILABLE_V460";
+    return reserve;
+  }
+
+  reserve.active = true;
+  reserve.targetAddress =
+    normalize(
+      fallback?.candidate?.address
+    );
+  reserve.targetSymbol =
+    fallback?.candidate?.symbol ||
+    null;
+  reserve.poolId =
+    normalize(
+      fallback
+        ?.candidate
+        ?.onChainPoolIdentityV153
+        ?.poolId
+    ) || null;
+  reserve.activatedAt =
+    Date.now();
+  reserve.releaseReason =
+    null;
+  reserve.sourceV460 =
+    "LAST_SUCCESSFUL_ALERT_FALLBACK";
+
+  return reserve;
+}
+
+/* =========================================================
    V459 QUALIFIED-CANDIDATE V458 REQUEST RESERVATION
    ========================================================= */
 
@@ -60949,6 +61421,38 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    lastSuccessfulAlertExactPoolFallbackV460: {
+      enabled: true,
+      fallbackOnlyWhenNoCurrentQualifiedTarget:
+        true,
+      source:
+        "LAST_ALERT_SCAN_V264",
+      successfulTelegramSendRequired:
+        true,
+      maxAlertAgeMs:
+        LAST_ALERT_EXACT_POOL_FALLBACK_MAX_AGE_MS_V460,
+      verifiedErc20WatchMetadataRequired:
+        true,
+      exactPoolIdentityRequired:
+        true,
+      persistedV237PoolRegistryFallbackAllowed:
+        true,
+      retryCooldownMs:
+        LAST_ALERT_EXACT_POOL_RETRY_COOLDOWN_MS_V460,
+      reservesBeforeAnalysisLoop:
+        true,
+      reservedRequests:
+        VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_REQUESTS_V458,
+      requestCeilingsChanged:
+        false,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false
+    },
+
     qualifiedCandidateUsdCoverageReservationV459: {
       enabled: true,
       activatesOnlyAfterQualifiedExactPoolCandidate:
@@ -61715,6 +62219,24 @@ for (
 
     return true;
   };
+
+  const lastSuccessfulAlertLoadV460 =
+    await loadLastSuccessfulAlertSnapshotV460(
+      env
+    );
+
+  const lastAlertExactPoolFallbackV460 =
+    buildLastAlertExactPoolCandidateV460(
+      state,
+      lastSuccessfulAlertLoadV460
+        ?.snapshot ||
+        null
+    );
+
+  activateLastAlertFallbackReserveV460(
+    budget,
+    lastAlertExactPoolFallbackV460
+  );
 
   for (
     let v135Index = 0;
@@ -65578,7 +66100,7 @@ for (
         ?.targetAddress
     );
 
-  const completeExactPoolCandidatesV458 =
+  const liveCompleteExactPoolCandidatesV460 =
     (Array.isArray(candidates) ? candidates : [])
       .filter(
         candidate =>
@@ -65608,7 +66130,19 @@ for (
             safeNumber(a?.opportunity?.score)
           );
         }
-      )
+      );
+
+  const completeExactPoolCandidatesV458 =
+    (
+      liveCompleteExactPoolCandidatesV460.length > 0
+        ? liveCompleteExactPoolCandidatesV460
+        : lastAlertExactPoolFallbackV460?.eligible === true &&
+          lastAlertExactPoolFallbackV460?.candidate
+          ? [
+              lastAlertExactPoolFallbackV460.candidate
+            ]
+          : []
+    )
       .slice(
         0,
         VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_CANDIDATES_V458
@@ -65650,6 +66184,66 @@ for (
 
     candidate.completeExactPoolDirectionalUsdV458 = result;
 
+    const candidateAddressV460 =
+      normalize(
+        candidate?.address
+      );
+
+    const fromLastAlertFallbackV460 =
+      candidate
+        ?.successfulTelegramAlertFallbackV460
+        ?.verified === true;
+
+    if (
+      fromLastAlertFallbackV460 &&
+      isAddress(candidateAddressV460)
+    ) {
+      state.completeExactPoolCompletionV460 =
+        state.completeExactPoolCompletionV460 &&
+        typeof state.completeExactPoolCompletionV460 ===
+          "object"
+          ? state.completeExactPoolCompletionV460
+          : {};
+
+      state.completeExactPoolCompletionV460[
+        candidateAddressV460
+      ] = {
+        address:
+          candidateAddressV460,
+        symbol:
+          candidate?.symbol ||
+          null,
+        poolId:
+          normalize(
+            result?.poolId ||
+            candidate
+              ?.onChainPoolIdentityV153
+              ?.poolId
+          ) || null,
+        attemptedAt:
+          Date.now(),
+        completedAt:
+          result?.verified === true
+            ? Date.now()
+            : null,
+        verified:
+          result?.verified === true,
+        status:
+          result?.status ||
+          null,
+        requestsUsed:
+          safeNumber(
+            result?.requestsUsed
+          ),
+        fullExactPool24hCoverageVerified:
+          result
+            ?.fullExactPool24hCoverageVerified ===
+          true,
+        source:
+          "LAST_SUCCESSFUL_ALERT_FALLBACK_V460"
+      };
+    }
+
     if (result?.verified === true) {
       completeExactPoolDirectionalUsdV458.verified++;
     }
@@ -65673,7 +66267,18 @@ for (
         result?.fullExactPool24hCoverageVerified === true,
       fullTokenMarketCoverageVerified: false,
       verifiedWindows:
-        result?.flow?.verifiedWindows || []
+        result?.flow?.verifiedWindows || [],
+      targetSourceV460:
+        candidate
+          ?.successfulTelegramAlertFallbackV460
+          ?.verified === true
+          ? "LAST_SUCCESSFUL_ALERT_FALLBACK_V460"
+          : "CURRENT_SCAN_QUALIFIED_CANDIDATE",
+      lastAlertSavedAtV460:
+        candidate
+          ?.successfulTelegramAlertFallbackV460
+          ?.savedAt ||
+        null
     });
   }
 
@@ -65708,8 +66313,11 @@ for (
         consumed
           ? "V458_PROTECTED_LANE_EXECUTED_V459"
           : completeExactPoolCandidatesV458.length === 0
-            ? "NO_ELIGIBLE_V458_TARGET_RELEASED_V459"
-            : "V458_TARGET_DID_NOT_CONSUME_PROTECTED_REQUESTS_V459",
+            ? "NO_ELIGIBLE_V458_OR_LAST_ALERT_TARGET_RELEASED_V460"
+            : lastAlertExactPoolFallbackV460?.eligible === true &&
+              liveCompleteExactPoolCandidatesV460.length === 0
+              ? "LAST_ALERT_V458_TARGET_DID_NOT_CONSUME_PROTECTED_REQUESTS_V460"
+              : "V458_TARGET_DID_NOT_CONSUME_PROTECTED_REQUESTS_V459",
         consumed
       );
     })();
@@ -69681,8 +70289,65 @@ for (
 
     hookLiquiditySemanticsV453,
     onChainMarketFallbackResultsV455,
+    lastSuccessfulAlertLoadV460: {
+      available:
+        lastSuccessfulAlertLoadV460?.available === true,
+      status:
+        lastSuccessfulAlertLoadV460?.status || null,
+      savedAt:
+        lastSuccessfulAlertLoadV460
+          ?.snapshot
+          ?.savedAt ||
+        null,
+      address:
+        normalize(
+          lastSuccessfulAlertLoadV460
+            ?.snapshot
+            ?.alert
+            ?.address
+        ) || null,
+      symbol:
+        lastSuccessfulAlertLoadV460
+          ?.snapshot
+          ?.alert
+          ?.symbol ||
+        null
+    },
+    lastAlertExactPoolFallbackV460: {
+      eligible:
+        lastAlertExactPoolFallbackV460?.eligible === true,
+      reason:
+        lastAlertExactPoolFallbackV460?.reason || null,
+      address:
+        lastAlertExactPoolFallbackV460?.address || null,
+      symbol:
+        lastAlertExactPoolFallbackV460?.symbol || null,
+      savedAt:
+        lastAlertExactPoolFallbackV460?.savedAt || null,
+      ageMs:
+        Number.isFinite(
+          Number(
+            lastAlertExactPoolFallbackV460?.ageMs
+          )
+        )
+          ? Number(
+              lastAlertExactPoolFallbackV460.ageMs
+            )
+          : null,
+      identitySource:
+        lastAlertExactPoolFallbackV460?.identitySource || null,
+      exactPoolId:
+        normalize(
+          lastAlertExactPoolFallbackV460
+            ?.candidate
+            ?.onChainPoolIdentityV153
+            ?.poolId
+        ) || null
+    },
     completeExactPoolDirectionalUsdV458,
     completeExactPoolReserveResultV459,
+    completeExactPoolCompletionV460:
+      state.completeExactPoolCompletionV460 || {},
 
     liquidityCrosschecksV449,
     exactPoolLiquidityCrosschecksV451:
