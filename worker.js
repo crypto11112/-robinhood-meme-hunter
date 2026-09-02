@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V438
- * AUTHORITATIVE RUNTIME VERSION: V438
+ * Robinhood Chain Meme Hunter — V439
+ * AUTHORITATIVE RUNTIME VERSION: V439
+ * V439 is a narrow holder-recovery fix based on the V438 scan where a market-verified candidate was blocked only because Blockscout Pro was already in cooldown. V439 extends the existing bounded V422/V437 holder retry state to Blockscout Pro cooldown responses. If the authenticated holder provider is cooling, the candidate is retained with a retry scheduled no earlier than the provider's own cooldown expiry (plus a small safety margin), rather than returning HOLDER_EVIDENCE_UNVERIFIED without a retry state. The same behavior applies when a due V422/V437 holder retry encounters an active Blockscout Pro cooldown. No provider is called early, no cooldown is bypassed, no holder evidence is fabricated, and the existing 45-minute holder-recovery maximum age remains. No market/RPC/Chainstack/scoring/qualification/Telegram/request-ceiling behavior changes.
  * V438 begins the independent on-chain market-verification path without weakening existing market/liquidity gates. It reuses the bot's existing exact-pool V4 directional ledger (V179+) and only accepts candidate-matched swaps whose quote value is already independently exact-USD verified through canonical USDG or canonical WETH/native ETH with the existing verified WETH/USDG reference. From those real executed swaps, V438 derives a bounded recent observed execution-price sample, median observed USD price, fully-diluted supply valuation from the already-verified ERC-20 totalSupply/decimals, and the largest verified observed USD trade as an execution-capacity observation. These values are kept in a separate nested evidence object and DO NOT set market.verified, DO NOT populate core liquidityUsd, and DO NOT bypass the existing minimum-liquidity or Telegram gates. This is the safe foundation for removing DexScreener/Gecko dependence: it tells us whether the bot already has enough exact on-chain price evidence, while explicitly identifying USD liquidity as the remaining proof requirement. No extra external requests, no new provider, no scoring change, no Telegram threshold change, no request-ceiling increase, and no holder/RPC behavior change.
  * V437 is a narrow holder-evidence recovery upgrade based on V436 diagnostics. It preserves the existing V422 verified-empty holder retry and extends that same bounded retry mechanism to Blockscout holder-endpoint unavailable/404 evidence. Zero-row responses keep the existing 2-minute retry cadence; holder endpoint unavailable/404 uses a slower 5-minute retry cadence. The retry remains forward-only and bounded by the existing V422 45-minute maximum age. A retry never promotes holder evidence unless real holder rows are later returned and the existing integrity/concentration/whale checks pass. No holder data is fabricated and no scoring, market verification, Telegram threshold, request ceiling, Chainstack/RPC behavior, or provider trust rule is weakened.
  * V436 is a diagnostic-only build on the proven V435 live-discovery fix. It adds a zero-request, zero-write candidate blocker diagnostic for returned candidates so each analysed candidate exposes the exact market, holder, and Telegram gating evidence that stopped or allowed progression. The diagnostic records Dex/Gecko market outcome already attached to the candidate, provider availability/cooldown evidence already present, holder integrity/source/Blockscout fallback evidence, and the exact existing Telegram qualification reasons. No provider order, retry cadence, request ceiling, scoring, qualification, holder requirement, market verification rule, Telegram threshold, or learning behavior is changed.
@@ -1512,7 +1513,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V438";
+const VERSION = "V439";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -36290,6 +36291,28 @@ function registerHolderEndpointUnavailableV437(
   );
 }
 
+function registerHolderProviderCooldownV439(
+  watched,
+  fallback
+) {
+  const retryAfterMs =
+    Math.max(
+      HOLDER_INDEX_LAG_RETRY_MS_V422,
+      safeNumber(
+        fallback?.retryAfterMs
+      ) + 5000
+    );
+
+  return registerHolderIndexLagV422(
+    watched,
+    "BLOCKSCOUT_PRO_V143",
+    fallback?.status ||
+      "BLOCKSCOUT_PRO_COOLDOWN_V145",
+    retryAfterMs,
+    "HOLDER_PROVIDER_COOLDOWN"
+  );
+}
+
 /* =========================================================
    V227 BITQUERY HOLDER FALLBACK — ZERO EXTRA HTTP REQUESTS
    ========================================================= */
@@ -36809,6 +36832,60 @@ async function holderIntelligence(
             true,
           nextRetryAt:
             nextStateV437?.nextRetryAt ||
+            null
+        }
+      };
+    } else if (
+      retryV422?.success !== true &&
+      retryV422?.status ===
+        "BLOCKSCOUT_PRO_COOLDOWN_V145"
+    ) {
+      const nextStateV439 =
+        registerHolderProviderCooldownV439(
+          watched,
+          retryV422
+        );
+
+      return {
+        ...unverifiedHolders(
+          "HOLDER_PROVIDER_COOLDOWN_RETRY_V439"
+        ),
+        holderSource:
+          "BLOCKSCOUT_PRO_V143",
+        blockscoutProHolderFallbackV143,
+        blockscoutProCounterFallbackV247,
+        holderIndexLagV422:
+          nextStateV439,
+        holderEndpointRecoveryV437:
+          null,
+        holderProviderCooldownRecoveryV439: {
+          enabled: true,
+          failureClass:
+            "HOLDER_PROVIDER_COOLDOWN",
+          providerStatus:
+            retryV422?.status ||
+            null,
+          providerCooldownUntil:
+            retryV422?.cooldownUntil ||
+            null,
+          nextRetryAt:
+            nextStateV439?.nextRetryAt ||
+            null,
+          retryAfterMs:
+            nextStateV439?.retryAfterMs ||
+            null,
+          qualificationRequirementUnchanged:
+            true
+        },
+        holderIndexLagRetryV422: {
+          ...holderIndexLagRetryV422,
+          status:
+            retryV422?.status ||
+            "BLOCKSCOUT_PRO_COOLDOWN_V145",
+          rescheduledByV439:
+            true,
+          nextRetryAt:
+            nextStateV439?.nextRetryAt ||
             null
         }
       };
@@ -37364,6 +37441,20 @@ async function holderIntelligence(
           )
         : null;
 
+    const holderProviderCooldownRetryV439 =
+      !holderEndpointRetryV437 &&
+      blockscoutProHolderFallbackV143?.status ===
+        "BLOCKSCOUT_PRO_COOLDOWN_V145"
+        ? registerHolderProviderCooldownV439(
+            watched,
+            blockscoutProHolderFallbackV143
+          )
+        : null;
+
+    const holderRecoveryStateV439 =
+      holderEndpointRetryV437 ||
+      holderProviderCooldownRetryV439;
+
     return {
       ...unverifiedHolders(
         "BLOCKSCOUT_HOLDERS_UNAVAILABLE"
@@ -37384,7 +37475,7 @@ async function holderIntelligence(
         "BLOCKSCOUT",
 
       holderIndexLagV422:
-        holderEndpointRetryV437,
+        holderRecoveryStateV439,
 
       holderEndpointRecoveryV437:
         holderEndpointRetryV437
@@ -37396,6 +37487,29 @@ async function holderIntelligence(
                 holderEndpointRetryV437.retryAfterMs,
               nextRetryAt:
                 holderEndpointRetryV437.nextRetryAt,
+              maxAgeMs:
+                HOLDER_INDEX_LAG_MAX_AGE_MS_V422,
+              qualificationRequirementUnchanged:
+                true
+            }
+          : null,
+
+      holderProviderCooldownRecoveryV439:
+        holderProviderCooldownRetryV439
+          ? {
+              enabled: true,
+              failureClass:
+                "HOLDER_PROVIDER_COOLDOWN",
+              providerStatus:
+                blockscoutProHolderFallbackV143?.status ||
+                null,
+              providerCooldownUntil:
+                blockscoutProHolderFallbackV143?.cooldownUntil ||
+                null,
+              retryAfterMs:
+                holderProviderCooldownRetryV439.retryAfterMs,
+              nextRetryAt:
+                holderProviderCooldownRetryV439.nextRetryAt,
               maxAgeMs:
                 HOLDER_INDEX_LAG_MAX_AGE_MS_V422,
               qualificationRequirementUnchanged:
@@ -44321,6 +44435,32 @@ function returnedCandidateBlockerDiagnosticV436(
                   enabled: true,
                   failureClass:
                     "HOLDER_ENDPOINT_UNAVAILABLE",
+                  nextRetryAt:
+                    holders
+                      ?.holderIndexLagV422
+                      ?.nextRetryAt ||
+                    null,
+                  retryAfterMs:
+                    holders
+                      ?.holderIndexLagV422
+                      ?.retryAfterMs ||
+                    0
+                }
+              : null
+          ),
+
+        holderProviderCooldownRecoveryV439:
+          holders
+            ?.holderProviderCooldownRecoveryV439 ||
+          (
+            holders
+              ?.holderIndexLagV422
+              ?.failureClassV437 ===
+              "HOLDER_PROVIDER_COOLDOWN"
+              ? {
+                  enabled: true,
+                  failureClass:
+                    "HOLDER_PROVIDER_COOLDOWN",
                   nextRetryAt:
                     holders
                       ?.holderIndexLagV422
@@ -56004,6 +56144,14 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    holderProviderCooldownRecoveryV439: {
+      enabled: true,
+      trigger: "BLOCKSCOUT_PRO_COOLDOWN_V145",
+      respectsProviderCooldown: true,
+      providerCallsAdded: 0,
+      requestCeilingChanged: false,
+      holderVerificationStandardsChanged: false
+    },
     onChainMarketVerificationFoundationV438: {
       enabled: true,
       exactUsdSwapLedgerOnly: true,
@@ -61637,6 +61785,30 @@ for (
       externalRequestsAdded:
         0,
       requestCeilingChanged:
+        false
+    },
+
+    holderProviderCooldownRecoveryV439: {
+      enabled: true,
+      trigger:
+        "BLOCKSCOUT_PRO_COOLDOWN_V145",
+      respectsProviderCooldown:
+        true,
+      retrySafetyMarginMs:
+        5000,
+      maxRetryAgeMs:
+        HOLDER_INDEX_LAG_MAX_AGE_MS_V422,
+      holderVerificationStandardsChanged:
+        false,
+      providerCallsAdded:
+        0,
+      requestCeilingChanged:
+        false,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
         false
     },
 
