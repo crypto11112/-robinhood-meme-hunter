@@ -1,6 +1,27 @@
 /**
- * Robinhood Chain Meme Hunter — V501
- * AUTHORITATIVE RUNTIME VERSION: V501
+ * Robinhood Chain Meme Hunter — V502
+ * AUTHORITATIVE RUNTIME VERSION: V502
+ *
+ * V502 UNKNOWN-SOURCE TARGET DIVERSIFICATION:
+ * - resumes launch-source discovery after the RWA mechanism was confirmed/frozen;
+ * - preserves the proven V480 -> V489 origin/mechanism pipeline;
+ * - adds bounded persisted investigation history for current/live unknown-source
+ *   ERC-20 candidates so the same unresolved token is not selected scan after scan;
+ * - prioritises NEVER-INVESTIGATED candidates first, then least-investigated,
+ *   then existing V484 freshness tier and analysis priority;
+ * - recently unresolved targets receive a 6h investigation cooldown; verified
+ *   origins remain handled by the existing 7d V480 origin cache/backlog logic;
+ * - records the exact outcome class already produced by V480/V483/V485 without
+ *   inventing a launch source;
+ * - surfaces recurring V483 counterparties and non-generic methods across 2+
+ *   distinct token fingerprints as mechanism candidates only, never proof;
+ * - explicitly suppresses generic ERC-20 approve selector 0x095ea7b3 from the
+ *   V502 mechanism-candidate method list because prior evidence showed it is
+ *   ubiquitous and non-diagnostic;
+ * - adds ZERO external requests and uses ZERO additional per-scan writes beyond
+ *   the existing main state save;
+ * - scoring, Momentum, qualification, Telegram thresholds, verified USD,
+ *   dense-pool completion, RWA detector, launch meter and hard limit 42 unchanged.
  *
  * V501 /launchsources RWA ACTIVE-STATE DISPLAY FIX:
  * - fixes V500 display logic that incorrectly required the non-persisted
@@ -2324,7 +2345,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V501";
+const VERSION = "V502";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71767,7 +71788,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71791,6 +71812,47 @@ for (
       telegramThresholdChanged:
         false,
       launchSourcePromotion:
+        false
+    },
+
+    unknownSourceTargetDiversificationV502: {
+      enabled: true,
+      measurementOnly: true,
+      objective:
+        "EXPAND_VERIFIED_LAUNCH_SOURCE_COVERAGE_WITHOUT_GUESSING",
+      preservesPipeline:
+        "V480_TO_V489",
+      targetPriority:
+        "NEVER_INVESTIGATED_THEN_LEAST_INVESTIGATED_THEN_V484_FRESHNESS_THEN_ANALYSIS_PRIORITY",
+      unresolvedTargetCooldownMs:
+        21600000,
+      retainedTargetLimit:
+        250,
+      retainedTargetMaxAgeMs:
+        604800000,
+      recurringMechanismCandidateThreshold:
+        "2_OR_MORE_DISTINCT_TOKEN_FINGERPRINTS",
+      genericApproveSelectorSuppressed:
+        "0x095ea7b3",
+      candidateMechanismMeansProof:
+        false,
+      exactProofStillRequiredBeforePromotion:
+        true,
+      externalRequestsAdded:
+        0,
+      additionalPerScanStateWrites:
+        0,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false,
+      rwaDetectorChanged:
         false
     },
 
@@ -98302,6 +98364,415 @@ function shouldReserveSecondarySlotForV486FairnessV487(
   };
 }
 
+
+function ensureUnknownSourceTargetRouterV502(
+  state
+) {
+  state.unknownSourceTargetRouterV502 =
+    state.unknownSourceTargetRouterV502 &&
+    typeof state.unknownSourceTargetRouterV502 === "object"
+      ? state.unknownSourceTargetRouterV502
+      : {
+          enabled: true,
+          measurementOnly: true,
+          monitorStartedAt:
+            Date.now(),
+          scansObserved: 0,
+          selections: 0,
+          targets: {},
+          lastSelectedToken: null,
+          lastSelectedAt: null,
+          lastSelectionReason: null
+        };
+
+  const root =
+    state.unknownSourceTargetRouterV502;
+
+  root.targets =
+    root.targets &&
+    typeof root.targets === "object"
+      ? root.targets
+      : {};
+
+  return root;
+}
+
+function pruneUnknownSourceTargetRouterV502(
+  state
+) {
+  const root =
+    ensureUnknownSourceTargetRouterV502(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  const maxAge =
+    7 * 24 * 60 * 60 * 1000;
+
+  root.targets =
+    Object.fromEntries(
+      Object.entries(
+        root.targets || {}
+      )
+        .filter(([, row]) => {
+          const at =
+            safeNumber(
+              row?.lastInvestigatedAt
+            );
+
+          return (
+            at > 0 &&
+            now - at <= maxAge
+          );
+        })
+        .sort(
+          (a, b) =>
+            safeNumber(
+              b[1]?.lastInvestigatedAt
+            ) -
+            safeNumber(
+              a[1]?.lastInvestigatedAt
+            )
+        )
+        .slice(0, 250)
+    );
+
+  return root;
+}
+
+function unknownSourceTargetCooldownV502(
+  state,
+  address
+) {
+  const clean =
+    normalize(address);
+
+  if (!isAddress(clean)) {
+    return {
+      cooling: false,
+      remainingMs: 0,
+      row: null
+    };
+  }
+
+  const root =
+    pruneUnknownSourceTargetRouterV502(
+      state
+    );
+
+  const row =
+    root.targets?.[clean] ||
+    null;
+
+  if (!row) {
+    return {
+      cooling: false,
+      remainingMs: 0,
+      row: null
+    };
+  }
+
+  const last =
+    safeNumber(
+      row.lastInvestigatedAt
+    );
+
+  /*
+   * Only unresolved/no-proof investigations are cooled here.
+   * Verified origins are already protected by the existing V480 7-day cache.
+   */
+  const unresolved =
+    row?.originVerified !== true;
+
+  const cooldownMs =
+    6 * 60 * 60 * 1000;
+
+  const remainingMs =
+    unresolved && last > 0
+      ? Math.max(
+          0,
+          cooldownMs -
+          (Date.now() - last)
+        )
+      : 0;
+
+  return {
+    cooling:
+      remainingMs > 0,
+    remainingMs,
+    row
+  };
+}
+
+function recordUnknownSourceTargetOutcomeV502({
+  state,
+  address,
+  telemetry
+}) {
+  const clean =
+    normalize(address);
+
+  if (!isAddress(clean)) {
+    return;
+  }
+
+  const root =
+    pruneUnknownSourceTargetRouterV502(
+      state
+    );
+
+  const previous =
+    root.targets?.[clean] ||
+    {};
+
+  const originVerified =
+    Array.isArray(
+      telemetry?.verifiedOrigins
+    ) &&
+    telemetry.verifiedOrigins
+      .some(
+        row =>
+          normalize(row?.token) ===
+            clean &&
+          row?.verified === true
+      );
+
+  const fingerprint =
+    telemetry
+      ?.unknownLaunchMechanismFingerprintV483;
+
+  const attribution =
+    telemetry
+      ?.exactCreationMechanismAttributionV485;
+
+  let outcome =
+    telemetry?.status ||
+    "DATA UNVERIFIED";
+
+  if (originVerified) {
+    outcome =
+      "V502_ORIGIN_VERIFIED_ROUTED_TO_EXACT_MECHANISM_PIPELINE";
+  } else if (
+    fingerprint?.status ===
+      "V483_TRANSACTION_FINGERPRINT_CAPTURED"
+  ) {
+    outcome =
+      "V502_INCOMPLETE_ORIGIN_FINGERPRINT_CAPTURED";
+  } else if (
+    fingerprint?.status ===
+      "V484_SKIPPED_NO_VERIFIED_CONTRACT_EVIDENCE"
+  ) {
+    outcome =
+      "V502_NO_VERIFIED_CONTRACT_EVIDENCE";
+  } else if (
+    attribution?.attributionResult
+      ?.exactTokenCreateVerified === true
+  ) {
+    outcome =
+      "V502_EXACT_TOKEN_CREATION_PROVEN";
+  }
+
+  root.targets[clean] = {
+    token:
+      clean,
+    firstInvestigatedAt:
+      safeNumber(
+        previous?.firstInvestigatedAt
+      ) ||
+      Date.now(),
+    lastInvestigatedAt:
+      Date.now(),
+    attempts:
+      safeNumber(
+        previous?.attempts
+      ) + 1,
+    originVerified,
+    lastOutcome:
+      outcome,
+    lastV480Status:
+      telemetry?.status ||
+      null,
+    lastV483Status:
+      fingerprint?.status ||
+      null,
+    lastV485Status:
+      attribution?.status ||
+      null,
+    evidenceMeaning:
+      originVerified
+        ? "VERIFIED_ORIGIN_ONLY_NOT_AUTOMATIC_LAUNCHPAD_PROOF"
+        : "UNKNOWN_SOURCE_INVESTIGATION_ONLY",
+    launchSource:
+      "DATA UNVERIFIED"
+  };
+
+  root.lastSelectedToken =
+    clean;
+  root.lastSelectedAt =
+    Date.now();
+  root.lastSelectionReason =
+    outcome;
+}
+
+function mechanismCandidateSnapshotV502(
+  state
+) {
+  const fp =
+    mechanismFingerprintSnapshotV483(
+      state
+    );
+
+  const genericMethods =
+    new Set([
+      "0x095ea7b3",
+      "approve",
+      "approve(address,uint256)"
+    ]);
+
+  const recurringCounterparties =
+    (Array.isArray(
+      fp?.recurringCounterparties
+    )
+      ? fp.recurringCounterparties
+      : []
+    )
+      .filter(
+        row =>
+          safeNumber(
+            row?.distinctTokens
+          ) >= 2
+      )
+      .slice(0, 20);
+
+  const recurringNonGenericMethods =
+    (Array.isArray(
+      fp?.recurringMethods
+    )
+      ? fp.recurringMethods
+      : []
+    )
+      .filter(row => {
+        const method =
+          String(
+            row?.methodOrSelector ||
+            ""
+          )
+            .trim()
+            .toLowerCase();
+
+        return (
+          safeNumber(
+            row?.distinctTokens
+          ) >= 2 &&
+          method &&
+          !genericMethods.has(method)
+        );
+      })
+      .slice(0, 20);
+
+  return {
+    enabled: true,
+    measurementOnly: true,
+    evidenceThreshold:
+      "RECURRING_ACROSS_2_OR_MORE_DISTINCT_TOKEN_FINGERPRINTS",
+    recurringCounterpartyCandidates:
+      recurringCounterparties,
+    recurringNonGenericMethodCandidates:
+      recurringNonGenericMethods,
+    genericMethodsSuppressed: [
+      "0x095ea7b3"
+    ],
+    interpretation:
+      "MECHANISM_CANDIDATES_ONLY_NOT_LAUNCH_SOURCE_PROOF",
+    promotionAllowed:
+      false,
+    nextExactProofRequired:
+      "EXACT_CREATION_OR_TRIGGER_TRANSACTION_LINKAGE_BEFORE_SOURCE_PROMOTION"
+  };
+}
+
+function unknownSourceTargetRouterSnapshotV502(
+  state
+) {
+  const root =
+    pruneUnknownSourceTargetRouterV502(
+      state
+    );
+
+  const rows =
+    Object.values(
+      root.targets || {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.lastInvestigatedAt
+          ) -
+          safeNumber(
+            a?.lastInvestigatedAt
+          )
+      );
+
+  return {
+    enabled: true,
+    measurementOnly: true,
+    monitorStartedAt:
+      safeNumber(
+        root.monitorStartedAt
+      ) || null,
+    scansObserved:
+      safeNumber(
+        root.scansObserved
+      ),
+    selections:
+      safeNumber(
+        root.selections
+      ),
+    retainedTargets:
+      rows.length,
+    unresolvedTargets:
+      rows.filter(
+        row =>
+          row?.originVerified !== true
+      ).length,
+    verifiedOriginTargets:
+      rows.filter(
+        row =>
+          row?.originVerified === true
+      ).length,
+    investigationCooldownMs:
+      6 * 60 * 60 * 1000,
+    prioritization:
+      "NEVER_INVESTIGATED_THEN_LEAST_INVESTIGATED_THEN_V484_AGE_TIER_THEN_ANALYSIS_PRIORITY",
+    recentTargets:
+      rows.slice(0, 20),
+    mechanismCandidates:
+      mechanismCandidateSnapshotV502(
+        state
+      ),
+    lastSelectedToken:
+      root.lastSelectedToken ||
+      null,
+    lastSelectedAt:
+      safeNumber(
+        root.lastSelectedAt
+      ) || null,
+    lastSelectionReason:
+      root.lastSelectionReason ||
+      null,
+    externalRequestsAdded:
+      0,
+    scoringChanged:
+      false,
+    telegramThresholdChanged:
+      false,
+    launchSourcePromotion:
+      false
+  };
+}
+
 async function traceUnknownLiveOriginsV477({
   env,
   state,
@@ -98312,6 +98783,16 @@ async function traceUnknownLiveOriginsV477({
   const root = pruneTokenOriginTraceV477(state);
   root.scansObserved =
     safeNumber(root.scansObserved) + 1;
+
+  const routerV502 =
+    pruneUnknownSourceTargetRouterV502(
+      state
+    );
+
+  routerV502.scansObserved =
+    safeNumber(
+      routerV502.scansObserved
+    ) + 1;
 
   const liveSet =
     liveTokens instanceof Set
@@ -98346,10 +98827,62 @@ async function traceUnknownLiveOriginsV477({
           return false;
         }
 
+        const cooldownV502 =
+          unknownSourceTargetCooldownV502(
+            state,
+            address
+          );
+
+        if (
+          cooldownV502.cooling === true
+        ) {
+          return false;
+        }
+
         return true;
       })
       .slice()
       .sort((a, b) => {
+        const addressA =
+          normalize(a?.address);
+        const addressB =
+          normalize(b?.address);
+
+        const routerV502 =
+          pruneUnknownSourceTargetRouterV502(
+            state
+          );
+
+        const rowA =
+          routerV502.targets?.[
+            addressA
+          ] || null;
+        const rowB =
+          routerV502.targets?.[
+            addressB
+          ] || null;
+
+        const neverA =
+          rowA ? 1 : 0;
+        const neverB =
+          rowB ? 1 : 0;
+
+        if (neverA !== neverB) {
+          return neverA - neverB;
+        }
+
+        const attemptsDiff =
+          safeNumber(
+            rowA?.attempts
+          ) -
+          safeNumber(
+            rowB?.attempts
+          );
+
+        if (attemptsDiff !== 0) {
+          return attemptsDiff;
+        }
+
         const tierDiff =
           launchFingerprintAgeTierV484(a) -
           launchFingerprintAgeTierV484(b);
@@ -98402,6 +98935,29 @@ async function traceUnknownLiveOriginsV477({
               analysisPriority(
                 selected[0]
               ),
+            targetDiversificationV502: {
+              enabled: true,
+              priorInvestigations:
+                safeNumber(
+                  routerV502
+                    ?.targets?.[
+                      normalize(
+                        selected[0]?.address
+                      )
+                    ]?.attempts
+                ),
+              neverInvestigated:
+                !routerV502
+                  ?.targets?.[
+                    normalize(
+                      selected[0]?.address
+                    )
+                  ],
+              recentUnresolvedCooldownMs:
+                6 * 60 * 60 * 1000,
+              selectionOrder:
+                "NEVER_INVESTIGATED_THEN_LEAST_INVESTIGATED_THEN_V484_AGE_THEN_PRIORITY"
+            },
             matureOpportunityAlertEligibilityChanged:
               false,
             scoringChanged:
@@ -98491,6 +99047,19 @@ async function traceUnknownLiveOriginsV477({
 
   const targetAddress =
     addresses[0] || null;
+
+  if (isAddress(targetAddress)) {
+    routerV502.selections =
+      safeNumber(
+        routerV502.selections
+      ) + 1;
+    routerV502.lastSelectedToken =
+      targetAddress;
+    routerV502.lastSelectedAt =
+      Date.now();
+    routerV502.lastSelectionReason =
+      "V502_DIVERSIFIED_UNKNOWN_SOURCE_TARGET_SELECTED";
+  }
 
   const selectedCandidateV484 =
     selected[0] || null;
@@ -98628,6 +99197,14 @@ async function traceUnknownLiveOriginsV477({
       root.lastStatus =
         `BLOCKSCOUT_PRO_V2_ADDRESS_HTTP_${response.status}_V480`;
       telemetry.status = root.lastStatus;
+
+      recordUnknownSourceTargetOutcomeV502({
+        state,
+        address:
+          targetAddress,
+        telemetry
+      });
+
       return telemetry;
     }
 
@@ -98890,6 +99467,13 @@ async function traceUnknownLiveOriginsV477({
 
     telemetry.status = root.lastStatus;
 
+    recordUnknownSourceTargetOutcomeV502({
+      state,
+      address:
+        targetAddress,
+      telemetry
+    });
+
     pruneTokenOriginTraceV477(state);
 
     telemetry.recurringCreators =
@@ -98909,6 +99493,14 @@ async function traceUnknownLiveOriginsV477({
     root.lastStatus =
       `BLOCKSCOUT_PRO_V2_ADDRESS_FETCH_ERROR_V480:${errorString(error)}`;
     telemetry.status = root.lastStatus;
+
+    recordUnknownSourceTargetOutcomeV502({
+      state,
+      address:
+        targetAddress,
+      telemetry
+    });
+
     return telemetry;
   } finally {
     clearTimeout(timer);
@@ -99030,6 +99622,10 @@ function tokenOriginTraceSnapshotV477(state) {
     },
     unknownLaunchMechanismFingerprintV483:
       mechanismFingerprintSnapshotV483(state),
+    unknownSourceTargetRouterV502:
+      unknownSourceTargetRouterSnapshotV502(
+        state
+      ),
     exactCreationMechanismAttributionV485:
       creationMechanismAttributionSnapshotV485(
         state
