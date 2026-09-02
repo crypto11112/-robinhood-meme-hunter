@@ -1,6 +1,23 @@
 /**
- * Robinhood Chain Meme Hunter — V505
- * AUTHORITATIVE RUNTIME VERSION: V505
+ * Robinhood Chain Meme Hunter — V506
+ * AUTHORITATIVE RUNTIME VERSION: V506
+ *
+ * V506 PRE-V485 STRONG-CREATOR ROUTING FIX:
+ * - fixes V505 priority placement: the decision is now made in the CURRENT/LIVE
+ *   V480 verified-origin path BEFORE V485 consumes its secondary request;
+ * - compares the freshly verified creator address directly with the strongest
+ *   unresolved recurring creator cluster, so a newly discovered token does not
+ *   need to already exist in the persisted cluster token list;
+ * - if the creator matches a >=6-token unresolved recurring cluster, V503 creator
+ *   attribution takes the slot and V485 for that token is explicitly deferred;
+ * - if no matching strong creator exists, V485 runs exactly as before;
+ * - V505 backlog safeguard remains preserved as a secondary protection;
+ * - recurrence alone never promotes a launch source;
+ * - exact creation/trigger linkage remains mandatory before source promotion;
+ * - one secondary diagnostic request maximum per scan remains enforced;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, verified-USD,
+ *   dense-pool completion, launch-meter, RWA detector, or alert-cadence changes.
  *
  * V505 STRONG RECURRING-CREATOR PRIORITY:
  * - preserves V504 solved-RWA backlog exclusion and all confirmed-working logic;
@@ -2398,7 +2415,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V505";
+const VERSION = "V506";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71841,7 +71858,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71865,6 +71882,42 @@ for (
       telegramThresholdChanged:
         false,
       launchSourcePromotion:
+        false
+    },
+
+    preV485StrongCreatorRoutingFixV506: {
+      enabled: true,
+      fixes:
+        "V505_PRIORITY_WAS_ONLY_IN_V486_BACKLOG_NOT_CURRENT_LIVE_V480_TO_V485_PATH",
+      decisionPoint:
+        "CURRENT_LIVE_V480_AFTER_VERIFIED_ORIGIN_BEFORE_V485_REQUEST",
+      matchingKey:
+        "VERIFIED_CREATOR_ADDRESS",
+      minimumDistinctVerifiedTokenOrigins:
+        6,
+      routesMatchingStrongCreatorTo:
+        "V503_RECURRING_CREATOR_ATTRIBUTION",
+      defersV485ForSameClusterOnly:
+        true,
+      v485GloballyDisabled:
+        false,
+      recurrenceAlonePromotesSource:
+        false,
+      exactCreationOrTriggerProofStillRequired:
+        true,
+      maxSecondaryDiagnosticRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false,
+      rwaDetectorChanged:
         false
     },
 
@@ -94844,6 +94897,85 @@ function shouldPrioritizeRecurringCreatorOverV485V505({
   };
 }
 
+
+function shouldPrioritizeVerifiedCreatorBeforeV485V506({
+  state,
+  verifiedCreator
+}) {
+  const creator =
+    normalize(
+      verifiedCreator
+    );
+
+  const pending =
+    strongRecurringCreatorCandidateV505(
+      state
+    );
+
+  if (
+    !isAddress(creator) ||
+    !pending
+  ) {
+    return {
+      prioritizeCreator: false,
+      reason:
+        "V506_NO_MATCHING_STRONG_RECURRING_CREATOR",
+      verifiedCreator:
+        isAddress(creator)
+          ? creator
+          : null,
+      pendingCreator:
+        pending || null
+    };
+  }
+
+  const pendingCreator =
+    normalize(
+      pending?.creator
+    );
+
+  const sameCreator =
+    creator ===
+    pendingCreator;
+
+  const thresholdMet =
+    safeNumber(
+      pending?.distinctTokens
+    ) >=
+    strongRecurringCreatorThresholdV505();
+
+  const incomplete =
+    pending?.identityProcessed !== true ||
+    pending?.transactionsProcessed !== true;
+
+  return {
+    prioritizeCreator:
+      sameCreator &&
+      thresholdMet &&
+      incomplete,
+    reason:
+      sameCreator &&
+      thresholdMet &&
+      incomplete
+        ? "V506_CURRENT_LIVE_CREATOR_MATCHES_STRONG_RECURRING_CLUSTER"
+        : "V506_CURRENT_LIVE_CREATOR_DOES_NOT_MATCH_PENDING_STRONG_CLUSTER",
+    verifiedCreator:
+      creator,
+    pendingCreator:
+      pendingCreator || null,
+    distinctTokens:
+      safeNumber(
+        pending?.distinctTokens
+      ),
+    identityProcessed:
+      pending?.identityProcessed === true,
+    transactionsProcessed:
+      pending?.transactionsProcessed === true,
+    thresholdDistinctTokens:
+      strongRecurringCreatorThresholdV505()
+  };
+}
+
 async function runRecurringCreatorAttributionV503({
   env,
   state,
@@ -95397,6 +95529,13 @@ function recurringCreatorAttributionSnapshotV503(
         ),
       priorityRule:
         "V503_CREATOR_LEVEL_ATTRIBUTION_BEFORE_REPEAT_V485_FOR_SAME_STRONG_CREATOR_CLUSTER",
+      preV485CurrentLiveRoutingV506: {
+        enabled: true,
+        compareBy:
+          "VERIFIED_CREATOR_ADDRESS",
+        decisionPoint:
+          "AFTER_V480_ORIGIN_PROOF_BEFORE_V485_REQUEST_CONSUMPTION"
+      },
       recurrenceAloneMeansLaunchSource:
         false
     },
@@ -100761,25 +100900,114 @@ async function traceUnknownLiveOriginsV477({
       );
 
       /*
-       * V485 exact creation-mechanism attribution:
-       * V480 has already proved the creator + exact creation transaction.
-       * Spend at most ONE released post-Telegram spare request on the raw
-       * execution trace and require an exact CREATE/CREATE2 token-address match.
-       * This is mutually exclusive with V483 because V483 runs only when V480
-       * provenance is incomplete.
+       * V506 PRE-V485 STRONG-CREATOR ROUTING:
+       * V480 has just proved the creator address for this current/live token.
+       * Decide BEFORE spending the V485 secondary request whether that creator
+       * is already a strong unresolved recurring cluster. This fixes V505,
+       * whose priority check existed only inside the later V486 backlog path.
        */
-      telemetry.exactCreationMechanismAttributionV485 =
-        await runExactCreationMechanismAttributionV485({
-          env,
+      const strongCreatorPriorityV506 =
+        shouldPrioritizeVerifiedCreatorBeforeV485V506({
           state,
-          budget,
-          token:
+          verifiedCreator:
+            row.contractCreator
+        });
+
+      telemetry.strongRecurringCreatorPriorityV506 = {
+        enabled: true,
+        applied:
+          strongCreatorPriorityV506
+            .prioritizeCreator === true,
+        reason:
+          strongCreatorPriorityV506
+            .reason,
+        verifiedCreator:
+          strongCreatorPriorityV506
+            .verifiedCreator ||
+          null,
+        pendingCreator:
+          strongCreatorPriorityV506
+            .pendingCreator ||
+          null,
+        distinctTokens:
+          safeNumber(
+            strongCreatorPriorityV506
+              .distinctTokens
+          ),
+        thresholdDistinctTokens:
+          strongRecurringCreatorThresholdV505(),
+        decisionPoint:
+          "CURRENT_LIVE_V480_AFTER_ORIGIN_PROOF_BEFORE_V485_REQUEST",
+        v485RequestConsumedBeforeDecision:
+          false
+      };
+
+      if (
+        strongCreatorPriorityV506
+          .prioritizeCreator === true
+      ) {
+        const creatorV503 =
+          await runRecurringCreatorAttributionV503({
+            env,
+            state,
+            budget
+          });
+
+        telemetry.recurringCreatorAttributionV503 =
+          creatorV503;
+
+        telemetry.exactCreationMechanismAttributionV485 = {
+          enabled: true,
+          measurementOnly: true,
+          attempted: false,
+          requestConsumed: false,
+          status:
+            "V506_DEFERRED_FOR_STRONG_RECURRING_CREATOR_ATTRIBUTION",
+          deferredToken:
             targetAddress,
           verifiedCreator:
-            row.contractCreator,
-          creationTransactionHash:
-            row.creationTransactionHash
-        });
+            normalize(
+              row.contractCreator
+            ),
+          recurringCreatorDistinctTokens:
+            safeNumber(
+              strongCreatorPriorityV506
+                .distinctTokens
+            ),
+          v503Result:
+            creatorV503?.status ||
+            "DATA UNVERIFIED",
+          exactCreationAttributionDisabledGlobally:
+            false,
+          sameClusterOnly:
+            true
+        };
+
+        telemetry.strongRecurringCreatorPriorityV506
+          .creatorAttributionResult =
+            creatorV503;
+
+        telemetry.strongRecurringCreatorPriorityV506
+          .v485DeferredForSameCluster =
+            true;
+      } else {
+        telemetry.exactCreationMechanismAttributionV485 =
+          await runExactCreationMechanismAttributionV485({
+            env,
+            state,
+            budget,
+            token:
+              targetAddress,
+            verifiedCreator:
+              row.contractCreator,
+            creationTransactionHash:
+              row.creationTransactionHash
+          });
+
+        telemetry.strongRecurringCreatorPriorityV506
+          .v485DeferredForSameCluster =
+            false;
+      }
 
       telemetry.v2AddressResponseV479 = {
         token:
