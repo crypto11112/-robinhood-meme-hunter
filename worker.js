@@ -1,6 +1,37 @@
 /**
- * Robinhood Chain Meme Hunter — V512
- * AUTHORITATIVE RUNTIME VERSION: V512
+ * Robinhood Chain Meme Hunter — V513
+ * AUTHORITATIVE RUNTIME VERSION: V513
+ *
+ * V513 DOPPLER DETERMINISTIC CANONICAL-PATTERN SELECTION + THIRD RECEIPT:
+ * - V512 proved seven exact token-bearing receipt patterns across two distinct
+ *   Doppler tokens / two distinct creation transactions, but correctly refused
+ *   auto-registration because all seven independently passed 2/2;
+ * - V513 resolves that ambiguity without contract-name guessing:
+ *     1) only V512 patterns already proven across >=2 tokens + >=2 txs qualify;
+ *     2) known shared chain infrastructure (canonical PoolManager) is excluded
+ *        from launch-source detector selection;
+ *     3) a candidate event must contain the exact created token only ONCE in
+ *        that receipt log, eliminating events whose one log carries the token
+ *        through multiple topic/data fields;
+ *     4) among remaining equally proven candidates, the earliest consistently
+ *        observed receipt-log position is selected deterministically;
+ *     5) lexical pattern key is only a stable final tie-breaker, never evidence;
+ * - selected pattern is NOT promoted from the original two receipts alone;
+ * - V513 requires a THIRD distinct V480-verified Doppler token and a THIRD exact
+ *   creation transaction receipt to reproduce the selected emitter/topic/token
+ *   slot exactly once;
+ * - failed third-receipt candidates are retained as rejected pattern keys, after
+ *   which the next deterministic eligible V512 pattern may be tested;
+ * - successful third proof confirms the canonical Doppler receipt pattern and
+ *   source-attributes verified origins; live detector activation is deferred to
+ *   the next build so detector wiring is isolated and testable;
+ * - V512 discovery evidence and V511 negative evidence are preserved;
+ * - V513 supersedes further V512 receipt requests once a canonical candidate is
+ *   derivable;
+ * - fixes/retains one-secondary-request-per-scan gating through current/live and
+ *   V486 paths; hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, verified-USD,
+ *   dense-pool completion, RWA detector, launch-meter or discovery changes.
  *
  * V512 DOPPLER WHOLE-RECEIPT RECURRING PATTERN PROOF:
  * - V511 proved that two successful Doppler creation receipts did NOT expose the
@@ -2539,7 +2570,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V512";
+const VERSION = "V513";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9994,6 +10025,27 @@ function newState() {
       recentVerifiedLaunches: []
     },
 
+    dopplerCanonicalPatternProofV513: {
+      enabled: true,
+      measurementOnlyUntilThirdProof: true,
+      monitorStartedAt: null,
+      scansObserved: 0,
+      validationRequestsAttempted: 0,
+      validationRequestsSucceeded: 0,
+      processedValidationReceipts: {},
+      rejectedPatternKeys: {},
+      validationProofs: {},
+      selectedCanonicalCandidate: null,
+      confirmedCanonicalPattern: null,
+      confirmedFactory: null,
+      confirmedAt: null,
+      lastSelectedToken: null,
+      lastSelectedTransactionHash: null,
+      lastProvider: null,
+      lastHttpStatus: null,
+      lastStatus: "NOT_EVALUATED_YET_V513"
+    },
+
     dopplerWholeReceiptPatternV512: {
       enabled: true,
       measurementOnlyUntilProof: true,
@@ -10012,6 +10064,57 @@ function newState() {
       lastProvider: null,
       lastHttpStatus: null,
       lastStatus: "NOT_EVALUATED_YET_V512"
+    },
+
+    dopplerDeterministicCanonicalPatternV513: {
+      enabled: true,
+      objective:
+        "RESOLVE_V512_MULTI_PATTERN_AMBIGUITY_AND_REQUIRE_THIRD_INDEPENDENT_RECEIPT",
+      requiresV512TwoTokenTwoTransactionPattern:
+        true,
+      knownSharedInfrastructureExcluded: [
+        "CANONICAL_UNISWAP_V4_POOL_MANAGER"
+      ],
+      sameMatchedLogMustContainCreatedTokenExactlyOnce:
+        true,
+      deterministicPrimaryOrdering:
+        "EARLIEST_AVERAGE_RECEIPT_LOG_POSITION",
+      deterministicSecondaryOrdering:
+        "LOWEST_MAX_RECEIPT_LOG_POSITION",
+      lexicalPatternKeyOnlyFinalTieBreaker:
+        true,
+      thirdDistinctVerifiedTokenRequired:
+        true,
+      thirdDistinctCreationTransactionRequired:
+        true,
+      thirdReceiptMustReproduceExactEmitterTopicAndTokenSlotOnce:
+        true,
+      failedCandidateIsRejectedNotPromoted:
+        true,
+      nextEligiblePatternMayBeTriedAfterRejection:
+        true,
+      v512FurtherRequestsSuppressedOnceCandidateDerivable:
+        true,
+      sourceAttributionOnlyAfterThirdProof:
+        true,
+      liveDetectorActivatedInThisVersion:
+        false,
+      liveDetectorNextStepAfterCanonicalConfirmation:
+        true,
+      maxSecondaryDiagnosticRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false,
+      rwaDetectorChanged:
+        false
     },
 
     dopplerWholeReceiptRecurringPatternProofV512: {
@@ -31246,6 +31349,7 @@ function verifiedLaunchSourceIdentityV476(
   const launchpads = [
     watched?.launchpadV495,
     watched?.launchpadV476,
+    watched?.launchpadV513,
     watched?.launchpadV512,
     watched?.launchpadV511,
     watched?.launchpadV509,
@@ -70698,6 +70802,11 @@ for (
       state
     );
 
+  const dopplerCanonicalPatternThisScanV513 =
+    dopplerCanonicalPatternSnapshotV513(
+      state
+    );
+
   /*
    * =======================================================
    * V170 POST-ANALYSIS RESIDUAL BACKLOG CATCH-UP
@@ -71932,6 +72041,13 @@ for (
         state
       ),
 
+    dopplerCanonicalPatternThisScanV513,
+
+    dopplerCanonicalPatternProofV513:
+      dopplerCanonicalPatternSnapshotV513(
+        state
+      ),
+
     tokenOriginTraceThisScanV477,
 
     tokenOriginTraceV477:
@@ -72178,7 +72294,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V512_V511_V510_V509_V508_V507_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V513_V512_V511_V510_V509_V508_V507_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -85302,6 +85418,1216 @@ function ensureLaunchCoverageCumulativeV474(state) {
 
 
 
+
+function ensureDopplerCanonicalPatternProofV513(
+  state
+) {
+  state.dopplerCanonicalPatternProofV513 =
+    state?.dopplerCanonicalPatternProofV513 &&
+    typeof state.dopplerCanonicalPatternProofV513 === "object"
+      ? state.dopplerCanonicalPatternProofV513
+      : {
+          enabled: true,
+          measurementOnlyUntilThirdProof: true,
+          monitorStartedAt: Date.now(),
+          scansObserved: 0,
+          validationRequestsAttempted: 0,
+          validationRequestsSucceeded: 0,
+          processedValidationReceipts: {},
+          rejectedPatternKeys: {},
+          validationProofs: {},
+          selectedCanonicalCandidate: null,
+          confirmedCanonicalPattern: null,
+          confirmedFactory: null,
+          confirmedAt: null,
+          lastSelectedToken: null,
+          lastSelectedTransactionHash: null,
+          lastProvider: null,
+          lastHttpStatus: null,
+          lastStatus: "NOT_EVALUATED_YET_V513"
+        };
+
+  const root =
+    state.dopplerCanonicalPatternProofV513;
+
+  if (!safeNumber(root.monitorStartedAt)) {
+    root.monitorStartedAt = Date.now();
+  }
+
+  for (const key of [
+    "processedValidationReceipts",
+    "rejectedPatternKeys",
+    "validationProofs"
+  ]) {
+    root[key] =
+      root[key] &&
+      typeof root[key] === "object"
+        ? root[key]
+        : {};
+  }
+
+  return root;
+}
+
+function dopplerPatternKeyV513(
+  row
+) {
+  const factory =
+    normalize(row?.verifiedFactory);
+  const emitter =
+    normalize(row?.emitter);
+  const topic0 =
+    normalize(row?.topic0);
+  const type =
+    String(
+      row?.addressLocationType || ""
+    );
+  const index =
+    Number(
+      row?.addressLocationIndex
+    );
+
+  if (
+    !isAddress(factory) ||
+    !isAddress(emitter) ||
+    !/^0x[a-f0-9]{64}$/.test(topic0) ||
+    !["TOPIC", "DATA_WORD"].includes(type) ||
+    !Number.isInteger(index) ||
+    index < 0
+  ) {
+    return null;
+  }
+
+  return (
+    `${factory}:${emitter}:${topic0}:${type}:${index}`
+  );
+}
+
+function occurrenceMatchesPatternV513(
+  occurrence,
+  pattern
+) {
+  return (
+    normalize(occurrence?.emitter) ===
+      normalize(pattern?.emitter) &&
+    normalize(occurrence?.topic0) ===
+      normalize(pattern?.topic0) &&
+    String(
+      occurrence?.addressLocationType ||
+      ""
+    ) ===
+      String(
+        pattern?.addressLocationType ||
+        ""
+      ) &&
+    Number(
+      occurrence?.addressLocationIndex
+    ) ===
+      Number(
+        pattern?.addressLocationIndex
+      )
+  );
+}
+
+function deriveDopplerCanonicalCandidateV513(
+  state
+) {
+  const root513 =
+    ensureDopplerCanonicalPatternProofV513(
+      state
+    );
+
+  if (
+    root513.confirmedCanonicalPattern &&
+    isAddress(
+      normalize(root513.confirmedFactory)
+    )
+  ) {
+    return null;
+  }
+
+  const root512 =
+    ensureDopplerWholeReceiptPatternV512(
+      state
+    );
+
+  rebuildDopplerWholeReceiptClustersV512(
+    state
+  );
+
+  const observations =
+    Object.values(
+      root512.receiptObservations || {}
+    )
+      .filter(row =>
+        row?.originVerified === true &&
+        isAddress(
+          normalize(row?.verifiedFactory)
+        ) &&
+        /^0x[a-f0-9]{64}$/.test(
+          String(
+            normalizeTxHashV495(
+              row?.transactionHash
+            ) || ""
+          )
+        )
+      );
+
+  if (observations.length < 2) {
+    return null;
+  }
+
+  const eligible = [];
+
+  for (
+    const cluster of Object.values(
+      root512.patternClusters || {}
+    )
+  ) {
+    if (
+      cluster?.confirmed !== true ||
+      safeNumber(
+        cluster?.distinctTokens
+      ) < 2 ||
+      safeNumber(
+        cluster?.distinctTransactions
+      ) < 2
+    ) {
+      continue;
+    }
+
+    const key =
+      dopplerPatternKeyV513(
+        cluster
+      );
+
+    if (
+      !key ||
+      root513.rejectedPatternKeys?.[key]
+    ) {
+      continue;
+    }
+
+    const emitter =
+      normalize(cluster?.emitter);
+
+    /*
+     * The canonical V4 PoolManager is known shared infrastructure already used
+     * across unrelated protocols throughout this Worker. A generic PoolManager
+     * event cannot by itself be a source-specific Doppler detector.
+     */
+    if (
+      emitter === normalize(POOL_MANAGER)
+    ) {
+      continue;
+    }
+
+    const logIndexes = [];
+    let exactOnceInEveryReceipt = true;
+    let singleTokenOccurrenceInItsLog =
+      true;
+    let matchedObservationCount = 0;
+
+    for (
+      const observation of observations
+    ) {
+      const occurrences =
+        Array.isArray(
+          observation?.exactTokenOccurrences
+        )
+          ? observation.exactTokenOccurrences
+          : [];
+
+      const matches =
+        occurrences.filter(
+          occurrence =>
+            occurrenceMatchesPatternV513(
+              occurrence,
+              cluster
+            )
+        );
+
+      if (matches.length === 0) {
+        continue;
+      }
+
+      matchedObservationCount++;
+
+      if (matches.length !== 1) {
+        exactOnceInEveryReceipt = false;
+        break;
+      }
+
+      const match = matches[0];
+      const logIndex =
+        Number(match?.logIndex);
+
+      if (
+        !Number.isInteger(logIndex) ||
+        logIndex < 0
+      ) {
+        exactOnceInEveryReceipt = false;
+        break;
+      }
+
+      /*
+       * Reject an event whose SAME log contains the exact created token in
+       * multiple ABI locations. This removes the V512 patterns where one log
+       * carried the token twice and therefore could not uniquely identify the
+       * canonical token field.
+       */
+      const siblingTokenOccurrences =
+        occurrences.filter(
+          occurrence =>
+            Number(
+              occurrence?.logIndex
+            ) === logIndex
+        );
+
+      if (
+        siblingTokenOccurrences.length !== 1
+      ) {
+        singleTokenOccurrenceInItsLog =
+          false;
+        break;
+      }
+
+      logIndexes.push(logIndex);
+    }
+
+    if (
+      matchedObservationCount < 2 ||
+      exactOnceInEveryReceipt !== true ||
+      singleTokenOccurrenceInItsLog !==
+        true ||
+      logIndexes.length < 2
+    ) {
+      continue;
+    }
+
+    const minLogIndex =
+      Math.min(...logIndexes);
+    const maxLogIndex =
+      Math.max(...logIndexes);
+    const averageLogIndex =
+      logIndexes.reduce(
+        (sum, n) => sum + n,
+        0
+      ) / logIndexes.length;
+
+    eligible.push({
+      key,
+      verifiedFactory:
+        normalize(
+          cluster?.verifiedFactory
+        ),
+      emitter,
+      topic0:
+        normalize(cluster?.topic0),
+      addressLocationType:
+        String(
+          cluster?.addressLocationType
+        ),
+      addressLocationIndex:
+        Number(
+          cluster?.addressLocationIndex
+        ),
+      distinctTokens:
+        safeNumber(
+          cluster?.distinctTokens
+        ),
+      distinctTransactions:
+        safeNumber(
+          cluster?.distinctTransactions
+        ),
+      matchedObservationCount,
+      logIndexes,
+      minLogIndex,
+      maxLogIndex,
+      averageLogIndex,
+      exactOncePerReceipt: true,
+      exactCreatedTokenOccursOnceInMatchedLog:
+        true,
+      sharedInfrastructureExcluded:
+        false
+    });
+  }
+
+  if (eligible.length === 0) {
+    return null;
+  }
+
+  eligible.sort((a, b) => {
+    if (
+      a.averageLogIndex !==
+      b.averageLogIndex
+    ) {
+      return (
+        a.averageLogIndex -
+        b.averageLogIndex
+      );
+    }
+
+    if (
+      a.maxLogIndex !== b.maxLogIndex
+    ) {
+      return (
+        a.maxLogIndex -
+        b.maxLogIndex
+      );
+    }
+
+    return a.key.localeCompare(b.key);
+  });
+
+  const selected = eligible[0];
+
+  return {
+    ...selected,
+    selectionStandard:
+      "V512_2X2_CONFIRMED_NON_SHARED_INFRA_SINGLE_TOKEN_OCCURRENCE_EVENT_EARLIEST_CONSISTENT_RECEIPT_POSITION_V513",
+    thirdIndependentReceiptRequired:
+      true,
+    eligibleCandidateCount:
+      eligible.length,
+    alternateEligiblePatternKeys:
+      eligible
+        .slice(1, 8)
+        .map(row => row.key)
+  };
+}
+
+function selectDopplerCanonicalValidationCandidateV513(
+  state,
+  canonicalPattern
+) {
+  if (!canonicalPattern) {
+    return null;
+  }
+
+  const root513 =
+    ensureDopplerCanonicalPatternProofV513(
+      state
+    );
+
+  const root512 =
+    ensureDopplerWholeReceiptPatternV512(
+      state
+    );
+
+  const factory =
+    normalize(
+      canonicalPattern?.verifiedFactory
+    );
+
+  if (!isAddress(factory)) {
+    return null;
+  }
+
+  const alreadyUsedTx =
+    new Set(
+      Object.keys(
+        root512.receiptObservations || {}
+      )
+        .map(normalizeTxHashV495)
+        .filter(Boolean)
+    );
+
+  for (
+    const tx of Object.keys(
+      root513.processedValidationReceipts ||
+      {}
+    )
+  ) {
+    const clean =
+      normalizeTxHashV495(tx);
+
+    if (clean) {
+      alreadyUsedTx.add(clean);
+    }
+  }
+
+  const origin =
+    pruneTokenOriginTraceV477(
+      state
+    );
+
+  const rows =
+    Object.entries(
+      origin?.tokenOrigins || {}
+    )
+      .map(([token, row]) => ({
+        token: normalize(token),
+        row
+      }))
+      .filter(item => {
+        const tx =
+          normalizeTxHashV495(
+            item?.row?.creationTransactionHash
+          );
+
+        return (
+          isAddress(item.token) &&
+          item?.row?.verified === true &&
+          normalize(
+            item?.row?.contractCreator
+          ) === factory &&
+          Boolean(tx) &&
+          !alreadyUsedTx.has(tx)
+        );
+      })
+      .sort(
+        (a, b) =>
+          safeNumber(a?.row?.verifiedAt) -
+          safeNumber(b?.row?.verifiedAt)
+      );
+
+  const selected = rows[0];
+
+  return selected
+    ? {
+        token: selected.token,
+        factory,
+        transactionHash:
+          normalizeTxHashV495(
+            selected?.row?.creationTransactionHash
+          ),
+        originVerifiedAt:
+          safeNumber(
+            selected?.row?.verifiedAt
+          ) || null,
+        originSource:
+          selected?.row?.source ||
+          "BLOCKSCOUT_PRO_V2_ADDRESS_INFO_V480"
+      }
+    : null;
+}
+
+function exactCanonicalPatternMatchesV513({
+  receipt,
+  token,
+  pattern
+}) {
+  const cleanToken =
+    normalize(token);
+  const tokenWord =
+    addressAbiWordV495(cleanToken);
+
+  if (
+    !isAddress(cleanToken) ||
+    !tokenWord ||
+    !pattern
+  ) {
+    return [];
+  }
+
+  const emitter =
+    normalize(pattern?.emitter);
+  const topic0 =
+    normalize(pattern?.topic0);
+  const type =
+    String(
+      pattern?.addressLocationType ||
+      ""
+    );
+  const index =
+    Number(
+      pattern?.addressLocationIndex
+    );
+
+  if (
+    !isAddress(emitter) ||
+    !/^0x[a-f0-9]{64}$/.test(topic0) ||
+    !["TOPIC", "DATA_WORD"].includes(type) ||
+    !Number.isInteger(index) ||
+    index < 0
+  ) {
+    return [];
+  }
+
+  const matches = [];
+  const logs =
+    Array.isArray(receipt?.logs)
+      ? receipt.logs
+      : [];
+
+  for (
+    let logIndex = 0;
+    logIndex < logs.length;
+    logIndex++
+  ) {
+    const log = logs[logIndex] || {};
+
+    if (
+      normalize(log?.address) !==
+      emitter
+    ) {
+      continue;
+    }
+
+    const topics =
+      Array.isArray(log?.topics)
+        ? log.topics.map(normalize)
+        : [];
+
+    if (
+      normalize(topics[0]) !== topic0
+    ) {
+      continue;
+    }
+
+    if (type === "TOPIC") {
+      if (
+        normalize(topics[index]) ===
+        tokenWord
+      ) {
+        matches.push({
+          logIndex,
+          emitter,
+          topic0,
+          addressLocationType:
+            "TOPIC",
+          addressLocationIndex:
+            index,
+          token: cleanToken
+        });
+      }
+
+      continue;
+    }
+
+    const words =
+      abiDataWordsV495(log?.data);
+
+    if (
+      normalize(words[index]) ===
+      tokenWord
+    ) {
+      matches.push({
+        logIndex,
+        emitter,
+        topic0,
+        addressLocationType:
+          "DATA_WORD",
+        addressLocationIndex:
+          index,
+        token: cleanToken
+      });
+    }
+  }
+
+  return matches;
+}
+
+function applyConfirmedDopplerAttributionV513(
+  state
+) {
+  const root =
+    ensureDopplerCanonicalPatternProofV513(
+      state
+    );
+
+  const factory =
+    normalize(root.confirmedFactory);
+  const pattern =
+    root.confirmedCanonicalPattern;
+
+  if (
+    !isAddress(factory) ||
+    !pattern
+  ) {
+    return 0;
+  }
+
+  const origin =
+    pruneTokenOriginTraceV477(
+      state
+    );
+
+  let applied = 0;
+
+  for (
+    const [tokenKey, row]
+    of Object.entries(
+      origin?.tokenOrigins || {}
+    )
+  ) {
+    const token =
+      normalize(tokenKey);
+
+    if (
+      !isAddress(token) ||
+      row?.verified !== true ||
+      normalize(
+        row?.contractCreator
+      ) !== factory
+    ) {
+      continue;
+    }
+
+    const watched =
+      findWatched(state, token);
+
+    if (!watched) {
+      continue;
+    }
+
+    const tx =
+      normalizeTxHashV495(
+        row?.creationTransactionHash
+      );
+
+    watched.launchpadV513 = {
+      verified: true,
+      protocol: "Doppler V1",
+      protocolKey: "doppler_v1",
+      factory,
+      canonicalEventEmitter:
+        pattern.emitter,
+      canonicalEventTopic0:
+        pattern.topic0,
+      tokenAddressLocationType:
+        pattern.addressLocationType,
+      tokenAddressLocationIndex:
+        pattern.addressLocationIndex,
+      launchTime: null,
+      transactionHash:
+        tx || null,
+      source:
+        "THREE_INDEPENDENT_VERIFIED_DOPPLER_CREATION_RECEIPTS_CANONICAL_PATTERN_V513",
+      verification:
+        "V512_TWO_RECEIPT_PATTERN_PLUS_V513_THIRD_DISTINCT_RECEIPT_EXACT_MATCH",
+      sourceAttributionVerified:
+        true,
+      timestampVerified:
+        false,
+      launchTimingInferred:
+        false,
+      liveDetectorActivated:
+        false,
+      liveDetectorDeferredToNextBuild:
+        true,
+      proofTokens:
+        3,
+      proofTransactions:
+        3
+    };
+
+    applied++;
+  }
+
+  return applied;
+}
+
+async function runDopplerCanonicalPatternValidationV513({
+  env,
+  state,
+  budget,
+  canonicalPattern,
+  candidate
+}) {
+  const root =
+    ensureDopplerCanonicalPatternProofV513(
+      state
+    );
+
+  root.scansObserved =
+    safeNumber(root.scansObserved) + 1;
+
+  root.selectedCanonicalCandidate =
+    canonicalPattern || null;
+
+  const telemetry = {
+    enabled: true,
+    measurementOnlyUntilThirdProof:
+      true,
+    attempted: false,
+    requestConsumed: false,
+    canonicalPattern:
+      canonicalPattern || null,
+    selectedToken:
+      candidate?.token || null,
+    selectedFactory:
+      candidate?.factory || null,
+    selectedTransactionHash:
+      candidate?.transactionHash || null,
+    provider: null,
+    httpStatus: null,
+    receiptStatus: null,
+    canonicalPatternMatchCount: 0,
+    canonicalPatternMatch: null,
+    thirdIndependentProofStored:
+      false,
+    confirmedCanonicalPatternAfterAttempt:
+      null,
+    attributedVerifiedOriginsAfterConfirmation:
+      0,
+    maxRequestsThisScan: 1,
+    hardRequestLimit: 42,
+    status: null
+  };
+
+  if (!canonicalPattern) {
+    telemetry.status =
+      "V513_NO_DETERMINISTIC_CANONICAL_PATTERN_CANDIDATE";
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  }
+
+  if (!candidate) {
+    telemetry.status =
+      "V513_CANONICAL_PATTERN_SELECTED_WAITING_FOR_THIRD_DISTINCT_DOPPLER_CREATION_TX";
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  }
+
+  const token =
+    normalize(candidate.token);
+  const factory =
+    normalize(candidate.factory);
+  const tx =
+    normalizeTxHashV495(
+      candidate.transactionHash
+    );
+
+  root.lastSelectedToken = token;
+  root.lastSelectedTransactionHash = tx;
+
+  if (
+    !isAddress(token) ||
+    !isAddress(factory) ||
+    !tx ||
+    factory !==
+      normalize(
+        canonicalPattern
+          ?.verifiedFactory
+      )
+  ) {
+    telemetry.status =
+      "V513_INVALID_THIRD_RECEIPT_VALIDATION_CANDIDATE";
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  }
+
+  const spare =
+    consumeReleasedGlobalSpareV478(
+      budget,
+      "DOPPLER_CANONICAL_PATTERN_THIRD_RECEIPT_V513",
+      1
+    );
+
+  if (spare?.ok !== true) {
+    telemetry.status =
+      `V513_BUDGET_UNAVAILABLE:${spare?.reason || "UNKNOWN"}`;
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  }
+
+  const selectedProvider =
+    selectReceiptRpcProviderV496(
+      env,
+      state
+    );
+
+  telemetry.providerDecisions =
+    selectedProvider?.decisions || [];
+
+  if (
+    !selectedProvider?.provider ||
+    !selectedProvider?.url
+  ) {
+    telemetry.status =
+      "V513_NO_HEALTHY_RECEIPT_RPC_PROVIDER";
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  }
+
+  telemetry.provider =
+    selectedProvider.provider;
+  root.lastProvider =
+    selectedProvider.provider;
+  telemetry.attempted = true;
+  telemetry.requestConsumed = true;
+  root.validationRequestsAttempted =
+    safeNumber(
+      root.validationRequestsAttempted
+    ) + 1;
+
+  const attemptedAt = Date.now();
+  const controller =
+    new AbortController();
+  const timer =
+    setTimeout(
+      () => controller.abort(),
+      6000
+    );
+
+  try {
+    const response =
+      await fetch(
+        selectedProvider.url,
+        {
+          method: "POST",
+          headers: {
+            "content-type":
+              "application/json"
+          },
+          body:
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 513,
+              method:
+                "eth_getTransactionReceipt",
+              params: [tx]
+            }),
+          signal: controller.signal
+        }
+      );
+
+    telemetry.httpStatus =
+      response.status;
+    root.lastHttpStatus =
+      response.status;
+
+    if (!response.ok) {
+      const transient =
+        isTransientReceiptHttpStatusV496(
+          response.status
+        );
+
+      root.processedValidationReceipts[
+        tx
+      ] = {
+        token,
+        factory,
+        transactionHash: tx,
+        canonicalPatternKey:
+          canonicalPattern.key,
+        attemptedAt,
+        provider:
+          selectedProvider.provider,
+        httpStatus:
+          response.status,
+        processedOnce:
+          !transient,
+        retryEligible:
+          transient,
+        status:
+          transient
+            ? `V513_TRANSIENT_HTTP_${response.status}_RETRY_PRESERVED`
+            : `V513_FINAL_HTTP_${response.status}`
+      };
+
+      telemetry.status =
+        root
+          .processedValidationReceipts[
+            tx
+          ].status;
+      root.lastStatus =
+        telemetry.status;
+      return telemetry;
+    }
+
+    const body =
+      await response.json();
+
+    const receipt =
+      body?.result &&
+      typeof body.result === "object"
+        ? body.result
+        : null;
+
+    if (!receipt) {
+      root.processedValidationReceipts[
+        tx
+      ] = {
+        token,
+        factory,
+        transactionHash: tx,
+        canonicalPatternKey:
+          canonicalPattern.key,
+        attemptedAt,
+        provider:
+          selectedProvider.provider,
+        httpStatus:
+          response.status,
+        processedOnce: false,
+        retryEligible: true,
+        status:
+          "V513_HTTP_200_RECEIPT_UNAVAILABLE_RETRY_PRESERVED"
+      };
+
+      telemetry.status =
+        root
+          .processedValidationReceipts[
+            tx
+          ].status;
+      root.lastStatus =
+        telemetry.status;
+      return telemetry;
+    }
+
+    root.validationRequestsSucceeded =
+      safeNumber(
+        root.validationRequestsSucceeded
+      ) + 1;
+
+    telemetry.receiptStatus =
+      receipt?.status || null;
+
+    const matches =
+      exactCanonicalPatternMatchesV513({
+        receipt,
+        token,
+        pattern:
+          canonicalPattern
+      });
+
+    telemetry.canonicalPatternMatchCount =
+      matches.length;
+    telemetry.canonicalPatternMatch =
+      matches.length === 1
+        ? matches[0]
+        : null;
+
+    const exactThirdProof =
+      matches.length === 1;
+
+    root.processedValidationReceipts[
+      tx
+    ] = {
+      token,
+      factory,
+      transactionHash: tx,
+      canonicalPatternKey:
+        canonicalPattern.key,
+      attemptedAt,
+      provider:
+        selectedProvider.provider,
+      httpStatus:
+        response.status,
+      receiptStatus:
+        receipt?.status || null,
+      canonicalPatternMatchCount:
+        matches.length,
+      exactThirdProof,
+      processedOnce: true,
+      retryEligible: false,
+      status:
+        exactThirdProof
+          ? "V513_THIRD_DISTINCT_RECEIPT_REPRODUCED_SELECTED_DOPPLER_PATTERN"
+          : matches.length > 1
+            ? "V513_SELECTED_PATTERN_AMBIGUOUS_IN_THIRD_RECEIPT"
+            : "V513_SELECTED_PATTERN_ABSENT_FROM_THIRD_RECEIPT"
+    };
+
+    if (exactThirdProof) {
+      root.validationProofs[tx] = {
+        token,
+        factory,
+        transactionHash: tx,
+        patternKey:
+          canonicalPattern.key,
+        emitter:
+          canonicalPattern.emitter,
+        topic0:
+          canonicalPattern.topic0,
+        addressLocationType:
+          canonicalPattern
+            .addressLocationType,
+        addressLocationIndex:
+          canonicalPattern
+            .addressLocationIndex,
+        receiptLogIndex:
+          matches[0].logIndex,
+        observedAt: attemptedAt,
+        provider:
+          `${selectedProvider.provider}_TRANSACTION_RECEIPT_V513`,
+        evidenceStandard:
+          "THIRD_DISTINCT_V480_VERIFIED_DOPPLER_CREATION_TX_REPRODUCES_DETERMINISTICALLY_SELECTED_V512_PATTERN_V513"
+      };
+
+      root.confirmedCanonicalPattern = {
+        ...canonicalPattern,
+        thirdValidationToken:
+          token,
+        thirdValidationTransactionHash:
+          tx,
+        thirdValidationLogIndex:
+          matches[0].logIndex,
+        proofStandard:
+          "V512_TWO_DISTINCT_RECEIPTS_PLUS_V513_THIRD_DISTINCT_RECEIPT_EXACT_MATCH"
+      };
+
+      root.confirmedFactory =
+        factory;
+      root.confirmedAt =
+        Date.now();
+
+      telemetry.thirdIndependentProofStored =
+        true;
+      telemetry.confirmedCanonicalPatternAfterAttempt =
+        root.confirmedCanonicalPattern;
+
+      telemetry.attributedVerifiedOriginsAfterConfirmation =
+        applyConfirmedDopplerAttributionV513(
+          state
+        );
+
+      telemetry.status =
+        "V513_DOPPLER_CANONICAL_PATTERN_CONFIRMED_THREE_INDEPENDENT_RECEIPTS";
+      root.lastStatus =
+        telemetry.status;
+
+      return telemetry;
+    }
+
+    /*
+     * The selected deterministic pattern failed an independent third receipt.
+     * Reject only that exact key. A later scan may derive/test the next eligible
+     * V512 pattern instead of weakening the evidence standard.
+     */
+    root.rejectedPatternKeys[
+      canonicalPattern.key
+    ] = {
+      rejectedAt: attemptedAt,
+      token,
+      transactionHash: tx,
+      matchCount: matches.length,
+      reason:
+        matches.length > 1
+          ? "AMBIGUOUS_IN_THIRD_RECEIPT"
+          : "ABSENT_FROM_THIRD_RECEIPT"
+    };
+
+    root.selectedCanonicalCandidate =
+      null;
+
+    telemetry.status =
+      root
+        .processedValidationReceipts[
+          tx
+        ].status;
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  } catch (error) {
+    telemetry.status =
+      `V513_RECEIPT_FETCH_ERROR_RETRY_PRESERVED:${errorString(error)}`;
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function dopplerCanonicalPatternSnapshotV513(
+  state
+) {
+  const root =
+    ensureDopplerCanonicalPatternProofV513(
+      state
+    );
+
+  const derived =
+    root.confirmedCanonicalPattern
+      ? null
+      : deriveDopplerCanonicalCandidateV513(
+          state
+        );
+
+  const proofs =
+    Object.values(
+      root.validationProofs || {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(b?.observedAt) -
+          safeNumber(a?.observedAt)
+      );
+
+  return {
+    enabled: true,
+    measurementOnlyUntilThirdProof:
+      true,
+    monitorStartedAt:
+      safeNumber(
+        root.monitorStartedAt
+      ) || null,
+    scansObserved:
+      safeNumber(root.scansObserved),
+    validationRequestsAttempted:
+      safeNumber(
+        root.validationRequestsAttempted
+      ),
+    validationRequestsSucceeded:
+      safeNumber(
+        root.validationRequestsSucceeded
+      ),
+    deterministicCandidate:
+      root.selectedCanonicalCandidate ||
+      derived ||
+      null,
+    rejectedPatternCount:
+      Object.keys(
+        root.rejectedPatternKeys || {}
+      ).length,
+    rejectedPatternKeys:
+      Object.keys(
+        root.rejectedPatternKeys || {}
+      ).slice(0, 12),
+    thirdValidationProofCount:
+      proofs.length,
+    recentValidationProofs:
+      proofs.slice(0, 6),
+    confirmedFactory:
+      root.confirmedFactory || null,
+    confirmedAt:
+      safeNumber(root.confirmedAt) ||
+      null,
+    confirmedCanonicalPattern:
+      root.confirmedCanonicalPattern ||
+      null,
+    lastSelectedToken:
+      root.lastSelectedToken || null,
+    lastSelectedTransactionHash:
+      root.lastSelectedTransactionHash ||
+      null,
+    lastProvider:
+      root.lastProvider || null,
+    lastHttpStatus:
+      root.lastHttpStatus ?? null,
+    lastStatus:
+      root.lastStatus || null,
+    selectionRules: [
+      "V512_PATTERN_ALREADY_2_TOKENS_2_TRANSACTIONS_CONFIRMED",
+      "EXCLUDE_CANONICAL_SHARED_POOL_MANAGER",
+      "EXACT_CREATED_TOKEN_MUST_OCCUR_ONCE_IN_MATCHED_LOG",
+      "EARLIEST_CONSISTENT_RECEIPT_LOG_POSITION",
+      "LEXICAL_KEY_ONLY_AS_FINAL_STABLE_TIEBREAKER",
+      "THIRD_DISTINCT_RECEIPT_REQUIRED_BEFORE_CANONICAL_CONFIRMATION"
+    ],
+    liveDetectorActivated:
+      false,
+    liveDetectorDeferredUntilV513Confirmation:
+      true,
+    sourcePromotionWithoutThirdProof:
+      false,
+    maxSecondaryRequestsPerScan:
+      1,
+    hardGlobalLimitUnchanged:
+      42
+  };
+}
+
 function ensureDopplerWholeReceiptPatternV512(
   state
 ) {
@@ -91618,6 +92944,21 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
       ?.ponsV2CreationReceiptProofV509
       ?.attempted === true;
 
+  const currentV513Attempted =
+    currentOriginTraceTelemetry
+      ?.dopplerCanonicalPatternProofV513
+      ?.attempted === true;
+
+  const currentV513Reserved =
+    currentOriginTraceTelemetry
+      ?.ponsV2ExactProofPriorityV510
+      ?.dopplerCanonicalValidationAfterV480V513 !==
+        null &&
+    currentOriginTraceTelemetry
+      ?.ponsV2ExactProofPriorityV510
+      ?.dopplerCanonicalValidationAfterV480V513 !==
+        undefined;
+
   const currentV512Attempted =
     currentOriginTraceTelemetry
       ?.dopplerWholeReceiptPatternV512
@@ -91668,6 +93009,10 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
       currentV509Attempted,
     currentLiveV509Reserved:
       currentV509Reserved,
+    currentLiveV513Attempted:
+      currentV513Attempted,
+    currentLiveV513Reserved:
+      currentV513Reserved,
     currentLiveV512Attempted:
       currentV512Attempted,
     currentLiveV512Reserved:
@@ -91727,6 +93072,8 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
    * protection. Never permit a second secondary request in the same scan.
    */
   if (
+    currentV513Attempted ||
+    currentV513Reserved ||
     currentV512Attempted ||
     currentV512Reserved ||
     currentV509Attempted ||
@@ -91735,11 +93082,15 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
     currentV483Attempted
   ) {
     telemetry.status =
-      currentV512Attempted
-        ? "V486_SKIPPED_CURRENT_LIVE_V512_USED_SECONDARY_SLOT"
-        : currentV512Reserved
-          ? "V486_SKIPPED_CURRENT_LIVE_V512_RESERVED_SECONDARY_SLOT"
-          : currentV509Attempted
+      currentV513Attempted
+        ? "V486_SKIPPED_CURRENT_LIVE_V513_USED_SECONDARY_SLOT"
+        : currentV513Reserved
+          ? "V486_SKIPPED_CURRENT_LIVE_V513_RESERVED_SECONDARY_SLOT"
+          : currentV512Attempted
+            ? "V486_SKIPPED_CURRENT_LIVE_V512_USED_SECONDARY_SLOT"
+            : currentV512Reserved
+              ? "V486_SKIPPED_CURRENT_LIVE_V512_RESERVED_SECONDARY_SLOT"
+              : currentV509Attempted
             ? "V486_SKIPPED_CURRENT_LIVE_V509_USED_SECONDARY_SLOT"
             : currentV509Reserved
               ? "V486_SKIPPED_CURRENT_LIVE_V509_RESERVED_SECONDARY_SLOT"
@@ -91748,6 +93099,20 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
                 : "V486_SKIPPED_CURRENT_LIVE_V483_USED_SECONDARY_SLOT";
 
     if (
+      currentV513Attempted ||
+      currentV513Reserved
+    ) {
+      fairness.consecutiveV483BlocksOfV486 =
+        0;
+
+      fairness.lastDecision =
+        currentV513Attempted
+          ? "V513_HIGHER_EVIDENCE_CANONICAL_VALIDATION_USED_SECONDARY_SLOT"
+          : "V513_HIGHER_EVIDENCE_CANONICAL_VALIDATION_RESERVED_SECONDARY_SLOT";
+
+      fairness.lastDecisionAt =
+        Date.now();
+    } else if (
       currentV512Attempted ||
       currentV512Reserved
     ) {
@@ -91996,13 +93361,103 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
   };
 
   /*
+   * V513 DOPPLER CANONICAL-PATTERN THIRD-RECEIPT VALIDATION:
+   * once V512 has enough repeated structure to derive a deterministic candidate,
+   * stop spending V512 discovery receipts and validate that one pattern on a
+   * third distinct verified creation transaction.
+   */
+  const dopplerCanonicalPatternV513 =
+    deriveDopplerCanonicalCandidateV513(
+      state
+    );
+
+  const dopplerCanonicalValidationCandidateV513 =
+    selectDopplerCanonicalValidationCandidateV513(
+      state,
+      dopplerCanonicalPatternV513
+    );
+
+  if (
+    dopplerCanonicalPatternV513 &&
+    dopplerCanonicalValidationCandidateV513
+  ) {
+    const dopplerV513 =
+      await runDopplerCanonicalPatternValidationV513({
+        env,
+        state,
+        budget,
+        canonicalPattern:
+          dopplerCanonicalPatternV513,
+        candidate:
+          dopplerCanonicalValidationCandidateV513
+      });
+
+    telemetry.dopplerCanonicalPatternProofV513 =
+      dopplerV513;
+    telemetry.dopplerWholeReceiptPatternV512 = {
+      enabled: true,
+      attempted: false,
+      requestConsumed: false,
+      status:
+        "V512_SUPERSEDED_BY_V513_CANONICAL_PATTERN_VALIDATION"
+    };
+    telemetry.selectedFromPersistedVerifiedOrigins =
+      true;
+    telemetry.selectedToken =
+      dopplerV513?.selectedToken ||
+      null;
+    telemetry.selectedCreator =
+      dopplerV513?.selectedFactory ||
+      null;
+    telemetry.selectedCreationTransactionHash =
+      dopplerV513
+        ?.selectedTransactionHash ||
+      null;
+    telemetry.attempted =
+      dopplerV513?.attempted === true;
+    telemetry.requestConsumed =
+      dopplerV513?.requestConsumed === true;
+    telemetry.processedAfterAttempt =
+      dopplerV513?.attempted === true;
+    telemetry.status =
+      dopplerV513?.status ||
+      "V513_STATUS_UNAVAILABLE";
+
+    root.lastStatus =
+      `V486_ROUTED_TO_V513:${telemetry.status}`;
+
+    return telemetry;
+  }
+
+  telemetry.dopplerCanonicalPatternProofV513 = {
+    enabled: true,
+    measurementOnlyUntilThirdProof:
+      true,
+    attempted: false,
+    requestConsumed: false,
+    canonicalPattern:
+      dopplerCanonicalPatternV513 ||
+      null,
+    status:
+      ensureDopplerCanonicalPatternProofV513(
+        state
+      ).confirmedCanonicalPattern
+        ? "V513_DOPPLER_CANONICAL_PATTERN_ALREADY_CONFIRMED"
+        : dopplerCanonicalPatternV513
+          ? "V513_CANONICAL_PATTERN_SELECTED_WAITING_FOR_THIRD_DISTINCT_DOPPLER_CREATION_TX"
+          : "V513_NO_DETERMINISTIC_CANONICAL_PATTERN_CANDIDATE"
+  };
+
+  /*
    * V512 DOPPLER WHOLE-RECEIPT PATTERN PROOF:
    * supersedes V511's disproven factory-emitter-only model.
    */
   const dopplerWholeReceiptCandidateV512 =
-    selectDopplerWholeReceiptCandidateV512(
-      state
-    );
+    dopplerCanonicalPatternV513
+      ? null
+      : selectDopplerWholeReceiptCandidateV512(
+          state
+        );
 
   if (dopplerWholeReceiptCandidateV512) {
     const dopplerV512 =
@@ -104977,14 +106432,33 @@ async function traceUnknownLiveOriginsV477({
       state
     );
 
-  const dopplerWholeReceiptCandidateBeforeV480V512 =
-    selectDopplerWholeReceiptCandidateV512(
+  const dopplerCanonicalPatternBeforeV480V513 =
+    deriveDopplerCanonicalCandidateV513(
       state
     );
+
+  const dopplerCanonicalValidationBeforeV480V513 =
+    selectDopplerCanonicalValidationCandidateV513(
+      state,
+      dopplerCanonicalPatternBeforeV480V513
+    );
+
+  const dopplerWholeReceiptCandidateBeforeV480V512 =
+    dopplerCanonicalPatternBeforeV480V513
+      ? null
+      : selectDopplerWholeReceiptCandidateV512(
+          state
+        );
 
   const ponsProofReservedBeforeV480V510 =
     Boolean(
       ponsReceiptCandidateBeforeV480V510
+    );
+
+  const dopplerCanonicalProofReservedBeforeV480V513 =
+    Boolean(
+      dopplerCanonicalPatternBeforeV480V513 &&
+      dopplerCanonicalValidationBeforeV480V513
     );
 
   const dopplerProofReservedBeforeV480V512 =
@@ -104992,8 +106466,9 @@ async function traceUnknownLiveOriginsV477({
       dopplerWholeReceiptCandidateBeforeV480V512
     );
 
-  const highEvidenceProofReservedBeforeV480V512 =
+  const highEvidenceProofReservedBeforeV480V513 =
     ponsProofReservedBeforeV480V510 ||
+    dopplerCanonicalProofReservedBeforeV480V513 ||
     dopplerProofReservedBeforeV480V512;
 
   telemetry.ponsV2ExactProofPriorityV510 = {
@@ -105011,6 +106486,20 @@ async function traceUnknownLiveOriginsV477({
               ponsReceiptCandidateBeforeV480V510.transactionHash
           }
         : null,
+    dopplerCanonicalPatternBeforeV480V513:
+      dopplerCanonicalPatternBeforeV480V513 ||
+      null,
+    dopplerCanonicalValidationBeforeV480V513:
+      dopplerCanonicalValidationBeforeV480V513
+        ? {
+            token:
+              dopplerCanonicalValidationBeforeV480V513.token,
+            factory:
+              dopplerCanonicalValidationBeforeV480V513.factory,
+            transactionHash:
+              dopplerCanonicalValidationBeforeV480V513.transactionHash
+          }
+        : null,
     dopplerWholeReceiptCandidateBeforeV480V512:
       dopplerWholeReceiptCandidateBeforeV480V512
         ? {
@@ -105022,14 +106511,16 @@ async function traceUnknownLiveOriginsV477({
               dopplerWholeReceiptCandidateBeforeV480V512.transactionHash
           }
         : null,
-    highEvidenceReservationV512:
-      highEvidenceProofReservedBeforeV480V512,
+    highEvidenceReservationV513:
+      highEvidenceProofReservedBeforeV480V513,
     status:
       ponsProofReservedBeforeV480V510
         ? "V510_V509_EXACT_PROOF_SLOT_RESERVED_BEFORE_CURRENT_LIVE_SECONDARY_WORK"
-        : dopplerProofReservedBeforeV480V512
-          ? "V512_DOPPLER_WHOLE_RECEIPT_SLOT_RESERVED_BEFORE_CURRENT_LIVE_SECONDARY_WORK"
-          : "V512_NO_PREEXISTING_HIGH_EVIDENCE_EXACT_PROOF_CANDIDATE"
+        : dopplerCanonicalProofReservedBeforeV480V513
+          ? "V513_DOPPLER_CANONICAL_THIRD_RECEIPT_SLOT_RESERVED_BEFORE_CURRENT_LIVE_SECONDARY_WORK"
+          : dopplerProofReservedBeforeV480V512
+            ? "V512_DOPPLER_WHOLE_RECEIPT_SLOT_RESERVED_BEFORE_CURRENT_LIVE_SECONDARY_WORK"
+            : "V513_NO_PREEXISTING_HIGH_EVIDENCE_EXACT_PROOF_CANDIDATE"
   };
 
   const fairnessReservationV487 =
@@ -105252,7 +106743,7 @@ async function traceUnknownLiveOriginsV477({
         ) &&
         fairnessReservationV487
           .reserve !== true &&
-        highEvidenceProofReservedBeforeV480V512 !==
+        highEvidenceProofReservedBeforeV480V513 !==
           true
       ) {
         telemetry.unknownLaunchMechanismFingerprintV483 =
@@ -105287,7 +106778,7 @@ async function traceUnknownLiveOriginsV477({
           !row?.contractCreator ||
           !row?.creationTransactionHash
         ) &&
-        highEvidenceProofReservedBeforeV480V512 ===
+        highEvidenceProofReservedBeforeV480V513 ===
           true
       ) {
         telemetry.unknownLaunchMechanismFingerprintV483 = {
@@ -105297,7 +106788,7 @@ async function traceUnknownLiveOriginsV477({
           attempted: false,
           requestConsumed: false,
           status:
-            "V512_DEFERRED_V483_FOR_ELIGIBLE_HIGH_EVIDENCE_EXACT_PROOF",
+            "V513_DEFERRED_V483_FOR_ELIGIBLE_HIGH_EVIDENCE_EXACT_PROOF",
           v509PriorityV510: {
             exactProofCandidateReserved:
               true,
@@ -105424,10 +106915,23 @@ async function traceUnknownLiveOriginsV477({
           state
         );
 
-      const dopplerWholeReceiptCandidateAfterV480V512 =
-        selectDopplerWholeReceiptCandidateV512(
+      const dopplerCanonicalPatternAfterV480V513 =
+        deriveDopplerCanonicalCandidateV513(
           state
         );
+
+      const dopplerCanonicalValidationAfterV480V513 =
+        selectDopplerCanonicalValidationCandidateV513(
+          state,
+          dopplerCanonicalPatternAfterV480V513
+        );
+
+      const dopplerWholeReceiptCandidateAfterV480V512 =
+        dopplerCanonicalPatternAfterV480V513
+          ? null
+          : selectDopplerWholeReceiptCandidateV512(
+              state
+            );
 
       telemetry.ponsV2ExactProofPriorityV510
         .candidateAfterV480 =
@@ -105439,6 +106943,24 @@ async function traceUnknownLiveOriginsV477({
                   ponsReceiptCandidateAfterV480V510.creator,
                 transactionHash:
                   ponsReceiptCandidateAfterV480V510.transactionHash
+              }
+            : null;
+
+      telemetry.ponsV2ExactProofPriorityV510
+        .dopplerCanonicalPatternAfterV480V513 =
+          dopplerCanonicalPatternAfterV480V513 ||
+          null;
+
+      telemetry.ponsV2ExactProofPriorityV510
+        .dopplerCanonicalValidationAfterV480V513 =
+          dopplerCanonicalValidationAfterV480V513
+            ? {
+                token:
+                  dopplerCanonicalValidationAfterV480V513.token,
+                factory:
+                  dopplerCanonicalValidationAfterV480V513.factory,
+                transactionHash:
+                  dopplerCanonicalValidationAfterV480V513.transactionHash
               }
             : null;
 
@@ -105552,6 +107074,86 @@ async function traceUnknownLiveOriginsV477({
           v485DeferredForSameCluster:
             false,
           deferredByHigherEvidenceV509:
+            true
+        };
+      } else if (
+        dopplerCanonicalPatternAfterV480V513 &&
+        dopplerCanonicalValidationAfterV480V513
+      ) {
+        const dopplerV513 =
+          await runDopplerCanonicalPatternValidationV513({
+            env,
+            state,
+            budget,
+            canonicalPattern:
+              dopplerCanonicalPatternAfterV480V513,
+            candidate:
+              dopplerCanonicalValidationAfterV480V513
+          });
+
+        telemetry.dopplerCanonicalPatternProofV513 =
+          dopplerV513;
+
+        telemetry.ponsV2ExactProofPriorityV510
+          .v503Deferred = true;
+        telemetry.ponsV2ExactProofPriorityV510
+          .v485Deferred = true;
+        telemetry.ponsV2ExactProofPriorityV510
+          .status =
+            dopplerV513?.attempted === true
+              ? "V513_DOPPLER_CANONICAL_THIRD_RECEIPT_RAN_BEFORE_V512_V503_V485"
+              : `V513_DOPPLER_CANONICAL_THIRD_RECEIPT_RESERVED_BUT_NOT_ATTEMPTED:${dopplerV513?.status || "UNKNOWN"}`;
+
+        telemetry.dopplerWholeReceiptPatternV512 = {
+          enabled: true,
+          attempted: false,
+          requestConsumed: false,
+          status:
+            "V512_SUPERSEDED_BY_V513_CANONICAL_PATTERN_VALIDATION"
+        };
+
+        telemetry.recurringCreatorAttributionV503 = {
+          enabled: true,
+          measurementOnly: true,
+          promotionAllowed: false,
+          attempted: false,
+          requestConsumed: false,
+          status:
+            "V513_DEFERRED_V503_FOR_HIGHER_EVIDENCE_CANONICAL_PATTERN_VALIDATION"
+        };
+
+        telemetry.exactCreationMechanismAttributionV485 = {
+          enabled: true,
+          measurementOnly: true,
+          promotionAllowed: false,
+          attempted: false,
+          requestConsumed: false,
+          status:
+            "V513_DEFERRED_V485_FOR_HIGHER_EVIDENCE_CANONICAL_PATTERN_VALIDATION",
+          deferredToken: targetAddress,
+          verifiedCreator:
+            normalize(row.contractCreator),
+          exactCreationAttributionDisabledGlobally:
+            false,
+          oneScanOnly: true
+        };
+
+        telemetry.strongRecurringCreatorPriorityV506 = {
+          enabled: true,
+          applied: false,
+          reason:
+            "V513_HIGHER_EVIDENCE_CANONICAL_PATTERN_VALIDATION_RESERVED_SECONDARY_SLOT",
+          verifiedCreator:
+            normalize(row.contractCreator),
+          pendingCreator: null,
+          distinctTokens: 0,
+          thresholdDistinctTokens:
+            strongRecurringCreatorThresholdV505(),
+          decisionPoint:
+            "CURRENT_LIVE_V480_AFTER_ORIGIN_PROOF_BEFORE_V512_V503_V485",
+          v485RequestConsumedBeforeDecision:
+            false,
+          deferredByHigherEvidenceV513:
             true
         };
       } else if (dopplerWholeReceiptCandidateAfterV480V512) {
