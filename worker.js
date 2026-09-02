@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V464
+ * AUTHORITATIVE RUNTIME VERSION: V464
+ * V464 is a narrow completion-lane capacity hardening build based on the live V463 NUDES test.
+ * V463 successfully selected NUDES from successful-alert history, performed one strict fresh ERC-20
+ * re-verification, checkpointed that proof, and protected the full V463 completion lane. The remaining
+ * blocker was purely bounded pagination capacity: the exact NUDES PoolId still had two unresolved
+ * saturated subranges after five exact-pool log requests, while the scan remained below the unchanged
+ * 42-request global ceiling.
+ *
+ * V464 therefore increases ONLY the pre-protected exact-pool completion envelope from five to nine
+ * PoolManager Swap-log range requests (plus the existing one timestamp-to-block request). These requests
+ * are carved out of the already-existing effective analysis allowance before lower-priority analysis can
+ * consume them; the 42 global ceiling, 21 base analysis limit, V416 adaptive maximum, 2-request Telegram
+ * reserve, scoring, qualification, holder rules, provider trust, discovery logic and Telegram thresholds
+ * are unchanged. Every child range remains exact PoolManager + Swap topic + exact PoolId filtered,
+ * deduplicated by transaction/log identity, and coverage stays UNVERIFIED unless every required range is
+ * non-saturated and every returned row is candidate-matched and exactly USD-decodable.
+ */
+/**
  * Robinhood Chain Meme Hunter — V463
  * AUTHORITATIVE RUNTIME VERSION: V463
  * V463 stabilises the exact-pool completion lane proven under V462. Older successful-alert snapshots did not explicitly persist ERC-20 identity fields, so V463 never invents that missing proof: when the newest structurally completion-capable historical alert lacks reusable metadata, V463 may perform at most ONE normal strict V418/V419/V421 ERC-20 verification using the existing analysis/global budget and unchanged >=3-of-4 method rule, then checkpoints the verified metadata through the existing V417 path. Separately, once a V458 target is eligible, V463 reserves the FULL existing V461 completion envelope (1 timestamp lookup + up to 5 exact-pool log requests = 6 analysis slots) before lower-priority analysis can consume it. This is request ordering only: the 42-request global ceiling, 21-request base analysis ceiling, V416 adaptive ceiling, notification reserve, provider protections, scoring, qualification, holder rules and Telegram thresholds are unchanged. If six slots are not available, the lane stays protected/UNVERIFIED rather than borrowing imaginary capacity.
@@ -1537,7 +1556,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V463";
+const VERSION = "V464";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2255,7 +2274,7 @@ const VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_CANDIDATES_V458 = 1;
 const VERIFIED_USD_COMPLETE_EXACT_POOL_LOOKBACK_MS_V458 =
   24 * 60 * 60 * 1000;
 const VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_REQUESTS_V458 = 2;
-const VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461 = 5;
+const VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461 = 9;
 const VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_TOTAL_REQUESTS_V461 =
   1 + VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461;
 
@@ -50572,6 +50591,12 @@ function upgradeCompleteExactPoolReserveV463(budget, source) {
   reserve.reserveSourceV463=source||null;
   reserve.timestampRequestsProtectedV463=1;
   reserve.maxLogRequestsProtectedV463=VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461;
+  reserve.v464PaginationCapacityHardening=true;
+  reserve.maxLogRequestsProtectedV464=VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461;
+  reserve.totalCompletionEnvelopeRequestsV464=VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_TOTAL_REQUESTS_V461;
+  reserve.globalLimitChangedV464=false;
+  reserve.baseAnalysisLimitChangedV464=false;
+  reserve.v416AdaptiveMaxChangedV464=false;
   reserve.requestCeilingsChangedV463=false;
   return reserve;
 }
@@ -70747,6 +70772,17 @@ for (
         V463_FULL_COMPLETION_RESERVE_REQUESTS,
       maxPaginationLogRequestsV461:
         VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461,
+      completionPaginationCapacityV464:{
+        enabled:true,
+        maxExactPoolLogRequests:VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461,
+        totalProtectedCompletionRequests:VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_TOTAL_REQUESTS_V461,
+        globalLimitChanged:false,
+        baseAnalysisLimitChanged:false,
+        adaptiveAnalysisMaxChanged:false,
+        scoringChanged:false,
+        qualificationChanged:false,
+        telegramThresholdChanged:false
+      },
       requestCeilingsChanged: false,
       scoringChanged: false,
       qualificationChanged: false,
