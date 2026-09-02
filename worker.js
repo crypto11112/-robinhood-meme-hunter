@@ -1,6 +1,25 @@
 /**
- * Robinhood Chain Meme Hunter — V476
- * AUTHORITATIVE RUNTIME VERSION: V476
+ * Robinhood Chain Meme Hunter — V477
+ * AUTHORITATIVE RUNTIME VERSION: V477
+ *
+ * V477 VERIFIED TOKEN-ORIGIN TRACING / CREATOR CLUSTERING:
+ * - traces up to four CURRENT/LIVE returned candidates whose launch source is
+ *   still UNVERIFIED using Blockscout's contract-creation provenance endpoint;
+ * - ONE batched external request maximum per scan (up to 4 token addresses);
+ * - request consumes the EXISTING analysis/global budget and respects all
+ *   existing reserve guards; the 42 hard ceiling is unchanged;
+ * - records only Blockscout-returned contractCreator + creation txHash as
+ *   verified origin provenance; creator is NOT automatically called a
+ *   launchpad/factory;
+ * - persists compact per-token origin evidence and recurring creator clusters;
+ * - creator clusters are measurement-only and require repeated distinct token
+ *   observations before being labelled RECURRING_CREATOR; even then launchpad
+ *   identity remains DATA UNVERIFIED until an exact launch event/mechanism is
+ *   proven;
+ * - runs after Telegram evaluation, before residual backlog reclaim, so it can
+ *   use otherwise-unused capacity without starving fresh candidate analysis;
+ * - no scoring, Momentum, qualification, holder, market, Telegram threshold,
+ *   provider-verification, V476 direct Pons detection or V469 priority change.
  *
  * V476 DIRECT ON-CHAIN LAUNCH-SOURCE EXPANSION:
  * - expands the EXISTING live eth_getLogs address array with positively known
@@ -1765,7 +1784,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V476";
+const VERSION = "V477";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9200,6 +9219,24 @@ function newState() {
       recentVerifiedLaunches: []
     },
 
+    tokenOriginTraceV477: {
+      enabled: true,
+      monitorStartedAt: null,
+      scansObserved: 0,
+      requestsAttempted: 0,
+      requestsSucceeded: 0,
+      addressesRequested: 0,
+      originsVerified: 0,
+      originsUnverified: 0,
+      lastAttemptAt: null,
+      lastSuccessAt: null,
+      lastStatus: "NOT_RUN_YET_V477",
+      lastHttpStatus: null,
+      tokenOrigins: {},
+      creatorClusters: {},
+      recentVerifiedOrigins: []
+    },
+
     verifiedLaunchMeterV470: {
       enabled: true,
       monitorStartedAt: null,
@@ -9743,6 +9780,30 @@ async function readState(env) {
           recentVerifiedLaunches:
             Array.isArray(parsed.directOnChainLaunchTelemetryV476?.recentVerifiedLaunches)
               ? parsed.directOnChainLaunchTelemetryV476.recentVerifiedLaunches.slice(-50)
+              : []
+        },
+
+        tokenOriginTraceV477: {
+          ...fresh.tokenOriginTraceV477,
+          ...(
+            parsed.tokenOriginTraceV477 &&
+            typeof parsed.tokenOriginTraceV477 === "object"
+              ? parsed.tokenOriginTraceV477
+              : {}
+          ),
+          tokenOrigins:
+            parsed.tokenOriginTraceV477?.tokenOrigins &&
+            typeof parsed.tokenOriginTraceV477.tokenOrigins === "object"
+              ? parsed.tokenOriginTraceV477.tokenOrigins
+              : {},
+          creatorClusters:
+            parsed.tokenOriginTraceV477?.creatorClusters &&
+            typeof parsed.tokenOriginTraceV477.creatorClusters === "object"
+              ? parsed.tokenOriginTraceV477.creatorClusters
+              : {},
+          recentVerifiedOrigins:
+            Array.isArray(parsed.tokenOriginTraceV477?.recentVerifiedOrigins)
+              ? parsed.tokenOriginTraceV477.recentVerifiedOrigins.slice(-100)
               : []
         },
 
@@ -69605,6 +69666,21 @@ for (
     );
 
   /*
+   * V477: trace actual creation provenance for CURRENT/LIVE analysed candidates
+   * whose launch source remains UNVERIFIED. This runs only after Telegram is
+   * complete, uses one existing analysis-budget request maximum, and therefore
+   * cannot starve fresh candidate analysis or Telegram delivery.
+   */
+  const tokenOriginTraceThisScanV477 =
+    await traceUnknownLiveOriginsV477({
+      env,
+      state,
+      budget,
+      candidates,
+      liveTokens
+    });
+
+  /*
    * =======================================================
    * V170 POST-ANALYSIS RESIDUAL BACKLOG CATCH-UP
    * =======================================================
@@ -70809,6 +70885,13 @@ for (
 
     directOnChainLaunchTelemetryV476:
       state.directOnChainLaunchTelemetryV476,
+
+    tokenOriginTraceThisScanV477,
+
+    tokenOriginTraceV477:
+      tokenOriginTraceSnapshotV477(
+        state
+      ),
 
     launchCoverageFunnelV474,
 
@@ -82942,6 +83025,516 @@ function ensureLaunchCoverageCumulativeV474(state) {
   }
 
   return state.launchCoverageCumulativeV474;
+}
+
+
+function ensureTokenOriginTraceV477(state) {
+  state.tokenOriginTraceV477 =
+    state?.tokenOriginTraceV477 &&
+    typeof state.tokenOriginTraceV477 === "object"
+      ? state.tokenOriginTraceV477
+      : newState().tokenOriginTraceV477;
+
+  const root = state.tokenOriginTraceV477;
+
+  if (!safeNumber(root.monitorStartedAt)) {
+    root.monitorStartedAt = Date.now();
+  }
+
+  root.tokenOrigins =
+    root.tokenOrigins &&
+    typeof root.tokenOrigins === "object"
+      ? root.tokenOrigins
+      : {};
+
+  root.creatorClusters =
+    root.creatorClusters &&
+    typeof root.creatorClusters === "object"
+      ? root.creatorClusters
+      : {};
+
+  root.recentVerifiedOrigins =
+    Array.isArray(root.recentVerifiedOrigins)
+      ? root.recentVerifiedOrigins
+      : [];
+
+  return root;
+}
+
+function pruneTokenOriginTraceV477(state) {
+  const root = ensureTokenOriginTraceV477(state);
+  const now = Date.now();
+  const maxAgeMs = 7 * 24 * 60 * 60 * 1000;
+
+  for (const [address, row] of Object.entries(root.tokenOrigins || {})) {
+    const at = safeNumber(row?.verifiedAt) || safeNumber(row?.observedAt);
+    if (!isAddress(address) || !at || now - at > maxAgeMs) {
+      delete root.tokenOrigins[address];
+    }
+  }
+
+  /*
+   * Rebuild clusters only from retained, individually verified token origins.
+   * This avoids stale counters surviving after evidence retention expires.
+   */
+  const clusters = {};
+
+  for (const [token, row] of Object.entries(root.tokenOrigins || {})) {
+    if (
+      row?.verified !== true ||
+      !isAddress(token) ||
+      !isAddress(row?.contractCreator)
+    ) {
+      continue;
+    }
+
+    const creator = normalize(row.contractCreator);
+
+    const cluster =
+      clusters[creator] ||
+      {
+        creator,
+        distinctTokens: 0,
+        tokens: [],
+        firstVerifiedAt: null,
+        lastVerifiedAt: null,
+        classification: "SINGLE_OBSERVED_CREATOR",
+        launchpadIdentity: "DATA UNVERIFIED"
+      };
+
+    if (!cluster.tokens.includes(token)) {
+      cluster.tokens.push(token);
+      cluster.distinctTokens++;
+    }
+
+    const at = safeNumber(row?.verifiedAt) || safeNumber(row?.observedAt);
+
+    cluster.firstVerifiedAt =
+      !cluster.firstVerifiedAt
+        ? at || null
+        : at
+          ? Math.min(cluster.firstVerifiedAt, at)
+          : cluster.firstVerifiedAt;
+
+    cluster.lastVerifiedAt =
+      Math.max(
+        safeNumber(cluster.lastVerifiedAt),
+        at || 0
+      ) || null;
+
+    cluster.classification =
+      cluster.distinctTokens >= 2
+        ? "RECURRING_CREATOR"
+        : "SINGLE_OBSERVED_CREATOR";
+
+    cluster.launchpadIdentity =
+      "DATA UNVERIFIED";
+
+    clusters[creator] = cluster;
+  }
+
+  root.creatorClusters = clusters;
+  root.recentVerifiedOrigins =
+    root.recentVerifiedOrigins
+      .filter(row =>
+        safeNumber(row?.verifiedAt) > 0 &&
+        now - safeNumber(row.verifiedAt) <= maxAgeMs
+      )
+      .slice(-100);
+
+  return root;
+}
+
+function blockscoutOriginTraceUrlV477(addresses) {
+  const clean =
+    Array.from(
+      new Set(
+        (addresses || [])
+          .map(normalize)
+          .filter(isAddress)
+      )
+    ).slice(0, 4);
+
+  if (!clean.length) return null;
+
+  const query =
+    new URLSearchParams({
+      module: "contract",
+      action: "getcontractcreation",
+      contractaddresses: clean.join(",")
+    });
+
+  return `${BLOCKSCOUT}/api?${query.toString()}`;
+}
+
+function parseBlockscoutOriginRowsV477(body) {
+  const rows =
+    Array.isArray(body?.result)
+      ? body.result
+      : [];
+
+  return rows
+    .map(row => {
+      const token =
+        normalize(
+          row?.contractAddress ||
+          row?.contract_address ||
+          null
+        );
+
+      const contractCreator =
+        normalize(
+          row?.contractCreator ||
+          row?.contract_creator ||
+          null
+        );
+
+      const creationTransactionHash =
+        normalize(
+          row?.txHash ||
+          row?.tx_hash ||
+          row?.creationTransactionHash ||
+          null
+        );
+
+      const verified =
+        isAddress(token) &&
+        isAddress(contractCreator) &&
+        /^0x[a-f0-9]{64}$/.test(
+          creationTransactionHash || ""
+        );
+
+      return {
+        token: token || null,
+        contractCreator:
+          contractCreator || null,
+        creationTransactionHash:
+          creationTransactionHash || null,
+        verified,
+        source:
+          verified
+            ? "BLOCKSCOUT_GETCONTRACTCREATION_V477"
+            : "BLOCKSCOUT_ORIGIN_ROW_INCOMPLETE_V477"
+      };
+    })
+    .filter(row => isAddress(row.token));
+}
+
+async function traceUnknownLiveOriginsV477({
+  env,
+  state,
+  budget,
+  candidates,
+  liveTokens
+}) {
+  const root = pruneTokenOriginTraceV477(state);
+  root.scansObserved =
+    safeNumber(root.scansObserved) + 1;
+
+  const liveSet =
+    liveTokens instanceof Set
+      ? new Set(
+          Array.from(liveTokens)
+            .map(normalize)
+            .filter(isAddress)
+        )
+      : new Set();
+
+  const selected =
+    (Array.isArray(candidates) ? candidates : [])
+      .filter(candidate => {
+        const address = normalize(candidate?.address);
+        if (!isAddress(address) || !liveSet.has(address)) return false;
+        if (candidate?.validERC20 !== true) return false;
+        if (candidate?.excludedReason) return false;
+        if (
+          candidate?.verifiedLaunchSourceV476?.verified === true ||
+          candidate?.verifiedLaunchAgeV223?.verified === true
+        ) {
+          return false;
+        }
+
+        const existing = root.tokenOrigins?.[address];
+        if (
+          existing?.verified === true &&
+          safeNumber(existing?.verifiedAt) > 0 &&
+          Date.now() - safeNumber(existing.verifiedAt) <
+            7 * 24 * 60 * 60 * 1000
+        ) {
+          return false;
+        }
+
+        return true;
+      })
+      .slice()
+      .sort((a, b) => analysisPriority(b) - analysisPriority(a))
+      .slice(0, 4);
+
+  const addresses =
+    selected
+      .map(row => normalize(row?.address))
+      .filter(isAddress);
+
+  const telemetry = {
+    enabled: true,
+    measurementOnly: true,
+    source:
+      "BLOCKSCOUT_CONTRACT_CREATION_PROVENANCE",
+    selectedAddresses: addresses,
+    selectedCount: addresses.length,
+    attempted: false,
+    requestConsumed: false,
+    requestType:
+      "BLOCKSCOUT_CONTRACT_ORIGIN_BATCH_V477",
+    maxAddressesPerBatch: 4,
+    maxExternalRequestsPerScan: 1,
+    requestCeilingChanged: false,
+    hardRequestLimit:
+      safeNumber(budget?.totalLimit),
+    verifiedOrigins: [],
+    unverifiedAddresses: [],
+    recurringCreators: [],
+    launchpadIdentityInferred: false,
+    status: null
+  };
+
+  if (!addresses.length) {
+    root.lastStatus =
+      "NO_ELIGIBLE_CURRENT_LIVE_UNKNOWN_ORIGIN_V477";
+    telemetry.status = root.lastStatus;
+    return telemetry;
+  }
+
+  const url =
+    blockscoutOriginTraceUrlV477(addresses);
+
+  if (!url) {
+    root.lastStatus =
+      "ORIGIN_TRACE_URL_UNAVAILABLE_V477";
+    telemetry.status = root.lastStatus;
+    return telemetry;
+  }
+
+  /*
+   * Use the ordinary analysis budget after Telegram evaluation. All existing
+   * V182/V301/V459 guards remain authoritative through consumeBudget().
+   */
+  if (
+    !consumeBudget(
+      budget,
+      "analysis",
+      "BLOCKSCOUT_CONTRACT_ORIGIN_BATCH_V477",
+      1
+    )
+  ) {
+    root.lastStatus =
+      "ORIGIN_TRACE_BUDGET_UNAVAILABLE_V477";
+    telemetry.status = root.lastStatus;
+    return telemetry;
+  }
+
+  telemetry.attempted = true;
+  telemetry.requestConsumed = true;
+  root.requestsAttempted =
+    safeNumber(root.requestsAttempted) + 1;
+  root.addressesRequested =
+    safeNumber(root.addressesRequested) +
+    addresses.length;
+  root.lastAttemptAt = Date.now();
+
+  const controller = new AbortController();
+  const timer =
+    setTimeout(
+      () => controller.abort(),
+      4500
+    );
+
+  try {
+    const response =
+      await fetch(
+        url,
+        {
+          method: "GET",
+          headers: {
+            accept: "application/json"
+          },
+          signal: controller.signal
+        }
+      );
+
+    root.lastHttpStatus = response.status;
+
+    if (!response.ok) {
+      root.lastStatus =
+        `BLOCKSCOUT_ORIGIN_HTTP_${response.status}_V477`;
+      telemetry.status = root.lastStatus;
+      return telemetry;
+    }
+
+    const body = await response.json();
+
+    const parsed =
+      parseBlockscoutOriginRowsV477(body);
+
+    const byToken =
+      new Map(
+        parsed.map(row => [normalize(row.token), row])
+      );
+
+    const now = Date.now();
+
+    for (const address of addresses) {
+      const row = byToken.get(address);
+
+      if (!row?.verified) {
+        root.originsUnverified =
+          safeNumber(root.originsUnverified) + 1;
+        telemetry.unverifiedAddresses.push(address);
+        continue;
+      }
+
+      const evidence = {
+        verified: true,
+        token: address,
+        contractCreator:
+          row.contractCreator,
+        creationTransactionHash:
+          row.creationTransactionHash,
+        source:
+          "BLOCKSCOUT_GETCONTRACTCREATION_V477",
+        evidenceMeaning:
+          "VERIFIED_CONTRACT_CREATOR_AND_CREATION_TX_ONLY",
+        creatorIsLaunchpad:
+          "DATA UNVERIFIED",
+        factoryOrRouter:
+          "DATA UNVERIFIED",
+        launchMechanism:
+          "DATA UNVERIFIED",
+        verifiedAt: now
+      };
+
+      root.tokenOrigins[address] = evidence;
+      root.originsVerified =
+        safeNumber(root.originsVerified) + 1;
+
+      root.recentVerifiedOrigins.push(evidence);
+
+      const watched =
+        Array.isArray(state?.watchedTokens)
+          ? state.watchedTokens.find(
+              item =>
+                normalize(item?.address) === address
+            )
+          : null;
+
+      if (watched) {
+        watched.originTraceV477 = evidence;
+      }
+
+      telemetry.verifiedOrigins.push(evidence);
+    }
+
+    root.requestsSucceeded =
+      safeNumber(root.requestsSucceeded) + 1;
+    root.lastSuccessAt = now;
+    root.lastStatus =
+      telemetry.verifiedOrigins.length
+        ? "VERIFIED_ORIGIN_PROVENANCE_FOUND_V477"
+        : "NO_VERIFIED_ORIGIN_ROWS_RETURNED_V477";
+
+    telemetry.status = root.lastStatus;
+
+    pruneTokenOriginTraceV477(state);
+
+    telemetry.recurringCreators =
+      Object.values(root.creatorClusters || {})
+        .filter(row =>
+          safeNumber(row?.distinctTokens) >= 2
+        )
+        .sort(
+          (a, b) =>
+            safeNumber(b?.distinctTokens) -
+            safeNumber(a?.distinctTokens)
+        )
+        .slice(0, 10);
+
+    return telemetry;
+  } catch (error) {
+    root.lastStatus =
+      `BLOCKSCOUT_ORIGIN_FETCH_ERROR_V477:${errorString(error)}`;
+    telemetry.status = root.lastStatus;
+    return telemetry;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function tokenOriginTraceSnapshotV477(state) {
+  const root = pruneTokenOriginTraceV477(state);
+
+  const recurring =
+    Object.values(root.creatorClusters || {})
+      .filter(row =>
+        safeNumber(row?.distinctTokens) >= 2
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(b?.distinctTokens) -
+          safeNumber(a?.distinctTokens)
+      )
+      .slice(0, 20);
+
+  return {
+    enabled: true,
+    measurementOnly: true,
+    monitorStartedAt:
+      safeNumber(root.monitorStartedAt) || null,
+    scansObserved:
+      safeNumber(root.scansObserved),
+    requestsAttempted:
+      safeNumber(root.requestsAttempted),
+    requestsSucceeded:
+      safeNumber(root.requestsSucceeded),
+    addressesRequested:
+      safeNumber(root.addressesRequested),
+    originsVerified:
+      safeNumber(root.originsVerified),
+    originsUnverified:
+      safeNumber(root.originsUnverified),
+    retainedTokenOrigins:
+      Object.keys(root.tokenOrigins || {}).length,
+    recurringCreatorCount:
+      recurring.length,
+    recurringCreators:
+      recurring,
+    recentVerifiedOrigins:
+      (root.recentVerifiedOrigins || []).slice(-20),
+    lastAttemptAt:
+      safeNumber(root.lastAttemptAt) || null,
+    lastSuccessAt:
+      safeNumber(root.lastSuccessAt) || null,
+    lastStatus:
+      root.lastStatus || null,
+    lastHttpStatus:
+      root.lastHttpStatus ?? null,
+    interpretation: {
+      contractCreatorVerifiedFromBlockscout:
+        true,
+      creationTransactionHashVerifiedFromBlockscout:
+        true,
+      recurringCreatorMeansLaunchpad:
+        false,
+      launchpadIdentity:
+        "DATA UNVERIFIED_UNTIL_EXACT_MECHANISM_PROVEN",
+      launchMechanism:
+        "DATA UNVERIFIED_UNTIL_EXACT_MECHANISM_PROVEN"
+    },
+    maxExternalRequestsPerScan: 1,
+    requestCeilingChanged: false,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false
+  };
 }
 
 function buildLaunchCoverageFunnelV474({
