@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V446
- * AUTHORITATIVE RUNTIME VERSION: V446
+ * Robinhood Chain Meme Hunter — V447
+ * AUTHORITATIVE RUNTIME VERSION: V447
+ * V447 is a narrow completion/reliability build based on the successful V446 ReservesLens decode. First, historical PoolKey recovery no longer fans out across Chainstack, Robinhood Public and Alchemy when an old-block eth_getLogs request is rejected. It now performs at most one Chainstack-only historical Initialize lookup, records HTTP_403 as a bounded historical-log capability cooldown in existing state, and skips further historical-log attempts while that cooldown is active. This prevents one optional recovery from consuming three analysis requests when public/Alchemy fallbacks are already rate-limited. Second, V441 ReservesLens target selection now explicitly prioritizes valuation-ready candidates: verified V438 exact-USD execution price plus a directly USD-valued quote (canonical USDG) or a fresh already-verified cached WETH/USDG reference. If no valuation-ready complete PoolKey exists, reserve reconstruction remains diagnostic-only on the best available candidate. No market promotion, scoring, qualification, liquidity threshold, Telegram rule, global request ceiling, scheduled cadence or provider secret is changed.
  * V446 fixes the V445 runtime failure caused by the V441 ReservesLens valuation calling a helper name that does not exist in the inherited codebase: bestVerifiedWethUsdGReferenceV195. V446 adds that missing bounded local helper and reuses only already-persisted verified WETH/USDG reference evidence; it makes zero external requests. The helper accepts the existing cached V3 canonical WETH/USDG reference only when it contains a positive price and a bounded verifiedAt timestamp, and returns it in the same shape expected by V441. If no valid cached reference exists, it returns null and V441 safely leaves USD liquidity incomplete rather than guessing. No V443 recovery logic, V442 Chainstack routing, V441 reserve reconstruction, budgets, scoring, qualification, liquidity thresholds or Telegram behavior are changed.
  * V445 fixes the remaining temporal-dead-zone bug by removing the historicalPoolKeyRecoveryResultV443 runtime value from the early scannerFunnelV415 object, which is created before candidate analysis and before that result exists. The early funnel now keeps only the static V443 capability descriptor. The actual recovery result is exposed only in the final scan response after the recovery call has completed. No PoolKey recovery logic, ReservesLens logic, Chainstack routing, request budgets, scoring, qualification, liquidity rules or Telegram behavior are changed.
  * V444 is a narrow runtime fix for the V443 temporal-dead-zone error. The V443 logic itself was valid, but the runtime result variable was named historicalPoolKeyRecoveryV443, the same identifier used by the top-level telemetry property shorthand before that const had been initialized in the scan function. V444 renames only the runtime result variable to historicalPoolKeyRecoveryResultV443 and updates the telemetry reference. No recovery logic, RPC routing, request budgets, scoring, qualification, liquidity rules or Telegram behavior are changed.
@@ -1520,7 +1521,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V446";
+const VERSION = "V447";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2543,6 +2544,217 @@ function onChainV4MarketEvidence(
 }
 
 /* =========================================================
+   V447 HISTORICAL LOG CAPABILITY GUARD + VALUATION TARGETING
+   ========================================================= */
+
+const V447_HISTORICAL_LOG_403_COOLDOWN_MS =
+  6 * 60 * 60 * 1000;
+
+function historicalLogCapabilityRootV447(
+  state
+) {
+  if (
+    !state ||
+    typeof state !== "object"
+  ) {
+    return null;
+  }
+
+  state.historicalLogCapabilityV447 =
+    state.historicalLogCapabilityV447 &&
+    typeof state.historicalLogCapabilityV447 === "object"
+      ? state.historicalLogCapabilityV447
+      : {
+          chainstack403Count: 0,
+          chainstackBlockedUntil: null,
+          lastAttemptAt: null,
+          lastSuccessAt: null,
+          lastHttp403At: null,
+          lastError: null
+        };
+
+  return state.historicalLogCapabilityV447;
+}
+
+function historicalLogChainstackBlockedV447(
+  state
+) {
+  const root =
+    historicalLogCapabilityRootV447(
+      state
+    );
+
+  const blockedUntil =
+    safeNumber(
+      root?.chainstackBlockedUntil
+    );
+
+  return (
+    blockedUntil > Date.now()
+  );
+}
+
+function recordHistoricalLogResultV447(
+  state,
+  {
+    success = false,
+    http403 = false,
+    error = null
+  } = {}
+) {
+  const root =
+    historicalLogCapabilityRootV447(
+      state
+    );
+
+  if (!root) {
+    return;
+  }
+
+  const at =
+    Date.now();
+
+  root.lastAttemptAt =
+    at;
+
+  if (success) {
+    root.lastSuccessAt =
+      at;
+
+    root.lastError =
+      null;
+
+    root.chainstack403Count =
+      0;
+
+    root.chainstackBlockedUntil =
+      null;
+
+    return;
+  }
+
+  root.lastError =
+    error || null;
+
+  if (http403) {
+    root.lastHttp403At =
+      at;
+
+    root.chainstack403Count =
+      safeNumber(
+        root.chainstack403Count
+      ) + 1;
+
+    root.chainstackBlockedUntil =
+      at +
+      V447_HISTORICAL_LOG_403_COOLDOWN_MS;
+  }
+}
+
+function reservesLensValuationReadinessV447(
+  state,
+  candidate,
+  poolKey
+) {
+  const priceVerified =
+    candidate
+      ?.market
+      ?.onChainMarketFoundationV438
+      ?.verifiedObservedExecutionPrice ===
+      true &&
+    safeNumber(
+      candidate
+        ?.market
+        ?.onChainMarketFoundationV438
+        ?.medianObservedPriceUsd
+    ) > 0;
+
+  if (
+    poolKey?.verified !==
+      true
+  ) {
+    return {
+      valuationReady: false,
+      priceVerified,
+      quoteUsdReady: false,
+      quoteType: null,
+      reason:
+        "POOLKEY_INCOMPLETE_V447"
+    };
+  }
+
+  const token =
+    normalize(
+      candidate?.address
+    );
+
+  const quote =
+    poolKey.currency0 === token
+      ? poolKey.currency1
+      : (
+          poolKey.currency1 === token
+            ? poolKey.currency0
+            : null
+        );
+
+  let quoteUsdReady =
+    false;
+
+  let quoteType =
+    null;
+
+  if (
+    quote ===
+      CANONICAL_USDG_V179
+  ) {
+    quoteUsdReady =
+      true;
+
+    quoteType =
+      "CANONICAL_USDG";
+  } else if (
+    quote === ZERO ||
+    quote ===
+      CANONICAL_WETH_V179
+  ) {
+    const reference =
+      bestVerifiedWethUsdGReferenceV195(
+        state
+      );
+
+    quoteUsdReady =
+      reference?.verified ===
+      true &&
+      safeNumber(
+        reference?.priceUsdGPerWeth
+      ) > 0;
+
+    quoteType =
+      quote === ZERO
+        ? "NATIVE_ETH"
+        : "CANONICAL_WETH";
+  }
+
+  return {
+    valuationReady:
+      priceVerified &&
+      quoteUsdReady,
+    priceVerified,
+    quoteUsdReady,
+    quoteType,
+    reason:
+      priceVerified &&
+      quoteUsdReady
+        ? "VALUATION_READY_V447"
+        : (
+            !priceVerified
+              ? "V438_PRICE_NOT_READY_V447"
+              : "QUOTE_USD_REFERENCE_NOT_READY_V447"
+          )
+  };
+}
+
+/* =========================================================
    V443 HISTORICAL IMMUTABLE POOLKEY RECOVERY
    ========================================================= */
 
@@ -2828,6 +3040,60 @@ async function recoverHistoricalPoolKeyV443(
     };
   }
 
+  if (
+    historicalLogChainstackBlockedV447(
+      state
+    )
+  ) {
+    const capability =
+      historicalLogCapabilityRootV447(
+        state
+      );
+
+    return {
+      ...base,
+      candidateAddress:
+        address,
+      symbol:
+        candidate?.symbol ||
+        null,
+      poolId,
+      blockNumber,
+      persistedSource,
+      status:
+        "CHAINSTACK_HISTORICAL_LOGS_403_COOLDOWN_V447",
+      provider:
+        "CHAINSTACK",
+      externalRequestsUsed:
+        0,
+      chainstackBlockedUntil:
+        capability
+          ?.chainstackBlockedUntil ||
+        null
+    };
+  }
+
+  const chainstackUrl =
+    chainstackRpcUrlV431(
+      env
+    );
+
+  if (!chainstackUrl) {
+    return {
+      ...base,
+      candidateAddress:
+        address,
+      symbol:
+        candidate?.symbol ||
+        null,
+      poolId,
+      blockNumber,
+      persistedSource,
+      status:
+        "CHAINSTACK_NOT_CONFIGURED_FOR_HISTORICAL_LOG_RECOVERY_V447"
+    };
+  }
+
   const before =
     safeNumber(
       budget?.totalUsed
@@ -2841,25 +3107,60 @@ async function recoverHistoricalPoolKeyV443(
       )
     ).toString(16);
 
-  const call =
-    await rpc(
-      env,
-      "eth_getLogs",
-      [{
-        fromBlock:
-          blockHex,
-        toBlock:
-          blockHex,
-        address:
-          POOL_MANAGER,
-        topics: [
-          INITIALIZE_TOPIC,
-          poolId
-        ]
-      }],
-      budget,
-      "analysis"
+  let rawResult =
+    null;
+
+  let callError =
+    null;
+
+  try {
+    rawResult =
+      await rpcCall(
+        chainstackUrl,
+        "eth_getLogs",
+        [{
+          fromBlock:
+            blockHex,
+          toBlock:
+            blockHex,
+          address:
+            POOL_MANAGER,
+          topics: [
+            INITIALIZE_TOPIC,
+            poolId
+          ]
+        }],
+        budget,
+        "analysis"
+      );
+
+    recordHistoricalLogResultV447(
+      state,
+      {
+        success: true
+      }
     );
+  } catch (error) {
+    callError =
+      errorString(error);
+
+    const http403 =
+      String(
+        callError || ""
+      ).includes(
+        "HTTP_403"
+      );
+
+    recordHistoricalLogResultV447(
+      state,
+      {
+        success: false,
+        http403,
+        error:
+          callError
+      }
+    );
+  }
 
   const used =
     Math.max(
@@ -2869,10 +3170,12 @@ async function recoverHistoricalPoolKeyV443(
       ) - before
     );
 
-  if (
-    call?.result === null ||
-    call?.result === undefined
-  ) {
+  if (callError) {
+    const capability =
+      historicalLogCapabilityRootV447(
+        state
+      );
+
     return {
       ...base,
       attempted: true,
@@ -2887,23 +3190,33 @@ async function recoverHistoricalPoolKeyV443(
       blockNumber,
       persistedSource,
       status:
-        "HISTORICAL_INITIALIZE_RPC_FAILED_V443",
+        String(
+          callError
+        ).includes(
+          "HTTP_403"
+        )
+          ? "CHAINSTACK_HISTORICAL_LOGS_HTTP_403_GUARDED_V447"
+          : "HISTORICAL_INITIALIZE_CHAINSTACK_ONLY_FAILED_V447",
       provider:
-        call?.provider ||
-        null,
+        "CHAINSTACK",
       error:
-        call?.error ||
-        null,
+        callError,
       externalRequestsUsed:
-        used
+        used,
+      fallbackProvidersAttempted:
+        0,
+      chainstackBlockedUntil:
+        capability
+          ?.chainstackBlockedUntil ||
+        null
     };
   }
 
   const logs =
     Array.isArray(
-      call.result
+      rawResult
     )
-      ? call.result
+      ? rawResult
       : [];
 
   let resolvedPool =
@@ -2952,8 +3265,7 @@ async function recoverHistoricalPoolKeyV443(
           ? "INITIALIZE_FOUND_BUT_POOLKEY_INCOMPLETE_V443"
           : "NO_INITIALIZE_AT_PERSISTED_BLOCK_V443",
       provider:
-        call?.provider ||
-        null,
+        "CHAINSTACK",
       logsReturned:
         logs.length,
       externalRequestsUsed:
@@ -3022,8 +3334,7 @@ async function recoverHistoricalPoolKeyV443(
         ? "HISTORICAL_POOLKEY_RECOVERED_V443"
         : "HISTORICAL_INITIALIZE_DECODED_BUT_REGISTRY_INCOMPLETE_V443",
     provider:
-      call?.provider ||
-      null,
+      "CHAINSTACK",
     logsReturned:
       logs.length,
     resolved:
@@ -3876,12 +4187,18 @@ async function reservesLensLiquidityDiagnosticV441(
       : [])
       .map(
         candidate => {
-          const priceVerified =
-            candidate
-              ?.market
-              ?.onChainMarketFoundationV438
-              ?.verifiedObservedExecutionPrice ===
-              true;
+          const key =
+            completePoolKeyV441(
+              state,
+              candidate
+            );
+
+          const readiness =
+            reservesLensValuationReadinessV447(
+              state,
+              candidate,
+              key
+            );
 
           const marketVerified =
             candidate
@@ -3891,8 +4208,30 @@ async function reservesLensLiquidityDiagnosticV441(
 
           return {
             candidate,
+            key,
+            readiness,
             score:
-              (priceVerified ? 1000 : 0) +
+              (
+                readiness
+                  ?.valuationReady ===
+                  true
+                  ? 5000
+                  : 0
+              ) +
+              (
+                readiness
+                  ?.priceVerified ===
+                  true
+                  ? 1000
+                  : 0
+              ) +
+              (
+                readiness
+                  ?.quoteUsdReady ===
+                  true
+                  ? 500
+                  : 0
+              ) +
               (marketVerified ? 200 : 0) +
               safeNumber(
                 candidate?.analysisPriority
@@ -3911,15 +4250,15 @@ async function reservesLensLiquidityDiagnosticV441(
   let poolKey =
     null;
 
+  let selectedReadinessV447 =
+    null;
+
   for (
     const row
     of ranked
   ) {
     const key =
-      completePoolKeyV441(
-        state,
-        row.candidate
-      );
+      row?.key;
 
     if (
       key?.verified === true
@@ -3929,6 +4268,10 @@ async function reservesLensLiquidityDiagnosticV441(
 
       poolKey =
         key;
+
+      selectedReadinessV447 =
+        row?.readiness ||
+        null;
 
       break;
     }
@@ -4184,7 +4527,9 @@ async function reservesLensLiquidityDiagnosticV441(
     diagnosticOnly:
       true,
     promotionApplied:
-      false
+      false,
+    valuationTargetingV447:
+      selectedReadinessV447
   };
 
   return {
@@ -4214,6 +4559,8 @@ async function reservesLensLiquidityDiagnosticV441(
       valuation,
     externalRequestsUsed:
       used,
+    valuationTargetingV447:
+      selectedReadinessV447,
     managedRpcRoutingV442: {
       enabled: true,
       preferredProvider:
@@ -58185,6 +58532,16 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    historicalLogGuardAndValuationTargetingV447: {
+      enabled: true,
+      historicalProvider: "CHAINSTACK_ONLY",
+      maxHistoricalRequestsPerScan: 1,
+      historical403CooldownMs:
+        V447_HISTORICAL_LOG_403_COOLDOWN_MS,
+      fallbackFanoutDisabled: true,
+      valuationReadyReservesLensPriority: true,
+      requestCeilingChanged: false
+    },
     historicalPoolKeyRecoveryV443: {
       enabled: true,
       exactPoolIdInitializeFilter: true,
@@ -63875,6 +64232,34 @@ for (
 
     historicalPoolKeyRecoveryV443:
       historicalPoolKeyRecoveryResultV443,
+
+    historicalLogGuardAndValuationTargetingV447: {
+      enabled: true,
+      historicalRecoveryProvider:
+        "CHAINSTACK_ONLY",
+      historicalRecoveryFallbackFanout:
+        false,
+      historical403CooldownMs:
+        V447_HISTORICAL_LOG_403_COOLDOWN_MS,
+      maxHistoricalRecoveryRequestsPerScan:
+        1,
+      reservesLensValuationReadyPriority:
+        true,
+      requiresV438PriceForFullIndependentValuation:
+        true,
+      allowsCanonicalUsdGQuote:
+        true,
+      allowsFreshCachedWethUsdGQuote:
+        true,
+      requestCeilingChanged:
+        false,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      marketPromotionChanged:
+        false
+    },
 
     wethUsdGReferenceReuseFixV446: {
       enabled: true,
