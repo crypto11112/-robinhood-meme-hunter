@@ -1,6 +1,14 @@
 /**
- * Robinhood Chain Meme Hunter — V471
- * AUTHORITATIVE RUNTIME VERSION: V471
+ * Robinhood Chain Meme Hunter — V472
+ * AUTHORITATIVE RUNTIME VERSION: V472
+ *
+ * V472 COSMETIC HOTFIX ONLY:
+ * - /launches heading now uses the runtime VERSION constant instead of a
+ *   hard-coded V470 label;
+ * - future version bumps will therefore display automatically;
+ * - V470 launch-meter logic, V471 newline fix, V469 fresh-candidate priority,
+ *   scoring, qualification, provider routing, request ceilings and Telegram
+ *   thresholds are unchanged.
  *
  * V471 HOTFIX ONLY:
  * - fixes /launches Telegram formatting so newline separators render as real
@@ -1707,7 +1715,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V471";
+const VERSION = "V472";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -82105,7 +82113,7 @@ function verifiedLaunchMeterTelegramMessageV470(state) {
         : "BUILDING";
 
   return [
-    "🚀 <b>Verified Robinhood Launch Meter — V470</b>",
+    `🚀 <b>Verified Robinhood Launch Meter — ${escapeHtml(VERSION)}</b>`,
     "",
     `Rolling 24h: <b>${fmtCount(
       meter?.rolling24hUniqueVerifiedLaunches
