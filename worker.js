@@ -1,6 +1,33 @@
 /**
- * Robinhood Chain Meme Hunter — V490
- * AUTHORITATIVE RUNTIME VERSION: V490
+ * Robinhood Chain Meme Hunter — V491
+ * AUTHORITATIVE RUNTIME VERSION: V491
+ *
+ * V491 VERIFIED DEPLOYMENT-SOURCE TRANSACTION MECHANISM FINGERPRINT:
+ * - preserves all confirmed-working V490/V489/V488/V487/V486/V485/V484/V483;
+ * - consumes V490 verified deployment-source contract profiles;
+ * - queries the authenticated Blockscout Pro source-address transaction route:
+ *     GET /4663/api/v2/addresses/{deploymentSource}/transactions?apikey=...
+ * - captures up to the provider-returned page of source activity without
+ *   claiming it is the first/earliest page;
+ * - records callers, transaction targets, decoded method names, 4-byte input
+ *   selectors, success/error flags, hashes, block numbers and timestamps;
+ * - separately counts transactions CALLING the verified deployment-source
+ *   contract versus transactions SENT BY the source;
+ * - builds recurring caller/method/selector evidence per verified source;
+ * - preserves the exact V489 CREATE/CREATE2 token-deployment evidence and V490
+ *   verified contract name alongside the activity fingerprint;
+ * - contract name "LaunchTokenDeployer" is evidence of verified contract
+ *   metadata only; V491 still does NOT infer launchpad/factory/router identity;
+ * - no method name or selector is treated as proof of a launch mechanism until
+ *   it is independently linked to exact token creation evidence;
+ * - V491 is one request, processed once after a real provider response, and
+ *   gets backlog priority before lower-evidence V490/V489/V486 work;
+ * - V487 fairness remains authoritative; current/live V485 remains absolute
+ *   priority and fresh V483 retains normal priority between fairness grants;
+ * - max ONE secondary origin/source diagnostic request per scan remains;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, launch meter,
+ *   V476 source promotion, or fresh-analysis-order changes.
  *
  * V490 VERIFIED DEPLOYMENT-SOURCE IDENTITY PROBE:
  * - preserves all confirmed-working V489/V488/V487/V486/V485/V484/V483 logic;
@@ -2092,7 +2119,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V490";
+const VERSION = "V491";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71238,6 +71265,11 @@ for (
         state
       ),
 
+    deploymentSourceMechanismFingerprintV491:
+      deploymentSourceMechanismFingerprintSnapshotV491(
+        state
+      ),
+
     deploymentSourceIdentityV490:
       deploymentSourceIdentitySnapshotV490(
         state
@@ -71440,7 +71472,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71464,6 +71496,51 @@ for (
       telegramThresholdChanged:
         false,
       launchSourcePromotion:
+        false
+    },
+
+    verifiedDeploymentSourceMechanismFingerprintV491: {
+      enabled: true,
+      measurementOnly: true,
+      inputEvidence:
+        "V490_VERIFIED_DEPLOYMENT_SOURCE_IS_CONTRACT",
+      provider:
+        "BLOCKSCOUT_PRO",
+      endpoint:
+        "/api/v2/addresses/{verifiedDeploymentSource}/transactions",
+      captures:
+        "CALLERS_TARGETS_METHODS_SELECTORS_TX_HASHES_BLOCKS_TIMESTAMPS_DIRECTION_SUCCESS",
+      providerPageOrderingAssumed:
+        false,
+      methodNameMeansLaunchMechanism:
+        false,
+      selectorMeansLaunchMechanism:
+        false,
+      exactCreationLinkStillRequired:
+        true,
+      recurringSourceEvidenceStillRequired:
+        true,
+      priority:
+        "BEFORE_NEW_V490_V489_V486_WORK",
+      processedOnceAfterRealResponse:
+        true,
+      maxRequestsPerScan:
+        1,
+      maxSecondaryOriginDiagnosticRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      launchSourcePromotion:
+        false,
+      launchMeterMutation:
+        false,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
         false
     },
 
@@ -86752,6 +86829,100 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
   }
 
   /*
+   * V491 SOURCE-MECHANISM FINGERPRINT ROUTE:
+   * A V490-proven source contract is one evidence step closer to becoming a
+   * reusable live detector. Capture its contract transaction activity before
+   * starting lower-evidence source/origin work.
+   */
+  const sourceMechanismCandidateV491 =
+    selectOldestSourceMechanismFingerprintCandidateV491(
+      state
+    );
+
+  if (sourceMechanismCandidateV491) {
+    const mechanismV491 =
+      await runDeploymentSourceMechanismFingerprintV491({
+        env,
+        state,
+        budget,
+        candidate:
+          sourceMechanismCandidateV491
+      });
+
+    telemetry.deploymentSourceMechanismFingerprintV491 =
+      mechanismV491;
+
+    telemetry.selectedFromPersistedVerifiedOrigins =
+      true;
+    telemetry.selectedToken =
+      mechanismV491?.evidenceToken ||
+      null;
+    telemetry.selectedCreator =
+      mechanismV491?.selectedSource ||
+      null;
+    telemetry.selectedCreationTransactionHash =
+      sourceMechanismCandidateV491
+        ?.sourceCreationTransactionHash ||
+      null;
+    telemetry.attempted =
+      mechanismV491?.attempted ===
+      true;
+    telemetry.requestConsumed =
+      mechanismV491
+        ?.requestConsumed === true;
+    telemetry.processedAfterAttempt =
+      mechanismV491
+        ?.processedAfterAttempt ===
+      true;
+    telemetry.status =
+      mechanismV491?.status ||
+      "V491_STATUS_UNAVAILABLE";
+
+    if (
+      mechanismV491?.attempted === true &&
+      v483DeferredForFairnessV487
+    ) {
+      telemetry.fairnessV487
+        .fairnessGrantThisScan = true;
+
+      fairness.fairnessGrants =
+        safeNumber(
+          fairness.fairnessGrants
+        ) + 1;
+
+      fairness.lastFairnessGrantAt =
+        Date.now();
+
+      fairness.lastFairnessGrantToken =
+        mechanismV491
+          ?.evidenceToken ||
+        null;
+
+      fairness.consecutiveV483BlocksOfV486 =
+        0;
+
+      fairness.lastDecision =
+        "V491_FAIRNESS_GRANTED_TO_DEPLOYMENT_SOURCE_MECHANISM_FINGERPRINT";
+
+      fairness.lastDecisionAt =
+        Date.now();
+    }
+
+    root.lastStatus =
+      `V486_ROUTED_TO_V491:${telemetry.status}`;
+
+    return telemetry;
+  }
+
+  telemetry.deploymentSourceMechanismFingerprintV491 = {
+    enabled: true,
+    measurementOnly: true,
+    attempted: false,
+    status:
+      "V491_NO_UNPROCESSED_VERIFIED_SOURCE_CONTRACT"
+  };
+
+  /*
    * V490 SOURCE-IDENTITY ROUTE:
    * Once V489 has produced an exact deployment source, profile that source
    * before starting another lower-evidence origin. This is one request and
@@ -87491,6 +87662,1034 @@ function persistedOriginRawTraceBacklogSnapshotV486(
 
 
 
+
+
+function ensureDeploymentSourceMechanismFingerprintV491(
+  state
+) {
+  if (
+    !state.deploymentSourceMechanismFingerprintV491 ||
+    typeof state.deploymentSourceMechanismFingerprintV491 !==
+      "object"
+  ) {
+    state.deploymentSourceMechanismFingerprintV491 = {
+      enabled: true,
+      measurementOnly: true,
+      monitorStartedAt: Date.now(),
+      scansObserved: 0,
+      requestsAttempted: 0,
+      requestsSucceeded: 0,
+      processedSources: {},
+      sourceFingerprints: {},
+      lastSource: null,
+      lastEvidenceToken: null,
+      lastStatus: null,
+      lastHttpStatus: null,
+      lastAttemptAt: null
+    };
+  }
+
+  const root =
+    state.deploymentSourceMechanismFingerprintV491;
+
+  root.processedSources =
+    root.processedSources &&
+    typeof root.processedSources === "object"
+      ? root.processedSources
+      : {};
+
+  root.sourceFingerprints =
+    root.sourceFingerprints &&
+    typeof root.sourceFingerprints === "object"
+      ? root.sourceFingerprints
+      : {};
+
+  return root;
+}
+
+function pruneDeploymentSourceMechanismFingerprintV491(
+  state
+) {
+  const root =
+    ensureDeploymentSourceMechanismFingerprintV491(
+      state
+    );
+
+  const now = Date.now();
+  const maxAgeMs =
+    14 * 24 * 60 * 60 * 1000;
+
+  root.processedSources =
+    Object.fromEntries(
+      Object.entries(
+        root.processedSources || {}
+      )
+        .filter(([, row]) => {
+          const at =
+            safeNumber(
+              row?.attemptedAt
+            );
+
+          return (
+            at > 0 &&
+            now - at <= maxAgeMs
+          );
+        })
+        .sort(
+          (a, b) =>
+            safeNumber(
+              b?.[1]?.attemptedAt
+            ) -
+            safeNumber(
+              a?.[1]?.attemptedAt
+            )
+        )
+        .slice(0, 200)
+    );
+
+  root.sourceFingerprints =
+    Object.fromEntries(
+      Object.entries(
+        root.sourceFingerprints || {}
+      )
+        .filter(([, row]) => {
+          const at =
+            safeNumber(
+              row?.observedAt
+            );
+
+          return (
+            at > 0 &&
+            now - at <= maxAgeMs
+          );
+        })
+        .sort(
+          (a, b) =>
+            safeNumber(
+              b?.[1]?.observedAt
+            ) -
+            safeNumber(
+              a?.[1]?.observedAt
+            )
+        )
+        .slice(0, 100)
+    );
+
+  return root;
+}
+
+function sourceMechanismFingerprintCandidatesV491(
+  state
+) {
+  const v490 =
+    pruneDeploymentSourceIdentityV490(
+      state
+    );
+
+  const root =
+    pruneDeploymentSourceMechanismFingerprintV491(
+      state
+    );
+
+  const rows = [];
+
+  for (
+    const [source, profile] of
+    Object.entries(
+      v490.sourceProfiles || {}
+    )
+  ) {
+    const cleanSource =
+      normalize(source);
+
+    const token =
+      normalize(
+        profile?.deployedToken
+      );
+
+    if (
+      !isAddress(cleanSource) ||
+      profile?.isContract !== true ||
+      root.processedSources[
+        cleanSource
+      ]
+    ) {
+      continue;
+    }
+
+    rows.push({
+      source:
+        cleanSource,
+      evidenceToken:
+        isAddress(token)
+          ? token
+          : null,
+      contractName:
+        typeof profile
+          ?.contractName ===
+          "string"
+          ? profile.contractName
+          : null,
+      blockscoutVerifiedContract:
+        profile
+          ?.blockscoutVerifiedContract ===
+        true,
+      exactV489CreationKind:
+        profile
+          ?.exactV489CreationKind ||
+        null,
+      sourceCreator:
+        normalize(
+          profile
+            ?.sourceCreator ||
+          ""
+        ),
+      sourceCreationTransactionHash:
+        String(
+          profile
+            ?.sourceCreationTransactionHash ||
+          ""
+        )
+          .trim()
+          .toLowerCase(),
+      observedAt:
+        safeNumber(
+          profile?.observedAt
+        )
+    });
+  }
+
+  rows.sort((a, b) => {
+    const aAt =
+      safeNumber(
+        a?.observedAt
+      );
+
+    const bAt =
+      safeNumber(
+        b?.observedAt
+      );
+
+    if (aAt !== bAt) {
+      return aAt - bAt;
+    }
+
+    return a.source.localeCompare(
+      b.source
+    );
+  });
+
+  return rows;
+}
+
+function selectOldestSourceMechanismFingerprintCandidateV491(
+  state
+) {
+  return (
+    sourceMechanismFingerprintCandidatesV491(
+      state
+    )[0] || null
+  );
+}
+
+function eligibleSourceMechanismFingerprintCountV491(
+  state
+) {
+  return sourceMechanismFingerprintCandidatesV491(
+    state
+  ).length;
+}
+
+function blockscoutProAddressTransactionsUrlV491(
+  env,
+  address
+) {
+  const key =
+    String(
+      env?.BLOCKSCOUT_PRO_API_KEY ||
+      ""
+    ).trim();
+
+  const clean =
+    normalize(address);
+
+  if (
+    !key ||
+    !isAddress(clean)
+  ) {
+    return null;
+  }
+
+  return (
+    `https://api.blockscout.com/4663/api/v2/addresses/${clean}/transactions` +
+    `?apikey=${encodeURIComponent(key)}`
+  );
+}
+
+function transactionAddressHashV491(
+  value
+) {
+  if (
+    typeof value === "string"
+  ) {
+    const clean =
+      normalize(value);
+
+    return isAddress(clean)
+      ? clean
+      : null;
+  }
+
+  const clean =
+    normalize(
+      value?.hash ||
+      value?.address ||
+      ""
+    );
+
+  return isAddress(clean)
+    ? clean
+    : null;
+}
+
+function selectorFromInputV491(
+  input
+) {
+  const clean =
+    String(
+      input || ""
+    )
+      .trim()
+      .toLowerCase();
+
+  if (
+    /^0x[a-f0-9]{8,}$/.test(clean)
+  ) {
+    return clean.slice(0, 10);
+  }
+
+  return null;
+}
+
+function blockscoutMethodNameV491(
+  row
+) {
+  const candidates = [
+    row?.method,
+    row?.method_name,
+    row?.decoded_input
+      ?.method_call,
+    row?.decoded_input
+      ?.method_id
+  ];
+
+  for (const value of candidates) {
+    if (
+      typeof value ===
+        "string" &&
+      value.trim()
+    ) {
+      return value
+        .trim()
+        .slice(0, 180);
+    }
+  }
+
+  return null;
+}
+
+function compactCountMapV491(
+  map,
+  max = 20
+) {
+  return Object.entries(
+    map || {}
+  )
+    .map(([key, value]) => ({
+      key,
+      count:
+        safeNumber(value)
+    }))
+    .sort(
+      (a, b) =>
+        b.count - a.count ||
+        a.key.localeCompare(
+          b.key
+        )
+    )
+    .slice(0, max);
+}
+
+function parseSourceMechanismTransactionsV491({
+  body,
+  source,
+  evidenceToken,
+  contractName,
+  exactV489CreationKind
+}) {
+  const cleanSource =
+    normalize(source);
+
+  const rows =
+    Array.isArray(body?.items)
+      ? body.items
+      : (
+          Array.isArray(body)
+            ? body
+            : []
+        );
+
+  const callers = {};
+  const targets = {};
+  const incomingMethods = {};
+  const outgoingMethods = {};
+  const incomingSelectors = {};
+  const outgoingSelectors = {};
+
+  let incomingToSource = 0;
+  let outgoingFromSource = 0;
+  let selfCalls = 0;
+  let successfulRows = 0;
+  let failedRows = 0;
+
+  const sampleRows = [];
+
+  for (
+    let index = 0;
+    index < rows.length;
+    index++
+  ) {
+    const row =
+      rows[index] || {};
+
+    const from =
+      transactionAddressHashV491(
+        row?.from
+      );
+
+    const to =
+      transactionAddressHashV491(
+        row?.to
+      );
+
+    const hash =
+      String(
+        row?.hash || ""
+      )
+        .trim()
+        .toLowerCase();
+
+    const input =
+      String(
+        row?.raw_input ??
+        row?.input ??
+        ""
+      )
+        .trim()
+        .toLowerCase();
+
+    const selector =
+      selectorFromInputV491(
+        input
+      );
+
+    const method =
+      blockscoutMethodNameV491(
+        row
+      );
+
+    const incoming =
+      isAddress(to) &&
+      to === cleanSource;
+
+    const outgoing =
+      isAddress(from) &&
+      from === cleanSource;
+
+    const success =
+      row?.status === "ok" ||
+      row?.status === "success" ||
+      row?.success === true ||
+      (
+        row?.status == null &&
+        row?.error == null
+      );
+
+    if (success) {
+      successfulRows++;
+    } else {
+      failedRows++;
+    }
+
+    if (incoming) {
+      incomingToSource++;
+
+      if (isAddress(from)) {
+        callers[from] =
+          safeNumber(
+            callers[from]
+          ) + 1;
+      }
+
+      if (method) {
+        incomingMethods[
+          method
+        ] =
+          safeNumber(
+            incomingMethods[
+              method
+            ]
+          ) + 1;
+      }
+
+      if (selector) {
+        incomingSelectors[
+          selector
+        ] =
+          safeNumber(
+            incomingSelectors[
+              selector
+            ]
+          ) + 1;
+      }
+    }
+
+    if (outgoing) {
+      outgoingFromSource++;
+
+      if (isAddress(to)) {
+        targets[to] =
+          safeNumber(
+            targets[to]
+          ) + 1;
+      }
+
+      if (method) {
+        outgoingMethods[
+          method
+        ] =
+          safeNumber(
+            outgoingMethods[
+              method
+            ]
+          ) + 1;
+      }
+
+      if (selector) {
+        outgoingSelectors[
+          selector
+        ] =
+          safeNumber(
+            outgoingSelectors[
+              selector
+            ]
+          ) + 1;
+      }
+    }
+
+    if (
+      incoming &&
+      outgoing
+    ) {
+      selfCalls++;
+    }
+
+    if (
+      sampleRows.length < 25
+    ) {
+      sampleRows.push({
+        index,
+        hash:
+          /^0x[a-f0-9]{64}$/.test(
+            hash
+          )
+            ? hash
+            : null,
+        blockNumber:
+          safeNumber(
+            row?.block ??
+            row?.block_number
+          ) || null,
+        timestamp:
+          row?.timestamp ||
+          row?.block_timestamp ||
+          null,
+        from:
+          isAddress(from)
+            ? from
+            : null,
+        to:
+          isAddress(to)
+            ? to
+            : null,
+        direction:
+          incoming &&
+          outgoing
+            ? "SELF"
+            : (
+                incoming
+                  ? "CALL_TO_SOURCE"
+                  : (
+                      outgoing
+                        ? "SENT_BY_SOURCE"
+                        : "RELATED_OTHER"
+                    )
+              ),
+        method,
+        selector,
+        success,
+        error:
+          row?.error != null
+            ? String(
+                row.error
+              ).slice(
+                0,
+                180
+              )
+            : null
+      });
+    }
+  }
+
+  return {
+    deploymentSource:
+      isAddress(cleanSource)
+        ? cleanSource
+        : null,
+    evidenceToken:
+      isAddress(
+        normalize(
+          evidenceToken
+        )
+      )
+        ? normalize(
+            evidenceToken
+          )
+        : null,
+    verifiedContractName:
+      contractName || null,
+    exactV489CreationKind:
+      exactV489CreationKind ||
+      null,
+    transactionRowsReturned:
+      rows.length,
+    pageOrdering:
+      "PROVIDER_RETURN_ORDER_NOT_ASSUMED_EARLIEST_OR_NEWEST",
+    incomingCallsToSource:
+      incomingToSource,
+    outgoingTransactionsFromSource:
+      outgoingFromSource,
+    selfCalls,
+    successfulRows,
+    failedRows,
+    topIncomingCallers:
+      compactCountMapV491(
+        callers
+      ),
+    topOutgoingTargets:
+      compactCountMapV491(
+        targets
+      ),
+    topIncomingMethods:
+      compactCountMapV491(
+        incomingMethods
+      ),
+    topOutgoingMethods:
+      compactCountMapV491(
+        outgoingMethods
+      ),
+    topIncomingSelectors:
+      compactCountMapV491(
+        incomingSelectors
+      ),
+    topOutgoingSelectors:
+      compactCountMapV491(
+        outgoingSelectors
+      ),
+    sampleTransactions:
+      sampleRows,
+    reusableMechanismProof:
+      false,
+    launchpadIdentity:
+      "DATA UNVERIFIED",
+    factoryIdentity:
+      "DATA UNVERIFIED",
+    routerIdentity:
+      "DATA UNVERIFIED",
+    interpretation:
+      "SOURCE_ACTIVITY_FINGERPRINT_ONLY_METHODS_AND_SELECTORS_NOT_CREATION_PROOF_V491",
+    launchSourcePromoted:
+      false
+  };
+}
+
+async function runDeploymentSourceMechanismFingerprintV491({
+  env,
+  state,
+  budget,
+  candidate
+}) {
+  const root =
+    pruneDeploymentSourceMechanismFingerprintV491(
+      state
+    );
+
+  root.scansObserved =
+    safeNumber(
+      root.scansObserved
+    ) + 1;
+
+  const telemetry = {
+    enabled: true,
+    measurementOnly: true,
+    promotionAllowed: false,
+    selectedSource: null,
+    evidenceToken: null,
+    contractName: null,
+    attempted: false,
+    requestConsumed: false,
+    provider:
+      "BLOCKSCOUT_PRO",
+    endpointV491:
+      "https://api.blockscout.com/4663/api/v2/addresses/{deploymentSource}/transactions?apikey=[REDACTED]",
+    fingerprintResult: null,
+    httpStatus: null,
+    processedAfterAttempt: false,
+    maxRequestsThisScan: 1,
+    hardRequestLimit: 42,
+    launchSourcePromoted: false,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false,
+    status: null
+  };
+
+  if (!candidate) {
+    telemetry.status =
+      "V491_NO_UNPROCESSED_VERIFIED_SOURCE_CONTRACT";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const source =
+    normalize(
+      candidate?.source
+    );
+
+  const token =
+    normalize(
+      candidate?.evidenceToken
+    );
+
+  telemetry.selectedSource =
+    source;
+  telemetry.evidenceToken =
+    isAddress(token)
+      ? token
+      : null;
+  telemetry.contractName =
+    candidate?.contractName ||
+    null;
+
+  root.lastSource =
+    source;
+  root.lastEvidenceToken =
+    isAddress(token)
+      ? token
+      : null;
+
+  const url =
+    blockscoutProAddressTransactionsUrlV491(
+      env,
+      source
+    );
+
+  if (!url) {
+    telemetry.status =
+      "V491_BLOCKSCOUT_PRO_NOT_CONFIGURED";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const spare =
+    consumeReleasedGlobalSpareV478(
+      budget,
+      "BLOCKSCOUT_PRO_DEPLOYMENT_SOURCE_TRANSACTIONS_V491",
+      1
+    );
+
+  if (spare?.ok !== true) {
+    telemetry.status =
+      `V491_BUDGET_UNAVAILABLE:${spare?.reason || "UNKNOWN"}`;
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  telemetry.attempted = true;
+  telemetry.requestConsumed = true;
+
+  root.requestsAttempted =
+    safeNumber(
+      root.requestsAttempted
+    ) + 1;
+
+  const attemptedAt =
+    Date.now();
+
+  root.lastAttemptAt =
+    attemptedAt;
+
+  const controller =
+    new AbortController();
+
+  const timer =
+    setTimeout(
+      () =>
+        controller.abort(),
+      6000
+    );
+
+  try {
+    const response =
+      await fetch(
+        url,
+        {
+          method: "GET",
+          headers: {
+            accept:
+              "application/json"
+          },
+          signal:
+            controller.signal
+        }
+      );
+
+    telemetry.httpStatus =
+      response.status;
+
+    root.lastHttpStatus =
+      response.status;
+
+    if (!response.ok) {
+      telemetry.status =
+        `V491_HTTP_${response.status}`;
+
+      root.lastStatus =
+        telemetry.status;
+
+      root.processedSources[
+        source
+      ] = {
+        source,
+        evidenceToken:
+          telemetry.evidenceToken,
+        attemptedAt,
+        httpStatus:
+          response.status,
+        status:
+          telemetry.status,
+        processedOnce:
+          true,
+        retryAutomatically:
+          false
+      };
+
+      telemetry.processedAfterAttempt =
+        true;
+
+      return telemetry;
+    }
+
+    const body =
+      await response.json();
+
+    root.requestsSucceeded =
+      safeNumber(
+        root.requestsSucceeded
+      ) + 1;
+
+    const fingerprint =
+      parseSourceMechanismTransactionsV491({
+        body,
+        source,
+        evidenceToken:
+          telemetry.evidenceToken,
+        contractName:
+          candidate?.contractName ||
+          null,
+        exactV489CreationKind:
+          candidate
+            ?.exactV489CreationKind ||
+          null
+      });
+
+    const persisted = {
+      ...fingerprint,
+      observedAt:
+        attemptedAt,
+      provider:
+        "BLOCKSCOUT_PRO_V2_ADDRESS_TRANSACTIONS_V491",
+      evidenceStandard:
+        "VERIFIED_SOURCE_CONTRACT_TRANSACTION_ACTIVITY_FINGERPRINT_V491"
+    };
+
+    root.sourceFingerprints[
+      source
+    ] = persisted;
+
+    root.processedSources[
+      source
+    ] = {
+      source,
+      evidenceToken:
+        telemetry.evidenceToken,
+      attemptedAt,
+      httpStatus:
+        response.status,
+      transactionRowsReturned:
+        safeNumber(
+          fingerprint
+            ?.transactionRowsReturned
+        ),
+      incomingCallsToSource:
+        safeNumber(
+          fingerprint
+            ?.incomingCallsToSource
+        ),
+      outgoingTransactionsFromSource:
+        safeNumber(
+          fingerprint
+            ?.outgoingTransactionsFromSource
+        ),
+      status:
+        "V491_VERIFIED_SOURCE_ACTIVITY_FINGERPRINT_CAPTURED",
+      processedOnce:
+        true,
+      retryAutomatically:
+        false
+    };
+
+    telemetry.fingerprintResult =
+      fingerprint;
+
+    telemetry.processedAfterAttempt =
+      true;
+
+    telemetry.status =
+      "V491_VERIFIED_SOURCE_ACTIVITY_FINGERPRINT_CAPTURED";
+
+    root.lastStatus =
+      telemetry.status;
+
+    pruneDeploymentSourceMechanismFingerprintV491(
+      state
+    );
+
+    return telemetry;
+  } catch (error) {
+    telemetry.status =
+      `V491_FETCH_ERROR:${errorString(error)}`;
+
+    root.lastStatus =
+      telemetry.status;
+
+    /*
+     * Transport failures remain retryable; no authoritative response arrived.
+     */
+    return telemetry;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function deploymentSourceMechanismFingerprintSnapshotV491(
+  state
+) {
+  const root =
+    pruneDeploymentSourceMechanismFingerprintV491(
+      state
+    );
+
+  const fingerprints =
+    Object.values(
+      root.sourceFingerprints || {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.observedAt
+          ) -
+          safeNumber(
+            a?.observedAt
+          )
+      );
+
+  return {
+    enabled: true,
+    measurementOnly: true,
+    monitorStartedAt:
+      safeNumber(
+        root.monitorStartedAt
+      ) || null,
+    scansObserved:
+      safeNumber(
+        root.scansObserved
+      ),
+    requestsAttempted:
+      safeNumber(
+        root.requestsAttempted
+      ),
+    requestsSucceeded:
+      safeNumber(
+        root.requestsSucceeded
+      ),
+    processedSourceCount:
+      Object.keys(
+        root.processedSources ||
+        {}
+      ).length,
+    remainingEligibleSourceCount:
+      eligibleSourceMechanismFingerprintCountV491(
+        state
+      ),
+    retainedSourceFingerprints:
+      fingerprints.length,
+    recentSourceFingerprints:
+      fingerprints.slice(0, 20),
+    lastSource:
+      root.lastSource || null,
+    lastEvidenceToken:
+      root.lastEvidenceToken ||
+      null,
+    lastStatus:
+      root.lastStatus || null,
+    lastHttpStatus:
+      root.lastHttpStatus ?? null,
+    lastAttemptAt:
+      safeNumber(
+        root.lastAttemptAt
+      ) || null,
+    sourceActivityFingerprintMeansLaunchpad:
+      false,
+    exactTokenCreationLinkStillRequiredForMethodProof:
+      true,
+    launchSourcePromotionAllowed:
+      false,
+    oneSecondaryDiagnosticPerScan:
+      true,
+    hardGlobalLimitUnchanged:
+      42
+  };
+}
 
 function ensureDeploymentSourceIdentityV490(
   state
@@ -90719,6 +91918,9 @@ function eligiblePersistedOriginBacklogCountV487(
       state
     ) +
     eligibleDeploymentSourceIdentityCountV490(
+      state
+    ) +
+    eligibleSourceMechanismFingerprintCountV491(
       state
     )
   );
