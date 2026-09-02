@@ -1,6 +1,28 @@
 /**
- * Robinhood Chain Meme Hunter — V492
- * AUTHORITATIVE RUNTIME VERSION: V492
+ * Robinhood Chain Meme Hunter — V493
+ * AUTHORITATIVE RUNTIME VERSION: V493
+ *
+ * V493 EXACT LAUNCH-TRIGGER TARGET CONTRACT IDENTITY:
+ * - preserves all confirmed-working V492/V491/V490/V489/V488/V487/V486/V485/V484/V483;
+ * - consumes V492 exact creation-transaction trigger linkage;
+ * - profiles the exact outer target contract that received createLaunch /
+ *   selector 0x3feab1d8 in the same transaction already proven to CREATE2 the token;
+ * - uses the authenticated Blockscout Pro address-info route:
+ *     GET /4663/api/v2/addresses/{outerTarget}?apikey=...
+ * - captures exact response-address match, contract status, verified-contract
+ *   status, contract name, proxy type, implementation address(es), creator,
+ *   creation transaction, creation status, token metadata and public tags;
+ * - preserves the V492 outer caller, target, method, selector and exact-token
+ *   creation transaction hash as linked evidence;
+ * - target contract identity is stronger mechanism evidence, but one exact token
+ *   remains insufficient for automatic launchpad/factory/router promotion;
+ * - V493 gets backlog priority before V492/V491/V490/V489/V486 work;
+ * - current/live V485 remains absolute priority and V487 fairness remains
+ *   authoritative with fresh V483 normal priority between fairness grants;
+ * - max ONE secondary origin/source diagnostic request per scan remains;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, launch meter,
+ *   V476 source promotion, or fresh-analysis-order changes.
  *
  * V492 EXACT TOKEN-CREATION TRANSACTION TRIGGER LINKAGE:
  * - preserves all confirmed-working V491/V490/V489/V488/V487/V486/V485/V484/V483;
@@ -2142,7 +2164,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V492";
+const VERSION = "V493";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71288,6 +71310,11 @@ for (
         state
       ),
 
+    launchTriggerTargetIdentityV493:
+      launchTriggerTargetIdentitySnapshotV493(
+        state
+      ),
+
     exactCreationTriggerLinkageV492:
       exactCreationTriggerLinkageSnapshotV492(
         state
@@ -71500,7 +71527,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -71524,6 +71551,47 @@ for (
       telegramThresholdChanged:
         false,
       launchSourcePromotion:
+        false
+    },
+
+    exactLaunchTriggerTargetContractIdentityV493: {
+      enabled: true,
+      measurementOnly: true,
+      inputEvidence:
+        "V492_EXACT_CREATION_TRANSACTION_TRIGGER_LINKED",
+      provider:
+        "BLOCKSCOUT_PRO",
+      endpoint:
+        "/api/v2/addresses/{exactOuterTarget}",
+      captures:
+        "CONTRACT_STATUS_VERIFICATION_NAME_PROXY_IMPLEMENTATION_CREATOR_CREATION_TX_TAGS",
+      exactOuterTriggerPreserved:
+        "CALLER_TARGET_METHOD_SELECTOR_TX_HASH",
+      targetIdentityMeansLaunchpad:
+        false,
+      recurringIndependentTokenProofStillRequired:
+        true,
+      priority:
+        "BEFORE_V492_V491_V490_V489_V486_BACKLOG",
+      processedOnceAfterRealResponse:
+        true,
+      maxRequestsPerScan:
+        1,
+      maxSecondaryOriginDiagnosticRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      launchSourcePromotion:
+        false,
+      launchMeterMutation:
+        false,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
         false
     },
 
@@ -86902,6 +86970,98 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
   }
 
   /*
+   * V493 EXACT TRIGGER-TARGET IDENTITY ROUTE:
+   * Once V492 binds an exact token-creation transaction to an outer target and
+   * selector, profile that exact target before lower-evidence backlog work.
+   */
+  const launchTriggerTargetCandidateV493 =
+    selectOldestLaunchTriggerTargetIdentityCandidateV493(
+      state
+    );
+
+  if (launchTriggerTargetCandidateV493) {
+    const targetV493 =
+      await runLaunchTriggerTargetIdentityV493({
+        env,
+        state,
+        budget,
+        candidate:
+          launchTriggerTargetCandidateV493
+      });
+
+    telemetry.launchTriggerTargetIdentityV493 =
+      targetV493;
+
+    telemetry.selectedFromPersistedVerifiedOrigins =
+      true;
+    telemetry.selectedToken =
+      targetV493?.selectedToken ||
+      null;
+    telemetry.selectedCreator =
+      targetV493?.selectedTarget ||
+      null;
+    telemetry.selectedCreationTransactionHash =
+      launchTriggerTargetCandidateV493
+        ?.creationTransactionHash ||
+      null;
+    telemetry.attempted =
+      targetV493?.attempted ===
+      true;
+    telemetry.requestConsumed =
+      targetV493
+        ?.requestConsumed === true;
+    telemetry.processedAfterAttempt =
+      targetV493
+        ?.processedAfterAttempt ===
+      true;
+    telemetry.status =
+      targetV493?.status ||
+      "V493_STATUS_UNAVAILABLE";
+
+    if (
+      targetV493?.attempted === true &&
+      v483DeferredForFairnessV487
+    ) {
+      telemetry.fairnessV487
+        .fairnessGrantThisScan = true;
+
+      fairness.fairnessGrants =
+        safeNumber(
+          fairness.fairnessGrants
+        ) + 1;
+
+      fairness.lastFairnessGrantAt =
+        Date.now();
+
+      fairness.lastFairnessGrantToken =
+        targetV493?.selectedToken ||
+        null;
+
+      fairness.consecutiveV483BlocksOfV486 =
+        0;
+
+      fairness.lastDecision =
+        "V493_FAIRNESS_GRANTED_TO_EXACT_TRIGGER_TARGET_IDENTITY";
+
+      fairness.lastDecisionAt =
+        Date.now();
+    }
+
+    root.lastStatus =
+      `V486_ROUTED_TO_V493:${telemetry.status}`;
+
+    return telemetry;
+  }
+
+  telemetry.launchTriggerTargetIdentityV493 = {
+    enabled: true,
+    measurementOnly: true,
+    attempted: false,
+    status:
+      "V493_NO_UNPROCESSED_EXACT_TRIGGER_TARGET"
+  };
+
+  /*
    * V492 EXACT CREATION-TRIGGER LINKAGE ROUTE:
    * The exact transaction already proven by V489 to contain the token CREATE2
    * is higher-value than generic source activity. Bind its outer call first.
@@ -87830,6 +87990,999 @@ function persistedOriginRawTraceBacklogSnapshotV486(
 
 
 
+
+
+function ensureLaunchTriggerTargetIdentityV493(
+  state
+) {
+  if (
+    !state.launchTriggerTargetIdentityV493 ||
+    typeof state.launchTriggerTargetIdentityV493 !==
+      "object"
+  ) {
+    state.launchTriggerTargetIdentityV493 = {
+      enabled: true,
+      measurementOnly: true,
+      monitorStartedAt: Date.now(),
+      scansObserved: 0,
+      requestsAttempted: 0,
+      requestsSucceeded: 0,
+      processedTargets: {},
+      targetProfiles: {},
+      lastTarget: null,
+      lastToken: null,
+      lastStatus: null,
+      lastHttpStatus: null,
+      lastAttemptAt: null
+    };
+  }
+
+  const root =
+    state.launchTriggerTargetIdentityV493;
+
+  root.processedTargets =
+    root.processedTargets &&
+    typeof root.processedTargets === "object"
+      ? root.processedTargets
+      : {};
+
+  root.targetProfiles =
+    root.targetProfiles &&
+    typeof root.targetProfiles === "object"
+      ? root.targetProfiles
+      : {};
+
+  return root;
+}
+
+function pruneLaunchTriggerTargetIdentityV493(
+  state
+) {
+  const root =
+    ensureLaunchTriggerTargetIdentityV493(
+      state
+    );
+
+  const now = Date.now();
+  const maxAgeMs =
+    14 * 24 * 60 * 60 * 1000;
+
+  root.processedTargets =
+    Object.fromEntries(
+      Object.entries(
+        root.processedTargets || {}
+      )
+        .filter(([, row]) => {
+          const at =
+            safeNumber(
+              row?.attemptedAt
+            );
+          return (
+            at > 0 &&
+            now - at <= maxAgeMs
+          );
+        })
+        .sort(
+          (a, b) =>
+            safeNumber(
+              b?.[1]?.attemptedAt
+            ) -
+            safeNumber(
+              a?.[1]?.attemptedAt
+            )
+        )
+        .slice(0, 200)
+    );
+
+  root.targetProfiles =
+    Object.fromEntries(
+      Object.entries(
+        root.targetProfiles || {}
+      )
+        .filter(([, row]) => {
+          const at =
+            safeNumber(
+              row?.observedAt
+            );
+          return (
+            at > 0 &&
+            now - at <= maxAgeMs
+          );
+        })
+        .sort(
+          (a, b) =>
+            safeNumber(
+              b?.[1]?.observedAt
+            ) -
+            safeNumber(
+              a?.[1]?.observedAt
+            )
+        )
+        .slice(0, 100)
+    );
+
+  return root;
+}
+
+function launchTriggerTargetIdentityCandidatesV493(
+  state
+) {
+  const v492 =
+    pruneExactCreationTriggerLinkageV492(
+      state
+    );
+
+  const root =
+    pruneLaunchTriggerTargetIdentityV493(
+      state
+    );
+
+  const rows = [];
+
+  for (
+    const linkage of
+    Object.values(
+      v492.triggerLinkages || {}
+    )
+  ) {
+    if (
+      linkage?.exactCreationTransactionLinked !==
+      true
+    ) {
+      continue;
+    }
+
+    const target =
+      normalize(
+        linkage?.outerTarget
+      );
+
+    const token =
+      normalize(
+        linkage?.token
+      );
+
+    if (
+      !isAddress(target) ||
+      root.processedTargets[target]
+    ) {
+      continue;
+    }
+
+    rows.push({
+      target,
+      token:
+        isAddress(token)
+          ? token
+          : null,
+      creationTransactionHash:
+        String(
+          linkage
+            ?.creationTransactionHash ||
+          ""
+        )
+          .trim()
+          .toLowerCase(),
+      verifiedDeploymentSource:
+        normalize(
+          linkage
+            ?.verifiedDeploymentSource ||
+          ""
+        ),
+      verifiedDeploymentSourceName:
+        linkage
+          ?.verifiedDeploymentSourceName ||
+        null,
+      creationKind:
+        linkage?.creationKind ||
+        null,
+      outerCaller:
+        normalize(
+          linkage?.outerCaller ||
+          ""
+        ),
+      outerMethod:
+        linkage?.outerMethod ||
+        null,
+      outerSelector:
+        String(
+          linkage?.outerSelector ||
+          ""
+        )
+          .trim()
+          .toLowerCase(),
+      verifiedAt:
+        safeNumber(
+          linkage?.verifiedAt
+        )
+    });
+  }
+
+  rows.sort((a, b) => {
+    const aAt =
+      safeNumber(
+        a?.verifiedAt
+      );
+    const bAt =
+      safeNumber(
+        b?.verifiedAt
+      );
+
+    if (aAt !== bAt) {
+      return aAt - bAt;
+    }
+
+    return a.target.localeCompare(
+      b.target
+    );
+  });
+
+  return rows;
+}
+
+function selectOldestLaunchTriggerTargetIdentityCandidateV493(
+  state
+) {
+  return (
+    launchTriggerTargetIdentityCandidatesV493(
+      state
+    )[0] || null
+  );
+}
+
+function eligibleLaunchTriggerTargetIdentityCountV493(
+  state
+) {
+  return launchTriggerTargetIdentityCandidatesV493(
+    state
+  ).length;
+}
+
+function parseAddressBooleanV493(
+  value
+) {
+  if (value === true) return true;
+  if (value === false) return false;
+
+  const text =
+    String(
+      value ?? ""
+    )
+      .trim()
+      .toLowerCase();
+
+  if (
+    text === "true" ||
+    text === "1" ||
+    text === "yes"
+  ) {
+    return true;
+  }
+
+  if (
+    text === "false" ||
+    text === "0" ||
+    text === "no"
+  ) {
+    return false;
+  }
+
+  return null;
+}
+
+function collectImplementationAddressesV493(
+  body
+) {
+  const values = [];
+
+  const candidates = [
+    body?.implementations,
+    body?.implementation,
+    body?.proxy?.implementations,
+    body?.proxy?.implementation,
+    body?.smart_contract?.implementations,
+    body?.smart_contract?.implementation
+  ];
+
+  for (const candidate of candidates) {
+    const list =
+      Array.isArray(candidate)
+        ? candidate
+        : (
+            candidate != null
+              ? [candidate]
+              : []
+          );
+
+    for (const item of list) {
+      const address =
+        transactionAddressHashV491(
+          item
+        );
+
+      if (
+        isAddress(address) &&
+        !values.includes(address)
+      ) {
+        values.push(address);
+      }
+    }
+  }
+
+  return values;
+}
+
+function collectPublicTagsV493(
+  body
+) {
+  const result = [];
+
+  const candidates = [
+    body?.public_tags,
+    body?.watchlist_names,
+    body?.tags,
+    body?.name
+  ];
+
+  for (const candidate of candidates) {
+    const list =
+      Array.isArray(candidate)
+        ? candidate
+        : (
+            candidate != null
+              ? [candidate]
+              : []
+          );
+
+    for (const item of list) {
+      let text = null;
+
+      if (
+        typeof item === "string"
+      ) {
+        text = item.trim();
+      } else if (
+        item &&
+        typeof item === "object"
+      ) {
+        text =
+          String(
+            item?.label ||
+            item?.name ||
+            item?.display_name ||
+            ""
+          ).trim();
+      }
+
+      if (
+        text &&
+        !result.includes(text)
+      ) {
+        result.push(
+          text.slice(0, 180)
+        );
+      }
+    }
+  }
+
+  return result.slice(0, 30);
+}
+
+function parseLaunchTriggerTargetIdentityV493({
+  body,
+  candidate
+}) {
+  const target =
+    normalize(
+      candidate?.target
+    );
+
+  const responseAddress =
+    normalize(
+      body?.hash ||
+      body?.address ||
+      ""
+    );
+
+  const isContract =
+    parseAddressBooleanV493(
+      body?.is_contract
+    ) ??
+    Boolean(
+      body?.smart_contract
+    );
+
+  const verifiedContract =
+    parseAddressBooleanV493(
+      body?.is_verified
+    ) ??
+    parseAddressBooleanV493(
+      body?.verified
+    ) ??
+    parseAddressBooleanV493(
+      body?.smart_contract
+        ?.is_verified
+    );
+
+  const contractName =
+    [
+      body?.name,
+      body?.smart_contract
+        ?.name,
+      body?.contract_name
+    ]
+      .find(
+        value =>
+          typeof value ===
+            "string" &&
+          value.trim()
+      )
+      ?.trim()
+      ?.slice(
+        0,
+        180
+      ) || null;
+
+  const proxyType =
+    [
+      body?.proxy_type,
+      body?.smart_contract
+        ?.proxy_type,
+      body?.proxy?.type
+    ]
+      .find(
+        value =>
+          typeof value ===
+            "string" &&
+          value.trim()
+      )
+      ?.trim()
+      ?.slice(
+        0,
+        120
+      ) || null;
+
+  const creator =
+    transactionAddressHashV491(
+      body?.creator_address_hash ||
+      body?.creator_address ||
+      body?.creator ||
+      body?.creation_transaction
+        ?.from
+    );
+
+  const sourceCreationTx =
+    String(
+      body
+        ?.creation_transaction_hash ||
+      body
+        ?.creation_tx_hash ||
+      body
+        ?.creation_transaction
+        ?.hash ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  const sourceCreationStatus =
+    String(
+      body
+        ?.creation_status ||
+      body
+        ?.creation_transaction
+        ?.status ||
+      ""
+    )
+      .trim()
+      .toLowerCase() ||
+    null;
+
+  const implementationAddresses =
+    collectImplementationAddressesV493(
+      body
+    );
+
+  const tags =
+    collectPublicTagsV493(
+      body
+    );
+
+  const tokenMetadata =
+    body?.token
+      ? {
+          address:
+            transactionAddressHashV491(
+              body?.token
+            ),
+          name:
+            typeof body?.token?.name ===
+              "string"
+              ? body.token.name
+              : null,
+          symbol:
+            typeof body?.token?.symbol ===
+              "string"
+              ? body.token.symbol
+              : null,
+          type:
+            typeof body?.token?.type ===
+              "string"
+              ? body.token.type
+              : null
+        }
+      : null;
+
+  const addressMatches =
+    isAddress(
+      responseAddress
+    ) &&
+    responseAddress === target;
+
+  return {
+    targetContract:
+      isAddress(target)
+        ? target
+        : null,
+    responseAddress:
+      isAddress(responseAddress)
+        ? responseAddress
+        : null,
+    responseAddressMatches:
+      addressMatches,
+    linkedToken:
+      candidate?.token ||
+      null,
+    exactCreationTransactionHash:
+      candidate
+        ?.creationTransactionHash ||
+      null,
+    exactCreationKind:
+      candidate?.creationKind ||
+      null,
+    verifiedDeploymentSource:
+      candidate
+        ?.verifiedDeploymentSource ||
+      null,
+    verifiedDeploymentSourceName:
+      candidate
+        ?.verifiedDeploymentSourceName ||
+      null,
+    exactOuterCaller:
+      isAddress(
+        normalize(
+          candidate?.outerCaller
+        )
+      )
+        ? normalize(
+            candidate?.outerCaller
+          )
+        : null,
+    exactOuterMethod:
+      candidate?.outerMethod ||
+      null,
+    exactOuterSelector:
+      candidate?.outerSelector ||
+      null,
+    isContract:
+      isContract === true,
+    addressKind:
+      isContract === true
+        ? "CONTRACT"
+        : (
+            isContract === false
+              ? "WALLET_OR_NON_CONTRACT"
+              : "DATA_UNVERIFIED"
+          ),
+    blockscoutVerifiedContract:
+      verifiedContract === true,
+    contractName,
+    proxyType,
+    implementationAddresses,
+    creator:
+      isAddress(creator)
+        ? creator
+        : null,
+    creationTransactionHash:
+      /^0x[a-f0-9]{64}$/.test(
+        sourceCreationTx
+      )
+        ? sourceCreationTx
+        : null,
+    creationStatus:
+      sourceCreationStatus,
+    tokenMetadata,
+    publicTags:
+      tags,
+    exactTargetAndTriggerLinked:
+      Boolean(
+        addressMatches &&
+        candidate
+          ?.creationTransactionHash &&
+        candidate
+          ?.outerMethod &&
+        /^0x[a-f0-9]{8}$/.test(
+          String(
+            candidate?.outerSelector ||
+            ""
+          )
+        )
+      ),
+    mechanismEvidenceLevel:
+      addressMatches &&
+      isContract === true
+        ? "EXACT_TRIGGER_TARGET_PROFILED_AS_CONTRACT"
+        : (
+            addressMatches
+              ? "EXACT_TRIGGER_TARGET_PROFILED"
+              : "DATA_UNVERIFIED"
+          ),
+    recurringIndependentTokenProof:
+      false,
+    launchpadIdentity:
+      "DATA UNVERIFIED",
+    factoryIdentity:
+      "DATA UNVERIFIED",
+    routerIdentity:
+      "DATA UNVERIFIED",
+    launchSourcePromoted:
+      false,
+    evidenceMeaning:
+      "V492_EXACT_TRIGGER_TARGET_PLUS_BLOCKSCOUT_TARGET_IDENTITY_V493"
+  };
+}
+
+async function runLaunchTriggerTargetIdentityV493({
+  env,
+  state,
+  budget,
+  candidate
+}) {
+  const root =
+    pruneLaunchTriggerTargetIdentityV493(
+      state
+    );
+
+  root.scansObserved =
+    safeNumber(
+      root.scansObserved
+    ) + 1;
+
+  const telemetry = {
+    enabled: true,
+    measurementOnly: true,
+    promotionAllowed: false,
+    selectedTarget: null,
+    selectedToken: null,
+    attempted: false,
+    requestConsumed: false,
+    provider:
+      "BLOCKSCOUT_PRO",
+    endpointV493:
+      "https://api.blockscout.com/4663/api/v2/addresses/{outerTarget}?apikey=[REDACTED]",
+    identityResult: null,
+    httpStatus: null,
+    processedAfterAttempt: false,
+    maxRequestsThisScan: 1,
+    hardRequestLimit: 42,
+    launchSourcePromoted: false,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false,
+    status: null
+  };
+
+  if (!candidate) {
+    telemetry.status =
+      "V493_NO_UNPROCESSED_EXACT_TRIGGER_TARGET";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const target =
+    normalize(
+      candidate?.target
+    );
+
+  const token =
+    normalize(
+      candidate?.token ||
+      ""
+    );
+
+  telemetry.selectedTarget =
+    target;
+  telemetry.selectedToken =
+    isAddress(token)
+      ? token
+      : null;
+
+  root.lastTarget =
+    target;
+  root.lastToken =
+    telemetry.selectedToken;
+
+  const url =
+    blockscoutProOriginTraceUrlV480(
+      env,
+      target
+    );
+
+  if (!url) {
+    telemetry.status =
+      "V493_BLOCKSCOUT_PRO_NOT_CONFIGURED";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const spare =
+    consumeReleasedGlobalSpareV478(
+      budget,
+      "BLOCKSCOUT_PRO_EXACT_TRIGGER_TARGET_IDENTITY_V493",
+      1
+    );
+
+  if (spare?.ok !== true) {
+    telemetry.status =
+      `V493_BUDGET_UNAVAILABLE:${spare?.reason || "UNKNOWN"}`;
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  telemetry.attempted = true;
+  telemetry.requestConsumed = true;
+
+  root.requestsAttempted =
+    safeNumber(
+      root.requestsAttempted
+    ) + 1;
+
+  const attemptedAt =
+    Date.now();
+
+  root.lastAttemptAt =
+    attemptedAt;
+
+  const controller =
+    new AbortController();
+
+  const timer =
+    setTimeout(
+      () =>
+        controller.abort(),
+      6000
+    );
+
+  try {
+    const response =
+      await fetch(
+        url,
+        {
+          method: "GET",
+          headers: {
+            accept:
+              "application/json"
+          },
+          signal:
+            controller.signal
+        }
+      );
+
+    telemetry.httpStatus =
+      response.status;
+    root.lastHttpStatus =
+      response.status;
+
+    if (!response.ok) {
+      telemetry.status =
+        `V493_HTTP_${response.status}`;
+
+      root.lastStatus =
+        telemetry.status;
+
+      root.processedTargets[
+        target
+      ] = {
+        target,
+        token:
+          telemetry.selectedToken,
+        attemptedAt,
+        httpStatus:
+          response.status,
+        status:
+          telemetry.status,
+        processedOnce:
+          true,
+        retryAutomatically:
+          false
+      };
+
+      telemetry.processedAfterAttempt =
+        true;
+
+      return telemetry;
+    }
+
+    const body =
+      await response.json();
+
+    root.requestsSucceeded =
+      safeNumber(
+        root.requestsSucceeded
+      ) + 1;
+
+    const identity =
+      parseLaunchTriggerTargetIdentityV493({
+        body,
+        candidate
+      });
+
+    const persisted = {
+      ...identity,
+      observedAt:
+        attemptedAt,
+      provider:
+        "BLOCKSCOUT_PRO_V2_ADDRESS_INFO_V493",
+      evidenceStandard:
+        "EXACT_V492_TRIGGER_TARGET_PLUS_BLOCKSCOUT_TARGET_ADDRESS_PROFILE_V493"
+    };
+
+    root.targetProfiles[
+      target
+    ] = persisted;
+
+    root.processedTargets[
+      target
+    ] = {
+      target,
+      token:
+        telemetry.selectedToken,
+      attemptedAt,
+      httpStatus:
+        response.status,
+      isContract:
+        identity?.isContract ===
+        true,
+      blockscoutVerifiedContract:
+        identity
+          ?.blockscoutVerifiedContract ===
+        true,
+      contractName:
+        identity?.contractName ||
+        null,
+      status:
+        identity?.isContract ===
+        true
+          ? "V493_EXACT_TRIGGER_TARGET_IS_CONTRACT"
+          : "V493_EXACT_TRIGGER_TARGET_PROFILED",
+      processedOnce:
+        true,
+      retryAutomatically:
+        false
+    };
+
+    telemetry.identityResult =
+      identity;
+    telemetry.processedAfterAttempt =
+      true;
+
+    telemetry.status =
+      root.processedTargets[
+        target
+      ].status;
+
+    root.lastStatus =
+      telemetry.status;
+
+    pruneLaunchTriggerTargetIdentityV493(
+      state
+    );
+
+    return telemetry;
+  } catch (error) {
+    telemetry.status =
+      `V493_FETCH_ERROR:${errorString(error)}`;
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function launchTriggerTargetIdentitySnapshotV493(
+  state
+) {
+  const root =
+    pruneLaunchTriggerTargetIdentityV493(
+      state
+    );
+
+  const profiles =
+    Object.values(
+      root.targetProfiles || {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.observedAt
+          ) -
+          safeNumber(
+            a?.observedAt
+          )
+      );
+
+  return {
+    enabled: true,
+    measurementOnly: true,
+    monitorStartedAt:
+      safeNumber(
+        root.monitorStartedAt
+      ) || null,
+    scansObserved:
+      safeNumber(
+        root.scansObserved
+      ),
+    requestsAttempted:
+      safeNumber(
+        root.requestsAttempted
+      ),
+    requestsSucceeded:
+      safeNumber(
+        root.requestsSucceeded
+      ),
+    processedTargetCount:
+      Object.keys(
+        root.processedTargets ||
+        {}
+      ).length,
+    remainingEligibleTargetCount:
+      eligibleLaunchTriggerTargetIdentityCountV493(
+        state
+      ),
+    retainedTargetProfiles:
+      profiles.length,
+    recentTargetProfiles:
+      profiles.slice(0, 20),
+    lastTarget:
+      root.lastTarget ||
+      null,
+    lastToken:
+      root.lastToken ||
+      null,
+    lastStatus:
+      root.lastStatus ||
+      null,
+    lastHttpStatus:
+      root.lastHttpStatus ??
+      null,
+    lastAttemptAt:
+      safeNumber(
+        root.lastAttemptAt
+      ) || null,
+    targetIdentityMeansLaunchpad:
+      false,
+    recurringIndependentTokenProofStillRequired:
+      true,
+    launchSourcePromotionAllowed:
+      false,
+    oneSecondaryDiagnosticPerScan:
+      true,
+    hardGlobalLimitUnchanged:
+      42
+  };
+}
 
 function ensureExactCreationTriggerLinkageV492(
   state
@@ -93070,6 +94223,9 @@ function eligiblePersistedOriginBacklogCountV487(
       state
     ) +
     eligibleExactCreationTriggerCountV492(
+      state
+    ) +
+    eligibleLaunchTriggerTargetIdentityCountV493(
       state
     )
   );
