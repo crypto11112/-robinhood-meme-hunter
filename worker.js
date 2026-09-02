@@ -1,4 +1,35 @@
 /**
+ * Robinhood Chain Meme Hunter — V465
+ * AUTHORITATIVE RUNTIME VERSION: V465
+ *
+ * V465 is a completion-lane efficiency/stability hardening build based on the live V464 test.
+ *
+ * V464 proved two remaining issues:
+ * 1) a successful-alert history row such as NUDES could be skipped before the strict one-shot
+ *    ERC-20 re-verification ran because V463 required a current watch-state object too early;
+ * 2) V461's binary pagination could spend most of its protected log requests repeatedly learning
+ *    that large child ranges were still saturated.
+ *
+ * V465 fixes both without weakening evidence:
+ * - historical completion eligibility may recover an exact PoolId only from the token's own prior
+ *   V460/V461 completion record AND a matching verified poolRegistry entry whose currencies contain
+ *   the exact token and a canonical ETH/WETH/USDG quote. This does not guess pool identity.
+ * - missing watch state no longer blocks structural eligibility. At most one history candidate per
+ *   scan can undergo the existing strict V418/V419/V421 ERC-20 verifier. A watch row is created only
+ *   AFTER that verifier succeeds, then its verified metadata is checkpointed.
+ * - the verified recovered PoolId is injected only into the in-memory successful-alert candidate used
+ *   by the completion lane; the original frozen alert-history snapshot is not rewritten.
+ * - after the initial exact-pool 24h query saturates, pagination fans out immediately across the
+ *   remaining protected request capacity using non-overlapping equal block ranges. Any individual
+ *   saturated child can still be split further if headroom remains. This avoids wasting requests on
+ *   repeated binary discovery of obviously oversized ranges.
+ *
+ * The 42-request global ceiling, 21-request base analysis ceiling, V416 adaptive ceiling, Telegram
+ * reserve, scoring, qualification, holder rules, provider trust, discovery logic and alert thresholds
+ * are unchanged. Complete exact-pool USD is VERIFIED only when every required range is non-saturated,
+ * every returned row is candidate-matched, and every returned row is exactly USD-decodable.
+ */
+/**
  * Robinhood Chain Meme Hunter — V464
  * AUTHORITATIVE RUNTIME VERSION: V464
  * V464 is a narrow completion-lane capacity hardening build based on the live V463 NUDES test.
@@ -1556,7 +1587,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V464";
+const VERSION = "V465";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -50341,23 +50372,128 @@ const V463_FULL_COMPLETION_RESERVE_REQUESTS =
   VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_TOTAL_REQUESTS_V461;
 const V463_MAX_HISTORY_ERC20_REVERIFY_PER_SCAN = 1;
 
+function exactPoolIdentityFromPriorCompletionV465(
+  state,
+  address
+) {
+  const token = normalize(address);
+  const previous =
+    state?.completeExactPoolCompletionV460?.[token] ||
+    null;
+  const poolId = normalize(previous?.poolId);
+
+  if (
+    !isAddress(token) ||
+    !/^0x[a-f0-9]{64}$/.test(String(poolId || ""))
+  ) {
+    return null;
+  }
+
+  const reg = state?.poolRegistry?.[poolId];
+  if (!reg) return null;
+
+  const c0 = normalize(reg?.currency0);
+  const c1 = normalize(reg?.currency1);
+  if (c0 !== token && c1 !== token) return null;
+
+  const quoteTokenAddress =
+    c0 === token ? c1 : c0;
+
+  if (
+    ![
+      ZERO,
+      CANONICAL_WETH_V179,
+      CANONICAL_USDG_V179
+    ].includes(quoteTokenAddress)
+  ) {
+    return null;
+  }
+
+  return {
+    verified: true,
+    status:
+      "PRIOR_COMPLETION_PLUS_POOL_REGISTRY_IDENTITY_V465",
+    poolId,
+    quoteTokenAddress,
+    quoteTokenSymbol:
+      quoteTokenAddress === CANONICAL_USDG_V179
+        ? "USDG"
+        : quoteTokenAddress === CANONICAL_WETH_V179
+          ? "WETH"
+          : "ETH",
+    blockNumber:
+      blockNumberFromAnyV180(
+        reg?.blockNumber ??
+        reg?.initializeBlock ??
+        reg?.createdBlock
+      ) || null,
+    currency0: c0,
+    currency1: c1,
+    sourceV460:
+      "PRIOR_COMPLETION_PLUS_POOL_REGISTRY_V465",
+    sourceV465:
+      "PRIOR_COMPLETION_PLUS_POOL_REGISTRY_V465"
+  };
+}
+
+function completionPoolForWatchBootstrapV465(identity) {
+  if (identity?.verified !== true) return null;
+  const poolId = normalize(identity?.poolId);
+  const currency0 = normalize(identity?.currency0);
+  const currency1 = normalize(identity?.currency1);
+  if (
+    !/^0x[a-f0-9]{64}$/.test(String(poolId || "")) ||
+    !isAddress(currency0) ||
+    !isAddress(currency1)
+  ) {
+    return null;
+  }
+  return {
+    poolId,
+    currency0,
+    currency1,
+    blockNumber:
+      blockNumberFromAnyV180(identity?.blockNumber) || null,
+    source:
+      "VERIFIED_ALERT_HISTORY_COMPLETION_IDENTITY_V465"
+  };
+}
+
+function patchedAlertSnapshotWithIdentityV465(
+  snapshot,
+  identity
+) {
+  if (!snapshot || identity?.verified !== true) return snapshot;
+  return {
+    ...snapshot,
+    candidate: {
+      ...(snapshot?.candidate || {}),
+      onChainPoolIdentityV153: {
+        ...identity,
+        verified: true
+      }
+    }
+  };
+}
+
 function structuralLastAlertEligibilityV463(
   state,
   lastAlertSnapshot
 ) {
   const base = {
     eligible: false,
-    reason: "LAST_ALERT_STRUCTURAL_NOT_ELIGIBLE_V463",
+    reason: "LAST_ALERT_STRUCTURAL_NOT_ELIGIBLE_V465",
     address: null,
     symbol: null,
     savedAt: null,
     ageMs: null,
     watched: null,
-    identity: null
+    identity: null,
+    watchBootstrapRequiredV465: false
   };
 
   if (!lastAlertSnapshot || lastAlertSnapshot?.alert?.sent !== true) {
-    return {...base, reason:"NO_SUCCESSFUL_ALERT_SNAPSHOT_V463"};
+    return {...base, reason:"NO_SUCCESSFUL_ALERT_SNAPSHOT_V465"};
   }
 
   const address = normalize(
@@ -50365,7 +50501,7 @@ function structuralLastAlertEligibilityV463(
     lastAlertSnapshot?.candidate?.address
   );
   if (!isAddress(address)) {
-    return {...base, address, reason:"LAST_ALERT_ADDRESS_INVALID_V463"};
+    return {...base, address, reason:"LAST_ALERT_ADDRESS_INVALID_V465"};
   }
 
   const savedAt = safeNumber(lastAlertSnapshot?.savedAt);
@@ -50376,26 +50512,35 @@ function structuralLastAlertEligibilityV463(
     ageMs > LAST_ALERT_EXACT_POOL_FALLBACK_MAX_AGE_MS_V460
   ) {
     return {
-      ...base, address, savedAt:savedAt || null,
+      ...base,
+      address,
+      savedAt:savedAt || null,
       ageMs:Number.isFinite(ageMs)?ageMs:null,
-      reason:"LAST_ALERT_TOO_OLD_FOR_24H_COMPLETION_V463"
+      reason:"LAST_ALERT_TOO_OLD_FOR_24H_COMPLETION_V465"
     };
   }
 
-  const watched = findWatched(state, address);
-  if (!watched) {
-    return {...base, address, savedAt, ageMs, reason:"LAST_ALERT_WATCH_STATE_UNAVAILABLE_V463"};
-  }
+  const watched = findWatched(state, address) || null;
 
-  const identity = exactPoolIdentityFromAlertV460(
-    state,
-    address,
-    lastAlertSnapshot?.candidate
-  );
+  const identity =
+    exactPoolIdentityFromAlertV460(
+      state,
+      address,
+      lastAlertSnapshot?.candidate
+    ) ||
+    exactPoolIdentityFromPriorCompletionV465(
+      state,
+      address
+    );
+
   if (identity?.verified !== true) {
     return {
-      ...base, address, savedAt, ageMs, watched,
-      reason:"LAST_ALERT_EXACT_POOL_IDENTITY_UNVERIFIED_V463"
+      ...base,
+      address,
+      savedAt,
+      ageMs,
+      watched,
+      reason:"LAST_ALERT_EXACT_POOL_IDENTITY_UNVERIFIED_V465"
     };
   }
 
@@ -50405,34 +50550,60 @@ function structuralLastAlertEligibilityV463(
       ? state.completeExactPoolCompletionV460
       : {};
 
-  const previous = state.completeExactPoolCompletionV460?.[address] || null;
-  const samePool = normalize(previous?.poolId) === normalize(identity?.poolId);
-  if (samePool && previous?.verified === true && safeNumber(previous?.completedAt) > 0) {
+  const previous =
+    state.completeExactPoolCompletionV460?.[address] ||
+    null;
+  const samePool =
+    normalize(previous?.poolId) ===
+    normalize(identity?.poolId);
+
+  if (
+    samePool &&
+    previous?.verified === true &&
+    safeNumber(previous?.completedAt) > 0
+  ) {
     return {
-      ...base, address, savedAt, ageMs, watched, identity,
-      reason:"LAST_ALERT_EXACT_POOL_ALREADY_COMPLETED_V463"
+      ...base,
+      address,
+      savedAt,
+      ageMs,
+      watched,
+      identity,
+      reason:"LAST_ALERT_EXACT_POOL_ALREADY_COMPLETED_V465"
     };
   }
+
   if (
     samePool &&
     safeNumber(previous?.attemptedAt) > 0 &&
-    Date.now() - safeNumber(previous?.attemptedAt) < LAST_ALERT_EXACT_POOL_RETRY_COOLDOWN_MS_V460
+    Date.now() - safeNumber(previous?.attemptedAt) <
+      LAST_ALERT_EXACT_POOL_RETRY_COOLDOWN_MS_V460
   ) {
     return {
-      ...base, address, savedAt, ageMs, watched, identity,
-      reason:"LAST_ALERT_EXACT_POOL_RETRY_COOLDOWN_V463"
+      ...base,
+      address,
+      savedAt,
+      ageMs,
+      watched,
+      identity,
+      reason:"LAST_ALERT_EXACT_POOL_RETRY_COOLDOWN_V465"
     };
   }
 
   return {
     eligible:true,
-    reason:"LAST_ALERT_STRUCTURALLY_ELIGIBLE_V463",
+    reason:"LAST_ALERT_STRUCTURALLY_ELIGIBLE_V465",
     address,
-    symbol:lastAlertSnapshot?.alert?.symbol || lastAlertSnapshot?.candidate?.symbol || watched?.metadata?.symbol || null,
+    symbol:
+      lastAlertSnapshot?.alert?.symbol ||
+      lastAlertSnapshot?.candidate?.symbol ||
+      watched?.metadata?.symbol ||
+      null,
     savedAt,
     ageMs,
     watched,
-    identity
+    identity,
+    watchBootstrapRequiredV465: !watched
   };
 }
 
@@ -50441,136 +50612,319 @@ async function selectEligibleSuccessfulAlertFallbackV463(
   state,
   budget
 ) {
-  const latestLoad = await loadLastSuccessfulAlertSnapshotV460(env);
-  const history = await alertHistoryV268(env);
+  const latestLoad =
+    await loadLastSuccessfulAlertSnapshotV460(env);
+  const history =
+    await alertHistoryV268(env);
+
   const snapshots = [];
   const seen = new Set();
 
-  const addSnapshot = (snapshot, source, historyIndex=null) => {
+  const addSnapshot = (
+    snapshot,
+    source,
+    historyIndex=null
+  ) => {
     if (!snapshot || snapshot?.alert?.sent !== true) return;
-    const address = normalize(snapshot?.alert?.address || snapshot?.candidate?.address);
+    const address = normalize(
+      snapshot?.alert?.address ||
+      snapshot?.candidate?.address
+    );
     const savedAt = safeNumber(snapshot?.savedAt);
     const key = `${savedAt || 0}:${address || "unknown"}`;
     if (seen.has(key)) return;
     seen.add(key);
-    snapshots.push({snapshot,source,historyIndex,savedAt:savedAt||null,address:address||null});
+    snapshots.push({
+      snapshot,
+      source,
+      historyIndex,
+      savedAt:savedAt || null,
+      address:address || null
+    });
   };
 
-  if (latestLoad?.available === true && latestLoad?.snapshot) {
-    addSnapshot(latestLoad.snapshot,"LAST_ALERT_SCAN_V264",null);
+  if (
+    latestLoad?.available === true &&
+    latestLoad?.snapshot
+  ) {
+    addSnapshot(
+      latestLoad.snapshot,
+      "LAST_ALERT_SCAN_V264",
+      null
+    );
   }
-  if (history?.status === "ALERT_HISTORY_AVAILABLE" && Array.isArray(history?.entries)) {
-    history.entries.forEach((entry,index)=>addSnapshot(entry?.snapshot||null,"ALERT_HISTORY_V268",index));
-  }
-  snapshots.sort((a,b)=>safeNumber(b?.savedAt)-safeNumber(a?.savedAt));
 
-  const evaluated=[];
-  let selected=null;
-  let reverificationAttempts=0;
-  let reverificationResult=null;
+  if (
+    history?.status === "ALERT_HISTORY_AVAILABLE" &&
+    Array.isArray(history?.entries)
+  ) {
+    history.entries.forEach(
+      (entry,index) =>
+        addSnapshot(
+          entry?.snapshot || null,
+          "ALERT_HISTORY_V268",
+          index
+        )
+    );
+  }
+
+  snapshots.sort(
+    (a,b) =>
+      safeNumber(b?.savedAt) -
+      safeNumber(a?.savedAt)
+  );
+
+  const evaluated = [];
+  let selected = null;
+  let reverificationAttempts = 0;
+  let reverificationResult = null;
 
   for (const row of snapshots) {
-    let fallback = buildLastAlertExactPoolCandidateV460(state,row.snapshot);
-    const structural = structuralLastAlertEligibilityV463(state,row.snapshot);
-    let reverifiedThisRow=false;
-    let reverifyStatus=null;
-    let metadataCheckpointed=false;
+    const structural =
+      structuralLastAlertEligibilityV463(
+        state,
+        row.snapshot
+      );
+
+    const workingSnapshot =
+      structural?.identity?.verified === true
+        ? patchedAlertSnapshotWithIdentityV465(
+            row.snapshot,
+            structural.identity
+          )
+        : row.snapshot;
+
+    let fallback =
+      buildLastAlertExactPoolCandidateV460(
+        state,
+        workingSnapshot
+      );
+
+    let reverifiedThisRow = false;
+    let reverifyStatus = null;
+    let metadataCheckpointed = false;
+    let watchBootstrappedV465 = false;
 
     if (
       fallback?.eligible !== true &&
-      fallback?.reason === "LAST_ALERT_ERC20_METADATA_NOT_VERIFIED_V460" &&
+      fallback?.reason ===
+        "LAST_ALERT_ERC20_METADATA_NOT_VERIFIED_V460" &&
       structural?.eligible === true &&
-      reverificationAttempts < V463_MAX_HISTORY_ERC20_REVERIFY_PER_SCAN
+      reverificationAttempts <
+        V463_MAX_HISTORY_ERC20_REVERIFY_PER_SCAN
     ) {
       reverificationAttempts++;
-      reverifiedThisRow=true;
+      reverifiedThisRow = true;
 
-      /* Require capacity for the worst-case strict verifier before starting.
-         verifyERC20 still consumes one request at a time through normal guards. */
       if (!budgetAvailable(budget,"analysis",5)) {
-        reverifyStatus="V463_ERC20_REVERIFY_CAPACITY_UNAVAILABLE";
+        reverifyStatus =
+          "V465_ERC20_REVERIFY_CAPACITY_UNAVAILABLE";
       } else {
-        const verification = await verifyERC20(
-          env,
-          structural.address,
-          budget,
-          structural.watched
-        );
-        reverificationResult={
+        const verificationWatch =
+          structural?.watched || {
+            address: structural.address,
+            firstSeenAt: Date.now(),
+            lastSeenAt: Date.now(),
+            lastLiveSeenAt: null,
+            lastCheckedAt: null,
+            checks: 0,
+            invalidChecks: 0,
+            lastValidationReason: null,
+            excludedReason: null,
+            pools: [
+              completionPoolForWatchBootstrapV465(
+                structural.identity
+              )
+            ].filter(Boolean),
+            metadata: null,
+            marketCache: null,
+            discoverySource:
+              "ALERT_HISTORY_REVERIFY_V465"
+          };
+
+        const verification =
+          await verifyERC20(
+            env,
+            structural.address,
+            budget,
+            verificationWatch
+          );
+
+        reverificationResult = {
           address:structural.address,
           symbol:structural.symbol,
-          validERC20:verification?.validERC20===true,
-          deferred:verification?.deferred===true,
-          reason:verification?.reason||null,
-          decimals:Number.isFinite(Number(verification?.decimals))?Number(verification.decimals):null,
-          hasTotalSupply:verification?.totalSupply!==null && verification?.totalSupply!==undefined,
-          identityStatus:verification?.erc20IdentityV418?.status||null
+          validERC20:
+            verification?.validERC20 === true,
+          deferred:
+            verification?.deferred === true,
+          reason:
+            verification?.reason || null,
+          decimals:
+            Number.isFinite(
+              Number(verification?.decimals)
+            )
+              ? Number(verification.decimals)
+              : null,
+          hasTotalSupply:
+            verification?.totalSupply !== null &&
+            verification?.totalSupply !== undefined,
+          identityStatus:
+            verification?.erc20IdentityV418?.status ||
+            null,
+          watchExistedBeforeV465:
+            Boolean(structural?.watched)
         };
-        reverifyStatus=verification?.reason||null;
+
+        reverifyStatus =
+          verification?.reason || null;
+
         if (verification?.validERC20 === true) {
-          metadataCheckpointed = checkpointVerifiedMetadataV417(
-            structural.watched,
-            verification
-          );
-          fallback = buildLastAlertExactPoolCandidateV460(state,row.snapshot);
+          let targetWatch = structural?.watched;
+
+          if (!targetWatch) {
+            const addResult =
+              addWatch(
+                state,
+                structural.address,
+                completionPoolForWatchBootstrapV465(
+                  structural.identity
+                ),
+                "ALERT_HISTORY_REVERIFY_V465"
+              );
+            targetWatch =
+              addResult?.token ||
+              findWatched(
+                state,
+                structural.address
+              ) ||
+              null;
+            watchBootstrappedV465 =
+              Boolean(targetWatch);
+          }
+
+          metadataCheckpointed =
+            checkpointVerifiedMetadataV417(
+              targetWatch,
+              verification
+            );
+
+          fallback =
+            buildLastAlertExactPoolCandidateV460(
+              state,
+              workingSnapshot
+            );
         }
       }
     }
 
-    const diagnostic={
+    const diagnostic = {
       source:row.source,
       historyIndex:row.historyIndex,
       savedAt:row.savedAt,
       address:row.address,
-      symbol:row.snapshot?.alert?.symbol || row.snapshot?.candidate?.symbol || null,
-      structurallyEligible:structural?.eligible===true,
-      structuralReason:structural?.reason||null,
-      eligible:fallback?.eligible===true,
-      reason:fallback?.reason||null,
-      identitySource:fallback?.identitySource || structural?.identity?.sourceV460 || null,
-      exactPoolId:normalize(
-        fallback?.candidate?.onChainPoolIdentityV153?.poolId || structural?.identity?.poolId
-      ) || null,
-      erc20ReverifiedV463:reverifiedThisRow,
-      erc20ReverifyStatusV463:reverifyStatus,
-      metadataCheckpointedV463:metadataCheckpointed
+      symbol:
+        row.snapshot?.alert?.symbol ||
+        row.snapshot?.candidate?.symbol ||
+        null,
+      structurallyEligible:
+        structural?.eligible === true,
+      structuralReason:
+        structural?.reason || null,
+      watchStateAvailableBeforeV465:
+        Boolean(structural?.watched),
+      watchBootstrapRequiredV465:
+        structural?.watchBootstrapRequiredV465 === true,
+      watchBootstrappedV465,
+      eligible:
+        fallback?.eligible === true,
+      reason:
+        fallback?.reason || null,
+      identitySource:
+        fallback?.identitySource ||
+        structural?.identity?.sourceV465 ||
+        structural?.identity?.sourceV460 ||
+        null,
+      exactPoolId:
+        normalize(
+          fallback?.candidate
+            ?.onChainPoolIdentityV153
+            ?.poolId ||
+          structural?.identity?.poolId
+        ) || null,
+      erc20ReverifiedV463:
+        reverifiedThisRow,
+      erc20ReverifyStatusV463:
+        reverifyStatus,
+      metadataCheckpointedV463:
+        metadataCheckpointed
     };
+
     evaluated.push(diagnostic);
 
-    if (fallback?.eligible===true && fallback?.candidate) {
-      selected={snapshot:row.snapshot,fallback,source:row.source,historyIndex:row.historyIndex,savedAt:row.savedAt,address:row.address};
+    if (
+      fallback?.eligible === true &&
+      fallback?.candidate
+    ) {
+      selected = {
+        snapshot:workingSnapshot,
+        originalSnapshot:row.snapshot,
+        fallback,
+        source:row.source,
+        historyIndex:row.historyIndex,
+        savedAt:row.savedAt,
+        address:row.address
+      };
       break;
-    }
-
-    /* One bounded fresh identity attempt per scan. If it was needed and failed,
-       do not spend more RPC budget walking older metadata-missing alerts. */
-    if (reverifiedThisRow && fallback?.eligible !== true) {
-      continue;
     }
   }
 
   return {
     enabled:true,
-    selectionMode:"NEWEST_ELIGIBLE_WITH_ONE_STRICT_ERC20_REVERIFY_V463",
+    selectionMode:
+      "NEWEST_VERIFIED_IDENTITY_WITH_ONE_STRICT_ERC20_REVERIFY_V465",
     latestLoad,
-    historyStatus:history?.status||null,
-    historyCount:safeNumber(history?.count),
-    snapshotsConsidered:evaluated.length,
-    selected:Boolean(selected),
-    selectedSource:selected?.source||null,
-    selectedHistoryIndex:selected?.historyIndex??null,
-    selectedSavedAt:selected?.savedAt||null,
-    selectedAddress:selected?.address||null,
-    selectedSymbol:selected?.snapshot?.alert?.symbol || selected?.snapshot?.candidate?.symbol || null,
-    selectedSnapshot:selected?.snapshot||null,
-    selectedFallback:selected?.fallback||null,
+    historyStatus:
+      history?.status || null,
+    historyCount:
+      safeNumber(history?.count),
+    snapshotsConsidered:
+      evaluated.length,
+    selected:
+      Boolean(selected),
+    selectedSource:
+      selected?.source || null,
+    selectedHistoryIndex:
+      selected?.historyIndex ?? null,
+    selectedSavedAt:
+      selected?.savedAt || null,
+    selectedAddress:
+      selected?.address || null,
+    selectedSymbol:
+      selected?.snapshot?.alert?.symbol ||
+      selected?.snapshot?.candidate?.symbol ||
+      null,
+    selectedSnapshot:
+      selected?.snapshot || null,
+    selectedFallback:
+      selected?.fallback || null,
     evaluated,
     erc20ReverificationV463:{
-      maxPerScan:V463_MAX_HISTORY_ERC20_REVERIFY_PER_SCAN,
-      attempts:reverificationAttempts,
-      result:reverificationResult,
+      maxPerScan:
+        V463_MAX_HISTORY_ERC20_REVERIFY_PER_SCAN,
+      attempts:
+        reverificationAttempts,
+      result:
+        reverificationResult,
       verificationRuleChanged:false,
-      freshProofRequiredWhenOldSnapshotLacksExplicitMetadata:true
+      freshProofRequiredWhenOldSnapshotLacksExplicitMetadata:true,
+      watchStateMayBeBootstrappedOnlyAfterVerificationV465:true
+    },
+    priorCompletionIdentityRecoveryV465:{
+      enabled:true,
+      requiresMatchingPoolRegistry:true,
+      requiresExactTokenCurrencyMatch:true,
+      requiresCanonicalQuote:true,
+      rewritesFrozenAlertHistory:false
     },
     addsExternalRequestsOnlyForOneStrictReverification:true,
     requestCeilingsChanged:false,
@@ -51176,49 +51530,152 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
 
   let ranges = [first];
   let pending = [];
-  if (first.saturated) {
-    pending.push({fromBlock, toBlock});
-    ranges = [];
-  }
   let stopReason = null;
+  let fanoutRangesV465 = 0;
+
+  if (first.saturated) {
+    ranges = [];
+
+    const remainingLogRequests =
+      Math.max(
+        0,
+        VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461 -
+          (requestsUsed - 1)
+      );
+
+    /*
+     * V465 efficiency hardening:
+     * fan out the already-known saturated full span directly across the
+     * remaining protected log-request capacity. This avoids spending requests
+     * on a binary tree whose large intermediate parents are likely to remain
+     * saturated. Ranges are exact, contiguous and non-overlapping.
+     */
+    const blockCount =
+      Math.max(1, toBlock - fromBlock + 1);
+    fanoutRangesV465 =
+      Math.max(
+        1,
+        Math.min(
+          remainingLogRequests,
+          blockCount
+        )
+      );
+
+    const baseSpan =
+      Math.floor(blockCount / fanoutRangesV465);
+    const remainder =
+      blockCount % fanoutRangesV465;
+
+    let cursor = fromBlock;
+    for (
+      let i = 0;
+      i < fanoutRangesV465;
+      i++
+    ) {
+      const span =
+        baseSpan +
+        (i < remainder ? 1 : 0);
+      const childFrom = cursor;
+      const childTo =
+        i === fanoutRangesV465 - 1
+          ? toBlock
+          : cursor + span - 1;
+      pending.push({
+        fromBlock:childFrom,
+        toBlock:childTo,
+        fanoutV465:true
+      });
+      cursor = childTo + 1;
+    }
+  }
 
   while (pending.length) {
-    if ((requestsUsed - 1) >= VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461) {
-      stopReason = "MAX_LOG_REQUESTS_REACHED_V461";
+    if (
+      (requestsUsed - 1) >=
+      VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461
+    ) {
+      stopReason =
+        "MAX_LOG_REQUESTS_REACHED_V461";
       break;
     }
+
     const range = pending.shift();
-    if (!range || range.fromBlock > range.toBlock) continue;
-    if (range.fromBlock === range.toBlock) {
-      stopReason = "SINGLE_BLOCK_RANGE_SATURATED_V461";
-      ranges.push({ok:true, ...range, rows:[], saturated:true, unresolved:true});
+    if (
+      !range ||
+      range.fromBlock > range.toBlock
+    ) {
+      continue;
+    }
+
+    const result =
+      await fetchRangeV461(
+        range.fromBlock,
+        range.toBlock
+      );
+
+    if (!result.ok) {
+      ranges.push({
+        ...result,
+        unresolved:true
+      });
+      stopReason = result.status;
       break;
     }
-    const mid = Math.floor((range.fromBlock + range.toBlock) / 2);
-    const children = [
-      {fromBlock:range.fromBlock, toBlock:mid},
-      {fromBlock:mid + 1, toBlock:range.toBlock}
-    ];
-    for (const child of children) {
-      if ((requestsUsed - 1) >= VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461) {
-        pending.unshift(child);
-        stopReason = "MAX_LOG_REQUESTS_REACHED_V461";
-        break;
-      }
-      const result = await fetchRangeV461(child.fromBlock, child.toBlock);
-      if (!result.ok) {
-        ranges.push({...result, unresolved:true});
-        stopReason = result.status;
-        pending = [];
-        break;
-      }
-      if (result.saturated) {
-        pending.push(child);
-      } else {
-        ranges.push(result);
-      }
+
+    if (!result.saturated) {
+      ranges.push({
+        ...result,
+        fanoutV465:
+          range?.fanoutV465 === true
+      });
+      continue;
     }
-    if (stopReason && stopReason !== "MAX_LOG_REQUESTS_REACHED_V461") break;
+
+    /*
+     * A directly fanned-out child can still be unusually dense.
+     * Split only that saturated child if protected capacity remains.
+     */
+    if (range.fromBlock === range.toBlock) {
+      ranges.push({
+        ...result,
+        unresolved:true
+      });
+      stopReason =
+        "SINGLE_BLOCK_RANGE_SATURATED_V461";
+      break;
+    }
+
+    const remainingCapacity =
+      VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461 -
+      (requestsUsed - 1);
+
+    if (remainingCapacity < 2) {
+      ranges.push({
+        ...result,
+        unresolved:true
+      });
+      stopReason =
+        "MAX_LOG_REQUESTS_REACHED_V461";
+      break;
+    }
+
+    const mid =
+      Math.floor(
+        (range.fromBlock + range.toBlock) / 2
+      );
+
+    pending.unshift(
+      {
+        fromBlock:mid + 1,
+        toBlock:range.toBlock,
+        recursiveSplitV465:true
+      },
+      {
+        fromBlock:range.fromBlock,
+        toBlock:mid,
+        recursiveSplitV465:true
+      }
+    );
   }
 
   const unresolvedRanges = pending.length + ranges.filter(r => r?.unresolved === true || r?.saturated === true).length;
@@ -51286,7 +51743,10 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
       unresolvedRanges,
       dedupedRows:rows.length,
       coverageComplete:allRangesComplete,
-      stoppedReason:stopReason
+      stoppedReason:stopReason,
+      fanoutFirstV465:first.saturated === true,
+      initialFanoutRangesV465:fanoutRangesV465,
+      binaryTreePrimaryStrategyV465:false
     }
   };
 }
