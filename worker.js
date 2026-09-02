@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V452
- * AUTHORITATIVE RUNTIME VERSION: V452
+ * Robinhood Chain Meme Hunter — V453
+ * AUTHORITATIVE RUNTIME VERSION: V453
+ * V453 resolves the generic custom-accounting ambiguity for the verified Pons V2 meme hook. Research confirms Pons V2 graduated pools use one permanently locked full-range Uniswap v4 position; the hook charges/accrues post-swap fees but does not replace the core AMM curve or custody trading principal between swaps. ReservesLens generically marks the hook as hasCustomAccounting because its hook permissions include a return-delta accounting flag, but for this specifically identified protocol that flag represents fee accounting rather than hook-managed replacement liquidity. V453 therefore adds a strict semantic classifier for the canonical Pons V2 hook address only. It labels its ReservesLens core principal as semantically usable independent pool-liquidity evidence while keeping hook-held accrued fees separate and excluded. This build remains diagnostic-only: it does NOT yet promote market.verified, change liquidity gates, scoring, qualification, Telegram behavior, provider routing, or request ceilings. Unknown/custom hooks remain blocked exactly as before.
  * V452 fixes the blocker proven by the V451 CULT scan: V196 already returned a VERIFIED native ETH -> canonical USDG price in the same scan, but V441 ReservesLens valuation only consulted the persisted V195 cache.  * V452 bridges already-verified same-scan WETH/USDG evidence into a bounded persisted reference consumed by V441. Priority is verified same-batch canonical WETH/USDG swap evidence, then verified V196 native ETH->canonical USDG quote, then verified V195 V3 reference.  * The bridge adds zero external requests and never invents a price. Reuse is capped at 30 minutes. Native ETH follows the existing 1:1 WETH denomination policy.  * No scoring, qualification, market promotion, liquidity threshold, Telegram behavior, provider routing or request ceilings change.
  * V451 fixes the liquidity cross-check definition after research and V448 evidence showed that V449 compared different Uniswap V4 pools for the same token.  * ReservesLens computes fee-excluded liquidity principal for one exact PoolKey/PoolId. A provider liquidity value is therefore comparable only when its pairAddress/pool identity matches that exact ReservesLens PoolId.  * V451 requires exact normalized pool identity equality before calculating liquidity ratios or divergence. Same-token/different-pool values are explicitly classified DIFFERENT_POOL_NOT_COMPARABLE_V451 and can never be used to validate or reject ReservesLens liquidity.  * Existing ReservesLens promotion remains disabled. No scoring, qualification, Telegram, provider routing, request budgets or liquidity thresholds change.
  * V450 removes historical PoolKey recovery from the live critical scan path. V447/V448/V449 proved that optional historical eth_getLogs recovery is unreliable across providers (Chainstack/Blockscout 403s) and can waste analysis budget without improving current-launch handling. V450 therefore does not call recoverHistoricalPoolKeyV443 during normal /scan execution. ReservesLens runs only when a complete PoolKey is already safely persisted from V441+ Initialize observation or other previously verified complete state. Older incomplete watched pools remain fully eligible for the rest of the scanner, but are skipped for independent ReservesLens liquidity rather than triggering historical recovery. The V448/V443 recovery code is retained but dormant for backwards compatibility/diagnostics; it is not part of the live critical path. V449 liquidity cross-checks, V447 valuation-ready target selection, V442 Chainstack ReservesLens routing, scoring, qualification, alert cooldowns, Telegram thresholds and request ceilings are unchanged.
@@ -1526,7 +1527,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V452";
+const VERSION = "V453";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -4850,6 +4851,109 @@ async function reservesLensLiquidityDiagnosticV441(
 /* =========================================================
    V449 LIQUIDITY CROSS-CHECK + TELEGRAM SEND-STATUS DIAGNOSTICS
    ========================================================= */
+
+const PONS_V2_MEME_HOOK_V453 =
+  "0xe5e702641ea86f4ae6cc3cdaed2b886f976be044";
+
+function classifyHookLiquiditySemanticsV453(
+  reservesLens
+) {
+  const hook =
+    normalize(
+      reservesLens
+        ?.poolKey
+        ?.hooks
+    );
+
+  const hasCustomAccounting =
+    reservesLens
+      ?.decoded
+      ?.hasCustomAccounting ===
+      true;
+
+  if (
+    hook ===
+    PONS_V2_MEME_HOOK_V453
+  ) {
+    return {
+      enabled: true,
+      identified: true,
+      protocol:
+        "PONS_V2",
+      hook,
+      classification:
+        "FEE_ACCOUNTING_ONLY_CORE_AMM_LIQUIDITY_V453",
+      coreLiquiditySemanticallyUsable:
+        true,
+      hookManagedTradingPrincipalIncluded:
+        false,
+      hookAccruedFeesExcluded:
+        true,
+      rationale:
+        "PONS_V2_SINGLE_LOCKED_FULL_RANGE_CORE_POSITION_AND_POST_SWAP_FEE_ACCOUNTING",
+      genericHasCustomAccounting:
+        hasCustomAccounting,
+      promotionAllowed:
+        false,
+      diagnosticOnly:
+        true
+    };
+  }
+
+  if (hasCustomAccounting) {
+    return {
+      enabled: true,
+      identified: false,
+      protocol: null,
+      hook: hook || null,
+      classification:
+        "UNKNOWN_CUSTOM_ACCOUNTING_REMAINS_BLOCKED_V453",
+      coreLiquiditySemanticallyUsable:
+        false,
+      hookManagedTradingPrincipalIncluded:
+        null,
+      hookAccruedFeesExcluded:
+        true,
+      rationale:
+        "CUSTOM_ACCOUNTING_SEMANTICS_NOT_INDEPENDENTLY_VERIFIED",
+      genericHasCustomAccounting:
+        true,
+      promotionAllowed:
+        false,
+      diagnosticOnly:
+        true
+    };
+  }
+
+  return {
+    enabled: true,
+    identified:
+      hook ===
+      "0x0000000000000000000000000000000000000000",
+    protocol:
+      hook ===
+      "0x0000000000000000000000000000000000000000"
+        ? "NO_HOOK"
+        : null,
+    hook: hook || null,
+    classification:
+      "CORE_AMM_LIQUIDITY_NO_CUSTOM_ACCOUNTING_V453",
+    coreLiquiditySemanticallyUsable:
+      true,
+    hookManagedTradingPrincipalIncluded:
+      false,
+    hookAccruedFeesExcluded:
+      true,
+    rationale:
+      "RESERVESLENS_CORE_PRINCIPAL_NO_CUSTOM_ACCOUNTING_FLAG",
+    genericHasCustomAccounting:
+      false,
+    promotionAllowed:
+      false,
+    diagnosticOnly:
+      true
+  };
+}
 
 function providerPoolIdentityV451(candidate) {
   const market =
@@ -59051,6 +59155,32 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    ponsV2HookLiquiditySemanticsV453: {
+      enabled: true,
+      canonicalPonsV2Hook:
+        PONS_V2_MEME_HOOK_V453,
+      ponsV2CoreLiquiditySemanticallyUsable:
+        true,
+      ponsV2HookFeesKeptSeparate:
+        true,
+      unknownCustomHooksRemainBlocked:
+        true,
+      diagnosticOnly:
+        true,
+      marketPromotionChanged:
+        false,
+      liquidityThresholdChanged:
+        false,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramBehaviourChanged:
+        false,
+      addsExternalRequests:
+        0
+    },
+
     verifiedEthUsdGReferenceBridgeV452: {
       enabled: true,
       sourcePriority: [
@@ -63425,6 +63555,38 @@ for (
       candidates
     );
 
+  const hookLiquiditySemanticsV453 =
+    (
+      Array.isArray(candidates)
+        ? candidates
+        : []
+    ).map(candidate => {
+      const semantics =
+        classifyHookLiquiditySemanticsV453(
+          candidate
+            ?.reservesLensLiquidityDiagnosticV441
+        );
+
+      candidate.hookLiquiditySemanticsV453 =
+        semantics;
+
+      return {
+        address:
+          normalize(
+            candidate?.address
+          ),
+        symbol:
+          candidate?.symbol || null,
+        poolId:
+          normalize(
+            candidate
+              ?.reservesLensLiquidityDiagnosticV441
+              ?.poolId
+          ) || null,
+        ...semantics
+      };
+    });
+
   const liquidityCrosschecksV449 =
     (
       Array.isArray(candidates)
@@ -67352,6 +67514,8 @@ for (
     telegramSendStatusV449,
 
     telegramResults,
+
+    hookLiquiditySemanticsV453,
 
     liquidityCrosschecksV449,
     exactPoolLiquidityCrosschecksV451:
