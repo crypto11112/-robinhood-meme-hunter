@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V444
- * AUTHORITATIVE RUNTIME VERSION: V444
+ * Robinhood Chain Meme Hunter — V445
+ * AUTHORITATIVE RUNTIME VERSION: V445
+ * V445 fixes the remaining temporal-dead-zone bug by removing the historicalPoolKeyRecoveryResultV443 runtime value from the early scannerFunnelV415 object, which is created before candidate analysis and before that result exists. The early funnel now keeps only the static V443 capability descriptor. The actual recovery result is exposed only in the final scan response after the recovery call has completed. No PoolKey recovery logic, ReservesLens logic, Chainstack routing, request budgets, scoring, qualification, liquidity rules or Telegram behavior are changed.
  * V444 is a narrow runtime fix for the V443 temporal-dead-zone error. The V443 logic itself was valid, but the runtime result variable was named historicalPoolKeyRecoveryV443, the same identifier used by the top-level telemetry property shorthand before that const had been initialized in the scan function. V444 renames only the runtime result variable to historicalPoolKeyRecoveryResultV443 and updates the telemetry reference. No recovery logic, RPC routing, request budgets, scoring, qualification, liquidity rules or Telegram behavior are changed.
  * V443 is a narrow historical PoolKey recovery build based on the V442 test. V442 proved the ReservesLens routing fix was ready, but the test candidate could not be queried because older persisted pool records pre-dated V441 and therefore contained PoolId/currencies without the immutable fee, tickSpacing and hooks fields required by ReservesLens. V443 recovers that missing immutable PoolKey from the exact historical PoolManager Initialize event when an older returned candidate has an incomplete persisted key and a known Initialize-derived block number. Recovery uses one exact single-block eth_getLogs request through the existing managed analysis RPC router (Chainstack preferred), filtered by PoolManager + Initialize topic + exact PoolId. A recovered event is decoded with the existing V441 full Initialize decoder, written into the existing poolRegistry, and merged into the watched token's existing pool row before the V441 ReservesLens diagnostic runs. At most one recovery request is attempted per scan and only within the existing analysis/global budgets. No request ceiling, scoring, qualification, liquidity threshold or Telegram rule is changed, and no PoolKey field is guessed.
  * V442 is a narrow routing correction for the V441 ReservesLens liquidity diagnostic. The V441 test proved PoolKey reconstruction works, but its single ReservesLens eth_call used the legacy V292 manual-RPC helper, which prefers Alchemy and hit an exhausted Alchemy monthly-capacity limit. V442 routes the ReservesLens read through the bot's existing managed analysis RPC path instead: Chainstack is preferred, Robinhood Public remains fallback, and Alchemy remains bounded fallback under the existing V423/V424/V426/V427 provider-health logic. No new RPC provider is added, no request ceiling is raised, and the diagnostic still consumes at most the existing analysis budget. All V441 liquidity calculations remain diagnostic-only; market.verified, liquidityUsd, scoring, qualification and Telegram thresholds remain unchanged.
@@ -1518,7 +1519,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V444";
+const VERSION = "V445";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -58110,9 +58111,6 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
-    historicalPoolKeyRecoveryV443:
-      historicalPoolKeyRecoveryResultV443,
-
     historicalPoolKeyRecoveryV443: {
       enabled: true,
       exactPoolIdInitializeFilter: true,
@@ -63800,6 +63798,9 @@ for (
 
     returnedCandidateBlockerDiagnosticV436:
       candidateBlockersV436,
+
+    historicalPoolKeyRecoveryV443:
+      historicalPoolKeyRecoveryResultV443,
 
     holderEvidenceRecoveryUpgradeV437: {
       enabled: true,
