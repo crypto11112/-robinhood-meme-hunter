@@ -1,6 +1,36 @@
 /**
- * Robinhood Chain Meme Hunter — V488
- * AUTHORITATIVE RUNTIME VERSION: V488
+ * Robinhood Chain Meme Hunter — V489
+ * AUTHORITATIVE RUNTIME VERSION: V489
+ *
+ * V489 FREE-PLAN BLOCKSCOUT INTERNAL-TRANSACTION CREATION ATTRIBUTION:
+ * - preserves all confirmed-working V488/V487/V486/V485/V484/V483 behaviour;
+ * - addresses the confirmed Chainstack free-plan HTTP 403 for
+ *   debug_traceTransaction by making Blockscout internal-transactions the
+ *   active no-debug fallback;
+ * - documented endpoint shape:
+ *     GET /api/v2/transactions/{transaction_hash}/internal-transactions
+ * - uses existing BLOCKSCOUT_PRO_API_KEY through the same Robinhood Chain
+ *   Blockscout PRO base already proven by V480/V483/V485;
+ * - exact deployment proof requires ONE successful internal-transaction row
+ *   whose created_contract.hash exactly equals the candidate token;
+ * - the matching row's from.hash is stored as VERIFIED DEPLOYMENT SOURCE;
+ * - CREATE/CREATE2 type is retained when Blockscout provides it;
+ * - deployment-source evidence DOES NOT automatically prove launchpad,
+ *   factory, router, or launch-source identity;
+ * - candidates come from V486 origins whose V485 raw trace already returned
+ *   HTTP 200 with no exact token-create match, including origins that V488
+ *   subsequently attempted against Chainstack and received HTTP 403;
+ * - V489 is processed once after a real request; no infinite retries;
+ * - V489 has priority over the now-known-unavailable automatic Chainstack
+ *   debug fallback and over starting another unprocessed V486 raw trace;
+ * - V488 telemetry/history is preserved but automatic Chainstack debug tracing
+ *   is disabled for the current free-plan path;
+ * - V487 fairness remains active: after two consecutive V483 blocks, the next
+ *   secondary slot services V489/V486 backlog;
+ * - max ONE secondary origin diagnostic request per scan remains unchanged;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, launch-meter,
+ *   V476 launch-source promotion, or fresh-analysis-order changes.
  *
  * V488 CHAINSTACK CALL-TRACE FALLBACK FOR EMPTY/UNUSABLE BLOCKSCOUT RAW TRACE:
  * - preserves all confirmed-working V487/V486/V485/V484/V483 behaviour;
@@ -2036,7 +2066,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V488";
+const VERSION = "V489";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71182,6 +71212,11 @@ for (
         state
       ),
 
+    blockscoutInternalCreationAttributionV489:
+      blockscoutInternalCreationAttributionSnapshotV489(
+        state
+      ),
+
     chainstackCreationTraceFallbackV488:
       {
         ...chainstackCreationTraceFallbackSnapshotV488(
@@ -71190,7 +71225,11 @@ for (
         chainstackConfigured:
           chainstackConfiguredV431(
             env
-          )
+          ),
+        automaticRoutingDisabledV489:
+          true,
+        automaticRoutingDisableReasonV489:
+          "CHAINSTACK_FREE_PLAN_DEBUG_TRACE_HTTP_403_CONFIRMED_V488"
       },
 
     postTelegramGlobalSpareV478:
@@ -71397,9 +71436,60 @@ for (
         false
     },
 
+    blockscoutInternalTransactionCreationAttributionV489: {
+      enabled: true,
+      measurementOnly: true,
+      provider:
+        "BLOCKSCOUT_PRO",
+      endpoint:
+        "/api/v2/transactions/{transaction_hash}/internal-transactions",
+      trigger:
+        "V485_HTTP_200_NO_EXACT_TOKEN_CREATE_MATCH",
+      includesPreviouslyV488Http403Origins:
+        true,
+      exactProofStandard:
+        "SUCCESSFUL_INTERNAL_TX_CREATED_CONTRACT_HASH_EQUALS_TOKEN",
+      verifiedDeploymentSource:
+        "MATCHING_INTERNAL_TX_FROM_HASH",
+      creationKind:
+        "BLOCKSCOUT_TYPE_ONLY_NO_INFERENCE",
+      processedOnceAfterRealRequest:
+        true,
+      automaticRetryAfterProcessed:
+        false,
+      priority:
+        "BEFORE_CHAINSTACK_V488_AND_BEFORE_NEW_V486_RAW_TRACE",
+      chainstackFreePlan403Workaround:
+        true,
+      maxRequestsPerScan:
+        1,
+      maxSecondaryOriginDiagnosticRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      deploymentSourceMeansLaunchpad:
+        false,
+      launchSourcePromotion:
+        false,
+      launchMeterMutation:
+        false,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false
+    },
+
     chainstackExactCreationTraceFallbackV488: {
       enabled: true,
       measurementOnly: true,
+      automaticRoutingDisabledV489:
+        true,
+      automaticRoutingDisableReasonV489:
+        "CHAINSTACK_FREE_PLAN_DEBUG_TRACE_HTTP_403_CONFIRMED_V488",
       provider:
         "CHAINSTACK",
       rpcMethod:
@@ -86586,14 +86676,116 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
   }
 
   /*
-   * V488: a prior Blockscout raw-trace HTTP-200/no-exact-match origin is one
-   * evidence step closer to resolution, so service that fallback before
-   * starting another unprocessed V486 Blockscout origin.
+   * V489 FREE-PLAN ROUTE:
+   * A prior V485 Blockscout raw-trace HTTP-200/no-match origin is first sent
+   * to Blockscout's documented transaction internal-transactions endpoint.
+   * This remains one request and can expose created_contract without debug RPC.
    */
-  const chainstackFallbackCandidateV488 =
-    selectOldestChainstackFallbackCandidateV488(
+  const blockscoutInternalCandidateV489 =
+    selectOldestBlockscoutInternalCandidateV489(
       state
     );
+
+  if (blockscoutInternalCandidateV489) {
+    const internalV489 =
+      await runBlockscoutInternalCreationAttributionV489({
+        env,
+        state,
+        budget,
+        candidate:
+          blockscoutInternalCandidateV489
+      });
+
+    telemetry.blockscoutInternalCreationV489 =
+      internalV489;
+
+    telemetry.chainstackFallbackV488 = {
+      enabled: true,
+      measurementOnly: true,
+      attempted: false,
+      automaticRoutingDisabledV489: true,
+      reason:
+        "CHAINSTACK_FREE_PLAN_DEBUG_TRACE_HTTP_403_CONFIRMED_V488",
+      status:
+        "V488_PRESERVED_HISTORY_ONLY_V489"
+    };
+
+    telemetry.selectedFromPersistedVerifiedOrigins =
+      true;
+    telemetry.selectedToken =
+      internalV489?.selectedToken ||
+      null;
+    telemetry.selectedCreator =
+      internalV489?.selectedCreator ||
+      null;
+    telemetry.selectedCreationTransactionHash =
+      internalV489
+        ?.selectedCreationTransactionHash ||
+      null;
+    telemetry.attempted =
+      internalV489?.attempted ===
+      true;
+    telemetry.requestConsumed =
+      internalV489
+        ?.requestConsumed === true;
+    telemetry.processedAfterAttempt =
+      internalV489
+        ?.processedAfterAttempt ===
+      true;
+    telemetry.status =
+      internalV489?.status ||
+      "V489_STATUS_UNAVAILABLE";
+
+    if (
+      internalV489?.attempted === true &&
+      v483DeferredForFairnessV487
+    ) {
+      telemetry.fairnessV487
+        .fairnessGrantThisScan = true;
+
+      fairness.fairnessGrants =
+        safeNumber(
+          fairness.fairnessGrants
+        ) + 1;
+
+      fairness.lastFairnessGrantAt =
+        Date.now();
+
+      fairness.lastFairnessGrantToken =
+        internalV489?.selectedToken ||
+        null;
+
+      fairness.consecutiveV483BlocksOfV486 =
+        0;
+
+      fairness.lastDecision =
+        "V489_FAIRNESS_GRANTED_TO_BLOCKSCOUT_INTERNAL_TX";
+
+      fairness.lastDecisionAt =
+        Date.now();
+    }
+
+    root.lastStatus =
+      `V486_ROUTED_TO_V489:${telemetry.status}`;
+
+    return telemetry;
+  }
+
+  telemetry.blockscoutInternalCreationV489 = {
+    enabled: true,
+    measurementOnly: true,
+    attempted: false,
+    status:
+      "V489_NO_ELIGIBLE_INTERNAL_TX_ATTRIBUTION"
+  };
+
+  /*
+   * V488 Chainstack debug tracing remains in the codebase for evidence/history
+   * but automatic execution is intentionally disabled on the confirmed free
+   * plan because it returns HTTP 403. Do not burn another request here.
+   */
+  const chainstackFallbackCandidateV488 =
+    null;
 
   if (chainstackFallbackCandidateV488) {
     const fallbackV488 =
@@ -86673,8 +86865,11 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
     enabled: true,
     measurementOnly: true,
     attempted: false,
+    automaticRoutingDisabledV489: true,
+    reason:
+      "CHAINSTACK_FREE_PLAN_DEBUG_TRACE_HTTP_403_CONFIRMED_V488",
     status:
-      "V488_NO_ELIGIBLE_BLOCKSCOUT_NO_MATCH_FALLBACK"
+      "V488_PRESERVED_HISTORY_ONLY_V489"
   };
 
   const selected =
@@ -87125,6 +87320,992 @@ function persistedOriginRawTraceBacklogSnapshotV486(
 }
 
 
+
+
+function ensureBlockscoutInternalCreationAttributionV489(
+  state
+) {
+  if (
+    !state.blockscoutInternalCreationAttributionV489 ||
+    typeof state.blockscoutInternalCreationAttributionV489 !== "object"
+  ) {
+    state.blockscoutInternalCreationAttributionV489 = {
+      enabled: true,
+      measurementOnly: true,
+      monitorStartedAt: Date.now(),
+      scansObserved: 0,
+      requestsAttempted: 0,
+      requestsSucceeded: 0,
+      exactTokenCreationsVerified: 0,
+      processedOrigins: {},
+      tokenAttributions: {},
+      sourceClusters: {},
+      lastTarget: null,
+      lastTransactionHash: null,
+      lastStatus: null,
+      lastHttpStatus: null,
+      lastAttemptAt: null
+    };
+  }
+
+  const root =
+    state.blockscoutInternalCreationAttributionV489;
+
+  root.processedOrigins =
+    root.processedOrigins &&
+    typeof root.processedOrigins === "object"
+      ? root.processedOrigins
+      : {};
+
+  root.tokenAttributions =
+    root.tokenAttributions &&
+    typeof root.tokenAttributions === "object"
+      ? root.tokenAttributions
+      : {};
+
+  root.sourceClusters =
+    root.sourceClusters &&
+    typeof root.sourceClusters === "object"
+      ? root.sourceClusters
+      : {};
+
+  return root;
+}
+
+function pruneBlockscoutInternalCreationAttributionV489(
+  state
+) {
+  const root =
+    ensureBlockscoutInternalCreationAttributionV489(
+      state
+    );
+
+  const now = Date.now();
+  const maxAgeMs =
+    7 * 24 * 60 * 60 * 1000;
+
+  root.processedOrigins =
+    Object.fromEntries(
+      Object.entries(
+        root.processedOrigins || {}
+      )
+        .filter(([, row]) => {
+          const at =
+            safeNumber(row?.attemptedAt);
+
+          return (
+            at > 0 &&
+            now - at <= maxAgeMs
+          );
+        })
+        .sort(
+          (a, b) =>
+            safeNumber(b?.[1]?.attemptedAt) -
+            safeNumber(a?.[1]?.attemptedAt)
+        )
+        .slice(0, 200)
+    );
+
+  root.tokenAttributions =
+    Object.fromEntries(
+      Object.entries(
+        root.tokenAttributions || {}
+      )
+        .filter(([, row]) => {
+          const at =
+            safeNumber(row?.verifiedAt);
+
+          return (
+            at > 0 &&
+            now - at <= maxAgeMs
+          );
+        })
+        .sort(
+          (a, b) =>
+            safeNumber(b?.[1]?.verifiedAt) -
+            safeNumber(a?.[1]?.verifiedAt)
+        )
+        .slice(0, 100)
+    );
+
+  root.sourceClusters = {};
+
+  for (
+    const attribution of
+    Object.values(
+      root.tokenAttributions || {}
+    )
+  ) {
+    if (
+      attribution?.exactTokenCreateVerified !==
+      true
+    ) {
+      continue;
+    }
+
+    const source =
+      normalize(
+        attribution?.verifiedDeploymentSource
+      );
+
+    const token =
+      normalize(
+        attribution?.token
+      );
+
+    if (
+      !isAddress(source) ||
+      !isAddress(token)
+    ) {
+      continue;
+    }
+
+    const cluster =
+      root.sourceClusters[source] || {
+        sourceAddress: source,
+        distinctTokens: 0,
+        tokens: [],
+        createCount: 0,
+        create2Count: 0,
+        creatorConsistencyCount: 0,
+        interpretation:
+          "RECURRING_VERIFIED_DEPLOYMENT_SOURCE_NOT_AUTOMATICALLY_LAUNCHPAD_V489"
+      };
+
+    if (!cluster.tokens.includes(token)) {
+      cluster.tokens.push(token);
+      cluster.distinctTokens++;
+    }
+
+    if (
+      attribution?.creationKind ===
+      "CREATE2"
+    ) {
+      cluster.create2Count++;
+    } else if (
+      attribution?.creationKind ===
+      "CREATE"
+    ) {
+      cluster.createCount++;
+    }
+
+    if (
+      attribution
+        ?.creatorMatchesInternalTxSource ===
+        true
+    ) {
+      cluster.creatorConsistencyCount++;
+    }
+
+    root.sourceClusters[source] =
+      cluster;
+  }
+
+  return root;
+}
+
+function blockscoutProInternalTransactionsUrlV489(
+  env,
+  transactionHash
+) {
+  const key =
+    String(
+      env?.BLOCKSCOUT_PRO_API_KEY ||
+      ""
+    ).trim();
+
+  const tx =
+    String(
+      transactionHash ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  if (
+    !key ||
+    !/^0x[a-f0-9]{64}$/.test(tx)
+  ) {
+    return null;
+  }
+
+  return (
+    `https://api.blockscout.com/4663/api/v2/transactions/${tx}/internal-transactions` +
+    `?apikey=${encodeURIComponent(key)}`
+  );
+}
+
+function internalTransactionCreatedContractV489(
+  row
+) {
+  return normalize(
+    row?.created_contract?.hash ??
+    row?.createdContract?.hash ??
+    row?.created_contract_hash ??
+    ""
+  );
+}
+
+function internalTransactionFromV489(
+  row
+) {
+  return normalize(
+    row?.from?.hash ??
+    row?.from ??
+    ""
+  );
+}
+
+function internalTransactionTypeV489(
+  row
+) {
+  const raw =
+    String(
+      row?.type ??
+      row?.call_type ??
+      row?.callType ??
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  if (raw.includes("create2")) {
+    return "CREATE2";
+  }
+
+  if (raw.includes("create")) {
+    return "CREATE";
+  }
+
+  /*
+   * Some Blockscout deployments expose created_contract without a create
+   * type label. Do not invent CREATE/CREATE2 in that case.
+   */
+  return null;
+}
+
+function parseExactInternalCreationV489({
+  body,
+  token,
+  verifiedCreator,
+  creationTransactionHash
+}) {
+  const cleanToken =
+    normalize(token);
+
+  const cleanCreator =
+    normalize(verifiedCreator);
+
+  const rows =
+    Array.isArray(body?.items)
+      ? body.items
+      : (
+          Array.isArray(body)
+            ? body
+            : []
+        );
+
+  const parsed =
+    rows.map((row, index) => ({
+      index,
+      row,
+      createdContract:
+        internalTransactionCreatedContractV489(
+          row
+        ),
+      from:
+        internalTransactionFromV489(
+          row
+        ),
+      creationKind:
+        internalTransactionTypeV489(
+          row
+        ),
+      success:
+        row?.success !== false &&
+        !row?.error,
+      error:
+        row?.error != null
+          ? String(row.error)
+          : null
+    }));
+
+  const exactMatches =
+    parsed.filter(row =>
+      row.success === true &&
+      isAddress(row.createdContract) &&
+      row.createdContract === cleanToken &&
+      isAddress(row.from)
+    );
+
+  const exact =
+    exactMatches.length === 1
+      ? exactMatches[0]
+      : null;
+
+  const source =
+    exact
+      ? exact.from
+      : null;
+
+  const verified =
+    Boolean(
+      exact &&
+      exactMatches.length === 1 &&
+      isAddress(source)
+    );
+
+  return {
+    token:
+      isAddress(cleanToken)
+        ? cleanToken
+        : null,
+    creationTransactionHash:
+      /^0x[a-f0-9]{64}$/.test(
+        String(
+          creationTransactionHash ||
+          ""
+        ).toLowerCase()
+      )
+        ? String(
+            creationTransactionHash
+          ).toLowerCase()
+        : null,
+    internalTransactionRowsReturned:
+      rows.length,
+    rowsWithCreatedContract:
+      parsed.filter(row =>
+        isAddress(
+          row.createdContract
+        )
+      ).length,
+    exactTokenCreateMatches:
+      exactMatches.length,
+    exactTokenCreateVerified:
+      verified,
+    creationKind:
+      exact?.creationKind || null,
+    matchingInternalTransactionIndex:
+      exact?.index ?? null,
+    verifiedDeploymentSource:
+      verified
+        ? source
+        : null,
+    v480VerifiedCreator:
+      isAddress(cleanCreator)
+        ? cleanCreator
+        : null,
+    creatorMatchesInternalTxSource:
+      Boolean(
+        verified &&
+        isAddress(cleanCreator) &&
+        cleanCreator === source
+      ),
+    deploymentSourceRole:
+      verified
+        ? "VERIFIED_DEPLOYMENT_SOURCE_ADDRESS_ONLY"
+        : "DATA_UNVERIFIED",
+    deploymentSourceIsLaunchpad:
+      "DATA UNVERIFIED",
+    deploymentSourceIsFactory:
+      "DATA UNVERIFIED",
+    deploymentSourceIsRouter:
+      "DATA UNVERIFIED",
+    launchSourcePromoted:
+      false,
+    evidenceStandard:
+      verified
+        ? "BLOCKSCOUT_INTERNAL_TX_CREATED_CONTRACT_EXACT_TOKEN_MATCH_V489"
+        : "NO_EXACT_BLOCKSCOUT_INTERNAL_TX_TOKEN_CREATION_PROOF_V489"
+  };
+}
+
+function selectOldestBlockscoutInternalCandidateV489(
+  state
+) {
+  const v486 =
+    prunePersistedOriginRawTraceBacklogV486(
+      state
+    );
+
+  const root =
+    pruneBlockscoutInternalCreationAttributionV489(
+      state
+    );
+
+  const candidates =
+    Object.entries(
+      v486.processedOrigins || {}
+    )
+      .map(([key, row]) => ({
+        key,
+        row
+      }))
+      .filter(({ key, row }) => {
+        const token =
+          normalize(row?.token);
+
+        const creator =
+          normalize(
+            row?.verifiedCreator
+          );
+
+        const tx =
+          String(
+            row?.creationTransactionHash ||
+            ""
+          )
+            .trim()
+            .toLowerCase();
+
+        return (
+          row?.exactTokenCreateVerified !==
+            true &&
+          String(
+            row?.attributionStatus ||
+            ""
+          ).includes(
+            "V485_HTTP_200_NO_EXACT_TOKEN_CREATE_MATCH"
+          ) &&
+          isAddress(token) &&
+          isAddress(creator) &&
+          /^0x[a-f0-9]{64}$/.test(tx) &&
+          !root
+            ?.processedOrigins?.[
+              key
+            ]
+        );
+      })
+      .sort(
+        (a, b) =>
+          safeNumber(
+            a?.row?.attemptedAt
+          ) -
+          safeNumber(
+            b?.row?.attemptedAt
+          )
+      );
+
+  return candidates[0] || null;
+}
+
+function eligibleBlockscoutInternalCandidateCountV489(
+  state
+) {
+  const v486 =
+    prunePersistedOriginRawTraceBacklogV486(
+      state
+    );
+
+  const root =
+    pruneBlockscoutInternalCreationAttributionV489(
+      state
+    );
+
+  let count = 0;
+
+  for (
+    const [key, row] of
+    Object.entries(
+      v486.processedOrigins || {}
+    )
+  ) {
+    const token =
+      normalize(row?.token);
+
+    const creator =
+      normalize(
+        row?.verifiedCreator
+      );
+
+    const tx =
+      String(
+        row?.creationTransactionHash ||
+        ""
+      )
+        .trim()
+        .toLowerCase();
+
+    if (
+      row?.exactTokenCreateVerified !==
+        true &&
+      String(
+        row?.attributionStatus ||
+        ""
+      ).includes(
+        "V485_HTTP_200_NO_EXACT_TOKEN_CREATE_MATCH"
+      ) &&
+      isAddress(token) &&
+      isAddress(creator) &&
+      /^0x[a-f0-9]{64}$/.test(tx) &&
+      !root
+        ?.processedOrigins?.[
+          key
+        ]
+    ) {
+      count++;
+    }
+  }
+
+  return count;
+}
+
+async function runBlockscoutInternalCreationAttributionV489({
+  env,
+  state,
+  budget,
+  candidate
+}) {
+  const root =
+    pruneBlockscoutInternalCreationAttributionV489(
+      state
+    );
+
+  root.scansObserved =
+    safeNumber(
+      root.scansObserved
+    ) + 1;
+
+  const telemetry = {
+    enabled: true,
+    measurementOnly: true,
+    promotionAllowed: false,
+    selectedFromV486ProcessedNoMatch:
+      Boolean(candidate),
+    selectedToken: null,
+    selectedCreator: null,
+    selectedCreationTransactionHash:
+      null,
+    attempted: false,
+    requestConsumed: false,
+    provider:
+      "BLOCKSCOUT_PRO",
+    endpointV489:
+      "https://api.blockscout.com/4663/api/v2/transactions/{creationTxHash}/internal-transactions?apikey=[REDACTED]",
+    attributionResult: null,
+    httpStatus: null,
+    processedAfterAttempt: false,
+    maxRequestsThisScan: 1,
+    hardRequestLimit: 42,
+    launchSourcePromoted: false,
+    launchMeterMutation: false,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false,
+    status: null
+  };
+
+  if (!candidate) {
+    telemetry.status =
+      "V489_NO_ELIGIBLE_INTERNAL_TX_ATTRIBUTION";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const key =
+    candidate.key;
+
+  const row =
+    candidate.row || {};
+
+  const token =
+    normalize(row?.token);
+
+  const creator =
+    normalize(
+      row?.verifiedCreator
+    );
+
+  const tx =
+    String(
+      row?.creationTransactionHash ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
+
+  telemetry.selectedToken =
+    token;
+  telemetry.selectedCreator =
+    creator;
+  telemetry.selectedCreationTransactionHash =
+    tx;
+
+  root.lastTarget =
+    token;
+  root.lastTransactionHash =
+    tx;
+
+  const url =
+    blockscoutProInternalTransactionsUrlV489(
+      env,
+      tx
+    );
+
+  if (!url) {
+    telemetry.status =
+      "V489_BLOCKSCOUT_PRO_NOT_CONFIGURED";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  const spare =
+    consumeReleasedGlobalSpareV478(
+      budget,
+      "BLOCKSCOUT_PRO_TRANSACTION_INTERNAL_CREATION_V489",
+      1
+    );
+
+  if (spare?.ok !== true) {
+    telemetry.status =
+      `V489_BUDGET_UNAVAILABLE:${spare?.reason || "UNKNOWN"}`;
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  }
+
+  telemetry.attempted = true;
+  telemetry.requestConsumed = true;
+
+  root.requestsAttempted =
+    safeNumber(
+      root.requestsAttempted
+    ) + 1;
+
+  const attemptedAt =
+    Date.now();
+
+  root.lastAttemptAt =
+    attemptedAt;
+
+  const controller =
+    new AbortController();
+
+  const timer =
+    setTimeout(
+      () =>
+        controller.abort(),
+      6000
+    );
+
+  try {
+    const response =
+      await fetch(
+        url,
+        {
+          method: "GET",
+          headers: {
+            accept:
+              "application/json"
+          },
+          signal:
+            controller.signal
+        }
+      );
+
+    telemetry.httpStatus =
+      response.status;
+
+    root.lastHttpStatus =
+      response.status;
+
+    if (!response.ok) {
+      telemetry.status =
+        `V489_HTTP_${response.status}`;
+
+      root.lastStatus =
+        telemetry.status;
+
+      root.processedOrigins[key] = {
+        token,
+        verifiedCreator:
+          creator,
+        creationTransactionHash:
+          tx,
+        attemptedAt,
+        httpStatus:
+          response.status,
+        attributionStatus:
+          telemetry.status,
+        exactTokenCreateVerified:
+          false,
+        verifiedDeploymentSource:
+          null,
+        processedOnce:
+          true,
+        retryAutomatically:
+          false
+      };
+
+      telemetry.processedAfterAttempt =
+        true;
+
+      return telemetry;
+    }
+
+    const body =
+      await response.json();
+
+    root.requestsSucceeded =
+      safeNumber(
+        root.requestsSucceeded
+      ) + 1;
+
+    const attribution =
+      parseExactInternalCreationV489({
+        body,
+        token,
+        verifiedCreator:
+          creator,
+        creationTransactionHash:
+          tx
+      });
+
+    telemetry.attributionResult =
+      attribution;
+
+    if (
+      attribution
+        ?.exactTokenCreateVerified ===
+        true
+    ) {
+      const persisted = {
+        ...attribution,
+        verifiedAt:
+          attemptedAt,
+        source:
+          "BLOCKSCOUT_PRO_TRANSACTION_INTERNAL_CREATION_V489",
+        evidenceMeaning:
+          "VERIFIED_DEPLOYMENT_SOURCE_ADDRESS_ONLY_NOT_LAUNCHPAD_IDENTITY"
+      };
+
+      root.tokenAttributions[
+        token
+      ] = persisted;
+
+      root.exactTokenCreationsVerified =
+        safeNumber(
+          root.exactTokenCreationsVerified
+        ) + 1;
+
+      const originRoot =
+        ensureTokenOriginTraceV477(
+          state
+        );
+
+      const origin =
+        originRoot
+          ?.tokenOrigins?.[
+            token
+          ];
+
+      if (
+        origin &&
+        origin?.verified === true
+      ) {
+        origin
+          .blockscoutInternalCreationV489 =
+          persisted;
+      }
+
+      const v485Root =
+        ensureCreationMechanismAttributionV485(
+          state
+        );
+
+      v485Root.blockscoutInternalFallbackV489 =
+        v485Root.blockscoutInternalFallbackV489 &&
+        typeof v485Root.blockscoutInternalFallbackV489 ===
+          "object"
+          ? v485Root.blockscoutInternalFallbackV489
+          : {};
+
+      v485Root.blockscoutInternalFallbackV489[
+        token
+      ] = persisted;
+    }
+
+    root.processedOrigins[key] = {
+      token,
+      verifiedCreator:
+        creator,
+      creationTransactionHash:
+        tx,
+      attemptedAt,
+      httpStatus:
+        response.status,
+      attributionStatus:
+        attribution
+          ?.exactTokenCreateVerified ===
+          true
+          ? "V489_EXACT_INTERNAL_TOKEN_CREATION_VERIFIED"
+          : "V489_HTTP_200_NO_EXACT_INTERNAL_TOKEN_CREATE_MATCH",
+      exactTokenCreateVerified:
+        attribution
+          ?.exactTokenCreateVerified ===
+        true,
+      verifiedDeploymentSource:
+        attribution
+          ?.verifiedDeploymentSource ||
+        null,
+      processedOnce:
+        true,
+      retryAutomatically:
+        false
+    };
+
+    telemetry.processedAfterAttempt =
+      true;
+
+    pruneBlockscoutInternalCreationAttributionV489(
+      state
+    );
+
+    telemetry.status =
+      attribution
+        ?.exactTokenCreateVerified ===
+        true
+        ? "V489_EXACT_INTERNAL_TOKEN_CREATION_VERIFIED"
+        : "V489_HTTP_200_NO_EXACT_INTERNAL_TOKEN_CREATE_MATCH";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  } catch (error) {
+    telemetry.status =
+      `V489_FETCH_ERROR:${errorString(error)}`;
+
+    root.lastStatus =
+      telemetry.status;
+
+    /*
+     * A transport failure is not marked processed so a transient network
+     * problem does not permanently burn the origin.
+     */
+    return telemetry;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function blockscoutInternalCreationAttributionSnapshotV489(
+  state
+) {
+  const root =
+    pruneBlockscoutInternalCreationAttributionV489(
+      state
+    );
+
+  const processed =
+    Object.values(
+      root.processedOrigins || {}
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.attemptedAt
+          ) -
+          safeNumber(
+            a?.attemptedAt
+          )
+      );
+
+  const recurring =
+    Object.values(
+      root.sourceClusters || {}
+    )
+      .filter(
+        row =>
+          safeNumber(
+            row?.distinctTokens
+          ) >= 2
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.distinctTokens
+          ) -
+          safeNumber(
+            a?.distinctTokens
+          )
+      );
+
+  return {
+    enabled: true,
+    measurementOnly: true,
+    monitorStartedAt:
+      safeNumber(
+        root.monitorStartedAt
+      ) || null,
+    scansObserved:
+      safeNumber(
+        root.scansObserved
+      ),
+    requestsAttempted:
+      safeNumber(
+        root.requestsAttempted
+      ),
+    requestsSucceeded:
+      safeNumber(
+        root.requestsSucceeded
+      ),
+    exactTokenCreationsVerified:
+      safeNumber(
+        root.exactTokenCreationsVerified
+      ),
+    processedOriginCount:
+      processed.length,
+    remainingEligibleInternalTxCount:
+      eligibleBlockscoutInternalCandidateCountV489(
+        state
+      ),
+    retainedTokenAttributions:
+      Object.keys(
+        root.tokenAttributions ||
+        {}
+      ).length,
+    recurringVerifiedDeploymentSourceCount:
+      recurring.length,
+    recurringVerifiedDeploymentSources:
+      recurring.slice(0, 20),
+    recentProcessedOrigins:
+      processed.slice(0, 20),
+    lastTarget:
+      root.lastTarget || null,
+    lastTransactionHash:
+      root.lastTransactionHash ||
+      null,
+    lastStatus:
+      root.lastStatus || null,
+    lastHttpStatus:
+      root.lastHttpStatus ?? null,
+    lastAttemptAt:
+      safeNumber(
+        root.lastAttemptAt
+      ) || null,
+    chainstackDebugAutoFallbackDisabled:
+      true,
+    reason:
+      "CHAINSTACK_FREE_PLAN_DEBUG_TRACE_HTTP_403_CONFIRMED_V488",
+    deploymentSourceMeansLaunchpad:
+      false,
+    launchSourcePromotionAllowed:
+      false,
+    oneSecondaryDiagnosticPerScan:
+      true,
+    hardGlobalLimitUnchanged:
+      42
+  };
+}
 
 function ensureChainstackCreationTraceFallbackV488(
   state
@@ -88453,7 +89634,7 @@ function eligiblePersistedOriginBacklogCountV487(
 
   return (
     count +
-    eligibleChainstackFallbackCountV488(
+    eligibleBlockscoutInternalCandidateCountV489(
       state
     )
   );
