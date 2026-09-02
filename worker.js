@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V454
- * AUTHORITATIVE RUNTIME VERSION: V454
+ * Robinhood Chain Meme Hunter — V455
+ * AUTHORITATIVE RUNTIME VERSION: V455
+ * V455 activates the first strict independent on-chain market fallback. It may promote candidate.market only when normal provider market evidence is still unverified AND one exact Uniswap V4 PoolId has all required independent evidence: recent candidate-matched V438 exact-USD executions from that exact PoolId, a verified complete Initialize-derived PoolKey, a successful V441 ReservesLens USD valuation for the same PoolId, and a V454 semantic classification that explicitly marks the core liquidity as usable. The V438 price is recalculated from only the exact PoolId being promoted; mixed-pool median prices are never used. Unknown custom-accounting hooks, missing ReservesLens evidence, incomplete PoolKeys, stale/no exact-USD execution samples, non-positive price/liquidity, or PoolId mismatches remain blocked. The fallback exposes verified priceUsd and exact-pool core liquidityUsd, plus FDV when verified totalSupply/decimals allow it. It deliberately does not invent circulating market cap, provider volume, buy pressure or pair-created age. After a successful promotion V455 refreshes the existing downstream momentum/market-quality/risk/opportunity/signal/confidence pipeline using the same established functions and protections; alert thresholds themselves are unchanged. No provider routing, holder standards, Telegram thresholds or request ceilings change, and V455 adds zero external requests.
  * V454 closes the false-positive semantic path exposed by the V453 SIM scan. The V453 classifier could label a candidate as CORE_AMM_LIQUIDITY_NO_CUSTOM_ACCOUNTING even when that candidate had no ReservesLens result, no verified PoolKey and no PoolId. V454 now requires real ReservesLens evidence and a verified complete PoolKey before ANY liquidity semantic classification may become usable. Missing ReservesLens evidence is classified NO_RESERVESLENS_LIQUIDITY_EVIDENCE_V454 and blocked. Incomplete or unverified PoolKey evidence is classified RESERVESLENS_POOLKEY_UNVERIFIED_V454 and blocked. Only then can a verified ordinary/no-custom-accounting pool become usable, or the specifically identified Pons V2 fee-accounting hook become usable under the researched V453 semantics. Unknown custom-accounting hooks remain blocked. This remains diagnostic-only and does not promote market verification, change liquidity gates, scoring, qualification, Telegram behavior, provider routing or request ceilings.
  * V453 resolves the generic custom-accounting ambiguity for the verified Pons V2 meme hook. Research confirms Pons V2 graduated pools use one permanently locked full-range Uniswap v4 position; the hook charges/accrues post-swap fees but does not replace the core AMM curve or custody trading principal between swaps. ReservesLens generically marks the hook as hasCustomAccounting because its hook permissions include a return-delta accounting flag, but for this specifically identified protocol that flag represents fee accounting rather than hook-managed replacement liquidity. V453 therefore adds a strict semantic classifier for the canonical Pons V2 hook address only. It labels its ReservesLens core principal as semantically usable independent pool-liquidity evidence while keeping hook-held accrued fees separate and excluded. This build remains diagnostic-only: it does NOT yet promote market.verified, change liquidity gates, scoring, qualification, Telegram behavior, provider routing, or request ceilings. Unknown/custom hooks remain blocked exactly as before.
  * V452 fixes the blocker proven by the V451 CULT scan: V196 already returned a VERIFIED native ETH -> canonical USDG price in the same scan, but V441 ReservesLens valuation only consulted the persisted V195 cache.  * V452 bridges already-verified same-scan WETH/USDG evidence into a bounded persisted reference consumed by V441. Priority is verified same-batch canonical WETH/USDG swap evidence, then verified V196 native ETH->canonical USDG quote, then verified V195 V3 reference.  * The bridge adds zero external requests and never invents a price. Reuse is capped at 30 minutes. Native ETH follows the existing 1:1 WETH denomination policy.  * No scoring, qualification, market promotion, liquidity threshold, Telegram behavior, provider routing or request ceilings change.
@@ -1528,7 +1529,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V454";
+const VERSION = "V455";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -5112,6 +5113,646 @@ function classifyHookLiquiditySemanticsV453(
       false,
     diagnosticOnly:
       true
+  };
+}
+
+function exactPoolPriceEvidenceV455(
+  candidate,
+  poolId
+) {
+  const foundation =
+    candidate
+      ?.market
+      ?.onChainMarketFoundationV438;
+
+  const exactPoolId =
+    normalize(poolId);
+
+  const nowMs =
+    Date.now();
+
+  const maxAgeMs =
+    safeNumber(
+      foundation?.maxSampleAgeMs
+    ) > 0
+      ? safeNumber(
+          foundation.maxSampleAgeMs
+        )
+      : ONCHAIN_MARKET_PRICE_MAX_AGE_MS_V438;
+
+  const samples =
+    (
+      Array.isArray(
+        foundation?.samples
+      )
+        ? foundation.samples
+        : []
+    )
+      .filter(row => {
+        const rowPoolId =
+          normalize(
+            row?.poolId
+          );
+
+        const observedAt =
+          safeNumber(
+            row?.observedAt
+          );
+
+        const priceUsd =
+          safeNumber(
+            row?.executionPriceUsd
+          );
+
+        return (
+          /^0x[a-f0-9]{64}$/.test(
+            String(
+              exactPoolId || ""
+            )
+          ) &&
+          rowPoolId ===
+            exactPoolId &&
+          observedAt > 0 &&
+          nowMs - observedAt >=
+            0 &&
+          nowMs - observedAt <=
+            maxAgeMs &&
+          priceUsd > 0
+        );
+      })
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.observedAt
+          ) -
+          safeNumber(
+            a?.observedAt
+          )
+      );
+
+  const prices =
+    samples.map(
+      row =>
+        safeNumber(
+          row?.executionPriceUsd
+        )
+    );
+
+  const medianPriceUsd =
+    medianNumberV187(
+      prices
+    );
+
+  const latest =
+    samples[0] || null;
+
+  const verified =
+    foundation
+      ?.verifiedObservedExecutionPrice ===
+      true &&
+    samples.length > 0 &&
+    Number.isFinite(
+      medianPriceUsd
+    ) &&
+    medianPriceUsd > 0 &&
+    safeNumber(
+      latest?.observedAt
+    ) > 0;
+
+  return {
+    verified,
+    source:
+      "V438_EXACT_USD_EXECUTIONS_EXACT_POOL_ONLY_V455",
+    poolId:
+      exactPoolId || null,
+    sampleCount:
+      samples.length,
+    medianPriceUsd:
+      verified
+        ? medianPriceUsd
+        : null,
+    latestPriceUsd:
+      verified
+        ? safeNumber(
+            latest
+              ?.executionPriceUsd
+          )
+        : null,
+    latestObservedAt:
+      verified
+        ? safeNumber(
+            latest?.observedAt
+          )
+        : null,
+    latestAgeMs:
+      verified
+        ? Math.max(
+            0,
+            nowMs -
+            safeNumber(
+              latest?.observedAt
+            )
+          )
+        : null,
+    maxAgeMs,
+    mixedPoolMedianUsed:
+      false,
+    samples:
+      samples.slice(
+        0,
+        ONCHAIN_MARKET_PRICE_MAX_SAMPLES_V438
+      )
+  };
+}
+
+function strictOnChainMarketFallbackEligibilityV455(
+  candidate
+) {
+  const market =
+    candidate?.market || {};
+
+  const lens =
+    candidate
+      ?.reservesLensLiquidityDiagnosticV441;
+
+  const semantics =
+    candidate
+      ?.hookLiquiditySemanticsV453;
+
+  const poolId =
+    normalize(
+      lens?.poolId ||
+      lens?.poolKey?.poolId
+    );
+
+  const price =
+    exactPoolPriceEvidenceV455(
+      candidate,
+      poolId
+    );
+
+  const liquidityUsd =
+    safeNumber(
+      lens
+        ?.usdValuation
+        ?.totalCoreLiquidityUsd
+    );
+
+  const poolKeyVerified =
+    lens
+      ?.poolKey
+      ?.verified ===
+      true &&
+    lens?.completePoolKey !==
+      false;
+
+  const lensVerified =
+    lens?.verified ===
+      true &&
+    lens
+      ?.usdValuation
+      ?.verified ===
+      true &&
+    liquidityUsd > 0;
+
+  const semanticUsable =
+    semantics
+      ?.strictEvidenceGuardV454 ===
+      true &&
+    semantics
+      ?.evidencePresent ===
+      true &&
+    semantics
+      ?.poolKeyVerified ===
+      true &&
+    semantics
+      ?.completePoolKey ===
+      true &&
+    semantics
+      ?.coreLiquiditySemanticallyUsable ===
+      true;
+
+  const semanticPoolId =
+    normalize(
+      semantics?.poolId
+    );
+
+  const exactPoolIdentity =
+    /^0x[a-f0-9]{64}$/.test(
+      String(
+        poolId || ""
+      )
+    ) &&
+    (
+      !semanticPoolId ||
+      semanticPoolId ===
+        poolId
+    ) &&
+    price?.poolId ===
+      poolId;
+
+  const reasons = [];
+
+  if (
+    market?.verified === true
+  ) {
+    reasons.push(
+      "PROVIDER_OR_EXISTING_MARKET_ALREADY_VERIFIED"
+    );
+  }
+
+  if (!poolKeyVerified) {
+    reasons.push(
+      "VERIFIED_COMPLETE_POOLKEY_REQUIRED_V455"
+    );
+  }
+
+  if (!lensVerified) {
+    reasons.push(
+      "VERIFIED_RESERVESLENS_USD_LIQUIDITY_REQUIRED_V455"
+    );
+  }
+
+  if (!semanticUsable) {
+    reasons.push(
+      "LIQUIDITY_SEMANTICS_NOT_USABLE_V455"
+    );
+  }
+
+  if (!price?.verified) {
+    reasons.push(
+      "RECENT_EXACT_POOL_USD_PRICE_REQUIRED_V455"
+    );
+  }
+
+  if (!exactPoolIdentity) {
+    reasons.push(
+      "EXACT_POOL_IDENTITY_MISMATCH_V455"
+    );
+  }
+
+  return {
+    enabled: true,
+    eligible:
+      reasons.length ===
+      0,
+    reasons,
+    poolId:
+      poolId || null,
+    exactPoolIdentity,
+    poolKeyVerified,
+    lensVerified,
+    semanticUsable,
+    priceEvidence:
+      price,
+    liquidityUsd:
+      lensVerified
+        ? liquidityUsd
+        : null,
+    addsExternalRequests:
+      0
+  };
+}
+
+function promoteStrictOnChainMarketFallbackV455(
+  candidate
+) {
+  const eligibility =
+    strictOnChainMarketFallbackEligibilityV455(
+      candidate
+    );
+
+  const originalMarket =
+    candidate?.market || {};
+
+  if (!eligibility.eligible) {
+    candidate.onChainMarketFallbackV455 = {
+      ...eligibility,
+      promoted: false,
+      marketVerifiedChanged:
+        false,
+      qualificationThresholdsChanged:
+        false
+    };
+
+    return {
+      promoted: false,
+      eligibility:
+        candidate
+          .onChainMarketFallbackV455
+    };
+  }
+
+  const priceUsd =
+    safeNumber(
+      eligibility
+        ?.priceEvidence
+        ?.medianPriceUsd
+    );
+
+  const liquidityUsd =
+    safeNumber(
+      eligibility
+        ?.liquidityUsd
+    );
+
+  const decimals =
+    Number(
+      candidate
+        ?.validation
+        ?.decimals
+    );
+
+  let totalSupply =
+    null;
+
+  try {
+    totalSupply =
+      candidate
+        ?.validation
+        ?.totalSupply !==
+          null &&
+      candidate
+        ?.validation
+        ?.totalSupply !==
+          undefined &&
+      Number.isInteger(
+        decimals
+      ) &&
+      decimals >= 0 &&
+      decimals <= 36
+        ? decimalRawToNumberV438(
+            candidate
+              .validation
+              .totalSupply,
+            decimals
+          )
+        : null;
+  } catch {
+    totalSupply = null;
+  }
+
+  const fdv =
+    Number.isFinite(
+      totalSupply
+    ) &&
+    totalSupply > 0 &&
+    priceUsd > 0
+      ? totalSupply *
+        priceUsd
+      : null;
+
+  const foundation =
+    originalMarket
+      ?.onChainMarketFoundationV438 ||
+    null;
+
+  candidate.market = {
+    ...originalMarket,
+    verified: true,
+    cached: false,
+    cacheAgeMs: 0,
+    status:
+      "VERIFIED_ONCHAIN_EXACT_POOL_FALLBACK_V455",
+    source:
+      "ONCHAIN_EXACT_POOL_FALLBACK_V455",
+    priceUsd:
+      String(
+        priceUsd
+      ),
+    liquidityUsd,
+    marketCap: null,
+    fdv:
+      Number.isFinite(fdv) &&
+      fdv > 0
+        ? fdv
+        : null,
+    volume: {
+      m5: null,
+      h1: null,
+      h24: null
+    },
+    buyPressure1h: null,
+    pairCreatedAt: null,
+    exactPoolIdV455:
+      eligibility.poolId,
+    onChainMarketFoundationV438:
+      foundation
+        ? {
+            ...foundation,
+            usdLiquidityVerified:
+              true,
+            fullMarketPromotionEligible:
+              true,
+            remainingRequirement:
+              null,
+            marketVerifiedChanged:
+              true,
+            liquidityGateChanged:
+              true,
+            promotionSourceV455:
+              "ONCHAIN_EXACT_POOL_FALLBACK_V455",
+            exactPoolPriceEvidenceV455:
+              eligibility
+                .priceEvidence,
+            exactPoolLiquidityUsdV455:
+              liquidityUsd
+          }
+        : foundation,
+    onChainMarketFallbackV455: {
+      ...eligibility,
+      promoted: true,
+      source:
+        "ONCHAIN_EXACT_POOL_FALLBACK_V455",
+      priceUsd,
+      liquidityUsd,
+      fdv:
+        Number.isFinite(fdv) &&
+        fdv > 0
+          ? fdv
+          : null,
+      marketCap:
+        null,
+      circulatingSupplyAssumed:
+        false,
+      providerVolumePromoted:
+        false,
+      providerBuyPressurePromoted:
+        false,
+      pairCreatedAtPromoted:
+        false,
+      marketVerifiedChanged:
+        true,
+      qualificationThresholdsChanged:
+        false,
+      addsExternalRequests:
+        0
+    }
+  };
+
+  candidate.onChainMarketFallbackV455 =
+    candidate
+      .market
+      .onChainMarketFallbackV455;
+
+  return {
+    promoted: true,
+    eligibility:
+      candidate
+        .onChainMarketFallbackV455
+  };
+}
+
+function refreshCandidateAfterMarketPromotionV455(
+  candidate,
+  state
+) {
+  if (
+    !candidate ||
+    candidate
+      ?.market
+      ?.onChainMarketFallbackV455
+      ?.promoted !==
+      true
+  ) {
+    return {
+      refreshed: false,
+      reason:
+        "NO_V455_MARKET_PROMOTION"
+    };
+  }
+
+  const historical =
+    getHistoricalSnapshot(
+      state,
+      candidate.address
+    );
+
+  candidate.momentum =
+    momentumAnalysis(
+      historical,
+      candidate.market,
+      candidate.holders,
+      candidate
+        .liveMomentumActivityV152,
+      candidate
+        .ponsCurveFlowV216
+    );
+
+  candidate.marketQuality =
+    marketQuality(
+      candidate.market
+    );
+
+  /*
+   * Do not infer launch age from on-chain market fallback.
+   * Verified protocol launch-age evidence remains separate.
+   */
+  candidate.launchStage =
+    launchStage(
+      candidate.market
+    );
+
+  candidate.risk =
+    scoreRisk(
+      candidate.validation,
+      candidate.market,
+      candidate.holders,
+      candidate.activity,
+      candidate.whaleFlow
+    );
+
+  candidate.opportunity =
+    scoreOpportunity(
+      candidate.validation,
+      candidate.market,
+      candidate.holders,
+      candidate.activity,
+      candidate.momentum,
+      candidate.marketQuality,
+      candidate.whaleFlow,
+      candidate.launchStage
+    );
+
+  candidate.signalConfirmation =
+    signalConfirmation(
+      candidate
+    );
+
+  candidate.confidence =
+    candidateConfidence(
+      candidate
+    );
+
+  evidenceQualityProtectionV158(
+    candidate
+  );
+
+  opportunityConfirmationCalibrationV253(
+    candidate,
+    {
+      refreshRaw: true,
+      phase:
+        "ONCHAIN_MARKET_FALLBACK_V455"
+    }
+  );
+
+  candidate.holderBreadthV136 =
+    healthyHolderBreadthV136(
+      candidate.holders
+    );
+
+  candidate.analysisPriority =
+    analysisPriority(
+      candidate
+    );
+
+  candidate.marketFallbackRescoreV455 = {
+    applied: true,
+    source:
+      "ONCHAIN_EXACT_POOL_FALLBACK_V455",
+    opportunityScore:
+      safeNumber(
+        candidate
+          ?.opportunity
+          ?.score
+      ),
+    confidenceScore:
+      safeNumber(
+        candidate
+          ?.confidence
+          ?.score
+      ),
+    riskScore:
+      candidate
+        ?.risk
+        ?.verified ===
+        true
+        ? safeNumber(
+            candidate
+              ?.risk
+              ?.score
+          )
+        : null,
+    marketQualityScore:
+      candidate
+        ?.marketQuality
+        ?.verified ===
+        true
+        ? safeNumber(
+            candidate
+              ?.marketQuality
+              ?.score
+          )
+        : null,
+    thresholdsChanged:
+      false
+  };
+
+  return {
+    refreshed: true,
+    ...candidate
+      .marketFallbackRescoreV455
   };
 }
 
@@ -59315,6 +59956,40 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    strictIndependentOnChainMarketFallbackV455: {
+      enabled: true,
+      providerMarketMustBeUnverified:
+        true,
+      exactPoolV438PriceRequired:
+        true,
+      mixedPoolPriceMedianAllowed:
+        false,
+      verifiedCompletePoolKeyRequired:
+        true,
+      verifiedReservesLensUsdLiquidityRequired:
+        true,
+      v454SemanticUsabilityRequired:
+        true,
+      unknownCustomHooksBlocked:
+        true,
+      circulatingMarketCapInvented:
+        false,
+      providerVolumePromoted:
+        false,
+      pairCreatedAtPromoted:
+        false,
+      downstreamScoringRefreshedAfterPromotion:
+        true,
+      alertThresholdsChanged:
+        false,
+      holderRequirementsChanged:
+        false,
+      addsExternalRequests:
+        0,
+      requestCeilingChanged:
+        false
+    },
+
     strictReservesLensSemanticGuardV454: {
       enabled: true,
       requiresReservesLensEvidence: true,
@@ -63779,6 +64454,49 @@ for (
       };
     });
 
+  const onChainMarketFallbackResultsV455 =
+    (
+      Array.isArray(candidates)
+        ? candidates
+        : []
+    ).map(candidate => {
+      const promotion =
+        promoteStrictOnChainMarketFallbackV455(
+          candidate
+        );
+
+      const refresh =
+        promotion?.promoted ===
+        true
+          ? refreshCandidateAfterMarketPromotionV455(
+              candidate,
+              state
+            )
+          : {
+              refreshed:
+                false,
+              reason:
+                "NOT_PROMOTED_V455"
+            };
+
+      return {
+        address:
+          normalize(
+            candidate?.address
+          ),
+        symbol:
+          candidate?.symbol ||
+          null,
+        promoted:
+          promotion?.promoted ===
+          true,
+        eligibility:
+          promotion?.eligibility ||
+          null,
+        refresh
+      };
+    });
+
   const liquidityCrosschecksV449 =
     (
       Array.isArray(candidates)
@@ -67708,6 +68426,7 @@ for (
     telegramResults,
 
     hookLiquiditySemanticsV453,
+    onChainMarketFallbackResultsV455,
 
     liquidityCrosschecksV449,
     exactPoolLiquidityCrosschecksV451:
