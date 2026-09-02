@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V440
- * AUTHORITATIVE RUNTIME VERSION: V440
+ * Robinhood Chain Meme Hunter — V441
+ * AUTHORITATIVE RUNTIME VERSION: V441
+ * V441 is a narrow independent-liquidity diagnostic based on V438/V440 evidence. It integrates the canonical Uniswap v4 ReservesLens as a read-only diagnostic for at most one returned candidate per scan, using the already-proven canonical Robinhood PoolManager and the candidate's exact Initialize-derived PoolKey. The lens reconstructs fee-excluded coreAmount0/coreAmount1 from PoolManager liquidity/tick state and self-checks reconstructed active liquidity against PoolManager state. V441 decodes the returned core reserves, current sqrtPrice/tick/activeLiquidity, hook-permission/custom-accounting flags, and computes USD liquidity ONLY when the candidate quote side is canonical USDG or WETH/native with the existing verified WETH/USDG reference. For custom-accounting hook pools the result is explicitly diagnostic/approximate and is never promoted. V441 DOES NOT change market.verified, liquidityUsd, Opportunity/Confidence/Risk, Telegram qualification, or thresholds. It uses at most one existing analysis-budget RPC request and never raises the global or phase request ceilings. V441 also enriches the existing Initialize decoder/registry/watch-pool merge with the already-emitted fee, tickSpacing, hooks, sqrtPriceX96 and initial tick so the complete immutable PoolKey is preserved rather than discarded.
  * V440 is a narrow evidence-completion prioritisation build based on the V439 split-evidence scan. It does not add requests or weaken any qualification rule. When the scarce fresh-market slot is being ranked, a candidate with fully verified cached holder evidence but no verified usable market cache receives a bounded completion bonus, so candidates already one major evidence component away from a full decision are favoured over equally viable incomplete candidates. Existing V422/V437/V439 holder-retry candidates remain separately protected and are still inserted before ordinary analysis when their retry is due. Existing V139 fairness, V159 fresh-market handoff, V166 partial-holder release, terminal pruning, request ceilings, scoring outputs and Telegram thresholds remain unchanged. V440 adds telemetry showing which selected tokens had market-ready/holder-ready evidence and whether the fresh-market target received the evidence-completion bonus.
  * V439 is a narrow holder-recovery fix based on the V438 scan where a market-verified candidate was blocked only because Blockscout Pro was already in cooldown. V439 extends the existing bounded V422/V437 holder retry state to Blockscout Pro cooldown responses. If the authenticated holder provider is cooling, the candidate is retained with a retry scheduled no earlier than the provider's own cooldown expiry (plus a small safety margin), rather than returning HOLDER_EVIDENCE_UNVERIFIED without a retry state. The same behavior applies when a due V422/V437 holder retry encounters an active Blockscout Pro cooldown. No provider is called early, no cooldown is bypassed, no holder evidence is fabricated, and the existing 45-minute holder-recovery maximum age remains. No market/RPC/Chainstack/scoring/qualification/Telegram/request-ceiling behavior changes.
  * V438 begins the independent on-chain market-verification path without weakening existing market/liquidity gates. It reuses the bot's existing exact-pool V4 directional ledger (V179+) and only accepts candidate-matched swaps whose quote value is already independently exact-USD verified through canonical USDG or canonical WETH/native ETH with the existing verified WETH/USDG reference. From those real executed swaps, V438 derives a bounded recent observed execution-price sample, median observed USD price, fully-diluted supply valuation from the already-verified ERC-20 totalSupply/decimals, and the largest verified observed USD trade as an execution-capacity observation. These values are kept in a separate nested evidence object and DO NOT set market.verified, DO NOT populate core liquidityUsd, and DO NOT bypass the existing minimum-liquidity or Telegram gates. This is the safe foundation for removing DexScreener/Gecko dependence: it tells us whether the bot already has enough exact on-chain price evidence, while explicitly identifying USD liquidity as the remaining proof requirement. No extra external requests, no new provider, no scoring change, no Telegram threshold change, no request-ceiling increase, and no holder/RPC behavior change.
@@ -1514,7 +1515,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V440";
+const VERSION = "V441";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -2533,6 +2534,1090 @@ function onChainV4MarketEvidence(
 
     usdLiquidityVerified:
       false
+  };
+}
+
+/* =========================================================
+   V441 CANONICAL UNISWAP V4 RESERVESLENS LIQUIDITY DIAGNOSTIC
+   ========================================================= */
+
+/*
+ * Canonical Uniswap v4 deployment on Robinhood Chain.
+ * ReservesLens is the canonical cross-chain CREATE2 deployment.
+ *
+ * Diagnostic only in V441:
+ * - no market promotion
+ * - no liquidity gate change
+ * - no scoring/qualification change
+ */
+const UNISWAP_V4_STATE_VIEW_V441 =
+  "0xf3334192d15450cdd385c8b70e03f9a6bd9e673b";
+
+const UNISWAP_V4_RESERVES_LENS_V441 =
+  "0x0000001b173c3bbf3984d417d8614e3eed34865b";
+
+/* getPoolTVL(address,(address,address,uint24,int24,address)) */
+const RESERVES_LENS_GET_POOL_TVL_SELECTOR_V441 =
+  "f95138f2";
+
+function abiEncodeAddressWordV441(
+  address
+) {
+  const a =
+    normalize(address);
+
+  if (!isAddress(a)) {
+    return null;
+  }
+
+  return a
+    .replace(/^0x/, "")
+    .padStart(64, "0");
+}
+
+function abiEncodeUintWordV441(
+  value
+) {
+  try {
+    const v =
+      BigInt(value);
+
+    if (v < 0n) {
+      return null;
+    }
+
+    return v
+      .toString(16)
+      .padStart(64, "0");
+  } catch {
+    return null;
+  }
+}
+
+function abiEncodeSignedWordV441(
+  value,
+  bits = 24
+) {
+  try {
+    let v =
+      BigInt(value);
+
+    const width =
+      BigInt(bits);
+
+    const min =
+      -(1n << (width - 1n));
+
+    const max =
+      (1n << (width - 1n)) - 1n;
+
+    if (
+      v < min ||
+      v > max
+    ) {
+      return null;
+    }
+
+    if (v < 0n) {
+      v =
+        (1n << 256n) + v;
+    }
+
+    return v
+      .toString(16)
+      .padStart(64, "0");
+  } catch {
+    return null;
+  }
+}
+
+function abiDecodeWordV441(
+  data,
+  index
+) {
+  const clean =
+    String(data || "")
+      .replace(/^0x/, "");
+
+  const start =
+    index * 64;
+
+  if (
+    clean.length <
+      start + 64
+  ) {
+    return null;
+  }
+
+  const word =
+    clean.slice(
+      start,
+      start + 64
+    );
+
+  return /^[0-9a-fA-F]{64}$/.test(word)
+    ? word
+    : null;
+}
+
+function abiDecodeUintWordV441(
+  data,
+  index
+) {
+  const word =
+    abiDecodeWordV441(
+      data,
+      index
+    );
+
+  if (!word) {
+    return null;
+  }
+
+  try {
+    return BigInt(
+      "0x" + word
+    );
+  } catch {
+    return null;
+  }
+}
+
+function abiDecodeSigned24WordV441(
+  data,
+  index
+) {
+  const raw =
+    abiDecodeUintWordV441(
+      data,
+      index
+    );
+
+  if (raw === null) {
+    return null;
+  }
+
+  const low =
+    raw & 0xffffffn;
+
+  return Number(
+    low >= 0x800000n
+      ? low - 0x1000000n
+      : low
+  );
+}
+
+function abiDecodeAddressWordV441(
+  data,
+  index
+) {
+  const word =
+    abiDecodeWordV441(
+      data,
+      index
+    );
+
+  if (!word) {
+    return null;
+  }
+
+  const address =
+    normalize(
+      "0x" +
+      word.slice(24)
+    );
+
+  return isAddress(address)
+    ? address
+    : null;
+}
+
+function completePoolKeyV441(
+  state,
+  candidate
+) {
+  const address =
+    normalize(
+      candidate?.address
+    );
+
+  const watched =
+    findWatched(
+      state,
+      address
+    );
+
+  const poolId =
+    normalize(
+      candidate
+        ?.onChainPoolIdentityV153
+        ?.poolId
+    );
+
+  const rows =
+    [];
+
+  for (
+    const pool
+    of Array.isArray(watched?.pools)
+      ? watched.pools
+      : []
+  ) {
+    rows.push(pool);
+  }
+
+  if (
+    poolId &&
+    state?.poolRegistry?.[poolId]
+  ) {
+    rows.push(
+      state.poolRegistry[poolId]
+    );
+  }
+
+  for (
+    const pool
+    of rows
+  ) {
+    if (
+      poolId &&
+      normalize(pool?.poolId) !==
+        poolId
+    ) {
+      continue;
+    }
+
+    const currency0 =
+      normalize(
+        pool?.currency0
+      );
+
+    const currency1 =
+      normalize(
+        pool?.currency1
+      );
+
+    const hooks =
+      normalize(
+        pool?.hooks
+      );
+
+    const fee =
+      safeNumber(
+        pool?.fee
+      );
+
+    const tickSpacing =
+      Number(
+        pool?.tickSpacing
+      );
+
+    if (
+      !isAddress(currency0) ||
+      !isAddress(currency1) ||
+      !isAddress(hooks) ||
+      !Number.isInteger(fee) ||
+      fee < 0 ||
+      fee > 0xffffff ||
+      !Number.isInteger(
+        tickSpacing
+      ) ||
+      tickSpacing <= 0
+    ) {
+      continue;
+    }
+
+    return {
+      verified: true,
+      source:
+        pool?.poolKeySourceV441 ||
+        "PERSISTED_INITIALIZE_POOL_KEY_V441",
+      poolId:
+        normalize(pool?.poolId) ||
+        poolId ||
+        null,
+      currency0,
+      currency1,
+      fee,
+      tickSpacing,
+      hooks
+    };
+  }
+
+  return {
+    verified: false,
+    source: null,
+    poolId:
+      poolId || null,
+    currency0: null,
+    currency1: null,
+    fee: null,
+    tickSpacing: null,
+    hooks: null
+  };
+}
+
+function encodeReservesLensCallV441(
+  poolKey
+) {
+  if (
+    poolKey?.verified !==
+      true
+  ) {
+    return null;
+  }
+
+  const words = [
+    abiEncodeAddressWordV441(
+      POOL_MANAGER
+    ),
+    abiEncodeAddressWordV441(
+      poolKey.currency0
+    ),
+    abiEncodeAddressWordV441(
+      poolKey.currency1
+    ),
+    abiEncodeUintWordV441(
+      poolKey.fee
+    ),
+    abiEncodeSignedWordV441(
+      poolKey.tickSpacing,
+      24
+    ),
+    abiEncodeAddressWordV441(
+      poolKey.hooks
+    )
+  ];
+
+  if (
+    words.some(
+      word => !word
+    )
+  ) {
+    return null;
+  }
+
+  return (
+    "0x" +
+    RESERVES_LENS_GET_POOL_TVL_SELECTOR_V441 +
+    words.join("")
+  );
+}
+
+function decimalFromRawUnsignedV441(
+  raw,
+  decimals
+) {
+  if (
+    typeof raw !== "bigint" ||
+    raw < 0n ||
+    !Number.isInteger(decimals) ||
+    decimals < 0 ||
+    decimals > 36
+  ) {
+    return null;
+  }
+
+  return bigintDecimalToNumberV187(
+    raw,
+    decimals
+  );
+}
+
+function reservesLensUsdValuationV441(
+  candidate,
+  poolKey,
+  decoded,
+  state
+) {
+  const token =
+    normalize(
+      candidate?.address
+    );
+
+  const tokenDecimals =
+    Number(
+      candidate?.decimals
+    );
+
+  const tokenIs0 =
+    poolKey.currency0 ===
+      token;
+
+  const tokenIs1 =
+    poolKey.currency1 ===
+      token;
+
+  if (
+    !tokenIs0 &&
+    !tokenIs1
+  ) {
+    return {
+      verified: false,
+      status:
+        "CANDIDATE_NOT_IN_POOL_KEY_V441"
+    };
+  }
+
+  const quote =
+    tokenIs0
+      ? poolKey.currency1
+      : poolKey.currency0;
+
+  const candidateRaw =
+    tokenIs0
+      ? decoded.coreAmount0
+      : decoded.coreAmount1;
+
+  const quoteRaw =
+    tokenIs0
+      ? decoded.coreAmount1
+      : decoded.coreAmount0;
+
+  const quoteDecimals =
+    quote === ZERO ||
+    quote === CANONICAL_WETH_V179
+      ? 18
+      : (
+          quote ===
+            CANONICAL_USDG_V179
+            ? CANONICAL_USDG_DECIMALS_V179
+            : null
+        );
+
+  const candidateAmount =
+    decimalFromRawUnsignedV441(
+      candidateRaw,
+      tokenDecimals
+    );
+
+  const quoteAmount =
+    Number.isInteger(
+      quoteDecimals
+    )
+      ? decimalFromRawUnsignedV441(
+          quoteRaw,
+          quoteDecimals
+        )
+      : null;
+
+  let quoteUsd =
+    null;
+
+  let usdBasis =
+    null;
+
+  if (
+    quote ===
+      CANONICAL_USDG_V179 &&
+    Number.isFinite(
+      quoteAmount
+    )
+  ) {
+    quoteUsd =
+      quoteAmount;
+
+    usdBasis =
+      "CANONICAL_USDG_1_TO_1_USD_V441";
+  } else if (
+    (
+      quote === ZERO ||
+      quote ===
+        CANONICAL_WETH_V179
+    ) &&
+    Number.isFinite(
+      quoteAmount
+    )
+  ) {
+    const reference =
+      bestVerifiedWethUsdGReferenceV195(
+        state
+      );
+
+    const wethUsd =
+      safeNumber(
+        reference
+          ?.priceUsdGPerWeth
+      );
+
+    if (wethUsd > 0) {
+      quoteUsd =
+        quoteAmount *
+        wethUsd;
+
+      usdBasis =
+        reference?.source ||
+        "VERIFIED_WETH_USDG_REFERENCE_V441";
+    }
+  }
+
+  const observedPrice =
+    safeNumber(
+      candidate
+        ?.market
+        ?.onChainMarketFoundationV438
+        ?.medianObservedPriceUsd
+    );
+
+  const candidateUsd =
+    observedPrice > 0 &&
+    Number.isFinite(
+      candidateAmount
+    )
+      ? candidateAmount *
+        observedPrice
+      : null;
+
+  const totalCoreLiquidityUsd =
+    Number.isFinite(
+      quoteUsd
+    ) &&
+    Number.isFinite(
+      candidateUsd
+    )
+      ? quoteUsd +
+        candidateUsd
+      : null;
+
+  const customAccounting =
+    decoded
+      ?.hasCustomAccounting ===
+      true;
+
+  return {
+    verified:
+      Number.isFinite(
+        totalCoreLiquidityUsd
+      ) &&
+      totalCoreLiquidityUsd >= 0 &&
+      !customAccounting,
+    status:
+      customAccounting
+        ? "CUSTOM_ACCOUNTING_CORE_RESERVES_APPROXIMATE_V441"
+        : (
+            Number.isFinite(
+              totalCoreLiquidityUsd
+            )
+              ? "CORE_POOL_USD_LIQUIDITY_DIAGNOSTIC_VERIFIED_V441"
+              : "USD_VALUATION_INCOMPLETE_V441"
+          ),
+    candidateAddress:
+      token,
+    quoteTokenAddress:
+      quote,
+    candidateAmount,
+    quoteAmount,
+    candidateUsd,
+    quoteUsd,
+    totalCoreLiquidityUsd,
+    candidateUsdPriceBasis:
+      observedPrice > 0
+        ? "V438_MEDIAN_EXACT_USD_EXECUTION_PRICE"
+        : null,
+    quoteUsdBasis:
+      usdBasis,
+    hasCustomAccounting:
+      customAccounting,
+    qualificationPromotionAllowed:
+      false
+  };
+}
+
+function decodeReservesLensResultV441(
+  data
+) {
+  const words =
+    String(data || "")
+      .replace(/^0x/, "");
+
+  if (
+    !/^[0-9a-fA-F]+$/.test(
+      words
+    ) ||
+    words.length <
+      14 * 64
+  ) {
+    return null;
+  }
+
+  const coreAmount0 =
+    abiDecodeUintWordV441(
+      data,
+      0
+    );
+
+  const coreAmount1 =
+    abiDecodeUintWordV441(
+      data,
+      1
+    );
+
+  const hookReserves0 =
+    abiDecodeUintWordV441(
+      data,
+      2
+    );
+
+  const hookReserves1 =
+    abiDecodeUintWordV441(
+      data,
+      3
+    );
+
+  const hookEffective0 =
+    abiDecodeUintWordV441(
+      data,
+      4
+    );
+
+  const hookEffective1 =
+    abiDecodeUintWordV441(
+      data,
+      5
+    );
+
+  const sqrtPriceX96 =
+    abiDecodeUintWordV441(
+      data,
+      6
+    );
+
+  const tick =
+    abiDecodeSigned24WordV441(
+      data,
+      7
+    );
+
+  const activeLiquidity =
+    abiDecodeUintWordV441(
+      data,
+      8
+    );
+
+  const blockNumber =
+    abiDecodeUintWordV441(
+      data,
+      9
+    );
+
+  const statsProvider =
+    abiDecodeAddressWordV441(
+      data,
+      10
+    );
+
+  const hookPermissions =
+    abiDecodeUintWordV441(
+      data,
+      11
+    );
+
+  const customAccounting =
+    abiDecodeUintWordV441(
+      data,
+      12
+    );
+
+  const statsStatus =
+    abiDecodeUintWordV441(
+      data,
+      13
+    );
+
+  if (
+    coreAmount0 === null ||
+    coreAmount1 === null ||
+    sqrtPriceX96 === null ||
+    activeLiquidity === null
+  ) {
+    return null;
+  }
+
+  return {
+    coreAmount0,
+    coreAmount1,
+    hookReserves0,
+    hookReserves1,
+    hookEffective0,
+    hookEffective1,
+    sqrtPriceX96,
+    tick,
+    activeLiquidity,
+    blockNumber,
+    statsProvider,
+    hookPermissions:
+      hookPermissions !== null
+        ? Number(
+            hookPermissions
+          )
+        : null,
+    hasCustomAccounting:
+      customAccounting === 1n,
+    statsStatus:
+      statsStatus !== null
+        ? Number(statsStatus)
+        : null
+  };
+}
+
+async function reservesLensLiquidityDiagnosticV441(
+  env,
+  state,
+  budget,
+  candidates
+) {
+  const base = {
+    enabled: true,
+    diagnosticOnly: true,
+    source:
+      "CANONICAL_UNISWAP_V4_RESERVES_LENS",
+    reservesLens:
+      UNISWAP_V4_RESERVES_LENS_V441,
+    stateView:
+      UNISWAP_V4_STATE_VIEW_V441,
+    poolManager:
+      POOL_MANAGER,
+    attempted: false,
+    requestSent: false,
+    candidateAddress: null,
+    symbol: null,
+    poolId: null,
+    completePoolKey: false,
+    status:
+      "NO_ELIGIBLE_CANDIDATE_V441",
+    decoded: null,
+    usdValuation: null,
+    externalRequestsUsed: 0,
+    marketVerifiedChanged: false,
+    liquidityGateChanged: false,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false
+  };
+
+  const ranked =
+    (Array.isArray(candidates)
+      ? candidates
+      : [])
+      .map(
+        candidate => {
+          const priceVerified =
+            candidate
+              ?.market
+              ?.onChainMarketFoundationV438
+              ?.verifiedObservedExecutionPrice ===
+              true;
+
+          const marketVerified =
+            candidate
+              ?.market
+              ?.verified ===
+              true;
+
+          return {
+            candidate,
+            score:
+              (priceVerified ? 1000 : 0) +
+              (marketVerified ? 200 : 0) +
+              safeNumber(
+                candidate?.analysisPriority
+              )
+          };
+        }
+      )
+      .sort(
+        (a, b) =>
+          b.score - a.score
+      );
+
+  let target =
+    null;
+
+  let poolKey =
+    null;
+
+  for (
+    const row
+    of ranked
+  ) {
+    const key =
+      completePoolKeyV441(
+        state,
+        row.candidate
+      );
+
+    if (
+      key?.verified === true
+    ) {
+      target =
+        row.candidate;
+
+      poolKey =
+        key;
+
+      break;
+    }
+  }
+
+  if (
+    !target ||
+    !poolKey
+  ) {
+    return {
+      ...base,
+      status:
+        "NO_RETURNED_CANDIDATE_WITH_COMPLETE_POOL_KEY_V441"
+    };
+  }
+
+  const calldata =
+    encodeReservesLensCallV441(
+      poolKey
+    );
+
+  if (!calldata) {
+    return {
+      ...base,
+      candidateAddress:
+        normalize(
+          target?.address
+        ),
+      symbol:
+        target?.symbol ||
+        null,
+      poolId:
+        poolKey?.poolId ||
+        null,
+      completePoolKey: true,
+      status:
+        "RESERVES_LENS_CALLDATA_ENCODING_FAILED_V441"
+    };
+  }
+
+  if (
+    !budgetAvailable(
+      budget,
+      "analysis"
+    )
+  ) {
+    return {
+      ...base,
+      candidateAddress:
+        normalize(
+          target?.address
+        ),
+      symbol:
+        target?.symbol ||
+        null,
+      poolId:
+        poolKey?.poolId ||
+        null,
+      completePoolKey: true,
+      status:
+        "ANALYSIS_BUDGET_UNAVAILABLE_V441"
+    };
+  }
+
+  const before =
+    safeNumber(
+      budget?.totalUsed
+    );
+
+  const call =
+    await manualRpcReadV292(
+      env,
+      budget,
+      "eth_call",
+      [
+        {
+          to:
+            UNISWAP_V4_RESERVES_LENS_V441,
+          data:
+            calldata
+        },
+        "latest"
+      ],
+      "V441_RESERVES_LENS_POOL_TVL"
+    );
+
+  const used =
+    Math.max(
+      0,
+      safeNumber(
+        budget?.totalUsed
+      ) - before
+    );
+
+  if (
+    call?.ok !== true
+  ) {
+    return {
+      ...base,
+      attempted: true,
+      requestSent:
+        used > 0,
+      candidateAddress:
+        normalize(
+          target?.address
+        ),
+      symbol:
+        target?.symbol ||
+        null,
+      poolId:
+        poolKey?.poolId ||
+        null,
+      completePoolKey: true,
+      poolKey,
+      status:
+        call?.status ||
+        "RESERVES_LENS_RPC_FAILED_V441",
+      provider:
+        call?.provider ||
+        null,
+      error:
+        call?.error ||
+        null,
+      externalRequestsUsed:
+        used
+    };
+  }
+
+  const decoded =
+    decodeReservesLensResultV441(
+      call.result
+    );
+
+  if (!decoded) {
+    return {
+      ...base,
+      attempted: true,
+      requestSent: true,
+      candidateAddress:
+        normalize(
+          target?.address
+        ),
+      symbol:
+        target?.symbol ||
+        null,
+      poolId:
+        poolKey?.poolId ||
+        null,
+      completePoolKey: true,
+      poolKey,
+      status:
+        "RESERVES_LENS_RESPONSE_DECODE_FAILED_V441",
+      provider:
+        call?.provider ||
+        null,
+      externalRequestsUsed:
+        used
+    };
+  }
+
+  const valuation =
+    reservesLensUsdValuationV441(
+      target,
+      poolKey,
+      decoded,
+      state
+    );
+
+  const serializableDecoded = {
+    coreAmount0:
+      decoded.coreAmount0
+        ?.toString() ||
+      null,
+    coreAmount1:
+      decoded.coreAmount1
+        ?.toString() ||
+      null,
+    hookReserves0:
+      decoded.hookReserves0
+        ?.toString() ||
+      null,
+    hookReserves1:
+      decoded.hookReserves1
+        ?.toString() ||
+      null,
+    hookEffective0:
+      decoded.hookEffective0
+        ?.toString() ||
+      null,
+    hookEffective1:
+      decoded.hookEffective1
+        ?.toString() ||
+      null,
+    sqrtPriceX96:
+      decoded.sqrtPriceX96
+        ?.toString() ||
+      null,
+    tick:
+      decoded.tick,
+    activeLiquidity:
+      decoded.activeLiquidity
+        ?.toString() ||
+      null,
+    blockNumber:
+      decoded.blockNumber
+        ?.toString() ||
+      null,
+    statsProvider:
+      decoded.statsProvider,
+    hookPermissions:
+      decoded.hookPermissions,
+    hasCustomAccounting:
+      decoded.hasCustomAccounting,
+    statsStatus:
+      decoded.statsStatus
+  };
+
+  target.reservesLensLiquidityDiagnosticV441 = {
+    verified:
+      valuation?.verified ===
+      true,
+    status:
+      valuation?.status ||
+      "DECODED_V441",
+    poolId:
+      poolKey.poolId,
+    poolKey,
+    decoded:
+      serializableDecoded,
+    usdValuation:
+      valuation,
+    diagnosticOnly:
+      true,
+    promotionApplied:
+      false
+  };
+
+  return {
+    ...base,
+    attempted: true,
+    requestSent: true,
+    candidateAddress:
+      normalize(
+        target?.address
+      ),
+    symbol:
+      target?.symbol ||
+      null,
+    poolId:
+      poolKey.poolId,
+    completePoolKey: true,
+    poolKey,
+    status:
+      valuation?.status ||
+      "RESERVES_LENS_DECODED_V441",
+    provider:
+      call?.provider ||
+      null,
+    decoded:
+      serializableDecoded,
+    usdValuation:
+      valuation,
+    externalRequestsUsed:
+      used
   };
 }
 
@@ -7261,6 +8346,32 @@ function registerPoolMapping(
       normalize(pool.currency0),
     currency1:
       normalize(pool.currency1),
+
+    fee:
+      pool?.fee ?? null,
+
+    tickSpacing:
+      pool?.tickSpacing ?? null,
+
+    hooks:
+      normalize(
+        pool?.hooks
+      ) || null,
+
+    sqrtPriceX96:
+      pool?.sqrtPriceX96 ?? null,
+
+    initialTick:
+      pool?.initialTick ?? null,
+
+    poolKeyCompleteV441:
+      pool?.poolKeyCompleteV441 ===
+      true,
+
+    poolKeySourceV441:
+      pool?.poolKeySourceV441 ||
+      null,
+
     tokens,
     lastSeenAt:
       Date.now(),
@@ -12971,6 +14082,50 @@ function addWatch(
       token.pools.push(
         pool
       );
+    } else {
+      const existingPool =
+        token.pools.find(
+          existing =>
+            normalize(
+              existing.poolId
+            ) ===
+            normalize(
+              pool.poolId
+            )
+        );
+
+      if (
+        existingPool &&
+        typeof existingPool ===
+          "object"
+      ) {
+        for (
+          const field
+          of [
+            "currency0",
+            "currency1",
+            "fee",
+            "tickSpacing",
+            "hooks",
+            "sqrtPriceX96",
+            "initialTick",
+            "poolKeyCompleteV441",
+            "poolKeySourceV441",
+            "blockNumber",
+            "transactionHash"
+          ]
+        ) {
+          if (
+            pool?.[field] !==
+              undefined &&
+            pool?.[field] !==
+              null
+          ) {
+            existingPool[field] =
+              pool[field];
+          }
+        }
+      }
     }
   }
 
@@ -18403,6 +19558,83 @@ function decodeInitialize(
     return null;
   }
 
+  const wordsV441 =
+    abiDataWordsV208(
+      log?.data
+    );
+
+  let feeV441 =
+    null;
+
+  let tickSpacingV441 =
+    null;
+
+  let hooksV441 =
+    null;
+
+  let sqrtPriceX96V441 =
+    null;
+
+  let initialTickV441 =
+    null;
+
+  if (
+    wordsV441.length >= 5
+  ) {
+    try {
+      feeV441 =
+        Number(
+          BigInt(
+            "0x" +
+            wordsV441[0]
+          )
+        );
+    } catch {
+      feeV441 =
+        null;
+    }
+
+    tickSpacingV441 =
+      signedInt24WordV208(
+        wordsV441[1]
+      );
+
+    hooksV441 =
+      abiWordAddressV208(
+        wordsV441[2]
+      );
+
+    try {
+      sqrtPriceX96V441 =
+        BigInt(
+          "0x" +
+          wordsV441[3]
+        ).toString();
+    } catch {
+      sqrtPriceX96V441 =
+        null;
+    }
+
+    initialTickV441 =
+      signedInt24WordV208(
+        wordsV441[4]
+      );
+  }
+
+  const fullPoolKeyV441 =
+    Number.isInteger(
+      feeV441
+    ) &&
+    feeV441 >= 0 &&
+    feeV441 <= 0xffffff &&
+    Number.isInteger(
+      tickSpacingV441
+    ) &&
+    tickSpacingV441 > 0 &&
+    isAddress(
+      hooksV441
+    );
+
   return {
     poolId:
       normalize(
@@ -18412,6 +19644,35 @@ function decodeInitialize(
     currency0,
 
     currency1,
+
+    fee:
+      fullPoolKeyV441
+        ? feeV441
+        : null,
+
+    tickSpacing:
+      fullPoolKeyV441
+        ? tickSpacingV441
+        : null,
+
+    hooks:
+      fullPoolKeyV441
+        ? hooksV441
+        : null,
+
+    sqrtPriceX96:
+      sqrtPriceX96V441,
+
+    initialTick:
+      initialTickV441,
+
+    poolKeyCompleteV441:
+      fullPoolKeyV441,
+
+    poolKeySourceV441:
+      fullPoolKeyV441
+        ? "POOL_MANAGER_INITIALIZE_EVENT"
+        : null,
 
     blockNumber:
       log.blockNumber,
@@ -56316,6 +57577,19 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    reservesLensLiquidityDiagnosticV441: {
+      enabled: true,
+      diagnosticOnly: true,
+      maxCandidatesPerScan: 1,
+      maxExistingAnalysisRequests: 1,
+      canonicalReservesLens:
+        UNISWAP_V4_RESERVES_LENS_V441,
+      marketPromotionChanged: false,
+      liquidityGateChanged: false,
+      scoringChanged: false,
+      qualificationChanged: false,
+      requestCeilingChanged: false
+    },
     priorityEvidenceCompletionV440: {
       enabled: true,
       marketCompletionBonus:
@@ -60546,6 +61820,14 @@ for (
       state
     );
 
+  const reservesLensLiquidityResultV441 =
+    await reservesLensLiquidityDiagnosticV441(
+      env,
+      state,
+      budget,
+      candidates
+    );
+
   const telegramQualificationDiagnostics =
     buildTelegramQualificationDiagnostics(
       candidates
@@ -61974,6 +63256,9 @@ for (
       requestCeilingChanged:
         false
     },
+
+    reservesLensLiquidityDiagnosticV441:
+      reservesLensLiquidityResultV441,
 
     priorityEvidenceCompletionV440:
       priorityEvidenceCompletionV440,
