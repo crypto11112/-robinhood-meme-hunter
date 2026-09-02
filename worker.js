@@ -1,6 +1,24 @@
 /**
- * Robinhood Chain Meme Hunter — V509
- * AUTHORITATIVE RUNTIME VERSION: V509
+ * Robinhood Chain Meme Hunter — V510
+ * AUTHORITATIVE RUNTIME VERSION: V510
+ *
+ * V510 V509 EXACT-PROOF PRIORITY RESERVATION:
+ * - fixes the proven routing fault where current/live V483 or V485 could consume
+ *   the single secondary diagnostic slot before eligible V509 Pons proof work;
+ * - checks persisted V509 eligibility BEFORE current/live secondary work;
+ * - an eligible V509 creation-receipt candidate reserves that secondary slot;
+ * - V483 is deferred for that scan when V509 proof work is already waiting;
+ * - after a fresh V480 verified origin is persisted, V509 eligibility is checked
+ *   again so a newly-created eligible Pons proof candidate can run immediately;
+ * - V509 runs BEFORE V506/V503 and V485 when an exact-proof candidate exists;
+ * - V486 recognizes a current-live V509 attempt/reservation and cannot spend a
+ *   second secondary request in the same scan;
+ * - V483/V485/V503 remain enabled globally and resume normally when V509 has no
+ *   eligible exact-proof candidate;
+ * - one secondary diagnostic request maximum per scan remains enforced;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, verified-USD,
+ *   dense-pool completion, RWA detector, launch-meter, or discovery changes.
  *
  * V509 DIRECT PONS V2 CREATION-RECEIPT PROOF:
  * - replaces V508's unavailable historical-overlap dependency with direct proof;
@@ -2475,7 +2493,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V509";
+const VERSION = "V510";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71986,7 +72004,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V509_V508_V507_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V510_V509_V508_V507_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -72010,6 +72028,50 @@ for (
       telegramThresholdChanged:
         false,
       launchSourcePromotion:
+        false
+    },
+
+    ponsV2ExactProofPriorityReservationV510: {
+      enabled: true,
+      objective:
+        "GUARANTEE_ELIGIBLE_V509_EXACT_PROOF_WORK_GETS_THE_SINGLE_SECONDARY_SLOT_BEFORE_LOWER_EVIDENCE_WORK",
+      reservationCheckedBeforeCurrentLiveV483:
+        true,
+      eligibilityRecheckedAfterFreshV480Origin:
+        true,
+      v509RunsBeforeV503WhenEligible:
+        true,
+      v509RunsBeforeV485WhenEligible:
+        true,
+      v483DeferredWhenV509Reserved:
+        true,
+      v503DeferredWhenV509Reserved:
+        true,
+      v485DeferredWhenV509Reserved:
+        true,
+      v486PreventsSecondSecondaryRequestAfterCurrentV509:
+        true,
+      v483GloballyDisabled:
+        false,
+      v503GloballyDisabled:
+        false,
+      v485GloballyDisabled:
+        false,
+      maxSecondaryDiagnosticRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false,
+      verifiedUsdChanged:
+        false,
+      rwaDetectorChanged:
         false
     },
 
@@ -89462,6 +89524,21 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
       ?.unknownLaunchMechanismFingerprintV483
       ?.attempted === true;
 
+  const currentV509Attempted =
+    currentOriginTraceTelemetry
+      ?.ponsV2CreationReceiptProofV509
+      ?.attempted === true;
+
+  const currentV509Reserved =
+    currentOriginTraceTelemetry
+      ?.ponsV2ExactProofPriorityV510
+      ?.candidateAfterV480 !==
+        null &&
+    currentOriginTraceTelemetry
+      ?.ponsV2ExactProofPriorityV510
+      ?.candidateAfterV480 !==
+        undefined;
+
   const v483DeferredForFairnessV487 =
     currentOriginTraceTelemetry
       ?.unknownLaunchMechanismFingerprintV483
@@ -89483,6 +89560,10 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
       currentV485Attempted,
     currentLiveV483Attempted:
       currentV483Attempted,
+    currentLiveV509Attempted:
+      currentV509Attempted,
+    currentLiveV509Reserved:
+      currentV509Reserved,
     v483DeferredForFairnessV487,
     fairnessV487: {
       consecutiveV483BlocksOfV486BeforeDecision:
@@ -89533,19 +89614,40 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
   };
 
   /*
-   * A current/live V483 fingerprint or current/live V485 raw trace already
-   * consumed the one secondary origin-diagnostic slot. Fresh evidence wins.
+   * V510: an eligible/attempted current-live V509 exact proof outranks V483,
+   * V503 and V485. Otherwise preserve the existing V483/V485 one-secondary-slot
+   * protection. Never permit a second secondary request in the same scan.
    */
   if (
+    currentV509Attempted ||
+    currentV509Reserved ||
     currentV485Attempted ||
     currentV483Attempted
   ) {
     telemetry.status =
-      currentV485Attempted
-        ? "V486_SKIPPED_CURRENT_LIVE_V485_USED_SECONDARY_SLOT"
-        : "V486_SKIPPED_CURRENT_LIVE_V483_USED_SECONDARY_SLOT";
+      currentV509Attempted
+        ? "V486_SKIPPED_CURRENT_LIVE_V509_USED_SECONDARY_SLOT"
+        : currentV509Reserved
+          ? "V486_SKIPPED_CURRENT_LIVE_V509_RESERVED_SECONDARY_SLOT"
+          : currentV485Attempted
+            ? "V486_SKIPPED_CURRENT_LIVE_V485_USED_SECONDARY_SLOT"
+            : "V486_SKIPPED_CURRENT_LIVE_V483_USED_SECONDARY_SLOT";
 
-    if (currentV483Attempted) {
+    if (
+      currentV509Attempted ||
+      currentV509Reserved
+    ) {
+      fairness.consecutiveV483BlocksOfV486 =
+        0;
+
+      fairness.lastDecision =
+        currentV509Attempted
+          ? "V510_HIGHER_EVIDENCE_V509_USED_SECONDARY_SLOT"
+          : "V510_HIGHER_EVIDENCE_V509_RESERVED_SECONDARY_SLOT";
+
+      fairness.lastDecisionAt =
+        Date.now();
+    } else if (currentV483Attempted) {
       fairness.consecutiveV483BlocksOfV486 =
         safeNumber(
           fairness
@@ -102622,6 +102724,19 @@ async function traceUnknownLiveOriginsV477({
       status:
         "NOT_NEEDED_OR_NOT_RUN_V485"
     },
+    ponsV2ExactProofPriorityV510: {
+      enabled: true,
+      reservedBeforeCurrentLiveSecondaryWork: false,
+      candidateBeforeV480: null,
+      candidateAfterV480: null,
+      v483Deferred: false,
+      v503Deferred: false,
+      v485Deferred: false,
+      v509AttemptedCurrentLive: false,
+      v509RequestConsumedCurrentLive: false,
+      status:
+        "V510_NOT_EVALUATED_YET"
+    },
     launchpadIdentityInferred: false,
     status: null
   };
@@ -102652,6 +102767,41 @@ async function traceUnknownLiveOriginsV477({
   const selectedCandidateV484 =
     selected[0] || null;
 
+  /*
+   * V510: reserve the ONE secondary diagnostic slot before any current/live
+   * V483/V485 work when persisted exact V509 proof work is already eligible.
+   */
+  const ponsReceiptCandidateBeforeV480V510 =
+    selectPonsV2CreationReceiptCandidateV509(
+      state
+    );
+
+  const ponsProofReservedBeforeV480V510 =
+    Boolean(
+      ponsReceiptCandidateBeforeV480V510
+    );
+
+  telemetry.ponsV2ExactProofPriorityV510 = {
+    ...telemetry.ponsV2ExactProofPriorityV510,
+    reservedBeforeCurrentLiveSecondaryWork:
+      ponsProofReservedBeforeV480V510,
+    candidateBeforeV480:
+      ponsReceiptCandidateBeforeV480V510
+        ? {
+            token:
+              ponsReceiptCandidateBeforeV480V510.token,
+            creator:
+              ponsReceiptCandidateBeforeV480V510.creator,
+            transactionHash:
+              ponsReceiptCandidateBeforeV480V510.transactionHash
+          }
+        : null,
+    status:
+      ponsProofReservedBeforeV480V510
+        ? "V510_V509_EXACT_PROOF_SLOT_RESERVED_BEFORE_CURRENT_LIVE_SECONDARY_WORK"
+        : "V510_NO_PREEXISTING_V509_EXACT_PROOF_CANDIDATE"
+  };
+
   const fairnessReservationV487 =
     shouldReserveSecondarySlotForV486FairnessV487(
       state
@@ -102668,7 +102818,9 @@ async function traceUnknownLiveOriginsV477({
       fairnessReservationV487
         .eligibleBacklog,
     currentLiveV485StillHasAbsolutePriority:
-      true,
+      !ponsProofReservedBeforeV480V510,
+    v509ExactProofReservationV510:
+      ponsProofReservedBeforeV480V510,
     scoringChanged: false
   };
 
@@ -102869,7 +103021,9 @@ async function traceUnknownLiveOriginsV477({
           !row?.creationTransactionHash
         ) &&
         fairnessReservationV487
-          .reserve !== true
+          .reserve !== true &&
+        ponsProofReservedBeforeV480V510 !==
+          true
       ) {
         telemetry.unknownLaunchMechanismFingerprintV483 =
           await runUnknownLaunchMechanismFingerprintV483({
@@ -102897,6 +103051,35 @@ async function traceUnknownLiveOriginsV477({
             launchSourceProof:
               false
           };
+      } else if (
+        contractEligibleForFingerprintV484 &&
+        (
+          !row?.contractCreator ||
+          !row?.creationTransactionHash
+        ) &&
+        ponsProofReservedBeforeV480V510 ===
+          true
+      ) {
+        telemetry.unknownLaunchMechanismFingerprintV483 = {
+          enabled: true,
+          measurementOnly: true,
+          promotionAllowed: false,
+          attempted: false,
+          requestConsumed: false,
+          status:
+            "V510_DEFERRED_V483_FOR_ELIGIBLE_V509_EXACT_PROOF",
+          v509PriorityV510: {
+            exactProofCandidateReserved:
+              true,
+            oneSecondaryRequestMaximum:
+              true,
+            lowerEvidenceWorkDeferred:
+              true
+          }
+        };
+
+        telemetry.ponsV2ExactProofPriorityV510
+          .v483Deferred = true;
       } else if (
         contractEligibleForFingerprintV484 &&
         (
@@ -103001,117 +103184,240 @@ async function traceUnknownLiveOriginsV477({
       );
 
       /*
-       * V506 PRE-V485 STRONG-CREATOR ROUTING:
-       * V480 has just proved the creator address for this current/live token.
-       * Decide BEFORE spending the V485 secondary request whether that creator
-       * is already a strong unresolved recurring cluster. This fixes V505,
-       * whose priority check existed only inside the later V486 backlog path.
+       * V510 EXACT-PROOF PRIORITY:
+       * V480 has now persisted this origin. Re-evaluate V509 eligibility so a
+       * pre-existing OR newly-created exact Pons proof candidate can consume
+       * the one secondary slot before lower-evidence V503/V485 work.
        */
-      const strongCreatorPriorityV506 =
-        shouldPrioritizeVerifiedCreatorBeforeV485V506({
-          state,
-          verifiedCreator:
-            row.contractCreator
-        });
+      const ponsReceiptCandidateAfterV480V510 =
+        selectPonsV2CreationReceiptCandidateV509(
+          state
+        );
 
-      telemetry.strongRecurringCreatorPriorityV506 = {
-        enabled: true,
-        applied:
-          strongCreatorPriorityV506
-            .prioritizeCreator === true,
-        reason:
-          strongCreatorPriorityV506
-            .reason,
-        verifiedCreator:
-          strongCreatorPriorityV506
-            .verifiedCreator ||
-          null,
-        pendingCreator:
-          strongCreatorPriorityV506
-            .pendingCreator ||
-          null,
-        distinctTokens:
-          safeNumber(
-            strongCreatorPriorityV506
-              .distinctTokens
-          ),
-        thresholdDistinctTokens:
-          strongRecurringCreatorThresholdV505(),
-        decisionPoint:
-          "CURRENT_LIVE_V480_AFTER_ORIGIN_PROOF_BEFORE_V485_REQUEST",
-        v485RequestConsumedBeforeDecision:
-          false
-      };
+      telemetry.ponsV2ExactProofPriorityV510
+        .candidateAfterV480 =
+          ponsReceiptCandidateAfterV480V510
+            ? {
+                token:
+                  ponsReceiptCandidateAfterV480V510.token,
+                creator:
+                  ponsReceiptCandidateAfterV480V510.creator,
+                transactionHash:
+                  ponsReceiptCandidateAfterV480V510.transactionHash
+              }
+            : null;
 
-      if (
-        strongCreatorPriorityV506
-          .prioritizeCreator === true
-      ) {
-        const creatorV503 =
-          await runRecurringCreatorAttributionV503({
+      if (ponsReceiptCandidateAfterV480V510) {
+        const ponsReceiptV509 =
+          await runPonsV2CreationReceiptProofV509({
             env,
             state,
             budget,
-            forcedCreator:
-              strongCreatorPriorityV506
-                .pendingCreator ||
-              row.contractCreator
+            candidate:
+              ponsReceiptCandidateAfterV480V510
           });
 
-        telemetry.recurringCreatorAttributionV503 =
-          creatorV503;
+        telemetry.ponsV2CreationReceiptProofV509 =
+          ponsReceiptV509;
+
+        telemetry.ponsV2ExactProofPriorityV510
+          .v509AttemptedCurrentLive =
+            ponsReceiptV509?.attempted === true;
+
+        telemetry.ponsV2ExactProofPriorityV510
+          .v509RequestConsumedCurrentLive =
+            ponsReceiptV509?.requestConsumed === true;
+
+        telemetry.ponsV2ExactProofPriorityV510
+          .v503Deferred = true;
+
+        telemetry.ponsV2ExactProofPriorityV510
+          .v485Deferred = true;
+
+        telemetry.ponsV2ExactProofPriorityV510
+          .status =
+            ponsReceiptV509?.attempted === true
+              ? "V510_V509_EXACT_PROOF_RAN_BEFORE_V503_V485"
+              : `V510_V509_EXACT_PROOF_RESERVED_BUT_NOT_ATTEMPTED:${ponsReceiptV509?.status || "UNKNOWN"}`;
+
+        telemetry.recurringCreatorAttributionV503 = {
+          enabled: true,
+          measurementOnly: true,
+          promotionAllowed: false,
+          attempted: false,
+          requestConsumed: false,
+          status:
+            "V510_DEFERRED_V503_FOR_HIGHER_EVIDENCE_V509_EXACT_PROOF",
+          deferredForCreator:
+            normalize(
+              ponsReceiptCandidateAfterV480V510.creator
+            ),
+          exactProofPriority:
+            true
+        };
 
         telemetry.exactCreationMechanismAttributionV485 = {
           enabled: true,
           measurementOnly: true,
+          promotionAllowed: false,
           attempted: false,
           requestConsumed: false,
           status:
-            "V506_DEFERRED_FOR_STRONG_RECURRING_CREATOR_ATTRIBUTION",
+            "V510_DEFERRED_V485_FOR_HIGHER_EVIDENCE_V509_EXACT_PROOF",
           deferredToken:
             targetAddress,
           verifiedCreator:
             normalize(
               row.contractCreator
             ),
-          recurringCreatorDistinctTokens:
+          v509SelectedToken:
+            ponsReceiptCandidateAfterV480V510.token,
+          v509SelectedCreator:
+            ponsReceiptCandidateAfterV480V510.creator,
+          v509SelectedCreationTransactionHash:
+            ponsReceiptCandidateAfterV480V510.transactionHash,
+          exactCreationAttributionDisabledGlobally:
+            false,
+          oneScanOnly:
+            true
+        };
+
+        telemetry.strongRecurringCreatorPriorityV506 = {
+          enabled: true,
+          applied: false,
+          reason:
+            "V510_HIGHER_EVIDENCE_V509_EXACT_PROOF_RESERVED_SECONDARY_SLOT",
+          verifiedCreator:
+            normalize(
+              row.contractCreator
+            ),
+          pendingCreator:
+            null,
+          distinctTokens:
+            0,
+          thresholdDistinctTokens:
+            strongRecurringCreatorThresholdV505(),
+          decisionPoint:
+            "CURRENT_LIVE_V480_AFTER_ORIGIN_PROOF_BEFORE_V503_V485",
+          v485RequestConsumedBeforeDecision:
+            false,
+          v485DeferredForSameCluster:
+            false,
+          deferredByHigherEvidenceV509:
+            true
+        };
+      } else {
+        /*
+         * V506 PRE-V485 STRONG-CREATOR ROUTING:
+         * No V509 exact-proof work is waiting, so preserve the confirmed V506
+         * routing unchanged.
+         */
+        const strongCreatorPriorityV506 =
+          shouldPrioritizeVerifiedCreatorBeforeV485V506({
+            state,
+            verifiedCreator:
+              row.contractCreator
+          });
+
+        telemetry.strongRecurringCreatorPriorityV506 = {
+          enabled: true,
+          applied:
+            strongCreatorPriorityV506
+              .prioritizeCreator === true,
+          reason:
+            strongCreatorPriorityV506
+              .reason,
+          verifiedCreator:
+            strongCreatorPriorityV506
+              .verifiedCreator ||
+            null,
+          pendingCreator:
+            strongCreatorPriorityV506
+              .pendingCreator ||
+            null,
+          distinctTokens:
             safeNumber(
               strongCreatorPriorityV506
                 .distinctTokens
             ),
-          v503Result:
-            creatorV503?.status ||
-            "DATA UNVERIFIED",
-          exactCreationAttributionDisabledGlobally:
-            false,
-          sameClusterOnly:
-            true
+          thresholdDistinctTokens:
+            strongRecurringCreatorThresholdV505(),
+          decisionPoint:
+            "CURRENT_LIVE_V480_AFTER_ORIGIN_PROOF_BEFORE_V485_REQUEST",
+          v485RequestConsumedBeforeDecision:
+            false
         };
 
-        telemetry.strongRecurringCreatorPriorityV506
-          .creatorAttributionResult =
+        if (
+          strongCreatorPriorityV506
+            .prioritizeCreator === true
+        ) {
+          const creatorV503 =
+            await runRecurringCreatorAttributionV503({
+              env,
+              state,
+              budget,
+              forcedCreator:
+                strongCreatorPriorityV506
+                  .pendingCreator ||
+                row.contractCreator
+            });
+
+          telemetry.recurringCreatorAttributionV503 =
             creatorV503;
 
-        telemetry.strongRecurringCreatorPriorityV506
-          .v485DeferredForSameCluster =
-            true;
-      } else {
-        telemetry.exactCreationMechanismAttributionV485 =
-          await runExactCreationMechanismAttributionV485({
-            env,
-            state,
-            budget,
-            token:
+          telemetry.exactCreationMechanismAttributionV485 = {
+            enabled: true,
+            measurementOnly: true,
+            attempted: false,
+            requestConsumed: false,
+            status:
+              "V506_DEFERRED_FOR_STRONG_RECURRING_CREATOR_ATTRIBUTION",
+            deferredToken:
               targetAddress,
             verifiedCreator:
-              row.contractCreator,
-            creationTransactionHash:
-              row.creationTransactionHash
-          });
+              normalize(
+                row.contractCreator
+              ),
+            recurringCreatorDistinctTokens:
+              safeNumber(
+                strongCreatorPriorityV506
+                  .distinctTokens
+              ),
+            v503Result:
+              creatorV503?.status ||
+              "DATA UNVERIFIED",
+            exactCreationAttributionDisabledGlobally:
+              false,
+            sameClusterOnly:
+              true
+          };
 
-        telemetry.strongRecurringCreatorPriorityV506
-          .v485DeferredForSameCluster =
-            false;
+          telemetry.strongRecurringCreatorPriorityV506
+            .creatorAttributionResult =
+              creatorV503;
+
+          telemetry.strongRecurringCreatorPriorityV506
+            .v485DeferredForSameCluster =
+              true;
+        } else {
+          telemetry.exactCreationMechanismAttributionV485 =
+            await runExactCreationMechanismAttributionV485({
+              env,
+              state,
+              budget,
+              token:
+                targetAddress,
+              verifiedCreator:
+                row.contractCreator,
+              creationTransactionHash:
+                row.creationTransactionHash
+            });
+
+          telemetry.strongRecurringCreatorPriorityV506
+            .v485DeferredForSameCluster =
+              false;
+        }
       }
 
       telemetry.v2AddressResponseV479 = {
