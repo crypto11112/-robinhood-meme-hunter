@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V441
- * AUTHORITATIVE RUNTIME VERSION: V441
+ * Robinhood Chain Meme Hunter — V442
+ * AUTHORITATIVE RUNTIME VERSION: V442
+ * V442 is a narrow routing correction for the V441 ReservesLens liquidity diagnostic. The V441 test proved PoolKey reconstruction works, but its single ReservesLens eth_call used the legacy V292 manual-RPC helper, which prefers Alchemy and hit an exhausted Alchemy monthly-capacity limit. V442 routes the ReservesLens read through the bot's existing managed analysis RPC path instead: Chainstack is preferred, Robinhood Public remains fallback, and Alchemy remains bounded fallback under the existing V423/V424/V426/V427 provider-health logic. No new RPC provider is added, no request ceiling is raised, and the diagnostic still consumes at most the existing analysis budget. All V441 liquidity calculations remain diagnostic-only; market.verified, liquidityUsd, scoring, qualification and Telegram thresholds remain unchanged.
  * V441 is a narrow independent-liquidity diagnostic based on V438/V440 evidence. It integrates the canonical Uniswap v4 ReservesLens as a read-only diagnostic for at most one returned candidate per scan, using the already-proven canonical Robinhood PoolManager and the candidate's exact Initialize-derived PoolKey. The lens reconstructs fee-excluded coreAmount0/coreAmount1 from PoolManager liquidity/tick state and self-checks reconstructed active liquidity against PoolManager state. V441 decodes the returned core reserves, current sqrtPrice/tick/activeLiquidity, hook-permission/custom-accounting flags, and computes USD liquidity ONLY when the candidate quote side is canonical USDG or WETH/native with the existing verified WETH/USDG reference. For custom-accounting hook pools the result is explicitly diagnostic/approximate and is never promoted. V441 DOES NOT change market.verified, liquidityUsd, Opportunity/Confidence/Risk, Telegram qualification, or thresholds. It uses at most one existing analysis-budget RPC request and never raises the global or phase request ceilings. V441 also enriches the existing Initialize decoder/registry/watch-pool merge with the already-emitted fee, tickSpacing, hooks, sqrtPriceX96 and initial tick so the complete immutable PoolKey is preserved rather than discarded.
  * V440 is a narrow evidence-completion prioritisation build based on the V439 split-evidence scan. It does not add requests or weaken any qualification rule. When the scarce fresh-market slot is being ranked, a candidate with fully verified cached holder evidence but no verified usable market cache receives a bounded completion bonus, so candidates already one major evidence component away from a full decision are favoured over equally viable incomplete candidates. Existing V422/V437/V439 holder-retry candidates remain separately protected and are still inserted before ordinary analysis when their retry is due. Existing V139 fairness, V159 fresh-market handoff, V166 partial-holder release, terminal pruning, request ceilings, scoring outputs and Telegram thresholds remain unchanged. V440 adds telemetry showing which selected tokens had market-ready/holder-ready evidence and whether the fresh-market target received the evidence-completion bonus.
  * V439 is a narrow holder-recovery fix based on the V438 scan where a market-verified candidate was blocked only because Blockscout Pro was already in cooldown. V439 extends the existing bounded V422/V437 holder retry state to Blockscout Pro cooldown responses. If the authenticated holder provider is cooling, the candidate is retained with a retry scheduled no earlier than the provider's own cooldown expiry (plus a small safety margin), rather than returning HOLDER_EVIDENCE_UNVERIFIED without a retry state. The same behavior applies when a due V422/V437 holder retry encounters an active Blockscout Pro cooldown. No provider is called early, no cooldown is bypassed, no holder evidence is fabricated, and the existing 45-minute holder-recovery maximum age remains. No market/RPC/Chainstack/scoring/qualification/Telegram/request-ceiling behavior changes.
@@ -1515,7 +1516,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V441";
+const VERSION = "V442";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -3424,9 +3425,8 @@ async function reservesLensLiquidityDiagnosticV441(
     );
 
   const call =
-    await manualRpcReadV292(
+    await rpc(
       env,
-      budget,
       "eth_call",
       [
         {
@@ -3437,7 +3437,8 @@ async function reservesLensLiquidityDiagnosticV441(
         },
         "latest"
       ],
-      "V441_RESERVES_LENS_POOL_TVL"
+      budget,
+      "analysis"
     );
 
   const used =
@@ -3449,7 +3450,8 @@ async function reservesLensLiquidityDiagnosticV441(
     );
 
   if (
-    call?.ok !== true
+    call?.result === null ||
+    call?.result === undefined
   ) {
     return {
       ...base,
@@ -3469,8 +3471,7 @@ async function reservesLensLiquidityDiagnosticV441(
       completePoolKey: true,
       poolKey,
       status:
-        call?.status ||
-        "RESERVES_LENS_RPC_FAILED_V441",
+        "RESERVES_LENS_RPC_FAILED_V442",
       provider:
         call?.provider ||
         null,
@@ -3478,7 +3479,16 @@ async function reservesLensLiquidityDiagnosticV441(
         call?.error ||
         null,
       externalRequestsUsed:
-        used
+        used,
+      managedRpcRoutingV442: {
+        enabled: true,
+        preferredProvider:
+          "CHAINSTACK",
+        phase:
+          "analysis",
+        legacyManualRpcV292Used:
+          false
+      }
     };
   }
 
@@ -3510,7 +3520,19 @@ async function reservesLensLiquidityDiagnosticV441(
         call?.provider ||
         null,
       externalRequestsUsed:
-        used
+        used,
+      managedRpcRoutingV442: {
+        enabled: true,
+        preferredProvider:
+          "CHAINSTACK",
+        actualProvider:
+          call?.provider ||
+          null,
+        phase:
+          "analysis",
+        legacyManualRpcV292Used:
+          false
+      }
     };
   }
 
@@ -3617,7 +3639,19 @@ async function reservesLensLiquidityDiagnosticV441(
     usdValuation:
       valuation,
     externalRequestsUsed:
-      used
+      used,
+    managedRpcRoutingV442: {
+      enabled: true,
+      preferredProvider:
+        "CHAINSTACK",
+      actualProvider:
+        call?.provider ||
+        null,
+      phase:
+        "analysis",
+      legacyManualRpcV292Used:
+        false
+    }
   };
 }
 
@@ -57577,6 +57611,15 @@ for (
       minimumStageBudgetProtected: 0,
       candidates: []
     },
+    reservesLensManagedRpcRoutingV442: {
+      enabled: true,
+      preferredProvider:
+        "CHAINSTACK",
+      usesExistingAnalysisRpcHealthRouting:
+        true,
+      requestCeilingChanged:
+        false
+    },
     reservesLensLiquidityDiagnosticV441: {
       enabled: true,
       diagnosticOnly: true,
@@ -63254,6 +63297,29 @@ for (
       externalRequestsAdded:
         0,
       requestCeilingChanged:
+        false
+    },
+
+    reservesLensManagedRpcRoutingV442: {
+      enabled: true,
+      preferredProvider:
+        "CHAINSTACK",
+      fallbackOrder:
+        [
+          "ROBINHOOD_PUBLIC_RPC",
+          "ALCHEMY"
+        ],
+      usesExistingAnalysisRpcHealthRouting:
+        true,
+      legacyManualRpcV292UsedForReservesLens:
+        false,
+      externalRequestCeilingChanged:
+        false,
+      marketPromotionChanged:
+        false,
+      scoringChanged:
+        false,
+      qualificationChanged:
         false
     },
 
