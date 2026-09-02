@@ -1,6 +1,20 @@
 /**
- * Robinhood Chain Meme Hunter — V477
- * AUTHORITATIVE RUNTIME VERSION: V477
+ * Robinhood Chain Meme Hunter — V478
+ * AUTHORITATIVE RUNTIME VERSION: V478
+ *
+ * V478 POST-TELEGRAM ORIGIN-TRACE BUDGET ROUTING HOTFIX:
+ * - fixes V477 origin tracing being blocked by analysis-phase exhaustion even
+ *   when the global request budget still has spare capacity after Telegram;
+ * - V477 still runs only AFTER notification reserve release and AFTER fresh
+ *   candidate analysis/Telegram evaluation;
+ * - origin tracing may consume ONE released spare global-capacity request
+ *   when the analysis phase is already full;
+ * - hard global request ceiling remains 42 and origin tracing remains max
+ *   one external request per scan / max four token addresses per batch;
+ * - no fresh-analysis capacity is reduced and Telegram reserve is never borrowed
+ *   before it is released;
+ * - V476 direct launch detection, V474 coverage funnel, V469 fresh-candidate
+ *   priority, scoring, Momentum, qualification and Telegram thresholds unchanged.
  *
  * V477 VERIFIED TOKEN-ORIGIN TRACING / CREATOR CLUSTERING:
  * - traces up to four CURRENT/LIVE returned candidates whose launch source is
@@ -1784,7 +1798,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V477";
+const VERSION = "V478";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -70893,6 +70907,13 @@ for (
         state
       ),
 
+    postTelegramGlobalSpareV478:
+      budget.postTelegramGlobalSpareV478 || {
+        enabled: true,
+        used: 0,
+        requests: []
+      },
+
     launchCoverageFunnelV474,
 
     launchCoverageCumulativeV474,
@@ -83220,6 +83241,118 @@ function parseBlockscoutOriginRowsV477(body) {
     .filter(row => isAddress(row.token));
 }
 
+
+function consumeReleasedGlobalSpareV478(
+  budget,
+  type,
+  amount = 1
+) {
+  const n =
+    Math.max(
+      1,
+      safeNumber(amount)
+    );
+
+  const totalUsed =
+    safeNumber(budget?.totalUsed);
+
+  const totalLimit =
+    safeNumber(budget?.totalLimit);
+
+  const notificationReserveActive =
+    Boolean(
+      budget?.notification
+        ?.globalReserveActiveV174
+    );
+
+  const notificationReserveRemaining =
+    safeNumber(
+      budget?.notification
+        ?.globalReserveRemainingV174
+    );
+
+  /*
+   * This path is valid only after V174 has released Telegram protection.
+   * Never borrow protected notification capacity.
+   */
+  if (
+    notificationReserveActive ||
+    notificationReserveRemaining > 0
+  ) {
+    return {
+      ok: false,
+      reason:
+        "NOTIFICATION_RESERVE_STILL_ACTIVE_V478"
+    };
+  }
+
+  if (
+    !totalLimit ||
+    totalUsed + n > totalLimit
+  ) {
+    return {
+      ok: false,
+      reason:
+        "GLOBAL_REQUEST_BUDGET_EXHAUSTED_V478"
+    };
+  }
+
+  /*
+   * Keep the authoritative global accounting exact while bypassing only the
+   * exhausted per-phase analysis cap. This is intentionally post-Telegram,
+   * one-request maximum, and does not change any configured phase limits.
+   */
+  budget.totalUsed =
+    totalUsed + n;
+
+  budget.requestTypes =
+    budget.requestTypes &&
+    typeof budget.requestTypes === "object"
+      ? budget.requestTypes
+      : {};
+
+  budget.requestTypes[type] =
+    safeNumber(
+      budget.requestTypes[type]
+    ) + n;
+
+  budget.postTelegramGlobalSpareV478 =
+    budget.postTelegramGlobalSpareV478 &&
+    typeof budget.postTelegramGlobalSpareV478 === "object"
+      ? budget.postTelegramGlobalSpareV478
+      : {
+          enabled: true,
+          used: 0,
+          requests: []
+        };
+
+  budget.postTelegramGlobalSpareV478.used =
+    safeNumber(
+      budget.postTelegramGlobalSpareV478.used
+    ) + n;
+
+  budget.postTelegramGlobalSpareV478.requests =
+    Array.isArray(
+      budget.postTelegramGlobalSpareV478.requests
+    )
+      ? budget.postTelegramGlobalSpareV478.requests
+      : [];
+
+  budget.postTelegramGlobalSpareV478.requests.push({
+    type,
+    amount: n,
+    usedAt: Date.now(),
+    reason:
+      "ANALYSIS_PHASE_FULL_BUT_GLOBAL_SPARE_AVAILABLE_AFTER_TELEGRAM_V478"
+  });
+
+  return {
+    ok: true,
+    reason:
+      "POST_TELEGRAM_GLOBAL_SPARE_CONSUMED_V478"
+  };
+}
+
 async function traceUnknownLiveOriginsV477({
   env,
   state,
@@ -83291,6 +83424,10 @@ async function traceUnknownLiveOriginsV477({
     requestCeilingChanged: false,
     hardRequestLimit:
       safeNumber(budget?.totalLimit),
+    postTelegramGlobalSpareFallbackV478: true,
+    budgetRouteV478: null,
+    globalSpareFallbackAttemptedV478: false,
+    globalSpareFallbackReasonV478: null,
     verifiedOrigins: [],
     unverifiedAddresses: [],
     recurringCreators: [],
@@ -83316,25 +83453,54 @@ async function traceUnknownLiveOriginsV477({
   }
 
   /*
-   * Use the ordinary analysis budget after Telegram evaluation. All existing
-   * V182/V301/V459 guards remain authoritative through consumeBudget().
+   * First try the normal analysis phase budget. If that phase is already full,
+   * V478 may use ONE released global-spare slot because this code runs only
+   * after Telegram protection has been released.
    */
-  if (
-    !consumeBudget(
+  let originBudgetRouteV478 =
+    "ANALYSIS_PHASE_V477";
+
+  let originBudgetConsumedV478 =
+    consumeBudget(
       budget,
       "analysis",
       "BLOCKSCOUT_CONTRACT_ORIGIN_BATCH_V477",
       1
-    )
-  ) {
-    root.lastStatus =
-      "ORIGIN_TRACE_BUDGET_UNAVAILABLE_V477";
-    telemetry.status = root.lastStatus;
-    return telemetry;
+    );
+
+  if (!originBudgetConsumedV478) {
+    const spare =
+      consumeReleasedGlobalSpareV478(
+        budget,
+        "BLOCKSCOUT_CONTRACT_ORIGIN_BATCH_V477",
+        1
+      );
+
+    if (spare?.ok === true) {
+      originBudgetConsumedV478 = true;
+      originBudgetRouteV478 =
+        "POST_TELEGRAM_GLOBAL_SPARE_V478";
+    } else {
+      root.lastStatus =
+        `ORIGIN_TRACE_BUDGET_UNAVAILABLE_V478:${spare?.reason || "UNKNOWN"}`;
+      telemetry.status = root.lastStatus;
+      telemetry.budgetRouteV478 =
+        "NONE";
+      telemetry.globalSpareFallbackAttemptedV478 =
+        true;
+      telemetry.globalSpareFallbackReasonV478 =
+        spare?.reason || null;
+      return telemetry;
+    }
   }
 
   telemetry.attempted = true;
   telemetry.requestConsumed = true;
+  telemetry.budgetRouteV478 =
+    originBudgetRouteV478;
+  telemetry.globalSpareFallbackAttemptedV478 =
+    originBudgetRouteV478 ===
+    "POST_TELEGRAM_GLOBAL_SPARE_V478";
   root.requestsAttempted =
     safeNumber(root.requestsAttempted) + 1;
   root.addressesRequested =
@@ -83530,6 +83696,8 @@ function tokenOriginTraceSnapshotV477(state) {
         "DATA UNVERIFIED_UNTIL_EXACT_MECHANISM_PROVEN"
     },
     maxExternalRequestsPerScan: 1,
+    postTelegramGlobalSpareFallbackV478: true,
+    hardGlobalLimitUnchangedV478: 42,
     requestCeilingChanged: false,
     scoringChanged: false,
     qualificationChanged: false,
