@@ -1,6 +1,27 @@
 /**
- * Robinhood Chain Meme Hunter — V486
- * AUTHORITATIVE RUNTIME VERSION: V486
+ * Robinhood Chain Meme Hunter — V487
+ * AUTHORITATIVE RUNTIME VERSION: V487
+ *
+ * V487 FAIRNESS ROUTING FOR PERSISTED VERIFIED-ORIGIN ATTRIBUTION:
+ * - preserves all confirmed-working V486/V485/V484/V483 behaviour;
+ * - fixes starvation observed in two consecutive V486 scans where current-live
+ *   V483 repeatedly consumed the single secondary origin-diagnostic slot while
+ *   verified-origin backlog remained ready;
+ * - CURRENT/LIVE V485 exact provenance attribution remains absolute first
+ *   priority because it is stronger exact evidence;
+ * - V483 fresh fingerprinting normally retains priority;
+ * - if V486 has been blocked specifically by V483 for 2 consecutive scans and
+ *   at least one eligible persisted verified origin remains, V487 grants the
+ *   NEXT secondary diagnostic slot to the oldest unprocessed V486 backlog item;
+ * - on that fairness scan, V483 fingerprinting is deferred for that scan only;
+ * - after one fairness grant, the V483-block streak resets to zero and normal
+ *   fresh-priority routing resumes;
+ * - fairness never bypasses the hard request guard and never runs if current
+ *   live V485 already consumed the secondary diagnostic slot;
+ * - max ONE secondary origin diagnostic request per scan remains unchanged;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, verified-launch
+ *   meter, V476 launch-source promotion or fresh analysis ordering changes.
  *
  * V486 PERSISTED VERIFIED-ORIGIN RAW-TRACE BACKLOG:
  * - preserves all confirmed-working V485/V484/V483 behaviour;
@@ -1985,7 +2006,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V486";
+const VERSION = "V487";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71126,6 +71147,11 @@ for (
         state
       ),
 
+    originDiagnosticFairnessV487:
+      originDiagnosticFairnessSnapshotV487(
+        state
+      ),
+
     postTelegramGlobalSpareV478:
       budget.postTelegramGlobalSpareV478 || {
         enabled: true,
@@ -71262,7 +71288,7 @@ for (
       enabled: true,
       measurementOnly: true,
       trigger:
-        "NO_CURRENT_LIVE_V483_OR_V485_SECONDARY_REQUEST_USED",
+        "NO_CURRENT_LIVE_V483_OR_V485_SECONDARY_REQUEST_USED_OR_V487_FAIRNESS_GRANT",
       source:
         "PERSISTED_V480_VERIFIED_ORIGINS",
       selection:
@@ -71272,7 +71298,7 @@ for (
       currentLiveV485Priority:
         true,
       currentLiveV483Priority:
-        true,
+        "NORMAL_EXCEPT_AFTER_TWO_CONSECUTIVE_V486_BLOCKS_V487",
       processedOnlyAfterRequestConsumed:
         true,
       automaticRetryOfProcessedOrigins:
@@ -71294,6 +71320,39 @@ for (
       qualificationChanged:
         false,
       telegramThresholdChanged:
+        false
+    },
+
+    originDiagnosticFairnessRoutingV487: {
+      enabled: true,
+      measurementOnly: true,
+      starvationTrigger:
+        "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
+      fairnessGrant:
+        "NEXT_SECONDARY_SLOT_TO_OLDEST_V486_BACKLOG",
+      currentLiveV485AbsolutePriority:
+        true,
+      v483DeferredForOneScanOnly:
+        true,
+      blockStreakResetAfterSuccessfulFairnessAttempt:
+        true,
+      blockStreakNotResetOnBudgetFailure:
+        true,
+      eligibleBacklogRequired:
+        true,
+      maxSecondaryOriginDiagnosticRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false,
+      launchSourcePromotion:
         false
     },
 
@@ -86332,6 +86391,17 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
       ?.unknownLaunchMechanismFingerprintV483
       ?.attempted === true;
 
+  const v483DeferredForFairnessV487 =
+    currentOriginTraceTelemetry
+      ?.unknownLaunchMechanismFingerprintV483
+      ?.status ===
+    "V487_DEFERRED_ONE_SCAN_FOR_V486_FAIRNESS";
+
+  const fairness =
+    ensureOriginDiagnosticFairnessV487(
+      state
+    );
+
   const telemetry = {
     enabled: true,
     measurementOnly: true,
@@ -86342,6 +86412,20 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
       currentV485Attempted,
     currentLiveV483Attempted:
       currentV483Attempted,
+    v483DeferredForFairnessV487,
+    fairnessV487: {
+      consecutiveV483BlocksOfV486BeforeDecision:
+        safeNumber(
+          fairness
+            .consecutiveV483BlocksOfV486
+        ),
+      fairnessThresholdScans:
+        2,
+      fairnessGrantThisScan:
+        false,
+      normalPriorityResumesAfterGrant:
+        true
+    },
     selectedFromPersistedVerifiedOrigins:
       false,
     selectionPolicy:
@@ -86379,6 +86463,26 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
         ? "V486_SKIPPED_CURRENT_LIVE_V485_USED_SECONDARY_SLOT"
         : "V486_SKIPPED_CURRENT_LIVE_V483_USED_SECONDARY_SLOT";
 
+    if (currentV483Attempted) {
+      fairness.consecutiveV483BlocksOfV486 =
+        safeNumber(
+          fairness
+            .consecutiveV483BlocksOfV486
+        ) + 1;
+
+      fairness.lastDecision =
+        "V487_V483_PRIORITY_BLOCKED_V486";
+
+      fairness.lastDecisionAt =
+        Date.now();
+    } else {
+      fairness.lastDecision =
+        "V487_CURRENT_LIVE_V485_ABSOLUTE_PRIORITY";
+
+      fairness.lastDecisionAt =
+        Date.now();
+    }
+
     root.lastStatus =
       telemetry.status;
 
@@ -86393,6 +86497,13 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
   if (!selected) {
     telemetry.status =
       "V486_NO_UNPROCESSED_VERIFIED_ORIGIN";
+
+    fairness.consecutiveV483BlocksOfV486 =
+      0;
+    fairness.lastDecision =
+      "V487_NO_ELIGIBLE_BACKLOG";
+    fairness.lastDecisionAt =
+      Date.now();
 
     root.lastStatus =
       telemetry.status;
@@ -86461,6 +86572,34 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
   telemetry.attempted =
     attribution?.attempted === true;
 
+  if (
+    attribution?.attempted === true &&
+    v483DeferredForFairnessV487
+  ) {
+    telemetry.fairnessV487
+      .fairnessGrantThisScan = true;
+
+    fairness.fairnessGrants =
+      safeNumber(
+        fairness.fairnessGrants
+      ) + 1;
+
+    fairness.lastFairnessGrantAt =
+      Date.now();
+
+    fairness.lastFairnessGrantToken =
+      token;
+
+    fairness.consecutiveV483BlocksOfV486 =
+      0;
+
+    fairness.lastDecision =
+      "V487_FAIRNESS_GRANTED_TO_V486_BACKLOG";
+
+    fairness.lastDecisionAt =
+      Date.now();
+  }
+
   telemetry.requestConsumed =
     attribution?.requestConsumed === true;
 
@@ -86475,6 +86614,15 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
       attribution?.status
         ? `V486_NOT_ATTEMPTED:${attribution.status}`
         : "V486_NOT_ATTEMPTED";
+
+    if (
+      v483DeferredForFairnessV487
+    ) {
+      fairness.lastDecision =
+        "V487_FAIRNESS_RESERVED_BUT_V486_COULD_NOT_ATTEMPT";
+      fairness.lastDecisionAt =
+        Date.now();
+    }
 
     root.lastStatus =
       telemetry.status;
@@ -86576,6 +86724,63 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
     telemetry.status;
 
   return telemetry;
+}
+
+
+function originDiagnosticFairnessSnapshotV487(
+  state
+) {
+  const fairness =
+    ensureOriginDiagnosticFairnessV487(
+      state
+    );
+
+  return {
+    enabled: true,
+    measurementOnly: true,
+    monitorStartedAt:
+      safeNumber(
+        fairness.monitorStartedAt
+      ) || null,
+    consecutiveV483BlocksOfV486:
+      safeNumber(
+        fairness
+          .consecutiveV483BlocksOfV486
+      ),
+    fairnessThresholdScans: 2,
+    fairnessGrants:
+      safeNumber(
+        fairness.fairnessGrants
+      ),
+    eligiblePersistedBacklog:
+      eligiblePersistedOriginBacklogCountV487(
+        state
+      ),
+    lastDecision:
+      fairness.lastDecision ||
+      null,
+    lastDecisionAt:
+      safeNumber(
+        fairness.lastDecisionAt
+      ) || null,
+    lastFairnessGrantAt:
+      safeNumber(
+        fairness.lastFairnessGrantAt
+      ) || null,
+    lastFairnessGrantToken:
+      fairness.lastFairnessGrantToken ||
+      null,
+    currentLiveV485AbsolutePriority:
+      true,
+    v483NormalPriorityExceptFairnessGrant:
+      true,
+    oneSecondaryDiagnosticPerScan:
+      true,
+    hardGlobalLimitUnchanged:
+      42,
+    scoringChanged: false,
+    telegramThresholdChanged: false
+  };
 }
 
 function persistedOriginRawTraceBacklogSnapshotV486(
@@ -86728,6 +86933,131 @@ function persistedOriginRawTraceBacklogSnapshotV486(
       42,
     launchSourcePromotionAllowed:
       false
+  };
+}
+
+
+function ensureOriginDiagnosticFairnessV487(
+  state
+) {
+  if (
+    !state.originDiagnosticFairnessV487 ||
+    typeof state.originDiagnosticFairnessV487 !==
+      "object"
+  ) {
+    state.originDiagnosticFairnessV487 = {
+      enabled: true,
+      measurementOnly: true,
+      monitorStartedAt: Date.now(),
+      consecutiveV483BlocksOfV486: 0,
+      fairnessGrants: 0,
+      lastDecision: null,
+      lastDecisionAt: null,
+      lastFairnessGrantAt: null,
+      lastFairnessGrantToken: null
+    };
+  }
+
+  return state.originDiagnosticFairnessV487;
+}
+
+function eligiblePersistedOriginBacklogCountV487(
+  state
+) {
+  const originRoot =
+    pruneTokenOriginTraceV477(
+      state
+    );
+
+  const attributionRoot =
+    pruneCreationMechanismAttributionV485(
+      state
+    );
+
+  const backlogRoot =
+    prunePersistedOriginRawTraceBacklogV486(
+      state
+    );
+
+  let count = 0;
+
+  for (
+    const [token, row] of
+    Object.entries(
+      originRoot.tokenOrigins || {}
+    )
+  ) {
+    const cleanToken =
+      normalize(token);
+
+    const tx =
+      String(
+        row?.creationTransactionHash ||
+        ""
+      )
+        .trim()
+        .toLowerCase();
+
+    const key =
+      persistedOriginKeyV486(
+        cleanToken,
+        tx
+      );
+
+    if (
+      row?.verified === true &&
+      isAddress(cleanToken) &&
+      isAddress(
+        normalize(
+          row?.contractCreator
+        )
+      ) &&
+      /^0x[a-f0-9]{64}$/.test(tx) &&
+      key &&
+      attributionRoot
+        ?.tokenAttributions?.[
+          cleanToken
+        ]
+        ?.exactTokenCreateVerified !==
+        true &&
+      !backlogRoot
+        ?.processedOrigins?.[
+          key
+        ]
+    ) {
+      count++;
+    }
+  }
+
+  return count;
+}
+
+function shouldReserveSecondarySlotForV486FairnessV487(
+  state
+) {
+  const fairness =
+    ensureOriginDiagnosticFairnessV487(
+      state
+    );
+
+  const eligibleBacklog =
+    eligiblePersistedOriginBacklogCountV487(
+      state
+    );
+
+  return {
+    reserve:
+      safeNumber(
+        fairness
+          .consecutiveV483BlocksOfV486
+      ) >= 2 &&
+      eligibleBacklog > 0,
+    consecutiveV483BlocksOfV486:
+      safeNumber(
+        fairness
+          .consecutiveV483BlocksOfV486
+      ),
+    eligibleBacklog
   };
 }
 
@@ -86924,6 +87254,26 @@ async function traceUnknownLiveOriginsV477({
   const selectedCandidateV484 =
     selected[0] || null;
 
+  const fairnessReservationV487 =
+    shouldReserveSecondarySlotForV486FairnessV487(
+      state
+    );
+
+  telemetry.fairnessReservationV487 = {
+    enabled: true,
+    reserveSecondarySlotForV486:
+      fairnessReservationV487.reserve,
+    consecutiveV483BlocksOfV486:
+      fairnessReservationV487
+        .consecutiveV483BlocksOfV486,
+    eligiblePersistedBacklog:
+      fairnessReservationV487
+        .eligibleBacklog,
+    currentLiveV485StillHasAbsolutePriority:
+      true,
+    scoringChanged: false
+  };
+
   const botVerifiedContractEvidenceV484 =
     selectedCandidateV484?.validERC20 === true;
 
@@ -87111,7 +87461,9 @@ async function traceUnknownLiveOriginsV477({
         (
           !row?.contractCreator ||
           !row?.creationTransactionHash
-        )
+        ) &&
+        fairnessReservationV487
+          .reserve !== true
       ) {
         telemetry.unknownLaunchMechanismFingerprintV483 =
           await runUnknownLaunchMechanismFingerprintV483({
@@ -87139,6 +87491,36 @@ async function traceUnknownLiveOriginsV477({
             launchSourceProof:
               false
           };
+      } else if (
+        contractEligibleForFingerprintV484 &&
+        (
+          !row?.contractCreator ||
+          !row?.creationTransactionHash
+        ) &&
+        fairnessReservationV487
+          .reserve === true
+      ) {
+        telemetry.unknownLaunchMechanismFingerprintV483 = {
+          enabled: true,
+          measurementOnly: true,
+          promotionAllowed: false,
+          attempted: false,
+          requestConsumed: false,
+          status:
+            "V487_DEFERRED_ONE_SCAN_FOR_V486_FAIRNESS",
+          fairnessV487: {
+            consecutiveV483BlocksOfV486:
+              fairnessReservationV487
+                .consecutiveV483BlocksOfV486,
+            eligiblePersistedBacklog:
+              fairnessReservationV487
+                .eligibleBacklog,
+            currentLiveV485AbsolutePriority:
+              true,
+            oneScanOnly:
+              true
+          }
+        };
       } else if (
         !contractEligibleForFingerprintV484
       ) {
