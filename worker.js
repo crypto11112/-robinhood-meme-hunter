@@ -1,6 +1,33 @@
 /**
- * Robinhood Chain Meme Hunter — V483
- * AUTHORITATIVE RUNTIME VERSION: V483
+ * Robinhood Chain Meme Hunter — V484
+ * AUTHORITATIVE RUNTIME VERSION: V484
+ *
+ * V484 FRESH UNKNOWN-LAUNCH TARGET ROUTING + CONTRACT-EVIDENCE RECONCILIATION:
+ * - preserves V483 unknown-launch mechanism fingerprinting;
+ * - prioritises unknown-source CURRENT/LIVE candidates by verified market age:
+ *     tier 0: <= 6h
+ *     tier 1: >6h to <=24h
+ *     tier 2: >24h to <=72h
+ *     tier 3: verified age >72h
+ *     tier 4: market age UNVERIFIED
+ *   with existing analysisPriority used inside each tier;
+ * - keeps mature opportunity alerts fully intact; age priority applies ONLY to
+ *   launch-mechanism fingerprint target selection;
+ * - fixes the V483 false-negative gate where Blockscout V2 can temporarily say
+ *   isContract=false for a token the bot has already strictly validated as
+ *   ERC-20. V484 accepts either:
+ *     A) Blockscout isContract=true, OR
+ *     B) existing bot validERC20=true evidence
+ *   as sufficient to RUN measurement-only transaction fingerprinting;
+ * - disagreement is surfaced explicitly as
+ *   BLOCKSCOUT_INDEXING_DISAGREEMENT_WITH_VERIFIED_ERC20_V484 and is NOT
+ *   promoted into creator/launch-source proof;
+ * - does not add a second address-info probe and therefore does not increase
+ *   origin-selection request rate versus V483;
+ * - max ONE fingerprint request per scan, hard global ceiling remains 42;
+ * - V476 live Pons discovery, V474 funnel, V469 fresh analysis priority, V478
+ *   post-Telegram routing, scoring, Momentum, qualification and Telegram
+ *   thresholds remain unchanged.
  *
  * V483 UNKNOWN-LAUNCH MECHANISM FINGERPRINTING:
  * - preserves V480 authenticated Blockscout PRO address-info provenance lookup;
@@ -1907,7 +1934,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V483";
+const VERSION = "V484";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71080,6 +71107,41 @@ for (
         false
     },
 
+    freshUnknownLaunchTargetRoutingV484: {
+      enabled: true,
+      measurementOnly: true,
+      agePriority:
+        [
+          "<=6h",
+          "6h-24h",
+          "24h-72h",
+          ">72h",
+          "UNVERIFIED"
+        ],
+      appliesOnlyToLaunchFingerprintTargetSelection:
+        true,
+      matureOpportunityAlertsChanged:
+        false,
+      botVerifiedERC20MayOverrideBlockscoutIsContractFalseForDiagnostic:
+        true,
+      disagreementSurfaced:
+        "BLOCKSCOUT_INDEXING_DISAGREEMENT_WITH_VERIFIED_ERC20_V484",
+      additionalAddressInfoProbes:
+        0,
+      maxFingerprintRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      launchSourcePromotion:
+        false,
+      scoringChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false
+    },
+
     launchCoverageFunnelV474,
 
     launchCoverageCumulativeV474,
@@ -84879,6 +84941,80 @@ async function runBlockscoutProOriginDiagnosticV481({
   }
 }
 
+
+function marketAgeMsForLaunchFingerprintV484(candidate) {
+  const directAge =
+    Number(
+      candidate?.market?.pairAgeMs ??
+      candidate?.market?.ageMs
+    );
+
+  if (
+    Number.isFinite(directAge) &&
+    directAge >= 0
+  ) {
+    return directAge;
+  }
+
+  const pairCreatedAt =
+    Number(
+      candidate?.market?.pairCreatedAt
+    );
+
+  if (
+    Number.isFinite(pairCreatedAt) &&
+    pairCreatedAt > 0 &&
+    pairCreatedAt <= Date.now()
+  ) {
+    return Math.max(
+      0,
+      Date.now() - pairCreatedAt
+    );
+  }
+
+  return null;
+}
+
+function launchFingerprintAgeTierV484(candidate) {
+  const ageMs =
+    marketAgeMsForLaunchFingerprintV484(
+      candidate
+    );
+
+  if (ageMs === null) {
+    return 4;
+  }
+
+  if (ageMs <= 6 * 60 * 60 * 1000) {
+    return 0;
+  }
+
+  if (ageMs <= 24 * 60 * 60 * 1000) {
+    return 1;
+  }
+
+  if (ageMs <= 72 * 60 * 60 * 1000) {
+    return 2;
+  }
+
+  return 3;
+}
+
+function launchFingerprintAgeLabelV484(candidate) {
+  const tier =
+    launchFingerprintAgeTierV484(
+      candidate
+    );
+
+  return [
+    "FRESH_LE_6H",
+    "YOUNG_6H_TO_24H",
+    "RECENT_24H_TO_72H",
+    "MATURE_GT_72H",
+    "MARKET_AGE_UNVERIFIED"
+  ][tier] || "MARKET_AGE_UNVERIFIED";
+}
+
 async function traceUnknownLiveOriginsV477({
   env,
   state,
@@ -84926,7 +85062,20 @@ async function traceUnknownLiveOriginsV477({
         return true;
       })
       .slice()
-      .sort((a, b) => analysisPriority(b) - analysisPriority(a))
+      .sort((a, b) => {
+        const tierDiff =
+          launchFingerprintAgeTierV484(a) -
+          launchFingerprintAgeTierV484(b);
+
+        if (tierDiff !== 0) {
+          return tierDiff;
+        }
+
+        return (
+          analysisPriority(b) -
+          analysisPriority(a)
+        );
+      })
       .slice(0, 1);
 
   const addresses =
@@ -84941,6 +85090,43 @@ async function traceUnknownLiveOriginsV477({
       "BLOCKSCOUT_PRO_V2_ADDRESS_CREATION_PROVENANCE_V480",
     selectedAddresses: addresses,
     selectedCount: addresses.length,
+    targetRoutingV484:
+      selected.length
+        ? {
+            enabled: true,
+            agePriorityApplied: true,
+            selectedAddress:
+              normalize(
+                selected[0]?.address
+              ),
+            verifiedMarketAgeMs:
+              marketAgeMsForLaunchFingerprintV484(
+                selected[0]
+              ),
+            ageTier:
+              launchFingerprintAgeTierV484(
+                selected[0]
+              ),
+            ageTierLabel:
+              launchFingerprintAgeLabelV484(
+                selected[0]
+              ),
+            analysisPriority:
+              analysisPriority(
+                selected[0]
+              ),
+            matureOpportunityAlertEligibilityChanged:
+              false,
+            scoringChanged:
+              false
+          }
+        : {
+            enabled: true,
+            agePriorityApplied: true,
+            selectedAddress: null,
+            status:
+              "NO_ELIGIBLE_TARGET_V484"
+          },
     attempted: false,
     requestConsumed: false,
     requestType:
@@ -85010,6 +85196,12 @@ async function traceUnknownLiveOriginsV477({
 
   const targetAddress =
     addresses[0] || null;
+
+  const selectedCandidateV484 =
+    selected[0] || null;
+
+  const botVerifiedContractEvidenceV484 =
+    selectedCandidateV484?.validERC20 === true;
 
   const blockscoutProApiKeyV480 =
     String(
@@ -85142,11 +85334,34 @@ async function traceUnknownLiveOriginsV477({
         targetAddress
       );
 
+      const blockscoutContractEvidenceV484 =
+        Boolean(row?.isContract);
+
+      const contractEligibleForFingerprintV484 =
+        blockscoutContractEvidenceV484 ||
+        botVerifiedContractEvidenceV484;
+
+      const contractEvidenceDisagreementV484 =
+        botVerifiedContractEvidenceV484 &&
+        !blockscoutContractEvidenceV484;
+
       telemetry.v2AddressResponseV479 = {
         token:
           row?.token || targetAddress,
         isContract:
-          Boolean(row?.isContract),
+          blockscoutContractEvidenceV484,
+        botVerifiedERC20ContractEvidenceV484:
+          botVerifiedContractEvidenceV484,
+        contractEligibleForFingerprintV484:
+          contractEligibleForFingerprintV484,
+        contractEvidenceDisagreementV484:
+          contractEvidenceDisagreementV484,
+        contractEvidenceStatusV484:
+          contractEvidenceDisagreementV484
+            ? "BLOCKSCOUT_INDEXING_DISAGREEMENT_WITH_VERIFIED_ERC20_V484"
+            : blockscoutContractEvidenceV484
+              ? "BLOCKSCOUT_AND_BOT_CONTRACT_EVIDENCE_COMPATIBLE_V484"
+              : "NO_VERIFIED_CONTRACT_EVIDENCE_V484",
         creationStatus:
           row?.creationStatus || null,
         creatorReturned:
@@ -85168,7 +85383,7 @@ async function traceUnknownLiveOriginsV477({
        * No result is promoted to launch-source proof in V483.
        */
       if (
-        Boolean(row?.isContract) &&
+        contractEligibleForFingerprintV484 &&
         (
           !row?.contractCreator ||
           !row?.creationTransactionHash
@@ -85184,6 +85399,42 @@ async function traceUnknownLiveOriginsV477({
             addressInfoBody:
               body
           });
+
+        telemetry.unknownLaunchMechanismFingerprintV483
+          .contractEvidenceV484 = {
+            blockscoutIsContract:
+              blockscoutContractEvidenceV484,
+            botVerifiedERC20:
+              botVerifiedContractEvidenceV484,
+            disagreement:
+              contractEvidenceDisagreementV484,
+            interpretation:
+              contractEvidenceDisagreementV484
+                ? "BLOCKSCOUT_INDEXING_DISAGREEMENT_WITH_VERIFIED_ERC20_V484"
+                : "CONTRACT_EVIDENCE_COMPATIBLE_V484",
+            launchSourceProof:
+              false
+          };
+      } else if (
+        !contractEligibleForFingerprintV484
+      ) {
+        telemetry.unknownLaunchMechanismFingerprintV483 = {
+          enabled: true,
+          measurementOnly: true,
+          promotionAllowed: false,
+          attempted: false,
+          requestConsumed: false,
+          status:
+            "V484_SKIPPED_NO_VERIFIED_CONTRACT_EVIDENCE",
+          contractEvidenceV484: {
+            blockscoutIsContract:
+              blockscoutContractEvidenceV484,
+            botVerifiedERC20:
+              botVerifiedContractEvidenceV484,
+            disagreement: false,
+            launchSourceProof: false
+          }
+        };
       }
     } else {
       const evidence = {
