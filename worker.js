@@ -1,4 +1,30 @@
 /**
+ * Robinhood Chain Meme Hunter — V466
+ * AUTHORITATIVE RUNTIME VERSION: V466
+ *
+ * V466 is a narrow persisted multi-scan exact-pool completion build based on the live V465
+ * NUDES/RETAIL diagnostics. V465 proved exact PoolId selection, strict ERC-20 recovery, request
+ * reservation, Blockscout fan-out, and exact-USD decoding are working; dense pools can simply
+ * exceed the nine protected exact-log requests available in one scan.
+ *
+ * V466 fixes only that bounded-completion bottleneck:
+ * - when a complete exact-pool 24h snapshot cannot finish in one scan, only fully fetched,
+ *   non-saturated child ranges are checkpointed; saturated/partial rows are never counted;
+ * - unresolved non-overlapping block ranges are persisted in the existing scanner state and
+ *   resumed on a later eligible scan for the same token + exact PoolId;
+ * - the original cutoff block, end block, and snapshot timestamps are frozen for that completion
+ *   job, so later scans finish one immutable evidence window instead of silently moving the goalposts;
+ * - each completed range contributes only exactly decoded candidate-matched USD trades to compact
+ *   fixed-window accumulators; raw saturated pages are never promoted to evidence;
+ * - once every required range is complete, the fixed snapshot is VERIFIED and the progress row is
+ *   removed. If the job becomes stale or the PoolId changes, it is discarded and restarted safely.
+ *
+ * No request ceiling is raised. The 42-request global ceiling, 21-request base analysis ceiling,
+ * V416 adaptive ceiling, V459/V463 reserve, nine-log-request per-attempt ceiling, Telegram reserve,
+ * scoring, qualification, holder rules, provider trust, discovery logic and alert thresholds remain
+ * unchanged. V466 adds no extra state-write cycle; progress rides the existing scanner-state save.
+ */
+/**
  * Robinhood Chain Meme Hunter — V465
  * AUTHORITATIVE RUNTIME VERSION: V465
  *
@@ -1587,7 +1613,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V465";
+const VERSION = "V466";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -51362,6 +51388,196 @@ function summarizeExactPoolRowsV458(
   };
 }
 
+const V466_EXACT_POOL_PROGRESS_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+const V466_EXACT_POOL_PROGRESS_MAX_COMPLETED_RANGES = 512;
+
+function exactPoolProgressStoreV466(state) {
+  state.completeExactPoolProgressV466 =
+    state?.completeExactPoolProgressV466 &&
+    typeof state.completeExactPoolProgressV466 === "object"
+      ? state.completeExactPoolProgressV466
+      : {};
+  return state.completeExactPoolProgressV466;
+}
+
+function emptyExactPoolAccumulatorV466(snapshotEndMs) {
+  const make = (key, label, windowMs) => ({
+    key,
+    label,
+    windowMs,
+    observedTrades: 0,
+    buys: 0,
+    sells: 0,
+    buyVolumeUsd: 0,
+    sellVolumeUsd: 0
+  });
+  return {
+    rowsComplete: 0,
+    rowsDecodedExactUsd: 0,
+    rejectedRows: 0,
+    rejected: [],
+    snapshotEndMs: safeNumber(snapshotEndMs) || null,
+    windows: {
+      m5: make("m5", "5m", V180_WINDOW_MS.m5),
+      m15: make("m15", "15m", V180_WINDOW_MS.m15),
+      h1: make("h1", "1h", V180_WINDOW_MS.h1),
+      h6: make("h6", "6h", V180_WINDOW_MS.h6),
+      h12: make("h12", "12h", V180_WINDOW_MS.h12),
+      h24: make("h24", "24h", V180_WINDOW_MS.h24)
+    }
+  };
+}
+
+function addCompleteExactPoolRowsToAccumulatorV466(
+  state,
+  token,
+  poolId,
+  rows,
+  wethUsdGReference,
+  progress
+) {
+  const accumulator =
+    progress?.accumulatorV466 &&
+    typeof progress.accumulatorV466 === "object"
+      ? progress.accumulatorV466
+      : emptyExactPoolAccumulatorV466(progress?.snapshotEndMs);
+  progress.accumulatorV466 = accumulator;
+
+  const exactToken = normalize(token);
+  const exactPoolId = normalize(poolId);
+  const endMs = safeNumber(progress?.snapshotEndMs);
+  const localKeys = new Set();
+  let rowsAccepted = 0;
+  let rowsRejected = 0;
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const tx = normalize(row?.transactionHash || row?.transaction_hash || row?.hash || "");
+    const li = normalize(row?.logIndex ?? row?.log_index ?? row?.index ?? "");
+    const bn = normalize(row?.blockNumber ?? row?.block_number ?? "");
+    const key = `${tx}|${li}|${bn}`;
+    if (localKeys.has(key)) continue;
+    localKeys.add(key);
+
+    const trade = decodeV4SwapDirectionalV179(state, row, wethUsdGReference);
+    const observedAt = blockscoutLogTimestampMsV180(row);
+    const valid =
+      trade?.verified === true &&
+      trade?.exactUsdVerified === true &&
+      normalize(trade?.candidateAddress) === exactToken &&
+      normalize(trade?.poolId) === exactPoolId &&
+      Number.isFinite(Number(trade?.exactUsdAmount)) &&
+      Number(trade?.exactUsdAmount) > 0 &&
+      safeNumber(observedAt) > 0 &&
+      endMs > 0 &&
+      safeNumber(observedAt) <= endMs;
+
+    if (!valid) {
+      rowsRejected++;
+      accumulator.rejectedRows = safeNumber(accumulator.rejectedRows) + 1;
+      if (!Array.isArray(accumulator.rejected)) accumulator.rejected = [];
+      if (accumulator.rejected.length < 20) {
+        accumulator.rejected.push({
+          transactionHash: tx || null,
+          blockNumber: blockNumberFromAnyV180(row?.blockNumber ?? row?.block_number) || null,
+          reason: !safeNumber(observedAt)
+            ? "TIMESTAMP_UNVERIFIED_V466"
+            : "EXACT_USD_OR_CANDIDATE_DECODE_REJECTED_V466"
+        });
+      }
+      continue;
+    }
+
+    rowsAccepted++;
+    accumulator.rowsDecodedExactUsd = safeNumber(accumulator.rowsDecodedExactUsd) + 1;
+    const usd = Number(trade.exactUsdAmount);
+    const at = safeNumber(observedAt);
+
+    for (const window of Object.values(accumulator.windows || {})) {
+      const windowMs = safeNumber(window?.windowMs);
+      if (!windowMs || at < endMs - windowMs || at > endMs) continue;
+      window.observedTrades = safeNumber(window.observedTrades) + 1;
+      if (trade?.side === "buy") {
+        window.buys = safeNumber(window.buys) + 1;
+        window.buyVolumeUsd = safeNumber(window.buyVolumeUsd) + usd;
+      } else if (trade?.side === "sell") {
+        window.sells = safeNumber(window.sells) + 1;
+        window.sellVolumeUsd = safeNumber(window.sellVolumeUsd) + usd;
+      } else {
+        rowsRejected++;
+        accumulator.rejectedRows = safeNumber(accumulator.rejectedRows) + 1;
+      }
+    }
+  }
+
+  accumulator.rowsComplete = safeNumber(accumulator.rowsComplete) + localKeys.size;
+  return {rowsAccepted, rowsRejected, uniqueRows: localKeys.size, accumulator};
+}
+
+function exactPoolFlowFromProgressV466(progress, coverageComplete) {
+  const accumulator = progress?.accumulatorV466 || emptyExactPoolAccumulatorV466(progress?.snapshotEndMs);
+  const allRowsExact = progress?.allRowsExactUsdDecodedV466 !== false && safeNumber(accumulator?.rejectedRows) === 0;
+  const verifiedCoverage = coverageComplete === true && allRowsExact;
+  const windows = {};
+
+  for (const [key, source] of Object.entries(accumulator.windows || {})) {
+    const buyVolumeUsd = safeNumber(source?.buyVolumeUsd);
+    const sellVolumeUsd = safeNumber(source?.sellVolumeUsd);
+    const totalUsd = buyVolumeUsd + sellVolumeUsd;
+    windows[key] = {
+      key,
+      label: source?.label || key,
+      verified: verifiedCoverage,
+      fullExactPoolCoverageVerified: verifiedCoverage,
+      fullMarketCoverageVerified: false,
+      exactPoolOnly: true,
+      observedTrades: safeNumber(source?.observedTrades),
+      buys: safeNumber(source?.buys),
+      sells: safeNumber(source?.sells),
+      buyVolumeUsd: verifiedCoverage ? buyVolumeUsd : null,
+      sellVolumeUsd: verifiedCoverage ? sellVolumeUsd : null,
+      netFlowUsd: verifiedCoverage ? buyVolumeUsd - sellVolumeUsd : null,
+      buyPressureUsd:
+        verifiedCoverage && totalUsd > 0
+          ? (buyVolumeUsd / totalUsd) * 100
+          : verifiedCoverage
+            ? 0
+            : null
+    };
+  }
+
+  const verifiedWindows = verifiedCoverage ? Object.keys(windows) : [];
+  return {
+    verified: verifiedCoverage,
+    source: "BLOCKSCOUT_PERSISTED_MULTI_SCAN_EXACT_V4_POOL_V466",
+    interpretation: "COMPLETE_FIXED_SNAPSHOT_EXACT_POOL_ONLY_NOT_FULL_TOKEN_MARKET",
+    tokenAddress: normalize(progress?.tokenAddress) || null,
+    poolId: normalize(progress?.poolId) || null,
+    rangeStartMs: safeNumber(progress?.snapshotStartMs) || null,
+    rangeEndMs: safeNumber(progress?.snapshotEndMs) || null,
+    snapshotFrozenV466: true,
+    rowsReturned: safeNumber(accumulator?.rowsComplete),
+    rowsDecodedExactUsd: safeNumber(accumulator?.rowsDecodedExactUsd),
+    rejectedRows: safeNumber(accumulator?.rejectedRows),
+    rejected: Array.isArray(accumulator?.rejected) ? accumulator.rejected.slice(0, 10) : [],
+    verifiedWindows,
+    windows,
+    fullTokenMarketCoverageVerified: false,
+    otherPoolsIncluded: false
+  };
+}
+
+function splitRangeForResumeV466(range) {
+  const fromBlock = blockNumberFromAnyV180(range?.fromBlock);
+  const toBlock = blockNumberFromAnyV180(range?.toBlock);
+  if (!Number.isFinite(fromBlock) || !Number.isFinite(toBlock) || fromBlock > toBlock) return [];
+  if (fromBlock === toBlock) return [{fromBlock, toBlock, terminalSingleBlockV466:true}];
+  const mid = Math.floor((fromBlock + toBlock) / 2);
+  return [
+    {fromBlock, toBlock:mid, resumedSplitV466:true},
+    {fromBlock:mid + 1, toBlock, resumedSplitV466:true}
+  ];
+}
+
 async function blockscoutCompleteExactPoolDirectionalUsdV458(
   candidate,
   budget,
@@ -51375,11 +51591,9 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
     measurementOnly: true,
     attempted: false,
     verified: false,
-    status: "NOT_ATTEMPTED_V458",
-    source:
-      "BLOCKSCOUT_COMPLETE_EXACT_V4_POOL_LOG_RANGE_V461",
-    candidateAddress:
-      normalize(candidate?.address) || null,
+    status: "NOT_ATTEMPTED_V466",
+    source: "BLOCKSCOUT_PERSISTED_MULTI_SCAN_EXACT_V4_POOL_V466",
+    candidateAddress: normalize(candidate?.address) || null,
     poolId: null,
     requestsUsed: 0,
     timestampLookupRequestSent: false,
@@ -51391,6 +51605,7 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
     identityBlock: null,
     queryCoversFullPoolLifetime: false,
     returnedLogs: 0,
+    returnedLogsThisScanV466: 0,
     saturated: false,
     allReturnedRowsExactUsdDecoded: false,
     fullExactPool24hCoverageVerified: false,
@@ -51399,8 +51614,7 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
     paginationV461: {
       enabled: true,
       triggered: false,
-      maxLogRequests:
-        VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461,
+      maxLogRequests: VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461,
       logRequestsUsed: 0,
       rangesFetched: 0,
       saturatedRanges: 0,
@@ -51408,6 +51622,17 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
       dedupedRows: 0,
       coverageComplete: false,
       stoppedReason: null
+    },
+    multiScanProgressV466: {
+      enabled: true,
+      resumed: false,
+      snapshotFrozen: false,
+      attempts: 0,
+      completedRanges: 0,
+      pendingRanges: 0,
+      progressPersisted: false,
+      staleProgressDiscarded: false,
+      poolChangedProgressDiscarded: false
     },
     requestCeilingsChanged: false,
     scoringChanged: false,
@@ -51417,39 +51642,30 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
 
   const token = normalize(candidate?.address);
   const identity = candidate?.onChainPoolIdentityV153;
-
   if (candidate?.validERC20 !== true || !isAddress(token)) {
-    return {...base, status: "CANDIDATE_NOT_ELIGIBLE_V458"};
+    return {...base, status:"CANDIDATE_NOT_ELIGIBLE_V466"};
   }
   if (identity?.verified !== true) {
-    return {...base, status: "VERIFIED_EXACT_POOL_IDENTITY_REQUIRED_V458"};
+    return {...base, status:"VERIFIED_EXACT_POOL_IDENTITY_REQUIRED_V466"};
   }
 
   const poolId = normalize(identity?.poolId);
   if (!/^0x[a-f0-9]{64}$/.test(String(poolId || ""))) {
-    return {...base, poolId: poolId || null, status: "EXACT_POOL_ID_INVALID_V458"};
+    return {...base, poolId:poolId || null, status:"EXACT_POOL_ID_INVALID_V466"};
   }
 
-  const quoteEligibility = v254PriceableQuote(
-    identity?.quoteTokenAddress,
-    wethUsdGReference
-  );
+  const quoteEligibility = v254PriceableQuote(identity?.quoteTokenAddress, wethUsdGReference);
   if (quoteEligibility?.eligible !== true) {
-    return {...base, poolId, status: "EXACT_POOL_USD_QUOTE_BASIS_UNVERIFIED_V458"};
+    return {...base, poolId, status:"EXACT_POOL_USD_QUOTE_BASIS_UNVERIFIED_V466"};
   }
 
-  const toBlock = blockNumberFromAnyV180(latestBlock);
-  if (!Number.isFinite(toBlock) || toBlock <= 0) {
-    return {...base, poolId, status: "LATEST_BLOCK_INVALID_V458"};
+  const latestHead = blockNumberFromAnyV180(latestBlock);
+  if (!Number.isFinite(latestHead) || latestHead <= 0) {
+    return {...base, poolId, status:"LATEST_BLOCK_INVALID_V466"};
   }
 
-  const identityBlock = blockNumberFromAnyV180(identity?.blockNumber);
-  const nowMs = Date.now();
-  const cutoffMs = nowMs - VERIFIED_USD_COMPLETE_EXACT_POOL_LOOKBACK_MS_V458;
-  const cutoffTimestampSec = Math.floor(cutoffMs / 1000);
-  const provider = env?.BLOCKSCOUT_PRO_API_KEY
-    ? "BLOCKSCOUT_PRO_UNIVERSAL_V2"
-    : "BLOCKSCOUT_PUBLIC";
+  const identityBlockCurrent = blockNumberFromAnyV180(identity?.blockNumber);
+  const provider = env?.BLOCKSCOUT_PRO_API_KEY ? "BLOCKSCOUT_PRO_UNIVERSAL_V2" : "BLOCKSCOUT_PUBLIC";
   const apiBase = provider === "BLOCKSCOUT_PRO_UNIVERSAL_V2"
     ? `${BLOCKSCOUT_PRO}/v2/api?chain_id=${BLOCKSCOUT_PRO_CHAIN_ID}`
     : `${BLOCKSCOUT}/api`;
@@ -51458,47 +51674,133 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
     ? `&apikey=${encodeURIComponent(env.BLOCKSCOUT_PRO_API_KEY)}`
     : "";
 
+  const store = exactPoolProgressStoreV466(state);
+  let progress = store[token] || null;
+  let staleProgressDiscarded = false;
+  let poolChangedProgressDiscarded = false;
+
+  if (progress) {
+    const age = Date.now() - safeNumber(progress?.updatedAt || progress?.createdAt);
+    if (!Number.isFinite(age) || age < 0 || age > V466_EXACT_POOL_PROGRESS_MAX_AGE_MS) {
+      delete store[token];
+      progress = null;
+      staleProgressDiscarded = true;
+    } else if (normalize(progress?.poolId) !== poolId) {
+      delete store[token];
+      progress = null;
+      poolChangedProgressDiscarded = true;
+    }
+  }
+
   let requestsUsed = 0;
-  if (!consumeBudget(budget, "analysis", "BLOCKSCOUT_V458_TIMESTAMP_TO_BLOCK")) {
-    return {...base, poolId, toBlock, identityBlock: identityBlock || null,
-      status: "ANALYSIS_BUDGET_PROTECTED_TIMESTAMP_LOOKUP_V458"};
-  }
-  requestsUsed++;
-
-  const timestampUrl = `${apiBase}${separator}module=block&action=getblocknobytime` +
-    `&timestamp=${cutoffTimestampSec}&closest=before${apiKeySuffix}`;
+  let logRequestsUsed = 0;
+  let timestampLookupRequestSent = false;
+  let toBlock = null;
+  let cutoffTimestampSec = null;
   let cutoffBlock = null;
-  try {
-    const response = await fetch(timestampUrl, {headers:{accept:"application/json"}});
-    if (!response.ok) {
-      return {...base, attempted:true, poolId, requestsUsed, timestampLookupRequestSent:true,
-        cutoffTimestampSec, toBlock, identityBlock: identityBlock || null,
-        status:`BLOCKSCOUT_TIMESTAMP_LOOKUP_HTTP_${response.status}_V458`};
-    }
-    const payload = await response.json();
-    cutoffBlock = blockNumberFromAnyV180(payload?.result?.blockNumber ?? payload?.result);
-    if (!Number.isFinite(cutoffBlock) || cutoffBlock < 0) {
-      return {...base, attempted:true, poolId, requestsUsed, timestampLookupRequestSent:true,
-        cutoffTimestampSec, toBlock, identityBlock: identityBlock || null,
-        status:"BLOCKSCOUT_TIMESTAMP_LOOKUP_INVALID_RESULT_V458"};
-    }
-  } catch (error) {
-    return {...base, attempted:true, poolId, requestsUsed, timestampLookupRequestSent:true,
-      cutoffTimestampSec, toBlock, identityBlock: identityBlock || null,
-      status:"BLOCKSCOUT_TIMESTAMP_LOOKUP_FETCH_ERROR_V458", error:errorString(error)};
-  }
+  let fromBlock = null;
+  let identityBlock = null;
+  let queryCoversFullPoolLifetime = false;
+  let snapshotStartMs = null;
+  let snapshotEndMs = null;
+  let pending = [];
+  let completedRanges = [];
+  let stopReason = null;
+  let saturatedRangesThisScan = 0;
+  let completeRangesThisScan = 0;
+  let returnedLogsThisScan = 0;
+  let initialFanoutRangesV465 = 0;
+  let resumed = false;
 
-  const fromBlock = Number.isFinite(identityBlock) && identityBlock > 0
-    ? Math.max(cutoffBlock, identityBlock)
-    : cutoffBlock;
-  const queryCoversFullPoolLifetime = Number.isFinite(identityBlock) && identityBlock > 0 && identityBlock >= cutoffBlock;
+  if (progress) {
+    resumed = true;
+    toBlock = blockNumberFromAnyV180(progress?.toBlock);
+    cutoffTimestampSec = safeNumber(progress?.cutoffTimestampSec);
+    cutoffBlock = blockNumberFromAnyV180(progress?.cutoffBlock);
+    fromBlock = blockNumberFromAnyV180(progress?.fromBlock);
+    identityBlock = blockNumberFromAnyV180(progress?.identityBlock);
+    queryCoversFullPoolLifetime = progress?.queryCoversFullPoolLifetime === true;
+    snapshotStartMs = safeNumber(progress?.snapshotStartMs);
+    snapshotEndMs = safeNumber(progress?.snapshotEndMs);
+    pending = Array.isArray(progress?.pendingRangesV466)
+      ? progress.pendingRangesV466.map(r => ({...r}))
+      : [];
+    completedRanges = Array.isArray(progress?.completedRangesV466)
+      ? progress.completedRangesV466.map(r => ({...r}))
+      : [];
+    progress.attemptsV466 = safeNumber(progress?.attemptsV466) + 1;
+    progress.updatedAt = Date.now();
+  } else {
+    snapshotEndMs = Date.now();
+    snapshotStartMs = snapshotEndMs - VERIFIED_USD_COMPLETE_EXACT_POOL_LOOKBACK_MS_V458;
+    cutoffTimestampSec = Math.floor(snapshotStartMs / 1000);
+    toBlock = latestHead;
+    identityBlock = identityBlockCurrent || null;
 
-  const fetchRangeV461 = async (rangeFrom, rangeTo) => {
-    if (!consumeBudget(budget, "analysis", "BLOCKSCOUT_V458_COMPLETE_EXACT_POOL_24H_LOGS")) {
-      return {ok:false, budgetBlocked:true, fromBlock:rangeFrom, toBlock:rangeTo, rows:[], saturated:false,
-        status:"ANALYSIS_BUDGET_PROTECTED_LOG_QUERY_V461"};
+    if (!consumeBudget(budget, "analysis", "BLOCKSCOUT_V458_TIMESTAMP_TO_BLOCK")) {
+      return {...base, poolId, toBlock, identityBlock, status:"ANALYSIS_BUDGET_PROTECTED_TIMESTAMP_LOOKUP_V466"};
     }
     requestsUsed++;
+    timestampLookupRequestSent = true;
+
+    const timestampUrl = `${apiBase}${separator}module=block&action=getblocknobytime` +
+      `&timestamp=${cutoffTimestampSec}&closest=before${apiKeySuffix}`;
+    try {
+      const response = await fetch(timestampUrl, {headers:{accept:"application/json"}});
+      if (!response.ok) {
+        return {...base, attempted:true, poolId, provider, requestsUsed, timestampLookupRequestSent:true,
+          cutoffTimestampSec, toBlock, identityBlock, status:`BLOCKSCOUT_TIMESTAMP_LOOKUP_HTTP_${response.status}_V466`};
+      }
+      const payload = await response.json();
+      cutoffBlock = blockNumberFromAnyV180(payload?.result?.blockNumber ?? payload?.result);
+      if (!Number.isFinite(cutoffBlock) || cutoffBlock < 0) {
+        return {...base, attempted:true, poolId, provider, requestsUsed, timestampLookupRequestSent:true,
+          cutoffTimestampSec, toBlock, identityBlock, status:"BLOCKSCOUT_TIMESTAMP_LOOKUP_INVALID_RESULT_V466"};
+      }
+    } catch (error) {
+      return {...base, attempted:true, poolId, provider, requestsUsed, timestampLookupRequestSent:true,
+        cutoffTimestampSec, toBlock, identityBlock, status:"BLOCKSCOUT_TIMESTAMP_LOOKUP_FETCH_ERROR_V466", error:errorString(error)};
+    }
+
+    fromBlock = Number.isFinite(identityBlock) && identityBlock > 0
+      ? Math.max(cutoffBlock, identityBlock)
+      : cutoffBlock;
+    queryCoversFullPoolLifetime = Number.isFinite(identityBlock) && identityBlock > 0 && identityBlock >= cutoffBlock;
+    progress = {
+      schema:"EXACT_POOL_MULTI_SCAN_PROGRESS_V466",
+      tokenAddress:token,
+      symbol:candidate?.symbol || null,
+      poolId,
+      provider,
+      createdAt:Date.now(),
+      updatedAt:Date.now(),
+      attemptsV466:1,
+      snapshotStartMs,
+      snapshotEndMs,
+      cutoffTimestampSec,
+      cutoffBlock,
+      fromBlock,
+      toBlock,
+      identityBlock:identityBlock || null,
+      queryCoversFullPoolLifetime,
+      pendingRangesV466:[],
+      completedRangesV466:[],
+      allRowsExactUsdDecodedV466:true,
+      accumulatorV466:emptyExactPoolAccumulatorV466(snapshotEndMs)
+    };
+  }
+
+  const fetchRangeV466 = async (rangeFrom, rangeTo) => {
+    if (logRequestsUsed >= VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461) {
+      return {ok:false, budgetBlocked:true, fromBlock:rangeFrom, toBlock:rangeTo, rows:[], saturated:false,
+        status:"MAX_LOG_REQUESTS_REACHED_V466"};
+    }
+    if (!consumeBudget(budget, "analysis", "BLOCKSCOUT_V458_COMPLETE_EXACT_POOL_24H_LOGS")) {
+      return {ok:false, budgetBlocked:true, fromBlock:rangeFrom, toBlock:rangeTo, rows:[], saturated:false,
+        status:"ANALYSIS_BUDGET_PROTECTED_LOG_QUERY_V466"};
+    }
+    requestsUsed++;
+    logRequestsUsed++;
     const logsUrl = `${apiBase}${separator}module=logs&action=getLogs` +
       `&fromBlock=${rangeFrom}&toBlock=${rangeTo}&address=${POOL_MANAGER}` +
       `&topic0=${SWAP_TOPIC}&topic1=${poolId}&topic0_1_opr=and${apiKeySuffix}`;
@@ -51506,7 +51808,7 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
       const response = await fetch(logsUrl, {headers:{accept:"application/json"}});
       if (!response.ok) {
         return {ok:false, fromBlock:rangeFrom, toBlock:rangeTo, rows:[], saturated:false,
-          status:`BLOCKSCOUT_EXACT_POOL_LOGS_HTTP_${response.status}_V461`};
+          status:`BLOCKSCOUT_EXACT_POOL_LOGS_HTTP_${response.status}_V466`};
       }
       const payload = await response.json();
       const rows = Array.isArray(payload?.result) ? payload.result : [];
@@ -51514,239 +51816,224 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
         saturated:rows.length >= BLOCKSCOUT_LOGS_MAX_ROWS_V180, status:"OK"};
     } catch (error) {
       return {ok:false, fromBlock:rangeFrom, toBlock:rangeTo, rows:[], saturated:false,
-        status:"BLOCKSCOUT_EXACT_POOL_LOGS_FETCH_ERROR_V461", error:errorString(error)};
+        status:"BLOCKSCOUT_EXACT_POOL_LOGS_FETCH_ERROR_V466", error:errorString(error)};
     }
   };
 
-  const first = await fetchRangeV461(fromBlock, toBlock);
-  if (!first.ok) {
-    return {...base, attempted:true, poolId, provider, requestsUsed,
-      timestampLookupRequestSent:true, logRequestSent:!first.budgetBlocked,
-      cutoffTimestampSec, cutoffBlock, fromBlock, toBlock,
-      identityBlock:identityBlock || null, queryCoversFullPoolLifetime,
-      status:first.status, error:first.error || null,
-      paginationV461:{...base.paginationV461, logRequestsUsed:Math.max(0, requestsUsed-1), stoppedReason:first.status}};
-  }
+  if (!resumed) {
+    const first = await fetchRangeV466(fromBlock, toBlock);
+    if (!first.ok) {
+      progress.pendingRangesV466 = [{fromBlock, toBlock, initialV466:true}];
+      progress.updatedAt = Date.now();
+      store[token] = progress;
+      return {...base, attempted:true, poolId, provider, requestsUsed,
+        timestampLookupRequestSent, logRequestSent:!first.budgetBlocked,
+        cutoffTimestampSec, cutoffBlock, fromBlock, toBlock,
+        identityBlock:identityBlock || null, queryCoversFullPoolLifetime,
+        status:first.status, error:first.error || null,
+        multiScanProgressV466:{...base.multiScanProgressV466, snapshotFrozen:true, attempts:1,
+          pendingRanges:1, progressPersisted:true, staleProgressDiscarded, poolChangedProgressDiscarded},
+        paginationV461:{...base.paginationV461, logRequestsUsed, unresolvedRanges:1, stoppedReason:first.status}};
+    }
 
-  let ranges = [first];
-  let pending = [];
-  let stopReason = null;
-  let fanoutRangesV465 = 0;
+    returnedLogsThisScan += first.rows.length;
 
-  if (first.saturated) {
-    ranges = [];
-
-    const remainingLogRequests =
-      Math.max(
-        0,
-        VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461 -
-          (requestsUsed - 1)
+    if (!first.saturated) {
+      const persisted = persistVerifiedUsdTradesV254(state, token, first.rows, wethUsdGReference, "BLOCKSCOUT_TIMESTAMP");
+      const exact = first.rows.length === 0 ? true : (
+        safeNumber(persisted?.exactUsdTrades) === first.rows.length &&
+        safeNumber(persisted?.candidateMismatch) === 0 &&
+        safeNumber(persisted?.exactUsdRejected) === 0 &&
+        safeNumber(persisted?.timestampRejected) === 0
       );
+      progress.allRowsExactUsdDecodedV466 = exact;
+      addCompleteExactPoolRowsToAccumulatorV466(state, token, poolId, first.rows, wethUsdGReference, progress);
+      progress.completedRangesV466 = [{fromBlock, toBlock, rows:first.rows.length}];
+      progress.pendingRangesV466 = [];
+      const coverageComplete = exact && safeNumber(progress?.accumulatorV466?.rejectedRows) === 0;
+      const flow = exactPoolFlowFromProgressV466(progress, coverageComplete);
+      const verified = flow?.windows?.h24?.fullExactPoolCoverageVerified === true && flow?.verified === true;
+      if (verified) delete store[token]; else store[token] = progress;
+      return {
+        ...base, attempted:true, verified, status:verified
+          ? "COMPLETE_EXACT_POOL_24H_USD_VERIFIED_V466"
+          : "EXACT_POOL_24H_ROWS_NOT_ALL_EXACT_USD_DECODABLE_V466",
+        provider, poolId, requestsUsed, timestampLookupRequestSent, logRequestSent:true,
+        cutoffTimestampSec, cutoffBlock, fromBlock, toBlock, identityBlock:identityBlock || null,
+        queryCoversFullPoolLifetime, returnedLogs:first.rows.length, returnedLogsThisScanV466:first.rows.length,
+        saturated:false, allReturnedRowsExactUsdDecoded:exact,
+        fullExactPool24hCoverageVerified:verified, fullTokenMarketCoverageVerified:false,
+        persistence:persisted, flow,
+        multiScanProgressV466:{enabled:true,resumed:false,snapshotFrozen:true,attempts:1,
+          completedRanges:1,pendingRanges:0,progressPersisted:!verified,completedAndCleared:verified,
+          staleProgressDiscarded,poolChangedProgressDiscarded},
+        paginationV461:{enabled:true,triggered:false,maxLogRequests:VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461,
+          logRequestsUsed,rangesFetched:1,saturatedRanges:0,unresolvedRanges:0,dedupedRows:first.rows.length,
+          coverageComplete:verified,stoppedReason:null,fanoutFirstV465:false,initialFanoutRangesV465:0,
+          binaryTreePrimaryStrategyV465:false,persistedAcrossScansV466:true}
+      };
+    }
 
-    /*
-     * V465 efficiency hardening:
-     * fan out the already-known saturated full span directly across the
-     * remaining protected log-request capacity. This avoids spending requests
-     * on a binary tree whose large intermediate parents are likely to remain
-     * saturated. Ranges are exact, contiguous and non-overlapping.
-     */
-    const blockCount =
-      Math.max(1, toBlock - fromBlock + 1);
-    fanoutRangesV465 =
-      Math.max(
-        1,
-        Math.min(
-          remainingLogRequests,
-          blockCount
-        )
-      );
-
-    const baseSpan =
-      Math.floor(blockCount / fanoutRangesV465);
-    const remainder =
-      blockCount % fanoutRangesV465;
-
+    saturatedRangesThisScan++;
+    const remainingLogRequests = Math.max(1,
+      VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461 - logRequestsUsed);
+    const blockCount = Math.max(1, toBlock - fromBlock + 1);
+    initialFanoutRangesV465 = Math.max(1, Math.min(remainingLogRequests, blockCount));
+    const baseSpan = Math.floor(blockCount / initialFanoutRangesV465);
+    const remainder = blockCount % initialFanoutRangesV465;
     let cursor = fromBlock;
-    for (
-      let i = 0;
-      i < fanoutRangesV465;
-      i++
-    ) {
-      const span =
-        baseSpan +
-        (i < remainder ? 1 : 0);
+    for (let i=0;i<initialFanoutRangesV465;i++) {
+      const span = baseSpan + (i < remainder ? 1 : 0);
       const childFrom = cursor;
-      const childTo =
-        i === fanoutRangesV465 - 1
-          ? toBlock
-          : cursor + span - 1;
-      pending.push({
-        fromBlock:childFrom,
-        toBlock:childTo,
-        fanoutV465:true
-      });
+      const childTo = i === initialFanoutRangesV465 - 1 ? toBlock : cursor + span - 1;
+      pending.push({fromBlock:childFrom,toBlock:childTo,fanoutV465:true});
       cursor = childTo + 1;
     }
   }
 
-  while (pending.length) {
-    if (
-      (requestsUsed - 1) >=
-      VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461
-    ) {
-      stopReason =
-        "MAX_LOG_REQUESTS_REACHED_V461";
-      break;
-    }
-
+  while (pending.length && logRequestsUsed < VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461) {
     const range = pending.shift();
-    if (
-      !range ||
-      range.fromBlock > range.toBlock
-    ) {
-      continue;
-    }
-
-    const result =
-      await fetchRangeV461(
-        range.fromBlock,
-        range.toBlock
-      );
-
+    if (!range || range.fromBlock > range.toBlock) continue;
+    const result = await fetchRangeV466(range.fromBlock, range.toBlock);
     if (!result.ok) {
-      ranges.push({
-        ...result,
-        unresolved:true
-      });
+      pending.unshift({fromBlock:range.fromBlock,toBlock:range.toBlock,retryV466:true});
       stopReason = result.status;
       break;
     }
 
-    if (!result.saturated) {
-      ranges.push({
-        ...result,
-        fanoutV465:
-          range?.fanoutV465 === true
-      });
+    returnedLogsThisScan += result.rows.length;
+
+    if (result.saturated) {
+      saturatedRangesThisScan++;
+      const split = splitRangeForResumeV466(range);
+      if (split.length === 1 && split[0]?.terminalSingleBlockV466 === true) {
+        pending.unshift(split[0]);
+        stopReason = "SINGLE_BLOCK_RANGE_SATURATED_V466";
+        progress.allRowsExactUsdDecodedV466 = false;
+        break;
+      }
+      pending.unshift(...split);
       continue;
     }
 
-    /*
-     * A directly fanned-out child can still be unusually dense.
-     * Split only that saturated child if protected capacity remains.
-     */
-    if (range.fromBlock === range.toBlock) {
-      ranges.push({
-        ...result,
-        unresolved:true
-      });
-      stopReason =
-        "SINGLE_BLOCK_RANGE_SATURATED_V461";
-      break;
-    }
-
-    const remainingCapacity =
-      VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461 -
-      (requestsUsed - 1);
-
-    if (remainingCapacity < 2) {
-      ranges.push({
-        ...result,
-        unresolved:true
-      });
-      stopReason =
-        "MAX_LOG_REQUESTS_REACHED_V461";
-      break;
-    }
-
-    const mid =
-      Math.floor(
-        (range.fromBlock + range.toBlock) / 2
-      );
-
-    pending.unshift(
-      {
-        fromBlock:mid + 1,
-        toBlock:range.toBlock,
-        recursiveSplitV465:true
-      },
-      {
-        fromBlock:range.fromBlock,
-        toBlock:mid,
-        recursiveSplitV465:true
-      }
+    const persisted = persistVerifiedUsdTradesV254(state, token, result.rows, wethUsdGReference, "BLOCKSCOUT_TIMESTAMP");
+    const exact = result.rows.length === 0 ? true : (
+      safeNumber(persisted?.exactUsdTrades) === result.rows.length &&
+      safeNumber(persisted?.candidateMismatch) === 0 &&
+      safeNumber(persisted?.exactUsdRejected) === 0 &&
+      safeNumber(persisted?.timestampRejected) === 0
     );
-  }
-
-  const unresolvedRanges = pending.length + ranges.filter(r => r?.unresolved === true || r?.saturated === true).length;
-  const allRangesComplete = unresolvedRanges === 0 && !stopReason;
-  const dedup = new Map();
-  const dedupeKey = row => {
-    const tx = normalize(row?.transactionHash || row?.transaction_hash || row?.hash || "");
-    const li = normalize(row?.logIndex ?? row?.log_index ?? row?.index ?? "");
-    const bn = normalize(row?.blockNumber ?? row?.block_number ?? "");
-    return `${tx}|${li}|${bn}`;
-  };
-  for (const range of ranges) {
-    for (const row of (Array.isArray(range?.rows) ? range.rows : [])) {
-      dedup.set(dedupeKey(row), row);
+    if (!exact) progress.allRowsExactUsdDecodedV466 = false;
+    const aggregation = addCompleteExactPoolRowsToAccumulatorV466(
+      state, token, poolId, result.rows, wethUsdGReference, progress
+    );
+    if (safeNumber(aggregation?.rowsRejected) > 0) progress.allRowsExactUsdDecodedV466 = false;
+    completeRangesThisScan++;
+    completedRanges.push({
+      fromBlock:range.fromBlock,
+      toBlock:range.toBlock,
+      rows:result.rows.length,
+      completedAt:Date.now()
+    });
+    if (completedRanges.length > V466_EXACT_POOL_PROGRESS_MAX_COMPLETED_RANGES) {
+      completedRanges = completedRanges.slice(-V466_EXACT_POOL_PROGRESS_MAX_COMPLETED_RANGES);
     }
   }
-  const rows = [...dedup.values()];
-  const persisted = persistVerifiedUsdTradesV254(
-    state, token, rows, wethUsdGReference, "BLOCKSCOUT_TIMESTAMP"
-  );
-  const allReturnedRowsExactUsdDecoded = rows.length === 0 ? true : (
-    safeNumber(persisted?.exactUsdTrades) === rows.length &&
-    safeNumber(persisted?.candidateMismatch) === 0 &&
-    safeNumber(persisted?.exactUsdRejected) === 0 &&
-    safeNumber(persisted?.timestampRejected) === 0
-  );
-  const exactPoolCoverageVerified = allRangesComplete && allReturnedRowsExactUsdDecoded;
-  const flow = summarizeExactPoolRowsV458(
-    state, token, poolId, rows, wethUsdGReference, cutoffMs, nowMs, exactPoolCoverageVerified
-  );
-  const fullExactPool24hCoverageVerified = flow?.windows?.h24?.fullExactPoolCoverageVerified === true && flow?.verified === true;
-  const anySaturation = first.saturated || ranges.some(r => r?.saturated === true);
+
+  if (pending.length && !stopReason && logRequestsUsed >= VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461) {
+    stopReason = "MAX_LOG_REQUESTS_REACHED_V466_PROGRESS_SAVED";
+  }
+
+  progress.pendingRangesV466 = pending.map(r => ({
+    fromBlock:blockNumberFromAnyV180(r?.fromBlock),
+    toBlock:blockNumberFromAnyV180(r?.toBlock),
+    fanoutV465:r?.fanoutV465 === true,
+    resumedSplitV466:r?.resumedSplitV466 === true,
+    retryV466:r?.retryV466 === true,
+    terminalSingleBlockV466:r?.terminalSingleBlockV466 === true
+  })).filter(r => Number.isFinite(r.fromBlock) && Number.isFinite(r.toBlock) && r.fromBlock <= r.toBlock);
+  progress.completedRangesV466 = completedRanges;
+  progress.updatedAt = Date.now();
+  progress.lastAttemptRequestsV466 = requestsUsed;
+  progress.lastAttemptLogRequestsV466 = logRequestsUsed;
+  progress.lastAttemptStatusV466 = stopReason || (pending.length ? "IN_PROGRESS_V466" : "RANGES_COMPLETE_V466");
+
+  const allRangesComplete = progress.pendingRangesV466.length === 0;
+  const allRowsExact = progress.allRowsExactUsdDecodedV466 !== false && safeNumber(progress?.accumulatorV466?.rejectedRows) === 0;
+  const flow = exactPoolFlowFromProgressV466(progress, allRangesComplete && allRowsExact);
+  const verified = flow?.windows?.h24?.fullExactPoolCoverageVerified === true && flow?.verified === true;
+
+  if (verified) {
+    delete store[token];
+  } else {
+    store[token] = progress;
+  }
+
+  const cumulativeRows = safeNumber(progress?.accumulatorV466?.rowsComplete);
+  const status = verified
+    ? "COMPLETE_EXACT_POOL_24H_USD_VERIFIED_V466"
+    : !allRangesComplete
+      ? (stopReason || "EXACT_POOL_24H_MULTI_SCAN_IN_PROGRESS_V466")
+      : !allRowsExact
+        ? "EXACT_POOL_24H_ROWS_NOT_ALL_EXACT_USD_DECODABLE_V466"
+        : "EXACT_POOL_24H_COVERAGE_NOT_VERIFIED_V466";
 
   return {
     ...base,
     attempted:true,
-    verified:fullExactPool24hCoverageVerified,
-    status: fullExactPool24hCoverageVerified
-      ? "COMPLETE_EXACT_POOL_24H_USD_VERIFIED_V461"
-      : !allRangesComplete
-        ? (stopReason || "EXACT_POOL_24H_PAGINATION_INCOMPLETE_V461")
-        : !allReturnedRowsExactUsdDecoded
-          ? "EXACT_POOL_24H_ROWS_NOT_ALL_EXACT_USD_DECODABLE_V461"
-          : "EXACT_POOL_24H_COVERAGE_NOT_VERIFIED_V461",
-    provider, poolId, requestsUsed,
-    timestampLookupRequestSent:true,
-    logRequestSent:true,
-    cutoffTimestampSec, cutoffBlock, fromBlock, toBlock,
+    verified,
+    status,
+    provider,
+    poolId,
+    requestsUsed,
+    timestampLookupRequestSent,
+    logRequestSent:logRequestsUsed > 0,
+    cutoffTimestampSec,
+    cutoffBlock,
+    fromBlock,
+    toBlock,
     identityBlock:identityBlock || null,
     queryCoversFullPoolLifetime,
-    returnedLogs:rows.length,
-    saturated:anySaturation && !allRangesComplete,
-    allReturnedRowsExactUsdDecoded,
-    fullExactPool24hCoverageVerified,
+    returnedLogs:cumulativeRows,
+    returnedLogsThisScanV466,
+    saturated:progress.pendingRangesV466.length > 0,
+    allReturnedRowsExactUsdDecoded:allRowsExact,
+    fullExactPool24hCoverageVerified:verified,
     fullTokenMarketCoverageVerified:false,
-    persistence:persisted,
     flow,
+    multiScanProgressV466:{
+      enabled:true,
+      resumed,
+      snapshotFrozen:true,
+      snapshotStartMs,
+      snapshotEndMs,
+      attempts:safeNumber(progress?.attemptsV466),
+      completedRanges:completedRanges.length,
+      completedRangesThisScan:completeRangesThisScan,
+      pendingRanges:progress.pendingRangesV466.length,
+      progressPersisted:!verified,
+      completedAndCleared:verified,
+      staleProgressDiscarded,
+      poolChangedProgressDiscarded,
+      rawSaturatedRowsCounted:false,
+      stateWriteCycleAdded:false
+    },
     paginationV461:{
       enabled:true,
-      triggered:first.saturated === true,
+      triggered:true,
       maxLogRequests:VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461,
-      logRequestsUsed:Math.max(0, requestsUsed - 1),
-      rangesFetched:ranges.length,
-      saturatedRanges:ranges.filter(r => r?.saturated === true).length + (first.saturated ? 1 : 0),
-      unresolvedRanges,
-      dedupedRows:rows.length,
-      coverageComplete:allRangesComplete,
-      stoppedReason:stopReason,
-      fanoutFirstV465:first.saturated === true,
-      initialFanoutRangesV465:fanoutRangesV465,
-      binaryTreePrimaryStrategyV465:false
+      logRequestsUsed,
+      rangesFetched:completeRangesThisScan,
+      saturatedRanges:saturatedRangesThisScan,
+      unresolvedRanges:progress.pendingRangesV466.length,
+      dedupedRows:cumulativeRows,
+      coverageComplete:verified,
+      stoppedReason:verified ? null : status,
+      fanoutFirstV465:!resumed,
+      initialFanoutRangesV465,
+      binaryTreePrimaryStrategyV465:false,
+      persistedAcrossScansV466:true,
+      resumedV466:resumed
     }
   };
 }
@@ -67147,6 +67434,7 @@ for (
       returnedLogs: safeNumber(result?.returnedLogs),
       saturated: result?.saturated === true,
       paginationV461: result?.paginationV461 || null,
+      multiScanProgressV466: result?.multiScanProgressV466 || null,
       allReturnedRowsExactUsdDecoded:
         result?.allReturnedRowsExactUsdDecoded === true,
       fullExactPool24hCoverageVerified:
@@ -71296,6 +71584,8 @@ for (
     completeExactPoolReserveResultV459,
     completeExactPoolCompletionV460:
       state.completeExactPoolCompletionV460 || {},
+    completeExactPoolProgressV466:
+      state.completeExactPoolProgressV466 || {},
 
     liquidityCrosschecksV449,
     exactPoolLiquidityCrosschecksV451:
