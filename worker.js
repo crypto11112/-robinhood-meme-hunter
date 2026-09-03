@@ -1,6 +1,22 @@
 /**
- * Robinhood Chain Meme Hunter — V518
- * AUTHORITATIVE RUNTIME VERSION: V518
+ * Robinhood Chain Meme Hunter — V519
+ * AUTHORITATIVE RUNTIME VERSION: V519
+ *
+ * V519 GENERIC-CREATOR IDENTITY HANDOFF:
+ * - closes the first observed V517 entry bottleneck: an unresolved creator with
+ *   >=3 distinct V480-verified token origins and >=3 distinct creation txs can
+ *   reserve the existing one secondary slot for V503 IDENTITY verification;
+ * - this V519 identity handoff runs before lower-evidence V483/V485/V486 work
+ *   and does NOT require the creator to meet the older V505 >=6-token threshold;
+ * - solved RWA, Pons V2, Doppler, already-confirmed V517 sources and active V515
+ *   registry factories are excluded from this handoff;
+ * - after V503 proves Blockscout contract identity, V517 becomes eligible on the
+ *   next scan and continues the unchanged exact 3-token/3-tx receipt proof;
+ * - V486 now explicitly treats an attempted V503 identity handoff as consuming
+ *   the single secondary slot, preventing any second diagnostic request;
+ * - no extra capacity: one secondary request maximum, hard global limit 42;
+ * - scoring, Momentum, qualification, Telegram thresholds, verified USD, Pons,
+ *   RWA, Doppler, V515 registry and dense-pool completion remain unchanged.
  *
  * V518 SOLVED-DOPPLER SUPPRESSION + GENERIC-PROOF SLOT PRIORITY:
  * - permanently suppresses V512 whole-receipt receipt work once persisted V513
@@ -2674,7 +2690,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V518";
+const VERSION = "V519";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -10263,6 +10279,22 @@ function newState() {
         false,
       v515RegistryChanged:
         false
+    },
+
+    genericCreatorIdentityHandoffV519: {
+      enabled: true,
+      minimumDistinctVerifiedOrigins: 3,
+      minimumDistinctCreationTransactions: 3,
+      verifiedContractIdentityRequiredBeforeV517: true,
+      reservesExistingSecondarySlotOnly: true,
+      priorityOverV483: true,
+      priorityOverV485: true,
+      priorityOverV486: true,
+      olderV505SixTokenThresholdChanged: false,
+      v517ThreeByThreeProofThresholdChanged: false,
+      hardGlobalRequestLimitUnchanged: 42,
+      scoringChanged: false,
+      telegramThresholdsChanged: false
     },
 
     genericUnknownSourceProofEngineV517: {
@@ -72868,7 +72900,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V518_V517_V515_V514_V513_V512_V511_V510_V509_V508_V507_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V519_V517_V515_V514_V513_V512_V511_V510_V509_V508_V507_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -86288,6 +86320,167 @@ function genericUnknownCreatorCandidatesV517(
   return rows;
 }
 
+function selectGenericUnknownCreatorIdentityCandidateV519(
+  state
+) {
+  const origin =
+    pruneTokenOriginTraceV477(
+      state
+    );
+
+  const solved =
+    solvedVerifiedCreatorsV517(
+      state
+    );
+
+  const genericRoot =
+    ensureGenericUnknownSourceProofV517(
+      state
+    );
+
+  const v503Rows =
+    recurringCreatorCandidatesV503(
+      state
+    );
+
+  const v503ByCreator =
+    new Map(
+      v503Rows.map(row => [
+        normalize(row?.creator),
+        row
+      ])
+    );
+
+  const candidates = [];
+
+  for (
+    const cluster of Object.values(
+      origin?.creatorClusters || {}
+    )
+  ) {
+    const creator =
+      normalize(cluster?.creator);
+
+    if (
+      !isAddress(creator) ||
+      solved.has(creator) ||
+      genericRoot.confirmedSources?.[creator] ||
+      safeNumber(
+        cluster?.distinctTokens
+      ) < 3
+    ) {
+      continue;
+    }
+
+    const v503 =
+      v503ByCreator.get(creator);
+
+    if (
+      !v503 ||
+      v503.identityProcessed === true
+    ) {
+      continue;
+    }
+
+    const tokenRows = [];
+
+    for (
+      const token of Array.isArray(
+        cluster?.tokens
+      )
+        ? cluster.tokens
+        : []
+    ) {
+      const cleanToken =
+        normalize(token);
+
+      const row =
+        origin?.tokenOrigins?.[
+          cleanToken
+        ];
+
+      const tx =
+        normalizeTxHashV495(
+          row?.creationTransactionHash
+        );
+
+      if (
+        !isAddress(cleanToken) ||
+        row?.verified !== true ||
+        normalize(
+          row?.contractCreator
+        ) !== creator ||
+        !tx
+      ) {
+        continue;
+      }
+
+      tokenRows.push({
+        token: cleanToken,
+        transactionHash: tx,
+        verifiedAt:
+          safeNumber(row?.verifiedAt) ||
+          null
+      });
+    }
+
+    const distinctTokens =
+      new Set(
+        tokenRows.map(row =>
+          row.token
+        )
+      ).size;
+
+    const distinctTransactions =
+      new Set(
+        tokenRows.map(row =>
+          row.transactionHash
+        )
+      ).size;
+
+    if (
+      distinctTokens < 3 ||
+      distinctTransactions < 3
+    ) {
+      continue;
+    }
+
+    candidates.push({
+      creator,
+      distinctTokens,
+      distinctTransactions,
+      tokens:
+        tokenRows
+          .sort(
+            (a, b) =>
+              safeNumber(a?.verifiedAt) -
+              safeNumber(b?.verifiedAt)
+          )
+          .map(row => row.token),
+      identityProcessed: false,
+      profile: null,
+      firstVerifiedAt:
+        Math.min(
+          ...tokenRows
+            .map(row =>
+              safeNumber(row?.verifiedAt)
+            )
+            .filter(n => n > 0)
+        ) || null
+    });
+  }
+
+  candidates.sort((a, b) =>
+    b.distinctTokens -
+      a.distinctTokens ||
+    safeNumber(a?.firstVerifiedAt) -
+      safeNumber(b?.firstVerifiedAt) ||
+    a.creator.localeCompare(b.creator)
+  );
+
+  return candidates[0] || null;
+}
+
 function selectGenericUnknownReceiptCandidateV517(
   state
 ) {
@@ -96519,6 +96712,11 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
       ?.genericUnknownSourceProofV517
       ?.attempted === true;
 
+  const currentV503Attempted =
+    currentOriginTraceTelemetry
+      ?.recurringCreatorAttributionV503
+      ?.attempted === true;
+
   const currentV517Reserved =
     currentOriginTraceTelemetry
       ?.ponsV2ExactProofPriorityV510
@@ -96566,6 +96764,8 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
       currentV517Attempted,
     currentLiveV517Reserved:
       currentV517Reserved,
+    currentLiveV503Attempted:
+      currentV503Attempted,
     v483DeferredForFairnessV487,
     fairnessV487: {
       consecutiveV483BlocksOfV486BeforeDecision:
@@ -96627,6 +96827,7 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
     currentV512Reserved ||
     currentV517Attempted ||
     currentV517Reserved ||
+    currentV503Attempted ||
     currentV509Attempted ||
     currentV509Reserved ||
     currentV485Attempted ||
@@ -96645,7 +96846,9 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
                 ? "V486_SKIPPED_CURRENT_LIVE_V517_USED_SECONDARY_SLOT"
                 : currentV517Reserved
                   ? "V486_SKIPPED_CURRENT_LIVE_V517_RESERVED_SECONDARY_SLOT"
-                  : currentV509Attempted
+                  : currentV503Attempted
+                    ? "V486_SKIPPED_CURRENT_LIVE_V503_USED_SECONDARY_SLOT_V519"
+                    : currentV509Attempted
             ? "V486_SKIPPED_CURRENT_LIVE_V509_USED_SECONDARY_SLOT"
             : currentV509Reserved
               ? "V486_SKIPPED_CURRENT_LIVE_V509_RESERVED_SECONDARY_SLOT"
@@ -96692,6 +96895,17 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
         currentV517Attempted
           ? "V518_V517_GENERIC_EXACT_PROOF_USED_SECONDARY_SLOT"
           : "V518_V517_GENERIC_EXACT_PROOF_RESERVED_SECONDARY_SLOT";
+
+      fairness.lastDecisionAt =
+        Date.now();
+    } else if (
+      currentV503Attempted
+    ) {
+      fairness.consecutiveV483BlocksOfV486 =
+        0;
+
+      fairness.lastDecision =
+        "V519_V503_GENERIC_CREATOR_IDENTITY_USED_SECONDARY_SLOT";
 
       fairness.lastDecisionAt =
         Date.now();
@@ -110178,10 +110392,26 @@ async function traceUnknownLiveOriginsV477({
       genericUnknownReceiptCandidateBeforeV480V518
     );
 
+  /*
+   * V519: a creator that already has the V517 3-origin/3-creation-tx evidence
+   * but is blocked only on V503 contract identity gets the SAME existing
+   * secondary slot before lower-evidence V483/V485 work.
+   */
+  const genericCreatorIdentityCandidateBeforeV480V519 =
+    selectGenericUnknownCreatorIdentityCandidateV519(
+      state
+    );
+
+  const genericCreatorIdentityReservedBeforeV480V519 =
+    Boolean(
+      genericCreatorIdentityCandidateBeforeV480V519
+    );
+
   const highEvidenceProofReservedBeforeV480V513 =
     ponsProofReservedBeforeV480V510 ||
     dopplerCanonicalProofReservedBeforeV480V513 ||
     genericProofReservedBeforeV480V518 ||
+    genericCreatorIdentityReservedBeforeV480V519 ||
     dopplerProofReservedBeforeV480V512;
 
   telemetry.ponsV2ExactProofPriorityV510 = {
@@ -110237,6 +110467,19 @@ async function traceUnknownLiveOriginsV477({
         : null,
     genericProofReservedBeforeV480V518:
       genericProofReservedBeforeV480V518,
+    genericCreatorIdentityCandidateBeforeV480V519:
+      genericCreatorIdentityCandidateBeforeV480V519
+        ? {
+            creator:
+              genericCreatorIdentityCandidateBeforeV480V519.creator,
+            distinctTokens:
+              genericCreatorIdentityCandidateBeforeV480V519.distinctTokens,
+            distinctTransactions:
+              genericCreatorIdentityCandidateBeforeV480V519.distinctTransactions
+          }
+        : null,
+    genericCreatorIdentityReservedBeforeV480V519:
+      genericCreatorIdentityReservedBeforeV480V519,
     highEvidenceReservationV513:
       highEvidenceProofReservedBeforeV480V513,
     status:
@@ -110246,9 +110489,11 @@ async function traceUnknownLiveOriginsV477({
           ? "V513_DOPPLER_CANONICAL_THIRD_RECEIPT_SLOT_RESERVED_BEFORE_CURRENT_LIVE_SECONDARY_WORK"
           : genericProofReservedBeforeV480V518
             ? "V518_V517_GENERIC_EXACT_RECEIPT_SLOT_RESERVED_BEFORE_CURRENT_LIVE_SECONDARY_WORK"
-            : dopplerProofReservedBeforeV480V512
-              ? "V512_DOPPLER_WHOLE_RECEIPT_SLOT_RESERVED_BEFORE_CURRENT_LIVE_SECONDARY_WORK"
-              : "V518_NO_PREEXISTING_HIGH_EVIDENCE_EXACT_PROOF_CANDIDATE"
+            : genericCreatorIdentityReservedBeforeV480V519
+              ? "V519_V503_GENERIC_CREATOR_IDENTITY_SLOT_RESERVED_BEFORE_CURRENT_LIVE_SECONDARY_WORK"
+              : dopplerProofReservedBeforeV480V512
+                ? "V512_DOPPLER_WHOLE_RECEIPT_SLOT_RESERVED_BEFORE_CURRENT_LIVE_SECONDARY_WORK"
+                : "V519_NO_PREEXISTING_HIGH_EVIDENCE_OR_IDENTITY_HANDOFF_CANDIDATE"
   };
 
   const fairnessReservationV487 =
@@ -110275,6 +110520,8 @@ async function traceUnknownLiveOriginsV477({
       ponsProofReservedBeforeV480V510,
     v517GenericProofReservationV518:
       genericProofReservedBeforeV480V518,
+    v519GenericCreatorIdentityReservation:
+      genericCreatorIdentityReservedBeforeV480V519,
     scoringChanged: false
   };
 
@@ -110675,6 +110922,11 @@ async function traceUnknownLiveOriginsV477({
           state
         );
 
+      const genericCreatorIdentityCandidateAfterV480V519 =
+        selectGenericUnknownCreatorIdentityCandidateV519(
+          state
+        );
+
       telemetry.ponsV2ExactProofPriorityV510
         .candidateAfterV480 =
           ponsReceiptCandidateAfterV480V510
@@ -110729,6 +110981,19 @@ async function traceUnknownLiveOriginsV477({
                   genericUnknownReceiptCandidateAfterV480V518.creator,
                 transactionHash:
                   genericUnknownReceiptCandidateAfterV480V518.transactionHash
+              }
+            : null;
+
+      telemetry.ponsV2ExactProofPriorityV510
+        .genericCreatorIdentityCandidateAfterV480V519 =
+          genericCreatorIdentityCandidateAfterV480V519
+            ? {
+                creator:
+                  genericCreatorIdentityCandidateAfterV480V519.creator,
+                distinctTokens:
+                  genericCreatorIdentityCandidateAfterV480V519.distinctTokens,
+                distinctTransactions:
+                  genericCreatorIdentityCandidateAfterV480V519.distinctTransactions
               }
             : null;
 
@@ -110997,6 +111262,85 @@ async function traceUnknownLiveOriginsV477({
             false,
           deferredByHigherEvidenceV517:
             true
+        };
+      } else if (
+        genericCreatorIdentityCandidateAfterV480V519
+      ) {
+        const creatorV503V519 =
+          await runRecurringCreatorAttributionV503({
+            env,
+            state,
+            budget,
+            forcedCreator:
+              genericCreatorIdentityCandidateAfterV480V519.creator
+          });
+
+        telemetry.recurringCreatorAttributionV503 =
+          creatorV503V519;
+
+        telemetry.ponsV2ExactProofPriorityV510
+          .v503Deferred = false;
+        telemetry.ponsV2ExactProofPriorityV510
+          .v485Deferred = true;
+        telemetry.ponsV2ExactProofPriorityV510
+          .status =
+            creatorV503V519?.attempted === true
+              ? "V519_V503_GENERIC_CREATOR_IDENTITY_RAN_BEFORE_V485"
+              : `V519_V503_GENERIC_CREATOR_IDENTITY_RESERVED_BUT_NOT_ATTEMPTED:${creatorV503V519?.status || "UNKNOWN"}`;
+
+        telemetry.exactCreationMechanismAttributionV485 = {
+          enabled: true,
+          measurementOnly: true,
+          promotionAllowed: false,
+          attempted: false,
+          requestConsumed: false,
+          status:
+            "V519_DEFERRED_V485_FOR_GENERIC_CREATOR_IDENTITY_HANDOFF",
+          deferredToken:
+            targetAddress,
+          verifiedCreator:
+            normalize(
+              row.contractCreator
+            ),
+          v519SelectedCreator:
+            genericCreatorIdentityCandidateAfterV480V519.creator,
+          v519DistinctTokens:
+            genericCreatorIdentityCandidateAfterV480V519.distinctTokens,
+          v519DistinctTransactions:
+            genericCreatorIdentityCandidateAfterV480V519.distinctTransactions,
+          exactCreationAttributionDisabledGlobally:
+            false,
+          oneScanOnly:
+            true
+        };
+
+        telemetry.strongRecurringCreatorPriorityV506 = {
+          enabled: true,
+          applied: false,
+          reason:
+            "V519_V503_IDENTITY_HANDOFF_FOR_V517_ENTRY_PRIORITY",
+          verifiedCreator:
+            normalize(
+              row.contractCreator
+            ),
+          pendingCreator:
+            genericCreatorIdentityCandidateAfterV480V519.creator,
+          distinctTokens:
+            genericCreatorIdentityCandidateAfterV480V519.distinctTokens,
+          distinctTransactions:
+            genericCreatorIdentityCandidateAfterV480V519.distinctTransactions,
+          thresholdDistinctTokens:
+            3,
+          decisionPoint:
+            "CURRENT_LIVE_V480_AFTER_ORIGIN_PROOF_BEFORE_V485",
+          v485RequestConsumedBeforeDecision:
+            false,
+          v485DeferredForSameCluster:
+            false,
+          deferredByV519IdentityHandoff:
+            true,
+          olderV505ThresholdUnchanged:
+            strongRecurringCreatorThresholdV505()
         };
       } else if (dopplerWholeReceiptCandidateAfterV480V512) {
         const dopplerV512 =
