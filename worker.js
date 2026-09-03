@@ -1,4 +1,29 @@
 /**
+ * Robinhood Chain Meme Hunter — V567
+ * AUTHORITATIVE RUNTIME VERSION: V567
+ *
+ * V567 EXPANSION-READY POOL PRIORITY:
+ * - preserves V566 density-aware 600/1200/2400/4800 block sizing;
+ * - preserves V565 evidence-aware watch retention;
+ * - preserves V564 Telegram verified rolling USD output;
+ * - preserves V563 token+PoolId watch keying;
+ * - fixes the confirmed scheduler mismatch where fresh active pools with
+ *   zero successful ranges were always selected ahead of pools already
+ *   qualified to use V566's larger safe catch-up spans;
+ * - selector priority is now:
+ *     1) expansion-ready pools: >=2 successful ranges, 0 saturation,
+ *        elastic block not active, closest to chain head;
+ *     2) active/recent exact pools nearest to head;
+ *     3) remaining eligible backlog;
+ * - the V559 reserve target ordering uses the same V567 priority so
+ *   protected capacity and actual collection agree;
+ * - existing V561 same-pool finish preference remains authoritative
+ *   once a selected pool is within one final default chunk of head;
+ * - no extra requests; hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, USD math, provider, or
+ *   Telegram-threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V566
  * AUTHORITATIVE RUNTIME VERSION: V566
  *
@@ -3374,7 +3399,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V566";
+const VERSION = "V567";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -57296,6 +57321,31 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
   };
 }
 
+function directionalWatchExpansionReadyV567(row) {
+  return (
+    safeNumber(row?.successfulRanges) >= 2 &&
+    safeNumber(row?.saturatedAttempts) === 0 &&
+    row?.nearHeadElasticBlockedV562 !== true &&
+    Number.isFinite(Number(row?.lastCollectedBlock))
+  );
+}
+
+function directionalWatchPriorityTierV567(row) {
+  if (directionalWatchExpansionReadyV567(row)) return 3;
+
+  if (
+    row?.activePoolEvidenceV555 === true ||
+    (
+      row?.recentExactPoolSeedV556 === true &&
+      row?.zeroActivityDeprioritisedV555 !== true
+    )
+  ) return 2;
+
+  if (row?.zeroActivityDeprioritisedV555 !== true) return 1;
+
+  return 0;
+}
+
 function selectDirectionalWatchCandidateV551(
   state,
   latestNumber,
@@ -57328,23 +57378,19 @@ function selectDirectionalWatchCandidateV551(
       );
     });
 
-  const hasActiveV555 =
-    eligible.some(row => row?.activePoolEvidenceV555 === true);
-  const hasRecentSeedV556 =
-    eligible.some(row =>
-      row?.recentExactPoolSeedV556 === true &&
-      row?.zeroActivityDeprioritisedV555 !== true
+  const highestPriorityTierV567 =
+    eligible.reduce(
+      (maxTier,row) =>
+        Math.max(maxTier,directionalWatchPriorityTierV567(row)),
+      0
     );
 
   const preferred =
-    hasActiveV555
-      ? eligible.filter(row => row?.activePoolEvidenceV555 === true)
-      : hasRecentSeedV556
-        ? eligible.filter(row =>
-            row?.recentExactPoolSeedV556 === true &&
-            row?.zeroActivityDeprioritisedV555 !== true
-          )
-        : eligible.filter(row => row?.zeroActivityDeprioritisedV555 !== true);
+    eligible.filter(
+      row =>
+        directionalWatchPriorityTierV567(row) ===
+        highestPriorityTierV567
+    );
 
   const pool =
     preferred.length > 0
@@ -57366,15 +57412,31 @@ function selectDirectionalWatchCandidateV551(
 
   return pool
     .sort((a,b) => {
-      const activeDelta =
-        Number(b?.activePoolEvidenceV555 === true) -
-        Number(a?.activePoolEvidenceV555 === true);
-      if (activeDelta !== 0) return activeDelta;
+      const tierDelta =
+        directionalWatchPriorityTierV567(b) -
+        directionalWatchPriorityTierV567(a);
+      if (tierDelta !== 0) return tierDelta;
 
-      /* V560: active/recent pool nearest to head first. */
-      const aBehind = Math.max(0, head - safeNumber(a?.lastCollectedBlock));
-      const bBehind = Math.max(0, head - safeNumber(b?.lastCollectedBlock));
+      /*
+       * V567: within the strongest available tier, closest to head first.
+       * This lets expansion-ready pools use V566's larger span before
+       * spending scarce requests building another new 600-block watch.
+       */
+      const aBehind =
+        Math.max(0, head - safeNumber(a?.lastCollectedBlock));
+      const bBehind =
+        Math.max(0, head - safeNumber(b?.lastCollectedBlock));
       if (aBehind !== bBehind) return aBehind - bBehind;
+
+      const rangeDelta =
+        safeNumber(b?.successfulRanges) -
+        safeNumber(a?.successfulRanges);
+      if (rangeDelta !== 0) return rangeDelta;
+
+      const exactUsdDelta =
+        safeNumber(b?.exactUsdTrades) -
+        safeNumber(a?.exactUsdTrades);
+      if (exactUsdDelta !== 0) return exactUsdDelta;
 
       const swapDelta =
         safeNumber(b?.poolSpecificSwapsV555) -
@@ -57386,11 +57448,16 @@ function selectDirectionalWatchCandidateV551(
         safeNumber(a?.poolSpecificLiquidityEventsV556);
       if (liquidityDelta !== 0) return liquidityDelta;
 
-      const aLast = safeNumber(a?.lastCollectedAt || a?.registeredAt);
-      const bLast = safeNumber(b?.lastCollectedAt || b?.registeredAt);
-      if (aLast !== bLast) return aLast - bLast;
+      const aLast =
+        safeNumber(a?.lastCollectedAt || a?.registeredAt);
+      const bLast =
+        safeNumber(b?.lastCollectedAt || b?.registeredAt);
+      if (aLast !== bLast) return bLast - aLast;
 
-      return safeNumber(b?.lastCollectedBlock) - safeNumber(a?.lastCollectedBlock);
+      return (
+        safeNumber(b?.lastCollectedBlock) -
+        safeNumber(a?.lastCollectedBlock)
+      );
     })[0] || null;
 }
 
@@ -57415,14 +57482,26 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
             );
           })
           .sort((a,b) => {
-            const activeDelta =
-              Number(b?.activePoolEvidenceV555 === true) -
-              Number(a?.activePoolEvidenceV555 === true);
-            if (activeDelta !== 0) return activeDelta;
+            const tierDelta =
+              directionalWatchPriorityTierV567(b) -
+              directionalWatchPriorityTierV567(a);
+            if (tierDelta !== 0) return tierDelta;
 
-            const aBehind = Math.max(0, head - safeNumber(a?.lastCollectedBlock));
-            const bBehind = Math.max(0, head - safeNumber(b?.lastCollectedBlock));
+            const aBehind =
+              Math.max(0, head - safeNumber(a?.lastCollectedBlock));
+            const bBehind =
+              Math.max(0, head - safeNumber(b?.lastCollectedBlock));
             if (aBehind !== bBehind) return aBehind - bBehind;
+
+            const rangeDelta =
+              safeNumber(b?.successfulRanges) -
+              safeNumber(a?.successfulRanges);
+            if (rangeDelta !== 0) return rangeDelta;
+
+            const exactUsdDelta =
+              safeNumber(b?.exactUsdTrades) -
+              safeNumber(a?.exactUsdTrades);
+            if (exactUsdDelta !== 0) return exactUsdDelta;
 
             const swapDelta =
               safeNumber(b?.poolSpecificSwapsV555) -
@@ -57434,8 +57513,10 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
               safeNumber(a?.poolSpecificLiquidityEventsV556);
             if (liquidityDelta !== 0) return liquidityDelta;
 
-            return safeNumber(b?.lastCollectedBlock) -
-              safeNumber(a?.lastCollectedBlock);
+            return (
+              safeNumber(b?.lastCollectedBlock) -
+              safeNumber(a?.lastCollectedBlock)
+            );
           })
       : [];
 
@@ -57803,6 +57884,12 @@ async function advanceDirectionalWatchV551({
           ? Number(averageLogsPerSuccessfulRangeV566.toFixed(2))
           : null,
       successfulRangesAtSelectionV566:successfulRangesV566,
+      expansionReadyPriorityV567:
+        directionalWatchExpansionReadyV567(candidate),
+      selectionPriorityTierV567:
+        directionalWatchPriorityTierV567(candidate),
+      selectionPolicyV567:
+        "EXPANSION_READY_THEN_ACTIVE_RECENT_THEN_BACKLOG_CLOSEST_TO_HEAD",
       configuredBlockSpanV562:configuredSpan,
       configuredBlockSpanV566:configuredSpan,
       baseConfiguredBlockSpanV562:baseConfiguredSpanV562,
@@ -75318,6 +75405,12 @@ for (
         row?.elasticNearHeadSpanAppliedV562 === true,
       densityExpansionAppliedV566:
         row?.densityExpansionAppliedV566 === true,
+      expansionReadyPriorityV567:
+        row?.expansionReadyPriorityV567 === true,
+      selectionPriorityTierV567:
+        Number.isFinite(Number(row?.selectionPriorityTierV567))
+          ? Number(row.selectionPriorityTierV567)
+          : null,
       densityTargetSpanV566:
         Number.isFinite(Number(row?.densityTargetSpanV566))
           ? Number(row.densityTargetSpanV566)
@@ -75352,6 +75445,9 @@ for (
     densityAwareCatchupV566:true,
     densityAwareMaxSpanV566:DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V566,
     saturationRowGuardV566:BLOCKSCOUT_LOGS_MAX_ROWS_V180,
+    selectionPriorityV567:
+      "EXPANSION_READY_THEN_ACTIVE_RECENT_THEN_BACKLOG_CLOSEST_TO_HEAD",
+    reservePriorityAlignedV567:true,
     reservedRequestsV559:safeNumber(
       directionalWatchReserveV553?.reservedRequests
     ),
