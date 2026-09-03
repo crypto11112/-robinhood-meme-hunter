@@ -1,4 +1,25 @@
 /**
+ * Robinhood Chain Meme Hunter — V562
+ * AUTHORITATIVE RUNTIME VERSION: V562
+ *
+ * V562 ELASTIC NEAR-HEAD BLOCK SPAN:
+ * - preserves V561 finish-near-head-first scheduling;
+ * - preserves V560 active-nearest-to-head priority;
+ * - preserves V559 protected directional reserve;
+ * - preserves V557 rolling directional USD verification unchanged;
+ * - changes ONLY the per-request block span for active exact pools near the scan head;
+ * - when an active exact watched pool is <= 2,400 blocks behind and its current
+ *   adaptive span is at least the proven 600-block default, one request may cover
+ *   up to the already-existing 1,200-block maximum;
+ * - the request never crosses the current scan head;
+ * - existing Blockscout saturation protection remains authoritative:
+ *   a saturated range does NOT advance coverage and halves the adaptive span;
+ * - after a saturation event, elastic promotion is temporarily disabled until a
+ *   later successful low-density range proves 600-block collection safe again;
+ * - no extra external requests, hard global ceiling remains 42;
+ * - no scoring, Momentum, qualification, USD-decoding, or Telegram changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V561
  * AUTHORITATIVE RUNTIME VERSION: V561
  *
@@ -3285,7 +3306,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V561";
+const VERSION = "V562";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -57259,13 +57280,35 @@ async function advanceDirectionalWatchV551({
     return {...base,status:"WATCH_ALREADY_AT_HEAD_V551"};
   }
 
-  const configuredSpan = Math.max(
+  const baseConfiguredSpanV562 = Math.max(
     DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551,
     Math.min(
       DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551,
-      Math.floor(safeNumber(candidate?.adaptiveBlockSpan) || DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551)
+      Math.floor(
+        safeNumber(candidate?.adaptiveBlockSpan) ||
+        DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551
+      )
     )
   );
+
+  const blocksBehindHeadV562 =
+    Math.max(0, head - lastCollectedBlock);
+
+  const elasticEligibleV562 =
+    candidate?.activePoolEvidenceV555 === true &&
+    candidate?.nearHeadElasticBlockedV562 !== true &&
+    blocksBehindHeadV562 > DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551 &&
+    blocksBehindHeadV562 <=
+      (DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551 * 2) &&
+    baseConfiguredSpanV562 >= DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551;
+
+  const configuredSpan =
+    elasticEligibleV562
+      ? Math.min(
+          DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551,
+          blocksBehindHeadV562
+        )
+      : baseConfiguredSpanV562;
 
   const fromBlock = lastCollectedBlock + 1;
   const toBlock = Math.min(head, fromBlock + configuredSpan - 1);
@@ -57314,6 +57357,7 @@ async function advanceDirectionalWatchV551({
         DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551,
         Math.floor(configuredSpan / 2)
       );
+      candidate.nearHeadElasticBlockedV562 = true;
       candidate.lastStatus = "RANGE_SATURATED_RETRY_SMALLER_NO_COVERAGE_ADVANCE_V551";
       candidate.updatedAt = Date.now();
 
@@ -57360,11 +57404,25 @@ async function advanceDirectionalWatchV551({
     candidate.successfulRanges = safeNumber(candidate?.successfulRanges) + 1;
     candidate.exactUsdTrades = safeNumber(candidate?.exactUsdTrades) + safeNumber(persisted?.exactUsdTrades);
     candidate.gapDetected = false;
-    if (configuredSpan < DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551 && rows.length < BLOCKSCOUT_LOGS_MAX_ROWS_V180 / 4) {
+    if (
+      configuredSpan < DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551 &&
+      rows.length < BLOCKSCOUT_LOGS_MAX_ROWS_V180 / 4
+    ) {
       candidate.adaptiveBlockSpan = Math.min(
         DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551,
-        Math.max(configuredSpan + DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551, Math.floor(configuredSpan * 1.5))
+        Math.max(
+          configuredSpan + DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551,
+          Math.floor(configuredSpan * 1.5)
+        )
       );
+    }
+
+    if (
+      candidate?.nearHeadElasticBlockedV562 === true &&
+      configuredSpan <= DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551 &&
+      rows.length < BLOCKSCOUT_LOGS_MAX_ROWS_V180 / 4
+    ) {
+      candidate.nearHeadElasticBlockedV562 = false;
     }
 
     root.updatedAt = Date.now();
@@ -57383,6 +57441,11 @@ async function advanceDirectionalWatchV551({
       coverageStartBlock:candidate?.coverageStartBlock ?? null,
       coverageEndBlock:candidate?.coverageEndBlock ?? null,
       blocksRemainingToHead:Math.max(0, head - toBlock),
+      blocksBehindAtSelectionV562:blocksBehindHeadV562,
+      elasticNearHeadSpanAppliedV562:elasticEligibleV562,
+      configuredBlockSpanV562:configuredSpan,
+      baseConfiguredBlockSpanV562:baseConfiguredSpanV562,
+      nearHeadElasticBlockedV562:candidate?.nearHeadElasticBlockedV562 === true,
       adaptiveBlockSpan:candidate?.adaptiveBlockSpan || configuredSpan,
       persistence:persisted,
       status:candidate.lastStatus
@@ -74630,6 +74693,12 @@ for (
         Number.isFinite(Number(row?.blocksRemainingToHead))
           ? Number(row.blocksRemainingToHead)
           : null,
+      elasticNearHeadSpanAppliedV562:
+        row?.elasticNearHeadSpanAppliedV562 === true,
+      configuredBlockSpanV562:
+        Number.isFinite(Number(row?.configuredBlockSpanV562))
+          ? Number(row.configuredBlockSpanV562)
+          : null,
       coverageAdvanced:row?.coverageAdvanced === true,
       rangeSaturated:row?.rangeSaturated === true,
       status:row?.status || null
@@ -74647,6 +74716,8 @@ for (
     reserveVersion:"V559_DYNAMIC_THREE_SLOT_WITH_ONE_MINIMUM_GUARANTEE",
     selectionPriorityV560:"ACTIVE_NEAREST_TO_HEAD_THEN_SWAP_ACTIVITY",
     finishNearHeadPoolFirstV561:true,
+    elasticNearHeadSpanV562:true,
+    elasticNearHeadMaxSpanV562:DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551,
     reservedRequestsV559:safeNumber(
       directionalWatchReserveV553?.reservedRequests
     ),
