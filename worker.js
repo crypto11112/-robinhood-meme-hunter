@@ -1,6 +1,20 @@
 /**
- * Robinhood Chain Meme Hunter — V536
- * AUTHORITATIVE RUNTIME VERSION: V536
+ * Robinhood Chain Meme Hunter — V537
+ * AUTHORITATIVE RUNTIME VERSION: V537
+ *
+ * V537 OPENFAIR TOPIC2 RECOVERY + BOUNDED PROOF RESERVATION:
+ * - V536 successfully confirmed/registered NOXA Fun at 75 distinct tokens / 75 distinct transactions;
+ * - preserves solved Mint Club + NOXA V515 detectors unchanged and automatically skips them in seeded history;
+ * - fixes the remaining Openfair historical-state gap: legacy V534/V535 recentEvidence retained topic1 but
+ *   Openfair LaunchCreated token identity is topic2, so those old rows cannot be retrospectively promoted;
+ * - V536 already stores topic2 on NEW historical pages; V537 gives unresolved Openfair one bounded recovery
+ *   opportunity to re-fetch an authenticated Blockscout Pro historical page and capture the exact topic2 token;
+ * - while that recovery is needed, one global slot is protected only from LOWER-PRIORITY analysis requests;
+ * - exact-pool completion, protected holder completion, USD completion and ATH fair-slot work may override it;
+ * - if any higher-priority protected work needs the slot, Openfair simply defers rather than exceeding budget;
+ * - Openfair remains fail-closed: SAME topic0 + topic2 token across >=3 distinct tokens AND >=3 distinct txs;
+ * - Flap remains fingerprint-only until an exact launch-creation event/token slot is independently proven;
+ * - hard global request limit remains 42; scanner/scoring/Momentum/qualification/Telegram thresholds unchanged.
  *
  * V536 NOXA EXACT RECLASSIFICATION + OPENFAIR EXACT-PROOF ACCUMULATOR:
  * - V535 historical telemetry independently exposed NOXA Fun factory TokenLaunched events as
@@ -2846,7 +2860,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V536";
+const VERSION = "V537";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9113,12 +9127,51 @@ function athFairSlotReserveBlocksAnalysisV301(budget, type, amount = 1) {
   return analysisBlocked || globalBlocked;
 }
 
+function configureOpenfairHistoricalRecoveryReserveV537(state,budget){
+  const root=ensureSeededHistoricalProofV529(state);
+  const row=root?.sources?.openfair;
+  const exactObs=Array.isArray(row?.exactSeededLaunchObservationsV536)?row.exactSeededLaunchObservationsV536:[];
+  const hasLaunchCreatedLegacyEvidence=Array.isArray(row?.recentEvidence)&&row.recentEvidence.some(ev=>isExactOpenfairLaunchCreatedDecodedV536(ev?.decodedMethod));
+  const needsRecovery=Boolean(row&&row.exactDetectorRegistered!==true&&safeNumber(row.logsObserved)>0&&exactObs.length<3&&hasLaunchCreatedLegacyEvidence);
+  budget.analysis.openfairHistoricalRecoveryReserveV537={
+    enabled:true,active:needsRecovery,reservedRequests:needsRecovery?1:0,configuredAt:Date.now(),
+    reason:needsRecovery?"OPENFAIR_LAUNCHCREATED_LEGACY_TOPIC2_NOT_PERSISTED":"OPENFAIR_RECOVERY_NOT_REQUIRED",
+    lowerPriorityRequestsBlocked:0,overriddenByProtectedWork:0
+  };
+  return budget.analysis.openfairHistoricalRecoveryReserveV537;
+}
+
+function openfairHistoricalRecoveryReserveBlocksAnalysisV537(budget,type,amount=1){
+  const r=budget?.analysis?.openfairHistoricalRecoveryReserveV537;
+  if(r?.active!==true||safeNumber(r?.reservedRequests)<=0)return false;
+  const protectedTypes=new Set([
+    "BLOCKSCOUT_V4_USDG_DIRECTIONAL_V180",
+    "BLOCKSCOUT_V4_USD_COMPLETION_V254",
+    "BLOCKSCOUT_PRO_HOLDER_COUNT_COMPLETION_V256",
+    "BLOCKSCOUT_V458_TIMESTAMP_TO_BLOCK",
+    "BLOCKSCOUT_V458_COMPLETE_EXACT_POOL_24H_LOGS",
+    "DEXSCREENER_ATH_FAIR_SLOT_V299"
+  ]);
+  if(protectedTypes.has(type)){r.overriddenByProtectedWork=safeNumber(r.overriddenByProtectedWork)+1;return false;}
+  const notificationReserveRemaining=budget?.notification?.globalReserveActiveV174===true?Math.max(0,safeNumber(budget?.notification?.limit)-safeNumber(budget?.notification?.used)):0;
+  const preTelegramGlobalLimit=Math.max(0,safeNumber(budget?.totalLimit)-notificationReserveRemaining);
+  const reserved=Math.max(0,safeNumber(r.reservedRequests));
+  return safeNumber(budget?.totalUsed)+amount>Math.max(0,preTelegramGlobalLimit-reserved);
+}
+
 function consumeBudget(
   budget,
   phase,
   type,
   amount = 1
 ) {
+  if(phase==="analysis"&&openfairHistoricalRecoveryReserveBlocksAnalysisV537(budget,type,amount)){
+    const r=budget.analysis.openfairHistoricalRecoveryReserveV537;
+    r.lowerPriorityRequestsBlocked=safeNumber(r.lowerPriorityRequestsBlocked)+1;
+    budget.skipped.push({phase,type,amount,reason:"V537_OPENFAIR_HISTORICAL_TOPIC2_RECOVERY_SLOT_RESERVED"});
+    return false;
+  }
+
   /*
    * V182:
    * Keep one analysis request and one slot inside the current pre-Telegram
@@ -22135,7 +22188,10 @@ function blockscoutProHistoricalAddressLogsUrlV533(env,address,nextPageParams=nu
 async function runSeededHistoricalProofV529({env,state,budget}){
   const root=ensureSeededHistoricalProofV529(state);
   const sources=SEEDED_HISTORICAL_SOURCES_V529,start=Math.max(0,Math.floor(safeNumber(root.nextIndex)))%sources.length;let chosen=null;
-  for(let i=0;i<sources.length;i++){const src=sources[(start+i)%sources.length],r=root.sources[src.key];if(r?.exactDetectorRegistered===true)continue;chosen=src;root.nextIndex=(start+i+1)%sources.length;break;}
+  const openfairRowV537=root.sources?.openfair;
+  const openfairNeedsTopic2RecoveryV537=Boolean(openfairRowV537&&openfairRowV537.exactDetectorRegistered!==true&&safeNumber(openfairRowV537.logsObserved)>0&&(Array.isArray(openfairRowV537.exactSeededLaunchObservationsV536)?openfairRowV537.exactSeededLaunchObservationsV536.length:0)<3&&Array.isArray(openfairRowV537.recentEvidence)&&openfairRowV537.recentEvidence.some(ev=>isExactOpenfairLaunchCreatedDecodedV536(ev?.decodedMethod)));
+  if(openfairNeedsTopic2RecoveryV537){chosen=sources.find(x=>x.key==="openfair")||null;}
+  if(!chosen)for(let i=0;i<sources.length;i++){const src=sources[(start+i)%sources.length],r=root.sources[src.key];if(r?.exactDetectorRegistered===true)continue;chosen=src;root.nextIndex=(start+i+1)%sources.length;break;}
   if(!chosen){root.lastStatus="V529_ALL_SEEDED_HISTORICAL_TARGETS_ALREADY_EXACT_OR_DISABLED";return{enabled:true,attempted:false,requestConsumed:false,status:root.lastStatus};}
   const row=root.sources[chosen.key];
   const params=row.nextPageParams&&typeof row.nextPageParams==="object"?row.nextPageParams:null;
@@ -22152,7 +22208,8 @@ async function runSeededHistoricalProofV529({env,state,budget}){
       if(chosen.key==="openfair"&&isExactOpenfairLaunchCreatedDecodedV536(evidence.decodedMethod)){const token=v529TopicAddress(topics[2]);if(token&&tx&&/^0x[a-f0-9]{64}$/.test(topic0))ensureExactSeededObservationsV536(row).push({observedAt:Date.now(),token,transactionHash:tx,topic0,addressLocationType:"TOPIC",addressLocationIndex:2,decodedMethod:evidence.decodedMethod,blockNumber:evidence.blockNumber,logIndex:evidence.logIndex});}
     }
     row.recentEvidence=row.recentEvidence.slice(-250);row.exactMintClubTokenCreatedObservations=(row.exactMintClubTokenCreatedObservations||[]).filter((x,i,a)=>a.findIndex(y=>y.transactionHash===x.transactionHash&&y.logIndex===x.logIndex)===i).slice(-250);row.exactSeededLaunchObservationsV536=ensureExactSeededObservationsV536(row).filter((x,i,a)=>a.findIndex(y=>y.transactionHash===x.transactionHash&&y.logIndex===x.logIndex&&normalize(y.token)===normalize(x.token))===i).slice(-250);row.logsObserved=safeNumber(row.logsObserved)+items.length;row.distinctTransactionsObserved=new Set(row.recentEvidence.map(x=>x.transactionHash).filter(x=>/^0x[a-f0-9]{64}$/.test(String(x||"")))).size;row.nextPageParams=payload?.next_page_params&&typeof payload.next_page_params==="object"?payload.next_page_params:null;
-    let registration=null;if(chosen.mintClubExact===true)registration=rebuildMintClubHistoricalExactProofV529(state);if(chosen.key==="noxa"||chosen.key==="openfair")registration=rebuildSeededExactProofV536(state,chosen.key)||registration;if(row.exactDetectorRegistered===true&&chosen.key==="mint_club")row.status="V529_MINTCLUB_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515";else if(row.exactDetectorRegistered===true&&chosen.key==="noxa")row.status="V536_NOXA_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515";else if(row.exactDetectorRegistered===true&&chosen.key==="openfair")row.status="V536_OPENFAIR_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515";else row.status=items.length?"V529_HISTORICAL_LOGS_OBSERVED_PROOF_ACCUMULATING":"V529_HISTORICAL_PAGE_EMPTY";root.lastStatus=row.status;
+    let registration=null;if(chosen.mintClubExact===true)registration=rebuildMintClubHistoricalExactProofV529(state);if(chosen.key==="noxa"||chosen.key==="openfair")registration=rebuildSeededExactProofV536(state,chosen.key)||registration;
+    if(chosen.key==="openfair"&&budget?.analysis?.openfairHistoricalRecoveryReserveV537){budget.analysis.openfairHistoricalRecoveryReserveV537.active=false;budget.analysis.openfairHistoricalRecoveryReserveV537.releasedAt=Date.now();budget.analysis.openfairHistoricalRecoveryReserveV537.releaseReason="OPENFAIR_HISTORICAL_REQUEST_ATTEMPTED_V537";}if(row.exactDetectorRegistered===true&&chosen.key==="mint_club")row.status="V529_MINTCLUB_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515";else if(row.exactDetectorRegistered===true&&chosen.key==="noxa")row.status="V536_NOXA_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515";else if(row.exactDetectorRegistered===true&&chosen.key==="openfair")row.status="V536_OPENFAIR_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515";else row.status=items.length?"V529_HISTORICAL_LOGS_OBSERVED_PROOF_ACCUMULATING":"V529_HISTORICAL_PAGE_EMPTY";root.lastStatus=row.status;
     return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,label:chosen.label,address:normalize(chosen.address),httpStatus:response.status,logsThisPage:items.length,exactMintClubTokenCreatedThisPage:exactMint,nextPageAvailable:Boolean(row.nextPageParams),exactLaunchPatternConfirmed:row.exactLaunchPatternConfirmed===true,exactDetectorRegistered:row.exactDetectorRegistered===true,registrationStatus:registration?.status||row.registrationStatus||null,residualLaneV532:true,authenticatedBlockscoutProV533:true,residualBudgetRemainingAfter:safeNumber(spare?.remainingAfter),status:row.status};
   }catch(e){row.lastError=errorString(e);row.status="V529_HISTORICAL_FETCH_ERROR_RETRY_PRESERVED";root.lastStatus=row.status;return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,error:row.lastError,residualLaneV532:true,authenticatedBlockscoutProV533:true,residualBudgetRemainingAfter:safeNumber(spare?.remainingAfter),status:row.status};}
 }
@@ -64676,6 +64733,9 @@ async function scan(
       state,
       budget
     );
+
+  const openfairHistoricalRecoveryReserveV537 =
+    configureOpenfairHistoricalRecoveryReserveV537(state,budget);
 
   /*
    * V186 local identity recovery must happen BEFORE pruneState so a valid
