@@ -1,6 +1,24 @@
 /**
- * Robinhood Chain Meme Hunter — V513
- * AUTHORITATIVE RUNTIME VERSION: V513
+ * Robinhood Chain Meme Hunter — V514
+ * AUTHORITATIVE RUNTIME VERSION: V514
+ *
+ * V514 DOPPLER CONFIRMED-PATTERN LIVE DETECTOR:
+ * - activates only from V513's persisted canonical Doppler pattern confirmed
+ *   across three distinct verified creation receipts;
+ * - no guessed event signature, emitter, token slot or launch address is added;
+ * - dynamically adds the V513-confirmed event emitter to the EXISTING live
+ *   eth_getLogs address array, adding ZERO extra live-discovery requests;
+ * - exact live match requires confirmed emitter + confirmed topic0 + confirmed
+ *   token topic/data slot and a valid non-zero decoded token address;
+ * - matched tokens enter the existing watch / analysis / qualification pipeline
+ *   with verified Doppler V1 source attribution;
+ * - live exact matches may use the existing verified-launch meter path; no meter
+ *   scoring or threshold logic is changed;
+ * - V513 proof is frozen and no further Doppler proof receipt request is needed;
+ * - V512/V511 evidence remains diagnostic-only;
+ * - hard global request ceiling remains 42;
+ * - scoring, Momentum, qualification, Telegram thresholds, verified USD,
+ *   dense-pool completion, RWA, Pons and existing discovery logic are unchanged.
  *
  * V513 DOPPLER DETERMINISTIC CANONICAL-PATTERN SELECTION + THIRD RECEIPT:
  * - V512 proved seven exact token-bearing receipt patterns across two distinct
@@ -2570,7 +2588,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V513";
+const VERSION = "V514";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -10025,6 +10043,22 @@ function newState() {
       recentVerifiedLaunches: []
     },
 
+    dopplerLiveDetectorV514: {
+      enabled: true,
+      monitorStartedAt: null,
+      activePattern: null,
+      activatedAt: null,
+      scansObserved: 0,
+      liveMatchesObserved: 0,
+      exactLiveTokensAdded: 0,
+      exactBacklogEventsDecoded: 0,
+      liveTokens: {},
+      lastLiveToken: null,
+      lastLiveTransactionHash: null,
+      lastLiveBlock: null,
+      lastStatus: "NOT_EVALUATED_YET_V514"
+    },
+
     dopplerCanonicalPatternProofV513: {
       enabled: true,
       measurementOnlyUntilThirdProof: true,
@@ -10064,6 +10098,52 @@ function newState() {
       lastProvider: null,
       lastHttpStatus: null,
       lastStatus: "NOT_EVALUATED_YET_V512"
+    },
+
+    dopplerExactLiveDetectorV514: {
+      enabled: true,
+      activationAuthority:
+        "PERSISTED_V513_CONFIRMED_CANONICAL_PATTERN",
+      minimumProofHistory:
+        "THREE_DISTINCT_VERIFIED_TOKENS_AND_CREATION_TRANSACTIONS",
+      guessedEmitterOrTopicAllowed:
+        false,
+      exactEmitterRequired:
+        true,
+      exactTopic0Required:
+        true,
+      exactConfirmedTokenSlotRequired:
+        true,
+      dynamicEmitterAddedToExistingLiveEthGetLogs:
+        true,
+      additionalLiveDiscoveryRequests:
+        0,
+      addsMatchedTokenToExistingWatchPipeline:
+        true,
+      verifiedSourceLabel:
+        "Doppler V1",
+      liveLaunchMeterUsesExistingVerifiedLaunchPath:
+        true,
+      v513FurtherProofRequestsAfterConfirmation:
+        false,
+      genericSelfRegistrationDeferredToNextBuild:
+        true,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false,
+      verifiedUsdChanged:
+        false,
+      rwaDetectorChanged:
+        false,
+      ponsDetectorChanged:
+        false
     },
 
     dopplerDeterministicCanonicalPatternV513: {
@@ -20761,7 +20841,8 @@ async function getLogsSingleProvider(
   to,
   budget,
   phase,
-  provider
+  provider,
+  extraLogEmittersV514 = []
 ) {
   const url =
     rpcProviderUrl(
@@ -20807,7 +20888,14 @@ async function getLogsSingleProvider(
               POOLS_TRADE_TOKEN_FACTORY_V204,
               ...POOLS_TRADE_LAUNCHPADS_V204,
               ...DIRECT_ONCHAIN_LAUNCH_FACTORIES_V476,
-              ...VERIFIED_RWA_LAUNCH_LOG_EMITTERS_V495
+              ...VERIFIED_RWA_LAUNCH_LOG_EMITTERS_V495,
+              ...(
+                Array.isArray(extraLogEmittersV514)
+                  ? extraLogEmittersV514
+                      .map(normalize)
+                      .filter(isAddress)
+                  : []
+              )
             ]
           }
         ],
@@ -20857,6 +20945,28 @@ async function scanLiveRange(
     discoveryService(
       state
     );
+
+  const dopplerBootstrapV514 =
+    bootstrapDopplerLiveDetectorV514(
+      state
+    );
+
+  const dopplerLiveRootV514 =
+    ensureDopplerLiveDetectorV514(
+      state
+    );
+
+  dopplerLiveRootV514.scansObserved =
+    safeNumber(
+      dopplerLiveRootV514.scansObserved
+    ) + 1;
+
+  const dopplerLiveEmittersV514 =
+    dopplerBootstrapV514?.active === true
+      ? dopplerLiveEmitterAddressesV514(
+          state
+        )
+      : [];
 
   let chunkSize =
     clamp(
@@ -20957,7 +21067,8 @@ async function scanLiveRange(
         chunkTo,
         budget,
         "discovery-live",
-        provider
+        provider,
+        dopplerLiveEmittersV514
       );
 
     if (
@@ -21028,7 +21139,8 @@ async function scanLiveRange(
               chunkTo,
               budget,
               "discovery-live",
-              provider
+              provider,
+              dopplerLiveEmittersV514
             );
 
           providerHeadRetries++;
@@ -21098,7 +21210,8 @@ async function scanLiveRange(
               chunkTo,
               budget,
               "discovery-live",
-              alternate
+              alternate,
+              dopplerLiveEmittersV514
             );
 
           if (
@@ -21131,7 +21244,8 @@ async function scanLiveRange(
               chunkTo,
               budget,
               "discovery-live",
-              provider
+              provider,
+              dopplerLiveEmittersV514
             );
 
           response =
@@ -21185,7 +21299,8 @@ async function scanLiveRange(
             chunkTo,
             budget,
             "discovery-live",
-            provider
+            provider,
+            dopplerLiveEmittersV514
           );
 
         if (
@@ -31349,6 +31464,7 @@ function verifiedLaunchSourceIdentityV476(
   const launchpads = [
     watched?.launchpadV495,
     watched?.launchpadV476,
+    watched?.launchpadV514,
     watched?.launchpadV513,
     watched?.launchpadV512,
     watched?.launchpadV511,
@@ -31587,6 +31703,32 @@ function processDiscoveryLogs(
   for (
     const token
     of rwaExactLaunchV495.seenTokens
+  ) {
+    seenTokens.add(token);
+  }
+
+  /*
+   * V514: zero-extra-request exact Doppler detector learned from V512/V513.
+   * Its confirmed event emitter is dynamically included in the same live
+   * eth_getLogs call; decoding is strict emitter + topic0 + token-slot.
+   */
+  const dopplerExactLaunchV514 =
+    processDopplerExactLiveLogsV514(
+      state,
+      logs,
+      source
+    );
+
+  for (
+    const token
+    of dopplerExactLaunchV514.newTokens
+  ) {
+    newTokens.add(token);
+  }
+
+  for (
+    const token
+    of dopplerExactLaunchV514.seenTokens
   ) {
     seenTokens.add(token);
   }
@@ -31977,6 +32119,34 @@ function processDiscoveryLogs(
   return {
     rawLogs:
       logs.length,
+
+    dopplerExactLaunchDetectorV514: {
+      enabled: true,
+      active:
+        dopplerExactLaunchV514.active ===
+        true,
+      zeroExtraRequests: true,
+      activePattern:
+        ensureDopplerLiveDetectorV514(
+          state
+        ).activePattern || null,
+      eventCount:
+        safeNumber(
+          dopplerExactLaunchV514.eventCount
+        ),
+      verifiedTokensAdded:
+        dopplerExactLaunchV514.newTokens
+          ?.size || 0,
+      events:
+        Array.isArray(
+          dopplerExactLaunchV514.events
+        )
+          ? dopplerExactLaunchV514.events
+              .slice(0, 25)
+          : [],
+      status:
+        dopplerExactLaunchV514.status
+    },
 
     directOnChainLaunchEventsV476: {
       enabled: true,
@@ -72048,6 +72218,11 @@ for (
         state
       ),
 
+    dopplerLiveDetectorV514:
+      dopplerLiveDetectorSnapshotV514(
+        state
+      ),
+
     tokenOriginTraceThisScanV477,
 
     tokenOriginTraceV477:
@@ -72294,7 +72469,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V513_V512_V511_V510_V509_V508_V507_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V514_V513_V512_V511_V510_V509_V508_V507_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -85419,6 +85594,528 @@ function ensureLaunchCoverageCumulativeV474(state) {
 
 
 
+
+function ensureDopplerLiveDetectorV514(
+  state
+) {
+  state.dopplerLiveDetectorV514 =
+    state?.dopplerLiveDetectorV514 &&
+    typeof state.dopplerLiveDetectorV514 === "object"
+      ? state.dopplerLiveDetectorV514
+      : {
+          enabled: true,
+          monitorStartedAt: Date.now(),
+          activePattern: null,
+          activatedAt: null,
+          scansObserved: 0,
+          liveMatchesObserved: 0,
+          exactLiveTokensAdded: 0,
+          exactBacklogEventsDecoded: 0,
+          liveTokens: {},
+          lastLiveToken: null,
+          lastLiveTransactionHash: null,
+          lastLiveBlock: null,
+          lastStatus: "NOT_EVALUATED_YET_V514"
+        };
+
+  const root =
+    state.dopplerLiveDetectorV514;
+
+  if (!safeNumber(root.monitorStartedAt)) {
+    root.monitorStartedAt = Date.now();
+  }
+
+  root.liveTokens =
+    root.liveTokens &&
+    typeof root.liveTokens === "object"
+      ? root.liveTokens
+      : {};
+
+  return root;
+}
+
+function bootstrapDopplerLiveDetectorV514(
+  state
+) {
+  const root =
+    ensureDopplerLiveDetectorV514(
+      state
+    );
+
+  const proof =
+    ensureDopplerCanonicalPatternProofV513(
+      state
+    );
+
+  const pattern =
+    proof?.confirmedCanonicalPattern;
+
+  const verifiedFactory =
+    normalize(
+      proof?.confirmedFactory
+    );
+
+  if (
+    !pattern ||
+    !isAddress(verifiedFactory)
+  ) {
+    root.activePattern = null;
+    root.lastStatus =
+      "V514_WAITING_FOR_V513_CONFIRMED_CANONICAL_PATTERN";
+
+    return {
+      enabled: true,
+      active: false,
+      status: root.lastStatus
+    };
+  }
+
+  const emitter =
+    normalize(pattern?.emitter);
+
+  const topic0 =
+    normalize(pattern?.topic0);
+
+  const type =
+    String(
+      pattern?.addressLocationType || ""
+    );
+
+  const index =
+    Number(
+      pattern?.addressLocationIndex
+    );
+
+  if (
+    !isAddress(emitter) ||
+    !/^0x[a-f0-9]{64}$/.test(topic0) ||
+    !["TOPIC", "DATA_WORD"].includes(type) ||
+    !Number.isInteger(index) ||
+    index < 0
+  ) {
+    root.activePattern = null;
+    root.lastStatus =
+      "V514_V513_CONFIRMED_PATTERN_INVALID_NO_ACTIVATION";
+
+    return {
+      enabled: true,
+      active: false,
+      status: root.lastStatus
+    };
+  }
+
+  const next = {
+    protocol: "Doppler V1",
+    protocolKey: "doppler_v1",
+    verifiedFactory,
+    emitter,
+    topic0,
+    addressLocationType: type,
+    addressLocationIndex: index,
+    proofStandard:
+      pattern?.proofStandard ||
+      "V512_TWO_DISTINCT_RECEIPTS_PLUS_V513_THIRD_DISTINCT_RECEIPT_EXACT_MATCH",
+    source:
+      "PERSISTED_V513_THREE_RECEIPT_CANONICAL_PATTERN"
+  };
+
+  if (
+    JSON.stringify(root.activePattern) !==
+    JSON.stringify(next)
+  ) {
+    root.activePattern = next;
+    root.activatedAt = Date.now();
+  }
+
+  root.lastStatus =
+    "V514_DOPPLER_EXACT_LIVE_DETECTOR_ACTIVE";
+
+  return {
+    enabled: true,
+    active: true,
+    activePattern: root.activePattern,
+    activatedAt:
+      safeNumber(root.activatedAt) || null,
+    status: root.lastStatus
+  };
+}
+
+function dopplerLiveEmitterAddressesV514(
+  state
+) {
+  const boot =
+    bootstrapDopplerLiveDetectorV514(
+      state
+    );
+
+  const emitter =
+    normalize(
+      boot?.activePattern?.emitter
+    );
+
+  return isAddress(emitter)
+    ? [emitter]
+    : [];
+}
+
+function decodeDopplerExactLiveLogV514(
+  state,
+  log
+) {
+  const root =
+    ensureDopplerLiveDetectorV514(
+      state
+    );
+
+  const pattern =
+    root.activePattern;
+
+  if (!pattern) {
+    return null;
+  }
+
+  const emitter =
+    normalize(log?.address);
+
+  const topics =
+    Array.isArray(log?.topics)
+      ? log.topics.map(normalize)
+      : [];
+
+  const topic0 =
+    topics[0] || null;
+
+  if (
+    emitter !== normalize(pattern.emitter) ||
+    topic0 !== normalize(pattern.topic0)
+  ) {
+    return null;
+  }
+
+  let token = null;
+
+  if (
+    pattern.addressLocationType ===
+    "TOPIC"
+  ) {
+    token =
+      extractAddressFromAbiWordV495(
+        topics[
+          Number(
+            pattern.addressLocationIndex
+          )
+        ]
+      );
+  } else if (
+    pattern.addressLocationType ===
+    "DATA_WORD"
+  ) {
+    const words =
+      abiDataWordsV495(
+        log?.data
+      );
+
+    token =
+      extractAddressFromAbiWordV495(
+        words[
+          Number(
+            pattern.addressLocationIndex
+          )
+        ]
+      );
+  }
+
+  if (
+    !isAddress(token) ||
+    token === ZERO ||
+    knownQuote(token)
+  ) {
+    return null;
+  }
+
+  return {
+    verified: true,
+    decodeVerified: true,
+    event:
+      "V513-confirmed canonical Doppler launch event",
+    protocol:
+      "Doppler V1",
+    protocolKey:
+      "doppler_v1",
+    factory:
+      pattern.verifiedFactory,
+    eventEmitter:
+      emitter,
+    eventTopic0:
+      topic0,
+    token,
+    transactionHash:
+      normalize(
+        log?.transactionHash
+      ) || null,
+    blockNumber:
+      blockNumberFromLogV476(log),
+    verification:
+      "THREE_INDEPENDENT_CREATION_RECEIPTS_CONFIRMED_EMITTER_TOPIC_TOKEN_SLOT_V513_LIVE_DECODE_V514",
+    source:
+      "DIRECT_ONCHAIN_DOPPLER_EXACT_LIVE_LAUNCH_V514"
+  };
+}
+
+function processDopplerExactLiveLogsV514(
+  state,
+  logs,
+  source
+) {
+  const root =
+    ensureDopplerLiveDetectorV514(
+      state
+    );
+
+  bootstrapDopplerLiveDetectorV514(
+    state
+  );
+
+  const events = [];
+  const newTokens =
+    new Set();
+  const seenTokens =
+    new Set();
+
+  if (!root.activePattern) {
+    return {
+      enabled: true,
+      active: false,
+      status:
+        "V514_DOPPLER_PATTERN_NOT_ACTIVE",
+      events,
+      newTokens,
+      seenTokens
+    };
+  }
+
+  for (const log of logs || []) {
+    const event =
+      decodeDopplerExactLiveLogV514(
+        state,
+        log
+      );
+
+    if (!event) {
+      continue;
+    }
+
+    events.push(event);
+
+    const watched =
+      addWatch(
+        state,
+        event.token,
+        null,
+        source === "LIVE"
+          ? "LIVE_DOPPLER_EXACT_VERIFIED_LAUNCH_V514"
+          : "BACKLOG_DOPPLER_EXACT_VERIFIED_LAUNCH_V514"
+      );
+
+    if (watched?.token) {
+      seenTokens.add(
+        normalize(event.token)
+      );
+
+      watched.token.launchpadV514 = {
+        verified: true,
+        protocol:
+          event.protocol,
+        protocolKey:
+          event.protocolKey,
+        factory:
+          event.factory,
+        canonicalEventEmitter:
+          event.eventEmitter,
+        canonicalEventTopic0:
+          event.eventTopic0,
+        tokenAddressLocationType:
+          root.activePattern
+            .addressLocationType,
+        tokenAddressLocationIndex:
+          root.activePattern
+            .addressLocationIndex,
+        launchBlock:
+          event.blockNumber || null,
+        launchTime: null,
+        transactionHash:
+          event.transactionHash || null,
+        event:
+          event.event,
+        source:
+          event.source,
+        verification:
+          event.verification,
+        sourceAttributionVerified:
+          true,
+        timestampVerified:
+          false,
+        timestampRecoveredFromBlockV258:
+          false,
+        liveDetectorActive:
+          true
+      };
+    }
+
+    if (watched?.added) {
+      newTokens.add(
+        normalize(event.token)
+      );
+    }
+
+    if (source === "LIVE") {
+      root.liveMatchesObserved =
+        safeNumber(
+          root.liveMatchesObserved
+        ) + 1;
+
+      if (watched?.added) {
+        root.exactLiveTokensAdded =
+          safeNumber(
+            root.exactLiveTokensAdded
+          ) + 1;
+      }
+
+      root.lastLiveToken =
+        event.token;
+      root.lastLiveTransactionHash =
+        event.transactionHash || null;
+      root.lastLiveBlock =
+        event.blockNumber || null;
+
+      const key =
+        `${event.transactionHash || "NO_TX"}:${event.blockNumber || "NO_BLOCK"}:${event.token}`;
+
+      root.liveTokens[key] = {
+        token:
+          event.token,
+        transactionHash:
+          event.transactionHash || null,
+        blockNumber:
+          event.blockNumber || null,
+        seenAt:
+          Date.now()
+      };
+
+      recordVerifiedLaunchV470(
+        state,
+        {
+          ...event,
+          blockTime: null
+        },
+        event.protocol,
+        {
+          verified: true,
+          allowObservedFallback: true,
+          timeBasis:
+            "LIVE_SCAN_OBSERVED_AT",
+          verification:
+            event.verification
+        }
+      );
+    } else {
+      root.exactBacklogEventsDecoded =
+        safeNumber(
+          root.exactBacklogEventsDecoded
+        ) + 1;
+    }
+  }
+
+  root.lastStatus =
+    events.length > 0
+      ? "V514_EXACT_DOPPLER_LAUNCH_EVENTS_DECODED"
+      : "V514_ACTIVE_NO_MATCHING_EVENTS_THIS_RANGE";
+
+  return {
+    enabled: true,
+    active: true,
+    status:
+      root.lastStatus,
+    eventCount:
+      events.length,
+    events,
+    newTokens,
+    seenTokens
+  };
+}
+
+function dopplerLiveDetectorSnapshotV514(
+  state
+) {
+  const root =
+    ensureDopplerLiveDetectorV514(
+      state
+    );
+
+  bootstrapDopplerLiveDetectorV514(
+    state
+  );
+
+  return {
+    enabled: true,
+    active:
+      Boolean(root.activePattern),
+    monitorStartedAt:
+      safeNumber(
+        root.monitorStartedAt
+      ) || null,
+    activatedAt:
+      safeNumber(
+        root.activatedAt
+      ) || null,
+    activePattern:
+      root.activePattern || null,
+    scansObserved:
+      safeNumber(
+        root.scansObserved
+      ),
+    liveMatchesObserved:
+      safeNumber(
+        root.liveMatchesObserved
+      ),
+    exactLiveTokensAdded:
+      safeNumber(
+        root.exactLiveTokensAdded
+      ),
+    exactBacklogEventsDecoded:
+      safeNumber(
+        root.exactBacklogEventsDecoded
+      ),
+    distinctPersistedLiveTokens:
+      new Set(
+        Object.values(
+          root.liveTokens || {}
+        )
+          .map(row =>
+            normalize(row?.token)
+          )
+          .filter(isAddress)
+      ).size,
+    lastLiveToken:
+      root.lastLiveToken || null,
+    lastLiveTransactionHash:
+      root.lastLiveTransactionHash ||
+      null,
+    lastLiveBlock:
+      safeNumber(
+        root.lastLiveBlock
+      ) || null,
+    lastStatus:
+      root.lastStatus || null,
+    persistedV513ConfirmationRequired:
+      true,
+    zeroAdditionalLiveRequests:
+      true,
+    hardGlobalLimitUnchanged:
+      42
+  };
+}
+
 function ensureDopplerCanonicalPatternProofV513(
   state
 ) {
@@ -86166,6 +86863,19 @@ async function runDopplerCanonicalPatternValidationV513({
     hardRequestLimit: 42,
     status: null
   };
+
+  if (
+    root.confirmedCanonicalPattern &&
+    isAddress(
+      normalize(root.confirmedFactory)
+    )
+  ) {
+    telemetry.status =
+      "V513_CANONICAL_PATTERN_ALREADY_CONFIRMED_NO_FURTHER_RECEIPT_REQUEST";
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  }
 
   if (!canonicalPattern) {
     telemetry.status =
