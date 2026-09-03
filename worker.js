@@ -1,4 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V572
+ * AUTHORITATIVE RUNTIME VERSION: V572
+ *
+ * V572 MANUAL ROLLING-LEDGER PROGRESS TELEMETRY:
+ * - preserves all V571/V570 autonomous and manual behaviour;
+ * - adds read-only /analyse progress for the matching exact-pool watch:
+ *   watch age, coverage blocks, last-known autonomous head gap, successful
+ *   contiguous ranges, exact-USD ledger trades, saturation attempts and
+ *   per-window maturity;
+ * - explains WHY 5m/15m/1h/6h/12h/24h remain UNVERIFIED;
+ * - uses only already-persisted autonomous state; zero extra requests;
+ * - /analyse still never adds to or mutates the autonomous watchlist;
+ * - no backfill and no inferred historical coverage;
+ * - hard autonomous request ceiling remains 42;
+ * - no scoring, Momentum, qualification, USD math, provider or Telegram
+ *   threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V571
  * AUTHORITATIVE RUNTIME VERSION: V571
  *
@@ -3491,7 +3509,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V571";
+const VERSION = "V572";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -88468,6 +88486,219 @@ async function manualNativeV3DirectionalV326(env, budget, candidate) {
     ledgerStatusV331:ledgerAfter?.status||ledgerBefore?.status||null,ledgerWriteStatusV331:ledgerWrite?.status||null,ledgerRecordsV331:Array.isArray(ledgerAfter?.records)?ledgerAfter.records.length:safeNumber(ledgerWrite?.records),ledgerRangesV331:Array.isArray(ledgerAfter?.ranges)?ledgerAfter.ranges.length:safeNumber(ledgerWrite?.ranges),ledgerInsertedV331:safeNumber(ledgerWrite?.inserted),ledgerDeduplicatedV331:safeNumber(ledgerWrite?.deduplicated),ledgerFirstBlockV331:Number.isFinite(Number(ledgerAfter?.firstObservedBlock))?Number(ledgerAfter.firstObservedBlock):null,ledgerLastBlockV331:Number.isFinite(Number(ledgerAfter?.lastObservedBlock))?Number(ledgerAfter.lastObservedBlock):null,rollingV334};
 }
 
+function manualRollingWatchProgressV572(state, candidate) {
+  const token = normalize(candidate?.address);
+  if (!isAddress(token)) return null;
+
+  const root = directionalWatchRootV551(state);
+  const entries = Object.values(root?.entries || {})
+    .filter(row => normalize(row?.tokenAddress) === token);
+
+  if (!entries.length) {
+    return {
+      enabled:true,
+      watchFound:false,
+      tokenAddress:token,
+      reason:"NO_AUTONOMOUS_EXACT_POOL_WATCH_FOR_TOKEN_V572",
+      readOnly:true,
+      externalRequestsAdded:0,
+      autonomousWatchlistMutated:false
+    };
+  }
+
+  const preferredPoolId =
+    normalize(candidate?.telegramRollingExactPoolUsdV564?.poolId) ||
+    normalize(candidate?.onChainPoolIdentityV153?.poolId) ||
+    (
+      Array.isArray(candidate?.onChainVerifiedFlowV212?.poolIds) &&
+      candidate.onChainVerifiedFlowV212.poolIds.length === 1
+        ? normalize(candidate.onChainVerifiedFlowV212.poolIds[0])
+        : null
+    );
+
+  const selected =
+    (
+      preferredPoolId
+        ? entries.find(row => normalize(row?.poolId) === preferredPoolId)
+        : null
+    ) ||
+    entries
+      .slice()
+      .sort((a,b) => {
+        const aEvidence =
+          safeNumber(a?.successfulRanges) * 1000000 +
+          safeNumber(a?.exactUsdTrades);
+        const bEvidence =
+          safeNumber(b?.successfulRanges) * 1000000 +
+          safeNumber(b?.exactUsdTrades);
+        if (aEvidence !== bEvidence) return bEvidence - aEvidence;
+        return safeNumber(b?.lastCollectedBlock) - safeNumber(a?.lastCollectedBlock);
+      })[0];
+
+  if (!selected) return null;
+
+  const now = Date.now();
+  const registeredAt = safeNumber(selected?.registeredAt);
+  const watchAgeMs =
+    registeredAt > 0
+      ? Math.max(0, now - registeredAt)
+      : null;
+
+  const persistedHead =
+    safeNumber(state?.latestVerifiedRollingExactPoolSweepV569?.scanHeadBlock);
+
+  const observedHeadFallback =
+    Object.values(root?.entries || {}).reduce(
+      (max,row) => Math.max(max,safeNumber(row?.lastCollectedBlock)),
+      0
+    );
+
+  const lastKnownAutonomousHead =
+    persistedHead > 0 ? persistedHead : observedHeadFallback;
+
+  const lastCollectedBlock = safeNumber(selected?.lastCollectedBlock);
+  const blocksBehindLastKnownHead =
+    lastKnownAutonomousHead > 0
+      ? Math.max(0,lastKnownAutonomousHead - lastCollectedBlock)
+      : null;
+
+  const caughtUpAndGapFree =
+    blocksBehindLastKnownHead === 0 &&
+    selected?.gapDetected !== true;
+
+  const windowDefs = {
+    m5:5 * 60 * 1000,
+    m15:15 * 60 * 1000,
+    h1:60 * 60 * 1000,
+    h6:6 * 60 * 60 * 1000,
+    h12:12 * 60 * 60 * 1000,
+    h24:24 * 60 * 60 * 1000
+  };
+
+  const maturity = Object.fromEntries(
+    Object.entries(windowDefs).map(([key,windowMs]) => {
+      const ageComplete =
+        Number.isFinite(watchAgeMs) && watchAgeMs >= windowMs;
+      const verifiedEligible =
+        ageComplete && caughtUpAndGapFree;
+
+      let reason = "READY_FOR_VERIFIED_WINDOW_V572";
+      if (!ageComplete) {
+        reason = "WAITING_FOR_FORWARD_WATCH_AGE_V572";
+      } else if (!caughtUpAndGapFree) {
+        reason = "WAITING_FOR_CATCHUP_TO_LAST_KNOWN_HEAD_V572";
+      }
+
+      return [key,{
+        verifiedEligible,
+        watchAgeComplete:ageComplete,
+        caughtUpAndGapFree,
+        remainingAgeMs:
+          Number.isFinite(watchAgeMs)
+            ? Math.max(0,windowMs - watchAgeMs)
+            : null,
+        reason
+      }];
+    })
+  );
+
+  return {
+    enabled:true,
+    watchFound:true,
+    tokenAddress:token,
+    poolId:normalize(selected?.poolId) || null,
+    registrationSource:selected?.registrationSourceV552 || null,
+    registeredAt:registeredAt || null,
+    watchAgeMs,
+    coverageStartBlock:safeNumber(selected?.coverageStartBlock) || null,
+    coverageEndBlock:safeNumber(selected?.coverageEndBlock) || null,
+    lastCollectedBlock:lastCollectedBlock || null,
+    lastKnownAutonomousHead:lastKnownAutonomousHead || null,
+    blocksBehindLastKnownHead,
+    caughtUpAndGapFree,
+    gapDetected:selected?.gapDetected === true,
+    successfulRanges:safeNumber(selected?.successfulRanges),
+    exactUsdTrades:safeNumber(selected?.exactUsdTrades),
+    saturatedAttempts:safeNumber(selected?.saturatedAttempts),
+    adaptiveBlockSpan:safeNumber(selected?.adaptiveBlockSpan),
+    lastStatus:selected?.lastStatus || null,
+    maturity,
+    readOnly:true,
+    externalRequestsAdded:0,
+    autonomousWatchlistMutated:false
+  };
+}
+
+function manualRollingProgressLinesV572(candidate) {
+  const p = candidate?.manualRollingWatchProgressV572;
+  if (!p?.enabled) return [];
+
+  if (p?.watchFound !== true) {
+    return [
+      "",
+      "📍 <b>Rolling Ledger Progress</b>",
+      "🛰 Autonomous exact-pool watch: <b>NOT FOUND</b>",
+      "ℹ️ <i>No existing autonomous exact-pool watch is available for this token.</i>"
+    ];
+  }
+
+  const fmtAge = ms => {
+    if (!Number.isFinite(Number(ms))) return "UNVERIFIED";
+    const total = Math.max(0,Math.floor(Number(ms) / 1000));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  };
+
+  const maturityText = key => {
+    const row = p?.maturity?.[key];
+    if (!row) return "UNVERIFIED";
+
+    if (row.verifiedEligible === true) {
+      return "READY — verification gate eligible";
+    }
+
+    if (row.reason === "WAITING_FOR_FORWARD_WATCH_AGE_V572") {
+      return `BUILDING — ${fmtAge(row.remainingAgeMs)} remaining`;
+    }
+
+    if (row.reason === "WAITING_FOR_CATCHUP_TO_LAST_KNOWN_HEAD_V572") {
+      return `CATCHING UP — ${safeNumber(p?.blocksBehindLastKnownHead)} blocks behind`;
+    }
+
+    return "UNVERIFIED";
+  };
+
+  const poolId = normalize(p?.poolId);
+  const shortPoolId =
+    poolId && poolId.length >= 18
+      ? `${poolId.slice(0,10)}…${poolId.slice(-8)}`
+      : "UNVERIFIED";
+
+  return [
+    "",
+    "📍 <b>Rolling Ledger Progress</b>",
+    `🛰 PoolId: <code>${escapeHtml(shortPoolId)}</code>`,
+    `⏱ Watch age: <b>${escapeHtml(fmtAge(p?.watchAgeMs))}</b>`,
+    `🧱 Coverage: <b>${safeNumber(p?.coverageStartBlock)} → ${safeNumber(p?.coverageEndBlock)}</b>`,
+    `🎯 Last-known autonomous head: <b>${safeNumber(p?.lastKnownAutonomousHead)}</b> | behind: <b>${safeNumber(p?.blocksBehindLastKnownHead)}</b> blocks`,
+    `✅ Successful contiguous ranges: <b>${safeNumber(p?.successfulRanges)}</b>`,
+    `💵 Exact-USD ledger trades: <b>${safeNumber(p?.exactUsdTrades)}</b>`,
+    `⚠️ Saturated attempts: <b>${safeNumber(p?.saturatedAttempts)}</b>`,
+    `📏 Adaptive span: <b>${safeNumber(p?.adaptiveBlockSpan)}</b> blocks`,
+    `• 5m: <b>${escapeHtml(maturityText("m5"))}</b>`,
+    `• 15m: <b>${escapeHtml(maturityText("m15"))}</b>`,
+    `• 1h: <b>${escapeHtml(maturityText("h1"))}</b>`,
+    `• 6h: <b>${escapeHtml(maturityText("h6"))}</b>`,
+    `• 12h: <b>${escapeHtml(maturityText("h12"))}</b>`,
+    `• 24h: <b>${escapeHtml(maturityText("h24"))}</b>`,
+    "ℹ️ <i>Read-only autonomous-watch progress. /analyse does not alter the watchlist.</i>"
+  ];
+}
+
 function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 = null) {
   const standard = telegramMessage(candidate);
   const sourceLines = String(standard || "").split("\n");
@@ -88548,6 +88779,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   const v3 = candidate?.nativeV3DirectionalV326 || null;
   const evidence = [];
   evidence.push("", "🔬 <b>Evidence Summary</b>");
+  evidence.push(...manualRollingProgressLinesV572(candidate));
 
   if (v3) {
     const pairVerified = v3?.verified === true || Boolean(v3?.protocolEvidence);
@@ -89125,6 +89357,12 @@ async function telegramFreshAnalyseV276(
       "NO_PERSISTED_MATCH_V571"
   };
 
+  candidate.manualRollingWatchProgressV572 =
+    manualRollingWatchProgressV572(
+      state,
+      candidate
+    );
+
   const performance =
     state
       ?.callPerformanceV270
@@ -89434,6 +89672,8 @@ async function telegramFreshAnalyseV276(
     },
     manualRollingLedgerBridgeV571:
       candidate?.manualRollingLedgerBridgeV571 || null,
+    manualRollingWatchProgressV572:
+      candidate?.manualRollingWatchProgressV572 || null,
     manualBitqueryUsdV285: {
       attempted: manualBitqueryUsdResultV285?.attempted === true,
       verified: manualBitqueryUsdResultV285?.verified === true,
