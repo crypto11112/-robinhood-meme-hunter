@@ -382,7 +382,7 @@
  * - scoring, Momentum, qualification, Telegram thresholds, verified USD,
  *   dense-pool completion, RWA detector, launch meter and hard limit 42 unchanged.
  *
- * V522 SOURCE IDENTITY + SEEDED LAUNCHPAD CORRELATION (READ-ONLY):
+ * V523 SEEDED NOXA LIVE EVIDENCE + V522 SOURCE INTELLIGENCE:
  * - preserves the proven V517/V520 autonomous 3x3 source-learning loop unchanged;
  * - adds /sourceintel as a zero-provider-request, zero-write evidence view;
  * - correlates self-learned V515 detectors with existing V503 creator identity evidence;
@@ -2726,7 +2726,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V522";
+const VERSION = "V523";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -21276,6 +21276,160 @@ async function getLogsSingleProvider(
   }
 }
 
+
+/* =========================================================
+   V523 SEEDED NOXA LIVE EVIDENCE COLLECTOR
+   =========================================================
+   Purpose:
+   - Treat the official NOXA Robinhood Launch Factory as a SEEDED LEAD only.
+   - Add its factory address to the EXISTING live eth_getLogs emitter array,
+     therefore adding ZERO extra live-discovery requests.
+   - Persist raw event fingerprints (topic0 / tx / block / log index) so the
+     next exact-proof stage can work from bot-observed evidence.
+   - Never infer a token address, launchpad identity, or promote a detector
+     from recurrence alone.
+   - Scoring, qualification, Telegram thresholds and hard request limit 42
+     remain unchanged.
+*/
+const SEEDED_NOXA_FACTORY_V523 =
+  "0xd9ec2db5f3d1b236843925949fe5bd8a3836fccb";
+
+function ensureSeededNoxaLiveEvidenceV523(state) {
+  state.seededNoxaLiveEvidenceV523 ??= {
+    enabled: true,
+    measurementOnlyUntilExactProof: true,
+    factory: SEEDED_NOXA_FACTORY_V523,
+    scansObserved: 0,
+    matchingLogsObserved: 0,
+    distinctTransactionsObserved: 0,
+    firstObservedAt: null,
+    lastObservedAt: null,
+    lastObservedBlock: null,
+    lastObservedTransactionHash: null,
+    topic0Counts: {},
+    recentEvidence: [],
+    exactLaunchPatternConfirmed: false,
+    exactDetectorRegistered: false,
+    launchSourcePromotionAllowed: false,
+    externalRequestsAdded: 0,
+    hardGlobalLimitUnchanged: 42,
+    status: "V523_SEEDED_NOXA_LIVE_EVIDENCE_COLLECTOR_ARMED"
+  };
+  return state.seededNoxaLiveEvidenceV523;
+}
+
+function seededNoxaEmitterAddressesV523(state) {
+  ensureSeededNoxaLiveEvidenceV523(state);
+  return [SEEDED_NOXA_FACTORY_V523];
+}
+
+function observeSeededNoxaLiveLogsV523(state, logs) {
+  const root = ensureSeededNoxaLiveEvidenceV523(state);
+  root.scansObserved = safeNumber(root.scansObserved) + 1;
+
+  const rows = Array.isArray(logs) ? logs : [];
+  let matched = 0;
+
+  for (const row of rows) {
+    const emitter = normalize(row?.address || "");
+    if (emitter !== SEEDED_NOXA_FACTORY_V523) continue;
+
+    matched++;
+    const topics = Array.isArray(row?.topics) ? row.topics : [];
+    const topic0 = String(topics[0] || "").toLowerCase();
+    const tx = String(row?.transactionHash || row?.transaction_hash || "").toLowerCase();
+    const blockHex = row?.blockNumber ?? row?.block_number ?? null;
+    const logIndexHex = row?.logIndex ?? row?.log_index ?? null;
+    const blockNumber = typeof blockHex === "string" && /^0x[0-9a-f]+$/i.test(blockHex)
+      ? parseInt(blockHex, 16)
+      : safeNumber(blockHex) || null;
+    const logIndex = typeof logIndexHex === "string" && /^0x[0-9a-f]+$/i.test(logIndexHex)
+      ? parseInt(logIndexHex, 16)
+      : safeNumber(logIndexHex) || null;
+
+    if (/^0x[a-f0-9]{64}$/.test(topic0)) {
+      root.topic0Counts[topic0] = safeNumber(root.topic0Counts[topic0]) + 1;
+    }
+
+    const evidence = {
+      observedAt: Date.now(),
+      factory: SEEDED_NOXA_FACTORY_V523,
+      topic0: /^0x[a-f0-9]{64}$/.test(topic0) ? topic0 : null,
+      transactionHash: /^0x[a-f0-9]{64}$/.test(tx) ? tx : null,
+      blockNumber,
+      logIndex,
+      topicCount: topics.length,
+      dataBytes: typeof row?.data === "string" && row.data.startsWith("0x")
+        ? Math.max(0, (row.data.length - 2) / 2)
+        : null,
+      evidenceMeaning: "SEEDED_FACTORY_EVENT_FINGERPRINT_ONLY_NOT_TOKEN_LAUNCH_PROOF_V523"
+    };
+
+    root.recentEvidence.push(evidence);
+    if (root.recentEvidence.length > 250) {
+      root.recentEvidence = root.recentEvidence.slice(-250);
+    }
+
+    if (!root.firstObservedAt) root.firstObservedAt = evidence.observedAt;
+    root.lastObservedAt = evidence.observedAt;
+    root.lastObservedBlock = blockNumber;
+    root.lastObservedTransactionHash = evidence.transactionHash;
+  }
+
+  root.matchingLogsObserved = safeNumber(root.matchingLogsObserved) + matched;
+  const txs = new Set(
+    (root.recentEvidence || [])
+      .map(row => String(row?.transactionHash || "").toLowerCase())
+      .filter(tx => /^0x[a-f0-9]{64}$/.test(tx))
+  );
+  root.distinctTransactionsObserved = txs.size;
+
+  if (root.matchingLogsObserved > 0) {
+    root.status = "V523_SEEDED_NOXA_LIVE_FACTORY_EVENTS_OBSERVED_AWAIT_EXACT_TOKEN_PROOF";
+  } else {
+    root.status = "V523_SEEDED_NOXA_LIVE_EVIDENCE_COLLECTOR_ARMED_NO_EVENT_OBSERVED_YET";
+  }
+
+  return {
+    enabled: true,
+    factory: SEEDED_NOXA_FACTORY_V523,
+    matchingLogsThisChunk: matched,
+    matchingLogsObserved: root.matchingLogsObserved,
+    distinctTransactionsObserved: root.distinctTransactionsObserved,
+    exactLaunchPatternConfirmed: false,
+    launchSourcePromoted: false,
+    externalRequestsAdded: 0,
+    status: root.status
+  };
+}
+
+function seededNoxaLiveEvidenceSnapshotV523(state) {
+  const root = ensureSeededNoxaLiveEvidenceV523(state);
+  return {
+    enabled: true,
+    measurementOnlyUntilExactProof: true,
+    factory: SEEDED_NOXA_FACTORY_V523,
+    scansObserved: safeNumber(root.scansObserved),
+    matchingLogsObserved: safeNumber(root.matchingLogsObserved),
+    distinctTransactionsObserved: safeNumber(root.distinctTransactionsObserved),
+    firstObservedAt: root.firstObservedAt || null,
+    lastObservedAt: root.lastObservedAt || null,
+    lastObservedBlock: root.lastObservedBlock || null,
+    lastObservedTransactionHash: root.lastObservedTransactionHash || null,
+    strongestTopics: Object.entries(root.topic0Counts || {})
+      .map(([topic0, count]) => ({ topic0, count: safeNumber(count) }))
+      .sort((a,b) => b.count - a.count || a.topic0.localeCompare(b.topic0))
+      .slice(0, 10),
+    recentEvidence: Array.isArray(root.recentEvidence) ? root.recentEvidence.slice(-10) : [],
+    exactLaunchPatternConfirmed: root.exactLaunchPatternConfirmed === true,
+    exactDetectorRegistered: root.exactDetectorRegistered === true,
+    launchSourcePromotionAllowed: false,
+    externalRequestsAdded: 0,
+    hardGlobalLimitUnchanged: 42,
+    status: root.status || null
+  };
+}
+
 /* =========================================================
    LIVE SCAN
    ========================================================= */
@@ -21341,7 +21495,8 @@ async function scanLiveRange(
     Array.from(
       new Set([
         ...dopplerLiveEmittersV514,
-        ...genericVerifiedEmittersV515
+        ...genericVerifiedEmittersV515,
+        ...seededNoxaEmitterAddressesV523(state)
       ])
     );
 
@@ -21701,6 +21856,11 @@ async function scanLiveRange(
         response.result
       )
     ) {
+      observeSeededNoxaLiveLogsV523(
+        state,
+        response.result
+      );
+
       output.logs.push(
         ...response.result
       );
@@ -112717,9 +112877,14 @@ function sourceIdentityIntelSnapshotV522(state) {
       (Array.isArray(cluster?.tokens) ? cluster.tokens.length : 0)
     );
 
+    const noxaV523 = seed.key === "noxa_fun"
+      ? seededNoxaLiveEvidenceSnapshotV523(state)
+      : null;
+
     return {
       ...seed,
       address,
+      seededLiveEvidenceV523: noxaV523,
       observedInVerifiedCreatorOrigins: Boolean(cluster),
       distinctVerifiedOriginTokens: distinctTokens,
       blockscoutVerifiedContractProfile: profile?.blockscoutVerifiedContract === true,
@@ -112729,11 +112894,15 @@ function sourceIdentityIntelSnapshotV522(state) {
       alreadyStaticSupported,
       status: detector
         ? "BOT_EXACT_DETECTOR_ALREADY_ACTIVE"
-        : cluster
-          ? "OBSERVED_IN_BOT_VERIFIED_ORIGIN_EVIDENCE_AWAIT_EXACT_SOURCE_PROOF"
-          : alreadyStaticSupported
-            ? "ALREADY_SUPPORTED_STATIC_SOURCE_NO_24H_CORRELATION_REQUIRED_V522"
-            : "SEEDED_LEAD_NOT_YET_MATCHED_IN_BOT_VERIFIED_ORIGIN_EVIDENCE",
+        : (seed.key === "noxa_fun" && safeNumber(noxaV523?.matchingLogsObserved) > 0)
+          ? "V523_SEEDED_FACTORY_LIVE_EVENTS_OBSERVED_AWAIT_EXACT_TOKEN_PROOF"
+          : cluster
+            ? "OBSERVED_IN_BOT_VERIFIED_ORIGIN_EVIDENCE_AWAIT_EXACT_SOURCE_PROOF"
+            : alreadyStaticSupported
+              ? "ALREADY_SUPPORTED_STATIC_SOURCE_NO_24H_CORRELATION_REQUIRED_V522"
+              : (seed.key === "noxa_fun")
+                ? "V523_SEEDED_FACTORY_LIVE_COLLECTOR_ARMED_NO_EVENT_OBSERVED_YET"
+                : "SEEDED_LEAD_NOT_YET_MATCHED_IN_BOT_VERIFIED_ORIGIN_EVIDENCE",
       sourcePromotionAllowedByV522: false
     };
   });
@@ -112777,13 +112946,25 @@ function sourceIdentityIntelTelegramMessageV522(state) {
       })
     : ["• No self-learned exact detector is currently retained"];
 
-  const seedLines = intel.seededLeads.flatMap(row => [
-    `• <b>${escapeHtml(row.name)}</b> — ${escapeHtml(row.role)}`,
-    `  Lead: <code>${escapeHtml(row.address)}</code>`,
-    `  Bot correlation: <b>${escapeHtml(row.status)}</b>`,
-    `  Verified-origin tokens seen: <b>${Number(safeNumber(row.distinctVerifiedOriginTokens)).toLocaleString("en-GB")}</b>`,
-    `  Exact detector active: <b>${row.exactRegistryDetectorActive ? "YES" : "NO"}</b>`
-  ]);
+  const seedLines = intel.seededLeads.flatMap(row => {
+    const lines = [
+      `• <b>${escapeHtml(row.name)}</b> — ${escapeHtml(row.role)}`,
+      `  Lead: <code>${escapeHtml(row.address)}</code>`,
+      `  Bot correlation: <b>${escapeHtml(row.status)}</b>`,
+      `  Verified-origin tokens seen: <b>${Number(safeNumber(row.distinctVerifiedOriginTokens)).toLocaleString("en-GB")}</b>`,
+      `  Exact detector active: <b>${row.exactRegistryDetectorActive ? "YES" : "NO"}</b>`
+    ];
+
+    if (row.key === "noxa_fun" && row.seededLiveEvidenceV523) {
+      lines.push(
+        `  V523 live factory logs observed: <b>${Number(safeNumber(row.seededLiveEvidenceV523.matchingLogsObserved)).toLocaleString("en-GB")}</b>`,
+        `  Distinct factory txs observed: <b>${Number(safeNumber(row.seededLiveEvidenceV523.distinctTransactionsObserved)).toLocaleString("en-GB")}</b>`,
+        `  Exact token-launch pattern: <b>${row.seededLiveEvidenceV523.exactLaunchPatternConfirmed ? "CONFIRMED" : "DATA UNVERIFIED"}</b>`
+      );
+    }
+
+    return lines;
+  });
 
   return [
     `🧬 <b>Launch Source Intelligence — ${escapeHtml(VERSION)}</b>`,
@@ -112794,7 +112975,7 @@ function sourceIdentityIntelTelegramMessageV522(state) {
     "<b>Seeded launchpad leads — correlation only</b>",
     ...seedLines,
     "",
-    "⚠️ Website/research labels are leads only. V522 does not promote a source name from them.",
+    "⚠️ Website/research labels are leads only. V523 does not promote a source name from them.",
     "✅ Exact launch-source verification still requires the bot's existing on-chain proof standard.",
     "<i>/sourceintel is read-only: 0 provider requests and 0 persistent state writes.</i>"
   ].join("\n");
