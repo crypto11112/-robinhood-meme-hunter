@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V559
+ * AUTHORITATIVE RUNTIME VERSION: V559
+ *
+ * V559 PROTECTED MULTI-POOL DIRECTIONAL RESERVE:
+ * - preserves V558 distinct-pool scheduling and V557 rolling USD verification unchanged;
+ * - fixes the V558 starvation case where 4 protected completion requests overrode the
+ *   single V553 directional reservation and the scan reached 42/42 before collection;
+ * - reserve size is now dynamic: up to 3 requests, matching the number of distinct
+ *   watched exact PoolIds currently behind the scan head;
+ * - protected evidence-completion work may borrow at most reserveSize-1 of those slots;
+ * - therefore at least ONE directional request is guaranteed to survive on a heavy scan;
+ * - on lighter scans, all 2-3 reserved requests remain available to the V558 scheduler;
+ * - lower-priority work continues to be blocked before it can consume reserved capacity;
+ * - no request ceiling increase: hard global limit remains 42;
+ * - no scoring, Momentum, qualification, rolling-USD math, provider, or Telegram changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V558
  * AUTHORITATIVE RUNTIME VERSION: V558
  *
@@ -3230,7 +3247,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V558";
+const VERSION = "V559";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9655,12 +9672,84 @@ function consumeBudget(
     ]);
 
     if (protectedTypesV553.has(type)) {
-      directionalWatchReserveV553.overriddenByProtectedWork =
-        safeNumber(directionalWatchReserveV553.overriddenByProtectedWork) + 1;
+      const maxProtectedOverridesV559 =
+        Math.max(
+          0,
+          safeNumber(directionalWatchReserveV553.maxProtectedOverridesV559)
+        );
+      const protectedOverridesUsedV559 =
+        Math.max(
+          0,
+          safeNumber(directionalWatchReserveV553.protectedOverridesUsedV559)
+        );
+
+      if (protectedOverridesUsedV559 < maxProtectedOverridesV559) {
+        directionalWatchReserveV553.protectedOverridesUsedV559 =
+          protectedOverridesUsedV559 + 1;
+        directionalWatchReserveV553.overriddenByProtectedWork =
+          safeNumber(directionalWatchReserveV553.overriddenByProtectedWork) + 1;
+      } else {
+        const reservedRequestsV559 = Math.max(
+          1,
+          safeNumber(
+            directionalWatchReserveV553.minimumGuaranteedRequestsV559
+          )
+        );
+        const notificationReserveRemainingV559 =
+          budget.notification?.globalReserveActiveV174 === true
+            ? Math.max(
+                0,
+                safeNumber(budget.notification?.limit) -
+                safeNumber(budget.notification?.used)
+              )
+            : 0;
+        const preTelegramGlobalLimitV559 = Math.max(
+          0,
+          safeNumber(budget.totalLimit) - notificationReserveRemainingV559
+        );
+        const analysisCapacityProtectedV559 =
+          safeNumber(budget.analysis?.used) + amount <=
+          Math.max(
+            0,
+            effectiveAnalysisLimitV416(budget) - reservedRequestsV559
+          );
+        const globalCapacityProtectedV559 =
+          safeNumber(budget.totalUsed) + amount <=
+          Math.max(
+            0,
+            preTelegramGlobalLimitV559 - reservedRequestsV559
+          );
+
+        if (
+          !analysisCapacityProtectedV559 ||
+          !globalCapacityProtectedV559
+        ) {
+          directionalWatchReserveV553.lowerPriorityRequestsBlocked =
+            safeNumber(
+              directionalWatchReserveV553.lowerPriorityRequestsBlocked
+            ) + 1;
+          directionalWatchReserveV553.protectedWorkBlockedV559 =
+            safeNumber(
+              directionalWatchReserveV553.protectedWorkBlockedV559
+            ) + 1;
+
+          budget.skipped.push({
+            phase,
+            type,
+            amount,
+            reason:"V559_MINIMUM_DIRECTIONAL_SLOT_GUARANTEED",
+            reservedFor:directionalWatchReserveV553.targetAddress || null,
+            protectedOverridesUsedV559,
+            maxProtectedOverridesV559
+          });
+          return false;
+        }
+      }
     } else {
       const reservedRequestsV553 = Math.max(
         0,
-        safeNumber(directionalWatchReserveV553.reservedRequests)
+        safeNumber(directionalWatchReserveV553.reservedRequests) -
+        safeNumber(directionalWatchReserveV553.protectedOverridesUsedV559)
       );
       const notificationReserveRemainingV553 =
         budget.notification?.globalReserveActiveV174 === true
@@ -56957,10 +57046,65 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
   const reserve = budget?.analysis?.directionalWatchReserveV553;
   if (!reserve?.enabled) return reserve || null;
 
-  const candidate = selectDirectionalWatchCandidateV551(state, latestNumber);
+  const root = pruneDirectionalWatchV551(state);
+  const head = Number(latestNumber);
+
+  const behindRowsV559 =
+    Number.isFinite(head) && head > 0
+      ? Object.values(root?.entries || {})
+          .filter(row => {
+            const poolId = normalize(row?.poolId);
+            const last = Number(row?.lastCollectedBlock);
+            return (
+              isAddress(normalize(row?.tokenAddress)) &&
+              /^0x[a-f0-9]{64}$/.test(String(poolId || "")) &&
+              Number.isFinite(last) &&
+              last < head
+            );
+          })
+          .sort((a,b) => {
+            const activeDelta =
+              Number(b?.activePoolEvidenceV555 === true) -
+              Number(a?.activePoolEvidenceV555 === true);
+            if (activeDelta !== 0) return activeDelta;
+
+            const swapDelta =
+              safeNumber(b?.poolSpecificSwapsV555) -
+              safeNumber(a?.poolSpecificSwapsV555);
+            if (swapDelta !== 0) return swapDelta;
+
+            return safeNumber(a?.lastCollectedBlock) -
+              safeNumber(b?.lastCollectedBlock);
+          })
+      : [];
+
+  const candidate = behindRowsV559[0] || null;
+  const distinctBehindPoolIdsV559 =
+    [...new Set(
+      behindRowsV559
+        .map(row => normalize(row?.poolId))
+        .filter(Boolean)
+    )];
+
+  const desiredReserveV559 =
+    Math.min(
+      DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554,
+      distinctBehindPoolIdsV559.length
+    );
+
   reserve.configuredAt = Date.now();
-  reserve.active = Boolean(candidate);
-  reserve.reservedRequests = candidate ? 1 : 0;
+  reserve.active = desiredReserveV559 > 0;
+  reserve.reservedRequests = desiredReserveV559;
+  reserve.minimumGuaranteedRequestsV559 =
+    desiredReserveV559 > 0 ? 1 : 0;
+  reserve.maxProtectedOverridesV559 =
+    Math.max(0, desiredReserveV559 - reserve.minimumGuaranteedRequestsV559);
+  reserve.protectedOverridesUsedV559 = 0;
+  reserve.behindPoolCountV559 = distinctBehindPoolIdsV559.length;
+  reserve.behindPoolIdsV559 = distinctBehindPoolIdsV559.slice(
+    0,
+    DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554
+  );
   reserve.targetAddress = candidate ? normalize(candidate?.tokenAddress) : null;
   reserve.poolId = candidate ? normalize(candidate?.poolId) : null;
   reserve.releaseReason = candidate
@@ -74367,6 +74511,25 @@ for (
   const directionalMultiPoolSchedulerV558 = {
     enabled:true,
     measurementOnly:true,
+    reserveVersion:"V559_DYNAMIC_THREE_SLOT_WITH_ONE_MINIMUM_GUARANTEE",
+    reservedRequestsV559:safeNumber(
+      directionalWatchReserveV553?.reservedRequests
+    ),
+    minimumGuaranteedRequestsV559:safeNumber(
+      directionalWatchReserveV553?.minimumGuaranteedRequestsV559
+    ),
+    maxProtectedOverridesV559:safeNumber(
+      directionalWatchReserveV553?.maxProtectedOverridesV559
+    ),
+    protectedOverridesUsedV559:safeNumber(
+      directionalWatchReserveV553?.protectedOverridesUsedV559
+    ),
+    protectedWorkBlockedV559:safeNumber(
+      directionalWatchReserveV553?.protectedWorkBlockedV559
+    ),
+    behindPoolCountV559:safeNumber(
+      directionalWatchReserveV553?.behindPoolCountV559
+    ),
     maxDistinctPoolsPerScan:DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554,
     distinctPoolsAdvanced:directionalPoolsAdvancedThisScanV558.size,
     poolIds:[...directionalPoolsAdvancedThisScanV558],
