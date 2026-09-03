@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V546
+ * AUTHORITATIVE RUNTIME VERSION: V546
+ *
+ * V546 HIGH-EVIDENCE AUTONOMOUS SLOT RESERVATION:
+ * - V545 confirmed exact V489 CREATE2 recurrence, but a later scan let fresh V480 + V485
+ *   consume the remaining global capacity and starve an already-pending higher-evidence V489 job;
+ * - before current-live V477 work, V546 checks whether V517, V519 or V489 has persisted
+ *   high-evidence autonomous work waiting;
+ * - when such work exists, one existing global spare slot is reserved against LOWER-EVIDENCE
+ *   fresh V485 raw-trace consumption only;
+ * - V480 origin discovery is NOT blocked: the bot may still discover one fresh token origin;
+ * - the later V545 autonomous lane may then spend the preserved slot on:
+ *     V517 exact receipt -> V519/V503 identity -> V489 internal creation proof;
+ * - if no high-evidence persisted work exists, V485 behavior is unchanged;
+ * - reservation adds ZERO request capacity and the authoritative hard ceiling remains 42;
+ * - no scoring, Momentum, qualification, Telegram threshold, USD, holder, ATH or detector
+ *   proof-standard changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V545
  * AUTHORITATIVE RUNTIME VERSION: V545
  *
@@ -2989,7 +3008,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V545";
+const VERSION = "V546";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -22562,6 +22581,41 @@ function markReleasedV544OriginProcessed(state, selected, attribution){
   return true;
 }
 
+
+function configureAutonomousHighEvidenceReserveV546(state,budget){
+  const receiptCandidate=selectGenericUnknownReceiptCandidateV517(state);
+  const identityCandidate=receiptCandidate?null:selectGenericUnknownCreatorIdentityCandidateV519(state);
+  const internalCandidate=(!receiptCandidate&&!identityCandidate)
+    ?selectOldestBlockscoutInternalCandidateV489(state)
+    :null;
+
+  const route=receiptCandidate
+    ?"V517_GENERIC_EXACT_RECEIPT"
+    :identityCandidate
+      ?"V519_V503_CREATOR_IDENTITY"
+      :internalCandidate
+        ?"V489_BLOCKSCOUT_INTERNAL_CREATION_ATTRIBUTION"
+        :null;
+
+  budget.analysis=budget.analysis&&typeof budget.analysis==="object"?budget.analysis:{};
+  budget.analysis.autonomousHighEvidenceReserveV546={
+    enabled:true,
+    active:Boolean(route),
+    route,
+    reservedRequests:route?1:0,
+    configuredAt:Date.now(),
+    lowerPriorityV485Blocked:0,
+    selectedToken:receiptCandidate?.token||normalize(internalCandidate?.row?.token)||null,
+    selectedCreator:receiptCandidate?.creator||identityCandidate?.creator||normalize(internalCandidate?.row?.verifiedCreator)||null,
+    selectedTransactionHash:receiptCandidate?.transactionHash||String(internalCandidate?.row?.creationTransactionHash||"").trim().toLowerCase()||null,
+    hardGlobalLimitUnchanged:42,
+    reason:route
+      ?`V546_RESERVE_ONE_EXISTING_GLOBAL_SLOT_FOR_${route}`
+      :"V546_NO_HIGH_EVIDENCE_AUTONOMOUS_JOB_WAITING"
+  };
+  return budget.analysis.autonomousHighEvidenceReserveV546;
+}
+
 async function runReleasedSeededAutonomousProofV544({
   env,state,budget,seededHistoricalProofThisScanV529
 }){
@@ -22586,15 +22640,15 @@ async function runReleasedSeededAutonomousProofV544({
 
   telemetry.seededProofComplete=seededProofCompleteForAutonomyV544(state);
   if(!telemetry.seededProofComplete){
-    telemetry.status="V545_SEEDED_PROOF_NOT_COMPLETE_EXTRA_AUTONOMOUS_LANE_DISABLED";
+    telemetry.status="V546_SEEDED_PROOF_NOT_COMPLETE_EXTRA_AUTONOMOUS_LANE_DISABLED";
     return telemetry;
   }
   if(seededHistoricalProofThisScanV529?.requestConsumed===true){
-    telemetry.status="V545_SEEDED_HISTORY_USED_RELEASED_SLOT_THIS_SCAN";
+    telemetry.status="V546_SEEDED_HISTORY_USED_RELEASED_SLOT_THIS_SCAN";
     return telemetry;
   }
   if(safeNumber(budget?.totalUsed)>=safeNumber(budget?.totalLimit)){
-    telemetry.status="V545_GLOBAL_REQUEST_BUDGET_ALREADY_EXHAUSTED";
+    telemetry.status="V546_GLOBAL_REQUEST_BUDGET_ALREADY_EXHAUSTED";
     return telemetry;
   }
 
@@ -22613,8 +22667,8 @@ async function runReleasedSeededAutonomousProofV544({
     telemetry.requestConsumed=result?.requestConsumed===true;
     telemetry.afterTotalUsed=safeNumber(budget?.totalUsed);
     telemetry.status=result?.registrationResult?.registered===true
-      ?"V545_RELEASED_SLOT_V517_SOURCE_AUTO_REGISTERED"
-      :`V545_RELEASED_SLOT_V517:${result?.status||"UNKNOWN"}`;
+      ?"V546_RELEASED_SLOT_V517_SOURCE_AUTO_REGISTERED"
+      :`V546_RELEASED_SLOT_V517:${result?.status||"UNKNOWN"}`;
     return telemetry;
   }
 
@@ -22630,7 +22684,7 @@ async function runReleasedSeededAutonomousProofV544({
     telemetry.attempted=result?.attempted===true;
     telemetry.requestConsumed=result?.requestConsumed===true;
     telemetry.afterTotalUsed=safeNumber(budget?.totalUsed);
-    telemetry.status=`V545_RELEASED_SLOT_V519_IDENTITY:${result?.status||"UNKNOWN"}`;
+    telemetry.status=`V546_RELEASED_SLOT_V519_IDENTITY:${result?.status||"UNKNOWN"}`;
     return telemetry;
   }
 
@@ -22651,15 +22705,15 @@ async function runReleasedSeededAutonomousProofV544({
     telemetry.requestConsumed=result?.requestConsumed===true;
     telemetry.afterTotalUsed=safeNumber(budget?.totalUsed);
     telemetry.status=result?.attributionResult?.exactTokenCreateVerified===true
-      ?"V545_RELEASED_SLOT_V489_EXACT_INTERNAL_CREATION_VERIFIED"
-      :`V545_RELEASED_SLOT_V489:${result?.status||"UNKNOWN"}`;
+      ?"V546_RELEASED_SLOT_V489_EXACT_INTERNAL_CREATION_VERIFIED"
+      :`V546_RELEASED_SLOT_V489:${result?.status||"UNKNOWN"}`;
     return telemetry;
   }
 
   // 4) Feed the earlier mechanism layer: one unresolved verified-origin raw trace.
   const selected=selectOldestUnprocessedVerifiedOriginV486(state);
   if(!selected){
-    telemetry.status="V545_NO_ELIGIBLE_UNKNOWN_SOURCE_WORK_RELEASED_SLOT_UNUSED";
+    telemetry.status="V546_NO_ELIGIBLE_UNKNOWN_SOURCE_WORK_RELEASED_SLOT_UNUSED";
     return telemetry;
   }
 
@@ -22689,8 +22743,8 @@ async function runReleasedSeededAutonomousProofV544({
 
   telemetry.afterTotalUsed=safeNumber(budget?.totalUsed);
   telemetry.status=result?.exactCreationTrace?.exactTokenCreateVerified===true
-    ?"V545_RELEASED_SLOT_V485_EXACT_CREATION_TRACE_VERIFIED"
-    :`V545_RELEASED_SLOT_V485:${result?.status||"UNKNOWN"}`;
+    ?"V546_RELEASED_SLOT_V485_EXACT_CREATION_TRACE_VERIFIED"
+    :`V546_RELEASED_SLOT_V485:${result?.status||"UNKNOWN"}`;
   return telemetry;
 }
 
@@ -72848,6 +72902,12 @@ for (
    * complete, uses one existing analysis-budget request maximum, and therefore
    * cannot starve fresh candidate analysis or Telegram delivery.
    */
+  const autonomousHighEvidenceReserveV546 =
+    configureAutonomousHighEvidenceReserveV546(
+      state,
+      budget
+    );
+
   const tokenOriginTraceThisScanV477 =
     await traceUnknownLiveOriginsV477({
       env,
@@ -95572,6 +95632,32 @@ function consumeReleasedGlobalSpareV478(
     return {
       ok: false,
       reason: "V539_SEEDED_HISTORICAL_RECOVERY_GLOBAL_SPARE_RESERVED"
+    };
+  }
+
+
+  const autonomousReserveV546 =
+    budget?.analysis?.autonomousHighEvidenceReserveV546;
+
+  if (
+    autonomousReserveV546?.active === true &&
+    safeNumber(autonomousReserveV546?.reservedRequests) > 0 &&
+    type === "BLOCKSCOUT_PRO_EXACT_CREATION_RAW_TRACE_V485"
+  ) {
+    autonomousReserveV546.lowerPriorityV485Blocked =
+      safeNumber(autonomousReserveV546.lowerPriorityV485Blocked) + 1;
+
+    budget.skipped = Array.isArray(budget?.skipped) ? budget.skipped : [];
+    budget.skipped.push({
+      phase: "post-telegram-global-spare",
+      type,
+      amount: n,
+      reason: "V546_HIGH_EVIDENCE_AUTONOMOUS_SLOT_RESERVED"
+    });
+
+    return {
+      ok: false,
+      reason: "V546_HIGH_EVIDENCE_AUTONOMOUS_SLOT_RESERVED"
     };
   }
 
