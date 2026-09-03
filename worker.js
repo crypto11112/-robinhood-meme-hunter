@@ -1,4 +1,25 @@
 /**
+ * Robinhood Chain Meme Hunter — V569
+ * AUTHORITATIVE RUNTIME VERSION: V569
+ *
+ * V569 PERSISTED VERIFIED SWEEP → TELEGRAM:
+ * - preserves V568/V567/V566/V565/V564/V563 behaviour;
+ * - fixes the confirmed timing mismatch where V557 verified windows become
+ *   available only AFTER Telegram has already been evaluated/sent;
+ * - after each completed post-Telegram directional sweep, persists a compact,
+ *   read-only snapshot of exact-pool windows that were VERIFIED at that exact
+ *   scan head;
+ * - next Telegram evaluation may use the latest persisted verified sweep for
+ *   the same token+PoolId, clearly labelled with its as-of time and block;
+ * - persisted proof is NEVER reclassified as current-head coverage;
+ * - current pre-Telegram V557 evidence remains preferred when it already has
+ *   verified windows; persisted completed-sweep proof is a truthful fallback;
+ * - snapshot retains only pools with >=1 verified window and remains bounded
+ *   to the existing 24 watched pools;
+ * - no external requests added and hard global ceiling remains 42;
+ * - no scoring, Momentum, qualification, USD math, provider or Telegram threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V568
  * AUTHORITATIVE RUNTIME VERSION: V568
  *
@@ -3421,7 +3442,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V568";
+const VERSION = "V569";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -60893,6 +60914,132 @@ function telegramHolderPresentationV269(
 
 
 
+function persistVerifiedRollingSweepV569(state, snapshotV557) {
+  if (!state || !snapshotV557) return null;
+
+  const windowKeys = ["m5","m15","h1","h6","h12","h24"];
+  const entries = (Array.isArray(snapshotV557?.entries) ? snapshotV557.entries : [])
+    .filter(row =>
+      windowKeys.some(key => row?.windows?.[key]?.verified === true)
+    )
+    .slice(0, DIRECTIONAL_WATCH_MAX_ENTRIES_V551)
+    .map(row => ({
+      watchKeyV563:
+        directionalWatchKeyV563(row?.tokenAddress,row?.poolId),
+      tokenAddress: normalize(row?.tokenAddress),
+      symbol: row?.symbol || null,
+      poolId: normalize(row?.poolId),
+      registrationAt: safeNumber(row?.registeredAt) || null,
+      coverageEndBlock: safeNumber(row?.coverageEndBlock) || null,
+      scanHeadBlock: safeNumber(row?.scanHeadBlock) || safeNumber(snapshotV557?.scanHeadBlock) || null,
+      caughtUpToScanHead: row?.caughtUpToScanHead === true,
+      gapFree: row?.gapFree === true,
+      exactUsdLedgerRecords: safeNumber(row?.exactUsdLedgerRecords),
+      windows: Object.fromEntries(
+        windowKeys.map(key => {
+          const w = row?.windows?.[key] || {};
+          return [key,{
+            verified:w?.verified === true,
+            status:w?.status || null,
+            windowMs:safeNumber(w?.windowMs),
+            cutoffAt:safeNumber(w?.cutoffAt) || null,
+            asOfAt:safeNumber(w?.asOfAt) || safeNumber(snapshotV557?.requestAt) || null,
+            registrationAt:safeNumber(w?.registrationAt) || null,
+            coverageEndBlock:safeNumber(w?.coverageEndBlock) || null,
+            scanHeadBlock:safeNumber(w?.scanHeadBlock) || null,
+            caughtUpToScanHead:w?.caughtUpToScanHead === true,
+            gapFree:w?.gapFree === true,
+            observedExactTrades:safeNumber(w?.observedExactTrades),
+            buyTrades:
+              w?.verified === true ? safeNumber(w?.buyTrades) : null,
+            sellTrades:
+              w?.verified === true ? safeNumber(w?.sellTrades) : null,
+            buyUsd:
+              w?.verified === true ? safeNumber(w?.buyUsd) : null,
+            sellUsd:
+              w?.verified === true ? safeNumber(w?.sellUsd) : null,
+            netUsd:
+              w?.verified === true ? safeNumber(w?.netUsd) : null,
+            buyPressurePct:
+              w?.verified === true ? safeNumber(w?.buyPressurePct) : null
+          }];
+        })
+      )
+    }));
+
+  if (!entries.length) {
+    return state.latestVerifiedRollingExactPoolSweepV569 || null;
+  }
+
+  state.latestVerifiedRollingExactPoolSweepV569 = {
+    schemaVersion:"V569_1",
+    proofType:"COMPLETED_EXACT_POOL_SWEEP_SNAPSHOT",
+    exactPoolOnly:true,
+    tokenWideMarketCoverageClaimed:false,
+    capturedAt:Date.now(),
+    requestAt:safeNumber(snapshotV557?.requestAt) || Date.now(),
+    scanHeadBlock:safeNumber(snapshotV557?.scanHeadBlock) || null,
+    entries
+  };
+
+  return state.latestVerifiedRollingExactPoolSweepV569;
+}
+
+function telegramSnapshotWithPersistedSweepV569(state, currentSnapshotV557) {
+  const persisted =
+    state?.latestVerifiedRollingExactPoolSweepV569 &&
+    typeof state.latestVerifiedRollingExactPoolSweepV569 === "object"
+      ? state.latestVerifiedRollingExactPoolSweepV569
+      : null;
+
+  const currentEntries =
+    Array.isArray(currentSnapshotV557?.entries)
+      ? currentSnapshotV557.entries.map(row => ({
+          ...row,
+          telegramEvidenceSourceV569:"CURRENT_PRE_TELEGRAM_V557",
+          verifiedSweepAsOfAtV569:
+            safeNumber(currentSnapshotV557?.requestAt) || Date.now(),
+          verifiedSweepHeadBlockV569:
+            safeNumber(currentSnapshotV557?.scanHeadBlock) || null
+        }))
+      : [];
+
+  const persistedEntries =
+    Array.isArray(persisted?.entries)
+      ? persisted.entries.map(row => ({
+          ...row,
+          telegramEvidenceSourceV569:"PERSISTED_COMPLETED_SWEEP_V569",
+          verifiedSweepAsOfAtV569:
+            safeNumber(persisted?.requestAt || persisted?.capturedAt) || null,
+          verifiedSweepHeadBlockV569:
+            safeNumber(persisted?.scanHeadBlock) || null,
+          persistedSweepAgeMsV569:
+            Math.max(
+              0,
+              Date.now() -
+              safeNumber(persisted?.requestAt || persisted?.capturedAt)
+            )
+        }))
+      : [];
+
+  /*
+   * Current evidence and persisted proof may contain the same token+PoolId.
+   * Keep both; V564 selection sorts by number of VERIFIED windows first, so a
+   * prior completed proof remains available without being mislabelled current.
+   */
+  return {
+    enabled:true,
+    requestAt:safeNumber(currentSnapshotV557?.requestAt) || Date.now(),
+    scanHeadBlock:safeNumber(currentSnapshotV557?.scanHeadBlock) || null,
+    entries:[...currentEntries,...persistedEntries],
+    persistedSweepAvailableV569:Boolean(persistedEntries.length),
+    persistedSweepAsOfAtV569:
+      safeNumber(persisted?.requestAt || persisted?.capturedAt) || null,
+    persistedSweepHeadBlockV569:
+      safeNumber(persisted?.scanHeadBlock) || null
+  };
+}
+
 function selectTelegramRollingExactPoolV564(candidate, snapshotV557) {
   const token = normalize(candidate?.address);
   const exactCandidatePoolId = normalize(
@@ -60984,9 +61131,23 @@ function selectTelegramRollingExactPoolV564(candidate, snapshotV557) {
       verifiedWindows: selectedScore.verifiedCount,
       caughtUpToScanHead: selectedScore.caughtUp === 1,
       exactUsdLedgerRecords: selectedScore.ledgerRecords,
+      evidenceSourceV569:
+        selected?.telegramEvidenceSourceV569 || "CURRENT_PRE_TELEGRAM_V557",
+      verifiedSweepAsOfAtV569:
+        safeNumber(selected?.verifiedSweepAsOfAtV569) || null,
+      verifiedSweepHeadBlockV569:
+        safeNumber(selected?.verifiedSweepHeadBlockV569) || null,
+      persistedSweepAgeMsV569:
+        Number.isFinite(Number(selected?.persistedSweepAgeMsV569))
+          ? Number(selected.persistedSweepAgeMsV569)
+          : null,
       reason:
         selectedScore.verifiedCount > 0
-          ? "MOST_MATURE_VERIFIED_EXACT_POOL_V564"
+          ? (
+              selected?.telegramEvidenceSourceV569 === "PERSISTED_COMPLETED_SWEEP_V569"
+                ? "MOST_MATURE_PERSISTED_VERIFIED_EXACT_POOL_SWEEP_V569"
+                : "MOST_MATURE_VERIFIED_EXACT_POOL_V564"
+            )
           : selectedScore.caughtUp === 1
             ? "CAUGHT_UP_EXACT_POOL_AWAITING_WINDOW_MATURITY_V564"
             : selectedScore.exactCandidateMatch === 1
@@ -61032,8 +61193,19 @@ function telegramRollingExactPoolUsdLinesV564(candidate) {
       ? `${poolId.slice(0, 10)}…${poolId.slice(-8)}`
       : "UNVERIFIED";
 
+  const evidenceSourceV569 =
+    selected?.selectionV564?.evidenceSourceV569 ||
+    "CURRENT_PRE_TELEGRAM_V557";
+  const sweepAsOfV569 =
+    safeNumber(selected?.selectionV564?.verifiedSweepAsOfAtV569);
+  const sweepHeadV569 =
+    safeNumber(selected?.selectionV564?.verifiedSweepHeadBlockV569);
+
   lines.push(
     `🛰 Exact PoolId: <code>${escapeHtml(shortPoolId)}</code>`,
+    evidenceSourceV569 === "PERSISTED_COMPLETED_SWEEP_V569"
+      ? `🕒 Verified sweep: <b>LAST COMPLETED</b> | block <b>${sweepHeadV569 || "UNVERIFIED"}</b> | as-of <b>${sweepAsOfV569 ? escapeHtml(new Date(sweepAsOfV569).toISOString()) : "UNVERIFIED"}</b>`
+      : `🕒 Verified sweep: <b>CURRENT PRE-TELEGRAM</b> | block <b>${sweepHeadV569 || "UNVERIFIED"}</b>`,
     `🔗 Candidate pool match: <b>${
       selected?.selectionV564?.candidatePoolMatch === true ? "YES" : "NO"
     }</b>`,
@@ -74639,13 +74811,19 @@ for (
       Date.now()
     );
 
+  const telegramRollingExactPoolSourceV569 =
+    telegramSnapshotWithPersistedSweepV569(
+      state,
+      preTelegramRollingExactPoolUsdV564
+    );
+
   const telegramRollingExactPoolSelectionsV564 = [];
 
   for (const candidate of candidates || []) {
     const selectedV564 =
       selectTelegramRollingExactPoolV564(
         candidate,
-        preTelegramRollingExactPoolUsdV564
+        telegramRollingExactPoolSourceV569
       );
 
     candidate.telegramRollingExactPoolUsdV564 =
@@ -74668,6 +74846,12 @@ for (
         ),
       caughtUpToScanHead:
         selectedV564?.caughtUpToScanHead === true,
+      evidenceSourceV569:
+        selectedV564?.selectionV564?.evidenceSourceV569 || null,
+      verifiedSweepAsOfAtV569:
+        selectedV564?.selectionV564?.verifiedSweepAsOfAtV569 || null,
+      verifiedSweepHeadBlockV569:
+        selectedV564?.selectionV564?.verifiedSweepHeadBlockV569 || null,
       selectionReason:
         selectedV564?.selectionV564?.reason || "NO_EXACT_POOL_SELECTION_V564"
     });
@@ -75587,6 +75771,12 @@ for (
       state,
       latestNumber,
       Date.now()
+    );
+
+  const persistedVerifiedRollingExactPoolSweepV569 =
+    persistVerifiedRollingSweepV569(
+      state,
+      verifiedRollingDirectionalUsdV557
     );
 
   /* V532: seeded history uses one separate residual post-Telegram request only if global capacity remains. */
@@ -80577,6 +80767,26 @@ for (
     directionalMultiPoolSchedulerV558,
     continuousDirectionalWatchV551,
     verifiedRollingDirectionalUsdV557,
+    persistedVerifiedRollingExactPoolSweepV569: {
+      enabled:true,
+      externalRequestsAdded:0,
+      proofType:
+        persistedVerifiedRollingExactPoolSweepV569?.proofType || null,
+      capturedAt:
+        persistedVerifiedRollingExactPoolSweepV569?.capturedAt || null,
+      scanHeadBlock:
+        persistedVerifiedRollingExactPoolSweepV569?.scanHeadBlock || null,
+      verifiedPools:
+        Array.isArray(persistedVerifiedRollingExactPoolSweepV569?.entries)
+          ? persistedVerifiedRollingExactPoolSweepV569.entries.length
+          : 0,
+      exactPoolOnly:true,
+      tokenWideMarketCoverageClaimed:false,
+      scoringChanged:false,
+      qualificationChanged:false,
+      telegramThresholdChanged:false,
+      hardGlobalLimitUnchanged:42
+    },
     preTelegramRollingExactPoolUsdV564: {
       enabled: true,
       measurementOnly: true,
