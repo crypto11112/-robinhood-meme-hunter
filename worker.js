@@ -1,6 +1,15 @@
 /**
- * Robinhood Chain Meme Hunter — V529
- * AUTHORITATIVE RUNTIME VERSION: V529
+ * Robinhood Chain Meme Hunter — V530
+ * AUTHORITATIVE RUNTIME VERSION: V530
+ *
+ * V530 /SOURCEINTEL HOTFIX:
+ * - fixes a Telegram /sourceintel runtime ReferenceError introduced in V529;
+ * - V529 added historical-proof request counters to the message using `fmt(...)`,
+ *   but `fmt` only exists as local helpers inside other reporting functions;
+ * - /sourceintel therefore failed before Telegram send when evaluating those lines;
+ * - replaces those two out-of-scope fmt() calls with local safeNumber/toLocaleString formatting;
+ * - adds no provider requests or state writes and changes no scanner, source proof,
+ *   detector, scoring, Momentum, qualification, Telegram thresholds or 42-request ceiling.
  *
  * V529 BOUNDED HISTORICAL SEEDED-SOURCE PROOF LANE:
  * - preserves V528 scanner/scoring/Telegram/self-learning behavior;
@@ -2770,7 +2779,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V529";
+const VERSION = "V530";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -113519,7 +113528,7 @@ function sourceIdentityIntelSnapshotV522(state) {
 
   return {
     enabled: true,
-    version: "V529",
+    version: "V530",
     readOnly: true,
     externalProviderRequests: 0,
     persistentWrites: 0,
@@ -113618,7 +113627,7 @@ function sourceIdentityIntelTelegramMessageV522(state) {
     ...seedLines,
     "",
     `🕰 <b>V529 historical proof:</b> ${escapeHtml(intel?.historicalProofV529?.lastStatus || "NOT_RUN")}`,
-    `   Last source: <b>${escapeHtml(intel?.historicalProofV529?.lastSourceKey || "NONE")}</b> | Requests: <b>${fmt(intel?.historicalProofV529?.requestsSucceeded)}/${fmt(intel?.historicalProofV529?.requestsAttempted)}</b>`,
+    `   Last source: <b>${escapeHtml(intel?.historicalProofV529?.lastSourceKey || "NONE")}</b> | Requests: <b>${Number(safeNumber(intel?.historicalProofV529?.requestsSucceeded)).toLocaleString("en-GB")}/${Number(safeNumber(intel?.historicalProofV529?.requestsAttempted)).toLocaleString("en-GB")}</b>`,
     "",
     "⚠️ V529 keeps V526/V527 safeguards: seeded names are never promoted from websites or recurrence alone.",
     "✅ lunch.fun remains a strongly corroborated identity candidate until a direct factory/proxy → brand link is proven.",
