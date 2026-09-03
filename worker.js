@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V560
+ * AUTHORITATIVE RUNTIME VERSION: V560
+ *
+ * V560 NEAR-HEAD VERIFICATION PRIORITY:
+ * - preserves V559 dynamic directional reservation and one-request minimum guarantee;
+ * - preserves V558 distinct-pool scheduling and V557 rolling USD verification unchanged;
+ * - changes ONLY directional watch selection priority:
+ *   active verified watched pools closest to the current chain head are advanced first;
+ * - this is specifically aimed at getting the first 5m/15m rolling USD windows fully
+ *   caught up and VERIFIED instead of spending the guaranteed request on deep backlog;
+ * - primary rank: activePoolEvidenceV555=true;
+ * - secondary rank: smallest blocks-behind-head;
+ * - tertiary rank: pool-specific swaps, then liquidity activity;
+ * - stale/deprioritised zero-activity fallback pools remain last;
+ * - no historical backfill, no inferred USD, no provider added;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, rolling-USD math, or Telegram-threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V559
  * AUTHORITATIVE RUNTIME VERSION: V559
  *
@@ -3247,7 +3266,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V559";
+const VERSION = "V560";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -57024,6 +57043,11 @@ function selectDirectionalWatchCandidateV551(state, latestNumber, excludedPoolId
         Number(a?.activePoolEvidenceV555 === true);
       if (activeDelta !== 0) return activeDelta;
 
+      /* V560: active/recent pool nearest to head first. */
+      const aBehind = Math.max(0, head - safeNumber(a?.lastCollectedBlock));
+      const bBehind = Math.max(0, head - safeNumber(b?.lastCollectedBlock));
+      if (aBehind !== bBehind) return aBehind - bBehind;
+
       const swapDelta =
         safeNumber(b?.poolSpecificSwapsV555) -
         safeNumber(a?.poolSpecificSwapsV555);
@@ -57038,7 +57062,7 @@ function selectDirectionalWatchCandidateV551(state, latestNumber, excludedPoolId
       const bLast = safeNumber(b?.lastCollectedAt || b?.registeredAt);
       if (aLast !== bLast) return aLast - bLast;
 
-      return safeNumber(a?.lastCollectedBlock) - safeNumber(b?.lastCollectedBlock);
+      return safeNumber(b?.lastCollectedBlock) - safeNumber(a?.lastCollectedBlock);
     })[0] || null;
 }
 
@@ -57068,13 +57092,22 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
               Number(a?.activePoolEvidenceV555 === true);
             if (activeDelta !== 0) return activeDelta;
 
+            const aBehind = Math.max(0, head - safeNumber(a?.lastCollectedBlock));
+            const bBehind = Math.max(0, head - safeNumber(b?.lastCollectedBlock));
+            if (aBehind !== bBehind) return aBehind - bBehind;
+
             const swapDelta =
               safeNumber(b?.poolSpecificSwapsV555) -
               safeNumber(a?.poolSpecificSwapsV555);
             if (swapDelta !== 0) return swapDelta;
 
-            return safeNumber(a?.lastCollectedBlock) -
-              safeNumber(b?.lastCollectedBlock);
+            const liquidityDelta =
+              safeNumber(b?.poolSpecificLiquidityEventsV556) -
+              safeNumber(a?.poolSpecificLiquidityEventsV556);
+            if (liquidityDelta !== 0) return liquidityDelta;
+
+            return safeNumber(b?.lastCollectedBlock) -
+              safeNumber(a?.lastCollectedBlock);
           })
       : [];
 
@@ -74493,6 +74526,11 @@ for (
       requestConsumed:row?.requestConsumed === true,
       selectedToken:row?.selectedToken || null,
       selectedPoolId:row?.selectedPoolId || null,
+      blocksBehindAtSelectionV560:
+        Number.isFinite(Number(latestNumber)) &&
+        Number.isFinite(Number(row?.fromBlock))
+          ? Math.max(0, Number(latestNumber) - (Number(row?.fromBlock) - 1))
+          : null,
       fromBlock:row?.fromBlock ?? null,
       toBlock:row?.toBlock ?? null,
       returnedLogs:safeNumber(row?.returnedLogs),
@@ -74512,6 +74550,7 @@ for (
     enabled:true,
     measurementOnly:true,
     reserveVersion:"V559_DYNAMIC_THREE_SLOT_WITH_ONE_MINIMUM_GUARANTEE",
+    selectionPriorityV560:"ACTIVE_NEAREST_TO_HEAD_THEN_SWAP_ACTIVITY",
     reservedRequestsV559:safeNumber(
       directionalWatchReserveV553?.reservedRequests
     ),
