@@ -1,4 +1,18 @@
 /**
+ * V539 FLAP DATA-WORD-3 EXACT PROOF RECOVERY + OPENFAIR EXHAUSTION:
+ * - V538 recovered Openfair topic2 successfully, but authenticated history is exhausted with
+ *   only one distinct LaunchCreated token/transaction; retain that exact evidence and stop
+ *   repeatedly spending the historical lane on an address that cannot currently reach 3x3;
+ * - pivots the bounded recovery reservation to Flap when exact TokenCreated evidence exists
+ *   but legacy telemetry did not retain the raw data needed to decode the token address;
+ * - exact Flap event: TokenCreated(uint256 ts,address creator,uint256 nonce,address token,
+ *   string name,string symbol,string meta); all parameters are unindexed and token is DATA_WORD 3;
+ * - stores raw historical log data, restarts Flap history once, and requires SAME topic0 across
+ *   >=3 distinct decoded tokens AND >=3 distinct creation transactions before V515 registration;
+ * - Mint Club + NOXA remain solved; Openfair remains fail-closed awaiting future evidence;
+ * - hard global request ceiling remains 42; scanner/scoring/Momentum/qualification unchanged.
+ */
+/**
  * V538 OPENFAIR GLOBAL-SPARE RESERVATION HANDOFF FIX:
  * - preserves V537 Openfair topic2 recovery reservation and all confirmed V535/V536 detectors;
  * - fixes the observed bypass where post-Telegram V478 global-spare work could consume the
@@ -9,8 +23,8 @@
  *   qualification, Telegram thresholds, verified USD, holder logic or confirmed detectors.
  */
 /**
- * Robinhood Chain Meme Hunter — V537
- * AUTHORITATIVE RUNTIME VERSION: V537
+ * Robinhood Chain Meme Hunter — V539
+ * AUTHORITATIVE RUNTIME VERSION: V539
  *
  * V537 OPENFAIR TOPIC2 RECOVERY + BOUNDED PROOF RESERVATION:
  * - V536 successfully confirmed/registered NOXA Fun at 75 distinct tokens / 75 distinct transactions;
@@ -2870,7 +2884,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V538";
+const VERSION = "V539";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9138,16 +9152,13 @@ function athFairSlotReserveBlocksAnalysisV301(budget, type, amount = 1) {
 }
 
 function configureOpenfairHistoricalRecoveryReserveV537(state,budget){
-  const root=ensureSeededHistoricalProofV529(state);
-  const row=root?.sources?.openfair;
-  const exactObs=Array.isArray(row?.exactSeededLaunchObservationsV536)?row.exactSeededLaunchObservationsV536:[];
-  const hasLaunchCreatedLegacyEvidence=Array.isArray(row?.recentEvidence)&&row.recentEvidence.some(ev=>isExactOpenfairLaunchCreatedDecodedV536(ev?.decodedMethod));
-  const needsRecovery=Boolean(row&&row.exactDetectorRegistered!==true&&safeNumber(row.logsObserved)>0&&exactObs.length<3&&hasLaunchCreatedLegacyEvidence);
-  budget.analysis.openfairHistoricalRecoveryReserveV537={
-    enabled:true,active:needsRecovery,reservedRequests:needsRecovery?1:0,configuredAt:Date.now(),
-    reason:needsRecovery?"OPENFAIR_LAUNCHCREATED_LEGACY_TOPIC2_NOT_PERSISTED":"OPENFAIR_RECOVERY_NOT_REQUIRED",
-    lowerPriorityRequestsBlocked:0,overriddenByProtectedWork:0
-  };
+  const root=ensureSeededHistoricalProofV529(state);openfairHistoricalSampleExhaustedV539(state);
+  const openfair=root?.sources?.openfair,oo=Array.isArray(openfair?.exactSeededLaunchObservationsV536)?openfair.exactSeededLaunchObservationsV536:[];
+  const openfairNeeds=Boolean(openfair&&openfair.exactDetectorRegistered!==true&&!openfair.historicalSampleExhaustedV539&&safeNumber(openfair.logsObserved)>0&&oo.length<3&&Array.isArray(openfair.recentEvidence)&&openfair.recentEvidence.some(ev=>isExactOpenfairLaunchCreatedDecodedV536(ev?.decodedMethod)));
+  const flap=root?.sources?.flap,fr=ensureFlapHistoricalRecoveryV539(state),fo=Array.isArray(flap?.exactSeededLaunchObservationsV536)?flap.exactSeededLaunchObservationsV536:[];
+  const flapNeeds=Boolean(flap&&flap.exactDetectorRegistered!==true&&fo.length<3&&Array.isArray(flap.recentEvidence)&&flap.recentEvidence.some(ev=>isExactFlapTokenCreatedDecodedV539(ev?.decodedMethod)));
+  const targetKey=openfairNeeds?"openfair":(flapNeeds?"flap":null);
+  budget.analysis.openfairHistoricalRecoveryReserveV537={enabled:true,active:Boolean(targetKey),targetKey,reservedRequests:targetKey?1:0,configuredAt:Date.now(),reason:targetKey==="openfair"?"OPENFAIR_LAUNCHCREATED_LEGACY_TOPIC2_NOT_PERSISTED":targetKey==="flap"?"V539_FLAP_TOKENCREATED_RAW_DATA_WORD3_RECOVERY":"SEEDED_RECOVERY_NOT_REQUIRED",lowerPriorityRequestsBlocked:0,overriddenByProtectedWork:0,openfairHistoricalSampleExhaustedV539:Boolean(openfair?.historicalSampleExhaustedV539),flapRecoveryRestartPerformedV539:Boolean(fr?.restartPerformed)};
   return budget.analysis.openfairHistoricalRecoveryReserveV537;
 }
 
@@ -22090,6 +22101,31 @@ function isExactOpenfairLaunchCreatedDecodedV536(decoded){
   const n=normalizedDecodedSignatureV536(decoded);
   return n.startsWith("launchcreated(address indexed creator,address indexed token,address launch,address harvester,address teamvesting,address referrer,string metadatacid,");
 }
+function isExactFlapTokenCreatedDecodedV539(decoded){
+  const n=normalizedDecodedSignatureV536(decoded);
+  return n.startsWith("tokencreated(uint256 ts,address creator,uint256 nonce,address token,string name,string symbol,string meta)");
+}
+function v539DataWordAddress(data,wordIndex){
+  const raw=String(data||"").toLowerCase();
+  if(!/^0x[a-f0-9]+$/.test(raw))return null;
+  const hex=raw.slice(2),i=Math.max(0,Math.floor(safeNumber(wordIndex)))*64;
+  if(hex.length<i+64)return null; const word=hex.slice(i,i+64);
+  if(!/^[a-f0-9]{64}$/.test(word))return null; const a="0x"+word.slice(-40);
+  return isAddress(a)&&normalize(a)!=="0x0000000000000000000000000000000000000000"?normalize(a):null;
+}
+function openfairHistoricalSampleExhaustedV539(state){
+  const row=ensureSeededHistoricalProofV529(state)?.sources?.openfair;
+  if(!row||row.exactDetectorRegistered===true)return false;
+  const obs=Array.isArray(row.exactSeededLaunchObservationsV536)?row.exactSeededLaunchObservationsV536:[];
+  const exhausted=safeNumber(row.requestsSucceeded)>0&&!row.nextPageParams&&obs.length>0&&obs.length<3;
+  if(exhausted){row.historicalSampleExhaustedV539=true;row.status="V539_OPENFAIR_EXACT_ONE_LAUNCH_EVIDENCE_HISTORY_EXHAUSTED_AWAIT_FUTURE_LIVE_EVIDENCE";}
+  return exhausted;
+}
+function ensureFlapHistoricalRecoveryV539(state){
+  const row=ensureSeededHistoricalProofV529(state)?.sources?.flap;if(!row)return null;
+  row.flapRawDataRecoveryV539=row.flapRawDataRecoveryV539&&typeof row.flapRawDataRecoveryV539==="object"?row.flapRawDataRecoveryV539:{enabled:true,restartPerformed:false,completed:false,startedAt:null};
+  return row.flapRawDataRecoveryV539;
+}
 function ensureExactSeededObservationsV536(src){
   src.exactSeededLaunchObservationsV536=Array.isArray(src.exactSeededLaunchObservationsV536)?src.exactSeededLaunchObservationsV536:[];
   return src.exactSeededLaunchObservationsV536;
@@ -22108,15 +22144,17 @@ function rebuildSeededExactProofV536(state,sourceKey){
   const best=ranked.find(x=>x.proofTokenCount>=3&&x.proofTransactionCount>=3)||null;if(!best)return null;
   let cfg=null;
   if(sourceKey==="noxa")cfg={protocol:"NOXA Fun",protocolKey:"noxa_fun",factory:SEEDED_NOXA_FACTORY_V523,index:1,evidenceStandard:"OFFICIAL_NOXA_ROBINHOOD_FACTORY_PLUS_3X3_EXACT_BLOCKSCOUT_TOKENLAUNCHED_TOPIC1_V536",status:"V536_NOXA_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515"};
-  if(sourceKey==="openfair")cfg={protocol:"Openfair",protocolKey:"openfair",factory:SEEDED_OPENFAIR_FACTORY_V524,index:2,evidenceStandard:"OFFICIAL_OPENFAIR_ROBINHOOD_FACTORY_PLUS_3X3_EXACT_BLOCKSCOUT_LAUNCHCREATED_TOPIC2_V536",status:"V536_OPENFAIR_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515"};
+  if(sourceKey==="openfair")cfg={protocol:"Openfair",protocolKey:"openfair",factory:SEEDED_OPENFAIR_FACTORY_V524,index:2,locationType:"TOPIC",evidenceStandard:"OFFICIAL_OPENFAIR_ROBINHOOD_FACTORY_PLUS_3X3_EXACT_BLOCKSCOUT_LAUNCHCREATED_TOPIC2_V536",status:"V536_OPENFAIR_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515"};
+  if(sourceKey==="flap")cfg={protocol:"Flap",protocolKey:"flap",factory:SEEDED_FLAP_PORTAL_V525,index:3,locationType:"DATA_WORD",evidenceStandard:"OFFICIAL_FLAP_ROBINHOOD_PORTAL_PLUS_3X3_EXACT_BLOCKSCOUT_TOKENCREATED_DATA_WORD3_V539",status:"V539_FLAP_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515"};
+  if(sourceKey==="noxa"&&cfg)cfg.locationType="TOPIC";
   if(!cfg)return null;
   src.exactLaunchPatternConfirmed=true;
-  const reg=registerVerifiedLaunchDetectorV515(state,{protocol:cfg.protocol,protocolKey:cfg.protocolKey,verifiedFactory:cfg.factory,emitter:cfg.factory,topic0:best.topic0,addressLocationType:"TOPIC",addressLocationIndex:cfg.index,proofTokens:best.tokens,proofTransactions:best.transactions,evidenceStandard:cfg.evidenceStandard,sourceState:"seededHistoricalProofV529"});
+  const reg=registerVerifiedLaunchDetectorV515(state,{protocol:cfg.protocol,protocolKey:cfg.protocolKey,verifiedFactory:cfg.factory,emitter:cfg.factory,topic0:best.topic0,addressLocationType:cfg.locationType||"TOPIC",addressLocationIndex:cfg.index,proofTokens:best.tokens,proofTransactions:best.transactions,evidenceStandard:cfg.evidenceStandard,sourceState:"seededHistoricalProofV529"});
   src.exactDetectorRegistered=reg?.registered===true||src.exactDetectorRegistered===true;src.registrationStatus=reg?.status||src.registrationStatus||null;if(src.exactDetectorRegistered)src.status=cfg.status;return reg;
 }
 function reclassifyStoredSeededHistoricalEvidenceV536(state){
-  const root=ensureSeededHistoricalProofV529(state),result={enabled:true,externalRequestsAdded:0,noxa:null,openfair:null};
-  for(const sourceKey of ["noxa","openfair"]){
+  const root=ensureSeededHistoricalProofV529(state),result={enabled:true,externalRequestsAdded:0,noxa:null,openfair:null,flap:null};
+  for(const sourceKey of ["noxa","openfair","flap"]){
     const src=root.sources?.[sourceKey];if(!src){result[sourceKey]={status:"V536_SOURCE_STATE_UNAVAILABLE"};continue;}
     const obs=ensureExactSeededObservationsV536(src),seen=new Set(obs.map(x=>`${String(x?.transactionHash||"").toLowerCase()}:${safeNumber(x?.logIndex)}:${normalize(x?.token)}`));let added=0;
     for(const ev of Array.isArray(src.recentEvidence)?src.recentEvidence:[]){
@@ -22124,6 +22162,7 @@ function reclassifyStoredSeededHistoricalEvidenceV536(state){
       let token=null,index=null,exact=false;
       if(sourceKey==="noxa"){exact=isExactNoxaTokenLaunchedDecodedV536(ev?.decodedMethod);token=v529TopicAddress(ev?.topic1);index=1;}
       if(sourceKey==="openfair"){exact=isExactOpenfairLaunchCreatedDecodedV536(ev?.decodedMethod);token=v529TopicAddress(ev?.topic2);index=2;}
+      if(sourceKey==="flap"){exact=isExactFlapTokenCreatedDecodedV539(ev?.decodedMethod);token=v539DataWordAddress(ev?.rawData,3);index=3;}
       if(!exact||!token)continue;const key=`${tx}:${safeNumber(ev?.logIndex)}:${token}`;if(seen.has(key))continue;seen.add(key);obs.push({observedAt:safeNumber(ev?.observedAt)||Date.now(),token,transactionHash:tx,topic0,addressLocationType:"TOPIC",addressLocationIndex:index,decodedMethod:String(ev?.decodedMethod||""),blockNumber:safeNumber(ev?.blockNumber)||null,logIndex:safeNumber(ev?.logIndex)||null,reclassifiedFromStoredEvidenceV536:true});added++;
     }
     src.exactSeededLaunchObservationsV536=obs.slice(-250);const registration=rebuildSeededExactProofV536(state,sourceKey),strong=src.strongestExactPatternV536||null;
@@ -22198,13 +22237,14 @@ function blockscoutProHistoricalAddressLogsUrlV533(env,address,nextPageParams=nu
 async function runSeededHistoricalProofV529({env,state,budget}){
   const root=ensureSeededHistoricalProofV529(state);
   const sources=SEEDED_HISTORICAL_SOURCES_V529,start=Math.max(0,Math.floor(safeNumber(root.nextIndex)))%sources.length;let chosen=null;
-  const openfairRowV537=root.sources?.openfair;
-  const openfairNeedsTopic2RecoveryV537=Boolean(openfairRowV537&&openfairRowV537.exactDetectorRegistered!==true&&safeNumber(openfairRowV537.logsObserved)>0&&(Array.isArray(openfairRowV537.exactSeededLaunchObservationsV536)?openfairRowV537.exactSeededLaunchObservationsV536.length:0)<3&&Array.isArray(openfairRowV537.recentEvidence)&&openfairRowV537.recentEvidence.some(ev=>isExactOpenfairLaunchCreatedDecodedV536(ev?.decodedMethod)));
-  if(openfairNeedsTopic2RecoveryV537){chosen=sources.find(x=>x.key==="openfair")||null;}
-  if(!chosen)for(let i=0;i<sources.length;i++){const src=sources[(start+i)%sources.length],r=root.sources[src.key];if(r?.exactDetectorRegistered===true)continue;chosen=src;root.nextIndex=(start+i+1)%sources.length;break;}
+  openfairHistoricalSampleExhaustedV539(state);
+  const recoveryTargetV539=String(budget?.analysis?.openfairHistoricalRecoveryReserveV537?.targetKey||"");
+  if(recoveryTargetV539){chosen=sources.find(x=>x.key===recoveryTargetV539)||null;}
+  if(!chosen)for(let i=0;i<sources.length;i++){const src=sources[(start+i)%sources.length],r=root.sources[src.key];if(r?.exactDetectorRegistered===true||r?.historicalSampleExhaustedV539===true)continue;chosen=src;root.nextIndex=(start+i+1)%sources.length;break;}
   if(!chosen){root.lastStatus="V529_ALL_SEEDED_HISTORICAL_TARGETS_ALREADY_EXACT_OR_DISABLED";return{enabled:true,attempted:false,requestConsumed:false,status:root.lastStatus};}
   const row=root.sources[chosen.key];
-  const params=row.nextPageParams&&typeof row.nextPageParams==="object"?row.nextPageParams:null;
+  let params=row.nextPageParams&&typeof row.nextPageParams==="object"?row.nextPageParams:null;
+  if(chosen.key==="flap"){const recovery=ensureFlapHistoricalRecoveryV539(state);if(recovery&&!recovery.restartPerformed){params=null;recovery.restartPerformed=true;recovery.startedAt=Date.now();recovery.status="V539_FLAP_HISTORY_RESTARTED_FROM_FIRST_PAGE_FOR_RAW_DATA";}}
   const url=blockscoutProHistoricalAddressLogsUrlV533(env,chosen.address,params);
   if(!url){row.lastError="BLOCKSCOUT_PRO_NOT_CONFIGURED";row.lastHttpStatus=null;row.status="V533_HISTORICAL_BLOCKSCOUT_PRO_NOT_CONFIGURED";root.lastStatus=row.status;return{enabled:true,attempted:false,requestConsumed:false,sourceKey:chosen.key,residualLaneV532:true,authenticatedBlockscoutProV533:false,status:row.status};}
   const spare=consumeResidualHistoricalProofRequestV532(budget,"SEEDED_HISTORICAL_ADDRESS_LOGS_V533",1);if(spare?.ok!==true){root.lastStatus=`V533_HISTORICAL_RESIDUAL_DEFERRED:${spare?.reason||"UNKNOWN"}`;return{enabled:true,attempted:false,requestConsumed:false,sourceKey:chosen.key,residualLaneV532:true,authenticatedBlockscoutProV533:true,status:root.lastStatus};}
@@ -22212,14 +22252,15 @@ async function runSeededHistoricalProofV529({env,state,budget}){
   try{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),6000);let response;try{response=await fetch(url,{headers:{accept:"application/json"},signal:controller.signal});}finally{clearTimeout(timer);}row.lastHttpStatus=response.status;
     if(!response.ok){row.lastError=`HTTP_${response.status}`;row.status=`V529_HISTORICAL_HTTP_${response.status}`;root.lastStatus=row.status;return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,httpStatus:response.status,residualLaneV532:true,authenticatedBlockscoutProV533:true,status:row.status};}
     const payload=await response.json(),items=Array.isArray(payload?.items)?payload.items:[];row.requestsSucceeded=safeNumber(row.requestsSucceeded)+1;root.requestsSucceeded=safeNumber(root.requestsSucceeded)+1;row.pagesObserved=safeNumber(row.pagesObserved)+1;row.lastSuccessAt=Date.now();row.lastError=null;let exactMint=0;
-    for(const log of items){const topics=v529LogTopics(log),topic0=String(topics[0]||"").toLowerCase(),tx=v529TxHash(log);if(/^0x[a-f0-9]{64}$/.test(topic0))row.topic0Counts[topic0]=safeNumber(row.topic0Counts[topic0])+1;const evidence={observedAt:Date.now(),topic0:/^0x[a-f0-9]{64}$/.test(topic0)?topic0:null,transactionHash:tx,blockNumber:safeNumber(log?.block_number||log?.blockNumber)||null,logIndex:safeNumber(log?.index||log?.log_index||log?.logIndex)||null,topicCount:topics.length,decodedMethod:v529DecodedMethod(log)||null,topic1:topics[1]||null,topic2:topics[2]||null,evidenceMeaning:"BLOCKSCOUT_V2_HISTORICAL_ADDRESS_LOG_FINGERPRINT_V529"};row.recentEvidence.push(evidence);
+    for(const log of items){const topics=v529LogTopics(log),topic0=String(topics[0]||"").toLowerCase(),tx=v529TxHash(log);if(/^0x[a-f0-9]{64}$/.test(topic0))row.topic0Counts[topic0]=safeNumber(row.topic0Counts[topic0])+1;const evidence={observedAt:Date.now(),topic0:/^0x[a-f0-9]{64}$/.test(topic0)?topic0:null,transactionHash:tx,blockNumber:safeNumber(log?.block_number||log?.blockNumber)||null,logIndex:safeNumber(log?.index||log?.log_index||log?.logIndex)||null,topicCount:topics.length,decodedMethod:v529DecodedMethod(log)||null,topic1:topics[1]||null,topic2:topics[2]||null,topic3:topics[3]||null,rawData:String(log?.data||log?.raw?.data||log?.raw_data||"")||null,evidenceMeaning:"BLOCKSCOUT_V2_HISTORICAL_ADDRESS_LOG_FINGERPRINT_V529"};row.recentEvidence.push(evidence);
       if(chosen.mintClubExact===true){const decoded=v529DecodedMethod(log),token=v529TopicAddress(topics[1]),exactDecoded=isExactMintClubTokenCreatedDecodedV535(decoded);if(exactDecoded&&token&&tx&&/^0x[a-f0-9]{64}$/.test(topic0)){row.exactMintClubTokenCreatedObservations.push({observedAt:Date.now(),token,transactionHash:tx,topic0,addressLocationType:"TOPIC",addressLocationIndex:1,decodedMethod:decoded,blockNumber:evidence.blockNumber,logIndex:evidence.logIndex});exactMint++;}}
       if(chosen.key==="noxa"&&isExactNoxaTokenLaunchedDecodedV536(evidence.decodedMethod)){const token=v529TopicAddress(topics[1]);if(token&&tx&&/^0x[a-f0-9]{64}$/.test(topic0))ensureExactSeededObservationsV536(row).push({observedAt:Date.now(),token,transactionHash:tx,topic0,addressLocationType:"TOPIC",addressLocationIndex:1,decodedMethod:evidence.decodedMethod,blockNumber:evidence.blockNumber,logIndex:evidence.logIndex});}
       if(chosen.key==="openfair"&&isExactOpenfairLaunchCreatedDecodedV536(evidence.decodedMethod)){const token=v529TopicAddress(topics[2]);if(token&&tx&&/^0x[a-f0-9]{64}$/.test(topic0))ensureExactSeededObservationsV536(row).push({observedAt:Date.now(),token,transactionHash:tx,topic0,addressLocationType:"TOPIC",addressLocationIndex:2,decodedMethod:evidence.decodedMethod,blockNumber:evidence.blockNumber,logIndex:evidence.logIndex});}
+      if(chosen.key==="flap"&&isExactFlapTokenCreatedDecodedV539(evidence.decodedMethod)){const token=v539DataWordAddress(evidence.rawData,3);if(token&&tx&&/^0x[a-f0-9]{64}$/.test(topic0))ensureExactSeededObservationsV536(row).push({observedAt:Date.now(),token,transactionHash:tx,topic0,addressLocationType:"DATA_WORD",addressLocationIndex:3,decodedMethod:evidence.decodedMethod,blockNumber:evidence.blockNumber,logIndex:evidence.logIndex});}
     }
-    row.recentEvidence=row.recentEvidence.slice(-250);row.exactMintClubTokenCreatedObservations=(row.exactMintClubTokenCreatedObservations||[]).filter((x,i,a)=>a.findIndex(y=>y.transactionHash===x.transactionHash&&y.logIndex===x.logIndex)===i).slice(-250);row.exactSeededLaunchObservationsV536=ensureExactSeededObservationsV536(row).filter((x,i,a)=>a.findIndex(y=>y.transactionHash===x.transactionHash&&y.logIndex===x.logIndex&&normalize(y.token)===normalize(x.token))===i).slice(-250);row.logsObserved=safeNumber(row.logsObserved)+items.length;row.distinctTransactionsObserved=new Set(row.recentEvidence.map(x=>x.transactionHash).filter(x=>/^0x[a-f0-9]{64}$/.test(String(x||"")))).size;row.nextPageParams=payload?.next_page_params&&typeof payload.next_page_params==="object"?payload.next_page_params:null;
-    let registration=null;if(chosen.mintClubExact===true)registration=rebuildMintClubHistoricalExactProofV529(state);if(chosen.key==="noxa"||chosen.key==="openfair")registration=rebuildSeededExactProofV536(state,chosen.key)||registration;
-    if(chosen.key==="openfair"&&budget?.analysis?.openfairHistoricalRecoveryReserveV537){budget.analysis.openfairHistoricalRecoveryReserveV537.active=false;budget.analysis.openfairHistoricalRecoveryReserveV537.releasedAt=Date.now();budget.analysis.openfairHistoricalRecoveryReserveV537.releaseReason="OPENFAIR_HISTORICAL_REQUEST_ATTEMPTED_V537";}if(row.exactDetectorRegistered===true&&chosen.key==="mint_club")row.status="V529_MINTCLUB_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515";else if(row.exactDetectorRegistered===true&&chosen.key==="noxa")row.status="V536_NOXA_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515";else if(row.exactDetectorRegistered===true&&chosen.key==="openfair")row.status="V536_OPENFAIR_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515";else row.status=items.length?"V529_HISTORICAL_LOGS_OBSERVED_PROOF_ACCUMULATING":"V529_HISTORICAL_PAGE_EMPTY";root.lastStatus=row.status;
+    row.recentEvidence=row.recentEvidence.slice(-250);if(chosen.key==="openfair"&&!payload?.next_page_params){openfairHistoricalSampleExhaustedV539(state);}row.exactMintClubTokenCreatedObservations=(row.exactMintClubTokenCreatedObservations||[]).filter((x,i,a)=>a.findIndex(y=>y.transactionHash===x.transactionHash&&y.logIndex===x.logIndex)===i).slice(-250);row.exactSeededLaunchObservationsV536=ensureExactSeededObservationsV536(row).filter((x,i,a)=>a.findIndex(y=>y.transactionHash===x.transactionHash&&y.logIndex===x.logIndex&&normalize(y.token)===normalize(x.token))===i).slice(-250);row.logsObserved=safeNumber(row.logsObserved)+items.length;row.distinctTransactionsObserved=new Set(row.recentEvidence.map(x=>x.transactionHash).filter(x=>/^0x[a-f0-9]{64}$/.test(String(x||"")))).size;row.nextPageParams=payload?.next_page_params&&typeof payload.next_page_params==="object"?payload.next_page_params:null;
+    let registration=null;if(chosen.mintClubExact===true)registration=rebuildMintClubHistoricalExactProofV529(state);if(chosen.key==="noxa"||chosen.key==="openfair"||chosen.key==="flap")registration=rebuildSeededExactProofV536(state,chosen.key)||registration;
+    if((chosen.key==="openfair"||chosen.key==="flap")&&budget?.analysis?.openfairHistoricalRecoveryReserveV537){budget.analysis.openfairHistoricalRecoveryReserveV537.active=false;budget.analysis.openfairHistoricalRecoveryReserveV537.releasedAt=Date.now();budget.analysis.openfairHistoricalRecoveryReserveV537.releaseReason=`${chosen.key.toUpperCase()}_HISTORICAL_REQUEST_ATTEMPTED_V539`;} if(row.exactDetectorRegistered===true&&chosen.key==="mint_club")row.status="V529_MINTCLUB_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515";else if(row.exactDetectorRegistered===true&&chosen.key==="noxa")row.status="V536_NOXA_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515";else if(row.exactDetectorRegistered===true&&chosen.key==="openfair")row.status="V536_OPENFAIR_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515";else if(row.exactDetectorRegistered===true&&chosen.key==="flap")row.status="V539_FLAP_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515";else row.status=items.length?"V529_HISTORICAL_LOGS_OBSERVED_PROOF_ACCUMULATING":"V529_HISTORICAL_PAGE_EMPTY";root.lastStatus=row.status;
     return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,label:chosen.label,address:normalize(chosen.address),httpStatus:response.status,logsThisPage:items.length,exactMintClubTokenCreatedThisPage:exactMint,nextPageAvailable:Boolean(row.nextPageParams),exactLaunchPatternConfirmed:row.exactLaunchPatternConfirmed===true,exactDetectorRegistered:row.exactDetectorRegistered===true,registrationStatus:registration?.status||row.registrationStatus||null,residualLaneV532:true,authenticatedBlockscoutProV533:true,residualBudgetRemainingAfter:safeNumber(spare?.remainingAfter),status:row.status};
   }catch(e){row.lastError=errorString(e);row.status="V529_HISTORICAL_FETCH_ERROR_RETRY_PRESERVED";root.lastStatus=row.status;return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,error:row.lastError,residualLaneV532:true,authenticatedBlockscoutProV533:true,residualBudgetRemainingAfter:safeNumber(spare?.remainingAfter),status:row.status};}
 }
@@ -95027,12 +95068,12 @@ function consumeReleasedGlobalSpareV478(
       phase: "post-telegram-global-spare",
       type,
       amount: n,
-      reason: "V538_OPENFAIR_HISTORICAL_TOPIC2_GLOBAL_SPARE_RESERVED"
+      reason: "V539_SEEDED_HISTORICAL_RECOVERY_GLOBAL_SPARE_RESERVED"
     });
 
     return {
       ok: false,
-      reason: "V538_OPENFAIR_HISTORICAL_TOPIC2_GLOBAL_SPARE_RESERVED"
+      reason: "V539_SEEDED_HISTORICAL_RECOVERY_GLOBAL_SPARE_RESERVED"
     };
   }
 
