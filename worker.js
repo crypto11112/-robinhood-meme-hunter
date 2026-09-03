@@ -382,6 +382,18 @@
  * - scoring, Momentum, qualification, Telegram thresholds, verified USD,
  *   dense-pool completion, RWA detector, launch meter and hard limit 42 unchanged.
  *
+ * V527 MINT CLUB SEEDED ROBINHOOD EVIDENCE COLLECTOR:
+ * - source audit confirmed pools.trade was ALREADY fully integrated with both entry contracts,
+ *   token factory, all four launchpad emitters and exact TokenLaunched PoolKey decoding; no
+ *   redundant Pools scanner change is made in V527;
+ * - adds official Mint Club Robinhood MCV2_Bond 0x91523b39813F3F4E406ECe406D0bEAaA9dE251fa
+ *   to the EXISTING live eth_getLogs emitter set, adding ZERO extra live-discovery requests;
+ * - records exact raw event fingerprints only until real Robinhood events are observed;
+ * - official source code documents MCV2_Bond TokenCreated(address,string,string,address), but
+ *   V527 does NOT promote Mint Club from docs alone and does NOT guess an event topic/token slot;
+ * - NOXA/Openfair/Flap collectors, V517/V520 self-learning, scoring, Telegram thresholds and
+ *   hard request limit 42 remain unchanged.
+ *
  * V526 LUNCH.FUN BRAND CORROBORATION GATE (REPORTING / EVIDENCE ONLY):
  * - preserves V525 Flap exact validation, V524 Openfair, V523 NOXA and V517/V520 autonomous learning unchanged;
  * - upgrades the auto_9983bb8c identity view from a single generic brand lead to a bounded
@@ -2737,7 +2749,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V526";
+const VERSION = "V527";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -21747,6 +21759,139 @@ function seededFlapExactEvidenceSnapshotV525(state) {
     hardGlobalLimitUnchanged:42,status:root.status||null};
 }
 
+
+/* =========================================================
+   V527 SEEDED MINT CLUB ROBINHOOD LIVE EVIDENCE COLLECTOR
+   =========================================================
+   Official Mint Club deployment evidence identifies MCV2_Bond on Robinhood
+   Chain (4663) at this address. Official source code documents a TokenCreated
+   event, but V527 deliberately collects raw live evidence first and does not
+   infer/promote a token launch from documentation alone.
+*/
+const SEEDED_MINTCLUB_BOND_V527 =
+  "0x91523b39813f3f4e406ece406d0beaaa9de251fa";
+
+function ensureSeededMintClubLiveEvidenceV527(state) {
+  state.seededMintClubLiveEvidenceV527 ??= {
+    enabled: true,
+    measurementOnlyUntilExactProof: true,
+    bond: SEEDED_MINTCLUB_BOND_V527,
+    chainId: 4663,
+    officialContractRole: "MCV2_Bond",
+    documentedEventShape: "TokenCreated(address indexed token,string name,string symbol,address indexed reserveToken)",
+    scansObserved: 0,
+    matchingLogsObserved: 0,
+    distinctTransactionsObserved: 0,
+    firstObservedAt: null,
+    lastObservedAt: null,
+    lastObservedBlock: null,
+    lastObservedTransactionHash: null,
+    topic0Counts: {},
+    recentEvidence: [],
+    exactLaunchPatternConfirmed: false,
+    exactDetectorRegistered: false,
+    launchSourcePromotionAllowed: false,
+    externalRequestsAdded: 0,
+    hardGlobalLimitUnchanged: 42,
+    status: "V527_SEEDED_MINTCLUB_BOND_COLLECTOR_ARMED"
+  };
+  return state.seededMintClubLiveEvidenceV527;
+}
+
+function seededMintClubEmitterAddressesV527(state) {
+  ensureSeededMintClubLiveEvidenceV527(state);
+  return [SEEDED_MINTCLUB_BOND_V527];
+}
+
+function observeSeededMintClubLiveLogsV527(state, logs) {
+  const root = ensureSeededMintClubLiveEvidenceV527(state);
+  root.scansObserved = safeNumber(root.scansObserved) + 1;
+  const rows = Array.isArray(logs) ? logs : [];
+  let matched = 0;
+  for (const row of rows) {
+    const emitter = normalize(row?.address || "");
+    if (emitter !== SEEDED_MINTCLUB_BOND_V527) continue;
+    matched++;
+    const topics = Array.isArray(row?.topics) ? row.topics : [];
+    const topic0 = String(topics[0] || "").toLowerCase();
+    const tx = String(row?.transactionHash || row?.transaction_hash || "").toLowerCase();
+    const blockHex = row?.blockNumber ?? row?.block_number ?? null;
+    const logIndexHex = row?.logIndex ?? row?.log_index ?? null;
+    const blockNumber = typeof blockHex === "string" && /^0x[0-9a-f]+$/i.test(blockHex)
+      ? parseInt(blockHex,16) : safeNumber(blockHex) || null;
+    const logIndex = typeof logIndexHex === "string" && /^0x[0-9a-f]+$/i.test(logIndexHex)
+      ? parseInt(logIndexHex,16) : safeNumber(logIndexHex) || null;
+    if (/^0x[a-f0-9]{64}$/.test(topic0)) {
+      root.topic0Counts[topic0] = safeNumber(root.topic0Counts[topic0]) + 1;
+    }
+    const evidence = {
+      observedAt: Date.now(),
+      bond: SEEDED_MINTCLUB_BOND_V527,
+      topic0: /^0x[a-f0-9]{64}$/.test(topic0) ? topic0 : null,
+      transactionHash: /^0x[a-f0-9]{64}$/.test(tx) ? tx : null,
+      blockNumber,
+      logIndex,
+      topicCount: topics.length,
+      topic1: topics[1] || null,
+      topic2: topics[2] || null,
+      dataBytes: typeof row?.data === "string" && row.data.startsWith("0x")
+        ? Math.max(0,(row.data.length-2)/2) : null,
+      evidenceMeaning: "OFFICIAL_MINTCLUB_BOND_EVENT_FINGERPRINT_ONLY_NOT_TOKEN_LAUNCH_PROOF_V527"
+    };
+    root.recentEvidence.push(evidence);
+    root.recentEvidence = root.recentEvidence.slice(-250);
+    if (!root.firstObservedAt) root.firstObservedAt = evidence.observedAt;
+    root.lastObservedAt = evidence.observedAt;
+    root.lastObservedBlock = blockNumber;
+    root.lastObservedTransactionHash = evidence.transactionHash;
+  }
+  root.matchingLogsObserved = safeNumber(root.matchingLogsObserved) + matched;
+  root.distinctTransactionsObserved = new Set((root.recentEvidence||[])
+    .map(x=>String(x?.transactionHash||"").toLowerCase())
+    .filter(x=>/^0x[a-f0-9]{64}$/.test(x))).size;
+  root.status = root.matchingLogsObserved > 0
+    ? "V527_MINTCLUB_BOND_EVENTS_OBSERVED_AWAIT_EXACT_TOKENCREATED_PROOF"
+    : "V527_SEEDED_MINTCLUB_BOND_COLLECTOR_ARMED_NO_EVENT_OBSERVED_YET";
+  return {
+    enabled:true,
+    bond:SEEDED_MINTCLUB_BOND_V527,
+    matchingLogsThisChunk:matched,
+    matchingLogsObserved:root.matchingLogsObserved,
+    distinctTransactionsObserved:root.distinctTransactionsObserved,
+    exactLaunchPatternConfirmed:false,
+    launchSourcePromoted:false,
+    externalRequestsAdded:0,
+    status:root.status
+  };
+}
+
+function seededMintClubLiveEvidenceSnapshotV527(state) {
+  const root=ensureSeededMintClubLiveEvidenceV527(state);
+  return {
+    enabled:true,
+    measurementOnlyUntilExactProof:true,
+    bond:SEEDED_MINTCLUB_BOND_V527,
+    officialContractRole:"MCV2_Bond",
+    documentedEventShape:root.documentedEventShape,
+    scansObserved:safeNumber(root.scansObserved),
+    matchingLogsObserved:safeNumber(root.matchingLogsObserved),
+    distinctTransactionsObserved:safeNumber(root.distinctTransactionsObserved),
+    firstObservedAt:root.firstObservedAt||null,
+    lastObservedAt:root.lastObservedAt||null,
+    lastObservedBlock:root.lastObservedBlock||null,
+    lastObservedTransactionHash:root.lastObservedTransactionHash||null,
+    strongestTopics:Object.entries(root.topic0Counts||{}).map(([topic0,count])=>({topic0,count:safeNumber(count)}))
+      .sort((a,b)=>b.count-a.count||a.topic0.localeCompare(b.topic0)).slice(0,10),
+    recentEvidence:Array.isArray(root.recentEvidence)?root.recentEvidence.slice(-10):[],
+    exactLaunchPatternConfirmed:root.exactLaunchPatternConfirmed===true,
+    exactDetectorRegistered:root.exactDetectorRegistered===true,
+    launchSourcePromotionAllowed:false,
+    externalRequestsAdded:0,
+    hardGlobalLimitUnchanged:42,
+    status:root.status||null
+  };
+}
+
 /* =========================================================
    LIVE SCAN
    ========================================================= */
@@ -21815,7 +21960,8 @@ async function scanLiveRange(
         ...genericVerifiedEmittersV515,
         ...seededNoxaEmitterAddressesV523(state),
         ...seededOpenfairEmitterAddressesV524(state),
-        ...seededFlapEmitterAddressesV525(state)
+        ...seededFlapEmitterAddressesV525(state),
+        ...seededMintClubEmitterAddressesV527(state)
       ])
     );
 
@@ -22186,6 +22332,11 @@ async function scanLiveRange(
       );
 
       observeSeededFlapLiveLogsV525(
+        state,
+        response.result
+      );
+
+      observeSeededMintClubLiveLogsV527(
         state,
         response.result
       );
@@ -113195,6 +113346,14 @@ function sourceIdentityIntelSnapshotV522(state) {
       leadProvenance: "PUBLIC_ROBINHOOD_CONTRACT_RESEARCH_LEAD",
       trustAsLaunchSourceWithoutBotProof: false
     }
+    ,{
+      key: "mint_club",
+      name: "Mint Club",
+      address: "0x91523b39813f3f4e406ece406d0beaaa9de251fa",
+      role: "MCV2_Bond — official Robinhood deployment",
+      leadProvenance: "OFFICIAL_MINT_CLUB_CONTRACT_REPOSITORY_ROBINHOOD_CHAIN_4663",
+      trustAsLaunchSourceWithoutBotProof: false
+    }
   ].map(seed => {
     const address = normalize(seed.address);
     const cluster = normalizedCluster(address);
@@ -113227,12 +113386,17 @@ function sourceIdentityIntelSnapshotV522(state) {
       ? seededFlapExactEvidenceSnapshotV525(state)
       : null;
 
+    const mintClubV527 = seed.key === "mint_club"
+      ? seededMintClubLiveEvidenceSnapshotV527(state)
+      : null;
+
     return {
       ...seed,
       address,
       seededLiveEvidenceV523: noxaV523,
       seededLiveEvidenceV524: openfairV524,
       seededExactEvidenceV525: flapV525,
+      seededLiveEvidenceV527: mintClubV527,
       observedInVerifiedCreatorOrigins: Boolean(cluster),
       distinctVerifiedOriginTokens: distinctTokens,
       blockscoutVerifiedContractProfile: profile?.blockscoutVerifiedContract === true,
@@ -113250,6 +113414,8 @@ function sourceIdentityIntelSnapshotV522(state) {
               ? "V525_FLAP_EXACT_PATTERN_CONFIRMED_THREE_INDEPENDENT_VERIFIED_LAUNCHES"
               : (seed.key === "flap" && safeNumber(flapV525?.matchingLogsObserved) > 0)
                 ? "V525_FLAP_PORTAL_EVENTS_OBSERVED_AWAIT_EXACT_PATTERN_PROOF"
+                : (seed.key === "mint_club" && safeNumber(mintClubV527?.matchingLogsObserved) > 0)
+                  ? "V527_MINTCLUB_BOND_EVENTS_OBSERVED_AWAIT_EXACT_TOKENCREATED_PROOF"
                 : cluster
               ? "OBSERVED_IN_BOT_VERIFIED_ORIGIN_EVIDENCE_AWAIT_EXACT_SOURCE_PROOF"
               : (seed.key === "flap")
@@ -113260,6 +113426,8 @@ function sourceIdentityIntelSnapshotV522(state) {
                   ? "V523_SEEDED_FACTORY_LIVE_COLLECTOR_ARMED_NO_EVENT_OBSERVED_YET"
                   : (seed.key === "openfair")
                     ? "V524_SEEDED_OPENFAIR_LIVE_COLLECTOR_ARMED_NO_EVENT_OBSERVED_YET"
+                    : (seed.key === "mint_club")
+                      ? "V527_SEEDED_MINTCLUB_BOND_COLLECTOR_ARMED_NO_EVENT_OBSERVED_YET"
                     : "SEEDED_LEAD_NOT_YET_MATCHED_IN_BOT_VERIFIED_ORIGIN_EVIDENCE",
       sourcePromotionAllowedByV522: false
     };
@@ -113267,7 +113435,7 @@ function sourceIdentityIntelSnapshotV522(state) {
 
   return {
     enabled: true,
-    version: "V526",
+    version: "V527",
     readOnly: true,
     externalProviderRequests: 0,
     persistentWrites: 0,
@@ -113280,7 +113448,7 @@ function sourceIdentityIntelSnapshotV522(state) {
     seededLeadCount: seededLeads.length,
     seededLeads,
     interpretation:
-      "V526_IDENTITY_CORROBORATION_ONLY_SHARED_DEPLOYER_IS_NOT_DIRECT_FACTORY_BRAND_PROOF_NO_RENAME_WITHOUT_DIRECT_LINK"
+      "V527_MINTCLUB_OFFICIAL_BOND_SEEDED_LIVE_EVIDENCE_PLUS_V526_BRAND_GATE_POOLS_EXISTING_EXACT_COVERAGE_PRESERVED"
   };
 }
 
@@ -113344,6 +113512,15 @@ function sourceIdentityIntelTelegramMessageV522(state) {
       );
     }
 
+    if (row.key === "mint_club" && row.seededLiveEvidenceV527) {
+      lines.push(
+        `  V527 live MCV2_Bond logs observed: <b>${Number(safeNumber(row.seededLiveEvidenceV527.matchingLogsObserved)).toLocaleString("en-GB")}</b>`,
+        `  Distinct bond txs observed: <b>${Number(safeNumber(row.seededLiveEvidenceV527.distinctTransactionsObserved)).toLocaleString("en-GB")}</b>`,
+        `  Official event shape known: <b>TokenCreated(address,string,string,address)</b>`,
+        `  Exact live token-launch pattern: <b>${row.seededLiveEvidenceV527.exactLaunchPatternConfirmed ? "CONFIRMED" : "DATA UNVERIFIED"}</b>`
+      );
+    }
+
     return lines;
   });
 
@@ -113356,7 +113533,7 @@ function sourceIdentityIntelTelegramMessageV522(state) {
     "<b>Seeded launchpad leads — correlation only</b>",
     ...seedLines,
     "",
-    "⚠️ V526 can corroborate a brand from independent public deployer evidence, but shared deployer identity alone cannot rename a detector.",
+    "⚠️ V527 keeps V526 brand corroboration safeguards and treats Mint Club's official contract as a seeded lead until live exact evidence is observed.",
     "✅ lunch.fun remains a strongly corroborated identity candidate until a direct factory/proxy → brand link is proven.",
     "<i>/sourceintel is read-only: 0 provider requests and 0 persistent state writes.</i>"
   ].join("\n");
