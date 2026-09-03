@@ -1,4 +1,29 @@
 /**
+ * Robinhood Chain Meme Hunter — V570
+ * AUTHORITATIVE RUNTIME VERSION: V570
+ *
+ * V570 V212 VERIFIED-OBSERVED EXACT-POOL → CONTINUOUS WATCH HANDOFF:
+ * - preserves V569 persisted verified sweep → Telegram;
+ * - preserves V568/V567/V566 catch-up and scheduler behaviour;
+ * - fixes the fresh-launch handoff exposed by JUICE:
+ *   V212 could already hold candidate-matched exact-USD V4 records with an
+ *   exact PoolId + quoteTokenAddress while onChainPoolIdentityV153 was still
+ *   unverified, leaving the rolling exact-pool ledger unable to register;
+ * - derives watch-registration candidates only from V212's underlying
+ *   exactUsdVerified records in state;
+ * - requires exact candidate token match, exact 32-byte PoolId, one consistent
+ *   quoteTokenAddress for that PoolId, and V254-priceable quote basis;
+ * - registers each proven token+PoolId forward-only at the current head;
+ * - DOES NOT backfill or claim full-window coverage from observed V212 trades;
+ * - therefore a fresh alert can show the proven exact PoolId immediately while
+ *   5m/15m/1h rolling totals remain UNVERIFIED until continuous coverage matures;
+ * - the existing "Verified On-chain USD (observed by bot)" section continues
+ *   to show immediate exact-USD observations such as JUICE's verified buys;
+ * - zero new external requests; hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, USD math, provider or Telegram
+ *   threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V569
  * AUTHORITATIVE RUNTIME VERSION: V569
  *
@@ -3442,7 +3467,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V569";
+const VERSION = "V570";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -57182,6 +57207,138 @@ function pruneDirectionalWatchV551(state) {
   return root;
 }
 
+function verifiedObservedWatchCandidatesV570(
+  state,
+  candidates,
+  wethUsdGReference
+) {
+  const out = [];
+  const seen = new Set();
+  const store = onChainDirectionalStoreV179(state);
+  const now = Date.now();
+
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const token = normalize(candidate?.address);
+    const flow = candidate?.onChainVerifiedFlowV212;
+
+    if (
+      candidate?.validERC20 !== true ||
+      !isAddress(token) ||
+      flow?.verified !== true ||
+      normalize(flow?.tokenAddress) !== token ||
+      !Array.isArray(flow?.poolIds) ||
+      flow.poolIds.length === 0
+    ) {
+      continue;
+    }
+
+    const ledger = store?.[token];
+    const records =
+      Array.isArray(ledger?.records)
+        ? ledger.records
+        : [];
+
+    for (const rawPoolId of flow.poolIds) {
+      const poolId = normalize(rawPoolId);
+
+      if (!/^0x[a-f0-9]{64}$/.test(String(poolId || ""))) {
+        continue;
+      }
+
+      const exactRows = records.filter(row =>
+        normalize(row?.candidateAddress) === token &&
+        normalize(row?.poolId) === poolId &&
+        row?.exactUsdVerified === true &&
+        Number.isFinite(Number(row?.exactUsdAmount)) &&
+        Number(row.exactUsdAmount) > 0 &&
+        (
+          row?.side === "buy" ||
+          row?.side === "sell"
+        )
+      );
+
+      if (!exactRows.length) continue;
+
+      const quoteTokens = Array.from(
+        new Set(
+          exactRows
+            .map(row => normalize(row?.quoteTokenAddress))
+            .filter(value => typeof value === "string" && value.length > 0)
+        )
+      );
+
+      /*
+       * A V4 pool has one fixed quote side for the candidate token. Do not
+       * synthesize a watch if the observed records disagree on quote identity.
+       */
+      if (quoteTokens.length !== 1) continue;
+
+      const quoteTokenAddress = quoteTokens[0];
+      const quoteEligibility =
+        v254PriceableQuote(
+          quoteTokenAddress,
+          wethUsdGReference
+        );
+
+      if (quoteEligibility?.eligible !== true) continue;
+
+      const key = `${token}:${poolId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const latestObservedAt = exactRows.reduce(
+        (max,row) => Math.max(max,safeNumber(row?.observedAt)),
+        0
+      );
+
+      const observedRecently =
+        latestObservedAt > 0 &&
+        (now - latestObservedAt) <= V180_WINDOW_MS.m15;
+
+      out.push({
+        ...candidate,
+        onChainPoolIdentityV153: {
+          ...(candidate?.onChainPoolIdentityV153 || {}),
+          verified: true,
+          poolId,
+          quoteTokenAddress,
+          poolSpecific: true,
+          source:
+            "V212_EXACT_USD_OBSERVED_POOL_HANDOFF_V570",
+          proof:
+            "CANDIDATE_MATCHED_EXACT_USD_RECORD_POOL_ID_AND_QUOTE_TOKEN"
+        },
+        activity: {
+          ...(candidate?.activity || {}),
+          poolSpecific: true,
+          swaps: Math.max(
+            safeNumber(candidate?.activity?.swaps),
+            exactRows.length
+          ),
+          liquidityEvents:
+            safeNumber(candidate?.activity?.liquidityEvents)
+        },
+        verifiedObservedRegistrationV570: {
+          verified: true,
+          source:
+            "ONCHAIN_DIRECTIONAL_V179_CANDIDATE_MATCHED_V212",
+          tokenAddress: token,
+          poolId,
+          quoteTokenAddress,
+          quoteBasis: quoteEligibility?.basis || null,
+          exactUsdRecords: exactRows.length,
+          latestObservedAt: latestObservedAt || null,
+          observedRecently,
+          forwardOnlyWatchStartRequired: true,
+          historicalWindowCoverageClaimed: false
+        }
+      });
+    }
+  }
+
+  return out;
+}
+
 function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber, wethUsdGReference) {
   const root = pruneDirectionalWatchV551(state);
   const now = Date.now();
@@ -57264,9 +57421,11 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
           safeNumber(existing?.exactUsdTrades) === 0
         );
       existing.registrationSourceV552 =
-        candidate?.successfulTelegramAlertFallbackV460?.verified === true
-          ? "PERSISTED_SUCCESSFUL_ALERT_FALLBACK_V460"
-          : "V458_SELECTED_CURRENT_EXACT_POOL_TARGET";
+        candidate?.verifiedObservedRegistrationV570?.verified === true
+          ? "V212_EXACT_USD_OBSERVED_POOL_HANDOFF_V570"
+          : candidate?.successfulTelegramAlertFallbackV460?.verified === true
+            ? "PERSISTED_SUCCESSFUL_ALERT_FALLBACK_V460"
+            : "V458_SELECTED_CURRENT_EXACT_POOL_TARGET";
       existing.updatedAt = now;
       refreshed++;
       rows.push({
@@ -57323,9 +57482,13 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       lastActivePoolEvidenceAtV555:activePoolEvidenceV555 ? now : null,
       zeroActivityDeprioritisedV555:false,
       registrationSourceV552:
-        candidate?.successfulTelegramAlertFallbackV460?.verified === true
-          ? "PERSISTED_SUCCESSFUL_ALERT_FALLBACK_V460"
-          : "V458_SELECTED_CURRENT_EXACT_POOL_TARGET"
+        candidate?.verifiedObservedRegistrationV570?.verified === true
+          ? "V212_EXACT_USD_OBSERVED_POOL_HANDOFF_V570"
+          : candidate?.successfulTelegramAlertFallbackV460?.verified === true
+            ? "PERSISTED_SUCCESSFUL_ALERT_FALLBACK_V460"
+            : "V458_SELECTED_CURRENT_EXACT_POOL_TARGET",
+      verifiedObservedRegistrationV570:
+        candidate?.verifiedObservedRegistrationV570 || null
     };
     registered++;
     rows.push({
@@ -61168,8 +61331,19 @@ function telegramRollingExactPoolUsdLinesV564(candidate) {
   ];
 
   if (!selected) {
+    const observedPoolIdsV570 =
+      Array.isArray(candidate?.onChainVerifiedFlowV212?.poolIds)
+        ? candidate.onChainVerifiedFlowV212.poolIds.filter(
+            value => /^0x[a-f0-9]{64}$/.test(String(normalize(value) || ""))
+          )
+        : [];
+
     lines.push(
-      "🛰 Exact PoolId: <b>UNVERIFIED</b>",
+      observedPoolIdsV570.length === 1
+        ? `🛰 Exact PoolId: <code>${escapeHtml(
+            `${normalize(observedPoolIdsV570[0]).slice(0,10)}…${normalize(observedPoolIdsV570[0]).slice(-8)}`
+          )}</code> <b>(OBSERVED — WATCH STARTING)</b>`
+        : "🛰 Exact PoolId: <b>UNVERIFIED</b>",
       "🟢 5m Buy USD: <b>UNVERIFIED</b>",
       "🔴 5m Sell USD: <b>UNVERIFIED</b>",
       "🟢 15m Buy USD: <b>UNVERIFIED</b>",
@@ -61182,7 +61356,9 @@ function telegramRollingExactPoolUsdLinesV564(candidate) {
       "🔴 12h Sell USD: <b>UNVERIFIED</b>",
       "🟢 24h Buy USD: <b>UNVERIFIED</b>",
       "🔴 24h Sell USD: <b>UNVERIFIED</b>",
-      "ℹ️ <i>Exact-pool continuous coverage is not yet proven for this token.</i>"
+      observedPoolIdsV570.length === 1
+        ? "ℹ️ <i>Exact PoolId is proven from candidate-matched exact-USD V4 observations. Continuous rolling coverage starts forward-only; earlier observed USD remains shown separately and is not promoted into complete-window totals.</i>"
+        : "ℹ️ <i>Exact-pool continuous coverage is not yet proven for this token.</i>"
     );
     return lines;
   }
@@ -74533,7 +74709,16 @@ for (
       })
       .slice(0, 3);
 
+  const directionalObservedExactPoolCandidatesV570 =
+    verifiedObservedWatchCandidatesV570(
+      state,
+      candidates,
+      onChainDirectionalV179?.wethUsdGReferenceV187 ||
+        bestVerifiedWethUsdGReferenceV195(state)
+    );
+
   const directionalWatchRegistrationCandidatesV555 = [
+    ...directionalObservedExactPoolCandidatesV570,
     ...directionalActiveExactPoolCandidatesV555,
     ...completeExactPoolCandidatesV458
   ].filter((candidate,index,array) =>
@@ -74552,6 +74737,37 @@ for (
       onChainDirectionalV179?.wethUsdGReferenceV187 ||
         bestVerifiedWethUsdGReferenceV195(state)
     );
+
+  const directionalObservedPoolHandoffV570 = {
+    enabled:true,
+    measurementOnly:true,
+    externalRequestsAdded:0,
+    derivedCandidates:
+      directionalObservedExactPoolCandidatesV570.length,
+    rows:
+      directionalObservedExactPoolCandidatesV570.map(candidate => ({
+        address:normalize(candidate?.address),
+        symbol:candidate?.symbol || null,
+        poolId:
+          normalize(candidate?.onChainPoolIdentityV153?.poolId) || null,
+        quoteTokenAddress:
+          normalize(candidate?.onChainPoolIdentityV153?.quoteTokenAddress) || null,
+        exactUsdRecords:
+          safeNumber(
+            candidate?.verifiedObservedRegistrationV570?.exactUsdRecords
+          ),
+        latestObservedAt:
+          candidate?.verifiedObservedRegistrationV570?.latestObservedAt || null,
+        quoteBasis:
+          candidate?.verifiedObservedRegistrationV570?.quoteBasis || null,
+        forwardOnlyWatchStartRequired:true,
+        historicalWindowCoverageClaimed:false
+      })),
+    hardGlobalLimitUnchanged:42,
+    scoringChanged:false,
+    qualificationChanged:false,
+    telegramThresholdChanged:false
+  };
 
   const directionalActivePoolTargetingV555 = {
     enabled:true,
@@ -80758,6 +80974,7 @@ for (
             ?.poolId
         ) || null
     },
+    directionalObservedPoolHandoffV570,
     directionalActivePoolTargetingV555,
     directionalWatchRegistrationV551,
     directionalWatchReserveV553,
