@@ -1,3 +1,27 @@
+/**
+ * Robinhood Chain Meme Hunter — V566
+ * AUTHORITATIVE RUNTIME VERSION: V566
+ *
+ * V566 DENSITY-AWARE EXACT-POOL CATCH-UP:
+ * - preserves V565 evidence-aware 24-slot retention;
+ * - preserves V564 Telegram verified rolling USD output;
+ * - preserves V563 token+PoolId watch keying;
+ * - fixes the confirmed catch-up throughput bottleneck without adding requests;
+ * - proven low-density pools can expand a single Blockscout exact-pool query
+ *   beyond 600 blocks, up to a hard V566 ceiling of 4,800 blocks;
+ * - span is chosen from observed historical log density:
+ *     <= 50 logs/successful range  -> up to 4,800 blocks
+ *     <= 200                       -> up to 2,400 blocks
+ *     <= 500                       -> up to 1,200 blocks
+ *     > 500 / insufficient history -> 600 blocks
+ * - requires >=2 successful contiguous ranges and zero saturation history before
+ *   the larger density-aware span is allowed;
+ * - existing 1,000-row saturation guard remains authoritative:
+ *   saturated queries DO NOT advance coverage and immediately halve the span;
+ * - exact-USD decode completeness remains mandatory before coverage advances;
+ * - no extra external requests and hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, provider, USD math, or Telegram threshold changes.
+ */
 /** Robinhood Chain Meme Hunter — V565
  * Evidence-aware directional watch retention.
  * Preserves V564/V563/V562 functionality.
@@ -3350,7 +3374,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V565";
+const VERSION = "V566";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -8697,6 +8721,7 @@ const DIRECTIONAL_WATCH_MAX_AGE_MS_V551 = 48 * 60 * 60 * 1000;
 const DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551 = 600;
 const DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551 = 10;
 const DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551 = 1200;
+const DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V566 = 4800;
 
 /* V554 bounded same-pool catch-up. */
 const DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554 = 3;
@@ -57528,7 +57553,7 @@ async function advanceDirectionalWatchV551({
   const baseConfiguredSpanV562 = Math.max(
     DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551,
     Math.min(
-      DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551,
+      DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V566,
       Math.floor(
         safeNumber(candidate?.adaptiveBlockSpan) ||
         DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551
@@ -57539,6 +57564,45 @@ async function advanceDirectionalWatchV551({
   const blocksBehindHeadV562 =
     Math.max(0, head - lastCollectedBlock);
 
+  const successfulRangesV566 =
+    safeNumber(candidate?.successfulRanges);
+  const cumulativeReturnedLogsV566 =
+    safeNumber(candidate?.returnedLogs);
+  const averageLogsPerSuccessfulRangeV566 =
+    successfulRangesV566 > 0
+      ? cumulativeReturnedLogsV566 / successfulRangesV566
+      : null;
+
+  let densityTargetSpanV566 =
+    DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551;
+
+  if (
+    successfulRangesV566 >= 2 &&
+    safeNumber(candidate?.saturatedAttempts) === 0 &&
+    candidate?.nearHeadElasticBlockedV562 !== true
+  ) {
+    if (
+      Number.isFinite(averageLogsPerSuccessfulRangeV566) &&
+      averageLogsPerSuccessfulRangeV566 <= 50
+    ) {
+      densityTargetSpanV566 = 4800;
+    } else if (
+      Number.isFinite(averageLogsPerSuccessfulRangeV566) &&
+      averageLogsPerSuccessfulRangeV566 <= 200
+    ) {
+      densityTargetSpanV566 = 2400;
+    } else if (
+      Number.isFinite(averageLogsPerSuccessfulRangeV566) &&
+      averageLogsPerSuccessfulRangeV566 <= 500
+    ) {
+      densityTargetSpanV566 = 1200;
+    }
+  }
+
+  /*
+   * V562 remains useful for a newly active near-head pool without enough
+   * history for V566's density classification.
+   */
   const elasticEligibleV562 =
     candidate?.activePoolEvidenceV555 === true &&
     candidate?.nearHeadElasticBlockedV562 !== true &&
@@ -57547,13 +57611,20 @@ async function advanceDirectionalWatchV551({
       (DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551 * 2) &&
     baseConfiguredSpanV562 >= DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551;
 
-  const configuredSpan =
-    elasticEligibleV562
-      ? Math.min(
-          DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551,
-          blocksBehindHeadV562
-        )
-      : baseConfiguredSpanV562;
+  const densityExpansionEligibleV566 =
+    densityTargetSpanV566 > DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551;
+
+  const configuredSpan = Math.max(
+    DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551,
+    Math.min(
+      blocksBehindHeadV562,
+      densityExpansionEligibleV566
+        ? densityTargetSpanV566
+        : elasticEligibleV562
+          ? DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551
+          : baseConfiguredSpanV562
+    )
+  );
 
   const fromBlock = lastCollectedBlock + 1;
   const toBlock = Math.min(head, fromBlock + configuredSpan - 1);
@@ -57602,6 +57673,8 @@ async function advanceDirectionalWatchV551({
         DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551,
         Math.floor(configuredSpan / 2)
       );
+      candidate.lastRangeReturnedLogsV566 = rows.length;
+      candidate.lastDensitySpanAttemptV566 = configuredSpan;
       candidate.nearHeadElasticBlockedV562 = true;
       candidate.lastStatus = "RANGE_SATURATED_RETRY_SMALLER_NO_COVERAGE_ADVANCE_V551";
       candidate.updatedAt = Date.now();
@@ -57651,6 +57724,31 @@ async function advanceDirectionalWatchV551({
       safeNumber(candidate?.exactUsdTrades) +
       safeNumber(persisted?.exactUsdTrades);
     candidate.gapDetected = false;
+    candidate.lastRangeReturnedLogsV566 = rows.length;
+    candidate.lastDensitySpanAttemptV566 = configuredSpan;
+    candidate.lastDensityAverageLogsPerSuccessfulRangeV566 =
+      averageLogsPerSuccessfulRangeV566;
+
+    /*
+     * Successful large low-density ranges may retain their proven span.
+     * A denser response immediately reduces the next preferred span.
+     */
+    if (rows.length <= 50) {
+      candidate.adaptiveBlockSpan = Math.min(
+        DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V566,
+        Math.max(
+          DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551,
+          configuredSpan
+        )
+      );
+    } else if (rows.length <= 200) {
+      candidate.adaptiveBlockSpan = Math.min(2400, configuredSpan);
+    } else if (rows.length <= 500) {
+      candidate.adaptiveBlockSpan = Math.min(1200, configuredSpan);
+    } else {
+      candidate.adaptiveBlockSpan =
+        DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551;
+    }
 
     if (toBlock >= head) {
       candidate.everCaughtUpV565 = true;
@@ -57696,8 +57794,17 @@ async function advanceDirectionalWatchV551({
       coverageEndBlock:candidate?.coverageEndBlock ?? null,
       blocksRemainingToHead:Math.max(0, head - toBlock),
       blocksBehindAtSelectionV562:blocksBehindHeadV562,
-      elasticNearHeadSpanAppliedV562:elasticEligibleV562,
+      elasticNearHeadSpanAppliedV562:
+        elasticEligibleV562 && !densityExpansionEligibleV566,
+      densityExpansionAppliedV566:densityExpansionEligibleV566,
+      densityTargetSpanV566,
+      averageLogsPerSuccessfulRangeV566:
+        Number.isFinite(averageLogsPerSuccessfulRangeV566)
+          ? Number(averageLogsPerSuccessfulRangeV566.toFixed(2))
+          : null,
+      successfulRangesAtSelectionV566:successfulRangesV566,
       configuredBlockSpanV562:configuredSpan,
+      configuredBlockSpanV566:configuredSpan,
       baseConfiguredBlockSpanV562:baseConfiguredSpanV562,
       nearHeadElasticBlockedV562:candidate?.nearHeadElasticBlockedV562 === true,
       adaptiveBlockSpan:candidate?.adaptiveBlockSpan || configuredSpan,
@@ -57741,6 +57848,14 @@ function directionalWatchSnapshotV551(state) {
       everCaughtUpV565:row?.everCaughtUpV565 === true,
       firstCaughtUpAtV565:safeNumber(row?.firstCaughtUpAtV565) || null,
       lastCaughtUpAtV565:safeNumber(row?.lastCaughtUpAtV565) || null,
+      lastRangeReturnedLogsV566:
+        Number.isFinite(Number(row?.lastRangeReturnedLogsV566))
+          ? Number(row.lastRangeReturnedLogsV566)
+          : null,
+      lastDensitySpanAttemptV566:
+        Number.isFinite(Number(row?.lastDensitySpanAttemptV566))
+          ? Number(row.lastDensitySpanAttemptV566)
+          : null,
       saturatedAttempts:safeNumber(row?.saturatedAttempts),
       registrationSourceV552:row?.registrationSourceV552 || null,
       activePoolEvidenceV555:row?.activePoolEvidenceV555 === true,
@@ -75201,6 +75316,16 @@ for (
           : null,
       elasticNearHeadSpanAppliedV562:
         row?.elasticNearHeadSpanAppliedV562 === true,
+      densityExpansionAppliedV566:
+        row?.densityExpansionAppliedV566 === true,
+      densityTargetSpanV566:
+        Number.isFinite(Number(row?.densityTargetSpanV566))
+          ? Number(row.densityTargetSpanV566)
+          : null,
+      averageLogsPerSuccessfulRangeV566:
+        Number.isFinite(Number(row?.averageLogsPerSuccessfulRangeV566))
+          ? Number(row.averageLogsPerSuccessfulRangeV566)
+          : null,
       configuredBlockSpanV562:
         Number.isFinite(Number(row?.configuredBlockSpanV562))
           ? Number(row.configuredBlockSpanV562)
@@ -75224,6 +75349,9 @@ for (
     finishNearHeadPoolFirstV561:true,
     elasticNearHeadSpanV562:true,
     elasticNearHeadMaxSpanV562:DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551,
+    densityAwareCatchupV566:true,
+    densityAwareMaxSpanV566:DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V566,
+    saturationRowGuardV566:BLOCKSCOUT_LOGS_MAX_ROWS_V180,
     reservedRequestsV559:safeNumber(
       directionalWatchReserveV553?.reservedRequests
     ),
