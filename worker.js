@@ -1,4 +1,15 @@
 /**
+ * Robinhood Chain Meme Hunter — V550
+ * AUTHORITATIVE RUNTIME VERSION: V550
+ *
+ * V550 SIGNED COHORT DELTA DISPLAY FIX — REPORTING ONLY:
+ * - fixes /signallearn negative USD median deltas displaying as UNVERIFIED;
+ * - cohort medians and all underlying frozen measurements are unchanged;
+ * - signed USD differences are formatted explicitly as +$x.xx / -$x.xx;
+ * - no measurement collection, scoring, Momentum, qualification, Telegram threshold,
+ *   launch-source logic, provider budget or hard 42-request-cap behavior changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V549
  * AUTHORITATIVE RUNTIME VERSION: V549
  *
@@ -3061,7 +3072,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V549";
+const VERSION = "V550";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -87642,10 +87653,16 @@ function signalLearningMetricStatsV548(records, extractor) {
   };
 }
 
-function signalLearningFormatV548(value, kind) {
+function signalLearningFormatV548(value, kind, signed = false) {
   const n = Number(value);
   if (!Number.isFinite(n)) return "UNVERIFIED";
-  if (kind === "usd") return telegramMoneyV271(n);
+  if (kind === "usd") {
+    if (signed) {
+      const sign = n > 0 ? "+" : n < 0 ? "-" : "";
+      return `${sign}$${Math.abs(n).toFixed(2)}`;
+    }
+    return telegramMoneyV271(n);
+  }
   if (kind === "pct") return `${n.toFixed(2)}%`;
   if (kind === "rate") return n.toFixed(2);
   if (kind === "count") return n.toFixed(1);
@@ -87670,8 +87687,12 @@ function signalLearningMetricLineV548(label, failures, winners, extractor, kind)
   let comparison = "comparison DATA UNVERIFIED";
   if (fail && win) {
     const delta = win.median - fail.median;
-    const sign = delta > 0 ? "+" : "";
-    comparison = `median Δ ${sign}${signalLearningFormatV548(delta,kind)}`;
+    if (kind === "usd") {
+      comparison = `median Δ ${signalLearningFormatV548(delta,kind,true)}`;
+    } else {
+      const sign = delta > 0 ? "+" : "";
+      comparison = `median Δ ${sign}${signalLearningFormatV548(delta,kind)}`;
+    }
   }
 
   return `• ${label}: ${failText} | ${winText} | ${comparison}`;
