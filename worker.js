@@ -2726,7 +2726,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V524";
+const VERSION = "V525";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -21584,6 +21584,158 @@ function seededOpenfairLiveEvidenceSnapshotV524(state) {
   };
 }
 
+
+/* =========================================================
+   V525 FLAP EXACT-SOURCE VALIDATION COLLECTOR
+   =========================================================
+   Purpose:
+   - Preserve the existing V214 Bitquery-verified Flap launch evidence.
+   - Add the already-supported Flap Portal/router to the EXISTING live
+     eth_getLogs emitter array: ZERO extra live-discovery requests.
+   - Cross-correlate a V214 verified Flap launch with an exact Portal log from
+     the SAME transaction and accept a token ABI location only when that token
+     occurs exactly once in that Portal log.
+   - Require the SAME emitter + topic0 + token slot across THREE distinct
+     verified Flap launch tokens and THREE distinct transactions before an
+     exact event pattern can be called confirmed.
+   - Measurement/proof only. No scoring, qualification, Telegram threshold,
+     V517/V520 self-learning, or hard-42 behavior is changed.
+*/
+const SEEDED_FLAP_PORTAL_V525 = FLAP_ROUTER_V214;
+
+function ensureSeededFlapExactEvidenceV525(state) {
+  state.seededFlapExactEvidenceV525 ??= {
+    enabled: true,
+    measurementOnlyUntilExactProof: true,
+    portal: SEEDED_FLAP_PORTAL_V525,
+    scansObserved: 0,
+    matchingLogsObserved: 0,
+    distinctTransactionsObserved: 0,
+    verifiedLaunchTxCorrelations: 0,
+    exactTokenOccurrenceObservations: [],
+    strongestPatternClusters: [],
+    exactLaunchPatternConfirmed: false,
+    confirmedPattern: null,
+    exactDetectorRegistered: false,
+    launchSourcePromotionAllowed: false,
+    externalRequestsAdded: 0,
+    hardGlobalLimitUnchanged: 42,
+    status: "V525_FLAP_EXACT_VALIDATION_ARMED"
+  };
+  return state.seededFlapExactEvidenceV525;
+}
+
+function seededFlapEmitterAddressesV525(state) {
+  ensureSeededFlapExactEvidenceV525(state);
+  return [SEEDED_FLAP_PORTAL_V525];
+}
+
+function rebuildSeededFlapPatternsV525(state) {
+  const root = ensureSeededFlapExactEvidenceV525(state);
+  const clusters = {};
+  for (const row of Array.isArray(root.exactTokenOccurrenceObservations) ? root.exactTokenOccurrenceObservations : []) {
+    const token = normalize(row?.token);
+    const tx = normalizeTxHashV495(row?.transactionHash);
+    const emitter = normalize(row?.emitter);
+    const topic0 = normalize(row?.topic0);
+    const type = String(row?.addressLocationType || "");
+    const index = Number(row?.addressLocationIndex);
+    if (!isAddress(token) || !tx || emitter !== SEEDED_FLAP_PORTAL_V525 ||
+        !/^0x[a-f0-9]{64}$/.test(topic0) || !["TOPIC","DATA_WORD"].includes(type) ||
+        !Number.isInteger(index) || index < 0) continue;
+    const key = [emitter, topic0, type, index].join(":");
+    clusters[key] ??= {key, emitter, topic0, addressLocationType:type, addressLocationIndex:index,
+      tokens:new Set(), transactionHashes:new Set(), logIndexes:[]};
+    clusters[key].tokens.add(token);
+    clusters[key].transactionHashes.add(tx);
+    const li = Number(row?.logIndex);
+    if (Number.isInteger(li)) clusters[key].logIndexes.push(li);
+  }
+  const ranked = Object.values(clusters).map(row => ({
+    key:row.key, emitter:row.emitter, topic0:row.topic0,
+    addressLocationType:row.addressLocationType, addressLocationIndex:row.addressLocationIndex,
+    tokens:Array.from(row.tokens), transactionHashes:Array.from(row.transactionHashes),
+    distinctTokens:row.tokens.size, distinctTransactions:row.transactionHashes.size,
+    averageLogIndex:row.logIndexes.length ? row.logIndexes.reduce((a,b)=>a+b,0)/row.logIndexes.length : null,
+    maxLogIndex:row.logIndexes.length ? Math.max(...row.logIndexes) : null,
+    confirmed:row.tokens.size>=3 && row.transactionHashes.size>=3
+  })).sort((a,b)=>Number(b.confirmed)-Number(a.confirmed) || b.distinctTokens-a.distinctTokens ||
+    b.distinctTransactions-a.distinctTransactions || safeNumber(a.averageLogIndex)-safeNumber(b.averageLogIndex) ||
+    String(a.key).localeCompare(String(b.key)));
+  root.strongestPatternClusters = ranked.slice(0,10);
+  const confirmed = ranked.find(row=>row.confirmed) || null;
+  root.exactLaunchPatternConfirmed = Boolean(confirmed);
+  root.confirmedPattern = confirmed;
+  if (confirmed) root.status = "V525_FLAP_EXACT_PATTERN_CONFIRMED_THREE_INDEPENDENT_VERIFIED_LAUNCHES";
+  return confirmed;
+}
+
+function observeSeededFlapLiveLogsV525(state, logs) {
+  const root = ensureSeededFlapExactEvidenceV525(state);
+  root.scansObserved = safeNumber(root.scansObserved)+1;
+  const rows = (Array.isArray(logs)?logs:[]).filter(row=>normalize(row?.address||"")===SEEDED_FLAP_PORTAL_V525);
+  root.matchingLogsObserved = safeNumber(root.matchingLogsObserved)+rows.length;
+  const allTx = new Set((root.recentTransactionHashes||[]).map(normalizeTxHashV495).filter(Boolean));
+  for (const row of rows) {
+    const tx = normalizeTxHashV495(row?.transactionHash || row?.transaction_hash);
+    if (tx) allTx.add(tx);
+  }
+  root.recentTransactionHashes = Array.from(allTx).slice(-250);
+  root.distinctTransactionsObserved = root.recentTransactionHashes.length;
+
+  const launches = Array.isArray(state?.flapDiscoveryV214?.recentVerifiedLaunches) ? state.flapDiscoveryV214.recentVerifiedLaunches : [];
+  const byTx = new Map();
+  for (const launch of launches) {
+    const tx = normalizeTxHashV495(launch?.transactionHash);
+    const token = normalize(launch?.token);
+    if (tx && isAddress(token)) byTx.set(tx,{tx,token});
+  }
+  const existingCorrelatedTx = new Set((root.correlatedTransactionHashes||[]).map(normalizeTxHashV495).filter(Boolean));
+  for (const row of rows) {
+    const tx = normalizeTxHashV495(row?.transactionHash || row?.transaction_hash);
+    const verified = tx ? byTx.get(tx) : null;
+    if (!verified) continue;
+    existingCorrelatedTx.add(tx);
+    const occurrences = exactTokenOccurrencesAcrossReceiptV512({receipt:{logs:[row]}, token:verified.token, verifiedFactory:SEEDED_FLAP_PORTAL_V525});
+    if (occurrences.length !== 1) continue;
+    const occ=occurrences[0];
+    const logIndexHex=row?.logIndex ?? row?.log_index ?? null;
+    const chainLogIndex=typeof logIndexHex==="string" && /^0x[0-9a-f]+$/i.test(logIndexHex) ? parseInt(logIndexHex,16) : safeNumber(logIndexHex)||null;
+    const observation={observedAt:Date.now(),token:verified.token,transactionHash:tx,emitter:SEEDED_FLAP_PORTAL_V525,
+      topic0:occ.topic0,addressLocationType:occ.addressLocationType,addressLocationIndex:occ.addressLocationIndex,
+      logIndex:chainLogIndex,sourceEvidence:"BITQUERY_FLAP_VERIFIED_LAUNCH_V214_PLUS_SAME_TX_EXACT_PORTAL_LOG_V525",
+      exactTokenOccursOnceInMatchedLog:true};
+    const dup=(root.exactTokenOccurrenceObservations||[]).some(x=>normalize(x?.token)===observation.token &&
+      normalizeTxHashV495(x?.transactionHash)===observation.transactionHash && normalize(x?.topic0)===normalize(observation.topic0) &&
+      String(x?.addressLocationType)===observation.addressLocationType && Number(x?.addressLocationIndex)===observation.addressLocationIndex);
+    if (!dup) root.exactTokenOccurrenceObservations.push(observation);
+  }
+  root.correlatedTransactionHashes=Array.from(existingCorrelatedTx).slice(-250);
+  root.verifiedLaunchTxCorrelations=root.correlatedTransactionHashes.length;
+  root.exactTokenOccurrenceObservations=(root.exactTokenOccurrenceObservations||[]).slice(-250);
+  rebuildSeededFlapPatternsV525(state);
+  if (!root.exactLaunchPatternConfirmed) root.status=rows.length ?
+    "V525_FLAP_PORTAL_EVENTS_OBSERVED_AWAIT_THREE_EXACT_VERIFIED_LAUNCH_CORRELATIONS" :
+    "V525_FLAP_EXACT_VALIDATION_ARMED_NO_PORTAL_EVENT_OBSERVED_YET";
+  return {enabled:true,portal:SEEDED_FLAP_PORTAL_V525,matchingLogsThisChunk:rows.length,
+    matchingLogsObserved:safeNumber(root.matchingLogsObserved),verifiedLaunchTxCorrelations:safeNumber(root.verifiedLaunchTxCorrelations),
+    exactOccurrenceObservationCount:(root.exactTokenOccurrenceObservations||[]).length,
+    exactLaunchPatternConfirmed:root.exactLaunchPatternConfirmed===true,externalRequestsAdded:0,launchSourcePromoted:false,status:root.status};
+}
+
+function seededFlapExactEvidenceSnapshotV525(state) {
+  const root=ensureSeededFlapExactEvidenceV525(state);
+  rebuildSeededFlapPatternsV525(state);
+  return {enabled:true,measurementOnlyUntilExactProof:true,portal:SEEDED_FLAP_PORTAL_V525,
+    scansObserved:safeNumber(root.scansObserved),matchingLogsObserved:safeNumber(root.matchingLogsObserved),
+    distinctTransactionsObserved:safeNumber(root.distinctTransactionsObserved),verifiedLaunchTxCorrelations:safeNumber(root.verifiedLaunchTxCorrelations),
+    exactOccurrenceObservationCount:(root.exactTokenOccurrenceObservations||[]).length,
+    strongestPatternClusters:Array.isArray(root.strongestPatternClusters)?root.strongestPatternClusters.slice(0,5):[],
+    exactLaunchPatternConfirmed:root.exactLaunchPatternConfirmed===true,confirmedPattern:root.confirmedPattern||null,
+    exactDetectorRegistered:root.exactDetectorRegistered===true,launchSourcePromotionAllowed:false,externalRequestsAdded:0,
+    hardGlobalLimitUnchanged:42,status:root.status||null};
+}
+
 /* =========================================================
    LIVE SCAN
    ========================================================= */
@@ -21651,7 +21803,8 @@ async function scanLiveRange(
         ...dopplerLiveEmittersV514,
         ...genericVerifiedEmittersV515,
         ...seededNoxaEmitterAddressesV523(state),
-        ...seededOpenfairEmitterAddressesV524(state)
+        ...seededOpenfairEmitterAddressesV524(state),
+        ...seededFlapEmitterAddressesV525(state)
       ])
     );
 
@@ -22017,6 +22170,11 @@ async function scanLiveRange(
       );
 
       observeSeededOpenfairLiveLogsV524(
+        state,
+        response.result
+      );
+
+      observeSeededFlapLiveLogsV525(
         state,
         response.result
       );
@@ -113045,11 +113203,16 @@ function sourceIdentityIntelSnapshotV522(state) {
       ? seededOpenfairLiveEvidenceSnapshotV524(state)
       : null;
 
+    const flapV525 = seed.key === "flap"
+      ? seededFlapExactEvidenceSnapshotV525(state)
+      : null;
+
     return {
       ...seed,
       address,
       seededLiveEvidenceV523: noxaV523,
       seededLiveEvidenceV524: openfairV524,
+      seededExactEvidenceV525: flapV525,
       observedInVerifiedCreatorOrigins: Boolean(cluster),
       distinctVerifiedOriginTokens: distinctTokens,
       blockscoutVerifiedContractProfile: profile?.blockscoutVerifiedContract === true,
@@ -113063,8 +113226,14 @@ function sourceIdentityIntelSnapshotV522(state) {
           ? "V523_SEEDED_FACTORY_LIVE_EVENTS_OBSERVED_AWAIT_EXACT_TOKEN_PROOF"
           : (seed.key === "openfair" && safeNumber(openfairV524?.matchingLogsObserved) > 0)
             ? "V524_SEEDED_OPENFAIR_LIVE_EVENTS_OBSERVED_AWAIT_EXACT_TOKEN_PROOF"
-            : cluster
+            : (seed.key === "flap" && flapV525?.exactLaunchPatternConfirmed === true)
+              ? "V525_FLAP_EXACT_PATTERN_CONFIRMED_THREE_INDEPENDENT_VERIFIED_LAUNCHES"
+              : (seed.key === "flap" && safeNumber(flapV525?.matchingLogsObserved) > 0)
+                ? "V525_FLAP_PORTAL_EVENTS_OBSERVED_AWAIT_EXACT_PATTERN_PROOF"
+                : cluster
               ? "OBSERVED_IN_BOT_VERIFIED_ORIGIN_EVIDENCE_AWAIT_EXACT_SOURCE_PROOF"
+              : (seed.key === "flap")
+                ? "V525_FLAP_EXACT_VALIDATION_ARMED_NO_PORTAL_EVENT_OBSERVED_YET"
               : alreadyStaticSupported
                 ? "ALREADY_SUPPORTED_STATIC_SOURCE_NO_24H_CORRELATION_REQUIRED_V522"
                 : (seed.key === "noxa_fun")
@@ -113078,7 +113247,7 @@ function sourceIdentityIntelSnapshotV522(state) {
 
   return {
     enabled: true,
-    version: "V524",
+    version: "V525",
     readOnly: true,
     externalProviderRequests: 0,
     persistentWrites: 0,
@@ -113091,7 +113260,7 @@ function sourceIdentityIntelSnapshotV522(state) {
     seededLeadCount: seededLeads.length,
     seededLeads,
     interpretation:
-      "IDENTITY_AND_SEEDED_LIVE_EVIDENCE_ONLY_NO_BRAND_OR_SOURCE_PROMOTION_WITHOUT_BOT_EXACT_PROOF_V524"
+      "IDENTITY_AND_SEEDED_EXACT_SOURCE_EVIDENCE_ONLY_NO_BRAND_OR_SOURCE_PROMOTION_WITHOUT_BOT_EXACT_PROOF_V525"
   };
 }
 
@@ -113140,6 +113309,19 @@ function sourceIdentityIntelTelegramMessageV522(state) {
       );
     }
 
+    if (row.key === "flap" && row.seededExactEvidenceV525) {
+      const top = Array.isArray(row.seededExactEvidenceV525.strongestPatternClusters)
+        ? row.seededExactEvidenceV525.strongestPatternClusters[0]
+        : null;
+      lines.push(
+        `  V525 live Portal logs observed: <b>${Number(safeNumber(row.seededExactEvidenceV525.matchingLogsObserved)).toLocaleString("en-GB")}</b>`,
+        `  Verified Flap launch tx correlations: <b>${Number(safeNumber(row.seededExactEvidenceV525.verifiedLaunchTxCorrelations)).toLocaleString("en-GB")}</b>`,
+        `  Exact token-slot observations: <b>${Number(safeNumber(row.seededExactEvidenceV525.exactOccurrenceObservationCount)).toLocaleString("en-GB")}</b>`,
+        `  Strongest exact pattern proof: <b>${top ? `${safeNumber(top.distinctTokens)}/3 tokens • ${safeNumber(top.distinctTransactions)}/3 txs` : "0/3"}</b>`,
+        `  Exact Flap launch pattern: <b>${row.seededExactEvidenceV525.exactLaunchPatternConfirmed ? "CONFIRMED" : "DATA UNVERIFIED"}</b>`
+      );
+    }
+
     return lines;
   });
 
@@ -113152,7 +113334,7 @@ function sourceIdentityIntelTelegramMessageV522(state) {
     "<b>Seeded launchpad leads — correlation only</b>",
     ...seedLines,
     "",
-    "⚠️ Website/research labels are leads only. V524 does not promote a source name from them.",
+    "⚠️ Website/research labels are leads only. V525 does not promote a source name from them.",
     "✅ Exact launch-source verification still requires the bot's existing on-chain proof standard.",
     "<i>/sourceintel is read-only: 0 provider requests and 0 persistent state writes.</i>"
   ].join("\n");
