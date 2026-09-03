@@ -1,4 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V577
+ * AUTHORITATIVE RUNTIME VERSION: V577
+ *
+ * V577 VERIFIED PRIOR-COMPLETION FIRST-RANGE SCHEDULER:
+ * - preserves V576 1m exact-pool window and all V575/V574 recovery/retention logic;
+ * - fixes the proven scheduler starvation where a verified V466-recovered pool
+ *   can survive the 24-slot watch yet receive zero collection ranges;
+ * - a recent verified priorCompletionRecoveryV574 row with successfulRanges=0
+ *   gets a temporary scheduler tier 4, above V567 expansion-ready tier 3;
+ * - after its first successful contiguous range it automatically drops back to
+ *   the normal V567 scheduler tiers;
+ * - generic for every safely verified V466 prior-completion recovery, not JUICE-specific;
+ * - uses only the existing directional request reserve / max 3 chunks per scan;
+ * - no new external requests, hard global cap remains 42;
+ * - no backfill and no scoring, Momentum, qualification, USD maths, provider,
+ *   watch-cap, retention, or Telegram-threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V576
  * AUTHORITATIVE RUNTIME VERSION: V576
  *
@@ -3618,7 +3636,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V576";
+const VERSION = "V577";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -58055,7 +58073,25 @@ function directionalWatchExpansionReadyV567(row) {
   );
 }
 
+function directionalWatchNeedsFirstRangePriorityV577(row) {
+  return Boolean(
+    row?.priorCompletionRecoveryV574?.verified === true &&
+    safeNumber(row?.successfulRanges) === 0 &&
+    Number.isFinite(Number(row?.lastCollectedBlock)) &&
+    safeNumber(row?.priorCompletionRecoveryV574?.completedAt) > 0 &&
+    Date.now() - safeNumber(row.priorCompletionRecoveryV574.completedAt) <=
+      DIRECTIONAL_PRIOR_COMPLETION_MAX_AGE_MS_V574
+  );
+}
+
 function directionalWatchPriorityTierV567(row) {
+  /*
+   * V577: one-shot bootstrap priority for safely reconstructed V466 pools.
+   * The moment the first contiguous range succeeds, successfulRanges becomes
+   * > 0 and the row returns to the normal V567 scheduler automatically.
+   */
+  if (directionalWatchNeedsFirstRangePriorityV577(row)) return 4;
+
   if (directionalWatchExpansionReadyV567(row)) return 3;
 
   if (
@@ -58298,6 +58334,8 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
   reserve.poolId = candidate ? normalize(candidate?.poolId) : null;
   reserve.selectionPriorityTierV567 =
     candidate ? directionalWatchPriorityTierV567(candidate) : null;
+  reserve.priorCompletionFirstRangePriorityV577 =
+    candidate ? directionalWatchNeedsFirstRangePriorityV577(candidate) : false;
   reserve.expansionReadyPriorityV567 =
     candidate ? directionalWatchExpansionReadyV567(candidate) : false;
   reserve.releaseReason = candidate
@@ -58343,6 +58381,8 @@ async function advanceDirectionalWatchV551({
     watchedCount:Object.keys(root.entries || {}).length,
     selectedToken:candidate ? normalize(candidate?.tokenAddress) : null,
     selectedPoolId:candidate ? normalize(candidate?.poolId) : null,
+    priorCompletionFirstRangePriorityV577:
+      candidate ? directionalWatchNeedsFirstRangePriorityV577(candidate) : false,
     fromBlock:null,
     toBlock:null,
     returnedLogs:0,
@@ -76483,7 +76523,7 @@ for (
     enabled:true,
     measurementOnly:true,
     samePoolOnly:false,
-    schedulerVersion:"V561_NEAR_HEAD_FINISH_THEN_DISTINCT_ROUND_ROBIN",
+    schedulerVersion:"V577_V466_FIRST_RANGE_THEN_V561_DISTINCT_ROUND_ROBIN",
     finishNearHeadPoolFirstV561:true,
     maxWatchedPoolsAdvancedPerScan:DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554,
     maxChunksPerScan:DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554,
@@ -76548,6 +76588,8 @@ for (
         Number.isFinite(Number(row?.selectionPriorityTierV567))
           ? Number(row.selectionPriorityTierV567)
           : null,
+      priorCompletionFirstRangePriorityV577:
+        row?.priorCompletionFirstRangePriorityV577 === true,
       densityTargetSpanV566:
         Number.isFinite(Number(row?.densityTargetSpanV566))
           ? Number(row.densityTargetSpanV566)
@@ -76574,8 +76616,17 @@ for (
   const directionalMultiPoolSchedulerV558 = {
     enabled:true,
     measurementOnly:true,
+    priorCompletionFirstRangePriorityV577:{
+      enabled:true,
+      temporaryTier:4,
+      normalExpansionReadyTierV567:3,
+      releaseCondition:"FIRST_SUCCESSFUL_CONTIGUOUS_RANGE",
+      generic:true,
+      externalRequestsAdded:0,
+      hardGlobalLimitUnchanged:42
+    },
     reserveVersion:"V559_DYNAMIC_THREE_SLOT_WITH_ONE_MINIMUM_GUARANTEE",
-    selectionPriorityV560:"ACTIVE_NEAREST_TO_HEAD_THEN_SWAP_ACTIVITY",
+    selectionPriorityV560:"V577_PRIOR_COMPLETION_FIRST_RANGE_THEN_V567_NORMAL_PRIORITY",
     finishNearHeadPoolFirstV561:true,
     elasticNearHeadSpanV562:true,
     elasticNearHeadMaxSpanV562:DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551,
