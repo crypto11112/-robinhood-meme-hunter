@@ -1,4 +1,26 @@
 /**
+ * Robinhood Chain Meme Hunter — V544
+ * AUTHORITATIVE RUNTIME VERSION: V544
+ *
+ * V544 AUTONOMOUS UNKNOWN-SOURCE ACCELERATION:
+ * - V543 permanently released the seeded historical request after Mint Club, NOXA Fun and
+ *   Flap became exact V515 detectors and Openfair history became exhausted;
+ * - uses at most ONE of that released post-Telegram requests per scan for autonomous source
+ *   learning instead of leaving it idle;
+ * - priority is evidence-first:
+ *     1) V517 eligible exact creation-receipt proof for an already verified recurring creator;
+ *     2) V519/V503 creator-identity handoff needed to unlock V517;
+ *     3) oldest unresolved V486/V485 verified-origin exact creation raw-trace attribution;
+ * - the extra lane never promotes from recurrence/name alone: V515 registration still requires
+ *   >=3 distinct verified tokens + >=3 distinct creation transactions with the SAME exact
+ *   non-PoolManager event/token slot pattern;
+ * - solved Mint Club/NOXA/Flap/Openfair seeded state is never re-queried by this lane;
+ * - at most one extra request is attempted, only after Telegram/seeded completion, and every
+ *   request still passes the authoritative released-global-spare hard-42 guard;
+ * - scanner, scoring, Momentum, qualification, Telegram thresholds, verified USD, holders,
+ *   ATH, existing detectors and all existing provider protections remain unchanged.
+ */
+/**
  * Robinhood Chain Meme Hunter — V543
  * AUTHORITATIVE RUNTIME VERSION: V543
  *
@@ -2944,7 +2966,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V543";
+const VERSION = "V544";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -22465,6 +22487,166 @@ async function runTargetedFlapHistoricalProofV541({env,state,budget,row,root}){
     row.status=row.exactDetectorRegistered===true?"V541_FLAP_EXACT_TARGETED_PATTERN_PROVEN_AND_REGISTERED_V515":"V541_FLAP_TARGETED_PROOF_ACCUMULATING";root.lastStatus=row.status;
     return{handled:true,enabled:true,attempted:true,requestConsumed:true,sourceKey:"flap",httpStatus:response.status,targetedTopic0:FLAP_TOKENCREATED_TOPIC0_V541,logsReturned:items.length,exactDecodedThisRequest:decoded,proofTokenCount:safeNumber(strong?.proofTokenCount),proofTransactionCount:safeNumber(strong?.proofTransactionCount),exactLaunchPatternConfirmed:row.exactLaunchPatternConfirmed===true,exactDetectorRegistered:row.exactDetectorRegistered===true,registrationStatus:registration?.status||row.registrationStatus||null,residualBudgetRemainingAfter:safeNumber(spare?.remainingAfter),status:row.status};
   }catch(e){row.lastError=errorString(e);row.status="V541_FLAP_TARGETED_FETCH_ERROR_RETRY_PRESERVED";root.lastStatus=row.status;return{handled:true,enabled:true,attempted:true,requestConsumed:true,sourceKey:"flap",error:row.lastError,targetedTopic0:FLAP_TOKENCREATED_TOPIC0_V541,status:row.status};}
+}
+
+
+function seededProofCompleteForAutonomyV544(state){
+  const root=ensureSeededHistoricalProofV529(state);
+  return Boolean(
+    root?.sources?.mint_club?.exactDetectorRegistered===true &&
+    root?.sources?.noxa?.exactDetectorRegistered===true &&
+    root?.sources?.flap?.exactDetectorRegistered===true &&
+    root?.sources?.openfair?.historicalSampleExhaustedV539===true
+  );
+}
+
+function markReleasedV544OriginProcessed(state, selected, attribution){
+  if(attribution?.attempted!==true)return false;
+  const token=normalize(selected?.token);
+  const creator=normalize(selected?.row?.contractCreator);
+  const tx=String(selected?.row?.creationTransactionHash||"").trim().toLowerCase();
+  const key=persistedOriginKeyV486(token,tx);
+  if(!key)return false;
+
+  const root=prunePersistedOriginRawTraceBacklogV486(state);
+  const attemptedAt=Date.now();
+  root.requestsAttempted=safeNumber(root.requestsAttempted)+1;
+  root.lastAttemptAt=attemptedAt;
+  root.lastHttpStatus=attribution?.httpStatus??null;
+  root.lastSelectedToken=token;
+  root.lastSelectedCreationTransactionHash=tx;
+  if(attribution?.httpStatus===200)root.requestsSucceeded=safeNumber(root.requestsSucceeded)+1;
+  if(attribution?.exactCreationTrace?.exactTokenCreateVerified===true){
+    root.exactTokenCreationsVerified=safeNumber(root.exactTokenCreationsVerified)+1;
+  }
+  root.processedOrigins[key]={
+    token,
+    verifiedCreator:creator,
+    creationTransactionHash:tx,
+    originVerifiedAt:safeNumber(selected?.row?.verifiedAt)||null,
+    attemptedAt,
+    httpStatus:attribution?.httpStatus??null,
+    attributionStatus:attribution?.status||null,
+    exactTokenCreateVerified:attribution?.exactCreationTrace?.exactTokenCreateVerified===true,
+    verifiedDeploymentSource:attribution?.exactCreationTrace?.verifiedDeploymentSource||null,
+    processedOnce:true,
+    retryAutomatically:false,
+    processedByReleasedSeededCapacityV544:true
+  };
+  root.lastStatus=attribution?.exactCreationTrace?.exactTokenCreateVerified===true
+    ?"V544_RELEASED_SEEDED_CAPACITY_EXACT_CREATION_TRACE_VERIFIED"
+    :`V544_RELEASED_SEEDED_CAPACITY_ORIGIN_PROCESSED:${attribution?.status||"UNKNOWN"}`;
+  return true;
+}
+
+async function runReleasedSeededAutonomousProofV544({
+  env,state,budget,seededHistoricalProofThisScanV529
+}){
+  const telemetry={
+    enabled:true,
+    attempted:false,
+    requestConsumed:false,
+    seededProofComplete:false,
+    seededHistoricalRequestConsumed:Boolean(seededHistoricalProofThisScanV529?.requestConsumed),
+    route:null,
+    selectedToken:null,
+    selectedCreator:null,
+    selectedTransactionHash:null,
+    result:null,
+    beforeTotalUsed:safeNumber(budget?.totalUsed),
+    afterTotalUsed:safeNumber(budget?.totalUsed),
+    hardGlobalLimitUnchanged:42,
+    maxExtraRequestsThisScan:1,
+    proofStandardUnchanged:"V515_3_DISTINCT_TOKENS_3_DISTINCT_CREATION_TRANSACTIONS_SAME_EXACT_PATTERN",
+    status:null
+  };
+
+  telemetry.seededProofComplete=seededProofCompleteForAutonomyV544(state);
+  if(!telemetry.seededProofComplete){
+    telemetry.status="V544_SEEDED_PROOF_NOT_COMPLETE_EXTRA_AUTONOMOUS_LANE_DISABLED";
+    return telemetry;
+  }
+  if(seededHistoricalProofThisScanV529?.requestConsumed===true){
+    telemetry.status="V544_SEEDED_HISTORY_USED_RELEASED_SLOT_THIS_SCAN";
+    return telemetry;
+  }
+  if(safeNumber(budget?.totalUsed)>=safeNumber(budget?.totalLimit)){
+    telemetry.status="V544_GLOBAL_REQUEST_BUDGET_ALREADY_EXHAUSTED";
+    return telemetry;
+  }
+
+  // 1) Highest value: another exact V517 creation receipt if one is eligible.
+  const receiptCandidate=selectGenericUnknownReceiptCandidateV517(state);
+  if(receiptCandidate){
+    telemetry.route="V517_GENERIC_EXACT_RECEIPT";
+    telemetry.selectedToken=receiptCandidate.token||null;
+    telemetry.selectedCreator=receiptCandidate.creator||null;
+    telemetry.selectedTransactionHash=receiptCandidate.transactionHash||null;
+    const result=await runGenericUnknownSourceProofV517({
+      env,state,budget,candidate:receiptCandidate
+    });
+    telemetry.result=result;
+    telemetry.attempted=result?.attempted===true;
+    telemetry.requestConsumed=result?.requestConsumed===true;
+    telemetry.afterTotalUsed=safeNumber(budget?.totalUsed);
+    telemetry.status=result?.registrationResult?.registered===true
+      ?"V544_RELEASED_SLOT_V517_SOURCE_AUTO_REGISTERED"
+      :`V544_RELEASED_SLOT_V517:${result?.status||"UNKNOWN"}`;
+    return telemetry;
+  }
+
+  // 2) If the creator has 3x3 origins but identity is the blocker, unlock V517.
+  const identityCandidate=selectGenericUnknownCreatorIdentityCandidateV519(state);
+  if(identityCandidate){
+    telemetry.route="V519_V503_CREATOR_IDENTITY";
+    telemetry.selectedCreator=identityCandidate.creator||null;
+    const result=await runRecurringCreatorAttributionV503({
+      env,state,budget,forcedCreator:identityCandidate.creator
+    });
+    telemetry.result=result;
+    telemetry.attempted=result?.attempted===true;
+    telemetry.requestConsumed=result?.requestConsumed===true;
+    telemetry.afterTotalUsed=safeNumber(budget?.totalUsed);
+    telemetry.status=`V544_RELEASED_SLOT_V519_IDENTITY:${result?.status||"UNKNOWN"}`;
+    return telemetry;
+  }
+
+  // 3) Feed the earlier mechanism layer: one unresolved verified-origin raw trace.
+  const selected=selectOldestUnprocessedVerifiedOriginV486(state);
+  if(!selected){
+    telemetry.status="V544_NO_ELIGIBLE_UNKNOWN_SOURCE_WORK_RELEASED_SLOT_UNUSED";
+    return telemetry;
+  }
+
+  const token=normalize(selected.token);
+  const creator=normalize(selected?.row?.contractCreator);
+  const tx=String(selected?.row?.creationTransactionHash||"").trim().toLowerCase();
+  telemetry.route="V486_V485_VERIFIED_ORIGIN_EXACT_CREATION_TRACE";
+  telemetry.selectedToken=token;
+  telemetry.selectedCreator=creator;
+  telemetry.selectedTransactionHash=tx;
+
+  const result=await runExactCreationMechanismAttributionV485({
+    env,
+    state,
+    budget,
+    token,
+    verifiedCreator:creator,
+    creationTransactionHash:tx
+  });
+  telemetry.result=result;
+  telemetry.attempted=result?.attempted===true;
+  telemetry.requestConsumed=result?.requestConsumed===true;
+
+  if(result?.attempted===true){
+    markReleasedV544OriginProcessed(state,selected,result);
+  }
+
+  telemetry.afterTotalUsed=safeNumber(budget?.totalUsed);
+  telemetry.status=result?.exactCreationTrace?.exactTokenCreateVerified===true
+    ?"V544_RELEASED_SLOT_V485_EXACT_CREATION_TRACE_VERIFIED"
+    :`V544_RELEASED_SLOT_V485:${result?.status||"UNKNOWN"}`;
+  return telemetry;
 }
 
 async function runSeededHistoricalProofV529({env,state,budget}){
@@ -72716,6 +72898,21 @@ for (
   const seededHistoricalProofThisScanV529 =
     await runSeededHistoricalProofV529({ env, state, budget });
 
+
+  /*
+   * V544: spend at most one request released by V543 on the generic unknown-source
+   * evidence ladder. This is intentionally after the normal V477/V486 work and after
+   * the seeded historical lane has proved complete, so it cannot steal fresh analysis
+   * or Telegram capacity.
+   */
+  const releasedSeededAutonomousProofV544 =
+    await runReleasedSeededAutonomousProofV544({
+      env,
+      state,
+      budget,
+      seededHistoricalProofThisScanV529
+    });
+
   /*
    * =======================================================
    * V170 POST-ANALYSIS RESIDUAL BACKLOG CATCH-UP
@@ -73589,6 +73786,8 @@ for (
       currentRun: seededHistoricalProofThisScanV529,
       cumulative: seededHistoricalProofSnapshotV529(state)
     },
+
+    releasedSeededAutonomousProofV544,
 
     requestBudget:
       budgetTelemetry(
