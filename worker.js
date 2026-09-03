@@ -382,6 +382,20 @@
  * - scoring, Momentum, qualification, Telegram thresholds, verified USD,
  *   dense-pool completion, RWA detector, launch meter and hard limit 42 unchanged.
  *
+ * V522 SOURCE IDENTITY + SEEDED LAUNCHPAD CORRELATION (READ-ONLY):
+ * - preserves the proven V517/V520 autonomous 3x3 source-learning loop unchanged;
+ * - adds /sourceintel as a zero-provider-request, zero-write evidence view;
+ * - correlates self-learned V515 detectors with existing V503 creator identity evidence;
+ * - adds bounded seeded launchpad leads for NOXA, Openfair and Flap without trusting
+ *   website/research labels as on-chain proof;
+ * - seeded leads are NEVER promoted to verified launch sources by V522;
+ * - records a lunch.fun brand candidate for auto_9983bb8c only as an external
+ *   identity lead because its V503 deployment source creator matches a publicly
+ *   documented lunch.fun Robinhood deployer; exact brand identity remains
+ *   DATA UNVERIFIED until bot/on-chain evidence directly links the source;
+ * - no scanner logic, scoring, qualification, Telegram alert thresholds, request
+ *   routing, launch-meter mutation or 42-request ceiling changes.
+ *
  * V521 DYNAMIC /launchsources REPORTING:
  * - reporting-only union of V470 static source labels + enabled V515 exact detectors
  * - Doppler V1 and V517 self-learned detectors appear automatically
@@ -2712,7 +2726,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V521";
+const VERSION = "V522";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -75665,6 +75679,7 @@ for (
         "/performance",
         "/launches",
         "/launchsources",
+        "/sourceintel",
         "/launchcoverage",
         "/usage",
         "/chainstack",
@@ -112552,6 +112567,240 @@ function launchSourcesTelegramMessageV499(
 }
 
 
+
+function sourceIdentityIntelSnapshotV522(state) {
+  const registry =
+    state?.verifiedLaunchDetectorRegistryV515 &&
+    typeof state.verifiedLaunchDetectorRegistryV515 === "object"
+      ? state.verifiedLaunchDetectorRegistryV515
+      : {};
+
+  const creatorState =
+    state?.recurringCreatorAttributionV503 &&
+    typeof state.recurringCreatorAttributionV503 === "object"
+      ? state.recurringCreatorAttributionV503
+      : {};
+
+  const originState =
+    state?.tokenOriginTraceV477 &&
+    typeof state.tokenOriginTraceV477 === "object"
+      ? state.tokenOriginTraceV477
+      : {};
+
+  const creatorProfiles =
+    creatorState?.creatorProfiles &&
+    typeof creatorState.creatorProfiles === "object"
+      ? creatorState.creatorProfiles
+      : {};
+
+  const creatorClusters =
+    originState?.creatorClusters &&
+    typeof originState.creatorClusters === "object"
+      ? originState.creatorClusters
+      : {};
+
+  const detectors = Object.values(registry?.detectors || {})
+    .filter(row => row?.enabled === true);
+
+  const normalizedCluster = address => {
+    const a = normalize(address);
+    const direct = creatorClusters?.[a];
+    if (direct && typeof direct === "object") return direct;
+    return Object.values(creatorClusters || {}).find(row =>
+      normalize(row?.creator || row?.contractCreator || row?.address) === a
+    ) || null;
+  };
+
+  const normalizedProfile = address => {
+    const a = normalize(address);
+    const direct = creatorProfiles?.[a];
+    if (direct && typeof direct === "object") return direct;
+    return Object.values(creatorProfiles || {}).find(row =>
+      normalize(row?.creator || row?.deploymentSource) === a
+    ) || null;
+  };
+
+  const learned = detectors
+    .filter(row =>
+      String(row?.sourceState || "") === "genericUnknownSourceProofV517" ||
+      String(row?.protocolKey || "").startsWith("auto_")
+    )
+    .map(detector => {
+      const factory = normalize(detector?.verifiedFactory || detector?.factory);
+      const profile = normalizedProfile(factory);
+      const sourceCreator = normalize(profile?.sourceCreator);
+
+      let brandCandidate = null;
+      let brandEvidence = "DATA UNVERIFIED";
+      let brandPromotionAllowed = false;
+
+      // V522 operator-research lead only. This does NOT rename/promote the detector.
+      // Public Robinhood-chain lunch.fun hook submissions identify this deployer.
+      if (sourceCreator === "0x7b2daf7f696bb844c7786693062d6619d1858cc9") {
+        brandCandidate = "lunch.fun";
+        brandEvidence =
+          "EXTERNAL_DEPLOYER_IDENTITY_LEAD_MATCHES_V503_SOURCE_CREATOR_NOT_DIRECT_BRAND_PROOF_V522";
+      }
+
+      return {
+        detectorId: detector?.detectorId || null,
+        protocol: detector?.protocol || null,
+        protocolKey: detector?.protocolKey || null,
+        factory,
+        emitter: normalize(detector?.emitter),
+        topic0: detector?.topic0 || null,
+        addressLocationType: detector?.addressLocationType || null,
+        addressLocationIndex: detector?.addressLocationIndex ?? null,
+        sourceState: detector?.sourceState || null,
+        exactDetectorVerified: true,
+        creatorProfileVerified: profile?.blockscoutVerifiedContract === true,
+        creatorContractName: profile?.contractName || null,
+        proxyType: profile?.proxyType || null,
+        sourceCreator: isAddress(sourceCreator) ? sourceCreator : null,
+        sourceCreationTransactionHash: profile?.sourceCreationTransactionHash || null,
+        brandCandidate,
+        brandEvidence,
+        brandIdentityVerifiedByBot: false,
+        brandPromotionAllowed
+      };
+    });
+
+  const meterV522 = verifiedLaunchMeterSnapshotV470(state);
+  const staticSupportedV522 = new Set(
+    Array.isArray(meterV522?.supportedVerifiedSources)
+      ? meterV522.supportedVerifiedSources.map(name => String(name || "").toLowerCase())
+      : []
+  );
+
+  const seededLeads = [
+    {
+      key: "noxa_fun",
+      name: "NOXA Fun",
+      address: "0xd9ec2db5f3d1b236843925949fe5bd8a3836fccb",
+      role: "Launch Factory",
+      leadProvenance: "OFFICIAL_NOXA_ROBINHOOD_CHAIN_DOCS_LEAD",
+      trustAsLaunchSourceWithoutBotProof: false
+    },
+    {
+      key: "openfair",
+      name: "Openfair",
+      address: "0x2505522ff2796e4152277028f75626f9136da0cf",
+      role: "LaunchFactory",
+      leadProvenance: "PUBLIC_ROBINHOOD_CONTRACT_RESEARCH_LEAD",
+      trustAsLaunchSourceWithoutBotProof: false
+    },
+    {
+      key: "flap",
+      name: "Flap",
+      address: "0x26605f322f7ff986f381bb9a6e3f5dab0beaeb09",
+      role: "Portal / launch entrypoint lead",
+      leadProvenance: "PUBLIC_ROBINHOOD_CONTRACT_RESEARCH_LEAD",
+      trustAsLaunchSourceWithoutBotProof: false
+    }
+  ].map(seed => {
+    const address = normalize(seed.address);
+    const cluster = normalizedCluster(address);
+    const profile = normalizedProfile(address);
+    const detector = detectors.find(row =>
+      normalize(row?.verifiedFactory || row?.factory || row?.emitter) === address
+    ) || null;
+    const alreadyStaticSupported =
+      staticSupportedV522.has(String(seed.name || "").toLowerCase()) ||
+      (seed.key === "flap" && (
+        staticSupportedV522.has("flap") ||
+        staticSupportedV522.has("flap.sh")
+      ));
+
+    const distinctTokens = safeNumber(
+      cluster?.distinctTokens ??
+      cluster?.verifiedTokenCount ??
+      (Array.isArray(cluster?.tokens) ? cluster.tokens.length : 0)
+    );
+
+    return {
+      ...seed,
+      address,
+      observedInVerifiedCreatorOrigins: Boolean(cluster),
+      distinctVerifiedOriginTokens: distinctTokens,
+      blockscoutVerifiedContractProfile: profile?.blockscoutVerifiedContract === true,
+      contractName: profile?.contractName || null,
+      exactRegistryDetectorActive: Boolean(detector),
+      detectorProtocol: detector?.protocol || null,
+      alreadyStaticSupported,
+      status: detector
+        ? "BOT_EXACT_DETECTOR_ALREADY_ACTIVE"
+        : cluster
+          ? "OBSERVED_IN_BOT_VERIFIED_ORIGIN_EVIDENCE_AWAIT_EXACT_SOURCE_PROOF"
+          : alreadyStaticSupported
+            ? "ALREADY_SUPPORTED_STATIC_SOURCE_NO_24H_CORRELATION_REQUIRED_V522"
+            : "SEEDED_LEAD_NOT_YET_MATCHED_IN_BOT_VERIFIED_ORIGIN_EVIDENCE",
+      sourcePromotionAllowedByV522: false
+    };
+  });
+
+  return {
+    enabled: true,
+    version: "V522",
+    readOnly: true,
+    externalProviderRequests: 0,
+    persistentWrites: 0,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false,
+    hardRequestLimitUnchanged: 42,
+    learnedSourceCount: learned.length,
+    learnedSources: learned,
+    seededLeadCount: seededLeads.length,
+    seededLeads,
+    interpretation:
+      "IDENTITY_AND_SEED_CORRELATION_ONLY_NO_BRAND_OR_SOURCE_PROMOTION_WITHOUT_BOT_EXACT_PROOF_V522"
+  };
+}
+
+function sourceIdentityIntelTelegramMessageV522(state) {
+  const intel = sourceIdentityIntelSnapshotV522(state);
+
+  const learnedLines = intel.learnedSources.length
+    ? intel.learnedSources.flatMap(row => {
+        const brand = row?.brandCandidate
+          ? `${row.brandCandidate} — EVIDENCE LINK ONLY`
+          : "DATA UNVERIFIED";
+        return [
+          `• <b>${escapeHtml(row?.protocol || row?.protocolKey || "Self-learned source")}</b>`,
+          `  Factory: <code>${escapeHtml(row?.factory || "UNVERIFIED")}</code>`,
+          `  Exact detector: <b>${row?.exactDetectorVerified ? "VERIFIED + ACTIVE" : "UNVERIFIED"}</b>`,
+          `  Contract profile: <b>${escapeHtml(row?.creatorContractName || "UNVERIFIED")}</b>${row?.proxyType ? ` (${escapeHtml(row.proxyType)})` : ""}`,
+          `  Source creator: <code>${escapeHtml(row?.sourceCreator || "UNVERIFIED")}</code>`,
+          `  Brand candidate: <b>${escapeHtml(brand)}</b>`,
+          `  Brand identity verified by bot: <b>NO</b>`
+        ];
+      })
+    : ["• No self-learned exact detector is currently retained"];
+
+  const seedLines = intel.seededLeads.flatMap(row => [
+    `• <b>${escapeHtml(row.name)}</b> — ${escapeHtml(row.role)}`,
+    `  Lead: <code>${escapeHtml(row.address)}</code>`,
+    `  Bot correlation: <b>${escapeHtml(row.status)}</b>`,
+    `  Verified-origin tokens seen: <b>${Number(safeNumber(row.distinctVerifiedOriginTokens)).toLocaleString("en-GB")}</b>`,
+    `  Exact detector active: <b>${row.exactRegistryDetectorActive ? "YES" : "NO"}</b>`
+  ]);
+
+  return [
+    `🧬 <b>Launch Source Intelligence — ${escapeHtml(VERSION)}</b>`,
+    "",
+    "<b>Self-learned source identity</b>",
+    ...learnedLines,
+    "",
+    "<b>Seeded launchpad leads — correlation only</b>",
+    ...seedLines,
+    "",
+    "⚠️ Website/research labels are leads only. V522 does not promote a source name from them.",
+    "✅ Exact launch-source verification still requires the bot's existing on-chain proof standard.",
+    "<i>/sourceintel is read-only: 0 provider requests and 0 persistent state writes.</i>"
+  ].join("\n");
+}
+
+
 function stripTelegramHtmlV500(
   message
 ) {
@@ -112695,6 +112944,7 @@ function telegramHelpV271() {
     "<code>/v3usd 0xADDRESS</code> — persisted native V3 USD flow (read-only)",
     "<code>/launches</code> — verified rolling 24h launch meter",
     "<code>/launchsources</code> — verified launch-source coverage + active sources",
+    "<code>/sourceintel</code> — self-learned source identity + seeded lead correlation",
     "<code>/launchcoverage</code> — launch discovery-to-Telegram coverage funnel",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
@@ -112992,6 +113242,23 @@ async function telegramCommandReplyV271(
   let reply;
 
   if (
+    parsed.command === "/sourceintel" ||
+    parsed.command === "/sourceidentity"
+  ) {
+    reply = sourceIdentityIntelTelegramMessageV522(state);
+
+    if (diagnosticV273) {
+      const intelV522 = sourceIdentityIntelSnapshotV522(state);
+      diagnosticV273.sourceIdentityIntelV522 = {
+        scannerBudgetConsumed: false,
+        externalProviderRequests: 0,
+        stateWrites: 0,
+        learnedSourceCount: safeNumber(intelV522?.learnedSourceCount),
+        seededLeadCount: safeNumber(intelV522?.seededLeadCount),
+        hardRequestLimitUnchanged: 42
+      };
+    }
+  } else if (
     parsed.command ===
       "/launchsources" ||
     parsed.command ===
