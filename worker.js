@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V561
+ * AUTHORITATIVE RUNTIME VERSION: V561
+ *
+ * V561 FINISH-NEAR-HEAD-POOL-FIRST:
+ * - preserves V560 active-nearest-to-head priority;
+ * - preserves V559 protected directional reserve;
+ * - preserves V558 multi-pool scheduling and V557 rolling USD math;
+ * - fixes the final scheduling inefficiency observed in V560:
+ *   when the first selected active pool is within ONE additional collector chunk
+ *   of the scan head after its first advance, the next directional chunk is forced
+ *   back onto that SAME exact PoolId so it can finish catching up;
+ * - once that pool reaches the scan head, any remaining directional chunk may move
+ *   to another distinct active pool;
+ * - this allows a pool that was 839 blocks behind to use 600 + remaining ~239 blocks
+ *   instead of abandoning it after the first 600-block chunk;
+ * - no extra request allowance: still max 3 directional chunks and hard 42 global;
+ * - no changes to USD decoding, scoring, Momentum, qualification or Telegram thresholds.
+ */
+/**
  * Robinhood Chain Meme Hunter — V560
  * AUTHORITATIVE RUNTIME VERSION: V560
  *
@@ -3266,7 +3285,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V560";
+const VERSION = "V561";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -56986,7 +57005,12 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
   };
 }
 
-function selectDirectionalWatchCandidateV551(state, latestNumber, excludedPoolIdsV558 = null) {
+function selectDirectionalWatchCandidateV551(
+  state,
+  latestNumber,
+  excludedPoolIdsV558 = null,
+  preferredPoolIdV561 = null
+) {
   const root = pruneDirectionalWatchV551(state);
   const head = Number(latestNumber);
   if (!Number.isFinite(head) || head <= 0) return null;
@@ -57035,6 +57059,19 @@ function selectDirectionalWatchCandidateV551(state, latestNumber, excludedPoolId
     preferred.length > 0
       ? preferred
       : eligible;
+
+  const preferredPoolIdNormalizedV561 =
+    normalize(preferredPoolIdV561);
+  if (
+    /^0x[a-f0-9]{64}$/.test(
+      String(preferredPoolIdNormalizedV561 || "")
+    )
+  ) {
+    const forcedV561 = pool.find(
+      row => normalize(row?.poolId) === preferredPoolIdNormalizedV561
+    );
+    if (forcedV561) return forcedV561;
+  }
 
   return pool
     .sort((a,b) => {
@@ -57163,13 +57200,15 @@ async function advanceDirectionalWatchV551({
   latestNumber,
   wethUsdGReference,
   env,
-  excludedPoolIdsV558 = null
+  excludedPoolIdsV558 = null,
+  preferredPoolIdV561 = null
 }) {
   const root = pruneDirectionalWatchV551(state);
   const candidate = selectDirectionalWatchCandidateV551(
     state,
     latestNumber,
-    excludedPoolIdsV558
+    excludedPoolIdsV558,
+    preferredPoolIdV561
   );
 
   const base = {
@@ -74402,6 +74441,19 @@ for (
     continuousDirectionalWatchThisScanV551
   ];
 
+  let finishPoolIdV561 =
+    continuousDirectionalWatchThisScanV551?.coverageAdvanced === true &&
+    safeNumber(
+      continuousDirectionalWatchThisScanV551?.blocksRemainingToHead
+    ) > 0 &&
+    safeNumber(
+      continuousDirectionalWatchThisScanV551?.blocksRemainingToHead
+    ) <= DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551
+      ? normalize(
+          continuousDirectionalWatchThisScanV551?.selectedPoolId
+        )
+      : null;
+
   let directionalCatchupStopReasonV554 =
     continuousDirectionalWatchThisScanV551?.coverageAdvanced === true
       ? null
@@ -74435,6 +74487,15 @@ for (
       break;
     }
 
+    const exclusionsForChunkV561 =
+      finishPoolIdV561
+        ? new Set(
+            [...directionalPoolsAdvancedThisScanV558].filter(
+              poolId => normalize(poolId) !== finishPoolIdV561
+            )
+          )
+        : directionalPoolsAdvancedThisScanV558;
+
     const extraChunkV554 =
       await advanceDirectionalWatchV551({
         state,
@@ -74442,7 +74503,8 @@ for (
         latestNumber,
         wethUsdGReference: directionalWatchQuoteReferenceV554,
         env,
-        excludedPoolIdsV558: directionalPoolsAdvancedThisScanV558
+        excludedPoolIdsV558: exclusionsForChunkV561,
+        preferredPoolIdV561: finishPoolIdV561
       });
 
     directionalCatchupChunksV554.push(extraChunkV554);
@@ -74470,10 +74532,38 @@ for (
       );
     }
 
-    if (safeNumber(extraChunkV554?.blocksRemainingToHead) <= 0) {
-      directionalCatchupStopReasonV554 =
-        "WATCH_CAUGHT_UP_TO_SCAN_HEAD_V554";
-      break;
+    const remainingAfterChunkV561 =
+      safeNumber(extraChunkV554?.blocksRemainingToHead);
+
+    if (
+      finishPoolIdV561 &&
+      normalize(extraChunkV554?.selectedPoolId) === finishPoolIdV561 &&
+      remainingAfterChunkV561 <= 0
+    ) {
+      finishPoolIdV561 = null;
+      /*
+       * Do NOT stop here: V561 may use a third already-available chunk
+       * on a different active exact pool.
+       */
+      continue;
+    }
+
+    finishPoolIdV561 =
+      extraChunkV554?.coverageAdvanced === true &&
+      remainingAfterChunkV561 > 0 &&
+      remainingAfterChunkV561 <= DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551
+        ? normalize(extraChunkV554?.selectedPoolId)
+        : null;
+
+    if (
+      remainingAfterChunkV561 <= 0 &&
+      !finishPoolIdV561
+    ) {
+      /*
+       * Pool is caught up. Continue if chunk capacity remains so another
+       * distinct pool can advance; the loop ceiling still limits this to 3.
+       */
+      continue;
     }
   }
 
@@ -74489,7 +74579,8 @@ for (
     enabled:true,
     measurementOnly:true,
     samePoolOnly:false,
-    schedulerVersion:"V558_DISTINCT_ACTIVE_POOL_ROUND_ROBIN",
+    schedulerVersion:"V561_NEAR_HEAD_FINISH_THEN_DISTINCT_ROUND_ROBIN",
+    finishNearHeadPoolFirstV561:true,
     maxWatchedPoolsAdvancedPerScan:DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554,
     maxChunksPerScan:DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554,
     distinctPoolsAdvanced:directionalPoolsAdvancedThisScanV558.size,
@@ -74535,6 +74626,10 @@ for (
       toBlock:row?.toBlock ?? null,
       returnedLogs:safeNumber(row?.returnedLogs),
       exactUsdTrades:safeNumber(row?.exactUsdTrades),
+      blocksRemainingAfterChunkV561:
+        Number.isFinite(Number(row?.blocksRemainingToHead))
+          ? Number(row.blocksRemainingToHead)
+          : null,
       coverageAdvanced:row?.coverageAdvanced === true,
       rangeSaturated:row?.rangeSaturated === true,
       status:row?.status || null
@@ -74551,6 +74646,7 @@ for (
     measurementOnly:true,
     reserveVersion:"V559_DYNAMIC_THREE_SLOT_WITH_ONE_MINIMUM_GUARANTEE",
     selectionPriorityV560:"ACTIVE_NEAREST_TO_HEAD_THEN_SWAP_ACTIVITY",
+    finishNearHeadPoolFirstV561:true,
     reservedRequestsV559:safeNumber(
       directionalWatchReserveV553?.reservedRequests
     ),
