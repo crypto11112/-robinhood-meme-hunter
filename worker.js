@@ -1,6 +1,34 @@
 /**
- * Robinhood Chain Meme Hunter — V516
- * AUTHORITATIVE RUNTIME VERSION: V516
+ * Robinhood Chain Meme Hunter — V517
+ * AUTHORITATIVE RUNTIME VERSION: V517
+ *
+ * V517 GENERIC UNKNOWN-SOURCE RECEIPT PROOF ENGINE:
+ * - adds the missing generic front-half for V515's verified detector registry;
+ * - automatically selects recurring V480-verified creator/factory clusters that:
+ *     * have >=3 distinct verified token origins;
+ *     * have an exact creation transaction for each proof candidate;
+ *     * have a V503 Blockscout-verified contract identity;
+ *     * are not already solved by RWA, Pons V2, Doppler or V515 registry;
+ * - inspects at most ONE exact creation receipt per scan using the existing
+ *   secondary-request slot/provider routing;
+ * - scans the whole receipt for the exact created-token ABI word, excluding
+ *   events emitted by the created token itself;
+ * - clusters exact patterns by verified creator + emitter + topic0 + token slot;
+ * - requires the SAME pattern across >=3 distinct verified tokens AND >=3
+ *   distinct creation transactions before registration;
+ * - excludes canonical shared PoolManager from source-specific registration;
+ * - requires the created token to occur exactly once in the matched receipt log;
+ * - if multiple patterns satisfy 3/3, deterministically chooses the earliest
+ *   consistently observed receipt-log position; lexical key is tie-break only;
+ * - auto-registers the proven detector through registerVerifiedLaunchDetectorV515;
+ * - uses a neutral source label derived from the verified creator address rather
+ *   than guessing a launchpad brand from a contract name;
+ * - after registration, existing watched origins receive verified V517 source
+ *   attribution and future matching launches flow through V515 generic live
+ *   detection into the normal analysis/qualification/Telegram pipeline;
+ * - no source promotion from recurrence, names, generic selectors or one receipt;
+ * - hard global request ceiling remains 42; scoring/Momentum/qualification/
+ *   Telegram thresholds/USD/dense completion/RWA/Pons/Doppler remain unchanged.
  *
  * V516 HOTFIX:
  * - fixes V515 runtime TDZ regression:
@@ -2626,7 +2654,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V516";
+const VERSION = "V517";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -10081,6 +10109,26 @@ function newState() {
       recentVerifiedLaunches: []
     },
 
+    genericUnknownSourceProofV517: {
+      enabled: true,
+      measurementOnlyUntilProof: true,
+      monitorStartedAt: null,
+      scansObserved: 0,
+      receiptRequestsAttempted: 0,
+      receiptRequestsSucceeded: 0,
+      processedReceipts: {},
+      observations: {},
+      patternClusters: {},
+      confirmedSources: {},
+      rejectedPatterns: {},
+      lastSelectedToken: null,
+      lastSelectedCreator: null,
+      lastSelectedTransactionHash: null,
+      lastProvider: null,
+      lastHttpStatus: null,
+      lastStatus: "NOT_EVALUATED_YET_V517"
+    },
+
     verifiedLaunchDetectorRegistryV515: {
       enabled: true,
       monitorStartedAt: null,
@@ -10151,6 +10199,62 @@ function newState() {
       lastProvider: null,
       lastHttpStatus: null,
       lastStatus: "NOT_EVALUATED_YET_V512"
+    },
+
+    genericUnknownSourceProofEngineV517: {
+      enabled: true,
+      objective:
+        "UNKNOWN_RECURRING_VERIFIED_CREATOR_TO_3X3_EXACT_RECEIPT_PATTERN_TO_V515_AUTO_REGISTRATION",
+      minimumRecurringVerifiedOrigins:
+        3,
+      blockscoutVerifiedCreatorContractRequired:
+        true,
+      exactCreationTransactionRequired:
+        true,
+      wholeReceiptExactTokenWordScan:
+        true,
+      createdTokenSelfEmitterExcluded:
+        true,
+      sharedCanonicalPoolManagerExcluded:
+        true,
+      exactTokenMustOccurOnceInMatchedLog:
+        true,
+      minimumDistinctProofTokens:
+        3,
+      minimumDistinctProofTransactions:
+        3,
+      sameCreatorEmitterTopicTokenSlotRequired:
+        true,
+      deterministicCanonicalSelection:
+        "EARLIEST_AVERAGE_LOG_INDEX_THEN_MAX_LOG_INDEX_THEN_LEXICAL_KEY",
+      contractNameUsedAsLaunchpadProof:
+        false,
+      neutralProtocolLabelUntilBrandVerified:
+        true,
+      automaticRegistryHandoff:
+        "registerVerifiedLaunchDetectorV515",
+      futureLiveDetectionAfterRegistration:
+        "V515_GENERIC_REGISTRY_ZERO_EXTRA_REQUEST_PATH",
+      maxSecondaryReceiptRequestsPerScan:
+        1,
+      solvedRwaPonsDopplerAndRegistryFactoriesExcluded:
+        true,
+      sourcePromotionFromRecurrenceAlone:
+        false,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false,
+      verifiedUsdChanged:
+        false,
+      denseCompletionChanged:
+        false
     },
 
     genericVerifiedLaunchDetectorRegistryV515: {
@@ -31605,6 +31709,8 @@ function verifiedLaunchSourceIdentityV476(
   const launchpads = [
     watched?.launchpadV495,
     watched?.launchpadV476,
+    watched?.launchpadV517,
+    watched?.launchpadV515,
     watched?.launchpadV514,
     watched?.launchpadV513,
     watched?.launchpadV512,
@@ -72447,6 +72553,11 @@ for (
         state
       ),
 
+    genericUnknownSourceProofV517:
+      genericUnknownSourceProofSnapshotV517(
+        state
+      ),
+
     tokenOriginTraceThisScanV477,
 
     tokenOriginTraceV477:
@@ -72693,7 +72804,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V515_V514_V513_V512_V511_V510_V509_V508_V507_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V517_V515_V514_V513_V512_V511_V510_V509_V508_V507_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -85820,6 +85931,1393 @@ function ensureLaunchCoverageCumulativeV474(state) {
 
 
 
+
+function ensureGenericUnknownSourceProofV517(
+  state
+) {
+  state.genericUnknownSourceProofV517 =
+    state?.genericUnknownSourceProofV517 &&
+    typeof state.genericUnknownSourceProofV517 === "object"
+      ? state.genericUnknownSourceProofV517
+      : {
+          enabled: true,
+          measurementOnlyUntilProof: true,
+          monitorStartedAt: Date.now(),
+          scansObserved: 0,
+          receiptRequestsAttempted: 0,
+          receiptRequestsSucceeded: 0,
+          processedReceipts: {},
+          observations: {},
+          patternClusters: {},
+          confirmedSources: {},
+          rejectedPatterns: {},
+          lastSelectedToken: null,
+          lastSelectedCreator: null,
+          lastSelectedTransactionHash: null,
+          lastProvider: null,
+          lastHttpStatus: null,
+          lastStatus: "NOT_EVALUATED_YET_V517"
+        };
+
+  const root =
+    state.genericUnknownSourceProofV517;
+
+  if (!safeNumber(root.monitorStartedAt)) {
+    root.monitorStartedAt = Date.now();
+  }
+
+  for (const key of [
+    "processedReceipts",
+    "observations",
+    "patternClusters",
+    "confirmedSources",
+    "rejectedPatterns"
+  ]) {
+    root[key] =
+      root[key] &&
+      typeof root[key] === "object"
+        ? root[key]
+        : {};
+  }
+
+  return root;
+}
+
+function solvedVerifiedCreatorsV517(
+  state
+) {
+  const solved =
+    new Set([
+      normalize(
+        RWA_LAUNCH_TOKEN_DEPLOYER_V495
+      ),
+      normalize(
+        RWA_LAUNCHPAD_FACTORY_V495
+      )
+    ].filter(isAddress));
+
+  const pons =
+    ensurePonsV2CreationReceiptProofV509(
+      state
+    );
+
+  if (
+    isAddress(
+      normalize(pons?.confirmedCreator)
+    )
+  ) {
+    solved.add(
+      normalize(pons.confirmedCreator)
+    );
+  }
+
+  const doppler =
+    ensureDopplerCanonicalPatternProofV513(
+      state
+    );
+
+  if (
+    isAddress(
+      normalize(doppler?.confirmedFactory)
+    )
+  ) {
+    solved.add(
+      normalize(
+        doppler.confirmedFactory
+      )
+    );
+  }
+
+  for (
+    const detector of activeVerifiedLaunchDetectorsV515(
+      state
+    )
+  ) {
+    const factory =
+      normalize(
+        detector?.verifiedFactory
+      );
+
+    if (isAddress(factory)) {
+      solved.add(factory);
+    }
+  }
+
+  return solved;
+}
+
+function verifiedCreatorProfileV517(
+  state,
+  creator
+) {
+  const clean =
+    normalize(creator);
+
+  const root =
+    ensureRecurringCreatorAttributionV503(
+      state
+    );
+
+  const profile =
+    root?.creatorProfiles?.[clean] ||
+    null;
+
+  if (
+    !profile ||
+    profile?.isContract !== true ||
+    profile?.blockscoutVerifiedContract !== true
+  ) {
+    return null;
+  }
+
+  return profile;
+}
+
+function genericUnknownCreatorCandidatesV517(
+  state
+) {
+  const origin =
+    pruneTokenOriginTraceV477(
+      state
+    );
+
+  const solved =
+    solvedVerifiedCreatorsV517(
+      state
+    );
+
+  const root =
+    ensureGenericUnknownSourceProofV517(
+      state
+    );
+
+  const rows = [];
+
+  for (
+    const cluster of Object.values(
+      origin?.creatorClusters || {}
+    )
+  ) {
+    const creator =
+      normalize(cluster?.creator);
+
+    if (
+      !isAddress(creator) ||
+      solved.has(creator) ||
+      root.confirmedSources?.[creator] ||
+      safeNumber(
+        cluster?.distinctTokens
+      ) < 3
+    ) {
+      continue;
+    }
+
+    const profile =
+      verifiedCreatorProfileV517(
+        state,
+        creator
+      );
+
+    if (!profile) {
+      continue;
+    }
+
+    const tokenRows = [];
+
+    for (
+      const token of Array.isArray(
+        cluster?.tokens
+      )
+        ? cluster.tokens
+        : []
+    ) {
+      const cleanToken =
+        normalize(token);
+
+      const row =
+        origin?.tokenOrigins?.[
+          cleanToken
+        ];
+
+      const tx =
+        normalizeTxHashV495(
+          row?.creationTransactionHash
+        );
+
+      if (
+        !isAddress(cleanToken) ||
+        row?.verified !== true ||
+        normalize(
+          row?.contractCreator
+        ) !== creator ||
+        !tx
+      ) {
+        continue;
+      }
+
+      tokenRows.push({
+        token: cleanToken,
+        transactionHash: tx,
+        verifiedAt:
+          safeNumber(row?.verifiedAt) ||
+          null,
+        source:
+          row?.source ||
+          "BLOCKSCOUT_PRO_V2_ADDRESS_INFO_V480"
+      });
+    }
+
+    const distinctTx =
+      new Set(
+        tokenRows.map(row =>
+          row.transactionHash
+        )
+      );
+
+    if (
+      tokenRows.length < 3 ||
+      distinctTx.size < 3
+    ) {
+      continue;
+    }
+
+    rows.push({
+      creator,
+      distinctTokens:
+        new Set(
+          tokenRows.map(row =>
+            row.token
+          )
+        ).size,
+      distinctTransactions:
+        distinctTx.size,
+      contractName:
+        typeof profile?.contractName ===
+          "string"
+          ? profile.contractName
+          : null,
+      tokenRows:
+        tokenRows.sort(
+          (a, b) =>
+            safeNumber(a?.verifiedAt) -
+            safeNumber(b?.verifiedAt)
+        ),
+      firstVerifiedAt:
+        Math.min(
+          ...tokenRows
+            .map(row =>
+              safeNumber(row?.verifiedAt)
+            )
+            .filter(n => n > 0)
+        ) || null
+    });
+  }
+
+  rows.sort((a, b) =>
+    b.distinctTokens -
+      a.distinctTokens ||
+    safeNumber(a?.firstVerifiedAt) -
+      safeNumber(b?.firstVerifiedAt) ||
+    a.creator.localeCompare(b.creator)
+  );
+
+  return rows;
+}
+
+function selectGenericUnknownReceiptCandidateV517(
+  state
+) {
+  const root =
+    ensureGenericUnknownSourceProofV517(
+      state
+    );
+
+  const candidates =
+    genericUnknownCreatorCandidatesV517(
+      state
+    );
+
+  for (const creatorRow of candidates) {
+    for (
+      const tokenRow of creatorRow.tokenRows
+    ) {
+      const prior =
+        root.processedReceipts?.[
+          tokenRow.transactionHash
+        ];
+
+      if (
+        prior?.processedOnce === true &&
+        prior?.retryEligible !== true
+      ) {
+        continue;
+      }
+
+      return {
+        token:
+          tokenRow.token,
+        creator:
+          creatorRow.creator,
+        transactionHash:
+          tokenRow.transactionHash,
+        originVerifiedAt:
+          tokenRow.verifiedAt,
+        originSource:
+          tokenRow.source,
+        creatorDistinctTokens:
+          creatorRow.distinctTokens,
+        creatorDistinctTransactions:
+          creatorRow.distinctTransactions,
+        contractName:
+          creatorRow.contractName
+      };
+    }
+  }
+
+  return null;
+}
+
+function genericPatternKeyV517({
+  creator,
+  emitter,
+  topic0,
+  addressLocationType,
+  addressLocationIndex
+}) {
+  const cleanCreator =
+    normalize(creator);
+  const cleanEmitter =
+    normalize(emitter);
+  const cleanTopic =
+    normalize(topic0);
+  const type =
+    String(
+      addressLocationType || ""
+    );
+  const index =
+    Number(addressLocationIndex);
+
+  if (
+    !isAddress(cleanCreator) ||
+    !isAddress(cleanEmitter) ||
+    !/^0x[a-f0-9]{64}$/.test(
+      cleanTopic
+    ) ||
+    !["TOPIC", "DATA_WORD"].includes(type) ||
+    !Number.isInteger(index) ||
+    index < 0
+  ) {
+    return null;
+  }
+
+  return [
+    cleanCreator,
+    cleanEmitter,
+    cleanTopic,
+    type,
+    index
+  ].join(":");
+}
+
+function rebuildGenericUnknownPatternsV517(
+  state
+) {
+  const root =
+    ensureGenericUnknownSourceProofV517(
+      state
+    );
+
+  const clusters = {};
+
+  for (
+    const observation of Object.values(
+      root.observations || {}
+    )
+  ) {
+    const creator =
+      normalize(
+        observation?.creator
+      );
+
+    const token =
+      normalize(
+        observation?.token
+      );
+
+    const tx =
+      normalizeTxHashV495(
+        observation?.transactionHash
+      );
+
+    if (
+      !isAddress(creator) ||
+      !isAddress(token) ||
+      !tx ||
+      observation?.originVerified !== true
+    ) {
+      continue;
+    }
+
+    const occurrences =
+      Array.isArray(
+        observation?.exactTokenOccurrences
+      )
+        ? observation.exactTokenOccurrences
+        : [];
+
+    /*
+     * Count exact created-token occurrences per receipt log. A source-specific
+     * canonical event must expose the token in exactly one ABI location in the
+     * matched log; multi-location logs are not registration candidates.
+     */
+    const perLogCounts = {};
+
+    for (const occurrence of occurrences) {
+      const li =
+        Number(
+          occurrence?.logIndex
+        );
+
+      if (
+        !Number.isInteger(li) ||
+        li < 0
+      ) {
+        continue;
+      }
+
+      perLogCounts[li] =
+        safeNumber(
+          perLogCounts[li]
+        ) + 1;
+    }
+
+    const seenPatternThisReceipt =
+      new Set();
+
+    for (const occurrence of occurrences) {
+      const emitter =
+        normalize(
+          occurrence?.emitter
+        );
+
+      /*
+       * PoolManager is deliberately excluded as shared chain infrastructure,
+       * not a source-specific launch authority.
+       */
+      if (
+        emitter === normalize(POOL_MANAGER)
+      ) {
+        continue;
+      }
+
+      const li =
+        Number(
+          occurrence?.logIndex
+        );
+
+      if (
+        safeNumber(
+          perLogCounts[li]
+        ) !== 1
+      ) {
+        continue;
+      }
+
+      const key =
+        genericPatternKeyV517({
+          creator,
+          emitter,
+          topic0:
+            occurrence?.topic0,
+          addressLocationType:
+            occurrence
+              ?.addressLocationType,
+          addressLocationIndex:
+            occurrence
+              ?.addressLocationIndex
+        });
+
+      if (
+        !key ||
+        seenPatternThisReceipt.has(key) ||
+        root.rejectedPatterns?.[key]
+      ) {
+        continue;
+      }
+
+      seenPatternThisReceipt.add(key);
+
+      clusters[key] =
+        clusters[key] || {
+          key,
+          creator,
+          emitter,
+          topic0:
+            normalize(
+              occurrence?.topic0
+            ),
+          addressLocationType:
+            String(
+              occurrence
+                ?.addressLocationType ||
+              ""
+            ),
+          addressLocationIndex:
+            Number(
+              occurrence
+                ?.addressLocationIndex
+            ),
+          tokens: [],
+          transactionHashes: [],
+          logIndexes: []
+        };
+
+      clusters[key].tokens.push(
+        token
+      );
+
+      clusters[
+        key
+      ].transactionHashes.push(
+        tx
+      );
+
+      clusters[
+        key
+      ].logIndexes.push(
+        li
+      );
+    }
+  }
+
+  for (
+    const row of Object.values(
+      clusters
+    )
+  ) {
+    row.tokens =
+      Array.from(
+        new Set(row.tokens)
+      );
+
+    row.transactionHashes =
+      Array.from(
+        new Set(
+          row.transactionHashes
+        )
+      );
+
+    row.distinctTokens =
+      row.tokens.length;
+
+    row.distinctTransactions =
+      row.transactionHashes.length;
+
+    row.averageLogIndex =
+      row.logIndexes.length > 0
+        ? (
+            row.logIndexes.reduce(
+              (sum, n) => sum + n,
+              0
+            ) /
+            row.logIndexes.length
+          )
+        : null;
+
+    row.maxLogIndex =
+      row.logIndexes.length > 0
+        ? Math.max(
+            ...row.logIndexes
+          )
+        : null;
+
+    row.confirmed =
+      row.distinctTokens >= 3 &&
+      row.distinctTransactions >= 3;
+  }
+
+  root.patternClusters =
+    clusters;
+
+  return root;
+}
+
+function canonicalGenericUnknownPatternV517(
+  state,
+  creator
+) {
+  const root =
+    rebuildGenericUnknownPatternsV517(
+      state
+    );
+
+  const cleanCreator =
+    normalize(creator);
+
+  const eligible =
+    Object.values(
+      root.patternClusters || {}
+    )
+      .filter(row =>
+        row?.confirmed === true &&
+        normalize(row?.creator) ===
+          cleanCreator &&
+        !root.rejectedPatterns?.[
+          row?.key
+        ]
+      )
+      .sort((a, b) => {
+        const aAvg =
+          Number.isFinite(
+            Number(a?.averageLogIndex)
+          )
+            ? Number(a.averageLogIndex)
+            : Number.MAX_SAFE_INTEGER;
+
+        const bAvg =
+          Number.isFinite(
+            Number(b?.averageLogIndex)
+          )
+            ? Number(b.averageLogIndex)
+            : Number.MAX_SAFE_INTEGER;
+
+        if (aAvg !== bAvg) {
+          return aAvg - bAvg;
+        }
+
+        const aMax =
+          Number.isFinite(
+            Number(a?.maxLogIndex)
+          )
+            ? Number(a.maxLogIndex)
+            : Number.MAX_SAFE_INTEGER;
+
+        const bMax =
+          Number.isFinite(
+            Number(b?.maxLogIndex)
+          )
+            ? Number(b.maxLogIndex)
+            : Number.MAX_SAFE_INTEGER;
+
+        if (aMax !== bMax) {
+          return aMax - bMax;
+        }
+
+        return String(
+          a?.key || ""
+        ).localeCompare(
+          String(
+            b?.key || ""
+          )
+        );
+      });
+
+  return eligible[0] || null;
+}
+
+function neutralAutoProtocolV517(
+  creator
+) {
+  const clean =
+    normalize(creator);
+
+  const suffix =
+    isAddress(clean)
+      ? clean.slice(-8)
+      : "unknown";
+
+  return {
+    protocol:
+      `Verified Launch Source ${suffix}`,
+    protocolKey:
+      `auto_${suffix}`
+        .toLowerCase()
+  };
+}
+
+function applyGenericConfirmedSourceAttributionV517(
+  state,
+  creator,
+  detector
+) {
+  const cleanCreator =
+    normalize(creator);
+
+  if (
+    !isAddress(cleanCreator) ||
+    !detector
+  ) {
+    return 0;
+  }
+
+  const origin =
+    pruneTokenOriginTraceV477(
+      state
+    );
+
+  let applied = 0;
+
+  for (
+    const [tokenKey, row]
+    of Object.entries(
+      origin?.tokenOrigins || {}
+    )
+  ) {
+    const token =
+      normalize(tokenKey);
+
+    if (
+      !isAddress(token) ||
+      row?.verified !== true ||
+      normalize(
+        row?.contractCreator
+      ) !== cleanCreator
+    ) {
+      continue;
+    }
+
+    const watched =
+      findWatched(state, token);
+
+    if (!watched) {
+      continue;
+    }
+
+    watched.launchpadV517 = {
+      verified: true,
+      protocol:
+        detector.protocol,
+      protocolKey:
+        detector.protocolKey,
+      factory:
+        cleanCreator,
+      canonicalEventEmitter:
+        detector.emitter,
+      canonicalEventTopic0:
+        detector.topic0,
+      tokenAddressLocationType:
+        detector.addressLocationType,
+      tokenAddressLocationIndex:
+        detector.addressLocationIndex,
+      launchTime: null,
+      transactionHash:
+        normalizeTxHashV495(
+          row?.creationTransactionHash
+        ),
+      source:
+        "GENERIC_3X3_EXACT_CREATION_RECEIPT_PATTERN_PROOF_V517",
+      verification:
+        "V480_VERIFIED_CREATOR_PLUS_THREE_DISTINCT_EXACT_CREATION_RECEIPTS_SAME_EVENT_PATTERN_V517",
+      sourceAttributionVerified:
+        true,
+      timestampVerified:
+        false,
+      launchTimingInferred:
+        false,
+      detectorId:
+        detector.detectorId ||
+        null,
+      registeredIntoV515:
+        true
+    };
+
+    applied++;
+  }
+
+  return applied;
+}
+
+async function runGenericUnknownSourceProofV517({
+  env,
+  state,
+  budget,
+  candidate
+}) {
+  const root =
+    ensureGenericUnknownSourceProofV517(
+      state
+    );
+
+  root.scansObserved =
+    safeNumber(root.scansObserved) + 1;
+
+  const telemetry = {
+    enabled: true,
+    measurementOnlyUntilProof: true,
+    attempted: false,
+    requestConsumed: false,
+    selectedToken:
+      candidate?.token || null,
+    selectedCreator:
+      candidate?.creator || null,
+    selectedTransactionHash:
+      candidate?.transactionHash || null,
+    provider: null,
+    httpStatus: null,
+    receiptStatus: null,
+    receiptLogCount: 0,
+    exactTokenOccurrenceCount: 0,
+    uniquePatternCountThisReceipt: 0,
+    strongestPatternAfterAttempt: null,
+    registrationAttempted: false,
+    registrationResult: null,
+    attributedVerifiedOriginsAfterRegistration:
+      0,
+    maxRequestsThisScan: 1,
+    hardRequestLimit: 42,
+    status: null
+  };
+
+  if (!candidate) {
+    telemetry.status =
+      "V517_NO_ELIGIBLE_GENERIC_UNKNOWN_SOURCE_RECEIPT";
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  }
+
+  const token =
+    normalize(candidate.token);
+
+  const creator =
+    normalize(candidate.creator);
+
+  const tx =
+    normalizeTxHashV495(
+      candidate.transactionHash
+    );
+
+  root.lastSelectedToken = token;
+  root.lastSelectedCreator = creator;
+  root.lastSelectedTransactionHash = tx;
+
+  if (
+    !isAddress(token) ||
+    !isAddress(creator) ||
+    !tx ||
+    !verifiedCreatorProfileV517(
+      state,
+      creator
+    )
+  ) {
+    telemetry.status =
+      "V517_INVALID_OR_UNVERIFIED_CREATOR_RECEIPT_CANDIDATE";
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  }
+
+  const spare =
+    consumeReleasedGlobalSpareV478(
+      budget,
+      "GENERIC_UNKNOWN_SOURCE_CREATION_RECEIPT_V517",
+      1
+    );
+
+  if (spare?.ok !== true) {
+    telemetry.status =
+      `V517_BUDGET_UNAVAILABLE:${spare?.reason || "UNKNOWN"}`;
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  }
+
+  const selectedProvider =
+    selectReceiptRpcProviderV496(
+      env,
+      state
+    );
+
+  telemetry.providerDecisions =
+    selectedProvider?.decisions || [];
+
+  if (
+    !selectedProvider?.provider ||
+    !selectedProvider?.url
+  ) {
+    telemetry.status =
+      "V517_NO_HEALTHY_RECEIPT_RPC_PROVIDER";
+    root.lastStatus =
+      telemetry.status;
+    return telemetry;
+  }
+
+  telemetry.provider =
+    selectedProvider.provider;
+  telemetry.attempted = true;
+  telemetry.requestConsumed = true;
+
+  root.lastProvider =
+    selectedProvider.provider;
+
+  root.receiptRequestsAttempted =
+    safeNumber(
+      root.receiptRequestsAttempted
+    ) + 1;
+
+  const attemptedAt =
+    Date.now();
+
+  const controller =
+    new AbortController();
+
+  const timer =
+    setTimeout(
+      () => controller.abort(),
+      6000
+    );
+
+  try {
+    const response =
+      await fetch(
+        selectedProvider.url,
+        {
+          method: "POST",
+          headers: {
+            "content-type":
+              "application/json"
+          },
+          body:
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 517,
+              method:
+                "eth_getTransactionReceipt",
+              params: [tx]
+            }),
+          signal:
+            controller.signal
+        }
+      );
+
+    telemetry.httpStatus =
+      response.status;
+
+    root.lastHttpStatus =
+      response.status;
+
+    if (!response.ok) {
+      const transient =
+        isTransientReceiptHttpStatusV496(
+          response.status
+        );
+
+      root.processedReceipts[tx] = {
+        token,
+        creator,
+        attemptedAt,
+        provider:
+          selectedProvider.provider,
+        httpStatus:
+          response.status,
+        processedOnce:
+          !transient,
+        retryEligible:
+          transient,
+        status:
+          transient
+            ? `V517_TRANSIENT_HTTP_${response.status}_RETRY_PRESERVED`
+            : `V517_FINAL_HTTP_${response.status}`
+      };
+
+      telemetry.status =
+        root.processedReceipts[
+          tx
+        ].status;
+
+      root.lastStatus =
+        telemetry.status;
+
+      return telemetry;
+    }
+
+    const body =
+      await response.json();
+
+    const receipt =
+      body?.result &&
+      typeof body.result === "object"
+        ? body.result
+        : null;
+
+    if (!receipt) {
+      root.processedReceipts[tx] = {
+        token,
+        creator,
+        attemptedAt,
+        provider:
+          selectedProvider.provider,
+        httpStatus:
+          response.status,
+        processedOnce: false,
+        retryEligible: true,
+        status:
+          "V517_HTTP_200_RECEIPT_UNAVAILABLE_RETRY_PRESERVED"
+      };
+
+      telemetry.status =
+        root.processedReceipts[
+          tx
+        ].status;
+
+      root.lastStatus =
+        telemetry.status;
+
+      return telemetry;
+    }
+
+    root.receiptRequestsSucceeded =
+      safeNumber(
+        root.receiptRequestsSucceeded
+      ) + 1;
+
+    telemetry.receiptStatus =
+      receipt?.status || null;
+
+    telemetry.receiptLogCount =
+      Array.isArray(receipt?.logs)
+        ? receipt.logs.length
+        : 0;
+
+    const occurrences =
+      exactTokenOccurrencesAcrossReceiptV512({
+        receipt,
+        token,
+        verifiedFactory:
+          creator
+      });
+
+    telemetry.exactTokenOccurrenceCount =
+      occurrences.length;
+
+    const uniquePatternKeys =
+      Array.from(
+        new Set(
+          occurrences.map(row =>
+            genericPatternKeyV517({
+              creator,
+              emitter:
+                row?.emitter,
+              topic0:
+                row?.topic0,
+              addressLocationType:
+                row?.addressLocationType,
+              addressLocationIndex:
+                row?.addressLocationIndex
+            })
+          ).filter(Boolean)
+        )
+      );
+
+    telemetry.uniquePatternCountThisReceipt =
+      uniquePatternKeys.length;
+
+    root.observations[tx] = {
+      token,
+      creator,
+      transactionHash: tx,
+      originVerified: true,
+      originSource:
+        candidate?.originSource ||
+        "BLOCKSCOUT_PRO_V2_ADDRESS_INFO_V480",
+      originVerifiedAt:
+        safeNumber(
+          candidate?.originVerifiedAt
+        ) || null,
+      receiptStatus:
+        receipt?.status || null,
+      receiptLogCount:
+        telemetry.receiptLogCount,
+      exactTokenOccurrences:
+        occurrences,
+      uniquePatternCount:
+        uniquePatternKeys.length,
+      observedAt:
+        attemptedAt,
+      provider:
+        `${selectedProvider.provider}_TRANSACTION_RECEIPT_V517`,
+      contractName:
+        candidate?.contractName ||
+        null,
+      evidenceStandard:
+        "V480_VERIFIED_CREATOR_PLUS_EXACT_CREATION_TX_FULL_RECEIPT_TOKEN_WORD_SCAN_V517"
+    };
+
+    root.processedReceipts[tx] = {
+      token,
+      creator,
+      attemptedAt,
+      provider:
+        selectedProvider.provider,
+      httpStatus:
+        response.status,
+      receiptStatus:
+        receipt?.status || null,
+      exactTokenOccurrenceCount:
+        occurrences.length,
+      processedOnce: true,
+      retryEligible: false,
+      status:
+        occurrences.length > 0
+          ? "V517_EXACT_TOKEN_OCCURRENCES_FOUND_ACROSS_CREATION_RECEIPT"
+          : "V517_NO_EXACT_TOKEN_OCCURRENCE_IN_CREATION_RECEIPT"
+    };
+
+    rebuildGenericUnknownPatternsV517(
+      state
+    );
+
+    const canonical =
+      canonicalGenericUnknownPatternV517(
+        state,
+        creator
+      );
+
+    telemetry.strongestPatternAfterAttempt =
+      canonical;
+
+    if (canonical) {
+      const neutral =
+        neutralAutoProtocolV517(
+          creator
+        );
+
+      telemetry.registrationAttempted =
+        true;
+
+      const registration =
+        registerVerifiedLaunchDetectorV515(
+          state,
+          {
+            protocol:
+              neutral.protocol,
+            protocolKey:
+              neutral.protocolKey,
+            verifiedFactory:
+              creator,
+            emitter:
+              canonical.emitter,
+            topic0:
+              canonical.topic0,
+            addressLocationType:
+              canonical
+                .addressLocationType,
+            addressLocationIndex:
+              canonical
+                .addressLocationIndex,
+            proofTokens:
+              canonical.tokens,
+            proofTransactions:
+              canonical.transactionHashes,
+            evidenceStandard:
+              "GENERIC_V517_THREE_DISTINCT_VERIFIED_TOKEN_CREATION_RECEIPTS_SAME_EXACT_PATTERN",
+            sourceState:
+              "genericUnknownSourceProofV517",
+            registeredAt:
+              Date.now()
+          }
+        );
+
+      telemetry.registrationResult =
+        registration;
+
+      if (
+        registration?.registered === true
+      ) {
+        root.confirmedSources[
+          creator
+        ] = {
+          creator,
+          protocol:
+            neutral.protocol,
+          protocolKey:
+            neutral.protocolKey,
+          detectorId:
+            registration.detectorId,
+          canonicalPattern:
+            canonical,
+          confirmedAt:
+            Date.now(),
+          proofTokens:
+            canonical.tokens.slice(0, 20),
+          proofTransactions:
+            canonical.transactionHashes
+              .slice(0, 20),
+          evidenceStandard:
+            "THREE_DISTINCT_VERIFIED_TOKEN_ORIGINS_THREE_DISTINCT_CREATION_TXS_SAME_EXACT_EVENT_PATTERN_V517"
+        };
+
+        telemetry.attributedVerifiedOriginsAfterRegistration =
+          applyGenericConfirmedSourceAttributionV517(
+            state,
+            creator,
+            registration.detector
+          );
+
+        telemetry.status =
+          "V517_GENERIC_UNKNOWN_SOURCE_PROVEN_AND_AUTO_REGISTERED_IN_V515";
+
+        root.lastStatus =
+          telemetry.status;
+
+        return telemetry;
+      }
+
+      telemetry.status =
+        `V517_CANONICAL_PATTERN_FOUND_REGISTRATION_NOT_ACCEPTED:${registration?.status || "UNKNOWN"}`;
+
+      root.lastStatus =
+        telemetry.status;
+
+      return telemetry;
+    }
+
+    telemetry.status =
+      occurrences.length > 0
+        ? "V517_RECEIPT_OBSERVED_WAITING_FOR_3X3_RECURRING_PATTERN"
+        : "V517_RECEIPT_OBSERVED_NO_TOKEN_PATTERN";
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  } catch (error) {
+    telemetry.status =
+      `V517_RECEIPT_FETCH_ERROR_RETRY_PRESERVED:${errorString(error)}`;
+
+    root.lastStatus =
+      telemetry.status;
+
+    return telemetry;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function genericUnknownSourceProofSnapshotV517(
+  state
+) {
+  const root =
+    rebuildGenericUnknownPatternsV517(
+      state
+    );
+
+  const candidates =
+    genericUnknownCreatorCandidatesV517(
+      state
+    );
+
+  const clusters =
+    Object.values(
+      root.patternClusters || {}
+    )
+      .sort((a, b) =>
+        safeNumber(
+          b?.distinctTokens
+        ) -
+          safeNumber(
+            a?.distinctTokens
+          ) ||
+        safeNumber(
+          a?.averageLogIndex
+        ) -
+          safeNumber(
+            b?.averageLogIndex
+          )
+      )
+      .slice(0, 20);
+
+  return {
+    enabled: true,
+    measurementOnlyUntilProof:
+      true,
+    monitorStartedAt:
+      safeNumber(
+        root.monitorStartedAt
+      ) || null,
+    scansObserved:
+      safeNumber(
+        root.scansObserved
+      ),
+    receiptRequestsAttempted:
+      safeNumber(
+        root.receiptRequestsAttempted
+      ),
+    receiptRequestsSucceeded:
+      safeNumber(
+        root.receiptRequestsSucceeded
+      ),
+    eligibleCreatorCount:
+      candidates.length,
+    eligibleCreators:
+      candidates.slice(0, 10).map(row => ({
+        creator:
+          row.creator,
+        distinctTokens:
+          row.distinctTokens,
+        distinctTransactions:
+          row.distinctTransactions,
+        contractNameInformationalOnly:
+          row.contractName,
+        blockscoutVerifiedContract:
+          true
+      })),
+    observationCount:
+      Object.keys(
+        root.observations || {}
+      ).length,
+    strongestPatternClusters:
+      clusters,
+    confirmedSourceCount:
+      Object.keys(
+        root.confirmedSources || {}
+      ).length,
+    confirmedSources:
+      Object.values(
+        root.confirmedSources || {}
+      ).slice(-20),
+    lastSelectedToken:
+      root.lastSelectedToken || null,
+    lastSelectedCreator:
+      root.lastSelectedCreator || null,
+    lastSelectedTransactionHash:
+      root.lastSelectedTransactionHash ||
+      null,
+    lastProvider:
+      root.lastProvider || null,
+    lastHttpStatus:
+      root.lastHttpStatus ?? null,
+    lastStatus:
+      root.lastStatus || null,
+    proofThreshold:
+      "3_DISTINCT_V480_VERIFIED_TOKENS_3_DISTINCT_CREATION_TRANSACTIONS_SAME_EXACT_NON_POOLMANAGER_SINGLE_TOKEN_SLOT_PATTERN",
+    verifiedCreatorContractIdentityRequired:
+      true,
+    contractNameUsedForPromotion:
+      false,
+    canonicalSharedPoolManagerExcluded:
+      true,
+    exactTokenMustOccurOnceInMatchedLog:
+      true,
+    deterministicPatternSelection:
+      "EARLIEST_AVERAGE_LOG_POSITION_THEN_MAX_LOG_POSITION_THEN_LEXICAL_KEY",
+    autoRegistryTarget:
+      "registerVerifiedLaunchDetectorV515",
+    neutralProtocolNamingUntil_EXTERNAL_BRAND_VERIFICATION:
+      true,
+    maxReceiptRequestsPerScan:
+      1,
+    hardGlobalLimitUnchanged:
+      42,
+    scoringChanged:
+      false,
+    qualificationChanged:
+      false,
+    telegramThresholdChanged:
+      false
+  };
+}
+
 function ensureVerifiedLaunchDetectorRegistryV515(
   state
 ) {
@@ -95452,6 +96950,107 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
     requestConsumed: false,
     status:
       "V511_SUPERSEDED_BY_V512_WHOLE_RECEIPT_PATTERN_PROOF"
+  };
+
+  /*
+   * V517 GENERIC UNKNOWN-SOURCE PROOF:
+   * Runs only when no current-live secondary work was used/reserved and after
+   * already-solved exact Pons/Doppler proof routes. It consumes at most the same
+   * single secondary receipt slot and can auto-register a 3x3-confirmed source
+   * directly into the V515 generic live detector registry.
+   */
+  const genericUnknownReceiptCandidateV517 =
+    selectGenericUnknownReceiptCandidateV517(
+      state
+    );
+
+  if (genericUnknownReceiptCandidateV517) {
+    const genericV517 =
+      await runGenericUnknownSourceProofV517({
+        env,
+        state,
+        budget,
+        candidate:
+          genericUnknownReceiptCandidateV517
+      });
+
+    telemetry.genericUnknownSourceProofV517 =
+      genericV517;
+
+    telemetry.selectedFromPersistedVerifiedOrigins =
+      true;
+    telemetry.selectedToken =
+      genericV517?.selectedToken ||
+      null;
+    telemetry.selectedCreator =
+      genericV517?.selectedCreator ||
+      null;
+    telemetry.selectedCreationTransactionHash =
+      genericV517
+        ?.selectedTransactionHash ||
+      null;
+    telemetry.attempted =
+      genericV517?.attempted === true;
+    telemetry.requestConsumed =
+      genericV517
+        ?.requestConsumed === true;
+    telemetry.processedAfterAttempt =
+      genericV517?.attempted === true;
+    telemetry.launchSourcePromoted =
+      genericV517
+        ?.registrationResult
+        ?.registered === true;
+    telemetry.status =
+      genericV517?.status ||
+      "V517_STATUS_UNAVAILABLE";
+
+    if (
+      genericV517?.attempted === true &&
+      v483DeferredForFairnessV487
+    ) {
+      telemetry.fairnessV487
+        .fairnessGrantThisScan = true;
+
+      fairness.fairnessGrants =
+        safeNumber(
+          fairness.fairnessGrants
+        ) + 1;
+
+      fairness.lastFairnessGrantAt =
+        Date.now();
+
+      fairness.lastFairnessGrantToken =
+        telemetry.selectedToken ||
+        null;
+
+      fairness.consecutiveV483BlocksOfV486 =
+        0;
+
+      fairness.lastDecision =
+        "V517_FAIRNESS_GRANTED_TO_GENERIC_UNKNOWN_SOURCE_EXACT_RECEIPT_PROOF";
+
+      fairness.lastDecisionAt =
+        Date.now();
+    }
+
+    root.lastStatus =
+      `V486_ROUTED_TO_V517:${telemetry.status}`;
+
+    return telemetry;
+  }
+
+  telemetry.genericUnknownSourceProofV517 = {
+    enabled: true,
+    measurementOnlyUntilProof:
+      true,
+    attempted: false,
+    requestConsumed: false,
+    eligibleCreatorCount:
+      genericUnknownCreatorCandidatesV517(
+        state
+      ).length,
+    status:
+      "V517_NO_ELIGIBLE_GENERIC_UNKNOWN_SOURCE_RECEIPT"
   };
 
   /*
