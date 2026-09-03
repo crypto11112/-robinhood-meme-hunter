@@ -1,4 +1,24 @@
 /**
+ * Robinhood Chain Meme Hunter — V552
+ * AUTHORITATIVE RUNTIME VERSION: V552
+ *
+ * V552 V458 WATCH-REGISTRATION ELIGIBILITY FIX:
+ * - V551 correctly created the forward-only continuous exact-pool collector, but its
+ *   registration helper redundantly called qualifiesTelegram() on candidates that had
+ *   already been selected by the existing V458 lane;
+ * - persisted successful-alert fallback targets can be fully valid ERC-20 + verified exact
+ *   V4 PoolId + exact-USD quote basis while lacking the transient live-analysis fields
+ *   required by qualifiesTelegram(), causing V551 to register 0 watches even when V458
+ *   independently completed exact-pool 24h USD verification;
+ * - V552 removes ONLY that redundant second qualification check;
+ * - registration still requires validERC20=true, onChainPoolIdentityV153.verified=true,
+ *   exact 32-byte PoolId, valid token address, valid chain head and V254 priceable quote basis;
+ * - the input set remains the existing V458-selected target set: current qualified exact-pool
+ *   candidate or the existing persisted successful-alert fallback;
+ * - no scoring, Momentum, Telegram thresholds, qualification rules, source learning,
+ *   request ceilings, provider routing or hard 42-request cap changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V551
  * AUTHORITATIVE RUNTIME VERSION: V551
  *
@@ -3096,7 +3116,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V551";
+const VERSION = "V552";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -56495,8 +56515,16 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
   const rows = [];
 
   for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    /*
+     * V552: candidates reaching this helper have already been selected by the
+     * protected V458 target lane. Re-running qualifiesTelegram() here is unsafe
+     * for persisted successful-alert fallback snapshots because they do not
+     * necessarily carry every transient live-analysis field.
+     *
+     * Keep the evidence requirements that actually matter for exact-pool
+     * directional collection.
+     */
     if (
-      qualifiesTelegram(candidate) !== true ||
       candidate?.validERC20 !== true ||
       candidate?.onChainPoolIdentityV153?.verified !== true
     ) {
@@ -56528,9 +56556,18 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       existing.lastOpportunityScore = safeNumber(candidate?.opportunity?.score);
       existing.lastConfidence = safeNumber(candidate?.confidence);
       existing.lastMomentum = safeNumber(candidate?.momentum?.score);
+      existing.registrationSourceV552 =
+        candidate?.successfulTelegramAlertFallbackV460?.verified === true
+          ? "PERSISTED_SUCCESSFUL_ALERT_FALLBACK_V460"
+          : "V458_SELECTED_CURRENT_EXACT_POOL_TARGET";
       existing.updatedAt = now;
       refreshed++;
-      rows.push({tokenAddress:token,poolId,status:"REFRESHED_EXISTING_WATCH_V551"});
+      rows.push({
+        tokenAddress:token,
+        poolId,
+        registrationSourceV552:existing.registrationSourceV552,
+        status:"REFRESHED_EXISTING_WATCH_V552"
+      });
       continue;
     }
 
@@ -56561,10 +56598,19 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       fullTokenMarketCoverageClaimed:false,
       lastOpportunityScore:safeNumber(candidate?.opportunity?.score),
       lastConfidence:safeNumber(candidate?.confidence),
-      lastMomentum:safeNumber(candidate?.momentum?.score)
+      lastMomentum:safeNumber(candidate?.momentum?.score),
+      registrationSourceV552:
+        candidate?.successfulTelegramAlertFallbackV460?.verified === true
+          ? "PERSISTED_SUCCESSFUL_ALERT_FALLBACK_V460"
+          : "V458_SELECTED_CURRENT_EXACT_POOL_TARGET"
     };
     registered++;
-    rows.push({tokenAddress:token,poolId,status:"REGISTERED_FORWARD_ONLY_AT_CURRENT_HEAD_V551"});
+    rows.push({
+      tokenAddress:token,
+      poolId,
+      registrationSourceV552:root.entries[token].registrationSourceV552,
+      status:"REGISTERED_FORWARD_ONLY_AT_CURRENT_HEAD_V552"
+    });
   }
 
   pruneDirectionalWatchV551(state);
@@ -56823,6 +56869,7 @@ function directionalWatchSnapshotV551(state) {
       successfulRanges:safeNumber(row?.successfulRanges),
       exactUsdTrades:safeNumber(row?.exactUsdTrades),
       saturatedAttempts:safeNumber(row?.saturatedAttempts),
+      registrationSourceV552:row?.registrationSourceV552 || null,
       forwardOnly:true,
       fullTimeWindowCoverageClaimed:false,
       fullTokenMarketCoverageClaimed:false
