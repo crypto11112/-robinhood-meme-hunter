@@ -1,4 +1,16 @@
 /**
+ * V540 FLAP V525 -> V515 CONFIRMED-PROOF BRIDGE:
+ * - preserves V539 historical DATA_WORD_3 recovery and all confirmed Mint Club/NOXA detectors;
+ * - consumes ZERO provider requests and adds no extra state-save cycle;
+ * - reuses only V525's existing fail-closed evidence: a bot-verified Flap launch token/tx must
+ *   correlate to the SAME Flap portal log, the token must occur exactly once in that log, and
+ *   the SAME emitter + topic0 + exact token slot must be reproduced across >=3 distinct tokens
+ *   AND >=3 distinct transactions before V525 marks a pattern confirmed;
+ * - only an already-confirmed V525 pattern is eligible for V515 registration;
+ * - fixes V539 stored Flap reclassification bookkeeping to retain DATA_WORD rather than TOPIC;
+ * - hard global request ceiling remains 42; scanner/scoring/Momentum/qualification/Telegram unchanged.
+ */
+/**
  * V539 FLAP DATA-WORD-3 EXACT PROOF RECOVERY + OPENFAIR EXHAUSTION:
  * - V538 recovered Openfair topic2 successfully, but authenticated history is exhausted with
  *   only one distinct LaunchCreated token/transaction; retain that exact evidence and stop
@@ -23,8 +35,8 @@
  *   qualification, Telegram thresholds, verified USD, holder logic or confirmed detectors.
  */
 /**
- * Robinhood Chain Meme Hunter — V539
- * AUTHORITATIVE RUNTIME VERSION: V539
+ * Robinhood Chain Meme Hunter — V540
+ * AUTHORITATIVE RUNTIME VERSION: V540
  *
  * V537 OPENFAIR TOPIC2 RECOVERY + BOUNDED PROOF RESERVATION:
  * - V536 successfully confirmed/registered NOXA Fun at 75 distinct tokens / 75 distinct transactions;
@@ -2884,7 +2896,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V539";
+const VERSION = "V540";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -22163,12 +22175,84 @@ function reclassifyStoredSeededHistoricalEvidenceV536(state){
       if(sourceKey==="noxa"){exact=isExactNoxaTokenLaunchedDecodedV536(ev?.decodedMethod);token=v529TopicAddress(ev?.topic1);index=1;}
       if(sourceKey==="openfair"){exact=isExactOpenfairLaunchCreatedDecodedV536(ev?.decodedMethod);token=v529TopicAddress(ev?.topic2);index=2;}
       if(sourceKey==="flap"){exact=isExactFlapTokenCreatedDecodedV539(ev?.decodedMethod);token=v539DataWordAddress(ev?.rawData,3);index=3;}
-      if(!exact||!token)continue;const key=`${tx}:${safeNumber(ev?.logIndex)}:${token}`;if(seen.has(key))continue;seen.add(key);obs.push({observedAt:safeNumber(ev?.observedAt)||Date.now(),token,transactionHash:tx,topic0,addressLocationType:"TOPIC",addressLocationIndex:index,decodedMethod:String(ev?.decodedMethod||""),blockNumber:safeNumber(ev?.blockNumber)||null,logIndex:safeNumber(ev?.logIndex)||null,reclassifiedFromStoredEvidenceV536:true});added++;
+      if(!exact||!token)continue;const key=`${tx}:${safeNumber(ev?.logIndex)}:${token}`;if(seen.has(key))continue;seen.add(key);obs.push({observedAt:safeNumber(ev?.observedAt)||Date.now(),token,transactionHash:tx,topic0,addressLocationType:sourceKey==="flap"?"DATA_WORD":"TOPIC",addressLocationIndex:index,decodedMethod:String(ev?.decodedMethod||""),blockNumber:safeNumber(ev?.blockNumber)||null,logIndex:safeNumber(ev?.logIndex)||null,reclassifiedFromStoredEvidenceV536:true});added++;
     }
     src.exactSeededLaunchObservationsV536=obs.slice(-250);const registration=rebuildSeededExactProofV536(state,sourceKey),strong=src.strongestExactPatternV536||null;
     result[sourceKey]={added,total:src.exactSeededLaunchObservationsV536.length,proofTokenCount:safeNumber(strong?.proofTokenCount),proofTransactionCount:safeNumber(strong?.proofTransactionCount),exactLaunchPatternConfirmed:src.exactLaunchPatternConfirmed===true,exactDetectorRegistered:src.exactDetectorRegistered===true,registrationStatus:registration?.status||src.registrationStatus||null,status:src.status||"V536_EXACT_RECLASSIFICATION_COMPLETE"};
   }
   return result;
+}
+
+
+function bridgeConfirmedFlapV525ToV515V540(state){
+  const flap=ensureSeededFlapExactEvidenceV525(state);
+  const confirmed=rebuildSeededFlapPatternsV525(state);
+  if(!confirmed||flap?.exactLaunchPatternConfirmed!==true){
+    return{
+      enabled:true,externalRequestsAdded:0,attempted:false,registered:false,
+      status:"V540_FLAP_V525_PATTERN_NOT_YET_CONFIRMED",
+      distinctTokens:safeNumber(confirmed?.distinctTokens),
+      distinctTransactions:safeNumber(confirmed?.distinctTransactions)
+    };
+  }
+  const emitter=normalize(confirmed?.emitter),topic0=String(confirmed?.topic0||"").toLowerCase();
+  const locationType=String(confirmed?.addressLocationType||"");
+  const locationIndex=Number(confirmed?.addressLocationIndex);
+  const proofTokens=Array.isArray(confirmed?.tokens)?confirmed.tokens.map(normalize).filter(isAddress):[];
+  const proofTransactions=Array.isArray(confirmed?.transactionHashes)?confirmed.transactionHashes.map(normalizeTxHashV495).filter(Boolean):[];
+  if(emitter!==SEEDED_FLAP_PORTAL_V525||!/^0x[a-f0-9]{64}$/.test(topic0)||
+     !["TOPIC","DATA_WORD"].includes(locationType)||!Number.isInteger(locationIndex)||locationIndex<0||
+     new Set(proofTokens).size<3||new Set(proofTransactions).size<3){
+    return{
+      enabled:true,externalRequestsAdded:0,attempted:false,registered:false,
+      status:"V540_FLAP_V525_CONFIRMED_PATTERN_FAILED_STRICT_REGISTRATION_GUARD",
+      distinctTokens:new Set(proofTokens).size,distinctTransactions:new Set(proofTransactions).size,
+      locationType,locationIndex
+    };
+  }
+  const reg=registerVerifiedLaunchDetectorV515(state,{
+    protocol:"Flap",
+    protocolKey:"flap",
+    verifiedFactory:SEEDED_FLAP_PORTAL_V525,
+    emitter:SEEDED_FLAP_PORTAL_V525,
+    topic0,
+    addressLocationType:locationType,
+    addressLocationIndex:locationIndex,
+    proofTokens:[...new Set(proofTokens)],
+    proofTransactions:[...new Set(proofTransactions)],
+    evidenceStandard:"V525_THREE_INDEPENDENT_BOT_VERIFIED_FLAP_LAUNCH_TX_PLUS_SAME_TX_EXACT_PORTAL_LOG_TOKEN_OCCURS_ONCE_V540",
+    sourceState:"seededFlapExactEvidenceV525"
+  });
+  const registered=reg?.registered===true||reg?.status==="V515_DETECTOR_ALREADY_REGISTERED_EXACT_MATCH";
+  if(registered){
+    flap.exactDetectorRegistered=true;
+    flap.launchSourcePromotionAllowed=true;
+    flap.status="V540_FLAP_V525_CONFIRMED_PATTERN_REGISTERED_V515";
+    const hist=ensureSeededHistoricalProofV529(state)?.sources?.flap;
+    if(hist){
+      hist.exactLaunchPatternConfirmed=true;
+      hist.exactDetectorRegistered=true;
+      hist.registrationStatus=reg?.status||hist.registrationStatus||null;
+      hist.status="V540_FLAP_V525_CONFIRMED_PATTERN_REGISTERED_V515";
+      hist.strongestExactPatternV536={
+        topic0,
+        tokens:[...new Set(proofTokens)],
+        transactions:[...new Set(proofTransactions)],
+        proofTokenCount:new Set(proofTokens).size,
+        proofTransactionCount:new Set(proofTransactions).size,
+        addressLocationType:locationType,
+        addressLocationIndex:locationIndex,
+        bridgedFromV525:true
+      };
+    }
+  }
+  return{
+    enabled:true,externalRequestsAdded:0,attempted:true,registered,
+    registrationStatus:reg?.status||null,
+    topic0,addressLocationType:locationType,addressLocationIndex:locationIndex,
+    proofTokenCount:new Set(proofTokens).size,proofTransactionCount:new Set(proofTransactions).size,
+    status:registered?"V540_FLAP_V525_CONFIRMED_PATTERN_REGISTERED_V515":"V540_FLAP_V515_REGISTRATION_REFUSED"
+  };
 }
 
 function reclassifyStoredMintClubHistoricalEvidenceV535(state){
@@ -72459,6 +72543,10 @@ for (
   const seededStoredEvidenceReclassificationV536 =
     reclassifyStoredSeededHistoricalEvidenceV536(state);
 
+  /* V540: zero-request bridge from V525's already-confirmed 3x3 Flap portal pattern into V515. */
+  const flapV525ConfirmedBridgeV540 =
+    bridgeConfirmedFlapV525ToV515V540(state);
+
   /* V532: seeded history uses one separate residual post-Telegram request only if global capacity remains. */
   const seededHistoricalProofThisScanV529 =
     await runSeededHistoricalProofV529({ env, state, budget });
@@ -73332,6 +73420,7 @@ for (
     seededHistoricalProofV529: {
       mintClubStoredEvidenceReclassificationV535,
       seededStoredEvidenceReclassificationV536,
+      flapV525ConfirmedBridgeV540,
       currentRun: seededHistoricalProofThisScanV529,
       cumulative: seededHistoricalProofSnapshotV529(state)
     },
