@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V557
+ * AUTHORITATIVE RUNTIME VERSION: V557
+ *
+ * V557 VERIFIED ROLLING DIRECTIONAL USD WINDOWS:
+ * - preserves V556 active/recent exact-V4 pool seeding and the proven V554 collector;
+ * - adds a read-only exact-pool rolling USD layer over the persisted V254 exact-trade ledger;
+ * - windows: 5m, 15m, 1h, 6h, 12h, 24h;
+ * - a window is VERIFIED only when the same exact watched PoolId has forward-only,
+ *   gap-free contiguous collection from at least the window cutoff through the scan head;
+ * - registration time is used conservatively as the earliest claimable wall-clock coverage:
+ *   if registration occurred after the cutoff, the window remains UNVERIFIED;
+ * - coverageEndBlock must be at the current scan head (or later) and gapDetected must not be true;
+ * - only exactUsdVerified V254 records matching BOTH candidate token and exact PoolId are summed;
+ * - zero trades becomes verified $0/$0 only when the full window coverage proof is complete;
+ * - incomplete windows expose no Buy/Sell USD totals and remain DATA UNVERIFIED;
+ * - no Telegram/scoring promotion yet: this version validates the rolling calculation first;
+ * - no extra provider requests and hard global request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V556
  * AUTHORITATIVE RUNTIME VERSION: V556
  *
@@ -3192,7 +3211,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V556";
+const VERSION = "V557";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -57171,6 +57190,174 @@ function directionalWatchSnapshotV551(state) {
 }
 
 
+function verifiedRollingDirectionalUsdWindowsV557(
+  state,
+  latestNumber,
+  requestAt = Date.now()
+) {
+  const watchRoot = pruneDirectionalWatchV551(state);
+  const store = onChainDirectionalStoreV179(state);
+  const head = Number(latestNumber);
+  const now = Number(requestAt);
+
+  const windows = [
+    ["m5", 5 * 60 * 1000],
+    ["m15", 15 * 60 * 1000],
+    ["h1", 60 * 60 * 1000],
+    ["h6", 6 * 60 * 60 * 1000],
+    ["h12", 12 * 60 * 60 * 1000],
+    ["h24", 24 * 60 * 60 * 1000]
+  ];
+
+  const entries = Object.values(watchRoot?.entries || {})
+    .filter(row =>
+      isAddress(normalize(row?.tokenAddress)) &&
+      /^0x[a-f0-9]{64}$/.test(String(normalize(row?.poolId) || ""))
+    )
+    .map(row => {
+      const token = normalize(row?.tokenAddress);
+      const poolId = normalize(row?.poolId);
+      const registeredAt = safeNumber(row?.registeredAt);
+      const coverageEndBlock = Number(row?.coverageEndBlock);
+      const caughtUpToScanHead =
+        Number.isFinite(head) &&
+        Number.isFinite(coverageEndBlock) &&
+        coverageEndBlock >= head;
+      const gapFree = row?.gapDetected !== true;
+
+      const ledgerRows =
+        Array.isArray(store?.[token]?.records)
+          ? store[token].records.filter(trade =>
+              normalize(trade?.candidateAddress) === token &&
+              normalize(trade?.poolId) === poolId &&
+              trade?.exactUsdVerified === true &&
+              Number.isFinite(Number(trade?.exactUsdAmount)) &&
+              Number(trade?.exactUsdAmount) > 0 &&
+              Number.isFinite(Number(trade?.observedAt))
+            )
+          : [];
+
+      const outWindows = {};
+
+      for (const [key, windowMs] of windows) {
+        const cutoff = now - windowMs;
+
+        /*
+         * Conservative wall-clock proof:
+         * registration happened only AFTER the starting chain head was known,
+         * so registeredAt <= cutoff guarantees the forward-only block coverage
+         * began no later than the requested window start.
+         */
+        const startCovered =
+          registeredAt > 0 &&
+          registeredAt <= cutoff;
+
+        const coverageComplete =
+          startCovered &&
+          caughtUpToScanHead &&
+          gapFree;
+
+        const rows = ledgerRows.filter(trade => {
+          const at = Number(trade?.observedAt);
+          return at >= cutoff && at <= now;
+        });
+
+        let buyUsd = 0;
+        let sellUsd = 0;
+        let buyTrades = 0;
+        let sellTrades = 0;
+
+        for (const trade of rows) {
+          const usd = Number(trade.exactUsdAmount);
+          const side = String(trade?.side || "").toLowerCase();
+
+          if (side === "buy") {
+            buyUsd += usd;
+            buyTrades++;
+          } else if (side === "sell") {
+            sellUsd += usd;
+            sellTrades++;
+          }
+        }
+
+        const totalUsd = buyUsd + sellUsd;
+
+        outWindows[key] = {
+          verified: coverageComplete,
+          status: coverageComplete
+            ? "VERIFIED_CONTIGUOUS_EXACT_POOL_WINDOW_V557"
+            : "DATA_UNVERIFIED_INCOMPLETE_CONTIGUOUS_WINDOW_V557",
+          windowMs,
+          cutoffAt: cutoff,
+          asOfAt: now,
+          registrationAt: registeredAt || null,
+          coverageEndBlock:
+            Number.isFinite(coverageEndBlock) ? coverageEndBlock : null,
+          scanHeadBlock:
+            Number.isFinite(head) ? head : null,
+          caughtUpToScanHead,
+          gapFree,
+          observedExactTrades: rows.length,
+          buyTrades: coverageComplete ? buyTrades : null,
+          sellTrades: coverageComplete ? sellTrades : null,
+          buyUsd: coverageComplete ? buyUsd : null,
+          sellUsd: coverageComplete ? sellUsd : null,
+          netUsd: coverageComplete ? buyUsd - sellUsd : null,
+          buyPressurePct:
+            coverageComplete && totalUsd > 0
+              ? (buyUsd / totalUsd) * 100
+              : coverageComplete
+                ? 0
+                : null
+        };
+      }
+
+      return {
+        tokenAddress: token,
+        symbol: row?.symbol || null,
+        poolId,
+        registeredAt: registeredAt || null,
+        coverageStartBlock: row?.coverageStartBlock ?? null,
+        coverageEndBlock:
+          Number.isFinite(coverageEndBlock) ? coverageEndBlock : null,
+        scanHeadBlock:
+          Number.isFinite(head) ? head : null,
+        caughtUpToScanHead,
+        gapFree,
+        exactUsdLedgerRecords: ledgerRows.length,
+        windows: outWindows
+      };
+    });
+
+  return {
+    enabled: true,
+    measurementOnly: true,
+    affectsScoring: false,
+    affectsTelegram: false,
+    exactPoolOnly: true,
+    fullTokenMarketCoverageClaimed: false,
+    forwardOnly: true,
+    requestAt: now,
+    scanHeadBlock: Number.isFinite(head) ? head : null,
+    watchedPoolsEvaluated: entries.length,
+    verifiedWindowCounts: {
+      m5: entries.filter(row => row?.windows?.m5?.verified === true).length,
+      m15: entries.filter(row => row?.windows?.m15?.verified === true).length,
+      h1: entries.filter(row => row?.windows?.h1?.verified === true).length,
+      h6: entries.filter(row => row?.windows?.h6?.verified === true).length,
+      h12: entries.filter(row => row?.windows?.h12?.verified === true).length,
+      h24: entries.filter(row => row?.windows?.h24?.verified === true).length
+    },
+    entries,
+    externalRequestsAdded: 0,
+    hardGlobalLimitUnchanged: 42,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdChanged: false
+  };
+}
+
+
 async function blockscoutCompleteExactPoolDirectionalUsdV458(
   candidate,
   budget,
@@ -74113,6 +74300,13 @@ for (
   const continuousDirectionalWatchV551 =
     directionalWatchSnapshotV551(state);
 
+  const verifiedRollingDirectionalUsdV557 =
+    verifiedRollingDirectionalUsdWindowsV557(
+      state,
+      latestNumber,
+      Date.now()
+    );
+
   /* V532: seeded history uses one separate residual post-Telegram request only if global capacity remains. */
   const seededHistoricalProofThisScanV529 =
     await runSeededHistoricalProofV529({ env, state, budget });
@@ -79099,6 +79293,7 @@ for (
     continuousDirectionalWatchThisScanV551,
     continuousDirectionalWatchCatchupV554,
     continuousDirectionalWatchV551,
+    verifiedRollingDirectionalUsdV557,
     completeExactPoolDirectionalUsdV458,
     completeExactPoolReserveResultV459,
     completeExactPoolCompletionV460:
