@@ -382,6 +382,17 @@
  * - scoring, Momentum, qualification, Telegram thresholds, verified USD,
  *   dense-pool completion, RWA detector, launch meter and hard limit 42 unchanged.
  *
+ * V526 LUNCH.FUN BRAND CORROBORATION GATE (REPORTING / EVIDENCE ONLY):
+ * - preserves V525 Flap exact validation, V524 Openfair, V523 NOXA and V517/V520 autonomous learning unchanged;
+ * - upgrades the auto_9983bb8c identity view from a single generic brand lead to a bounded
+ *   externally corroborated deployer match: two independent Uniswap hook submissions name
+ *   the exact V503 sourceCreator 0x7b2d...8cc9 as deployer of lunch.fun Robinhood-chain hooks;
+ * - DOES NOT rename the self-learned detector to lunch.fun because a direct factory/proxy
+ *   -> public lunch.fun launch-factory identity link is still DATA UNVERIFIED;
+ * - adds an explicit direct-brand-proof gate so future code cannot promote the name merely
+ *   from shared deployer identity;
+ * - /sourceintel remains read-only: 0 provider requests, 0 state writes.
+ *
  * V524 SEEDED OPENFAIR + V523 NOXA LIVE EVIDENCE + V522 SOURCE INTELLIGENCE:
  * - preserves the proven V517/V520 autonomous 3x3 source-learning loop unchanged;
  * - adds /sourceintel as a zero-provider-request, zero-write evidence view;
@@ -2726,7 +2737,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V525";
+const VERSION = "V526";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -113112,12 +113123,18 @@ function sourceIdentityIntelSnapshotV522(state) {
       let brandEvidence = "DATA UNVERIFIED";
       let brandPromotionAllowed = false;
 
-      // V522 operator-research lead only. This does NOT rename/promote the detector.
-      // Public Robinhood-chain lunch.fun hook submissions identify this deployer.
+      // V526 bounded external corroboration only. This does NOT rename/promote the detector.
+      // Two separate Uniswap hooklist submissions for Robinhood Chain explicitly identify
+      // this exact deployer as the deployer of lunch.fun hooks (LunchTaxHook + LunchTaxHookPair).
+      // A shared deployer is strong corroboration, but it is NOT direct proof that this exact
+      // V517-learned factory/proxy is itself the public lunch.fun launch factory.
+      let externalBrandCorroborationCountV526 = 0;
+      let directFactoryBrandLinkVerifiedV526 = false;
       if (sourceCreator === "0x7b2daf7f696bb844c7786693062d6619d1858cc9") {
         brandCandidate = "lunch.fun";
+        externalBrandCorroborationCountV526 = 2;
         brandEvidence =
-          "EXTERNAL_DEPLOYER_IDENTITY_LEAD_MATCHES_V503_SOURCE_CREATOR_NOT_DIRECT_BRAND_PROOF_V522";
+          "V526_STRONG_EXTERNAL_CORROBORATION_TWO_UNISWAP_HOOK_SUBMISSIONS_SAME_DEPLOYER_DIRECT_FACTORY_BRAND_LINK_STILL_UNVERIFIED";
       }
 
       return {
@@ -113138,8 +113155,11 @@ function sourceIdentityIntelSnapshotV522(state) {
         sourceCreationTransactionHash: profile?.sourceCreationTransactionHash || null,
         brandCandidate,
         brandEvidence,
-        brandIdentityVerifiedByBot: false,
-        brandPromotionAllowed
+        externalBrandCorroborationCountV526,
+        externalBrandCorroboratedV526: externalBrandCorroborationCountV526 >= 2,
+        directFactoryBrandLinkVerifiedV526,
+        brandIdentityVerifiedByBot: directFactoryBrandLinkVerifiedV526 === true,
+        brandPromotionAllowed: directFactoryBrandLinkVerifiedV526 === true && brandPromotionAllowed === true
       };
     });
 
@@ -113247,7 +113267,7 @@ function sourceIdentityIntelSnapshotV522(state) {
 
   return {
     enabled: true,
-    version: "V525",
+    version: "V526",
     readOnly: true,
     externalProviderRequests: 0,
     persistentWrites: 0,
@@ -113260,7 +113280,7 @@ function sourceIdentityIntelSnapshotV522(state) {
     seededLeadCount: seededLeads.length,
     seededLeads,
     interpretation:
-      "IDENTITY_AND_SEEDED_EXACT_SOURCE_EVIDENCE_ONLY_NO_BRAND_OR_SOURCE_PROMOTION_WITHOUT_BOT_EXACT_PROOF_V525"
+      "V526_IDENTITY_CORROBORATION_ONLY_SHARED_DEPLOYER_IS_NOT_DIRECT_FACTORY_BRAND_PROOF_NO_RENAME_WITHOUT_DIRECT_LINK"
   };
 }
 
@@ -113279,7 +113299,9 @@ function sourceIdentityIntelTelegramMessageV522(state) {
           `  Contract profile: <b>${escapeHtml(row?.creatorContractName || "UNVERIFIED")}</b>${row?.proxyType ? ` (${escapeHtml(row.proxyType)})` : ""}`,
           `  Source creator: <code>${escapeHtml(row?.sourceCreator || "UNVERIFIED")}</code>`,
           `  Brand candidate: <b>${escapeHtml(brand)}</b>`,
-          `  Brand identity verified by bot: <b>NO</b>`
+          `  External brand corroboration: <b>${row?.externalBrandCorroboratedV526 ? `YES — ${safeNumber(row?.externalBrandCorroborationCountV526)} independent public deployer links` : "NO"}</b>`,
+          `  Direct factory → brand link: <b>${row?.directFactoryBrandLinkVerifiedV526 ? "VERIFIED" : "DATA UNVERIFIED"}</b>`,
+          `  Brand identity verified by bot: <b>${row?.brandIdentityVerifiedByBot ? "YES" : "NO"}</b>`
         ];
       })
     : ["• No self-learned exact detector is currently retained"];
@@ -113334,8 +113356,8 @@ function sourceIdentityIntelTelegramMessageV522(state) {
     "<b>Seeded launchpad leads — correlation only</b>",
     ...seedLines,
     "",
-    "⚠️ Website/research labels are leads only. V525 does not promote a source name from them.",
-    "✅ Exact launch-source verification still requires the bot's existing on-chain proof standard.",
+    "⚠️ V526 can corroborate a brand from independent public deployer evidence, but shared deployer identity alone cannot rename a detector.",
+    "✅ lunch.fun remains a strongly corroborated identity candidate until a direct factory/proxy → brand link is proven.",
     "<i>/sourceintel is read-only: 0 provider requests and 0 persistent state writes.</i>"
   ].join("\n");
 }
