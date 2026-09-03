@@ -1,6 +1,6 @@
 /**
- * Robinhood Chain Meme Hunter — V533
- * AUTHORITATIVE RUNTIME VERSION: V533
+ * Robinhood Chain Meme Hunter — V534
+ * AUTHORITATIVE RUNTIME VERSION: V534
  *
  * V533 AUTHENTICATED SEEDED HISTORICAL LOG ROUTING FIX:
  * - fixes the observed V532/V529 seeded historical Mint Club HTTP 403 by replacing
@@ -24,6 +24,14 @@
  * - if the scan is already at 42, historical proof cleanly defers with DATA UNVERIFIED;
  * - no scanner, scoring, Momentum, qualification, Telegram threshold, verified-USD,
  *   holder, V515/V517/V520 detector proof standard, or existing secondary routing changes.
+ *
+
+ * V534 HISTORICAL RAW-TOPIC FINGERPRINT TELEMETRY:
+ * - preserves V533 authenticated Blockscout Pro historical logs and V532 residual lane;
+ * - surfaces recurring raw topic0 counts and bounded recent log-shape samples already persisted by V529;
+ * - adds ZERO provider requests and ZERO extra persistent writes;
+ * - does not weaken Mint Club 3-token/3-transaction exact proof or promote from topic frequency alone;
+ * - hard global request ceiling remains 42; scanner/scoring/Momentum/qualification/Telegram unchanged.
  *
  * V531 /SOURCEINTEL HISTORICAL-STATE REPORTING FIX:
  * - fixes V530 /sourceintel always showing V529 historical proof as NOT_RUN;
@@ -2811,7 +2819,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V533";
+const VERSION = "V534";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -22042,7 +22050,7 @@ async function runSeededHistoricalProofV529({env,state,budget}){
     return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,label:chosen.label,address:normalize(chosen.address),httpStatus:response.status,logsThisPage:items.length,exactMintClubTokenCreatedThisPage:exactMint,nextPageAvailable:Boolean(row.nextPageParams),exactLaunchPatternConfirmed:row.exactLaunchPatternConfirmed===true,exactDetectorRegistered:row.exactDetectorRegistered===true,registrationStatus:registration?.status||row.registrationStatus||null,residualLaneV532:true,authenticatedBlockscoutProV533:true,residualBudgetRemainingAfter:safeNumber(spare?.remainingAfter),status:row.status};
   }catch(e){row.lastError=errorString(e);row.status="V529_HISTORICAL_FETCH_ERROR_RETRY_PRESERVED";root.lastStatus=row.status;return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,error:row.lastError,residualLaneV532:true,authenticatedBlockscoutProV533:true,residualBudgetRemainingAfter:safeNumber(spare?.remainingAfter),status:row.status};}
 }
-function seededHistoricalProofSnapshotV529(state){const root=ensureSeededHistoricalProofV529(state);rebuildMintClubHistoricalExactProofV529(state);return{enabled:true,oneRequestMaximumPerScan:true,hardGlobalLimitUnchanged:42,requestsAttempted:safeNumber(root.requestsAttempted),requestsSucceeded:safeNumber(root.requestsSucceeded),lastAttemptAt:root.lastAttemptAt||null,lastSourceKey:root.lastSourceKey||null,lastStatus:root.lastStatus||null,sources:Object.values(root.sources||{}).map(r=>({key:r.key,label:r.label,address:r.address,requestsAttempted:safeNumber(r.requestsAttempted),requestsSucceeded:safeNumber(r.requestsSucceeded),pagesObserved:safeNumber(r.pagesObserved),logsObserved:safeNumber(r.logsObserved),distinctTransactionsObserved:safeNumber(r.distinctTransactionsObserved),exactMintClubTokenCreatedObservations:Array.isArray(r.exactMintClubTokenCreatedObservations)?r.exactMintClubTokenCreatedObservations.length:0,strongestExactPattern:r.strongestExactPattern?{topic0:r.strongestExactPattern.topic0,proofTokenCount:r.strongestExactPattern.proofTokenCount,proofTransactionCount:r.strongestExactPattern.proofTransactionCount}:null,exactLaunchPatternConfirmed:r.exactLaunchPatternConfirmed===true,exactDetectorRegistered:r.exactDetectorRegistered===true,nextPageAvailable:Boolean(r.nextPageParams),status:r.status||null}))};}
+function seededHistoricalProofSnapshotV529(state){const root=ensureSeededHistoricalProofV529(state);rebuildMintClubHistoricalExactProofV529(state);return{enabled:true,oneRequestMaximumPerScan:true,hardGlobalLimitUnchanged:42,requestsAttempted:safeNumber(root.requestsAttempted),requestsSucceeded:safeNumber(root.requestsSucceeded),lastAttemptAt:root.lastAttemptAt||null,lastSourceKey:root.lastSourceKey||null,lastStatus:root.lastStatus||null,sources:Object.values(root.sources||{}).map(r=>{const topTopic0Counts=Object.entries(r.topic0Counts||{}).map(([topic0,count])=>({topic0,count:safeNumber(count)})).sort((a,b)=>b.count-a.count||a.topic0.localeCompare(b.topic0)).slice(0,12);const recentLogShapeSamples=(Array.isArray(r.recentEvidence)?r.recentEvidence:[]).slice(-12).map(e=>({topic0:e?.topic0||null,topic1:e?.topic1||null,topicCount:safeNumber(e?.topicCount),decodedMethod:e?.decodedMethod||null,transactionHash:e?.transactionHash||null,blockNumber:e?.blockNumber||null,logIndex:e?.logIndex??null}));return{key:r.key,label:r.label,address:r.address,requestsAttempted:safeNumber(r.requestsAttempted),requestsSucceeded:safeNumber(r.requestsSucceeded),pagesObserved:safeNumber(r.pagesObserved),logsObserved:safeNumber(r.logsObserved),distinctTransactionsObserved:safeNumber(r.distinctTransactionsObserved),exactMintClubTokenCreatedObservations:Array.isArray(r.exactMintClubTokenCreatedObservations)?r.exactMintClubTokenCreatedObservations.length:0,strongestExactPattern:r.strongestExactPattern?{topic0:r.strongestExactPattern.topic0,proofTokenCount:r.strongestExactPattern.proofTokenCount,proofTransactionCount:r.strongestExactPattern.proofTransactionCount}:null,topTopic0Counts,recentLogShapeSamples,rawTopicTelemetryV534:true,exactLaunchPatternConfirmed:r.exactLaunchPatternConfirmed===true,exactDetectorRegistered:r.exactDetectorRegistered===true,nextPageAvailable:Boolean(r.nextPageParams),status:r.status||null};})};}
 
 /* =========================================================
    LIVE SCAN
