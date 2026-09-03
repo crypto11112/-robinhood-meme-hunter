@@ -1,4 +1,35 @@
 /**
+ * Robinhood Chain Meme Hunter — V573
+ * AUTHORITATIVE RUNTIME VERSION: V573
+ *
+ * V573 PERSISTED EXACT-POOL WATCH RECOVERY:
+ * - preserves all V572/V571/V570 behaviour;
+ * - fixes the real condition exposed by /analyse JUICE:
+ *   an exact PoolId can be proven in persisted candidate-matched exact-USD
+ *   V179/V212 evidence while that token+PoolId is absent from the current
+ *   24-slot autonomous continuous watch;
+ * - scans the already-bounded V179 persisted directional store
+ *   (max 8 tokens / 26h retention) for recent exact-USD-verified PoolIds;
+ * - requires:
+ *     * valid token address;
+ *     * exact 32-byte PoolId;
+ *     * >=1 exactUsdVerified trade with positive exactUsdAmount;
+ *     * one consistent quoteTokenAddress per recovered PoolId;
+ *     * existing V254 quote eligibility;
+ * - recovers at most 2 PoolIds per token and 8 recovered PoolIds per scan;
+ * - recovered watches always start FORWARD-ONLY at the current head;
+ * - persisted historical trades are NOT backfilled into complete rolling windows;
+ * - current candidate/V570/V458 registrations remain supported and deduplicated;
+ * - V565 retention is refined so recent V573 exact-USD recovery evidence can
+ *   displace low-value empty/stale watches while mature caught-up and
+ *   contiguous exact-USD watches remain protected first;
+ * - watch cap stays 24;
+ * - zero new external requests;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, USD math, provider, or Telegram
+ *   threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V572
  * AUTHORITATIVE RUNTIME VERSION: V572
  *
@@ -3509,7 +3540,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V572";
+const VERSION = "V573";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -8853,6 +8884,11 @@ const NATIVE_V3_SWEEP_REQUEST_RESERVE_V331 = 2;
  */
 const DIRECTIONAL_WATCH_MAX_ENTRIES_V551 = 24;
 const DIRECTIONAL_WATCH_MAX_AGE_MS_V551 = 48 * 60 * 60 * 1000;
+const DIRECTIONAL_RECOVERY_MAX_POOLS_PER_TOKEN_V573 = 2;
+const DIRECTIONAL_RECOVERY_MAX_POOLS_PER_SCAN_V573 = 8;
+const DIRECTIONAL_RECOVERY_RECENT_MS_V573 =
+  ONCHAIN_DIRECTIONAL_RETENTION_MS_V179;
+
 const DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551 = 600;
 const DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551 = 10;
 const DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551 = 1200;
@@ -57150,13 +57186,29 @@ function pruneDirectionalWatchV551(state) {
   });
 
   const retentionTierV565 = row => {
-    if (row?.everCaughtUpV565 === true) return 4;
+    /*
+     * V573 keeps the original evidence-first philosophy while ensuring that
+     * a recently proven exact-USD pool can enter the bounded watch instead of
+     * being immediately discarded behind empty/stale rows.
+     */
+    if (row?.everCaughtUpV565 === true) return 6;
+
     if (
       safeNumber(row?.successfulRanges) > 0 &&
       safeNumber(row?.exactUsdTrades) > 0
-    ) return 3;
-    if (safeNumber(row?.successfulRanges) > 0) return 2;
-    if (row?.activePoolEvidenceV555 === true) return 1;
+    ) return 5;
+
+    if (
+      row?.persistedObservedRecoveryV573?.verified === true &&
+      safeNumber(row?.persistedObservedRecoveryV573?.latestObservedAt) > 0 &&
+      now -
+        safeNumber(row.persistedObservedRecoveryV573.latestObservedAt) <=
+        DIRECTIONAL_RECOVERY_RECENT_MS_V573
+    ) return 4;
+
+    if (safeNumber(row?.successfulRanges) > 0) return 3;
+    if (row?.activePoolEvidenceV555 === true) return 2;
+    if (row?.recentExactPoolSeedV556 === true) return 1;
     return 0;
   };
 
@@ -57225,6 +57277,12 @@ function pruneDirectionalWatchV551(state) {
     keptWithSuccessfulRanges: rows.filter(
       row => safeNumber(row?.successfulRanges) > 0
     ).length,
+    keptRecoveredExactUsdV573: rows.filter(
+      row => row?.persistedObservedRecoveryV573?.verified === true
+    ).length,
+    droppedRecoveredExactUsdV573: droppedRows.filter(
+      row => row?.persistedObservedRecoveryV573?.verified === true
+    ).length,
     droppedEvidenceRows: droppedRows
       .filter(
         row =>
@@ -57247,6 +57305,183 @@ function pruneDirectionalWatchV551(state) {
 
   root.updatedAt = now;
   return root;
+}
+
+function persistedObservedWatchRecoveryCandidatesV573(
+  state,
+  wethUsdGReference
+) {
+  const store = onChainDirectionalStoreV179(state);
+  const now = Date.now();
+  const recovered = [];
+
+  const tokenLedgers = Object.entries(store || {})
+    .filter(([token,ledger]) =>
+      isAddress(normalize(token)) &&
+      now - safeNumber(ledger?.lastSeenAt) <=
+        DIRECTIONAL_RECOVERY_RECENT_MS_V573 &&
+      Array.isArray(ledger?.records) &&
+      ledger.records.length > 0
+    )
+    .sort((a,b) =>
+      safeNumber(b?.[1]?.lastSeenAt) -
+      safeNumber(a?.[1]?.lastSeenAt)
+    );
+
+  for (const [rawToken, ledger] of tokenLedgers) {
+    const token = normalize(rawToken);
+    const groups = new Map();
+
+    for (const row of ledger.records || []) {
+      if (
+        normalize(row?.candidateAddress) !== token ||
+        row?.exactUsdVerified !== true ||
+        !Number.isFinite(Number(row?.exactUsdAmount)) ||
+        Number(row.exactUsdAmount) <= 0
+      ) {
+        continue;
+      }
+
+      const poolId = normalize(row?.poolId);
+      const quoteTokenAddress = normalize(row?.quoteTokenAddress);
+
+      if (
+        !/^0x[a-f0-9]{64}$/.test(String(poolId || "")) ||
+        !isAddress(quoteTokenAddress)
+      ) {
+        continue;
+      }
+
+      const observedAt = safeNumber(row?.observedAt);
+      if (
+        observedAt <= 0 ||
+        now - observedAt >
+          DIRECTIONAL_RECOVERY_RECENT_MS_V573
+      ) {
+        continue;
+      }
+
+      const group = groups.get(poolId) || {
+        poolId,
+        rows:[],
+        quoteTokens:new Set(),
+        latestObservedAt:0
+      };
+
+      group.rows.push(row);
+      group.quoteTokens.add(quoteTokenAddress);
+      group.latestObservedAt =
+        Math.max(group.latestObservedAt, observedAt);
+
+      groups.set(poolId, group);
+    }
+
+    const tokenPools = Array.from(groups.values())
+      .filter(group => group.quoteTokens.size === 1)
+      .map(group => {
+        const quoteTokenAddress =
+          Array.from(group.quoteTokens)[0];
+
+        const quoteEligibility =
+          v254PriceableQuote(
+            quoteTokenAddress,
+            wethUsdGReference
+          );
+
+        if (quoteEligibility?.eligible !== true) {
+          return null;
+        }
+
+        const buyTrades = group.rows.filter(
+          row => row?.side === "buy"
+        ).length;
+
+        const sellTrades = group.rows.filter(
+          row => row?.side === "sell"
+        ).length;
+
+        return {
+          address:token,
+          symbol:null,
+          validERC20:true,
+          onChainPoolIdentityV153:{
+            verified:true,
+            poolId:group.poolId,
+            quoteTokenAddress,
+            poolSpecific:true,
+            source:
+              "PERSISTED_EXACT_USD_DIRECTIONAL_STORE_RECOVERY_V573",
+            proof:
+              "PERSISTED_CANDIDATE_MATCHED_EXACT_USD_POOL_ID_AND_QUOTE_TOKEN"
+          },
+          activity:{
+            poolSpecific:true,
+            swaps:group.rows.length,
+            liquidityEvents:0
+          },
+          persistedObservedRecoveryV573:{
+            verified:true,
+            source:
+              "ONCHAIN_DIRECTIONAL_V179_PERSISTED_EXACT_USD_RECOVERY_V573",
+            tokenAddress:token,
+            poolId:group.poolId,
+            quoteTokenAddress,
+            quoteBasis:quoteEligibility?.basis || null,
+            exactUsdRecords:group.rows.length,
+            buyTrades,
+            sellTrades,
+            latestObservedAt:group.latestObservedAt,
+            forwardOnlyWatchStartRequired:true,
+            historicalWindowCoverageClaimed:false
+          }
+        };
+      })
+      .filter(Boolean)
+      .sort((a,b) => {
+        const observedDelta =
+          safeNumber(
+            b?.persistedObservedRecoveryV573?.latestObservedAt
+          ) -
+          safeNumber(
+            a?.persistedObservedRecoveryV573?.latestObservedAt
+          );
+        if (observedDelta !== 0) return observedDelta;
+
+        return (
+          safeNumber(
+            b?.persistedObservedRecoveryV573?.exactUsdRecords
+          ) -
+          safeNumber(
+            a?.persistedObservedRecoveryV573?.exactUsdRecords
+          )
+        );
+      })
+      .slice(0,DIRECTIONAL_RECOVERY_MAX_POOLS_PER_TOKEN_V573);
+
+    recovered.push(...tokenPools);
+  }
+
+  return recovered
+    .sort((a,b) => {
+      const observedDelta =
+        safeNumber(
+          b?.persistedObservedRecoveryV573?.latestObservedAt
+        ) -
+        safeNumber(
+          a?.persistedObservedRecoveryV573?.latestObservedAt
+        );
+      if (observedDelta !== 0) return observedDelta;
+
+      return (
+        safeNumber(
+          b?.persistedObservedRecoveryV573?.exactUsdRecords
+        ) -
+        safeNumber(
+          a?.persistedObservedRecoveryV573?.exactUsdRecords
+        )
+      );
+    })
+    .slice(0,DIRECTIONAL_RECOVERY_MAX_POOLS_PER_SCAN_V573);
 }
 
 function verifiedObservedWatchCandidatesV570(
@@ -57463,11 +57698,17 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
           safeNumber(existing?.exactUsdTrades) === 0
         );
       existing.registrationSourceV552 =
-        candidate?.verifiedObservedRegistrationV570?.verified === true
-          ? "V212_EXACT_USD_OBSERVED_POOL_HANDOFF_V570"
-          : candidate?.successfulTelegramAlertFallbackV460?.verified === true
-            ? "PERSISTED_SUCCESSFUL_ALERT_FALLBACK_V460"
-            : "V458_SELECTED_CURRENT_EXACT_POOL_TARGET";
+        candidate?.persistedObservedRecoveryV573?.verified === true
+          ? "PERSISTED_EXACT_USD_WATCH_RECOVERY_V573"
+          : candidate?.verifiedObservedRegistrationV570?.verified === true
+            ? "V212_EXACT_USD_OBSERVED_POOL_HANDOFF_V570"
+            : candidate?.successfulTelegramAlertFallbackV460?.verified === true
+              ? "PERSISTED_SUCCESSFUL_ALERT_FALLBACK_V460"
+              : "V458_SELECTED_CURRENT_EXACT_POOL_TARGET";
+      existing.persistedObservedRecoveryV573 =
+        candidate?.persistedObservedRecoveryV573 ||
+        existing.persistedObservedRecoveryV573 ||
+        null;
       existing.updatedAt = now;
       refreshed++;
       rows.push({
@@ -57524,13 +57765,17 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       lastActivePoolEvidenceAtV555:activePoolEvidenceV555 ? now : null,
       zeroActivityDeprioritisedV555:false,
       registrationSourceV552:
-        candidate?.verifiedObservedRegistrationV570?.verified === true
-          ? "V212_EXACT_USD_OBSERVED_POOL_HANDOFF_V570"
-          : candidate?.successfulTelegramAlertFallbackV460?.verified === true
-            ? "PERSISTED_SUCCESSFUL_ALERT_FALLBACK_V460"
-            : "V458_SELECTED_CURRENT_EXACT_POOL_TARGET",
+        candidate?.persistedObservedRecoveryV573?.verified === true
+          ? "PERSISTED_EXACT_USD_WATCH_RECOVERY_V573"
+          : candidate?.verifiedObservedRegistrationV570?.verified === true
+            ? "V212_EXACT_USD_OBSERVED_POOL_HANDOFF_V570"
+            : candidate?.successfulTelegramAlertFallbackV460?.verified === true
+              ? "PERSISTED_SUCCESSFUL_ALERT_FALLBACK_V460"
+              : "V458_SELECTED_CURRENT_EXACT_POOL_TARGET",
       verifiedObservedRegistrationV570:
-        candidate?.verifiedObservedRegistrationV570 || null
+        candidate?.verifiedObservedRegistrationV570 || null,
+      persistedObservedRecoveryV573:
+        candidate?.persistedObservedRecoveryV573 || null
     };
     registered++;
     rows.push({
@@ -58219,6 +58464,8 @@ function directionalWatchSnapshotV551(state) {
           : null,
       saturatedAttempts:safeNumber(row?.saturatedAttempts),
       registrationSourceV552:row?.registrationSourceV552 || null,
+      persistedObservedRecoveryV573:
+        row?.persistedObservedRecoveryV573 || null,
       activePoolEvidenceV555:row?.activePoolEvidenceV555 === true,
       poolSpecificSwapsV555:safeNumber(row?.poolSpecificSwapsV555),
       poolSpecificLiquidityEventsV556:safeNumber(row?.poolSpecificLiquidityEventsV556),
@@ -74751,6 +74998,13 @@ for (
       })
       .slice(0, 3);
 
+  const directionalPersistedRecoveryCandidatesV573 =
+    persistedObservedWatchRecoveryCandidatesV573(
+      state,
+      onChainDirectionalV179?.wethUsdGReferenceV187 ||
+        bestVerifiedWethUsdGReferenceV195(state)
+    );
+
   const directionalObservedExactPoolCandidatesV570 =
     verifiedObservedWatchCandidatesV570(
       state,
@@ -74760,6 +75014,7 @@ for (
     );
 
   const directionalWatchRegistrationCandidatesV555 = [
+    ...directionalPersistedRecoveryCandidatesV573,
     ...directionalObservedExactPoolCandidatesV570,
     ...directionalActiveExactPoolCandidatesV555,
     ...completeExactPoolCandidatesV458
@@ -74779,6 +75034,55 @@ for (
       onChainDirectionalV179?.wethUsdGReferenceV187 ||
         bestVerifiedWethUsdGReferenceV195(state)
     );
+
+  const directionalPersistedWatchRecoveryV573 = {
+    enabled:true,
+    measurementOnly:false,
+    externalRequestsAdded:0,
+    storeBoundedByV179:true,
+    maxPersistedTokensV179:ONCHAIN_DIRECTIONAL_MAX_TOKENS_V179,
+    retentionHoursV179:
+      ONCHAIN_DIRECTIONAL_RETENTION_MS_V179 / 3600000,
+    maxPoolsPerTokenV573:
+      DIRECTIONAL_RECOVERY_MAX_POOLS_PER_TOKEN_V573,
+    maxPoolsPerScanV573:
+      DIRECTIONAL_RECOVERY_MAX_POOLS_PER_SCAN_V573,
+    derivedCandidates:
+      directionalPersistedRecoveryCandidatesV573.length,
+    rows:
+      directionalPersistedRecoveryCandidatesV573.map(candidate => ({
+        address:normalize(candidate?.address),
+        poolId:
+          normalize(candidate?.onChainPoolIdentityV153?.poolId) || null,
+        quoteTokenAddress:
+          normalize(
+            candidate?.onChainPoolIdentityV153?.quoteTokenAddress
+          ) || null,
+        exactUsdRecords:
+          safeNumber(
+            candidate?.persistedObservedRecoveryV573?.exactUsdRecords
+          ),
+        buyTrades:
+          safeNumber(
+            candidate?.persistedObservedRecoveryV573?.buyTrades
+          ),
+        sellTrades:
+          safeNumber(
+            candidate?.persistedObservedRecoveryV573?.sellTrades
+          ),
+        latestObservedAt:
+          candidate?.persistedObservedRecoveryV573?.latestObservedAt || null,
+        quoteBasis:
+          candidate?.persistedObservedRecoveryV573?.quoteBasis || null,
+        forwardOnlyWatchStartRequired:true,
+        historicalWindowCoverageClaimed:false
+      })),
+    watchCapUnchanged:DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
+    hardGlobalLimitUnchanged:42,
+    scoringChanged:false,
+    qualificationChanged:false,
+    telegramThresholdChanged:false
+  };
 
   const directionalObservedPoolHandoffV570 = {
     enabled:true,
@@ -81016,6 +81320,7 @@ for (
             ?.poolId
         ) || null
     },
+    directionalPersistedWatchRecoveryV573,
     directionalObservedPoolHandoffV570,
     directionalActivePoolTargetingV555,
     directionalWatchRegistrationV551,
