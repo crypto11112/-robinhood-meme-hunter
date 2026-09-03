@@ -1,4 +1,28 @@
 /**
+ * Robinhood Chain Meme Hunter — V571
+ * AUTHORITATIVE RUNTIME VERSION: V571
+ *
+ * V571 MANUAL /analyse ROLLING-LEDGER PARITY:
+ * - preserves all V570 autonomous V212 exact-pool watch handoff behaviour;
+ * - fixes the confirmed /analyse presentation bug where the V332 cleanup filter
+ *   swallowed the entire "Verified Rolling Buy/Sell USD — BOT EXACT-POOL LEDGER"
+ *   section between the indexed-feed and verified-observed sections;
+ * - /analyse now keeps that exact-pool ledger section visible;
+ * - /analyse also reads the latest autonomous V569 persisted verified sweep
+ *   READ-ONLY and selects matching token+PoolId evidence for display;
+ * - if a persisted verified sweep exists for the analysed token, /analyse may
+ *   show those verified rolling windows with the existing LAST COMPLETED
+ *   block/time label;
+ * - if no mature persisted sweep exists but V212 already proves one exact
+ *   PoolId, /analyse shows "OBSERVED — WATCH STARTING" instead of hiding the
+ *   PoolId;
+ * - manual analysis still does NOT add or mutate the autonomous watchlist;
+ * - zero external requests and zero autonomous-state writes are added;
+ * - hard autonomous request ceiling remains 42 and manual /analyse budget is unchanged;
+ * - no scoring, Momentum, qualification, USD math, provider or Telegram
+ *   threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V570
  * AUTHORITATIVE RUNTIME VERSION: V570
  *
@@ -3467,7 +3491,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V570";
+const VERSION = "V571";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -88479,12 +88503,14 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     }
     if (mode === "INDEXED_DIRECTIONAL") {
       return text.includes("🔧 <b>Directional USD diagnostics") ||
+             text.includes("🧾 <b>Verified Rolling Buy/Sell USD — BOT EXACT-POOL LEDGER</b>") ||
              text.includes("✅ <b>Verified On-chain USD (observed by bot)</b>") ||
              text.includes("🟣 <b>Verified Pons Curve USD</b>") ||
              text.includes("👥 Holder count:");
     }
     if (mode === "DIRECTIONAL_DEBUG") {
-      return text.includes("✅ <b>Verified On-chain USD (observed by bot)</b>") ||
+      return text.includes("🧾 <b>Verified Rolling Buy/Sell USD — BOT EXACT-POOL LEDGER</b>") ||
+             text.includes("✅ <b>Verified On-chain USD (observed by bot)</b>") ||
              text.includes("🟣 <b>Verified Pons Curve USD</b>") ||
              text.includes("👥 Holder count:");
     }
@@ -89049,6 +89075,56 @@ async function telegramFreshAnalyseV276(
     }
   };
 
+  /*
+   * V571: manual /analyse is isolated from autonomous writes, but it may read
+   * the already-persisted V569 completed exact-pool sweep for presentation.
+   * No current-head claim is synthesized here. Persisted proof remains labelled
+   * LAST COMPLETED by the existing V569 formatter.
+   */
+  const manualRollingSourceV571 =
+    telegramSnapshotWithPersistedSweepV569(
+      state,
+      {
+        enabled:true,
+        requestAt:Date.now(),
+        scanHeadBlock:null,
+        entries:[]
+      }
+    );
+
+  const manualRollingSelectionV571 =
+    selectTelegramRollingExactPoolV564(
+      candidate,
+      manualRollingSourceV571
+    );
+
+  if (manualRollingSelectionV571) {
+    candidate.telegramRollingExactPoolUsdV564 =
+      manualRollingSelectionV571;
+  }
+
+  candidate.manualRollingLedgerBridgeV571 = {
+    enabled:true,
+    readOnly:true,
+    externalRequestsAdded:0,
+    autonomousWatchlistMutated:false,
+    persistedSweepAvailable:
+      manualRollingSourceV571?.persistedSweepAvailableV569 === true,
+    selectedPoolId:
+      normalize(
+        manualRollingSelectionV571?.poolId
+      ) || null,
+    verifiedWindows:
+      safeNumber(
+        manualRollingSelectionV571?.selectionV564?.verifiedWindows
+      ),
+    evidenceSource:
+      manualRollingSelectionV571?.selectionV564?.evidenceSourceV569 || null,
+    selectionReason:
+      manualRollingSelectionV571?.selectionV564?.reason ||
+      "NO_PERSISTED_MATCH_V571"
+  };
+
   const performance =
     state
       ?.callPerformanceV270
@@ -89356,6 +89432,8 @@ async function telegramFreshAnalyseV276(
         .filter(([, row]) => row?.verified === true)
         .map(([key]) => key)
     },
+    manualRollingLedgerBridgeV571:
+      candidate?.manualRollingLedgerBridgeV571 || null,
     manualBitqueryUsdV285: {
       attempted: manualBitqueryUsdResultV285?.attempted === true,
       verified: manualBitqueryUsdResultV285?.verified === true,
