@@ -1,6 +1,15 @@
 /**
- * Robinhood Chain Meme Hunter — V530
- * AUTHORITATIVE RUNTIME VERSION: V530
+ * Robinhood Chain Meme Hunter — V531
+ * AUTHORITATIVE RUNTIME VERSION: V531
+ *
+ * V531 /SOURCEINTEL HISTORICAL-STATE REPORTING FIX:
+ * - fixes V530 /sourceintel always showing V529 historical proof as NOT_RUN;
+ * - the V529 historical proof state was persisted correctly, but sourceIdentityIntelSnapshotV522
+ *   did not expose seededHistoricalProofV529 to the Telegram formatter;
+ * - adds a strictly read-only projection of the persisted V529 counters/status into /sourceintel;
+ * - does NOT call the mutating proof rebuild/registration helper from the read-only command;
+ * - adds zero provider requests, zero persistent writes, and changes no scanner, proof,
+ *   detector, scoring, Momentum, qualification, Telegram thresholds or 42-request ceiling.
  *
  * V530 /SOURCEINTEL HOTFIX:
  * - fixes a Telegram /sourceintel runtime ReferenceError introduced in V529;
@@ -2779,7 +2788,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V530";
+const VERSION = "V531";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -113528,7 +113537,7 @@ function sourceIdentityIntelSnapshotV522(state) {
 
   return {
     enabled: true,
-    version: "V530",
+    version: "V531",
     readOnly: true,
     externalProviderRequests: 0,
     persistentWrites: 0,
@@ -113540,8 +113549,18 @@ function sourceIdentityIntelSnapshotV522(state) {
     learnedSources: learned,
     seededLeadCount: seededLeads.length,
     seededLeads,
+    historicalProofV529: {
+      enabled: state?.seededHistoricalProofV529?.enabled === true,
+      oneRequestMaximumPerScan: state?.seededHistoricalProofV529?.oneRequestMaximumPerScan === true,
+      hardGlobalLimitUnchanged: safeNumber(state?.seededHistoricalProofV529?.hardGlobalLimitUnchanged) || 42,
+      requestsAttempted: safeNumber(state?.seededHistoricalProofV529?.requestsAttempted),
+      requestsSucceeded: safeNumber(state?.seededHistoricalProofV529?.requestsSucceeded),
+      lastAttemptAt: state?.seededHistoricalProofV529?.lastAttemptAt || null,
+      lastSourceKey: state?.seededHistoricalProofV529?.lastSourceKey || null,
+      lastStatus: state?.seededHistoricalProofV529?.lastStatus || "V529_HISTORICAL_NOT_RUN"
+    },
     interpretation:
-      "V527_MINTCLUB_OFFICIAL_BOND_SEEDED_LIVE_EVIDENCE_PLUS_V526_BRAND_GATE_POOLS_EXISTING_EXACT_COVERAGE_PRESERVED"
+      "V531_SOURCEINTEL_READ_ONLY_HISTORICAL_STATE_PROJECTION_PLUS_V527_MINTCLUB_V526_BRAND_GATE"
   };
 }
 
