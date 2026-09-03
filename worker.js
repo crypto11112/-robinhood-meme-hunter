@@ -1,6 +1,20 @@
 /**
- * Robinhood Chain Meme Hunter — V519
- * AUTHORITATIVE RUNTIME VERSION: V519
+ * Robinhood Chain Meme Hunter — V520
+ * AUTHORITATIVE RUNTIME VERSION: V520
+ *
+ * V520 EXECUTE RESERVED CREATOR-IDENTITY HANDOFF:
+ * - fixes the V519 runtime routing gap: a 3-origin/3-creation-tx creator could
+ *   reserve V503 IDENTITY before V480 but the job only executed when that scan's
+ *   current V480 target itself returned a verified origin;
+ * - executes the already-reserved V503 identity job after an unverified V480
+ *   response as well, before lower-priority V485/V486 work;
+ * - the identity request still uses the SAME one secondary diagnostic slot and
+ *   adds no request capacity; V486 now honours the reservation even if V503
+ *   cannot actually attempt because provider/budget conditions block it;
+ * - once identity is verified, unchanged V517 can begin exact 1/3 -> 2/3 -> 3/3
+ *   receipt proof on subsequent scans; no proof standard is weakened;
+ * - hard global ceiling remains 42; scoring, Momentum, qualification, Telegram
+ *   thresholds, verified USD, Pons, RWA, Doppler, V515 and completion unchanged.
  *
  * V519 GENERIC-CREATOR IDENTITY HANDOFF:
  * - closes the first observed V517 entry bottleneck: an unresolved creator with
@@ -2690,7 +2704,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V519";
+const VERSION = "V520";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -96717,6 +96731,14 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
       ?.recurringCreatorAttributionV503
       ?.attempted === true;
 
+  const currentV503Reserved =
+    currentOriginTraceTelemetry
+      ?.ponsV2ExactProofPriorityV510
+      ?.genericCreatorIdentityReservedBeforeV480V519 === true ||
+    currentOriginTraceTelemetry
+      ?.v520PreexistingCreatorIdentityHandoff
+      ?.reservedBeforeV480 === true;
+
   const currentV517Reserved =
     currentOriginTraceTelemetry
       ?.ponsV2ExactProofPriorityV510
@@ -96766,6 +96788,8 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
       currentV517Reserved,
     currentLiveV503Attempted:
       currentV503Attempted,
+    currentLiveV503Reserved:
+      currentV503Reserved,
     v483DeferredForFairnessV487,
     fairnessV487: {
       consecutiveV483BlocksOfV486BeforeDecision:
@@ -96828,6 +96852,7 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
     currentV517Attempted ||
     currentV517Reserved ||
     currentV503Attempted ||
+    currentV503Reserved ||
     currentV509Attempted ||
     currentV509Reserved ||
     currentV485Attempted ||
@@ -96847,8 +96872,10 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
                 : currentV517Reserved
                   ? "V486_SKIPPED_CURRENT_LIVE_V517_RESERVED_SECONDARY_SLOT"
                   : currentV503Attempted
-                    ? "V486_SKIPPED_CURRENT_LIVE_V503_USED_SECONDARY_SLOT_V519"
-                    : currentV509Attempted
+                    ? "V520_V486_SKIPPED_CURRENT_LIVE_V503_USED_SECONDARY_SLOT"
+                    : currentV503Reserved
+                      ? "V520_V486_SKIPPED_V503_CREATOR_IDENTITY_RESERVED_SECONDARY_SLOT"
+                      : currentV509Attempted
             ? "V486_SKIPPED_CURRENT_LIVE_V509_USED_SECONDARY_SLOT"
             : currentV509Reserved
               ? "V486_SKIPPED_CURRENT_LIVE_V509_RESERVED_SECONDARY_SLOT"
@@ -96899,13 +96926,16 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
       fairness.lastDecisionAt =
         Date.now();
     } else if (
-      currentV503Attempted
+      currentV503Attempted ||
+      currentV503Reserved
     ) {
       fairness.consecutiveV483BlocksOfV486 =
         0;
 
       fairness.lastDecision =
-        "V519_V503_GENERIC_CREATOR_IDENTITY_USED_SECONDARY_SLOT";
+        currentV503Attempted
+          ? "V520_V503_GENERIC_CREATOR_IDENTITY_USED_SECONDARY_SLOT"
+          : "V520_V503_GENERIC_CREATOR_IDENTITY_RESERVED_SECONDARY_SLOT";
 
       fairness.lastDecisionAt =
         Date.now();
@@ -110830,6 +110860,66 @@ async function traceUnknownLiveOriginsV477({
             disagreement: false,
             launchSourceProof: false
           }
+        };
+      }
+
+      /*
+       * V520: execute a V519 creator-identity reservation even when this scan's
+       * V480 target is unrelated/unverified. V519 only executed this handoff
+       * inside the verified-origin branch, allowing V486 to steal the slot.
+       */
+      if (
+        genericCreatorIdentityReservedBeforeV480V519 === true &&
+        ponsProofReservedBeforeV480V510 !== true &&
+        dopplerCanonicalProofReservedBeforeV480V513 !== true &&
+        genericProofReservedBeforeV480V518 !== true
+      ) {
+        const creatorV503V520 =
+          await runRecurringCreatorAttributionV503({
+            env,
+            state,
+            budget,
+            forcedCreator:
+              genericCreatorIdentityCandidateBeforeV480V519.creator
+          });
+
+        telemetry.recurringCreatorAttributionV503 = creatorV503V520;
+        telemetry.v520PreexistingCreatorIdentityHandoff = {
+          enabled: true,
+          reservedBeforeV480: true,
+          creator: genericCreatorIdentityCandidateBeforeV480V519.creator,
+          distinctTokens: genericCreatorIdentityCandidateBeforeV480V519.distinctTokens,
+          distinctTransactions: genericCreatorIdentityCandidateBeforeV480V519.distinctTransactions,
+          attempted: creatorV503V520?.attempted === true,
+          requestConsumed: creatorV503V520?.requestConsumed === true,
+          resultStatus: creatorV503V520?.status || null,
+          oneSecondarySlotMaximum: true,
+          hardRequestLimit: 42,
+          status: creatorV503V520?.attempted === true
+            ? "V520_PREEXISTING_V503_CREATOR_IDENTITY_EXECUTED_AFTER_UNVERIFIED_V480"
+            : `V520_PREEXISTING_V503_CREATOR_IDENTITY_RESERVED_NOT_ATTEMPTED:${creatorV503V520?.status || "UNKNOWN"}`
+        };
+
+        telemetry.ponsV2ExactProofPriorityV510.v503Deferred = false;
+        telemetry.ponsV2ExactProofPriorityV510.v485Deferred = true;
+        telemetry.ponsV2ExactProofPriorityV510.status =
+          creatorV503V520?.attempted === true
+            ? "V520_V503_PREEXISTING_GENERIC_CREATOR_IDENTITY_RAN_BEFORE_V485_V486"
+            : `V520_V503_PREEXISTING_GENERIC_CREATOR_IDENTITY_RESERVED_BUT_NOT_ATTEMPTED:${creatorV503V520?.status || "UNKNOWN"}`;
+
+        telemetry.exactCreationMechanismAttributionV485 = {
+          enabled: true,
+          measurementOnly: true,
+          promotionAllowed: false,
+          attempted: false,
+          requestConsumed: false,
+          status: "V520_DEFERRED_V485_FOR_PREEXISTING_GENERIC_CREATOR_IDENTITY_HANDOFF",
+          deferredToken: targetAddress,
+          v520SelectedCreator: genericCreatorIdentityCandidateBeforeV480V519.creator,
+          v520DistinctTokens: genericCreatorIdentityCandidateBeforeV480V519.distinctTokens,
+          v520DistinctTransactions: genericCreatorIdentityCandidateBeforeV480V519.distinctTransactions,
+          exactCreationAttributionDisabledGlobally: false,
+          oneScanOnly: true
         };
       }
     } else {
