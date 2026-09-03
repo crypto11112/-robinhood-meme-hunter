@@ -1,6 +1,26 @@
 /**
- * Robinhood Chain Meme Hunter — V517
- * AUTHORITATIVE RUNTIME VERSION: V517
+ * Robinhood Chain Meme Hunter — V518
+ * AUTHORITATIVE RUNTIME VERSION: V518
+ *
+ * V518 SOLVED-DOPPLER SUPPRESSION + GENERIC-PROOF SLOT PRIORITY:
+ * - permanently suppresses V512 whole-receipt receipt work once persisted V513
+ *   has a confirmed canonical Doppler pattern + confirmed factory;
+ * - also suppresses V513 validation reservation/work after its confirmation;
+ * - V511/V512/V513 remain readable historical evidence but cannot consume the
+ *   secondary request slot after Doppler is solved;
+ * - reserves the one secondary slot for an already-eligible V517 generic unknown
+ *   source before lower-evidence current-live V483/V485 work;
+ * - after a fresh V480 origin is persisted, immediately re-evaluates V517 and
+ *   lets a newly eligible generic 3-origin creator use that same scan's one
+ *   secondary receipt slot before V503/V485;
+ * - V509 exact Pons proof and any genuinely unfinished V513 proof remain higher
+ *   evidence; solved Doppler cannot re-enter those routes;
+ * - V517 reservation is reflected in V486 so no second secondary request can run;
+ * - no new request capacity: maximum one secondary diagnostic request per scan,
+ *   hard global ceiling remains 42;
+ * - V515 generic registry/live detection, RWA, Pons, Doppler live detector,
+ *   scoring, Momentum, qualification, Telegram thresholds, verified USD and
+ *   dense-pool completion are unchanged.
  *
  * V517 GENERIC UNKNOWN-SOURCE RECEIPT PROOF ENGINE:
  * - adds the missing generic front-half for V515's verified detector registry;
@@ -2654,7 +2674,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V517";
+const VERSION = "V518";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -10199,6 +10219,50 @@ function newState() {
       lastProvider: null,
       lastHttpStatus: null,
       lastStatus: "NOT_EVALUATED_YET_V512"
+    },
+
+    solvedDopplerSuppressionAndV517PriorityV518: {
+      enabled: true,
+      authoritativeSolvedCondition:
+        "V513_CONFIRMED_CANONICAL_PATTERN_AND_CONFIRMED_FACTORY",
+      v512ReceiptWorkAfterSolved:
+        false,
+      v513ValidationWorkAfterSolved:
+        false,
+      oldDopplerEvidenceDeleted:
+        false,
+      v517PreV480Reservation:
+        true,
+      v517PostV480SameScanReevaluation:
+        true,
+      v517PriorityOverV483:
+        true,
+      v517PriorityOverV485:
+        true,
+      v517PriorityOverV503WhenExactReceiptEligible:
+        true,
+      unfinishedV509AndV513ExactProofPreserved:
+        true,
+      maxSecondaryRequestsPerScan:
+        1,
+      hardGlobalRequestLimitUnchanged:
+        42,
+      scoringChanged:
+        false,
+      momentumChanged:
+        false,
+      qualificationChanged:
+        false,
+      telegramThresholdChanged:
+        false,
+      verifiedUsdChanged:
+        false,
+      rwaChanged:
+        false,
+      ponsChanged:
+        false,
+      v515RegistryChanged:
+        false
     },
 
     genericUnknownSourceProofEngineV517: {
@@ -72804,7 +72868,7 @@ for (
       starvationTrigger:
         "TWO_CONSECUTIVE_SCANS_V486_BLOCKED_BY_CURRENT_LIVE_V483",
       fairnessGrant:
-        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V517_V515_V514_V513_V512_V511_V510_V509_V508_V507_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
+        "NEXT_SECONDARY_SLOT_TO_HIGHEST_EVIDENCE_V518_V517_V515_V514_V513_V512_V511_V510_V509_V508_V507_V506_V505_V504_V503_V502_V499_V498_V497_V496_V495_V494_V493_V492_V491_V490_V489_V486_BACKLOG",
       currentLiveV485AbsolutePriority:
         true,
       v483DeferredForOneScanOnly:
@@ -89217,14 +89281,29 @@ function selectDopplerCanonicalValidationCandidateV513(
   state,
   canonicalPattern
 ) {
-  if (!canonicalPattern) {
-    return null;
-  }
-
   const root513 =
     ensureDopplerCanonicalPatternProofV513(
       state
     );
+
+  /*
+   * V518: confirmed V513 proof is terminal. No new validation candidate may
+   * reserve or consume the secondary slot after confirmation.
+   */
+  if (
+    root513?.confirmedCanonicalPattern &&
+    isAddress(
+      normalize(
+        root513?.confirmedFactory
+      )
+    )
+  ) {
+    return null;
+  }
+
+  if (!canonicalPattern) {
+    return null;
+  }
 
   const root512 =
     ensureDopplerWholeReceiptPatternV512(
@@ -90114,11 +90193,33 @@ function selectDopplerWholeReceiptCandidateV512(
       state
     );
 
+  const solvedV513 =
+    ensureDopplerCanonicalPatternProofV513(
+      state
+    );
+
+  /*
+   * V518 hard stop: once the authoritative V513 canonical pattern is confirmed,
+   * V512 is historical evidence only and may never consume another receipt slot.
+   */
   if (
+    (
+      solvedV513?.confirmedCanonicalPattern &&
+      isAddress(
+        normalize(
+          solvedV513?.confirmedFactory
+        )
+      )
+    ) ||
     isAddress(
       normalize(root.confirmedFactory)
     )
   ) {
+    root.lastStatus =
+      solvedV513?.confirmedCanonicalPattern
+        ? "V518_V512_PERMANENTLY_SUPPRESSED_DOPPLER_ALREADY_CONFIRMED_V513"
+        : root.lastStatus;
+
     return null;
   }
 
@@ -96413,6 +96514,21 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
       ?.candidateAfterV480 !==
         undefined;
 
+  const currentV517Attempted =
+    currentOriginTraceTelemetry
+      ?.genericUnknownSourceProofV517
+      ?.attempted === true;
+
+  const currentV517Reserved =
+    currentOriginTraceTelemetry
+      ?.ponsV2ExactProofPriorityV510
+      ?.genericUnknownReceiptCandidateAfterV480V518 !==
+        null &&
+    currentOriginTraceTelemetry
+      ?.ponsV2ExactProofPriorityV510
+      ?.genericUnknownReceiptCandidateAfterV480V518 !==
+        undefined;
+
   const v483DeferredForFairnessV487 =
     currentOriginTraceTelemetry
       ?.unknownLaunchMechanismFingerprintV483
@@ -96446,6 +96562,10 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
       currentV512Attempted,
     currentLiveV512Reserved:
       currentV512Reserved,
+    currentLiveV517Attempted:
+      currentV517Attempted,
+    currentLiveV517Reserved:
+      currentV517Reserved,
     v483DeferredForFairnessV487,
     fairnessV487: {
       consecutiveV483BlocksOfV486BeforeDecision:
@@ -96505,6 +96625,8 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
     currentV513Reserved ||
     currentV512Attempted ||
     currentV512Reserved ||
+    currentV517Attempted ||
+    currentV517Reserved ||
     currentV509Attempted ||
     currentV509Reserved ||
     currentV485Attempted ||
@@ -96519,7 +96641,11 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
             ? "V486_SKIPPED_CURRENT_LIVE_V512_USED_SECONDARY_SLOT"
             : currentV512Reserved
               ? "V486_SKIPPED_CURRENT_LIVE_V512_RESERVED_SECONDARY_SLOT"
-              : currentV509Attempted
+              : currentV517Attempted
+                ? "V486_SKIPPED_CURRENT_LIVE_V517_USED_SECONDARY_SLOT"
+                : currentV517Reserved
+                  ? "V486_SKIPPED_CURRENT_LIVE_V517_RESERVED_SECONDARY_SLOT"
+                  : currentV509Attempted
             ? "V486_SKIPPED_CURRENT_LIVE_V509_USED_SECONDARY_SLOT"
             : currentV509Reserved
               ? "V486_SKIPPED_CURRENT_LIVE_V509_RESERVED_SECONDARY_SLOT"
@@ -96552,6 +96678,20 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
         currentV512Attempted
           ? "V512_HIGHER_EVIDENCE_DOPPLER_PROOF_USED_SECONDARY_SLOT"
           : "V512_HIGHER_EVIDENCE_DOPPLER_PROOF_RESERVED_SECONDARY_SLOT";
+
+      fairness.lastDecisionAt =
+        Date.now();
+    } else if (
+      currentV517Attempted ||
+      currentV517Reserved
+    ) {
+      fairness.consecutiveV483BlocksOfV486 =
+        0;
+
+      fairness.lastDecision =
+        currentV517Attempted
+          ? "V518_V517_GENERIC_EXACT_PROOF_USED_SECONDARY_SLOT"
+          : "V518_V517_GENERIC_EXACT_PROOF_RESERVED_SECONDARY_SLOT";
 
       fairness.lastDecisionAt =
         Date.now();
@@ -96936,12 +97076,39 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
     enabled: true,
     measurementOnlyUntilProof: true,
     attempted: false,
+    requestConsumed: false,
+    permanentlySuppressedAfterV513ConfirmationV518:
+      Boolean(
+        ensureDopplerCanonicalPatternProofV513(
+          state
+        )?.confirmedCanonicalPattern &&
+        isAddress(
+          normalize(
+            ensureDopplerCanonicalPatternProofV513(
+              state
+            )?.confirmedFactory
+          )
+        )
+      ),
     status:
-      ensureDopplerWholeReceiptPatternV512(
-        state
-      ).confirmedFactory
-        ? "V512_DOPPLER_WHOLE_RECEIPT_PATTERN_ALREADY_CONFIRMED"
-        : "V512_NO_ELIGIBLE_DOPPLER_WHOLE_RECEIPT_CANDIDATE"
+      (
+        ensureDopplerCanonicalPatternProofV513(
+          state
+        )?.confirmedCanonicalPattern &&
+        isAddress(
+          normalize(
+            ensureDopplerCanonicalPatternProofV513(
+              state
+            )?.confirmedFactory
+          )
+        )
+      )
+        ? "V518_V512_PERMANENTLY_SUPPRESSED_DOPPLER_ALREADY_CONFIRMED_V513"
+        : ensureDopplerWholeReceiptPatternV512(
+            state
+          ).confirmedFactory
+          ? "V512_DOPPLER_WHOLE_RECEIPT_PATTERN_ALREADY_CONFIRMED"
+          : "V512_NO_ELIGIBLE_DOPPLER_WHOLE_RECEIPT_CANDIDATE"
   };
 
   telemetry.dopplerExactMechanismProofV511 = {
@@ -109996,9 +110163,25 @@ async function traceUnknownLiveOriginsV477({
       dopplerWholeReceiptCandidateBeforeV480V512
     );
 
+  /*
+   * V518: if the generic proof engine already has an eligible unresolved
+   * creator/creation receipt before this V480 request, reserve the same single
+   * secondary slot so V483/V485 cannot steal it.
+   */
+  const genericUnknownReceiptCandidateBeforeV480V518 =
+    selectGenericUnknownReceiptCandidateV517(
+      state
+    );
+
+  const genericProofReservedBeforeV480V518 =
+    Boolean(
+      genericUnknownReceiptCandidateBeforeV480V518
+    );
+
   const highEvidenceProofReservedBeforeV480V513 =
     ponsProofReservedBeforeV480V510 ||
     dopplerCanonicalProofReservedBeforeV480V513 ||
+    genericProofReservedBeforeV480V518 ||
     dopplerProofReservedBeforeV480V512;
 
   telemetry.ponsV2ExactProofPriorityV510 = {
@@ -110041,6 +110224,19 @@ async function traceUnknownLiveOriginsV477({
               dopplerWholeReceiptCandidateBeforeV480V512.transactionHash
           }
         : null,
+    genericUnknownReceiptCandidateBeforeV480V518:
+      genericUnknownReceiptCandidateBeforeV480V518
+        ? {
+            token:
+              genericUnknownReceiptCandidateBeforeV480V518.token,
+            creator:
+              genericUnknownReceiptCandidateBeforeV480V518.creator,
+            transactionHash:
+              genericUnknownReceiptCandidateBeforeV480V518.transactionHash
+          }
+        : null,
+    genericProofReservedBeforeV480V518:
+      genericProofReservedBeforeV480V518,
     highEvidenceReservationV513:
       highEvidenceProofReservedBeforeV480V513,
     status:
@@ -110048,9 +110244,11 @@ async function traceUnknownLiveOriginsV477({
         ? "V510_V509_EXACT_PROOF_SLOT_RESERVED_BEFORE_CURRENT_LIVE_SECONDARY_WORK"
         : dopplerCanonicalProofReservedBeforeV480V513
           ? "V513_DOPPLER_CANONICAL_THIRD_RECEIPT_SLOT_RESERVED_BEFORE_CURRENT_LIVE_SECONDARY_WORK"
-          : dopplerProofReservedBeforeV480V512
-            ? "V512_DOPPLER_WHOLE_RECEIPT_SLOT_RESERVED_BEFORE_CURRENT_LIVE_SECONDARY_WORK"
-            : "V513_NO_PREEXISTING_HIGH_EVIDENCE_EXACT_PROOF_CANDIDATE"
+          : genericProofReservedBeforeV480V518
+            ? "V518_V517_GENERIC_EXACT_RECEIPT_SLOT_RESERVED_BEFORE_CURRENT_LIVE_SECONDARY_WORK"
+            : dopplerProofReservedBeforeV480V512
+              ? "V512_DOPPLER_WHOLE_RECEIPT_SLOT_RESERVED_BEFORE_CURRENT_LIVE_SECONDARY_WORK"
+              : "V518_NO_PREEXISTING_HIGH_EVIDENCE_EXACT_PROOF_CANDIDATE"
   };
 
   const fairnessReservationV487 =
@@ -110069,9 +110267,14 @@ async function traceUnknownLiveOriginsV477({
       fairnessReservationV487
         .eligibleBacklog,
     currentLiveV485StillHasAbsolutePriority:
-      !ponsProofReservedBeforeV480V510,
+      !ponsProofReservedBeforeV480V510 &&
+      !dopplerCanonicalProofReservedBeforeV480V513 &&
+      !genericProofReservedBeforeV480V518 &&
+      !dopplerProofReservedBeforeV480V512,
     v509ExactProofReservationV510:
       ponsProofReservedBeforeV480V510,
+    v517GenericProofReservationV518:
+      genericProofReservedBeforeV480V518,
     scoringChanged: false
   };
 
@@ -110463,6 +110666,15 @@ async function traceUnknownLiveOriginsV477({
               state
             );
 
+      /*
+       * V518: V480 may have just created the third independently verified
+       * origin for a generic recurring creator. Re-evaluate V517 immediately.
+       */
+      const genericUnknownReceiptCandidateAfterV480V518 =
+        selectGenericUnknownReceiptCandidateV517(
+          state
+        );
+
       telemetry.ponsV2ExactProofPriorityV510
         .candidateAfterV480 =
           ponsReceiptCandidateAfterV480V510
@@ -110504,6 +110716,19 @@ async function traceUnknownLiveOriginsV477({
                   dopplerWholeReceiptCandidateAfterV480V512.factory,
                 transactionHash:
                   dopplerWholeReceiptCandidateAfterV480V512.transactionHash
+              }
+            : null;
+
+      telemetry.ponsV2ExactProofPriorityV510
+        .genericUnknownReceiptCandidateAfterV480V518 =
+          genericUnknownReceiptCandidateAfterV480V518
+            ? {
+                token:
+                  genericUnknownReceiptCandidateAfterV480V518.token,
+                creator:
+                  genericUnknownReceiptCandidateAfterV480V518.creator,
+                transactionHash:
+                  genericUnknownReceiptCandidateAfterV480V518.transactionHash
               }
             : null;
 
@@ -110684,6 +110909,93 @@ async function traceUnknownLiveOriginsV477({
           v485RequestConsumedBeforeDecision:
             false,
           deferredByHigherEvidenceV513:
+            true
+        };
+      } else if (
+        genericUnknownReceiptCandidateAfterV480V518
+      ) {
+        const genericV517 =
+          await runGenericUnknownSourceProofV517({
+            env,
+            state,
+            budget,
+            candidate:
+              genericUnknownReceiptCandidateAfterV480V518
+          });
+
+        telemetry.genericUnknownSourceProofV517 =
+          genericV517;
+
+        telemetry.ponsV2ExactProofPriorityV510
+          .v503Deferred = true;
+        telemetry.ponsV2ExactProofPriorityV510
+          .v485Deferred = true;
+        telemetry.ponsV2ExactProofPriorityV510
+          .status =
+            genericV517?.attempted === true
+              ? "V518_V517_GENERIC_EXACT_RECEIPT_PROOF_RAN_BEFORE_V503_V485"
+              : `V518_V517_GENERIC_EXACT_RECEIPT_RESERVED_BUT_NOT_ATTEMPTED:${genericV517?.status || "UNKNOWN"}`;
+
+        telemetry.recurringCreatorAttributionV503 = {
+          enabled: true,
+          measurementOnly: true,
+          promotionAllowed: false,
+          attempted: false,
+          requestConsumed: false,
+          status:
+            "V518_DEFERRED_V503_FOR_V517_GENERIC_EXACT_RECEIPT_PROOF",
+          exactProofPriority: true
+        };
+
+        telemetry.exactCreationMechanismAttributionV485 = {
+          enabled: true,
+          measurementOnly: true,
+          promotionAllowed: false,
+          attempted: false,
+          requestConsumed: false,
+          status:
+            "V518_DEFERRED_V485_FOR_V517_GENERIC_EXACT_RECEIPT_PROOF",
+          deferredToken:
+            targetAddress,
+          verifiedCreator:
+            normalize(
+              row.contractCreator
+            ),
+          v517SelectedToken:
+            genericUnknownReceiptCandidateAfterV480V518.token,
+          v517SelectedCreator:
+            genericUnknownReceiptCandidateAfterV480V518.creator,
+          v517SelectedCreationTransactionHash:
+            genericUnknownReceiptCandidateAfterV480V518.transactionHash,
+          exactCreationAttributionDisabledGlobally:
+            false,
+          oneScanOnly:
+            true
+        };
+
+        telemetry.strongRecurringCreatorPriorityV506 = {
+          enabled: true,
+          applied: false,
+          reason:
+            "V518_V517_GENERIC_EXACT_RECEIPT_PROOF_RESERVED_SECONDARY_SLOT",
+          verifiedCreator:
+            normalize(
+              row.contractCreator
+            ),
+          pendingCreator:
+            genericUnknownReceiptCandidateAfterV480V518.creator,
+          distinctTokens:
+            safeNumber(
+              genericUnknownReceiptCandidateAfterV480V518
+                .creatorDistinctTokens
+            ),
+          thresholdDistinctTokens:
+            3,
+          decisionPoint:
+            "CURRENT_LIVE_V480_AFTER_ORIGIN_PROOF_BEFORE_V512_V503_V485",
+          v485RequestConsumedBeforeDecision:
+            false,
+          deferredByHigherEvidenceV517:
             true
         };
       } else if (dopplerWholeReceiptCandidateAfterV480V512) {
