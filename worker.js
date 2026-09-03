@@ -1,4 +1,20 @@
 /**
+ * Robinhood Chain Meme Hunter — V541
+ * AUTHORITATIVE RUNTIME VERSION: V541
+ *
+ * V541 FLAP TARGETED TOKENCREATED TOPIC0 PROOF:
+ * - V540 accumulated 15 successful Flap history pages / 750 logs and showed the exact
+ *   TokenCreated(uint256,address,uint256,address,string,string,string) topic0 exactly 3 times;
+ * - replaces blind Flap pagination with ONE authenticated Blockscout logs request filtered by
+ *   exact portal address + exact topic0 0x504e7f360b2e5fe33cbaaae4c593bc55305328341bf79009e43e0e3b7f699603;
+ * - decodes created token only from ABI DATA_WORD 3 and requires valid tx hash + exact emitter/topic;
+ * - registration remains fail-closed at >=3 distinct decoded tokens AND >=3 distinct transactions;
+ * - targeted request uses the SAME residual historical request slot; hard global ceiling stays 42;
+ * - if the targeted route is unavailable/fails, no proof is invented and state remains retryable;
+ * - Mint Club + NOXA remain solved; Openfair remains retained at one exact launch;
+ * - scanner/scoring/Momentum/qualification/Telegram thresholds/verified USD unchanged.
+ */
+/**
  * V540 FLAP V525 -> V515 CONFIRMED-PROOF BRIDGE:
  * - preserves V539 historical DATA_WORD_3 recovery and all confirmed Mint Club/NOXA detectors;
  * - consumes ZERO provider requests and adds no extra state-save cycle;
@@ -35,7 +51,7 @@
  *   qualification, Telegram thresholds, verified USD, holder logic or confirmed detectors.
  */
 /**
- * Robinhood Chain Meme Hunter — V540
+ * Robinhood Chain Meme Hunter — V541
  * AUTHORITATIVE RUNTIME VERSION: V540
  *
  * V537 OPENFAIR TOPIC2 RECOVERY + BOUNDED PROOF RESERVATION:
@@ -2896,7 +2912,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V540";
+const VERSION = "V541";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -22318,9 +22334,77 @@ function blockscoutProHistoricalAddressLogsUrlV533(env,address,nextPageParams=nu
   return `${url}?${qs.toString()}`;
 }
 
+const FLAP_TOKENCREATED_TOPIC0_V541 = "0x504e7f360b2e5fe33cbaaae4c593bc55305328341bf79009e43e0e3b7f699603";
+
+function flapTargetedHistoricalLogsUrlV541(env){
+  const apiKey=String(env?.BLOCKSCOUT_PRO_API_KEY||"").trim();
+  if(!apiKey)return null;
+  const qs=new URLSearchParams();
+  qs.set("module","logs");
+  qs.set("action","getLogs");
+  qs.set("fromBlock","0");
+  qs.set("toBlock","latest");
+  qs.set("address",SEEDED_FLAP_PORTAL_V525);
+  qs.set("topic0",FLAP_TOKENCREATED_TOPIC0_V541);
+  qs.set("apikey",apiKey);
+  return `${BLOCKSCOUT_PRO}/${BLOCKSCOUT_PRO_CHAIN_ID}/api?${qs.toString()}`;
+}
+
+function v541LegacyLogTxHash(log){
+  const tx=String(log?.transactionHash||log?.transaction_hash||"").toLowerCase();
+  return /^0x[a-f0-9]{64}$/.test(tx)?tx:null;
+}
+
+function v541LegacyLogIndex(log){
+  const x=log?.logIndex??log?.log_index??log?.index;
+  if(typeof x==="string"&&/^0x[a-f0-9]+$/i.test(x))return parseInt(x,16);
+  return safeNumber(x)||null;
+}
+
+async function runTargetedFlapHistoricalProofV541({env,state,budget,row,root}){
+  if(row?.exactDetectorRegistered===true)return null;
+  const seenCount=safeNumber(row?.topic0Counts?.[FLAP_TOKENCREATED_TOPIC0_V541]);
+  if(seenCount<3)return null;
+  const url=flapTargetedHistoricalLogsUrlV541(env);
+  if(!url)return{handled:true,enabled:true,attempted:false,requestConsumed:false,sourceKey:"flap",status:"V541_FLAP_TARGETED_BLOCKSCOUT_PRO_NOT_CONFIGURED"};
+  const spare=consumeResidualHistoricalProofRequestV532(budget,"FLAP_TARGETED_TOKENCREATED_TOPIC0_V541",1);
+  if(spare?.ok!==true)return{handled:true,enabled:true,attempted:false,requestConsumed:false,sourceKey:"flap",status:`V541_FLAP_TARGETED_DEFERRED:${spare?.reason||"UNKNOWN"}`};
+  row.requestsAttempted=safeNumber(row.requestsAttempted)+1;root.requestsAttempted=safeNumber(root.requestsAttempted)+1;row.lastAttemptAt=Date.now();root.lastAttemptAt=row.lastAttemptAt;root.lastSourceKey="flap";
+  try{
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),6000);let response;
+    try{response=await fetch(url,{headers:{accept:"application/json"},signal:controller.signal});}finally{clearTimeout(timer);}
+    row.lastHttpStatus=response.status;
+    if(!response.ok){row.lastError=`HTTP_${response.status}`;row.status=`V541_FLAP_TARGETED_HTTP_${response.status}_RETRYABLE`;root.lastStatus=row.status;return{handled:true,enabled:true,attempted:true,requestConsumed:true,sourceKey:"flap",httpStatus:response.status,targetedTopic0:FLAP_TOKENCREATED_TOPIC0_V541,status:row.status};}
+    const payload=await response.json();
+    const items=Array.isArray(payload?.result)?payload.result:(Array.isArray(payload?.items)?payload.items:[]);
+    row.requestsSucceeded=safeNumber(row.requestsSucceeded)+1;root.requestsSucceeded=safeNumber(root.requestsSucceeded)+1;row.lastSuccessAt=Date.now();row.lastError=null;
+    const obs=ensureExactSeededObservationsV536(row);let decoded=0;
+    for(const log of items){
+      const addr=normalize(log?.address||SEEDED_FLAP_PORTAL_V525);
+      const topics=v529LogTopics(log);
+      const topic0=String(topics[0]||log?.topics?.[0]||"").toLowerCase();
+      const tx=v541LegacyLogTxHash(log);
+      const rawData=String(log?.data||log?.raw?.data||"");
+      if(addr!==SEEDED_FLAP_PORTAL_V525||topic0!==FLAP_TOKENCREATED_TOPIC0_V541||!tx)continue;
+      const token=v539DataWordAddress(rawData,3);if(!token)continue;
+      obs.push({observedAt:Date.now(),token,transactionHash:tx,topic0,addressLocationType:"DATA_WORD",addressLocationIndex:3,decodedMethod:"TokenCreated(uint256,address,uint256,address,string,string,string)",blockNumber:(typeof log?.blockNumber==="string"&&/^0x/i.test(log.blockNumber))?parseInt(log.blockNumber,16):(safeNumber(log?.blockNumber)||null),logIndex:v541LegacyLogIndex(log),targetedTopic0ProofV541:true});decoded++;
+    }
+    row.exactSeededLaunchObservationsV536=obs.filter((x,i,a)=>a.findIndex(y=>y.transactionHash===x.transactionHash&&normalize(y.token)===normalize(x.token)&&String(y.topic0).toLowerCase()===String(x.topic0).toLowerCase())===i).slice(-250);
+    const registration=rebuildSeededExactProofV536(state,"flap");
+    const strong=row.strongestExactPatternV536||null;
+    row.status=row.exactDetectorRegistered===true?"V541_FLAP_EXACT_TARGETED_PATTERN_PROVEN_AND_REGISTERED_V515":"V541_FLAP_TARGETED_PROOF_ACCUMULATING";root.lastStatus=row.status;
+    return{handled:true,enabled:true,attempted:true,requestConsumed:true,sourceKey:"flap",httpStatus:response.status,targetedTopic0:FLAP_TOKENCREATED_TOPIC0_V541,logsReturned:items.length,exactDecodedThisRequest:decoded,proofTokenCount:safeNumber(strong?.proofTokenCount),proofTransactionCount:safeNumber(strong?.proofTransactionCount),exactLaunchPatternConfirmed:row.exactLaunchPatternConfirmed===true,exactDetectorRegistered:row.exactDetectorRegistered===true,registrationStatus:registration?.status||row.registrationStatus||null,residualBudgetRemainingAfter:safeNumber(spare?.remainingAfter),status:row.status};
+  }catch(e){row.lastError=errorString(e);row.status="V541_FLAP_TARGETED_FETCH_ERROR_RETRY_PRESERVED";root.lastStatus=row.status;return{handled:true,enabled:true,attempted:true,requestConsumed:true,sourceKey:"flap",error:row.lastError,targetedTopic0:FLAP_TOKENCREATED_TOPIC0_V541,status:row.status};}
+}
+
 async function runSeededHistoricalProofV529({env,state,budget}){
   const root=ensureSeededHistoricalProofV529(state);
   const sources=SEEDED_HISTORICAL_SOURCES_V529,start=Math.max(0,Math.floor(safeNumber(root.nextIndex)))%sources.length;let chosen=null;
+  const flapRowV541=root?.sources?.flap;
+  if(flapRowV541&&flapRowV541.exactDetectorRegistered!==true&&safeNumber(flapRowV541?.topic0Counts?.[FLAP_TOKENCREATED_TOPIC0_V541])>=3){
+    const targetedV541=await runTargetedFlapHistoricalProofV541({env,state,budget,row:flapRowV541,root});
+    if(targetedV541?.handled===true)return targetedV541;
+  }
   openfairHistoricalSampleExhaustedV539(state);
   const recoveryTargetV539=String(budget?.analysis?.openfairHistoricalRecoveryReserveV537?.targetKey||"");
   if(recoveryTargetV539){chosen=sources.find(x=>x.key===recoveryTargetV539)||null;}
