@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V558
+ * AUTHORITATIVE RUNTIME VERSION: V558
+ *
+ * V558 MULTI-POOL DIRECTIONAL CATCH-UP SCHEDULER:
+ * - preserves V557 verified rolling USD window calculations unchanged;
+ * - preserves V556 active/recent exact-V4 watch registration unchanged;
+ * - preserves V551/V554 exact PoolId collection, saturation protection and V254 persistence;
+ * - changes ONLY how the up-to-3 directional chunks are scheduled:
+ *   each chunk prefers a DIFFERENT eligible watched PoolId in the same scan;
+ * - the first request still uses V553's protected directional reservation;
+ * - later requests use only genuine spare analysis/global capacity;
+ * - already-selected PoolIds are excluded from later chunks in that scan;
+ * - this prevents one high-swap but badly-behind pool from monopolising all three requests;
+ * - if fewer than three distinct pools need advancement, the scheduler stops rather than
+ *   spending extra requests repeatedly on one pool;
+ * - hard global request ceiling remains 42; no provider, scoring, Momentum,
+ *   qualification, rolling-USD math, or Telegram-threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V557
  * AUTHORITATIVE RUNTIME VERSION: V557
  *
@@ -3211,7 +3230,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V557";
+const VERSION = "V558";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -56859,17 +56878,28 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
   };
 }
 
-function selectDirectionalWatchCandidateV551(state, latestNumber) {
+function selectDirectionalWatchCandidateV551(state, latestNumber, excludedPoolIdsV558 = null) {
   const root = pruneDirectionalWatchV551(state);
   const head = Number(latestNumber);
   if (!Number.isFinite(head) || head <= 0) return null;
 
+  const excludedSetV558 =
+    excludedPoolIdsV558 instanceof Set
+      ? excludedPoolIdsV558
+      : new Set(
+          Array.isArray(excludedPoolIdsV558)
+            ? excludedPoolIdsV558.map(normalize).filter(Boolean)
+            : []
+        );
+
   const eligible = Object.values(root.entries || {})
     .filter(row => {
       const last = Number(row?.lastCollectedBlock);
+      const poolId = normalize(row?.poolId);
       return (
         isAddress(normalize(row?.tokenAddress)) &&
-        /^0x[a-f0-9]{64}$/.test(String(normalize(row?.poolId) || "")) &&
+        /^0x[a-f0-9]{64}$/.test(String(poolId || "")) &&
+        !excludedSetV558.has(poolId) &&
         Number.isFinite(last) &&
         last < head
       );
@@ -56955,10 +56985,15 @@ async function advanceDirectionalWatchV551({
   budget,
   latestNumber,
   wethUsdGReference,
-  env
+  env,
+  excludedPoolIdsV558 = null
 }) {
   const root = pruneDirectionalWatchV551(state);
-  const candidate = selectDirectionalWatchCandidateV551(state, latestNumber);
+  const candidate = selectDirectionalWatchCandidateV551(
+    state,
+    latestNumber,
+    excludedPoolIdsV558
+  );
 
   const base = {
     enabled:true,
@@ -74153,14 +74188,28 @@ for (
     onChainDirectionalV179?.wethUsdGReferenceV187 ||
     bestVerifiedWethUsdGReferenceV195(state);
 
+  const directionalPoolsAdvancedThisScanV558 = new Set();
+
   const continuousDirectionalWatchThisScanV551 =
     await advanceDirectionalWatchV551({
       state,
       budget,
       latestNumber,
       wethUsdGReference: directionalWatchQuoteReferenceV554,
-      env
+      env,
+      excludedPoolIdsV558: directionalPoolsAdvancedThisScanV558
     });
+
+  if (
+    continuousDirectionalWatchThisScanV551?.requestConsumed === true &&
+    /^0x[a-f0-9]{64}$/.test(
+      String(normalize(continuousDirectionalWatchThisScanV551?.selectedPoolId) || "")
+    )
+  ) {
+    directionalPoolsAdvancedThisScanV558.add(
+      normalize(continuousDirectionalWatchThisScanV551.selectedPoolId)
+    );
+  }
 
   const directionalWatchReserveResultV553 =
     releaseDirectionalWatchReserveV553(
@@ -74215,7 +74264,8 @@ for (
         budget,
         latestNumber,
         wethUsdGReference: directionalWatchQuoteReferenceV554,
-        env
+        env,
+        excludedPoolIdsV558: directionalPoolsAdvancedThisScanV558
       });
 
     directionalCatchupChunksV554.push(extraChunkV554);
@@ -74226,9 +74276,21 @@ for (
       extraChunkV554?.rangeSaturated === true
     ) {
       directionalCatchupStopReasonV554 =
-        extraChunkV554?.status ||
-        "EXTRA_CHUNK_DID_NOT_ADVANCE_V554";
+        extraChunkV554?.status === "NO_WATCHED_POOL_NEEDS_ADVANCE_V551"
+          ? "NO_ADDITIONAL_DISTINCT_POOL_NEEDS_ADVANCE_V558"
+          : extraChunkV554?.status ||
+            "EXTRA_CHUNK_DID_NOT_ADVANCE_V554";
       break;
+    }
+
+    if (
+      /^0x[a-f0-9]{64}$/.test(
+        String(normalize(extraChunkV554?.selectedPoolId) || "")
+      )
+    ) {
+      directionalPoolsAdvancedThisScanV558.add(
+        normalize(extraChunkV554.selectedPoolId)
+      );
     }
 
     if (safeNumber(extraChunkV554?.blocksRemainingToHead) <= 0) {
@@ -74249,9 +74311,12 @@ for (
   const continuousDirectionalWatchCatchupV554 = {
     enabled:true,
     measurementOnly:true,
-    samePoolOnly:true,
-    maxWatchedPoolsAdvancedPerScan:1,
+    samePoolOnly:false,
+    schedulerVersion:"V558_DISTINCT_ACTIVE_POOL_ROUND_ROBIN",
+    maxWatchedPoolsAdvancedPerScan:DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554,
     maxChunksPerScan:DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554,
+    distinctPoolsAdvanced:directionalPoolsAdvancedThisScanV558.size,
+    distinctPoolIds:[...directionalPoolsAdvancedThisScanV558],
     chunksAttempted:directionalCatchupChunksV554.length,
     requestsConsumed:directionalCatchupChunksV554.filter(
       row => row?.requestConsumed === true
@@ -74282,6 +74347,8 @@ for (
       chunk:index + 1,
       attempted:row?.attempted === true,
       requestConsumed:row?.requestConsumed === true,
+      selectedToken:row?.selectedToken || null,
+      selectedPoolId:row?.selectedPoolId || null,
       fromBlock:row?.fromBlock ?? null,
       toBlock:row?.toBlock ?? null,
       returnedLogs:safeNumber(row?.returnedLogs),
@@ -74292,6 +74359,24 @@ for (
     })),
     hardGlobalLimitUnchanged:42,
     requestCeilingsChanged:false,
+    scoringChanged:false,
+    qualificationChanged:false,
+    telegramThresholdChanged:false
+  };
+
+  const directionalMultiPoolSchedulerV558 = {
+    enabled:true,
+    measurementOnly:true,
+    maxDistinctPoolsPerScan:DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554,
+    distinctPoolsAdvanced:directionalPoolsAdvancedThisScanV558.size,
+    poolIds:[...directionalPoolsAdvancedThisScanV558],
+    chunksAttempted:directionalCatchupChunksV554.length,
+    requestsConsumed:directionalCatchupChunksV554.filter(
+      row => row?.requestConsumed === true
+    ).length,
+    hardGlobalLimitUnchanged:42,
+    externalRequestCeilingChanged:false,
+    rollingUsdMathChanged:false,
     scoringChanged:false,
     qualificationChanged:false,
     telegramThresholdChanged:false
@@ -79292,6 +79377,7 @@ for (
     directionalWatchReserveResultV553,
     continuousDirectionalWatchThisScanV551,
     continuousDirectionalWatchCatchupV554,
+    directionalMultiPoolSchedulerV558,
     continuousDirectionalWatchV551,
     verifiedRollingDirectionalUsdV557,
     completeExactPoolDirectionalUsdV458,
