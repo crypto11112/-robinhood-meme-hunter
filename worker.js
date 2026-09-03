@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V554
+ * AUTHORITATIVE RUNTIME VERSION: V554
+ *
+ * V554 BOUNDED MULTI-CHUNK DIRECTIONAL CATCH-UP:
+ * - preserves V553's one-slot reservation for the first continuous exact-pool request;
+ * - after that reserved request is released, may advance the SAME watched exact V4 pool
+ *   through up to two additional contiguous chunks in the same scan;
+ * - extra chunks run ONLY from genuinely spare analysis/global capacity and stop while
+ *   at least one global request remains unspent for later residual work;
+ * - each chunk still uses the proven V551 exact PoolId query, saturation protection,
+ *   all-row exact-USD validation, gap-free coverage rules and V254 persistence;
+ * - any failed, saturated, unverified, or non-advancing chunk stops catch-up immediately;
+ * - maximum watched pools advanced per scan remains one;
+ * - hard global request ceiling remains 42; no provider, scoring, Momentum,
+ *   qualification or Telegram-threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V553
  * AUTHORITATIVE RUNTIME VERSION: V553
  *
@@ -3133,7 +3150,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V553";
+const VERSION = "V554";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -8480,6 +8497,10 @@ const DIRECTIONAL_WATCH_MAX_AGE_MS_V551 = 48 * 60 * 60 * 1000;
 const DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551 = 600;
 const DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551 = 10;
 const DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551 = 1200;
+
+/* V554 bounded same-pool catch-up. */
+const DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554 = 3;
+const DIRECTIONAL_WATCH_MIN_GLOBAL_SPARE_AFTER_EXTRA_CHUNK_V554 = 1;
 
 
 const MIN_ALERT_SCORE = 60;
@@ -73714,17 +73735,21 @@ for (
     bridgeConfirmedFlapV525ToV515V540(state);
 
   /*
-   * V553: advance the reserved continuous directional watch BEFORE lower-priority
-   * seeded/generic residual research can consume the protected capacity.
+   * V554: first advance uses V553's protected slot. Once that slot is released,
+   * the same watched pool may consume up to two ADDITIONAL genuinely spare
+   * analysis requests. No extra reservation is created and the hard global
+   * ceiling remains 42.
    */
+  const directionalWatchQuoteReferenceV554 =
+    onChainDirectionalV179?.wethUsdGReferenceV187 ||
+    bestVerifiedWethUsdGReferenceV195(state);
+
   const continuousDirectionalWatchThisScanV551 =
     await advanceDirectionalWatchV551({
       state,
       budget,
       latestNumber,
-      wethUsdGReference:
-        onChainDirectionalV179?.wethUsdGReferenceV187 ||
-        bestVerifiedWethUsdGReferenceV195(state),
+      wethUsdGReference: directionalWatchQuoteReferenceV554,
       env
     });
 
@@ -73737,6 +73762,131 @@ for (
           "V551_CONTINUOUS_DIRECTIONAL_NO_REQUEST_V553",
       continuousDirectionalWatchThisScanV551?.requestConsumed === true
     );
+
+  const directionalCatchupChunksV554 = [
+    continuousDirectionalWatchThisScanV551
+  ];
+
+  let directionalCatchupStopReasonV554 =
+    continuousDirectionalWatchThisScanV551?.coverageAdvanced === true
+      ? null
+      : continuousDirectionalWatchThisScanV551?.status ||
+        "FIRST_CHUNK_DID_NOT_ADVANCE_V554";
+
+  while (
+    directionalCatchupStopReasonV554 === null &&
+    directionalCatchupChunksV554.length <
+      DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554
+  ) {
+    const globalRemainingV554 =
+      Math.max(
+        0,
+        safeNumber(budget?.totalLimit) -
+        safeNumber(budget?.totalUsed)
+      );
+
+    if (
+      globalRemainingV554 <=
+      DIRECTIONAL_WATCH_MIN_GLOBAL_SPARE_AFTER_EXTRA_CHUNK_V554
+    ) {
+      directionalCatchupStopReasonV554 =
+        "GLOBAL_SPARE_FLOOR_REACHED_V554";
+      break;
+    }
+
+    if (!budgetAvailable(budget, "analysis")) {
+      directionalCatchupStopReasonV554 =
+        "NO_SPARE_ANALYSIS_BUDGET_FOR_EXTRA_CHUNK_V554";
+      break;
+    }
+
+    const extraChunkV554 =
+      await advanceDirectionalWatchV551({
+        state,
+        budget,
+        latestNumber,
+        wethUsdGReference: directionalWatchQuoteReferenceV554,
+        env
+      });
+
+    directionalCatchupChunksV554.push(extraChunkV554);
+
+    if (
+      extraChunkV554?.requestConsumed !== true ||
+      extraChunkV554?.coverageAdvanced !== true ||
+      extraChunkV554?.rangeSaturated === true
+    ) {
+      directionalCatchupStopReasonV554 =
+        extraChunkV554?.status ||
+        "EXTRA_CHUNK_DID_NOT_ADVANCE_V554";
+      break;
+    }
+
+    if (safeNumber(extraChunkV554?.blocksRemainingToHead) <= 0) {
+      directionalCatchupStopReasonV554 =
+        "WATCH_CAUGHT_UP_TO_SCAN_HEAD_V554";
+      break;
+    }
+  }
+
+  if (directionalCatchupStopReasonV554 === null) {
+    directionalCatchupStopReasonV554 =
+      directionalCatchupChunksV554.length >=
+      DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554
+        ? "MAX_CHUNKS_REACHED_V554"
+        : "CATCHUP_COMPLETE_V554";
+  }
+
+  const continuousDirectionalWatchCatchupV554 = {
+    enabled:true,
+    measurementOnly:true,
+    samePoolOnly:true,
+    maxWatchedPoolsAdvancedPerScan:1,
+    maxChunksPerScan:DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554,
+    chunksAttempted:directionalCatchupChunksV554.length,
+    requestsConsumed:directionalCatchupChunksV554.filter(
+      row => row?.requestConsumed === true
+    ).length,
+    chunksAdvanced:directionalCatchupChunksV554.filter(
+      row => row?.coverageAdvanced === true
+    ).length,
+    returnedLogs:directionalCatchupChunksV554.reduce(
+      (sum,row) => sum + safeNumber(row?.returnedLogs), 0
+    ),
+    exactUsdTrades:directionalCatchupChunksV554.reduce(
+      (sum,row) => sum + safeNumber(row?.exactUsdTrades), 0
+    ),
+    firstFromBlock:
+      directionalCatchupChunksV554.find(
+        row => Number.isFinite(Number(row?.fromBlock))
+      )?.fromBlock ?? null,
+    finalToBlock:
+      [...directionalCatchupChunksV554].reverse().find(
+        row => Number.isFinite(Number(row?.toBlock))
+      )?.toBlock ?? null,
+    blocksRemainingToHead:
+      [...directionalCatchupChunksV554].reverse().find(
+        row => Number.isFinite(Number(row?.blocksRemainingToHead))
+      )?.blocksRemainingToHead ?? null,
+    stopReason:directionalCatchupStopReasonV554,
+    chunks:directionalCatchupChunksV554.map((row,index)=>({
+      chunk:index + 1,
+      attempted:row?.attempted === true,
+      requestConsumed:row?.requestConsumed === true,
+      fromBlock:row?.fromBlock ?? null,
+      toBlock:row?.toBlock ?? null,
+      returnedLogs:safeNumber(row?.returnedLogs),
+      exactUsdTrades:safeNumber(row?.exactUsdTrades),
+      coverageAdvanced:row?.coverageAdvanced === true,
+      rangeSaturated:row?.rangeSaturated === true,
+      status:row?.status || null
+    })),
+    hardGlobalLimitUnchanged:42,
+    requestCeilingsChanged:false,
+    scoringChanged:false,
+    qualificationChanged:false,
+    telegramThresholdChanged:false
+  };
 
   const continuousDirectionalWatchV551 =
     directionalWatchSnapshotV551(state);
@@ -78724,6 +78874,7 @@ for (
     directionalWatchReserveV553,
     directionalWatchReserveResultV553,
     continuousDirectionalWatchThisScanV551,
+    continuousDirectionalWatchCatchupV554,
     continuousDirectionalWatchV551,
     completeExactPoolDirectionalUsdV458,
     completeExactPoolReserveResultV459,
