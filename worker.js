@@ -1,4 +1,32 @@
 /**
+ * Robinhood Chain Meme Hunter — V574
+ * AUTHORITATIVE RUNTIME VERSION: V574
+ *
+ * V574 PRIOR-COMPLETION EXACT-POOL WATCH RECOVERY:
+ * - preserves all V573/V572/V571/V570 behaviour;
+ * - fixes the diagnosed JUICE gap without guessing:
+ *   V573 could only recover pools still present in the bounded V179 store;
+ *   JUICE had already been evicted from V179 even though V466 retained a
+ *   verified completed exact-pool record;
+ * - adds a second zero-request recovery lane from
+ *   state.completeExactPoolCompletionV460;
+ * - uses the EXISTING exactPoolIdentityFromPriorCompletionV465() proof path
+ *   to reconstruct PoolId + quoteTokenAddress from:
+ *     1) verified prior V466 completion; and
+ *     2) the exact poolRegistry currencies for that same PoolId;
+ * - V254 quote eligibility must still pass before registration;
+ * - only verified recent completions are eligible;
+ * - recovered watches start FORWARD-ONLY at current head;
+ * - no V466 historical USD is promoted into the new rolling ledger;
+ * - prior-completion recovery is prioritised ahead of ordinary V573 recent
+ *   V179 recovery, while the overall watch cap remains 24;
+ * - max 4 prior-completion recovery candidates per scan;
+ * - zero new external requests;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, USD maths, provider or Telegram
+ *   threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V573
  * AUTHORITATIVE RUNTIME VERSION: V573
  *
@@ -3540,7 +3568,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V573";
+const VERSION = "V574";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -8888,6 +8916,10 @@ const DIRECTIONAL_RECOVERY_MAX_POOLS_PER_TOKEN_V573 = 2;
 const DIRECTIONAL_RECOVERY_MAX_POOLS_PER_SCAN_V573 = 8;
 const DIRECTIONAL_RECOVERY_RECENT_MS_V573 =
   ONCHAIN_DIRECTIONAL_RETENTION_MS_V179;
+
+const DIRECTIONAL_PRIOR_COMPLETION_RECOVERY_MAX_V574 = 4;
+const DIRECTIONAL_PRIOR_COMPLETION_MAX_AGE_MS_V574 =
+  48 * 60 * 60 * 1000;
 
 const DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551 = 600;
 const DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551 = 10;
@@ -57199,6 +57231,14 @@ function pruneDirectionalWatchV551(state) {
     ) return 5;
 
     if (
+      row?.priorCompletionRecoveryV574?.verified === true &&
+      safeNumber(row?.priorCompletionRecoveryV574?.completedAt) > 0 &&
+      now -
+        safeNumber(row.priorCompletionRecoveryV574.completedAt) <=
+        DIRECTIONAL_PRIOR_COMPLETION_MAX_AGE_MS_V574
+    ) return 4;
+
+    if (
       row?.persistedObservedRecoveryV573?.verified === true &&
       safeNumber(row?.persistedObservedRecoveryV573?.latestObservedAt) > 0 &&
       now -
@@ -57277,6 +57317,12 @@ function pruneDirectionalWatchV551(state) {
     keptWithSuccessfulRanges: rows.filter(
       row => safeNumber(row?.successfulRanges) > 0
     ).length,
+    keptPriorCompletionRecoveredV574: rows.filter(
+      row => row?.priorCompletionRecoveryV574?.verified === true
+    ).length,
+    droppedPriorCompletionRecoveredV574: droppedRows.filter(
+      row => row?.priorCompletionRecoveryV574?.verified === true
+    ).length,
     keptRecoveredExactUsdV573: rows.filter(
       row => row?.persistedObservedRecoveryV573?.verified === true
     ).length,
@@ -57305,6 +57351,119 @@ function pruneDirectionalWatchV551(state) {
 
   root.updatedAt = now;
   return root;
+}
+
+function priorCompletionWatchRecoveryCandidatesV574(
+  state,
+  wethUsdGReference
+) {
+  const completions =
+    state?.completeExactPoolCompletionV460 &&
+    typeof state.completeExactPoolCompletionV460 === "object"
+      ? state.completeExactPoolCompletionV460
+      : {};
+
+  const now = Date.now();
+  const rows = [];
+
+  for (const [rawToken, completion] of Object.entries(completions)) {
+    const token = normalize(rawToken);
+    const completedAt = safeNumber(completion?.completedAt);
+    const poolId = normalize(completion?.poolId);
+
+    if (
+      !isAddress(token) ||
+      completion?.verified !== true ||
+      completion?.fullExactPool24hCoverageVerified !== true ||
+      !/^0x[a-f0-9]{64}$/.test(String(poolId || "")) ||
+      completedAt <= 0 ||
+      now - completedAt >
+        DIRECTIONAL_PRIOR_COMPLETION_MAX_AGE_MS_V574
+    ) {
+      continue;
+    }
+
+    /*
+     * Existing V465 proof path:
+     * verified prior completion + exact poolRegistry currency identity.
+     * This is deliberately stronger than PoolId-only recovery.
+     */
+    const identity =
+      exactPoolIdentityFromPriorCompletionV465(
+        state,
+        token
+      );
+
+    if (
+      identity?.verified !== true ||
+      normalize(identity?.poolId) !== poolId
+    ) {
+      continue;
+    }
+
+    const quoteTokenAddress =
+      normalize(identity?.quoteTokenAddress);
+
+    const quoteEligibility =
+      v254PriceableQuote(
+        quoteTokenAddress,
+        wethUsdGReference
+      );
+
+    if (quoteEligibility?.eligible !== true) {
+      continue;
+    }
+
+    rows.push({
+      address:token,
+      symbol:completion?.symbol || null,
+      validERC20:true,
+      onChainPoolIdentityV153:{
+        ...identity,
+        verified:true,
+        poolSpecific:true,
+        source:
+          "PRIOR_V466_COMPLETION_PLUS_POOL_REGISTRY_RECOVERY_V574"
+      },
+      activity:{
+        poolSpecific:true,
+        swaps:1,
+        liquidityEvents:0
+      },
+      priorCompletionRecoveryV574:{
+        verified:true,
+        tokenAddress:token,
+        poolId,
+        quoteTokenAddress,
+        quoteBasis:quoteEligibility?.basis || null,
+        completedAt,
+        completionStatus:completion?.status || null,
+        completionSource:completion?.source || null,
+        fullExactPool24hCoverageVerified:true,
+        identitySource:
+          identity?.sourceV465 ||
+          identity?.sourceV460 ||
+          null,
+        forwardOnlyWatchStartRequired:true,
+        historicalWindowCoverageClaimed:false,
+        historicalUsdBackfilled:false
+      }
+    });
+  }
+
+  return rows
+    .sort((a,b) =>
+      safeNumber(
+        b?.priorCompletionRecoveryV574?.completedAt
+      ) -
+      safeNumber(
+        a?.priorCompletionRecoveryV574?.completedAt
+      )
+    )
+    .slice(
+      0,
+      DIRECTIONAL_PRIOR_COMPLETION_RECOVERY_MAX_V574
+    );
 }
 
 function persistedObservedWatchRecoveryCandidatesV573(
@@ -57698,13 +57857,19 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
           safeNumber(existing?.exactUsdTrades) === 0
         );
       existing.registrationSourceV552 =
-        candidate?.persistedObservedRecoveryV573?.verified === true
-          ? "PERSISTED_EXACT_USD_WATCH_RECOVERY_V573"
-          : candidate?.verifiedObservedRegistrationV570?.verified === true
-            ? "V212_EXACT_USD_OBSERVED_POOL_HANDOFF_V570"
+        candidate?.priorCompletionRecoveryV574?.verified === true
+          ? "PRIOR_V466_COMPLETION_WATCH_RECOVERY_V574"
+          : candidate?.persistedObservedRecoveryV573?.verified === true
+            ? "PERSISTED_EXACT_USD_WATCH_RECOVERY_V573"
+            : candidate?.verifiedObservedRegistrationV570?.verified === true
+              ? "V212_EXACT_USD_OBSERVED_POOL_HANDOFF_V570"
             : candidate?.successfulTelegramAlertFallbackV460?.verified === true
               ? "PERSISTED_SUCCESSFUL_ALERT_FALLBACK_V460"
               : "V458_SELECTED_CURRENT_EXACT_POOL_TARGET";
+      existing.priorCompletionRecoveryV574 =
+        candidate?.priorCompletionRecoveryV574 ||
+        existing.priorCompletionRecoveryV574 ||
+        null;
       existing.persistedObservedRecoveryV573 =
         candidate?.persistedObservedRecoveryV573 ||
         existing.persistedObservedRecoveryV573 ||
@@ -57765,15 +57930,19 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       lastActivePoolEvidenceAtV555:activePoolEvidenceV555 ? now : null,
       zeroActivityDeprioritisedV555:false,
       registrationSourceV552:
-        candidate?.persistedObservedRecoveryV573?.verified === true
-          ? "PERSISTED_EXACT_USD_WATCH_RECOVERY_V573"
-          : candidate?.verifiedObservedRegistrationV570?.verified === true
-            ? "V212_EXACT_USD_OBSERVED_POOL_HANDOFF_V570"
+        candidate?.priorCompletionRecoveryV574?.verified === true
+          ? "PRIOR_V466_COMPLETION_WATCH_RECOVERY_V574"
+          : candidate?.persistedObservedRecoveryV573?.verified === true
+            ? "PERSISTED_EXACT_USD_WATCH_RECOVERY_V573"
+            : candidate?.verifiedObservedRegistrationV570?.verified === true
+              ? "V212_EXACT_USD_OBSERVED_POOL_HANDOFF_V570"
             : candidate?.successfulTelegramAlertFallbackV460?.verified === true
               ? "PERSISTED_SUCCESSFUL_ALERT_FALLBACK_V460"
               : "V458_SELECTED_CURRENT_EXACT_POOL_TARGET",
       verifiedObservedRegistrationV570:
         candidate?.verifiedObservedRegistrationV570 || null,
+      priorCompletionRecoveryV574:
+        candidate?.priorCompletionRecoveryV574 || null,
       persistedObservedRecoveryV573:
         candidate?.persistedObservedRecoveryV573 || null
     };
@@ -58464,6 +58633,8 @@ function directionalWatchSnapshotV551(state) {
           : null,
       saturatedAttempts:safeNumber(row?.saturatedAttempts),
       registrationSourceV552:row?.registrationSourceV552 || null,
+      priorCompletionRecoveryV574:
+        row?.priorCompletionRecoveryV574 || null,
       persistedObservedRecoveryV573:
         row?.persistedObservedRecoveryV573 || null,
       activePoolEvidenceV555:row?.activePoolEvidenceV555 === true,
@@ -74998,6 +75169,13 @@ for (
       })
       .slice(0, 3);
 
+  const directionalPriorCompletionRecoveryCandidatesV574 =
+    priorCompletionWatchRecoveryCandidatesV574(
+      state,
+      onChainDirectionalV179?.wethUsdGReferenceV187 ||
+        bestVerifiedWethUsdGReferenceV195(state)
+    );
+
   const directionalPersistedRecoveryCandidatesV573 =
     persistedObservedWatchRecoveryCandidatesV573(
       state,
@@ -75014,6 +75192,7 @@ for (
     );
 
   const directionalWatchRegistrationCandidatesV555 = [
+    ...directionalPriorCompletionRecoveryCandidatesV574,
     ...directionalPersistedRecoveryCandidatesV573,
     ...directionalObservedExactPoolCandidatesV570,
     ...directionalActiveExactPoolCandidatesV555,
@@ -75034,6 +75213,52 @@ for (
       onChainDirectionalV179?.wethUsdGReferenceV187 ||
         bestVerifiedWethUsdGReferenceV195(state)
     );
+
+  const directionalPriorCompletionWatchRecoveryV574 = {
+    enabled:true,
+    externalRequestsAdded:0,
+    source:"COMPLETE_EXACT_POOL_COMPLETION_V460_PLUS_POOL_REGISTRY_V465",
+    maxAgeHours:
+      DIRECTIONAL_PRIOR_COMPLETION_MAX_AGE_MS_V574 / 3600000,
+    maxCandidatesPerScan:
+      DIRECTIONAL_PRIOR_COMPLETION_RECOVERY_MAX_V574,
+    derivedCandidates:
+      directionalPriorCompletionRecoveryCandidatesV574.length,
+    rows:
+      directionalPriorCompletionRecoveryCandidatesV574.map(candidate => ({
+        address:normalize(candidate?.address),
+        symbol:candidate?.symbol || null,
+        poolId:
+          normalize(candidate?.onChainPoolIdentityV153?.poolId) || null,
+        quoteTokenAddress:
+          normalize(candidate?.onChainPoolIdentityV153?.quoteTokenAddress) || null,
+        quoteBasis:
+          candidate?.priorCompletionRecoveryV574?.quoteBasis || null,
+        completedAt:
+          candidate?.priorCompletionRecoveryV574?.completedAt || null,
+        completionStatus:
+          candidate?.priorCompletionRecoveryV574?.completionStatus || null,
+        identitySource:
+          candidate?.priorCompletionRecoveryV574?.identitySource || null,
+        fullExactPool24hCoverageVerified:
+          candidate?.priorCompletionRecoveryV574
+            ?.fullExactPool24hCoverageVerified === true,
+        forwardOnlyWatchStartRequired:true,
+        historicalWindowCoverageClaimed:false,
+        historicalUsdBackfilled:false
+      })),
+    proofRequirements:{
+      verifiedPriorCompletion:true,
+      exactPoolRegistryCurrencyIdentity:true,
+      v254QuoteEligibility:true,
+      poolIdOnlyRecoveryAllowed:false
+    },
+    watchCapUnchanged:DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
+    hardGlobalLimitUnchanged:42,
+    scoringChanged:false,
+    qualificationChanged:false,
+    telegramThresholdChanged:false
+  };
 
   const directionalPersistedWatchRecoveryV573 = {
     enabled:true,
@@ -81320,6 +81545,7 @@ for (
             ?.poolId
         ) || null
     },
+    directionalPriorCompletionWatchRecoveryV574,
     directionalPersistedWatchRecoveryV573,
     directionalObservedPoolHandoffV570,
     directionalActivePoolTargetingV555,
