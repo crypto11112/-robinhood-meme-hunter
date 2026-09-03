@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V556
+ * AUTHORITATIVE RUNTIME VERSION: V556
+ *
+ * V556 RECENT EXACT-V4 POOL SEEDING:
+ * - preserves V555 active-pool preference and the proven V554 continuous collector;
+ * - fixes the remaining same-scan timing problem: a verified exact V4 pool no longer
+ *   needs to show a swap in the exact registration scan to become worth watching;
+ * - current-scan candidates are seed-eligible when validERC20=true,
+ *   onChainPoolIdentityV153.verified=true, activity.poolSpecific=true, and they show
+ *   either swaps>0 OR liquidityEvents>0;
+ * - swap-active pools remain highest priority; liquidity-only pools are persisted as
+ *   recent exact-pool seeds so later scans can capture their first swaps forward-only;
+ * - every seed still requires an exact-USD-priceable quote basis through existing V254
+ *   verification; no inferred USD and no historical backfill;
+ * - zero-activity stale fallbacks remain deprioritised;
+ * - hard global request ceiling remains 42; no provider, scoring, Momentum,
+ *   qualification, or Telegram-threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V555
  * AUTHORITATIVE RUNTIME VERSION: V555
  *
@@ -3173,7 +3192,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V555";
+const VERSION = "V556";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -56681,9 +56700,19 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       candidate?.activity?.poolSpecific === true
         ? Math.max(0, safeNumber(candidate?.activity?.swaps))
         : 0;
+    const poolSpecificLiquidityEventsV556 =
+      candidate?.activity?.poolSpecific === true
+        ? Math.max(0, safeNumber(candidate?.activity?.liquidityEvents))
+        : 0;
     const activePoolEvidenceV555 =
       candidate?.activity?.poolSpecific === true &&
       poolSpecificSwapsV555 > 0;
+    const recentExactPoolSeedV556 =
+      candidate?.activity?.poolSpecific === true &&
+      (
+        poolSpecificSwapsV555 > 0 ||
+        poolSpecificLiquidityEventsV556 > 0
+      );
 
     if (
       !isAddress(token) ||
@@ -56705,6 +56734,8 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       existing.lastConfidence = safeNumber(candidate?.confidence);
       existing.lastMomentum = safeNumber(candidate?.momentum?.score);
       existing.poolSpecificSwapsV555 = poolSpecificSwapsV555;
+      existing.poolSpecificLiquidityEventsV556 = poolSpecificLiquidityEventsV556;
+      existing.recentExactPoolSeedV556 = recentExactPoolSeedV556;
       existing.activePoolEvidenceV555 = activePoolEvidenceV555;
       existing.lastActivePoolEvidenceAtV555 =
         activePoolEvidenceV555 ? now : (existing.lastActivePoolEvidenceAtV555 || null);
@@ -56726,6 +56757,8 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
         registrationSourceV552:existing.registrationSourceV552,
         activePoolEvidenceV555,
         poolSpecificSwapsV555,
+        poolSpecificLiquidityEventsV556,
+        recentExactPoolSeedV556,
         zeroActivityDeprioritisedV555:existing.zeroActivityDeprioritisedV555 === true,
         status:activePoolEvidenceV555
           ? "REFRESHED_ACTIVE_EXACT_POOL_WATCH_V555"
@@ -56765,6 +56798,8 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       lastConfidence:safeNumber(candidate?.confidence),
       lastMomentum:safeNumber(candidate?.momentum?.score),
       poolSpecificSwapsV555,
+      poolSpecificLiquidityEventsV556,
+      recentExactPoolSeedV556,
       activePoolEvidenceV555,
       lastActivePoolEvidenceAtV555:activePoolEvidenceV555 ? now : null,
       zeroActivityDeprioritisedV555:false,
@@ -56780,6 +56815,8 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       registrationSourceV552:root.entries[token].registrationSourceV552,
       activePoolEvidenceV555,
       poolSpecificSwapsV555,
+      poolSpecificLiquidityEventsV556,
+      recentExactPoolSeedV556,
       zeroActivityDeprioritisedV555:false,
       status:activePoolEvidenceV555
         ? "REGISTERED_ACTIVE_EXACT_POOL_FORWARD_ONLY_V555"
@@ -56821,11 +56858,21 @@ function selectDirectionalWatchCandidateV551(state, latestNumber) {
 
   const hasActiveV555 =
     eligible.some(row => row?.activePoolEvidenceV555 === true);
+  const hasRecentSeedV556 =
+    eligible.some(row =>
+      row?.recentExactPoolSeedV556 === true &&
+      row?.zeroActivityDeprioritisedV555 !== true
+    );
 
   const preferred =
     hasActiveV555
       ? eligible.filter(row => row?.activePoolEvidenceV555 === true)
-      : eligible.filter(row => row?.zeroActivityDeprioritisedV555 !== true);
+      : hasRecentSeedV556
+        ? eligible.filter(row =>
+            row?.recentExactPoolSeedV556 === true &&
+            row?.zeroActivityDeprioritisedV555 !== true
+          )
+        : eligible.filter(row => row?.zeroActivityDeprioritisedV555 !== true);
 
   const pool =
     preferred.length > 0
@@ -56843,6 +56890,11 @@ function selectDirectionalWatchCandidateV551(state, latestNumber) {
         safeNumber(b?.poolSpecificSwapsV555) -
         safeNumber(a?.poolSpecificSwapsV555);
       if (swapDelta !== 0) return swapDelta;
+
+      const liquidityDelta =
+        safeNumber(b?.poolSpecificLiquidityEventsV556) -
+        safeNumber(a?.poolSpecificLiquidityEventsV556);
+      if (liquidityDelta !== 0) return liquidityDelta;
 
       const aLast = safeNumber(a?.lastCollectedAt || a?.registeredAt);
       const bLast = safeNumber(b?.lastCollectedAt || b?.registeredAt);
@@ -57099,6 +57151,8 @@ function directionalWatchSnapshotV551(state) {
       registrationSourceV552:row?.registrationSourceV552 || null,
       activePoolEvidenceV555:row?.activePoolEvidenceV555 === true,
       poolSpecificSwapsV555:safeNumber(row?.poolSpecificSwapsV555),
+      poolSpecificLiquidityEventsV556:safeNumber(row?.poolSpecificLiquidityEventsV556),
+      recentExactPoolSeedV556:row?.recentExactPoolSeedV556 === true,
       lastActivePoolEvidenceAtV555:row?.lastActivePoolEvidenceAtV555 || null,
       zeroActivityDeprioritisedV555:row?.zeroActivityDeprioritisedV555 === true,
       forwardOnly:true,
@@ -73074,13 +73128,22 @@ for (
         candidate?.validERC20 === true &&
         candidate?.onChainPoolIdentityV153?.verified === true &&
         candidate?.activity?.poolSpecific === true &&
-        safeNumber(candidate?.activity?.swaps) > 0
+        (
+          safeNumber(candidate?.activity?.swaps) > 0 ||
+          safeNumber(candidate?.activity?.liquidityEvents) > 0
+        )
       )
       .sort((a,b) => {
         const swapDelta =
           safeNumber(b?.activity?.swaps) -
           safeNumber(a?.activity?.swaps);
         if (swapDelta !== 0) return swapDelta;
+
+        const liquidityDelta =
+          safeNumber(b?.activity?.liquidityEvents) -
+          safeNumber(a?.activity?.liquidityEvents);
+        if (liquidityDelta !== 0) return liquidityDelta;
+
         return (
           safeNumber(b?.opportunity?.score) -
           safeNumber(a?.opportunity?.score)
@@ -73112,6 +73175,10 @@ for (
     enabled:true,
     measurementOnly:true,
     currentScanActiveExactPools:
+      directionalActiveExactPoolCandidatesV555.filter(
+        candidate => safeNumber(candidate?.activity?.swaps) > 0
+      ).length,
+    currentScanRecentExactPoolSeedsV556:
       directionalActiveExactPoolCandidatesV555.length,
     candidates:
       directionalActiveExactPoolCandidatesV555.map(candidate => ({
@@ -73122,6 +73189,13 @@ for (
           normalize(candidate?.onChainPoolIdentityV153?.quoteTokenAddress) || null,
         poolSpecific:candidate?.activity?.poolSpecific === true,
         swaps:safeNumber(candidate?.activity?.swaps),
+        liquidityEvents:safeNumber(candidate?.activity?.liquidityEvents),
+        seedReasonV556:
+          safeNumber(candidate?.activity?.swaps) > 0
+            ? "POOL_SPECIFIC_SWAP_ACTIVITY"
+            : safeNumber(candidate?.activity?.liquidityEvents) > 0
+              ? "POOL_SPECIFIC_LIQUIDITY_ACTIVITY"
+              : "UNVERIFIED",
         opportunityScore:safeNumber(candidate?.opportunity?.score)
       })),
     fallbackStillPreserved:
