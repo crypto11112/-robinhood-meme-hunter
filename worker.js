@@ -1,4 +1,27 @@
 /**
+ * Robinhood Chain Meme Hunter — V578
+ * AUTHORITATIVE RUNTIME VERSION: V578
+ *
+ * V578 PRIOR-COMPLETION CATCH-UP-TO-HEAD FIX:
+ * - preserves V577 and all earlier confirmed-working behaviour;
+ * - fixes the remaining V577 scheduler weakness proven by JUICE:
+ *   V577 gave verified V466-recovered pools priority only for their first
+ *   contiguous range, then immediately dropped them back to ordinary routing;
+ * - V578 keeps a recent verified V466 prior-completion pool on temporary
+ *   catch-up priority until its exact-pool coverage reaches the current head;
+ * - the priority is generic, never hard-coded to JUICE;
+ * - an eligible prior-completion catch-up pool may use the existing V568-style
+ *   guaranteed second directional chunk when spare analysis capacity exists;
+ * - the third directional chunk remains available for normal routing;
+ * - once the pool reaches the head, the temporary priority releases
+ *   automatically and normal V567 scheduling resumes;
+ * - no historical backfill;
+ * - no scoring, Momentum, qualification, USD-decoding, retention, Telegram,
+ *   provider, or alert-threshold changes;
+ * - no new external-request allocation;
+ * - hard global request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V577
  * AUTHORITATIVE RUNTIME VERSION: V577
  *
@@ -3636,7 +3659,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V577";
+const VERSION = "V578";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -58084,13 +58107,33 @@ function directionalWatchNeedsFirstRangePriorityV577(row) {
   );
 }
 
+function directionalWatchNeedsPriorCompletionCatchupV578(row, latestNumber = null) {
+  const last = Number(row?.lastCollectedBlock);
+  const head = Number(latestNumber);
+
+  return Boolean(
+    row?.priorCompletionRecoveryV574?.verified === true &&
+    Number.isFinite(last) &&
+    safeNumber(row?.priorCompletionRecoveryV574?.completedAt) > 0 &&
+    Date.now() - safeNumber(row.priorCompletionRecoveryV574.completedAt) <=
+      DIRECTIONAL_PRIOR_COMPLETION_MAX_AGE_MS_V574 &&
+    row?.everCaughtUpV565 !== true &&
+    (
+      !Number.isFinite(head) ||
+      head <= 0 ||
+      last < head
+    )
+  );
+}
+
 function directionalWatchPriorityTierV567(row) {
   /*
-   * V577: one-shot bootstrap priority for safely reconstructed V466 pools.
-   * The moment the first contiguous range succeeds, successfulRanges becomes
-   * > 0 and the row returns to the normal V567 scheduler automatically.
+   * V578: safely reconstructed V466 pools retain temporary catch-up priority
+   * until they have actually reached the chain head. V577 released this
+   * priority after only the first successful range, which could leave a pool
+   * thousands of blocks behind again.
    */
-  if (directionalWatchNeedsFirstRangePriorityV577(row)) return 4;
+  if (directionalWatchNeedsPriorCompletionCatchupV578(row)) return 4;
 
   if (directionalWatchExpansionReadyV567(row)) return 3;
 
@@ -58295,11 +58338,23 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
       distinctBehindPoolIdsV559.length
     );
 
+  const priorCompletionCatchupEligibleV578 =
+    Boolean(
+      candidate &&
+      directionalWatchNeedsPriorCompletionCatchupV578(
+        candidate,
+        latestNumber
+      )
+    );
+
   const expansionCatchupSprintEligibleV568 =
     Boolean(
       candidate &&
       desiredReserveV559 >= 2 &&
-      directionalWatchExpansionReadyV567(candidate) &&
+      (
+        directionalWatchExpansionReadyV567(candidate) ||
+        priorCompletionCatchupEligibleV578
+      ) &&
       Math.max(
         0,
         safeNumber(latestNumber) -
@@ -58336,6 +58391,13 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
     candidate ? directionalWatchPriorityTierV567(candidate) : null;
   reserve.priorCompletionFirstRangePriorityV577 =
     candidate ? directionalWatchNeedsFirstRangePriorityV577(candidate) : false;
+  reserve.priorCompletionCatchupPriorityV578 =
+    candidate
+      ? directionalWatchNeedsPriorCompletionCatchupV578(
+          candidate,
+          latestNumber
+        )
+      : false;
   reserve.expansionReadyPriorityV567 =
     candidate ? directionalWatchExpansionReadyV567(candidate) : false;
   reserve.releaseReason = candidate
@@ -58679,8 +58741,13 @@ async function advanceDirectionalWatchV551({
         directionalWatchExpansionReadyV567(candidate),
       selectionPriorityTierV567:
         directionalWatchPriorityTierV567(candidate),
+      priorCompletionCatchupPriorityV578:
+        directionalWatchNeedsPriorCompletionCatchupV578(
+          candidate,
+          head
+        ),
       selectionPolicyV567:
-        "EXPANSION_READY_THEN_ACTIVE_RECENT_THEN_BACKLOG_CLOSEST_TO_HEAD",
+        "V578_PRIOR_COMPLETION_CATCHUP_TO_HEAD_THEN_EXPANSION_READY_THEN_ACTIVE_RECENT",
       configuredBlockSpanV562:configuredSpan,
       configuredBlockSpanV566:configuredSpan,
       baseConfiguredBlockSpanV562:baseConfiguredSpanV562,
@@ -76335,12 +76402,18 @@ for (
     );
   }
 
+  const priorCompletionCatchupSprintV578 =
+    directionalWatchReserveV553?.priorCompletionCatchupPriorityV578 === true;
+
   const expansionCatchupSprintV568 =
     directionalWatchReserveV553?.expansionCatchupSprintEligibleV568 === true &&
     continuousDirectionalWatchThisScanV551?.requestConsumed === true &&
     continuousDirectionalWatchThisScanV551?.coverageAdvanced === true &&
     continuousDirectionalWatchThisScanV551?.rangeSaturated !== true &&
-    continuousDirectionalWatchThisScanV551?.expansionReadyPriorityV567 === true;
+    (
+      continuousDirectionalWatchThisScanV551?.expansionReadyPriorityV567 === true ||
+      priorCompletionCatchupSprintV578
+    );
 
   const expansionCatchupPoolIdV568 =
     expansionCatchupSprintV568
@@ -76523,7 +76596,7 @@ for (
     enabled:true,
     measurementOnly:true,
     samePoolOnly:false,
-    schedulerVersion:"V577_V466_FIRST_RANGE_THEN_V561_DISTINCT_ROUND_ROBIN",
+    schedulerVersion:"V578_V466_CATCHUP_TO_HEAD_THEN_V561_DISTINCT_ROUND_ROBIN",
     finishNearHeadPoolFirstV561:true,
     maxWatchedPoolsAdvancedPerScan:DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554,
     maxChunksPerScan:DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554,
@@ -76590,6 +76663,10 @@ for (
           : null,
       priorCompletionFirstRangePriorityV577:
         row?.priorCompletionFirstRangePriorityV577 === true,
+      priorCompletionCatchupPriorityV578:
+        row?.priorCompletionCatchupPriorityV578 === true,
+      priorCompletionCatchupPriorityV578:
+        row?.priorCompletionCatchupPriorityV578 === true,
       densityTargetSpanV566:
         Number.isFinite(Number(row?.densityTargetSpanV566))
           ? Number(row.densityTargetSpanV566)
@@ -76618,15 +76695,25 @@ for (
     measurementOnly:true,
     priorCompletionFirstRangePriorityV577:{
       enabled:true,
+      supersededForOngoingCatchupByV578:true,
+      temporaryTier:4,
+      generic:true,
+      externalRequestsAdded:0,
+      hardGlobalLimitUnchanged:42
+    },
+    priorCompletionCatchupPriorityV578:{
+      enabled:true,
       temporaryTier:4,
       normalExpansionReadyTierV567:3,
-      releaseCondition:"FIRST_SUCCESSFUL_CONTIGUOUS_RANGE",
+      releaseCondition:"EXACT_POOL_COVERAGE_REACHES_CURRENT_HEAD",
+      guaranteedSecondChunkUsesExistingDirectionalCapacity:true,
+      thirdChunkRemainsNormalRouting:true,
       generic:true,
       externalRequestsAdded:0,
       hardGlobalLimitUnchanged:42
     },
     reserveVersion:"V559_DYNAMIC_THREE_SLOT_WITH_ONE_MINIMUM_GUARANTEE",
-    selectionPriorityV560:"V577_PRIOR_COMPLETION_FIRST_RANGE_THEN_V567_NORMAL_PRIORITY",
+    selectionPriorityV560:"V578_PRIOR_COMPLETION_CATCHUP_TO_HEAD_THEN_V567_NORMAL_PRIORITY",
     finishNearHeadPoolFirstV561:true,
     elasticNearHeadSpanV562:true,
     elasticNearHeadMaxSpanV562:DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551,
