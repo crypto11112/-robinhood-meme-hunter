@@ -382,6 +382,14 @@
  * - scoring, Momentum, qualification, Telegram thresholds, verified USD,
  *   dense-pool completion, RWA detector, launch meter and hard limit 42 unchanged.
  *
+ * V521 DYNAMIC /launchsources REPORTING:
+ * - reporting-only union of V470 static source labels + enabled V515 exact detectors
+ * - Doppler V1 and V517 self-learned detectors appear automatically
+ * - future generic exact detectors require no manual reporting-list update
+ * - clearly labels self-learned exact detectors
+ * - /launchsources remains 0 provider requests and 0 persistent writes
+ * - scanner/scoring/qualification/Telegram thresholds/request ceiling unchanged
+ *
  * V501 /launchsources RWA ACTIVE-STATE DISPLAY FIX:
  * - fixes V500 display logic that incorrectly required the non-persisted
  *   snapshot-only field rwaExactLiveDetectorV495.liveDetectorActive;
@@ -2704,7 +2712,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V520";
+const VERSION = "V521";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -112325,12 +112333,62 @@ function launchSourcesTelegramMessageV499(
       ? state.rwaExactLiveDetectorV495
       : {};
 
-  const supported =
+  const staticSupported =
     Array.isArray(
       meter?.supportedVerifiedSources
     )
       ? meter.supportedVerifiedSources
       : [];
+
+  /*
+   * V521 reporting-only dynamic source catalogue.
+   * Keep the original V470 static supported labels intact, then union in every
+   * enabled exact detector already held by the V515 registry. This makes
+   * /launchsources automatically reflect Doppler and future V517-learned
+   * sources without changing discovery, meter mutation, request routing or
+   * launch qualification.
+   */
+  const registry =
+    state?.verifiedLaunchDetectorRegistryV515 &&
+    typeof state.verifiedLaunchDetectorRegistryV515 === "object"
+      ? state.verifiedLaunchDetectorRegistryV515
+      : {};
+
+  const registryDetectors =
+    Object.values(
+      registry?.detectors || {}
+    )
+      .filter(row =>
+        row?.enabled === true &&
+        String(row?.protocol || "").trim()
+      );
+
+  const registryByProtocol =
+    new Map();
+
+  for (const detector of registryDetectors) {
+    const name =
+      String(detector?.protocol || "").trim();
+
+    if (!name) continue;
+
+    if (!registryByProtocol.has(name)) {
+      registryByProtocol.set(
+        name,
+        detector
+      );
+    }
+  }
+
+  const supported =
+    Array.from(
+      new Set([
+        ...staticSupported,
+        ...Array.from(
+          registryByProtocol.keys()
+        )
+      ])
+    );
 
   const rolling =
     meter?.rolling24hByProtocol &&
@@ -112410,11 +112468,6 @@ function launchSourcesTelegramMessageV499(
               rolling?.[name]
             );
 
-          const status =
-            count > 0
-              ? `ACTIVE 24H — ${fmt(count)} launch${count === 1 ? "" : "es"}`
-              : "SUPPORTED — NO 24H VERIFIED LAUNCH OBSERVED";
-
           if (
             name ===
             "RWAERC20LaunchpadFactory"
@@ -112432,6 +112485,38 @@ function launchSourcesTelegramMessageV499(
             );
           }
 
+          const detector =
+            registryByProtocol.get(name);
+
+          if (detector) {
+            const selfLearned =
+              String(
+                detector?.sourceState || ""
+              ) ===
+              "genericUnknownSourceProofV517" ||
+              String(
+                detector?.protocolKey || ""
+              ).startsWith("auto_");
+
+            const detectorStatus =
+              selfLearned
+                ? "SELF-LEARNED — EXACT DETECTOR ACTIVE"
+                : "EXACT DETECTOR ACTIVE";
+
+            return (
+              `• ${escapeHtml(name)}: <b>${detectorStatus}</b>${
+                count > 0
+                  ? ` — ${fmt(count)} launch${count === 1 ? "" : "es"} / 24h`
+                  : " — NO 24H VERIFIED LAUNCH OBSERVED"
+              }`
+            );
+          }
+
+          const status =
+            count > 0
+              ? `ACTIVE 24H — ${fmt(count)} launch${count === 1 ? "" : "es"}`
+              : "SUPPORTED — NO 24H VERIFIED LAUNCH OBSERVED";
+
           return `• ${escapeHtml(name)}: <b>${status}</b>`;
         })
       : [
@@ -112442,6 +112527,8 @@ function launchSourcesTelegramMessageV499(
     `🛰 <b>Launch Source Coverage — ${escapeHtml(VERSION)}</b>`,
     "",
     `<b>Bot-supported verified source labels:</b> ${fmt(supported.length)}`,
+    `<b>Exact registry detectors active:</b> ${fmt(registryDetectors.length)}`,
+    `<b>Self-learned exact detectors:</b> ${fmt(registryDetectors.filter(row => String(row?.sourceState || "") === "genericUnknownSourceProofV517" || String(row?.protocolKey || "").startsWith("auto_")).length)}`,
     `<b>Observed active in rolling 24h:</b> ${fmt(active.length)}`,
     `<b>Verified launches observed in rolling 24h:</b> ${fmt(meter?.rolling24hUniqueVerifiedLaunches)}`,
     `Meter status: <b>${escapeHtml(meterAgeStatus)}</b>`,
