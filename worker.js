@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V563
+ * AUTHORITATIVE RUNTIME VERSION: V563
+ *
+ * V563 MULTI-POOL WATCH STATE KEYING:
+ * - fixes the confirmed multi-pool overwrite bug in V551 directional watch state;
+ * - V551 previously keyed root.entries by tokenAddress only;
+ * - when the same token exposed another exact PoolId, the newer pool replaced the
+ *   older pool and erased its accumulated forward-only coverage progress;
+ * - V563 keys directional watches by tokenAddress + exact PoolId;
+ * - existing token-keyed V551 entries are migrated in-place on first access;
+ * - multiple exact PoolIds for the same token can now coexist and mature independently;
+ * - registration refreshes only the matching token+PoolId watch;
+ * - pruning preserves distinct exact pools instead of collapsing them by token;
+ * - all V562/V561/V560/V559 scheduling, saturation, USD ledger, and verification
+ *   safeguards remain unchanged;
+ * - hard global request ceiling remains 42;
+ * - no scoring, Momentum, qualification, USD math, or Telegram threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V562
  * AUTHORITATIVE RUNTIME VERSION: V562
  *
@@ -3306,7 +3325,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V562";
+const VERSION = "V563";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -56808,12 +56827,96 @@ function splitRangeForResumeV466(range) {
 }
 
 
+
+function directionalWatchKeyV563(tokenAddress, poolId) {
+  const token = normalize(tokenAddress);
+  const pool = normalize(poolId);
+  if (
+    !isAddress(token) ||
+    !/^0x[a-f0-9]{64}$/.test(String(pool || ""))
+  ) {
+    return null;
+  }
+  return `${token}:${pool}`;
+}
+
+function migrateDirectionalWatchKeysV563(root) {
+  const sourceEntries =
+    root?.entries && typeof root.entries === "object"
+      ? root.entries
+      : {};
+
+  const migrated = {};
+  let migratedLegacyRows = 0;
+  let preservedCompositeRows = 0;
+  let droppedInvalidRows = 0;
+
+  for (const [oldKey, row] of Object.entries(sourceEntries)) {
+    const token = normalize(row?.tokenAddress);
+    const poolId = normalize(row?.poolId);
+    const compositeKey = directionalWatchKeyV563(token, poolId);
+
+    if (!compositeKey) {
+      droppedInvalidRows++;
+      continue;
+    }
+
+    const oldKeyNormalized = String(oldKey || "").toLowerCase();
+    if (oldKeyNormalized === compositeKey) {
+      preservedCompositeRows++;
+    } else {
+      migratedLegacyRows++;
+    }
+
+    /*
+     * If duplicate material somehow exists during migration, preserve the
+     * row with the greatest proven coverage end, then the most recent evidence.
+     */
+    const prior = migrated[compositeKey];
+    if (!prior) {
+      migrated[compositeKey] = row;
+      continue;
+    }
+
+    const priorCoverage = safeNumber(prior?.coverageEndBlock);
+    const rowCoverage = safeNumber(row?.coverageEndBlock);
+
+    if (
+      rowCoverage > priorCoverage ||
+      (
+        rowCoverage === priorCoverage &&
+        safeNumber(row?.lastQualifiedAt || row?.updatedAt || row?.registeredAt) >
+        safeNumber(prior?.lastQualifiedAt || prior?.updatedAt || prior?.registeredAt)
+      )
+    ) {
+      migrated[compositeKey] = row;
+    }
+  }
+
+  root.entries = migrated;
+  root.keySchemaV563 = "TOKEN_ADDRESS_PLUS_EXACT_POOL_ID";
+  root.lastKeyMigrationV563 = {
+    at: Date.now(),
+    migratedLegacyRows,
+    preservedCompositeRows,
+    droppedInvalidRows,
+    resultingEntries: Object.keys(migrated).length
+  };
+
+  return root;
+}
+
 function directionalWatchRootV551(state) {
   state.directionalExactPoolWatchV551 =
     state?.directionalExactPoolWatchV551 &&
     typeof state.directionalExactPoolWatchV551 === "object"
       ? state.directionalExactPoolWatchV551
-      : {schemaVersion:"V551_1",updatedAt:null,entries:{}};
+      : {
+          schemaVersion:"V563_1",
+          keySchemaV563:"TOKEN_ADDRESS_PLUS_EXACT_POOL_ID",
+          updatedAt:null,
+          entries:{}
+        };
 
   state.directionalExactPoolWatchV551.entries =
     state.directionalExactPoolWatchV551?.entries &&
@@ -56821,7 +56924,26 @@ function directionalWatchRootV551(state) {
       ? state.directionalExactPoolWatchV551.entries
       : {};
 
-  return state.directionalExactPoolWatchV551;
+  const root = state.directionalExactPoolWatchV551;
+
+  const needsMigrationV563 =
+    root?.keySchemaV563 !== "TOKEN_ADDRESS_PLUS_EXACT_POOL_ID" ||
+    Object.entries(root.entries || {}).some(([key, row]) => {
+      const expected = directionalWatchKeyV563(
+        row?.tokenAddress,
+        row?.poolId
+      );
+      return expected && String(key || "").toLowerCase() !== expected;
+    });
+
+  if (needsMigrationV563) {
+    migrateDirectionalWatchKeysV563(root);
+  }
+
+  root.schemaVersion = "V563_1";
+  root.keySchemaV563 = "TOKEN_ADDRESS_PLUS_EXACT_POOL_ID";
+
+  return root;
 }
 
 function pruneDirectionalWatchV551(state) {
@@ -56847,7 +56969,12 @@ function pruneDirectionalWatchV551(state) {
     .slice(0, DIRECTIONAL_WATCH_MAX_ENTRIES_V551);
 
   root.entries = Object.fromEntries(
-    rows.map(row => [normalize(row.tokenAddress), row])
+    rows
+      .map(row => [
+        directionalWatchKeyV563(row?.tokenAddress, row?.poolId),
+        row
+      ])
+      .filter(([key]) => Boolean(key))
   );
   root.updatedAt = now;
   return root;
@@ -56910,7 +57037,10 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       continue;
     }
 
-    const existing = root.entries[token];
+    const watchKeyV563 = directionalWatchKeyV563(token, poolId);
+    if (!watchKeyV563) continue;
+
+    const existing = root.entries[watchKeyV563];
     if (existing && normalize(existing?.poolId) === poolId) {
       existing.symbol = candidate?.symbol || existing.symbol || null;
       existing.quoteTokenAddress = quoteTokenAddress || existing.quoteTokenAddress || null;
@@ -56938,6 +57068,7 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       existing.updatedAt = now;
       refreshed++;
       rows.push({
+        watchKeyV563,
         tokenAddress:token,
         poolId,
         registrationSourceV552:existing.registrationSourceV552,
@@ -56955,7 +57086,7 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       continue;
     }
 
-    root.entries[token] = {
+    root.entries[watchKeyV563] = {
       schema:"CONTINUOUS_EXACT_POOL_DIRECTIONAL_WATCH_V551",
       tokenAddress:token,
       symbol:candidate?.symbol || null,
@@ -56996,9 +57127,10 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
     };
     registered++;
     rows.push({
+      watchKeyV563,
       tokenAddress:token,
       poolId,
-      registrationSourceV552:root.entries[token].registrationSourceV552,
+      registrationSourceV552:root.entries[watchKeyV563].registrationSourceV552,
       activePoolEvidenceV555,
       poolSpecificSwapsV555,
       poolSpecificLiquidityEventsV556,
@@ -57017,6 +57149,10 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
     registered,
     refreshed,
     watchedCount:Object.keys(directionalWatchRootV551(state).entries || {}).length,
+    keySchemaV563:"TOKEN_ADDRESS_PLUS_EXACT_POOL_ID",
+    sameTokenMultiPoolSupportedV563:true,
+    migrationV563:
+      directionalWatchRootV551(state)?.lastKeyMigrationV563 || null,
     rows,
     externalRequestsAdded:0,
     stateWriteCycleAdded:false,
@@ -57465,6 +57601,10 @@ function directionalWatchSnapshotV551(state) {
   const entries = Object.values(root.entries || {})
     .sort((a,b)=>safeNumber(b?.lastQualifiedAt)-safeNumber(a?.lastQualifiedAt))
     .map(row => ({
+      watchKeyV563:directionalWatchKeyV563(
+        row?.tokenAddress,
+        row?.poolId
+      ),
       tokenAddress:normalize(row?.tokenAddress),
       symbol:row?.symbol || null,
       poolId:normalize(row?.poolId),
@@ -57495,7 +57635,10 @@ function directionalWatchSnapshotV551(state) {
 
   return {
     enabled:true,
-    schemaVersion:"V551_1",
+    schemaVersion:"V563_1",
+    keySchemaV563:"TOKEN_ADDRESS_PLUS_EXACT_POOL_ID",
+    sameTokenMultiPoolSupportedV563:true,
+    migrationV563:root?.lastKeyMigrationV563 || null,
     watchedCount:entries.length,
     maxEntries:DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
     maxAgeHours:DIRECTIONAL_WATCH_MAX_AGE_MS_V551 / 3600000,
@@ -57627,6 +57770,7 @@ function verifiedRollingDirectionalUsdWindowsV557(
       }
 
       return {
+        watchKeyV563: directionalWatchKeyV563(token, poolId),
         tokenAddress: token,
         symbol: row?.symbol || null,
         poolId,
