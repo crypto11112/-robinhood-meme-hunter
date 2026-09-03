@@ -1,4 +1,36 @@
 /**
+ * Robinhood Chain Meme Hunter — V543
+ * AUTHORITATIVE RUNTIME VERSION: V543
+ *
+ * V543 SEEDED LAUNCH-SOURCE PROOF COMPLETION FREEZE:
+ * - consumes the persisted result that Flap is now V515 exact-registered from targeted
+ *   TokenCreated proof (DATA_WORD 3) with far more than the required 3 distinct tokens / 3 txs;
+ * - Mint Club, NOXA Fun and Flap are treated as completed seeded exact detectors and can no
+ *   longer consume seeded historical/recovery requests;
+ * - Openfair's one exact LaunchCreated proof is retained, but its authenticated historical
+ *   sample is exhausted and remains fail-closed until genuinely new independent evidence exists;
+ * - when the seeded state is 3 solved + Openfair exhausted, the old recovery reservation is
+ *   explicitly disabled and the historical lane reports COMPLETE without consuming a request;
+ * - released request capacity remains available to the existing autonomous generic V517/V520
+ *   source-learning / origin-proof pipeline; no new bespoke launchpad scanner is added;
+ * - hard global request ceiling remains 42; scanner, scoring, Momentum, qualification,
+ *   Telegram thresholds, verified USD, holder, ATH and all confirmed detectors are unchanged.
+ */
+/**
+ * Robinhood Chain Meme Hunter — V542
+ * AUTHORITATIVE RUNTIME VERSION: V542
+ *
+ * V542 FLAP TARGETED-PROOF GLOBAL SLOT RESERVATION:
+ * - V541 proved the exact Flap TokenCreated topic0 appears three times in persisted historical telemetry;
+ * - V541 targeted proof was starved because lower-priority V480 post-Telegram origin work consumed request 42;
+ * - while Flap is unresolved and the exact TokenCreated topic0 count is >=3, reserve one existing global slot
+ *   for the targeted authenticated Blockscout proof request;
+ * - the existing V538/V539 post-Telegram spare guard now sees the Flap targeted reservation and defers lower-priority spare work;
+ * - no request capacity is added, hard global ceiling remains 42;
+ * - exact Flap registration still requires SAME topic0 + DATA_WORD 3 across >=3 distinct tokens and >=3 distinct transactions;
+ * - Mint Club, NOXA, Openfair evidence, scanner, scoring, Momentum, qualification, Telegram thresholds and USD logic unchanged.
+ */
+/**
  * Robinhood Chain Meme Hunter — V541
  * AUTHORITATIVE RUNTIME VERSION: V541
  *
@@ -2912,7 +2944,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V541";
+const VERSION = "V543";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9181,12 +9213,50 @@ function athFairSlotReserveBlocksAnalysisV301(budget, type, amount = 1) {
 
 function configureOpenfairHistoricalRecoveryReserveV537(state,budget){
   const root=ensureSeededHistoricalProofV529(state);openfairHistoricalSampleExhaustedV539(state);
-  const openfair=root?.sources?.openfair,oo=Array.isArray(openfair?.exactSeededLaunchObservationsV536)?openfair.exactSeededLaunchObservationsV536:[];
-  const openfairNeeds=Boolean(openfair&&openfair.exactDetectorRegistered!==true&&!openfair.historicalSampleExhaustedV539&&safeNumber(openfair.logsObserved)>0&&oo.length<3&&Array.isArray(openfair.recentEvidence)&&openfair.recentEvidence.some(ev=>isExactOpenfairLaunchCreatedDecodedV536(ev?.decodedMethod)));
-  const flap=root?.sources?.flap,fr=ensureFlapHistoricalRecoveryV539(state),fo=Array.isArray(flap?.exactSeededLaunchObservationsV536)?flap.exactSeededLaunchObservationsV536:[];
-  const flapNeeds=Boolean(flap&&flap.exactDetectorRegistered!==true&&fo.length<3&&Array.isArray(flap.recentEvidence)&&flap.recentEvidence.some(ev=>isExactFlapTokenCreatedDecodedV539(ev?.decodedMethod)));
+  const mint=root?.sources?.mint_club,noxa=root?.sources?.noxa,openfair=root?.sources?.openfair,flap=root?.sources?.flap;
+  const seededCompleteV543=Boolean(
+    mint?.exactDetectorRegistered===true &&
+    noxa?.exactDetectorRegistered===true &&
+    flap?.exactDetectorRegistered===true &&
+    openfair?.historicalSampleExhaustedV539===true
+  );
+  const oo=Array.isArray(openfair?.exactSeededLaunchObservationsV536)?openfair.exactSeededLaunchObservationsV536:[];
+  const openfairNeeds=Boolean(!seededCompleteV543&&openfair&&openfair.exactDetectorRegistered!==true&&!openfair.historicalSampleExhaustedV539&&safeNumber(openfair.logsObserved)>0&&oo.length<3&&Array.isArray(openfair.recentEvidence)&&openfair.recentEvidence.some(ev=>isExactOpenfairLaunchCreatedDecodedV536(ev?.decodedMethod)));
+  const fr=ensureFlapHistoricalRecoveryV539(state),fo=Array.isArray(flap?.exactSeededLaunchObservationsV536)?flap.exactSeededLaunchObservationsV536:[];
+  const flapLegacyNeeds=Boolean(!seededCompleteV543&&flap&&flap.exactDetectorRegistered!==true&&fo.length<3&&Array.isArray(flap.recentEvidence)&&flap.recentEvidence.some(ev=>isExactFlapTokenCreatedDecodedV539(ev?.decodedMethod)));
+  const flapTargetedNeedsV542=Boolean(!seededCompleteV543&&flap&&flap.exactDetectorRegistered!==true&&fo.length<3&&safeNumber(flap?.topic0Counts?.[FLAP_TOKENCREATED_TOPIC0_V541])>=3);
+  const flapNeeds=flapLegacyNeeds||flapTargetedNeedsV542;
   const targetKey=openfairNeeds?"openfair":(flapNeeds?"flap":null);
-  budget.analysis.openfairHistoricalRecoveryReserveV537={enabled:true,active:Boolean(targetKey),targetKey,reservedRequests:targetKey?1:0,configuredAt:Date.now(),reason:targetKey==="openfair"?"OPENFAIR_LAUNCHCREATED_LEGACY_TOPIC2_NOT_PERSISTED":targetKey==="flap"?"V539_FLAP_TOKENCREATED_RAW_DATA_WORD3_RECOVERY":"SEEDED_RECOVERY_NOT_REQUIRED",lowerPriorityRequestsBlocked:0,overriddenByProtectedWork:0,openfairHistoricalSampleExhaustedV539:Boolean(openfair?.historicalSampleExhaustedV539),flapRecoveryRestartPerformedV539:Boolean(fr?.restartPerformed)};
+  budget.analysis.openfairHistoricalRecoveryReserveV537={
+    enabled:true,
+    active:Boolean(targetKey),
+    targetKey,
+    reservedRequests:targetKey?1:0,
+    configuredAt:Date.now(),
+    reason:seededCompleteV543
+      ?"V543_SEEDED_PROOF_COMPLETE_THREE_EXACT_OPENFAIR_EXHAUSTED_RESERVATION_RELEASED"
+      :targetKey==="openfair"
+        ?"OPENFAIR_LAUNCHCREATED_LEGACY_TOPIC2_NOT_PERSISTED"
+        :targetKey==="flap"
+          ?(flapTargetedNeedsV542?"V542_FLAP_TARGETED_TOKENCREATED_TOPIC0_GLOBAL_SLOT_RESERVED":"V539_FLAP_TOKENCREATED_RAW_DATA_WORD3_RECOVERY")
+          :"SEEDED_RECOVERY_NOT_REQUIRED",
+    lowerPriorityRequestsBlocked:0,
+    overriddenByProtectedWork:0,
+    openfairHistoricalSampleExhaustedV539:Boolean(openfair?.historicalSampleExhaustedV539),
+    flapRecoveryRestartPerformedV539:Boolean(fr?.restartPerformed),
+    flapTargetedTopic0ReserveV542:flapTargetedNeedsV542,
+    flapTargetedTopic0CountV542:safeNumber(flap?.topic0Counts?.[FLAP_TOKENCREATED_TOPIC0_V541]),
+    seededProofCompletionV543:{
+      complete:seededCompleteV543,
+      exactRegistered:{
+        mintClub:mint?.exactDetectorRegistered===true,
+        noxaFun:noxa?.exactDetectorRegistered===true,
+        flap:flap?.exactDetectorRegistered===true
+      },
+      openfairHistoricalSampleExhausted:openfair?.historicalSampleExhaustedV539===true,
+      releasedRequestCapacityToGenericPipeline:seededCompleteV543
+    }
+  };
   return budget.analysis.openfairHistoricalRecoveryReserveV537;
 }
 
@@ -22409,7 +22479,18 @@ async function runSeededHistoricalProofV529({env,state,budget}){
   const recoveryTargetV539=String(budget?.analysis?.openfairHistoricalRecoveryReserveV537?.targetKey||"");
   if(recoveryTargetV539){chosen=sources.find(x=>x.key===recoveryTargetV539)||null;}
   if(!chosen)for(let i=0;i<sources.length;i++){const src=sources[(start+i)%sources.length],r=root.sources[src.key];if(r?.exactDetectorRegistered===true||r?.historicalSampleExhaustedV539===true)continue;chosen=src;root.nextIndex=(start+i+1)%sources.length;break;}
-  if(!chosen){root.lastStatus="V529_ALL_SEEDED_HISTORICAL_TARGETS_ALREADY_EXACT_OR_DISABLED";return{enabled:true,attempted:false,requestConsumed:false,status:root.lastStatus};}
+  if(!chosen){
+    const seededCompleteV543=Boolean(
+      root?.sources?.mint_club?.exactDetectorRegistered===true &&
+      root?.sources?.noxa?.exactDetectorRegistered===true &&
+      root?.sources?.flap?.exactDetectorRegistered===true &&
+      root?.sources?.openfair?.historicalSampleExhaustedV539===true
+    );
+    root.lastStatus=seededCompleteV543
+      ?"V543_SEEDED_HISTORY_COMPLETE_THREE_EXACT_OPENFAIR_EXHAUSTED_ZERO_REQUEST"
+      :"V529_ALL_SEEDED_HISTORICAL_TARGETS_ALREADY_EXACT_OR_DISABLED";
+    return{enabled:true,attempted:false,requestConsumed:false,seededProofCompleteV543:seededCompleteV543,releasedRequestCapacityToGenericPipelineV543:seededCompleteV543,status:root.lastStatus};
+  }
   const row=root.sources[chosen.key];
   let params=row.nextPageParams&&typeof row.nextPageParams==="object"?row.nextPageParams:null;
   if(chosen.key==="flap"){const recovery=ensureFlapHistoricalRecoveryV539(state);if(recovery&&!recovery.restartPerformed){params=null;recovery.restartPerformed=true;recovery.startedAt=Date.now();recovery.status="V539_FLAP_HISTORY_RESTARTED_FROM_FIRST_PAGE_FOR_RAW_DATA";}}
