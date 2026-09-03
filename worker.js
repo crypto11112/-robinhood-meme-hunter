@@ -1,6 +1,17 @@
 /**
- * Robinhood Chain Meme Hunter — V515
- * AUTHORITATIVE RUNTIME VERSION: V515
+ * Robinhood Chain Meme Hunter — V516
+ * AUTHORITATIVE RUNTIME VERSION: V516
+ *
+ * V516 HOTFIX:
+ * - fixes V515 runtime TDZ regression:
+ *   `learnedLiveEmittersV515` incorrectly spread itself during initialization;
+ * - correct merge is:
+ *   existing confirmed Doppler V514 emitter(s)
+ *   + generic verified V515 registry emitter(s);
+ * - NO generic-registry architecture change;
+ * - NO detector proof/registration standard change;
+ * - NO discovery/scoring/Momentum/qualification/Telegram/USD change;
+ * - Pons, RWA, Doppler proof state and hard request ceiling 42 preserved.
  *
  * V515 GENERIC VERIFIED LAUNCH-DETECTOR REGISTRY:
  * - replaces the concept of one bespoke learned live detector with one generic
@@ -2615,7 +2626,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V515";
+const VERSION = "V516";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -21093,7 +21104,7 @@ async function scanLiveRange(
   const learnedLiveEmittersV515 =
     Array.from(
       new Set([
-        ...learnedLiveEmittersV515,
+        ...dopplerLiveEmittersV514,
         ...genericVerifiedEmittersV515
       ])
     );
