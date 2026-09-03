@@ -1,8 +1,19 @@
 /**
- * Robinhood Chain Meme Hunter — V520
- * AUTHORITATIVE RUNTIME VERSION: V520
+ * Robinhood Chain Meme Hunter — V528
+ * AUTHORITATIVE RUNTIME VERSION: V528
  *
- * V520 EXECUTE RESERVED CREATOR-IDENTITY HANDOFF:
+ * V528 RUNTIME HEADER / VERSION CONSISTENCY CLEANUP:
+ * - fixes the stale top-of-file V520 header carried forward into later builds;
+ * - runtime VERSION is V528 and /sourceintel reports V528;
+ * - preserves the complete V527 Mint Club seeded live-evidence collector;
+ * - preserves V526 lunch.fun corroboration safeguards, V525 Flap validation,
+ *   V524 Openfair, V523 NOXA, V521/V522 source reporting/intelligence and the
+ *   proven V515/V517/V520 self-learning launch-source architecture unchanged;
+ * - no scanner, source-detector, scoring, Momentum, qualification, Telegram,
+ *   verified-USD, holder, completion, persistence or request-budget logic changes;
+ * - hard global request ceiling remains 42.
+ *
+ * HISTORICAL V520 EXECUTE RESERVED CREATOR-IDENTITY HANDOFF:
  * - fixes the V519 runtime routing gap: a 3-origin/3-creation-tx creator could
  *   reserve V503 IDENTITY before V480 but the job only executed when that scan's
  *   current V480 target itself returned a verified origin;
@@ -2749,7 +2760,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V527";
+const VERSION = "V528";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -113435,7 +113446,7 @@ function sourceIdentityIntelSnapshotV522(state) {
 
   return {
     enabled: true,
-    version: "V527",
+    version: "V528",
     readOnly: true,
     externalProviderRequests: 0,
     persistentWrites: 0,
