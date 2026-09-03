@@ -1,6 +1,20 @@
 /**
- * Robinhood Chain Meme Hunter — V534
- * AUTHORITATIVE RUNTIME VERSION: V534
+ * Robinhood Chain Meme Hunter — V535
+ * AUTHORITATIVE RUNTIME VERSION: V535
+ *
+ * V535 MINT CLUB DECODED-SIGNATURE RECLASSIFICATION FIX:
+ * - V534 telemetry proved Blockscout Pro returns Mint Club TokenCreated as
+ *   `TokenCreated(address indexed token, string name, string symbol, address indexed reserveToken)`;
+ * - fixes V529's overly narrow decoded-method matcher, which expected only
+ *   `TokenCreated(address,string,string,address)` and therefore counted zero exact observations;
+ * - accepts only the exact Blockscout decoded ABI form above (plus the canonical ABI-only form);
+ * - topic[1] remains mandatory as the exact created-token address; topic0 + tx hash remain mandatory;
+ * - reclassifies already-persisted V534/V533 Mint Club recentEvidence during the normal scan,
+ *   adding ZERO provider requests and using the existing main state save only;
+ * - existing >=3 distinct tokens + >=3 distinct creation transactions requirement is unchanged;
+ * - detector registration still flows only through registerVerifiedLaunchDetectorV515;
+ * - V534 telemetry, V533 authenticated Blockscout Pro routing, V532 residual historical lane,
+ *   scanner/scoring/Momentum/qualification/Telegram thresholds and hard request ceiling 42 unchanged.
  *
  * V533 AUTHENTICATED SEEDED HISTORICAL LOG ROUTING FIX:
  * - fixes the observed V532/V529 seeded historical Mint Club HTTP 403 by replacing
@@ -2819,7 +2833,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V534";
+const VERSION = "V535";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -21984,6 +21998,30 @@ function v529TxHash(row){const raw=String(row?.transaction_hash||row?.transactio
 function v529LogTopics(row){const direct=Array.isArray(row?.topics)?row.topics:[];if(direct.length)return direct.map(x=>typeof x==="string"?x:(x?.hash||x?.value||null)).filter(Boolean);const raw=Array.isArray(row?.raw?.topics)?row.raw.topics:[];return raw.map(x=>typeof x==="string"?x:(x?.hash||x?.value||null)).filter(Boolean);}
 function v529DecodedMethod(row){return String(row?.decoded?.method_call||row?.decoded?.methodCall||row?.decoded?.name||"").trim();}
 
+function isExactMintClubTokenCreatedDecodedV535(decoded){
+  const normalized=String(decoded||"").trim().replace(/\s+/g," ").replace(/\s*,\s*/g,",").toLowerCase();
+  return normalized==="tokencreated(address indexed token,string name,string symbol,address indexed reservetoken)" || normalized==="tokencreated(address,string,string,address)";
+}
+
+function reclassifyStoredMintClubHistoricalEvidenceV535(state){
+  const root=ensureSeededHistoricalProofV529(state),src=root.sources?.mint_club;
+  if(!src)return{enabled:true,reclassified:0,status:"V535_MINTCLUB_STATE_UNAVAILABLE"};
+  src.exactMintClubTokenCreatedObservations=Array.isArray(src.exactMintClubTokenCreatedObservations)?src.exactMintClubTokenCreatedObservations:[];
+  const seen=new Set(src.exactMintClubTokenCreatedObservations.map(x=>`${String(x?.transactionHash||"").toLowerCase()}:${safeNumber(x?.logIndex)}`));
+  let added=0;
+  for(const ev of Array.isArray(src.recentEvidence)?src.recentEvidence:[]){
+    if(!isExactMintClubTokenCreatedDecodedV535(ev?.decodedMethod))continue;
+    const token=v529TopicAddress(ev?.topic1),tx=String(ev?.transactionHash||"").toLowerCase(),topic0=String(ev?.topic0||"").toLowerCase();
+    if(!token||!/^0x[a-f0-9]{64}$/.test(tx)||!/^0x[a-f0-9]{64}$/.test(topic0))continue;
+    const key=`${tx}:${safeNumber(ev?.logIndex)}`;if(seen.has(key))continue;seen.add(key);
+    src.exactMintClubTokenCreatedObservations.push({observedAt:safeNumber(ev?.observedAt)||Date.now(),token,transactionHash:tx,topic0,addressLocationType:"TOPIC",addressLocationIndex:1,decodedMethod:String(ev?.decodedMethod||""),blockNumber:safeNumber(ev?.blockNumber)||null,logIndex:safeNumber(ev?.logIndex)||null,reclassifiedFromStoredEvidenceV535:true});added++;
+  }
+  src.exactMintClubTokenCreatedObservations=src.exactMintClubTokenCreatedObservations.slice(-250);
+  const registration=rebuildMintClubHistoricalExactProofV529(state);
+  src.lastReclassificationV535={at:Date.now(),added,total:src.exactMintClubTokenCreatedObservations.length,registrationStatus:registration?.status||src.registrationStatus||null};
+  return{enabled:true,reclassified:added,total:src.exactMintClubTokenCreatedObservations.length,exactLaunchPatternConfirmed:src.exactLaunchPatternConfirmed===true,exactDetectorRegistered:src.exactDetectorRegistered===true,registrationStatus:registration?.status||src.registrationStatus||null,status:src.status||"V535_MINTCLUB_RECLASSIFICATION_COMPLETE"};
+}
+
 function rebuildMintClubHistoricalExactProofV529(state){
   const root=ensureSeededHistoricalProofV529(state),src=root.sources.mint_club,obs=Array.isArray(src.exactMintClubTokenCreatedObservations)?src.exactMintClubTokenCreatedObservations:[],clusters=new Map();
   for(const o of obs){if(!isAddress(normalize(o?.token))||!/^0x[a-f0-9]{64}$/.test(String(o?.transactionHash||""))||!/^0x[a-f0-9]{64}$/.test(String(o?.topic0||"")))continue;const key=String(o.topic0).toLowerCase(),c=clusters.get(key)||{topic0:key,tokens:new Set(),txs:new Set()};c.tokens.add(normalize(o.token));c.txs.add(String(o.transactionHash).toLowerCase());clusters.set(key,c);}
@@ -22043,7 +22081,7 @@ async function runSeededHistoricalProofV529({env,state,budget}){
     if(!response.ok){row.lastError=`HTTP_${response.status}`;row.status=`V529_HISTORICAL_HTTP_${response.status}`;root.lastStatus=row.status;return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,httpStatus:response.status,residualLaneV532:true,authenticatedBlockscoutProV533:true,status:row.status};}
     const payload=await response.json(),items=Array.isArray(payload?.items)?payload.items:[];row.requestsSucceeded=safeNumber(row.requestsSucceeded)+1;root.requestsSucceeded=safeNumber(root.requestsSucceeded)+1;row.pagesObserved=safeNumber(row.pagesObserved)+1;row.lastSuccessAt=Date.now();row.lastError=null;let exactMint=0;
     for(const log of items){const topics=v529LogTopics(log),topic0=String(topics[0]||"").toLowerCase(),tx=v529TxHash(log);if(/^0x[a-f0-9]{64}$/.test(topic0))row.topic0Counts[topic0]=safeNumber(row.topic0Counts[topic0])+1;const evidence={observedAt:Date.now(),topic0:/^0x[a-f0-9]{64}$/.test(topic0)?topic0:null,transactionHash:tx,blockNumber:safeNumber(log?.block_number||log?.blockNumber)||null,logIndex:safeNumber(log?.index||log?.log_index||log?.logIndex)||null,topicCount:topics.length,decodedMethod:v529DecodedMethod(log)||null,topic1:topics[1]||null,evidenceMeaning:"BLOCKSCOUT_V2_HISTORICAL_ADDRESS_LOG_FINGERPRINT_V529"};row.recentEvidence.push(evidence);
-      if(chosen.mintClubExact===true){const decoded=v529DecodedMethod(log).replace(/\s+/g,""),token=v529TopicAddress(topics[1]),exactDecoded=/^TokenCreated\(address,string,string,address\)/i.test(decoded);if(exactDecoded&&token&&tx&&/^0x[a-f0-9]{64}$/.test(topic0)){row.exactMintClubTokenCreatedObservations.push({observedAt:Date.now(),token,transactionHash:tx,topic0,addressLocationType:"TOPIC",addressLocationIndex:1,decodedMethod:v529DecodedMethod(log),blockNumber:evidence.blockNumber,logIndex:evidence.logIndex});exactMint++;}}
+      if(chosen.mintClubExact===true){const decoded=v529DecodedMethod(log),token=v529TopicAddress(topics[1]),exactDecoded=isExactMintClubTokenCreatedDecodedV535(decoded);if(exactDecoded&&token&&tx&&/^0x[a-f0-9]{64}$/.test(topic0)){row.exactMintClubTokenCreatedObservations.push({observedAt:Date.now(),token,transactionHash:tx,topic0,addressLocationType:"TOPIC",addressLocationIndex:1,decodedMethod:decoded,blockNumber:evidence.blockNumber,logIndex:evidence.logIndex});exactMint++;}}
     }
     row.recentEvidence=row.recentEvidence.slice(-250);row.exactMintClubTokenCreatedObservations=(row.exactMintClubTokenCreatedObservations||[]).filter((x,i,a)=>a.findIndex(y=>y.transactionHash===x.transactionHash&&y.logIndex===x.logIndex)===i).slice(-250);row.logsObserved=safeNumber(row.logsObserved)+items.length;row.distinctTransactionsObserved=new Set(row.recentEvidence.map(x=>x.transactionHash).filter(x=>/^0x[a-f0-9]{64}$/.test(String(x||"")))).size;row.nextPageParams=payload?.next_page_params&&typeof payload.next_page_params==="object"?payload.next_page_params:null;
     let registration=null;if(chosen.mintClubExact===true)registration=rebuildMintClubHistoricalExactProofV529(state);row.status=row.exactDetectorRegistered===true?"V529_MINTCLUB_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515":items.length?"V529_HISTORICAL_LOGS_OBSERVED_PROOF_ACCUMULATING":"V529_HISTORICAL_PAGE_EMPTY";root.lastStatus=row.status;
@@ -72234,6 +72272,10 @@ for (
       state
     );
 
+  /* V535: zero-request reclassification of already-persisted Mint Club V534/V533 log evidence. */
+  const mintClubStoredEvidenceReclassificationV535 =
+    reclassifyStoredMintClubHistoricalEvidenceV535(state);
+
   /* V532: seeded history uses one separate residual post-Telegram request only if global capacity remains. */
   const seededHistoricalProofThisScanV529 =
     await runSeededHistoricalProofV529({ env, state, budget });
@@ -73105,6 +73147,7 @@ for (
       ),
 
     seededHistoricalProofV529: {
+      mintClubStoredEvidenceReclassificationV535,
       currentRun: seededHistoricalProofThisScanV529,
       cumulative: seededHistoricalProofSnapshotV529(state)
     },
