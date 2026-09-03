@@ -1,6 +1,29 @@
 /**
- * Robinhood Chain Meme Hunter — V531
- * AUTHORITATIVE RUNTIME VERSION: V531
+ * Robinhood Chain Meme Hunter — V533
+ * AUTHORITATIVE RUNTIME VERSION: V533
+ *
+ * V533 AUTHENTICATED SEEDED HISTORICAL LOG ROUTING FIX:
+ * - fixes the observed V532/V529 seeded historical Mint Club HTTP 403 by replacing
+ *   the unauthenticated public Blockscout address-logs URL with the bot's already
+ *   proven authenticated Blockscout Pro Robinhood-chain route;
+ * - uses existing env.BLOCKSCOUT_PRO_API_KEY only and never logs the key;
+ * - when Pro is not configured, no historical request/budget is consumed;
+ * - preserves V532 residual one-request lane, Mint Club 3-token/3-tx exact proof,
+ *   Flap/NOXA/Openfair fingerprint-only status, all scanner/scoring/Telegram logic,
+ *   and the hard global 42-request ceiling unchanged.
+ *
+ *
+ * V532 RESIDUAL HISTORICAL LAUNCH-SOURCE PROOF LANE:
+ * - fixes the observed V531 starvation where V529 seeded historical proof was repeatedly
+ *   skipped because the existing post-Telegram secondary slot had already been consumed;
+ * - preserves every existing high-evidence/current-live secondary proof route unchanged;
+ * - seeded Mint Club/Flap/NOXA/Openfair history may now use ONE separate residual request
+ *   only after Telegram and only when the authoritative global request budget still has room;
+ * - the residual lane has its own strict max of ONE request per scan and never borrows an
+ *   active Telegram reserve or raises the hard global ceiling above 42;
+ * - if the scan is already at 42, historical proof cleanly defers with DATA UNVERIFIED;
+ * - no scanner, scoring, Momentum, qualification, Telegram threshold, verified-USD,
+ *   holder, V515/V517/V520 detector proof standard, or existing secondary routing changes.
  *
  * V531 /SOURCEINTEL HISTORICAL-STATE REPORTING FIX:
  * - fixes V530 /sourceintel always showing V529 historical proof as NOT_RUN;
@@ -2788,7 +2811,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V531";
+const VERSION = "V533";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -21963,25 +21986,61 @@ function rebuildMintClubHistoricalExactProofV529(state){
   src.exactDetectorRegistered=reg?.registered===true||src.exactDetectorRegistered===true;src.registrationStatus=reg?.status||null;if(src.exactDetectorRegistered)src.status="V529_MINTCLUB_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515";return reg;
 }
 
+function consumeResidualHistoricalProofRequestV532(budget,type,amount=1){
+  const n=Math.max(1,safeNumber(amount));
+  const totalUsed=safeNumber(budget?.totalUsed),totalLimit=safeNumber(budget?.totalLimit);
+  const notificationReserveActive=Boolean(budget?.notification?.globalReserveActiveV174);
+  const notificationReserveRemaining=safeNumber(budget?.notification?.globalReserveRemainingV174);
+  if(notificationReserveActive||notificationReserveRemaining>0)return{ok:false,reason:"V532_NOTIFICATION_RESERVE_STILL_ACTIVE"};
+  if(!totalLimit||totalUsed+n>totalLimit)return{ok:false,reason:"V532_GLOBAL_REQUEST_BUDGET_EXHAUSTED"};
+  budget.historicalLaunchSourceResidualV532=budget.historicalLaunchSourceResidualV532&&typeof budget.historicalLaunchSourceResidualV532==="object"?budget.historicalLaunchSourceResidualV532:{enabled:true,maxRequestsPerScan:1,used:0,requests:[]};
+  const lane=budget.historicalLaunchSourceResidualV532;
+  if(safeNumber(lane.used)+n>1)return{ok:false,reason:"V532_HISTORICAL_RESIDUAL_ONE_REQUEST_LIMIT_REACHED"};
+  budget.totalUsed=totalUsed+n;
+  budget.requestTypes=budget.requestTypes&&typeof budget.requestTypes==="object"?budget.requestTypes:{};
+  budget.requestTypes[type]=safeNumber(budget.requestTypes[type])+n;
+  lane.used=safeNumber(lane.used)+n;
+  lane.requests=Array.isArray(lane.requests)?lane.requests:[];
+  lane.requests.push({type,amount:n,usedAt:Date.now(),reason:"V532_POST_TELEGRAM_RESIDUAL_HISTORICAL_LAUNCH_SOURCE_PROOF"});
+  return{ok:true,reason:"V532_HISTORICAL_RESIDUAL_REQUEST_CONSUMED",remainingAfter:Math.max(0,totalLimit-(totalUsed+n))};
+}
+
+function blockscoutProHistoricalAddressLogsUrlV533(env,address,nextPageParams=null){
+  const clean=normalize(address);
+  const apiKey=String(env?.BLOCKSCOUT_PRO_API_KEY||"").trim();
+  if(!isAddress(clean)||!apiKey)return null;
+  let url=`${BLOCKSCOUT_PRO}/${BLOCKSCOUT_PRO_CHAIN_ID}/api/v2/addresses/${clean}/logs`;
+  const qs=new URLSearchParams();
+  if(nextPageParams&&typeof nextPageParams==="object"){
+    for(const[k,v]of Object.entries(nextPageParams)){
+      if(v!==null&&v!==undefined&&String(v)!=="")qs.set(k,String(v));
+    }
+  }
+  qs.set("apikey",apiKey);
+  return `${url}?${qs.toString()}`;
+}
+
 async function runSeededHistoricalProofV529({env,state,budget}){
-  const root=ensureSeededHistoricalProofV529(state),priorSpare=safeNumber(budget?.postTelegramGlobalSpareV478?.used);
-  if(priorSpare>0){root.lastStatus="V529_SKIPPED_EXISTING_SECONDARY_POST_TELEGRAM_SLOT_ALREADY_USED";return{enabled:true,attempted:false,requestConsumed:false,status:root.lastStatus,priorSecondaryRequests:priorSpare};}
+  const root=ensureSeededHistoricalProofV529(state);
   const sources=SEEDED_HISTORICAL_SOURCES_V529,start=Math.max(0,Math.floor(safeNumber(root.nextIndex)))%sources.length;let chosen=null;
   for(let i=0;i<sources.length;i++){const src=sources[(start+i)%sources.length],r=root.sources[src.key];if(r?.exactDetectorRegistered===true)continue;chosen=src;root.nextIndex=(start+i+1)%sources.length;break;}
   if(!chosen){root.lastStatus="V529_ALL_SEEDED_HISTORICAL_TARGETS_ALREADY_EXACT_OR_DISABLED";return{enabled:true,attempted:false,requestConsumed:false,status:root.lastStatus};}
-  const spare=consumeReleasedGlobalSpareV478(budget,"SEEDED_HISTORICAL_ADDRESS_LOGS_V529",1);if(spare?.ok!==true){root.lastStatus=`V529_BUDGET_UNAVAILABLE:${spare?.reason||"UNKNOWN"}`;return{enabled:true,attempted:false,requestConsumed:false,sourceKey:chosen.key,status:root.lastStatus};}
-  const row=root.sources[chosen.key];row.requestsAttempted=safeNumber(row.requestsAttempted)+1;root.requestsAttempted=safeNumber(root.requestsAttempted)+1;row.lastAttemptAt=Date.now();root.lastAttemptAt=row.lastAttemptAt;root.lastSourceKey=chosen.key;
-  let url=`${BLOCKSCOUT}/api/v2/addresses/${normalize(chosen.address)}/logs`;const params=row.nextPageParams&&typeof row.nextPageParams==="object"?row.nextPageParams:null;if(params){const qs=new URLSearchParams();for(const[k,v]of Object.entries(params))if(v!==null&&v!==undefined&&String(v)!=="")qs.set(k,String(v));const q=qs.toString();if(q)url+=`?${q}`;}
+  const row=root.sources[chosen.key];
+  const params=row.nextPageParams&&typeof row.nextPageParams==="object"?row.nextPageParams:null;
+  const url=blockscoutProHistoricalAddressLogsUrlV533(env,chosen.address,params);
+  if(!url){row.lastError="BLOCKSCOUT_PRO_NOT_CONFIGURED";row.lastHttpStatus=null;row.status="V533_HISTORICAL_BLOCKSCOUT_PRO_NOT_CONFIGURED";root.lastStatus=row.status;return{enabled:true,attempted:false,requestConsumed:false,sourceKey:chosen.key,residualLaneV532:true,authenticatedBlockscoutProV533:false,status:row.status};}
+  const spare=consumeResidualHistoricalProofRequestV532(budget,"SEEDED_HISTORICAL_ADDRESS_LOGS_V533",1);if(spare?.ok!==true){root.lastStatus=`V533_HISTORICAL_RESIDUAL_DEFERRED:${spare?.reason||"UNKNOWN"}`;return{enabled:true,attempted:false,requestConsumed:false,sourceKey:chosen.key,residualLaneV532:true,authenticatedBlockscoutProV533:true,status:root.lastStatus};}
+  row.requestsAttempted=safeNumber(row.requestsAttempted)+1;root.requestsAttempted=safeNumber(root.requestsAttempted)+1;row.lastAttemptAt=Date.now();root.lastAttemptAt=row.lastAttemptAt;root.lastSourceKey=chosen.key;
   try{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),6000);let response;try{response=await fetch(url,{headers:{accept:"application/json"},signal:controller.signal});}finally{clearTimeout(timer);}row.lastHttpStatus=response.status;
-    if(!response.ok){row.lastError=`HTTP_${response.status}`;row.status=`V529_HISTORICAL_HTTP_${response.status}`;root.lastStatus=row.status;return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,httpStatus:response.status,status:row.status};}
+    if(!response.ok){row.lastError=`HTTP_${response.status}`;row.status=`V529_HISTORICAL_HTTP_${response.status}`;root.lastStatus=row.status;return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,httpStatus:response.status,residualLaneV532:true,authenticatedBlockscoutProV533:true,status:row.status};}
     const payload=await response.json(),items=Array.isArray(payload?.items)?payload.items:[];row.requestsSucceeded=safeNumber(row.requestsSucceeded)+1;root.requestsSucceeded=safeNumber(root.requestsSucceeded)+1;row.pagesObserved=safeNumber(row.pagesObserved)+1;row.lastSuccessAt=Date.now();row.lastError=null;let exactMint=0;
     for(const log of items){const topics=v529LogTopics(log),topic0=String(topics[0]||"").toLowerCase(),tx=v529TxHash(log);if(/^0x[a-f0-9]{64}$/.test(topic0))row.topic0Counts[topic0]=safeNumber(row.topic0Counts[topic0])+1;const evidence={observedAt:Date.now(),topic0:/^0x[a-f0-9]{64}$/.test(topic0)?topic0:null,transactionHash:tx,blockNumber:safeNumber(log?.block_number||log?.blockNumber)||null,logIndex:safeNumber(log?.index||log?.log_index||log?.logIndex)||null,topicCount:topics.length,decodedMethod:v529DecodedMethod(log)||null,topic1:topics[1]||null,evidenceMeaning:"BLOCKSCOUT_V2_HISTORICAL_ADDRESS_LOG_FINGERPRINT_V529"};row.recentEvidence.push(evidence);
       if(chosen.mintClubExact===true){const decoded=v529DecodedMethod(log).replace(/\s+/g,""),token=v529TopicAddress(topics[1]),exactDecoded=/^TokenCreated\(address,string,string,address\)/i.test(decoded);if(exactDecoded&&token&&tx&&/^0x[a-f0-9]{64}$/.test(topic0)){row.exactMintClubTokenCreatedObservations.push({observedAt:Date.now(),token,transactionHash:tx,topic0,addressLocationType:"TOPIC",addressLocationIndex:1,decodedMethod:v529DecodedMethod(log),blockNumber:evidence.blockNumber,logIndex:evidence.logIndex});exactMint++;}}
     }
     row.recentEvidence=row.recentEvidence.slice(-250);row.exactMintClubTokenCreatedObservations=(row.exactMintClubTokenCreatedObservations||[]).filter((x,i,a)=>a.findIndex(y=>y.transactionHash===x.transactionHash&&y.logIndex===x.logIndex)===i).slice(-250);row.logsObserved=safeNumber(row.logsObserved)+items.length;row.distinctTransactionsObserved=new Set(row.recentEvidence.map(x=>x.transactionHash).filter(x=>/^0x[a-f0-9]{64}$/.test(String(x||"")))).size;row.nextPageParams=payload?.next_page_params&&typeof payload.next_page_params==="object"?payload.next_page_params:null;
     let registration=null;if(chosen.mintClubExact===true)registration=rebuildMintClubHistoricalExactProofV529(state);row.status=row.exactDetectorRegistered===true?"V529_MINTCLUB_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515":items.length?"V529_HISTORICAL_LOGS_OBSERVED_PROOF_ACCUMULATING":"V529_HISTORICAL_PAGE_EMPTY";root.lastStatus=row.status;
-    return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,label:chosen.label,address:normalize(chosen.address),httpStatus:response.status,logsThisPage:items.length,exactMintClubTokenCreatedThisPage:exactMint,nextPageAvailable:Boolean(row.nextPageParams),exactLaunchPatternConfirmed:row.exactLaunchPatternConfirmed===true,exactDetectorRegistered:row.exactDetectorRegistered===true,registrationStatus:registration?.status||row.registrationStatus||null,status:row.status};
-  }catch(e){row.lastError=errorString(e);row.status="V529_HISTORICAL_FETCH_ERROR_RETRY_PRESERVED";root.lastStatus=row.status;return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,error:row.lastError,status:row.status};}
+    return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,label:chosen.label,address:normalize(chosen.address),httpStatus:response.status,logsThisPage:items.length,exactMintClubTokenCreatedThisPage:exactMint,nextPageAvailable:Boolean(row.nextPageParams),exactLaunchPatternConfirmed:row.exactLaunchPatternConfirmed===true,exactDetectorRegistered:row.exactDetectorRegistered===true,registrationStatus:registration?.status||row.registrationStatus||null,residualLaneV532:true,authenticatedBlockscoutProV533:true,residualBudgetRemainingAfter:safeNumber(spare?.remainingAfter),status:row.status};
+  }catch(e){row.lastError=errorString(e);row.status="V529_HISTORICAL_FETCH_ERROR_RETRY_PRESERVED";root.lastStatus=row.status;return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,error:row.lastError,residualLaneV532:true,authenticatedBlockscoutProV533:true,residualBudgetRemainingAfter:safeNumber(spare?.remainingAfter),status:row.status};}
 }
 function seededHistoricalProofSnapshotV529(state){const root=ensureSeededHistoricalProofV529(state);rebuildMintClubHistoricalExactProofV529(state);return{enabled:true,oneRequestMaximumPerScan:true,hardGlobalLimitUnchanged:42,requestsAttempted:safeNumber(root.requestsAttempted),requestsSucceeded:safeNumber(root.requestsSucceeded),lastAttemptAt:root.lastAttemptAt||null,lastSourceKey:root.lastSourceKey||null,lastStatus:root.lastStatus||null,sources:Object.values(root.sources||{}).map(r=>({key:r.key,label:r.label,address:r.address,requestsAttempted:safeNumber(r.requestsAttempted),requestsSucceeded:safeNumber(r.requestsSucceeded),pagesObserved:safeNumber(r.pagesObserved),logsObserved:safeNumber(r.logsObserved),distinctTransactionsObserved:safeNumber(r.distinctTransactionsObserved),exactMintClubTokenCreatedObservations:Array.isArray(r.exactMintClubTokenCreatedObservations)?r.exactMintClubTokenCreatedObservations.length:0,strongestExactPattern:r.strongestExactPattern?{topic0:r.strongestExactPattern.topic0,proofTokenCount:r.strongestExactPattern.proofTokenCount,proofTransactionCount:r.strongestExactPattern.proofTransactionCount}:null,exactLaunchPatternConfirmed:r.exactLaunchPatternConfirmed===true,exactDetectorRegistered:r.exactDetectorRegistered===true,nextPageAvailable:Boolean(r.nextPageParams),status:r.status||null}))};}
 
@@ -72167,7 +72226,7 @@ for (
       state
     );
 
-  /* V529: only use the released secondary slot when earlier origin/proof work did not. */
+  /* V532: seeded history uses one separate residual post-Telegram request only if global capacity remains. */
   const seededHistoricalProofThisScanV529 =
     await runSeededHistoricalProofV529({ env, state, budget });
 
