@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V547
+ * AUTHORITATIVE RUNTIME VERSION: V547
+ *
+ * V547 SOLVED-SOURCE BACKLOG EXCLUSION:
+ * - latest V546 telemetry proved the released autonomous slot can still be spent on a creator
+ *   that is already solved/registered (observed: Doppler V1 factory 0x1b37...b69a);
+ * - V486/V485 oldest-unprocessed verified-origin selection now excludes EVERY creator returned
+ *   by solvedVerifiedCreatorsV517(), not only the older V504 RWA exclusions;
+ * - V489 internal-transactions candidate selection and eligible-count telemetry use the same
+ *   solved-creator exclusion, preventing already-confirmed V515/Doppler/Pons/RWA sources from
+ *   re-entering the autonomous proof backlog;
+ * - persisted historical evidence is retained; nothing is deleted or rewritten;
+ * - unknown creators remain eligible under the exact same proof ladder and V515 3x3 gate;
+ * - hard global request ceiling remains 42; no scoring, Momentum, qualification, Telegram,
+ *   verified-USD, holder, ATH, scanner or confirmed-detector behavior changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V546
  * AUTHORITATIVE RUNTIME VERSION: V546
  *
@@ -3008,7 +3025,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V546";
+const VERSION = "V547";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -98219,6 +98236,11 @@ function selectOldestUnprocessedVerifiedOriginV486(
       state
     );
 
+  const solvedCreatorsV547 =
+    solvedVerifiedCreatorsV517(
+      state
+    );
+
   const candidates =
     Object.entries(
       originRoot.tokenOrigins || {}
@@ -98277,7 +98299,8 @@ function selectOldestUnprocessedVerifiedOriginV486(
         if (
           isSolvedExactLaunchMechanismAddressV504(
             creator
-          )
+          ) ||
+          solvedCreatorsV547.has(creator)
         ) {
           return false;
         }
@@ -109365,6 +109388,11 @@ function selectOldestBlockscoutInternalCandidateV489(
       state
     );
 
+  const solvedCreatorsV547 =
+    solvedVerifiedCreatorsV517(
+      state
+    );
+
   const candidates =
     Object.entries(
       v486.processedOrigins || {}
@@ -109401,6 +109429,7 @@ function selectOldestBlockscoutInternalCandidateV489(
           ) &&
           isAddress(token) &&
           isAddress(creator) &&
+          !solvedCreatorsV547.has(creator) &&
           /^0x[a-f0-9]{64}$/.test(tx) &&
           !root
             ?.processedOrigins?.[
@@ -109431,6 +109460,11 @@ function eligibleBlockscoutInternalCandidateCountV489(
 
   const root =
     pruneBlockscoutInternalCreationAttributionV489(
+      state
+    );
+
+  const solvedCreatorsV547 =
+    solvedVerifiedCreatorsV517(
       state
     );
 
@@ -109469,6 +109503,7 @@ function eligibleBlockscoutInternalCandidateCountV489(
       ) &&
       isAddress(token) &&
       isAddress(creator) &&
+      !solvedCreatorsV547.has(creator) &&
       /^0x[a-f0-9]{64}$/.test(tx) &&
       !root
         ?.processedOrigins?.[
