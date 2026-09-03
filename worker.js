@@ -1,4 +1,28 @@
 /**
+ * Robinhood Chain Meme Hunter — V551
+ * AUTHORITATIVE RUNTIME VERSION: V551
+ *
+ * V551 CONTINUOUS EXACT-POOL DIRECTIONAL WATCHLIST — MEASUREMENT ONLY:
+ * - preserves all V550 scanner, source-learning, scoring, Momentum, qualification,
+ *   Telegram thresholds, provider routing and hard 42-request global ceiling;
+ * - registers serious Telegram-qualified candidates only when an exact verified V4
+ *   PoolId and an exact-USD-priceable quote basis already exist;
+ * - registration is FORWARD-ONLY: a newly registered pool starts coverage at the
+ *   current verified chain head and does not reconstruct earlier blocks;
+ * - advances at most ONE watched exact pool per scan using only spare analysis/global
+ *   capacity after Telegram and the protected V458 completion lane;
+ * - queries PoolManager Swap logs for the exact PoolId from last verified covered
+ *   block + 1 forward, persists exact decoded USD trades through the existing V254
+ *   ledger, and records contiguous covered block ranges;
+ * - coverage advances only when the Blockscout response is non-saturated AND every
+ *   returned row is candidate-matched, timestamp-valid and exact-USD decodable;
+ * - saturated ranges are NOT marked covered; the next scan retries that same point
+ *   with an adaptively smaller range;
+ * - no complete 5m/15m/1h/6h/12h/24h claim is made in V551. This build establishes
+ *   the gap-free forward collector needed for later rolling-window verification;
+ * - zero new providers, no historical guessing, no token-wide coverage claim.
+ */
+/**
  * Robinhood Chain Meme Hunter — V550
  * AUTHORITATIVE RUNTIME VERSION: V550
  *
@@ -3072,7 +3096,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V550";
+const VERSION = "V551";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -8410,6 +8434,16 @@ const NATIVE_V3_SWEEP_BLOCKS_PER_CHUNK_V331 = 10;
 const NATIVE_V3_SWEEP_MAX_CHUNKS_V331 = 4;
 const NATIVE_V3_SWEEP_REQUEST_RESERVE_V331 = 2;
 
+/*
+ * V551 forward-only exact V4 directional watchlist.
+ * One watched pool may advance per scan; no historical backfill is attempted.
+ */
+const DIRECTIONAL_WATCH_MAX_ENTRIES_V551 = 24;
+const DIRECTIONAL_WATCH_MAX_AGE_MS_V551 = 48 * 60 * 60 * 1000;
+const DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551 = 600;
+const DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551 = 10;
+const DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551 = 1200;
+
 
 const MIN_ALERT_SCORE = 60;
 
@@ -10327,6 +10361,12 @@ function newState() {
     completeExactPoolCompletionV460:
       {},
 
+    directionalExactPoolWatchV551: {
+      schemaVersion: "V551_1",
+      updatedAt: null,
+      entries: {}
+    },
+
     callPerformanceV270:
       {},
 
@@ -11374,6 +11414,21 @@ async function readState(env) {
             "object"
             ? parsed.followUpTrackingV267
             : {},
+
+        directionalExactPoolWatchV551: {
+          ...fresh.directionalExactPoolWatchV551,
+          ...(
+            parsed.directionalExactPoolWatchV551 &&
+            typeof parsed.directionalExactPoolWatchV551 === "object"
+              ? parsed.directionalExactPoolWatchV551
+              : {}
+          ),
+          entries:
+            parsed.directionalExactPoolWatchV551?.entries &&
+            typeof parsed.directionalExactPoolWatchV551.entries === "object"
+              ? parsed.directionalExactPoolWatchV551.entries
+              : {}
+        },
 
         callPerformanceV270:
           parsed.callPerformanceV270 &&
@@ -56386,6 +56441,404 @@ function splitRangeForResumeV466(range) {
   ];
 }
 
+
+function directionalWatchRootV551(state) {
+  state.directionalExactPoolWatchV551 =
+    state?.directionalExactPoolWatchV551 &&
+    typeof state.directionalExactPoolWatchV551 === "object"
+      ? state.directionalExactPoolWatchV551
+      : {schemaVersion:"V551_1",updatedAt:null,entries:{}};
+
+  state.directionalExactPoolWatchV551.entries =
+    state.directionalExactPoolWatchV551?.entries &&
+    typeof state.directionalExactPoolWatchV551.entries === "object"
+      ? state.directionalExactPoolWatchV551.entries
+      : {};
+
+  return state.directionalExactPoolWatchV551;
+}
+
+function pruneDirectionalWatchV551(state) {
+  const root = directionalWatchRootV551(state);
+  const now = Date.now();
+
+  const rows = Object.values(root.entries || {})
+    .filter(row => {
+      const token = normalize(row?.tokenAddress);
+      const poolId = normalize(row?.poolId);
+      const seenAt = safeNumber(row?.lastQualifiedAt || row?.registeredAt);
+      return (
+        isAddress(token) &&
+        /^0x[a-f0-9]{64}$/.test(String(poolId || "")) &&
+        seenAt > 0 &&
+        now - seenAt <= DIRECTIONAL_WATCH_MAX_AGE_MS_V551
+      );
+    })
+    .sort((a,b) =>
+      safeNumber(b?.lastQualifiedAt || b?.registeredAt) -
+      safeNumber(a?.lastQualifiedAt || a?.registeredAt)
+    )
+    .slice(0, DIRECTIONAL_WATCH_MAX_ENTRIES_V551);
+
+  root.entries = Object.fromEntries(
+    rows.map(row => [normalize(row.tokenAddress), row])
+  );
+  root.updatedAt = now;
+  return root;
+}
+
+function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber, wethUsdGReference) {
+  const root = pruneDirectionalWatchV551(state);
+  const now = Date.now();
+  let registered = 0;
+  let refreshed = 0;
+  const rows = [];
+
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    if (
+      qualifiesTelegram(candidate) !== true ||
+      candidate?.validERC20 !== true ||
+      candidate?.onChainPoolIdentityV153?.verified !== true
+    ) {
+      continue;
+    }
+
+    const token = normalize(candidate?.address);
+    const identity = candidate?.onChainPoolIdentityV153;
+    const poolId = normalize(identity?.poolId);
+    const quoteTokenAddress = normalize(identity?.quoteTokenAddress);
+    const quoteEligibility = v254PriceableQuote(quoteTokenAddress, wethUsdGReference);
+
+    if (
+      !isAddress(token) ||
+      !/^0x[a-f0-9]{64}$/.test(String(poolId || "")) ||
+      quoteEligibility?.eligible !== true ||
+      !Number.isFinite(Number(latestNumber)) ||
+      Number(latestNumber) <= 0
+    ) {
+      continue;
+    }
+
+    const existing = root.entries[token];
+    if (existing && normalize(existing?.poolId) === poolId) {
+      existing.symbol = candidate?.symbol || existing.symbol || null;
+      existing.quoteTokenAddress = quoteTokenAddress || existing.quoteTokenAddress || null;
+      existing.quoteBasis = quoteEligibility?.basis || existing.quoteBasis || null;
+      existing.lastQualifiedAt = now;
+      existing.lastOpportunityScore = safeNumber(candidate?.opportunity?.score);
+      existing.lastConfidence = safeNumber(candidate?.confidence);
+      existing.lastMomentum = safeNumber(candidate?.momentum?.score);
+      existing.updatedAt = now;
+      refreshed++;
+      rows.push({tokenAddress:token,poolId,status:"REFRESHED_EXISTING_WATCH_V551"});
+      continue;
+    }
+
+    root.entries[token] = {
+      schema:"CONTINUOUS_EXACT_POOL_DIRECTIONAL_WATCH_V551",
+      tokenAddress:token,
+      symbol:candidate?.symbol || null,
+      poolId,
+      quoteTokenAddress:quoteTokenAddress || null,
+      quoteBasis:quoteEligibility?.basis || null,
+      registeredAt:now,
+      lastQualifiedAt:now,
+      updatedAt:now,
+      forwardOnly:true,
+      coverageStartBlock:Number(latestNumber) + 1,
+      coverageEndBlock:Number(latestNumber),
+      lastCollectedBlock:Number(latestNumber),
+      lastCollectedAt:null,
+      lastAttemptAt:null,
+      lastStatus:"REGISTERED_FORWARD_ONLY_AT_CURRENT_HEAD_V551",
+      adaptiveBlockSpan:DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551,
+      saturatedAttempts:0,
+      successfulRanges:0,
+      exactUsdTrades:0,
+      returnedLogs:0,
+      gapDetected:false,
+      fullTimeWindowCoverageClaimed:false,
+      fullTokenMarketCoverageClaimed:false,
+      lastOpportunityScore:safeNumber(candidate?.opportunity?.score),
+      lastConfidence:safeNumber(candidate?.confidence),
+      lastMomentum:safeNumber(candidate?.momentum?.score)
+    };
+    registered++;
+    rows.push({tokenAddress:token,poolId,status:"REGISTERED_FORWARD_ONLY_AT_CURRENT_HEAD_V551"});
+  }
+
+  pruneDirectionalWatchV551(state);
+  return {
+    enabled:true,
+    forwardOnly:true,
+    registered,
+    refreshed,
+    watchedCount:Object.keys(directionalWatchRootV551(state).entries || {}).length,
+    rows,
+    externalRequestsAdded:0,
+    stateWriteCycleAdded:false,
+    scoringChanged:false,
+    qualificationChanged:false,
+    telegramThresholdChanged:false
+  };
+}
+
+function selectDirectionalWatchCandidateV551(state, latestNumber) {
+  const root = pruneDirectionalWatchV551(state);
+  const head = Number(latestNumber);
+  if (!Number.isFinite(head) || head <= 0) return null;
+
+  return Object.values(root.entries || {})
+    .filter(row => {
+      const last = Number(row?.lastCollectedBlock);
+      return (
+        isAddress(normalize(row?.tokenAddress)) &&
+        /^0x[a-f0-9]{64}$/.test(String(normalize(row?.poolId) || "")) &&
+        Number.isFinite(last) &&
+        last < head
+      );
+    })
+    .sort((a,b) => {
+      const aLast = safeNumber(a?.lastCollectedAt || a?.registeredAt);
+      const bLast = safeNumber(b?.lastCollectedAt || b?.registeredAt);
+      if (aLast !== bLast) return aLast - bLast;
+      return safeNumber(a?.lastCollectedBlock) - safeNumber(b?.lastCollectedBlock);
+    })[0] || null;
+}
+
+async function advanceDirectionalWatchV551({
+  state,
+  budget,
+  latestNumber,
+  wethUsdGReference,
+  env
+}) {
+  const root = pruneDirectionalWatchV551(state);
+  const candidate = selectDirectionalWatchCandidateV551(state, latestNumber);
+
+  const base = {
+    enabled:true,
+    measurementOnly:true,
+    forwardOnly:true,
+    attempted:false,
+    requestConsumed:false,
+    watchedCount:Object.keys(root.entries || {}).length,
+    selectedToken:candidate ? normalize(candidate?.tokenAddress) : null,
+    selectedPoolId:candidate ? normalize(candidate?.poolId) : null,
+    fromBlock:null,
+    toBlock:null,
+    returnedLogs:0,
+    exactUsdTrades:0,
+    rangeSaturated:false,
+    coverageAdvanced:false,
+    status:candidate ? "NOT_ATTEMPTED_V551" : "NO_WATCHED_POOL_NEEDS_ADVANCE_V551",
+    hardGlobalLimitUnchanged:42,
+    maxWatchedPoolsAdvancedPerScan:1,
+    fullTimeWindowCoverageClaimed:false,
+    fullTokenMarketCoverageClaimed:false,
+    scoringChanged:false,
+    qualificationChanged:false,
+    telegramThresholdChanged:false
+  };
+
+  if (!candidate) return base;
+  if (!budgetAvailable(budget, "analysis")) {
+    return {...base,status:"NO_SPARE_ANALYSIS_BUDGET_V551"};
+  }
+  if (safeNumber(budget?.totalUsed) >= safeNumber(budget?.totalLimit)) {
+    return {...base,status:"GLOBAL_REQUEST_BUDGET_EXHAUSTED_V551"};
+  }
+
+  const token = normalize(candidate.tokenAddress);
+  const poolId = normalize(candidate.poolId);
+  const quoteEligibility = v254PriceableQuote(candidate?.quoteTokenAddress, wethUsdGReference);
+  if (quoteEligibility?.eligible !== true) {
+    candidate.lastAttemptAt = Date.now();
+    candidate.lastStatus = "WATCH_QUOTE_BASIS_CURRENTLY_UNVERIFIED_V551";
+    return {...base,status:candidate.lastStatus};
+  }
+
+  const lastCollectedBlock = Number(candidate?.lastCollectedBlock);
+  const head = Number(latestNumber);
+  if (!Number.isFinite(lastCollectedBlock) || !Number.isFinite(head) || lastCollectedBlock >= head) {
+    return {...base,status:"WATCH_ALREADY_AT_HEAD_V551"};
+  }
+
+  const configuredSpan = Math.max(
+    DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551,
+    Math.min(
+      DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551,
+      Math.floor(safeNumber(candidate?.adaptiveBlockSpan) || DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551)
+    )
+  );
+
+  const fromBlock = lastCollectedBlock + 1;
+  const toBlock = Math.min(head, fromBlock + configuredSpan - 1);
+
+  if (!consumeBudget(budget, "analysis", "BLOCKSCOUT_V551_CONTINUOUS_EXACT_POOL_LOGS")) {
+    return {...base,fromBlock,toBlock,status:"ANALYSIS_BUDGET_PROTECTED_V551"};
+  }
+
+  const provider = env?.BLOCKSCOUT_PRO_API_KEY
+    ? "BLOCKSCOUT_PRO_UNIVERSAL_V2"
+    : "BLOCKSCOUT_PUBLIC";
+  const apiBase = provider === "BLOCKSCOUT_PRO_UNIVERSAL_V2"
+    ? `${BLOCKSCOUT_PRO}/v2/api?chain_id=${BLOCKSCOUT_PRO_CHAIN_ID}`
+    : `${BLOCKSCOUT}/api`;
+  const separator = apiBase.includes("?") ? "&" : "?";
+  const apiKeySuffix = provider === "BLOCKSCOUT_PRO_UNIVERSAL_V2"
+    ? `&apikey=${encodeURIComponent(env.BLOCKSCOUT_PRO_API_KEY)}`
+    : "";
+
+  const logsUrl = `${apiBase}${separator}module=logs&action=getLogs` +
+    `&fromBlock=${fromBlock}&toBlock=${toBlock}&address=${POOL_MANAGER}` +
+    `&topic0=${SWAP_TOPIC}&topic1=${poolId}&topic0_1_opr=and${apiKeySuffix}`;
+
+  candidate.lastAttemptAt = Date.now();
+
+  try {
+    const response = await fetch(logsUrl,{headers:{accept:"application/json"}});
+    if (!response.ok) {
+      candidate.lastStatus = `BLOCKSCOUT_HTTP_${response.status}_V551`;
+      candidate.updatedAt = Date.now();
+      return {
+        ...base,attempted:true,requestConsumed:true,fromBlock,toBlock,provider,
+        status:candidate.lastStatus
+      };
+    }
+
+    const payload = await response.json();
+    const rows = Array.isArray(payload?.result) ? payload.result : [];
+    const saturated = rows.length >= BLOCKSCOUT_LOGS_MAX_ROWS_V180;
+
+    candidate.returnedLogs = safeNumber(candidate?.returnedLogs) + rows.length;
+
+    if (saturated) {
+      candidate.saturatedAttempts = safeNumber(candidate?.saturatedAttempts) + 1;
+      candidate.adaptiveBlockSpan = Math.max(
+        DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551,
+        Math.floor(configuredSpan / 2)
+      );
+      candidate.lastStatus = "RANGE_SATURATED_RETRY_SMALLER_NO_COVERAGE_ADVANCE_V551";
+      candidate.updatedAt = Date.now();
+
+      return {
+        ...base,attempted:true,requestConsumed:true,fromBlock,toBlock,provider,
+        returnedLogs:rows.length,rangeSaturated:true,
+        adaptiveBlockSpan:candidate.adaptiveBlockSpan,
+        status:candidate.lastStatus
+      };
+    }
+
+    const persisted = persistVerifiedUsdTradesV254(
+      state,
+      token,
+      rows,
+      wethUsdGReference,
+      "BLOCKSCOUT_CONTINUOUS_EXACT_POOL_V551"
+    );
+
+    const exact = rows.length === 0 ? true : (
+      safeNumber(persisted?.exactUsdTrades) === rows.length &&
+      safeNumber(persisted?.candidateMismatch) === 0 &&
+      safeNumber(persisted?.exactUsdRejected) === 0 &&
+      safeNumber(persisted?.timestampRejected) === 0
+    );
+
+    if (!exact) {
+      candidate.lastStatus = "ROWS_NOT_ALL_EXACT_USD_DECODABLE_NO_COVERAGE_ADVANCE_V551";
+      candidate.updatedAt = Date.now();
+      return {
+        ...base,attempted:true,requestConsumed:true,fromBlock,toBlock,provider,
+        returnedLogs:rows.length,
+        exactUsdTrades:safeNumber(persisted?.exactUsdTrades),
+        persistence:persisted,
+        status:candidate.lastStatus
+      };
+    }
+
+    candidate.lastCollectedBlock = toBlock;
+    candidate.coverageEndBlock = toBlock;
+    candidate.lastCollectedAt = Date.now();
+    candidate.updatedAt = Date.now();
+    candidate.lastStatus = "CONTIGUOUS_EXACT_POOL_RANGE_VERIFIED_V551";
+    candidate.successfulRanges = safeNumber(candidate?.successfulRanges) + 1;
+    candidate.exactUsdTrades = safeNumber(candidate?.exactUsdTrades) + safeNumber(persisted?.exactUsdTrades);
+    candidate.gapDetected = false;
+    if (configuredSpan < DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551 && rows.length < BLOCKSCOUT_LOGS_MAX_ROWS_V180 / 4) {
+      candidate.adaptiveBlockSpan = Math.min(
+        DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551,
+        Math.max(configuredSpan + DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551, Math.floor(configuredSpan * 1.5))
+      );
+    }
+
+    root.updatedAt = Date.now();
+
+    return {
+      ...base,
+      attempted:true,
+      requestConsumed:true,
+      provider,
+      fromBlock,
+      toBlock,
+      returnedLogs:rows.length,
+      exactUsdTrades:safeNumber(persisted?.exactUsdTrades),
+      rangeSaturated:false,
+      coverageAdvanced:true,
+      coverageStartBlock:candidate?.coverageStartBlock ?? null,
+      coverageEndBlock:candidate?.coverageEndBlock ?? null,
+      blocksRemainingToHead:Math.max(0, head - toBlock),
+      adaptiveBlockSpan:candidate?.adaptiveBlockSpan || configuredSpan,
+      persistence:persisted,
+      status:candidate.lastStatus
+    };
+  } catch (error) {
+    candidate.lastStatus = "BLOCKSCOUT_FETCH_ERROR_V551";
+    candidate.updatedAt = Date.now();
+    return {
+      ...base,attempted:true,requestConsumed:true,fromBlock,toBlock,
+      status:candidate.lastStatus,error:errorString(error)
+    };
+  }
+}
+
+function directionalWatchSnapshotV551(state) {
+  const root = pruneDirectionalWatchV551(state);
+  const entries = Object.values(root.entries || {})
+    .sort((a,b)=>safeNumber(b?.lastQualifiedAt)-safeNumber(a?.lastQualifiedAt))
+    .map(row => ({
+      tokenAddress:normalize(row?.tokenAddress),
+      symbol:row?.symbol || null,
+      poolId:normalize(row?.poolId),
+      quoteTokenAddress:normalize(row?.quoteTokenAddress) || null,
+      quoteBasis:row?.quoteBasis || null,
+      registeredAt:row?.registeredAt || null,
+      lastQualifiedAt:row?.lastQualifiedAt || null,
+      coverageStartBlock:row?.coverageStartBlock ?? null,
+      coverageEndBlock:row?.coverageEndBlock ?? null,
+      lastCollectedBlock:row?.lastCollectedBlock ?? null,
+      lastCollectedAt:row?.lastCollectedAt || null,
+      lastStatus:row?.lastStatus || null,
+      adaptiveBlockSpan:safeNumber(row?.adaptiveBlockSpan),
+      successfulRanges:safeNumber(row?.successfulRanges),
+      exactUsdTrades:safeNumber(row?.exactUsdTrades),
+      saturatedAttempts:safeNumber(row?.saturatedAttempts),
+      forwardOnly:true,
+      fullTimeWindowCoverageClaimed:false,
+      fullTokenMarketCoverageClaimed:false
+    }));
+
+  return {
+    enabled:true,
+    schemaVersion:"V551_1",
+    watchedCount:entries.length,
+    maxEntries:DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
+    maxAgeHours:DIRECTIONAL_WATCH_MAX_AGE_MS_V551 / 3600000,
+    entries
+  };
+}
+
+
 async function blockscoutCompleteExactPoolDirectionalUsdV458(
   candidate,
   budget,
@@ -72324,6 +72777,15 @@ for (
         VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_CANDIDATES_V458
       );
 
+  const directionalWatchRegistrationV551 =
+    registerDirectionalWatchCandidatesV551(
+      state,
+      completeExactPoolCandidatesV458,
+      latestNumber,
+      onChainDirectionalV179?.wethUsdGReferenceV187 ||
+        bestVerifiedWethUsdGReferenceV195(state)
+    );
+
   const completeExactPoolDirectionalUsdV458 = {
     enabled: true,
     measurementOnly: true,
@@ -73076,6 +73538,26 @@ for (
   /* V532: seeded history uses one separate residual post-Telegram request only if global capacity remains. */
   const seededHistoricalProofThisScanV529 =
     await runSeededHistoricalProofV529({ env, state, budget });
+
+  /*
+   * V551: directional coverage is now the highest-priority residual measurement lane.
+   * It advances at most one already-verified exact V4 PoolId using only remaining
+   * analysis/global capacity. No request is reserved or added; if no spare exists,
+   * the watch remains safely persisted for the next scan.
+   */
+  const continuousDirectionalWatchThisScanV551 =
+    await advanceDirectionalWatchV551({
+      state,
+      budget,
+      latestNumber,
+      wethUsdGReference:
+        onChainDirectionalV179?.wethUsdGReferenceV187 ||
+        bestVerifiedWethUsdGReferenceV195(state),
+      env
+    });
+
+  const continuousDirectionalWatchV551 =
+    directionalWatchSnapshotV551(state);
 
 
   /*
@@ -78052,6 +78534,9 @@ for (
             ?.poolId
         ) || null
     },
+    directionalWatchRegistrationV551,
+    continuousDirectionalWatchThisScanV551,
+    continuousDirectionalWatchV551,
     completeExactPoolDirectionalUsdV458,
     completeExactPoolReserveResultV459,
     completeExactPoolCompletionV460:
