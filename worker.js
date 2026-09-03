@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V549
+ * AUTHORITATIVE RUNTIME VERSION: V549
+ *
+ * V549 MEASUREMENT NULL-INTEGRITY FIX — MEASUREMENT/REPORTING ONLY:
+ * - fixes legacy JavaScript null coercion in V411 measurement telemetry where Number(null)
+ *   could become 0 and make unavailable evidence look like a verified zero;
+ * - future V411-style measurements now reject null/undefined/blank values before numeric conversion;
+ * - transaction acceleration now requires explicit verified buy AND sell counts instead of
+ *   constructing a zero from missing values;
+ * - /signallearn uses strict per-metric raw-field validation and excludes suspect legacy
+ *   null-coerced rows rather than treating them as measured zeros;
+ * - trade-size cohort stats reject null medians/p75 values, fixing n>0 + UNVERIFIED median output;
+ * - existing frozen records are NOT rewritten or backfilled;
+ * - no Opportunity, Momentum, qualification, Telegram threshold, detector, provider budget,
+ *   call selection or hard 42-request-cap behavior changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V548
  * AUTHORITATIVE RUNTIME VERSION: V548
  *
@@ -3044,7 +3061,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V548";
+const VERSION = "V549";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -63316,6 +63333,8 @@ function percentileV411(values, p) {
 
 function measurementSignalsV411(candidate, state, capturedAt = Date.now()) {
   const finite = value => {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "string" && value.trim() === "") return null;
     const n = Number(value);
     return Number.isFinite(n) ? n : null;
   };
@@ -63344,13 +63363,21 @@ function measurementSignalsV411(candidate, state, capturedAt = Date.now()) {
 
   const liqNow = candidate?.market?.verified === true ? finite(candidate?.market?.liquidityUsd) : null;
   const volH1Now = candidate?.market?.verified === true ? finite(candidate?.market?.volume?.h1) : null;
-  const txH1Now = candidate?.market?.verified === true
-    ? finite(safeNumber(candidate?.market?.transactions?.h1?.buys) + safeNumber(candidate?.market?.transactions?.h1?.sells))
+  const txBuysNow = candidate?.market?.verified === true
+    ? finite(candidate?.market?.transactions?.h1?.buys)
+    : null;
+  const txSellsNow = candidate?.market?.verified === true
+    ? finite(candidate?.market?.transactions?.h1?.sells)
+    : null;
+  const txH1Now = txBuysNow !== null && txSellsNow !== null
+    ? txBuysNow + txSellsNow
     : null;
   const liqBefore = previous ? finite(previous?.liquidityUsd) : null;
   const volH1Before = previous ? finite(previous?.volumeH1) : null;
-  const txH1Before = previous
-    ? finite(safeNumber(previous?.buysH1) + safeNumber(previous?.sellsH1))
+  const txBuysBefore = previous ? finite(previous?.buysH1) : null;
+  const txSellsBefore = previous ? finite(previous?.sellsH1) : null;
+  const txH1Before = txBuysBefore !== null && txSellsBefore !== null
+    ? txBuysBefore + txSellsBefore
     : null;
 
   // Verified wallet breadth is only claimed when the stored Pons V2 trade feed
@@ -63394,7 +63421,7 @@ function measurementSignalsV411(candidate, state, capturedAt = Date.now()) {
     comparisonSnapshotAt: previousAt,
     comparisonAgeMs: previousAt !== null ? Math.max(0, nowMs-previousAt) : null,
     holderGrowth: {
-      verified: holderCountNow !== null && holderCountBefore !== null && elapsedHours !== null && elapsedHours > 0,
+      verified: holderCountNow !== null && holderCountBefore !== null && holderCountBefore > 0 && elapsedHours !== null && elapsedHours > 0,
       previous: holderCountBefore,
       current: holderCountNow,
       absoluteGrowth: holderDelta,
@@ -63402,19 +63429,19 @@ function measurementSignalsV411(candidate, state, capturedAt = Date.now()) {
       holdersPerHour: holderDelta !== null && elapsedHours > 0 ? holderDelta / elapsedHours : null
     },
     liquidityGrowth: {
-      verified: liqNow !== null && liqBefore !== null,
+      verified: liqNow !== null && liqBefore !== null && liqBefore > 0,
       previousUsd: liqBefore,
       currentUsd: liqNow,
       growthPct: percentDelta(liqBefore, liqNow)
     },
     volumeAcceleration: {
-      verified: volH1Now !== null && volH1Before !== null,
+      verified: volH1Now !== null && volH1Before !== null && volH1Before > 0,
       previousH1Usd: volH1Before,
       currentH1Usd: volH1Now,
       growthPct: percentDelta(volH1Before, volH1Now)
     },
     transactionAcceleration: {
-      verified: txH1Now !== null && txH1Before !== null,
+      verified: txH1Now !== null && txH1Before !== null && txH1Before > 0,
       previousH1Transactions: txH1Before,
       currentH1Transactions: txH1Now,
       growthPct: percentDelta(txH1Before, txH1Now)
@@ -87519,8 +87546,77 @@ function frozenLearningMessageV312(state) {
 
 
 function signalLearningFiniteV548(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+
+function signalLearningVerifiedMetricV549(metric, kind) {
+  if (!metric || metric?.verified !== true) return null;
+
+  if (kind === "holderVelocity") {
+    const previous = signalLearningFiniteV548(metric?.previous);
+    const current = signalLearningFiniteV548(metric?.current);
+    const value = signalLearningFiniteV548(metric?.holdersPerHour);
+    return previous !== null && previous > 0 && current !== null && value !== null ? value : null;
+  }
+
+  if (kind === "holderPct") {
+    const previous = signalLearningFiniteV548(metric?.previous);
+    const current = signalLearningFiniteV548(metric?.current);
+    const value = signalLearningFiniteV548(metric?.growthPct);
+    return previous !== null && previous > 0 && current !== null && value !== null ? value : null;
+  }
+
+  if (kind === "liquidityPct") {
+    const previous = signalLearningFiniteV548(metric?.previousUsd);
+    const current = signalLearningFiniteV548(metric?.currentUsd);
+    const value = signalLearningFiniteV548(metric?.growthPct);
+    return previous !== null && previous > 0 && current !== null && value !== null ? value : null;
+  }
+
+  if (kind === "volumePct") {
+    const previous = signalLearningFiniteV548(metric?.previousH1Usd);
+    const current = signalLearningFiniteV548(metric?.currentH1Usd);
+    const value = signalLearningFiniteV548(metric?.growthPct);
+    return previous !== null && previous > 0 && current !== null && value !== null ? value : null;
+  }
+
+  if (kind === "txPct") {
+    const previous = signalLearningFiniteV548(metric?.previousH1Transactions);
+    const current = signalLearningFiniteV548(metric?.currentH1Transactions);
+    const value = signalLearningFiniteV548(metric?.growthPct);
+    return previous !== null && previous > 0 && current !== null && value !== null ? value : null;
+  }
+
+  if (kind === "uniqueBuyers") {
+    const trades = signalLearningFiniteV548(metric?.buyTrades);
+    const buyers = signalLearningFiniteV548(metric?.uniqueBuyers);
+    return trades !== null && trades > 0 && buyers !== null && buyers > 0 ? buyers : null;
+  }
+
+  if (kind === "repeatRatio") {
+    const trades = signalLearningFiniteV548(metric?.buyTrades);
+    const buyers = signalLearningFiniteV548(metric?.uniqueBuyers);
+    const ratio = signalLearningFiniteV548(metric?.repeatBuyerRatioPct);
+    return trades !== null && trades > 0 && buyers !== null && buyers > 0 && ratio !== null ? ratio : null;
+  }
+
+  if (kind === "medianTrade") {
+    const trades = signalLearningFiniteV548(metric?.trades);
+    const value = signalLearningFiniteV548(metric?.medianUsd);
+    return trades !== null && trades > 0 && value !== null && value > 0 ? value : null;
+  }
+
+  if (kind === "p75Trade") {
+    const trades = signalLearningFiniteV548(metric?.trades);
+    const value = signalLearningFiniteV548(metric?.p75Usd);
+    return trades !== null && trades > 0 && value !== null && value > 0 ? value : null;
+  }
+
+  return null;
 }
 
 function signalLearningMetricStatsV548(records, extractor) {
@@ -87612,55 +87708,55 @@ function signalLearningMessageV548(state) {
     signalLearningMetricLineV548(
       "Holder growth velocity",
       failures,winners,
-      record => m(record)?.holderGrowth?.verified === true ? m(record)?.holderGrowth?.holdersPerHour : null,
+      record => signalLearningVerifiedMetricV549(m(record)?.holderGrowth, "holderVelocity"),
       "rate"
     ),
     signalLearningMetricLineV548(
       "Holder growth",
       failures,winners,
-      record => m(record)?.holderGrowth?.verified === true ? m(record)?.holderGrowth?.growthPct : null,
+      record => signalLearningVerifiedMetricV549(m(record)?.holderGrowth, "holderPct"),
       "pct"
     ),
     signalLearningMetricLineV548(
       "Liquidity growth",
       failures,winners,
-      record => m(record)?.liquidityGrowth?.verified === true ? m(record)?.liquidityGrowth?.growthPct : null,
+      record => signalLearningVerifiedMetricV549(m(record)?.liquidityGrowth, "liquidityPct"),
       "pct"
     ),
     signalLearningMetricLineV548(
       "1h volume acceleration",
       failures,winners,
-      record => m(record)?.volumeAcceleration?.verified === true ? m(record)?.volumeAcceleration?.growthPct : null,
+      record => signalLearningVerifiedMetricV549(m(record)?.volumeAcceleration, "volumePct"),
       "pct"
     ),
     signalLearningMetricLineV548(
       "1h transaction acceleration",
       failures,winners,
-      record => m(record)?.transactionAcceleration?.verified === true ? m(record)?.transactionAcceleration?.growthPct : null,
+      record => signalLearningVerifiedMetricV549(m(record)?.transactionAcceleration, "txPct"),
       "pct"
     ),
     signalLearningMetricLineV548(
       "Unique buyers — verified 15m",
       failures,winners,
-      record => m(record)?.buyerBreadth?.verified === true ? m(record)?.buyerBreadth?.uniqueBuyers : null,
+      record => signalLearningVerifiedMetricV549(m(record)?.buyerBreadth, "uniqueBuyers"),
       "count"
     ),
     signalLearningMetricLineV548(
       "Repeat-buyer ratio — verified 15m",
       failures,winners,
-      record => m(record)?.buyerBreadth?.verified === true ? m(record)?.buyerBreadth?.repeatBuyerRatioPct : null,
+      record => signalLearningVerifiedMetricV549(m(record)?.buyerBreadth, "repeatRatio"),
       "pct"
     ),
     signalLearningMetricLineV548(
       "Observed median trade — verified 15m",
       failures,winners,
-      record => m(record)?.tradeSizeDistribution?.verified === true ? m(record)?.tradeSizeDistribution?.medianUsd : null,
+      record => signalLearningVerifiedMetricV549(m(record)?.tradeSizeDistribution, "medianTrade"),
       "usd"
     ),
     signalLearningMetricLineV548(
       "Observed p75 trade — verified 15m",
       failures,winners,
-      record => m(record)?.tradeSizeDistribution?.verified === true ? m(record)?.tradeSizeDistribution?.p75Usd : null,
+      record => signalLearningVerifiedMetricV549(m(record)?.tradeSizeDistribution, "p75Trade"),
       "usd"
     ),
     "",
@@ -87677,7 +87773,7 @@ function signalLearningMessageV548(state) {
     "",
     "📏 Sample strength: TOO_SMALL &lt;3 | VERY_SMALL 3–9 | SMALL 10–29 | BUILDING 30–99 | STRONGER 100+",
     "⚠️ <b>DESCRIPTIVE ONLY</b> — correlation is not causation. No score, weight, threshold or qualification is changed.",
-    "<i>Only frozen call-time verified measurements are included. Missing evidence remains DATA UNVERIFIED and is never backfilled.</i>",
+    "<i>Only frozen call-time measurements that pass V549 raw-field integrity checks are included. Legacy null-coerced/suspect rows are excluded; missing evidence remains DATA UNVERIFIED and is never backfilled.</i>",
     "<i>/signallearn is read-only: zero provider requests and zero persistent state writes.</i>"
   ];
 
