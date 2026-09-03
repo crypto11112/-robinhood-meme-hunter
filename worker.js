@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V548
+ * AUTHORITATIVE RUNTIME VERSION: V548
+ *
+ * V548 ENTRY-SIGNAL COHORT LEARNING — READ ONLY:
+ * - preserves all V547 scanner, launch-source learning, V515 detectors, scoring,
+ *   Momentum, qualification, Telegram thresholds, provider ceilings and hard 42-request cap;
+ * - DOES NOT add provider requests and DOES NOT collect duplicate measurements;
+ * - reuses the already-frozen V411 measurementSignalsV411 stored at successful call time;
+ * - adds /signallearn, comparing verified entry measurements for:
+ *     A) calls whose stored verified ATH never exceeded entry, versus
+ *     B) calls whose stored verified ATH reached 2x+;
+ * - compares holder-growth velocity, holder-growth %, liquidity growth,
+ *   1h volume acceleration, 1h transaction acceleration, verified 15m unique buyers,
+ *   repeat-buyer ratio and verified observed trade-size distribution;
+ * - missing/unverified measurements are excluded per metric, never backfilled or inferred;
+ * - reports sample size for every metric and labels the output DESCRIPTIVE ONLY;
+ * - no scoring/weight/threshold mutation is permitted from these comparisons.
+ */
+/**
  * Robinhood Chain Meme Hunter — V547
  * AUTHORITATIVE RUNTIME VERSION: V547
  *
@@ -3025,7 +3044,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V547";
+const VERSION = "V548";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -87498,6 +87517,200 @@ function frozenLearningMessageV312(state) {
   return lines.filter((line, index, arr) => !(line === '' && arr[index - 1] === '')).join('\n');
 }
 
+
+function signalLearningFiniteV548(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function signalLearningMetricStatsV548(records, extractor) {
+  const values = [];
+  for (const record of Array.isArray(records) ? records : []) {
+    const value = signalLearningFiniteV548(extractor(record));
+    if (value !== null) values.push(value);
+  }
+  if (!values.length) return null;
+  const sorted = [...values].sort((a,b)=>a-b);
+  const total = sorted.reduce((sum,value)=>sum+value,0);
+  const mid = Math.floor(sorted.length/2);
+  const median = sorted.length % 2
+    ? sorted[mid]
+    : (sorted[mid-1]+sorted[mid])/2;
+  return {
+    n: sorted.length,
+    average: total/sorted.length,
+    median,
+    min: sorted[0],
+    max: sorted[sorted.length-1],
+    sampleStrength: learningSampleStrengthV313(sorted.length)
+  };
+}
+
+function signalLearningFormatV548(value, kind) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "UNVERIFIED";
+  if (kind === "usd") return telegramMoneyV271(n);
+  if (kind === "pct") return `${n.toFixed(2)}%`;
+  if (kind === "rate") return n.toFixed(2);
+  if (kind === "count") return n.toFixed(1);
+  return n.toFixed(2);
+}
+
+function signalLearningMetricLineV548(label, failures, winners, extractor, kind) {
+  const fail = signalLearningMetricStatsV548(failures, extractor);
+  const win = signalLearningMetricStatsV548(winners, extractor);
+
+  if (!fail && !win) {
+    return `• ${label}: DATA UNVERIFIED — no frozen verified samples`;
+  }
+
+  const failText = fail
+    ? `fail med ${signalLearningFormatV548(fail.median,kind)} (n=${fail.n}, ${fail.sampleStrength})`
+    : "fail DATA UNVERIFIED (n=0)";
+  const winText = win
+    ? `2x+ med ${signalLearningFormatV548(win.median,kind)} (n=${win.n}, ${win.sampleStrength})`
+    : "2x+ DATA UNVERIFIED (n=0)";
+
+  let comparison = "comparison DATA UNVERIFIED";
+  if (fail && win) {
+    const delta = win.median - fail.median;
+    const sign = delta > 0 ? "+" : "";
+    comparison = `median Δ ${sign}${signalLearningFormatV548(delta,kind)}`;
+  }
+
+  return `• ${label}: ${failText} | ${winText} | ${comparison}`;
+}
+
+function signalLearningMessageV548(state) {
+  const all = callPerformanceEntriesV271(state);
+  const frozen = all.filter(record => {
+    const snap = record?.entrySignalSnapshotV309;
+    const ath = Number(record?.athMultipleByMarketCap);
+    return snap?.frozenAtSuccessfulCall === true &&
+      snap?.laterEvidenceBackfillAllowed === false &&
+      snap?.measurementSignalsV411?.measurementOnly === true &&
+      Number.isFinite(ath) && ath > 0;
+  });
+
+  const failures = frozen.filter(record =>
+    Number(record?.athMultipleByMarketCap) <= 1.000001
+  );
+  const winners = frozen.filter(record =>
+    Number(record?.athMultipleByMarketCap) >= 2
+  );
+
+  const m = record => record?.entrySignalSnapshotV309?.measurementSignalsV411;
+
+  const lines = [
+    `🧬 <b>Entry Signal Cohort Learning — ${VERSION}</b>`,
+    "",
+    `V411+ frozen measurement calls: <b>${frozen.length}</b> / ${all.length} tracked`,
+    `Never-above-entry cohort: <b>${failures.length}</b>`,
+    `Verified 2x+ cohort: <b>${winners.length}</b>`,
+    "",
+    "<b>📊 Frozen call-time measurements</b>",
+    signalLearningMetricLineV548(
+      "Holder growth velocity",
+      failures,winners,
+      record => m(record)?.holderGrowth?.verified === true ? m(record)?.holderGrowth?.holdersPerHour : null,
+      "rate"
+    ),
+    signalLearningMetricLineV548(
+      "Holder growth",
+      failures,winners,
+      record => m(record)?.holderGrowth?.verified === true ? m(record)?.holderGrowth?.growthPct : null,
+      "pct"
+    ),
+    signalLearningMetricLineV548(
+      "Liquidity growth",
+      failures,winners,
+      record => m(record)?.liquidityGrowth?.verified === true ? m(record)?.liquidityGrowth?.growthPct : null,
+      "pct"
+    ),
+    signalLearningMetricLineV548(
+      "1h volume acceleration",
+      failures,winners,
+      record => m(record)?.volumeAcceleration?.verified === true ? m(record)?.volumeAcceleration?.growthPct : null,
+      "pct"
+    ),
+    signalLearningMetricLineV548(
+      "1h transaction acceleration",
+      failures,winners,
+      record => m(record)?.transactionAcceleration?.verified === true ? m(record)?.transactionAcceleration?.growthPct : null,
+      "pct"
+    ),
+    signalLearningMetricLineV548(
+      "Unique buyers — verified 15m",
+      failures,winners,
+      record => m(record)?.buyerBreadth?.verified === true ? m(record)?.buyerBreadth?.uniqueBuyers : null,
+      "count"
+    ),
+    signalLearningMetricLineV548(
+      "Repeat-buyer ratio — verified 15m",
+      failures,winners,
+      record => m(record)?.buyerBreadth?.verified === true ? m(record)?.buyerBreadth?.repeatBuyerRatioPct : null,
+      "pct"
+    ),
+    signalLearningMetricLineV548(
+      "Observed median trade — verified 15m",
+      failures,winners,
+      record => m(record)?.tradeSizeDistribution?.verified === true ? m(record)?.tradeSizeDistribution?.medianUsd : null,
+      "usd"
+    ),
+    signalLearningMetricLineV548(
+      "Observed p75 trade — verified 15m",
+      failures,winners,
+      record => m(record)?.tradeSizeDistribution?.verified === true ? m(record)?.tradeSizeDistribution?.p75Usd : null,
+      "usd"
+    ),
+    "",
+    "<b>⏱ Existing short-horizon learning</b>",
+    fixedHorizonLearningLineV317("5m outcome", frozen.map(record => {
+      const out = record?.entryTimingOutcomesV411?.outcomes?.m5;
+      return out?.verified === true && out?.frozen === true
+        ? {...record, fixedHorizonOutcomesV317:{outcomes:{m5:out}}}
+        : record;
+    }), "m5"),
+    `• 5m captured: ${frozen.filter(r=>r?.entryTimingOutcomesV411?.outcomes?.m5?.verified===true && r?.entryTimingOutcomesV411?.outcomes?.m5?.frozen===true).length}/${frozen.length}`,
+    `• 15m captured: ${frozen.filter(r=>r?.entryTimingOutcomesV411?.outcomes?.m15?.verified===true && r?.entryTimingOutcomesV411?.outcomes?.m15?.frozen===true).length}/${frozen.length}`,
+    `• 30m captured: ${frozen.filter(r=>r?.entryTimingOutcomesV411?.outcomes?.m30?.verified===true && r?.entryTimingOutcomesV411?.outcomes?.m30?.frozen===true).length}/${frozen.length}`,
+    "",
+    "📏 Sample strength: TOO_SMALL &lt;3 | VERY_SMALL 3–9 | SMALL 10–29 | BUILDING 30–99 | STRONGER 100+",
+    "⚠️ <b>DESCRIPTIVE ONLY</b> — correlation is not causation. No score, weight, threshold or qualification is changed.",
+    "<i>Only frozen call-time verified measurements are included. Missing evidence remains DATA UNVERIFIED and is never backfilled.</i>",
+    "<i>/signallearn is read-only: zero provider requests and zero persistent state writes.</i>"
+  ];
+
+  // Replace the helper-generated 5m line with a true V411 timing-outcome summary.
+  const timingRows = (key) => frozen
+    .map(record => {
+      const out = record?.entryTimingOutcomesV411?.outcomes?.[key];
+      const multiple = Number(out?.multipleByMarketCap);
+      return out?.verified === true && out?.frozen === true && Number.isFinite(multiple) && multiple > 0
+        ? {...record, athMultipleByMarketCap: multiple}
+        : null;
+    })
+    .filter(Boolean);
+  const timingLine = (label,key) => {
+    const stats = learningGroupStatsV312(timingRows(key));
+    return stats
+      ? `• ${label}: ${learningStatsTextV312(stats)}`
+      : `• ${label}: n=0 — no forward-only verified outcomes captured yet`;
+  };
+
+  const marker = lines.indexOf("<b>⏱ Existing short-horizon learning</b>");
+  if (marker >= 0) {
+    lines.splice(marker+1, 4,
+      timingLine("5m outcome", "m5"),
+      timingLine("15m outcome", "m15"),
+      timingLine("30m outcome", "m30")
+    );
+  }
+
+  return lines.join("\n");
+}
+
+
 function formatUsdV353(value) {
   const n = Number(value);
   if (!Number.isFinite(n)) return "UNVERIFIED";
@@ -114735,6 +114948,7 @@ function telegramHelpV271() {
     "<code>/best</code> — highest verified ATH X calls",
     "<code>/performance</code> — overall tracked-call summary",
     "<code>/learning</code> — frozen signals, outcomes + sample quality",
+    "<code>/signallearn</code> — compare frozen entry measurements: failures vs 2x+ winners",
     "<code>/horizon GUS</code> — fixed-horizon capture diagnostics",
     "<code>/live GUS</code> — V414 lower-timeframe rolling signals + breakout state (read-only)",
     "<code>/v3usd 0xADDRESS</code> — persisted native V3 USD flow (read-only)",
@@ -115423,6 +115637,14 @@ async function telegramCommandReplyV271(
       );
   } else if (
     parsed.command ===
+    "/signallearn"
+  ) {
+    reply =
+      signalLearningMessageV548(
+        state
+      );
+  } else if (
+    parsed.command ===
       "/help" ||
     parsed.command ===
       "/start"
@@ -115446,7 +115668,8 @@ async function telegramCommandReplyV271(
   const needsChunkedReplyV316 =
     parsed.command === "/analyse" ||
     parsed.command === "/analyze" ||
-    parsed.command === "/learning";
+    parsed.command === "/learning" ||
+    parsed.command === "/signallearn";
 
   if (isFreshAnalyseV352) {
     await telegramAnalyseCheckpointV352(
