@@ -1,3 +1,8 @@
+/** Robinhood Chain Meme Hunter — V565
+ * Evidence-aware directional watch retention.
+ * Preserves V564/V563/V562 functionality.
+ * Keeps 24-entry watch cap and hard 42-request ceiling unchanged.
+ */
 /**
  * Robinhood Chain Meme Hunter — V564
  * AUTHORITATIVE RUNTIME VERSION: V564
@@ -3345,7 +3350,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V564";
+const VERSION = "V565";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -56969,33 +56974,117 @@ function directionalWatchRootV551(state) {
 function pruneDirectionalWatchV551(state) {
   const root = directionalWatchRootV551(state);
   const now = Date.now();
+  const beforeRows = Object.values(root.entries || {});
 
-  const rows = Object.values(root.entries || {})
-    .filter(row => {
-      const token = normalize(row?.tokenAddress);
-      const poolId = normalize(row?.poolId);
-      const seenAt = safeNumber(row?.lastQualifiedAt || row?.registeredAt);
-      return (
-        isAddress(token) &&
-        /^0x[a-f0-9]{64}$/.test(String(poolId || "")) &&
-        seenAt > 0 &&
-        now - seenAt <= DIRECTIONAL_WATCH_MAX_AGE_MS_V551
-      );
-    })
-    .sort((a,b) =>
+  const eligibleRows = beforeRows.filter(row => {
+    const token = normalize(row?.tokenAddress);
+    const poolId = normalize(row?.poolId);
+    const seenAt = safeNumber(row?.lastQualifiedAt || row?.registeredAt);
+
+    return (
+      isAddress(token) &&
+      /^0x[a-f0-9]{64}$/.test(String(poolId || "")) &&
+      seenAt > 0 &&
+      now - seenAt <= DIRECTIONAL_WATCH_MAX_AGE_MS_V551
+    );
+  });
+
+  const retentionTierV565 = row => {
+    if (row?.everCaughtUpV565 === true) return 4;
+    if (
+      safeNumber(row?.successfulRanges) > 0 &&
+      safeNumber(row?.exactUsdTrades) > 0
+    ) return 3;
+    if (safeNumber(row?.successfulRanges) > 0) return 2;
+    if (row?.activePoolEvidenceV555 === true) return 1;
+    return 0;
+  };
+
+  const sortedRows = [...eligibleRows].sort((a,b) => {
+    const tierDelta = retentionTierV565(b) - retentionTierV565(a);
+    if (tierDelta !== 0) return tierDelta;
+
+    const exactDelta =
+      safeNumber(b?.exactUsdTrades) - safeNumber(a?.exactUsdTrades);
+    if (exactDelta !== 0) return exactDelta;
+
+    const rangeDelta =
+      safeNumber(b?.successfulRanges) - safeNumber(a?.successfulRanges);
+    if (rangeDelta !== 0) return rangeDelta;
+
+    const activeSwapDelta =
+      safeNumber(b?.poolSpecificSwapsV555) -
+      safeNumber(a?.poolSpecificSwapsV555);
+    if (activeSwapDelta !== 0) return activeSwapDelta;
+
+    const collectedDelta =
+      safeNumber(b?.lastCollectedAt) - safeNumber(a?.lastCollectedAt);
+    if (collectedDelta !== 0) return collectedDelta;
+
+    return (
       safeNumber(b?.lastQualifiedAt || b?.registeredAt) -
       safeNumber(a?.lastQualifiedAt || a?.registeredAt)
-    )
-    .slice(0, DIRECTIONAL_WATCH_MAX_ENTRIES_V551);
+    );
+  });
+
+  const rows = sortedRows.slice(0, DIRECTIONAL_WATCH_MAX_ENTRIES_V551);
+
+  const keptKeys = new Set(
+    rows
+      .map(row => directionalWatchKeyV563(row?.tokenAddress,row?.poolId))
+      .filter(Boolean)
+  );
+
+  const droppedRows = sortedRows.filter(row => {
+    const key = directionalWatchKeyV563(row?.tokenAddress,row?.poolId);
+    return key && !keptKeys.has(key);
+  });
 
   root.entries = Object.fromEntries(
     rows
       .map(row => [
-        directionalWatchKeyV563(row?.tokenAddress, row?.poolId),
+        directionalWatchKeyV563(row?.tokenAddress,row?.poolId),
         row
       ])
       .filter(([key]) => Boolean(key))
   );
+
+  root.lastPruneV565 = {
+    at: now,
+    maxEntries: DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
+    beforeCount: beforeRows.length,
+    eligibleCount: eligibleRows.length,
+    keptCount: rows.length,
+    droppedCount: droppedRows.length,
+    keptEverCaughtUp: rows.filter(row => row?.everCaughtUpV565 === true).length,
+    keptWithExactUsdEvidence: rows.filter(
+      row =>
+        safeNumber(row?.successfulRanges) > 0 &&
+        safeNumber(row?.exactUsdTrades) > 0
+    ).length,
+    keptWithSuccessfulRanges: rows.filter(
+      row => safeNumber(row?.successfulRanges) > 0
+    ).length,
+    droppedEvidenceRows: droppedRows
+      .filter(
+        row =>
+          row?.everCaughtUpV565 === true ||
+          safeNumber(row?.successfulRanges) > 0 ||
+          safeNumber(row?.exactUsdTrades) > 0
+      )
+      .map(row => ({
+        tokenAddress: normalize(row?.tokenAddress),
+        poolId: normalize(row?.poolId),
+        everCaughtUpV565: row?.everCaughtUpV565 === true,
+        successfulRanges: safeNumber(row?.successfulRanges),
+        exactUsdTrades: safeNumber(row?.exactUsdTrades),
+        activePoolEvidenceV555: row?.activePoolEvidenceV555 === true
+      }))
+      .slice(0,12),
+    policy:
+      "EVER_CAUGHT_UP_THEN_EXACT_USD_EVIDENCE_THEN_CONTIGUOUS_RANGES_THEN_ACTIVE_RECENCY"
+  };
+
   root.updatedAt = now;
   return root;
 }
@@ -57558,8 +57647,17 @@ async function advanceDirectionalWatchV551({
     candidate.updatedAt = Date.now();
     candidate.lastStatus = "CONTIGUOUS_EXACT_POOL_RANGE_VERIFIED_V551";
     candidate.successfulRanges = safeNumber(candidate?.successfulRanges) + 1;
-    candidate.exactUsdTrades = safeNumber(candidate?.exactUsdTrades) + safeNumber(persisted?.exactUsdTrades);
+    candidate.exactUsdTrades =
+      safeNumber(candidate?.exactUsdTrades) +
+      safeNumber(persisted?.exactUsdTrades);
     candidate.gapDetected = false;
+
+    if (toBlock >= head) {
+      candidate.everCaughtUpV565 = true;
+      candidate.firstCaughtUpAtV565 =
+        safeNumber(candidate?.firstCaughtUpAtV565) || Date.now();
+      candidate.lastCaughtUpAtV565 = Date.now();
+    }
     if (
       configuredSpan < DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551 &&
       rows.length < BLOCKSCOUT_LOGS_MAX_ROWS_V180 / 4
@@ -57640,6 +57738,9 @@ function directionalWatchSnapshotV551(state) {
       adaptiveBlockSpan:safeNumber(row?.adaptiveBlockSpan),
       successfulRanges:safeNumber(row?.successfulRanges),
       exactUsdTrades:safeNumber(row?.exactUsdTrades),
+      everCaughtUpV565:row?.everCaughtUpV565 === true,
+      firstCaughtUpAtV565:safeNumber(row?.firstCaughtUpAtV565) || null,
+      lastCaughtUpAtV565:safeNumber(row?.lastCaughtUpAtV565) || null,
       saturatedAttempts:safeNumber(row?.saturatedAttempts),
       registrationSourceV552:row?.registrationSourceV552 || null,
       activePoolEvidenceV555:row?.activePoolEvidenceV555 === true,
@@ -57659,6 +57760,9 @@ function directionalWatchSnapshotV551(state) {
     keySchemaV563:"TOKEN_ADDRESS_PLUS_EXACT_POOL_ID",
     sameTokenMultiPoolSupportedV563:true,
     migrationV563:root?.lastKeyMigrationV563 || null,
+    retentionPolicyV565:
+      "EVER_CAUGHT_UP_THEN_EXACT_USD_EVIDENCE_THEN_CONTIGUOUS_RANGES_THEN_ACTIVE_RECENCY",
+    lastPruneV565:root?.lastPruneV565 || null,
     watchedCount:entries.length,
     maxEntries:DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
     maxAgeHours:DIRECTIONAL_WATCH_MAX_AGE_MS_V551 / 3600000,
