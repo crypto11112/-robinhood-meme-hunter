@@ -1,4 +1,34 @@
 /**
+ * Robinhood Chain Meme Hunter — V575
+ * AUTHORITATIVE RUNTIME VERSION: V575
+ *
+ * V575 PRIOR-COMPLETION RETENTION PRIORITY FIX:
+ * - preserves all V574/V573/V572/V571/V570 behaviour;
+ * - fixes the exact same-scan retention bug proven by V574 diagnostics:
+ *   JUICE was correctly reconstructed and registered from verified V466
+ *   completion evidence, but V574 assigned prior-completion recovery and
+ *   ordinary V573 persisted recovery the same retention tier;
+ * - same-tier tie-breakers then favoured newer V573 pools with higher current
+ *   swap counts, causing JUICE to disappear before the final 24-entry snapshot;
+ * - retention tiers are now explicitly ordered:
+ *     7 = ever caught up;
+ *     6 = successful continuous ranges + exact-USD ledger evidence;
+ *     5 = recent verified V466 prior-completion recovery;
+ *     4 = recent V573 persisted exact-USD recovery;
+ *     3 = successful continuous ranges;
+ *     2 = active exact-pool evidence;
+ *     1 = recent exact-pool seed;
+ *     0 = other;
+ * - this gives proven prior-completion pools a real retention lane while still
+ *   keeping mature continuous evidence above them;
+ * - watch cap remains 24;
+ * - no extra requests;
+ * - hard global request ceiling remains 42;
+ * - no backfill;
+ * - no scoring, Momentum, qualification, USD maths, provider or Telegram
+ *   threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V574
  * AUTHORITATIVE RUNTIME VERSION: V574
  *
@@ -3568,7 +3598,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V574";
+const VERSION = "V575";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -57223,20 +57253,25 @@ function pruneDirectionalWatchV551(state) {
      * a recently proven exact-USD pool can enter the bounded watch instead of
      * being immediately discarded behind empty/stale rows.
      */
-    if (row?.everCaughtUpV565 === true) return 6;
+    if (row?.everCaughtUpV565 === true) return 7;
 
     if (
       safeNumber(row?.successfulRanges) > 0 &&
       safeNumber(row?.exactUsdTrades) > 0
-    ) return 5;
+    ) return 6;
 
+    /*
+     * V575: verified prior-completion recovery must outrank ordinary V573
+     * recent recovery. V574 gave both tier 4, allowing active-swap tie-breakers
+     * to evict a proven V466 pool such as JUICE in the same scan.
+     */
     if (
       row?.priorCompletionRecoveryV574?.verified === true &&
       safeNumber(row?.priorCompletionRecoveryV574?.completedAt) > 0 &&
       now -
         safeNumber(row.priorCompletionRecoveryV574.completedAt) <=
         DIRECTIONAL_PRIOR_COMPLETION_MAX_AGE_MS_V574
-    ) return 4;
+    ) return 5;
 
     if (
       row?.persistedObservedRecoveryV573?.verified === true &&
@@ -57323,6 +57358,14 @@ function pruneDirectionalWatchV551(state) {
     droppedPriorCompletionRecoveredV574: droppedRows.filter(
       row => row?.priorCompletionRecoveryV574?.verified === true
     ).length,
+    priorCompletionRetentionPriorityV575: {
+      enabled:true,
+      priorCompletionTier:5,
+      persistedV573RecoveryTier:4,
+      continuousExactUsdEvidenceTier:6,
+      everCaughtUpTier:7,
+      sameTierBugFromV574Fixed:true
+    },
     keptRecoveredExactUsdV573: rows.filter(
       row => row?.persistedObservedRecoveryV573?.verified === true
     ).length,
@@ -57346,7 +57389,7 @@ function pruneDirectionalWatchV551(state) {
       }))
       .slice(0,12),
     policy:
-      "EVER_CAUGHT_UP_THEN_EXACT_USD_EVIDENCE_THEN_CONTIGUOUS_RANGES_THEN_ACTIVE_RECENCY"
+      "EVER_CAUGHT_UP_THEN_CONTINUOUS_EXACT_USD_THEN_V466_PRIOR_COMPLETION_THEN_V573_RECOVERY_THEN_CONTIGUOUS_RANGES_THEN_ACTIVE_RECENCY"
   };
 
   root.updatedAt = now;
@@ -58655,7 +58698,7 @@ function directionalWatchSnapshotV551(state) {
     sameTokenMultiPoolSupportedV563:true,
     migrationV563:root?.lastKeyMigrationV563 || null,
     retentionPolicyV565:
-      "EVER_CAUGHT_UP_THEN_EXACT_USD_EVIDENCE_THEN_CONTIGUOUS_RANGES_THEN_ACTIVE_RECENCY",
+      "EVER_CAUGHT_UP_THEN_CONTINUOUS_EXACT_USD_THEN_V466_PRIOR_COMPLETION_THEN_V573_RECOVERY_THEN_CONTIGUOUS_RANGES_THEN_ACTIVE_RECENCY",
     lastPruneV565:root?.lastPruneV565 || null,
     watchedCount:entries.length,
     maxEntries:DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
