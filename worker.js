@@ -1,4 +1,27 @@
 /**
+ * Robinhood Chain Meme Hunter — V545
+ * AUTHORITATIVE RUNTIME VERSION: V545
+ *
+ * V545 AUTONOMOUS INTERNAL-TX PROGRESSION:
+ * - preserves V544's one released seeded-proof request for autonomous unknown-source learning;
+ * - V544 proved the lane works, but its first V485 Blockscout raw-trace returned HTTP 200
+ *   with zero trace rows / no exact token CREATE match;
+ * - when a V485 no-match is already persisted, V545 now advances that evidence through the
+ *   existing V489 authenticated Blockscout internal-transactions fallback BEFORE starting a
+ *   fresh V485 raw-trace candidate;
+ * - priority remains evidence-first:
+ *     1) V517 generic exact creation-receipt proof;
+ *     2) V519/V503 recurring creator identity handoff;
+ *     3) V489 internal-transactions follow-up for a persisted V485 no-match;
+ *     4) oldest unresolved V486/V485 exact creation raw-trace attribution;
+ * - V489 remains measurement/proof only and cannot promote a launch source by itself;
+ * - V515 automatic registration still requires >=3 distinct verified tokens + >=3 distinct
+ *   creation transactions with the same exact non-PoolManager event/token-slot pattern;
+ * - at most ONE released-slot request per scan, all through the existing hard-42 guard;
+ * - scoring, Momentum, qualification, Telegram thresholds, verified USD, holder logic,
+ *   ATH, scanner behavior and all existing confirmed detectors remain unchanged.
+ */
+/**
  * Robinhood Chain Meme Hunter — V544
  * AUTHORITATIVE RUNTIME VERSION: V544
  *
@@ -2966,7 +2989,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V544";
+const VERSION = "V545";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -22563,15 +22586,15 @@ async function runReleasedSeededAutonomousProofV544({
 
   telemetry.seededProofComplete=seededProofCompleteForAutonomyV544(state);
   if(!telemetry.seededProofComplete){
-    telemetry.status="V544_SEEDED_PROOF_NOT_COMPLETE_EXTRA_AUTONOMOUS_LANE_DISABLED";
+    telemetry.status="V545_SEEDED_PROOF_NOT_COMPLETE_EXTRA_AUTONOMOUS_LANE_DISABLED";
     return telemetry;
   }
   if(seededHistoricalProofThisScanV529?.requestConsumed===true){
-    telemetry.status="V544_SEEDED_HISTORY_USED_RELEASED_SLOT_THIS_SCAN";
+    telemetry.status="V545_SEEDED_HISTORY_USED_RELEASED_SLOT_THIS_SCAN";
     return telemetry;
   }
   if(safeNumber(budget?.totalUsed)>=safeNumber(budget?.totalLimit)){
-    telemetry.status="V544_GLOBAL_REQUEST_BUDGET_ALREADY_EXHAUSTED";
+    telemetry.status="V545_GLOBAL_REQUEST_BUDGET_ALREADY_EXHAUSTED";
     return telemetry;
   }
 
@@ -22590,8 +22613,8 @@ async function runReleasedSeededAutonomousProofV544({
     telemetry.requestConsumed=result?.requestConsumed===true;
     telemetry.afterTotalUsed=safeNumber(budget?.totalUsed);
     telemetry.status=result?.registrationResult?.registered===true
-      ?"V544_RELEASED_SLOT_V517_SOURCE_AUTO_REGISTERED"
-      :`V544_RELEASED_SLOT_V517:${result?.status||"UNKNOWN"}`;
+      ?"V545_RELEASED_SLOT_V517_SOURCE_AUTO_REGISTERED"
+      :`V545_RELEASED_SLOT_V517:${result?.status||"UNKNOWN"}`;
     return telemetry;
   }
 
@@ -22607,14 +22630,36 @@ async function runReleasedSeededAutonomousProofV544({
     telemetry.attempted=result?.attempted===true;
     telemetry.requestConsumed=result?.requestConsumed===true;
     telemetry.afterTotalUsed=safeNumber(budget?.totalUsed);
-    telemetry.status=`V544_RELEASED_SLOT_V519_IDENTITY:${result?.status||"UNKNOWN"}`;
+    telemetry.status=`V545_RELEASED_SLOT_V519_IDENTITY:${result?.status||"UNKNOWN"}`;
     return telemetry;
   }
 
-  // 3) Feed the earlier mechanism layer: one unresolved verified-origin raw trace.
+  // 3) If V485 already returned an authenticated HTTP-200/no-match, progress that
+  // exact creation transaction through the existing free-plan V489 internal-tx route.
+  const internalCandidateV489=selectOldestBlockscoutInternalCandidateV489(state);
+  if(internalCandidateV489){
+    telemetry.route="V489_BLOCKSCOUT_INTERNAL_CREATION_ATTRIBUTION";
+    telemetry.selectedToken=normalize(internalCandidateV489?.row?.token)||null;
+    telemetry.selectedCreator=normalize(internalCandidateV489?.row?.verifiedCreator)||null;
+    telemetry.selectedTransactionHash=String(internalCandidateV489?.row?.creationTransactionHash||"").trim().toLowerCase()||null;
+
+    const result=await runBlockscoutInternalCreationAttributionV489({
+      env,state,budget,candidate:internalCandidateV489
+    });
+    telemetry.result=result;
+    telemetry.attempted=result?.attempted===true;
+    telemetry.requestConsumed=result?.requestConsumed===true;
+    telemetry.afterTotalUsed=safeNumber(budget?.totalUsed);
+    telemetry.status=result?.attributionResult?.exactTokenCreateVerified===true
+      ?"V545_RELEASED_SLOT_V489_EXACT_INTERNAL_CREATION_VERIFIED"
+      :`V545_RELEASED_SLOT_V489:${result?.status||"UNKNOWN"}`;
+    return telemetry;
+  }
+
+  // 4) Feed the earlier mechanism layer: one unresolved verified-origin raw trace.
   const selected=selectOldestUnprocessedVerifiedOriginV486(state);
   if(!selected){
-    telemetry.status="V544_NO_ELIGIBLE_UNKNOWN_SOURCE_WORK_RELEASED_SLOT_UNUSED";
+    telemetry.status="V545_NO_ELIGIBLE_UNKNOWN_SOURCE_WORK_RELEASED_SLOT_UNUSED";
     return telemetry;
   }
 
@@ -22644,8 +22689,8 @@ async function runReleasedSeededAutonomousProofV544({
 
   telemetry.afterTotalUsed=safeNumber(budget?.totalUsed);
   telemetry.status=result?.exactCreationTrace?.exactTokenCreateVerified===true
-    ?"V544_RELEASED_SLOT_V485_EXACT_CREATION_TRACE_VERIFIED"
-    :`V544_RELEASED_SLOT_V485:${result?.status||"UNKNOWN"}`;
+    ?"V545_RELEASED_SLOT_V485_EXACT_CREATION_TRACE_VERIFIED"
+    :`V545_RELEASED_SLOT_V485:${result?.status||"UNKNOWN"}`;
   return telemetry;
 }
 
