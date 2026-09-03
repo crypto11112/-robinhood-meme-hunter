@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V553
+ * AUTHORITATIVE RUNTIME VERSION: V553
+ *
+ * V553 DIRECTIONAL WATCH RESERVED PROGRESS:
+ * - V552 proved exact-pool watch registration, but the first follow-up scan reached
+ *   analysis/global exhaustion before V551 could advance its persisted watched PoolId;
+ * - when a persisted V551 watched pool is behind the verified chain head, V553 reserves
+ *   ONE EXISTING analysis/pre-Telegram global slot from lower-priority analysis only;
+ * - protected exact-USD completion (V180/V254/V458) and holder-count completion may
+ *   override this reserve, so evidence-critical existing work is not regressed;
+ * - the V551 collector request itself bypasses the reserve and runs before seeded/generic
+ *   post-Telegram residual research, preventing lower-priority work from stealing the slot;
+ * - if no watched pool needs advancement, no slot is reserved;
+ * - reservation changes priority only: hard global limit remains 42 and no analysis limit,
+ *   scoring, Momentum, qualification, Telegram threshold or provider ceiling is increased.
+ */
+/**
  * Robinhood Chain Meme Hunter — V552
  * AUTHORITATIVE RUNTIME VERSION: V552
  *
@@ -3116,7 +3133,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V552";
+const VERSION = "V553";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9004,6 +9021,20 @@ function createBudget() {
         estimatedRpcRequestsSaved: 0
       },
 
+      directionalWatchReserveV553: {
+        enabled: true,
+        active: false,
+        reservedRequests: 0,
+        targetAddress: null,
+        poolId: null,
+        configuredAt: null,
+        releasedAt: null,
+        releaseReason: null,
+        lowerPriorityRequestsBlocked: 0,
+        overriddenByProtectedWork: 0,
+        requestCeilingsChanged: false
+      },
+
       completeExactPoolReserveV459: {
         enabled: true,
         active: false,
@@ -9497,6 +9528,70 @@ function consumeBudget(
 
   const protectedV458LogsTypeV459 =
     "BLOCKSCOUT_V458_COMPLETE_EXACT_POOL_24H_LOGS";
+
+  /*
+   * V553: protect one existing slot for a persisted continuous exact-pool watch
+   * that is behind the verified head. Existing evidence-critical completion
+   * calls may override the reserve. No request ceiling is raised.
+   */
+  const directionalWatchReserveV553 =
+    budget.analysis?.directionalWatchReserveV553;
+
+  const protectedDirectionalWatchTypeV553 =
+    "BLOCKSCOUT_V551_CONTINUOUS_EXACT_POOL_LOGS";
+
+  if (
+    phase === "analysis" &&
+    directionalWatchReserveV553?.active === true &&
+    type !== protectedDirectionalWatchTypeV553
+  ) {
+    const protectedTypesV553 = new Set([
+      protectedUsdGTypeV182,
+      protectedUsdCompletionTypeV254,
+      protectedHolderCountCompletionTypeV256,
+      protectedV458TimestampTypeV459,
+      protectedV458LogsTypeV459
+    ]);
+
+    if (protectedTypesV553.has(type)) {
+      directionalWatchReserveV553.overriddenByProtectedWork =
+        safeNumber(directionalWatchReserveV553.overriddenByProtectedWork) + 1;
+    } else {
+      const reservedRequestsV553 = Math.max(
+        0,
+        safeNumber(directionalWatchReserveV553.reservedRequests)
+      );
+      const notificationReserveRemainingV553 =
+        budget.notification?.globalReserveActiveV174 === true
+          ? Math.max(0,
+              safeNumber(budget.notification?.limit) -
+              safeNumber(budget.notification?.used))
+          : 0;
+      const preTelegramGlobalLimitV553 = Math.max(
+        0,
+        safeNumber(budget.totalLimit) - notificationReserveRemainingV553
+      );
+      const analysisCapacityProtectedV553 =
+        safeNumber(budget.analysis?.used) + amount <=
+        Math.max(0, effectiveAnalysisLimitV416(budget) - reservedRequestsV553);
+      const globalCapacityProtectedV553 =
+        safeNumber(budget.totalUsed) + amount <=
+        Math.max(0, preTelegramGlobalLimitV553 - reservedRequestsV553);
+
+      if (!analysisCapacityProtectedV553 || !globalCapacityProtectedV553) {
+        directionalWatchReserveV553.lowerPriorityRequestsBlocked =
+          safeNumber(directionalWatchReserveV553.lowerPriorityRequestsBlocked) + 1;
+        budget.skipped.push({
+          phase,
+          type,
+          amount,
+          reason:"V553_CONTINUOUS_DIRECTIONAL_WATCH_SLOT_RESERVED",
+          reservedFor:directionalWatchReserveV553.targetAddress || null
+        });
+        return false;
+      }
+    }
+  }
 
   /*
    * V459: once a genuinely qualified exact-pool candidate exists, protect two
@@ -10080,6 +10175,8 @@ function budgetTelemetry(
 
       adaptiveHeadroomV416:
         budget.analysis?.adaptiveHeadroomV416 || null,
+      directionalWatchReserveV553:
+        budget.analysis?.directionalWatchReserveV553 || null,
       completeExactPoolReserveV459:
         budget.analysis?.completeExactPoolReserveV459 || null,
 
@@ -56652,6 +56749,33 @@ function selectDirectionalWatchCandidateV551(state, latestNumber) {
     })[0] || null;
 }
 
+function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
+  const reserve = budget?.analysis?.directionalWatchReserveV553;
+  if (!reserve?.enabled) return reserve || null;
+
+  const candidate = selectDirectionalWatchCandidateV551(state, latestNumber);
+  reserve.configuredAt = Date.now();
+  reserve.active = Boolean(candidate);
+  reserve.reservedRequests = candidate ? 1 : 0;
+  reserve.targetAddress = candidate ? normalize(candidate?.tokenAddress) : null;
+  reserve.poolId = candidate ? normalize(candidate?.poolId) : null;
+  reserve.releaseReason = candidate
+    ? null
+    : "NO_WATCHED_POOL_BEHIND_HEAD_V553";
+  reserve.requestCeilingsChanged = false;
+  return reserve;
+}
+
+function releaseDirectionalWatchReserveV553(budget,reason,consumed=false) {
+  const reserve = budget?.analysis?.directionalWatchReserveV553;
+  if (!reserve?.enabled) return reserve || null;
+  reserve.active = false;
+  reserve.releasedAt = Date.now();
+  reserve.releaseReason = reason || null;
+  reserve.consumed = consumed === true;
+  return reserve;
+}
+
 async function advanceDirectionalWatchV551({
   state,
   budget,
@@ -65947,6 +66071,13 @@ async function scan(
       latest.block
     );
 
+  const directionalWatchReserveV553 =
+    configureDirectionalWatchReserveV553(
+      state,
+      budget,
+      latestNumber
+    );
+
   const previousBacklogCursor =
     state.lastScannedBlock;
 
@@ -73582,15 +73713,9 @@ for (
   const flapV525ConfirmedBridgeV540 =
     bridgeConfirmedFlapV525ToV515V540(state);
 
-  /* V532: seeded history uses one separate residual post-Telegram request only if global capacity remains. */
-  const seededHistoricalProofThisScanV529 =
-    await runSeededHistoricalProofV529({ env, state, budget });
-
   /*
-   * V551: directional coverage is now the highest-priority residual measurement lane.
-   * It advances at most one already-verified exact V4 PoolId using only remaining
-   * analysis/global capacity. No request is reserved or added; if no spare exists,
-   * the watch remains safely persisted for the next scan.
+   * V553: advance the reserved continuous directional watch BEFORE lower-priority
+   * seeded/generic residual research can consume the protected capacity.
    */
   const continuousDirectionalWatchThisScanV551 =
     await advanceDirectionalWatchV551({
@@ -73603,8 +73728,22 @@ for (
       env
     });
 
+  const directionalWatchReserveResultV553 =
+    releaseDirectionalWatchReserveV553(
+      budget,
+      continuousDirectionalWatchThisScanV551?.requestConsumed === true
+        ? "V551_CONTINUOUS_DIRECTIONAL_REQUEST_EXECUTED_V553"
+        : continuousDirectionalWatchThisScanV551?.status ||
+          "V551_CONTINUOUS_DIRECTIONAL_NO_REQUEST_V553",
+      continuousDirectionalWatchThisScanV551?.requestConsumed === true
+    );
+
   const continuousDirectionalWatchV551 =
     directionalWatchSnapshotV551(state);
+
+  /* V532: seeded history uses one separate residual post-Telegram request only if global capacity remains. */
+  const seededHistoricalProofThisScanV529 =
+    await runSeededHistoricalProofV529({ env, state, budget });
 
 
   /*
@@ -78582,6 +78721,8 @@ for (
         ) || null
     },
     directionalWatchRegistrationV551,
+    directionalWatchReserveV553,
+    directionalWatchReserveResultV553,
     continuousDirectionalWatchThisScanV551,
     continuousDirectionalWatchV551,
     completeExactPoolDirectionalUsdV458,
