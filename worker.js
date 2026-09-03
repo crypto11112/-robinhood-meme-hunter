@@ -1,4 +1,24 @@
 /**
+ * Robinhood Chain Meme Hunter — V564
+ * AUTHORITATIVE RUNTIME VERSION: V564
+ *
+ * V564 TELEGRAM VERIFIED ROLLING EXACT-POOL USD:
+ * - preserves V563 token+PoolId watch keying and all collector/scheduler behaviour;
+ * - adds ZERO external requests;
+ * - computes a pre-Telegram read-only V557 rolling snapshot from already-persisted
+ *   V254 exact-USD trades and V563 exact-pool coverage;
+ * - selects ONE exact watched PoolId for each candidate (never aggregates pools);
+ * - Telegram now renders 5m/15m/1h/6h/12h/24h Buy USD / Sell USD / Net USD;
+ * - each timeframe independently shows VERIFIED values only when V557 proves
+ *   complete gap-free coverage through the current scan head;
+ * - incomplete windows remain UNVERIFIED;
+ * - verified zero activity is rendered as $0 / $0, distinct from UNVERIFIED;
+ * - section explicitly states EXACT POOL ONLY / NOT TOKEN-WIDE MARKET COVERAGE;
+ * - existing provider/indexed/observed USD sections remain untouched for comparison;
+ * - no scoring, Momentum, qualification, alert threshold, provider, collector,
+ *   request budget or hard 42-request ceiling changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V563
  * AUTHORITATIVE RUNTIME VERSION: V563
  *
@@ -3325,7 +3345,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V563";
+const VERSION = "V564";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -60518,6 +60538,196 @@ function telegramHolderPresentationV269(
 }
 
 
+
+function selectTelegramRollingExactPoolV564(candidate, snapshotV557) {
+  const token = normalize(candidate?.address);
+  const exactCandidatePoolId = normalize(
+    candidate?.onChainPoolIdentityV153?.poolId ||
+    candidate?.onChainPoolIdentityV153?.pairAddress ||
+    null
+  );
+
+  const rows = Array.isArray(snapshotV557?.entries)
+    ? snapshotV557.entries.filter(
+        row =>
+          normalize(row?.tokenAddress) === token &&
+          /^0x[a-f0-9]{64}$/.test(String(normalize(row?.poolId) || ""))
+      )
+    : [];
+
+  if (!rows.length) return null;
+
+  const windowKeys = ["m5", "m15", "h1", "h6", "h12", "h24"];
+
+  const score = row => {
+    const verifiedCount = windowKeys.filter(
+      key => row?.windows?.[key]?.verified === true
+    ).length;
+
+    const exactCandidateMatch =
+      exactCandidatePoolId &&
+      normalize(row?.poolId) === exactCandidatePoolId
+        ? 1
+        : 0;
+
+    const caughtUp =
+      row?.caughtUpToScanHead === true
+        ? 1
+        : 0;
+
+    const ledgerRecords =
+      safeNumber(row?.exactUsdLedgerRecords);
+
+    const registrationAge =
+      Math.max(
+        0,
+        safeNumber(snapshotV557?.requestAt) -
+        safeNumber(row?.registeredAt)
+      );
+
+    return {
+      verifiedCount,
+      exactCandidateMatch,
+      caughtUp,
+      ledgerRecords,
+      registrationAge
+    };
+  };
+
+  rows.sort((a, b) => {
+    const sa = score(a);
+    const sb = score(b);
+
+    if (sa.verifiedCount !== sb.verifiedCount) {
+      return sb.verifiedCount - sa.verifiedCount;
+    }
+    if (sa.caughtUp !== sb.caughtUp) {
+      return sb.caughtUp - sa.caughtUp;
+    }
+    if (sa.exactCandidateMatch !== sb.exactCandidateMatch) {
+      return sb.exactCandidateMatch - sa.exactCandidateMatch;
+    }
+    if (sa.registrationAge !== sb.registrationAge) {
+      return sb.registrationAge - sa.registrationAge;
+    }
+    return sb.ledgerRecords - sa.ledgerRecords;
+  });
+
+  const selected = rows[0];
+  const selectedScore = score(selected);
+
+  return {
+    ...selected,
+    selectionV564: {
+      candidatePoolId: exactCandidatePoolId || null,
+      selectedPoolId: normalize(selected?.poolId),
+      candidatePoolMatch:
+        Boolean(
+          exactCandidatePoolId &&
+          normalize(selected?.poolId) === exactCandidatePoolId
+        ),
+      sameTokenPoolsAvailable: rows.length,
+      verifiedWindows: selectedScore.verifiedCount,
+      caughtUpToScanHead: selectedScore.caughtUp === 1,
+      exactUsdLedgerRecords: selectedScore.ledgerRecords,
+      reason:
+        selectedScore.verifiedCount > 0
+          ? "MOST_MATURE_VERIFIED_EXACT_POOL_V564"
+          : selectedScore.caughtUp === 1
+            ? "CAUGHT_UP_EXACT_POOL_AWAITING_WINDOW_MATURITY_V564"
+            : selectedScore.exactCandidateMatch === 1
+              ? "CURRENT_CANDIDATE_EXACT_POOL_V564"
+              : "BEST_AVAILABLE_EXACT_POOL_V564"
+    }
+  };
+}
+
+function telegramRollingExactPoolUsdLinesV564(candidate) {
+  const selected =
+    candidate?.telegramRollingExactPoolUsdV564 ||
+    null;
+
+  const lines = [
+    "",
+    "🧾 <b>Verified Rolling Buy/Sell USD — BOT EXACT-POOL LEDGER</b>"
+  ];
+
+  if (!selected) {
+    lines.push(
+      "🛰 Exact PoolId: <b>UNVERIFIED</b>",
+      "🟢 5m Buy USD: <b>UNVERIFIED</b>",
+      "🔴 5m Sell USD: <b>UNVERIFIED</b>",
+      "🟢 15m Buy USD: <b>UNVERIFIED</b>",
+      "🔴 15m Sell USD: <b>UNVERIFIED</b>",
+      "🟢 1h Buy USD: <b>UNVERIFIED</b>",
+      "🔴 1h Sell USD: <b>UNVERIFIED</b>",
+      "🟢 6h Buy USD: <b>UNVERIFIED</b>",
+      "🔴 6h Sell USD: <b>UNVERIFIED</b>",
+      "🟢 12h Buy USD: <b>UNVERIFIED</b>",
+      "🔴 12h Sell USD: <b>UNVERIFIED</b>",
+      "🟢 24h Buy USD: <b>UNVERIFIED</b>",
+      "🔴 24h Sell USD: <b>UNVERIFIED</b>",
+      "ℹ️ <i>Exact-pool continuous coverage is not yet proven for this token.</i>"
+    );
+    return lines;
+  }
+
+  const poolId = normalize(selected?.poolId);
+  const shortPoolId =
+    /^0x[a-f0-9]{64}$/.test(String(poolId || ""))
+      ? `${poolId.slice(0, 10)}…${poolId.slice(-8)}`
+      : "UNVERIFIED";
+
+  lines.push(
+    `🛰 Exact PoolId: <code>${escapeHtml(shortPoolId)}</code>`,
+    `🔗 Candidate pool match: <b>${
+      selected?.selectionV564?.candidatePoolMatch === true ? "YES" : "NO"
+    }</b>`,
+    `📡 Coverage through scan head: <b>${
+      selected?.caughtUpToScanHead === true ? "YES" : "NO"
+    }</b> | gap-free <b>${selected?.gapFree === true ? "YES" : "NO"}</b>`
+  );
+
+  const moneyV564 = value =>
+    Number.isFinite(Number(value))
+      ? telegramMoneyV271(Number(value))
+      : "UNVERIFIED";
+
+  const pushWindow = (label, key) => {
+    const row = selected?.windows?.[key];
+
+    if (row?.verified === true) {
+      lines.push(
+        `🟢 ${label} Buy USD: <b>${moneyV564(row?.buyUsd)}</b>`,
+        `🔴 ${label} Sell USD: <b>${moneyV564(row?.sellUsd)}</b>`,
+        `📈 ${label} Net USD: <b>${moneyV564(row?.netUsd)}</b>`,
+        `✅ ${label} coverage: <b>VERIFIED</b>`
+      );
+      return;
+    }
+
+    lines.push(
+      `🟢 ${label} Buy USD: <b>UNVERIFIED</b>`,
+      `🔴 ${label} Sell USD: <b>UNVERIFIED</b>`,
+      `📈 ${label} Net USD: <b>UNVERIFIED</b>`,
+      `⏳ ${label} coverage: <b>UNVERIFIED</b>`
+    );
+  };
+
+  pushWindow("5m", "m5");
+  pushWindow("15m", "m15");
+  pushWindow("1h", "h1");
+  pushWindow("6h", "h6");
+  pushWindow("12h", "h12");
+  pushWindow("24h", "h24");
+
+  lines.push(
+    "ℹ️ <i>EXACT POOL ONLY — these are complete bot-verified totals for the selected PoolId when marked VERIFIED; they are not claimed as token-wide market totals across every pool.</i>"
+  );
+
+  return lines;
+}
+
 function telegramMessage(
   candidate
 ) {
@@ -61162,6 +61372,7 @@ function telegramMessage(
     candidate?.manualDirectionalDiagnosticsV324
       ? `Result: <b>${candidate.manualDirectionalDiagnosticsV324.gecko.verifiedAnyWindow || candidate.manualDirectionalDiagnosticsV324.bitquery.verified ? "VERIFIED_DIRECTIONAL_DATA" : "NO_VERIFIED_DIRECTIONAL_DATA"}</b>`
       : null,
+    ...telegramRollingExactPoolUsdLinesV564(candidate),
     ...verifiedObservedLinesV212,
     ...telegramCompleteExactPoolUsdLinesV458(candidate),
     ...ponsCurveLinesV216,
@@ -74061,6 +74272,53 @@ for (
       candidates
     );
 
+  /*
+   * V564: read-only rolling exact-pool USD snapshot BEFORE Telegram.
+   * This intentionally uses only evidence already persisted before the alert.
+   * The post-Telegram V551 collector remains in its established position and
+   * cannot retroactively influence a message that was already sent.
+   */
+  const preTelegramRollingExactPoolUsdV564 =
+    verifiedRollingDirectionalUsdWindowsV557(
+      state,
+      latestNumber,
+      Date.now()
+    );
+
+  const telegramRollingExactPoolSelectionsV564 = [];
+
+  for (const candidate of candidates || []) {
+    const selectedV564 =
+      selectTelegramRollingExactPoolV564(
+        candidate,
+        preTelegramRollingExactPoolUsdV564
+      );
+
+    candidate.telegramRollingExactPoolUsdV564 =
+      selectedV564;
+
+    telegramRollingExactPoolSelectionsV564.push({
+      address: normalize(candidate?.address),
+      symbol: candidate?.symbol || null,
+      selectedPoolId:
+        normalize(selectedV564?.poolId) || null,
+      candidatePoolMatch:
+        selectedV564?.selectionV564?.candidatePoolMatch === true,
+      sameTokenPoolsAvailable:
+        safeNumber(
+          selectedV564?.selectionV564?.sameTokenPoolsAvailable
+        ),
+      verifiedWindows:
+        safeNumber(
+          selectedV564?.selectionV564?.verifiedWindows
+        ),
+      caughtUpToScanHead:
+        selectedV564?.caughtUpToScanHead === true,
+      selectionReason:
+        selectedV564?.selectionV564?.reason || "NO_EXACT_POOL_SELECTION_V564"
+    });
+  }
+
   /* =======================================================
      TELEGRAM
      ======================================================= */
@@ -79893,6 +80151,23 @@ for (
     directionalMultiPoolSchedulerV558,
     continuousDirectionalWatchV551,
     verifiedRollingDirectionalUsdV557,
+    preTelegramRollingExactPoolUsdV564: {
+      enabled: true,
+      measurementOnly: true,
+      externalRequestsAdded: 0,
+      exactPoolOnly: true,
+      tokenWideMarketCoverageClaimed: false,
+      scanHeadBlock:
+        preTelegramRollingExactPoolUsdV564?.scanHeadBlock ?? null,
+      verifiedWindowCounts:
+        preTelegramRollingExactPoolUsdV564?.verifiedWindowCounts || null,
+      selections:
+        telegramRollingExactPoolSelectionsV564,
+      scoringChanged: false,
+      qualificationChanged: false,
+      telegramThresholdChanged: false,
+      hardGlobalLimitUnchanged: 42
+    },
     completeExactPoolDirectionalUsdV458,
     completeExactPoolReserveResultV459,
     completeExactPoolCompletionV460:
