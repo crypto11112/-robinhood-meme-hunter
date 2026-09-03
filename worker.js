@@ -382,7 +382,7 @@
  * - scoring, Momentum, qualification, Telegram thresholds, verified USD,
  *   dense-pool completion, RWA detector, launch meter and hard limit 42 unchanged.
  *
- * V523 SEEDED NOXA LIVE EVIDENCE + V522 SOURCE INTELLIGENCE:
+ * V524 SEEDED OPENFAIR + V523 NOXA LIVE EVIDENCE + V522 SOURCE INTELLIGENCE:
  * - preserves the proven V517/V520 autonomous 3x3 source-learning loop unchanged;
  * - adds /sourceintel as a zero-provider-request, zero-write evidence view;
  * - correlates self-learned V515 detectors with existing V503 creator identity evidence;
@@ -2726,7 +2726,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V523";
+const VERSION = "V524";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -21430,6 +21430,160 @@ function seededNoxaLiveEvidenceSnapshotV523(state) {
   };
 }
 
+
+/* =========================================================
+   V524 SEEDED OPENFAIR LIVE EVIDENCE COLLECTOR
+   =========================================================
+   Purpose:
+   - Treat the published Openfair Robinhood LaunchFactory as a SEEDED LEAD only.
+   - Add its factory address to the EXISTING live eth_getLogs emitter array,
+     therefore adding ZERO extra live-discovery requests.
+   - Persist raw event fingerprints (topic0 / tx / block / log index) so a later
+     exact-proof stage can identify the launched-token slot from real evidence.
+   - Never infer a token address, launchpad identity, or promote a detector
+     from recurrence alone.
+   - Scoring, qualification, Telegram thresholds and hard request limit 42
+     remain unchanged.
+*/
+const SEEDED_OPENFAIR_FACTORY_V524 =
+  "0x2505522ff2796e4152277028f75626f9136da0cf";
+
+function ensureSeededOpenfairLiveEvidenceV524(state) {
+  state.seededOpenfairLiveEvidenceV524 ??= {
+    enabled: true,
+    measurementOnlyUntilExactProof: true,
+    factory: SEEDED_OPENFAIR_FACTORY_V524,
+    scansObserved: 0,
+    matchingLogsObserved: 0,
+    distinctTransactionsObserved: 0,
+    firstObservedAt: null,
+    lastObservedAt: null,
+    lastObservedBlock: null,
+    lastObservedTransactionHash: null,
+    topic0Counts: {},
+    recentEvidence: [],
+    exactLaunchPatternConfirmed: false,
+    exactDetectorRegistered: false,
+    launchSourcePromotionAllowed: false,
+    externalRequestsAdded: 0,
+    hardGlobalLimitUnchanged: 42,
+    status: "V524_SEEDED_OPENFAIR_LIVE_EVIDENCE_COLLECTOR_ARMED"
+  };
+  return state.seededOpenfairLiveEvidenceV524;
+}
+
+function seededOpenfairEmitterAddressesV524(state) {
+  ensureSeededOpenfairLiveEvidenceV524(state);
+  return [SEEDED_OPENFAIR_FACTORY_V524];
+}
+
+function observeSeededOpenfairLiveLogsV524(state, logs) {
+  const root = ensureSeededOpenfairLiveEvidenceV524(state);
+  root.scansObserved = safeNumber(root.scansObserved) + 1;
+
+  const rows = Array.isArray(logs) ? logs : [];
+  let matched = 0;
+
+  for (const row of rows) {
+    const emitter = normalize(row?.address || "");
+    if (emitter !== SEEDED_OPENFAIR_FACTORY_V524) continue;
+
+    matched++;
+    const topics = Array.isArray(row?.topics) ? row.topics : [];
+    const topic0 = String(topics[0] || "").toLowerCase();
+    const tx = String(row?.transactionHash || row?.transaction_hash || "").toLowerCase();
+    const blockHex = row?.blockNumber ?? row?.block_number ?? null;
+    const logIndexHex = row?.logIndex ?? row?.log_index ?? null;
+    const blockNumber = typeof blockHex === "string" && /^0x[0-9a-f]+$/i.test(blockHex)
+      ? parseInt(blockHex, 16)
+      : safeNumber(blockHex) || null;
+    const logIndex = typeof logIndexHex === "string" && /^0x[0-9a-f]+$/i.test(logIndexHex)
+      ? parseInt(logIndexHex, 16)
+      : safeNumber(logIndexHex) || null;
+
+    if (/^0x[a-f0-9]{64}$/.test(topic0)) {
+      root.topic0Counts[topic0] = safeNumber(root.topic0Counts[topic0]) + 1;
+    }
+
+    const evidence = {
+      observedAt: Date.now(),
+      factory: SEEDED_OPENFAIR_FACTORY_V524,
+      topic0: /^0x[a-f0-9]{64}$/.test(topic0) ? topic0 : null,
+      transactionHash: /^0x[a-f0-9]{64}$/.test(tx) ? tx : null,
+      blockNumber,
+      logIndex,
+      topicCount: topics.length,
+      dataBytes: typeof row?.data === "string" && row.data.startsWith("0x")
+        ? Math.max(0, (row.data.length - 2) / 2)
+        : null,
+      evidenceMeaning: "SEEDED_FACTORY_EVENT_FINGERPRINT_ONLY_NOT_TOKEN_LAUNCH_PROOF_V524"
+    };
+
+    root.recentEvidence.push(evidence);
+    if (root.recentEvidence.length > 250) {
+      root.recentEvidence = root.recentEvidence.slice(-250);
+    }
+
+    if (!root.firstObservedAt) root.firstObservedAt = evidence.observedAt;
+    root.lastObservedAt = evidence.observedAt;
+    root.lastObservedBlock = blockNumber;
+    root.lastObservedTransactionHash = evidence.transactionHash;
+  }
+
+  root.matchingLogsObserved = safeNumber(root.matchingLogsObserved) + matched;
+  const txs = new Set(
+    (root.recentEvidence || [])
+      .map(row => String(row?.transactionHash || "").toLowerCase())
+      .filter(tx => /^0x[a-f0-9]{64}$/.test(tx))
+  );
+  root.distinctTransactionsObserved = txs.size;
+
+  if (root.matchingLogsObserved > 0) {
+    root.status = "V524_SEEDED_OPENFAIR_LIVE_FACTORY_EVENTS_OBSERVED_AWAIT_EXACT_TOKEN_PROOF";
+  } else {
+    root.status = "V524_SEEDED_OPENFAIR_LIVE_EVIDENCE_COLLECTOR_ARMED_NO_EVENT_OBSERVED_YET";
+  }
+
+  return {
+    enabled: true,
+    factory: SEEDED_OPENFAIR_FACTORY_V524,
+    matchingLogsThisChunk: matched,
+    matchingLogsObserved: root.matchingLogsObserved,
+    distinctTransactionsObserved: root.distinctTransactionsObserved,
+    exactLaunchPatternConfirmed: false,
+    launchSourcePromoted: false,
+    externalRequestsAdded: 0,
+    status: root.status
+  };
+}
+
+function seededOpenfairLiveEvidenceSnapshotV524(state) {
+  const root = ensureSeededOpenfairLiveEvidenceV524(state);
+  return {
+    enabled: true,
+    measurementOnlyUntilExactProof: true,
+    factory: SEEDED_OPENFAIR_FACTORY_V524,
+    scansObserved: safeNumber(root.scansObserved),
+    matchingLogsObserved: safeNumber(root.matchingLogsObserved),
+    distinctTransactionsObserved: safeNumber(root.distinctTransactionsObserved),
+    firstObservedAt: root.firstObservedAt || null,
+    lastObservedAt: root.lastObservedAt || null,
+    lastObservedBlock: root.lastObservedBlock || null,
+    lastObservedTransactionHash: root.lastObservedTransactionHash || null,
+    strongestTopics: Object.entries(root.topic0Counts || {})
+      .map(([topic0, count]) => ({ topic0, count: safeNumber(count) }))
+      .sort((a,b) => b.count - a.count || a.topic0.localeCompare(b.topic0))
+      .slice(0, 10),
+    recentEvidence: Array.isArray(root.recentEvidence) ? root.recentEvidence.slice(-10) : [],
+    exactLaunchPatternConfirmed: root.exactLaunchPatternConfirmed === true,
+    exactDetectorRegistered: root.exactDetectorRegistered === true,
+    launchSourcePromotionAllowed: false,
+    externalRequestsAdded: 0,
+    hardGlobalLimitUnchanged: 42,
+    status: root.status || null
+  };
+}
+
 /* =========================================================
    LIVE SCAN
    ========================================================= */
@@ -21496,7 +21650,8 @@ async function scanLiveRange(
       new Set([
         ...dopplerLiveEmittersV514,
         ...genericVerifiedEmittersV515,
-        ...seededNoxaEmitterAddressesV523(state)
+        ...seededNoxaEmitterAddressesV523(state),
+        ...seededOpenfairEmitterAddressesV524(state)
       ])
     );
 
@@ -21857,6 +22012,11 @@ async function scanLiveRange(
       )
     ) {
       observeSeededNoxaLiveLogsV523(
+        state,
+        response.result
+      );
+
+      observeSeededOpenfairLiveLogsV524(
         state,
         response.result
       );
@@ -112881,10 +113041,15 @@ function sourceIdentityIntelSnapshotV522(state) {
       ? seededNoxaLiveEvidenceSnapshotV523(state)
       : null;
 
+    const openfairV524 = seed.key === "openfair"
+      ? seededOpenfairLiveEvidenceSnapshotV524(state)
+      : null;
+
     return {
       ...seed,
       address,
       seededLiveEvidenceV523: noxaV523,
+      seededLiveEvidenceV524: openfairV524,
       observedInVerifiedCreatorOrigins: Boolean(cluster),
       distinctVerifiedOriginTokens: distinctTokens,
       blockscoutVerifiedContractProfile: profile?.blockscoutVerifiedContract === true,
@@ -112896,20 +113061,24 @@ function sourceIdentityIntelSnapshotV522(state) {
         ? "BOT_EXACT_DETECTOR_ALREADY_ACTIVE"
         : (seed.key === "noxa_fun" && safeNumber(noxaV523?.matchingLogsObserved) > 0)
           ? "V523_SEEDED_FACTORY_LIVE_EVENTS_OBSERVED_AWAIT_EXACT_TOKEN_PROOF"
-          : cluster
-            ? "OBSERVED_IN_BOT_VERIFIED_ORIGIN_EVIDENCE_AWAIT_EXACT_SOURCE_PROOF"
-            : alreadyStaticSupported
-              ? "ALREADY_SUPPORTED_STATIC_SOURCE_NO_24H_CORRELATION_REQUIRED_V522"
-              : (seed.key === "noxa_fun")
-                ? "V523_SEEDED_FACTORY_LIVE_COLLECTOR_ARMED_NO_EVENT_OBSERVED_YET"
-                : "SEEDED_LEAD_NOT_YET_MATCHED_IN_BOT_VERIFIED_ORIGIN_EVIDENCE",
+          : (seed.key === "openfair" && safeNumber(openfairV524?.matchingLogsObserved) > 0)
+            ? "V524_SEEDED_OPENFAIR_LIVE_EVENTS_OBSERVED_AWAIT_EXACT_TOKEN_PROOF"
+            : cluster
+              ? "OBSERVED_IN_BOT_VERIFIED_ORIGIN_EVIDENCE_AWAIT_EXACT_SOURCE_PROOF"
+              : alreadyStaticSupported
+                ? "ALREADY_SUPPORTED_STATIC_SOURCE_NO_24H_CORRELATION_REQUIRED_V522"
+                : (seed.key === "noxa_fun")
+                  ? "V523_SEEDED_FACTORY_LIVE_COLLECTOR_ARMED_NO_EVENT_OBSERVED_YET"
+                  : (seed.key === "openfair")
+                    ? "V524_SEEDED_OPENFAIR_LIVE_COLLECTOR_ARMED_NO_EVENT_OBSERVED_YET"
+                    : "SEEDED_LEAD_NOT_YET_MATCHED_IN_BOT_VERIFIED_ORIGIN_EVIDENCE",
       sourcePromotionAllowedByV522: false
     };
   });
 
   return {
     enabled: true,
-    version: "V522",
+    version: "V524",
     readOnly: true,
     externalProviderRequests: 0,
     persistentWrites: 0,
@@ -112922,7 +113091,7 @@ function sourceIdentityIntelSnapshotV522(state) {
     seededLeadCount: seededLeads.length,
     seededLeads,
     interpretation:
-      "IDENTITY_AND_SEED_CORRELATION_ONLY_NO_BRAND_OR_SOURCE_PROMOTION_WITHOUT_BOT_EXACT_PROOF_V522"
+      "IDENTITY_AND_SEEDED_LIVE_EVIDENCE_ONLY_NO_BRAND_OR_SOURCE_PROMOTION_WITHOUT_BOT_EXACT_PROOF_V524"
   };
 }
 
@@ -112963,6 +113132,14 @@ function sourceIdentityIntelTelegramMessageV522(state) {
       );
     }
 
+    if (row.key === "openfair" && row.seededLiveEvidenceV524) {
+      lines.push(
+        `  V524 live factory logs observed: <b>${Number(safeNumber(row.seededLiveEvidenceV524.matchingLogsObserved)).toLocaleString("en-GB")}</b>`,
+        `  Distinct factory txs observed: <b>${Number(safeNumber(row.seededLiveEvidenceV524.distinctTransactionsObserved)).toLocaleString("en-GB")}</b>`,
+        `  Exact token-launch pattern: <b>${row.seededLiveEvidenceV524.exactLaunchPatternConfirmed ? "CONFIRMED" : "DATA UNVERIFIED"}</b>`
+      );
+    }
+
     return lines;
   });
 
@@ -112975,7 +113152,7 @@ function sourceIdentityIntelTelegramMessageV522(state) {
     "<b>Seeded launchpad leads — correlation only</b>",
     ...seedLines,
     "",
-    "⚠️ Website/research labels are leads only. V523 does not promote a source name from them.",
+    "⚠️ Website/research labels are leads only. V524 does not promote a source name from them.",
     "✅ Exact launch-source verification still requires the bot's existing on-chain proof standard.",
     "<i>/sourceintel is read-only: 0 provider requests and 0 persistent state writes.</i>"
   ].join("\n");
