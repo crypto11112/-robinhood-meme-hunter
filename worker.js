@@ -1,4 +1,26 @@
 /**
+ * Robinhood Chain Meme Hunter — V568
+ * AUTHORITATIVE RUNTIME VERSION: V568
+ *
+ * V568 EXPANSION CATCH-UP SPRINT:
+ * - preserves V567 expansion-ready selector priority;
+ * - preserves V566 density-aware 600/1200/2400/4800 spans;
+ * - preserves V565 evidence-aware retention;
+ * - preserves V564 Telegram exact-pool rolling USD output;
+ * - preserves V563 token+PoolId watch keying;
+ * - when the top reserved directional target is expansion-ready and behind head,
+ *   V559 now guarantees 2 of its existing reserved requests instead of 1;
+ * - protected work may borrow only the remaining reserve slot in that case;
+ * - the second directional chunk preferentially continues the SAME exact PoolId
+ *   when the first V567 expansion-ready chunk advanced safely;
+ * - a heavy scan can therefore cover up to 9,600 contiguous blocks on the same
+ *   proven low-density pool without increasing the 42-request hard cap;
+ * - V554 global spare-floor rule is relaxed from 1 to 0 ONLY for the guaranteed
+ *   second V568 reserved catch-up request, allowing request 42/42 to be used;
+ * - saturation / incomplete exact-USD decoding still stops coverage immediately;
+ * - no scoring, Momentum, qualification, USD math, provider or Telegram threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V567
  * AUTHORITATIVE RUNTIME VERSION: V567
  *
@@ -3399,7 +3421,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V567";
+const VERSION = "V568";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -57534,13 +57556,35 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
       distinctBehindPoolIdsV559.length
     );
 
+  const expansionCatchupSprintEligibleV568 =
+    Boolean(
+      candidate &&
+      desiredReserveV559 >= 2 &&
+      directionalWatchExpansionReadyV567(candidate) &&
+      Math.max(
+        0,
+        safeNumber(latestNumber) -
+        safeNumber(candidate?.lastCollectedBlock)
+      ) > DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551
+    );
+
   reserve.configuredAt = Date.now();
   reserve.active = desiredReserveV559 > 0;
   reserve.reservedRequests = desiredReserveV559;
+  reserve.expansionCatchupSprintEligibleV568 =
+    expansionCatchupSprintEligibleV568;
   reserve.minimumGuaranteedRequestsV559 =
-    desiredReserveV559 > 0 ? 1 : 0;
+    desiredReserveV559 > 0
+      ? (expansionCatchupSprintEligibleV568 ? 2 : 1)
+      : 0;
+  reserve.minimumGuaranteedRequestsV568 =
+    reserve.minimumGuaranteedRequestsV559;
   reserve.maxProtectedOverridesV559 =
-    Math.max(0, desiredReserveV559 - reserve.minimumGuaranteedRequestsV559);
+    Math.max(
+      0,
+      desiredReserveV559 -
+      reserve.minimumGuaranteedRequestsV559
+    );
   reserve.protectedOverridesUsedV559 = 0;
   reserve.behindPoolCountV559 = distinctBehindPoolIdsV559.length;
   reserve.behindPoolIdsV559 = distinctBehindPoolIdsV559.slice(
@@ -57549,6 +57593,10 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
   );
   reserve.targetAddress = candidate ? normalize(candidate?.tokenAddress) : null;
   reserve.poolId = candidate ? normalize(candidate?.poolId) : null;
+  reserve.selectionPriorityTierV567 =
+    candidate ? directionalWatchPriorityTierV567(candidate) : null;
+  reserve.expansionReadyPriorityV567 =
+    candidate ? directionalWatchExpansionReadyV567(candidate) : false;
   reserve.releaseReason = candidate
     ? null
     : "NO_WATCHED_POOL_BEHIND_HEAD_V553";
@@ -75198,6 +75246,18 @@ for (
     );
   }
 
+  const expansionCatchupSprintV568 =
+    directionalWatchReserveV553?.expansionCatchupSprintEligibleV568 === true &&
+    continuousDirectionalWatchThisScanV551?.requestConsumed === true &&
+    continuousDirectionalWatchThisScanV551?.coverageAdvanced === true &&
+    continuousDirectionalWatchThisScanV551?.rangeSaturated !== true &&
+    continuousDirectionalWatchThisScanV551?.expansionReadyPriorityV567 === true;
+
+  const expansionCatchupPoolIdV568 =
+    expansionCatchupSprintV568
+      ? normalize(continuousDirectionalWatchThisScanV551?.selectedPoolId)
+      : null;
+
   const directionalWatchReserveResultV553 =
     releaseDirectionalWatchReserveV553(
       budget,
@@ -75213,17 +75273,20 @@ for (
   ];
 
   let finishPoolIdV561 =
-    continuousDirectionalWatchThisScanV551?.coverageAdvanced === true &&
-    safeNumber(
-      continuousDirectionalWatchThisScanV551?.blocksRemainingToHead
-    ) > 0 &&
-    safeNumber(
-      continuousDirectionalWatchThisScanV551?.blocksRemainingToHead
-    ) <= DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551
-      ? normalize(
-          continuousDirectionalWatchThisScanV551?.selectedPoolId
-        )
-      : null;
+    expansionCatchupPoolIdV568 ||
+    (
+      continuousDirectionalWatchThisScanV551?.coverageAdvanced === true &&
+      safeNumber(
+        continuousDirectionalWatchThisScanV551?.blocksRemainingToHead
+      ) > 0 &&
+      safeNumber(
+        continuousDirectionalWatchThisScanV551?.blocksRemainingToHead
+      ) <= DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551
+        ? normalize(
+            continuousDirectionalWatchThisScanV551?.selectedPoolId
+          )
+        : null
+    );
 
   let directionalCatchupStopReasonV554 =
     continuousDirectionalWatchThisScanV551?.coverageAdvanced === true
@@ -75243,9 +75306,15 @@ for (
         safeNumber(budget?.totalUsed)
       );
 
+    const guaranteedSecondSprintChunkV568 =
+      expansionCatchupSprintV568 === true &&
+      directionalCatchupChunksV554.length === 1 &&
+      globalRemainingV554 >= 1;
+
     if (
       globalRemainingV554 <=
-      DIRECTIONAL_WATCH_MIN_GLOBAL_SPARE_AFTER_EXTRA_CHUNK_V554
+        DIRECTIONAL_WATCH_MIN_GLOBAL_SPARE_AFTER_EXTRA_CHUNK_V554 &&
+      !guaranteedSecondSprintChunkV568
     ) {
       directionalCatchupStopReasonV554 =
         "GLOBAL_SPARE_FLOOR_REACHED_V554";
@@ -75305,6 +75374,21 @@ for (
 
     const remainingAfterChunkV561 =
       safeNumber(extraChunkV554?.blocksRemainingToHead);
+
+    if (
+      expansionCatchupSprintV568 === true &&
+      directionalCatchupChunksV554.length >= 2 &&
+      normalize(extraChunkV554?.selectedPoolId) ===
+        expansionCatchupPoolIdV568 &&
+      remainingAfterChunkV561 >
+        DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551
+    ) {
+      /*
+       * V568 guarantees/concentrates the second chunk. A third chunk, when
+       * genuine spare capacity exists, returns to normal distinct-pool routing.
+       */
+      finishPoolIdV561 = null;
+    }
 
     if (
       finishPoolIdV561 &&
@@ -75407,6 +75491,10 @@ for (
         row?.densityExpansionAppliedV566 === true,
       expansionReadyPriorityV567:
         row?.expansionReadyPriorityV567 === true,
+      expansionCatchupSprintV568:
+        expansionCatchupSprintV568 === true,
+      samePoolSprintTargetV568:
+        expansionCatchupPoolIdV568 || null,
       selectionPriorityTierV567:
         Number.isFinite(Number(row?.selectionPriorityTierV567))
           ? Number(row.selectionPriorityTierV567)
@@ -75448,6 +75536,16 @@ for (
     selectionPriorityV567:
       "EXPANSION_READY_THEN_ACTIVE_RECENT_THEN_BACKLOG_CLOSEST_TO_HEAD",
     reservePriorityAlignedV567:true,
+    expansionCatchupSprintV568:
+      expansionCatchupSprintV568 === true,
+    expansionCatchupPoolIdV568:
+      expansionCatchupPoolIdV568 || null,
+    guaranteedDirectionalRequestsV568:
+      safeNumber(
+        directionalWatchReserveResultV553?.minimumGuaranteedRequestsV568
+      ),
+    samePoolSecondChunkV568:
+      expansionCatchupSprintV568 === true,
     reservedRequestsV559:safeNumber(
       directionalWatchReserveV553?.reservedRequests
     ),
