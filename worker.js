@@ -1,4 +1,24 @@
 /**
+ * Robinhood Chain Meme Hunter — V576
+ * AUTHORITATIVE RUNTIME VERSION: V576
+ *
+ * V576 VERIFIED 1-MINUTE EXACT-POOL DIRECTIONAL USD WINDOW:
+ * - preserves all V575/V574/V573/V572/V571/V570 behaviour;
+ * - adds a 1m window to the V557 continuous exact-pool rolling USD ledger;
+ * - 1m uses the exact same conservative proof gate as existing windows:
+ *     registrationAt <= 1m cutoff + caught up to scan head + gap-free;
+ * - verified zero is allowed only after complete 1m coverage is proven;
+ * - incomplete 1m remains UNVERIFIED;
+ * - adds m1 to V569 persisted verified sweep snapshots;
+ * - adds 1m Buy/Sell/Net USD to V564 Telegram/manual exact-pool display;
+ * - adds 1m maturity progress to V572 /analyse diagnostics;
+ * - measurement/presentation only; 1m does NOT affect Opportunity, Momentum,
+ *   qualification, alert thresholds, or learning outcomes;
+ * - zero external requests added; watch cap remains 24;
+ * - hard global request ceiling remains 42;
+ * - no historical backfill and no token-wide market coverage claim.
+ */
+/**
  * Robinhood Chain Meme Hunter — V575
  * AUTHORITATIVE RUNTIME VERSION: V575
  *
@@ -3598,7 +3618,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V575";
+const VERSION = "V576";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -58719,6 +58739,7 @@ function verifiedRollingDirectionalUsdWindowsV557(
   const now = Number(requestAt);
 
   const windows = [
+    ["m1", 1 * 60 * 1000],
     ["m5", 5 * 60 * 1000],
     ["m15", 15 * 60 * 1000],
     ["h1", 60 * 60 * 1000],
@@ -58859,7 +58880,17 @@ function verifiedRollingDirectionalUsdWindowsV557(
     requestAt: now,
     scanHeadBlock: Number.isFinite(head) ? head : null,
     watchedPoolsEvaluated: entries.length,
+    oneMinuteExactPoolWindowV576: {
+      enabled:true,
+      measurementOnly:true,
+      windowMs:60 * 1000,
+      usesSameContiguousCoverageGateAsV557:true,
+      historicalBackfill:false,
+      scoringChanged:false,
+      externalRequestsAdded:0
+    },
     verifiedWindowCounts: {
+      m1: entries.filter(row => row?.windows?.m1?.verified === true).length,
       m5: entries.filter(row => row?.windows?.m5?.verified === true).length,
       m15: entries.filter(row => row?.windows?.m15?.verified === true).length,
       h1: entries.filter(row => row?.windows?.h1?.verified === true).length,
@@ -61583,7 +61614,7 @@ function telegramHolderPresentationV269(
 function persistVerifiedRollingSweepV569(state, snapshotV557) {
   if (!state || !snapshotV557) return null;
 
-  const windowKeys = ["m5","m15","h1","h6","h12","h24"];
+  const windowKeys = ["m1","m5","m15","h1","h6","h12","h24"];
   const entries = (Array.isArray(snapshotV557?.entries) ? snapshotV557.entries : [])
     .filter(row =>
       windowKeys.some(key => row?.windows?.[key]?.verified === true)
@@ -61638,7 +61669,7 @@ function persistVerifiedRollingSweepV569(state, snapshotV557) {
   }
 
   state.latestVerifiedRollingExactPoolSweepV569 = {
-    schemaVersion:"V569_1",
+    schemaVersion:"V576_1",
     proofType:"COMPLETED_EXACT_POOL_SWEEP_SNAPSHOT",
     exactPoolOnly:true,
     tokenWideMarketCoverageClaimed:false,
@@ -61724,7 +61755,7 @@ function selectTelegramRollingExactPoolV564(candidate, snapshotV557) {
 
   if (!rows.length) return null;
 
-  const windowKeys = ["m5", "m15", "h1", "h6", "h12", "h24"];
+  const windowKeys = ["m1", "m5", "m15", "h1", "h6", "h12", "h24"];
 
   const score = row => {
     const verifiedCount = windowKeys.filter(
@@ -61847,6 +61878,8 @@ function telegramRollingExactPoolUsdLinesV564(candidate) {
             `${normalize(observedPoolIdsV570[0]).slice(0,10)}…${normalize(observedPoolIdsV570[0]).slice(-8)}`
           )}</code> <b>(OBSERVED — WATCH STARTING)</b>`
         : "🛰 Exact PoolId: <b>UNVERIFIED</b>",
+      "🟢 1m Buy USD: <b>UNVERIFIED</b>",
+      "🔴 1m Sell USD: <b>UNVERIFIED</b>",
       "🟢 5m Buy USD: <b>UNVERIFIED</b>",
       "🔴 5m Sell USD: <b>UNVERIFIED</b>",
       "🟢 15m Buy USD: <b>UNVERIFIED</b>",
@@ -61919,6 +61952,7 @@ function telegramRollingExactPoolUsdLinesV564(candidate) {
     );
   };
 
+  pushWindow("1m", "m1");
   pushWindow("5m", "m5");
   pushWindow("15m", "m15");
   pushWindow("1h", "h1");
@@ -61927,7 +61961,8 @@ function telegramRollingExactPoolUsdLinesV564(candidate) {
   pushWindow("24h", "h24");
 
   lines.push(
-    "ℹ️ <i>EXACT POOL ONLY — these are complete bot-verified totals for the selected PoolId when marked VERIFIED; they are not claimed as token-wide market totals across every pool.</i>"
+    "ℹ️ <i>EXACT POOL ONLY — these are complete bot-verified totals for the selected PoolId when marked VERIFIED; they are not claimed as token-wide market totals across every pool.</i>",
+    "⚡ <i>V576 1m is measurement-only and uses the same gap-free forward-coverage proof as longer windows.</i>"
   );
 
   return lines;
@@ -89141,6 +89176,7 @@ function manualRollingWatchProgressV572(state, candidate) {
     selected?.gapDetected !== true;
 
   const windowDefs = {
+    m1:1 * 60 * 1000,
     m5:5 * 60 * 1000,
     m15:15 * 60 * 1000,
     h1:60 * 60 * 1000,
@@ -89263,6 +89299,7 @@ function manualRollingProgressLinesV572(candidate) {
     `💵 Exact-USD ledger trades: <b>${safeNumber(p?.exactUsdTrades)}</b>`,
     `⚠️ Saturated attempts: <b>${safeNumber(p?.saturatedAttempts)}</b>`,
     `📏 Adaptive span: <b>${safeNumber(p?.adaptiveBlockSpan)}</b> blocks`,
+    `• 1m: <b>${escapeHtml(maturityText("m1"))}</b>`,
     `• 5m: <b>${escapeHtml(maturityText("m5"))}</b>`,
     `• 15m: <b>${escapeHtml(maturityText("m15"))}</b>`,
     `• 1h: <b>${escapeHtml(maturityText("h1"))}</b>`,
