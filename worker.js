@@ -1,4 +1,14 @@
 /**
+ * V538 OPENFAIR GLOBAL-SPARE RESERVATION HANDOFF FIX:
+ * - preserves V537 Openfair topic2 recovery reservation and all confirmed V535/V536 detectors;
+ * - fixes the observed bypass where post-Telegram V478 global-spare work could consume the
+ *   one request V537 had reserved before runSeededHistoricalProofV529 executed;
+ * - while Openfair topic2 recovery is active, lower-priority V478 global-spare requests are
+ *   deferred so the existing V532/V533 historical lane can consume that same request later;
+ * - does not increase the 42-request ceiling and does not change scoring, Momentum,
+ *   qualification, Telegram thresholds, verified USD, holder logic or confirmed detectors.
+ */
+/**
  * Robinhood Chain Meme Hunter — V537
  * AUTHORITATIVE RUNTIME VERSION: V537
  *
@@ -2860,7 +2870,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V537";
+const VERSION = "V538";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -94996,6 +95006,35 @@ function consumeReleasedGlobalSpareV478(
       1,
       safeNumber(amount)
     );
+
+  /*
+   * V538: V537 reserved one analysis/global slot for Openfair topic2 recovery,
+   * but this post-Telegram V478 bypass path does not call consumeBudget().
+   * Preserve that exact request for the later V532/V533 historical lane.
+   */
+  const openfairRecoveryReserveV538 =
+    budget?.analysis?.openfairHistoricalRecoveryReserveV537;
+
+  if (
+    openfairRecoveryReserveV538?.active === true &&
+    safeNumber(openfairRecoveryReserveV538?.reservedRequests) > 0
+  ) {
+    openfairRecoveryReserveV538.globalSpareRequestsBlockedV538 =
+      safeNumber(openfairRecoveryReserveV538.globalSpareRequestsBlockedV538) + 1;
+
+    budget.skipped = Array.isArray(budget?.skipped) ? budget.skipped : [];
+    budget.skipped.push({
+      phase: "post-telegram-global-spare",
+      type,
+      amount: n,
+      reason: "V538_OPENFAIR_HISTORICAL_TOPIC2_GLOBAL_SPARE_RESERVED"
+    });
+
+    return {
+      ok: false,
+      reason: "V538_OPENFAIR_HISTORICAL_TOPIC2_GLOBAL_SPARE_RESERVED"
+    };
+  }
 
   const totalUsed =
     safeNumber(budget?.totalUsed);
