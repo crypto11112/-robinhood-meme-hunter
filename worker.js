@@ -1,6 +1,16 @@
 /**
- * Robinhood Chain Meme Hunter — V528
- * AUTHORITATIVE RUNTIME VERSION: V528
+ * Robinhood Chain Meme Hunter — V529
+ * AUTHORITATIVE RUNTIME VERSION: V529
+ *
+ * V529 BOUNDED HISTORICAL SEEDED-SOURCE PROOF LANE:
+ * - preserves V528 scanner/scoring/Telegram/self-learning behavior;
+ * - at most ONE Blockscout V2 address-log request per scan and only when the existing
+ *   released post-Telegram secondary/global-spare lane has not already been consumed;
+ * - rotates Mint Club -> Flap -> NOXA -> Openfair and persists pagination/evidence;
+ * - Mint Club promotion is fail-closed: exact decoded TokenCreated evidence, topic[1]
+ *   token identity, same topic0, >=3 distinct tokens and >=3 distinct transactions;
+ * - Flap/NOXA/Openfair remain fingerprint-only until their token slot is proven;
+ * - hard limit 42 and V515/V517/V520 autonomous source architecture unchanged.
  *
  * V528 RUNTIME HEADER / VERSION CONSISTENCY CLEANUP:
  * - fixes the stale top-of-file V520 header carried forward into later builds;
@@ -2760,7 +2770,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V528";
+const VERSION = "V529";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -21902,6 +21912,60 @@ function seededMintClubLiveEvidenceSnapshotV527(state) {
     status:root.status||null
   };
 }
+
+
+/* =========================================================
+   V529 BOUNDED HISTORICAL SEEDED-SOURCE PROOF LANE
+   ========================================================= */
+const SEEDED_HISTORICAL_SOURCES_V529 = [
+  { key:"mint_club", label:"Mint Club", address:SEEDED_MINTCLUB_BOND_V527, mintClubExact:true },
+  { key:"flap", label:"Flap", address:SEEDED_FLAP_PORTAL_V525 },
+  { key:"noxa", label:"NOXA Fun", address:SEEDED_NOXA_FACTORY_V523 },
+  { key:"openfair", label:"Openfair", address:SEEDED_OPENFAIR_FACTORY_V524 }
+];
+
+function ensureSeededHistoricalProofV529(state) {
+  state.seededHistoricalProofV529 ??= {enabled:true,oneRequestMaximumPerScan:true,hardGlobalLimitUnchanged:42,priorityOrder:SEEDED_HISTORICAL_SOURCES_V529.map(x=>x.key),nextIndex:0,requestsAttempted:0,requestsSucceeded:0,lastAttemptAt:null,lastSourceKey:null,lastStatus:"V529_HISTORICAL_PROOF_READY",sources:{}};
+  const root=state.seededHistoricalProofV529; root.sources ??= {};
+  for (const src of SEEDED_HISTORICAL_SOURCES_V529) root.sources[src.key] ??= {key:src.key,label:src.label,address:normalize(src.address),requestsAttempted:0,requestsSucceeded:0,pagesObserved:0,logsObserved:0,distinctTransactionsObserved:0,exactMintClubTokenCreatedObservations:[],topic0Counts:{},recentEvidence:[],nextPageParams:null,exactLaunchPatternConfirmed:false,exactDetectorRegistered:false,lastAttemptAt:null,lastSuccessAt:null,lastHttpStatus:null,lastError:null,status:"V529_HISTORICAL_NOT_ATTEMPTED"};
+  return root;
+}
+function v529TopicAddress(word){const raw=String(word||"").toLowerCase();if(!/^0x[a-f0-9]{64}$/.test(raw))return null;const a="0x"+raw.slice(-40);return isAddress(a)?normalize(a):null;}
+function v529TxHash(row){const raw=String(row?.transaction_hash||row?.transactionHash||row?.transaction?.hash||"").toLowerCase();return /^0x[a-f0-9]{64}$/.test(raw)?raw:null;}
+function v529LogTopics(row){const direct=Array.isArray(row?.topics)?row.topics:[];if(direct.length)return direct.map(x=>typeof x==="string"?x:(x?.hash||x?.value||null)).filter(Boolean);const raw=Array.isArray(row?.raw?.topics)?row.raw.topics:[];return raw.map(x=>typeof x==="string"?x:(x?.hash||x?.value||null)).filter(Boolean);}
+function v529DecodedMethod(row){return String(row?.decoded?.method_call||row?.decoded?.methodCall||row?.decoded?.name||"").trim();}
+
+function rebuildMintClubHistoricalExactProofV529(state){
+  const root=ensureSeededHistoricalProofV529(state),src=root.sources.mint_club,obs=Array.isArray(src.exactMintClubTokenCreatedObservations)?src.exactMintClubTokenCreatedObservations:[],clusters=new Map();
+  for(const o of obs){if(!isAddress(normalize(o?.token))||!/^0x[a-f0-9]{64}$/.test(String(o?.transactionHash||""))||!/^0x[a-f0-9]{64}$/.test(String(o?.topic0||"")))continue;const key=String(o.topic0).toLowerCase(),c=clusters.get(key)||{topic0:key,tokens:new Set(),txs:new Set()};c.tokens.add(normalize(o.token));c.txs.add(String(o.transactionHash).toLowerCase());clusters.set(key,c);}
+  const ranked=[...clusters.values()].map(c=>({topic0:c.topic0,tokens:[...c.tokens],transactions:[...c.txs],proofTokenCount:c.tokens.size,proofTransactionCount:c.txs.size})).sort((a,b)=>b.proofTokenCount-a.proofTokenCount||b.proofTransactionCount-a.proofTransactionCount||a.topic0.localeCompare(b.topic0));
+  src.strongestExactPattern=ranked[0]||null;const best=ranked.find(x=>x.proofTokenCount>=3&&x.proofTransactionCount>=3)||null;if(!best)return null;
+  src.exactLaunchPatternConfirmed=true;
+  const reg=registerVerifiedLaunchDetectorV515(state,{protocol:"Mint Club",protocolKey:"mint_club",verifiedFactory:SEEDED_MINTCLUB_BOND_V527,emitter:SEEDED_MINTCLUB_BOND_V527,topic0:best.topic0,addressLocationType:"TOPIC",addressLocationIndex:1,proofTokens:best.tokens,proofTransactions:best.transactions,evidenceStandard:"OFFICIAL_ROBINHOOD_MCV2_BOND_PLUS_3X3_EXACT_BLOCKSCOUT_TOKENCREATED_TOPIC1_V529",sourceState:"seededHistoricalProofV529"});
+  src.exactDetectorRegistered=reg?.registered===true||src.exactDetectorRegistered===true;src.registrationStatus=reg?.status||null;if(src.exactDetectorRegistered)src.status="V529_MINTCLUB_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515";return reg;
+}
+
+async function runSeededHistoricalProofV529({env,state,budget}){
+  const root=ensureSeededHistoricalProofV529(state),priorSpare=safeNumber(budget?.postTelegramGlobalSpareV478?.used);
+  if(priorSpare>0){root.lastStatus="V529_SKIPPED_EXISTING_SECONDARY_POST_TELEGRAM_SLOT_ALREADY_USED";return{enabled:true,attempted:false,requestConsumed:false,status:root.lastStatus,priorSecondaryRequests:priorSpare};}
+  const sources=SEEDED_HISTORICAL_SOURCES_V529,start=Math.max(0,Math.floor(safeNumber(root.nextIndex)))%sources.length;let chosen=null;
+  for(let i=0;i<sources.length;i++){const src=sources[(start+i)%sources.length],r=root.sources[src.key];if(r?.exactDetectorRegistered===true)continue;chosen=src;root.nextIndex=(start+i+1)%sources.length;break;}
+  if(!chosen){root.lastStatus="V529_ALL_SEEDED_HISTORICAL_TARGETS_ALREADY_EXACT_OR_DISABLED";return{enabled:true,attempted:false,requestConsumed:false,status:root.lastStatus};}
+  const spare=consumeReleasedGlobalSpareV478(budget,"SEEDED_HISTORICAL_ADDRESS_LOGS_V529",1);if(spare?.ok!==true){root.lastStatus=`V529_BUDGET_UNAVAILABLE:${spare?.reason||"UNKNOWN"}`;return{enabled:true,attempted:false,requestConsumed:false,sourceKey:chosen.key,status:root.lastStatus};}
+  const row=root.sources[chosen.key];row.requestsAttempted=safeNumber(row.requestsAttempted)+1;root.requestsAttempted=safeNumber(root.requestsAttempted)+1;row.lastAttemptAt=Date.now();root.lastAttemptAt=row.lastAttemptAt;root.lastSourceKey=chosen.key;
+  let url=`${BLOCKSCOUT}/api/v2/addresses/${normalize(chosen.address)}/logs`;const params=row.nextPageParams&&typeof row.nextPageParams==="object"?row.nextPageParams:null;if(params){const qs=new URLSearchParams();for(const[k,v]of Object.entries(params))if(v!==null&&v!==undefined&&String(v)!=="")qs.set(k,String(v));const q=qs.toString();if(q)url+=`?${q}`;}
+  try{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),6000);let response;try{response=await fetch(url,{headers:{accept:"application/json"},signal:controller.signal});}finally{clearTimeout(timer);}row.lastHttpStatus=response.status;
+    if(!response.ok){row.lastError=`HTTP_${response.status}`;row.status=`V529_HISTORICAL_HTTP_${response.status}`;root.lastStatus=row.status;return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,httpStatus:response.status,status:row.status};}
+    const payload=await response.json(),items=Array.isArray(payload?.items)?payload.items:[];row.requestsSucceeded=safeNumber(row.requestsSucceeded)+1;root.requestsSucceeded=safeNumber(root.requestsSucceeded)+1;row.pagesObserved=safeNumber(row.pagesObserved)+1;row.lastSuccessAt=Date.now();row.lastError=null;let exactMint=0;
+    for(const log of items){const topics=v529LogTopics(log),topic0=String(topics[0]||"").toLowerCase(),tx=v529TxHash(log);if(/^0x[a-f0-9]{64}$/.test(topic0))row.topic0Counts[topic0]=safeNumber(row.topic0Counts[topic0])+1;const evidence={observedAt:Date.now(),topic0:/^0x[a-f0-9]{64}$/.test(topic0)?topic0:null,transactionHash:tx,blockNumber:safeNumber(log?.block_number||log?.blockNumber)||null,logIndex:safeNumber(log?.index||log?.log_index||log?.logIndex)||null,topicCount:topics.length,decodedMethod:v529DecodedMethod(log)||null,topic1:topics[1]||null,evidenceMeaning:"BLOCKSCOUT_V2_HISTORICAL_ADDRESS_LOG_FINGERPRINT_V529"};row.recentEvidence.push(evidence);
+      if(chosen.mintClubExact===true){const decoded=v529DecodedMethod(log).replace(/\s+/g,""),token=v529TopicAddress(topics[1]),exactDecoded=/^TokenCreated\(address,string,string,address\)/i.test(decoded);if(exactDecoded&&token&&tx&&/^0x[a-f0-9]{64}$/.test(topic0)){row.exactMintClubTokenCreatedObservations.push({observedAt:Date.now(),token,transactionHash:tx,topic0,addressLocationType:"TOPIC",addressLocationIndex:1,decodedMethod:v529DecodedMethod(log),blockNumber:evidence.blockNumber,logIndex:evidence.logIndex});exactMint++;}}
+    }
+    row.recentEvidence=row.recentEvidence.slice(-250);row.exactMintClubTokenCreatedObservations=(row.exactMintClubTokenCreatedObservations||[]).filter((x,i,a)=>a.findIndex(y=>y.transactionHash===x.transactionHash&&y.logIndex===x.logIndex)===i).slice(-250);row.logsObserved=safeNumber(row.logsObserved)+items.length;row.distinctTransactionsObserved=new Set(row.recentEvidence.map(x=>x.transactionHash).filter(x=>/^0x[a-f0-9]{64}$/.test(String(x||"")))).size;row.nextPageParams=payload?.next_page_params&&typeof payload.next_page_params==="object"?payload.next_page_params:null;
+    let registration=null;if(chosen.mintClubExact===true)registration=rebuildMintClubHistoricalExactProofV529(state);row.status=row.exactDetectorRegistered===true?"V529_MINTCLUB_EXACT_HISTORICAL_PATTERN_PROVEN_AND_REGISTERED_V515":items.length?"V529_HISTORICAL_LOGS_OBSERVED_PROOF_ACCUMULATING":"V529_HISTORICAL_PAGE_EMPTY";root.lastStatus=row.status;
+    return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,label:chosen.label,address:normalize(chosen.address),httpStatus:response.status,logsThisPage:items.length,exactMintClubTokenCreatedThisPage:exactMint,nextPageAvailable:Boolean(row.nextPageParams),exactLaunchPatternConfirmed:row.exactLaunchPatternConfirmed===true,exactDetectorRegistered:row.exactDetectorRegistered===true,registrationStatus:registration?.status||row.registrationStatus||null,status:row.status};
+  }catch(e){row.lastError=errorString(e);row.status="V529_HISTORICAL_FETCH_ERROR_RETRY_PRESERVED";root.lastStatus=row.status;return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,error:row.lastError,status:row.status};}
+}
+function seededHistoricalProofSnapshotV529(state){const root=ensureSeededHistoricalProofV529(state);rebuildMintClubHistoricalExactProofV529(state);return{enabled:true,oneRequestMaximumPerScan:true,hardGlobalLimitUnchanged:42,requestsAttempted:safeNumber(root.requestsAttempted),requestsSucceeded:safeNumber(root.requestsSucceeded),lastAttemptAt:root.lastAttemptAt||null,lastSourceKey:root.lastSourceKey||null,lastStatus:root.lastStatus||null,sources:Object.values(root.sources||{}).map(r=>({key:r.key,label:r.label,address:r.address,requestsAttempted:safeNumber(r.requestsAttempted),requestsSucceeded:safeNumber(r.requestsSucceeded),pagesObserved:safeNumber(r.pagesObserved),logsObserved:safeNumber(r.logsObserved),distinctTransactionsObserved:safeNumber(r.distinctTransactionsObserved),exactMintClubTokenCreatedObservations:Array.isArray(r.exactMintClubTokenCreatedObservations)?r.exactMintClubTokenCreatedObservations.length:0,strongestExactPattern:r.strongestExactPattern?{topic0:r.strongestExactPattern.topic0,proofTokenCount:r.strongestExactPattern.proofTokenCount,proofTransactionCount:r.strongestExactPattern.proofTransactionCount}:null,exactLaunchPatternConfirmed:r.exactLaunchPatternConfirmed===true,exactDetectorRegistered:r.exactDetectorRegistered===true,nextPageAvailable:Boolean(r.nextPageParams),status:r.status||null}))};}
 
 /* =========================================================
    LIVE SCAN
@@ -72085,6 +72149,10 @@ for (
       state
     );
 
+  /* V529: only use the released secondary slot when earlier origin/proof work did not. */
+  const seededHistoricalProofThisScanV529 =
+    await runSeededHistoricalProofV529({ env, state, budget });
+
   /*
    * =======================================================
    * V170 POST-ANALYSIS RESIDUAL BACKLOG CATCH-UP
@@ -72950,6 +73018,11 @@ for (
       marketProviderRecoveryTelemetryV157(
         state
       ),
+
+    seededHistoricalProofV529: {
+      currentRun: seededHistoricalProofThisScanV529,
+      cumulative: seededHistoricalProofSnapshotV529(state)
+    },
 
     requestBudget:
       budgetTelemetry(
@@ -113446,7 +113519,7 @@ function sourceIdentityIntelSnapshotV522(state) {
 
   return {
     enabled: true,
-    version: "V528",
+    version: "V529",
     readOnly: true,
     externalProviderRequests: 0,
     persistentWrites: 0,
@@ -113544,7 +113617,10 @@ function sourceIdentityIntelTelegramMessageV522(state) {
     "<b>Seeded launchpad leads — correlation only</b>",
     ...seedLines,
     "",
-    "⚠️ V527 keeps V526 brand corroboration safeguards and treats Mint Club's official contract as a seeded lead until live exact evidence is observed.",
+    `🕰 <b>V529 historical proof:</b> ${escapeHtml(intel?.historicalProofV529?.lastStatus || "NOT_RUN")}`,
+    `   Last source: <b>${escapeHtml(intel?.historicalProofV529?.lastSourceKey || "NONE")}</b> | Requests: <b>${fmt(intel?.historicalProofV529?.requestsSucceeded)}/${fmt(intel?.historicalProofV529?.requestsAttempted)}</b>`,
+    "",
+    "⚠️ V529 keeps V526/V527 safeguards: seeded names are never promoted from websites or recurrence alone.",
     "✅ lunch.fun remains a strongly corroborated identity candidate until a direct factory/proxy → brand link is proven.",
     "<i>/sourceintel is read-only: 0 provider requests and 0 persistent state writes.</i>"
   ].join("\n");
