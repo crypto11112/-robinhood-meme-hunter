@@ -1,4 +1,25 @@
 /**
+ * Robinhood Chain Meme Hunter — V581
+ * AUTHORITATIVE RUNTIME VERSION: V581
+ *
+ * V581 TWO-SLOT RECOVERED-POOL RESERVE PROTECTION:
+ * - preserves V580 and all earlier confirmed-working behaviour;
+ * - fixes the remaining budget leak proven by the V580 scan: when 2+ recent
+ *   verified V466-recovered pools are waiting for catch-up, one protected
+ *   evidence request could still override the directional reserve, leaving
+ *   only one actual catch-up request before the hard global ceiling;
+ * - V581 counts eligible prior-completion catch-up pools at reserve setup;
+ * - when at least two are waiting, the two guaranteed directional requests
+ *   are protected from V559 protected-evidence overrides for that scan;
+ * - lower-priority/protected work is deferred rather than increasing budget;
+ * - V580 failed-pool skip and V579 fair rotation remain unchanged;
+ * - generic logic, never hard-coded to JUICE;
+ * - no historical backfill;
+ * - no scoring, Momentum, qualification, USD maths, retention, Telegram,
+ *   provider, or alert-threshold changes;
+ * - hard global external-request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V580
  * AUTHORITATIVE RUNTIME VERSION: V580
  *
@@ -3703,7 +3724,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V580";
+const VERSION = "V581";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -58397,14 +58418,23 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
       distinctBehindPoolIdsV559.length
     );
 
-  const priorCompletionCatchupEligibleV578 =
-    Boolean(
-      candidate &&
+  const priorCompletionCatchupRowsV581 =
+    behindRowsV559.filter(row =>
       directionalWatchNeedsPriorCompletionCatchupV578(
-        candidate,
+        row,
         latestNumber
       )
     );
+
+  const priorCompletionCatchupEligibleV578 =
+    priorCompletionCatchupRowsV581.length > 0;
+
+  const priorCompletionCatchupPoolCountV581 =
+    new Set(
+      priorCompletionCatchupRowsV581
+        .map(row => normalize(row?.poolId))
+        .filter(Boolean)
+    ).size;
 
   const expansionCatchupSprintEligibleV568 =
     Boolean(
@@ -58433,11 +58463,17 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
   reserve.minimumGuaranteedRequestsV568 =
     reserve.minimumGuaranteedRequestsV559;
   reserve.maxProtectedOverridesV559 =
-    Math.max(
-      0,
-      desiredReserveV559 -
-      reserve.minimumGuaranteedRequestsV559
-    );
+    priorCompletionCatchupPoolCountV581 >= 2
+      ? 0
+      : Math.max(
+          0,
+          desiredReserveV559 -
+          reserve.minimumGuaranteedRequestsV559
+        );
+  reserve.priorCompletionCatchupPoolCountV581 =
+    priorCompletionCatchupPoolCountV581;
+  reserve.twoSlotRecoveredPoolReserveProtectedV581 =
+    priorCompletionCatchupPoolCountV581 >= 2;
   reserve.protectedOverridesUsedV559 = 0;
   reserve.behindPoolCountV559 = distinctBehindPoolIdsV559.length;
   reserve.behindPoolIdsV559 = distinctBehindPoolIdsV559.slice(
@@ -76862,8 +76898,17 @@ for (
       externalRequestsAdded:0,
       hardGlobalLimitUnchanged:42
     },
+    twoSlotRecoveredPoolReserveProtectionV581:{
+      enabled:true,
+      trigger:"AT_LEAST_TWO_VERIFIED_V466_RECOVERED_POOLS_WAITING",
+      guaranteedDirectionalSlots:2,
+      protectedEvidenceOverrideAllowedWhileTriggered:false,
+      budgetCeilingRaised:false,
+      generic:true,
+      hardGlobalLimitUnchanged:42
+    },
     reserveVersion:"V559_DYNAMIC_THREE_SLOT_WITH_ONE_MINIMUM_GUARANTEE",
-    selectionPriorityV560:"V580_SKIP_FAILED_POOL_THEN_V579_FAIR_ROTATION_THEN_V578_CATCHUP_TO_HEAD",
+    selectionPriorityV560:"V581_TWO_SLOT_RESERVE_THEN_V580_SKIP_FAILED_THEN_V579_FAIR_ROTATION",
     finishNearHeadPoolFirstV561:true,
     elasticNearHeadSpanV562:true,
     elasticNearHeadMaxSpanV562:DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551,
