@@ -1,4 +1,25 @@
 /**
+ * Robinhood Chain Meme Hunter — V619
+ * AUTHORITATIVE RUNTIME VERSION: V619
+ *
+ * V619:
+ * - transient exact V3 eth_getLogs failures become PENDING VERIFICATION first;
+ *   the exact cursor is frozen and FULL eligibility is suspended while the same
+ *   range is retried. The original V371 epoch is preserved if recovered within
+ *   the existing 135s verification-age allowance. Only an expired unresolved
+ *   range becomes a real integrity gap.
+ * - /blockscoutusage projects main + V3 fallback consumption separately and
+ *   together against the 100k/day allowance.
+ * - /analyse can use at most two EXISTING manual-analysis request slots to prove
+ *   exact contract creation via Blockscout getcontractcreation + exact creation
+ *   transaction details when launch age/source are otherwise unverified.
+ * - exact creation time may be shown as verified contract-creation/launch age;
+ *   exact creator address may be shown as verified creator, but brand/launchpad
+ *   identity remains UNVERIFIED unless an existing detector proves it.
+ * - no scoring, Momentum, qualification, V4, alerts, Blockscout cadence,
+ *   launch-detector proof standard, or hard scanner 42-request ceiling changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V618
  * AUTHORITATIVE RUNTIME VERSION: V618
  *
@@ -4485,7 +4506,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V618";
+const VERSION = "V619";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -12096,6 +12117,31 @@ function blockscoutProUsageTelegramMessageV611(state,fallbackV615=null){
       ? (combinedCreditsV615/safeNumber(r.dailyAllowanceCredits))*100
       : null;
 
+  const mainProjected24hV619=
+    Number.isFinite(Number(r.projected24hCredits))
+      ? Number(r.projected24hCredits)
+      : null;
+  const fallbackProjected24hV619=
+    Number.isFinite(Number(fallbackV615?.projected24hCredits))
+      ? Number(fallbackV615.projected24hCredits)
+      : null;
+  const combinedProjected24hV619=
+    mainProjected24hV619!==null || fallbackProjected24hV619!==null
+      ? safeNumber(mainProjected24hV619)+safeNumber(fallbackProjected24hV619)
+      : null;
+  const combinedProjectedPctV619=
+    combinedProjected24hV619!==null && safeNumber(r.dailyAllowanceCredits)>0
+      ? (combinedProjected24hV619/safeNumber(r.dailyAllowanceCredits))*100
+      : null;
+  const combinedCapacityStatusV619=
+    combinedProjected24hV619===null
+      ? "BUILDING_SAMPLE"
+      : combinedProjected24hV619>=safeNumber(r.dailyAllowanceCredits)
+        ? "LIKELY_TO_EXCEED"
+        : combinedProjectedPctV619>=75
+          ? "WATCH"
+          : "SAFE";
+
   const lines=[
     `🧭 <b>Blockscout PRO Usage — ${escapeHtml(VERSION)}</b>`,
     "",
@@ -12110,10 +12156,12 @@ function blockscoutProUsageTelegramMessageV611(state,fallbackV615=null){
     `Heavy/raw-trace calls: <b>${fmtNum(r.heavyRequests)}</b> × ${r.heavyCreditsPerRequest} credits`,
     "",
     `Sample quality: <b>${escapeHtml(r.sampleQuality)}</b>`,
-    `Credits/hour: <b>${fmtNum(r.creditsPerHour)}</b>`,
-    `Projected 24h credits: <b>${fmtNum(r.projected24hCredits)}</b>`,
-    `Projected allowance used: <b>${fmtPct(r.projected24hPct)}</b>`,
-    `Capacity status: <b>${escapeHtml(r.status)}</b>`,
+    `Main credits/hour: <b>${fmtNum(r.creditsPerHour)}</b>`,
+    `Main projected 24h: <b>${fmtNum(mainProjected24hV619)}</b> credits`,
+    `V3 fallback projected 24h: <b>${fmtNum(fallbackProjected24hV619)}</b> credits`,
+    `Combined projected 24h: <b>${fmtNum(combinedProjected24hV619)}</b> / <b>${fmtNum(r.dailyAllowanceCredits)}</b>`,
+    `Combined projected allowance used: <b>${fmtPct(combinedProjectedPctV619)}</b>`,
+    `Combined capacity status: <b>${escapeHtml(combinedCapacityStatusV619)}</b>`,
     `V3 fallback guard: <b>${escapeHtml(String(fallbackV615?.status||"BUILDING"))}</b> | reserved cap <b>${fmtNum(fallbackV615?.dailyCapCredits||V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615)}</b>/day`,
     "",
     `Reset UTC: <b>${escapeHtml(r.nextResetUtc)}</b>`,
@@ -64055,10 +64103,16 @@ function telegramMessage(
       protocol: null
     };
 
+  const manualCreationProofV619=candidate?.manualContractCreationV619||null;
+
   const verifiedLaunchAgeTextV223 =
     verifiedLaunchAgeV223Data?.verified === true
       ? verifiedLaunchAgeV223Data.launchAgeDisplay
-      : "UNVERIFIED";
+      : manualCreationProofV619?.transactionVerified===true &&
+        manualCreationProofV619?.creationAgeDisplay &&
+        manualCreationProofV619.creationAgeDisplay!=="UNVERIFIED"
+        ? manualCreationProofV619.creationAgeDisplay
+        : "UNVERIFIED";
 
   const scannerAgeTextV223 =
     verifiedLaunchAgeV223Data?.scannerAgeDisplay ||
@@ -64177,6 +64231,10 @@ function telegramMessage(
     `<code>${escapeHtml(candidate.address)}</code>`,
     "",
     `⏱ Verified launch age: <b>${escapeHtml(verifiedLaunchAgeTextV223)}</b>`,
+    manualCreationProofV619?.transactionVerified===true &&
+    verifiedLaunchAgeV223Data?.verified!==true
+      ? `🧬 Launch-age proof: <b>EXACT CONTRACT CREATION TX</b>${manualCreationProofV619?.blockNumber ? ` | block <b>${safeNumber(manualCreationProofV619.blockNumber)}</b>` : ""}${manualCreationProofV619?.timestamp ? ` | <b>${escapeHtml(manualCreationProofV619.timestamp)}</b>` : ""}`
+      : null,
     `🕒 Verified market age: <b>${escapeHtml(verifiedMarketAgeV408)}</b>`,
     `🏪 Market-age source: <b>${escapeHtml(verifiedMarketAgeSourceV408)}</b>`,
     `🔭 Scanner age: <b>${escapeHtml(scannerAgeTextV223)}</b>`,
@@ -64186,7 +64244,10 @@ function telegramMessage(
       : verifiedLaunchAgeV223Data?.verified === true &&
         verifiedLaunchAgeV223Data?.protocol
         ? `🏷 Launch source: <b>${escapeHtml(verifiedLaunchAgeV223Data.protocol)}</b>`
-        : `🏷 Launch source: <b>UNVERIFIED</b>`,
+        : manualCreationProofV619?.creationMatchVerified===true &&
+          isAddress(manualCreationProofV619?.creator)
+          ? `🏷 Launch source: <b>CONTRACT CREATOR VERIFIED</b> | <code>${escapeHtml(manualCreationProofV619.creator)}</code> | brand/launchpad <b>UNVERIFIED</b>`
+          : `🏷 Launch source: <b>UNVERIFIED</b>`,
     "",
     `🎯 Opportunity: <b>${escapeHtml(opportunityInterpretationV261.label)}</b>`,
     `📊 Opportunity Score: <b>${candidate.opportunity.score}/100</b>`,
@@ -91419,6 +91480,19 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   const v3 = candidate?.nativeV3DirectionalV326 || null;
   const evidence = [];
   evidence.push("", "🔬 <b>Evidence Summary</b>");
+  if(candidate?.manualContractCreationV619?.attempted===true){
+    const cpV619=candidate.manualContractCreationV619;
+    evidence.push(
+      `🧬 Contract creation proof V619: <b>${escapeHtml(cpV619.status||"UNVERIFIED")}</b> | requests <b>${safeNumber(cpV619.requestsUsed)}</b>`,
+      cpV619?.creationMatchVerified===true
+        ? `• Creator: <code>${escapeHtml(cpV619.creator||"UNVERIFIED")}</code> | creation tx <code>${escapeHtml(cpV619.creationTransactionHash||"UNVERIFIED")}</code>`
+        : `• Creator/creation tx: <b>UNVERIFIED</b>`,
+      cpV619?.transactionVerified===true
+        ? `• Creation time: <b>${escapeHtml(cpV619.timestamp||"UNVERIFIED")}</b> | age <b>${escapeHtml(cpV619.creationAgeDisplay||"UNVERIFIED")}</b>`
+        : `• Creation time: <b>UNVERIFIED</b>`,
+      `• Brand/launchpad identity: <b>UNVERIFIED unless an existing exact detector independently matches</b>`
+    );
+  }
   evidence.push(...manualRollingProgressLinesV572(candidate));
 
   if (v3) {
@@ -91608,6 +91682,77 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   }
 
   return compact.join("\n");
+}
+
+async function manualContractCreationProofV619({env,state,budget,tokenAddress}){
+  const token=normalize(tokenAddress);
+  const out={
+    status:"NOT_ATTEMPTED_V619",attempted:false,requestsUsed:0,
+    token:isAddress(token)?token:null,creationMatchVerified:false,
+    creator:null,creationTransactionHash:null,transactionVerified:false,
+    blockNumber:null,timestamp:null,timestampMs:null,creationAgeMs:null,
+    creationAgeDisplay:"UNVERIFIED",brandPromoted:false,
+    scoringChanged:false,watchStateChanged:false
+  };
+  if(!isAddress(token)){out.status="INVALID_TOKEN_V619";return out;}
+
+  const creationUrl=blockscoutProGetContractCreationUrlV481(env,token);
+  if(!creationUrl){out.status="BLOCKSCOUT_PRO_NOT_CONFIGURED_V619";return out;}
+  if(!consumeBudget(budget,"analysis","V619_MANUAL_GETCONTRACTCREATION",1)){
+    out.status="MANUAL_BUDGET_UNAVAILABLE_CREATION_V619";return out;
+  }
+  out.attempted=true; out.requestsUsed++;
+  recordBlockscoutProUsageV611(state,"V619_MANUAL_GETCONTRACTCREATION",BLOCKSCOUT_PRO_STANDARD_CREDITS_V611);
+  let r1;
+  try{r1=await fetch(creationUrl,{headers:{accept:"application/json"}});}
+  catch(error){out.status=`GETCONTRACTCREATION_FETCH_ERROR_V619:${errorString(error)}`;return out;}
+  updateBlockscoutProHttpStatusV611(state,"V619_MANUAL_GETCONTRACTCREATION",r1.status);
+  if(!r1.ok){out.status=`GETCONTRACTCREATION_HTTP_${r1.status}_V619`;return out;}
+  const b1=await r1.json().catch(()=>null);
+  const parsed=parseBlockscoutProGetContractCreationV481(b1,token);
+  if(parsed?.strictlyVerified!==true){out.status="NO_STRICT_CONTRACT_CREATION_MATCH_V619";return out;}
+
+  out.creationMatchVerified=true;
+  out.creator=parsed?.exactResult?.contractCreator||null;
+  out.creationTransactionHash=parsed?.exactResult?.creationTransactionHash||null;
+
+  const txUrl=blockscoutProTransactionDetailsUrlV492(env,out.creationTransactionHash);
+  if(!txUrl){out.status="CREATION_TX_URL_UNAVAILABLE_V619";return out;}
+  if(!consumeBudget(budget,"analysis","V619_MANUAL_CREATION_TX_DETAILS",1)){
+    out.status="CREATION_VERIFIED_TIMESTAMP_BUDGET_UNAVAILABLE_V619";return out;
+  }
+  out.requestsUsed++;
+  recordBlockscoutProUsageV611(state,"V619_MANUAL_CREATION_TX_DETAILS",BLOCKSCOUT_PRO_STANDARD_CREDITS_V611);
+  let r2;
+  try{r2=await fetch(txUrl,{headers:{accept:"application/json"}});}
+  catch(error){out.status=`CREATION_TX_FETCH_ERROR_V619:${errorString(error)}`;return out;}
+  updateBlockscoutProHttpStatusV611(state,"V619_MANUAL_CREATION_TX_DETAILS",r2.status);
+  if(!r2.ok){out.status=`CREATION_TX_HTTP_${r2.status}_V619`;return out;}
+  const b2=await r2.json().catch(()=>null);
+  const gotHash=String(b2?.hash||"").trim().toLowerCase();
+  const wantHash=String(out.creationTransactionHash||"").trim().toLowerCase();
+  if(!/^0x[a-f0-9]{64}$/.test(gotHash)||gotHash!==wantHash){
+    out.status="CREATION_TX_HASH_MISMATCH_V619";return out;
+  }
+
+  const tsRaw=b2?.timestamp??b2?.block_timestamp??null;
+  let tsMs=null;
+  if(typeof tsRaw==="number"&&Number.isFinite(tsRaw)){
+    tsMs=tsRaw>1e12?tsRaw:tsRaw*1000;
+  }else{
+    const p=Date.parse(String(tsRaw||""));
+    if(Number.isFinite(p))tsMs=p;
+  }
+  out.transactionVerified=true;
+  out.blockNumber=safeNumber(b2?.block??b2?.block_number)||null;
+  out.timestamp=tsMs&&tsMs>0?new Date(tsMs).toISOString():null;
+  out.timestampMs=tsMs&&tsMs>0?tsMs:null;
+  out.creationAgeMs=out.timestampMs?Math.max(0,Date.now()-out.timestampMs):null;
+  out.creationAgeDisplay=out.creationAgeMs!==null?formatAgeV223(out.creationAgeMs):"UNVERIFIED";
+  out.status=out.timestampMs
+    ?"EXACT_CONTRACT_CREATION_TIME_VERIFIED_V619"
+    :"EXACT_CREATION_TX_VERIFIED_TIMESTAMP_UNAVAILABLE_V619";
+  return out;
 }
 
 async function telegramFreshAnalyseV276(
@@ -92219,6 +92364,24 @@ async function telegramFreshAnalyseV276(
     workersKvWritesAdded: 0
   };
 
+  let manualContractCreationV619=null;
+  if(
+    candidate?.verifiedLaunchAgeV223?.verified!==true ||
+    candidate?.verifiedLaunchSourceV476?.verified!==true
+  ){
+    try{
+      manualContractCreationV619=await manualContractCreationProofV619({
+        env,state,budget,tokenAddress:resolved.address
+      });
+    }catch(error){
+      manualContractCreationV619={
+        status:`MANUAL_CREATION_PROOF_FAIL_OPEN_V619:${errorString(error)}`,
+        attempted:false,requestsUsed:0
+      };
+    }
+  }
+  candidate.manualContractCreationV619=manualContractCreationV619;
+
   const telemetry = {
     status:
       "ANALYSIS_COMPLETE",
@@ -92381,6 +92544,8 @@ async function telegramFreshAnalyseV276(
       candidate?.manualRollingLedgerBridgeV571 || null,
     manualRollingWatchProgressV572:
       candidate?.manualRollingWatchProgressV572 || null,
+    manualContractCreationV619:
+      candidate?.manualContractCreationV619 || null,
     manualBitqueryUsdV285: {
       attempted: manualBitqueryUsdResultV285?.attempted === true,
       verified: manualBitqueryUsdResultV285?.verified === true,
@@ -121251,6 +121416,9 @@ function v3FeedUsageTelegramMessageV598(token, result) {
       : []),
     `V3 log transport: <b>${result?.v3HttpLogPollingV605?.enabled===true?"HTTP eth_getLogs":"LEGACY"}</b> | WebSocket subscriptions <b>${safeNumber(result?.v3HttpLogPollingV605?.webSocketSubscriptions)}</b>`,
     `HTTP poll health: <b>${result?.httpPollFreshV606===true?"FRESH":result?.v3HttpLogPollingV605?.enabled===true?"BUILDING/STALE":"N/A"}</b> | age <b>${escapeHtml(fmtAge(result?.pollAgeMsV606))}</b>`,
+    ...(result?.v3HttpLogPollingV605?.pendingRangeV619
+      ? [`V619 pending exact range: <b>${safeNumber(result.v3HttpLogPollingV605.pendingRangeV619.fromBlock)}→${safeNumber(result.v3HttpLogPollingV605.pendingRangeV619.toBlock)}</b> | cursor frozen | attempts <b>${safeNumber(result.v3HttpLogPollingV605.pendingRangeV619.attempts)}</b>`]
+      : []),
     `Log polls: <b>${safeNumber(result?.v3HttpLogPollingV605?.pollSuccesses)}</b> success / <b>${safeNumber(result?.v3HttpLogPollingV605?.pollFailures)}</b> failed | provider <b>${escapeHtml(String(result?.v3HttpLogPollingV605?.lastProviderId||"BUILDING"))}</b>`,
     v3HttpProviderDiagLineV610("dRPC",result?.v3HttpLogPollingV605?.providerStatsV609?.DRPC),
     v3HttpProviderDiagLineV610("QuickNode",result?.v3HttpLogPollingV605?.providerStatsV609?.QUICKNODE),
@@ -121260,7 +121428,10 @@ function v3FeedUsageTelegramMessageV598(token, result) {
     `Blockscout V3 fallback: <b>${result?.v3BlockscoutFallbackV615?.telemetry?.successes>0?"WORKING":result?.v3BlockscoutFallbackV615?.telemetry?.attempts>0?"ATTEMPTED":"BUILDING"}</b> | attempts <b>${safeNumber(result?.v3BlockscoutFallbackV615?.telemetry?.attempts)}</b> | successes <b>${safeNumber(result?.v3BlockscoutFallbackV615?.telemetry?.successes)}</b> | failures <b>${safeNumber(result?.v3BlockscoutFallbackV615?.telemetry?.failures)}</b>`,
     `Blockscout V3 reserved credits: <b>${safeNumber(result?.v3BlockscoutFallbackV615?.meter?.creditsUsed).toLocaleString("en-GB")}</b> / <b>${safeNumber(result?.v3BlockscoutFallbackV615?.meter?.dailyCapCredits||V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615).toLocaleString("en-GB")}</b>`,
     ...(result?.v3HttpLogPollingV605?.lastFailure
-      ? [`Last exact-log failure: <code>${escapeHtml(JSON.stringify(result.v3HttpLogPollingV605.lastFailure).slice(0,180))}</code>`]
+      ? [`Current exact-log failure: <code>${escapeHtml(JSON.stringify(result.v3HttpLogPollingV605.lastFailure).slice(0,180))}</code>`]
+      : []),
+    ...(result?.v3HttpLogPollingV605?.lastTransientFailureV619
+      ? [`Last transient log failure V619: <code>${escapeHtml(JSON.stringify(result.v3HttpLogPollingV605.lastTransientFailureV619).slice(0,210))}</code>`]
       : []),
     `Observed heads: <b>${safeNumber(result?.headsObserved).toLocaleString("en-GB")}</b>`,
     `Exact-pool V3 swaps captured: <b>${safeNumber(result?.swapsCaptured).toLocaleString("en-GB")}</b>`,
@@ -129574,6 +129745,9 @@ if (url.pathname === "/reconcile-v374") {
       v3HttpLogPollingV605:{
         enabled:cfg?.httpLogPollingV605===true,
         status:logPollV605?.status||null,
+        pendingRangeV619:logPollV605?.pendingRangeV619||null,
+        lastTransientFailureV619:logPollV605?.lastTransientFailureV619||null,
+        lastRecoveredPendingRangeV619:logPollV605?.lastRecoveredPendingRangeV619||null,
         initialized:logPollV605?.initialized===true,
         initializedAt:logPollV605?.initializedAt||null,
         lastProcessedBlock:logPollV605?.lastProcessedBlock??null,
@@ -131312,31 +131486,114 @@ if (url.pathname === "/reconcile-v374") {
     }
 
     if(result?.ok!==true){
+      const failureAtV619=Date.now();
+      const lastSuccessfulPollAtV619=
+        Number.isFinite(Number(poll.lastSuccessfulPollAt))
+          ? Number(poll.lastSuccessfulPollAt)
+          : null;
+      const verificationAgeMsV619=
+        lastSuccessfulPollAtV619!==null
+          ? Math.max(0,failureAtV619-lastSuccessfulPollAtV619)
+          : Infinity;
+      const failureDetailV619=
+        result?.lastFailure||
+        result?.blockscoutFallbackV615?.lastFailure||
+        null;
+
       poll.pollFailures=safeNumber(poll.pollFailures)+1;
-      poll.status="HTTP_LOG_POLL_FAILED_V605";
-      poll.lastFailure=result?.lastFailure||null;
+      poll.status=
+        verificationAgeMsV619<=V3_BLOCKSCOUT_FALLBACK_MAX_VERIFICATION_AGE_MS_V615
+          ? "HTTP_LOG_RANGE_PENDING_VERIFICATION_V619"
+          : "HTTP_LOG_RANGE_VERIFICATION_EXPIRED_V619";
+      poll.lastFailure=failureDetailV619;
+      poll.lastTransientFailureV619={
+        at:failureAtV619,
+        fromBlock:from,
+        toBlock:to,
+        verificationAgeMs:verificationAgeMsV619,
+        detail:failureDetailV619,
+        status:poll.status
+      };
+      const samePendingV619=
+        Number(poll?.pendingRangeV619?.fromBlock)===from &&
+        Number(poll?.pendingRangeV619?.toBlock)===to;
+      poll.pendingRangeV619={
+        fromBlock:from,
+        toBlock:to,
+        since:samePendingV619 &&
+          Number.isFinite(Number(poll?.pendingRangeV619?.since))
+            ? Number(poll.pendingRangeV619.since)
+            : failureAtV619,
+        attempts:samePendingV619
+          ? safeNumber(poll?.pendingRangeV619?.attempts)+1
+          : 1,
+        cursorFrozenAt:cursor
+      };
       poll.providerStatsV609=
         await this.state.storage.get("v609:httpLogProviderStats")||{};
-      poll.updatedAt=Date.now();
+      poll.updatedAt=failureAtV619;
       await this.doPutV404("v605:logPoll",poll);
 
-      await this.markCoverageGapV366("HTTP_ETH_GETLOGS_FAILED_V605");
-      await this.markIntegrityGapV369("HTTP_ETH_GETLOGS_FAILED_V605");
-      await this.markIntegrityGapV371("HTTP_ETH_GETLOGS_FAILED_V605");
-
       const conn=await this.state.storage.get("connection")||{};
+
+      if(
+        verificationAgeMsV619<=
+        V3_BLOCKSCOUT_FALLBACK_MAX_VERIFICATION_AGE_MS_V615
+      ){
+        /*
+         * API/transport failure is not proof of a chain-data gap. Freeze the
+         * cursor, suspend FULL eligibility, and retry this exact range.
+         * V371 remains active so its original continuousStartAt survives.
+         */
+        await this.doPutV404("connection",{
+          ...conn,
+          status:"HTTP_LOG_RANGE_PENDING_VERIFICATION_V619",
+          connected:true,
+          subscriptionAccepted:false,
+          logSubscriptionAccepted:false,
+          headSubscriptionAccepted:shared?.fresh===true,
+          transportV605:"HTTP_ETH_GETLOGS",
+          lastError:JSON.stringify(failureDetailV619||{}).slice(0,240),
+          pendingExactRangeV619:{fromBlock:from,toBlock:to},
+          pendingSinceV619:poll.pendingRangeV619.since
+        });
+
+        return {
+          ok:true,
+          deferred:true,
+          pendingVerificationV619:true,
+          status:"HTTP_LOG_RANGE_PENDING_VERIFICATION_V619",
+          verificationAgeMs:verificationAgeMsV619,
+          fromBlock:from,
+          toBlock:to,
+          cursorFrozenAt:cursor,
+          ...result
+        };
+      }
+
+      await this.markCoverageGapV366("HTTP_ETH_GETLOGS_VERIFICATION_EXPIRED_V619");
+      await this.markIntegrityGapV369("HTTP_ETH_GETLOGS_VERIFICATION_EXPIRED_V619");
+      await this.markIntegrityGapV371("HTTP_ETH_GETLOGS_VERIFICATION_EXPIRED_V619");
+
       await this.doPutV404("connection",{
         ...conn,
-        status:"HTTP_LOG_POLL_FAILED_V605",
+        status:"HTTP_LOG_RANGE_VERIFICATION_EXPIRED_V619",
         connected:false,
         subscriptionAccepted:false,
         logSubscriptionAccepted:false,
         headSubscriptionAccepted:shared?.fresh===true,
         transportV605:"HTTP_ETH_GETLOGS",
-        lastError:JSON.stringify(result?.lastFailure||{}).slice(0,240)
+        lastError:JSON.stringify(failureDetailV619||{}).slice(0,240),
+        pendingExactRangeV619:{fromBlock:from,toBlock:to},
+        pendingSinceV619:poll.pendingRangeV619.since
       });
 
-      return {ok:false,status:"HTTP_LOG_POLL_FAILED_V605",...result};
+      return {
+        ok:false,
+        status:"HTTP_LOG_RANGE_VERIFICATION_EXPIRED_V619",
+        verificationAgeMs:verificationAgeMsV619,
+        ...result
+      };
     }
 
     const logs=result.logs||[];
@@ -131367,6 +131624,14 @@ if (url.pathname === "/reconcile-v374") {
     poll.lastElapsedMs=result.elapsedMs;
     poll.status=to>=head?"HTTP_LOG_POLL_CAUGHT_UP_V605":"HTTP_LOG_POLL_CATCHING_UP_V605";
     poll.lastFailure=null;
+    if(poll.pendingRangeV619){
+      poll.lastRecoveredPendingRangeV619={
+        ...poll.pendingRangeV619,
+        recoveredAt:Date.now(),
+        recoveredByProvider:result.providerId||null
+      };
+    }
+    poll.pendingRangeV619=null;
     poll.updatedAt=Date.now();
 
     await this.doPutV404("v605:logPoll",poll);
@@ -131386,7 +131651,9 @@ if (url.pathname === "/reconcile-v374") {
       sharedHeadFreshV602:true,
       transportV605:"HTTP_ETH_GETLOGS",
       activeHttpProviderV605:result.providerId,
-      lastError:null
+      lastError:null,
+      pendingExactRangeV619:null,
+      pendingSinceV619:null
     });
 
     if(!wasActive){
