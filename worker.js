@@ -4,6 +4,8 @@
  *
  * V631 SOURCE-ATTRIBUTION PRIORITY
  * - builds directly forward from V630;
+ * - HOTFIX: moves blockscoutWideIdentity403V630 initialization ahead of its
+ *   first use, eliminating the V630 temporal-dead-zone scan crash;
  * - improves launch-source learning WITHOUT weakening exact-proof standards;
  * - NEW: recurring unknown creators that are closest to a confirmed exact
  *   receipt pattern are prioritised for the existing single V517 proof slot;
@@ -20680,9 +20682,23 @@ async function resolvePersistentUnknownPools(
      */
     let blockscoutFirstResolvedPoolV625 = null;
 
+    /*
+     * V631 HOTFIX:
+     * Declare/read the persisted V184 Blockscout 403 state BEFORE either
+     * Blockscout identity branch references it. V630 declared this later in
+     * the same block, which caused a temporal-dead-zone ReferenceError and
+     * aborted the entire scan.
+     */
+    const blockscoutWideIdentity403V630 =
+      String(
+        blockscoutWideInitializeTelemetryV184(state)?.lastStatus ||
+        ""
+      ).toUpperCase() === "HTTP_403";
+
     if (
       output.blockscoutWideInitializeV184.attempts < 1 &&
-      output.requestsUsed < resolverRequestLimit
+      output.requestsUsed < resolverRequestLimit &&
+      !blockscoutWideIdentity403V630
     ) {
       const blockscoutFirstV625 =
         await blockscoutWideInitializeForPoolV184(
@@ -20993,12 +21009,6 @@ async function resolvePersistentUnknownPools(
      */
     let wideResolvedPoolV184 =
       null;
-
-    const blockscoutWideIdentity403V630 =
-      String(
-        blockscoutWideInitializeTelemetryV184(state)?.lastStatus ||
-        ""
-      ).toUpperCase() === "HTTP_403";
 
     if (
       output.blockscoutWideInitializeV184
