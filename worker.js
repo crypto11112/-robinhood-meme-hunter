@@ -1,4 +1,29 @@
 /**
+ * Robinhood Chain Meme Hunter — V631
+ * AUTHORITATIVE RUNTIME VERSION: V631
+ *
+ * V631 SOURCE-ATTRIBUTION PRIORITY
+ * - builds directly forward from V630;
+ * - improves launch-source learning WITHOUT weakening exact-proof standards;
+ * - NEW: recurring unknown creators that are closest to a confirmed exact
+ *   receipt pattern are prioritised for the existing single V517 proof slot;
+ * - a creator with 2 matching exact creation receipts is therefore completed
+ *   before a completely unproven creator with only a larger raw token count;
+ * - NEW: /launchcoverage classifies unattributed returned current/live
+ *   candidates using evidence already held in state:
+ *      RECURRING_UNKNOWN_SOURCE_PROOF_IN_PROGRESS
+ *      VERIFIED_CREATOR_SOURCE_PROOF_INCOMPLETE
+ *      NO_RECURRING_SOURCE_EVIDENCE_YET
+ *      INSUFFICIENT_ORIGIN_EVIDENCE
+ * - categories are evidence states only; they never invent a launchpad name,
+ *   launch time, or launch mechanism;
+ * - confirmed V517 patterns still require >=3 distinct tokens AND >=3 distinct
+ *   creation transactions with the same exact emitter/topic/token ABI slot;
+ * - zero additional provider requests, no scoring/Momentum/qualification/
+ *   Telegram threshold changes, and the hard 42-request ceiling is unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V630
  * AUTHORITATIVE RUNTIME VERSION: V630
  *
@@ -4696,7 +4721,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V630";
+const VERSION = "V631";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -95909,6 +95934,82 @@ function verifiedCreatorProfileV517(
   return profile;
 }
 
+function genericUnknownCreatorPatternProgressV631(
+  state,
+  creator
+) {
+  const cleanCreator =
+    normalize(creator);
+
+  const root =
+    rebuildGenericUnknownPatternsV517(
+      state
+    );
+
+  const rows =
+    Object.values(
+      root?.patternClusters || {}
+    )
+      .filter(row =>
+        normalize(row?.creator) ===
+          cleanCreator &&
+        !root?.rejectedPatterns?.[
+          row?.key
+        ]
+      );
+
+  let bestDistinctTransactions = 0;
+  let bestDistinctTokens = 0;
+  let bestConfirmed = false;
+  let bestPatternKey = null;
+
+  for (const row of rows) {
+    const tx =
+      safeNumber(
+        row?.distinctTransactions
+      );
+
+    const tokens =
+      safeNumber(
+        row?.distinctTokens
+      );
+
+    if (
+      tx > bestDistinctTransactions ||
+      (
+        tx === bestDistinctTransactions &&
+        tokens > bestDistinctTokens
+      )
+    ) {
+      bestDistinctTransactions = tx;
+      bestDistinctTokens = tokens;
+      bestConfirmed =
+        row?.confirmed === true;
+      bestPatternKey =
+        row?.key || null;
+    }
+  }
+
+  return {
+    creator: cleanCreator,
+    bestDistinctTransactions,
+    bestDistinctTokens,
+    bestConfirmed,
+    bestPatternKey,
+    confirmationThresholdTransactions: 3,
+    confirmationThresholdTokens: 3,
+    receiptsStillNeeded:
+      Math.max(
+        0,
+        3 -
+          Math.min(
+            bestDistinctTransactions,
+            bestDistinctTokens
+          )
+      )
+  };
+}
+
 function genericUnknownCreatorCandidatesV517(
   state
 ) {
@@ -96017,8 +96118,15 @@ function genericUnknownCreatorCandidatesV517(
       continue;
     }
 
+    const patternProgressV631 =
+      genericUnknownCreatorPatternProgressV631(
+        state,
+        creator
+      );
+
     rows.push({
       creator,
+      patternProgressV631,
       distinctTokens:
         new Set(
           tokenRows.map(row =>
@@ -96050,6 +96158,22 @@ function genericUnknownCreatorCandidatesV517(
   }
 
   rows.sort((a, b) =>
+    safeNumber(
+      b?.patternProgressV631
+        ?.bestDistinctTransactions
+    ) -
+      safeNumber(
+        a?.patternProgressV631
+          ?.bestDistinctTransactions
+      ) ||
+    safeNumber(
+      b?.patternProgressV631
+        ?.bestDistinctTokens
+    ) -
+      safeNumber(
+        a?.patternProgressV631
+          ?.bestDistinctTokens
+      ) ||
     b.distinctTokens -
       a.distinctTokens ||
     safeNumber(a?.firstVerifiedAt) -
@@ -96266,7 +96390,34 @@ function selectGenericUnknownReceiptCandidateV517(
         creatorDistinctTransactions:
           creatorRow.distinctTransactions,
         contractName:
-          creatorRow.contractName
+          creatorRow.contractName,
+        sourceLearningPriorityV631: {
+          patternProgressDistinctTransactions:
+            safeNumber(
+              creatorRow?.patternProgressV631
+                ?.bestDistinctTransactions
+            ),
+          patternProgressDistinctTokens:
+            safeNumber(
+              creatorRow?.patternProgressV631
+                ?.bestDistinctTokens
+            ),
+          receiptsStillNeeded:
+            creatorRow?.patternProgressV631
+              ?.receiptsStillNeeded ?? 3,
+          priorityReason:
+            safeNumber(
+              creatorRow?.patternProgressV631
+                ?.bestDistinctTransactions
+            ) >= 2
+              ? "ONE_EXACT_MATCHING_RECEIPT_FROM_CONFIRMATION_V631"
+              : safeNumber(
+                  creatorRow?.patternProgressV631
+                    ?.bestDistinctTransactions
+                ) >= 1
+                ? "EXACT_PATTERN_PROOF_IN_PROGRESS_V631"
+                : "RECURRING_VERIFIED_CREATOR_AWAITING_PATTERN_PROOF_V631"
+        }
       };
     }
   }
@@ -121679,6 +121830,148 @@ function tokenOriginTraceSnapshotV477(state) {
   };
 }
 
+function sourceAttributionClassV631(
+  state,
+  candidate
+) {
+  const address =
+    normalize(candidate?.address);
+
+  if (!isAddress(address)) {
+    return {
+      class:
+        "INSUFFICIENT_ORIGIN_EVIDENCE",
+      reason:
+        "INVALID_OR_MISSING_TOKEN_ADDRESS"
+    };
+  }
+
+  if (
+    candidate?.verifiedLaunchSourceV476
+      ?.verified === true ||
+    candidate?.verifiedLaunchAgeV223
+      ?.verified === true
+  ) {
+    return {
+      class:
+        "VERIFIED_SOURCE",
+      reason:
+        "POSITIVE_VERIFIED_LAUNCH_SOURCE_EVIDENCE"
+    };
+  }
+
+  const origin =
+    pruneTokenOriginTraceV477(
+      state
+    );
+
+  const tokenOrigin =
+    origin?.tokenOrigins?.[
+      address
+    ] || null;
+
+  const creator =
+    normalize(
+      tokenOrigin?.contractCreator
+    );
+
+  if (
+    tokenOrigin?.verified !== true ||
+    !isAddress(creator)
+  ) {
+    return {
+      class:
+        "INSUFFICIENT_ORIGIN_EVIDENCE",
+      reason:
+        "VERIFIED_CONTRACT_CREATOR_OR_CREATION_TX_NOT_AVAILABLE"
+    };
+  }
+
+  const generic =
+    ensureGenericUnknownSourceProofV517(
+      state
+    );
+
+  const confirmed =
+    generic?.confirmedSources?.[
+      creator
+    ];
+
+  if (confirmed?.registered === true) {
+    return {
+      class:
+        "VERIFIED_CREATOR_SOURCE_PROOF_INCOMPLETE",
+      reason:
+        "CONFIRMED_SOURCE_EXISTS_BUT_CURRENT_CANDIDATE_ATTRIBUTION_NOT_YET_BRIDGED",
+      creator
+    };
+  }
+
+  const progress =
+    genericUnknownCreatorPatternProgressV631(
+      state,
+      creator
+    );
+
+  if (
+    safeNumber(
+      progress?.bestDistinctTransactions
+    ) > 0 ||
+    safeNumber(
+      progress?.bestDistinctTokens
+    ) > 0
+  ) {
+    return {
+      class:
+        "RECURRING_UNKNOWN_SOURCE_PROOF_IN_PROGRESS",
+      reason:
+        "EXACT_CREATION_RECEIPT_PATTERN_EVIDENCE_ALREADY_OBSERVED",
+      creator,
+      patternProgressDistinctTransactions:
+        safeNumber(
+          progress?.bestDistinctTransactions
+        ),
+      patternProgressDistinctTokens:
+        safeNumber(
+          progress?.bestDistinctTokens
+        ),
+      receiptsStillNeeded:
+        progress?.receiptsStillNeeded ?? 3
+    };
+  }
+
+  const cluster =
+    origin?.creatorClusters?.[
+      creator
+    ] || null;
+
+  if (
+    safeNumber(
+      cluster?.distinctTokens
+    ) >= 3
+  ) {
+    return {
+      class:
+        "VERIFIED_CREATOR_SOURCE_PROOF_INCOMPLETE",
+      reason:
+        "RECURRING_VERIFIED_CREATOR_WITHOUT_EXACT_CANONICAL_PATTERN_YET",
+      creator,
+      creatorDistinctTokens:
+        safeNumber(
+          cluster?.distinctTokens
+        )
+    };
+  }
+
+  return {
+    class:
+      "NO_RECURRING_SOURCE_EVIDENCE_YET",
+    reason:
+      "VERIFIED_ORIGIN_PRESENT_BUT_NO_REPEAT_SOURCE_PATTERN_PROVEN",
+    creator
+  };
+}
+
 function buildLaunchCoverageFunnelV474({
   state,
   startedAt,
@@ -121762,6 +122055,30 @@ function buildLaunchCoverageFunnelV474({
         candidate?.verifiedLaunchSourceV476?.verified !== true &&
         candidate?.verifiedLaunchAgeV223?.verified !== true
       );
+
+  const sourceAttributionClassesV631 = {};
+
+  for (
+    const candidate
+    of unverifiedLaunchCandidates
+  ) {
+    const classification =
+      sourceAttributionClassV631(
+        state,
+        candidate
+      );
+
+    const key =
+      classification?.class ||
+      "INSUFFICIENT_ORIGIN_EVIDENCE";
+
+    sourceAttributionClassesV631[key] =
+      safeNumber(
+        sourceAttributionClassesV631[
+          key
+        ]
+      ) + 1;
+  }
 
   const telegramQualified =
     currentLiveCandidates
@@ -121875,6 +122192,26 @@ function buildLaunchCoverageFunnelV474({
         verifiedLaunchCandidates.length,
       returnedCurrentLiveWithUnverifiedLaunchSource:
         unverifiedLaunchCandidates.length,
+      unattributedRecurringUnknownProofInProgressV631:
+        safeNumber(
+          sourceAttributionClassesV631
+            .RECURRING_UNKNOWN_SOURCE_PROOF_IN_PROGRESS
+        ),
+      unattributedVerifiedCreatorProofIncompleteV631:
+        safeNumber(
+          sourceAttributionClassesV631
+            .VERIFIED_CREATOR_SOURCE_PROOF_INCOMPLETE
+        ),
+      unattributedNoRecurringSourceEvidenceYetV631:
+        safeNumber(
+          sourceAttributionClassesV631
+            .NO_RECURRING_SOURCE_EVIDENCE_YET
+        ),
+      unattributedInsufficientOriginEvidenceV631:
+        safeNumber(
+          sourceAttributionClassesV631
+            .INSUFFICIENT_ORIGIN_EVIDENCE
+        ),
       currentLiveTelegramQualified:
         telegramQualified.length,
       currentLiveTelegramSent:
@@ -121931,6 +122268,11 @@ function buildLaunchCoverageFunnelV474({
               : candidate?.verifiedLaunchAgeV223?.verified === true
                 ? "VERIFIED_SOURCE_AND_TIMESTAMP_V223"
                 : "UNVERIFIED",
+          sourceAttributionClassV631:
+            sourceAttributionClassV631(
+              state,
+              candidate
+            ),
           marketVerified:
             candidate?.market?.verified === true,
           scannerAgeMs:
@@ -121966,6 +122308,10 @@ function updateLaunchCoverageCumulativeV474(
     "currentLiveReturnedCandidates",
     "returnedCurrentLiveWithVerifiedLaunchSource",
     "returnedCurrentLiveWithUnverifiedLaunchSource",
+    "unattributedRecurringUnknownProofInProgressV631",
+    "unattributedVerifiedCreatorProofIncompleteV631",
+    "unattributedNoRecurringSourceEvidenceYetV631",
+    "unattributedInsufficientOriginEvidenceV631",
     "currentLiveTelegramQualified",
     "currentLiveTelegramSent"
   ]) {
@@ -122036,6 +122382,10 @@ function launchCoverageTelegramMessageV474(state) {
     `Current/live returned candidates: <b>${fmt(last.currentLiveReturnedCandidates)}</b>`,
     `Returned with verified launch source: <b>${fmt(last.returnedCurrentLiveWithVerifiedLaunchSource)}</b>`,
     `Returned with launch source UNVERIFIED: <b>${fmt(last.returnedCurrentLiveWithUnverifiedLaunchSource)}</b>`,
+    `↳ Recurring unknown source — exact proof in progress: <b>${fmt(last.unattributedRecurringUnknownProofInProgressV631)}</b>`,
+    `↳ Verified creator — source proof incomplete: <b>${fmt(last.unattributedVerifiedCreatorProofIncompleteV631)}</b>`,
+    `↳ No recurring source evidence yet: <b>${fmt(last.unattributedNoRecurringSourceEvidenceYetV631)}</b>`,
+    `↳ Insufficient verified origin evidence: <b>${fmt(last.unattributedInsufficientOriginEvidenceV631)}</b>`,
     `Telegram qualified: <b>${fmt(last.currentLiveTelegramQualified)}</b>`,
     `Telegram sent: <b>${fmt(last.currentLiveTelegramSent)}</b>`,
     "",
@@ -122052,7 +122402,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "<i>Measurement only. Zero additional provider requests and no scoring/threshold changes.</i>"
+    "V631 prioritises the recurring unknown creator closest to exact 3×3 source proof for the existing single proof slot.",
+    "<i>Zero additional provider requests and no scoring/threshold changes.</i>"
   ].join("\n");
 }
 
