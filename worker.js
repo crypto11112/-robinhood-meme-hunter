@@ -1,4 +1,19 @@
 /**
+ * Robinhood Chain Meme Hunter — V604
+ * AUTHORITATIVE RUNTIME VERSION: V604
+ *
+ * V604 POST-OPEN PROVIDER HEALTH FAILOVER:
+ * - preserves V603 public-RPC shared-head architecture;
+ * - fixes providers that return HTTP 101 then die immediately after OPEN;
+ * - proven QuickNode failure: code 1001 "upstream went away" / network lost
+ *   roughly 80ms after OPEN;
+ * - OPEN->close/error within 5s marks that provider unstable for 10 minutes;
+ * - next reconnect skips the cooling provider and tries the next configured one;
+ * - with QuickNode unstable, dRPC becomes the next live Swap-feed provider;
+ * - cooldown automatically expires; stable sockets clear their cooldown;
+ * - no shared-head, USD, scoring, V4, qualification, alert, or 42-cap changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V603
  * AUTHORITATIVE RUNTIME VERSION: V603
  *
@@ -4200,7 +4215,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V603";
+const VERSION = "V604";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -120422,6 +120437,16 @@ function v3CollectorControlTelegramMessageV592(action, token, result) {
       `V597 provider: <b>${escapeHtml(String(pfV597.activeProvider||pfV597.preferredProvider||"NONE_ACTIVE"))}</b>`,
       `Configured V3 WSS providers: <b>${escapeHtml(configuredV597||"NONE")}</b>`
     );
+    const cooldownsV604=pfV597?.providerCooldownsV604||{};
+    const activeCooldownsV604=Object.entries(cooldownsV604)
+      .filter(([,row])=>Number(row?.until)>Date.now())
+      .map(([id,row])=>`${id} ${Math.max(1,Math.ceil((Number(row.until)-Date.now())/60000))}m`);
+    if(activeCooldownsV604.length){
+      lines.push(
+        `V604 provider cooldown: <b>${escapeHtml(activeCooldownsV604.join(", "))}</b>`
+      );
+    }
+
     if (pfV597?.lastProviderFailure?.providerId) {
       const failureV597=pfV597.lastProviderFailure;
       let failureTextV597=`${failureV597.providerId}: ${failureV597.failure||"FAILED"}`;
@@ -125654,6 +125679,8 @@ const DRPC_WS_CU_PER_SUBSCRIPTION_V600 = 20;
 const DRPC_WS_CU_PER_NOTIFICATION_V600 = 20;
 const V3_SHARED_HEAD_NAME_V602 = "V3_SHARED_HEAD_V602";
 const V3_SHARED_HEAD_MODE_KEY_V602 = "v602:sharedHeadObject";
+const V3_PROVIDER_FAST_FAILURE_MS_V604 = 5000;
+const V3_PROVIDER_COOLDOWN_MS_V604 = 10 * 60 * 1000;
 
 const V3_HEAD_STALE_MS_V371 = 30000;
 const V3_HEAD_WATCHDOG_MS_V371 = 15000;
@@ -127656,6 +127683,19 @@ if (url.pathname === "/reconcile-v374") {
     // reconnect decision. This keeps persisted evidence at most ~15s behind.
     await this.flushTradeStateV403();
 
+    // V604: surviving beyond the fast-failure threshold proves the provider
+    // is no longer in the immediate-open failure state.
+    if(
+      productionEnabled===true &&
+      this.ws &&
+      this.ws.readyState===WebSocket.OPEN &&
+      this.activeProviderIdV604 &&
+      Number.isFinite(Number(this.activeProviderOpenedAtV604)) &&
+      Date.now()-Number(this.activeProviderOpenedAtV604)>V3_PROVIDER_FAST_FAILURE_MS_V604
+    ){
+      await this.clearProviderCooldownV604(this.activeProviderIdV604);
+    }
+
     // Preserve the confirmed V371 production single-pool watchdog behavior.
     // V401 only shares the Durable Object alarm so the shadow collector can
     // independently prove that its newHeads stream remains live.
@@ -128130,6 +128170,10 @@ if (url.pathname === "/reconcile-v374") {
       v3ProviderFailoverV597:{
         enabled:true,
         activeProvider:conn?.activeProviderV597||null,
+        postOpenHealthFailoverV604:true,
+        fastFailureThresholdMsV604:V3_PROVIDER_FAST_FAILURE_MS_V604,
+        cooldownMsV604:V3_PROVIDER_COOLDOWN_MS_V604,
+        providerCooldownsV604:await this.state.storage.get("v604:providerCooldowns")||{},
         configuredProviders:Array.isArray(conn?.configuredProvidersV597)
           ? conn.configuredProvidersV597
           : this.v3ProviderCandidatesV597().map(row=>row.id),
@@ -129147,15 +129191,65 @@ if (url.pathname === "/reconcile-v374") {
   }
 
   async orderedV3ProvidersV597() {
-    const rows = this.v3ProviderCandidatesV597();
-    const preferred = await this.state.storage.get("v597:preferredProviderId");
+    const rows=this.v3ProviderCandidatesV597();
+    const preferred=await this.state.storage.get("v597:preferredProviderId");
+    const cooldowns=await this.state.storage.get("v604:providerCooldowns")||{};
+    const nowMs=Date.now();
 
-    if (!preferred) return rows;
+    const healthy=[];
+    const cooling=[];
+
+    for(const row of rows){
+      const until=Number(cooldowns?.[row.id]?.until);
+      if(Number.isFinite(until)&&until>nowMs){
+        cooling.push({...row,cooldownUntilV604:until});
+      }else{
+        healthy.push(row);
+      }
+    }
 
     return [
-      ...rows.filter(row => row.id === preferred),
-      ...rows.filter(row => row.id !== preferred)
+      ...healthy.filter(row=>row.id===preferred),
+      ...healthy.filter(row=>row.id!==preferred),
+      ...cooling
     ];
+  }
+
+  async markProviderFastFailureV604(providerId, reason, detail={}) {
+    if(!providerId)return null;
+    const nowMs=Date.now();
+    const cooldowns=await this.state.storage.get("v604:providerCooldowns")||{};
+    const prior=cooldowns?.[providerId]||{};
+
+    cooldowns[providerId]={
+      until:nowMs+V3_PROVIDER_COOLDOWN_MS_V604,
+      lastFailureAt:nowMs,
+      reason:String(reason||"FAST_POST_OPEN_FAILURE_V604").slice(0,140),
+      failures:safeNumber(prior.failures)+1,
+      detail:{
+        code:Number.isFinite(Number(detail?.code))?Number(detail.code):null,
+        reason:typeof detail?.reason==="string"?detail.reason.slice(0,180):null,
+        message:typeof detail?.message==="string"?detail.message.slice(0,180):null,
+        socketAgeMs:Number.isFinite(Number(detail?.socketAgeMs))?Number(detail.socketAgeMs):null
+      }
+    };
+
+    await this.doPutV404("v604:providerCooldowns",cooldowns);
+
+    const preferred=await this.state.storage.get("v597:preferredProviderId");
+    if(preferred===providerId){
+      await this.state.storage.delete("v597:preferredProviderId");
+    }
+
+    return cooldowns[providerId];
+  }
+
+  async clearProviderCooldownV604(providerId) {
+    if(!providerId)return;
+    const cooldowns=await this.state.storage.get("v604:providerCooldowns")||{};
+    if(!cooldowns?.[providerId])return;
+    delete cooldowns[providerId];
+    await this.doPutV404("v604:providerCooldowns",cooldowns);
   }
 
   async recordV3HandshakeEventV594(eventType, detail = {}) {
@@ -129407,6 +129501,8 @@ if (url.pathname === "/reconcile-v374") {
     }
 
     this.ws=ws;
+    this.activeProviderIdV604=selectedProviderV597.id;
+    this.activeProviderOpenedAtV604=Date.now();
     await this.doPutV404("v597:preferredProviderId",selectedProviderV597.id);
 
     // V600: one compact baseline per successful provider session.
@@ -129477,31 +129573,76 @@ if (url.pathname === "/reconcile-v374") {
       });
     });
     ws.addEventListener("close", async (event)=>{
+      const socketAgeV604=
+        Number.isFinite(Number(this.activeProviderOpenedAtV604))
+          ? Math.max(0,Date.now()-Number(this.activeProviderOpenedAtV604))
+          : Math.max(0,Date.now()-Number(socketConnectStartedAtV593));
+
       await this.recordV3HandshakeEventV594(
         "CLOSE_V594",
         {
           code:Number.isFinite(Number(event?.code))?Number(event.code):null,
           reason:typeof event?.reason==="string"?event.reason.slice(0,240):null,
           wasClean:typeof event?.wasClean==="boolean"?event.wasClean:null,
-          ageAtCloseMs:Math.max(0,Date.now()-Number(socketConnectStartedAtV593))
+          ageAtCloseMs:socketAgeV604,
+          providerId:selectedProviderV597?.id||null
         }
       );
+
+      if(socketAgeV604<=V3_PROVIDER_FAST_FAILURE_MS_V604){
+        await this.markProviderFastFailureV604(
+          selectedProviderV597?.id,
+          "FAST_POST_OPEN_CLOSE_V604",
+          {code:event?.code,reason:event?.reason,socketAgeMs:socketAgeV604}
+        );
+      }else{
+        await this.clearProviderCooldownV604(selectedProviderV597?.id);
+      }
+
       this.ws=null;
       this.wsConnectStartedAtV593=null;
+      this.activeProviderIdV604=null;
+      this.activeProviderOpenedAtV604=null;
       this.subscriptionId=null;
       this.headSubscriptionId=null;
-      this.scheduleReconnect("WEBSOCKET_CLOSED_V368");
+
+      this.scheduleReconnect(
+        socketAgeV604<=V3_PROVIDER_FAST_FAILURE_MS_V604
+          ? "FAST_POST_OPEN_CLOSE_V604"
+          : "WEBSOCKET_CLOSED_V368"
+      );
     });
     ws.addEventListener("error", async (event)=>{
+      const socketAgeV604=
+        Number.isFinite(Number(this.activeProviderOpenedAtV604))
+          ? Math.max(0,Date.now()-Number(this.activeProviderOpenedAtV604))
+          : Math.max(0,Date.now()-Number(socketConnectStartedAtV593));
+      const messageV604=
+        String(event?.message||event?.error?.message||"WEBSOCKET_ERROR_EVENT_NO_MESSAGE").slice(0,240);
+
       await this.recordV3HandshakeEventV594(
         "ERROR_V594",
         {
-          message:String(event?.message||event?.error?.message||"WEBSOCKET_ERROR_EVENT_NO_MESSAGE").slice(0,240),
-          ageAtErrorMs:Math.max(0,Date.now()-Number(socketConnectStartedAtV593))
+          message:messageV604,
+          ageAtErrorMs:socketAgeV604,
+          providerId:selectedProviderV597?.id||null
         }
       );
+
+      if(socketAgeV604<=V3_PROVIDER_FAST_FAILURE_MS_V604){
+        await this.markProviderFastFailureV604(
+          selectedProviderV597?.id,
+          "FAST_POST_OPEN_ERROR_V604",
+          {message:messageV604,socketAgeMs:socketAgeV604}
+        );
+      }
+
       this.wsConnectStartedAtV593=null;
-      this.scheduleReconnect("WEBSOCKET_ERROR_V363");
+      this.scheduleReconnect(
+        socketAgeV604<=V3_PROVIDER_FAST_FAILURE_MS_V604
+          ? "FAST_POST_OPEN_ERROR_V604"
+          : "WEBSOCKET_ERROR_V363"
+      );
     });
 
     // Existing V368 subscription payloads are preserved exactly.
