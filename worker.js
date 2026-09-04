@@ -1,4 +1,19 @@
 /**
+ * Robinhood Chain Meme Hunter — V594
+ * AUTHORITATIVE RUNTIME VERSION: V594
+ *
+ * V594 V3 WEBSOCKET HANDSHAKE DIAGNOSTICS:
+ * - preserves V593 and all confirmed-working V4/V3 behaviour;
+ * - DOES NOT change WebSocket connection/reconnect behaviour;
+ * - records CONNECT attempt, OPEN, ERROR, CLOSE and V593 timeout events;
+ * - records handshake duration, close code/reason/wasClean and timeout source;
+ * - persists a compact recent event ring for /v3status;
+ * - never exposes the Alchemy API key;
+ * - diagnostic only;
+ * - no extra RPC/provider requests;
+ * - hard global external-request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V593
  * AUTHORITATIVE RUNTIME VERSION: V593
  *
@@ -4002,7 +4017,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V593";
+const VERSION = "V594";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -120062,6 +120077,23 @@ function v3CollectorControlTelegramMessageV592(action, token, result) {
     lines.push(`Verified V3 pool: <code>${escapeHtml(result.pair)}</code>`);
   }
 
+  const hsV594=result?.v3WebSocketHandshakeDiagnosticsV594||null;
+  if (hsV594) {
+    lines.push(
+      `Handshake attempts: <b>${safeNumber(hsV594.connectAttempts)}</b> | opens <b>${safeNumber(hsV594.openEvents)}</b> | errors <b>${safeNumber(hsV594.errorEvents)}</b> | closes <b>${safeNumber(hsV594.closeEvents)}</b> | timeouts <b>${safeNumber(hsV594.timeoutEvents)}</b>`
+    );
+    if (hsV594?.lastEventType) {
+      const last=hsV594?.lastEvent||{};
+      let detail=String(hsV594.lastEventType);
+      if (last?.code!==undefined&&last?.code!==null) detail+=` code=${last.code}`;
+      if (last?.reason) detail+=` reason=${String(last.reason).slice(0,120)}`;
+      if (last?.message) detail+=` message=${String(last.message).slice(0,120)}`;
+      if (last?.handshakeMs!==undefined&&last?.handshakeMs!==null) detail+=` handshake=${last.handshakeMs}ms`;
+      if (last?.connectingAgeMs!==undefined&&last?.connectingAgeMs!==null) detail+=` connectingAge=${last.connectingAgeMs}ms`;
+      lines.push(`Last handshake event: <b>${escapeHtml(detail)}</b>`);
+    }
+  }
+
   if (result?.error) {
     lines.push(`Error: <b>${escapeHtml(String(result.error).slice(0,220))}</b>`);
   }
@@ -126565,6 +126597,10 @@ export class V3LiveCollectorV363 {
         connectingAgeMsV593 !== null &&
         connectingAgeMsV593 > V3_SOCKET_CONNECT_TIMEOUT_MS_V593
       ) {
+        await this.recordV3HandshakeEventV594(
+          "CONNECT_TIMEOUT_V594",
+          {source:"FETCH_SELF_HEAL_V594",connectingAgeMs:connectingAgeMsV593,timeoutMs:V3_SOCKET_CONNECT_TIMEOUT_MS_V593}
+        );
         try { this.ws?.close(1012, "V593 connect timeout"); } catch (_) {}
       }
 
@@ -127163,6 +127199,10 @@ if (url.pathname === "/reconcile-v374") {
             connectingAgeMsV593!==null &&
             connectingAgeMsV593>V3_SOCKET_CONNECT_TIMEOUT_MS_V593
           ) {
+            await this.recordV3HandshakeEventV594(
+              "CONNECT_TIMEOUT_V594",
+              {source:"ALARM_WATCHDOG_V594",connectingAgeMs:connectingAgeMsV593,timeoutMs:V3_SOCKET_CONNECT_TIMEOUT_MS_V593}
+            );
             try { this.ws?.close(1012,"V593 connect timeout"); } catch (_) {}
             this.ws=null;
             this.wsConnectStartedAtV593=null;
@@ -127199,6 +127239,7 @@ if (url.pathname === "/reconcile-v374") {
 
   async status(overrideStatus=null) {
     const enabled = await this.state.storage.get("enabled");
+    const handshakeV594 = await this.state.storage.get("v594:handshakeDiagnostics") || {};
     const cfg = this.config || await this.state.storage.get("config") || null;
     const conn = await this.state.storage.get("connection") || {};
     const stats = await this.state.storage.get("stats") || {};
@@ -127248,6 +127289,23 @@ if (url.pathname === "/reconcile-v374") {
         watchdogCadenceMs:V3_HEAD_WATCHDOG_MS_V371,
         reconnectDelayMs:V3_LIVE_RECONNECT_MS_V363,
         oldPartialEvidenceNeverPromoted:true,
+        externalRequestsAdded:0,
+        hardGlobalLimitUnchanged:42
+      },
+      v3WebSocketHandshakeDiagnosticsV594:{
+        enabled:true,
+        connectAttempts:safeNumber(handshakeV594?.connectAttempts),
+        openEvents:safeNumber(handshakeV594?.openEvents),
+        errorEvents:safeNumber(handshakeV594?.errorEvents),
+        closeEvents:safeNumber(handshakeV594?.closeEvents),
+        timeoutEvents:safeNumber(handshakeV594?.timeoutEvents),
+        lastEventType:handshakeV594?.lastEventType||null,
+        lastEventAt:Number.isFinite(Number(handshakeV594?.lastEventAt))?Number(handshakeV594.lastEventAt):null,
+        lastEvent:handshakeV594?.lastEvent||null,
+        recentEvents:Array.isArray(handshakeV594?.recentEvents)?handshakeV594.recentEvents.slice(-6):[],
+        endpointHost:"robinhood-mainnet.g.alchemy.com",
+        alchemyKeyConfigured:Boolean(this.env.ALCHEMY_API_KEY),
+        apiKeyExposed:false,
         externalRequestsAdded:0,
         hardGlobalLimitUnchanged:42
       },
@@ -127929,6 +127987,38 @@ if (url.pathname === "/reconcile-v374") {
       status:conn.subscriptionAccepted===true&&conn.runtimeVersion===VERSION&&String(conn?.configFingerprintV399||"")===String(cfg?.configFingerprintV399||"")&&reconciliationAllWindowsPassV398&&reconciliationAllWindowsPassV400&&shadowHeadFreshV401?"SHADOW_MULTI_POOL_WRITE_EFFICIENT_ACTIVE_V402":"SHADOW_MULTI_POOL_NOT_YET_ACTIVE_V401",timestamp:new Date(nowMs).toISOString()};
   }
 
+  async recordV3HandshakeEventV594(eventType, detail = {}) {
+    const now = Date.now();
+    const current =
+      await this.state.storage.get("v594:handshakeDiagnostics") || {};
+    const recent = Array.isArray(current.recentEvents) ? current.recentEvents : [];
+
+    const event = {
+      at: now,
+      iso: new Date(now).toISOString(),
+      eventType: String(eventType || "UNKNOWN").slice(0,80),
+      ...detail
+    };
+
+    recent.push(event);
+
+    const next = {
+      ...current,
+      lastEvent:event,
+      lastEventType:event.eventType,
+      lastEventAt:now,
+      connectAttempts:safeNumber(current.connectAttempts)+(event.eventType==="CONNECT_ATTEMPT_V594"?1:0),
+      openEvents:safeNumber(current.openEvents)+(event.eventType==="OPEN_V594"?1:0),
+      errorEvents:safeNumber(current.errorEvents)+(event.eventType==="ERROR_V594"?1:0),
+      closeEvents:safeNumber(current.closeEvents)+(event.eventType==="CLOSE_V594"?1:0),
+      timeoutEvents:safeNumber(current.timeoutEvents)+(event.eventType==="CONNECT_TIMEOUT_V594"?1:0),
+      recentEvents:recent.slice(-12)
+    };
+
+    await this.doPutV404("v594:handshakeDiagnostics", next);
+    return next;
+  }
+
   async connect() {
     const enabled = await this.state.storage.get("enabled");
     if (enabled !== true) return;
@@ -127957,8 +128047,21 @@ if (url.pathname === "/reconcile-v374") {
 
     let ws;
     const socketConnectStartedAtV593 = Date.now();
+    await this.recordV3HandshakeEventV594(
+      "CONNECT_ATTEMPT_V594",
+      {
+        connectStartedAtV593:socketConnectStartedAtV593,
+        connectTimeoutMsV593:V3_SOCKET_CONNECT_TIMEOUT_MS_V593,
+        alchemyKeyConfigured:Boolean(this.env.ALCHEMY_API_KEY),
+        endpointHost:"robinhood-mainnet.g.alchemy.com"
+      }
+    );
     try { ws = new WebSocket(`wss://robinhood-mainnet.g.alchemy.com/v2/${String(this.env.ALCHEMY_API_KEY)}`); }
-    catch (e) { await this.scheduleReconnect(String(e?.message||e)); return; }
+    catch (e) {
+      await this.recordV3HandshakeEventV594("CONSTRUCTOR_ERROR_V594",{error:String(e?.message||e).slice(0,240)});
+      await this.scheduleReconnect(String(e?.message||e));
+      return;
+    }
 
     this.ws = ws;
     this.wsConnectStartedAtV593 = socketConnectStartedAtV593;
@@ -127979,6 +128082,11 @@ if (url.pathname === "/reconcile-v374") {
     });
 
     ws.addEventListener("open", async () => {
+      const openedAtV594=Date.now();
+      await this.recordV3HandshakeEventV594(
+        "OPEN_V594",
+        {openedAt:openedAtV594,handshakeMs:Math.max(0,openedAtV594-Number(socketConnectStartedAtV593))}
+      );
       this.reconnectPending = false;
       this.wsConnectStartedAtV593 = null;
       await this.doPutV404("connection",{status:"WEBSOCKET_OPEN_SUBSCRIBING_V368",connected:true,subscriptionAccepted:false,logSubscriptionAccepted:false,headSubscriptionAccepted:false,lastConnectedAt:Date.now(),subscriptionIdPresent:false,headSubscriptionIdPresent:false,socketConnectStartedAtV593:null,socketConnectTimeoutMsV593:V3_SOCKET_CONNECT_TIMEOUT_MS_V593});
@@ -127991,14 +128099,30 @@ if (url.pathname === "/reconcile-v374") {
         const c=await this.state.storage.get("connection")||{}; c.lastError=String(e?.message||e).slice(0,240); c.status="MESSAGE_PROCESSING_ERROR_V363"; await this.doPutV404("connection",c);
       });
     });
-    ws.addEventListener("close", ()=>{
+    ws.addEventListener("close", async (event)=>{
+      await this.recordV3HandshakeEventV594(
+        "CLOSE_V594",
+        {
+          code:Number.isFinite(Number(event?.code))?Number(event.code):null,
+          reason:typeof event?.reason==="string"?event.reason.slice(0,240):null,
+          wasClean:typeof event?.wasClean==="boolean"?event.wasClean:null,
+          ageAtCloseMs:Math.max(0,Date.now()-Number(socketConnectStartedAtV593))
+        }
+      );
       this.ws=null;
       this.wsConnectStartedAtV593=null;
       this.subscriptionId=null;
       this.headSubscriptionId=null;
       this.scheduleReconnect("WEBSOCKET_CLOSED_V368");
     });
-    ws.addEventListener("error", ()=>{
+    ws.addEventListener("error", async (event)=>{
+      await this.recordV3HandshakeEventV594(
+        "ERROR_V594",
+        {
+          message:String(event?.message||event?.error?.message||"WEBSOCKET_ERROR_EVENT_NO_MESSAGE").slice(0,240),
+          ageAtErrorMs:Math.max(0,Date.now()-Number(socketConnectStartedAtV593))
+        }
+      );
       this.wsConnectStartedAtV593=null;
       this.scheduleReconnect("WEBSOCKET_ERROR_V363");
     });
