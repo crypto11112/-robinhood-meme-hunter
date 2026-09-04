@@ -1,4 +1,17 @@
 /**
+ * Robinhood Chain Meme Hunter — V610
+ * AUTHORITATIVE RUNTIME VERSION: V610
+ *
+ * V610 PER-PROVIDER HTTP LOG ERROR REPORTING:
+ * - preserves V609 collector behaviour unchanged;
+ * - /feedusage prints exact per-provider eth_getLogs diagnostics for
+ *   dRPC, QuickNode, Alchemy and Robinhood public RPC;
+ * - shows attempts, successes, failures, last HTTP status, RPC error,
+ *   network/timeout error and last elapsed time;
+ * - no provider order, polling cadence, integrity, decoding, USD, scoring,
+ *   V4, alerts, qualification or hard 42-request scanner-cap changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V609
  * AUTHORITATIVE RUNTIME VERSION: V609
  *
@@ -4316,7 +4329,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V609";
+const VERSION = "V610";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -120317,6 +120330,28 @@ function parseTelegramCommandV271(
   };
 }
 
+function v3HttpProviderDiagLineV610(label,row) {
+  const r=row||{};
+  const http=
+    Number.isFinite(Number(r.lastHttpStatus))
+      ? String(Number(r.lastHttpStatus))
+      : "NONE";
+  const rpc=
+    typeof r.lastRpcError==="string" && r.lastRpcError.length
+      ? r.lastRpcError
+      : "NONE";
+  const error=
+    typeof r.lastError==="string" && r.lastError.length
+      ? r.lastError
+      : "NONE";
+  const elapsed=
+    Number.isFinite(Number(r.lastElapsedMs))
+      ? `${Math.max(0,Math.round(Number(r.lastElapsedMs)))}ms`
+      : "UNVERIFIED";
+
+  return `${label}: attempts <b>${safeNumber(r.attempts)}</b> | success <b>${safeNumber(r.successes)}</b> | failed <b>${safeNumber(r.failures)}</b> | HTTP <b>${escapeHtml(http)}</b> | RPC <code>${escapeHtml(rpc.slice(0,120))}</code> | error <code>${escapeHtml(error.slice(0,120))}</code> | response <b>${escapeHtml(elapsed)}</b>`;
+}
+
 function v3FeedUsageTelegramMessageV598(token, result) {
   const activeProvider =
     String(result?.activeProvider || "NONE_ACTIVE");
@@ -120377,7 +120412,7 @@ function v3FeedUsageTelegramMessageV598(token, result) {
   };
 
   const lines = [
-    `📡 <b>V3 Feed Usage — V609</b>`,
+    `📡 <b>V3 Feed Usage — V610</b>`,
     `Contract: <code>${escapeHtml(token)}</code>`,
     "",
     `Active provider: <b>${escapeHtml(activeProvider)}</b>`,
@@ -120399,8 +120434,10 @@ function v3FeedUsageTelegramMessageV598(token, result) {
     `V3 log transport: <b>${result?.v3HttpLogPollingV605?.enabled===true?"HTTP eth_getLogs":"LEGACY"}</b> | WebSocket subscriptions <b>${safeNumber(result?.v3HttpLogPollingV605?.webSocketSubscriptions)}</b>`,
     `HTTP poll health: <b>${result?.httpPollFreshV606===true?"FRESH":result?.v3HttpLogPollingV605?.enabled===true?"BUILDING/STALE":"N/A"}</b> | age <b>${escapeHtml(fmtAge(result?.pollAgeMsV606))}</b>`,
     `Log polls: <b>${safeNumber(result?.v3HttpLogPollingV605?.pollSuccesses)}</b> success / <b>${safeNumber(result?.v3HttpLogPollingV605?.pollFailures)}</b> failed | provider <b>${escapeHtml(String(result?.v3HttpLogPollingV605?.lastProviderId||"BUILDING"))}</b>`,
-    `Log provider attempts: dRPC <b>${safeNumber(result?.v3HttpLogPollingV605?.providerStatsV609?.DRPC?.attempts)}</b> | QuickNode <b>${safeNumber(result?.v3HttpLogPollingV605?.providerStatsV609?.QUICKNODE?.attempts)}</b> | Alchemy <b>${safeNumber(result?.v3HttpLogPollingV605?.providerStatsV609?.ALCHEMY?.attempts)}</b> | Public <b>${safeNumber(result?.v3HttpLogPollingV605?.providerStatsV609?.ROBINHOOD_PUBLIC_RPC?.attempts)}</b>`,
-    `Log provider successes: dRPC <b>${safeNumber(result?.v3HttpLogPollingV605?.providerStatsV609?.DRPC?.successes)}</b> | QuickNode <b>${safeNumber(result?.v3HttpLogPollingV605?.providerStatsV609?.QUICKNODE?.successes)}</b> | Alchemy <b>${safeNumber(result?.v3HttpLogPollingV605?.providerStatsV609?.ALCHEMY?.successes)}</b> | Public <b>${safeNumber(result?.v3HttpLogPollingV605?.providerStatsV609?.ROBINHOOD_PUBLIC_RPC?.successes)}</b>`,
+    v3HttpProviderDiagLineV610("dRPC",result?.v3HttpLogPollingV605?.providerStatsV609?.DRPC),
+    v3HttpProviderDiagLineV610("QuickNode",result?.v3HttpLogPollingV605?.providerStatsV609?.QUICKNODE),
+    v3HttpProviderDiagLineV610("Alchemy",result?.v3HttpLogPollingV605?.providerStatsV609?.ALCHEMY),
+    v3HttpProviderDiagLineV610("Public RPC",result?.v3HttpLogPollingV605?.providerStatsV609?.ROBINHOOD_PUBLIC_RPC),
     ...(result?.v3HttpLogPollingV605?.lastFailure
       ? [`Last exact-log failure: <code>${escapeHtml(JSON.stringify(result.v3HttpLogPollingV605.lastFailure).slice(0,180))}</code>`]
       : []),
