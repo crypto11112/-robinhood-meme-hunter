@@ -1,4 +1,27 @@
 /**
+ * Robinhood Chain Meme Hunter — V620
+ * AUTHORITATIVE RUNTIME VERSION: V620
+ *
+ * V620 FORWARD-ONLY PRICE + HOLDER GROWTH LEARNING:
+ * - NEW successful calls freeze entry price + verified entry holder count;
+ * - tracks 5m / 15m / 30m / 1h / 6h / 12h / 24h;
+ * - price outcome stores later price, absolute change and +/- growth %;
+ * - holder outcome stores later holder count, +/- holder count and +/- growth %;
+ * - price outcomes reuse the existing V413 DexScreener live-horizon request;
+ * - holder outcomes reuse only verified holder evidence already obtained by the
+ *   normal scanner/analyser path; NO new holder-provider request is added;
+ * - price and holder outcomes freeze independently, so missing holder evidence
+ *   never blocks verified price growth and vice versa;
+ * - first verified observation at/after each target is frozen with observation lag;
+ * - V620 is forward-only for NEW V620-era calls: no historical/backfill mutation;
+ * - /horizon shows the new growth outcomes;
+ * - /learning shows V620 capture coverage for research;
+ * - measurement/learning only: scoring, Momentum, qualification, alerts and
+ *   thresholds are unchanged;
+ * - V619 transient retry, combined Blockscout meter, launch proof, V3/V4 collectors,
+ *   provider cadence and hard scanner 42-request ceiling are preserved.
+ */
+/**
  * Robinhood Chain Meme Hunter — V619
  * AUTHORITATIVE RUNTIME VERSION: V619
  *
@@ -4506,7 +4529,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V619";
+const VERSION = "V620";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -68252,6 +68275,149 @@ function buildEntrySignalSnapshotV309(candidate, capturedAt) {
   };
 }
 
+const GROWTH_HORIZONS_V620 = Object.freeze({
+  m5:5*60*1000,
+  m15:15*60*1000,
+  m30:30*60*1000,
+  h1:60*60*1000,
+  h6:6*60*60*1000,
+  h12:12*60*60*1000,
+  h24:24*60*60*1000
+});
+
+function verifiedHolderCountV620(candidate){
+  const presentation=telegramHolderPresentationV269(candidate);
+  const n=Number(presentation?.holderCount?.count);
+  return presentation?.holderCount?.verified===true &&
+    Number.isFinite(n) && n>0
+      ? {
+          verified:true,
+          holderCount:Math.floor(n),
+          source:presentation?.holderCount?.source||"VERIFIED_HOLDER_PRESENTATION_V620"
+        }
+      : {verified:false,holderCount:null,source:null};
+}
+
+function initialiseGrowthOutcomesV620(entryTimestamp,entryPriceUsd,entryHolderCount,entryHolderSource=null){
+  const entryAt=Number(entryTimestamp);
+  const entryPrice=Number(entryPriceUsd);
+  const entryHolders=Number(entryHolderCount);
+  if(!Number.isFinite(entryAt)||entryAt<=0)return null;
+
+  const outcomes={};
+  for(const [key,delay] of Object.entries(GROWTH_HORIZONS_V620)){
+    outcomes[key]={
+      targetAt:entryAt+delay,
+      price:null,
+      holders:null
+    };
+  }
+
+  return {
+    version:"V620",
+    forwardOnly:true,
+    hindsightBackfillAllowed:false,
+    initialisedAt:Date.now(),
+    entryTimestamp:entryAt,
+    entryPriceUsd:Number.isFinite(entryPrice)&&entryPrice>0?entryPrice:null,
+    entryHolderCount:Number.isFinite(entryHolders)&&entryHolders>0?Math.floor(entryHolders):null,
+    entryHolderSource:
+      Number.isFinite(entryHolders)&&entryHolders>0
+        ? (entryHolderSource||null)
+        : null,
+    outcomes
+  };
+}
+
+function captureGrowthOutcomesV620(record,candidate,observedAt=Date.now()){
+  const tracker=record?.growthOutcomesV620;
+  if(
+    !tracker ||
+    tracker?.version!=="V620" ||
+    tracker?.forwardOnly!==true ||
+    tracker?.hindsightBackfillAllowed!==false
+  ) return record;
+
+  const observed=Number(observedAt);
+  const entryAt=Number(tracker.entryTimestamp);
+  if(!Number.isFinite(observed)||!Number.isFinite(entryAt)||observed<entryAt)return record;
+
+  const market=candidate?.market;
+  const currentPrice=
+    market?.verified===true &&
+    Number.isFinite(Number(market?.priceUsd)) &&
+    Number(market.priceUsd)>0
+      ? Number(market.priceUsd)
+      : null;
+  const priceSource=currentPrice!==null?(market?.source||"VERIFIED_MARKET_V620"):null;
+  const holderNow=verifiedHolderCountV620(candidate);
+
+  tracker.outcomes=
+    tracker.outcomes&&typeof tracker.outcomes==="object"
+      ? tracker.outcomes
+      : {};
+
+  for(const [key,delay] of Object.entries(GROWTH_HORIZONS_V620)){
+    const targetAt=entryAt+delay;
+    const row=tracker.outcomes[key]&&typeof tracker.outcomes[key]==="object"
+      ? tracker.outcomes[key]
+      : {targetAt,price:null,holders:null};
+    row.targetAt=targetAt;
+    if(observed<targetAt){
+      tracker.outcomes[key]=row;
+      continue;
+    }
+
+    if(
+      !row.price &&
+      currentPrice!==null &&
+      Number.isFinite(Number(tracker.entryPriceUsd)) &&
+      Number(tracker.entryPriceUsd)>0
+    ){
+      const entryPrice=Number(tracker.entryPriceUsd);
+      row.price={
+        verified:true,
+        frozen:true,
+        targetAt,
+        observedAt:observed,
+        observationLagMs:observed-targetAt,
+        entryPriceUsd:entryPrice,
+        priceUsd:currentPrice,
+        absoluteChangeUsd:currentPrice-entryPrice,
+        growthPct:((currentPrice-entryPrice)/entryPrice)*100,
+        source:priceSource
+      };
+    }
+
+    if(
+      !row.holders &&
+      holderNow?.verified===true &&
+      Number.isFinite(Number(tracker.entryHolderCount)) &&
+      Number(tracker.entryHolderCount)>0
+    ){
+      const entryHolders=Math.floor(Number(tracker.entryHolderCount));
+      const currentHolders=Math.floor(Number(holderNow.holderCount));
+      row.holders={
+        verified:true,
+        frozen:true,
+        targetAt,
+        observedAt:observed,
+        observationLagMs:observed-targetAt,
+        entryHolderCount:entryHolders,
+        holderCount:currentHolders,
+        holderChange:currentHolders-entryHolders,
+        growthPct:((currentHolders-entryHolders)/entryHolders)*100,
+        source:holderNow.source||null
+      };
+    }
+
+    tracker.outcomes[key]=row;
+  }
+
+  tracker.lastUpdatedAt=observed;
+  return record;
+}
+
 const ENTRY_TIMING_HORIZONS_V411 = Object.freeze({
   m5: 5 * 60 * 1000,
   m15: 15 * 60 * 1000,
@@ -68408,6 +68574,27 @@ function buildCallPerformanceRecordV270(
         : null
     );
 
+  const frozenEntryHolderV620=
+    entrySignalSnapshotV309?.holders?.holderCountVerified===true &&
+    Number.isFinite(Number(entrySignalSnapshotV309?.holders?.holderCount)) &&
+    Number(entrySignalSnapshotV309.holders.holderCount)>0
+      ? Math.floor(Number(entrySignalSnapshotV309.holders.holderCount))
+      : null;
+
+  const growthOutcomesV620=
+    existing?.growthOutcomesV620 ??
+    (
+      successfulAlert &&
+      !existing?.entryTimestamp
+        ? initialiseGrowthOutcomesV620(
+            entryTimestamp||nowMs,
+            entryPriceUsd,
+            frozenEntryHolderV620,
+            entrySignalSnapshotV309?.holders?.holderSource||null
+          )
+        : null
+    );
+
   let athPriceUsd =
     existing?.athPriceUsd ??
     entryPriceUsd ??
@@ -68540,6 +68727,7 @@ function buildCallPerformanceRecordV270(
         : (existing?.entryTimestamp ? "LEGACY_ENTRY_TELEGRAM_PROVENANCE_UNVERIFIED" : "NO_FROZEN_ENTRY"),
     fixedHorizonOutcomesV317,
     entryTimingOutcomesV411,
+    growthOutcomesV620,
     drawdownTrackerV407,
 
     entryMarketVerified:
@@ -68628,6 +68816,7 @@ function buildCallPerformanceRecordV270(
     captureFixedHorizonOutcomesV317(performanceRecordV317, nowMs, market.marketCap, market.source);
     captureEntryTimingOutcomesV411(performanceRecordV317, nowMs, market.marketCap, market.source);
   }
+  captureGrowthOutcomesV620(performanceRecordV317,candidate,nowMs);
   return performanceRecordV317;
 }
 
@@ -68742,6 +68931,12 @@ function registerSuccessfulCallPerformanceV270(
       record.entryPriceUsd,
     entryMarketCap:
       record.entryMarketCap,
+    entryHolderCountV620:
+      record?.growthOutcomesV620?.entryHolderCount ?? null,
+    entryHolderSourceV620:
+      record?.growthOutcomesV620?.entryHolderSource ?? null,
+    growthTrackerV620Initialised:
+      record?.growthOutcomesV620?.version==="V620",
     entrySignalSnapshotV309:
       record.entrySignalSnapshotV309
         ? {
@@ -93071,9 +93266,41 @@ function horizonDiagnosticsMessageV318(record, nowMs = Date.now()) {
     lines.push(`   Reason: <code>${escapeHtml(reason)}</code>`);
   }
 
+  const growthV620=record?.growthOutcomesV620||null;
   lines.push(
     "",
-    "<i>Read-only stored-state diagnostic. Zero provider requests. V411 5m/15m/30m and V317 1h/6h/24h outcomes are forward-only and are never historically backfilled.</i>"
+    "📈 <b>V620 Price + Holder Growth — measurement only</b>",
+    `Tracker present: <b>${growthV620?.version==="V620"?"YES":"NO — PRE-V620/NOT INITIALISED"}</b>`,
+    `Entry price: <b>${Number.isFinite(Number(growthV620?.entryPriceUsd))&&Number(growthV620.entryPriceUsd)>0?telegramMoneyV271(growthV620.entryPriceUsd):"UNVERIFIED"}</b>`,
+    `Entry holders: <b>${Number.isFinite(Number(growthV620?.entryHolderCount))&&Number(growthV620.entryHolderCount)>0?telegramPlainNumberV271(growthV620.entryHolderCount,0):"UNVERIFIED"}</b>`
+  );
+
+  const growthLabelV620=key=>({
+    m5:"5m",m15:"15m",m30:"30m",h1:"1h",h6:"6h",h12:"12h",h24:"24h"
+  }[key]||key);
+  const signedPctV620=value=>{
+    const n=Number(value);
+    return Number.isFinite(n)?`${n>=0?"+":""}${n.toFixed(2)}%`:"UNVERIFIED";
+  };
+  const signedCountV620=value=>{
+    const n=Number(value);
+    return Number.isFinite(n)?`${n>=0?"+":""}${Math.trunc(n).toLocaleString("en-GB")}`:"UNVERIFIED";
+  };
+
+  for(const key of Object.keys(GROWTH_HORIZONS_V620)){
+    const g=growthV620?.outcomes?.[key]||null;
+    const price=g?.price||null;
+    const holders=g?.holders||null;
+    lines.push(
+      `• <b>${growthLabelV620(key)}</b> price: <b>${price?.verified===true&&price?.frozen===true?signedPctV620(price.growthPct):"UNVERIFIED"}</b>${price?.verified===true&&price?.frozen===true?` | ${telegramMoneyV271(price.priceUsd)} | lag ${compactCallAgeV307(safeNumber(price.observationLagMs))}`:""}`,
+      `  holders: <b>${holders?.verified===true&&holders?.frozen===true?signedCountV620(holders.holderChange):"UNVERIFIED"}</b>${holders?.verified===true&&holders?.frozen===true?` (<b>${signedPctV620(holders.growthPct)}</b>) | ${telegramPlainNumberV271(holders.holderCount,0)} | lag ${compactCallAgeV307(safeNumber(holders.observationLagMs))}`:""}`
+    );
+  }
+
+  lines.push(
+    "",
+    "<i>V620 is forward-only for new calls. Price uses the existing V413 live market observation. Holder growth freezes only when the normal bot path already has a verified holder count; no extra holder API request is made.</i>",
+    "<i>Read-only stored-state diagnostic. Zero provider requests. V411/V317/V620 outcomes are never historically backfilled.</i>"
   );
 
   return lines.join("\n");
@@ -93699,6 +93926,16 @@ function frozenLearningMessageV312(state) {
     fixedHorizonLearningLineV317('6h outcome', records, 'h6'),
     fixedHorizonLearningLineV317('24h outcome', records, 'h24'),
     '<i>First verified market-cap observation at/after each target is frozen. Observation lag is preserved; pre-V317 calls are never backfilled.</i>',
+    '',
+    '<b>📈 V620 price + holder growth capture</b>',
+    ...Object.entries(GROWTH_HORIZONS_V620).map(([key])=>{
+      const label={m5:'5m',m15:'15m',m30:'30m',h1:'1h',h6:'6h',h12:'12h',h24:'24h'}[key]||key;
+      const v620Rows=records.filter(r=>r?.growthOutcomesV620?.version==='V620');
+      const priceCaptured=v620Rows.filter(r=>r?.growthOutcomesV620?.outcomes?.[key]?.price?.verified===true&&r?.growthOutcomesV620?.outcomes?.[key]?.price?.frozen===true).length;
+      const holderCaptured=v620Rows.filter(r=>r?.growthOutcomesV620?.outcomes?.[key]?.holders?.verified===true&&r?.growthOutcomesV620?.outcomes?.[key]?.holders?.frozen===true).length;
+      return `• ${label}: price ${priceCaptured}/${v620Rows.length} | holders ${holderCaptured}/${v620Rows.length}`;
+    }),
+    '<i>V620 is measurement-only and forward-only. Missing holder observations remain DATA UNVERIFIED; no historical holder counts are invented.</i>',
     '',
     ...confidence, '',
     ...momentum, '',
@@ -127431,6 +127668,7 @@ const HORIZON_LIVE_WINDOWS_V413 = Object.freeze({
   m30: 30 * 60 * 1000,
   h1: 60 * 60 * 1000,
   h6: 6 * 60 * 60 * 1000,
+  h12: 12 * 60 * 60 * 1000,
   h24: 24 * 60 * 60 * 1000
 });
 
@@ -127844,6 +128082,8 @@ async function registerLiveHorizonV413(env, registration) {
   const address = normalize(registration?.address || "");
   const entryTimestamp = Number(registration?.entryTimestamp);
   const entryMarketCap = Number(registration?.entryMarketCap);
+  const entryPriceUsd = Number(registration?.entryPriceUsd);
+  const entryHolderCountV620 = Number(registration?.entryHolderCountV620);
   const entryProof = registration?.entryTelegramDeliveryProofV412 || null;
   const latestProof = registration?.latestSuccessfulTelegramDeliveryV412 || null;
   const genuineNewEntry =
@@ -127870,6 +128110,15 @@ async function registerLiveHorizonV413(env, registration) {
         symbol: registration?.symbol || null,
         entryTimestamp,
         entryMarketCap,
+        entryPriceUsd:
+          Number.isFinite(entryPriceUsd)&&entryPriceUsd>0
+            ? entryPriceUsd
+            : null,
+        entryHolderCountV620:
+          Number.isFinite(entryHolderCountV620)&&entryHolderCountV620>0
+            ? Math.floor(entryHolderCountV620)
+            : null,
+        entryHolderSourceV620:registration?.entryHolderSourceV620||null,
         telegramMessageId: Number(entryProof.messageId),
         registeredAt: Date.now()
       })
@@ -127936,12 +128185,62 @@ async function mergeLiveHorizonSnapshotsV413(state, env) {
       }
     }
 
+    const liveGrowthV620=
+      live?.growthOutcomesV620&&typeof live.growthOutcomesV620==="object"
+        ? live.growthOutcomesV620
+        : null;
+    const recordGrowthV620=
+      record?.growthOutcomesV620&&typeof record.growthOutcomesV620==="object"
+        ? record.growthOutcomesV620
+        : null;
+
+    if(
+      liveGrowthV620?.version==="V620" &&
+      recordGrowthV620?.version==="V620" &&
+      liveGrowthV620?.forwardOnly===true &&
+      recordGrowthV620?.forwardOnly===true &&
+      liveGrowthV620?.hindsightBackfillAllowed===false &&
+      recordGrowthV620?.hindsightBackfillAllowed===false
+    ){
+      recordGrowthV620.outcomes=
+        recordGrowthV620.outcomes&&typeof recordGrowthV620.outcomes==="object"
+          ? recordGrowthV620.outcomes
+          : {};
+      for(const key of Object.keys(GROWTH_HORIZONS_V620)){
+        const liveRow=liveGrowthV620?.outcomes?.[key];
+        const recordRow=recordGrowthV620?.outcomes?.[key]&&typeof recordGrowthV620.outcomes[key]==="object"
+          ? recordGrowthV620.outcomes[key]
+          : {
+              targetAt:Number(record.entryTimestamp)+GROWTH_HORIZONS_V620[key],
+              price:null,
+              holders:null
+            };
+        if(
+          !recordRow.price &&
+          liveRow?.price?.verified===true &&
+          liveRow?.price?.frozen===true
+        ){
+          recordRow.price={...liveRow.price};
+          outcomesMerged++;
+          touched=true;
+        }
+        recordGrowthV620.outcomes[key]=recordRow;
+      }
+      recordGrowthV620.lastMergedFromLiveV620=Date.now();
+    }
+
     const observedAt = Number(live?.latestObservation?.observedAt);
     const marketCap = Number(live?.latestObservation?.marketCap);
     if (live?.latestObservation?.verified === true && Number.isFinite(observedAt) && observedAt > Number(record?.currentObservationTimestamp || 0) && Number.isFinite(marketCap) && marketCap > 0) {
       record.currentObservationTimestamp = observedAt;
       record.currentMarketVerified = true;
       record.currentMarketCap = marketCap;
+      if(
+        Number.isFinite(Number(live?.latestObservation?.priceUsd)) &&
+        Number(live.latestObservation.priceUsd)>0
+      ){
+        record.currentPriceUsd=Number(live.latestObservation.priceUsd);
+      }
       record.currentMarketSource = "DEXSCREENER_LIVE_HORIZON_V413";
       record.observationCount = safeNumber(record?.observationCount) + 1;
       const priorAth = Number(record?.athMarketCap);
@@ -128339,10 +128638,39 @@ export class V3LiveCollectorV363 {
         symbol: body?.symbol || null,
         entryTimestamp,
         entryMarketCap,
+        entryPriceUsd:
+          Number.isFinite(Number(body?.entryPriceUsd))&&Number(body.entryPriceUsd)>0
+            ? Number(body.entryPriceUsd)
+            : null,
+        entryHolderCountV620:
+          Number.isFinite(Number(body?.entryHolderCountV620))&&Number(body.entryHolderCountV620)>0
+            ? Math.floor(Number(body.entryHolderCountV620))
+            : null,
+        entryHolderSourceV620:body?.entryHolderSourceV620||null,
         telegramMessageId,
         registeredAt: Number(body?.registeredAt) || Date.now(),
         latestObservation: null,
-        outcomes: {m5:null,m15:null,m30:null,h1:null,h6:null,h24:null},
+        outcomes: {m5:null,m15:null,m30:null,h1:null,h6:null,h12:null,h24:null},
+        growthOutcomesV620:{
+          version:"V620",
+          forwardOnly:true,
+          hindsightBackfillAllowed:false,
+          entryTimestamp,
+          entryPriceUsd:
+            Number.isFinite(Number(body?.entryPriceUsd))&&Number(body.entryPriceUsd)>0
+              ? Number(body.entryPriceUsd)
+              : null,
+          entryHolderCount:
+            Number.isFinite(Number(body?.entryHolderCountV620))&&Number(body.entryHolderCountV620)>0
+              ? Math.floor(Number(body.entryHolderCountV620))
+              : null,
+          entryHolderSource:body?.entryHolderSourceV620||null,
+          outcomes:Object.fromEntries(
+            Object.entries(GROWTH_HORIZONS_V620).map(([key,delay])=>[
+              key,{targetAt:entryTimestamp+delay,price:null,holders:null}
+            ])
+          )
+        },
         rollingMarketV414: [],
         liveSignalsV414: null,
         breakoutLearningV414: {version:"V414",forwardOnly:true,hindsightBackfillAllowed:false,events:[],lastObservedState:null,lastUpdatedAt:null},
@@ -128469,7 +128797,17 @@ export class V3LiveCollectorV363 {
         const marketCap = Number(pair?.marketCap);
         if (!Number.isFinite(marketCap) || marketCap <= 0) continue;
         verifiedObservations++;
-        row.latestObservation = {verified:true,observedAt,marketCap,source:"DEXSCREENER_LIVE_HORIZON_V413"};
+        const observedPriceV620=
+          Number.isFinite(Number(pair?.priceUsd))&&Number(pair.priceUsd)>0
+            ? Number(pair.priceUsd)
+            : null;
+        row.latestObservation = {
+          verified:true,
+          observedAt,
+          marketCap,
+          priceUsd:observedPriceV620,
+          source:"DEXSCREENER_LIVE_HORIZON_V413"
+        };
 
         // V414: reuse this exact fresh pair response for rolling signals. No
         // second HTTP call is made. Keep a bounded ~75 minute history.
@@ -128500,7 +128838,52 @@ export class V3LiveCollectorV363 {
         row.liveSignalsV414 = computeLiveSignalsV414(row.rollingMarketV414, row.liveSignalsV414);
         updateBreakoutLearningV414(row, observedAt, marketCap);
 
-        row.outcomes = row.outcomes && typeof row.outcomes === "object" ? row.outcomes : {m5:null,m15:null,m30:null,h1:null,h6:null,h24:null};
+        row.growthOutcomesV620=
+          row?.growthOutcomesV620&&typeof row.growthOutcomesV620==="object"
+            ? row.growthOutcomesV620
+            : null;
+        if(
+          row.growthOutcomesV620?.version==="V620" &&
+          row.growthOutcomesV620?.forwardOnly===true &&
+          row.growthOutcomesV620?.hindsightBackfillAllowed===false
+        ){
+          row.growthOutcomesV620.outcomes=
+            row.growthOutcomesV620.outcomes&&typeof row.growthOutcomesV620.outcomes==="object"
+              ? row.growthOutcomesV620.outcomes
+              : {};
+          for(const [key,horizonMs] of Object.entries(GROWTH_HORIZONS_V620)){
+            const targetAt=Number(row.entryTimestamp)+horizonMs;
+            const g=row.growthOutcomesV620.outcomes[key]&&typeof row.growthOutcomesV620.outcomes[key]==="object"
+              ? row.growthOutcomesV620.outcomes[key]
+              : {targetAt,price:null,holders:null};
+            g.targetAt=targetAt;
+            if(
+              !g.price &&
+              observedAt>=targetAt &&
+              observedPriceV620!==null &&
+              Number.isFinite(Number(row.growthOutcomesV620.entryPriceUsd)) &&
+              Number(row.growthOutcomesV620.entryPriceUsd)>0
+            ){
+              const entryPrice=Number(row.growthOutcomesV620.entryPriceUsd);
+              g.price={
+                verified:true,
+                frozen:true,
+                targetAt,
+                observedAt,
+                observationLagMs:observedAt-targetAt,
+                entryPriceUsd:entryPrice,
+                priceUsd:observedPriceV620,
+                absoluteChangeUsd:observedPriceV620-entryPrice,
+                growthPct:((observedPriceV620-entryPrice)/entryPrice)*100,
+                source:"DEXSCREENER_LIVE_HORIZON_V620_REUSED_V413"
+              };
+            }
+            row.growthOutcomesV620.outcomes[key]=g;
+          }
+          row.growthOutcomesV620.lastUpdatedAt=observedAt;
+        }
+
+        row.outcomes = row.outcomes && typeof row.outcomes === "object" ? row.outcomes : {m5:null,m15:null,m30:null,h1:null,h6:null,h12:null,h24:null};
         for (const [key,horizonMs] of Object.entries(HORIZON_LIVE_WINDOWS_V413)) {
           if (row.outcomes[key]) continue;
           const targetAt = Number(row.entryTimestamp)+horizonMs;
@@ -128517,7 +128900,7 @@ export class V3LiveCollectorV363 {
           };
           captures++;
         }
-        row.completed = ["m5","m15","m30","h1","h6","h24"].every(key=>row.outcomes[key]?.verified===true&&row.outcomes[key]?.frozen===true);
+        row.completed = ["m5","m15","m30","h1","h6","h12","h24"].every(key=>row.outcomes[key]?.verified===true&&row.outcomes[key]?.frozen===true);
         entries[address]=row;
         anyChanged = true;
       }
