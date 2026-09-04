@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V587
+ * AUTHORITATIVE RUNTIME VERSION: V587
+ *
+ * V587 VERIFIED 30-MINUTE EXACT-POOL WINDOW:
+ * - preserves V586 and all earlier confirmed-working behaviour;
+ * - adds a forward-only 30m exact-pool rolling Buy/Sell USD window;
+ * - uses the same contiguous, gap-free, caught-up exact-pool ledger gate as
+ *   the existing 1m/5m/15m/1h/6h/12h/24h windows;
+ * - VERIFIED $0/$0 means genuinely no decoded exact-pool trades in the complete
+ *   30-minute window; incomplete coverage remains UNVERIFIED;
+ * - no historical backfill;
+ * - no scoring, Momentum, qualification, Telegram thresholds, providers,
+ *   request budgets or alert logic changed;
+ * - no extra external requests;
+ * - hard global request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V586
  * AUTHORITATIVE RUNTIME VERSION: V586
  *
@@ -3853,7 +3870,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V586";
+const VERSION = "V587";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -89957,6 +89974,7 @@ function manualRollingWatchProgressV572(state, candidate) {
     m1:1 * 60 * 1000,
     m5:5 * 60 * 1000,
     m15:15 * 60 * 1000,
+    m30:30 * 60 * 1000,
     h1:60 * 60 * 1000,
     h6:6 * 60 * 60 * 1000,
     h12:12 * 60 * 60 * 1000,
