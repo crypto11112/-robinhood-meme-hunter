@@ -1,4 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V613
+ * AUTHORITATIVE RUNTIME VERSION: V613
+ *
+ * V613 BLOCKSCOUT V3 ONE-SHOT PROOF:
+ * - preserves V612 and all collector behaviour unchanged;
+ * - adds /blockscoutv3test 0xADDRESS;
+ * - resolves the token's already-verified exact Uniswap V3 pool;
+ * - reads the current shared-head block from the existing V3 Durable Object;
+ * - performs ONE Blockscout PRO JSON-RPC eth_getLogs request over the latest
+ *   120 blocks for the exact pool + Uniswap V3 Swap topic;
+ * - counts the request through the V611/V612 Blockscout PRO credit meter;
+ * - reports HTTP/RPC status, returned exact Swap logs and first/last block;
+ * - diagnostic only: does NOT persist swaps, advance V3 cursor, modify
+ *   integrity, scoring, qualification, alerts, or autonomous watch state;
+ * - expected planning cost: one standard Blockscout PRO request (20 credits);
+ * - no hard 42-request scanner-budget change.
+ */
+/**
  * Robinhood Chain Meme Hunter — V612
  * AUTHORITATIVE RUNTIME VERSION: V612
  *
@@ -4364,7 +4382,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V612";
+const VERSION = "V613";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -120771,6 +120789,7 @@ function telegramHelpV271() {
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/blockscoutusage</code> — Blockscout PRO daily credit meter (read-only)",
+    "<code>/blockscoutv3test 0xADDRESS</code> — one-shot exact V3 Blockscout log test",
     "<code>/help</code> — command list",
     "",
     "<i>/analyse performs a fresh bounded analysis. /v3start and /v3stop control the token's V3 live collector. Other diagnostic/report commands do not trigger a fresh chain scan.</i>"
@@ -121731,6 +121750,47 @@ async function telegramCommandReplyV271(
           0,
         stateWrites:
           0
+      };
+    }
+  } else if (
+    parsed.command === "/blockscoutv3test" ||
+    parsed.command === "/bsv3test"
+  ) {
+    const tokenV613=normalize(parsed.argument);
+    let testV613;
+
+    if(!isAddress(tokenV613)){
+      testV613={
+        version:VERSION,
+        token:tokenV613||null,
+        status:"INVALID_TOKEN_V613",
+        attempted:false,
+        expectedCredits:BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
+      };
+    }else{
+      testV613=
+        await blockscoutV3OneShotTestV613(
+          env,
+          state,
+          tokenV613
+        );
+    }
+
+    reply=
+      blockscoutV3OneShotTelegramV613(
+        testV613
+      );
+
+    if(diagnosticV273){
+      diagnosticV273.blockscoutV3OneShotV613={
+        token:tokenV613||null,
+        status:testV613?.status||null,
+        attempted:testV613?.attempted===true,
+        httpStatus:testV613?.httpStatus??null,
+        exactSwapLogs:testV613?.exactSwapLogs??null,
+        expectedCredits:testV613?.expectedCredits??null,
+        scannerBudgetConsumed:false,
+        ledgerMutation:false
       };
     }
   } else if (
@@ -126521,6 +126581,240 @@ function durableUsageTelegramMessageV404(result) {
     "",
     `<i>Bot-side estimate since ${escapeHtml(result.monitorStartedAtIso || "meter start")}. V410 does not treat an initialization-only count as proof of low collector usage. Cloudflare's dashboard is the official billing counter.</i>`
   ].join("\n");
+}
+
+async function blockscoutV3OneShotTestV613(env,state,tokenInput){
+  const token=normalize(tokenInput||"");
+
+  const base={
+    version:VERSION,
+    test:"BLOCKSCOUT_V3_ONE_SHOT_V613",
+    token:token||null,
+    diagnosticOnly:true,
+    ledgerMutation:false,
+    integrityMutation:false,
+    scoringMutation:false,
+    scannerBudgetConsumed:false,
+    expectedCredits:BLOCKSCOUT_PRO_STANDARD_CREDITS_V611,
+    attempted:false,
+    requestConsumed:false,
+    httpStatus:null,
+    rpcError:null,
+    status:null
+  };
+
+  if(!isAddress(token)){
+    return {...base,status:"INVALID_TOKEN_V613"};
+  }
+
+  const apiKey=String(env?.BLOCKSCOUT_PRO_API_KEY||"").trim();
+  if(!apiKey){
+    return {...base,status:"BLOCKSCOUT_PRO_NOT_CONFIGURED_V613"};
+  }
+
+  const cfg=await v3LiveCollectorConfigV363(env,token);
+  if(cfg?.ok!==true || !isAddress(cfg?.pair)){
+    return {
+      ...base,
+      status:cfg?.status||"VERIFIED_V3_POOL_NOT_AVAILABLE_V613",
+      pool:cfg?.pair||null
+    };
+  }
+
+  const liveStatus=
+    await v3LiveCollectorRouteV363(
+      env,
+      token,
+      "status"
+    );
+
+  const headCandidates=[
+    liveStatus?.sharedHeadV602?.lastHeadBlock,
+    liveStatus?.lastHeadBlock,
+    liveStatus?.head?.lastHeadBlock
+  ];
+
+  const head=headCandidates
+    .map(Number)
+    .find(Number.isFinite);
+
+  if(!Number.isFinite(head) || head<=0){
+    return {
+      ...base,
+      pool:normalize(cfg.pair),
+      status:"FRESH_HEAD_UNAVAILABLE_V613",
+      sharedHeadFresh:
+        liveStatus?.sharedHeadV602?.fresh===true
+    };
+  }
+
+  const toBlock=Math.trunc(head);
+  const fromBlock=Math.max(0,toBlock-119);
+  const endpoint=`${BLOCKSCOUT_PRO}/${BLOCKSCOUT_PRO_CHAIN_ID}/json-rpc`;
+
+  const payload={
+    id:613,
+    jsonrpc:"2.0",
+    method:"eth_getLogs",
+    params:[{
+      fromBlock:`0x${BigInt(fromBlock).toString(16)}`,
+      toBlock:`0x${BigInt(toBlock).toString(16)}`,
+      address:normalize(cfg.pair),
+      topics:[UNISWAP_V3_SWAP_TOPIC_V326]
+    }]
+  };
+
+  const started=Date.now();
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),6000);
+
+  recordBlockscoutProUsageV611(
+    state,
+    "V613_V3_EXACT_POOL_ONE_SHOT",
+    BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
+  );
+
+  try{
+    const response=await fetch(
+      endpoint,
+      {
+        method:"POST",
+        headers:{
+          accept:"application/json",
+          "content-type":"application/json",
+          authorization:`Bearer ${apiKey}`
+        },
+        body:JSON.stringify(payload),
+        signal:controller.signal
+      }
+    );
+
+    updateBlockscoutProHttpStatusV611(
+      state,
+      "V613_V3_EXACT_POOL_ONE_SHOT",
+      response.status
+    );
+
+    let body=null;
+    try{body=await response.json();}catch(_){}
+
+    const rpcError=
+      body?.error?.message!=null
+        ? String(body.error.message).slice(0,300)
+        : body?.error!=null
+          ? JSON.stringify(body.error).slice(0,300)
+          : null;
+
+    const logs=Array.isArray(body?.result)?body.result:[];
+
+    const exactLogs=logs.filter(log=>
+      normalize(log?.address||"")===normalize(cfg.pair) &&
+      normalize(log?.topics?.[0]||"")===normalize(UNISWAP_V3_SWAP_TOPIC_V326)
+    );
+
+    const blocks=exactLogs
+      .map(log=>{
+        const raw=log?.blockNumber??log?.block_number;
+        if(typeof raw==="string"&&/^0x[0-9a-f]+$/i.test(raw))return parseInt(raw,16);
+        const n=Number(raw);
+        return Number.isFinite(n)?n:null;
+      })
+      .filter(Number.isFinite)
+      .sort((a,b)=>a-b);
+
+    const ok=
+      response.ok &&
+      !rpcError &&
+      Array.isArray(body?.result);
+
+    return {
+      ...base,
+      attempted:true,
+      requestConsumed:true,
+      httpStatus:response.status,
+      rpcError,
+      status:ok
+        ? "BLOCKSCOUT_V3_EXACT_LOGS_OK_V613"
+        : `BLOCKSCOUT_V3_TEST_FAILED_V613`,
+      pool:normalize(cfg.pair),
+      token0:normalize(cfg.token0),
+      token1:normalize(cfg.token1),
+      sharedHeadFresh:
+        liveStatus?.sharedHeadV602?.fresh===true,
+      fromBlock,
+      toBlock,
+      blockSpan:toBlock-fromBlock+1,
+      rawLogsReturned:logs.length,
+      exactSwapLogs:exactLogs.length,
+      firstExactSwapBlock:blocks.length?blocks[0]:null,
+      lastExactSwapBlock:blocks.length?blocks[blocks.length-1]:null,
+      elapsedMs:Math.max(0,Date.now()-started),
+      blockscoutMeterAfterRequest:
+        blockscoutProUsageSnapshotV611(state)
+    };
+  }catch(error){
+    return {
+      ...base,
+      attempted:true,
+      requestConsumed:true,
+      pool:normalize(cfg.pair),
+      fromBlock,
+      toBlock,
+      blockSpan:toBlock-fromBlock+1,
+      status:"BLOCKSCOUT_V3_TEST_FETCH_ERROR_V613",
+      error:String(
+        error?.name==="AbortError"
+          ? "TIMEOUT"
+          : error?.message||error
+      ).slice(0,300),
+      elapsedMs:Math.max(0,Date.now()-started),
+      blockscoutMeterAfterRequest:
+        blockscoutProUsageSnapshotV611(state)
+    };
+  }finally{
+    clearTimeout(timer);
+  }
+}
+
+function blockscoutV3OneShotTelegramV613(result){
+  const r=result||{};
+  const lines=[
+    "🧪 <b>Blockscout V3 Exact-Pool Test — V613</b>",
+    "",
+    `Token: <code>${escapeHtml(String(r.token||"UNVERIFIED"))}</code>`,
+    `Pool: <code>${escapeHtml(String(r.pool||"UNVERIFIED"))}</code>`,
+    `Status: <b>${escapeHtml(String(r.status||"UNVERIFIED"))}</b>`,
+    `Attempted: <b>${r.attempted===true?"YES":"NO"}</b>`,
+    `Blockscout credits planned: <b>${safeNumber(r.expectedCredits)}</b>`,
+    "",
+    `HTTP: <b>${Number.isFinite(Number(r.httpStatus))?Number(r.httpStatus):"UNVERIFIED"}</b>`,
+    `RPC error: <code>${escapeHtml(String(r.rpcError||r.error||"NONE").slice(0,240))}</code>`
+  ];
+
+  if(Number.isFinite(Number(r.fromBlock))&&Number.isFinite(Number(r.toBlock))){
+    lines.push(
+      `Range: <b>${Math.trunc(Number(r.fromBlock))}</b> → <b>${Math.trunc(Number(r.toBlock))}</b> (${safeNumber(r.blockSpan)} blocks)`,
+      `Raw logs returned: <b>${safeNumber(r.rawLogsReturned)}</b>`,
+      `Exact V3 Swap logs: <b>${safeNumber(r.exactSwapLogs)}</b>`,
+      `First/last exact Swap block: <b>${Number.isFinite(Number(r.firstExactSwapBlock))?Math.trunc(Number(r.firstExactSwapBlock)):"NONE"}</b> / <b>${Number.isFinite(Number(r.lastExactSwapBlock))?Math.trunc(Number(r.lastExactSwapBlock)):"NONE"}</b>`
+    );
+  }
+
+  const meter=r.blockscoutMeterAfterRequest;
+  if(meter){
+    lines.push(
+      "",
+      `Meter after test: <b>${safeNumber(meter.estimatedCreditsUsed).toLocaleString("en-GB")}</b> / <b>${safeNumber(meter.dailyAllowanceCredits).toLocaleString("en-GB")}</b> credits`,
+      `Estimated remaining: <b>${safeNumber(meter.remainingEstimatedCredits).toLocaleString("en-GB")}</b>`
+    );
+  }
+
+  lines.push(
+    "",
+    "<i>Diagnostic only. No swap is written to the V3 ledger and no integrity/scoring state is changed.</i>"
+  );
+
+  return lines.join("\\n");
 }
 
 async function v3LiveCollectorRouteV363(env, tokenInput, action) {
