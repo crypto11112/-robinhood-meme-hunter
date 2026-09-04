@@ -1,4 +1,33 @@
 /**
+ * Robinhood Chain Meme Hunter — V585
+ * AUTHORITATIVE RUNTIME VERSION: V585
+ *
+ * V585 FASTER VERIFIED RECOVERED-POOL CATCH-UP:
+ * - preserves V584 and all earlier confirmed-working behaviour;
+ * - V584 proved the verified-watch decoder fallback works and JUICE safely
+ *   completed consecutive 19,200-block ranges with very low log density;
+ * - increases the temporary recovered-pool fast-catchup ceiling:
+ *     <= 50 logs on last successful range  -> up to 38,400 blocks
+ *     <= 200 logs                         -> up to 19,200 blocks
+ *     <= 500 logs                         -> up to 9,600 blocks
+ * - applies only to verified prior-completion recovered pools already showing
+ *   successful contiguous exact-USD-complete collection;
+ * - existing saturation / decode-completeness protections remain authoritative:
+ *     * saturated ranges NEVER advance coverage;
+ *     * non-exact-decodable ranges NEVER advance coverage;
+ *     * V583 decode-failure backoff still disables fast expansion until a
+ *       smaller safe retry succeeds;
+ * - V584 decoder fallback is unchanged;
+ * - V581 two-slot reserve, V580 failed-pool skip, V579 fairness, V578 catch-up
+ *   priority and V575 retention remain intact;
+ * - generic logic, no token address or PoolId hard-coding;
+ * - no historical backfill;
+ * - no scoring, Momentum, qualification, USD maths, Telegram, provider,
+ *   retention or alert-threshold changes;
+ * - no extra external requests;
+ * - hard global request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V584
  * AUTHORITATIVE RUNTIME VERSION: V584
  *
@@ -3802,7 +3831,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V584";
+const VERSION = "V585";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9159,8 +9188,8 @@ const DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551 = 600;
 const DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551 = 10;
 const DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551 = 1200;
 const DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V566 = 4800;
-const DIRECTIONAL_PRIOR_COMPLETION_FAST_MAX_SPAN_V582 = 19200;
-const DIRECTIONAL_PRIOR_COMPLETION_MEDIUM_SPAN_V582 = 9600;
+const DIRECTIONAL_PRIOR_COMPLETION_FAST_MAX_SPAN_V582 = 38400;
+const DIRECTIONAL_PRIOR_COMPLETION_MEDIUM_SPAN_V582 = 19200;
 
 /* V554 bounded same-pool catch-up. */
 const DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554 = 3;
@@ -58867,8 +58896,7 @@ async function advanceDirectionalWatchV551({
       priorCompletionCatchupTargetSpanV582 =
         DIRECTIONAL_PRIOR_COMPLETION_MEDIUM_SPAN_V582;
     } else if (lastRangeReturnedLogsV582 <= 500) {
-      priorCompletionCatchupTargetSpanV582 =
-        DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V566;
+      priorCompletionCatchupTargetSpanV582 = 9600;
     }
   }
 
@@ -77205,10 +77233,22 @@ for (
       externalRequestsAdded:0,
       hardGlobalLimitUnchanged:42
     },
+    fasterVerifiedRecoveredPoolCatchupV585:{
+      enabled:true,
+      lowDensityMaxSpan:38400,
+      mediumDensitySpan:19200,
+      denseRecoveredSpan:9600,
+      requiresVerifiedPriorCompletion:true,
+      requiresSuccessfulExactUsdCompleteRange:true,
+      saturationAndDecodeGuardsUnchanged:true,
+      externalRequestsAdded:0,
+      hardGlobalLimitUnchanged:42
+    },
     fastVerifiedRecoveredPoolCatchupV582:{
       enabled:true,
-      maxLowDensitySpan:19200,
-      mediumDensitySpan:9600,
+      maxLowDensitySpan:38400,
+      mediumDensitySpan:19200,
+      denseRecoveredSpan:9600,
       existingNormalMaxSpan:4800,
       requiresVerifiedPriorCompletion:true,
       requiresAtLeastOneSuccessfulRange:true,
