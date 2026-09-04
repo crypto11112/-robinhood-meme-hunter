@@ -1,4 +1,18 @@
 /**
+ * Robinhood Chain Meme Hunter — V593
+ * AUTHORITATIVE RUNTIME VERSION: V593
+ *
+ * V593 V3 WEBSOCKET CONNECTING-STATE FIX:
+ * - preserves V592 and all confirmed-working V4/V3 behaviour;
+ * - fixes self-heal/watchdog recycling WebSocket.CONNECTING as if it were dead;
+ * - gives a new outbound V3 socket a 20-second handshake grace period;
+ * - CONNECTING within grace is left alone by fetch self-heal and watchdog;
+ * - CONNECTING beyond 20s is recycled and retried;
+ * - persists connect-start state so status can distinguish CONNECTING vs dead;
+ * - dual-subscription integrity rules remain unchanged;
+ * - no extra RPC/provider requests; hard global request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V592
  * AUTHORITATIVE RUNTIME VERSION: V592
  *
@@ -3988,7 +4002,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V592";
+const VERSION = "V593";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -119997,11 +120011,18 @@ function v3CollectorControlTelegramMessageV592(action, token, result) {
         ? "NO"
         : "UNVERIFIED";
 
+  const runtimeConnectingV593 =
+    result?.v3IntegrityDiagnosticsV589?.runtimeSocketConnecting === true ||
+    result?.autonomousSocketSelfHealV591?.runtimeSocketConnecting === true ||
+    result?.runtimeSocketConnecting === true;
+
   const connected =
     result?.connectionOpened === true ||
     result?.connected === true
       ? "YES"
-      : "NO";
+      : runtimeConnectingV593
+        ? "CONNECTING"
+        : "NO";
 
   const logSub =
     result?.logSubscriptionAccepted === true
@@ -125126,6 +125147,7 @@ async function scheduledScan(
 
 const V3_LIVE_DO_BINDING_V363 = "V3_LIVE_COLLECTOR";
 const V3_LIVE_RECONNECT_MS_V363 = 15000;
+const V3_SOCKET_CONNECT_TIMEOUT_MS_V593 = 20000;
 const V3_HEAD_STALE_MS_V371 = 30000;
 const V3_HEAD_WATCHDOG_MS_V371 = 15000;
 
@@ -126492,6 +126514,22 @@ export class V3LiveCollectorV363 {
     const conn = await this.state.storage.get("connection") || {};
     const runtimeOpen =
       Boolean(this.ws && this.ws.readyState === WebSocket.OPEN);
+    const runtimeConnecting =
+      Boolean(this.ws && this.ws.readyState === WebSocket.CONNECTING);
+    const connectStartedAtV593 =
+      Number.isFinite(Number(this.wsConnectStartedAtV593))
+        ? Number(this.wsConnectStartedAtV593)
+        : Number.isFinite(Number(conn?.socketConnectStartedAtV593))
+          ? Number(conn.socketConnectStartedAtV593)
+          : null;
+    const connectingAgeMsV593 =
+      runtimeConnecting && connectStartedAtV593 !== null
+        ? Math.max(0, Date.now() - connectStartedAtV593)
+        : null;
+    const connectingWithinTimeoutV593 =
+      runtimeConnecting &&
+      connectingAgeMsV593 !== null &&
+      connectingAgeMsV593 <= V3_SOCKET_CONNECT_TIMEOUT_MS_V593;
     const persistedDual =
       conn.connected===true &&
       conn.logSubscriptionAccepted===true &&
@@ -126510,7 +126548,7 @@ export class V3LiveCollectorV363 {
 
     let reconnectRequested = false;
 
-    if (!runtimeOpen) {
+    if (!runtimeOpen && !connectingWithinTimeoutV593) {
       /*
        * A new runtime without its in-memory socket cannot inherit a persisted
        * "connected" claim. Reset only connection/integrity state; retained
@@ -126522,9 +126560,20 @@ export class V3LiveCollectorV363 {
         await this.markIntegrityGapV371("V591_RUNTIME_SOCKET_SELF_HEAL");
       }
 
+      if (
+        runtimeConnecting &&
+        connectingAgeMsV593 !== null &&
+        connectingAgeMsV593 > V3_SOCKET_CONNECT_TIMEOUT_MS_V593
+      ) {
+        try { this.ws?.close(1012, "V593 connect timeout"); } catch (_) {}
+      }
+
       await this.doPutV404("connection", {
         ...conn,
-        status:"V591_SELF_HEAL_RECONNECT_REQUESTED",
+        status:
+          runtimeConnecting
+            ? "V593_CONNECT_TIMEOUT_RECONNECT_REQUESTED"
+            : "V591_SELF_HEAL_RECONNECT_REQUESTED",
         connected:false,
         subscriptionAccepted:false,
         logSubscriptionAccepted:false,
@@ -126555,6 +126604,10 @@ export class V3LiveCollectorV363 {
     return {
       enabled:true,
       runtimeOpen,
+      runtimeConnecting,
+      connectingAgeMsV593,
+      connectingWithinTimeoutV593,
+      connectTimeoutMsV593:V3_SOCKET_CONNECT_TIMEOUT_MS_V593,
       persistedDualBeforeHeal:persistedDual,
       reconnectRequested,
       alarmRearmed,
@@ -127080,23 +127133,49 @@ if (url.pathname === "/reconcile-v374") {
         try { this.ws?.close(1012,"V371 head stream stale"); } catch (_) {}
         this.ws=null; this.subscriptionId=null; this.headSubscriptionId=null;
         await this.scheduleReconnect(`NEWHEADS_STALE_V371_${Math.round(headAgeMs)}MS`);
-      } else if (!dualAccepted || !this.ws || this.ws.readyState!==WebSocket.OPEN) {
-        // V591: an enabled dead collector must never remain dormant. Clear an
-        // in-memory reconnect latch from a prior runtime/event and attempt a
-        // fresh connection on every watchdog cycle until dual subscriptions
-        // are accepted.
-        this.reconnectPending = false;
+      } else {
+        const runtimeOpenV593 =
+          Boolean(this.ws && this.ws.readyState===WebSocket.OPEN);
+        const runtimeConnectingV593 =
+          Boolean(this.ws && this.ws.readyState===WebSocket.CONNECTING);
+        const connectStartedAtV593 =
+          Number.isFinite(Number(this.wsConnectStartedAtV593))
+            ? Number(this.wsConnectStartedAtV593)
+            : Number.isFinite(Number(conn?.socketConnectStartedAtV593))
+              ? Number(conn.socketConnectStartedAtV593)
+              : null;
+        const connectingAgeMsV593 =
+          runtimeConnectingV593 && connectStartedAtV593!==null
+            ? Math.max(0,Date.now()-connectStartedAtV593)
+            : null;
+        const connectingWithinTimeoutV593 =
+          runtimeConnectingV593 &&
+          connectingAgeMsV593!==null &&
+          connectingAgeMsV593<=V3_SOCKET_CONNECT_TIMEOUT_MS_V593;
 
-        // V403: if persisted state says coverage was active but this runtime no
-        // longer owns the live socket, conservatively reset the integrity epoch.
-        // This prevents an unexpected isolate restart from hiding up to one
-        // checkpoint interval of unflushed trade evidence.
-        if (dualAccepted && (!this.ws || this.ws.readyState!==WebSocket.OPEN)) {
-          await this.markCoverageGapV366("V403_RUNTIME_SOCKET_LOSS");
-          await this.markIntegrityGapV369("V403_RUNTIME_SOCKET_LOSS");
-          await this.markIntegrityGapV371("V403_RUNTIME_SOCKET_LOSS");
+        if (!dualAccepted && connectingWithinTimeoutV593) {
+          // Valid handshake in progress; do not recycle it.
+        } else if (!dualAccepted || !runtimeOpenV593) {
+          this.reconnectPending = false;
+
+          if (
+            runtimeConnectingV593 &&
+            connectingAgeMsV593!==null &&
+            connectingAgeMsV593>V3_SOCKET_CONNECT_TIMEOUT_MS_V593
+          ) {
+            try { this.ws?.close(1012,"V593 connect timeout"); } catch (_) {}
+            this.ws=null;
+            this.wsConnectStartedAtV593=null;
+          }
+
+          if (dualAccepted && !runtimeOpenV593) {
+            await this.markCoverageGapV366("V403_RUNTIME_SOCKET_LOSS");
+            await this.markIntegrityGapV369("V403_RUNTIME_SOCKET_LOSS");
+            await this.markIntegrityGapV371("V403_RUNTIME_SOCKET_LOSS");
+          }
+
+          await this.connect();
         }
-        await this.connect();
       }
     }
 
@@ -127136,6 +127215,14 @@ if (url.pathname === "/reconcile-v374") {
         runtimeSocketPresent:Boolean(this.ws),
         runtimeSocketReadyState:this.ws?.readyState ?? null,
         runtimeSocketOpen:Boolean(this.ws && this.ws.readyState===WebSocket.OPEN),
+        runtimeSocketConnecting:Boolean(this.ws && this.ws.readyState===WebSocket.CONNECTING),
+        socketConnectStartedAtV593:
+          Number.isFinite(Number(this.wsConnectStartedAtV593))
+            ? Number(this.wsConnectStartedAtV593)
+            : Number.isFinite(Number(conn?.socketConnectStartedAtV593))
+              ? Number(conn.socketConnectStartedAtV593)
+              : null,
+        socketConnectTimeoutMsV593:V3_SOCKET_CONNECT_TIMEOUT_MS_V593,
         persistedConnected:conn.connected===true,
         dualAcceptedPersisted:dualAccepted,
         logSubscriptionAccepted:conn.logSubscriptionAccepted===true,
@@ -127154,6 +127241,9 @@ if (url.pathname === "/reconcile-v374") {
         enabledPersisted:enabled===true,
         intentionalStopRespected:enabled!==true,
         runtimeSocketOpen:Boolean(this.ws && this.ws.readyState===WebSocket.OPEN),
+        runtimeSocketConnecting:Boolean(this.ws && this.ws.readyState===WebSocket.CONNECTING),
+        connectingStateGraceV593:true,
+        connectTimeoutMsV593:V3_SOCKET_CONNECT_TIMEOUT_MS_V593,
         reconnectUntilDualAccepted:true,
         watchdogCadenceMs:V3_HEAD_WATCHDOG_MS_V371,
         reconnectDelayMs:V3_LIVE_RECONNECT_MS_V363,
@@ -127848,13 +127938,50 @@ if (url.pathname === "/reconcile-v374") {
       return;
     }
     if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+
+    if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
+      const startedAtV593 =
+        Number.isFinite(Number(this.wsConnectStartedAtV593))
+          ? Number(this.wsConnectStartedAtV593)
+          : null;
+      const ageV593 =
+        startedAtV593 !== null
+          ? Math.max(0, Date.now() - startedAtV593)
+          : 0;
+
+      if (ageV593 <= V3_SOCKET_CONNECT_TIMEOUT_MS_V593) return;
+
+      try { this.ws.close(1012, "V593 stale connecting socket"); } catch (_) {}
+      this.ws = null;
+    }
+
     let ws;
+    const socketConnectStartedAtV593 = Date.now();
     try { ws = new WebSocket(`wss://robinhood-mainnet.g.alchemy.com/v2/${String(this.env.ALCHEMY_API_KEY)}`); }
     catch (e) { await this.scheduleReconnect(String(e?.message||e)); return; }
+
     this.ws = ws;
+    this.wsConnectStartedAtV593 = socketConnectStartedAtV593;
+
+    const priorConnV593 = await this.state.storage.get("connection") || {};
+    await this.doPutV404("connection",{
+      ...priorConnV593,
+      status:"WEBSOCKET_CONNECTING_V593",
+      connected:false,
+      subscriptionAccepted:false,
+      logSubscriptionAccepted:false,
+      headSubscriptionAccepted:false,
+      subscriptionIdPresent:false,
+      headSubscriptionIdPresent:false,
+      socketConnectStartedAtV593,
+      socketConnectTimeoutMsV593:V3_SOCKET_CONNECT_TIMEOUT_MS_V593,
+      lastError:null
+    });
+
     ws.addEventListener("open", async () => {
       this.reconnectPending = false;
-      await this.doPutV404("connection",{status:"WEBSOCKET_OPEN_SUBSCRIBING_V368",connected:true,subscriptionAccepted:false,logSubscriptionAccepted:false,headSubscriptionAccepted:false,lastConnectedAt:Date.now(),subscriptionIdPresent:false,headSubscriptionIdPresent:false});
+      this.wsConnectStartedAtV593 = null;
+      await this.doPutV404("connection",{status:"WEBSOCKET_OPEN_SUBSCRIBING_V368",connected:true,subscriptionAccepted:false,logSubscriptionAccepted:false,headSubscriptionAccepted:false,lastConnectedAt:Date.now(),subscriptionIdPresent:false,headSubscriptionIdPresent:false,socketConnectStartedAtV593:null,socketConnectTimeoutMsV593:V3_SOCKET_CONNECT_TIMEOUT_MS_V593});
       // V368 uses two narrow/free WebSocket subscriptions: exact V3 Swap logs + chain heads.
       ws.send(JSON.stringify({jsonrpc:"2.0",id:363,method:"eth_subscribe",params:["logs",{address:this.config.pair,topics:[UNISWAP_V3_SWAP_TOPIC_V326]}]}));
       ws.send(JSON.stringify({jsonrpc:"2.0",id:368,method:"eth_subscribe",params:["newHeads"]}));
@@ -127864,8 +127991,17 @@ if (url.pathname === "/reconcile-v374") {
         const c=await this.state.storage.get("connection")||{}; c.lastError=String(e?.message||e).slice(0,240); c.status="MESSAGE_PROCESSING_ERROR_V363"; await this.doPutV404("connection",c);
       });
     });
-    ws.addEventListener("close", ()=>{ this.ws=null; this.subscriptionId=null; this.headSubscriptionId=null; this.scheduleReconnect("WEBSOCKET_CLOSED_V368"); });
-    ws.addEventListener("error", ()=>{ this.scheduleReconnect("WEBSOCKET_ERROR_V363"); });
+    ws.addEventListener("close", ()=>{
+      this.ws=null;
+      this.wsConnectStartedAtV593=null;
+      this.subscriptionId=null;
+      this.headSubscriptionId=null;
+      this.scheduleReconnect("WEBSOCKET_CLOSED_V368");
+    });
+    ws.addEventListener("error", ()=>{
+      this.wsConnectStartedAtV593=null;
+      this.scheduleReconnect("WEBSOCKET_ERROR_V363");
+    });
   }
 
   async scheduleReconnect(error) {
@@ -128055,6 +128191,14 @@ if (url.pathname === "/reconcile-v374") {
         runtimeSocketPresent:Boolean(this.ws),
         runtimeSocketReadyState:this.ws?.readyState ?? null,
         runtimeSocketOpen:Boolean(this.ws && this.ws.readyState===WebSocket.OPEN),
+        runtimeSocketConnecting:Boolean(this.ws && this.ws.readyState===WebSocket.CONNECTING),
+        socketConnectStartedAtV593:
+          Number.isFinite(Number(this.wsConnectStartedAtV593))
+            ? Number(this.wsConnectStartedAtV593)
+            : Number.isFinite(Number(conn?.socketConnectStartedAtV593))
+              ? Number(conn.socketConnectStartedAtV593)
+              : null,
+        socketConnectTimeoutMsV593:V3_SOCKET_CONNECT_TIMEOUT_MS_V593,
         persistedConnected:conn.connected===true,
         dualAcceptedPersisted:dualAccepted,
         currentIntegrityActive:integrity.active===true,
