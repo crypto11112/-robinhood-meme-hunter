@@ -1,4 +1,29 @@
 /**
+ * Robinhood Chain Meme Hunter — V615
+ * AUTHORITATIVE RUNTIME VERSION: V615
+ *
+ * V615 BLOCKSCOUT-BACKED LIVE V3 RECOVERY:
+ * - preserves V614 and all confirmed V3/V4/scoring/qualification behaviour;
+ * - adds Blockscout PRO as the final exact-pool eth_getLogs source for the
+ *   production V3 HTTP collector;
+ * - existing HTTP providers are still attempted first;
+ * - Blockscout is throttled to at most one fallback request per token per 60s;
+ * - a singleton Durable Object enforces a shared 40,000-credit/day V3 fallback
+ *   budget and a global request-spacing guard before any Blockscout call;
+ * - fallback requests use the already-proven Blockscout PRO JSON-RPC
+ *   eth_getLogs endpoint and the exact verified V3 pool + Swap topic;
+ * - successful Blockscout logs enter the existing persistSwap() path unchanged,
+ *   restoring directional BUY/SELL and verified USD evidence when the current
+ *   WETH/USDG reference is available;
+ * - cursor advances ONLY after a fully successful exact-range response;
+ * - waiting for the 60s fallback slot does not fabricate an integrity gap;
+ *   if exact range verification becomes too old, integrity is reset normally;
+ * - /blockscoutusage combines the existing main-worker meter with the separate
+ *   autonomous V3 fallback meter without making a provider request;
+ * - no scoring, Momentum, V4, alert thresholds, qualification rules or hard
+ *   42-request scanner ceiling are changed.
+ */
+/**
  * Robinhood Chain Meme Hunter — V614
  * AUTHORITATIVE RUNTIME VERSION: V614
  *
@@ -4399,7 +4424,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V614";
+const VERSION = "V615";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -11655,6 +11680,13 @@ const BLOCKSCOUT_PRO_FREE_DAILY_CREDITS_V611 = 100000;
 const BLOCKSCOUT_PRO_FREE_RPS_V611 = 5;
 const BLOCKSCOUT_PRO_STANDARD_CREDITS_V611 = 20;
 const BLOCKSCOUT_PRO_HEAVY_CREDITS_V611 = 50;
+const V3_BLOCKSCOUT_FALLBACK_METER_NAME_V615 = "V3_BLOCKSCOUT_FALLBACK_METER_V615";
+const V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615 = 40000;
+const V3_BLOCKSCOUT_FALLBACK_MIN_TOKEN_INTERVAL_MS_V615 = 60 * 1000;
+const V3_BLOCKSCOUT_FALLBACK_GLOBAL_MIN_INTERVAL_MS_V615 = 250;
+const V3_BLOCKSCOUT_FALLBACK_MAX_VERIFICATION_AGE_MS_V615 = 90 * 1000;
+const V3_BLOCKSCOUT_FALLBACK_TIMEOUT_MS_V615 = 6000;
+
 
 function utcDayKeyV611(ts=Date.now()){
   return new Date(ts).toISOString().slice(0,10);
@@ -11939,7 +11971,43 @@ function blockscoutProUsageSnapshotV611(state){
   };
 }
 
-function blockscoutProUsageTelegramMessageV611(state){
+async function v3BlockscoutFallbackMeterSnapshotFromDoV615(env){
+  const ns=env?.[V3_LIVE_DO_BINDING_V363];
+  if(!ns || typeof ns.idFromName!=="function" || typeof ns.get!=="function"){
+    return {
+      version:VERSION,
+      status:"V3_FALLBACK_METER_BINDING_UNAVAILABLE_V615",
+      available:false,
+      requests:0,
+      creditsUsed:0,
+      dailyCapCredits:V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615,
+      remainingCredits:V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615
+    };
+  }
+
+  try{
+    const stub=ns.get(ns.idFromName(V3_BLOCKSCOUT_FALLBACK_METER_NAME_V615));
+    const response=await stub.fetch("https://v3-live.internal/blockscout-fallback-meter-v615");
+    const body=await response.json().catch(()=>({}));
+    return {
+      available:response.ok,
+      ...body
+    };
+  }catch(error){
+    return {
+      version:VERSION,
+      status:"V3_FALLBACK_METER_READ_FAILED_V615",
+      available:false,
+      requests:0,
+      creditsUsed:0,
+      dailyCapCredits:V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615,
+      remainingCredits:V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615,
+      error:String(error?.message||error).slice(0,220)
+    };
+  }
+}
+
+function blockscoutProUsageTelegramMessageV611(state,fallbackV615=null){
   const r=blockscoutProUsageSnapshotV611(state);
 
   const fmtNum=value=>
@@ -11952,6 +12020,19 @@ function blockscoutProUsageTelegramMessageV611(state){
       ? `${Number(value).toFixed(2)}%`
       : "BUILDING";
 
+  const fallbackCreditsV615=safeNumber(fallbackV615?.creditsUsed);
+  const fallbackRequestsV615=safeNumber(fallbackV615?.requests);
+  const combinedCreditsV615=
+    safeNumber(r.estimatedCreditsUsed)+fallbackCreditsV615;
+  const combinedRemainingV615=Math.max(
+    0,
+    safeNumber(r.dailyAllowanceCredits)-combinedCreditsV615
+  );
+  const combinedUsedPctV615=
+    safeNumber(r.dailyAllowanceCredits)>0
+      ? (combinedCreditsV615/safeNumber(r.dailyAllowanceCredits))*100
+      : null;
+
   const lines=[
     `🧭 <b>Blockscout PRO Usage — ${escapeHtml(VERSION)}</b>`,
     "",
@@ -11959,6 +12040,9 @@ function blockscoutProUsageTelegramMessageV611(state){
     `Estimated credits: <b>${fmtNum(r.estimatedCreditsUsed)}</b> / <b>${fmtNum(r.dailyAllowanceCredits)}</b>`,
     `Used: <b>${fmtPct(r.usedPct)}</b>`,
     `Estimated remaining: <b>${fmtNum(r.remainingEstimatedCredits)}</b> credits`,
+    `V3 fallback requests: <b>${fmtNum(fallbackRequestsV615)}</b> | fallback credits: <b>${fmtNum(fallbackCreditsV615)}</b> / <b>${fmtNum(fallbackV615?.dailyCapCredits||V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615)}</b>`,
+    `Combined bot estimate: <b>${fmtNum(combinedCreditsV615)}</b> / <b>${fmtNum(r.dailyAllowanceCredits)}</b> (${fmtPct(combinedUsedPctV615)})`,
+    `Combined estimated remaining: <b>${fmtNum(combinedRemainingV615)}</b> credits`,
     `Standard calls: <b>${fmtNum(r.standardRequests)}</b> × ${r.standardCreditsPerRequest} credits`,
     `Heavy/raw-trace calls: <b>${fmtNum(r.heavyRequests)}</b> × ${r.heavyCreditsPerRequest} credits`,
     "",
@@ -11967,6 +12051,7 @@ function blockscoutProUsageTelegramMessageV611(state){
     `Projected 24h credits: <b>${fmtNum(r.projected24hCredits)}</b>`,
     `Projected allowance used: <b>${fmtPct(r.projected24hPct)}</b>`,
     `Capacity status: <b>${escapeHtml(r.status)}</b>`,
+    `V3 fallback guard: <b>${escapeHtml(String(fallbackV615?.status||"BUILDING"))}</b> | reserved cap <b>${fmtNum(fallbackV615?.dailyCapCredits||V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615)}</b>/day`,
     "",
     `Reset UTC: <b>${escapeHtml(r.nextResetUtc)}</b>`,
     `Reset UK: <b>${escapeHtml(r.nextResetUk)}</b>`,
@@ -11986,7 +12071,7 @@ function blockscoutProUsageTelegramMessageV611(state){
     "",
     `Pre-V611 usage: <b>DATA UNVERIFIED</b>`,
     `Actual account-wide usage: <b>DATA UNVERIFIED</b>`,
-    "<i>Bot-side forward-only estimate. Blockscout Dev Portal remains authoritative. /blockscoutusage performs no provider request and no state write.</i>"
+    "<i>Bot-side forward-only estimate. Blockscout Dev Portal remains authoritative. /blockscoutusage makes no external provider request and does not mutate meter state; it also reads the V3 fallback singleton meter internally.</i>"
   );
 
   return lines.join("\n");
@@ -120921,7 +121006,7 @@ function v3FeedUsageTelegramMessageV598(token, result) {
   };
 
   const lines = [
-    `📡 <b>V3 Feed Usage — V610</b>`,
+    `📡 <b>V3 Feed Usage — V615</b>`,
     `Contract: <code>${escapeHtml(token)}</code>`,
     "",
     `Active provider: <b>${escapeHtml(activeProvider)}</b>`,
@@ -120947,6 +121032,9 @@ function v3FeedUsageTelegramMessageV598(token, result) {
     v3HttpProviderDiagLineV610("QuickNode",result?.v3HttpLogPollingV605?.providerStatsV609?.QUICKNODE),
     v3HttpProviderDiagLineV610("Alchemy",result?.v3HttpLogPollingV605?.providerStatsV609?.ALCHEMY),
     v3HttpProviderDiagLineV610("Public RPC",result?.v3HttpLogPollingV605?.providerStatsV609?.ROBINHOOD_PUBLIC_RPC),
+    v3HttpProviderDiagLineV610("Blockscout",result?.v3HttpLogPollingV605?.providerStatsV609?.BLOCKSCOUT_PRO_V615),
+    `Blockscout V3 fallback: <b>${result?.v3BlockscoutFallbackV615?.telemetry?.successes>0?"WORKING":result?.v3BlockscoutFallbackV615?.telemetry?.attempts>0?"ATTEMPTED":"BUILDING"}</b> | attempts <b>${safeNumber(result?.v3BlockscoutFallbackV615?.telemetry?.attempts)}</b> | successes <b>${safeNumber(result?.v3BlockscoutFallbackV615?.telemetry?.successes)}</b> | failures <b>${safeNumber(result?.v3BlockscoutFallbackV615?.telemetry?.failures)}</b>`,
+    `Blockscout V3 reserved credits: <b>${safeNumber(result?.v3BlockscoutFallbackV615?.meter?.creditsUsed).toLocaleString("en-GB")}</b> / <b>${safeNumber(result?.v3BlockscoutFallbackV615?.meter?.dailyCapCredits||V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615).toLocaleString("en-GB")}</b>`,
     ...(result?.v3HttpLogPollingV605?.lastFailure
       ? [`Last exact-log failure: <code>${escapeHtml(JSON.stringify(result.v3HttpLogPollingV605.lastFailure).slice(0,180))}</code>`]
       : []),
@@ -121838,9 +121926,15 @@ async function telegramCommandReplyV271(
     parsed.command === "/blockscoutusage" ||
     parsed.command === "/blockscout"
   ) {
+    const fallbackMeterV615=
+      await v3BlockscoutFallbackMeterSnapshotFromDoV615(
+        env
+      );
+
     reply =
       blockscoutProUsageTelegramMessageV611(
-        state
+        state,
+        fallbackMeterV615
       );
 
     if (diagnosticV273) {
@@ -121862,7 +121956,13 @@ async function telegramCommandReplyV271(
           meterV611?.status || null,
         scannerBudgetConsumed:false,
         externalProviderRequests:0,
-        stateWrites:0
+        stateWrites:0,
+        v3FallbackV615:{
+          requests:safeNumber(fallbackMeterV615?.requests),
+          creditsUsed:safeNumber(fallbackMeterV615?.creditsUsed),
+          dailyCapCredits:safeNumber(fallbackMeterV615?.dailyCapCredits),
+          status:fallbackMeterV615?.status||null
+        }
       };
     }
   } else if (
@@ -128195,6 +128295,20 @@ export class V3LiveCollectorV363 {
   async fetch(request) {
     const url = new URL(request.url);
 
+    if(
+      url.pathname==="/blockscout-fallback-reserve-v615" &&
+      request.method==="POST"
+    ){
+      return Response.json(
+        await this.blockscoutFallbackReserveV615(request)
+      );
+    }
+    if(url.pathname==="/blockscout-fallback-meter-v615"){
+      return Response.json(
+        await this.blockscoutFallbackMeterSnapshotV615()
+      );
+    }
+
     if(url.pathname==="/shared-head-start-v602"){
       await this.doPutV404(V3_SHARED_HEAD_MODE_KEY_V602,true);
       await this.doPutV404("enabled",true);
@@ -128218,7 +128332,9 @@ export class V3LiveCollectorV363 {
       url.pathname !== "/shadow-multipool-start-v394" &&
       url.pathname !== "/feed-usage-v598" &&
       url.pathname !== "/shared-head-start-v602" &&
-      url.pathname !== "/shared-head-status-v602"
+      url.pathname !== "/shared-head-status-v602" &&
+      url.pathname !== "/blockscout-fallback-reserve-v615" &&
+      url.pathname !== "/blockscout-fallback-meter-v615"
     ) {
       try {
         selfHealV591 =
@@ -128901,6 +129017,20 @@ if (url.pathname === "/reconcile-v374") {
     const logPollV605=await this.state.storage.get("v605:logPoll")||{};
     const httpLogProviderStatsV609=
       await this.state.storage.get("v609:httpLogProviderStats")||{};
+    const blockscoutFallbackTelemetryV615=
+      await this.state.storage.get("v615:blockscoutFallbackTelemetry")||{};
+    let blockscoutFallbackMeterV615=null;
+    try{
+      const stubV615=await this.blockscoutFallbackMeterStubV615();
+      if(stubV615){
+        const responseV615=
+          await stubV615.fetch(
+            "https://v3-live.internal/blockscout-fallback-meter-v615"
+          );
+        blockscoutFallbackMeterV615=
+          await responseV615.json().catch(()=>null);
+      }
+    }catch(_){}
 
     const configured =
       Array.isArray(conn?.configuredProvidersV597) &&
@@ -129199,6 +129329,20 @@ if (url.pathname === "/reconcile-v374") {
       recentProviderSwitches,
       recentOpenProviders:openProviders.slice(-6),
       lastProviderFailure:conn?.lastProviderFailureV597 || null,
+      v3BlockscoutFallbackV615:{
+        enabled:true,
+        tokenMinIntervalMs:V3_BLOCKSCOUT_FALLBACK_MIN_TOKEN_INTERVAL_MS_V615,
+        maxVerificationAgeMs:V3_BLOCKSCOUT_FALLBACK_MAX_VERIFICATION_AGE_MS_V615,
+        telemetry:blockscoutFallbackTelemetryV615,
+        meter:blockscoutFallbackMeterV615,
+        lastAttemptAt:
+          Number.isFinite(Number(await this.state.storage.get("v615:lastBlockscoutFallbackAttemptAt")))
+            ? Number(await this.state.storage.get("v615:lastBlockscoutFallbackAttemptAt"))
+            : null,
+        exactPoolOnly:true,
+        ledgerPath:"EXISTING_PERSIST_SWAP_V363",
+        scannerBudgetConsumed:false
+      },
       v3HttpLogPollingV605:{
         enabled:cfg?.httpLogPollingV605===true,
         status:logPollV605?.status||null,
@@ -130223,6 +130367,446 @@ if (url.pathname === "/reconcile-v374") {
     await this.doPutV404("v609:httpLogProviderStats",stats);
   }
 
+  async blockscoutFallbackMeterSnapshotV615() {
+    const day=utcDayKeyV611();
+    const raw=await this.state.storage.get("v615:blockscoutFallbackUsage")||{};
+    const active=raw?.utcDay===day ? raw : {};
+
+    const requests=safeNumber(active.requests);
+    const creditsUsed=safeNumber(active.creditsUsed);
+    const remainingCredits=Math.max(
+      0,
+      V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615-creditsUsed
+    );
+    const startedAt=
+      Number.isFinite(Number(active.firstReservedAt))
+        ? Number(active.firstReservedAt)
+        : null;
+    const elapsedMs=
+      startedAt!==null
+        ? Math.max(0,Date.now()-startedAt)
+        : 0;
+    const mature=elapsedMs>=10*60*1000 && creditsUsed>0;
+    const creditsPerHour=
+      mature
+        ? creditsUsed/(elapsedMs/(60*60*1000))
+        : null;
+    const projected24hCredits=
+      creditsPerHour!==null
+        ? creditsPerHour*24
+        : null;
+
+    let status="BUILDING_SAMPLE";
+    if(creditsUsed>=V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615){
+      status="DAILY_CAP_REACHED";
+    }else if(
+      projected24hCredits!==null &&
+      projected24hCredits>=V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615
+    ){
+      status="LIKELY_TO_REACH_RESERVED_CAP";
+    }else if(
+      projected24hCredits!==null &&
+      projected24hCredits>=V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615*0.75
+    ){
+      status="WATCH";
+    }else if(mature){
+      status="SAFE";
+    }
+
+    return {
+      version:VERSION,
+      meter:"V3_BLOCKSCOUT_FALLBACK_V615",
+      utcDay:day,
+      requests,
+      creditsUsed,
+      dailyCapCredits:V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615,
+      remainingCredits,
+      firstReservedAt:startedAt,
+      lastReservedAt:
+        Number.isFinite(Number(active.lastReservedAt))
+          ? Number(active.lastReservedAt)
+          : null,
+      elapsedMs,
+      creditsPerHour,
+      projected24hCredits,
+      status,
+      deniedDailyCap:safeNumber(active.deniedDailyCap),
+      deniedGlobalSpacing:safeNumber(active.deniedGlobalSpacing),
+      byToken:active.byToken||{},
+      endpoint:"BLOCKSCOUT_PRO_JSONRPC_ETH_GETLOGS",
+      creditsPerRequest:BLOCKSCOUT_PRO_STANDARD_CREDITS_V611,
+      externalProviderRequest:false,
+      timestamp:now()
+    };
+  }
+
+  async blockscoutFallbackReserveV615(request) {
+    let body={};
+    try{body=await request.json();}catch(_){}
+
+    const credits=Math.max(
+      1,
+      Math.trunc(Number(body?.credits)||BLOCKSCOUT_PRO_STANDARD_CREDITS_V611)
+    );
+    const token=normalize(body?.token||"");
+    const nowMs=Date.now();
+    const day=utcDayKeyV611();
+    let raw=await this.state.storage.get("v615:blockscoutFallbackUsage")||{};
+
+    if(raw?.utcDay!==day){
+      raw={
+        utcDay:day,
+        requests:0,
+        creditsUsed:0,
+        firstReservedAt:null,
+        lastReservedAt:null,
+        deniedDailyCap:0,
+        deniedGlobalSpacing:0,
+        byToken:{}
+      };
+    }
+
+    const current=safeNumber(raw.creditsUsed);
+    if(
+      current+credits >
+      V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615
+    ){
+      raw.deniedDailyCap=safeNumber(raw.deniedDailyCap)+1;
+      await this.doPutV404("v615:blockscoutFallbackUsage",raw);
+      return {
+        ok:false,
+        reserved:false,
+        status:"BLOCKSCOUT_V3_DAILY_RESERVED_CAP_REACHED_V615",
+        creditsUsed:current,
+        dailyCapCredits:V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615,
+        remainingCredits:Math.max(
+          0,
+          V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615-current
+        )
+      };
+    }
+
+    const lastReservedAt=Number(raw.lastReservedAt);
+    if(
+      Number.isFinite(lastReservedAt) &&
+      nowMs-lastReservedAt <
+        V3_BLOCKSCOUT_FALLBACK_GLOBAL_MIN_INTERVAL_MS_V615
+    ){
+      raw.deniedGlobalSpacing=safeNumber(raw.deniedGlobalSpacing)+1;
+      await this.doPutV404("v615:blockscoutFallbackUsage",raw);
+      return {
+        ok:false,
+        reserved:false,
+        deferred:true,
+        status:"BLOCKSCOUT_V3_GLOBAL_SPACING_WAIT_V615",
+        retryAfterMs:
+          V3_BLOCKSCOUT_FALLBACK_GLOBAL_MIN_INTERVAL_MS_V615-
+          Math.max(0,nowMs-lastReservedAt)
+      };
+    }
+
+    raw.requests=safeNumber(raw.requests)+1;
+    raw.creditsUsed=current+credits;
+    raw.firstReservedAt=
+      Number.isFinite(Number(raw.firstReservedAt))
+        ? Number(raw.firstReservedAt)
+        : nowMs;
+    raw.lastReservedAt=nowMs;
+    raw.byToken=raw.byToken||{};
+
+    const tokenKey=isAddress(token)?token:"UNVERIFIED_TOKEN";
+    const row=raw.byToken[tokenKey]||{requests:0,creditsUsed:0};
+    row.requests=safeNumber(row.requests)+1;
+    row.creditsUsed=safeNumber(row.creditsUsed)+credits;
+    row.lastReservedAt=nowMs;
+    raw.byToken[tokenKey]=row;
+
+    await this.doPutV404("v615:blockscoutFallbackUsage",raw);
+
+    return {
+      ok:true,
+      reserved:true,
+      status:"BLOCKSCOUT_V3_CREDIT_RESERVED_V615",
+      credits,
+      requests:safeNumber(raw.requests),
+      creditsUsed:safeNumber(raw.creditsUsed),
+      dailyCapCredits:V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615,
+      remainingCredits:Math.max(
+        0,
+        V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615-
+        safeNumber(raw.creditsUsed)
+      )
+    };
+  }
+
+  async blockscoutFallbackMeterStubV615() {
+    const ns=this.env?.[V3_LIVE_DO_BINDING_V363];
+    if(!ns || typeof ns.idFromName!=="function" || typeof ns.get!=="function"){
+      return null;
+    }
+    return ns.get(ns.idFromName(V3_BLOCKSCOUT_FALLBACK_METER_NAME_V615));
+  }
+
+  async reserveBlockscoutFallbackCreditV615(credits) {
+    const stub=await this.blockscoutFallbackMeterStubV615();
+    if(!stub){
+      return {
+        ok:false,
+        reserved:false,
+        status:"BLOCKSCOUT_V3_METER_BINDING_UNAVAILABLE_V615"
+      };
+    }
+
+    try{
+      const response=await stub.fetch(
+        "https://v3-live.internal/blockscout-fallback-reserve-v615",
+        {
+          method:"POST",
+          headers:{"content-type":"application/json"},
+          body:JSON.stringify({
+            credits,
+            token:this.config?.token||null
+          })
+        }
+      );
+      return await response.json();
+    }catch(error){
+      return {
+        ok:false,
+        reserved:false,
+        status:"BLOCKSCOUT_V3_METER_RESERVE_FAILED_V615",
+        error:String(error?.message||error).slice(0,220)
+      };
+    }
+  }
+
+  async fetchBlockscoutExactV3LogsV615(fromBlock,toBlock) {
+    const apiKey=String(this.env?.BLOCKSCOUT_PRO_API_KEY||"").trim();
+    if(!apiKey){
+      return {
+        ok:false,
+        attempted:false,
+        status:"BLOCKSCOUT_PRO_NOT_CONFIGURED_V615",
+        lastFailure:{
+          providerId:"BLOCKSCOUT_PRO_V615",
+          error:"BLOCKSCOUT_PRO_API_KEY_MISSING"
+        }
+      };
+    }
+
+    const nowMs=Date.now();
+    const lastAttemptAt=
+      Number(await this.state.storage.get("v615:lastBlockscoutFallbackAttemptAt"));
+    if(
+      Number.isFinite(lastAttemptAt) &&
+      nowMs-lastAttemptAt <
+        V3_BLOCKSCOUT_FALLBACK_MIN_TOKEN_INTERVAL_MS_V615
+    ){
+      return {
+        ok:false,
+        attempted:false,
+        deferred:true,
+        status:"BLOCKSCOUT_V3_TOKEN_INTERVAL_WAIT_V615",
+        retryAfterMs:
+          V3_BLOCKSCOUT_FALLBACK_MIN_TOKEN_INTERVAL_MS_V615-
+          Math.max(0,nowMs-lastAttemptAt)
+      };
+    }
+
+    const reserve=
+      await this.reserveBlockscoutFallbackCreditV615(
+        BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
+      );
+
+    if(reserve?.reserved!==true){
+      return {
+        ok:false,
+        attempted:false,
+        deferred:reserve?.deferred===true,
+        budgetBlocked:
+          reserve?.status==="BLOCKSCOUT_V3_DAILY_RESERVED_CAP_REACHED_V615",
+        status:reserve?.status||"BLOCKSCOUT_V3_RESERVE_DENIED_V615",
+        reserve
+      };
+    }
+
+    await this.doPutV404(
+      "v615:lastBlockscoutFallbackAttemptAt",
+      nowMs
+    );
+
+    const endpoint=
+      `${BLOCKSCOUT_PRO}/${BLOCKSCOUT_PRO_CHAIN_ID}/json-rpc`;
+
+    const controller=new AbortController();
+    const timer=setTimeout(
+      ()=>controller.abort(),
+      V3_BLOCKSCOUT_FALLBACK_TIMEOUT_MS_V615
+    );
+    const started=Date.now();
+
+    const telemetry=
+      await this.state.storage.get("v615:blockscoutFallbackTelemetry")||{};
+
+    try{
+      const response=await fetch(
+        endpoint,
+        {
+          method:"POST",
+          headers:{
+            accept:"application/json",
+            "content-type":"application/json",
+            authorization:`Bearer ${apiKey}`
+          },
+          body:JSON.stringify({
+            jsonrpc:"2.0",
+            id:615,
+            method:"eth_getLogs",
+            params:[{
+              fromBlock:"0x"+Math.trunc(fromBlock).toString(16),
+              toBlock:"0x"+Math.trunc(toBlock).toString(16),
+              address:this.config.pair,
+              topics:[UNISWAP_V3_SWAP_TOPIC_V326]
+            }]
+          }),
+          signal:controller.signal
+        }
+      );
+
+      let body=null;
+      try{body=await response.json();}catch(_){}
+
+      const rpcError=
+        body?.error?.message!=null
+          ? String(body.error.message).slice(0,240)
+          : body?.error!=null
+            ? JSON.stringify(body.error).slice(0,240)
+            : null;
+
+      telemetry.attempts=safeNumber(telemetry.attempts)+1;
+      telemetry.lastAttemptAt=Date.now();
+      telemetry.lastHttpStatus=response.status;
+      telemetry.lastElapsedMs=Math.max(0,Date.now()-started);
+
+      if(
+        response.ok &&
+        !rpcError &&
+        Array.isArray(body?.result)
+      ){
+        telemetry.successes=safeNumber(telemetry.successes)+1;
+        telemetry.lastSuccessAt=Date.now();
+        telemetry.lastReturnedLogs=body.result.length;
+        telemetry.lastRange={fromBlock,toBlock};
+        telemetry.lastError=null;
+        await this.doPutV404(
+          "v615:blockscoutFallbackTelemetry",
+          telemetry
+        );
+
+        await this.recordV3HttpLogProviderAttemptV609(
+          "BLOCKSCOUT_PRO_V615",
+          "SUCCESS",
+          {
+            httpStatus:response.status,
+            elapsedMs:telemetry.lastElapsedMs,
+            fromBlock,
+            toBlock
+          }
+        );
+
+        return {
+          ok:true,
+          attempted:true,
+          providerId:"BLOCKSCOUT_PRO_V615",
+          providerSource:"BLOCKSCOUT_PRO_JSONRPC_ETH_GETLOGS_V615",
+          httpStatus:response.status,
+          logs:body.result,
+          elapsedMs:telemetry.lastElapsedMs,
+          reserve
+        };
+      }
+
+      telemetry.failures=safeNumber(telemetry.failures)+1;
+      telemetry.lastFailureAt=Date.now();
+      telemetry.lastError=
+        rpcError||`HTTP_${response.status}_INVALID_RESULT`;
+      telemetry.lastRange={fromBlock,toBlock};
+      await this.doPutV404(
+        "v615:blockscoutFallbackTelemetry",
+        telemetry
+      );
+
+      await this.recordV3HttpLogProviderAttemptV609(
+        "BLOCKSCOUT_PRO_V615",
+        "FAILURE",
+        {
+          httpStatus:response.status,
+          rpcError,
+          elapsedMs:telemetry.lastElapsedMs,
+          fromBlock,
+          toBlock
+        }
+      );
+
+      return {
+        ok:false,
+        attempted:true,
+        status:"BLOCKSCOUT_V3_EXACT_LOGS_FAILED_V615",
+        lastFailure:{
+          providerId:"BLOCKSCOUT_PRO_V615",
+          httpStatus:response.status,
+          rpcError,
+          elapsedMs:telemetry.lastElapsedMs
+        },
+        reserve
+      };
+    }catch(error){
+      const message=String(
+        error?.name==="AbortError"
+          ? "TIMEOUT"
+          : error?.message||error
+      ).slice(0,220);
+
+      telemetry.attempts=safeNumber(telemetry.attempts)+1;
+      telemetry.failures=safeNumber(telemetry.failures)+1;
+      telemetry.lastAttemptAt=Date.now();
+      telemetry.lastFailureAt=Date.now();
+      telemetry.lastError=message;
+      telemetry.lastElapsedMs=Math.max(0,Date.now()-started);
+      telemetry.lastRange={fromBlock,toBlock};
+
+      await this.doPutV404(
+        "v615:blockscoutFallbackTelemetry",
+        telemetry
+      );
+
+      await this.recordV3HttpLogProviderAttemptV609(
+        "BLOCKSCOUT_PRO_V615",
+        "FAILURE",
+        {
+          error:message,
+          elapsedMs:telemetry.lastElapsedMs,
+          fromBlock,
+          toBlock
+        }
+      );
+
+      return {
+        ok:false,
+        attempted:true,
+        status:"BLOCKSCOUT_V3_EXACT_LOGS_FETCH_ERROR_V615",
+        lastFailure:{
+          providerId:"BLOCKSCOUT_PRO_V615",
+          error:message,
+          elapsedMs:telemetry.lastElapsedMs
+        },
+        reserve
+      };
+    }finally{
+      clearTimeout(timer);
+    }
+  }
+
   async fetchExactV3LogsV605(fromBlock,toBlock) {
     const providers=this.v3HttpLogProviderCandidatesV605();
     let lastFailure=null;
@@ -130320,7 +130904,49 @@ if (url.pathname === "/reconcile-v374") {
       }
     }
 
-    return {ok:false,lastFailure,configuredProviders:providers.map(row=>row.id)};
+    const blockscoutV615=
+      await this.fetchBlockscoutExactV3LogsV615(
+        fromBlock,
+        toBlock
+      );
+
+    if(blockscoutV615?.ok===true){
+      return {
+        ...blockscoutV615,
+        configuredProviders:[
+          ...providers.map(row=>row.id),
+          "BLOCKSCOUT_PRO_V615"
+        ],
+        priorProviderFailure:lastFailure,
+        requestAttempts:
+          providers.length+1
+      };
+    }
+
+    if(blockscoutV615?.deferred===true){
+      return {
+        ok:false,
+        deferred:true,
+        status:blockscoutV615.status,
+        retryAfterMs:blockscoutV615.retryAfterMs??null,
+        lastFailure,
+        blockscoutFallbackV615:blockscoutV615,
+        configuredProviders:[
+          ...providers.map(row=>row.id),
+          "BLOCKSCOUT_PRO_V615"
+        ]
+      };
+    }
+
+    return {
+      ok:false,
+      lastFailure:blockscoutV615?.lastFailure||lastFailure,
+      blockscoutFallbackV615:blockscoutV615,
+      configuredProviders:[
+        ...providers.map(row=>row.id),
+        "BLOCKSCOUT_PRO_V615"
+      ]
+    };
   }
 
   async pollExactV3LogsV605() {
@@ -130387,12 +131013,75 @@ if (url.pathname === "/reconcile-v374") {
     const result=await this.fetchExactV3LogsV605(from,to);
 
     poll.providerRequests=safeNumber(poll.providerRequests)+(
-      result?.ok===true
-        ? 1
-        : Math.max(1,Array.isArray(result?.configuredProviders)?result.configuredProviders.length:1)
+      Number.isFinite(Number(result?.requestAttempts))
+        ? Math.max(0,Number(result.requestAttempts))
+        : result?.ok===true
+          ? 1
+          : Math.max(
+              1,
+              Array.isArray(result?.configuredProviders)
+                ? result.configuredProviders.length
+                : 1
+            )
     );
     poll.lastAttemptAt=Date.now();
     poll.lastRange={fromBlock:from,toBlock:to};
+
+    if(result?.deferred===true){
+      const lastSuccessfulPollAt=
+        Number.isFinite(Number(poll.lastSuccessfulPollAt))
+          ? Number(poll.lastSuccessfulPollAt)
+          : null;
+      const verificationAgeMs=
+        lastSuccessfulPollAt!==null
+          ? Math.max(0,Date.now()-lastSuccessfulPollAt)
+          : null;
+
+      poll.status="BLOCKSCOUT_V3_FALLBACK_WAIT_V615";
+      poll.lastDeferredAt=Date.now();
+      poll.lastDeferredStatusV615=result?.status||null;
+      poll.lastDeferredRetryAfterMsV615=result?.retryAfterMs??null;
+      poll.updatedAt=Date.now();
+      await this.doPutV404("v605:logPoll",poll);
+
+      if(
+        verificationAgeMs!==null &&
+        verificationAgeMs<=V3_BLOCKSCOUT_FALLBACK_MAX_VERIFICATION_AGE_MS_V615
+      ){
+        return {
+          ok:true,
+          deferred:true,
+          status:"BLOCKSCOUT_V3_FALLBACK_WAIT_HEALTHY_V615",
+          verificationAgeMs,
+          retryAfterMs:result?.retryAfterMs??null,
+          head,
+          lastProcessedBlock:cursor
+        };
+      }
+
+      await this.markCoverageGapV366("BLOCKSCOUT_V3_VERIFICATION_TOO_OLD_V615");
+      await this.markIntegrityGapV369("BLOCKSCOUT_V3_VERIFICATION_TOO_OLD_V615");
+      await this.markIntegrityGapV371("BLOCKSCOUT_V3_VERIFICATION_TOO_OLD_V615");
+
+      const conn=await this.state.storage.get("connection")||{};
+      await this.doPutV404("connection",{
+        ...conn,
+        status:"BLOCKSCOUT_V3_VERIFICATION_TOO_OLD_V615",
+        connected:false,
+        subscriptionAccepted:false,
+        logSubscriptionAccepted:false,
+        headSubscriptionAccepted:shared?.fresh===true,
+        lastError:"BLOCKSCOUT_V3_VERIFICATION_TOO_OLD_V615"
+      });
+
+      return {
+        ok:false,
+        deferred:true,
+        status:"BLOCKSCOUT_V3_VERIFICATION_TOO_OLD_V615",
+        verificationAgeMs,
+        retryAfterMs:result?.retryAfterMs??null
+      };
+    }
 
     if(result?.ok!==true){
       poll.pollFailures=safeNumber(poll.pollFailures)+1;
