@@ -1,4 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V618
+ * AUTHORITATIVE RUNTIME VERSION: V618
+ *
+ * V618 V3 PRESENTATION CONSISTENCY CLEANUP:
+ * - presentation-only follow-up to confirmed-working V617;
+ * - adds 1m and 30m to the read-only integrity-gate summary so it matches the
+ *   horizons already exposed by the live V3 ledger;
+ * - does NOT make 1m or 30m scoring-active; scoring remains unchanged;
+ * - suppresses obsolete cached legacy head-age and old legacy head-number
+ *   diagnostics when HTTP eth_getLogs mode is active;
+ * - replaces WebSocket-specific diagnostic wording with concise HTTP-mode
+ *   current-state wording;
+ * - keeps the V617 main rolling Buy/Sell USD section and FULL/PARTIAL rules;
+ * - preserves V616/V617 V3 collector, Blockscout exact-log/head fallbacks,
+ *   cadence, credit guards, V4 collector, scoring, Momentum, qualification,
+ *   alerts and the hard 42-request ceiling unchanged.
+ */
+/**
  * Robinhood Chain Meme Hunter — V617
  * AUTHORITATIVE RUNTIME VERSION: V617
  *
@@ -4467,7 +4485,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V617";
+const VERSION = "V618";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -91500,20 +91518,24 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
         : null;
 
     evidence.push(
-      `🧪 V590 current V3 reset cause: <b>${escapeHtml(lastIntegrityGapReasonV590)}</b>${lastIntegrityGapAtV590!==null ? ` | ${escapeHtml(new Date(lastIntegrityGapAtV590).toISOString())}` : ""}`,
       liveV3V365?.windowClockBasis==="EXACT_V3_ETH_GETLOGS_INGESTION_TIME_V616"
-        ? `🔌 Current HTTP integrity flags: log <b>${liveV3V365?.logSubscriptionAccepted===true ? "YES" : "NO"}</b> | verified head <b>${liveV3V365?.headSubscriptionAccepted===true ? "YES" : "NO"}</b> | legacy cached head-age diagnostic <b>${headAgeMsV590!==null ? `${Math.round(headAgeMsV590/1000)}s` : "UNVERIFIED"}</b>`
+        ? `🧪 Current V3 integrity mode: <b>HTTP EXACT-POOL + VERIFIED HEAD</b>`
+        : `🧪 V590 current V3 reset cause: <b>${escapeHtml(lastIntegrityGapReasonV590)}</b>${lastIntegrityGapAtV590!==null ? ` | ${escapeHtml(new Date(lastIntegrityGapAtV590).toISOString())}` : ""}`,
+      liveV3V365?.windowClockBasis==="EXACT_V3_ETH_GETLOGS_INGESTION_TIME_V616"
+        ? `🔌 Current HTTP integrity: exact-log feed <b>${liveV3V365?.logSubscriptionAccepted===true ? "YES" : "NO"}</b> | verified-head gate <b>${liveV3V365?.headSubscriptionAccepted===true ? "YES" : "NO"}</b>`
         : `🔌 V3 subscriptions: log <b>${liveV3V365?.logSubscriptionAccepted===true ? "YES" : "NO"}</b> | head <b>${liveV3V365?.headSubscriptionAccepted===true ? "YES" : "NO"}</b>${headAgeMsV590!==null ? ` | head age <b>${Math.round(headAgeMsV590/1000)}s</b>` : ""}${headStaleThresholdMsV590!==null ? ` / stale threshold <b>${Math.round(headStaleThresholdMsV590/1000)}s</b>` : ""}`,
-      `🧩 Legacy coverage reset cause: <b>${escapeHtml(lastCoverageGapReasonV590)}</b>${liveV3V365?.lastError ? ` | last connection error <b>${escapeHtml(String(liveV3V365.lastError).slice(0,140))}</b>` : ""}`,
       liveV3V365?.windowClockBasis==="EXACT_V3_ETH_GETLOGS_INGESTION_TIME_V616"
-        ? `🩹 Legacy V591 socket self-heal telemetry: <b>NOT USED FOR CURRENT HTTP FEED HEALTH</b>`
+        ? `🧩 Prior integrity reset: <b>${escapeHtml(lastIntegrityGapReasonV590)}</b>${lastIntegrityGapAtV590!==null ? ` | ${escapeHtml(new Date(lastIntegrityGapAtV590).toISOString())}` : ""}`
+        : `🧩 Legacy coverage reset cause: <b>${escapeHtml(lastCoverageGapReasonV590)}</b>${liveV3V365?.lastError ? ` | last connection error <b>${escapeHtml(String(liveV3V365.lastError).slice(0,140))}</b>` : ""}`,
+      liveV3V365?.windowClockBasis==="EXACT_V3_ETH_GETLOGS_INGESTION_TIME_V616"
+        ? `🩹 Legacy WebSocket watchdog: <b>IGNORED IN CURRENT HTTP MODE</b>`
         : `🩹 V591 socket self-heal: <b>${liveV3V365?.autonomousSocketSelfHealV591?.enabledPersisted===true ? "ENABLED" : "NOT ENABLED"}</b> | reconnect until dual subscriptions <b>${liveV3V365?.autonomousSocketSelfHealV591?.reconnectUntilDualAccepted===true ? "ON" : "OFF"}</b>`
     );
 
     evidence.push(`🧮 Live swaps captured: <b>${safeNumber(liveV3V365?.swapsCaptured)}</b> | Workers KV writes: <b>${safeNumber(liveV3V365?.workersKvWrites)}</b> | interruptions: <b>${safeNumber(liveV3V365?.interruptionsSinceV366)}</b>`);
     evidence.push(
       liveV3V365?.windowClockBasis==="EXACT_V3_ETH_GETLOGS_INGESTION_TIME_V616"
-        ? `🧱 V371/V616 HTTP liveness guard: <b>${liveV3V365?.headSubscriptionAccepted===true ? "ACTIVE" : "UNVERIFIED"}</b>${Number.isFinite(Number(liveV3V365?.lastHeadBlock)) ? ` | verified head <b>${safeNumber(liveV3V365.lastHeadBlock)}</b>` : ""}`
+        ? `🧱 V371/V616 HTTP liveness guard: <b>${liveV3V365?.headSubscriptionAccepted===true ? "ACTIVE" : "UNVERIFIED"}</b> | current head proof is reported by <code>/feedusage</code>`
         : `🧱 V371 head-liveness guard: <b>${liveV3V365?.headSubscriptionAccepted===true ? "ACTIVE" : "UNVERIFIED"}</b> | heads <b>${safeNumber(liveV3V365?.headsObserved)}</b> | head notification gaps <b>${safeNumber(liveV3V365?.headGapsDetected)}</b>${Number.isFinite(Number(liveV3V365?.lastHeadBlock)) ? ` | head <b>${safeNumber(liveV3V365.lastHeadBlock)}</b>` : ""}`
     );
 
@@ -91543,8 +91565,8 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     }
     const coverageGateV367 = candidate?.liveV3CoverageEvidenceV367 || null;
     const completeV367 = Array.isArray(coverageGateV367?.completeWindows) ? coverageGateV367.completeWindows : [];
-    evidence.push(`🛡 Integrity coverage gate V372: <b>${completeV367.length ? completeV367.join(", ") : "NO FULL WINDOWS YET"}</b> eligible as integrity-complete evidence`);
-    evidence.push(`🧠 Scoring safety: <b>PARTIAL WINDOWS EXCLUDED</b> | live-flow score mutation <b>OFF</b>`);
+    evidence.push(`🛡 Integrity coverage gate V372: <b>${completeV367.length ? completeV367.join(", ") : "NO FULL WINDOWS YET"}</b> complete horizons`);
+    evidence.push(`🧠 Scoring safety: <b>UNCHANGED</b> | 1m/30m/12h display maturity does not activate new scoring | live-flow score mutation <b>OFF</b>`);
     const flowVerifyV372 = candidate?.verifiedAccumulationDistributionV372 || null;
     if (flowVerifyV372) {
       evidence.push(`🐋 V372 accumulation/distribution proof: <b>${escapeHtml(flowVerifyV372.status || "UNVERIFIED")}</b> | tracked whales <b>${safeNumber(flowVerifyV372.trackedWallets)}</b> | wallet <b>${escapeHtml(flowVerifyV372.walletDirection || "UNVERIFIED")}</b> | market <b>${escapeHtml(flowVerifyV372.marketDirection || "UNVERIFIED")}</b>`);
@@ -92094,7 +92116,7 @@ async function telegramFreshAnalyseV276(
    * observation but are never promoted to complete/scoring-grade evidence.
    * V367 intentionally does not alter the established opportunity/momentum
    * formulas yet; it exposes a safe qualification layer for later scoring. */
-  const liveDefsV367 = ["5m", "15m", "1h", "6h", "24h"];
+  const liveDefsV367 = ["1m", "5m", "15m", "30m", "1h", "6h", "12h", "24h"];
   const liveCoverageEvidenceV367 = {
     status: "LIVE_V3_COVERAGE_GATE_V367",
     scoringPolicy: "FULL_WINDOWS_ONLY_V367",
