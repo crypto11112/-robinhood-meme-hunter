@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V624
+ * AUTHORITATIVE RUNTIME VERSION: V624
+ *
+ * V624 KNOWN-LAUNCHPAD CURRENT-LIVE FAST PATH
+ * - builds directly forward from V623;
+ * - fixes a verified-launch funnel gap: shared Bitquery V210/V214/V215/V220/V222/V224
+ *   launches were added to liveTokens/newTokens but not to V621's highest-priority
+ *   currentLiveVerifiedLaunchTokens queue;
+ * - positively verified current-run Bags, Flap, Pons V2, LaunchHood, hood.fun,
+ *   Klik Finance, Bankr Bot, Ape.store, Clanker and Virtuals launches now enter
+ *   the same exact-launch analysis-priority lane before MAX_TOKEN_CHECKS truncation;
+ * - verification standards are unchanged: no address-only or brand-only promotion;
+ *   only rows already positively verified by the existing exact launch mechanisms qualify;
+ * - adds V624 telemetry showing verified known-launchpad tokens promoted this run;
+ * - zero new provider requests; no scoring, Momentum, qualification, Telegram threshold,
+ *   provider cadence, KV key, 42-request global ceiling or 21-request base-analysis change;
+ * - preserves V623 provider diagnostics, V622 PoolId diagnostics and V621 behaviour.
+ */
+/**
  * Robinhood Chain Meme Hunter — V623
  * AUTHORITATIVE RUNTIME VERSION: V623
  *
@@ -4580,7 +4599,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V623";
+const VERSION = "V624";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71180,6 +71199,76 @@ for (
   }
 
   /*
+   * V624 KNOWN-LAUNCHPAD CURRENT-LIVE FAST PATH
+   *
+   * V210/V214/V215/V220/V222/V224 already apply their own exact-positive
+   * verification rules before returning launch rows. Earlier builds inserted
+   * those tokens into liveTokens/newTokens, but V621's highest-priority launch
+   * queue was assembled before this shared result existed. Consequently a
+   * freshly VERIFIED known-launchpad token could still sit behind ordinary
+   * watch/retry rows at MAX_TOKEN_CHECKS truncation.
+   *
+   * Reuse only the current response's positively verified rows and promote
+   * their token addresses into the existing V621 set. No provider request,
+   * detector rule, score, threshold or identity assumption is added here.
+   */
+  const knownLaunchpadFastPathV624 = {
+    enabled: true,
+    zeroAdditionalRequests: true,
+    verifiedRowsSeen: 0,
+    uniqueVerifiedTokensPromoted: 0,
+    tokens: [],
+    byProtocol: {},
+    rejectedUnverifiedRows: 0
+  };
+
+  const knownLaunchpadPriorityBeforeV624 =
+    new Set(currentLiveVerifiedLaunchTokensV621);
+
+  const knownLaunchpadRowsV624 = [
+    ...(bagsDiscoveryV210.launches || []),
+    ...(bagsDiscoveryV210.flapLaunches || []),
+    ...(bagsDiscoveryV210.ponsLaunches || []),
+    ...(bagsDiscoveryV210.launchHoodLaunchesV220 || []),
+    ...(bagsDiscoveryV210.fixedMintLaunchpadLaunchesV222 || []),
+    ...(bagsDiscoveryV210.clankerVirtualsLaunchesV224 || [])
+  ];
+
+  for (const launch of knownLaunchpadRowsV624) {
+    if (launch?.verified !== true) {
+      knownLaunchpadFastPathV624.rejectedUnverifiedRows++;
+      continue;
+    }
+
+    const tokenAddressV624 = normalize(launch?.token);
+    if (!isAddress(tokenAddressV624) || tokenAddressV624 === ZERO) {
+      continue;
+    }
+
+    knownLaunchpadFastPathV624.verifiedRowsSeen++;
+
+    const protocolV624 =
+      String(
+        launch?.protocol ||
+        launch?.protocolFamily ||
+        launch?.source ||
+        "VERIFIED_KNOWN_LAUNCHPAD"
+      ).trim();
+
+    knownLaunchpadFastPathV624.byProtocol[protocolV624] =
+      safeNumber(knownLaunchpadFastPathV624.byProtocol[protocolV624]) + 1;
+
+    addCurrentLiveVerifiedLaunchV621(tokenAddressV624);
+  }
+
+  knownLaunchpadFastPathV624.tokens =
+    Array.from(currentLiveVerifiedLaunchTokensV621)
+      .filter(address => !knownLaunchpadPriorityBeforeV624.has(address));
+
+  knownLaunchpadFastPathV624.uniqueVerifiedTokensPromoted =
+    knownLaunchpadFastPathV624.tokens.length;
+
+  /*
    * V98: a pool can be active in the 20-block live window while its
    * Initialize event sits just outside that window. Fetch one cheap,
    * initialize-only lookback range and register those mappings before
@@ -72798,6 +72887,7 @@ for (
       analysisBeforeHistoricalCompletion: true,
       currentLiveVerifiedLaunchPriorityV621: {
         enabled: true,
+        knownLaunchpadFastPathV624,
         exactLaunchesSeen: currentLiveVerifiedLaunchTokensV621.size,
         eligibleWatchedInsertedAheadOfRetries:
           currentLiveVerifiedLaunchWatchedV621.length,
@@ -81818,6 +81908,7 @@ for (
       enabled: true,
       unifiedCurrentLivePriorityV621: {
         enabled: true,
+        knownLaunchpadFastPathV624,
         exactVerifiedTokenCount: currentLiveVerifiedLaunchTokensV621.size,
         exactVerifiedTokens: Array.from(currentLiveVerifiedLaunchTokensV621),
         queuePriorityOnly: true,
