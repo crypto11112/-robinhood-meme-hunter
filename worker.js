@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V608
+ * AUTHORITATIVE RUNTIME VERSION: V608
+ *
+ * V608 FORCED SHARED-HEAD REVIVAL:
+ * - preserves V607 HTTP-only V3 architecture;
+ * - fixes stale shared-head singleton that was not self-reviving;
+ * - every token HTTP poll checks shared-head freshness first;
+ * - if stale, token DO force-wakes singleton via /shared-head-start-v602,
+ *   which performs an immediate eth_blockNumber poll;
+ * - token then re-reads shared-head status before deciding integrity;
+ * - shared-head provider-attempt counters are persisted for EVERY attempted
+ *   source, not only successful dRPC fallback;
+ * - telemetry shows total attempts, attempts by provider, last failure,
+ *   fallback depth, and last successful provider;
+ * - no WebSockets are reintroduced;
+ * - exact-pool eth_getLogs, USD, scoring, V4, qualification, alerts and the
+ *   hard 42-request scanner cap are unchanged.
+ */
+/**
  * Robinhood Chain Meme Hunter — V607
  * AUTHORITATIVE RUNTIME VERSION: V607
  *
@@ -4280,7 +4299,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V607";
+const VERSION = "V608";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -120341,7 +120360,7 @@ function v3FeedUsageTelegramMessageV598(token, result) {
   };
 
   const lines = [
-    `📡 <b>V3 Feed Usage — V607</b>`,
+    `📡 <b>V3 Feed Usage — V608</b>`,
     `Contract: <code>${escapeHtml(token)}</code>`,
     "",
     `Active provider: <b>${escapeHtml(activeProvider)}</b>`,
@@ -120356,6 +120375,10 @@ function v3FeedUsageTelegramMessageV598(token, result) {
     "",
     `Shared head polls: <b>${safeNumber(result?.sharedHeadV602?.pollsObservedV603).toLocaleString("en-GB")}</b> | all-provider failures <b>${safeNumber(result?.sharedHeadV602?.pollFailuresV603)}</b>`,
     `Head fallbacks: <b>${safeNumber(result?.sharedHeadV602?.fallbackPollsV607)}</b> | dRPC head requests <b>${safeNumber(result?.sharedHeadV602?.drpcHeadRequestsV607)}</b>`,
+    `Head provider attempts: PUBLIC <b>${safeNumber(result?.sharedHeadV602?.providerAttemptsV608?.ROBINHOOD_PUBLIC_RPC)}</b> | dRPC <b>${safeNumber(result?.sharedHeadV602?.providerAttemptsV608?.DRPC)}</b> | QuickNode <b>${safeNumber(result?.sharedHeadV602?.providerAttemptsV608?.QUICKNODE)}</b> | Alchemy <b>${safeNumber(result?.sharedHeadV602?.providerAttemptsV608?.ALCHEMY)}</b>`,
+    ...(result?.sharedHeadV602?.lastFailureV607
+      ? [`Last head-source failure: <code>${escapeHtml(JSON.stringify(result.sharedHeadV602.lastFailureV607).slice(0,180))}</code>`]
+      : []),
     `V3 log transport: <b>${result?.v3HttpLogPollingV605?.enabled===true?"HTTP eth_getLogs":"LEGACY"}</b> | WebSocket subscriptions <b>${safeNumber(result?.v3HttpLogPollingV605?.webSocketSubscriptions)}</b>`,
     `HTTP poll health: <b>${result?.httpPollFreshV606===true?"FRESH":result?.v3HttpLogPollingV605?.enabled===true?"BUILDING/STALE":"N/A"}</b> | age <b>${escapeHtml(fmtAge(result?.pollAgeMsV606))}</b>`,
     `Log polls: <b>${safeNumber(result?.v3HttpLogPollingV605?.pollSuccesses)}</b> success / <b>${safeNumber(result?.v3HttpLogPollingV605?.pollFailures)}</b> failed | provider <b>${escapeHtml(String(result?.v3HttpLogPollingV605?.lastProviderId||"BUILDING"))}</b>`,
@@ -128240,6 +128263,8 @@ if (url.pathname === "/reconcile-v374") {
         drpcHeadRequestsV607:safeNumber(sharedHeadV602?.drpcHeadRequestsV607),
         lastProviderV607:sharedHeadV602?.lastProviderV607||null,
         lastProviderFallbackDepthV607:sharedHeadV602?.lastProviderFallbackDepthV607??null,
+        providerAttemptsV608:sharedHeadV602?.providerAttemptsV608||{},
+        lastFailureV607:sharedHeadV602?.lastFailureV607||null,
         lastPollDurationMs:sharedHeadV602?.lastPollDurationMs??null,
         lastError:sharedHeadV602?.lastError||null,
         oneNewHeadsSubscription:false,
@@ -129163,8 +129188,8 @@ if (url.pathname === "/reconcile-v374") {
   }
 
   async initializeHttpLogPollingV605() {
-    const shared=await this.ensureSharedHeadStartedV602();
-    const status=await this.getSharedHeadStatusV602();
+    await this.ensureSharedHeadStartedV602();
+    const status=await this.ensureFreshSharedHeadV608();
 
     if(status?.fresh!==true||!Number.isFinite(Number(status?.lastHeadBlock))){
       await this.doPutV404("v605:logPoll",{
@@ -129304,7 +129329,7 @@ if (url.pathname === "/reconcile-v374") {
     if(!this.config)this.config=await this.state.storage.get("config");
     if(!this.config?.pair)return {ok:false,status:"MISSING_V3_CONFIG_V605"};
 
-    const shared=await this.getSharedHeadStatusV602();
+    const shared=await this.ensureFreshSharedHeadV608();
     const poll=await this.state.storage.get("v605:logPoll")||{};
 
     if(shared?.fresh!==true||!Number.isFinite(Number(shared?.lastHeadBlock))){
@@ -129536,6 +129561,14 @@ if (url.pathname === "/reconcile-v374") {
       const timer=setTimeout(()=>controller.abort(),V3_SHARED_HEAD_HTTP_TIMEOUT_MS_V607);
       requestsThisPoll++;
 
+      const attemptsV608=
+        await this.state.storage.get("v608:sharedHeadProviderAttempts")||{};
+      attemptsV608[provider.id]=safeNumber(attemptsV608[provider.id])+1;
+      attemptsV608.total=safeNumber(attemptsV608.total)+1;
+      attemptsV608.lastAttemptProvider=provider.id;
+      attemptsV608.lastAttemptAt=Date.now();
+      await this.doPutV404("v608:sharedHeadProviderAttempts",attemptsV608);
+
       try{
         const response=await fetch(
           provider.url,
@@ -129594,6 +129627,9 @@ if (url.pathname === "/reconcile-v374") {
 
           await this.doPutV404("v602:sharedHeads",heads);
 
+          const attemptsSnapshotV608=
+            await this.state.storage.get("v608:sharedHeadProviderAttempts")||{};
+
           await this.doPutV404("v602:sharedHeadConnection",{
             ...priorConn,
             connected:true,
@@ -129611,6 +129647,8 @@ if (url.pathname === "/reconcile-v374") {
             drpcHeadRequestsV607:safeNumber(priorConn.drpcHeadRequestsV607)+(provider.id==="DRPC"?1:0),
             lastProviderV607:provider.id,
             lastProviderFallbackDepthV607:i,
+            providerAttemptsV608:attemptsSnapshotV608,
+            lastFailureV607:null,
             lastPollAt:nowMs,
             lastPollDurationMs:Math.max(0,nowMs-startedAt),
             acceptedAt:priorConn.acceptedAt||nowMs
@@ -129647,6 +129685,8 @@ if (url.pathname === "/reconcile-v374") {
     }
 
     const nowMs=Date.now();
+    const attemptsSnapshotV608=
+      await this.state.storage.get("v608:sharedHeadProviderAttempts")||{};
     await this.doPutV404("v602:sharedHeadConnection",{
       ...priorConn,
       connected:false,
@@ -129660,6 +129700,7 @@ if (url.pathname === "/reconcile-v374") {
       pollFailuresV603:safeNumber(priorConn.pollFailuresV603)+1,
       providerRequestsV607:safeNumber(priorConn.providerRequestsV607)+requestsThisPoll,
       lastFailureV607:lastFailure,
+      providerAttemptsV608:attemptsSnapshotV608,
       lastPollAt:nowMs
     });
 
@@ -129734,6 +129775,11 @@ if (url.pathname === "/reconcile-v374") {
         Number.isFinite(Number(conn.lastProviderFallbackDepthV607))
           ? Number(conn.lastProviderFallbackDepthV607)
           : null,
+      providerAttemptsV608:
+        conn.providerAttemptsV608 ||
+        await this.state.storage.get("v608:sharedHeadProviderAttempts") ||
+        {},
+      lastFailureV607:conn.lastFailureV607||null,
       pollsObservedV603:safeNumber(heads.pollsObservedV603),
       pollSuccessesV603:safeNumber(conn.pollSuccessesV603),
       pollFailuresV603:safeNumber(conn.pollFailuresV603),
@@ -129760,6 +129806,26 @@ if (url.pathname === "/reconcile-v374") {
 
     await this.pollSharedHeadV603();
     await this.doSetAlarmV404(Date.now()+V3_HEAD_WATCHDOG_MS_V371);
+  }
+
+  async ensureFreshSharedHeadV608() {
+    let shared=await this.getSharedHeadStatusV602();
+
+    if(shared?.fresh===true){
+      return {
+        ...shared,
+        revivalAttemptedV608:false
+      };
+    }
+
+    const revival=await this.ensureSharedHeadStartedV602();
+    shared=await this.getSharedHeadStatusV602();
+
+    return {
+      ...shared,
+      revivalAttemptedV608:true,
+      revivalResultV608:revival?.status||null
+    };
   }
 
   async syncSharedHeadIntoTokenV602() {
