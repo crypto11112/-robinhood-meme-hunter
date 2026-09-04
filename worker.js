@@ -1,4 +1,32 @@
 /**
+ * Robinhood Chain Meme Hunter — V597
+ * AUTHORITATIVE RUNTIME VERSION: V597
+ *
+ * V597 V3 MULTI-PROVIDER WEBSOCKET FAILOVER:
+ * - preserves V596 and all confirmed-working V4/V3 evidence semantics;
+ * - removes Alchemy as a single point of failure for the native V3 collector;
+ * - supports configured provider endpoints in this priority order:
+ *     1) V3_WSS_URL        (generic preferred provider)
+ *     2) QUICKNODE_WSS_URL (QuickNode)
+ *     3) DRPC_WSS_URL      (dRPC)
+ *     4) VALIDATIONCLOUD_WSS_URL (Validation Cloud)
+ *     5) BLOCKDAEMON_WSS_URL     (Blockdaemon)
+ *     6) Alchemy WSS derived from ALCHEMY_API_KEY
+ * - provider URLs are secrets/config and are NEVER printed to Telegram;
+ * - Cloudflare fetch()+Upgrade:websocket is used for every provider;
+ * - HTTP 429, refused upgrade, fetch exception or accept failure advances to
+ *   the next configured provider in the SAME connect cycle;
+ * - successful provider is persisted as the preferred provider for subsequent
+ *   reconnects, but the collector can fail over again if it later degrades;
+ * - if every configured provider fails, existing V591/V593 watchdog/self-heal
+ *   continues retrying without promoting partial coverage;
+ * - existing exact V3 log + newHeads subscription payloads are unchanged;
+ * - no scoring, Momentum, qualification, USD maths, alert thresholds, V4
+ *   collector, launch learner or 42-request scanner budget changes;
+ * - WebSocket upgrade attempts are transport lifecycle operations, not scanner
+ *   analysis-budget requests.
+ */
+/**
  * Robinhood Chain Meme Hunter — V596
  * AUTHORITATIVE RUNTIME VERSION: V596
  *
@@ -4053,7 +4081,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V596";
+const VERSION = "V597";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -120113,6 +120141,23 @@ function v3CollectorControlTelegramMessageV592(action, token, result) {
     lines.push(`Verified V3 pool: <code>${escapeHtml(result.pair)}</code>`);
   }
 
+  const pfV597=result?.v3ProviderFailoverV597||null;
+  if (pfV597) {
+    const configuredV597=Array.isArray(pfV597.configuredProviders)
+      ? pfV597.configuredProviders.join(", ")
+      : "NONE";
+    lines.push(
+      `V597 provider: <b>${escapeHtml(String(pfV597.activeProvider||pfV597.preferredProvider||"NONE_ACTIVE"))}</b>`,
+      `Configured V3 WSS providers: <b>${escapeHtml(configuredV597||"NONE")}</b>`
+    );
+    if (pfV597?.lastProviderFailure?.providerId) {
+      const failureV597=pfV597.lastProviderFailure;
+      let failureTextV597=`${failureV597.providerId}: ${failureV597.failure||"FAILED"}`;
+      if (failureV597.httpStatus) failureTextV597+=` HTTP ${failureV597.httpStatus}`;
+      lines.push(`Last provider failure: <b>${escapeHtml(failureTextV597)}</b>`);
+    }
+  }
+
   const hsV594=result?.v3WebSocketHandshakeDiagnosticsV594||null;
   if (hsV594) {
     lines.push(
@@ -127372,6 +127417,18 @@ if (url.pathname === "/reconcile-v374") {
         externalRequestsAdded:0,
         hardGlobalLimitUnchanged:42
       },
+      v3ProviderFailoverV597:{
+        enabled:true,
+        activeProvider:conn?.activeProviderV597||null,
+        configuredProviders:Array.isArray(conn?.configuredProvidersV597)
+          ? conn.configuredProvidersV597
+          : this.v3ProviderCandidatesV597().map(row=>row.id),
+        preferredProvider:
+          await this.state.storage.get("v597:preferredProviderId") || null,
+        lastProviderFailure:conn?.lastProviderFailureV597||null,
+        providerUrlsExposed:false,
+        alchemySinglePointOfFailureRemoved:true
+      },
       v3WebSocketHandshakeDiagnosticsV594:{
         enabled:true,
         connectAttempts:safeNumber(handshakeV594?.connectAttempts),
@@ -128067,6 +128124,52 @@ if (url.pathname === "/reconcile-v374") {
       status:conn.subscriptionAccepted===true&&conn.runtimeVersion===VERSION&&String(conn?.configFingerprintV399||"")===String(cfg?.configFingerprintV399||"")&&reconciliationAllWindowsPassV398&&reconciliationAllWindowsPassV400&&shadowHeadFreshV401?"SHADOW_MULTI_POOL_WRITE_EFFICIENT_ACTIVE_V402":"SHADOW_MULTI_POOL_NOT_YET_ACTIVE_V401",timestamp:new Date(nowMs).toISOString()};
   }
 
+  v3ProviderCandidatesV597() {
+    const rows = [];
+
+    const push = (id, url, source) => {
+      const raw = String(url || "").trim();
+      if (!raw) return;
+      if (!/^wss:\/\//i.test(raw) && !/^https:\/\//i.test(raw)) return;
+      if (rows.some(row => row.id === id || row.url === raw)) return;
+      rows.push({id, url:raw, source});
+    };
+
+    push("GENERIC_V3", this.env.V3_WSS_URL, "V3_WSS_URL");
+    push("QUICKNODE", this.env.QUICKNODE_WSS_URL, "QUICKNODE_WSS_URL");
+    push("DRPC", this.env.DRPC_WSS_URL, "DRPC_WSS_URL");
+    push("VALIDATION_CLOUD", this.env.VALIDATIONCLOUD_WSS_URL, "VALIDATIONCLOUD_WSS_URL");
+    push("BLOCKDAEMON", this.env.BLOCKDAEMON_WSS_URL, "BLOCKDAEMON_WSS_URL");
+
+    if (this.env.ALCHEMY_API_KEY) {
+      push(
+        "ALCHEMY",
+        `wss://robinhood-mainnet.g.alchemy.com/v2/${String(this.env.ALCHEMY_API_KEY)}`,
+        "ALCHEMY_API_KEY"
+      );
+    }
+
+    return rows;
+  }
+
+  v3UpgradeUrlV597(wssUrl) {
+    return String(wssUrl || "")
+      .replace(/^wss:\/\//i, "https://")
+      .replace(/^ws:\/\//i, "http://");
+  }
+
+  async orderedV3ProvidersV597() {
+    const rows = this.v3ProviderCandidatesV597();
+    const preferred = await this.state.storage.get("v597:preferredProviderId");
+
+    if (!preferred) return rows;
+
+    return [
+      ...rows.filter(row => row.id === preferred),
+      ...rows.filter(row => row.id !== preferred)
+    ];
+  }
+
   async recordV3HandshakeEventV594(eventType, detail = {}) {
     const now = Date.now();
     const current =
@@ -128157,88 +128260,158 @@ if (url.pathname === "/reconcile-v374") {
       lastError:null
     });
 
-    let upgradeResponseV596;
-    try {
-      upgradeResponseV596 = await fetch(
-        `https://robinhood-mainnet.g.alchemy.com/v2/${String(this.env.ALCHEMY_API_KEY)}`,
-        {
-          headers:{
-            "Upgrade":"websocket"
-          }
-        }
-      );
-    } catch (e) {
-      const messageV596=String(e?.message||e).slice(0,240);
+    const providersV597 = await this.orderedV3ProvidersV597();
+
+    if (!providersV597.length) {
       await this.recordV3HandshakeEventV594(
-        "FETCH_UPGRADE_EXCEPTION_V596",
-        {
-          message:messageV596,
-          ageAtErrorMs:Math.max(0,Date.now()-Number(socketConnectStartedAtV593))
-        }
+        "NO_V3_WSS_PROVIDER_CONFIGURED_V597",
+        {configuredProviders:0}
       );
       this.wsConnectStartedAtV593=null;
-      await this.scheduleReconnect(`FETCH_UPGRADE_EXCEPTION_V596: ${messageV596}`);
+      await this.doPutV404("connection",{
+        ...priorConnV593,
+        status:"NO_V3_WSS_PROVIDER_CONFIGURED_V597",
+        connected:false,
+        subscriptionAccepted:false,
+        logSubscriptionAccepted:false,
+        headSubscriptionAccepted:false,
+        lastError:"No V3 WebSocket provider endpoint configured"
+      });
+      await this.scheduleReconnect("NO_V3_WSS_PROVIDER_CONFIGURED_V597");
       return;
     }
 
-    const upgradeStatusV596=Number(upgradeResponseV596?.status||0);
-    const hasWebSocketV596=Boolean(upgradeResponseV596?.webSocket);
+    let selectedProviderV597=null;
+    let upgradeResponseV596=null;
+    let upgradeStatusV596=0;
+    let lastFailureV597=null;
 
-    if (upgradeStatusV596!==101 || !hasWebSocketV596) {
-      let bodyV596="";
-      try {
-        bodyV596=String(await upgradeResponseV596.text()).slice(0,360);
-      } catch (_) {}
+    for (const providerV597 of providersV597) {
+      const attemptStartedAtV597=Date.now();
 
       await this.recordV3HandshakeEventV594(
-        "FETCH_UPGRADE_REJECTED_V596",
+        "PROVIDER_ATTEMPT_V597",
         {
-          httpStatus:upgradeStatusV596,
-          statusText:String(upgradeResponseV596?.statusText||"").slice(0,120),
-          body:bodyV596,
-          hasWebSocket:hasWebSocketV596,
-          ageAtRejectMs:Math.max(0,Date.now()-Number(socketConnectStartedAtV593))
+          providerId:providerV597.id,
+          providerSource:providerV597.source,
+          configuredProviderCount:providersV597.length
         }
       );
 
+      let responseV597;
+      try {
+        responseV597=await fetch(
+          this.v3UpgradeUrlV597(providerV597.url),
+          {headers:{"Upgrade":"websocket"}}
+        );
+      } catch (e) {
+        const messageV597=String(e?.message||e).slice(0,240);
+        lastFailureV597={
+          providerId:providerV597.id,
+          failure:"FETCH_EXCEPTION",
+          message:messageV597
+        };
+        await this.recordV3HandshakeEventV594(
+          "PROVIDER_FETCH_EXCEPTION_V597",
+          {
+            providerId:providerV597.id,
+            message:messageV597,
+            ageMs:Math.max(0,Date.now()-attemptStartedAtV597)
+          }
+        );
+        continue;
+      }
+
+      const statusV597=Number(responseV597?.status||0);
+      const hasSocketV597=Boolean(responseV597?.webSocket);
+
+      if (statusV597!==101 || !hasSocketV597) {
+        let bodyV597="";
+        try { bodyV597=String(await responseV597.text()).slice(0,360); } catch (_) {}
+
+        lastFailureV597={
+          providerId:providerV597.id,
+          failure:"UPGRADE_REJECTED",
+          httpStatus:statusV597,
+          statusText:String(responseV597?.statusText||"").slice(0,120),
+          body:bodyV597
+        };
+
+        await this.recordV3HandshakeEventV594(
+          "PROVIDER_UPGRADE_REJECTED_V597",
+          {
+            providerId:providerV597.id,
+            httpStatus:statusV597,
+            statusText:String(responseV597?.statusText||"").slice(0,120),
+            body:bodyV597,
+            hasWebSocket:hasSocketV597,
+            ageMs:Math.max(0,Date.now()-attemptStartedAtV597)
+          }
+        );
+        continue;
+      }
+
+      const candidateWsV597=responseV597.webSocket;
+
+      try {
+        candidateWsV597.accept();
+      } catch (e) {
+        const messageV597=String(e?.message||e).slice(0,240);
+        lastFailureV597={
+          providerId:providerV597.id,
+          failure:"ACCEPT_ERROR",
+          message:messageV597
+        };
+        await this.recordV3HandshakeEventV594(
+          "PROVIDER_ACCEPT_ERROR_V597",
+          {
+            providerId:providerV597.id,
+            message:messageV597
+          }
+        );
+        try { candidateWsV597.close(1011,"V597 accept failure"); } catch (_) {}
+        continue;
+      }
+
+      selectedProviderV597=providerV597;
+      upgradeResponseV596=responseV597;
+      upgradeStatusV596=statusV597;
+      ws=candidateWsV597;
+      break;
+    }
+
+    if (!selectedProviderV597 || !ws) {
       this.wsConnectStartedAtV593=null;
+
+      await this.recordV3HandshakeEventV594(
+        "ALL_V3_PROVIDERS_FAILED_V597",
+        {
+          configuredProviders:providersV597.map(row=>row.id),
+          lastFailure:lastFailureV597
+        }
+      );
 
       await this.doPutV404("connection",{
         ...priorConnV593,
-        status:"FETCH_UPGRADE_REJECTED_V596",
+        status:"ALL_V3_PROVIDERS_FAILED_V597",
         connected:false,
         subscriptionAccepted:false,
         logSubscriptionAccepted:false,
         headSubscriptionAccepted:false,
         subscriptionIdPresent:false,
         headSubscriptionIdPresent:false,
-        transportV596:"FETCH_UPGRADE",
-        httpStatusV596:upgradeStatusV596,
-        httpStatusTextV596:String(upgradeResponseV596?.statusText||"").slice(0,120),
-        httpBodyV596:bodyV596,
-        lastError:`HTTP ${upgradeStatusV596} ${String(upgradeResponseV596?.statusText||"")}`.slice(0,240)
+        providerFailoverV597:true,
+        configuredProvidersV597:providersV597.map(row=>row.id),
+        lastProviderFailureV597:lastFailureV597,
+        lastError:"All configured V3 WebSocket providers failed"
       });
 
-      await this.scheduleReconnect(`FETCH_UPGRADE_REJECTED_V596_HTTP_${upgradeStatusV596}`);
-      return;
-    }
-
-    ws=upgradeResponseV596.webSocket;
-
-    try {
-      ws.accept();
-    } catch (e) {
-      const messageV596=String(e?.message||e).slice(0,240);
-      await this.recordV3HandshakeEventV594(
-        "FETCH_UPGRADE_ACCEPT_ERROR_V596",
-        {message:messageV596}
-      );
-      this.wsConnectStartedAtV593=null;
-      await this.scheduleReconnect(`FETCH_UPGRADE_ACCEPT_ERROR_V596: ${messageV596}`);
+      await this.scheduleReconnect("ALL_V3_PROVIDERS_FAILED_V597");
       return;
     }
 
     this.ws=ws;
+    await this.doPutV404("v597:preferredProviderId",selectedProviderV597.id);
 
     const openedAtV596=Date.now();
     await this.recordV3HandshakeEventV594(
@@ -128246,8 +128419,9 @@ if (url.pathname === "/reconcile-v374") {
       {
         openedAt:openedAtV596,
         handshakeMs:Math.max(0,openedAtV596-Number(socketConnectStartedAtV593)),
-        transport:"FETCH_UPGRADE_V596",
-        httpStatus:upgradeStatusV596
+        transport:"FETCH_UPGRADE_V597",
+        httpStatus:upgradeStatusV596,
+        providerId:selectedProviderV597.id
       }
     );
 
@@ -128265,8 +128439,12 @@ if (url.pathname === "/reconcile-v374") {
       headSubscriptionIdPresent:false,
       socketConnectStartedAtV593:null,
       socketConnectTimeoutMsV593:V3_SOCKET_CONNECT_TIMEOUT_MS_V593,
-      transportV596:"FETCH_UPGRADE",
+      transportV596:"FETCH_UPGRADE_V597",
       httpStatusV596:upgradeStatusV596,
+      providerFailoverV597:true,
+      activeProviderV597:selectedProviderV597?.id||null,
+      activeProviderSourceV597:selectedProviderV597?.source||null,
+      configuredProvidersV597:providersV597.map(row=>row.id),
       lastError:null
     });
     // V596: returned fetch-upgrade socket is already OPEN after accept().
