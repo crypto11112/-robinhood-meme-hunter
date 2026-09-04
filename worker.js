@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V616
+ * AUTHORITATIVE RUNTIME VERSION: V616
+ *
+ * V616 BLOCKSCOUT HEAD-LIVENESS FIX:
+ * - preserves V615 exact V3 Blockscout fallback and existing persistSwap USD path;
+ * - fixes repeated SHARED_HEAD_NOT_FRESH resets in HTTP mode;
+ * - existing public/dRPC/QuickNode/Alchemy eth_blockNumber providers remain first;
+ * - when all normal head providers fail, the shared-head singleton can use ONE
+ *   metered Blockscout PRO eth_blockNumber fallback;
+ * - Blockscout head fallback reuses the V615 shared 40k/day V3 credit reserve;
+ * - both Blockscout exact-log and head fallback use a 90-second minimum cadence;
+ * - worst-case one-token V3 Blockscout recovery is ~38,400 credits/day;
+ * - shared-head freshness threshold is 135 seconds in this bounded HTTP mode;
+ * - a recent verified Blockscout/public head stays valid between fallback polls;
+ * - integrity still resets when verified head/log continuity genuinely expires;
+ * - /feedusage reports the real shared-head provider and Blockscout head telemetry;
+ * - no scoring, Momentum, V4, qualification, alerts, or hard 42-request cap changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V615
  * AUTHORITATIVE RUNTIME VERSION: V615
  *
@@ -4424,7 +4443,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V615";
+const VERSION = "V616";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -11682,9 +11701,11 @@ const BLOCKSCOUT_PRO_STANDARD_CREDITS_V611 = 20;
 const BLOCKSCOUT_PRO_HEAVY_CREDITS_V611 = 50;
 const V3_BLOCKSCOUT_FALLBACK_METER_NAME_V615 = "V3_BLOCKSCOUT_FALLBACK_METER_V615";
 const V3_BLOCKSCOUT_FALLBACK_DAILY_CAP_CREDITS_V615 = 40000;
-const V3_BLOCKSCOUT_FALLBACK_MIN_TOKEN_INTERVAL_MS_V615 = 60 * 1000;
+const V3_BLOCKSCOUT_FALLBACK_MIN_TOKEN_INTERVAL_MS_V615 = 90 * 1000;
 const V3_BLOCKSCOUT_FALLBACK_GLOBAL_MIN_INTERVAL_MS_V615 = 250;
-const V3_BLOCKSCOUT_FALLBACK_MAX_VERIFICATION_AGE_MS_V615 = 90 * 1000;
+const V3_BLOCKSCOUT_FALLBACK_MAX_VERIFICATION_AGE_MS_V615 = 135 * 1000;
+const V3_BLOCKSCOUT_HEAD_MIN_INTERVAL_MS_V616 = 90 * 1000;
+const V3_SHARED_HEAD_STALE_MS_V616 = 135 * 1000;
 const V3_BLOCKSCOUT_FALLBACK_TIMEOUT_MS_V615 = 6000;
 
 
@@ -121006,7 +121027,7 @@ function v3FeedUsageTelegramMessageV598(token, result) {
   };
 
   const lines = [
-    `📡 <b>V3 Feed Usage — V615</b>`,
+    `📡 <b>V3 Feed Usage — V616</b>`,
     `Contract: <code>${escapeHtml(token)}</code>`,
     "",
     `Active provider: <b>${escapeHtml(activeProvider)}</b>`,
@@ -121017,7 +121038,8 @@ function v3FeedUsageTelegramMessageV598(token, result) {
     `Continuous effective uptime: <b>${escapeHtml(fmtDuration(result?.continuousIntegrityMs))}</b>`,
     `Head age: <b>${escapeHtml(fmtAge(result?.effectiveHeadAgeMsV609??result?.headAgeMs))}</b> | last block: <b>${Number.isFinite(Number(result?.sharedHeadV602?.lastHeadBlock)) ? Math.trunc(Number(result.sharedHeadV602.lastHeadBlock)) : (Number.isFinite(Number(result?.lastHeadBlock)) ? Math.trunc(Number(result.lastHeadBlock)) : "UNVERIFIED")}</b>`,
     `Shared head: <b>${result?.sharedHeadV602?.fresh===true?"FRESH":"NOT FRESH"}</b> | source <b>${escapeHtml(String(result?.sharedHeadV602?.activeProvider||"UNVERIFIED"))}</b>`,
-    `Head transport: <b>${escapeHtml(String(result?.sharedHeadV602?.providerAttemptsV608?.total>0?"HTTP_ETH_BLOCKNUMBER_FAILOVER_V607":"HTTP_ETH_BLOCKNUMBER_V603"))}</b> | global newHeads subscriptions <b>0</b>`,
+    `Head transport: <b>${escapeHtml(String(result?.sharedHeadV602?.transport||"HTTP_ETH_BLOCKNUMBER_FAILOVER_V616"))}</b> | global newHeads subscriptions <b>0</b>`,
+    `Blockscout head fallback: <b>${safeNumber(result?.sharedHeadV602?.blockscoutHeadTelemetryV616?.successes)>0?"WORKING":safeNumber(result?.sharedHeadV602?.blockscoutHeadTelemetryV616?.attempts)>0?"ATTEMPTED":"BUILDING"}</b> | requests <b>${safeNumber(result?.sharedHeadV602?.blockscoutHeadRequestsV616)}</b> | successes <b>${safeNumber(result?.sharedHeadV602?.blockscoutHeadTelemetryV616?.successes)}</b> | failures <b>${safeNumber(result?.sharedHeadV602?.blockscoutHeadTelemetryV616?.failures)}</b>`,
     "",
     `Shared head polls: <b>${safeNumber(result?.sharedHeadV602?.pollsObservedV603).toLocaleString("en-GB")}</b> | all-provider failures <b>${safeNumber(result?.sharedHeadV602?.pollFailuresV603)}</b>`,
     `Head fallbacks: <b>${safeNumber(result?.sharedHeadV602?.fallbackPollsV607)}</b> | dRPC head requests <b>${safeNumber(result?.sharedHeadV602?.drpcHeadRequestsV607)}</b>`,
@@ -129239,7 +129261,7 @@ if (url.pathname === "/reconcile-v374") {
 
     return {
       version:VERSION,
-      status:"V3_FEED_USAGE_READY_V598",
+      status:"V3_FEED_USAGE_READY_V616",
       token:cfg?.token || null,
       pair:cfg?.pair || null,
       enabled:enabled === true,
@@ -129305,6 +129327,10 @@ if (url.pathname === "/reconcile-v374") {
         providerRequestsV607:safeNumber(sharedHeadV602?.providerRequestsV607),
         fallbackPollsV607:safeNumber(sharedHeadV602?.fallbackPollsV607),
         drpcHeadRequestsV607:safeNumber(sharedHeadV602?.drpcHeadRequestsV607),
+        blockscoutHeadRequestsV616:
+          safeNumber(sharedHeadV602?.blockscoutHeadRequestsV616),
+        blockscoutHeadTelemetryV616:
+          sharedHeadV602?.blockscoutHeadTelemetryV616||{},
         lastProviderV607:sharedHeadV602?.lastProviderV607||null,
         lastProviderFallbackDepthV607:sharedHeadV602?.lastProviderFallbackDepthV607??null,
         providerAttemptsV608:sharedHeadV602?.providerAttemptsV608||{},
@@ -131238,6 +131264,233 @@ if (url.pathname === "/reconcile-v374") {
     return rows;
   }
 
+  async blockscoutSharedHeadFallbackV616(priorConn={}) {
+    const apiKey=String(this.env?.BLOCKSCOUT_PRO_API_KEY||"").trim();
+    if(!apiKey){
+      return {ok:false,attempted:false,status:"BLOCKSCOUT_HEAD_NOT_CONFIGURED_V616"};
+    }
+
+    const nowMs=Date.now();
+    const heads=await this.state.storage.get("v602:sharedHeads")||{};
+    const lastAttemptAt=Number(
+      await this.state.storage.get("v616:lastBlockscoutHeadAttemptAt")
+    );
+
+    if(
+      Number.isFinite(lastAttemptAt) &&
+      nowMs-lastAttemptAt < V3_BLOCKSCOUT_HEAD_MIN_INTERVAL_MS_V616
+    ){
+      const lastHeadAt=Number(heads.lastHeadAt);
+      const headAgeMs=
+        Number.isFinite(lastHeadAt)
+          ? Math.max(0,nowMs-lastHeadAt)
+          : null;
+
+      if(
+        headAgeMs!==null &&
+        headAgeMs<=V3_SHARED_HEAD_STALE_MS_V616 &&
+        Number.isFinite(Number(heads.lastHeadBlock))
+      ){
+        return {
+          ok:true,
+          attempted:false,
+          cached:true,
+          fresh:true,
+          status:"BLOCKSCOUT_HEAD_CACHED_FRESH_V616",
+          providerId:heads.lastProviderV607||"BLOCKSCOUT_PRO_V616",
+          lastHeadBlock:Number(heads.lastHeadBlock),
+          lastHeadAt:Number(heads.lastHeadAt),
+          headAgeMs,
+          retryAfterMs:
+            V3_BLOCKSCOUT_HEAD_MIN_INTERVAL_MS_V616-
+            Math.max(0,nowMs-lastAttemptAt)
+        };
+      }
+
+      return {
+        ok:false,
+        attempted:false,
+        deferred:true,
+        status:"BLOCKSCOUT_HEAD_INTERVAL_WAIT_V616",
+        retryAfterMs:
+          V3_BLOCKSCOUT_HEAD_MIN_INTERVAL_MS_V616-
+          Math.max(0,nowMs-lastAttemptAt)
+      };
+    }
+
+    const reserve=
+      await this.reserveBlockscoutFallbackCreditV615(
+        BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
+      );
+
+    if(reserve?.reserved!==true){
+      return {
+        ok:false,
+        attempted:false,
+        deferred:reserve?.deferred===true,
+        status:reserve?.status||"BLOCKSCOUT_HEAD_RESERVE_DENIED_V616",
+        reserve
+      };
+    }
+
+    await this.doPutV404("v616:lastBlockscoutHeadAttemptAt",nowMs);
+
+    const controller=new AbortController();
+    const timer=setTimeout(
+      ()=>controller.abort(),
+      V3_BLOCKSCOUT_FALLBACK_TIMEOUT_MS_V615
+    );
+    const started=Date.now();
+
+    try{
+      const response=await fetch(
+        `${BLOCKSCOUT_PRO}/${BLOCKSCOUT_PRO_CHAIN_ID}/json-rpc`,
+        {
+          method:"POST",
+          headers:{
+            accept:"application/json",
+            "content-type":"application/json",
+            authorization:`Bearer ${apiKey}`
+          },
+          body:JSON.stringify({
+            jsonrpc:"2.0",
+            id:616,
+            method:"eth_blockNumber",
+            params:[]
+          }),
+          signal:controller.signal
+        }
+      );
+
+      let body=null;
+      try{body=await response.json();}catch(_){}
+
+      if(
+        response.ok &&
+        typeof body?.result==="string" &&
+        /^0x[0-9a-f]+$/i.test(body.result)
+      ){
+        const block=parseInt(body.result,16);
+        const successAt=Date.now();
+        const previous=Number(heads.lastHeadBlock);
+
+        heads.pollsObservedV603=safeNumber(heads.pollsObservedV603)+1;
+        heads.headsObserved=safeNumber(heads.headsObserved)+1;
+        heads.lastHeadAt=successAt;
+        heads.lastSuccessfulPollAtV603=successAt;
+        heads.lastHeadBlock=block;
+        heads.headSourceV603="BLOCKSCOUT_PRO_V616_ETH_BLOCKNUMBER";
+        heads.lastProviderV607="BLOCKSCOUT_PRO_V616";
+        heads.providerFallbackDepthV607=999;
+        heads.blockscoutHeadRequestsV616=
+          safeNumber(heads.blockscoutHeadRequestsV616)+1;
+
+        if(Number.isFinite(previous)&&block<previous){
+          heads.regressionsObservedV603=safeNumber(heads.regressionsObservedV603)+1;
+          heads.lastRegressionFromV603=previous;
+          heads.lastRegressionToV603=block;
+          heads.lastRegressionAtV603=successAt;
+        }
+
+        await this.doPutV404("v602:sharedHeads",heads);
+
+        const diag=
+          await this.state.storage.get("v616:blockscoutHeadTelemetry")||{};
+        diag.attempts=safeNumber(diag.attempts)+1;
+        diag.successes=safeNumber(diag.successes)+1;
+        diag.lastAttemptAt=successAt;
+        diag.lastSuccessAt=successAt;
+        diag.lastHttpStatus=response.status;
+        diag.lastHeadBlock=block;
+        diag.lastElapsedMs=Math.max(0,successAt-started);
+        diag.lastError=null;
+        await this.doPutV404("v616:blockscoutHeadTelemetry",diag);
+
+        await this.doPutV404("v602:sharedHeadConnection",{
+          ...priorConn,
+          connected:true,
+          subscriptionAccepted:true,
+          status:"SHARED_HEAD_BLOCKSCOUT_FRESH_V616",
+          activeProvider:"BLOCKSCOUT_PRO_V616",
+          activeProviderSource:"BLOCKSCOUT_PRO_JSONRPC_ETH_BLOCKNUMBER_V616",
+          transport:"HTTP_ETH_BLOCKNUMBER_FAILOVER_V616",
+          lastHttpStatus:response.status,
+          lastError:null,
+          pollSuccessesV603:safeNumber(priorConn.pollSuccessesV603)+1,
+          fallbackPollsV607:safeNumber(priorConn.fallbackPollsV607)+1,
+          blockscoutHeadRequestsV616:
+            safeNumber(priorConn.blockscoutHeadRequestsV616)+1,
+          lastProviderV607:"BLOCKSCOUT_PRO_V616",
+          lastProviderFallbackDepthV607:999,
+          lastFailureV607:null,
+          lastPollAt:successAt,
+          lastPollDurationMs:Math.max(0,successAt-started),
+          acceptedAt:priorConn.acceptedAt||successAt
+        });
+
+        return {
+          ok:true,
+          attempted:true,
+          fresh:true,
+          status:"SHARED_HEAD_BLOCKSCOUT_FRESH_V616",
+          providerId:"BLOCKSCOUT_PRO_V616",
+          lastHeadBlock:block,
+          lastHeadAt:successAt,
+          reserve
+        };
+      }
+
+      const rpcError=body?.error?.message||null;
+      const failAt=Date.now();
+      const diag=
+        await this.state.storage.get("v616:blockscoutHeadTelemetry")||{};
+      diag.attempts=safeNumber(diag.attempts)+1;
+      diag.failures=safeNumber(diag.failures)+1;
+      diag.lastAttemptAt=failAt;
+      diag.lastFailureAt=failAt;
+      diag.lastHttpStatus=response.status;
+      diag.lastElapsedMs=Math.max(0,failAt-started);
+      diag.lastError=
+        String(rpcError||`HTTP_${response.status}_INVALID_BLOCK`).slice(0,220);
+      await this.doPutV404("v616:blockscoutHeadTelemetry",diag);
+
+      return {
+        ok:false,
+        attempted:true,
+        status:"BLOCKSCOUT_HEAD_FAILED_V616",
+        httpStatus:response.status,
+        rpcError,
+        reserve
+      };
+    }catch(error){
+      const failAt=Date.now();
+      const message=String(
+        error?.name==="AbortError"
+          ?"TIMEOUT"
+          :error?.message||error
+      ).slice(0,220);
+      const diag=
+        await this.state.storage.get("v616:blockscoutHeadTelemetry")||{};
+      diag.attempts=safeNumber(diag.attempts)+1;
+      diag.failures=safeNumber(diag.failures)+1;
+      diag.lastAttemptAt=failAt;
+      diag.lastFailureAt=failAt;
+      diag.lastElapsedMs=Math.max(0,failAt-started);
+      diag.lastError=message;
+      await this.doPutV404("v616:blockscoutHeadTelemetry",diag);
+
+      return {
+        ok:false,
+        attempted:true,
+        status:"BLOCKSCOUT_HEAD_FETCH_ERROR_V616",
+        error:message,
+        reserve
+      };
+    }finally{
+      clearTimeout(timer);
+    }
+  }
+
   async pollSharedHeadV603() {
     const enabled=await this.state.storage.get("enabled");
     if(enabled!==true){
@@ -131379,6 +131632,18 @@ if (url.pathname === "/reconcile-v374") {
       }
     }
 
+    const blockscoutHeadV616=
+      await this.blockscoutSharedHeadFallbackV616(priorConn);
+
+    if(blockscoutHeadV616?.ok===true){
+      return {
+        ...blockscoutHeadV616,
+        fallbackDepth:providers.length,
+        normalProvidersFailed:true,
+        priorFailure:lastFailure
+      };
+    }
+
     const nowMs=Date.now();
     const attemptsSnapshotV608=
       await this.state.storage.get("v608:sharedHeadProviderAttempts")||{};
@@ -131395,6 +131660,7 @@ if (url.pathname === "/reconcile-v374") {
       pollFailuresV603:safeNumber(priorConn.pollFailuresV603)+1,
       providerRequestsV607:safeNumber(priorConn.providerRequestsV607)+requestsThisPoll,
       lastFailureV607:lastFailure,
+      blockscoutHeadFallbackV616:blockscoutHeadV616||null,
       providerAttemptsV608:attemptsSnapshotV608,
       lastPollAt:nowMs
     });
@@ -131404,6 +131670,7 @@ if (url.pathname === "/reconcile-v374") {
       status:"ALL_SHARED_HEAD_HTTP_PROVIDERS_FAILED_V607",
       fresh:false,
       lastFailure,
+      blockscoutHeadFallbackV616:blockscoutHeadV616||null,
       configuredProviders:providers.map(row=>row.id)
     };
   }
@@ -131440,7 +131707,7 @@ if (url.pathname === "/reconcile-v374") {
       conn.connected===true&&
       conn.subscriptionAccepted===true&&
       headAgeMs!==null&&
-      headAgeMs<=V3_SHARED_HEAD_STALE_MS_V607;
+      headAgeMs<=V3_SHARED_HEAD_STALE_MS_V616;
 
     return {
       version:VERSION,
@@ -131451,20 +131718,34 @@ if (url.pathname === "/reconcile-v374") {
       runtimeSocketOpen:false,
       subscriptionAccepted:conn.subscriptionAccepted===true,
       fresh,
-      activeProvider:"ROBINHOOD_PUBLIC_RPC",
-      configuredProviders:["ROBINHOOD_PUBLIC_RPC"],
-      transport:"HTTP_ETH_BLOCKNUMBER_V603",
+      activeProvider:
+        conn.activeProvider||
+        conn.lastProviderV607||
+        heads.lastProviderV607||
+        "ROBINHOOD_PUBLIC_RPC",
+      configuredProviders:
+        Array.isArray(conn.configuredProviders)&&conn.configuredProviders.length
+          ? conn.configuredProviders
+          : ["ROBINHOOD_PUBLIC_RPC","BLOCKSCOUT_PRO_V616"],
+      transport:conn.transport||"HTTP_ETH_BLOCKNUMBER_V607",
       lastHeadBlock:
         Number.isFinite(Number(heads.lastHeadBlock))
           ? Number(heads.lastHeadBlock)
           : null,
       lastHeadAt,
       headAgeMs,
-      headStaleThresholdMs:V3_SHARED_HEAD_STALE_MS_V607,
+      headStaleThresholdMs:V3_SHARED_HEAD_STALE_MS_V616,
       headsObserved:safeNumber(heads.headsObserved),
       providerRequestsV607:safeNumber(conn.providerRequestsV607),
       fallbackPollsV607:safeNumber(conn.fallbackPollsV607),
       drpcHeadRequestsV607:safeNumber(conn.drpcHeadRequestsV607),
+      blockscoutHeadRequestsV616:
+        safeNumber(
+          conn.blockscoutHeadRequestsV616||
+          heads.blockscoutHeadRequestsV616
+        ),
+      blockscoutHeadTelemetryV616:
+        await this.state.storage.get("v616:blockscoutHeadTelemetry")||{},
       lastProviderV607:conn.lastProviderV607||heads.lastProviderV607||null,
       lastProviderFallbackDepthV607:
         Number.isFinite(Number(conn.lastProviderFallbackDepthV607))
@@ -131490,6 +131771,7 @@ if (url.pathname === "/reconcile-v374") {
       oneSharedHeadSource:true,
       oneNewHeadsSubscription:false,
       publicRpcPollingIntervalMs:V3_HEAD_WATCHDOG_MS_V371,
+      blockscoutFallbackMinIntervalMsV616:V3_BLOCKSCOUT_HEAD_MIN_INTERVAL_MS_V616,
       sharedSingletonName:V3_SHARED_HEAD_NAME_V602,
       timestamp:now()
     };
@@ -132280,7 +132562,7 @@ if (url.pathname === "/reconcile-v374") {
         numericHeadNotificationGapsDoNotResetIntegrity:true,
         externalRequestsAdded:0,
         hardGlobalLimitUnchanged:42
-      },storage:"DURABLE_OBJECT_5_MINUTE_TRADE_BUCKETS_V364",token:cfg?.token||null,pair:cfg?.pair||null,coverage:coverageActive?"V371_INTEGRITY_COVERAGE_ACTIVE":"V371_INTEGRITY_COVERAGE_PARTIAL_OR_INACTIVE",historicalCoverage:"PRE_V364_HISTORY_NOT_BACKFILLED",windowClockBasis:"WEBSOCKET_INGESTION_TIME_V364",coverageClockBasis:"V371_DUAL_SUBSCRIPTIONS_PLUS_HEAD_LIVENESS_WATCHDOG",coverageIntegrity:"HEAD_NOTIFICATION_DIAGNOSTIC_PLUS_STALE_STREAM_RESET_V371",logSubscriptionAccepted:conn.logSubscriptionAccepted===true,headSubscriptionAccepted:conn.headSubscriptionAccepted===true,lastHeadBlock:Number.isFinite(Number(heads.lastHeadBlock))?Number(heads.lastHeadBlock):null,headsObserved:safeNumber(heads.headsObserved),headGapsDetected:safeNumber(heads.gapsDetected),lastHeadGapAt:heads.lastGapAt||null,lastHeadGapSize:safeNumber(heads.lastGapSize),lastHeadGapClassification:heads.lastGapClassification||null,headAgeMs:Number.isFinite(Number(heads.lastHeadAt))?Math.max(0,nowMs-Number(heads.lastHeadAt)):null,headStaleThresholdMs:V3_HEAD_STALE_MS_V371,coverageActive,continuousCoverageStartAt:coverageStartAt,continuousCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,continuousCoverageMs,integrityCoverageStartAt:coverageStartAt,integrityCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,integrityCoverageMs:continuousCoverageMs,integrityInterruptionsSinceV371:safeNumber(integrity.interruptions),lastIntegrityGapAt:integrity.lastGapAt||null,lastIntegrityGapReason:integrity.lastGapReason||null,legacyV366CoverageStartAt:legacyCoverageStartAt,legacyV366CoverageStartIso:legacyCoverageStartAt!==null?new Date(legacyCoverageStartAt).toISOString():null,interruptionsSinceV366:safeNumber(cov.interruptions),lastCoverageGapAt:cov.lastGapAt||null,lastCoverageGapReason:cov.lastGapReason||null,windows,lastTrade:stats.lastTrade||null,swapsCaptured:safeNumber(stats.swapsCaptured),timestamp:new Date(nowMs).toISOString()};
+      },storage:"DURABLE_OBJECT_5_MINUTE_TRADE_BUCKETS_V364",token:cfg?.token||null,pair:cfg?.pair||null,coverage:coverageActive?"V371_INTEGRITY_COVERAGE_ACTIVE":"V371_INTEGRITY_COVERAGE_PARTIAL_OR_INACTIVE",historicalCoverage:"PRE_V364_HISTORY_NOT_BACKFILLED",windowClockBasis:cfg?.httpLogPollingV605===true?"EXACT_V3_ETH_GETLOGS_INGESTION_TIME_V616":"WEBSOCKET_INGESTION_TIME_V364",coverageClockBasis:cfg?.httpLogPollingV605===true?"V371_EXACT_LOG_POLL_PLUS_VERIFIED_HTTP_HEAD_LIVENESS_V616":"V371_DUAL_SUBSCRIPTIONS_PLUS_HEAD_LIVENESS_WATCHDOG",coverageIntegrity:cfg?.httpLogPollingV605===true?"CONTIGUOUS_EXACT_LOG_RANGES_PLUS_VERIFIED_HTTP_HEAD_FRESHNESS_V616":"HEAD_NOTIFICATION_DIAGNOSTIC_PLUS_STALE_STREAM_RESET_V371",logSubscriptionAccepted:conn.logSubscriptionAccepted===true,headSubscriptionAccepted:conn.headSubscriptionAccepted===true,lastHeadBlock:Number.isFinite(Number(heads.lastHeadBlock))?Number(heads.lastHeadBlock):null,headsObserved:safeNumber(heads.headsObserved),headGapsDetected:safeNumber(heads.gapsDetected),lastHeadGapAt:heads.lastGapAt||null,lastHeadGapSize:safeNumber(heads.lastGapSize),lastHeadGapClassification:heads.lastGapClassification||null,headAgeMs:Number.isFinite(Number(heads.lastHeadAt))?Math.max(0,nowMs-Number(heads.lastHeadAt)):null,headStaleThresholdMs:V3_HEAD_STALE_MS_V371,coverageActive,continuousCoverageStartAt:coverageStartAt,continuousCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,continuousCoverageMs,integrityCoverageStartAt:coverageStartAt,integrityCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,integrityCoverageMs:continuousCoverageMs,integrityInterruptionsSinceV371:safeNumber(integrity.interruptions),lastIntegrityGapAt:integrity.lastGapAt||null,lastIntegrityGapReason:integrity.lastGapReason||null,legacyV366CoverageStartAt:legacyCoverageStartAt,legacyV366CoverageStartIso:legacyCoverageStartAt!==null?new Date(legacyCoverageStartAt).toISOString():null,interruptionsSinceV366:safeNumber(cov.interruptions),lastCoverageGapAt:cov.lastGapAt||null,lastCoverageGapReason:cov.lastGapReason||null,windows,lastTrade:stats.lastTrade||null,swapsCaptured:safeNumber(stats.swapsCaptured),timestamp:new Date(nowMs).toISOString()};
   }
 
   async persistSwap(log) {
