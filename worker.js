@@ -1,4 +1,26 @@
 /**
+ * Robinhood Chain Meme Hunter — V598
+ * AUTHORITATIVE RUNTIME VERSION: V598
+ *
+ * V598 READ-ONLY V3 FEED / PROVIDER METER:
+ * - preserves V597 provider failover and all confirmed-working collector logic;
+ * - adds Telegram: /feedusage 0xADDRESS
+ * - exact-address only: no DexScreener resolution and no fresh chain scan;
+ * - reads persisted Durable Object feed/provider evidence only;
+ * - reports active provider, configured fallbacks, socket/subscription health,
+ *   current integrity uptime, head freshness, cumulative heads/swaps,
+ *   reconnects/interruptions, handshake attempts/opens/closes, recent provider
+ *   failures and recent provider switches visible in the persisted event ring;
+ * - reports an OBSERVED FEED EVENTS count (heads + exact-pool swaps) only;
+ *   this is NOT claimed to equal provider billing credits/compute units;
+ * - provider quota/billing remains DATA UNVERIFIED unless a provider exposes
+ *   authoritative usage separately; provider dashboards remain authoritative;
+ * - /feedusage itself performs zero external provider/RPC requests and zero
+ *   collector writes, and is excluded from V591 liveness-nudge behaviour;
+ * - no scoring, Momentum, qualification, USD maths, alert thresholds, V4,
+ *   launch learner, provider connection behaviour or 42-request cap changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V597
  * AUTHORITATIVE RUNTIME VERSION: V597
  *
@@ -4081,7 +4103,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V597";
+const VERSION = "V598";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -120043,6 +120065,7 @@ function telegramHelpV271() {
     "<code>/v3start 0xADDRESS</code> — enable/start the verified native V3 live collector",
     "<code>/v3status 0xADDRESS</code> — V3 live collector socket/subscription status",
     "<code>/v3stop 0xADDRESS</code> — intentionally disable the token's V3 live collector",
+    "<code>/feedusage 0xADDRESS</code> — V3 feed/provider health + observed usage meter (read-only)",
     "<code>/launches</code> — verified rolling 24h launch meter",
     "<code>/launchsources</code> — verified launch-source coverage + active sources",
     "<code>/sourceintel</code> — self-learned source identity + seeded lead correlation",
@@ -120079,6 +120102,94 @@ function parseTelegramCommandV271(
     argument:
       parts.join(" ").trim()
   };
+}
+
+function v3FeedUsageTelegramMessageV598(token, result) {
+  const activeProvider =
+    String(result?.activeProvider || "NONE_ACTIVE");
+  const configured =
+    Array.isArray(result?.configuredProviders)
+      ? result.configuredProviders
+      : [];
+
+  const socket =
+    result?.runtimeSocketOpen === true
+      ? "OPEN"
+      : result?.runtimeSocketConnecting === true
+        ? "CONNECTING"
+        : "NOT OPEN";
+
+  const dual =
+    result?.dualSubscriptionActive === true
+      ? "YES"
+      : "NO";
+
+  const integrity =
+    result?.integrityActive === true
+      ? "ACTIVE"
+      : "NOT ACTIVE";
+
+  const fmtDuration = (ms) => {
+    const n = Number(ms);
+    if (!Number.isFinite(n) || n < 0) return "UNVERIFIED";
+    const s = Math.floor(n / 1000);
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    if (d > 0) return `${d}d ${h}h ${m}m`;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${sec}s`;
+    return `${sec}s`;
+  };
+
+  const fmtAge = (ms) => {
+    const n = Number(ms);
+    if (!Number.isFinite(n) || n < 0) return "UNVERIFIED";
+    if (n < 1000) return `${Math.round(n)}ms`;
+    if (n < 60000) return `${Math.round(n/1000)}s`;
+    return `${Math.round(n/60000)}m`;
+  };
+
+  const lines = [
+    `📡 <b>V3 Feed Usage — V598</b>`,
+    `Contract: <code>${escapeHtml(token)}</code>`,
+    "",
+    `Active provider: <b>${escapeHtml(activeProvider)}</b>`,
+    `Configured fallbacks: <b>${escapeHtml(configured.join(", ") || "NONE")}</b>`,
+    `Socket: <b>${socket}</b> | dual subscriptions: <b>${dual}</b>`,
+    `Integrity: <b>${integrity}</b> | continuous uptime: <b>${escapeHtml(fmtDuration(result?.continuousIntegrityMs))}</b>`,
+    `Head age: <b>${escapeHtml(fmtAge(result?.headAgeMs))}</b> | last block: <b>${Number.isFinite(Number(result?.lastHeadBlock)) ? Math.trunc(Number(result.lastHeadBlock)) : "UNVERIFIED"}</b>`,
+    "",
+    `Observed heads: <b>${safeNumber(result?.headsObserved).toLocaleString("en-GB")}</b>`,
+    `Exact-pool V3 swaps captured: <b>${safeNumber(result?.swapsCaptured).toLocaleString("en-GB")}</b>`,
+    `Observed feed events: <b>${safeNumber(result?.observedFeedEvents).toLocaleString("en-GB")}</b>`,
+    `Reconnects: <b>${safeNumber(result?.reconnects)}</b> | integrity interruptions: <b>${safeNumber(result?.integrityInterruptions)}</b>`,
+    "",
+    `Handshake attempts: <b>${safeNumber(result?.handshakeAttempts)}</b> | opens <b>${safeNumber(result?.handshakeOpens)}</b> | closes <b>${safeNumber(result?.handshakeCloses)}</b> | errors <b>${safeNumber(result?.handshakeErrors)}</b>`,
+    `Recent provider switches: <b>${safeNumber(result?.recentProviderSwitches)}</b>`
+  ];
+
+  if (result?.lastProviderFailure?.providerId) {
+    const f = result.lastProviderFailure;
+    let detail = `${f.providerId}: ${f.failure || "FAILED"}`;
+    if (f.httpStatus) detail += ` HTTP ${f.httpStatus}`;
+    lines.push(`Last provider failure: <b>${escapeHtml(detail)}</b>`);
+  }
+
+  if (result?.lastIntegrityGapReason) {
+    lines.push(
+      `Last integrity gap: <b>${escapeHtml(String(result.lastIntegrityGapReason).slice(0,180))}</b>`
+    );
+  }
+
+  lines.push(
+    "",
+    `Provider billing/quota: <b>DATA UNVERIFIED</b>`,
+    `<i>Observed feed events are bot-side telemetry, not provider billing credits/CUs. Provider dashboards remain authoritative. /feedusage makes no provider/RPC request and writes no collector state.</i>`
+  );
+
+  return lines.join("\\n");
 }
 
 function v3CollectorControlTelegramMessageV592(action, token, result) {
@@ -120432,6 +120543,78 @@ async function telegramCommandReplyV271(
       diagnosticV273.result = resultV404?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
     }
     return {success:resultV404?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0};
+  }
+
+  // V598: exact-address, read-only V3 feed/provider usage meter.
+  if (parsed.command === "/feedusage" || parsed.command === "/feed") {
+    const tokenV598 = normalize(parsed.argument);
+    let meterV598 = null;
+    let replyV598;
+
+    if (!isAddress(tokenV598)) {
+      replyV598 =
+        `ℹ️ Use <code>/feedusage 0xADDRESS</code>. This meter is exact-address only and does not perform token resolution.`;
+    } else {
+      meterV598 =
+        await v3LiveCollectorRouteV363(
+          env,
+          tokenV598,
+          "feedusage"
+        );
+      replyV598 =
+        v3FeedUsageTelegramMessageV598(
+          tokenV598,
+          meterV598
+        );
+    }
+
+    if (diagnosticV273) {
+      diagnosticV273.replyAttempted = true;
+      diagnosticV273.feedUsageV598 = {
+        token:tokenV598 || null,
+        activeProvider:meterV598?.activeProvider || null,
+        dualSubscriptionActive:
+          meterV598?.dualSubscriptionActive === true,
+        observedFeedEvents:
+          meterV598?.observedFeedEvents ?? null,
+        scannerBudgetConsumed:false,
+        externalProviderRequests:0,
+        collectorWrites:0
+      };
+    }
+
+    const sendV598 =
+      await sendTelegram(
+        env,
+        replyV598,
+        null,
+        null
+      );
+
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess =
+        sendV598?.success === true;
+      diagnosticV273.telegramStatus =
+        sendV598?.status || null;
+      diagnosticV273.telegramMode =
+        sendV598?.mode || null;
+      diagnosticV273.telegramError =
+        sendV598?.error || null;
+      diagnosticV273.result =
+        sendV598?.success === true
+          ? "REPLY_SENT"
+          : "REPLY_FAILED";
+    }
+
+    return {
+      success:sendV598?.success === true,
+      ignored:false,
+      command:parsed.command,
+      argument:tokenV598 || null,
+      scannerBudgetConsumed:false,
+      externalProviderRequests:0,
+      collectorWrites:0
+    };
   }
 
   // V592: Telegram controls for the already-existing native V3 live collector.
@@ -125519,6 +125702,10 @@ async function v3LiveCollectorRouteV363(env, tokenInput, action) {
     return await r.json();
   }
   if (action === "usage") return await durableUsageSnapshotV404(env);
+  if (action === "feedusage") {
+    const r = await stub.fetch("https://v3-live.internal/feed-usage-v598");
+    return await r.json();
+  }
   const r = await stub.fetch("https://v3-live.internal/status");
   return await r.json();
 }
@@ -126791,7 +126978,8 @@ export class V3LiveCollectorV363 {
     if (
       url.pathname !== "/stop" &&
       url.pathname !== "/start" &&
-      url.pathname !== "/shadow-multipool-start-v394"
+      url.pathname !== "/shadow-multipool-start-v394" &&
+      url.pathname !== "/feed-usage-v598"
     ) {
       try {
         selfHealV591 =
@@ -126908,6 +127096,9 @@ export class V3LiveCollectorV363 {
       await this.doPutV404("connection", {connected:false,subscriptionAccepted:false,logSubscriptionAccepted:false,headSubscriptionAccepted:false,stoppedAt:Date.now()});
       await this.flushUsageDeltaV404(true);
       return Response.json(await this.status("STOPPED_V363"));
+    }
+    if (url.pathname === "/feed-usage-v598") {
+      return Response.json(await this.feedUsageSnapshotV598());
     }
     if (url.pathname === "/status") return Response.json(await this.status());
     
@@ -127360,6 +127551,123 @@ if (url.pathname === "/reconcile-v374") {
     // Keep checking while either collector is enabled. Fifteen seconds is the
     // already-proven V371 cadence; V402 does not increase provider requests.
     await this.doSetAlarmV404(Date.now()+V3_HEAD_WATCHDOG_MS_V371);
+  }
+
+  async feedUsageSnapshotV598() {
+    const nowMs = Date.now();
+    const enabled = await this.state.storage.get("enabled");
+    const cfg = this.config || await this.state.storage.get("config") || null;
+    const conn = await this.state.storage.get("connection") || {};
+    const stats = await this.state.storage.get("stats") || {};
+    const heads = this.headsV402 || await this.state.storage.get("v368:heads") || {};
+    const integrity = await this.state.storage.get("v371:integrityCoverage") || {};
+    const handshake =
+      await this.state.storage.get("v594:handshakeDiagnostics") || {};
+    const preferred =
+      await this.state.storage.get("v597:preferredProviderId") || null;
+
+    const configured =
+      Array.isArray(conn?.configuredProvidersV597) &&
+      conn.configuredProvidersV597.length
+        ? conn.configuredProvidersV597
+        : this.v3ProviderCandidatesV597().map(row => row.id);
+
+    const dual =
+      conn.connected === true &&
+      conn.logSubscriptionAccepted === true &&
+      conn.headSubscriptionAccepted === true;
+
+    const integrityStart =
+      integrity.active === true &&
+      Number.isFinite(Number(integrity.continuousStartAt))
+        ? Number(integrity.continuousStartAt)
+        : null;
+
+    const headsObserved = safeNumber(heads.headsObserved);
+    const swapsCaptured = safeNumber(stats.swapsCaptured);
+
+    const recent =
+      Array.isArray(handshake?.recentEvents)
+        ? handshake.recentEvents
+        : [];
+
+    const openProviders =
+      recent
+        .filter(row => row?.eventType === "OPEN_V594" && row?.providerId)
+        .map(row => String(row.providerId));
+
+    let recentProviderSwitches = 0;
+    for (let i = 1; i < openProviders.length; i++) {
+      if (openProviders[i] !== openProviders[i - 1]) {
+        recentProviderSwitches++;
+      }
+    }
+
+    return {
+      version:VERSION,
+      status:"V3_FEED_USAGE_READY_V598",
+      token:cfg?.token || null,
+      pair:cfg?.pair || null,
+      enabled:enabled === true,
+      activeProvider:conn?.activeProviderV597 || null,
+      preferredProvider:preferred,
+      configuredProviders:configured,
+      runtimeSocketOpen:
+        Boolean(this.ws && this.ws.readyState === WebSocket.OPEN),
+      runtimeSocketConnecting:
+        Boolean(this.ws && this.ws.readyState === WebSocket.CONNECTING),
+      logSubscriptionAccepted:
+        conn.logSubscriptionAccepted === true,
+      headSubscriptionAccepted:
+        conn.headSubscriptionAccepted === true,
+      dualSubscriptionActive:dual,
+      integrityActive:
+        integrity.active === true && dual,
+      continuousIntegrityStartAt:integrityStart,
+      continuousIntegrityMs:
+        integrityStart !== null
+          ? Math.max(0, nowMs - integrityStart)
+          : 0,
+      lastHeadBlock:
+        Number.isFinite(Number(heads.lastHeadBlock))
+          ? Number(heads.lastHeadBlock)
+          : null,
+      lastHeadAt:
+        Number.isFinite(Number(heads.lastHeadAt))
+          ? Number(heads.lastHeadAt)
+          : null,
+      headAgeMs:
+        Number.isFinite(Number(heads.lastHeadAt))
+          ? Math.max(0, nowMs - Number(heads.lastHeadAt))
+          : null,
+      headsObserved,
+      swapsCaptured,
+      buysCaptured:safeNumber(stats.buysCaptured),
+      sellsCaptured:safeNumber(stats.sellsCaptured),
+      usdVerifiedCaptured:safeNumber(stats.usdVerifiedCaptured),
+      observedFeedEvents:headsObserved + swapsCaptured,
+      reconnects:safeNumber(stats.reconnects),
+      integrityInterruptions:safeNumber(integrity.interruptions),
+      lastIntegrityGapAt:integrity.lastGapAt || null,
+      lastIntegrityGapReason:integrity.lastGapReason || null,
+      handshakeAttempts:safeNumber(handshake.connectAttempts),
+      handshakeOpens:safeNumber(handshake.openEvents),
+      handshakeErrors:safeNumber(handshake.errorEvents),
+      handshakeCloses:safeNumber(handshake.closeEvents),
+      handshakeTimeouts:safeNumber(handshake.timeoutEvents),
+      recentProviderSwitches,
+      recentOpenProviders:openProviders.slice(-6),
+      lastProviderFailure:conn?.lastProviderFailureV597 || null,
+      billingQuotaStatus:"DATA_UNVERIFIED",
+      observedEventsAreNotBillingUnits:true,
+      providerDashboardAuthoritative:true,
+      scannerBudgetConsumed:false,
+      externalProviderRequests:0,
+      collectorWrites:0,
+      readOnly:true,
+      hardGlobalLimitUnchanged:42,
+      timestamp:now()
+    };
   }
 
   async status(overrideStatus=null) {
