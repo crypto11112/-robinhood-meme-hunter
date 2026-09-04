@@ -1,4 +1,18 @@
 /**
+ * Robinhood Chain Meme Hunter — V629
+ * AUTHORITATIVE RUNTIME VERSION: V629
+ *
+ * V629 VALIDATION CLOUD REALISTIC FREE-TIER PROJECTION
+ * - preserves the V628 persistent Validation Cloud request meter and all V628 provider behaviour;
+ * - fixes the misleading early-month projection when only a small number of scans have been observed;
+ * - keeps the existing calendar-observed projection;
+ * - adds a separate 5-minute-cadence projection using the latest scan's Validation Cloud successes;
+ * - projects 288 scheduled scans/day and 8,640 scans/30 days at the current 5-minute scheduler cadence;
+ * - shows 20 / 100 / 500 CU planning scenarios for BOTH observed-calendar and 5-minute-cadence projections;
+ * - usage meter remains read-only and adds zero RPC/provider requests and zero additional state writes;
+ * - no scoring, Momentum, qualification, launch-proof, Telegram-alert, provider-routing or 42-request-ceiling changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V628
  * AUTHORITATIVE RUNTIME VERSION: V628
  *
@@ -4659,7 +4673,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V628";
+const VERSION = "V629";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -23168,21 +23182,51 @@ function validationCloudUsageTelemetryV628(state) {
   const attempts = safeNumber(stored.attemptsThisMonth);
   const avgSuccessPerDay = successes / elapsedDays;
   const projected30DaySuccesses = Math.round(avgSuccessPerDay * 30);
+
+  /*
+   * V629: the calendar projection is intentionally retained, but it is
+   * misleading at the start of a month when only a few scans have been
+   * observed. Add a second planning projection based on the bot's current
+   * five-minute scheduler cadence and the latest scan's Validation Cloud
+   * successful request count. This is planning telemetry only: it does not
+   * schedule anything or add provider requests.
+   */
+  const schedulerCadenceMinutesV629 = 5;
+  const scansPerDayAtCadenceV629 = Math.round((24 * 60) / schedulerCadenceMinutesV629);
+  const scansPer30DaysAtCadenceV629 = scansPerDayAtCadenceV629 * 30;
+  const lastScanSuccessesV629 = safeNumber(stored.lastScanSuccesses);
+  const cadenceProjected30DaySuccessesV629 =
+    Math.round(lastScanSuccessesV629 * scansPer30DaysAtCadenceV629);
+
+  const statusForCuV629 = projectedCu =>
+    projectedCu < VALIDATION_CLOUD_FREE_CU_MONTH_V628 * 0.5
+      ? "SAFE"
+      : projectedCu < VALIDATION_CLOUD_FREE_CU_MONTH_V628 * 0.8
+        ? "WATCH"
+        : projectedCu < VALIDATION_CLOUD_FREE_CU_MONTH_V628
+          ? "WARNING"
+          : "OVER_FREE_ALLOWANCE";
+
   const scenario = cuPerRequest => {
     const usedCu = successes * cuPerRequest;
     const projectedCu = projected30DaySuccesses * cuPerRequest;
+    const cadenceProjectedCu = cadenceProjected30DaySuccessesV629 * cuPerRequest;
     return {
       assumedCuPerSuccessfulRequest: cuPerRequest,
       estimatedCuUsed: usedCu,
       estimatedPercentUsed: Number((usedCu / VALIDATION_CLOUD_FREE_CU_MONTH_V628 * 100).toFixed(4)),
       projected30DayCu: projectedCu,
       projected30DayPercent: Number((projectedCu / VALIDATION_CLOUD_FREE_CU_MONTH_V628 * 100).toFixed(2)),
-      projectedStatus: projectedCu < VALIDATION_CLOUD_FREE_CU_MONTH_V628 * 0.5 ? "SAFE" : projectedCu < VALIDATION_CLOUD_FREE_CU_MONTH_V628 * 0.8 ? "WATCH" : projectedCu < VALIDATION_CLOUD_FREE_CU_MONTH_V628 ? "WARNING" : "OVER_FREE_ALLOWANCE"
+      projectedStatus: statusForCuV629(projectedCu),
+      cadenceProjected30DayCuV629: cadenceProjectedCu,
+      cadenceProjected30DayPercentV629: Number((cadenceProjectedCu / VALIDATION_CLOUD_FREE_CU_MONTH_V628 * 100).toFixed(2)),
+      cadenceProjectedStatusV629: statusForCuV629(cadenceProjectedCu)
     };
   };
+
   return {
     enabled: true,
-    source: "BOT_OBSERVED_VALIDATION_CLOUD_RPC_ATTEMPTS_V628",
+    source: "BOT_OBSERVED_VALIDATION_CLOUD_RPC_ATTEMPTS_V629",
     billingAuthoritative: false,
     dashboardAuthoritative: true,
     calendarMonthPlanningMeter: true,
@@ -23192,11 +23236,19 @@ function validationCloudUsageTelemetryV628(state) {
     successesThisMonth: successes,
     http429ThisMonth: safeNumber(stored.http429ThisMonth),
     lastScanAttempts: safeNumber(stored.lastScanAttempts),
-    lastScanSuccesses: safeNumber(stored.lastScanSuccesses),
+    lastScanSuccesses: lastScanSuccessesV629,
     lastScan429s: safeNumber(stored.lastScan429s),
     scansWithValidationCloud: safeNumber(stored.scansWithValidationCloud),
     averageSuccessfulRequestsPerDay: Number(avgSuccessPerDay.toFixed(2)),
     projected30DaySuccessfulRequests: projected30DaySuccesses,
+    cadenceProjectionV629: {
+      schedulerCadenceMinutes: schedulerCadenceMinutesV629,
+      scansPerDay: scansPerDayAtCadenceV629,
+      scansPer30Days: scansPer30DaysAtCadenceV629,
+      successfulRequestsPerScanBasis: lastScanSuccessesV629,
+      projected30DaySuccessfulRequests: cadenceProjected30DaySuccessesV629,
+      basis: "LATEST_SCAN_SUCCESS_COUNT_AT_CURRENT_5_MINUTE_SCHEDULER_CADENCE"
+    },
     planningScenarios: {
       low20Cu: scenario(20),
       medium100Cu: scenario(100),
@@ -23204,7 +23256,7 @@ function validationCloudUsageTelemetryV628(state) {
     },
     firstObservedAt: safeNumber(stored.firstObservedAt) || null,
     lastObservedAt: safeNumber(stored.lastObservedAt) || null,
-    note: "REQUEST_COUNT_BASED_PLANNING_ESTIMATE_ONLY_ACTUAL_METHOD_CU_WEIGHTS_AND_VALIDATION_CLOUD_DASHBOARD_ARE_AUTHORITATIVE",
+    note: "V629_DUAL_PROJECTION_REQUEST_COUNT_PLANNING_ONLY_ACTUAL_METHOD_CU_WEIGHTS_AND_VALIDATION_CLOUD_DASHBOARD_ARE_AUTHORITATIVE",
     externalRequestsAdded: 0,
     additionalStateWrites: 0
   };
@@ -95444,6 +95496,7 @@ function validationCloudUsageTelegramMessageV628(state) {
   const low = meter?.planningScenarios?.low20Cu || {};
   const med = meter?.planningScenarios?.medium100Cu || {};
   const high = meter?.planningScenarios?.high500Cu || {};
+  const cadence = meter?.cadenceProjectionV629 || {};
   return [
     `☁️ <b>Validation Cloud Usage — ${VERSION}</b>`,
     "",
@@ -95454,15 +95507,26 @@ function validationCloudUsageTelegramMessageV628(state) {
     `HTTP 429s: <b>${fmt(meter?.http429ThisMonth)}</b>`,
     `Last scan: <b>${fmt(meter?.lastScanSuccesses)} successful / ${fmt(meter?.lastScanAttempts)} attempts</b>`,
     "",
+    "📅 <b>Observed calendar projection</b>",
     `Average successful requests/day: <b>${fmt(meter?.averageSuccessfulRequestsPerDay)}</b>`,
     `Projected 30-day successful requests: <b>${fmt(meter?.projected30DaySuccessfulRequests)}</b>`,
     "",
-    "📐 <b>Planning scenarios</b>",
+    "⏱ <b>5-minute scanner projection</b>",
+    `Basis: <b>${fmt(cadence?.successfulRequestsPerScanBasis)} successful RPC requests/scan</b>`,
+    `Scheduled scans: <b>${fmt(cadence?.scansPerDay)}/day • ${fmt(cadence?.scansPer30Days)}/30 days</b>`,
+    `Projected 30-day successful requests: <b>${fmt(cadence?.projected30DaySuccessfulRequests)}</b>`,
+    "",
+    "📐 <b>5-minute cadence CU stress cases</b>",
+    `20 CU/request: <b>${fmt(low.cadenceProjected30DayCuV629)} CU (${pct(low.cadenceProjected30DayPercentV629)}) — ${escapeHtml(low.cadenceProjectedStatusV629 || "UNVERIFIED")}</b>`,
+    `100 CU/request: <b>${fmt(med.cadenceProjected30DayCuV629)} CU (${pct(med.cadenceProjected30DayPercentV629)}) — ${escapeHtml(med.cadenceProjectedStatusV629 || "UNVERIFIED")}</b>`,
+    `500 CU/request: <b>${fmt(high.cadenceProjected30DayCuV629)} CU (${pct(high.cadenceProjected30DayPercentV629)}) — ${escapeHtml(high.cadenceProjectedStatusV629 || "UNVERIFIED")}</b>`,
+    "",
+    "📐 <b>Observed-calendar CU estimate</b>",
     `20 CU/request: <b>${fmt(low.projected30DayCu)} CU (${pct(low.projected30DayPercent)}) — ${escapeHtml(low.projectedStatus || "UNVERIFIED")}</b>`,
     `100 CU/request: <b>${fmt(med.projected30DayCu)} CU (${pct(med.projected30DayPercent)}) — ${escapeHtml(med.projectedStatus || "UNVERIFIED")}</b>`,
     `500 CU/request: <b>${fmt(high.projected30DayCu)} CU (${pct(high.projected30DayPercent)}) — ${escapeHtml(high.projectedStatus || "UNVERIFIED")}</b>`,
     "",
-    "ℹ️ <i>Bot-side planning estimate only. Validation Cloud's dashboard is authoritative because CU cost can vary by RPC method.</i>",
+    "ℹ️ <i>Bot-side planning estimates only. Validation Cloud's dashboard remains authoritative because CU cost can vary by RPC method.</i>",
     "<i>Read-only command: no scan, RPC request or state write.</i>"
   ].join("\n");
 }
