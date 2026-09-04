@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V601
+ * AUTHORITATIVE RUNTIME VERSION: V601
+ *
+ * V601 dRPC METER MATURITY / PRESENTATION FIX:
+ * - preserves V600 and all confirmed-working provider/collector logic;
+ * - meter-only change;
+ * - increases minimum projection sample from 1 minute to 10 minutes;
+ * - before 10 minutes, CU/hour, CU/day, 30-day projection, usage %, and
+ *   headroom remain UNAVAILABLE/BUILDING rather than misleading zeroes;
+ * - adds sample quality:
+ *     * EARLY   < 10 minutes
+ *     * FAIR    10–30 minutes
+ *     * GOOD    30–60 minutes
+ *     * STRONG  >= 60 minutes
+ * - capacity status remains BUILDING_SAMPLE until sample is mature;
+ * - no V3 connection/reconnect, decoding, USD, scoring, V4, alert, failover,
+ *   or hard 42-request-cap changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V600
  * AUTHORITATIVE RUNTIME VERSION: V600
  *
@@ -4148,7 +4167,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V600";
+const VERSION = "V601";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -120242,15 +120261,23 @@ function v3FeedUsageTelegramMessageV598(token, result) {
 
   const drpcV600=result?.drpcMonthlyCapacityV600||null;
   if (drpcV600) {
-    const fmtCuV600 = (value) =>
-      Number.isFinite(Number(value))
-        ? Math.round(Number(value)).toLocaleString("en-GB")
+    const fmtCuV600 = (value) => {
+      if (value === null || value === undefined) return "BUILDING";
+      const n = Number(value);
+      return Number.isFinite(n)
+        ? Math.round(n).toLocaleString("en-GB")
         : "BUILDING";
+    };
 
-    const pctV600 =
-      Number.isFinite(Number(drpcV600?.projected30dPct))
-        ? `${Number(drpcV600.projected30dPct).toFixed(2)}%`
+    const pctV600 = (() => {
+      if (drpcV600?.projected30dPct === null || drpcV600?.projected30dPct === undefined) {
+        return "BUILDING";
+      }
+      const n = Number(drpcV600.projected30dPct);
+      return Number.isFinite(n)
+        ? `${n.toFixed(2)}%`
         : "BUILDING";
+    })();
 
     lines.push(
       "",
@@ -120258,6 +120285,7 @@ function v3FeedUsageTelegramMessageV598(token, result) {
       `Free allowance: <b>${fmtCuV600(drpcV600?.freeAllowanceCu30d)} CU</b> / 30 days`,
       `Pricing basis: <b>20 CU/subscription + 20 CU/notification</b>`,
       `Measurement sample: <b>${escapeHtml(fmtDuration(drpcV600?.sessionElapsedMs))}</b> | notifications <b>${safeNumber(drpcV600?.notificationsSinceBaseline).toLocaleString("en-GB")}</b>`,
+      `Sample quality: <b>${escapeHtml(String(drpcV600?.sampleQuality || "EARLY"))}</b> | minimum projection sample <b>${safeNumber(drpcV600?.minimumSampleMinutes || 10)}m</b>`,
       `Estimated CU/hour: <b>${fmtCuV600(drpcV600?.estimatedCuPerHour)}</b>`,
       `Estimated CU/day: <b>${fmtCuV600(drpcV600?.estimatedCuPerDay)}</b>`,
       `Projected 30-day CU: <b>${fmtCuV600(drpcV600?.projected30dCu)}</b>`,
@@ -120265,6 +120293,12 @@ function v3FeedUsageTelegramMessageV598(token, result) {
       `Projected headroom: <b>${fmtCuV600(drpcV600?.projectedHeadroomCu)} CU</b>`,
       `Capacity status: <b>${escapeHtml(String(drpcV600?.status||"BUILDING_SAMPLE"))}</b>`
     );
+
+    if (drpcV600?.rateSampleReady !== true) {
+      lines.push(
+        `<i>Projection is withheld until at least ${safeNumber(drpcV600?.minimumSampleMinutes || 10)} minutes of live feed data has been observed.</i>`
+      );
+    }
   }
 
   if (result?.stalePersistedRuntimeState === true) {
@@ -127728,8 +127762,20 @@ if (url.pathname === "/reconcile-v374") {
     const dayMsV600 = 24 * hourMsV600;
     const period30dMsV600 = 30 * dayMsV600;
 
+    const sampleMinutesV601 =
+      meterElapsedMsV600 / (60 * 1000);
+
+    const sampleQualityV601 =
+      sampleMinutesV601 < 10
+        ? "EARLY"
+        : sampleMinutesV601 < 30
+          ? "FAIR"
+          : sampleMinutesV601 < 60
+            ? "GOOD"
+            : "STRONG";
+
     const rateEligibleV600 =
-      meterElapsedMsV600 >= 60 * 1000 &&
+      meterElapsedMsV600 >= 10 * 60 * 1000 &&
       meterNotificationsV600 > 0;
 
     const drpcCuPerHourV600 =
@@ -127853,6 +127899,8 @@ if (url.pathname === "/reconcile-v374") {
         subscriptionActionsObserved:meterSubscriptionActionsV600,
         observedEquivalentCu:observedDrpcCuV600,
         rateSampleReady:rateEligibleV600,
+        minimumSampleMinutes:10,
+        sampleQuality:sampleQualityV601,
         estimatedCuPerHour:
           Number.isFinite(drpcCuPerHourV600)
             ? Number(drpcCuPerHourV600.toFixed(2))
