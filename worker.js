@@ -1,4 +1,32 @@
 /**
+ * Robinhood Chain Meme Hunter — V584
+ * AUTHORITATIVE RUNTIME VERSION: V584
+ *
+ * V584 VERIFIED WATCH-IDENTITY DECODER FALLBACK:
+ * - preserves V583 and all earlier confirmed-working behaviour;
+ * - V583 proved JUICE rows are genuine exact PoolManager Swap-topic rows with
+ *   the exact watched PoolId, but V179 returned decoder-null before USD conversion;
+ * - V179 continues to prefer state.poolRegistry[poolId] currency identity;
+ * - if that registry entry is missing/incomplete at decode time, V584 may use
+ *   the already-verified continuous-watch identity passed by V551:
+ *     exact watched PoolId + candidate address + canonical quote address;
+ * - currency0/currency1 order is reconstructed only by Uniswap's deterministic
+ *   address sorting rule; no token or side is guessed;
+ * - fallback is accepted only when:
+ *     * log topic0 is canonical Swap topic;
+ *     * log topic1 exactly equals the watched PoolId;
+ *     * candidate is a valid non-zero address;
+ *     * quote is exactly native ETH, canonical WETH, or canonical USDG;
+ *     * candidate != quote;
+ * - all signed-delta direction checks and exact-USD rules remain unchanged;
+ * - V583 decode-failure backoff remains active if rows still fail;
+ * - no historical backfill;
+ * - no scoring, Momentum, qualification, Telegram, provider, retention or
+ *   alert-threshold changes;
+ * - no extra external requests;
+ * - hard global request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V583
  * AUTHORITATIVE RUNTIME VERSION: V583
  *
@@ -3774,7 +3802,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V583";
+const VERSION = "V584";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -28481,7 +28509,8 @@ function deriveCanonicalWethUsdGReferenceV187(
 function decodeV4SwapDirectionalV179(
   state,
   log,
-  wethUsdGReferenceV187 = null
+  wethUsdGReferenceV187 = null,
+  exactWatchIdentityV584 = null
 ) {
   if (
     normalize(
@@ -28502,15 +28531,21 @@ function decodeV4SwapDirectionalV179(
       ?.poolRegistry
       ?.[poolId];
 
-  const currency0 =
+  let currency0 =
     normalize(
       pool?.currency0
     );
 
-  const currency1 =
+  let currency1 =
     normalize(
       pool?.currency1
     );
+
+  let currencyIdentitySourceV584 =
+    isAddress(currency0) &&
+    isAddress(currency1)
+      ? "POOL_REGISTRY_V179"
+      : null;
 
   if (
     !/^0x[0-9a-f]{64}$/.test(
@@ -28518,13 +28553,77 @@ function decodeV4SwapDirectionalV179(
         poolId ||
         ""
       )
-    ) ||
-    !isAddress(
-      currency0
-    ) ||
-    !isAddress(
-      currency1
     )
+  ) {
+    return null;
+  }
+
+  if (
+    !isAddress(currency0) ||
+    !isAddress(currency1)
+  ) {
+    const expectedPoolIdV584 =
+      normalize(
+        exactWatchIdentityV584?.poolId
+      );
+
+    const expectedCandidateV584 =
+      normalize(
+        exactWatchIdentityV584?.candidateAddress
+      );
+
+    const expectedQuoteV584 =
+      normalize(
+        exactWatchIdentityV584?.quoteTokenAddress
+      );
+
+    const canonicalQuoteV584 =
+      [
+        ZERO,
+        CANONICAL_WETH_V179,
+        CANONICAL_USDG_V179
+      ].includes(
+        expectedQuoteV584
+      );
+
+    const exactWatchIdentityVerifiedV584 =
+      exactWatchIdentityV584?.verified === true &&
+      expectedPoolIdV584 === poolId &&
+      isAddress(expectedCandidateV584) &&
+      expectedCandidateV584 !== ZERO &&
+      isAddress(expectedQuoteV584) &&
+      canonicalQuoteV584 &&
+      expectedCandidateV584 !== expectedQuoteV584;
+
+    if (
+      !exactWatchIdentityVerifiedV584
+    ) {
+      return null;
+    }
+
+    /*
+     * Uniswap PoolKey currencies are deterministically sorted by address.
+     * Native ETH is address(0), so normal lexicographic numeric address order
+     * is sufficient and does not infer trading direction.
+     */
+    if (
+      BigInt(expectedCandidateV584) <
+      BigInt(expectedQuoteV584)
+    ) {
+      currency0 = expectedCandidateV584;
+      currency1 = expectedQuoteV584;
+    } else {
+      currency0 = expectedQuoteV584;
+      currency1 = expectedCandidateV584;
+    }
+
+    currencyIdentitySourceV584 =
+      "VERIFIED_EXACT_WATCH_IDENTITY_ADDRESS_SORT_V584";
+  }
+
+  if (
+    !isAddress(currency0) ||
+    !isAddress(currency1)
   ) {
     return null;
   }
@@ -28818,6 +28917,8 @@ function decodeV4SwapDirectionalV179(
 
     source:
       "UNISWAP_V4_POOLMANAGER_SWAP_V179",
+
+    currencyIdentitySourceV584,
 
     poolId,
 
@@ -54773,7 +54874,8 @@ function persistVerifiedUsdTradesV254(
   candidateAddress,
   rows,
   wethUsdGReference,
-  observedAtMode
+  observedAtMode,
+  exactWatchIdentityV584 = null
 ) {
   const token =
     normalize(
@@ -54791,6 +54893,8 @@ function persistVerifiedUsdTradesV254(
     exactUsdRejected: 0,
     decoderNull: 0,
     decoderNullSamples: [],
+    watchIdentityFallbackDecodedV584: 0,
+    poolRegistryDecodedV584: 0,
     poolIds: []
   };
 
@@ -54849,7 +54953,8 @@ function persistVerifiedUsdTradesV254(
       decodeV4SwapDirectionalV179(
         state,
         row,
-        wethUsdGReference
+        wethUsdGReference,
+        exactWatchIdentityV584
       );
 
     if (
@@ -54876,6 +54981,18 @@ function persistVerifiedUsdTradesV254(
         });
       }
       continue;
+    }
+
+    if (
+      trade?.currencyIdentitySourceV584 ===
+        "VERIFIED_EXACT_WATCH_IDENTITY_ADDRESS_SORT_V584"
+    ) {
+      output.watchIdentityFallbackDecodedV584++;
+    } else if (
+      trade?.currencyIdentitySourceV584 ===
+        "POOL_REGISTRY_V179"
+    ) {
+      output.poolRegistryDecodedV584++;
     }
 
     if (
@@ -58845,7 +58962,25 @@ async function advanceDirectionalWatchV551({
       token,
       rows,
       wethUsdGReference,
-      "BLOCKSCOUT_CONTINUOUS_EXACT_POOL_V551"
+      "BLOCKSCOUT_CONTINUOUS_EXACT_POOL_V551",
+      {
+        verified:
+          /^0x[a-f0-9]{64}$/.test(String(poolId || "")) &&
+          isAddress(token) &&
+          isAddress(normalize(candidate?.quoteTokenAddress)) &&
+          [
+            ZERO,
+            CANONICAL_WETH_V179,
+            CANONICAL_USDG_V179
+          ].includes(normalize(candidate?.quoteTokenAddress)),
+        poolId,
+        candidateAddress:token,
+        quoteTokenAddress:normalize(candidate?.quoteTokenAddress),
+        source:
+          candidate?.registrationSourceV552 ||
+          candidate?.priorCompletionRecoveryV574?.identitySource ||
+          "CONTINUOUS_EXACT_POOL_WATCH_V551"
+      }
     );
 
     const exact = rows.length === 0 ? true : (
@@ -77092,6 +77227,17 @@ for (
       maximumBackoffRetrySpan:4800,
       unblockCondition:"NEXT_SUCCESSFUL_EXACT_USD_COMPLETE_CONTIGUOUS_RANGE",
       addsDecoderShapeDiagnostics:true,
+      externalRequestsAdded:0,
+      hardGlobalLimitUnchanged:42
+    },
+    verifiedWatchIdentityDecoderFallbackV584:{
+      enabled:true,
+      registryPreferred:true,
+      fallbackRequiresExactWatchedPoolId:true,
+      fallbackRequiresCanonicalQuote:true,
+      currencyOrdering:"DETERMINISTIC_UNISWAP_ADDRESS_SORT",
+      directionStillFromSignedPoolDeltas:true,
+      exactUsdRulesUnchanged:true,
       externalRequestsAdded:0,
       hardGlobalLimitUnchanged:42
     },
