@@ -1,4 +1,28 @@
 /**
+ * Robinhood Chain Meme Hunter — V582
+ * AUTHORITATIVE RUNTIME VERSION: V582
+ *
+ * V582 FAST VERIFIED RECOVERED-POOL CATCH-UP:
+ * - preserves V581 and all earlier confirmed-working behaviour;
+ * - speeds up safely verified V466-recovered pools that are far behind the head;
+ * - after at least one successful contiguous range, a recovered pool with low
+ *   observed log density may use a larger temporary catch-up span:
+ *     <= 50 logs on last successful range  -> up to 19,200 blocks
+ *     <= 200 logs                         -> up to 9,600 blocks
+ *     <= 500 logs                         -> up to 4,800 blocks
+ * - the existing 1,000-row saturation guard remains authoritative:
+ *   a saturated range NEVER advances coverage and the span falls back smaller;
+ * - exact-USD decode completeness remains mandatory before coverage advances;
+ * - V581 two-slot reserve, V580 failed-pool skip, V579 fairness, V578 catch-up
+ *   priority and V575 retention all remain intact;
+ * - generic logic; no token address or PoolId is hard-coded;
+ * - no historical backfill;
+ * - no scoring, Momentum, qualification, USD maths, Telegram, provider or
+ *   alert-threshold changes;
+ * - no extra external requests;
+ * - hard global request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V581
  * AUTHORITATIVE RUNTIME VERSION: V581
  *
@@ -3724,7 +3748,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V581";
+const VERSION = "V582";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9081,6 +9105,8 @@ const DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551 = 600;
 const DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551 = 10;
 const DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551 = 1200;
 const DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V566 = 4800;
+const DIRECTIONAL_PRIOR_COMPLETION_FAST_MAX_SPAN_V582 = 19200;
+const DIRECTIONAL_PRIOR_COMPLETION_MEDIUM_SPAN_V582 = 9600;
 
 /* V554 bounded same-pool catch-up. */
 const DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554 = 3;
@@ -58579,10 +58605,21 @@ async function advanceDirectionalWatchV551({
     return {...base,status:"WATCH_ALREADY_AT_HEAD_V551"};
   }
 
+  const priorCompletionCatchupV582 =
+    directionalWatchNeedsPriorCompletionCatchupV578(
+      candidate,
+      latestNumber
+    );
+
+  const maxConfiguredSpanV582 =
+    priorCompletionCatchupV582
+      ? DIRECTIONAL_PRIOR_COMPLETION_FAST_MAX_SPAN_V582
+      : DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V566;
+
   const baseConfiguredSpanV562 = Math.max(
     DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551,
     Math.min(
-      DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V566,
+      maxConfiguredSpanV582,
       Math.floor(
         safeNumber(candidate?.adaptiveBlockSpan) ||
         DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551
@@ -58643,15 +58680,51 @@ async function advanceDirectionalWatchV551({
   const densityExpansionEligibleV566 =
     densityTargetSpanV566 > DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551;
 
+  const lastRangeReturnedLogsV582 =
+    Number.isFinite(Number(candidate?.lastRangeReturnedLogsV566))
+      ? Number(candidate.lastRangeReturnedLogsV566)
+      : null;
+
+  let priorCompletionCatchupTargetSpanV582 = null;
+
+  if (
+    priorCompletionCatchupV582 &&
+    successfulRangesV566 >= 1 &&
+    safeNumber(candidate?.saturatedAttempts) === 0 &&
+    candidate?.nearHeadElasticBlockedV562 !== true &&
+    Number.isFinite(lastRangeReturnedLogsV582)
+  ) {
+    if (lastRangeReturnedLogsV582 <= 50) {
+      priorCompletionCatchupTargetSpanV582 =
+        DIRECTIONAL_PRIOR_COMPLETION_FAST_MAX_SPAN_V582;
+    } else if (lastRangeReturnedLogsV582 <= 200) {
+      priorCompletionCatchupTargetSpanV582 =
+        DIRECTIONAL_PRIOR_COMPLETION_MEDIUM_SPAN_V582;
+    } else if (lastRangeReturnedLogsV582 <= 500) {
+      priorCompletionCatchupTargetSpanV582 =
+        DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V566;
+    }
+  }
+
+  const priorCompletionFastCatchupAppliedV582 =
+    Number.isFinite(Number(priorCompletionCatchupTargetSpanV582)) &&
+    Number(priorCompletionCatchupTargetSpanV582) >
+      DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551;
+
   const configuredSpan = Math.max(
     DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551,
     Math.min(
       blocksBehindHeadV562,
-      densityExpansionEligibleV566
-        ? densityTargetSpanV566
-        : elasticEligibleV562
-          ? DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551
-          : baseConfiguredSpanV562
+      priorCompletionFastCatchupAppliedV582
+        ? Math.min(
+            Number(priorCompletionCatchupTargetSpanV582),
+            maxConfiguredSpanV582
+          )
+        : densityExpansionEligibleV566
+          ? densityTargetSpanV566
+          : elasticEligibleV562
+            ? DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551
+            : baseConfiguredSpanV562
     )
   );
 
@@ -58764,14 +58837,21 @@ async function advanceDirectionalWatchV551({
      */
     if (rows.length <= 50) {
       candidate.adaptiveBlockSpan = Math.min(
-        DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V566,
+        priorCompletionCatchupV582
+          ? DIRECTIONAL_PRIOR_COMPLETION_FAST_MAX_SPAN_V582
+          : DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V566,
         Math.max(
           DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551,
           configuredSpan
         )
       );
     } else if (rows.length <= 200) {
-      candidate.adaptiveBlockSpan = Math.min(2400, configuredSpan);
+      candidate.adaptiveBlockSpan = Math.min(
+        priorCompletionCatchupV582
+          ? DIRECTIONAL_PRIOR_COMPLETION_MEDIUM_SPAN_V582
+          : 2400,
+        configuredSpan
+      );
     } else if (rows.length <= 500) {
       candidate.adaptiveBlockSpan = Math.min(1200, configuredSpan);
     } else {
@@ -58827,6 +58907,15 @@ async function advanceDirectionalWatchV551({
         elasticEligibleV562 && !densityExpansionEligibleV566,
       densityExpansionAppliedV566:densityExpansionEligibleV566,
       densityTargetSpanV566,
+      priorCompletionFastCatchupV582:{
+        eligible:priorCompletionCatchupV582,
+        applied:priorCompletionFastCatchupAppliedV582,
+        targetSpan:priorCompletionCatchupTargetSpanV582,
+        lastRangeReturnedLogs:lastRangeReturnedLogsV582,
+        maxSpan:DIRECTIONAL_PRIOR_COMPLETION_FAST_MAX_SPAN_V582,
+        saturationRowGuard:BLOCKSCOUT_LOGS_MAX_ROWS_V180,
+        coverageAdvancesOnlyOnExactUsdComplete:true
+      },
       averageLogsPerSuccessfulRangeV566:
         Number.isFinite(averageLogsPerSuccessfulRangeV566)
           ? Number(averageLogsPerSuccessfulRangeV566.toFixed(2))
@@ -76840,6 +76929,8 @@ for (
         Number.isFinite(Number(row?.densityTargetSpanV566))
           ? Number(row.densityTargetSpanV566)
           : null,
+      priorCompletionFastCatchupV582:
+        row?.priorCompletionFastCatchupV582 || null,
       averageLogsPerSuccessfulRangeV566:
         Number.isFinite(Number(row?.averageLogsPerSuccessfulRangeV566))
           ? Number(row.averageLogsPerSuccessfulRangeV566)
@@ -76894,6 +76985,20 @@ for (
       poolSpecificDecodeFailureDoesNotStopWholeScan:true,
       failedPoolExcludedOnlyForCurrentScan:true,
       coverageNeverAdvancedOnFailure:true,
+      generic:true,
+      externalRequestsAdded:0,
+      hardGlobalLimitUnchanged:42
+    },
+    fastVerifiedRecoveredPoolCatchupV582:{
+      enabled:true,
+      maxLowDensitySpan:19200,
+      mediumDensitySpan:9600,
+      existingNormalMaxSpan:4800,
+      requiresVerifiedPriorCompletion:true,
+      requiresAtLeastOneSuccessfulRange:true,
+      saturationGuardRows:1000,
+      saturatedRangeCoverageAdvance:false,
+      exactUsdCompletenessRequired:true,
       generic:true,
       externalRequestsAdded:0,
       hardGlobalLimitUnchanged:42
