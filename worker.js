@@ -1,4 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V622
+ * AUTHORITATIVE RUNTIME VERSION: V622
+ *
+ * V622 LIVE POOL-ID IDENTITY DIAGNOSTICS
+ * - builds directly forward from confirmed V621;
+ * - preserves V621 current-live verified-launch queue priority unchanged;
+ * - exposes every current-live V199 PoolId-first Bitquery identity attempt;
+ * - records resolver lane/activity, returned PoolId/manager/protocol/currencies,
+ *   strict numeric currency-order validation, request/HTTP result and failure stage;
+ * - marks whether a resolved identity was registered in poolRegistry, whether its
+ *   unknown-pool tracker row was cleared and which non-quote tokens were watched;
+ * - adds a zero-request V622 summary of attempted/resolved/persisted/failed pools
+ *   plus failure-reason counts so the next unseen launchpad can be diagnosed live;
+ * - diagnostic/measurement only: zero new requests, no scoring, Momentum,
+ *   qualification, launch-detector, provider cadence or Telegram threshold changes;
+ * - hard 42 global / existing discovery / 21 base-analysis limits remain unchanged.
+ */
+/**
  * Robinhood Chain Meme Hunter — V621
  * AUTHORITATIVE RUNTIME VERSION: V621
  *
@@ -4547,7 +4565,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V621";
+const VERSION = "V622";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -16537,6 +16555,49 @@ function sortV4CurrenciesV199(
   }
 }
 
+/*
+ * V622 diagnostics only. These helpers classify already-returned V199 evidence;
+ * they do not make provider calls and do not change resolver eligibility.
+ */
+function bitqueryPoolIdentityFailureStageV622(
+  result
+) {
+  const status =
+    String(result?.status || "");
+
+  if (status === "RESOLVED") return "RESOLVED";
+  if (status === "NOT_CONFIGURED") return "CONFIGURATION";
+  if (status === "INVALID_POOL_ID") return "INPUT_VALIDATION";
+  if (status === "DISCOVERY_LIVE_BUDGET_PROTECTED") return "REQUEST_BUDGET";
+  if (status === "EMPTY_REALTIME_WINDOW") return "REALTIME_COVERAGE";
+  if (status === "POOL_ID_MISMATCH") return "POOL_ID_VALIDATION";
+  if (status === "PROTOCOL_UNVERIFIED") return "PROTOCOL_VALIDATION";
+  if (status === "POOL_MANAGER_MISMATCH") return "POOL_MANAGER_VALIDATION";
+  if (status === "CURRENCIES_UNVERIFIED") return "CURRENCY_VALIDATION";
+  if (status === "GRAPHQL_ERROR") return "GRAPHQL_RESPONSE";
+  if (status === "FETCH_ERROR") return "FETCH";
+  if (/^HTTP_/.test(status)) return "HTTP";
+  if (/COOLDOWN/i.test(status)) return "PROVIDER_COOLDOWN";
+  return status || "UNCLASSIFIED";
+}
+
+function currencyOrderingVerifiedV622(
+  result
+) {
+  const sorted =
+    sortV4CurrenciesV199(
+      result?.currencyA,
+      result?.currencyB
+    );
+
+  if (!sorted) return false;
+
+  return (
+    normalize(result?.currency0) === sorted[0] &&
+    normalize(result?.currency1) === sorted[1]
+  );
+}
+
 async function getPoolIdentityBitqueryDexPoolEventsV199(
   env,
   state,
@@ -19576,7 +19637,18 @@ async function resolvePersistentUnknownPools(
       currencyOrdering:
         "UNISWAP_V4_NUMERIC_ADDRESS_SORT",
       identityGuessing: false,
-      attemptHistoryV199: []
+      attemptHistoryV199: [],
+      diagnosticsV622: {
+        enabled: true,
+        zeroAdditionalRequests: true,
+        attemptedPoolIds: [],
+        resolvedPoolIds: [],
+        persistedPoolIds: [],
+        failedPoolIds: [],
+        failureReasonCounts: {},
+        lastAttempt: null,
+        status: "AWAITING_CURRENT_LIVE_IDENTITY_ATTEMPT"
+      }
     },
     bitqueryInitializeV190: {
       enabled: true,
@@ -19797,19 +19869,62 @@ async function resolvePersistentUnknownPools(
         .error =
           dexPoolV199.error;
 
+      const v622FailureStage =
+        bitqueryPoolIdentityFailureStageV622(
+          dexPoolV199
+        );
+
+      const v622CurrencyOrderingVerified =
+        currencyOrderingVerifiedV622(
+          dexPoolV199
+        );
+
       output.bitqueryDexPoolEventsV199
         .attemptHistoryV199.push({
           poolId,
+          resolverLane,
+          activityScore:
+            activityScore(entry),
+          firstActiveBlock:
+            safeNumber(entry?.firstActiveBlock) || null,
+          lastSeenBlock:
+            safeNumber(entry?.lastSeenBlock) || null,
+          trackerAttemptsBefore:
+            safeNumber(entry?.attempts),
+          requestConsumed:
+            safeNumber(
+              dexPoolV199.externalRequestsUsed
+            ) > 0,
           status:
             dexPoolV199.status,
+          failureStageV622:
+            v622FailureStage,
+          failureReasonV622:
+            dexPoolV199.error ||
+            (
+              dexPoolV199.status !== "RESOLVED"
+                ? dexPoolV199.status
+                : null
+            ),
           httpStatus:
             dexPoolV199.httpStatus,
           returnedPoolId:
             dexPoolV199.returnedPoolId,
+          exactPoolIdMatchedV622:
+            normalize(dexPoolV199.returnedPoolId) ===
+              normalize(poolId),
           poolManager:
             dexPoolV199.poolManager,
+          expectedPoolManagerV622:
+            normalize(POOL_MANAGER),
+          poolManagerMatchedV622:
+            !isAddress(dexPoolV199.poolManager) ||
+            normalize(dexPoolV199.poolManager) ===
+              normalize(POOL_MANAGER),
           protocolName:
             dexPoolV199.protocolName,
+          protocolVersion:
+            dexPoolV199.protocolVersion,
           currencyA:
             dexPoolV199.currencyA,
           currencyB:
@@ -19818,10 +19933,16 @@ async function resolvePersistentUnknownPools(
             dexPoolV199.currency0,
           currency1:
             dexPoolV199.currency1,
+          currencyOrderingVerifiedV622:
+            v622CurrencyOrderingVerified,
           resolved:
             Boolean(
               dexPoolV199.resolvedPool
-            )
+            ),
+          identityPersistedV622: false,
+          trackerClearedV622: false,
+          watchedTokenAddressesV622: [],
+          resolutionPathV622: null
         });
 
       if (
@@ -19997,6 +20118,37 @@ async function resolvePersistentUnknownPools(
           bitqueryResolutionPathV199 ||
             "V190_BITQUERY_REALTIME_INITIALIZE"
         );
+      }
+
+      const v622WatchedTokenAddresses =
+        [
+          bitqueryResolvedPoolV190.currency0,
+          bitqueryResolvedPoolV190.currency1
+        ].filter(
+          address =>
+            isAddress(address) &&
+            address !== ZERO &&
+            !knownQuote(address)
+        );
+
+      const v622AttemptRow =
+        [...output.bitqueryDexPoolEventsV199.attemptHistoryV199]
+          .reverse()
+          .find(
+            row =>
+              normalize(row?.poolId) === poolId &&
+              row?.resolved === true
+          ) || null;
+
+      if (v622AttemptRow) {
+        v622AttemptRow.identityPersistedV622 =
+          Boolean(state.poolRegistry?.[poolId]);
+        v622AttemptRow.trackerClearedV622 = true;
+        v622AttemptRow.watchedTokenAddressesV622 =
+          v622WatchedTokenAddresses;
+        v622AttemptRow.resolutionPathV622 =
+          bitqueryResolutionPathV199 ||
+          "V190_BITQUERY_REALTIME_INITIALIZE";
       }
 
       delete tracker[
@@ -20699,6 +20851,73 @@ async function resolvePersistentUnknownPools(
       UNKNOWN_POOL_RESOLUTION_REQUESTS_PER_RUN -
         resolverRequestLimit
     );
+
+  const v622Attempts =
+    output.bitqueryDexPoolEventsV199
+      .attemptHistoryV199;
+
+  const v622FailureReasonCounts = {};
+
+  for (const row of v622Attempts) {
+    if (row?.resolved === true) continue;
+
+    const key =
+      String(
+        row?.failureStageV622 ||
+        row?.status ||
+        "UNCLASSIFIED"
+      );
+
+    v622FailureReasonCounts[key] =
+      safeNumber(
+        v622FailureReasonCounts[key]
+      ) + 1;
+  }
+
+  output.bitqueryDexPoolEventsV199
+    .diagnosticsV622 = {
+      enabled: true,
+      zeroAdditionalRequests: true,
+      attemptedPoolIds:
+        v622Attempts
+          .map(row => normalize(row?.poolId))
+          .filter(Boolean),
+      resolvedPoolIds:
+        v622Attempts
+          .filter(row => row?.resolved === true)
+          .map(row => normalize(row?.poolId))
+          .filter(Boolean),
+      persistedPoolIds:
+        v622Attempts
+          .filter(row => row?.identityPersistedV622 === true)
+          .map(row => normalize(row?.poolId))
+          .filter(Boolean),
+      failedPoolIds:
+        v622Attempts
+          .filter(row => row?.resolved !== true)
+          .map(row => normalize(row?.poolId))
+          .filter(Boolean),
+      failureReasonCounts:
+        v622FailureReasonCounts,
+      lastAttempt:
+        v622Attempts.length
+          ? v622Attempts[v622Attempts.length - 1]
+          : null,
+      status:
+        v622Attempts.some(
+          row => row?.identityPersistedV622 === true
+        )
+          ? "V622_IDENTITY_RESOLVED_AND_PERSISTED"
+          : (
+              v622Attempts.some(row => row?.resolved === true)
+                ? "V622_IDENTITY_RESOLVED_PERSISTENCE_UNCONFIRMED"
+                : (
+                    v622Attempts.length
+                      ? "V622_ATTEMPTED_NO_IDENTITY_RESOLVED"
+                      : "V622_NO_CURRENT_LIVE_BITQUERY_IDENTITY_ATTEMPT"
+                  )
+            )
+    };
 
   return output;
 }
