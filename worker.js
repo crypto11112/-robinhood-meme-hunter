@@ -1,4 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V625
+ * AUTHORITATIVE RUNTIME VERSION: V625
+ *
+ * V625 BLOCKSCOUT-FIRST FREE IDENTITY RECOVERY
+ * - moves the existing exact PoolId Blockscout Initialize resolver ahead of the
+ *   two-request RPC blockHash checkpoint so the 100k/day Blockscout allowance
+ *   gets first chance to recover unknown live V4 pool identity;
+ * - reuses the existing V184 exact topic0+topic1 query: ZERO new request ceiling;
+ * - fixes V184 non-OK response handling that could itself throw and collapse a
+ *   real Blockscout HTTP status into generic FETCH_ERROR;
+ * - RPC fallback now prefers ROBINHOOD_PUBLIC_RPC -> ALCHEMY -> CHAINSTACK, so
+ *   a known Chainstack free-plan 403 cannot consume the first reserved slot;
+ * - successful PoolId mappings remain permanently persisted through the existing
+ *   pool registry and watched-token pipeline;
+ * - no scoring, Momentum, qualification, Telegram, launch proof standard,
+ *   provider global cadence, KV key, or hard 42-request ceiling changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V624
  * AUTHORITATIVE RUNTIME VERSION: V624
  *
@@ -4599,7 +4617,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V624";
+const VERSION = "V625";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -17482,9 +17500,9 @@ async function getInitializeForPoolBlockHashV188(
   }
 
   const providers = [
-    "CHAINSTACK",
+    "ROBINHOOD_PUBLIC_RPC",
     "ALCHEMY",
-    "ROBINHOOD_PUBLIC_RPC"
+    "CHAINSTACK"
   ];
 
   let used = 0;
@@ -18896,15 +18914,12 @@ async function blockscoutWideInitializeForPoolV184(
     if (
       !response.ok
     ) {
-      setAthFollowUpStatusV296(service, {
-        status: `HTTP_${response.status}`,
-        attempted: true,
-        requestedAddresses: v295BatchAddresses.length,
-        observed: 0,
-        athUpdated: 0,
-        httpStatus: response.status
-      });
-
+      /*
+       * V625: preserve the real Blockscout HTTP outcome. V624 inherited an
+       * unrelated ATH telemetry call here that referenced out-of-scope
+       * variables; that secondary exception masked the real status as
+       * FETCH_ERROR.
+       */
       service.lastStatus =
         `HTTP_${response.status}`;
 
@@ -18912,6 +18927,7 @@ async function blockscoutWideInitializeForPoolV184(
         ...base,
         attempted: true,
         externalRequestsUsed: 1,
+        httpStatus: response.status,
         status:
           `BLOCKSCOUT_HTTP_${response.status}`,
         fromBlock,
@@ -19847,6 +19863,9 @@ async function resolvePersistentUnknownPools(
       fromBlock: null,
       toBlock: null,
       fallbackToRpc: false,
+      priorityV625: "FIRST_BEFORE_RPC_BLOCKHASH",
+      httpStatusV625: null,
+      errorV625: null,
       service:
         blockscoutWideInitializeTelemetryV184(
           state
@@ -20346,6 +20365,120 @@ async function resolvePersistentUnknownPools(
         resolutionPath:
           bitqueryResolutionPathV199 ||
           "V190_BITQUERY_REALTIME_INITIALIZE",
+        error: null
+      });
+
+      continue;
+    }
+
+    /*
+     * V625: BLOCKSCOUT-FIRST FREE IDENTITY RECOVERY.
+     *
+     * The existing V184 query is already exact by PoolManager + Initialize
+     * topic0 + PoolId topic1 and costs only one existing discovery-live slot.
+     * Give the 100k/day Blockscout source first chance before spending the
+     * two-request RPC blockHash checkpoint. This does not increase the resolver
+     * ceiling; the later legacy V184 position automatically skips because its
+     * attempt counter is already consumed.
+     */
+    let blockscoutFirstResolvedPoolV625 = null;
+
+    if (
+      output.blockscoutWideInitializeV184.attempts < 1 &&
+      output.requestsUsed < resolverRequestLimit
+    ) {
+      const blockscoutFirstV625 =
+        await blockscoutWideInitializeForPoolV184(
+          state,
+          budget,
+          poolId,
+          entry.firstActiveBlock
+        );
+
+      output.blockscoutWideInitializeV184.attempts +=
+        blockscoutFirstV625.attempted ? 1 : 0;
+      output.blockscoutWideInitializeV184.requestsUsed +=
+        safeNumber(blockscoutFirstV625.externalRequestsUsed);
+      output.requestsUsed +=
+        safeNumber(blockscoutFirstV625.externalRequestsUsed);
+      output.blockscoutWideInitializeV184.status =
+        blockscoutFirstV625.status || null;
+      output.blockscoutWideInitializeV184.selectedPoolId = poolId;
+      output.blockscoutWideInitializeV184.fromBlock =
+        blockscoutFirstV625.fromBlock;
+      output.blockscoutWideInitializeV184.toBlock =
+        blockscoutFirstV625.toBlock;
+      output.blockscoutWideInitializeV184.service =
+        blockscoutWideInitializeTelemetryV184(state);
+      output.blockscoutWideInitializeV184.httpStatusV625 =
+        safeNumber(blockscoutFirstV625.httpStatus) || null;
+      output.blockscoutWideInitializeV184.errorV625 =
+        blockscoutFirstV625.error || null;
+      output.blockscoutWideInitializeV184.priorityV625 =
+        "FIRST_BEFORE_RPC_BLOCKHASH";
+
+      if (blockscoutFirstV625.resolvedPool) {
+        blockscoutFirstResolvedPoolV625 =
+          blockscoutFirstV625.resolvedPool;
+        output.blockscoutWideInitializeV184.resolved = 1;
+      } else if (blockscoutFirstV625.attempted) {
+        output.blockscoutWideInitializeV184.fallbackToRpc = true;
+      }
+    }
+
+    if (blockscoutFirstResolvedPoolV625) {
+      entry.lastResolvedSearchDistance = unknownPoolSearchDistance(entry);
+      entry.consecutiveEmptySearches = 0;
+
+      registerPoolMapping(state, blockscoutFirstResolvedPoolV625);
+
+      for (const address of [
+        blockscoutFirstResolvedPoolV625.currency0,
+        blockscoutFirstResolvedPoolV625.currency1
+      ]) {
+        if (
+          !isAddress(address) ||
+          address === ZERO ||
+          knownQuote(address)
+        ) {
+          continue;
+        }
+
+        addWatch(
+          state,
+          address,
+          blockscoutFirstResolvedPoolV625,
+          "V625_BLOCKSCOUT_FIRST_EXACT_INITIALIZE"
+        );
+      }
+
+      delete tracker[poolId];
+      output.resolved++;
+      output.resolvedPoolIds.push(poolId);
+      output.probes.push({
+        poolId,
+        resolverLane,
+        activityScore: activityScore(entry),
+        swapEvents: safeNumber(entry.swapEvents),
+        liquidityEvents: safeNumber(entry.liquidityEvents),
+        appearances: safeNumber(entry.appearances),
+        fromBlock: output.blockscoutWideInitializeV184.fromBlock,
+        toBlock: output.blockscoutWideInitializeV184.toBlock,
+        requestedBlocks:
+          output.blockscoutWideInitializeV184.fromBlock !== null &&
+          output.blockscoutWideInitializeV184.toBlock !== null
+            ? (
+                output.blockscoutWideInitializeV184.toBlock -
+                output.blockscoutWideInitializeV184.fromBlock + 1
+              )
+            : 0,
+        desiredChunkBlocks: BLOCKSCOUT_WIDE_INITIALIZE_LOOKBACK_BLOCKS_V184,
+        externalRequestsUsed:
+          safeNumber(output.blockscoutWideInitializeV184.requestsUsed),
+        provider: "BLOCKSCOUT",
+        logs: 1,
+        resolved: true,
+        resolutionPath: "V625_BLOCKSCOUT_FIRST_EXACT_INITIALIZE",
         error: null
       });
 
