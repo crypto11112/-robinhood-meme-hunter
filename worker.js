@@ -1,4 +1,28 @@
 /**
+ * Robinhood Chain Meme Hunter — V600
+ * AUTHORITATIVE RUNTIME VERSION: V600
+ *
+ * V600 dRPC MONTHLY CAPACITY PROJECTION:
+ * - preserves V599 and all confirmed-working V597 provider failover logic;
+ * - upgrades /feedusage 0xADDRESS with a dRPC free-tier capacity projection;
+ * - dRPC documented free allowance: 210,000,000 CU per 30-day period;
+ * - documented EVM WS pricing used:
+ *     * eth_subscribe = 20 CU
+ *     * each subscription notification = 20 CU
+ * - records one compact provider-session baseline when a WebSocket provider
+ *   successfully opens (NOT per head/swap; no high-frequency storage writes);
+ * - calculates observed heads + exact-pool swap notifications since baseline;
+ * - estimates current CU/hour, CU/day and projected 30-day CU;
+ * - reports projected free-tier usage %, headroom and SAFE/WARNING/EXCEED status;
+ * - projection can be shown even while QuickNode is active, answering:
+ *   "would the same observed feed rate fit inside dRPC free tier?";
+ * - does NOT claim to know dRPC account usage that occurred before V600;
+ * - provider dashboard remains authoritative for actual account-cycle usage;
+ * - /feedusage remains zero external provider/RPC calls and zero writes;
+ * - no V3 decoding, USD, scoring, V4, alert, collector, failover or 42-request
+ *   budget behaviour changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V599
  * AUTHORITATIVE RUNTIME VERSION: V599
  *
@@ -4124,7 +4148,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V599";
+const VERSION = "V600";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -120183,7 +120207,7 @@ function v3FeedUsageTelegramMessageV598(token, result) {
   };
 
   const lines = [
-    `📡 <b>V3 Feed Usage — V598</b>`,
+    `📡 <b>V3 Feed Usage — V600</b>`,
     `Contract: <code>${escapeHtml(token)}</code>`,
     "",
     `Active provider: <b>${escapeHtml(activeProvider)}</b>`,
@@ -120216,6 +120240,33 @@ function v3FeedUsageTelegramMessageV598(token, result) {
     );
   }
 
+  const drpcV600=result?.drpcMonthlyCapacityV600||null;
+  if (drpcV600) {
+    const fmtCuV600 = (value) =>
+      Number.isFinite(Number(value))
+        ? Math.round(Number(value)).toLocaleString("en-GB")
+        : "BUILDING";
+
+    const pctV600 =
+      Number.isFinite(Number(drpcV600?.projected30dPct))
+        ? `${Number(drpcV600.projected30dPct).toFixed(2)}%`
+        : "BUILDING";
+
+    lines.push(
+      "",
+      `📆 <b>dRPC 30-day free-tier projection</b>`,
+      `Free allowance: <b>${fmtCuV600(drpcV600?.freeAllowanceCu30d)} CU</b> / 30 days`,
+      `Pricing basis: <b>20 CU/subscription + 20 CU/notification</b>`,
+      `Measurement sample: <b>${escapeHtml(fmtDuration(drpcV600?.sessionElapsedMs))}</b> | notifications <b>${safeNumber(drpcV600?.notificationsSinceBaseline).toLocaleString("en-GB")}</b>`,
+      `Estimated CU/hour: <b>${fmtCuV600(drpcV600?.estimatedCuPerHour)}</b>`,
+      `Estimated CU/day: <b>${fmtCuV600(drpcV600?.estimatedCuPerDay)}</b>`,
+      `Projected 30-day CU: <b>${fmtCuV600(drpcV600?.projected30dCu)}</b>`,
+      `Projected allowance used: <b>${pctV600}</b>`,
+      `Projected headroom: <b>${fmtCuV600(drpcV600?.projectedHeadroomCu)} CU</b>`,
+      `Capacity status: <b>${escapeHtml(String(drpcV600?.status||"BUILDING_SAMPLE"))}</b>`
+    );
+  }
+
   if (result?.stalePersistedRuntimeState === true) {
     lines.push(
       "",
@@ -120225,8 +120276,8 @@ function v3FeedUsageTelegramMessageV598(token, result) {
 
   lines.push(
     "",
-    `Provider billing/quota: <b>DATA UNVERIFIED</b>`,
-    `<i>Observed feed events are bot-side telemetry, not provider billing credits/CUs. Provider dashboards remain authoritative. /feedusage makes no provider/RPC request and writes no collector state.</i>`
+    `Actual provider account-cycle usage: <b>DATA UNVERIFIED</b>`,
+    `<i>V600 projects dRPC capacity from the live notification rate and dRPC's documented CU model. It does not know usage incurred before V600 or elsewhere on your dRPC account. The dRPC dashboard remains authoritative. /feedusage itself makes no provider/RPC request and writes no collector state.</i>`
   );
 
   return lines.join("\n");
@@ -125528,6 +125579,9 @@ async function scheduledScan(
 const V3_LIVE_DO_BINDING_V363 = "V3_LIVE_COLLECTOR";
 const V3_LIVE_RECONNECT_MS_V363 = 15000;
 const V3_SOCKET_CONNECT_TIMEOUT_MS_V593 = 20000;
+const DRPC_FREE_CU_30D_V600 = 210000000;
+const DRPC_WS_CU_PER_SUBSCRIPTION_V600 = 20;
+const DRPC_WS_CU_PER_NOTIFICATION_V600 = 20;
 const V3_HEAD_STALE_MS_V371 = 30000;
 const V3_HEAD_WATCHDOG_MS_V371 = 15000;
 
@@ -127605,6 +127659,8 @@ if (url.pathname === "/reconcile-v374") {
       await this.state.storage.get("v594:handshakeDiagnostics") || {};
     const preferred =
       await this.state.storage.get("v597:preferredProviderId") || null;
+    const providerSessionV600 =
+      await this.state.storage.get("v600:providerSession") || {};
 
     const configured =
       Array.isArray(conn?.configuredProvidersV597) &&
@@ -127641,6 +127697,71 @@ if (url.pathname === "/reconcile-v374") {
 
     const headsObserved = safeNumber(heads.headsObserved);
     const swapsCaptured = safeNumber(stats.swapsCaptured);
+
+    const meterStartAtV600 =
+      Number.isFinite(Number(providerSessionV600?.startedAt))
+        ? Number(providerSessionV600.startedAt)
+        : null;
+    const meterElapsedMsV600 =
+      meterStartAtV600 !== null
+        ? Math.max(0, nowMs - meterStartAtV600)
+        : 0;
+    const meterHeadsDeltaV600 =
+      meterStartAtV600 !== null
+        ? Math.max(0, headsObserved - safeNumber(providerSessionV600?.headsStart))
+        : 0;
+    const meterSwapsDeltaV600 =
+      meterStartAtV600 !== null
+        ? Math.max(0, swapsCaptured - safeNumber(providerSessionV600?.swapsStart))
+        : 0;
+    const meterNotificationsV600 =
+      meterHeadsDeltaV600 + meterSwapsDeltaV600;
+    const meterSubscriptionActionsV600 =
+      meterStartAtV600 !== null
+        ? Math.max(0, safeNumber(providerSessionV600?.subscriptionActionsAtStart))
+        : 0;
+    const observedDrpcCuV600 =
+      (meterNotificationsV600 * DRPC_WS_CU_PER_NOTIFICATION_V600) +
+      (meterSubscriptionActionsV600 * DRPC_WS_CU_PER_SUBSCRIPTION_V600);
+
+    const hourMsV600 = 60 * 60 * 1000;
+    const dayMsV600 = 24 * hourMsV600;
+    const period30dMsV600 = 30 * dayMsV600;
+
+    const rateEligibleV600 =
+      meterElapsedMsV600 >= 60 * 1000 &&
+      meterNotificationsV600 > 0;
+
+    const drpcCuPerHourV600 =
+      rateEligibleV600
+        ? (meterNotificationsV600 * DRPC_WS_CU_PER_NOTIFICATION_V600) /
+          (meterElapsedMsV600 / hourMsV600)
+        : null;
+    const drpcCuPerDayV600 =
+      Number.isFinite(drpcCuPerHourV600)
+        ? drpcCuPerHourV600 * 24
+        : null;
+    const projectedDrpc30dCuV600 =
+      Number.isFinite(drpcCuPerDayV600)
+        ? (drpcCuPerDayV600 * 30) +
+          (2 * DRPC_WS_CU_PER_SUBSCRIPTION_V600)
+        : null;
+    const projectedDrpc30dPctV600 =
+      Number.isFinite(projectedDrpc30dCuV600)
+        ? (projectedDrpc30dCuV600 / DRPC_FREE_CU_30D_V600) * 100
+        : null;
+    const projectedDrpcHeadroomCuV600 =
+      Number.isFinite(projectedDrpc30dCuV600)
+        ? DRPC_FREE_CU_30D_V600 - projectedDrpc30dCuV600
+        : null;
+    const projectedDrpcCapacityStatusV600 =
+      !Number.isFinite(projectedDrpc30dPctV600)
+        ? "BUILDING_SAMPLE"
+        : projectedDrpc30dPctV600 >= 100
+          ? "LIKELY_TO_EXCEED"
+          : projectedDrpc30dPctV600 >= 80
+            ? "WARNING"
+            : "SAFE";
 
     const recent =
       Array.isArray(handshake?.recentEvents)
@@ -127718,7 +127839,48 @@ if (url.pathname === "/reconcile-v374") {
       recentProviderSwitches,
       recentOpenProviders:openProviders.slice(-6),
       lastProviderFailure:conn?.lastProviderFailureV597 || null,
-      billingQuotaStatus:"DATA_UNVERIFIED",
+      drpcMonthlyCapacityV600:{
+        enabled:true,
+        freeAllowanceCu30d:DRPC_FREE_CU_30D_V600,
+        cuPerSubscription:DRPC_WS_CU_PER_SUBSCRIPTION_V600,
+        cuPerNotification:DRPC_WS_CU_PER_NOTIFICATION_V600,
+        sessionProvider:providerSessionV600?.providerId||null,
+        sessionStartedAt:meterStartAtV600,
+        sessionElapsedMs:meterElapsedMsV600,
+        headsSinceBaseline:meterHeadsDeltaV600,
+        swapsSinceBaseline:meterSwapsDeltaV600,
+        notificationsSinceBaseline:meterNotificationsV600,
+        subscriptionActionsObserved:meterSubscriptionActionsV600,
+        observedEquivalentCu:observedDrpcCuV600,
+        rateSampleReady:rateEligibleV600,
+        estimatedCuPerHour:
+          Number.isFinite(drpcCuPerHourV600)
+            ? Number(drpcCuPerHourV600.toFixed(2))
+            : null,
+        estimatedCuPerDay:
+          Number.isFinite(drpcCuPerDayV600)
+            ? Number(drpcCuPerDayV600.toFixed(2))
+            : null,
+        projected30dCu:
+          Number.isFinite(projectedDrpc30dCuV600)
+            ? Math.round(projectedDrpc30dCuV600)
+            : null,
+        projected30dPct:
+          Number.isFinite(projectedDrpc30dPctV600)
+            ? Number(projectedDrpc30dPctV600.toFixed(3))
+            : null,
+        projectedHeadroomCu:
+          Number.isFinite(projectedDrpcHeadroomCuV600)
+            ? Math.round(projectedDrpcHeadroomCuV600)
+            : null,
+        status:projectedDrpcCapacityStatusV600,
+        projectionWindowDays:30,
+        projectionBasis:"CURRENT_PROVIDER_SESSION_NOTIFICATION_RATE_APPLIED_TO_DRPC_DOCUMENTED_WS_CU_MODEL",
+        actualAccountCycleUsageKnown:false,
+        preV600UsageIncluded:false,
+        providerDashboardAuthoritative:true
+      },
+      billingQuotaStatus:"PROJECTED_DRPC_CAPACITY_AVAILABLE_V600_ACTUAL_ACCOUNT_USAGE_UNVERIFIED",
       observedEventsAreNotBillingUnits:true,
       providerDashboardAuthoritative:true,
       scannerBudgetConsumed:false,
@@ -128781,7 +128943,27 @@ if (url.pathname === "/reconcile-v374") {
     this.ws=ws;
     await this.doPutV404("v597:preferredProviderId",selectedProviderV597.id);
 
-    const openedAtV596=Date.now();
+    // V600: one compact baseline per successful provider session.
+    // This is intentionally NOT updated per notification.
+    const meterHeadsV600 =
+      this.headsV402 || await this.state.storage.get("v368:heads") || {};
+    const meterStatsV600 =
+      this.liveStatsV403 || await this.state.storage.get("stats") || {};
+    const openedAtV600 = Date.now();
+
+    await this.doPutV404("v600:providerSession",{
+      providerId:selectedProviderV597?.id||null,
+      startedAt:openedAtV600,
+      headsStart:safeNumber(meterHeadsV600?.headsObserved),
+      swapsStart:safeNumber(meterStatsV600?.swapsCaptured),
+      subscriptionActionsAtStart:2,
+      drpcCuPerSubscription:DRPC_WS_CU_PER_SUBSCRIPTION_V600,
+      drpcCuPerNotification:DRPC_WS_CU_PER_NOTIFICATION_V600,
+      drpcFreeCu30d:DRPC_FREE_CU_30D_V600,
+      basis:"SUCCESSFUL_PROVIDER_OPEN_BASELINE_V600"
+    });
+
+    const openedAtV596=openedAtV600;
     await this.recordV3HandshakeEventV594(
       "OPEN_V594",
       {
