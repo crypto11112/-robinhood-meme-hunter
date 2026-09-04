@@ -1,4 +1,19 @@
 /**
+ * Robinhood Chain Meme Hunter — V623
+ * AUTHORITATIVE RUNTIME VERSION: V623
+ *
+ * V623 EXACT RPC IDENTITY PROVIDER DIAGNOSTICS
+ * - builds directly forward from V622 with discovery/scoring/alerts unchanged;
+ * - instruments the existing V188 exact blockHash PoolId resolver per provider;
+ * - records CHAINSTACK / ALCHEMY / ROBINHOOD_PUBLIC_RPC eligibility and skip reason;
+ * - records exact block lookup attempt/result, block hash, exact eth_getLogs attempt/result,
+ *   returned log count, exact PoolId match, failure stage and raw provider error;
+ * - proves whether a failure is block lookup, EIP-234 blockHash log support, 429/cooldown,
+ *   empty exact Initialize evidence, budget protection or missing provider configuration;
+ * - zero new requests and no provider order/cadence/request ceilings are changed;
+ * - preserves V622 live PoolId identity diagnostics and all V621 working behaviour.
+ */
+/**
  * Robinhood Chain Meme Hunter — V622
  * AUTHORITATIVE RUNTIME VERSION: V622
  *
@@ -4565,7 +4580,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V622";
+const VERSION = "V623";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -17426,7 +17441,8 @@ async function getInitializeForPoolBlockHashV188(
     logs: [],
     resolvedPool: null,
     error: null,
-    status: null
+    status: null,
+    providerAttemptsV623: []
   };
 
   const normalizedPoolId =
@@ -17454,25 +17470,17 @@ async function getInitializeForPoolBlockHashV188(
 
   let used = 0;
   let lastError = null;
+  const providerAttemptsV623 = [];
 
   for (
     const provider
     of providers
   ) {
-    if (
-      used >=
-        externalRequestAllowance ||
-      !budgetAvailable(
-        budget,
-        "discovery-live"
-      ) ||
+    const cooling =
       discoveryProviderCooling(
         state,
         provider
-      )
-    ) {
-      continue;
-    }
+      );
 
     const url =
       rpcProviderUrl(
@@ -17480,16 +17488,82 @@ async function getInitializeForPoolBlockHashV188(
         provider
       );
 
-    if (!url) {
+    const rowV623 = {
+      provider,
+      configured: Boolean(url),
+      cooling: Boolean(cooling),
+      skipped: false,
+      skipReason: null,
+      requestsUsedBefore:
+        used,
+      blockLookupAttempted: false,
+      blockLookupStatus: "NOT_REACHED",
+      blockLookupError: null,
+      blockHash: null,
+      exactLogLookupAttempted: false,
+      exactLogLookupStatus: "NOT_REACHED",
+      exactLogLookupError: null,
+      logCount: 0,
+      exactPoolIdMatched: false,
+      resolved: false,
+      failureStage: null,
+      requestsUsedAfter: null
+    };
+
+    if (
+      used >=
+        externalRequestAllowance
+    ) {
+      rowV623.skipped = true;
+      rowV623.skipReason =
+        "REQUEST_ALLOWANCE_EXHAUSTED";
+      rowV623.requestsUsedAfter = used;
+      providerAttemptsV623.push(rowV623);
       continue;
     }
 
+    if (
+      !budgetAvailable(
+        budget,
+        "discovery-live"
+      )
+    ) {
+      rowV623.skipped = true;
+      rowV623.skipReason =
+        "DISCOVERY_LIVE_BUDGET_PROTECTED";
+      rowV623.requestsUsedAfter = used;
+      providerAttemptsV623.push(rowV623);
+      continue;
+    }
+
+    if (cooling) {
+      rowV623.skipped = true;
+      rowV623.skipReason =
+        "PROVIDER_COOLDOWN_ACTIVE";
+      rowV623.requestsUsedAfter = used;
+      providerAttemptsV623.push(rowV623);
+      continue;
+    }
+
+    if (!url) {
+      rowV623.skipped = true;
+      rowV623.skipReason =
+        "PROVIDER_NOT_CONFIGURED";
+      rowV623.requestsUsedAfter = used;
+      providerAttemptsV623.push(rowV623);
+      continue;
+    }
+
+    let stageV623 =
+      "BLOCK_LOOKUP";
+
     try {
       /*
-       * Request #1: obtain the exact block hash. A blockHash log query then
-       * avoids the provider's restrictive multi-block eth_getLogs range.
+       * Existing V188 request #1: obtain exact block hash.
+       * V623 only records the outcome; request behaviour is unchanged.
        */
       used++;
+      rowV623.blockLookupAttempted = true;
 
       const block =
         await rpcCall(
@@ -17511,8 +17585,27 @@ async function getInitializeForPoolBlockHashV188(
           block?.hash
         );
 
+      rowV623.blockHash =
+        blockHash || null;
+
+      if (!blockHash) {
+        rowV623.blockLookupStatus =
+          "NO_BLOCK_HASH";
+        rowV623.failureStage =
+          "BLOCK_LOOKUP";
+        rowV623.blockLookupError =
+          "BLOCK_HASH_UNAVAILABLE";
+        lastError =
+          "BLOCK_HASH_UNAVAILABLE_OR_BUDGET_PROTECTED";
+        rowV623.requestsUsedAfter = used;
+        providerAttemptsV623.push(rowV623);
+        continue;
+      }
+
+      rowV623.blockLookupStatus =
+        "OK";
+
       if (
-        !blockHash ||
         used >=
           externalRequestAllowance ||
         !budgetAvailable(
@@ -17520,12 +17613,22 @@ async function getInitializeForPoolBlockHashV188(
           "discovery-live"
         )
       ) {
+        rowV623.failureStage =
+          "BETWEEN_BLOCK_AND_LOG";
+        rowV623.exactLogLookupStatus =
+          "REQUEST_ALLOWANCE_OR_BUDGET_PROTECTED";
         lastError =
           "BLOCK_HASH_UNAVAILABLE_OR_BUDGET_PROTECTED";
+        rowV623.requestsUsedAfter = used;
+        providerAttemptsV623.push(rowV623);
         continue;
       }
 
+      stageV623 =
+        "EXACT_BLOCKHASH_LOG_LOOKUP";
+
       used++;
+      rowV623.exactLogLookupAttempted = true;
 
       const logs =
         await rpcCall(
@@ -17548,6 +17651,13 @@ async function getInitializeForPoolBlockHashV188(
         Array.isArray(logs)
           ? logs
           : [];
+
+      rowV623.logCount =
+        rows.length;
+      rowV623.exactLogLookupStatus =
+        rows.length > 0
+          ? "LOGS_RETURNED"
+          : "EMPTY";
 
       let resolvedPool =
         null;
@@ -17572,6 +17682,17 @@ async function getInitializeForPoolBlockHashV188(
         }
       }
 
+      rowV623.exactPoolIdMatched =
+        Boolean(resolvedPool);
+      rowV623.resolved =
+        Boolean(resolvedPool);
+      rowV623.failureStage =
+        resolvedPool
+          ? null
+          : "EXACT_BLOCKHASH_LOG_LOOKUP";
+      rowV623.requestsUsedAfter = used;
+      providerAttemptsV623.push(rowV623);
+
       return {
         ...base,
         attempted: true,
@@ -17585,7 +17706,8 @@ async function getInitializeForPoolBlockHashV188(
         status:
           resolvedPool
             ? "RESOLVED"
-            : "EMPTY"
+            : "EMPTY",
+        providerAttemptsV623
       };
     } catch (error) {
       const message =
@@ -17598,6 +17720,27 @@ async function getInitializeForPoolBlockHashV188(
         message;
 
       if (
+        stageV623 ===
+          "BLOCK_LOOKUP"
+      ) {
+        rowV623.blockLookupStatus =
+          "ERROR";
+        rowV623.blockLookupError =
+          message;
+      } else {
+        rowV623.exactLogLookupStatus =
+          "ERROR";
+        rowV623.exactLogLookupError =
+          message;
+      }
+
+      rowV623.failureStage =
+        stageV623;
+      rowV623.requestsUsedAfter =
+        used;
+      providerAttemptsV623.push(rowV623);
+
+      if (
         is429(message)
       ) {
         markDiscovery429(
@@ -17606,11 +17749,7 @@ async function getInitializeForPoolBlockHashV188(
         );
       }
 
-      /*
-       * A provider may not support EIP-234 blockHash filtering. Preserve
-       * the existing range resolver as fallback rather than treating that
-       * as a fatal scan error.
-       */
+      /* Preserve V188 provider fallback semantics unchanged. */
       continue;
     }
   }
@@ -17626,7 +17765,8 @@ async function getInitializeForPoolBlockHashV188(
     status:
       used > 0
         ? "UNRESOLVED"
-        : "NOT_ATTEMPTED"
+        : "NOT_ATTEMPTED",
+    providerAttemptsV623
   };
 }
 
@@ -19708,7 +19848,8 @@ async function resolvePersistentUnknownPools(
       status: "NOT_REACHED",
       checkpointOutcomeV189: "NOT_REACHED",
       error: null,
-      fallbackToRangeCrawler: false
+      fallbackToRangeCrawler: false,
+      providerAttemptsV623: []
     },
     probes: []
   };
@@ -20276,6 +20417,14 @@ async function resolvePersistentUnknownPools(
       output.rpcBlockHashInitializeV188
         .error =
           blockHashV188.error;
+
+      output.rpcBlockHashInitializeV188
+        .providerAttemptsV623 =
+          Array.isArray(
+            blockHashV188.providerAttemptsV623
+          )
+            ? blockHashV188.providerAttemptsV623
+            : [];
 
       if (
         blockHashV188.resolvedPool
