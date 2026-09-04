@@ -1,4 +1,17 @@
 /**
+ * Robinhood Chain Meme Hunter — V626
+ * AUTHORITATIVE RUNTIME VERSION: V626
+ *
+ * V626 dRPC PRIMARY FREE-RPC INTEGRATION
+ * - activates the already-configured DRPC_WSS_URL secret for normal HTTP JSON-RPC by deriving HTTPS from WSS;
+ * - dRPC becomes first normal SYSTEM + ANALYSIS RPC in the existing rpc() router;
+ * - dRPC becomes first LIVE discovery eth_getLogs provider and first exact V4 PoolId block-hash identity provider;
+ * - Robinhood Public RPC, Alchemy and Chainstack remain bounded fallbacks;
+ * - adds dRPC discovery 429 cooldown telemetry using the existing persistent discovery state;
+ * - does not add requests, raise the hard 42-request ceiling, alter backlog learning, scoring, Momentum, qualification, launch proof, or Telegram thresholds;
+ * - Blockscout remains the indexed-data source and V625 Blockscout-first identity recovery is preserved.
+ */
+/**
  * Robinhood Chain Meme Hunter — V625
  * AUTHORITATIVE RUNTIME VERSION: V625
  *
@@ -4617,7 +4630,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V625";
+const VERSION = "V626";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -15041,6 +15054,22 @@ function markDiscovery429(
 
   if (
     provider ===
+    "DRPC"
+  ) {
+    service.drpcLiveLast429AtV626 =
+      Date.now();
+
+    service.drpcLiveCooldownUntilV626 =
+      until;
+
+    service.drpcLiveTotal429sV626 =
+      safeNumber(
+        service.drpcLiveTotal429sV626
+      ) + 1;
+  }
+
+  if (
+    provider ===
     "CHAINSTACK"
   ) {
     service.chainstackLiveLast429AtV435 =
@@ -15107,6 +15136,18 @@ function discoveryProviderCooling(
 
   if (
     provider ===
+    "DRPC"
+  ) {
+    return (
+      safeNumber(
+        service.drpcLiveCooldownUntilV626
+      ) >
+      Date.now()
+    );
+  }
+
+  if (
+    provider ===
     "ROBINHOOD_PUBLIC_RPC"
   ) {
     return (
@@ -15153,6 +15194,16 @@ function preferredLiveDiscoveryProviderV435(
   state
 ) {
   if (
+    drpcConfiguredV626(env) &&
+    !discoveryProviderCooling(
+      state,
+      "DRPC"
+    )
+  ) {
+    return "DRPC";
+  }
+
+  if (
     chainstackConfiguredV431(env) &&
     !chainstackLiveDiscoveryCoolingV435(
       state
@@ -15175,6 +15226,17 @@ function alternateLiveDiscoveryProviderV435(
   state,
   current
 ) {
+  if (
+    current !== "DRPC" &&
+    drpcConfiguredV626(env) &&
+    !discoveryProviderCooling(
+      state,
+      "DRPC"
+    )
+  ) {
+    return "DRPC";
+  }
+
   if (
     current !== "CHAINSTACK" &&
     chainstackConfiguredV431(env) &&
@@ -15244,12 +15306,33 @@ function liveDiscoveryTelemetryV435(
     enabled: true,
     scope:
       "LIVE_DISCOVERY_ETH_GETLOGS_ONLY",
+    drpcConfiguredV626:
+      drpcConfiguredV626(env),
+    drpcCoolingV626:
+      discoveryProviderCooling(
+        state,
+        "DRPC"
+      ),
+    drpcCooldownUntilV626:
+      safeNumber(
+        service.drpcLiveCooldownUntilV626
+      ) || null,
+    drpcLast429AtV626:
+      safeNumber(
+        service.drpcLiveLast429AtV626
+      ) || null,
+    drpcTotal429sV626:
+      safeNumber(
+        service.drpcLiveTotal429sV626
+      ),
     chainstackConfigured:
       chainstackConfiguredV431(env),
     preferredProvider:
-      chainstackConfiguredV431(env)
-        ? "CHAINSTACK"
-        : "LEGACY_DISCOVERY_ORDER",
+      drpcConfiguredV626(env)
+        ? "DRPC"
+        : chainstackConfiguredV431(env)
+          ? "CHAINSTACK"
+          : "LEGACY_DISCOVERY_ORDER",
     actualSuccessfulRangeProviders:
       byProvider,
     lastLiveProvider:
@@ -17500,6 +17583,7 @@ async function getInitializeForPoolBlockHashV188(
   }
 
   const providers = [
+    "DRPC",
     "ROBINHOOD_PUBLIC_RPC",
     "ALCHEMY",
     "CHAINSTACK"
@@ -22303,6 +22387,36 @@ function chainstackPlanningAllowanceV433(env) {
 }
 
 
+function drpcRpcUrlV626(env) {
+  const explicit =
+    String(
+      env?.DRPC_RPC_URL || ""
+    ).trim();
+
+  if (/^https?:\/\/.+/i.test(explicit)) {
+    return explicit;
+  }
+
+  const wss =
+    String(
+      env?.DRPC_WSS_URL || ""
+    ).trim();
+
+  const derived = wss
+    .replace(/^wss:\/\//i, "https://")
+    .replace(/^ws:\/\//i, "http://");
+
+  return /^https?:\/\/.+/i.test(derived)
+    ? derived
+    : null;
+}
+
+function drpcConfiguredV626(env) {
+  return Boolean(
+    drpcRpcUrlV626(env)
+  );
+}
+
 function chainstackRpcUrlV431(env) {
   const value =
     String(
@@ -22485,6 +22599,7 @@ function providerScoreV424(budget, provider, method, originalIndex) {
    * V431: managed Chainstack gets the strongest initial preference when
    * configured. Dynamic health evidence still overrides this preference.
    */
+  if (provider === "DRPC") score += 100;
   if (provider === "CHAINSTACK") score += 60;
   if (provider === "ROBINHOOD_PUBLIC_RPC") score += 15;
 
@@ -23672,6 +23787,9 @@ async function rpc(
   budget,
   phase
 ) {
+  const drpcUrl =
+    drpcRpcUrlV626(env);
+
   const chainstackUrl =
     chainstackRpcUrlV431(env);
 
@@ -23683,11 +23801,13 @@ async function rpc(
   const originalProviders =
     phase === "analysis"
       ? [
+          {name: "DRPC", url: drpcUrl},
           {name: "CHAINSTACK", url: chainstackUrl},
           {name: "ROBINHOOD_PUBLIC_RPC", url: PUBLIC_RPC},
           {name: "ALCHEMY", url: alchemyUrl}
         ]
       : [
+          {name: "DRPC", url: drpcUrl},
           {name: "CHAINSTACK", url: chainstackUrl},
           {name: "ROBINHOOD_PUBLIC_RPC", url: PUBLIC_RPC},
           ...(alchemyUrl ? [{name: "ALCHEMY", url: alchemyUrl}] : [])
@@ -23857,6 +23977,14 @@ function normalSystemRpcsAll429V429(
   const configured = [
     "ROBINHOOD_PUBLIC_RPC"
   ];
+
+  if (
+    drpcConfiguredV626(env)
+  ) {
+    configured.unshift(
+      "DRPC"
+    );
+  }
 
   if (
     chainstackConfiguredV431(env)
@@ -24201,6 +24329,15 @@ function rpcProviderUrl(
   env,
   provider
 ) {
+  if (
+    provider ===
+    "DRPC"
+  ) {
+    return drpcRpcUrlV626(
+      env
+    );
+  }
+
   if (
     provider ===
     "CHAINSTACK"
