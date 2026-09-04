@@ -1,4 +1,25 @@
 /**
+ * Robinhood Chain Meme Hunter — V579
+ * AUTHORITATIVE RUNTIME VERSION: V579
+ *
+ * V579 FAIR RECOVERED-POOL ROTATION:
+ * - preserves V578 and all earlier confirmed-working behaviour;
+ * - fixes V578 starvation where both available directional catch-up chunks
+ *   could be consumed by the same tier-4 V466-recovered pool;
+ * - tier-4 prior-completion catch-up pools now rotate one distinct pool first
+ *   before any same-pool second-chunk sprint is allowed;
+ * - example: if NUDES and JUICE both need catch-up, chunk 1 may go to NUDES
+ *   and chunk 2 must prefer JUICE before NUDES can consume another chunk;
+ * - same-pool sprint remains available only when no other eligible tier-4
+ *   prior-completion catch-up pool is waiting;
+ * - generic logic, never hard-coded to JUICE;
+ * - no historical backfill;
+ * - no scoring, Momentum, qualification, USD maths, retention, Telegram,
+ *   provider, or alert-threshold changes;
+ * - no extra external requests;
+ * - hard global request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V578
  * AUTHORITATIVE RUNTIME VERSION: V578
  *
@@ -3659,7 +3680,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V578";
+const VERSION = "V579";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -58126,6 +58147,21 @@ function directionalWatchNeedsPriorCompletionCatchupV578(row, latestNumber = nul
   );
 }
 
+
+function directionalWatchHasOtherPriorCompletionCatchupV579(
+  state,
+  currentPoolId,
+  latestNumber
+) {
+  const current = String(currentPoolId || "").toLowerCase();
+
+  return Object.values(state?.continuousDirectionalWatchV551?.entries || {}).some(
+    row =>
+      String(row?.poolId || "").toLowerCase() !== current &&
+      directionalWatchNeedsPriorCompletionCatchupV578(row, latestNumber)
+  );
+}
+
 function directionalWatchPriorityTierV567(row) {
   /*
    * V578: safely reconstructed V466 pools retain temporary catch-up priority
@@ -76405,6 +76441,17 @@ for (
   const priorCompletionCatchupSprintV578 =
     directionalWatchReserveV553?.priorCompletionCatchupPriorityV578 === true;
 
+  const otherPriorCompletionCatchupWaitingV579 =
+    Boolean(
+      priorCompletionCatchupSprintV578 &&
+      continuousDirectionalWatchThisScanV551?.selectedPoolId &&
+      directionalWatchHasOtherPriorCompletionCatchupV579(
+        state,
+        continuousDirectionalWatchThisScanV551.selectedPoolId,
+        latestNumber
+      )
+    );
+
   const expansionCatchupSprintV568 =
     directionalWatchReserveV553?.expansionCatchupSprintEligibleV568 === true &&
     continuousDirectionalWatchThisScanV551?.requestConsumed === true &&
@@ -76413,7 +76460,8 @@ for (
     (
       continuousDirectionalWatchThisScanV551?.expansionReadyPriorityV567 === true ||
       priorCompletionCatchupSprintV578
-    );
+    ) &&
+    !otherPriorCompletionCatchupWaitingV579;
 
   const expansionCatchupPoolIdV568 =
     expansionCatchupSprintV568
@@ -76596,7 +76644,15 @@ for (
     enabled:true,
     measurementOnly:true,
     samePoolOnly:false,
-    schedulerVersion:"V578_V466_CATCHUP_TO_HEAD_THEN_V561_DISTINCT_ROUND_ROBIN",
+    schedulerVersion:"V579_FAIR_V466_CATCHUP_ROTATION_THEN_V561_DISTINCT_ROUND_ROBIN",
+    fairPriorCompletionRotationV579:{
+      enabled:true,
+      distinctTier4PoolBeforeSamePoolSprint:true,
+      samePoolSprintBlockedWhenAnotherTier4Waiting:true,
+      generic:true,
+      externalRequestsAdded:0,
+      hardGlobalLimitUnchanged:42
+    },
     finishNearHeadPoolFirstV561:true,
     maxWatchedPoolsAdvancedPerScan:DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554,
     maxChunksPerScan:DIRECTIONAL_WATCH_MAX_CHUNKS_PER_SCAN_V554,
@@ -76712,8 +76768,16 @@ for (
       externalRequestsAdded:0,
       hardGlobalLimitUnchanged:42
     },
+    fairPriorCompletionRotationV579:{
+      enabled:true,
+      distinctRecoveredPoolsPreferredBeforeSamePoolSprint:true,
+      samePoolSprintOnlyWhenNoOtherTier4RecoveredPoolWaiting:true,
+      generic:true,
+      externalRequestsAdded:0,
+      hardGlobalLimitUnchanged:42
+    },
     reserveVersion:"V559_DYNAMIC_THREE_SLOT_WITH_ONE_MINIMUM_GUARANTEE",
-    selectionPriorityV560:"V578_PRIOR_COMPLETION_CATCHUP_TO_HEAD_THEN_V567_NORMAL_PRIORITY",
+    selectionPriorityV560:"V579_FAIR_PRIOR_COMPLETION_ROTATION_THEN_V578_CATCHUP_TO_HEAD_THEN_V567_NORMAL_PRIORITY",
     finishNearHeadPoolFirstV561:true,
     elasticNearHeadSpanV562:true,
     elasticNearHeadMaxSpanV562:DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551,
