@@ -1,4 +1,27 @@
 /**
+ * Robinhood Chain Meme Hunter — V634
+ * AUTHORITATIVE RUNTIME VERSION: V634
+ *
+ * V634 PERSISTENT UNKNOWN-POOL FIRST-ACTIVE CHECKPOINT
+ * - builds directly forward from V633;
+ * - NEW: when an exact first-active-block PoolId Initialize checkpoint returns
+ *   a successful EMPTY result, that fact is persisted on the unknown-pool row;
+ * - future scans skip repeating the same 2-request blockHash checkpoint for
+ *   that PoolId and spend the preserved resolver capacity on backward exact
+ *   Initialize ranges instead;
+ * - a checkpoint is only memoized after a successful exact EMPTY response;
+ *   provider errors, 429s, aborts and budget blocks are NEVER memoized;
+ * - if firstActiveBlock changes for any reason, the stored checkpoint is
+ *   automatically invalidated and may be proved again;
+ * - Validation Cloud stays primary; exact backward range fallback includes
+ *   Chainstack before Robinhood Public RPC and Alchemy;
+ * - V630 backward cursor, V631 source attribution, V632 resilience and V633
+ *   global dRPC removal are preserved;
+ * - zero scoring, Momentum, qualification, Telegram threshold, launchpad proof,
+ *   KV/state-key, or hard 42-request ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V633
  * AUTHORITATIVE RUNTIME VERSION: V633
  *
@@ -4765,7 +4788,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V633";
+const VERSION = "V634";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -16267,6 +16290,32 @@ function observeUnknownPools(
         safeNumber(
           previous.lastResolvedSearchDistance
         ) || null,
+      firstActiveCheckpointBlockV634:
+        safeNumber(
+          previous.firstActiveCheckpointBlockV634
+        ) || null,
+      firstActiveCheckpointStatusV634:
+        (
+          safeNumber(
+            previous.firstActiveCheckpointBlockV634
+          ) === safeNumber(firstActiveBlock)
+        )
+          ? (
+              previous.firstActiveCheckpointStatusV634 ||
+              null
+            )
+          : null,
+      firstActiveCheckpointAtV634:
+        (
+          safeNumber(
+            previous.firstActiveCheckpointBlockV634
+          ) === safeNumber(firstActiveBlock)
+        )
+          ? (
+              previous.firstActiveCheckpointAtV634 ||
+              null
+            )
+          : null,
       lastError:
         previous.lastError ||
         null
@@ -18155,6 +18204,16 @@ async function getInitializeForPoolRange(
     },
     {
       provider:
+        "CHAINSTACK",
+      safeBlocks:
+        VALIDATION_CLOUD_UNKNOWN_POOL_RANGE_BLOCKS_V630,
+      genericSafe:
+        VALIDATION_CLOUD_UNKNOWN_POOL_RANGE_BLOCKS_V630,
+      fixedBoundedRangeV634:
+        true
+    },
+    {
+      provider:
         "ROBINHOOD_PUBLIC_RPC",
       safeBlocks:
         safeChunks.publicChunkBlocks,
@@ -18347,6 +18406,7 @@ async function getInitializeForPoolRange(
 
     const shouldProbe =
       provider !== "VALIDATION_CLOUD" &&
+      provider !== "CHAINSTACK" &&
       exactPoolCanGrowthProbe(
         state,
         provider,
@@ -20178,12 +20238,24 @@ async function resolvePersistentUnknownPools(
       cursorSource: "unknownPools[poolId].searchCursorBlock",
       advancesOnlyAfterSuccessfulEmptyRange: true,
       blockscoutKnown403Bypass: true,
+      persistentFirstActiveEmptyMemoV634: true,
+      firstActiveCheckpointRequestsPreservedPerMemoizedPoolV634: 2,
+      exactRangeFallbackOrderV634: [
+        "VALIDATION_CLOUD",
+        "CHAINSTACK",
+        "ROBINHOOD_PUBLIC_RPC",
+        "ALCHEMY"
+      ],
       extraHardRequestCeiling: 0,
       status: "ARMED"
+
     },
     rpcBlockHashInitializeV188: {
       enabled: true,
       forcedCheckpointV189: true,
+      persistentEmptyMemoV634: true,
+      memoizedEmptySkipsV634: 0,
+      requestsPreservedForBackwardSearchV634: 0,
       reservedRequestsV189: 2,
       maxPoolsPerRun: 1,
       attempts: 0,
@@ -20827,7 +20899,50 @@ async function resolvePersistentUnknownPools(
     let blockHashResolvedPoolV188 =
       null;
 
+    const firstActiveCheckpointAlreadyEmptyV634 =
+      entry.firstActiveCheckpointStatusV634 ===
+        "EMPTY" &&
+      safeNumber(
+        entry.firstActiveCheckpointBlockV634
+      ) ===
+        safeNumber(
+          entry.firstActiveBlock
+        );
+
     if (
+      firstActiveCheckpointAlreadyEmptyV634
+    ) {
+      output.rpcBlockHashInitializeV188
+        .memoizedEmptySkipsV634 += 1;
+
+      output.rpcBlockHashInitializeV188
+        .requestsPreservedForBackwardSearchV634 += 2;
+
+      output.rpcBlockHashInitializeV188
+        .selectedPoolId =
+          poolId;
+
+      output.rpcBlockHashInitializeV188
+        .blockNumber =
+          safeNumber(
+            entry.firstActiveBlock
+          ) || null;
+
+      output.rpcBlockHashInitializeV188
+        .status =
+          "SKIPPED_MEMOIZED_EMPTY_V634";
+
+      output.rpcBlockHashInitializeV188
+        .checkpointOutcomeV189 =
+          "EMPTY_MEMOIZED_V634";
+
+      output.rpcBlockHashInitializeV188
+        .fallbackToRangeCrawler =
+          true;
+    }
+
+    if (
+      !firstActiveCheckpointAlreadyEmptyV634 &&
       output.rpcBlockHashInitializeV188
         .attempts < 1 &&
       (
@@ -20920,6 +21035,34 @@ async function resolvePersistentUnknownPools(
 
         output.rpcBlockHashInitializeV188
           .resolved = 1;
+      } else if (
+        blockHashV188.status === "EMPTY" &&
+        !blockHashV188.error &&
+        safeNumber(
+          blockHashV188.blockNumber
+        ) ===
+          safeNumber(
+            entry.firstActiveBlock
+          )
+      ) {
+        /*
+         * V634: only successful exact EMPTY is safe to memoize.
+         * Errors and budget/provider failures must remain retryable.
+         */
+        entry.firstActiveCheckpointBlockV634 =
+          safeNumber(
+            entry.firstActiveBlock
+          );
+
+        entry.firstActiveCheckpointStatusV634 =
+          "EMPTY";
+
+        entry.firstActiveCheckpointAtV634 =
+          Date.now();
+
+        output.rpcBlockHashInitializeV188
+          .fallbackToRangeCrawler =
+            true;
       } else if (
         blockHashV188.attempted
       ) {
