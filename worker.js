@@ -1,4 +1,26 @@
 /**
+ * Robinhood Chain Meme Hunter — V632
+ * AUTHORITATIVE RUNTIME VERSION: V632
+ *
+ * V632 VALIDATION CLOUD LIVE-RANGE RESILIENCE
+ * - builds directly forward from fixed V631;
+ * - NEW: Validation Cloud live eth_getLogs treats transport abort/timeout and
+ *   provider internal-server/5xx errors as retryable live-range failures;
+ * - NEW: retries the identical bounded live range ONCE on Validation Cloud;
+ * - NEW: if that still fails, immediately falls through the existing free RPC
+ *   chain in this order: Robinhood Public RPC -> Alchemy -> Chainstack;
+ * - dRPC is excluded from this live fallback path because Robinhood Mainnet
+ *   endpoint access is not available in the user's current dRPC setup;
+ * - a successful fallback continues the live cursor normally instead of
+ *   declaring PARTIAL_SCAN_FAILED_LIVE_RANGE;
+ * - existing 429 cooldown protection remains unchanged;
+ * - V630 backward exact-PoolId identity recovery and V631 source-attribution
+ *   priority/3x3 proof rules are preserved;
+ * - zero scoring, Momentum, qualification, Telegram threshold, launchpad proof,
+ *   KV/state-key, or hard 42-request ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V631
  * AUTHORITATIVE RUNTIME VERSION: V631
  *
@@ -4723,7 +4745,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V631";
+const VERSION = "V632";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -15385,6 +15407,11 @@ function alternateLiveDiscoveryProviderV435(
   state,
   current
 ) {
+  /*
+   * V632 live fallback order.
+   * Validation Cloud remains primary; dRPC is intentionally excluded because
+   * no usable Robinhood Mainnet endpoint is available in the current setup.
+   */
   if (
     current !== "VALIDATION_CLOUD" &&
     validationCloudConfiguredV627(env) &&
@@ -15394,27 +15421,6 @@ function alternateLiveDiscoveryProviderV435(
     )
   ) {
     return "VALIDATION_CLOUD";
-  }
-
-  if (
-    current !== "DRPC" &&
-    drpcConfiguredV626(env) &&
-    !discoveryProviderCooling(
-      state,
-      "DRPC"
-    )
-  ) {
-    return "DRPC";
-  }
-
-  if (
-    current !== "CHAINSTACK" &&
-    chainstackConfiguredV431(env) &&
-    !chainstackLiveDiscoveryCoolingV435(
-      state
-    )
-  ) {
-    return "CHAINSTACK";
   }
 
   if (
@@ -15436,6 +15442,16 @@ function alternateLiveDiscoveryProviderV435(
     )
   ) {
     return "ALCHEMY";
+  }
+
+  if (
+    current !== "CHAINSTACK" &&
+    chainstackConfiguredV431(env) &&
+    !chainstackLiveDiscoveryCoolingV435(
+      state
+    )
+  ) {
+    return "CHAINSTACK";
   }
 
   return null;
@@ -24663,6 +24679,32 @@ function isRpcAbortLikeV156(
   );
 }
 
+function isRetryableLiveProviderErrorV632(
+  value
+) {
+  const text =
+    String(
+      value ||
+      ""
+    ).toLowerCase();
+
+  return (
+    isRpcAbortLikeV156(text) ||
+    text.includes("internal server error") ||
+    text.includes("http 500") ||
+    text.includes("http_500") ||
+    text.includes("http 502") ||
+    text.includes("http_502") ||
+    text.includes("bad gateway") ||
+    text.includes("http 503") ||
+    text.includes("http_503") ||
+    text.includes("service unavailable") ||
+    text.includes("http 504") ||
+    text.includes("http_504") ||
+    text.includes("gateway timeout")
+  );
+}
+
 async function providerHeadBlock(
   env,
   budget,
@@ -26316,7 +26358,7 @@ async function scanLiveRange(
       !Array.isArray(
         response.result
       ) &&
-      isRpcAbortLikeV156(
+      isRetryableLiveProviderErrorV632(
         response.error
       )
     ) {
@@ -26339,9 +26381,9 @@ async function scanLiveRange(
         abortRecoveryAttemptsV156++;
 
         /*
-         * V630: Validation Cloud has ample free headroom and recent aborts were
-         * transport-level rather than HTTP 429. Retry the identical bounded
-         * request ONCE on Validation Cloud before moving to another provider.
+         * V632: Validation Cloud has ample free headroom. Retry the identical
+         * bounded range ONCE for transport/timeout/internal-server/5xx failures
+         * before moving immediately to another free RPC provider.
          */
         if (
           provider === "VALIDATION_CLOUD" &&
@@ -26352,7 +26394,7 @@ async function scanLiveRange(
         ) {
           abortSameProviderRetriesV156++;
 
-          const sameProviderRetryV630 =
+          const sameProviderRetryV632 =
             await getLogsSingleProvider(
               env,
               cursor,
@@ -26364,11 +26406,11 @@ async function scanLiveRange(
             );
 
           response =
-            sameProviderRetryV630;
+            sameProviderRetryV632;
 
           if (
             Array.isArray(
-              sameProviderRetryV630.result
+              sameProviderRetryV632.result
             )
           ) {
             abortRecoverySuccessesV156++;
