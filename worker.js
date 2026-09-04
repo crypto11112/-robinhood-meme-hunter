@@ -1,4 +1,27 @@
 /**
+ * Robinhood Chain Meme Hunter — V592
+ * AUTHORITATIVE RUNTIME VERSION: V592
+ *
+ * V592 TELEGRAM V3 COLLECTOR CONTROLS:
+ * - preserves V591 and all confirmed-working V4/V3 collector behaviour;
+ * - exposes the already-existing verified V3 live collector lifecycle through
+ *   Telegram:
+ *     /v3start 0xADDRESS
+ *     /v3status 0xADDRESS
+ *     /v3stop 0xADDRESS
+ * - /v3start calls the same existing v3LiveCollectorRouteV363(...,"start")
+ *   used by the Worker /v3live-start HTTP route;
+ * - start still validates token + verified V3 configuration before enabling;
+ * - /v3status is read-only;
+ * - /v3stop intentionally disables that token's collector, which V591
+ *   self-heal respects;
+ * - updates /help wording so mutating V3 controls are not described as
+ *   read-only diagnostics;
+ * - no scoring, Momentum, qualification, USD maths, provider budgets,
+ *   alert thresholds or V4 logic changes;
+ * - hard global external-request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V591
  * AUTHORITATIVE RUNTIME VERSION: V591
  *
@@ -3965,7 +3988,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V591";
+const VERSION = "V592";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -119924,6 +119947,9 @@ function telegramHelpV271() {
     "<code>/horizon GUS</code> — fixed-horizon capture diagnostics",
     "<code>/live GUS</code> — V414 lower-timeframe rolling signals + breakout state (read-only)",
     "<code>/v3usd 0xADDRESS</code> — persisted native V3 USD flow (read-only)",
+    "<code>/v3start 0xADDRESS</code> — enable/start the verified native V3 live collector",
+    "<code>/v3status 0xADDRESS</code> — V3 live collector socket/subscription status",
+    "<code>/v3stop 0xADDRESS</code> — intentionally disable the token's V3 live collector",
     "<code>/launches</code> — verified rolling 24h launch meter",
     "<code>/launchsources</code> — verified launch-source coverage + active sources",
     "<code>/sourceintel</code> — self-learned source identity + seeded lead correlation",
@@ -119932,7 +119958,7 @@ function telegramHelpV271() {
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/help</code> — command list",
     "",
-    "<i>/analyse performs a fresh bounded analysis. Other commands read stored evidence/diagnostics and do not trigger a fresh chain scan.</i>"
+    "<i>/analyse performs a fresh bounded analysis. /v3start and /v3stop control the token's V3 live collector. Other diagnostic/report commands do not trigger a fresh chain scan.</i>"
   ].join("\n");
 }
 
@@ -119960,6 +119986,82 @@ function parseTelegramCommandV271(
     argument:
       parts.join(" ").trim()
   };
+}
+
+function v3CollectorControlTelegramMessageV592(action, token, result) {
+  const status = String(result?.status || "UNVERIFIED");
+  const enabled =
+    result?.enabled === true
+      ? "YES"
+      : result?.enabled === false
+        ? "NO"
+        : "UNVERIFIED";
+
+  const connected =
+    result?.connectionOpened === true ||
+    result?.connected === true
+      ? "YES"
+      : "NO";
+
+  const logSub =
+    result?.logSubscriptionAccepted === true
+      ? "YES"
+      : "NO";
+
+  const headSub =
+    result?.headSubscriptionAccepted === true
+      ? "YES"
+      : "NO";
+
+  const selfHeal =
+    result?.autonomousSocketSelfHealV591?.enabledPersisted === true
+      ? "ENABLED"
+      : result?.enabled === true
+        ? "ENABLED"
+        : "NOT ENABLED";
+
+  const lines = [
+    `🔌 <b>V3 Collector ${escapeHtml(String(action || "").toUpperCase())}</b>`,
+    "",
+    `Token: <code>${escapeHtml(token)}</code>`,
+    `Status: <b>${escapeHtml(status)}</b>`,
+    `Enabled: <b>${enabled}</b>`
+  ];
+
+  if (action !== "stop") {
+    lines.push(
+      `Runtime/connection: <b>${connected}</b>`,
+      `Log subscription: <b>${logSub}</b>`,
+      `Head subscription: <b>${headSub}</b>`,
+      `V591 self-heal: <b>${selfHeal}</b>`
+    );
+  }
+
+  if (result?.pair) {
+    lines.push(`Verified V3 pool: <code>${escapeHtml(result.pair)}</code>`);
+  }
+
+  if (result?.error) {
+    lines.push(`Error: <b>${escapeHtml(String(result.error).slice(0,220))}</b>`);
+  }
+
+  if (result?.reason) {
+    lines.push(`Reason: <b>${escapeHtml(String(result.reason).slice(0,220))}</b>`);
+  }
+
+  if (action === "start") {
+    lines.push(
+      "",
+      "<i>Start enables the persisted per-token collector. V591 then keeps its WebSocket/watchdog self-healing while enabled. Integrity windows rebuild forward from the new continuous epoch.</i>"
+    );
+  } else if (action === "stop") {
+    lines.push(
+      "",
+      "<i>Collector intentionally disabled. V591 self-heal will not reconnect it until /v3start is used again.</i>"
+    );
+  }
+
+  return lines.join("\n");
 }
 
 async function telegramAnalyseCheckpointV352(
@@ -120152,6 +120254,93 @@ async function telegramCommandReplyV271(
       diagnosticV273.result = resultV404?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
     }
     return {success:resultV404?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0};
+  }
+
+  // V592: Telegram controls for the already-existing native V3 live collector.
+  if (
+    parsed.command === "/v3start" ||
+    parsed.command === "/v3status" ||
+    parsed.command === "/v3stop"
+  ) {
+    const tokenV592 = normalize(parsed.argument);
+
+    let replyV592;
+    let routeResultV592 = null;
+
+    if (!isAddress(tokenV592)) {
+      replyV592 =
+        `ℹ️ Use <code>${escapeHtml(parsed.command)} 0xADDRESS</code>.`;
+    } else {
+      const actionV592 =
+        parsed.command === "/v3start"
+          ? "start"
+          : parsed.command === "/v3stop"
+            ? "stop"
+            : "status";
+
+      routeResultV592 =
+        await v3LiveCollectorRouteV363(
+          env,
+          tokenV592,
+          actionV592
+        );
+
+      replyV592 =
+        v3CollectorControlTelegramMessageV592(
+          actionV592,
+          tokenV592,
+          routeResultV592
+        );
+    }
+
+    if (diagnosticV273) {
+      diagnosticV273.replyAttempted = true;
+      diagnosticV273.v3CollectorControlV592 = {
+        command:parsed.command,
+        token:tokenV592 || null,
+        status:routeResultV592?.status || null,
+        enabled:
+          routeResultV592?.enabled === true
+            ? true
+            : routeResultV592?.enabled === false
+              ? false
+              : null,
+        scannerBudgetConsumed:false
+      };
+    }
+
+    const sendV592 =
+      await sendTelegram(
+        env,
+        replyV592,
+        null,
+        null
+      );
+
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess =
+        sendV592?.success === true;
+      diagnosticV273.telegramStatus =
+        sendV592?.status || null;
+      diagnosticV273.telegramMode =
+        sendV592?.mode || null;
+      diagnosticV273.telegramError =
+        sendV592?.error || null;
+      diagnosticV273.result =
+        sendV592?.success === true
+          ? "REPLY_SENT"
+          : "REPLY_FAILED";
+    }
+
+    return {
+      success:sendV592?.success === true,
+      ignored:false,
+      command:parsed.command,
+      argument:tokenV592 || null,
+      collectorStatus:
+        routeResultV592?.status || null,
+      scannerBudgetConsumed:false
+    };
   }
 
   /* V353: isolated address-only persisted USD reader.
