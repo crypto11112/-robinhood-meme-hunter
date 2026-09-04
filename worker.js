@@ -1,4 +1,30 @@
 /**
+ * Robinhood Chain Meme Hunter — V635
+ * AUTHORITATIVE RUNTIME VERSION: V635
+ *
+ * V635 ATOMIC EXACT-POOL CHECKPOINT
+ * - builds directly forward from V634;
+ * - exact first-active-block PoolId identity is now attempted atomically per
+ *   provider: a provider is only started when two discovery-live request slots
+ *   remain for BOTH eth_getBlockByNumber + exact blockHash eth_getLogs;
+ * - the checkpoint reserves up to four existing resolver requests so one
+ *   provider failure can hand the entire two-step checkpoint to the next
+ *   provider without leaving a half-completed cross-provider attempt;
+ * - provider order for this checkpoint is:
+ *   Validation Cloud -> Chainstack -> Robinhood Public RPC -> Alchemy;
+ * - checkpoint "attempts" only increments after one provider completes both
+ *   steps and returns RESOLVED or proven EMPTY; failed provider starts are
+ *   exposed separately as invocation/provider telemetry;
+ * - successful EMPTY still feeds V634 persistent checkpoint memoization;
+ * - no new external-request ceiling: the existing resolver budget and global
+ *   hard 42-request ceiling remain authoritative;
+ * - V630 backward cursor, V631 source attribution, V632 live resilience,
+ *   V633 global dRPC removal and V634 persistent EMPTY memo are preserved;
+ * - zero scoring, Momentum, qualification, Telegram threshold, launchpad proof,
+ *   or KV/state-key changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V634
  * AUTHORITATIVE RUNTIME VERSION: V634
  *
@@ -4788,7 +4814,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V634";
+const VERSION = "V635";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -17801,10 +17827,12 @@ async function getInitializeForPoolBlockHashV188(
   poolId,
   blockNumber,
   budget,
-  externalRequestAllowance = 2
+  externalRequestAllowance = 4
 ) {
   const base = {
     attempted: false,
+    completedAtomicProviderV635: false,
+    providerInvocationsV635: 0,
     externalRequestsUsed: 0,
     provider: null,
     blockNumber:
@@ -17834,15 +17862,20 @@ async function getInitializeForPoolBlockHashV188(
     };
   }
 
+  /*
+   * V635: same-provider atomic checkpoint order.
+   * Never begin a provider unless BOTH request slots are currently available.
+   */
   const providers = [
     "VALIDATION_CLOUD",
+    "CHAINSTACK",
     "ROBINHOOD_PUBLIC_RPC",
-    "ALCHEMY",
-    "CHAINSTACK"
+    "ALCHEMY"
   ];
 
   let used = 0;
   let lastError = null;
+  let providerInvocationsV635 = 0;
   const providerAttemptsV623 = [];
 
   for (
@@ -17867,6 +17900,9 @@ async function getInitializeForPoolBlockHashV188(
       cooling: Boolean(cooling),
       skipped: false,
       skipReason: null,
+      atomicPairReservedV635: false,
+      completeAtomicProviderV635: false,
+      requestsRequiredBeforeStartV635: 2,
       requestsUsedBefore:
         used,
       blockLookupAttempted: false,
@@ -17883,13 +17919,17 @@ async function getInitializeForPoolBlockHashV188(
       requestsUsedAfter: null
     };
 
+    /*
+     * V635: do not start a provider unless the local resolver allowance AND
+     * the real discovery-live/global budget can fund the complete two-call pair.
+     */
     if (
-      used >=
-        externalRequestAllowance
+      externalRequestAllowance -
+        used < 2
     ) {
       rowV623.skipped = true;
       rowV623.skipReason =
-        "REQUEST_ALLOWANCE_EXHAUSTED";
+        "ATOMIC_PAIR_ALLOWANCE_NOT_AVAILABLE_V635";
       rowV623.requestsUsedAfter = used;
       providerAttemptsV623.push(rowV623);
       continue;
@@ -17898,12 +17938,13 @@ async function getInitializeForPoolBlockHashV188(
     if (
       !budgetAvailable(
         budget,
-        "discovery-live"
+        "discovery-live",
+        2
       )
     ) {
       rowV623.skipped = true;
       rowV623.skipReason =
-        "DISCOVERY_LIVE_BUDGET_PROTECTED";
+        "ATOMIC_PAIR_DISCOVERY_BUDGET_NOT_AVAILABLE_V635";
       rowV623.requestsUsedAfter = used;
       providerAttemptsV623.push(rowV623);
       continue;
@@ -17927,14 +17968,14 @@ async function getInitializeForPoolBlockHashV188(
       continue;
     }
 
+    rowV623.atomicPairReservedV635 =
+      true;
+    providerInvocationsV635++;
+
     let stageV623 =
       "BLOCK_LOOKUP";
 
     try {
-      /*
-       * Existing V188 request #1: obtain exact block hash.
-       * V623 only records the outcome; request behaviour is unchanged.
-       */
       used++;
       rowV623.blockLookupAttempted = true;
 
@@ -17969,33 +18010,20 @@ async function getInitializeForPoolBlockHashV188(
         rowV623.blockLookupError =
           "BLOCK_HASH_UNAVAILABLE";
         lastError =
-          "BLOCK_HASH_UNAVAILABLE_OR_BUDGET_PROTECTED";
+          "BLOCK_HASH_UNAVAILABLE";
         rowV623.requestsUsedAfter = used;
         providerAttemptsV623.push(rowV623);
+
+        /*
+         * This provider did not complete atomically. Because two request slots
+         * were reserved before starting, the next provider may retry the entire
+         * checkpoint if enough allowance remains.
+         */
         continue;
       }
 
       rowV623.blockLookupStatus =
         "OK";
-
-      if (
-        used >=
-          externalRequestAllowance ||
-        !budgetAvailable(
-          budget,
-          "discovery-live"
-        )
-      ) {
-        rowV623.failureStage =
-          "BETWEEN_BLOCK_AND_LOG";
-        rowV623.exactLogLookupStatus =
-          "REQUEST_ALLOWANCE_OR_BUDGET_PROTECTED";
-        lastError =
-          "BLOCK_HASH_UNAVAILABLE_OR_BUDGET_PROTECTED";
-        rowV623.requestsUsedAfter = used;
-        providerAttemptsV623.push(rowV623);
-        continue;
-      }
 
       stageV623 =
         "EXACT_BLOCKHASH_LOG_LOOKUP";
@@ -18063,12 +18091,20 @@ async function getInitializeForPoolBlockHashV188(
         resolvedPool
           ? null
           : "EXACT_BLOCKHASH_LOG_LOOKUP";
+      rowV623.completeAtomicProviderV635 =
+        true;
       rowV623.requestsUsedAfter = used;
       providerAttemptsV623.push(rowV623);
 
+      /*
+       * V635: only a provider that completed BOTH calls counts as a checkpoint
+       * attempt. EMPTY is a valid exact result and may be memoized by V634.
+       */
       return {
         ...base,
         attempted: true,
+        completedAtomicProviderV635: true,
+        providerInvocationsV635,
         externalRequestsUsed:
           used,
         provider,
@@ -18122,22 +18158,26 @@ async function getInitializeForPoolBlockHashV188(
         );
       }
 
-      /* Preserve V188 provider fallback semantics unchanged. */
+      /*
+       * V635: abandon this provider completely and retry the whole two-step
+       * checkpoint on the next provider, but only if another atomic pair fits.
+       */
       continue;
     }
   }
 
   return {
     ...base,
-    attempted:
-      used > 0,
+    attempted: false,
+    completedAtomicProviderV635: false,
+    providerInvocationsV635,
     externalRequestsUsed:
       used,
     error:
       lastError,
     status:
       used > 0
-        ? "UNRESOLVED"
+        ? "NO_COMPLETE_ATOMIC_PROVIDER_V635"
         : "NOT_ATTEMPTED",
     providerAttemptsV623
   };
@@ -20240,6 +20280,15 @@ async function resolvePersistentUnknownPools(
       blockscoutKnown403Bypass: true,
       persistentFirstActiveEmptyMemoV634: true,
       firstActiveCheckpointRequestsPreservedPerMemoizedPoolV634: 2,
+      atomicFirstActiveCheckpointV635: true,
+      atomicCheckpointPairRequestsV635: 2,
+      atomicCheckpointMaxExistingAllowanceV635: 4,
+      atomicCheckpointProviderOrderV635: [
+        "VALIDATION_CLOUD",
+        "CHAINSTACK",
+        "ROBINHOOD_PUBLIC_RPC",
+        "ALCHEMY"
+      ],
       exactRangeFallbackOrderV634: [
         "VALIDATION_CLOUD",
         "CHAINSTACK",
@@ -20257,6 +20306,17 @@ async function resolvePersistentUnknownPools(
       memoizedEmptySkipsV634: 0,
       requestsPreservedForBackwardSearchV634: 0,
       reservedRequestsV189: 2,
+      atomicPairRequestsV635: 2,
+      maxCheckpointAllowanceV635: 4,
+      sameProviderCompletionRequiredV635: true,
+      providerOrderV635: [
+        "VALIDATION_CLOUD",
+        "CHAINSTACK",
+        "ROBINHOOD_PUBLIC_RPC",
+        "ALCHEMY"
+      ],
+      invocationsV635: 0,
+      incompleteProviderInvocationsV635: 0,
       maxPoolsPerRun: 1,
       attempts: 0,
       requestsUsed: 0,
@@ -20944,11 +21004,16 @@ async function resolvePersistentUnknownPools(
     if (
       !firstActiveCheckpointAlreadyEmptyV634 &&
       output.rpcBlockHashInitializeV188
-        .attempts < 1 &&
+        .invocationsV635 < 1 &&
       (
         resolverRequestLimit -
         output.requestsUsed
-      ) >= 2
+      ) >= 4 &&
+      budgetAvailable(
+        budget,
+        "discovery-live",
+        2
+      )
     ) {
       const blockHashV188 =
         await getInitializeForPoolBlockHashV188(
@@ -20958,17 +21023,34 @@ async function resolvePersistentUnknownPools(
           entry.firstActiveBlock,
           budget,
           Math.min(
-            2,
+            4,
             resolverRequestLimit -
               output.requestsUsed
           )
         );
 
       output.rpcBlockHashInitializeV188
+        .invocationsV635 += 1;
+
+      output.rpcBlockHashInitializeV188
         .attempts +=
-          blockHashV188.attempted
+          blockHashV188.completedAtomicProviderV635
             ? 1
             : 0;
+
+      output.rpcBlockHashInitializeV188
+        .incompleteProviderInvocationsV635 +=
+          Math.max(
+            0,
+            safeNumber(
+              blockHashV188.providerInvocationsV635
+            ) -
+              (
+                blockHashV188.completedAtomicProviderV635
+                  ? 1
+                  : 0
+              )
+          );
 
       output.rpcBlockHashInitializeV188
         .requestsUsed +=
@@ -21009,9 +21091,14 @@ async function resolvePersistentUnknownPools(
                 blockHashV188.status === "EMPTY"
                   ? "EMPTY"
                   : (
-                      blockHashV188.attempted
-                        ? "ERROR"
-                        : "BUDGET_BLOCKED"
+                      blockHashV188.status ===
+                        "NO_COMPLETE_ATOMIC_PROVIDER_V635"
+                        ? "NO_COMPLETE_ATOMIC_PROVIDER_V635"
+                        : (
+                            blockHashV188.attempted
+                              ? "ERROR"
+                              : "BUDGET_BLOCKED"
+                          )
                     )
               );
 
