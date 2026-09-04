@@ -1,4 +1,28 @@
 /**
+ * Robinhood Chain Meme Hunter — V617
+ * AUTHORITATIVE RUNTIME VERSION: V617
+ *
+ * V617 V3 LIVE USD /ANALYSE INTEGRATION:
+ * - preserves the confirmed-working V616 V3 collector, Blockscout exact-log
+ *   fallback, Blockscout shared-head fallback and all integrity behaviour;
+ * - presentation/integration only: /analyse now uses the read-only live V3
+ *   Durable Object windows in the MAIN rolling Buy/Sell USD section when a
+ *   verified Uniswap V3 pool is available;
+ * - shows the verified V3 pool address instead of a V4-style PoolId UNVERIFIED;
+ * - exposes 1m, 5m, 15m, 30m, 1h, 6h, 12h and 24h live V3 windows;
+ * - FULL is shown only after the existing continuous integrity clock genuinely
+ *   covers the complete horizon;
+ * - PARTIAL values remain explicitly labelled observed-only / not complete;
+ * - if any trade inside a window lacks verified USD conversion, dollar totals
+ *   are not promoted as complete verified USD;
+ * - renames the old “Live V3 WebSocket Flow” presentation to HTTP exact-pool
+ *   flow when HTTP polling mode is active;
+ * - labels legacy socket/head diagnostics as legacy so stale pre-HTTP telemetry
+ *   cannot make the current V616/V617 HTTP collector look unhealthy;
+ * - scoring, Momentum, risk, qualification, V4, alerts, provider cadence,
+ *   Blockscout credit guards and the hard 42-request ceiling are unchanged.
+ */
+/**
  * Robinhood Chain Meme Hunter — V616
  * AUTHORITATIVE RUNTIME VERSION: V616
  *
@@ -4443,7 +4467,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V616";
+const VERSION = "V617";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -91154,6 +91178,107 @@ function manualRollingProgressLinesV572(candidate) {
   ];
 }
 
+function telegramV3LiveRollingUsdLinesV617(candidate){
+  const live=candidate?.liveV3WindowsV365||null;
+  const v3=candidate?.nativeV3DirectionalV326||null;
+
+  const liveReady=
+    (live?.status==="LIVE_ROLLING_WINDOWS_V364" ||
+     live?.status==="LIVE_ROLLING_WINDOWS_V371") &&
+    live?.windows &&
+    live?.token &&
+    live?.pair;
+
+  const v3Verified=
+    v3?.verified===true ||
+    Boolean(v3?.protocolEvidence);
+
+  if(!liveReady || !v3Verified){
+    return null;
+  }
+
+  const pair=normalize(
+    live?.pair ||
+    v3?.pairAddress ||
+    ""
+  );
+
+  if(!isAddress(pair)){
+    return null;
+  }
+
+  const lines=[
+    "",
+    "🧾 <b>Verified Rolling Buy/Sell USD — BOT V3 EXACT-POOL LIVE LEDGER</b>",
+    `🧱 Verified V3 pool: <code>${escapeHtml(pair)}</code>`,
+    `📡 Transport: <b>${live?.windowClockBasis==="EXACT_V3_ETH_GETLOGS_INGESTION_TIME_V616"?"HTTP eth_getLogs":"V3 LIVE COLLECTOR"}</b>`,
+    `🛡 Integrity clock: <b>${live?.coverageActive===true?"ACTIVE":"INTERRUPTED"}</b> | continuous <b>${Math.floor(safeNumber(live?.continuousCoverageMs)/60000)}m</b>`
+  ];
+
+  const labels=["1m","5m","15m","30m","1h","6h","12h","24h"];
+
+  for(const label of labels){
+    const row=live?.windows?.[label]||null;
+
+    if(!row){
+      lines.push(
+        `🟢 ${label} Buy USD: <b>UNVERIFIED</b>`,
+        `🔴 ${label} Sell USD: <b>UNVERIFIED</b>`,
+        `⏳ ${label} coverage: <b>UNVERIFIED</b>`
+      );
+      continue;
+    }
+
+    const trades=safeNumber(row?.trades);
+    const verifiedUsdTrades=safeNumber(row?.usdVerifiedTrades);
+    const allUsdVerified=
+      trades===0 ||
+      verifiedUsdTrades===trades;
+
+    const full=
+      live?.coverageActive===true &&
+      row?.fullCoverage===true &&
+      row?.coverage==="FULL_INTEGRITY_V371";
+
+    const observedUsdUsable=
+      allUsdVerified &&
+      Number.isFinite(Number(row?.buyUsd)) &&
+      Number.isFinite(Number(row?.sellUsd));
+
+    if(full && observedUsdUsable){
+      lines.push(
+        `🟢 ${label} Buy USD: <b>${formatUsdV353(row.buyUsd)}</b>`,
+        `🔴 ${label} Sell USD: <b>${formatUsdV353(row.sellUsd)}</b>`,
+        `📈 ${label} Net USD: <b>${formatUsdV353(row.netUsd)}</b>`,
+        `✅ ${label} coverage: <b>FULL — VERIFIED</b> | ${safeNumber(row?.buys)}B/${safeNumber(row?.sells)}S`
+      );
+      continue;
+    }
+
+    if(observedUsdUsable){
+      lines.push(
+        `🟢 ${label} Buy USD: <b>${formatUsdV353(row.buyUsd)}</b> <i>(PARTIAL)</i>`,
+        `🔴 ${label} Sell USD: <b>${formatUsdV353(row.sellUsd)}</b> <i>(PARTIAL)</i>`,
+        `📈 ${label} Net USD: <b>${formatUsdV353(row.netUsd)}</b> <i>(PARTIAL)</i>`,
+        `⏳ ${label} coverage: <b>PARTIAL — NOT COMPLETE</b> | ${safeNumber(row?.buys)}B/${safeNumber(row?.sells)}S`
+      );
+      continue;
+    }
+
+    lines.push(
+      `🟢 ${label} Buy USD: <b>UNVERIFIED</b>`,
+      `🔴 ${label} Sell USD: <b>UNVERIFIED</b>`,
+      `⏳ ${label} coverage: <b>${full?"FULL TIME COVERAGE — USD INCOMPLETE":"PARTIAL — USD INCOMPLETE"}</b> | verified USD ${verifiedUsdTrades}/${trades} trades`
+    );
+  }
+
+  lines.push(
+    "ℹ️ <i>FULL means the exact V3 pool was continuously covered for the entire horizon. PARTIAL values are observed live flow only and are not promoted as complete-window totals.</i>"
+  );
+
+  return lines;
+}
+
 function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 = null) {
   const standard = telegramMessage(candidate);
   const sourceLines = String(standard || "").split("\n");
@@ -91231,6 +91356,48 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     out[1] = "🧪 <b>Fresh Manual Analysis</b>";
   }
 
+  /*
+   * V617: replace the V4-style rolling ledger presentation only when this
+   * candidate has a verified V3 pool AND the read-only live V3 window source.
+   * V4 candidates retain telegramRollingExactPoolUsdLinesV564 unchanged.
+   */
+  const v3MainLinesV617=
+    telegramV3LiveRollingUsdLinesV617(candidate);
+
+  if(Array.isArray(v3MainLinesV617) && v3MainLinesV617.length){
+    const startV617=out.findIndex(line =>
+      String(line||"").includes(
+        "🧾 <b>Verified Rolling Buy/Sell USD — BOT EXACT-POOL LEDGER</b>"
+      )
+    );
+
+    if(startV617>=0){
+      let endV617=out.length;
+      const resumeMarkersV617=[
+        "✅ <b>Verified On-chain USD (observed by bot)</b>",
+        "🟣 <b>Verified Pons Curve USD</b>",
+        "👥 Holder count:"
+      ];
+
+      for(let i=startV617+1;i<out.length;i++){
+        if(
+          resumeMarkersV617.some(marker =>
+            String(out[i]||"").includes(marker)
+          )
+        ){
+          endV617=i;
+          break;
+        }
+      }
+
+      out.splice(
+        startV617,
+        Math.max(0,endV617-startV617),
+        ...v3MainLinesV617
+      );
+    }
+  }
+
   const v3 = candidate?.nativeV3DirectionalV326 || null;
   const evidence = [];
   evidence.push("", "🔬 <b>Evidence Summary</b>");
@@ -91306,7 +91473,12 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
 
   const liveV3V365 = candidate?.liveV3WindowsV365 || null;
   if ((liveV3V365?.status === "LIVE_ROLLING_WINDOWS_V364" || liveV3V365?.status === "LIVE_ROLLING_WINDOWS_V371") && liveV3V365?.windows) {
-    evidence.push("", "📡 <b>Live V3 WebSocket Flow — VERIFIED</b>");
+    evidence.push(
+      "",
+      liveV3V365?.windowClockBasis==="EXACT_V3_ETH_GETLOGS_INGESTION_TIME_V616"
+        ? "📡 <b>Live V3 Exact-Pool HTTP Flow — VERIFIED</b>"
+        : "📡 <b>Live V3 WebSocket Flow — VERIFIED</b>"
+    );
     const coverageMinutesV366 = Math.floor(safeNumber(liveV3V365?.continuousCoverageMs) / 60000);
     evidence.push(`🟢 Coverage clock: <b>${liveV3V365?.coverageActive===true ? "ACTIVE" : "INTERRUPTED"}</b> | continuous <b>${coverageMinutesV366}m</b> | pre-V364 history not backfilled`);
 
@@ -91329,13 +91501,21 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
 
     evidence.push(
       `🧪 V590 current V3 reset cause: <b>${escapeHtml(lastIntegrityGapReasonV590)}</b>${lastIntegrityGapAtV590!==null ? ` | ${escapeHtml(new Date(lastIntegrityGapAtV590).toISOString())}` : ""}`,
-      `🔌 V3 subscriptions: log <b>${liveV3V365?.logSubscriptionAccepted===true ? "YES" : "NO"}</b> | head <b>${liveV3V365?.headSubscriptionAccepted===true ? "YES" : "NO"}</b>${headAgeMsV590!==null ? ` | head age <b>${Math.round(headAgeMsV590/1000)}s</b>` : ""}${headStaleThresholdMsV590!==null ? ` / stale threshold <b>${Math.round(headStaleThresholdMsV590/1000)}s</b>` : ""}`,
+      liveV3V365?.windowClockBasis==="EXACT_V3_ETH_GETLOGS_INGESTION_TIME_V616"
+        ? `🔌 Current HTTP integrity flags: log <b>${liveV3V365?.logSubscriptionAccepted===true ? "YES" : "NO"}</b> | verified head <b>${liveV3V365?.headSubscriptionAccepted===true ? "YES" : "NO"}</b> | legacy cached head-age diagnostic <b>${headAgeMsV590!==null ? `${Math.round(headAgeMsV590/1000)}s` : "UNVERIFIED"}</b>`
+        : `🔌 V3 subscriptions: log <b>${liveV3V365?.logSubscriptionAccepted===true ? "YES" : "NO"}</b> | head <b>${liveV3V365?.headSubscriptionAccepted===true ? "YES" : "NO"}</b>${headAgeMsV590!==null ? ` | head age <b>${Math.round(headAgeMsV590/1000)}s</b>` : ""}${headStaleThresholdMsV590!==null ? ` / stale threshold <b>${Math.round(headStaleThresholdMsV590/1000)}s</b>` : ""}`,
       `🧩 Legacy coverage reset cause: <b>${escapeHtml(lastCoverageGapReasonV590)}</b>${liveV3V365?.lastError ? ` | last connection error <b>${escapeHtml(String(liveV3V365.lastError).slice(0,140))}</b>` : ""}`,
-      `🩹 V591 socket self-heal: <b>${liveV3V365?.autonomousSocketSelfHealV591?.enabledPersisted===true ? "ENABLED" : "NOT ENABLED"}</b> | reconnect until dual subscriptions <b>${liveV3V365?.autonomousSocketSelfHealV591?.reconnectUntilDualAccepted===true ? "ON" : "OFF"}</b>`
+      liveV3V365?.windowClockBasis==="EXACT_V3_ETH_GETLOGS_INGESTION_TIME_V616"
+        ? `🩹 Legacy V591 socket self-heal telemetry: <b>NOT USED FOR CURRENT HTTP FEED HEALTH</b>`
+        : `🩹 V591 socket self-heal: <b>${liveV3V365?.autonomousSocketSelfHealV591?.enabledPersisted===true ? "ENABLED" : "NOT ENABLED"}</b> | reconnect until dual subscriptions <b>${liveV3V365?.autonomousSocketSelfHealV591?.reconnectUntilDualAccepted===true ? "ON" : "OFF"}</b>`
     );
 
     evidence.push(`🧮 Live swaps captured: <b>${safeNumber(liveV3V365?.swapsCaptured)}</b> | Workers KV writes: <b>${safeNumber(liveV3V365?.workersKvWrites)}</b> | interruptions: <b>${safeNumber(liveV3V365?.interruptionsSinceV366)}</b>`);
-    evidence.push(`🧱 V371 head-liveness guard: <b>${liveV3V365?.headSubscriptionAccepted===true ? "ACTIVE" : "UNVERIFIED"}</b> | heads <b>${safeNumber(liveV3V365?.headsObserved)}</b> | head notification gaps <b>${safeNumber(liveV3V365?.headGapsDetected)}</b>${Number.isFinite(Number(liveV3V365?.lastHeadBlock)) ? ` | head <b>${safeNumber(liveV3V365.lastHeadBlock)}</b>` : ""}`);
+    evidence.push(
+      liveV3V365?.windowClockBasis==="EXACT_V3_ETH_GETLOGS_INGESTION_TIME_V616"
+        ? `🧱 V371/V616 HTTP liveness guard: <b>${liveV3V365?.headSubscriptionAccepted===true ? "ACTIVE" : "UNVERIFIED"}</b>${Number.isFinite(Number(liveV3V365?.lastHeadBlock)) ? ` | verified head <b>${safeNumber(liveV3V365.lastHeadBlock)}</b>` : ""}`
+        : `🧱 V371 head-liveness guard: <b>${liveV3V365?.headSubscriptionAccepted===true ? "ACTIVE" : "UNVERIFIED"}</b> | heads <b>${safeNumber(liveV3V365?.headsObserved)}</b> | head notification gaps <b>${safeNumber(liveV3V365?.headGapsDetected)}</b>${Number.isFinite(Number(liveV3V365?.lastHeadBlock)) ? ` | head <b>${safeNumber(liveV3V365.lastHeadBlock)}</b>` : ""}`
+    );
 
     const v3DiagV589 = liveV3V365?.v3IntegrityDiagnosticsV589 || null;
     if (v3DiagV589) {
@@ -91370,7 +91550,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       evidence.push(`🐋 V372 accumulation/distribution proof: <b>${escapeHtml(flowVerifyV372.status || "UNVERIFIED")}</b> | tracked whales <b>${safeNumber(flowVerifyV372.trackedWallets)}</b> | wallet <b>${escapeHtml(flowVerifyV372.walletDirection || "UNVERIFIED")}</b> | market <b>${escapeHtml(flowVerifyV372.marketDirection || "UNVERIFIED")}</b>`);
     }
     const liveWindows = liveV3V365.windows || {};
-    for (const label of ["5m", "15m", "1h", "6h", "24h"]) {
+    for (const label of ["1m", "5m", "15m", "30m", "1h", "6h", "12h", "24h"]) {
       const row = liveWindows?.[label] || {};
       const totalUsd = safeNumber(row?.buyUsd) + safeNumber(row?.sellUsd);
       const pressure = Number.isFinite(Number(row?.buyPressurePct))
@@ -132506,7 +132686,7 @@ if (url.pathname === "/reconcile-v374") {
       const stored = got && typeof got.get === "function" ? got.get(key) : null;
       if (Array.isArray(stored)) trades.push(...stored);
     }
-    const defs = [["5m",5*60*1000],["15m",15*60*1000],["1h",60*60*1000],["6h",6*60*60*1000],["24h",24*60*60*1000]];
+    const defs = [["1m",60*1000],["5m",5*60*1000],["15m",15*60*1000],["30m",30*60*1000],["1h",60*60*1000],["6h",6*60*60*1000],["12h",12*60*60*1000],["24h",24*60*60*1000]];
     const windows = {};
     for (const [name,ms] of defs) {
       const rows = trades.filter(r => Number(r?.observedAt)>=nowMs-ms && Number(r?.observedAt)<=nowMs);
