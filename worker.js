@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V609
+ * AUTHORITATIVE RUNTIME VERSION: V609
+ *
+ * V609 HTTP LOG PROVIDER DIAGNOSTICS:
+ * - preserves V608 HTTP-only V3 architecture and forced shared-head revival;
+ * - records EVERY exact-pool eth_getLogs provider attempt;
+ * - records per-provider attempts, successes, failures, HTTP status, RPC error,
+ *   timeout/network exception, and last elapsed time;
+ * - records fallback depth and last successful exact-log provider;
+ * - /feedusage exposes the exact reason dRPC/QuickNode/Alchemy/public RPC fail;
+ * - fixes confusing "Head age" display to use the shared-head singleton age
+ *   while HTTP mode is active, rather than stale token-local newHeads telemetry;
+ * - fixes shared-head transport display to V607/V608 HTTP failover transport;
+ * - no changes to polling cadence, evidence integrity, decoding, USD, scoring,
+ *   V4, alerts, qualification or hard 42-request scanner cap.
+ */
+/**
  * Robinhood Chain Meme Hunter — V608
  * AUTHORITATIVE RUNTIME VERSION: V608
  *
@@ -4299,7 +4316,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V608";
+const VERSION = "V609";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -120360,7 +120377,7 @@ function v3FeedUsageTelegramMessageV598(token, result) {
   };
 
   const lines = [
-    `📡 <b>V3 Feed Usage — V608</b>`,
+    `📡 <b>V3 Feed Usage — V609</b>`,
     `Contract: <code>${escapeHtml(token)}</code>`,
     "",
     `Active provider: <b>${escapeHtml(activeProvider)}</b>`,
@@ -120369,9 +120386,9 @@ function v3FeedUsageTelegramMessageV598(token, result) {
     `Persisted legacy dual flags: <b>${persistedDual}</b>`,
     `Integrity: <b>${integrity}</b> | persisted integrity: <b>${persistedIntegrity}</b>`,
     `Continuous effective uptime: <b>${escapeHtml(fmtDuration(result?.continuousIntegrityMs))}</b>`,
-    `Head age: <b>${escapeHtml(fmtAge(result?.headAgeMs))}</b> | last block: <b>${Number.isFinite(Number(result?.lastHeadBlock)) ? Math.trunc(Number(result.lastHeadBlock)) : "UNVERIFIED"}</b>`,
+    `Head age: <b>${escapeHtml(fmtAge(result?.effectiveHeadAgeMsV609??result?.headAgeMs))}</b> | last block: <b>${Number.isFinite(Number(result?.sharedHeadV602?.lastHeadBlock)) ? Math.trunc(Number(result.sharedHeadV602.lastHeadBlock)) : (Number.isFinite(Number(result?.lastHeadBlock)) ? Math.trunc(Number(result.lastHeadBlock)) : "UNVERIFIED")}</b>`,
     `Shared head: <b>${result?.sharedHeadV602?.fresh===true?"FRESH":"NOT FRESH"}</b> | source <b>${escapeHtml(String(result?.sharedHeadV602?.activeProvider||"UNVERIFIED"))}</b>`,
-    `Head transport: <b>${escapeHtml(String(result?.sharedHeadV602?.transport||"HTTP_ETH_BLOCKNUMBER_V607"))}</b> | global newHeads subscriptions <b>0</b>`,
+    `Head transport: <b>${escapeHtml(String(result?.sharedHeadV602?.providerAttemptsV608?.total>0?"HTTP_ETH_BLOCKNUMBER_FAILOVER_V607":"HTTP_ETH_BLOCKNUMBER_V603"))}</b> | global newHeads subscriptions <b>0</b>`,
     "",
     `Shared head polls: <b>${safeNumber(result?.sharedHeadV602?.pollsObservedV603).toLocaleString("en-GB")}</b> | all-provider failures <b>${safeNumber(result?.sharedHeadV602?.pollFailuresV603)}</b>`,
     `Head fallbacks: <b>${safeNumber(result?.sharedHeadV602?.fallbackPollsV607)}</b> | dRPC head requests <b>${safeNumber(result?.sharedHeadV602?.drpcHeadRequestsV607)}</b>`,
@@ -120382,6 +120399,11 @@ function v3FeedUsageTelegramMessageV598(token, result) {
     `V3 log transport: <b>${result?.v3HttpLogPollingV605?.enabled===true?"HTTP eth_getLogs":"LEGACY"}</b> | WebSocket subscriptions <b>${safeNumber(result?.v3HttpLogPollingV605?.webSocketSubscriptions)}</b>`,
     `HTTP poll health: <b>${result?.httpPollFreshV606===true?"FRESH":result?.v3HttpLogPollingV605?.enabled===true?"BUILDING/STALE":"N/A"}</b> | age <b>${escapeHtml(fmtAge(result?.pollAgeMsV606))}</b>`,
     `Log polls: <b>${safeNumber(result?.v3HttpLogPollingV605?.pollSuccesses)}</b> success / <b>${safeNumber(result?.v3HttpLogPollingV605?.pollFailures)}</b> failed | provider <b>${escapeHtml(String(result?.v3HttpLogPollingV605?.lastProviderId||"BUILDING"))}</b>`,
+    `Log provider attempts: dRPC <b>${safeNumber(result?.v3HttpLogPollingV605?.providerStatsV609?.DRPC?.attempts)}</b> | QuickNode <b>${safeNumber(result?.v3HttpLogPollingV605?.providerStatsV609?.QUICKNODE?.attempts)}</b> | Alchemy <b>${safeNumber(result?.v3HttpLogPollingV605?.providerStatsV609?.ALCHEMY?.attempts)}</b> | Public <b>${safeNumber(result?.v3HttpLogPollingV605?.providerStatsV609?.ROBINHOOD_PUBLIC_RPC?.attempts)}</b>`,
+    `Log provider successes: dRPC <b>${safeNumber(result?.v3HttpLogPollingV605?.providerStatsV609?.DRPC?.successes)}</b> | QuickNode <b>${safeNumber(result?.v3HttpLogPollingV605?.providerStatsV609?.QUICKNODE?.successes)}</b> | Alchemy <b>${safeNumber(result?.v3HttpLogPollingV605?.providerStatsV609?.ALCHEMY?.successes)}</b> | Public <b>${safeNumber(result?.v3HttpLogPollingV605?.providerStatsV609?.ROBINHOOD_PUBLIC_RPC?.successes)}</b>`,
+    ...(result?.v3HttpLogPollingV605?.lastFailure
+      ? [`Last exact-log failure: <code>${escapeHtml(JSON.stringify(result.v3HttpLogPollingV605.lastFailure).slice(0,180))}</code>`]
+      : []),
     `Observed heads: <b>${safeNumber(result?.headsObserved).toLocaleString("en-GB")}</b>`,
     `Exact-pool V3 swaps captured: <b>${safeNumber(result?.swapsCaptured).toLocaleString("en-GB")}</b>`,
     `Observed feed events: <b>${safeNumber(result?.observedFeedEvents).toLocaleString("en-GB")}</b>`,
@@ -127991,6 +128013,8 @@ if (url.pathname === "/reconcile-v374") {
       await this.state.storage.get("v600:providerSession") || {};
     const sharedHeadV602=await this.getSharedHeadStatusV602();
     const logPollV605=await this.state.storage.get("v605:logPoll")||{};
+    const httpLogProviderStatsV609=
+      await this.state.storage.get("v609:httpLogProviderStats")||{};
 
     const configured =
       Array.isArray(conn?.configuredProvidersV597) &&
@@ -128247,6 +128271,10 @@ if (url.pathname === "/reconcile-v374") {
       sellsCaptured:safeNumber(stats.sellsCaptured),
       usdVerifiedCaptured:safeNumber(stats.usdVerifiedCaptured),
       observedFeedEvents:headsObserved + swapsCaptured,
+      effectiveHeadAgeMsV609:
+        cfg?.httpLogPollingV605===true
+          ? (sharedHeadV602?.headAgeMs??null)
+          : headAgeMs,
       sharedHeadV602:{
         enabled:true,
         fresh:sharedHeadV602?.fresh===true,
@@ -128298,6 +128326,7 @@ if (url.pathname === "/reconcile-v374") {
         swapsPersistAttempted:safeNumber(logPollV605?.swapsPersistAttempted),
         lastProviderId:logPollV605?.lastProviderId||null,
         lastFailure:logPollV605?.lastFailure||null,
+        providerStatsV609:httpLogProviderStatsV609,
         pollingIntervalMs:V3_HTTP_LOG_POLL_INTERVAL_MS_V605,
         maxBlocksPerPoll:V3_HTTP_LOG_MAX_BLOCKS_PER_POLL_V605,
         webSocketSubscriptions:0,
@@ -129255,6 +129284,59 @@ if (url.pathname === "/reconcile-v374") {
     return {ok:true,status:"HTTP_LOG_POLL_INITIALIZED_V605",lastProcessedBlock:head};
   }
 
+  async recordV3HttpLogProviderAttemptV609(providerId, outcome, detail={}) {
+    if(!providerId)return;
+    const stats=await this.state.storage.get("v609:httpLogProviderStats")||{};
+    const row=stats[providerId]||{
+      attempts:0,
+      successes:0,
+      failures:0
+    };
+
+    row.attempts=safeNumber(row.attempts)+1;
+    if(outcome==="SUCCESS"){
+      row.successes=safeNumber(row.successes)+1;
+    }else if(outcome==="FAILURE"){
+      row.failures=safeNumber(row.failures)+1;
+    }
+
+    row.lastOutcome=outcome;
+    row.lastAt=Date.now();
+    row.lastHttpStatus=
+      Number.isFinite(Number(detail?.httpStatus))
+        ? Number(detail.httpStatus)
+        : null;
+    row.lastRpcError=
+      typeof detail?.rpcError==="string"
+        ? detail.rpcError.slice(0,220)
+        : null;
+    row.lastError=
+      typeof detail?.error==="string"
+        ? detail.error.slice(0,220)
+        : null;
+    row.lastElapsedMs=
+      Number.isFinite(Number(detail?.elapsedMs))
+        ? Number(detail.elapsedMs)
+        : null;
+    row.lastRange=
+      detail?.fromBlock!==undefined && detail?.toBlock!==undefined
+        ? {
+            fromBlock:Number(detail.fromBlock),
+            toBlock:Number(detail.toBlock)
+          }
+        : row.lastRange||null;
+
+    stats[providerId]=row;
+    stats.totalAttempts=safeNumber(stats.totalAttempts)+1;
+    if(outcome==="SUCCESS")stats.totalSuccesses=safeNumber(stats.totalSuccesses)+1;
+    if(outcome==="FAILURE")stats.totalFailures=safeNumber(stats.totalFailures)+1;
+    stats.lastProvider=providerId;
+    stats.lastOutcome=outcome;
+    stats.lastAt=Date.now();
+
+    await this.doPutV404("v609:httpLogProviderStats",stats);
+  }
+
   async fetchExactV3LogsV605(fromBlock,toBlock) {
     const providers=this.v3HttpLogProviderCandidatesV605();
     let lastFailure=null;
@@ -129291,6 +129373,16 @@ if (url.pathname === "/reconcile-v374") {
           httpStatus<300 &&
           Array.isArray(body?.result)
         ){
+          await this.recordV3HttpLogProviderAttemptV609(
+            provider.id,
+            "SUCCESS",
+            {
+              httpStatus,
+              elapsedMs:Math.max(0,Date.now()-started),
+              fromBlock,
+              toBlock
+            }
+          );
           clearTimeout(timer);
           return {
             ok:true,
@@ -129308,12 +129400,35 @@ if (url.pathname === "/reconcile-v374") {
           rpcError:body?.error?.message||null,
           elapsedMs:Math.max(0,Date.now()-started)
         };
+
+        await this.recordV3HttpLogProviderAttemptV609(
+          provider.id,
+          "FAILURE",
+          {
+            httpStatus,
+            rpcError:body?.error?.message||null,
+            elapsedMs:lastFailure.elapsedMs,
+            fromBlock,
+            toBlock
+          }
+        );
       }catch(error){
         lastFailure={
           providerId:provider.id,
           error:String(error?.name==="AbortError"?"TIMEOUT":error?.message||error).slice(0,220),
           elapsedMs:Math.max(0,Date.now()-started)
         };
+
+        await this.recordV3HttpLogProviderAttemptV609(
+          provider.id,
+          "FAILURE",
+          {
+            error:lastFailure.error,
+            elapsedMs:lastFailure.elapsedMs,
+            fromBlock,
+            toBlock
+          }
+        );
       }finally{
         clearTimeout(timer);
       }
@@ -129397,6 +129512,8 @@ if (url.pathname === "/reconcile-v374") {
       poll.pollFailures=safeNumber(poll.pollFailures)+1;
       poll.status="HTTP_LOG_POLL_FAILED_V605";
       poll.lastFailure=result?.lastFailure||null;
+      poll.providerStatsV609=
+        await this.state.storage.get("v609:httpLogProviderStats")||{};
       poll.updatedAt=Date.now();
       await this.doPutV404("v605:logPoll",poll);
 
@@ -129440,6 +129557,9 @@ if (url.pathname === "/reconcile-v374") {
     poll.lastSuccessfulPollAt=Date.now();
     poll.lastProviderId=result.providerId;
     poll.lastProviderSource=result.providerSource;
+    poll.lastSuccessfulProviderV609=result.providerId;
+    poll.providerStatsV609=
+      await this.state.storage.get("v609:httpLogProviderStats")||{};
     poll.lastHttpStatus=result.httpStatus;
     poll.lastElapsedMs=result.elapsedMs;
     poll.status=to>=head?"HTTP_LOG_POLL_CAUGHT_UP_V605":"HTTP_LOG_POLL_CATCHING_UP_V605";
