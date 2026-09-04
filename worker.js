@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V614
+ * AUTHORITATIVE RUNTIME VERSION: V614
+ *
+ * V614 BLOCKSCOUT METER PERSISTENCE FIX:
+ * - preserves V613 one-shot Blockscout V3 proof and all collector behaviour;
+ * - fixes /blockscoutv3test meter undercount:
+ *     V613 recorded the 20-credit test in the in-memory state but the Telegram
+ *     diagnostic command path did not persist the main STATE_KEY afterwards;
+ * - successful/attempted /blockscoutv3test now persists the updated main state;
+ * - persistence result is exposed in the test reply/diagnostic;
+ * - /blockscoutusage remains strictly read-only and performs no state write;
+ * - updates Blockscout meter title to the authoritative runtime version;
+ * - does NOT enable Blockscout as autonomous V3 fallback yet;
+ * - no polling, integrity, decoding, USD, scoring, V4, alert, qualification,
+ *   provider-order or hard 42-request scanner-cap changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V613
  * AUTHORITATIVE RUNTIME VERSION: V613
  *
@@ -4382,7 +4399,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V613";
+const VERSION = "V614";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -11936,7 +11953,7 @@ function blockscoutProUsageTelegramMessageV611(state){
       : "BUILDING";
 
   const lines=[
-    "🧭 <b>Blockscout PRO Usage — V612</b>",
+    `🧭 <b>Blockscout PRO Usage — ${escapeHtml(VERSION)}</b>`,
     "",
     `Observed requests: <b>${fmtNum(r.observedRequests)}</b>`,
     `Estimated credits: <b>${fmtNum(r.estimatedCreditsUsed)}</b> / <b>${fmtNum(r.dailyAllowanceCredits)}</b>`,
@@ -121774,6 +121791,26 @@ async function telegramCommandReplyV271(
           state,
           tokenV613
         );
+
+      if(testV613?.requestConsumed===true){
+        const persistenceV614=
+          await writeState(
+            env,
+            state
+          );
+
+        testV613.statePersistenceV614={
+          saved:persistenceV614?.saved===true,
+          binding:persistenceV614?.binding||null,
+          error:persistenceV614?.error||null
+        };
+
+        // Refresh the displayed meter from the exact state that was persisted.
+        testV613.blockscoutMeterAfterRequest=
+          blockscoutProUsageSnapshotV611(
+            state
+          );
+      }
     }
 
     reply=
@@ -121789,6 +121826,10 @@ async function telegramCommandReplyV271(
         httpStatus:testV613?.httpStatus??null,
         exactSwapLogs:testV613?.exactSwapLogs??null,
         expectedCredits:testV613?.expectedCredits??null,
+        meterStatePersistedV614:
+          testV613?.statePersistenceV614?.saved===true,
+        meterStatePersistenceErrorV614:
+          testV613?.statePersistenceV614?.error||null,
         scannerBudgetConsumed:false,
         ledgerMutation:false
       };
@@ -126797,6 +126838,16 @@ function blockscoutV3OneShotTelegramV613(result){
       `Raw logs returned: <b>${safeNumber(r.rawLogsReturned)}</b>`,
       `Exact V3 Swap logs: <b>${safeNumber(r.exactSwapLogs)}</b>`,
       `First/last exact Swap block: <b>${Number.isFinite(Number(r.firstExactSwapBlock))?Math.trunc(Number(r.firstExactSwapBlock)):"NONE"}</b> / <b>${Number.isFinite(Number(r.lastExactSwapBlock))?Math.trunc(Number(r.lastExactSwapBlock)):"NONE"}</b>`
+    );
+  }
+
+  if(r.statePersistenceV614){
+    lines.push(
+      "",
+      `Meter persistence: <b>${r.statePersistenceV614.saved===true?"SAVED":"FAILED"}</b>` +
+      (r.statePersistenceV614.error
+        ? ` | <code>${escapeHtml(String(r.statePersistenceV614.error).slice(0,180))}</code>`
+        : "")
     );
   }
 
