@@ -1,4 +1,25 @@
 /**
+ * Robinhood Chain Meme Hunter — V599
+ * AUTHORITATIVE RUNTIME VERSION: V599
+ *
+ * V599 V3 FEED METER TRUTH/PRESENTATION FIX:
+ * - preserves V598 and all confirmed-working V597 collector/failover logic;
+ * - fixes /feedusage contradictory health reporting:
+ *     * persisted dual-subscription flags are shown separately;
+ *     * effective/runtime dual health now requires runtime WebSocket OPEN
+ *       AND persisted log+head subscription acceptance;
+ *     * effective integrity ACTIVE requires runtime dual health as well;
+ * - reports a stale-persisted-state warning when storage claims dual/integrity
+ *   but this Durable Object runtime has no OPEN socket;
+ * - keeps /feedusage read-only and does NOT trigger self-heal;
+ * - fixes Telegram formatter to use real newline characters instead of
+ *   rendering literal "\n" text;
+ * - adds clearer reconnect wording: cumulative reconnect attempts are lifetime
+ *   bot telemetry, not provider billing usage;
+ * - no V3 connection/reconnect, decoding, USD, scoring, V4, alert, provider
+ *   failover or hard 42-request-cap changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V598
  * AUTHORITATIVE RUNTIME VERSION: V598
  *
@@ -4103,7 +4124,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V598";
+const VERSION = "V599";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -120124,8 +120145,18 @@ function v3FeedUsageTelegramMessageV598(token, result) {
       ? "YES"
       : "NO";
 
+  const persistedDual =
+    result?.persistedDualSubscriptionActive === true
+      ? "YES"
+      : "NO";
+
   const integrity =
     result?.integrityActive === true
+      ? "ACTIVE"
+      : "NOT ACTIVE";
+
+  const persistedIntegrity =
+    result?.persistedIntegrityActive === true
       ? "ACTIVE"
       : "NOT ACTIVE";
 
@@ -120157,14 +120188,16 @@ function v3FeedUsageTelegramMessageV598(token, result) {
     "",
     `Active provider: <b>${escapeHtml(activeProvider)}</b>`,
     `Configured fallbacks: <b>${escapeHtml(configured.join(", ") || "NONE")}</b>`,
-    `Socket: <b>${socket}</b> | dual subscriptions: <b>${dual}</b>`,
-    `Integrity: <b>${integrity}</b> | continuous uptime: <b>${escapeHtml(fmtDuration(result?.continuousIntegrityMs))}</b>`,
+    `Socket: <b>${socket}</b> | effective dual subscriptions: <b>${dual}</b>`,
+    `Persisted dual flags: <b>${persistedDual}</b>`,
+    `Integrity: <b>${integrity}</b> | persisted integrity: <b>${persistedIntegrity}</b>`,
+    `Continuous effective uptime: <b>${escapeHtml(fmtDuration(result?.continuousIntegrityMs))}</b>`,
     `Head age: <b>${escapeHtml(fmtAge(result?.headAgeMs))}</b> | last block: <b>${Number.isFinite(Number(result?.lastHeadBlock)) ? Math.trunc(Number(result.lastHeadBlock)) : "UNVERIFIED"}</b>`,
     "",
     `Observed heads: <b>${safeNumber(result?.headsObserved).toLocaleString("en-GB")}</b>`,
     `Exact-pool V3 swaps captured: <b>${safeNumber(result?.swapsCaptured).toLocaleString("en-GB")}</b>`,
     `Observed feed events: <b>${safeNumber(result?.observedFeedEvents).toLocaleString("en-GB")}</b>`,
-    `Reconnects: <b>${safeNumber(result?.reconnects)}</b> | integrity interruptions: <b>${safeNumber(result?.integrityInterruptions)}</b>`,
+    `Reconnect attempts (cumulative): <b>${safeNumber(result?.reconnects)}</b> | integrity interruptions: <b>${safeNumber(result?.integrityInterruptions)}</b>`,
     "",
     `Handshake attempts: <b>${safeNumber(result?.handshakeAttempts)}</b> | opens <b>${safeNumber(result?.handshakeOpens)}</b> | closes <b>${safeNumber(result?.handshakeCloses)}</b> | errors <b>${safeNumber(result?.handshakeErrors)}</b>`,
     `Recent provider switches: <b>${safeNumber(result?.recentProviderSwitches)}</b>`
@@ -120183,13 +120216,20 @@ function v3FeedUsageTelegramMessageV598(token, result) {
     );
   }
 
+  if (result?.stalePersistedRuntimeState === true) {
+    lines.push(
+      "",
+      `⚠️ <b>Runtime/persisted mismatch:</b> storage still claims live subscription/integrity state, but this DO runtime has no OPEN socket. Effective health is therefore NOT ACTIVE. Use /v3status to let the normal V591 self-heal path verify/recover the live socket.`
+    );
+  }
+
   lines.push(
     "",
     `Provider billing/quota: <b>DATA UNVERIFIED</b>`,
     `<i>Observed feed events are bot-side telemetry, not provider billing credits/CUs. Provider dashboards remain authoritative. /feedusage makes no provider/RPC request and writes no collector state.</i>`
   );
 
-  return lines.join("\\n");
+  return lines.join("\n");
 }
 
 function v3CollectorControlTelegramMessageV592(action, token, result) {
@@ -127572,13 +127612,29 @@ if (url.pathname === "/reconcile-v374") {
         ? conn.configuredProvidersV597
         : this.v3ProviderCandidatesV597().map(row => row.id);
 
-    const dual =
+    const runtimeSocketOpen =
+      Boolean(this.ws && this.ws.readyState === WebSocket.OPEN);
+
+    const persistedDual =
       conn.connected === true &&
       conn.logSubscriptionAccepted === true &&
       conn.headSubscriptionAccepted === true;
 
+    const effectiveDual =
+      runtimeSocketOpen && persistedDual;
+
+    const persistedIntegrityActive =
+      integrity.active === true;
+
+    const effectiveIntegrityActive =
+      effectiveDual && persistedIntegrityActive;
+
+    const stalePersistedRuntimeState =
+      !runtimeSocketOpen &&
+      (persistedDual || persistedIntegrityActive);
+
     const integrityStart =
-      integrity.active === true &&
+      effectiveIntegrityActive &&
       Number.isFinite(Number(integrity.continuousStartAt))
         ? Number(integrity.continuousStartAt)
         : null;
@@ -127612,17 +127668,20 @@ if (url.pathname === "/reconcile-v374") {
       activeProvider:conn?.activeProviderV597 || null,
       preferredProvider:preferred,
       configuredProviders:configured,
-      runtimeSocketOpen:
-        Boolean(this.ws && this.ws.readyState === WebSocket.OPEN),
+      runtimeSocketOpen,
       runtimeSocketConnecting:
         Boolean(this.ws && this.ws.readyState === WebSocket.CONNECTING),
+      persistedConnectionOpen:
+        conn.connected === true,
       logSubscriptionAccepted:
         conn.logSubscriptionAccepted === true,
       headSubscriptionAccepted:
         conn.headSubscriptionAccepted === true,
-      dualSubscriptionActive:dual,
-      integrityActive:
-        integrity.active === true && dual,
+      persistedDualSubscriptionActive:persistedDual,
+      dualSubscriptionActive:effectiveDual,
+      persistedIntegrityActive,
+      integrityActive:effectiveIntegrityActive,
+      stalePersistedRuntimeState,
       continuousIntegrityStartAt:integrityStart,
       continuousIntegrityMs:
         integrityStart !== null
@@ -127647,6 +127706,7 @@ if (url.pathname === "/reconcile-v374") {
       usdVerifiedCaptured:safeNumber(stats.usdVerifiedCaptured),
       observedFeedEvents:headsObserved + swapsCaptured,
       reconnects:safeNumber(stats.reconnects),
+      reconnectCounterScope:"CUMULATIVE_LIFETIME_BOT_TELEMETRY",
       integrityInterruptions:safeNumber(integrity.interruptions),
       lastIntegrityGapAt:integrity.lastGapAt || null,
       lastIntegrityGapReason:integrity.lastGapReason || null,
