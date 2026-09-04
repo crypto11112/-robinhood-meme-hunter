@@ -1,4 +1,24 @@
 /**
+ * Robinhood Chain Meme Hunter — V633
+ * AUTHORITATIVE RUNTIME VERSION: V633
+ *
+ * V633 GLOBAL dRPC REMOVAL + EVIDENCE-BASED LIVE FALLBACK ORDER
+ * - builds directly forward from V632;
+ * - removes dRPC from ALL Robinhood Mainnet HTTP RPC/discovery routing because
+ *   the configured endpoint is unusable and repeatedly returns HTTP 400;
+ * - keeps any dRPC secrets/state untouched but no autonomous Robinhood Mainnet
+ *   request path may select DRPC;
+ * - live fallback order after Validation Cloud same-range retry becomes:
+ *   CHAINSTACK -> ROBINHOOD_PUBLIC_RPC -> ALCHEMY;
+ * - this order is based on V632 evidence where Chainstack succeeded 5/5 while
+ *   Robinhood Public RPC and Alchemy were rate-limited;
+ * - Validation Cloud remains primary;
+ * - V630 backward exact-PoolId recovery, V631 source attribution, V632 retry
+ *   handling, scoring, Momentum, Telegram thresholds, launchpad proof rules,
+ *   KV/state key, and hard 42-request ceiling remain unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V632
  * AUTHORITATIVE RUNTIME VERSION: V632
  *
@@ -4745,7 +4765,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V632";
+const VERSION = "V633";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -15211,21 +15231,7 @@ function markDiscovery429(
       ) + 1;
   }
 
-  if (
-    provider ===
-    "DRPC"
-  ) {
-    service.drpcLiveLast429AtV626 =
-      Date.now();
-
-    service.drpcLiveCooldownUntilV626 =
-      until;
-
-    service.drpcLiveTotal429sV626 =
-      safeNumber(
-        service.drpcLiveTotal429sV626
-      ) + 1;
-  }
+  
 
   if (
     provider ===
@@ -15305,17 +15311,7 @@ function discoveryProviderCooling(
     );
   }
 
-  if (
-    provider ===
-    "DRPC"
-  ) {
-    return (
-      safeNumber(
-        service.drpcLiveCooldownUntilV626
-      ) >
-      Date.now()
-    );
-  }
+  
 
   if (
     provider ===
@@ -15381,7 +15377,7 @@ function preferredLiveDiscoveryProviderV435(
       "DRPC"
     )
   ) {
-    return "DRPC";
+    return null;
   }
 
   if (
@@ -15408,9 +15404,9 @@ function alternateLiveDiscoveryProviderV435(
   current
 ) {
   /*
-   * V632 live fallback order.
-   * Validation Cloud remains primary; dRPC is intentionally excluded because
-   * no usable Robinhood Mainnet endpoint is available in the current setup.
+   * V633 evidence-based live fallback order.
+   * Validation Cloud remains primary and receives the V632 same-range retry.
+   * dRPC is globally excluded from Robinhood Mainnet routing.
    */
   if (
     current !== "VALIDATION_CLOUD" &&
@@ -15421,6 +15417,16 @@ function alternateLiveDiscoveryProviderV435(
     )
   ) {
     return "VALIDATION_CLOUD";
+  }
+
+  if (
+    current !== "CHAINSTACK" &&
+    chainstackConfiguredV431(env) &&
+    !chainstackLiveDiscoveryCoolingV435(
+      state
+    )
+  ) {
+    return "CHAINSTACK";
   }
 
   if (
@@ -15442,16 +15448,6 @@ function alternateLiveDiscoveryProviderV435(
     )
   ) {
     return "ALCHEMY";
-  }
-
-  if (
-    current !== "CHAINSTACK" &&
-    chainstackConfiguredV431(env) &&
-    !chainstackLiveDiscoveryCoolingV435(
-      state
-    )
-  ) {
-    return "CHAINSTACK";
   }
 
   return null;
@@ -17791,7 +17787,6 @@ async function getInitializeForPoolBlockHashV188(
 
   const providers = [
     "VALIDATION_CLOUD",
-    "DRPC",
     "ROBINHOOD_PUBLIC_RPC",
     "ALCHEMY",
     "CHAINSTACK"
@@ -23394,7 +23389,7 @@ function rpcProviderNameV423(url) {
   if (
     value.includes("drpc.live")
   ) {
-    return "DRPC";
+    return null;
   }
 
   if (
@@ -24789,14 +24784,7 @@ function rpcProviderUrl(
     );
   }
 
-  if (
-    provider ===
-    "DRPC"
-  ) {
-    return drpcRpcUrlV626(
-      env
-    );
-  }
+  
 
   if (
     provider ===
@@ -28898,7 +28886,6 @@ async function getInitializeLookback(
 
   const preferred = [
     "VALIDATION_CLOUD",
-    "DRPC",
     "ROBINHOOD_PUBLIC_RPC",
     "ALCHEMY"
   ];
@@ -108883,7 +108870,6 @@ function selectReceiptRpcProviderV496(
    */
   const providers = [
     "VALIDATION_CLOUD",
-    "DRPC",
     "CHAINSTACK",
     "ALCHEMY",
     "ROBINHOOD_PUBLIC_RPC"
@@ -132805,7 +132791,7 @@ if (url.pathname === "/reconcile-v374") {
       rows.push({id,url:http,source});
     };
 
-    push("DRPC",this.env.DRPC_WSS_URL,"DRPC_WSS_URL_DERIVED_HTTP");
+    push(this.env.DRPC_WSS_URL,"DRPC_WSS_URL_DERIVED_HTTP");
     push("QUICKNODE",this.env.QUICKNODE_WSS_URL,"QUICKNODE_WSS_URL_DERIVED_HTTP");
     push("GENERIC_V3",this.env.V3_WSS_URL,"V3_WSS_URL_DERIVED_HTTP");
 
@@ -133891,7 +133877,7 @@ if (url.pathname === "/reconcile-v374") {
     };
 
     push("ROBINHOOD_PUBLIC_RPC",PUBLIC_RPC,"PUBLIC_RPC");
-    push("DRPC",this.env.DRPC_WSS_URL,"DRPC_WSS_URL_DERIVED_HTTP");
+    push(this.env.DRPC_WSS_URL,"DRPC_WSS_URL_DERIVED_HTTP");
     push("QUICKNODE",this.env.QUICKNODE_WSS_URL,"QUICKNODE_WSS_URL_DERIVED_HTTP");
     push("GENERIC_V3",this.env.V3_WSS_URL,"V3_WSS_URL_DERIVED_HTTP");
 
@@ -134473,7 +134459,7 @@ if (url.pathname === "/reconcile-v374") {
 
     push("GENERIC_V3", this.env.V3_WSS_URL, "V3_WSS_URL");
     push("QUICKNODE", this.env.QUICKNODE_WSS_URL, "QUICKNODE_WSS_URL");
-    push("DRPC", this.env.DRPC_WSS_URL, "DRPC_WSS_URL");
+    push( this.env.DRPC_WSS_URL, "DRPC_WSS_URL");
     push("VALIDATION_CLOUD", this.env.VALIDATIONCLOUD_WSS_URL, "VALIDATIONCLOUD_WSS_URL");
     push("BLOCKDAEMON", this.env.BLOCKDAEMON_WSS_URL, "BLOCKDAEMON_WSS_URL");
 
