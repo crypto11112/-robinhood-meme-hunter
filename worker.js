@@ -1,4 +1,31 @@
 /**
+ * Robinhood Chain Meme Hunter — V605
+ * AUTHORITATIVE RUNTIME VERSION: V605
+ *
+ * V605 V3 EXACT-POOL HTTP LOG POLLING:
+ * - preserves V603 shared Robinhood-public-RPC head polling and all evidence semantics;
+ * - stops using outbound WebSockets for production token Swap collection;
+ * - each token polls eth_getLogs for ONLY its verified V3 pool + Swap topic;
+ * - polling cursor is forward-only and starts at the current verified shared head;
+ * - normal cadence: one bounded exact-pool log request every 15 seconds;
+ * - HTTP provider order for logs:
+ *     1) dRPC endpoint derived from DRPC_WSS_URL
+ *     2) QuickNode endpoint derived from QUICKNODE_WSS_URL
+ *     3) generic V3 endpoint derived from V3_WSS_URL
+ *     4) Alchemy HTTP derived from ALCHEMY_API_KEY
+ *     5) Robinhood public RPC last-resort fallback
+ * - failed provider HTTP calls automatically try the next provider;
+ * - successful logs are passed through the existing persistSwap() decoder and
+ *   5-minute live evidence buckets unchanged;
+ * - a failed/unknown polling interval resets integrity; no gap is hidden;
+ * - no historical backfill is invented: first activation begins at current head;
+ * - no per-token newHeads subscription and no token WebSocket subscription;
+ * - /feedusage projects dRPC cost from HTTP polling requests (20 CU/request),
+ *   not WebSocket notifications;
+ * - scoring, Momentum, USD maths, V4, qualification, alerts and hard 42-request
+ *   scanner ceiling remain unchanged.
+ */
+/**
  * Robinhood Chain Meme Hunter — V604
  * AUTHORITATIVE RUNTIME VERSION: V604
  *
@@ -4215,7 +4242,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V604";
+const VERSION = "V605";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -120274,7 +120301,7 @@ function v3FeedUsageTelegramMessageV598(token, result) {
   };
 
   const lines = [
-    `📡 <b>V3 Feed Usage — V603</b>`,
+    `📡 <b>V3 Feed Usage — V605</b>`,
     `Contract: <code>${escapeHtml(token)}</code>`,
     "",
     `Active provider: <b>${escapeHtml(activeProvider)}</b>`,
@@ -120288,6 +120315,8 @@ function v3FeedUsageTelegramMessageV598(token, result) {
     `Head transport: <b>${escapeHtml(String(result?.sharedHeadV602?.transport||"HTTP_ETH_BLOCKNUMBER_V603"))}</b> | global newHeads subscriptions <b>0</b>`,
     "",
     `Public head polls: <b>${safeNumber(result?.sharedHeadV602?.pollsObservedV603).toLocaleString("en-GB")}</b> | failures <b>${safeNumber(result?.sharedHeadV602?.pollFailuresV603)}</b>`,
+    `V3 log transport: <b>${result?.v3HttpLogPollingV605?.enabled===true?"HTTP eth_getLogs":"LEGACY"}</b> | WebSocket subscriptions <b>${safeNumber(result?.v3HttpLogPollingV605?.webSocketSubscriptions)}</b>`,
+    `Log polls: <b>${safeNumber(result?.v3HttpLogPollingV605?.pollSuccesses)}</b> success / <b>${safeNumber(result?.v3HttpLogPollingV605?.pollFailures)}</b> failed | provider <b>${escapeHtml(String(result?.v3HttpLogPollingV605?.lastProviderId||"BUILDING"))}</b>`,
     `Observed heads: <b>${safeNumber(result?.headsObserved).toLocaleString("en-GB")}</b>`,
     `Exact-pool V3 swaps captured: <b>${safeNumber(result?.swapsCaptured).toLocaleString("en-GB")}</b>`,
     `Observed feed events: <b>${safeNumber(result?.observedFeedEvents).toLocaleString("en-GB")}</b>`,
@@ -120334,7 +120363,7 @@ function v3FeedUsageTelegramMessageV598(token, result) {
       "",
       `📆 <b>dRPC 30-day free-tier projection</b>`,
       `Free allowance: <b>${fmtCuV600(drpcV600?.freeAllowanceCu30d)} CU</b> / 30 days`,
-      `Pricing basis: <b>20 CU/subscription + 20 CU/notification</b>`,
+      `Pricing basis: <b>${drpcV600?.httpPollingModeV605===true?"20 CU per eth_getLogs request":"20 CU/subscription + 20 CU/notification"}</b>`,
       `Measurement sample: <b>${escapeHtml(fmtDuration(drpcV600?.sessionElapsedMs))}</b> | notifications <b>${safeNumber(drpcV600?.notificationsSinceBaseline).toLocaleString("en-GB")}</b>`,
       `Sample quality: <b>${escapeHtml(String(drpcV600?.sampleQuality || "EARLY"))}</b> | minimum projection sample <b>${safeNumber(drpcV600?.minimumSampleMinutes || 10)}m</b>`,
       `Estimated CU/hour: <b>${fmtCuV600(drpcV600?.estimatedCuPerHour)}</b>`,
@@ -125681,6 +125710,11 @@ const V3_SHARED_HEAD_NAME_V602 = "V3_SHARED_HEAD_V602";
 const V3_SHARED_HEAD_MODE_KEY_V602 = "v602:sharedHeadObject";
 const V3_PROVIDER_FAST_FAILURE_MS_V604 = 5000;
 const V3_PROVIDER_COOLDOWN_MS_V604 = 10 * 60 * 1000;
+const V3_HTTP_LOG_POLL_INTERVAL_MS_V605 = 15000;
+const V3_HTTP_LOG_MAX_BLOCKS_PER_POLL_V605 = 1200;
+const V3_HTTP_LOG_TIMEOUT_MS_V605 = 4500;
+const DRPC_HTTP_CU_PER_REQUEST_V605 = 20;
+
 
 const V3_HEAD_STALE_MS_V371 = 30000;
 const V3_HEAD_WATCHDOG_MS_V371 = 15000;
@@ -127049,6 +127083,24 @@ export class V3LiveCollectorV363 {
       };
     }
 
+    const cfgV605=this.config||await this.state.storage.get("config")||null;
+    if(cfgV605?.httpLogPollingV605===true){
+      let alarmAt=null;
+      try{alarmAt=await this.state.storage.getAlarm();}catch(_){}
+      let alarmRearmed=false;
+      if(!Number.isFinite(Number(alarmAt))){
+        await this.doSetAlarmV404(Date.now()+1000);
+        alarmRearmed=true;
+      }
+      return {
+        enabled:true,
+        action:"HTTP_LOG_POLLING_SELF_HEAL_V605",
+        reconnectRequested:false,
+        alarmRearmed,
+        httpPolling:true
+      };
+    }
+
     const conn = await this.state.storage.get("connection") || {};
     const runtimeOpen =
       Boolean(this.ws && this.ws.readyState === WebSocket.OPEN);
@@ -127216,6 +127268,7 @@ export class V3LiveCollectorV363 {
         return Response.json({version:VERSION,status:"INVALID_LIVE_CONFIG_V363"},{status:400});
       }
       cfg.sharedHeadModeV602=true;
+      cfg.httpLogPollingV605=true;
       this.config=cfg;
       await this.doPutV404("config",cfg);
       await this.doPutV404("enabled",true);
@@ -127224,7 +127277,7 @@ export class V3LiveCollectorV363 {
       await this.markIntegrityGapV369("V602_SHARED_HEAD_MIGRATION");
       await this.markIntegrityGapV371("V602_SHARED_HEAD_MIGRATION");
       await this.ensureSharedHeadStartedV602();
-      await this.connect();
+      await this.initializeHttpLogPollingV605();
       // V591: WebSocket open/subscription callbacks are asynchronous. Arm the
       // watchdog immediately so a failed/open-pending socket cannot strand an
       // enabled collector before dual acceptance is persisted.
@@ -127662,6 +127715,15 @@ if (url.pathname === "/reconcile-v374") {
       await this.sharedHeadAlarmV602();
       return;
     }
+    const cfgV605=this.config||await this.state.storage.get("config")||null;
+    if(cfgV605?.httpLogPollingV605===true){
+      this.config=cfgV605;
+      await this.pollExactV3LogsV605();
+      await this.flushTradeStateV403();
+      await this.checkpointHeadTelemetryV402();
+      await this.doSetAlarmV404(Date.now()+V3_HTTP_LOG_POLL_INTERVAL_MS_V605);
+      return;
+    }
     const horizonEnabledV413 = await this.state.storage.get(HORIZON_LIVE_ENABLED_KEY_V413);
     if (horizonEnabledV413 === true) {
       const horizonPollV413 = await this.pollLiveHorizonsV413();
@@ -127828,6 +127890,7 @@ if (url.pathname === "/reconcile-v374") {
     const providerSessionV600 =
       await this.state.storage.get("v600:providerSession") || {};
     const sharedHeadV602=await this.getSharedHeadStatusV602();
+    const logPollV605=await this.state.storage.get("v605:logPoll")||{};
 
     const configured =
       Array.isArray(conn?.configuredProvidersV597) &&
@@ -127888,25 +127951,53 @@ if (url.pathname === "/reconcile-v374") {
       sharedHeadV602?.transport==="HTTP_ETH_BLOCKNUMBER_V603" ||
       sharedHeadV602?.activeProvider==="ROBINHOOD_PUBLIC_RPC";
 
+    const httpPollingModeV605=this.config?.httpLogPollingV605===true;
+
     const meterNotificationsV600 =
-      sharedPublicRpcModeV603
-        ? meterSwapsDeltaV600
-        : (meterHeadsDeltaV600 + meterSwapsDeltaV600);
+      httpPollingModeV605
+        ? 0
+        : (
+            sharedPublicRpcModeV603
+              ? meterSwapsDeltaV600
+              : (meterHeadsDeltaV600 + meterSwapsDeltaV600)
+          );
     const meterSubscriptionActionsV600 =
       meterStartAtV600 !== null
         ? Math.max(0, safeNumber(providerSessionV600?.subscriptionActionsAtStart))
         : 0;
+    const observedHttpRequestsV605=safeNumber(logPollV605?.providerRequests);
     const observedDrpcCuV600 =
-      (meterNotificationsV600 * DRPC_WS_CU_PER_NOTIFICATION_V600) +
-      (meterSubscriptionActionsV600 * DRPC_WS_CU_PER_SUBSCRIPTION_V600);
+      httpPollingModeV605
+        ? observedHttpRequestsV605*DRPC_HTTP_CU_PER_REQUEST_V605
+        : (
+            (meterNotificationsV600 * DRPC_WS_CU_PER_NOTIFICATION_V600) +
+            (meterSubscriptionActionsV600 * DRPC_WS_CU_PER_SUBSCRIPTION_V600)
+          );
+
+    if(
+      httpPollingModeV605 &&
+      Number.isFinite(Number(logPollV605?.initializedAt))
+    ){
+      // Rebase the rate clock to the V605 polling epoch.
+      providerSessionV600.startedAt=Number(logPollV605.initializedAt);
+    }
 
     const hourMsV600 = 60 * 60 * 1000;
     const dayMsV600 = 24 * hourMsV600;
     const period30dMsV600 = 30 * dayMsV600;
 
-    const sampleMinutesV601 =
-      meterElapsedMsV600 / (60 * 1000);
+    const effectiveElapsedMsV605=
+      httpPollingModeV605&&Number.isFinite(Number(logPollV605?.initializedAt))
+        ? Math.max(0,nowMs-Number(logPollV605.initializedAt))
+        : meterElapsedMsV600;
 
+    const effectiveUnitsV605=
+      httpPollingModeV605
+        ? observedHttpRequestsV605
+        : meterNotificationsV600;
+
+    const sampleMinutesV601 =
+      effectiveElapsedMsV605 / (60 * 1000);
     const sampleQualityV601 =
       sampleMinutesV601 < 10
         ? "EARLY"
@@ -127917,13 +128008,18 @@ if (url.pathname === "/reconcile-v374") {
             : "STRONG";
 
     const rateEligibleV600 =
-      meterElapsedMsV600 >= 10 * 60 * 1000 &&
-      meterNotificationsV600 > 0;
+      effectiveElapsedMsV605 >= 10 * 60 * 1000 &&
+      effectiveUnitsV605 > 0;
 
     const drpcCuPerHourV600 =
       rateEligibleV600
-        ? (meterNotificationsV600 * DRPC_WS_CU_PER_NOTIFICATION_V600) /
-          (meterElapsedMsV600 / hourMsV600)
+        ? (
+            httpPollingModeV605
+              ? (observedHttpRequestsV605 * DRPC_HTTP_CU_PER_REQUEST_V605) /
+                (effectiveElapsedMsV605 / hourMsV600)
+              : (meterNotificationsV600 * DRPC_WS_CU_PER_NOTIFICATION_V600) /
+                (effectiveElapsedMsV605 / hourMsV600)
+          )
         : null;
     const drpcCuPerDayV600 =
       Number.isFinite(drpcCuPerHourV600)
@@ -127932,7 +128028,7 @@ if (url.pathname === "/reconcile-v374") {
     const projectedDrpc30dCuV600 =
       Number.isFinite(drpcCuPerDayV600)
         ? (drpcCuPerDayV600 * 30) +
-          (2 * DRPC_WS_CU_PER_SUBSCRIPTION_V600)
+          (httpPollingModeV605 ? 0 : (2 * DRPC_WS_CU_PER_SUBSCRIPTION_V600))
         : null;
     const projectedDrpc30dPctV600 =
       Number.isFinite(projectedDrpc30dCuV600)
@@ -128045,6 +128141,24 @@ if (url.pathname === "/reconcile-v374") {
       recentProviderSwitches,
       recentOpenProviders:openProviders.slice(-6),
       lastProviderFailure:conn?.lastProviderFailureV597 || null,
+      v3HttpLogPollingV605:{
+        enabled:this.config?.httpLogPollingV605===true,
+        status:logPollV605?.status||null,
+        initialized:logPollV605?.initialized===true,
+        initializedAt:logPollV605?.initializedAt||null,
+        lastProcessedBlock:logPollV605?.lastProcessedBlock??null,
+        pollSuccesses:safeNumber(logPollV605?.pollSuccesses),
+        pollFailures:safeNumber(logPollV605?.pollFailures),
+        providerRequests:safeNumber(logPollV605?.providerRequests),
+        logsObserved:safeNumber(logPollV605?.logsObserved),
+        swapsPersistAttempted:safeNumber(logPollV605?.swapsPersistAttempted),
+        lastProviderId:logPollV605?.lastProviderId||null,
+        lastFailure:logPollV605?.lastFailure||null,
+        pollingIntervalMs:V3_HTTP_LOG_POLL_INTERVAL_MS_V605,
+        maxBlocksPerPoll:V3_HTTP_LOG_MAX_BLOCKS_PER_POLL_V605,
+        webSocketSubscriptions:0,
+        forwardOnly:true
+      },
       drpcMonthlyCapacityV600:{
         enabled:true,
         freeAllowanceCu30d:DRPC_FREE_CU_30D_V600,
@@ -128052,11 +128166,14 @@ if (url.pathname === "/reconcile-v374") {
         cuPerNotification:DRPC_WS_CU_PER_NOTIFICATION_V600,
         sessionProvider:providerSessionV600?.providerId||null,
         sessionStartedAt:meterStartAtV600,
-        sessionElapsedMs:meterElapsedMsV600,
+        sessionElapsedMs:effectiveElapsedMsV605,
         headsSinceBaseline:meterHeadsDeltaV600,
         swapsSinceBaseline:meterSwapsDeltaV600,
         notificationsSinceBaseline:meterNotificationsV600,
-        subscriptionActionsObserved:meterSubscriptionActionsV600,
+        httpPollingModeV605,
+        httpRequestsObservedV605:observedHttpRequestsV605,
+        httpCuPerRequestV605:DRPC_HTTP_CU_PER_REQUEST_V605,
+        subscriptionActionsObserved:httpPollingModeV605?0:meterSubscriptionActionsV600,
         observedEquivalentCu:observedDrpcCuV600,
         rateSampleReady:rateEligibleV600,
         minimumSampleMinutes:10,
@@ -128084,9 +128201,13 @@ if (url.pathname === "/reconcile-v374") {
         status:projectedDrpcCapacityStatusV600,
         projectionWindowDays:30,
         projectionBasis:
-          sharedPublicRpcModeV603
-            ? "TOKEN_SWAP_NOTIFICATIONS_ONLY_SHARED_HEAD_USES_FREE_PUBLIC_RPC_V603"
-            : "CURRENT_PROVIDER_SESSION_NOTIFICATION_RATE_APPLIED_TO_DRPC_DOCUMENTED_WS_CU_MODEL",
+          httpPollingModeV605
+            ? "EXACT_POOL_ETH_GETLOGS_HTTP_REQUEST_RATE_X_20_CU_V605"
+            : (
+                sharedPublicRpcModeV603
+                  ? "TOKEN_SWAP_NOTIFICATIONS_ONLY_SHARED_HEAD_USES_FREE_PUBLIC_RPC_V603"
+                  : "CURRENT_PROVIDER_SESSION_NOTIFICATION_RATE_APPLIED_TO_DRPC_DOCUMENTED_WS_CU_MODEL"
+              ),
         sharedHeadCuCounted:false,
         sharedHeadSource:
           sharedPublicRpcModeV603
@@ -128890,6 +129011,332 @@ if (url.pathname === "/reconcile-v374") {
       status:conn.subscriptionAccepted===true&&conn.runtimeVersion===VERSION&&String(conn?.configFingerprintV399||"")===String(cfg?.configFingerprintV399||"")&&reconciliationAllWindowsPassV398&&reconciliationAllWindowsPassV400&&shadowHeadFreshV401?"SHADOW_MULTI_POOL_WRITE_EFFICIENT_ACTIVE_V402":"SHADOW_MULTI_POOL_NOT_YET_ACTIVE_V401",timestamp:new Date(nowMs).toISOString()};
   }
 
+  v3HttpLogProviderCandidatesV605() {
+    const rows=[];
+    const push=(id,url,source)=>{
+      const raw=String(url||"").trim();
+      if(!raw)return;
+      const http=raw
+        .replace(/^wss:\/\//i,"https://")
+        .replace(/^ws:\/\//i,"http://");
+      if(!/^https?:\/\//i.test(http))return;
+      if(rows.some(row=>row.id===id||row.url===http))return;
+      rows.push({id,url:http,source});
+    };
+
+    push("DRPC",this.env.DRPC_WSS_URL,"DRPC_WSS_URL_DERIVED_HTTP");
+    push("QUICKNODE",this.env.QUICKNODE_WSS_URL,"QUICKNODE_WSS_URL_DERIVED_HTTP");
+    push("GENERIC_V3",this.env.V3_WSS_URL,"V3_WSS_URL_DERIVED_HTTP");
+
+    if(this.env.ALCHEMY_API_KEY){
+      push(
+        "ALCHEMY",
+        `https://robinhood-mainnet.g.alchemy.com/v2/${String(this.env.ALCHEMY_API_KEY)}`,
+        "ALCHEMY_API_KEY"
+      );
+    }
+
+    push("ROBINHOOD_PUBLIC_RPC",PUBLIC_RPC,"PUBLIC_RPC");
+    return rows;
+  }
+
+  async initializeHttpLogPollingV605() {
+    const shared=await this.ensureSharedHeadStartedV602();
+    const status=await this.getSharedHeadStatusV602();
+
+    if(status?.fresh!==true||!Number.isFinite(Number(status?.lastHeadBlock))){
+      await this.doPutV404("v605:logPoll",{
+        enabled:true,
+        initialized:false,
+        status:"WAITING_FOR_FRESH_SHARED_HEAD_V605",
+        updatedAt:Date.now()
+      });
+      return {ok:false,status:"WAITING_FOR_FRESH_SHARED_HEAD_V605"};
+    }
+
+    const head=Number(status.lastHeadBlock);
+    const existing=await this.state.storage.get("v605:logPoll")||{};
+
+    if(
+      existing.initialized===true &&
+      Number.isFinite(Number(existing.lastProcessedBlock))
+    ){
+      return {ok:true,status:"HTTP_LOG_POLL_ALREADY_INITIALIZED_V605",...existing};
+    }
+
+    const next={
+      enabled:true,
+      initialized:true,
+      status:"HTTP_LOG_POLL_INITIALIZED_V605",
+      initializedAt:Date.now(),
+      lastProcessedBlock:head,
+      lastSuccessfulPollAt:Date.now(),
+      pollSuccesses:0,
+      pollFailures:0,
+      providerRequests:0,
+      logsObserved:0,
+      swapsPersistAttempted:0,
+      forwardOnly:true,
+      noBackfill:true,
+      updatedAt:Date.now()
+    };
+
+    await this.doPutV404("v605:logPoll",next);
+
+    const conn=await this.state.storage.get("connection")||{};
+    await this.doPutV404("connection",{
+      ...conn,
+      status:"HTTP_LOG_POLL_PLUS_SHARED_HEAD_ACTIVE_V605",
+      connected:true,
+      subscriptionAccepted:true,
+      logSubscriptionAccepted:true,
+      headSubscriptionAccepted:true,
+      subscriptionIdPresent:false,
+      headSubscriptionIdPresent:false,
+      sharedHeadModeV602:true,
+      sharedHeadFreshV602:true,
+      transportV605:"HTTP_ETH_GETLOGS",
+      activeProviderV597:null,
+      lastError:null
+    });
+
+    await this.markCoverageConnectedV366();
+    await this.markIntegrityConnectedV369("HTTP_LOG_POLL_PLUS_SHARED_HEAD_V605");
+    await this.markIntegrityConnectedV371("HTTP_LOG_POLL_PLUS_SHARED_HEAD_V605");
+    await this.doSetAlarmV404(Date.now()+V3_HTTP_LOG_POLL_INTERVAL_MS_V605);
+
+    return {ok:true,status:"HTTP_LOG_POLL_INITIALIZED_V605",lastProcessedBlock:head};
+  }
+
+  async fetchExactV3LogsV605(fromBlock,toBlock) {
+    const providers=this.v3HttpLogProviderCandidatesV605();
+    let lastFailure=null;
+
+    for(const provider of providers){
+      const controller=new AbortController();
+      const timer=setTimeout(()=>controller.abort(),V3_HTTP_LOG_TIMEOUT_MS_V605);
+      const started=Date.now();
+
+      try{
+        const response=await fetch(provider.url,{
+          method:"POST",
+          headers:{"content-type":"application/json"},
+          body:JSON.stringify({
+            jsonrpc:"2.0",
+            id:605,
+            method:"eth_getLogs",
+            params:[{
+              fromBlock:"0x"+Math.trunc(fromBlock).toString(16),
+              toBlock:"0x"+Math.trunc(toBlock).toString(16),
+              address:this.config.pair,
+              topics:[UNISWAP_V3_SWAP_TOPIC_V326]
+            }]
+          }),
+          signal:controller.signal
+        });
+
+        const httpStatus=Number(response?.status||0);
+        let body=null;
+        try{body=await response.json();}catch(_){}
+
+        if(
+          httpStatus>=200 &&
+          httpStatus<300 &&
+          Array.isArray(body?.result)
+        ){
+          clearTimeout(timer);
+          return {
+            ok:true,
+            providerId:provider.id,
+            providerSource:provider.source,
+            httpStatus,
+            logs:body.result,
+            elapsedMs:Math.max(0,Date.now()-started)
+          };
+        }
+
+        lastFailure={
+          providerId:provider.id,
+          httpStatus,
+          rpcError:body?.error?.message||null,
+          elapsedMs:Math.max(0,Date.now()-started)
+        };
+      }catch(error){
+        lastFailure={
+          providerId:provider.id,
+          error:String(error?.name==="AbortError"?"TIMEOUT":error?.message||error).slice(0,220),
+          elapsedMs:Math.max(0,Date.now()-started)
+        };
+      }finally{
+        clearTimeout(timer);
+      }
+    }
+
+    return {ok:false,lastFailure,configuredProviders:providers.map(row=>row.id)};
+  }
+
+  async pollExactV3LogsV605() {
+    const enabled=await this.state.storage.get("enabled");
+    if(enabled!==true)return {ok:false,status:"DISABLED_V605"};
+
+    if(!this.config)this.config=await this.state.storage.get("config");
+    if(!this.config?.pair)return {ok:false,status:"MISSING_V3_CONFIG_V605"};
+
+    const shared=await this.getSharedHeadStatusV602();
+    const poll=await this.state.storage.get("v605:logPoll")||{};
+
+    if(shared?.fresh!==true||!Number.isFinite(Number(shared?.lastHeadBlock))){
+      if(poll.initialized===true){
+        await this.markCoverageGapV366("SHARED_HEAD_NOT_FRESH_V605");
+        await this.markIntegrityGapV369("SHARED_HEAD_NOT_FRESH_V605");
+        await this.markIntegrityGapV371("SHARED_HEAD_NOT_FRESH_V605");
+      }
+      const conn=await this.state.storage.get("connection")||{};
+      await this.doPutV404("connection",{
+        ...conn,
+        status:"HTTP_LOG_POLL_WAITING_FOR_SHARED_HEAD_V605",
+        connected:false,
+        subscriptionAccepted:false,
+        logSubscriptionAccepted:false,
+        headSubscriptionAccepted:false,
+        lastError:"SHARED_HEAD_NOT_FRESH_V605"
+      });
+      return {ok:false,status:"SHARED_HEAD_NOT_FRESH_V605"};
+    }
+
+    if(
+      poll.initialized!==true ||
+      !Number.isFinite(Number(poll.lastProcessedBlock))
+    ){
+      return await this.initializeHttpLogPollingV605();
+    }
+
+    const head=Number(shared.lastHeadBlock);
+    let cursor=Number(poll.lastProcessedBlock);
+
+    if(cursor>=head){
+      const conn=await this.state.storage.get("connection")||{};
+      if(conn.subscriptionAccepted!==true){
+        await this.doPutV404("connection",{
+          ...conn,
+          status:"HTTP_LOG_POLL_PLUS_SHARED_HEAD_ACTIVE_V605",
+          connected:true,
+          subscriptionAccepted:true,
+          logSubscriptionAccepted:true,
+          headSubscriptionAccepted:true,
+          transportV605:"HTTP_ETH_GETLOGS",
+          lastError:null
+        });
+        await this.markCoverageConnectedV366();
+        await this.markIntegrityConnectedV369("HTTP_LOG_POLL_RECOVERED_V605");
+        await this.markIntegrityConnectedV371("HTTP_LOG_POLL_RECOVERED_V605");
+      }
+      return {ok:true,status:"HTTP_LOG_POLL_CAUGHT_UP_V605",head,lastProcessedBlock:cursor,logs:0};
+    }
+
+    const from=cursor+1;
+    const to=Math.min(head,from+V3_HTTP_LOG_MAX_BLOCKS_PER_POLL_V605-1);
+    const result=await this.fetchExactV3LogsV605(from,to);
+
+    poll.providerRequests=safeNumber(poll.providerRequests)+(
+      result?.ok===true
+        ? 1
+        : Math.max(1,Array.isArray(result?.configuredProviders)?result.configuredProviders.length:1)
+    );
+    poll.lastAttemptAt=Date.now();
+    poll.lastRange={fromBlock:from,toBlock:to};
+
+    if(result?.ok!==true){
+      poll.pollFailures=safeNumber(poll.pollFailures)+1;
+      poll.status="HTTP_LOG_POLL_FAILED_V605";
+      poll.lastFailure=result?.lastFailure||null;
+      poll.updatedAt=Date.now();
+      await this.doPutV404("v605:logPoll",poll);
+
+      await this.markCoverageGapV366("HTTP_ETH_GETLOGS_FAILED_V605");
+      await this.markIntegrityGapV369("HTTP_ETH_GETLOGS_FAILED_V605");
+      await this.markIntegrityGapV371("HTTP_ETH_GETLOGS_FAILED_V605");
+
+      const conn=await this.state.storage.get("connection")||{};
+      await this.doPutV404("connection",{
+        ...conn,
+        status:"HTTP_LOG_POLL_FAILED_V605",
+        connected:false,
+        subscriptionAccepted:false,
+        logSubscriptionAccepted:false,
+        headSubscriptionAccepted:shared?.fresh===true,
+        transportV605:"HTTP_ETH_GETLOGS",
+        lastError:JSON.stringify(result?.lastFailure||{}).slice(0,240)
+      });
+
+      return {ok:false,status:"HTTP_LOG_POLL_FAILED_V605",...result};
+    }
+
+    const logs=result.logs||[];
+    let eligible=0;
+
+    for(const log of logs){
+      if(
+        log?.removed===true ||
+        normalize(log?.address||"")!==this.config.pair ||
+        normalize(log?.topics?.[0]||"")!==normalize(UNISWAP_V3_SWAP_TOPIC_V326)
+      )continue;
+
+      eligible++;
+      await this.persistSwap(log);
+    }
+
+    poll.pollSuccesses=safeNumber(poll.pollSuccesses)+1;
+    poll.logsObserved=safeNumber(poll.logsObserved)+logs.length;
+    poll.swapsPersistAttempted=safeNumber(poll.swapsPersistAttempted)+eligible;
+    poll.lastProcessedBlock=to;
+    poll.lastSuccessfulPollAt=Date.now();
+    poll.lastProviderId=result.providerId;
+    poll.lastProviderSource=result.providerSource;
+    poll.lastHttpStatus=result.httpStatus;
+    poll.lastElapsedMs=result.elapsedMs;
+    poll.status=to>=head?"HTTP_LOG_POLL_CAUGHT_UP_V605":"HTTP_LOG_POLL_CATCHING_UP_V605";
+    poll.lastFailure=null;
+    poll.updatedAt=Date.now();
+
+    await this.doPutV404("v605:logPoll",poll);
+
+    const conn=await this.state.storage.get("connection")||{};
+    const wasActive=conn.subscriptionAccepted===true;
+    await this.doPutV404("connection",{
+      ...conn,
+      status:"HTTP_LOG_POLL_PLUS_SHARED_HEAD_ACTIVE_V605",
+      connected:true,
+      subscriptionAccepted:true,
+      logSubscriptionAccepted:true,
+      headSubscriptionAccepted:true,
+      subscriptionIdPresent:false,
+      headSubscriptionIdPresent:false,
+      sharedHeadModeV602:true,
+      sharedHeadFreshV602:true,
+      transportV605:"HTTP_ETH_GETLOGS",
+      activeHttpProviderV605:result.providerId,
+      lastError:null
+    });
+
+    if(!wasActive){
+      await this.markCoverageConnectedV366();
+      await this.markIntegrityConnectedV369("HTTP_LOG_POLL_RECOVERED_V605");
+      await this.markIntegrityConnectedV371("HTTP_LOG_POLL_RECOVERED_V605");
+    }
+
+    return {
+      ok:true,
+      status:poll.status,
+      providerId:result.providerId,
+      fromBlock:from,
+      toBlock:to,
+      head,
+      logs:logs.length,
+      eligible
+    };
+  }
+
   async sharedHeadStubV602() {
     const ns=this.env?.[V3_LIVE_DO_BINDING_V363];
     if(!ns||typeof ns.idFromName!=="function"||typeof ns.get!=="function") return null;
@@ -129287,6 +129734,12 @@ if (url.pathname === "/reconcile-v374") {
   async connect() {
     if((await this.state.storage.get(V3_SHARED_HEAD_MODE_KEY_V602))===true){
       return await this.connectSharedHeadV602();
+    }
+
+    const cfgV605=this.config||await this.state.storage.get("config")||null;
+    if(cfgV605?.httpLogPollingV605===true){
+      this.config=cfgV605;
+      return await this.initializeHttpLogPollingV605();
     }
     const enabled=await this.state.storage.get("enabled");
     if(enabled!==true)return;
@@ -129913,7 +130366,7 @@ if (url.pathname === "/reconcile-v374") {
     else if(kv && quoteTokenAddress===CANONICAL_WETH_V179 && Number.isFinite(quoteAmount) && quoteAmount!==0){
       try{const rawRef=await kv.get(V347_REFERENCE_DIAGNOSTIC_KEY_V348);if(rawRef){const ref=JSON.parse(rawRef);const p=Number(ref?.priceUsdGPerWeth);if(ref?.verified===true&&Number.isFinite(p)&&p>0){priceUsd=p;usd=Math.abs(quoteAmount)*p;usdVerified=true;usdBasis="EXACT_WETH_QUOTE_X_VERIFIED_CURRENT_REFERENCE_V363";}}}catch(_){}
     }
-    const row={tradeKey,transactionHash:txHash,logIndex,blockNumber:rpcBlockNumberV331(log?.blockNumber),pairAddress:pair,side:raw<0n?"BUY":"SELL",tokenAmount:Math.abs(amount),quoteTokenAddress,quoteAmount:Number.isFinite(quoteAmount)&&quoteAmount!==0?Math.abs(quoteAmount):null,quoteAmountVerifiedV336:Number.isFinite(quoteAmount)&&quoteAmount!==0,quoteAmountBasisV336:Number.isFinite(quoteAmount)&&quoteAmount!==0?"EXACT_V3_SWAP_QUOTE_DELTA_V336":null,usd:Number.isFinite(usd)&&usd>0?usd:null,usdVerified,priceUsd:Number.isFinite(priceUsd)?priceUsd:null,sameCycleUsdV347:Number.isFinite(usd)&&usd>0?usd:null,sameCycleUsdVerifiedV347:usdVerified,sameCycleUsdBasisV347:usdBasis,observedAt:Date.now(),blockTimestampMs:null,timestampVerifiedV334:false,timestampBasis:"LIVE_WEBSOCKET_INGESTION_TIME_V363",captureBasis:"ALCHEMY_ETH_SUBSCRIBE_EXACT_V3_SWAP_V363"};
+    const row={tradeKey,transactionHash:txHash,logIndex,blockNumber:rpcBlockNumberV331(log?.blockNumber),pairAddress:pair,side:raw<0n?"BUY":"SELL",tokenAmount:Math.abs(amount),quoteTokenAddress,quoteAmount:Number.isFinite(quoteAmount)&&quoteAmount!==0?Math.abs(quoteAmount):null,quoteAmountVerifiedV336:Number.isFinite(quoteAmount)&&quoteAmount!==0,quoteAmountBasisV336:Number.isFinite(quoteAmount)&&quoteAmount!==0?"EXACT_V3_SWAP_QUOTE_DELTA_V336":null,usd:Number.isFinite(usd)&&usd>0?usd:null,usdVerified,priceUsd:Number.isFinite(priceUsd)?priceUsd:null,sameCycleUsdV347:Number.isFinite(usd)&&usd>0?usd:null,sameCycleUsdVerifiedV347:usdVerified,sameCycleUsdBasisV347:usdBasis,observedAt:Date.now(),blockTimestampMs:null,timestampVerifiedV334:false,timestampBasis:this.config?.httpLogPollingV605===true?"HTTP_LOG_POLL_INGESTION_TIME_V605":"LIVE_WEBSOCKET_INGESTION_TIME_V363",captureBasis:this.config?.httpLogPollingV605===true?"EXACT_V3_ETH_GETLOGS_POLL_V605":"ALCHEMY_ETH_SUBSCRIBE_EXACT_V3_SWAP_V363"};
     // V403: live trades enter the same Durable Object 5-minute bucket evidence
     // immediately in the hot cache and are checkpointed on the watchdog cadence.
     // Existing scheduled/manual V3 ledger remains untouched for historical/backfill evidence.
