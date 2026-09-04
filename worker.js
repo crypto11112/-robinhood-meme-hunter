@@ -1,4 +1,30 @@
 /**
+ * Robinhood Chain Meme Hunter — V583
+ * AUTHORITATIVE RUNTIME VERSION: V583
+ *
+ * V583 DECODE-FAILURE BACKOFF + DIAGNOSTICS:
+ * - preserves V582 and all earlier confirmed-working behaviour;
+ * - fixes V582 repeatedly re-selecting the same 19,200-block fast span after
+ *   a non-saturated exact-USD decode failure;
+ * - on ROWS_NOT_ALL_EXACT_USD_DECODABLE_NO_COVERAGE_ADVANCE_V551:
+ *     * coverage still NEVER advances;
+ *     * the pool is marked fastCatchupDecodeBlockedV583=true;
+ *     * next preferred span backs off to at most one quarter of the failed
+ *       span, never below the existing 600-block default;
+ *     * V582 19,200/9,600 fast expansion is disabled until a smaller range
+ *       succeeds;
+ * - after the next successful exact-USD-complete contiguous range, the decode
+ *   block is cleared and normal adaptive acceleration may resume;
+ * - adds zero-request decoder-shape telemetry to distinguish decoder-null rows
+ *   from candidate mismatch, exact-USD rejection, or timestamp rejection;
+ * - no rows are guessed or skipped; exact completeness remains mandatory;
+ * - no historical backfill;
+ * - no scoring, Momentum, qualification, USD maths, Telegram, provider or
+ *   alert-threshold changes;
+ * - no extra external requests;
+ * - hard global request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V582
  * AUTHORITATIVE RUNTIME VERSION: V582
  *
@@ -3748,7 +3774,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V582";
+const VERSION = "V583";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -54763,6 +54789,8 @@ function persistVerifiedUsdTradesV254(
     timestampRejected: 0,
     candidateMismatch: 0,
     exactUsdRejected: 0,
+    decoderNull: 0,
+    decoderNullSamples: [],
     poolIds: []
   };
 
@@ -54827,6 +54855,26 @@ function persistVerifiedUsdTradesV254(
     if (
       !trade?.verified
     ) {
+      output.decoderNull++;
+      if (output.decoderNullSamples.length < 5) {
+        output.decoderNullSamples.push({
+          topic0: normalize(row?.topics?.[0]) || null,
+          topic1: normalize(row?.topics?.[1]) || null,
+          topicsCount: Array.isArray(row?.topics) ? row.topics.length : null,
+          dataHexLength:
+            typeof row?.data === "string" ? row.data.length : null,
+          blockNumber:
+            blockNumberFromAnyV180(
+              row?.blockNumber ?? row?.block_number
+            ) || null,
+          transactionHash:
+            normalize(
+              row?.transactionHash ??
+              row?.transaction_hash ??
+              row?.hash
+            ) || null
+        });
+      }
       continue;
     }
 
@@ -58692,6 +58740,7 @@ async function advanceDirectionalWatchV551({
     successfulRangesV566 >= 1 &&
     safeNumber(candidate?.saturatedAttempts) === 0 &&
     candidate?.nearHeadElasticBlockedV562 !== true &&
+    candidate?.fastCatchupDecodeBlockedV583 !== true &&
     Number.isFinite(lastRangeReturnedLogsV582)
   ) {
     if (lastRangeReturnedLogsV582 <= 50) {
@@ -58720,11 +58769,13 @@ async function advanceDirectionalWatchV551({
             Number(priorCompletionCatchupTargetSpanV582),
             maxConfiguredSpanV582
           )
-        : densityExpansionEligibleV566
-          ? densityTargetSpanV566
-          : elasticEligibleV562
-            ? DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551
-            : baseConfiguredSpanV562
+        : candidate?.fastCatchupDecodeBlockedV583 === true
+          ? baseConfiguredSpanV562
+          : densityExpansionEligibleV566
+            ? densityTargetSpanV566
+            : elasticEligibleV562
+              ? DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551
+              : baseConfiguredSpanV562
     )
   );
 
@@ -58805,12 +58856,33 @@ async function advanceDirectionalWatchV551({
     );
 
     if (!exact) {
+      const decodeBackoffSpanV583 = Math.max(
+        DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551,
+        Math.min(
+          DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V566,
+          Math.floor(configuredSpan / 4)
+        )
+      );
+
+      candidate.fastCatchupDecodeBlockedV583 = true;
+      candidate.fastCatchupDecodeBlockedAtV583 = Date.now();
+      candidate.fastCatchupDecodeFailedSpanV583 = configuredSpan;
+      candidate.adaptiveBlockSpan = decodeBackoffSpanV583;
       candidate.lastStatus = "ROWS_NOT_ALL_EXACT_USD_DECODABLE_NO_COVERAGE_ADVANCE_V551";
       candidate.updatedAt = Date.now();
+
       return {
         ...base,attempted:true,requestConsumed:true,fromBlock,toBlock,provider,
         returnedLogs:rows.length,
         exactUsdTrades:safeNumber(persisted?.exactUsdTrades),
+        configuredBlockSpanV562:configuredSpan,
+        decodeFailureBackoffV583:{
+          enabled:true,
+          failedSpan:configuredSpan,
+          nextPreferredSpan:decodeBackoffSpanV583,
+          fastExpansionBlockedUntilSuccessfulRange:true,
+          coverageAdvanced:false
+        },
         persistence:persisted,
         status:candidate.lastStatus
       };
@@ -58826,6 +58898,9 @@ async function advanceDirectionalWatchV551({
       safeNumber(candidate?.exactUsdTrades) +
       safeNumber(persisted?.exactUsdTrades);
     candidate.gapDetected = false;
+    candidate.fastCatchupDecodeBlockedV583 = false;
+    candidate.fastCatchupDecodeBlockedAtV583 = null;
+    candidate.fastCatchupDecodeFailedSpanV583 = null;
     candidate.lastRangeReturnedLogsV566 = rows.length;
     candidate.lastDensitySpanAttemptV566 = configuredSpan;
     candidate.lastDensityAverageLogsPerSuccessfulRangeV566 =
@@ -58984,6 +59059,12 @@ function directionalWatchSnapshotV551(state) {
       lastDensitySpanAttemptV566:
         Number.isFinite(Number(row?.lastDensitySpanAttemptV566))
           ? Number(row.lastDensitySpanAttemptV566)
+          : null,
+      fastCatchupDecodeBlockedV583:
+        row?.fastCatchupDecodeBlockedV583 === true,
+      fastCatchupDecodeFailedSpanV583:
+        Number.isFinite(Number(row?.fastCatchupDecodeFailedSpanV583))
+          ? Number(row.fastCatchupDecodeFailedSpanV583)
           : null,
       saturatedAttempts:safeNumber(row?.saturatedAttempts),
       registrationSourceV552:row?.registrationSourceV552 || null,
@@ -77000,6 +77081,17 @@ for (
       saturatedRangeCoverageAdvance:false,
       exactUsdCompletenessRequired:true,
       generic:true,
+      externalRequestsAdded:0,
+      hardGlobalLimitUnchanged:42
+    },
+    decodeFailureBackoffV583:{
+      enabled:true,
+      fastExpansionBlockedAfterDecodeFailure:true,
+      failedSpanBackoffDivisor:4,
+      minimumRetrySpan:600,
+      maximumBackoffRetrySpan:4800,
+      unblockCondition:"NEXT_SUCCESSFUL_EXACT_USD_COMPLETE_CONTIGUOUS_RANGE",
+      addsDecoderShapeDiagnostics:true,
       externalRequestsAdded:0,
       hardGlobalLimitUnchanged:42
     },
