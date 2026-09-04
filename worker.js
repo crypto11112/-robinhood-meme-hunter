@@ -1,4 +1,17 @@
 /**
+ * Robinhood Chain Meme Hunter — V627
+ * AUTHORITATIVE RUNTIME VERSION: V627
+ *
+ * V627 VALIDATION CLOUD PRIMARY FREE-RPC INTEGRATION
+ * - activates VALIDATION_CLOUD_RPC_URL as the first-choice HTTP JSON-RPC provider;
+ * - Validation Cloud becomes first normal SYSTEM + ANALYSIS RPC, first LIVE discovery eth_getLogs provider,
+ *   and first exact V4 PoolId block-hash identity provider;
+ * - dRPC remains configured only as a bounded fallback, followed by Robinhood Public RPC, Alchemy and Chainstack;
+ * - adds Validation Cloud discovery 429 cooldown + provider telemetry;
+ * - preserves V626/V625 Blockscout-first indexed identity recovery and all confirmed launchpad fast paths;
+ * - zero extra requests: hard 42-request ceiling, scoring, Momentum, qualification, launch proof and Telegram thresholds unchanged.
+ */
+/**
  * Robinhood Chain Meme Hunter — V626
  * AUTHORITATIVE RUNTIME VERSION: V626
  *
@@ -4630,7 +4643,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V626";
+const VERSION = "V627";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -15054,6 +15067,22 @@ function markDiscovery429(
 
   if (
     provider ===
+    "VALIDATION_CLOUD"
+  ) {
+    service.validationCloudLiveLast429AtV627 =
+      Date.now();
+
+    service.validationCloudLiveCooldownUntilV627 =
+      until;
+
+    service.validationCloudLiveTotal429sV627 =
+      safeNumber(
+        service.validationCloudLiveTotal429sV627
+      ) + 1;
+  }
+
+  if (
+    provider ===
     "DRPC"
   ) {
     service.drpcLiveLast429AtV626 =
@@ -15136,6 +15165,18 @@ function discoveryProviderCooling(
 
   if (
     provider ===
+    "VALIDATION_CLOUD"
+  ) {
+    return (
+      safeNumber(
+        service.validationCloudLiveCooldownUntilV627
+      ) >
+      Date.now()
+    );
+  }
+
+  if (
+    provider ===
     "DRPC"
   ) {
     return (
@@ -15194,6 +15235,16 @@ function preferredLiveDiscoveryProviderV435(
   state
 ) {
   if (
+    validationCloudConfiguredV627(env) &&
+    !discoveryProviderCooling(
+      state,
+      "VALIDATION_CLOUD"
+    )
+  ) {
+    return "VALIDATION_CLOUD";
+  }
+
+  if (
     drpcConfiguredV626(env) &&
     !discoveryProviderCooling(
       state,
@@ -15226,6 +15277,17 @@ function alternateLiveDiscoveryProviderV435(
   state,
   current
 ) {
+  if (
+    current !== "VALIDATION_CLOUD" &&
+    validationCloudConfiguredV627(env) &&
+    !discoveryProviderCooling(
+      state,
+      "VALIDATION_CLOUD"
+    )
+  ) {
+    return "VALIDATION_CLOUD";
+  }
+
   if (
     current !== "DRPC" &&
     drpcConfiguredV626(env) &&
@@ -15306,6 +15368,25 @@ function liveDiscoveryTelemetryV435(
     enabled: true,
     scope:
       "LIVE_DISCOVERY_ETH_GETLOGS_ONLY",
+    validationCloudConfiguredV627:
+      validationCloudConfiguredV627(env),
+    validationCloudCoolingV627:
+      discoveryProviderCooling(
+        state,
+        "VALIDATION_CLOUD"
+      ),
+    validationCloudCooldownUntilV627:
+      safeNumber(
+        service.validationCloudLiveCooldownUntilV627
+      ) || null,
+    validationCloudLast429AtV627:
+      safeNumber(
+        service.validationCloudLiveLast429AtV627
+      ) || null,
+    validationCloudTotal429sV627:
+      safeNumber(
+        service.validationCloudLiveTotal429sV627
+      ),
     drpcConfiguredV626:
       drpcConfiguredV626(env),
     drpcCoolingV626:
@@ -15328,11 +15409,13 @@ function liveDiscoveryTelemetryV435(
     chainstackConfigured:
       chainstackConfiguredV431(env),
     preferredProvider:
-      drpcConfiguredV626(env)
-        ? "DRPC"
-        : chainstackConfiguredV431(env)
-          ? "CHAINSTACK"
-          : "LEGACY_DISCOVERY_ORDER",
+      validationCloudConfiguredV627(env)
+        ? "VALIDATION_CLOUD"
+        : drpcConfiguredV626(env)
+          ? "DRPC"
+          : chainstackConfiguredV431(env)
+            ? "CHAINSTACK"
+            : "LEGACY_DISCOVERY_ORDER",
     actualSuccessfulRangeProviders:
       byProvider,
     lastLiveProvider:
@@ -17583,6 +17666,7 @@ async function getInitializeForPoolBlockHashV188(
   }
 
   const providers = [
+    "VALIDATION_CLOUD",
     "DRPC",
     "ROBINHOOD_PUBLIC_RPC",
     "ALCHEMY",
@@ -22417,6 +22501,23 @@ function drpcConfiguredV626(env) {
   );
 }
 
+function validationCloudRpcUrlV627(env) {
+  const value =
+    String(
+      env?.VALIDATION_CLOUD_RPC_URL || ""
+    ).trim();
+
+  return /^https?:\/\/.+/i.test(value)
+    ? value
+    : null;
+}
+
+function validationCloudConfiguredV627(env) {
+  return Boolean(
+    validationCloudRpcUrlV627(env)
+  );
+}
+
 function chainstackRpcUrlV431(env) {
   const value =
     String(
@@ -22599,6 +22700,7 @@ function providerScoreV424(budget, provider, method, originalIndex) {
    * V431: managed Chainstack gets the strongest initial preference when
    * configured. Dynamic health evidence still overrides this preference.
    */
+  if (provider === "VALIDATION_CLOUD") score += 120;
   if (provider === "DRPC") score += 100;
   if (provider === "CHAINSTACK") score += 60;
   if (provider === "ROBINHOOD_PUBLIC_RPC") score += 15;
@@ -23787,6 +23889,9 @@ async function rpc(
   budget,
   phase
 ) {
+  const validationCloudUrl =
+    validationCloudRpcUrlV627(env);
+
   const drpcUrl =
     drpcRpcUrlV626(env);
 
@@ -23801,12 +23906,14 @@ async function rpc(
   const originalProviders =
     phase === "analysis"
       ? [
+          {name: "VALIDATION_CLOUD", url: validationCloudUrl},
           {name: "DRPC", url: drpcUrl},
           {name: "CHAINSTACK", url: chainstackUrl},
           {name: "ROBINHOOD_PUBLIC_RPC", url: PUBLIC_RPC},
           {name: "ALCHEMY", url: alchemyUrl}
         ]
       : [
+          {name: "VALIDATION_CLOUD", url: validationCloudUrl},
           {name: "DRPC", url: drpcUrl},
           {name: "CHAINSTACK", url: chainstackUrl},
           {name: "ROBINHOOD_PUBLIC_RPC", url: PUBLIC_RPC},
@@ -23983,6 +24090,14 @@ function normalSystemRpcsAll429V429(
   ) {
     configured.unshift(
       "DRPC"
+    );
+  }
+
+  if (
+    validationCloudConfiguredV627(env)
+  ) {
+    configured.unshift(
+      "VALIDATION_CLOUD"
     );
   }
 
@@ -24329,6 +24444,15 @@ function rpcProviderUrl(
   env,
   provider
 ) {
+  if (
+    provider ===
+    "VALIDATION_CLOUD"
+  ) {
+    return validationCloudRpcUrlV627(
+      env
+    );
+  }
+
   if (
     provider ===
     "DRPC"
@@ -28394,7 +28518,12 @@ async function getInitializeLookback(
     return { logs: [], provider: null, error: null };
   }
 
-  const preferred = ["ROBINHOOD_PUBLIC_RPC", "ALCHEMY"];
+  const preferred = [
+    "VALIDATION_CLOUD",
+    "DRPC",
+    "ROBINHOOD_PUBLIC_RPC",
+    "ALCHEMY"
+  ];
 
   for (const provider of preferred) {
     if (discoveryProviderCooling(state, provider)) continue;
@@ -108193,6 +108322,8 @@ function selectReceiptRpcProviderV496(
    * One provider is selected. There is no same-scan fallback.
    */
   const providers = [
+    "VALIDATION_CLOUD",
+    "DRPC",
     "CHAINSTACK",
     "ALCHEMY",
     "ROBINHOOD_PUBLIC_RPC"
