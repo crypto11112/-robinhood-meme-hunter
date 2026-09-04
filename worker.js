@@ -1,4 +1,32 @@
 /**
+ * Robinhood Chain Meme Hunter — V591
+ * AUTHORITATIVE RUNTIME VERSION: V591
+ *
+ * V591 V3 AUTONOMOUS SOCKET SELF-HEAL:
+ * - preserves V590 and all confirmed-working V4/V3 evidence semantics;
+ * - V590 proved IF's V3 collector is dead because the runtime WebSocket is
+ *   NOT_OPEN, both subscriptions are NO, integrity is inactive, and the last
+ *   reset reason is WEBSOCKET_CLOSED_V368;
+ * - adds a production-collector self-heal guard:
+ *     * ONLY when this token's persisted "enabled" flag is true;
+ *     * if the runtime socket is absent/not OPEN, reconnect is requested;
+ *     * if no Durable Object alarm is armed, watchdog is re-armed;
+ *     * stale persisted dual-subscription state is conservatively reset before
+ *       reconnect so continuity can never be falsely inherited;
+ * - the guard runs on ordinary DO fetches (status/windows/analyse path), so a
+ *   dead enabled collector repairs itself immediately when observed;
+ * - the normal Durable Object alarm loop remains the autonomous long-running
+ *   watchdog and continues re-arming itself every V371 watchdog cadence;
+ * - intentional /stop remains authoritative because enabled=false prevents
+ *   self-heal/reconnect;
+ * - every reconnect begins a NEW integrity epoch: old partial history is never
+ *   promoted to full-window evidence;
+ * - no scoring, Momentum, qualification, USD maths, provider budgets,
+ *   Telegram thresholds or alert logic changes;
+ * - no additional provider/RPC requests; WebSocket reconnect only;
+ * - hard global external-request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V590
  * AUTHORITATIVE RUNTIME VERSION: V590
  *
@@ -3937,7 +3965,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V590";
+const VERSION = "V591";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -90365,7 +90393,8 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     evidence.push(
       `🧪 V590 current V3 reset cause: <b>${escapeHtml(lastIntegrityGapReasonV590)}</b>${lastIntegrityGapAtV590!==null ? ` | ${escapeHtml(new Date(lastIntegrityGapAtV590).toISOString())}` : ""}`,
       `🔌 V3 subscriptions: log <b>${liveV3V365?.logSubscriptionAccepted===true ? "YES" : "NO"}</b> | head <b>${liveV3V365?.headSubscriptionAccepted===true ? "YES" : "NO"}</b>${headAgeMsV590!==null ? ` | head age <b>${Math.round(headAgeMsV590/1000)}s</b>` : ""}${headStaleThresholdMsV590!==null ? ` / stale threshold <b>${Math.round(headStaleThresholdMsV590/1000)}s</b>` : ""}`,
-      `🧩 Legacy coverage reset cause: <b>${escapeHtml(lastCoverageGapReasonV590)}</b>${liveV3V365?.lastError ? ` | last connection error <b>${escapeHtml(String(liveV3V365.lastError).slice(0,140))}</b>` : ""}`
+      `🧩 Legacy coverage reset cause: <b>${escapeHtml(lastCoverageGapReasonV590)}</b>${liveV3V365?.lastError ? ` | last connection error <b>${escapeHtml(String(liveV3V365.lastError).slice(0,140))}</b>` : ""}`,
+      `🩹 V591 socket self-heal: <b>${liveV3V365?.autonomousSocketSelfHealV591?.enabledPersisted===true ? "ENABLED" : "NOT ENABLED"}</b> | reconnect until dual subscriptions <b>${liveV3V365?.autonomousSocketSelfHealV591?.reconnectUntilDualAccepted===true ? "ON" : "OFF"}</b>`
     );
 
     evidence.push(`🧮 Live swaps captured: <b>${safeNumber(liveV3V365?.swapsCaptured)}</b> | Workers KV writes: <b>${safeNumber(liveV3V365?.workersKvWrites)}</b> | interruptions: <b>${safeNumber(liveV3V365?.interruptionsSinceV366)}</b>`);
@@ -126260,8 +126289,120 @@ export class V3LiveCollectorV363 {
     return {active:true,requests,verifiedObservations,captures,lastHttpStatus,lastError};
   }
 
+  async ensureProductionCollectorSelfHealV591(trigger="DO_FETCH_V591") {
+    const enabled = await this.state.storage.get("enabled");
+    if (enabled !== true) {
+      return {
+        enabled:false,
+        action:"INTENTIONAL_OR_PERSISTED_DISABLED_NO_SELF_HEAL_V591",
+        reconnectRequested:false,
+        alarmRearmed:false
+      };
+    }
+
+    const conn = await this.state.storage.get("connection") || {};
+    const runtimeOpen =
+      Boolean(this.ws && this.ws.readyState === WebSocket.OPEN);
+    const persistedDual =
+      conn.connected===true &&
+      conn.logSubscriptionAccepted===true &&
+      conn.headSubscriptionAccepted===true;
+
+    let alarmAt = null;
+    try {
+      alarmAt = await this.state.storage.getAlarm();
+    } catch (_) {}
+
+    let alarmRearmed = false;
+    if (!Number.isFinite(Number(alarmAt))) {
+      await this.doSetAlarmV404(Date.now()+1000);
+      alarmRearmed = true;
+    }
+
+    let reconnectRequested = false;
+
+    if (!runtimeOpen) {
+      /*
+       * A new runtime without its in-memory socket cannot inherit a persisted
+       * "connected" claim. Reset only connection/integrity state; retained
+       * partial trade evidence remains available but cannot become FULL.
+       */
+      if (persistedDual) {
+        await this.markCoverageGapV366("V591_RUNTIME_SOCKET_SELF_HEAL");
+        await this.markIntegrityGapV369("V591_RUNTIME_SOCKET_SELF_HEAL");
+        await this.markIntegrityGapV371("V591_RUNTIME_SOCKET_SELF_HEAL");
+      }
+
+      await this.doPutV404("connection", {
+        ...conn,
+        status:"V591_SELF_HEAL_RECONNECT_REQUESTED",
+        connected:false,
+        subscriptionAccepted:false,
+        logSubscriptionAccepted:false,
+        headSubscriptionAccepted:false,
+        subscriptionIdPresent:false,
+        headSubscriptionIdPresent:false,
+        selfHealTriggerV591:String(trigger||"DO_FETCH_V591").slice(0,120),
+        selfHealRequestedAtV591:Date.now(),
+        lastError:
+          conn?.lastError ||
+          "RUNTIME_SOCKET_NOT_OPEN_SELF_HEAL_V591"
+      });
+
+      this.ws = null;
+      this.subscriptionId = null;
+      this.headSubscriptionId = null;
+      this.reconnectPending = false;
+
+      await this.connect();
+      reconnectRequested = true;
+
+      // Guarantee another watchdog tick even if the socket open event never
+      // arrives. setAlarm replaces the existing alarm with this near retry.
+      await this.doSetAlarmV404(Date.now()+V3_LIVE_RECONNECT_MS_V363);
+      alarmRearmed = true;
+    }
+
+    return {
+      enabled:true,
+      runtimeOpen,
+      persistedDualBeforeHeal:persistedDual,
+      reconnectRequested,
+      alarmRearmed,
+      alarmAtBeforeHeal:
+        Number.isFinite(Number(alarmAt)) ? Number(alarmAt) : null,
+      trigger
+    };
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
+
+    /*
+     * V591: status/windows/reconciliation calls are read-mostly, but when an
+     * enabled collector is observably dead they also act as a safe liveness
+     * nudge. /stop is excluded so an intentional stop can never reconnect.
+     * /start already owns its own connect lifecycle.
+     */
+    let selfHealV591 = null;
+    if (
+      url.pathname !== "/stop" &&
+      url.pathname !== "/start" &&
+      url.pathname !== "/shadow-multipool-start-v394"
+    ) {
+      try {
+        selfHealV591 =
+          await this.ensureProductionCollectorSelfHealV591(
+            `FETCH_${url.pathname}_V591`
+          );
+      } catch (error) {
+        selfHealV591 = {
+          enabled:null,
+          action:"SELF_HEAL_ERROR_V591",
+          error:String(error?.message||error).slice(0,240)
+        };
+      }
+    }
     if (url.pathname === "/usage-ingest-v404" && request.method === "POST") return await this.usageMeterIngestV404(request);
     if (url.pathname === "/usage-v404") return Response.json(await this.usageMeterSnapshotV404());
     if (url.pathname === "/horizon-register-v413" && request.method === "POST") return await this.horizonRegisterV413(request);
@@ -126281,6 +126422,11 @@ export class V3LiveCollectorV363 {
       await this.doPutV404("config", cfg);
       await this.doPutV404("enabled", true);
       await this.connect();
+      // V591: WebSocket open/subscription callbacks are asynchronous. Arm the
+      // watchdog immediately so a failed/open-pending socket cannot strand an
+      // enabled collector before dual acceptance is persisted.
+      await this.doSetAlarmV404(Date.now()+V3_HEAD_WATCHDOG_MS_V371);
+
       // V371 starts a fresh integrity epoch under the liveness-watchdog model.
       // Never inherit V369/V370 elapsed integrity time into V371.
       const connAfterStart = await this.state.storage.get("connection") || {};
@@ -126746,6 +126892,12 @@ if (url.pathname === "/reconcile-v374") {
         this.ws=null; this.subscriptionId=null; this.headSubscriptionId=null;
         await this.scheduleReconnect(`NEWHEADS_STALE_V371_${Math.round(headAgeMs)}MS`);
       } else if (!dualAccepted || !this.ws || this.ws.readyState!==WebSocket.OPEN) {
+        // V591: an enabled dead collector must never remain dormant. Clear an
+        // in-memory reconnect latch from a prior runtime/event and attempt a
+        // fresh connection on every watchdog cycle until dual subscriptions
+        // are accepted.
+        this.reconnectPending = false;
+
         // V403: if persisted state says coverage was active but this runtime no
         // longer owns the live socket, conservatively reset the integrity epoch.
         // This prevents an unexpected isolate restart from hiding up to one
@@ -126806,6 +126958,17 @@ if (url.pathname === "/reconcile-v374") {
           : [],
         numericHeadNotificationGapsDoNotResetIntegrity:true,
         headGapClassification:heads.lastGapClassification||null,
+        externalRequestsAdded:0,
+        hardGlobalLimitUnchanged:42
+      },
+      autonomousSocketSelfHealV591:{
+        enabledPersisted:enabled===true,
+        intentionalStopRespected:enabled!==true,
+        runtimeSocketOpen:Boolean(this.ws && this.ws.readyState===WebSocket.OPEN),
+        reconnectUntilDualAccepted:true,
+        watchdogCadenceMs:V3_HEAD_WATCHDOG_MS_V371,
+        reconnectDelayMs:V3_LIVE_RECONNECT_MS_V363,
+        oldPartialEvidenceNeverPromoted:true,
         externalRequestsAdded:0,
         hardGlobalLimitUnchanged:42
       },
