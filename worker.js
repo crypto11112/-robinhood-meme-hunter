@@ -1,4 +1,20 @@
 /**
+ * Robinhood Chain Meme Hunter — V628
+ * AUTHORITATIVE RUNTIME VERSION: V628
+ *
+ * V628 VALIDATION CLOUD FREE-TIER USAGE METER + dRPC HTTP RETIREMENT
+ * - adds a persistent bot-observed Validation Cloud request meter;
+ * - tracks attempts, successful requests, 429s and per-scan usage;
+ * - projects 30-day successful-request volume from observed use;
+ * - shows planning CU scenarios at 20 / 100 / 500 CU per successful request;
+ * - treats Validation Cloud dashboard as authoritative because CU cost can vary by method;
+ * - adds read-only Telegram commands /validationusage and /validation;
+ * - removes unavailable dRPC from normal HTTP RPC/discovery fallback order;
+ * - Validation Cloud remains primary, then Robinhood Public RPC / Alchemy / Chainstack fallbacks;
+ * - zero extra provider requests; existing scan state write only;
+ * - no scoring, Momentum, qualification, launch-proof, Telegram-alert or 42-request-ceiling changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V627
  * AUTHORITATIVE RUNTIME VERSION: V627
  *
@@ -4643,7 +4659,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V627";
+const VERSION = "V628";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -12543,6 +12559,23 @@ function newState() {
       totalObservedRequests: 0
     },
 
+    validationCloudUsageMeterV628: {
+      schemaVersion: "V628_1",
+      calendarMonthKey: null,
+      monthStartedAt: null,
+      attemptsThisMonth: 0,
+      successesThisMonth: 0,
+      http429ThisMonth: 0,
+      scansWithValidationCloud: 0,
+      firstObservedAt: null,
+      lastObservedAt: null,
+      lastScanAttempts: 0,
+      lastScanSuccesses: 0,
+      lastScan429s: 0,
+      totalObservedAttempts: 0,
+      totalObservedSuccesses: 0
+    },
+
     snapshots:
       {},
 
@@ -13615,6 +13648,16 @@ async function readState(env) {
             parsed.chainstackUsageMeterV433 &&
             typeof parsed.chainstackUsageMeterV433 === "object"
               ? parsed.chainstackUsageMeterV433
+              : {}
+          )
+        },
+
+        validationCloudUsageMeterV628: {
+          ...fresh.validationCloudUsageMeterV628,
+          ...(
+            parsed.validationCloudUsageMeterV628 &&
+            typeof parsed.validationCloudUsageMeterV628 === "object"
+              ? parsed.validationCloudUsageMeterV628
               : {}
           )
         },
@@ -23069,6 +23112,104 @@ function chainstackUsageTelemetryV433(
   };
 }
 
+
+/* =========================================================
+   V628 VALIDATION CLOUD FREE-TIER USAGE METER
+   ========================================================= */
+const VALIDATION_CLOUD_FREE_CU_MONTH_V628 = 50000000;
+
+function validationCloudScanStatsV628(budget) {
+  const row =
+    budget?.rpcProviderHealthV423?.providers?.VALIDATION_CLOUD || {};
+  return {
+    attempts: safeNumber(row?.attempts),
+    successes: safeNumber(row?.successes),
+    http429: safeNumber(row?.http429)
+  };
+}
+
+function updateValidationCloudUsageMeterV628(state, budget) {
+  if (!state || typeof state !== "object") return null;
+  const now = Date.now();
+  const key = calendarMonthKeyV433(now);
+  const prior = state.validationCloudUsageMeterV628 &&
+    typeof state.validationCloudUsageMeterV628 === "object"
+      ? state.validationCloudUsageMeterV628 : {};
+  const sameMonth = prior.calendarMonthKey === key;
+  const scan = validationCloudScanStatsV628(budget);
+  const meter = {
+    schemaVersion: "V628_1",
+    calendarMonthKey: key,
+    monthStartedAt: sameMonth && safeNumber(prior.monthStartedAt)
+      ? safeNumber(prior.monthStartedAt) : calendarMonthStartV433(now),
+    attemptsThisMonth: (sameMonth ? safeNumber(prior.attemptsThisMonth) : 0) + scan.attempts,
+    successesThisMonth: (sameMonth ? safeNumber(prior.successesThisMonth) : 0) + scan.successes,
+    http429ThisMonth: (sameMonth ? safeNumber(prior.http429ThisMonth) : 0) + scan.http429,
+    scansWithValidationCloud: (sameMonth ? safeNumber(prior.scansWithValidationCloud) : 0) + (scan.attempts > 0 ? 1 : 0),
+    firstObservedAt: sameMonth && safeNumber(prior.firstObservedAt)
+      ? safeNumber(prior.firstObservedAt) : (scan.attempts > 0 ? now : null),
+    lastObservedAt: scan.attempts > 0 ? now : (sameMonth ? safeNumber(prior.lastObservedAt) || null : null),
+    lastScanAttempts: scan.attempts,
+    lastScanSuccesses: scan.successes,
+    lastScan429s: scan.http429,
+    totalObservedAttempts: safeNumber(prior.totalObservedAttempts) + scan.attempts,
+    totalObservedSuccesses: safeNumber(prior.totalObservedSuccesses) + scan.successes
+  };
+  state.validationCloudUsageMeterV628 = meter;
+  return meter;
+}
+
+function validationCloudUsageTelemetryV628(state) {
+  const stored = state?.validationCloudUsageMeterV628 || {};
+  const now = Date.now();
+  const monthStart = safeNumber(stored.monthStartedAt) || calendarMonthStartV433(now);
+  const elapsedDays = Math.max(1 / 24, (now - monthStart) / 86400000);
+  const successes = safeNumber(stored.successesThisMonth);
+  const attempts = safeNumber(stored.attemptsThisMonth);
+  const avgSuccessPerDay = successes / elapsedDays;
+  const projected30DaySuccesses = Math.round(avgSuccessPerDay * 30);
+  const scenario = cuPerRequest => {
+    const usedCu = successes * cuPerRequest;
+    const projectedCu = projected30DaySuccesses * cuPerRequest;
+    return {
+      assumedCuPerSuccessfulRequest: cuPerRequest,
+      estimatedCuUsed: usedCu,
+      estimatedPercentUsed: Number((usedCu / VALIDATION_CLOUD_FREE_CU_MONTH_V628 * 100).toFixed(4)),
+      projected30DayCu: projectedCu,
+      projected30DayPercent: Number((projectedCu / VALIDATION_CLOUD_FREE_CU_MONTH_V628 * 100).toFixed(2)),
+      projectedStatus: projectedCu < VALIDATION_CLOUD_FREE_CU_MONTH_V628 * 0.5 ? "SAFE" : projectedCu < VALIDATION_CLOUD_FREE_CU_MONTH_V628 * 0.8 ? "WATCH" : projectedCu < VALIDATION_CLOUD_FREE_CU_MONTH_V628 ? "WARNING" : "OVER_FREE_ALLOWANCE"
+    };
+  };
+  return {
+    enabled: true,
+    source: "BOT_OBSERVED_VALIDATION_CLOUD_RPC_ATTEMPTS_V628",
+    billingAuthoritative: false,
+    dashboardAuthoritative: true,
+    calendarMonthPlanningMeter: true,
+    calendarMonthKey: stored.calendarMonthKey || calendarMonthKeyV433(now),
+    freeAllowanceCuPerMonth: VALIDATION_CLOUD_FREE_CU_MONTH_V628,
+    attemptsThisMonth: attempts,
+    successesThisMonth: successes,
+    http429ThisMonth: safeNumber(stored.http429ThisMonth),
+    lastScanAttempts: safeNumber(stored.lastScanAttempts),
+    lastScanSuccesses: safeNumber(stored.lastScanSuccesses),
+    lastScan429s: safeNumber(stored.lastScan429s),
+    scansWithValidationCloud: safeNumber(stored.scansWithValidationCloud),
+    averageSuccessfulRequestsPerDay: Number(avgSuccessPerDay.toFixed(2)),
+    projected30DaySuccessfulRequests: projected30DaySuccesses,
+    planningScenarios: {
+      low20Cu: scenario(20),
+      medium100Cu: scenario(100),
+      high500Cu: scenario(500)
+    },
+    firstObservedAt: safeNumber(stored.firstObservedAt) || null,
+    lastObservedAt: safeNumber(stored.lastObservedAt) || null,
+    note: "REQUEST_COUNT_BASED_PLANNING_ESTIMATE_ONLY_ACTUAL_METHOD_CU_WEIGHTS_AND_VALIDATION_CLOUD_DASHBOARD_ARE_AUTHORITATIVE",
+    externalRequestsAdded: 0,
+    additionalStateWrites: 0
+  };
+}
+
 /* =========================================================
    V423 RPC PROVIDER HEALTH DIAGNOSTIC
    ========================================================= */
@@ -23076,6 +23217,18 @@ function chainstackUsageTelemetryV433(
 function rpcProviderNameV423(url) {
   const value =
     String(url || "").toLowerCase();
+
+  if (
+    value.includes("validationcloud.io")
+  ) {
+    return "VALIDATION_CLOUD";
+  }
+
+  if (
+    value.includes("drpc.live")
+  ) {
+    return "DRPC";
+  }
 
   if (
     value.includes(
@@ -23907,14 +24060,12 @@ async function rpc(
     phase === "analysis"
       ? [
           {name: "VALIDATION_CLOUD", url: validationCloudUrl},
-          {name: "DRPC", url: drpcUrl},
           {name: "CHAINSTACK", url: chainstackUrl},
           {name: "ROBINHOOD_PUBLIC_RPC", url: PUBLIC_RPC},
           {name: "ALCHEMY", url: alchemyUrl}
         ]
       : [
           {name: "VALIDATION_CLOUD", url: validationCloudUrl},
-          {name: "DRPC", url: drpcUrl},
           {name: "CHAINSTACK", url: chainstackUrl},
           {name: "ROBINHOOD_PUBLIC_RPC", url: PUBLIC_RPC},
           ...(alchemyUrl ? [{name: "ALCHEMY", url: alchemyUrl}] : [])
@@ -24084,14 +24235,6 @@ function normalSystemRpcsAll429V429(
   const configured = [
     "ROBINHOOD_PUBLIC_RPC"
   ];
-
-  if (
-    drpcConfiguredV626(env)
-  ) {
-    configured.unshift(
-      "DRPC"
-    );
-  }
 
   if (
     validationCloudConfiguredV627(env)
@@ -80272,6 +80415,12 @@ for (
       env
     );
 
+  const validationCloudUsageUpdateV628 =
+    updateValidationCloudUsageMeterV628(
+      state,
+      budget
+    );
+
   /*
    * V473: initialize/prune the forward-only verified-launch meter BEFORE the
    * authoritative scan state write. In V470-V472, a zero-launch scan could
@@ -80779,6 +80928,14 @@ for (
       ),
       updateThisScan:
         chainstackUsageUpdateV433
+    },
+
+    validationCloudUsageMeterV628: {
+      ...validationCloudUsageTelemetryV628(
+        state
+      ),
+      updateThisScan:
+        validationCloudUsageUpdateV628
     },
 
     geckoMarketFallbackPriorityV433: {
@@ -95278,6 +95435,36 @@ function v3UsdTelegramMessageV353(result) {
     `<i>Read-only persisted evidence. ${safeNumber(result.elapsedMs)} ms aggregation; no pricing/API/RPC call and no KV write from /v3usd.</i>`
   );
   return lines.join("\n");
+}
+
+function validationCloudUsageTelegramMessageV628(state) {
+  const meter = validationCloudUsageTelemetryV628(state);
+  const fmt = value => Number.isFinite(Number(value)) ? Number(value).toLocaleString("en-GB") : "0";
+  const pct = value => Number.isFinite(Number(value)) ? `${Number(value).toFixed(2)}%` : "UNVERIFIED";
+  const low = meter?.planningScenarios?.low20Cu || {};
+  const med = meter?.planningScenarios?.medium100Cu || {};
+  const high = meter?.planningScenarios?.high500Cu || {};
+  return [
+    `☁️ <b>Validation Cloud Usage — ${VERSION}</b>`,
+    "",
+    `Month: <b>${escapeHtml(meter?.calendarMonthKey || "UNVERIFIED")}</b>`,
+    `Free allowance: <b>${fmt(meter?.freeAllowanceCuPerMonth)} CU/month</b>`,
+    `Successful RPC requests observed: <b>${fmt(meter?.successesThisMonth)}</b>`,
+    `RPC attempts observed: <b>${fmt(meter?.attemptsThisMonth)}</b>`,
+    `HTTP 429s: <b>${fmt(meter?.http429ThisMonth)}</b>`,
+    `Last scan: <b>${fmt(meter?.lastScanSuccesses)} successful / ${fmt(meter?.lastScanAttempts)} attempts</b>`,
+    "",
+    `Average successful requests/day: <b>${fmt(meter?.averageSuccessfulRequestsPerDay)}</b>`,
+    `Projected 30-day successful requests: <b>${fmt(meter?.projected30DaySuccessfulRequests)}</b>`,
+    "",
+    "📐 <b>Planning scenarios</b>",
+    `20 CU/request: <b>${fmt(low.projected30DayCu)} CU (${pct(low.projected30DayPercent)}) — ${escapeHtml(low.projectedStatus || "UNVERIFIED")}</b>`,
+    `100 CU/request: <b>${fmt(med.projected30DayCu)} CU (${pct(med.projected30DayPercent)}) — ${escapeHtml(med.projectedStatus || "UNVERIFIED")}</b>`,
+    `500 CU/request: <b>${fmt(high.projected30DayCu)} CU (${pct(high.projected30DayPercent)}) — ${escapeHtml(high.projectedStatus || "UNVERIFIED")}</b>`,
+    "",
+    "ℹ️ <i>Bot-side planning estimate only. Validation Cloud's dashboard is authoritative because CU cost can vary by RPC method.</i>",
+    "<i>Read-only command: no scan, RPC request or state write.</i>"
+  ].join("\n");
 }
 
 function chainstackUsageTelegramMessageV434(
@@ -122526,6 +122713,7 @@ function telegramHelpV271() {
     "<code>/launchcoverage</code> — launch discovery-to-Telegram coverage funnel",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
+    "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
     "<code>/blockscoutusage</code> — Blockscout PRO daily credit meter (read-only)",
     "<code>/blockscoutv3test 0xADDRESS</code> — one-shot exact V3 Blockscout log test",
     "<code>/help</code> — command list",
@@ -123606,6 +123794,24 @@ async function telegramCommandReplyV271(
           dailyCapCredits:safeNumber(fallbackMeterV615?.dailyCapCredits),
           status:fallbackMeterV615?.status||null
         }
+      };
+    }
+  } else if (
+    parsed.command === "/validationusage" ||
+    parsed.command === "/validation"
+  ) {
+    reply = validationCloudUsageTelegramMessageV628(state);
+    if (diagnosticV273) {
+      const meterV628 = validationCloudUsageTelemetryV628(state);
+      diagnosticV273.validationCloudUsageV628 = {
+        attemptsThisMonth: meterV628?.attemptsThisMonth ?? null,
+        successesThisMonth: meterV628?.successesThisMonth ?? null,
+        http429ThisMonth: meterV628?.http429ThisMonth ?? null,
+        projected30DaySuccessfulRequests: meterV628?.projected30DaySuccessfulRequests ?? null,
+        planningScenarios: meterV628?.planningScenarios || null,
+        scannerBudgetConsumed: false,
+        externalProviderRequests: 0,
+        stateWrites: 0
       };
     }
   } else if (
