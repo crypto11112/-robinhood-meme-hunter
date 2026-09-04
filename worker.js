@@ -1,4 +1,25 @@
 /**
+ * Robinhood Chain Meme Hunter — V638
+ * AUTHORITATIVE RUNTIME VERSION: V638
+ *
+ * V638 METHOD-SPECIFIC LIVE eth_getLogs ROUTING
+ * - builds directly forward from V637;
+ * - Validation Cloud remains primary for normal LIVE discovery eth_getLogs;
+ * - live eth_getLogs fallback order is now:
+ *   Validation Cloud -> Robinhood Public RPC -> Alchemy -> Chainstack;
+ * - one Chainstack HTTP 403 from normal live eth_getLogs starts a
+ *   METHOD-SPECIFIC 60-minute cooldown for Chainstack live eth_getLogs only;
+ * - that cooldown does NOT disable Chainstack eth_call, eth_getCode, receipts,
+ *   or other already-working Chainstack paths;
+ * - live 429 recovery now uses the LIVE method-specific selector, not the
+ *   legacy generic discovery selector;
+ * - dRPC remains excluded from Robinhood Mainnet autonomous routing;
+ * - V630-V637 identity/source/retry/checkpoint/cache logic is preserved;
+ * - zero scoring, Momentum, qualification, Telegram threshold, launchpad proof,
+ *   KV/state-key, scheduled cadence, or hard 42-request ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V637
  * AUTHORITATIVE RUNTIME VERSION: V637
  *
@@ -4853,7 +4874,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V637";
+const VERSION = "V638";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -5780,6 +5801,9 @@ const V244_BLOCKSCOUT_429_COOLDOWN_MS = 5 * 60 * 1000;
 
 const DISCOVERY_RPC_429_COOLDOWN_MS =
   60 * 1000;
+
+const CHAINSTACK_LIVE_GETLOGS_403_COOLDOWN_MS_V638 =
+  60 * 60 * 1000;
 
 /* =========================================================
    HARD REQUEST BUDGET
@@ -15444,6 +15468,93 @@ function chainstackLiveDiscoveryCoolingV435(
   );
 }
 
+function isHttp403V638(
+  value
+) {
+  const valueText =
+    String(
+      value ||
+      ""
+    ).toUpperCase();
+
+  return (
+    valueText.includes("HTTP_403") ||
+    valueText.includes("HTTP 403") ||
+    valueText.includes("STATUS 403")
+  );
+}
+
+function markChainstackLiveGetLogs403V638(
+  state,
+  error = null
+) {
+  const service =
+    discoveryService(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  service.chainstackLiveGetLogs403LastAtV638 =
+    now;
+
+  service.chainstackLiveGetLogs403CooldownUntilV638 =
+    now +
+    CHAINSTACK_LIVE_GETLOGS_403_COOLDOWN_MS_V638;
+
+  service.chainstackLiveGetLogs403TotalV638 =
+    safeNumber(
+      service.chainstackLiveGetLogs403TotalV638
+    ) + 1;
+
+  service.chainstackLiveGetLogs403LastErrorV638 =
+    error
+      ? String(error)
+      : "HTTP_403";
+}
+
+function chainstackLiveGetLogs403CoolingV638(
+  state
+) {
+  const service =
+    discoveryService(
+      state
+    );
+
+  return (
+    safeNumber(
+      service.chainstackLiveGetLogs403CooldownUntilV638
+    ) >
+    Date.now()
+  );
+}
+
+function observeLiveGetLogsProviderFailureV638(
+  state,
+  provider,
+  response
+) {
+  if (
+    provider === "CHAINSTACK" &&
+    !Array.isArray(
+      response?.result
+    ) &&
+    isHttp403V638(
+      response?.error
+    )
+  ) {
+    markChainstackLiveGetLogs403V638(
+      state,
+      response?.error
+    );
+
+    return true;
+  }
+
+  return false;
+}
+
 function preferredLiveDiscoveryProviderV435(
   env,
   state
@@ -15459,31 +15570,37 @@ function preferredLiveDiscoveryProviderV435(
   }
 
   if (
-    drpcConfiguredV626(env) &&
     !discoveryProviderCooling(
       state,
-      "DRPC"
+      "ROBINHOOD_PUBLIC_RPC"
     )
   ) {
-    return null;
+    return "ROBINHOOD_PUBLIC_RPC";
+  }
+
+  if (
+    env.ALCHEMY_API_KEY &&
+    !discoveryProviderCooling(
+      state,
+      "ALCHEMY"
+    )
+  ) {
+    return "ALCHEMY";
   }
 
   if (
     chainstackConfiguredV431(env) &&
     !chainstackLiveDiscoveryCoolingV435(
       state
+    ) &&
+    !chainstackLiveGetLogs403CoolingV638(
+      state
     )
   ) {
     return "CHAINSTACK";
   }
 
-  /*
-   * Preserve the proven legacy ordering as fallback only.
-   */
-  return preferredDiscoveryProvider(
-    env,
-    state
-  );
+  return null;
 }
 
 function alternateLiveDiscoveryProviderV435(
@@ -15491,11 +15608,6 @@ function alternateLiveDiscoveryProviderV435(
   state,
   current
 ) {
-  /*
-   * V633 evidence-based live fallback order.
-   * Validation Cloud remains primary and receives the V632 same-range retry.
-   * dRPC is globally excluded from Robinhood Mainnet routing.
-   */
   if (
     current !== "VALIDATION_CLOUD" &&
     validationCloudConfiguredV627(env) &&
@@ -15505,16 +15617,6 @@ function alternateLiveDiscoveryProviderV435(
     )
   ) {
     return "VALIDATION_CLOUD";
-  }
-
-  if (
-    current !== "CHAINSTACK" &&
-    chainstackConfiguredV431(env) &&
-    !chainstackLiveDiscoveryCoolingV435(
-      state
-    )
-  ) {
-    return "CHAINSTACK";
   }
 
   if (
@@ -15536,6 +15638,19 @@ function alternateLiveDiscoveryProviderV435(
     )
   ) {
     return "ALCHEMY";
+  }
+
+  if (
+    current !== "CHAINSTACK" &&
+    chainstackConfiguredV431(env) &&
+    !chainstackLiveDiscoveryCoolingV435(
+      state
+    ) &&
+    !chainstackLiveGetLogs403CoolingV638(
+      state
+    )
+  ) {
+    return "CHAINSTACK";
   }
 
   return null;
@@ -15617,13 +15732,35 @@ function liveDiscoveryTelemetryV435(
     chainstackConfigured:
       chainstackConfiguredV431(env),
     preferredProvider:
-      validationCloudConfiguredV627(env)
-        ? "VALIDATION_CLOUD"
-        : drpcConfiguredV626(env)
-          ? "DRPC"
-          : chainstackConfiguredV431(env)
-            ? "CHAINSTACK"
-            : "LEGACY_DISCOVERY_ORDER",
+      preferredLiveDiscoveryProviderV435(
+        env,
+        state
+      ),
+    liveGetLogsProviderOrderV638: [
+      "VALIDATION_CLOUD",
+      "ROBINHOOD_PUBLIC_RPC",
+      "ALCHEMY",
+      "CHAINSTACK"
+    ],
+    chainstackLiveGetLogs403CoolingV638:
+      chainstackLiveGetLogs403CoolingV638(
+        state
+      ),
+    chainstackLiveGetLogs403CooldownUntilV638:
+      safeNumber(
+        service.chainstackLiveGetLogs403CooldownUntilV638
+      ) || null,
+    chainstackLiveGetLogs403LastAtV638:
+      safeNumber(
+        service.chainstackLiveGetLogs403LastAtV638
+      ) || null,
+    chainstackLiveGetLogs403TotalV638:
+      safeNumber(
+        service.chainstackLiveGetLogs403TotalV638
+      ),
+    chainstackLiveGetLogs403LastErrorV638:
+      service.chainstackLiveGetLogs403LastErrorV638 ||
+      null,
     actualSuccessfulRangeProviders:
       byProvider,
     lastLiveProvider:
@@ -26983,6 +27120,12 @@ async function scanLiveRange(
         learnedLiveEmittersV515
       );
 
+    observeLiveGetLogsProviderFailureV638(
+      state,
+      provider,
+      response
+    );
+
     if (
       !Array.isArray(
         response.result
@@ -27054,6 +27197,12 @@ async function scanLiveRange(
               provider,
               learnedLiveEmittersV515
             );
+
+          observeLiveGetLogsProviderFailureV638(
+            state,
+            provider,
+            response
+          );
 
           providerHeadRetries++;
         }
@@ -27127,6 +27276,12 @@ async function scanLiveRange(
           response =
             sameProviderRetryV632;
 
+          observeLiveGetLogsProviderFailureV638(
+            state,
+            provider,
+            response
+          );
+
           if (
             Array.isArray(
               sameProviderRetryV632.result
@@ -27166,6 +27321,12 @@ async function scanLiveRange(
                 learnedLiveEmittersV515
               );
 
+            observeLiveGetLogsProviderFailureV638(
+              state,
+              alternate,
+              retry
+            );
+
             if (
               Array.isArray(
                 retry.result
@@ -27204,6 +27365,12 @@ async function scanLiveRange(
             response =
               retry;
 
+            observeLiveGetLogsProviderFailureV638(
+              state,
+              provider,
+              response
+            );
+
             if (
               Array.isArray(
                 retry.result
@@ -27230,7 +27397,7 @@ async function scanLiveRange(
       );
 
       const alternate =
-        alternateDiscoveryProvider(
+        alternateLiveDiscoveryProviderV435(
           env,
           state,
           provider
@@ -27256,6 +27423,12 @@ async function scanLiveRange(
             provider,
             learnedLiveEmittersV515
           );
+
+        observeLiveGetLogsProviderFailureV638(
+          state,
+          provider,
+          response
+        );
 
         if (
           !Array.isArray(
