@@ -1,4 +1,27 @@
 /**
+ * Robinhood Chain Meme Hunter — V590
+ * AUTHORITATIVE RUNTIME VERSION: V590
+ *
+ * V590 IMMEDIATE V3 RESET-CAUSE SURFACING:
+ * - preserves V589 and all confirmed-working collector behaviour;
+ * - does not wait for a new post-V589 interruption to explain the current
+ *   interrupted state;
+ * - surfaces already-persisted V371/V366 reset evidence immediately beside
+ *   the live coverage clock:
+ *     * lastIntegrityGapReason
+ *     * lastIntegrityGapAt
+ *     * lastCoverageGapReason
+ *     * log/head subscription accepted state
+ *     * head age versus stale threshold
+ *     * last connection error when present
+ * - keeps V589 reason counters/recent-event ledger for future resets;
+ * - diagnostic/presentation only;
+ * - no scoring, Momentum, qualification, USD maths, providers, request budget,
+ *   Telegram thresholds or alert logic changes;
+ * - no extra external requests;
+ * - hard global request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V589
  * AUTHORITATIVE RUNTIME VERSION: V589
  *
@@ -3914,7 +3937,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V589";
+const VERSION = "V590";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -90321,6 +90344,30 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     evidence.push("", "📡 <b>Live V3 WebSocket Flow — VERIFIED</b>");
     const coverageMinutesV366 = Math.floor(safeNumber(liveV3V365?.continuousCoverageMs) / 60000);
     evidence.push(`🟢 Coverage clock: <b>${liveV3V365?.coverageActive===true ? "ACTIVE" : "INTERRUPTED"}</b> | continuous <b>${coverageMinutesV366}m</b> | pre-V364 history not backfilled`);
+
+    const lastIntegrityGapReasonV590 =
+      String(liveV3V365?.lastIntegrityGapReason || "UNVERIFIED").slice(0,160);
+    const lastCoverageGapReasonV590 =
+      String(liveV3V365?.lastCoverageGapReason || "UNVERIFIED").slice(0,160);
+    const lastIntegrityGapAtV590 =
+      Number.isFinite(Number(liveV3V365?.lastIntegrityGapAt))
+        ? Number(liveV3V365.lastIntegrityGapAt)
+        : null;
+    const headAgeMsV590 =
+      Number.isFinite(Number(liveV3V365?.headAgeMs))
+        ? Number(liveV3V365.headAgeMs)
+        : null;
+    const headStaleThresholdMsV590 =
+      Number.isFinite(Number(liveV3V365?.headStaleThresholdMs))
+        ? Number(liveV3V365.headStaleThresholdMs)
+        : null;
+
+    evidence.push(
+      `🧪 V590 current V3 reset cause: <b>${escapeHtml(lastIntegrityGapReasonV590)}</b>${lastIntegrityGapAtV590!==null ? ` | ${escapeHtml(new Date(lastIntegrityGapAtV590).toISOString())}` : ""}`,
+      `🔌 V3 subscriptions: log <b>${liveV3V365?.logSubscriptionAccepted===true ? "YES" : "NO"}</b> | head <b>${liveV3V365?.headSubscriptionAccepted===true ? "YES" : "NO"}</b>${headAgeMsV590!==null ? ` | head age <b>${Math.round(headAgeMsV590/1000)}s</b>` : ""}${headStaleThresholdMsV590!==null ? ` / stale threshold <b>${Math.round(headStaleThresholdMsV590/1000)}s</b>` : ""}`,
+      `🧩 Legacy coverage reset cause: <b>${escapeHtml(lastCoverageGapReasonV590)}</b>${liveV3V365?.lastError ? ` | last connection error <b>${escapeHtml(String(liveV3V365.lastError).slice(0,140))}</b>` : ""}`
+    );
+
     evidence.push(`🧮 Live swaps captured: <b>${safeNumber(liveV3V365?.swapsCaptured)}</b> | Workers KV writes: <b>${safeNumber(liveV3V365?.workersKvWrites)}</b> | interruptions: <b>${safeNumber(liveV3V365?.interruptionsSinceV366)}</b>`);
     evidence.push(`🧱 V371 head-liveness guard: <b>${liveV3V365?.headSubscriptionAccepted===true ? "ACTIVE" : "UNVERIFIED"}</b> | heads <b>${safeNumber(liveV3V365?.headsObserved)}</b> | head notification gaps <b>${safeNumber(liveV3V365?.headGapsDetected)}</b>${Number.isFinite(Number(liveV3V365?.lastHeadBlock)) ? ` | head <b>${safeNumber(liveV3V365.lastHeadBlock)}</b>` : ""}`);
 
@@ -90337,7 +90384,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
         : [];
 
       evidence.push(
-        `🧪 V589 V3 integrity diagnostic: runtime socket <b>${v3DiagV589?.runtimeSocketOpen===true ? "OPEN" : "NOT_OPEN"}</b> | persisted dual subscription <b>${v3DiagV589?.dualAcceptedPersisted===true ? "YES" : "NO"}</b> | integrity active <b>${v3DiagV589?.currentIntegrityActive===true ? "YES" : "NO"}</b>`,
+        `🧪 V590 V3 integrity diagnostic: runtime socket <b>${v3DiagV589?.runtimeSocketOpen===true ? "OPEN" : "NOT_OPEN"}</b> | persisted dual subscription <b>${v3DiagV589?.dualAcceptedPersisted===true ? "YES" : "NO"}</b> | integrity active <b>${v3DiagV589?.currentIntegrityActive===true ? "YES" : "NO"}</b>`,
         `🧪 V589 real interruption reasons: <b>${escapeHtml(reasonTextV589)}</b>`,
         `ℹ️ Numeric newHeads jumps are diagnostic-only and do <b>not</b> reset V371 integrity.`
       );
