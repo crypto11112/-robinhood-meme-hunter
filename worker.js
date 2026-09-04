@@ -1,4 +1,18 @@
 /**
+ * Robinhood Chain Meme Hunter — V606
+ * AUTHORITATIVE RUNTIME VERSION: V606
+ *
+ * V606 HTTP-POLLING ACTIVATION / MIGRATION FIX:
+ * - preserves V605 architecture and all confirmed evidence semantics;
+ * - fixes stale in-memory V604 config overriding persisted V605 config;
+ * - persisted config is authoritative in self-heal, alarm, connect and meter;
+ * - /start closes and clears any leftover token WebSocket before HTTP mode;
+ * - V605 polling initialization retries until shared head is fresh;
+ * - /feedusage reads HTTP mode from persisted config;
+ * - HTTP polling health does not require an OPEN WebSocket;
+ * - no scoring, USD, V4, alerts, qualification or 42-cap changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V605
  * AUTHORITATIVE RUNTIME VERSION: V605
  *
@@ -4242,7 +4256,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V605";
+const VERSION = "V606";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -120252,11 +120266,13 @@ function v3FeedUsageTelegramMessageV598(token, result) {
       : [];
 
   const socket =
-    result?.runtimeSocketOpen === true
-      ? "OPEN"
-      : result?.runtimeSocketConnecting === true
-        ? "CONNECTING"
-        : "NOT OPEN";
+    result?.transportModeV606==="HTTP_ETH_GETLOGS"
+      ? "NOT USED (HTTP MODE)"
+      : result?.runtimeSocketOpen === true
+        ? "OPEN"
+        : result?.runtimeSocketConnecting === true
+          ? "CONNECTING"
+          : "NOT OPEN";
 
   const dual =
     result?.dualSubscriptionActive === true
@@ -120301,13 +120317,13 @@ function v3FeedUsageTelegramMessageV598(token, result) {
   };
 
   const lines = [
-    `📡 <b>V3 Feed Usage — V605</b>`,
+    `📡 <b>V3 Feed Usage — V606</b>`,
     `Contract: <code>${escapeHtml(token)}</code>`,
     "",
     `Active provider: <b>${escapeHtml(activeProvider)}</b>`,
     `Configured fallbacks: <b>${escapeHtml(configured.join(", ") || "NONE")}</b>`,
-    `Socket: <b>${socket}</b> | effective dual subscriptions: <b>${dual}</b>`,
-    `Persisted dual flags: <b>${persistedDual}</b>`,
+    `Socket: <b>${socket}</b> | effective feed health: <b>${dual}</b>`,
+    `Persisted legacy dual flags: <b>${persistedDual}</b>`,
     `Integrity: <b>${integrity}</b> | persisted integrity: <b>${persistedIntegrity}</b>`,
     `Continuous effective uptime: <b>${escapeHtml(fmtDuration(result?.continuousIntegrityMs))}</b>`,
     `Head age: <b>${escapeHtml(fmtAge(result?.headAgeMs))}</b> | last block: <b>${Number.isFinite(Number(result?.lastHeadBlock)) ? Math.trunc(Number(result.lastHeadBlock)) : "UNVERIFIED"}</b>`,
@@ -120316,6 +120332,7 @@ function v3FeedUsageTelegramMessageV598(token, result) {
     "",
     `Public head polls: <b>${safeNumber(result?.sharedHeadV602?.pollsObservedV603).toLocaleString("en-GB")}</b> | failures <b>${safeNumber(result?.sharedHeadV602?.pollFailuresV603)}</b>`,
     `V3 log transport: <b>${result?.v3HttpLogPollingV605?.enabled===true?"HTTP eth_getLogs":"LEGACY"}</b> | WebSocket subscriptions <b>${safeNumber(result?.v3HttpLogPollingV605?.webSocketSubscriptions)}</b>`,
+    `HTTP poll health: <b>${result?.httpPollFreshV606===true?"FRESH":result?.v3HttpLogPollingV605?.enabled===true?"BUILDING/STALE":"N/A"}</b> | age <b>${escapeHtml(fmtAge(result?.pollAgeMsV606))}</b>`,
     `Log polls: <b>${safeNumber(result?.v3HttpLogPollingV605?.pollSuccesses)}</b> success / <b>${safeNumber(result?.v3HttpLogPollingV605?.pollFailures)}</b> failed | provider <b>${escapeHtml(String(result?.v3HttpLogPollingV605?.lastProviderId||"BUILDING"))}</b>`,
     `Observed heads: <b>${safeNumber(result?.headsObserved).toLocaleString("en-GB")}</b>`,
     `Exact-pool V3 swaps captured: <b>${safeNumber(result?.swapsCaptured).toLocaleString("en-GB")}</b>`,
@@ -120451,6 +120468,10 @@ function v3CollectorControlTelegramMessageV592(action, token, result) {
       `Head subscription: <b>${headSub}</b>`,
       `V591 self-heal: <b>${selfHeal}</b>`
     );
+  }
+
+  if (result?.transportModeV606==="HTTP_ETH_GETLOGS" || result?.v3HttpLogPollingV605?.enabled===true) {
+    lines.push(`V605/V606 transport: <b>HTTP eth_getLogs</b>`);
   }
 
   if (result?.pair) {
@@ -127083,7 +127104,9 @@ export class V3LiveCollectorV363 {
       };
     }
 
-    const cfgV605=this.config||await this.state.storage.get("config")||null;
+    const storedCfgV606=await this.state.storage.get("config")||null;
+    if(storedCfgV606)this.config=storedCfgV606;
+    const cfgV605=storedCfgV606||this.config||null;
     if(cfgV605?.httpLogPollingV605===true){
       let alarmAt=null;
       try{alarmAt=await this.state.storage.getAlarm();}catch(_){}
@@ -127269,6 +127292,23 @@ export class V3LiveCollectorV363 {
       }
       cfg.sharedHeadModeV602=true;
       cfg.httpLogPollingV605=true;
+
+      try {
+        if(this.ws && (
+          this.ws.readyState===WebSocket.OPEN ||
+          this.ws.readyState===WebSocket.CONNECTING
+        )){
+          this.ws.close(1000,"V606 migrate to HTTP log polling");
+        }
+      } catch (_) {}
+      this.ws=null;
+      this.subscriptionId=null;
+      this.headSubscriptionId=null;
+      this.wsConnectStartedAtV593=null;
+      this.activeProviderIdV604=null;
+      this.activeProviderOpenedAtV604=null;
+      this.reconnectPending=false;
+
       this.config=cfg;
       await this.doPutV404("config",cfg);
       await this.doPutV404("enabled",true);
@@ -127715,10 +127755,19 @@ if (url.pathname === "/reconcile-v374") {
       await this.sharedHeadAlarmV602();
       return;
     }
-    const cfgV605=this.config||await this.state.storage.get("config")||null;
+    const storedCfgV606=await this.state.storage.get("config")||null;
+    if(storedCfgV606)this.config=storedCfgV606;
+    const cfgV605=storedCfgV606||this.config||null;
     if(cfgV605?.httpLogPollingV605===true){
       this.config=cfgV605;
-      await this.pollExactV3LogsV605();
+
+      const pollStateV606=await this.state.storage.get("v605:logPoll")||{};
+      if(pollStateV606.initialized!==true){
+        await this.initializeHttpLogPollingV605();
+      }else{
+        await this.pollExactV3LogsV605();
+      }
+
       await this.flushTradeStateV403();
       await this.checkpointHeadTelemetryV402();
       await this.doSetAlarmV404(Date.now()+V3_HTTP_LOG_POLL_INTERVAL_MS_V605);
@@ -127878,7 +127927,8 @@ if (url.pathname === "/reconcile-v374") {
   async feedUsageSnapshotV598() {
     const nowMs = Date.now();
     const enabled = await this.state.storage.get("enabled");
-    const cfg = this.config || await this.state.storage.get("config") || null;
+    const cfg = await this.state.storage.get("config") || this.config || null;
+    if(cfg)this.config=cfg;
     const conn = await this.state.storage.get("connection") || {};
     const stats = await this.state.storage.get("stats") || {};
     const heads = this.headsV402 || await this.state.storage.get("v368:heads") || {};
@@ -127901,13 +127951,38 @@ if (url.pathname === "/reconcile-v374") {
     const runtimeSocketOpen =
       Boolean(this.ws && this.ws.readyState === WebSocket.OPEN);
 
+    const httpModeHealthV606 =
+      cfg?.httpLogPollingV605===true;
+
     const persistedDual =
       conn.connected === true &&
       conn.logSubscriptionAccepted === true &&
       conn.headSubscriptionAccepted === true;
 
+    const lastSuccessfulPollAtV606=
+      Number.isFinite(Number(logPollV605?.lastSuccessfulPollAt))
+        ? Number(logPollV605.lastSuccessfulPollAt)
+        : null;
+
+    const pollAgeMsV606=
+      lastSuccessfulPollAtV606!==null
+        ? Math.max(0,nowMs-lastSuccessfulPollAtV606)
+        : null;
+
+    const httpPollFreshV606=
+      httpModeHealthV606 &&
+      logPollV605?.initialized===true &&
+      sharedHeadV602?.fresh===true &&
+      pollAgeMsV606!==null &&
+      pollAgeMsV606<=Math.max(
+        V3_HTTP_LOG_POLL_INTERVAL_MS_V605*3,
+        60000
+      );
+
     const effectiveDual =
-      runtimeSocketOpen && persistedDual;
+      httpModeHealthV606
+        ? httpPollFreshV606
+        : (runtimeSocketOpen && persistedDual);
 
     const persistedIntegrityActive =
       integrity.active === true;
@@ -127916,8 +127991,12 @@ if (url.pathname === "/reconcile-v374") {
       effectiveDual && persistedIntegrityActive;
 
     const stalePersistedRuntimeState =
-      !runtimeSocketOpen &&
-      (persistedDual || persistedIntegrityActive);
+      httpModeHealthV606
+        ? false
+        : (
+            !runtimeSocketOpen &&
+            (persistedDual || persistedIntegrityActive)
+          );
 
     const integrityStart =
       effectiveIntegrityActive &&
@@ -127951,7 +128030,7 @@ if (url.pathname === "/reconcile-v374") {
       sharedHeadV602?.transport==="HTTP_ETH_BLOCKNUMBER_V603" ||
       sharedHeadV602?.activeProvider==="ROBINHOOD_PUBLIC_RPC";
 
-    const httpPollingModeV605=this.config?.httpLogPollingV605===true;
+    const httpPollingModeV605=cfg?.httpLogPollingV605===true;
 
     const meterNotificationsV600 =
       httpPollingModeV605
@@ -128074,6 +128153,10 @@ if (url.pathname === "/reconcile-v374") {
       preferredProvider:preferred,
       configuredProviders:configured,
       runtimeSocketOpen,
+      transportModeV606:httpModeHealthV606?"HTTP_ETH_GETLOGS":"LEGACY_WEBSOCKET",
+      httpPollFreshV606,
+      lastSuccessfulPollAtV606,
+      pollAgeMsV606,
       runtimeSocketConnecting:
         Boolean(this.ws && this.ws.readyState === WebSocket.CONNECTING),
       persistedConnectionOpen:
@@ -128142,7 +128225,7 @@ if (url.pathname === "/reconcile-v374") {
       recentOpenProviders:openProviders.slice(-6),
       lastProviderFailure:conn?.lastProviderFailureV597 || null,
       v3HttpLogPollingV605:{
-        enabled:this.config?.httpLogPollingV605===true,
+        enabled:cfg?.httpLogPollingV605===true,
         status:logPollV605?.status||null,
         initialized:logPollV605?.initialized===true,
         initializedAt:logPollV605?.initializedAt||null,
@@ -128236,7 +128319,8 @@ if (url.pathname === "/reconcile-v374") {
         ? await this.sharedHeadStatusV602()
         : await this.getSharedHeadStatusV602();
     const handshakeV594 = await this.state.storage.get("v594:handshakeDiagnostics") || {};
-    const cfg = this.config || await this.state.storage.get("config") || null;
+    const cfg = await this.state.storage.get("config") || this.config || null;
+    if(cfg)this.config=cfg;
     const conn = await this.state.storage.get("connection") || {};
     const stats = await this.state.storage.get("stats") || {};
     const cov=await this.state.storage.get("v366:coverage")||{};
@@ -129736,7 +129820,9 @@ if (url.pathname === "/reconcile-v374") {
       return await this.connectSharedHeadV602();
     }
 
-    const cfgV605=this.config||await this.state.storage.get("config")||null;
+    const storedCfgV606=await this.state.storage.get("config")||null;
+    if(storedCfgV606)this.config=storedCfgV606;
+    const cfgV605=storedCfgV606||this.config||null;
     if(cfgV605?.httpLogPollingV605===true){
       this.config=cfgV605;
       return await this.initializeHttpLogPollingV605();
