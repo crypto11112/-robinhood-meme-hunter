@@ -1,4 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V621
+ * AUTHORITATIVE RUNTIME VERSION: V621
+ *
+ * V621 CURRENT-LIVE VERIFIED-LAUNCH ANALYSIS PRIORITY
+ * - fixes the V620 funnel bottleneck without loosening qualification;
+ * - unifies already-verified LIVE V515/V514/V476/V208/V211 launch tokens;
+ * - inserts exact current-live launches ahead of ordinary retries/watch rows
+ *   before MAX_TOKEN_CHECKS truncation;
+ * - a current exact launch that still needs market evidence owns the scarce
+ *   fresh-market/completion slot ahead of an older carried retry, while that
+ *   retry remains queued;
+ * - existing V417 bounded progressive completion is reused when only residual
+ *   analysis budget is available;
+ * - adds funnel telemetry for exact launches seen/selected/returned/deferred;
+ * - zero new requests, no scoring/Momentum/qualification/Telegram changes,
+ *   no provider cadence change, hard 42 global / 21 base-analysis limits unchanged.
+ */
+/**
  * Robinhood Chain Meme Hunter — V620
  * AUTHORITATIVE RUNTIME VERSION: V620
  *
@@ -4529,7 +4547,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V620";
+const VERSION = "V621";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -70448,6 +70466,39 @@ for (
     newTokens.add(launchToken);
   }
 
+  const currentLiveVerifiedLaunchTokensV621 =
+    new Set(
+      Array.from(verifiedLaunchPriorityTokensV211)
+        .map(normalize)
+        .filter(isAddress)
+    );
+
+  const addCurrentLiveVerifiedLaunchV621 = value => {
+    const address=normalize(value);
+    if(isAddress(address)){
+      currentLiveVerifiedLaunchTokensV621.add(address);
+      liveTokens.add(address);
+      newTokens.add(address);
+    }
+  };
+
+  for(const event of (liveDiscovery?.genericVerifiedLaunchDetectorRegistryV515?.events||[])){
+    addCurrentLiveVerifiedLaunchV621(event?.token||event?.tokenAddress);
+  }
+  for(const event of (liveDiscovery?.dopplerExactLaunchDetectorV514?.events||[])){
+    addCurrentLiveVerifiedLaunchV621(event?.token||event?.tokenAddress);
+  }
+  for(const event of (liveDiscovery?.directOnChainLaunchEventsV476?.events||[])){
+    if(event?.decodeVerified===true||event?.verified===true){
+      addCurrentLiveVerifiedLaunchV621(event?.token||event?.tokenAddress);
+    }
+  }
+  for(const event of (liveDiscovery?.poolsTradeLaunchEventsV205?.events||[])){
+    if(event?.decodeVerified===true||event?.verified===true){
+      addCurrentLiveVerifiedLaunchV621(event?.token||event?.tokenAddress);
+    }
+  }
+
   /*
    * V228: V227 could only target a candidate that already existed before this
    * shared Bitquery request. Persist the best unresolved holder candidate from
@@ -71277,9 +71328,28 @@ for (
       ? null
       : pendingCompletionTokenRaw;
 
+  const currentLiveVerifiedLaunchWatchedV621 =
+    Array.from(currentLiveVerifiedLaunchTokensV621)
+      .map(address =>
+        state.watchedTokens.find(
+          token => normalize(token?.address)===address
+        ) || null
+      )
+      .filter(Boolean)
+      .filter(token =>
+        terminalPriorityRejectFromWatched(token)?.terminal!==true &&
+        preMarketExcludedToken(token)?.excluded!==true
+      )
+      .sort(
+        (a,b)=>
+          marketFreshPriorityScore(b,newTokens,liveTokens)-
+          marketFreshPriorityScore(a,newTokens,liveTokens)
+      );
+
   const selected =
     uniqueBy(
       [
+        ...currentLiveVerifiedLaunchWatchedV621,
         ...(pendingCompletionToken ? [pendingCompletionToken] : []),
         ...retryTokensV415,
         ...selectedBase
@@ -71326,14 +71396,28 @@ for (
                 .missingMarketOnlyMajorEvidence ===
                 true
                 ? EVIDENCE_COMPLETION_MARKET_BONUS_V440
+                : 0,
+
+            currentLiveVerifiedLaunchV621:
+              currentLiveVerifiedLaunchTokensV621.has(
+                normalize(token?.address)
+              ),
+
+            queuePriorityBonusV621:
+              currentLiveVerifiedLaunchTokensV621.has(
+                normalize(token?.address)
+              )
+                ? 1000
                 : 0
           };
         }
       )
       .sort(
         (a, b) =>
+          safeNumber(b?.queuePriorityBonusV621) -
+            safeNumber(a?.queuePriorityBonusV621) ||
           b.score -
-          a.score
+            a.score
       );
 
   const pendingCompletionRankedRow =
@@ -71545,20 +71629,35 @@ for (
     telegramThresholdsUnchanged: true
   };
 
+  const currentLiveVerifiedLaunchFreshRowV621 =
+    rankedMarketFreshCandidates.find(
+      row =>
+        row?.currentLiveVerifiedLaunchV621===true &&
+        !freshUsableVerifiedMarketCacheV159(row?.token) &&
+        terminalPriorityRejectFromWatched(row?.token)?.terminal!==true &&
+        preMarketCandidateAllowed(row?.token)
+    ) || null;
+
+  const currentLiveVerifiedLaunchFreshTargetV621 =
+    currentLiveVerifiedLaunchFreshRowV621?.token || null;
+
   let marketFreshTarget =
-    retryFairnessOverrideV139
-      ? retryFairnessChallengerRow
-          ?.token ||
-        null
-      : partialHolderFreshSlotReleaseTriggeredV166
-        ? partialHolderFreshSlotChallengerRowV166
+    currentLiveVerifiedLaunchFreshTargetV621 ||
+    (
+      retryFairnessOverrideV139
+        ? retryFairnessChallengerRow
             ?.token ||
           null
-        : pendingCompletionToken ||
-          rankedMarketFreshCandidates
-            [0]
-            ?.token ||
-          null;
+        : partialHolderFreshSlotReleaseTriggeredV166
+          ? partialHolderFreshSlotChallengerRowV166
+              ?.token ||
+            null
+          : pendingCompletionToken ||
+            rankedMarketFreshCandidates
+              [0]
+              ?.token ||
+            null
+    );
 
   let marketFreshTargetAddress =
     normalize(
@@ -72329,6 +72428,34 @@ for (
     freshCandidatePriorityV469: {
       enabled: true,
       analysisBeforeHistoricalCompletion: true,
+      currentLiveVerifiedLaunchPriorityV621: {
+        enabled: true,
+        exactLaunchesSeen: currentLiveVerifiedLaunchTokensV621.size,
+        eligibleWatchedInsertedAheadOfRetries:
+          currentLiveVerifiedLaunchWatchedV621.length,
+        selectedAfterQueueTruncation:
+          analysisSelected.filter(token =>
+            currentLiveVerifiedLaunchTokensV621.has(
+              normalize(token?.address)
+            )
+          ).length,
+        freshMarketSlotPromoted:
+          Boolean(currentLiveVerifiedLaunchFreshTargetV621),
+        freshMarketSlotAddress:
+          normalize(currentLiveVerifiedLaunchFreshTargetV621?.address)||null,
+        carriedRetryPreserved:
+          Boolean(
+            pendingCompletionToken &&
+            normalize(pendingCompletionToken?.address)!==
+              normalize(currentLiveVerifiedLaunchFreshTargetV621?.address)
+          ),
+        returnedCandidates: 0,
+        budgetDeferred: 0,
+        externalRequestsAdded: 0,
+        scoringChanged: false,
+        qualificationChanged: false,
+        thresholdsChanged: false
+      },
       currentQualifiedCompletionReserveDeferredUntilAfterAnalysis: true,
       historicalCompletionReserveDeferredUntilAfterAnalysis: true,
       requestCeilingsChanged: false,
@@ -73500,6 +73627,10 @@ for (
     ) {
       deferredAnalysis++;
       scannerFunnelV415.budgetDeferred++;
+      if(currentLiveVerifiedLaunchTokensV621.has(address)){
+        scannerFunnelV415.freshCandidatePriorityV469
+          .currentLiveVerifiedLaunchPriorityV621.budgetDeferred++;
+      }
 
       queueDeferredAnalysisV415(
         state,
@@ -73628,6 +73759,10 @@ for (
       }
 
       scannerFunnelV415.budgetDeferred++;
+      if(currentLiveVerifiedLaunchTokensV621.has(address)){
+        scannerFunnelV415.freshCandidatePriorityV469
+          .currentLiveVerifiedLaunchPriorityV621.budgetDeferred++;
+      }
 
       queueDeferredAnalysisV415(
         state,
@@ -73943,6 +74078,10 @@ for (
       }
 
       scannerFunnelV415.budgetDeferred++;
+      if(currentLiveVerifiedLaunchTokensV621.has(address)){
+        scannerFunnelV415.freshCandidatePriorityV469
+          .currentLiveVerifiedLaunchPriorityV621.budgetDeferred++;
+      }
       queueDeferredAnalysisV415(
         state,
         watched,
@@ -74637,6 +74776,10 @@ for (
     );
 
     scannerFunnelV415.returnedCandidates++;
+    if(currentLiveVerifiedLaunchTokensV621.has(address)){
+      scannerFunnelV415.freshCandidatePriorityV469
+        .currentLiveVerifiedLaunchPriorityV621.returnedCandidates++;
+    }
     if (candidate?.market?.verified === true) {
       scannerFunnelV415.marketVerified++;
     }
@@ -81305,6 +81448,14 @@ for (
 
     verifiedLaunchPriorityV211: {
       enabled: true,
+      unifiedCurrentLivePriorityV621: {
+        enabled: true,
+        exactVerifiedTokenCount: currentLiveVerifiedLaunchTokensV621.size,
+        exactVerifiedTokens: Array.from(currentLiveVerifiedLaunchTokensV621),
+        queuePriorityOnly: true,
+        externalRequestsAdded: 0,
+        scoringChanged: false
+      },
       sameScanPriority: true,
       externalRequestsAdded: 0,
       verifiedTokensPrioritized:
