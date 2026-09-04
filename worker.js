@@ -1,4 +1,27 @@
 /**
+ * Robinhood Chain Meme Hunter — V630
+ * AUTHORITATIVE RUNTIME VERSION: V630
+ *
+ * V630 VALIDATION CLOUD BACKWARD POOL-IDENTITY RECOVERY
+ * - builds directly forward from V629;
+ * - keeps Validation Cloud as the primary free HTTP JSON-RPC provider;
+ * - NEW: exact unknown V4 PoolId range crawler now uses Validation Cloud first;
+ * - NEW: searches backwards from the persisted searchCursorBlock in bounded
+ *   250-block exact PoolId Initialize windows and persists progress across scans;
+ * - NEW: a successful empty range advances the existing persistent cursor rather
+ *   than repeating the same first-active block on every run;
+ * - NEW: the known-block checkpoint remains exact, while the backward crawler
+ *   handles pools whose Initialize predates first observed Swap/Liquidity activity;
+ * - V630 skips the known-403 Blockscout wide-Initialize identity request while
+ *   that exact Blockscout service remains in HTTP_403 state; all other Blockscout
+ *   features remain untouched;
+ * - NEW: Validation Cloud live-range transport aborts get one same-provider retry
+ *   before falling back to another provider;
+ * - no scoring, Momentum, qualification, alert threshold, launchpad proof,
+ *   Telegram, KV/state-key, or hard 42-request ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V629
  * AUTHORITATIVE RUNTIME VERSION: V629
  *
@@ -4673,7 +4696,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V629";
+const VERSION = "V630";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -9852,6 +9875,7 @@ const UNKNOWN_POOL_SEARCH_MAX_CHUNK_BLOCKS = 40;
  */
 const UNKNOWN_POOL_EXACT_GROW_SUCCESS_STREAK = 3;
 const UNKNOWN_POOL_EXACT_MAX_BLOCKS = 1000;
+const VALIDATION_CLOUD_UNKNOWN_POOL_RANGE_BLOCKS_V630 = 250;
 const UNKNOWN_POOL_EXACT_PROBE_COOLDOWN_MS =
   5 * 60 * 1000;
 
@@ -18083,6 +18107,16 @@ async function getInitializeForPoolRange(
   const preferred = [
     {
       provider:
+        "VALIDATION_CLOUD",
+      safeBlocks:
+        VALIDATION_CLOUD_UNKNOWN_POOL_RANGE_BLOCKS_V630,
+      genericSafe:
+        VALIDATION_CLOUD_UNKNOWN_POOL_RANGE_BLOCKS_V630,
+      fixedBoundedRangeV630:
+        true
+    },
+    {
+      provider:
         "ROBINHOOD_PUBLIC_RPC",
       safeBlocks:
         safeChunks.publicChunkBlocks,
@@ -18274,6 +18308,7 @@ async function getInitializeForPoolRange(
     }
 
     const shouldProbe =
+      provider !== "VALIDATION_CLOUD" &&
       exactPoolCanGrowthProbe(
         state,
         provider,
@@ -20096,6 +20131,18 @@ async function resolvePersistentUnknownPools(
           state
         )
     },
+    validationCloudBackwardIdentityV630: {
+      enabled: true,
+      provider: "VALIDATION_CLOUD",
+      exactPoolIdRequired: true,
+      boundedRangeBlocks: VALIDATION_CLOUD_UNKNOWN_POOL_RANGE_BLOCKS_V630,
+      persistentCursor: true,
+      cursorSource: "unknownPools[poolId].searchCursorBlock",
+      advancesOnlyAfterSuccessfulEmptyRange: true,
+      blockscoutKnown403Bypass: true,
+      extraHardRequestCeiling: 0,
+      status: "ARMED"
+    },
     rpcBlockHashInitializeV188: {
       enabled: true,
       forcedCheckpointV189: true,
@@ -20651,6 +20698,16 @@ async function resolvePersistentUnknownPools(
       }
     }
 
+    if (blockscoutWideIdentity403V630) {
+      output.blockscoutWideInitializeV184.status =
+        "SKIPPED_KNOWN_HTTP_403_V630";
+      output.blockscoutWideInitializeV184.priorityV625 =
+        "BYPASSED_FOR_VALIDATION_CLOUD_BACKWARD_RANGE_V630";
+      output.blockscoutWideInitializeV184.httpStatusV625 = 403;
+      output.blockscoutWideInitializeV184.errorV625 =
+        "KNOWN_BLOCKSCOUT_WIDE_INITIALIZE_HTTP_403_NO_REQUEST_SPENT_V630";
+    }
+
     if (blockscoutFirstResolvedPoolV625) {
       entry.lastResolvedSearchDistance = unknownPoolSearchDistance(entry);
       entry.consecutiveEmptySearches = 0;
@@ -20912,11 +20969,18 @@ async function resolvePersistentUnknownPools(
     let wideResolvedPoolV184 =
       null;
 
+    const blockscoutWideIdentity403V630 =
+      String(
+        blockscoutWideInitializeTelemetryV184(state)?.lastStatus ||
+        ""
+      ).toUpperCase() === "HTTP_403";
+
     if (
       output.blockscoutWideInitializeV184
         .attempts < 1 &&
       output.requestsUsed <
-        resolverRequestLimit
+        resolverRequestLimit &&
+      !blockscoutWideIdentity403V630
     ) {
       const wideV184 =
         await blockscoutWideInitializeForPoolV184(
@@ -26239,49 +26303,13 @@ async function scanLiveRange(
 
         abortRecoveryAttemptsV156++;
 
-        const alternate =
-          alternateLiveDiscoveryProviderV435(
-            env,
-            state,
-            provider
-          );
-
+        /*
+         * V630: Validation Cloud has ample free headroom and recent aborts were
+         * transport-level rather than HTTP 429. Retry the identical bounded
+         * request ONCE on Validation Cloud before moving to another provider.
+         */
         if (
-          alternate &&
-          budgetAvailable(
-            budget,
-            "discovery-live"
-          )
-        ) {
-          abortAlternateProviderRetriesV156++;
-
-          const retry =
-            await getLogsSingleProvider(
-              env,
-              cursor,
-              chunkTo,
-              budget,
-              "discovery-live",
-              alternate,
-              learnedLiveEmittersV515
-            );
-
-          if (
-            Array.isArray(
-              retry.result
-            )
-          ) {
-            provider =
-              alternate;
-
-            response =
-              retry;
-
-            abortRecoverySuccessesV156++;
-          }
-        }
-
-        else if (
+          provider === "VALIDATION_CLOUD" &&
           budgetAvailable(
             budget,
             "discovery-live"
@@ -26289,7 +26317,7 @@ async function scanLiveRange(
         ) {
           abortSameProviderRetriesV156++;
 
-          const retry =
+          const sameProviderRetryV630 =
             await getLogsSingleProvider(
               env,
               cursor,
@@ -26301,14 +26329,92 @@ async function scanLiveRange(
             );
 
           response =
-            retry;
+            sameProviderRetryV630;
 
           if (
             Array.isArray(
-              retry.result
+              sameProviderRetryV630.result
             )
           ) {
             abortRecoverySuccessesV156++;
+          }
+        }
+
+        if (
+          !Array.isArray(
+            response.result
+          ) &&
+          budgetAvailable(
+            budget,
+            "discovery-live"
+          )
+        ) {
+          const alternate =
+            alternateLiveDiscoveryProviderV435(
+              env,
+              state,
+              provider
+            );
+
+          if (alternate) {
+            abortAlternateProviderRetriesV156++;
+
+            const retry =
+              await getLogsSingleProvider(
+                env,
+                cursor,
+                chunkTo,
+                budget,
+                "discovery-live",
+                alternate,
+                learnedLiveEmittersV515
+              );
+
+            if (
+              Array.isArray(
+                retry.result
+              )
+            ) {
+              provider =
+                alternate;
+
+              response =
+                retry;
+
+              abortRecoverySuccessesV156++;
+            } else {
+              response = retry;
+            }
+          } else if (
+            provider !== "VALIDATION_CLOUD" &&
+            budgetAvailable(
+              budget,
+              "discovery-live"
+            )
+          ) {
+            abortSameProviderRetriesV156++;
+
+            const retry =
+              await getLogsSingleProvider(
+                env,
+                cursor,
+                chunkTo,
+                budget,
+                "discovery-live",
+                provider,
+                learnedLiveEmittersV515
+              );
+
+            response =
+              retry;
+
+            if (
+              Array.isArray(
+                retry.result
+              )
+            ) {
+              abortRecoverySuccessesV156++;
+            }
           }
         }
       }
