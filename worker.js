@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V595
+ * AUTHORITATIVE RUNTIME VERSION: V595
+ *
+ * V595 SHOW LAST WEBSOCKET CLOSE REASON:
+ * - preserves V594 and all confirmed-working behaviour;
+ * - diagnostic/presentation only;
+ * - /v3status now surfaces the most recent CLOSE, ERROR and TIMEOUT events
+ *   from V594's persisted handshake ring even when the newest event is a fresh
+ *   CONNECT_ATTEMPT;
+ * - exposes close code, reason, wasClean and age-at-close;
+ * - exposes most recent error message and timeout source when present;
+ * - never exposes the Alchemy API key;
+ * - no connection/reconnect behaviour changes;
+ * - no extra RPC/provider requests;
+ * - hard global external-request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V594
  * AUTHORITATIVE RUNTIME VERSION: V594
  *
@@ -4017,7 +4034,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V594";
+const VERSION = "V595";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -120082,6 +120099,23 @@ function v3CollectorControlTelegramMessageV592(action, token, result) {
     lines.push(
       `Handshake attempts: <b>${safeNumber(hsV594.connectAttempts)}</b> | opens <b>${safeNumber(hsV594.openEvents)}</b> | errors <b>${safeNumber(hsV594.errorEvents)}</b> | closes <b>${safeNumber(hsV594.closeEvents)}</b> | timeouts <b>${safeNumber(hsV594.timeoutEvents)}</b>`
     );
+
+    const recentV595=Array.isArray(hsV594?.recentEvents)
+      ? hsV594.recentEvents
+      : [];
+
+    const lastCloseV595=[...recentV595]
+      .reverse()
+      .find(row=>row?.eventType==="CLOSE_V594")||null;
+
+    const lastErrorV595=[...recentV595]
+      .reverse()
+      .find(row=>row?.eventType==="ERROR_V594"||row?.eventType==="CONSTRUCTOR_ERROR_V594")||null;
+
+    const lastTimeoutV595=[...recentV595]
+      .reverse()
+      .find(row=>row?.eventType==="CONNECT_TIMEOUT_V594")||null;
+
     if (hsV594?.lastEventType) {
       const last=hsV594?.lastEvent||{};
       let detail=String(hsV594.lastEventType);
@@ -120091,6 +120125,30 @@ function v3CollectorControlTelegramMessageV592(action, token, result) {
       if (last?.handshakeMs!==undefined&&last?.handshakeMs!==null) detail+=` handshake=${last.handshakeMs}ms`;
       if (last?.connectingAgeMs!==undefined&&last?.connectingAgeMs!==null) detail+=` connectingAge=${last.connectingAgeMs}ms`;
       lines.push(`Last handshake event: <b>${escapeHtml(detail)}</b>`);
+    }
+
+    if (lastCloseV595) {
+      let closeDetailV595=`code=${lastCloseV595?.code ?? "UNAVAILABLE"}`;
+      closeDetailV595+=` | reason=${String(lastCloseV595?.reason || "NO_REASON_SUPPLIED").slice(0,140)}`;
+      closeDetailV595+=` | clean=${lastCloseV595?.wasClean===true ? "YES" : lastCloseV595?.wasClean===false ? "NO" : "UNAVAILABLE"}`;
+      if (Number.isFinite(Number(lastCloseV595?.ageAtCloseMs))) {
+        closeDetailV595+=` | age=${Math.round(Number(lastCloseV595.ageAtCloseMs))}ms`;
+      }
+      lines.push(`Most recent CLOSE: <b>${escapeHtml(closeDetailV595)}</b>`);
+    } else {
+      lines.push(`Most recent CLOSE: <b>NONE_IN_RECENT_RING</b>`);
+    }
+
+    if (lastErrorV595) {
+      lines.push(
+        `Most recent ERROR: <b>${escapeHtml(String(lastErrorV595?.message || lastErrorV595?.error || "NO_MESSAGE").slice(0,180))}</b>`
+      );
+    }
+
+    if (lastTimeoutV595) {
+      lines.push(
+        `Most recent TIMEOUT: <b>${escapeHtml(String(lastTimeoutV595?.source || "UNKNOWN_SOURCE"))}</b>${Number.isFinite(Number(lastTimeoutV595?.connectingAgeMs)) ? ` | age <b>${Math.round(Number(lastTimeoutV595.connectingAgeMs))}ms</b>` : ""}`
+      );
     }
   }
 
