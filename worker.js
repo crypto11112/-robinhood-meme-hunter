@@ -1,4 +1,28 @@
 /**
+ * Robinhood Chain Meme Hunter — V607
+ * AUTHORITATIVE RUNTIME VERSION: V607
+ *
+ * V607 SHARED-HEAD HTTP PROVIDER FAILOVER:
+ * - preserves V606 token exact-pool HTTP eth_getLogs polling;
+ * - fixes unreliable Robinhood public-RPC-only shared head source;
+ * - shared eth_blockNumber poll provider order:
+ *     1) Robinhood public RPC (free primary)
+ *     2) dRPC HTTP derived from DRPC_WSS_URL
+ *     3) QuickNode HTTP derived from QUICKNODE_WSS_URL
+ *     4) generic V3 HTTP derived from V3_WSS_URL
+ *     5) Alchemy HTTP derived from ALCHEMY_API_KEY
+ * - one shared head poll every 15s for the whole V3 system;
+ * - only falls through to paid/free-tier providers when an earlier source fails;
+ * - head freshness tolerance increased from 30s to 45s so one missed 15s poll
+ *   cannot unnecessarily break integrity;
+ * - failed poll across ALL head providers resets integrity as before;
+ * - records head provider used, requests, failures, fallback count;
+ * - dRPC capacity meter includes observed dRPC head-fallback requests as shared
+ *   system overhead plus exact-pool eth_getLogs requests;
+ * - no WebSocket collection, scoring, USD, V4, alerts, qualification or
+ *   hard 42-request scanner-cap changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V606
  * AUTHORITATIVE RUNTIME VERSION: V606
  *
@@ -4256,7 +4280,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V606";
+const VERSION = "V607";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -120317,7 +120341,7 @@ function v3FeedUsageTelegramMessageV598(token, result) {
   };
 
   const lines = [
-    `📡 <b>V3 Feed Usage — V606</b>`,
+    `📡 <b>V3 Feed Usage — V607</b>`,
     `Contract: <code>${escapeHtml(token)}</code>`,
     "",
     `Active provider: <b>${escapeHtml(activeProvider)}</b>`,
@@ -120327,10 +120351,11 @@ function v3FeedUsageTelegramMessageV598(token, result) {
     `Integrity: <b>${integrity}</b> | persisted integrity: <b>${persistedIntegrity}</b>`,
     `Continuous effective uptime: <b>${escapeHtml(fmtDuration(result?.continuousIntegrityMs))}</b>`,
     `Head age: <b>${escapeHtml(fmtAge(result?.headAgeMs))}</b> | last block: <b>${Number.isFinite(Number(result?.lastHeadBlock)) ? Math.trunc(Number(result.lastHeadBlock)) : "UNVERIFIED"}</b>`,
-    `Shared head: <b>${result?.sharedHeadV602?.fresh===true?"FRESH":"NOT FRESH"}</b> | source <b>${escapeHtml(String(result?.sharedHeadV602?.activeProvider||"ROBINHOOD_PUBLIC_RPC"))}</b>`,
-    `Head transport: <b>${escapeHtml(String(result?.sharedHeadV602?.transport||"HTTP_ETH_BLOCKNUMBER_V603"))}</b> | global newHeads subscriptions <b>0</b>`,
+    `Shared head: <b>${result?.sharedHeadV602?.fresh===true?"FRESH":"NOT FRESH"}</b> | source <b>${escapeHtml(String(result?.sharedHeadV602?.activeProvider||"UNVERIFIED"))}</b>`,
+    `Head transport: <b>${escapeHtml(String(result?.sharedHeadV602?.transport||"HTTP_ETH_BLOCKNUMBER_V607"))}</b> | global newHeads subscriptions <b>0</b>`,
     "",
-    `Public head polls: <b>${safeNumber(result?.sharedHeadV602?.pollsObservedV603).toLocaleString("en-GB")}</b> | failures <b>${safeNumber(result?.sharedHeadV602?.pollFailuresV603)}</b>`,
+    `Shared head polls: <b>${safeNumber(result?.sharedHeadV602?.pollsObservedV603).toLocaleString("en-GB")}</b> | all-provider failures <b>${safeNumber(result?.sharedHeadV602?.pollFailuresV603)}</b>`,
+    `Head fallbacks: <b>${safeNumber(result?.sharedHeadV602?.fallbackPollsV607)}</b> | dRPC head requests <b>${safeNumber(result?.sharedHeadV602?.drpcHeadRequestsV607)}</b>`,
     `V3 log transport: <b>${result?.v3HttpLogPollingV605?.enabled===true?"HTTP eth_getLogs":"LEGACY"}</b> | WebSocket subscriptions <b>${safeNumber(result?.v3HttpLogPollingV605?.webSocketSubscriptions)}</b>`,
     `HTTP poll health: <b>${result?.httpPollFreshV606===true?"FRESH":result?.v3HttpLogPollingV605?.enabled===true?"BUILDING/STALE":"N/A"}</b> | age <b>${escapeHtml(fmtAge(result?.pollAgeMsV606))}</b>`,
     `Log polls: <b>${safeNumber(result?.v3HttpLogPollingV605?.pollSuccesses)}</b> success / <b>${safeNumber(result?.v3HttpLogPollingV605?.pollFailures)}</b> failed | provider <b>${escapeHtml(String(result?.v3HttpLogPollingV605?.lastProviderId||"BUILDING"))}</b>`,
@@ -125735,6 +125760,8 @@ const V3_HTTP_LOG_POLL_INTERVAL_MS_V605 = 15000;
 const V3_HTTP_LOG_MAX_BLOCKS_PER_POLL_V605 = 1200;
 const V3_HTTP_LOG_TIMEOUT_MS_V605 = 4500;
 const DRPC_HTTP_CU_PER_REQUEST_V605 = 20;
+const V3_SHARED_HEAD_STALE_MS_V607 = 45000;
+const V3_SHARED_HEAD_HTTP_TIMEOUT_MS_V607 = 4500;
 
 
 const V3_HEAD_STALE_MS_V371 = 30000;
@@ -128044,7 +128071,11 @@ if (url.pathname === "/reconcile-v374") {
       meterStartAtV600 !== null
         ? Math.max(0, safeNumber(providerSessionV600?.subscriptionActionsAtStart))
         : 0;
-    const observedHttpRequestsV605=safeNumber(logPollV605?.providerRequests);
+    const observedTokenHttpRequestsV605=safeNumber(logPollV605?.providerRequests);
+    const observedSharedDrpcHeadRequestsV607=safeNumber(sharedHeadV602?.drpcHeadRequestsV607);
+    const observedHttpRequestsV605=
+      observedTokenHttpRequestsV605 +
+      observedSharedDrpcHeadRequestsV607;
     const observedDrpcCuV600 =
       httpPollingModeV605
         ? observedHttpRequestsV605*DRPC_HTTP_CU_PER_REQUEST_V605
@@ -128204,6 +128235,11 @@ if (url.pathname === "/reconcile-v374") {
         pollsObservedV603:safeNumber(sharedHeadV602?.pollsObservedV603),
         pollSuccessesV603:safeNumber(sharedHeadV602?.pollSuccessesV603),
         pollFailuresV603:safeNumber(sharedHeadV602?.pollFailuresV603),
+        providerRequestsV607:safeNumber(sharedHeadV602?.providerRequestsV607),
+        fallbackPollsV607:safeNumber(sharedHeadV602?.fallbackPollsV607),
+        drpcHeadRequestsV607:safeNumber(sharedHeadV602?.drpcHeadRequestsV607),
+        lastProviderV607:sharedHeadV602?.lastProviderV607||null,
+        lastProviderFallbackDepthV607:sharedHeadV602?.lastProviderFallbackDepthV607??null,
         lastPollDurationMs:sharedHeadV602?.lastPollDurationMs??null,
         lastError:sharedHeadV602?.lastError||null,
         oneNewHeadsSubscription:false,
@@ -128255,6 +128291,8 @@ if (url.pathname === "/reconcile-v374") {
         notificationsSinceBaseline:meterNotificationsV600,
         httpPollingModeV605,
         httpRequestsObservedV605:observedHttpRequestsV605,
+        tokenHttpRequestsObservedV605:observedTokenHttpRequestsV605,
+        sharedDrpcHeadRequestsObservedV607:observedSharedDrpcHeadRequestsV607,
         httpCuPerRequestV605:DRPC_HTTP_CU_PER_REQUEST_V605,
         subscriptionActionsObserved:httpPollingModeV605?0:meterSubscriptionActionsV600,
         observedEquivalentCu:observedDrpcCuV600,
@@ -128285,7 +128323,7 @@ if (url.pathname === "/reconcile-v374") {
         projectionWindowDays:30,
         projectionBasis:
           httpPollingModeV605
-            ? "EXACT_POOL_ETH_GETLOGS_HTTP_REQUEST_RATE_X_20_CU_V605"
+            ? "TOKEN_ETH_GETLOGS_PLUS_SHARED_DRPC_HEAD_FALLBACK_REQUEST_RATE_X_20_CU_V607"
             : (
                 sharedPublicRpcModeV603
                   ? "TOKEN_SWAP_NOTIFICATIONS_ONLY_SHARED_HEAD_USES_FREE_PUBLIC_RPC_V603"
@@ -129451,145 +129489,187 @@ if (url.pathname === "/reconcile-v374") {
     }
   }
 
+  v3SharedHeadHttpProvidersV607() {
+    const rows=[];
+    const push=(id,url,source)=>{
+      const raw=String(url||"").trim();
+      if(!raw)return;
+      const http=raw
+        .replace(/^wss:\/\//i,"https://")
+        .replace(/^ws:\/\//i,"http://");
+      if(!/^https?:\/\//i.test(http))return;
+      if(rows.some(row=>row.id===id||row.url===http))return;
+      rows.push({id,url:http,source});
+    };
+
+    push("ROBINHOOD_PUBLIC_RPC",PUBLIC_RPC,"PUBLIC_RPC");
+    push("DRPC",this.env.DRPC_WSS_URL,"DRPC_WSS_URL_DERIVED_HTTP");
+    push("QUICKNODE",this.env.QUICKNODE_WSS_URL,"QUICKNODE_WSS_URL_DERIVED_HTTP");
+    push("GENERIC_V3",this.env.V3_WSS_URL,"V3_WSS_URL_DERIVED_HTTP");
+
+    if(this.env.ALCHEMY_API_KEY){
+      push(
+        "ALCHEMY",
+        `https://robinhood-mainnet.g.alchemy.com/v2/${String(this.env.ALCHEMY_API_KEY)}`,
+        "ALCHEMY_API_KEY"
+      );
+    }
+
+    return rows;
+  }
+
   async pollSharedHeadV603() {
     const enabled=await this.state.storage.get("enabled");
     if(enabled!==true){
-      return {ok:false,status:"SHARED_HEAD_DISABLED_V603",fresh:false};
+      return {ok:false,status:"SHARED_HEAD_DISABLED_V607",fresh:false};
     }
 
-    const startedAt=Date.now();
-    const controller=new AbortController();
-    const timer=setTimeout(()=>controller.abort(),4500);
+    const providers=this.v3SharedHeadHttpProvidersV607();
+    const priorConn=await this.state.storage.get("v602:sharedHeadConnection")||{};
+    let lastFailure=null;
+    let requestsThisPoll=0;
 
-    try{
-      const response=await fetch(
-        PUBLIC_RPC,
-        {
-          method:"POST",
-          headers:{"content-type":"application/json"},
-          body:JSON.stringify({
-            jsonrpc:"2.0",
-            id:603,
-            method:"eth_blockNumber",
-            params:[]
-          }),
-          signal:controller.signal
+    for(let i=0;i<providers.length;i++){
+      const provider=providers[i];
+      const startedAt=Date.now();
+      const controller=new AbortController();
+      const timer=setTimeout(()=>controller.abort(),V3_SHARED_HEAD_HTTP_TIMEOUT_MS_V607);
+      requestsThisPoll++;
+
+      try{
+        const response=await fetch(
+          provider.url,
+          {
+            method:"POST",
+            headers:{"content-type":"application/json"},
+            body:JSON.stringify({
+              jsonrpc:"2.0",
+              id:607,
+              method:"eth_blockNumber",
+              params:[]
+            }),
+            signal:controller.signal
+          }
+        );
+
+        const httpStatus=Number(response?.status||0);
+        let body=null;
+        try{body=await response.json();}catch(_){}
+
+        if(
+          httpStatus>=200 &&
+          httpStatus<300 &&
+          typeof body?.result==="string" &&
+          /^0x[0-9a-f]+$/i.test(body.result)
+        ){
+          const block=parseInt(body.result,16);
+          const nowMs=Date.now();
+          const heads=await this.state.storage.get("v602:sharedHeads")||{};
+          const previous=Number(heads.lastHeadBlock);
+
+          heads.pollsObservedV603=safeNumber(heads.pollsObservedV603)+1;
+          heads.headsObserved=safeNumber(heads.headsObserved)+1;
+          heads.lastHeadAt=nowMs;
+          heads.lastSuccessfulPollAtV603=nowMs;
+          heads.lastHeadBlock=block;
+          heads.headSourceV603=`${provider.id}_ETH_BLOCKNUMBER`;
+          heads.lastProviderV607=provider.id;
+          heads.providerFallbackDepthV607=i;
+          heads.providerRequestsV607=safeNumber(heads.providerRequestsV607)+requestsThisPoll;
+
+          if(provider.id==="DRPC"){
+            heads.drpcHeadRequestsV607=safeNumber(heads.drpcHeadRequestsV607)+1;
+          }
+
+          if(i>0){
+            heads.fallbackPollsV607=safeNumber(heads.fallbackPollsV607)+1;
+          }
+
+          if(Number.isFinite(previous)&&block<previous){
+            heads.regressionsObservedV603=safeNumber(heads.regressionsObservedV603)+1;
+            heads.lastRegressionFromV603=previous;
+            heads.lastRegressionToV603=block;
+            heads.lastRegressionAtV603=nowMs;
+          }
+
+          await this.doPutV404("v602:sharedHeads",heads);
+
+          await this.doPutV404("v602:sharedHeadConnection",{
+            ...priorConn,
+            connected:true,
+            subscriptionAccepted:true,
+            status:"SHARED_HEAD_HTTP_FRESH_V607",
+            activeProvider:provider.id,
+            activeProviderSource:provider.source,
+            transport:"HTTP_ETH_BLOCKNUMBER_V607",
+            configuredProviders:providers.map(row=>row.id),
+            lastHttpStatus:httpStatus,
+            lastError:null,
+            pollSuccessesV603:safeNumber(priorConn.pollSuccessesV603)+1,
+            providerRequestsV607:safeNumber(priorConn.providerRequestsV607)+requestsThisPoll,
+            fallbackPollsV607:safeNumber(priorConn.fallbackPollsV607)+(i>0?1:0),
+            drpcHeadRequestsV607:safeNumber(priorConn.drpcHeadRequestsV607)+(provider.id==="DRPC"?1:0),
+            lastProviderV607:provider.id,
+            lastProviderFallbackDepthV607:i,
+            lastPollAt:nowMs,
+            lastPollDurationMs:Math.max(0,nowMs-startedAt),
+            acceptedAt:priorConn.acceptedAt||nowMs
+          });
+
+          clearTimeout(timer);
+
+          return {
+            ok:true,
+            status:"SHARED_HEAD_HTTP_FRESH_V607",
+            fresh:true,
+            providerId:provider.id,
+            fallbackDepth:i,
+            lastHeadBlock:block,
+            lastHeadAt:nowMs
+          };
         }
-      );
 
-      const httpStatus=Number(response?.status||0);
-      let body=null;
-      try{body=await response.json();}catch(_){}
-
-      if(
-        httpStatus<200||
-        httpStatus>=300||
-        typeof body?.result!=="string"||
-        !/^0x[0-9a-f]+$/i.test(body.result)
-      ){
-        const errorText=
-          body?.error?.message||
-          `HTTP_${httpStatus}_INVALID_ETH_BLOCKNUMBER`;
-        const prior=await this.state.storage.get("v602:sharedHeadConnection")||{};
-        const failures=safeNumber(prior.pollFailuresV603)+1;
-
-        await this.doPutV404("v602:sharedHeadConnection",{
-          ...prior,
-          connected:false,
-          subscriptionAccepted:false,
-          status:"SHARED_HEAD_PUBLIC_RPC_POLL_FAILED_V603",
-          activeProvider:"ROBINHOOD_PUBLIC_RPC",
-          activeProviderSource:"PUBLIC_RPC",
-          transport:"HTTP_ETH_BLOCKNUMBER_V603",
-          lastHttpStatus:httpStatus,
-          lastError:String(errorText).slice(0,220),
-          pollFailuresV603:failures,
-          lastPollAt:Date.now(),
-          lastPollDurationMs:Math.max(0,Date.now()-startedAt)
-        });
-
-        return {
-          ok:false,
-          status:"SHARED_HEAD_PUBLIC_RPC_POLL_FAILED_V603",
-          fresh:false,
+        lastFailure={
+          providerId:provider.id,
           httpStatus,
-          error:String(errorText).slice(0,220)
+          rpcError:body?.error?.message||null,
+          elapsedMs:Math.max(0,Date.now()-startedAt)
         };
+      }catch(error){
+        lastFailure={
+          providerId:provider.id,
+          error:String(error?.name==="AbortError"?"TIMEOUT":error?.message||error).slice(0,220),
+          elapsedMs:Math.max(0,Date.now()-startedAt)
+        };
+      }finally{
+        clearTimeout(timer);
       }
-
-      const block=parseInt(body.result,16);
-      const nowMs=Date.now();
-      const heads=await this.state.storage.get("v602:sharedHeads")||{};
-      const previous=Number(heads.lastHeadBlock);
-
-      heads.pollsObservedV603=safeNumber(heads.pollsObservedV603)+1;
-      heads.headsObserved=safeNumber(heads.headsObserved)+1;
-      heads.lastHeadAt=nowMs;
-      heads.lastSuccessfulPollAtV603=nowMs;
-      heads.lastHeadBlock=block;
-      heads.headSourceV603="ROBINHOOD_PUBLIC_RPC_ETH_BLOCKNUMBER";
-
-      if(Number.isFinite(previous)&&block<previous){
-        heads.regressionsObservedV603=safeNumber(heads.regressionsObservedV603)+1;
-        heads.lastRegressionFromV603=previous;
-        heads.lastRegressionToV603=block;
-        heads.lastRegressionAtV603=nowMs;
-      }
-
-      await this.doPutV404("v602:sharedHeads",heads);
-
-      const prior=await this.state.storage.get("v602:sharedHeadConnection")||{};
-      await this.doPutV404("v602:sharedHeadConnection",{
-        ...prior,
-        connected:true,
-        subscriptionAccepted:true,
-        status:"SHARED_HEAD_PUBLIC_RPC_FRESH_V603",
-        activeProvider:"ROBINHOOD_PUBLIC_RPC",
-        activeProviderSource:"PUBLIC_RPC",
-        transport:"HTTP_ETH_BLOCKNUMBER_V603",
-        configuredProviders:["ROBINHOOD_PUBLIC_RPC"],
-        lastHttpStatus:httpStatus,
-        lastError:null,
-        pollSuccessesV603:safeNumber(prior.pollSuccessesV603)+1,
-        lastPollAt:nowMs,
-        lastPollDurationMs:Math.max(0,nowMs-startedAt),
-        acceptedAt:prior.acceptedAt||nowMs
-      });
-
-      return {
-        ok:true,
-        status:"SHARED_HEAD_PUBLIC_RPC_FRESH_V603",
-        fresh:true,
-        lastHeadBlock:block,
-        lastHeadAt:nowMs
-      };
-    }catch(error){
-      const message=String(error?.name==="AbortError"?"PUBLIC_RPC_TIMEOUT":error?.message||error).slice(0,220);
-      const prior=await this.state.storage.get("v602:sharedHeadConnection")||{};
-
-      await this.doPutV404("v602:sharedHeadConnection",{
-        ...prior,
-        connected:false,
-        subscriptionAccepted:false,
-        status:"SHARED_HEAD_PUBLIC_RPC_EXCEPTION_V603",
-        activeProvider:"ROBINHOOD_PUBLIC_RPC",
-        activeProviderSource:"PUBLIC_RPC",
-        transport:"HTTP_ETH_BLOCKNUMBER_V603",
-        lastError:message,
-        pollFailuresV603:safeNumber(prior.pollFailuresV603)+1,
-        lastPollAt:Date.now(),
-        lastPollDurationMs:Math.max(0,Date.now()-startedAt)
-      });
-
-      return {
-        ok:false,
-        status:"SHARED_HEAD_PUBLIC_RPC_EXCEPTION_V603",
-        fresh:false,
-        error:message
-      };
-    }finally{
-      clearTimeout(timer);
     }
+
+    const nowMs=Date.now();
+    await this.doPutV404("v602:sharedHeadConnection",{
+      ...priorConn,
+      connected:false,
+      subscriptionAccepted:false,
+      status:"ALL_SHARED_HEAD_HTTP_PROVIDERS_FAILED_V607",
+      activeProvider:null,
+      activeProviderSource:null,
+      transport:"HTTP_ETH_BLOCKNUMBER_V607",
+      configuredProviders:providers.map(row=>row.id),
+      lastError:JSON.stringify(lastFailure||{}).slice(0,240),
+      pollFailuresV603:safeNumber(priorConn.pollFailuresV603)+1,
+      providerRequestsV607:safeNumber(priorConn.providerRequestsV607)+requestsThisPoll,
+      lastFailureV607:lastFailure,
+      lastPollAt:nowMs
+    });
+
+    return {
+      ok:false,
+      status:"ALL_SHARED_HEAD_HTTP_PROVIDERS_FAILED_V607",
+      fresh:false,
+      lastFailure,
+      configuredProviders:providers.map(row=>row.id)
+    };
   }
 
   async connectSharedHeadV602() {
@@ -129624,7 +129704,7 @@ if (url.pathname === "/reconcile-v374") {
       conn.connected===true&&
       conn.subscriptionAccepted===true&&
       headAgeMs!==null&&
-      headAgeMs<=V3_HEAD_STALE_MS_V371;
+      headAgeMs<=V3_SHARED_HEAD_STALE_MS_V607;
 
     return {
       version:VERSION,
@@ -129644,8 +129724,16 @@ if (url.pathname === "/reconcile-v374") {
           : null,
       lastHeadAt,
       headAgeMs,
-      headStaleThresholdMs:V3_HEAD_STALE_MS_V371,
+      headStaleThresholdMs:V3_SHARED_HEAD_STALE_MS_V607,
       headsObserved:safeNumber(heads.headsObserved),
+      providerRequestsV607:safeNumber(conn.providerRequestsV607),
+      fallbackPollsV607:safeNumber(conn.fallbackPollsV607),
+      drpcHeadRequestsV607:safeNumber(conn.drpcHeadRequestsV607),
+      lastProviderV607:conn.lastProviderV607||heads.lastProviderV607||null,
+      lastProviderFallbackDepthV607:
+        Number.isFinite(Number(conn.lastProviderFallbackDepthV607))
+          ? Number(conn.lastProviderFallbackDepthV607)
+          : null,
       pollsObservedV603:safeNumber(heads.pollsObservedV603),
       pollSuccessesV603:safeNumber(conn.pollSuccessesV603),
       pollFailuresV603:safeNumber(conn.pollFailuresV603),
