@@ -1,4 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V636
+ * AUTHORITATIVE RUNTIME VERSION: V636
+ *
+ * V636 METHOD-SPECIFIC CHECKPOINT PROVIDER ROUTING
+ * - builds directly forward from V635;
+ * - exact first-active-block PoolId checkpoint provider order is now:
+ *   Validation Cloud -> Robinhood Public RPC -> Alchemy;
+ * - Chainstack is intentionally SKIPPED for the checkpoint block lookup path
+ *   after V635 proved HTTP 403 on eth_getBlockByNumber for this method;
+ * - Chainstack remains fully enabled for normal live eth_getLogs discovery
+ *   and any other already-working paths;
+ * - preserves V635 same-provider atomic two-step checkpoint semantics;
+ * - preserves V634 successful-EMPTY memoization and V630 backward identity;
+ * - no scoring, Momentum, qualification, Telegram threshold, launchpad proof,
+ *   KV/state-key, or hard 42-request ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V635
  * AUTHORITATIVE RUNTIME VERSION: V635
  *
@@ -4814,7 +4832,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V635";
+const VERSION = "V636";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -17868,7 +17886,6 @@ async function getInitializeForPoolBlockHashV188(
    */
   const providers = [
     "VALIDATION_CLOUD",
-    "CHAINSTACK",
     "ROBINHOOD_PUBLIC_RPC",
     "ALCHEMY"
   ];
@@ -20285,10 +20302,12 @@ async function resolvePersistentUnknownPools(
       atomicCheckpointMaxExistingAllowanceV635: 4,
       atomicCheckpointProviderOrderV635: [
         "VALIDATION_CLOUD",
-        "CHAINSTACK",
         "ROBINHOOD_PUBLIC_RPC",
         "ALCHEMY"
       ],
+      chainstackAtomicCheckpointDisabledV636: true,
+      chainstackAtomicCheckpointReasonV636:
+        "METHOD_SPECIFIC_ETH_GETBLOCKBYNUMBER_HTTP_403",
       exactRangeFallbackOrderV634: [
         "VALIDATION_CLOUD",
         "CHAINSTACK",
@@ -20311,10 +20330,12 @@ async function resolvePersistentUnknownPools(
       sameProviderCompletionRequiredV635: true,
       providerOrderV635: [
         "VALIDATION_CLOUD",
-        "CHAINSTACK",
         "ROBINHOOD_PUBLIC_RPC",
         "ALCHEMY"
       ],
+      chainstackCheckpointSkippedV636: true,
+      chainstackCheckpointSkipReasonV636:
+        "ETH_GETBLOCKBYNUMBER_HTTP_403_OBSERVED_V635",
       invocationsV635: 0,
       incompleteProviderInvocationsV635: 0,
       maxPoolsPerRun: 1,
