@@ -1,4 +1,27 @@
 /**
+ * Robinhood Chain Meme Hunter — V580
+ * AUTHORITATIVE RUNTIME VERSION: V580
+ *
+ * V580 SKIP-FAILED-POOL AND CONTINUE:
+ * - preserves V579 and all earlier confirmed-working behaviour;
+ * - fixes the V579 scan-wide stall proven when the first selected recovered
+ *   pool returned a row that was not exact-USD decodable;
+ * - that pool-specific decode failure no longer stops the whole directional
+ *   catch-up loop for the scan;
+ * - the failed pool is excluded for the rest of the current scan and the next
+ *   eligible watched pool may use the remaining directional request slot;
+ * - this allows fair recovered-pool rotation (V579) to actually reach other
+ *   waiting tier-4 pools such as JUICE;
+ * - coverage is NEVER advanced for a failed/undecodable range;
+ * - the failed pool remains in the watch for future retries;
+ * - generic logic, never hard-coded to JUICE;
+ * - no historical backfill;
+ * - no scoring, Momentum, qualification, USD maths, retention, Telegram,
+ *   provider, or alert-threshold changes;
+ * - no extra external-request allocation;
+ * - hard global request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V579
  * AUTHORITATIVE RUNTIME VERSION: V579
  *
@@ -3680,7 +3703,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V579";
+const VERSION = "V580";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -76498,8 +76521,26 @@ for (
         : null
     );
 
+  const directionalPoolFailuresThisScanV580 = new Set();
+
+  const firstChunkPoolIdV580 =
+    normalize(continuousDirectionalWatchThisScanV551?.selectedPoolId);
+
+  const firstChunkSkippableFailureV580 =
+    continuousDirectionalWatchThisScanV551?.requestConsumed === true &&
+    continuousDirectionalWatchThisScanV551?.coverageAdvanced !== true &&
+    continuousDirectionalWatchThisScanV551?.rangeSaturated !== true &&
+    continuousDirectionalWatchThisScanV551?.status ===
+      "ROWS_NOT_ALL_EXACT_USD_DECODABLE_NO_COVERAGE_ADVANCE_V551" &&
+    /^0x[a-f0-9]{64}$/.test(String(firstChunkPoolIdV580 || ""));
+
+  if (firstChunkSkippableFailureV580) {
+    directionalPoolFailuresThisScanV580.add(firstChunkPoolIdV580);
+  }
+
   let directionalCatchupStopReasonV554 =
-    continuousDirectionalWatchThisScanV551?.coverageAdvanced === true
+    continuousDirectionalWatchThisScanV551?.coverageAdvanced === true ||
+    firstChunkSkippableFailureV580
       ? null
       : continuousDirectionalWatchThisScanV551?.status ||
         "FIRST_CHUNK_DID_NOT_ADVANCE_V554";
@@ -76537,14 +76578,19 @@ for (
       break;
     }
 
+    const baseExclusionsV580 = new Set([
+      ...directionalPoolsAdvancedThisScanV558,
+      ...directionalPoolFailuresThisScanV580
+    ]);
+
     const exclusionsForChunkV561 =
       finishPoolIdV561
         ? new Set(
-            [...directionalPoolsAdvancedThisScanV558].filter(
+            [...baseExclusionsV580].filter(
               poolId => normalize(poolId) !== finishPoolIdV561
             )
           )
-        : directionalPoolsAdvancedThisScanV558;
+        : baseExclusionsV580;
 
     const extraChunkV554 =
       await advanceDirectionalWatchV551({
@@ -76564,6 +76610,23 @@ for (
       extraChunkV554?.coverageAdvanced !== true ||
       extraChunkV554?.rangeSaturated === true
     ) {
+      const failedPoolIdV580 =
+        normalize(extraChunkV554?.selectedPoolId);
+
+      const skippablePoolFailureV580 =
+        extraChunkV554?.requestConsumed === true &&
+        extraChunkV554?.coverageAdvanced !== true &&
+        extraChunkV554?.rangeSaturated !== true &&
+        extraChunkV554?.status ===
+          "ROWS_NOT_ALL_EXACT_USD_DECODABLE_NO_COVERAGE_ADVANCE_V551" &&
+        /^0x[a-f0-9]{64}$/.test(String(failedPoolIdV580 || ""));
+
+      if (skippablePoolFailureV580) {
+        directionalPoolFailuresThisScanV580.add(failedPoolIdV580);
+        finishPoolIdV561 = null;
+        continue;
+      }
+
       directionalCatchupStopReasonV554 =
         extraChunkV554?.status === "NO_WATCHED_POOL_NEEDS_ADVANCE_V551"
           ? "NO_ADDITIONAL_DISTINCT_POOL_NEEDS_ADVANCE_V558"
@@ -76644,7 +76707,17 @@ for (
     enabled:true,
     measurementOnly:true,
     samePoolOnly:false,
-    schedulerVersion:"V579_FAIR_V466_CATCHUP_ROTATION_THEN_V561_DISTINCT_ROUND_ROBIN",
+    schedulerVersion:"V580_SKIP_FAILED_POOL_THEN_V579_FAIR_RECOVERED_ROTATION",
+    skipFailedPoolAndContinueV580:{
+      enabled:true,
+      skippableStatus:"ROWS_NOT_ALL_EXACT_USD_DECODABLE_NO_COVERAGE_ADVANCE_V551",
+      failedPoolExcludedForRemainderOfScan:true,
+      failedRangeCoverageAdvanced:false,
+      failedPoolRetainedForFutureRetry:true,
+      generic:true,
+      externalRequestsAdded:0,
+      hardGlobalLimitUnchanged:42
+    },
     fairPriorCompletionRotationV579:{
       enabled:true,
       distinctTier4PoolBeforeSamePoolSprint:true,
@@ -76671,6 +76744,10 @@ for (
     exactUsdTrades:directionalCatchupChunksV554.reduce(
       (sum,row) => sum + safeNumber(row?.exactUsdTrades), 0
     ),
+    poolSpecificFailuresSkippedV580:
+      directionalPoolFailuresThisScanV580.size,
+    failedPoolIdsV580:
+      [...directionalPoolFailuresThisScanV580],
     firstFromBlock:
       directionalCatchupChunksV554.find(
         row => Number.isFinite(Number(row?.fromBlock))
@@ -76776,8 +76853,17 @@ for (
       externalRequestsAdded:0,
       hardGlobalLimitUnchanged:42
     },
+    skipFailedPoolAndContinueV580:{
+      enabled:true,
+      poolSpecificDecodeFailureDoesNotStopWholeScan:true,
+      failedPoolExcludedOnlyForCurrentScan:true,
+      coverageNeverAdvancedOnFailure:true,
+      generic:true,
+      externalRequestsAdded:0,
+      hardGlobalLimitUnchanged:42
+    },
     reserveVersion:"V559_DYNAMIC_THREE_SLOT_WITH_ONE_MINIMUM_GUARANTEE",
-    selectionPriorityV560:"V579_FAIR_PRIOR_COMPLETION_ROTATION_THEN_V578_CATCHUP_TO_HEAD_THEN_V567_NORMAL_PRIORITY",
+    selectionPriorityV560:"V580_SKIP_FAILED_POOL_THEN_V579_FAIR_ROTATION_THEN_V578_CATCHUP_TO_HEAD",
     finishNearHeadPoolFirstV561:true,
     elasticNearHeadSpanV562:true,
     elasticNearHeadMaxSpanV562:DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551,
