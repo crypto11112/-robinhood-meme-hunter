@@ -1,4 +1,26 @@
 /**
+ * Robinhood Chain Meme Hunter — V611
+ * AUTHORITATIVE RUNTIME VERSION: V611
+ *
+ * V611 BLOCKSCOUT PRO CREDIT METER:
+ * - preserves V610 collector/provider diagnostics unchanged;
+ * - adds a bot-side Blockscout PRO daily credit meter BEFORE V3 fallback use;
+ * - current documented free planning allowance: 100,000 credits/day, 5 RPS;
+ * - standard Blockscout PRO calls are conservatively counted at 20 credits;
+ * - raw-trace calls are counted at 50 credits;
+ * - counter resets by UTC calendar day and reports the equivalent UK reset time;
+ * - /blockscoutusage (alias /blockscout) is read-only: zero external calls,
+ *   zero scanner-budget consumption and zero state writes;
+ * - meter begins at V611 deployment: pre-V611/account-external usage remains
+ *   DATA UNVERIFIED and Blockscout Dev Portal is authoritative;
+ * - instruments existing authenticated Blockscout PRO calls already made by
+ *   this Worker; public per-instance Blockscout calls do not consume PRO credits
+ *   and are not counted;
+ * - does NOT yet add Blockscout as the V3 exact-pool fallback;
+ * - no polling cadence, provider order, integrity, decoding, USD, scoring,
+ *   V4, alerts, qualification or hard 42-request scanner-cap changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V610
  * AUTHORITATIVE RUNTIME VERSION: V610
  *
@@ -4329,7 +4351,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V610";
+const VERSION = "V611";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -11574,6 +11596,350 @@ function budgetTelemetry(
     skipped:
       budget.skipped
   };
+}
+
+
+/* =========================================================
+   V611 — BLOCKSCOUT PRO BOT-SIDE CREDIT METER
+   ========================================================= */
+
+const BLOCKSCOUT_PRO_FREE_DAILY_CREDITS_V611 = 100000;
+const BLOCKSCOUT_PRO_FREE_RPS_V611 = 5;
+const BLOCKSCOUT_PRO_STANDARD_CREDITS_V611 = 20;
+const BLOCKSCOUT_PRO_HEAVY_CREDITS_V611 = 50;
+
+function utcDayKeyV611(ts=Date.now()){
+  return new Date(ts).toISOString().slice(0,10);
+}
+
+function nextUtcMidnightV611(ts=Date.now()){
+  const d=new Date(ts);
+  return Date.UTC(
+    d.getUTCFullYear(),
+    d.getUTCMonth(),
+    d.getUTCDate()+1,
+    0,0,0,0
+  );
+}
+
+function ukDateTimeV611(ts){
+  try{
+    return new Intl.DateTimeFormat(
+      "en-GB",
+      {
+        timeZone:"Europe/London",
+        hour:"2-digit",
+        minute:"2-digit",
+        day:"2-digit",
+        month:"short",
+        year:"numeric",
+        hour12:false
+      }
+    ).format(new Date(ts));
+  }catch(_){
+    return new Date(ts).toISOString();
+  }
+}
+
+function ensureBlockscoutProUsageV611(state){
+  const day=utcDayKeyV611();
+  const existing=
+    state?.blockscoutProUsageV611 &&
+    typeof state.blockscoutProUsageV611==="object"
+      ? state.blockscoutProUsageV611
+      : null;
+
+  if(!existing || existing.utcDay!==day){
+    state.blockscoutProUsageV611={
+      version:"V611",
+      utcDay:day,
+      monitorStartedAt:Date.now(),
+      requests:0,
+      estimatedCredits:0,
+      standardRequests:0,
+      heavyRequests:0,
+      byEndpoint:{},
+      lastRequestAt:null,
+      lastEndpoint:null,
+      lastCredits:null,
+      lastHttpStatus:null,
+      meterBasis:"BOT_SIDE_V611_FORWARD_ONLY",
+      preV611Usage:"DATA UNVERIFIED"
+    };
+  }
+
+  return state.blockscoutProUsageV611;
+}
+
+function recordBlockscoutProUsageV611(
+  state,
+  endpoint,
+  credits=BLOCKSCOUT_PRO_STANDARD_CREDITS_V611,
+  httpStatus=null
+){
+  if(!state || typeof state!=="object")return null;
+
+  const meter=ensureBlockscoutProUsageV611(state);
+  const cost=Math.max(
+    0,
+    Math.trunc(Number(credits)||BLOCKSCOUT_PRO_STANDARD_CREDITS_V611)
+  );
+  const key=String(endpoint||"UNCLASSIFIED").slice(0,120);
+
+  meter.requests=safeNumber(meter.requests)+1;
+  meter.estimatedCredits=safeNumber(meter.estimatedCredits)+cost;
+
+  if(cost>=BLOCKSCOUT_PRO_HEAVY_CREDITS_V611){
+    meter.heavyRequests=safeNumber(meter.heavyRequests)+1;
+  }else{
+    meter.standardRequests=safeNumber(meter.standardRequests)+1;
+  }
+
+  const row=
+    meter.byEndpoint[key] &&
+    typeof meter.byEndpoint[key]==="object"
+      ? meter.byEndpoint[key]
+      : {
+          requests:0,
+          estimatedCredits:0,
+          lastRequestAt:null,
+          lastHttpStatus:null
+        };
+
+  row.requests=safeNumber(row.requests)+1;
+  row.estimatedCredits=safeNumber(row.estimatedCredits)+cost;
+  row.lastRequestAt=Date.now();
+  if(Number.isFinite(Number(httpStatus))){
+    row.lastHttpStatus=Number(httpStatus);
+  }
+  meter.byEndpoint[key]=row;
+
+  meter.lastRequestAt=Date.now();
+  meter.lastEndpoint=key;
+  meter.lastCredits=cost;
+  if(Number.isFinite(Number(httpStatus))){
+    meter.lastHttpStatus=Number(httpStatus);
+  }
+
+  return meter;
+}
+
+function updateBlockscoutProHttpStatusV611(state,endpoint,httpStatus){
+  if(!state?.blockscoutProUsageV611)return;
+  const meter=ensureBlockscoutProUsageV611(state);
+  const key=String(endpoint||"UNCLASSIFIED").slice(0,120);
+  const status=Number(httpStatus);
+  if(!Number.isFinite(status))return;
+
+  meter.lastHttpStatus=status;
+  const row=meter.byEndpoint?.[key];
+  if(row && typeof row==="object"){
+    row.lastHttpStatus=status;
+  }
+}
+
+function blockscoutProUsageSnapshotV611(state){
+  const nowMs=Date.now();
+  const day=utcDayKeyV611(nowMs);
+  const raw=
+    state?.blockscoutProUsageV611?.utcDay===day
+      ? state.blockscoutProUsageV611
+      : {
+          version:"V611",
+          utcDay:day,
+          monitorStartedAt:null,
+          requests:0,
+          estimatedCredits:0,
+          standardRequests:0,
+          heavyRequests:0,
+          byEndpoint:{},
+          lastRequestAt:null,
+          lastEndpoint:null,
+          lastCredits:null,
+          lastHttpStatus:null,
+          meterBasis:"BOT_SIDE_V611_FORWARD_ONLY",
+          preV611Usage:"DATA UNVERIFIED"
+        };
+
+  const credits=safeNumber(raw.estimatedCredits);
+  const requests=safeNumber(raw.requests);
+  const remaining=Math.max(
+    0,
+    BLOCKSCOUT_PRO_FREE_DAILY_CREDITS_V611-credits
+  );
+  const usedPct=
+    (credits/BLOCKSCOUT_PRO_FREE_DAILY_CREDITS_V611)*100;
+
+  const startedAt=
+    Number.isFinite(Number(raw.monitorStartedAt))
+      ? Number(raw.monitorStartedAt)
+      : null;
+  const elapsedMs=
+    startedAt!==null
+      ? Math.max(0,nowMs-startedAt)
+      : 0;
+
+  const mature=elapsedMs>=10*60*1000 && credits>0;
+  const creditsPerHour=
+    mature
+      ? credits/(elapsedMs/(60*60*1000))
+      : null;
+  const projected24hCredits=
+    creditsPerHour!==null
+      ? creditsPerHour*24
+      : null;
+  const projectedPct=
+    projected24hCredits!==null
+      ? (projected24hCredits/BLOCKSCOUT_PRO_FREE_DAILY_CREDITS_V611)*100
+      : null;
+
+  let status="BUILDING_SAMPLE";
+  if(mature){
+    if(
+      credits>=BLOCKSCOUT_PRO_FREE_DAILY_CREDITS_V611 ||
+      projected24hCredits>=BLOCKSCOUT_PRO_FREE_DAILY_CREDITS_V611
+    ){
+      status="LIKELY_TO_EXCEED";
+    }else if(
+      usedPct>=75 ||
+      projectedPct>=75
+    ){
+      status="WATCH";
+    }else{
+      status="SAFE";
+    }
+  }
+
+  const topEndpoints=
+    Object.entries(raw.byEndpoint||{})
+      .map(([endpoint,row])=>({
+        endpoint,
+        requests:safeNumber(row?.requests),
+        estimatedCredits:safeNumber(row?.estimatedCredits),
+        lastHttpStatus:
+          Number.isFinite(Number(row?.lastHttpStatus))
+            ? Number(row.lastHttpStatus)
+            : null,
+        lastRequestAt:
+          Number.isFinite(Number(row?.lastRequestAt))
+            ? Number(row.lastRequestAt)
+            : null
+      }))
+      .sort(
+        (a,b)=>
+          b.estimatedCredits-a.estimatedCredits ||
+          b.requests-a.requests ||
+          a.endpoint.localeCompare(b.endpoint)
+      )
+      .slice(0,8);
+
+  const resetAt=nextUtcMidnightV611(nowMs);
+
+  return {
+    version:VERSION,
+    meter:"BLOCKSCOUT_PRO_CREDIT_METER_V611",
+    readOnly:true,
+    externalProviderRequests:0,
+    stateWrites:0,
+    scannerBudgetConsumed:false,
+    utcDay:day,
+    monitorStartedAt:startedAt,
+    monitorStartedAtIso:
+      startedAt!==null
+        ? new Date(startedAt).toISOString()
+        : null,
+    observedRequests:requests,
+    estimatedCreditsUsed:credits,
+    dailyAllowanceCredits:
+      BLOCKSCOUT_PRO_FREE_DAILY_CREDITS_V611,
+    remainingEstimatedCredits:remaining,
+    usedPct,
+    freeRps:BLOCKSCOUT_PRO_FREE_RPS_V611,
+    standardCreditsPerRequest:
+      BLOCKSCOUT_PRO_STANDARD_CREDITS_V611,
+    heavyCreditsPerRequest:
+      BLOCKSCOUT_PRO_HEAVY_CREDITS_V611,
+    standardRequests:safeNumber(raw.standardRequests),
+    heavyRequests:safeNumber(raw.heavyRequests),
+    elapsedMs,
+    minimumProjectionSampleMs:10*60*1000,
+    sampleQuality:
+      elapsedMs<10*60*1000
+        ? "EARLY"
+        : elapsedMs<30*60*1000
+          ? "FAIR"
+          : elapsedMs<60*60*1000
+            ? "GOOD"
+            : "STRONG",
+    creditsPerHour,
+    projected24hCredits,
+    projected24hPct:projectedPct,
+    status,
+    nextResetUtc:new Date(resetAt).toISOString(),
+    nextResetUk:ukDateTimeV611(resetAt),
+    lastRequestAt:raw.lastRequestAt||null,
+    lastEndpoint:raw.lastEndpoint||null,
+    lastCredits:raw.lastCredits??null,
+    lastHttpStatus:raw.lastHttpStatus??null,
+    topEndpoints,
+    preV611Usage:"DATA UNVERIFIED",
+    accountWideUsage:"DATA UNVERIFIED",
+    authoritativeSource:"BLOCKSCOUT_DEV_PORTAL",
+    timestamp:now()
+  };
+}
+
+function blockscoutProUsageTelegramMessageV611(state){
+  const r=blockscoutProUsageSnapshotV611(state);
+
+  const fmtNum=value=>
+    Number.isFinite(Number(value))
+      ? Math.round(Number(value)).toLocaleString("en-GB")
+      : "BUILDING";
+
+  const fmtPct=value=>
+    Number.isFinite(Number(value))
+      ? `${Number(value).toFixed(2)}%`
+      : "BUILDING";
+
+  const lines=[
+    "🧭 <b>Blockscout PRO Usage — V611</b>",
+    "",
+    `Observed requests: <b>${fmtNum(r.observedRequests)}</b>`,
+    `Estimated credits: <b>${fmtNum(r.estimatedCreditsUsed)}</b> / <b>${fmtNum(r.dailyAllowanceCredits)}</b>`,
+    `Used: <b>${fmtPct(r.usedPct)}</b>`,
+    `Estimated remaining: <b>${fmtNum(r.remainingEstimatedCredits)}</b> credits`,
+    `Standard calls: <b>${fmtNum(r.standardRequests)}</b> × ${r.standardCreditsPerRequest} credits`,
+    `Heavy/raw-trace calls: <b>${fmtNum(r.heavyRequests)}</b> × ${r.heavyCreditsPerRequest} credits`,
+    "",
+    `Sample quality: <b>${escapeHtml(r.sampleQuality)}</b>`,
+    `Credits/hour: <b>${fmtNum(r.creditsPerHour)}</b>`,
+    `Projected 24h credits: <b>${fmtNum(r.projected24hCredits)}</b>`,
+    `Projected allowance used: <b>${fmtPct(r.projected24hPct)}</b>`,
+    `Capacity status: <b>${escapeHtml(r.status)}</b>`,
+    "",
+    `Reset UTC: <b>${escapeHtml(r.nextResetUtc)}</b>`,
+    `Reset UK: <b>${escapeHtml(r.nextResetUk)}</b>`,
+    `Free-plan rate limit: <b>${r.freeRps} RPS</b>`
+  ];
+
+  if(Array.isArray(r.topEndpoints) && r.topEndpoints.length){
+    lines.push("","🔎 <b>Top metered endpoints</b>");
+    for(const row of r.topEndpoints){
+      lines.push(
+        `• ${escapeHtml(row.endpoint)} — ${fmtNum(row.requests)} req / ${fmtNum(row.estimatedCredits)} credits`
+      );
+    }
+  }
+
+  lines.push(
+    "",
+    `Pre-V611 usage: <b>DATA UNVERIFIED</b>`,
+    `Actual account-wide usage: <b>DATA UNVERIFIED</b>`,
+    "<i>Bot-side forward-only estimate. Blockscout Dev Portal remains authoritative. /blockscoutusage performs no provider request and no state write.</i>"
+  );
+
+  return lines.join("\n");
 }
 
 /* =========================================================
@@ -24026,7 +24392,9 @@ async function runTargetedFlapHistoricalProofV541({env,state,budget,row,root}){
   row.requestsAttempted=safeNumber(row.requestsAttempted)+1;root.requestsAttempted=safeNumber(root.requestsAttempted)+1;row.lastAttemptAt=Date.now();root.lastAttemptAt=row.lastAttemptAt;root.lastSourceKey="flap";
   try{
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),6000);let response;
+    recordBlockscoutProUsageV611(state,"V541_FLAP_TARGETED_LOGS",BLOCKSCOUT_PRO_STANDARD_CREDITS_V611);
     try{response=await fetch(url,{headers:{accept:"application/json"},signal:controller.signal});}finally{clearTimeout(timer);}
+    updateBlockscoutProHttpStatusV611(state,"V541_FLAP_TARGETED_LOGS",response.status);
     row.lastHttpStatus=response.status;
     if(!response.ok){row.lastError=`HTTP_${response.status}`;row.status=`V541_FLAP_TARGETED_HTTP_${response.status}_RETRYABLE`;root.lastStatus=row.status;return{handled:true,enabled:true,attempted:true,requestConsumed:true,sourceKey:"flap",httpStatus:response.status,targetedTopic0:FLAP_TOKENCREATED_TOPIC0_V541,status:row.status};}
     const payload=await response.json();
@@ -24299,7 +24667,7 @@ async function runSeededHistoricalProofV529({env,state,budget}){
   if(!url){row.lastError="BLOCKSCOUT_PRO_NOT_CONFIGURED";row.lastHttpStatus=null;row.status="V533_HISTORICAL_BLOCKSCOUT_PRO_NOT_CONFIGURED";root.lastStatus=row.status;return{enabled:true,attempted:false,requestConsumed:false,sourceKey:chosen.key,residualLaneV532:true,authenticatedBlockscoutProV533:false,status:row.status};}
   const spare=consumeResidualHistoricalProofRequestV532(budget,"SEEDED_HISTORICAL_ADDRESS_LOGS_V533",1);if(spare?.ok!==true){root.lastStatus=`V533_HISTORICAL_RESIDUAL_DEFERRED:${spare?.reason||"UNKNOWN"}`;return{enabled:true,attempted:false,requestConsumed:false,sourceKey:chosen.key,residualLaneV532:true,authenticatedBlockscoutProV533:true,status:root.lastStatus};}
   row.requestsAttempted=safeNumber(row.requestsAttempted)+1;root.requestsAttempted=safeNumber(root.requestsAttempted)+1;row.lastAttemptAt=Date.now();root.lastAttemptAt=row.lastAttemptAt;root.lastSourceKey=chosen.key;
-  try{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),6000);let response;try{response=await fetch(url,{headers:{accept:"application/json"},signal:controller.signal});}finally{clearTimeout(timer);}row.lastHttpStatus=response.status;
+  try{const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),6000);let response;recordBlockscoutProUsageV611(state,"V533_HISTORICAL_ADDRESS_LOGS",BLOCKSCOUT_PRO_STANDARD_CREDITS_V611);try{response=await fetch(url,{headers:{accept:"application/json"},signal:controller.signal});}finally{clearTimeout(timer);}updateBlockscoutProHttpStatusV611(state,"V533_HISTORICAL_ADDRESS_LOGS",response.status);row.lastHttpStatus=response.status;
     if(!response.ok){row.lastError=`HTTP_${response.status}`;row.status=`V529_HISTORICAL_HTTP_${response.status}`;root.lastStatus=row.status;return{enabled:true,attempted:true,requestConsumed:true,sourceKey:chosen.key,httpStatus:response.status,residualLaneV532:true,authenticatedBlockscoutProV533:true,status:row.status};}
     const payload=await response.json(),items=Array.isArray(payload?.items)?payload.items:[];row.requestsSucceeded=safeNumber(row.requestsSucceeded)+1;root.requestsSucceeded=safeNumber(root.requestsSucceeded)+1;row.pagesObserved=safeNumber(row.pagesObserved)+1;row.lastSuccessAt=Date.now();row.lastError=null;let exactMint=0;
     for(const log of items){const topics=v529LogTopics(log),topic0=String(topics[0]||"").toLowerCase(),tx=v529TxHash(log);if(/^0x[a-f0-9]{64}$/.test(topic0))row.topic0Counts[topic0]=safeNumber(row.topic0Counts[topic0])+1;const evidence={observedAt:Date.now(),topic0:/^0x[a-f0-9]{64}$/.test(topic0)?topic0:null,transactionHash:tx,blockNumber:safeNumber(log?.block_number||log?.blockNumber)||null,logIndex:safeNumber(log?.index||log?.log_index||log?.logIndex)||null,topicCount:topics.length,decodedMethod:v529DecodedMethod(log)||null,topic1:topics[1]||null,topic2:topics[2]||null,topic3:topics[3]||null,rawData:String(log?.data||log?.raw?.data||log?.raw_data||"")||null,evidenceMeaning:"BLOCKSCOUT_V2_HISTORICAL_ADDRESS_LOG_FINGERPRINT_V529"};row.recentEvidence.push(evidence);
@@ -25201,6 +25569,11 @@ async function fetchBlockscoutBacklogTopicV248(
   }
 
   try {
+    recordBlockscoutProUsageV611(
+      state,
+      "V248_PRO_JSONRPC_ETH_GETLOGS",
+      BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
+    );
     const response =
       await fetch(
         `${BLOCKSCOUT_PRO}/${BLOCKSCOUT_PRO_CHAIN_ID}/json-rpc`,
@@ -25229,6 +25602,12 @@ async function fetchBlockscoutBacklogTopicV248(
             })
         }
       );
+
+    updateBlockscoutProHttpStatusV611(
+      state,
+      "V248_PRO_JSONRPC_ETH_GETLOGS",
+      response.status
+    );
 
     const remainingHeader =
       response.headers.get(
@@ -44389,6 +44768,12 @@ async function blockscoutProHoldersV143(
     const url =
       `${BLOCKSCOUT_PRO}/${BLOCKSCOUT_PRO_CHAIN_ID}/api/v2/tokens/${token}/holders?apikey=${encodeURIComponent(apiKey)}`;
 
+    recordBlockscoutProUsageV611(
+      state,
+      "V143_TOKEN_HOLDERS",
+      BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
+    );
+
     const response =
       await fetch(
         url,
@@ -44399,6 +44784,12 @@ async function blockscoutProHoldersV143(
           }
         }
       );
+
+    updateBlockscoutProHttpStatusV611(
+      state,
+      "V143_TOKEN_HOLDERS",
+      response.status
+    );
 
     if (
       response.status ===
@@ -44681,6 +45072,12 @@ async function blockscoutProCountersV247(
     const url =
       `${BLOCKSCOUT_PRO}/${BLOCKSCOUT_PRO_CHAIN_ID}/api/v2/tokens/${token}/counters?apikey=${encodeURIComponent(apiKey)}`;
 
+    recordBlockscoutProUsageV611(
+      state,
+      "V256_TOKEN_COUNTERS",
+      BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
+    );
+
     const response =
       await fetch(
         url,
@@ -44691,6 +45088,12 @@ async function blockscoutProCountersV247(
           }
         }
       );
+
+    updateBlockscoutProHttpStatusV611(
+      state,
+      "V256_TOKEN_COUNTERS",
+      response.status
+    );
 
     if (
       response.status ===
@@ -59447,7 +59850,21 @@ async function advanceDirectionalWatchV551({
   candidate.lastAttemptAt = Date.now();
 
   try {
+    if(provider==="BLOCKSCOUT_PRO_UNIVERSAL_V2"){
+      recordBlockscoutProUsageV611(
+        state,
+        "V551_CONTINUOUS_EXACT_POOL_LOGS",
+        BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
+      );
+    }
     const response = await fetch(logsUrl,{headers:{accept:"application/json"}});
+    if(provider==="BLOCKSCOUT_PRO_UNIVERSAL_V2"){
+      updateBlockscoutProHttpStatusV611(
+        state,
+        "V551_CONTINUOUS_EXACT_POOL_LOGS",
+        response.status
+      );
+    }
     if (!response.ok) {
       candidate.lastStatus = `BLOCKSCOUT_HTTP_${response.status}_V551`;
       candidate.updatedAt = Date.now();
@@ -101776,6 +102193,11 @@ async function runUnknownLaunchMechanismFingerprintV483({
   );
 
   try {
+    recordBlockscoutProUsageV611(
+      state,
+      "V483_UNKNOWN_LAUNCH_TX_FINGERPRINT",
+      BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
+    );
     const response = await fetch(
       url,
       {
@@ -101787,6 +102209,11 @@ async function runUnknownLaunchMechanismFingerprintV483({
       }
     );
 
+    updateBlockscoutProHttpStatusV611(
+      state,
+      "V483_UNKNOWN_LAUNCH_TX_FINGERPRINT",
+      response.status
+    );
     telemetry.httpStatus = response.status;
     root.lastHttpStatus = response.status;
 
@@ -102231,6 +102658,11 @@ async function runExactPonsV2LaunchDiagnosticV482({
     );
 
   try {
+    recordBlockscoutProUsageV611(
+      state,
+      "V482_EXACT_PONS_V2_DIAGNOSTIC",
+      BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
+    );
     const response =
       await fetch(
         url,
@@ -102243,6 +102675,11 @@ async function runExactPonsV2LaunchDiagnosticV482({
         }
       );
 
+    updateBlockscoutProHttpStatusV611(
+      state,
+      "V482_EXACT_PONS_V2_DIAGNOSTIC",
+      response.status
+    );
     telemetry.httpStatus =
       response.status;
 
@@ -102580,6 +103017,11 @@ async function runBlockscoutProOriginDiagnosticV481({
     );
 
   try {
+    recordBlockscoutProUsageV611(
+      state,
+      "V481_GET_CONTRACT_CREATION",
+      BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
+    );
     const response =
       await fetch(
         url,
@@ -102592,6 +103034,11 @@ async function runBlockscoutProOriginDiagnosticV481({
         }
       );
 
+    updateBlockscoutProHttpStatusV611(
+      state,
+      "V481_GET_CONTRACT_CREATION",
+      response.status
+    );
     telemetry.httpStatus =
       response.status;
 
@@ -103386,6 +103833,11 @@ async function runExactCreationMechanismAttributionV485({
     );
 
   try {
+    recordBlockscoutProUsageV611(
+      state,
+      "V485_CREATION_RAW_TRACE",
+      BLOCKSCOUT_PRO_HEAVY_CREDITS_V611
+    );
     const response =
       await fetch(
         url,
@@ -103400,6 +103852,11 @@ async function runExactCreationMechanismAttributionV485({
         }
       );
 
+    updateBlockscoutProHttpStatusV611(
+      state,
+      "V485_CREATION_RAW_TRACE",
+      response.status
+    );
     telemetry.httpStatus =
       response.status;
 
@@ -120298,6 +120755,7 @@ function telegramHelpV271() {
     "<code>/launchcoverage</code> — launch discovery-to-Telegram coverage funnel",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
+    "<code>/blockscoutusage</code> — Blockscout PRO daily credit meter (read-only)",
     "<code>/help</code> — command list",
     "",
     "<i>/analyse performs a fresh bounded analysis. /v3start and /v3stop control the token's V3 live collector. Other diagnostic/report commands do not trigger a fresh chain scan.</i>"
@@ -121258,6 +121716,37 @@ async function telegramCommandReplyV271(
           0,
         stateWrites:
           0
+      };
+    }
+  } else if (
+    parsed.command === "/blockscoutusage" ||
+    parsed.command === "/blockscout"
+  ) {
+    reply =
+      blockscoutProUsageTelegramMessageV611(
+        state
+      );
+
+    if (diagnosticV273) {
+      const meterV611 =
+        blockscoutProUsageSnapshotV611(
+          state
+        );
+
+      diagnosticV273.blockscoutProUsageV611 = {
+        observedRequests:
+          meterV611?.observedRequests ?? null,
+        estimatedCreditsUsed:
+          meterV611?.estimatedCreditsUsed ?? null,
+        remainingEstimatedCredits:
+          meterV611?.remainingEstimatedCredits ?? null,
+        projected24hCredits:
+          meterV611?.projected24hCredits ?? null,
+        status:
+          meterV611?.status || null,
+        scannerBudgetConsumed:false,
+        externalProviderRequests:0,
+        stateWrites:0
       };
     }
   } else if (
