@@ -1,4 +1,26 @@
 /**
+ * Robinhood Chain Meme Hunter — V586
+ * AUTHORITATIVE RUNTIME VERSION: V586
+ *
+ * V586 FAIRNESS BEFORE NEAR-HEAD FINISH:
+ * - preserves V585 and all earlier confirmed-working behaviour;
+ * - fixes the proven scheduler conflict where a near-head recovered pool could
+ *   consume both protected directional slots while another verified tier-4
+ *   recovered pool was still waiting;
+ * - before every extra directional chunk, if finishPoolIdV561 points at a pool
+ *   and another verified prior-completion catch-up pool is waiting, the finish
+ *   preference is cleared so routing must choose a distinct recovered pool;
+ * - V561 near-head finishing remains available when no other recovered tier-4
+ *   pool is waiting;
+ * - V585 38,400/19,200/9,600 fast catch-up spans remain unchanged;
+ * - V584 verified watch-identity decoder fallback remains unchanged;
+ * - no historical backfill;
+ * - no scoring, Momentum, qualification, USD maths, Telegram, provider,
+ *   retention or alert-threshold changes;
+ * - no extra external requests;
+ * - hard global request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V585
  * AUTHORITATIVE RUNTIME VERSION: V585
  *
@@ -3831,7 +3853,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V585";
+const VERSION = "V586";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -76890,6 +76912,17 @@ for (
         : null
     );
 
+  if (
+    finishPoolIdV561 &&
+    directionalWatchHasOtherPriorCompletionCatchupV579(
+      state,
+      finishPoolIdV561,
+      latestNumber
+    )
+  ) {
+    finishPoolIdV561 = null;
+  }
+
   const directionalPoolFailuresThisScanV580 = new Set();
 
   const firstChunkPoolIdV580 =
@@ -76945,6 +76978,17 @@ for (
       directionalCatchupStopReasonV554 =
         "NO_SPARE_ANALYSIS_BUDGET_FOR_EXTRA_CHUNK_V554";
       break;
+    }
+
+    if (
+      finishPoolIdV561 &&
+      directionalWatchHasOtherPriorCompletionCatchupV579(
+        state,
+        finishPoolIdV561,
+        latestNumber
+      )
+    ) {
+      finishPoolIdV561 = null;
     }
 
     const baseExclusionsV580 = new Set([
@@ -77076,7 +77120,7 @@ for (
     enabled:true,
     measurementOnly:true,
     samePoolOnly:false,
-    schedulerVersion:"V580_SKIP_FAILED_POOL_THEN_V579_FAIR_RECOVERED_ROTATION",
+    schedulerVersion:"V586_FAIR_RECOVERED_ROTATION_BEFORE_V561_NEAR_HEAD_FINISH",
     skipFailedPoolAndContinueV580:{
       enabled:true,
       skippableStatus:"ROWS_NOT_ALL_EXACT_USD_DECODABLE_NO_COVERAGE_ADVANCE_V551",
@@ -77091,6 +77135,15 @@ for (
       enabled:true,
       distinctTier4PoolBeforeSamePoolSprint:true,
       samePoolSprintBlockedWhenAnotherTier4Waiting:true,
+      generic:true,
+      externalRequestsAdded:0,
+      hardGlobalLimitUnchanged:42
+    },
+    fairnessBeforeNearHeadFinishV586:{
+      enabled:true,
+      distinctRecoveredPoolBeforeNearHeadFinish:true,
+      finishPreferenceClearedWhenAnotherRecoveredTier4Waits:true,
+      nearHeadFinishAllowedWhenNoOtherRecoveredTier4Waits:true,
       generic:true,
       externalRequestsAdded:0,
       hardGlobalLimitUnchanged:42
@@ -77241,6 +77294,15 @@ for (
       requiresVerifiedPriorCompletion:true,
       requiresSuccessfulExactUsdCompleteRange:true,
       saturationAndDecodeGuardsUnchanged:true,
+      externalRequestsAdded:0,
+      hardGlobalLimitUnchanged:42
+    },
+    fairnessBeforeNearHeadFinishV586:{
+      enabled:true,
+      recoveredTier4DistinctPoolPriority:true,
+      v561NearHeadFinishBlockedWhileAnotherRecoveredTier4Waits:true,
+      nearHeadFinishResumesWhenNoOtherRecoveredPoolWaiting:true,
+      generic:true,
       externalRequestsAdded:0,
       hardGlobalLimitUnchanged:42
     },
