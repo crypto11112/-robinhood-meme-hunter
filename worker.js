@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V588
+ * AUTHORITATIVE RUNTIME VERSION: V588
+ *
+ * V588 REAL 30-MINUTE EXACT-POOL WINDOW:
+ * - preserves V587/V586 and all confirmed-working collector/decoder/scheduler logic;
+ * - fixes V587 wiring error: m30 had been added to maturity telemetry but not to
+ *   the authoritative verifiedRollingDirectionalUsdWindowsV557 calculation list;
+ * - adds m30 to:
+ *     * V557 verified rolling-window calculation;
+ *     * verifiedWindowCounts telemetry;
+ *     * Telegram exact-pool ledger output;
+ *     * /analyse rolling-ledger maturity output;
+ * - uses exactly the same forward-only contiguous/gap-free/caught-up proof as
+ *   1m/5m/15m/1h/6h/12h/24h;
+ * - no backfill, no guessing, no scoring changes, no provider changes;
+ * - no extra external requests;
+ * - hard global request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V587
  * AUTHORITATIVE RUNTIME VERSION: V587
  *
@@ -3870,7 +3889,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V587";
+const VERSION = "V588";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -59316,6 +59335,7 @@ function verifiedRollingDirectionalUsdWindowsV557(
     ["m1", 1 * 60 * 1000],
     ["m5", 5 * 60 * 1000],
     ["m15", 15 * 60 * 1000],
+    ["m30", 30 * 60 * 1000],
     ["h1", 60 * 60 * 1000],
     ["h6", 6 * 60 * 60 * 1000],
     ["h12", 12 * 60 * 60 * 1000],
@@ -59463,10 +59483,21 @@ function verifiedRollingDirectionalUsdWindowsV557(
       scoringChanged:false,
       externalRequestsAdded:0
     },
+    thirtyMinuteExactPoolWindowV588: {
+      enabled:true,
+      measurementOnly:true,
+      windowMs:30 * 60 * 1000,
+      usesSameContiguousCoverageGateAsV557:true,
+      historicalBackfill:false,
+      scoringChanged:false,
+      externalRequestsAdded:0,
+      hardGlobalLimitUnchanged:42
+    },
     verifiedWindowCounts: {
       m1: entries.filter(row => row?.windows?.m1?.verified === true).length,
       m5: entries.filter(row => row?.windows?.m5?.verified === true).length,
       m15: entries.filter(row => row?.windows?.m15?.verified === true).length,
+      m30: entries.filter(row => row?.windows?.m30?.verified === true).length,
       h1: entries.filter(row => row?.windows?.h1?.verified === true).length,
       h6: entries.filter(row => row?.windows?.h6?.verified === true).length,
       h12: entries.filter(row => row?.windows?.h12?.verified === true).length,
@@ -62458,6 +62489,8 @@ function telegramRollingExactPoolUsdLinesV564(candidate) {
       "🔴 5m Sell USD: <b>UNVERIFIED</b>",
       "🟢 15m Buy USD: <b>UNVERIFIED</b>",
       "🔴 15m Sell USD: <b>UNVERIFIED</b>",
+      "🟢 30m Buy USD: <b>UNVERIFIED</b>",
+      "🔴 30m Sell USD: <b>UNVERIFIED</b>",
       "🟢 1h Buy USD: <b>UNVERIFIED</b>",
       "🔴 1h Sell USD: <b>UNVERIFIED</b>",
       "🟢 6h Buy USD: <b>UNVERIFIED</b>",
@@ -62529,6 +62562,7 @@ function telegramRollingExactPoolUsdLinesV564(candidate) {
   pushWindow("1m", "m1");
   pushWindow("5m", "m5");
   pushWindow("15m", "m15");
+  pushWindow("30m", "m30");
   pushWindow("1h", "h1");
   pushWindow("6h", "h6");
   pushWindow("12h", "h12");
@@ -90098,6 +90132,7 @@ function manualRollingProgressLinesV572(candidate) {
     `• 1m: <b>${escapeHtml(maturityText("m1"))}</b>`,
     `• 5m: <b>${escapeHtml(maturityText("m5"))}</b>`,
     `• 15m: <b>${escapeHtml(maturityText("m15"))}</b>`,
+    `• 30m: <b>${escapeHtml(maturityText("m30"))}</b>`,
     `• 1h: <b>${escapeHtml(maturityText("h1"))}</b>`,
     `• 6h: <b>${escapeHtml(maturityText("h6"))}</b>`,
     `• 12h: <b>${escapeHtml(maturityText("h12"))}</b>`,
