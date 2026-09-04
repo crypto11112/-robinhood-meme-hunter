@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V596
+ * AUTHORITATIVE RUNTIME VERSION: V596
+ *
+ * V596 CLOUDFLARE FETCH-BASED V3 WEBSOCKET UPGRADE:
+ * - preserves V595 and all confirmed-working V4/V3 evidence semantics;
+ * - replaces ONLY the V3 outbound Alchemy handshake mechanism;
+ * - proven reason: V595 recorded repeated close 1006
+ *   "Failed to establish websocket connection" in ~75ms with 0 OPEN events;
+ * - uses Cloudflare's documented outbound fetch() + Upgrade:websocket path;
+ * - exposes the HTTP upgrade status/body when the peer refuses the upgrade;
+ * - on HTTP 101 + response.webSocket, accepts the returned socket and starts
+ *   the existing exact V3 Swap-log + newHeads subscriptions unchanged;
+ * - no change to V3 trade decoding, USD maths, integrity windows, scoring,
+ *   qualification, Telegram thresholds, V4 collector, launch learning,
+ *   request budgets or alert behaviour;
+ * - never exposes the Alchemy API key;
+ * - hard global external-request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V595
  * AUTHORITATIVE RUNTIME VERSION: V595
  *
@@ -4034,7 +4053,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V595";
+const VERSION = "V596";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -120122,6 +120141,9 @@ function v3CollectorControlTelegramMessageV592(action, token, result) {
       if (last?.code!==undefined&&last?.code!==null) detail+=` code=${last.code}`;
       if (last?.reason) detail+=` reason=${String(last.reason).slice(0,120)}`;
       if (last?.message) detail+=` message=${String(last.message).slice(0,120)}`;
+      if (last?.httpStatus!==undefined&&last?.httpStatus!==null) detail+=` HTTP=${last.httpStatus}`;
+      if (last?.statusText) detail+=` ${String(last.statusText).slice(0,80)}`;
+      if (last?.body) detail+=` body=${String(last.body).slice(0,160)}`;
       if (last?.handshakeMs!==undefined&&last?.handshakeMs!==null) detail+=` handshake=${last.handshakeMs}ms`;
       if (last?.connectingAgeMs!==undefined&&last?.connectingAgeMs!==null) detail+=` connectingAge=${last.connectingAgeMs}ms`;
       lines.push(`Last handshake event: <b>${escapeHtml(detail)}</b>`);
@@ -128105,29 +128127,24 @@ if (url.pathname === "/reconcile-v374") {
 
     let ws;
     const socketConnectStartedAtV593 = Date.now();
+
     await this.recordV3HandshakeEventV594(
       "CONNECT_ATTEMPT_V594",
       {
         connectStartedAtV593:socketConnectStartedAtV593,
         connectTimeoutMsV593:V3_SOCKET_CONNECT_TIMEOUT_MS_V593,
         alchemyKeyConfigured:Boolean(this.env.ALCHEMY_API_KEY),
-        endpointHost:"robinhood-mainnet.g.alchemy.com"
+        endpointHost:"robinhood-mainnet.g.alchemy.com",
+        transport:"FETCH_UPGRADE_V596"
       }
     );
-    try { ws = new WebSocket(`wss://robinhood-mainnet.g.alchemy.com/v2/${String(this.env.ALCHEMY_API_KEY)}`); }
-    catch (e) {
-      await this.recordV3HandshakeEventV594("CONSTRUCTOR_ERROR_V594",{error:String(e?.message||e).slice(0,240)});
-      await this.scheduleReconnect(String(e?.message||e));
-      return;
-    }
 
-    this.ws = ws;
     this.wsConnectStartedAtV593 = socketConnectStartedAtV593;
 
     const priorConnV593 = await this.state.storage.get("connection") || {};
     await this.doPutV404("connection",{
       ...priorConnV593,
-      status:"WEBSOCKET_CONNECTING_V593",
+      status:"WEBSOCKET_FETCH_UPGRADE_CONNECTING_V596",
       connected:false,
       subscriptionAccepted:false,
       logSubscriptionAccepted:false,
@@ -128136,22 +128153,124 @@ if (url.pathname === "/reconcile-v374") {
       headSubscriptionIdPresent:false,
       socketConnectStartedAtV593,
       socketConnectTimeoutMsV593:V3_SOCKET_CONNECT_TIMEOUT_MS_V593,
+      transportV596:"FETCH_UPGRADE",
       lastError:null
     });
 
-    ws.addEventListener("open", async () => {
-      const openedAtV594=Date.now();
-      await this.recordV3HandshakeEventV594(
-        "OPEN_V594",
-        {openedAt:openedAtV594,handshakeMs:Math.max(0,openedAtV594-Number(socketConnectStartedAtV593))}
+    let upgradeResponseV596;
+    try {
+      upgradeResponseV596 = await fetch(
+        `https://robinhood-mainnet.g.alchemy.com/v2/${String(this.env.ALCHEMY_API_KEY)}`,
+        {
+          headers:{
+            "Upgrade":"websocket"
+          }
+        }
       );
-      this.reconnectPending = false;
-      this.wsConnectStartedAtV593 = null;
-      await this.doPutV404("connection",{status:"WEBSOCKET_OPEN_SUBSCRIBING_V368",connected:true,subscriptionAccepted:false,logSubscriptionAccepted:false,headSubscriptionAccepted:false,lastConnectedAt:Date.now(),subscriptionIdPresent:false,headSubscriptionIdPresent:false,socketConnectStartedAtV593:null,socketConnectTimeoutMsV593:V3_SOCKET_CONNECT_TIMEOUT_MS_V593});
-      // V368 uses two narrow/free WebSocket subscriptions: exact V3 Swap logs + chain heads.
-      ws.send(JSON.stringify({jsonrpc:"2.0",id:363,method:"eth_subscribe",params:["logs",{address:this.config.pair,topics:[UNISWAP_V3_SWAP_TOPIC_V326]}]}));
-      ws.send(JSON.stringify({jsonrpc:"2.0",id:368,method:"eth_subscribe",params:["newHeads"]}));
+    } catch (e) {
+      const messageV596=String(e?.message||e).slice(0,240);
+      await this.recordV3HandshakeEventV594(
+        "FETCH_UPGRADE_EXCEPTION_V596",
+        {
+          message:messageV596,
+          ageAtErrorMs:Math.max(0,Date.now()-Number(socketConnectStartedAtV593))
+        }
+      );
+      this.wsConnectStartedAtV593=null;
+      await this.scheduleReconnect(`FETCH_UPGRADE_EXCEPTION_V596: ${messageV596}`);
+      return;
+    }
+
+    const upgradeStatusV596=Number(upgradeResponseV596?.status||0);
+    const hasWebSocketV596=Boolean(upgradeResponseV596?.webSocket);
+
+    if (upgradeStatusV596!==101 || !hasWebSocketV596) {
+      let bodyV596="";
+      try {
+        bodyV596=String(await upgradeResponseV596.text()).slice(0,360);
+      } catch (_) {}
+
+      await this.recordV3HandshakeEventV594(
+        "FETCH_UPGRADE_REJECTED_V596",
+        {
+          httpStatus:upgradeStatusV596,
+          statusText:String(upgradeResponseV596?.statusText||"").slice(0,120),
+          body:bodyV596,
+          hasWebSocket:hasWebSocketV596,
+          ageAtRejectMs:Math.max(0,Date.now()-Number(socketConnectStartedAtV593))
+        }
+      );
+
+      this.wsConnectStartedAtV593=null;
+
+      await this.doPutV404("connection",{
+        ...priorConnV593,
+        status:"FETCH_UPGRADE_REJECTED_V596",
+        connected:false,
+        subscriptionAccepted:false,
+        logSubscriptionAccepted:false,
+        headSubscriptionAccepted:false,
+        subscriptionIdPresent:false,
+        headSubscriptionIdPresent:false,
+        transportV596:"FETCH_UPGRADE",
+        httpStatusV596:upgradeStatusV596,
+        httpStatusTextV596:String(upgradeResponseV596?.statusText||"").slice(0,120),
+        httpBodyV596:bodyV596,
+        lastError:`HTTP ${upgradeStatusV596} ${String(upgradeResponseV596?.statusText||"")}`.slice(0,240)
+      });
+
+      await this.scheduleReconnect(`FETCH_UPGRADE_REJECTED_V596_HTTP_${upgradeStatusV596}`);
+      return;
+    }
+
+    ws=upgradeResponseV596.webSocket;
+
+    try {
+      ws.accept();
+    } catch (e) {
+      const messageV596=String(e?.message||e).slice(0,240);
+      await this.recordV3HandshakeEventV594(
+        "FETCH_UPGRADE_ACCEPT_ERROR_V596",
+        {message:messageV596}
+      );
+      this.wsConnectStartedAtV593=null;
+      await this.scheduleReconnect(`FETCH_UPGRADE_ACCEPT_ERROR_V596: ${messageV596}`);
+      return;
+    }
+
+    this.ws=ws;
+
+    const openedAtV596=Date.now();
+    await this.recordV3HandshakeEventV594(
+      "OPEN_V594",
+      {
+        openedAt:openedAtV596,
+        handshakeMs:Math.max(0,openedAtV596-Number(socketConnectStartedAtV593)),
+        transport:"FETCH_UPGRADE_V596",
+        httpStatus:upgradeStatusV596
+      }
+    );
+
+    this.reconnectPending=false;
+    this.wsConnectStartedAtV593=null;
+
+    await this.doPutV404("connection",{
+      status:"WEBSOCKET_OPEN_SUBSCRIBING_V596",
+      connected:true,
+      subscriptionAccepted:false,
+      logSubscriptionAccepted:false,
+      headSubscriptionAccepted:false,
+      lastConnectedAt:Date.now(),
+      subscriptionIdPresent:false,
+      headSubscriptionIdPresent:false,
+      socketConnectStartedAtV593:null,
+      socketConnectTimeoutMsV593:V3_SOCKET_CONNECT_TIMEOUT_MS_V593,
+      transportV596:"FETCH_UPGRADE",
+      httpStatusV596:upgradeStatusV596,
+      lastError:null
     });
+    // V596: returned fetch-upgrade socket is already OPEN after accept().
+    // Attach handlers before sending the unchanged subscription requests.
     ws.addEventListener("message", event => {
       this.processing = this.processing.then(()=>this.handleMessage(event)).catch(async e=>{
         const c=await this.state.storage.get("connection")||{}; c.lastError=String(e?.message||e).slice(0,240); c.status="MESSAGE_PROCESSING_ERROR_V363"; await this.doPutV404("connection",c);
@@ -128184,6 +128303,32 @@ if (url.pathname === "/reconcile-v374") {
       this.wsConnectStartedAtV593=null;
       this.scheduleReconnect("WEBSOCKET_ERROR_V363");
     });
+
+    // Existing V368 subscription payloads are preserved exactly.
+    try {
+      ws.send(JSON.stringify({
+        jsonrpc:"2.0",
+        id:363,
+        method:"eth_subscribe",
+        params:["logs",{
+          address:this.config.pair,
+          topics:[UNISWAP_V3_SWAP_TOPIC_V326]
+        }]
+      }));
+      ws.send(JSON.stringify({
+        jsonrpc:"2.0",
+        id:368,
+        method:"eth_subscribe",
+        params:["newHeads"]
+      }));
+    } catch (e) {
+      const messageV596=String(e?.message||e).slice(0,240);
+      await this.recordV3HandshakeEventV594(
+        "SUBSCRIPTION_SEND_ERROR_V596",
+        {message:messageV596}
+      );
+      await this.scheduleReconnect(`SUBSCRIPTION_SEND_ERROR_V596: ${messageV596}`);
+    }
   }
 
   async scheduleReconnect(error) {
