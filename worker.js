@@ -1,4 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V603
+ * AUTHORITATIVE RUNTIME VERSION: V603
+ *
+ * V603 SHARED-HEAD PUBLIC-RPC POLLING FIX:
+ * - preserves V602 token-side shared-head architecture and all V597 provider failover;
+ * - removes the failed shared-head WebSocket singleton implementation;
+ * - shared singleton now polls Robinhood public RPC eth_blockNumber once every 15s;
+ * - only ONE public head poll exists for the whole V3 system, regardless of token count;
+ * - token collectors keep only their exact-pool Swap WebSocket subscription;
+ * - no dRPC/QuickNode newHeads notification cost;
+ * - shared-head freshness is based on persisted successful poll time, not an in-memory socket;
+ * - failed/stale public head polls reset token integrity safely; no partial evidence promotion;
+ * - public-head poll telemetry reports last HTTP/RPC error and poll count;
+ * - V600/V601 dRPC projection counts shared-head provider CU as ZERO because the head source
+ *   is Robinhood public RPC, while still projecting exact-pool Swap notification CU;
+ * - no scoring, USD decoding, V4, qualification, alerts or hard 42-request scan cap changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V602
  * AUTHORITATIVE RUNTIME VERSION: V602
  *
@@ -4182,7 +4200,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V602";
+const VERSION = "V603";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -120241,7 +120259,7 @@ function v3FeedUsageTelegramMessageV598(token, result) {
   };
 
   const lines = [
-    `📡 <b>V3 Feed Usage — V602</b>`,
+    `📡 <b>V3 Feed Usage — V603</b>`,
     `Contract: <code>${escapeHtml(token)}</code>`,
     "",
     `Active provider: <b>${escapeHtml(activeProvider)}</b>`,
@@ -120251,8 +120269,10 @@ function v3FeedUsageTelegramMessageV598(token, result) {
     `Integrity: <b>${integrity}</b> | persisted integrity: <b>${persistedIntegrity}</b>`,
     `Continuous effective uptime: <b>${escapeHtml(fmtDuration(result?.continuousIntegrityMs))}</b>`,
     `Head age: <b>${escapeHtml(fmtAge(result?.headAgeMs))}</b> | last block: <b>${Number.isFinite(Number(result?.lastHeadBlock)) ? Math.trunc(Number(result.lastHeadBlock)) : "UNVERIFIED"}</b>`,
-    `Shared head: <b>${result?.sharedHeadV602?.fresh===true?"FRESH":"NOT FRESH"}</b> | provider <b>${escapeHtml(String(result?.sharedHeadV602?.activeProvider||"UNVERIFIED"))}</b> | global newHeads subscriptions <b>1</b>`,
+    `Shared head: <b>${result?.sharedHeadV602?.fresh===true?"FRESH":"NOT FRESH"}</b> | source <b>${escapeHtml(String(result?.sharedHeadV602?.activeProvider||"ROBINHOOD_PUBLIC_RPC"))}</b>`,
+    `Head transport: <b>${escapeHtml(String(result?.sharedHeadV602?.transport||"HTTP_ETH_BLOCKNUMBER_V603"))}</b> | global newHeads subscriptions <b>0</b>`,
     "",
+    `Public head polls: <b>${safeNumber(result?.sharedHeadV602?.pollsObservedV603).toLocaleString("en-GB")}</b> | failures <b>${safeNumber(result?.sharedHeadV602?.pollFailuresV603)}</b>`,
     `Observed heads: <b>${safeNumber(result?.headsObserved).toLocaleString("en-GB")}</b>`,
     `Exact-pool V3 swaps captured: <b>${safeNumber(result?.swapsCaptured).toLocaleString("en-GB")}</b>`,
     `Observed feed events: <b>${safeNumber(result?.observedFeedEvents).toLocaleString("en-GB")}</b>`,
@@ -127824,8 +127844,14 @@ if (url.pathname === "/reconcile-v374") {
       meterStartAtV600 !== null
         ? Math.max(0, swapsCaptured - safeNumber(providerSessionV600?.swapsStart))
         : 0;
+    const sharedPublicRpcModeV603 =
+      sharedHeadV602?.transport==="HTTP_ETH_BLOCKNUMBER_V603" ||
+      sharedHeadV602?.activeProvider==="ROBINHOOD_PUBLIC_RPC";
+
     const meterNotificationsV600 =
-      meterHeadsDeltaV600 + meterSwapsDeltaV600;
+      sharedPublicRpcModeV603
+        ? meterSwapsDeltaV600
+        : (meterHeadsDeltaV600 + meterSwapsDeltaV600);
     const meterSubscriptionActionsV600 =
       meterStartAtV600 !== null
         ? Math.max(0, safeNumber(providerSessionV600?.subscriptionActionsAtStart))
@@ -127949,9 +127975,22 @@ if (url.pathname === "/reconcile-v374") {
       usdVerifiedCaptured:safeNumber(stats.usdVerifiedCaptured),
       observedFeedEvents:headsObserved + swapsCaptured,
       sharedHeadV602:{
-        enabled:true,fresh:sharedHeadV602?.fresh===true,activeProvider:sharedHeadV602?.activeProvider||null,
-        lastHeadBlock:sharedHeadV602?.lastHeadBlock??null,headAgeMs:sharedHeadV602?.headAgeMs??null,
-        headsObserved:safeNumber(sharedHeadV602?.headsObserved),oneNewHeadsSubscription:true,perTokenNewHeadsSubscription:false
+        enabled:true,
+        fresh:sharedHeadV602?.fresh===true,
+        activeProvider:sharedHeadV602?.activeProvider||"ROBINHOOD_PUBLIC_RPC",
+        transport:sharedHeadV602?.transport||"HTTP_ETH_BLOCKNUMBER_V603",
+        lastHeadBlock:sharedHeadV602?.lastHeadBlock??null,
+        headAgeMs:sharedHeadV602?.headAgeMs??null,
+        headsObserved:safeNumber(sharedHeadV602?.headsObserved),
+        pollsObservedV603:safeNumber(sharedHeadV602?.pollsObservedV603),
+        pollSuccessesV603:safeNumber(sharedHeadV602?.pollSuccessesV603),
+        pollFailuresV603:safeNumber(sharedHeadV602?.pollFailuresV603),
+        lastPollDurationMs:sharedHeadV602?.lastPollDurationMs??null,
+        lastError:sharedHeadV602?.lastError||null,
+        oneNewHeadsSubscription:false,
+        perTokenNewHeadsSubscription:false,
+        sharedHeadProviderCuPerNotification:0,
+        publicRpcHeadPolling:true
       },
       reconnects:safeNumber(stats.reconnects),
       reconnectCounterScope:"CUMULATIVE_LIFETIME_BOT_TELEMETRY",
@@ -128004,7 +128043,15 @@ if (url.pathname === "/reconcile-v374") {
             : null,
         status:projectedDrpcCapacityStatusV600,
         projectionWindowDays:30,
-        projectionBasis:"CURRENT_PROVIDER_SESSION_NOTIFICATION_RATE_APPLIED_TO_DRPC_DOCUMENTED_WS_CU_MODEL",
+        projectionBasis:
+          sharedPublicRpcModeV603
+            ? "TOKEN_SWAP_NOTIFICATIONS_ONLY_SHARED_HEAD_USES_FREE_PUBLIC_RPC_V603"
+            : "CURRENT_PROVIDER_SESSION_NOTIFICATION_RATE_APPLIED_TO_DRPC_DOCUMENTED_WS_CU_MODEL",
+        sharedHeadCuCounted:false,
+        sharedHeadSource:
+          sharedPublicRpcModeV603
+            ? "ROBINHOOD_PUBLIC_RPC_ETH_BLOCKNUMBER"
+            : "PROVIDER_WS_OR_LEGACY",
         actualAccountCycleUsageKnown:false,
         preV600UsageIncluded:false,
         providerDashboardAuthoritative:true
@@ -128116,8 +128163,10 @@ if (url.pathname === "/reconcile-v374") {
         headAgeMs:sharedHeadStatusV602?.headAgeMs??null,
         lastHeadBlock:sharedHeadStatusV602?.lastHeadBlock??null,
         headsObserved:safeNumber(sharedHeadStatusV602?.headsObserved),
-        oneGlobalNewHeadsSubscription:true,
-        perTokenNewHeadsSubscription:cfg?.sharedHeadModeV602===true?false:true
+        oneGlobalNewHeadsSubscription:false,
+        sharedHeadPublicRpcPolling:true,
+        transport:sharedHeadStatusV602?.transport||"HTTP_ETH_BLOCKNUMBER_V603",
+        perTokenNewHeadsSubscription:false
       },
       connectionOpened:conn.connected===true,subscriptionAccepted:conn.subscriptionAccepted===true,subscriptionIdPresent:Boolean(conn.subscriptionIdPresent),logSubscriptionAccepted:conn.logSubscriptionAccepted===true,headSubscriptionAccepted:conn.headSubscriptionAccepted===true,headSubscriptionIdPresent:Boolean(conn.headSubscriptionIdPresent),lastHeadBlock:Number.isFinite(Number(heads.lastHeadBlock))?Number(heads.lastHeadBlock):null,headsObserved:safeNumber(heads.headsObserved),headGapsDetected:safeNumber(heads.gapsDetected),lastHeadGapAt:heads.lastGapAt||null,lastHeadGapFrom:heads.lastGapFrom??null,lastHeadGapTo:heads.lastGapTo??null,lastHeadGapSize:safeNumber(heads.lastGapSize),lastHeadGapClassification:heads.lastGapClassification||null,headAgeMs:Number.isFinite(Number(heads.lastHeadAt))?Math.max(0,Date.now()-Number(heads.lastHeadAt)):null,headStaleThresholdMs:V3_HEAD_STALE_MS_V371,lastConnectedAt:conn.lastConnectedAt||null,lastMessageAt:this.lastMessageAtV402||conn.lastMessageAt||null,lastSwapAt:stats.lastSwapAt||null,lastTrade:stats.lastTrade||null,swapsCaptured:safeNumber(stats.swapsCaptured),buysCaptured:safeNumber(stats.buysCaptured),sellsCaptured:safeNumber(stats.sellsCaptured),usdVerifiedCaptured:safeNumber(stats.usdVerifiedCaptured),reconnects:safeNumber(stats.reconnects),lastError:conn.lastError||null,coverageActive,continuousCoverageStartAt:coverageStartAt,continuousCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,continuousCoverageMs:coverageStartAt!==null?Math.max(0,Date.now()-coverageStartAt):0,integrityCoverageStartAt:coverageStartAt,integrityCoverageStartIso:coverageStartAt!==null?new Date(coverageStartAt).toISOString():null,integrityCoverageMs:coverageStartAt!==null?Math.max(0,Date.now()-coverageStartAt):0,integrityInterruptionsSinceV371:safeNumber(integrity.interruptions),lastIntegrityGapAt:integrity.lastGapAt||null,lastIntegrityGapReason:integrity.lastGapReason||null,legacyV366CoverageStartAt:legacyCoverageStartAt,legacyV366CoverageStartIso:legacyCoverageStartAt!==null?new Date(legacyCoverageStartAt).toISOString():null,interruptionsSinceV366:safeNumber(cov.interruptions),lastCoverageGapAt:cov.lastGapAt||null,lastCoverageGapReason:cov.lastGapReason||null,coverageIntegrity:"V371_DUAL_SUBSCRIPTIONS_PLUS_HEAD_LIVENESS_WATCHDOG",kvBinding:getKV(this.env)?.binding||null};
   }
@@ -128827,152 +128876,226 @@ if (url.pathname === "/reconcile-v374") {
     }
   }
 
-  async connectSharedHeadV602() {
+  async pollSharedHeadV603() {
     const enabled=await this.state.storage.get("enabled");
-    if(enabled!==true) return;
-
-    if(this.ws&&this.ws.readyState===WebSocket.OPEN) return;
-
-    if(this.ws&&this.ws.readyState===WebSocket.CONNECTING){
-      const started=Number(this.wsConnectStartedAtV593);
-      if(Number.isFinite(started)&&Date.now()-started<=V3_SOCKET_CONNECT_TIMEOUT_MS_V593) return;
-      try{this.ws.close(1012,"V602 stale shared-head connect");}catch(_){}
-      this.ws=null;
+    if(enabled!==true){
+      return {ok:false,status:"SHARED_HEAD_DISABLED_V603",fresh:false};
     }
 
-    const providers=await this.orderedV3ProvidersV597();
-    if(!providers.length){
-      await this.doPutV404("v602:sharedHeadConnection",{connected:false,subscriptionAccepted:false,status:"NO_SHARED_HEAD_PROVIDER_V602",updatedAt:Date.now()});
-      await this.doSetAlarmV404(Date.now()+V3_LIVE_RECONNECT_MS_V363);
-      return;
-    }
-
-    this.wsConnectStartedAtV593=Date.now();
-    let ws=null, selected=null, httpStatus=0, lastFailure=null;
-
-    for(const provider of providers){
-      let response;
-      try{
-        response=await fetch(this.v3UpgradeUrlV597(provider.url),{headers:{Upgrade:"websocket"}});
-      }catch(error){
-        lastFailure={providerId:provider.id,failure:"FETCH_EXCEPTION",message:String(error?.message||error).slice(0,200)};
-        continue;
-      }
-      httpStatus=Number(response?.status||0);
-      if(httpStatus!==101||!response?.webSocket){
-        let body=""; try{body=String(await response.text()).slice(0,240);}catch(_){}
-        lastFailure={providerId:provider.id,failure:"UPGRADE_REJECTED",httpStatus,body};
-        continue;
-      }
-      const candidate=response.webSocket;
-      try{candidate.accept();}catch(error){
-        lastFailure={providerId:provider.id,failure:"ACCEPT_ERROR",message:String(error?.message||error).slice(0,200)};
-        continue;
-      }
-      ws=candidate; selected=provider; break;
-    }
-
-    if(!ws||!selected){
-      this.ws=null; this.wsConnectStartedAtV593=null;
-      await this.doPutV404("v602:sharedHeadConnection",{
-        connected:false,subscriptionAccepted:false,status:"ALL_SHARED_HEAD_PROVIDERS_FAILED_V602",
-        configuredProviders:providers.map(x=>x.id),lastFailure,updatedAt:Date.now()
-      });
-      await this.doSetAlarmV404(Date.now()+V3_LIVE_RECONNECT_MS_V363);
-      return;
-    }
-
-    this.ws=ws; this.wsConnectStartedAtV593=null; this.headSubscriptionId=null;
-    await this.doPutV404("v597:preferredProviderId",selected.id);
-    await this.doPutV404("v602:sharedHeadConnection",{
-      connected:true,subscriptionAccepted:false,status:"SHARED_HEAD_SUBSCRIBING_V602",
-      activeProvider:selected.id,activeProviderSource:selected.source,
-      configuredProviders:providers.map(x=>x.id),openedAt:Date.now(),httpStatus,lastError:null
-    });
-
-    ws.addEventListener("message",event=>{
-      this.processing=this.processing.then(()=>this.handleSharedHeadMessageV602(event)).catch(()=>{});
-    });
-    ws.addEventListener("close",async event=>{
-      this.ws=null; this.headSubscriptionId=null;
-      await this.doPutV404("v602:sharedHeadConnection",{
-        connected:false,subscriptionAccepted:false,status:"SHARED_HEAD_SOCKET_CLOSED_V602",
-        closeCode:Number.isFinite(Number(event?.code))?Number(event.code):null,
-        closeReason:typeof event?.reason==="string"?event.reason.slice(0,160):null,closedAt:Date.now()
-      });
-      await this.doSetAlarmV404(Date.now()+V3_LIVE_RECONNECT_MS_V363);
-    });
-    ws.addEventListener("error",async event=>{
-      await this.doPutV404("v602:sharedHeadLastError",{at:Date.now(),error:String(event?.message||event?.error?.message||"WEBSOCKET_ERROR").slice(0,220)});
-    });
+    const startedAt=Date.now();
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),4500);
 
     try{
-      ws.send(JSON.stringify({jsonrpc:"2.0",id:602,method:"eth_subscribe",params:["newHeads"]}));
+      const response=await fetch(
+        PUBLIC_RPC,
+        {
+          method:"POST",
+          headers:{"content-type":"application/json"},
+          body:JSON.stringify({
+            jsonrpc:"2.0",
+            id:603,
+            method:"eth_blockNumber",
+            params:[]
+          }),
+          signal:controller.signal
+        }
+      );
+
+      const httpStatus=Number(response?.status||0);
+      let body=null;
+      try{body=await response.json();}catch(_){}
+
+      if(
+        httpStatus<200||
+        httpStatus>=300||
+        typeof body?.result!=="string"||
+        !/^0x[0-9a-f]+$/i.test(body.result)
+      ){
+        const errorText=
+          body?.error?.message||
+          `HTTP_${httpStatus}_INVALID_ETH_BLOCKNUMBER`;
+        const prior=await this.state.storage.get("v602:sharedHeadConnection")||{};
+        const failures=safeNumber(prior.pollFailuresV603)+1;
+
+        await this.doPutV404("v602:sharedHeadConnection",{
+          ...prior,
+          connected:false,
+          subscriptionAccepted:false,
+          status:"SHARED_HEAD_PUBLIC_RPC_POLL_FAILED_V603",
+          activeProvider:"ROBINHOOD_PUBLIC_RPC",
+          activeProviderSource:"PUBLIC_RPC",
+          transport:"HTTP_ETH_BLOCKNUMBER_V603",
+          lastHttpStatus:httpStatus,
+          lastError:String(errorText).slice(0,220),
+          pollFailuresV603:failures,
+          lastPollAt:Date.now(),
+          lastPollDurationMs:Math.max(0,Date.now()-startedAt)
+        });
+
+        return {
+          ok:false,
+          status:"SHARED_HEAD_PUBLIC_RPC_POLL_FAILED_V603",
+          fresh:false,
+          httpStatus,
+          error:String(errorText).slice(0,220)
+        };
+      }
+
+      const block=parseInt(body.result,16);
+      const nowMs=Date.now();
+      const heads=await this.state.storage.get("v602:sharedHeads")||{};
+      const previous=Number(heads.lastHeadBlock);
+
+      heads.pollsObservedV603=safeNumber(heads.pollsObservedV603)+1;
+      heads.headsObserved=safeNumber(heads.headsObserved)+1;
+      heads.lastHeadAt=nowMs;
+      heads.lastSuccessfulPollAtV603=nowMs;
+      heads.lastHeadBlock=block;
+      heads.headSourceV603="ROBINHOOD_PUBLIC_RPC_ETH_BLOCKNUMBER";
+
+      if(Number.isFinite(previous)&&block<previous){
+        heads.regressionsObservedV603=safeNumber(heads.regressionsObservedV603)+1;
+        heads.lastRegressionFromV603=previous;
+        heads.lastRegressionToV603=block;
+        heads.lastRegressionAtV603=nowMs;
+      }
+
+      await this.doPutV404("v602:sharedHeads",heads);
+
+      const prior=await this.state.storage.get("v602:sharedHeadConnection")||{};
+      await this.doPutV404("v602:sharedHeadConnection",{
+        ...prior,
+        connected:true,
+        subscriptionAccepted:true,
+        status:"SHARED_HEAD_PUBLIC_RPC_FRESH_V603",
+        activeProvider:"ROBINHOOD_PUBLIC_RPC",
+        activeProviderSource:"PUBLIC_RPC",
+        transport:"HTTP_ETH_BLOCKNUMBER_V603",
+        configuredProviders:["ROBINHOOD_PUBLIC_RPC"],
+        lastHttpStatus:httpStatus,
+        lastError:null,
+        pollSuccessesV603:safeNumber(prior.pollSuccessesV603)+1,
+        lastPollAt:nowMs,
+        lastPollDurationMs:Math.max(0,nowMs-startedAt),
+        acceptedAt:prior.acceptedAt||nowMs
+      });
+
+      return {
+        ok:true,
+        status:"SHARED_HEAD_PUBLIC_RPC_FRESH_V603",
+        fresh:true,
+        lastHeadBlock:block,
+        lastHeadAt:nowMs
+      };
     }catch(error){
-      try{ws.close(1011,"V602 subscribe send failed");}catch(_){}
-      await this.doPutV404("v602:sharedHeadConnection",{connected:false,subscriptionAccepted:false,status:"SHARED_HEAD_SUBSCRIBE_SEND_FAILED_V602",lastError:String(error?.message||error).slice(0,220)});
+      const message=String(error?.name==="AbortError"?"PUBLIC_RPC_TIMEOUT":error?.message||error).slice(0,220);
+      const prior=await this.state.storage.get("v602:sharedHeadConnection")||{};
+
+      await this.doPutV404("v602:sharedHeadConnection",{
+        ...prior,
+        connected:false,
+        subscriptionAccepted:false,
+        status:"SHARED_HEAD_PUBLIC_RPC_EXCEPTION_V603",
+        activeProvider:"ROBINHOOD_PUBLIC_RPC",
+        activeProviderSource:"PUBLIC_RPC",
+        transport:"HTTP_ETH_BLOCKNUMBER_V603",
+        lastError:message,
+        pollFailuresV603:safeNumber(prior.pollFailuresV603)+1,
+        lastPollAt:Date.now(),
+        lastPollDurationMs:Math.max(0,Date.now()-startedAt)
+      });
+
+      return {
+        ok:false,
+        status:"SHARED_HEAD_PUBLIC_RPC_EXCEPTION_V603",
+        fresh:false,
+        error:message
+      };
+    }finally{
+      clearTimeout(timer);
     }
-    await this.doSetAlarmV404(Date.now()+V3_HEAD_WATCHDOG_MS_V371);
   }
 
-  async handleSharedHeadMessageV602(event) {
-    let msg; try{msg=JSON.parse(typeof event.data==="string"?event.data:"");}catch(_){return;}
-    if(msg?.id===602){
-      const conn=await this.state.storage.get("v602:sharedHeadConnection")||{};
-      if(typeof msg.result==="string"&&msg.result.length>2){
-        this.headSubscriptionId=msg.result; conn.connected=true; conn.subscriptionAccepted=true;
-        conn.status="SHARED_HEAD_LIVE_V602"; conn.acceptedAt=Date.now(); conn.lastError=null;
-      }else if(msg?.error){
-        conn.connected=false; conn.subscriptionAccepted=false; conn.status="SHARED_HEAD_SUBSCRIPTION_REJECTED_V602";
-        conn.lastError=JSON.stringify(msg.error).slice(0,220);
-      }
-      await this.doPutV404("v602:sharedHeadConnection",conn); return;
-    }
-    if(msg?.method!=="eth_subscription"||msg?.params?.subscription!==this.headSubscriptionId||!msg?.params?.result) return;
-    const raw=msg.params.result?.number;
-    const block=typeof raw==="string"&&/^0x[0-9a-f]+$/i.test(raw)?parseInt(raw,16):Number(raw);
-    if(!Number.isFinite(block)||block<0)return;
-    if(!this.headsV402)this.headsV402=await this.state.storage.get("v602:sharedHeads")||{};
-    const heads=this.headsV402, previous=Number(heads.lastHeadBlock), at=Date.now();
-    heads.headsObserved=safeNumber(heads.headsObserved)+1; heads.lastHeadAt=at;
-    if(Number.isFinite(previous)&&block>previous+1){
-      heads.gapsDetected=safeNumber(heads.gapsDetected)+1; heads.lastGapAt=at; heads.lastGapFrom=previous; heads.lastGapTo=block;
-      heads.lastGapSize=block-previous-1; heads.lastGapClassification="SHARED_HEAD_NOTIFICATION_GAP_ONLY_V602";
-    }
-    if(!Number.isFinite(previous)||block>previous)heads.lastHeadBlock=block;
-    this.headsV402=heads; this.headsDirtyV402=true;
+  async connectSharedHeadV602() {
+    // V603 compatibility wrapper: "connect" now means perform one immediate
+    // public-RPC head poll and arm the singleton alarm.
+    const result=await this.pollSharedHeadV603();
+    await this.doSetAlarmV404(Date.now()+V3_HEAD_WATCHDOG_MS_V371);
+    return result;
+  }
+
+  async handleSharedHeadMessageV602(_event) {
+    // V603: intentionally unused. Shared head no longer uses WebSocket.
+    return;
   }
 
   async sharedHeadStatusV602() {
     const enabled=await this.state.storage.get("enabled");
     const conn=await this.state.storage.get("v602:sharedHeadConnection")||{};
-    const heads=this.headsV402||await this.state.storage.get("v602:sharedHeads")||{};
-    const runtimeOpen=Boolean(this.ws&&this.ws.readyState===WebSocket.OPEN);
-    const lastHeadAt=Number.isFinite(Number(heads.lastHeadAt))?Number(heads.lastHeadAt):null;
-    const headAgeMs=lastHeadAt!==null?Math.max(0,Date.now()-lastHeadAt):null;
-    const fresh=enabled===true&&runtimeOpen&&conn.subscriptionAccepted===true&&headAgeMs!==null&&headAgeMs<=V3_HEAD_STALE_MS_V371;
+    const heads=await this.state.storage.get("v602:sharedHeads")||{};
+
+    const lastHeadAt=
+      Number.isFinite(Number(heads.lastHeadAt))
+        ? Number(heads.lastHeadAt)
+        : null;
+    const headAgeMs=
+      lastHeadAt!==null
+        ? Math.max(0,Date.now()-lastHeadAt)
+        : null;
+
+    const fresh=
+      enabled===true&&
+      conn.connected===true&&
+      conn.subscriptionAccepted===true&&
+      headAgeMs!==null&&
+      headAgeMs<=V3_HEAD_STALE_MS_V371;
+
     return {
-      version:VERSION,status:fresh?"SHARED_HEAD_FRESH_V602":"SHARED_HEAD_NOT_FRESH_V602",
-      enabled:enabled===true,runtimeSocketOpen:runtimeOpen,subscriptionAccepted:conn.subscriptionAccepted===true,fresh,
-      activeProvider:conn.activeProvider||null,configuredProviders:Array.isArray(conn.configuredProviders)?conn.configuredProviders:[],
-      lastHeadBlock:Number.isFinite(Number(heads.lastHeadBlock))?Number(heads.lastHeadBlock):null,lastHeadAt,headAgeMs,
-      headStaleThresholdMs:V3_HEAD_STALE_MS_V371,headsObserved:safeNumber(heads.headsObserved),gapsDetected:safeNumber(heads.gapsDetected),
-      oneNewHeadsSubscription:true,sharedSingletonName:V3_SHARED_HEAD_NAME_V602,timestamp:now()
+      version:VERSION,
+      status:fresh
+        ? "SHARED_HEAD_PUBLIC_RPC_FRESH_V603"
+        : "SHARED_HEAD_PUBLIC_RPC_NOT_FRESH_V603",
+      enabled:enabled===true,
+      runtimeSocketOpen:false,
+      subscriptionAccepted:conn.subscriptionAccepted===true,
+      fresh,
+      activeProvider:"ROBINHOOD_PUBLIC_RPC",
+      configuredProviders:["ROBINHOOD_PUBLIC_RPC"],
+      transport:"HTTP_ETH_BLOCKNUMBER_V603",
+      lastHeadBlock:
+        Number.isFinite(Number(heads.lastHeadBlock))
+          ? Number(heads.lastHeadBlock)
+          : null,
+      lastHeadAt,
+      headAgeMs,
+      headStaleThresholdMs:V3_HEAD_STALE_MS_V371,
+      headsObserved:safeNumber(heads.headsObserved),
+      pollsObservedV603:safeNumber(heads.pollsObservedV603),
+      pollSuccessesV603:safeNumber(conn.pollSuccessesV603),
+      pollFailuresV603:safeNumber(conn.pollFailuresV603),
+      lastPollAt:
+        Number.isFinite(Number(conn.lastPollAt))
+          ? Number(conn.lastPollAt)
+          : null,
+      lastPollDurationMs:
+        Number.isFinite(Number(conn.lastPollDurationMs))
+          ? Number(conn.lastPollDurationMs)
+          : null,
+      lastError:conn.lastError||null,
+      oneSharedHeadSource:true,
+      oneNewHeadsSubscription:false,
+      publicRpcPollingIntervalMs:V3_HEAD_WATCHDOG_MS_V371,
+      sharedSingletonName:V3_SHARED_HEAD_NAME_V602,
+      timestamp:now()
     };
   }
 
   async sharedHeadAlarmV602() {
-    const enabled=await this.state.storage.get("enabled"); if(enabled!==true)return;
-    const status=await this.sharedHeadStatusV602();
-    if(status.fresh!==true){
-      if(this.ws&&this.ws.readyState===WebSocket.OPEN&&Number.isFinite(Number(status.headAgeMs))&&Number(status.headAgeMs)>V3_HEAD_STALE_MS_V371){
-        try{this.ws.close(1012,"V602 shared head stale");}catch(_){} this.ws=null; this.headSubscriptionId=null;
-      }
-      await this.connectSharedHeadV602();
-    }
-    if(this.headsDirtyV402===true&&this.headsV402){
-      await this.doPutV404("v602:sharedHeads",this.headsV402); this.headsDirtyV402=false;
-    }
+    const enabled=await this.state.storage.get("enabled");
+    if(enabled!==true)return;
+
+    await this.pollSharedHeadV603();
     await this.doSetAlarmV404(Date.now()+V3_HEAD_WATCHDOG_MS_V371);
   }
 
