@@ -1,4 +1,25 @@
 /**
+ * Robinhood Chain Meme Hunter — V637
+ * AUTHORITATIVE RUNTIME VERSION: V637
+ *
+ * V637 PERSISTENT BLOCK-HASH REUSE FOR EXACT POOL IDENTITY
+ * - builds directly forward from V636;
+ * - unknown-pool rows persist a verified block hash for firstActiveBlock;
+ * - if that same firstActiveBlock is seen again, the exact checkpoint skips
+ *   eth_getBlockByNumber and goes directly to exact blockHash eth_getLogs;
+ * - a block hash obtained by the normal atomic checkpoint is persisted even if
+ *   the later exact log request fails, provided it belongs to firstActiveBlock;
+ * - if firstActiveBlock changes, the stored hash is automatically invalidated;
+ * - V634 successful-EMPTY memoization remains authoritative;
+ * - uncached checkpoint fallback remains:
+ *   Validation Cloud -> Robinhood Public RPC -> Alchemy;
+ * - Chainstack remains enabled for normal live eth_getLogs discovery and is
+ *   available as a final direct-log fallback once a block hash is already known;
+ * - no scoring, Momentum, qualification, Telegram threshold, launchpad proof,
+ *   KV/state-key, or hard 42-request ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V636
  * AUTHORITATIVE RUNTIME VERSION: V636
  *
@@ -4832,7 +4853,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V636";
+const VERSION = "V637";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -16334,6 +16355,39 @@ function observeUnknownPools(
         safeNumber(
           previous.lastResolvedSearchDistance
         ) || null,
+      firstActiveBlockHashV637:
+        (
+          safeNumber(
+            previous.firstActiveBlockHashBlockV637
+          ) === safeNumber(firstActiveBlock)
+        )
+          ? (
+              normalize(
+                previous.firstActiveBlockHashV637
+              ) || null
+            )
+          : null,
+      firstActiveBlockHashBlockV637:
+        (
+          safeNumber(
+            previous.firstActiveBlockHashBlockV637
+          ) === safeNumber(firstActiveBlock)
+        )
+          ? safeNumber(
+              previous.firstActiveBlockHashBlockV637
+            )
+          : null,
+      firstActiveBlockHashAtV637:
+        (
+          safeNumber(
+            previous.firstActiveBlockHashBlockV637
+          ) === safeNumber(firstActiveBlock)
+        )
+          ? (
+              previous.firstActiveBlockHashAtV637 ||
+              null
+            )
+          : null,
       firstActiveCheckpointBlockV634:
         safeNumber(
           previous.firstActiveCheckpointBlockV634
@@ -18199,6 +18253,240 @@ async function getInitializeForPoolBlockHashV188(
     providerAttemptsV623
   };
 }
+
+async function getInitializeForCachedBlockHashV637(
+  env,
+  state,
+  poolId,
+  blockNumber,
+  blockHash,
+  budget,
+  externalRequestAllowance = 4
+) {
+  const normalizedPoolId =
+    normalize(poolId);
+
+  const normalizedBlockHash =
+    normalize(blockHash);
+
+  const targetBlock =
+    safeNumber(blockNumber);
+
+  const base = {
+    attempted: false,
+    usedCachedBlockHashV637: true,
+    externalRequestsUsed: 0,
+    provider: null,
+    blockNumber:
+      targetBlock || null,
+    blockHash:
+      normalizedBlockHash || null,
+    logs: [],
+    resolvedPool: null,
+    error: null,
+    status: null,
+    providerAttemptsV637: []
+  };
+
+  if (
+    !normalizedPoolId ||
+    !normalizedBlockHash ||
+    targetBlock <= 0
+  ) {
+    return {
+      ...base,
+      status:
+        "INVALID_CACHED_BLOCK_HASH_V637"
+    };
+  }
+
+  const providers = [
+    "VALIDATION_CLOUD",
+    "ROBINHOOD_PUBLIC_RPC",
+    "ALCHEMY",
+    "CHAINSTACK"
+  ];
+
+  let used = 0;
+  let lastError = null;
+  const providerAttemptsV637 = [];
+
+  for (
+    const provider
+    of providers
+  ) {
+    const url =
+      rpcProviderUrl(
+        env,
+        provider
+      );
+
+    const cooling =
+      discoveryProviderCooling(
+        state,
+        provider
+      );
+
+    const row = {
+      provider,
+      configured: Boolean(url),
+      cooling: Boolean(cooling),
+      skipped: false,
+      skipReason: null,
+      attempted: false,
+      status: "NOT_REACHED",
+      error: null,
+      logCount: 0,
+      exactPoolIdMatched: false
+    };
+
+    if (
+      externalRequestAllowance -
+        used < 1 ||
+      !budgetAvailable(
+        budget,
+        "discovery-live",
+        1
+      )
+    ) {
+      row.skipped = true;
+      row.skipReason =
+        "BUDGET_NOT_AVAILABLE_V637";
+      providerAttemptsV637.push(row);
+      continue;
+    }
+
+    if (
+      cooling ||
+      !url
+    ) {
+      row.skipped = true;
+      row.skipReason =
+        cooling
+          ? "PROVIDER_COOLDOWN_ACTIVE"
+          : "PROVIDER_NOT_CONFIGURED";
+      providerAttemptsV637.push(row);
+      continue;
+    }
+
+    try {
+      used++;
+      row.attempted = true;
+
+      const logs =
+        await rpcCall(
+          url,
+          "eth_getLogs",
+          [{
+            blockHash:
+              normalizedBlockHash,
+            address:
+              POOL_MANAGER,
+            topics: [
+              INITIALIZE_TOPIC,
+              normalizedPoolId
+            ]
+          }],
+          budget,
+          "discovery-live"
+        );
+
+      const rows =
+        Array.isArray(logs)
+          ? logs
+          : [];
+
+      let resolvedPool =
+        null;
+
+      for (
+        const log
+        of rows
+      ) {
+        const decoded =
+          decodeInitialize(log);
+
+        if (
+          decoded &&
+          normalize(
+            decoded.poolId
+          ) ===
+            normalizedPoolId
+        ) {
+          resolvedPool =
+            decoded;
+          break;
+        }
+      }
+
+      row.logCount =
+        rows.length;
+      row.exactPoolIdMatched =
+        Boolean(resolvedPool);
+      row.status =
+        resolvedPool
+          ? "RESOLVED"
+          : "EMPTY";
+
+      providerAttemptsV637.push(row);
+
+      return {
+        ...base,
+        attempted: true,
+        externalRequestsUsed:
+          used,
+        provider,
+        logs: rows,
+        resolvedPool,
+        error: null,
+        status:
+          resolvedPool
+            ? "RESOLVED"
+            : "EMPTY",
+        providerAttemptsV637
+      };
+    } catch (error) {
+      const message =
+        String(
+          error?.message ||
+          error
+        );
+
+      lastError =
+        message;
+      row.error =
+        message;
+      row.status =
+        "ERROR";
+      providerAttemptsV637.push(row);
+
+      if (
+        is429(message)
+      ) {
+        markDiscovery429(
+          state,
+          provider
+        );
+      }
+    }
+  }
+
+  return {
+    ...base,
+    attempted:
+      used > 0,
+    externalRequestsUsed:
+      used,
+    error:
+      lastError,
+    status:
+      used > 0
+        ? "ALL_PROVIDERS_FAILED_V637"
+        : "NOT_ATTEMPTED",
+    providerAttemptsV637
+  };
+}
+
 
 async function getInitializeForPoolRange(
   env,
@@ -20300,6 +20588,9 @@ async function resolvePersistentUnknownPools(
       atomicFirstActiveCheckpointV635: true,
       atomicCheckpointPairRequestsV635: 2,
       atomicCheckpointMaxExistingAllowanceV635: 4,
+      persistentBlockHashReuseV637: true,
+      blockHashReuseSkipsEthGetBlockByNumberV637: true,
+      invalidatesWhenFirstActiveBlockChangesV637: true,
       atomicCheckpointProviderOrderV635: [
         "VALIDATION_CLOUD",
         "ROBINHOOD_PUBLIC_RPC",
@@ -20328,6 +20619,11 @@ async function resolvePersistentUnknownPools(
       atomicPairRequestsV635: 2,
       maxCheckpointAllowanceV635: 4,
       sameProviderCompletionRequiredV635: true,
+      persistentBlockHashReuseV637: true,
+      cachedBlockHashHitsV637: 0,
+      cachedBlockHashDirectLogAttemptsV637: 0,
+      cachedBlockHashRequestsSavedV637: 0,
+      cachedBlockHashPersistedV637: 0,
       providerOrderV635: [
         "VALIDATION_CLOUD",
         "ROBINHOOD_PUBLIC_RPC",
@@ -21022,8 +21318,164 @@ async function resolvePersistentUnknownPools(
           true;
     }
 
+    const cachedFirstActiveBlockHashV637 =
+      (
+        safeNumber(
+          entry.firstActiveBlockHashBlockV637
+        ) ===
+          safeNumber(
+            entry.firstActiveBlock
+          )
+      )
+        ? normalize(
+            entry.firstActiveBlockHashV637
+          )
+        : null;
+
     if (
       !firstActiveCheckpointAlreadyEmptyV634 &&
+      cachedFirstActiveBlockHashV637 &&
+      output.rpcBlockHashInitializeV188
+        .invocationsV635 < 1 &&
+      (
+        resolverRequestLimit -
+        output.requestsUsed
+      ) >= 1 &&
+      budgetAvailable(
+        budget,
+        "discovery-live",
+        1
+      )
+    ) {
+      output.rpcBlockHashInitializeV188
+        .cachedBlockHashHitsV637 += 1;
+
+      const cachedResultV637 =
+        await getInitializeForCachedBlockHashV637(
+          env,
+          state,
+          poolId,
+          entry.firstActiveBlock,
+          cachedFirstActiveBlockHashV637,
+          budget,
+          Math.min(
+            4,
+            resolverRequestLimit -
+              output.requestsUsed
+          )
+        );
+
+      output.requestsUsed +=
+        safeNumber(
+          cachedResultV637.externalRequestsUsed
+        );
+
+      output.rpcBlockHashInitializeV188
+        .requestsUsed +=
+          safeNumber(
+            cachedResultV637.externalRequestsUsed
+          );
+
+      output.rpcBlockHashInitializeV188
+        .cachedBlockHashDirectLogAttemptsV637 +=
+          cachedResultV637.attempted
+            ? 1
+            : 0;
+
+      output.rpcBlockHashInitializeV188
+        .cachedBlockHashRequestsSavedV637 +=
+          cachedResultV637.attempted
+            ? 1
+            : 0;
+
+      output.rpcBlockHashInitializeV188
+        .invocationsV635 += 1;
+
+      output.rpcBlockHashInitializeV188
+        .attempts +=
+          (
+            cachedResultV637.status ===
+              "RESOLVED" ||
+            cachedResultV637.status ===
+              "EMPTY"
+          )
+            ? 1
+            : 0;
+
+      output.rpcBlockHashInitializeV188
+        .selectedPoolId =
+          poolId;
+
+      output.rpcBlockHashInitializeV188
+        .blockNumber =
+          safeNumber(
+            entry.firstActiveBlock
+          ) || null;
+
+      output.rpcBlockHashInitializeV188
+        .blockHash =
+          cachedFirstActiveBlockHashV637;
+
+      output.rpcBlockHashInitializeV188
+        .provider =
+          cachedResultV637.provider;
+
+      output.rpcBlockHashInitializeV188
+        .status =
+          cachedResultV637.status;
+
+      output.rpcBlockHashInitializeV188
+        .checkpointOutcomeV189 =
+          cachedResultV637.resolvedPool
+            ? "RESOLVED"
+            : (
+                cachedResultV637.status ===
+                  "EMPTY"
+                  ? "EMPTY"
+                  : "CACHED_BLOCK_HASH_PROVIDER_FAILURE_V637"
+              );
+
+      output.rpcBlockHashInitializeV188
+        .error =
+          cachedResultV637.error;
+
+      output.rpcBlockHashInitializeV188
+        .providerAttemptsV623 =
+          cachedResultV637
+            .providerAttemptsV637 ||
+          [];
+
+      if (
+        cachedResultV637.resolvedPool
+      ) {
+        blockHashResolvedPoolV188 =
+          cachedResultV637.resolvedPool;
+
+        output.rpcBlockHashInitializeV188
+          .resolved = 1;
+      } else if (
+        cachedResultV637.status === "EMPTY"
+      ) {
+        entry.firstActiveCheckpointBlockV634 =
+          safeNumber(
+            entry.firstActiveBlock
+          );
+
+        entry.firstActiveCheckpointStatusV634 =
+          "EMPTY";
+
+        entry.firstActiveCheckpointAtV634 =
+          Date.now();
+
+        output.rpcBlockHashInitializeV188
+          .fallbackToRangeCrawler =
+            true;
+      }
+    }
+
+    if (
+      !firstActiveCheckpointAlreadyEmptyV634 &&
+      !cachedFirstActiveBlockHashV637 &&
       output.rpcBlockHashInitializeV188
         .invocationsV635 < 1 &&
       (
@@ -21095,6 +21547,34 @@ async function resolvePersistentUnknownPools(
       output.rpcBlockHashInitializeV188
         .blockHash =
           blockHashV188.blockHash;
+
+      if (
+        normalize(
+          blockHashV188.blockHash
+        ) &&
+        safeNumber(
+          blockHashV188.blockNumber
+        ) ===
+          safeNumber(
+            entry.firstActiveBlock
+          )
+      ) {
+        entry.firstActiveBlockHashV637 =
+          normalize(
+            blockHashV188.blockHash
+          );
+
+        entry.firstActiveBlockHashBlockV637 =
+          safeNumber(
+            entry.firstActiveBlock
+          );
+
+        entry.firstActiveBlockHashAtV637 =
+          Date.now();
+
+        output.rpcBlockHashInitializeV188
+          .cachedBlockHashPersistedV637 += 1;
+      }
 
       output.rpcBlockHashInitializeV188
         .provider =
