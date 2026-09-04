@@ -1,4 +1,17 @@
 /**
+ * Robinhood Chain Meme Hunter — V612
+ * AUTHORITATIVE RUNTIME VERSION: V612
+ *
+ * V612 BLOCKSCOUT METER SAMPLE-QUALITY FIX:
+ * - preserves V611 Blockscout Pro usage instrumentation unchanged;
+ * - fixes misleading STRONG sample label when zero Blockscout calls occurred;
+ * - zero requests/credits => sample quality BUILDING;
+ * - once usage begins: EARLY <10m, FAIR 10-30m, GOOD 30-60m, STRONG >=60m;
+ * - capacity status remains BUILDING_SAMPLE until projection is eligible;
+ * - no Blockscout fallback is enabled yet;
+ * - no scanner/provider/integrity/decoding/USD/scoring/V4/alert/42-cap changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V611
  * AUTHORITATIVE RUNTIME VERSION: V611
  *
@@ -4351,7 +4364,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V611";
+const VERSION = "V612";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -11864,13 +11877,15 @@ function blockscoutProUsageSnapshotV611(state){
     elapsedMs,
     minimumProjectionSampleMs:10*60*1000,
     sampleQuality:
-      elapsedMs<10*60*1000
-        ? "EARLY"
-        : elapsedMs<30*60*1000
-          ? "FAIR"
-          : elapsedMs<60*60*1000
-            ? "GOOD"
-            : "STRONG",
+      requests<=0 || credits<=0
+        ? "BUILDING"
+        : elapsedMs<10*60*1000
+          ? "EARLY"
+          : elapsedMs<30*60*1000
+            ? "FAIR"
+            : elapsedMs<60*60*1000
+              ? "GOOD"
+              : "STRONG",
     creditsPerHour,
     projected24hCredits,
     projected24hPct:projectedPct,
@@ -11903,7 +11918,7 @@ function blockscoutProUsageTelegramMessageV611(state){
       : "BUILDING";
 
   const lines=[
-    "🧭 <b>Blockscout PRO Usage — V611</b>",
+    "🧭 <b>Blockscout PRO Usage — V612</b>",
     "",
     `Observed requests: <b>${fmtNum(r.observedRequests)}</b>`,
     `Estimated credits: <b>${fmtNum(r.estimatedCreditsUsed)}</b> / <b>${fmtNum(r.dailyAllowanceCredits)}</b>`,
