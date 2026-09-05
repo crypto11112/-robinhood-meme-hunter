@@ -1,4 +1,30 @@
 /**
+ * Robinhood Chain Meme Hunter — V643
+ * AUTHORITATIVE RUNTIME VERSION: V643
+ *
+ * V643 MULTI TIER-1 DIRECT HASH CHECKPOINTS
+ * - builds directly forward from V642;
+ * - current-live unknown pools with an exact firstActiveBlock blockHash are
+ *   allowed to consume multiple one-request direct checkpoints in the same run;
+ * - each Tier-1 direct checkpoint calls exact blockHash eth_getLogs with an
+ *   external request allowance of ONE;
+ * - the batch stops automatically at the existing dynamic resolver request
+ *   limit / discovery-live budget; no new request allowance is created;
+ * - successful EMPTY results feed V634 memoization immediately and are skipped
+ *   on later scans;
+ * - successful RESOLVED results register the exact pool mapping/watch evidence
+ *   immediately;
+ * - failed direct attempts remain retryable on later scans and do not invent
+ *   identity;
+ * - lower priority / older resolver work remains available only after the
+ *   Tier-1 direct batch has not consumed the existing resolver allowance;
+ * - preserves V640 deferred recovery, V641 observed block-hash harvesting and
+ *   V642 hash-aware scheduling;
+ * - no scoring, Momentum, qualification, Telegram threshold, launch-source
+ *   proof, cadence, KV namespace, or hard 42-request ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V642
  * AUTHORITATIVE RUNTIME VERSION: V642
  *
@@ -4964,7 +4990,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V642";
+const VERSION = "V643";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -21326,6 +21352,15 @@ async function resolvePersistentUnknownPools(
       observedFirstActivityBlockHashHarvestV641: true,
       observedBlockHashZeroExtraRequestsV641: true,
       hashAwareCandidatePriorityV642: true,
+      multiTier1DirectCheckpointsV643: true,
+      tier1DirectMaxRequestsV643:
+        resolverRequestLimit,
+      tier1DirectAttemptsV643: 0,
+      tier1DirectRequestsUsedV643: 0,
+      tier1DirectResolvedV643: 0,
+      tier1DirectEmptyV643: 0,
+      tier1DirectFailedV643: 0,
+      tier1DirectResultsV643: [],
       currentLiveEvidenceSourceV642:
         "PREFERRED_LIVE_POOL_IDS_V191",
       exactFirstActiveHashRequiredV642: true,
@@ -21358,7 +21393,11 @@ async function resolvePersistentUnknownPools(
         "ETH_GETBLOCKBYNUMBER_HTTP_403_OBSERVED_V635",
       invocationsV635: 0,
       incompleteProviderInvocationsV635: 0,
-      maxPoolsPerRun: 1,
+      maxPoolsPerRun:
+        resolverRequestLimit,
+      maxPoolsPerRunLegacyV635: 1,
+      multiPoolDirectModeV643:
+        "TIER1_HASH_READY_ONLY",
       attempts: 0,
       requestsUsed: 0,
       resolved: 0,
@@ -21855,6 +21894,321 @@ async function resolvePersistentUnknownPools(
     }
 
     /*
+     * V643: MULTI TIER-1 DIRECT HASH CHECKPOINT BATCH.
+     *
+     * V642 has already ordered current-live + exact-hash candidates first.
+     * For those candidates, do the cheapest exact proof immediately:
+     * one blockHash eth_getLogs request, no eth_getBlockByNumber.
+     *
+     * We deliberately allow only ONE actual external request per candidate.
+     * Multiple candidates may run only while the EXISTING resolver allowance
+     * and discovery-live budget still have room.
+     */
+    const tierV643 =
+      unknownPoolResolverPriorityTierV642(
+        entry,
+        livePriorityPoolIdsV191
+      );
+
+    const tier1HashReadyV643 =
+      tierV643 === 1 &&
+      unknownPoolHasExactFirstActiveHashV642(
+        entry
+      );
+
+    if (
+      tier1HashReadyV643 &&
+      output.requestsUsed <
+        resolverRequestLimit &&
+      budgetAvailable(
+        budget,
+        "discovery-live",
+        1
+      )
+    ) {
+      const directHashV643 =
+        normalize(
+          entry.firstActiveBlockHashV637
+        );
+
+      const directResultV643 =
+        await getInitializeForCachedBlockHashV637(
+          env,
+          state,
+          poolId,
+          entry.firstActiveBlock,
+          directHashV643,
+          budget,
+          1
+        );
+
+      const directRequestsV643 =
+        safeNumber(
+          directResultV643.externalRequestsUsed
+        );
+
+      output.requestsUsed +=
+        directRequestsV643;
+
+      output.rpcBlockHashInitializeV188
+        .requestsUsed +=
+          directRequestsV643;
+
+      output.rpcBlockHashInitializeV188
+        .cachedBlockHashHitsV637 += 1;
+
+      output.rpcBlockHashInitializeV188
+        .cachedBlockHashDirectLogAttemptsV637 +=
+          directResultV643.attempted
+            ? 1
+            : 0;
+
+      output.rpcBlockHashInitializeV188
+        .cachedBlockHashRequestsSavedV637 +=
+          directResultV643.attempted
+            ? 1
+            : 0;
+
+      output.rpcBlockHashInitializeV188
+        .tier1DirectAttemptsV643 +=
+          directResultV643.attempted
+            ? 1
+            : 0;
+
+      output.rpcBlockHashInitializeV188
+        .tier1DirectRequestsUsedV643 +=
+          directRequestsV643;
+
+      const directRowV643 = {
+        poolId,
+        tier: 1,
+        currentLive: true,
+        firstActiveBlock:
+          safeNumber(
+            entry.firstActiveBlock
+          ) || null,
+        blockHash:
+          directHashV643,
+        hashSource:
+          entry.firstActiveBlockHashSourceV641 ||
+          "PERSISTED_BLOCK_HASH_V637",
+        attempted:
+          Boolean(
+            directResultV643.attempted
+          ),
+        requestsUsed:
+          directRequestsV643,
+        provider:
+          directResultV643.provider ||
+          null,
+        status:
+          directResultV643.status ||
+          null,
+        error:
+          directResultV643.error ||
+          null,
+        resolved:
+          Boolean(
+            directResultV643.resolvedPool
+          )
+      };
+
+      output.rpcBlockHashInitializeV188
+        .tier1DirectResultsV643.push(
+          directRowV643
+        );
+
+      /*
+       * Keep the legacy scalar fields useful by reflecting the most recent
+       * Tier-1 direct checkpoint while the V643 array preserves every result.
+       */
+      output.rpcBlockHashInitializeV188
+        .selectedPoolId =
+          poolId;
+
+      output.rpcBlockHashInitializeV188
+        .blockNumber =
+          safeNumber(
+            entry.firstActiveBlock
+          ) || null;
+
+      output.rpcBlockHashInitializeV188
+        .blockHash =
+          directHashV643;
+
+      output.rpcBlockHashInitializeV188
+        .provider =
+          directResultV643.provider ||
+          null;
+
+      output.rpcBlockHashInitializeV188
+        .status =
+          directResultV643.status ||
+          null;
+
+      output.rpcBlockHashInitializeV188
+        .error =
+          directResultV643.error ||
+          null;
+
+      output.rpcBlockHashInitializeV188
+        .providerAttemptsV623 =
+          directResultV643
+            .providerAttemptsV637 ||
+          [];
+
+      if (
+        directResultV643.resolvedPool
+      ) {
+        const resolvedPoolV643 =
+          directResultV643.resolvedPool;
+
+        output.rpcBlockHashInitializeV188
+          .tier1DirectResolvedV643 += 1;
+
+        output.rpcBlockHashInitializeV188
+          .resolved += 1;
+
+        output.rpcBlockHashInitializeV188
+          .checkpointOutcomeV189 =
+            "RESOLVED_V643_TIER1_DIRECT";
+
+        registerPoolMapping(
+          state,
+          resolvedPoolV643
+        );
+
+        for (
+          const address
+          of [
+            resolvedPoolV643.currency0,
+            resolvedPoolV643.currency1
+          ]
+        ) {
+          if (
+            !isAddress(address) ||
+            address === ZERO ||
+            knownQuote(address)
+          ) {
+            continue;
+          }
+
+          addWatch(
+            state,
+            address,
+            resolvedPoolV643,
+            "V643_TIER1_DIRECT_BLOCKHASH_INITIALIZE"
+          );
+        }
+
+        delete tracker[poolId];
+
+        output.resolved++;
+        output.resolvedPoolIds.push(
+          poolId
+        );
+
+        output.probes.push({
+          poolId,
+          resolverLane,
+          activityScore:
+            activityScore(entry),
+          swapEvents:
+            safeNumber(
+              entry.swapEvents
+            ),
+          liquidityEvents:
+            safeNumber(
+              entry.liquidityEvents
+            ),
+          appearances:
+            safeNumber(
+              entry.appearances
+            ),
+          fromBlock:
+            safeNumber(
+              entry.firstActiveBlock
+            ),
+          toBlock:
+            safeNumber(
+              entry.firstActiveBlock
+            ),
+          requestedBlocks: 1,
+          desiredChunkBlocks: 1,
+          externalRequestsUsed:
+            directRequestsV643,
+          provider:
+            directResultV643.provider ||
+            null,
+          logs:
+            Array.isArray(
+              directResultV643.logs
+            )
+              ? directResultV643.logs.length
+              : 0,
+          resolved: true,
+          resolutionPath:
+            "V643_TIER1_DIRECT_BLOCKHASH_INITIALIZE",
+          error: null
+        });
+
+        continue;
+      }
+
+      if (
+        directResultV643.status ===
+          "EMPTY"
+      ) {
+        entry.firstActiveCheckpointBlockV634 =
+          safeNumber(
+            entry.firstActiveBlock
+          );
+
+        entry.firstActiveCheckpointStatusV634 =
+          "EMPTY";
+
+        entry.firstActiveCheckpointAtV634 =
+          Date.now();
+
+        output.rpcBlockHashInitializeV188
+          .tier1DirectEmptyV643 += 1;
+
+        output.rpcBlockHashInitializeV188
+          .checkpointOutcomeV189 =
+            "EMPTY_MEMOIZED_V643_TIER1_DIRECT";
+
+        output.rpcBlockHashInitializeV188
+          .fallbackToRangeCrawler =
+            true;
+
+        /*
+         * Breadth-first V643 behaviour: once the exact first-active block has
+         * been proven EMPTY, move to the next Tier-1 candidate this run.
+         * The existing backward crawler can use the memoized state later.
+         */
+        continue;
+      }
+
+      output.rpcBlockHashInitializeV188
+        .tier1DirectFailedV643 += 1;
+
+      output.rpcBlockHashInitializeV188
+        .checkpointOutcomeV189 =
+          "TIER1_DIRECT_PROVIDER_FAILURE_V643";
+
+      /*
+       * If one external request was spent but no exact result was obtained,
+       * move to the next Tier-1 candidate rather than turning a cheap breadth
+       * pass into a multi-provider depth probe.
+       */
+      if (
+        directRequestsV643 > 0
+      ) {
+        continue;
+      }
+    }
+
+    /*
      * V625: BLOCKSCOUT-FIRST FREE IDENTITY RECOVERY.
      *
      * The existing V184 query is already exact by PoolManager + Initialize
@@ -22057,6 +22411,7 @@ async function resolvePersistentUnknownPools(
         : null;
 
     if (
+      !tier1HashReadyV643 &&
       !firstActiveCheckpointAlreadyEmptyV634 &&
       cachedFirstActiveBlockHashV637 &&
       output.rpcBlockHashInitializeV188
