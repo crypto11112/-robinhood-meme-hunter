@@ -1,4 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V640
+ * AUTHORITATIVE RUNTIME VERSION: V640
+ *
+ * V640 DEFERRED LIVE-RANGE RECOVERY
+ * - builds directly forward from V639;
+ * - failed/unavailable live ranges are persisted instead of forgotten;
+ * - the oldest deferred block is retried BEFORE the current live window;
+ * - successful chunks advance the deferred cursor; it clears only when the
+ *   preserved range has actually been processed;
+ * - when every suitable free live provider is cooling/unavailable, the range
+ *   is deferred without spending a pointless live RPC request;
+ * - new chain-tip growth extends the deferred end so catch-up stays contiguous;
+ * - V638/V639 method-specific provider cooldowns remain authoritative;
+ * - no scoring, Momentum, qualification, Telegram threshold, launch-source
+ *   proof, cadence, or hard 42-request ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V639
  * AUTHORITATIVE RUNTIME VERSION: V639
  *
@@ -4895,7 +4913,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V639";
+const VERSION = "V640";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -15850,6 +15868,26 @@ function liveDiscoveryTelemetryV435(
     chainstackBackwardExactGetLogs403LastErrorV639:
       service.chainstackBackwardExactGetLogs403LastErrorV639 ||
       null,
+    deferredLiveRangeV640:
+      deferredLiveRangeV640(
+        state
+      ),
+    deferredLiveRangeSavedTotalV640:
+      safeNumber(
+        service.deferredLiveRangeSavedTotalV640
+      ),
+    deferredLiveRangeClearedTotalV640:
+      safeNumber(
+        service.deferredLiveRangeClearedTotalV640
+      ),
+    deferredLiveRangeLastSavedAtV640:
+      safeNumber(
+        service.deferredLiveRangeLastSavedAtV640
+      ) || null,
+    deferredLiveRangeLastClearedAtV640:
+      safeNumber(
+        service.deferredLiveRangeLastClearedAtV640
+      ) || null,
     actualSuccessfulRangeProviders:
       byProvider,
     lastLiveProvider:
@@ -27067,6 +27105,216 @@ function seededHistoricalProofSnapshotV529(state){const root=ensureSeededHistori
    LIVE SCAN
    ========================================================= */
 
+
+function deferredLiveRangeV640(
+  state
+) {
+  const service =
+    discoveryService(
+      state
+    );
+
+  const row =
+    service.deferredLiveRangeV640;
+
+  if (
+    !row ||
+    typeof row !== "object"
+  ) {
+    return null;
+  }
+
+  const fromBlock =
+    safeNumber(
+      row.fromBlock
+    );
+
+  const toBlock =
+    safeNumber(
+      row.toBlock
+    );
+
+  if (
+    fromBlock <= 0 ||
+    toBlock < fromBlock
+  ) {
+    service.deferredLiveRangeV640 =
+      null;
+
+    return null;
+  }
+
+  return {
+    fromBlock,
+    toBlock,
+    createdAt:
+      safeNumber(
+        row.createdAt
+      ) || null,
+    updatedAt:
+      safeNumber(
+        row.updatedAt
+      ) || null,
+    reason:
+      row.reason ||
+      null,
+    lastError:
+      row.lastError ||
+      null
+  };
+}
+
+function persistDeferredLiveRangeV640(
+  state,
+  fromBlock,
+  toBlock,
+  reason = null,
+  lastError = null
+) {
+  const service =
+    discoveryService(
+      state
+    );
+
+  const from =
+    safeNumber(
+      fromBlock
+    );
+
+  const to =
+    safeNumber(
+      toBlock
+    );
+
+  if (
+    from <= 0 ||
+    to < from
+  ) {
+    return deferredLiveRangeV640(
+      state
+    );
+  }
+
+  const existing =
+    deferredLiveRangeV640(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  service.deferredLiveRangeV640 = {
+    fromBlock:
+      existing
+        ? Math.min(
+            existing.fromBlock,
+            from
+          )
+        : from,
+    toBlock:
+      existing
+        ? Math.max(
+            existing.toBlock,
+            to
+          )
+        : to,
+    createdAt:
+      existing?.createdAt ||
+      now,
+    updatedAt:
+      now,
+    reason:
+      reason ||
+      existing?.reason ||
+      "LIVE_RANGE_DEFERRED_V640",
+    lastError:
+      lastError ||
+      existing?.lastError ||
+      null
+  };
+
+  service.deferredLiveRangeSavedTotalV640 =
+    safeNumber(
+      service.deferredLiveRangeSavedTotalV640
+    ) + 1;
+
+  service.deferredLiveRangeLastSavedAtV640 =
+    now;
+
+  return deferredLiveRangeV640(
+    state
+  );
+}
+
+function advanceDeferredLiveRangeV640(
+  state,
+  processedThrough
+) {
+  const service =
+    discoveryService(
+      state
+    );
+
+  const current =
+    deferredLiveRangeV640(
+      state
+    );
+
+  if (!current) {
+    return null;
+  }
+
+  const through =
+    safeNumber(
+      processedThrough
+    );
+
+  if (
+    through < current.fromBlock
+  ) {
+    return current;
+  }
+
+  if (
+    through >= current.toBlock
+  ) {
+    service.deferredLiveRangeV640 =
+      null;
+
+    service.deferredLiveRangeClearedTotalV640 =
+      safeNumber(
+        service.deferredLiveRangeClearedTotalV640
+      ) + 1;
+
+    service.deferredLiveRangeLastClearedAtV640 =
+      Date.now();
+
+    return null;
+  }
+
+  service.deferredLiveRangeV640 = {
+    ...current,
+    fromBlock:
+      through + 1,
+    updatedAt:
+      Date.now()
+  };
+
+  return deferredLiveRangeV640(
+    state
+  );
+}
+
+function allLiveProvidersUnavailableV640(
+  env,
+  state
+) {
+  return !preferredLiveDiscoveryProviderV435(
+    env,
+    state
+  );
+}
+
 async function scanLiveRange(
   env,
   state,
@@ -27150,11 +27398,50 @@ async function scanLiveRange(
   const requestedTo =
     to;
 
+  const deferredAtStartV640 =
+    deferredLiveRangeV640(
+      state
+    );
+
+  /*
+   * V640: if an older live range is pending, extend its end to the latest
+   * current live target and resume from its oldest unprocessed block.
+   */
+  if (
+    deferredAtStartV640 &&
+    safeNumber(to) >
+      deferredAtStartV640.toBlock
+  ) {
+    persistDeferredLiveRangeV640(
+      state,
+      deferredAtStartV640.fromBlock,
+      safeNumber(to),
+      "DEFERRED_RANGE_EXTENDED_TO_CURRENT_TIP_V640",
+      deferredAtStartV640.lastError
+    );
+  }
+
+  const activeDeferredAtStartV640 =
+    deferredLiveRangeV640(
+      state
+    );
+
   let effectiveTo =
-    to;
+    activeDeferredAtStartV640
+      ? BigInt(
+          Math.max(
+            activeDeferredAtStartV640.toBlock,
+            safeNumber(to)
+          )
+        )
+      : to;
 
   let cursor =
-    from;
+    activeDeferredAtStartV640
+      ? BigInt(
+          activeDeferredAtStartV640.fromBlock
+        )
+      : from;
 
   let processedThrough =
     null;
@@ -27222,8 +27509,16 @@ async function scanLiveRange(
       );
 
     if (!provider) {
+      persistDeferredLiveRangeV640(
+        state,
+        Number(cursor),
+        Number(effectiveTo),
+        "ALL_LIVE_PROVIDERS_UNAVAILABLE_OR_COOLING_V640",
+        "DISCOVERY_PROVIDERS_COOLING_DOWN"
+      );
+
       error =
-        "DISCOVERY_PROVIDERS_COOLING_DOWN";
+        "LIVE_RANGE_DEFERRED_ALL_PROVIDERS_UNAVAILABLE_V640";
 
       break;
     }
@@ -27627,6 +27922,13 @@ async function scanLiveRange(
       processedThrough =
         chunkTo;
 
+      advanceDeferredLiveRangeV640(
+        state,
+        Number(
+          processedThrough
+        )
+      );
+
       service.lastLiveSuccessAt =
         Date.now();
 
@@ -27684,6 +27986,14 @@ async function scanLiveRange(
       response.error ||
       "LIVE_GET_LOGS_FAILED";
 
+    persistDeferredLiveRangeV640(
+      state,
+      Number(cursor),
+      Number(effectiveTo),
+      "LIVE_RANGE_PROVIDER_FAILURE_V640",
+      error
+    );
+
     break;
   }
 
@@ -27725,6 +28035,34 @@ async function scanLiveRange(
     providerHeadRefreshes,
 
     providerHeadRetries,
+
+    deferredRecoveryV640: {
+      enabled:
+        true,
+      retriedDeferredFirst:
+        Boolean(
+          activeDeferredAtStartV640
+        ),
+      deferredAtStart:
+        activeDeferredAtStartV640,
+      deferredRemaining:
+        deferredLiveRangeV640(
+          state
+        ),
+      allProvidersUnavailableAtReturn:
+        allLiveProvidersUnavailableV640(
+          env,
+          state
+        ),
+      savedTotal:
+        safeNumber(
+          service.deferredLiveRangeSavedTotalV640
+        ),
+      clearedTotal:
+        safeNumber(
+          service.deferredLiveRangeClearedTotalV640
+        )
+    },
 
     abortRecoveryV156: {
       enabled:
