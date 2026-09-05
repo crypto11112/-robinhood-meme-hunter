@@ -1,4 +1,25 @@
 /**
+ * Robinhood Chain Meme Hunter — V639
+ * AUTHORITATIVE RUNTIME VERSION: V639
+ *
+ * V639 BACKWARD EXACT-POOL RANGE METHOD ROUTING
+ * - builds directly forward from V638;
+ * - backward exact-PoolId Initialize range crawler gets its own method-specific
+ *   provider health state instead of relying only on generic cooldowns;
+ * - provider order for backward exact-range eth_getLogs is:
+ *   Validation Cloud -> Robinhood Public RPC -> Alchemy -> Chainstack;
+ * - if Chainstack returns HTTP 403 on this backward exact-range method, only
+ *   CHAINSTACK_BACKWARD_EXACT_GETLOGS enters a 60-minute cooldown;
+ * - Chainstack remains available for normal live eth_getLogs and all other
+ *   already-working methods;
+ * - preserves V634 memoized EMPTY checkpoints, V635 atomic checkpoint logic,
+ *   V637 persistent block-hash reuse, and V638 live getLogs method routing;
+ * - dRPC remains excluded from Robinhood Mainnet autonomous routing;
+ * - no scoring, Momentum, qualification, Telegram threshold, launchpad proof,
+ *   KV/state-key, cadence, or hard 42-request ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V638
  * AUTHORITATIVE RUNTIME VERSION: V638
  *
@@ -4874,7 +4895,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V638";
+const VERSION = "V639";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -5803,6 +5824,9 @@ const DISCOVERY_RPC_429_COOLDOWN_MS =
   60 * 1000;
 
 const CHAINSTACK_LIVE_GETLOGS_403_COOLDOWN_MS_V638 =
+  60 * 60 * 1000;
+
+const CHAINSTACK_BACKWARD_EXACT_GETLOGS_403_COOLDOWN_MS_V639 =
   60 * 60 * 1000;
 
 /* =========================================================
@@ -15530,6 +15554,52 @@ function chainstackLiveGetLogs403CoolingV638(
   );
 }
 
+function markChainstackBackwardExactGetLogs403V639(
+  state,
+  error = null
+) {
+  const service =
+    discoveryService(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  service.chainstackBackwardExactGetLogs403LastAtV639 =
+    now;
+
+  service.chainstackBackwardExactGetLogs403CooldownUntilV639 =
+    now +
+    CHAINSTACK_BACKWARD_EXACT_GETLOGS_403_COOLDOWN_MS_V639;
+
+  service.chainstackBackwardExactGetLogs403TotalV639 =
+    safeNumber(
+      service.chainstackBackwardExactGetLogs403TotalV639
+    ) + 1;
+
+  service.chainstackBackwardExactGetLogs403LastErrorV639 =
+    error
+      ? String(error)
+      : "HTTP_403";
+}
+
+function chainstackBackwardExactGetLogs403CoolingV639(
+  state
+) {
+  const service =
+    discoveryService(
+      state
+    );
+
+  return (
+    safeNumber(
+      service.chainstackBackwardExactGetLogs403CooldownUntilV639
+    ) >
+    Date.now()
+  );
+}
+
 function observeLiveGetLogsProviderFailureV638(
   state,
   provider,
@@ -15760,6 +15830,25 @@ function liveDiscoveryTelemetryV435(
       ),
     chainstackLiveGetLogs403LastErrorV638:
       service.chainstackLiveGetLogs403LastErrorV638 ||
+      null,
+    chainstackBackwardExactGetLogs403CoolingV639:
+      chainstackBackwardExactGetLogs403CoolingV639(
+        state
+      ),
+    chainstackBackwardExactGetLogs403CooldownUntilV639:
+      safeNumber(
+        service.chainstackBackwardExactGetLogs403CooldownUntilV639
+      ) || null,
+    chainstackBackwardExactGetLogs403LastAtV639:
+      safeNumber(
+        service.chainstackBackwardExactGetLogs403LastAtV639
+      ) || null,
+    chainstackBackwardExactGetLogs403TotalV639:
+      safeNumber(
+        service.chainstackBackwardExactGetLogs403TotalV639
+      ),
+    chainstackBackwardExactGetLogs403LastErrorV639:
+      service.chainstackBackwardExactGetLogs403LastErrorV639 ||
       null,
     actualSuccessfulRangeProviders:
       byProvider,
@@ -18686,16 +18775,6 @@ async function getInitializeForPoolRange(
     },
     {
       provider:
-        "CHAINSTACK",
-      safeBlocks:
-        VALIDATION_CLOUD_UNKNOWN_POOL_RANGE_BLOCKS_V630,
-      genericSafe:
-        VALIDATION_CLOUD_UNKNOWN_POOL_RANGE_BLOCKS_V630,
-      fixedBoundedRangeV634:
-        true
-    },
-    {
-      provider:
         "ROBINHOOD_PUBLIC_RPC",
       safeBlocks:
         safeChunks.publicChunkBlocks,
@@ -18709,6 +18788,16 @@ async function getInitializeForPoolRange(
         safeChunks.alchemyChunkBlocks,
       genericSafe:
         safeChunks.alchemyGenericSafe
+    },
+    {
+      provider:
+        "CHAINSTACK",
+      safeBlocks:
+        VALIDATION_CLOUD_UNKNOWN_POOL_RANGE_BLOCKS_V630,
+      genericSafe:
+        VALIDATION_CLOUD_UNKNOWN_POOL_RANGE_BLOCKS_V630,
+      fixedBoundedRangeV639:
+        true
     }
   ];
 
@@ -18841,6 +18930,18 @@ async function getInitializeForPoolRange(
           );
         }
 
+        if (
+          provider === "CHAINSTACK" &&
+          isHttp403V638(
+            message
+          )
+        ) {
+          markChainstackBackwardExactGetLogs403V639(
+            state,
+            message
+          );
+        }
+
         return {
           logs: [],
           provider,
@@ -18866,6 +18967,15 @@ async function getInitializeForPoolRange(
   ) {
     const provider =
       option.provider;
+
+    if (
+      provider === "CHAINSTACK" &&
+      chainstackBackwardExactGetLogs403CoolingV639(
+        state
+      )
+    ) {
+      continue;
+    }
 
     if (
       discoveryProviderCooling(
@@ -20738,10 +20848,19 @@ async function resolvePersistentUnknownPools(
         "METHOD_SPECIFIC_ETH_GETBLOCKBYNUMBER_HTTP_403",
       exactRangeFallbackOrderV634: [
         "VALIDATION_CLOUD",
-        "CHAINSTACK",
         "ROBINHOOD_PUBLIC_RPC",
-        "ALCHEMY"
+        "ALCHEMY",
+        "CHAINSTACK"
       ],
+      backwardExactMethodRoutingV639: true,
+      backwardExactProviderOrderV639: [
+        "VALIDATION_CLOUD",
+        "ROBINHOOD_PUBLIC_RPC",
+        "ALCHEMY",
+        "CHAINSTACK"
+      ],
+      chainstackBackwardExact403CooldownMinutesV639: 60,
+      chainstackBackwardExact403MethodOnlyV639: true,
       extraHardRequestCeiling: 0,
       status: "ARMED"
 
