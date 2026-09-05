@@ -1,4 +1,24 @@
 /**
+ * Robinhood Chain Meme Hunter — V647
+ * AUTHORITATIVE RUNTIME VERSION: V647
+ *
+ * V647 DEFERRED LIVE-RANGE STATE REFERENCE FIX
+ * - builds directly forward from V646;
+ * - fixes a stale-object-reference bug in the V640 deferred range helpers;
+ * - persistDeferredLiveRangeV640() now reads the existing deferred range first,
+ *   then reacquires the authoritative discoveryRpc service object before writing;
+ * - advanceDeferredLiveRangeV640() does the same before mutating/clearing state;
+ * - this ensures a terminal live-range failure actually persists
+ *   state.services.discoveryRpc.deferredLiveRangeV640 instead of writing to an
+ *   object reference that may have been replaced by discoveryService();
+ * - V646 terminal-429/no-provider persistence paths are preserved;
+ * - V640 retry-oldest-first behaviour is preserved;
+ * - zero extra provider requests;
+ * - no scoring, Momentum, qualification, Telegram threshold, launch-source
+ *   proof, cadence, KV namespace, provider routing, or hard 42-request ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V646
  * AUTHORITATIVE RUNTIME VERSION: V646
  *
@@ -5065,7 +5085,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V646";
+const VERSION = "V647";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -16040,6 +16060,12 @@ function liveDiscoveryTelemetryV435(
       safeNumber(
         service.deferredLiveRangeLastClearedAtV640
       ) || null,
+    deferredLiveRangeLastWriteVerifiedV647:
+      service.deferredLiveRangeLastWriteVerifiedV647 ||
+      null,
+    deferredLiveRangeLastAdvanceActionV647:
+      service.deferredLiveRangeLastAdvanceActionV647 ||
+      null,
     actualSuccessfulRangeProviders:
       byProvider,
     lastLiveProvider:
@@ -28056,11 +28082,6 @@ function persistDeferredLiveRangeV640(
   reason = null,
   lastError = null
 ) {
-  const service =
-    discoveryService(
-      state
-    );
-
   const from =
     safeNumber(
       fromBlock
@@ -28080,8 +28101,20 @@ function persistDeferredLiveRangeV640(
     );
   }
 
+  /*
+   * V647: IMPORTANT ORDERING.
+   * deferredLiveRangeV640() may call discoveryService(state), which can
+   * normalise/reassign state.services.discoveryRpc. Therefore we MUST read the
+   * existing range first and only then reacquire the authoritative service
+   * reference used for mutation.
+   */
   const existing =
     deferredLiveRangeV640(
+      state
+    );
+
+  const service =
+    discoveryService(
       state
     );
 
@@ -28126,20 +28159,34 @@ function persistDeferredLiveRangeV640(
   service.deferredLiveRangeLastSavedAtV640 =
     now;
 
+  service.deferredLiveRangeLastWriteVerifiedV647 = {
+    fromBlock:
+      safeNumber(
+        service.deferredLiveRangeV640
+          ?.fromBlock
+      ),
+    toBlock:
+      safeNumber(
+        service.deferredLiveRangeV640
+          ?.toBlock
+      ),
+    at:
+      now
+  };
+
   return deferredLiveRangeV640(
     state
   );
 }
 
+
 function advanceDeferredLiveRangeV640(
   state,
   processedThrough
 ) {
-  const service =
-    discoveryService(
-      state
-    );
-
+  /*
+   * V647: read first, then reacquire service for mutation.
+   */
   const current =
     deferredLiveRangeV640(
       state
@@ -28148,6 +28195,11 @@ function advanceDeferredLiveRangeV640(
   if (!current) {
     return null;
   }
+
+  const service =
+    discoveryService(
+      state
+    );
 
   const through =
     safeNumber(
@@ -28174,6 +28226,9 @@ function advanceDeferredLiveRangeV640(
     service.deferredLiveRangeLastClearedAtV640 =
       Date.now();
 
+    service.deferredLiveRangeLastAdvanceActionV647 =
+      "CLEARED_AFTER_SUCCESSFUL_PROCESSING";
+
     return null;
   }
 
@@ -28185,10 +28240,14 @@ function advanceDeferredLiveRangeV640(
       Date.now()
   };
 
+  service.deferredLiveRangeLastAdvanceActionV647 =
+    "ADVANCED_AFTER_SUCCESSFUL_PROCESSING";
+
   return deferredLiveRangeV640(
     state
   );
 }
+
 
 function allLiveProvidersUnavailableV640(
   env,
@@ -28932,6 +28991,10 @@ async function scanLiveRange(
         true,
       persistsWhenNoAlternateProviderV646:
         true,
+      authoritativeServiceReferenceFixV647:
+        true,
+      mutationOrderV647:
+        "READ_EXISTING_THEN_REACQUIRE_DISCOVERY_SERVICE",
       retriedDeferredFirst:
         Boolean(
           activeDeferredAtStartV640
@@ -87137,6 +87200,17 @@ for (
 
     currentLiveMeasurementTelemetryV645:
       currentLiveMeasurementCoverageV645Result,
+
+    deferredStateReferenceFixV647: {
+      enabled: true,
+      staleReferenceBugFixed: true,
+      writeOrder:
+        "READ_EXISTING_THEN_REACQUIRE_AUTHORITATIVE_SERVICE",
+      appliesToPersist: true,
+      appliesToAdvanceAndClear: true,
+      extraRequestsAdded: 0,
+      hardExternalRequestLimitPreserved: 42
+    },
 
     deferredLiveRangeTerminal429FixV646: {
       enabled: true,
