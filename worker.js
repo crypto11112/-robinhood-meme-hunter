@@ -1,4 +1,29 @@
 /**
+ * Robinhood Chain Meme Hunter — V641
+ * AUTHORITATIVE RUNTIME VERSION: V641
+ *
+ * V641 ZERO-REQUEST OBSERVED BLOCK-HASH HARVEST
+ * - builds directly forward from V640;
+ * - NEW: unknown V4 pool tracking harvests blockHash directly from the Swap /
+ *   ModifyLiquidity log that established firstActiveBlock;
+ * - this is already-delivered chain evidence: ZERO additional RPC requests;
+ * - when firstActiveBlock is discovered earlier than previously known, its
+ *   corresponding observed blockHash replaces the later cached hash;
+ * - when the existing firstActiveBlock is observed again, a missing hash can
+ *   be repaired from that log;
+ * - V637 can therefore skip eth_getBlockByNumber and go directly to exact
+ *   blockHash eth_getLogs in the SAME scan after observeUnknownPools();
+ * - hashes are accepted only as exact 32-byte 0x-prefixed values and only when
+ *   the log blockNumber exactly equals firstActiveBlock;
+ * - no pool currency/token identity is inferred from activity; exact Initialize
+ *   proof remains mandatory;
+ * - V640 deferred live-range recovery and all V630-V639 provider protections
+ *   remain intact;
+ * - no scoring, Momentum, qualification, Telegram threshold, launch-source
+ *   proof, cadence, KV namespace, or hard 42-request ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V640
  * AUTHORITATIVE RUNTIME VERSION: V640
  *
@@ -4913,7 +4938,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V640";
+const VERSION = "V641";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -16456,6 +16481,106 @@ function ensureUnknownPoolState(state) {
   return state.unknownPools;
 }
 
+function validObservedBlockHashV641(
+  value
+) {
+  return /^0x[0-9a-f]{64}$/.test(
+    String(
+      normalize(value) ||
+      ""
+    )
+  );
+}
+
+function recordObservedUnknownPoolBlockHashV641(
+  state,
+  {
+    poolId,
+    blockNumber,
+    blockHash,
+    firstActiveBlock,
+    previousFirstActiveBlock,
+    previousHash
+  }
+) {
+  const service =
+    discoveryService(
+      state
+    );
+
+  const normalizedHash =
+    normalize(
+      blockHash
+    );
+
+  if (
+    !validObservedBlockHashV641(
+      normalizedHash
+    ) ||
+    safeNumber(blockNumber) <= 0 ||
+    safeNumber(firstActiveBlock) <= 0 ||
+    safeNumber(blockNumber) !==
+      safeNumber(firstActiveBlock)
+  ) {
+    return {
+      accepted: false,
+      blockHash: null,
+      source: null
+    };
+  }
+
+  const previousValid =
+    validObservedBlockHashV641(
+      previousHash
+    );
+
+  const movedEarlier =
+    safeNumber(
+      previousFirstActiveBlock
+    ) > 0 &&
+    safeNumber(firstActiveBlock) <
+      safeNumber(
+        previousFirstActiveBlock
+      );
+
+  const repairedMissing =
+    !previousValid;
+
+  service.observedUnknownPoolBlockHashHarvestsV641 =
+    safeNumber(
+      service.observedUnknownPoolBlockHashHarvestsV641
+    ) + 1;
+
+  if (movedEarlier) {
+    service.observedUnknownPoolEarlierBlockHashReplacementsV641 =
+      safeNumber(
+        service.observedUnknownPoolEarlierBlockHashReplacementsV641
+      ) + 1;
+  }
+
+  if (repairedMissing) {
+    service.observedUnknownPoolMissingHashRepairsV641 =
+      safeNumber(
+        service.observedUnknownPoolMissingHashRepairsV641
+      ) + 1;
+  }
+
+  service.observedUnknownPoolBlockHashLastAtV641 =
+    Date.now();
+
+  service.observedUnknownPoolBlockHashLastPoolIdV641 =
+    normalize(poolId) ||
+    null;
+
+  return {
+    accepted: true,
+    blockHash:
+      normalizedHash,
+    source:
+      "OBSERVED_FIRST_ACTIVITY_LOG_BLOCKHASH_V641"
+  };
+}
+
 function observeUnknownPools(
   state,
   logs,
@@ -16534,6 +16659,22 @@ function observeUnknownPools(
               ? blockNumber
               : null
           );
+
+    const observedHashV641 =
+      recordObservedUnknownPoolBlockHashV641(
+        state,
+        {
+          poolId,
+          blockNumber,
+          blockHash:
+            log?.blockHash,
+          firstActiveBlock,
+          previousFirstActiveBlock:
+            priorFirst,
+          previousHash:
+            previous.firstActiveBlockHashV637
+        }
+      );
 
     const isSwap =
       topic0 === SWAP_TOPIC;
@@ -16620,38 +16761,59 @@ function observeUnknownPools(
           previous.lastResolvedSearchDistance
         ) || null,
       firstActiveBlockHashV637:
-        (
-          safeNumber(
-            previous.firstActiveBlockHashBlockV637
-          ) === safeNumber(firstActiveBlock)
-        )
-          ? (
-              normalize(
-                previous.firstActiveBlockHashV637
-              ) || null
-            )
-          : null,
+        observedHashV641.accepted
+          ? observedHashV641.blockHash
+          : (
+              safeNumber(
+                previous.firstActiveBlockHashBlockV637
+              ) === safeNumber(firstActiveBlock)
+                ? (
+                    normalize(
+                      previous.firstActiveBlockHashV637
+                    ) || null
+                  )
+                : null
+            ),
       firstActiveBlockHashBlockV637:
-        (
-          safeNumber(
-            previous.firstActiveBlockHashBlockV637
-          ) === safeNumber(firstActiveBlock)
-        )
+        observedHashV641.accepted
           ? safeNumber(
-              previous.firstActiveBlockHashBlockV637
+              firstActiveBlock
             )
-          : null,
+          : (
+              safeNumber(
+                previous.firstActiveBlockHashBlockV637
+              ) === safeNumber(firstActiveBlock)
+                ? safeNumber(
+                    previous.firstActiveBlockHashBlockV637
+                  )
+                : null
+            ),
       firstActiveBlockHashAtV637:
-        (
-          safeNumber(
-            previous.firstActiveBlockHashBlockV637
-          ) === safeNumber(firstActiveBlock)
-        )
-          ? (
-              previous.firstActiveBlockHashAtV637 ||
-              null
-            )
-          : null,
+        observedHashV641.accepted
+          ? now
+          : (
+              safeNumber(
+                previous.firstActiveBlockHashBlockV637
+              ) === safeNumber(firstActiveBlock)
+                ? (
+                    previous.firstActiveBlockHashAtV637 ||
+                    null
+                  )
+                : null
+            ),
+      firstActiveBlockHashSourceV641:
+        observedHashV641.accepted
+          ? observedHashV641.source
+          : (
+              safeNumber(
+                previous.firstActiveBlockHashBlockV637
+              ) === safeNumber(firstActiveBlock)
+                ? (
+                    previous.firstActiveBlockHashSourceV641 ||
+                    null
+                  )
+                : null
+            ),
       firstActiveCheckpointBlockV634:
         safeNumber(
           previous.firstActiveCheckpointBlockV634
@@ -20874,6 +21036,11 @@ async function resolvePersistentUnknownPools(
       atomicCheckpointPairRequestsV635: 2,
       atomicCheckpointMaxExistingAllowanceV635: 4,
       persistentBlockHashReuseV637: true,
+      observedActivityBlockHashHarvestV641: true,
+      observedActivityBlockHashSourceV641:
+        "NORMAL_DISCOVERY_SWAP_OR_MODIFY_LIQUIDITY_LOG",
+      observedActivityBlockHashExtraRequestsV641: 0,
+      exactInitializeProofStillRequiredV641: true,
       blockHashReuseSkipsEthGetBlockByNumberV637: true,
       invalidatesWhenFirstActiveBlockChangesV637: true,
       atomicCheckpointProviderOrderV635: [
@@ -20914,6 +21081,23 @@ async function resolvePersistentUnknownPools(
       maxCheckpointAllowanceV635: 4,
       sameProviderCompletionRequiredV635: true,
       persistentBlockHashReuseV637: true,
+      observedFirstActivityBlockHashHarvestV641: true,
+      observedBlockHashZeroExtraRequestsV641: true,
+      observedBlockHashHarvestsTotalV641:
+        safeNumber(
+          discoveryService(state)
+            .observedUnknownPoolBlockHashHarvestsV641
+        ),
+      observedEarlierBlockHashReplacementsTotalV641:
+        safeNumber(
+          discoveryService(state)
+            .observedUnknownPoolEarlierBlockHashReplacementsV641
+        ),
+      observedMissingHashRepairsTotalV641:
+        safeNumber(
+          discoveryService(state)
+            .observedUnknownPoolMissingHashRepairsV641
+        ),
       cachedBlockHashHitsV637: 0,
       cachedBlockHashDirectLogAttemptsV637: 0,
       cachedBlockHashRequestsSavedV637: 0,
