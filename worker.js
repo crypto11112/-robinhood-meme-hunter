@@ -1,4 +1,24 @@
 /**
+ * Robinhood Chain Meme Hunter — V646
+ * AUTHORITATIVE RUNTIME VERSION: V646
+ *
+ * V646 DEFERRED LIVE-RANGE 429 PERSISTENCE FIX
+ * - builds directly forward from V645;
+ * - fixes the live-scan terminal 429 path so an unprocessed live chunk is always
+ *   persisted into V640 deferredLiveRangeV640 before the scan exits;
+ * - covers the case where the final usable provider returns HTTP 429 after
+ *   alternate-provider recovery has been exhausted;
+ * - also persists the remaining live range if a provider-selection branch exits
+ *   with no usable provider after cooldown/routing updates;
+ * - V640 retry-first behaviour remains unchanged: the next scheduled scan starts
+ *   from the oldest deferred block and clears only after successful processing;
+ * - no extra provider requests are introduced;
+ * - V645 measurement-only telemetry is preserved;
+ * - no scoring, Momentum, qualification, Telegram threshold, launch-source
+ *   proof, cadence, KV namespace, provider quotas, or hard 42-request ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V645
  * AUTHORITATIVE RUNTIME VERSION: V645
  *
@@ -5045,7 +5065,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V645";
+const VERSION = "V646";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -28378,12 +28398,12 @@ async function scanLiveRange(
         state,
         Number(cursor),
         Number(effectiveTo),
-        "ALL_LIVE_PROVIDERS_UNAVAILABLE_OR_COOLING_V640",
+        "ALL_LIVE_PROVIDERS_UNAVAILABLE_OR_COOLING_V646",
         "DISCOVERY_PROVIDERS_COOLING_DOWN"
       );
 
       error =
-        "LIVE_RANGE_DEFERRED_ALL_PROVIDERS_UNAVAILABLE_V640";
+        "LIVE_RANGE_DEFERRED_ALL_PROVIDERS_UNAVAILABLE_V646";
 
       break;
     }
@@ -28855,7 +28875,9 @@ async function scanLiveRange(
       state,
       Number(cursor),
       Number(effectiveTo),
-      "LIVE_RANGE_PROVIDER_FAILURE_V640",
+      is429(error)
+        ? "LIVE_RANGE_TERMINAL_429_DEFERRED_V646"
+        : "LIVE_RANGE_PROVIDER_FAILURE_V640",
       error
     );
 
@@ -28903,6 +28925,12 @@ async function scanLiveRange(
 
     deferredRecoveryV640: {
       enabled:
+        true,
+      terminal429PersistenceFixV646:
+        true,
+      persistsRemainingRangeOnTerminal429V646:
+        true,
+      persistsWhenNoAlternateProviderV646:
         true,
       retriedDeferredFirst:
         Boolean(
@@ -87109,6 +87137,15 @@ for (
 
     currentLiveMeasurementTelemetryV645:
       currentLiveMeasurementCoverageV645Result,
+
+    deferredLiveRangeTerminal429FixV646: {
+      enabled: true,
+      persistOnFinalHttp429: true,
+      persistWhenNoAlternateProvider: true,
+      retryOldestDeferredFirst: true,
+      extraRequestsAdded: 0,
+      hardExternalRequestLimitPreserved: 42
+    },
 
     currentLiveMeasurementPolicyV645: {
       enabled: true,
