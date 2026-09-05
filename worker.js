@@ -1,4 +1,26 @@
 /**
+ * Robinhood Chain Meme Hunter — V648
+ * AUTHORITATIVE RUNTIME VERSION: V648
+ *
+ * V648 BITQUERY-QUOTA-INDEPENDENT UNKNOWN-POOL IDENTITY
+ * - builds directly forward from authoritative V647;
+ * - when the existing provider-wide Bitquery HTTP 402 cooldown is active,
+ *   the unknown-pool resolver bypasses BOTH Bitquery PoolId-first identity
+ *   paths before entering the candidate loop;
+ * - the same existing resolver allowance is immediately left available for
+ *   exact persisted blockHash proof, Blockscout exact Initialize recovery,
+ *   atomic RPC checkpoint and backward exact-range identity recovery;
+ * - Bitquery is NOT removed: after the existing one-hour V251 cooldown expires,
+ *   normal Bitquery recovery probing automatically resumes unchanged;
+ * - adds zero-request telemetry proving when provider-independent continuation
+ *   is active and which already-built identity paths remain available;
+ * - zero additional provider requests and no hard-ceiling increase;
+ * - preserves V647 deferred-live-range persistence, V645 measurements, scoring,
+ *   Momentum, qualification, Telegram thresholds, launch-source proof, cadence,
+ *   KV namespace/state key, provider cooldowns and the hard 42-request ceiling.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V647
  * AUTHORITATIVE RUNTIME VERSION: V647
  *
@@ -5085,7 +5107,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V647";
+const VERSION = "V648";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -20465,6 +20487,22 @@ async function resolvePersistentUnknownPools(
       ).trim()
     );
 
+  /*
+   * V648: Bitquery HTTP 402 is an account/quota state, not a reason to keep
+   * entering provider-specific identity branches. Detect it once at resolver
+   * entry and leave every existing resolver slot available for independent
+   * on-chain / indexed recovery. Bitquery automatically re-enters after the
+   * unchanged V251 cooldown expires.
+   */
+  const bitqueryQuotaCoolingForResolverV648 =
+    bitqueryConfiguredV190 &&
+    bitquery402CoolingV251(state);
+
+  const bitqueryQuotaTelemetryForResolverV648 =
+    bitqueryConfiguredV190
+      ? bitquery402CooldownTelemetryV251(state)
+      : null;
+
   const tracker =
     ensureUnknownPoolState(
       state
@@ -21160,6 +21198,31 @@ async function resolvePersistentUnknownPools(
     requestLimitReason:
       dynamicRequestBudget
         .reason,
+    providerIndependentIdentityV648: {
+      enabled: true,
+      bitqueryConfigured:
+        bitqueryConfiguredV190,
+      bitqueryQuotaCooling:
+        bitqueryQuotaCoolingForResolverV648,
+      bitqueryBypassedForQuota:
+        bitqueryQuotaCoolingForResolverV648,
+      bitqueryQuotaV251:
+        bitqueryQuotaTelemetryForResolverV648,
+      resolverAllowancePreserved:
+        bitqueryQuotaCoolingForResolverV648,
+      extraExternalRequests: 0,
+      fallbackOrder: [
+        "PERSISTED_EXACT_BLOCKHASH_RPC",
+        "BLOCKSCOUT_EXACT_INITIALIZE",
+        "ATOMIC_RPC_FIRST_ACTIVE_CHECKPOINT",
+        "BACKWARD_EXACT_RANGE_RPC"
+      ],
+      identityGuessing: false,
+      status:
+        bitqueryQuotaCoolingForResolverV648
+          ? "BITQUERY_402_BYPASSED_CONTINUING_INDEPENDENTLY_V648"
+          : "BITQUERY_AVAILABLE_NORMAL_ROUTING_V648"
+    },
     scheduler:
       "BALANCED_BREADTH_DEPTH_V108_HASH_AWARE_V642",
     hashAwareResolverPriorityV642:
@@ -21290,7 +21353,10 @@ async function resolvePersistentUnknownPools(
       bitqueryAttemptForcedToCurrentLivePool:
         Boolean(
           bitqueryPriorityPoolV191
-        ),
+        ) &&
+        !bitqueryQuotaCoolingForResolverV648,
+      bitqueryQuotaBypassV648:
+        bitqueryQuotaCoolingForResolverV648,
       sameScanReplayAlreadyPresentFromV179:
         true,
       extraExternalRequests:
@@ -21323,9 +21389,11 @@ async function resolvePersistentUnknownPools(
       transactionHash: null,
       httpStatus: null,
       status:
-        bitqueryConfiguredV190
-          ? "NOT_REACHED"
-          : "NOT_CONFIGURED",
+        !bitqueryConfiguredV190
+          ? "NOT_CONFIGURED"
+          : bitqueryQuotaCoolingForResolverV648
+            ? "BYPASSED_HTTP_402_COOLDOWN_V648"
+            : "NOT_REACHED",
       error: null,
       exactPoolIdRequired: true,
       currencyOrdering:
@@ -21363,9 +21431,11 @@ async function resolvePersistentUnknownPools(
       transactionHash: null,
       httpStatus: null,
       status:
-        bitqueryConfiguredV190
-          ? "NOT_REACHED"
-          : "NOT_CONFIGURED",
+        !bitqueryConfiguredV190
+          ? "NOT_CONFIGURED"
+          : bitqueryQuotaCoolingForResolverV648
+            ? "BYPASSED_HTTP_402_COOLDOWN_V648"
+            : "NOT_REACHED",
       error: null,
       fallbackToLegacyResolver: false,
       exactTopicPoolIdLookup: true,
@@ -21621,6 +21691,7 @@ async function resolvePersistentUnknownPools(
           output.bitqueryDexPoolEventsV199
             .maxAttemptsPerRun &&
       bitqueryConfiguredV190 &&
+      !bitqueryQuotaCoolingForResolverV648 &&
       livePriorityPoolIdsV191.has(
         normalize(poolId)
       ) &&
@@ -21796,6 +21867,7 @@ async function resolvePersistentUnknownPools(
           output.bitqueryInitializeV190
             .maxAttemptsPerRun &&
       bitqueryConfiguredV190 &&
+      !bitqueryQuotaCoolingForResolverV648 &&
       livePriorityPoolIdsV191.has(
         normalize(poolId)
       ) &&
