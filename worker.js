@@ -1,4 +1,33 @@
 /**
+ * Robinhood Chain Meme Hunter — V645
+ * AUTHORITATIVE RUNTIME VERSION: V645
+ *
+ * V645 CURRENT-LIVE MEASUREMENT TELEMETRY
+ * - builds directly forward from V644;
+ * - exposes the already-built V411 measurement signals on every analysed
+ *   current/live candidate, not only after a successful Telegram call;
+ * - measurements include:
+ *   verified 15m unique buyers + repeat-buyer ratio where exact trader-wallet
+ *   evidence exists, holder-growth velocity, liquidity growth, 1h volume
+ *   acceleration, 1h transaction acceleration and observed exact-USD trade-size
+ *   distribution;
+ * - ZERO additional provider requests: all fields reuse candidate/state evidence
+ *   already collected by the existing scanner;
+ * - current/live classification is evidence-only: liveDiscovery,
+ *   newlyDiscovered, or the existing V621 current-live verified-launch set;
+ * - missing evidence remains UNVERIFIED; generic V4 swaps never fabricate
+ *   end-user buyer identity;
+ * - successful Telegram calls still freeze a fresh V411 snapshot at successful
+ *   delivery time exactly as before; V645 scan telemetry does not replace or
+ *   backfill frozen entry snapshots;
+ * - adds scan-level coverage counts so we can measure how often each signal is
+ *   actually verified before touching Opportunity scoring;
+ * - measurement-only: no scoring, Momentum, qualification, Telegram threshold,
+ *   launch-source proof, cadence, KV namespace, provider order, or hard
+ *   42-request ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V644
  * AUTHORITATIVE RUNTIME VERSION: V644
  *
@@ -5016,7 +5045,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V644";
+const VERSION = "V645";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -71478,6 +71507,208 @@ function measurementSignalsV411(candidate, state, capturedAt = Date.now()) {
   };
 }
 
+function currentLiveMeasurementSignalsV645(
+  candidate,
+  state,
+  currentLiveVerifiedLaunchTokensV621,
+  capturedAt = Date.now()
+) {
+  const address =
+    normalize(
+      candidate?.address
+    );
+
+  const liveEvidence = {
+    liveDiscovery:
+      candidate?.liveDiscovery === true,
+    newlyDiscovered:
+      candidate?.newlyDiscovered === true,
+    currentLiveVerifiedLaunchV621:
+      Boolean(
+        address &&
+        currentLiveVerifiedLaunchTokensV621?.has(
+          address
+        )
+      )
+  };
+
+  const eligible =
+    liveEvidence.liveDiscovery ||
+    liveEvidence.newlyDiscovered ||
+    liveEvidence.currentLiveVerifiedLaunchV621;
+
+  if (!eligible) {
+    return null;
+  }
+
+  const signals =
+    measurementSignalsV411(
+      candidate,
+      state,
+      capturedAt
+    );
+
+  return {
+    version: "V645",
+    measurementOnly: true,
+    affectsScoring: false,
+    capturedAt:
+      safeNumber(
+        signals?.capturedAt
+      ) ||
+      safeNumber(
+        capturedAt
+      ) ||
+      Date.now(),
+    currentLiveEvidence:
+      liveEvidence,
+    signals
+  };
+}
+
+function currentLiveMeasurementCoverageV645(
+  candidates
+) {
+  const rows =
+    (Array.isArray(candidates)
+      ? candidates
+      : [])
+      .map(
+        candidate => ({
+          candidate,
+          measurement:
+            candidate
+              ?.currentLiveMeasurementSignalsV645
+        })
+      )
+      .filter(
+        row =>
+          row.measurement &&
+          row.measurement
+            ?.measurementOnly === true
+      );
+
+  const verifiedCount =
+    selector =>
+      rows.filter(
+        row =>
+          selector(
+            row.measurement?.signals
+          )?.verified === true
+      ).length;
+
+  const sample =
+    rows
+      .map(
+        row => {
+          const candidate =
+            row.candidate;
+
+          const signals =
+            row.measurement
+              ?.signals ||
+            {};
+
+          return {
+            address:
+              normalize(
+                candidate?.address
+              ),
+            symbol:
+              candidate?.symbol ||
+              candidate?.metadata?.symbol ||
+              null,
+            opportunity:
+              safeNumber(
+                candidate?.opportunity?.score
+              ),
+            currentLiveEvidence:
+              row.measurement
+                ?.currentLiveEvidence ||
+              null,
+            holderGrowth:
+              signals?.holderGrowth ||
+              null,
+            liquidityGrowth:
+              signals?.liquidityGrowth ||
+              null,
+            volumeAcceleration:
+              signals?.volumeAcceleration ||
+              null,
+            transactionAcceleration:
+              signals?.transactionAcceleration ||
+              null,
+            buyerBreadth:
+              signals?.buyerBreadth ||
+              null,
+            tradeSizeDistribution:
+              signals?.tradeSizeDistribution ||
+              null
+          };
+        }
+      )
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b.opportunity
+          ) -
+          safeNumber(
+            a.opportunity
+          )
+      )
+      .slice(
+        0,
+        12
+      );
+
+  return {
+    version: "V645",
+    measurementOnly: true,
+    affectsScoring: false,
+    externalRequestsAdded: 0,
+    currentLiveAnalysed:
+      rows.length,
+    verifiedCoverage: {
+      holderGrowthVelocity:
+        verifiedCount(
+          signals =>
+            signals?.holderGrowth
+        ),
+      liquidityGrowth:
+        verifiedCount(
+          signals =>
+            signals?.liquidityGrowth
+        ),
+      volumeAcceleration1h:
+        verifiedCount(
+          signals =>
+            signals?.volumeAcceleration
+        ),
+      transactionAcceleration1h:
+        verifiedCount(
+          signals =>
+            signals?.transactionAcceleration
+        ),
+      uniqueBuyers15mAndRepeatRatio:
+        verifiedCount(
+          signals =>
+            signals?.buyerBreadth
+        ),
+      exactObservedTradeSizeDistribution15m:
+        verifiedCount(
+          signals =>
+            signals?.tradeSizeDistribution
+        )
+    },
+    buyerIdentityRule:
+      "EXACT_TRADER_WALLET_REQUIRED_GENERIC_V4_UNVERIFIED",
+    frozenCallSnapshotsChanged:
+      false,
+    sample
+  };
+}
+
+
 function buildEntrySignalSnapshotV309(candidate, capturedAt) {
   const market = candidate?.market;
   const holders = candidate?.holders;
@@ -78190,6 +78421,18 @@ for (
         .currentQualifiedTargetsFound++;
     }
 
+    /*
+     * V645: measurement-only current/live telemetry. This reads evidence the
+     * scanner already has and cannot alter qualification/scoring.
+     */
+    candidate.currentLiveMeasurementSignalsV645 =
+      currentLiveMeasurementSignalsV645(
+        candidate,
+        state,
+        currentLiveVerifiedLaunchTokensV621,
+        Date.now()
+      );
+
     candidates.push(
       candidate
     );
@@ -78223,6 +78466,11 @@ for (
         a.analysisPriority
       )
   );
+
+  const currentLiveMeasurementCoverageV645Result =
+    currentLiveMeasurementCoverageV645(
+      candidates
+    );
 
   const holderProviderTelemetryV144 =
     candidates.map(
@@ -81342,9 +81590,11 @@ for (
       candidate.telegramDeliveryProofV412 =
         telegramDeliveryProofV412(result, env.TELEGRAM_CHAT_ID);
 
-      // V411 measurement-only entry telemetry. This reuses evidence already in
-      // state/candidate and performs zero external requests. It cannot change
-      // qualification because Telegram has already succeeded at this point.
+      // V411/V645 measurement-only entry telemetry. V645 may already expose a
+      // pre-alert current/live measurement for diagnostics, but successful calls
+      // intentionally recompute V411 HERE so the frozen entry snapshot remains
+      // tied to successful Telegram delivery time. Zero external requests and
+      // no qualification/scoring change.
       candidate.measurementSignalsV411 = measurementSignalsV411(
         candidate,
         state,
@@ -86855,6 +87105,32 @@ for (
         ),
       verifiedUsdCalculationChanged: false,
       candidates: telegramVerifiedUsdObservabilityV213
+    },
+
+    currentLiveMeasurementTelemetryV645:
+      currentLiveMeasurementCoverageV645Result,
+
+    currentLiveMeasurementPolicyV645: {
+      enabled: true,
+      measurementOnly: true,
+      affectsScoring: false,
+      externalRequestsAdded: 0,
+      signals: [
+        "HOLDER_GROWTH_VELOCITY",
+        "LIQUIDITY_GROWTH",
+        "VOLUME_ACCELERATION_1H",
+        "TRANSACTION_ACCELERATION_1H",
+        "UNIQUE_BUYERS_15M_WHEN_EXACT_TRADER_VERIFIED",
+        "REPEAT_BUYER_RATIO_15M_WHEN_EXACT_TRADER_VERIFIED",
+        "OBSERVED_EXACT_USD_TRADE_SIZE_DISTRIBUTION_15M"
+      ],
+      genericV4BuyerIdentityInferred: false,
+      frozenSuccessfulCallSnapshotBehaviourChanged: false,
+      scoringChanged: false,
+      momentumChanged: false,
+      qualificationChanged: false,
+      telegramThresholdsChanged: false,
+      hardExternalRequestLimitPreserved: 42
     },
 
     scannerFunnelV415: {
