@@ -1,4 +1,30 @@
 /**
+ * Robinhood Chain Meme Hunter — V644
+ * AUTHORITATIVE RUNTIME VERSION: V644
+ *
+ * V644 FULL TIER-1 RESOLVER ALLOWANCE
+ * - builds directly forward from V643;
+ * - V643 proved the dynamic resolver limit can be 4 but only 3 Tier-1 direct
+ *   checks ran because legacy Bitquery current-live lookup could consume one
+ *   resolver request before the cheaper exact blockHash path;
+ * - NEW: for CURRENT-LIVE + EXACT FIRST-ACTIVE BLOCK HASH candidates, the
+ *   one-request direct exact blockHash eth_getLogs checkpoint now runs BEFORE
+ *   Bitquery and owns that candidate's resolver slot;
+ * - Bitquery remains available for current-live candidates WITHOUT a usable
+ *   exact first-active block hash and for all existing non-Tier-1 paths;
+ * - this does not remove Bitquery and does not add requests: it simply spends
+ *   scarce resolver capacity on the cheapest exact proof first;
+ * - V643 may therefore use the full existing resolver allowance (e.g. 4/4
+ *   one-request Tier-1 checks) when enough hash-ready live pools exist;
+ * - EMPTY results still memoize immediately; RESOLVED results still register
+ *   exact pool identity immediately;
+ * - preserves V640 deferred recovery, V641 block-hash harvesting, V642
+ *   hash-aware ordering and V643 multi-Tier-1 batching;
+ * - no scoring, Momentum, qualification, Telegram threshold, launch-source
+ *   proof, cadence, KV namespace, or hard 42-request ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V643
  * AUTHORITATIVE RUNTIME VERSION: V643
  *
@@ -4990,7 +5016,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V643";
+const VERSION = "V644";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -21353,6 +21379,10 @@ async function resolvePersistentUnknownPools(
       observedBlockHashZeroExtraRequestsV641: true,
       hashAwareCandidatePriorityV642: true,
       multiTier1DirectCheckpointsV643: true,
+      tier1DirectBeforeBitqueryV644: true,
+      bitqueryBypassedForTier1HashReadyV644: 0,
+      tier1DirectFullAllowanceTargetV644:
+        resolverRequestLimit,
       tier1DirectMaxRequestsV643:
         resolverRequestLimit,
       tier1DirectAttemptsV643: 0,
@@ -21480,6 +21510,24 @@ async function resolvePersistentUnknownPools(
     output.attempted++;
 
     /*
+     * V644: classify the candidate BEFORE legacy Bitquery work.
+     * If this is a V642 Tier-1 candidate, V643's direct exact blockHash proof
+     * is cheaper (one request) and more deterministic than spending the same
+     * resolver slot on a provider lookup first.
+     */
+    const tierV644 =
+      unknownPoolResolverPriorityTierV642(
+        entry,
+        livePriorityPoolIdsV191
+      );
+
+    const tier1HashReadyV644 =
+      tierV644 === 1 &&
+      unknownPoolHasExactFirstActiveHashV642(
+        entry
+      );
+
+    /*
      * V199: CURRENT-live PoolId-first identity lookup.
      * DEXPoolEvents is realtime-only and keyed directly by the exact V4
      * PoolId. If it cannot resolve, preserve the proven V190 exact
@@ -21492,6 +21540,7 @@ async function resolvePersistentUnknownPools(
       null;
 
     if (
+      !tier1HashReadyV644 &&
       output.bitqueryDexPoolEventsV199
         .attempts <
           output.bitqueryDexPoolEventsV199
@@ -21665,6 +21714,7 @@ async function resolvePersistentUnknownPools(
      * when V199 did not resolve and request budget remains.
      */
     if (
+      !tier1HashReadyV644 &&
       !bitqueryResolvedPoolV190 &&
       output.bitqueryInitializeV190
         .attempts <
@@ -21905,16 +21955,17 @@ async function resolvePersistentUnknownPools(
      * and discovery-live budget still have room.
      */
     const tierV643 =
-      unknownPoolResolverPriorityTierV642(
-        entry,
-        livePriorityPoolIdsV191
-      );
+      tierV644;
 
     const tier1HashReadyV643 =
-      tierV643 === 1 &&
-      unknownPoolHasExactFirstActiveHashV642(
-        entry
-      );
+      tier1HashReadyV644;
+
+    if (
+      tier1HashReadyV643
+    ) {
+      output.rpcBlockHashInitializeV188
+        .bitqueryBypassedForTier1HashReadyV644 += 1;
+    }
 
     if (
       tier1HashReadyV643 &&
