@@ -1,4 +1,30 @@
 /**
+ * Robinhood Chain Meme Hunter — V642
+ * AUTHORITATIVE RUNTIME VERSION: V642
+ *
+ * V642 HASH-AWARE UNKNOWN-POOL RESOLVER PRIORITY
+ * - builds directly forward from V641;
+ * - resolver candidates are now tiered AFTER the existing V103/V108/V191
+ *   fairness/live scheduling, so working lane selection is preserved;
+ * - priority order:
+ *   1) current-live unknown + valid firstActiveBlock blockHash
+ *   2) current-live unknown without blockHash
+ *   3) older unresolved unknown + valid blockHash
+ *   4) older unresolved unknown without blockHash
+ * - "current-live" uses the existing V191 preferredLivePoolIds evidence from
+ *   the actual current live batch; no new age heuristic is introduced;
+ * - a valid hash must be the exact 32-byte hash stored for the same
+ *   firstActiveBlock;
+ * - this lets V637/V641's one-request exact blockHash eth_getLogs path consume
+ *   scarce resolver capacity before two-step block lookups where possible;
+ * - exact Initialize proof remains mandatory; activity never infers identity;
+ * - adds detailed priority telemetry with zero additional provider requests;
+ * - preserves V640 deferred recovery and all V630-V641 protections;
+ * - no scoring, Momentum, qualification, Telegram threshold, launch-source
+ *   proof, cadence, KV namespace, or hard 42-request ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V641
  * AUTHORITATIVE RUNTIME VERSION: V641
  *
@@ -4938,7 +4964,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V641";
+const VERSION = "V642";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -20162,6 +20188,124 @@ async function blockscoutWideInitializeForPoolV184(
   }
 }
 
+
+function unknownPoolHasExactFirstActiveHashV642(
+  entry
+) {
+  const firstActiveBlock =
+    safeNumber(
+      entry?.firstActiveBlock
+    );
+
+  const hashBlock =
+    safeNumber(
+      entry?.firstActiveBlockHashBlockV637
+    );
+
+  const hash =
+    normalize(
+      entry?.firstActiveBlockHashV637
+    );
+
+  return (
+    firstActiveBlock > 0 &&
+    hashBlock === firstActiveBlock &&
+    validObservedBlockHashV641(
+      hash
+    )
+  );
+}
+
+function unknownPoolResolverPriorityTierV642(
+  entry,
+  livePriorityPoolIdsV191
+) {
+  const poolId =
+    normalize(
+      entry?.poolId
+    );
+
+  const currentLive =
+    Boolean(
+      poolId &&
+      livePriorityPoolIdsV191?.has(
+        poolId
+      )
+    );
+
+  const hasHash =
+    unknownPoolHasExactFirstActiveHashV642(
+      entry
+    );
+
+  if (
+    currentLive &&
+    hasHash
+  ) {
+    return 1;
+  }
+
+  if (
+    currentLive
+  ) {
+    return 2;
+  }
+
+  if (hasHash) {
+    return 3;
+  }
+
+  return 4;
+}
+
+function applyHashAwareResolverPriorityV642(
+  candidates,
+  livePriorityPoolIdsV191
+) {
+  return (
+    Array.isArray(candidates)
+      ? candidates
+      : []
+  )
+    .map(
+      (item, index) => ({
+        item,
+        index,
+        tier:
+          unknownPoolResolverPriorityTierV642(
+            item?.entry,
+            livePriorityPoolIdsV191
+          )
+      })
+    )
+    .sort(
+      (a, b) => {
+        if (
+          a.tier !==
+          b.tier
+        ) {
+          return (
+            a.tier -
+            b.tier
+          );
+        }
+
+        /*
+         * Preserve the existing scheduler's exact order inside each tier.
+         * V642 only promotes cheaper/more actionable evidence classes.
+         */
+        return (
+          a.index -
+          b.index
+        );
+      }
+    )
+    .map(
+      row =>
+        row.item
+    );
+}
+
 async function resolvePersistentUnknownPools(
   env,
   state,
@@ -20771,6 +20915,96 @@ async function resolvePersistentUnknownPools(
     ];
   }
 
+  /*
+   * V642: final zero-request scheduling pass. Existing lane membership and
+   * within-tier order stay unchanged; only evidence tier moves candidates.
+   */
+  candidates =
+    applyHashAwareResolverPriorityV642(
+      candidates,
+      livePriorityPoolIdsV191
+    );
+
+  const resolverPriorityTelemetryV642 = {
+    eligibleCandidates:
+      eligibleCandidates.length,
+    eligibleWithExactFirstActiveHash:
+      eligibleCandidates.filter(
+        entry =>
+          unknownPoolHasExactFirstActiveHashV642(
+            entry
+          )
+      ).length,
+    currentLiveEligible:
+      eligibleCandidates.filter(
+        entry =>
+          livePriorityPoolIdsV191.has(
+            normalize(
+              entry?.poolId
+            )
+          )
+      ).length,
+    currentLiveWithExactFirstActiveHash:
+      eligibleCandidates.filter(
+        entry =>
+          livePriorityPoolIdsV191.has(
+            normalize(
+              entry?.poolId
+            )
+          ) &&
+          unknownPoolHasExactFirstActiveHashV642(
+            entry
+          )
+      ).length,
+    selectedCandidateCount:
+      candidates.length,
+    selectedTiers:
+      candidates.map(
+        item =>
+          unknownPoolResolverPriorityTierV642(
+            item?.entry,
+            livePriorityPoolIdsV191
+          )
+      ),
+    selectedPoolIds:
+      candidates.map(
+        item =>
+          normalize(
+            item?.entry?.poolId
+          )
+      ),
+    selectedHashReady:
+      candidates.map(
+        item =>
+          unknownPoolHasExactFirstActiveHashV642(
+            item?.entry
+          )
+      ),
+    selectedCurrentLive:
+      candidates.map(
+        item =>
+          livePriorityPoolIdsV191.has(
+            normalize(
+              item?.entry?.poolId
+            )
+          )
+      ),
+    selectedHashSources:
+      candidates.map(
+        item =>
+          item?.entry
+            ?.firstActiveBlockHashSourceV641 ||
+          (
+            unknownPoolHasExactFirstActiveHashV642(
+              item?.entry
+            )
+              ? "PERSISTED_BLOCK_HASH_V637"
+              : null
+          )
+      )
+  };
+
+
   const output = {
     attempted: 0,
     requestsUsed: 0,
@@ -20800,7 +21034,15 @@ async function resolvePersistentUnknownPools(
       dynamicRequestBudget
         .reason,
     scheduler:
-      "BALANCED_BREADTH_DEPTH_V108",
+      "BALANCED_BREADTH_DEPTH_V108_HASH_AWARE_V642",
+    hashAwareResolverPriorityV642:
+      resolverPriorityTelemetryV642,
+    resolverPriorityOrderV642: [
+      "CURRENT_LIVE_WITH_EXACT_BLOCK_HASH",
+      "CURRENT_LIVE_WITHOUT_BLOCK_HASH",
+      "OLDER_WITH_EXACT_BLOCK_HASH",
+      "OLDER_WITHOUT_BLOCK_HASH"
+    ],
     selectedLanes:
       candidates.map(
         item =>
@@ -21083,6 +21325,10 @@ async function resolvePersistentUnknownPools(
       persistentBlockHashReuseV637: true,
       observedFirstActivityBlockHashHarvestV641: true,
       observedBlockHashZeroExtraRequestsV641: true,
+      hashAwareCandidatePriorityV642: true,
+      currentLiveEvidenceSourceV642:
+        "PREFERRED_LIVE_POOL_IDS_V191",
+      exactFirstActiveHashRequiredV642: true,
       observedBlockHashHarvestsTotalV641:
         safeNumber(
           discoveryService(state)
