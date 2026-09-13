@@ -1,4 +1,27 @@
 /**
+ * Robinhood Chain Meme Hunter — V650
+ * AUTHORITATIVE RUNTIME VERSION: V650
+ *
+ * V650 ERC-20 IDENTITY RPC RESILIENCE
+ * - builds directly forward from authoritative V649;
+ * - fixes the ERC-20 independent read fallback so it is not restricted to the
+ *   narrow "every normal provider explicitly returned HTTP 429" case;
+ * - when normal analysis RPC routing produces no usable eth_getCode/eth_call
+ *   result because of a rate limit, transient provider/network failure, provider
+ *   HTTP/config failure, or all routes being temporarily unavailable, V650 may
+ *   spend ONE existing analysis-budget request on the already configured V421
+ *   independent read endpoint;
+ * - deterministic contract-call failures/reverts are NOT retried through the
+ *   independent provider and are never promoted into ERC-20 proof;
+ * - REQUEST_BUDGET_EXHAUSTED never triggers an extra fallback request;
+ * - adds no provider, no request ceiling, and no extra request outside the
+ *   existing 42 global / analysis budget protections;
+ * - preserves V649 verified-launch analysis lane and funnel diagnostics, V648
+ *   Bitquery-quota-independent identity, scoring, Momentum, qualification,
+ *   launch-source proof and Telegram thresholds unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V649
  * AUTHORITATIVE RUNTIME VERSION: V649
  *
@@ -5128,7 +5151,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V649";
+const VERSION = "V650";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -40963,6 +40986,14 @@ function normalAnalysisRpcsAll429V421(env, error) {
   ];
 
   if (
+    validationCloudConfiguredV627(env)
+  ) {
+    configured.unshift(
+      "VALIDATION_CLOUD"
+    );
+  }
+
+  if (
     chainstackConfiguredV431(env)
   ) {
     configured.unshift(
@@ -41001,11 +41032,48 @@ function normalAnalysisRpcsAll429V421(env, error) {
 }
 
 /*
- * V421 deliberately does NOT alter generic rpc().  Only ERC-20 identity
- * reads may use this fallback, and only after all normal analysis RPCs
- * have positively returned rate-limit evidence.  This prevents the
- * fallback from silently becoming a new primary provider.
+ * V650 preserves the V421 scope: generic rpc() is unchanged and only ERC-20
+ * identity reads may use this independent fallback.  V650 broadens eligibility
+ * from the old all-429-only condition to genuine non-deterministic provider /
+ * transport unavailability. Deterministic contract failures and exhausted
+ * request budget remain ineligible, so the fallback cannot manufacture proof.
  */
+function independentErc20FallbackEligibleV650(error) {
+  const message = String(error || "").trim();
+  if (!message) return false;
+
+  const cls = erc20RpcFailureClassV418(message);
+
+  if (
+    cls === "BUDGET" ||
+    cls === "DETERMINISTIC_CALL_FAILURE"
+  ) {
+    return false;
+  }
+
+  if (
+    cls === "RATE_LIMIT" ||
+    cls === "TRANSIENT_PROVIDER"
+  ) {
+    return true;
+  }
+
+  const upper = message.toUpperCase();
+  return (
+    upper.includes("NO_RPC_PROVIDER_AVAILABLE") ||
+    upper.includes("NO_CONFIGURED_ANALYSIS_RPC") ||
+    upper.includes("V424_METHOD_COOLDOWN_AFTER_429") ||
+    upper.includes("HTTP_401") ||
+    upper.includes("HTTP_403") ||
+    upper.includes("HTTP_405") ||
+    upper.includes("HTTP_408") ||
+    upper.includes("HTTP_409") ||
+    upper.includes("HTTP_425") ||
+    upper.includes("HTTP_5") ||
+    upper.includes("RPC_ERROR") ||
+    upper.includes("PROVIDER")
+  );
+}
 async function erc20ReadRpcV421(
   env,
   method,
@@ -41036,17 +41104,29 @@ async function erc20ReadRpcV421(
 
   const primaryError = primary?.error || null;
 
-  if (
-    !normalAnalysisRpcsAll429V421(
+  const allNormal429V421 =
+    normalAnalysisRpcsAll429V421(
       env,
       primaryError
-    )
-  ) {
+    );
+
+  const fallbackEligibleV650 =
+    allNormal429V421 ||
+    independentErc20FallbackEligibleV650(
+      primaryError
+    );
+
+  if (!fallbackEligibleV650) {
     return {
       ...primary,
       v421FallbackAttempted: false,
       v421FallbackUsed: false,
-      v421PrimaryError: primaryError
+      v421PrimaryError: primaryError,
+      v650FallbackEligible: false,
+      v650EligibilityClass:
+        erc20RpcFailureClassV418(
+          primaryError
+        )
     };
   }
 
@@ -41059,7 +41139,10 @@ async function erc20ReadRpcV421(
       v421FallbackAttempted: false,
       v421FallbackUsed: false,
       v421PrimaryError: primaryError,
-      v421FallbackError: "REQUEST_BUDGET_EXHAUSTED_ANALYSIS"
+      v421FallbackError: "REQUEST_BUDGET_EXHAUSTED_ANALYSIS",
+      v650FallbackEligible: true,
+      v650EligibilityClass:
+        erc20RpcFailureClassV418(primaryError)
     };
   }
 
@@ -41071,7 +41154,10 @@ async function erc20ReadRpcV421(
       ...primary,
       v421FallbackAttempted: false,
       v421FallbackUsed: false,
-      v421PrimaryError: primaryError
+      v421PrimaryError: primaryError,
+      v650FallbackEligible: true,
+      v650EligibilityClass:
+        erc20RpcFailureClassV418(primaryError)
     };
   }
 
@@ -41109,7 +41195,10 @@ async function erc20ReadRpcV421(
       v421FallbackUsed: true,
       v421PrimaryError: primaryError,
       v421FallbackError: null,
-      v421Stage: stage || null
+      v421Stage: stage || null,
+      v650FallbackEligible: true,
+      v650EligibilityClass:
+        erc20RpcFailureClassV418(primaryError)
     };
   } catch (error) {
     const fallbackError =
@@ -41139,7 +41228,10 @@ async function erc20ReadRpcV421(
       v421FallbackUsed: false,
       v421PrimaryError: primaryError,
       v421FallbackError: fallbackError,
-      v421Stage: stage || null
+      v421Stage: stage || null,
+      v650FallbackEligible: true,
+      v650EligibilityClass:
+        erc20RpcFailureClassV418(primaryError)
     };
   }
 }
