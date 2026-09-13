@@ -5280,20 +5280,21 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V664";
+const VERSION = "V665";
 
 /*
- * V664 — CoinGecko fallback decision-path diagnostics.
- * - Preserves all V663 scanner, qualification-audit, scoring and provider logic.
- * - Adds zero-request tracing around the existing marketData -> priority fallback
- *   -> GeckoTerminal -> CoinGecko Demo decision path.
- * - Records per-token market priority, Demo eligibility, provider availability,
- *   trigger/status, exact branch/skip reason, budget at decision time, whether
- *   CoinGecko was called, requestSent, returned status and verification result.
- * - Resets once per scanner run and persists in the SAME existing state write.
- * - /launchcoverage renders the latest trace for up to four tokens.
- * - Diagnostic only: no provider request is added, no routing/cooldown behaviour
- *   changes, no score/qualification/Telegram threshold changes, and the hard
+ * V665 — holder/risk decision-path diagnostics.
+ * - Preserves V664 CoinGecko tracing and all V663 qualification-audit behaviour.
+ * - Adds zero-request holder-path telemetry using evidence already produced by
+ *   holderIntelligence: public V2 row result, legacy row result, Bitquery reuse
+ *   state, Blockscout Pro holder/counter fallback state, same-run outage circuit,
+ *   retry state, and final holder-integrity outcome.
+ * - Adds compact risk-dependency telemetry showing the exact evidence classes
+ *   seen by scoreRisk, independent-evidence count and risk-unverified reasons.
+ * - /launchcoverage renders the latest holder/risk diagnosis for returned
+ *   current/live candidates.
+ * - Diagnostic only: zero new provider requests, zero extra state-write cycles,
+ *   no holder/risk/scoring/qualification/Telegram rule changes, and the hard
  *   42-request ceiling remains unchanged.
  */
 
@@ -53049,6 +53050,45 @@ async function holderIntelligence(
       holderSource:
         "BLOCKSCOUT_OUTAGE_DEFERRED",
 
+      holderPathDiagnosticV665: {
+        diagnosticOnly: true,
+        publicV2HolderRows: {
+          attempted: false,
+          rowsAvailable: false,
+          status: "SUPPRESSED_BY_SAME_RUN_OUTAGE_CIRCUIT"
+        },
+        legacyHolderRows: {
+          attempted: false,
+          rowsAvailable: false,
+          status: "SUPPRESSED_BY_SAME_RUN_OUTAGE_CIRCUIT"
+        },
+        bitqueryReuse: {
+          checked: false,
+          matched: false,
+          used: false,
+          status: "SUPPRESSED_BY_SAME_RUN_OUTAGE_CIRCUIT"
+        },
+        blockscoutProHolder:
+          blockscoutProDeferredTelemetryV164(),
+        sameRunHolderOutageCircuit: {
+          active: true,
+          detectedToken:
+            budget?.blockscoutHolderOutage?.detectedToken || null,
+          lowerPriorityFreshRequestsSuppressed:
+            safeNumber(
+              budget?.blockscoutHolderOutage
+                ?.lowerPriorityFreshRequestsSuppressed
+            ),
+          lowerPriorityCacheFallbacks:
+            safeNumber(
+              budget?.blockscoutHolderOutage
+                ?.lowerPriorityCacheFallbacks
+            )
+        },
+        finalStatus:
+          "BLOCKSCOUT_HOLDER_OUTAGE_DEFERRED"
+      },
+
       blockscoutProHolderFallbackV143:
         blockscoutProDeferredTelemetryV164()
     };
@@ -53950,6 +53990,57 @@ async function holderIntelligence(
             }
           : null,
 
+      holderPathDiagnosticV665: {
+        diagnosticOnly: true,
+        publicV2HolderRows: {
+          attempted: true,
+          rowsAvailable: false,
+          status: "UNAVAILABLE_OR_INVALID_RESPONSE"
+        },
+        legacyHolderRows: {
+          attempted: true,
+          rowsAvailable: false,
+          status: "UNAVAILABLE_OR_INVALID_RESPONSE"
+        },
+        bitqueryReuse: {
+          checked:
+            bitqueryHolderFallbackTelemetryV227?.checked === true,
+          matched:
+            bitqueryHolderFallbackTelemetryV227?.matched === true,
+          used:
+            bitqueryHolderFallbackTelemetryV227?.used === true,
+          status:
+            bitqueryHolderFallbackTelemetryV227?.status || null,
+          holderCount:
+            bitqueryHolderFallbackTelemetryV227?.holderCount ?? null
+        },
+        blockscoutProHolder:
+          blockscoutProHolderFallbackV143,
+        blockscoutProCounters:
+          blockscoutProCounterFallbackV247,
+        sameRunHolderOutageCircuit: {
+          active:
+            budget?.blockscoutHolderOutage?.active === true,
+          detectedToken:
+            budget?.blockscoutHolderOutage?.detectedToken || null,
+          lowerPriorityFreshRequestsSuppressed:
+            safeNumber(
+              budget?.blockscoutHolderOutage
+                ?.lowerPriorityFreshRequestsSuppressed
+            ),
+          lowerPriorityCacheFallbacks:
+            safeNumber(
+              budget?.blockscoutHolderOutage
+                ?.lowerPriorityCacheFallbacks
+            )
+        },
+        finalStatus:
+          "BLOCKSCOUT_HOLDERS_UNAVAILABLE",
+        countersVerified,
+        holderCount,
+        transferCount
+      },
+
       blockscoutProHolderFallbackV143,
       blockscoutProCounterFallbackV247
     };
@@ -54694,6 +54785,69 @@ async function holderIntelligence(
 
     holderCachePairCorrection:
       cachedPairMisclassified,
+
+    holderPathDiagnosticV665: {
+      diagnosticOnly: true,
+      publicV2HolderRows: {
+        attempted: true,
+        rowsAvailable:
+          holderSource === "BLOCKSCOUT_V2",
+        status:
+          holderSource === "BLOCKSCOUT_V2"
+            ? "ROWS_USED"
+            : (
+                v2HolderRowsUnavailable
+                  ? "UNAVAILABLE_OR_INVALID_RESPONSE"
+                  : "NOT_FINAL_SOURCE"
+              )
+      },
+      legacyHolderRows: {
+        attempted:
+          v2HolderRowsUnavailable === true ||
+          holderSource === "BLOCKSCOUT_LEGACY",
+        rowsAvailable:
+          holderSource === "BLOCKSCOUT_LEGACY",
+        status:
+          holderSource === "BLOCKSCOUT_LEGACY"
+            ? "ROWS_USED"
+            : (
+                legacyHolderRowsUnavailable
+                  ? "UNAVAILABLE_OR_INVALID_RESPONSE"
+                  : "NOT_FINAL_SOURCE"
+              )
+      },
+      bitqueryReuse: {
+        checked:
+          bitqueryHolderFallbackTelemetryV227?.checked === true,
+        matched:
+          bitqueryHolderFallbackTelemetryV227?.matched === true,
+        used:
+          bitqueryHolderFallbackTelemetryV227?.used === true,
+        status:
+          bitqueryHolderFallbackTelemetryV227?.status || null,
+        holderCount:
+          bitqueryHolderFallbackTelemetryV227?.holderCount ?? null
+      },
+      blockscoutProHolder:
+        blockscoutProHolderFallbackV143,
+      blockscoutProCounters:
+        blockscoutProCounterFallbackV247,
+      sameRunHolderOutageCircuit: {
+        active:
+          budget?.blockscoutHolderOutage?.active === true,
+        detectedToken:
+          budget?.blockscoutHolderOutage?.detectedToken || null
+      },
+      finalStatus:
+        "HOLDER_EVIDENCE_VERIFIED",
+      finalSource:
+        holderSource,
+      countersVerified,
+      concentrationVerified: true,
+      whaleVerified: true,
+      positiveHolderRows:
+        positiveHolders.length
+    },
 
     whale: {
       verified:
@@ -70553,6 +70707,47 @@ async function analyzeToken(
       launch
     );
 
+  const riskDependencyDiagnosticV665 = {
+    diagnosticOnly: true,
+    verified:
+      risk?.verified === true,
+    score:
+      risk?.verified === true
+        ? safeNumber(risk?.score)
+        : null,
+    independentEvidence:
+      safeNumber(
+        risk?.independentEvidence
+      ),
+    evidence: {
+      market:
+        risk?.evidence?.market === true,
+      concentration:
+        risk?.evidence?.concentration === true,
+      liveActivity:
+        risk?.evidence?.liveActivity === true,
+      liquidityActivity:
+        risk?.evidence?.liquidityActivity === true,
+      holderCounters:
+        risk?.evidence?.holderCounters === true
+    },
+    reasons:
+      Array.isArray(risk?.reasons)
+        ? risk.reasons.slice(0, 6)
+        : [],
+    holderEvidenceContribution:
+      (
+        risk?.verified !== true &&
+        (
+          holders?.integrity?.verified !== true ||
+          holders?.concentrationVerified !== true ||
+          holders?.whale?.verified !== true
+        )
+      )
+        ? "HOLDER_EVIDENCE_INCOMPLETE"
+        : "HOLDER_EVIDENCE_NOT_CURRENT_RISK_BLOCKER"
+  };
+
   const candidate = {
     address,
 
@@ -70608,6 +70803,8 @@ async function analyzeToken(
     whaleFlow,
 
     risk,
+
+    riskDependencyDiagnosticV665,
 
     opportunity,
 
@@ -80888,7 +81085,9 @@ for (
                   holderIntegrityV656?.status ||
                   blockscoutProV656?.status ||
                   "HOLDER_EVIDENCE_UNVERIFIED"
-                )
+                ),
+          pathDiagnosticV665:
+            holdersV656?.holderPathDiagnosticV665 || null
         },
         risk: {
           verified: riskV656?.verified === true,
@@ -80902,7 +81101,9 @@ for (
             riskV656?.reason ||
             (riskV656?.verified === true
               ? null
-              : "RISK_UNVERIFIED")
+              : "RISK_UNVERIFIED"),
+          dependencyDiagnosticV665:
+            candidate?.riskDependencyDiagnosticV665 || null
         },
         telegramReasons:
           telegramQualificationReasons(candidate)
@@ -129253,6 +129454,54 @@ function launchCoverageTelegramMessageV474(state) {
         return `• <b>${symbol}</b> (${escapeHtml(shortAddress)}) — Market: ${marketBlocker}; Holders: ${holderBlocker}; Risk: ${riskBlocker}; budget left A/G ${analysisRemaining}/${globalRemaining}`;
       });
 
+  const holderRiskLinesV665 =
+    (Array.isArray(last.currentLiveEvidenceCompletionV656)
+      ? last.currentLiveEvidenceCompletionV656
+      : []
+    )
+      .slice(0, 4)
+      .map((row, index) => {
+        const symbol =
+          escapeHtml(row?.symbol || `Candidate ${index + 1}`);
+        const holderPath =
+          row?.holders?.pathDiagnosticV665 || null;
+        const riskDiag =
+          row?.risk?.dependencyDiagnosticV665 || null;
+
+        const v2 =
+          holderPath?.publicV2HolderRows?.status ||
+          "NOT_CAPTURED";
+        const legacy =
+          holderPath?.legacyHolderRows?.status ||
+          "NOT_CAPTURED";
+        const bq =
+          holderPath?.bitqueryReuse?.status ||
+          "NOT_CAPTURED";
+        const pro =
+          holderPath?.blockscoutProHolder?.status ||
+          "NOT_CAPTURED";
+        const proHttp =
+          holderPath?.blockscoutProHolder?.httpStatus ??
+          null;
+        const circuit =
+          holderPath?.sameRunHolderOutageCircuit?.active === true
+            ? "ACTIVE"
+            : "NO";
+        const riskEvidence =
+          riskDiag?.evidence || {};
+        const riskReason =
+          Array.isArray(riskDiag?.reasons) &&
+          riskDiag.reasons.length
+            ? riskDiag.reasons[0]
+            : (
+                riskDiag?.verified === true
+                  ? "VERIFIED"
+                  : "UNVERIFIED"
+              );
+
+        return `• <b>${symbol}</b> — V2 ${escapeHtml(String(v2))}; Legacy ${escapeHtml(String(legacy))}; Bitquery ${escapeHtml(String(bq))}; PRO ${escapeHtml(String(pro))}${proHttp ? ` HTTP ${fmt(proHttp)}` : ""}; circuit ${circuit}; risk evidence M/C/A/H ${riskEvidence.market===true?"Y":"N"}/${riskEvidence.concentration===true?"Y":"N"}/${riskEvidence.liveActivity===true?"Y":"N"}/${riskEvidence.holderCounters===true?"Y":"N"} (${fmt(riskDiag?.independentEvidence)}/2); ${escapeHtml(String(riskReason))}`;
+      });
+
   const coinGeckoTraceV664 =
     coinGeckoDecisionTraceSnapshotV664(
       state
@@ -129330,7 +129579,7 @@ function launchCoverageTelegramMessageV474(state) {
       ? evidenceLinesV656
       : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V664 rotating evidence-completion queue</b>",
+    "<b>V665 rotating evidence-completion queue</b>",
     `Pending: <b>${fmt(last?.evidenceCompletionQueueV658?.pending)}</b> · Provider-ready pre-analysis: <b>${fmt(last?.evidenceCompletionQueueV658?.preAnalysisProviderReadyV661)}</b>`,
     `Selection reason: <b>${escapeHtml(last?.evidenceCompletionQueueV658?.preAnalysisSelectionReasonV661 || "None")}</b>`,
     `CoinGecko Demo fallback: <b>${
@@ -129355,6 +129604,13 @@ function launchCoverageTelegramMessageV474(state) {
         : ["• No market fallback trace captured in this scan."]
     ),
     "",
+    "<b>V665 holder/risk decision trace — latest scan</b>",
+    ...(
+      holderRiskLinesV665.length
+        ? holderRiskLinesV665
+        : ["• No holder/risk diagnostic captured in this scan."]
+    ),
+    "",
     "<b>Cumulative since V474</b>",
     `Scans observed: <b>${fmt(c.scansObserved)}</b>`,
     `Live addresses observed: <b>${fmt(c.liveAddressesObserved)}</b>`,
@@ -129368,8 +129624,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V655 fresh-launch budget protection and the V663 qualification audit remain preserved; V664 adds decision-path telemetry around the existing CoinGecko fallback.",
-    "<i>V664 is diagnostic-only: market routing, the 42-request ceiling, one-Demo-request-per-scan guard, scoring/thresholds and provider cooldown protections are unchanged.</i>"
+    "V655 fresh-launch budget protection, V663 qualification audit and V664 CoinGecko trace remain preserved; V665 adds holder/risk decision-path telemetry.",
+    "<i>V665 is diagnostic-only: holder/risk logic, market routing, the 42-request ceiling, scoring/thresholds and provider cooldown protections are unchanged.</i>"
   ].join("\n");
 }
 
