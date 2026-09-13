@@ -5280,23 +5280,22 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V660";
+const VERSION = "V661";
 
 /*
- * V660 — free authenticated CoinGecko Demo market fallback.
- * - Preserves V659 provider-ready queue scheduling and every existing guard.
- * - Adds an OPTIONAL third market evidence path using CoinGecko's free Demo API
- *   (`COINGECKO_DEMO_API_KEY`) only for persisted/queued completion targets.
- * - The Demo request uses CoinGecko's authenticated /onchain token-pools
- *   endpoint for Robinhood Chain and reuses the existing strict Gecko pool
- *   parser: positive USD price + positive USD liquidity are still required.
- * - At most ONE CoinGecko Demo market request per scan, with persistent spacing,
- *   adaptive 429 cooldown and existing analysis/global request accounting.
- * - It does NOT bypass DexScreener/GeckoTerminal cooldowns; it is an independent
- *   authenticated quota path used when those public paths cannot complete a
- *   queued candidate.
- * - Hard request ceiling remains 42. Scoring, qualification, liquidity/risk
- *   requirements and Telegram thresholds are unchanged.
+ * V661 — pre-analysis queue reconciliation / CoinGecko handoff fix.
+ * - Preserves all V660 market fallback, request-budget, cooldown, scoring and
+ *   qualification behaviour.
+ * - FIX: persisted verified-launch evidence rows are reconciled BEFORE final
+ *   analysis selection so a provider-ready row can actually be served in the
+ *   same scan.
+ * - At most ONE provider-ready queued token is still admitted per scan.
+ * - The selected queued token keeps V660 CoinGecko Demo fallback eligibility
+ *   when DexScreener / GeckoTerminal cannot complete market evidence.
+ * - Adds same-point diagnostics so Provider-ready and Served describe the same
+ *   pre-analysis queue state rather than different moments in the scan.
+ * - Hard request ceiling remains 42. No scoring, qualification, liquidity,
+ *   risk or Telegram threshold changes.
  */
 
 const EVIDENCE_COMPLETION_QUEUE_MAX_V658 = 6;
@@ -73229,6 +73228,131 @@ function evidenceCompletionProviderGateV659(
   };
 }
 
+
+function preReconcileEvidenceCompletionQueueV661(
+  state,
+  liveTokens
+) {
+  const queue =
+    pruneEvidenceCompletionQueueV658(
+      state
+    );
+
+  if (!queue) return null;
+
+  const liveSet =
+    new Set(
+      Array.from(
+        liveTokens || []
+      )
+        .map(value =>
+          normalize(
+            typeof value === "string"
+              ? value
+              : value?.address
+          )
+        )
+        .filter(isAddress)
+    );
+
+  const now =
+    Date.now();
+
+  for (
+    const row
+    of queue.entries
+  ) {
+    const address =
+      normalize(row?.address);
+
+    if (!isAddress(address)) continue;
+
+    const watched =
+      state?.watchedTokens?.find(
+        token =>
+          normalize(token?.address) ===
+          address
+      ) || null;
+
+    if (!watched) continue;
+
+    if (
+      liveSet.has(address)
+    ) {
+      row.lastObservedAt =
+        now;
+    }
+
+    row.symbol =
+      watched?.metadata?.symbol ||
+      watched?.symbol ||
+      row?.symbol ||
+      null;
+
+    /*
+     * Do NOT push nextEligibleAt forward here. V661's purpose is to preserve
+     * already-earned queue eligibility into the current selection point.
+     */
+  }
+
+  queue.lastPreReconciledAtV661 =
+    now;
+
+  queue.lastUpdatedAt =
+    now;
+
+  return queue;
+}
+
+function queueSelectionSnapshotV661(
+  state,
+  env
+) {
+  const queue =
+    ensureEvidenceCompletionQueueV658(
+      state
+    );
+
+  if (!queue) {
+    return {
+      providerReady: 0,
+      selectedAddress: null,
+      selectedReason: null,
+      capturedAt: Date.now()
+    };
+  }
+
+  const ready =
+    queue.entries
+      .map(row => ({
+        row,
+        gate:
+          evidenceCompletionProviderGateV659(
+            state,
+            row,
+            env
+          )
+      }))
+      .filter(
+        item =>
+          item?.gate?.ready === true
+      );
+
+  return {
+    providerReady:
+      ready.length,
+    selectedAddress:
+      normalize(
+        queue?.lastSelectedAddress
+      ) || null,
+    selectedReason:
+      queue?.lastSelectedReasonV659 ||
+      null,
+    capturedAt:
+      Date.now()
+  };
+}
+
 function selectEvidenceCompletionRetryV658(state, env) {
   const queue = pruneEvidenceCompletionQueueV658(state);
   if (!queue || !queue.entries.length) return null;
@@ -73317,6 +73441,8 @@ function selectEvidenceCompletionRetryV658(state, env) {
       selectedItem?.gate?.dexReady === true,
     geckoReady:
       selectedItem?.gate?.geckoReady === true,
+    coinGeckoDemoReadyV660:
+      selectedItem?.gate?.coinGeckoDemoReadyV660 === true,
     selectedAt:
       now
   };
@@ -73578,6 +73704,22 @@ function evidenceCompletionQueueSnapshotV658(state) {
         : null,
     lastSelectedReasonV659:
       queue.lastSelectedReasonV659 || null,
+    preAnalysisProviderReadyV661:
+      safeNumber(
+        state?.evidenceCompletionQueueSelectionV661
+          ?.before
+          ?.providerReady
+      ),
+    preAnalysisSelectedAddressV661:
+      normalize(
+        state?.evidenceCompletionQueueSelectionV661
+          ?.selectedAddress
+      ) || null,
+    preAnalysisSelectionReasonV661:
+      state?.evidenceCompletionQueueSelectionV661
+        ?.after
+        ?.selectedReason ||
+      null,
     lastSelectedAddress:
       normalize(queue.lastSelectedAddress) || null,
     lastSelectedAt:
@@ -78009,11 +78151,41 @@ for (
     env
   );
 
+  preReconcileEvidenceCompletionQueueV661(
+    state,
+    liveTokens
+  );
+
+  const queueSelectionBeforeV661 =
+    queueSelectionSnapshotV661(
+      state,
+      env
+    );
+
   const evidenceCompletionRetryTokenV658 =
     selectEvidenceCompletionRetryV658(
       state,
       env
     );
+
+  const queueSelectionAfterV661 =
+    queueSelectionSnapshotV661(
+      state,
+      env
+    );
+
+  state.evidenceCompletionQueueSelectionV661 = {
+    before:
+      queueSelectionBeforeV661,
+    after:
+      queueSelectionAfterV661,
+    selectedAddress:
+      normalize(
+        evidenceCompletionRetryTokenV658?.address
+      ) || null,
+    selectedAt:
+      Date.now()
+  };
 
   const evidenceCompletionRetryAddressV658 =
     normalize(
@@ -127992,18 +128164,22 @@ function launchCoverageTelegramMessageV474(state) {
       ? evidenceLinesV656
       : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V660 rotating evidence-completion queue</b>",
-    `Pending: <b>${fmt(last?.evidenceCompletionQueueV658?.pending)}</b> · Provider-ready now: <b>${fmt(last?.evidenceCompletionQueueV658?.providerReadyV659)}</b>`,
-    `Selection reason: <b>${escapeHtml(last?.evidenceCompletionQueueV658?.lastSelectedReasonV659 || "None")}</b>`,
+    "<b>V661 rotating evidence-completion queue</b>",
+    `Pending: <b>${fmt(last?.evidenceCompletionQueueV658?.pending)}</b> · Provider-ready pre-analysis: <b>${fmt(last?.evidenceCompletionQueueV658?.preAnalysisProviderReadyV661)}</b>`,
+    `Selection reason: <b>${escapeHtml(last?.evidenceCompletionQueueV658?.preAnalysisSelectionReasonV661 || "None")}</b>`,
     `CoinGecko Demo fallback: <b>${
       state?.services?.coingeckoDemoV660?.configured === true
         ? escapeHtml(state?.services?.coingeckoDemoV660?.lastStatus || "READY / NOT YET USED")
         : "NOT CONFIGURED"
     }</b>`,
     `Served this/last scan: <b>${
-      isAddress(normalize(last?.evidenceCompletionQueueV658?.lastSelectedAddress))
-        ? escapeHtml(`${normalize(last.evidenceCompletionQueueV658.lastSelectedAddress).slice(0, 6)}…${normalize(last.evidenceCompletionQueueV658.lastSelectedAddress).slice(-4)}`)
-        : "None"
+      isAddress(normalize(last?.evidenceCompletionQueueV658?.preAnalysisSelectedAddressV661))
+        ? escapeHtml(`${normalize(last.evidenceCompletionQueueV658.preAnalysisSelectedAddressV661).slice(0, 6)}…${normalize(last.evidenceCompletionQueueV658.preAnalysisSelectedAddressV661).slice(-4)}`)
+        : (
+            isAddress(normalize(last?.evidenceCompletionQueueV658?.lastSelectedAddress))
+              ? escapeHtml(`${normalize(last.evidenceCompletionQueueV658.lastSelectedAddress).slice(0, 6)}…${normalize(last.evidenceCompletionQueueV658.lastSelectedAddress).slice(-4)}`)
+              : "None"
+          )
     }</b>`,
     "",
     "<b>Cumulative since V474</b>",
@@ -128019,8 +128195,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V655 fresh-launch budget protection remains preserved; V660 adds an optional free authenticated CoinGecko Demo market fallback for persisted/queued completion targets.",
-    "<i>V660 keeps the 42-request ceiling, one-Demo-request-per-scan guard, existing scoring/thresholds and all provider cooldown protections.</i>"
+    "V655 fresh-launch budget protection remains preserved; V661 reconciles the persisted completion queue before final analysis selection so provider-ready rows can actually be served.",
+    "<i>V661 keeps the 42-request ceiling, one-Demo-request-per-scan guard, existing scoring/thresholds and all provider cooldown protections.</i>"
   ].join("\n");
 }
 
