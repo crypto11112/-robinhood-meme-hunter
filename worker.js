@@ -1,4 +1,27 @@
 /**
+ * Robinhood Chain Meme Hunter — V654
+ * AUTHORITATIVE RUNTIME VERSION: V654
+ *
+ * V654 ERC-20 RESERVED-LANE CONSUMPTION FIX
+ * - builds directly forward from authoritative V653;
+ * - fixes the remaining V653 collision where a fresh verified launch could have
+ *   a V653 identity slot reserved/released for it, yet its RPC:eth_getCode or
+ *   RPC:eth_call could still be blocked by older lower-priority analysis reserves
+ *   (continuous directional watch, exact-pool completion, USDG or ATH reserve);
+ * - erc20ReadRpcV421 now marks the exact token address while an ERC-20 identity
+ *   read is in flight; consumeBudget recognises only RPC:eth_getCode / RPC:eth_call
+ *   for an address in the V653 fresh-launch priority set as V654 identity work;
+ * - V654 identity work STILL obeys the V653 future-launch reserve, the effective
+ *   analysis limit, pre-Telegram global/notification reserve and hard 42 ceiling;
+ * - it bypasses only older lower-priority maintenance/enrichment reserves, so a
+ *   released fresh-launch identity slot is actually spendable;
+ * - V419 checkpoints remain authoritative: one protected request may prove
+ *   bytecode/method evidence and later scans reuse it rather than starting over;
+ * - no new provider, no request-ceiling increase, no scoring/qualification/
+ *   Telegram-threshold change.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V653
  * AUTHORITATIVE RUNTIME VERSION: V653
  *
@@ -5215,7 +5238,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V653";
+const VERSION = "V654";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -11158,6 +11181,10 @@ function createBudget() {
         reservedRequests: 0,
         pendingAddresses: [],
         releasedAddresses: [],
+        priorityAddressesV654: [],
+        activeIdentityAddressV654: null,
+        identityReserveOverridesV654: 0,
+        identityReserveOverrideTypesV654: {},
         lowerPriorityRequestsBlocked: 0,
         blockedTypes: {},
         lastBlockedType: null,
@@ -11677,6 +11704,10 @@ function configureFreshVerifiedLaunchErc20ReserveV653(
   reserve.configuredAt = Date.now();
   reserve.pendingAddresses = addresses;
   reserve.releasedAddresses = [];
+  reserve.priorityAddressesV654 = [...addresses];
+  reserve.activeIdentityAddressV654 = null;
+  reserve.identityReserveOverridesV654 = 0;
+  reserve.identityReserveOverrideTypesV654 = {};
   reserve.initialReservedRequests = addresses.length;
   reserve.reservedRequests = addresses.length;
   reserve.active = addresses.length > 0;
@@ -11811,6 +11842,64 @@ function freshVerifiedLaunchErc20ReserveBlocksV653(
   return true;
 }
 
+function isFreshVerifiedLaunchIdentityRequestV654(
+  budget,
+  phase,
+  type
+) {
+  if (phase !== "analysis") return false;
+
+  if (
+    type !== "RPC:eth_getCode" &&
+    type !== "RPC:eth_call"
+  ) {
+    return false;
+  }
+
+  const reserve =
+    budget?.analysis?.freshVerifiedLaunchErc20ReserveV653;
+
+  const address =
+    normalize(
+      reserve?.activeIdentityAddressV654
+    );
+
+  if (!address) return false;
+
+  const priority =
+    Array.isArray(reserve?.priorityAddressesV654)
+      ? reserve.priorityAddressesV654
+      : [];
+
+  return priority.includes(address);
+}
+
+function observeFreshVerifiedLaunchIdentityOverrideV654(
+  budget,
+  type
+) {
+  const reserve =
+    budget?.analysis?.freshVerifiedLaunchErc20ReserveV653;
+
+  if (!reserve) return;
+
+  reserve.identityReserveOverridesV654 =
+    safeNumber(reserve.identityReserveOverridesV654) + 1;
+
+  reserve.identityReserveOverrideTypesV654 =
+    reserve.identityReserveOverrideTypesV654 &&
+    typeof reserve.identityReserveOverrideTypesV654 === "object"
+      ? reserve.identityReserveOverrideTypesV654
+      : {};
+
+  const key = String(type || "UNKNOWN");
+
+  reserve.identityReserveOverrideTypesV654[key] =
+    safeNumber(
+      reserve.identityReserveOverrideTypesV654[key]
+    ) + 1;
+}
+
 function consumeBudget(
   budget,
   phase,
@@ -11841,7 +11930,18 @@ function consumeBudget(
     return false;
   }
 
-  if(phase==="analysis"&&openfairHistoricalRecoveryReserveBlocksAnalysisV537(budget,type,amount)){
+  const freshVerifiedLaunchIdentityRequestV654 =
+    isFreshVerifiedLaunchIdentityRequestV654(
+      budget,
+      phase,
+      type
+    );
+
+  if(
+    !freshVerifiedLaunchIdentityRequestV654 &&
+    phase==="analysis" &&
+    openfairHistoricalRecoveryReserveBlocksAnalysisV537(budget,type,amount)
+  ){
     const r=budget.analysis.openfairHistoricalRecoveryReserveV537;
     r.lowerPriorityRequestsBlocked=safeNumber(r.lowerPriorityRequestsBlocked)+1;
     budget.skipped.push({phase,type,amount,reason:"V537_OPENFAIR_HISTORICAL_TOPIC2_RECOVERY_SLOT_RESERVED"});
@@ -11885,6 +11985,7 @@ function consumeBudget(
     "BLOCKSCOUT_V551_CONTINUOUS_EXACT_POOL_LOGS";
 
   if (
+    !freshVerifiedLaunchIdentityRequestV654 &&
     phase === "analysis" &&
     directionalWatchReserveV553?.active === true &&
     type !== protectedDirectionalWatchTypeV553
@@ -12019,6 +12120,7 @@ function consumeBudget(
       ?.completeExactPoolReserveV459;
 
   if (
+    !freshVerifiedLaunchIdentityRequestV654 &&
     phase === "analysis" &&
     completeExactPoolReserveV459?.active === true &&
     type !== protectedV458TimestampTypeV459 &&
@@ -12100,6 +12202,7 @@ function consumeBudget(
   }
 
   if (
+    !freshVerifiedLaunchIdentityRequestV654 &&
     phase ===
       "analysis" &&
     usdGReserveV182
@@ -12188,6 +12291,7 @@ function consumeBudget(
   }
 
   if (
+    !freshVerifiedLaunchIdentityRequestV654 &&
     phase === "analysis" &&
     athFairSlotReserveBlocksAnalysisV301(budget, type, amount)
   ) {
@@ -12198,6 +12302,15 @@ function consumeBudget(
       reason: "V301_ATH_FAIR_SLOT_REQUEST_RESERVED"
     });
     return false;
+  }
+
+  if (
+    freshVerifiedLaunchIdentityRequestV654
+  ) {
+    observeFreshVerifiedLaunchIdentityOverrideV654(
+      budget,
+      type
+    );
   }
 
   if (
@@ -41411,13 +41524,47 @@ async function erc20ReadRpcV421(
   address,
   stage
 ) {
-  const primary = await rpc(
-    env,
-    method,
-    params,
-    budget,
-    "analysis"
-  );
+  const reserveV654 =
+    budget?.analysis?.freshVerifiedLaunchErc20ReserveV653;
+
+  const normalizedAddressV654 =
+    normalize(address);
+
+  const priorityAddressesV654 =
+    Array.isArray(reserveV654?.priorityAddressesV654)
+      ? reserveV654.priorityAddressesV654
+      : [];
+
+  const identityPriorityV654 =
+    normalizedAddressV654 &&
+    priorityAddressesV654.includes(
+      normalizedAddressV654
+    );
+
+  if (identityPriorityV654) {
+    reserveV654.activeIdentityAddressV654 =
+      normalizedAddressV654;
+  }
+
+  let primary;
+
+  try {
+    primary = await rpc(
+      env,
+      method,
+      params,
+      budget,
+      "analysis"
+    );
+  } finally {
+    if (
+      identityPriorityV654 &&
+      reserveV654?.activeIdentityAddressV654 ===
+        normalizedAddressV654
+    ) {
+      reserveV654.activeIdentityAddressV654 = null;
+    }
+  }
 
   if (
     primary?.result !== null &&
@@ -41501,13 +41648,30 @@ async function erc20ReadRpcV421(
   telemetry.lastAttemptAt = Date.now();
 
   try {
-    const result = await rpcCall(
-      fallbackUrl,
-      method,
-      params,
-      budget,
-      "analysis"
-    );
+    if (identityPriorityV654) {
+      reserveV654.activeIdentityAddressV654 =
+        normalizedAddressV654;
+    }
+
+    let result;
+
+    try {
+      result = await rpcCall(
+        fallbackUrl,
+        method,
+        params,
+        budget,
+        "analysis"
+      );
+    } finally {
+      if (
+        identityPriorityV654 &&
+        reserveV654?.activeIdentityAddressV654 ===
+          normalizedAddressV654
+      ) {
+        reserveV654.activeIdentityAddressV654 = null;
+      }
+    }
 
     telemetry.succeeded =
       safeNumber(telemetry.succeeded) + 1;
@@ -91905,7 +92069,7 @@ async function erc20RpcDiagnosticV652(env) {
   return {
     agent: "Robinhood Chain Meme Hunter",
     version: VERSION,
-    status: "READ_ONLY_ERC20_RPC_DIAGNOSTIC_V653",
+    status: "READ_ONLY_ERC20_RPC_DIAGNOSTIC_V654",
     scannerBudgetConsumed: false,
     externalProviderRequestsAdded: 0,
     stateWritePerformed: false,
