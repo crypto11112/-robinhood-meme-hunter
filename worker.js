@@ -5280,22 +5280,21 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V663";
+const VERSION = "V664";
 
 /*
- * V663 — forward-only 7-day qualification audit.
- * - Preserves V662 market/provider behaviour unchanged.
- * - Adds a measurement-only persisted audit for current/live positively verified
- *   launches that reach returned-candidate analysis.
- * - Records the exact existing Telegram qualification blockers, compact evidence
- *   state, and whether each verified launch qualified / was sent.
- * - Dedupes by token and keeps the latest observed state for a bounded 7-day
- *   window; no historical blocker backfill is invented.
- * - Adds read-only /audit7d command showing blocker totals, one-blocker near
- *   misses, evidence-only unresolved candidates, and sample completeness.
- * - Uses evidence already produced by the scanner: zero extra provider requests,
- *   zero extra state-write cycles, no scoring/qualification/threshold changes,
- *   and the hard 42-request ceiling remains unchanged.
+ * V664 — CoinGecko fallback decision-path diagnostics.
+ * - Preserves all V663 scanner, qualification-audit, scoring and provider logic.
+ * - Adds zero-request tracing around the existing marketData -> priority fallback
+ *   -> GeckoTerminal -> CoinGecko Demo decision path.
+ * - Records per-token market priority, Demo eligibility, provider availability,
+ *   trigger/status, exact branch/skip reason, budget at decision time, whether
+ *   CoinGecko was called, requestSent, returned status and verification result.
+ * - Resets once per scanner run and persists in the SAME existing state write.
+ * - /launchcoverage renders the latest trace for up to four tokens.
+ * - Diagnostic only: no provider request is added, no routing/cooldown behaviour
+ *   changes, no score/qualification/Telegram threshold changes, and the hard
+ *   42-request ceiling remains unchanged.
  */
 
 const EVIDENCE_COMPLETION_QUEUE_MAX_V658 = 6;
@@ -14535,6 +14534,14 @@ function newState() {
       lastRecordedAddress: null
     },
 
+    coinGeckoDecisionTraceV664: {
+      enabled: true,
+      diagnosticOnly: true,
+      scanStartedAt: null,
+      scanCompletedAt: null,
+      rows: []
+    },
+
     scheduler: {
       scheduledRunCount:
         0,
@@ -15134,6 +15141,20 @@ async function readState(env) {
           records:
             Array.isArray(parsed.qualificationAuditV663?.records)
               ? parsed.qualificationAuditV663.records.slice(-5000)
+              : []
+        },
+
+        coinGeckoDecisionTraceV664: {
+          ...fresh.coinGeckoDecisionTraceV664,
+          ...(
+            parsed.coinGeckoDecisionTraceV664 &&
+            typeof parsed.coinGeckoDecisionTraceV664 === "object"
+              ? parsed.coinGeckoDecisionTraceV664
+              : {}
+          ),
+          rows:
+            Array.isArray(parsed.coinGeckoDecisionTraceV664?.rows)
+              ? parsed.coinGeckoDecisionTraceV664.rows.slice(-12)
               : []
         },
 
@@ -45217,6 +45238,166 @@ async function geckoTerminalMarketData(
    V660 FREE AUTHENTICATED COINGECKO DEMO MARKET FALLBACK
    ========================================================= */
 
+
+function resetCoinGeckoDecisionTraceV664(
+  state,
+  startedAt = Date.now()
+) {
+  state.coinGeckoDecisionTraceV664 = {
+    enabled: true,
+    diagnosticOnly: true,
+    scanStartedAt:
+      safeNumber(startedAt) ||
+      Date.now(),
+    scanCompletedAt: null,
+    rows: []
+  };
+
+  return state.coinGeckoDecisionTraceV664;
+}
+
+function traceCoinGeckoDecisionV664(
+  state,
+  token,
+  patch = {}
+) {
+  if (
+    !state ||
+    typeof state !== "object"
+  ) {
+    return null;
+  }
+
+  const root =
+    state.coinGeckoDecisionTraceV664 &&
+    typeof state.coinGeckoDecisionTraceV664 === "object"
+      ? state.coinGeckoDecisionTraceV664
+      : resetCoinGeckoDecisionTraceV664(
+          state,
+          Date.now()
+        );
+
+  root.rows =
+    Array.isArray(root.rows)
+      ? root.rows
+      : [];
+
+  const address =
+    normalize(token);
+
+  if (!isAddress(address)) {
+    return null;
+  }
+
+  let row =
+    root.rows.find(
+      item =>
+        normalize(item?.address) ===
+        address
+    );
+
+  if (!row) {
+    row = {
+      address,
+      firstTraceAt:
+        Date.now(),
+      lastTraceAt:
+        Date.now(),
+      stages: []
+    };
+
+    root.rows.push(row);
+
+    if (root.rows.length > 12) {
+      root.rows =
+        root.rows.slice(-12);
+      row =
+        root.rows.find(
+          item =>
+            normalize(item?.address) ===
+            address
+        ) || row;
+    }
+  }
+
+  row.lastTraceAt =
+    Date.now();
+
+  const stage =
+    String(
+      patch?.stage ||
+      ""
+    ).trim();
+
+  if (stage) {
+    row.stages =
+      Array.isArray(row.stages)
+        ? row.stages
+        : [];
+
+    row.stages.push({
+      at: Date.now(),
+      stage,
+      status:
+        patch?.status ||
+        null,
+      reason:
+        patch?.reason ||
+        patch?.skipReason ||
+        null
+    });
+
+    row.stages =
+      row.stages.slice(-10);
+  }
+
+  for (
+    const [key, value]
+    of Object.entries(
+      patch || {}
+    )
+  ) {
+    if (key === "stage") {
+      continue;
+    }
+
+    row[key] = value;
+  }
+
+  return row;
+}
+
+function coinGeckoDecisionTraceSnapshotV664(
+  state
+) {
+  const root =
+    state?.coinGeckoDecisionTraceV664 &&
+    typeof state.coinGeckoDecisionTraceV664 === "object"
+      ? state.coinGeckoDecisionTraceV664
+      : {
+          enabled: true,
+          diagnosticOnly: true,
+          scanStartedAt: null,
+          scanCompletedAt: null,
+          rows: []
+        };
+
+  return {
+    enabled: true,
+    diagnosticOnly: true,
+    scanStartedAt:
+      safeNumber(root.scanStartedAt) ||
+      null,
+    scanCompletedAt:
+      safeNumber(root.scanCompletedAt) ||
+      null,
+    rows:
+      Array.isArray(root.rows)
+        ? root.rows.slice(-12)
+        : []
+  };
+}
+
 function coinGeckoDemoConfiguredV660(env) {
   return Boolean(
     String(
@@ -45767,9 +45948,47 @@ async function priorityMarketFallback(
   trigger,
   original
 ) {
+  traceCoinGeckoDecisionV664(
+    state,
+    token,
+    {
+      stage: "PRIORITY_FALLBACK_ENTERED_V664",
+      priority:
+        priority === true,
+      demoFallbackEligible:
+        demoFallbackEligibleV660 === true,
+      fallbackTrigger:
+        trigger || null,
+      originalStatus:
+        original?.status || null,
+      coinGeckoConfigured:
+        coinGeckoDemoConfiguredV660(env),
+      analysisUsedAtFallback:
+        safeNumber(budget?.analysis?.used),
+      analysisLimitAtFallback:
+        safeNumber(budget?.analysis?.limit),
+      globalUsedAtFallback:
+        safeNumber(budget?.totalUsed),
+      globalLimitAtFallback:
+        safeNumber(budget?.totalLimit)
+    }
+  );
+
   if (
     !priority
   ) {
+    traceCoinGeckoDecisionV664(
+      state,
+      token,
+      {
+        stage: "PRIORITY_FALLBACK_SKIPPED_V664",
+        decision:
+          "SKIPPED",
+        skipReason:
+          "MARKET_PRIORITY_FALSE"
+      }
+    );
+
     return original;
   }
 
@@ -45784,6 +46003,34 @@ async function priorityMarketFallback(
     geckoMarketFreshEligibilityV433(
       state
     );
+
+  const demoFreshEligibilityV664 =
+    coinGeckoDemoFreshEligibilityV660(
+      state,
+      env
+    );
+
+  traceCoinGeckoDecisionV664(
+    state,
+    token,
+    {
+      stage: "PROVIDER_GATE_EVALUATED_V664",
+      geckoAvailabilityEligible:
+        availabilityV147?.gecko?.eligible === true,
+      geckoAvailabilityReason:
+        availabilityV147?.gecko?.reason || null,
+      geckoFreshEligible:
+        geckoMarketEligibilityV433?.eligible === true,
+      geckoFreshReason:
+        geckoMarketEligibilityV433?.reason || null,
+      demoFreshEligible:
+        demoFreshEligibilityV664?.eligible === true,
+      demoFreshReason:
+        demoFreshEligibilityV664?.reason || null,
+      demoFreshEligibleAt:
+        demoFreshEligibilityV664?.eligibleAt || null
+    }
+  );
 
   if (
     !availabilityV147
@@ -45814,6 +46061,22 @@ async function priorityMarketFallback(
         env
       )
     ) {
+      traceCoinGeckoDecisionV664(
+        state,
+        token,
+        {
+          stage: "DEMO_DIRECT_UNAVAILABLE_BRANCH_V664",
+          decision:
+            "CALL_DEMO",
+          publicFallbackStatus:
+            geckoUnavailableV660.status,
+          analysisUsedBeforeDemo:
+            safeNumber(budget?.analysis?.used),
+          globalUsedBeforeDemo:
+            safeNumber(budget?.totalUsed)
+        }
+      );
+
       const demoV660 =
         await coinGeckoDemoMarketDataV660(
           token,
@@ -45823,6 +46086,28 @@ async function priorityMarketFallback(
           env,
           geckoUnavailableV660.status
         );
+
+      traceCoinGeckoDecisionV664(
+        state,
+        token,
+        {
+          stage: "DEMO_DIRECT_RESULT_V664",
+          demoCalled: true,
+          demoRequestSent:
+            demoV660?.requestSent === true,
+          demoStatus:
+            demoV660?.status ||
+            (demoV660?.verified === true
+              ? "VERIFIED"
+              : null),
+          demoVerified:
+            demoV660?.verified === true,
+          analysisUsedAfterDemo:
+            safeNumber(budget?.analysis?.used),
+          globalUsedAfterDemo:
+            safeNumber(budget?.totalUsed)
+        }
+      );
 
       if (
         demoV660?.verified ===
@@ -45871,6 +46156,26 @@ async function priorityMarketFallback(
         }
       };
     }
+
+    traceCoinGeckoDecisionV664(
+      state,
+      token,
+      {
+        stage: "DEMO_DIRECT_SKIPPED_V664",
+        decision:
+          "SKIPPED",
+        skipReason:
+          demoFallbackEligibleV660 !== true
+            ? "DEMO_FALLBACK_ELIGIBILITY_FALSE"
+            : (
+                coinGeckoDemoConfiguredV660(env)
+                  ? "DIRECT_BRANCH_NOT_SELECTED_UNKNOWN"
+                  : "COINGECKO_DEMO_NOT_CONFIGURED"
+              ),
+        publicFallbackStatus:
+          geckoUnavailableV660.status
+      }
+    );
 
     return {
       ...original,
@@ -45926,6 +46231,24 @@ async function priorityMarketFallback(
       trigger
     );
 
+  traceCoinGeckoDecisionV664(
+    state,
+    token,
+    {
+      stage: "GECKO_FALLBACK_RESULT_V664",
+      geckoFallbackStatus:
+        fallback?.status || null,
+      geckoFallbackVerified:
+        fallback?.verified === true,
+      geckoFallbackRequestSent:
+        fallback?.requestSent === true
+          ? true
+          : fallback?.requestSent === false
+            ? false
+            : null
+    }
+  );
+
   if (
     fallback?.verified
   ) {
@@ -45943,14 +46266,49 @@ async function priorityMarketFallback(
   let coinGeckoDemoV660 =
     null;
 
-  if (
+  const coinGeckoConfiguredV664 =
     coinGeckoDemoConfiguredV660(
       env
-    ) &&
+    );
+
+  const shouldTryDemoV664 =
     shouldTryCoinGeckoDemoV660(
       fallback,
       demoFallbackEligibleV660
-    )
+    );
+
+  traceCoinGeckoDecisionV664(
+    state,
+    token,
+    {
+      stage: "DEMO_POST_GECKO_DECISION_V664",
+      coinGeckoConfigured:
+        coinGeckoConfiguredV664,
+      demoFallbackEligible:
+        demoFallbackEligibleV660 === true,
+      shouldTryDemo:
+        shouldTryDemoV664 === true,
+      geckoFallbackStatus:
+        fallback?.status || null,
+      decision:
+        coinGeckoConfiguredV664 &&
+        shouldTryDemoV664
+          ? "CALL_DEMO"
+          : "SKIP_DEMO",
+      skipReason:
+        !coinGeckoConfiguredV664
+          ? "COINGECKO_DEMO_NOT_CONFIGURED"
+          : !demoFallbackEligibleV660
+            ? "DEMO_FALLBACK_ELIGIBILITY_FALSE"
+            : !shouldTryDemoV664
+              ? "GECKO_STATUS_NOT_IN_DEMO_TRIGGER_SET"
+              : null
+    }
+  );
+
+  if (
+    coinGeckoConfiguredV664 &&
+    shouldTryDemoV664
   ) {
     coinGeckoDemoV660 =
       await coinGeckoDemoMarketDataV660(
@@ -45962,6 +46320,28 @@ async function priorityMarketFallback(
         fallback?.status ||
         trigger
       );
+
+    traceCoinGeckoDecisionV664(
+      state,
+      token,
+      {
+        stage: "DEMO_POST_GECKO_RESULT_V664",
+        demoCalled: true,
+        demoRequestSent:
+          coinGeckoDemoV660?.requestSent === true,
+        demoStatus:
+          coinGeckoDemoV660?.status ||
+          (coinGeckoDemoV660?.verified === true
+            ? "VERIFIED"
+            : null),
+        demoVerified:
+          coinGeckoDemoV660?.verified === true,
+        analysisUsedAfterDemo:
+          safeNumber(budget?.analysis?.used),
+        globalUsedAfterDemo:
+          safeNumber(budget?.totalUsed)
+      }
+    );
 
     if (
       coinGeckoDemoV660?.verified ===
@@ -48563,6 +48943,30 @@ async function marketData(
   priority = false,
   demoFallbackEligibleV660 = false
 ) {
+  traceCoinGeckoDecisionV664(
+    state,
+    token,
+    {
+      stage: "MARKET_DATA_ENTERED_V664",
+      allowFresh:
+        allowFresh === true,
+      marketPriority:
+        priority === true,
+      demoFallbackEligible:
+        demoFallbackEligibleV660 === true,
+      coinGeckoConfigured:
+        coinGeckoDemoConfiguredV660(env),
+      analysisUsed:
+        safeNumber(budget?.analysis?.used),
+      analysisLimit:
+        safeNumber(budget?.analysis?.limit),
+      globalUsed:
+        safeNumber(budget?.totalUsed),
+      globalLimit:
+        safeNumber(budget?.totalLimit)
+    }
+  );
+
   const freshCache =
     cachedMarket(
       watched,
@@ -76306,6 +76710,15 @@ async function scan(
   const state =
     stateResult.state;
 
+  /*
+   * V664: reset only the diagnostic trace for this scanner run. It is persisted
+   * later in the normal existing state write and does not consume a request.
+   */
+  resetCoinGeckoDecisionTraceV664(
+    state,
+    startedAt
+  );
+
   const rpcHealthHydrationV426 =
     hydrateRpcHealthV426(
       state,
@@ -86082,6 +86495,14 @@ for (
       state,
       launchCoverageFunnelV474
     );
+
+  if (
+    state?.coinGeckoDecisionTraceV664 &&
+    typeof state.coinGeckoDecisionTraceV664 === "object"
+  ) {
+    state.coinGeckoDecisionTraceV664.scanCompletedAt =
+      Date.now();
+  }
 
   const save =
     await writeState(
@@ -128832,6 +129253,56 @@ function launchCoverageTelegramMessageV474(state) {
         return `• <b>${symbol}</b> (${escapeHtml(shortAddress)}) — Market: ${marketBlocker}; Holders: ${holderBlocker}; Risk: ${riskBlocker}; budget left A/G ${analysisRemaining}/${globalRemaining}`;
       });
 
+  const coinGeckoTraceV664 =
+    coinGeckoDecisionTraceSnapshotV664(
+      state
+    );
+
+  const coinGeckoTraceLinesV664 =
+    (
+      Array.isArray(
+        coinGeckoTraceV664?.rows
+      )
+        ? coinGeckoTraceV664.rows
+        : []
+    )
+      .slice(-4)
+      .map(row => {
+        const short =
+          isAddress(normalize(row?.address))
+            ? `${normalize(row.address).slice(0, 6)}…${normalize(row.address).slice(-4)}`
+            : "UNVERIFIED";
+
+        const decision =
+          row?.decision ||
+          (
+            row?.demoCalled === true
+              ? "CALL_DEMO"
+              : "NO_DEMO_DECISION"
+          );
+
+        const skip =
+          row?.skipReason
+            ? ` · skip ${escapeHtml(row.skipReason)}`
+            : "";
+
+        const gecko =
+          row?.geckoFallbackStatus ||
+          row?.geckoAvailabilityReason ||
+          row?.geckoFreshReason ||
+          "NONE";
+
+        const demoStatus =
+          row?.demoStatus ||
+          (
+            row?.demoCalled === true
+              ? "CALLED_STATUS_UNAVAILABLE"
+              : "NOT_CALLED"
+          );
+
+        return `• <code>${escapeHtml(short)}</code> — priority ${row?.marketPriority === true || row?.priority === true ? "YES" : "NO"} · demo eligible ${row?.demoFallbackEligible === true ? "YES" : "NO"} · Gecko ${escapeHtml(String(gecko))} · decision ${escapeHtml(String(decision))}${skip} · Demo ${escapeHtml(String(demoStatus))}`;
+      });
+
   return [
     `🔭 <b>Launch Coverage Funnel — ${escapeHtml(VERSION)}</b>`,
     "",
@@ -128859,7 +129330,7 @@ function launchCoverageTelegramMessageV474(state) {
       ? evidenceLinesV656
       : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V663 rotating evidence-completion queue</b>",
+    "<b>V664 rotating evidence-completion queue</b>",
     `Pending: <b>${fmt(last?.evidenceCompletionQueueV658?.pending)}</b> · Provider-ready pre-analysis: <b>${fmt(last?.evidenceCompletionQueueV658?.preAnalysisProviderReadyV661)}</b>`,
     `Selection reason: <b>${escapeHtml(last?.evidenceCompletionQueueV658?.preAnalysisSelectionReasonV661 || "None")}</b>`,
     `CoinGecko Demo fallback: <b>${
@@ -128877,6 +129348,13 @@ function launchCoverageTelegramMessageV474(state) {
           )
     }</b>`,
     "",
+    "<b>V664 CoinGecko decision trace — latest scan</b>",
+    ...(
+      coinGeckoTraceLinesV664.length
+        ? coinGeckoTraceLinesV664
+        : ["• No market fallback trace captured in this scan."]
+    ),
+    "",
     "<b>Cumulative since V474</b>",
     `Scans observed: <b>${fmt(c.scansObserved)}</b>`,
     `Live addresses observed: <b>${fmt(c.liveAddressesObserved)}</b>`,
@@ -128890,8 +129368,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V655 fresh-launch budget protection remains preserved; V663 adds a forward-only 7-day qualification audit using evidence already produced by the scanner.",
-    "<i>V663 keeps V662 market routing, the 42-request ceiling, one-Demo-request-per-scan guard, existing scoring/thresholds and all provider cooldown protections unchanged.</i>"
+    "V655 fresh-launch budget protection and the V663 qualification audit remain preserved; V664 adds decision-path telemetry around the existing CoinGecko fallback.",
+    "<i>V664 is diagnostic-only: market routing, the 42-request ceiling, one-Demo-request-per-scan guard, scoring/thresholds and provider cooldown protections are unchanged.</i>"
   ].join("\n");
 }
 
