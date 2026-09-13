@@ -1,4 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V656
+ * AUTHORITATIVE RUNTIME VERSION: V656
+ *
+ * V656 EVIDENCE-COMPLETION DIAGNOSTIC
+ * - builds directly forward from authoritative V655;
+ * - V655 proved the live-analysis budget funnel can return 4/4 selected verified
+ *   launches with zero budget deferrals; V656 therefore changes no routing,
+ *   scoring, qualification, Telegram threshold, cadence, or request ceiling;
+ * - records a zero-request per-candidate evidence-completion snapshot immediately
+ *   after analysis: remaining analysis/global budget, Dex/Gecko availability and
+ *   market status, alternative/on-chain market evidence, USD-liquidity status,
+ *   Blockscout holder status/retry state, and risk verification status;
+ * - persists a compact copy into the existing V474 launch-coverage last-scan
+ *   snapshot and renders it in /launchcoverage for the current/live candidates;
+ * - adds zero provider requests and zero additional state-write cycles.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V655
  * AUTHORITATIVE RUNTIME VERSION: V655
  *
@@ -5262,7 +5280,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V655";
+const VERSION = "V656";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -78635,6 +78653,179 @@ for (
         }
       );
 
+    /*
+     * V656: capture the exact evidence-completion state at the moment this
+     * candidate returns from analyzeToken. Diagnostic only: no provider call,
+     * no state write, no qualification/scoring mutation.
+     */
+    if (candidate && typeof candidate === "object") {
+      const marketV656 = candidate?.market || {};
+      const availabilityV656 =
+        marketV656?.marketProviderAvailabilityV147 || {};
+      const alternativeV656 =
+        marketV656?.alternativeMarketData || {};
+      const holdersV656 = candidate?.holders || {};
+      const holderIntegrityV656 = holdersV656?.integrity || {};
+      const blockscoutProV656 =
+        holdersV656?.blockscoutProHolderFallbackV143 || {};
+      const holderRetryV656 =
+        holdersV656?.holderIndexLagRetryV422 ||
+        holdersV656?.holderIndexLagV422 ||
+        null;
+      const riskV656 = candidate?.risk || {};
+      const onChainV656 =
+        marketV656?.onChainMarketFoundationV438 || null;
+
+      candidate.evidenceCompletionDiagnosticV656 = {
+        capturedAt: Date.now(),
+        address,
+        symbol:
+          candidate?.symbol ||
+          candidate?.validation?.symbol ||
+          watched?.metadata?.symbol ||
+          watched?.symbol ||
+          null,
+        budget: {
+          analysisUsed: safeNumber(budget?.analysis?.used),
+          analysisEffectiveLimit: effectiveAnalysisLimitV416(budget),
+          analysisRemaining: Math.max(
+            0,
+            effectiveAnalysisLimitV416(budget) -
+              safeNumber(budget?.analysis?.used)
+          ),
+          globalUsed: safeNumber(budget?.totalUsed),
+          globalLimit: safeNumber(budget?.totalLimit),
+          globalRemaining: Math.max(
+            0,
+            safeNumber(budget?.totalLimit) -
+              safeNumber(budget?.totalUsed)
+          )
+        },
+        market: {
+          verified: marketV656?.verified === true,
+          source: marketV656?.source || null,
+          status:
+            marketV656?.status ||
+            marketV656?.dexStatus ||
+            null,
+          liquidityUsd:
+            marketV656?.verified === true
+              ? safeNumber(marketV656?.liquidityUsd)
+              : null,
+          dex: {
+            eligible: availabilityV656?.dex?.eligible ?? null,
+            reason: availabilityV656?.dex?.reason || null,
+            cooldownUntil:
+              availabilityV656?.dex?.cooldownUntil || null
+          },
+          gecko: {
+            eligible: availabilityV656?.gecko?.eligible ?? null,
+            reason: availabilityV656?.gecko?.reason || null,
+            cooldownUntil:
+              availabilityV656?.gecko?.cooldownUntil || null
+          },
+          alternative: {
+            attempted: alternativeV656?.attempted === true,
+            requestSent: alternativeV656?.requestSent === true,
+            source: alternativeV656?.source || null,
+            status: alternativeV656?.status || null,
+            fallbackTrigger:
+              alternativeV656?.fallbackTrigger || null,
+            earliestMarketRetryAt:
+              alternativeV656?.earliestMarketRetryAt || null
+          },
+          onChain: onChainV656
+            ? {
+                verifiedObservedExecutionPrice:
+                  onChainV656?.verifiedObservedExecutionPrice === true,
+                usdLiquidityVerified:
+                  onChainV656?.usdLiquidityVerified === true,
+                status: onChainV656?.status || null,
+                source: onChainV656?.source || null
+              }
+            : null,
+          primaryBlocker:
+            marketV656?.verified === true
+              ? null
+              : (
+                  onChainV656?.verifiedObservedExecutionPrice === true &&
+                  onChainV656?.usdLiquidityVerified !== true
+                    ? "ONCHAIN_PRICE_VERIFIED_USD_LIQUIDITY_STILL_REQUIRED_V438"
+                    : (
+                        alternativeV656?.status ||
+                        marketV656?.status ||
+                        availabilityV656?.dex?.reason ||
+                        availabilityV656?.gecko?.reason ||
+                        "MARKET_UNVERIFIED"
+                      )
+                )
+        },
+        holders: {
+          fullyVerified:
+            holdersV656?.integrity?.verified === true &&
+            holdersV656?.concentrationVerified === true &&
+            holdersV656?.whale?.verified === true,
+          integrityStatus: holderIntegrityV656?.status || null,
+          source: holdersV656?.holderSource || null,
+          countersVerified:
+            holdersV656?.countersVerified === true,
+          concentrationVerified:
+            holdersV656?.concentrationVerified === true,
+          whaleVerified:
+            holdersV656?.whale?.verified === true,
+          blockscoutPro: {
+            configured: blockscoutProV656?.configured === true,
+            attempted: blockscoutProV656?.attempted === true,
+            success: blockscoutProV656?.success === true,
+            status: blockscoutProV656?.status || null,
+            httpStatus: blockscoutProV656?.httpStatus ?? null,
+            cooldownUntil:
+              blockscoutProV656?.cooldownUntil || null
+          },
+          retry: holderRetryV656
+            ? {
+                nextRetryAt: holderRetryV656?.nextRetryAt || null,
+                retryAfterMs:
+                  safeNumber(holderRetryV656?.retryAfterMs),
+                failureClass:
+                  holderRetryV656?.failureClassV437 ||
+                  holderRetryV656?.failureClass ||
+                  null,
+                status: holderRetryV656?.status || null
+              }
+            : null,
+          primaryBlocker:
+            (
+              holdersV656?.integrity?.verified === true &&
+              holdersV656?.concentrationVerified === true &&
+              holdersV656?.whale?.verified === true
+            )
+              ? null
+              : (
+                  holderIntegrityV656?.status ||
+                  blockscoutProV656?.status ||
+                  "HOLDER_EVIDENCE_UNVERIFIED"
+                )
+        },
+        risk: {
+          verified: riskV656?.verified === true,
+          score:
+            riskV656?.verified === true
+              ? safeNumber(riskV656?.score)
+              : null,
+          status: riskV656?.status || null,
+          source: riskV656?.source || null,
+          reason:
+            riskV656?.reason ||
+            (riskV656?.verified === true
+              ? null
+              : "RISK_UNVERIFIED")
+        },
+        telegramReasons:
+          telegramQualificationReasons(candidate)
+      };
+    }
+
     const erc20IdentityDiagnosticV418 =
       candidate?.validation?.erc20IdentityV418 ||
       watched?.erc20IdentityV418 ||
@@ -125985,6 +126176,36 @@ function buildLaunchCoverageFunnelV474({
         );
       });
 
+  const currentLiveEvidenceCompletionV656 =
+    currentLiveCandidates
+      .slice(0, 10)
+      .map(candidate => {
+        const d =
+          candidate?.evidenceCompletionDiagnosticV656 ||
+          null;
+
+        if (!d) {
+          return {
+            address: normalize(candidate?.address),
+            symbol: candidate?.symbol || null,
+            status: "DIAGNOSTIC_NOT_CAPTURED_V656"
+          };
+        }
+
+        return {
+          address: d.address || normalize(candidate?.address),
+          symbol: d.symbol || candidate?.symbol || null,
+          budget: d.budget || null,
+          market: d.market || null,
+          holders: d.holders || null,
+          risk: d.risk || null,
+          telegramReasons:
+            Array.isArray(d.telegramReasons)
+              ? d.telegramReasons
+              : []
+        };
+      });
+
   const funnel = {
     enabled: true,
     version: "V474",
@@ -126054,7 +126275,8 @@ function buildLaunchCoverageFunnelV474({
         telegramQualified.length,
       currentLiveTelegramBlockedByV649,
       currentLiveTelegramSent:
-        currentLiveTelegramSent
+        currentLiveTelegramSent,
+      currentLiveEvidenceCompletionV656
     },
 
     diagnosticOnly: {
@@ -126235,6 +126457,37 @@ function launchCoverageTelegramMessageV474(state) {
         : "None";
     };
 
+  const evidenceLinesV656 =
+    (Array.isArray(last.currentLiveEvidenceCompletionV656)
+      ? last.currentLiveEvidenceCompletionV656
+      : []
+    )
+      .slice(0, 4)
+      .map((row, index) => {
+        const symbol =
+          escapeHtml(row?.symbol || `Candidate ${index + 1}`);
+        const shortAddress =
+          isAddress(normalize(row?.address))
+            ? `${normalize(row.address).slice(0, 6)}…${normalize(row.address).slice(-4)}`
+            : "UNVERIFIED";
+        const marketBlocker =
+          escapeHtml(row?.market?.primaryBlocker ||
+            (row?.market?.verified === true ? "VERIFIED" : "UNVERIFIED"));
+        const holderBlocker =
+          escapeHtml(row?.holders?.primaryBlocker ||
+            (row?.holders?.fullyVerified === true ? "VERIFIED" : "UNVERIFIED"));
+        const riskBlocker =
+          escapeHtml(row?.risk?.verified === true
+            ? `VERIFIED ${safeNumber(row?.risk?.score)}/100`
+            : (row?.risk?.reason || row?.risk?.status || "RISK_UNVERIFIED"));
+        const analysisRemaining =
+          fmt(row?.budget?.analysisRemaining);
+        const globalRemaining =
+          fmt(row?.budget?.globalRemaining);
+
+        return `• <b>${symbol}</b> (${escapeHtml(shortAddress)}) — Market: ${marketBlocker}; Holders: ${holderBlocker}; Risk: ${riskBlocker}; budget left A/G ${analysisRemaining}/${globalRemaining}`;
+      });
+
   return [
     `🔭 <b>Launch Coverage Funnel — ${escapeHtml(VERSION)}</b>`,
     "",
@@ -126257,6 +126510,11 @@ function launchCoverageTelegramMessageV474(state) {
     `↳ Qualification blockers: <b>${reasonSummaryV649(last.currentLiveTelegramBlockedByV649)}</b>`,
     `Telegram sent: <b>${fmt(last.currentLiveTelegramSent)}</b>`,
     "",
+    "<b>V656 evidence completion — current/live returned</b>",
+    ...(evidenceLinesV656.length
+      ? evidenceLinesV656
+      : ["• No V656 candidate diagnostic captured in this scan."]),
+    "",
     "<b>Cumulative since V474</b>",
     `Scans observed: <b>${fmt(c.scansObserved)}</b>`,
     `Live addresses observed: <b>${fmt(c.liveAddressesObserved)}</b>`,
@@ -126270,8 +126528,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V649 allows a lower-ranked current/live verified launch to use existing residual progressive-analysis capacity when the top target defers.",
-    "<i>Zero additional provider requests, unchanged request ceilings and no scoring/threshold changes.</i>"
+    "V649 fresh-launch progressive analysis remains preserved; V656 adds read-only per-candidate evidence-completion diagnostics.",
+    "<i>V656 adds zero provider requests, unchanged request ceilings and no scoring/threshold changes.</i>"
   ].join("\n");
 }
 
