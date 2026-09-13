@@ -5280,7 +5280,20 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V656";
+const VERSION = "V657";
+
+/*
+ * V657 — fresh verified launch evidence-completion priority.
+ * - Preserves V655/V656 4-of-4 analysis completion and ERC20 reservations.
+ * - Current/live positively verified launches may use existing bounded market
+ *   fallback priority (DexScreener -> GeckoTerminal) within all existing
+ *   cooldown, spacing, scan and request-budget guards.
+ * - Current/live verified launches may use holder completion priority only when
+ *   Blockscout has not already proved a same-scan outage and V422 retry timing
+ *   allows it.
+ * - No request ceiling, provider cooldown, scoring, qualification or Telegram
+ *   threshold is changed. Missing evidence remains UNVERIFIED.
+ */
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -78633,21 +78646,46 @@ for (
               address
             ),
 
+          /*
+           * V657: every current/live positively verified launch may use the
+           * existing bounded fresh-market recovery lane. Provider cooldowns,
+           * fresh-spacing, one-fresh-per-scan guards and request ceilings remain
+           * authoritative, so this does not bypass DexScreener/Gecko protection.
+           */
           marketFreshEligible:
-            isPriorityCompletion,
+            isPriorityCompletion ||
+            isCurrentLiveVerifiedLaunchV649,
 
           priorityCompletion:
             isPriorityCompletion,
 
           marketPriority:
-            isPriorityCompletion,
+            isPriorityCompletion ||
+            isCurrentLiveVerifiedLaunchV649,
 
+          /*
+           * V657 holder completion: allow a fresh verified launch to use the
+           * existing holder-completion path only while Blockscout has NOT
+           * already proved a same-run outage and any V422 retry is actually due.
+           * This preserves the outage circuit breaker and retry cadence instead
+           * of repeatedly hammering the same unavailable holder endpoint.
+           */
           holderPriorityCompletion:
-            freshMarketSlotHandoffV159
-              .triggered
-              ? address ===
-                retryPersistenceAddressV139
-              : isPriorityCompletion,
+            (
+              freshMarketSlotHandoffV159
+                .triggered
+                ? address ===
+                  retryPersistenceAddressV139
+                : isPriorityCompletion
+            ) ||
+            (
+              isCurrentLiveVerifiedLaunchV649 &&
+              budget?.blockscoutHolderOutage?.active !== true &&
+              (
+                holderIndexLagStateV422(watched)?.active !== true ||
+                holderIndexLagStateV422(watched)?.due === true
+              )
+            ),
 
           liveMomentumActivityV152
         }
@@ -126528,8 +126566,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V649 fresh-launch progressive analysis remains preserved; V656 adds read-only per-candidate evidence-completion diagnostics.",
-    "<i>V656 adds zero provider requests, unchanged request ceilings and no scoring/threshold changes.</i>"
+    "V655 fresh-launch budget protection remains preserved; V657 extends bounded market/holder completion priority to current/live verified launches without bypassing provider cooldowns.",
+    "<i>V657 adds no request ceiling, no scoring/threshold change, and preserves provider cooldown/retry guards.</i>"
   ].join("\n");
 }
 
