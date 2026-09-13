@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V652
+ * AUTHORITATIVE RUNTIME VERSION: V652
+ *
+ * V652 READ-ONLY ERC-20 RPC DIAGNOSTIC
+ * - builds directly forward from authoritative V651;
+ * - adds /erc20-rpc, a read-only zero-provider-request diagnostic route;
+ * - exposes persisted V426 provider+method analysis health for eth_getCode and
+ *   eth_call, including attempts, successes, 429 state, cooldowns and outcomes;
+ * - exposes recent watched-token V418/V419 ERC-20 identity diagnostics,
+ *   including primary provider, failure class, BlockReq V421 fallback
+ *   attempted/used/error fields and method-level retry evidence;
+ * - exposes latest launch-coverage defer reasons for correlation;
+ * - does not run a scan, does not call RPC/Blockscout/Dex/Gecko/Bitquery,
+ *   does not consume the 42-request scanner budget and does not write state;
+ * - no scanner, provider routing, scoring, qualification, Telegram threshold,
+ *   cadence or request-ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V651
  * AUTHORITATIVE RUNTIME VERSION: V651
  *
@@ -5172,7 +5191,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V651";
+const VERSION = "V652";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -90943,6 +90962,7 @@ async function health(
       "/scan",
       "/state",
       "/diagnostics",
+      "/erc20-rpc",
       "/run-all",
       "/test-telegram",
       "/telegram-webhook",
@@ -91407,6 +91427,216 @@ async function stateStatus(
 
     timestamp:
       now()
+  };
+}
+
+
+/* =========================================================
+   V652 — READ-ONLY ERC-20 RPC DIAGNOSTIC
+   ========================================================= */
+
+async function erc20RpcDiagnosticV652(env) {
+  const result = await readState(env);
+  const state = result?.state || freshState();
+
+  const persisted =
+    state?.rpcHealthPersistentV426 &&
+    typeof state.rpcHealthPersistentV426 === "object"
+      ? state.rpcHealthPersistentV426
+      : {};
+
+  const providerMethod =
+    persisted?.providerMethod &&
+    typeof persisted.providerMethod === "object"
+      ? persisted.providerMethod
+      : {};
+
+  const rpcRows = Object.values(providerMethod)
+    .filter(row => {
+      const method = String(row?.method || "");
+      return method === "eth_getCode" || method === "eth_call";
+    })
+    .map(row => ({
+      provider: row?.provider || null,
+      method: row?.method || null,
+      attempts: safeNumber(row?.attempts),
+      successes: safeNumber(row?.successes),
+      http429: safeNumber(row?.http429),
+      consecutive429: safeNumber(row?.consecutive429),
+      cooldownUntil: safeNumber(row?.cooldownUntil) || null,
+      cooldownActive:
+        safeNumber(row?.cooldownUntil) > Date.now(),
+      cooldownReason: row?.cooldownReason || null,
+      lastAttemptAt: safeNumber(row?.lastAttemptAt) || null,
+      lastSuccessAt: safeNumber(row?.lastSuccessAt) || null,
+      last429At: safeNumber(row?.last429At) || null,
+      lastOutcome: row?.lastOutcome || null,
+      lastLatencyMs:
+        Number.isFinite(Number(row?.lastLatencyMs))
+          ? Number(row.lastLatencyMs)
+          : null
+    }))
+    .sort((a, b) =>
+      String(a.method).localeCompare(String(b.method)) ||
+      String(a.provider).localeCompare(String(b.provider))
+    );
+
+  const watched =
+    Array.isArray(state?.watchedTokens)
+      ? state.watchedTokens
+      : [];
+
+  const recentDeferred = watched
+    .map(row => {
+      const diag =
+        row?.erc20IdentityV418 &&
+        typeof row.erc20IdentityV418 === "object"
+          ? row.erc20IdentityV418
+          : null;
+
+      if (!diag) return null;
+
+      const recordedAt =
+        safeNumber(diag?.recordedAt);
+
+      const reason =
+        diag?.reason || null;
+
+      if (
+        ![
+          "ERC20_CODE_RPC_UNAVAILABLE_V418",
+          "ERC20_METHODS_RPC_UNAVAILABLE_RETRY_V418",
+          "ERC20_SCAN_RPC_CIRCUIT_OPEN_V420"
+        ].includes(reason)
+      ) {
+        return null;
+      }
+
+      return {
+        address: normalize(row?.address) || null,
+        symbol:
+          row?.symbol ||
+          row?.metadata?.symbol ||
+          null,
+        recordedAt: recordedAt || null,
+        ageMinutes:
+          recordedAt
+            ? Number(((Date.now() - recordedAt) / 60000).toFixed(2))
+            : null,
+        reason,
+        status: diag?.status || null,
+        score: safeNumber(diag?.score),
+        requiredScore: safeNumber(diag?.requiredScore) || 3,
+        earlyStoppedV419: diag?.earlyStoppedV419 === true,
+        stoppedAfterV419: diag?.stoppedAfterV419 || null,
+        code: diag?.code
+          ? {
+              verifiedResponse:
+                diag.code.verifiedResponse === true,
+              hasBytecode:
+                diag.code.hasBytecode === true,
+              provider:
+                diag.code.provider || null,
+              error:
+                diag.code.error || null,
+              failureClass:
+                diag.code.failureClass || null,
+              v421FallbackAttempted:
+                diag.code.v421FallbackAttempted === true,
+              v421FallbackUsed:
+                diag.code.v421FallbackUsed === true,
+              v421PrimaryError:
+                diag.code.v421PrimaryError || null,
+              v421FallbackError:
+                diag.code.v421FallbackError || null
+            }
+          : null,
+        methods:
+          Array.isArray(diag?.methods)
+            ? diag.methods.map(m => ({
+                method: m?.method || null,
+                rpcReturned: m?.rpcReturned === true,
+                provider: m?.provider || null,
+                error: m?.error || null,
+                failureClass: m?.failureClass || null,
+                retryableFailure:
+                  m?.retryableFailure === true,
+                reusedProofV419:
+                  m?.reusedProofV419 === true,
+                skippedV419:
+                  m?.skippedV419 === true,
+                decodedVerified:
+                  m?.decodedVerified === true,
+                v421FallbackAttempted:
+                  m?.v421FallbackAttempted === true,
+                v421FallbackUsed:
+                  m?.v421FallbackUsed === true,
+                v421PrimaryError:
+                  m?.v421PrimaryError || null,
+                v421FallbackError:
+                  m?.v421FallbackError || null
+              }))
+            : []
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) =>
+      safeNumber(b.recordedAt) -
+      safeNumber(a.recordedAt)
+    )
+    .slice(0, 12);
+
+  const coverage =
+    state?.launchCoverageCumulativeV474 &&
+    typeof state.launchCoverageCumulativeV474 === "object"
+      ? state.launchCoverageCumulativeV474
+      : {};
+
+  return {
+    agent: "Robinhood Chain Meme Hunter",
+    version: VERSION,
+    status: "READ_ONLY_ERC20_RPC_DIAGNOSTIC_V652",
+    scannerBudgetConsumed: false,
+    externalProviderRequestsAdded: 0,
+    stateWritePerformed: false,
+
+    rpcPersistentHealthV426: {
+      updatedAt:
+        safeNumber(persisted?.updatedAt) || null,
+      savedRows:
+        safeNumber(
+          persisted?.lastPersistSummary?.savedRows
+        ),
+      ethGetCodeAndEthCall: rpcRows
+    },
+
+    recentDeferredErc20V418: recentDeferred,
+
+    latestLaunchCoverage: {
+      scansObserved:
+        safeNumber(coverage?.scansObserved),
+      lastUpdatedAt:
+        coverage?.lastUpdatedAt || null,
+      currentLiveBudgetDeferred:
+        safeNumber(
+          coverage?.lastScan?.currentLiveBudgetDeferred
+        ),
+      currentLiveDeferredByReasonV649:
+        coverage?.lastScan?.currentLiveDeferredByReasonV649 || {}
+    },
+
+    interpretation: {
+      ifRpcRowsShowSuccessButDeferredStillOccurs:
+        "Inspect recentDeferredErc20V418 primary/fallback errors; provider availability may differ by request or budget point.",
+      ifBlockReqFallbackAttemptedAndFailed:
+        "V421 independent fallback itself is unavailable for that read.",
+      ifBlockReqFallbackNotAttempted:
+        "Primary error was not eligible for V650 fallback or analysis budget was unavailable before fallback.",
+      noEvidenceFabricated:
+        true
+    },
+
+    timestamp: now()
   };
 }
 
@@ -131412,6 +131642,17 @@ async function handleRequest(
 
   if (
     path ===
+    "/erc20-rpc"
+  ) {
+    return jsonResponse(
+      await erc20RpcDiagnosticV652(
+        env
+      )
+    );
+  }
+
+  if (
+    path ===
     "/diagnostics"
   ) {
     return jsonResponse(
@@ -131536,6 +131777,7 @@ async function handleRequest(
         "/scan",
         "/state",
         "/diagnostics",
+        "/erc20-rpc",
         "/run-all",
         "/test-telegram",
         "/telegram-webhook",
