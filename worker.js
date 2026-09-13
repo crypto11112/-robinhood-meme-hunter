@@ -5280,20 +5280,28 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V657";
+const VERSION = "V658";
 
 /*
- * V657 — fresh verified launch evidence-completion priority.
- * - Preserves V655/V656 4-of-4 analysis completion and ERC20 reservations.
- * - Current/live positively verified launches may use existing bounded market
- *   fallback priority (DexScreener -> GeckoTerminal) within all existing
- *   cooldown, spacing, scan and request-budget guards.
- * - Current/live verified launches may use holder completion priority only when
- *   Blockscout has not already proved a same-scan outage and V422 retry timing
- *   allows it.
- * - No request ceiling, provider cooldown, scoring, qualification or Telegram
- *   threshold is changed. Missing evidence remains UNVERIFIED.
+ * V658 — rotating verified-launch evidence-completion queue.
+ * - Preserves V655/V657 4-of-4 analysis completion, ERC20 reservations and
+ *   current/live market/holder completion priority.
+ * - Adds a small persisted queue for otherwise viable positively verified
+ *   launches that returned with incomplete market / holder / risk evidence.
+ * - At most ONE queued evidence-completion candidate is injected into the next
+ *   bounded analysis set per scan, behind already-protected carried/holder
+ *   retries and ahead of ordinary lower-priority selected rows.
+ * - Queue rotation respects provider-reported retry/cooldown times, bounded age
+ *   and bounded attempts; it never bypasses DexScreener, GeckoTerminal,
+ *   Blockscout, analysis/global budgets, or the hard 42-request ceiling.
+ * - No scoring, qualification, liquidity, risk or Telegram threshold changes.
+ *   Missing evidence remains UNVERIFIED.
  */
+
+const EVIDENCE_COMPLETION_QUEUE_MAX_V658 = 6;
+const EVIDENCE_COMPLETION_QUEUE_MAX_ATTEMPTS_V658 = 6;
+const EVIDENCE_COMPLETION_QUEUE_MAX_AGE_MS_V658 = 2 * 60 * 60 * 1000;
+const EVIDENCE_COMPLETION_QUEUE_DEFAULT_RETRY_MS_V658 = 5 * 60 * 1000;
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -13673,6 +13681,17 @@ function newState() {
 
     launchAgeRecoveryV260:
       {},
+
+    evidenceCompletionQueueV658: {
+      schemaVersion: "V658_1",
+      entries: [],
+      lastSelectedAddress: null,
+      lastSelectedAt: null,
+      lastUpdatedAt: null,
+      totalEnqueued: 0,
+      totalSelected: 0,
+      totalCompletedOrDropped: 0
+    },
 
     rpcHealthPersistentV426: {
       schemaVersion: "V426_1",
@@ -72228,6 +72247,395 @@ function shouldKeepCompletionCandidate(
 }
 
 
+
+/* =========================================================
+   V658 ROTATING VERIFIED-LAUNCH EVIDENCE COMPLETION QUEUE
+   ========================================================= */
+
+function ensureEvidenceCompletionQueueV658(state) {
+  if (!state || typeof state !== "object") return null;
+
+  const existing =
+    state.evidenceCompletionQueueV658 &&
+    typeof state.evidenceCompletionQueueV658 === "object"
+      ? state.evidenceCompletionQueueV658
+      : {};
+
+  state.evidenceCompletionQueueV658 = {
+    schemaVersion: "V658_1",
+    entries:
+      Array.isArray(existing.entries)
+        ? existing.entries
+        : [],
+    lastSelectedAddress:
+      normalize(existing.lastSelectedAddress) || null,
+    lastSelectedAt:
+      safeNumber(existing.lastSelectedAt) || null,
+    lastUpdatedAt:
+      safeNumber(existing.lastUpdatedAt) || null,
+    totalEnqueued:
+      safeNumber(existing.totalEnqueued),
+    totalSelected:
+      safeNumber(existing.totalSelected),
+    totalCompletedOrDropped:
+      safeNumber(existing.totalCompletedOrDropped)
+  };
+
+  return state.evidenceCompletionQueueV658;
+}
+
+function evidenceCompletionRetryAtV658(candidate) {
+  const now = Date.now();
+  const market = candidate?.market || {};
+  const availability =
+    market?.marketProviderAvailabilityV147 || {};
+  const alternative =
+    market?.alternativeMarketData || {};
+  const holders =
+    candidate?.holders || {};
+  const holderRetry =
+    holders?.holderIndexLagRetryV422 ||
+    holders?.holderIndexLagV422 ||
+    null;
+
+  const times = [
+    alternative?.earliestMarketRetryAt,
+    alternative?.freshEligibleAt,
+    alternative?.cooldownUntil,
+    availability?.earliestEligibleAt,
+    availability?.dex?.eligibleAt,
+    availability?.dex?.cooldownUntil,
+    availability?.gecko?.eligibleAt,
+    availability?.gecko?.cooldownUntil,
+    holderRetry?.nextRetryAt
+  ]
+    .map(safeNumber)
+    .filter(value => value > now);
+
+  return times.length
+    ? Math.min(...times)
+    : now + EVIDENCE_COMPLETION_QUEUE_DEFAULT_RETRY_MS_V658;
+}
+
+function pruneEvidenceCompletionQueueV658(state) {
+  const queue = ensureEvidenceCompletionQueueV658(state);
+  if (!queue) return null;
+
+  const now = Date.now();
+  const before = queue.entries.length;
+
+  queue.entries = queue.entries
+    .filter(row => {
+      const address = normalize(row?.address);
+      if (!isAddress(address) || address === ZERO) return false;
+
+      const watched =
+        state?.watchedTokens?.find(
+          token => normalize(token?.address) === address
+        ) || null;
+
+      if (!completionCandidateStillEligible(watched)) return false;
+
+      const firstQueuedAt = safeNumber(row?.firstQueuedAt);
+      if (
+        firstQueuedAt > 0 &&
+        now - firstQueuedAt >
+          EVIDENCE_COMPLETION_QUEUE_MAX_AGE_MS_V658
+      ) {
+        return false;
+      }
+
+      if (
+        safeNumber(row?.attempts) >=
+        EVIDENCE_COMPLETION_QUEUE_MAX_ATTEMPTS_V658
+      ) {
+        return false;
+      }
+
+      return true;
+    })
+    .slice(0, EVIDENCE_COMPLETION_QUEUE_MAX_V658);
+
+  const dropped = Math.max(0, before - queue.entries.length);
+  queue.totalCompletedOrDropped += dropped;
+  queue.lastUpdatedAt = now;
+  return queue;
+}
+
+function selectEvidenceCompletionRetryV658(state) {
+  const queue = pruneEvidenceCompletionQueueV658(state);
+  if (!queue || !queue.entries.length) return null;
+
+  const now = Date.now();
+  const primaryAddress =
+    normalize(state?.priorityCandidateCompletion?.address);
+  const holderRetryAddress =
+    normalize(state?.holderEvidenceRetryV422?.address);
+
+  const eligible = queue.entries
+    .filter(row => {
+      const address = normalize(row?.address);
+      if (!isAddress(address)) return false;
+
+      if (
+        address === primaryAddress ||
+        address === holderRetryAddress
+      ) {
+        return false;
+      }
+
+      return safeNumber(row?.nextEligibleAt) <= now;
+    })
+    .sort((a, b) => {
+      const aQueued = safeNumber(a?.firstQueuedAt);
+      const bQueued = safeNumber(b?.firstQueuedAt);
+      if (aQueued !== bQueued) return aQueued - bQueued;
+      return safeNumber(b?.priority) - safeNumber(a?.priority);
+    });
+
+  const selected = eligible[0] || null;
+  if (!selected) return null;
+
+  const address = normalize(selected.address);
+  const watched =
+    state?.watchedTokens?.find(
+      token => normalize(token?.address) === address
+    ) || null;
+
+  if (!watched) return null;
+
+  selected.attempts =
+    safeNumber(selected.attempts) + 1;
+  selected.lastAttemptAt = now;
+  selected.nextEligibleAt =
+    now + EVIDENCE_COMPLETION_QUEUE_DEFAULT_RETRY_MS_V658;
+
+  queue.lastSelectedAddress = address;
+  queue.lastSelectedAt = now;
+  queue.totalSelected =
+    safeNumber(queue.totalSelected) + 1;
+  queue.lastUpdatedAt = now;
+
+  return watched;
+}
+
+function updateEvidenceCompletionQueueV658(
+  state,
+  candidates,
+  liveTokens
+) {
+  const queue = pruneEvidenceCompletionQueueV658(state);
+  if (!queue) return null;
+
+  const now = Date.now();
+  const liveSet =
+    new Set(
+      Array.from(liveTokens || [])
+        .map(value =>
+          normalize(
+            typeof value === "string"
+              ? value
+              : value?.address
+          )
+        )
+        .filter(isAddress)
+    );
+
+  const candidateByAddress =
+    new Map(
+      (Array.isArray(candidates) ? candidates : [])
+        .map(candidate => [
+          normalize(candidate?.address),
+          candidate
+        ])
+        .filter(([address]) => isAddress(address))
+    );
+
+  queue.entries = queue.entries.filter(row => {
+    const address = normalize(row?.address);
+    const candidate = candidateByAddress.get(address);
+    if (!candidate) return true;
+
+    const watched =
+      state?.watchedTokens?.find(
+        token => normalize(token?.address) === address
+      ) || null;
+
+    if (
+      !shouldKeepCompletionCandidate(
+        candidate,
+        row,
+        watched
+      )
+    ) {
+      queue.totalCompletedOrDropped =
+        safeNumber(queue.totalCompletedOrDropped) + 1;
+      return false;
+    }
+
+    row.symbol =
+      candidate?.symbol ||
+      candidate?.validation?.symbol ||
+      row?.symbol ||
+      null;
+    row.priority = analysisPriority(candidate);
+    row.blockers = completionCandidateBlockers(candidate);
+    row.marketStatus =
+      candidate?.market?.status || null;
+    row.holderStatus =
+      candidate?.holders?.integrity?.status || null;
+    row.riskVerified =
+      candidate?.risk?.verified === true;
+    row.lastObservedAt = now;
+    row.nextEligibleAt =
+      evidenceCompletionRetryAtV658(candidate);
+
+    return true;
+  });
+
+  for (
+    const candidate
+    of Array.isArray(candidates) ? candidates : []
+  ) {
+    const address = normalize(candidate?.address);
+    if (!isAddress(address) || !liveSet.has(address)) continue;
+
+    const verifiedLaunch =
+      candidate?.verifiedLaunchSourceV476?.verified === true ||
+      candidate?.verifiedLaunchAgeV223?.verified === true;
+
+    if (!verifiedLaunch) continue;
+
+    const watched =
+      state?.watchedTokens?.find(
+        token => normalize(token?.address) === address
+      ) || null;
+
+    if (
+      !shouldKeepCompletionCandidate(
+        candidate,
+        null,
+        watched
+      )
+    ) {
+      continue;
+    }
+
+    const existing =
+      queue.entries.find(
+        row => normalize(row?.address) === address
+      );
+
+    if (existing) {
+      existing.symbol =
+        candidate?.symbol ||
+        candidate?.validation?.symbol ||
+        existing?.symbol ||
+        null;
+      existing.priority = analysisPriority(candidate);
+      existing.blockers = completionCandidateBlockers(candidate);
+      existing.marketStatus =
+        candidate?.market?.status || null;
+      existing.holderStatus =
+        candidate?.holders?.integrity?.status || null;
+      existing.lastObservedAt = now;
+      existing.nextEligibleAt =
+        evidenceCompletionRetryAtV658(candidate);
+      continue;
+    }
+
+    queue.entries.push({
+      address,
+      symbol:
+        candidate?.symbol ||
+        candidate?.validation?.symbol ||
+        null,
+      firstQueuedAt: now,
+      lastObservedAt: now,
+      lastAttemptAt: null,
+      nextEligibleAt:
+        evidenceCompletionRetryAtV658(candidate),
+      attempts: 0,
+      priority: analysisPriority(candidate),
+      blockers: completionCandidateBlockers(candidate),
+      marketStatus:
+        candidate?.market?.status || null,
+      holderStatus:
+        candidate?.holders?.integrity?.status || null,
+      riskVerified:
+        candidate?.risk?.verified === true,
+      verifiedLaunch: true
+    });
+
+    queue.totalEnqueued =
+      safeNumber(queue.totalEnqueued) + 1;
+  }
+
+  queue.entries = queue.entries
+    .sort((a, b) => {
+      const aQueued = safeNumber(a?.firstQueuedAt);
+      const bQueued = safeNumber(b?.firstQueuedAt);
+      if (aQueued !== bQueued) return aQueued - bQueued;
+      return safeNumber(b?.priority) - safeNumber(a?.priority);
+    })
+    .slice(0, EVIDENCE_COMPLETION_QUEUE_MAX_V658);
+
+  queue.lastUpdatedAt = now;
+  return queue;
+}
+
+function evidenceCompletionQueueSnapshotV658(state) {
+  const queue = ensureEvidenceCompletionQueueV658(state);
+  if (!queue) {
+    return {
+      pending: 0,
+      dueNow: 0,
+      lastSelectedAddress: null,
+      lastSelectedAt: null,
+      entries: []
+    };
+  }
+
+  const now = Date.now();
+
+  return {
+    pending: queue.entries.length,
+    dueNow:
+      queue.entries.filter(
+        row => safeNumber(row?.nextEligibleAt) <= now
+      ).length,
+    lastSelectedAddress:
+      normalize(queue.lastSelectedAddress) || null,
+    lastSelectedAt:
+      safeNumber(queue.lastSelectedAt) || null,
+    totalEnqueued:
+      safeNumber(queue.totalEnqueued),
+    totalSelected:
+      safeNumber(queue.totalSelected),
+    totalCompletedOrDropped:
+      safeNumber(queue.totalCompletedOrDropped),
+    entries:
+      queue.entries.slice(0, 6).map(row => ({
+        address: normalize(row?.address),
+        symbol: row?.symbol || null,
+        firstQueuedAt:
+          safeNumber(row?.firstQueuedAt) || null,
+        nextEligibleAt:
+          safeNumber(row?.nextEligibleAt) || null,
+        attempts:
+          safeNumber(row?.attempts),
+        blockers:
+          Array.isArray(row?.blockers)
+            ? row.blockers.slice(0, 6)
+            : [],
+        marketStatus:
+          row?.marketStatus || null,
+        holderStatus:
+          row?.holderStatus || null
+      }))
+  };
+}
+
 /* =========================================================
    MAIN SCAN
    ========================================================= */
@@ -76609,10 +77017,25 @@ for (
       ? pendingHolderEvidenceTokenV422
       : null;
 
+  /*
+   * V658: inject at most one due rotating evidence-completion target. Existing
+   * dedicated carried completion and V422 holder-retry lanes retain precedence.
+   */
+  const evidenceCompletionRetryTokenV658 =
+    selectEvidenceCompletionRetryV658(
+      state
+    );
+
+  const evidenceCompletionRetryAddressV658 =
+    normalize(
+      evidenceCompletionRetryTokenV658?.address
+    );
+
   const analysisSelectedRawV142 =
     marketFreshTarget ||
     protectedCarriedAnalysisTargetV178 ||
     holderEvidenceRetryTokenV422 ||
+    evidenceCompletionRetryTokenV658 ||
     pendingDirectionalUsdTokenV176
       ? uniqueBy(
           [
@@ -76624,6 +77047,11 @@ for (
             ...(
               holderEvidenceRetryTokenV422
                 ? [holderEvidenceRetryTokenV422]
+                : []
+            ),
+            ...(
+              evidenceCompletionRetryTokenV658
+                ? [evidenceCompletionRetryTokenV658]
                 : []
             ),
             ...(
@@ -78654,14 +79082,17 @@ for (
            */
           marketFreshEligible:
             isPriorityCompletion ||
-            isCurrentLiveVerifiedLaunchV649,
+            isCurrentLiveVerifiedLaunchV649 ||
+            address === evidenceCompletionRetryAddressV658,
 
           priorityCompletion:
-            isPriorityCompletion,
+            isPriorityCompletion ||
+            address === evidenceCompletionRetryAddressV658,
 
           marketPriority:
             isPriorityCompletion ||
-            isCurrentLiveVerifiedLaunchV649,
+            isCurrentLiveVerifiedLaunchV649 ||
+            address === evidenceCompletionRetryAddressV658,
 
           /*
            * V657 holder completion: allow a fresh verified launch to use the
@@ -78676,10 +79107,16 @@ for (
                 .triggered
                 ? address ===
                   retryPersistenceAddressV139
-                : isPriorityCompletion
+                : (
+                    isPriorityCompletion ||
+                    address === evidenceCompletionRetryAddressV658
+                  )
             ) ||
             (
-              isCurrentLiveVerifiedLaunchV649 &&
+              (
+                isCurrentLiveVerifiedLaunchV649 ||
+                address === evidenceCompletionRetryAddressV658
+              ) &&
               budget?.blockscoutHolderOutage?.active !== true &&
               (
                 holderIndexLagStateV422(watched)?.active !== true ||
@@ -84365,6 +84802,17 @@ for (
       status: "NO_ELIGIBLE_EXACT_POOL_LIQUIDITY_TARGET"
     };
   }
+
+  /*
+   * V658: reconcile the rotating evidence-completion queue after this scan's
+   * analysis. It reuses the same existing state write and makes zero requests.
+   */
+  const evidenceCompletionQueueV658 =
+    updateEvidenceCompletionQueueV658(
+      state,
+      candidates,
+      liveTokens
+    );
 
   const rpcHealthPersistenceV426 =
     persistRpcHealthV426(
@@ -126314,7 +126762,9 @@ function buildLaunchCoverageFunnelV474({
       currentLiveTelegramBlockedByV649,
       currentLiveTelegramSent:
         currentLiveTelegramSent,
-      currentLiveEvidenceCompletionV656
+      currentLiveEvidenceCompletionV656,
+      evidenceCompletionQueueV658:
+        evidenceCompletionQueueSnapshotV658(state)
     },
 
     diagnosticOnly: {
@@ -126553,6 +127003,14 @@ function launchCoverageTelegramMessageV474(state) {
       ? evidenceLinesV656
       : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
+    "<b>V658 rotating evidence-completion queue</b>",
+    `Pending: <b>${fmt(last?.evidenceCompletionQueueV658?.pending)}</b> · Due now: <b>${fmt(last?.evidenceCompletionQueueV658?.dueNow)}</b>`,
+    `Served this/last scan: <b>${
+      isAddress(normalize(last?.evidenceCompletionQueueV658?.lastSelectedAddress))
+        ? escapeHtml(`${normalize(last.evidenceCompletionQueueV658.lastSelectedAddress).slice(0, 6)}…${normalize(last.evidenceCompletionQueueV658.lastSelectedAddress).slice(-4)}`)
+        : "None"
+    }</b>`,
+    "",
     "<b>Cumulative since V474</b>",
     `Scans observed: <b>${fmt(c.scansObserved)}</b>`,
     `Live addresses observed: <b>${fmt(c.liveAddressesObserved)}</b>`,
@@ -126566,8 +127024,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V655 fresh-launch budget protection remains preserved; V657 extends bounded market/holder completion priority to current/live verified launches without bypassing provider cooldowns.",
-    "<i>V657 adds no request ceiling, no scoring/threshold change, and preserves provider cooldown/retry guards.</i>"
+    "V655 fresh-launch budget protection remains preserved; V658 adds one-at-a-time persisted rotation for incomplete verified-launch evidence without bypassing provider cooldowns.",
+    "<i>V658 adds no request ceiling, no scoring/threshold change, and preserves provider cooldown/retry guards.</i>"
   ].join("\n");
 }
 
