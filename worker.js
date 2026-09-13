@@ -5280,7 +5280,18 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V667";
+const VERSION = "V668";
+
+/*
+ * V668 — Telegram /launchcoverage delivery hotfix.
+ * - Preserves V667 completely.
+ * - Routes /launchcoverage and /coverage through the already-proven V292
+ *   line-safe chunked Telegram sender instead of one raw sendMessage call.
+ * - This prevents the growing launch-coverage diagnostic from exceeding
+ *   Telegram's per-message text ceiling and returning HTTP 400.
+ * - No scanner, provider, request-budget, scoring, qualification, holder,
+ *   market-data, learning, state, or Telegram-alert threshold changes.
+ */
 
 /*
  * V667 — bounded CoinGecko Demo second-chance market completion.
@@ -132319,15 +132330,19 @@ async function telegramCommandReplyV271(
       true;
   }
 
-  // V317: /learning preserves chunked delivery and escapes literal '<' text for Telegram HTML as
-  // sample-quality sections grow. Reuse the already-proven V292 line-safe
-  // chunked sender. Literal comparison text uses &lt; so Telegram parse_mode=HTML
-  // cannot misread it as a malformed tag. Zero provider/scanner/scoring changes.
+  // V668: preserve the existing V317 chunked delivery and also route
+  // /launchcoverage + /coverage through the proven V292 line-safe sender.
+  // Launch-coverage diagnostics have grown beyond a safe single-message size,
+  // which can make Telegram sendMessage return HTTP 400. Chunking changes only
+  // reply transport; it consumes no scanner/provider budget and changes no
+  // scoring, qualification, holder, market, state, or alert logic.
   const needsChunkedReplyV316 =
     parsed.command === "/analyse" ||
     parsed.command === "/analyze" ||
     parsed.command === "/learning" ||
-    parsed.command === "/signallearn";
+    parsed.command === "/signallearn" ||
+    parsed.command === "/launchcoverage" ||
+    parsed.command === "/coverage";
 
   if (isFreshAnalyseV352) {
     await telegramAnalyseCheckpointV352(
