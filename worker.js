@@ -1,4 +1,28 @@
 /**
+ * Robinhood Chain Meme Hunter — V653
+ * AUTHORITATIVE RUNTIME VERSION: V653
+ *
+ * V653 FRESH VERIFIED-LAUNCH ERC-20 IDENTITY RESERVE
+ * - builds directly forward from authoritative V652;
+ * - evidence from /erc20-rpc proved Validation Cloud eth_getCode/eth_call were
+ *   healthy while later fresh launches deferred only because analysis budget
+ *   was already exhausted;
+ * - before the current/live analysis queue starts, V653 reserves ONE existing
+ *   analysis/global request for each selected positively verified live launch
+ *   that still lacks reusable verified ERC-20 metadata;
+ * - when that launch reaches its queue turn, its own one-request reservation is
+ *   released immediately so its ERC-20 validation may use it; reservations for
+ *   later fresh launches stay protected;
+ * - lower-priority analysis/enrichment cannot consume those future ERC-20 slots;
+ * - this guarantees forward validation progress without inventing evidence and
+ *   without raising the 42 global / 21 base-analysis ceilings;
+ * - V417/V419 checkpoints remain authoritative, so one protected request can
+ *   prove bytecode or advance method evidence and be reused on the next scan;
+ * - preserves V652 /erc20-rpc diagnostics, V651 live-first backlog protection,
+ *   provider routing/cooldowns, scoring, qualification and Telegram thresholds.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V652
  * AUTHORITATIVE RUNTIME VERSION: V652
  *
@@ -5191,7 +5215,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V652";
+const VERSION = "V653";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -11126,6 +11150,22 @@ function createBudget() {
         estimatedRpcRequestsSaved: 0
       },
 
+      freshVerifiedLaunchErc20ReserveV653: {
+        enabled: true,
+        active: false,
+        configuredAt: null,
+        initialReservedRequests: 0,
+        reservedRequests: 0,
+        pendingAddresses: [],
+        releasedAddresses: [],
+        lowerPriorityRequestsBlocked: 0,
+        blockedTypes: {},
+        lastBlockedType: null,
+        lastBlockedAt: null,
+        requestCeilingsRaised: false,
+        verificationRuleChanged: false
+      },
+
       directionalWatchReserveV553: {
         enabled: true,
         active: false,
@@ -11596,12 +11636,211 @@ function openfairHistoricalRecoveryReserveBlocksAnalysisV537(budget,type,amount=
   return safeNumber(budget?.totalUsed)+amount>Math.max(0,preTelegramGlobalLimit-reserved);
 }
 
+function configureFreshVerifiedLaunchErc20ReserveV653(
+  budget,
+  queue,
+  currentLiveVerifiedLaunchTokensV621
+) {
+  const reserve =
+    budget?.analysis?.freshVerifiedLaunchErc20ReserveV653;
+
+  if (!reserve?.enabled) return reserve || null;
+
+  const addresses = [];
+  const seen = new Set();
+
+  for (const watched of Array.isArray(queue) ? queue : []) {
+    const address = normalize(watched?.address);
+
+    if (
+      !address ||
+      seen.has(address) ||
+      !currentLiveVerifiedLaunchTokensV621?.has(address)
+    ) {
+      continue;
+    }
+
+    seen.add(address);
+
+    /*
+     * A fully reusable V417 metadata checkpoint no longer needs a protected
+     * ERC-20 identity request. Partial V419 progress still gets one slot so it
+     * can advance the next missing identity stage.
+     */
+    if (reusableMetadata(watched)) {
+      continue;
+    }
+
+    addresses.push(address);
+  }
+
+  reserve.configuredAt = Date.now();
+  reserve.pendingAddresses = addresses;
+  reserve.releasedAddresses = [];
+  reserve.initialReservedRequests = addresses.length;
+  reserve.reservedRequests = addresses.length;
+  reserve.active = addresses.length > 0;
+  reserve.lowerPriorityRequestsBlocked = 0;
+  reserve.blockedTypes = {};
+  reserve.lastBlockedType = null;
+  reserve.lastBlockedAt = null;
+
+  return reserve;
+}
+
+function releaseFreshVerifiedLaunchErc20SlotV653(
+  budget,
+  address
+) {
+  const reserve =
+    budget?.analysis?.freshVerifiedLaunchErc20ReserveV653;
+
+  const token = normalize(address);
+
+  if (
+    !reserve?.enabled ||
+    !token ||
+    !Array.isArray(reserve.pendingAddresses)
+  ) {
+    return false;
+  }
+
+  const index =
+    reserve.pendingAddresses.indexOf(token);
+
+  if (index < 0) return false;
+
+  reserve.pendingAddresses.splice(index, 1);
+  reserve.releasedAddresses =
+    Array.isArray(reserve.releasedAddresses)
+      ? reserve.releasedAddresses
+      : [];
+
+  if (!reserve.releasedAddresses.includes(token)) {
+    reserve.releasedAddresses.push(token);
+  }
+
+  reserve.reservedRequests =
+    Math.max(
+      0,
+      safeNumber(reserve.reservedRequests) - 1
+    );
+
+  reserve.active =
+    safeNumber(reserve.reservedRequests) > 0;
+
+  return true;
+}
+
+function freshVerifiedLaunchErc20ReserveBlocksV653(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  if (phase !== "analysis") return false;
+
+  const reserve =
+    budget?.analysis?.freshVerifiedLaunchErc20ReserveV653;
+
+  const reserved =
+    Math.max(
+      0,
+      safeNumber(reserve?.reservedRequests)
+    );
+
+  if (
+    reserve?.active !== true ||
+    reserved <= 0
+  ) {
+    return false;
+  }
+
+  const notificationReserveRemaining =
+    budget.notification?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(budget.notification?.limit) -
+            safeNumber(budget.notification?.used)
+        )
+      : 0;
+
+  const preTelegramGlobalLimit =
+    Math.max(
+      0,
+      safeNumber(budget.totalLimit) -
+        notificationReserveRemaining
+    );
+
+  const preservesAnalysis =
+    safeNumber(budget.analysis?.used) + amount <=
+      Math.max(
+        0,
+        effectiveAnalysisLimitV416(budget) -
+          reserved
+      );
+
+  const preservesGlobal =
+    safeNumber(budget.totalUsed) + amount <=
+      Math.max(
+        0,
+        preTelegramGlobalLimit -
+          reserved
+      );
+
+  if (preservesAnalysis && preservesGlobal) {
+    return false;
+  }
+
+  reserve.lowerPriorityRequestsBlocked =
+    safeNumber(reserve.lowerPriorityRequestsBlocked) + 1;
+
+  const key = String(type || "UNKNOWN");
+  reserve.blockedTypes =
+    reserve.blockedTypes &&
+    typeof reserve.blockedTypes === "object"
+      ? reserve.blockedTypes
+      : {};
+
+  reserve.blockedTypes[key] =
+    safeNumber(reserve.blockedTypes[key]) + 1;
+
+  reserve.lastBlockedType = key;
+  reserve.lastBlockedAt = Date.now();
+
+  return true;
+}
+
 function consumeBudget(
   budget,
   phase,
   type,
   amount = 1
 ) {
+  if (
+    freshVerifiedLaunchErc20ReserveBlocksV653(
+      budget,
+      phase,
+      type,
+      amount
+    )
+  ) {
+    budget.skipped.push({
+      phase,
+      type,
+      amount,
+      reason:
+        "V653_FRESH_VERIFIED_LAUNCH_ERC20_SLOT_RESERVED",
+      reservedRequests:
+        safeNumber(
+          budget.analysis
+            ?.freshVerifiedLaunchErc20ReserveV653
+            ?.reservedRequests
+        )
+    });
+    return false;
+  }
+
   if(phase==="analysis"&&openfairHistoricalRecoveryReserveBlocksAnalysisV537(budget,type,amount)){
     const r=budget.analysis.openfairHistoricalRecoveryReserveV537;
     r.lowerPriorityRequestsBlocked=safeNumber(r.lowerPriorityRequestsBlocked)+1;
@@ -12374,6 +12613,10 @@ function budgetTelemetry(
 
       adaptiveHeadroomV416:
         budget.analysis?.adaptiveHeadroomV416 || null,
+
+      freshVerifiedLaunchErc20ReserveV653:
+        budget.analysis?.freshVerifiedLaunchErc20ReserveV653 || null,
+
       directionalWatchReserveV553:
         budget.analysis?.directionalWatchReserveV553 || null,
       completeExactPoolReserveV459:
@@ -77055,6 +77298,36 @@ for (
       ...analysisSelected
     ];
 
+  const v653FreshVerifiedLaunchErc20Reserve =
+    configureFreshVerifiedLaunchErc20ReserveV653(
+      budget,
+      v135AnalysisQueue,
+      currentLiveVerifiedLaunchTokensV621
+    );
+
+  scannerFunnelV415.freshCandidatePriorityV469
+    .currentLiveVerifiedLaunchPriorityV621
+    .erc20IdentityReserveV653 = {
+      enabled: true,
+      configuredAt:
+        v653FreshVerifiedLaunchErc20Reserve?.configuredAt || null,
+      initialReservedRequests:
+        safeNumber(
+          v653FreshVerifiedLaunchErc20Reserve
+            ?.initialReservedRequests
+        ),
+      pendingAddresses:
+        Array.isArray(
+          v653FreshVerifiedLaunchErc20Reserve?.pendingAddresses
+        )
+          ? [
+              ...v653FreshVerifiedLaunchErc20Reserve.pendingAddresses
+            ]
+          : [],
+      requestCeilingsRaised: false,
+      verificationRuleChanged: false
+    };
+
   const v141AnalysedAddresses =
     new Set();
 
@@ -77360,6 +77633,43 @@ for (
       currentLiveVerifiedLaunchTokensV621.has(
         address
       );
+
+    /*
+     * V653: release only THIS launch's one-request reservation when its queue
+     * turn begins. Slots for later fresh verified launches stay protected.
+     * If this row never needed a reservation, this is a no-op.
+     */
+    const releasedOwnErc20SlotV653 =
+      releaseFreshVerifiedLaunchErc20SlotV653(
+        budget,
+        address
+      );
+
+    if (
+      releasedOwnErc20SlotV653 &&
+      scannerFunnelV415
+        ?.freshCandidatePriorityV469
+        ?.currentLiveVerifiedLaunchPriorityV621
+        ?.erc20IdentityReserveV653
+    ) {
+      const t =
+        scannerFunnelV415
+          .freshCandidatePriorityV469
+          .currentLiveVerifiedLaunchPriorityV621
+          .erc20IdentityReserveV653;
+
+      t.releasedAddresses =
+        Array.isArray(t.releasedAddresses)
+          ? t.releasedAddresses
+          : [];
+      t.releasedAddresses.push(address);
+      t.remainingReservedRequests =
+        safeNumber(
+          budget.analysis
+            ?.freshVerifiedLaunchErc20ReserveV653
+            ?.reservedRequests
+        );
+    }
 
     /*
      * V649: V133 must not blanket-defer a different fresh positively verified
@@ -91595,7 +91905,7 @@ async function erc20RpcDiagnosticV652(env) {
   return {
     agent: "Robinhood Chain Meme Hunter",
     version: VERSION,
-    status: "READ_ONLY_ERC20_RPC_DIAGNOSTIC_V652",
+    status: "READ_ONLY_ERC20_RPC_DIAGNOSTIC_V653",
     scannerBudgetConsumed: false,
     externalProviderRequestsAdded: 0,
     stateWritePerformed: false,
