@@ -5280,22 +5280,22 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V665";
+const VERSION = "V666";
 
 /*
- * V665 — holder/risk decision-path diagnostics.
- * - Preserves V664 CoinGecko tracing and all V663 qualification-audit behaviour.
- * - Adds zero-request holder-path telemetry using evidence already produced by
- *   holderIntelligence: public V2 row result, legacy row result, Bitquery reuse
- *   state, Blockscout Pro holder/counter fallback state, same-run outage circuit,
- *   retry state, and final holder-integrity outcome.
- * - Adds compact risk-dependency telemetry showing the exact evidence classes
- *   seen by scoreRisk, independent-evidence count and risk-unverified reasons.
- * - /launchcoverage renders the latest holder/risk diagnosis for returned
- *   current/live candidates.
- * - Diagnostic only: zero new provider requests, zero extra state-write cycles,
- *   no holder/risk/scoring/qualification/Telegram rule changes, and the hard
- *   42-request ceiling remains unchanged.
+ * V666 — protected first verified-launch holder completion.
+ * - Preserves V665 holder/risk diagnostics, V664 CoinGecko tracing and V663 audit.
+ * - FIX: when a priority current/live verified launch has no public V2/legacy
+ *   holder rows and no reusable Bitquery rows, ONE existing analysis request may
+ *   bypass lower-priority internal reserves to reach Blockscout Pro holders.
+ * - The protected holder request still obeys the normal analysis limit, global
+ *   pre-Telegram limit, notification reserve and hard 42-request ceiling.
+ * - FIX: the same-run Blockscout holder-outage circuit no longer opens merely
+ *   because public V2 + legacy rows were unavailable. It opens only on genuine
+ *   provider-wide Pro evidence: HTTP 429, transient 5xx, or active Pro cooldown.
+ * - 404/token indexing lag remains token-specific and does not suppress other
+ *   current/live verified launches in the same scan.
+ * - No scoring, risk, holder-integrity, qualification or Telegram threshold change.
  */
 
 const EVIDENCE_COMPLETION_QUEUE_MAX_V658 = 6;
@@ -12125,13 +12125,109 @@ function observeFreshVerifiedLaunchIdentityOverrideV654(
     ) + 1;
 }
 
+
+function priorityHolderProCompletionRequestV666(
+  budget,
+  phase,
+  type
+) {
+  const lane =
+    budget?.analysis
+      ?.priorityHolderProCompletionV666;
+
+  return Boolean(
+    phase === "analysis" &&
+    type === "BLOCKSCOUT_PRO_HOLDERS_V143" &&
+    lane?.active === true &&
+    lane?.used !== true &&
+    isAddress(
+      normalize(lane?.address)
+    )
+  );
+}
+
+function claimPriorityHolderProCompletionV666(
+  budget,
+  token
+) {
+  if (
+    !budget?.analysis ||
+    !isAddress(normalize(token))
+  ) {
+    return {
+      claimed: false,
+      reason: "INVALID_BUDGET_OR_TOKEN"
+    };
+  }
+
+  const existing =
+    budget.analysis
+      .priorityHolderProCompletionV666;
+
+  if (
+    existing?.claimed === true
+  ) {
+    return {
+      claimed: false,
+      reason: "ONE_PER_SCAN_ALREADY_CLAIMED",
+      lane: existing
+    };
+  }
+
+  const lane = {
+    enabled: true,
+    claimed: true,
+    active: true,
+    used: false,
+    address:
+      normalize(token),
+    claimedAt:
+      Date.now(),
+    consumedAt:
+      null,
+    consumeStatus:
+      "CLAIMED_PENDING_REQUEST",
+    reserveBypasses: {
+      v653: 0,
+      v537: 0,
+      v553: 0,
+      v459: 0,
+      v182: 0,
+      v301: 0
+    }
+  };
+
+  budget.analysis
+    .priorityHolderProCompletionV666 =
+    lane;
+
+  return {
+    claimed: true,
+    reason: "CLAIMED",
+    lane
+  };
+}
+
 function consumeBudget(
   budget,
   phase,
   type,
   amount = 1
 ) {
+  const priorityHolderProRequestV666 =
+    priorityHolderProCompletionRequestV666(
+      budget,
+      phase,
+      type
+    );
+
+  const holderLaneV666 =
+    budget?.analysis
+      ?.priorityHolderProCompletionV666 ||
+    null;
+
   if (
+    !priorityHolderProRequestV666 &&
     freshVerifiedLaunchErc20ReserveBlocksV653(
       budget,
       phase,
@@ -12155,6 +12251,18 @@ function consumeBudget(
     return false;
   }
 
+  if (
+    priorityHolderProRequestV666 &&
+    holderLaneV666
+  ) {
+    holderLaneV666.reserveBypasses =
+      holderLaneV666.reserveBypasses || {};
+    holderLaneV666.reserveBypasses.v653 =
+      safeNumber(
+        holderLaneV666.reserveBypasses.v653
+      ) + 1;
+  }
+
   const freshVerifiedLaunchIdentityRequestV654 =
     isFreshVerifiedLaunchIdentityRequestV654(
       budget,
@@ -12163,6 +12271,7 @@ function consumeBudget(
     );
 
   if(
+    !priorityHolderProRequestV666 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
     phase==="analysis" &&
     openfairHistoricalRecoveryReserveBlocksAnalysisV537(budget,type,amount)
@@ -12210,6 +12319,7 @@ function consumeBudget(
     "BLOCKSCOUT_V551_CONTINUOUS_EXACT_POOL_LOGS";
 
   if (
+    !priorityHolderProRequestV666 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
     phase === "analysis" &&
     directionalWatchReserveV553?.active === true &&
@@ -12345,6 +12455,7 @@ function consumeBudget(
       ?.completeExactPoolReserveV459;
 
   if (
+    !priorityHolderProRequestV666 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
     phase === "analysis" &&
     completeExactPoolReserveV459?.active === true &&
@@ -12427,6 +12538,7 @@ function consumeBudget(
   }
 
   if (
+    !priorityHolderProRequestV666 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
     phase ===
       "analysis" &&
@@ -12516,6 +12628,7 @@ function consumeBudget(
   }
 
   if (
+    !priorityHolderProRequestV666 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
     phase === "analysis" &&
     athFairSlotReserveBlocksAnalysisV301(budget, type, amount)
@@ -12545,6 +12658,18 @@ function consumeBudget(
       amount
     )
   ) {
+    if (
+      priorityHolderProRequestV666 &&
+      holderLaneV666
+    ) {
+      holderLaneV666.active = false;
+      holderLaneV666.used = false;
+      holderLaneV666.consumeStatus =
+        "HARD_OR_PHASE_BUDGET_UNAVAILABLE";
+      holderLaneV666.closedAt =
+        Date.now();
+    }
+
     budget.skipped.push({
       phase,
       type,
@@ -12559,6 +12684,37 @@ function consumeBudget(
 
   budget.totalUsed +=
     amount;
+
+  if (
+    priorityHolderProRequestV666 &&
+    holderLaneV666
+  ) {
+    holderLaneV666.active = false;
+    holderLaneV666.used = true;
+    holderLaneV666.consumedAt =
+      Date.now();
+    holderLaneV666.consumeStatus =
+      "CONSUMED_WITHIN_EXISTING_BUDGET";
+
+    /*
+     * Diagnostic counters: this protected request bypasses only internal
+     * lower-priority reserves. The hard/phase budget check above remains final.
+     */
+    holderLaneV666.reserveBypasses =
+      holderLaneV666.reserveBypasses || {};
+    for (const key of [
+      "v537",
+      "v553",
+      "v459",
+      "v182",
+      "v301"
+    ]) {
+      holderLaneV666.reserveBypasses[key] =
+        safeNumber(
+          holderLaneV666.reserveBypasses[key]
+        ) + 1;
+    }
+  }
 
   if (
     phase === "analysis" &&
@@ -53574,6 +53730,18 @@ async function holderIntelligence(
   if (
     v2HolderRowsUnavailable &&
     legacyHolderRowsUnavailable &&
+    priorityCompletion === true &&
+    blockscoutProConfiguredV164
+  ) {
+    claimPriorityHolderProCompletionV666(
+      budget,
+      token
+    );
+  }
+
+  if (
+    v2HolderRowsUnavailable &&
+    legacyHolderRowsUnavailable &&
     budgetAvailable(
       budget,
       "analysis"
@@ -53618,7 +53786,29 @@ async function holderIntelligence(
         ) || null,
       retryUntilV146:
         proResult.retryUntilV146 ??
-        null
+        null,
+      priorityHolderProCompletionV666:
+        budget?.analysis
+          ?.priorityHolderProCompletionV666
+          ? {
+              claimed:
+                budget.analysis
+                  .priorityHolderProCompletionV666
+                  .claimed === true,
+              used:
+                budget.analysis
+                  .priorityHolderProCompletionV666
+                  .used === true,
+              address:
+                budget.analysis
+                  .priorityHolderProCompletionV666
+                  .address || null,
+              consumeStatus:
+                budget.analysis
+                  .priorityHolderProCompletionV666
+                  .consumeStatus || null
+            }
+          : null
     };
 
     if (
@@ -53818,9 +54008,38 @@ async function holderIntelligence(
    * may still be healthy and are not treated
    * as proof that holder concentration is available.
    */
+  const genuineProviderWideHolderOutageV666 =
+    (
+      blockscoutProHolderFallbackV143
+        ?.transientOutageV145 === true
+    ) ||
+    (
+      blockscoutProHolderFallbackV143
+        ?.status ===
+        "BLOCKSCOUT_PRO_COOLDOWN_V145"
+    ) ||
+    (
+      blockscoutProHolderFallbackV143
+        ?.status ===
+        "BLOCKSCOUT_PRO_HTTP_429_V247"
+    ) ||
+    (
+      blockscoutProHolderFallbackV143
+        ?.httpStatus === 429
+    ) ||
+    (
+      [500, 502, 503, 504].includes(
+        safeNumber(
+          blockscoutProHolderFallbackV143
+            ?.httpStatus
+        )
+      )
+    );
+
   if (
     v2HolderRowsUnavailable &&
-    legacyHolderRowsUnavailable
+    legacyHolderRowsUnavailable &&
+    genuineProviderWideHolderOutageV666
   ) {
     if (
       !budget.blockscoutHolderOutage ||
@@ -53861,6 +54080,20 @@ async function holderIntelligence(
       normalize(
         token
       );
+
+    budget
+      .blockscoutHolderOutage
+      .evidenceV666 = {
+        status:
+          blockscoutProHolderFallbackV143
+            ?.status || null,
+        httpStatus:
+          blockscoutProHolderFallbackV143
+            ?.httpStatus || null,
+        transientOutage:
+          blockscoutProHolderFallbackV143
+            ?.transientOutageV145 === true
+      };
   }
 
   const holderCount =
@@ -54018,6 +54251,30 @@ async function holderIntelligence(
           blockscoutProHolderFallbackV143,
         blockscoutProCounters:
           blockscoutProCounterFallbackV247,
+        priorityHolderProCompletionV666:
+          budget?.analysis
+            ?.priorityHolderProCompletionV666
+            ? {
+                claimed:
+                  budget.analysis
+                    .priorityHolderProCompletionV666
+                    .claimed === true,
+                used:
+                  budget.analysis
+                    .priorityHolderProCompletionV666
+                    .used === true,
+                address:
+                  budget.analysis
+                    .priorityHolderProCompletionV666
+                    .address || null,
+                consumeStatus:
+                  budget.analysis
+                    .priorityHolderProCompletionV666
+                    .consumeStatus || null
+              }
+            : null,
+        providerWideOutageEvidenceV666:
+          genuineProviderWideHolderOutageV666,
         sameRunHolderOutageCircuit: {
           active:
             budget?.blockscoutHolderOutage?.active === true,
@@ -129487,6 +129744,25 @@ function launchCoverageTelegramMessageV474(state) {
           holderPath?.sameRunHolderOutageCircuit?.active === true
             ? "ACTIVE"
             : "NO";
+        const holderLaneV666 =
+          holderPath?.priorityHolderProCompletionV666 || null;
+        const holderLaneTextV666 =
+          holderLaneV666
+            ? (
+                holderLaneV666.used === true
+                  ? "USED"
+                  : (
+                      holderLaneV666.claimed === true
+                        ? escapeHtml(
+                            String(
+                              holderLaneV666.consumeStatus ||
+                              "CLAIMED"
+                            )
+                          )
+                        : "NOT_CLAIMED"
+                    )
+              )
+            : "N/A";
         const riskEvidence =
           riskDiag?.evidence || {};
         const riskReason =
@@ -129499,7 +129775,7 @@ function launchCoverageTelegramMessageV474(state) {
                   : "UNVERIFIED"
               );
 
-        return `• <b>${symbol}</b> — V2 ${escapeHtml(String(v2))}; Legacy ${escapeHtml(String(legacy))}; Bitquery ${escapeHtml(String(bq))}; PRO ${escapeHtml(String(pro))}${proHttp ? ` HTTP ${fmt(proHttp)}` : ""}; circuit ${circuit}; risk evidence M/C/A/H ${riskEvidence.market===true?"Y":"N"}/${riskEvidence.concentration===true?"Y":"N"}/${riskEvidence.liveActivity===true?"Y":"N"}/${riskEvidence.holderCounters===true?"Y":"N"} (${fmt(riskDiag?.independentEvidence)}/2); ${escapeHtml(String(riskReason))}`;
+        return `• <b>${symbol}</b> — V2 ${escapeHtml(String(v2))}; Legacy ${escapeHtml(String(legacy))}; Bitquery ${escapeHtml(String(bq))}; PRO ${escapeHtml(String(pro))}${proHttp ? ` HTTP ${fmt(proHttp)}` : ""}; V666 holder slot ${holderLaneTextV666}; circuit ${circuit}; risk evidence M/C/A/H ${riskEvidence.market===true?"Y":"N"}/${riskEvidence.concentration===true?"Y":"N"}/${riskEvidence.liveActivity===true?"Y":"N"}/${riskEvidence.holderCounters===true?"Y":"N"} (${fmt(riskDiag?.independentEvidence)}/2); ${escapeHtml(String(riskReason))}`;
       });
 
   const coinGeckoTraceV664 =
@@ -129579,7 +129855,7 @@ function launchCoverageTelegramMessageV474(state) {
       ? evidenceLinesV656
       : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V665 rotating evidence-completion queue</b>",
+    "<b>V666 rotating evidence-completion queue</b>",
     `Pending: <b>${fmt(last?.evidenceCompletionQueueV658?.pending)}</b> · Provider-ready pre-analysis: <b>${fmt(last?.evidenceCompletionQueueV658?.preAnalysisProviderReadyV661)}</b>`,
     `Selection reason: <b>${escapeHtml(last?.evidenceCompletionQueueV658?.preAnalysisSelectionReasonV661 || "None")}</b>`,
     `CoinGecko Demo fallback: <b>${
@@ -129604,7 +129880,7 @@ function launchCoverageTelegramMessageV474(state) {
         : ["• No market fallback trace captured in this scan."]
     ),
     "",
-    "<b>V665 holder/risk decision trace — latest scan</b>",
+    "<b>V666 holder/risk decision trace — latest scan</b>",
     ...(
       holderRiskLinesV665.length
         ? holderRiskLinesV665
@@ -129624,8 +129900,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V655 fresh-launch budget protection, V663 qualification audit and V664 CoinGecko trace remain preserved; V665 adds holder/risk decision-path telemetry.",
-    "<i>V665 is diagnostic-only: holder/risk logic, market routing, the 42-request ceiling, scoring/thresholds and provider cooldown protections are unchanged.</i>"
+    "V655 fresh-launch budget protection, V663 audit and V664/V665 diagnostics remain preserved; V666 gives one priority verified launch a protected existing holder-completion slot.",
+    "<i>V666 does not raise the 42-request ceiling or weaken holder/risk/qualification rules; the same-run outage circuit now requires genuine provider-wide evidence.</i>"
   ].join("\n");
 }
 
