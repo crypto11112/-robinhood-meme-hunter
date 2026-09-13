@@ -1,4 +1,25 @@
 /**
+ * Robinhood Chain Meme Hunter — V649
+ * AUTHORITATIVE RUNTIME VERSION: V649
+ *
+ * V649 FRESH VERIFIED-LAUNCH ANALYSIS LANE + CALL-FUNNEL AUDIT
+ * - builds directly forward from authoritative V648;
+ * - fixes an over-broad V133 budget-protection interaction: when the priority
+ *   candidate defers, another CURRENT/LIVE POSITIVELY VERIFIED launch is no
+ *   longer automatically deferred solely because it is lower in queue order;
+ * - a verified current/live launch may use the existing V417 bounded progressive
+ *   completion path when residual analysis/global allowance can fund its next
+ *   evidence stage; every real request still passes the existing budget guards;
+ * - does NOT raise the 42 global ceiling, 21 base analysis ceiling, notification
+ *   reserve, provider quotas or MAX_TOKEN_CHECKS;
+ * - /launchcoverage now reports exact current/live defer-reason counts and exact
+ *   Telegram qualification blocker counts from evidence already produced in the
+ *   scan, adding zero provider requests and no extra state write;
+ * - preserves V648 Bitquery-quota-independent identity continuation, scoring,
+ *   Momentum, qualification thresholds, launch-source proof and Telegram rules.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V648
  * AUTHORITATIVE RUNTIME VERSION: V648
  *
@@ -5107,7 +5128,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V648";
+const VERSION = "V649";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -76264,6 +76285,8 @@ for (
           ),
         returnedCandidates: 0,
         budgetDeferred: 0,
+        topCandidateProtectionBypassedForVerifiedLaunchV649: 0,
+        progressiveBoundedAttemptsV649: 0,
         externalRequestsAdded: 0,
         scoringChanged: false,
         qualificationChanged: false,
@@ -77155,6 +77178,27 @@ for (
       address ===
       marketFreshTargetAddress;
 
+    const isCurrentLiveVerifiedLaunchV649 =
+      currentLiveVerifiedLaunchTokensV621.has(
+        address
+      );
+
+    /*
+     * V649: V133 must not blanket-defer a different fresh positively verified
+     * launch merely because the top completion target could not finish. The
+     * verified launch still has to fit the existing residual/bounded budget
+     * checks below; this only removes the inherited queue-wide veto.
+     */
+    if (
+      !isPriorityCompletion &&
+      topCandidateAnalysisDeferred &&
+      isCurrentLiveVerifiedLaunchV649
+    ) {
+      scannerFunnelV415.freshCandidatePriorityV469
+        .currentLiveVerifiedLaunchPriorityV621
+        .topCandidateProtectionBypassedForVerifiedLaunchV649++;
+    }
+
     /*
      * V150: frozen pre-analysis terminal evidence is authoritative for this
      * run. A later handoff cannot accidentally reinsert one of these tokens.
@@ -77436,7 +77480,8 @@ for (
      */
     if (
       !isPriorityCompletion &&
-      topCandidateAnalysisDeferred
+      topCandidateAnalysisDeferred &&
+      !isCurrentLiveVerifiedLaunchV649
     ) {
       deferredAnalysis++;
       scannerFunnelV415.budgetDeferred++;
@@ -77525,7 +77570,10 @@ for (
 
     const v417ProgressivePriorityAttempt =
       !v165FullEstimateAffordable &&
-      isPriorityCompletion &&
+      (
+        isPriorityCompletion ||
+        isCurrentLiveVerifiedLaunchV649
+      ) &&
       v165ResidualAllowance >=
         v417MinimumStageRequests;
 
@@ -77547,6 +77595,14 @@ for (
 
     if (v417ProgressivePriorityAttempt) {
       scannerFunnelV415.progressiveCompletionV417.attempted++;
+      if (
+        isCurrentLiveVerifiedLaunchV649 &&
+        !isPriorityCompletion
+      ) {
+        scannerFunnelV415.freshCandidatePriorityV469
+          .currentLiveVerifiedLaunchPriorityV621
+          .progressiveBoundedAttemptsV649++;
+      }
     } else if (
       !v165FullEstimateAffordable &&
       isPriorityCompletion &&
@@ -124726,6 +124782,17 @@ function buildLaunchCoverageFunnelV474({
       );
     });
 
+  const currentLiveDeferredByReasonV649 = {};
+  for (const row of deferredCurrentLive) {
+    const reason =
+      row?.reason ||
+      "ANALYSIS_DEFERRED_UNSPECIFIED";
+    currentLiveDeferredByReasonV649[reason] =
+      safeNumber(
+        currentLiveDeferredByReasonV649[reason]
+      ) + 1;
+  }
+
   const currentLiveCandidates =
     (Array.isArray(candidates)
       ? candidates
@@ -124735,6 +124802,19 @@ function buildLaunchCoverageFunnelV474({
         normalize(candidate?.address)
       )
     );
+
+  const currentLiveTelegramBlockedByV649 = {};
+  for (const candidate of currentLiveCandidates) {
+    for (
+      const reason
+      of telegramQualificationReasons(candidate)
+    ) {
+      currentLiveTelegramBlockedByV649[reason] =
+        safeNumber(
+          currentLiveTelegramBlockedByV649[reason]
+        ) + 1;
+    }
+  }
 
   const verifiedLaunchCandidates =
     currentLiveCandidates
@@ -124880,6 +124960,7 @@ function buildLaunchCoverageFunnelV474({
         currentLiveAnalysed.length,
       currentLiveBudgetDeferred:
         deferredCurrentLive.length,
+      currentLiveDeferredByReasonV649,
       currentLiveReturnedCandidates:
         currentLiveCandidates.length,
       returnedCurrentLiveWithVerifiedLaunchSource:
@@ -124908,6 +124989,7 @@ function buildLaunchCoverageFunnelV474({
         ),
       currentLiveTelegramQualified:
         telegramQualified.length,
+      currentLiveTelegramBlockedByV649,
       currentLiveTelegramSent:
         currentLiveTelegramSent
     },
@@ -125063,6 +125145,33 @@ function launchCoverageTelegramMessageV474(state) {
       ).toFixed(1)}%`;
     };
 
+  const reasonSummaryV649 =
+    counts => {
+      const rows =
+        Object.entries(
+          counts || {}
+        )
+          .filter(
+            ([, count]) =>
+              safeNumber(count) > 0
+          )
+          .sort(
+            (a, b) =>
+              safeNumber(b[1]) -
+              safeNumber(a[1])
+          )
+          .slice(0, 6);
+
+      return rows.length
+        ? rows
+            .map(
+              ([reason, count]) =>
+                `${escapeHtml(reason)} ×${fmt(count)}`
+            )
+            .join("; ")
+        : "None";
+    };
+
   return [
     `🔭 <b>Launch Coverage Funnel — ${escapeHtml(VERSION)}</b>`,
     "",
@@ -125073,6 +125182,7 @@ function launchCoverageTelegramMessageV474(state) {
     `Current/live selected for analysis: <b>${fmt(last.selectedCurrentLiveForAnalysis)}</b>`,
     `Current/live analysis loop entered: <b>${fmt(last.currentLiveAnalysisLoopEntered)}</b>`,
     `Current/live budget deferred: <b>${fmt(last.currentLiveBudgetDeferred)}</b>`,
+    `↳ Defer reasons: <b>${reasonSummaryV649(last.currentLiveDeferredByReasonV649)}</b>`,
     `Current/live returned candidates: <b>${fmt(last.currentLiveReturnedCandidates)}</b>`,
     `Returned with verified launch source: <b>${fmt(last.returnedCurrentLiveWithVerifiedLaunchSource)}</b>`,
     `Returned with launch source UNVERIFIED: <b>${fmt(last.returnedCurrentLiveWithUnverifiedLaunchSource)}</b>`,
@@ -125081,6 +125191,7 @@ function launchCoverageTelegramMessageV474(state) {
     `↳ No recurring source evidence yet: <b>${fmt(last.unattributedNoRecurringSourceEvidenceYetV631)}</b>`,
     `↳ Insufficient verified origin evidence: <b>${fmt(last.unattributedInsufficientOriginEvidenceV631)}</b>`,
     `Telegram qualified: <b>${fmt(last.currentLiveTelegramQualified)}</b>`,
+    `↳ Qualification blockers: <b>${reasonSummaryV649(last.currentLiveTelegramBlockedByV649)}</b>`,
     `Telegram sent: <b>${fmt(last.currentLiveTelegramSent)}</b>`,
     "",
     "<b>Cumulative since V474</b>",
@@ -125096,8 +125207,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V631 prioritises the recurring unknown creator closest to exact 3×3 source proof for the existing single proof slot.",
-    "<i>Zero additional provider requests and no scoring/threshold changes.</i>"
+    "V649 allows a lower-ranked current/live verified launch to use existing residual progressive-analysis capacity when the top target defers.",
+    "<i>Zero additional provider requests, unchanged request ceilings and no scoring/threshold changes.</i>"
   ].join("\n");
 }
 
