@@ -5280,21 +5280,22 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V662";
+const VERSION = "V663";
 
 /*
- * V662 — current/live verified-launch CoinGecko handoff.
- * - Preserves V661 queue reconciliation and all V660 CoinGecko Demo safeguards.
- * - FIX: CoinGecko Demo eligibility now follows the existing marketPriority
- *   lane, not only priorityCompletion.
- * - This allows ONE current/live positively verified launch per scan to use the
- *   free authenticated CoinGecko fallback when DexScreener / GeckoTerminal
- *   cannot complete market evidence.
- * - The existing CoinGecko one-request-per-scan guard, 5-minute spacing,
- *   persistent 429 cooldown, analysis/global budget accounting and 42-request
- *   hard ceiling remain authoritative.
- * - No scoring, qualification, liquidity, risk, holder or Telegram threshold
- *   changes. Missing evidence remains UNVERIFIED.
+ * V663 — forward-only 7-day qualification audit.
+ * - Preserves V662 market/provider behaviour unchanged.
+ * - Adds a measurement-only persisted audit for current/live positively verified
+ *   launches that reach returned-candidate analysis.
+ * - Records the exact existing Telegram qualification blockers, compact evidence
+ *   state, and whether each verified launch qualified / was sent.
+ * - Dedupes by token and keeps the latest observed state for a bounded 7-day
+ *   window; no historical blocker backfill is invented.
+ * - Adds read-only /audit7d command showing blocker totals, one-blocker near
+ *   misses, evidence-only unresolved candidates, and sample completeness.
+ * - Uses evidence already produced by the scanner: zero extra provider requests,
+ *   zero extra state-write cycles, no scoring/qualification/threshold changes,
+ *   and the hard 42-request ceiling remains unchanged.
  */
 
 const EVIDENCE_COMPLETION_QUEUE_MAX_V658 = 6;
@@ -14521,6 +14522,19 @@ function newState() {
       lastScan: null
     },
 
+    qualificationAuditV663: {
+      enabled: true,
+      schemaVersion: "V663_1",
+      monitorStartedAt: null,
+      lastUpdatedAt: null,
+      scansObserved: 0,
+      retentionMs: 7 * 24 * 60 * 60 * 1000,
+      maxRecords: 5000,
+      records: [],
+      totalUniqueObservedSinceV663: 0,
+      lastRecordedAddress: null
+    },
+
     scheduler: {
       scheduledRunCount:
         0,
@@ -15107,6 +15121,20 @@ async function readState(env) {
             typeof parsed.launchCoverageCumulativeV474.lastScan === "object"
               ? parsed.launchCoverageCumulativeV474.lastScan
               : null
+        },
+
+        qualificationAuditV663: {
+          ...fresh.qualificationAuditV663,
+          ...(
+            parsed.qualificationAuditV663 &&
+            typeof parsed.qualificationAuditV663 === "object"
+              ? parsed.qualificationAuditV663
+              : {}
+          ),
+          records:
+            Array.isArray(parsed.qualificationAuditV663?.records)
+              ? parsed.qualificationAuditV663.records.slice(-5000)
+              : []
         },
 
         scheduler: {
@@ -86045,6 +86073,16 @@ for (
       launchCoverageFunnelV474
     );
 
+  /*
+   * V663: zero-request qualification audit. Reuses the evidence already captured
+   * in the V474 funnel and persists it in the same existing state write.
+   */
+  const qualificationAuditV663 =
+    updateQualificationAuditV663(
+      state,
+      launchCoverageFunnelV474
+    );
+
   const save =
     await writeState(
       env,
@@ -88044,6 +88082,29 @@ for (
 
     launchCoverageCumulativeV474,
 
+    qualificationAuditV663: {
+      status:
+        qualificationAuditSnapshotV663(state)
+          ?.status || null,
+      scansObserved:
+        safeNumber(
+          qualificationAuditV663
+            ?.scansObserved
+        ),
+      retainedUniqueVerifiedLaunches:
+        Array.isArray(
+          qualificationAuditV663
+            ?.records
+        )
+          ? qualificationAuditV663.records.length
+          : 0,
+      externalRequestsAdded: 0,
+      stateWriteCyclesAdded: 0,
+      scoringChanged: false,
+      qualificationChanged: false,
+      telegramThresholdChanged: false
+    },
+
     verifiedLaunchPriorityV211: {
       enabled: true,
       unifiedCurrentLivePriorityV621: {
@@ -89810,6 +89871,7 @@ for (
         "/launchsources",
         "/sourceintel",
         "/launchcoverage",
+        "/audit7d",
         "/usage",
         "/chainstack",
         "/help"
@@ -101450,6 +101512,603 @@ function ensureLaunchCoverageCumulativeV474(state) {
 
 
 
+
+
+const QUALIFICATION_AUDIT_RETENTION_MS_V663 =
+  7 * 24 * 60 * 60 * 1000;
+
+const QUALIFICATION_AUDIT_MAX_RECORDS_V663 =
+  5000;
+
+function ensureQualificationAuditV663(
+  state
+) {
+  const base =
+    newState().qualificationAuditV663;
+
+  state.qualificationAuditV663 =
+    state?.qualificationAuditV663 &&
+    typeof state.qualificationAuditV663 === "object"
+      ? {
+          ...base,
+          ...state.qualificationAuditV663
+        }
+      : {
+          ...base
+        };
+
+  const audit =
+    state.qualificationAuditV663;
+
+  audit.records =
+    Array.isArray(audit.records)
+      ? audit.records
+      : [];
+
+  audit.retentionMs =
+    QUALIFICATION_AUDIT_RETENTION_MS_V663;
+
+  audit.maxRecords =
+    QUALIFICATION_AUDIT_MAX_RECORDS_V663;
+
+  if (!safeNumber(audit.monitorStartedAt)) {
+    audit.monitorStartedAt =
+      Date.now();
+  }
+
+  return audit;
+}
+
+function pruneQualificationAuditV663(
+  state,
+  now = Date.now()
+) {
+  const audit =
+    ensureQualificationAuditV663(
+      state
+    );
+
+  const cutoff =
+    now -
+    QUALIFICATION_AUDIT_RETENTION_MS_V663;
+
+  audit.records =
+    audit.records
+      .filter(row => {
+        const at =
+          safeNumber(
+            row?.lastEvaluatedAt ||
+            row?.firstEvaluatedAt
+          );
+
+        return (
+          isAddress(
+            normalize(row?.address)
+          ) &&
+          at >= cutoff &&
+          at <= now + 5 * 60 * 1000
+        );
+      })
+      .sort(
+        (a, b) =>
+          safeNumber(a?.lastEvaluatedAt) -
+          safeNumber(b?.lastEvaluatedAt)
+      )
+      .slice(
+        -QUALIFICATION_AUDIT_MAX_RECORDS_V663
+      );
+
+  return audit;
+}
+
+function qualificationAuditEvidenceOnlyV663(
+  row
+) {
+  const reasons =
+    Array.isArray(row?.telegramReasons)
+      ? row.telegramReasons
+      : [];
+
+  if (!reasons.length) {
+    return false;
+  }
+
+  const intrinsic =
+    new Set([
+      "OPPORTUNITY_SCORE",
+      "CONFIDENCE_SCORE",
+      "RISK_TOO_HIGH",
+      "INSUFFICIENT_SIGNALS",
+      "VERIFIED_BEARISH_SHORT_TERM_FLOW_V232",
+      "SAME_RUN_TERMINAL_RISK",
+      "SAME_RUN_VERIFIED_HIGH_CONCENTRATION"
+    ]);
+
+  if (
+    reasons.some(reason =>
+      intrinsic.has(reason)
+    )
+  ) {
+    return false;
+  }
+
+  const evidenceReasons =
+    new Set([
+      "RISK_UNVERIFIED",
+      "MARKET_UNVERIFIED",
+      "LIQUIDITY_TOO_LOW_OR_UNVERIFIED",
+      "HOLDER_EVIDENCE_UNVERIFIED",
+      "MARKET_EVIDENCE_STALE_FOR_ALERT_V169",
+      "HOLDER_EVIDENCE_STALE_FOR_ALERT_V169"
+    ]);
+
+  return reasons.every(reason =>
+    evidenceReasons.has(reason)
+  );
+}
+
+function updateQualificationAuditV663(
+  state,
+  funnel
+) {
+  const audit =
+    pruneQualificationAuditV663(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  const rows =
+    Array.isArray(
+      funnel?.returnedCurrentLiveCandidates
+    )
+      ? funnel.returnedCurrentLiveCandidates
+      : [];
+
+  audit.scansObserved =
+    safeNumber(
+      audit.scansObserved
+    ) + 1;
+
+  for (
+    const row
+    of rows
+  ) {
+    if (
+      row?.verifiedLaunchSource !==
+      true
+    ) {
+      continue;
+    }
+
+    const address =
+      normalize(row?.address);
+
+    if (!isAddress(address)) {
+      continue;
+    }
+
+    const existingIndex =
+      audit.records.findIndex(
+        item =>
+          normalize(item?.address) ===
+          address
+      );
+
+    const previous =
+      existingIndex >= 0
+        ? audit.records[existingIndex]
+        : null;
+
+    const reasons =
+      Array.isArray(
+        row?.telegramReasons
+      )
+        ? row.telegramReasons
+            .filter(Boolean)
+            .slice(0, 12)
+        : [];
+
+    const record = {
+      address,
+      symbol:
+        row?.symbol ||
+        previous?.symbol ||
+        null,
+      launchProtocol:
+        row?.launchProtocol ||
+        previous?.launchProtocol ||
+        null,
+      firstEvaluatedAt:
+        safeNumber(
+          previous?.firstEvaluatedAt
+        ) ||
+        now,
+      lastEvaluatedAt:
+        now,
+      evaluationCount:
+        safeNumber(
+          previous?.evaluationCount
+        ) + 1,
+      telegramQualified:
+        row?.telegramQualified ===
+        true,
+      telegramSent:
+        row?.telegramSent ===
+        true,
+      telegramReasons:
+        reasons,
+      blockerCount:
+        reasons.length,
+      opportunityScore:
+        safeNumber(
+          row?.opportunityScore
+        ),
+      confidenceScore:
+        safeNumber(
+          row?.confidenceScore
+        ),
+      riskVerified:
+        row?.riskVerified === true,
+      riskScore:
+        row?.riskVerified === true
+          ? safeNumber(row?.riskScore)
+          : null,
+      marketVerified:
+        row?.marketVerified === true,
+      liquidityUsd:
+        row?.marketVerified === true
+          ? safeNumber(row?.liquidityUsd)
+          : null,
+      holderEvidenceVerified:
+        row?.holderEvidenceVerified ===
+        true,
+      signalCount:
+        safeNumber(
+          row?.signalCount
+        ),
+      marketStatus:
+        row?.marketStatus || null,
+      holderStatus:
+        row?.holderStatus || null
+    };
+
+    record.evidenceOnlyUnresolvedV663 =
+      qualificationAuditEvidenceOnlyV663(
+        record
+      );
+
+    record.oneBlockerAwayV663 =
+      reasons.length === 1;
+
+    if (existingIndex >= 0) {
+      audit.records[
+        existingIndex
+      ] = record;
+    }
+    else {
+      audit.records.push(
+        record
+      );
+
+      audit.totalUniqueObservedSinceV663 =
+        safeNumber(
+          audit.totalUniqueObservedSinceV663
+        ) + 1;
+    }
+
+    audit.lastRecordedAddress =
+      address;
+  }
+
+  pruneQualificationAuditV663(
+    state,
+    now
+  );
+
+  audit.lastUpdatedAt =
+    now;
+
+  return audit;
+}
+
+function qualificationAuditSnapshotV663(
+  state
+) {
+  const audit =
+    pruneQualificationAuditV663(
+      state
+    );
+
+  const now =
+    Date.now();
+
+  const monitorStartedAt =
+    safeNumber(
+      audit.monitorStartedAt
+    );
+
+  const sampleAgeMs =
+    monitorStartedAt
+      ? Math.max(
+          0,
+          now - monitorStartedAt
+        )
+      : 0;
+
+  const rows =
+    Array.isArray(audit.records)
+      ? audit.records
+      : [];
+
+  const blockerCounts = {};
+
+  for (
+    const row
+    of rows
+  ) {
+    for (
+      const reason
+      of Array.isArray(
+        row?.telegramReasons
+      )
+        ? row.telegramReasons
+        : []
+    ) {
+      blockerCounts[reason] =
+        safeNumber(
+          blockerCounts[reason]
+        ) + 1;
+    }
+  }
+
+  const oneBlockerAway =
+    rows.filter(
+      row =>
+        row?.oneBlockerAwayV663 ===
+        true
+    );
+
+  const evidenceOnly =
+    rows.filter(
+      row =>
+        row?.evidenceOnlyUnresolvedV663 ===
+        true
+    );
+
+  const qualified =
+    rows.filter(
+      row =>
+        row?.telegramQualified ===
+        true
+    );
+
+  const sent =
+    rows.filter(
+      row =>
+        row?.telegramSent ===
+        true
+    );
+
+  const qualifiedNotSent =
+    rows.filter(
+      row =>
+        row?.telegramQualified ===
+          true &&
+        row?.telegramSent !==
+          true
+    );
+
+  const topBlockers =
+    Object.entries(
+      blockerCounts
+    )
+      .sort(
+        (a, b) =>
+          safeNumber(b[1]) -
+          safeNumber(a[1])
+      )
+      .slice(0, 10);
+
+  return {
+    enabled: true,
+    diagnosticOnly: true,
+    forwardOnlyFromV663: true,
+    historicalBackfill:
+      "NOT_PERFORMED",
+    windowMs:
+      QUALIFICATION_AUDIT_RETENTION_MS_V663,
+    monitorStartedAt:
+      monitorStartedAt || null,
+    sampleAgeMs,
+    completeSevenDayWindow:
+      sampleAgeMs >=
+      QUALIFICATION_AUDIT_RETENTION_MS_V663,
+    status:
+      sampleAgeMs >=
+      QUALIFICATION_AUDIT_RETENTION_MS_V663
+        ? "FULL_7_DAY_FORWARD_WINDOW_V663"
+        : "BUILDING_FORWARD_ONLY_WINDOW_V663",
+    scansObserved:
+      safeNumber(
+        audit.scansObserved
+      ),
+    uniqueVerifiedLaunchesEvaluated:
+      rows.length,
+    telegramQualified:
+      qualified.length,
+    telegramSent:
+      sent.length,
+    qualifiedButNotSent:
+      qualifiedNotSent.length,
+    oneBlockerAway:
+      oneBlockerAway.length,
+    evidenceOnlyUnresolved:
+      evidenceOnly.length,
+    blockerCounts,
+    topBlockers,
+    nearMisses:
+      oneBlockerAway
+        .sort(
+          (a, b) =>
+            safeNumber(b?.lastEvaluatedAt) -
+            safeNumber(a?.lastEvaluatedAt)
+        )
+        .slice(0, 8),
+    evidenceOnlyCandidates:
+      evidenceOnly
+        .sort(
+          (a, b) =>
+            safeNumber(b?.lastEvaluatedAt) -
+            safeNumber(a?.lastEvaluatedAt)
+        )
+        .slice(0, 8)
+  };
+}
+
+function qualificationAuditTelegramMessageV663(
+  state
+) {
+  const audit =
+    qualificationAuditSnapshotV663(
+      state
+    );
+
+  const fmt =
+    value =>
+      Number(
+        safeNumber(value)
+      ).toLocaleString("en-GB");
+
+  const duration =
+    ms => {
+      const totalMinutes =
+        Math.floor(
+          Math.max(
+            0,
+            safeNumber(ms)
+          ) /
+          60000
+        );
+
+      const days =
+        Math.floor(
+          totalMinutes /
+          (24 * 60)
+        );
+
+      const hours =
+        Math.floor(
+          (
+            totalMinutes %
+            (24 * 60)
+          ) /
+          60
+        );
+
+      const minutes =
+        totalMinutes %
+        60;
+
+      if (days > 0) {
+        return `${days}d ${hours}h`;
+      }
+
+      if (hours > 0) {
+        return `${hours}h ${minutes}m`;
+      }
+
+      return `${minutes}m`;
+    };
+
+  const blockerLines =
+    (
+      Array.isArray(
+        audit.topBlockers
+      )
+        ? audit.topBlockers
+        : []
+    )
+      .slice(0, 8)
+      .map(
+        ([reason, count]) =>
+          `• ${escapeHtml(reason)}: <b>${fmt(count)}</b>`
+      );
+
+  const nearMissLines =
+    (
+      Array.isArray(
+        audit.nearMisses
+      )
+        ? audit.nearMisses
+        : []
+    )
+      .slice(0, 5)
+      .map(row => {
+        const symbol =
+          escapeHtml(
+            row?.symbol ||
+            "UNKNOWN"
+          );
+
+        const short =
+          isAddress(
+            normalize(
+              row?.address
+            )
+          )
+            ? `${normalize(row.address).slice(0, 6)}…${normalize(row.address).slice(-4)}`
+            : "UNVERIFIED";
+
+        const blocker =
+          escapeHtml(
+            Array.isArray(
+              row?.telegramReasons
+            ) &&
+            row.telegramReasons.length
+              ? row.telegramReasons[0]
+              : "NONE"
+          );
+
+        return `• <b>${symbol}</b> (${escapeHtml(short)}) — ${blocker}`;
+      });
+
+  return [
+    `🧾 <b>7-Day Qualification Audit — ${escapeHtml(VERSION)}</b>`,
+    "",
+    `Status: <b>${escapeHtml(audit.status)}</b>`,
+    `Sample age: <b>${escapeHtml(duration(audit.sampleAgeMs))}</b>`,
+    `Scans observed: <b>${fmt(audit.scansObserved)}</b>`,
+    `Unique verified launches evaluated: <b>${fmt(audit.uniqueVerifiedLaunchesEvaluated)}</b>`,
+    "",
+    `Telegram qualified: <b>${fmt(audit.telegramQualified)}</b>`,
+    `Telegram sent: <b>${fmt(audit.telegramSent)}</b>`,
+    `Qualified but not sent: <b>${fmt(audit.qualifiedButNotSent)}</b>`,
+    `One blocker away: <b>${fmt(audit.oneBlockerAway)}</b>`,
+    `Evidence-only unresolved*: <b>${fmt(audit.evidenceOnlyUnresolved)}</b>`,
+    "",
+    "<b>Top qualification blockers</b>",
+    ...(
+      blockerLines.length
+        ? blockerLines
+        : ["• No verified-launch blocker evidence recorded yet"]
+    ),
+    "",
+    "<b>One-blocker near misses</b>",
+    ...(
+      nearMissLines.length
+        ? nearMissLines
+        : ["• None recorded yet"]
+    ),
+    "",
+    audit.completeSevenDayWindow
+      ? "✅ <b>Full forward 7-day sample built.</b>"
+      : "⏳ <b>Building forward-only sample.</b> Earlier blocker history is not backfilled or guessed.",
+    "*Evidence-only unresolved means the currently recorded blockers are missing/stale market, liquidity, holder or risk evidence only. It does NOT claim the token would definitely qualify once that evidence arrives.",
+    "<i>Read-only report. Zero provider requests and zero state writes.</i>"
+  ].join("\n");
+}
 
 function ensureGenericUnknownSourceProofV517(
   state
@@ -127994,7 +128653,37 @@ function buildLaunchCoverageFunnelV474({
           scannerAgeMs:
             candidate?.verifiedLaunchAgeV223?.scannerAgeMs ?? null,
           telegramQualified:
-            qualifiesTelegram(candidate)
+            qualifiesTelegram(candidate),
+          telegramSent:
+            sentAddresses.has(
+              normalize(candidate?.address)
+            ),
+          telegramReasons:
+            telegramQualificationReasons(candidate),
+          opportunityScore:
+            safeNumber(candidate?.opportunity?.score),
+          confidenceScore:
+            safeNumber(candidate?.confidence?.score),
+          riskVerified:
+            candidate?.risk?.verified === true,
+          riskScore:
+            candidate?.risk?.verified === true
+              ? safeNumber(candidate?.risk?.score)
+              : null,
+          liquidityUsd:
+            candidate?.market?.verified === true
+              ? safeNumber(candidate?.market?.liquidityUsd)
+              : null,
+          holderEvidenceVerified:
+            candidate?.holders?.integrity?.verified === true &&
+            candidate?.holders?.concentrationVerified === true &&
+            candidate?.holders?.whale?.verified === true,
+          signalCount:
+            safeNumber(candidate?.signalConfirmation?.signals),
+          marketStatus:
+            candidate?.market?.status || null,
+          holderStatus:
+            candidate?.holders?.integrity?.status || null
         }))
   };
 
@@ -128170,7 +128859,7 @@ function launchCoverageTelegramMessageV474(state) {
       ? evidenceLinesV656
       : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V662 rotating evidence-completion queue</b>",
+    "<b>V663 rotating evidence-completion queue</b>",
     `Pending: <b>${fmt(last?.evidenceCompletionQueueV658?.pending)}</b> · Provider-ready pre-analysis: <b>${fmt(last?.evidenceCompletionQueueV658?.preAnalysisProviderReadyV661)}</b>`,
     `Selection reason: <b>${escapeHtml(last?.evidenceCompletionQueueV658?.preAnalysisSelectionReasonV661 || "None")}</b>`,
     `CoinGecko Demo fallback: <b>${
@@ -128201,8 +128890,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V655 fresh-launch budget protection remains preserved; V662 lets the existing market-priority lane use the optional CoinGecko Demo fallback when public market providers cannot complete evidence.",
-    "<i>V662 keeps the 42-request ceiling, one-Demo-request-per-scan guard, 5-minute spacing, existing scoring/thresholds and all provider cooldown protections.</i>"
+    "V655 fresh-launch budget protection remains preserved; V663 adds a forward-only 7-day qualification audit using evidence already produced by the scanner.",
+    "<i>V663 keeps V662 market routing, the 42-request ceiling, one-Demo-request-per-scan guard, existing scoring/thresholds and all provider cooldown protections unchanged.</i>"
   ].join("\n");
 }
 
@@ -129031,6 +129720,7 @@ function telegramHelpV271() {
     "<code>/launchsources</code> — verified launch-source coverage + active sources",
     "<code>/sourceintel</code> — self-learned source identity + seeded lead correlation",
     "<code>/launchcoverage</code> — launch discovery-to-Telegram coverage funnel",
+    "<code>/audit7d</code> — forward 7-day verified-launch qualification audit",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -129967,6 +130657,49 @@ async function telegramCommandReplyV271(
           safeNumber(
             state?.launchCoverageCumulativeV474
               ?.scansObserved
+          )
+      };
+    }
+  } else if (
+    parsed.command ===
+      "/audit7d" ||
+    parsed.command ===
+      "/qualaudit"
+  ) {
+    reply =
+      qualificationAuditTelegramMessageV663(
+        state
+      );
+
+    if (diagnosticV273) {
+      const auditV663 =
+        qualificationAuditSnapshotV663(
+          state
+        );
+
+      diagnosticV273.qualificationAuditV663 = {
+        scannerBudgetConsumed: false,
+        externalProviderRequests: 0,
+        stateWrites: 0,
+        status:
+          auditV663?.status || null,
+        scansObserved:
+          safeNumber(
+            auditV663?.scansObserved
+          ),
+        uniqueVerifiedLaunchesEvaluated:
+          safeNumber(
+            auditV663
+              ?.uniqueVerifiedLaunchesEvaluated
+          ),
+        oneBlockerAway:
+          safeNumber(
+            auditV663?.oneBlockerAway
+          ),
+        evidenceOnlyUnresolved:
+          safeNumber(
+            auditV663
+              ?.evidenceOnlyUnresolved
           )
       };
     }
