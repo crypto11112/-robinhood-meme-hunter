@@ -1,4 +1,25 @@
 /**
+ * Robinhood Chain Meme Hunter — V651
+ * AUTHORITATIVE RUNTIME VERSION: V651
+ *
+ * V651 LIVE-FIRST ANALYSIS CAPACITY PROTECTION
+ * - builds directly forward from authoritative V650;
+ * - caps PRE-ANALYSIS backlog work at 4 requests instead of allowing historical
+ *   catch-up to consume the full 12-request backlog allowance before fresh
+ *   candidate analysis;
+ * - live discovery keeps its existing 12-request ceiling and remains first;
+ * - candidate analysis + Telegram keep priority over historical catch-up;
+ * - AFTER analysis + Telegram, existing V170 backlog reclaim can still use up
+ *   to 5 otherwise-unused discovery requests, so catch-up continues without
+ *   starving current/live launches;
+ * - hard global 42, discovery 24, base analysis 21, notification 2, provider
+ *   cooldowns, scoring, qualification and Telegram thresholds are unchanged;
+ * - adds budget telemetry showing the V651 pre-analysis backlog cap and whether
+ *   fresh-analysis capacity protection is active;
+ * - zero new providers and zero request-ceiling increase.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V650
  * AUTHORITATIVE RUNTIME VERSION: V650
  *
@@ -5151,7 +5172,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V650";
+const VERSION = "V651";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -6096,6 +6117,13 @@ const SYSTEM_REQUEST_LIMIT = 2;
 const DISCOVERY_REQUEST_LIMIT = 24;
 const LIVE_DISCOVERY_REQUEST_LIMIT = 12;
 const BACKLOG_DISCOVERY_REQUEST_LIMIT = 12;
+
+/*
+ * V651: historical catch-up must not consume the capacity required to fully
+ * analyse fresh verified launches. Only this pre-analysis allowance is reduced;
+ * V170 may reclaim otherwise-unused discovery capacity after Telegram.
+ */
+const V651_PRE_ANALYSIS_BACKLOG_REQUEST_LIMIT = 4;
 
 /*
  * V170:
@@ -11012,7 +11040,24 @@ function createBudget() {
         0,
 
       backlogLimit:
-        BACKLOG_DISCOVERY_REQUEST_LIMIT
+        V651_PRE_ANALYSIS_BACKLOG_REQUEST_LIMIT,
+
+      liveFirstAnalysisProtectionV651: {
+        enabled: true,
+        preAnalysisBacklogLimit:
+          V651_PRE_ANALYSIS_BACKLOG_REQUEST_LIMIT,
+        fullBacklogLimit:
+          BACKLOG_DISCOVERY_REQUEST_LIMIT,
+        liveDiscoveryLimit:
+          LIVE_DISCOVERY_REQUEST_LIMIT,
+        baseAnalysisLimit:
+          ANALYSIS_REQUEST_LIMIT,
+        hardGlobalLimit:
+          MAX_EXTERNAL_REQUESTS,
+        postAnalysisReclaimMax:
+          V170_POST_ANALYSIS_BACKLOG_RECLAIM_MAX_REQUESTS,
+        requestCeilingsRaised: false
+      }
     },
 
     analysis: {
@@ -12141,6 +12186,10 @@ function activatePostAnalysisBacklogReclaimV170(
     originalBacklogLimit,
     effectiveBacklogLimit:
       budget.discovery.backlogLimit,
+    preAnalysisBacklogLimitV651:
+      V651_PRE_ANALYSIS_BACKLOG_REQUEST_LIMIT,
+    liveFirstAnalysisProtectionV651:
+      true,
     discoveryRemainingBeforeReclaim:
       discoveryRemaining,
     analysisUsed:
@@ -12244,6 +12293,24 @@ function budgetTelemetry(
               budget.discovery.liveUsed
           )
       },
+
+      liveFirstAnalysisProtectionV651:
+        budget.discovery.liveFirstAnalysisProtectionV651 || {
+          enabled: true,
+          preAnalysisBacklogLimit:
+            V651_PRE_ANALYSIS_BACKLOG_REQUEST_LIMIT,
+          fullBacklogLimit:
+            BACKLOG_DISCOVERY_REQUEST_LIMIT,
+          liveDiscoveryLimit:
+            LIVE_DISCOVERY_REQUEST_LIMIT,
+          baseAnalysisLimit:
+            ANALYSIS_REQUEST_LIMIT,
+          hardGlobalLimit:
+            MAX_EXTERNAL_REQUESTS,
+          postAnalysisReclaimMax:
+            V170_POST_ANALYSIS_BACKLOG_RECLAIM_MAX_REQUESTS,
+          requestCeilingsRaised: false
+        },
 
       backlog: {
         used:
