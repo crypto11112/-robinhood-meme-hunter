@@ -5280,21 +5280,24 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V666";
+const VERSION = "V667";
 
 /*
- * V666 — protected first verified-launch holder completion.
- * - Preserves V665 holder/risk diagnostics, V664 CoinGecko tracing and V663 audit.
- * - FIX: when a priority current/live verified launch has no public V2/legacy
- *   holder rows and no reusable Bitquery rows, ONE existing analysis request may
- *   bypass lower-priority internal reserves to reach Blockscout Pro holders.
- * - The protected holder request still obeys the normal analysis limit, global
- *   pre-Telegram limit, notification reserve and hard 42-request ceiling.
- * - FIX: the same-run Blockscout holder-outage circuit no longer opens merely
- *   because public V2 + legacy rows were unavailable. It opens only on genuine
- *   provider-wide Pro evidence: HTTP 429, transient 5xx, or active Pro cooldown.
- * - 404/token indexing lag remains token-specific and does not suppress other
- *   current/live verified launches in the same scan.
+ * V667 — bounded CoinGecko Demo second-chance market completion.
+ * - Preserves the V666 holder fix, V665 holder/risk diagnostics, V664 trace and
+ *   V663 qualification audit.
+ * - Keeps the normal CoinGecko Demo allowance at ONE fresh request per scan.
+ * - Only when that first Demo request was actually sent and returned
+ *   COINGECKO_DEMO_NO_MARKET_FOUND_V660 may one later priority candidate receive
+ *   a single second-chance Demo request in the same scan.
+ * - The second-chance lane is globally throttled to at most once every 2 hours
+ *   and is protected by a forward-only bot-side 9,500-request UTC calendar-month
+ *   ceiling, leaving headroom below the user's 10,000-call Demo allowance.
+ * - The second-chance request may bypass only the normal 5-minute Demo spacing
+ *   and one-request-per-scan guard; it still obeys CoinGecko cooldown/429 state,
+ *   the normal analysis/global budgets, notification reserve and hard 42 ceiling.
+ * - Fixes /launchcoverage Demo status so the latest persisted V664 trace is shown
+ *   when service.lastStatus is absent/stale.
  * - No scoring, risk, holder-integrity, qualification or Telegram threshold change.
  */
 
@@ -5348,6 +5351,19 @@ const COINGECKO_DEMO_MIN_FRESH_INTERVAL_MS_V660 =
 
 const COINGECKO_DEMO_MAX_FRESH_PER_SCAN_V660 =
   1;
+
+/*
+ * V667 second-chance guard.
+ * Normal operation remains one Demo request per scan. A second request is only
+ * permitted after an actual first-request NO_MARKET_FOUND result, no more than
+ * once every two hours, and while the forward-only bot-side monthly meter is
+ * below 9,500 requests.
+ */
+const COINGECKO_DEMO_SECOND_CHANCE_INTERVAL_MS_V667 =
+  2 * 60 * 60 * 1000;
+
+const COINGECKO_DEMO_MONTHLY_BOT_LIMIT_V667 =
+  9500;
 
 const COINGECKO_DEMO_429_BASE_COOLDOWN_MS_V660 =
   10 * 60 * 1000;
@@ -45317,6 +45333,20 @@ async function geckoTerminalMarketData(
       service.lastStatus =
         "NO_MARKET_FOUND";
 
+      if (
+        !secondChanceAttemptV667
+      ) {
+        budget.analysis
+          .coinGeckoDemoSecondChanceEligibleV667 =
+          true;
+        budget.analysis
+          .coinGeckoDemoSecondChanceTriggerAddressV667 =
+          normalize(token) || null;
+        budget.analysis
+          .coinGeckoDemoSecondChanceArmedAtV667 =
+          Date.now();
+      }
+
       return {
         verified:
           false,
@@ -45583,10 +45613,27 @@ function coinGeckoDemoServiceV660(
       ? coinGeckoDemoConfiguredV660(env)
       : existing.configured === true;
 
+  const monthKeyV667 =
+    new Date().toISOString().slice(0, 7);
+
+  const sameMonthV667 =
+    existing.monthKeyV667 === monthKeyV667;
+
   state.services.coingeckoDemoV660 = {
     ...existing,
     configured:
       configuredNow,
+    monthKeyV667,
+    monthRequestsV667:
+      sameMonthV667
+        ? safeNumber(existing.monthRequestsV667)
+        : 0,
+    monthLimitV667:
+      COINGECKO_DEMO_MONTHLY_BOT_LIMIT_V667,
+    lastOverflowAtV667:
+      safeNumber(existing.lastOverflowAtV667) || null,
+    totalOverflowRequestsV667:
+      safeNumber(existing.totalOverflowRequestsV667),
     cooldownUntil:
       safeNumber(existing.cooldownUntil) || null,
     last429At:
@@ -45633,6 +45680,25 @@ function coinGeckoDemoFreshEligibilityV660(
       reason:
         "COINGECKO_DEMO_NOT_CONFIGURED_V660",
       eligibleAt: null
+    };
+  }
+
+  if (
+    safeNumber(service.monthRequestsV667) >=
+    COINGECKO_DEMO_MONTHLY_BOT_LIMIT_V667
+  ) {
+    return {
+      eligible: false,
+      configured: true,
+      reason:
+        "COINGECKO_DEMO_MONTHLY_BOT_LIMIT_V667",
+      eligibleAt: null,
+      monthKeyV667:
+        service.monthKeyV667 || null,
+      monthRequestsV667:
+        safeNumber(service.monthRequestsV667),
+      monthLimitV667:
+        COINGECKO_DEMO_MONTHLY_BOT_LIMIT_V667
     };
   }
 
@@ -45785,15 +45851,65 @@ async function coinGeckoDemoMarketDataV660(
       env
     );
 
+  budget.analysis.coinGeckoDemoFreshUsedV660 =
+    safeNumber(
+      budget.analysis
+        .coinGeckoDemoFreshUsedV660
+    );
+
+  const priorFreshUsedV667 =
+    safeNumber(
+      budget.analysis
+        .coinGeckoDemoFreshUsedV660
+    );
+
+  const overflowAlreadyUsedV667 =
+    budget.analysis
+      .coinGeckoDemoSecondChanceUsedV667 ===
+    true;
+
+  const overflowEligibleFromNoMarketV667 =
+    budget.analysis
+      .coinGeckoDemoSecondChanceEligibleV667 ===
+    true;
+
+  const lastOverflowAtV667 =
+    safeNumber(
+      service.lastOverflowAtV667
+    );
+
+  const overflowIntervalReadyV667 =
+    !lastOverflowAtV667 ||
+    Date.now() - lastOverflowAtV667 >=
+      COINGECKO_DEMO_SECOND_CHANCE_INTERVAL_MS_V667;
+
+  const monthlyHeadroomV667 =
+    safeNumber(service.monthRequestsV667) <
+    COINGECKO_DEMO_MONTHLY_BOT_LIMIT_V667;
+
+  const secondChanceAttemptV667 =
+    priorFreshUsedV667 >=
+      COINGECKO_DEMO_MAX_FRESH_PER_SCAN_V660 &&
+    overflowEligibleFromNoMarketV667 &&
+    !overflowAlreadyUsedV667 &&
+    overflowIntervalReadyV667 &&
+    monthlyHeadroomV667;
+
   const eligibility =
     coinGeckoDemoFreshEligibilityV660(
       state,
       env
     );
 
+  const spacingOnlyBypassV667 =
+    secondChanceAttemptV667 &&
+    eligibility?.reason ===
+      "COINGECKO_DEMO_FRESH_SPACING_V660";
+
   if (
     eligibility.eligible !==
-    true
+      true &&
+    !spacingOnlyBypassV667
   ) {
     return {
       verified: false,
@@ -45812,16 +45928,11 @@ async function coinGeckoDemoMarketDataV660(
     };
   }
 
-  budget.analysis.coinGeckoDemoFreshUsedV660 =
-    safeNumber(
-      budget.analysis
-        .coinGeckoDemoFreshUsedV660
-    );
-
   if (
     budget.analysis
       .coinGeckoDemoFreshUsedV660 >=
-      COINGECKO_DEMO_MAX_FRESH_PER_SCAN_V660
+      COINGECKO_DEMO_MAX_FRESH_PER_SCAN_V660 &&
+    !secondChanceAttemptV667
   ) {
     return {
       verified: false,
@@ -45856,6 +45967,31 @@ async function coinGeckoDemoMarketDataV660(
 
   budget.analysis
     .coinGeckoDemoFreshUsedV660++;
+
+  if (
+    secondChanceAttemptV667
+  ) {
+    budget.analysis
+      .coinGeckoDemoSecondChanceUsedV667 =
+      true;
+
+    budget.analysis
+      .coinGeckoDemoSecondChanceEligibleV667 =
+      false;
+
+    service.lastOverflowAtV667 =
+      Date.now();
+
+    service.totalOverflowRequestsV667 =
+      safeNumber(
+        service.totalOverflowRequestsV667
+      ) + 1;
+  }
+
+  service.monthRequestsV667 =
+    safeNumber(
+      service.monthRequestsV667
+    ) + 1;
 
   service.lastRequestAt =
     Date.now();
@@ -45983,7 +46119,15 @@ async function coinGeckoDemoMarketDataV660(
           "COINGECKO_DEMO_V660",
         fallbackTrigger:
           trigger,
-        requestSent: true
+        requestSent: true,
+        secondChanceV667:
+          secondChanceAttemptV667,
+        secondChanceEligibleNextV667:
+          !secondChanceAttemptV667,
+        monthRequestsV667:
+          safeNumber(service.monthRequestsV667),
+        monthLimitV667:
+          COINGECKO_DEMO_MONTHLY_BOT_LIMIT_V667
       };
     }
 
@@ -46002,7 +46146,13 @@ async function coinGeckoDemoMarketDataV660(
       fallbackTrigger:
         trigger,
       authenticatedFreeFallbackV660:
-        true
+        true,
+      secondChanceV667:
+        secondChanceAttemptV667,
+      monthRequestsV667:
+        safeNumber(service.monthRequestsV667),
+      monthLimitV667:
+        COINGECKO_DEMO_MONTHLY_BOT_LIMIT_V667
     };
 
     if (
@@ -129783,6 +129933,36 @@ function launchCoverageTelegramMessageV474(state) {
       state
     );
 
+  const latestCoinGeckoTraceRowV667 =
+    Array.isArray(
+      coinGeckoTraceV664?.rows
+    ) &&
+    coinGeckoTraceV664.rows.length
+      ? coinGeckoTraceV664.rows[
+          coinGeckoTraceV664.rows.length - 1
+        ]
+      : null;
+
+  const coinGeckoDisplayStatusV667 =
+    state?.services?.coingeckoDemoV660?.configured !== true
+      ? "NOT CONFIGURED"
+      : (
+          latestCoinGeckoTraceRowV667?.demoCalled === true
+            ? (
+                latestCoinGeckoTraceRowV667?.demoStatus ||
+                "CALLED_STATUS_UNAVAILABLE"
+              )
+            : (
+                state?.services?.coingeckoDemoV660?.lastStatus ||
+                "READY / NOT YET USED"
+              )
+        );
+
+  const coinGeckoMonthUsageV667 =
+    state?.services?.coingeckoDemoV660?.configured === true
+      ? `${fmt(state?.services?.coingeckoDemoV660?.monthRequestsV667)} / ${fmt(state?.services?.coingeckoDemoV660?.monthLimitV667 || COINGECKO_DEMO_MONTHLY_BOT_LIMIT_V667)}`
+      : "N/A";
+
   const coinGeckoTraceLinesV664 =
     (
       Array.isArray(
@@ -129855,14 +130035,10 @@ function launchCoverageTelegramMessageV474(state) {
       ? evidenceLinesV656
       : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V666 rotating evidence-completion queue</b>",
+    "<b>V667 rotating evidence-completion queue</b>",
     `Pending: <b>${fmt(last?.evidenceCompletionQueueV658?.pending)}</b> · Provider-ready pre-analysis: <b>${fmt(last?.evidenceCompletionQueueV658?.preAnalysisProviderReadyV661)}</b>`,
     `Selection reason: <b>${escapeHtml(last?.evidenceCompletionQueueV658?.preAnalysisSelectionReasonV661 || "None")}</b>`,
-    `CoinGecko Demo fallback: <b>${
-      state?.services?.coingeckoDemoV660?.configured === true
-        ? escapeHtml(state?.services?.coingeckoDemoV660?.lastStatus || "READY / NOT YET USED")
-        : "NOT CONFIGURED"
-    }</b>`,
+    `CoinGecko Demo fallback: <b>${escapeHtml(String(coinGeckoDisplayStatusV667))}</b> · V667 month meter: <b>${escapeHtml(String(coinGeckoMonthUsageV667))}</b>`,
     `Served this/last scan: <b>${
       isAddress(normalize(last?.evidenceCompletionQueueV658?.preAnalysisSelectedAddressV661))
         ? escapeHtml(`${normalize(last.evidenceCompletionQueueV658.preAnalysisSelectedAddressV661).slice(0, 6)}…${normalize(last.evidenceCompletionQueueV658.preAnalysisSelectedAddressV661).slice(-4)}`)
@@ -129880,7 +130056,7 @@ function launchCoverageTelegramMessageV474(state) {
         : ["• No market fallback trace captured in this scan."]
     ),
     "",
-    "<b>V666 holder/risk decision trace — latest scan</b>",
+    "<b>V667 holder/risk decision trace — latest scan</b>",
     ...(
       holderRiskLinesV665.length
         ? holderRiskLinesV665
@@ -129900,8 +130076,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V655 fresh-launch budget protection, V663 audit and V664/V665 diagnostics remain preserved; V666 gives one priority verified launch a protected existing holder-completion slot.",
-    "<i>V666 does not raise the 42-request ceiling or weaken holder/risk/qualification rules; the same-run outage circuit now requires genuine provider-wide evidence.</i>"
+    "V655 fresh-launch budget protection, V663 audit, V664/V665 diagnostics and the V666 holder fix remain preserved; V667 adds a tightly bounded Demo second-chance lane after a real first-request NO_MARKET_FOUND.",
+    "<i>V667 keeps the normal one-Demo-request path, allows at most one second chance per 2h, enforces a forward-only 9,500/month bot meter, preserves the hard 42-request ceiling and changes no qualification threshold.</i>"
   ].join("\n");
 }
 
