@@ -5280,7 +5280,20 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V668";
+const VERSION = "V669";
+
+/*
+ * V669 — CoinGecko Demo persisted-service reference fix.
+ * - Preserves V668 completely.
+ * - Fixes coinGeckoDemoServiceV660() so repeated service refreshes mutate the
+ *   existing persisted service object in place instead of replacing it.
+ * - This prevents callers from continuing to update a stale object reference
+ *   after coinGeckoDemoFreshEligibilityV660() refreshes provider state.
+ * - Restores reliable persistence for monthRequestsV667, lastRequestAt,
+ *   totalRequests, cooldown/429 state, overflow timing and verified counters.
+ * - No extra provider requests, no request-ceiling change, and no scoring,
+ *   holder, risk, qualification or Telegram-alert threshold changes.
+ */
 
 /*
  * V668 — Telegram /launchcoverage delivery hotfix.
@@ -45630,42 +45643,55 @@ function coinGeckoDemoServiceV660(
   const sameMonthV667 =
     existing.monthKeyV667 === monthKeyV667;
 
-  state.services.coingeckoDemoV660 = {
-    ...existing,
-    configured:
-      configuredNow,
-    monthKeyV667,
-    monthRequestsV667:
-      sameMonthV667
-        ? safeNumber(existing.monthRequestsV667)
-        : 0,
-    monthLimitV667:
-      COINGECKO_DEMO_MONTHLY_BOT_LIMIT_V667,
-    lastOverflowAtV667:
-      safeNumber(existing.lastOverflowAtV667) || null,
-    totalOverflowRequestsV667:
-      safeNumber(existing.totalOverflowRequestsV667),
-    cooldownUntil:
-      safeNumber(existing.cooldownUntil) || null,
-    last429At:
-      safeNumber(existing.last429At) || null,
-    lastSuccessAt:
-      safeNumber(existing.lastSuccessAt) || null,
-    lastRequestAt:
-      safeNumber(existing.lastRequestAt) || null,
-    lastStatus:
-      existing.lastStatus || null,
-    consecutive429s:
-      safeNumber(existing.consecutive429s),
-    total429s:
-      safeNumber(existing.total429s),
-    totalRequests:
-      safeNumber(existing.totalRequests),
-    totalVerified:
-      safeNumber(existing.totalVerified)
-  };
+  /*
+   * V669: preserve object identity. Several callers hold a reference returned
+   * by this helper and then call coinGeckoDemoFreshEligibilityV660(), which
+   * calls this helper again. Replacing the object here made the caller's
+   * reference stale, so later request/cooldown/month-meter mutations could be
+   * lost from persisted state. Mutating the existing object in place keeps
+   * every active reference attached to state.services.coingeckoDemoV660.
+   */
+  Object.assign(
+    existing,
+    {
+      configured:
+        configuredNow,
+      monthKeyV667,
+      monthRequestsV667:
+        sameMonthV667
+          ? safeNumber(existing.monthRequestsV667)
+          : 0,
+      monthLimitV667:
+        COINGECKO_DEMO_MONTHLY_BOT_LIMIT_V667,
+      lastOverflowAtV667:
+        safeNumber(existing.lastOverflowAtV667) || null,
+      totalOverflowRequestsV667:
+        safeNumber(existing.totalOverflowRequestsV667),
+      cooldownUntil:
+        safeNumber(existing.cooldownUntil) || null,
+      last429At:
+        safeNumber(existing.last429At) || null,
+      lastSuccessAt:
+        safeNumber(existing.lastSuccessAt) || null,
+      lastRequestAt:
+        safeNumber(existing.lastRequestAt) || null,
+      lastStatus:
+        existing.lastStatus || null,
+      consecutive429s:
+        safeNumber(existing.consecutive429s),
+      total429s:
+        safeNumber(existing.total429s),
+      totalRequests:
+        safeNumber(existing.totalRequests),
+      totalVerified:
+        safeNumber(existing.totalVerified)
+    }
+  );
 
-  return state.services.coingeckoDemoV660;
+  state.services.coingeckoDemoV660 =
+    existing;
+
+  return existing;
 }
 
 function coinGeckoDemoFreshEligibilityV660(
@@ -130087,8 +130113,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V655 fresh-launch budget protection, V663 audit, V664/V665 diagnostics and the V666 holder fix remain preserved; V667 adds a tightly bounded Demo second-chance lane after a real first-request NO_MARKET_FOUND.",
-    "<i>V667 keeps the normal one-Demo-request path, allows at most one second chance per 2h, enforces a forward-only 9,500/month bot meter, preserves the hard 42-request ceiling and changes no qualification threshold.</i>"
+    "V655 fresh-launch budget protection, V663 audit, V664/V665 diagnostics, the V666 holder fix and V667 Demo second-chance lane remain preserved; V669 fixes CoinGecko persisted service-object identity.",
+    "<i>V669 preserves the V667 one-Demo-request/second-chance rules and 9,500/month bot meter, preserves the hard 42-request ceiling and changes no qualification threshold.</i>"
   ].join("\n");
 }
 
