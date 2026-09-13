@@ -5280,7 +5280,24 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V669";
+const VERSION = "V670";
+
+/*
+ * V670 — Free-plan scheduled CPU relay fix.
+ * - Preserves V669 scanner/provider/scoring/holder/Telegram behaviour.
+ * - Cloudflare Observability proved the every-5-minutes cron is firing but the
+ *   scheduled event is terminated with outcome=exceededCpu at cpuTimeMs=10.
+ * - The cron handler is therefore reduced to one lightweight self-fetch relay.
+ * - The relayed HTTP request executes the existing scheduledScan(env), preserving
+ *   scheduled=true telemetry, all scanner logic, native V3 collection, state
+ *   writes and Telegram behaviour.
+ * - The relay uses the already-public /scan capability surface and a dedicated
+ *   query marker; it does not add a new provider request to the scanner's
+ *   42-request accounting because the relay is orchestration, not chain analysis.
+ * - Manual /scan remains unchanged and still runs with scheduled=false.
+ * - No scoring, qualification, risk, holder, market, request-ceiling or alert
+ *   threshold changes.
+ */
 
 /*
  * V669 — CoinGecko Demo persisted-service reference fix.
@@ -130113,8 +130130,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V655 fresh-launch budget protection, V663 audit, V664/V665 diagnostics, the V666 holder fix and V667 Demo second-chance lane remain preserved; V669 fixes CoinGecko persisted service-object identity.",
-    "<i>V669 preserves the V667 one-Demo-request/second-chance rules and 9,500/month bot meter, preserves the hard 42-request ceiling and changes no qualification threshold.</i>"
+    "V655 fresh-launch budget protection, V663 audit, V664/V665 diagnostics, the V666 holder fix, V667 Demo second-chance lane and V669 CoinGecko persistence fix remain preserved; V670 relays cron execution into the proven HTTP scan path to avoid the Free-plan scheduled CPU ceiling.",
+    "<i>V670 preserves the V667 one-Demo-request/second-chance rules, 9,500/month bot meter and hard 42-request ceiling; only scheduled orchestration changes.</i>"
   ].join("\n");
 }
 
@@ -136183,14 +136200,31 @@ async function handleRequest(
     path ===
     "/scan"
   ) {
+    const requestUrlV670 =
+      new URL(
+        request.url
+      );
+
+    const scheduledRelayV670 =
+      request.method ===
+        "POST" &&
+      requestUrlV670.searchParams.get(
+        "v670ScheduledRelay"
+      ) ===
+        "1";
+
     return jsonResponse(
-      await scan(
-        env,
-        {
-          scheduled:
-            false
-        }
-      )
+      scheduledRelayV670
+        ? await scheduledScan(
+            env
+          )
+        : await scan(
+            env,
+            {
+              scheduled:
+                false
+            }
+          )
     );
   }
 
@@ -142964,6 +142998,60 @@ if (url.pathname === "/reconcile-v374") {
 
 
 /* =========================================================
+   V670 FREE-PLAN SCHEDULED CPU RELAY
+   ========================================================= */
+
+const V670_SELF_SCAN_URL =
+  "https://robinhood-meme-hunter.johnd1987.workers.dev/scan?v670ScheduledRelay=1";
+
+async function relayScheduledScanV670() {
+  const response =
+    await fetch(
+      V670_SELF_SCAN_URL,
+      {
+        method:
+          "POST",
+        headers: {
+          "x-robinhood-meme-hunter-cron-relay":
+            "V670"
+        }
+      }
+    );
+
+  let result = null;
+
+  try {
+    result =
+      await response.json();
+  } catch (_) {
+    result = null;
+  }
+
+  if (
+    !response.ok
+  ) {
+    throw new Error(
+      `V670_SCHEDULED_RELAY_HTTP_${response.status}`
+    );
+  }
+
+  return {
+    ok: true,
+    status:
+      "V670_SCHEDULED_RELAY_COMPLETE",
+    relayedVersion:
+      result?.version ||
+      null,
+    relayedStatus:
+      result?.status ||
+      null,
+    timestamp:
+      Date.now()
+  };
+}
+
+
+/* =========================================================
    CLOUDFLARE EXPORT
    ========================================================= */
 
@@ -143019,10 +143107,13 @@ export default {
     env,
     ctx
   ) {
+    /*
+     * V670: Cloudflare Free cron events were proven to die at 10 ms CPU before
+     * the full scanner could finish. Keep the scheduled event itself tiny and
+     * relay into the already-working HTTP scan execution path.
+     */
     ctx.waitUntil(
-      scheduledScan(
-        env
-      )
+      relayScheduledScanV670()
     );
   }
 };
