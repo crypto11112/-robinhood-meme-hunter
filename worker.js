@@ -5280,23 +5280,23 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V659";
+const VERSION = "V660";
 
 /*
- * V659 — authoritative provider-ready queue scheduling.
- * - Preserves V658's persisted rotating verified-launch evidence queue.
- * - FIX: queued market-incomplete launches are no longer gated only by the
- *   candidate's old stored nextEligibleAt timestamp.
- * - Each scan re-checks the CURRENT DexScreener / GeckoTerminal availability
- *   state before deciding whether a queued candidate is actually serviceable.
- * - When a market provider is genuinely eligible, one queued candidate gets
- *   first use of the EXISTING bounded market-completion opportunity before
- *   ordinary fresh candidates.
- * - If both market providers are still cooling down / staggered, the queue
- *   remains parked and does not waste an analysis/provider request.
- * - Holder-only / risk-only completion keeps V658's bounded retry timing.
- * - Hard request ceiling remains 42. Provider cooldowns, spacing, scan limits,
- *   scoring, qualification and Telegram thresholds are unchanged.
+ * V660 — free authenticated CoinGecko Demo market fallback.
+ * - Preserves V659 provider-ready queue scheduling and every existing guard.
+ * - Adds an OPTIONAL third market evidence path using CoinGecko's free Demo API
+ *   (`COINGECKO_DEMO_API_KEY`) only for persisted/queued completion targets.
+ * - The Demo request uses CoinGecko's authenticated /onchain token-pools
+ *   endpoint for Robinhood Chain and reuses the existing strict Gecko pool
+ *   parser: positive USD price + positive USD liquidity are still required.
+ * - At most ONE CoinGecko Demo market request per scan, with persistent spacing,
+ *   adaptive 429 cooldown and existing analysis/global request accounting.
+ * - It does NOT bypass DexScreener/GeckoTerminal cooldowns; it is an independent
+ *   authenticated quota path used when those public paths cannot complete a
+ *   queued candidate.
+ * - Hard request ceiling remains 42. Scoring, qualification, liquidity/risk
+ *   requirements and Telegram thresholds are unchanged.
  */
 
 const EVIDENCE_COMPLETION_QUEUE_MAX_V658 = 6;
@@ -5332,6 +5332,29 @@ const GECKOTERMINAL_BASE =
 
 const GECKOTERMINAL_NETWORK =
   "robinhood";
+
+/*
+ * V660 free authenticated CoinGecko Demo fallback.
+ * We deliberately keep this to one request per scan and 5-minute spacing so
+ * the free monthly quota remains bounded even during long-running operation.
+ */
+const COINGECKO_DEMO_ONCHAIN_BASE_V660 =
+  "https://api.coingecko.com/api/v3/onchain";
+
+const COINGECKO_DEMO_NETWORK_V660 =
+  "robinhood";
+
+const COINGECKO_DEMO_MIN_FRESH_INTERVAL_MS_V660 =
+  5 * 60 * 1000;
+
+const COINGECKO_DEMO_MAX_FRESH_PER_SCAN_V660 =
+  1;
+
+const COINGECKO_DEMO_429_BASE_COOLDOWN_MS_V660 =
+  10 * 60 * 1000;
+
+const COINGECKO_DEMO_MAX_429_COOLDOWN_MS_V660 =
+  6 * 60 * 60 * 1000;
 
 const GECKOTERMINAL_429_COOLDOWN_MS =
   2 * 60 * 1000;
@@ -45163,12 +45186,558 @@ async function geckoTerminalMarketData(
   }
 }
 
+
+/* =========================================================
+   V660 FREE AUTHENTICATED COINGECKO DEMO MARKET FALLBACK
+   ========================================================= */
+
+function coinGeckoDemoConfiguredV660(env) {
+  return Boolean(
+    String(
+      env?.COINGECKO_DEMO_API_KEY ||
+      ""
+    ).trim()
+  );
+}
+
+function coinGeckoDemoServiceV660(
+  state,
+  env = null
+) {
+  state.services =
+    state.services ||
+    {};
+
+  const existing =
+    state.services.coingeckoDemoV660 &&
+    typeof state.services.coingeckoDemoV660 === "object"
+      ? state.services.coingeckoDemoV660
+      : {};
+
+  const configuredNow =
+    env !== null
+      ? coinGeckoDemoConfiguredV660(env)
+      : existing.configured === true;
+
+  state.services.coingeckoDemoV660 = {
+    ...existing,
+    configured:
+      configuredNow,
+    cooldownUntil:
+      safeNumber(existing.cooldownUntil) || null,
+    last429At:
+      safeNumber(existing.last429At) || null,
+    lastSuccessAt:
+      safeNumber(existing.lastSuccessAt) || null,
+    lastRequestAt:
+      safeNumber(existing.lastRequestAt) || null,
+    lastStatus:
+      existing.lastStatus || null,
+    consecutive429s:
+      safeNumber(existing.consecutive429s),
+    total429s:
+      safeNumber(existing.total429s),
+    totalRequests:
+      safeNumber(existing.totalRequests),
+    totalVerified:
+      safeNumber(existing.totalVerified)
+  };
+
+  return state.services.coingeckoDemoV660;
+}
+
+function coinGeckoDemoFreshEligibilityV660(
+  state,
+  env = null
+) {
+  const service =
+    coinGeckoDemoServiceV660(
+      state,
+      env
+    );
+
+  const now =
+    Date.now();
+
+  if (
+    service.configured !==
+    true
+  ) {
+    return {
+      eligible: false,
+      configured: false,
+      reason:
+        "COINGECKO_DEMO_NOT_CONFIGURED_V660",
+      eligibleAt: null
+    };
+  }
+
+  const cooldownUntil =
+    safeNumber(
+      service.cooldownUntil
+    );
+
+  if (
+    cooldownUntil &&
+    now < cooldownUntil
+  ) {
+    return {
+      eligible: false,
+      configured: true,
+      reason:
+        "COINGECKO_DEMO_COOLDOWN_V660",
+      eligibleAt:
+        cooldownUntil
+    };
+  }
+
+  const lastRequestAt =
+    safeNumber(
+      service.lastRequestAt
+    );
+
+  const spacingEligibleAt =
+    lastRequestAt
+      ? lastRequestAt +
+        COINGECKO_DEMO_MIN_FRESH_INTERVAL_MS_V660
+      : 0;
+
+  if (
+    spacingEligibleAt &&
+    now < spacingEligibleAt
+  ) {
+    return {
+      eligible: false,
+      configured: true,
+      reason:
+        "COINGECKO_DEMO_FRESH_SPACING_V660",
+      eligibleAt:
+        spacingEligibleAt
+    };
+  }
+
+  return {
+    eligible: true,
+    configured: true,
+    reason: null,
+    eligibleAt: now
+  };
+}
+
+function registerCoinGeckoDemo429V660(
+  service
+) {
+  const now =
+    Date.now();
+
+  const prior429At =
+    safeNumber(
+      service.last429At
+    );
+
+  const priorLevel =
+    (
+      prior429At &&
+      now - prior429At <=
+        24 * 60 * 60 * 1000
+    )
+      ? safeNumber(
+          service.consecutive429s
+        )
+      : 0;
+
+  const level =
+    Math.min(
+      6,
+      Math.max(
+        1,
+        priorLevel + 1
+      )
+    );
+
+  const cooldownMs =
+    Math.min(
+      COINGECKO_DEMO_MAX_429_COOLDOWN_MS_V660,
+      COINGECKO_DEMO_429_BASE_COOLDOWN_MS_V660 *
+        Math.pow(
+          2,
+          level - 1
+        )
+    );
+
+  service.last429At =
+    now;
+
+  service.consecutive429s =
+    level;
+
+  service.cooldownUntil =
+    now + cooldownMs;
+
+  service.lastStatus =
+    "HTTP_429";
+
+  service.total429s =
+    safeNumber(
+      service.total429s
+    ) + 1;
+
+  return cooldownMs;
+}
+
+function registerCoinGeckoDemoSuccessV660(
+  service,
+  status
+) {
+  service.lastSuccessAt =
+    Date.now();
+
+  service.lastStatus =
+    status;
+
+  service.cooldownUntil =
+    null;
+
+  service.consecutive429s =
+    Math.max(
+      0,
+      safeNumber(
+        service.consecutive429s
+      ) - 1
+    );
+}
+
+async function coinGeckoDemoMarketDataV660(
+  token,
+  budget,
+  watched,
+  state,
+  env,
+  trigger
+) {
+  const service =
+    coinGeckoDemoServiceV660(
+      state,
+      env
+    );
+
+  const eligibility =
+    coinGeckoDemoFreshEligibilityV660(
+      state,
+      env
+    );
+
+  if (
+    eligibility.eligible !==
+    true
+  ) {
+    return {
+      verified: false,
+      status:
+        eligibility.reason ||
+        "COINGECKO_DEMO_NOT_ELIGIBLE_V660",
+      source:
+        "COINGECKO_DEMO_V660",
+      fallbackTrigger:
+        trigger,
+      configured:
+        eligibility.configured === true,
+      freshEligibleAt:
+        eligibility.eligibleAt || null,
+      requestSent: false
+    };
+  }
+
+  budget.analysis.coinGeckoDemoFreshUsedV660 =
+    safeNumber(
+      budget.analysis
+        .coinGeckoDemoFreshUsedV660
+    );
+
+  if (
+    budget.analysis
+      .coinGeckoDemoFreshUsedV660 >=
+      COINGECKO_DEMO_MAX_FRESH_PER_SCAN_V660
+  ) {
+    return {
+      verified: false,
+      status:
+        "COINGECKO_DEMO_SCAN_LIMIT_V660",
+      source:
+        "COINGECKO_DEMO_V660",
+      fallbackTrigger:
+        trigger,
+      requestSent: false
+    };
+  }
+
+  if (
+    !consumeBudget(
+      budget,
+      "analysis",
+      "COINGECKO_DEMO_FALLBACK_V660"
+    )
+  ) {
+    return {
+      verified: false,
+      status:
+        "COINGECKO_DEMO_BUDGET_PROTECTED_V660",
+      source:
+        "COINGECKO_DEMO_V660",
+      fallbackTrigger:
+        trigger,
+      requestSent: false
+    };
+  }
+
+  budget.analysis
+    .coinGeckoDemoFreshUsedV660++;
+
+  service.lastRequestAt =
+    Date.now();
+
+  service.totalRequests =
+    safeNumber(
+      service.totalRequests
+    ) + 1;
+
+  try {
+    const response =
+      await marketFetchV428(
+        `${COINGECKO_DEMO_ONCHAIN_BASE_V660}/networks/${COINGECKO_DEMO_NETWORK_V660}/tokens/${token}/pools`,
+        {
+          headers: {
+            accept:
+              "application/json",
+            "x-cg-demo-api-key":
+              String(
+                env?.COINGECKO_DEMO_API_KEY ||
+                ""
+              ).trim()
+          }
+        },
+        budget,
+        state,
+        {
+          provider:
+            "COINGECKO_DEMO_V660",
+          feature:
+            "AUTHENTICATED_MARKET_FALLBACK_V660",
+          phase:
+            "analysis",
+          pathClass:
+            "ONCHAIN_TOKEN_POOLS"
+        }
+      );
+
+    if (
+      response.status ===
+      429
+    ) {
+      const cooldownMs =
+        registerCoinGeckoDemo429V660(
+          service
+        );
+
+      return {
+        verified: false,
+        status:
+          "COINGECKO_DEMO_HTTP_429_V660",
+        source:
+          "COINGECKO_DEMO_V660",
+        fallbackTrigger:
+          trigger,
+        rateLimited: true,
+        cooldownUntil:
+          service.cooldownUntil,
+        adaptiveBackoffMs:
+          cooldownMs,
+        requestSent: true
+      };
+    }
+
+    if (
+      !response.ok
+    ) {
+      service.lastStatus =
+        `HTTP_${response.status}`;
+
+      return {
+        verified: false,
+        status:
+          `COINGECKO_DEMO_HTTP_${response.status}_V660`,
+        source:
+          "COINGECKO_DEMO_V660",
+        fallbackTrigger:
+          trigger,
+        requestSent: true
+      };
+    }
+
+    const payload =
+      await response.json();
+
+    const rows =
+      Array.isArray(
+        payload?.data
+      )
+        ? payload.data
+        : [];
+
+    const markets =
+      rows
+        .map(
+          row =>
+            parseGeckoPoolMarket(
+              token,
+              watched,
+              row
+            )
+        )
+        .filter(Boolean)
+        .sort(
+          (a, b) =>
+            safeNumber(
+              b.liquidityUsd
+            ) -
+            safeNumber(
+              a.liquidityUsd
+            )
+        );
+
+    if (
+      !markets.length
+    ) {
+      service.lastStatus =
+        "NO_MARKET_FOUND";
+
+      return {
+        verified: false,
+        status:
+          "COINGECKO_DEMO_NO_MARKET_FOUND_V660",
+        source:
+          "COINGECKO_DEMO_V660",
+        fallbackTrigger:
+          trigger,
+        requestSent: true
+      };
+    }
+
+    const market = {
+      ...markets[0],
+      source:
+        `COINGECKO_DEMO_FALLBACK_V660_${String(
+          trigger ||
+          "PUBLIC_MARKET_PROVIDERS_UNAVAILABLE"
+        )
+          .replace(
+            /[^A-Z0-9_]/gi,
+            "_"
+          )
+          .toUpperCase()}`,
+      fallbackTrigger:
+        trigger,
+      authenticatedFreeFallbackV660:
+        true
+    };
+
+    if (
+      market?.verified !==
+      true
+    ) {
+      service.lastStatus =
+        "POOL_RETURNED_NOT_VERIFIED";
+
+      return {
+        ...market,
+        verified: false,
+        status:
+          market?.status ||
+          "COINGECKO_DEMO_POOL_NOT_VERIFIED_V660",
+        requestSent: true
+      };
+    }
+
+    registerCoinGeckoDemoSuccessV660(
+      service,
+      "VERIFIED"
+    );
+
+    service.totalVerified =
+      safeNumber(
+        service.totalVerified
+      ) + 1;
+
+    saveMarketCache(
+      watched,
+      market
+    );
+
+    return market;
+  }
+
+  catch (
+    error
+  ) {
+    service.lastStatus =
+      "FETCH_ERROR";
+
+    return {
+      verified: false,
+      status:
+        "COINGECKO_DEMO_FETCH_ERROR_V660",
+      source:
+        "COINGECKO_DEMO_V660",
+      fallbackTrigger:
+        trigger,
+      requestSent: true,
+      error:
+        errorString(error)
+    };
+  }
+}
+
+function shouldTryCoinGeckoDemoV660(
+  fallback,
+  demoFallbackEligible
+) {
+  if (
+    demoFallbackEligible !==
+    true
+  ) {
+    return false;
+  }
+
+  const status =
+    String(
+      fallback?.status ||
+      ""
+    );
+
+  return [
+    "GECKOTERMINAL_HTTP_429",
+    "GECKOTERMINAL_COOLDOWN",
+    "GECKOTERMINAL_FRESH_SPACING",
+    "GECKOTERMINAL_SCAN_LIMIT",
+    "GECKOTERMINAL_FETCH_ERROR",
+    "GECKO_CROSS_PROVIDER_STAGGER_V157",
+    "GECKOTERMINAL_RECOVERY_STAGGER_V157",
+    "GECKOTERMINAL_NOT_ELIGIBLE"
+  ].some(
+    prefix =>
+      status === prefix ||
+      status.startsWith(prefix)
+  );
+}
+
 async function priorityMarketFallback(
   token,
   budget,
   watched,
   state,
+  env,
   priority,
+  demoFallbackEligibleV660,
   trigger,
   original
 ) {
@@ -45197,26 +45766,98 @@ async function priorityMarketFallback(
     geckoMarketEligibilityV433
       .eligible !== true
   ) {
+    const geckoUnavailableV660 = {
+      verified: false,
+      status:
+        availabilityV147
+          .gecko
+          .reason ||
+        geckoMarketEligibilityV433
+          .reason ||
+        "GECKOTERMINAL_NOT_ELIGIBLE",
+      source:
+        "GECKOTERMINAL",
+      fallbackTrigger:
+        trigger
+    };
+
+    if (
+      demoFallbackEligibleV660 ===
+        true &&
+      coinGeckoDemoConfiguredV660(
+        env
+      )
+    ) {
+      const demoV660 =
+        await coinGeckoDemoMarketDataV660(
+          token,
+          budget,
+          watched,
+          state,
+          env,
+          geckoUnavailableV660.status
+        );
+
+      if (
+        demoV660?.verified ===
+        true
+      ) {
+        return {
+          ...demoV660,
+          marketProviderAvailabilityV147:
+            availabilityV147
+        };
+      }
+
+      return {
+        ...original,
+        marketProviderAvailabilityV147:
+          availabilityV147,
+        alternativeMarketData: {
+          attempted: false,
+          checked: true,
+          requestSent: false,
+          source:
+            "GECKOTERMINAL",
+          status:
+            geckoUnavailableV660.status,
+          fallbackTrigger:
+            trigger,
+          cooldownUntil:
+            availabilityV147
+              .gecko
+              .cooldownUntil,
+          freshEligibleAt:
+            availabilityV147
+              .gecko
+              .eligibleAt,
+          bothProvidersUnavailable:
+            availabilityV147
+              .bothUnavailable,
+          earliestMarketRetryAt:
+            availabilityV147
+              .earliestEligibleAt,
+          retryAfterMs:
+            availabilityV147
+              .retryAfterMs,
+          coinGeckoDemoV660:
+            demoV660
+        }
+      };
+    }
+
     return {
       ...original,
-
       marketProviderAvailabilityV147:
         availabilityV147,
-
       alternativeMarketData: {
-        attempted:
-          false,
-        checked:
-          true,
-        requestSent:
-          false,
+        attempted: false,
+        checked: true,
+        requestSent: false,
         source:
           "GECKOTERMINAL",
         status:
-          availabilityV147
-            .gecko
-            .reason ||
-          "GECKOTERMINAL_NOT_ELIGIBLE",
+          geckoUnavailableV660.status,
         fallbackTrigger:
           trigger,
         cooldownUntil:
@@ -45235,7 +45876,17 @@ async function priorityMarketFallback(
             .earliestEligibleAt,
         retryAfterMs:
           availabilityV147
-            .retryAfterMs
+            .retryAfterMs,
+        coinGeckoDemoV660: {
+          verified: false,
+          status:
+            coinGeckoDemoConfiguredV660(
+              env
+            )
+              ? "NOT_SELECTED_V660"
+              : "COINGECKO_DEMO_NOT_CONFIGURED_V660",
+          requestSent: false
+        }
       }
     };
   }
@@ -45261,6 +45912,45 @@ async function priorityMarketFallback(
           token
         )
     };
+  }
+
+  let coinGeckoDemoV660 =
+    null;
+
+  if (
+    coinGeckoDemoConfiguredV660(
+      env
+    ) &&
+    shouldTryCoinGeckoDemoV660(
+      fallback,
+      demoFallbackEligibleV660
+    )
+  ) {
+    coinGeckoDemoV660 =
+      await coinGeckoDemoMarketDataV660(
+        token,
+        budget,
+        watched,
+        state,
+        env,
+        fallback?.status ||
+        trigger
+      );
+
+    if (
+      coinGeckoDemoV660?.verified ===
+      true
+    ) {
+      return {
+        ...coinGeckoDemoV660,
+        marketProviderAvailabilityV147:
+          marketProviderAvailabilityV147(
+            state,
+            watched?.address ||
+            token
+          )
+      };
+    }
   }
 
   return {
@@ -45299,7 +45989,19 @@ async function priorityMarketFallback(
         null,
       freshEligibleAt:
         fallback?.freshEligibleAt ||
-        null
+        null,
+      coinGeckoDemoV660:
+        coinGeckoDemoV660 ||
+        {
+          verified: false,
+          status:
+            coinGeckoDemoConfiguredV660(
+              env
+            )
+              ? "NOT_SELECTED_V660"
+              : "COINGECKO_DEMO_NOT_CONFIGURED_V660",
+          requestSent: false
+        }
     }
   };
 }
@@ -47830,8 +48532,10 @@ async function marketData(
   budget,
   watched,
   state,
+  env,
   allowFresh = true,
-  priority = false
+  priority = false,
+  demoFallbackEligibleV660 = false
 ) {
   const freshCache =
     cachedMarket(
@@ -47910,7 +48614,9 @@ async function marketData(
       budget,
       watched,
       state,
+      env,
       priority,
+      demoFallbackEligibleV660,
       "DEXSCREENER_COOLDOWN",
       {
         verified:
@@ -48013,7 +48719,9 @@ async function marketData(
       budget,
       watched,
       state,
+      env,
       priority,
+      demoFallbackEligibleV660,
       "DEXSCREENER_FRESH_GUARD",
       {
         verified:
@@ -48081,7 +48789,9 @@ async function marketData(
       budget,
       watched,
       state,
+      env,
       priority,
+      demoFallbackEligibleV660,
       "DEXSCREENER_RECOVERY_STAGGER_V157",
       originalV157
     );
@@ -48285,7 +48995,9 @@ async function marketData(
         budget,
         watched,
         state,
-        priority,
+        env,
+      priority,
+      demoFallbackEligibleV660,
         "DEXSCREENER_HTTP_429",
         {
           verified:
@@ -48518,7 +49230,9 @@ async function marketData(
           budget,
           watched,
           state,
-          priority,
+          env,
+      priority,
+      demoFallbackEligibleV660,
           "DEXSCREENER_NO_MARKET_FOUND",
           result
         );
@@ -69217,11 +69931,15 @@ async function analyzeToken(
         budget,
         watched,
         state,
+        env,
         Boolean(
           options?.marketFreshEligible
         ),
         Boolean(
           options?.marketPriority ??
+          options?.priorityCompletion
+        ),
+        Boolean(
           options?.priorityCompletion
         )
       );
@@ -72366,7 +73084,8 @@ function pruneEvidenceCompletionQueueV658(state) {
 
 function evidenceCompletionProviderGateV659(
   state,
-  row
+  row,
+  env = null
 ) {
   const now = Date.now();
   const blockers =
@@ -72410,9 +73129,20 @@ function evidenceCompletionProviderGateV659(
       availability?.gecko?.eligible ===
       true;
 
+    const coinGeckoDemoEligibilityV660 =
+      coinGeckoDemoFreshEligibilityV660(
+        state,
+        env
+      );
+
+    const coinGeckoDemoReadyV660 =
+      coinGeckoDemoEligibilityV660
+        ?.eligible === true;
+
     const providerReady =
       dexReady ||
-      geckoReady;
+      geckoReady ||
+      coinGeckoDemoReadyV660;
 
     return {
       ready:
@@ -72422,20 +73152,32 @@ function evidenceCompletionProviderGateV659(
           ? (
               dexReady
                 ? "DEX_PROVIDER_READY_V659"
-                : "GECKO_PROVIDER_READY_V659"
+                : (
+                    geckoReady
+                      ? "GECKO_PROVIDER_READY_V659"
+                      : "COINGECKO_DEMO_PROVIDER_READY_V660"
+                  )
             )
-          : "MARKET_PROVIDERS_NOT_READY_V659",
+          : "MARKET_PROVIDERS_NOT_READY_V660",
       needsMarket,
       needsHolder,
       needsRisk,
       dexReady,
       geckoReady,
+      coinGeckoDemoReadyV660,
+      coinGeckoDemoReasonV660:
+        coinGeckoDemoEligibilityV660
+          ?.reason || null,
       eligibleAt:
         providerReady
           ? now
           : (
               safeNumber(
                 availability?.earliestEligibleAt
+              ) ||
+              safeNumber(
+                coinGeckoDemoEligibilityV660
+                  ?.eligibleAt
               ) ||
               safeNumber(
                 row?.nextEligibleAt
@@ -72476,6 +73218,8 @@ function evidenceCompletionProviderGateV659(
     needsRisk,
     dexReady: false,
     geckoReady: false,
+    coinGeckoDemoReadyV660: false,
+    coinGeckoDemoReasonV660: null,
     eligibleAt:
       rowEligibleAt ||
       (
@@ -72485,7 +73229,7 @@ function evidenceCompletionProviderGateV659(
   };
 }
 
-function selectEvidenceCompletionRetryV658(state) {
+function selectEvidenceCompletionRetryV658(state, env) {
   const queue = pruneEvidenceCompletionQueueV658(state);
   if (!queue || !queue.entries.length) return null;
 
@@ -72501,7 +73245,8 @@ function selectEvidenceCompletionRetryV658(state) {
       gate:
         evidenceCompletionProviderGateV659(
           state,
-          row
+          row,
+          env
         )
     }))
     .filter(item => {
@@ -77255,9 +78000,19 @@ for (
    * V658: inject at most one due rotating evidence-completion target. Existing
    * dedicated carried completion and V422 holder-retry lanes retain precedence.
    */
+  /*
+   * V660 refreshes optional Demo-provider configuration from the actual Worker
+   * environment every scan, including scans where the queue is empty.
+   */
+  coinGeckoDemoServiceV660(
+    state,
+    env
+  );
+
   const evidenceCompletionRetryTokenV658 =
     selectEvidenceCompletionRetryV658(
-      state
+      state,
+      env
     );
 
   const evidenceCompletionRetryAddressV658 =
@@ -127237,9 +127992,14 @@ function launchCoverageTelegramMessageV474(state) {
       ? evidenceLinesV656
       : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V659 rotating evidence-completion queue</b>",
+    "<b>V660 rotating evidence-completion queue</b>",
     `Pending: <b>${fmt(last?.evidenceCompletionQueueV658?.pending)}</b> · Provider-ready now: <b>${fmt(last?.evidenceCompletionQueueV658?.providerReadyV659)}</b>`,
     `Selection reason: <b>${escapeHtml(last?.evidenceCompletionQueueV658?.lastSelectedReasonV659 || "None")}</b>`,
+    `CoinGecko Demo fallback: <b>${
+      state?.services?.coingeckoDemoV660?.configured === true
+        ? escapeHtml(state?.services?.coingeckoDemoV660?.lastStatus || "READY / NOT YET USED")
+        : "NOT CONFIGURED"
+    }</b>`,
     `Served this/last scan: <b>${
       isAddress(normalize(last?.evidenceCompletionQueueV658?.lastSelectedAddress))
         ? escapeHtml(`${normalize(last.evidenceCompletionQueueV658.lastSelectedAddress).slice(0, 6)}…${normalize(last.evidenceCompletionQueueV658.lastSelectedAddress).slice(-4)}`)
@@ -127259,8 +128019,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V655 fresh-launch budget protection remains preserved; V659 gives one queued verified launch first right to an already-eligible market slot using current provider state.",
-    "<i>V659 adds no request ceiling, no scoring/threshold change, and preserves provider cooldown/retry guards.</i>"
+    "V655 fresh-launch budget protection remains preserved; V660 adds an optional free authenticated CoinGecko Demo market fallback for persisted/queued completion targets.",
+    "<i>V660 keeps the 42-request ceiling, one-Demo-request-per-scan guard, existing scoring/thresholds and all provider cooldown protections.</i>"
   ].join("\n");
 }
 
