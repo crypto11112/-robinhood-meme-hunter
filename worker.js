@@ -5280,22 +5280,23 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V658";
+const VERSION = "V659";
 
 /*
- * V658 — rotating verified-launch evidence-completion queue.
- * - Preserves V655/V657 4-of-4 analysis completion, ERC20 reservations and
- *   current/live market/holder completion priority.
- * - Adds a small persisted queue for otherwise viable positively verified
- *   launches that returned with incomplete market / holder / risk evidence.
- * - At most ONE queued evidence-completion candidate is injected into the next
- *   bounded analysis set per scan, behind already-protected carried/holder
- *   retries and ahead of ordinary lower-priority selected rows.
- * - Queue rotation respects provider-reported retry/cooldown times, bounded age
- *   and bounded attempts; it never bypasses DexScreener, GeckoTerminal,
- *   Blockscout, analysis/global budgets, or the hard 42-request ceiling.
- * - No scoring, qualification, liquidity, risk or Telegram threshold changes.
- *   Missing evidence remains UNVERIFIED.
+ * V659 — authoritative provider-ready queue scheduling.
+ * - Preserves V658's persisted rotating verified-launch evidence queue.
+ * - FIX: queued market-incomplete launches are no longer gated only by the
+ *   candidate's old stored nextEligibleAt timestamp.
+ * - Each scan re-checks the CURRENT DexScreener / GeckoTerminal availability
+ *   state before deciding whether a queued candidate is actually serviceable.
+ * - When a market provider is genuinely eligible, one queued candidate gets
+ *   first use of the EXISTING bounded market-completion opportunity before
+ *   ordinary fresh candidates.
+ * - If both market providers are still cooling down / staggered, the queue
+ *   remains parked and does not waste an analysis/provider request.
+ * - Holder-only / risk-only completion keeps V658's bounded retry timing.
+ * - Hard request ceiling remains 42. Provider cooldowns, spacing, scan limits,
+ *   scoring, qualification and Telegram thresholds are unchanged.
  */
 
 const EVIDENCE_COMPLETION_QUEUE_MAX_V658 = 6;
@@ -72362,6 +72363,128 @@ function pruneEvidenceCompletionQueueV658(state) {
   return queue;
 }
 
+
+function evidenceCompletionProviderGateV659(
+  state,
+  row
+) {
+  const now = Date.now();
+  const blockers =
+    Array.isArray(row?.blockers)
+      ? row.blockers
+      : [];
+
+  const needsMarket =
+    blockers.includes(
+      "MARKET_UNVERIFIED"
+    );
+
+  const needsHolder =
+    blockers.includes(
+      "HOLDER_EVIDENCE_UNVERIFIED"
+    );
+
+  const needsRisk =
+    blockers.includes(
+      "RISK_UNVERIFIED"
+    );
+
+  /*
+   * V659:
+   * Market retries use the CURRENT provider state, not a stale per-candidate
+   * timestamp captured on an earlier scan. This means a queued token becomes
+   * serviceable as soon as DexScreener OR GeckoTerminal is genuinely eligible.
+   */
+  if (needsMarket) {
+    const availability =
+      marketProviderAvailabilityV147(
+        state,
+        row?.address
+      );
+
+    const dexReady =
+      availability?.dex?.eligible ===
+      true;
+
+    const geckoReady =
+      availability?.gecko?.eligible ===
+      true;
+
+    const providerReady =
+      dexReady ||
+      geckoReady;
+
+    return {
+      ready:
+        providerReady,
+      reason:
+        providerReady
+          ? (
+              dexReady
+                ? "DEX_PROVIDER_READY_V659"
+                : "GECKO_PROVIDER_READY_V659"
+            )
+          : "MARKET_PROVIDERS_NOT_READY_V659",
+      needsMarket,
+      needsHolder,
+      needsRisk,
+      dexReady,
+      geckoReady,
+      eligibleAt:
+        providerReady
+          ? now
+          : (
+              safeNumber(
+                availability?.earliestEligibleAt
+              ) ||
+              safeNumber(
+                row?.nextEligibleAt
+              ) ||
+              (
+                now +
+                EVIDENCE_COMPLETION_QUEUE_DEFAULT_RETRY_MS_V658
+              )
+            )
+    };
+  }
+
+  /*
+   * Once market evidence is complete, holder/risk-only retries retain the
+   * existing bounded V658 clock so V659 does not increase Blockscout pressure.
+   */
+  const rowEligibleAt =
+    safeNumber(
+      row?.nextEligibleAt
+    );
+
+  const clockReady =
+    rowEligibleAt <= now;
+
+  return {
+    ready:
+      clockReady &&
+      (
+        needsHolder ||
+        needsRisk
+      ),
+    reason:
+      clockReady
+        ? "NON_MARKET_RETRY_DUE_V659"
+        : "NON_MARKET_RETRY_WAIT_V659",
+    needsMarket,
+    needsHolder,
+    needsRisk,
+    dexReady: false,
+    geckoReady: false,
+    eligibleAt:
+      rowEligibleAt ||
+      (
+        now +
+        EVIDENCE_COMPLETION_QUEUE_DEFAULT_RETRY_MS_V658
+      )
+  };
+}
+
 function selectEvidenceCompletionRetryV658(state) {
   const queue = pruneEvidenceCompletionQueueV658(state);
   if (!queue || !queue.entries.length) return null;
@@ -72373,10 +72496,24 @@ function selectEvidenceCompletionRetryV658(state) {
     normalize(state?.holderEvidenceRetryV422?.address);
 
   const eligible = queue.entries
-    .filter(row => {
-      const address = normalize(row?.address);
+    .map(row => ({
+      row,
+      gate:
+        evidenceCompletionProviderGateV659(
+          state,
+          row
+        )
+    }))
+    .filter(item => {
+      const address =
+        normalize(item?.row?.address);
+
       if (!isAddress(address)) return false;
 
+      /*
+       * Existing dedicated retry lanes retain first ownership of their exact
+       * target so V659 never duplicates work already scheduled elsewhere.
+       */
       if (
         address === primaryAddress ||
         address === holderRetryAddress
@@ -72384,37 +72521,94 @@ function selectEvidenceCompletionRetryV658(state) {
         return false;
       }
 
-      return safeNumber(row?.nextEligibleAt) <= now;
+      return item?.gate?.ready === true;
     })
     .sort((a, b) => {
-      const aQueued = safeNumber(a?.firstQueuedAt);
-      const bQueued = safeNumber(b?.firstQueuedAt);
-      if (aQueued !== bQueued) return aQueued - bQueued;
-      return safeNumber(b?.priority) - safeNumber(a?.priority);
+      const aQueued =
+        safeNumber(a?.row?.firstQueuedAt);
+      const bQueued =
+        safeNumber(b?.row?.firstQueuedAt);
+
+      if (aQueued !== bQueued) {
+        return aQueued - bQueued;
+      }
+
+      return (
+        safeNumber(b?.row?.priority) -
+        safeNumber(a?.row?.priority)
+      );
     });
 
-  const selected = eligible[0] || null;
-  if (!selected) return null;
+  const selectedItem =
+    eligible[0] || null;
 
-  const address = normalize(selected.address);
+  if (!selectedItem) return null;
+
+  const selected =
+    selectedItem.row;
+
+  const address =
+    normalize(selected.address);
+
   const watched =
     state?.watchedTokens?.find(
-      token => normalize(token?.address) === address
+      token =>
+        normalize(token?.address) ===
+        address
     ) || null;
 
   if (!watched) return null;
 
   selected.attempts =
     safeNumber(selected.attempts) + 1;
-  selected.lastAttemptAt = now;
-  selected.nextEligibleAt =
-    now + EVIDENCE_COMPLETION_QUEUE_DEFAULT_RETRY_MS_V658;
 
-  queue.lastSelectedAddress = address;
-  queue.lastSelectedAt = now;
+  selected.lastAttemptAt =
+    now;
+
+  selected.lastProviderGateV659 = {
+    reason:
+      selectedItem?.gate?.reason || null,
+    dexReady:
+      selectedItem?.gate?.dexReady === true,
+    geckoReady:
+      selectedItem?.gate?.geckoReady === true,
+    selectedAt:
+      now
+  };
+
+  /*
+   * Claim the existing Dex priority reservation for this queued target when
+   * market evidence is still missing. This does NOT add a request; it only
+   * gives the queued candidate first right to the next already-allowed slot.
+   */
+  if (
+    selectedItem?.gate?.needsMarket ===
+    true
+  ) {
+    reservePriorityFreshMarket(
+      state,
+      address
+    );
+  }
+
+  selected.nextEligibleAt =
+    now +
+    EVIDENCE_COMPLETION_QUEUE_DEFAULT_RETRY_MS_V658;
+
+  queue.lastSelectedAddress =
+    address;
+
+  queue.lastSelectedAt =
+    now;
+
+  queue.lastSelectedReasonV659 =
+    selectedItem?.gate?.reason || null;
+
   queue.totalSelected =
     safeNumber(queue.totalSelected) + 1;
-  queue.lastUpdatedAt = now;
+
+  queue.lastUpdatedAt =
+    now;
 
   return watched;
 }
@@ -72598,12 +72792,47 @@ function evidenceCompletionQueueSnapshotV658(state) {
 
   const now = Date.now();
 
+  const providerReadyRowsV659 =
+    queue.entries
+      .map(row => ({
+        row,
+        gate:
+          evidenceCompletionProviderGateV659(
+            state,
+            row
+          )
+      }))
+      .filter(
+        item =>
+          item?.gate?.ready === true
+      );
+
   return {
     pending: queue.entries.length,
     dueNow:
-      queue.entries.filter(
-        row => safeNumber(row?.nextEligibleAt) <= now
-      ).length,
+      providerReadyRowsV659.length,
+    providerReadyV659:
+      providerReadyRowsV659.length,
+    nextProviderEligibleAtV659:
+      queue.entries.length
+        ? Math.min(
+            ...queue.entries.map(
+              row =>
+                safeNumber(
+                  evidenceCompletionProviderGateV659(
+                    state,
+                    row
+                  )?.eligibleAt
+                ) ||
+                (
+                  now +
+                  EVIDENCE_COMPLETION_QUEUE_DEFAULT_RETRY_MS_V658
+                )
+            )
+          )
+        : null,
+    lastSelectedReasonV659:
+      queue.lastSelectedReasonV659 || null,
     lastSelectedAddress:
       normalize(queue.lastSelectedAddress) || null,
     lastSelectedAt:
@@ -72631,7 +72860,12 @@ function evidenceCompletionQueueSnapshotV658(state) {
         marketStatus:
           row?.marketStatus || null,
         holderStatus:
-          row?.holderStatus || null
+          row?.holderStatus || null,
+        providerGateV659:
+          evidenceCompletionProviderGateV659(
+            state,
+            row
+          )
       }))
   };
 }
@@ -127003,8 +127237,9 @@ function launchCoverageTelegramMessageV474(state) {
       ? evidenceLinesV656
       : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V658 rotating evidence-completion queue</b>",
-    `Pending: <b>${fmt(last?.evidenceCompletionQueueV658?.pending)}</b> · Due now: <b>${fmt(last?.evidenceCompletionQueueV658?.dueNow)}</b>`,
+    "<b>V659 rotating evidence-completion queue</b>",
+    `Pending: <b>${fmt(last?.evidenceCompletionQueueV658?.pending)}</b> · Provider-ready now: <b>${fmt(last?.evidenceCompletionQueueV658?.providerReadyV659)}</b>`,
+    `Selection reason: <b>${escapeHtml(last?.evidenceCompletionQueueV658?.lastSelectedReasonV659 || "None")}</b>`,
     `Served this/last scan: <b>${
       isAddress(normalize(last?.evidenceCompletionQueueV658?.lastSelectedAddress))
         ? escapeHtml(`${normalize(last.evidenceCompletionQueueV658.lastSelectedAddress).slice(0, 6)}…${normalize(last.evidenceCompletionQueueV658.lastSelectedAddress).slice(-4)}`)
@@ -127024,8 +127259,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V655 fresh-launch budget protection remains preserved; V658 adds one-at-a-time persisted rotation for incomplete verified-launch evidence without bypassing provider cooldowns.",
-    "<i>V658 adds no request ceiling, no scoring/threshold change, and preserves provider cooldown/retry guards.</i>"
+    "V655 fresh-launch budget protection remains preserved; V659 gives one queued verified launch first right to an already-eligible market slot using current provider state.",
+    "<i>V659 adds no request ceiling, no scoring/threshold change, and preserves provider cooldown/retry guards.</i>"
   ].join("\n");
 }
 
