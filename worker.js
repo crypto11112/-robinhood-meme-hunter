@@ -1,4 +1,28 @@
 /**
+ * Robinhood Chain Meme Hunter — V655
+ * AUTHORITATIVE RUNTIME VERSION: V655
+ *
+ * V655 FRESH-LAUNCH IDENTITY STAGE COMPLETION
+ * - builds directly forward from authoritative V654;
+ * - replaces V653's flat one-request-per-launch ERC-20 reserve with a dynamic
+ *   identity-stage reserve derived from each launch's reusable V419 checkpoint;
+ * - reserves only the requests still required to reach the existing >=3-of-4
+ *   ERC-20 method proof threshold, plus eth_getCode when bytecode is not yet
+ *   checkpointed; no verification rule is weakened;
+ * - when a fresh verified launch reaches its queue turn, its complete dynamic
+ *   allocation is released for that launch while later launches remain protected;
+ * - adds a bounded fresh-launch progress attempt when the full analysis estimate
+ *   cannot fit but at least one protected identity request can still advance a
+ *   verified current/live launch; this removes the V654 FULL_ANALYSIS_BUDGET_PROTECTED
+ *   dead-end without pretending the rest of analysis completed;
+ * - V419 checkpoints preserve every successful bytecode/method proof for the
+ *   next scan, so partial progress is forward-only rather than repeated work;
+ * - preserves V654 priority identity lane over older maintenance reserves;
+ * - hard global 42, base analysis 21, Telegram reserve, provider routing,
+ *   scoring, qualification and Telegram thresholds remain unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V654
  * AUTHORITATIVE RUNTIME VERSION: V654
  *
@@ -5238,7 +5262,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V654";
+const VERSION = "V655";
 
 const CHAIN_ID = 4663;
 const CHAIN_NAME = "Robinhood Chain";
@@ -11182,6 +11206,9 @@ function createBudget() {
         pendingAddresses: [],
         releasedAddresses: [],
         priorityAddressesV654: [],
+        pendingRequestsByAddressV655: {},
+        initialReservedByAddressV655: {},
+        releasedRequestAllocationsV655: {},
         activeIdentityAddressV654: null,
         identityReserveOverridesV654: 0,
         identityReserveOverrideTypesV654: {},
@@ -11663,6 +11690,105 @@ function openfairHistoricalRecoveryReserveBlocksAnalysisV537(budget,type,amount=
   return safeNumber(budget?.totalUsed)+amount>Math.max(0,preTelegramGlobalLimit-reserved);
 }
 
+function freshVerifiedLaunchIdentityRequestsNeededV655(watched) {
+  if (reusableMetadata(watched)) return 0;
+
+  const progress =
+    reusableErc20ProgressV419(watched) || {};
+
+  const codeRequests =
+    progress?.codeHasBytecode === true
+      ? 0
+      : 1;
+
+  const methodSpecs = [
+    ["name", "0x06fdde03"],
+    ["symbol", "0x95d89b41"],
+    ["decimals", "0x313ce567"],
+    ["totalSupply", "0x18160ddd"]
+  ];
+
+  let verifiedMethods = 0;
+
+  for (const [label] of methodSpecs) {
+    const row = progress?.methods?.[label];
+    if (row?.raw === null || row?.raw === undefined) {
+      continue;
+    }
+
+    const decoded =
+      decodeErc20ProbeValueV419(
+        label,
+        row.raw
+      );
+
+    if (decoded?.verified === true) {
+      verifiedMethods++;
+    }
+  }
+
+  const methodRequests =
+    Math.max(
+      0,
+      3 - verifiedMethods
+    );
+
+  return Math.max(
+    0,
+    Math.min(
+      4,
+      codeRequests + methodRequests
+    )
+  );
+}
+
+function freshVerifiedLaunchIdentityUsableAllowanceV655(
+  budget
+) {
+  const reserve =
+    budget?.analysis?.freshVerifiedLaunchErc20ReserveV653;
+
+  const futureReserved =
+    Math.max(
+      0,
+      safeNumber(reserve?.reservedRequests)
+    );
+
+  const notificationReserveRemaining =
+    budget?.notification?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(budget.notification?.limit) -
+            safeNumber(budget.notification?.used)
+        )
+      : 0;
+
+  const analysisRemaining =
+    Math.max(
+      0,
+      effectiveAnalysisLimitV416(budget) -
+        safeNumber(budget?.analysis?.used) -
+        futureReserved
+    );
+
+  const preTelegramGlobalRemaining =
+    Math.max(
+      0,
+      safeNumber(budget?.totalLimit) -
+        notificationReserveRemaining -
+        safeNumber(budget?.totalUsed) -
+        futureReserved
+    );
+
+  return Math.max(
+    0,
+    Math.min(
+      analysisRemaining,
+      preTelegramGlobalRemaining
+    )
+  );
+}
+
 function configureFreshVerifiedLaunchErc20ReserveV653(
   budget,
   queue,
@@ -11675,6 +11801,8 @@ function configureFreshVerifiedLaunchErc20ReserveV653(
 
   const addresses = [];
   const seen = new Set();
+  const pendingRequestsByAddressV655 = {};
+  let totalReservedV655 = 0;
 
   for (const watched of Array.isArray(queue) ? queue : []) {
     const address = normalize(watched?.address);
@@ -11689,27 +11817,37 @@ function configureFreshVerifiedLaunchErc20ReserveV653(
 
     seen.add(address);
 
-    /*
-     * A fully reusable V417 metadata checkpoint no longer needs a protected
-     * ERC-20 identity request. Partial V419 progress still gets one slot so it
-     * can advance the next missing identity stage.
-     */
-    if (reusableMetadata(watched)) {
+    const requestsNeededV655 =
+      freshVerifiedLaunchIdentityRequestsNeededV655(
+        watched
+      );
+
+    if (requestsNeededV655 <= 0) {
       continue;
     }
 
     addresses.push(address);
+    pendingRequestsByAddressV655[address] =
+      requestsNeededV655;
+    totalReservedV655 += requestsNeededV655;
   }
 
   reserve.configuredAt = Date.now();
   reserve.pendingAddresses = addresses;
   reserve.releasedAddresses = [];
   reserve.priorityAddressesV654 = [...addresses];
+  reserve.pendingRequestsByAddressV655 = {
+    ...pendingRequestsByAddressV655
+  };
+  reserve.initialReservedByAddressV655 = {
+    ...pendingRequestsByAddressV655
+  };
+  reserve.releasedRequestAllocationsV655 = {};
   reserve.activeIdentityAddressV654 = null;
   reserve.identityReserveOverridesV654 = 0;
   reserve.identityReserveOverrideTypesV654 = {};
-  reserve.initialReservedRequests = addresses.length;
-  reserve.reservedRequests = addresses.length;
+  reserve.initialReservedRequests = totalReservedV655;
+  reserve.reservedRequests = totalReservedV655;
   reserve.active = addresses.length > 0;
   reserve.lowerPriorityRequestsBlocked = 0;
   reserve.blockedTypes = {};
@@ -11751,10 +11889,35 @@ function releaseFreshVerifiedLaunchErc20SlotV653(
     reserve.releasedAddresses.push(token);
   }
 
+  const allocatedRequestsV655 =
+    Math.max(
+      1,
+      safeNumber(
+        reserve?.pendingRequestsByAddressV655?.[token]
+      )
+    );
+
+  reserve.releasedRequestAllocationsV655 =
+    reserve.releasedRequestAllocationsV655 &&
+    typeof reserve.releasedRequestAllocationsV655 === "object"
+      ? reserve.releasedRequestAllocationsV655
+      : {};
+
+  reserve.releasedRequestAllocationsV655[token] =
+    allocatedRequestsV655;
+
+  if (
+    reserve.pendingRequestsByAddressV655 &&
+    typeof reserve.pendingRequestsByAddressV655 === "object"
+  ) {
+    delete reserve.pendingRequestsByAddressV655[token];
+  }
+
   reserve.reservedRequests =
     Math.max(
       0,
-      safeNumber(reserve.reservedRequests) - 1
+      safeNumber(reserve.reservedRequests) -
+        allocatedRequestsV655
     );
 
   reserve.active =
@@ -77480,6 +77643,10 @@ for (
           v653FreshVerifiedLaunchErc20Reserve
             ?.initialReservedRequests
         ),
+      initialReservedByAddressV655:
+        v653FreshVerifiedLaunchErc20Reserve
+          ?.initialReservedByAddressV655 || {},
+      dynamicIdentityStageReserveV655: true,
       pendingAddresses:
         Array.isArray(
           v653FreshVerifiedLaunchErc20Reserve?.pendingAddresses
@@ -77827,6 +77994,10 @@ for (
           ? t.releasedAddresses
           : [];
       t.releasedAddresses.push(address);
+      t.releasedRequestAllocationsV655 =
+        budget.analysis
+          ?.freshVerifiedLaunchErc20ReserveV653
+          ?.releasedRequestAllocationsV655 || {};
       t.remainingReservedRequests =
         safeNumber(
           budget.analysis
@@ -78220,14 +78391,37 @@ for (
     const v417MinimumStageRequests =
       progressiveStageMinimumV417(watched);
 
+    const v655FreshIdentityRequestsNeeded =
+      isCurrentLiveVerifiedLaunchV649
+        ? freshVerifiedLaunchIdentityRequestsNeededV655(
+            watched
+          )
+        : 0;
+
+    const v655FreshIdentityUsableAllowance =
+      isCurrentLiveVerifiedLaunchV649
+        ? freshVerifiedLaunchIdentityUsableAllowanceV655(
+            budget
+          )
+        : 0;
+
+    const v655FreshVerifiedIdentityProgressAttempt =
+      !v165FullEstimateAffordable &&
+      isCurrentLiveVerifiedLaunchV649 &&
+      v655FreshIdentityRequestsNeeded > 0 &&
+      v655FreshIdentityUsableAllowance >= 1;
+
     const v417ProgressivePriorityAttempt =
       !v165FullEstimateAffordable &&
       (
         isPriorityCompletion ||
         isCurrentLiveVerifiedLaunchV649
       ) &&
-      v165ResidualAllowance >=
-        v417MinimumStageRequests;
+      (
+        v165ResidualAllowance >=
+          v417MinimumStageRequests ||
+        v655FreshVerifiedIdentityProgressAttempt
+      );
 
     const v165BoundedReplacementAttempt =
       !v165FullEstimateAffordable &&
@@ -78350,6 +78544,12 @@ for (
             v415ProtectedPriorityResidualAttempt,
           progressivePriorityV417:
             v417ProgressivePriorityAttempt,
+          freshVerifiedIdentityProgressV655:
+            v655FreshVerifiedIdentityProgressAttempt,
+          freshIdentityRequestsNeededV655:
+            v655FreshIdentityRequestsNeeded,
+          freshIdentityUsableAllowanceV655:
+            v655FreshIdentityUsableAllowance,
           progressiveMinimumStageRequestsV417:
             v417MinimumStageRequests,
           providerAvailabilityV415:
@@ -92069,7 +92269,7 @@ async function erc20RpcDiagnosticV652(env) {
   return {
     agent: "Robinhood Chain Meme Hunter",
     version: VERSION,
-    status: "READ_ONLY_ERC20_RPC_DIAGNOSTIC_V654",
+    status: "READ_ONLY_ERC20_RPC_DIAGNOSTIC_V655",
     scannerBudgetConsumed: false,
     externalProviderRequestsAdded: 0,
     stateWritePerformed: false,
