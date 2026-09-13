@@ -5280,22 +5280,21 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V661";
+const VERSION = "V662";
 
 /*
- * V661 — pre-analysis queue reconciliation / CoinGecko handoff fix.
- * - Preserves all V660 market fallback, request-budget, cooldown, scoring and
- *   qualification behaviour.
- * - FIX: persisted verified-launch evidence rows are reconciled BEFORE final
- *   analysis selection so a provider-ready row can actually be served in the
- *   same scan.
- * - At most ONE provider-ready queued token is still admitted per scan.
- * - The selected queued token keeps V660 CoinGecko Demo fallback eligibility
- *   when DexScreener / GeckoTerminal cannot complete market evidence.
- * - Adds same-point diagnostics so Provider-ready and Served describe the same
- *   pre-analysis queue state rather than different moments in the scan.
- * - Hard request ceiling remains 42. No scoring, qualification, liquidity,
- *   risk or Telegram threshold changes.
+ * V662 — current/live verified-launch CoinGecko handoff.
+ * - Preserves V661 queue reconciliation and all V660 CoinGecko Demo safeguards.
+ * - FIX: CoinGecko Demo eligibility now follows the existing marketPriority
+ *   lane, not only priorityCompletion.
+ * - This allows ONE current/live positively verified launch per scan to use the
+ *   free authenticated CoinGecko fallback when DexScreener / GeckoTerminal
+ *   cannot complete market evidence.
+ * - The existing CoinGecko one-request-per-scan guard, 5-minute spacing,
+ *   persistent 429 cooldown, analysis/global budget accounting and 42-request
+ *   hard ceiling remain authoritative.
+ * - No scoring, qualification, liquidity, risk, holder or Telegram threshold
+ *   changes. Missing evidence remains UNVERIFIED.
  */
 
 const EVIDENCE_COMPLETION_QUEUE_MAX_V658 = 6;
@@ -69938,7 +69937,14 @@ async function analyzeToken(
           options?.marketPriority ??
           options?.priorityCompletion
         ),
+        /*
+         * V662: Demo fallback eligibility follows the already-established
+         * marketPriority lane. Current/live positively verified launches are
+         * market-priority in the scanner, while CoinGecko itself remains capped
+         * at one request per scan with its existing spacing/cooldown guards.
+         */
         Boolean(
+          options?.marketPriority ??
           options?.priorityCompletion
         )
       );
@@ -128164,7 +128170,7 @@ function launchCoverageTelegramMessageV474(state) {
       ? evidenceLinesV656
       : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V661 rotating evidence-completion queue</b>",
+    "<b>V662 rotating evidence-completion queue</b>",
     `Pending: <b>${fmt(last?.evidenceCompletionQueueV658?.pending)}</b> · Provider-ready pre-analysis: <b>${fmt(last?.evidenceCompletionQueueV658?.preAnalysisProviderReadyV661)}</b>`,
     `Selection reason: <b>${escapeHtml(last?.evidenceCompletionQueueV658?.preAnalysisSelectionReasonV661 || "None")}</b>`,
     `CoinGecko Demo fallback: <b>${
@@ -128195,8 +128201,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V655 fresh-launch budget protection remains preserved; V661 reconciles the persisted completion queue before final analysis selection so provider-ready rows can actually be served.",
-    "<i>V661 keeps the 42-request ceiling, one-Demo-request-per-scan guard, existing scoring/thresholds and all provider cooldown protections.</i>"
+    "V655 fresh-launch budget protection remains preserved; V662 lets the existing market-priority lane use the optional CoinGecko Demo fallback when public market providers cannot complete evidence.",
+    "<i>V662 keeps the 42-request ceiling, one-Demo-request-per-scan guard, 5-minute spacing, existing scoring/thresholds and all provider cooldown protections.</i>"
   ].join("\n");
 }
 
