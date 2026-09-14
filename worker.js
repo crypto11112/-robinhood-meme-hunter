@@ -1,6 +1,24 @@
 /**
+ * Robinhood Chain Meme Hunter — V689
+ * AUTHORITATIVE RUNTIME VERSION: V689
+ *
+ * V689 V3 PRESENTATION CLEANUP ONLY
+ * - builds directly from confirmed-working V688;
+ * - when the current V605 HTTP exact-pool live ledger is available for a verified
+ *   V3 pool, /analyse now treats that live ledger as the authoritative V3 flow;
+ * - suppresses the older native V3 sweep/count/USD block that could visually
+ *   contradict the current live HTTP ledger;
+ * - relabels the unrelated V4 PoolId rolling-watch diagnostic so it cannot be
+ *   mistaken for the V3 exact-pool collector;
+ * - keeps a short note that legacy native V3 history remains retained for
+ *   diagnostics, without presenting it as current live flow;
+ * - NO collector, USD conversion, request-budget, scoring, qualification,
+ *   scheduler, Telegram-threshold or provider changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V688
- * AUTHORITATIVE RUNTIME VERSION: V688
+ * HISTORICAL VERSION NOTE: V688
  *
  * V688 BOUNDED VERIFIED-V3 COLLECTOR AUTO-ACTIVATION
  * - builds directly forward from confirmed V687;
@@ -5657,7 +5675,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V688";
+const VERSION = "V689";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -102531,8 +102549,8 @@ function manualRollingProgressLinesV572(candidate) {
     return [
       "",
       "📍 <b>Rolling Ledger Progress</b>",
-      "🛰 Autonomous exact-pool watch: <b>NOT FOUND</b>",
-      "ℹ️ <i>No existing autonomous exact-pool watch is available for this token.</i>"
+      "🛰 V4 PoolId rolling watch: <b>NOT FOUND</b>",
+      "ℹ️ <i>This is the separate V4 PoolId watch and does not describe the V3 exact-pool HTTP collector.</i>"
     ];
   }
 
@@ -102591,7 +102609,7 @@ function manualRollingProgressLinesV572(candidate) {
     `• 6h: <b>${escapeHtml(maturityText("h6"))}</b>`,
     `• 12h: <b>${escapeHtml(maturityText("h12"))}</b>`,
     `• 24h: <b>${escapeHtml(maturityText("h24"))}</b>`,
-    "ℹ️ <i>Read-only autonomous-watch progress. /analyse does not alter the watchlist.</i>"
+    "ℹ️ <i>Read-only V4 PoolId watch progress. This is separate from the V3 exact-pool HTTP collector.</i>"
   ];
 }
 
@@ -102816,6 +102834,27 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   }
 
   const v3 = candidate?.nativeV3DirectionalV326 || null;
+  const liveV3ForPresentationV689 =
+    candidate?.liveV3WindowsV365 || null;
+  const liveV3AuthoritativeV689 =
+    (
+      liveV3ForPresentationV689?.status ===
+        "LIVE_ROLLING_WINDOWS_V364" ||
+      liveV3ForPresentationV689?.status ===
+        "LIVE_ROLLING_WINDOWS_V371"
+    ) &&
+    Boolean(liveV3ForPresentationV689?.windows) &&
+    isAddress(
+      normalize(
+        liveV3ForPresentationV689?.pair ||
+        ""
+      )
+    ) &&
+    (
+      v3?.verified === true ||
+      Boolean(v3?.protocolEvidence)
+    );
+
   const evidence = [];
   evidence.push("", "🔬 <b>Evidence Summary</b>");
   if(candidate?.manualContractCreationV619?.attempted===true){
@@ -102834,71 +102873,141 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   evidence.push(...manualRollingProgressLinesV572(candidate));
 
   if (v3) {
-    const pairVerified = v3?.verified === true || Boolean(v3?.protocolEvidence);
-    const protocolName = pairVerified ? "Uniswap V3 — VERIFIED ON-CHAIN" : "Uniswap V3 — UNVERIFIED";
-    evidence.push(`🏊 Pool protocol: <b>${protocolName}</b>`);
+    const pairVerified =
+      v3?.verified === true ||
+      Boolean(v3?.protocolEvidence);
+
+    const protocolName =
+      pairVerified
+        ? "Uniswap V3 — VERIFIED ON-CHAIN"
+        : "Uniswap V3 — UNVERIFIED";
+
+    evidence.push(
+      `🏊 Pool protocol: <b>${protocolName}</b>`
+    );
 
     if (v3?.pairAddress) {
-      evidence.push(`🧱 Pool: <code>${escapeHtml(v3.pairAddress)}</code>`);
+      evidence.push(
+        `🧱 Pool: <code>${escapeHtml(v3.pairAddress)}</code>`
+      );
     }
 
-    if (v3?.verified === true && Number.isFinite(Number(v3?.fromBlock)) && Number.isFinite(Number(v3?.toBlock))) {
+    /*
+     * V689 presentation only:
+     * Once the current V605/V617 live HTTP source exists, do not print the
+     * older V326/V331/V354 native sweep/count/USD block beside it. Those rows
+     * remain persisted and untouched; they are simply no longer presented as
+     * if they were the current live source.
+     */
+    if (liveV3AuthoritativeV689) {
       evidence.push(
-        `🔁 Native V3 sweep: <b>${safeNumber(v3?.sweepBlocksV331)} blocks</b> | <b>${safeNumber(v3?.swaps)} swaps</b> (${safeNumber(v3?.buys)} buys / ${safeNumber(v3?.sells)} sells)`
+        "✅ <b>Current V3 flow source: V605 HTTP exact-pool live ledger</b>",
+        "ℹ️ <i>Legacy native V3 sweep/ledger history is retained for diagnostics but suppressed here to avoid conflicting with the current live ledger above.</i>"
       );
     } else {
-      evidence.push(`🔁 Native V3 sweep: <b>${escapeHtml(v3?.status || "UNVERIFIED")}</b>`);
-    }
-
-    if (v3?.ledgerStatusV331) {
-      evidence.push(
-        `🗃 V3 ledger: <b>${safeNumber(v3?.ledgerRecordsV331)} records</b> | <b>${safeNumber(v3?.ledgerRangesV331)} verified ranges</b>${v3?.sweepGapV331 === true ? " | coverage <b>PARTIAL</b>" : ""}`
-      );
-    }
-
-    const rolling=v3?.rollingV334;
-    if(rolling){
-      evidence.push(`🕒 Verified block timestamps: <b>${safeNumber(rolling?.verifiedTimestampRecords)}/${safeNumber(rolling?.totalRecords)} records</b>`);
-      const w=rolling?.windows||{};
-      evidence.push(`⏱ V3 rolling counts — PARTIAL COVERAGE`);
-      evidence.push(`• 5m: <b>${safeNumber(w?.["5m"]?.buys)} buys / ${safeNumber(w?.["5m"]?.sells)} sells</b>`);
-      evidence.push(`• 15m: <b>${safeNumber(w?.["15m"]?.buys)} buys / ${safeNumber(w?.["15m"]?.sells)} sells</b>`);
-      evidence.push(`• 1h: <b>${safeNumber(w?.["1h"]?.buys)} buys / ${safeNumber(w?.["1h"]?.sells)} sells</b>`);
-      evidence.push(`• 6h: <b>${safeNumber(w?.["6h"]?.buys)} buys / ${safeNumber(w?.["6h"]?.sells)} sells</b>`);
-      evidence.push(`• 24h: <b>${safeNumber(w?.["24h"]?.buys)} buys / ${safeNumber(w?.["24h"]?.sells)} sells</b>`);
-      evidence.push(`🧾 Exact quote evidence: <b>${safeNumber(rolling?.quoteReadyRecordsV337)}/${safeNumber(rolling?.totalRecords)} records</b> (${safeNumber(rolling?.wethQuoteRecordsV337)} WETH / ${safeNumber(rolling?.usdgQuoteRecordsV337)} USDG)`);
-      if(safeNumber(rolling?.quoteReadyRecordsV337)>0){
-        evidence.push(`↔️ Quote-ready direction: <b>${safeNumber(rolling?.quoteReadyBuysV337)} buys / ${safeNumber(rolling?.quoteReadySellsV337)} sells</b>`);
-      }
-    }
-
-    const persistedUsdV354 = candidate?.persistedV3UsdV354 || null;
-    if (persistedUsdV354?.status === "PERSISTED_USD_AGGREGATION_VERIFIED_V351" && safeNumber(persistedUsdV354?.usdVerifiedRecords) > 0) {
-      evidence.push(
-        `💵 Native V3 USD evidence: <b>${safeNumber(persistedUsdV354?.usdVerifiedRecords)}/${safeNumber(persistedUsdV354?.ledgerRecords)} VERIFIED</b> — PARTIAL COVERAGE`
-      );
-      evidence.push(`💱 Basis: <b>SAME-CYCLE WETH/USDG REFERENCE</b> — not exact historical-block price`);
-      const usdWindowsV354 = persistedUsdV354?.windows || {};
-      for (const label of ["5m", "15m", "1h", "6h", "24h"]) {
-        const row = usdWindowsV354?.[label] || {};
-        const totalUsd = safeNumber(row?.buyUsd) + safeNumber(row?.sellUsd);
-        const pressure = Number.isFinite(Number(row?.buyPressurePct))
-          ? `${Number(row.buyPressurePct).toFixed(2)}%`
-          : (totalUsd === 0 ? "0.00%" : "UNVERIFIED");
+      if (
+        v3?.verified === true &&
+        Number.isFinite(Number(v3?.fromBlock)) &&
+        Number.isFinite(Number(v3?.toBlock))
+      ) {
         evidence.push(
-          `• ${label} USD: 🟢 <b>${formatUsdV353(row?.buyUsd)}</b> | 🔴 <b>${formatUsdV353(row?.sellUsd)}</b> | Net <b>${formatUsdV353(row?.netUsd)}</b> | Buy pressure <b>${pressure}</b>`
+          `🔁 Native V3 sweep: <b>${safeNumber(v3?.sweepBlocksV331)} blocks</b> | <b>${safeNumber(v3?.swaps)} swaps</b> (${safeNumber(v3?.buys)} buys / ${safeNumber(v3?.sells)} sells)`
+        );
+      } else {
+        evidence.push(
+          `🔁 Native V3 sweep: <b>${escapeHtml(v3?.status || "UNVERIFIED")}</b>`
         );
       }
-    } else if (v3?.usdVerified === true) {
-      /* Preserve legacy path, but use the proven in-scope formatter. */
-      evidence.push(
-        `💵 Native V3 flow: 🟢 <b>${formatUsdV353(v3?.buyUsd)}</b> | 🔴 <b>${formatUsdV353(v3?.sellUsd)}</b> | Net <b>${formatUsdV353(v3?.netUsd)}</b>`
-      );
-    } else {
-      evidence.push("💵 Native V3 directional USD: <b>UNVERIFIED</b>");
+
+      if (v3?.ledgerStatusV331) {
+        evidence.push(
+          `🗃 V3 ledger: <b>${safeNumber(v3?.ledgerRecordsV331)} records</b> | <b>${safeNumber(v3?.ledgerRangesV331)} verified ranges</b>${v3?.sweepGapV331 === true ? " | coverage <b>PARTIAL</b>" : ""}`
+        );
+      }
+
+      const rolling = v3?.rollingV334;
+      if (rolling) {
+        evidence.push(
+          `🕒 Verified block timestamps: <b>${safeNumber(rolling?.verifiedTimestampRecords)}/${safeNumber(rolling?.totalRecords)} records</b>`,
+          `⏱ V3 rolling counts — PARTIAL COVERAGE`,
+          `• 5m: <b>${safeNumber(rolling?.windows?.["5m"]?.buys)} buys / ${safeNumber(rolling?.windows?.["5m"]?.sells)} sells</b>`,
+          `• 15m: <b>${safeNumber(rolling?.windows?.["15m"]?.buys)} buys / ${safeNumber(rolling?.windows?.["15m"]?.sells)} sells</b>`,
+          `• 1h: <b>${safeNumber(rolling?.windows?.["1h"]?.buys)} buys / ${safeNumber(rolling?.windows?.["1h"]?.sells)} sells</b>`,
+          `• 6h: <b>${safeNumber(rolling?.windows?.["6h"]?.buys)} buys / ${safeNumber(rolling?.windows?.["6h"]?.sells)} sells</b>`,
+          `• 24h: <b>${safeNumber(rolling?.windows?.["24h"]?.buys)} buys / ${safeNumber(rolling?.windows?.["24h"]?.sells)} sells</b>`,
+          `🧾 Exact quote evidence: <b>${safeNumber(rolling?.quoteReadyRecordsV337)}/${safeNumber(rolling?.totalRecords)} records</b> (${safeNumber(rolling?.wethQuoteRecordsV337)} WETH / ${safeNumber(rolling?.usdgQuoteRecordsV337)} USDG)`
+        );
+
+        if (safeNumber(rolling?.quoteReadyRecordsV337) > 0) {
+          evidence.push(
+            `↔️ Quote-ready direction: <b>${safeNumber(rolling?.quoteReadyBuysV337)} buys / ${safeNumber(rolling?.quoteReadySellsV337)} sells</b>`
+          );
+        }
+      }
+
+      const persistedUsdV354 =
+        candidate?.persistedV3UsdV354 || null;
+
+      if (
+        persistedUsdV354?.status ===
+          "PERSISTED_USD_AGGREGATION_VERIFIED_V351" &&
+        safeNumber(
+          persistedUsdV354?.usdVerifiedRecords
+        ) > 0
+      ) {
+        evidence.push(
+          `💵 Native V3 USD evidence: <b>${safeNumber(persistedUsdV354?.usdVerifiedRecords)}/${safeNumber(persistedUsdV354?.ledgerRecords)} VERIFIED</b> — PARTIAL COVERAGE`,
+          `💱 Basis: <b>SAME-CYCLE WETH/USDG REFERENCE</b> — not exact historical-block price`
+        );
+
+        const usdWindowsV354 =
+          persistedUsdV354?.windows || {};
+
+        for (
+          const label of [
+            "5m",
+            "15m",
+            "1h",
+            "6h",
+            "24h"
+          ]
+        ) {
+          const row =
+            usdWindowsV354?.[label] || {};
+
+          const totalUsd =
+            safeNumber(row?.buyUsd) +
+            safeNumber(row?.sellUsd);
+
+          const pressure =
+            Number.isFinite(
+              Number(row?.buyPressurePct)
+            )
+              ? `${Number(
+                  row.buyPressurePct
+                ).toFixed(2)}%`
+              : totalUsd === 0
+              ? "0.00%"
+              : "UNVERIFIED";
+
+          evidence.push(
+            `• ${label} USD: 🟢 <b>${formatUsdV353(row?.buyUsd)}</b> | 🔴 <b>${formatUsdV353(row?.sellUsd)}</b> | Net <b>${formatUsdV353(row?.netUsd)}</b> | Buy pressure <b>${pressure}</b>`
+          );
+        }
+      } else if (v3?.usdVerified === true) {
+        evidence.push(
+          `💵 Native V3 flow: 🟢 <b>${formatUsdV353(v3?.buyUsd)}</b> | 🔴 <b>${formatUsdV353(v3?.sellUsd)}</b> | Net <b>${formatUsdV353(v3?.netUsd)}</b>`
+        );
+      } else {
+        evidence.push(
+          "💵 Native V3 directional USD: <b>UNVERIFIED</b>"
+        );
+      }
     }
   } else {
-    evidence.push("🏊 Native V3 evidence: <b>UNVERIFIED</b>");
+    evidence.push(
+      "🏊 Native V3 evidence: <b>UNVERIFIED</b>"
+    );
   }
 
   const liveV3V365 = candidate?.liveV3WindowsV365 || null;
@@ -133269,7 +133378,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
-    "<i>V688 preserves V687 verified V3 USD conversion and automatically enables the existing V605 exact-pool collector for bounded already-verified V3 candidates. No new provider/RPC requests; hard 42, Telegram reserve, scoring and qualification thresholds remain unchanged.</i>"
+    "<i>V689 is presentation-only: when V605 HTTP exact-pool live V3 evidence is available it is shown as the authoritative flow, while legacy native V3 history remains stored but is no longer shown as competing live data. V688 auto-start, hard 42, Telegram reserve, scoring and qualification thresholds remain unchanged.</i>"
   ].join("\n");
 }
 
