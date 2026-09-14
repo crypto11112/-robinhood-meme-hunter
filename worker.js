@@ -1,6 +1,26 @@
 /**
+ * Robinhood Chain Meme Hunter — V678
+ * AUTHORITATIVE RUNTIME VERSION: V678
+ *
+ * V678 HOLDER-PRO GATE DIAGNOSTIC — ZERO REQUEST / ZERO BEHAVIOUR CHANGE
+ * - builds directly forward from V677;
+ * - diagnostic only: no provider order, request ceiling, reserve, cooldown,
+ *   qualification, scoring, Telegram threshold or holder/risk rule changes;
+ * - records whether the V422 Pro-first path or normal V143 fallback reached
+ *   its pre-call budget gate;
+ * - records whether blockscoutProHoldersV143() was entered;
+ * - records whether consumeBudget() was reached and accepted/denied;
+ * - records the V666 lane state plus V677 final-boundary telemetry at that
+ *   exact point;
+ * - records analysis used/effective limit, total used/hard limit and protected
+ *   notification reserve without adding any external request;
+ * - exposes the bounded trace in /launchcoverage so the next live failure can
+ *   prove the exact gate responsible before V679 changes behaviour.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V677
- * AUTHORITATIVE RUNTIME VERSION: V677
+ * HISTORICAL VERSION NOTE: V677
  *
  * V677 V666 HOLDER-PRO FINAL BUDGET BOUNDARY FIX
  * - builds directly forward from confirmed V676;
@@ -5420,7 +5440,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V677";
+const VERSION = "V678";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -51590,13 +51610,149 @@ function clearBlockscoutPro404RetryV146(
   }
 }
 
+function holderProBudgetSnapshotV678(
+  budget
+) {
+  const notificationReserveRemaining =
+    budget?.notification
+      ?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(budget.notification?.limit) -
+            safeNumber(budget.notification?.used)
+        )
+      : 0;
+
+  return {
+    analysisUsed:
+      safeNumber(budget?.analysis?.used),
+    effectiveAnalysisLimit:
+      effectiveAnalysisLimitV416(budget),
+    totalUsed:
+      safeNumber(budget?.totalUsed),
+    hardTotalLimit:
+      safeNumber(budget?.totalLimit),
+    notificationReserveRemaining,
+    preTelegramGlobalLimit:
+      Math.max(
+        0,
+        safeNumber(budget?.totalLimit) -
+          notificationReserveRemaining
+      ),
+    normalAnalysisBudgetAvailable:
+      budgetAvailable(
+        budget,
+        "analysis"
+      )
+  };
+}
+
+function recordHolderProGateTraceV678(
+  budget,
+  event
+) {
+  if (!budget?.analysis) return;
+
+  const trace =
+    budget.analysis.holderProGateTraceV678 ||
+    (budget.analysis.holderProGateTraceV678 = {
+      enabled: true,
+      diagnosticOnly: true,
+      zeroExtraRequests: true,
+      behaviourChanged: false,
+      events: []
+    });
+
+  const lane =
+    budget.analysis
+      ?.priorityHolderProCompletionV666;
+
+  const row = {
+    at: Date.now(),
+    ...(event || {}),
+    budget:
+      holderProBudgetSnapshotV678(
+        budget
+      ),
+    v666Lane:
+      lane
+        ? {
+            claimed:
+              lane.claimed === true,
+            active:
+              lane.active === true,
+            used:
+              lane.used === true,
+            address:
+              lane.address || null,
+            consumeStatus:
+              lane.consumeStatus || null,
+            finalBoundaryV677:
+              lane.finalBoundaryV677
+                ? {
+                    evaluated:
+                      lane.finalBoundaryV677
+                        .evaluated === true,
+                    normalBudgetAvailable:
+                      lane.finalBoundaryV677
+                        .normalBudgetAvailable,
+                    bypassUsed:
+                      lane.finalBoundaryV677
+                        .bypassUsed === true,
+                    hardOrNotificationBlocked:
+                      lane.finalBoundaryV677
+                        .hardOrNotificationBlocked === true,
+                    analysisUsedBefore:
+                      lane.finalBoundaryV677
+                        .analysisUsedBefore,
+                    effectiveAnalysisLimit:
+                      lane.finalBoundaryV677
+                        .effectiveAnalysisLimit,
+                    totalUsedBefore:
+                      lane.finalBoundaryV677
+                        .totalUsedBefore,
+                    hardTotalLimit:
+                      lane.finalBoundaryV677
+                        .hardTotalLimit,
+                    notificationReserveRemaining:
+                      lane.finalBoundaryV677
+                        .notificationReserveRemaining
+                  }
+                : null
+          }
+        : null
+  };
+
+  trace.events.push(row);
+
+  if (trace.events.length > 16) {
+    trace.events =
+      trace.events.slice(-16);
+  }
+
+  trace.lastEvent = row;
+}
+
 async function blockscoutProHoldersV143(
   token,
   budget,
   env,
   state,
-  watched
+  watched,
+  callPathV678 = "UNSPECIFIED"
 ) {
+  recordHolderProGateTraceV678(
+    budget,
+    {
+      stage:
+        "V143_FUNCTION_ENTERED",
+      path:
+        callPathV678,
+      token:
+        normalize(token)
+    }
+  );
+
   const apiKey =
     String(
       env?.BLOCKSCOUT_PRO_API_KEY ||
@@ -51670,12 +51826,43 @@ async function blockscoutProHoldersV143(
     };
   }
 
-  if (
-    !consumeBudget(
+  recordHolderProGateTraceV678(
+    budget,
+    {
+      stage:
+        "V143_BEFORE_CONSUME_BUDGET",
+      path:
+        callPathV678,
+      token:
+        normalize(token)
+    }
+  );
+
+  const holderProBudgetConsumedV678 =
+    consumeBudget(
       budget,
       "analysis",
       "BLOCKSCOUT_PRO_HOLDERS_V143"
-    )
+    );
+
+  recordHolderProGateTraceV678(
+    budget,
+    {
+      stage:
+        holderProBudgetConsumedV678
+          ? "V143_CONSUME_BUDGET_ACCEPTED"
+          : "V143_CONSUME_BUDGET_DENIED",
+      path:
+        callPathV678,
+      token:
+        normalize(token),
+      consumed:
+        holderProBudgetConsumedV678
+    }
+  );
+
+  if (
+    !holderProBudgetConsumedV678
   ) {
     return {
       configured: true,
@@ -54302,13 +54489,39 @@ async function holderIntelligence(
    * empty holder page, retry the authenticated holder-row route first. If the
    * index has populated, this avoids re-spending the public/legacy sequence.
    */
-  if (
-    holderIndexLagRetryV422.eligible &&
-    blockscoutProConfiguredV164 &&
+  const holderIndexLagPreCallBudgetAvailableV678 =
     budgetAvailable(
       budget,
       "analysis"
-    )
+    );
+
+  if (
+    holderIndexLagRetryV422.eligible &&
+    blockscoutProConfiguredV164
+  ) {
+    recordHolderProGateTraceV678(
+      budget,
+      {
+        stage:
+          "V422_PRE_CALL_GATE",
+        path:
+          "V422_PRO_FIRST_RETRY",
+        token:
+          normalize(token),
+        eligible:
+          true,
+        configured:
+          true,
+        preCallBudgetAvailable:
+          holderIndexLagPreCallBudgetAvailableV678
+      }
+    );
+  }
+
+  if (
+    holderIndexLagRetryV422.eligible &&
+    blockscoutProConfiguredV164 &&
+    holderIndexLagPreCallBudgetAvailableV678
   ) {
     const beforeV422 =
       safeNumber(budget?.totalUsed);
@@ -54319,7 +54532,8 @@ async function holderIntelligence(
         budget,
         env,
         state,
-        watched
+        watched,
+        "V422_PRO_FIRST_RETRY"
       );
 
     holderIndexLagRetryV422.attempted =
@@ -54719,13 +54933,39 @@ async function holderIntelligence(
     );
   }
 
-  if (
-    v2HolderRowsUnavailable &&
-    legacyHolderRowsUnavailable &&
+  const normalProFallbackPreCallBudgetAvailableV678 =
     budgetAvailable(
       budget,
       "analysis"
-    )
+    );
+
+  if (
+    v2HolderRowsUnavailable &&
+    legacyHolderRowsUnavailable
+  ) {
+    recordHolderProGateTraceV678(
+      budget,
+      {
+        stage:
+          "NORMAL_V143_PRE_CALL_GATE",
+        path:
+          "NORMAL_V143_FALLBACK",
+        token:
+          normalize(token),
+        v2Unavailable:
+          true,
+        legacyUnavailable:
+          true,
+        preCallBudgetAvailable:
+          normalProFallbackPreCallBudgetAvailableV678
+      }
+    );
+  }
+
+  if (
+    v2HolderRowsUnavailable &&
+    legacyHolderRowsUnavailable &&
+    normalProFallbackPreCallBudgetAvailableV678
   ) {
     const proResult =
       await blockscoutProHoldersV143(
@@ -54733,7 +54973,8 @@ async function holderIntelligence(
         budget,
         env,
         state,
-        watched
+        watched,
+        "NORMAL_V143_FALLBACK"
       );
 
     blockscoutProHolderFallbackV143 = {
@@ -88000,6 +88241,34 @@ for (
       candidates,
       telegramResults
     });
+
+  if (
+    launchCoverageFunnelV474?.funnel
+  ) {
+    const holderProTraceV678 =
+      budget?.analysis
+        ?.holderProGateTraceV678;
+
+    launchCoverageFunnelV474.funnel
+      .holderProGateTraceV678 =
+        holderProTraceV678 &&
+        Array.isArray(holderProTraceV678.events)
+          ? {
+              enabled: true,
+              diagnosticOnly: true,
+              zeroExtraRequests: true,
+              behaviourChanged: false,
+              events:
+                holderProTraceV678.events.slice(-12)
+            }
+          : {
+              enabled: true,
+              diagnosticOnly: true,
+              zeroExtraRequests: true,
+              behaviourChanged: false,
+              events: []
+            };
+  }
 
   const launchCoverageCumulativeV474 =
     updateLaunchCoverageCumulativeV474(
@@ -130876,6 +131145,33 @@ function launchCoverageTelegramMessageV474(state) {
       ? `${fmt(state?.services?.coingeckoDemoV660?.monthRequestsV667)} / ${fmt(state?.services?.coingeckoDemoV660?.monthLimitV667 || COINGECKO_DEMO_MONTHLY_BOT_LIMIT_V667)}`
       : "N/A";
 
+  const holderProGateLinesV678 =
+    (
+      Array.isArray(
+        last?.holderProGateTraceV678?.events
+      )
+        ? last.holderProGateTraceV678.events
+        : []
+    )
+      .slice(-8)
+      .map(row => {
+        const short =
+          isAddress(normalize(row?.token))
+            ? `${normalize(row.token).slice(0, 6)}…${normalize(row.token).slice(-4)}`
+            : "UNVERIFIED";
+
+        const b =
+          row?.budget || {};
+
+        const lane =
+          row?.v666Lane || null;
+
+        const boundary =
+          lane?.finalBoundaryV677 || null;
+
+        return `• <code>${escapeHtml(short)}</code> — ${escapeHtml(String(row?.path || "UNSPECIFIED"))} · ${escapeHtml(String(row?.stage || "UNKNOWN_STAGE"))} · pre-call ${row?.preCallBudgetAvailable === true ? "YES" : row?.preCallBudgetAvailable === false ? "NO" : "N/A"} · A ${fmt(b?.analysisUsed)}/${fmt(b?.effectiveAnalysisLimit)} · G ${fmt(b?.totalUsed)}/${fmt(b?.preTelegramGlobalLimit)} (hard ${fmt(b?.hardTotalLimit)}) · V666 ${lane?.claimed === true ? "CLAIMED" : "NO"} / ${lane?.used === true ? "USED" : "NOT_USED"} · consume ${escapeHtml(String(lane?.consumeStatus || "N/A"))} · V677 reached ${boundary?.evaluated === true ? "YES" : "NO"} / bypass ${boundary?.bypassUsed === true ? "YES" : "NO"}`;
+      });
+
   const coinGeckoTraceLinesV664 =
     (
       Array.isArray(
@@ -130976,6 +131272,13 @@ function launchCoverageTelegramMessageV474(state) {
         : ["• No holder/risk diagnostic captured in this scan."]
     ),
     "",
+    "<b>V678 holder-Pro gate diagnostic — latest scan</b>",
+    ...(
+      holderProGateLinesV678.length
+        ? holderProGateLinesV678
+        : ["• No Blockscout Pro holder gate reached in this scan."]
+    ),
+    "",
     "<b>Cumulative since V474</b>",
     `Scans observed: <b>${fmt(c.scansObserved)}</b>`,
     `Live addresses observed: <b>${fmt(c.liveAddressesObserved)}</b>`,
@@ -130989,8 +131292,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V677 preserves V676 fairness, V675 ERC-20 identity rescue, V674 CoinGecko second-chance completion and the V673 Durable Object scheduler; V677 lets only the already-authorised one-per-scan V666 Blockscout Pro holder request cross the internal analysis-phase boundary when real pre-Telegram global headroom still exists.",
-    "<i>V671 preserves the V667 one-Demo-request/second-chance rules, 9,500/month bot meter and hard 42-request ceiling; only scheduled request routing changes.</i>"
+    "V678 is diagnostic-only and preserves V677/V676/V675/V674/V673 behaviour; it records the V422 and normal V143 Blockscout Pro pre-call gates plus the V666/V677 consume path without adding requests or changing qualification.",
+    "<i>Hard 42-request ceiling, provider cooldowns, CoinGecko Demo limits, scoring and Telegram thresholds remain unchanged.</i>"
   ].join("\n");
 }
 
