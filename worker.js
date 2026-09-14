@@ -1,6 +1,27 @@
 /**
+ * Robinhood Chain Meme Hunter — V680
+ * AUTHORITATIVE RUNTIME VERSION: V680
+ *
+ * V680 SAME-TOKEN PRO REUSE + DISTINCT COUNTER CONTINUATION
+ * - builds directly forward from V679 and the live V679 diagnostic proof;
+ * - caches the first successful Blockscout Pro V143 holder-row response per
+ *   token for the current scan and reuses it on later same-token V143 calls;
+ * - this removes duplicate same-token V143 provider work;
+ * - if V143 already consumed the one-per-scan V666 protected lane but a
+ *   genuinely distinct verified holder count is still missing, the same-token
+ *   V247 counters request may bypass ONLY internal lower-priority reserves;
+ * - that V247 continuation does NOT get a second V666 protected spend and does
+ *   NOT bypass the normal final analysis/global budget check;
+ * - therefore hard total ceiling 42 and the Telegram notification reserve
+ *   remain authoritative;
+ * - V679 unified lane, V678 diagnostics, V676 fairness, V675 ERC-20 rescue,
+ *   V674 CoinGecko second chance and V673 Durable Object scheduling remain;
+ * - no scoring, qualification, holder/risk rule or Telegram threshold changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V679
- * AUTHORITATIVE RUNTIME VERSION: V679
+ * HISTORICAL VERSION NOTE: V679
  *
  * V679 UNIFIED V666 BLOCKSCOUT PRO HOLDER COMPLETION LANE
  * - builds directly forward from diagnostic V678;
@@ -5461,7 +5482,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V679";
+const VERSION = "V680";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12819,8 +12840,16 @@ function consumeBudget(
       type
     );
 
+  const holderProCounterContinuationV680 =
+    holderProCounterContinuationRequestV680(
+      budget,
+      phase,
+      type
+    );
+
   if (
     !priorityHolderProRequestV666 &&
+    !holderProCounterContinuationV680 &&
     !coinGeckoDemoSecondChancePriorityV674 &&
     freshVerifiedLaunchErc20ReserveBlocksV653(
       budget,
@@ -12866,6 +12895,7 @@ function consumeBudget(
 
   if (
     !priorityHolderProRequestV666 &&
+    !holderProCounterContinuationV680 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
     !coinGeckoDemoSecondChancePriorityV674 &&
     currentLiveEvidenceFairnessReserveBlocksV676(
@@ -12921,6 +12951,7 @@ function consumeBudget(
 
   if(
     !priorityHolderProRequestV666 &&
+    !holderProCounterContinuationV680 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
     !coinGeckoDemoSecondChancePriorityV674 &&
     phase==="analysis" &&
@@ -12970,6 +13001,7 @@ function consumeBudget(
 
   if (
     !priorityHolderProRequestV666 &&
+    !holderProCounterContinuationV680 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
     !coinGeckoDemoSecondChancePriorityV674 &&
     phase === "analysis" &&
@@ -13107,6 +13139,7 @@ function consumeBudget(
 
   if (
     !priorityHolderProRequestV666 &&
+    !holderProCounterContinuationV680 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
     !coinGeckoDemoSecondChancePriorityV674 &&
     phase === "analysis" &&
@@ -13191,6 +13224,7 @@ function consumeBudget(
 
   if (
     !priorityHolderProRequestV666 &&
+    !holderProCounterContinuationV680 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
     !coinGeckoDemoSecondChancePriorityV674 &&
     phase ===
@@ -13282,6 +13316,7 @@ function consumeBudget(
 
   if (
     !priorityHolderProRequestV666 &&
+    !holderProCounterContinuationV680 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
     !coinGeckoDemoSecondChancePriorityV674 &&
     phase === "analysis" &&
@@ -51807,6 +51842,85 @@ function recordHolderProGateTraceV678(
   trace.lastEvent = row;
 }
 
+function holderProResultCacheV680(
+  budget
+) {
+  if (!budget?.analysis) return null;
+
+  return (
+    budget.analysis.holderProResultCacheV680 ||
+    (budget.analysis.holderProResultCacheV680 = {
+      enabled: true,
+      entries: {}
+    })
+  );
+}
+
+function getHolderProResultV680(
+  budget,
+  token
+) {
+  const cache =
+    holderProResultCacheV680(budget);
+
+  const key =
+    normalize(token);
+
+  if (
+    !cache ||
+    !isAddress(key)
+  ) {
+    return null;
+  }
+
+  return cache.entries?.[key] || null;
+}
+
+function setHolderProResultV680(
+  budget,
+  token,
+  result,
+  source
+) {
+  const cache =
+    holderProResultCacheV680(budget);
+
+  const key =
+    normalize(token);
+
+  if (
+    !cache ||
+    !isAddress(key) ||
+    !result ||
+    result?.success !== true
+  ) {
+    return;
+  }
+
+  cache.entries[key] = {
+    storedAt: Date.now(),
+    source:
+      String(source || "BLOCKSCOUT_PRO_V143"),
+    result
+  };
+}
+
+function holderProCounterContinuationRequestV680(
+  budget,
+  phase,
+  type
+) {
+  return Boolean(
+    phase === "analysis" &&
+    (
+      type === "BLOCKSCOUT_PRO_TOKEN_COUNTERS_V247" ||
+      type === "BLOCKSCOUT_PRO_HOLDER_COUNT_COMPLETION_V256"
+    ) &&
+    budget?.analysis
+      ?.holderProCounterContinuationActiveV680 === true
+  );
+}
+
 async function blockscoutProHoldersV143(
   token,
   budget,
@@ -51826,6 +51940,42 @@ async function blockscoutProHoldersV143(
         normalize(token)
     }
   );
+
+  const cachedHolderProV680 =
+    getHolderProResultV680(
+      budget,
+      token
+    );
+
+  if (
+    cachedHolderProV680?.result?.success === true &&
+    Array.isArray(
+      cachedHolderProV680?.result?.data?.items
+    )
+  ) {
+    recordHolderProGateTraceV678(
+      budget,
+      {
+        stage:
+          "V143_REUSED_SAME_SCAN_RESULT_V680",
+        path:
+          callPathV678,
+        token:
+          normalize(token),
+        cacheSource:
+          cachedHolderProV680.source,
+        cacheStoredAt:
+          cachedHolderProV680.storedAt
+      }
+    );
+
+    return {
+      ...cachedHolderProV680.result,
+      reusedSameScanV680: true,
+      reusedSourceV680:
+        cachedHolderProV680.source
+    };
+  }
 
   const apiKey =
     String(
@@ -52125,7 +52275,7 @@ async function blockscoutProHoldersV143(
     proServiceV145.consecutiveTransientFailures =
       0;
 
-    return {
+    const successfulHolderRowsV680 = {
       configured: true,
       attempted: true,
       success: true,
@@ -52137,6 +52287,15 @@ async function blockscoutProHoldersV143(
           true
       }
     };
+
+    setHolderProResultV680(
+      budget,
+      token,
+      successfulHolderRowsV680,
+      callPathV678
+    );
+
+    return successfulHolderRowsV680;
   }
 
   catch (error) {
@@ -52251,7 +52410,10 @@ async function blockscoutProCountersV247(
         requestTypeV256,
       armedPriorityCountersV679:
         budget?.analysis
-          ?.priorityHolderProCountersActiveV679 === true
+          ?.priorityHolderProCountersActiveV679 === true,
+      continuationV680:
+        budget?.analysis
+          ?.holderProCounterContinuationActiveV680 === true
     }
   );
 
@@ -55304,7 +55466,20 @@ async function holderIntelligence(
         preCallBudgetAvailable:
           normalProCountersBudgetAvailableV679,
         v666SamePriorityToken:
-          samePriorityTokenV679
+          samePriorityTokenV679,
+        v680CachedV143:
+          Boolean(
+            getHolderProResultV680(
+              budget,
+              token
+            )?.result?.success === true
+          ),
+        v680LaneAlreadyUsedByV143:
+          Boolean(
+            laneV679?.used === true &&
+            laneV679?.unifiedProLaneV679
+              ?.consumedPath === "HOLDER_ROWS_V143"
+          )
       }
     );
 
@@ -55321,6 +55496,53 @@ async function holderIntelligence(
         budget.analysis
           .priorityHolderProCountersTokenV679 =
           normalize(token);
+      }
+
+      const cachedRowsForCounterV680 =
+        getHolderProResultV680(
+          budget,
+          token
+        );
+
+      const sameTokenV143AlreadyUsedV680 =
+        Boolean(
+          cachedRowsForCounterV680?.result?.success === true &&
+          Array.isArray(
+            cachedRowsForCounterV680?.result?.data?.items
+          ) &&
+          laneV679?.used === true &&
+          laneV679?.unifiedProLaneV679
+            ?.consumedPath === "HOLDER_ROWS_V143" &&
+          normalize(laneV679?.address) ===
+            normalize(token)
+        );
+
+      /*
+       * The outer V247 condition already proves counterData.holderCount is
+       * still null, so this is genuinely distinct counter evidence.
+       * V680 lets it cross internal lower-priority reserves only; the normal
+       * final budgetAvailable() check remains mandatory.
+       */
+      if (
+        sameTokenV143AlreadyUsedV680
+      ) {
+        budget.analysis
+          .holderProCounterContinuationActiveV680 =
+          true;
+
+        recordHolderProGateTraceV678(
+          budget,
+          {
+            stage:
+              "V247_DISTINCT_COUNTER_CONTINUATION_ARMED_V680",
+            path:
+              "V247_PRO_COUNTERS",
+            token:
+              normalize(token),
+            v143ReusedOrCompleted:
+              true
+          }
+        );
       }
 
       let proCountersV247;
@@ -55340,6 +55562,9 @@ async function holderIntelligence(
         budget.analysis
           .priorityHolderProCountersTokenV679 =
           null;
+        budget.analysis
+          .holderProCounterContinuationActiveV680 =
+          false;
       }
 
       blockscoutProCounterFallbackV247 = {
@@ -131461,8 +131686,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V679 preserves V678 diagnostics and unifies the one-per-scan V666 protected Blockscout Pro holder lane across V143 holder rows and the same-token V247 holder counters path; whichever consumes the lane first closes it for the other path.",
-    "<i>V679 adds no request ceiling: hard 42, Telegram notification reserve, provider cooldowns, CoinGecko Demo limits, scoring and qualification thresholds remain unchanged.</i>"
+    "V680 preserves V679/V678 diagnostics, reuses successful same-scan V143 holder rows for the same token, and allows a genuinely distinct same-token V247 counter continuation to bypass only internal lower-priority reserves after V143 already used the V666 lane.",
+    "<i>V680 gives no second V666 protected spend and does not bypass the normal final budget check: hard 42, Telegram reserve, provider cooldowns, CoinGecko Demo limits, scoring and qualification thresholds remain unchanged.</i>"
   ].join("\n");
 }
 
