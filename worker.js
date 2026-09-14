@@ -1,6 +1,24 @@
 /**
+ * Robinhood Chain Meme Hunter — V693
+ * AUTHORITATIVE RUNTIME VERSION: V693
+ *
+ * V693 DEDICATED STATE-MAINTENANCE ROUTE
+ * - moves oversized-state rescue out of /scan into GET /compact-state-v693;
+ * - maintenance request does no discovery, analysis, Telegram or provider work;
+ * - normal scans use only cheap count caps plus one ordinary state serialization;
+ * - /compact-state-v693 applies the safe V692 Tier 1 + Tier 2 trims immediately,
+ *   serializes once, checks the 25 MiB KV boundary, then saves if safe;
+ * - calls/performance, learning/frozen outcomes, alerts, watched tokens, verified
+ *   V3 identities/live DO state, active evidence queues, holder evidence and
+ *   confirmed launch detectors/source identities remain protected;
+ * - keeps the 20 MiB target / 25 MiB hard guard and reports exact after-bytes,
+ *   trim counts, save status and serialization count;
+ * - preserves V690 ERC20 reservation logic and all V687-V689 V3 fixes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V692
- * AUTHORITATIVE RUNTIME VERSION: V692
+ * HISTORICAL VERSION NOTE: V692
  *
  * V692 LOW-CPU KV STATE COMPACTION
  * - rebuilds the V691 state-size fix after V691 itself hit Cloudflare 1102;
@@ -5739,7 +5757,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V692";
+const VERSION = "V693";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -18263,6 +18281,123 @@ function compactTier2StateV692(
   }
 }
 
+
+function applyPreventativeStateCapsV693(
+  state
+) {
+  const summary = {
+    mode:
+      "CHEAP_COUNT_ONLY_PREVENTATIVE_V693",
+    trimmed: {}
+  };
+
+  const add = (key, removed) => {
+    const count =
+      safeNumber(removed);
+
+    if (count <= 0) return;
+
+    summary.trimmed[key] =
+      safeNumber(
+        summary.trimmed[key]
+      ) + count;
+  };
+
+  const audit =
+    state?.qualificationAuditV663;
+
+  if (
+    audit &&
+    typeof audit === "object"
+  ) {
+    const trimmed =
+      trimArrayTailV692(
+        audit.records,
+        V692_QUALIFICATION_AUDIT_KEEP
+      );
+
+    audit.records =
+      trimmed.value;
+
+    audit.maxRecords =
+      V692_QUALIFICATION_AUDIT_KEEP;
+
+    add(
+      "qualificationAuditRecords",
+      trimmed.removed
+    );
+  }
+
+  const meter =
+    state?.verifiedLaunchMeterV470;
+
+  if (
+    meter &&
+    typeof meter === "object"
+  ) {
+    const trimmed =
+      trimArrayTailV692(
+        meter.records,
+        V692_VERIFIED_LAUNCH_METER_KEEP
+      );
+
+    meter.records =
+      trimmed.value;
+
+    meter.maxRecords =
+      V692_VERIFIED_LAUNCH_METER_KEEP;
+
+    if (
+      safeNumber(trimmed.removed) >
+      0
+    ) {
+      meter.droppedForCapacity =
+        safeNumber(
+          meter.droppedForCapacity
+        ) +
+        safeNumber(
+          trimmed.removed
+        );
+
+      meter.capacityTruncated =
+        true;
+    }
+
+    add(
+      "verifiedLaunchMeterRecords",
+      trimmed.removed
+    );
+  }
+
+  const origin =
+    state?.tokenOriginTraceV477;
+
+  if (
+    origin &&
+    typeof origin === "object" &&
+    Array.isArray(
+      origin.recentVerifiedOrigins
+    )
+  ) {
+    const trimmed =
+      trimArrayTailV692(
+        origin.recentVerifiedOrigins,
+        V692_RECENT_VERIFIED_ORIGINS_KEEP
+      );
+
+    origin.recentVerifiedOrigins =
+      trimmed.value;
+
+    add(
+      "recentVerifiedOrigins",
+      trimmed.removed
+    );
+  }
+
+  return summary;
+}
+
+
 function compactStateForKvV692(
   state
 ) {
@@ -18428,6 +18563,197 @@ function compactStateForKvV692(
 }
 
 
+
+async function compactAndWriteStateV693(
+  env
+) {
+  const stateRead =
+    await readState(
+      env
+    );
+
+  const state =
+    stateRead?.state ||
+    stateRead;
+
+  if (
+    !state ||
+    typeof state !== "object"
+  ) {
+    return {
+      ok: false,
+      saved: false,
+      version: VERSION,
+      route:
+        "/compact-state-v693",
+      error:
+        "STATE_READ_FAILED_V693",
+      externalProviderRequests: 0,
+      telegramRequests: 0
+    };
+  }
+
+  const kv =
+    await getKV(
+      env
+    );
+
+  if (!kv) {
+    return {
+      ok: false,
+      saved: false,
+      version: VERSION,
+      route:
+        "/compact-state-v693",
+      error:
+        "KV_BINDING_UNAVAILABLE_V693",
+      externalProviderRequests: 0,
+      telegramRequests: 0
+    };
+  }
+
+  state.version =
+    VERSION;
+
+  state.updatedAt =
+    now();
+
+  state.stateCompactionV692 =
+    state?.stateCompactionV692 &&
+    typeof state.stateCompactionV692 === "object"
+      ? state.stateCompactionV692
+      : {
+          schemaVersion:
+            "V692_1",
+          enabled: true,
+          targetBytes:
+            V692_STATE_TARGET_BYTES,
+          kvHardLimitBytes:
+            V692_KV_HARD_LIMIT_BYTES,
+          totalCompactions: 0,
+          totalBytesRemoved: 0
+        };
+
+  const telemetry =
+    state.stateCompactionV692;
+
+  telemetry.lastEvaluatedAt =
+    Date.now();
+
+  telemetry.lastTrimmed = {};
+
+  telemetry.lastMode =
+    "DEDICATED_MAINTENANCE_ROUTE_V693";
+
+  /*
+   * This request performs no scan work. Apply both known-safe count-first
+   * tiers before the first/only whole-state stringify.
+   */
+  compactTier1StateV692(
+    state,
+    telemetry
+  );
+
+  compactTier2StateV692(
+    state,
+    telemetry
+  );
+
+  const serialized =
+    jsonStringifySafeV246(
+      state,
+      0
+    );
+
+  const afterBytes =
+    utf8BytesV692(
+      serialized
+    );
+
+  const trimmed = {
+    ...(
+      telemetry.lastTrimmed ||
+      {}
+    )
+  };
+
+  const targetMet =
+    afterBytes <=
+    V692_STATE_TARGET_BYTES;
+
+  const belowHardLimit =
+    afterBytes <
+    V692_KV_HARD_LIMIT_BYTES;
+
+  if (!belowHardLimit) {
+    return {
+      ok: false,
+      saved: false,
+      version: VERSION,
+      route:
+        "/compact-state-v693",
+      status:
+        "STILL_OVERSIZED_AFTER_SAFE_COMPACTION_V693",
+      error:
+        "STATE_STILL_ABOVE_KV_HARD_LIMIT_V693",
+      afterBytes,
+      afterMiB:
+        Number(
+          (
+            afterBytes /
+            (1024 * 1024)
+          ).toFixed(3)
+        ),
+      targetBytes:
+        V692_STATE_TARGET_BYTES,
+      hardLimitBytes:
+        V692_KV_HARD_LIMIT_BYTES,
+      targetMet,
+      belowHardLimit,
+      trimmed,
+      fullStateSerializations: 1,
+      externalProviderRequests: 0,
+      telegramRequests: 0
+    };
+  }
+
+  await kv.put(
+    STATE_KEY,
+    serialized
+  );
+
+  return {
+    ok: true,
+    saved: true,
+    version: VERSION,
+    route:
+      "/compact-state-v693",
+    status:
+      "COMPACTED_AND_SAVED_V693",
+    afterBytes,
+    afterMiB:
+      Number(
+        (
+          afterBytes /
+          (1024 * 1024)
+        ).toFixed(3)
+      ),
+    targetBytes:
+      V692_STATE_TARGET_BYTES,
+    targetMiB: 20,
+    hardLimitBytes:
+      V692_KV_HARD_LIMIT_BYTES,
+    hardLimitMiB: 25,
+    targetMet,
+    belowHardLimit,
+    trimmed,
+    fullStateSerializations: 1,
+    externalProviderRequests: 0,
+    telegramRequests: 0
+  };
+}
+
+
 async function writeState(
   env,
   state
@@ -18459,15 +18785,28 @@ async function writeState(
     state.updatedAt =
       now();
 
-    const statePayloadV692 =
-      compactStateForKvV692(
+    const preventativeV693 =
+      applyPreventativeStateCapsV693(
         state
       );
 
+    /*
+     * Normal scan persistence is intentionally cheap. No rescue compaction,
+     * no section profiling and no second whole-state stringify here.
+     */
+    const serializedV693 =
+      jsonStringifySafeV246(
+        state,
+        0
+      );
+
+    const bytesV693 =
+      utf8BytesV692(
+        serializedV693
+      );
+
     if (
-      safeNumber(
-        statePayloadV692?.afterBytes
-      ) >=
+      bytesV693 >=
       V692_KV_HARD_LIMIT_BYTES
     ) {
       return {
@@ -18477,39 +18816,29 @@ async function writeState(
         binding,
 
         error:
-          "KV_STATE_STILL_ABOVE_HARD_LIMIT_AFTER_LOW_CPU_V692_COMPACTION",
+          "STATE_TOO_LARGE_USE_COMPACT_STATE_V693",
 
-        stateCompactionV692: {
+        stateCompactionV693: {
+          mode:
+            "NORMAL_SCAN_PREVENTATIVE_ONLY_V693",
           afterBytes:
-            statePayloadV692?.afterBytes ||
-            null,
-          tier1Bytes:
-            statePayloadV692?.tier1Bytes ||
-            null,
-          targetBytes:
-            V692_STATE_TARGET_BYTES,
+            bytesV693,
           hardLimitBytes:
             V692_KV_HARD_LIMIT_BYTES,
-          tier2Applied:
-            statePayloadV692?.tier2Applied ===
-            true,
-          fullSerializations:
-            safeNumber(
-              statePayloadV692?.fullSerializations
-            ),
-          targetMet:
-            statePayloadV692?.targetMet ===
-            true,
-          trimmed:
-            statePayloadV692?.trimmed ||
-            {}
+          maintenanceRoute:
+            "/compact-state-v693",
+          preventativeTrimmed:
+            preventativeV693?.trimmed ||
+            {},
+          fullStateSerializations: 1,
+          externalProviderRequestsAdded: 0
         }
       };
     }
 
     await kv.put(
       STATE_KEY,
-      statePayloadV692.serialized
+      serializedV693
     );
 
     return {
@@ -18521,33 +18850,18 @@ async function writeState(
       error:
         null,
 
-      stateCompactionV692: {
-        compacted:
-          statePayloadV692?.compacted ===
-          true,
+      stateCompactionV693: {
+        mode:
+          "NORMAL_SCAN_PREVENTATIVE_ONLY_V693",
         afterBytes:
-          statePayloadV692?.afterBytes ||
-          null,
-        tier1Bytes:
-          statePayloadV692?.tier1Bytes ||
-          null,
-        targetBytes:
-          V692_STATE_TARGET_BYTES,
+          bytesV693,
         hardLimitBytes:
           V692_KV_HARD_LIMIT_BYTES,
-        tier2Applied:
-          statePayloadV692?.tier2Applied ===
-          true,
-        fullSerializations:
-          safeNumber(
-            statePayloadV692?.fullSerializations
-          ),
-        targetMet:
-          statePayloadV692?.targetMet ===
-          true,
-        trimmed:
-          statePayloadV692?.trimmed ||
-          {}
+        preventativeTrimmed:
+          preventativeV693?.trimmed ||
+          {},
+        fullStateSerializations: 1,
+        externalProviderRequestsAdded: 0
       }
     };
   }
@@ -98781,6 +99095,7 @@ async function health(
     routes: [
       "/health",
       "/rpc-test",
+      "/compact-state-v693",
       "/scan",
       "/state",
       "/diagnostics",
@@ -134544,7 +134859,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
-    "<i>V692 replaces V691's CPU-heavy compaction with count-first low-CPU trimming and at most two full state serializations. Protected calls, learning, alerts, verified V3 identities, active queues and confirmed launch detectors remain untouched; hard 42 and Telegram reserve are unchanged.</i>"
+    "<i>V693 moves oversized-state rescue into dedicated /compact-state-v693 maintenance. Normal scans use cheap preventative caps only; protected calls, learning, alerts, verified V3 identities, active queues and confirmed launch detectors remain untouched. Hard 42 and Telegram reserve are unchanged.</i>"
   ].join("\n");
 }
 
@@ -140629,6 +140944,17 @@ async function handleRequest(
   ) {
     return jsonResponse(
       await rpcTest(
+        env
+      )
+    );
+  }
+
+  if (
+    path ===
+    "/compact-state-v693"
+  ) {
+    return jsonResponse(
+      await compactAndWriteStateV693(
         env
       )
     );
