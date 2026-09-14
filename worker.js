@@ -1,6 +1,26 @@
 /**
+ * Robinhood Chain Meme Hunter — V672
+ * AUTHORITATIVE RUNTIME VERSION: V672
+ *
+ * V672 COINGECKO DEMO SECOND-CHANCE ARMING FIX
+ * - builds directly forward from confirmed V671 scheduled-relay routing;
+ * - fixes the existing V667 Demo second-chance lane so it is armed ONLY after the
+ *   first authenticated CoinGecko Demo request itself returns no usable market;
+ * - a token-specific authenticated Demo HTTP 404 is treated as equivalent to
+ *   no-market-found for this bounded second-chance decision because the same
+ *   endpoint/network is already proven working for other tokens;
+ * - removes premature arming from the public GeckoTerminal no-market branch, so
+ *   a successful authenticated Demo response cannot accidentally grant a second
+ *   Demo request later in the same scan;
+ * - second chance remains limited by the existing once-per-2-hours overflow guard,
+ *   9,500/month bot-side cap, provider spacing/cooldown rules and hard 42-request ceiling;
+ * - no scoring, Momentum, Telegram thresholds, qualification, holder/risk rules,
+ *   launch-source proof, state keys, scheduled cadence, or provider ceilings change.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V671
- * AUTHORITATIVE RUNTIME VERSION: V671
+ * HISTORICAL VERSION NOTE: V671
  *
  * V671 SCHEDULED RELAY POST ROUTING FIX
  * - builds directly forward from authoritative V670;
@@ -5294,7 +5314,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V671";
+const VERSION = "V672";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -45347,6 +45367,30 @@ async function geckoTerminalMarketData(
       service.lastStatus =
         `HTTP_${response.status}`;
 
+      /*
+       * V672: the authenticated token-pools endpoint is already proven working
+       * on this network. A token-specific 404 therefore represents no indexed
+       * market for this candidate and may arm the existing bounded second chance.
+       * Other HTTP errors do not earn an overflow request.
+       */
+      if (
+        response.status === 404 &&
+        !secondChanceAttemptV667
+      ) {
+        budget.analysis
+          .coinGeckoDemoSecondChanceEligibleV667 =
+          true;
+        budget.analysis
+          .coinGeckoDemoSecondChanceTriggerAddressV667 =
+          normalize(token) || null;
+        budget.analysis
+          .coinGeckoDemoSecondChanceArmedAtV667 =
+          Date.now();
+        budget.analysis
+          .coinGeckoDemoSecondChanceTriggerReasonV672 =
+          "COINGECKO_DEMO_HTTP_404_V660";
+      }
+
       return {
         verified:
           false,
@@ -45401,20 +45445,11 @@ async function geckoTerminalMarketData(
       service.lastStatus =
         "NO_MARKET_FOUND";
 
-      if (
-        !secondChanceAttemptV667
-      ) {
-        budget.analysis
-          .coinGeckoDemoSecondChanceEligibleV667 =
-          true;
-        budget.analysis
-          .coinGeckoDemoSecondChanceTriggerAddressV667 =
-          normalize(token) || null;
-        budget.analysis
-          .coinGeckoDemoSecondChanceArmedAtV667 =
-          Date.now();
-      }
-
+      /*
+       * V672: do NOT arm the authenticated Demo second-chance lane from the
+       * public GeckoTerminal result. The overflow is earned only when the first
+       * authenticated Demo request itself proves no usable market.
+       */
       return {
         verified:
           false,
@@ -46191,6 +46226,27 @@ async function coinGeckoDemoMarketDataV660(
     ) {
       service.lastStatus =
         "NO_MARKET_FOUND";
+
+      /*
+       * V672: this is the intended V667 trigger — the FIRST authenticated Demo
+       * request was actually sent and returned no usable market.
+       */
+      if (
+        !secondChanceAttemptV667
+      ) {
+        budget.analysis
+          .coinGeckoDemoSecondChanceEligibleV667 =
+          true;
+        budget.analysis
+          .coinGeckoDemoSecondChanceTriggerAddressV667 =
+          normalize(token) || null;
+        budget.analysis
+          .coinGeckoDemoSecondChanceArmedAtV667 =
+          Date.now();
+        budget.analysis
+          .coinGeckoDemoSecondChanceTriggerReasonV672 =
+          "COINGECKO_DEMO_NO_MARKET_FOUND_V660";
+      }
 
       return {
         verified: false,
