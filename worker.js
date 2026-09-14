@@ -1,6 +1,20 @@
 /**
+ * Robinhood Chain Meme Hunter — V671
+ * AUTHORITATIVE RUNTIME VERSION: V671
+ *
+ * V671 SCHEDULED RELAY POST ROUTING FIX
+ * - builds directly forward from authoritative V670;
+ * - allows ONLY POST /scan?v670ScheduledRelay=1 to pass the global GET-only guard;
+ * - preserves Telegram webhook POST handling and blocks every other non-GET request;
+ * - preserves the existing scheduledScan(env) path used by the external relay Service Binding;
+ * - manual GET /scan remains scheduled=false;
+ * - no scanner, scoring, qualification, risk, holder, market, provider, Telegram,
+ *   request-budget, cadence, state-key, or hard 42-request ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V656
- * AUTHORITATIVE RUNTIME VERSION: V656
+ * HISTORICAL VERSION NOTE: V656
  *
  * V656 EVIDENCE-COMPLETION DIAGNOSTIC
  * - builds directly forward from authoritative V655;
@@ -5280,7 +5294,20 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V670";
+const VERSION = "V671";
+
+/*
+ * V671 — scheduled relay POST routing fix.
+ * - Preserves V670 scanner/provider/scoring/holder/Telegram behaviour.
+ * - Allows ONLY the dedicated /scan?v670ScheduledRelay=1 POST relay through
+ *   the global GET-only request guard so the external relay Worker / Service
+ *   Binding can reach the existing scheduledScan(env) path.
+ * - Telegram webhook POST handling remains unchanged and still runs first.
+ * - Every other non-GET request remains METHOD_NOT_ALLOWED exactly as before.
+ * - Manual GET /scan remains scheduled=false.
+ * - No scoring, qualification, risk, holder, market, provider, request-budget,
+ *   hard 42-request ceiling or Telegram threshold changes.
+ */
 
 /*
  * V670 — Free-plan scheduled CPU relay fix.
@@ -130130,8 +130157,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V655 fresh-launch budget protection, V663 audit, V664/V665 diagnostics, the V666 holder fix, V667 Demo second-chance lane and V669 CoinGecko persistence fix remain preserved; V670 relays cron execution into the proven HTTP scan path to avoid the Free-plan scheduled CPU ceiling.",
-    "<i>V670 preserves the V667 one-Demo-request/second-chance rules, 9,500/month bot meter and hard 42-request ceiling; only scheduled orchestration changes.</i>"
+    "V655 fresh-launch budget protection, V663 audit, V664/V665 diagnostics, the V666 holder fix, V667 Demo second-chance lane and V669 CoinGecko persistence fix remain preserved; V671 allows the dedicated scheduled relay POST through the main Worker GET-only guard so the external Service Binding relay can reach the proven scheduled scan path.",
+    "<i>V671 preserves the V667 one-Demo-request/second-chance rules, 9,500/month bot meter and hard 42-request ceiling; only scheduled request routing changes.</i>"
   ].join("\n");
 }
 
@@ -135072,6 +135099,18 @@ async function handleRequest(
       ) ||
     "/";
 
+  // V671: resolve the dedicated scheduled relay before the global GET-only guard.
+  // This is intentionally limited to the existing V670 marker on /scan.
+  const scheduledRelayV671 =
+    path ===
+      "/scan" &&
+    request.method ===
+      "POST" &&
+    url.searchParams.get(
+      "v670ScheduledRelay"
+    ) ===
+      "1";
+
   if (
     request.method ===
     "OPTIONS"
@@ -135131,7 +135170,8 @@ async function handleRequest(
 
   if (
     request.method !==
-    "GET"
+      "GET" &&
+    !scheduledRelayV671
   ) {
     return jsonResponse(
       {
@@ -136200,21 +136240,8 @@ async function handleRequest(
     path ===
     "/scan"
   ) {
-    const requestUrlV670 =
-      new URL(
-        request.url
-      );
-
-    const scheduledRelayV670 =
-      request.method ===
-        "POST" &&
-      requestUrlV670.searchParams.get(
-        "v670ScheduledRelay"
-      ) ===
-        "1";
-
     return jsonResponse(
-      scheduledRelayV670
+      scheduledRelayV671
         ? await scheduledScan(
             env
           )
