@@ -1,6 +1,32 @@
 /**
+ * Robinhood Chain Meme Hunter — V688
+ * AUTHORITATIVE RUNTIME VERSION: V688
+ *
+ * V688 BOUNDED VERIFIED-V3 COLLECTOR AUTO-ACTIVATION
+ * - builds directly forward from confirmed V687;
+ * - V687 proved verified USD conversion works once the existing V605 exact-pool
+ *   collector is enabled; Artificial Inu immediately captured a fresh verified
+ *   $1,594.82 V3 buy after manual /v3start;
+ * - V688 removes that manual activation dependency for already-verified V3 pools;
+ * - current/priority analysed candidates with a valid V329 on-chain-verified
+ *   Uniswap V3 pair automatically check the existing collector state;
+ * - if the collector is disabled, the existing V605/V591 start path is invoked;
+ * - manual /analyse also auto-starts immediately after it independently proves
+ *   and persists a V329 V3 pair;
+ * - at most TWO new collector starts are permitted per scan budget context;
+ * - existing enabled collectors are never restarted unnecessarily;
+ * - only KV/Durable-Object control work is added: ZERO scanner provider/RPC
+ *   requests and no increase to the hard 42 request ceiling;
+ * - no WebSocket rollback: production V605 HTTP exact-log + shared-head mode
+ *   remains authoritative;
+ * - V687 verified-USD bridge, V686 diagnostics, V684 aligned scheduler and V683
+ *   holder fairness are preserved;
+ * - scoring, qualification and Telegram thresholds are unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V687
- * AUTHORITATIVE RUNTIME VERSION: V687
+ * HISTORICAL VERSION NOTE: V687
  *
  * V687 V3 VERIFIED-USD REFERENCE BRIDGE RESTORE
  * - builds directly forward from diagnostic V686;
@@ -5631,7 +5657,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V687";
+const VERSION = "V688";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -15005,6 +15031,9 @@ function budgetTelemetry(
 
       erc20IdentityDiagnosticRowsV686:
         budget.analysis?.erc20IdentityDiagnosticRowsV686 || [],
+
+      v3CollectorAutoStartV688:
+        budget.analysis?.v3CollectorAutoStartV688 || null,
 
       directionalWatchReserveV553:
         budget.analysis?.directionalWatchReserveV553 || null,
@@ -74116,6 +74145,57 @@ async function analyzeToken(
       candidate
     );
 
+  /*
+   * V688: bounded zero-provider-request activation for serious/current
+   * candidates, but ONLY when an independently verified V329 V3 pair already
+   * exists. No pair identity is guessed from market metadata.
+   */
+  candidate.v3CollectorAutoStartV688 = {
+    attempted: false,
+    started: false,
+    status:
+      "NOT_ELIGIBLE_OR_NOT_ATTEMPTED_V688",
+    externalProviderRequestsAdded: 0,
+    scannerRequestBudgetAdded: 0
+  };
+
+  if (
+    Boolean(
+      options?.priorityCompletion ||
+      options?.marketPriority
+    )
+  ) {
+    try {
+      candidate.v3CollectorAutoStartV688 =
+        {
+          attempted: true,
+          ...(
+            await autoStartVerifiedV3CollectorV688(
+              env,
+              budget,
+              address,
+              validation.decimals,
+              "CURRENT_PRIORITY_ANALYSIS_V688"
+            )
+          )
+        };
+    } catch (error) {
+      candidate.v3CollectorAutoStartV688 = {
+        attempted: true,
+        started: false,
+        status:
+          "AUTO_START_FAIL_OPEN_V688",
+        error:
+          String(
+            error?.message ||
+            error
+          ).slice(0, 160),
+        externalProviderRequestsAdded: 0,
+        scannerRequestBudgetAdded: 0
+      };
+    }
+  }
+
   return candidate;
 }
 
@@ -103336,9 +103416,62 @@ async function telegramFreshAnalyseV276(
 
   /* V333: once /analyse has independently proven a V3 pair, register the token
    * for autonomous scheduled collection. KV-only; no external request. */
-  if (manualNativeV3ResultV326?.protocolEvidence === "ONCHAIN_TOKEN0_TOKEN1_FEE_V329" && isAddress(manualNativeV3ResultV326?.pairAddress)) {
-    await registerNativeV3CollectorTokenV333(env, resolved.address, candidate?.decimals);
+  let manualV3AutoStartV688 = {
+    attempted: false,
+    started: false,
+    status:
+      "NO_VERIFIED_V3_PAIR_V688",
+    externalProviderRequestsAdded: 0,
+    scannerRequestBudgetAdded: 0
+  };
+
+  if (
+    manualNativeV3ResultV326
+      ?.protocolEvidence ===
+      "ONCHAIN_TOKEN0_TOKEN1_FEE_V329" &&
+    isAddress(
+      manualNativeV3ResultV326
+        ?.pairAddress
+    )
+  ) {
+    await registerNativeV3CollectorTokenV333(
+      env,
+      resolved.address,
+      candidate?.decimals
+    );
+
+    try {
+      manualV3AutoStartV688 = {
+        attempted: true,
+        ...(
+          await autoStartVerifiedV3CollectorV688(
+            env,
+            budget,
+            resolved.address,
+            candidate?.decimals,
+            "MANUAL_V329_PROOF_V688"
+          )
+        )
+      };
+    } catch (error) {
+      manualV3AutoStartV688 = {
+        attempted: true,
+        started: false,
+        status:
+          "MANUAL_AUTO_START_FAIL_OPEN_V688",
+        error:
+          String(
+            error?.message ||
+            error
+          ).slice(0, 160),
+        externalProviderRequestsAdded: 0,
+        scannerRequestBudgetAdded: 0
+      };
+    }
   }
+
+  candidate.manualV3AutoStartV688 =
+    manualV3AutoStartV688;
 
   const manualLiveV4ResultV283 =
     await manualLiveV4EnrichmentV283(
@@ -133136,7 +133269,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
-    "<i>V687 restores the verified WETH/USDG reference bridge used by V3 USD evidence and applies it only to new exact-pool records; no historical backfill. V686 diagnostics, V684 scheduler alignment, V683 holder fairness, hard 42, Telegram reserve, scoring and qualification thresholds remain unchanged.</i>"
+    "<i>V688 preserves V687 verified V3 USD conversion and automatically enables the existing V605 exact-pool collector for bounded already-verified V3 candidates. No new provider/RPC requests; hard 42, Telegram reserve, scoring and qualification thresholds remain unchanged.</i>"
   ].join("\n");
 }
 
@@ -140309,7 +140442,277 @@ function blockscoutV3OneShotTelegramV613(result){
   return lines.join("\\n");
 }
 
+
+const V688_MAX_NEW_V3_COLLECTOR_STARTS_PER_CONTEXT = 2;
+
+function v3CollectorAutoStartStateV688(
+  budget
+) {
+  if (!budget?.analysis) {
+    return {
+      checks: 0,
+      starts: 0,
+      results: []
+    };
+  }
+
+  if (
+    !budget.analysis
+      .v3CollectorAutoStartV688
+  ) {
+    budget.analysis
+      .v3CollectorAutoStartV688 = {
+        enabled: true,
+        checks: 0,
+        starts: 0,
+        alreadyEnabled: 0,
+        noVerifiedPair: 0,
+        startFailures: 0,
+        maxStarts:
+          V688_MAX_NEW_V3_COLLECTOR_STARTS_PER_CONTEXT,
+        results: []
+      };
+  }
+
+  return budget.analysis
+    .v3CollectorAutoStartV688;
+}
+
+async function autoStartVerifiedV3CollectorV688(
+  env,
+  budget,
+  tokenInput,
+  decimals,
+  reason = "VERIFIED_V3_CANDIDATE_V688"
+) {
+  const token =
+    normalize(tokenInput || "");
+
+  const state =
+    v3CollectorAutoStartStateV688(
+      budget
+    );
+
+  const record = result => {
+    const row = {
+      token:
+        isAddress(token)
+          ? token
+          : null,
+      reason,
+      at: Date.now(),
+      externalProviderRequestsAdded: 0,
+      scannerRequestBudgetAdded: 0,
+      ...result
+    };
+
+    if (
+      Array.isArray(state?.results)
+    ) {
+      state.results.push(row);
+
+      if (state.results.length > 12) {
+        state.results =
+          state.results.slice(-12);
+      }
+    }
+
+    return row;
+  };
+
+  if (!isAddress(token)) {
+    return record({
+      started: false,
+      status:
+        "INVALID_TOKEN_V688"
+    });
+  }
+
+  state.checks =
+    safeNumber(state.checks) + 1;
+
+  /*
+   * Keep the existing V333 registry/config path authoritative for decimals.
+   * This is KV-only and adds no external request.
+   */
+  const registry =
+    await registerNativeV3CollectorTokenV333(
+      env,
+      token,
+      decimals
+    );
+
+  const pairCache =
+    await loadVerifiedV3PairIdentityV329(
+      env,
+      token
+    );
+
+  if (pairCache?.valid !== true) {
+    state.noVerifiedPair =
+      safeNumber(
+        state.noVerifiedPair
+      ) + 1;
+
+    return record({
+      started: false,
+      status:
+        "VERIFIED_V3_PAIR_REQUIRED_V688",
+      pairStatus:
+        pairCache?.status || null,
+      registryStatus:
+        registry?.status || null
+    });
+  }
+
+  /*
+   * Read the existing DO status first. In V605 this is an internal DO fetch,
+   * not an external provider request. It also lets the existing self-heal path
+   * repair an already-enabled collector without a needless restart.
+   */
+  let status = null;
+
+  try {
+    status =
+      await v3LiveCollectorRouteV363(
+        env,
+        token,
+        "status"
+      );
+  } catch (error) {
+    status = {
+      status:
+        "STATUS_READ_FAIL_OPEN_V688",
+      error:
+        String(
+          error?.message ||
+          error
+        ).slice(0, 160)
+    };
+  }
+
+  if (status?.enabled === true) {
+    state.alreadyEnabled =
+      safeNumber(
+        state.alreadyEnabled
+      ) + 1;
+
+    return record({
+      started: false,
+      alreadyEnabled: true,
+      status:
+        "COLLECTOR_ALREADY_ENABLED_V688",
+      collectorStatus:
+        status?.status || null,
+      pairAddress:
+        normalize(
+          pairCache?.record
+            ?.pairAddress
+        ) || null,
+      registryStatus:
+        registry?.status || null
+    });
+  }
+
+  if (
+    safeNumber(state.starts) >=
+    V688_MAX_NEW_V3_COLLECTOR_STARTS_PER_CONTEXT
+  ) {
+    return record({
+      started: false,
+      status:
+        "AUTO_START_LIMIT_REACHED_V688",
+      maxStarts:
+        V688_MAX_NEW_V3_COLLECTOR_STARTS_PER_CONTEXT,
+      pairAddress:
+        normalize(
+          pairCache?.record
+            ?.pairAddress
+        ) || null,
+      registryStatus:
+        registry?.status || null
+    });
+  }
+
+  let start = null;
+
+  try {
+    start =
+      await v3LiveCollectorRouteV363(
+        env,
+        token,
+        "start"
+      );
+  } catch (error) {
+    state.startFailures =
+      safeNumber(
+        state.startFailures
+      ) + 1;
+
+    return record({
+      started: false,
+      status:
+        "COLLECTOR_START_THROW_V688",
+      error:
+        String(
+          error?.message ||
+          error
+        ).slice(0, 160),
+      pairAddress:
+        normalize(
+          pairCache?.record
+            ?.pairAddress
+        ) || null,
+      registryStatus:
+        registry?.status || null
+    });
+  }
+
+  const accepted =
+    start?.enabled === true ||
+    String(
+      start?.status || ""
+    ).includes("START") ||
+    String(
+      start?.status || ""
+    ).includes("ACTIVE");
+
+  if (accepted) {
+    state.starts =
+      safeNumber(
+        state.starts
+      ) + 1;
+  } else {
+    state.startFailures =
+      safeNumber(
+        state.startFailures
+      ) + 1;
+  }
+
+  return record({
+    started: accepted,
+    alreadyEnabled: false,
+    status:
+      accepted
+        ? "AUTO_START_ACCEPTED_V688"
+        : "AUTO_START_NOT_ACCEPTED_V688",
+    collectorStatus:
+      start?.status || null,
+    enabled:
+      start?.enabled === true,
+    pairAddress:
+      normalize(
+        pairCache?.record
+          ?.pairAddress
+      ) || null,
+    registryStatus:
+      registry?.status || null
+  });
+}
+
+
 async function v3LiveCollectorRouteV363(env, tokenInput, action) {
+
   const token = normalize(tokenInput || "");
   const ns = env?.[V3_LIVE_DO_BINDING_V363];
   if (!ns || typeof ns.idFromName !== "function" || typeof ns.get !== "function") {
