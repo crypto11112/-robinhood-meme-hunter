@@ -1,6 +1,28 @@
 /**
+ * Robinhood Chain Meme Hunter — V681
+ * AUTHORITATIVE RUNTIME VERSION: V681
+ *
+ * V681 V143 ATTEMPT DEDUP + V247 DISTINCT COUNTER CONTINUATION
+ * - builds directly forward from V680 and the live V680 diagnostic proof;
+ * - records a same-scan V143 provider attempt as soon as the request budget is
+ *   successfully consumed, regardless of whether the provider later returns
+ *   usable holder rows, 404, 429, transient error, invalid data or fetch error;
+ * - a second same-token V143 provider request in the same scan is suppressed;
+ * - successful V143 rows still use the existing V680 same-scan result cache;
+ * - when V143 already consumed the one-per-scan V666 protected lane but the
+ *   distinct holder-count evidence is still missing, V247 counters may cross
+ *   only the existing internal lower-priority reserve guards;
+ * - V247 still must pass the ordinary final budget/global/Telegram-reserve gate
+ *   and does NOT receive a second V666 protected spend;
+ * - hard request ceiling remains 42;
+ * - V679 unified Pro lane, V678 diagnostics, V676 fairness, V675 ERC-20 rescue,
+ *   V674 CoinGecko second chance, V673 Durable Object scheduling, scoring,
+ *   holder/risk rules, qualification and Telegram thresholds remain unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V680
- * AUTHORITATIVE RUNTIME VERSION: V680
+ * HISTORICAL VERSION NOTE: V680
  *
  * V680 SAME-TOKEN PRO REUSE + DISTINCT COUNTER CONTINUATION
  * - builds directly forward from V679 and the live V679 diagnostic proof;
@@ -5482,7 +5504,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V680";
+const VERSION = "V681";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -51905,6 +51927,83 @@ function setHolderProResultV680(
   };
 }
 
+function holderProAttemptStateV681(
+  budget
+) {
+  if (!budget?.analysis) return null;
+
+  return (
+    budget.analysis.holderProAttemptStateV681 ||
+    (budget.analysis.holderProAttemptStateV681 = {
+      enabled: true,
+      entries: {}
+    })
+  );
+}
+
+function getHolderProAttemptV681(
+  budget,
+  token
+) {
+  const state =
+    holderProAttemptStateV681(budget);
+
+  const key =
+    normalize(token);
+
+  if (
+    !state ||
+    !isAddress(key)
+  ) {
+    return null;
+  }
+
+  return state.entries?.[key] || null;
+}
+
+function markHolderProAttemptV681(
+  budget,
+  token,
+  callPath,
+  requestType
+) {
+  const state =
+    holderProAttemptStateV681(budget);
+
+  const key =
+    normalize(token);
+
+  if (
+    !state ||
+    !isAddress(key)
+  ) {
+    return null;
+  }
+
+  const existing =
+    state.entries?.[key] || null;
+
+  if (existing) {
+    return existing;
+  }
+
+  const row = {
+    token: key,
+    attemptedAt: Date.now(),
+    callPath:
+      String(callPath || "UNSPECIFIED"),
+    requestType:
+      String(
+        requestType ||
+        "BLOCKSCOUT_PRO_HOLDERS_V143"
+      ),
+    budgetWasConsumed: true
+  };
+
+  state.entries[key] = row;
+  return row;
+}
+
 function holderProCounterContinuationRequestV680(
   budget,
   phase,
@@ -51974,6 +52073,44 @@ async function blockscoutProHoldersV143(
       reusedSameScanV680: true,
       reusedSourceV680:
         cachedHolderProV680.source
+    };
+  }
+
+  const priorHolderProAttemptV681 =
+    getHolderProAttemptV681(
+      budget,
+      token
+    );
+
+  if (
+    priorHolderProAttemptV681
+  ) {
+    recordHolderProGateTraceV678(
+      budget,
+      {
+        stage:
+          "V143_DUPLICATE_ATTEMPT_SUPPRESSED_V681",
+        path:
+          callPathV678,
+        token:
+          normalize(token),
+        priorCallPath:
+          priorHolderProAttemptV681.callPath,
+        priorAttemptedAt:
+          priorHolderProAttemptV681.attemptedAt
+      }
+    );
+
+    return {
+      configured: true,
+      attempted: false,
+      success: false,
+      status:
+        "BLOCKSCOUT_PRO_V143_ALREADY_ATTEMPTED_THIS_SCAN_V681",
+      duplicateSuppressedV681: true,
+      priorAttempt:
+        priorHolderProAttemptV681,
+      data: null
     };
   }
 
@@ -52097,6 +52234,25 @@ async function blockscoutProHoldersV143(
       data: null
     };
   }
+
+  markHolderProAttemptV681(
+    budget,
+    token,
+    callPathV678,
+    "BLOCKSCOUT_PRO_HOLDERS_V143"
+  );
+
+  recordHolderProGateTraceV678(
+    budget,
+    {
+      stage:
+        "V143_ATTEMPT_MARKED_V681",
+      path:
+        callPathV678,
+      token:
+        normalize(token)
+    }
+  );
 
   try {
     proServiceV145.totalRequests =
@@ -55479,6 +55635,13 @@ async function holderIntelligence(
             laneV679?.used === true &&
             laneV679?.unifiedProLaneV679
               ?.consumedPath === "HOLDER_ROWS_V143"
+          ),
+        v681V143AttemptRecorded:
+          Boolean(
+            getHolderProAttemptV681(
+              budget,
+              token
+            )
           )
       }
     );
@@ -55504,12 +55667,15 @@ async function holderIntelligence(
           token
         );
 
-      const sameTokenV143AlreadyUsedV680 =
+      const attemptedRowsForCounterV681 =
+        getHolderProAttemptV681(
+          budget,
+          token
+        );
+
+      const sameTokenV143AlreadyUsedV681 =
         Boolean(
-          cachedRowsForCounterV680?.result?.success === true &&
-          Array.isArray(
-            cachedRowsForCounterV680?.result?.data?.items
-          ) &&
+          attemptedRowsForCounterV681 &&
           laneV679?.used === true &&
           laneV679?.unifiedProLaneV679
             ?.consumedPath === "HOLDER_ROWS_V143" &&
@@ -55518,13 +55684,17 @@ async function holderIntelligence(
         );
 
       /*
-       * The outer V247 condition already proves counterData.holderCount is
-       * still null, so this is genuinely distinct counter evidence.
-       * V680 lets it cross internal lower-priority reserves only; the normal
-       * final budgetAvailable() check remains mandatory.
+       * The outer V247 condition already proves holderCount is still null,
+       * therefore V247 is distinct counter evidence rather than a duplicate
+       * V143 holder-row request.
+       *
+       * V681 requires only proof that V143 really attempted the provider and
+       * consumed the V666 lane. The V143 response does not need to have been
+       * successful. This continuation crosses internal lower-priority reserve
+       * guards only; the ordinary final budget/global gate remains mandatory.
        */
       if (
-        sameTokenV143AlreadyUsedV680
+        sameTokenV143AlreadyUsedV681
       ) {
         budget.analysis
           .holderProCounterContinuationActiveV680 =
@@ -55534,13 +55704,21 @@ async function holderIntelligence(
           budget,
           {
             stage:
-              "V247_DISTINCT_COUNTER_CONTINUATION_ARMED_V680",
+              "V247_DISTINCT_COUNTER_CONTINUATION_ARMED_V681",
             path:
               "V247_PRO_COUNTERS",
             token:
               normalize(token),
-            v143ReusedOrCompleted:
-              true
+            v143Attempted:
+              true,
+            v143SuccessfulRowsCached:
+              Boolean(
+                cachedRowsForCounterV680
+                  ?.result?.success === true
+              ),
+            priorV143CallPath:
+              attemptedRowsForCounterV681
+                ?.callPath || null
           }
         );
       }
@@ -131686,8 +131864,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V680 preserves V679/V678 diagnostics, reuses successful same-scan V143 holder rows for the same token, and allows a genuinely distinct same-token V247 counter continuation to bypass only internal lower-priority reserves after V143 already used the V666 lane.",
-    "<i>V680 gives no second V666 protected spend and does not bypass the normal final budget check: hard 42, Telegram reserve, provider cooldowns, CoinGecko Demo limits, scoring and qualification thresholds remain unchanged.</i>"
+    "V681 preserves V680/V679/V678 diagnostics, suppresses every second same-token V143 provider attempt after the first real V143 request consumed budget, and allows distinct V247 counter continuation through internal lower-priority reserves even when the first V143 provider response was unusable.",
+    "<i>V681 gives no second V666 protected spend and V247 still must pass the normal final budget/global gate: hard 42, Telegram reserve, provider cooldowns, CoinGecko Demo limits, scoring and qualification thresholds remain unchanged.</i>"
   ].join("\n");
 }
 
