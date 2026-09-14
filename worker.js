@@ -1,6 +1,32 @@
 /**
+ * Robinhood Chain Meme Hunter — V691
+ * AUTHORITATIVE RUNTIME VERSION: V691
+ *
+ * V691 KV STATE-SIZE SAFETY / ADAPTIVE COMPACTION
+ * - builds directly forward from V690 after a real scan hit Cloudflare KV's
+ *   25 MiB single-value limit (26,284,876 bytes > 26,214,400 bytes);
+ * - compacts ONLY bounded diagnostic/history evidence before the existing main
+ *   STATE_KEY write when serialized state is too large;
+ * - NEVER prunes callPerformanceV270, alerts, frozen learning/outcome records,
+ *   V3 live Durable Object state, verified V3 pair identities, watched tokens,
+ *   pool registry, holder evidence, launch-detector registrations/confirmed
+ *   launch-source identities, or the active evidence-completion queue;
+ * - first trims qualification-audit and verified-launch meter histories while
+ *   preserving their cumulative counters;
+ * - only if still oversized, trims old token-origin trace rows and raw
+ *   launch-source proof working sets while preserving confirmed sources,
+ *   confirmed canonical patterns and the V515 detector registry;
+ * - records before/after byte size, safety target and exact trim counts in
+ *   stateCompactionV691 so state-size behaviour is measurable;
+ * - target save size is 20 MiB, leaving ~5 MiB headroom below the KV limit;
+ * - zero external provider/RPC requests and no additional KV write cycle;
+ * - preserves V690 ERC20 reservation logic, V689 presentation cleanup,
+ *   V688 V3 auto-start, V687 verified USD, hard 42 and Telegram reserve.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V690
- * AUTHORITATIVE RUNTIME VERSION: V690
+ * HISTORICAL VERSION NOTE: V690
  *
  * V690 EARLY ERC20 COMPLETION HEADROOM RESERVE
  * - builds directly forward from confirmed-working V689;
@@ -5693,7 +5719,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V690";
+const VERSION = "V691";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -16985,6 +17011,25 @@ function newState() {
       lastRecordedAddress: null
     },
 
+    stateCompactionV691: {
+      schemaVersion: "V691_1",
+      enabled: true,
+      targetBytes: 20 * 1024 * 1024,
+      kvHardLimitBytes: 25 * 1024 * 1024,
+      lastEvaluatedAt: null,
+      lastCompactedAt: null,
+      lastBeforeBytes: null,
+      lastAfterBytes: null,
+      lastNeededCompaction: false,
+      totalCompactions: 0,
+      totalBytesRemoved: 0,
+      lastTrimmed: {},
+      lastTopSectionsBefore: [],
+      lastTopSectionsAfter: [],
+      protectedDataPolicy:
+        "CALLS_LEARNING_ALERTS_V3_VERIFIED_IDENTITIES_ACTIVE_QUEUES_AND_CONFIRMED_LAUNCH_DETECTORS_NOT_PRUNED"
+    },
+
     coinGeckoDecisionTraceV664: {
       enabled: true,
       diagnosticOnly: true,
@@ -17595,6 +17640,29 @@ async function readState(env) {
               : []
         },
 
+        stateCompactionV691: {
+          ...fresh.stateCompactionV691,
+          ...(
+            parsed.stateCompactionV691 &&
+            typeof parsed.stateCompactionV691 === "object"
+              ? parsed.stateCompactionV691
+              : {}
+          ),
+          lastTrimmed:
+            parsed.stateCompactionV691?.lastTrimmed &&
+            typeof parsed.stateCompactionV691.lastTrimmed === "object"
+              ? parsed.stateCompactionV691.lastTrimmed
+              : {},
+          lastTopSectionsBefore:
+            Array.isArray(parsed.stateCompactionV691?.lastTopSectionsBefore)
+              ? parsed.stateCompactionV691.lastTopSectionsBefore.slice(0, 12)
+              : [],
+          lastTopSectionsAfter:
+            Array.isArray(parsed.stateCompactionV691?.lastTopSectionsAfter)
+              ? parsed.stateCompactionV691.lastTopSectionsAfter.slice(0, 12)
+              : []
+        },
+
         coinGeckoDecisionTraceV664: {
           ...fresh.coinGeckoDecisionTraceV664,
           ...(
@@ -17738,6 +17806,770 @@ async function readState(env) {
   }
 }
 
+
+const V691_KV_HARD_LIMIT_BYTES =
+  25 * 1024 * 1024;
+
+const V691_STATE_TARGET_BYTES =
+  20 * 1024 * 1024;
+
+const V691_QUALIFICATION_AUDIT_KEEP =
+  1500;
+
+const V691_VERIFIED_LAUNCH_METER_KEEP =
+  3000;
+
+const V691_TOKEN_ORIGIN_KEEP =
+  1500;
+
+const V691_GENERIC_PROCESSED_RECEIPTS_KEEP =
+  750;
+
+const V691_GENERIC_OBSERVATIONS_KEEP =
+  1000;
+
+const V691_GENERIC_REJECTED_PATTERNS_KEEP =
+  300;
+
+const V691_DOPPLER_RAW_PROOF_KEEP =
+  300;
+
+function utf8BytesV691(value) {
+  const stringValue =
+    typeof value === "string"
+      ? value
+      : jsonStringifySafeV246(
+          value,
+          0
+        );
+
+  try {
+    return new TextEncoder()
+      .encode(stringValue)
+      .byteLength;
+  }
+  catch (_) {
+    /*
+     * JSON persisted here is overwhelmingly ASCII. This is a fail-safe only;
+     * TextEncoder is available in Cloudflare Workers.
+     */
+    return String(stringValue).length;
+  }
+}
+
+function topStateSectionsByBytesV691(
+  state,
+  limit = 12
+) {
+  const rows = [];
+
+  for (
+    const [key, value]
+    of Object.entries(state || {})
+  ) {
+    let bytes = 0;
+
+    try {
+      bytes =
+        utf8BytesV691(value);
+    }
+    catch (_) {
+      bytes = -1;
+    }
+
+    rows.push({
+      key,
+      bytes
+    });
+  }
+
+  return rows
+    .sort(
+      (a, b) =>
+        safeNumber(b?.bytes) -
+        safeNumber(a?.bytes)
+    )
+    .slice(
+      0,
+      Math.max(
+        1,
+        Math.min(
+          20,
+          safeNumber(limit) || 12
+        )
+      )
+    );
+}
+
+function v691EntryTime(row) {
+  const candidates = [
+    row?.verifiedAt,
+    row?.observedAt,
+    row?.lastEvaluatedAt,
+    row?.firstEvaluatedAt,
+    row?.launchedAt,
+    row?.recordedAt,
+    row?.updatedAt,
+    row?.createdAt,
+    row?.at,
+    row?.timestamp
+  ];
+
+  for (const value of candidates) {
+    const numeric =
+      safeNumber(value);
+
+    if (numeric > 0) return numeric;
+
+    const parsed =
+      Date.parse(
+        String(value || "")
+      );
+
+    if (
+      Number.isFinite(parsed) &&
+      parsed > 0
+    ) {
+      return parsed;
+    }
+  }
+
+  return 0;
+}
+
+function keepNewestObjectEntriesV691(
+  objectValue,
+  keep
+) {
+  if (
+    !objectValue ||
+    typeof objectValue !== "object" ||
+    Array.isArray(objectValue)
+  ) {
+    return {
+      value: {},
+      removed: 0
+    };
+  }
+
+  const entries =
+    Object.entries(objectValue);
+
+  const limit =
+    Math.max(
+      0,
+      safeNumber(keep)
+    );
+
+  if (
+    !limit ||
+    entries.length <= limit
+  ) {
+    return {
+      value: objectValue,
+      removed: 0
+    };
+  }
+
+  const ranked =
+    entries
+      .map(
+        ([key, value], index) => ({
+          key,
+          value,
+          index,
+          at:
+            v691EntryTime(value)
+        })
+      )
+      .sort(
+        (a, b) => {
+          const byTime =
+            safeNumber(a.at) -
+            safeNumber(b.at);
+
+          if (byTime !== 0) {
+            return byTime;
+          }
+
+          return a.index - b.index;
+        }
+      )
+      .slice(-limit);
+
+  const next = {};
+
+  for (const row of ranked) {
+    next[row.key] = row.value;
+  }
+
+  return {
+    value: next,
+    removed:
+      entries.length -
+      ranked.length
+  };
+}
+
+function rebuildTokenOriginClustersV691(
+  state
+) {
+  const root =
+    state?.tokenOriginTraceV477;
+
+  if (
+    !root ||
+    typeof root !== "object"
+  ) {
+    return;
+  }
+
+  const clusters = {};
+
+  for (
+    const [token, row]
+    of Object.entries(
+      root.tokenOrigins || {}
+    )
+  ) {
+    if (
+      row?.verified !== true ||
+      !isAddress(token) ||
+      !isAddress(
+        normalize(
+          row?.contractCreator
+        )
+      )
+    ) {
+      continue;
+    }
+
+    const creator =
+      normalize(
+        row.contractCreator
+      );
+
+    const cluster =
+      clusters[creator] ||
+      {
+        creator,
+        distinctTokens: 0,
+        tokens: [],
+        firstVerifiedAt: null,
+        lastVerifiedAt: null,
+        classification:
+          "SINGLE_OBSERVED_CREATOR",
+        launchpadIdentity:
+          "DATA UNVERIFIED"
+      };
+
+    if (
+      !cluster.tokens.includes(token)
+    ) {
+      cluster.tokens.push(token);
+      cluster.distinctTokens += 1;
+    }
+
+    const at =
+      v691EntryTime(row);
+
+    cluster.firstVerifiedAt =
+      !cluster.firstVerifiedAt
+        ? at || null
+        : at
+          ? Math.min(
+              cluster.firstVerifiedAt,
+              at
+            )
+          : cluster.firstVerifiedAt;
+
+    cluster.lastVerifiedAt =
+      Math.max(
+        safeNumber(
+          cluster.lastVerifiedAt
+        ),
+        at || 0
+      ) || null;
+
+    cluster.classification =
+      cluster.distinctTokens >= 2
+        ? "RECURRING_CREATOR"
+        : "SINGLE_OBSERVED_CREATOR";
+
+    clusters[creator] =
+      cluster;
+  }
+
+  root.creatorClusters =
+    clusters;
+
+  root.recentVerifiedOrigins =
+    Array.isArray(
+      root.recentVerifiedOrigins
+    )
+      ? root.recentVerifiedOrigins
+          .slice(-100)
+      : [];
+}
+
+function compactStateForKvV691(
+  state
+) {
+  state.stateCompactionV691 =
+    state?.stateCompactionV691 &&
+    typeof state.stateCompactionV691 === "object"
+      ? state.stateCompactionV691
+      : {
+          schemaVersion: "V691_1",
+          enabled: true,
+          targetBytes:
+            V691_STATE_TARGET_BYTES,
+          kvHardLimitBytes:
+            V691_KV_HARD_LIMIT_BYTES,
+          totalCompactions: 0,
+          totalBytesRemoved: 0
+        };
+
+  const telemetry =
+    state.stateCompactionV691;
+
+  telemetry.enabled = true;
+  telemetry.targetBytes =
+    V691_STATE_TARGET_BYTES;
+  telemetry.kvHardLimitBytes =
+    V691_KV_HARD_LIMIT_BYTES;
+  telemetry.lastEvaluatedAt =
+    Date.now();
+  telemetry.lastTrimmed = {};
+
+  let serialized =
+    jsonStringifySafeV246(
+      state,
+      0
+    );
+
+  const beforeBytes =
+    utf8BytesV691(
+      serialized
+    );
+
+  telemetry.lastBeforeBytes =
+    beforeBytes;
+  telemetry.lastTopSectionsBefore =
+    topStateSectionsByBytesV691(
+      state,
+      12
+    );
+
+  if (
+    beforeBytes <=
+    V691_STATE_TARGET_BYTES
+  ) {
+    telemetry.lastNeededCompaction =
+      false;
+    telemetry.lastAfterBytes =
+      beforeBytes;
+    telemetry.lastTopSectionsAfter =
+      telemetry.lastTopSectionsBefore;
+
+    /*
+     * Telemetry fields changed after the first stringify, so create the exact
+     * payload that writeState will persist.
+     */
+    serialized =
+      jsonStringifySafeV246(
+        state,
+        0
+      );
+
+    telemetry.lastAfterBytes =
+      utf8BytesV691(
+        serialized
+      );
+
+    serialized =
+      jsonStringifySafeV246(
+        state,
+        0
+      );
+
+    return {
+      serialized,
+      beforeBytes,
+      afterBytes:
+        utf8BytesV691(serialized),
+      compacted: false,
+      telemetry
+    };
+  }
+
+  telemetry.lastNeededCompaction =
+    true;
+  telemetry.lastCompactedAt =
+    Date.now();
+
+  /*
+   * TIER 1 — bounded diagnostics/history only.
+   * Cumulative counters remain untouched.
+   */
+  if (
+    Array.isArray(
+      state?.qualificationAuditV663
+        ?.records
+    ) &&
+    state.qualificationAuditV663
+      .records.length >
+      V691_QUALIFICATION_AUDIT_KEEP
+  ) {
+    const before =
+      state.qualificationAuditV663
+        .records.length;
+
+    state.qualificationAuditV663.records =
+      state.qualificationAuditV663.records
+        .slice(
+          -V691_QUALIFICATION_AUDIT_KEEP
+        );
+
+    state.qualificationAuditV663
+      .maxRecords =
+      V691_QUALIFICATION_AUDIT_KEEP;
+
+    telemetry.lastTrimmed
+      .qualificationAuditRecords =
+      before -
+      state.qualificationAuditV663
+        .records.length;
+  }
+
+  if (
+    Array.isArray(
+      state?.verifiedLaunchMeterV470
+        ?.records
+    ) &&
+    state.verifiedLaunchMeterV470
+      .records.length >
+      V691_VERIFIED_LAUNCH_METER_KEEP
+  ) {
+    const before =
+      state.verifiedLaunchMeterV470
+        .records.length;
+
+    state.verifiedLaunchMeterV470.records =
+      state.verifiedLaunchMeterV470.records
+        .slice(
+          -V691_VERIFIED_LAUNCH_METER_KEEP
+        );
+
+    const removed =
+      before -
+      state.verifiedLaunchMeterV470
+        .records.length;
+
+    state.verifiedLaunchMeterV470
+      .maxRecords =
+      V691_VERIFIED_LAUNCH_METER_KEEP;
+
+    state.verifiedLaunchMeterV470
+      .droppedForCapacity =
+      safeNumber(
+        state.verifiedLaunchMeterV470
+          .droppedForCapacity
+      ) +
+      removed;
+
+    if (removed > 0) {
+      state.verifiedLaunchMeterV470
+        .capacityTruncated = true;
+    }
+
+    telemetry.lastTrimmed
+      .verifiedLaunchMeterRecords =
+      removed;
+  }
+
+  serialized =
+    jsonStringifySafeV246(
+      state,
+      0
+    );
+
+  let currentBytes =
+    utf8BytesV691(
+      serialized
+    );
+
+  /*
+   * TIER 2 — only if Tier 1 is insufficient.
+   * Token-origin trace is measurement/history. Keep newest individually
+   * verified rows and rebuild creator clusters from retained evidence.
+   */
+  if (
+    currentBytes >
+      V691_STATE_TARGET_BYTES &&
+    state?.tokenOriginTraceV477
+      ?.tokenOrigins &&
+    typeof state.tokenOriginTraceV477
+      .tokenOrigins === "object"
+  ) {
+    const compacted =
+      keepNewestObjectEntriesV691(
+        state.tokenOriginTraceV477
+          .tokenOrigins,
+        V691_TOKEN_ORIGIN_KEEP
+      );
+
+    state.tokenOriginTraceV477
+      .tokenOrigins =
+      compacted.value;
+
+    if (
+      safeNumber(compacted.removed) >
+      0
+    ) {
+      telemetry.lastTrimmed
+        .tokenOriginRows =
+        compacted.removed;
+
+      rebuildTokenOriginClustersV691(
+        state
+      );
+    }
+
+    serialized =
+      jsonStringifySafeV246(
+        state,
+        0
+      );
+
+    currentBytes =
+      utf8BytesV691(
+        serialized
+      );
+  }
+
+  /*
+   * TIER 3 — raw working sets from the generic unknown-source proof engine.
+   * Confirmed sources and patternClusters are NEVER touched.
+   */
+  if (
+    currentBytes >
+      V691_STATE_TARGET_BYTES &&
+    state?.genericUnknownSourceProofV517 &&
+    typeof state.genericUnknownSourceProofV517 === "object"
+  ) {
+    const root =
+      state.genericUnknownSourceProofV517;
+
+    const processed =
+      keepNewestObjectEntriesV691(
+        root.processedReceipts,
+        V691_GENERIC_PROCESSED_RECEIPTS_KEEP
+      );
+
+    root.processedReceipts =
+      processed.value;
+
+    telemetry.lastTrimmed
+      .genericProcessedReceipts =
+      processed.removed;
+
+    const observations =
+      keepNewestObjectEntriesV691(
+        root.observations,
+        V691_GENERIC_OBSERVATIONS_KEEP
+      );
+
+    root.observations =
+      observations.value;
+
+    telemetry.lastTrimmed
+      .genericObservations =
+      observations.removed;
+
+    const rejected =
+      keepNewestObjectEntriesV691(
+        root.rejectedPatterns,
+        V691_GENERIC_REJECTED_PATTERNS_KEEP
+      );
+
+    root.rejectedPatterns =
+      rejected.value;
+
+    telemetry.lastTrimmed
+      .genericRejectedPatterns =
+      rejected.removed;
+
+    serialized =
+      jsonStringifySafeV246(
+        state,
+        0
+      );
+
+    currentBytes =
+      utf8BytesV691(
+        serialized
+      );
+  }
+
+  /*
+   * TIER 4 — legacy/raw Doppler proof working sets only.
+   * ConfirmedPattern, confirmedCanonicalPattern, confirmedFactory and V515
+   * registered detectors stay intact.
+   */
+  if (
+    currentBytes >
+    V691_STATE_TARGET_BYTES
+  ) {
+    const rawProofRoots = [
+      [
+        "dopplerWholeReceiptPatternV512",
+        [
+          "processedReceipts",
+          "receiptObservations"
+        ]
+      ],
+      [
+        "dopplerCanonicalPatternProofV513",
+        [
+          "processedValidationReceipts",
+          "validationProofs",
+          "rejectedPatternKeys"
+        ]
+      ],
+      [
+        "dopplerExactMechanismProofV511",
+        [
+          "processedReceipts",
+          "receiptProofs"
+        ]
+      ],
+      [
+        "ponsV2CreationReceiptProofV509",
+        [
+          "processedReceipts",
+          "proofs"
+        ]
+      ]
+    ];
+
+    for (
+      const [rootName, fields]
+      of rawProofRoots
+    ) {
+      const root =
+        state?.[rootName];
+
+      if (
+        !root ||
+        typeof root !== "object"
+      ) {
+        continue;
+      }
+
+      for (const field of fields) {
+        const compacted =
+          keepNewestObjectEntriesV691(
+            root?.[field],
+            V691_DOPPLER_RAW_PROOF_KEEP
+          );
+
+        root[field] =
+          compacted.value;
+
+        if (
+          safeNumber(
+            compacted.removed
+          ) > 0
+        ) {
+          telemetry.lastTrimmed[
+            `${rootName}.${field}`
+          ] =
+            compacted.removed;
+        }
+      }
+    }
+
+    serialized =
+      jsonStringifySafeV246(
+        state,
+        0
+      );
+
+    currentBytes =
+      utf8BytesV691(
+        serialized
+      );
+  }
+
+  telemetry.totalCompactions =
+    safeNumber(
+      telemetry.totalCompactions
+    ) + 1;
+
+  telemetry.totalBytesRemoved =
+    safeNumber(
+      telemetry.totalBytesRemoved
+    ) +
+    Math.max(
+      0,
+      beforeBytes -
+      currentBytes
+    );
+
+  telemetry.lastTopSectionsAfter =
+    topStateSectionsByBytesV691(
+      state,
+      12
+    );
+
+  /*
+   * Re-serialize after telemetry updates. This is the exact payload used by
+   * writeState. If protected/essential state alone ever exceeds the target,
+   * we do NOT silently delete it; the telemetry exposes that condition.
+   */
+  serialized =
+    jsonStringifySafeV246(
+      state,
+      0
+    );
+
+  currentBytes =
+    utf8BytesV691(
+      serialized
+    );
+
+  telemetry.lastAfterBytes =
+    currentBytes;
+
+  serialized =
+    jsonStringifySafeV246(
+      state,
+      0
+    );
+
+  currentBytes =
+    utf8BytesV691(
+      serialized
+    );
+
+  return {
+    serialized,
+    beforeBytes,
+    afterBytes:
+      currentBytes,
+    compacted: true,
+    targetMet:
+      currentBytes <=
+      V691_STATE_TARGET_BYTES,
+    belowKvHardLimit:
+      currentBytes <
+      V691_KV_HARD_LIMIT_BYTES,
+    telemetry
+  };
+}
+
+
 async function writeState(
   env,
   state
@@ -17769,12 +18601,56 @@ async function writeState(
     state.updatedAt =
       now();
 
+    const statePayloadV691 =
+      compactStateForKvV691(
+        state
+      );
+
+    /*
+     * Refuse to knowingly submit a payload still at/above the provider's
+     * documented single-value boundary. Essential/protected state is never
+     * silently deleted just to force a write.
+     */
+    if (
+      safeNumber(
+        statePayloadV691?.afterBytes
+      ) >=
+      V691_KV_HARD_LIMIT_BYTES
+    ) {
+      return {
+        saved:
+          false,
+
+        binding,
+
+        error:
+          "KV_STATE_STILL_ABOVE_HARD_LIMIT_AFTER_SAFE_V691_COMPACTION",
+
+        stateCompactionV691: {
+          beforeBytes:
+            statePayloadV691?.beforeBytes ||
+            null,
+          afterBytes:
+            statePayloadV691?.afterBytes ||
+            null,
+          targetBytes:
+            V691_STATE_TARGET_BYTES,
+          hardLimitBytes:
+            V691_KV_HARD_LIMIT_BYTES,
+          targetMet:
+            statePayloadV691?.targetMet ===
+            true,
+          trimmed:
+            state?.stateCompactionV691
+              ?.lastTrimmed ||
+            {}
+        }
+      };
+    }
+
     await kv.put(
       STATE_KEY,
-      jsonStringifySafeV246(
-        state,
-        0
-      )
+      statePayloadV691.serialized
     );
 
     return {
@@ -17784,7 +18660,32 @@ async function writeState(
       binding,
 
       error:
-        null
+        null,
+
+      stateCompactionV691: {
+        compacted:
+          statePayloadV691?.compacted ===
+          true,
+        beforeBytes:
+          statePayloadV691?.beforeBytes ||
+          null,
+        afterBytes:
+          statePayloadV691?.afterBytes ||
+          null,
+        targetBytes:
+          V691_STATE_TARGET_BYTES,
+        hardLimitBytes:
+          V691_KV_HARD_LIMIT_BYTES,
+        targetMet:
+          safeNumber(
+            statePayloadV691?.afterBytes
+          ) <=
+          V691_STATE_TARGET_BYTES,
+        trimmed:
+          state?.stateCompactionV691
+            ?.lastTrimmed ||
+          {}
+      }
     };
   }
 
@@ -98094,7 +98995,11 @@ async function health(
         ).length,
 
       stateError:
-        result.error
+        result.error,
+
+      stateCompactionV691:
+        state?.stateCompactionV691 ||
+        null
     },
 
     scheduler: {
@@ -133776,7 +134681,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
-    "<i>V690 preserves V689/V688 V3 behaviour and protects one existing pre-Telegram request earlier for fresh ERC20 identity completion. Hard 42, Telegram reserve, scoring and qualification thresholds remain unchanged.</i>"
+    "<i>V691 adds adaptive safe KV-state compaction before the existing state write. Calls, learning, alerts, verified V3 identities, active queues and confirmed launch detectors are protected; hard 42, Telegram reserve, scoring and qualification thresholds remain unchanged.</i>"
   ].join("\n");
 }
 
