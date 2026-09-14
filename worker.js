@@ -1,6 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V696
+ * AUTHORITATIVE RUNTIME VERSION: V696
+ *
+ * V696 ON-CHAIN DIRECTIONAL CHILD-SIZE DIAGNOSTIC
+ * - builds directly forward from V695;
+ * - adds GET /state-size-v696?section=onChainDirectionalV179;
+ * - read-only: profiles the 8 direct child fields inside onChainDirectionalV179;
+ * - reports exact serialized bytes/MiB plus shallow counts for each child;
+ * - zero KV writes, zero provider/RPC requests, zero Telegram requests;
+ * - no scoring, qualification, collector, launch-source, state-compaction or
+ *   request-budget behaviour changes;
+ * - preserves V694 maintenance compaction, V690 ERC20 reservation logic and all
+ *   V687-V689 V3 fixes unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V695
- * AUTHORITATIVE RUNTIME VERSION: V695
+ * HISTORICAL VERSION NOTE: V695
  *
  * V695 PAGED STATE-SIZE DIAGNOSTIC
  * - builds directly forward from confirmed-working V694;
@@ -5787,7 +5803,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V695";
+const VERSION = "V696";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -18791,6 +18807,175 @@ async function stateSizeDiagnosticV695(
       batch + 1 < totalBatches
         ? batch + 1
         : null,
+    mutatesState: false,
+    externalProviderRequests: 0,
+    telegramRequests: 0,
+    kvWrites: 0
+  };
+}
+
+
+
+async function stateSectionSizeDiagnosticV696(
+  env,
+  sectionInput
+) {
+  const requestedSection =
+    String(
+      sectionInput ||
+      ""
+    ).trim();
+
+  const allowedSection =
+    "onChainDirectionalV179";
+
+  if (
+    requestedSection !==
+    allowedSection
+  ) {
+    return {
+      ok: false,
+      version: VERSION,
+      route:
+        "/state-size-v696",
+      error:
+        "SECTION_NOT_ALLOWED_V696",
+      allowedSection,
+      mutatesState: false,
+      externalProviderRequests: 0,
+      telegramRequests: 0,
+      kvWrites: 0
+    };
+  }
+
+  const stateRead =
+    await readState(
+      env
+    );
+
+  const state =
+    stateRead?.state ||
+    stateRead;
+
+  if (
+    !state ||
+    typeof state !== "object"
+  ) {
+    return {
+      ok: false,
+      version: VERSION,
+      route:
+        "/state-size-v696",
+      error:
+        "STATE_READ_FAILED_V696",
+      mutatesState: false,
+      externalProviderRequests: 0,
+      telegramRequests: 0,
+      kvWrites: 0
+    };
+  }
+
+  const section =
+    state?.[allowedSection];
+
+  if (
+    !section ||
+    typeof section !== "object" ||
+    Array.isArray(section)
+  ) {
+    return {
+      ok: false,
+      version: VERSION,
+      route:
+        "/state-size-v696",
+      error:
+        "SECTION_UNAVAILABLE_OR_NOT_OBJECT_V696",
+      section:
+        allowedSection,
+      mutatesState: false,
+      externalProviderRequests: 0,
+      telegramRequests: 0,
+      kvWrites: 0
+    };
+  }
+
+  const children = [];
+
+  for (
+    const [key, value]
+    of Object.entries(section)
+  ) {
+    let bytes =
+      null;
+
+    let error =
+      null;
+
+    try {
+      const serialized =
+        jsonStringifySafeV246(
+          value,
+          0
+        );
+
+      bytes =
+        utf8BytesV692(
+          serialized
+        );
+    }
+    catch (err) {
+      error =
+        String(
+          err?.message ||
+          err
+        ).slice(0, 180);
+    }
+
+    const shape =
+      shallowContainerCountV695(
+        value
+      );
+
+    children.push({
+      key,
+      bytes,
+      mib:
+        Number.isFinite(
+          Number(bytes)
+        )
+          ? Number(
+              (
+                Number(bytes) /
+                (1024 * 1024)
+              ).toFixed(4)
+            )
+          : null,
+      type:
+        shape.type,
+      shallowCount:
+        shape.count,
+      error
+    });
+  }
+
+  children.sort(
+    (a, b) =>
+      safeNumber(b?.bytes) -
+      safeNumber(a?.bytes)
+  );
+
+  return {
+    ok: true,
+    version: VERSION,
+    route:
+      "/state-size-v696",
+    mode:
+      "READ_ONLY_ONCHAIN_DIRECTIONAL_CHILD_PROFILE_V696",
+    section:
+      allowedSection,
+    childCount:
+      children.length,
+    children,
     mutatesState: false,
     externalProviderRequests: 0,
     telegramRequests: 0,
@@ -99344,6 +99529,7 @@ async function health(
     routes: [
       "/health",
       "/rpc-test",
+      "/state-size-v696",
       "/state-size-v695",
       "/compact-state-v693",
       "/scan",
@@ -135109,7 +135295,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
-    "<i>V695 adds a read-only paged state-size diagnostic route. V694 compaction behaviour, protected data policy, hard 42, Telegram reserve and all V687-V690 logic remain unchanged.</i>"
+    "<i>V696 adds a read-only child-size diagnostic for onChainDirectionalV179. V695/V694 diagnostics and compaction behaviour, protected data policy, hard 42, Telegram reserve and all V687-V690 logic remain unchanged.</i>"
   ].join("\n");
 }
 
@@ -141195,6 +141381,20 @@ async function handleRequest(
     return jsonResponse(
       await rpcTest(
         env
+      )
+    );
+  }
+
+  if (
+    path ===
+    "/state-size-v696"
+  ) {
+    return jsonResponse(
+      await stateSectionSizeDiagnosticV696(
+        env,
+        url.searchParams.get(
+          "section"
+        )
       )
     );
   }
