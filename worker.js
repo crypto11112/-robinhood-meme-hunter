@@ -1,6 +1,28 @@
 /**
+ * Robinhood Chain Meme Hunter — V698
+ * AUTHORITATIVE RUNTIME VERSION: V698
+ *
+ * V698 TARGETED ON-CHAIN DIRECTIONAL LEDGER RETENTION FIX
+ * - builds directly forward from V697 after diagnostics proved that
+ *   onChainDirectionalV179[token].records is the state-size culprit;
+ * - lowers the existing V179 per-token record ceiling from 6000 to 1000;
+ * - preserves the newest 1000 exact decoded records per token and leaves the
+ *   existing 26h age rule / 8-token ceiling intact;
+ * - V179/V212 remains VERIFIED OBSERVED flow only, so this retention cap does
+ *   not create or weaken any full-market/full-window completeness claim;
+ * - adds GET /compact-directional-v698 for one-time targeted cleanup of the
+ *   already-persisted oversized ledgers;
+ * - normal persistence also applies the same cheap directional cap before its
+ *   existing single stringify so the state cannot regrow through this path;
+ * - token metadata, poolIds, firstSeenAt/lastSeenAt and the newest records stay;
+ * - calls/performance, learning, alerts, V3 live evidence, launch-source proof,
+ *   scoring, thresholds, hard 42 and Telegram reserve are unchanged;
+ * - zero provider/RPC/Telegram requests are used by the cleanup route.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V697
- * AUTHORITATIVE RUNTIME VERSION: V697
+ * HISTORICAL VERSION NOTE: V697
  *
  * V697 TOKEN-LEVEL ON-CHAIN DIRECTIONAL SIZE DIAGNOSTIC
  * - builds directly forward from V696;
@@ -5820,7 +5842,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V697";
+const VERSION = "V698";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -6672,7 +6694,13 @@ const CANONICAL_USDG_DECIMALS_V179 = 6;
 const CANONICAL_WETH_DECIMALS_V187 = 18;
 const NATIVE_ETH_DECIMALS_V192 = 18;
 
-const ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179 = 6000;
+/*
+ * V698: V179 is an observed-evidence ledger, not a full-market completeness
+ * ledger. 1000 recent exact records per token keeps substantial rolling
+ * evidence while preventing a handful of active tokens from consuming most
+ * of the single KV state value.
+ */
+const ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179 = 1000;
 const ONCHAIN_DIRECTIONAL_MAX_TOKENS_V179 = 8;
 const ONCHAIN_DIRECTIONAL_RETENTION_MS_V179 =
   26 * 60 * 60 * 1000;
@@ -19216,6 +19244,168 @@ async function stateTokenSizeDiagnosticV697(
 }
 
 
+
+async function compactDirectionalStateV698(
+  env
+) {
+  const stateRead =
+    await readState(
+      env
+    );
+
+  const state =
+    stateRead?.state ||
+    stateRead;
+
+  if (
+    !state ||
+    typeof state !== "object"
+  ) {
+    return {
+      ok: false,
+      saved: false,
+      version: VERSION,
+      route:
+        "/compact-directional-v698",
+      error:
+        "STATE_READ_FAILED_V698",
+      externalProviderRequests: 0,
+      telegramRequests: 0
+    };
+  }
+
+  const kvResult =
+    await getKV(
+      env
+    );
+
+  const kv =
+    kvResult?.kv ||
+    null;
+
+  const binding =
+    kvResult?.binding ||
+    null;
+
+  if (
+    !kv ||
+    typeof kv.put !== "function"
+  ) {
+    return {
+      ok: false,
+      saved: false,
+      version: VERSION,
+      route:
+        "/compact-directional-v698",
+      error:
+        "KV_BINDING_UNAVAILABLE_V698",
+      binding,
+      externalProviderRequests: 0,
+      telegramRequests: 0
+    };
+  }
+
+  state.version =
+    VERSION;
+
+  state.updatedAt =
+    now();
+
+  const directionalCompaction =
+    capOnChainDirectionalRecordsV698(
+      state
+    );
+
+  /*
+   * One whole-state stringify only. No scan, providers, Telegram or secondary
+   * broad compaction runs in this maintenance request.
+   */
+  const serialized =
+    jsonStringifySafeV246(
+      state,
+      0
+    );
+
+  const afterBytes =
+    utf8BytesV692(
+      serialized
+    );
+
+  const belowHardLimit =
+    afterBytes <
+    V692_KV_HARD_LIMIT_BYTES;
+
+  if (!belowHardLimit) {
+    return {
+      ok: false,
+      saved: false,
+      version: VERSION,
+      route:
+        "/compact-directional-v698",
+      status:
+        "TARGETED_COMPACTION_STILL_ABOVE_KV_LIMIT_V698",
+      error:
+        "STATE_STILL_ABOVE_KV_HARD_LIMIT_V698",
+      binding,
+      afterBytes,
+      afterMiB:
+        Number(
+          (
+            afterBytes /
+            (1024 * 1024)
+          ).toFixed(3)
+        ),
+      targetBytes:
+        V692_STATE_TARGET_BYTES,
+      hardLimitBytes:
+        V692_KV_HARD_LIMIT_BYTES,
+      directionalCompaction,
+      fullStateSerializations: 1,
+      externalProviderRequests: 0,
+      telegramRequests: 0
+    };
+  }
+
+  await kv.put(
+    STATE_KEY,
+    serialized
+  );
+
+  return {
+    ok: true,
+    saved: true,
+    version: VERSION,
+    route:
+      "/compact-directional-v698",
+    status:
+      "TARGETED_DIRECTIONAL_COMPACTION_SAVED_V698",
+    binding,
+    afterBytes,
+    afterMiB:
+      Number(
+        (
+          afterBytes /
+          (1024 * 1024)
+        ).toFixed(3)
+      ),
+    targetBytes:
+      V692_STATE_TARGET_BYTES,
+    targetMiB: 20,
+    targetMet:
+      afterBytes <=
+      V692_STATE_TARGET_BYTES,
+    hardLimitBytes:
+      V692_KV_HARD_LIMIT_BYTES,
+    hardLimitMiB: 25,
+    belowHardLimit,
+    directionalCompaction,
+    fullStateSerializations: 1,
+    externalProviderRequests: 0,
+    telegramRequests: 0
+  };
+}
+
+
 async function compactAndWriteStateV693(
   env
 ) {
@@ -19456,6 +19646,11 @@ async function writeState(
         state
       );
 
+    const directionalRetentionV698 =
+      capOnChainDirectionalRecordsV698(
+        state
+      );
+
     /*
      * Normal scan persistence is intentionally cheap. No rescue compaction,
      * no section profiling and no second whole-state stringify here.
@@ -19496,6 +19691,7 @@ async function writeState(
           preventativeTrimmed:
             preventativeV693?.trimmed ||
             {},
+          directionalRetentionV698,
           fullStateSerializations: 1,
           externalProviderRequestsAdded: 0
         }
@@ -19526,6 +19722,7 @@ async function writeState(
         preventativeTrimmed:
           preventativeV693?.trimmed ||
           {},
+        directionalRetentionV698,
         fullStateSerializations: 1,
         externalProviderRequestsAdded: 0
       }
@@ -38767,6 +38964,104 @@ function onChainDirectionalStoreV179(
     .onChainDirectionalV179;
 }
 
+
+function capOnChainDirectionalRecordsV698(
+  state
+) {
+  const store =
+    onChainDirectionalStoreV179(
+      state
+    );
+
+  const result = {
+    enabled: true,
+    maxRecordsPerToken:
+      ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179,
+    tokensExamined: 0,
+    tokensTrimmed: 0,
+    recordsBefore: 0,
+    recordsAfter: 0,
+    recordsRemoved: 0,
+    rows: []
+  };
+
+  for (
+    const [address, ledger]
+    of Object.entries(store)
+  ) {
+    if (
+      !ledger ||
+      typeof ledger !== "object"
+    ) {
+      continue;
+    }
+
+    result.tokensExamined++;
+
+    const records =
+      Array.isArray(
+        ledger.records
+      )
+        ? ledger.records
+        : [];
+
+    const before =
+      records.length;
+
+    result.recordsBefore +=
+      before;
+
+    if (
+      before >
+      ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179
+    ) {
+      /*
+       * Existing writers keep records ordered oldest -> newest. Keep only the
+       * newest tail. No record contents are rewritten or reinterpreted.
+       */
+      ledger.records =
+        records.slice(
+          -ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179
+        );
+
+      result.tokensTrimmed++;
+
+      const removed =
+        before -
+        ledger.records.length;
+
+      result.recordsRemoved +=
+        removed;
+
+      result.rows.push({
+        token:
+          normalize(address) ||
+          address,
+        before,
+        after:
+          ledger.records.length,
+        removed
+      });
+    }
+
+    result.recordsAfter +=
+      Array.isArray(
+        ledger.records
+      )
+        ? ledger.records.length
+        : 0;
+  }
+
+  result.rows.sort(
+    (a, b) =>
+      safeNumber(b?.removed) -
+      safeNumber(a?.removed)
+  );
+
+  return result;
+}
+
+
 function pruneOnChainDirectionalStoreV179(
   state
 ) {
@@ -38777,6 +39072,14 @@ function pruneOnChainDirectionalStoreV179(
 
   const now =
     Date.now();
+
+  /*
+   * V698: enforce the bounded recent-record ceiling every time the existing
+   * directional store is pruned.
+   */
+  capOnChainDirectionalRecordsV698(
+    state
+  );
 
   const entries =
     Object.entries(
@@ -99761,6 +100064,7 @@ async function health(
     routes: [
       "/health",
       "/rpc-test",
+      "/compact-directional-v698",
       "/state-size-v697",
       "/state-size-v696",
       "/state-size-v695",
@@ -135528,7 +135832,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
-    "<i>V697 adds a read-only token-level child-size diagnostic inside onChainDirectionalV179. V696/V695 diagnostics, V694 compaction behaviour, hard 42, Telegram reserve and all V687-V690 logic remain unchanged.</i>"
+    "<i>V698 caps the existing V179 observed directional ledger at 1,000 newest records per token and adds targeted /compact-directional-v698 cleanup. No completeness standard, scoring, hard 42, Telegram reserve or V687-V690 behaviour is loosened.</i>"
   ].join("\n");
 }
 
@@ -141613,6 +141917,17 @@ async function handleRequest(
   ) {
     return jsonResponse(
       await rpcTest(
+        env
+      )
+    );
+  }
+
+  if (
+    path ===
+    "/compact-directional-v698"
+  ) {
+    return jsonResponse(
+      await compactDirectionalStateV698(
         env
       )
     );
