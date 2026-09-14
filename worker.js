@@ -1,6 +1,25 @@
 /**
+ * Robinhood Chain Meme Hunter — V674
+ * AUTHORITATIVE RUNTIME VERSION: V674
+ *
+ * V674 COINGECKO DEMO SECOND-CHANCE RESERVE BYPASS
+ * - builds directly forward from confirmed V673 Durable Object scheduling;
+ * - preserves the V672 rule that a second authenticated CoinGecko Demo request
+ *   is earned only after the first authenticated Demo request itself returns
+ *   no usable market / token-specific 404;
+ * - when that already-authorised V667/V672 second chance is being consumed,
+ *   it may bypass ONLY internal lower-priority analysis reserves;
+ * - the final normal budgetAvailable() check remains authoritative, so this
+ *   cannot exceed the effective analysis allowance, notification reserve,
+ *   monthly 9,500 Demo cap, once-per-2-hours overflow guard, or hard 42-request ceiling;
+ * - adds bounded telemetry for which internal reserves were bypassed;
+ * - no scoring, Momentum, qualification, Telegram thresholds, holder/risk rules,
+ *   launch-source proof, provider ceilings, Durable Object cadence or state keys change.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V673
- * AUTHORITATIVE RUNTIME VERSION: V673
+ * HISTORICAL VERSION NOTE: V673
  *
  * V673 FREE-TIER DURABLE SCHEDULER
  * - builds directly forward from confirmed V672;
@@ -5335,7 +5354,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V673";
+const VERSION = "V674";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12333,6 +12352,43 @@ function claimPriorityHolderProCompletionV666(
   };
 }
 
+function coinGeckoDemoSecondChancePriorityRequestV674(
+  budget,
+  phase,
+  type
+) {
+  return Boolean(
+    phase === "analysis" &&
+    type === "COINGECKO_DEMO_FALLBACK_V660" &&
+    budget?.analysis
+      ?.coinGeckoDemoSecondChanceConsumeActiveV674 === true
+  );
+}
+
+function observeCoinGeckoDemoSecondChanceReserveBypassV674(
+  budget,
+  reserveKey
+) {
+  if (!budget?.analysis) return;
+
+  const telemetry =
+    budget.analysis
+      .coinGeckoDemoSecondChanceBypassTelemetryV674 ||
+    (budget.analysis
+      .coinGeckoDemoSecondChanceBypassTelemetryV674 = {
+        attempts: 0,
+        successfulConsumes: 0,
+        finalBudgetBlocked: 0,
+        bypasses: {}
+      });
+
+  const key =
+    String(reserveKey || "UNKNOWN");
+
+  telemetry.bypasses[key] =
+    safeNumber(telemetry.bypasses[key]) + 1;
+}
+
 function consumeBudget(
   budget,
   phase,
@@ -12351,8 +12407,16 @@ function consumeBudget(
       ?.priorityHolderProCompletionV666 ||
     null;
 
+  const coinGeckoDemoSecondChancePriorityV674 =
+    coinGeckoDemoSecondChancePriorityRequestV674(
+      budget,
+      phase,
+      type
+    );
+
   if (
     !priorityHolderProRequestV666 &&
+    !coinGeckoDemoSecondChancePriorityV674 &&
     freshVerifiedLaunchErc20ReserveBlocksV653(
       budget,
       phase,
@@ -12395,9 +12459,25 @@ function consumeBudget(
       type
     );
 
+  if (
+    coinGeckoDemoSecondChancePriorityV674 &&
+    freshVerifiedLaunchErc20ReserveBlocksV653(
+      budget,
+      phase,
+      type,
+      amount
+    )
+  ) {
+    observeCoinGeckoDemoSecondChanceReserveBypassV674(
+      budget,
+      "V653_FRESH_VERIFIED_LAUNCH_ERC20_SLOT_RESERVED"
+    );
+  }
+
   if(
     !priorityHolderProRequestV666 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
+    !coinGeckoDemoSecondChancePriorityV674 &&
     phase==="analysis" &&
     openfairHistoricalRecoveryReserveBlocksAnalysisV537(budget,type,amount)
   ){
@@ -12446,6 +12526,7 @@ function consumeBudget(
   if (
     !priorityHolderProRequestV666 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
+    !coinGeckoDemoSecondChancePriorityV674 &&
     phase === "analysis" &&
     directionalWatchReserveV553?.active === true &&
     type !== protectedDirectionalWatchTypeV553
@@ -12582,6 +12663,7 @@ function consumeBudget(
   if (
     !priorityHolderProRequestV666 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
+    !coinGeckoDemoSecondChancePriorityV674 &&
     phase === "analysis" &&
     completeExactPoolReserveV459?.active === true &&
     type !== protectedV458TimestampTypeV459 &&
@@ -12665,6 +12747,7 @@ function consumeBudget(
   if (
     !priorityHolderProRequestV666 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
+    !coinGeckoDemoSecondChancePriorityV674 &&
     phase ===
       "analysis" &&
     usdGReserveV182
@@ -12755,6 +12838,7 @@ function consumeBudget(
   if (
     !priorityHolderProRequestV666 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
+    !coinGeckoDemoSecondChancePriorityV674 &&
     phase === "analysis" &&
     athFairSlotReserveBlocksAnalysisV301(budget, type, amount)
   ) {
@@ -12777,6 +12861,83 @@ function consumeBudget(
   }
 
   if (
+    coinGeckoDemoSecondChancePriorityV674
+  ) {
+    const t =
+      budget.analysis
+        .coinGeckoDemoSecondChanceBypassTelemetryV674 ||
+      (budget.analysis
+        .coinGeckoDemoSecondChanceBypassTelemetryV674 = {
+          attempts: 0,
+          successfulConsumes: 0,
+          finalBudgetBlocked: 0,
+          bypasses: {}
+        });
+
+    t.attempts =
+      safeNumber(t.attempts) + 1;
+
+    /*
+     * Record the reserve types that are currently active. This is telemetry
+     * only; the final hard/phase budget check below is still mandatory.
+     */
+    if (
+      budget.analysis
+        ?.openfairHistoricalRecoveryReserveV537
+        ?.active === true
+    ) {
+      observeCoinGeckoDemoSecondChanceReserveBypassV674(
+        budget,
+        "V537_OPENFAIR_HISTORICAL_TOPIC2_RECOVERY_SLOT_RESERVED"
+      );
+    }
+
+    if (
+      budget.analysis
+        ?.directionalWatchReserveV553
+        ?.active === true
+    ) {
+      observeCoinGeckoDemoSecondChanceReserveBypassV674(
+        budget,
+        "V553_CONTINUOUS_DIRECTIONAL_WATCH_SLOT_RESERVED"
+      );
+    }
+
+    if (
+      budget.analysis
+        ?.completeExactPoolReserveV459
+        ?.active === true
+    ) {
+      observeCoinGeckoDemoSecondChanceReserveBypassV674(
+        budget,
+        "V459_COMPLETE_EXACT_POOL_REQUESTS_RESERVED"
+      );
+    }
+
+    if (
+      budget.analysis
+        ?.blockscoutUsdGReserveV182
+        ?.active === true
+    ) {
+      observeCoinGeckoDemoSecondChanceReserveBypassV674(
+        budget,
+        "V182_BLOCKSCOUT_USDG_REQUEST_RESERVED"
+      );
+    }
+
+    if (
+      budget.analysis
+        ?.athFairSlotReserveV301
+        ?.active === true
+    ) {
+      observeCoinGeckoDemoSecondChanceReserveBypassV674(
+        budget,
+        "V301_ATH_FAIR_SLOT_REQUEST_RESERVED"
+      );
+    }
+  }
+
+  if (
     !budgetAvailable(
       budget,
       phase,
@@ -12795,6 +12956,24 @@ function consumeBudget(
         Date.now();
     }
 
+    if (
+      coinGeckoDemoSecondChancePriorityV674
+    ) {
+      const t =
+        budget.analysis
+          .coinGeckoDemoSecondChanceBypassTelemetryV674 ||
+        (budget.analysis
+          .coinGeckoDemoSecondChanceBypassTelemetryV674 = {
+            attempts: 0,
+            successfulConsumes: 0,
+            finalBudgetBlocked: 0,
+            bypasses: {}
+          });
+
+      t.finalBudgetBlocked =
+        safeNumber(t.finalBudgetBlocked) + 1;
+    }
+
     budget.skipped.push({
       phase,
       type,
@@ -12809,6 +12988,24 @@ function consumeBudget(
 
   budget.totalUsed +=
     amount;
+
+  if (
+    coinGeckoDemoSecondChancePriorityV674
+  ) {
+    const t =
+      budget.analysis
+        .coinGeckoDemoSecondChanceBypassTelemetryV674 ||
+      (budget.analysis
+        .coinGeckoDemoSecondChanceBypassTelemetryV674 = {
+          attempts: 0,
+          successfulConsumes: 0,
+          finalBudgetBlocked: 0,
+          bypasses: {}
+        });
+
+    t.successfulConsumes =
+      safeNumber(t.successfulConsumes) + 1;
+  }
 
   if (
     priorityHolderProRequestV666 &&
@@ -46084,16 +46281,33 @@ async function coinGeckoDemoMarketDataV660(
   }
 
   if (
-    !consumeBudget(
+    secondChanceAttemptV667
+  ) {
+    budget.analysis
+      .coinGeckoDemoSecondChanceConsumeActiveV674 =
+      true;
+  }
+
+  const demoBudgetConsumedV674 =
+    consumeBudget(
       budget,
       "analysis",
       "COINGECKO_DEMO_FALLBACK_V660"
-    )
+    );
+
+  budget.analysis
+    .coinGeckoDemoSecondChanceConsumeActiveV674 =
+    false;
+
+  if (
+    !demoBudgetConsumedV674
   ) {
     return {
       verified: false,
       status:
-        "COINGECKO_DEMO_BUDGET_PROTECTED_V660",
+        secondChanceAttemptV667
+          ? "COINGECKO_DEMO_SECOND_CHANCE_HARD_BUDGET_BLOCKED_V674"
+          : "COINGECKO_DEMO_BUDGET_PROTECTED_V660",
       source:
         "COINGECKO_DEMO_V660",
       fallbackTrigger:
