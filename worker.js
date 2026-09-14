@@ -1,6 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V682
+ * AUTHORITATIVE RUNTIME VERSION: V682
+ *
+ * V682 V666 LANE-OWNER DIAGNOSTIC — ZERO REQUEST / ZERO BEHAVIOUR CHANGE
+ * - builds directly forward from V681;
+ * - diagnostic only: no provider order, request allocation, reserve, cooldown,
+ *   scoring, qualification, Telegram threshold or scheduler behaviour changes;
+ * - every V143/V247 holder-Pro trace now records the actual V666 lane-owner
+ *   token address, current event token, and exact owner-match YES/NO;
+ * - records V666 claimedAt, consumedAt, consumed request type/path and whether
+ *   the protected lane had already been consumed before the current event;
+ * - /launchcoverage prints the owner token beside each event so we can prove
+ *   whether later candidates are losing to a lane already spent by another token;
+ * - adds zero external requests and leaves the hard 42-request ceiling unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V681
- * AUTHORITATIVE RUNTIME VERSION: V681
+ * HISTORICAL VERSION NOTE: V681
  *
  * V681 V143 ATTEMPT DEDUP + V247 DISTINCT COUNTER CONTINUATION
  * - builds directly forward from V680 and the live V680 diagnostic proof;
@@ -5504,7 +5521,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V681";
+const VERSION = "V682";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -51805,6 +51822,10 @@ function recordHolderProGateTraceV678(
               lane.used === true,
             address:
               lane.address || null,
+            claimedAt:
+              lane.claimedAt || null,
+            consumedAt:
+              lane.consumedAt || null,
             consumeStatus:
               lane.consumeStatus || null,
             unifiedProLaneV679:
@@ -51852,6 +51873,51 @@ function recordHolderProGateTraceV678(
                 : null
           }
         : null
+  };
+
+  const currentEventTokenV682 =
+    normalize(row?.token);
+
+  const laneOwnerTokenV682 =
+    normalize(row?.v666Lane?.address);
+
+  row.v682LaneOwner = {
+    currentToken:
+      isAddress(currentEventTokenV682)
+        ? currentEventTokenV682
+        : null,
+    ownerToken:
+      isAddress(laneOwnerTokenV682)
+        ? laneOwnerTokenV682
+        : null,
+    tokenMatchesOwner:
+      (
+        isAddress(currentEventTokenV682) &&
+        isAddress(laneOwnerTokenV682)
+      )
+        ? currentEventTokenV682 === laneOwnerTokenV682
+        : null,
+    claimedAt:
+      row?.v666Lane?.claimedAt || null,
+    consumedAt:
+      row?.v666Lane?.consumedAt || null,
+    consumedPath:
+      row?.v666Lane?.unifiedProLaneV679?.consumedPath || null,
+    consumedRequestType:
+      row?.v666Lane?.unifiedProLaneV679?.consumedRequestType || null,
+    laneAlreadyConsumedBeforeEvent:
+      Boolean(
+        row?.v666Lane?.used === true &&
+        Number.isFinite(Number(row?.v666Lane?.consumedAt)) &&
+        Number(row.v666Lane.consumedAt) <= Number(row.at)
+      ),
+    laneConsumedByDifferentToken:
+      Boolean(
+        row?.v666Lane?.used === true &&
+        isAddress(currentEventTokenV682) &&
+        isAddress(laneOwnerTokenV682) &&
+        currentEventTokenV682 !== laneOwnerTokenV682
+      )
   };
 
   trace.events.push(row);
@@ -131717,6 +131783,40 @@ function launchCoverageTelegramMessageV474(state) {
       ? `${fmt(state?.services?.coingeckoDemoV660?.monthRequestsV667)} / ${fmt(state?.services?.coingeckoDemoV660?.monthLimitV667 || COINGECKO_DEMO_MONTHLY_BOT_LIMIT_V667)}`
       : "N/A";
 
+  const holderProOwnerSummaryV682 =
+    (() => {
+      const events =
+        Array.isArray(last?.holderProGateTraceV678?.events)
+          ? last.holderProGateTraceV678.events
+          : [];
+
+      const withOwner =
+        events.find(
+          row =>
+            isAddress(
+              normalize(
+                row?.v682LaneOwner?.ownerToken
+              )
+            )
+        ) || null;
+
+      if (!withOwner) {
+        return [
+          "• V666 lane owner: NOT CAPTURED"
+        ];
+      }
+
+      const owner =
+        normalize(
+          withOwner.v682LaneOwner.ownerToken
+        );
+
+      return [
+        `• V666 lane owner: <code>${escapeHtml(owner.slice(0, 6))}…${escapeHtml(owner.slice(-4))}</code>`,
+        `• Protected lane consumed: ${withOwner?.v666Lane?.used === true ? "YES" : "NO"} · path ${escapeHtml(String(withOwner?.v682LaneOwner?.consumedPath || "N/A"))} · request ${escapeHtml(String(withOwner?.v682LaneOwner?.consumedRequestType || "N/A"))}`
+      ];
+    })();
+
   const holderProGateLinesV678 =
     (
       Array.isArray(
@@ -131741,7 +131841,32 @@ function launchCoverageTelegramMessageV474(state) {
         const boundary =
           lane?.finalBoundaryV677 || null;
 
-        return `• <code>${escapeHtml(short)}</code> — ${escapeHtml(String(row?.path || "UNSPECIFIED"))} · ${escapeHtml(String(row?.stage || "UNKNOWN_STAGE"))} · pre-call ${row?.preCallBudgetAvailable === true ? "YES" : row?.preCallBudgetAvailable === false ? "NO" : "N/A"} · A ${fmt(b?.analysisUsed)}/${fmt(b?.effectiveAnalysisLimit)} · G ${fmt(b?.totalUsed)}/${fmt(b?.preTelegramGlobalLimit)} (hard ${fmt(b?.hardTotalLimit)}) · V666 ${lane?.claimed === true ? "CLAIMED" : "NO"} / ${lane?.used === true ? "USED" : "NOT_USED"} · consume ${escapeHtml(String(lane?.consumeStatus || "N/A"))} · V679 path ${escapeHtml(String(lane?.unifiedProLaneV679?.consumedPath || "N/A"))} · V677 reached ${boundary?.evaluated === true ? "YES" : "NO"} / bypass ${boundary?.bypassUsed === true ? "YES" : "NO"}`;
+        const ownerV682 =
+          row?.v682LaneOwner || {};
+
+        const ownerShortV682 =
+          isAddress(normalize(ownerV682?.ownerToken))
+            ? `${normalize(ownerV682.ownerToken).slice(0, 6)}…${normalize(ownerV682.ownerToken).slice(-4)}`
+            : "NONE";
+
+        const ownerMatchV682 =
+          ownerV682?.tokenMatchesOwner === true
+            ? "YES"
+            : ownerV682?.tokenMatchesOwner === false
+              ? "NO"
+              : "N/A";
+
+        const consumedBeforeV682 =
+          ownerV682?.laneAlreadyConsumedBeforeEvent === true
+            ? "YES"
+            : "NO";
+
+        const differentOwnerV682 =
+          ownerV682?.laneConsumedByDifferentToken === true
+            ? "YES"
+            : "NO";
+
+        return `• <code>${escapeHtml(short)}</code> — ${escapeHtml(String(row?.path || "UNSPECIFIED"))} · ${escapeHtml(String(row?.stage || "UNKNOWN_STAGE"))} · pre-call ${row?.preCallBudgetAvailable === true ? "YES" : row?.preCallBudgetAvailable === false ? "NO" : "N/A"} · A ${fmt(b?.analysisUsed)}/${fmt(b?.effectiveAnalysisLimit)} · G ${fmt(b?.totalUsed)}/${fmt(b?.preTelegramGlobalLimit)} (hard ${fmt(b?.hardTotalLimit)}) · V666 ${lane?.claimed === true ? "CLAIMED" : "NO"} / ${lane?.used === true ? "USED" : "NOT_USED"} · owner <code>${escapeHtml(ownerShortV682)}</code> · token=owner ${ownerMatchV682} · consumed-before ${consumedBeforeV682} · different-owner ${differentOwnerV682} · consume ${escapeHtml(String(lane?.consumeStatus || "N/A"))} · consumed-path ${escapeHtml(String(ownerV682?.consumedPath || lane?.unifiedProLaneV679?.consumedPath || "N/A"))} · consumed-type ${escapeHtml(String(ownerV682?.consumedRequestType || lane?.unifiedProLaneV679?.consumedRequestType || "N/A"))} · V677 reached ${boundary?.evaluated === true ? "YES" : "NO"} / bypass ${boundary?.bypassUsed === true ? "YES" : "NO"}`;
       });
 
   const coinGeckoTraceLinesV664 =
@@ -131844,7 +131969,8 @@ function launchCoverageTelegramMessageV474(state) {
         : ["• No holder/risk diagnostic captured in this scan."]
     ),
     "",
-    "<b>V678 holder-Pro gate diagnostic — latest scan</b>",
+    "<b>V682 V666 lane-owner diagnostic — latest scan</b>",
+    ...holderProOwnerSummaryV682,
     ...(
       holderProGateLinesV678.length
         ? holderProGateLinesV678
@@ -131864,8 +131990,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V681 preserves V680/V679/V678 diagnostics, suppresses every second same-token V143 provider attempt after the first real V143 request consumed budget, and allows distinct V247 counter continuation through internal lower-priority reserves even when the first V143 provider response was unusable.",
-    "<i>V681 gives no second V666 protected spend and V247 still must pass the normal final budget/global gate: hard 42, Telegram reserve, provider cooldowns, CoinGecko Demo limits, scoring and qualification thresholds remain unchanged.</i>"
+    "V682 is diagnostic-only and preserves V681/V680/V679/V678 behaviour; it exposes the exact V666 lane-owner token, owner-match status, consumed path/type and whether the protected lane was already spent before each V143/V247 event.",
+    "<i>V682 adds zero provider requests and changes no budget or qualification behaviour: hard 42, Telegram reserve, provider cooldowns, CoinGecko Demo limits, scoring and qualification thresholds remain unchanged.</i>"
   ].join("\n");
 }
 
