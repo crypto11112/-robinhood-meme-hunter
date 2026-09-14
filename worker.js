@@ -1,6 +1,28 @@
 /**
+ * Robinhood Chain Meme Hunter — V675
+ * AUTHORITATIVE RUNTIME VERSION: V675
+ *
+ * V675 FRESH-LAUNCH ERC-20 IDENTITY RESCUE RESERVE
+ * - builds directly forward from confirmed V674;
+ * - fixes a narrow V655 reserve edge case: the previous reserve protected only
+ *   the minimum number of successful probes needed to reach the existing >=3-of-4
+ *   ERC-20 proof threshold. If one of those method probes deterministically failed,
+ *   the fourth ERC-20 method could be reached after the protected allocation was
+ *   exhausted and be misclassified as ERC20_METHODS_RPC_UNAVAILABLE_RETRY_V418;
+ * - each fresh positively verified launch now reserves at most ONE additional
+ *   existing analysis request beyond the minimum success path, bounded by the
+ *   number of still-unproven ERC-20 methods;
+ * - this does NOT weaken the >=3-of-4 verification rule, does not invent ERC-20
+ *   evidence, and does not retry deterministic failures;
+ * - successful V419 checkpoints still reduce future reserve requirements;
+ * - hard global 42, base/effective analysis limits, Telegram reserve, provider
+ *   routing, V673 Durable Object scheduler, V674 CoinGecko second-chance path,
+ *   scoring, qualification and Telegram thresholds are unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V674
- * AUTHORITATIVE RUNTIME VERSION: V674
+ * HISTORICAL VERSION NOTE: V674
  *
  * V674 COINGECKO DEMO SECOND-CHANCE RESERVE BYPASS
  * - builds directly forward from confirmed V673 Durable Object scheduling;
@@ -5354,7 +5376,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V674";
+const VERSION = "V675";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -11933,17 +11955,43 @@ function freshVerifiedLaunchIdentityRequestsNeededV655(watched) {
     }
   }
 
-  const methodRequests =
+  const successfulMethodsStillNeededV675 =
     Math.max(
       0,
       3 - verifiedMethods
     );
 
+  const unprovenMethodsRemainingV675 =
+    Math.max(
+      0,
+      methodSpecs.length - verifiedMethods
+    );
+
+  /*
+   * V675: protect one extra method read beyond the minimum success path.
+   * Example from a completely fresh token:
+   *   old V655 reserve = eth_getCode + 3 method reads = 4 requests.
+   * If one of those first three methods deterministically fails, the verifier
+   * still needs the fourth ERC-20 method to preserve the unchanged >=3-of-4
+   * rule. That fourth read must not lose its slot to lower-priority analysis.
+   *
+   * The rescue is strictly bounded to one extra method and only while there
+   * are still unproven methods available. Successful V419 checkpoints shrink
+   * this allocation automatically on later scans.
+   */
+  const methodRequestsV675 =
+    successfulMethodsStillNeededV675 > 0
+      ? Math.min(
+          unprovenMethodsRemainingV675,
+          successfulMethodsStillNeededV675 + 1
+        )
+      : 0;
+
   return Math.max(
     0,
     Math.min(
-      4,
-      codeRequests + methodRequests
+      5,
+      codeRequests + methodRequestsV675
     )
   );
 }
@@ -12054,6 +12102,10 @@ function configureFreshVerifiedLaunchErc20ReserveV653(
   reserve.identityReserveOverrideTypesV654 = {};
   reserve.initialReservedRequests = totalReservedV655;
   reserve.reservedRequests = totalReservedV655;
+  reserve.v675IdentityRescueReserve = true;
+  reserve.v675MaxPerFreshLaunch = 5;
+  reserve.v675Rule =
+    "MINIMUM_SUCCESS_PATH_PLUS_ONE_BOUNDED_METHOD_RESCUE";
   reserve.active = addresses.length > 0;
   reserve.lowerPriorityRequestsBlocked = 0;
   reserve.blockedTypes = {};
@@ -130448,7 +130500,7 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V655 fresh-launch budget protection, V663 audit, V664/V665 diagnostics, the V666 holder fix, V667 Demo second-chance lane and V669 CoinGecko persistence fix remain preserved; V671 allows the dedicated scheduled relay POST through the main Worker GET-only guard so the external Service Binding relay can reach the proven scheduled scan path.",
+    "V675 preserves V655 fresh-launch budget protection, V663 audit, V664/V665 diagnostics, V666 holder completion, V674 CoinGecko second-chance completion and the V673 Durable Object scheduler; V675 adds only one bounded ERC-20 identity rescue request per fresh verified launch when still-unproven methods remain.",
     "<i>V671 preserves the V667 one-Demo-request/second-chance rules, 9,500/month bot meter and hard 42-request ceiling; only scheduled request routing changes.</i>"
   ].join("\n");
 }
