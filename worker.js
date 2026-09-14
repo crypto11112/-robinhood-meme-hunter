@@ -1,6 +1,29 @@
 /**
+ * Robinhood Chain Meme Hunter — V683
+ * AUTHORITATIVE RUNTIME VERSION: V683
+ *
+ * V683 BOUNDED SECOND V666 HOLDER-PRO COMPLETION
+ * - builds directly forward from diagnostic V682;
+ * - V682 proved a later verified candidate can lose holder completion because
+ *   the single V666 protected lane was already consumed by a different token;
+ * - V683 allows at most TWO sequential V666 protected holder-completion claims
+ *   per scan, never more;
+ * - the second claim is allowed only after the first lane is fully consumed,
+ *   only for a DIFFERENT token, and only when real pre-Telegram global headroom
+ *   still exists;
+ * - only one protected holder lane can be active at a time;
+ * - no same-token second protected claim and no third protected claim;
+ * - hard total request ceiling remains 42 and Telegram notification reserve
+ *   remains protected;
+ * - V682 owner diagnostics remain enabled and now include claim ordinal/count;
+ * - V681/V680/V679 holder sequencing, V676 fairness, V675 ERC-20 rescue,
+ *   V674 CoinGecko second chance and V673 Durable Object scheduling remain;
+ * - no scoring, qualification, risk rules or Telegram threshold changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V682
- * AUTHORITATIVE RUNTIME VERSION: V682
+ * HISTORICAL VERSION NOTE: V682
  *
  * V682 V666 LANE-OWNER DIAGNOSTIC — ZERO REQUEST / ZERO BEHAVIOUR CHANGE
  * - builds directly forward from V681;
@@ -5521,7 +5544,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V682";
+const VERSION = "V683";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12691,6 +12714,52 @@ function priorityHolderProCompletionRequestV666(
   );
 }
 
+function holderProClaimStateV683(
+  budget
+) {
+  if (!budget?.analysis) return null;
+
+  return (
+    budget.analysis.holderProClaimStateV683 ||
+    (budget.analysis.holderProClaimStateV683 = {
+      enabled: true,
+      maxClaimsPerScan: 2,
+      claimsUsed: 0,
+      claimedTokens: [],
+      rotations: 0,
+      secondClaimDeniedNoHeadroom: 0,
+      thirdClaimDenied: 0,
+      sameTokenSecondClaimDenied: 0
+    })
+  );
+}
+
+function holderProSecondClaimHasHeadroomV683(
+  budget
+) {
+  const notificationReserveRemaining =
+    budget?.notification
+      ?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(budget.notification?.limit) -
+            safeNumber(budget.notification?.used)
+        )
+      : 0;
+
+  const preTelegramGlobalLimit =
+    Math.max(
+      0,
+      safeNumber(budget?.totalLimit) -
+        notificationReserveRemaining
+    );
+
+  return (
+    safeNumber(budget?.totalUsed) + 1 <=
+    preTelegramGlobalLimit
+  );
+}
+
 function claimPriorityHolderProCompletionV666(
   budget,
   token
@@ -12709,15 +12778,98 @@ function claimPriorityHolderProCompletionV666(
     budget.analysis
       .priorityHolderProCompletionV666;
 
+  const claimStateV683 =
+    holderProClaimStateV683(
+      budget
+    );
+
+  const tokenAddressV683 =
+    normalize(token);
+
   if (
-    existing?.claimed === true
+    existing?.claimed === true &&
+    existing?.active === true &&
+    existing?.used !== true
   ) {
     return {
       claimed: false,
-      reason: "ONE_PER_SCAN_ALREADY_CLAIMED",
+      reason:
+        "ACTIVE_PROTECTED_LANE_ALREADY_CLAIMED_V683",
       lane: existing
     };
   }
+
+  if (
+    existing?.claimed === true &&
+    normalize(existing?.address) ===
+      tokenAddressV683
+  ) {
+    claimStateV683.sameTokenSecondClaimDenied =
+      safeNumber(
+        claimStateV683.sameTokenSecondClaimDenied
+      ) + 1;
+
+    return {
+      claimed: false,
+      reason:
+        "SAME_TOKEN_SECOND_PROTECTED_CLAIM_DENIED_V683",
+      lane: existing
+    };
+  }
+
+  if (
+    existing?.claimed === true &&
+    existing?.used === true
+  ) {
+    if (
+      safeNumber(
+        claimStateV683.claimsUsed
+      ) >= 2
+    ) {
+      claimStateV683.thirdClaimDenied =
+        safeNumber(
+          claimStateV683.thirdClaimDenied
+        ) + 1;
+
+      return {
+        claimed: false,
+        reason:
+          "MAX_TWO_PROTECTED_HOLDER_CLAIMS_REACHED_V683",
+        lane: existing
+      };
+    }
+
+    if (
+      !holderProSecondClaimHasHeadroomV683(
+        budget
+      )
+    ) {
+      claimStateV683.secondClaimDeniedNoHeadroom =
+        safeNumber(
+          claimStateV683.secondClaimDeniedNoHeadroom
+        ) + 1;
+
+      return {
+        claimed: false,
+        reason:
+          "SECOND_PROTECTED_HOLDER_CLAIM_NO_GLOBAL_HEADROOM_V683",
+        lane: existing
+      };
+    }
+
+    claimStateV683.rotations =
+      safeNumber(
+        claimStateV683.rotations
+      ) + 1;
+  }
+
+  const claimOrdinalV683 =
+    Math.min(
+      2,
+      safeNumber(
+        claimStateV683.claimsUsed
+      ) + 1
+    );
 
   const lane = {
     enabled: true,
@@ -12725,7 +12877,9 @@ function claimPriorityHolderProCompletionV666(
     active: true,
     used: false,
     address:
-      normalize(token),
+      tokenAddressV683,
+    claimOrdinalV683,
+    maxClaimsPerScanV683: 2,
     claimedAt:
       Date.now(),
     consumedAt:
@@ -12765,9 +12919,32 @@ function claimPriorityHolderProCompletionV666(
     .priorityHolderProCompletionV666 =
     lane;
 
+  claimStateV683.claimsUsed =
+    claimOrdinalV683;
+
+  if (
+    !Array.isArray(
+      claimStateV683.claimedTokens
+    )
+  ) {
+    claimStateV683.claimedTokens = [];
+  }
+
+  if (
+    !claimStateV683.claimedTokens
+      .includes(tokenAddressV683)
+  ) {
+    claimStateV683.claimedTokens
+      .push(tokenAddressV683);
+  }
+
   return {
     claimed: true,
-    reason: "CLAIMED",
+    reason:
+      claimOrdinalV683 === 1
+        ? "CLAIMED_PRIMARY_V683"
+        : "CLAIMED_SECONDARY_V683",
+    claimOrdinalV683,
     lane
   };
 }
@@ -51826,6 +52003,16 @@ function recordHolderProGateTraceV678(
               lane.claimedAt || null,
             consumedAt:
               lane.consumedAt || null,
+            claimOrdinalV683:
+              safeNumber(
+                lane.claimOrdinalV683
+              ) || null,
+            claimsUsedV683:
+              safeNumber(
+                budget?.analysis
+                  ?.holderProClaimStateV683
+                  ?.claimsUsed
+              ),
             consumeStatus:
               lane.consumeStatus || null,
             unifiedProLaneV679:
@@ -51905,6 +52092,14 @@ function recordHolderProGateTraceV678(
       row?.v666Lane?.unifiedProLaneV679?.consumedPath || null,
     consumedRequestType:
       row?.v666Lane?.unifiedProLaneV679?.consumedRequestType || null,
+    claimOrdinalV683:
+      safeNumber(
+        row?.v666Lane?.claimOrdinalV683
+      ) || null,
+    claimsUsedV683:
+      safeNumber(
+        row?.v666Lane?.claimsUsedV683
+      ),
     laneAlreadyConsumedBeforeEvent:
       Boolean(
         row?.v666Lane?.used === true &&
@@ -131813,7 +132008,7 @@ function launchCoverageTelegramMessageV474(state) {
 
       return [
         `• V666 lane owner: <code>${escapeHtml(owner.slice(0, 6))}…${escapeHtml(owner.slice(-4))}</code>`,
-        `• Protected lane consumed: ${withOwner?.v666Lane?.used === true ? "YES" : "NO"} · path ${escapeHtml(String(withOwner?.v682LaneOwner?.consumedPath || "N/A"))} · request ${escapeHtml(String(withOwner?.v682LaneOwner?.consumedRequestType || "N/A"))}`
+        `• Protected lane consumed: ${withOwner?.v666Lane?.used === true ? "YES" : "NO"} · claim ${fmt(withOwner?.v682LaneOwner?.claimOrdinalV683)}/2 · path ${escapeHtml(String(withOwner?.v682LaneOwner?.consumedPath || "N/A"))} · request ${escapeHtml(String(withOwner?.v682LaneOwner?.consumedRequestType || "N/A"))}`
       ];
     })();
 
@@ -131866,7 +132061,7 @@ function launchCoverageTelegramMessageV474(state) {
             ? "YES"
             : "NO";
 
-        return `• <code>${escapeHtml(short)}</code> — ${escapeHtml(String(row?.path || "UNSPECIFIED"))} · ${escapeHtml(String(row?.stage || "UNKNOWN_STAGE"))} · pre-call ${row?.preCallBudgetAvailable === true ? "YES" : row?.preCallBudgetAvailable === false ? "NO" : "N/A"} · A ${fmt(b?.analysisUsed)}/${fmt(b?.effectiveAnalysisLimit)} · G ${fmt(b?.totalUsed)}/${fmt(b?.preTelegramGlobalLimit)} (hard ${fmt(b?.hardTotalLimit)}) · V666 ${lane?.claimed === true ? "CLAIMED" : "NO"} / ${lane?.used === true ? "USED" : "NOT_USED"} · owner <code>${escapeHtml(ownerShortV682)}</code> · token=owner ${ownerMatchV682} · consumed-before ${consumedBeforeV682} · different-owner ${differentOwnerV682} · consume ${escapeHtml(String(lane?.consumeStatus || "N/A"))} · consumed-path ${escapeHtml(String(ownerV682?.consumedPath || lane?.unifiedProLaneV679?.consumedPath || "N/A"))} · consumed-type ${escapeHtml(String(ownerV682?.consumedRequestType || lane?.unifiedProLaneV679?.consumedRequestType || "N/A"))} · V677 reached ${boundary?.evaluated === true ? "YES" : "NO"} / bypass ${boundary?.bypassUsed === true ? "YES" : "NO"}`;
+        return `• <code>${escapeHtml(short)}</code> — ${escapeHtml(String(row?.path || "UNSPECIFIED"))} · ${escapeHtml(String(row?.stage || "UNKNOWN_STAGE"))} · pre-call ${row?.preCallBudgetAvailable === true ? "YES" : row?.preCallBudgetAvailable === false ? "NO" : "N/A"} · A ${fmt(b?.analysisUsed)}/${fmt(b?.effectiveAnalysisLimit)} · G ${fmt(b?.totalUsed)}/${fmt(b?.preTelegramGlobalLimit)} (hard ${fmt(b?.hardTotalLimit)}) · V666 ${lane?.claimed === true ? "CLAIMED" : "NO"} / ${lane?.used === true ? "USED" : "NOT_USED"} · owner <code>${escapeHtml(ownerShortV682)}</code> · claim ${fmt(ownerV682?.claimOrdinalV683)}/2 · token=owner ${ownerMatchV682} · consumed-before ${consumedBeforeV682} · different-owner ${differentOwnerV682} · consume ${escapeHtml(String(lane?.consumeStatus || "N/A"))} · consumed-path ${escapeHtml(String(ownerV682?.consumedPath || lane?.unifiedProLaneV679?.consumedPath || "N/A"))} · consumed-type ${escapeHtml(String(ownerV682?.consumedRequestType || lane?.unifiedProLaneV679?.consumedRequestType || "N/A"))} · V677 reached ${boundary?.evaluated === true ? "YES" : "NO"} / bypass ${boundary?.bypassUsed === true ? "YES" : "NO"}`;
       });
 
   const coinGeckoTraceLinesV664 =
@@ -131990,8 +132185,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V682 is diagnostic-only and preserves V681/V680/V679/V678 behaviour; it exposes the exact V666 lane-owner token, owner-match status, consumed path/type and whether the protected lane was already spent before each V143/V247 event.",
-    "<i>V682 adds zero provider requests and changes no budget or qualification behaviour: hard 42, Telegram reserve, provider cooldowns, CoinGecko Demo limits, scoring and qualification thresholds remain unchanged.</i>"
+    "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
+    "<i>V683 raises no request ceiling and never permits simultaneous protected lanes: hard 42, Telegram reserve, provider cooldowns, CoinGecko Demo limits, scoring and qualification thresholds remain unchanged.</i>"
   ].join("\n");
 }
 
