@@ -1,6 +1,26 @@
 /**
+ * Robinhood Chain Meme Hunter — V692
+ * AUTHORITATIVE RUNTIME VERSION: V692
+ *
+ * V692 LOW-CPU KV STATE COMPACTION
+ * - rebuilds the V691 state-size fix after V691 itself hit Cloudflare 1102;
+ * - removes V691's repeated full-state serialization and per-section byte scans;
+ * - trims known safe diagnostic/history containers by COUNT before serializing;
+ * - performs ONE full stringify after Tier 1, and at most ONE additional full
+ *   stringify only when deeper safe raw-proof trimming is actually required;
+ * - no top-level section byte profiling, no giant-object timestamp sorting and
+ *   no repeated 26 MiB JSON serialization loops;
+ * - protected calls/performance, learning/frozen outcomes, alerts, watched
+ *   tokens, verified V3 identities/live DO state, active queues, holder evidence
+ *   and confirmed launch detectors remain untouched;
+ * - retains a 20 MiB target and 25 MiB hard-limit guard;
+ * - zero provider/RPC requests and no extra KV write cycle;
+ * - preserves V690 ERC20 reservation logic and all V687-V689 V3 fixes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V691
- * AUTHORITATIVE RUNTIME VERSION: V691
+ * HISTORICAL VERSION NOTE: V691
  *
  * V691 KV STATE-SIZE SAFETY / ADAPTIVE COMPACTION
  * - builds directly forward from V690 after a real scan hit Cloudflare KV's
@@ -17,7 +37,7 @@
  *   launch-source proof working sets while preserving confirmed sources,
  *   confirmed canonical patterns and the V515 detector registry;
  * - records before/after byte size, safety target and exact trim counts in
- *   stateCompactionV691 so state-size behaviour is measurable;
+ *   stateCompactionV692 so state-size behaviour is measurable;
  * - target save size is 20 MiB, leaving ~5 MiB headroom below the KV limit;
  * - zero external provider/RPC requests and no additional KV write cycle;
  * - preserves V690 ERC20 reservation logic, V689 presentation cleanup,
@@ -5719,7 +5739,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V691";
+const VERSION = "V692";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -17011,8 +17031,8 @@ function newState() {
       lastRecordedAddress: null
     },
 
-    stateCompactionV691: {
-      schemaVersion: "V691_1",
+    stateCompactionV692: {
+      schemaVersion: "V692_1",
       enabled: true,
       targetBytes: 20 * 1024 * 1024,
       kvHardLimitBytes: 25 * 1024 * 1024,
@@ -17640,26 +17660,26 @@ async function readState(env) {
               : []
         },
 
-        stateCompactionV691: {
-          ...fresh.stateCompactionV691,
+        stateCompactionV692: {
+          ...fresh.stateCompactionV692,
           ...(
-            parsed.stateCompactionV691 &&
-            typeof parsed.stateCompactionV691 === "object"
-              ? parsed.stateCompactionV691
+            parsed.stateCompactionV692 &&
+            typeof parsed.stateCompactionV692 === "object"
+              ? parsed.stateCompactionV692
               : {}
           ),
           lastTrimmed:
-            parsed.stateCompactionV691?.lastTrimmed &&
-            typeof parsed.stateCompactionV691.lastTrimmed === "object"
-              ? parsed.stateCompactionV691.lastTrimmed
+            parsed.stateCompactionV692?.lastTrimmed &&
+            typeof parsed.stateCompactionV692.lastTrimmed === "object"
+              ? parsed.stateCompactionV692.lastTrimmed
               : {},
           lastTopSectionsBefore:
-            Array.isArray(parsed.stateCompactionV691?.lastTopSectionsBefore)
-              ? parsed.stateCompactionV691.lastTopSectionsBefore.slice(0, 12)
+            Array.isArray(parsed.stateCompactionV692?.lastTopSectionsBefore)
+              ? parsed.stateCompactionV692.lastTopSectionsBefore.slice(0, 12)
               : [],
           lastTopSectionsAfter:
-            Array.isArray(parsed.stateCompactionV691?.lastTopSectionsAfter)
-              ? parsed.stateCompactionV691.lastTopSectionsAfter.slice(0, 12)
+            Array.isArray(parsed.stateCompactionV692?.lastTopSectionsAfter)
+              ? parsed.stateCompactionV692.lastTopSectionsAfter.slice(0, 12)
               : []
         },
 
@@ -17807,137 +17827,106 @@ async function readState(env) {
 }
 
 
-const V691_KV_HARD_LIMIT_BYTES =
+
+const V692_KV_HARD_LIMIT_BYTES =
   25 * 1024 * 1024;
 
-const V691_STATE_TARGET_BYTES =
+const V692_STATE_TARGET_BYTES =
   20 * 1024 * 1024;
 
-const V691_QUALIFICATION_AUDIT_KEEP =
-  1500;
-
-const V691_VERIFIED_LAUNCH_METER_KEEP =
-  3000;
-
-const V691_TOKEN_ORIGIN_KEEP =
-  1500;
-
-const V691_GENERIC_PROCESSED_RECEIPTS_KEEP =
-  750;
-
-const V691_GENERIC_OBSERVATIONS_KEEP =
+/*
+ * Tier 1 is intentionally aggressive on disposable diagnostic/history rows.
+ * These are count caps only: no whole-state size scan is needed first.
+ */
+const V692_QUALIFICATION_AUDIT_KEEP =
   1000;
 
-const V691_GENERIC_REJECTED_PATTERNS_KEEP =
-  300;
+const V692_VERIFIED_LAUNCH_METER_KEEP =
+  2000;
 
-const V691_DOPPLER_RAW_PROOF_KEEP =
-  300;
+const V692_RECENT_VERIFIED_ORIGINS_KEEP =
+  100;
 
-function utf8BytesV691(value) {
-  const stringValue =
-    typeof value === "string"
-      ? value
-      : jsonStringifySafeV246(
-          value,
-          0
-        );
+/*
+ * Tier 2 is reached only if Tier 1's ONE full serialization is still above the
+ * 20 MiB target. These are raw proof/measurement working sets; confirmed
+ * detectors/sources/patterns are deliberately not touched.
+ */
+const V692_TOKEN_ORIGIN_KEEP =
+  1000;
 
+const V692_GENERIC_PROCESSED_RECEIPTS_KEEP =
+  500;
+
+const V692_GENERIC_OBSERVATIONS_KEEP =
+  750;
+
+const V692_GENERIC_REJECTED_PATTERNS_KEEP =
+  200;
+
+const V692_RAW_PROOF_KEEP =
+  200;
+
+function utf8BytesV692(
+  stringValue
+) {
   try {
     return new TextEncoder()
-      .encode(stringValue)
+      .encode(
+        String(
+          stringValue || ""
+        )
+      )
       .byteLength;
   }
   catch (_) {
-    /*
-     * JSON persisted here is overwhelmingly ASCII. This is a fail-safe only;
-     * TextEncoder is available in Cloudflare Workers.
-     */
-    return String(stringValue).length;
+    return String(
+      stringValue || ""
+    ).length;
   }
 }
 
-function topStateSectionsByBytesV691(
-  state,
-  limit = 12
+function trimArrayTailV692(
+  arrayValue,
+  keep
 ) {
-  const rows = [];
-
-  for (
-    const [key, value]
-    of Object.entries(state || {})
-  ) {
-    let bytes = 0;
-
-    try {
-      bytes =
-        utf8BytesV691(value);
-    }
-    catch (_) {
-      bytes = -1;
-    }
-
-    rows.push({
-      key,
-      bytes
-    });
+  if (!Array.isArray(arrayValue)) {
+    return {
+      value: [],
+      removed: 0
+    };
   }
 
-  return rows
-    .sort(
-      (a, b) =>
-        safeNumber(b?.bytes) -
-        safeNumber(a?.bytes)
-    )
-    .slice(
+  const limit =
+    Math.max(
       0,
-      Math.max(
-        1,
-        Math.min(
-          20,
-          safeNumber(limit) || 12
-        )
-      )
+      safeNumber(keep)
     );
-}
 
-function v691EntryTime(row) {
-  const candidates = [
-    row?.verifiedAt,
-    row?.observedAt,
-    row?.lastEvaluatedAt,
-    row?.firstEvaluatedAt,
-    row?.launchedAt,
-    row?.recordedAt,
-    row?.updatedAt,
-    row?.createdAt,
-    row?.at,
-    row?.timestamp
-  ];
-
-  for (const value of candidates) {
-    const numeric =
-      safeNumber(value);
-
-    if (numeric > 0) return numeric;
-
-    const parsed =
-      Date.parse(
-        String(value || "")
-      );
-
-    if (
-      Number.isFinite(parsed) &&
-      parsed > 0
-    ) {
-      return parsed;
-    }
+  if (
+    !limit ||
+    arrayValue.length <= limit
+  ) {
+    return {
+      value: arrayValue,
+      removed: 0
+    };
   }
 
-  return 0;
+  return {
+    value:
+      arrayValue.slice(-limit),
+    removed:
+      arrayValue.length -
+      limit
+  };
 }
 
-function keepNewestObjectEntriesV691(
+/*
+ * Raw diagnostic/proof maps are inserted over time. Keep the tail of insertion
+ * order without sorting the entire object or inspecting timestamps.
+ */
+function trimObjectInsertionTailV692(
   objectValue,
   keep
 ) {
@@ -17952,8 +17941,8 @@ function keepNewestObjectEntriesV691(
     };
   }
 
-  const entries =
-    Object.entries(objectValue);
+  const keys =
+    Object.keys(objectValue);
 
   const limit =
     Math.max(
@@ -17963,7 +17952,7 @@ function keepNewestObjectEntriesV691(
 
   if (
     !limit ||
-    entries.length <= limit
+    keys.length <= limit
   ) {
     return {
       value: objectValue,
@@ -17971,176 +17960,358 @@ function keepNewestObjectEntriesV691(
     };
   }
 
-  const ranked =
-    entries
-      .map(
-        ([key, value], index) => ({
-          key,
-          value,
-          index,
-          at:
-            v691EntryTime(value)
-        })
-      )
-      .sort(
-        (a, b) => {
-          const byTime =
-            safeNumber(a.at) -
-            safeNumber(b.at);
-
-          if (byTime !== 0) {
-            return byTime;
-          }
-
-          return a.index - b.index;
-        }
-      )
-      .slice(-limit);
+  const keepKeys =
+    keys.slice(-limit);
 
   const next = {};
 
-  for (const row of ranked) {
-    next[row.key] = row.value;
+  for (const key of keepKeys) {
+    next[key] =
+      objectValue[key];
   }
 
   return {
     value: next,
     removed:
-      entries.length -
-      ranked.length
+      keys.length -
+      keepKeys.length
   };
 }
 
-function rebuildTokenOriginClustersV691(
-  state
+function addTrimCountV692(
+  telemetry,
+  key,
+  removed
 ) {
-  const root =
+  const count =
+    safeNumber(removed);
+
+  if (count <= 0) return;
+
+  telemetry.lastTrimmed =
+    telemetry.lastTrimmed &&
+    typeof telemetry.lastTrimmed === "object"
+      ? telemetry.lastTrimmed
+      : {};
+
+  telemetry.lastTrimmed[key] =
+    safeNumber(
+      telemetry.lastTrimmed[key]
+    ) +
+    count;
+}
+
+function compactTier1StateV692(
+  state,
+  telemetry
+) {
+  const audit =
+    state?.qualificationAuditV663;
+
+  if (
+    audit &&
+    typeof audit === "object"
+  ) {
+    const trimmed =
+      trimArrayTailV692(
+        audit.records,
+        V692_QUALIFICATION_AUDIT_KEEP
+      );
+
+    audit.records =
+      trimmed.value;
+
+    audit.maxRecords =
+      V692_QUALIFICATION_AUDIT_KEEP;
+
+    addTrimCountV692(
+      telemetry,
+      "qualificationAuditRecords",
+      trimmed.removed
+    );
+  }
+
+  const meter =
+    state?.verifiedLaunchMeterV470;
+
+  if (
+    meter &&
+    typeof meter === "object"
+  ) {
+    const trimmed =
+      trimArrayTailV692(
+        meter.records,
+        V692_VERIFIED_LAUNCH_METER_KEEP
+      );
+
+    meter.records =
+      trimmed.value;
+
+    meter.maxRecords =
+      V692_VERIFIED_LAUNCH_METER_KEEP;
+
+    if (
+      safeNumber(trimmed.removed) >
+      0
+    ) {
+      meter.droppedForCapacity =
+        safeNumber(
+          meter.droppedForCapacity
+        ) +
+        safeNumber(
+          trimmed.removed
+        );
+
+      meter.capacityTruncated =
+        true;
+    }
+
+    addTrimCountV692(
+      telemetry,
+      "verifiedLaunchMeterRecords",
+      trimmed.removed
+    );
+  }
+
+  const origin =
     state?.tokenOriginTraceV477;
 
   if (
-    !root ||
-    typeof root !== "object"
-  ) {
-    return;
-  }
-
-  const clusters = {};
-
-  for (
-    const [token, row]
-    of Object.entries(
-      root.tokenOrigins || {}
+    origin &&
+    typeof origin === "object" &&
+    Array.isArray(
+      origin.recentVerifiedOrigins
     )
   ) {
+    const trimmed =
+      trimArrayTailV692(
+        origin.recentVerifiedOrigins,
+        V692_RECENT_VERIFIED_ORIGINS_KEEP
+      );
+
+    origin.recentVerifiedOrigins =
+      trimmed.value;
+
+    addTrimCountV692(
+      telemetry,
+      "recentVerifiedOrigins",
+      trimmed.removed
+    );
+  }
+}
+
+function compactTier2StateV692(
+  state,
+  telemetry
+) {
+  const origin =
+    state?.tokenOriginTraceV477;
+
+  if (
+    origin &&
+    typeof origin === "object" &&
+    origin.tokenOrigins &&
+    typeof origin.tokenOrigins === "object"
+  ) {
+    const trimmed =
+      trimObjectInsertionTailV692(
+        origin.tokenOrigins,
+        V692_TOKEN_ORIGIN_KEEP
+      );
+
+    origin.tokenOrigins =
+      trimmed.value;
+
+    /*
+     * creatorClusters is derived diagnostic grouping. Drop it when tokenOrigins
+     * are compacted instead of rebuilding/sorting it in this request.
+     * It can rebuild naturally from future verified-origin observations.
+     */
     if (
-      row?.verified !== true ||
-      !isAddress(token) ||
-      !isAddress(
-        normalize(
-          row?.contractCreator
-        )
-      )
+      safeNumber(trimmed.removed) >
+      0
+    ) {
+      const priorClusters =
+        origin.creatorClusters &&
+        typeof origin.creatorClusters === "object"
+          ? Object.keys(
+              origin.creatorClusters
+            ).length
+          : 0;
+
+      origin.creatorClusters = {};
+
+      addTrimCountV692(
+        telemetry,
+        "tokenOriginRows",
+        trimmed.removed
+      );
+
+      addTrimCountV692(
+        telemetry,
+        "derivedCreatorClustersReset",
+        priorClusters
+      );
+    }
+  }
+
+  const generic =
+    state?.genericUnknownSourceProofV517;
+
+  if (
+    generic &&
+    typeof generic === "object"
+  ) {
+    const fields = [
+      [
+        "processedReceipts",
+        V692_GENERIC_PROCESSED_RECEIPTS_KEEP
+      ],
+      [
+        "observations",
+        V692_GENERIC_OBSERVATIONS_KEEP
+      ],
+      [
+        "rejectedPatterns",
+        V692_GENERIC_REJECTED_PATTERNS_KEEP
+      ]
+    ];
+
+    for (
+      const [field, keep]
+      of fields
+    ) {
+      const trimmed =
+        trimObjectInsertionTailV692(
+          generic[field],
+          keep
+        );
+
+      generic[field] =
+        trimmed.value;
+
+      addTrimCountV692(
+        telemetry,
+        `genericUnknownSourceProofV517.${field}`,
+        trimmed.removed
+      );
+    }
+  }
+
+  const rawProofRoots = [
+    [
+      "dopplerWholeReceiptPatternV512",
+      [
+        "processedReceipts",
+        "receiptObservations"
+      ]
+    ],
+    [
+      "dopplerCanonicalPatternProofV513",
+      [
+        "processedValidationReceipts",
+        "validationProofs",
+        "rejectedPatternKeys"
+      ]
+    ],
+    [
+      "dopplerExactMechanismProofV511",
+      [
+        "processedReceipts",
+        "receiptProofs"
+      ]
+    ],
+    [
+      "ponsV2CreationReceiptProofV509",
+      [
+        "processedReceipts",
+        "proofs"
+      ]
+    ]
+  ];
+
+  for (
+    const [rootName, fields]
+    of rawProofRoots
+  ) {
+    const root =
+      state?.[rootName];
+
+    if (
+      !root ||
+      typeof root !== "object"
     ) {
       continue;
     }
 
-    const creator =
-      normalize(
-        row.contractCreator
+    for (const field of fields) {
+      const trimmed =
+        trimObjectInsertionTailV692(
+          root[field],
+          V692_RAW_PROOF_KEEP
+        );
+
+      root[field] =
+        trimmed.value;
+
+      addTrimCountV692(
+        telemetry,
+        `${rootName}.${field}`,
+        trimmed.removed
       );
-
-    const cluster =
-      clusters[creator] ||
-      {
-        creator,
-        distinctTokens: 0,
-        tokens: [],
-        firstVerifiedAt: null,
-        lastVerifiedAt: null,
-        classification:
-          "SINGLE_OBSERVED_CREATOR",
-        launchpadIdentity:
-          "DATA UNVERIFIED"
-      };
-
-    if (
-      !cluster.tokens.includes(token)
-    ) {
-      cluster.tokens.push(token);
-      cluster.distinctTokens += 1;
     }
-
-    const at =
-      v691EntryTime(row);
-
-    cluster.firstVerifiedAt =
-      !cluster.firstVerifiedAt
-        ? at || null
-        : at
-          ? Math.min(
-              cluster.firstVerifiedAt,
-              at
-            )
-          : cluster.firstVerifiedAt;
-
-    cluster.lastVerifiedAt =
-      Math.max(
-        safeNumber(
-          cluster.lastVerifiedAt
-        ),
-        at || 0
-      ) || null;
-
-    cluster.classification =
-      cluster.distinctTokens >= 2
-        ? "RECURRING_CREATOR"
-        : "SINGLE_OBSERVED_CREATOR";
-
-    clusters[creator] =
-      cluster;
   }
-
-  root.creatorClusters =
-    clusters;
-
-  root.recentVerifiedOrigins =
-    Array.isArray(
-      root.recentVerifiedOrigins
-    )
-      ? root.recentVerifiedOrigins
-          .slice(-100)
-      : [];
 }
 
-function compactStateForKvV691(
+function compactStateForKvV692(
   state
 ) {
-  state.stateCompactionV691 =
-    state?.stateCompactionV691 &&
-    typeof state.stateCompactionV691 === "object"
-      ? state.stateCompactionV691
+  state.stateCompactionV692 =
+    state?.stateCompactionV692 &&
+    typeof state.stateCompactionV692 === "object"
+      ? state.stateCompactionV692
       : {
-          schemaVersion: "V691_1",
+          schemaVersion:
+            "V692_1",
           enabled: true,
           targetBytes:
-            V691_STATE_TARGET_BYTES,
+            V692_STATE_TARGET_BYTES,
           kvHardLimitBytes:
-            V691_KV_HARD_LIMIT_BYTES,
+            V692_KV_HARD_LIMIT_BYTES,
           totalCompactions: 0,
           totalBytesRemoved: 0
         };
 
   const telemetry =
-    state.stateCompactionV691;
+    state.stateCompactionV692;
 
+  telemetry.schemaVersion =
+    "V692_1";
   telemetry.enabled = true;
   telemetry.targetBytes =
-    V691_STATE_TARGET_BYTES;
+    V692_STATE_TARGET_BYTES;
   telemetry.kvHardLimitBytes =
-    V691_KV_HARD_LIMIT_BYTES;
+    V692_KV_HARD_LIMIT_BYTES;
   telemetry.lastEvaluatedAt =
     Date.now();
   telemetry.lastTrimmed = {};
+  telemetry.lastMode =
+    "COUNT_FIRST_LOW_CPU_V692";
+  telemetry.fullSerializationsThisWrite =
+    0;
+  telemetry.lastBeforeBytes =
+    null;
+  telemetry.lastTopSectionsBefore = [];
+  telemetry.lastTopSectionsAfter = [];
+
+  /*
+   * IMPORTANT: trim first. V691's failure was caused by repeatedly serializing
+   * the already-oversized state before doing useful work.
+   */
+  compactTier1StateV692(
+    state,
+    telemetry
+  );
 
   let serialized =
     jsonStringifySafeV246(
@@ -18148,33 +18319,33 @@ function compactStateForKvV691(
       0
     );
 
-  const beforeBytes =
-    utf8BytesV691(
+  telemetry.fullSerializationsThisWrite +=
+    1;
+
+  let afterBytes =
+    utf8BytesV692(
       serialized
     );
 
-  telemetry.lastBeforeBytes =
-    beforeBytes;
-  telemetry.lastTopSectionsBefore =
-    topStateSectionsByBytesV691(
-      state,
-      12
-    );
+  const tier1Bytes =
+    afterBytes;
+
+  let tier2Applied =
+    false;
 
   if (
-    beforeBytes <=
-    V691_STATE_TARGET_BYTES
+    afterBytes >
+    V692_STATE_TARGET_BYTES
   ) {
-    telemetry.lastNeededCompaction =
-      false;
-    telemetry.lastAfterBytes =
-      beforeBytes;
-    telemetry.lastTopSectionsAfter =
-      telemetry.lastTopSectionsBefore;
+    tier2Applied = true;
+
+    compactTier2StateV692(
+      state,
+      telemetry
+    );
 
     /*
-     * Telemetry fields changed after the first stringify, so create the exact
-     * payload that writeState will persist.
+     * SECOND and final permitted whole-state stringify for this write.
      */
     serialized =
       jsonStringifySafeV246(
@@ -18182,390 +18353,77 @@ function compactStateForKvV691(
         0
       );
 
-    telemetry.lastAfterBytes =
-      utf8BytesV691(
+    telemetry.fullSerializationsThisWrite +=
+      1;
+
+    afterBytes =
+      utf8BytesV692(
         serialized
       );
-
-    serialized =
-      jsonStringifySafeV246(
-        state,
-        0
-      );
-
-    return {
-      serialized,
-      beforeBytes,
-      afterBytes:
-        utf8BytesV691(serialized),
-      compacted: false,
-      telemetry
-    };
   }
 
   telemetry.lastNeededCompaction =
-    true;
-  telemetry.lastCompactedAt =
-    Date.now();
-
-  /*
-   * TIER 1 — bounded diagnostics/history only.
-   * Cumulative counters remain untouched.
-   */
-  if (
-    Array.isArray(
-      state?.qualificationAuditV663
-        ?.records
-    ) &&
-    state.qualificationAuditV663
-      .records.length >
-      V691_QUALIFICATION_AUDIT_KEEP
-  ) {
-    const before =
-      state.qualificationAuditV663
-        .records.length;
-
-    state.qualificationAuditV663.records =
-      state.qualificationAuditV663.records
-        .slice(
-          -V691_QUALIFICATION_AUDIT_KEEP
-        );
-
-    state.qualificationAuditV663
-      .maxRecords =
-      V691_QUALIFICATION_AUDIT_KEEP;
-
-    telemetry.lastTrimmed
-      .qualificationAuditRecords =
-      before -
-      state.qualificationAuditV663
-        .records.length;
-  }
+    Object.keys(
+      telemetry.lastTrimmed || {}
+    ).length > 0;
 
   if (
-    Array.isArray(
-      state?.verifiedLaunchMeterV470
-        ?.records
-    ) &&
-    state.verifiedLaunchMeterV470
-      .records.length >
-      V691_VERIFIED_LAUNCH_METER_KEEP
+    telemetry.lastNeededCompaction
   ) {
-    const before =
-      state.verifiedLaunchMeterV470
-        .records.length;
+    telemetry.lastCompactedAt =
+      Date.now();
 
-    state.verifiedLaunchMeterV470.records =
-      state.verifiedLaunchMeterV470.records
-        .slice(
-          -V691_VERIFIED_LAUNCH_METER_KEEP
-        );
-
-    const removed =
-      before -
-      state.verifiedLaunchMeterV470
-        .records.length;
-
-    state.verifiedLaunchMeterV470
-      .maxRecords =
-      V691_VERIFIED_LAUNCH_METER_KEEP;
-
-    state.verifiedLaunchMeterV470
-      .droppedForCapacity =
+    telemetry.totalCompactions =
       safeNumber(
-        state.verifiedLaunchMeterV470
-          .droppedForCapacity
-      ) +
-      removed;
-
-    if (removed > 0) {
-      state.verifiedLaunchMeterV470
-        .capacityTruncated = true;
-    }
-
-    telemetry.lastTrimmed
-      .verifiedLaunchMeterRecords =
-      removed;
+        telemetry.totalCompactions
+      ) + 1;
   }
 
-  serialized =
-    jsonStringifySafeV246(
-      state,
-      0
-    );
-
-  let currentBytes =
-    utf8BytesV691(
-      serialized
-    );
-
-  /*
-   * TIER 2 — only if Tier 1 is insufficient.
-   * Token-origin trace is measurement/history. Keep newest individually
-   * verified rows and rebuild creator clusters from retained evidence.
-   */
-  if (
-    currentBytes >
-      V691_STATE_TARGET_BYTES &&
-    state?.tokenOriginTraceV477
-      ?.tokenOrigins &&
-    typeof state.tokenOriginTraceV477
-      .tokenOrigins === "object"
-  ) {
-    const compacted =
-      keepNewestObjectEntriesV691(
-        state.tokenOriginTraceV477
-          .tokenOrigins,
-        V691_TOKEN_ORIGIN_KEEP
-      );
-
-    state.tokenOriginTraceV477
-      .tokenOrigins =
-      compacted.value;
-
-    if (
-      safeNumber(compacted.removed) >
-      0
-    ) {
-      telemetry.lastTrimmed
-        .tokenOriginRows =
-        compacted.removed;
-
-      rebuildTokenOriginClustersV691(
-        state
-      );
-    }
-
-    serialized =
-      jsonStringifySafeV246(
-        state,
-        0
-      );
-
-    currentBytes =
-      utf8BytesV691(
-        serialized
-      );
-  }
-
-  /*
-   * TIER 3 — raw working sets from the generic unknown-source proof engine.
-   * Confirmed sources and patternClusters are NEVER touched.
-   */
-  if (
-    currentBytes >
-      V691_STATE_TARGET_BYTES &&
-    state?.genericUnknownSourceProofV517 &&
-    typeof state.genericUnknownSourceProofV517 === "object"
-  ) {
-    const root =
-      state.genericUnknownSourceProofV517;
-
-    const processed =
-      keepNewestObjectEntriesV691(
-        root.processedReceipts,
-        V691_GENERIC_PROCESSED_RECEIPTS_KEEP
-      );
-
-    root.processedReceipts =
-      processed.value;
-
-    telemetry.lastTrimmed
-      .genericProcessedReceipts =
-      processed.removed;
-
-    const observations =
-      keepNewestObjectEntriesV691(
-        root.observations,
-        V691_GENERIC_OBSERVATIONS_KEEP
-      );
-
-    root.observations =
-      observations.value;
-
-    telemetry.lastTrimmed
-      .genericObservations =
-      observations.removed;
-
-    const rejected =
-      keepNewestObjectEntriesV691(
-        root.rejectedPatterns,
-        V691_GENERIC_REJECTED_PATTERNS_KEEP
-      );
-
-    root.rejectedPatterns =
-      rejected.value;
-
-    telemetry.lastTrimmed
-      .genericRejectedPatterns =
-      rejected.removed;
-
-    serialized =
-      jsonStringifySafeV246(
-        state,
-        0
-      );
-
-    currentBytes =
-      utf8BytesV691(
-        serialized
-      );
-  }
-
-  /*
-   * TIER 4 — legacy/raw Doppler proof working sets only.
-   * ConfirmedPattern, confirmedCanonicalPattern, confirmedFactory and V515
-   * registered detectors stay intact.
-   */
-  if (
-    currentBytes >
-    V691_STATE_TARGET_BYTES
-  ) {
-    const rawProofRoots = [
-      [
-        "dopplerWholeReceiptPatternV512",
-        [
-          "processedReceipts",
-          "receiptObservations"
-        ]
-      ],
-      [
-        "dopplerCanonicalPatternProofV513",
-        [
-          "processedValidationReceipts",
-          "validationProofs",
-          "rejectedPatternKeys"
-        ]
-      ],
-      [
-        "dopplerExactMechanismProofV511",
-        [
-          "processedReceipts",
-          "receiptProofs"
-        ]
-      ],
-      [
-        "ponsV2CreationReceiptProofV509",
-        [
-          "processedReceipts",
-          "proofs"
-        ]
-      ]
-    ];
-
-    for (
-      const [rootName, fields]
-      of rawProofRoots
-    ) {
-      const root =
-        state?.[rootName];
-
-      if (
-        !root ||
-        typeof root !== "object"
-      ) {
-        continue;
-      }
-
-      for (const field of fields) {
-        const compacted =
-          keepNewestObjectEntriesV691(
-            root?.[field],
-            V691_DOPPLER_RAW_PROOF_KEEP
-          );
-
-        root[field] =
-          compacted.value;
-
-        if (
-          safeNumber(
-            compacted.removed
-          ) > 0
-        ) {
-          telemetry.lastTrimmed[
-            `${rootName}.${field}`
-          ] =
-            compacted.removed;
-        }
-      }
-    }
-
-    serialized =
-      jsonStringifySafeV246(
-        state,
-        0
-      );
-
-    currentBytes =
-      utf8BytesV691(
-        serialized
-      );
-  }
-
-  telemetry.totalCompactions =
-    safeNumber(
-      telemetry.totalCompactions
-    ) + 1;
-
-  telemetry.totalBytesRemoved =
-    safeNumber(
-      telemetry.totalBytesRemoved
-    ) +
-    Math.max(
-      0,
-      beforeBytes -
-      currentBytes
-    );
-
-  telemetry.lastTopSectionsAfter =
-    topStateSectionsByBytesV691(
-      state,
-      12
-    );
-
-  /*
-   * Re-serialize after telemetry updates. This is the exact payload used by
-   * writeState. If protected/essential state alone ever exceeds the target,
-   * we do NOT silently delete it; the telemetry exposes that condition.
-   */
-  serialized =
-    jsonStringifySafeV246(
-      state,
-      0
-    );
-
-  currentBytes =
-    utf8BytesV691(
-      serialized
-    );
+  telemetry.lastTier1Bytes =
+    tier1Bytes;
 
   telemetry.lastAfterBytes =
-    currentBytes;
+    afterBytes;
 
-  serialized =
-    jsonStringifySafeV246(
-      state,
-      0
-    );
+  telemetry.lastTier2Applied =
+    tier2Applied;
 
-  currentBytes =
-    utf8BytesV691(
-      serialized
-    );
+  telemetry.lastTargetMet =
+    afterBytes <=
+    V692_STATE_TARGET_BYTES;
 
+  telemetry.lastBelowHardLimit =
+    afterBytes <
+    V692_KV_HARD_LIMIT_BYTES;
+
+  /*
+   * Do NOT stringify again just to persist telemetry changes; that is the exact
+   * V691 CPU trap we are removing. The returned payload already contains all
+   * pre-serialization trim evidence. Precise byte/target results are returned
+   * by writeState and the next persisted cycle can store the summary.
+   */
   return {
     serialized,
-    beforeBytes,
-    afterBytes:
-      currentBytes,
-    compacted: true,
+    afterBytes,
+    compacted:
+      telemetry.lastNeededCompaction,
+    tier1Bytes,
+    tier2Applied,
     targetMet:
-      currentBytes <=
-      V691_STATE_TARGET_BYTES,
+      afterBytes <=
+      V692_STATE_TARGET_BYTES,
     belowKvHardLimit:
-      currentBytes <
-      V691_KV_HARD_LIMIT_BYTES,
-    telemetry
+      afterBytes <
+      V692_KV_HARD_LIMIT_BYTES,
+    fullSerializations:
+      telemetry.fullSerializationsThisWrite,
+    trimmed:
+      {
+        ...(
+          telemetry.lastTrimmed ||
+          {}
+        )
+      }
   };
 }
 
@@ -18601,21 +18459,16 @@ async function writeState(
     state.updatedAt =
       now();
 
-    const statePayloadV691 =
-      compactStateForKvV691(
+    const statePayloadV692 =
+      compactStateForKvV692(
         state
       );
 
-    /*
-     * Refuse to knowingly submit a payload still at/above the provider's
-     * documented single-value boundary. Essential/protected state is never
-     * silently deleted just to force a write.
-     */
     if (
       safeNumber(
-        statePayloadV691?.afterBytes
+        statePayloadV692?.afterBytes
       ) >=
-      V691_KV_HARD_LIMIT_BYTES
+      V692_KV_HARD_LIMIT_BYTES
     ) {
       return {
         saved:
@@ -18624,25 +18477,31 @@ async function writeState(
         binding,
 
         error:
-          "KV_STATE_STILL_ABOVE_HARD_LIMIT_AFTER_SAFE_V691_COMPACTION",
+          "KV_STATE_STILL_ABOVE_HARD_LIMIT_AFTER_LOW_CPU_V692_COMPACTION",
 
-        stateCompactionV691: {
-          beforeBytes:
-            statePayloadV691?.beforeBytes ||
-            null,
+        stateCompactionV692: {
           afterBytes:
-            statePayloadV691?.afterBytes ||
+            statePayloadV692?.afterBytes ||
+            null,
+          tier1Bytes:
+            statePayloadV692?.tier1Bytes ||
             null,
           targetBytes:
-            V691_STATE_TARGET_BYTES,
+            V692_STATE_TARGET_BYTES,
           hardLimitBytes:
-            V691_KV_HARD_LIMIT_BYTES,
+            V692_KV_HARD_LIMIT_BYTES,
+          tier2Applied:
+            statePayloadV692?.tier2Applied ===
+            true,
+          fullSerializations:
+            safeNumber(
+              statePayloadV692?.fullSerializations
+            ),
           targetMet:
-            statePayloadV691?.targetMet ===
+            statePayloadV692?.targetMet ===
             true,
           trimmed:
-            state?.stateCompactionV691
-              ?.lastTrimmed ||
+            statePayloadV692?.trimmed ||
             {}
         }
       };
@@ -18650,7 +18509,7 @@ async function writeState(
 
     await kv.put(
       STATE_KEY,
-      statePayloadV691.serialized
+      statePayloadV692.serialized
     );
 
     return {
@@ -18662,28 +18521,32 @@ async function writeState(
       error:
         null,
 
-      stateCompactionV691: {
+      stateCompactionV692: {
         compacted:
-          statePayloadV691?.compacted ===
+          statePayloadV692?.compacted ===
           true,
-        beforeBytes:
-          statePayloadV691?.beforeBytes ||
-          null,
         afterBytes:
-          statePayloadV691?.afterBytes ||
+          statePayloadV692?.afterBytes ||
+          null,
+        tier1Bytes:
+          statePayloadV692?.tier1Bytes ||
           null,
         targetBytes:
-          V691_STATE_TARGET_BYTES,
+          V692_STATE_TARGET_BYTES,
         hardLimitBytes:
-          V691_KV_HARD_LIMIT_BYTES,
-        targetMet:
+          V692_KV_HARD_LIMIT_BYTES,
+        tier2Applied:
+          statePayloadV692?.tier2Applied ===
+          true,
+        fullSerializations:
           safeNumber(
-            statePayloadV691?.afterBytes
-          ) <=
-          V691_STATE_TARGET_BYTES,
+            statePayloadV692?.fullSerializations
+          ),
+        targetMet:
+          statePayloadV692?.targetMet ===
+          true,
         trimmed:
-          state?.stateCompactionV691
-            ?.lastTrimmed ||
+          statePayloadV692?.trimmed ||
           {}
       }
     };
@@ -98997,8 +98860,8 @@ async function health(
       stateError:
         result.error,
 
-      stateCompactionV691:
-        state?.stateCompactionV691 ||
+      stateCompactionV692:
+        state?.stateCompactionV692 ||
         null
     },
 
@@ -134681,7 +134544,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
-    "<i>V691 adds adaptive safe KV-state compaction before the existing state write. Calls, learning, alerts, verified V3 identities, active queues and confirmed launch detectors are protected; hard 42, Telegram reserve, scoring and qualification thresholds remain unchanged.</i>"
+    "<i>V692 replaces V691's CPU-heavy compaction with count-first low-CPU trimming and at most two full state serializations. Protected calls, learning, alerts, verified V3 identities, active queues and confirmed launch detectors remain untouched; hard 42 and Telegram reserve are unchanged.</i>"
   ].join("\n");
 }
 
