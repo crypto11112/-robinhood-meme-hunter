@@ -1,6 +1,27 @@
 /**
+ * Robinhood Chain Meme Hunter — V673
+ * AUTHORITATIVE RUNTIME VERSION: V673
+ *
+ * V673 FREE-TIER DURABLE SCHEDULER
+ * - builds directly forward from confirmed V672;
+ * - moves heavy automatic scheduledScan(env) execution into a dedicated SQLite
+ *   Durable Object invocation, which has the Durable Object CPU allowance rather
+ *   than the Workers Free 10 ms Cron/HTTP CPU ceiling;
+ * - the existing five-minute Cron becomes a tiny health/nudge only: it asks the
+ *   scheduler Durable Object to ensure its self-rescheduling alarm is armed;
+ * - the Durable Object alarm runs the existing scheduledScan(env) unchanged and
+ *   re-arms itself for five minutes later;
+ * - adds read-only /scheduler-status-v673 plus /scheduler-start-v673 bootstrap;
+ * - preserves V672 scanner/scoring/qualification/provider/Telegram logic, all
+ *   existing KV state/history, the V3LiveCollectorV363 Durable Object and the
+ *   hard 42-request scanner ceiling;
+ * - no scoring, Momentum, Telegram threshold, launch-source, holder/risk, market,
+ *   CoinGecko, provider-budget or evidence-integrity rules change.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V672
- * AUTHORITATIVE RUNTIME VERSION: V672
+ * HISTORICAL VERSION NOTE: V672
  *
  * V672 COINGECKO DEMO SECOND-CHANCE ARMING FIX
  * - builds directly forward from confirmed V671 scheduled-relay routing;
@@ -5314,7 +5335,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V672";
+const VERSION = "V673";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -136281,6 +136302,18 @@ async function handleRequest(
     return jsonResponse(await v3LiveCollectorRouteV363(env, url.searchParams.get("token") || "", "stop"));
   }
 
+  if (path === "/scheduler-status-v673") {
+    return jsonResponse(
+      await scanSchedulerRequestV673(env, "/status", "GET")
+    );
+  }
+
+  if (path === "/scheduler-start-v673") {
+    return jsonResponse(
+      await scanSchedulerRequestV673(env, "/start", "POST")
+    );
+  }
+
   if (
     path ===
     "/rpc-test"
@@ -137970,6 +138003,199 @@ function liveSignalTelegramMessageV414(result) {
     "👤 Unique/repeat buyers: <b>UNVERIFIED BY THIS V414 LIVE LAYER</b>",
     "<i>Measurement-only. Uses the V413 fresh batch on one pinned pair. Exact-USD lines are only swaps actually verified/observed by the bot and are NOT complete-market totals. Stronger breakout states require healthy data, minimum history, cadence, confidence and persistence. Does not affect scoring, qualification, alerts or trading.</i>"
   ].join("\n");
+}
+
+
+/* =========================================================
+   V673 — FREE-TIER DURABLE SCHEDULER
+   ========================================================= */
+
+const SCAN_SCHEDULER_NAME_V673 = "main-five-minute-scheduler";
+const SCAN_SCHEDULER_INTERVAL_MS_V673 = 5 * 60 * 1000;
+const SCAN_SCHEDULER_BOOT_DELAY_MS_V673 = 1500;
+
+function scanSchedulerStubV673(env) {
+  if (!env?.SCAN_SCHEDULER_V673) return null;
+  try {
+    const id = env.SCAN_SCHEDULER_V673.idFromName(
+      SCAN_SCHEDULER_NAME_V673
+    );
+    return env.SCAN_SCHEDULER_V673.get(id);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function scanSchedulerRequestV673(env, path, method = "GET") {
+  const stub = scanSchedulerStubV673(env);
+  if (!stub) {
+    return {
+      ok: false,
+      version: VERSION,
+      status: "SCAN_SCHEDULER_BINDING_UNAVAILABLE_V673",
+      timestamp: now()
+    };
+  }
+
+  try {
+    const response = await stub.fetch(
+      new Request(
+        `https://scan-scheduler.internal${path}`,
+        { method }
+      )
+    );
+    let body = null;
+    try { body = await response.json(); } catch (_) {}
+    return body || {
+      ok: response.ok,
+      version: VERSION,
+      status: `SCAN_SCHEDULER_HTTP_${response.status}_V673`,
+      timestamp: now()
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      version: VERSION,
+      status: "SCAN_SCHEDULER_REQUEST_EXCEPTION_V673",
+      error: errorString(error),
+      timestamp: now()
+    };
+  }
+}
+
+export class ScanSchedulerV673 {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+  }
+
+  async ensureAlarmV673(forceSoon = false) {
+    const current = await this.state.storage.getAlarm();
+    const nowMs = Date.now();
+    const validFuture =
+      Number.isFinite(Number(current)) &&
+      Number(current) > nowMs + 500 &&
+      Number(current) <= nowMs + SCAN_SCHEDULER_INTERVAL_MS_V673 + 30000;
+
+    if (forceSoon || !validFuture) {
+      const next = forceSoon
+        ? nowMs + SCAN_SCHEDULER_BOOT_DELAY_MS_V673
+        : nowMs + SCAN_SCHEDULER_INTERVAL_MS_V673;
+      await this.state.storage.setAlarm(next);
+      return { armed: true, nextAlarmAt: next, changed: true };
+    }
+
+    return { armed: true, nextAlarmAt: Number(current), changed: false };
+  }
+
+  async statusV673() {
+    const alarm = await this.state.storage.getAlarm();
+    const last = await this.state.storage.get("v673:last") || null;
+    return {
+      ok: true,
+      version: VERSION,
+      scheduler: "DURABLE_OBJECT_ALARM_V673",
+      alarmArmed: Number.isFinite(Number(alarm)),
+      nextAlarmAt: Number.isFinite(Number(alarm)) ? Number(alarm) : null,
+      nextAlarmIso: Number.isFinite(Number(alarm))
+        ? new Date(Number(alarm)).toISOString()
+        : null,
+      last,
+      timestamp: now()
+    };
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/ensure") {
+      const ensured = await this.ensureAlarmV673(false);
+      return jsonResponse({
+        ok: true,
+        version: VERSION,
+        scheduler: "DURABLE_OBJECT_ALARM_V673",
+        status: ensured.changed
+          ? "ALARM_ARMED_V673"
+          : "ALARM_ALREADY_ARMED_V673",
+        ...ensured,
+        timestamp: now()
+      });
+    }
+
+    if (url.pathname === "/start") {
+      const ensured = await this.ensureAlarmV673(true);
+      return jsonResponse({
+        ok: true,
+        version: VERSION,
+        scheduler: "DURABLE_OBJECT_ALARM_V673",
+        status: "ALARM_BOOTSTRAP_ARMED_V673",
+        ...ensured,
+        timestamp: now()
+      });
+    }
+
+    if (url.pathname === "/status") {
+      return jsonResponse(await this.statusV673());
+    }
+
+    return jsonResponse({
+      ok: false,
+      version: VERSION,
+      status: "SCAN_SCHEDULER_ROUTE_NOT_FOUND_V673",
+      timestamp: now()
+    }, 404);
+  }
+
+  async alarm() {
+    const startedAt = Date.now();
+    let result = null;
+    let failure = null;
+
+    try {
+      result = await scheduledScan(this.env);
+    } catch (error) {
+      failure = errorString(error);
+      console.error("V673_DURABLE_SCHEDULED_SCAN_ERROR", failure);
+    }
+
+    const completedAt = Date.now();
+    const nextAlarmAt = completedAt + SCAN_SCHEDULER_INTERVAL_MS_V673;
+
+    const last = {
+      ok: !failure,
+      status: failure
+        ? "DURABLE_SCHEDULED_SCAN_FAILED_V673"
+        : "DURABLE_SCHEDULED_SCAN_COMPLETE_V673",
+      error: failure,
+      startedAt,
+      completedAt,
+      durationMs: completedAt - startedAt,
+      scanStatus: result?.status || null,
+      latestBlock: result?.latestBlock ?? null,
+      scheduledRun: result?.scheduledRun === true,
+      requestsUsed: result?.requestBudget?.used ?? null,
+      qualifyingCandidates: result?.qualifyingCandidates ?? null,
+      nextAlarmAt
+    };
+
+    try {
+      await this.state.storage.put("v673:last", last);
+    } catch (error) {
+      console.error("V673_SCHEDULER_STATUS_WRITE_FAILED", errorString(error));
+    }
+
+    // Always re-arm for the next normal five-minute cycle. We deliberately catch
+    // scan failures above so Cloudflare alarm retries cannot create duplicate scans.
+    await this.state.storage.setAlarm(nextAlarmAt);
+
+    console.log(
+      jsonStringifySafeV246({
+        event: "V673_DURABLE_SCHEDULED_SCAN",
+        ...last,
+        timestamp: now()
+      })
+    );
+  }
 }
 
 export class V3LiveCollectorV363 {
@@ -143191,12 +143417,15 @@ export default {
     ctx
   ) {
     /*
-     * V670: Cloudflare Free cron events were proven to die at 10 ms CPU before
-     * the full scanner could finish. Keep the scheduled event itself tiny and
-     * relay into the already-working HTTP scan execution path.
+     * V673: Free-plan Cron remains a tiny nudge only. Heavy scheduledScan(env)
+     * executes later inside the ScanSchedulerV673 Durable Object alarm.
      */
     ctx.waitUntil(
-      relayScheduledScanV670()
+      scanSchedulerRequestV673(
+        env,
+        "/ensure",
+        "POST"
+      )
     );
   }
 };
