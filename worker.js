@@ -1,6 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V695
+ * AUTHORITATIVE RUNTIME VERSION: V695
+ *
+ * V695 PAGED STATE-SIZE DIAGNOSTIC
+ * - builds directly forward from confirmed-working V694;
+ * - adds GET /state-size-v695?batch=N as a read-only maintenance route;
+ * - profiles only a small page of top-level state sections per request so the
+ *   ~24.7 MiB state is not re-serialized section-by-section in one Worker run;
+ * - returns exact serialized bytes/MiB for each section in that page, plus key
+ *   counts/array lengths when available, with zero state mutation;
+ * - no KV write, discovery, analysis, Telegram or provider requests;
+ * - V694 /compact-state-v693 remains unchanged and available;
+ * - preserves V690 ERC20 reservation logic and all V687-V689 V3 fixes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V694
- * AUTHORITATIVE RUNTIME VERSION: V694
+ * HISTORICAL VERSION NOTE: V694
  *
  * V694 MAINTENANCE ROUTE KV BINDING FIX
  * - builds directly forward from V693;
@@ -5771,7 +5787,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V694";
+const VERSION = "V695";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -18576,6 +18592,211 @@ function compactStateForKvV692(
   };
 }
 
+
+
+
+const V695_STATE_SIZE_BATCH_SIZE =
+  8;
+
+function shallowContainerCountV695(
+  value
+) {
+  if (Array.isArray(value)) {
+    return {
+      type: "array",
+      count: value.length
+    };
+  }
+
+  if (
+    value &&
+    typeof value === "object"
+  ) {
+    return {
+      type: "object",
+      count:
+        Object.keys(value).length
+    };
+  }
+
+  return {
+    type:
+      value === null
+        ? "null"
+        : typeof value,
+    count: null
+  };
+}
+
+async function stateSizeDiagnosticV695(
+  env,
+  batchInput
+) {
+  const stateRead =
+    await readState(
+      env
+    );
+
+  const state =
+    stateRead?.state ||
+    stateRead;
+
+  if (
+    !state ||
+    typeof state !== "object"
+  ) {
+    return {
+      ok: false,
+      version: VERSION,
+      route:
+        "/state-size-v695",
+      error:
+        "STATE_READ_FAILED_V695",
+      externalProviderRequests: 0,
+      telegramRequests: 0,
+      kvWrites: 0
+    };
+  }
+
+  const keys =
+    Object.keys(state)
+      .sort();
+
+  const requestedBatch =
+    Math.max(
+      0,
+      Math.floor(
+        safeNumber(batchInput)
+      )
+    );
+
+  const totalBatches =
+    Math.max(
+      1,
+      Math.ceil(
+        keys.length /
+        V695_STATE_SIZE_BATCH_SIZE
+      )
+    );
+
+  const batch =
+    Math.min(
+      requestedBatch,
+      totalBatches - 1
+    );
+
+  const start =
+    batch *
+    V695_STATE_SIZE_BATCH_SIZE;
+
+  const selectedKeys =
+    keys.slice(
+      start,
+      start +
+      V695_STATE_SIZE_BATCH_SIZE
+    );
+
+  const sections = [];
+
+  for (const key of selectedKeys) {
+    const value =
+      state[key];
+
+    let serialized =
+      "";
+
+    let bytes =
+      null;
+
+    let error =
+      null;
+
+    try {
+      serialized =
+        jsonStringifySafeV246(
+          value,
+          0
+        );
+
+      bytes =
+        utf8BytesV692(
+          serialized
+        );
+    }
+    catch (err) {
+      error =
+        String(
+          err?.message ||
+          err
+        ).slice(0, 180);
+    }
+
+    const shape =
+      shallowContainerCountV695(
+        value
+      );
+
+    sections.push({
+      key,
+      bytes,
+      mib:
+        Number.isFinite(
+          Number(bytes)
+        )
+          ? Number(
+              (
+                Number(bytes) /
+                (1024 * 1024)
+              ).toFixed(4)
+            )
+          : null,
+      type:
+        shape.type,
+      shallowCount:
+        shape.count,
+      error
+    });
+  }
+
+  sections.sort(
+    (a, b) =>
+      safeNumber(b?.bytes) -
+      safeNumber(a?.bytes)
+  );
+
+  return {
+    ok: true,
+    version: VERSION,
+    route:
+      "/state-size-v695",
+    mode:
+      "READ_ONLY_PAGED_TOP_LEVEL_PROFILE_V695",
+    batch,
+    batchSize:
+      V695_STATE_SIZE_BATCH_SIZE,
+    totalTopLevelKeys:
+      keys.length,
+    totalBatches,
+    keyRange: {
+      startIndex: start,
+      endIndexExclusive:
+        Math.min(
+          keys.length,
+          start +
+          V695_STATE_SIZE_BATCH_SIZE
+        )
+    },
+    sections,
+    nextBatch:
+      batch + 1 < totalBatches
+        ? batch + 1
+        : null,
+    mutatesState: false,
+    externalProviderRequests: 0,
+    telegramRequests: 0,
+    kvWrites: 0
+  };
+}
 
 
 async function compactAndWriteStateV693(
@@ -99123,6 +99344,7 @@ async function health(
     routes: [
       "/health",
       "/rpc-test",
+      "/state-size-v695",
       "/compact-state-v693",
       "/scan",
       "/state",
@@ -134887,7 +135109,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
-    "<i>V694 fixes the V693 maintenance-route KV binding unwrap only. Dedicated /compact-state-v693 behaviour, protected data policy, hard 42, Telegram reserve and all V687-V690 logic remain unchanged.</i>"
+    "<i>V695 adds a read-only paged state-size diagnostic route. V694 compaction behaviour, protected data policy, hard 42, Telegram reserve and all V687-V690 logic remain unchanged.</i>"
   ].join("\n");
 }
 
@@ -140973,6 +141195,20 @@ async function handleRequest(
     return jsonResponse(
       await rpcTest(
         env
+      )
+    );
+  }
+
+  if (
+    path ===
+    "/state-size-v695"
+  ) {
+    return jsonResponse(
+      await stateSizeDiagnosticV695(
+        env,
+        url.searchParams.get(
+          "batch"
+        )
       )
     );
   }
