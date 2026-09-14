@@ -1,6 +1,27 @@
 /**
+ * Robinhood Chain Meme Hunter — V684
+ * AUTHORITATIVE RUNTIME VERSION: V684
+ *
+ * V684 CLOCK-ALIGNED DURABLE SCHEDULER
+ * - builds directly forward from confirmed V683;
+ * - keeps the proven V673 Durable Object alarm architecture;
+ * - normal automatic scans are now aligned to exact five-minute wall-clock
+ *   boundaries: :00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55;
+ * - after a scan finishes, the next alarm is the next safe five-minute boundary,
+ *   not completedAt + five minutes, so scheduler drift is removed;
+ * - a 30-second minimum lead prevents an almost-immediate second scan when a
+ *   scan finishes just before a boundary;
+ * - /scheduler-start-v673 still bootstraps quickly, then subsequent alarms align;
+ * - no Cron relay is reintroduced and no wrangler/binding change is required;
+ * - V683 holder fairness, V682 diagnostics, V681/V680/V679 holder sequencing,
+ *   V676 fairness, V675 ERC-20 rescue, V674 CoinGecko second chance, scoring,
+ *   qualification, provider cooldowns and Telegram thresholds remain unchanged;
+ * - hard request ceiling remains 42.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V683
- * AUTHORITATIVE RUNTIME VERSION: V683
+ * HISTORICAL VERSION NOTE: V683
  *
  * V683 BOUNDED SECOND V666 HOLDER-PRO COMPLETION
  * - builds directly forward from diagnostic V682;
@@ -5544,7 +5565,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V683";
+const VERSION = "V684";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -132186,7 +132207,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
-    "<i>V683 raises no request ceiling and never permits simultaneous protected lanes: hard 42, Telegram reserve, provider cooldowns, CoinGecko Demo limits, scoring and qualification thresholds remain unchanged.</i>"
+    "<i>V684 keeps V683 holder fairness unchanged and aligns the existing Durable Object scheduler to :00/:05/:10/... boundaries; hard 42, Telegram reserve, provider cooldowns, CoinGecko Demo limits, scoring and qualification thresholds remain unchanged.</i>"
   ].join("\n");
 }
 
@@ -139964,6 +139985,41 @@ function liveSignalTelegramMessageV414(result) {
 const SCAN_SCHEDULER_NAME_V673 = "main-five-minute-scheduler";
 const SCAN_SCHEDULER_INTERVAL_MS_V673 = 5 * 60 * 1000;
 const SCAN_SCHEDULER_BOOT_DELAY_MS_V673 = 1500;
+const SCAN_SCHEDULER_MIN_BOUNDARY_LEAD_MS_V684 = 30 * 1000;
+
+function nextAlignedScanBoundaryV684(
+  fromMs = Date.now()
+) {
+  const base =
+    Math.max(
+      0,
+      safeNumber(fromMs)
+    ) +
+    SCAN_SCHEDULER_MIN_BOUNDARY_LEAD_MS_V684;
+
+  return (
+    Math.ceil(
+      base /
+      SCAN_SCHEDULER_INTERVAL_MS_V673
+    ) *
+    SCAN_SCHEDULER_INTERVAL_MS_V673
+  );
+}
+
+function isAlignedScanBoundaryV684(
+  timestamp
+) {
+  const t =
+    Number(timestamp);
+
+  return (
+    Number.isFinite(t) &&
+    t > 0 &&
+    t %
+      SCAN_SCHEDULER_INTERVAL_MS_V673 ===
+      0
+  );
+}
 
 function scanSchedulerStubV673(env) {
   if (!env?.SCAN_SCHEDULER_V673) return null;
@@ -140023,34 +140079,95 @@ export class ScanSchedulerV673 {
   async ensureAlarmV673(forceSoon = false) {
     const current = await this.state.storage.getAlarm();
     const nowMs = Date.now();
+
+    const currentNumber =
+      Number(current);
+
     const validFuture =
-      Number.isFinite(Number(current)) &&
-      Number(current) > nowMs + 500 &&
-      Number(current) <= nowMs + SCAN_SCHEDULER_INTERVAL_MS_V673 + 30000;
+      Number.isFinite(currentNumber) &&
+      currentNumber > nowMs + 500 &&
+      currentNumber <=
+        nowMs +
+          SCAN_SCHEDULER_INTERVAL_MS_V673 +
+          SCAN_SCHEDULER_MIN_BOUNDARY_LEAD_MS_V684 &&
+      (
+        forceSoon ||
+        isAlignedScanBoundaryV684(
+          currentNumber
+        )
+      );
 
     if (forceSoon || !validFuture) {
       const next = forceSoon
-        ? nowMs + SCAN_SCHEDULER_BOOT_DELAY_MS_V673
-        : nowMs + SCAN_SCHEDULER_INTERVAL_MS_V673;
+        ? nowMs +
+          SCAN_SCHEDULER_BOOT_DELAY_MS_V673
+        : nextAlignedScanBoundaryV684(
+            nowMs
+          );
+
       await this.state.storage.setAlarm(next);
-      return { armed: true, nextAlarmAt: next, changed: true };
+
+      return {
+        armed: true,
+        nextAlarmAt: next,
+        alignedV684:
+          !forceSoon &&
+          isAlignedScanBoundaryV684(next),
+        bootstrapSoonV684:
+          forceSoon === true,
+        changed: true
+      };
     }
 
-    return { armed: true, nextAlarmAt: Number(current), changed: false };
+    return {
+      armed: true,
+      nextAlarmAt: currentNumber,
+      alignedV684:
+        isAlignedScanBoundaryV684(
+          currentNumber
+        ),
+      bootstrapSoonV684: false,
+      changed: false
+    };
   }
 
   async statusV673() {
     const alarm = await this.state.storage.getAlarm();
-    const last = await this.state.storage.get("v673:last") || null;
+    const last =
+      await this.state.storage.get("v673:last") ||
+      null;
+
+    const alarmNumber =
+      Number(alarm);
+
+    const alarmValid =
+      Number.isFinite(alarmNumber) &&
+      alarmNumber > 0;
+
     return {
       ok: true,
       version: VERSION,
-      scheduler: "DURABLE_OBJECT_ALARM_V673",
-      alarmArmed: Number.isFinite(Number(alarm)),
-      nextAlarmAt: Number.isFinite(Number(alarm)) ? Number(alarm) : null,
-      nextAlarmIso: Number.isFinite(Number(alarm))
-        ? new Date(Number(alarm)).toISOString()
-        : null,
+      scheduler:
+        "DURABLE_OBJECT_ALARM_V673",
+      alignment:
+        "FIVE_MINUTE_WALL_CLOCK_BOUNDARIES_V684",
+      alarmArmed: alarmValid,
+      nextAlarmAt:
+        alarmValid
+          ? alarmNumber
+          : null,
+      nextAlarmIso:
+        alarmValid
+          ? new Date(
+              alarmNumber
+            ).toISOString()
+          : null,
+      nextAlarmAlignedV684:
+        alarmValid
+          ? isAlignedScanBoundaryV684(
+              alarmNumber
+            )
+          : false,
       last,
       timestamp: now()
     };
@@ -140110,7 +140227,11 @@ export class ScanSchedulerV673 {
     }
 
     const completedAt = Date.now();
-    const nextAlarmAt = completedAt + SCAN_SCHEDULER_INTERVAL_MS_V673;
+
+    const nextAlarmAt =
+      nextAlignedScanBoundaryV684(
+        completedAt
+      );
 
     const last = {
       ok: !failure,
@@ -140124,9 +140245,19 @@ export class ScanSchedulerV673 {
       scanStatus: result?.status || null,
       latestBlock: result?.latestBlock ?? null,
       scheduledRun: result?.scheduledRun === true,
-      requestsUsed: result?.requestBudget?.used ?? null,
-      qualifyingCandidates: result?.qualifyingCandidates ?? null,
-      nextAlarmAt
+      requestsUsed:
+        result?.requestBudget?.used ??
+        null,
+      qualifyingCandidates:
+        result?.qualifyingCandidates ??
+        null,
+      nextAlarmAt,
+      nextAlarmAlignedV684:
+        isAlignedScanBoundaryV684(
+          nextAlarmAt
+        ),
+      schedulerAlignmentV684:
+        "FIVE_MINUTE_WALL_CLOCK_BOUNDARIES"
     };
 
     try {
@@ -140135,8 +140266,9 @@ export class ScanSchedulerV673 {
       console.error("V673_SCHEDULER_STATUS_WRITE_FAILED", errorString(error));
     }
 
-    // Always re-arm for the next normal five-minute cycle. We deliberately catch
-    // scan failures above so Cloudflare alarm retries cannot create duplicate scans.
+    // Always re-arm to the next safe exact five-minute wall-clock boundary.
+    // We deliberately catch scan failures above so Cloudflare alarm retries
+    // cannot create duplicate scans.
     await this.state.storage.setAlarm(nextAlarmAt);
 
     console.log(
