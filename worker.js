@@ -1,6 +1,28 @@
 /**
+ * Robinhood Chain Meme Hunter — V676
+ * AUTHORITATIVE RUNTIME VERSION: V676
+ *
+ * V676 CURRENT/LIVE EVIDENCE FAIRNESS RESERVE
+ * - builds directly forward from confirmed V675;
+ * - adds a zero-extra-request fairness reserve across the already-selected
+ *   positively verified current/live launches;
+ * - before analysis starts, ONE existing analysis request is protected for each
+ *   selected current/live launch still waiting for its queue turn;
+ * - when that launch reaches its turn, its own fairness slot is released;
+ * - ordinary earlier-candidate enrichment/market work cannot consume the final
+ *   request(s) protected for later verified launches;
+ * - existing higher-priority lanes remain authoritative: V654/V675 ERC-20
+ *   identity work, V666 protected holder-Pro completion and the confirmed V674
+ *   CoinGecko Demo second chance may still bypass this fairness reserve;
+ * - this redistributes the SAME request budget only: hard global 42, base/effective
+ *   analysis limits, Telegram reserve and provider limits are unchanged;
+ * - no scoring, qualification, Telegram threshold, launch-source, Momentum, ATH,
+ *   learning, holder verification rule or Durable Object scheduling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V675
- * AUTHORITATIVE RUNTIME VERSION: V675
+ * HISTORICAL VERSION NOTE: V675
  *
  * V675 FRESH-LAUNCH ERC-20 IDENTITY RESCUE RESERVE
  * - builds directly forward from confirmed V674;
@@ -5376,7 +5398,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V675";
+const VERSION = "V676";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12322,6 +12344,194 @@ function observeFreshVerifiedLaunchIdentityOverrideV654(
 }
 
 
+function configureCurrentLiveEvidenceFairnessReserveV676(
+  budget,
+  queue,
+  currentLiveVerifiedLaunchTokensV621
+) {
+  if (!budget?.analysis) return null;
+
+  const addresses = [];
+  const seen = new Set();
+
+  for (const watched of Array.isArray(queue) ? queue : []) {
+    const address = normalize(watched?.address);
+
+    if (
+      !isAddress(address) ||
+      seen.has(address) ||
+      !currentLiveVerifiedLaunchTokensV621?.has(address)
+    ) {
+      continue;
+    }
+
+    seen.add(address);
+    addresses.push(address);
+  }
+
+  const reserve = {
+    enabled: true,
+    configuredAt: Date.now(),
+    pendingAddresses: [...addresses],
+    releasedAddresses: [],
+    initialReservedRequests: addresses.length,
+    reservedRequests: addresses.length,
+    perLaunchRequests: 1,
+    active: addresses.length > 0,
+    lowerPriorityRequestsBlocked: 0,
+    blockedTypes: {},
+    lastBlockedType: null,
+    lastBlockedAt: null,
+    hardRequestLimitRaised: false,
+    analysisLimitRaised: false
+  };
+
+  budget.analysis.currentLiveEvidenceFairnessReserveV676 =
+    reserve;
+
+  return reserve;
+}
+
+function releaseCurrentLiveEvidenceFairnessSlotV676(
+  budget,
+  address
+) {
+  const reserve =
+    budget?.analysis
+      ?.currentLiveEvidenceFairnessReserveV676;
+
+  const token = normalize(address);
+
+  if (
+    reserve?.enabled !== true ||
+    !isAddress(token) ||
+    !Array.isArray(reserve.pendingAddresses)
+  ) {
+    return false;
+  }
+
+  const index =
+    reserve.pendingAddresses.indexOf(token);
+
+  if (index < 0) return false;
+
+  reserve.pendingAddresses.splice(index, 1);
+
+  if (
+    !Array.isArray(reserve.releasedAddresses)
+  ) {
+    reserve.releasedAddresses = [];
+  }
+
+  if (
+    !reserve.releasedAddresses.includes(token)
+  ) {
+    reserve.releasedAddresses.push(token);
+  }
+
+  reserve.reservedRequests =
+    Math.max(
+      0,
+      safeNumber(reserve.reservedRequests) - 1
+    );
+
+  reserve.active =
+    reserve.reservedRequests > 0;
+
+  return true;
+}
+
+function currentLiveEvidenceFairnessReserveBlocksV676(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  if (phase !== "analysis") return false;
+
+  const reserve =
+    budget?.analysis
+      ?.currentLiveEvidenceFairnessReserveV676;
+
+  const reserved =
+    Math.max(
+      0,
+      safeNumber(reserve?.reservedRequests)
+    );
+
+  if (
+    reserve?.active !== true ||
+    reserved <= 0
+  ) {
+    return false;
+  }
+
+  const notificationReserveRemaining =
+    budget.notification
+      ?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(budget.notification?.limit) -
+            safeNumber(budget.notification?.used)
+        )
+      : 0;
+
+  const preTelegramGlobalLimit =
+    Math.max(
+      0,
+      safeNumber(budget.totalLimit) -
+        notificationReserveRemaining
+    );
+
+  const preservesAnalysis =
+    safeNumber(budget.analysis?.used) + amount <=
+      Math.max(
+        0,
+        effectiveAnalysisLimitV416(budget) -
+          reserved
+      );
+
+  const preservesGlobal =
+    safeNumber(budget.totalUsed) + amount <=
+      Math.max(
+        0,
+        preTelegramGlobalLimit -
+          reserved
+      );
+
+  if (
+    preservesAnalysis &&
+    preservesGlobal
+  ) {
+    return false;
+  }
+
+  reserve.lowerPriorityRequestsBlocked =
+    safeNumber(
+      reserve.lowerPriorityRequestsBlocked
+    ) + 1;
+
+  const key =
+    String(type || "UNKNOWN");
+
+  reserve.blockedTypes =
+    reserve.blockedTypes &&
+    typeof reserve.blockedTypes === "object"
+      ? reserve.blockedTypes
+      : {};
+
+  reserve.blockedTypes[key] =
+    safeNumber(
+      reserve.blockedTypes[key]
+    ) + 1;
+
+  reserve.lastBlockedType = key;
+  reserve.lastBlockedAt = Date.now();
+
+  return true;
+}
+
+
 function priorityHolderProCompletionRequestV666(
   budget,
   phase,
@@ -12510,6 +12720,46 @@ function consumeBudget(
       phase,
       type
     );
+
+  if (
+    !priorityHolderProRequestV666 &&
+    !freshVerifiedLaunchIdentityRequestV654 &&
+    !coinGeckoDemoSecondChancePriorityV674 &&
+    currentLiveEvidenceFairnessReserveBlocksV676(
+      budget,
+      phase,
+      type,
+      amount
+    )
+  ) {
+    budget.skipped.push({
+      phase,
+      type,
+      amount,
+      reason:
+        "V676_CURRENT_LIVE_EVIDENCE_FAIRNESS_RESERVED",
+      reservedRequests:
+        safeNumber(
+          budget.analysis
+            ?.currentLiveEvidenceFairnessReserveV676
+            ?.reservedRequests
+        ),
+      pendingAddresses:
+        Array.isArray(
+          budget.analysis
+            ?.currentLiveEvidenceFairnessReserveV676
+            ?.pendingAddresses
+        )
+          ? [
+              ...budget.analysis
+                .currentLiveEvidenceFairnessReserveV676
+                .pendingAddresses
+            ]
+          : []
+    });
+
+    return false;
+  }
 
   if (
     coinGeckoDemoSecondChancePriorityV674 &&
@@ -80727,6 +80977,13 @@ for (
       currentLiveVerifiedLaunchTokensV621
     );
 
+  const v676CurrentLiveEvidenceFairnessReserve =
+    configureCurrentLiveEvidenceFairnessReserveV676(
+      budget,
+      v135AnalysisQueue,
+      currentLiveVerifiedLaunchTokensV621
+    );
+
   scannerFunnelV415.freshCandidatePriorityV469
     .currentLiveVerifiedLaunchPriorityV621
     .erc20IdentityReserveV653 = {
@@ -80752,6 +81009,33 @@ for (
           : [],
       requestCeilingsRaised: false,
       verificationRuleChanged: false
+    };
+
+  scannerFunnelV415.freshCandidatePriorityV469
+    .currentLiveVerifiedLaunchPriorityV621
+    .evidenceFairnessReserveV676 = {
+      enabled: true,
+      configuredAt:
+        v676CurrentLiveEvidenceFairnessReserve
+          ?.configuredAt || null,
+      initialReservedRequests:
+        safeNumber(
+          v676CurrentLiveEvidenceFairnessReserve
+            ?.initialReservedRequests
+        ),
+      pendingAddresses:
+        Array.isArray(
+          v676CurrentLiveEvidenceFairnessReserve
+            ?.pendingAddresses
+        )
+          ? [
+              ...v676CurrentLiveEvidenceFairnessReserve
+                .pendingAddresses
+            ]
+          : [],
+      perLaunchRequests: 1,
+      hardRequestLimitRaised: false,
+      analysisLimitRaised: false
     };
 
   const v141AnalysedAddresses =
@@ -81070,6 +81354,55 @@ for (
         budget,
         address
       );
+
+    const releasedOwnEvidenceFairnessSlotV676 =
+      releaseCurrentLiveEvidenceFairnessSlotV676(
+        budget,
+        address
+      );
+
+    if (
+      releasedOwnEvidenceFairnessSlotV676 &&
+      scannerFunnelV415
+        ?.freshCandidatePriorityV469
+        ?.currentLiveVerifiedLaunchPriorityV621
+        ?.evidenceFairnessReserveV676
+    ) {
+      const fairnessTelemetryV676 =
+        scannerFunnelV415
+          .freshCandidatePriorityV469
+          .currentLiveVerifiedLaunchPriorityV621
+          .evidenceFairnessReserveV676;
+
+      fairnessTelemetryV676.releasedAddresses =
+        Array.isArray(
+          fairnessTelemetryV676.releasedAddresses
+        )
+          ? fairnessTelemetryV676.releasedAddresses
+          : [];
+
+      if (
+        !fairnessTelemetryV676.releasedAddresses
+          .includes(address)
+      ) {
+        fairnessTelemetryV676.releasedAddresses
+          .push(address);
+      }
+
+      fairnessTelemetryV676.remainingReservedRequests =
+        safeNumber(
+          budget.analysis
+            ?.currentLiveEvidenceFairnessReserveV676
+            ?.reservedRequests
+        );
+
+      fairnessTelemetryV676.lowerPriorityRequestsBlocked =
+        safeNumber(
+          budget.analysis
+            ?.currentLiveEvidenceFairnessReserveV676
+            ?.lowerPriorityRequestsBlocked
+        );
+    }
 
     if (
       releasedOwnErc20SlotV653 &&
@@ -130500,7 +130833,7 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V675 preserves V655 fresh-launch budget protection, V663 audit, V664/V665 diagnostics, V666 holder completion, V674 CoinGecko second-chance completion and the V673 Durable Object scheduler; V675 adds only one bounded ERC-20 identity rescue request per fresh verified launch when still-unproven methods remain.",
+    "V676 preserves V675 ERC-20 identity rescue, V674 CoinGecko second-chance completion, V666 holder completion and the V673 Durable Object scheduler; V676 protects one existing analysis request for each later selected current/live verified launch until that launch reaches its queue turn.",
     "<i>V671 preserves the V667 one-Demo-request/second-chance rules, 9,500/month bot meter and hard 42-request ceiling; only scheduled request routing changes.</i>"
   ].join("\n");
 }
