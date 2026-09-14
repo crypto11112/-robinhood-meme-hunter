@@ -1,6 +1,20 @@
 /**
+ * Robinhood Chain Meme Hunter — V686
+ * AUTHORITATIVE RUNTIME VERSION: V686
+ *
+ * V686 ERC20 IDENTITY-RESCUE DIAGNOSTIC
+ * - diagnostic-only build directly forward from V685;
+ * - no request allocation, provider routing, scoring, qualification,
+ *   Telegram threshold or hard-42 behaviour changes;
+ * - records the exact V685 third-method rescue arm/consume/denial path;
+ * - persists that trace with deferred V418 identity evidence so /erc20-rpc
+ *   can show why the rescue did or did not run;
+ * - V684 scheduler alignment and V683 holder fairness remain unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V685
- * AUTHORITATIVE RUNTIME VERSION: V685
+ * HISTORICAL VERSION NOTE: V685
  *
  * V685 BOUNDED ERC20 THIRD-METHOD IDENTITY COMPLETION
  * - builds directly forward from confirmed V684;
@@ -5588,7 +5602,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V685";
+const VERSION = "V686";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12560,6 +12574,48 @@ function erc20IdentityCompletionStateV685(
   );
 }
 
+function erc20IdentityDiagnosticRowsV686(
+  budget
+) {
+  if (!budget?.analysis) return null;
+
+  if (
+    !Array.isArray(
+      budget.analysis
+        .erc20IdentityDiagnosticRowsV686
+    )
+  ) {
+    budget.analysis
+      .erc20IdentityDiagnosticRowsV686 = [];
+  }
+
+  return budget.analysis
+    .erc20IdentityDiagnosticRowsV686;
+}
+
+function recordErc20IdentityDiagnosticV686(
+  budget,
+  row = {}
+) {
+  const rows =
+    erc20IdentityDiagnosticRowsV686(
+      budget
+    );
+
+  if (!rows) return;
+
+  rows.push({
+    at: Date.now(),
+    ...row
+  });
+
+  if (rows.length > 40) {
+    budget.analysis
+      .erc20IdentityDiagnosticRowsV686 =
+      rows.slice(-40);
+  }
+}
+
 function currentLiveVerifiedLaunchIdentityAddressV685(
   budget,
   address
@@ -12614,15 +12670,59 @@ function armErc20IdentityCompletionV685(
 
   const token = normalize(address);
 
+  const priorityEligibleV686 =
+    currentLiveVerifiedLaunchIdentityAddressV685(
+      budget,
+      token
+    );
+
   if (
     !state?.enabled ||
     state.used === true ||
     state.active === true ||
-    !currentLiveVerifiedLaunchIdentityAddressV685(
-      budget,
-      token
-    )
+    !priorityEligibleV686
   ) {
+    recordErc20IdentityDiagnosticV686(
+      budget,
+      {
+        stage: "ARM_DENIED_V686",
+        address: token,
+        method: String(method || ""),
+        stateEnabled:
+          state?.enabled === true,
+        stateUsed:
+          state?.used === true,
+        stateActive:
+          state?.active === true,
+        priorityEligibleV685:
+          priorityEligibleV686,
+        analysisUsed:
+          safeNumber(
+            budget?.analysis?.used
+          ),
+        analysisLimit:
+          safeNumber(
+            budget?.analysis?.limit
+          ),
+        totalUsed:
+          safeNumber(
+            budget?.totalUsed
+          ),
+        totalLimit:
+          safeNumber(
+            budget?.totalLimit
+          ),
+        denialReason:
+          !state?.enabled
+            ? "STATE_DISABLED"
+            : state.used === true
+              ? "RESCUE_ALREADY_USED"
+              : state.active === true
+                ? "RESCUE_ALREADY_ACTIVE"
+                : "TOKEN_NOT_IN_V654_PRIORITY_LIST"
+      }
+    );
+
     return false;
   }
 
@@ -12636,6 +12736,43 @@ function armErc20IdentityCompletionV685(
       safeNumber(
         state.deniedNoGlobalHeadroom
       ) + 1;
+
+    recordErc20IdentityDiagnosticV686(
+      budget,
+      {
+        stage: "ARM_DENIED_V686",
+        address: token,
+        method: String(method || ""),
+        priorityEligibleV685: true,
+        analysisUsed:
+          safeNumber(
+            budget?.analysis?.used
+          ),
+        analysisLimit:
+          safeNumber(
+            budget?.analysis?.limit
+          ),
+        totalUsed:
+          safeNumber(
+            budget?.totalUsed
+          ),
+        totalLimit:
+          safeNumber(
+            budget?.totalLimit
+          ),
+        notificationUsed:
+          safeNumber(
+            budget?.notification?.used
+          ),
+        notificationLimit:
+          safeNumber(
+            budget?.notification?.limit
+          ),
+        denialReason:
+          "NO_PRE_TELEGRAM_GLOBAL_HEADROOM"
+      }
+    );
+
     return false;
   }
 
@@ -12645,6 +12782,32 @@ function armErc20IdentityCompletionV685(
   state.armedAt = Date.now();
   state.armedCount =
     safeNumber(state.armedCount) + 1;
+
+  recordErc20IdentityDiagnosticV686(
+    budget,
+    {
+      stage: "ARM_ACCEPTED_V686",
+      address: token,
+      method: String(method || ""),
+      priorityEligibleV685: true,
+      analysisUsed:
+        safeNumber(
+          budget?.analysis?.used
+        ),
+      analysisLimit:
+        safeNumber(
+          budget?.analysis?.limit
+        ),
+      totalUsed:
+        safeNumber(
+          budget?.totalUsed
+        ),
+      totalLimit:
+        safeNumber(
+          budget?.totalLimit
+        )
+    }
+  );
 
   return true;
 }
@@ -12686,6 +12849,36 @@ function consumeErc20IdentityCompletionV685(
   const state =
     budget.analysis.erc20IdentityCompletionV685;
 
+  recordErc20IdentityDiagnosticV686(
+    budget,
+    {
+      stage: "CONSUME_ENTERED_V686",
+      address:
+        normalize(state?.address),
+      method:
+        state?.method || null,
+      phase,
+      type,
+      amount,
+      analysisUsed:
+        safeNumber(
+          budget?.analysis?.used
+        ),
+      analysisLimit:
+        safeNumber(
+          budget?.analysis?.limit
+        ),
+      totalUsed:
+        safeNumber(
+          budget?.totalUsed
+        ),
+      totalLimit:
+        safeNumber(
+          budget?.totalLimit
+        )
+    }
+  );
+
   if (
     !erc20IdentityCompletionGlobalHeadroomV685(
       budget,
@@ -12709,6 +12902,30 @@ function consumeErc20IdentityCompletionV685(
       method:
         state.method || null
     });
+
+    recordErc20IdentityDiagnosticV686(
+      budget,
+      {
+        stage: "CONSUME_DENIED_V686",
+        address:
+          normalize(state?.address),
+        method:
+          state?.method || null,
+        phase,
+        type,
+        amount,
+        denialReason:
+          "NO_PRE_TELEGRAM_GLOBAL_HEADROOM",
+        totalUsed:
+          safeNumber(
+            budget?.totalUsed
+          ),
+        totalLimit:
+          safeNumber(
+            budget?.totalLimit
+          )
+      }
+    );
 
     return false;
   }
@@ -12738,6 +12955,34 @@ function consumeErc20IdentityCompletionV685(
   state.notificationReservePreserved =
     budget.notification
       ?.globalReserveActiveV174 === true;
+
+  recordErc20IdentityDiagnosticV686(
+    budget,
+    {
+      stage: "CONSUME_ACCEPTED_V686",
+      address:
+        normalize(state?.address),
+      method:
+        state?.method || null,
+      phase,
+      type,
+      amount,
+      analysisUsedAfter:
+        safeNumber(
+          budget?.analysis?.used
+        ),
+      totalUsedAfter:
+        safeNumber(
+          budget?.totalUsed
+        ),
+      totalLimit:
+        safeNumber(
+          budget?.totalLimit
+        ),
+      notificationReservePreserved:
+        state.notificationReservePreserved
+    }
+  );
 
   return true;
 }
@@ -14500,6 +14745,9 @@ function budgetTelemetry(
 
       erc20IdentityCompletionV685:
         budget.analysis?.erc20IdentityCompletionV685 || null,
+
+      erc20IdentityDiagnosticRowsV686:
+        budget.analysis?.erc20IdentityDiagnosticRowsV686 || [],
 
       directionalWatchReserveV553:
         budget.analysis?.directionalWatchReserveV553 || null,
@@ -43890,6 +44138,39 @@ async function verifyERC20(env, address, budget, watched) {
             )?.verified === true
         ).length;
 
+      recordErc20IdentityDiagnosticV686(
+        budget,
+        {
+          stage:
+            "THIRD_METHOD_BUDGET_BOUNDARY_V686",
+          address:
+            normalize(address),
+          method: label,
+          verifiedMethodProofsBeforeV685,
+          priorityEligibleV685:
+            currentLiveVerifiedLaunchIdentityAddressV685(
+              budget,
+              address
+            ),
+          analysisUsed:
+            safeNumber(
+              budget?.analysis?.used
+            ),
+          analysisLimit:
+            safeNumber(
+              budget?.analysis?.limit
+            ),
+          totalUsed:
+            safeNumber(
+              budget?.totalUsed
+            ),
+          totalLimit:
+            safeNumber(
+              budget?.totalLimit
+            )
+        }
+      );
+
       const rescueArmedV685 =
         verifiedMethodProofsBeforeV685 >= 2 &&
         armErc20IdentityCompletionV685(
@@ -44077,6 +44358,69 @@ async function verifyERC20(env, address, budget, watched) {
         checkpointedMethodCountV419,
         reusedMethodProofCountV419,
         reusedCodeProofV419,
+        v685IdentityCompletionState:
+          budget?.analysis
+            ?.erc20IdentityCompletionV685
+            ? {
+                enabled:
+                  budget.analysis
+                    .erc20IdentityCompletionV685
+                    .enabled === true,
+                active:
+                  budget.analysis
+                    .erc20IdentityCompletionV685
+                    .active === true,
+                used:
+                  budget.analysis
+                    .erc20IdentityCompletionV685
+                    .used === true,
+                address:
+                  budget.analysis
+                    .erc20IdentityCompletionV685
+                    .address || null,
+                method:
+                  budget.analysis
+                    .erc20IdentityCompletionV685
+                    .method || null,
+                deniedNoGlobalHeadroom:
+                  safeNumber(
+                    budget.analysis
+                      .erc20IdentityCompletionV685
+                      .deniedNoGlobalHeadroom
+                  ),
+                armedCount:
+                  safeNumber(
+                    budget.analysis
+                      .erc20IdentityCompletionV685
+                      .armedCount
+                  ),
+                consumedCount:
+                  safeNumber(
+                    budget.analysis
+                      .erc20IdentityCompletionV685
+                      .consumedCount
+                  ),
+                finalBudgetBlocked:
+                  safeNumber(
+                    budget.analysis
+                      .erc20IdentityCompletionV685
+                      .finalBudgetBlocked
+                  )
+              }
+            : null,
+        v686IdentityDiagnostic:
+          Array.isArray(
+            budget?.analysis
+              ?.erc20IdentityDiagnosticRowsV686
+          )
+            ? budget.analysis
+                .erc20IdentityDiagnosticRowsV686
+                .filter(
+                  row =>
+                    normalize(row?.address) ===
+                    normalize(address)
+                )
+            : [],
         savedProbeEstimateV419: Math.max(0, methodSpecs.length - probes.filter(r => !r.skippedV419 && !r.reusedProofV419).length)
       };
       persistErc20IdentityV418(watched, diagnostic);
@@ -97480,6 +97824,14 @@ async function erc20RpcDiagnosticV652(env) {
         requiredScore: safeNumber(diag?.requiredScore) || 3,
         earlyStoppedV419: diag?.earlyStoppedV419 === true,
         stoppedAfterV419: diag?.stoppedAfterV419 || null,
+        v685IdentityCompletionState:
+          diag?.v685IdentityCompletionState || null,
+        v686IdentityDiagnostic:
+          Array.isArray(
+            diag?.v686IdentityDiagnostic
+          )
+            ? diag.v686IdentityDiagnostic
+            : [],
         code: diag?.code
           ? {
               verifiedResponse:
@@ -97525,7 +97877,11 @@ async function erc20RpcDiagnosticV652(env) {
                 v421PrimaryError:
                   m?.v421PrimaryError || null,
                 v421FallbackError:
-                  m?.v421FallbackError || null
+                  m?.v421FallbackError || null,
+                v685IdentityCompletionArmed:
+                  m?.v685IdentityCompletionArmed === true,
+                v685IdentityCompletionConsumed:
+                  m?.v685IdentityCompletionConsumed === true
               }))
             : []
       };
@@ -132513,7 +132869,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
-    "<i>V685 keeps V684 scheduler alignment and V683 holder fairness unchanged; one bounded third-method ERC20 identity completion may cross internal analysis boundaries only when pre-Telegram global headroom exists. Hard 42, Telegram reserve, provider routing, scoring and qualification thresholds remain unchanged.</i>"
+    "<i>V686 is diagnostic-only over V685: it exposes the third-method identity-rescue arm/consume/denial path without changing request allocation. V684 scheduler alignment, V683 holder fairness, hard 42, Telegram reserve, provider routing, scoring and qualification thresholds remain unchanged.</i>"
   ].join("\n");
 }
 
