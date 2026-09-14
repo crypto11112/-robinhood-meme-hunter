@@ -1,6 +1,28 @@
 /**
+ * Robinhood Chain Meme Hunter — V677
+ * AUTHORITATIVE RUNTIME VERSION: V677
+ *
+ * V677 V666 HOLDER-PRO FINAL BUDGET BOUNDARY FIX
+ * - builds directly forward from confirmed V676;
+ * - fixes the repeated live case where the V666 one-per-scan protected
+ *   Blockscout Pro holder request was correctly claimed ("holder slot USED")
+ *   but then still failed at the final phase-level analysis limit with
+ *   ANALYSIS_BUDGET_UNAVAILABLE;
+ * - ONLY the already-authorised V666 BLOCKSCOUT_PRO_HOLDERS_V143 request may
+ *   cross that internal analysis-phase boundary;
+ * - the request still MUST fit inside the existing pre-Telegram global budget,
+ *   with the unused Telegram/notification reserve protected exactly as before;
+ * - hard total request ceiling remains 42 and no extra provider request is
+ *   created unless real global headroom already exists;
+ * - V666 remains one protected holder-Pro completion request per scan;
+ * - V676 fairness, V675 ERC-20 rescue, V674 CoinGecko second chance,
+ *   V673 Durable Object scheduling, scoring, qualification, holder/risk rules,
+ *   provider cooldowns and Telegram thresholds remain unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V676
- * AUTHORITATIVE RUNTIME VERSION: V676
+ * HISTORICAL VERSION NOTE: V676
  *
  * V676 CURRENT/LIVE EVIDENCE FAIRNESS RESERVE
  * - builds directly forward from confirmed V675;
@@ -5398,7 +5420,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V676";
+const VERSION = "V677";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12600,6 +12622,17 @@ function claimPriorityHolderProCompletionV666(
       v459: 0,
       v182: 0,
       v301: 0
+    },
+    finalBoundaryV677: {
+      evaluated: false,
+      normalBudgetAvailable: null,
+      bypassUsed: false,
+      hardOrNotificationBlocked: false,
+      analysisUsedBefore: null,
+      effectiveAnalysisLimit: null,
+      totalUsedBefore: null,
+      hardTotalLimit: null,
+      notificationReserveRemaining: null
     }
   };
 
@@ -12649,6 +12682,52 @@ function observeCoinGeckoDemoSecondChanceReserveBypassV674(
 
   telemetry.bypasses[key] =
     safeNumber(telemetry.bypasses[key]) + 1;
+}
+
+function priorityHolderProFinalBudgetAvailableV677(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  if (
+    phase !== "analysis" ||
+    type !== "BLOCKSCOUT_PRO_HOLDERS_V143" ||
+    !priorityHolderProCompletionRequestV666(
+      budget,
+      phase,
+      type
+    )
+  ) {
+    return false;
+  }
+
+  const notificationReserveRemainingV677 =
+    budget.notification
+      ?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(
+            budget.notification?.limit
+          ) -
+            safeNumber(
+              budget.notification?.used
+            )
+        )
+      : 0;
+
+  const preTelegramGlobalLimitV677 =
+    Math.max(
+      0,
+      safeNumber(budget.totalLimit) -
+        notificationReserveRemainingV677
+    );
+
+  return (
+    safeNumber(budget.totalUsed) +
+      amount <=
+    preTelegramGlobalLimitV677
+  );
 }
 
 function consumeBudget(
@@ -13239,12 +13318,85 @@ function consumeBudget(
     }
   }
 
-  if (
-    !budgetAvailable(
+  const normalFinalBudgetAvailableV677 =
+    budgetAvailable(
       budget,
       phase,
       amount
+    );
+
+  const priorityHolderProFinalBudgetAvailableV677 =
+    (
+      priorityHolderProRequestV666 &&
+      !normalFinalBudgetAvailableV677
     )
+      ? priorityHolderProFinalBudgetAvailableV677(
+          budget,
+          phase,
+          type,
+          amount
+        )
+      : false;
+
+  if (
+    priorityHolderProRequestV666 &&
+    holderLaneV666
+  ) {
+    holderLaneV666.finalBoundaryV677 =
+      holderLaneV666.finalBoundaryV677 || {
+        evaluated: false,
+        normalBudgetAvailable: null,
+        bypassUsed: false,
+        hardOrNotificationBlocked: false,
+        analysisUsedBefore: null,
+        effectiveAnalysisLimit: null,
+        totalUsedBefore: null,
+        hardTotalLimit: null,
+        notificationReserveRemaining: null
+      };
+
+    const tV677 =
+      holderLaneV666.finalBoundaryV677;
+
+    tV677.evaluated = true;
+    tV677.normalBudgetAvailable =
+      normalFinalBudgetAvailableV677;
+    tV677.bypassUsed =
+      (
+        !normalFinalBudgetAvailableV677 &&
+        priorityHolderProFinalBudgetAvailableV677
+      );
+    tV677.hardOrNotificationBlocked =
+      (
+        !normalFinalBudgetAvailableV677 &&
+        !priorityHolderProFinalBudgetAvailableV677
+      );
+    tV677.analysisUsedBefore =
+      safeNumber(budget.analysis?.used);
+    tV677.effectiveAnalysisLimit =
+      effectiveAnalysisLimitV416(budget);
+    tV677.totalUsedBefore =
+      safeNumber(budget.totalUsed);
+    tV677.hardTotalLimit =
+      safeNumber(budget.totalLimit);
+    tV677.notificationReserveRemaining =
+      budget.notification
+        ?.globalReserveActiveV174 === true
+        ? Math.max(
+            0,
+            safeNumber(
+              budget.notification?.limit
+            ) -
+              safeNumber(
+                budget.notification?.used
+              )
+          )
+        : 0;
+  }
+
+  if (
+    !normalFinalBudgetAvailableV677 &&
+    !priorityHolderProFinalBudgetAvailableV677
   ) {
     if (
       priorityHolderProRequestV666 &&
@@ -13253,7 +13405,7 @@ function consumeBudget(
       holderLaneV666.active = false;
       holderLaneV666.used = false;
       holderLaneV666.consumeStatus =
-        "HARD_OR_PHASE_BUDGET_UNAVAILABLE";
+        "HARD_OR_NOTIFICATION_BUDGET_UNAVAILABLE_V677";
       holderLaneV666.closedAt =
         Date.now();
     }
@@ -13318,7 +13470,11 @@ function consumeBudget(
     holderLaneV666.consumedAt =
       Date.now();
     holderLaneV666.consumeStatus =
-      "CONSUMED_WITHIN_EXISTING_BUDGET";
+      holderLaneV666
+        ?.finalBoundaryV677
+        ?.bypassUsed === true
+        ? "CONSUMED_VIA_V677_FINAL_ANALYSIS_BOUNDARY_BYPASS"
+        : "CONSUMED_WITHIN_EXISTING_BUDGET";
 
     /*
      * Diagnostic counters: this protected request bypasses only internal
@@ -130833,7 +130989,7 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V676 preserves V675 ERC-20 identity rescue, V674 CoinGecko second-chance completion, V666 holder completion and the V673 Durable Object scheduler; V676 protects one existing analysis request for each later selected current/live verified launch until that launch reaches its queue turn.",
+    "V677 preserves V676 fairness, V675 ERC-20 identity rescue, V674 CoinGecko second-chance completion and the V673 Durable Object scheduler; V677 lets only the already-authorised one-per-scan V666 Blockscout Pro holder request cross the internal analysis-phase boundary when real pre-Telegram global headroom still exists.",
     "<i>V671 preserves the V667 one-Demo-request/second-chance rules, 9,500/month bot meter and hard 42-request ceiling; only scheduled request routing changes.</i>"
   ].join("\n");
 }
