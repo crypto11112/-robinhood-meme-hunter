@@ -1,6 +1,29 @@
 /**
+ * Robinhood Chain Meme Hunter — V685
+ * AUTHORITATIVE RUNTIME VERSION: V685
+ *
+ * V685 BOUNDED ERC20 THIRD-METHOD IDENTITY COMPLETION
+ * - builds directly forward from confirmed V684;
+ * - diagnostic proof showed recurring V418 deferrals were budget failures,
+ *   not RPC/provider failures: bytecode + name + symbol verified, then decimals
+ *   was blocked at the analysis-budget boundary;
+ * - for a current/live verified-launch identity already holding TWO verified
+ *   ERC20 method proofs, V685 may arm exactly ONE final protected eth_call
+ *   completion request for the third method;
+ * - the rescue can cross internal analysis/reserve boundaries only while real
+ *   pre-Telegram global headroom remains;
+ * - at most one V685 rescue request per token identity pass; no fallback request
+ *   is granted if that one protected request itself fails;
+ * - hard request ceiling stays 42 and the Telegram notification reserve remains
+ *   protected;
+ * - no RPC provider/fallback routing changes;
+ * - V684 five-minute wall-clock scheduler alignment, V683 holder fairness,
+ *   V682 diagnostics and all prior scoring/qualification rules are preserved.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V684
- * AUTHORITATIVE RUNTIME VERSION: V684
+ * HISTORICAL VERSION NOTE: V684
  *
  * V684 CLOCK-ALIGNED DURABLE SCHEDULER
  * - builds directly forward from confirmed V683;
@@ -5565,7 +5588,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V684";
+const VERSION = "V685";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12511,6 +12534,215 @@ function observeFreshVerifiedLaunchIdentityOverrideV654(
 }
 
 
+
+function erc20IdentityCompletionStateV685(
+  budget
+) {
+  if (!budget?.analysis) return null;
+
+  return (
+    budget.analysis.erc20IdentityCompletionV685 ||
+    (budget.analysis.erc20IdentityCompletionV685 = {
+      enabled: true,
+      active: false,
+      used: false,
+      address: null,
+      method: null,
+      armedAt: null,
+      consumedAt: null,
+      deniedNoGlobalHeadroom: 0,
+      armedCount: 0,
+      consumedCount: 0,
+      finalBudgetBlocked: 0,
+      rule:
+        "TWO_VERIFIED_METHODS_PLUS_ONE_PROTECTED_THIRD_METHOD"
+    })
+  );
+}
+
+function currentLiveVerifiedLaunchIdentityAddressV685(
+  budget,
+  address
+) {
+  const token = normalize(address);
+  const reserve =
+    budget?.analysis?.freshVerifiedLaunchErc20ReserveV653;
+
+  return Boolean(
+    isAddress(token) &&
+    Array.isArray(reserve?.priorityAddressesV654) &&
+    reserve.priorityAddressesV654.includes(token)
+  );
+}
+
+function erc20IdentityCompletionGlobalHeadroomV685(
+  budget,
+  amount = 1
+) {
+  const notificationReserveRemaining =
+    budget?.notification?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(budget.notification?.limit) -
+            safeNumber(budget.notification?.used)
+        )
+      : 0;
+
+  const preTelegramGlobalLimit =
+    Math.max(
+      0,
+      safeNumber(budget?.totalLimit) -
+        notificationReserveRemaining
+    );
+
+  return (
+    safeNumber(budget?.totalUsed) +
+      Math.max(1, safeNumber(amount)) <=
+    preTelegramGlobalLimit
+  );
+}
+
+function armErc20IdentityCompletionV685(
+  budget,
+  address,
+  method
+) {
+  const state =
+    erc20IdentityCompletionStateV685(
+      budget
+    );
+
+  const token = normalize(address);
+
+  if (
+    !state?.enabled ||
+    state.used === true ||
+    state.active === true ||
+    !currentLiveVerifiedLaunchIdentityAddressV685(
+      budget,
+      token
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    !erc20IdentityCompletionGlobalHeadroomV685(
+      budget,
+      1
+    )
+  ) {
+    state.deniedNoGlobalHeadroom =
+      safeNumber(
+        state.deniedNoGlobalHeadroom
+      ) + 1;
+    return false;
+  }
+
+  state.active = true;
+  state.address = token;
+  state.method = String(method || "");
+  state.armedAt = Date.now();
+  state.armedCount =
+    safeNumber(state.armedCount) + 1;
+
+  return true;
+}
+
+function erc20IdentityCompletionRequestV685(
+  budget,
+  phase,
+  type
+) {
+  const state =
+    budget?.analysis?.erc20IdentityCompletionV685;
+
+  return Boolean(
+    phase === "analysis" &&
+    type === "RPC:eth_call" &&
+    state?.enabled === true &&
+    state?.active === true &&
+    state?.used !== true &&
+    isAddress(normalize(state?.address))
+  );
+}
+
+function consumeErc20IdentityCompletionV685(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  if (
+    !erc20IdentityCompletionRequestV685(
+      budget,
+      phase,
+      type
+    )
+  ) {
+    return null;
+  }
+
+  const state =
+    budget.analysis.erc20IdentityCompletionV685;
+
+  if (
+    !erc20IdentityCompletionGlobalHeadroomV685(
+      budget,
+      amount
+    )
+  ) {
+    state.active = false;
+    state.finalBudgetBlocked =
+      safeNumber(
+        state.finalBudgetBlocked
+      ) + 1;
+
+    budget.skipped.push({
+      phase,
+      type,
+      amount,
+      reason:
+        "V685_IDENTITY_COMPLETION_PRE_TELEGRAM_GLOBAL_BUDGET_BLOCKED",
+      address:
+        state.address || null,
+      method:
+        state.method || null
+    });
+
+    return false;
+  }
+
+  budget.totalUsed += amount;
+  budget.analysis.used += amount;
+
+  state.active = false;
+  state.used = true;
+  state.consumedAt = Date.now();
+  state.consumedCount =
+    safeNumber(
+      state.consumedCount
+    ) + 1;
+  state.analysisUsedAfter =
+    safeNumber(
+      budget.analysis.used
+    );
+  state.totalUsedAfter =
+    safeNumber(
+      budget.totalUsed
+    );
+  state.hardRequestLimit =
+    safeNumber(
+      budget.totalLimit
+    );
+  state.notificationReservePreserved =
+    budget.notification
+      ?.globalReserveActiveV174 === true;
+
+  return true;
+}
+
+
 function configureCurrentLiveEvidenceFairnessReserveV676(
   budget,
   queue,
@@ -13058,6 +13290,26 @@ function consumeBudget(
   type,
   amount = 1
 ) {
+  /*
+   * V685: one narrowly armed ERC20 third-method completion may bypass internal
+   * analysis/reserve boundaries. The helper still enforces the real
+   * pre-Telegram global ceiling, so the hard 42 and notification reserve remain
+   * authoritative.
+   */
+  const identityCompletionConsumeV685 =
+    consumeErc20IdentityCompletionV685(
+      budget,
+      phase,
+      type,
+      amount
+    );
+
+  if (
+    identityCompletionConsumeV685 !== null
+  ) {
+    return identityCompletionConsumeV685;
+  }
+
   const priorityHolderProRequestV666 =
     priorityHolderProCompletionRequestV666(
       budget,
@@ -14245,6 +14497,9 @@ function budgetTelemetry(
 
       freshVerifiedLaunchErc20ReserveV653:
         budget.analysis?.freshVerifiedLaunchErc20ReserveV653 || null,
+
+      erc20IdentityCompletionV685:
+        budget.analysis?.erc20IdentityCompletionV685 || null,
 
       directionalWatchReserveV553:
         budget.analysis?.directionalWatchReserveV553 || null,
@@ -28364,6 +28619,11 @@ async function rpc(
       !budgetAvailable(
         budget,
         phase
+      ) &&
+      !erc20IdentityCompletionRequestV685(
+        budget,
+        phase,
+        `RPC:${method}`
       )
     ) {
       break;
@@ -43620,22 +43880,64 @@ async function verifyERC20(env, address, budget, watched) {
     }
 
     if (!budgetAvailable(budget, "analysis", 1)) {
-      probes.push({
-        label,
-        ok: false,
-        raw: null,
-        provider: null,
-        error: "REQUEST_BUDGET_EXHAUSTED",
-        failureClass: "BUDGET",
-        retryableFailure: true,
-        reusedProofV419: false
-      });
-      earlyStoppedV419 = true;
-      stoppedAfterV419 = label;
-      break;
+      const verifiedMethodProofsBeforeV685 =
+        probes.filter(
+          row =>
+            row?.ok === true &&
+            decodeErc20ProbeValueV419(
+              row.label,
+              row.raw
+            )?.verified === true
+        ).length;
+
+      const rescueArmedV685 =
+        verifiedMethodProofsBeforeV685 >= 2 &&
+        armErc20IdentityCompletionV685(
+          budget,
+          address,
+          label
+        );
+
+      if (!rescueArmedV685) {
+        probes.push({
+          label,
+          ok: false,
+          raw: null,
+          provider: null,
+          error: "REQUEST_BUDGET_EXHAUSTED",
+          failureClass: "BUDGET",
+          retryableFailure: true,
+          reusedProofV419: false,
+          v685IdentityCompletionArmed: false
+        });
+        earlyStoppedV419 = true;
+        stoppedAfterV419 = label;
+        break;
+      }
     }
 
+    const rescueStateBeforeProbeV685 =
+      budget?.analysis
+        ?.erc20IdentityCompletionV685;
+
+    const rescueActiveForProbeV685 =
+      rescueStateBeforeProbeV685?.active === true &&
+      normalize(
+        rescueStateBeforeProbeV685?.address
+      ) === normalize(address) &&
+      String(
+        rescueStateBeforeProbeV685?.method || ""
+      ) === String(label);
+
     const probe = await erc20ProbeV418(env, address, data, label, budget);
+
+    if (rescueActiveForProbeV685) {
+      probe.v685IdentityCompletionArmed = true;
+      probe.v685IdentityCompletionConsumed =
+        budget?.analysis
+          ?.erc20IdentityCompletionV685
+          ?.used === true;
+    }
     probes.push(probe);
     openErc20RpcCircuitV420(env, budget, address, label, probe.error);
 
@@ -43740,7 +44042,11 @@ async function verifyERC20(env, address, budget, watched) {
     v421PrimaryError:
       row?.v421PrimaryError || null,
     v421FallbackError:
-      row?.v421FallbackError || null
+      row?.v421FallbackError || null,
+    v685IdentityCompletionArmed:
+      row?.v685IdentityCompletionArmed === true,
+    v685IdentityCompletionConsumed:
+      row?.v685IdentityCompletionConsumed === true
   }));
 
   if (score < 3) {
@@ -132207,7 +132513,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
-    "<i>V684 keeps V683 holder fairness unchanged and aligns the existing Durable Object scheduler to :00/:05/:10/... boundaries; hard 42, Telegram reserve, provider cooldowns, CoinGecko Demo limits, scoring and qualification thresholds remain unchanged.</i>"
+    "<i>V685 keeps V684 scheduler alignment and V683 holder fairness unchanged; one bounded third-method ERC20 identity completion may cross internal analysis boundaries only when pre-Telegram global headroom exists. Hard 42, Telegram reserve, provider routing, scoring and qualification thresholds remain unchanged.</i>"
   ].join("\n");
 }
 
