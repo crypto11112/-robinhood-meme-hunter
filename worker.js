@@ -1,6 +1,35 @@
 /**
+ * Robinhood Chain Meme Hunter — V687
+ * AUTHORITATIVE RUNTIME VERSION: V687
+ *
+ * V687 V3 VERIFIED-USD REFERENCE BRIDGE RESTORE
+ * - builds directly forward from diagnostic V686;
+ * - regression audit found the autonomous V333 native V3 collector still
+ *   captures exact WETH/USDG quote deltas, but scheduled rows are persisted
+ *   without USD conversion while the live V3 path expects the legacy V347
+ *   WETH/USDG reference key;
+ * - the scanner already produces a strict verified WETH/USDG reference in V452
+ *   using the existing 30-minute freshness rule;
+ * - V687 bridges that already-verified V452 reference into the existing V347 KV
+ *   key with ZERO new provider/RPC requests;
+ * - the scheduled V333 collector reads the reference once per run and applies
+ *   USD only to NEW exact-pool records:
+ *     * canonical USDG quote => exact USD directly;
+ *     * canonical WETH quote => exact WETH amount x fresh verified WETH/USDG;
+ * - no historical V3 rows are backfilled or rewritten;
+ * - the existing V605/V617 live HTTP V3 collector also benefits from the same
+ *   restored reference key when active;
+ * - no WebSocket rollback: V605 intentionally replaced production token
+ *   WebSockets with exact-pool HTTP eth_getLogs polling;
+ * - V686 ERC20 diagnostics, V685 rescue logic, V684 aligned scheduler and V683
+ *   holder fairness are preserved;
+ * - hard scanner request ceiling remains 42; scoring, qualification and
+ *   Telegram thresholds are unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V686
- * AUTHORITATIVE RUNTIME VERSION: V686
+ * HISTORICAL VERSION NOTE: V686
  *
  * V686 ERC20 IDENTITY-RESCUE DIAGNOSTIC
  * - diagnostic-only build directly forward from V685;
@@ -5602,7 +5631,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V686";
+const VERSION = "V687";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -8341,7 +8370,235 @@ function bestVerifiedWethUsdGReferenceV195(
   return null;
 }
 
+
+const V687_V3_USD_REFERENCE_KEY =
+  "robinhood-meme-hunter-v347-weth-usdg-reference";
+
+const V687_V3_USD_REFERENCE_MAX_AGE_MS =
+  30 * 60 * 1000;
+
+async function syncVerifiedWethUsdGReferenceToV3V687(
+  env,
+  state
+) {
+  const ref =
+    bestVerifiedWethUsdGReferenceV195(
+      state
+    );
+
+  const price =
+    Number(
+      ref?.priceUsdGPerWeth
+    );
+
+  const verifiedAt =
+    Number(
+      ref?.verifiedAt
+    );
+
+  const ageMs =
+    Number.isFinite(verifiedAt)
+      ? Math.max(
+          0,
+          Date.now() - verifiedAt
+        )
+      : null;
+
+  if (
+    ref?.verified !== true ||
+    !Number.isFinite(price) ||
+    price <= 0 ||
+    !Number.isFinite(verifiedAt) ||
+    verifiedAt <= 0 ||
+    ageMs === null ||
+    ageMs >
+      V687_V3_USD_REFERENCE_MAX_AGE_MS
+  ) {
+    return {
+      persisted: false,
+      status:
+        "NO_FRESH_VERIFIED_WETH_USDG_REFERENCE_V687",
+      externalProviderRequestsAdded: 0,
+      historicalRowsBackfilled: 0
+    };
+  }
+
+  const { kv } =
+    getKV(env);
+
+  if (!kv) {
+    return {
+      persisted: false,
+      status:
+        "KV_UNAVAILABLE_V687",
+      externalProviderRequestsAdded: 0,
+      historicalRowsBackfilled: 0
+    };
+  }
+
+  const row = {
+    verified: true,
+    schema:
+      "V687_CURRENT_VERIFIED_WETH_USDG_REFERENCE",
+    priceUsdGPerWeth:
+      price,
+    source:
+      ref?.source ||
+      "VERIFIED_WETH_USDG_REFERENCE_V687",
+    trust:
+      ref?.trust || null,
+    observedAt:
+      verifiedAt,
+    bridgedAt:
+      Date.now(),
+    weth:
+      normalize(
+        CANONICAL_WETH_V179
+      ),
+    usdg:
+      normalize(
+        CANONICAL_USDG_V179
+      ),
+    historicalExactBlock: false,
+    freshnessMaxMs:
+      V687_V3_USD_REFERENCE_MAX_AGE_MS,
+    forwardOnly: true,
+    bridgeSource:
+      "CURRENT_SCANNER_V452_TO_V3_V687"
+  };
+
+  try {
+    await kv.put(
+      V687_V3_USD_REFERENCE_KEY,
+      JSON.stringify(row)
+    );
+
+    return {
+      persisted: true,
+      status:
+        "VERIFIED_WETH_USDG_REFERENCE_SYNCED_TO_V3_V687",
+      priceUsdGPerWeth:
+        row.priceUsdGPerWeth,
+      source:
+        row.source,
+      observedAt:
+        row.observedAt,
+      externalProviderRequestsAdded: 0,
+      historicalRowsBackfilled: 0
+    };
+  } catch (error) {
+    return {
+      persisted: false,
+      status:
+        "V3_REFERENCE_KV_WRITE_FAILED_V687",
+      error:
+        String(
+          error?.message ||
+          error
+        ).slice(0, 180),
+      externalProviderRequestsAdded: 0,
+      historicalRowsBackfilled: 0
+    };
+  }
+}
+
+async function loadVerifiedV3UsdReferenceV687(
+  env
+) {
+  const { kv } =
+    getKV(env);
+
+  if (!kv) {
+    return {
+      verified: false,
+      status:
+        "KV_UNAVAILABLE_V687"
+    };
+  }
+
+  try {
+    const raw =
+      await kv.get(
+        V687_V3_USD_REFERENCE_KEY
+      );
+
+    if (!raw) {
+      return {
+        verified: false,
+        status:
+          "V3_USD_REFERENCE_NOT_FOUND_V687"
+      };
+    }
+
+    const row =
+      JSON.parse(raw);
+
+    const price =
+      Number(
+        row?.priceUsdGPerWeth
+      );
+
+    const observedAt =
+      Number(
+        row?.observedAt
+      );
+
+    const ageMs =
+      Number.isFinite(observedAt)
+        ? Math.max(
+            0,
+            Date.now() - observedAt
+          )
+        : null;
+
+    const verified =
+      row?.verified === true &&
+      Number.isFinite(price) &&
+      price > 0 &&
+      Number.isFinite(observedAt) &&
+      observedAt > 0 &&
+      ageMs !== null &&
+      ageMs <=
+        V687_V3_USD_REFERENCE_MAX_AGE_MS;
+
+    return {
+      verified,
+      status:
+        verified
+          ? "V3_USD_REFERENCE_VERIFIED_V687"
+          : "V3_USD_REFERENCE_STALE_OR_INVALID_V687",
+      priceUsdGPerWeth:
+        verified
+          ? price
+          : null,
+      source:
+        verified
+          ? row?.source || null
+          : null,
+      observedAt:
+        Number.isFinite(observedAt)
+          ? observedAt
+          : null,
+      ageMs,
+      historicalExactBlock:
+        row?.historicalExactBlock === true
+    };
+  } catch (error) {
+    return {
+      verified: false,
+      status:
+        "V3_USD_REFERENCE_READ_ERROR_V687",
+      error:
+        String(
+          error?.message ||
+          error
+        ).slice(0, 180)
+    };
+  }
+}
+
 function reservesLensUsdValuationV441(
+
   candidate,
   poolKey,
   decoded,
@@ -80775,6 +81032,12 @@ for (
       }
     );
 
+  const v3UsdReferenceBridgeV687 =
+    await syncVerifiedWethUsdGReferenceToV3V687(
+      env,
+      state
+    );
+
   const bitqueryWethUsdGReferenceV194 =
     (
       sameBatchWethUsdGReferencePrecheckV194
@@ -80840,6 +81103,10 @@ for (
   onChainDirectionalV179
     .verifiedWethUsdGReferenceBridgeV452 =
       verifiedWethUsdGReferenceBridgeV452;
+
+  onChainDirectionalV179
+    .v3UsdReferenceBridgeV687 =
+      v3UsdReferenceBridgeV687;
 
   onChainDirectionalV179
     .resolvedPoolReplayDiagnosticV198 =
@@ -132869,7 +133136,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
-    "<i>V686 is diagnostic-only over V685: it exposes the third-method identity-rescue arm/consume/denial path without changing request allocation. V684 scheduler alignment, V683 holder fairness, hard 42, Telegram reserve, provider routing, scoring and qualification thresholds remain unchanged.</i>"
+    "<i>V687 restores the verified WETH/USDG reference bridge used by V3 USD evidence and applies it only to new exact-pool records; no historical backfill. V686 diagnostics, V684 scheduler alignment, V683 holder fairness, hard 42, Telegram reserve, scoring and qualification thresholds remain unchanged.</i>"
   ].join("\n");
 }
 
@@ -135803,7 +136070,7 @@ async function runAll(
    - zero RPC/provider/API requests
    - inspects any V347 state left in the existing KV namespace
 */
-const V347_REFERENCE_DIAGNOSTIC_KEY_V348 = "robinhood-meme-hunter-v347-weth-usdg-reference";
+const V347_REFERENCE_DIAGNOSTIC_KEY_V348 = V687_V3_USD_REFERENCE_KEY;
 
 async function v347StateDiagnosticV348(env) {
   const startedAt = Date.now();
@@ -139285,7 +139552,7 @@ function nativeV3RollingWindowsV334(records,nowMs=Date.now()){
   };
 }
 
-async function collectOneNativeV3TokenV333(env,budget,row,headBlock){
+async function collectOneNativeV3TokenV333(env,budget,row,headBlock,v3UsdReferenceV687=null){
   const token=normalize(row?.tokenAddress);
   const pairCache=await loadVerifiedV3PairIdentityV329(env,token);
   if(!pairCache?.valid) return {token,status:pairCache?.status||"PAIR_CACHE_UNAVAILABLE_V333",requestsUsed:0};
@@ -139322,7 +139589,119 @@ async function collectOneNativeV3TokenV333(env,budget,row,headBlock){
     const quoteRaw=token===token0?amount1:amount0;
     const quoteDecimals=quoteTokenAddress===CANONICAL_WETH_V179?18:(quoteTokenAddress===CANONICAL_USDG_V179?CANONICAL_USDG_DECIMALS_V179:null);
     const quoteAmount=Number.isInteger(quoteDecimals)?decimalFromSignedRawV326(quoteRaw,quoteDecimals):null;
-    unique.set(tradeKey,{tradeKey,transactionHash:txHash,logIndex,blockNumber:rpcBlockNumberV331(log?.blockNumber),pairAddress:pair,side:raw<0n?"BUY":"SELL",tokenAmount:Math.abs(amount),quoteTokenAddress:isAddress(quoteTokenAddress)?quoteTokenAddress:null,quoteAmount:Number.isFinite(quoteAmount)&&quoteAmount!==0?Math.abs(quoteAmount):null,quoteAmountVerifiedV336:Number.isFinite(quoteAmount)&&quoteAmount!==0,quoteAmountBasisV336:Number.isFinite(quoteAmount)&&quoteAmount!==0?"EXACT_V3_SWAP_QUOTE_DELTA_V336":null,usd:null,usdVerified:false,priceUsd:null,observedAt:Date.now(),blockTimestampMs:null,timestampVerifiedV334:false,timestampBasis:"INGESTION_TIME_ONLY_V333"});
+    const exactQuoteAmountV687 =
+      Number.isFinite(quoteAmount) &&
+      quoteAmount !== 0
+        ? Math.abs(quoteAmount)
+        : null;
+
+    let usdV687 = null;
+    let usdVerifiedV687 = false;
+    let usdBasisV687 = null;
+    let priceUsdV687 = null;
+
+    if (
+      quoteTokenAddress ===
+        normalize(CANONICAL_USDG_V179) &&
+      Number.isFinite(exactQuoteAmountV687) &&
+      exactQuoteAmountV687 > 0
+    ) {
+      usdV687 =
+        exactQuoteAmountV687;
+      usdVerifiedV687 = true;
+      usdBasisV687 =
+        "EXACT_CANONICAL_USDG_QUOTE_V687";
+      priceUsdV687 = 1;
+    } else if (
+      quoteTokenAddress ===
+        normalize(CANONICAL_WETH_V179) &&
+      Number.isFinite(exactQuoteAmountV687) &&
+      exactQuoteAmountV687 > 0 &&
+      v3UsdReferenceV687?.verified === true &&
+      Number.isFinite(
+        Number(
+          v3UsdReferenceV687
+            ?.priceUsdGPerWeth
+        )
+      ) &&
+      Number(
+        v3UsdReferenceV687
+          .priceUsdGPerWeth
+      ) > 0
+    ) {
+      priceUsdV687 =
+        Number(
+          v3UsdReferenceV687
+            .priceUsdGPerWeth
+        );
+
+      usdV687 =
+        exactQuoteAmountV687 *
+        priceUsdV687;
+
+      usdVerifiedV687 =
+        Number.isFinite(usdV687) &&
+        usdV687 > 0;
+
+      usdBasisV687 =
+        usdVerifiedV687
+          ? "EXACT_WETH_QUOTE_X_FRESH_VERIFIED_REFERENCE_V687"
+          : null;
+    }
+
+    unique.set(tradeKey,{
+      tradeKey,
+      transactionHash:txHash,
+      logIndex,
+      blockNumber:rpcBlockNumberV331(log?.blockNumber),
+      pairAddress:pair,
+      side:raw<0n?"BUY":"SELL",
+      tokenAmount:Math.abs(amount),
+      quoteTokenAddress:isAddress(quoteTokenAddress)?quoteTokenAddress:null,
+      quoteAmount:exactQuoteAmountV687,
+      quoteAmountVerifiedV336:
+        Number.isFinite(exactQuoteAmountV687) &&
+        exactQuoteAmountV687 > 0,
+      quoteAmountBasisV336:
+        Number.isFinite(exactQuoteAmountV687) &&
+        exactQuoteAmountV687 > 0
+          ? "EXACT_V3_SWAP_QUOTE_DELTA_V336"
+          : null,
+      usd:
+        usdVerifiedV687
+          ? usdV687
+          : null,
+      usdVerified:
+        usdVerifiedV687,
+      priceUsd:
+        Number.isFinite(priceUsdV687)
+          ? priceUsdV687
+          : null,
+      sameCycleUsdV347:
+        usdVerifiedV687
+          ? usdV687
+          : null,
+      sameCycleUsdVerifiedV347:
+        usdVerifiedV687,
+      sameCycleUsdBasisV347:
+        usdBasisV687,
+      v687ReferenceSource:
+        usdVerifiedV687 &&
+        quoteTokenAddress ===
+          normalize(CANONICAL_WETH_V179)
+          ? v3UsdReferenceV687?.source || null
+          : null,
+      v687ReferenceObservedAt:
+        usdVerifiedV687 &&
+        quoteTokenAddress ===
+          normalize(CANONICAL_WETH_V179)
+          ? v3UsdReferenceV687?.observedAt || null
+          : null,
+      observedAt:Date.now(),
+      blockTimestampMs:null,
+      timestampVerifiedV334:false,
+      timestampBasis:"INGESTION_TIME_ONLY_V333"
+    });
   }
   const scannedRange={fromBlock,toBlock:rangeTo,observedAt:Date.now(),swaps:logsResult.result.length,source:"SCHEDULED_NATIVE_V3_COLLECTOR_V333"};
   /* V334 Step 2A: hydrate exact on-chain block timestamps. New swaps are
@@ -139339,12 +139718,49 @@ async function scheduledNativeV3CollectorV333(env){
   const registry=await loadNativeV3CollectorRegistryV333(env);
   const selected=registry.slice(-NATIVE_V3_COLLECTOR_MAX_TOKENS_PER_RUN_V333);
   if(!selected.length) return {status:"NO_REGISTERED_V3_TOKENS_V333",tokens:0,requestsUsed:0,results:[]};
+
+  const v3UsdReferenceV687 =
+    await loadVerifiedV3UsdReferenceV687(
+      env
+    );
+
   const head=await rpc(env,"eth_blockNumber",[],budget,"analysis");
   let headBlock=null; try{if(head?.result)headBlock=Number(BigInt(head.result));}catch(_){}
   if(!Number.isFinite(headBlock)) return {status:"COLLECTOR_HEAD_UNVERIFIED_V333",tokens:selected.length,requestsUsed:safeNumber(budget.totalUsed),results:[]};
   const results=[];
-  for(const row of selected){ if(!budgetAvailable(budget,"analysis"))break; results.push(await collectOneNativeV3TokenV333(env,budget,row,headBlock)); }
-  return {status:"SCHEDULED_NATIVE_V3_COLLECTOR_COMPLETE_V333",headBlock,tokens:selected.length,processed:results.length,requestsUsed:safeNumber(budget.totalUsed),requestLimit:NATIVE_V3_COLLECTOR_REQUEST_LIMIT_V333,results};
+  for(const row of selected){
+    if(!budgetAvailable(budget,"analysis"))break;
+    results.push(
+      await collectOneNativeV3TokenV333(
+        env,
+        budget,
+        row,
+        headBlock,
+        v3UsdReferenceV687
+      )
+    );
+  }
+  return {
+    status:"SCHEDULED_NATIVE_V3_COLLECTOR_COMPLETE_V333",
+    headBlock,
+    tokens:selected.length,
+    processed:results.length,
+    requestsUsed:safeNumber(budget.totalUsed),
+    requestLimit:NATIVE_V3_COLLECTOR_REQUEST_LIMIT_V333,
+    v3UsdReferenceV687:{
+      verified:
+        v3UsdReferenceV687?.verified===true,
+      status:
+        v3UsdReferenceV687?.status||null,
+      source:
+        v3UsdReferenceV687?.source||null,
+      ageMs:
+        Number.isFinite(Number(v3UsdReferenceV687?.ageMs))
+          ? Number(v3UsdReferenceV687.ageMs)
+          : null
+    },
+    results
+  };
 }
 
 /* =========================================================
