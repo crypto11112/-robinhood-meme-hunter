@@ -1,6 +1,27 @@
 /**
+ * Robinhood Chain Meme Hunter — V679
+ * AUTHORITATIVE RUNTIME VERSION: V679
+ *
+ * V679 UNIFIED V666 BLOCKSCOUT PRO HOLDER COMPLETION LANE
+ * - builds directly forward from diagnostic V678;
+ * - unifies the protected one-per-scan V666 holder completion lane across
+ *   Blockscout Pro holder rows V143 and same-token Pro counters V247;
+ * - V247 may use the protected lane only when explicitly armed for the same
+ *   current priority token and only while the lane is still active/unused;
+ * - whichever of V143 or V247 consumes the protected lane first closes it,
+ *   preventing a second protected Pro spend in the same scan;
+ * - V677 final-boundary protection now recognises the armed V247 request too,
+ *   while still requiring real pre-Telegram global headroom;
+ * - hard total ceiling remains 42 and the Telegram notification reserve stays protected;
+ * - V678 diagnostics remain enabled so /launchcoverage can prove which Pro path consumed the lane;
+ * - V676 fairness, V675 ERC-20 rescue, V674 CoinGecko second chance,
+ *   V673 Durable Object scheduling, scoring, holder/risk rules, provider cooldowns,
+ *   qualification and Telegram thresholds remain unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V678
- * AUTHORITATIVE RUNTIME VERSION: V678
+ * HISTORICAL VERSION NOTE: V678
  *
  * V678 HOLDER-PRO GATE DIAGNOSTIC — ZERO REQUEST / ZERO BEHAVIOUR CHANGE
  * - builds directly forward from V677;
@@ -5440,7 +5461,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V678";
+const VERSION = "V679";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12583,14 +12604,30 @@ function priorityHolderProCompletionRequestV666(
     budget?.analysis
       ?.priorityHolderProCompletionV666;
 
+  const laneToken =
+    normalize(lane?.address);
+
+  const holderRowsV143 =
+    type === "BLOCKSCOUT_PRO_HOLDERS_V143";
+
+  const armedCountersV679 =
+    (
+      type === "BLOCKSCOUT_PRO_TOKEN_COUNTERS_V247" ||
+      type === "BLOCKSCOUT_PRO_HOLDER_COUNT_COMPLETION_V256"
+    ) &&
+    budget?.analysis
+      ?.priorityHolderProCountersActiveV679 === true &&
+    normalize(
+      budget?.analysis
+        ?.priorityHolderProCountersTokenV679
+    ) === laneToken;
+
   return Boolean(
     phase === "analysis" &&
-    type === "BLOCKSCOUT_PRO_HOLDERS_V143" &&
+    (holderRowsV143 || armedCountersV679) &&
     lane?.active === true &&
     lane?.used !== true &&
-    isAddress(
-      normalize(lane?.address)
-    )
+    isAddress(laneToken)
   );
 }
 
@@ -12653,6 +12690,14 @@ function claimPriorityHolderProCompletionV666(
       totalUsedBefore: null,
       hardTotalLimit: null,
       notificationReserveRemaining: null
+    },
+    unifiedProLaneV679: {
+      enabled: true,
+      holderRowsV143Eligible: true,
+      countersV247EligibleWhenArmed: true,
+      consumedPath: null,
+      consumedRequestType: null,
+      doubleProtectedSpendAllowed: false
     }
   };
 
@@ -12712,7 +12757,6 @@ function priorityHolderProFinalBudgetAvailableV677(
 ) {
   if (
     phase !== "analysis" ||
-    type !== "BLOCKSCOUT_PRO_HOLDERS_V143" ||
     !priorityHolderProCompletionRequestV666(
       budget,
       phase,
@@ -13489,6 +13533,25 @@ function consumeBudget(
     holderLaneV666.used = true;
     holderLaneV666.consumedAt =
       Date.now();
+
+    if (
+      holderLaneV666.unifiedProLaneV679 &&
+      typeof holderLaneV666.unifiedProLaneV679 === "object"
+    ) {
+      holderLaneV666.unifiedProLaneV679.consumedPath =
+        type === "BLOCKSCOUT_PRO_HOLDERS_V143"
+          ? "HOLDER_ROWS_V143"
+          : (
+              type === "BLOCKSCOUT_PRO_TOKEN_COUNTERS_V247" ||
+              type === "BLOCKSCOUT_PRO_HOLDER_COUNT_COMPLETION_V256"
+            )
+            ? "TOKEN_COUNTERS_V247"
+            : "OTHER";
+
+      holderLaneV666.unifiedProLaneV679.consumedRequestType =
+        type;
+    }
+
     holderLaneV666.consumeStatus =
       holderLaneV666
         ?.finalBoundaryV677
@@ -51687,6 +51750,17 @@ function recordHolderProGateTraceV678(
               lane.address || null,
             consumeStatus:
               lane.consumeStatus || null,
+            unifiedProLaneV679:
+              lane.unifiedProLaneV679
+                ? {
+                    consumedPath:
+                      lane.unifiedProLaneV679
+                        .consumedPath || null,
+                    consumedRequestType:
+                      lane.unifiedProLaneV679
+                        .consumedRequestType || null
+                  }
+                : null,
             finalBoundaryV677:
               lane.finalBoundaryV677
                 ? {
@@ -52164,12 +52238,50 @@ async function blockscoutProCountersV247(
     };
   }
 
-  if (
-    !consumeBudget(
+  recordHolderProGateTraceV678(
+    budget,
+    {
+      stage:
+        "V247_BEFORE_CONSUME_BUDGET_V679",
+      path:
+        "V247_PRO_COUNTERS",
+      token:
+        normalize(token),
+      requestType:
+        requestTypeV256,
+      armedPriorityCountersV679:
+        budget?.analysis
+          ?.priorityHolderProCountersActiveV679 === true
+    }
+  );
+
+  const proCountersBudgetConsumedV679 =
+    consumeBudget(
       budget,
       "analysis",
       requestTypeV256
-    )
+    );
+
+  recordHolderProGateTraceV678(
+    budget,
+    {
+      stage:
+        proCountersBudgetConsumedV679
+          ? "V247_CONSUME_BUDGET_ACCEPTED_V679"
+          : "V247_CONSUME_BUDGET_DENIED_V679",
+      path:
+        "V247_PRO_COUNTERS",
+      token:
+        normalize(token),
+      requestType:
+        requestTypeV256,
+      consumed:
+        proCountersBudgetConsumedV679
+    }
+  );
+
+  if (
+    !proCountersBudgetConsumedV679
   ) {
     return {
       ...base,
@@ -55159,19 +55271,76 @@ async function holderIntelligence(
       );
     }
 
-    if (
+    const normalProCountersBudgetAvailableV679 =
       budgetAvailable(
         budget,
         "analysis"
-      )
+      );
+
+    const laneV679 =
+      budget?.analysis
+        ?.priorityHolderProCompletionV666 ||
+      null;
+
+    const samePriorityTokenV679 =
+      (
+        priorityCompletion === true &&
+        laneV679?.claimed === true &&
+        laneV679?.active === true &&
+        laneV679?.used !== true &&
+        normalize(laneV679?.address) ===
+          normalize(token)
+      );
+
+    recordHolderProGateTraceV678(
+      budget,
+      {
+        stage:
+          "V247_PRE_CALL_GATE_V679",
+        path:
+          "V247_PRO_COUNTERS",
+        token:
+          normalize(token),
+        preCallBudgetAvailable:
+          normalProCountersBudgetAvailableV679,
+        v666SamePriorityToken:
+          samePriorityTokenV679
+      }
+    );
+
+    if (
+      normalProCountersBudgetAvailableV679 ||
+      samePriorityTokenV679
     ) {
-      const proCountersV247 =
-        await blockscoutProCountersV247(
-          token,
-          budget,
-          env,
-          state
-        );
+      if (
+        samePriorityTokenV679
+      ) {
+        budget.analysis
+          .priorityHolderProCountersActiveV679 =
+          true;
+        budget.analysis
+          .priorityHolderProCountersTokenV679 =
+          normalize(token);
+      }
+
+      let proCountersV247;
+
+      try {
+        proCountersV247 =
+          await blockscoutProCountersV247(
+            token,
+            budget,
+            env,
+            state
+          );
+      } finally {
+        budget.analysis
+          .priorityHolderProCountersActiveV679 =
+          false;
+        budget.analysis
+          .priorityHolderProCountersTokenV679 =
+          null;
+      }
 
       blockscoutProCounterFallbackV247 = {
         configured:
@@ -131169,7 +131338,7 @@ function launchCoverageTelegramMessageV474(state) {
         const boundary =
           lane?.finalBoundaryV677 || null;
 
-        return `• <code>${escapeHtml(short)}</code> — ${escapeHtml(String(row?.path || "UNSPECIFIED"))} · ${escapeHtml(String(row?.stage || "UNKNOWN_STAGE"))} · pre-call ${row?.preCallBudgetAvailable === true ? "YES" : row?.preCallBudgetAvailable === false ? "NO" : "N/A"} · A ${fmt(b?.analysisUsed)}/${fmt(b?.effectiveAnalysisLimit)} · G ${fmt(b?.totalUsed)}/${fmt(b?.preTelegramGlobalLimit)} (hard ${fmt(b?.hardTotalLimit)}) · V666 ${lane?.claimed === true ? "CLAIMED" : "NO"} / ${lane?.used === true ? "USED" : "NOT_USED"} · consume ${escapeHtml(String(lane?.consumeStatus || "N/A"))} · V677 reached ${boundary?.evaluated === true ? "YES" : "NO"} / bypass ${boundary?.bypassUsed === true ? "YES" : "NO"}`;
+        return `• <code>${escapeHtml(short)}</code> — ${escapeHtml(String(row?.path || "UNSPECIFIED"))} · ${escapeHtml(String(row?.stage || "UNKNOWN_STAGE"))} · pre-call ${row?.preCallBudgetAvailable === true ? "YES" : row?.preCallBudgetAvailable === false ? "NO" : "N/A"} · A ${fmt(b?.analysisUsed)}/${fmt(b?.effectiveAnalysisLimit)} · G ${fmt(b?.totalUsed)}/${fmt(b?.preTelegramGlobalLimit)} (hard ${fmt(b?.hardTotalLimit)}) · V666 ${lane?.claimed === true ? "CLAIMED" : "NO"} / ${lane?.used === true ? "USED" : "NOT_USED"} · consume ${escapeHtml(String(lane?.consumeStatus || "N/A"))} · V679 path ${escapeHtml(String(lane?.unifiedProLaneV679?.consumedPath || "N/A"))} · V677 reached ${boundary?.evaluated === true ? "YES" : "NO"} / bypass ${boundary?.bypassUsed === true ? "YES" : "NO"}`;
       });
 
   const coinGeckoTraceLinesV664 =
@@ -131292,8 +131461,8 @@ function launchCoverageTelegramMessageV474(state) {
     "A new token, recent market pair, or scanner first-seen timestamp is not treated as proof of a launch.",
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
-    "V678 is diagnostic-only and preserves V677/V676/V675/V674/V673 behaviour; it records the V422 and normal V143 Blockscout Pro pre-call gates plus the V666/V677 consume path without adding requests or changing qualification.",
-    "<i>Hard 42-request ceiling, provider cooldowns, CoinGecko Demo limits, scoring and Telegram thresholds remain unchanged.</i>"
+    "V679 preserves V678 diagnostics and unifies the one-per-scan V666 protected Blockscout Pro holder lane across V143 holder rows and the same-token V247 holder counters path; whichever consumes the lane first closes it for the other path.",
+    "<i>V679 adds no request ceiling: hard 42, Telegram notification reserve, provider cooldowns, CoinGecko Demo limits, scoring and qualification thresholds remain unchanged.</i>"
   ].join("\n");
 }
 
