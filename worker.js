@@ -1,6 +1,24 @@
 /**
+ * Robinhood Chain Meme Hunter — V690
+ * AUTHORITATIVE RUNTIME VERSION: V690
+ *
+ * V690 EARLY ERC20 COMPLETION HEADROOM RESERVE
+ * - builds directly forward from confirmed-working V689;
+ * - fixes the V686-proven case where V685 reached the third ERC20 method only
+ *   after pre-Telegram global usage had already reached 40/42;
+ * - protects exactly ONE existing pre-Telegram global request earlier, while
+ *   fresh/current verified-launch ERC20 identity work is still pending;
+ * - this one-slot guard is checked before holder/CoinGecko/other protected-work
+ *   bypasses can consume the final identity-completion slot;
+ * - the selected fresh launch's own ERC20 eth_getCode/eth_call may consume it;
+ * - hard 42 and Telegram's 2-request notification reserve remain unchanged;
+ * - no provider, scoring, qualification or threshold changes;
+ * - V689 presentation cleanup, V688 V3 auto-start and V687 USD bridge preserved.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V689
- * AUTHORITATIVE RUNTIME VERSION: V689
+ * HISTORICAL VERSION NOTE: V689
  *
  * V689 V3 PRESENTATION CLEANUP ONLY
  * - builds directly from confirmed-working V688;
@@ -5675,7 +5693,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V689";
+const VERSION = "V690";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -11952,6 +11970,27 @@ function createBudget() {
         estimatedRpcRequestsSaved: 0
       },
 
+      erc20UpstreamHeadroomReserveV690: {
+        enabled: true,
+        active: false,
+        reservedRequests: 0,
+        configuredAt: null,
+        pendingAddresses: [],
+        activeCandidateAddress: null,
+        consumedByAddress: null,
+        consumedAt: null,
+        releasedAt: null,
+        releaseReason: null,
+        blockedRequests: 0,
+        blockedTypes: {},
+        lastBlockedType: null,
+        lastBlockedAt: null,
+        hardRequestLimitRaised: false,
+        notificationReserveChanged: false,
+        rule:
+          "ONE_PRE_TELEGRAM_GLOBAL_SLOT_PROTECTED_UNTIL_FRESH_ERC20_IDENTITY_CAN_USE_IT"
+      },
+
       freshVerifiedLaunchErc20ReserveV653: {
         enabled: true,
         active: false,
@@ -12569,6 +12608,254 @@ function freshVerifiedLaunchIdentityUsableAllowanceV655(
     )
   );
 }
+
+
+function configureErc20UpstreamHeadroomReserveV690(
+  budget,
+  queue,
+  currentLiveVerifiedLaunchTokensV621
+) {
+  const reserve =
+    budget?.analysis?.erc20UpstreamHeadroomReserveV690;
+
+  if (reserve?.enabled !== true) return reserve || null;
+
+  const pendingAddresses = [];
+  const seen = new Set();
+
+  for (const watched of Array.isArray(queue) ? queue : []) {
+    const address = normalize(watched?.address);
+
+    if (
+      !isAddress(address) ||
+      seen.has(address) ||
+      !currentLiveVerifiedLaunchTokensV621?.has(address) ||
+      reusableMetadata(watched)
+    ) {
+      continue;
+    }
+
+    if (
+      freshVerifiedLaunchIdentityRequestsNeededV655(watched) <= 0
+    ) {
+      continue;
+    }
+
+    seen.add(address);
+    pendingAddresses.push(address);
+  }
+
+  reserve.configuredAt = Date.now();
+  reserve.pendingAddresses = [...pendingAddresses];
+  reserve.active = pendingAddresses.length > 0;
+  reserve.reservedRequests = reserve.active ? 1 : 0;
+  reserve.activeCandidateAddress = null;
+  reserve.consumedByAddress = null;
+  reserve.consumedAt = null;
+  reserve.releasedAt = null;
+  reserve.releaseReason = null;
+  reserve.blockedRequests = 0;
+  reserve.blockedTypes = {};
+  reserve.lastBlockedType = null;
+  reserve.lastBlockedAt = null;
+
+  return reserve;
+}
+
+function setActiveErc20UpstreamCandidateV690(
+  budget,
+  address
+) {
+  const reserve =
+    budget?.analysis?.erc20UpstreamHeadroomReserveV690;
+  const token = normalize(address);
+
+  if (
+    reserve?.enabled !== true ||
+    reserve?.active !== true ||
+    !isAddress(token) ||
+    !Array.isArray(reserve.pendingAddresses) ||
+    !reserve.pendingAddresses.includes(token)
+  ) {
+    return false;
+  }
+
+  reserve.activeCandidateAddress = token;
+  return true;
+}
+
+function releaseErc20UpstreamCandidateV690(
+  budget,
+  address,
+  reason = "CANDIDATE_ANALYSIS_RETURNED_V690"
+) {
+  const reserve =
+    budget?.analysis?.erc20UpstreamHeadroomReserveV690;
+  const token = normalize(address);
+
+  if (reserve?.enabled !== true || !isAddress(token)) {
+    return false;
+  }
+
+  if (Array.isArray(reserve.pendingAddresses)) {
+    reserve.pendingAddresses =
+      reserve.pendingAddresses.filter(
+        item => normalize(item) !== token
+      );
+  }
+
+  if (normalize(reserve.activeCandidateAddress) === token) {
+    reserve.activeCandidateAddress = null;
+  }
+
+  if (reserve.consumedAt) {
+    reserve.active = false;
+    reserve.reservedRequests = 0;
+    reserve.releasedAt = Date.now();
+    reserve.releaseReason =
+      "PROTECTED_SLOT_ALREADY_CONSUMED_V690";
+  } else if (
+    Array.isArray(reserve.pendingAddresses) &&
+    reserve.pendingAddresses.length > 0
+  ) {
+    reserve.active = true;
+    reserve.reservedRequests = 1;
+    reserve.releaseReason =
+      "ROLLED_TO_NEXT_PENDING_FRESH_LAUNCH_V690";
+  } else {
+    reserve.active = false;
+    reserve.reservedRequests = 0;
+    reserve.releasedAt = Date.now();
+    reserve.releaseReason = reason;
+  }
+
+  return true;
+}
+
+function erc20UpstreamIdentityRequestV690(
+  budget,
+  phase,
+  type
+) {
+  if (
+    phase !== "analysis" ||
+    (type !== "RPC:eth_getCode" && type !== "RPC:eth_call")
+  ) {
+    return false;
+  }
+
+  const upstream =
+    budget?.analysis?.erc20UpstreamHeadroomReserveV690;
+  const v653 =
+    budget?.analysis?.freshVerifiedLaunchErc20ReserveV653;
+
+  const activeCandidate =
+    normalize(upstream?.activeCandidateAddress);
+  const activeIdentity =
+    normalize(v653?.activeIdentityAddressV654);
+
+  return Boolean(
+    upstream?.active === true &&
+    isAddress(activeCandidate) &&
+    activeIdentity === activeCandidate
+  );
+}
+
+function erc20UpstreamHeadroomReserveDecisionV690(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  const reserve =
+    budget?.analysis?.erc20UpstreamHeadroomReserveV690;
+
+  if (
+    phase !== "analysis" ||
+    reserve?.active !== true ||
+    safeNumber(reserve?.reservedRequests) <= 0
+  ) {
+    return {
+      block: false,
+      identityMayConsume: false,
+      consumesProtectedSlot: false
+    };
+  }
+
+  const notificationReserveRemaining =
+    budget?.notification?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(budget.notification?.limit) -
+            safeNumber(budget.notification?.used)
+        )
+      : 0;
+
+  const preTelegramGlobalLimit =
+    Math.max(
+      0,
+      safeNumber(budget?.totalLimit) -
+        notificationReserveRemaining
+    );
+
+  const protectedLimit =
+    Math.max(
+      0,
+      preTelegramGlobalLimit -
+        safeNumber(reserve.reservedRequests)
+    );
+
+  const wouldCrossProtectedLimit =
+    safeNumber(budget?.totalUsed) +
+      Math.max(1, safeNumber(amount)) >
+    protectedLimit;
+
+  if (!wouldCrossProtectedLimit) {
+    return {
+      block: false,
+      identityMayConsume: false,
+      consumesProtectedSlot: false
+    };
+  }
+
+  const identityMayConsume =
+    erc20UpstreamIdentityRequestV690(
+      budget,
+      phase,
+      type
+    );
+
+  return {
+    block: !identityMayConsume,
+    identityMayConsume,
+    consumesProtectedSlot: identityMayConsume,
+    preTelegramGlobalLimit,
+    protectedLimit
+  };
+}
+
+function observeErc20UpstreamProtectedConsumeV690(
+  budget,
+  address
+) {
+  const reserve =
+    budget?.analysis?.erc20UpstreamHeadroomReserveV690;
+
+  if (reserve?.active !== true) return;
+
+  const token = normalize(address);
+
+  reserve.consumedByAddress =
+    isAddress(token)
+      ? token
+      : normalize(reserve.activeCandidateAddress) || null;
+  reserve.consumedAt = Date.now();
+  reserve.active = false;
+  reserve.reservedRequests = 0;
+  reserve.releaseReason =
+    "CONSUMED_BY_FRESH_ERC20_IDENTITY_V690";
+}
+
 
 function configureFreshVerifiedLaunchErc20ReserveV653(
   budget,
@@ -13837,6 +14124,53 @@ function consumeBudget(
   amount = 1
 ) {
   /*
+   * V690: one upstream slot is protected before older internal priority
+   * bypasses. Only the active fresh token's own ERC20 identity read may use it.
+   */
+  const upstreamDecisionV690 =
+    erc20UpstreamHeadroomReserveDecisionV690(
+      budget,
+      phase,
+      type,
+      amount
+    );
+
+  if (upstreamDecisionV690.block === true) {
+    const reserveV690 =
+      budget?.analysis?.erc20UpstreamHeadroomReserveV690;
+
+    reserveV690.blockedRequests =
+      safeNumber(reserveV690.blockedRequests) + 1;
+
+    const keyV690 = String(type || "UNKNOWN");
+    reserveV690.blockedTypes =
+      reserveV690.blockedTypes &&
+      typeof reserveV690.blockedTypes === "object"
+        ? reserveV690.blockedTypes
+        : {};
+    reserveV690.blockedTypes[keyV690] =
+      safeNumber(reserveV690.blockedTypes[keyV690]) + 1;
+    reserveV690.lastBlockedType = keyV690;
+    reserveV690.lastBlockedAt = Date.now();
+
+    budget.skipped.push({
+      phase,
+      type,
+      amount,
+      reason:
+        "V690_ERC20_UPSTREAM_PRE_TELEGRAM_SLOT_RESERVED",
+      reservedRequests:
+        safeNumber(reserveV690.reservedRequests),
+      pendingAddresses:
+        Array.isArray(reserveV690.pendingAddresses)
+          ? [...reserveV690.pendingAddresses]
+          : []
+    });
+
+    return false;
+  }
+
+  /*
    * V685: one narrowly armed ERC20 third-method completion may bypass internal
    * analysis/reserve boundaries. The helper still enforces the real
    * pre-Telegram global ceiling, so the hard 42 and notification reserve remain
@@ -14765,6 +15099,21 @@ function consumeBudget(
       amount;
   }
 
+  if (
+    upstreamDecisionV690
+      ?.consumesProtectedSlot === true
+  ) {
+    observeErc20UpstreamProtectedConsumeV690(
+      budget,
+      budget?.analysis
+        ?.freshVerifiedLaunchErc20ReserveV653
+        ?.activeIdentityAddressV654 ||
+      budget?.analysis
+        ?.erc20UpstreamHeadroomReserveV690
+        ?.activeCandidateAddress
+    );
+  }
+
   return true;
 }
 
@@ -15049,6 +15398,9 @@ function budgetTelemetry(
 
       erc20IdentityDiagnosticRowsV686:
         budget.analysis?.erc20IdentityDiagnosticRowsV686 || [],
+
+      erc20UpstreamHeadroomReserveV690:
+        budget.analysis?.erc20UpstreamHeadroomReserveV690 || null,
 
       v3CollectorAutoStartV688:
         budget.analysis?.v3CollectorAutoStartV688 || null,
@@ -83243,6 +83595,13 @@ for (
       currentLiveVerifiedLaunchTokensV621
     );
 
+  const v690Erc20UpstreamHeadroomReserve =
+    configureErc20UpstreamHeadroomReserveV690(
+      budget,
+      v135AnalysisQueue,
+      currentLiveVerifiedLaunchTokensV621
+    );
+
   const v676CurrentLiveEvidenceFairnessReserve =
     configureCurrentLiveEvidenceFairnessReserveV676(
       budget,
@@ -83274,7 +83633,25 @@ for (
             ]
           : [],
       requestCeilingsRaised: false,
-      verificationRuleChanged: false
+      verificationRuleChanged: false,
+      upstreamHeadroomReserveV690: {
+        enabled:
+          v690Erc20UpstreamHeadroomReserve?.enabled === true,
+        active:
+          v690Erc20UpstreamHeadroomReserve?.active === true,
+        reservedRequests:
+          safeNumber(
+            v690Erc20UpstreamHeadroomReserve?.reservedRequests
+          ),
+        pendingAddresses:
+          Array.isArray(
+            v690Erc20UpstreamHeadroomReserve?.pendingAddresses
+          )
+            ? [...v690Erc20UpstreamHeadroomReserve.pendingAddresses]
+            : [],
+        hardRequestLimitRaised: false,
+        notificationReserveChanged: false
+      }
     };
 
   scannerFunnelV415.freshCandidatePriorityV469
@@ -84290,6 +84667,14 @@ for (
     const v417MetadataWasReusableBefore =
       Boolean(reusableMetadata(watched));
 
+    const v690UpstreamCandidateActivated =
+      isCurrentLiveVerifiedLaunchV649
+        ? setActiveErc20UpstreamCandidateV690(
+            budget,
+            address
+          )
+        : false;
+
     const candidate =
       await analyzeToken(
         env,
@@ -84362,6 +84747,19 @@ for (
           liveMomentumActivityV152
         }
       );
+
+    if (v690UpstreamCandidateActivated) {
+      releaseErc20UpstreamCandidateV690(
+        budget,
+        address,
+        candidate?.validation?.validERC20 === true ||
+        candidate?.validERC20 === true
+          ? "ERC20_IDENTITY_COMPLETED_V690"
+          : candidate?.analysisDeferred === true
+            ? "ERC20_IDENTITY_DEFERRED_V690"
+            : "CANDIDATE_ANALYSIS_RETURNED_V690"
+      );
+    }
 
     /*
      * V656: capture the exact evidence-completion state at the moment this
@@ -133378,7 +133776,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
-    "<i>V689 is presentation-only: when V605 HTTP exact-pool live V3 evidence is available it is shown as the authoritative flow, while legacy native V3 history remains stored but is no longer shown as competing live data. V688 auto-start, hard 42, Telegram reserve, scoring and qualification thresholds remain unchanged.</i>"
+    "<i>V690 preserves V689/V688 V3 behaviour and protects one existing pre-Telegram request earlier for fresh ERC20 identity completion. Hard 42, Telegram reserve, scoring and qualification thresholds remain unchanged.</i>"
   ].join("\n");
 }
 
