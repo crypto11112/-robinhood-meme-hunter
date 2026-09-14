@@ -1,6 +1,20 @@
 /**
+ * Robinhood Chain Meme Hunter — V694
+ * AUTHORITATIVE RUNTIME VERSION: V694
+ *
+ * V694 MAINTENANCE ROUTE KV BINDING FIX
+ * - builds directly forward from V693;
+ * - fixes /compact-state-v693 using the existing getKV(env) wrapper result
+ *   correctly instead of calling .put() on the wrapper object itself;
+ * - unwraps { kv, binding } and writes through the real KV namespace;
+ * - no compaction policy, scan logic, scoring, thresholds, provider routing,
+ *   V3 logic, ERC20 reservation behaviour or request ceilings are changed;
+ * - maintenance route remains discovery/analysis/Telegram/provider free.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V693
- * AUTHORITATIVE RUNTIME VERSION: V693
+ * HISTORICAL VERSION NOTE: V693
  *
  * V693 DEDICATED STATE-MAINTENANCE ROUTE
  * - moves oversized-state rescue out of /scan into GET /compact-state-v693;
@@ -5757,7 +5771,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V693";
+const VERSION = "V694";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -18593,12 +18607,23 @@ async function compactAndWriteStateV693(
     };
   }
 
-  const kv =
+  const kvResultV694 =
     await getKV(
       env
     );
 
-  if (!kv) {
+  const kv =
+    kvResultV694?.kv ||
+    null;
+
+  const binding =
+    kvResultV694?.binding ||
+    null;
+
+  if (
+    !kv ||
+    typeof kv.put !== "function"
+  ) {
     return {
       ok: false,
       saved: false,
@@ -18606,7 +18631,8 @@ async function compactAndWriteStateV693(
       route:
         "/compact-state-v693",
       error:
-        "KV_BINDING_UNAVAILABLE_V693",
+        "KV_BINDING_UNAVAILABLE_V694",
+      binding,
       externalProviderRequests: 0,
       telegramRequests: 0
     };
@@ -18696,6 +18722,7 @@ async function compactAndWriteStateV693(
         "STILL_OVERSIZED_AFTER_SAFE_COMPACTION_V693",
       error:
         "STATE_STILL_ABOVE_KV_HARD_LIMIT_V693",
+      binding,
       afterBytes,
       afterMiB:
         Number(
@@ -18730,6 +18757,7 @@ async function compactAndWriteStateV693(
       "/compact-state-v693",
     status:
       "COMPACTED_AND_SAVED_V693",
+    binding,
     afterBytes,
     afterMiB:
       Number(
@@ -134859,7 +134887,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
-    "<i>V693 moves oversized-state rescue into dedicated /compact-state-v693 maintenance. Normal scans use cheap preventative caps only; protected calls, learning, alerts, verified V3 identities, active queues and confirmed launch detectors remain untouched. Hard 42 and Telegram reserve are unchanged.</i>"
+    "<i>V694 fixes the V693 maintenance-route KV binding unwrap only. Dedicated /compact-state-v693 behaviour, protected data policy, hard 42, Telegram reserve and all V687-V690 logic remain unchanged.</i>"
   ].join("\n");
 }
 
