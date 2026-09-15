@@ -1,6 +1,24 @@
 /**
+ * Robinhood Chain Meme Hunter — V709
+ * AUTHORITATIVE RUNTIME VERSION: V709
+ *
+ * V709 GOLDRUSH CREDIT METER + ROUTINE SAFETY GUARD
+ * - builds directly from confirmed V708;
+ * - adds a separate tiny persistent GoldRush usage ledger in KV;
+ * - forward-only bot-side credit estimate from V709;
+ * - defaults to a conservative 10,000-credit / 30-day planning profile;
+ * - stops routine GoldRush fallback at 9,000 estimated credits, preserving
+ *   about 1,000 credits for manual diagnostics;
+ * - records documented known endpoint costs from observed response counts;
+ * - adds GET /goldrush-usage and Telegram /goldrush;
+ * - preserves V708 verified V3 BUY/SELL-direction diagnostic;
+ * - no scoring/qualification/alert-threshold changes;
+ * - hard scanner request ceiling remains 42.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V708
- * AUTHORITATIVE RUNTIME VERSION: V708
+ * HISTORICAL VERSION NOTE: V708
  *
  * V708 DIRECT PROVEN-RPC V3 POOL IDENTITY DIAGNOSTIC
  * - builds directly from V707;
@@ -6014,7 +6032,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V708";
+const VERSION = "V709";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -56734,6 +56752,472 @@ async function blockscoutProHoldersV143(
 }
 
 
+
+/* =========================================================
+   V709 GOLDRUSH FORWARD-ONLY CREDIT METER / ROUTINE GUARD
+   ========================================================= */
+
+const GOLDRUSH_USAGE_KEY_V709 =
+  "robinhood-meme-hunter-goldrush-usage-v709";
+
+const GOLDRUSH_DEFAULT_PLANNING_CREDITS_V709 = 10000;
+const GOLDRUSH_DEFAULT_ROUTINE_CAP_CREDITS_V709 = 9000;
+const GOLDRUSH_DEFAULT_PERIOD_DAYS_V709 = 30;
+
+const GOLDRUSH_HOLDER_CREDITS_PER_ITEM_V709 = 0.02;
+const GOLDRUSH_TX_LOGS_CREDITS_PER_ITEM_V709 = 0.1;
+const GOLDRUSH_TX_NO_LOGS_CREDITS_PER_ITEM_V709 = 0.05;
+const GOLDRUSH_HISTORICAL_PRICE_CREDITS_PER_CALL_V709 = 1;
+
+function goldRushPositiveNumberV709(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function goldRushPlanningConfigV709(env) {
+  const planningCredits =
+    goldRushPositiveNumberV709(
+      env?.GOLDRUSH_PLANNING_CREDITS,
+      GOLDRUSH_DEFAULT_PLANNING_CREDITS_V709
+    );
+
+  const routineCapCredits =
+    Math.min(
+      planningCredits,
+      goldRushPositiveNumberV709(
+        env?.GOLDRUSH_ROUTINE_CAP_CREDITS,
+        GOLDRUSH_DEFAULT_ROUTINE_CAP_CREDITS_V709
+      )
+    );
+
+  const periodDays =
+    Math.max(
+      1,
+      Math.min(
+        366,
+        Math.round(
+          goldRushPositiveNumberV709(
+            env?.GOLDRUSH_PERIOD_DAYS,
+            GOLDRUSH_DEFAULT_PERIOD_DAYS_V709
+          )
+        )
+      )
+    );
+
+  return {
+    profile: "VIBE_CONSERVATIVE_PLANNING_V709",
+    planningCredits,
+    routineCapCredits,
+    reserveCredits: Math.max(0, planningCredits - routineCapCredits),
+    periodDays,
+    note: "Planning guard only. GoldRush dashboard/account billing remains authoritative."
+  };
+}
+
+function newGoldRushUsageV709(env, startAt = Date.now()) {
+  const config = goldRushPlanningConfigV709(env);
+
+  return {
+    schemaVersion: "V709",
+    forwardOnlySince: startAt,
+    periodStartAt: startAt,
+    periodEndAt: startAt + config.periodDays * 86400000,
+    requestsObserved: 0,
+    itemsObserved: 0,
+    estimatedCreditsUsed: 0,
+    routineEstimatedCreditsUsed: 0,
+    diagnosticEstimatedCreditsUsed: 0,
+    unknownCostRequests: 0,
+    lastRequestAt: null,
+    lastEndpoint: null,
+    endpoints: {},
+    planningConfigAtStart: config
+  };
+}
+
+function normalizeGoldRushUsageV709(raw, env, at = Date.now()) {
+  const config = goldRushPlanningConfigV709(env);
+  const meter =
+    raw && typeof raw === "object"
+      ? { ...raw }
+      : newGoldRushUsageV709(env, at);
+
+  meter.periodStartAt =
+    Number.isFinite(Number(meter.periodStartAt))
+      ? Number(meter.periodStartAt)
+      : at;
+
+  meter.periodEndAt =
+    Number.isFinite(Number(meter.periodEndAt))
+      ? Number(meter.periodEndAt)
+      : meter.periodStartAt + config.periodDays * 86400000;
+
+  meter.forwardOnlySince =
+    Number.isFinite(Number(meter.forwardOnlySince))
+      ? Number(meter.forwardOnlySince)
+      : meter.periodStartAt;
+
+  meter.requestsObserved = safeNumber(meter.requestsObserved);
+  meter.itemsObserved = safeNumber(meter.itemsObserved);
+  meter.estimatedCreditsUsed =
+    Number(Number(meter.estimatedCreditsUsed || 0).toFixed(4));
+  meter.routineEstimatedCreditsUsed =
+    Number(Number(meter.routineEstimatedCreditsUsed || 0).toFixed(4));
+  meter.diagnosticEstimatedCreditsUsed =
+    Number(Number(meter.diagnosticEstimatedCreditsUsed || 0).toFixed(4));
+  meter.unknownCostRequests = safeNumber(meter.unknownCostRequests);
+  meter.endpoints =
+    meter.endpoints && typeof meter.endpoints === "object"
+      ? meter.endpoints
+      : {};
+
+  return { meter, config };
+}
+
+async function readGoldRushUsageV709(env) {
+  const wrapper = getKV(env);
+
+  if (!wrapper?.kv) {
+    return {
+      available: false,
+      binding: wrapper?.binding || null,
+      error: "KV_UNAVAILABLE",
+      meter: newGoldRushUsageV709(env),
+      persisted: false
+    };
+  }
+
+  try {
+    const raw = await wrapper.kv.get(GOLDRUSH_USAGE_KEY_V709);
+    let parsed = null;
+
+    if (raw) {
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        parsed = null;
+      }
+    }
+
+    return {
+      available: true,
+      binding: wrapper.binding || null,
+      error: null,
+      meter: normalizeGoldRushUsageV709(parsed, env).meter,
+      persisted: Boolean(parsed)
+    };
+  } catch (error) {
+    return {
+      available: false,
+      binding: wrapper?.binding || null,
+      error: errorString(error),
+      meter: newGoldRushUsageV709(env),
+      persisted: false
+    };
+  }
+}
+
+async function writeGoldRushUsageV709(env, meter) {
+  const wrapper = getKV(env);
+
+  if (!wrapper?.kv) {
+    return {
+      saved: false,
+      binding: wrapper?.binding || null,
+      error: "KV_UNAVAILABLE"
+    };
+  }
+
+  try {
+    await wrapper.kv.put(
+      GOLDRUSH_USAGE_KEY_V709,
+      JSON.stringify(meter)
+    );
+
+    return {
+      saved: true,
+      binding: wrapper.binding || null,
+      error: null
+    };
+  } catch (error) {
+    return {
+      saved: false,
+      binding: wrapper.binding || null,
+      error: errorString(error)
+    };
+  }
+}
+
+async function recordGoldRushUsageV709(
+  env,
+  {
+    endpoint,
+    mode = "DIAGNOSTIC",
+    items = 0,
+    estimatedCredits = null,
+    costVerified = true,
+    httpStatus = null
+  } = {}
+) {
+  const at = Date.now();
+  const loaded = await readGoldRushUsageV709(env);
+  let { meter, config } =
+    normalizeGoldRushUsageV709(loaded?.meter, env, at);
+
+  if (at >= safeNumber(meter.periodEndAt)) {
+    meter = newGoldRushUsageV709(env, at);
+    config = goldRushPlanningConfigV709(env);
+  }
+
+  const cleanItems = Math.max(0, safeNumber(items));
+  const creditsKnown =
+    Number.isFinite(Number(estimatedCredits)) &&
+    Number(estimatedCredits) >= 0;
+  const cleanCredits =
+    creditsKnown
+      ? Number(Number(estimatedCredits).toFixed(4))
+      : 0;
+
+  const endpointKey =
+    String(endpoint || "UNKNOWN").slice(0, 80);
+
+  const current =
+    meter.endpoints[endpointKey] &&
+    typeof meter.endpoints[endpointKey] === "object"
+      ? meter.endpoints[endpointKey]
+      : {
+          requests: 0,
+          items: 0,
+          estimatedCredits: 0,
+          lastAt: null,
+          lastHttpStatus: null
+        };
+
+  current.requests = safeNumber(current.requests) + 1;
+  current.items = safeNumber(current.items) + cleanItems;
+  current.estimatedCredits =
+    Number(
+      (
+        Number(current.estimatedCredits || 0) +
+        cleanCredits
+      ).toFixed(4)
+    );
+  current.lastAt = at;
+  current.lastHttpStatus = httpStatus ?? null;
+  meter.endpoints[endpointKey] = current;
+
+  meter.requestsObserved = safeNumber(meter.requestsObserved) + 1;
+  meter.itemsObserved = safeNumber(meter.itemsObserved) + cleanItems;
+  meter.estimatedCreditsUsed =
+    Number(
+      (
+        Number(meter.estimatedCreditsUsed || 0) +
+        cleanCredits
+      ).toFixed(4)
+    );
+
+  if (String(mode).toUpperCase() === "ROUTINE") {
+    meter.routineEstimatedCreditsUsed =
+      Number(
+        (
+          Number(meter.routineEstimatedCreditsUsed || 0) +
+          cleanCredits
+        ).toFixed(4)
+      );
+  } else {
+    meter.diagnosticEstimatedCreditsUsed =
+      Number(
+        (
+          Number(meter.diagnosticEstimatedCreditsUsed || 0) +
+          cleanCredits
+        ).toFixed(4)
+      );
+  }
+
+  if (costVerified !== true || !creditsKnown) {
+    meter.unknownCostRequests =
+      safeNumber(meter.unknownCostRequests) + 1;
+  }
+
+  meter.lastRequestAt = at;
+  meter.lastEndpoint = endpointKey;
+
+  const saved = await writeGoldRushUsageV709(env, meter);
+
+  return { meter, config, saved };
+}
+
+async function goldRushUsageSnapshotV709(env) {
+  const loaded = await readGoldRushUsageV709(env);
+  const { meter, config } =
+    normalizeGoldRushUsageV709(loaded?.meter, env);
+
+  const nowMs = Date.now();
+  const used = Math.max(0, Number(meter.estimatedCreditsUsed || 0));
+  const remainingPlanning =
+    Math.max(0, config.planningCredits - used);
+  const routineRemaining =
+    Math.max(0, config.routineCapCredits - used);
+
+  const elapsedDays =
+    Math.max(
+      1 / 24,
+      (nowMs - safeNumber(meter.periodStartAt)) / 86400000
+    );
+
+  const observedDailyRate = used / elapsedDays;
+  const projectedPeriodCredits =
+    Number((observedDailyRate * config.periodDays).toFixed(2));
+  const periodExpired = nowMs >= safeNumber(meter.periodEndAt);
+
+  let status = "SAFE";
+
+  if (periodExpired) {
+    status = "PERIOD_EXPIRED_AWAITING_NEXT_METERED_REQUEST";
+  } else if (used >= config.planningCredits) {
+    status = "STOP_ALL_NONESSENTIAL_GOLDRUSH";
+  } else if (used >= config.routineCapCredits) {
+    status = "ROUTINE_GOLDRUSH_STOPPED_RESERVE_ONLY";
+  } else if (projectedPeriodCredits > config.routineCapCredits) {
+    status = "CAUTION_PROJECTED_ABOVE_ROUTINE_CAP";
+  }
+
+  return {
+    version: VERSION,
+    meter: "GOLDRUSH_FORWARD_ONLY_USAGE_V709",
+    persisted: loaded?.persisted === true,
+    kvAvailable: loaded?.available === true,
+    kvBinding: loaded?.binding || null,
+    kvError: loaded?.error || null,
+    planningProfile: config.profile,
+    planningCredits: config.planningCredits,
+    routineCapCredits: config.routineCapCredits,
+    reserveCredits: config.reserveCredits,
+    periodDays: config.periodDays,
+    forwardOnlySince: meter.forwardOnlySince || null,
+    periodStartAt: meter.periodStartAt || null,
+    periodEndAt: meter.periodEndAt || null,
+    requestsObserved: safeNumber(meter.requestsObserved),
+    itemsObserved: safeNumber(meter.itemsObserved),
+    estimatedCreditsUsed: Number(used.toFixed(4)),
+    routineEstimatedCreditsUsed:
+      Number(Number(meter.routineEstimatedCreditsUsed || 0).toFixed(4)),
+    diagnosticEstimatedCreditsUsed:
+      Number(Number(meter.diagnosticEstimatedCreditsUsed || 0).toFixed(4)),
+    unknownCostRequests: safeNumber(meter.unknownCostRequests),
+    remainingPlanningCredits:
+      Number(remainingPlanning.toFixed(4)),
+    routineCreditsRemainingBeforeGuard:
+      Number(routineRemaining.toFixed(4)),
+    observedCreditsPerDay:
+      Number(observedDailyRate.toFixed(2)),
+    projectedPeriodCredits,
+    lastRequestAt: meter.lastRequestAt || null,
+    lastEndpoint: meter.lastEndpoint || null,
+    endpoints: meter.endpoints || {},
+    routineAllowed:
+      !periodExpired &&
+      used < config.routineCapCredits,
+    status,
+    hardScannerRequestLimit: 42,
+    scannerBudgetConsumed: false,
+    externalProviderRequestsForMeterRead: 0,
+    actualGoldRushAccountUsage: "DATA UNVERIFIED",
+    authoritativeSource: "GOLDRUSH_DASHBOARD",
+    note:
+      "Forward-only bot-side estimate from V709. Calls before V709 or outside this Worker are not included."
+  };
+}
+
+async function goldRushRoutineGuardV709(
+  env,
+  estimatedNextCredits = 0
+) {
+  const snapshot = await goldRushUsageSnapshotV709(env);
+  const next = Math.max(0, Number(estimatedNextCredits || 0));
+  const projectedAfter =
+    Number(
+      (
+        safeNumber(snapshot.estimatedCreditsUsed) +
+        next
+      ).toFixed(4)
+    );
+
+  return {
+    allowed:
+      snapshot.kvAvailable === true &&
+      snapshot.routineAllowed === true &&
+      projectedAfter <= safeNumber(snapshot.routineCapCredits),
+    projectedAfter,
+    estimatedNextCredits: next,
+    snapshot,
+    reason:
+      snapshot.kvAvailable !== true
+        ? "METER_KV_UNAVAILABLE_FAIL_CLOSED"
+        : snapshot.routineAllowed !== true
+          ? "ROUTINE_CAP_NOT_AVAILABLE"
+          : projectedAfter > safeNumber(snapshot.routineCapCredits)
+            ? "NEXT_REQUEST_WOULD_CROSS_ROUTINE_CAP"
+            : "ALLOWED"
+  };
+}
+
+function goldRushUsageTelegramMessageV709(snapshot) {
+  const s = snapshot || {};
+
+  const fmt = value =>
+    Number.isFinite(Number(value))
+      ? Number(value).toLocaleString(
+          "en-GB",
+          { maximumFractionDigits: 2 }
+        )
+      : "UNVERIFIED";
+
+  const fmtDate = value => {
+    if (!Number.isFinite(Number(value))) {
+      return "UNVERIFIED";
+    }
+
+    try {
+      return new Date(Number(value)).toLocaleString(
+        "en-GB",
+        {
+          timeZone: "Europe/London",
+          day: "2-digit",
+          month: "short",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit"
+        }
+      );
+    } catch {
+      return "UNVERIFIED";
+    }
+  };
+
+  return [
+    "🟨 <b>GoldRush Usage — V709</b>",
+    "",
+    `Estimated used: <b>${fmt(s.estimatedCreditsUsed)} / ${fmt(s.planningCredits)}</b> credits`,
+    `Planning remaining: <b>${fmt(s.remainingPlanningCredits)}</b>`,
+    `Routine guard: <b>${fmt(s.routineCapCredits)}</b> | room before guard: <b>${fmt(s.routineCreditsRemainingBeforeGuard)}</b>`,
+    `Protected reserve: <b>${fmt(s.reserveCredits)}</b>`,
+    "",
+    `Requests observed: <b>${fmt(s.requestsObserved)}</b> | items observed: <b>${fmt(s.itemsObserved)}</b>`,
+    `Routine credits: <b>${fmt(s.routineEstimatedCreditsUsed)}</b> | diagnostics: <b>${fmt(s.diagnosticEstimatedCreditsUsed)}</b>`,
+    `Observed rate: <b>${fmt(s.observedCreditsPerDay)}</b>/day`,
+    `Projected ${fmt(s.periodDays)}d: <b>${fmt(s.projectedPeriodCredits)}</b> credits`,
+    "",
+    `Status: <b>${escapeHtml(String(s.status || "UNVERIFIED"))}</b>`,
+    `Routine GoldRush allowed: <b>${s.routineAllowed === true ? "YES" : "NO"}</b>`,
+    `Meter period: <b>${escapeHtml(fmtDate(s.periodStartAt))}</b> → <b>${escapeHtml(fmtDate(s.periodEndAt))}</b>`,
+    "",
+    "Actual GoldRush account usage: <b>DATA UNVERIFIED</b>",
+    "<i>Forward-only bot estimate from V709. GoldRush dashboard remains authoritative. Calls before V709 or outside this Worker are not included.</i>"
+  ].join("\n");
+}
+
+
 /*
  * V704 VERIFIED GOLDRUSH HOLDER FALLBACK
  *
@@ -56869,6 +57353,40 @@ async function goldRushHoldersV704(
       ...base,
       status:
         "GOLDRUSH_SCAN_REQUEST_LIMIT_REACHED_V704"
+    };
+  }
+
+  /*
+   * V709 monthly routine-credit guard.
+   * Holder endpoint page-size is 100 and documented cost is 0.02/item,
+   * so reserve a conservative maximum 2 credits before authorizing the call.
+   */
+  const goldRushGuardV709 =
+    await goldRushRoutineGuardV709(
+      env,
+      100 *
+      GOLDRUSH_HOLDER_CREDITS_PER_ITEM_V709
+    );
+
+  telemetry.goldRushGuardV709 = {
+    allowed: goldRushGuardV709?.allowed === true,
+    reason: goldRushGuardV709?.reason || null,
+    projectedAfter: goldRushGuardV709?.projectedAfter ?? null,
+    routineCapCredits:
+      goldRushGuardV709?.snapshot?.routineCapCredits ?? null,
+    estimatedCreditsUsed:
+      goldRushGuardV709?.snapshot?.estimatedCreditsUsed ?? null
+  };
+
+  if (goldRushGuardV709?.allowed !== true) {
+    telemetry.lastStatus =
+      "GOLDRUSH_ROUTINE_CREDIT_GUARD_V709";
+
+    return {
+      ...base,
+      attempted: false,
+      status: "GOLDRUSH_ROUTINE_CREDIT_GUARD_V709",
+      goldRushGuardV709: telemetry.goldRushGuardV709
     };
   }
 
@@ -57010,6 +57528,35 @@ async function goldRushHoldersV704(
             row.value !==
               null
         );
+
+    const goldRushUsageRecordV709 =
+      await recordGoldRushUsageV709(
+        env,
+        {
+          endpoint: "TOKEN_HOLDERS_V2",
+          mode: "ROUTINE",
+          items: rawItems.length,
+          estimatedCredits:
+            rawItems.length *
+            GOLDRUSH_HOLDER_CREDITS_PER_ITEM_V709,
+          costVerified: true,
+          httpStatus: response.status
+        }
+      );
+
+    telemetry.goldRushUsageV709 = {
+      estimatedCreditsThisRequest:
+        Number(
+          (
+            rawItems.length *
+            GOLDRUSH_HOLDER_CREDITS_PER_ITEM_V709
+          ).toFixed(4)
+        ),
+      meterSaved:
+        goldRushUsageRecordV709?.saved?.saved === true,
+      meterSaveError:
+        goldRushUsageRecordV709?.saved?.error || null
+    };
 
     const totalCountRaw =
       data?.pagination
@@ -137861,6 +138408,7 @@ function telegramHelpV271() {
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
     "<code>/blockscoutusage</code> — Blockscout PRO daily credit meter (read-only)",
+    "<code>/goldrush</code> — GoldRush forward-only credit meter + monthly routine guard",
     "<code>/blockscoutv3test 0xADDRESS</code> — one-shot exact V3 Blockscout log test",
     "<code>/help</code> — command list",
     "",
@@ -138460,6 +139008,73 @@ async function telegramCommandReplyV271(
       diagnosticV273.result = resultV404?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
     }
     return {success:resultV404?.success===true,ignored:false,command:parsed.command,scannerBudgetConsumed:false,externalProviderRequests:0};
+  }
+
+  // V709: read-only GoldRush credit meter; no provider request and no scan.
+  if (
+    parsed.command === "/goldrush" ||
+    parsed.command === "/goldrushusage"
+  ) {
+    const usageV709 =
+      await goldRushUsageSnapshotV709(
+        env
+      );
+
+    const replyV709 =
+      goldRushUsageTelegramMessageV709(
+        usageV709
+      );
+
+    if (diagnosticV273) {
+      diagnosticV273.replyAttempted = true;
+      diagnosticV273.goldRushUsageV709 = {
+        estimatedCreditsUsed:
+          usageV709?.estimatedCreditsUsed ?? null,
+        remainingPlanningCredits:
+          usageV709?.remainingPlanningCredits ?? null,
+        routineCreditsRemainingBeforeGuard:
+          usageV709?.routineCreditsRemainingBeforeGuard ?? null,
+        projectedPeriodCredits:
+          usageV709?.projectedPeriodCredits ?? null,
+        status: usageV709?.status || null,
+        routineAllowed:
+          usageV709?.routineAllowed === true,
+        scannerBudgetConsumed: false,
+        externalProviderRequests: 0,
+        stateWrites: 0
+      };
+    }
+
+    const sendV709 =
+      await sendTelegram(
+        env,
+        replyV709,
+        null,
+        null
+      );
+
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess =
+        sendV709?.success === true;
+      diagnosticV273.telegramStatus =
+        sendV709?.status || null;
+      diagnosticV273.telegramMode =
+        sendV709?.mode || null;
+      diagnosticV273.telegramError =
+        sendV709?.error || null;
+      diagnosticV273.result =
+        sendV709?.success === true
+          ? "REPLY_SENT"
+          : "REPLY_FAILED";
+    }
+
+    return {
+      success: sendV709?.success === true,
+      ignored: false,
+      command: parsed.command,
+      scannerBudgetConsumed: false,
+      externalProviderRequests: 0
+    };
   }
 
   // V598: exact-address, read-only V3 feed/provider usage meter.
@@ -142073,6 +142688,21 @@ async function goldRushHolderDiagnosticV702(
       body?.error_code !== 0
     );
 
+  const goldRushUsageRecordV709 =
+    await recordGoldRushUsageV709(
+      env,
+      {
+        endpoint: "TOKEN_HOLDERS_V2",
+        mode: "DIAGNOSTIC",
+        items: items.length,
+        estimatedCredits:
+          items.length *
+          GOLDRUSH_HOLDER_CREDITS_PER_ITEM_V709,
+        costVerified: true,
+        httpStatus: response.status
+      }
+    );
+
   return {
     ...base,
     externalRequestsUsed: 1,
@@ -142468,6 +143098,40 @@ async function goldRushMarketUsdDiagnosticV705(
     !txApiError &&
     txItems.length > 0;
 
+  const goldRushPriceUsageV709 =
+    await recordGoldRushUsageV709(
+      env,
+      {
+        endpoint: "HISTORICAL_TOKEN_PRICES",
+        mode: "DIAGNOSTIC",
+        items: priceItems.length,
+        estimatedCredits:
+          priceResponse?.status !== null &&
+          priceResponse?.status !== undefined
+            ? GOLDRUSH_HISTORICAL_PRICE_CREDITS_PER_CALL_V709
+            : 0,
+        costVerified:
+          priceResponse?.status !== null &&
+          priceResponse?.status !== undefined,
+        httpStatus: priceResponse?.status ?? null
+      }
+    );
+
+  const goldRushTxNoLogsUsageV709 =
+    await recordGoldRushUsageV709(
+      env,
+      {
+        endpoint: "TRANSACTIONS_V3_NO_LOGS",
+        mode: "DIAGNOSTIC",
+        items: txItems.length,
+        estimatedCredits:
+          txItems.length *
+          GOLDRUSH_TX_NO_LOGS_CREDITS_PER_ITEM_V709,
+        costVerified: true,
+        httpStatus: txResponse?.status ?? null
+      }
+    );
+
   return {
     ...base,
     externalRequestsUsed:
@@ -142859,7 +143523,7 @@ async function directDiagnosticEthCallV708(
 }
 
 
-async function goldRushV3SwapDiagnosticV708(
+async function goldRushV3SwapDiagnosticV709(
   env,
   token,
   pool
@@ -142887,7 +143551,7 @@ async function goldRushV3SwapDiagnosticV708(
     version:
       VERSION,
     diagnostic:
-      "GOLDRUSH_ROBINHOOD_V3_SWAP_LOGS_V708",
+      "GOLDRUSH_ROBINHOOD_V3_SWAP_LOGS_V709",
     safe:
       true,
     diagnosticOnly:
@@ -142939,7 +143603,7 @@ async function goldRushV3SwapDiagnosticV708(
       success:
         false,
       status:
-        "INVALID_TOKEN_OR_POOL_V708"
+        "INVALID_TOKEN_OR_POOL_V709"
     };
   }
 
@@ -142949,7 +143613,7 @@ async function goldRushV3SwapDiagnosticV708(
       success:
         false,
       status:
-        "GOLDRUSH_API_KEY_NOT_CONFIGURED_V708"
+        "GOLDRUSH_API_KEY_NOT_CONFIGURED_V709"
     };
   }
 
@@ -143347,7 +144011,7 @@ async function goldRushV3SwapDiagnosticV708(
       success:
         false,
       status:
-        "GOLDRUSH_SWAP_FETCH_FAILED_V708",
+        "GOLDRUSH_SWAP_FETCH_FAILED_V709",
       error:
         errorString(
           error
@@ -143373,6 +144037,21 @@ async function goldRushV3SwapDiagnosticV708(
     )
       ? body.data.items
       : [];
+
+  const goldRushTxLogsUsageV709 =
+    await recordGoldRushUsageV709(
+      env,
+      {
+        endpoint: "TRANSACTIONS_V3_WITH_LOGS",
+        mode: "DIAGNOSTIC",
+        items: txItems.length,
+        estimatedCredits:
+          txItems.length *
+          GOLDRUSH_TX_LOGS_CREDITS_PER_ITEM_V709,
+        costVerified: true,
+        httpStatus: response.status
+      }
+    );
 
   let totalLogEvents =
     0;
@@ -143656,17 +144335,17 @@ async function goldRushV3SwapDiagnosticV708(
       response.ok &&
       !apiError &&
       swapDirectionVerified
-        ? "GOLDRUSH_V3_SWAP_DIRECTION_CONFIRMED_V708"
+        ? "GOLDRUSH_V3_SWAP_DIRECTION_CONFIRMED_V709"
         : response.ok &&
             !apiError &&
             decodedSwapLogs >
               0
-          ? "GOLDRUSH_SWAP_LOGS_FOUND_DIRECTION_NOT_CONFIRMED_V708"
+          ? "GOLDRUSH_SWAP_LOGS_FOUND_DIRECTION_NOT_CONFIRMED_V709"
           : response.ok &&
               !apiError
-            ? "GOLDRUSH_NO_V3_SWAP_LOGS_IN_RECENT_WINDOW_V708"
-            : "GOLDRUSH_SWAP_HTTP_ERROR_V708",
-    capabilityDecisionV708: {
+            ? "GOLDRUSH_NO_V3_SWAP_LOGS_IN_RECENT_WINDOW_V709"
+            : "GOLDRUSH_SWAP_HTTP_ERROR_V709",
+    capabilityDecisionV709: {
       decodedSwapLogsAvailable:
         decodedSwapLogs >
         0,
@@ -143820,6 +144499,17 @@ async function handleRequest(
 
   if (
     path ===
+      "/goldrush-usage"
+  ) {
+    return jsonResponse(
+      await goldRushUsageSnapshotV709(
+        env
+      )
+    );
+  }
+
+  if (
+    path ===
       "/goldrush-market-test"
   ) {
     return jsonResponse(
@@ -143835,7 +144525,7 @@ async function handleRequest(
       "/goldrush-swap-test"
   ) {
     return jsonResponse(
-      await goldRushV3SwapDiagnosticV708(
+      await goldRushV3SwapDiagnosticV709(
         env,
         url.searchParams.get("token") || "",
         url.searchParams.get("pool") || ""
