@@ -1,6 +1,21 @@
 /**
- * Robinhood Chain Meme Hunter — V719
- * AUTHORITATIVE RUNTIME VERSION: V719
+ * Robinhood Chain Meme Hunter — V720
+ * AUTHORITATIVE RUNTIME VERSION: V720
+ *
+ * V720 VERIFIED-LIVE QUALIFICATION / SUBREQUEST PROTECTION
+ * - builds directly from confirmed V719;
+ * - fixes the live evidence bottleneck exposed after V719: Cloudflare reported
+ *   "Too many subrequests by single Worker invocation" during backlog work while
+ *   current/live verified launches were still competing for completion capacity;
+ * - when the LIVE pass has already positively verified one or more launch tokens,
+ *   pre-analysis backlog catch-up is deferred entirely for that scan;
+ * - the same live-launch scan also suppresses the optional post-analysis residual
+ *   backlog reclaim, so backlog cannot push the invocation into Cloudflare's
+ *   subrequest ceiling after qualification/Telegram work;
+ * - scans with no positively verified live launch keep the existing backlog paths,
+ *   so historical catch-up continues during quiet scans;
+ * - hard 42, live discovery, launch verification, provider order/cooldowns, scoring,
+ *   holder/risk standards and Telegram thresholds remain unchanged.
  *
  * V719 MANUAL-SCAN DURABLE CPU RELAY
  * - builds directly from tested V718;
@@ -6224,7 +6239,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V719";
+const VERSION = "V720";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -87524,6 +87539,30 @@ for (
       );
   }
 
+  /*
+   * V720: once the live pass has positively verified at least one launch,
+   * qualification owns the remainder of this invocation. Backlog is historical
+   * catch-up, so it is safe to defer it to a future quiet scan. This prevents
+   * backlog provider retries/subrequests from competing with same-run ERC20,
+   * market and holder completion and from tripping Cloudflare's invocation-level
+   * subrequest ceiling. No launch evidence is discarded and hard 42 is unchanged.
+   */
+  const v720LiveQualificationProtection = {
+    enabled: true,
+    currentLiveVerifiedLaunchCount:
+      currentLiveVerifiedLaunchTokensV621.size,
+    active:
+      currentLiveVerifiedLaunchTokensV621.size > 0,
+    preAnalysisBacklogDeferred: false,
+    postAnalysisBacklogSuppressed: false,
+    reason:
+      currentLiveVerifiedLaunchTokensV621.size > 0
+        ? "CURRENT_LIVE_VERIFIED_LAUNCH_QUALIFICATION_PRIORITY_V720"
+        : "NO_CURRENT_LIVE_VERIFIED_LAUNCH_V720",
+    hardRequestLimitUnchanged: true,
+    telegramThresholdsUnchanged: true
+  };
+
   /* =======================================================
      BACKLOG
      ======================================================= */
@@ -87566,6 +87605,7 @@ for (
   };
 
   if (
+    v720LiveQualificationProtection.active !== true &&
     backlogFrom !==
       null &&
     backlogFrom <=
@@ -87616,6 +87656,14 @@ for (
 
     backlogError =
       backlogResult.error;
+  }
+
+  else if (
+    v720LiveQualificationProtection.active === true &&
+    backlogFrom !== null &&
+    backlogFrom <= backlogTargetBlock
+  ) {
+    v720LiveQualificationProtection.preAnalysisBacklogDeferred = true;
   }
 
   else if (
@@ -96173,6 +96221,13 @@ for (
       budget
     );
 
+  if (v720LiveQualificationProtection.active === true) {
+    postAnalysisBacklogReclaimV170.activated = false;
+    postAnalysisBacklogReclaimV170.v720SuppressedForLiveQualification = true;
+    budget.discovery.postAnalysisBacklogReclaimV170 = false;
+    v720LiveQualificationProtection.postAnalysisBacklogSuppressed = true;
+  }
+
   let postAnalysisBacklogResultV170 =
     null;
 
@@ -97099,6 +97154,8 @@ for (
     },
 
     releasedSeededAutonomousProofV544,
+
+    v720LiveQualificationProtection,
 
     requestBudget:
       budgetTelemetry(
@@ -150546,6 +150603,8 @@ function compactManualScanResultV719(result) {
     persistence: result?.persistence || null,
     services: result?.services || null,
     requestBudget: result?.requestBudget || null,
+    v720LiveQualificationProtection:
+      result?.v720LiveQualificationProtection || null,
     scannerFunnelV415: result?.scannerFunnelV415 || null,
     launchCoverageFunnelV474: result?.launchCoverageFunnelV474 || null,
     launchCoverageCumulativeV474: result?.launchCoverageCumulativeV474
