@@ -1,6 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V714
+ * AUTHORITATIVE RUNTIME VERSION: V714
+ *
+ * V714 ERC20 -> QUALIFICATION OWNERSHIP HANDOFF
+ * - builds directly from V713;
+ * - explicitly transfers protected capacity from ERC20 identity to the active
+ *   candidate's market/holder qualification after identity succeeds;
+ * - qualification calls cannot consume that slice before the handoff;
+ * - protects FOUR qualification requests so the existing holder path can reach
+ *   the guarded GoldRush fallback after Blockscout public/legacy/Pro attempts;
+ * - remains inside hard 42 and preserves provider order/cooldowns, V709 credit
+ *   guard, V711 USD fallback, V712 diagnostics and all Telegram thresholds;
+ * - preserves completed handoff/consume telemetry instead of wiping it.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V713
- * AUTHORITATIVE RUNTIME VERSION: V713
+ * HISTORICAL VERSION NOTE: V713
  *
  * V713 DYNAMIC PROTECTED QUALIFICATION RESERVE
  * - builds directly from confirmed V712 evidence;
@@ -6113,7 +6129,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V713";
+const VERSION = "V714";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12426,7 +12442,7 @@ function createBudget() {
 
         qualificationReserveV713: {
           enabled: true,
-          maxRequestsPerActiveCandidate: 3,
+          maxRequestsPerActiveCandidate: 4,
           reservedRequests: 0,
           consumedRequests: 0,
           consumedTypes: {},
@@ -12434,6 +12450,10 @@ function createBudget() {
           lastConsumedType: null,
           lastConsumedAt: null,
           activeAddress: null,
+          phaseV714: "IDLE",
+          handedOffAtV714: null,
+          handoffCountV714: 0,
+          completedCandidatesV714: [],
           rule:
             "ACTIVE_CURRENT_LIVE_VERIFIED_LAUNCH_MARKET_HOLDER_EVIDENCE_ONLY_INSIDE_EXISTING_PRE_TELEGRAM_BUDGET"
         },
@@ -13127,7 +13147,7 @@ function configureErc20UpstreamHeadroomReserveV690(
    */
   const qualificationRequestsPerCandidateV713 =
     pendingAddresses.length > 0
-      ? 3
+      ? 4
       : 0;
 
   const initialReservedRequestsV699 =
@@ -13180,7 +13200,7 @@ function configureErc20UpstreamHeadroomReserveV690(
       : {};
 
   reserve.qualificationReserveV713.enabled = true;
-  reserve.qualificationReserveV713.maxRequestsPerActiveCandidate = 3;
+  reserve.qualificationReserveV713.maxRequestsPerActiveCandidate = 4;
   reserve.qualificationReserveV713.reservedRequests = 0;
   reserve.qualificationReserveV713.consumedRequests = 0;
   reserve.qualificationReserveV713.consumedTypes = {};
@@ -13188,6 +13208,10 @@ function configureErc20UpstreamHeadroomReserveV690(
   reserve.qualificationReserveV713.lastConsumedType = null;
   reserve.qualificationReserveV713.lastConsumedAt = null;
   reserve.qualificationReserveV713.activeAddress = null;
+  reserve.qualificationReserveV713.phaseV714 = "IDLE";
+  reserve.qualificationReserveV713.handedOffAtV714 = null;
+  reserve.qualificationReserveV713.handoffCountV714 = 0;
+  reserve.qualificationReserveV713.completedCandidatesV714 = [];
   reserve.qualificationReserveV713.rule =
     "ACTIVE_CURRENT_LIVE_VERIFIED_LAUNCH_MARKET_HOLDER_EVIDENCE_ONLY_INSIDE_EXISTING_PRE_TELEGRAM_BUDGET";
 
@@ -13199,7 +13223,7 @@ function configureErc20UpstreamHeadroomReserveV690(
   reserve.lastBlockedAt = null;
   reserve.sequenceReserveV699 = true;
   reserve.maxSequenceRequestsV699 = 5;
-  reserve.qualificationRequestsPerCandidateV713 = 3;
+  reserve.qualificationRequestsPerCandidateV713 = 4;
   reserve.rule =
     "DYNAMIC_V655_ERC20_IDENTITY_PLUS_V713_QUALIFICATION_RESERVED_INSIDE_EXISTING_PRE_TELEGRAM_BUDGET";
 
@@ -13256,11 +13280,11 @@ function setActiveErc20UpstreamCandidateV690(
     Math.max(
       0,
       Math.min(
-        3,
+        4,
         safeNumber(
           qualificationReserveV713
             ?.maxRequestsPerActiveCandidate
-        ) || 3
+        ) || 4
       )
     );
 
@@ -13273,6 +13297,8 @@ function setActiveErc20UpstreamCandidateV690(
   qualificationReserveV713.lastConsumedType = null;
   qualificationReserveV713.lastConsumedAt = null;
   qualificationReserveV713.activeAddress = token;
+  qualificationReserveV713.phaseV714 = "IDENTITY";
+  qualificationReserveV713.handedOffAtV714 = null;
 
   const activeRequiredV713 =
     requiredV699 +
@@ -13321,16 +13347,44 @@ function releaseErc20UpstreamCandidateV690(
   }
 
   /*
-   * V699: a protected consume by one token no longer disables the reserve for
-   * every later candidate. Roll forward to the largest bounded requirement
-   * still pending in this scan.
+   * V714: preserve completed handoff/consume telemetry before the shared lane
+   * rolls to the next candidate.
    */
   if (
     reserve.qualificationReserveV713 &&
     typeof reserve.qualificationReserveV713 === "object"
   ) {
-    reserve.qualificationReserveV713.reservedRequests = 0;
-    reserve.qualificationReserveV713.activeAddress = null;
+    const qV714 = reserve.qualificationReserveV713;
+
+    qV714.completedCandidatesV714 =
+      Array.isArray(qV714.completedCandidatesV714)
+        ? qV714.completedCandidatesV714
+        : [];
+
+    qV714.completedCandidatesV714.push({
+      address: token,
+      phase: qV714.phaseV714 || null,
+      handedOffAt: qV714.handedOffAtV714 || null,
+      consumedRequests: safeNumber(qV714.consumedRequests),
+      consumedTypes:
+        qV714.consumedTypes &&
+        typeof qV714.consumedTypes === "object"
+          ? { ...qV714.consumedTypes }
+          : {},
+      remainingQualificationRequests:
+        safeNumber(qV714.reservedRequests),
+      bypassedInternalAnalysisBoundary:
+        safeNumber(qV714.bypassedInternalAnalysisBoundary),
+      releasedAt: Date.now(),
+      releaseReason: reason
+    });
+
+    qV714.completedCandidatesV714 =
+      qV714.completedCandidatesV714.slice(-12);
+
+    qV714.reservedRequests = 0;
+    qV714.activeAddress = null;
+    qV714.phaseV714 = "IDLE";
   }
 
   const nextIdentityReservedV699 =
@@ -13351,13 +13405,13 @@ function releaseErc20UpstreamCandidateV690(
 
   const nextReservedV699 =
     nextIdentityReservedV699 > 0
-      ? nextIdentityReservedV699 + 3
+      ? nextIdentityReservedV699 + 4
       : 0;
 
   if (nextReservedV699 > 0) {
     reserve.active = true;
     reserve.reservedRequests =
-      Math.min(8, nextReservedV699);
+      Math.min(9, nextReservedV699);
     reserve.releasedAt = null;
     reserve.releaseReason =
       "ROLLED_TO_NEXT_PENDING_FRESH_LAUNCH_SEQUENCE_V699";
@@ -13504,6 +13558,71 @@ function observeSameTokenHolderBorrowV701(
 
 
 
+
+function handoffErc20ToQualificationV714(
+  budget,
+  address
+) {
+  const reserve =
+    budget?.analysis
+      ?.erc20UpstreamHeadroomReserveV690;
+  const q =
+    reserve?.qualificationReserveV713;
+  const token =
+    normalize(address);
+
+  if (
+    reserve?.enabled !== true ||
+    reserve?.active !== true ||
+    !isAddress(token) ||
+    normalize(reserve?.activeCandidateAddress) !== token ||
+    q?.enabled !== true ||
+    normalize(q?.activeAddress) !== token
+  ) {
+    return {
+      handedOff: false,
+      reason: "NO_MATCHING_ACTIVE_V714_QUALIFICATION_OWNER"
+    };
+  }
+
+  const qualificationRemaining =
+    Math.max(
+      0,
+      Math.min(
+        4,
+        safeNumber(q?.reservedRequests),
+        safeNumber(reserve?.reservedRequests)
+      )
+    );
+
+  q.reservedRequests = qualificationRemaining;
+  q.phaseV714 = "ACTIVE_CANDIDATE_QUALIFICATION";
+  q.handedOffAtV714 = Date.now();
+  q.handoffCountV714 =
+    safeNumber(q.handoffCountV714) + 1;
+
+  reserve.activeCandidateRequiredRequestsV699 = 0;
+  reserve.reservedRequests = qualificationRemaining;
+  reserve.releaseReason =
+    qualificationRemaining > 0
+      ? "ERC20_IDENTITY_TO_QUALIFICATION_HANDOFF_V714"
+      : "NO_QUALIFICATION_CAPACITY_REMAINING_AT_HANDOFF_V714";
+
+  if (qualificationRemaining <= 0) {
+    reserve.active = false;
+  }
+
+  return {
+    handedOff: qualificationRemaining > 0,
+    address: token,
+    qualificationRequestsProtected: qualificationRemaining,
+    hardRequestLimitRaised: false,
+    phase: q.phaseV714,
+    handedOffAt: q.handedOffAtV714
+  };
+}
+
+
 function activeQualificationRequestV713(
   budget,
   phase,
@@ -13521,6 +13640,7 @@ function activeQualificationRequestV713(
   if (
     reserve?.active !== true ||
     q?.enabled !== true ||
+    q?.phaseV714 !== "ACTIVE_CANDIDATE_QUALIFICATION" ||
     safeNumber(q?.reservedRequests) <= 0 ||
     !isAddress(
       normalize(reserve?.activeCandidateAddress)
@@ -15281,7 +15401,15 @@ function consumeBudget(
       pendingAddresses:
         Array.isArray(reserveV690.pendingAddresses)
           ? [...reserveV690.pendingAddresses]
-          : []
+          : [],
+      activeCandidateAddressV714:
+        normalize(reserveV690.activeCandidateAddress) || null,
+      qualificationPhaseV714:
+        reserveV690?.qualificationReserveV713?.phaseV714 || null,
+      qualificationActiveAddressV714:
+        normalize(
+          reserveV690?.qualificationReserveV713?.activeAddress
+        ) || null
     });
 
     return false;
@@ -68994,14 +69122,18 @@ function qualificationCauseV712(
 
   const skippedForCandidate =
     skipped.filter(row => {
-      const pending =
-        Array.isArray(row?.pendingAddresses)
-          ? row.pendingAddresses.map(normalize)
-          : [];
-      return (
-        normalize(row?.address) === candidateAddress ||
-        normalize(row?.token) === candidateAddress ||
-        pending.includes(candidateAddress)
+      const explicitAddress =
+        normalize(
+          row?.address ||
+          row?.token ||
+          row?.reservedFor ||
+          row?.activeCandidateAddressV714 ||
+          row?.qualificationActiveAddressV714
+        );
+
+      return Boolean(
+        explicitAddress &&
+        explicitAddress === candidateAddress
       );
     });
 
@@ -79584,6 +79716,12 @@ async function analyzeToken(
     };
   }
 
+  const qualificationHandoffV714 =
+    handoffErc20ToQualificationV714(
+      budget,
+      address
+    );
+
   let market = {
     verified:
       false,
@@ -79942,6 +80080,8 @@ async function analyzeToken(
       Boolean(
         options?.liveDiscovery
       ),
+
+    qualificationHandoffV714,
 
     qualificationTraceV712: {
       diagnosticOnly: true,
@@ -88879,19 +89019,36 @@ for (
       qualificationChanged: false
     },
 
-    dynamicQualificationReserveV713: {
+    qualificationOwnershipHandoffV714: {
       enabled: true,
-      maxRequestsPerActiveCandidate: 3,
+      maxRequestsPerActiveCandidate: 4,
+      explicitOwnershipPhases: [
+        "IDENTITY",
+        "ACTIVE_CANDIDATE_QUALIFICATION",
+        "IDLE"
+      ],
       activeCurrentLiveVerifiedLaunchOnly: true,
       protectsMarketAndHolderEvidence: true,
+      fourthSlotPurpose:
+        "REACH_EXISTING_GOLDRUSH_HOLDER_FALLBACK_AFTER_BLOCKSCOUT_PATHS",
       erc20IdentityReservePreserved: true,
+      completedCandidateTelemetryPreserved: true,
+      pendingListMisattributionFixed: true,
       providerCooldownsPreserved: true,
+      providerOrderChanged: false,
       hardRequestLimitChanged: false,
       analysisBaseLimitChanged: false,
       notificationReserveChanged: false,
       scoringChanged: false,
       qualificationChanged: false,
       telegramThresholdChanged: false
+    },
+
+    dynamicQualificationReserveV713: {
+      enabled: true,
+      preservedUnderV714: true,
+      maxRequestsPerActiveCandidate: 4,
+      explicitV714HandoffRequired: true
     },
 
     qualificationBreakdownV712: {
