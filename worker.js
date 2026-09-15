@@ -1,6 +1,27 @@
 /**
+ * Robinhood Chain Meme Hunter — V716
+ * AUTHORITATIVE RUNTIME VERSION: V716
+ *
+ * V716 REUSED ERC-20 TOTAL-SUPPLY COMPLETION
+ * - builds directly from confirmed V715;
+ * - fixes the V715-proven GOLEM case where a reused >=3-of-4 verified ERC-20
+ *   identity can carry totalSupply=null, causing holderIntelligence to be skipped
+ *   even when ample analysis headroom remains;
+ * - for REUSED valid ERC-20 metadata only, makes one bounded verified totalSupply()
+ *   completion attempt before the V714 qualification handoff;
+ * - a successful positive uint256 result is checkpointed into existing V419 progress
+ *   and V417 metadata, then the unchanged holder path runs in the same analysis;
+ * - failure never invents supply, never weakens holder/risk requirements, and remains
+ *   UNVERIFIED for retry under the existing completion machinery;
+ * - the totalSupply completion may use only ordinary analysis headroom and cannot
+ *   consume the four protected V714 market/holder qualification requests;
+ * - hard 42, notification reserve, providers/cooldowns, scoring, market verification,
+ *   holder standards and Telegram thresholds remain unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V715
- * AUTHORITATIVE RUNTIME VERSION: V715
+ * HISTORICAL VERSION NOTE: V715
  *
  * V715 PRE-ANALYSIS IDENTITY + QUALIFICATION HEADROOM GATE
  * - builds directly from confirmed V714;
@@ -6148,7 +6169,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V715";
+const VERSION = "V716";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -47820,6 +47841,148 @@ async function erc20ProbeV418(env, address, data, label, budget) {
   };
 }
 
+async function completeReusedTotalSupplyV716(
+  env,
+  address,
+  budget,
+  watched,
+  validation
+) {
+  const telemetry = {
+    enabled: true,
+    reusedIdentity: validation?.reused === true,
+    needed: false,
+    attempted: false,
+    requestConsumed: false,
+    repaired: false,
+    source: null,
+    totalSupply: validation?.totalSupply ?? null,
+    status: null,
+    error: null,
+    failureClass: null,
+    ordinaryAnalysisHeadroomOnly: true,
+    protectedQualificationRequestsConsumed: 0,
+    hardRequestLimitRaised: false
+  };
+
+  if (
+    validation?.validERC20 !== true ||
+    validation?.reused !== true
+  ) {
+    telemetry.status =
+      "NOT_REUSED_VERIFIED_IDENTITY_V716";
+    return { validation, telemetry };
+  }
+
+  let existingSupplyPositive = false;
+  try {
+    existingSupplyPositive =
+      validation?.totalSupply !== null &&
+      validation?.totalSupply !== undefined &&
+      BigInt(String(validation.totalSupply)) > 0n;
+  } catch {}
+
+  if (existingSupplyPositive) {
+    telemetry.status =
+      "TOTAL_SUPPLY_ALREADY_VERIFIED_V716";
+    return { validation, telemetry };
+  }
+
+  telemetry.needed = true;
+
+  /*
+   * Deliberately use ordinary analysis availability BEFORE the V714 handoff.
+   * The four qualification slots therefore remain untouched for market/holder
+   * evidence. If ordinary headroom is unavailable, preserve UNVERIFIED truth
+   * and let the existing completion/retry machinery try again later.
+   */
+  if (!budgetAvailable(budget, "analysis", 1)) {
+    telemetry.status =
+      "ORDINARY_ANALYSIS_HEADROOM_UNAVAILABLE_V716";
+    return { validation, telemetry };
+  }
+
+  const beforeTotal = safeNumber(budget?.totalUsed);
+  const probe = await erc20ProbeV418(
+    env,
+    address,
+    "0x18160ddd",
+    "totalSupply",
+    budget
+  );
+  const afterTotal = safeNumber(budget?.totalUsed);
+
+  telemetry.attempted = true;
+  telemetry.requestConsumed = afterTotal > beforeTotal;
+  telemetry.source = probe?.provider || null;
+  telemetry.error = probe?.error || null;
+  telemetry.failureClass = probe?.failureClass || null;
+
+  openErc20RpcCircuitV420(
+    env,
+    budget,
+    address,
+    "totalSupply",
+    probe?.error || null
+  );
+
+  if (probe?.ok === true) {
+    checkpointErc20ProgressV419(
+      watched,
+      {
+        methods: {
+          totalSupply: {
+            raw: probe.raw,
+            provider: probe.provider || null,
+            verifiedAt: Date.now()
+          }
+        }
+      }
+    );
+  }
+
+  const decoded =
+    probe?.ok === true
+      ? decodeErc20ProbeValueV419(
+          "totalSupply",
+          probe.raw
+        )
+      : { verified: false, value: null };
+
+  if (decoded?.verified === true) {
+    const repairedValidation = {
+      ...validation,
+      totalSupply: decoded.value,
+      totalSupplyRepairedV716: true,
+      totalSupplyRepairProviderV716:
+        probe?.provider || null,
+      totalSupplyRepairAtV716: Date.now()
+    };
+
+    checkpointVerifiedMetadataV417(
+      watched,
+      repairedValidation
+    );
+
+    telemetry.repaired = true;
+    telemetry.totalSupply = decoded.value;
+    telemetry.status =
+      "REUSED_TOTAL_SUPPLY_VERIFIED_V716";
+
+    return {
+      validation: repairedValidation,
+      telemetry
+    };
+  }
+
+  telemetry.status =
+    probe?.retryableFailure === true
+      ? "REUSED_TOTAL_SUPPLY_RETRYABLE_UNVERIFIED_V716"
+      : "REUSED_TOTAL_SUPPLY_UNVERIFIED_V716";
+
+  return { validation, telemetry };
+}
+
 function persistErc20IdentityV418(watched, diagnostic) {
   if (!watched || !diagnostic) return;
   watched.erc20IdentityV418 = { ...diagnostic, recordedAt: Date.now() };
@@ -79588,7 +79751,7 @@ async function analyzeToken(
     };
   }
 
-  const validation =
+  let validation =
     await verifyERC20(
       env,
       address,
@@ -79734,6 +79897,30 @@ async function analyzeToken(
         )
     };
   }
+
+  /*
+   * V716: V715 live evidence proved that a reused 3-of-4 identity may be
+   * perfectly valid while totalSupply is still null. Holder intelligence
+   * requires a verified supply denominator, so complete only that missing
+   * method once, using ordinary analysis headroom, before handing the four
+   * protected requests to qualification.
+   */
+  const totalSupplyCompletionV716 =
+    await completeReusedTotalSupplyV716(
+      env,
+      address,
+      budget,
+      watched,
+      validation
+    );
+
+  validation =
+    totalSupplyCompletionV716?.validation ||
+    validation;
+
+  const totalSupplyRepairV716 =
+    totalSupplyCompletionV716?.telemetry ||
+    null;
 
   const qualificationHandoffV714 =
     handoffErc20ToQualificationV714(
@@ -80099,6 +80286,8 @@ async function analyzeToken(
       Boolean(
         options?.liveDiscovery
       ),
+
+    totalSupplyRepairV716,
 
     qualificationHandoffV714,
 
