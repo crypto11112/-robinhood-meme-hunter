@@ -1,6 +1,24 @@
 /**
+ * Robinhood Chain Meme Hunter — V710
+ * AUTHORITATIVE RUNTIME VERSION: V710
+ *
+ * V710 EXACT SWAP-USD DIAGNOSTIC
+ * - builds directly from confirmed V709;
+ * - preserves V709 GoldRush credit meter/guard unchanged;
+ * - preserves V708 verified BUY/SELL direction mapping;
+ * - reads the existing bot state read-only and reuses only the existing VERIFIED,
+ *   freshness-bounded WETH/USDG reference from bestVerifiedWethUsdGReferenceV195();
+ * - converts each exact WETH quote-side raw amount into USD using 18 decimals;
+ * - aggregates verified BUY USD / SELL USD for the returned GoldRush swap window;
+ * - never uses GoldRush transaction value_quote as swap USD;
+ * - no scoring/qualification/Telegram-alert changes and no live USD promotion;
+ * - GoldRush still uses one diagnostic Transactions V3 request;
+ * - hard scanner request ceiling remains 42.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V709
- * AUTHORITATIVE RUNTIME VERSION: V709
+ * HISTORICAL VERSION NOTE: V709
  *
  * V709 GOLDRUSH CREDIT METER + ROUTINE SAFETY GUARD
  * - builds directly from confirmed V708;
@@ -6032,7 +6050,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V709";
+const VERSION = "V710";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -143523,7 +143541,7 @@ async function directDiagnosticEthCallV708(
 }
 
 
-async function goldRushV3SwapDiagnosticV709(
+async function goldRushV3SwapDiagnosticV710(
   env,
   token,
   pool
@@ -143551,7 +143569,7 @@ async function goldRushV3SwapDiagnosticV709(
     version:
       VERSION,
     diagnostic:
-      "GOLDRUSH_ROBINHOOD_V3_SWAP_LOGS_V709",
+      "GOLDRUSH_ROBINHOOD_V3_SWAP_USD_V710",
     safe:
       true,
     diagnosticOnly:
@@ -143603,7 +143621,7 @@ async function goldRushV3SwapDiagnosticV709(
       success:
         false,
       status:
-        "INVALID_TOKEN_OR_POOL_V709"
+        "INVALID_TOKEN_OR_POOL_V710"
     };
   }
 
@@ -143613,8 +143631,59 @@ async function goldRushV3SwapDiagnosticV709(
       success:
         false,
       status:
-        "GOLDRUSH_API_KEY_NOT_CONFIGURED_V709"
+        "GOLDRUSH_API_KEY_NOT_CONFIGURED_V710"
     };
+  }
+
+  /*
+   * V710 read-only verified USD bridge.
+   * No provider call is added here. bestVerifiedWethUsdGReferenceV195() already
+   * enforces its existing verification/freshness requirements.
+   */
+  let diagnosticStateV710 =
+    null;
+  let diagnosticStateReadV710 = {
+    persistent: false,
+    binding: null,
+    error: null
+  };
+  let verifiedWethUsdReferenceV710 =
+    null;
+
+  try {
+    const loadedStateV710 =
+      await readState(
+        env
+      );
+
+    diagnosticStateV710 =
+      loadedStateV710?.state ||
+      null;
+
+    diagnosticStateReadV710 = {
+      persistent:
+        loadedStateV710?.persistent ===
+        true,
+      binding:
+        loadedStateV710?.binding ||
+        null,
+      error:
+        loadedStateV710?.error ||
+        null
+    };
+
+    verifiedWethUsdReferenceV710 =
+      bestVerifiedWethUsdGReferenceV195(
+        diagnosticStateV710
+      );
+  } catch (error) {
+    diagnosticStateReadV710 = {
+      persistent: false,
+      binding: null,
+      error: errorString(error)
+    };
+    verifiedWethUsdReferenceV710 =
+      null;
   }
 
   /*
@@ -144011,7 +144080,7 @@ async function goldRushV3SwapDiagnosticV709(
       success:
         false,
       status:
-        "GOLDRUSH_SWAP_FETCH_FAILED_V709",
+        "GOLDRUSH_SWAP_FETCH_FAILED_V710",
       error:
         errorString(
           error
@@ -144062,6 +144131,15 @@ async function goldRushV3SwapDiagnosticV709(
   let buys =
     0;
   let sells =
+    0;
+
+  let verifiedBuyUsdV710 =
+    0;
+  let verifiedSellUsdV710 =
+    0;
+  let swapsWithVerifiedUsdV710 =
+    0;
+  let swapsWithoutVerifiedUsdV710 =
     0;
 
   const swapPreview =
@@ -144224,6 +144302,129 @@ async function goldRushV3SwapDiagnosticV709(
         }
       }
 
+      let swapUsdV710 =
+        null;
+      let swapUsdBasisV710 =
+        null;
+      let swapUsdVerifiedV710 =
+        false;
+
+      if (
+        direction !==
+          "UNVERIFIED" &&
+        quoteAmountRaw !==
+          null
+      ) {
+        try {
+          const quoteRawV710 =
+            BigInt(
+              String(
+                quoteAmountRaw
+              )
+            );
+
+          if (
+            quoteToken ===
+              CANONICAL_USDG_V179
+          ) {
+            const quoteAmountUsdGV710 =
+              decimalFromRawUnsignedV441(
+                quoteRawV710,
+                CANONICAL_USDG_DECIMALS_V179
+              );
+
+            if (
+              Number.isFinite(
+                quoteAmountUsdGV710
+              ) &&
+              quoteAmountUsdGV710 >=
+                0
+            ) {
+              swapUsdV710 =
+                quoteAmountUsdGV710;
+              swapUsdBasisV710 =
+                "CANONICAL_USDG_1_TO_1_USD_V710";
+              swapUsdVerifiedV710 =
+                true;
+            }
+          } else if (
+            quoteToken ===
+              CANONICAL_WETH_V179
+          ) {
+            const wethAmountV710 =
+              decimalFromRawUnsignedV441(
+                quoteRawV710,
+                CANONICAL_WETH_DECIMALS_V187
+              );
+
+            const wethUsdV710 =
+              safeNumber(
+                verifiedWethUsdReferenceV710
+                  ?.priceUsdGPerWeth
+              );
+
+            if (
+              Number.isFinite(
+                wethAmountV710
+              ) &&
+              wethAmountV710 >=
+                0 &&
+              verifiedWethUsdReferenceV710
+                ?.verified ===
+                true &&
+              wethUsdV710 >
+                0
+            ) {
+              swapUsdV710 =
+                wethAmountV710 *
+                wethUsdV710;
+              swapUsdBasisV710 =
+                verifiedWethUsdReferenceV710
+                  ?.source ||
+                "VERIFIED_WETH_USDG_REFERENCE_V710";
+              swapUsdVerifiedV710 =
+                true;
+            }
+          }
+        } catch {
+          swapUsdV710 =
+            null;
+          swapUsdBasisV710 =
+            null;
+          swapUsdVerifiedV710 =
+            false;
+        }
+      }
+
+      if (
+        swapUsdVerifiedV710 ===
+          true &&
+        Number.isFinite(
+          swapUsdV710
+        )
+      ) {
+        swapsWithVerifiedUsdV710++;
+
+        if (
+          direction ===
+            "BUY"
+        ) {
+          verifiedBuyUsdV710 +=
+            swapUsdV710;
+        } else if (
+          direction ===
+            "SELL"
+        ) {
+          verifiedSellUsdV710 +=
+            swapUsdV710;
+        }
+      } else if (
+        direction !==
+          "UNVERIFIED"
+      ) {
+        swapsWithoutVerifiedUsdV710++;
+      }
+
       if (
         swapPreview.length <
         12
@@ -144258,6 +144459,18 @@ async function goldRushV3SwapDiagnosticV709(
           quoteAmountRaw,
           quoteToken,
           quoteSymbol,
+          swapUsdV710:
+            Number.isFinite(
+              swapUsdV710
+            )
+              ? Number(
+                  swapUsdV710.toFixed(
+                    8
+                  )
+                )
+              : null,
+          swapUsdVerifiedV710,
+          swapUsdBasisV710,
           transactionNativeValueQuoteUsd:
             tx?.value_quote ??
             null,
@@ -144326,6 +144539,64 @@ async function goldRushV3SwapDiagnosticV709(
       buys,
       sells
     },
+    verifiedUsdV710: {
+      available:
+        swapsWithVerifiedUsdV710 >
+        0,
+      swapsWithVerifiedUsd:
+        swapsWithVerifiedUsdV710,
+      swapsWithoutVerifiedUsd:
+        swapsWithoutVerifiedUsdV710,
+      buyUsd:
+        Number(
+          verifiedBuyUsdV710.toFixed(
+            8
+          )
+        ),
+      sellUsd:
+        Number(
+          verifiedSellUsdV710.toFixed(
+            8
+          )
+        ),
+      totalUsd:
+        Number(
+          (
+            verifiedBuyUsdV710 +
+            verifiedSellUsdV710
+          ).toFixed(
+            8
+          )
+        ),
+      wethUsdReference: {
+        verified:
+          verifiedWethUsdReferenceV710
+            ?.verified ===
+            true,
+        priceUsdGPerWeth:
+          verifiedWethUsdReferenceV710
+            ?.priceUsdGPerWeth ??
+          null,
+        source:
+          verifiedWethUsdReferenceV710
+            ?.source ||
+          null,
+        verifiedAt:
+          verifiedWethUsdReferenceV710
+            ?.verifiedAt ||
+          null,
+        ageMs:
+          verifiedWethUsdReferenceV710
+            ?.ageMs ??
+          null,
+        externalRequestsUsed:
+          0
+      },
+      stateRead:
+        diagnosticStateReadV710,
+      goldRushTransactionValueQuoteUsed:
+        false
+    },
     swapPreview,
     success:
       response.ok &&
@@ -144335,17 +144606,17 @@ async function goldRushV3SwapDiagnosticV709(
       response.ok &&
       !apiError &&
       swapDirectionVerified
-        ? "GOLDRUSH_V3_SWAP_DIRECTION_CONFIRMED_V709"
+        ? "GOLDRUSH_V3_SWAP_DIRECTION_CONFIRMED_V710"
         : response.ok &&
             !apiError &&
             decodedSwapLogs >
               0
-          ? "GOLDRUSH_SWAP_LOGS_FOUND_DIRECTION_NOT_CONFIRMED_V709"
+          ? "GOLDRUSH_SWAP_LOGS_FOUND_DIRECTION_NOT_CONFIRMED_V710"
           : response.ok &&
               !apiError
-            ? "GOLDRUSH_NO_V3_SWAP_LOGS_IN_RECENT_WINDOW_V709"
-            : "GOLDRUSH_SWAP_HTTP_ERROR_V709",
-    capabilityDecisionV709: {
+            ? "GOLDRUSH_NO_V3_SWAP_LOGS_IN_RECENT_WINDOW_V710"
+            : "GOLDRUSH_SWAP_HTTP_ERROR_V710",
+    capabilityDecisionV710: {
       decodedSwapLogsAvailable:
         decodedSwapLogs >
         0,
@@ -144355,9 +144626,30 @@ async function goldRushV3SwapDiagnosticV709(
         exactMappedSwapLogs >
         0,
       exactSwapUsdVerified:
+        exactMappedSwapLogs >
+          0 &&
+        swapsWithVerifiedUsdV710 ===
+          exactMappedSwapLogs,
+      verifiedUsdSwaps:
+        swapsWithVerifiedUsdV710,
+      mappedSwaps:
+        exactMappedSwapLogs,
+      usdSource:
+        swapsWithVerifiedUsdV710 >
+          0
+          ? (
+              quoteToken ===
+                CANONICAL_USDG_V179
+                ? "CANONICAL_USDG_1_TO_1"
+                : verifiedWethUsdReferenceV710
+                    ?.source ||
+                  "DATA_UNVERIFIED"
+            )
+          : "DATA_UNVERIFIED",
+      goldRushTransactionValueQuoteUsed:
         false,
-      reasonExactUsdStillFalse:
-        "V706 proves swap direction/raw amounts only. It does not equate generic transaction value_quote with swap USD."
+      note:
+        "V710 USD uses exact quote-side swap amount plus the bot's existing verified USDG/WETH reference only."
     },
     apiKeySuppressed:
       true,
@@ -144525,7 +144817,7 @@ async function handleRequest(
       "/goldrush-swap-test"
   ) {
     return jsonResponse(
-      await goldRushV3SwapDiagnosticV709(
+      await goldRushV3SwapDiagnosticV710(
         env,
         url.searchParams.get("token") || "",
         url.searchParams.get("pool") || ""
