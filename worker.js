@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V719
+ * AUTHORITATIVE RUNTIME VERSION: V719
+ *
+ * V719 MANUAL-SCAN DURABLE CPU RELAY
+ * - builds directly from tested V718;
+ * - fixes repeated Cloudflare 1102 resource-limit failures on manual GET /scan;
+ * - V673 already moved automatic heavy scans into ScanSchedulerV673 because the
+ *   normal Free-plan Worker HTTP/Cron context can hit the 10 ms CPU ceiling;
+ * - V719 routes manual /scan through that existing Durable Object too, while
+ *   preserving scheduled=false scanner behaviour, state writes and Telegram logic;
+ * - the Durable Object returns a compact manual-scan result instead of serialising
+ *   the multi-megabyte full diagnostic object back through the thin HTTP Worker;
+ * - scanner/provider/scoring/qualification/holder logic, V718 GoldRush rescue,
+ *   hard 42, notification reserve and Telegram thresholds are unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V718
  * AUTHORITATIVE RUNTIME VERSION: V718
  *
@@ -6207,7 +6224,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V718";
+const VERSION = "V719";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -148295,18 +148312,20 @@ async function handleRequest(
     path ===
     "/scan"
   ) {
+    if (scheduledRelayV671) {
+      return jsonResponse(
+        await scheduledScan(
+          env
+        )
+      );
+    }
+
     return jsonResponse(
-      scheduledRelayV671
-        ? await scheduledScan(
-            env
-          )
-        : await scan(
-            env,
-            {
-              scheduled:
-                false
-            }
-          )
+      await scanSchedulerRequestV673(
+        env,
+        "/manual-scan-v719",
+        "POST"
+      )
     );
   }
 
@@ -150483,6 +150502,83 @@ async function scanSchedulerRequestV673(env, path, method = "GET") {
   }
 }
 
+
+function compactManualScanResultV719(result) {
+  const candidates = Array.isArray(result?.candidates)
+    ? result.candidates.slice(0, 8).map(candidate => ({
+        address: candidate?.address || null,
+        name: candidate?.name || null,
+        symbol: candidate?.symbol || null,
+        validERC20: candidate?.validERC20 === true,
+        analysisDeferred: candidate?.analysisDeferred === true,
+        marketVerified: candidate?.market?.verified === true,
+        marketStatus: candidate?.market?.status || null,
+        liquidityUsd: candidate?.market?.liquidityUsd ?? null,
+        holderEvidenceVerified:
+          candidate?.holders?.integrity?.verified === true &&
+          candidate?.holders?.concentrationVerified === true &&
+          candidate?.holders?.whale?.verified === true,
+        holderStatus: candidate?.holders?.integrity?.status || null,
+        opportunityScore: candidate?.opportunity?.score ?? null,
+        confidenceScore: candidate?.confidence?.score ?? null,
+        riskVerified: candidate?.risk?.verified === true,
+        riskScore: candidate?.risk?.verified === true
+          ? candidate?.risk?.score ?? null
+          : null,
+        signalCount: candidate?.signalConfirmation?.signals ?? null,
+        telegramQualified: candidate?.telegramQualified === true,
+        telegramSent: candidate?.telegramSent === true,
+        telegramReasons: Array.isArray(candidate?.telegramReasons)
+          ? candidate.telegramReasons.slice(0, 12)
+          : []
+      }))
+    : [];
+
+  return {
+    agent: result?.agent || "Robinhood Chain Meme Hunter",
+    version: VERSION,
+    status: result?.status || null,
+    scanMode: result?.scanMode || null,
+    scheduledRun: false,
+    durationMs: result?.durationMs ?? null,
+    latestBlock: result?.latestBlock ?? null,
+    rpcProvider: result?.rpcProvider || null,
+    persistence: result?.persistence || null,
+    services: result?.services || null,
+    requestBudget: result?.requestBudget || null,
+    scannerFunnelV415: result?.scannerFunnelV415 || null,
+    launchCoverageFunnelV474: result?.launchCoverageFunnelV474 || null,
+    launchCoverageCumulativeV474: result?.launchCoverageCumulativeV474
+      ? {
+          currentLiveAnalysisLoopEntered:
+            result.launchCoverageCumulativeV474.currentLiveAnalysisLoopEntered ?? null,
+          currentLiveBudgetDeferred:
+            result.launchCoverageCumulativeV474.currentLiveBudgetDeferred ?? null,
+          currentLiveReturnedCandidates:
+            result.launchCoverageCumulativeV474.currentLiveReturnedCandidates ?? null,
+          currentLiveTelegramQualified:
+            result.launchCoverageCumulativeV474.currentLiveTelegramQualified ?? null,
+          currentLiveTelegramSent:
+            result.launchCoverageCumulativeV474.currentLiveTelegramSent ?? null,
+          lastScan: result.launchCoverageCumulativeV474.lastScan || null
+        }
+      : null,
+    qualifyingCandidates: result?.qualifyingCandidates ?? null,
+    telegram: result?.telegram || null,
+    candidates,
+    v719ManualDurableRelay: {
+      enabled: true,
+      heavyScanRanInsideDurableObject: true,
+      compactHttpResponse: true,
+      fullDiagnosticResponseSuppressed: true,
+      scannerLogicChanged: false,
+      requestCeilingChanged: false,
+      telegramThresholdChanged: false
+    },
+    timestamp: now()
+  };
+}
+
 export class ScanSchedulerV673 {
   constructor(state, env) {
     this.state = state;
@@ -150588,6 +150684,16 @@ export class ScanSchedulerV673 {
 
   async fetch(request) {
     const url = new URL(request.url);
+
+    if (url.pathname === "/manual-scan-v719") {
+      const result = await scan(
+        this.env,
+        { scheduled: false }
+      );
+      return jsonResponse(
+        compactManualScanResultV719(result)
+      );
+    }
 
     if (url.pathname === "/ensure") {
       const ensured = await this.ensureAlarmV673(false);
