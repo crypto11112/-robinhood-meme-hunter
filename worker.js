@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V721
+ * AUTHORITATIVE RUNTIME VERSION: V721
+ *
+ * V721 ON-CHAIN MARKET RESCUE TARGETING
+ * - builds directly from confirmed V720;
+ * - targets the existing canonical ReservesLens / strict on-chain market fallback
+ *   at the strongest MARKET-UNVERIFIED candidate when DexScreener, GeckoTerminal
+ *   and the configured CoinGecko demo fallback are all currently unavailable;
+ * - preserves the existing strict proof requirements: verified complete pool key,
+ *   exact-pool USD execution price, verified ReservesLens USD valuation and safe
+ *   hook/core-liquidity semantics must ALL pass before market promotion;
+ * - keeps the existing one-candidate / one-analysis-request ReservesLens ceiling;
+ * - adds compact V721 rescue telemetry so manual /scan shows whether a rescue
+ *   target existed, whether a request was attempted, and whether promotion occurred;
+ * - hard 42, V720 live/backlog protection, provider cooldowns, scoring, holder/risk
+ *   standards and Telegram thresholds remain unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V720
  * AUTHORITATIVE RUNTIME VERSION: V720
  *
@@ -6239,7 +6258,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V720";
+const VERSION = "V721";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -9580,7 +9599,27 @@ async function reservesLensLiquidityDiagnosticV441(
     liquidityGateChanged: false,
     scoringChanged: false,
     qualificationChanged: false,
-    telegramThresholdChanged: false
+    telegramThresholdChanged: false,
+    v721OnChainMarketRescueTargeting: {
+      enabled: true,
+      selected: false,
+      candidateAddress: null,
+      symbol: null,
+      marketAlreadyVerified: null,
+      allFreshMarketProvidersUnavailable: null,
+      rescuePriorityApplied: false,
+      completePoolKey: false,
+      valuationReady: false,
+      priceVerified: false,
+      quoteUsdReady: false,
+      dexReady: null,
+      geckoReady: null,
+      coinGeckoDemoReady: null,
+      targetingOnly: true,
+      proofRequirementsChanged: false,
+      requestCeilingChanged: false,
+      telegramThresholdChanged: false
+    }
   };
 
   const ranked =
@@ -9608,11 +9647,56 @@ async function reservesLensLiquidityDiagnosticV441(
               ?.verified ===
               true;
 
+          /*
+           * V721:
+           * If all currently configured fresh market providers are unavailable,
+           * favour a MARKET-UNVERIFIED candidate that can potentially satisfy the
+           * already-existing strict on-chain promotion path. This changes targeting
+           * only; it does not weaken any proof requirement or add provider calls.
+           */
+          const marketAvailabilityV721 =
+            marketProviderAvailabilityV147(
+              state,
+              candidate?.address
+            );
+
+          const coinGeckoDemoEligibilityV721 =
+            coinGeckoDemoFreshEligibilityV660(
+              state,
+              env
+            );
+
+          const allFreshMarketProvidersUnavailableV721 =
+            marketVerified !== true &&
+            marketAvailabilityV721
+              ?.bothUnavailable ===
+              true &&
+            coinGeckoDemoEligibilityV721
+              ?.eligible !==
+              true;
+
+          const verifiedPoolKeyReadyV721 =
+            key?.verified ===
+              true;
+
+          const onChainRescueTargetV721 =
+            allFreshMarketProvidersUnavailableV721 &&
+            verifiedPoolKeyReadyV721;
+
           return {
             candidate,
             key,
             readiness,
+            marketAvailabilityV721,
+            coinGeckoDemoEligibilityV721,
+            allFreshMarketProvidersUnavailableV721,
+            onChainRescueTargetV721,
             score:
+              (
+                onChainRescueTargetV721
+                  ? 20000
+                  : 0
+              ) +
               (
                 readiness
                   ?.valuationReady ===
@@ -9634,7 +9718,11 @@ async function reservesLensLiquidityDiagnosticV441(
                   ? 500
                   : 0
               ) +
-              (marketVerified ? 200 : 0) +
+              (
+                marketVerified
+                  ? 200
+                  : 0
+              ) +
               safeNumber(
                 candidate?.analysisPriority
               )
@@ -9674,6 +9762,59 @@ async function reservesLensLiquidityDiagnosticV441(
       selectedReadinessV447 =
         row?.readiness ||
         null;
+
+      base.v721OnChainMarketRescueTargeting = {
+        enabled: true,
+        selected: true,
+        candidateAddress:
+          normalize(
+            row?.candidate?.address
+          ) || null,
+        symbol:
+          row?.candidate?.symbol ||
+          null,
+        marketAlreadyVerified:
+          row?.candidate?.market?.verified ===
+          true,
+        allFreshMarketProvidersUnavailable:
+          row
+            ?.allFreshMarketProvidersUnavailableV721 ===
+          true,
+        rescuePriorityApplied:
+          row?.onChainRescueTargetV721 ===
+          true,
+        completePoolKey:
+          row?.key?.verified ===
+          true,
+        valuationReady:
+          row?.readiness?.valuationReady ===
+          true,
+        priceVerified:
+          row?.readiness?.priceVerified ===
+          true,
+        quoteUsdReady:
+          row?.readiness?.quoteUsdReady ===
+          true,
+        dexReady:
+          row
+            ?.marketAvailabilityV721
+            ?.dex?.eligible ===
+          true,
+        geckoReady:
+          row
+            ?.marketAvailabilityV721
+            ?.gecko?.eligible ===
+          true,
+        coinGeckoDemoReady:
+          row
+            ?.coinGeckoDemoEligibilityV721
+            ?.eligible ===
+          true,
+        targetingOnly: true,
+        proofRequirementsChanged: false,
+        requestCeilingChanged: false,
+        telegramThresholdChanged: false
+      };
 
       break;
     }
@@ -150605,6 +150746,40 @@ function compactManualScanResultV719(result) {
     requestBudget: result?.requestBudget || null,
     v720LiveQualificationProtection:
       result?.v720LiveQualificationProtection || null,
+    v721OnChainMarketRescue: result?.reservesLensLiquidityDiagnosticV441
+      ? {
+          attempted:
+            result.reservesLensLiquidityDiagnosticV441.attempted === true,
+          requestSent:
+            result.reservesLensLiquidityDiagnosticV441.requestSent === true,
+          candidateAddress:
+            result.reservesLensLiquidityDiagnosticV441.candidateAddress || null,
+          symbol:
+            result.reservesLensLiquidityDiagnosticV441.symbol || null,
+          poolId:
+            result.reservesLensLiquidityDiagnosticV441.poolId || null,
+          status:
+            result.reservesLensLiquidityDiagnosticV441.status || null,
+          usdValuationVerified:
+            result.reservesLensLiquidityDiagnosticV441
+              ?.usdValuation?.verified === true,
+          externalRequestsUsed:
+            result.reservesLensLiquidityDiagnosticV441.externalRequestsUsed ?? 0,
+          targeting:
+            result.reservesLensLiquidityDiagnosticV441
+              ?.v721OnChainMarketRescueTargeting || null,
+          promotion:
+            Array.isArray(result?.onChainMarketFallbackResultsV455)
+              ? result.onChainMarketFallbackResultsV455
+                  .find(row =>
+                    normalize(row?.address) ===
+                    normalize(
+                      result.reservesLensLiquidityDiagnosticV441.candidateAddress
+                    )
+                  ) || null
+              : null
+        }
+      : null,
     scannerFunnelV415: result?.scannerFunnelV415 || null,
     launchCoverageFunnelV474: result?.launchCoverageFunnelV474 || null,
     launchCoverageCumulativeV474: result?.launchCoverageCumulativeV474
