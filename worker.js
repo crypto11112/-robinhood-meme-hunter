@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V717
+ * AUTHORITATIVE RUNTIME VERSION: V717
+ *
+ * V717 ACTIVE-QUALIFICATION GOLDRUSH HOLDER FALLBACK
+ * - builds directly from confirmed V716;
+ * - fixes the V716 live OZZY case where market, score, confidence, risk, liquidity
+ *   and signals all passed but holder rows remained unavailable while Blockscout
+ *   Pro was in cooldown;
+ * - broadens the existing ONE-request-per-scan V704 GoldRush holder fallback from
+ *   priorityCompletion-only to the currently active V714 qualification owner too;
+ * - only runs after the existing public -> legacy -> Bitquery reuse -> Blockscout
+ *   Pro holder paths still produced no rows;
+ * - preserves the existing GoldRush credit guard, provider ordering, cooldowns and
+ *   the four-request protected qualification lane;
+ * - hard 42, notification reserve, scoring, market verification, holder standards,
+ *   risk requirements and Telegram thresholds remain unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V716
  * AUTHORITATIVE RUNTIME VERSION: V716
  *
@@ -6169,7 +6188,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V716";
+const VERSION = "V717";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -61437,7 +61456,28 @@ async function holderIntelligence(
    * This is intentionally BEFORE the V247 count-only fallback and before the
    * same-run Blockscout outage circuit is opened. A successful independent
    * holder source means the candidate no longer lacks concentration evidence.
+   *
+   * V717: the same bounded fallback is also eligible for the ACTIVE V714
+   * qualification owner, even when that candidate is not flagged as the legacy
+   * priorityCompletion candidate. The existing one-request-per-scan GoldRush
+   * guard remains authoritative.
    */
+  const goldRushActiveQualificationOwnerV717 =
+    Boolean(
+      budget?.analysis
+        ?.erc20UpstreamHeadroomReserveV690
+        ?.qualificationReserveV713
+        ?.phaseV714 ===
+        "ACTIVE_CANDIDATE_QUALIFICATION" &&
+      normalize(
+        budget?.analysis
+          ?.erc20UpstreamHeadroomReserveV690
+          ?.qualificationReserveV713
+          ?.activeAddress
+      ) ===
+        normalize(token)
+    );
+
   if (
     (
       !holders ||
@@ -61445,8 +61485,10 @@ async function holderIntelligence(
         holders.items
       )
     ) &&
-    priorityCompletion ===
-      true &&
+    (
+      priorityCompletion === true ||
+      goldRushActiveQualificationOwnerV717
+    ) &&
     String(
       env?.GOLDRUSH_API_KEY ||
       ""
