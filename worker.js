@@ -1,6 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V706
+ * AUTHORITATIVE RUNTIME VERSION: V706
+ *
+ * V706 GOLDRUSH V3 SWAP-LOG DIAGNOSTIC
+ * - builds directly from confirmed V705;
+ * - preserves V704 live GoldRush holder fallback unchanged;
+ * - adds isolated GET route /goldrush-swap-test for a known verified V3 pool;
+ * - uses ONE GoldRush recent-transactions request with logs enabled;
+ * - uses two existing RPC eth_call metadata reads (token0/token1) only to map
+ *   Uniswap V3 signed Swap amounts to BUY/SELL direction correctly;
+ * - extracts bounded decoded Swap-event evidence and exact raw token/quote amounts;
+ * - does NOT promote any GoldRush swap value into live scoring/Telegram/USD yet;
+ * - no KV/DO writes and no consumption of the live scanner hard 42 budget.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V705
- * AUTHORITATIVE RUNTIME VERSION: V705
+ * HISTORICAL VERSION NOTE: V705
  *
  * V705 GOLDRUSH MARKET/USD CAPABILITY DIAGNOSTIC
  * - builds directly from confirmed V704;
@@ -5965,7 +5981,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V705";
+const VERSION = "V706";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -142509,6 +142525,629 @@ async function goldRushMarketUsdDiagnosticV705(
 }
 
 
+
+function goldRushDecodedParamV706(
+  decoded,
+  name
+) {
+  const params =
+    Array.isArray(
+      decoded?.params
+    )
+      ? decoded.params
+      : [];
+
+  const target =
+    params.find(
+      p =>
+        String(
+          p?.name ||
+          ""
+        ).toLowerCase() ===
+        String(
+          name ||
+          ""
+        ).toLowerCase()
+    );
+
+  return target?.value ??
+    null;
+}
+
+
+function goldRushSignedBigIntV706(
+  value
+) {
+  try {
+    if (
+      value ===
+        null ||
+      value ===
+        undefined ||
+      value ===
+        ""
+    ) {
+      return null;
+    }
+
+    return BigInt(
+      String(
+        value
+      )
+    );
+  } catch {
+    return null;
+  }
+}
+
+
+async function goldRushV3SwapDiagnosticV706(
+  env,
+  token,
+  pool
+) {
+  const address =
+    normalize(
+      token || ""
+    );
+
+  const poolAddress =
+    normalize(
+      pool ||
+      "0xc4a21f9d6485fc5893dd4a491b320a83daf4da1d"
+    );
+
+  const apiKey =
+    String(
+      env?.GOLDRUSH_API_KEY ||
+      ""
+    ).trim();
+
+  const base = {
+    agent:
+      "Robinhood Chain Meme Hunter",
+    version:
+      VERSION,
+    diagnostic:
+      "GOLDRUSH_ROBINHOOD_V3_SWAP_LOGS_V706",
+    safe:
+      true,
+    diagnosticOnly:
+      true,
+    scannerMutated:
+      false,
+    scoringMutated:
+      false,
+    telegramMutated:
+      false,
+    stateMutated:
+      false,
+    hardScannerRequestLimit:
+      42,
+    scannerRequestBudgetConsumed:
+      false,
+    chain:
+      "robinhood-mainnet",
+    chainId:
+      4663,
+    token:
+      isAddress(address)
+        ? address
+        : null,
+    pool:
+      isAddress(poolAddress)
+        ? poolAddress
+        : null,
+    apiKeyConfigured:
+      Boolean(apiKey),
+    goldRushRequestsUsed:
+      0,
+    metadataRpcRequestsUsed:
+      0,
+    timestamp:
+      now()
+  };
+
+  if (
+    !isAddress(
+      address
+    ) ||
+    !isAddress(
+      poolAddress
+    )
+  ) {
+    return {
+      ...base,
+      success:
+        false,
+      status:
+        "INVALID_TOKEN_OR_POOL_V706"
+    };
+  }
+
+  if (!apiKey) {
+    return {
+      ...base,
+      success:
+        false,
+      status:
+        "GOLDRUSH_API_KEY_NOT_CONFIGURED_V706"
+    };
+  }
+
+  /*
+   * Resolve the verified V3 pool side mapping first. These are ordinary RPC
+   * eth_call metadata reads, not GoldRush credits and not scanner-budget calls.
+   */
+  const alchemyUrl =
+    v356AlchemyUrl(
+      env
+    );
+
+  let token0 =
+    null;
+  let token1 =
+    null;
+  let metadataRpcRequestsUsed =
+    0;
+
+  if (alchemyUrl) {
+    const [
+      token0Call,
+      token1Call
+    ] =
+      await Promise.all([
+        v375EthCallRaw(
+          alchemyUrl,
+          poolAddress,
+          UNISWAP_V3_TOKEN0_SELECTOR_V326
+        ),
+        v375EthCallRaw(
+          alchemyUrl,
+          poolAddress,
+          UNISWAP_V3_TOKEN1_SELECTOR_V326
+        )
+      ]);
+
+    metadataRpcRequestsUsed =
+      2;
+
+    token0 =
+      token0Call?.ok
+        ? decodeEthCallAddressV326(
+            token0Call.result
+          )
+        : null;
+
+    token1 =
+      token1Call?.ok
+        ? decodeEthCallAddressV326(
+            token1Call.result
+          )
+        : null;
+  }
+
+  const candidateSide =
+    token0 ===
+      address
+      ? 0
+      : token1 ===
+          address
+        ? 1
+        : null;
+
+  const quoteToken =
+    candidateSide ===
+      0
+      ? token1
+      : candidateSide ===
+          1
+        ? token0
+        : null;
+
+  const quoteSymbol =
+    quoteToken ===
+      CANONICAL_WETH_V179
+      ? "WETH"
+      : quoteToken ===
+          CANONICAL_USDG_V179
+        ? "USDG"
+        : null;
+
+  /*
+   * One GoldRush request only. Unlike V705, logs are explicitly enabled.
+   * GoldRush documents Transactions V3 as returning decoded event logs.
+   */
+  const endpoint =
+    `https://api.covalenthq.com/v1/robinhood-mainnet/address/${poolAddress}/transactions_v3/` +
+    `?no-logs=false&quote-currency=USD`;
+
+  let response;
+  let body =
+    null;
+
+  try {
+    response =
+      await fetch(
+        endpoint,
+        {
+          method:
+            "GET",
+          headers: {
+            accept:
+              "application/json",
+            authorization:
+              `Bearer ${apiKey}`
+          }
+        }
+      );
+
+    const raw =
+      await response.text();
+
+    try {
+      body =
+        raw
+          ? JSON.parse(
+              raw
+            )
+          : null;
+    } catch {
+      body =
+        null;
+    }
+  } catch (error) {
+    return {
+      ...base,
+      metadataRpcRequestsUsed,
+      poolIdentity: {
+        token0,
+        token1,
+        candidateSide,
+        quoteToken,
+        quoteSymbol,
+        verified:
+          candidateSide !==
+            null
+      },
+      goldRushRequestsUsed:
+        1,
+      success:
+        false,
+      status:
+        "GOLDRUSH_SWAP_FETCH_FAILED_V706",
+      error:
+        errorString(
+          error
+        )
+    };
+  }
+
+  const apiError =
+    body?.error ===
+      true ||
+    (
+      body?.error_code !==
+        undefined &&
+      body?.error_code !==
+        null &&
+      body?.error_code !==
+        0
+    );
+
+  const txItems =
+    Array.isArray(
+      body?.data?.items
+    )
+      ? body.data.items
+      : [];
+
+  let totalLogEvents =
+    0;
+  let decodedSwapLogs =
+    0;
+  let exactMappedSwapLogs =
+    0;
+  let buys =
+    0;
+  let sells =
+    0;
+
+  const swapPreview =
+    [];
+
+  for (
+    const tx
+    of txItems
+  ) {
+    const logs =
+      Array.isArray(
+        tx?.log_events
+      )
+        ? tx.log_events
+        : [];
+
+    totalLogEvents +=
+      logs.length;
+
+    for (
+      const log
+      of logs
+    ) {
+      const emitter =
+        normalize(
+          log?.sender_address ||
+          log?.address ||
+          ""
+        );
+
+      if (
+        emitter !==
+          poolAddress
+      ) {
+        continue;
+      }
+
+      const decoded =
+        log?.decoded &&
+        typeof log.decoded ===
+          "object"
+          ? log.decoded
+          : null;
+
+      const decodedName =
+        String(
+          decoded?.name ||
+          ""
+        );
+
+      const topic0 =
+        String(
+          log?.raw_log_topics?.[0] ||
+          ""
+        ).toLowerCase();
+
+      const isSwap =
+        decodedName.toLowerCase() ===
+          "swap" ||
+        topic0 ===
+          UNISWAP_V3_SWAP_TOPIC_V326;
+
+      if (!isSwap) {
+        continue;
+      }
+
+      decodedSwapLogs++;
+
+      const amount0Raw =
+        goldRushDecodedParamV706(
+          decoded,
+          "amount0"
+        );
+
+      const amount1Raw =
+        goldRushDecodedParamV706(
+          decoded,
+          "amount1"
+        );
+
+      const amount0 =
+        goldRushSignedBigIntV706(
+          amount0Raw
+        );
+
+      const amount1 =
+        goldRushSignedBigIntV706(
+          amount1Raw
+        );
+
+      let direction =
+        "UNVERIFIED";
+      let candidateAmountRaw =
+        null;
+      let quoteAmountRaw =
+        null;
+
+      if (
+        candidateSide !==
+          null &&
+        amount0 !==
+          null &&
+        amount1 !==
+          null
+      ) {
+        const candidateDelta =
+          candidateSide ===
+            0
+            ? amount0
+            : amount1;
+
+        const quoteDelta =
+          candidateSide ===
+            0
+            ? amount1
+            : amount0;
+
+        /*
+         * Uniswap V3 Swap amounts are pool deltas:
+         * candidate > 0 => candidate entered pool => SELL candidate.
+         * candidate < 0 => candidate left pool  => BUY candidate.
+         */
+        if (
+          candidateDelta >
+          0n
+        ) {
+          direction =
+            "SELL";
+          sells++;
+        } else if (
+          candidateDelta <
+          0n
+        ) {
+          direction =
+            "BUY";
+          buys++;
+        }
+
+        candidateAmountRaw =
+          (
+            candidateDelta <
+            0n
+              ? -candidateDelta
+              : candidateDelta
+          ).toString();
+
+        quoteAmountRaw =
+          (
+            quoteDelta <
+            0n
+              ? -quoteDelta
+              : quoteDelta
+          ).toString();
+
+        if (
+          direction !==
+            "UNVERIFIED"
+        ) {
+          exactMappedSwapLogs++;
+        }
+      }
+
+      if (
+        swapPreview.length <
+        12
+      ) {
+        swapPreview.push({
+          txHash:
+            tx?.tx_hash ??
+            log?.tx_hash ??
+            null,
+          blockSignedAt:
+            log?.block_signed_at ??
+            tx?.block_signed_at ??
+            null,
+          blockHeight:
+            log?.block_height ??
+            tx?.block_height ??
+            null,
+          decodedName:
+            decodedName ||
+            null,
+          topic0:
+            topic0 ||
+            null,
+          amount0Raw:
+            amount0Raw ??
+            null,
+          amount1Raw:
+            amount1Raw ??
+            null,
+          direction,
+          candidateAmountRaw,
+          quoteAmountRaw,
+          quoteToken,
+          quoteSymbol,
+          transactionNativeValueQuoteUsd:
+            tx?.value_quote ??
+            null,
+          note:
+            "transactionNativeValueQuoteUsd is NOT asserted as swap USD"
+        });
+      }
+    }
+  }
+
+  const poolIdentityVerified =
+    candidateSide !==
+      null &&
+    isAddress(
+      token0
+    ) &&
+    isAddress(
+      token1
+    );
+
+  const swapDirectionVerified =
+    poolIdentityVerified &&
+    exactMappedSwapLogs >
+      0;
+
+  return {
+    ...base,
+    metadataRpcRequestsUsed,
+    goldRushRequestsUsed:
+      1,
+    httpStatus:
+      response.status,
+    httpOk:
+      response.ok,
+    apiError,
+    errorCode:
+      body?.error_code ??
+      null,
+    errorMessage:
+      body?.error_message ??
+      body?.message ??
+      null,
+    poolIdentity: {
+      token0,
+      token1,
+      candidateSide,
+      quoteToken,
+      quoteSymbol,
+      verified:
+        poolIdentityVerified
+    },
+    transactionsReturned:
+      txItems.length,
+    totalLogEvents,
+    decodedSwapLogs,
+    exactMappedSwapLogs,
+    directionalCounts: {
+      buys,
+      sells
+    },
+    swapPreview,
+    success:
+      response.ok &&
+      !apiError &&
+      swapDirectionVerified,
+    status:
+      response.ok &&
+      !apiError &&
+      swapDirectionVerified
+        ? "GOLDRUSH_V3_SWAP_DIRECTION_CONFIRMED_V706"
+        : response.ok &&
+            !apiError &&
+            decodedSwapLogs >
+              0
+          ? "GOLDRUSH_SWAP_LOGS_FOUND_DIRECTION_NOT_CONFIRMED_V706"
+          : response.ok &&
+              !apiError
+            ? "GOLDRUSH_NO_V3_SWAP_LOGS_IN_RECENT_WINDOW_V706"
+            : "GOLDRUSH_SWAP_HTTP_ERROR_V706",
+    capabilityDecisionV706: {
+      decodedSwapLogsAvailable:
+        decodedSwapLogs >
+        0,
+      exactBuySellDirectionAvailable:
+        swapDirectionVerified,
+      exactCandidateAndQuoteRawAmountsAvailable:
+        exactMappedSwapLogs >
+        0,
+      exactSwapUsdVerified:
+        false,
+      reasonExactUsdStillFalse:
+        "V706 proves swap direction/raw amounts only. It does not equate generic transaction value_quote with swap USD."
+    },
+    apiKeySuppressed:
+      true,
+    rawBodySuppressed:
+      true
+  };
+}
+
+
 async function handleRequest(
   request,
   env
@@ -142647,6 +143286,19 @@ async function handleRequest(
       await goldRushMarketUsdDiagnosticV705(
         env,
         url.searchParams.get("token") || ""
+      )
+    );
+  }
+
+  if (
+    path ===
+      "/goldrush-swap-test"
+  ) {
+    return jsonResponse(
+      await goldRushV3SwapDiagnosticV706(
+        env,
+        url.searchParams.get("token") || "",
+        url.searchParams.get("pool") || ""
       )
     );
   }
