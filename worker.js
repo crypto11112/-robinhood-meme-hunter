@@ -1,6 +1,26 @@
 /**
+ * Robinhood Chain Meme Hunter — V704
+ * AUTHORITATIVE RUNTIME VERSION: V704
+ *
+ * V704 GOLDRUSH LIVE HOLDER FALLBACK
+ * - builds directly from confirmed V703;
+ * - preserves Blockscout public/legacy/Pro as the primary holder path;
+ * - only when the PRIORITY current/live candidate still has no holder rows,
+ *   GoldRush may make ONE bounded holder request for that scan;
+ * - GoldRush Robinhood Chain support was proven by V703 before integration;
+ * - uses page 0 / 100 holders only, enough for the existing top-10
+ *   concentration/integrity pipeline without downloading the full holder set;
+ * - pagination total_count may supply VERIFIED holder count while the returned
+ *   balances feed the existing holder-integrity / whale calculations;
+ * - no fabricated evidence: malformed, empty or failed GoldRush responses
+ *   remain UNVERIFIED and fall through to existing behaviour;
+ * - hard 42, Telegram reserve, alert thresholds, scoring rules, ERC20 rules,
+ *   V701 holder fairness, V700 boundary protection and V698 state cap unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V703
- * AUTHORITATIVE RUNTIME VERSION: V703
+ * HISTORICAL VERSION NOTE: V703
  *
  * V703 GOLDRUSH HOLDER PAGE-SIZE FIX
  * - builds directly from V702 diagnostic;
@@ -5928,7 +5948,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V703";
+const VERSION = "V704";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -56647,6 +56667,415 @@ async function blockscoutProHoldersV143(
   }
 }
 
+
+/*
+ * V704 VERIFIED GOLDRUSH HOLDER FALLBACK
+ *
+ * Scope is intentionally narrow:
+ * - priority current/live candidate only (caller-enforced);
+ * - only after existing Blockscout holder-row routes failed;
+ * - maximum ONE GoldRush request per scanner budget object / scan;
+ * - request goes through consumeBudget("analysis") so the hard 42 and
+ *   Telegram notification reserve remain authoritative;
+ * - page 0 / 100 rows only.
+ *
+ * V703 proved this endpoint on Robinhood Chain before live integration.
+ */
+async function goldRushHoldersV704(
+  token,
+  budget,
+  env
+) {
+  const apiKey =
+    String(
+      env?.GOLDRUSH_API_KEY ||
+      ""
+    ).trim();
+
+  const address =
+    normalize(
+      token || ""
+    );
+
+  if (
+    !budget?.analysis
+  ) {
+    return {
+      configured:
+        Boolean(apiKey),
+      attempted:
+        false,
+      success:
+        false,
+      verified:
+        false,
+      status:
+        "NO_ANALYSIS_BUDGET_V704",
+      data:
+        null
+    };
+  }
+
+  const telemetry =
+    budget.analysis
+      .goldRushHolderFallbackV704 ||
+    (budget.analysis
+      .goldRushHolderFallbackV704 = {
+        enabled:
+          true,
+        maxRequestsPerScan:
+          1,
+        requestsUsed:
+          0,
+        attempted:
+          0,
+        succeeded:
+          0,
+        failed:
+          0,
+        lastToken:
+          null,
+        lastStatus:
+          "NOT_ATTEMPTED",
+        lastHttpStatus:
+          null,
+        lastAttemptAt:
+          null,
+        lastSuccessAt:
+          null,
+        hardRequestLimitRaised:
+          false,
+        notificationReserveChanged:
+          false,
+        rule:
+          "PRIORITY_ONLY_AFTER_BLOCKSCOUT_ROWS_FAIL_MAX_ONE_GOLDRUSH_REQUEST_PER_SCAN"
+      });
+
+  const base = {
+    configured:
+      Boolean(apiKey),
+    attempted:
+      false,
+    success:
+      false,
+    verified:
+      false,
+    status:
+      apiKey
+        ? "NOT_ATTEMPTED"
+        : "GOLDRUSH_API_KEY_NOT_CONFIGURED_V704",
+    httpStatus:
+      null,
+    holderCount:
+      null,
+    rowCount:
+      0,
+    hasMore:
+      null,
+    data:
+      null
+  };
+
+  if (
+    !apiKey
+  ) {
+    return base;
+  }
+
+  if (
+    !isAddress(
+      address
+    )
+  ) {
+    return {
+      ...base,
+      status:
+        "INVALID_TOKEN_V704"
+    };
+  }
+
+  if (
+    safeNumber(
+      telemetry.requestsUsed
+    ) >= 1
+  ) {
+    return {
+      ...base,
+      status:
+        "GOLDRUSH_SCAN_REQUEST_LIMIT_REACHED_V704"
+    };
+  }
+
+  /*
+   * consumeBudget is the only authorization. No out-of-band request is made
+   * when the existing scanner allowance is unavailable.
+   */
+  if (
+    !consumeBudget(
+      budget,
+      "analysis",
+      "GOLDRUSH_HOLDERS_V704"
+    )
+  ) {
+    return {
+      ...base,
+      status:
+        "ANALYSIS_BUDGET_UNAVAILABLE_V704"
+    };
+  }
+
+  telemetry.requestsUsed =
+    safeNumber(
+      telemetry.requestsUsed
+    ) + 1;
+  telemetry.attempted =
+    safeNumber(
+      telemetry.attempted
+    ) + 1;
+  telemetry.lastToken =
+    address;
+  telemetry.lastAttemptAt =
+    Date.now();
+
+  const endpoint =
+    `https://api.covalenthq.com/v1/robinhood-mainnet/tokens/${address}/token_holders_v2/` +
+    `?page-size=100&page-number=0`;
+
+  try {
+    const response =
+      await fetch(
+        endpoint,
+        {
+          method:
+            "GET",
+          headers: {
+            accept:
+              "application/json",
+            authorization:
+              `Basic ${btoa(`${apiKey}:`)}`
+          }
+        }
+      );
+
+    telemetry.lastHttpStatus =
+      response.status;
+
+    let body =
+      null;
+
+    try {
+      body =
+        await response.json();
+    } catch {
+      body =
+        null;
+    }
+
+    if (
+      !response.ok
+    ) {
+      telemetry.failed =
+        safeNumber(
+          telemetry.failed
+        ) + 1;
+      telemetry.lastStatus =
+        `HTTP_${response.status}`;
+
+      return {
+        ...base,
+        attempted:
+          true,
+        status:
+          `GOLDRUSH_HTTP_${response.status}_V704`,
+        httpStatus:
+          response.status
+      };
+    }
+
+    const data =
+      body?.data &&
+      typeof body.data ===
+        "object"
+        ? body.data
+        : null;
+
+    const rawItems =
+      Array.isArray(
+        data?.items
+      )
+        ? data.items
+        : [];
+
+    const items =
+      rawItems
+        .map(
+          row => ({
+            address:
+              normalize(
+                row?.address ||
+                row?.holder_address ||
+                ""
+              ),
+            value:
+              row?.balance !==
+                undefined &&
+              row?.balance !==
+                null
+                ? String(
+                    row.balance
+                  )
+                : null,
+            goldRushTotalSupplyV704:
+              row?.total_supply !==
+                undefined &&
+              row?.total_supply !==
+                null
+                ? String(
+                    row.total_supply
+                  )
+                : null
+          })
+        )
+        .filter(
+          row =>
+            isAddress(
+              row.address
+            ) &&
+            row.value !==
+              null
+        );
+
+    const totalCountRaw =
+      data?.pagination
+        ?.total_count;
+
+    const holderCount =
+      Number.isFinite(
+        Number(
+          totalCountRaw
+        )
+      ) &&
+      Number(
+        totalCountRaw
+      ) >= 0
+        ? Math.floor(
+            Number(
+              totalCountRaw
+            )
+          )
+        : null;
+
+    const apiError =
+      body?.error === true ||
+      (
+        body?.error_code !==
+          undefined &&
+        body?.error_code !==
+          null &&
+        body?.error_code !==
+          0
+      );
+
+    if (
+      apiError ||
+      items.length ===
+        0
+    ) {
+      telemetry.failed =
+        safeNumber(
+          telemetry.failed
+        ) + 1;
+      telemetry.lastStatus =
+        apiError
+          ? "API_ERROR_V704"
+          : "NO_HOLDER_ROWS_V704";
+
+      return {
+        ...base,
+        attempted:
+          true,
+        status:
+          apiError
+            ? "GOLDRUSH_API_ERROR_V704"
+            : "GOLDRUSH_NO_HOLDER_ROWS_V704",
+        httpStatus:
+          response.status,
+        holderCount,
+        rowCount:
+          items.length,
+        hasMore:
+          data?.pagination
+            ?.has_more ??
+          null
+      };
+    }
+
+    telemetry.succeeded =
+      safeNumber(
+        telemetry.succeeded
+      ) + 1;
+    telemetry.lastStatus =
+      "VERIFIED_RESPONSE_V704";
+    telemetry.lastSuccessAt =
+      Date.now();
+
+    return {
+      configured:
+        true,
+      attempted:
+        true,
+      success:
+        true,
+      verified:
+        true,
+      status:
+        "GOLDRUSH_VERIFIED_HOLDER_ROWS_V704",
+      httpStatus:
+        response.status,
+      holderCount,
+      rowCount:
+        items.length,
+      hasMore:
+        data?.pagination
+          ?.has_more ??
+        null,
+      data: {
+        items,
+        goldRushV704:
+          true,
+        holderCountV704:
+          holderCount,
+        fetchedAt:
+          Date.now(),
+        source:
+          "GOLDRUSH_TOKEN_HOLDERS_V2_V704"
+      }
+    };
+  }
+
+  catch (error) {
+    telemetry.failed =
+      safeNumber(
+        telemetry.failed
+      ) + 1;
+    telemetry.lastStatus =
+      "FETCH_ERROR_V704";
+
+    return {
+      ...base,
+      attempted:
+        true,
+      status:
+        "GOLDRUSH_FETCH_ERROR_V704",
+      error:
+        errorString(
+          error
+        )
+    };
+  }
+}
+
+
 /*
  * V247 VERIFIED BLOCKSCOUT PRO HOLDER-COUNT FALLBACK
  *
@@ -59054,6 +59483,37 @@ async function holderIntelligence(
     retryAfterMs: 0
   };
 
+  let goldRushHolderFallbackV704 = {
+    configured:
+      Boolean(
+        String(
+          env?.GOLDRUSH_API_KEY ||
+          ""
+        ).trim()
+      ),
+    attempted:
+      false,
+    success:
+      false,
+    verified:
+      false,
+    status:
+      String(
+        env?.GOLDRUSH_API_KEY ||
+        ""
+      ).trim()
+        ? "NOT_NEEDED_YET"
+        : "GOLDRUSH_API_KEY_NOT_CONFIGURED_V704",
+    httpStatus:
+      null,
+    holderCount:
+      null,
+    rowCount:
+      0,
+    hasMore:
+      null
+  };
+
   let blockscoutProHolderFallbackV143 = {
     configured:
       blockscoutProConfiguredV164,
@@ -59651,6 +60111,119 @@ async function holderIntelligence(
     }
   }
 
+
+  /*
+   * V704:
+   * Existing Blockscout public -> legacy -> Bitquery reuse -> Blockscout Pro
+   * ordering remains untouched. Only the priority candidate may now try one
+   * GoldRush page when those routes still produced no holder rows.
+   *
+   * This is intentionally BEFORE the V247 count-only fallback and before the
+   * same-run Blockscout outage circuit is opened. A successful independent
+   * holder source means the candidate no longer lacks concentration evidence.
+   */
+  if (
+    (
+      !holders ||
+      !Array.isArray(
+        holders.items
+      )
+    ) &&
+    priorityCompletion ===
+      true &&
+    String(
+      env?.GOLDRUSH_API_KEY ||
+      ""
+    ).trim()
+  ) {
+    const goldRushResultV704 =
+      await goldRushHoldersV704(
+        token,
+        budget,
+        env
+      );
+
+    goldRushHolderFallbackV704 = {
+      configured:
+        goldRushResultV704
+          ?.configured === true,
+      attempted:
+        goldRushResultV704
+          ?.attempted === true,
+      success:
+        goldRushResultV704
+          ?.success === true,
+      verified:
+        goldRushResultV704
+          ?.verified === true,
+      status:
+        goldRushResultV704
+          ?.status ||
+        null,
+      httpStatus:
+        safeNumber(
+          goldRushResultV704
+            ?.httpStatus
+        ) || null,
+      holderCount:
+        goldRushResultV704
+          ?.holderCount ??
+        null,
+      rowCount:
+        safeNumber(
+          goldRushResultV704
+            ?.rowCount
+        ),
+      hasMore:
+        goldRushResultV704
+          ?.hasMore ??
+        null
+    };
+
+    if (
+      goldRushResultV704
+        ?.success === true &&
+      goldRushResultV704
+        ?.verified === true &&
+      Array.isArray(
+        goldRushResultV704
+          ?.data
+          ?.items
+      ) &&
+      goldRushResultV704
+        .data
+        .items
+        .length >
+        0
+    ) {
+      holders =
+        goldRushResultV704
+          .data;
+
+      v2HolderRowsUnavailable =
+        false;
+
+      legacyHolderRowsUnavailable =
+        false;
+
+      if (
+        counterData.holderCount ===
+          null &&
+        goldRushResultV704
+          .holderCount !==
+          null
+      ) {
+        counterData.holderCount =
+          goldRushResultV704
+            .holderCount;
+
+        counterSource =
+          "GOLDRUSH_PAGINATION_TOTAL_COUNT_V704";
+      }
+    }
+  }
+
+
   /*
    * V280 manual-analysis holder-count budget guard.
    *
@@ -59689,13 +60262,15 @@ async function holderIntelligence(
           countersVerified: false,
           holderCount: null,
           holderSource:
-            holders?.proV143
-              ? "BLOCKSCOUT_PRO_V143"
-              : holders?.legacy
-                ? "BLOCKSCOUT_LEGACY"
-                : holders?.bitqueryV227
-                  ? "BITQUERY_EVM_HOLDERS_V227"
-                  : "BLOCKSCOUT_V2"
+            holders?.goldRushV704
+              ? "GOLDRUSH_TOKEN_HOLDERS_V2_V704"
+              : holders?.proV143
+                ? "BLOCKSCOUT_PRO_V143"
+                : holders?.legacy
+                  ? "BLOCKSCOUT_LEGACY"
+                  : holders?.bitqueryV227
+                    ? "BITQUERY_EVM_HOLDERS_V227"
+                    : "BLOCKSCOUT_V2"
         },
         state,
         token
@@ -60215,6 +60790,8 @@ async function holderIntelligence(
           blockscoutProHolderFallbackV143,
         blockscoutProCounters:
           blockscoutProCounterFallbackV247,
+        goldRushHolderV704:
+          goldRushHolderFallbackV704,
         priorityHolderProCompletionV666:
           budget?.analysis
             ?.priorityHolderProCompletionV666
@@ -60263,7 +60840,8 @@ async function holderIntelligence(
       },
 
       blockscoutProHolderFallbackV143,
-      blockscoutProCounterFallbackV247
+      blockscoutProCounterFallbackV247,
+      goldRushHolderFallbackV704
     };
   }
 
@@ -60313,13 +60891,15 @@ async function holderIntelligence(
   }
 
   const holderSource =
-    holders?.bitqueryV227
-      ? "BITQUERY_EVM_HOLDERS_V227"
-      : holders?.proV143
-        ? "BLOCKSCOUT_PRO_V143"
-        : holders?.legacy
-          ? "BLOCKSCOUT_LEGACY"
-          : "BLOCKSCOUT_V2";
+    holders?.goldRushV704
+      ? "GOLDRUSH_TOKEN_HOLDERS_V2_V704"
+      : holders?.bitqueryV227
+        ? "BITQUERY_EVM_HOLDERS_V227"
+        : holders?.proV143
+          ? "BLOCKSCOUT_PRO_V143"
+          : holders?.legacy
+            ? "BLOCKSCOUT_LEGACY"
+            : "BLOCKSCOUT_V2";
 
   const rawItems =
     holders.items.slice(
@@ -60395,6 +60975,7 @@ async function holderIntelligence(
 
       blockscoutProHolderFallbackV143,
       blockscoutProCounterFallbackV247,
+      goldRushHolderFallbackV704,
 
       whale: {
         verified:
@@ -60957,6 +61538,7 @@ async function holderIntelligence(
 
     blockscoutProHolderFallbackV143,
       blockscoutProCounterFallbackV247,
+    goldRushHolderFallbackV704,
 
     countersVerified,
 
@@ -61053,6 +61635,8 @@ async function holderIntelligence(
         blockscoutProHolderFallbackV143,
       blockscoutProCounters:
         blockscoutProCounterFallbackV247,
+      goldRushHolderV704:
+        goldRushHolderFallbackV704,
       sameRunHolderOutageCircuit: {
         active:
           budget?.blockscoutHolderOutage?.active === true,
@@ -141312,7 +141896,7 @@ async function goldRushHolderDiagnosticV702(
   const base = {
     agent: "Robinhood Chain Meme Hunter",
     version: VERSION,
-    diagnostic: "GOLDRUSH_ROBINHOOD_TOKEN_HOLDERS_V703",
+    diagnostic: "GOLDRUSH_ROBINHOOD_TOKEN_HOLDERS_V704",
     safe: true,
     diagnosticOnly: true,
     scannerMutated: false,
