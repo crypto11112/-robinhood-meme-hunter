@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V715
+ * AUTHORITATIVE RUNTIME VERSION: V715
+ *
+ * V715 PRE-ANALYSIS IDENTITY + QUALIFICATION HEADROOM GATE
+ * - builds directly from confirmed V714;
+ * - fixes the V714-proven case where a lower-ranked current/live verified launch
+ *   could begin ERC-20 identity with too little pre-Telegram global headroom left
+ *   to preserve the four-request qualification handoff afterwards;
+ * - before a bounded fresh-launch identity attempt starts, requires enough
+ *   pre-Telegram global capacity for the token's remaining V655/V675 identity
+ *   requests PLUS the existing four V714 qualification requests;
+ * - if that complete sequence cannot fit, defers the candidate intact to the
+ *   existing retry queue instead of spending identity requests that cannot lead
+ *   to a same-run qualification decision;
+ * - does NOT raise hard 42, change provider order/cooldowns, scoring, holder
+ *   standards, market verification, Telegram thresholds or notification reserve.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V714
  * AUTHORITATIVE RUNTIME VERSION: V714
  *
@@ -6129,7 +6148,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V714";
+const VERSION = "V715";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -90167,11 +90186,60 @@ for (
           )
         : 0;
 
+    /*
+     * V715: V714 proved that protecting the qualification slice only at the
+     * ERC20 -> qualification handoff is too late when a lower-ranked fresh
+     * launch starts with insufficient PRE-TELEGRAM global capacity. A fresh
+     * token can otherwise spend its remaining 4-5 identity probes and arrive
+     * at the handoff with only the notification reserve left.
+     *
+     * Require the complete bounded sequence to fit before starting that
+     * progressive identity attempt: remaining V655/V675 identity work + the
+     * existing four-request V714 qualification slice. This is a scheduling
+     * guard only. It adds no requests and does not change hard 42.
+     */
+    const v715QualificationRequestsNeeded =
+      isCurrentLiveVerifiedLaunchV649 &&
+      v655FreshIdentityRequestsNeeded > 0
+        ? 4
+        : 0;
+
+    const v715NotificationReserveRemaining =
+      budget?.notification?.globalReserveActiveV174 === true
+        ? Math.max(
+            0,
+            safeNumber(budget?.notification?.limit) -
+              safeNumber(budget?.notification?.used)
+          )
+        : 0;
+
+    const v715PreTelegramGlobalRemaining =
+      Math.max(
+        0,
+        safeNumber(budget?.totalLimit) -
+          v715NotificationReserveRemaining -
+          safeNumber(budget?.totalUsed)
+      );
+
+    const v715CompleteFreshSequenceRequired =
+      Math.max(
+        0,
+        v655FreshIdentityRequestsNeeded +
+          v715QualificationRequestsNeeded
+      );
+
+    const v715CompleteFreshSequenceAffordable =
+      !isCurrentLiveVerifiedLaunchV649 ||
+      v655FreshIdentityRequestsNeeded <= 0 ||
+      v715PreTelegramGlobalRemaining >=
+        v715CompleteFreshSequenceRequired;
+
     const v655FreshVerifiedIdentityProgressAttempt =
       !v165FullEstimateAffordable &&
       isCurrentLiveVerifiedLaunchV649 &&
       v655FreshIdentityRequestsNeeded > 0 &&
-      v655FreshIdentityUsableAllowance >= 1;
+      v655FreshIdentityUsableAllowance >= 1 &&
+      v715CompleteFreshSequenceAffordable;
 
     const v417ProgressivePriorityAttempt =
       !v165FullEstimateAffordable &&
@@ -90225,6 +90293,16 @@ for (
     ) {
       deferredAnalysis++;
 
+      const v715SequenceHeadroomProtected =
+        isCurrentLiveVerifiedLaunchV649 &&
+        v655FreshIdentityRequestsNeeded > 0 &&
+        !v715CompleteFreshSequenceAffordable;
+
+      const v715DeferredReason =
+        v715SequenceHeadroomProtected
+          ? "V715_QUALIFICATION_SEQUENCE_HEADROOM_PROTECTED"
+          : "FULL_ANALYSIS_BUDGET_PROTECTED";
+
       if (
         isPriorityCompletion
       ) {
@@ -90232,7 +90310,7 @@ for (
           true;
 
         topCandidateDeferredReason =
-          "FULL_ANALYSIS_BUDGET_PROTECTED";
+          v715DeferredReason;
       }
 
       scannerFunnelV415.budgetDeferred++;
@@ -90244,7 +90322,7 @@ for (
       queueDeferredAnalysisV415(
         state,
         watched,
-        "FULL_ANALYSIS_BUDGET_PROTECTED",
+        v715DeferredReason,
         marketFreshPriorityScore(watched, newTokens, liveTokens)
       );
 
@@ -90261,10 +90339,25 @@ for (
           true,
 
         reason:
-          "FULL_ANALYSIS_BUDGET_PROTECTED",
+          v715DeferredReason,
 
         estimatedRequests:
           required,
+
+        v715QualificationSequenceHeadroom: {
+          protected: v715SequenceHeadroomProtected,
+          identityRequestsNeeded:
+            v655FreshIdentityRequestsNeeded,
+          qualificationRequestsNeeded:
+            v715QualificationRequestsNeeded,
+          completeSequenceRequired:
+            v715CompleteFreshSequenceRequired,
+          preTelegramGlobalRemaining:
+            v715PreTelegramGlobalRemaining,
+          notificationReserveRemaining:
+            v715NotificationReserveRemaining,
+          hardRequestLimitRaised: false
+        },
 
         terminalReplacementBudgetRecoveryV165:
           v165ProtectedReplacement
