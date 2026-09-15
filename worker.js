@@ -1,6 +1,29 @@
 /**
+ * Robinhood Chain Meme Hunter — V711
+ * AUTHORITATIVE RUNTIME VERSION: V711
+ *
+ * V711 GUARDED LIVE GOLDRUSH VERIFIED DIRECTIONAL-USD FALLBACK
+ * - builds directly from confirmed V710;
+ * - promotes the proven V710 GoldRush V3 swap -> direction -> exact quote ->
+ *   verified USD path into the autonomous scanner as a LAST-RESORT fallback;
+ * - existing free/current providers and V254 exact-pool completion remain first;
+ * - only the already-selected single V254 qualifying completion candidate may use it;
+ * - only when that candidate still has NO verified directional USD after V254;
+ * - requires persisted on-chain-verified V3 pair identity (V329) or a
+ *   factory-verified V388 registry pool with canonical WETH/USDG quote;
+ * - requires the existing verified/fresh WETH/USDG reference for WETH pools;
+ * - uses at most ONE GoldRush Transactions V3-with-logs request per scan;
+ * - the V709 routine credit guard is checked BEFORE the provider call;
+ * - the GoldRush call consumes the EXISTING analysis budget and hard 42 ceiling;
+ * - verified rows are written into the existing V179 directional ledger with
+ *   exact timestamps and deduplication, preserving observed-only semantics;
+ * - no scoring formula, Telegram threshold, holder rule, market verification
+ *   rule, or request ceiling is loosened.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V710
- * AUTHORITATIVE RUNTIME VERSION: V710
+ * HISTORICAL VERSION NOTE: V710
  *
  * V710 EXACT SWAP-USD DIAGNOSTIC
  * - builds directly from confirmed V709;
@@ -6050,7 +6073,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V710";
+const VERSION = "V711";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -74544,6 +74567,881 @@ function priceableCandidatePoolSelectionV266(
 }
 
 
+
+/* =========================================================
+   V711 GUARDED LIVE GOLDRUSH V3 VERIFIED-USD FALLBACK
+   ========================================================= */
+
+function goldRushV3ObservedAtV711(tx, log) {
+  const raw =
+    log?.block_signed_at ||
+    tx?.block_signed_at ||
+    null;
+
+  const parsed =
+    raw
+      ? Date.parse(String(raw))
+      : NaN;
+
+  return Number.isFinite(parsed)
+    ? parsed
+    : null;
+}
+
+function goldRushV3LogIndexV711(log, fallbackIndex) {
+  const candidates = [
+    log?.log_offset,
+    log?.log_index,
+    log?.logOffset,
+    log?.logIndex,
+    fallbackIndex
+  ];
+
+  for (const value of candidates) {
+    const n = Number(value);
+    if (Number.isInteger(n) && n >= 0) {
+      return n;
+    }
+  }
+
+  return fallbackIndex;
+}
+
+async function verifiedV3PoolIdentityForGoldRushV711(
+  env,
+  candidate
+) {
+  const token =
+    normalize(candidate?.address);
+
+  const marketPair =
+    normalize(
+      candidate?.market?.pairAddress ||
+      candidate?.market?.pairId ||
+      ""
+    );
+
+  const empty = {
+    verified: false,
+    token,
+    pool: null,
+    token0: null,
+    token1: null,
+    candidateSide: null,
+    quoteToken: null,
+    quoteSymbol: null,
+    source: null,
+    status: null
+  };
+
+  if (!isAddress(token)) {
+    return {
+      ...empty,
+      status: "INVALID_TOKEN_V711"
+    };
+  }
+
+  /*
+   * First choice: the existing V329 persisted on-chain-verified V3 identity.
+   * No network/provider request is needed.
+   */
+  const cache =
+    await loadVerifiedV3PairIdentityV329(
+      env,
+      token
+    );
+
+  if (
+    cache?.valid === true &&
+    isAddress(cache?.record?.pairAddress) &&
+    isAddress(cache?.record?.token0) &&
+    isAddress(cache?.record?.token1)
+  ) {
+    const pool =
+      normalize(cache.record.pairAddress);
+    const token0 =
+      normalize(cache.record.token0);
+    const token1 =
+      normalize(cache.record.token1);
+    const candidateSide =
+      token === token0
+        ? 0
+        : token === token1
+          ? 1
+          : null;
+    const quoteToken =
+      candidateSide === 0
+        ? token1
+        : candidateSide === 1
+          ? token0
+          : null;
+
+    if (
+      candidateSide !== null &&
+      (
+        quoteToken === CANONICAL_WETH_V179 ||
+        quoteToken === CANONICAL_USDG_V179
+      ) &&
+      (
+        !isAddress(marketPair) ||
+        marketPair === pool
+      )
+    ) {
+      return {
+        verified: true,
+        token,
+        pool,
+        token0,
+        token1,
+        candidateSide,
+        quoteToken,
+        quoteSymbol:
+          quoteToken === CANONICAL_WETH_V179
+            ? "WETH"
+            : "USDG",
+        source:
+          "PERSISTED_ONCHAIN_VERIFIED_V3_PAIR_V329",
+        status:
+          "VERIFIED_V3_PAIR_AVAILABLE_V711"
+      };
+    }
+  }
+
+  /*
+   * Second choice: factory-verified V388 registry.
+   * Prefer the provider's verified market pair when one is present; otherwise
+   * accept only a single unambiguous canonical-quote registry pool.
+   */
+  const registry =
+    await v388ReadPoolRegistry(
+      env,
+      token
+    );
+
+  const eligible =
+    (
+      Array.isArray(registry?.entries)
+        ? registry.entries
+        : []
+    )
+      .map(entry => {
+        const pool =
+          normalize(entry?.pool);
+        const token0 =
+          normalize(entry?.token0);
+        const token1 =
+          normalize(entry?.token1);
+        const factory =
+          normalize(entry?.factory);
+
+        const candidateSide =
+          token === token0
+            ? 0
+            : token === token1
+              ? 1
+              : null;
+
+        const quoteToken =
+          candidateSide === 0
+            ? token1
+            : candidateSide === 1
+              ? token0
+              : null;
+
+        return {
+          entry,
+          pool,
+          token0,
+          token1,
+          factory,
+          candidateSide,
+          quoteToken
+        };
+      })
+      .filter(row =>
+        isAddress(row.pool) &&
+        isAddress(row.token0) &&
+        isAddress(row.token1) &&
+        row.candidateSide !== null &&
+        row.entry?.factoryVerified === true &&
+        row.factory === normalize(UNISWAP_V3_FACTORY_V195) &&
+        (
+          row.quoteToken === CANONICAL_WETH_V179 ||
+          row.quoteToken === CANONICAL_USDG_V179
+        )
+      );
+
+  let selected =
+    isAddress(marketPair)
+      ? eligible.find(row => row.pool === marketPair)
+      : null;
+
+  if (!selected && eligible.length === 1) {
+    selected = eligible[0];
+  }
+
+  if (!selected) {
+    return {
+      ...empty,
+      status:
+        eligible.length
+          ? "MULTIPLE_OR_MARKET_PAIR_MISMATCH_V711"
+          : "NO_VERIFIED_CANONICAL_V3_POOL_V711"
+    };
+  }
+
+  return {
+    verified: true,
+    token,
+    pool: selected.pool,
+    token0: selected.token0,
+    token1: selected.token1,
+    candidateSide: selected.candidateSide,
+    quoteToken: selected.quoteToken,
+    quoteSymbol:
+      selected.quoteToken === CANONICAL_WETH_V179
+        ? "WETH"
+        : "USDG",
+    source:
+      "PERSISTED_FACTORY_VERIFIED_V388_REGISTRY",
+    status:
+      "VERIFIED_V3_REGISTRY_POOL_AVAILABLE_V711"
+  };
+}
+
+function persistGoldRushV3UsdRowsV711(
+  state,
+  candidateAddress,
+  poolIdentity,
+  txItems,
+  wethUsdReference
+) {
+  const token =
+    normalize(candidateAddress);
+
+  const output = {
+    rowsSeen: 0,
+    swapLogsSeen: 0,
+    exactUsdTrades: 0,
+    inserted: 0,
+    deduplicated: 0,
+    timestampRejected: 0,
+    identityRejected: 0,
+    usdRejected: 0,
+    buys: 0,
+    sells: 0,
+    buyUsd: 0,
+    sellUsd: 0,
+    pool:
+      normalize(poolIdentity?.pool) ||
+      null,
+    source:
+      "GOLDRUSH_V3_EXACT_SWAP_USD_V711"
+  };
+
+  if (
+    !isAddress(token) ||
+    poolIdentity?.verified !== true ||
+    !isAddress(poolIdentity?.pool) ||
+    !Array.isArray(txItems)
+  ) {
+    return output;
+  }
+
+  const store =
+    onChainDirectionalStoreV179(state);
+
+  const previous =
+    store[token] &&
+    typeof store[token] === "object"
+      ? store[token]
+      : {};
+
+  const records =
+    Array.isArray(previous.records)
+      ? previous.records
+      : [];
+
+  const keys =
+    new Set(
+      records
+        .map(row => String(row?.tradeKey || ""))
+        .filter(Boolean)
+    );
+
+  const now = Date.now();
+
+  for (const tx of txItems) {
+    const logs =
+      Array.isArray(tx?.log_events)
+        ? tx.log_events
+        : [];
+
+    for (let i = 0; i < logs.length; i++) {
+      const log = logs[i];
+      output.rowsSeen++;
+
+      const emitter =
+        normalize(
+          log?.sender_address ||
+          log?.address ||
+          ""
+        );
+
+      if (emitter !== normalize(poolIdentity.pool)) {
+        continue;
+      }
+
+      const decoded =
+        log?.decoded &&
+        typeof log.decoded === "object"
+          ? log.decoded
+          : null;
+
+      const topic0 =
+        String(
+          log?.raw_log_topics?.[0] ||
+          ""
+        ).toLowerCase();
+
+      const isSwap =
+        String(decoded?.name || "").toLowerCase() === "swap" ||
+        topic0 === UNISWAP_V3_SWAP_TOPIC_V326;
+
+      if (!isSwap) {
+        continue;
+      }
+
+      output.swapLogsSeen++;
+
+      const amount0 =
+        goldRushSignedBigIntV706(
+          goldRushDecodedParamV706(decoded, "amount0")
+        );
+      const amount1 =
+        goldRushSignedBigIntV706(
+          goldRushDecodedParamV706(decoded, "amount1")
+        );
+
+      if (
+        amount0 === null ||
+        amount1 === null
+      ) {
+        output.identityRejected++;
+        continue;
+      }
+
+      const candidateDelta =
+        poolIdentity.candidateSide === 0
+          ? amount0
+          : amount1;
+
+      const quoteDelta =
+        poolIdentity.candidateSide === 0
+          ? amount1
+          : amount0;
+
+      const side =
+        candidateDelta < 0n
+          ? "buy"
+          : candidateDelta > 0n
+            ? "sell"
+            : null;
+
+      if (!side) {
+        output.identityRejected++;
+        continue;
+      }
+
+      const quoteRaw =
+        quoteDelta < 0n
+          ? -quoteDelta
+          : quoteDelta;
+
+      let exactUsdAmount = null;
+      let exactUsdSource = null;
+
+      if (
+        poolIdentity.quoteToken ===
+          CANONICAL_USDG_V179
+      ) {
+        exactUsdAmount =
+          decimalFromRawUnsignedV441(
+            quoteRaw,
+            CANONICAL_USDG_DECIMALS_V179
+          );
+        exactUsdSource =
+          "GOLDRUSH_V3_CANONICAL_USDG_1_TO_1_V711";
+      } else if (
+        poolIdentity.quoteToken ===
+          CANONICAL_WETH_V179 &&
+        wethUsdReference?.verified === true &&
+        safeNumber(
+          wethUsdReference?.priceUsdGPerWeth
+        ) > 0
+      ) {
+        const weth =
+          decimalFromRawUnsignedV441(
+            quoteRaw,
+            CANONICAL_WETH_DECIMALS_V187
+          );
+
+        if (
+          Number.isFinite(weth) &&
+          weth >= 0
+        ) {
+          exactUsdAmount =
+            weth *
+            safeNumber(
+              wethUsdReference.priceUsdGPerWeth
+            );
+          exactUsdSource =
+            `GOLDRUSH_V3_WETH_BRIDGE_V711:${String(
+              wethUsdReference?.source ||
+              "VERIFIED_WETH_USDG_REFERENCE"
+            )}`;
+        }
+      }
+
+      if (
+        !Number.isFinite(exactUsdAmount) ||
+        exactUsdAmount <= 0
+      ) {
+        output.usdRejected++;
+        continue;
+      }
+
+      const observedAt =
+        goldRushV3ObservedAtV711(
+          tx,
+          log
+        );
+
+      if (
+        !safeNumber(observedAt) ||
+        observedAt > now + 60000
+      ) {
+        output.timestampRejected++;
+        continue;
+      }
+
+      const txHash =
+        normalize(
+          tx?.tx_hash ||
+          log?.tx_hash ||
+          ""
+        );
+
+      const logIndex =
+        goldRushV3LogIndexV711(
+          log,
+          i
+        );
+
+      const tradeKey =
+        `v711:${normalize(poolIdentity.pool)}:${txHash || "nohash"}:${logIndex}`;
+
+      if (keys.has(tradeKey)) {
+        output.deduplicated++;
+        continue;
+      }
+
+      keys.add(tradeKey);
+
+      records.push({
+        verified: true,
+        candidateAddress: token,
+        side,
+        exactUsdVerified: true,
+        exactUsdAmount,
+        exactUsdSource,
+        quoteTokenAddress:
+          poolIdentity.quoteToken,
+        quoteAmountRaw:
+          quoteRaw.toString(),
+        candidateAmountRaw:
+          (
+            candidateDelta < 0n
+              ? -candidateDelta
+              : candidateDelta
+          ).toString(),
+        pairAddressV711:
+          normalize(poolIdentity.pool),
+        poolIdentitySourceV711:
+          poolIdentity.source,
+        poolId: null,
+        transactionHash:
+          txHash || null,
+        logIndexV711:
+          logIndex,
+        blockNumber:
+          safeNumber(
+            log?.block_height ??
+            tx?.block_height
+          ) || null,
+        tradeKey,
+        observedAt,
+        completionSourceV254:
+          "GOLDRUSH_TIMESTAMPED_V3_SWAP_V711",
+        interpretation:
+          "VERIFIED_OBSERVED_NOT_FULL_MARKET_WINDOW"
+      });
+
+      output.exactUsdTrades++;
+      output.inserted++;
+
+      if (side === "buy") {
+        output.buys++;
+        output.buyUsd += exactUsdAmount;
+      } else {
+        output.sells++;
+        output.sellUsd += exactUsdAmount;
+      }
+    }
+  }
+
+  records.sort(
+    (a, b) =>
+      safeNumber(a?.observedAt) -
+      safeNumber(b?.observedAt)
+  );
+
+  const cutoff =
+    Date.now() -
+    ONCHAIN_DIRECTIONAL_RETENTION_MS_V179;
+
+  let retained =
+    records.filter(
+      row =>
+        safeNumber(row?.observedAt) >= cutoff
+    );
+
+  if (
+    retained.length >
+    ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179
+  ) {
+    retained =
+      retained.slice(
+        -ONCHAIN_DIRECTIONAL_MAX_RECORDS_V179
+      );
+  }
+
+  if (retained.length) {
+    store[token] = {
+      version: "V711",
+      tokenAddress: token,
+      firstSeenAt:
+        safeNumber(previous?.firstSeenAt) ||
+        safeNumber(retained?.[0]?.observedAt) ||
+        now,
+      lastSeenAt:
+        Math.max(
+          safeNumber(previous?.lastSeenAt),
+          ...retained.map(row => safeNumber(row?.observedAt))
+        ),
+      poolIds:
+        Array.isArray(previous?.poolIds)
+          ? previous.poolIds.slice(-8)
+          : [],
+      records: retained
+    };
+  }
+
+  output.buyUsd =
+    Number(output.buyUsd.toFixed(8));
+  output.sellUsd =
+    Number(output.sellUsd.toFixed(8));
+  output.totalUsd =
+    Number(
+      (
+        output.buyUsd +
+        output.sellUsd
+      ).toFixed(8)
+    );
+
+  return output;
+}
+
+async function goldRushVerifiedUsdFallbackV711(
+  candidate,
+  state,
+  budget,
+  env
+) {
+  const token =
+    normalize(candidate?.address);
+
+  const base = {
+    enabled: true,
+    candidateAddress:
+      token || null,
+    attempted: false,
+    eligible: false,
+    externalRequestsUsed: 0,
+    creditGuard: null,
+    poolIdentity: null,
+    transactionsReturned: 0,
+    persistence: null,
+    finalFlow: null,
+    status: null
+  };
+
+  if (!isAddress(token)) {
+    return {
+      ...base,
+      status: "INVALID_TOKEN_V711"
+    };
+  }
+
+  if (
+    candidateVerifiedOnChainFlowV212(
+      candidate,
+      state
+    )?.verified === true
+  ) {
+    return {
+      ...base,
+      status:
+        "VERIFIED_DIRECTIONAL_USD_ALREADY_AVAILABLE_V711"
+    };
+  }
+
+  if (
+    !String(
+      env?.GOLDRUSH_API_KEY ||
+      ""
+    ).trim()
+  ) {
+    return {
+      ...base,
+      status:
+        "GOLDRUSH_API_KEY_NOT_CONFIGURED_V711"
+    };
+  }
+
+  const identity =
+    await verifiedV3PoolIdentityForGoldRushV711(
+      env,
+      candidate
+    );
+
+  base.poolIdentity = identity;
+
+  if (identity?.verified !== true) {
+    return {
+      ...base,
+      status:
+        identity?.status ||
+        "VERIFIED_V3_POOL_REQUIRED_V711"
+    };
+  }
+
+  const wethUsdReference =
+    identity.quoteToken === CANONICAL_WETH_V179
+      ? bestVerifiedWethUsdGReferenceV195(state)
+      : null;
+
+  if (
+    identity.quoteToken === CANONICAL_WETH_V179 &&
+    (
+      wethUsdReference?.verified !== true ||
+      safeNumber(
+        wethUsdReference?.priceUsdGPerWeth
+      ) <= 0
+    )
+  ) {
+    return {
+      ...base,
+      eligible: true,
+      status:
+        "VERIFIED_WETH_USD_REFERENCE_REQUIRED_V711"
+    };
+  }
+
+  base.eligible = true;
+
+  /*
+   * Conservative pre-authorisation assumes up to 100 returned transaction
+   * items at 0.1 credits/item = 10 credits.
+   */
+  const guard =
+    await goldRushRoutineGuardV709(
+      env,
+      100 *
+      GOLDRUSH_TX_LOGS_CREDITS_PER_ITEM_V709
+    );
+
+  base.creditGuard = {
+    allowed:
+      guard?.allowed === true,
+    reason:
+      guard?.reason || null,
+    estimatedNextCredits:
+      guard?.estimatedNextCredits ?? null,
+    projectedAfter:
+      guard?.projectedAfter ?? null
+  };
+
+  if (guard?.allowed !== true) {
+    return {
+      ...base,
+      status:
+        "GOLDRUSH_ROUTINE_CREDIT_GUARD_V711"
+    };
+  }
+
+  /*
+   * The provider request must consume the normal scanner analysis budget.
+   * No bypass/reserve crossing is permitted here.
+   */
+  if (
+    !consumeBudget(
+      budget,
+      "analysis",
+      "GOLDRUSH_V3_VERIFIED_USD_FALLBACK_V711"
+    )
+  ) {
+    return {
+      ...base,
+      status:
+        "SCANNER_ANALYSIS_BUDGET_UNAVAILABLE_V711"
+    };
+  }
+
+  base.attempted = true;
+  base.externalRequestsUsed = 1;
+
+  const endpoint =
+    `https://api.covalenthq.com/v1/robinhood-mainnet/address/${identity.pool}/transactions_v3/` +
+    `?no-logs=false&quote-currency=USD`;
+
+  let response = null;
+  let body = null;
+
+  try {
+    response =
+      await fetch(
+        endpoint,
+        {
+          method: "GET",
+          headers: {
+            accept: "application/json",
+            authorization:
+              `Bearer ${String(
+                env.GOLDRUSH_API_KEY
+              ).trim()}`
+          }
+        }
+      );
+
+    const raw =
+      await response.text();
+
+    try {
+      body =
+        raw
+          ? JSON.parse(raw)
+          : null;
+    } catch {
+      body = null;
+    }
+  } catch (error) {
+    return {
+      ...base,
+      status:
+        "GOLDRUSH_FETCH_ERROR_V711",
+      error:
+        errorString(error)
+    };
+  }
+
+  const txItems =
+    Array.isArray(body?.data?.items)
+      ? body.data.items
+      : [];
+
+  base.transactionsReturned =
+    txItems.length;
+
+  await recordGoldRushUsageV709(
+    env,
+    {
+      endpoint:
+        "TRANSACTIONS_V3_WITH_LOGS",
+      mode:
+        "ROUTINE",
+      items:
+        txItems.length,
+      estimatedCredits:
+        txItems.length *
+        GOLDRUSH_TX_LOGS_CREDITS_PER_ITEM_V709,
+      costVerified:
+        true,
+      httpStatus:
+        response.status
+    }
+  );
+
+  if (
+    !response.ok ||
+    body?.error === true
+  ) {
+    return {
+      ...base,
+      httpStatus:
+        response.status,
+      status:
+        "GOLDRUSH_HTTP_ERROR_V711",
+      errorCode:
+        body?.error_code ??
+        null,
+      errorMessage:
+        body?.error_message ??
+        body?.message ??
+        null
+    };
+  }
+
+  const persistence =
+    persistGoldRushV3UsdRowsV711(
+      state,
+      token,
+      identity,
+      txItems,
+      wethUsdReference
+    );
+
+  const finalFlow =
+    candidateVerifiedOnChainFlowV212(
+      candidate,
+      state
+    );
+
+  return {
+    ...base,
+    httpStatus:
+      response.status,
+    persistence,
+    finalFlow,
+    verifiedUsdRecovered:
+      finalFlow?.verified === true &&
+      safeNumber(
+        persistence?.inserted
+      ) > 0,
+    status:
+      finalFlow?.verified === true
+        ? "VERIFIED_DIRECTIONAL_USD_RECOVERED_GOLDRUSH_V711"
+        : (
+            safeNumber(
+              persistence?.swapLogsSeen
+            ) > 0
+              ? "GOLDRUSH_SWAPS_FOUND_USD_NOT_RECOVERED_V711"
+              : "NO_GOLDRUSH_V3_SWAPS_IN_RETURNED_WINDOW_V711"
+          )
+  };
+}
+
+
 async function verifiedUsdCompletionPassV254(
   candidate,
   state,
@@ -90883,7 +91781,7 @@ for (
     verifiedUsdCompletionV254
       .attempted++;
 
-    const completion =
+    let completion =
       await verifiedUsdCompletionPassV254(
         candidate,
         state,
@@ -90898,6 +91796,64 @@ for (
 
     candidate.verifiedUsdCompletionV254 =
       completion;
+
+    /*
+     * V711: only after the existing V254 path has failed to produce ANY
+     * verified directional USD may the same already-qualified single candidate
+     * attempt the guarded GoldRush V3 fallback.
+     */
+    let goldRushFallbackV711 =
+      null;
+
+    if (
+      completion?.finalFlow?.verified !==
+        true &&
+      candidateVerifiedOnChainFlowV212(
+        candidate,
+        state
+      )?.verified !==
+        true
+    ) {
+      goldRushFallbackV711 =
+        await goldRushVerifiedUsdFallbackV711(
+          candidate,
+          state,
+          budget,
+          env
+        );
+
+      candidate.goldRushVerifiedUsdFallbackV711 =
+        goldRushFallbackV711;
+
+      if (
+        goldRushFallbackV711
+          ?.finalFlow
+          ?.verified ===
+        true
+      ) {
+        completion = {
+          ...completion,
+          finalFlow:
+            goldRushFallbackV711.finalFlow,
+          verifiedUsdRecovered:
+            goldRushFallbackV711
+              ?.verifiedUsdRecovered ===
+            true,
+          verifiedUsdAvailableV263:
+            true,
+          coverageEnrichedV263:
+            goldRushFallbackV711
+              ?.verifiedUsdRecovered ===
+            true,
+          goldRushFallbackV711,
+          status:
+            "VERIFIED_DIRECTIONAL_USD_RECOVERED_GOLDRUSH_V711"
+        };
+
+        candidate.verifiedUsdCompletionV254 =
+          completion;
+      }
+    }
 
     verifiedUsdCompletionV254
       .results.push({
@@ -90937,6 +91893,49 @@ for (
           completion
             ?.historyPersistence ||
           null,
+        goldRushFallbackV711:
+          goldRushFallbackV711
+            ? {
+                status:
+                  goldRushFallbackV711
+                    ?.status ||
+                  null,
+                attempted:
+                  goldRushFallbackV711
+                    ?.attempted ===
+                  true,
+                eligible:
+                  goldRushFallbackV711
+                    ?.eligible ===
+                  true,
+                externalRequestsUsed:
+                  safeNumber(
+                    goldRushFallbackV711
+                      ?.externalRequestsUsed
+                  ),
+                transactionsReturned:
+                  safeNumber(
+                    goldRushFallbackV711
+                      ?.transactionsReturned
+                  ),
+                poolIdentity:
+                  goldRushFallbackV711
+                    ?.poolIdentity ||
+                  null,
+                creditGuard:
+                  goldRushFallbackV711
+                    ?.creditGuard ||
+                  null,
+                persistence:
+                  goldRushFallbackV711
+                    ?.persistence ||
+                  null,
+                verifiedUsdRecovered:
+                  goldRushFallbackV711
+                    ?.verifiedUsdRecovered ===
+                  true
+              }
+            : null,
         coverageBeforeV262:
           completion
             ?.coverageBeforeV262 ||
