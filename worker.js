@@ -1,6 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V707
+ * AUTHORITATIVE RUNTIME VERSION: V707
+ *
+ * V707 VERIFIED V3 POOL-METADATA REUSE FOR GOLDRUSH SWAP DIAGNOSTIC
+ * - builds directly from V706;
+ * - fixes only the pool token0/token1 identity step that blocked BUY/SELL mapping;
+ * - first reuses the bot's persisted VERIFIED V3 pair identity (V363/V329);
+ * - if the requested pool is not the base monitored pair, reuses the persisted
+ *   factory-verified V388 multi-pool registry;
+ * - only if neither verified persisted source resolves the pool does it attempt
+ *   the same bounded two-call RPC token0/token1 fallback from V706;
+ * - GoldRush still uses ONE transactions-with-logs request;
+ * - no live scoring/Telegram/USD promotion, no KV writes, and no change to the
+ *   hard scanner request ceiling of 42.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V706
- * AUTHORITATIVE RUNTIME VERSION: V706
+ * HISTORICAL VERSION NOTE: V706
  *
  * V706 GOLDRUSH V3 SWAP-LOG DIAGNOSTIC
  * - builds directly from confirmed V705;
@@ -5981,7 +5998,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V706";
+const VERSION = "V707";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -142581,7 +142598,7 @@ function goldRushSignedBigIntV706(
 }
 
 
-async function goldRushV3SwapDiagnosticV706(
+async function goldRushV3SwapDiagnosticV707(
   env,
   token,
   pool
@@ -142609,7 +142626,7 @@ async function goldRushV3SwapDiagnosticV706(
     version:
       VERSION,
     diagnostic:
-      "GOLDRUSH_ROBINHOOD_V3_SWAP_LOGS_V706",
+      "GOLDRUSH_ROBINHOOD_V3_SWAP_LOGS_V707",
     safe:
       true,
     diagnosticOnly:
@@ -142661,7 +142678,7 @@ async function goldRushV3SwapDiagnosticV706(
       success:
         false,
       status:
-        "INVALID_TOKEN_OR_POOL_V706"
+        "INVALID_TOKEN_OR_POOL_V707"
     };
   }
 
@@ -142671,60 +142688,266 @@ async function goldRushV3SwapDiagnosticV706(
       success:
         false,
       status:
-        "GOLDRUSH_API_KEY_NOT_CONFIGURED_V706"
+        "GOLDRUSH_API_KEY_NOT_CONFIGURED_V707"
     };
   }
 
   /*
-   * Resolve the verified V3 pool side mapping first. These are ordinary RPC
-   * eth_call metadata reads, not GoldRush credits and not scanner-budget calls.
+   * V707 pool identity order:
+   *
+   * 1) Reuse V363/V329 persisted VERIFIED base-pair metadata.
+   * 2) Reuse V388 factory-verified multi-pool registry metadata.
+   * 3) Only if neither verified persisted source resolves this exact pool,
+   *    fall back to the bounded V706 token0/token1 eth_call pair.
+   *
+   * This avoids making diagnostic direction verification depend on a provider
+   * RPC when the bot already possesses verified pool identity.
    */
-  const alchemyUrl =
-    v356AlchemyUrl(
-      env
-    );
-
   let token0 =
     null;
   let token1 =
     null;
+  let metadataSourceV707 =
+    "UNRESOLVED";
+  let metadataVerifiedV707 =
+    false;
   let metadataRpcRequestsUsed =
     0;
+  let basePairStatusV707 =
+    null;
+  let registryReadErrorV707 =
+    null;
 
-  if (alchemyUrl) {
-    const [
-      token0Call,
-      token1Call
-    ] =
-      await Promise.all([
-        v375EthCallRaw(
-          alchemyUrl,
-          poolAddress,
-          UNISWAP_V3_TOKEN0_SELECTOR_V326
-        ),
-        v375EthCallRaw(
-          alchemyUrl,
-          poolAddress,
-          UNISWAP_V3_TOKEN1_SELECTOR_V326
+  try {
+    const baseConfigV707 =
+      await v3LiveCollectorConfigV363(
+        env,
+        address
+      );
+
+    basePairStatusV707 =
+      baseConfigV707?.status ||
+      null;
+
+    if (
+      baseConfigV707?.ok ===
+        true &&
+      normalize(
+        baseConfigV707?.pair ||
+        ""
+      ) ===
+        poolAddress &&
+      isAddress(
+        baseConfigV707?.token0
+      ) &&
+      isAddress(
+        baseConfigV707?.token1
+      ) &&
+      (
+        normalize(
+          baseConfigV707.token0
+        ) ===
+          address ||
+        normalize(
+          baseConfigV707.token1
+        ) ===
+          address
+      )
+    ) {
+      token0 =
+        normalize(
+          baseConfigV707.token0
+        );
+      token1 =
+        normalize(
+          baseConfigV707.token1
+        );
+      metadataSourceV707 =
+        "PERSISTED_VERIFIED_BASE_PAIR_V363_V329";
+      metadataVerifiedV707 =
+        true;
+    }
+  } catch (error) {
+    basePairStatusV707 =
+      `BASE_PAIR_LOOKUP_ERROR:${errorString(error)}`;
+  }
+
+  if (
+    !metadataVerifiedV707
+  ) {
+    try {
+      const registryV707 =
+        await v388ReadPoolRegistry(
+          env,
+          address
+        );
+
+      registryReadErrorV707 =
+        registryV707?.readError ||
+        null;
+
+      const registryEntryV707 =
+        (
+          Array.isArray(
+            registryV707?.entries
+          )
+            ? registryV707.entries
+            : []
+        ).find(
+          entry => {
+            const p =
+              normalize(
+                entry?.pool ||
+                ""
+              );
+            const t0 =
+              normalize(
+                entry?.token0 ||
+                ""
+              );
+            const t1 =
+              normalize(
+                entry?.token1 ||
+                ""
+              );
+            const factory =
+              normalize(
+                entry?.factory ||
+                ""
+              );
+
+            return (
+              p ===
+                poolAddress &&
+              entry?.factoryVerified ===
+                true &&
+              factory ===
+                normalize(
+                  UNISWAP_V3_FACTORY_V195
+                ) &&
+              (
+                t0 ===
+                  address ||
+                t1 ===
+                  address
+              ) &&
+              isAddress(
+                t0
+              ) &&
+              isAddress(
+                t1
+              )
+            );
+          }
+        );
+
+      if (
+        registryEntryV707
+      ) {
+        token0 =
+          normalize(
+            registryEntryV707.token0
+          );
+        token1 =
+          normalize(
+            registryEntryV707.token1
+          );
+        metadataSourceV707 =
+          "PERSISTED_FACTORY_VERIFIED_V388_REGISTRY";
+        metadataVerifiedV707 =
+          true;
+      }
+    } catch (error) {
+      registryReadErrorV707 =
+        errorString(
+          error
+        );
+    }
+  }
+
+  if (
+    !metadataVerifiedV707
+  ) {
+    const alchemyUrl =
+      v356AlchemyUrl(
+        env
+      );
+
+    if (
+      alchemyUrl
+    ) {
+      const [
+        token0Call,
+        token1Call
+      ] =
+        await Promise.all([
+          v375EthCallRaw(
+            alchemyUrl,
+            poolAddress,
+            UNISWAP_V3_TOKEN0_SELECTOR_V326
+          ),
+          v375EthCallRaw(
+            alchemyUrl,
+            poolAddress,
+            UNISWAP_V3_TOKEN1_SELECTOR_V326
+          )
+        ]);
+
+      metadataRpcRequestsUsed =
+        2;
+
+      const rpcToken0V707 =
+        token0Call?.ok
+          ? decodeEthCallAddressV326(
+              token0Call.result
+            )
+          : null;
+
+      const rpcToken1V707 =
+        token1Call?.ok
+          ? decodeEthCallAddressV326(
+              token1Call.result
+            )
+          : null;
+
+      if (
+        isAddress(
+          rpcToken0V707
+        ) &&
+        isAddress(
+          rpcToken1V707
+        ) &&
+        (
+          normalize(
+            rpcToken0V707
+          ) ===
+            address ||
+          normalize(
+            rpcToken1V707
+          ) ===
+            address
         )
-      ]);
-
-    metadataRpcRequestsUsed =
-      2;
-
-    token0 =
-      token0Call?.ok
-        ? decodeEthCallAddressV326(
-            token0Call.result
-          )
-        : null;
-
-    token1 =
-      token1Call?.ok
-        ? decodeEthCallAddressV326(
-            token1Call.result
-          )
-        : null;
+      ) {
+        token0 =
+          normalize(
+            rpcToken0V707
+          );
+        token1 =
+          normalize(
+            rpcToken1V707
+          );
+        metadataSourceV707 =
+          "RPC_TOKEN0_TOKEN1_FALLBACK_V707";
+        metadataVerifiedV707 =
+          true;
+      } else {
+        metadataSourceV707 =
+          "RPC_TOKEN0_TOKEN1_UNRESOLVED_V707";
+      }
+    } else {
+      metadataSourceV707 =
+        "NO_VERIFIED_PERSISTED_METADATA_AND_RPC_UNAVAILABLE_V707";
+    }
   }
 
   const candidateSide =
@@ -142806,16 +143029,22 @@ async function goldRushV3SwapDiagnosticV706(
         candidateSide,
         quoteToken,
         quoteSymbol,
+        metadataSourceV707,
+        metadataVerifiedV707,
+        basePairStatusV707,
+        registryReadErrorV707,
         verified:
           candidateSide !==
-            null
+            null &&
+          metadataVerifiedV707 ===
+            true
       },
       goldRushRequestsUsed:
         1,
       success:
         false,
       status:
-        "GOLDRUSH_SWAP_FETCH_FAILED_V706",
+        "GOLDRUSH_SWAP_FETCH_FAILED_V707",
       error:
         errorString(
           error
@@ -143058,6 +143287,8 @@ async function goldRushV3SwapDiagnosticV706(
   }
 
   const poolIdentityVerified =
+    metadataVerifiedV707 ===
+      true &&
     candidateSide !==
       null &&
     isAddress(
@@ -143095,6 +143326,11 @@ async function goldRushV3SwapDiagnosticV706(
       candidateSide,
       quoteToken,
       quoteSymbol,
+      metadataSourceV707,
+      metadataVerifiedV707,
+      basePairStatusV707,
+      registryReadErrorV707,
+      metadataRpcRequestsUsed,
       verified:
         poolIdentityVerified
     },
@@ -143116,17 +143352,17 @@ async function goldRushV3SwapDiagnosticV706(
       response.ok &&
       !apiError &&
       swapDirectionVerified
-        ? "GOLDRUSH_V3_SWAP_DIRECTION_CONFIRMED_V706"
+        ? "GOLDRUSH_V3_SWAP_DIRECTION_CONFIRMED_V707"
         : response.ok &&
             !apiError &&
             decodedSwapLogs >
               0
-          ? "GOLDRUSH_SWAP_LOGS_FOUND_DIRECTION_NOT_CONFIRMED_V706"
+          ? "GOLDRUSH_SWAP_LOGS_FOUND_DIRECTION_NOT_CONFIRMED_V707"
           : response.ok &&
               !apiError
-            ? "GOLDRUSH_NO_V3_SWAP_LOGS_IN_RECENT_WINDOW_V706"
-            : "GOLDRUSH_SWAP_HTTP_ERROR_V706",
-    capabilityDecisionV706: {
+            ? "GOLDRUSH_NO_V3_SWAP_LOGS_IN_RECENT_WINDOW_V707"
+            : "GOLDRUSH_SWAP_HTTP_ERROR_V707",
+    capabilityDecisionV707: {
       decodedSwapLogsAvailable:
         decodedSwapLogs >
         0,
@@ -143295,7 +143531,7 @@ async function handleRequest(
       "/goldrush-swap-test"
   ) {
     return jsonResponse(
-      await goldRushV3SwapDiagnosticV706(
+      await goldRushV3SwapDiagnosticV707(
         env,
         url.searchParams.get("token") || "",
         url.searchParams.get("pool") || ""
