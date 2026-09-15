@@ -1,6 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V700
+ * AUTHORITATIVE RUNTIME VERSION: V700
+ *
+ * V700 ERC20 PROTECTED ANALYSIS-BOUNDARY COMPLETION
+ * - builds directly forward from confirmed V699;
+ * - fixes the remaining case where an active V699-protected fresh-launch ERC20
+ *   identity sequence can still be rejected by the INTERNAL analysis ceiling;
+ * - only that active ERC20 identity request may cross the internal analysis
+ *   boundary, and only while the real pre-Telegram global allowance has room;
+ * - hard 42 and unused Telegram notification reserve remain absolute;
+ * - no new provider, no higher request ceiling, no lower ERC20 verification;
+ * - preserves V698 state retention and all V687-V699 working logic.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V699
- * AUTHORITATIVE RUNTIME VERSION: V699
+ * HISTORICAL VERSION NOTE: V699
  *
  * V699 ERC20 IDENTITY-SEQUENCE HEADROOM FIX
  * - builds directly forward from confirmed V698;
@@ -5866,7 +5881,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V699";
+const VERSION = "V700";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12163,6 +12178,12 @@ function createBudget() {
         consumedAt: null,
         consumedProtectedRequestsV699: 0,
         protectedConsumeEventsV699: 0,
+        analysisBoundaryBypassesV700: 0,
+        analysisBoundaryBypassesForActiveCandidateV700: 0,
+        lastAnalysisBoundaryBypassAtV700: null,
+        lastAnalysisBoundaryBypassTypeV700: null,
+        analysisBoundaryRuleV700:
+          "ACTIVE_V699_ERC20_IDENTITY_ONLY_PRE_TELEGRAM_GLOBAL_LIMIT_STILL_AUTHORITATIVE",
         releasedAt: null,
         releaseReason: null,
         blockedRequests: 0,
@@ -12877,6 +12898,12 @@ function configureErc20UpstreamHeadroomReserveV690(
   reserve.consumedAt = null;
   reserve.consumedProtectedRequestsV699 = 0;
   reserve.protectedConsumeEventsV699 = 0;
+  reserve.analysisBoundaryBypassesV700 = 0;
+  reserve.analysisBoundaryBypassesForActiveCandidateV700 = 0;
+  reserve.lastAnalysisBoundaryBypassAtV700 = null;
+  reserve.lastAnalysisBoundaryBypassTypeV700 = null;
+  reserve.analysisBoundaryRuleV700 =
+    "ACTIVE_V699_ERC20_IDENTITY_ONLY_PRE_TELEGRAM_GLOBAL_LIMIT_STILL_AUTHORITATIVE";
   reserve.releasedAt = null;
   reserve.releaseReason = null;
   reserve.blockedRequests = 0;
@@ -12929,6 +12956,7 @@ function setActiveErc20UpstreamCandidateV690(
   reserve.activeCandidateAddress = token;
   reserve.activeCandidateRequiredRequestsV699 =
     requiredV699;
+  reserve.analysisBoundaryBypassesForActiveCandidateV700 = 0;
 
   /*
    * The pre-candidate reservation used the maximum requirement among pending
@@ -12984,6 +13012,7 @@ function releaseErc20UpstreamCandidateV690(
   if (normalize(reserve.activeCandidateAddress) === token) {
     reserve.activeCandidateAddress = null;
     reserve.activeCandidateRequiredRequestsV699 = 0;
+    reserve.analysisBoundaryBypassesForActiveCandidateV700 = 0;
   }
 
   /*
@@ -13125,6 +13154,132 @@ function erc20UpstreamHeadroomReserveDecisionV690(
     protectedLimit
   };
 }
+
+
+function erc20UpstreamAnalysisBoundaryAvailableV700(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  if (
+    phase !== "analysis" ||
+    !erc20UpstreamIdentityRequestV690(
+      budget,
+      phase,
+      type
+    )
+  ) {
+    return false;
+  }
+
+  const reserve =
+    budget?.analysis
+      ?.erc20UpstreamHeadroomReserveV690;
+
+  if (
+    reserve?.active !== true ||
+    safeNumber(reserve?.reservedRequests) <= 0
+  ) {
+    return false;
+  }
+
+  const notificationReserveRemaining =
+    budget?.notification
+      ?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(budget.notification?.limit) -
+          safeNumber(budget.notification?.used)
+        )
+      : 0;
+
+  const preTelegramGlobalLimit =
+    Math.max(
+      0,
+      safeNumber(budget?.totalLimit) -
+      notificationReserveRemaining
+    );
+
+  const globalStillAvailable =
+    safeNumber(budget?.totalUsed) +
+      Math.max(1, safeNumber(amount)) <=
+    preTelegramGlobalLimit;
+
+  const internalAnalysisWouldBlock =
+    safeNumber(budget?.analysis?.used) +
+      Math.max(1, safeNumber(amount)) >
+    effectiveAnalysisLimitV416(
+      budget
+    );
+
+  const usedByActiveCandidate =
+    Math.max(
+      0,
+      safeNumber(
+        reserve
+          ?.analysisBoundaryBypassesForActiveCandidateV700
+      )
+    );
+
+  const activeCandidateAllowance =
+    Math.max(
+      0,
+      Math.min(
+        5,
+        safeNumber(
+          reserve
+            ?.activeCandidateRequiredRequestsV699
+        )
+      )
+    );
+
+  return Boolean(
+    globalStillAvailable &&
+    internalAnalysisWouldBlock &&
+    activeCandidateAllowance > 0 &&
+    usedByActiveCandidate <
+      activeCandidateAllowance
+  );
+}
+
+function observeErc20UpstreamAnalysisBoundaryBypassV700(
+  budget,
+  type,
+  amount = 1
+) {
+  const reserve =
+    budget?.analysis
+      ?.erc20UpstreamHeadroomReserveV690;
+
+  if (!reserve) return;
+
+  const consumed =
+    Math.max(
+      1,
+      safeNumber(amount)
+    );
+
+  reserve.analysisBoundaryBypassesV700 =
+    safeNumber(
+      reserve.analysisBoundaryBypassesV700
+    ) + consumed;
+
+  reserve.analysisBoundaryBypassesForActiveCandidateV700 =
+    safeNumber(
+      reserve.analysisBoundaryBypassesForActiveCandidateV700
+    ) + consumed;
+
+  reserve.lastAnalysisBoundaryBypassAtV700 =
+    Date.now();
+
+  reserve.lastAnalysisBoundaryBypassTypeV700 =
+    String(type || "UNKNOWN");
+
+  reserve.analysisBoundaryRuleV700 =
+    "ACTIVE_V699_ERC20_IDENTITY_ONLY_PRE_TELEGRAM_GLOBAL_LIMIT_STILL_AUTHORITATIVE";
+}
+
 
 function observeErc20UpstreamProtectedConsumeV690(
   budget,
@@ -15130,6 +15285,18 @@ function consumeBudget(
         )
       : false;
 
+  const erc20AnalysisBoundaryAvailableV700 =
+    (
+      !normalFinalBudgetAvailableV677
+    )
+      ? erc20UpstreamAnalysisBoundaryAvailableV700(
+          budget,
+          phase,
+          type,
+          amount
+        )
+      : false;
+
   if (
     priorityHolderProRequestV666 &&
     holderLaneV666
@@ -15188,7 +15355,8 @@ function consumeBudget(
 
   if (
     !normalFinalBudgetAvailableV677 &&
-    !priorityHolderProFinalBudgetAvailableV677
+    !priorityHolderProFinalBudgetAvailableV677 &&
+    !erc20AnalysisBoundaryAvailableV700
   ) {
     if (
       priorityHolderProRequestV666 &&
@@ -15234,6 +15402,16 @@ function consumeBudget(
 
   budget.totalUsed +=
     amount;
+
+  if (
+    erc20AnalysisBoundaryAvailableV700
+  ) {
+    observeErc20UpstreamAnalysisBoundaryBypassV700(
+      budget,
+      type,
+      amount
+    );
+  }
 
   if (
     coinGeckoDemoSecondChancePriorityV674
@@ -136011,7 +136189,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
-    "<i>V699 converts the V690 upstream ERC20 protection from one slot into the bounded V655/V675 remaining identity sequence (max 5). Hard 42, Telegram reserve, ERC20 verification rules and all V687-V698 working behaviour remain unchanged.</i>"
+    "<i>V700 allows only the active V699-protected ERC20 identity sequence to cross the internal analysis ceiling while hard 42 and Telegram reserve stay absolute. V698 state retention and all V687-V699 working behaviour remain preserved.</i>"
   ].join("\n");
 }
 
