@@ -1,4 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V718
+ * AUTHORITATIVE RUNTIME VERSION: V718
+ *
+ * V718 VERIFIED-MARKET GOLDRUSH HOLDER RESCUE
+ * - builds directly from tested V717;
+ * - fixes the V717 live OZZY case where the token already met Opportunity,
+ *   Confidence, Risk, liquidity and signal gates but holder evidence remained
+ *   unavailable because it was neither the legacy priorityCompletion token nor
+ *   the currently active V714 qualification owner;
+ * - allows the existing ONE-request-per-scan V704 GoldRush holder fallback when
+ *   holder rows are still missing AND the candidate already has VERIFIED market
+ *   data with at least the existing $1000 Telegram liquidity minimum;
+ * - preserves public -> legacy -> Bitquery reuse -> Blockscout Pro ordering;
+ * - preserves GoldRush's existing credit guard and one-request-per-scan ceiling;
+ * - hard 42, notification reserve, scoring, market verification, holder standards,
+ *   risk requirements and Telegram thresholds remain unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V717
  * AUTHORITATIVE RUNTIME VERSION: V717
  *
@@ -6188,7 +6207,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V717";
+const VERSION = "V718";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -61478,6 +61497,19 @@ async function holderIntelligence(
         normalize(token)
     );
 
+  /*
+   * V718: a completion/retry candidate can already have enough verified market
+   * evidence to pass the Telegram market/liquidity gates while not owning either
+   * of the two older priority flags. In that exact case, missing holder rows are
+   * the only evidence class that the independent GoldRush source can complete.
+   * Keep this deliberately narrow: verified market + the existing liquidity gate.
+   * The V704 helper still enforces one GoldRush request per scan and its credit guard.
+   */
+  const goldRushVerifiedMarketRescueV718 =
+    market?.verified === true &&
+    safeNumber(market?.liquidityUsd) >=
+      MIN_ALERT_LIQUIDITY;
+
   if (
     (
       !holders ||
@@ -61487,7 +61519,8 @@ async function holderIntelligence(
     ) &&
     (
       priorityCompletion === true ||
-      goldRushActiveQualificationOwnerV717
+      goldRushActiveQualificationOwnerV717 ||
+      goldRushVerifiedMarketRescueV718
     ) &&
     String(
       env?.GOLDRUSH_API_KEY ||
