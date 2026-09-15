@@ -1,6 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V708
+ * AUTHORITATIVE RUNTIME VERSION: V708
+ *
+ * V708 DIRECT PROVEN-RPC V3 POOL IDENTITY DIAGNOSTIC
+ * - builds directly from V707;
+ * - keeps GoldRush swap/log behaviour unchanged;
+ * - fixes only token0/token1 resolution for /goldrush-swap-test;
+ * - when persisted verified metadata does not resolve the requested pool, performs
+ *   direct bounded eth_call reads using the bot's real Robinhood RPC provider order:
+ *   Validation Cloud -> Chainstack -> Robinhood public RPC -> Alchemy -> BlockReq;
+ * - does not use the scanner budget object and does not alter the hard 42 ceiling;
+ * - records each attempted provider/status without exposing API keys;
+ * - no scoring/Telegram/USD promotion and no KV/DO writes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V707
- * AUTHORITATIVE RUNTIME VERSION: V707
+ * HISTORICAL VERSION NOTE: V707
  *
  * V707 VERIFIED V3 POOL-METADATA REUSE FOR GOLDRUSH SWAP DIAGNOSTIC
  * - builds directly from V706;
@@ -5998,7 +6014,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V707";
+const VERSION = "V708";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -142598,7 +142614,252 @@ function goldRushSignedBigIntV706(
 }
 
 
-async function goldRushV3SwapDiagnosticV707(
+
+async function directDiagnosticEthCallV708(
+  env,
+  to,
+  data
+) {
+  const validationCloudUrl =
+    validationCloudRpcUrlV627(
+      env
+    );
+
+  const chainstackUrl =
+    chainstackRpcUrlV431(
+      env
+    );
+
+  const alchemyUrl =
+    String(
+      env?.ALCHEMY_API_KEY ||
+      ""
+    ).trim()
+      ? ALCHEMY_BASE +
+        String(
+          env.ALCHEMY_API_KEY
+        ).trim()
+      : null;
+
+  const blockreqUrl =
+    v421ReadRpcUrl(
+      env
+    );
+
+  const providers = [
+    {
+      name:
+        "VALIDATION_CLOUD",
+      url:
+        validationCloudUrl
+    },
+    {
+      name:
+        "CHAINSTACK",
+      url:
+        chainstackUrl
+    },
+    {
+      name:
+        "ROBINHOOD_PUBLIC_RPC",
+      url:
+        PUBLIC_RPC
+    },
+    {
+      name:
+        "ALCHEMY",
+      url:
+        alchemyUrl
+    },
+    {
+      name:
+        "BLOCKREQ_PUBLIC_V421",
+      url:
+        blockreqUrl
+    }
+  ]
+    .filter(
+      row =>
+        /^https?:\/\/.+/i.test(
+          String(
+            row?.url ||
+            ""
+          )
+        )
+    );
+
+  const attempts =
+    [];
+
+  for (
+    const provider
+    of providers
+  ) {
+    const startedAt =
+      Date.now();
+
+    let timer =
+      null;
+
+    try {
+      const controller =
+        new AbortController();
+
+      timer =
+        setTimeout(
+          () =>
+            controller.abort(),
+          6000
+        );
+
+      const response =
+        await fetch(
+          provider.url,
+          {
+            method:
+              "POST",
+            headers: {
+              "content-type":
+                "application/json"
+            },
+            body:
+              JSON.stringify({
+                jsonrpc:
+                  "2.0",
+                id:
+                  1,
+                method:
+                  "eth_call",
+                params: [
+                  {
+                    to,
+                    data
+                  },
+                  "latest"
+                ]
+              }),
+            signal:
+              controller.signal
+          }
+        );
+
+      let payload =
+        null;
+
+      try {
+        payload =
+          await response.json();
+      } catch {
+        payload =
+          null;
+      }
+
+      const result =
+        typeof payload?.result ===
+          "string"
+          ? payload.result
+          : null;
+
+      const decoded =
+        result
+          ? decodeEthCallAddressV326(
+              result
+            )
+          : null;
+
+      attempts.push({
+        provider:
+          provider.name,
+        httpStatus:
+          response.status,
+        httpOk:
+          response.ok,
+        rpcErrorCode:
+          payload?.error?.code ??
+          null,
+        rpcErrorMessage:
+          payload?.error?.message ??
+          null,
+        resultPresent:
+          Boolean(result),
+        decodedAddress:
+          decoded,
+        latencyMs:
+          Date.now() -
+          startedAt
+      });
+
+      if (
+        response.ok &&
+        isAddress(
+          decoded
+        )
+      ) {
+        return {
+          success:
+            true,
+          provider:
+            provider.name,
+          result,
+          decodedAddress:
+            normalize(
+              decoded
+            ),
+          attempts
+        };
+      }
+    }
+
+    catch (error) {
+      attempts.push({
+        provider:
+          provider.name,
+        httpStatus:
+          null,
+        httpOk:
+          false,
+        rpcErrorCode:
+          null,
+        rpcErrorMessage:
+          errorString(
+            error
+          ),
+        resultPresent:
+          false,
+        decodedAddress:
+          null,
+        latencyMs:
+          Date.now() -
+          startedAt
+      });
+    }
+
+    finally {
+      if (
+        timer
+      ) {
+        clearTimeout(
+          timer
+        );
+      }
+    }
+  }
+
+  return {
+    success:
+      false,
+    provider:
+      null,
+    result:
+      null,
+    decodedAddress:
+      null,
+    attempts
+  };
+}
+
+
+async function goldRushV3SwapDiagnosticV708(
   env,
   token,
   pool
@@ -142626,7 +142887,7 @@ async function goldRushV3SwapDiagnosticV707(
     version:
       VERSION,
     diagnostic:
-      "GOLDRUSH_ROBINHOOD_V3_SWAP_LOGS_V707",
+      "GOLDRUSH_ROBINHOOD_V3_SWAP_LOGS_V708",
     safe:
       true,
     diagnosticOnly:
@@ -142678,7 +142939,7 @@ async function goldRushV3SwapDiagnosticV707(
       success:
         false,
       status:
-        "INVALID_TOKEN_OR_POOL_V707"
+        "INVALID_TOKEN_OR_POOL_V708"
     };
   }
 
@@ -142688,7 +142949,7 @@ async function goldRushV3SwapDiagnosticV707(
       success:
         false,
       status:
-        "GOLDRUSH_API_KEY_NOT_CONFIGURED_V707"
+        "GOLDRUSH_API_KEY_NOT_CONFIGURED_V708"
     };
   }
 
@@ -142865,88 +143126,129 @@ async function goldRushV3SwapDiagnosticV707(
     }
   }
 
+  let directRpcIdentityV708 =
+    null;
+
   if (
     !metadataVerifiedV707
   ) {
-    const alchemyUrl =
-      v356AlchemyUrl(
-        env
+    const [
+      token0CallV708,
+      token1CallV708
+    ] =
+      await Promise.all([
+        directDiagnosticEthCallV708(
+          env,
+          poolAddress,
+          UNISWAP_V3_TOKEN0_SELECTOR_V326
+        ),
+        directDiagnosticEthCallV708(
+          env,
+          poolAddress,
+          UNISWAP_V3_TOKEN1_SELECTOR_V326
+        )
+      ]);
+
+    metadataRpcRequestsUsed =
+      (
+        Array.isArray(
+          token0CallV708
+            ?.attempts
+        )
+          ? token0CallV708
+              .attempts
+              .length
+          : 0
+      ) +
+      (
+        Array.isArray(
+          token1CallV708
+            ?.attempts
+        )
+          ? token1CallV708
+              .attempts
+              .length
+          : 0
       );
 
-    if (
-      alchemyUrl
-    ) {
-      const [
-        token0Call,
-        token1Call
-      ] =
-        await Promise.all([
-          v375EthCallRaw(
-            alchemyUrl,
-            poolAddress,
-            UNISWAP_V3_TOKEN0_SELECTOR_V326
-          ),
-          v375EthCallRaw(
-            alchemyUrl,
-            poolAddress,
-            UNISWAP_V3_TOKEN1_SELECTOR_V326
-          )
-        ]);
+    const rpcToken0V708 =
+      normalize(
+        token0CallV708
+          ?.decodedAddress ||
+        ""
+      );
 
-      metadataRpcRequestsUsed =
-        2;
+    const rpcToken1V708 =
+      normalize(
+        token1CallV708
+          ?.decodedAddress ||
+        ""
+      );
 
-      const rpcToken0V707 =
-        token0Call?.ok
-          ? decodeEthCallAddressV326(
-              token0Call.result
-            )
-          : null;
-
-      const rpcToken1V707 =
-        token1Call?.ok
-          ? decodeEthCallAddressV326(
-              token1Call.result
-            )
-          : null;
-
-      if (
+    directRpcIdentityV708 = {
+      token0Provider:
+        token0CallV708
+          ?.provider ||
+        null,
+      token1Provider:
+        token1CallV708
+          ?.provider ||
+        null,
+      token0:
         isAddress(
-          rpcToken0V707
-        ) &&
-        isAddress(
-          rpcToken1V707
-        ) &&
-        (
-          normalize(
-            rpcToken0V707
-          ) ===
-            address ||
-          normalize(
-            rpcToken1V707
-          ) ===
-            address
+          rpcToken0V708
         )
-      ) {
-        token0 =
-          normalize(
-            rpcToken0V707
-          );
-        token1 =
-          normalize(
-            rpcToken1V707
-          );
-        metadataSourceV707 =
-          "RPC_TOKEN0_TOKEN1_FALLBACK_V707";
-        metadataVerifiedV707 =
-          true;
-      } else {
-        metadataSourceV707 =
-          "RPC_TOKEN0_TOKEN1_UNRESOLVED_V707";
-      }
+          ? rpcToken0V708
+          : null,
+      token1:
+        isAddress(
+          rpcToken1V708
+        )
+          ? rpcToken1V708
+          : null,
+      token0Attempts:
+        Array.isArray(
+          token0CallV708
+            ?.attempts
+        )
+          ? token0CallV708
+              .attempts
+          : [],
+      token1Attempts:
+        Array.isArray(
+          token1CallV708
+            ?.attempts
+        )
+          ? token1CallV708
+              .attempts
+          : []
+    };
+
+    if (
+      isAddress(
+        rpcToken0V708
+      ) &&
+      isAddress(
+        rpcToken1V708
+      ) &&
+      (
+        rpcToken0V708 ===
+          address ||
+        rpcToken1V708 ===
+          address
+      )
+    ) {
+      token0 =
+        rpcToken0V708;
+      token1 =
+        rpcToken1V708;
+      metadataSourceV707 =
+        "DIRECT_PROVEN_RPC_TOKEN0_TOKEN1_V708";
+      metadataVerifiedV707 =
+        true;
     } else {
       metadataSourceV707 =
-        "NO_VERIFIED_PERSISTED_METADATA_AND_RPC_UNAVAILABLE_V707";
+        "DIRECT_PROVEN_RPC_TOKEN0_TOKEN1_UNRESOLVED_V708";
     }
   }
 
@@ -143033,6 +143335,7 @@ async function goldRushV3SwapDiagnosticV707(
         metadataVerifiedV707,
         basePairStatusV707,
         registryReadErrorV707,
+        directRpcIdentityV708,
         verified:
           candidateSide !==
             null &&
@@ -143044,7 +143347,7 @@ async function goldRushV3SwapDiagnosticV707(
       success:
         false,
       status:
-        "GOLDRUSH_SWAP_FETCH_FAILED_V707",
+        "GOLDRUSH_SWAP_FETCH_FAILED_V708",
       error:
         errorString(
           error
@@ -143331,6 +143634,7 @@ async function goldRushV3SwapDiagnosticV707(
       basePairStatusV707,
       registryReadErrorV707,
       metadataRpcRequestsUsed,
+      directRpcIdentityV708,
       verified:
         poolIdentityVerified
     },
@@ -143352,17 +143656,17 @@ async function goldRushV3SwapDiagnosticV707(
       response.ok &&
       !apiError &&
       swapDirectionVerified
-        ? "GOLDRUSH_V3_SWAP_DIRECTION_CONFIRMED_V707"
+        ? "GOLDRUSH_V3_SWAP_DIRECTION_CONFIRMED_V708"
         : response.ok &&
             !apiError &&
             decodedSwapLogs >
               0
-          ? "GOLDRUSH_SWAP_LOGS_FOUND_DIRECTION_NOT_CONFIRMED_V707"
+          ? "GOLDRUSH_SWAP_LOGS_FOUND_DIRECTION_NOT_CONFIRMED_V708"
           : response.ok &&
               !apiError
-            ? "GOLDRUSH_NO_V3_SWAP_LOGS_IN_RECENT_WINDOW_V707"
-            : "GOLDRUSH_SWAP_HTTP_ERROR_V707",
-    capabilityDecisionV707: {
+            ? "GOLDRUSH_NO_V3_SWAP_LOGS_IN_RECENT_WINDOW_V708"
+            : "GOLDRUSH_SWAP_HTTP_ERROR_V708",
+    capabilityDecisionV708: {
       decodedSwapLogsAvailable:
         decodedSwapLogs >
         0,
@@ -143531,7 +143835,7 @@ async function handleRequest(
       "/goldrush-swap-test"
   ) {
     return jsonResponse(
-      await goldRushV3SwapDiagnosticV707(
+      await goldRushV3SwapDiagnosticV708(
         env,
         url.searchParams.get("token") || "",
         url.searchParams.get("pool") || ""
