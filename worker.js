@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V722
+ * AUTHORITATIVE RUNTIME VERSION: V722
+ *
+ * V722 CLOUDFLARE PHYSICAL-SUBREQUEST CIRCUIT
+ * - builds directly from tested V721;
+ * - detects Cloudflare's invocation-level "Too many subrequests" transport failure;
+ * - opens one scan-wide physical-subrequest circuit immediately after that exact failure;
+ * - stops RPC provider fall-through and independent ERC20 read fallbacks once the
+ *   invocation is physically exhausted, preventing useless same-invocation retries;
+ * - future RPC calls in the same scan fail closed without consuming logical request
+ *   budget, preserving unfinished candidates for the existing retry/checkpoint paths;
+ * - exposes compact V722 circuit telemetry inside requestBudget;
+ * - hard 42, V720 live/backlog protection, V721 on-chain market rescue, provider
+ *   cooldowns, scoring, holder/risk standards and Telegram thresholds are unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V721
  * AUTHORITATIVE RUNTIME VERSION: V721
  *
@@ -6258,7 +6275,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V721";
+const VERSION = "V722";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12510,6 +12527,23 @@ function createBudget() {
     totalLimit:
       MAX_EXTERNAL_REQUESTS,
 
+    cloudflareSubrequestCircuitV722: {
+      enabled: true,
+      open: false,
+      openedAt: null,
+      reason: null,
+      triggeringMethod: null,
+      triggeringPhase: null,
+      triggeringProvider: null,
+      triggeringError: null,
+      providerFallbacksStopped: 0,
+      rpcCallsShortCircuited: 0,
+      erc20IndependentFallbacksSkipped: 0,
+      logicalRequestsAvoidedAfterOpen: 0,
+      hardRequestLimitChanged: false,
+      telegramThresholdsChanged: false
+    },
+
     rpcProviderHealthV423: {
       enabled: true,
       diagnosticOnly: true,
@@ -16827,6 +16861,9 @@ function budgetTelemetry(
 
     limit:
       budget.totalLimit,
+
+    cloudflareSubrequestCircuitV722:
+      budget?.cloudflareSubrequestCircuitV722 || null,
 
     rpcProviderHealthV423:
       rpcProviderHealthTelemetryV423(
@@ -32506,6 +32543,50 @@ function rpcProviderHealthTelemetryV423(
    RPC
    ========================================================= */
 
+function cloudflareSubrequestLimitErrorV722(error) {
+  const message = String(
+    errorString(error) || error || ""
+  ).toUpperCase();
+
+  return (
+    message.includes("TOO MANY SUBREQUESTS BY SINGLE WORKER INVOCATION") ||
+    (
+      message.includes("TOO MANY SUBREQUESTS") &&
+      message.includes("WORKER")
+    )
+  );
+}
+
+function cloudflareSubrequestCircuitV722(budget) {
+  return budget?.cloudflareSubrequestCircuitV722 || null;
+}
+
+function openCloudflareSubrequestCircuitV722(
+  budget,
+  { method = null, phase = null, provider = null, error = null } = {}
+) {
+  if (!cloudflareSubrequestLimitErrorV722(error)) return false;
+
+  const circuit = cloudflareSubrequestCircuitV722(budget);
+  if (!circuit?.enabled) return false;
+
+  if (circuit.open !== true) {
+    circuit.open = true;
+    circuit.openedAt = Date.now();
+    circuit.reason = "CLOUDFLARE_INVOCATION_SUBREQUEST_LIMIT_V722";
+    circuit.triggeringMethod = method || null;
+    circuit.triggeringPhase = phase || null;
+    circuit.triggeringProvider = provider || null;
+    circuit.triggeringError = String(error || "").slice(0, 500) || null;
+  }
+
+  return true;
+}
+
+function cloudflareSubrequestCircuitOpenV722(budget) {
+  return cloudflareSubrequestCircuitV722(budget)?.open === true;
+}
+
 async function rpcCall(
   url,
   method,
@@ -32513,6 +32594,17 @@ async function rpcCall(
   budget,
   phase
 ) {
+  if (cloudflareSubrequestCircuitOpenV722(budget)) {
+    const circuit = cloudflareSubrequestCircuitV722(budget);
+    circuit.rpcCallsShortCircuited =
+      safeNumber(circuit.rpcCallsShortCircuited) + 1;
+    circuit.logicalRequestsAvoidedAfterOpen =
+      safeNumber(circuit.logicalRequestsAvoidedAfterOpen) + 1;
+    throw new Error(
+      "CLOUDFLARE_SUBREQUEST_CIRCUIT_OPEN_V722"
+    );
+  }
+
   if (
     !consumeBudget(
       budget,
@@ -32717,6 +32809,16 @@ async function rpcCall(
     const messageV423 =
       errorString(error);
 
+    openCloudflareSubrequestCircuitV722(
+      budget,
+      {
+        method,
+        phase,
+        provider: providerV423,
+        error: messageV423
+      }
+    );
+
     const rootV423 =
       rpcHealthRootV423(
         budget
@@ -32786,6 +32888,19 @@ async function rpc(
   budget,
   phase
 ) {
+  if (cloudflareSubrequestCircuitOpenV722(budget)) {
+    const circuit = cloudflareSubrequestCircuitV722(budget);
+    circuit.rpcCallsShortCircuited =
+      safeNumber(circuit.rpcCallsShortCircuited) + 1;
+    circuit.logicalRequestsAvoidedAfterOpen =
+      safeNumber(circuit.logicalRequestsAvoidedAfterOpen) + 1;
+    return {
+      result: null,
+      provider: null,
+      error: "CLOUDFLARE_SUBREQUEST_CIRCUIT_OPEN_V722"
+    };
+  }
+
   const validationCloudUrl =
     validationCloudRpcUrlV627(env);
 
@@ -32911,6 +33026,13 @@ async function rpc(
       errors.push(
         `${provider.name}: ${message}`
       );
+
+      if (cloudflareSubrequestCircuitOpenV722(budget)) {
+        const circuit = cloudflareSubrequestCircuitV722(budget);
+        circuit.providerFallbacksStopped =
+          safeNumber(circuit.providerFallbacksStopped) + 1;
+        break;
+      }
 
       if (
         message.startsWith(
@@ -47778,6 +47900,29 @@ async function erc20ReadRpcV421(
   }
 
   const primaryError = primary?.error || null;
+
+  if (cloudflareSubrequestCircuitOpenV722(budget)) {
+    const circuit = cloudflareSubrequestCircuitV722(budget);
+    circuit.erc20IndependentFallbacksSkipped =
+      safeNumber(circuit.erc20IndependentFallbacksSkipped) + 1;
+    circuit.logicalRequestsAvoidedAfterOpen =
+      safeNumber(circuit.logicalRequestsAvoidedAfterOpen) + 1;
+
+    return {
+      ...primary,
+      error:
+        primaryError ||
+        "CLOUDFLARE_SUBREQUEST_CIRCUIT_OPEN_V722",
+      v421FallbackAttempted: false,
+      v421FallbackUsed: false,
+      v421PrimaryError: primaryError,
+      v421FallbackError:
+        "SKIPPED_CLOUDFLARE_SUBREQUEST_CIRCUIT_V722",
+      v650FallbackEligible: false,
+      v650EligibilityClass:
+        "SCAN_PHYSICAL_SUBREQUEST_LIMIT"
+    };
+  }
 
   const allNormal429V421 =
     normalAnalysisRpcsAll429V421(
