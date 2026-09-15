@@ -1,6 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V702
+ * AUTHORITATIVE RUNTIME VERSION: V702
+ *
+ * V702 GOLDRUSH HOLDER CAPABILITY DIAGNOSTIC
+ * - builds directly from confirmed V701;
+ * - adds one isolated GET route: /goldrush-test?token=0x...;
+ * - uses env.GOLDRUSH_API_KEY only and never returns/logs the secret;
+ * - makes at most ONE GoldRush/Covalent holder request per invocation;
+ * - tests Robinhood Chain with chain slug robinhood-mainnet;
+ * - does not touch live scanner scoring, Telegram, KV state, scheduler,
+ *   Durable Objects, qualification rules, or the hard 42 scanner budget;
+ * - returns only bounded holder capability diagnostics and a small sample.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V701
- * AUTHORITATIVE RUNTIME VERSION: V701
+ * HISTORICAL VERSION NOTE: V701
  *
  * V701 HOLDER-EVIDENCE FAIRNESS THROUGH V699 RESERVE
  * - builds directly forward from confirmed V700;
@@ -5901,7 +5916,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V701";
+const VERSION = "V702";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -141274,6 +141289,179 @@ async function v388MergeVerifiedPoolRegistry(env, token, observedPools) {
   };
 }
 
+
+async function goldRushHolderDiagnosticV702(
+  env,
+  token
+) {
+  const address = normalize(token || "");
+  const apiKey = String(env?.GOLDRUSH_API_KEY || "").trim();
+
+  const base = {
+    agent: "Robinhood Chain Meme Hunter",
+    version: VERSION,
+    diagnostic: "GOLDRUSH_ROBINHOOD_TOKEN_HOLDERS_V702",
+    safe: true,
+    diagnosticOnly: true,
+    scannerMutated: false,
+    scoringMutated: false,
+    telegramMutated: false,
+    stateMutated: false,
+    hardScannerRequestLimit: 42,
+    scannerRequestBudgetConsumed: false,
+    chain: "robinhood-mainnet",
+    chainId: 4663,
+    token: isAddress(address) ? address : null,
+    apiKeyConfigured: Boolean(apiKey),
+    externalRequestsUsed: 0,
+    timestamp: now()
+  };
+
+  if (!isAddress(address)) {
+    return {
+      ...base,
+      success: false,
+      status: "INVALID_TOKEN_V702"
+    };
+  }
+
+  if (!apiKey) {
+    return {
+      ...base,
+      success: false,
+      status: "GOLDRUSH_API_KEY_NOT_CONFIGURED_V702"
+    };
+  }
+
+  const endpoint =
+    `https://api.covalenthq.com/v1/robinhood-mainnet/tokens/${address}/token_holders_v2/` +
+    `?page-size=20&page-number=0`;
+
+  let response;
+  let rawText = "";
+
+  try {
+    response = await fetch(
+      endpoint,
+      {
+        method: "GET",
+        headers: {
+          "accept": "application/json",
+          "authorization": `Basic ${btoa(`${apiKey}:`)}`
+        }
+      }
+    );
+
+    rawText = await response.text();
+  } catch (error) {
+    return {
+      ...base,
+      externalRequestsUsed: 1,
+      success: false,
+      status: "GOLDRUSH_FETCH_FAILED_V702",
+      error: errorString(error)
+    };
+  }
+
+  let body = null;
+
+  try {
+    body = rawText ? JSON.parse(rawText) : null;
+  } catch {
+    body = null;
+  }
+
+  const data =
+    body?.data &&
+    typeof body.data === "object"
+      ? body.data
+      : null;
+
+  const items =
+    Array.isArray(data?.items)
+      ? data.items
+      : [];
+
+  const pagination =
+    data?.pagination &&
+    typeof data.pagination === "object"
+      ? data.pagination
+      : null;
+
+  const sample =
+    items.slice(0, 10).map(row => ({
+      address:
+        normalize(
+          row?.address ||
+          row?.holder_address ||
+          ""
+        ) || null,
+      balance: row?.balance ?? null,
+      balanceQuote: row?.balance_quote ?? null,
+      totalSupply: row?.total_supply ?? null,
+      contractDecimals: row?.contract_decimals ?? null,
+      contractTickerSymbol: row?.contract_ticker_symbol ?? null
+    }));
+
+  const apiError =
+    body?.error === true ||
+    (
+      body?.error_code !== undefined &&
+      body?.error_code !== null &&
+      body?.error_code !== 0
+    );
+
+  return {
+    ...base,
+    externalRequestsUsed: 1,
+    httpStatus: response.status,
+    httpOk: response.ok,
+    success:
+      response.ok &&
+      !apiError &&
+      items.length > 0,
+    status:
+      response.ok
+        ? (
+            items.length > 0
+              ? "GOLDRUSH_HOLDER_ROWS_RETURNED_V702"
+              : "GOLDRUSH_HTTP_OK_NO_HOLDER_ROWS_V702"
+          )
+        : "GOLDRUSH_HTTP_ERROR_V702",
+    goldRush: {
+      apiError,
+      error: body?.error ?? null,
+      errorCode: body?.error_code ?? null,
+      errorMessage:
+        body?.error_message ??
+        body?.message ??
+        null,
+      updatedAt: data?.updated_at ?? null,
+      chainId: data?.chain_id ?? null,
+      chainName: data?.chain_name ?? null,
+      itemsReturned: items.length,
+      pagination: pagination
+        ? {
+            hasMore: pagination?.has_more ?? null,
+            pageNumber: pagination?.page_number ?? null,
+            pageSize: pagination?.page_size ?? null,
+            totalCount: pagination?.total_count ?? null
+          }
+        : null,
+      sample
+    },
+    capabilityDecisionV702:
+      response.ok &&
+      !apiError &&
+      items.length > 0
+        ? "ROBINHOOD_TOKEN_HOLDER_ENDPOINT_CONFIRMED_WORKING"
+        : "ROBINHOOD_TOKEN_HOLDER_ENDPOINT_NOT_YET_CONFIRMED",
+    rawBodySuppressed: true,
+    apiKeySuppressed: true
+  };
+}
+
+
 async function handleRequest(
   request,
   env
@@ -141402,6 +141590,18 @@ async function handleRequest(
 
   if (path === "/usage" || path === "/durable-usage-v404") {
     return jsonResponse(await durableUsageSnapshotV404(env));
+  }
+
+  if (
+    path ===
+      "/goldrush-test"
+  ) {
+    return jsonResponse(
+      await goldRushHolderDiagnosticV702(
+        env,
+        url.searchParams.get("token") || ""
+      )
+    );
   }
 
   if (
