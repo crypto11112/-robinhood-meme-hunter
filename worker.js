@@ -1,4 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V723
+ * AUTHORITATIVE RUNTIME VERSION: V723
+ *
+ * V723 TWO-STAGE DURABLE QUALIFICATION FOLLOW-UP
+ * - builds directly from tested V722;
+ * - when Cloudflare's physical subrequest circuit opens with unfinished analysis,
+ *   arms a second Durable Object alarm invocation with a fresh subrequest allowance;
+ * - the follow-up invocation skips the expensive live eth_getLogs discovery pass and
+ *   suppresses backlog so persisted ERC20 / market / holder retry work gets first claim;
+ * - preserves all V722 fail-closed circuit behaviour and candidate checkpoints;
+ * - manual /scan also arms the same bounded follow-up when the first stage exhausts
+ *   Cloudflare physical subrequests;
+ * - hard 42 logical request ceiling, provider cooldowns, scoring, holder/risk standards,
+ *   V720 live qualification protection, V721 on-chain market rescue and Telegram
+ *   thresholds are unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V722
  * AUTHORITATIVE RUNTIME VERSION: V722
  *
@@ -6275,7 +6293,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V722";
+const VERSION = "V723";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -86878,6 +86896,9 @@ async function scan(
       options.scheduled
     );
 
+  const qualificationFollowUpV723 =
+    options?.qualificationFollowUpV723 === true;
+
   if (
     scheduled
   ) {
@@ -86947,14 +86968,21 @@ async function scan(
     );
 
   const liveScan =
-    await scanLiveRange(
-      env,
-      state,
-      live.from,
-      live.to,
-      budget,
-      liveOutput
-    );
+    qualificationFollowUpV723
+      ? {
+          success: true,
+          error: null,
+          processedThrough: null,
+          v723SkippedForQualificationFollowUp: true
+        }
+      : await scanLiveRange(
+          env,
+          state,
+          live.from,
+          live.to,
+          budget,
+          liveOutput
+        );
 
   const liveError =
     liveScan.success
@@ -86962,11 +86990,21 @@ async function scan(
       : liveScan.error;
 
   const liveDiscovery =
-    processDiscoveryLogs(
-      state,
-      liveOutput.logs,
-      "LIVE"
-    );
+    qualificationFollowUpV723
+      ? {
+          rawLogs: 0,
+          initializeEvents: 0,
+          swapTopicMatches: 0,
+          liquidityTopicMatches: 0,
+          newTokens: new Set(),
+          seenTokens: new Set(),
+          v723QualificationFollowUp: true
+        }
+      : processDiscoveryLogs(
+          state,
+          liveOutput.logs,
+          "LIVE"
+        );
 
   
   /*
@@ -87838,13 +87876,16 @@ for (
     currentLiveVerifiedLaunchCount:
       currentLiveVerifiedLaunchTokensV621.size,
     active:
+      qualificationFollowUpV723 ||
       currentLiveVerifiedLaunchTokensV621.size > 0,
     preAnalysisBacklogDeferred: false,
     postAnalysisBacklogSuppressed: false,
     reason:
-      currentLiveVerifiedLaunchTokensV621.size > 0
-        ? "CURRENT_LIVE_VERIFIED_LAUNCH_QUALIFICATION_PRIORITY_V720"
-        : "NO_CURRENT_LIVE_VERIFIED_LAUNCH_V720",
+      qualificationFollowUpV723
+        ? "V723_QUALIFICATION_FOLLOWUP_PRIORITY"
+        : currentLiveVerifiedLaunchTokensV621.size > 0
+          ? "CURRENT_LIVE_VERIFIED_LAUNCH_QUALIFICATION_PRIORITY_V720"
+          : "NO_CURRENT_LIVE_VERIFIED_LAUNCH_V720",
     hardRequestLimitUnchanged: true,
     telegramThresholdsUnchanged: true
   };
@@ -97442,6 +97483,17 @@ for (
     releasedSeededAutonomousProofV544,
 
     v720LiveQualificationProtection,
+
+    v723TwoStageQualification: {
+      enabled: true,
+      stage: qualificationFollowUpV723 ? "QUALIFICATION_FOLLOWUP" : "PRIMARY_SCAN",
+      qualificationFollowUp: qualificationFollowUpV723,
+      liveDiscoverySkipped: qualificationFollowUpV723,
+      backlogSuppressed: qualificationFollowUpV723,
+      freshInvocationSubrequestAllowance: qualificationFollowUpV723,
+      hardRequestLimitUnchanged: true,
+      telegramThresholdsUnchanged: true
+    },
 
     requestBudget:
       budgetTelemetry(
@@ -150891,6 +150943,8 @@ function compactManualScanResultV719(result) {
     requestBudget: result?.requestBudget || null,
     v720LiveQualificationProtection:
       result?.v720LiveQualificationProtection || null,
+    v723TwoStageQualification:
+      result?.v723TwoStageQualification || null,
     v721OnChainMarketRescue: result?.reservesLensLiquidityDiagnosticV441
       ? {
           attempted:
@@ -151069,6 +151123,29 @@ export class ScanSchedulerV673 {
         this.env,
         { scheduled: false }
       );
+
+      const followUpNeededV723 =
+        result?.requestBudget?.cloudflareSubrequestCircuitV722?.open === true &&
+        safeNumber(result?.scannerFunnelV415?.retryQueueAfterAnalysis) > 0;
+
+      if (followUpNeededV723) {
+        const followUpAtV723 = Date.now() + 1500;
+        await this.state.storage.put("v723:qualificationFollowup", {
+          pending: true,
+          armedAt: Date.now(),
+          source: "MANUAL_PRIMARY_SCAN",
+          retryQueueAfterAnalysis:
+            safeNumber(result?.scannerFunnelV415?.retryQueueAfterAnalysis)
+        });
+        await this.state.storage.setAlarm(followUpAtV723);
+        result.v723TwoStageQualification = {
+          ...(result.v723TwoStageQualification || {}),
+          followUpArmed: true,
+          followUpAt: followUpAtV723,
+          followUpReason: "CLOUDFLARE_SUBREQUEST_CIRCUIT_WITH_RETRY_QUEUE_V723"
+        };
+      }
+
       return jsonResponse(
         compactManualScanResultV719(result)
       );
@@ -151117,8 +151194,25 @@ export class ScanSchedulerV673 {
     let result = null;
     let failure = null;
 
+    const pendingFollowUpV723 =
+      await this.state.storage.get("v723:qualificationFollowup") ||
+      null;
+    const qualificationFollowUpV723 =
+      pendingFollowUpV723?.pending === true;
+
+    if (qualificationFollowUpV723) {
+      try {
+        await this.state.storage.delete("v723:qualificationFollowup");
+      } catch {}
+    }
+
     try {
-      result = await scheduledScan(this.env);
+      result = qualificationFollowUpV723
+        ? await scan(this.env, {
+            scheduled: true,
+            qualificationFollowUpV723: true
+          })
+        : await scheduledScan(this.env);
     } catch (error) {
       failure = errorString(error);
       console.error("V673_DURABLE_SCHEDULED_SCAN_ERROR", failure);
@@ -151126,10 +151220,28 @@ export class ScanSchedulerV673 {
 
     const completedAt = Date.now();
 
+    const followUpNeededV723 =
+      !qualificationFollowUpV723 &&
+      !failure &&
+      result?.requestBudget?.cloudflareSubrequestCircuitV722?.open === true &&
+      safeNumber(result?.scannerFunnelV415?.retryQueueAfterAnalysis) > 0;
+
     const nextAlarmAt =
-      nextAlignedScanBoundaryV684(
-        completedAt
-      );
+      followUpNeededV723
+        ? completedAt + 1500
+        : nextAlignedScanBoundaryV684(
+            completedAt
+          );
+
+    if (followUpNeededV723) {
+      await this.state.storage.put("v723:qualificationFollowup", {
+        pending: true,
+        armedAt: completedAt,
+        source: "SCHEDULED_PRIMARY_SCAN",
+        retryQueueAfterAnalysis:
+          safeNumber(result?.scannerFunnelV415?.retryQueueAfterAnalysis)
+      });
+    }
 
     const last = {
       ok: !failure,
@@ -151149,6 +151261,14 @@ export class ScanSchedulerV673 {
       qualifyingCandidates:
         result?.qualifyingCandidates ??
         null,
+      v723Stage:
+        qualificationFollowUpV723
+          ? "QUALIFICATION_FOLLOWUP"
+          : "PRIMARY_SCAN",
+      v723FollowUpArmed:
+        followUpNeededV723,
+      v723RetryQueueAfterAnalysis:
+        safeNumber(result?.scannerFunnelV415?.retryQueueAfterAnalysis),
       nextAlarmAt,
       nextAlarmAlignedV684:
         isAlignedScanBoundaryV684(
@@ -151164,9 +151284,10 @@ export class ScanSchedulerV673 {
       console.error("V673_SCHEDULER_STATUS_WRITE_FAILED", errorString(error));
     }
 
-    // Always re-arm to the next safe exact five-minute wall-clock boundary.
-    // We deliberately catch scan failures above so Cloudflare alarm retries
-    // cannot create duplicate scans.
+    // V723 may arm one immediate qualification follow-up after a physically exhausted
+    // primary scan; otherwise retain the exact five-minute wall-clock cadence.
+    // We deliberately catch scan failures above so Cloudflare alarm retries cannot
+    // create duplicate scans.
     await this.state.storage.setAlarm(nextAlarmAt);
 
     console.log(
