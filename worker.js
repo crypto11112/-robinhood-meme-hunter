@@ -1,6 +1,26 @@
 /**
+ * Robinhood Chain Meme Hunter — V701
+ * AUTHORITATIVE RUNTIME VERSION: V701
+ *
+ * V701 HOLDER-EVIDENCE FAIRNESS THROUGH V699 RESERVE
+ * - builds directly forward from confirmed V700;
+ * - fixes the V700 evidence-completion conflict where V699's five-request
+ *   ERC20 sequence reserve could block an already-claimed V666 holder request
+ *   for the CURRENT active candidate;
+ * - permits at most ONE same-token V666 holder request per scan to borrow only
+ *   the fifth/rescue slot from the V699 reserve;
+ * - preserves FOUR ERC20 identity slots after that borrow, so the normal
+ *   getCode + 3-of-4 minimum verification path remains protected;
+ * - never borrows while an ERC20 identity RPC is active;
+ * - hard 42, Telegram reserve, qualification thresholds and ERC20 verification
+ *   rules remain unchanged;
+ * - adds no provider calls and no new request allowance;
+ * - preserves V698 state retention and all V687-V700 working logic.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V700
- * AUTHORITATIVE RUNTIME VERSION: V700
+ * HISTORICAL VERSION NOTE: V700
  *
  * V700 ERC20 PROTECTED ANALYSIS-BOUNDARY COMPLETION
  * - builds directly forward from confirmed V699;
@@ -5881,7 +5901,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V700";
+const VERSION = "V701";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12184,6 +12204,13 @@ function createBudget() {
         lastAnalysisBoundaryBypassTypeV700: null,
         analysisBoundaryRuleV700:
           "ACTIVE_V699_ERC20_IDENTITY_ONLY_PRE_TELEGRAM_GLOBAL_LIMIT_STILL_AUTHORITATIVE",
+        holderEvidenceBorrowUsedV701: false,
+        holderEvidenceBorrowCountV701: 0,
+        holderEvidenceBorrowedRequestsV701: 0,
+        holderEvidenceBorrowAddressV701: null,
+        holderEvidenceBorrowAtV701: null,
+        holderEvidenceBorrowRuleV701:
+          "ONE_SAME_TOKEN_V666_HOLDER_ROW_MAY_USE_ONLY_V675_FIFTH_RESCUE_SLOT_KEEP_FOUR_IDENTITY_REQUESTS_PROTECTED",
         releasedAt: null,
         releaseReason: null,
         blockedRequests: 0,
@@ -12904,6 +12931,13 @@ function configureErc20UpstreamHeadroomReserveV690(
   reserve.lastAnalysisBoundaryBypassTypeV700 = null;
   reserve.analysisBoundaryRuleV700 =
     "ACTIVE_V699_ERC20_IDENTITY_ONLY_PRE_TELEGRAM_GLOBAL_LIMIT_STILL_AUTHORITATIVE";
+  reserve.holderEvidenceBorrowUsedV701 = false;
+  reserve.holderEvidenceBorrowCountV701 = 0;
+  reserve.holderEvidenceBorrowedRequestsV701 = 0;
+  reserve.holderEvidenceBorrowAddressV701 = null;
+  reserve.holderEvidenceBorrowAtV701 = null;
+  reserve.holderEvidenceBorrowRuleV701 =
+    "ONE_SAME_TOKEN_V666_HOLDER_ROW_MAY_USE_ONLY_V675_FIFTH_RESCUE_SLOT_KEEP_FOUR_IDENTITY_REQUESTS_PROTECTED";
   reserve.releasedAt = null;
   reserve.releaseReason = null;
   reserve.blockedRequests = 0;
@@ -13082,6 +13116,109 @@ function erc20UpstreamIdentityRequestV690(
   );
 }
 
+
+function sameTokenHolderMayBorrowV701(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  if (
+    phase !== "analysis" ||
+    type !== "BLOCKSCOUT_PRO_HOLDERS_V143"
+  ) {
+    return false;
+  }
+
+  const reserve =
+    budget?.analysis
+      ?.erc20UpstreamHeadroomReserveV690;
+
+  const lane =
+    budget?.analysis
+      ?.priorityHolderProCompletionV666;
+
+  const activeCandidate =
+    normalize(
+      reserve?.activeCandidateAddress
+    );
+
+  const activeIdentity =
+    normalize(
+      budget?.analysis
+        ?.freshVerifiedLaunchErc20ReserveV653
+        ?.activeIdentityAddressV654
+    );
+
+  /*
+   * V701 deliberately lends only the V675 rescue/fifth slot. Four requests
+   * remain protected for the standard getCode + three verified ERC20 methods
+   * path. This is ordering/fairness only; it never raises the request ceiling.
+   */
+  const leavesMinimumIdentityPathProtected =
+    safeNumber(reserve?.reservedRequests) -
+      Math.max(1, safeNumber(amount)) >= 4;
+
+  return Boolean(
+    reserve?.active === true &&
+    reserve?.holderEvidenceBorrowUsedV701 !== true &&
+    leavesMinimumIdentityPathProtected &&
+    isAddress(activeCandidate) &&
+    !activeIdentity &&
+    lane?.claimed === true &&
+    lane?.active === true &&
+    lane?.used !== true &&
+    normalize(lane?.address) === activeCandidate &&
+    safeNumber(
+      lane?.claimOrdinalV683
+    ) >= 1
+  );
+}
+
+function observeSameTokenHolderBorrowV701(
+  budget,
+  amount = 1
+) {
+  const reserve =
+    budget?.analysis
+      ?.erc20UpstreamHeadroomReserveV690;
+
+  if (!reserve) return;
+
+  const consumed =
+    Math.max(
+      1,
+      safeNumber(amount)
+    );
+
+  reserve.holderEvidenceBorrowUsedV701 = true;
+  reserve.holderEvidenceBorrowCountV701 =
+    safeNumber(
+      reserve.holderEvidenceBorrowCountV701
+    ) + 1;
+  reserve.holderEvidenceBorrowedRequestsV701 =
+    safeNumber(
+      reserve.holderEvidenceBorrowedRequestsV701
+    ) + consumed;
+  reserve.holderEvidenceBorrowAddressV701 =
+    normalize(
+      reserve.activeCandidateAddress
+    ) || null;
+  reserve.holderEvidenceBorrowAtV701 =
+    Date.now();
+
+  reserve.reservedRequests =
+    Math.max(
+      0,
+      safeNumber(reserve.reservedRequests) -
+      consumed
+    );
+
+  reserve.holderEvidenceBorrowRuleV701 =
+    "ONE_SAME_TOKEN_V666_HOLDER_ROW_MAY_USE_ONLY_V675_FIFTH_RESCUE_SLOT_KEEP_FOUR_IDENTITY_REQUESTS_PROTECTED";
+}
+
+
 function erc20UpstreamHeadroomReserveDecisionV690(
   budget,
   phase,
@@ -13146,10 +13283,24 @@ function erc20UpstreamHeadroomReserveDecisionV690(
       type
     );
 
+  const holderMayBorrowV701 =
+    sameTokenHolderMayBorrowV701(
+      budget,
+      phase,
+      type,
+      amount
+    );
+
   return {
-    block: !identityMayConsume,
+    block:
+      !identityMayConsume &&
+      !holderMayBorrowV701,
     identityMayConsume,
-    consumesProtectedSlot: identityMayConsume,
+    holderMayBorrowV701,
+    consumesProtectedSlot:
+      identityMayConsume,
+    consumesHolderBorrowSlotV701:
+      holderMayBorrowV701,
     preTelegramGlobalLimit,
     protectedLimit
   };
@@ -15613,6 +15764,16 @@ function consumeBudget(
       budget?.analysis
         ?.erc20UpstreamHeadroomReserveV690
         ?.activeCandidateAddress,
+      amount
+    );
+  }
+
+  if (
+    upstreamDecisionV690
+      ?.consumesHolderBorrowSlotV701 === true
+  ) {
+    observeSameTokenHolderBorrowV701(
+      budget,
       amount
     );
   }
@@ -136189,7 +136350,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
-    "<i>V700 allows only the active V699-protected ERC20 identity sequence to cross the internal analysis ceiling while hard 42 and Telegram reserve stay absolute. V698 state retention and all V687-V699 working behaviour remain preserved.</i>"
+    "<i>V701 lets one same-token protected V666 holder-row request borrow only the V675 fifth/rescue identity slot, while four ERC20 identity requests, hard 42 and Telegram reserve remain protected. All V687-V700 working behaviour is preserved.</i>"
   ].join("\n");
 }
 
