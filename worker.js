@@ -1,6 +1,30 @@
 /**
+ * Robinhood Chain Meme Hunter — V699
+ * AUTHORITATIVE RUNTIME VERSION: V699
+ *
+ * V699 ERC20 IDENTITY-SEQUENCE HEADROOM FIX
+ * - builds directly forward from confirmed V698;
+ * - fixes the V698 scan where V690's single upstream ERC20 slot was consumed
+ *   by an earlier identity read and a later required method still stranded at
+ *   the 40/42 pre-Telegram boundary with V418;
+ * - turns the existing V690 upstream reserve into a bounded dynamic sequence
+ *   reserve derived from freshVerifiedLaunchIdentityRequestsNeededV655();
+ * - protects up to the exact remaining V655/V675 ERC20 identity allowance
+ *   (maximum 5 requests), rather than one blind slot;
+ * - when protected capacity is actually consumed by the active token, the
+ *   reserve decrements one-for-one and remains active for the remaining
+ *   identity sequence;
+ * - when that candidate returns, the reserve rolls to the next pending fresh
+ *   verified launch using that token's own calculated remaining requirement;
+ * - hard 42, Telegram reserve, >=3-of-4 ERC20 verification rule, provider
+ *   fallbacks, scoring/qualification and every V687-V698 working component
+ *   remain unchanged;
+ * - no request ceiling is raised and no new provider is added.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V698
- * AUTHORITATIVE RUNTIME VERSION: V698
+ * HISTORICAL VERSION NOTE: V698
  *
  * V698 TARGETED ON-CHAIN DIRECTIONAL LEDGER RETENTION FIX
  * - builds directly forward from V697 after diagnostics proved that
@@ -5842,7 +5866,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V698";
+const VERSION = "V699";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12131,9 +12155,14 @@ function createBudget() {
         reservedRequests: 0,
         configuredAt: null,
         pendingAddresses: [],
+        pendingRequestsByAddressV699: {},
+        initialReservedRequestsV699: 0,
         activeCandidateAddress: null,
+        activeCandidateRequiredRequestsV699: 0,
         consumedByAddress: null,
         consumedAt: null,
+        consumedProtectedRequestsV699: 0,
+        protectedConsumeEventsV699: 0,
         releasedAt: null,
         releaseReason: null,
         blockedRequests: 0,
@@ -12142,8 +12171,10 @@ function createBudget() {
         lastBlockedAt: null,
         hardRequestLimitRaised: false,
         notificationReserveChanged: false,
+        sequenceReserveV699: true,
+        maxSequenceRequestsV699: 5,
         rule:
-          "ONE_PRE_TELEGRAM_GLOBAL_SLOT_PROTECTED_UNTIL_FRESH_ERC20_IDENTITY_CAN_USE_IT"
+          "DYNAMIC_V655_ERC20_IDENTITY_SEQUENCE_RESERVED_INSIDE_EXISTING_PRE_TELEGRAM_BUDGET_V699"
       },
 
       freshVerifiedLaunchErc20ReserveV653: {
@@ -12776,6 +12807,7 @@ function configureErc20UpstreamHeadroomReserveV690(
   if (reserve?.enabled !== true) return reserve || null;
 
   const pendingAddresses = [];
+  const pendingRequestsByAddressV699 = {};
   const seen = new Set();
 
   for (const watched of Array.isArray(queue) ? queue : []) {
@@ -12790,29 +12822,71 @@ function configureErc20UpstreamHeadroomReserveV690(
       continue;
     }
 
-    if (
-      freshVerifiedLaunchIdentityRequestsNeededV655(watched) <= 0
-    ) {
+    const requestsNeededV699 =
+      Math.max(
+        0,
+        Math.min(
+          5,
+          freshVerifiedLaunchIdentityRequestsNeededV655(
+            watched
+          )
+        )
+      );
+
+    if (requestsNeededV699 <= 0) {
       continue;
     }
 
     seen.add(address);
     pendingAddresses.push(address);
+    pendingRequestsByAddressV699[address] =
+      requestsNeededV699;
   }
+
+  /*
+   * V699: before any candidate starts, protect enough capacity for whichever
+   * pending fresh verified launch needs the largest bounded V655/V675 identity
+   * sequence. This does not add requests; it only prevents older priority
+   * bypasses from consuming those existing pre-Telegram slots first.
+   */
+  const initialReservedRequestsV699 =
+    pendingAddresses.reduce(
+      (maxNeeded, address) =>
+        Math.max(
+          maxNeeded,
+          safeNumber(
+            pendingRequestsByAddressV699[address]
+          )
+        ),
+      0
+    );
 
   reserve.configuredAt = Date.now();
   reserve.pendingAddresses = [...pendingAddresses];
+  reserve.pendingRequestsByAddressV699 = {
+    ...pendingRequestsByAddressV699
+  };
+  reserve.initialReservedRequestsV699 =
+    initialReservedRequestsV699;
   reserve.active = pendingAddresses.length > 0;
-  reserve.reservedRequests = reserve.active ? 1 : 0;
+  reserve.reservedRequests =
+    initialReservedRequestsV699;
   reserve.activeCandidateAddress = null;
+  reserve.activeCandidateRequiredRequestsV699 = 0;
   reserve.consumedByAddress = null;
   reserve.consumedAt = null;
+  reserve.consumedProtectedRequestsV699 = 0;
+  reserve.protectedConsumeEventsV699 = 0;
   reserve.releasedAt = null;
   reserve.releaseReason = null;
   reserve.blockedRequests = 0;
   reserve.blockedTypes = {};
   reserve.lastBlockedType = null;
   reserve.lastBlockedAt = null;
+  reserve.sequenceReserveV699 = true;
+  reserve.maxSequenceRequestsV699 = 5;
+  reserve.rule =
+    "DYNAMIC_V655_ERC20_IDENTITY_SEQUENCE_RESERVED_INSIDE_EXISTING_PRE_TELEGRAM_BUDGET_V699";
 
   return reserve;
 }
@@ -12827,7 +12901,6 @@ function setActiveErc20UpstreamCandidateV690(
 
   if (
     reserve?.enabled !== true ||
-    reserve?.active !== true ||
     !isAddress(token) ||
     !Array.isArray(reserve.pendingAddresses) ||
     !reserve.pendingAddresses.includes(token)
@@ -12835,7 +12908,49 @@ function setActiveErc20UpstreamCandidateV690(
     return false;
   }
 
+  const requiredV699 =
+    Math.max(
+      0,
+      Math.min(
+        5,
+        safeNumber(
+          reserve
+            ?.pendingRequestsByAddressV699
+            ?.[token]
+        )
+      )
+    );
+
+  if (requiredV699 <= 0) {
+    return false;
+  }
+
+  reserve.active = true;
   reserve.activeCandidateAddress = token;
+  reserve.activeCandidateRequiredRequestsV699 =
+    requiredV699;
+
+  /*
+   * The pre-candidate reservation used the maximum requirement among pending
+   * launches, so narrowing it to this token cannot create new pressure.
+   */
+  reserve.reservedRequests =
+    Math.min(
+      Math.max(
+        0,
+        safeNumber(reserve.reservedRequests)
+      ),
+      requiredV699
+    );
+
+  if (reserve.reservedRequests <= 0) {
+    reserve.reservedRequests =
+      requiredV699;
+  }
+
+  reserve.releaseReason =
+    "ACTIVE_FRESH_ERC20_IDENTITY_SEQUENCE_V699";
+
   return true;
 }
 
@@ -12859,24 +12974,46 @@ function releaseErc20UpstreamCandidateV690(
       );
   }
 
-  if (normalize(reserve.activeCandidateAddress) === token) {
-    reserve.activeCandidateAddress = null;
+  if (
+    reserve.pendingRequestsByAddressV699 &&
+    typeof reserve.pendingRequestsByAddressV699 === "object"
+  ) {
+    delete reserve.pendingRequestsByAddressV699[token];
   }
 
-  if (reserve.consumedAt) {
-    reserve.active = false;
-    reserve.reservedRequests = 0;
-    reserve.releasedAt = Date.now();
-    reserve.releaseReason =
-      "PROTECTED_SLOT_ALREADY_CONSUMED_V690";
-  } else if (
-    Array.isArray(reserve.pendingAddresses) &&
-    reserve.pendingAddresses.length > 0
-  ) {
+  if (normalize(reserve.activeCandidateAddress) === token) {
+    reserve.activeCandidateAddress = null;
+    reserve.activeCandidateRequiredRequestsV699 = 0;
+  }
+
+  /*
+   * V699: a protected consume by one token no longer disables the reserve for
+   * every later candidate. Roll forward to the largest bounded requirement
+   * still pending in this scan.
+   */
+  const nextReservedV699 =
+    Array.isArray(reserve.pendingAddresses)
+      ? reserve.pendingAddresses.reduce(
+          (maxNeeded, pendingAddress) =>
+            Math.max(
+              maxNeeded,
+              safeNumber(
+                reserve
+                  ?.pendingRequestsByAddressV699
+                  ?.[normalize(pendingAddress)]
+              )
+            ),
+          0
+        )
+      : 0;
+
+  if (nextReservedV699 > 0) {
     reserve.active = true;
-    reserve.reservedRequests = 1;
+    reserve.reservedRequests =
+      Math.min(5, nextReservedV699);
+    reserve.releasedAt = null;
     reserve.releaseReason =
-      "ROLLED_TO_NEXT_PENDING_FRESH_LAUNCH_V690";
+      "ROLLED_TO_NEXT_PENDING_FRESH_LAUNCH_SEQUENCE_V699";
   } else {
     reserve.active = false;
     reserve.reservedRequests = 0;
@@ -12991,7 +13128,8 @@ function erc20UpstreamHeadroomReserveDecisionV690(
 
 function observeErc20UpstreamProtectedConsumeV690(
   budget,
-  address
+  address,
+  amount = 1
 ) {
   const reserve =
     budget?.analysis?.erc20UpstreamHeadroomReserveV690;
@@ -12999,18 +13137,48 @@ function observeErc20UpstreamProtectedConsumeV690(
   if (reserve?.active !== true) return;
 
   const token = normalize(address);
+  const consumed =
+    Math.max(
+      1,
+      safeNumber(amount)
+    );
 
   reserve.consumedByAddress =
     isAddress(token)
       ? token
       : normalize(reserve.activeCandidateAddress) || null;
   reserve.consumedAt = Date.now();
-  reserve.active = false;
-  reserve.reservedRequests = 0;
-  reserve.releaseReason =
-    "CONSUMED_BY_FRESH_ERC20_IDENTITY_V690";
-}
+  reserve.consumedProtectedRequestsV699 =
+    safeNumber(
+      reserve.consumedProtectedRequestsV699
+    ) + consumed;
+  reserve.protectedConsumeEventsV699 =
+    safeNumber(
+      reserve.protectedConsumeEventsV699
+    ) + 1;
 
+  /*
+   * V699: consume only the protected slice actually used. Keep the remaining
+   * sequence reserved so a later symbol/decimals/totalSupply method cannot be
+   * stranded by unrelated priority work.
+   */
+  reserve.reservedRequests =
+    Math.max(
+      0,
+      safeNumber(reserve.reservedRequests) -
+        consumed
+    );
+
+  if (reserve.reservedRequests > 0) {
+    reserve.active = true;
+    reserve.releaseReason =
+      "PARTIAL_ERC20_SEQUENCE_PROTECTED_CONSUME_V699";
+  } else {
+    reserve.active = false;
+    reserve.releaseReason =
+      "ERC20_SEQUENCE_PROTECTED_CAPACITY_CONSUMED_V699";
+  }
+}
 
 function configureFreshVerifiedLaunchErc20ReserveV653(
   budget,
@@ -14279,8 +14447,9 @@ function consumeBudget(
   amount = 1
 ) {
   /*
-   * V690: one upstream slot is protected before older internal priority
-   * bypasses. Only the active fresh token's own ERC20 identity read may use it.
+   * V699: the V690 upstream lane now protects the bounded remaining ERC20
+   * identity sequence calculated by V655/V675 (max 5), rather than one slot.
+   * Only the active fresh token's own ERC20 identity reads may consume it.
    */
   const upstreamDecisionV690 =
     erc20UpstreamHeadroomReserveDecisionV690(
@@ -15265,7 +15434,8 @@ function consumeBudget(
         ?.activeIdentityAddressV654 ||
       budget?.analysis
         ?.erc20UpstreamHeadroomReserveV690
-        ?.activeCandidateAddress
+        ?.activeCandidateAddress,
+      amount
     );
   }
 
@@ -85686,16 +85856,25 @@ for (
           v690Erc20UpstreamHeadroomReserve?.enabled === true,
         active:
           v690Erc20UpstreamHeadroomReserve?.active === true,
+        sequenceReserveV699:
+          v690Erc20UpstreamHeadroomReserve?.sequenceReserveV699 === true,
+        initialReservedRequestsV699:
+          safeNumber(
+            v690Erc20UpstreamHeadroomReserve?.initialReservedRequestsV699
+          ),
         reservedRequests:
           safeNumber(
             v690Erc20UpstreamHeadroomReserve?.reservedRequests
           ),
+        pendingRequestsByAddressV699:
+          v690Erc20UpstreamHeadroomReserve?.pendingRequestsByAddressV699 || {},
         pendingAddresses:
           Array.isArray(
             v690Erc20UpstreamHeadroomReserve?.pendingAddresses
           )
             ? [...v690Erc20UpstreamHeadroomReserve.pendingAddresses]
             : [],
+        maxSequenceRequestsV699: 5,
         hardRequestLimitRaised: false,
         notificationReserveChanged: false
       }
@@ -135832,7 +136011,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
-    "<i>V698 caps the existing V179 observed directional ledger at 1,000 newest records per token and adds targeted /compact-directional-v698 cleanup. No completeness standard, scoring, hard 42, Telegram reserve or V687-V690 behaviour is loosened.</i>"
+    "<i>V699 converts the V690 upstream ERC20 protection from one slot into the bounded V655/V675 remaining identity sequence (max 5). Hard 42, Telegram reserve, ERC20 verification rules and all V687-V698 working behaviour remain unchanged.</i>"
   ].join("\n");
 }
 
