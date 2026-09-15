@@ -1,6 +1,24 @@
 /**
+ * Robinhood Chain Meme Hunter — V712
+ * AUTHORITATIVE RUNTIME VERSION: V712
+ *
+ * V712 DIAGNOSTIC-ONLY TELEGRAM QUALIFICATION TRACE
+ * - builds directly from confirmed V711;
+ * - adds zero-request, zero-write candidate qualification tracing;
+ * - captures exact scanner-budget snapshots at candidate analysis start,
+ *   after ERC-20 identity, after market evidence, after holder evidence and
+ *   after scoring;
+ * - exposes exact Telegram threshold values versus each candidate's values;
+ * - separates verified adverse token evidence from missing/unverified evidence;
+ * - classifies likely provider/cooldown, budget/headroom, or genuine-data
+ *   blockers conservatively and labels ambiguous attribution as UNRESOLVED;
+ * - does NOT change scoring, qualification, thresholds, provider order,
+ *   request ceilings, holder standards, market verification, or Telegram.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V711
- * AUTHORITATIVE RUNTIME VERSION: V711
+ * HISTORICAL VERSION NOTE: V711
  *
  * V711 GUARDED LIVE GOLDRUSH VERIFIED DIRECTIONAL-USD FALLBACK
  * - builds directly from confirmed V710;
@@ -6073,7 +6091,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V711";
+const VERSION = "V712";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -68615,6 +68633,388 @@ function returnedCandidateBlockerDiagnosticV436(
 }
 
 
+
+/* =========================================================
+   V712 TELEGRAM QUALIFICATION BREAKDOWN — DIAGNOSTIC ONLY
+   ========================================================= */
+
+function qualificationCauseV712(
+  candidate,
+  reason,
+  budget
+) {
+  const market =
+    candidate?.market || {};
+  const holders =
+    candidate?.holders || {};
+  const trace =
+    candidate?.qualificationTraceV712 || {};
+
+  const skipped =
+    Array.isArray(budget?.skipped)
+      ? budget.skipped
+      : [];
+
+  const candidateAddress =
+    normalize(candidate?.address);
+
+  const skippedForCandidate =
+    skipped.filter(row => {
+      const pending =
+        Array.isArray(row?.pendingAddresses)
+          ? row.pendingAddresses.map(normalize)
+          : [];
+      return (
+        normalize(row?.address) === candidateAddress ||
+        normalize(row?.token) === candidateAddress ||
+        pending.includes(candidateAddress)
+      );
+    });
+
+  const budgetBlocked =
+    skippedForCandidate.some(row =>
+      /RESERVED|HEADROOM|BUDGET|LIMIT/i.test(
+        String(row?.reason || "")
+      )
+    );
+
+  const providerCooldown =
+    Boolean(
+      market?.marketProviderAvailabilityV147?.dex?.eligible === false ||
+      market?.marketProviderAvailabilityV147?.gecko?.eligible === false ||
+      market?.alternativeMarketData?.cooldownUntil ||
+      market?.alternativeMarketData?.freshEligibleAt ||
+      holders?.blockscoutProHolderFallbackV143?.cooldownUntil ||
+      holders?.holderProviderCooldownRecoveryV439
+    );
+
+  const providerFailure =
+    Boolean(
+      (
+        holders?.blockscoutProHolderFallbackV143?.attempted === true &&
+        holders?.blockscoutProHolderFallbackV143?.success !== true
+      ) ||
+      /HTTP|OUTAGE|UNAVAILABLE|FETCH|ERROR|429|402|403|404|500/i.test(
+        String(
+          market?.status ||
+          market?.alternativeMarketData?.status ||
+          holders?.integrity?.status ||
+          holders?.blockscoutProHolderFallbackV143?.status ||
+          ""
+        )
+      )
+    );
+
+  if (
+    reason === "RISK_TOO_HIGH" ||
+    reason === "SAME_RUN_VERIFIED_HIGH_CONCENTRATION" ||
+    reason === "VERIFIED_BEARISH_SHORT_TERM_FLOW_V232"
+  ) {
+    return {
+      class: "GENUINE_VERIFIED_ADVERSE_EVIDENCE",
+      confidence: "HIGH",
+      budgetRelated: false
+    };
+  }
+
+  if (
+    reason === "LIQUIDITY_TOO_LOW_OR_UNVERIFIED" &&
+    market?.verified === true &&
+    safeNumber(market?.liquidityUsd) > 0
+  ) {
+    return {
+      class: "GENUINE_VERIFIED_TOKEN_DATA",
+      confidence: "HIGH",
+      budgetRelated: false
+    };
+  }
+
+  if (
+    reason === "MARKET_UNVERIFIED" ||
+    reason === "HOLDER_EVIDENCE_UNVERIFIED" ||
+    reason === "RISK_UNVERIFIED" ||
+    reason === "LIQUIDITY_TOO_LOW_OR_UNVERIFIED"
+  ) {
+    if (budgetBlocked) {
+      return {
+        class: "BUDGET_OR_HEADROOM_STARVATION",
+        confidence: "HIGH",
+        budgetRelated: true,
+        matchingSkippedRequests:
+          skippedForCandidate.slice(0, 8)
+      };
+    }
+
+    if (providerCooldown) {
+      return {
+        class: "PROVIDER_COOLDOWN_OR_SPACING",
+        confidence: "HIGH",
+        budgetRelated: false
+      };
+    }
+
+    if (providerFailure) {
+      return {
+        class: "PROVIDER_FAILURE_OR_OUTAGE",
+        confidence: "MEDIUM",
+        budgetRelated: false
+      };
+    }
+
+    const remainingAfterMarket =
+      safeNumber(
+        trace?.budgetAfterMarket?.remaining
+      );
+    const remainingAfterHolders =
+      safeNumber(
+        trace?.budgetAfterHolders?.remaining
+      );
+
+    if (
+      remainingAfterMarket <= 2 ||
+      remainingAfterHolders <= 2
+    ) {
+      return {
+        class: "POSSIBLE_GLOBAL_HEADROOM_PRESSURE",
+        confidence: "MEDIUM",
+        budgetRelated: true
+      };
+    }
+
+    return {
+      class: "EVIDENCE_UNVERIFIED_CAUSE_UNRESOLVED",
+      confidence: "LOW",
+      budgetRelated: false
+    };
+  }
+
+  if (
+    reason === "OPPORTUNITY_SCORE" ||
+    reason === "CONFIDENCE_SCORE" ||
+    reason === "INSUFFICIENT_SIGNALS"
+  ) {
+    const coreEvidenceMissing =
+      market?.verified !== true ||
+      holders?.integrity?.verified !== true ||
+      holders?.concentrationVerified !== true ||
+      holders?.whale?.verified !== true ||
+      candidate?.risk?.verified !== true;
+
+    return coreEvidenceMissing
+      ? {
+          class: "DOWNSTREAM_SCORE_AFFECTED_BY_INCOMPLETE_EVIDENCE",
+          confidence: "MEDIUM",
+          budgetRelated:
+            budgetBlocked
+        }
+      : {
+          class: "GENUINE_CURRENT_SCORE_OR_SIGNAL_RESULT",
+          confidence: "HIGH",
+          budgetRelated: false
+        };
+  }
+
+  return {
+    class: "OTHER_QUALIFICATION_BLOCKER",
+    confidence: "LOW",
+    budgetRelated: false
+  };
+}
+
+
+function qualificationBreakdownV712(
+  candidates,
+  budget
+) {
+  const rows = [];
+
+  for (
+    const candidate
+    of Array.isArray(candidates)
+      ? candidates
+      : []
+  ) {
+    const reasons =
+      telegramQualificationReasons(
+        candidate
+      );
+
+    const trace =
+      candidate?.qualificationTraceV712 ||
+      null;
+
+    const holders =
+      candidate?.holders || {};
+
+    const causes =
+      reasons.map(reason => ({
+        reason,
+        ...qualificationCauseV712(
+          candidate,
+          reason,
+          budget
+        )
+      }));
+
+    rows.push({
+      address:
+        normalize(candidate?.address),
+      symbol:
+        candidate?.symbol ||
+        candidate?.validation?.symbol ||
+        null,
+
+      qualifies:
+        reasons.length === 0,
+
+      thresholds: {
+        opportunityMinimum:
+          MIN_ALERT_SCORE,
+        confidenceMinimum:
+          MIN_CONFIDENCE_ALERT,
+        riskMaximum:
+          MAX_ALERT_RISK,
+        liquidityMinimumUsd:
+          MIN_ALERT_LIQUIDITY,
+        minimumSignals:
+          2
+      },
+
+      actual: {
+        opportunityScore:
+          safeNumber(
+            candidate?.opportunity?.score
+          ),
+        confidenceScore:
+          safeNumber(
+            candidate?.confidence?.score
+          ),
+        riskVerified:
+          candidate?.risk?.verified === true,
+        riskScore:
+          candidate?.risk?.verified === true
+            ? safeNumber(candidate?.risk?.score)
+            : null,
+        marketVerified:
+          candidate?.market?.verified === true,
+        marketStatus:
+          candidate?.market?.status ||
+          candidate?.market?.dexStatus ||
+          null,
+        liquidityUsd:
+          candidate?.market?.verified === true
+            ? safeNumber(
+                candidate?.market?.liquidityUsd
+              )
+            : null,
+        holderIntegrityVerified:
+          holders?.integrity?.verified === true,
+        holderConcentrationVerified:
+          holders?.concentrationVerified === true,
+        whaleVerified:
+          holders?.whale?.verified === true,
+        holderEvidenceFullyVerified:
+          holders?.integrity?.verified === true &&
+          holders?.concentrationVerified === true &&
+          holders?.whale?.verified === true,
+        signalCount:
+          safeNumber(
+            candidate?.signalConfirmation?.signals
+          )
+      },
+
+      telegramReasons:
+        reasons,
+
+      blockerAttribution:
+        causes,
+
+      budgetTrace:
+        trace,
+
+      exactRequestsRemaining: {
+        atAnalysisStart:
+          trace?.budgetAtAnalysisStart?.remaining ??
+          null,
+        afterErc20:
+          trace?.budgetAfterErc20?.remaining ??
+          null,
+        afterMarket:
+          trace?.budgetAfterMarket?.remaining ??
+          null,
+        afterHolders:
+          trace?.budgetAfterHolders?.remaining ??
+          null,
+        afterScoring:
+          trace?.budgetAfterScoring?.remaining ??
+          null
+      }
+    });
+  }
+
+  const allCauses =
+    rows.flatMap(row =>
+      row.blockerAttribution || []
+    );
+
+  const byClass = {};
+
+  for (const cause of allCauses) {
+    byClass[cause.class] =
+      safeNumber(
+        byClass[cause.class]
+      ) + 1;
+  }
+
+  return {
+    enabled: true,
+    diagnosticOnly: true,
+    sourceVersion: "V712",
+    evaluated:
+      rows.length,
+    qualifying:
+      rows.filter(row => row.qualifies).length,
+    blocked:
+      rows.filter(row => !row.qualifies).length,
+    blockerClasses:
+      byClass,
+    candidates:
+      rows.slice(0, 12),
+
+    endOfScanBudgetSnapshot:
+      requestBudgetSnapshotV264(
+        budget
+      ),
+
+    interpretation: {
+      exactPerCandidateBudgetSnapshots:
+        true,
+      providerVsBudgetAttribution:
+        "CONSERVATIVE_EVIDENCE_BASED_CLASSIFICATION",
+      ambiguousCasesRemain:
+        "UNRESOLVED",
+      noThresholdChange:
+        true
+    },
+
+    externalRequestsAdded:
+      0,
+    stateWritesAdded:
+      0,
+    scoringChanged:
+      false,
+    qualificationChanged:
+      false,
+    telegramThresholdChanged:
+      false,
+    providerOrderChanged:
+      false,
+    requestCeilingChanged:
+      false
+  };
+}
+
+
 /* =========================================================
    V216 VERIFIED PONS V2 CURVE FLOW
    ========================================================= */
@@ -78654,6 +79054,22 @@ async function analyzeToken(
       watched.address
     );
 
+  /*
+   * V712: exact read-only request-budget checkpoints for this candidate.
+   * These snapshots do not consume requests and do not affect scheduling.
+   */
+  const qualificationBudgetStartV712 =
+    requestBudgetSnapshotV264(
+      budget
+    );
+
+  let qualificationBudgetAfterErc20V712 =
+    null;
+  let qualificationBudgetAfterMarketV712 =
+    null;
+  let qualificationBudgetAfterHoldersV712 =
+    null;
+
   const previous =
     getHistoricalSnapshot(
       state,
@@ -78750,6 +79166,11 @@ async function analyzeToken(
         )
     };
   }
+
+  qualificationBudgetAfterErc20V712 =
+    requestBudgetSnapshotV264(
+      budget
+    );
 
   /*
    * V417 progressive checkpoint: once ERC-20 identity is verified, persist it
@@ -78923,6 +79344,11 @@ async function analyzeToken(
       onChainMarketFoundation;
   }
 
+  qualificationBudgetAfterMarketV712 =
+    requestBudgetSnapshotV264(
+      budget
+    );
+
   let holders =
     unverifiedHolders();
 
@@ -78966,6 +79392,11 @@ async function analyzeToken(
         address
       )
   };
+
+  qualificationBudgetAfterHoldersV712 =
+    requestBudgetSnapshotV264(
+      budget
+    );
 
   const whaleFlow =
     analyseWhaleFlow(
@@ -79176,7 +79607,41 @@ async function analyzeToken(
     liveDiscovery:
       Boolean(
         options?.liveDiscovery
-      )
+      ),
+
+    qualificationTraceV712: {
+      diagnosticOnly: true,
+      budgetAtAnalysisStart:
+        qualificationBudgetStartV712,
+      budgetAfterErc20:
+        qualificationBudgetAfterErc20V712,
+      budgetAfterMarket:
+        qualificationBudgetAfterMarketV712,
+      budgetAfterHolders:
+        qualificationBudgetAfterHoldersV712,
+      budgetAfterScoring:
+        requestBudgetSnapshotV264(
+          budget
+        ),
+      requestDelta: {
+        total:
+          safeNumber(
+            qualificationBudgetStartV712?.remaining
+          ) -
+          safeNumber(
+            requestBudgetSnapshotV264(budget)?.remaining
+          ),
+        analysis:
+          safeNumber(
+            requestBudgetSnapshotV264(budget)?.analysis?.used
+          ) -
+          safeNumber(
+            qualificationBudgetStartV712?.analysis?.used
+          )
+      },
+      externalRequestsAddedByDiagnostic:
+        0
+    }
   };
 
   candidate.signalConfirmation =
@@ -88079,6 +88544,21 @@ for (
       scoringChanged: false,
       qualificationChanged: false
     },
+
+    qualificationBreakdownV712: {
+      enabled: true,
+      diagnosticOnly: true,
+      perCandidateBudgetCheckpoints: true,
+      exactThresholdVsActualValues: true,
+      providerVsBudgetClassification: true,
+      ambiguousAttributionRemainsUnresolved: true,
+      externalRequestsAdded: 0,
+      stateWritesAdded: 0,
+      scoringChanged: false,
+      qualificationChanged: false,
+      telegramThresholdChanged: false,
+      requestCeilingChanged: false
+    },
     chainstackLiveDiscoveryV435: {
       enabled: true,
       preferredProvider: "CHAINSTACK",
@@ -93572,6 +94052,12 @@ for (
       candidates
     );
 
+  const qualificationBreakdownResultV712 =
+    qualificationBreakdownV712(
+      candidates,
+      budget
+    );
+
   /*
    * V564: read-only rolling exact-pool USD snapshot BEFORE Telegram.
    * This intentionally uses only evidence already persisted before the alert.
@@ -95882,6 +96368,9 @@ for (
 
     returnedCandidateBlockerDiagnosticV436:
       candidateBlockersV436,
+
+    qualificationBreakdownV712:
+      qualificationBreakdownResultV712,
 
     historicalPoolKeyRecoveryV443:
       historicalPoolKeyRecoveryResultV443,
@@ -98938,6 +99427,9 @@ for (
 
     returnedCandidateBlockerDiagnosticV436:
       candidateBlockersV436,
+
+    qualificationBreakdownV712:
+      qualificationBreakdownResultV712,
 
     holderCountCompletionV256: {
       ...holderCountCompletionV256,
