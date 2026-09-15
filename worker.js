@@ -1,6 +1,18 @@
 /**
+ * Robinhood Chain Meme Hunter — V703
+ * AUTHORITATIVE RUNTIME VERSION: V703
+ *
+ * V703 GOLDRUSH HOLDER PAGE-SIZE FIX
+ * - builds directly from V702 diagnostic;
+ * - changes only the GoldRush holder diagnostic page size from 20 to 100;
+ * - preserves diagnostic-only isolation and one external request per invocation;
+ * - does not alter scanner logic, scoring, Telegram, state, scheduler, provider
+ *   cooldowns, qualification rules, or the hard 42 scanner budget.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V702
- * AUTHORITATIVE RUNTIME VERSION: V702
+ * HISTORICAL VERSION NOTE: V702
  *
  * V702 GOLDRUSH HOLDER CAPABILITY DIAGNOSTIC
  * - builds directly from confirmed V701;
@@ -5916,7 +5928,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V702";
+const VERSION = "V703";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -141300,7 +141312,7 @@ async function goldRushHolderDiagnosticV702(
   const base = {
     agent: "Robinhood Chain Meme Hunter",
     version: VERSION,
-    diagnostic: "GOLDRUSH_ROBINHOOD_TOKEN_HOLDERS_V702",
+    diagnostic: "GOLDRUSH_ROBINHOOD_TOKEN_HOLDERS_V703",
     safe: true,
     diagnosticOnly: true,
     scannerMutated: false,
@@ -141321,7 +141333,7 @@ async function goldRushHolderDiagnosticV702(
     return {
       ...base,
       success: false,
-      status: "INVALID_TOKEN_V702"
+      status: "INVALID_TOKEN_V703"
     };
   }
 
@@ -141329,13 +141341,13 @@ async function goldRushHolderDiagnosticV702(
     return {
       ...base,
       success: false,
-      status: "GOLDRUSH_API_KEY_NOT_CONFIGURED_V702"
+      status: "GOLDRUSH_API_KEY_NOT_CONFIGURED_V703"
     };
   }
 
   const endpoint =
     `https://api.covalenthq.com/v1/robinhood-mainnet/tokens/${address}/token_holders_v2/` +
-    `?page-size=20&page-number=0`;
+    `?page-size=100&page-number=0`;
 
   let response;
   let rawText = "";
@@ -141358,7 +141370,7 @@ async function goldRushHolderDiagnosticV702(
       ...base,
       externalRequestsUsed: 1,
       success: false,
-      status: "GOLDRUSH_FETCH_FAILED_V702",
+      status: "GOLDRUSH_FETCH_FAILED_V703",
       error: errorString(error)
     };
   }
@@ -141424,10 +141436,10 @@ async function goldRushHolderDiagnosticV702(
       response.ok
         ? (
             items.length > 0
-              ? "GOLDRUSH_HOLDER_ROWS_RETURNED_V702"
-              : "GOLDRUSH_HTTP_OK_NO_HOLDER_ROWS_V702"
+              ? "GOLDRUSH_HOLDER_ROWS_RETURNED_V703"
+              : "GOLDRUSH_HTTP_OK_NO_HOLDER_ROWS_V703"
           )
-        : "GOLDRUSH_HTTP_ERROR_V702",
+        : "GOLDRUSH_HTTP_ERROR_V703",
     goldRush: {
       apiError,
       error: body?.error ?? null,
@@ -141450,7 +141462,7 @@ async function goldRushHolderDiagnosticV702(
         : null,
       sample
     },
-    capabilityDecisionV702:
+    capabilityDecisionV703:
       response.ok &&
       !apiError &&
       items.length > 0
