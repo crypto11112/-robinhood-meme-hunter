@@ -1,6 +1,28 @@
 /**
+ * Robinhood Chain Meme Hunter — V713
+ * AUTHORITATIVE RUNTIME VERSION: V713
+ *
+ * V713 DYNAMIC PROTECTED QUALIFICATION RESERVE
+ * - builds directly from confirmed V712 evidence;
+ * - fixes the V712-proven case where a current/live verified launch could reach
+ *   analysis with enough room to finish ERC-20 identity but too little room to
+ *   verify market/holders/risk before Telegram;
+ * - extends the existing V690/V699 protected lane by THREE bounded qualification
+ *   requests for the ACTIVE current/live verified-launch candidate only;
+ * - those three requests may be used dynamically by existing market or holder
+ *   verification routes and are released if unused;
+ * - ERC-20 identity protection remains separate and keeps the existing V655/
+ *   V675 dynamic requirement and >=3-of-4 verification rule;
+ * - provider cooldowns, spacing, outage guards and the GoldRush credit guard
+ *   remain authoritative; V713 guarantees capacity, not provider success;
+ * - genuine adverse evidence remains a rejection;
+ * - hard 42, notification reserve, scoring, qualification, holder standards,
+ *   market verification and Telegram thresholds are unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V712
- * AUTHORITATIVE RUNTIME VERSION: V712
+ * HISTORICAL VERSION NOTE: V712
  *
  * V712 DIAGNOSTIC-ONLY TELEGRAM QUALIFICATION TRACE
  * - builds directly from confirmed V711;
@@ -6091,7 +6113,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V712";
+const VERSION = "V713";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12401,6 +12423,21 @@ function createBudget() {
         holderEvidenceBorrowAtV701: null,
         holderEvidenceBorrowRuleV701:
           "ONE_SAME_TOKEN_V666_HOLDER_ROW_MAY_USE_ONLY_V675_FIFTH_RESCUE_SLOT_KEEP_FOUR_IDENTITY_REQUESTS_PROTECTED",
+
+        qualificationReserveV713: {
+          enabled: true,
+          maxRequestsPerActiveCandidate: 3,
+          reservedRequests: 0,
+          consumedRequests: 0,
+          consumedTypes: {},
+          bypassedInternalAnalysisBoundary: 0,
+          lastConsumedType: null,
+          lastConsumedAt: null,
+          activeAddress: null,
+          rule:
+            "ACTIVE_CURRENT_LIVE_VERIFIED_LAUNCH_MARKET_HOLDER_EVIDENCE_ONLY_INSIDE_EXISTING_PRE_TELEGRAM_BUDGET"
+        },
+
         releasedAt: null,
         releaseReason: null,
         blockedRequests: 0,
@@ -13082,11 +13119,17 @@ function configureErc20UpstreamHeadroomReserveV690(
   }
 
   /*
-   * V699: before any candidate starts, protect enough capacity for whichever
+   * V713: before any candidate starts, protect enough capacity for whichever
    * pending fresh verified launch needs the largest bounded V655/V675 identity
-   * sequence. This does not add requests; it only prevents older priority
-   * bypasses from consuming those existing pre-Telegram slots first.
+   * sequence PLUS three existing-budget qualification requests. This does not
+   * add requests; it only prevents earlier/lower-priority work from consuming
+   * those pre-Telegram slots first.
    */
+  const qualificationRequestsPerCandidateV713 =
+    pendingAddresses.length > 0
+      ? 3
+      : 0;
+
   const initialReservedRequestsV699 =
     pendingAddresses.reduce(
       (maxNeeded, address) =>
@@ -13094,7 +13137,8 @@ function configureErc20UpstreamHeadroomReserveV690(
           maxNeeded,
           safeNumber(
             pendingRequestsByAddressV699[address]
-          )
+          ) +
+          qualificationRequestsPerCandidateV713
         ),
       0
     );
@@ -13128,6 +13172,25 @@ function configureErc20UpstreamHeadroomReserveV690(
   reserve.holderEvidenceBorrowAtV701 = null;
   reserve.holderEvidenceBorrowRuleV701 =
     "ONE_SAME_TOKEN_V666_HOLDER_ROW_MAY_USE_ONLY_V675_FIFTH_RESCUE_SLOT_KEEP_FOUR_IDENTITY_REQUESTS_PROTECTED";
+
+  reserve.qualificationReserveV713 =
+    reserve.qualificationReserveV713 &&
+    typeof reserve.qualificationReserveV713 === "object"
+      ? reserve.qualificationReserveV713
+      : {};
+
+  reserve.qualificationReserveV713.enabled = true;
+  reserve.qualificationReserveV713.maxRequestsPerActiveCandidate = 3;
+  reserve.qualificationReserveV713.reservedRequests = 0;
+  reserve.qualificationReserveV713.consumedRequests = 0;
+  reserve.qualificationReserveV713.consumedTypes = {};
+  reserve.qualificationReserveV713.bypassedInternalAnalysisBoundary = 0;
+  reserve.qualificationReserveV713.lastConsumedType = null;
+  reserve.qualificationReserveV713.lastConsumedAt = null;
+  reserve.qualificationReserveV713.activeAddress = null;
+  reserve.qualificationReserveV713.rule =
+    "ACTIVE_CURRENT_LIVE_VERIFIED_LAUNCH_MARKET_HOLDER_EVIDENCE_ONLY_INSIDE_EXISTING_PRE_TELEGRAM_BUDGET";
+
   reserve.releasedAt = null;
   reserve.releaseReason = null;
   reserve.blockedRequests = 0;
@@ -13136,8 +13199,9 @@ function configureErc20UpstreamHeadroomReserveV690(
   reserve.lastBlockedAt = null;
   reserve.sequenceReserveV699 = true;
   reserve.maxSequenceRequestsV699 = 5;
+  reserve.qualificationRequestsPerCandidateV713 = 3;
   reserve.rule =
-    "DYNAMIC_V655_ERC20_IDENTITY_SEQUENCE_RESERVED_INSIDE_EXISTING_PRE_TELEGRAM_BUDGET_V699";
+    "DYNAMIC_V655_ERC20_IDENTITY_PLUS_V713_QUALIFICATION_RESERVED_INSIDE_EXISTING_PRE_TELEGRAM_BUDGET";
 
   return reserve;
 }
@@ -13182,26 +13246,43 @@ function setActiveErc20UpstreamCandidateV690(
     requiredV699;
   reserve.analysisBoundaryBypassesForActiveCandidateV700 = 0;
 
-  /*
-   * The pre-candidate reservation used the maximum requirement among pending
-   * launches, so narrowing it to this token cannot create new pressure.
-   */
-  reserve.reservedRequests =
-    Math.min(
-      Math.max(
-        0,
-        safeNumber(reserve.reservedRequests)
-      ),
-      requiredV699
+  const qualificationReserveV713 =
+    reserve.qualificationReserveV713 &&
+    typeof reserve.qualificationReserveV713 === "object"
+      ? reserve.qualificationReserveV713
+      : (reserve.qualificationReserveV713 = {});
+
+  const qualificationRequiredV713 =
+    Math.max(
+      0,
+      Math.min(
+        3,
+        safeNumber(
+          qualificationReserveV713
+            ?.maxRequestsPerActiveCandidate
+        ) || 3
+      )
     );
 
-  if (reserve.reservedRequests <= 0) {
-    reserve.reservedRequests =
-      requiredV699;
-  }
+  qualificationReserveV713.enabled = true;
+  qualificationReserveV713.reservedRequests =
+    qualificationRequiredV713;
+  qualificationReserveV713.consumedRequests = 0;
+  qualificationReserveV713.consumedTypes = {};
+  qualificationReserveV713.bypassedInternalAnalysisBoundary = 0;
+  qualificationReserveV713.lastConsumedType = null;
+  qualificationReserveV713.lastConsumedAt = null;
+  qualificationReserveV713.activeAddress = token;
+
+  const activeRequiredV713 =
+    requiredV699 +
+    qualificationRequiredV713;
+
+  reserve.reservedRequests =
+    activeRequiredV713;
 
   reserve.releaseReason =
-    "ACTIVE_FRESH_ERC20_IDENTITY_SEQUENCE_V699";
+    "ACTIVE_FRESH_ERC20_IDENTITY_PLUS_QUALIFICATION_V713";
 
   return true;
 }
@@ -13244,7 +13325,15 @@ function releaseErc20UpstreamCandidateV690(
    * every later candidate. Roll forward to the largest bounded requirement
    * still pending in this scan.
    */
-  const nextReservedV699 =
+  if (
+    reserve.qualificationReserveV713 &&
+    typeof reserve.qualificationReserveV713 === "object"
+  ) {
+    reserve.qualificationReserveV713.reservedRequests = 0;
+    reserve.qualificationReserveV713.activeAddress = null;
+  }
+
+  const nextIdentityReservedV699 =
     Array.isArray(reserve.pendingAddresses)
       ? reserve.pendingAddresses.reduce(
           (maxNeeded, pendingAddress) =>
@@ -13260,10 +13349,15 @@ function releaseErc20UpstreamCandidateV690(
         )
       : 0;
 
+  const nextReservedV699 =
+    nextIdentityReservedV699 > 0
+      ? nextIdentityReservedV699 + 3
+      : 0;
+
   if (nextReservedV699 > 0) {
     reserve.active = true;
     reserve.reservedRequests =
-      Math.min(5, nextReservedV699);
+      Math.min(8, nextReservedV699);
     reserve.releasedAt = null;
     reserve.releaseReason =
       "ROLLED_TO_NEXT_PENDING_FRESH_LAUNCH_SEQUENCE_V699";
@@ -13409,6 +13503,189 @@ function observeSameTokenHolderBorrowV701(
 }
 
 
+
+function activeQualificationRequestV713(
+  budget,
+  phase,
+  type
+) {
+  if (phase !== "analysis") return false;
+
+  const reserve =
+    budget?.analysis
+      ?.erc20UpstreamHeadroomReserveV690;
+
+  const q =
+    reserve?.qualificationReserveV713;
+
+  if (
+    reserve?.active !== true ||
+    q?.enabled !== true ||
+    safeNumber(q?.reservedRequests) <= 0 ||
+    !isAddress(
+      normalize(reserve?.activeCandidateAddress)
+    ) ||
+    normalize(q?.activeAddress) !==
+      normalize(reserve?.activeCandidateAddress)
+  ) {
+    return false;
+  }
+
+  const key =
+    String(type || "");
+
+  return Boolean(
+    key === "DEXSCREENER" ||
+    key === "DEXSCREENER_TOKEN_FALLBACK" ||
+    key === "GECKOTERMINAL_FALLBACK" ||
+    key === "COINGECKO_DEMO_FALLBACK_V660" ||
+    key === "BLOCKSCOUT" ||
+    key === "BLOCKSCOUT_LEGACY_HOLDERS" ||
+    key === "BLOCKSCOUT_PRO_HOLDERS_V143" ||
+    key === "BLOCKSCOUT_PRO_TOKEN_COUNTERS_V247" ||
+    key === "BLOCKSCOUT_PRO_HOLDER_COUNT_COMPLETION_V256" ||
+    key === "GOLDRUSH_HOLDERS_V704"
+  );
+}
+
+function qualificationAnalysisBoundaryAvailableV713(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  if (
+    !activeQualificationRequestV713(
+      budget,
+      phase,
+      type
+    )
+  ) {
+    return false;
+  }
+
+  const q =
+    budget?.analysis
+      ?.erc20UpstreamHeadroomReserveV690
+      ?.qualificationReserveV713;
+
+  const needed =
+    Math.max(
+      1,
+      safeNumber(amount)
+    );
+
+  if (
+    safeNumber(q?.reservedRequests) <
+    needed
+  ) {
+    return false;
+  }
+
+  const notificationReserveRemaining =
+    budget?.notification
+      ?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(
+            budget.notification?.limit
+          ) -
+          safeNumber(
+            budget.notification?.used
+          )
+        )
+      : 0;
+
+  const preTelegramGlobalLimit =
+    Math.max(
+      0,
+      safeNumber(budget?.totalLimit) -
+      notificationReserveRemaining
+    );
+
+  return Boolean(
+    safeNumber(budget?.totalUsed) +
+      needed <=
+      preTelegramGlobalLimit &&
+    safeNumber(budget?.analysis?.used) +
+      needed >
+      effectiveAnalysisLimitV416(
+        budget
+      )
+  );
+}
+
+function observeQualificationProtectedConsumeV713(
+  budget,
+  type,
+  amount = 1,
+  boundaryBypass = false
+) {
+  const reserve =
+    budget?.analysis
+      ?.erc20UpstreamHeadroomReserveV690;
+
+  const q =
+    reserve?.qualificationReserveV713;
+
+  if (!q) return;
+
+  const consumed =
+    Math.max(
+      1,
+      safeNumber(amount)
+    );
+
+  q.reservedRequests =
+    Math.max(
+      0,
+      safeNumber(q.reservedRequests) -
+      consumed
+    );
+
+  q.consumedRequests =
+    safeNumber(q.consumedRequests) +
+    consumed;
+
+  q.consumedTypes =
+    q.consumedTypes &&
+    typeof q.consumedTypes === "object"
+      ? q.consumedTypes
+      : {};
+
+  const key =
+    String(type || "UNKNOWN");
+
+  q.consumedTypes[key] =
+    safeNumber(
+      q.consumedTypes[key]
+    ) + consumed;
+
+  q.lastConsumedType = key;
+  q.lastConsumedAt = Date.now();
+
+  if (boundaryBypass) {
+    q.bypassedInternalAnalysisBoundary =
+      safeNumber(
+        q.bypassedInternalAnalysisBoundary
+      ) + consumed;
+  }
+
+  reserve.reservedRequests =
+    Math.max(
+      0,
+      safeNumber(reserve.reservedRequests) -
+      consumed
+    );
+
+  if (reserve.reservedRequests <= 0) {
+    reserve.active = false;
+    reserve.releaseReason =
+      "V713_ACTIVE_PROTECTED_CAPACITY_CONSUMED";
+  }
+}
+
+
 function erc20UpstreamHeadroomReserveDecisionV690(
   budget,
   phase,
@@ -13481,16 +13758,36 @@ function erc20UpstreamHeadroomReserveDecisionV690(
       amount
     );
 
+  const qualificationMayConsumeV713 =
+    activeQualificationRequestV713(
+      budget,
+      phase,
+      type
+    ) &&
+    safeNumber(
+      reserve
+        ?.qualificationReserveV713
+        ?.reservedRequests
+    ) >=
+      Math.max(
+        1,
+        safeNumber(amount)
+      );
+
   return {
     block:
       !identityMayConsume &&
-      !holderMayBorrowV701,
+      !holderMayBorrowV701 &&
+      !qualificationMayConsumeV713,
     identityMayConsume,
     holderMayBorrowV701,
+    qualificationMayConsumeV713,
     consumesProtectedSlot:
       identityMayConsume,
     consumesHolderBorrowSlotV701:
       holderMayBorrowV701,
+    consumesQualificationSlotV713:
+      qualificationMayConsumeV713,
     preTelegramGlobalLimit,
     protectedLimit
   };
@@ -15036,10 +15333,16 @@ function consumeBudget(
       type
     );
 
+  const qualificationPriorityV713 =
+    upstreamDecisionV690
+      ?.qualificationMayConsumeV713 ===
+      true;
+
   if (
     !priorityHolderProRequestV666 &&
     !holderProCounterContinuationV680 &&
     !coinGeckoDemoSecondChancePriorityV674 &&
+    !qualificationPriorityV713 &&
     freshVerifiedLaunchErc20ReserveBlocksV653(
       budget,
       phase,
@@ -15087,6 +15390,7 @@ function consumeBudget(
     !holderProCounterContinuationV680 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
     !coinGeckoDemoSecondChancePriorityV674 &&
+    !qualificationPriorityV713 &&
     currentLiveEvidenceFairnessReserveBlocksV676(
       budget,
       phase,
@@ -15143,6 +15447,7 @@ function consumeBudget(
     !holderProCounterContinuationV680 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
     !coinGeckoDemoSecondChancePriorityV674 &&
+    !qualificationPriorityV713 &&
     phase==="analysis" &&
     openfairHistoricalRecoveryReserveBlocksAnalysisV537(budget,type,amount)
   ){
@@ -15193,6 +15498,7 @@ function consumeBudget(
     !holderProCounterContinuationV680 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
     !coinGeckoDemoSecondChancePriorityV674 &&
+    !qualificationPriorityV713 &&
     phase === "analysis" &&
     directionalWatchReserveV553?.active === true &&
     type !== protectedDirectionalWatchTypeV553
@@ -15331,6 +15637,7 @@ function consumeBudget(
     !holderProCounterContinuationV680 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
     !coinGeckoDemoSecondChancePriorityV674 &&
+    !qualificationPriorityV713 &&
     phase === "analysis" &&
     completeExactPoolReserveV459?.active === true &&
     type !== protectedV458TimestampTypeV459 &&
@@ -15416,6 +15723,7 @@ function consumeBudget(
     !holderProCounterContinuationV680 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
     !coinGeckoDemoSecondChancePriorityV674 &&
+    !qualificationPriorityV713 &&
     phase ===
       "analysis" &&
     usdGReserveV182
@@ -15508,6 +15816,7 @@ function consumeBudget(
     !holderProCounterContinuationV680 &&
     !freshVerifiedLaunchIdentityRequestV654 &&
     !coinGeckoDemoSecondChancePriorityV674 &&
+    !qualificationPriorityV713 &&
     phase === "analysis" &&
     athFairSlotReserveBlocksAnalysisV301(budget, type, amount)
   ) {
@@ -15638,6 +15947,18 @@ function consumeBudget(
         )
       : false;
 
+  const qualificationBoundaryAvailableV713 =
+    (
+      !normalFinalBudgetAvailableV677
+    )
+      ? qualificationAnalysisBoundaryAvailableV713(
+          budget,
+          phase,
+          type,
+          amount
+        )
+      : false;
+
   if (
     priorityHolderProRequestV666 &&
     holderLaneV666
@@ -15697,7 +16018,8 @@ function consumeBudget(
   if (
     !normalFinalBudgetAvailableV677 &&
     !priorityHolderProFinalBudgetAvailableV677 &&
-    !erc20AnalysisBoundaryAvailableV700
+    !erc20AnalysisBoundaryAvailableV700 &&
+    !qualificationBoundaryAvailableV713
   ) {
     if (
       priorityHolderProRequestV666 &&
@@ -15965,6 +16287,18 @@ function consumeBudget(
     observeSameTokenHolderBorrowV701(
       budget,
       amount
+    );
+  }
+
+  if (
+    upstreamDecisionV690
+      ?.consumesQualificationSlotV713 === true
+  ) {
+    observeQualificationProtectedConsumeV713(
+      budget,
+      type,
+      amount,
+      qualificationBoundaryAvailableV713
     );
   }
 
@@ -88543,6 +88877,21 @@ for (
       retryCadenceChanged: false,
       scoringChanged: false,
       qualificationChanged: false
+    },
+
+    dynamicQualificationReserveV713: {
+      enabled: true,
+      maxRequestsPerActiveCandidate: 3,
+      activeCurrentLiveVerifiedLaunchOnly: true,
+      protectsMarketAndHolderEvidence: true,
+      erc20IdentityReservePreserved: true,
+      providerCooldownsPreserved: true,
+      hardRequestLimitChanged: false,
+      analysisBaseLimitChanged: false,
+      notificationReserveChanged: false,
+      scoringChanged: false,
+      qualificationChanged: false,
+      telegramThresholdChanged: false
     },
 
     qualificationBreakdownV712: {
