@@ -1,6 +1,23 @@
 /**
+ * Robinhood Chain Meme Hunter — V705
+ * AUTHORITATIVE RUNTIME VERSION: V705
+ *
+ * V705 GOLDRUSH MARKET/USD CAPABILITY DIAGNOSTIC
+ * - builds directly from confirmed V704;
+ * - leaves the live scanner and V704 holder fallback unchanged;
+ * - adds one isolated GET route: /goldrush-market-test?token=0x...;
+ * - makes at most TWO manual GoldRush requests: one USD pricing request and
+ *   one recent-transaction request for the token contract;
+ * - uses the documented Robinhood chain slug robinhood-mainnet;
+ * - does not write KV/DO state, does not touch Telegram/scoring, and does not
+ *   consume the live scanner's hard 42-request budget;
+ * - exposes bounded response-shape evidence only so market/USD usefulness can
+ *   be proven before any live integration.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V704
- * AUTHORITATIVE RUNTIME VERSION: V704
+ * HISTORICAL VERSION NOTE: V704
  *
  * V704 GOLDRUSH LIVE HOLDER FALLBACK
  * - builds directly from confirmed V703;
@@ -5948,7 +5965,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V704";
+const VERSION = "V705";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -142058,6 +142075,440 @@ async function goldRushHolderDiagnosticV702(
 }
 
 
+
+async function goldRushMarketUsdDiagnosticV705(
+  env,
+  token
+) {
+  const address =
+    normalize(
+      token || ""
+    );
+
+  const apiKey =
+    String(
+      env?.GOLDRUSH_API_KEY ||
+      ""
+    ).trim();
+
+  const base = {
+    agent:
+      "Robinhood Chain Meme Hunter",
+    version:
+      VERSION,
+    diagnostic:
+      "GOLDRUSH_ROBINHOOD_MARKET_USD_V705",
+    safe:
+      true,
+    diagnosticOnly:
+      true,
+    scannerMutated:
+      false,
+    scoringMutated:
+      false,
+    telegramMutated:
+      false,
+    stateMutated:
+      false,
+    hardScannerRequestLimit:
+      42,
+    scannerRequestBudgetConsumed:
+      false,
+    chain:
+      "robinhood-mainnet",
+    chainId:
+      4663,
+    token:
+      isAddress(address)
+        ? address
+        : null,
+    apiKeyConfigured:
+      Boolean(apiKey),
+    maxExternalRequests:
+      2,
+    externalRequestsUsed:
+      0,
+    timestamp:
+      now()
+  };
+
+  if (!isAddress(address)) {
+    return {
+      ...base,
+      success:
+        false,
+      status:
+        "INVALID_TOKEN_V705"
+    };
+  }
+
+  if (!apiKey) {
+    return {
+      ...base,
+      success:
+        false,
+      status:
+        "GOLDRUSH_API_KEY_NOT_CONFIGURED_V705"
+    };
+  }
+
+  const authHeaders = {
+    accept:
+      "application/json",
+    authorization:
+      `Bearer ${apiKey}`
+  };
+
+  /*
+   * 1) GoldRush documented historical token price endpoint.
+   * We request USD only and a very small current date window.
+   * This is capability testing, not live scanner evidence.
+   */
+  const today =
+    new Date()
+      .toISOString()
+      .slice(
+        0,
+        10
+      );
+
+  const priceUrl =
+    `https://api.covalenthq.com/v1/pricing/historical_by_addresses_v2/` +
+    `robinhood-mainnet/USD/${address}/?from=${today}&to=${today}`;
+
+  /*
+   * 2) GoldRush documented recent-transactions endpoint.
+   * The token contract itself is used as the address. We request no decoded
+   * logs here first to keep the response bounded; if this proves useful,
+   * a later diagnostic can target a verified pool and include logs.
+   */
+  const txUrl =
+    `https://api.covalenthq.com/v1/robinhood-mainnet/address/${address}/transactions_v3/` +
+    `?no-logs=true&quote-currency=USD`;
+
+  async function fetchJsonV705(url) {
+    try {
+      const response =
+        await fetch(
+          url,
+          {
+            method:
+              "GET",
+            headers:
+              authHeaders
+          }
+        );
+
+      const raw =
+        await response.text();
+
+      let body =
+        null;
+
+      try {
+        body =
+          raw
+            ? JSON.parse(
+                raw
+              )
+            : null;
+      } catch {
+        body =
+          null;
+      }
+
+      return {
+        ok:
+          response.ok,
+        status:
+          response.status,
+        body
+      };
+    } catch (error) {
+      return {
+        ok:
+          false,
+        status:
+          null,
+        body:
+          null,
+        error:
+          errorString(
+            error
+          )
+      };
+    }
+  }
+
+  const priceResponse =
+    await fetchJsonV705(
+      priceUrl
+    );
+
+  const txResponse =
+    await fetchJsonV705(
+      txUrl
+    );
+
+  const priceBody =
+    priceResponse?.body;
+
+  const priceData =
+    priceBody?.data;
+
+  const priceItems =
+    Array.isArray(
+      priceData
+    )
+      ? priceData
+      : Array.isArray(
+          priceData?.items
+        )
+        ? priceData.items
+        : [];
+
+  /*
+   * Pricing endpoint responses can be grouped by token with nested prices.
+   * Keep only a tiny sanitized preview so we can inspect the exact shape.
+   */
+  const pricePreview =
+    priceItems
+      .slice(
+        0,
+        3
+      )
+      .map(
+        item => ({
+          contractAddress:
+            normalize(
+              item?.contract_address ||
+              item?.contractAddress ||
+              ""
+            ) ||
+            null,
+          contractName:
+            item?.contract_name ??
+            null,
+          contractTickerSymbol:
+            item?.contract_ticker_symbol ??
+            null,
+          quoteCurrency:
+            item?.quote_currency ??
+            item?.quoteCurrency ??
+            null,
+          prices:
+            Array.isArray(
+              item?.prices
+            )
+              ? item.prices
+                  .slice(
+                    0,
+                    3
+                  )
+                  .map(
+                    p => ({
+                      date:
+                        p?.date ??
+                        null,
+                      price:
+                        p?.price ??
+                        null,
+                      prettyPrice:
+                        p?.pretty_price ??
+                        null
+                    })
+                  )
+              : [],
+          directPrice:
+            item?.price ??
+            null
+        })
+      );
+
+  const txData =
+    txResponse
+      ?.body
+      ?.data;
+
+  const txItems =
+    Array.isArray(
+      txData?.items
+    )
+      ? txData.items
+      : [];
+
+  const txPreview =
+    txItems
+      .slice(
+        0,
+        5
+      )
+      .map(
+        tx => ({
+          txHash:
+            tx?.tx_hash ??
+            null,
+          blockSignedAt:
+            tx?.block_signed_at ??
+            null,
+          from:
+            normalize(
+              tx?.from_address ||
+              ""
+            ) ||
+            null,
+          to:
+            normalize(
+              tx?.to_address ||
+              ""
+            ) ||
+            null,
+          value:
+            tx?.value ??
+            null,
+          valueQuote:
+            tx?.value_quote ??
+            null,
+          gasQuote:
+            tx?.gas_quote ??
+            null,
+          successful:
+            tx?.successful ??
+            null,
+          logEventsReturned:
+            Array.isArray(
+              tx?.log_events
+            )
+              ? tx.log_events.length
+              : null
+        })
+      );
+
+  const priceApiError =
+    priceBody?.error === true ||
+    (
+      priceBody?.error_code !==
+        undefined &&
+      priceBody?.error_code !==
+        null &&
+      priceBody?.error_code !==
+        0
+    );
+
+  const txBody =
+    txResponse?.body;
+
+  const txApiError =
+    txBody?.error === true ||
+    (
+      txBody?.error_code !==
+        undefined &&
+      txBody?.error_code !==
+        null &&
+      txBody?.error_code !==
+        0
+    );
+
+  const priceUseful =
+    priceResponse?.ok === true &&
+    !priceApiError &&
+    priceItems.length > 0;
+
+  const txUseful =
+    txResponse?.ok === true &&
+    !txApiError &&
+    txItems.length > 0;
+
+  return {
+    ...base,
+    externalRequestsUsed:
+      2,
+    success:
+      priceUseful ||
+      txUseful,
+    status:
+      priceUseful &&
+      txUseful
+        ? "GOLDRUSH_PRICE_AND_RECENT_TX_DATA_RETURNED_V705"
+        : priceUseful
+          ? "GOLDRUSH_PRICE_DATA_RETURNED_V705"
+          : txUseful
+            ? "GOLDRUSH_RECENT_TX_DATA_RETURNED_V705"
+            : "GOLDRUSH_MARKET_USD_NOT_YET_CONFIRMED_V705",
+    pricing: {
+      attempted:
+        true,
+      httpStatus:
+        priceResponse?.status ??
+        null,
+      httpOk:
+        priceResponse?.ok ===
+        true,
+      apiError:
+        priceApiError,
+      errorCode:
+        priceBody?.error_code ??
+        null,
+      errorMessage:
+        priceBody?.error_message ??
+        priceBody?.message ??
+        priceResponse?.error ??
+        null,
+      itemsReturned:
+        priceItems.length,
+      preview:
+        pricePreview,
+      capability:
+        priceUseful
+          ? "USD_TOKEN_PRICE_DATA_AVAILABLE"
+          : "USD_TOKEN_PRICE_DATA_NOT_CONFIRMED"
+    },
+    recentTransactions: {
+      attempted:
+        true,
+      httpStatus:
+        txResponse?.status ??
+        null,
+      httpOk:
+        txResponse?.ok ===
+        true,
+      apiError:
+        txApiError,
+      errorCode:
+        txBody?.error_code ??
+        null,
+      errorMessage:
+        txBody?.error_message ??
+        txBody?.message ??
+        txResponse?.error ??
+        null,
+      itemsReturned:
+        txItems.length,
+      preview:
+        txPreview,
+      capability:
+        txUseful
+          ? "RECENT_TRANSACTION_DATA_AVAILABLE"
+          : "RECENT_TRANSACTION_DATA_NOT_CONFIRMED"
+    },
+    nextDecisionV705: {
+      pricingCanPotentiallyHelpMarketUsd:
+        priceUseful,
+      transactionEndpointCanPotentiallyHelpActivity:
+        txUseful,
+      directionalBuySellUsdVerified:
+        false,
+      note:
+        "This diagnostic does not classify buys/sells or promote any evidence into the live scanner."
+    },
+    apiKeySuppressed:
+      true,
+    rawBodiesSuppressed:
+      true
+  };
+}
+
+
 async function handleRequest(
   request,
   env
@@ -142186,6 +142637,18 @@ async function handleRequest(
 
   if (path === "/usage" || path === "/durable-usage-v404") {
     return jsonResponse(await durableUsageSnapshotV404(env));
+  }
+
+  if (
+    path ===
+      "/goldrush-market-test"
+  ) {
+    return jsonResponse(
+      await goldRushMarketUsdDiagnosticV705(
+        env,
+        url.searchParams.get("token") || ""
+      )
+    );
   }
 
   if (
