@@ -1,6 +1,15 @@
 /**
- * Robinhood Chain Meme Hunter — V734
- * AUTHORITATIVE RUNTIME VERSION: V734
+ * Robinhood Chain Meme Hunter — V735
+ * AUTHORITATIVE RUNTIME VERSION: V735
+ *
+ * V735 VERIFIED MARKET-PROVENANCE HANDOFF FIX
+ * - Builds directly forward from V734.
+ * - Fixes the deterministic V732 bridge failure proven by V734 diagnostics: verified GeckoTerminal/CoinGecko Demo market rows can be served later from CACHE/STALE_CACHE_* with market.source rewritten, making the exact pool bridge reject genuine provider evidence as V732_PROVIDER_MARKET_NOT_ELIGIBLE.
+ * - Preserves the original verified Gecko/CoinGecko provider source in providerSourceV735 when market evidence is cached/reused.
+ * - V732 exact-pool bridge may use that preserved provenance only when market.verified=true; all existing exact PoolId, base/quote address, candidate-side and on-chain PoolKey currency checks remain mandatory.
+ * - Does NOT expand knownQuote(), does NOT trust symbols, does NOT promote arbitrary counter-tokens to USD, and does NOT loosen V254 exact-USD rules.
+ * - Adds zero provider/RPC requests, zero new request slots, no scoring/Momentum/Confidence/Risk/qualification/Telegram-threshold changes, and keeps the hard global request limit at 42.
+ * - /datacoverage starts a clean forward-only V735 sample while retaining older V733/V734 rows as legacy evidence.
  *
  * V734 /DATACOVERAGE HOTFIX
  * - Builds directly from V733.
@@ -6441,7 +6450,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V734";
+const VERSION = "V735";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -47431,12 +47440,39 @@ function geckoCompatibleMarketSourceV732(source) {
   );
 }
 
+function bridgeProviderSourceV735(market) {
+  if (market?.verified !== true) {
+    return "";
+  }
+
+  const candidates = [
+    market?.providerSourceV735,
+    market?.source
+  ];
+
+  for (const value of candidates) {
+    if (
+      geckoCompatibleMarketSourceV732(
+        value
+      )
+    ) {
+      return String(value || "");
+    }
+  }
+
+  return "";
+}
+
 function exactGeckoProviderPoolIdentityV732(
   watched,
   market
 ) {
   const token = normalize(watched?.address);
-  const source = String(market?.source || "");
+  const source =
+    bridgeProviderSourceV735(
+      market
+    ) ||
+    String(market?.source || "");
 
   if (
     !isAddress(token) ||
@@ -47726,6 +47762,11 @@ function poolBridgeDiagnosticV733(
     persistedBridgeReusable: persisted?.verified === true,
     marketVerified: market?.verified === true,
     marketSource: market?.source || null,
+    marketProviderSourceV735:
+      bridgeProviderSourceV735(
+        market
+      ) ||
+      null,
     marketPairAddress: pairAddress || null,
     pairAddressIsPoolId: /^0x[a-f0-9]{64}$/.test(String(pairAddress || "")),
     providerBaseTokenAddress: baseTokenAddress || null,
@@ -49680,8 +49721,17 @@ function cachedMarket(
     return null;
   }
 
+  const providerSourceV735 =
+    bridgeProviderSourceV735(
+      cache.data
+    );
+
   return {
     ...cache.data,
+
+    providerSourceV735:
+      providerSourceV735 ||
+      null,
 
     cached:
       true,
@@ -49714,6 +49764,12 @@ function saveMarketCache(
 
     data: {
       ...data,
+
+      providerSourceV735:
+        bridgeProviderSourceV735(
+          data
+        ) ||
+        null,
 
       cached:
         false,
@@ -114242,7 +114298,7 @@ function dataCoverageAuditV731(candidate, state, context = {}) {
   }
 
   return {
-    version: "V733_1",
+    version: "V735_1",
     diagnosticOnly: true,
     address,
     evidence,
@@ -114322,7 +114378,7 @@ function dataCoverageSnapshotV731(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
     : [];
-  const detailed = rows.filter(row => row?.dataCoverageAuditV731?.version === "V733_1");
+  const detailed = rows.filter(row => row?.dataCoverageAuditV731?.version === "V735_1");
   const domains = ["market", "directionalUsd", "launchAge", "exactPoolIdentity", "holders", "risk"];
   const providers = ["dexscreener", "geckoMarket", "coinGeckoDemo", "geckoDirectional", "blockscoutHolders", "launchBlockRpc"];
   const classes = ["VERIFIED", "PROVIDER_LIMITED", "DATA_NOT_FOUND", "BUDGET_BLOCKED", "NOT_ATTEMPTED", "VERIFICATION_REJECTED"];
@@ -114351,11 +114407,11 @@ function dataCoverageSnapshotV731(state) {
     bridgeStatusCounts[bridgeStatus] = safeNumber(bridgeStatusCounts[bridgeStatus]) + 1;
   }
   return {
-    version: "V733",
+    version: "V735",
     diagnosticOnly: true,
     retainedQualificationRows: rows.length,
-    detailedV733Rows: detailed.length,
-    legacyRowsWithoutV733Detail: Math.max(0, rows.length - detailed.length),
+    detailedV735Rows: detailed.length,
+    legacyRowsWithoutV735Detail: Math.max(0, rows.length - detailed.length),
     domainCounts,
     providerCounts,
     bridgeStatusCounts,
@@ -114377,19 +114433,19 @@ function dataCoverageSnapshotV731(state) {
 
 function dataCoverageTelegramMessageV731(state) {
   const d = dataCoverageSnapshotV731(state);
-  const total = safeNumber(d.detailedV733Rows);
+  const total = safeNumber(d.detailedV735Rows);
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "📡 <b>Free Data Coverage Audit — V734</b>",
+    "📡 <b>Free Data Coverage Audit — V735</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
-    `V733 detailed rows: <b>${fmt(total)}</b>`,
-    `Legacy rows without V733 detail: <b>${fmt(d.legacyRowsWithoutV733Detail)}</b>`,
+    `V735 detailed rows: <b>${fmt(total)}</b>`,
+    `Legacy rows without V735 detail: <b>${fmt(d.legacyRowsWithoutV735Detail)}</b>`,
     ""
   ];
   if (!total) {
-    lines.push("⏳ Forward-only V733 coverage sample is building. No older rows are backfilled or guessed.");
+    lines.push("⏳ Forward-only V735 coverage sample is building. No older rows are backfilled or guessed.");
     return lines.join("\n");
   }
   const label = {
@@ -144265,7 +144321,7 @@ async function telegramCommandReplyV271(
         scannerBudgetConsumed: false,
         externalProviderRequests: 0,
         stateWrites: 0,
-        detailedV733Rows: safeNumber(coverageV731?.detailedV733Rows),
+        detailedV735Rows: safeNumber(coverageV731?.detailedV735Rows),
         marketVerified: safeNumber(coverageV731?.domainCounts?.market?.VERIFIED),
         marketProviderLimited: safeNumber(coverageV731?.domainCounts?.market?.PROVIDER_LIMITED),
         directionalVerified: safeNumber(coverageV731?.domainCounts?.directionalUsd?.VERIFIED),
