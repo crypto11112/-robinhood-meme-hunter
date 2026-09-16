@@ -1,4 +1,29 @@
 /**
+ * Robinhood Chain Meme Hunter — V726
+ * AUTHORITATIVE RUNTIME VERSION: V726
+ *
+ * V726 MATURE-OPPORTUNITY CURRENT-ACTIVITY CONFIRMATION
+ * - builds directly from deployed V725 and preserves the V725 /scoreaudit diagnostic;
+ * - fixes the mature-alert quality gap proven by Artificial Inu: static ERC20, liquidity,
+ *   volume and holder-quality points could exceed the Telegram score threshold while
+ *   current activity was weak/bearish and verified directional USD was unavailable;
+ * - changes NO Opportunity weights, Momentum maths, Confidence maths, Rug Risk maths,
+ *   provider trust, holder standards, minimum liquidity, score thresholds or hard 42 cap;
+ * - adds one Telegram qualification gate ONLY for candidates classified by the existing
+ *   alert classifier as MATURE_OPPORTUNITY;
+ * - mature candidates must have at least one positive CURRENT confirmation already present:
+ *     (a) verified Momentum >=25, OR
+ *     (b) verified directional-USD buy pressure >=50%, OR
+ *     (c) existing verified/usable Pons curve confirmation, OR
+ *     (d) provider-reported transaction COUNTS showing buy-led activity in 5m (>=3 tx)
+ *         or 1h (>=10 tx); provider counts are NEVER promoted to verified USD;
+ * - missing current confirmation fails closed as MATURE_CURRENT_ACTIVITY_UNCONFIRMED_V726;
+ * - NEW/EARLY/UNVERIFIED-stage qualification is untouched so this cannot make fresh launch
+ *   scoring easier or harder; V725 score-audit collection continues forward-only;
+ * - adds zero provider/RPC requests, zero extra state writes and zero scan passes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V725
  * AUTHORITATIVE RUNTIME VERSION: V725
  *
@@ -6329,7 +6354,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V725";
+const VERSION = "V726";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -68942,6 +68967,180 @@ function telegramVerifiedBearishFlowProtectionV232(
   };
 }
 
+function matureOpportunityCurrentConfirmationV726(
+  candidate
+) {
+  const alertClass =
+    telegramAlertClass(
+      candidate
+    );
+
+  if (
+    alertClass?.code !==
+    "MATURE_OPPORTUNITY"
+  ) {
+    return {
+      required: false,
+      passes: true,
+      reason: "NOT_MATURE_OPPORTUNITY_V726",
+      confirmations: []
+    };
+  }
+
+  const confirmations = [];
+
+  const momentumVerified =
+    candidate?.momentum?.verified ===
+    true;
+
+  const momentumScore =
+    safeNumber(
+      candidate?.momentum?.score
+    );
+
+  if (
+    momentumVerified &&
+    momentumScore >= 25
+  ) {
+    confirmations.push(
+      "VERIFIED_MOMENTUM_GTE_25"
+    );
+  }
+
+  const directional =
+    candidate?.momentum
+      ?.directionalUsdPressureV151 ||
+    null;
+
+  const directionalPressure =
+    directional?.verified === true
+      ? Number(
+          directional?.buyPressureUsd
+        )
+      : NaN;
+
+  if (
+    directional?.verified === true &&
+    Number.isFinite(
+      directionalPressure
+    ) &&
+    directionalPressure >= 50
+  ) {
+    confirmations.push(
+      "VERIFIED_DIRECTIONAL_USD_BUY_PRESSURE_GTE_50"
+    );
+  }
+
+  const pons =
+    ponsConfirmationQualityV219(
+      candidate
+    );
+
+  if (
+    pons?.strong === true ||
+    pons?.usable === true
+  ) {
+    confirmations.push(
+      pons?.strong === true
+        ? "VERIFIED_PONS_STRONG_CURRENT_CONFIRMATION"
+        : "VERIFIED_PONS_USABLE_CURRENT_CONFIRMATION"
+    );
+  }
+
+  /*
+   * Provider transaction counts are allowed only as an ACTIVITY confirmation.
+   * They are never called verified directional USD and never create USD values.
+   */
+  const tx5m =
+    candidate?.market?.transactions?.m5 ||
+    null;
+
+  const buys5m =
+    safeNumber(tx5m?.buys);
+
+  const sells5m =
+    safeNumber(tx5m?.sells);
+
+  const total5m =
+    buys5m + sells5m;
+
+  if (
+    candidate?.market?.verified === true &&
+    total5m >= 3 &&
+    buys5m > sells5m
+  ) {
+    confirmations.push(
+      "PROVIDER_REPORTED_BUY_LED_5M_COUNTS"
+    );
+  }
+
+  const tx1h =
+    candidate?.market?.transactions?.h1 ||
+    null;
+
+  const buys1h =
+    safeNumber(tx1h?.buys);
+
+  const sells1h =
+    safeNumber(tx1h?.sells);
+
+  const total1h =
+    buys1h + sells1h;
+
+  if (
+    candidate?.market?.verified === true &&
+    total1h >= 10 &&
+    buys1h > sells1h
+  ) {
+    confirmations.push(
+      "PROVIDER_REPORTED_BUY_LED_1H_COUNTS"
+    );
+  }
+
+  return {
+    required: true,
+    passes:
+      confirmations.length > 0,
+    reason:
+      confirmations.length > 0
+        ? "MATURE_CURRENT_ACTIVITY_CONFIRMED_V726"
+        : "MATURE_CURRENT_ACTIVITY_UNCONFIRMED_V726",
+    confirmations,
+    evidence: {
+      momentumVerified,
+      momentumScore,
+      directionalUsdVerified:
+        directional?.verified === true,
+      directionalBuyPressureUsd:
+        Number.isFinite(
+          directionalPressure
+        )
+          ? directionalPressure
+          : null,
+      ponsUsable:
+        pons?.usable === true,
+      ponsStrong:
+        pons?.strong === true,
+      providerCountsOnly: true,
+      provider5m: {
+        buys: buys5m,
+        sells: sells5m,
+        total: total5m
+      },
+      provider1h: {
+        buys: buys1h,
+        sells: sells1h,
+        total: total1h
+      }
+    },
+    verifiedUsdInferredFromCounts: false,
+    scoringChanged: false,
+    thresholdsChanged: false,
+    externalRequestsAdded: 0
+  };
+}
+
+
 function qualifiesTelegram(
   candidate
 ) {
@@ -69037,6 +69236,18 @@ function qualifiesTelegram(
   if (
     bearishFlowProtectionV232
       .suppresses
+  ) {
+    return false;
+  }
+
+  const matureConfirmationV726 =
+    matureOpportunityCurrentConfirmationV726(
+      candidate
+    );
+
+  if (
+    matureConfirmationV726.required === true &&
+    matureConfirmationV726.passes !== true
   ) {
     return false;
   }
@@ -69197,6 +69408,20 @@ function telegramQualificationReasons(
   ) {
     reasons.push(
       "VERIFIED_BEARISH_SHORT_TERM_FLOW_V232"
+    );
+  }
+
+  const matureConfirmationV726 =
+    matureOpportunityCurrentConfirmationV726(
+      candidate
+    );
+
+  if (
+    matureConfirmationV726.required === true &&
+    matureConfirmationV726.passes !== true
+  ) {
+    reasons.push(
+      "MATURE_CURRENT_ACTIVITY_UNCONFIRMED_V726"
     );
   }
 
@@ -69647,6 +69872,11 @@ function returnedCandidateBlockerDiagnosticV436(
                 "HOLDER_EVIDENCE_UNVERIFIED"
               )
       },
+
+      matureCurrentActivityConfirmationV726:
+        matureOpportunityCurrentConfirmationV726(
+          candidate
+        ),
 
       telegram: {
         qualifies:
@@ -113226,6 +113456,7 @@ function qualificationAuditEvidenceOnlyV663(
       "CONFIDENCE_SCORE",
       "RISK_TOO_HIGH",
       "INSUFFICIENT_SIGNALS",
+      "MATURE_CURRENT_ACTIVITY_UNCONFIRMED_V726",
       "VERIFIED_BEARISH_SHORT_TERM_FLOW_V232",
       "SAME_RUN_TERMINAL_RISK",
       "SAME_RUN_VERIFIED_HIGH_CONCENTRATION"
