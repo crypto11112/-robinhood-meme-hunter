@@ -1,7 +1,17 @@
 /**
- * Robinhood Chain Meme Hunter — V730
- * AUTHORITATIVE RUNTIME VERSION: V730
+ * Robinhood Chain Meme Hunter — V731
+ * AUTHORITATIVE RUNTIME VERSION: V731
  *
+ * V731 FREE-DATA COVERAGE AUDIT — DIAGNOSTIC ONLY
+ * - builds directly from deployed V730 with no scanner/scoring/provider-routing behaviour change;
+ * - adds read-only Telegram /datacoverage (alias /coverageaudit);
+ * - records forward-only V731 per-candidate evidence coverage across market, directional USD, launch age, exact pool identity, holders and risk;
+ * - classifies missing evidence from observed statuses only as PROVIDER_LIMITED, DATA_NOT_FOUND, BUDGET_BLOCKED, NOT_ATTEMPTED or VERIFICATION_REJECTED;
+ * - records observed provider/source outcomes for DexScreener, GeckoTerminal, CoinGecko Demo, Blockscout holders, Gecko directional completion and V258 launch-block recovery;
+ * - adds zero provider/RPC requests, zero extra state-write cycles, no scoring/qualification changes and keeps the hard 42 cap unchanged;
+ * - never infers missing provider data or promotes unverified evidence.
+ *
+ * V730 V258 PROTECTED-COMPLETION PRECHECK FIX
  * V730 V258 PROTECTED-COMPLETION PRECHECK FIX
  * - builds directly from deployed V729;
  * - fixes the inherited V258 launch-block timestamp path returning ANALYSIS_BUDGET_UNAVAILABLE before the existing protected completion reserve can be consumed;
@@ -6407,7 +6417,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V730";
+const VERSION = "V731";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -113710,6 +113720,333 @@ function evidenceAuditTelegramMessageV727(state) {
 }
 
 /* =========================================================
+   V731 FREE-DATA COVERAGE AUDIT — DIAGNOSTIC ONLY
+   ========================================================= */
+function coverageStatusClassV731({ verified = false, attempted = false, status = null } = {}) {
+  if (verified === true) return "VERIFIED";
+  const s = String(status || "").toUpperCase();
+  if (!attempted && (!s || s === "LOOKUP_SKIPPED" || s.includes("NOT_ATTEMPTED") || s.includes("NOT_SELECTED"))) {
+    return "NOT_ATTEMPTED";
+  }
+  if (
+    s.includes("429") ||
+    s.includes("RATE_LIMIT") ||
+    s.includes("COOLDOWN") ||
+    s.includes("FRESH_SPACING") ||
+    s.includes("SCAN_LIMIT") ||
+    s.includes("MONTHLY_BOT_LIMIT") ||
+    s.includes("PROVIDER_UNAVAILABLE")
+  ) return "PROVIDER_LIMITED";
+  if (
+    s.includes("BUDGET") ||
+    s.includes("SLOT_RESERVED") ||
+    s.includes("REQUEST_LIMIT") ||
+    s.includes("HARD_LIMIT")
+  ) return "BUDGET_BLOCKED";
+  if (
+    s.includes("NO_MARKET") ||
+    s.includes("NOT_FOUND") ||
+    s.includes("HTTP_404") ||
+    s.includes("NO_VERIFIED_LAUNCH_EVENT_EVIDENCE") ||
+    s.includes("NO_POOL") ||
+    s.includes("EMPTY")
+  ) return "DATA_NOT_FOUND";
+  if (
+    s.includes("UNVERIFIED") ||
+    s.includes("INVALID") ||
+    s.includes("INCOMPLETE") ||
+    s.includes("PARTIAL") ||
+    s.includes("MISMATCH") ||
+    s.includes("INSUFFICIENT") ||
+    s.includes("UNSUPPORTED")
+  ) return "VERIFICATION_REJECTED";
+  return attempted ? "VERIFICATION_REJECTED" : "NOT_ATTEMPTED";
+}
+
+function dataCoverageAuditV731(candidate, state, context = {}) {
+  const market = candidate?.market || {};
+  const holders = candidate?.holders || {};
+  const v175 = context?.earlyDirectionalTradeEnrichmentV175 || {};
+  const v151 = context?.directionalTradeEnrichment || {};
+  const v258 = context?.launchAgeCompletionV258 || {};
+  const address = normalize(candidate?.address);
+  const v258Row = (Array.isArray(v258?.results) ? v258.results : [])
+    .find(row => normalize(row?.address) === address) || null;
+  const launchVerified =
+    candidate?.verifiedLaunchAgeV223?.verified === true ||
+    candidate?.launchStage?.verified === true;
+  const directionalVerified = candidateDirectionalUsdVerifiedV727(candidate, state);
+  const exactPoolVerified = candidate?.onChainPoolIdentityV153?.verified === true;
+  const holderVerified =
+    holders?.integrity?.verified === true &&
+    holders?.concentrationVerified === true &&
+    holders?.whale?.verified === true;
+  const riskVerified = candidate?.risk?.verified === true;
+
+  const alt = market?.alternativeMarketData || {};
+  const demo = alt?.coinGeckoDemoV660 || market?.coinGeckoDemoV660 || {};
+  const marketStatus = market?.status || market?.dexStatus || alt?.status || demo?.status || null;
+  const marketAttempted = Boolean(
+    market?.verified === true || marketStatus || alt?.attempted === true || alt?.checked === true || demo?.requestSent === true
+  );
+  const directionalStatus =
+    (normalize(v175?.selectedAddress) === address ? v175?.status : null) ||
+    (normalize(v151?.address) === address ? v151?.status : null) ||
+    null;
+  const directionalAttempted =
+    (normalize(v175?.selectedAddress) === address && v175?.attempted === true) ||
+    (normalize(v151?.address) === address && v151?.attempted === true);
+  const launchAttempted = v258Row?.attempted === true;
+  const holderStatus = holders?.integrity?.status || null;
+  const poolStatus = candidate?.onChainPoolIdentityV153?.status || null;
+  const riskStatus = candidate?.risk?.status || null;
+
+  const dexStatus =
+    String(market?.source || "").toUpperCase().includes("DEXSCREENER") && market?.verified === true
+      ? "VERIFIED"
+      : (String(marketStatus || "").toUpperCase().includes("DEX") ? marketStatus : null);
+  const geckoMarketStatus =
+    String(market?.source || "").toUpperCase().includes("GECKOTERMINAL") && market?.verified === true
+      ? "VERIFIED"
+      : alt?.status || null;
+  const demoStatus =
+    String(market?.source || "").toUpperCase().includes("COINGECKO_DEMO") && market?.verified === true
+      ? "VERIFIED"
+      : demo?.status || null;
+
+  const evidence = {
+    market: {
+      verified: market?.verified === true,
+      attempted: marketAttempted,
+      status: marketStatus,
+      source: market?.source || null
+    },
+    directionalUsd: {
+      verified: directionalVerified,
+      attempted: directionalAttempted,
+      status: directionalStatus,
+      source:
+        candidate?.market?.directionalTradeFeed?.source ||
+        candidate?.market?.directionalFlow?.source ||
+        candidate?.momentum?.directionalUsdPressureV151?.source ||
+        null
+    },
+    launchAge: {
+      verified: launchVerified,
+      attempted: launchAttempted,
+      status: v258Row?.status || (!launchVerified ? "NOT_ATTEMPTED" : "VERIFIED"),
+      source: candidate?.verifiedLaunchAgeV223?.source || candidate?.launchStage?.source || null
+    },
+    exactPoolIdentity: {
+      verified: exactPoolVerified,
+      attempted: Boolean(poolStatus || exactPoolVerified),
+      status: poolStatus,
+      source: candidate?.onChainPoolIdentityV153?.source || null
+    },
+    holders: {
+      verified: holderVerified,
+      attempted: Boolean(holderStatus || holders?.holderSource || holderVerified),
+      status: holderStatus,
+      source: holders?.holderSource || holders?.integrity?.source || null
+    },
+    risk: {
+      verified: riskVerified,
+      attempted: Boolean(riskStatus || candidate?.risk || riskVerified),
+      status: riskStatus,
+      source: candidate?.risk?.source || null
+    }
+  };
+  for (const x of Object.values(evidence)) {
+    x.classification = coverageStatusClassV731(x);
+  }
+
+  return {
+    version: "V731_1",
+    diagnosticOnly: true,
+    address,
+    evidence,
+    providers: {
+      dexscreener: {
+        observed: Boolean(dexStatus || String(market?.source || "").toUpperCase().includes("DEXSCREENER")),
+        status: dexStatus,
+        classification: coverageStatusClassV731({
+          verified: dexStatus === "VERIFIED",
+          attempted: Boolean(dexStatus),
+          status: dexStatus
+        })
+      },
+      geckoMarket: {
+        observed: Boolean(geckoMarketStatus || String(market?.source || "").toUpperCase().includes("GECKOTERMINAL")),
+        status: geckoMarketStatus,
+        classification: coverageStatusClassV731({
+          verified: geckoMarketStatus === "VERIFIED",
+          attempted: alt?.attempted === true || alt?.checked === true || Boolean(geckoMarketStatus),
+          status: geckoMarketStatus
+        })
+      },
+      coinGeckoDemo: {
+        observed: Boolean(demoStatus || demo?.requestSent === true || String(market?.source || "").toUpperCase().includes("COINGECKO_DEMO")),
+        status: demoStatus,
+        classification: coverageStatusClassV731({
+          verified: demoStatus === "VERIFIED",
+          attempted: demo?.requestSent === true || Boolean(demoStatus),
+          status: demoStatus
+        })
+      },
+      geckoDirectional: {
+        observed: Boolean(directionalStatus || normalize(v175?.selectedAddress) === address || normalize(v151?.address) === address),
+        status: directionalStatus,
+        classification: coverageStatusClassV731({
+          verified: directionalVerified,
+          attempted: directionalAttempted,
+          status: directionalStatus
+        })
+      },
+      blockscoutHolders: {
+        observed: Boolean(holderStatus || holders?.holderSource),
+        status: holderStatus,
+        source: holders?.holderSource || null,
+        classification: coverageStatusClassV731({
+          verified: holderVerified,
+          attempted: Boolean(holderStatus || holders?.holderSource),
+          status: holderStatus
+        })
+      },
+      launchBlockRpc: {
+        observed: Boolean(v258Row),
+        status: v258Row?.status || null,
+        provider: v258Row?.provider || null,
+        classification: coverageStatusClassV731({
+          verified: v258Row?.recovered === true,
+          attempted: launchAttempted,
+          status: v258Row?.status || null
+        })
+      }
+    },
+    requestBudgetSnapshot: {
+      totalUsed: safeNumber(context?.budget?.totalUsed),
+      totalLimit: safeNumber(context?.budget?.totalLimit) || 42,
+      analysisUsed: safeNumber(context?.budget?.analysis?.used),
+      analysisLimit: safeNumber(context?.budget?.analysis?.effectiveLimit || context?.budget?.analysis?.limit)
+    },
+    externalRequestsAdded: 0,
+    stateWritesAdded: 0,
+    scoringChanged: false,
+    qualificationChanged: false
+  };
+}
+
+function dataCoverageSnapshotV731(state) {
+  const rows = Array.isArray(state?.qualificationAuditV663?.records)
+    ? state.qualificationAuditV663.records
+    : [];
+  const detailed = rows.filter(row => row?.dataCoverageAuditV731?.version === "V731_1");
+  const domains = ["market", "directionalUsd", "launchAge", "exactPoolIdentity", "holders", "risk"];
+  const providers = ["dexscreener", "geckoMarket", "coinGeckoDemo", "geckoDirectional", "blockscoutHolders", "launchBlockRpc"];
+  const classes = ["VERIFIED", "PROVIDER_LIMITED", "DATA_NOT_FOUND", "BUDGET_BLOCKED", "NOT_ATTEMPTED", "VERIFICATION_REJECTED"];
+  const domainCounts = {};
+  const providerCounts = {};
+  const statusCounts = {};
+  for (const d of domains) domainCounts[d] = Object.fromEntries(classes.map(c => [c, 0]));
+  for (const p of providers) providerCounts[p] = { observed: 0, ...Object.fromEntries(classes.map(c => [c, 0])) };
+  for (const row of detailed) {
+    const d = row.dataCoverageAuditV731 || {};
+    for (const domain of domains) {
+      const x = d?.evidence?.[domain] || {};
+      const cls = classes.includes(x.classification) ? x.classification : "NOT_ATTEMPTED";
+      domainCounts[domain][cls]++;
+      if (x.status) statusCounts[`${domain}:${x.status}`] = safeNumber(statusCounts[`${domain}:${x.status}`]) + 1;
+    }
+    for (const provider of providers) {
+      const x = d?.providers?.[provider] || {};
+      if (x.observed === true) providerCounts[provider].observed++;
+      const cls = classes.includes(x.classification) ? x.classification : "NOT_ATTEMPTED";
+      providerCounts[provider][cls]++;
+      if (x.status) statusCounts[`${provider}:${x.status}`] = safeNumber(statusCounts[`${provider}:${x.status}`]) + 1;
+    }
+  }
+  return {
+    version: "V731",
+    diagnosticOnly: true,
+    retainedQualificationRows: rows.length,
+    detailedV731Rows: detailed.length,
+    legacyRowsWithoutV731Detail: Math.max(0, rows.length - detailed.length),
+    domainCounts,
+    providerCounts,
+    topObservedStatuses: Object.entries(statusCounts)
+      .sort((a,b) => safeNumber(b[1]) - safeNumber(a[1]))
+      .slice(0,12),
+    interpretation: {
+      categoriesAreStatusDerivedOnly: true,
+      noEvidencePromoted: true,
+      noProviderRequests: true,
+      noExtraStateWrites: true,
+      hardLimitUnchanged: 42
+    }
+  };
+}
+
+function dataCoverageTelegramMessageV731(state) {
+  const d = dataCoverageSnapshotV731(state);
+  const total = safeNumber(d.detailedV731Rows);
+  const fmt = n => safeNumber(n).toLocaleString("en-GB");
+  const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
+  const lines = [
+    "📡 <b>Free Data Coverage Audit — V731</b>",
+    "",
+    `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
+    `V731 detailed rows: <b>${fmt(total)}</b>`,
+    `Legacy rows without V731 detail: <b>${fmt(d.legacyRowsWithoutV731Detail)}</b>`,
+    ""
+  ];
+  if (!total) {
+    lines.push("⏳ Forward-only V731 coverage sample is building. No older rows are backfilled or guessed.");
+    return lines.join("\n");
+  }
+  const label = {
+    market: "Market",
+    directionalUsd: "Directional USD",
+    launchAge: "Launch age",
+    exactPoolIdentity: "Exact pool identity",
+    holders: "Holder evidence",
+    risk: "Risk"
+  };
+  lines.push("🧩 <b>Evidence coverage by final cause</b>");
+  for (const key of Object.keys(label)) {
+    const c = d.domainCounts?.[key] || {};
+    lines.push(
+      `• ${label[key]}: ✅ ${fmt(c.VERIFIED)} (${pct(c.VERIFIED)}) · provider ${fmt(c.PROVIDER_LIMITED)} · budget ${fmt(c.BUDGET_BLOCKED)} · no-data ${fmt(c.DATA_NOT_FOUND)} · not-tried ${fmt(c.NOT_ATTEMPTED)} · rejected ${fmt(c.VERIFICATION_REJECTED)}`
+    );
+  }
+  const providerLabel = {
+    dexscreener: "DexScreener",
+    geckoMarket: "GeckoTerminal market",
+    coinGeckoDemo: "CoinGecko Demo",
+    geckoDirectional: "Gecko directional",
+    blockscoutHolders: "Blockscout holders",
+    launchBlockRpc: "Launch-block RPC"
+  };
+  lines.push("", "🌐 <b>Observed provider outcomes</b>");
+  for (const key of Object.keys(providerLabel)) {
+    const c = d.providerCounts?.[key] || {};
+    lines.push(
+      `• ${providerLabel[key]}: observed ${fmt(c.observed)} · ✅ ${fmt(c.VERIFIED)} · limited ${fmt(c.PROVIDER_LIMITED)} · budget ${fmt(c.BUDGET_BLOCKED)} · no-data ${fmt(c.DATA_NOT_FOUND)} · rejected ${fmt(c.VERIFICATION_REJECTED)}`
+    );
+  }
+  if (Array.isArray(d.topObservedStatuses) && d.topObservedStatuses.length) {
+    lines.push("", "🔎 <b>Top observed statuses</b>");
+    for (const [status,count] of d.topObservedStatuses.slice(0,8)) {
+      lines.push(`• ${escapeHtml(status)}: <b>${fmt(count)}</b>`);
+    }
+  }
+  lines.push(
+    "",
+    "<i>Classification uses only observed statuses. Read-only command: zero provider requests, zero state writes, no scoring/qualification changes.</i>"
+  );
+  return lines.join("\n");
+}
+
+/* =========================================================
    V725 OPPORTUNITY / SIGNAL AUDIT — DIAGNOSTIC ONLY
    ========================================================= */
 const SCORE_AUDIT_MISSING_MARKET_V725 = 1;
@@ -114238,6 +114575,10 @@ function updateQualificationAuditV663(
         row?.evidenceCompletionAuditV727 && typeof row.evidenceCompletionAuditV727 === "object"
           ? row.evidenceCompletionAuditV727
           : previous?.evidenceCompletionAuditV727 || null,
+      dataCoverageAuditV731:
+        row?.dataCoverageAuditV731 && typeof row.dataCoverageAuditV731 === "object"
+          ? row.dataCoverageAuditV731
+          : previous?.dataCoverageAuditV731 || null,
       marketStatus:
         row?.marketStatus || null,
       holderStatus:
@@ -141165,6 +141506,13 @@ function buildLaunchCoverageFunnelV474({
               launchAgeCompletionV258,
               budget
             }),
+          dataCoverageAuditV731:
+            dataCoverageAuditV731(candidate, state, {
+              earlyDirectionalTradeEnrichmentV175,
+              directionalTradeEnrichment,
+              launchAgeCompletionV258,
+              budget
+            }),
           marketStatus:
             candidate?.market?.status || null,
           holderStatus:
@@ -142458,7 +142806,8 @@ function telegramHelpV271() {
     "<code>/launchcoverage</code> — launch discovery-to-Telegram coverage funnel",
     "<code>/audit7d</code> — forward 7-day verified-launch qualification audit",
     "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
-    "<code>/evidenceaudit</code> — V727 evidence-completion regression audit (read-only)",
+    "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
+    "<code>/datacoverage</code> — V731 free-provider/data coverage audit (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -143507,6 +143856,25 @@ async function telegramCommandReplyV271(
             auditV663
               ?.evidenceOnlyUnresolved
           )
+      };
+    }
+  } else if (
+    parsed.command === "/datacoverage" ||
+    parsed.command === "/coverageaudit"
+  ) {
+    reply = dataCoverageTelegramMessageV731(state);
+
+    if (diagnosticV273) {
+      const coverageV731 = dataCoverageSnapshotV731(state);
+      diagnosticV273.dataCoverageV731 = {
+        scannerBudgetConsumed: false,
+        externalProviderRequests: 0,
+        stateWrites: 0,
+        detailedV731Rows: safeNumber(coverageV731?.detailedV731Rows),
+        marketVerified: safeNumber(coverageV731?.domainCounts?.market?.VERIFIED),
+        marketProviderLimited: safeNumber(coverageV731?.domainCounts?.market?.PROVIDER_LIMITED),
+        directionalVerified: safeNumber(coverageV731?.domainCounts?.directionalUsd?.VERIFIED),
+        directionalProviderLimited: safeNumber(coverageV731?.domainCounts?.directionalUsd?.PROVIDER_LIMITED)
       };
     }
   } else if (
