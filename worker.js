@@ -1,4 +1,25 @@
 /**
+ * Robinhood Chain Meme Hunter — V727
+ * AUTHORITATIVE RUNTIME VERSION: V727
+ *
+ * V727 EVIDENCE-COMPLETION REGRESSION AUDIT — DIAGNOSTIC ONLY
+ * - builds directly from deployed V726;
+ * - changes NO scoring, Momentum maths, Confidence, Rug Risk, qualification, Telegram
+ *   thresholds, provider routing, cooldowns, request ordering or hard 42 cap;
+ * - adds read-only Telegram /evidenceaudit (alias /completionaudit);
+ * - records, for returned verified-launch candidates, whether the inherited V175 early
+ *   directional lane, V151 pre-qualification directional lane, V254 exact-USD completion
+ *   lane and V258 launch-age completion lane were eligible, selected, attempted and/or
+ *   successful;
+ * - explicitly distinguishes gate starvation (for example score <60 before V175 can run)
+ *   from provider/identity/completion failure;
+ * - records whether Momentum, Market Quality, Whale Flow, launch age and directional USD
+ *   were still unverified at the final Telegram decision;
+ * - piggybacks on the existing V663 audit record and existing state write; zero provider
+ *   requests, zero extra state writes and zero scan passes are added.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V726
  * AUTHORITATIVE RUNTIME VERSION: V726
  *
@@ -6354,7 +6375,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V726";
+const VERSION = "V727";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -97326,7 +97347,12 @@ for (
         v141AnalysedAddresses,
       validationResults,
       candidates,
-      telegramResults
+      telegramResults,
+      earlyDirectionalTradeEnrichmentV175,
+      directionalTradeEnrichment,
+      verifiedUsdCompletionV254,
+      launchAgeCompletionV258,
+      budget
     });
 
   if (
@@ -113086,6 +113112,268 @@ function pruneQualificationAuditV663(
 
 
 /* =========================================================
+   V727 EVIDENCE-COMPLETION REGRESSION AUDIT — DIAGNOSTIC ONLY
+   ========================================================= */
+function candidateDirectionalUsdVerifiedV727(candidate, state) {
+  const indexed =
+    candidate?.market?.directionalTradeFeed?.verifiedAnyWindow === true ||
+    candidate?.market?.directionalFlow?.verifiedAnyWindow === true ||
+    candidate?.momentum?.directionalUsdPressureV151?.verified === true;
+  const onChain =
+    candidateVerifiedOnChainFlowV212(candidate, state)?.verified === true;
+  return indexed || onChain;
+}
+
+function evidenceCompletionAuditV727(candidate, state, context = {}) {
+  const address = normalize(candidate?.address);
+  const market = candidate?.market || {};
+  const poolIdentityVerified = candidate?.onChainPoolIdentityV153?.verified === true;
+  const marketPairSideVerified =
+    market?.verified === true &&
+    Boolean(market?.pairAddress) &&
+    ["BASE", "QUOTE"].includes(String(market?.targetTokenSide || "").toUpperCase());
+  const riskAcceptable =
+    candidate?.risk?.severeOverride !== true &&
+    String(candidate?.risk?.label || "").toUpperCase() !== "HIGH";
+  const score = safeNumber(candidate?.opportunity?.score);
+  const confidence = safeNumber(candidate?.confidence?.score);
+  const v175Eligible =
+    candidate?.validERC20 === true &&
+    riskAcceptable &&
+    (market?.verified === true || poolIdentityVerified) &&
+    score >= 60 &&
+    confidence >= 55;
+  const v151Eligible =
+    candidate?.validERC20 === true &&
+    (marketPairSideVerified || poolIdentityVerified) &&
+    riskAcceptable;
+  const needsUsd = verifiedUsdCoverageV262(candidate, state)?.needsEnrichment === true;
+  const qualifiesNow = qualifiesTelegram(candidate);
+  const v254Eligible =
+    qualifiesNow &&
+    safeNumber(candidate?.activity?.swaps) > 0 &&
+    needsUsd;
+
+  const v175 = context?.earlyDirectionalTradeEnrichmentV175 || {};
+  const v151 = context?.directionalTradeEnrichment || {};
+  const v254 = context?.verifiedUsdCompletionV254 || {};
+  const v258 = context?.launchAgeCompletionV258 || {};
+  const v254Row = (Array.isArray(v254?.results) ? v254.results : [])
+    .find(row => normalize(row?.address) === address) || null;
+  const v258Row = (Array.isArray(v258?.results) ? v258.results : [])
+    .find(row => normalize(row?.address) === address) || null;
+
+  const launchVerified =
+    candidate?.verifiedLaunchAgeV223?.verified === true ||
+    candidate?.launchStage?.verified === true;
+  const directionalUsdVerified = candidateDirectionalUsdVerifiedV727(candidate, state);
+
+  const v175Blockers = [];
+  if (candidate?.validERC20 !== true) v175Blockers.push("ERC20_UNVERIFIED");
+  if (!riskAcceptable) v175Blockers.push("RISK_NOT_ACCEPTABLE");
+  if (!(market?.verified === true || poolIdentityVerified)) v175Blockers.push("MARKET_OR_POOL_IDENTITY_UNVERIFIED");
+  if (score < 60) v175Blockers.push("OPPORTUNITY_BELOW_60");
+  if (confidence < 55) v175Blockers.push("CONFIDENCE_BELOW_55");
+
+  const v151Blockers = [];
+  if (candidate?.validERC20 !== true) v151Blockers.push("ERC20_UNVERIFIED");
+  if (!(marketPairSideVerified || poolIdentityVerified)) v151Blockers.push("MARKET_PAIR_OR_POOL_IDENTITY_UNVERIFIED");
+  if (!riskAcceptable) v151Blockers.push("RISK_NOT_ACCEPTABLE");
+
+  const v254Blockers = [];
+  if (!qualifiesNow) v254Blockers.push("NOT_TELEGRAM_QUALIFIED_BEFORE_V254");
+  if (!(safeNumber(candidate?.activity?.swaps) > 0)) v254Blockers.push("NO_BOT_OBSERVED_SWAPS");
+  if (!needsUsd) v254Blockers.push("USD_ENRICHMENT_NOT_NEEDED_OR_NOT_ELIGIBLE");
+
+  return {
+    version: "V727_1",
+    diagnosticOnly: true,
+    address,
+    finalEvidence: {
+      launchAgeVerified: launchVerified,
+      momentumVerified: candidate?.momentum?.verified === true,
+      marketVerified: market?.verified === true,
+      marketQualityVerified: candidate?.marketQuality?.verified === true,
+      whaleFlowVerified: candidate?.whaleFlow?.verified === true,
+      directionalUsdVerified,
+      exactPoolIdentityVerified: poolIdentityVerified,
+      observedSwaps: safeNumber(candidate?.activity?.swaps),
+      observedLiquidityEvents: safeNumber(candidate?.activity?.liquidityEvents),
+      opportunityScore: score,
+      confidenceScore: confidence,
+      telegramQualified: qualifiesNow
+    },
+    v175: {
+      eligible: v175Eligible,
+      blockers: v175Blockers,
+      selected: normalize(v175?.selectedAddress) === address,
+      attempted: normalize(v175?.selectedAddress) === address && v175?.attempted === true,
+      verifiedAnyWindow: normalize(v175?.selectedAddress) === address && v175?.verifiedAnyWindow === true,
+      status: normalize(v175?.selectedAddress) === address ? (v175?.status || null) : null
+    },
+    v151: {
+      eligible: v151Eligible,
+      blockers: v151Blockers,
+      selected: normalize(v151?.address) === address,
+      attempted: normalize(v151?.address) === address && v151?.attempted === true,
+      verifiedAnyWindow: normalize(v151?.address) === address && v151?.verifiedAnyWindow === true,
+      selectionMode: normalize(v151?.address) === address ? (v151?.selectionMode || null) : null,
+      status: normalize(v151?.address) === address ? (v151?.status || null) : null
+    },
+    v254: {
+      eligible: v254Eligible,
+      blockers: v254Blockers,
+      selected: Boolean(v254Row),
+      attempted: Boolean(v254Row),
+      recovered: v254Row?.verifiedUsdRecovered === true,
+      status: v254Row?.status || null,
+      externalRequestsUsed: safeNumber(v254Row?.externalRequestsUsed)
+    },
+    v258: {
+      needed: !launchVerified,
+      selected: Boolean(v258Row),
+      attempted: v258Row?.attempted === true,
+      recovered: v258Row?.recovered === true,
+      status: v258Row?.status || null,
+      externalRequestsUsed: safeNumber(v258Row?.externalRequestsUsed),
+      candidatePoolSize: safeNumber(v258?.candidatePoolSizeV259),
+      candidatesEligibleThisScan: safeNumber(v258?.candidatesEligible)
+    },
+    budgetAtAudit: {
+      globalUsed: safeNumber(context?.budget?.used),
+      hardLimit: 42,
+      analysisUsed: safeNumber(context?.budget?.analysis?.used),
+      analysisLimit: safeNumber(context?.budget?.analysis?.effectiveLimit || context?.budget?.analysis?.limit)
+    },
+    likelyGateStarvation:
+      directionalUsdVerified !== true &&
+      candidate?.momentum?.verified !== true &&
+      score < 60 &&
+      v175Eligible !== true,
+    scoringChanged: false,
+    qualificationChanged: false,
+    providerRequestsAdded: 0,
+    stateWritesAdded: 0
+  };
+}
+
+function evidenceAuditSnapshotV727(state) {
+  const rows = Array.isArray(state?.qualificationAuditV663?.records)
+    ? state.qualificationAuditV663.records
+    : [];
+  const detailed = rows.filter(row => row?.evidenceCompletionAuditV727?.version === "V727_1");
+  const c = {
+    total: detailed.length,
+    launchMissing: 0, momentumMissing: 0, marketMissing: 0, qualityMissing: 0,
+    whaleMissing: 0, usdMissing: 0, poolIdentityMissing: 0, likelyGateStarvation: 0,
+    v175Eligible: 0, v175Selected: 0, v175Attempted: 0, v175Verified: 0,
+    v151Eligible: 0, v151Selected: 0, v151Attempted: 0, v151Verified: 0,
+    v254Eligible: 0, v254Selected: 0, v254Recovered: 0,
+    v258Needed: 0, v258Selected: 0, v258Attempted: 0, v258Recovered: 0
+  };
+  const blockerCounts = {};
+  const statusCounts = {};
+  const bump = (obj, key) => { if (key) obj[key] = safeNumber(obj[key]) + 1; };
+  for (const row of detailed) {
+    const d = row.evidenceCompletionAuditV727 || {};
+    const f = d.finalEvidence || {};
+    if (f.launchAgeVerified !== true) c.launchMissing++;
+    if (f.momentumVerified !== true) c.momentumMissing++;
+    if (f.marketVerified !== true) c.marketMissing++;
+    if (f.marketQualityVerified !== true) c.qualityMissing++;
+    if (f.whaleFlowVerified !== true) c.whaleMissing++;
+    if (f.directionalUsdVerified !== true) c.usdMissing++;
+    if (f.exactPoolIdentityVerified !== true) c.poolIdentityMissing++;
+    if (d.likelyGateStarvation === true) c.likelyGateStarvation++;
+    for (const lane of ["v175", "v151", "v254", "v258"]) {
+      const x = d?.[lane] || {};
+      if (lane === "v258") {
+        if (x.needed === true) c.v258Needed++;
+        if (x.selected === true) c.v258Selected++;
+        if (x.attempted === true) c.v258Attempted++;
+        if (x.recovered === true) c.v258Recovered++;
+      } else {
+        if (x.eligible === true) c[`${lane}Eligible`]++;
+        if (x.selected === true) c[`${lane}Selected`]++;
+        if (x.attempted === true && c[`${lane}Attempted`] !== undefined) c[`${lane}Attempted`]++;
+        if ((x.verifiedAnyWindow === true || x.recovered === true) && c[`${lane}Verified`] !== undefined) c[`${lane}Verified`]++;
+      }
+      for (const reason of Array.isArray(x.blockers) ? x.blockers : []) bump(blockerCounts, `${lane}:${reason}`);
+      if (x.status) bump(statusCounts, `${lane}:${x.status}`);
+    }
+  }
+  const top = obj => Object.entries(obj).sort((a,b) => safeNumber(b[1]) - safeNumber(a[1])).slice(0,10);
+  return {
+    version: "V727",
+    diagnosticOnly: true,
+    retainedQualificationRows: rows.length,
+    detailedV727Rows: detailed.length,
+    legacyRowsWithoutV727Detail: Math.max(0, rows.length - detailed.length),
+    counts: c,
+    topGateBlockers: top(blockerCounts),
+    topSelectedLaneStatuses: top(statusCounts),
+    interpretation: {
+      noEvidenceIsPromoted: true,
+      noProviderRequests: true,
+      noExtraStateWrites: true,
+      scoringChanged: false,
+      qualificationChanged: false,
+      hardLimitUnchanged: 42
+    }
+  };
+}
+
+function evidenceAuditTelegramMessageV727(state) {
+  const d = evidenceAuditSnapshotV727(state);
+  const c = d.counts || {};
+  const total = safeNumber(d.detailedV727Rows);
+  const fmt = n => safeNumber(n).toLocaleString("en-GB");
+  const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
+  const lines = [
+    "🧪 <b>Evidence Completion Regression Audit — V727</b>",
+    "",
+    `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
+    `V727 detailed rows: <b>${fmt(total)}</b>`,
+    `Legacy rows without V727 detail: <b>${fmt(d.legacyRowsWithoutV727Detail)}</b>`,
+    ""
+  ];
+  if (!total) {
+    lines.push("⏳ Forward-only diagnostic is building. V727 does not backfill or guess old completion-path evidence.");
+    return lines.join("\n");
+  }
+  lines.push(
+    "🧩 <b>Still UNVERIFIED at final decision</b>",
+    `• Directional USD: <b>${fmt(c.usdMissing)}</b> (${pct(c.usdMissing)})`,
+    `• Momentum: <b>${fmt(c.momentumMissing)}</b> (${pct(c.momentumMissing)})`,
+    `• Market: <b>${fmt(c.marketMissing)}</b> (${pct(c.marketMissing)})`,
+    `• Market Quality: <b>${fmt(c.qualityMissing)}</b> (${pct(c.qualityMissing)})`,
+    `• Whale Flow: <b>${fmt(c.whaleMissing)}</b> (${pct(c.whaleMissing)})`,
+    `• Verified launch age: <b>${fmt(c.launchMissing)}</b> (${pct(c.launchMissing)})`,
+    `• Exact pool identity: <b>${fmt(c.poolIdentityMissing)}</b> (${pct(c.poolIdentityMissing)})`,
+    "",
+    `⚠️ Likely pre-score gate starvation: <b>${fmt(c.likelyGateStarvation)}</b> (${pct(c.likelyGateStarvation)})`,
+    "",
+    "💵 <b>Directional completion lanes</b>",
+    `V175 early lane: eligible <b>${fmt(c.v175Eligible)}</b> · selected <b>${fmt(c.v175Selected)}</b> · attempted <b>${fmt(c.v175Attempted)}</b> · verified <b>${fmt(c.v175Verified)}</b>`,
+    `V151 prequal lane: eligible <b>${fmt(c.v151Eligible)}</b> · selected <b>${fmt(c.v151Selected)}</b> · attempted <b>${fmt(c.v151Attempted)}</b> · verified <b>${fmt(c.v151Verified)}</b>`,
+    `V254 exact-USD lane: eligible <b>${fmt(c.v254Eligible)}</b> · selected <b>${fmt(c.v254Selected)}</b> · recovered <b>${fmt(c.v254Recovered)}</b>`,
+    "",
+    "⏱ <b>Launch-age completion V258</b>",
+    `Needed <b>${fmt(c.v258Needed)}</b> · selected <b>${fmt(c.v258Selected)}</b> · attempted <b>${fmt(c.v258Attempted)}</b> · recovered <b>${fmt(c.v258Recovered)}</b>`
+  );
+  if (Array.isArray(d.topGateBlockers) && d.topGateBlockers.length) {
+    lines.push("", "🚧 <b>Top completion-gate blockers</b>");
+    for (const [reason,count] of d.topGateBlockers.slice(0,8)) lines.push(`• ${escapeHtml(reason)}: <b>${fmt(count)}</b>`);
+  }
+  if (Array.isArray(d.topSelectedLaneStatuses) && d.topSelectedLaneStatuses.length) {
+    lines.push("", "📡 <b>Selected-lane outcomes</b>");
+    for (const [status,count] of d.topSelectedLaneStatuses.slice(0,6)) lines.push(`• ${escapeHtml(status)}: <b>${fmt(count)}</b>`);
+  }
+  lines.push("", "<i>Read-only command. Zero provider requests, zero state writes, no scoring/qualification changes.</i>");
+  return lines.join("\n");
+}
+
+/* =========================================================
    V725 OPPORTUNITY / SIGNAL AUDIT — DIAGNOSTIC ONLY
    ========================================================= */
 const SCORE_AUDIT_MISSING_MARKET_V725 = 1;
@@ -113610,6 +113898,10 @@ function updateQualificationAuditV663(
         row?.scoreAuditV725 && typeof row.scoreAuditV725 === "object"
           ? row.scoreAuditV725
           : previous?.scoreAuditV725 || null,
+      evidenceCompletionAuditV727:
+        row?.evidenceCompletionAuditV727 && typeof row.evidenceCompletionAuditV727 === "object"
+          ? row.evidenceCompletionAuditV727
+          : previous?.evidenceCompletionAuditV727 || null,
       marketStatus:
         row?.marketStatus || null,
       holderStatus:
@@ -140139,7 +140431,12 @@ function buildLaunchCoverageFunnelV474({
   analysedAddresses,
   validationResults,
   candidates,
-  telegramResults
+  telegramResults,
+  earlyDirectionalTradeEnrichmentV175,
+  directionalTradeEnrichment,
+  verifiedUsdCompletionV254,
+  launchAgeCompletionV258,
+  budget
 }) {
   const addressSet =
     values =>
@@ -140524,6 +140821,14 @@ function buildLaunchCoverageFunnelV474({
             safeNumber(candidate?.signalConfirmation?.signals),
           scoreAuditV725:
             opportunityScoreAuditV725(candidate),
+          evidenceCompletionAuditV727:
+            evidenceCompletionAuditV727(candidate, state, {
+              earlyDirectionalTradeEnrichmentV175,
+              directionalTradeEnrichment,
+              verifiedUsdCompletionV254,
+              launchAgeCompletionV258,
+              budget
+            }),
           marketStatus:
             candidate?.market?.status || null,
           holderStatus:
@@ -141817,6 +142122,7 @@ function telegramHelpV271() {
     "<code>/launchcoverage</code> — launch discovery-to-Telegram coverage funnel",
     "<code>/audit7d</code> — forward 7-day verified-launch qualification audit",
     "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
+    "<code>/evidenceaudit</code> — V727 evidence-completion regression audit (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -142865,6 +143171,25 @@ async function telegramCommandReplyV271(
             auditV663
               ?.evidenceOnlyUnresolved
           )
+      };
+    }
+  } else if (
+    parsed.command === "/evidenceaudit" ||
+    parsed.command === "/completionaudit"
+  ) {
+    reply = evidenceAuditTelegramMessageV727(state);
+
+    if (diagnosticV273) {
+      const evidenceAuditV727 = evidenceAuditSnapshotV727(state);
+      diagnosticV273.evidenceAuditV727 = {
+        scannerBudgetConsumed: false,
+        externalProviderRequests: 0,
+        stateWrites: 0,
+        detailedV727Rows: safeNumber(evidenceAuditV727?.detailedV727Rows),
+        likelyGateStarvation: safeNumber(evidenceAuditV727?.counts?.likelyGateStarvation),
+        directionalUsdMissing: safeNumber(evidenceAuditV727?.counts?.usdMissing),
+        momentumMissing: safeNumber(evidenceAuditV727?.counts?.momentumMissing),
+        launchAgeMissing: safeNumber(evidenceAuditV727?.counts?.launchMissing)
       };
     }
   } else if (
