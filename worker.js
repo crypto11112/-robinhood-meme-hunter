@@ -1,6 +1,13 @@
 /**
- * Robinhood Chain Meme Hunter — V732
- * AUTHORITATIVE RUNTIME VERSION: V732
+ * Robinhood Chain Meme Hunter — V733
+ * AUTHORITATIVE RUNTIME VERSION: V733
+ *
+ * V733 V732 POOL-BRIDGE FAILURE DIAGNOSTIC — ZERO REQUESTS
+ * - Builds directly forward from V732 with scanner/provider/scoring/qualification behaviour unchanged.
+ * - Records the exact V732 bridge result for every analysed candidate instead of collapsing failures into NO_KNOWN_QUOTE_V4_POOL.
+ * - Separates provider-market-ineligible, missing provider pool fields, candidate-side mismatch, provider PoolId absent from watched pools, watched PoolKey currencies unavailable, provider/on-chain currency mismatch, bad counter-token, current bridge success and persisted bridge reuse.
+ * - Adds no provider/RPC requests, no extra state-write cycle, no new request slot and keeps the hard global limit at 42.
+ * - /datacoverage starts a clean forward-only V733 sample and adds a V732 bridge-diagnostic section.
  *
  * V732 VERIFIED GECKO-POOL IDENTITY BRIDGE
  * - Builds directly forward from V731.
@@ -6427,7 +6434,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V732";
+const VERSION = "V733";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -47665,6 +47672,69 @@ function persistedProviderPoolIdentityV732(watched) {
   };
 }
 
+function poolBridgeDiagnosticV733(
+  watched,
+  market
+) {
+  const token = normalize(watched?.address);
+  const current = exactGeckoProviderPoolIdentityV732(
+    watched,
+    market
+  );
+
+  const persisted = persistedProviderPoolIdentityV732(
+    watched
+  );
+
+  const pairAddress = normalize(market?.pairAddress);
+  const baseTokenAddress = normalize(market?.baseTokenAddress);
+  const quoteTokenAddress = normalize(market?.quoteTokenAddress);
+  const watchedPools = Array.isArray(watched?.pools)
+    ? watched.pools
+    : [];
+  const matchingPool = /^0x[a-f0-9]{64}$/.test(String(pairAddress || ""))
+    ? watchedPools.find(row => normalize(row?.poolId) === pairAddress) || null
+    : null;
+
+  let status = current?.status || "V733_BRIDGE_STATUS_UNAVAILABLE";
+  let verified = current?.verified === true;
+  let source = current?.source || null;
+
+  if (verified) {
+    status = "V733_CURRENT_PROVIDER_BRIDGE_VERIFIED";
+  } else if (persisted?.verified === true) {
+    status = "V733_PERSISTED_PROVIDER_BRIDGE_REUSABLE";
+    verified = true;
+    source = persisted?.source || null;
+  }
+
+  return {
+    version: "V733_1",
+    diagnosticOnly: true,
+    status,
+    verified,
+    source,
+    currentBridgeStatus: current?.status || null,
+    currentBridgeVerified: current?.verified === true,
+    persistedBridgeReusable: persisted?.verified === true,
+    marketVerified: market?.verified === true,
+    marketSource: market?.source || null,
+    marketPairAddress: pairAddress || null,
+    pairAddressIsPoolId: /^0x[a-f0-9]{64}$/.test(String(pairAddress || "")),
+    providerBaseTokenAddress: baseTokenAddress || null,
+    providerQuoteTokenAddress: quoteTokenAddress || null,
+    providerTargetTokenSide: String(market?.targetTokenSide || "").toUpperCase() || null,
+    candidateAddress: token || null,
+    watchedPoolCount: watchedPools.length,
+    exactProviderPoolInWatch: Boolean(matchingPool),
+    watchedCurrency0: normalize(matchingPool?.currency0) || null,
+    watchedCurrency1: normalize(matchingPool?.currency1) || null,
+    externalRequestsAdded: 0,
+    stateWritesAdded: 0
+  };
+}
+
+
 function onChainPoolIdentityV153(
   watched,
   market = null
@@ -81211,6 +81281,12 @@ async function analyzeToken(
       onChainMarketFoundation
   };
 
+  const poolBridgeDiagnosticV733Result =
+    poolBridgeDiagnosticV733(
+      watched,
+      market
+    );
+
   const onChainPoolIdentity =
     onChainPoolIdentityV153(
       watched,
@@ -81443,6 +81519,9 @@ async function analyzeToken(
 
     onChainPoolIdentityV153:
       onChainPoolIdentity,
+
+    poolBridgeDiagnosticV733:
+      poolBridgeDiagnosticV733Result,
 
     liveMomentumActivityV152,
 
@@ -113882,6 +113961,7 @@ function evidenceAuditSnapshotV727(state) {
   };
   const blockerCounts = {};
   const statusCounts = {};
+  const bridgeStatusCounts = {};
   const reserveConsumedTypeCounts = {};
   let reserveConsumedRows = 0;
   let reserveUnusedRows = 0;
@@ -114155,10 +114235,11 @@ function dataCoverageAuditV731(candidate, state, context = {}) {
   }
 
   return {
-    version: "V732_1",
+    version: "V733_1",
     diagnosticOnly: true,
     address,
     evidence,
+    poolBridgeV733: candidate?.poolBridgeDiagnosticV733 || null,
     providers: {
       dexscreener: {
         observed: Boolean(dexStatus || String(market?.source || "").toUpperCase().includes("DEXSCREENER")),
@@ -114234,7 +114315,7 @@ function dataCoverageSnapshotV731(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
     : [];
-  const detailed = rows.filter(row => row?.dataCoverageAuditV731?.version === "V732_1");
+  const detailed = rows.filter(row => row?.dataCoverageAuditV731?.version === "V733_1");
   const domains = ["market", "directionalUsd", "launchAge", "exactPoolIdentity", "holders", "risk"];
   const providers = ["dexscreener", "geckoMarket", "coinGeckoDemo", "geckoDirectional", "blockscoutHolders", "launchBlockRpc"];
   const classes = ["VERIFIED", "PROVIDER_LIMITED", "DATA_NOT_FOUND", "BUDGET_BLOCKED", "NOT_ATTEMPTED", "VERIFICATION_REJECTED"];
@@ -114258,15 +114339,21 @@ function dataCoverageSnapshotV731(state) {
       providerCounts[provider][cls]++;
       if (x.status) statusCounts[`${provider}:${x.status}`] = safeNumber(statusCounts[`${provider}:${x.status}`]) + 1;
     }
+    const bridgeStatus = String(d?.poolBridgeV733?.status || "V733_BRIDGE_STATUS_MISSING");
+    bridgeStatusCounts[bridgeStatus] = safeNumber(bridgeStatusCounts[bridgeStatus]) + 1;
   }
   return {
-    version: "V732",
+    version: "V733",
     diagnosticOnly: true,
     retainedQualificationRows: rows.length,
-    detailedV732Rows: detailed.length,
-    legacyRowsWithoutV732Detail: Math.max(0, rows.length - detailed.length),
+    detailedV733Rows: detailed.length,
+    legacyRowsWithoutV733Detail: Math.max(0, rows.length - detailed.length),
     domainCounts,
     providerCounts,
+    bridgeStatusCounts,
+    topPoolBridgeStatuses: Object.entries(bridgeStatusCounts)
+      .sort((a,b) => safeNumber(b[1]) - safeNumber(a[1]))
+      .slice(0,12),
     topObservedStatuses: Object.entries(statusCounts)
       .sort((a,b) => safeNumber(b[1]) - safeNumber(a[1]))
       .slice(0,12),
@@ -114282,19 +114369,19 @@ function dataCoverageSnapshotV731(state) {
 
 function dataCoverageTelegramMessageV731(state) {
   const d = dataCoverageSnapshotV731(state);
-  const total = safeNumber(d.detailedV732Rows);
+  const total = safeNumber(d.detailedV733Rows);
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "📡 <b>Free Data Coverage Audit — V732</b>",
+    "📡 <b>Free Data Coverage Audit — V733</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
-    `V732 detailed rows: <b>${fmt(total)}</b>`,
-    `Legacy rows without V732 detail: <b>${fmt(d.legacyRowsWithoutV732Detail)}</b>`,
+    `V733 detailed rows: <b>${fmt(total)}</b>`,
+    `Legacy rows without V733 detail: <b>${fmt(d.legacyRowsWithoutV733Detail)}</b>`,
     ""
   ];
   if (!total) {
-    lines.push("⏳ Forward-only V732 coverage sample is building. No older rows are backfilled or guessed.");
+    lines.push("⏳ Forward-only V733 coverage sample is building. No older rows are backfilled or guessed.");
     return lines.join("\n");
   }
   const label = {
@@ -114326,6 +114413,12 @@ function dataCoverageTelegramMessageV731(state) {
     lines.push(
       `• ${providerLabel[key]}: observed ${fmt(c.observed)} · ✅ ${fmt(c.VERIFIED)} · limited ${fmt(c.PROVIDER_LIMITED)} · budget ${fmt(c.BUDGET_BLOCKED)} · no-data ${fmt(c.DATA_NOT_FOUND)} · rejected ${fmt(c.VERIFICATION_REJECTED)}`
     );
+  }
+  if (Array.isArray(d.topPoolBridgeStatuses) && d.topPoolBridgeStatuses.length) {
+    lines.push("", "🧬 <b>V732 pool-bridge diagnostic</b>");
+    for (const [status,count] of d.topPoolBridgeStatuses.slice(0,8)) {
+      lines.push(`• ${escapeHtml(status)}: <b>${fmt(count)}</b>`);
+    }
   }
   if (Array.isArray(d.topObservedStatuses) && d.topObservedStatuses.length) {
     lines.push("", "🔎 <b>Top observed statuses</b>");
@@ -143101,7 +143194,7 @@ function telegramHelpV271() {
     "<code>/audit7d</code> — forward 7-day verified-launch qualification audit",
     "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
     "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
-    "<code>/datacoverage</code> — V732 free-provider/data coverage audit (read-only)",
+    "<code>/datacoverage</code> — V733 free-provider/data + V732 pool-bridge audit (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -144164,7 +144257,7 @@ async function telegramCommandReplyV271(
         scannerBudgetConsumed: false,
         externalProviderRequests: 0,
         stateWrites: 0,
-        detailedV732Rows: safeNumber(coverageV731?.detailedV732Rows),
+        detailedV733Rows: safeNumber(coverageV731?.detailedV733Rows),
         marketVerified: safeNumber(coverageV731?.domainCounts?.market?.VERIFIED),
         marketProviderLimited: safeNumber(coverageV731?.domainCounts?.market?.PROVIDER_LIMITED),
         directionalVerified: safeNumber(coverageV731?.domainCounts?.directionalUsd?.VERIFIED),
