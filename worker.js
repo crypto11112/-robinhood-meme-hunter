@@ -1,6 +1,13 @@
 /**
- * Robinhood Chain Meme Hunter — V733
- * AUTHORITATIVE RUNTIME VERSION: V733
+ * Robinhood Chain Meme Hunter — V734
+ * AUTHORITATIVE RUNTIME VERSION: V734
+ *
+ * V734 /DATACOVERAGE HOTFIX
+ * - Builds directly from V733.
+ * - FIX: declares the missing bridgeStatusCounts accumulator used by dataCoverageSnapshotV731().
+ * - Restores /datacoverage and /coverageaudit without changing scanner/provider/scoring/qualification behaviour.
+ * - Preserves already-collected forward-only V733 diagnostic rows; no reset/backfill.
+ * - Zero provider/RPC requests added; hard global limit remains 42.
  *
  * V733 V732 POOL-BRIDGE FAILURE DIAGNOSTIC — ZERO REQUESTS
  * - Builds directly forward from V732 with scanner/provider/scoring/qualification behaviour unchanged.
@@ -6434,7 +6441,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V733";
+const VERSION = "V734";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -114322,6 +114329,7 @@ function dataCoverageSnapshotV731(state) {
   const domainCounts = {};
   const providerCounts = {};
   const statusCounts = {};
+  const bridgeStatusCounts = {};
   for (const d of domains) domainCounts[d] = Object.fromEntries(classes.map(c => [c, 0]));
   for (const p of providers) providerCounts[p] = { observed: 0, ...Object.fromEntries(classes.map(c => [c, 0])) };
   for (const row of detailed) {
@@ -114373,7 +114381,7 @@ function dataCoverageTelegramMessageV731(state) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "📡 <b>Free Data Coverage Audit — V733</b>",
+    "📡 <b>Free Data Coverage Audit — V734</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
     `V733 detailed rows: <b>${fmt(total)}</b>`,
@@ -143194,7 +143202,7 @@ function telegramHelpV271() {
     "<code>/audit7d</code> — forward 7-day verified-launch qualification audit",
     "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
     "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
-    "<code>/datacoverage</code> — V733 free-provider/data + V732 pool-bridge audit (read-only)",
+    "<code>/datacoverage</code> — V734 hotfixed free-provider/data + V732 pool-bridge audit (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
