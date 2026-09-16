@@ -1,6 +1,18 @@
 /**
- * Robinhood Chain Meme Hunter — V728
- * AUTHORITATIVE RUNTIME VERSION: V728
+ * Robinhood Chain Meme Hunter — V729
+ * AUTHORITATIVE RUNTIME VERSION: V729
+ *
+ * V729 MARKET-FIRST EVIDENCE-COMPLETION RESTORATION
+ * - builds directly from deployed V728;
+ * - keeps the single protected pre-Telegram evidence-completion request inside the existing hard 42 cap;
+ * - expands that SAME one-slot reserve to the existing authenticated CoinGecko Demo market fallback because V728 evidence showed market/pool identity remained the dominant upstream blocker;
+ * - priority order is still determined by the existing scanner/provider flow: this does not add a second slot or a second provider request;
+ * - CoinGecko Demo spacing, monthly guard, one-fresh/second-chance protections and strict market verification remain authoritative;
+ * - existing launch-block timestamp and Gecko directional completion may still use the slot when market evidence does not consume it;
+ * - /evidenceaudit becomes forward-only V729 telemetry so V727/V728 legacy rows no longer blur the post-fix sample;
+ * - V175 audit eligibility now reflects the V728 single-target pre-score exception instead of incorrectly reporting Opportunity/Confidence as blockers after that target was selected;
+ * - changes NO Opportunity/Momentum/Confidence/Risk maths, Telegram thresholds, provider trust, holder rules, notification reserve or hard 42 cap;
+ * - never guesses market, pool identity, launch age or directional USD.
  *
  * V728 PRE-SCORE EVIDENCE-COMPLETION RESTORATION
  * - builds directly from deployed V727 and preserves /evidenceaudit;
@@ -6386,7 +6398,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V728";
+const VERSION = "V729";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12909,7 +12921,7 @@ function createBudget() {
         hardRequestLimitRaised: false,
         analysisLimitRaised: false,
         notificationReserveChanged: false,
-        rule: "ONE_PRE_TELEGRAM_COMPLETION_SLOT_FOR_CURRENT_LIVE_VERIFIED_LAUNCH_V728"
+        rule: "ONE_PRE_TELEGRAM_MARKET_OR_EVIDENCE_COMPLETION_SLOT_FOR_CURRENT_LIVE_VERIFIED_LAUNCH_V729"
       },
 
       directionalWatchReserveV553: {
@@ -15798,7 +15810,8 @@ function evidenceCompletionRequestV728(type) {
   const key = String(type || "");
   return Boolean(
     key === "RPC:eth_getBlockByNumber" ||
-    key === "GECKOTERMINAL_DIRECTIONAL_TRADES"
+    key === "GECKOTERMINAL_DIRECTIONAL_TRADES" ||
+    key === "COINGECKO_DEMO_FALLBACK_V660"
   );
 }
 
@@ -15868,7 +15881,7 @@ function tryConsumeEvidenceCompletionReserveV728(
     if (r.reservedRequests <= 0) {
       r.active = false;
       r.releasedAt = Date.now();
-      r.releaseReason = "V728_COMPLETION_SLOT_CONSUMED";
+      r.releaseReason = "V729_MARKET_OR_COMPLETION_SLOT_CONSUMED";
     }
     return true;
   }
@@ -15885,7 +15898,7 @@ function tryConsumeEvidenceCompletionReserveV728(
       phase,
       type,
       amount: needed,
-      reason: "V728_EVIDENCE_COMPLETION_SLOT_RESERVED",
+      reason: "V729_MARKET_OR_EVIDENCE_COMPLETION_SLOT_RESERVED",
       reservedRequests: safeNumber(r.reservedRequests)
     });
     return false;
@@ -113342,14 +113355,22 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   const riskAcceptable =
     candidate?.risk?.severeOverride !== true &&
     String(candidate?.risk?.label || "").toUpperCase() !== "HIGH";
+  const v175 = context?.earlyDirectionalTradeEnrichmentV175 || {};
+  const v151 = context?.directionalTradeEnrichment || {};
+  const v254 = context?.verifiedUsdCompletionV254 || {};
+  const v258 = context?.launchAgeCompletionV258 || {};
+  const v175SelectedV729 =
+    normalize(v175?.selectedAddress) === address;
   const score = safeNumber(candidate?.opportunity?.score);
   const confidence = safeNumber(candidate?.confidence?.score);
   const v175Eligible =
     candidate?.validERC20 === true &&
     riskAcceptable &&
     (market?.verified === true || poolIdentityVerified) &&
-    score >= 60 &&
-    confidence >= 55;
+    (
+      v175SelectedV729 ||
+      (score >= 60 && confidence >= 55)
+    );
   const v151Eligible =
     candidate?.validERC20 === true &&
     (marketPairSideVerified || poolIdentityVerified) &&
@@ -113361,10 +113382,6 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
     safeNumber(candidate?.activity?.swaps) > 0 &&
     needsUsd;
 
-  const v175 = context?.earlyDirectionalTradeEnrichmentV175 || {};
-  const v151 = context?.directionalTradeEnrichment || {};
-  const v254 = context?.verifiedUsdCompletionV254 || {};
-  const v258 = context?.launchAgeCompletionV258 || {};
   const v254Row = (Array.isArray(v254?.results) ? v254.results : [])
     .find(row => normalize(row?.address) === address) || null;
   const v258Row = (Array.isArray(v258?.results) ? v258.results : [])
@@ -113379,8 +113396,8 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   if (candidate?.validERC20 !== true) v175Blockers.push("ERC20_UNVERIFIED");
   if (!riskAcceptable) v175Blockers.push("RISK_NOT_ACCEPTABLE");
   if (!(market?.verified === true || poolIdentityVerified)) v175Blockers.push("MARKET_OR_POOL_IDENTITY_UNVERIFIED");
-  if (score < 60) v175Blockers.push("OPPORTUNITY_BELOW_60");
-  if (confidence < 55) v175Blockers.push("CONFIDENCE_BELOW_55");
+  if (!v175SelectedV729 && score < 60) v175Blockers.push("OPPORTUNITY_BELOW_60");
+  if (!v175SelectedV729 && confidence < 55) v175Blockers.push("CONFIDENCE_BELOW_55");
 
   const v151Blockers = [];
   if (candidate?.validERC20 !== true) v151Blockers.push("ERC20_UNVERIFIED");
@@ -113393,7 +113410,7 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   if (!needsUsd) v254Blockers.push("USD_ENRICHMENT_NOT_NEEDED_OR_NOT_ELIGIBLE");
 
   return {
-    version: "V727_1",
+    version: "V729_1",
     diagnosticOnly: true,
     address,
     finalEvidence: {
@@ -113468,7 +113485,7 @@ function evidenceAuditSnapshotV727(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
     : [];
-  const detailed = rows.filter(row => row?.evidenceCompletionAuditV727?.version === "V727_1");
+  const detailed = rows.filter(row => row?.evidenceCompletionAuditV727?.version === "V729_1");
   const c = {
     total: detailed.length,
     launchMissing: 0, momentumMissing: 0, marketMissing: 0, qualityMissing: 0,
@@ -113511,11 +113528,11 @@ function evidenceAuditSnapshotV727(state) {
   }
   const top = obj => Object.entries(obj).sort((a,b) => safeNumber(b[1]) - safeNumber(a[1])).slice(0,10);
   return {
-    version: "V727",
+    version: "V729",
     diagnosticOnly: true,
     retainedQualificationRows: rows.length,
-    detailedV727Rows: detailed.length,
-    legacyRowsWithoutV727Detail: Math.max(0, rows.length - detailed.length),
+    detailedV729Rows: detailed.length,
+    legacyRowsWithoutV729Detail: Math.max(0, rows.length - detailed.length),
     counts: c,
     topGateBlockers: top(blockerCounts),
     topSelectedLaneStatuses: top(statusCounts),
@@ -113533,19 +113550,19 @@ function evidenceAuditSnapshotV727(state) {
 function evidenceAuditTelegramMessageV727(state) {
   const d = evidenceAuditSnapshotV727(state);
   const c = d.counts || {};
-  const total = safeNumber(d.detailedV727Rows);
+  const total = safeNumber(d.detailedV729Rows);
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "🧪 <b>Evidence Completion Regression Audit — V727</b>",
+    "🧪 <b>Evidence Completion Regression Audit — V729</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
-    `V727 detailed rows: <b>${fmt(total)}</b>`,
-    `Legacy rows without V727 detail: <b>${fmt(d.legacyRowsWithoutV727Detail)}</b>`,
+    `V729 detailed rows: <b>${fmt(total)}</b>`,
+    `Legacy rows without V729 detail: <b>${fmt(d.legacyRowsWithoutV729Detail)}</b>`,
     ""
   ];
   if (!total) {
-    lines.push("⏳ Forward-only diagnostic is building. V727 does not backfill or guess old completion-path evidence.");
+    lines.push("⏳ Forward-only V729 diagnostic is building. Older V727/V728 rows are intentionally excluded from this post-fix sample.");
     return lines.join("\n");
   }
   lines.push(
@@ -143392,7 +143409,7 @@ async function telegramCommandReplyV271(
         scannerBudgetConsumed: false,
         externalProviderRequests: 0,
         stateWrites: 0,
-        detailedV727Rows: safeNumber(evidenceAuditV727?.detailedV727Rows),
+        detailedV729Rows: safeNumber(evidenceAuditV727?.detailedV729Rows),
         likelyGateStarvation: safeNumber(evidenceAuditV727?.counts?.likelyGateStarvation),
         directionalUsdMissing: safeNumber(evidenceAuditV727?.counts?.usdMissing),
         momentumMissing: safeNumber(evidenceAuditV727?.counts?.momentumMissing),
