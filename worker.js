@@ -1,6 +1,13 @@
 /**
- * Robinhood Chain Meme Hunter — V735
- * AUTHORITATIVE RUNTIME VERSION: V735
+ * Robinhood Chain Meme Hunter — V736
+ * AUTHORITATIVE RUNTIME VERSION: V736
+ *
+ * V736 COMPLETE POOL-BRIDGE FIELD DIAGNOSTIC — ZERO REQUESTS
+ * - Builds directly forward from V735 with all V735 provider-provenance behaviour preserved.
+ * - Diagnoses every exact provider-pool field required by the V732 bridge in one pass: exact 32-byte pair/PoolId, valid base token, valid quote token, BASE/QUOTE orientation, candidate-side consistency, watched PoolId presence, watched PoolKey currencies and provider/on-chain currency-set equality.
+ * - Aggregates the missing/failing field reasons in /datacoverage so we do not need one diagnostic version per field.
+ * - Adds zero provider/RPC requests, zero state-write cycles and no scoring/Momentum/Confidence/Risk/qualification/Telegram changes. Hard global request limit remains 42.
+ * - /datacoverage starts a clean forward-only V736 sample; older V735 rows remain legacy evidence.
  *
  * V735 VERIFIED MARKET-PROVENANCE HANDOFF FIX
  * - Builds directly forward from V734.
@@ -6450,7 +6457,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V735";
+const VERSION = "V736";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -47751,8 +47758,45 @@ function poolBridgeDiagnosticV733(
     source = persisted?.source || null;
   }
 
+  const pairAddressIsPoolId = /^0x[a-f0-9]{64}$/.test(String(pairAddress || ""));
+  const baseTokenValid = isAddress(baseTokenAddress);
+  const quoteTokenValid = isAddress(quoteTokenAddress);
+  const targetTokenSide = String(market?.targetTokenSide || "").toUpperCase();
+  const targetTokenSideValid = ["BASE", "QUOTE"].includes(targetTokenSide);
+  const candidateIsBase = baseTokenAddress === token;
+  const candidateIsQuote = quoteTokenAddress === token;
+  const candidateSideConsistent =
+    targetTokenSideValid &&
+    ((candidateIsBase && targetTokenSide === "BASE") ||
+     (candidateIsQuote && targetTokenSide === "QUOTE"));
+  const watchedCurrency0 = normalize(matchingPool?.currency0);
+  const watchedCurrency1 = normalize(matchingPool?.currency1);
+  const watchedCurrenciesValid =
+    isAddress(watchedCurrency0) &&
+    isAddress(watchedCurrency1) &&
+    watchedCurrency0 !== watchedCurrency1;
+  const providerCurrencySetMatchesWatch =
+    watchedCurrenciesValid &&
+    baseTokenValid &&
+    quoteTokenValid &&
+    ((watchedCurrency0 === baseTokenAddress && watchedCurrency1 === quoteTokenAddress) ||
+     (watchedCurrency0 === quoteTokenAddress && watchedCurrency1 === baseTokenAddress));
+
+  const fieldFailures = [];
+  if (market?.verified !== true) fieldFailures.push("MARKET_NOT_VERIFIED");
+  if (!bridgeProviderSourceV735(market)) fieldFailures.push("PROVIDER_SOURCE_NOT_ELIGIBLE");
+  if (!pairAddress) fieldFailures.push("PAIR_ADDRESS_MISSING");
+  else if (!pairAddressIsPoolId) fieldFailures.push("PAIR_ADDRESS_NOT_32_BYTE_POOL_ID");
+  if (!baseTokenValid) fieldFailures.push("BASE_TOKEN_ADDRESS_INVALID_OR_MISSING");
+  if (!quoteTokenValid) fieldFailures.push("QUOTE_TOKEN_ADDRESS_INVALID_OR_MISSING");
+  if (!targetTokenSideValid) fieldFailures.push("TARGET_TOKEN_SIDE_INVALID_OR_MISSING");
+  if (baseTokenValid && quoteTokenValid && targetTokenSideValid && !candidateSideConsistent) fieldFailures.push("CANDIDATE_SIDE_MISMATCH");
+  if (pairAddressIsPoolId && !matchingPool) fieldFailures.push("PROVIDER_POOL_ID_NOT_IN_WATCH");
+  if (matchingPool && !watchedCurrenciesValid) fieldFailures.push("WATCHED_POOL_CURRENCIES_INVALID_OR_MISSING");
+  if (matchingPool && watchedCurrenciesValid && baseTokenValid && quoteTokenValid && !providerCurrencySetMatchesWatch) fieldFailures.push("PROVIDER_ONCHAIN_CURRENCY_SET_MISMATCH");
+
   return {
-    version: "V733_1",
+    version: "V736_1",
     diagnosticOnly: true,
     status,
     verified,
@@ -47768,15 +47812,24 @@ function poolBridgeDiagnosticV733(
       ) ||
       null,
     marketPairAddress: pairAddress || null,
-    pairAddressIsPoolId: /^0x[a-f0-9]{64}$/.test(String(pairAddress || "")),
+    pairAddressIsPoolId,
     providerBaseTokenAddress: baseTokenAddress || null,
+    baseTokenValid,
     providerQuoteTokenAddress: quoteTokenAddress || null,
-    providerTargetTokenSide: String(market?.targetTokenSide || "").toUpperCase() || null,
+    quoteTokenValid,
+    providerTargetTokenSide: targetTokenSide || null,
+    targetTokenSideValid,
     candidateAddress: token || null,
+    candidateIsBase,
+    candidateIsQuote,
+    candidateSideConsistent,
     watchedPoolCount: watchedPools.length,
     exactProviderPoolInWatch: Boolean(matchingPool),
-    watchedCurrency0: normalize(matchingPool?.currency0) || null,
-    watchedCurrency1: normalize(matchingPool?.currency1) || null,
+    watchedCurrency0: watchedCurrency0 || null,
+    watchedCurrency1: watchedCurrency1 || null,
+    watchedCurrenciesValid,
+    providerCurrencySetMatchesWatch,
+    fieldFailures,
     externalRequestsAdded: 0,
     stateWritesAdded: 0
   };
@@ -114298,7 +114351,7 @@ function dataCoverageAuditV731(candidate, state, context = {}) {
   }
 
   return {
-    version: "V735_1",
+    version: "V736_1",
     diagnosticOnly: true,
     address,
     evidence,
@@ -114378,7 +114431,7 @@ function dataCoverageSnapshotV731(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
     : [];
-  const detailed = rows.filter(row => row?.dataCoverageAuditV731?.version === "V735_1");
+  const detailed = rows.filter(row => row?.dataCoverageAuditV731?.version === "V736_1");
   const domains = ["market", "directionalUsd", "launchAge", "exactPoolIdentity", "holders", "risk"];
   const providers = ["dexscreener", "geckoMarket", "coinGeckoDemo", "geckoDirectional", "blockscoutHolders", "launchBlockRpc"];
   const classes = ["VERIFIED", "PROVIDER_LIMITED", "DATA_NOT_FOUND", "BUDGET_BLOCKED", "NOT_ATTEMPTED", "VERIFICATION_REJECTED"];
@@ -114386,6 +114439,7 @@ function dataCoverageSnapshotV731(state) {
   const providerCounts = {};
   const statusCounts = {};
   const bridgeStatusCounts = {};
+  const poolFieldIssueCounts = {};
   for (const d of domains) domainCounts[d] = Object.fromEntries(classes.map(c => [c, 0]));
   for (const p of providers) providerCounts[p] = { observed: 0, ...Object.fromEntries(classes.map(c => [c, 0])) };
   for (const row of detailed) {
@@ -114405,16 +114459,28 @@ function dataCoverageSnapshotV731(state) {
     }
     const bridgeStatus = String(d?.poolBridgeV733?.status || "V733_BRIDGE_STATUS_MISSING");
     bridgeStatusCounts[bridgeStatus] = safeNumber(bridgeStatusCounts[bridgeStatus]) + 1;
+    const failures = Array.isArray(d?.poolBridgeV733?.fieldFailures)
+      ? d.poolBridgeV733.fieldFailures
+      : [];
+    for (const reason of failures) {
+      const key = String(reason || "").trim();
+      if (!key) continue;
+      poolFieldIssueCounts[key] = safeNumber(poolFieldIssueCounts[key]) + 1;
+    }
   }
   return {
-    version: "V735",
+    version: "V736",
     diagnosticOnly: true,
     retainedQualificationRows: rows.length,
-    detailedV735Rows: detailed.length,
-    legacyRowsWithoutV735Detail: Math.max(0, rows.length - detailed.length),
+    detailedV736Rows: detailed.length,
+    legacyRowsWithoutV736Detail: Math.max(0, rows.length - detailed.length),
     domainCounts,
     providerCounts,
     bridgeStatusCounts,
+    poolFieldIssueCounts,
+    topPoolFieldIssues: Object.entries(poolFieldIssueCounts)
+      .sort((a,b) => safeNumber(b[1]) - safeNumber(a[1]))
+      .slice(0,16),
     topPoolBridgeStatuses: Object.entries(bridgeStatusCounts)
       .sort((a,b) => safeNumber(b[1]) - safeNumber(a[1]))
       .slice(0,12),
@@ -114433,19 +114499,19 @@ function dataCoverageSnapshotV731(state) {
 
 function dataCoverageTelegramMessageV731(state) {
   const d = dataCoverageSnapshotV731(state);
-  const total = safeNumber(d.detailedV735Rows);
+  const total = safeNumber(d.detailedV736Rows);
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "📡 <b>Free Data Coverage Audit — V735</b>",
+    "📡 <b>Free Data Coverage Audit — V736</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
-    `V735 detailed rows: <b>${fmt(total)}</b>`,
-    `Legacy rows without V735 detail: <b>${fmt(d.legacyRowsWithoutV735Detail)}</b>`,
+    `V736 detailed rows: <b>${fmt(total)}</b>`,
+    `Legacy rows without V736 detail: <b>${fmt(d.legacyRowsWithoutV736Detail)}</b>`,
     ""
   ];
   if (!total) {
-    lines.push("⏳ Forward-only V735 coverage sample is building. No older rows are backfilled or guessed.");
+    lines.push("⏳ Forward-only V736 coverage sample is building. No older rows are backfilled or guessed.");
     return lines.join("\n");
   }
   const label = {
@@ -114481,6 +114547,12 @@ function dataCoverageTelegramMessageV731(state) {
   if (Array.isArray(d.topPoolBridgeStatuses) && d.topPoolBridgeStatuses.length) {
     lines.push("", "🧬 <b>V732 pool-bridge diagnostic</b>");
     for (const [status,count] of d.topPoolBridgeStatuses.slice(0,8)) {
+      lines.push(`• ${escapeHtml(status)}: <b>${fmt(count)}</b>`);
+    }
+  }
+  if (Array.isArray(d.topPoolFieldIssues) && d.topPoolFieldIssues.length) {
+    lines.push("", "🧪 <b>Exact pool-field failures — V736</b>");
+    for (const [status,count] of d.topPoolFieldIssues.slice(0,12)) {
       lines.push(`• ${escapeHtml(status)}: <b>${fmt(count)}</b>`);
     }
   }
@@ -144321,7 +144393,7 @@ async function telegramCommandReplyV271(
         scannerBudgetConsumed: false,
         externalProviderRequests: 0,
         stateWrites: 0,
-        detailedV735Rows: safeNumber(coverageV731?.detailedV735Rows),
+        detailedV736Rows: safeNumber(coverageV731?.detailedV736Rows),
         marketVerified: safeNumber(coverageV731?.domainCounts?.market?.VERIFIED),
         marketProviderLimited: safeNumber(coverageV731?.domainCounts?.market?.PROVIDER_LIMITED),
         directionalVerified: safeNumber(coverageV731?.domainCounts?.directionalUsd?.VERIFIED),
