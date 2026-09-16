@@ -1,4 +1,24 @@
 /**
+ * Robinhood Chain Meme Hunter — V725
+ * AUTHORITATIVE RUNTIME VERSION: V725
+ *
+ * V725 OPPORTUNITY / SIGNAL AUDIT — DIAGNOSTIC ONLY
+ * - builds directly from tested V724;
+ * - adds read-only Telegram /scoreaudit (alias /oppaudit);
+ * - records a compact forward-only per-candidate score diagnostic alongside the existing
+ *   V663 qualification-audit record, piggybacking on the existing state write;
+ * - recomputes the inherited base Opportunity components without changing scoreOpportunity();
+ * - separates points actually earned from evidence that was unavailable and from observed
+ *   zero/negative conditions, so new-launch data starvation can be measured rather than guessed;
+ * - exposes the final calibrated score separately from the recomputed base score and reports
+ *   a mechanical maximum missing-evidence headroom only as diagnostic upper bound, never as
+ *   a predicted/assumed score;
+ * - adds zero provider/RPC requests, zero extra scan passes and zero additional state-write cycles;
+ * - V724 two-stage retry completion, hard 42, provider cooldowns, scoring, Momentum, signal
+ *   rules, holder/risk standards, qualification and Telegram thresholds are unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V724
  * AUTHORITATIVE RUNTIME VERSION: V724
  *
@@ -6309,7 +6329,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V724";
+const VERSION = "V725";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -100939,6 +100959,7 @@ for (
         "/sourceintel",
         "/launchcoverage",
         "/audit7d",
+        "/scoreaudit",
         "/usage",
         "/chainstack",
         "/help"
@@ -112833,6 +112854,360 @@ function pruneQualificationAuditV663(
   return audit;
 }
 
+
+/* =========================================================
+   V725 OPPORTUNITY / SIGNAL AUDIT — DIAGNOSTIC ONLY
+   ========================================================= */
+const SCORE_AUDIT_MISSING_MARKET_V725 = 1;
+const SCORE_AUDIT_MISSING_LAUNCH_V725 = 2;
+const SCORE_AUDIT_MISSING_HOLDER_COUNT_V725 = 4;
+const SCORE_AUDIT_MISSING_CONCENTRATION_V725 = 8;
+const SCORE_AUDIT_MISSING_MOMENTUM_V725 = 16;
+const SCORE_AUDIT_MISSING_QUALITY_V725 = 32;
+const SCORE_AUDIT_MISSING_WHALE_FLOW_V725 = 64;
+
+const SCORE_AUDIT_NO_SWAPS_V725 = 1;
+const SCORE_AUDIT_NO_LIQ_EVENTS_V725 = 2;
+
+const SCORE_AUDIT_COMPONENTS_V725 = [
+  ["ERC20", 20],
+  ["NAME_SYMBOL", 5],
+  ["V4_SWAPS", 10],
+  ["LIQ_EVENTS", 5],
+  ["MARKET_VERIFIED", 10],
+  ["LIQ_5K", 5],
+  ["LIQ_25K", 5],
+  ["VOL_10K", 5],
+  ["VOL_50K", 5],
+  ["BUY_PRESSURE_60", 7],
+  ["MCAP_EARLY_RANGE", 5],
+  ["LAUNCH_JUST", 10],
+  ["LAUNCH_EARLY", 7],
+  ["LAUNCH_EMERGING", 4],
+  ["HOLDERS_50", 4],
+  ["HOLDERS_200", 4],
+  ["HEALTHY_HOLDERS", 5],
+  ["SMART_MONEY_CANDIDATE", 5],
+  ["HIGH_CONCENTRATION_PENALTY", -15],
+  ["MOMENTUM_75", 15],
+  ["MOMENTUM_50", 10],
+  ["MOMENTUM_25", 5],
+  ["QUALITY_40", 10],
+  ["QUALITY_20", 5],
+  ["WHALE_ACCUMULATION", 10],
+  ["WHALE_DISTRIBUTION_PENALTY", -10]
+];
+
+function opportunityScoreAuditV725(candidate) {
+  const token = candidate?.validation || {};
+  const market = candidate?.market || {};
+  const holders = candidate?.holders || {};
+  const activity = candidate?.activity || {};
+  const momentum = candidate?.momentum || {};
+  const quality = candidate?.marketQuality || {};
+  const whaleFlow = candidate?.whaleFlow || {};
+  const launch = candidate?.launchStage || {};
+
+  let raw = 0;
+  let earnedMask = 0;
+  let missingMask = 0;
+  let observedNoActivityMask = 0;
+  let missingPositiveMax = 0;
+
+  const earn = (index) => {
+    const row = SCORE_AUDIT_COMPONENTS_V725[index];
+    if (!row) return;
+    raw += safeNumber(row[1]);
+    earnedMask += 2 ** index;
+  };
+
+  if (token?.validERC20 === true) earn(0);
+  if (token?.name && token?.symbol) earn(1);
+
+  if (safeNumber(activity?.swaps) > 0) earn(2);
+  else observedNoActivityMask |= SCORE_AUDIT_NO_SWAPS_V725;
+
+  if (safeNumber(activity?.liquidityEvents) > 0) earn(3);
+  else observedNoActivityMask |= SCORE_AUDIT_NO_LIQ_EVENTS_V725;
+
+  if (market?.verified === true) {
+    earn(4);
+    if (safeNumber(market?.liquidityUsd) >= 5000) earn(5);
+    if (safeNumber(market?.liquidityUsd) >= 25000) earn(6);
+    if (safeNumber(market?.volume?.h24) >= 10000) earn(7);
+    if (safeNumber(market?.volume?.h24) >= 50000) earn(8);
+    if (market?.buyPressure1h !== null && market?.buyPressure1h !== undefined && safeNumber(market?.buyPressure1h) >= 60) earn(9);
+    if (safeNumber(market?.marketCap) >= 25000 && safeNumber(market?.marketCap) <= 5000000) earn(10);
+  } else {
+    missingMask |= SCORE_AUDIT_MISSING_MARKET_V725;
+    missingPositiveMax += 42;
+  }
+
+  if (launch?.verified === true) {
+    if (launch?.stage === "JUST_LAUNCHED") earn(11);
+    else if (launch?.stage === "VERY_EARLY" || launch?.stage === "EARLY") earn(12);
+    else if (launch?.stage === "EMERGING") earn(13);
+  } else {
+    missingMask |= SCORE_AUDIT_MISSING_LAUNCH_V725;
+    missingPositiveMax += 10;
+  }
+
+  if (holders?.countersVerified === true) {
+    if (safeNumber(holders?.holderCount) >= 50) earn(14);
+    if (safeNumber(holders?.holderCount) >= 200) earn(15);
+  } else {
+    missingMask |= SCORE_AUDIT_MISSING_HOLDER_COUNT_V725;
+    missingPositiveMax += 8;
+  }
+
+  const holderBreadth = healthyHolderBreadthV136(holders);
+  const concentrationVerified =
+    holders?.concentrationVerified === true &&
+    holders?.whale?.verified === true;
+
+  if (holderBreadth?.eligible === true) earn(16);
+  else if (!concentrationVerified) {
+    missingMask |= SCORE_AUDIT_MISSING_CONCENTRATION_V725;
+    missingPositiveMax += 5;
+  }
+
+  if (concentrationVerified) {
+    if (holders?.whale?.smartMoneyCandidate === true) earn(17);
+    if (holders?.whale?.concentrationRisk === "HIGH") earn(18);
+  } else {
+    missingMask |= SCORE_AUDIT_MISSING_CONCENTRATION_V725;
+    /* smart-money bonus is separately unavailable; avoid double-counting breadth */
+    missingPositiveMax += 5;
+  }
+
+  if (momentum?.verified === true) {
+    if (safeNumber(momentum?.score) >= 75) earn(19);
+    else if (safeNumber(momentum?.score) >= 50) earn(20);
+    else if (safeNumber(momentum?.score) >= 25) earn(21);
+  } else {
+    missingMask |= SCORE_AUDIT_MISSING_MOMENTUM_V725;
+    missingPositiveMax += 15;
+  }
+
+  if (quality?.verified === true) {
+    if (safeNumber(quality?.score) >= 40) earn(22);
+    else if (safeNumber(quality?.score) >= 20) earn(23);
+  } else {
+    missingMask |= SCORE_AUDIT_MISSING_QUALITY_V725;
+    missingPositiveMax += 10;
+  }
+
+  if (whaleFlow?.verified === true) {
+    if (whaleFlow?.flow === "NET_ACCUMULATION") earn(24);
+    if (whaleFlow?.flow === "NET_DISTRIBUTION") earn(25);
+  } else {
+    missingMask |= SCORE_AUDIT_MISSING_WHALE_FLOW_V725;
+    missingPositiveMax += 10;
+  }
+
+  const baseScore = clamp(raw, 0, 100);
+  const finalScore = safeNumber(candidate?.opportunity?.score);
+
+  return {
+    version: "V725_1",
+    diagnosticOnly: true,
+    rawBeforeClamp: raw,
+    baseScore,
+    finalScore,
+    calibrationDelta: finalScore - baseScore,
+    earnedMask,
+    missingMask,
+    observedNoActivityMask,
+    missingPositiveMax,
+    mechanicalCeilingWithMissingPositiveEvidence:
+      clamp(baseScore + missingPositiveMax, 0, 100),
+    assumptionsMade: false,
+    scoringChanged: false,
+    qualificationChanged: false,
+    externalRequestsAdded: 0
+  };
+}
+
+function scoreAuditHasBitV725(mask, index) {
+  const n = safeNumber(mask);
+  return Math.floor(n / (2 ** index)) % 2 === 1;
+}
+
+function scoreAuditSnapshotV725(state) {
+  const audit = qualificationAuditSnapshotV663(state);
+  const rows = Array.isArray(state?.qualificationAuditV663?.records)
+    ? state.qualificationAuditV663.records
+    : [];
+
+  const detailed = rows.filter(row => row?.scoreAuditV725?.version === "V725_1");
+  const scoreBands = { lt40: 0, from40to49: 0, from50to59: 0, gte60: 0 };
+  const missing = {
+    market: 0,
+    launch: 0,
+    holderCount: 0,
+    concentration: 0,
+    momentum: 0,
+    quality: 0,
+    whaleFlow: 0
+  };
+  const earnedCounts = Array(SCORE_AUDIT_COMPONENTS_V725.length).fill(0);
+  let noObservedSwaps = 0;
+  let noObservedLiquidityEvents = 0;
+  let sumFinal = 0;
+  let sumBase = 0;
+  let sumMissingHeadroom = 0;
+  let opportunityFailuresDetailed = 0;
+  let opportunityFailuresWithMissingEvidence = 0;
+  let opportunityFailuresNoMissingEvidence = 0;
+
+  for (const row of detailed) {
+    const d = row.scoreAuditV725 || {};
+    const score = safeNumber(d.finalScore);
+    sumFinal += score;
+    sumBase += safeNumber(d.baseScore);
+    sumMissingHeadroom += safeNumber(d.missingPositiveMax);
+
+    if (score < 40) scoreBands.lt40++;
+    else if (score < 50) scoreBands.from40to49++;
+    else if (score < 60) scoreBands.from50to59++;
+    else scoreBands.gte60++;
+
+    const mm = safeNumber(d.missingMask);
+    if (mm & SCORE_AUDIT_MISSING_MARKET_V725) missing.market++;
+    if (mm & SCORE_AUDIT_MISSING_LAUNCH_V725) missing.launch++;
+    if (mm & SCORE_AUDIT_MISSING_HOLDER_COUNT_V725) missing.holderCount++;
+    if (mm & SCORE_AUDIT_MISSING_CONCENTRATION_V725) missing.concentration++;
+    if (mm & SCORE_AUDIT_MISSING_MOMENTUM_V725) missing.momentum++;
+    if (mm & SCORE_AUDIT_MISSING_QUALITY_V725) missing.quality++;
+    if (mm & SCORE_AUDIT_MISSING_WHALE_FLOW_V725) missing.whaleFlow++;
+
+    if (safeNumber(d.observedNoActivityMask) & SCORE_AUDIT_NO_SWAPS_V725) noObservedSwaps++;
+    if (safeNumber(d.observedNoActivityMask) & SCORE_AUDIT_NO_LIQ_EVENTS_V725) noObservedLiquidityEvents++;
+
+    for (let i = 0; i < earnedCounts.length; i++) {
+      if (scoreAuditHasBitV725(d.earnedMask, i)) earnedCounts[i]++;
+    }
+
+    const opportunityFailed = Array.isArray(row?.telegramReasons) && row.telegramReasons.includes("OPPORTUNITY_SCORE");
+    if (opportunityFailed) {
+      opportunityFailuresDetailed++;
+      if (mm > 0) opportunityFailuresWithMissingEvidence++;
+      else opportunityFailuresNoMissingEvidence++;
+    }
+  }
+
+  const topEarned = earnedCounts
+    .map((count, index) => ({
+      component: SCORE_AUDIT_COMPONENTS_V725[index]?.[0] || `COMP_${index}`,
+      points: safeNumber(SCORE_AUDIT_COMPONENTS_V725[index]?.[1]),
+      count
+    }))
+    .filter(row => row.count > 0)
+    .sort((a,b) => b.count - a.count)
+    .slice(0, 8);
+
+  return {
+    version: "V725",
+    diagnosticOnly: true,
+    auditStatus: audit?.status || null,
+    retainedQualificationRows: rows.length,
+    detailedV725Rows: detailed.length,
+    legacyRowsWithoutDetail: Math.max(0, rows.length - detailed.length),
+    scoreBands,
+    averages: detailed.length ? {
+      finalScore: Number((sumFinal / detailed.length).toFixed(1)),
+      baseScore: Number((sumBase / detailed.length).toFixed(1)),
+      missingPositiveMax: Number((sumMissingHeadroom / detailed.length).toFixed(1))
+    } : null,
+    missing,
+    noObservedSwaps,
+    noObservedLiquidityEvents,
+    opportunityFailuresDetailed,
+    opportunityFailuresWithMissingEvidence,
+    opportunityFailuresNoMissingEvidence,
+    topEarned,
+    allAuditTopBlockers: audit?.topBlockers || [],
+    interpretation: {
+      missingPositiveMaxIsMechanicalUpperBoundOnly: true,
+      missingEvidenceIsNeverAssumedPositive: true,
+      scoringChanged: false,
+      qualificationChanged: false,
+      providerRequests: 0,
+      stateWritesFromCommand: 0
+    }
+  };
+}
+
+function scoreAuditTelegramMessageV725(state) {
+  const d = scoreAuditSnapshotV725(state);
+  const fmt = value => safeNumber(value).toLocaleString("en-GB");
+  const pct = (n, total) => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
+  const total = safeNumber(d.detailedV725Rows);
+  const lines = [
+    "🧮 <b>Opportunity / Signal Audit — V725</b>",
+    "",
+    `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
+    `V725 detailed score rows: <b>${fmt(total)}</b>`,
+    `Legacy rows without component detail: <b>${fmt(d.legacyRowsWithoutDetail)}</b>`,
+    `Audit status: <b>${escapeHtml(String(d.auditStatus || "BUILDING"))}</b>`,
+    ""
+  ];
+
+  if (total === 0) {
+    lines.push(
+      "⏳ <b>Forward-only detail is building.</b>",
+      "V725 does not invent/backfill component evidence for older V663 rows. New verified-launch evaluations will populate this diagnostic automatically.",
+      "",
+      "Existing /audit7d blocker totals remain valid; /scoreaudit adds the component-level split from V725 onward."
+    );
+    return lines.join("\n");
+  }
+
+  lines.push(
+    `Average final Opportunity: <b>${d.averages.finalScore}/100</b>`,
+    `Average recomputed base: <b>${d.averages.baseScore}/100</b>`,
+    `Average missing-positive mechanical headroom*: <b>+${d.averages.missingPositiveMax}</b>`,
+    "",
+    "📊 <b>Final-score distribution</b>",
+    `• &lt;40: <b>${fmt(d.scoreBands.lt40)}</b>`,
+    `• 40–49: <b>${fmt(d.scoreBands.from40to49)}</b>`,
+    `• 50–59: <b>${fmt(d.scoreBands.from50to59)}</b>`,
+    `• 60+: <b>${fmt(d.scoreBands.gte60)}</b>`,
+    "",
+    "🧩 <b>Missing evidence among V725 rows</b>",
+    `• Market: <b>${fmt(d.missing.market)}</b> (${pct(d.missing.market,total)})`,
+    `• Verified launch age/stage: <b>${fmt(d.missing.launch)}</b> (${pct(d.missing.launch,total)})`,
+    `• Holder count: <b>${fmt(d.missing.holderCount)}</b> (${pct(d.missing.holderCount,total)})`,
+    `• Holder concentration: <b>${fmt(d.missing.concentration)}</b> (${pct(d.missing.concentration,total)})`,
+    `• Momentum: <b>${fmt(d.missing.momentum)}</b> (${pct(d.missing.momentum,total)})`,
+    `• Market quality: <b>${fmt(d.missing.quality)}</b> (${pct(d.missing.quality,total)})`,
+    `• Whale flow: <b>${fmt(d.missing.whaleFlow)}</b> (${pct(d.missing.whaleFlow,total)})`,
+    "",
+    `No bot-observed V4 swaps: <b>${fmt(d.noObservedSwaps)}</b> (${pct(d.noObservedSwaps,total)})`,
+    `No bot-observed liquidity events: <b>${fmt(d.noObservedLiquidityEvents)}</b> (${pct(d.noObservedLiquidityEvents,total)})`,
+    "",
+    "🎯 <b>Opportunity-score failures</b>",
+    `Detailed failures: <b>${fmt(d.opportunityFailuresDetailed)}</b>`,
+    `↳ with ≥1 missing score evidence group: <b>${fmt(d.opportunityFailuresWithMissingEvidence)}</b>`,
+    `↳ with score evidence groups present: <b>${fmt(d.opportunityFailuresNoMissingEvidence)}</b>`
+  );
+
+  if (Array.isArray(d.topEarned) && d.topEarned.length) {
+    lines.push("", "✅ <b>Most commonly earned components</b>");
+    for (const row of d.topEarned.slice(0,6)) {
+      lines.push(`• ${escapeHtml(row.component)} (${row.points >= 0 ? "+" : ""}${row.points}): <b>${fmt(row.count)}</b>`);
+    }
+  }
+
+  lines.push(
+    "",
+    "*Mechanical headroom is the maximum positive points attached to evidence groups that were unavailable. It does <b>not</b> assume that missing evidence would have been positive.",
+    "<i>Read-only command. Zero provider requests, zero state writes, no scoring or Telegram threshold changes.</i>"
+  );
+
+  return lines.join("\n");
+}
+
 function qualificationAuditEvidenceOnlyV663(
   row
 ) {
@@ -113000,6 +113375,10 @@ function updateQualificationAuditV663(
         safeNumber(
           row?.signalCount
         ),
+      scoreAuditV725:
+        row?.scoreAuditV725 && typeof row.scoreAuditV725 === "object"
+          ? row.scoreAuditV725
+          : previous?.scoreAuditV725 || null,
       marketStatus:
         row?.marketStatus || null,
       holderStatus:
@@ -139912,6 +140291,8 @@ function buildLaunchCoverageFunnelV474({
             candidate?.holders?.whale?.verified === true,
           signalCount:
             safeNumber(candidate?.signalConfirmation?.signals),
+          scoreAuditV725:
+            opportunityScoreAuditV725(candidate),
           marketStatus:
             candidate?.market?.status || null,
           holderStatus:
@@ -141204,6 +141585,7 @@ function telegramHelpV271() {
     "<code>/sourceintel</code> — self-learned source identity + seeded lead correlation",
     "<code>/launchcoverage</code> — launch discovery-to-Telegram coverage funnel",
     "<code>/audit7d</code> — forward 7-day verified-launch qualification audit",
+    "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -142252,6 +142634,27 @@ async function telegramCommandReplyV271(
             auditV663
               ?.evidenceOnlyUnresolved
           )
+      };
+    }
+  } else if (
+    parsed.command === "/scoreaudit" ||
+    parsed.command === "/oppaudit"
+  ) {
+    reply = scoreAuditTelegramMessageV725(state);
+
+    if (diagnosticV273) {
+      const scoreAuditV725 = scoreAuditSnapshotV725(state);
+      diagnosticV273.scoreAuditV725 = {
+        scannerBudgetConsumed: false,
+        externalProviderRequests: 0,
+        stateWrites: 0,
+        detailedV725Rows: safeNumber(scoreAuditV725?.detailedV725Rows),
+        legacyRowsWithoutDetail: safeNumber(scoreAuditV725?.legacyRowsWithoutDetail),
+        opportunityFailuresDetailed: safeNumber(scoreAuditV725?.opportunityFailuresDetailed),
+        opportunityFailuresWithMissingEvidence: safeNumber(scoreAuditV725?.opportunityFailuresWithMissingEvidence),
+        opportunityFailuresNoMissingEvidence: safeNumber(scoreAuditV725?.opportunityFailuresNoMissingEvidence),
+        scoringChanged: false,
+        qualificationChanged: false
       };
     }
   } else if (
