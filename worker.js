@@ -1,4 +1,20 @@
 /**
+ * Robinhood Chain Meme Hunter — V724
+ * AUTHORITATIVE RUNTIME VERSION: V724
+ *
+ * V724 RETRY-QUEUE QUALIFICATION FOLLOW-UP
+ * - builds directly from tested V723;
+ * - keeps the existing V723 two-stage Durable Object qualification architecture;
+ * - broadens the one-shot follow-up trigger so unfinished persisted candidates get a
+ *   fresh qualification invocation when the primary scan either hits Cloudflare's
+ *   physical subrequest circuit OR reaches >=40/42 logical requests with retries left;
+ * - the follow-up still skips live discovery/backlog and cannot recursively arm itself;
+ * - hard 42 logical request ceiling per invocation, provider cooldowns, scoring,
+ *   holder/risk standards, V720 live qualification protection, V721 on-chain market
+ *   rescue, V722 fail-closed circuit behaviour and Telegram thresholds are unchanged.
+ */
+
+/**
  * Robinhood Chain Meme Hunter — V723
  * AUTHORITATIVE RUNTIME VERSION: V723
  *
@@ -6293,7 +6309,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V723";
+const VERSION = "V724";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -151124,25 +151140,39 @@ export class ScanSchedulerV673 {
         { scheduled: false }
       );
 
-      const followUpNeededV723 =
-        result?.requestBudget?.cloudflareSubrequestCircuitV722?.open === true &&
-        safeNumber(result?.scannerFunnelV415?.retryQueueAfterAnalysis) > 0;
+      const retryQueueAfterAnalysisV724 =
+        safeNumber(result?.scannerFunnelV415?.retryQueueAfterAnalysis);
+      const requestsUsedV724 =
+        safeNumber(result?.requestBudget?.used);
+      const physicalCircuitOpenV724 =
+        result?.requestBudget?.cloudflareSubrequestCircuitV722?.open === true;
+      const logicalBudgetNearExhaustedV724 =
+        requestsUsedV724 >= 40;
+      const followUpNeededV724 =
+        retryQueueAfterAnalysisV724 > 0 &&
+        (physicalCircuitOpenV724 || logicalBudgetNearExhaustedV724);
 
-      if (followUpNeededV723) {
-        const followUpAtV723 = Date.now() + 1500;
+      if (followUpNeededV724) {
+        const followUpAtV724 = Date.now() + 1500;
+        const followUpReasonV724 = physicalCircuitOpenV724
+          ? "CLOUDFLARE_SUBREQUEST_CIRCUIT_WITH_RETRY_QUEUE_V724"
+          : "LOGICAL_BUDGET_NEAR_EXHAUSTED_WITH_RETRY_QUEUE_V724";
         await this.state.storage.put("v723:qualificationFollowup", {
           pending: true,
           armedAt: Date.now(),
-          source: "MANUAL_PRIMARY_SCAN",
-          retryQueueAfterAnalysis:
-            safeNumber(result?.scannerFunnelV415?.retryQueueAfterAnalysis)
+          source: "MANUAL_PRIMARY_SCAN_V724",
+          retryQueueAfterAnalysis: retryQueueAfterAnalysisV724,
+          requestsUsed: requestsUsedV724,
+          triggerReason: followUpReasonV724
         });
-        await this.state.storage.setAlarm(followUpAtV723);
+        await this.state.storage.setAlarm(followUpAtV724);
         result.v723TwoStageQualification = {
           ...(result.v723TwoStageQualification || {}),
           followUpArmed: true,
-          followUpAt: followUpAtV723,
-          followUpReason: "CLOUDFLARE_SUBREQUEST_CIRCUIT_WITH_RETRY_QUEUE_V723"
+          followUpAt: followUpAtV724,
+          followUpReason: followUpReasonV724,
+          v724RetryQueueTrigger: true,
+          v724RequestsUsedAtArm: requestsUsedV724
         };
       }
 
@@ -151220,26 +151250,41 @@ export class ScanSchedulerV673 {
 
     const completedAt = Date.now();
 
-    const followUpNeededV723 =
+    const retryQueueAfterAnalysisV724 =
+      safeNumber(result?.scannerFunnelV415?.retryQueueAfterAnalysis);
+    const requestsUsedV724 =
+      safeNumber(result?.requestBudget?.used);
+    const physicalCircuitOpenV724 =
+      result?.requestBudget?.cloudflareSubrequestCircuitV722?.open === true;
+    const logicalBudgetNearExhaustedV724 =
+      requestsUsedV724 >= 40;
+    const followUpNeededV724 =
       !qualificationFollowUpV723 &&
       !failure &&
-      result?.requestBudget?.cloudflareSubrequestCircuitV722?.open === true &&
-      safeNumber(result?.scannerFunnelV415?.retryQueueAfterAnalysis) > 0;
+      retryQueueAfterAnalysisV724 > 0 &&
+      (physicalCircuitOpenV724 || logicalBudgetNearExhaustedV724);
+    const followUpReasonV724 =
+      followUpNeededV724
+        ? (physicalCircuitOpenV724
+            ? "CLOUDFLARE_SUBREQUEST_CIRCUIT_WITH_RETRY_QUEUE_V724"
+            : "LOGICAL_BUDGET_NEAR_EXHAUSTED_WITH_RETRY_QUEUE_V724")
+        : null;
 
     const nextAlarmAt =
-      followUpNeededV723
+      followUpNeededV724
         ? completedAt + 1500
         : nextAlignedScanBoundaryV684(
             completedAt
           );
 
-    if (followUpNeededV723) {
+    if (followUpNeededV724) {
       await this.state.storage.put("v723:qualificationFollowup", {
         pending: true,
         armedAt: completedAt,
-        source: "SCHEDULED_PRIMARY_SCAN",
-        retryQueueAfterAnalysis:
-          safeNumber(result?.scannerFunnelV415?.retryQueueAfterAnalysis)
+        source: "SCHEDULED_PRIMARY_SCAN_V724",
+        retryQueueAfterAnalysis: retryQueueAfterAnalysisV724,
+        requestsUsed: requestsUsedV724,
+        triggerReason: followUpReasonV724
       });
     }
 
@@ -151266,9 +151311,17 @@ export class ScanSchedulerV673 {
           ? "QUALIFICATION_FOLLOWUP"
           : "PRIMARY_SCAN",
       v723FollowUpArmed:
-        followUpNeededV723,
+        followUpNeededV724,
       v723RetryQueueAfterAnalysis:
-        safeNumber(result?.scannerFunnelV415?.retryQueueAfterAnalysis),
+        retryQueueAfterAnalysisV724,
+      v724FollowUpArmed:
+        followUpNeededV724,
+      v724FollowUpReason:
+        followUpReasonV724,
+      v724RequestsUsed:
+        requestsUsedV724,
+      v724RetryQueueAfterAnalysis:
+        retryQueueAfterAnalysisV724,
       nextAlarmAt,
       nextAlarmAlignedV684:
         isAlignedScanBoundaryV684(
@@ -151284,8 +151337,9 @@ export class ScanSchedulerV673 {
       console.error("V673_SCHEDULER_STATUS_WRITE_FAILED", errorString(error));
     }
 
-    // V723 may arm one immediate qualification follow-up after a physically exhausted
-    // primary scan; otherwise retain the exact five-minute wall-clock cadence.
+    // V724 may arm one immediate qualification follow-up when a primary scan leaves
+    // persisted retries after either physical exhaustion or >=40/42 logical requests;
+    // otherwise retain the exact five-minute wall-clock cadence.
     // We deliberately catch scan failures above so Cloudflare alarm retries cannot
     // create duplicate scans.
     await this.state.storage.setAlarm(nextAlarmAt);
