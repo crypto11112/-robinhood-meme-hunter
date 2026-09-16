@@ -1,6 +1,16 @@
 /**
- * Robinhood Chain Meme Hunter — V731
- * AUTHORITATIVE RUNTIME VERSION: V731
+ * Robinhood Chain Meme Hunter — V732
+ * AUTHORITATIVE RUNTIME VERSION: V732
+ *
+ * V732 VERIFIED GECKO-POOL IDENTITY BRIDGE
+ * - Builds directly forward from V731.
+ * - Preserves V731 free-data coverage diagnostics, scoring, Momentum, qualification, Telegram thresholds, provider cadence/cooldowns and hard 42-request ceiling.
+ * - Fixes the structural NO_KNOWN_QUOTE_V4_POOL dead-end without weakening canonical-USD rules: when a VERIFIED GeckoTerminal/CoinGecko Demo market row names an exact 32-byte V4 PoolId and its base/quote addresses exactly match the already-decoded on-chain PoolKey currencies, that immutable pool identity may be persisted and reused.
+ * - The bridge records Gecko's exact BASE/QUOTE orientation for later pool-trade queries even when the counter-token is not canonical USDG/WETH/native.
+ * - It does NOT make an arbitrary counter-token a trusted USD quote, does NOT expand knownQuote(), and does NOT make V254 historical exact-USD pricing eligible. Canonical/raw exact-USD maths remain unchanged.
+ * - Persisted V732 identity is revalidated against the watched PoolId + on-chain currencies before every reuse; no address-only, symbol-only or guessed promotion is allowed.
+ * - Zero extra provider/RPC requests. No new request slot. Hard global limit remains 42.
+ * - V731 /datacoverage remains read-only but starts a clean forward-only V732 sample so the effect can be measured.
  *
  * V731 FREE-DATA COVERAGE AUDIT — DIAGNOSTIC ONLY
  * - builds directly from deployed V730 with no scanner/scoring/provider-routing behaviour change;
@@ -6417,7 +6427,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V731";
+const VERSION = "V732";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -47399,8 +47409,265 @@ function activeTokensFromLogs(
 }
 
 
+function geckoCompatibleMarketSourceV732(source) {
+  const s = String(source || "").toUpperCase();
+  return (
+    s.includes("GECKOTERMINAL") ||
+    s.includes("COINGECKO_DEMO")
+  );
+}
+
+function exactGeckoProviderPoolIdentityV732(
+  watched,
+  market
+) {
+  const token = normalize(watched?.address);
+  const source = String(market?.source || "");
+
+  if (
+    !isAddress(token) ||
+    token === ZERO ||
+    knownQuote(token) ||
+    market?.verified !== true ||
+    !geckoCompatibleMarketSourceV732(source)
+  ) {
+    return {
+      verified: false,
+      status: "V732_PROVIDER_MARKET_NOT_ELIGIBLE"
+    };
+  }
+
+  const poolId = normalize(market?.pairAddress);
+  const baseTokenAddress = normalize(market?.baseTokenAddress);
+  const quoteTokenAddressProvider = normalize(market?.quoteTokenAddress);
+  const targetTokenSide = String(market?.targetTokenSide || "").toUpperCase();
+
+  if (
+    !/^0x[a-f0-9]{64}$/.test(String(poolId || "")) ||
+    !isAddress(baseTokenAddress) ||
+    !isAddress(quoteTokenAddressProvider) ||
+    baseTokenAddress === quoteTokenAddressProvider ||
+    !["BASE", "QUOTE"].includes(targetTokenSide)
+  ) {
+    return {
+      verified: false,
+      status: "V732_PROVIDER_POOL_FIELDS_UNVERIFIED"
+    };
+  }
+
+  const candidateIsBase = baseTokenAddress === token;
+  const candidateIsQuote = quoteTokenAddressProvider === token;
+
+  if (
+    (!candidateIsBase && !candidateIsQuote) ||
+    (candidateIsBase && targetTokenSide !== "BASE") ||
+    (candidateIsQuote && targetTokenSide !== "QUOTE")
+  ) {
+    return {
+      verified: false,
+      status: "V732_PROVIDER_CANDIDATE_SIDE_MISMATCH"
+    };
+  }
+
+  const pool = (Array.isArray(watched?.pools) ? watched.pools : [])
+    .find(row => normalize(row?.poolId) === poolId);
+
+  if (!pool) {
+    return {
+      verified: false,
+      status: "V732_PROVIDER_POOL_NOT_IN_WATCH",
+      poolId
+    };
+  }
+
+  const currency0 = normalize(pool?.currency0);
+  const currency1 = normalize(pool?.currency1);
+
+  if (
+    !isAddress(currency0) ||
+    !isAddress(currency1) ||
+    currency0 === currency1
+  ) {
+    return {
+      verified: false,
+      status: "V732_WATCHED_POOL_CURRENCIES_UNVERIFIED",
+      poolId
+    };
+  }
+
+  const sameCurrencySet =
+    (
+      currency0 === baseTokenAddress &&
+      currency1 === quoteTokenAddressProvider
+    ) ||
+    (
+      currency0 === quoteTokenAddressProvider &&
+      currency1 === baseTokenAddress
+    );
+
+  if (!sameCurrencySet) {
+    return {
+      verified: false,
+      status: "V732_PROVIDER_ONCHAIN_CURRENCY_MISMATCH",
+      poolId
+    };
+  }
+
+  const counterTokenAddress = candidateIsBase
+    ? quoteTokenAddressProvider
+    : baseTokenAddress;
+
+  if (!isAddress(counterTokenAddress) || counterTokenAddress === token) {
+    return {
+      verified: false,
+      status: "V732_COUNTER_TOKEN_UNVERIFIED",
+      poolId
+    };
+  }
+
+  return {
+    verified: true,
+    status: "ONCHAIN_V4_POOL_IDENTITY_PROVIDER_CORROBORATED_V732",
+    source: "GECKO_EXACT_POOL_X_ONCHAIN_POOLKEY_V732",
+    providerSource: source,
+    providerCorroboratedV732: true,
+    poolId,
+    pairAddress: poolId,
+    candidateAddress: token,
+    quoteTokenAddress: counterTokenAddress,
+    providerBaseTokenAddress: baseTokenAddress,
+    providerQuoteTokenAddress: quoteTokenAddressProvider,
+    nativeQuote: counterTokenAddress === ZERO,
+    canonicalQuote:
+      counterTokenAddress === ZERO ||
+      knownQuote(counterTokenAddress),
+    targetTokenSide,
+    blockNumber: pool?.blockNumber || null,
+    transactionHash: pool?.transactionHash || null,
+    verifiedAt: Date.now(),
+    usdQuotePromotionAllowedV732: false,
+    exactUsdHistoryPromotionAllowedV732: false
+  };
+}
+
+function persistProviderPoolIdentityV732(watched, identity) {
+  if (
+    !watched ||
+    typeof watched !== "object" ||
+    identity?.verified !== true ||
+    identity?.providerCorroboratedV732 !== true
+  ) {
+    return false;
+  }
+
+  const previous = watched?.providerCorroboratedPoolIdentityV732;
+  const nowMs = Date.now();
+
+  watched.providerCorroboratedPoolIdentityV732 = {
+    ...identity,
+    firstVerifiedAt:
+      normalize(previous?.poolId) === normalize(identity?.poolId)
+        ? (safeNumber(previous?.firstVerifiedAt) || nowMs)
+        : nowMs,
+    lastVerifiedAt: nowMs,
+    verifiedAt: nowMs
+  };
+
+  return true;
+}
+
+function persistedProviderPoolIdentityV732(watched) {
+  const token = normalize(watched?.address);
+  const stored = watched?.providerCorroboratedPoolIdentityV732;
+
+  if (
+    !isAddress(token) ||
+    stored?.verified !== true ||
+    stored?.providerCorroboratedV732 !== true ||
+    !geckoCompatibleMarketSourceV732(stored?.providerSource)
+  ) {
+    return null;
+  }
+
+  const poolId = normalize(stored?.poolId);
+  const providerBaseTokenAddress = normalize(stored?.providerBaseTokenAddress);
+  const providerQuoteTokenAddress = normalize(stored?.providerQuoteTokenAddress);
+  const targetTokenSide = String(stored?.targetTokenSide || "").toUpperCase();
+
+  if (
+    !/^0x[a-f0-9]{64}$/.test(String(poolId || "")) ||
+    !isAddress(providerBaseTokenAddress) ||
+    !isAddress(providerQuoteTokenAddress) ||
+    !["BASE", "QUOTE"].includes(targetTokenSide)
+  ) {
+    return null;
+  }
+
+  const candidateIsBase = providerBaseTokenAddress === token;
+  const candidateIsQuote = providerQuoteTokenAddress === token;
+
+  if (
+    (!candidateIsBase && !candidateIsQuote) ||
+    (candidateIsBase && targetTokenSide !== "BASE") ||
+    (candidateIsQuote && targetTokenSide !== "QUOTE")
+  ) {
+    return null;
+  }
+
+  const pool = (Array.isArray(watched?.pools) ? watched.pools : [])
+    .find(row => normalize(row?.poolId) === poolId);
+
+  if (!pool) return null;
+
+  const currency0 = normalize(pool?.currency0);
+  const currency1 = normalize(pool?.currency1);
+
+  const sameCurrencySet =
+    isAddress(currency0) &&
+    isAddress(currency1) &&
+    (
+      (
+        currency0 === providerBaseTokenAddress &&
+        currency1 === providerQuoteTokenAddress
+      ) ||
+      (
+        currency0 === providerQuoteTokenAddress &&
+        currency1 === providerBaseTokenAddress
+      )
+    );
+
+  if (!sameCurrencySet) return null;
+
+  const counterTokenAddress = candidateIsBase
+    ? providerQuoteTokenAddress
+    : providerBaseTokenAddress;
+
+  if (!isAddress(counterTokenAddress) || counterTokenAddress === token) {
+    return null;
+  }
+
+  return {
+    ...stored,
+    verified: true,
+    status: "ONCHAIN_V4_POOL_IDENTITY_PROVIDER_CORROBORATED_REUSED_V732",
+    source: "PERSISTED_GECKO_EXACT_POOL_X_ONCHAIN_POOLKEY_V732",
+    poolId,
+    pairAddress: poolId,
+    candidateAddress: token,
+    quoteTokenAddress: counterTokenAddress,
+    nativeQuote: counterTokenAddress === ZERO,
+    canonicalQuote:
+      counterTokenAddress === ZERO ||
+      knownQuote(counterTokenAddress),
+    targetTokenSide,
+    usdQuotePromotionAllowedV732: false,
+    exactUsdHistoryPromotionAllowedV732: false
+  };
+}
+
 function onChainPoolIdentityV153(
-  watched
+  watched,
+  market = null
 ) {
   const token =
     normalize(
@@ -47493,6 +47760,32 @@ function onChainPoolIdentityV153(
   }
 
   if (!matches.length) {
+    const currentProviderIdentityV732 =
+      exactGeckoProviderPoolIdentityV732(
+        watched,
+        market
+      );
+
+    if (
+      currentProviderIdentityV732?.verified === true
+    ) {
+      persistProviderPoolIdentityV732(
+        watched,
+        currentProviderIdentityV732
+      );
+
+      return currentProviderIdentityV732;
+    }
+
+    const persistedProviderIdentityV732 =
+      persistedProviderPoolIdentityV732(
+        watched
+      );
+
+    if (persistedProviderIdentityV732) {
+      return persistedProviderIdentityV732;
+    }
+
     return {
       verified: false,
       status:
@@ -80920,7 +81213,8 @@ async function analyzeToken(
 
   const onChainPoolIdentity =
     onChainPoolIdentityV153(
-      watched
+      watched,
+      market
     );
 
   const onChainMarketEvidence =
@@ -113861,7 +114155,7 @@ function dataCoverageAuditV731(candidate, state, context = {}) {
   }
 
   return {
-    version: "V731_1",
+    version: "V732_1",
     diagnosticOnly: true,
     address,
     evidence,
@@ -113940,7 +114234,7 @@ function dataCoverageSnapshotV731(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
     : [];
-  const detailed = rows.filter(row => row?.dataCoverageAuditV731?.version === "V731_1");
+  const detailed = rows.filter(row => row?.dataCoverageAuditV731?.version === "V732_1");
   const domains = ["market", "directionalUsd", "launchAge", "exactPoolIdentity", "holders", "risk"];
   const providers = ["dexscreener", "geckoMarket", "coinGeckoDemo", "geckoDirectional", "blockscoutHolders", "launchBlockRpc"];
   const classes = ["VERIFIED", "PROVIDER_LIMITED", "DATA_NOT_FOUND", "BUDGET_BLOCKED", "NOT_ATTEMPTED", "VERIFICATION_REJECTED"];
@@ -113966,11 +114260,11 @@ function dataCoverageSnapshotV731(state) {
     }
   }
   return {
-    version: "V731",
+    version: "V732",
     diagnosticOnly: true,
     retainedQualificationRows: rows.length,
-    detailedV731Rows: detailed.length,
-    legacyRowsWithoutV731Detail: Math.max(0, rows.length - detailed.length),
+    detailedV732Rows: detailed.length,
+    legacyRowsWithoutV732Detail: Math.max(0, rows.length - detailed.length),
     domainCounts,
     providerCounts,
     topObservedStatuses: Object.entries(statusCounts)
@@ -113988,19 +114282,19 @@ function dataCoverageSnapshotV731(state) {
 
 function dataCoverageTelegramMessageV731(state) {
   const d = dataCoverageSnapshotV731(state);
-  const total = safeNumber(d.detailedV731Rows);
+  const total = safeNumber(d.detailedV732Rows);
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "📡 <b>Free Data Coverage Audit — V731</b>",
+    "📡 <b>Free Data Coverage Audit — V732</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
-    `V731 detailed rows: <b>${fmt(total)}</b>`,
-    `Legacy rows without V731 detail: <b>${fmt(d.legacyRowsWithoutV731Detail)}</b>`,
+    `V732 detailed rows: <b>${fmt(total)}</b>`,
+    `Legacy rows without V732 detail: <b>${fmt(d.legacyRowsWithoutV732Detail)}</b>`,
     ""
   ];
   if (!total) {
-    lines.push("⏳ Forward-only V731 coverage sample is building. No older rows are backfilled or guessed.");
+    lines.push("⏳ Forward-only V732 coverage sample is building. No older rows are backfilled or guessed.");
     return lines.join("\n");
   }
   const label = {
@@ -142807,7 +143101,7 @@ function telegramHelpV271() {
     "<code>/audit7d</code> — forward 7-day verified-launch qualification audit",
     "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
     "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
-    "<code>/datacoverage</code> — V731 free-provider/data coverage audit (read-only)",
+    "<code>/datacoverage</code> — V732 free-provider/data coverage audit (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -143870,7 +144164,7 @@ async function telegramCommandReplyV271(
         scannerBudgetConsumed: false,
         externalProviderRequests: 0,
         stateWrites: 0,
-        detailedV731Rows: safeNumber(coverageV731?.detailedV731Rows),
+        detailedV732Rows: safeNumber(coverageV731?.detailedV732Rows),
         marketVerified: safeNumber(coverageV731?.domainCounts?.market?.VERIFIED),
         marketProviderLimited: safeNumber(coverageV731?.domainCounts?.market?.PROVIDER_LIMITED),
         directionalVerified: safeNumber(coverageV731?.domainCounts?.directionalUsd?.VERIFIED),
