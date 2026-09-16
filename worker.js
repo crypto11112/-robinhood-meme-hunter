@@ -1,6 +1,17 @@
 /**
- * Robinhood Chain Meme Hunter — V727
- * AUTHORITATIVE RUNTIME VERSION: V727
+ * Robinhood Chain Meme Hunter — V728
+ * AUTHORITATIVE RUNTIME VERSION: V728
+ *
+ * V728 PRE-SCORE EVIDENCE-COMPLETION RESTORATION
+ * - builds directly from deployed V727 and preserves /evidenceaudit;
+ * - restores one protected late evidence-completion request inside the existing hard 42 cap;
+ * - the protected request may be used only for launch-block timestamp recovery or the existing Gecko directional-trade completion path;
+ * - lower-priority analysis cannot consume that final protected pre-Telegram slot when a current/live positively verified launch is present;
+ * - V175 enrichment no longer requires Opportunity >=60 / Confidence >=55 for the single current/live positively verified launch target: verified market/pool identity and non-terminal risk remain mandatory;
+ * - successful enrichment still has to pass the existing strict USD verification and the normal Momentum/Opportunity/Confidence/Telegram gates afterwards;
+ * - does NOT lower Opportunity, Confidence, Risk, liquidity, holder, signal or Telegram thresholds;
+ * - does NOT infer launch age, directional USD or pool identity;
+ * - provider cooldowns, one-Gecko-fresh-per-scan rule, notification reserve and hard 42 cap remain authoritative.
  *
  * V727 EVIDENCE-COMPLETION REGRESSION AUDIT — DIAGNOSTIC ONLY
  * - builds directly from deployed V726;
@@ -6375,7 +6386,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V727";
+const VERSION = "V728";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12880,6 +12891,27 @@ function createBudget() {
         verificationRuleChanged: false
       },
 
+      evidenceCompletionReserveV728: {
+        enabled: true,
+        active: false,
+        reservedRequests: 0,
+        initialReservedRequests: 0,
+        configuredAt: null,
+        consumed: 0,
+        consumedTypes: {},
+        lowerPriorityRequestsBlocked: 0,
+        lastBlockedType: null,
+        lastBlockedAt: null,
+        lastConsumedType: null,
+        lastConsumedAt: null,
+        releasedAt: null,
+        releaseReason: null,
+        hardRequestLimitRaised: false,
+        analysisLimitRaised: false,
+        notificationReserveChanged: false,
+        rule: "ONE_PRE_TELEGRAM_COMPLETION_SLOT_FOR_CURRENT_LIVE_VERIFIED_LAUNCH_V728"
+      },
+
       directionalWatchReserveV553: {
         enabled: true,
         active: false,
@@ -15738,12 +15770,148 @@ function priorityHolderProFinalBudgetAvailableV677(
   );
 }
 
+function configureEvidenceCompletionReserveV728(
+  budget,
+  active
+) {
+  const r =
+    budget?.analysis?.evidenceCompletionReserveV728;
+
+  if (!r) return null;
+
+  r.enabled = true;
+  r.active = active === true;
+  r.initialReservedRequests = r.active ? 1 : 0;
+  r.reservedRequests = r.active ? 1 : 0;
+  r.configuredAt = Date.now();
+  r.releaseReason = r.active
+    ? null
+    : "NO_CURRENT_LIVE_VERIFIED_LAUNCH_V728";
+  r.hardRequestLimitRaised = false;
+  r.analysisLimitRaised = false;
+  r.notificationReserveChanged = false;
+
+  return r;
+}
+
+function evidenceCompletionRequestV728(type) {
+  const key = String(type || "");
+  return Boolean(
+    key === "RPC:eth_getBlockByNumber" ||
+    key === "GECKOTERMINAL_DIRECTIONAL_TRADES"
+  );
+}
+
+function preTelegramGlobalLimitV728(budget) {
+  const notificationReserveRemaining =
+    budget?.notification?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(budget?.notification?.limit) -
+            safeNumber(budget?.notification?.used)
+        )
+      : 0;
+
+  return Math.max(
+    0,
+    safeNumber(budget?.totalLimit) -
+      notificationReserveRemaining
+  );
+}
+
+function tryConsumeEvidenceCompletionReserveV728(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  if (phase !== "analysis") return null;
+
+  const r =
+    budget?.analysis?.evidenceCompletionReserveV728;
+
+  if (
+    r?.enabled !== true ||
+    r?.active !== true ||
+    safeNumber(r?.reservedRequests) <= 0
+  ) {
+    return null;
+  }
+
+  const needed = Math.max(1, safeNumber(amount));
+  const allowed = evidenceCompletionRequestV728(type);
+  const limit = preTelegramGlobalLimitV728(budget);
+
+  if (allowed) {
+    if (
+      needed > safeNumber(r.reservedRequests) ||
+      safeNumber(budget?.totalUsed) + needed > limit
+    ) {
+      return null;
+    }
+
+    budget.totalUsed += needed;
+    budget.analysis.used += needed;
+    r.reservedRequests = Math.max(
+      0,
+      safeNumber(r.reservedRequests) - needed
+    );
+    r.consumed = safeNumber(r.consumed) + needed;
+    r.consumedTypes =
+      r.consumedTypes && typeof r.consumedTypes === "object"
+        ? r.consumedTypes
+        : {};
+    const key = String(type || "UNKNOWN");
+    r.consumedTypes[key] = safeNumber(r.consumedTypes[key]) + needed;
+    r.lastConsumedType = key;
+    r.lastConsumedAt = Date.now();
+    if (r.reservedRequests <= 0) {
+      r.active = false;
+      r.releasedAt = Date.now();
+      r.releaseReason = "V728_COMPLETION_SLOT_CONSUMED";
+    }
+    return true;
+  }
+
+  if (
+    safeNumber(budget?.totalUsed) + needed >
+      Math.max(0, limit - safeNumber(r.reservedRequests))
+  ) {
+    r.lowerPriorityRequestsBlocked =
+      safeNumber(r.lowerPriorityRequestsBlocked) + 1;
+    r.lastBlockedType = String(type || "UNKNOWN");
+    r.lastBlockedAt = Date.now();
+    budget.skipped.push({
+      phase,
+      type,
+      amount: needed,
+      reason: "V728_EVIDENCE_COMPLETION_SLOT_RESERVED",
+      reservedRequests: safeNumber(r.reservedRequests)
+    });
+    return false;
+  }
+
+  return null;
+}
+
 function consumeBudget(
   budget,
   phase,
   type,
   amount = 1
 ) {
+  const completionReserveDecisionV728 =
+    tryConsumeEvidenceCompletionReserveV728(
+      budget,
+      phase,
+      type,
+      amount
+    );
+
+  if (completionReserveDecisionV728 !== null) {
+    return completionReserveDecisionV728;
+  }
+
   /*
    * V699: the V690 upstream lane now protects the bounded remaining ERC20
    * identity sequence calculated by V655/V675 (max 5), rather than one slot.
@@ -89519,8 +89687,9 @@ for (
     attempted: false,
     verifiedAnyWindow: false,
     status: "NO_EARLY_DIRECTIONAL_TARGET",
-    opportunityMinimum: 60,
-    confidenceMinimum: 55,
+    opportunityMinimum: null,
+    confidenceMinimum: null,
+    v728CurrentLiveVerifiedLaunchPreScoreCompletion: true,
     oneGeckoFreshPerScanPreserved: true,
     strictUsdVerificationPreserved: true,
     noExternalRequestRateIncrease: true
@@ -90253,6 +90422,12 @@ for (
       currentLiveVerifiedLaunchTokensV621
     );
 
+  const v728EvidenceCompletionReserve =
+    configureEvidenceCompletionReserveV728(
+      budget,
+      currentLiveVerifiedLaunchTokensV621.size > 0
+    );
+
   scannerFunnelV415.freshCandidatePriorityV469
     .currentLiveVerifiedLaunchPriorityV621
     .erc20IdentityReserveV653 = {
@@ -90332,6 +90507,18 @@ for (
       perLaunchRequests: 1,
       hardRequestLimitRaised: false,
       analysisLimitRaised: false
+    };
+
+  scannerFunnelV415.freshCandidatePriorityV469
+    .currentLiveVerifiedLaunchPriorityV621
+    .evidenceCompletionReserveV728 = {
+      enabled: true,
+      active: v728EvidenceCompletionReserve?.active === true,
+      initialReservedRequests: safeNumber(v728EvidenceCompletionReserve?.initialReservedRequests),
+      reservedRequests: safeNumber(v728EvidenceCompletionReserve?.reservedRequests),
+      hardRequestLimitRaised: false,
+      analysisLimitRaised: false,
+      notificationReserveChanged: false
     };
 
   const v141AnalysedAddresses =
@@ -92073,19 +92260,20 @@ for (
       candidate?.validERC20 === true &&
       candidate?.risk?.severeOverride !== true &&
       String(candidate?.risk?.label || "").toUpperCase() !== "HIGH" &&
+      currentLiveVerifiedLaunchTokensV621.has(
+        normalize(candidate.address)
+      ) &&
       (
         candidate?.market?.verified === true ||
         candidate?.onChainPoolIdentityV153?.verified === true
-      ) &&
-      safeNumber(candidate?.opportunity?.score) >= 60 &&
-      safeNumber(candidate?.confidence?.score) >= 55
+      )
     ) {
       earlyDirectionalTradeEnrichmentV175 = {
         ...earlyDirectionalTradeEnrichmentV175,
         selectedAddress: normalize(candidate.address),
         symbol: candidate.symbol || null,
         eligible: true,
-        status: "SELECTED_BEFORE_LOWER_PRIORITY_ANALYSIS"
+        status: "SELECTED_PRE_SCORE_CURRENT_LIVE_VERIFIED_LAUNCH_V728"
       };
 
       const earlyEnrichmentV175 =
@@ -101705,6 +101893,25 @@ for (
     directionalTradeEnrichment,
 
     earlyDirectionalTradeEnrichmentV175,
+
+    evidenceCompletionRestoreV728: {
+      enabled: true,
+      diagnosticSource: "V727_EVIDENCEAUDIT",
+      protectedRequestsInitially: safeNumber(v728EvidenceCompletionReserve?.initialReservedRequests),
+      protectedRequestsRemaining: safeNumber(budget?.analysis?.evidenceCompletionReserveV728?.reservedRequests),
+      consumed: safeNumber(budget?.analysis?.evidenceCompletionReserveV728?.consumed),
+      consumedTypes: budget?.analysis?.evidenceCompletionReserveV728?.consumedTypes || {},
+      lowerPriorityRequestsBlocked: safeNumber(budget?.analysis?.evidenceCompletionReserveV728?.lowerPriorityRequestsBlocked),
+      releaseReason: budget?.analysis?.evidenceCompletionReserveV728?.releaseReason || null,
+      v175PreScoreGateRestored: true,
+      currentLiveVerifiedLaunchOnly: true,
+      marketOrPoolIdentityStillRequired: true,
+      terminalRiskStillRejected: true,
+      strictUsdVerificationPreserved: true,
+      hardRequestLimit: MAX_EXTERNAL_REQUESTS,
+      hardRequestLimitRaised: false,
+      telegramThresholdsChanged: false
+    },
 
     preQualificationDirectionalEnrichmentV151: {
       enabled:
