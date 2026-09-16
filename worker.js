@@ -1,6 +1,17 @@
 /**
+ * Robinhood Chain Meme Hunter — V737
+ * AUTHORITATIVE RUNTIME VERSION: V737
+ *
+ * V737 EARLY EXACT-POOL WATCH HANDOFF
+ * - Builds directly forward from V736.
+ * - Uses already-verified exact V4 pool identity earlier: a V732/V735 provider-corroborated exact PoolId with a V254-priceable canonical quote may enter the existing V551 forward-only directional watch even when the current scan has zero pool-specific swaps/liquidity events.
+ * - This does not fabricate directional USD, does not backfill history, and does not claim complete windows. The watch starts strictly at current head + 1 and only future exact-pool rows collected by the existing V551/V557 machinery can become verified evidence.
+ * - Existing V551 registration still independently requires valid ERC-20, verified exact pool identity, exact 32-byte PoolId, and a V254-priceable quote. Arbitrary counter-tokens remain ineligible.
+ * - Adds zero new provider/RPC request types, no new request slot, no scoring/Momentum/Confidence/Risk/qualification/Telegram-threshold changes, and keeps the hard global request limit at 42.
+ * - V736 diagnostics are preserved so market/pool-field coverage remains measurable.
+ *
  * Robinhood Chain Meme Hunter — V736
- * AUTHORITATIVE RUNTIME VERSION: V736
+ * HISTORICAL VERSION NOTE: V736
  *
  * V736 COMPLETE POOL-BRIDGE FIELD DIAGNOSTIC — ZERO REQUESTS
  * - Builds directly forward from V735 with all V735 provider-provenance behaviour preserved.
@@ -6457,7 +6468,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V736";
+const VERSION = "V737";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -95946,11 +95957,42 @@ for (
         bestVerifiedWethUsdGReferenceV195(state)
     );
 
+  /*
+   * V737: once V732/V735 has already proven an exact PoolId + token orientation,
+   * do not wait for same-scan pool activity before starting the existing
+   * forward-only exact-pool collector. This is deliberately restricted to
+   * provider-corroborated identities; registerDirectionalWatchCandidatesV551()
+   * still enforces V254 quote priceability and all exact identity guards.
+   * No historical coverage is created: new watches begin at head + 1.
+   */
+  const directionalProviderCorroboratedExactPoolCandidatesV737 =
+    (Array.isArray(candidates) ? candidates : [])
+      .filter(candidate => {
+        const identity = candidate?.onChainPoolIdentityV153 || {};
+        const source = String(identity?.source || "").toUpperCase();
+        const providerCorroborated =
+          identity?.providerCorroboratedV732 === true ||
+          source.includes("GECKO_EXACT_POOL_X_ONCHAIN_POOLKEY_V732") ||
+          source.includes("PERSISTED_GECKO_EXACT_POOL_X_ONCHAIN_POOLKEY_V732");
+        return (
+          candidate?.validERC20 === true &&
+          identity?.verified === true &&
+          providerCorroborated &&
+          /^0x[a-f0-9]{64}$/.test(String(normalize(identity?.poolId) || ""))
+        );
+      })
+      .sort((a,b) =>
+        safeNumber(b?.analysisPriority) - safeNumber(a?.analysisPriority) ||
+        safeNumber(b?.opportunity?.score) - safeNumber(a?.opportunity?.score)
+      )
+      .slice(0, 2);
+
   const directionalWatchRegistrationCandidatesV555 = [
     ...directionalPriorCompletionRecoveryCandidatesV574,
     ...directionalPersistedRecoveryCandidatesV573,
     ...directionalObservedExactPoolCandidatesV570,
     ...directionalActiveExactPoolCandidatesV555,
+    ...directionalProviderCorroboratedExactPoolCandidatesV737,
     ...completeExactPoolCandidatesV458
   ].filter((candidate,index,array) =>
     index === array.findIndex(other =>
@@ -95968,6 +96010,27 @@ for (
       onChainDirectionalV179?.wethUsdGReferenceV187 ||
         bestVerifiedWethUsdGReferenceV195(state)
     );
+
+  directionalWatchRegistrationV551.v737EarlyProviderCorroboratedHandoff = {
+    enabled:true,
+    considered:directionalProviderCorroboratedExactPoolCandidatesV737.length,
+    rows:directionalProviderCorroboratedExactPoolCandidatesV737.map(candidate => ({
+      address:normalize(candidate?.address),
+      symbol:candidate?.symbol || null,
+      poolId:normalize(candidate?.onChainPoolIdentityV153?.poolId) || null,
+      quoteTokenAddress:normalize(candidate?.onChainPoolIdentityV153?.quoteTokenAddress) || null,
+      identityStatus:candidate?.onChainPoolIdentityV153?.status || null,
+      identitySource:candidate?.onChainPoolIdentityV153?.source || null,
+      providerCorroboratedV732:candidate?.onChainPoolIdentityV153?.providerCorroboratedV732 === true,
+      currentPoolSpecificSwaps:safeNumber(candidate?.activity?.poolSpecific === true ? candidate?.activity?.swaps : 0),
+      currentPoolSpecificLiquidityEvents:safeNumber(candidate?.activity?.poolSpecific === true ? candidate?.activity?.liquidityEvents : 0),
+      forwardOnlyStartRequired:true
+    })),
+    externalRequestsAdded:0,
+    historicalBackfill:false,
+    hardGlobalLimitUnchanged:42,
+    telegramThresholdsChanged:false
+  };
 
   const directionalPriorCompletionWatchRecoveryV574 = {
     enabled:true,
