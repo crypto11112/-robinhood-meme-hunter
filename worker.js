@@ -1,4 +1,14 @@
 /**
+ * Robinhood Chain Meme Hunter — V793
+ *
+ * V793 MANUAL V4 VERIFIED-LAUNCH ANCHOR RECOVERY:
+ * - builds directly from V792;
+ * - /v4poolsearch now recovers an exact launchBlock from the token's persisted watchedTokens launchpad records;
+ * - reuses the bot's existing verifiedLaunchSourceIdentityV476() trust rules instead of inventing or estimating a launch block;
+ * - preserves cursor and legacy verified-launch stores as fallbacks;
+ * - diagnostic remains read-only: no KV writes, no scanner-budget requests, no scoring/Telegram/USD changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V792
  *
  * V792 MANUAL V4 SEARCH USABILITY FIX:
@@ -6842,7 +6852,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V792";
+const VERSION = "V793";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -40834,6 +40844,24 @@ function v4PoolSearchLaunchAnchorV791(state, token, explicitBlock = 0) {
   const t=normalize(token);
   const explicit=safeNumber(explicitBlock);
   if(explicit>0) return {block:explicit,source:"EXPLICIT_BLOCK_ARGUMENT"};
+
+  // V793: use the bot's own persisted watched-token launch evidence first.
+  // verifiedLaunchSourceIdentityV476() already enforces the accepted verified
+  // launchpad families/events, so this does not estimate or infer a block.
+  const watchedV793=Array.isArray(state?.watchedTokens)
+    ? findWatched(state,t)
+    : null;
+  if(watchedV793){
+    const verifiedV793=verifiedLaunchSourceIdentityV476(watchedV793);
+    const watchedLaunchBlockV793=safeNumber(verifiedV793?.launchBlock);
+    if(verifiedV793?.verified===true && watchedLaunchBlockV793>0){
+      return {
+        block:watchedLaunchBlockV793,
+        source:`WATCHED_TOKEN_${String(verifiedV793?.protocol||"VERIFIED_LAUNCH").toUpperCase()}_V793`
+      };
+    }
+  }
+
   const c789=state?.productionV4InitCursorV789?.[t];
   if(safeNumber(c789?.launchBlock)>0) return {block:safeNumber(c789.launchBlock),source:"V789_CURSOR"};
   const c788=state?.productionV4InitCursorV788?.[t];
@@ -40892,7 +40920,7 @@ async function v4PoolSearchDiagnosticV791(env, argument="") {
   const autoTarget=v4PoolSearchAutoTokenV792(state);
   const token=isAddress(explicitToken)?explicitToken:(isAddress(autoTarget?.tokenAddress)?normalize(autoTarget.tokenAddress):null);
   const base={
-    version:"V792",diagnostic:"MANUAL_V4_BIDIRECTIONAL_POOL_SEARCH",tokenAddress:token||null,
+    version:"V793",diagnostic:"MANUAL_V4_BIDIRECTIONAL_POOL_SEARCH",tokenAddress:token||null,
     tokenSource:isAddress(explicitToken)?"EXPLICIT_ARGUMENT":(autoTarget?.source||"NONE"),
     launchBlock:null,launchAnchorSource:null,rpcProvider:null,head:null,recentFromBlock:null,recentToBlock:null,
     recentSwapRows:0,livePoolIds:0,windows:[],initializeRows:0,decodedTokenMatches:0,
@@ -40977,7 +41005,7 @@ function v4PoolSearchTelegramV791(result){
   const r=result||{};
   const short=v=>{const s=String(v||"");return s.length>22?`${s.slice(0,12)}…${s.slice(-8)}`:(s||"NONE");};
   const lines=[
-    "🧬 <b>Manual V4 Pool Search — V792</b>","",
+    "🧬 <b>Manual V4 Pool Search — V793</b>","",
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
     `Token source: <b>${escapeHtml(String(r?.tokenSource||"NONE"))}</b>`,
     `Launch anchor: <b>${escapeHtml(String(r?.launchBlock??"NONE"))}</b> · ${escapeHtml(String(r?.launchAnchorSource||"NONE"))}`,
@@ -149578,7 +149606,7 @@ function telegramHelpV271() {
     "<code>/uniswapv4test [0xPOOLID]</code> — V765 one-request Uniswap V4 Pool Info test; auto-selects a retained PoolId when omitted",
     "<code>/v4marketstatus</code> — V773 show the last production market/liquidity completion result",
     "<code>/v4prodstatus</code> — V772 show the last production scanner V4/Uniswap enrichment result",
-    "<code>/v4poolsearch [0xTOKEN] [launchBlock]</code> — V792 manual Validation Cloud PoolId search; auto-selects latest cursor token and supports anchorless recent-backward fallback (diagnostic only)",
+    "<code>/v4poolsearch [0xTOKEN] [launchBlock]</code> — V793 manual Validation Cloud PoolId search; recovers verified launch anchors from persisted watched-token launchpad evidence, auto-selects latest cursor token and supports anchorless fallback (diagnostic only)",
     "<code>/v4allpools [0xTOKEN]</code> — V771 verify all recent live V4 pools for a token + normalized BUY/SELL amounts using on-chain decimals",
     "<code>/v4swapamounts [0xTOKEN]</code> — V770 verify exact raw target/paired amounts for BUY vs SELL swaps on the discovered live pool",
     "<code>/v4swapdirection [0xTOKEN]</code> — V769 verify BUY/SELL direction from signed on-chain V4 Swap deltas on the discovered live pool",
