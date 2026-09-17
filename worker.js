@@ -1,6 +1,13 @@
 /**
- * Robinhood Chain Meme Hunter — V752
- * AUTHORITATIVE RUNTIME VERSION: V752
+ * Robinhood Chain Meme Hunter — V753
+ * AUTHORITATIVE RUNTIME VERSION: V753
+ *
+ * V753 RAW-WATCH LIFECYCLE REMOVAL TRACE — DIAGNOSTIC ONLY:
+ * - Preserves V752 collection, admission, freshness, scoring and qualification behavior.
+ * - Records every raw-only watch removal from the known lifecycle paths: stale multi-pool retirement, stale single-pool retirement, migration/reselection, expiry, invalid identity and capacity pruning.
+ * - Records whether the watch had completed a first range, was still pending V744 first-range priority, and whether its first-range request had actually been dispatched.
+ * - Adds zero provider/RPC requests, zero request slots and zero additional state-write cycles.
+ * - /poolwatch surfaces recent raw-watch removal events and reason counts.
  *
  *
  * V752 REGISTRATION-SWAP FRESHNESS FIX — NO REQUEST/SCORING CHANGE:
@@ -6614,7 +6621,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V752";
+const VERSION = "V753";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -74805,6 +74812,10 @@ function poolWatchTelemetryRootV741(state) {
           prunedInvalidIdentity:0,
           prunedCapacity:0,
           lastPruneAt:null,
+          rawRemovalEventsV753:[],
+          rawRemovalReasonCountsV753:{},
+          rawRemovalTotalV753:0,
+          lastRawRemovalV753:null,
           reselectionEvaluatedV747:0,
           reselectionMigratedV747:0,
           reselectionSkippedProviderV747:0,
@@ -74835,6 +74846,50 @@ function poolWatchTelemetryRejectV741(state, reason) {
   const key = String(reason || "UNKNOWN_REJECTION_V741");
   t.registrationRejected[key] = safeNumber(t.registrationRejected?.[key]) + 1;
   t.updatedAt = Date.now();
+}
+
+function recordRawWatchRemovalV753(state, row, reason, extra = null) {
+  if (row?.rawOnlyV740 !== true) return null;
+  const telemetry = poolWatchTelemetryRootV741(state);
+  telemetry.rawRemovalEventsV753 = Array.isArray(telemetry?.rawRemovalEventsV753)
+    ? telemetry.rawRemovalEventsV753
+    : [];
+  telemetry.rawRemovalReasonCountsV753 =
+    telemetry?.rawRemovalReasonCountsV753 && typeof telemetry.rawRemovalReasonCountsV753 === "object"
+      ? telemetry.rawRemovalReasonCountsV753
+      : {};
+
+  const key = String(reason || "UNKNOWN_RAW_WATCH_REMOVAL_V753");
+  const event = {
+    at:Date.now(),
+    reason:key,
+    tokenAddress:normalize(row?.tokenAddress) || null,
+    symbol:row?.symbol || null,
+    poolId:normalize(row?.poolId) || null,
+    successfulRanges:safeNumber(row?.successfulRanges),
+    rawSwapLogs:safeNumber(row?.rawSwapLogsV740),
+    firstRangeCompleted:safeNumber(row?.successfulRanges) > 0,
+    firstRangePriorityPendingAtRemoval:directionalWatchNeedsRawFirstRangePriorityV744(row),
+    firstRangeRequestDispatchedV753:safeNumber(row?.firstRangeRequestDispatchedAtV753) > 0,
+    firstRangeRequestDispatchedAtV753:safeNumber(row?.firstRangeRequestDispatchedAtV753) || null,
+    lastAttemptAt:safeNumber(row?.lastAttemptAt) || null,
+    registeredAt:safeNumber(row?.registeredAt) || null,
+    lastQualifiedAt:safeNumber(row?.lastQualifiedAt) || null,
+    lastCollectedBlock:row?.lastCollectedBlock ?? null,
+    lastStatus:row?.lastStatus || null,
+    ...(extra && typeof extra === "object" ? extra : {})
+  };
+
+  telemetry.rawRemovalTotalV753 = safeNumber(telemetry?.rawRemovalTotalV753) + 1;
+  telemetry.rawRemovalReasonCountsV753[key] =
+    safeNumber(telemetry.rawRemovalReasonCountsV753?.[key]) + 1;
+  telemetry.rawRemovalEventsV753.push(event);
+  if (telemetry.rawRemovalEventsV753.length > 40) {
+    telemetry.rawRemovalEventsV753 = telemetry.rawRemovalEventsV753.slice(-40);
+  }
+  telemetry.lastRawRemovalV753 = event;
+  telemetry.updatedAt = Date.now();
+  return event;
 }
 
 function reselectPersistedRawDirectionalWatchesV747(state, latestNumber) {
@@ -74939,6 +74994,11 @@ function reselectPersistedRawDirectionalWatchesV747(state, latestNumber) {
         : null;
 
     if (!swapWinner?.row) {
+      recordRawWatchRemovalV753(state, oldRow, "STALE_MULTI_POOL_RETIREMENT_V749", {
+        lifecycleBranch:"RESELECT_PERSISTED_RAW_V747_V749",
+        headBlock:head,
+        canonicalPoolCount:matches.length
+      });
       delete root.entries[oldKey];
       telemetry.staleMultiPoolRetiredV749 = safeNumber(telemetry?.staleMultiPoolRetiredV749) + 1;
       telemetry.lastStaleRetirementV749 = {
@@ -75043,6 +75103,12 @@ function reselectPersistedRawDirectionalWatchesV747(state, latestNumber) {
       }
     };
 
+    recordRawWatchRemovalV753(state, oldRow, "MIGRATED_TO_FRESHER_POOL_V749", {
+      lifecycleBranch:"RESELECT_PERSISTED_RAW_V747_V749",
+      replacementPoolId:winner.row.poolId,
+      migrationBasis:basis,
+      headBlock:head
+    });
     delete root.entries[oldKey];
     root.entries[newKey] = replacement;
     migrated++;
@@ -75190,6 +75256,12 @@ function retireStaleSinglePoolRawWatchesV752(state, latestNumber) {
       continue;
     }
 
+    recordRawWatchRemovalV753(state, row, "STALE_SINGLE_POOL_RETIREMENT_V752", {
+      lifecycleBranch:"SINGLE_POOL_ADMISSION_V752",
+      headBlock:head,
+      retainedSwapBlock:retainedSwapBlock || null,
+      retainedSwapGapBlocks:retainedSwapGap
+    });
     delete root.entries[watchKey];
     retired++;
     telemetry.staleSinglePoolRetiredV752 =
@@ -75260,10 +75332,21 @@ function pruneDirectionalWatchV551(state) {
       /^0x[a-f0-9]{64}$/.test(String(poolId || "")) &&
       seenAt > 0;
     if (!identityValidV741) {
+      if (row?.rawOnlyV740 === true) {
+        recordRawWatchRemovalV753(state, row, "PRUNED_INVALID_IDENTITY_V741", {
+          lifecycleBranch:"PRUNE_DIRECTIONAL_WATCH_V551"
+        });
+      }
       invalidRemovedV741++;
       return false;
     }
     if (now - seenAt > DIRECTIONAL_WATCH_MAX_AGE_MS_V551) {
+      if (row?.rawOnlyV740 === true) {
+        recordRawWatchRemovalV753(state, row, "PRUNED_EXPIRED_V741", {
+          lifecycleBranch:"PRUNE_DIRECTIONAL_WATCH_V551",
+          ageMs:now - seenAt
+        });
+      }
       expiredRemovedV741++;
       return false;
     }
@@ -75379,6 +75462,16 @@ function pruneDirectionalWatchV551(state) {
     const key = directionalWatchKeyV563(row?.tokenAddress,row?.poolId);
     return key && !keptKeys.has(key);
   });
+
+  for (const row of droppedRows) {
+    if (row?.rawOnlyV740 === true) {
+      recordRawWatchRemovalV753(state, row, "PRUNED_CAPACITY_V743", {
+        lifecycleBranch:"PRUNE_DIRECTIONAL_WATCH_V551",
+        maxEntries:DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
+        rawReserveSlots:DIRECTIONAL_WATCH_RAW_RESERVE_V743
+      });
+    }
+  }
 
   if (expiredRemovedV741 > 0) {
     telemetryV741.prunedExpired =
@@ -76846,6 +76939,15 @@ async function advanceDirectionalWatchV551({
     `&topic0=${SWAP_TOPIC}&topic1=${poolId}&topic0_1_opr=and${apiKeySuffix}`;
 
   candidate.lastAttemptAt = Date.now();
+  if (
+    rawOnlyV740 &&
+    safeNumber(candidate?.successfulRanges) === 0 &&
+    safeNumber(candidate?.firstRangeRequestDispatchedAtV753) <= 0
+  ) {
+    candidate.firstRangeRequestDispatchedAtV753 = candidate.lastAttemptAt;
+    candidate.firstRangeRequestDispatchedFromBlockV753 = fromBlock;
+    candidate.firstRangeRequestDispatchedToBlockV753 = toBlock;
+  }
 
   /*
    * V748 diagnostic only: capture the exact existing raw-watch request range and
@@ -77729,7 +77831,16 @@ function poolWatchDiagnosticSnapshotV741(state) {
       prunedExpired:safeNumber(telemetry?.prunedExpired),
       prunedInvalidIdentity:safeNumber(telemetry?.prunedInvalidIdentity),
       prunedCapacity:safeNumber(telemetry?.prunedCapacity),
-      lastPruneAt:safeNumber(telemetry?.lastPruneAt) || null
+      lastPruneAt:safeNumber(telemetry?.lastPruneAt) || null,
+      rawRemovalTotalV753:safeNumber(telemetry?.rawRemovalTotalV753),
+      rawRemovalReasonCountsV753:
+        telemetry?.rawRemovalReasonCountsV753 && typeof telemetry.rawRemovalReasonCountsV753 === "object"
+          ? telemetry.rawRemovalReasonCountsV753
+          : {},
+      rawRemovalEventsV753:Array.isArray(telemetry?.rawRemovalEventsV753)
+        ? telemetry.rawRemovalEventsV753.slice(-12)
+        : [],
+      lastRawRemovalV753:telemetry?.lastRawRemovalV753 || null
     },
     statusCounts,
     registrationSources,
@@ -77788,8 +77899,41 @@ function poolWatchDiagnosticTelegramV741(state) {
     `Raw registered / refreshed: <b>${safeNumber(t.rawRegistered)} / ${safeNumber(t.rawRefreshed)}</b>`,
     `Standard registered / refreshed: <b>${safeNumber(t.standardRegistered)} / ${safeNumber(t.standardRefreshed)}</b>`,
     `Pruned expired / invalid / capacity: <b>${safeNumber(t.prunedExpired)} / ${safeNumber(t.prunedInvalidIdentity)} / ${safeNumber(t.prunedCapacity)}</b>`,
-    `Telemetry since: <code>${escapeHtml(fmtTime(t.startedAt))}</code>`
+    `Telemetry since: <code>${escapeHtml(fmtTime(t.startedAt))}</code>`,
+    "",
+    "🧪 <b>V753 raw-watch lifecycle removals</b>",
+    `Raw removals traced: <b>${safeNumber(t.rawRemovalTotalV753)}</b>`,
+    `Latest removal: <b>${escapeHtml(t?.lastRawRemovalV753?.reason || "NONE")}</b>`
   ];
+
+  const removalReasonsV753 = Object.entries(t.rawRemovalReasonCountsV753 || {})
+    .sort((a,b)=>safeNumber(b[1])-safeNumber(a[1]))
+    .slice(0,8);
+  if (removalReasonsV753.length) {
+    for (const [reason,count] of removalReasonsV753) {
+      lines.push(`• ${escapeHtml(reason)}: <b>${safeNumber(count)}</b>`);
+    }
+  }
+  const removalEventsV753 = Array.isArray(t.rawRemovalEventsV753)
+    ? t.rawRemovalEventsV753.slice(-6).reverse()
+    : [];
+  if (removalEventsV753.length) {
+    lines.push("", "🧹 <b>Latest raw-watch removal events</b>");
+    for (const event of removalEventsV753) {
+      const tokenShort = event?.tokenAddress
+        ? `${event.tokenAddress.slice(0,8)}…${event.tokenAddress.slice(-6)}`
+        : "UNVERIFIED";
+      const poolShort = event?.poolId
+        ? `${event.poolId.slice(0,10)}…${event.poolId.slice(-8)}`
+        : "UNVERIFIED";
+      lines.push(
+        `• <b>${escapeHtml(event?.symbol || "TOKEN")}</b> ${escapeHtml(tokenShort)} | pool <code>${escapeHtml(poolShort)}</code>`,
+        `  reason ${escapeHtml(event?.reason || "UNVERIFIED")} · ranges ${safeNumber(event?.successfulRanges)} · swaps ${safeNumber(event?.rawSwapLogs)}`,
+        `  V744 pending at removal ${event?.firstRangePriorityPendingAtRemoval === true ? "YES" : "NO"} · first request dispatched ${event?.firstRangeRequestDispatchedV753 === true ? "YES" : "NO"}`,
+        `  status ${escapeHtml(event?.lastStatus || "UNVERIFIED")} · at ${escapeHtml(fmtTime(event?.at))}`
+      );
+    }
+  }
 
   if (topReasons.length) {
     lines.push("", "🚫 <b>Top registration rejection reasons</b>");
@@ -77836,7 +77980,7 @@ function poolWatchDiagnosticTelegramV741(state) {
 
   lines.push(
     "",
-    "<i>Read-only command: zero provider requests, zero scanner-budget requests and zero state writes. V748 trace is measurement-only and instruments the existing exact-pool request; it adds zero requests and does not change query/decoder/scheduler/scoring/qualification.</i>"
+    "<i>Read-only command: zero provider requests, zero scanner-budget requests and zero state writes. V748/V753 diagnostics are measurement-only; V753 records lifecycle removal telemetry on existing scan state and adds zero provider/RPC requests, zero request slots and no scoring/qualification changes.</i>"
   );
   return lines.join("\n");
 }
