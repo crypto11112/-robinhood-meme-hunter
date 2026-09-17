@@ -1,6 +1,12 @@
 /**
- * Robinhood Chain Meme Hunter — V759
- * AUTHORITATIVE RUNTIME VERSION: V759
+ * Robinhood Chain Meme Hunter — V760
+ * AUTHORITATIVE RUNTIME VERSION: V760
+ *
+ * V760 RAW-WATCH ADMISSION REJECTION TRACE — DIAGNOSTIC ONLY:
+ * - Persists a bounded recent-event trace for V755 raw-only admission decisions using the already-proven V756 telemetry store.
+ * - Records the exact on-chain PoolId, provider pool/pair identity fields, identity source/status, provider verification, 5m/1h tx+volume, retained Swap evidence, and which V755 sub-condition failed.
+ * - /poolwatch displays the latest V760 rejection traces so we can distinguish provider identity mismatch, missing carried-through activity, stale retained activity, or genuinely inactive pools.
+ * - Adds zero provider/RPC requests, zero request slots, no scoring/qualification/collector/admission-rule changes, and hard request cap remains 42.
  *
  * V759 /POOLWATCH CHUNKED TELEGRAM DELIVERY — TRANSPORT ONLY:
  * - Fixes /poolwatch and /watchpool silently failing once restored persisted telemetry makes the reply exceed Telegram single-message size.
@@ -6652,7 +6658,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V759";
+const VERSION = "V760";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -76191,11 +76197,19 @@ function rawWatchCurrentActivityAdmissionV755(state, candidate, latestNumber) {
   }
 
   const market = candidate?.market || null;
-  const providerPair = normalize(market?.pairAddress);
+  const providerPairRaw = market?.pairAddress ?? null;
+  const providerPair = normalize(providerPairRaw);
+  const providerPairIdRaw = market?.pairId ?? null;
+  const providerPoolIdRaw = market?.poolId ?? null;
+  const providerPoolIdV451 = providerPoolIdentityV451(candidate);
   const exactProviderPoolMatch =
     market?.verified === true &&
     /^0x[a-f0-9]{64}$/.test(String(providerPair || "")) &&
     providerPair === poolId;
+  const providerPoolIdV451Matches =
+    market?.verified === true &&
+    /^0x[a-f0-9]{64}$/.test(String(providerPoolIdV451 || "")) &&
+    providerPoolIdV451 === poolId;
 
   const tx5 = market?.transactions?.m5 || null;
   const tx1h = market?.transactions?.h1 || null;
@@ -76221,8 +76235,20 @@ function rawWatchCurrentActivityAdmissionV755(state, candidate, latestNumber) {
     retainedSwapGapBlocks:retainedSwapGap,
     freshSwapWindowBlocks:RAW_MULTI_POOL_FRESH_SWAP_BLOCKS_V749,
     providerMarketVerified:market?.verified === true,
+    providerSource:market?.source || market?.provider || market?.marketSource || null,
+    providerPairRaw:providerPairRaw == null ? null : String(providerPairRaw),
     providerPair:providerPair || null,
+    providerPairIdRaw:providerPairIdRaw == null ? null : String(providerPairIdRaw),
+    providerPoolIdRaw:providerPoolIdRaw == null ? null : String(providerPoolIdRaw),
+    providerPoolIdV451:providerPoolIdV451 || null,
+    providerPoolIdV451Matches,
+    providerPairLooksPoolId:/^0x[a-f0-9]{64}$/.test(String(providerPair || "")),
+    providerPairLooksAddress:isAddress(providerPair),
+    providerPairNormalizedLength:providerPair ? String(providerPair).length : 0,
     exactProviderPoolMatch,
+    identitySource:identity?.source || null,
+    identityStatus:identity?.status || null,
+    providerCorroboratedV732:identity?.providerCorroboratedV732 === true,
     provider5mTransactions:tx5Total,
     provider1hTransactions:tx1hTotal,
     provider5mVolumeUsd:vol5 || null,
@@ -76247,12 +76273,14 @@ function rawAdmissionTelemetryRootV756(state) {
       acceptedReasons:{},
       rejectedReasons:{},
       lastAccepted:null,
-      lastRejected:null
+      lastRejected:null,
+      recentEventsV760:[]
     };
   }
   const t = state.rawAdmissionTelemetryV756;
   t.acceptedReasons = t.acceptedReasons && typeof t.acceptedReasons === "object" ? t.acceptedReasons : {};
   t.rejectedReasons = t.rejectedReasons && typeof t.rejectedReasons === "object" ? t.rejectedReasons : {};
+  t.recentEventsV760 = Array.isArray(t.recentEventsV760) ? t.recentEventsV760 : [];
   return t;
 }
 
@@ -76276,6 +76304,8 @@ function rawAdmissionRecordV756(state, admission, accepted, candidate) {
   };
   if (accepted) { t.accepted = safeNumber(t.accepted) + 1; t.lastAccepted = event; }
   else { t.rejected = safeNumber(t.rejected) + 1; t.lastRejected = event; }
+  t.recentEventsV760.push(event);
+  if (t.recentEventsV760.length > 16) t.recentEventsV760 = t.recentEventsV760.slice(-16);
   t.updatedAt = now;
   return event;
 }
@@ -78197,12 +78227,49 @@ function poolWatchDiagnosticTelegramV741(state) {
     `V757 duplicate counters (legacy): evaluated <b>${safeNumber(t.rawAdmissionEvaluatedV757)}</b> · accepted <b>${safeNumber(t.rawAdmissionAcceptedV757)}</b> · rejected <b>${safeNumber(t.rawAdmissionRejectedV757)}</b>`,
     `Standard registered / refreshed: <b>${safeNumber(t.standardRegistered)} / ${safeNumber(t.standardRefreshed)}</b>`,
     `Pruned expired / invalid / capacity: <b>${safeNumber(t.prunedExpired)} / ${safeNumber(t.prunedInvalidIdentity)} / ${safeNumber(t.prunedCapacity)}</b>`,
-    `Telemetry since: <code>${escapeHtml(fmtTime(t.startedAt))}</code>`,
+    `Telemetry since: <code>${escapeHtml(fmtTime(t.startedAt))}</code>`
+  ];
+
+  const recentAdmissionV760 = Array.isArray(state?.rawAdmissionTelemetryV756?.recentEventsV760)
+    ? state.rawAdmissionTelemetryV756.recentEventsV760.slice(-8).reverse()
+    : [];
+  if (recentAdmissionV760.length) {
+    lines.push("", "🧬 <b>V760 raw admission decision trace</b>");
+    for (const event of recentAdmissionV760) {
+      const e = event?.evidence || {};
+      const tokenShort = event?.tokenAddress
+        ? `${event.tokenAddress.slice(0,8)}…${event.tokenAddress.slice(-6)}`
+        : "UNVERIFIED";
+      const poolShort = event?.poolId
+        ? `${event.poolId.slice(0,10)}…${event.poolId.slice(-8)}`
+        : "UNVERIFIED";
+      const providerShort = e?.providerPair
+        ? `${String(e.providerPair).slice(0,10)}…${String(e.providerPair).slice(-8)}`
+        : "NONE";
+      const v451Short = e?.providerPoolIdV451
+        ? `${String(e.providerPoolIdV451).slice(0,10)}…${String(e.providerPoolIdV451).slice(-8)}`
+        : "NONE";
+      lines.push(
+        `• <b>${escapeHtml(event?.symbol || "TOKEN")}</b> ${escapeHtml(tokenShort)} · ${event?.accepted === true ? "ACCEPT" : "REJECT"} · ${escapeHtml(fmtTime(event?.at))}`,
+        `  selected PoolId <code>${escapeHtml(poolShort)}</code> · identity ${escapeHtml(e?.identitySource || "UNVERIFIED")} / ${escapeHtml(e?.identityStatus || "UNVERIFIED")}`,
+        `  provider verified ${e?.providerMarketVerified === true ? "YES" : "NO"} · source ${escapeHtml(e?.providerSource || "UNVERIFIED")}`,
+        `  market.pairAddress <code>${escapeHtml(providerShort)}</code> · len ${safeNumber(e?.providerPairNormalizedLength)} · looks PoolId ${e?.providerPairLooksPoolId === true ? "YES" : "NO"} · looks address ${e?.providerPairLooksAddress === true ? "YES" : "NO"}`,
+        `  providerPoolIdV451 <code>${escapeHtml(v451Short)}</code> · pair match ${e?.exactProviderPoolMatch === true ? "YES" : "NO"} · V451 match ${e?.providerPoolIdV451Matches === true ? "YES" : "NO"}`,
+        `  activity 5m tx ${safeNumber(e?.provider5mTransactions)} / $${safeNumber(e?.provider5mVolumeUsd).toFixed(2)} · 1h tx ${safeNumber(e?.provider1hTransactions)} / $${safeNumber(e?.provider1hVolumeUsd).toFixed(2)} · current ${e?.providerCurrentActivity === true ? "YES" : "NO"}`,
+        `  on-chain poolSpecific swaps ${safeNumber(e?.poolSpecificSwaps)} · retained Swap block ${escapeHtml(String(e?.retainedSwapBlock ?? "NONE"))} · gap ${e?.retainedSwapGapBlocks == null ? "UNVERIFIED" : escapeHtml(String(e.retainedSwapGapBlocks))}`,
+        `  reasons ${Array.isArray(event?.reasons) ? escapeHtml(event.reasons.join(",")) : "NONE"}`
+      );
+    }
+  } else {
+    lines.push("", "🧬 <b>V760 raw admission decision trace</b>", "No V760 admission decisions retained yet.");
+  }
+
+  lines.push(
     "",
     "🧪 <b>V753 raw-watch lifecycle removals</b>",
     `Raw removals traced: <b>${safeNumber(t.rawRemovalTotalV753)}</b>`,
     `Latest removal: <b>${escapeHtml(t?.lastRawRemovalV753?.reason || "NONE")}</b>`
-  ];
+  );
 
   const removalReasonsV753 = Object.entries(t.rawRemovalReasonCountsV753 || {})
     .sort((a,b)=>safeNumber(b[1])-safeNumber(a[1]))
@@ -78282,7 +78349,7 @@ function poolWatchDiagnosticTelegramV741(state) {
 
   lines.push(
     "",
-    "<i>Read-only command: zero provider requests, zero scanner-budget requests and zero state writes. V748/V753 diagnostics are measurement-only; V753 records lifecycle removal telemetry on existing scan state and adds zero provider/RPC requests, zero request slots and no scoring/qualification changes. V758 changes telemetry authority/display only and uses the proven V756 persisted admission store.</i>"
+    "<i>Read-only command: zero provider requests, zero scanner-budget requests and zero state writes. V748/V753 diagnostics are measurement-only; V753 records lifecycle removal telemetry on existing scan state and adds zero provider/RPC requests, zero request slots and no scoring/qualification changes. V758 changes telemetry authority/display only and uses the proven V756 persisted admission store. V760 adds bounded persisted admission-decision diagnostics only; it does not change V755 admission behavior.</i>"
   );
   return lines.join("\n");
 }
