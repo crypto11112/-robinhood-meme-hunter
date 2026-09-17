@@ -1,6 +1,13 @@
 /**
- * Robinhood Chain Meme Hunter — V762
- * AUTHORITATIVE RUNTIME VERSION: V762
+ * Robinhood Chain Meme Hunter — V763
+ * AUTHORITATIVE RUNTIME VERSION: V763
+ *
+ * V763 FRESH ON-CHAIN RAW ADMISSION GATE — TARGETED CORRECTION:
+ * - Fixes V762 proof that a non-zero candidate.activity.poolSpecific swap count can be historical/synthesised and can admit a stale raw V4 pool even when the subsequent exact forward range contains zero logs.
+ * - V755's on-chain-current admission branch now requires VERIFIED current live-window pool-specific swaps from candidate.liveMomentumActivityV152, or the already-existing fresh retained canonical Swap block inside the 12,000-block V749 freshness window.
+ * - A historical/non-fresh poolSpecific swap count remains diagnostic only and no longer proves CURRENT activity by itself.
+ * - Exact provider↔PoolId + current 5m/1h provider activity remains unchanged as the third admission path.
+ * - Adds zero provider/RPC requests, zero request slots, no scoring/qualification/Telegram-threshold change, and hard request cap remains 42.
  *
  * V762 FREE-PROVIDER SUFFICIENCY AUDIT — DIAGNOSTIC ONLY:
  * - Aggregates the existing V760 admission traces and V761 upstream snapshots across scans.
@@ -6670,7 +6677,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V762";
+const VERSION = "V763";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -76185,11 +76192,22 @@ function rawWatchCurrentActivityAdmissionV755(state, candidate, latestNumber) {
   const head = Number(latestNumber);
   const reasons = [];
 
+  // V763: candidate.activity may contain historical/recovered/synthesised pool-specific
+  // swap counts. Preserve that number for diagnostics, but only the dedicated verified
+  // live-window activity can prove CURRENT pool-specific swap activity.
   const poolSpecificSwaps =
     candidate?.activity?.poolSpecific === true
       ? Math.max(0, safeNumber(candidate?.activity?.swaps))
       : 0;
-  if (poolSpecificSwaps > 0) reasons.push("CURRENT_POOL_SPECIFIC_SWAP_ACTIVITY_V755");
+  const livePoolSpecificActivityV763 = candidate?.liveMomentumActivityV152 || {};
+  const verifiedLivePoolSpecificSwapsV763 =
+    livePoolSpecificActivityV763?.verified === true &&
+    livePoolSpecificActivityV763?.poolSpecific === true
+      ? Math.max(0, safeNumber(livePoolSpecificActivityV763?.swaps))
+      : 0;
+  if (verifiedLivePoolSpecificSwapsV763 > 0) {
+    reasons.push("CURRENT_VERIFIED_LIVE_POOL_SPECIFIC_SWAP_ACTIVITY_V763");
+  }
 
   let retainedSwapBlock = 0;
   let retainedSwapGap = null;
@@ -76243,6 +76261,11 @@ function rawWatchCurrentActivityAdmissionV755(state, candidate, latestNumber) {
     tokenAddress:isAddress(token) ? token : null,
     poolId:/^0x[a-f0-9]{64}$/.test(String(poolId || "")) ? poolId : null,
     poolSpecificSwaps,
+    historicalPoolSpecificSwapsDiagnosticV763:poolSpecificSwaps,
+    verifiedLivePoolSpecificSwapsV763,
+    livePoolSpecificActivityVerifiedV763:
+      livePoolSpecificActivityV763?.verified === true &&
+      livePoolSpecificActivityV763?.poolSpecific === true,
     retainedSwapBlock:retainedSwapBlock || null,
     retainedSwapGapBlocks:retainedSwapGap,
     freshSwapWindowBlocks:RAW_MULTI_POOL_FRESH_SWAP_BLOCKS_V749,
@@ -76298,7 +76321,7 @@ function rawProviderSufficiencyAdmissionRecordV762(state, admission, candidate, 
   const exactMatch = admission?.exactProviderPoolMatch === true || admission?.providerPoolIdV451Matches === true;
   const providerCurrent = admission?.providerCurrentActivity === true;
   const retainedGap = admission?.retainedSwapGapBlocks;
-  const onChainCurrent = safeNumber(admission?.poolSpecificSwaps) > 0 ||
+  const onChainCurrent = safeNumber(admission?.verifiedLivePoolSpecificSwapsV763) > 0 ||
     (retainedGap != null && Number.isFinite(Number(retainedGap)) && Number(retainedGap) <= RAW_MULTI_POOL_FRESH_SWAP_BLOCKS_V749);
   a.admissionEvents = safeNumber(a.admissionEvents) + 1;
   if (admission?.providerMarketVerified === true) a.providerMarketVerifiedAdmissions = safeNumber(a.providerMarketVerifiedAdmissions) + 1;
@@ -78335,7 +78358,7 @@ function poolWatchDiagnosticTelegramV741(state) {
         `  market.pairAddress <code>${escapeHtml(providerShort)}</code> · len ${safeNumber(e?.providerPairNormalizedLength)} · looks PoolId ${e?.providerPairLooksPoolId === true ? "YES" : "NO"} · looks address ${e?.providerPairLooksAddress === true ? "YES" : "NO"}`,
         `  providerPoolIdV451 <code>${escapeHtml(v451Short)}</code> · pair match ${e?.exactProviderPoolMatch === true ? "YES" : "NO"} · V451 match ${e?.providerPoolIdV451Matches === true ? "YES" : "NO"}`,
         `  activity 5m tx ${safeNumber(e?.provider5mTransactions)} / $${safeNumber(e?.provider5mVolumeUsd).toFixed(2)} · 1h tx ${safeNumber(e?.provider1hTransactions)} / $${safeNumber(e?.provider1hVolumeUsd).toFixed(2)} · current ${e?.providerCurrentActivity === true ? "YES" : "NO"}`,
-        `  on-chain poolSpecific swaps ${safeNumber(e?.poolSpecificSwaps)} · retained Swap block ${escapeHtml(String(e?.retainedSwapBlock ?? "NONE"))} · gap ${e?.retainedSwapGapBlocks == null ? "UNVERIFIED" : escapeHtml(String(e.retainedSwapGapBlocks))}`,
+        `  on-chain poolSpecific swaps ${safeNumber(e?.poolSpecificSwaps)} · V763 verified-live swaps ${safeNumber(e?.verifiedLivePoolSpecificSwapsV763)} · retained Swap block ${escapeHtml(String(e?.retainedSwapBlock ?? "NONE"))} · gap ${e?.retainedSwapGapBlocks == null ? "UNVERIFIED" : escapeHtml(String(e.retainedSwapGapBlocks))}`,
         `  reasons ${Array.isArray(event?.reasons) ? escapeHtml(event.reasons.join(",")) : "NONE"}`
       );
     }
@@ -78485,7 +78508,7 @@ function poolWatchDiagnosticTelegramV741(state) {
 
   lines.push(
     "",
-    "<i>Read-only command: zero provider requests, zero scanner-budget requests and zero state writes. V748/V753 diagnostics are measurement-only; V753 records lifecycle removal telemetry on existing scan state and adds zero provider/RPC requests, zero request slots and no scoring/qualification changes. V758 changes telemetry authority/display only and uses the proven V756 persisted admission store. V760 adds bounded persisted admission-decision diagnostics only; V761 adds a bounded latest-scan upstream raw-lane eligibility snapshot; V762 aggregates those observations into a persistent provider-sufficiency audit. None changes V755 admission behavior.</i>"
+    "<i>Read-only command: zero provider requests, zero scanner-budget requests and zero state writes. V748/V753 diagnostics are measurement-only; V753 records lifecycle removal telemetry on existing scan state and adds zero provider/RPC requests, zero request slots and no scoring/qualification changes. V758 changes telemetry authority/display only and uses the proven V756 persisted admission store. V760 adds bounded persisted admission-decision diagnostics only; V761 adds a bounded latest-scan upstream raw-lane eligibility snapshot; V762 aggregates those observations into a persistent provider-sufficiency audit. V763 changes only the on-chain-current raw admission proof: historical poolSpecific counts no longer qualify unless current live-window or fresh retained-Swap evidence is verified.</i>"
   );
   return lines.join("\n");
 }
