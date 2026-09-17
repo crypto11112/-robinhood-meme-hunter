@@ -1,13 +1,13 @@
 /**
- * Robinhood Chain Meme Hunter — V757
- * AUTHORITATIVE RUNTIME VERSION: V757
+ * Robinhood Chain Meme Hunter — V758
+ * AUTHORITATIVE RUNTIME VERSION: V758
  *
- * V757 RAW-WATCH ADMISSION TELEMETRY — PROVEN V741 ROOT:
- * - Preserves V755 admission rules and all V742–V755 collection/selection/retirement behavior.
- * - Adds a dedicated persisted raw-admission telemetry object so evaluated/accepted/rejected counts cannot silently remain zero while V755 rejection reasons are being recorded.
- * - Persists the exact admission reasons and evidence snapshot on every newly accepted/refreshed raw-only watch.
- * - V757 stores raw-admission totals/reasons inside the already-proven poolWatchTelemetryV741 root.
- * - /poolwatch reports V757 admission totals plus the exact accepted reason for each retained raw watch.
+ * V758 RAW-WATCH ADMISSION TELEMETRY — AUTHORITATIVE PROVEN PERSISTENCE PATH:
+ * - Preserves V755 admission rules and all V742–V757 collection/selection/retirement behavior.
+ * - Uses the already-proven persisted rawAdmissionTelemetryV756 object as the single authoritative
+ *   admission counter/reason store; V757's duplicate V741-root counters remain diagnostic legacy only.
+ * - /poolwatch labels the V756-backed counters as V758 authoritative telemetry and shows the exact
+ *   accepted reason already persisted on each V756-era raw watch.
  * - Adds zero provider/RPC requests, zero request slots, no scoring/qualification change, and hard request cap remains 42.
  *
  * V755 RAW-WATCH CURRENT-ACTIVITY ADMISSION — NO REQUEST/SCORING CHANGE:
@@ -6647,7 +6647,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V757";
+const VERSION = "V758";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -78187,8 +78187,9 @@ function poolWatchDiagnosticTelegramV741(state) {
     `Unpriceable-quote raw handoff attempts: <b>${safeNumber(t.rawHandoffAttempts)}</b>`,
     `Raw registered / refreshed: <b>${safeNumber(t.rawRegistered)} / ${safeNumber(t.rawRefreshed)}</b>`,
     `V755 raw activity admission: evaluated <b>${safeNumber(t.rawAdmissionEvaluatedV755)}</b> · accepted <b>${safeNumber(t.rawAdmissionAcceptedV755)}</b> · rejected <b>${safeNumber(t.rawAdmissionRejectedV755)}</b>`,
-    `V756 persisted admission (legacy root): evaluated <b>${safeNumber(state?.rawAdmissionTelemetryV756?.evaluated)}</b> · accepted <b>${safeNumber(state?.rawAdmissionTelemetryV756?.accepted)}</b> · rejected <b>${safeNumber(state?.rawAdmissionTelemetryV756?.rejected)}</b>`,
-    `V757 admission in V741 root: evaluated <b>${safeNumber(t.rawAdmissionEvaluatedV757)}</b> · accepted <b>${safeNumber(t.rawAdmissionAcceptedV757)}</b> · rejected <b>${safeNumber(t.rawAdmissionRejectedV757)}</b>`,
+    `V756 persisted admission (proven store): evaluated <b>${safeNumber(state?.rawAdmissionTelemetryV756?.evaluated)}</b> · accepted <b>${safeNumber(state?.rawAdmissionTelemetryV756?.accepted)}</b> · rejected <b>${safeNumber(state?.rawAdmissionTelemetryV756?.rejected)}</b>`,
+    `V758 authoritative admission: evaluated <b>${safeNumber(state?.rawAdmissionTelemetryV756?.evaluated)}</b> · accepted <b>${safeNumber(state?.rawAdmissionTelemetryV756?.accepted)}</b> · rejected <b>${safeNumber(state?.rawAdmissionTelemetryV756?.rejected)}</b>`,
+    `V757 duplicate counters (legacy): evaluated <b>${safeNumber(t.rawAdmissionEvaluatedV757)}</b> · accepted <b>${safeNumber(t.rawAdmissionAcceptedV757)}</b> · rejected <b>${safeNumber(t.rawAdmissionRejectedV757)}</b>`,
     `Standard registered / refreshed: <b>${safeNumber(t.standardRegistered)} / ${safeNumber(t.standardRefreshed)}</b>`,
     `Pruned expired / invalid / capacity: <b>${safeNumber(t.prunedExpired)} / ${safeNumber(t.prunedInvalidIdentity)} / ${safeNumber(t.prunedCapacity)}</b>`,
     `Telemetry since: <code>${escapeHtml(fmtTime(t.startedAt))}</code>`,
@@ -78256,6 +78257,7 @@ function poolWatchDiagnosticTelegramV741(state) {
       `  V755 admission ${row?.rawWatchCurrentActivityAdmissionV755?.passes === true ? "PASS" : "LEGACY/UNVERIFIED"}${Array.isArray(row?.rawWatchCurrentActivityAdmissionV755?.reasons) && row.rawWatchCurrentActivityAdmissionV755.reasons.length ? ` · ${row.rawWatchCurrentActivityAdmissionV755.reasons.join(",")}` : ""}`,
       `  V756 accepted reason ${row?.rawWatchActivityAdmissionV756?.accepted === true ? (Array.isArray(row?.rawWatchActivityAdmissionV756?.reasons) ? row.rawWatchActivityAdmissionV756.reasons.join(",") : "PASS") : "LEGACY/UNVERIFIED"}`,
       `  V757 accepted reason ${row?.rawWatchActivityAdmissionV757?.accepted === true ? (Array.isArray(row?.rawWatchActivityAdmissionV757?.reasons) ? row.rawWatchActivityAdmissionV757.reasons.join(",") : "PASS") : "LEGACY/UNVERIFIED"}`,
+      `  V758 authoritative accepted reason ${row?.rawWatchActivityAdmissionV756?.accepted === true ? (Array.isArray(row?.rawWatchActivityAdmissionV756?.reasons) ? row.rawWatchActivityAdmissionV756.reasons.join(",") : "PASS") : "LEGACY/UNVERIFIED"}`,
         `  last swap ${escapeHtml(fmtTime(row?.lastRawSwapAtV740))} · block ${escapeHtml(String(row?.lastCollectedBlock ?? "UNVERIFIED"))}`,
         `  status ${escapeHtml(row?.lastStatus || "UNVERIFIED")}`
       );
@@ -78275,7 +78277,7 @@ function poolWatchDiagnosticTelegramV741(state) {
 
   lines.push(
     "",
-    "<i>Read-only command: zero provider requests, zero scanner-budget requests and zero state writes. V748/V753 diagnostics are measurement-only; V753 records lifecycle removal telemetry on existing scan state and adds zero provider/RPC requests, zero request slots and no scoring/qualification changes.</i>"
+    "<i>Read-only command: zero provider requests, zero scanner-budget requests and zero state writes. V748/V753 diagnostics are measurement-only; V753 records lifecycle removal telemetry on existing scan state and adds zero provider/RPC requests, zero request slots and no scoring/qualification changes. V758 changes telemetry authority/display only and uses the proven V756 persisted admission store.</i>"
   );
   return lines.join("\n");
 }
