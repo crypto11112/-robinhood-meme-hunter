@@ -1,8 +1,13 @@
 /**
  * Robinhood Chain Meme Hunter
  *
- * V766:
- * - V767 adds /v4poollivecompare: diagnostic-only Uniswap Pool Info + direct recent PoolManager Swap-log comparison across retained candidate PoolIds, with no DexScreener dependency.
+ * V768:
+ * - Fixes V767 zero-candidate dead-end: /v4poollivecompare now discovers currently active V4 PoolIds directly from recent PoolManager Swap logs before asking Uniswap Pool Info which live pools contain the requested token.
+ * - Does not require a PoolId to have already been retained in KV. Checks up to 60 active PoolIds in bounded Uniswap batches of 20.
+ * - Diagnostic only: no scanner-budget use, no KV writes, no scoring/admission/collector changes, no DexScreener dependency.
+ *
+ * V767:
+ * - Added /v4poollivecompare: diagnostic-only Uniswap Pool Info + direct recent PoolManager Swap-log comparison across retained candidate PoolIds, with no DexScreener dependency.
  * - Adds /v4poolcompare: diagnostic-only comparison of the scanner's retained V4 PoolIds vs DexScreener's currently most-active bytes32 Uniswap V4 pair and Uniswap Pool Info confirmation.
  * - Auto-selects the newest token with multiple retained V760 PoolIds when no token is supplied, specifically to expose wrong-pool selection without hard-coding a token.
  * - Uses one DexScreener request + one Uniswap Pool Info request; one KV read; zero KV writes; zero scanner-budget requests; no scoring/admission/collector changes.
@@ -6696,7 +6701,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V767";
+const VERSION = "V768";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -40300,7 +40305,92 @@ async function v4PoolInfoBatchV767(env, poolIds) {
   }
 }
 
-async function v4PoolLiveCompareDiagnosticV767(env, requestedToken = "") {
+async function v4PoolInfoBatchV768(env, poolIds) {
+  const apiKey = String(env?.UNISWAP_API_KEY || "").trim();
+  const ids = [...new Set((poolIds || []).map(normalize).filter(isBytes32HexV765))].slice(0,60);
+  if (!apiKey) return {attempted:false,ok:false,httpStatus:null,pools:[],error:"UNISWAP_API_KEY_NOT_CONFIGURED",externalRequestsUsed:0,batches:0};
+  if (!ids.length) return {attempted:false,ok:false,httpStatus:null,pools:[],error:"NO_POOLIDS",externalRequestsUsed:0,batches:0};
+
+  const pools = [];
+  let externalRequestsUsed = 0;
+  let lastHttpStatus = null;
+  let lastError = null;
+  let okBatches = 0;
+  const chunks = [];
+  for (let i=0;i<ids.length;i+=20) chunks.push(ids.slice(i,i+20));
+
+  for (const chunk of chunks) {
+    try {
+      const response = await fetch("https://liquidity.api.uniswap.org/lp/pool_info", {
+        method:"POST",
+        headers:{"x-api-key":apiKey,"content-type":"application/json","accept":"application/json"},
+        body:JSON.stringify({
+          protocol:"V4",
+          poolReferences:chunk.map(referenceIdentifier => ({protocol:"V4",chainId:4663,referenceIdentifier})),
+          chainId:4663,
+          pageSize:Math.max(1,chunk.length),
+          currentPage:1
+        })
+      });
+      externalRequestsUsed += 1;
+      lastHttpStatus = response.status;
+      const text = await response.text();
+      let payload = null;
+      try { payload = text ? JSON.parse(text) : null; } catch {}
+      if (!response.ok) {
+        lastError = payload?.detail || payload?.message || payload?.error || (text?text.slice(0,700):`HTTP_${response.status}`);
+        continue;
+      }
+      okBatches += 1;
+      for (const row of (Array.isArray(payload?.pools)?payload.pools:[])) {
+        pools.push({
+          poolId:normalize(row?.poolReferenceIdentifier) || null,
+          protocol:row?.poolProtocol || null,
+          chainId:safeNumber(row?.chainId) || null,
+          tokenA:normalize(row?.tokenAddressA) || null,
+          tokenB:normalize(row?.tokenAddressB) || null,
+          liquidity:row?.poolLiquidity ?? null,
+          reserve0:row?.token0Reserves ?? null,
+          reserve1:row?.token1Reserves ?? null,
+          currentTick:row?.currentTick ?? null,
+          fee:row?.fee ?? null,
+          tickSpacing:row?.tickSpacing ?? null,
+          hook:normalize(row?.hookAddress) || null
+        });
+      }
+    } catch (error) {
+      externalRequestsUsed += 1;
+      lastError = errorString(error);
+    }
+  }
+
+  return {
+    attempted:externalRequestsUsed>0,
+    ok:okBatches>0,
+    httpStatus:lastHttpStatus,
+    pools,
+    error:okBatches===chunks.length?null:lastError,
+    externalRequestsUsed,
+    batches:chunks.length,
+    successfulBatches:okBatches
+  };
+}
+
+function v4PoolLiveAggregateSwapRowsV768(rows) {
+  const map = new Map();
+  for (const log of (Array.isArray(rows)?rows:[])) {
+    const poolId = normalize(Array.isArray(log?.topics)?log.topics[1]:null);
+    if (!isBytes32HexV765(poolId)) continue;
+    const block = Number.parseInt(String(log?.blockNumber||"0x0"),16);
+    const current = map.get(poolId) || {poolId,freshSwapCount:0,lastFreshSwapBlock:null};
+    current.freshSwapCount += 1;
+    if (Number.isFinite(block) && block>safeNumber(current.lastFreshSwapBlock)) current.lastFreshSwapBlock=block;
+    map.set(poolId,current);
+  }
+  return [...map.values()].sort((a,b)=>(safeNumber(b.freshSwapCount)-safeNumber(a.freshSwapCount)) || (safeNumber(b.lastFreshSwapBlock)-safeNumber(a.lastFreshSwapBlock)));
+}
+
+async function v4PoolLiveCompareDiagnosticV768(env, requestedToken = "") {
   const explicit = normalize(requestedToken);
   let loaded = {state:{},error:null};
   try { loaded = await readState(env); } catch (error) { loaded = {state:{},error:errorString(error)}; }
@@ -40308,40 +40398,25 @@ async function v4PoolLiveCompareDiagnosticV767(env, requestedToken = "") {
   const auto = v4PoolCompareAutoTokenV766(state);
   const token = isAddress(explicit) ? explicit : auto?.tokenAddress;
   const base = {
-    version:"V767", diagnostic:"V4_UNISWAP_AND_DIRECT_LOG_LIVE_COMPARE",
+    version:"V768", diagnostic:"V4_DIRECT_LIVE_DISCOVERY_THEN_UNISWAP_IDENTIFICATION",
     tokenAddress:token || null, tokenSource:isAddress(explicit)?"EXPLICIT_ARGUMENT":auto?.source || "AUTO_UNAVAILABLE",
     kvRead:true, kvReadError:loaded?.error || null,
-    candidatePools:[], uniswap:{attempted:false,ok:false,httpStatus:null,error:null,poolsReturned:0},
+    retainedCandidateCount:0, candidatePools:[],
+    discovery:{mode:"DIRECT_RECENT_POOLMANAGER_SWAP_LOGS",uniqueActivePoolIds:0,poolIdsSentToUniswap:0,truncated:false},
+    uniswap:{attempted:false,ok:false,httpStatus:null,error:null,poolsReturned:0,batches:0,successfulBatches:0},
     rpc:{provider:null,head:null,fromBlock:null,toBlock:null,windowBlocks:600,headOk:false,logsOk:false,httpStatusHead:null,httpStatusLogs:null,errorHead:null,errorLogs:null},
-    freshSwapRows:0, freshSwapPools:0, bestLivePoolId:null,
+    freshSwapRows:0, freshSwapPools:0, matchingTokenPools:0, bestLivePoolId:null,
     externalRequestsUsed:0, scannerBudgetConsumed:false, stateWrites:0, hardRequestLimitChanged:false
   };
   if (!isAddress(token)) return {...base,error:"NO_VALID_TOKEN_AVAILABLE"};
 
-  const candidates = v4PoolLiveCandidateIdsV767(state, token);
-  if (!candidates.length) return {...base,error:"NO_RETAINED_V4_POOLIDS_AVAILABLE"};
-  base.candidatePools = candidates.map(c => ({...c,uniswapRecognized:false,containsToken:false,uniswapLiquidity:null,freshSwapCount:0,lastFreshSwapBlock:null}));
+  const retained = v4PoolLiveCandidateIdsV767(state, token);
+  base.retainedCandidateCount = retained.length;
+  const retainedMap = new Map(retained.map(r=>[normalize(r.poolId),r]));
 
-  const uni = await v4PoolInfoBatchV767(env, candidates.map(c=>c.poolId));
-  base.externalRequestsUsed += safeNumber(uni?.externalRequestsUsed);
-  base.uniswap = {attempted:uni?.attempted===true,ok:uni?.ok===true,httpStatus:uni?.httpStatus??null,error:uni?.error||null,poolsReturned:Array.isArray(uni?.pools)?uni.pools.length:0};
-  const uniMap = new Map((uni?.pools||[]).map(p=>[normalize(p?.poolId),p]));
-  for (const row of base.candidatePools) {
-    const p = uniMap.get(normalize(row.poolId));
-    if (!p) continue;
-    row.uniswapRecognized = true;
-    row.containsToken = normalize(p?.tokenA) === token || normalize(p?.tokenB) === token;
-    row.uniswapTokenA = p?.tokenA || null;
-    row.uniswapTokenB = p?.tokenB || null;
-    row.uniswapLiquidity = p?.liquidity ?? null;
-    row.uniswapCurrentTick = p?.currentTick ?? null;
-    row.uniswapFee = p?.fee ?? null;
-    row.uniswapHook = p?.hook || null;
-  }
-
-  const tokenPools = base.candidatePools.filter(r=>r.uniswapRecognized===true && r.containsToken===true).map(r=>r.poolId);
-  if (!tokenPools.length) return {...base,error:uni?.ok===true?"UNISWAP_RECOGNIZED_NO_CANDIDATE_POOL_CONTAINING_TOKEN":(uni?.error||"UNISWAP_POOL_INFO_FAILED")};
-
+  // V768's key correction: discover ACTUALLY LIVE PoolIds from recent PoolManager
+  // Swap logs even when KV retained zero candidates. This makes the diagnostic
+  // independent of the V760/V740 retention handoff that blocked V767.
   const rpcEndpoint = v4PoolLiveRpcEndpointV767(env);
   base.rpc.provider = rpcEndpoint.name;
   const head = await v4PoolLiveRpcCallV767(rpcEndpoint.url,"eth_blockNumber",[]);
@@ -40353,13 +40428,13 @@ async function v4PoolLiveCompareDiagnosticV767(env, requestedToken = "") {
   const headNum = Number.parseInt(String(head.result||"0x0"),16);
   if (!Number.isFinite(headNum) || headNum<=0) return {...base,error:"HEAD_UNVERIFIED"};
   const from = Math.max(0,headNum-base.rpc.windowBlocks+1);
-  base.rpc.head = headNum; base.rpc.fromBlock=from; base.rpc.toBlock=headNum;
+  base.rpc.head=headNum; base.rpc.fromBlock=from; base.rpc.toBlock=headNum;
 
   const logs = await v4PoolLiveRpcCallV767(rpcEndpoint.url,"eth_getLogs",[{
     address:POOL_MANAGER,
     fromBlock:`0x${from.toString(16)}`,
     toBlock:`0x${headNum.toString(16)}`,
-    topics:[SWAP_TOPIC,tokenPools]
+    topics:[SWAP_TOPIC]
   }]);
   base.externalRequestsUsed += 1;
   base.rpc.logsOk = logs?.ok===true;
@@ -40369,52 +40444,92 @@ async function v4PoolLiveCompareDiagnosticV767(env, requestedToken = "") {
 
   const rows = Array.isArray(logs.result)?logs.result:[];
   base.freshSwapRows = rows.length;
-  for (const log of rows) {
-    const poolId = normalize(Array.isArray(log?.topics)?log.topics[1]:null);
-    const block = Number.parseInt(String(log?.blockNumber||"0x0"),16);
-    const row = base.candidatePools.find(r=>normalize(r.poolId)===poolId);
-    if (!row) continue;
-    row.freshSwapCount = safeNumber(row.freshSwapCount)+1;
-    if (Number.isFinite(block) && block>safeNumber(row.lastFreshSwapBlock)) row.lastFreshSwapBlock=block;
-  }
-  base.freshSwapPools = base.candidatePools.filter(r=>safeNumber(r.freshSwapCount)>0).length;
-  const best = [...base.candidatePools].filter(r=>r.containsToken===true).sort((a,b)=>(safeNumber(b.freshSwapCount)-safeNumber(a.freshSwapCount)) || (safeNumber(b.lastFreshSwapBlock)-safeNumber(a.lastFreshSwapBlock)))[0] || null;
-  base.bestLivePoolId = best && safeNumber(best.freshSwapCount)>0 ? best.poolId : null;
+  const active = v4PoolLiveAggregateSwapRowsV768(rows);
+  base.discovery.uniqueActivePoolIds = active.length;
+  base.freshSwapPools = active.length;
+
+  // Uniswap documents a maximum of 20 poolReferences per pool_info request.
+  // V768 checks up to 60 recent live pools in 3 bounded batches, busiest first.
+  const selectedActive = active.slice(0,60);
+  base.discovery.poolIdsSentToUniswap = selectedActive.length;
+  base.discovery.truncated = active.length > selectedActive.length;
+  if (!selectedActive.length) return {...base,error:"NO_RECENT_V4_SWAP_POOLS_IN_WINDOW"};
+
+  const uni = await v4PoolInfoBatchV768(env, selectedActive.map(r=>r.poolId));
+  base.externalRequestsUsed += safeNumber(uni?.externalRequestsUsed);
+  base.uniswap = {
+    attempted:uni?.attempted===true, ok:uni?.ok===true, httpStatus:uni?.httpStatus??null,
+    error:uni?.error||null, poolsReturned:Array.isArray(uni?.pools)?uni.pools.length:0,
+    batches:safeNumber(uni?.batches), successfulBatches:safeNumber(uni?.successfulBatches)
+  };
+  if (!uni?.ok) return {...base,error:uni?.error||"UNISWAP_POOL_INFO_FAILED"};
+
+  const uniMap = new Map((uni?.pools||[]).map(p=>[normalize(p?.poolId),p]));
+  base.candidatePools = selectedActive.map(a=>{
+    const p = uniMap.get(normalize(a.poolId)) || null;
+    const retainedRow = retainedMap.get(normalize(a.poolId)) || null;
+    const containsToken = Boolean(p && (normalize(p?.tokenA)===token || normalize(p?.tokenB)===token));
+    return {
+      poolId:a.poolId,
+      source:retainedRow?.source || "DIRECT_RECENT_SWAP_DISCOVERY_V768",
+      retained:retainedMap.has(normalize(a.poolId)),
+      uniswapRecognized:Boolean(p),
+      containsToken,
+      uniswapTokenA:p?.tokenA || null,
+      uniswapTokenB:p?.tokenB || null,
+      uniswapLiquidity:p?.liquidity ?? null,
+      uniswapCurrentTick:p?.currentTick ?? null,
+      uniswapFee:p?.fee ?? null,
+      uniswapTickSpacing:p?.tickSpacing ?? null,
+      uniswapHook:p?.hook || null,
+      freshSwapCount:safeNumber(a?.freshSwapCount),
+      lastFreshSwapBlock:a?.lastFreshSwapBlock || null
+    };
+  });
+
+  const matches = base.candidatePools.filter(r=>r.uniswapRecognized===true && r.containsToken===true);
+  base.matchingTokenPools = matches.length;
+  const best = [...matches].sort((a,b)=>(safeNumber(b.freshSwapCount)-safeNumber(a.freshSwapCount)) || (safeNumber(b.lastFreshSwapBlock)-safeNumber(a.lastFreshSwapBlock)))[0] || null;
+  base.bestLivePoolId = best?.poolId || null;
+  if (!best) return {...base,error:"NO_RECENT_UNISWAP_V4_POOL_CONTAINING_TOKEN_IN_WINDOW"};
   return base;
 }
 
-function v4PoolLiveCompareTelegramV767(result) {
+function v4PoolLiveCompareTelegramV768(result) {
   const r=result||{};
   const short=v=>{const s=String(v||"");return s.length>22?`${s.slice(0,12)}…${s.slice(-8)}`:(s||"NONE");};
+  const matching = Array.isArray(r?.candidatePools) ? r.candidatePools.filter(x=>x?.containsToken===true) : [];
   const lines=[
-    "🧬 <b>V4 Direct Live Pool Comparison — V767</b>","",
+    "🧬 <b>V4 Direct Live Pool Comparison — V768</b>","",
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
     `Token source: <b>${escapeHtml(String(r?.tokenSource||"UNVERIFIED"))}</b>`,
-    `Candidate PoolIds tested: <b>${Array.isArray(r?.candidatePools)?r.candidatePools.length:0}</b>`,"",
-    "🦄 <b>Uniswap Pool Info</b>",
-    `HTTP / OK: <b>${escapeHtml(String(r?.uniswap?.httpStatus??"N/A"))} / ${r?.uniswap?.ok===true?"YES":"NO"}</b>`,
-    `Pools returned: <b>${safeNumber(r?.uniswap?.poolsReturned)}</b>`,"",
-    "⛓ <b>Direct recent PoolManager Swap logs</b>",
+    `Retained PoolIds available: <b>${safeNumber(r?.retainedCandidateCount)}</b>`,"",
+    "⛓ <b>Direct recent PoolManager Swap discovery</b>",
     `RPC: <b>${escapeHtml(String(r?.rpc?.provider||"UNVERIFIED"))}</b>`,
     `Head: <b>${escapeHtml(String(r?.rpc?.head??"UNVERIFIED"))}</b>`,
     `Window: <b>${escapeHtml(String(r?.rpc?.fromBlock??"?"))}→${escapeHtml(String(r?.rpc?.toBlock??"?"))}</b> (${safeNumber(r?.rpc?.windowBlocks)} blocks)`,
-    `eth_getLogs: <b>${r?.rpc?.logsOk===true?"OK":"FAILED"}</b> · returned Swap rows <b>${safeNumber(r?.freshSwapRows)}</b>`,
-    `Pools with fresh swaps: <b>${safeNumber(r?.freshSwapPools)}</b>`,"",
-    "🔬 <b>Pool-by-pool result</b>"
+    `eth_getLogs: <b>${r?.rpc?.logsOk===true?"OK":"FAILED"}</b> · Swap rows <b>${safeNumber(r?.freshSwapRows)}</b>`,
+    `Unique live PoolIds: <b>${safeNumber(r?.discovery?.uniqueActivePoolIds)}</b>`,"",
+    "🦄 <b>Uniswap Pool Info identification</b>",
+    `HTTP / OK: <b>${escapeHtml(String(r?.uniswap?.httpStatus??"N/A"))} / ${r?.uniswap?.ok===true?"YES":"NO"}</b>`,
+    `PoolIds checked: <b>${safeNumber(r?.discovery?.poolIdsSentToUniswap)}</b> · pools returned <b>${safeNumber(r?.uniswap?.poolsReturned)}</b>`,
+    `Batches: <b>${safeNumber(r?.uniswap?.successfulBatches)}/${safeNumber(r?.uniswap?.batches)}</b>`,
+    `Pools containing token: <b>${safeNumber(r?.matchingTokenPools)}</b>`,"",
+    "🔬 <b>Matching live pool result</b>"
   ];
-  if (Array.isArray(r?.candidatePools) && r.candidatePools.length) {
-    for (const row of r.candidatePools) {
-      lines.push(`• <code>${escapeHtml(short(row?.poolId))}</code> · ${escapeHtml(String(row?.source||"UNKNOWN"))}`);
-      lines.push(`  Uniswap recognized ${row?.uniswapRecognized===true?"YES":"NO"} · contains token ${row?.containsToken===true?"YES":"NO"} · fresh swaps <b>${safeNumber(row?.freshSwapCount)}</b> · latest block <b>${row?.lastFreshSwapBlock??"NONE"}</b>`);
-      if (row?.uniswapRecognized===true) lines.push(`  liquidity ${escapeHtml(String(row?.uniswapLiquidity??"UNVERIFIED"))} · token A/B <code>${escapeHtml(short(row?.uniswapTokenA))}</code> / <code>${escapeHtml(short(row?.uniswapTokenB))}</code>`);
+  if (matching.length) {
+    for (const row of matching) {
+      lines.push(`• <code>${escapeHtml(short(row?.poolId))}</code> · fresh swaps <b>${safeNumber(row?.freshSwapCount)}</b> · latest block <b>${row?.lastFreshSwapBlock??"NONE"}</b>`);
+      lines.push(`  liquidity ${escapeHtml(String(row?.uniswapLiquidity??"UNVERIFIED"))} · token A/B <code>${escapeHtml(short(row?.uniswapTokenA))}</code> / <code>${escapeHtml(short(row?.uniswapTokenB))}</code>`);
+      lines.push(`  source ${escapeHtml(String(row?.source||"UNKNOWN"))} · retained ${row?.retained===true?"YES":"NO"}`);
     }
-  } else lines.push("No candidate pools retained.");
+  } else lines.push("No recent live Uniswap V4 pool containing this token was identified in the 600-block window.");
   lines.push("",`🏁 Best currently-live PoolId: <code>${escapeHtml(short(r?.bestLivePoolId))}</code>`,
     r?.rpc?.errorHead?`Head error: <code>${escapeHtml(String(r.rpc.errorHead).slice(0,400))}</code>`:"Head error: <b>NONE</b>",
     r?.rpc?.errorLogs?`Logs error: <code>${escapeHtml(String(r.rpc.errorLogs).slice(0,400))}</code>`:"Logs error: <b>NONE</b>",
     r?.uniswap?.error?`Uniswap error: <code>${escapeHtml(String(r.uniswap.error).slice(0,400))}</code>`:"Uniswap error: <b>NONE</b>",
-    r?.error?`Diagnostic result: <code>${escapeHtml(String(r.error).slice(0,400))}</code>`:"Diagnostic result: <b>COMPLETE</b>","",
-    `<i>Diagnostic only: ${safeNumber(r?.externalRequestsUsed)} external requests, one KV read, zero KV writes and zero scanner-budget requests. Uses Uniswap Pool Info plus direct PoolManager Swap logs; DexScreener is not used.</i>`);
+    r?.error?`Diagnostic result: <code>${escapeHtml(String(r.error).slice(0,400))}</code>`:"Diagnostic result: <b>LIVE_V4_POOL_VERIFIED</b>","",
+    `<i>Diagnostic only: ${safeNumber(r?.externalRequestsUsed)} external requests, one KV read, zero KV writes and zero scanner-budget requests. V768 no longer requires a retained PoolId before testing live V4 activity.</i>`);
   return lines.join("\\n");
 }
 
@@ -147463,7 +147578,7 @@ function telegramHelpV271() {
     "<code>/cmctest [0xADDRESS]</code> — V738 CoinMarketCap Robinhood Chain coverage test (diagnostic only)",
     "<code>/uniswaptest</code> — V764 one-request Uniswap Trade API POST quote test (diagnostic only)",
     "<code>/uniswapv4test [0xPOOLID]</code> — V765 one-request Uniswap V4 Pool Info test; auto-selects a retained PoolId when omitted",
-    "<code>/v4poollivecompare [0xTOKEN]</code> — V767 compare retained PoolIds via Uniswap Pool Info + direct recent PoolManager Swap logs (no DexScreener)",
+    "<code>/v4poollivecompare [0xTOKEN]</code> — V768 discover recent live PoolIds directly from PoolManager swaps, then identify token pools with Uniswap Pool Info (no DexScreener)",
     "<code>/v4poolcompare [0xTOKEN]</code> — V766 compare scanner PoolIds vs DexScreener active V4 pair + Uniswap Pool Info confirmation",
     "<code>/cmcusage</code> — V739 CoinMarketCap bot-side monthly request meter (read-only)",
     "<code>/poolwatch</code> — V748 raw exact-pool range/log/decode trace diagnostic (read-only)",
@@ -148304,27 +148419,28 @@ async function telegramCommandReplyV271(
 
 
   if (parsed.command === "/v4poollivecompare") {
-    const compareV767 = await v4PoolLiveCompareDiagnosticV767(env, parsed.argument || "");
-    const replyV767 = v4PoolLiveCompareTelegramV767(compareV767);
+    const compareV768 = await v4PoolLiveCompareDiagnosticV768(env, parsed.argument || "");
+    const replyV768 = v4PoolLiveCompareTelegramV768(compareV768);
     if (diagnosticV273) {
       diagnosticV273.replyAttempted = true;
-      diagnosticV273.v4PoolLiveCompareV767 = {
-        tokenAddress:compareV767?.tokenAddress || null,
-        bestLivePoolId:compareV767?.bestLivePoolId || null,
-        freshSwapRows:safeNumber(compareV767?.freshSwapRows),
-        freshSwapPools:safeNumber(compareV767?.freshSwapPools),
-        externalRequestsUsed:safeNumber(compareV767?.externalRequestsUsed), scannerBudgetConsumed:false, stateWrites:0
+      diagnosticV273.v4PoolLiveCompareV768 = {
+        tokenAddress:compareV768?.tokenAddress || null,
+        bestLivePoolId:compareV768?.bestLivePoolId || null,
+        freshSwapRows:safeNumber(compareV768?.freshSwapRows),
+        freshSwapPools:safeNumber(compareV768?.freshSwapPools),
+        matchingTokenPools:safeNumber(compareV768?.matchingTokenPools),
+        externalRequestsUsed:safeNumber(compareV768?.externalRequestsUsed), scannerBudgetConsumed:false, stateWrites:0
       };
     }
-    const sentV767 = await sendTelegram(env, replyV767, null, null);
+    const sentV768 = await sendTelegram(env, replyV768, null, null);
     if (diagnosticV273) {
-      diagnosticV273.replySuccess = sentV767?.success === true;
-      diagnosticV273.telegramStatus = sentV767?.status || null;
-      diagnosticV273.telegramMode = sentV767?.mode || null;
-      diagnosticV273.telegramError = sentV767?.error || null;
-      diagnosticV273.result = sentV767?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+      diagnosticV273.replySuccess = sentV768?.success === true;
+      diagnosticV273.telegramStatus = sentV768?.status || null;
+      diagnosticV273.telegramMode = sentV768?.mode || null;
+      diagnosticV273.telegramError = sentV768?.error || null;
+      diagnosticV273.result = sentV768?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
     }
-    return {success:sentV767?.success===true, ignored:false, command:parsed.command, v4PoolLiveCompareV767:compareV767};
+    return {success:sentV768?.success===true, ignored:false, command:parsed.command, v4PoolLiveCompareV768:compareV768};
   }
 
   if (parsed.command === "/v4poolcompare") {
@@ -154129,7 +154245,7 @@ async function handleRequest(
 
   if (path === "/v4poollivecompare") {
     return jsonResponse(
-      await v4PoolLiveCompareDiagnosticV767(
+      await v4PoolLiveCompareDiagnosticV768(
         env,
         url.searchParams.get("token") || ""
       )
