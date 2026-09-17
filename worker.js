@@ -1,6 +1,11 @@
 /**
  * Robinhood Chain Meme Hunter
  *
+ * V765:
+ * - Adds /uniswapv4test: one-request Uniswap Liquidity Pool Info API diagnostic for a known V4 PoolId on Robinhood Chain 4663.
+ * - Auto-selects the newest retained exact provider↔PoolId V760 trace when no PoolId argument is supplied; explicit bytes32 PoolId is also supported.
+ * - Diagnostic only: no scanner-budget requests, no KV writes, no scoring/admission/collector/Telegram gate changes.
+ *
  * V764:
  * - Adds a one-request read-only Uniswap Trade API diagnostic at /uniswaptest and Telegram /uniswaptest.
  * - Uses the existing UNISWAP_API_KEY server-side and the existing POST /v1/quote integration shape.
@@ -6685,7 +6690,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V764";
+const VERSION = "V765";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -39779,6 +39784,246 @@ function uniswapTradeApiDiagnosticTelegramV764(result) {
     r.error ? `Error: <code>${escapeHtml(String(r.error).slice(0,500))}</code>` : "Error: <b>NONE</b>",
     "",
     `<i>Diagnostic only: ${safeNumber(r.externalRequestsUsed)} external request, zero scanner-budget requests, zero KV writes. API key is never displayed.</i>`
+  ].join("\\n");
+}
+
+
+function isBytes32HexV765(value) {
+  return /^0x[a-fA-F0-9]{64}$/.test(String(value || "").trim());
+}
+
+function newestAutoPoolIdV765(state) {
+  const events = Array.isArray(state?.rawAdmissionTelemetryV756?.recentEventsV760)
+    ? [...state.rawAdmissionTelemetryV756.recentEventsV760].reverse()
+    : [];
+
+  const exact = events.find(event => {
+    const e = event?.evidence || {};
+    return isBytes32HexV765(event?.poolId) &&
+      (e?.exactProviderPoolMatch === true || e?.providerPoolIdV451Matches === true);
+  });
+  if (exact) {
+    return {
+      poolId: normalize(exact.poolId),
+      source: "LATEST_EXACT_PROVIDER_POOLID_V760",
+      symbol: exact?.symbol || null,
+      tokenAddress: normalize(exact?.tokenAddress) || null
+    };
+  }
+
+  const anyAdmission = events.find(event => isBytes32HexV765(event?.poolId));
+  if (anyAdmission) {
+    return {
+      poolId: normalize(anyAdmission.poolId),
+      source: "LATEST_V760_POOLID",
+      symbol: anyAdmission?.symbol || null,
+      tokenAddress: normalize(anyAdmission?.tokenAddress) || null
+    };
+  }
+
+  const entries = Object.values(state?.directionalExactPoolWatchV551?.entries || {});
+  const raw = [...entries]
+    .filter(row => row && row?.rawOnlyV740 === true && isBytes32HexV765(row?.poolId))
+    .sort((a,b) => safeNumber(b?.registeredAt) - safeNumber(a?.registeredAt))[0];
+  if (raw) {
+    return {
+      poolId: normalize(raw.poolId),
+      source: "LATEST_RAW_WATCH_POOLID_V740",
+      symbol: raw?.symbol || null,
+      tokenAddress: normalize(raw?.tokenAddress) || null
+    };
+  }
+
+  return {
+    poolId: null,
+    source: "NO_RETAINED_POOLID_AVAILABLE",
+    symbol: null,
+    tokenAddress: null
+  };
+}
+
+async function uniswapV4PoolInfoDiagnosticV765(env, requestedPoolId = "") {
+  const apiKey = String(env.UNISWAP_API_KEY || "").trim();
+  let selected = {
+    poolId: isBytes32HexV765(requestedPoolId) ? normalize(requestedPoolId) : null,
+    source: isBytes32HexV765(requestedPoolId) ? "EXPLICIT_ARGUMENT" : "AUTO_SELECT_PENDING",
+    symbol: null,
+    tokenAddress: null
+  };
+  let kvRead = false;
+  let kvReadError = null;
+
+  if (!selected.poolId) {
+    try {
+      const loaded = await readState(env);
+      kvRead = true;
+      kvReadError = loaded?.error || null;
+      selected = newestAutoPoolIdV765(loaded?.state || {});
+    } catch (error) {
+      kvRead = true;
+      kvReadError = errorString(error);
+    }
+  }
+
+  const base = {
+    version: "V765",
+    diagnostic: "UNISWAP_V4_POOL_INFO_API",
+    apiKeyConfigured: Boolean(apiKey),
+    apiKeyExposed: false,
+    endpoint: "https://liquidity.api.uniswap.org/lp/pool_info",
+    method: "POST",
+    chainId: 4663,
+    protocol: "V4",
+    requestedPoolId: String(requestedPoolId || "").trim() || null,
+    poolId: selected?.poolId || null,
+    poolIdSource: selected?.source || null,
+    sourceSymbol: selected?.symbol || null,
+    sourceTokenAddress: selected?.tokenAddress || null,
+    kvRead,
+    kvReadError,
+    attempted: false,
+    httpStatus: null,
+    ok: false,
+    poolReturned: false,
+    exactReferenceMatch: false,
+    requestId: null,
+    pool: null,
+    error: null,
+    externalRequestsUsed: 0,
+    scannerBudgetConsumed: false,
+    stateWrites: 0,
+    hardRequestLimitChanged: false,
+    activityDataClaimed: false
+  };
+
+  if (!apiKey) {
+    return {...base, error:"UNISWAP_API_KEY_NOT_CONFIGURED"};
+  }
+  if (!selected?.poolId) {
+    return {...base, error:kvReadError || "NO_VALID_V4_POOLID_AVAILABLE"};
+  }
+
+  try {
+    const response = await fetch(base.endpoint, {
+      method:"POST",
+      headers:{
+        "x-api-key":apiKey,
+        "content-type":"application/json",
+        "accept":"application/json"
+      },
+      body:JSON.stringify({
+        protocol:"V4",
+        poolReferences:[{
+          protocol:"V4",
+          chainId:4663,
+          referenceIdentifier:selected.poolId
+        }],
+        chainId:4663,
+        pageSize:1,
+        currentPage:1
+      })
+    });
+
+    const httpStatus = response.status;
+    let payload = null;
+    let rawText = null;
+    try {
+      rawText = await response.text();
+      payload = rawText ? JSON.parse(rawText) : null;
+    } catch {
+      payload = null;
+    }
+
+    if (!response.ok) {
+      return {
+        ...base,
+        attempted:true,
+        httpStatus,
+        externalRequestsUsed:1,
+        error:
+          payload?.detail ||
+          payload?.errorCode ||
+          payload?.message ||
+          payload?.error ||
+          (rawText ? String(rawText).slice(0,700) : `HTTP_${httpStatus}`)
+      };
+    }
+
+    const pools = Array.isArray(payload?.pools) ? payload.pools : [];
+    const exact = pools.find(row => normalize(row?.poolReferenceIdentifier) === selected.poolId) || pools[0] || null;
+    const pool = exact ? {
+      poolReferenceIdentifier: normalize(exact?.poolReferenceIdentifier) || null,
+      poolProtocol: exact?.poolProtocol || null,
+      chainId: safeNumber(exact?.chainId) || null,
+      tokenAddressA: normalize(exact?.tokenAddressA) || null,
+      tokenAddressB: normalize(exact?.tokenAddressB) || null,
+      tokenDecimalsA: exact?.tokenDecimalsA ?? null,
+      tokenDecimalsB: exact?.tokenDecimalsB ?? null,
+      fee: exact?.fee ?? null,
+      tickSpacing: exact?.tickSpacing ?? null,
+      hookAddress: normalize(exact?.hookAddress) || null,
+      poolLiquidity: exact?.poolLiquidity ?? null,
+      sqrtRatioX96: exact?.sqrtRatioX96 ?? null,
+      currentTick: exact?.currentTick ?? null,
+      token0Reserves: exact?.token0Reserves ?? null,
+      token1Reserves: exact?.token1Reserves ?? null,
+      tokenAmountA: exact?.tokenAmountA ?? null,
+      tokenAmountB: exact?.tokenAmountB ?? null
+    } : null;
+
+    return {
+      ...base,
+      attempted:true,
+      httpStatus,
+      ok:true,
+      requestId:payload?.requestId || null,
+      poolReturned:Boolean(pool),
+      exactReferenceMatch:Boolean(pool && pool.poolReferenceIdentifier === selected.poolId),
+      pool,
+      externalRequestsUsed:1,
+      error:pool ? null : "HTTP_200_BUT_NO_POOL_RETURNED"
+    };
+  } catch (error) {
+    return {
+      ...base,
+      attempted:true,
+      externalRequestsUsed:1,
+      error:errorString(error)
+    };
+  }
+}
+
+function uniswapV4PoolInfoTelegramV765(result) {
+  const r = result || {};
+  const p = r?.pool || {};
+  const short = value => {
+    const s = String(value || "");
+    return s.length > 22 ? `${s.slice(0,12)}…${s.slice(-8)}` : (s || "UNVERIFIED");
+  };
+  return [
+    "🦄 <b>Uniswap V4 Pool Info Test — V765</b>",
+    "",
+    `UNISWAP_API_KEY: <b>${r.apiKeyConfigured===true?"CONFIGURED":"NOT CONFIGURED"}</b>`,
+    `Request: <b>POST</b> <code>/lp/pool_info</code>`,
+    `Robinhood Chain: <b>${escapeHtml(String(r.chainId ?? 4663))}</b>`,
+    `PoolId source: <b>${escapeHtml(String(r.poolIdSource || "UNVERIFIED"))}</b>`,
+    `PoolId: <code>${escapeHtml(short(r.poolId))}</code>`,
+    `HTTP: <b>${escapeHtml(String(r.httpStatus ?? "N/A"))}</b>`,
+    `API response: <b>${r.ok===true?"OK":"FAILED"}</b>`,
+    `Pool returned: <b>${r.poolReturned===true?"YES":"NO"}</b>`,
+    `Exact PoolId match: <b>${r.exactReferenceMatch===true?"YES":"NO"}</b>`,
+    "",
+    `Protocol / chain: <b>${escapeHtml(String(p?.poolProtocol || "UNVERIFIED"))} / ${escapeHtml(String(p?.chainId ?? "UNVERIFIED"))}</b>`,
+    `Token A: <code>${escapeHtml(short(p?.tokenAddressA))}</code>`,
+    `Token B: <code>${escapeHtml(short(p?.tokenAddressB))}</code>`,
+    `Fee / tick spacing: <b>${escapeHtml(String(p?.fee ?? "UNVERIFIED"))} / ${escapeHtml(String(p?.tickSpacing ?? "UNVERIFIED"))}</b>`,
+    `Hook: <code>${escapeHtml(short(p?.hookAddress))}</code>`,
+    `Pool liquidity: <b>${escapeHtml(String(p?.poolLiquidity ?? "UNVERIFIED"))}</b>`,
+    `Current tick: <b>${escapeHtml(String(p?.currentTick ?? "UNVERIFIED"))}</b>`,
+    `Reserve0 / Reserve1: <b>${escapeHtml(String(p?.token0Reserves ?? "UNVERIFIED"))} / ${escapeHtml(String(p?.token1Reserves ?? "UNVERIFIED"))}</b>`,
+    r.error ? `Error: <code>${escapeHtml(String(r.error).slice(0,700))}</code>` : "Error: <b>NONE</b>",
+    "",
+    `<i>Diagnostic only: ${safeNumber(r.externalRequestsUsed)} Uniswap request, ${r.kvRead===true?"one KV read for automatic PoolId selection":"zero KV reads when an explicit PoolId is supplied"}, zero KV writes and zero scanner-budget requests. This endpoint tests V4 pool-state recognition; it does not claim recent swap/activity coverage.</i>`
   ].join("\\n");
 }
 
@@ -146793,6 +147038,7 @@ function telegramHelpV271() {
     "<code>/datacoverage</code> — V734 hotfixed free-provider/data + V732 pool-bridge audit (read-only)",
     "<code>/cmctest [0xADDRESS]</code> — V738 CoinMarketCap Robinhood Chain coverage test (diagnostic only)",
     "<code>/uniswaptest</code> — V764 one-request Uniswap Trade API POST quote test (diagnostic only)",
+    "<code>/uniswapv4test [0xPOOLID]</code> — V765 one-request Uniswap V4 Pool Info test; auto-selects a retained PoolId when omitted",
     "<code>/cmcusage</code> — V739 CoinMarketCap bot-side monthly request meter (read-only)",
     "<code>/poolwatch</code> — V748 raw exact-pool range/log/decode trace diagnostic (read-only)",
     "<code>/poolmatch</code> — V747 selected-vs-provider/canonical pool activity + persisted-watch reselection diagnostic (read-only)",
@@ -147628,6 +147874,53 @@ async function telegramCommandReplyV271(
     };
   }
 
+
+
+  if (parsed.command === "/uniswapv4test") {
+    const uniswapV765 = await uniswapV4PoolInfoDiagnosticV765(env, parsed.argument || "");
+    const replyV765 = uniswapV4PoolInfoTelegramV765(uniswapV765);
+    if (diagnosticV273) {
+      diagnosticV273.replyAttempted = true;
+      diagnosticV273.uniswapV4TestV765 = {
+        poolId: uniswapV765?.poolId || null,
+        poolIdSource: uniswapV765?.poolIdSource || null,
+        attempted: uniswapV765?.attempted === true,
+        httpStatus: uniswapV765?.httpStatus ?? null,
+        ok: uniswapV765?.ok === true,
+        poolReturned: uniswapV765?.poolReturned === true,
+        exactReferenceMatch: uniswapV765?.exactReferenceMatch === true,
+        externalRequestsUsed: safeNumber(uniswapV765?.externalRequestsUsed),
+        scannerBudgetConsumed:false,
+        stateWrites:0,
+        hardGlobalLimitUnchanged:42
+      };
+    }
+    const sentV765 = await sendTelegram(env, replyV765, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV765?.success === true;
+      diagnosticV273.telegramStatus = sentV765?.status || null;
+      diagnosticV273.telegramMode = sentV765?.mode || null;
+      diagnosticV273.telegramError = sentV765?.error || null;
+      diagnosticV273.result = sentV765?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {
+      success:sentV765?.success === true,
+      ignored:false,
+      command:parsed.command,
+      uniswapV4TestV765:{
+        poolId:uniswapV765?.poolId || null,
+        poolIdSource:uniswapV765?.poolIdSource || null,
+        attempted:uniswapV765?.attempted === true,
+        httpStatus:uniswapV765?.httpStatus ?? null,
+        ok:uniswapV765?.ok === true,
+        poolReturned:uniswapV765?.poolReturned === true,
+        exactReferenceMatch:uniswapV765?.exactReferenceMatch === true,
+        externalRequestsUsed:safeNumber(uniswapV765?.externalRequestsUsed),
+        scannerBudgetConsumed:false,
+        stateWrites:0
+      }
+    };
+  }
 
   if (parsed.command === "/uniswaptest") {
     const uniswapV764 = await uniswapTradeApiDiagnosticV764(env);
@@ -153352,6 +153645,16 @@ async function handleRequest(
     return jsonResponse(
       await health(
         env
+      )
+    );
+  }
+
+
+  if (path === "/uniswapv4test") {
+    return jsonResponse(
+      await uniswapV4PoolInfoDiagnosticV765(
+        env,
+        url.searchParams.get("pool") || ""
       )
     );
   }
