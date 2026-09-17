@@ -1,5 +1,14 @@
 /**
- * Robinhood Chain Meme Hunter — V791
+ * Robinhood Chain Meme Hunter — V792
+ *
+ * V792 MANUAL V4 SEARCH USABILITY FIX:
+ * - /v4poolsearch with no args auto-selects the most recently updated V789/V788 cursor token with a verified launch block;
+ * - valid explicit tokens without a stored launch anchor no longer abort before RPC; they use two recent backward 250-block Initialize windows;
+ * - explicit /v4poolsearch 0xTOKEN BLOCK remains supported for a known historical anchor;
+ * - diagnostic only: zero scanner-budget requests, zero KV writes, no scoring/Telegram/USD changes.
+ */
+/**
+ * Robinhood Chain Meme Hunter — V792
  *
  * V790 V789 BIDIRECTIONAL PROTECTED-HANDOFF AUTHORISATION FIX:
  * - preserves V789 bidirectional Validation Cloud Initialize cursor/search logic unchanged;
@@ -6833,7 +6842,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V791";
+const VERSION = "V792";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -40852,6 +40861,27 @@ function v4PoolSearchLaunchAnchorV791(state, token, explicitBlock = 0) {
   return {block:0,source:"NO_VERIFIED_LAUNCH_ANCHOR"};
 }
 
+function v4PoolSearchAutoTokenV792(state) {
+  const candidates=[];
+  for(const [source,store] of [
+    ["V789_CURSOR",state?.productionV4InitCursorV789],
+    ["V788_CURSOR",state?.productionV4InitCursorV788]
+  ]){
+    if(!store || typeof store!=="object") continue;
+    for(const [key,row] of Object.entries(store)){
+      const token=normalize(row?.tokenAddress||key);
+      const launchBlock=safeNumber(row?.launchBlock);
+      if(!isAddress(token) || !(launchBlock>0)) continue;
+      candidates.push({tokenAddress:token,launchBlock,updatedAt:safeNumber(row?.updatedAt),source});
+    }
+  }
+  candidates.sort((a,b)=>safeNumber(b?.updatedAt)-safeNumber(a?.updatedAt));
+  if(candidates.length) return candidates[0];
+  const latest=normalize(state?.productionV4EnrichmentV772?.tokenAddress);
+  if(isAddress(latest)) return {tokenAddress:latest,launchBlock:0,updatedAt:0,source:"LAST_PRODUCTION_TOKEN"};
+  return null;
+}
+
 async function v4PoolSearchDiagnosticV791(env, argument="") {
   const parts=String(argument||"").trim().split(/\s+/).filter(Boolean);
   const explicitToken=normalize(parts[0]||"");
@@ -40859,20 +40889,22 @@ async function v4PoolSearchDiagnosticV791(env, argument="") {
   let loaded={state:{},error:null};
   try{loaded=await readState(env);}catch(error){loaded={state:{},error:errorString(error)};}
   const state=loaded?.state||{};
-  const latestToken=normalize(state?.productionV4EnrichmentV772?.tokenAddress);
-  const token=isAddress(explicitToken)?explicitToken:(isAddress(latestToken)?latestToken:null);
+  const autoTarget=v4PoolSearchAutoTokenV792(state);
+  const token=isAddress(explicitToken)?explicitToken:(isAddress(autoTarget?.tokenAddress)?normalize(autoTarget.tokenAddress):null);
   const base={
-    version:"V791",diagnostic:"MANUAL_V4_BIDIRECTIONAL_POOL_SEARCH",tokenAddress:token||null,
-    tokenSource:isAddress(explicitToken)?"EXPLICIT_ARGUMENT":(isAddress(latestToken)?"LAST_PRODUCTION_TOKEN":"NONE"),
+    version:"V792",diagnostic:"MANUAL_V4_BIDIRECTIONAL_POOL_SEARCH",tokenAddress:token||null,
+    tokenSource:isAddress(explicitToken)?"EXPLICIT_ARGUMENT":(autoTarget?.source||"NONE"),
     launchBlock:null,launchAnchorSource:null,rpcProvider:null,head:null,recentFromBlock:null,recentToBlock:null,
     recentSwapRows:0,livePoolIds:0,windows:[],initializeRows:0,decodedTokenMatches:0,
     matchingPoolIds:[],activeMatchingPoolIds:[],matchingRecentSwapRows:0,externalRequestsUsed:0,
     scannerBudgetConsumed:false,stateWrites:0,kvRead:true,kvReadError:loaded?.error||null,error:null
   };
   if(!isAddress(token)) return {...base,error:"NO_VALID_TOKEN_USE_/v4poolsearch_0xTOKEN"};
-  const anchor=v4PoolSearchLaunchAnchorV791(state,token,explicitBlock);
+  let anchor=v4PoolSearchLaunchAnchorV791(state,token,explicitBlock);
+  if(!(anchor.block>0) && !isAddress(explicitToken) && safeNumber(autoTarget?.launchBlock)>0){
+    anchor={block:safeNumber(autoTarget.launchBlock),source:autoTarget.source||"AUTO_CURSOR"};
+  }
   base.launchBlock=anchor.block||null;base.launchAnchorSource=anchor.source;
-  if(!(anchor.block>0)) return {...base,error:"NO_VERIFIED_LAUNCH_ANCHOR_USE_/v4poolsearch_0xTOKEN_BLOCK"};
 
   const rpc=v4PoolLiveRpcEndpointV767(env);
   base.rpcProvider=rpc.name;
@@ -40894,10 +40926,20 @@ async function v4PoolSearchDiagnosticV791(env, argument="") {
   const activeIds=new Set(active.map(r=>normalize(r?.poolId)).filter(isBytes32HexV765));
 
   const span=Math.max(1,Math.min(250,safeNumber(VALIDATION_CLOUD_UNKNOWN_POOL_RANGE_BLOCKS_V630)||250));
-  const ranges=[
-    {label:"BACKWARD",from:Math.max(0,anchor.block-span),to:Math.max(0,anchor.block-1)},
-    {label:"FORWARD",from:anchor.block,to:Math.min(headNum,anchor.block+span-1)}
-  ];
+  const anchored=anchor.block>0 && anchor.block<=headNum;
+  const ranges=anchored
+    ? [
+        {label:"BACKWARD",from:Math.max(0,anchor.block-span),to:Math.max(0,anchor.block-1)},
+        {label:"FORWARD",from:anchor.block,to:Math.min(headNum,anchor.block+span-1)}
+      ]
+    : [
+        {label:"RECENT_BACKWARD_A",from:Math.max(0,headNum-span+1),to:headNum},
+        {label:"RECENT_BACKWARD_B",from:Math.max(0,headNum-(span*2)+1),to:Math.max(0,headNum-span)}
+      ];
+  if(!anchored){
+    base.launchBlock=null;
+    base.launchAnchorSource="NO_VERIFIED_LAUNCH_ANCHOR_RECENT_BACKWARD_FALLBACK_V792";
+  }
   const matched=new Set();
   for(const range of ranges){
     const row={label:range.label,fromBlock:range.from,toBlock:range.to,attempted:false,ok:false,rows:0,tokenMatches:0,error:null};
@@ -40935,7 +40977,7 @@ function v4PoolSearchTelegramV791(result){
   const r=result||{};
   const short=v=>{const s=String(v||"");return s.length>22?`${s.slice(0,12)}…${s.slice(-8)}`:(s||"NONE");};
   const lines=[
-    "🧬 <b>Manual V4 Pool Search — V791</b>","",
+    "🧬 <b>Manual V4 Pool Search — V792</b>","",
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
     `Token source: <b>${escapeHtml(String(r?.tokenSource||"NONE"))}</b>`,
     `Launch anchor: <b>${escapeHtml(String(r?.launchBlock??"NONE"))}</b> · ${escapeHtml(String(r?.launchAnchorSource||"NONE"))}`,
@@ -149536,7 +149578,7 @@ function telegramHelpV271() {
     "<code>/uniswapv4test [0xPOOLID]</code> — V765 one-request Uniswap V4 Pool Info test; auto-selects a retained PoolId when omitted",
     "<code>/v4marketstatus</code> — V773 show the last production market/liquidity completion result",
     "<code>/v4prodstatus</code> — V772 show the last production scanner V4/Uniswap enrichment result",
-    "<code>/v4poolsearch [0xTOKEN] [launchBlock]</code> — V791 force a manual bidirectional Validation Cloud PoolId search (diagnostic only)",
+    "<code>/v4poolsearch [0xTOKEN] [launchBlock]</code> — V792 manual Validation Cloud PoolId search; auto-selects latest cursor token and supports anchorless recent-backward fallback (diagnostic only)",
     "<code>/v4allpools [0xTOKEN]</code> — V771 verify all recent live V4 pools for a token + normalized BUY/SELL amounts using on-chain decimals",
     "<code>/v4swapamounts [0xTOKEN]</code> — V770 verify exact raw target/paired amounts for BUY vs SELL swaps on the discovered live pool",
     "<code>/v4swapdirection [0xTOKEN]</code> — V769 verify BUY/SELL direction from signed on-chain V4 Swap deltas on the discovered live pool",
