@@ -1,6 +1,11 @@
 /**
  * Robinhood Chain Meme Hunter
  *
+ * V775:
+ * - Fixes /v4marketstatus legacy-record compatibility: usable market status is recalculated from actual positive priceUsd + liquidityUsd instead of trusting stale persisted booleans.
+ * - Old V773/V774 records can no longer display usable market/liquidity YES while their values are UNVERIFIED.
+ * - Production scanner enrichment logic, provider routing, hard request ceiling, scoring and Telegram thresholds are unchanged.
+ *
  * V774:
  * - Fixes production market evidence integrity: verified flag alone is not enough.
  * - Requires positive verified priceUsd AND liquidityUsd before market completion is treated as usable.
@@ -6730,7 +6735,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V774";
+const VERSION = "V775";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -155272,8 +155277,18 @@ function productionMarketLiquidityStatusTelegramV773(result) {
     const n = Number(v);
     return Number.isFinite(n) && n > 0 ? `$${n.toLocaleString("en-US",{maximumFractionDigits:2})}` : "UNVERIFIED";
   };
+  // V775: legacy V773/V774 records may contain stale booleans.
+  // Recompute user-visible usability from the actual persisted values.
+  const displayedPriceUsdV775 = Number(r?.priceUsd);
+  const displayedLiquidityUsdV775 = Number(r?.liquidityUsd);
+  const usableMarketV775 =
+    r?.marketVerifiedAfter === true &&
+    Number.isFinite(displayedPriceUsdV775) && displayedPriceUsdV775 > 0 &&
+    Number.isFinite(displayedLiquidityUsdV775) && displayedLiquidityUsdV775 > 0;
+  const usableLiquidityV775 =
+    usableMarketV775 && r?.liquidityVerifiedAfter === true;
   return [
-    "💧 <b>Production Market / Liquidity Bridge — V774</b>",
+    "💧 <b>Production Market / Liquidity Bridge — V775</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
@@ -155284,13 +155299,13 @@ function productionMarketLiquidityStatusTelegramV773(result) {
     `Extra requests used: <b>${safeNumber(r?.externalRequestsUsed)}</b>`,
     "",
     `Pre-existing market flag: <b>${r?.marketFlagVerifiedBefore === true ? "YES" : "NO"}</b>`,
-    `Usable market verified: <b>${r?.marketVerifiedAfter === true ? "YES" : "NO"}</b>`,
-    `Liquidity verified: <b>${r?.liquidityVerifiedAfter === true ? "YES" : "NO"}</b>`,
+    `Usable market verified: <b>${usableMarketV775 ? "YES" : "NO"}</b>`,
+    `Liquidity verified: <b>${usableLiquidityV775 ? "YES" : "NO"}</b>`,
     `Price: <b>${money(r?.priceUsd)}</b>`,
     `Liquidity: <b>${money(r?.liquidityUsd)}</b>`,
     `Momentum / Opportunity / Confidence after: <b>${safeNumber(r?.momentumAfter)} / ${safeNumber(r?.opportunityAfter)} / ${safeNumber(r?.confidenceAfter)}</b>`,
     "",
-    "<i>V774 requires verified flag + positive USD price + positive USD liquidity before market evidence is considered usable. It reuses the existing free verifier and changes no Telegram thresholds.</i>"
+    "<i>V775 recalculates usable market evidence from actual positive USD price + liquidity values, including for legacy records. Production enrichment rules, free verifier use and Telegram thresholds are unchanged.</i>"
   ].join("\\n");
 }
 
