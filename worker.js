@@ -6735,7 +6735,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V777";
+const VERSION = "V778";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -92087,18 +92087,46 @@ async function enrichCandidateWithProductionV4V772(
   base.recentSwapRows = rows.length;
   base.uniqueLivePoolIds = active.length;
 
-  // Retained token-specific PoolIds get first priority, then freshest/highest-activity live pools.
+  // V778: retained token-specific PoolIds first, then balance BUSIEST and FRESHEST
+  // recent live pools inside the same fixed 40-PoolId / 2-Uniswap-batch envelope.
+  // This avoids starving newer/lower-volume pools behind globally busiest V4 pools.
   const selected = [];
   const seen = new Set();
   const add = id => {
     const poolId = normalize(id);
-    if (!isBytes32HexV765(poolId) || seen.has(poolId) || selected.length >= 40) return;
+    if (!isBytes32HexV765(poolId) || seen.has(poolId) || selected.length >= 40) return false;
     seen.add(poolId);
     selected.push(poolId);
+    return true;
   };
 
-  for (const row of v4PoolLiveCandidateIdsV767(state, token)) add(row?.poolId);
-  for (const row of active) add(row?.poolId);
+  const retainedRowsV778 = v4PoolLiveCandidateIdsV767(state, token);
+  for (const row of retainedRowsV778) add(row?.poolId);
+
+  const remainingV778 = Math.max(0, 40 - selected.length);
+  const busiestQuotaV778 = Math.ceil(remainingV778 / 2);
+  let busiestAddedV778 = 0;
+  for (const row of active) {
+    if (selected.length >= 40 || busiestAddedV778 >= busiestQuotaV778) break;
+    if (add(row?.poolId)) busiestAddedV778++;
+  }
+
+  const freshestV778 = [...active].sort((a,b) =>
+    (safeNumber(b?.lastFreshSwapBlock) - safeNumber(a?.lastFreshSwapBlock)) ||
+    (safeNumber(b?.freshSwapCount) - safeNumber(a?.freshSwapCount))
+  );
+  for (const row of freshestV778) {
+    if (selected.length >= 40) break;
+    add(row?.poolId);
+  }
+
+  base.poolSelectionV778 = {
+    retainedCandidates: retainedRowsV778.length,
+    busiestAdded: busiestAddedV778,
+    freshestAdded: Math.max(0, selected.length - retainedRowsV778.length - busiestAddedV778),
+    totalSelected: selected.length,
+    strategy: "RETAINED_THEN_BALANCED_BUSY_FRESH_V778"
+  };
   base.candidatePoolIdsChecked = selected.length;
 
   const uni = await v772UniswapIdentifyPools(env, budget, selected, token);
@@ -155514,7 +155542,7 @@ function productionV4StatusTelegramV772(result) {
     return x.length > 22 ? `${x.slice(0,12)}…${x.slice(-8)}` : (x || "NONE");
   };
   return [
-    "🧬 <b>Production V4 / Uniswap Bridge — V777</b>",
+    "🧬 <b>Production V4 / Uniswap Bridge — V778</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
@@ -155523,11 +155551,12 @@ function productionV4StatusTelegramV772(result) {
     `RPC: <b>${escapeHtml(String(r?.rpcProvider || "N/A"))}</b>`,
     `Recent swaps / live PoolIds: <b>${safeNumber(r?.recentSwapRows)} / ${safeNumber(r?.uniqueLivePoolIds)}</b>`,
     `Bounded PoolIds checked: <b>${safeNumber(r?.candidatePoolIdsChecked)}</b>`,
+    `V778 pool selection retained / busiest / freshest: <b>${safeNumber(r?.poolSelectionV778?.retainedCandidates)} / ${safeNumber(r?.poolSelectionV778?.busiestAdded)} / ${safeNumber(r?.poolSelectionV778?.freshestAdded)}</b>`,
     `Matching pools / swaps: <b>${Array.isArray(r?.matchingPoolIds) ? r.matchingPoolIds.length : 0} / ${safeNumber(r?.matchingSwapRows)}</b>`,
     `Extra production requests used: <b>${safeNumber(r?.externalRequestsUsed)}</b>`,
-    `V777 protected slots remaining / consumed: <b>${safeNumber(r?.requestReserveV776?.handoffRemainingV777 ?? r?.requestReserveV776?.reservedRequests)} / ${safeNumber(r?.requestReserveV776?.consumedProtectedRequests)}</b>`,
-    `V777 lower-priority requests blocked: <b>${safeNumber(r?.requestReserveV776?.blockedRequests)}</b>`,
-    `V777 handoff active / hard-boundary blocks: <b>${r?.requestReserveV776?.handoffActiveV777 === true ? "YES" : "NO"} / ${safeNumber(r?.requestReserveV776?.handoffHardBoundaryBlocksV777)}</b>`,
+    `V778 protected slots remaining / consumed: <b>${safeNumber(r?.requestReserveV776?.handoffRemainingV777 ?? r?.requestReserveV776?.reservedRequests)} / ${safeNumber(r?.requestReserveV776?.consumedProtectedRequests)}</b>`,
+    `V778 lower-priority requests blocked: <b>${safeNumber(r?.requestReserveV776?.blockedRequests)}</b>`,
+    `V778 handoff active / hard-boundary blocks: <b>${r?.requestReserveV776?.handoffActiveV777 === true ? "YES" : "NO"} / ${safeNumber(r?.requestReserveV776?.handoffHardBoundaryBlocksV777)}</b>`,
     `Momentum / Opportunity / Confidence after: <b>${safeNumber(r?.momentumAfter)} / ${safeNumber(r?.opportunityAfter)} / ${safeNumber(r?.confidenceAfter)}</b>`,
     "",
     "<i>Read-only status of the last scanner run. V772 changes no Telegram thresholds and infers no USD value from V4 activity.</i>"
