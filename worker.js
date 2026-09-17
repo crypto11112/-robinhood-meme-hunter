@@ -1,6 +1,18 @@
 /**
+ * Robinhood Chain Meme Hunter — V738
+ * AUTHORITATIVE RUNTIME VERSION: V738
+ *
+ * V738 COINMARKETCAP COVERAGE TEST — DIAGNOSTIC ONLY
+ * - Builds directly forward from V737.
+ * - Adds /cmctest [0xADDRESS] to verify the Cloudflare CMC_API_KEY, query CoinMarketCap's supported DEX platform list, and check specifically for Robinhood Chain / chain ID 4663.
+ * - If Robinhood Chain is supported, the same command tests CMC token detail and token-pool coverage for the supplied address; when no address is supplied it uses the existing public WHAT IF test contract solely for this diagnostic.
+ * - The command is isolated from the scanner: it uses at most 3 CoinMarketCap HTTP requests, zero scanner-budget requests, zero KV writes, and does not feed any CMC response into market verification, scoring, Momentum, holder/risk evidence, qualification, or Telegram alerts.
+ * - API keys are never echoed into replies or diagnostics. Missing/unverified CMC fields remain UNVERIFIED.
+ * - V737 early exact-pool watch handoff and all earlier confirmed-working behaviour are preserved unchanged.
+ * - Hard global scanner request limit remains 42.
+ *
  * Robinhood Chain Meme Hunter — V737
- * AUTHORITATIVE RUNTIME VERSION: V737
+ * HISTORICAL VERSION NOTE: V737
  *
  * V737 EARLY EXACT-POOL WATCH HANDOFF
  * - Builds directly forward from V736.
@@ -6468,7 +6480,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V737";
+const VERSION = "V738";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -143364,6 +143376,242 @@ async function sendLaunchSourcesTelegramV500(
   }
 }
 
+
+const CMC_TEST_DEFAULT_TOKEN_V738 = "0x232cdfc415d10b673845d83dc02ba2eabe7e30d1";
+const CMC_TARGET_CHAIN_ID_V738 = 4663;
+const CMC_MAX_REQUESTS_V738 = 3;
+
+function cmcExtractPayloadV738(json) {
+  if (Array.isArray(json)) return json;
+  if (Array.isArray(json?.data)) return json.data;
+  if (Array.isArray(json?.result)) return json.result;
+  if (json?.data && typeof json.data === "object") return json.data;
+  return json;
+}
+
+function cmcPlatformRowsV738(json) {
+  const payload = cmcExtractPayloadV738(json);
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.list)) return payload.list;
+  if (Array.isArray(payload?.platforms)) return payload.platforms;
+  return [];
+}
+
+function cmcRobinhoodPlatformMatchV738(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  return list.find(row => {
+    const name = String(row?.n ?? row?.name ?? row?.platformName ?? "").toLowerCase();
+    const chainIds = [row?.chId, row?.chainId, row?.cid].map(Number).filter(Number.isFinite);
+    return chainIds.includes(CMC_TARGET_CHAIN_ID_V738) || name.includes("robinhood");
+  }) || null;
+}
+
+async function cmcFetchJsonV738(env, path, query = null, meter = null) {
+  const apiKey = String(env?.CMC_API_KEY || "").trim();
+  if (!apiKey) {
+    return { ok:false, status:null, outcome:"CMC_API_KEY_NOT_CONFIGURED", data:null, error:null };
+  }
+  if (meter && safeNumber(meter.requests) >= CMC_MAX_REQUESTS_V738) {
+    return { ok:false, status:null, outcome:"CMC_DIAGNOSTIC_REQUEST_CAP_REACHED_V738", data:null, error:null };
+  }
+  const url = new URL(`https://pro-api.coinmarketcap.com${path}`);
+  if (query && typeof query === "object") {
+    for (const [key,value] of Object.entries(query)) {
+      if (value !== null && value !== undefined && String(value).length) url.searchParams.set(key,String(value));
+    }
+  }
+  if (meter) meter.requests = safeNumber(meter.requests) + 1;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const response = await fetch(url.toString(), {
+      method:"GET",
+      headers:{
+        "Accept":"application/json",
+        "X-CMC_PRO_API_KEY":apiKey
+      },
+      signal:controller.signal
+    });
+    const text = await response.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch {}
+    const errorMessage =
+      data?.status?.error_message ||
+      data?.status?.errorMessage ||
+      data?.error ||
+      (!response.ok ? text.slice(0,220) : null);
+    return {
+      ok:response.ok,
+      status:response.status,
+      outcome:response.ok ? "HTTP_OK" : `HTTP_${response.status}`,
+      data,
+      error:errorMessage ? String(errorMessage).slice(0,240) : null
+    };
+  } catch (error) {
+    return {
+      ok:false,
+      status:null,
+      outcome:error?.name === "AbortError" ? "TIMEOUT" : "FETCH_ERROR",
+      data:null,
+      error:errorString(error).slice(0,240)
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function cmcTokenFieldSummaryV738(payload) {
+  const p = payload && typeof payload === "object" ? payload : {};
+  const data = p?.data && typeof p.data === "object" ? p.data : p;
+  return {
+    name:data?.n ?? data?.name ?? null,
+    symbol:data?.sym ?? data?.symbol ?? null,
+    address:data?.addr ?? data?.a ?? data?.address ?? null,
+    platform:data?.plt ?? data?.platform ?? data?.platformName ?? null,
+    priceUsd:data?.p ?? data?.price ?? data?.priceUsd ?? null,
+    liquidityUsd:data?.liqUsd ?? data?.liquidityUsd ?? null,
+    marketCap:data?.mcap ?? data?.marketCap ?? null,
+    holders:data?.hld ?? data?.holders ?? data?.holderCount ?? null,
+    launchAt:data?.lchAt ?? data?.launchAt ?? null
+  };
+}
+
+function cmcPoolRowsV738(payload) {
+  const p = cmcExtractPayloadV738(payload);
+  if (Array.isArray(p)) return p;
+  if (Array.isArray(p?.list)) return p.list;
+  if (Array.isArray(p?.pools)) return p.pools;
+  return [];
+}
+
+async function coinMarketCapCoverageTestV738(env, tokenArg) {
+  const meter = { requests:0 };
+  const configured = Boolean(String(env?.CMC_API_KEY || "").trim());
+  const token = isAddress(normalize(tokenArg)) ? normalize(tokenArg) : CMC_TEST_DEFAULT_TOKEN_V738;
+  const result = {
+    version:"V738_1",
+    diagnosticOnly:true,
+    apiKeyConfigured:configured,
+    apiKeyExposed:false,
+    targetChainId:CMC_TARGET_CHAIN_ID_V738,
+    token,
+    usedDefaultToken:!isAddress(normalize(tokenArg)),
+    requests:0,
+    scannerBudgetConsumed:false,
+    stateWrites:0,
+    scoringChanged:false,
+    qualificationChanged:false,
+    hardGlobalLimitUnchanged:42,
+    platform:null,
+    tokenDetail:null,
+    pools:null
+  };
+  if (!configured) return result;
+
+  const platforms = await cmcFetchJsonV738(env,"/v1/dex/platform/list",null,meter);
+  const rows = platforms.ok ? cmcPlatformRowsV738(platforms.data) : [];
+  const match = cmcRobinhoodPlatformMatchV738(rows);
+  result.platform = {
+    requestOutcome:platforms.outcome,
+    httpStatus:platforms.status,
+    error:platforms.error,
+    platformRows:rows.length,
+    robinhoodSupported:Boolean(match),
+    match:match ? {
+      id:match?.id ?? null,
+      name:match?.n ?? match?.name ?? match?.platformName ?? null,
+      chainId:match?.chId ?? match?.chainId ?? null,
+      acronym:match?.pltA ?? null,
+      supportedDexCount:match?.dn ?? null
+    } : null
+  };
+
+  if (!match) {
+    result.requests = meter.requests;
+    return result;
+  }
+
+  const platformName = String(match?.n ?? match?.name ?? match?.platformName ?? "").trim();
+  const tokenDetail = await cmcFetchJsonV738(env,"/v1/dex/token",{ platform:platformName, address:token },meter);
+  result.tokenDetail = {
+    requestOutcome:tokenDetail.outcome,
+    httpStatus:tokenDetail.status,
+    error:tokenDetail.error,
+    fields:tokenDetail.ok ? cmcTokenFieldSummaryV738(tokenDetail.data) : null
+  };
+
+  const pools = await cmcFetchJsonV738(env,"/v1/dex/token/pools",{ platform:platformName, address:token, size:5 },meter);
+  const poolRows = pools.ok ? cmcPoolRowsV738(pools.data) : [];
+  result.pools = {
+    requestOutcome:pools.outcome,
+    httpStatus:pools.status,
+    error:pools.error,
+    count:poolRows.length,
+    rows:poolRows.slice(0,5).map(row => ({
+      poolAddress:row?.addr ?? row?.address ?? null,
+      liquidityUsd:row?.liqUsd ?? row?.liquidityUsd ?? null,
+      volume24h:row?.v24 ?? row?.volume24h ?? null,
+      exchange:row?.exn ?? row?.exchangeName ?? null,
+      baseIndex:row?.bidx ?? null,
+      token0Address:row?.t0?.a ?? row?.t0?.addr ?? row?.token0?.address ?? null,
+      token1Address:row?.t1?.a ?? row?.t1?.addr ?? row?.token1?.address ?? null
+    }))
+  };
+  result.requests = meter.requests;
+  return result;
+}
+
+function coinMarketCapCoverageTelegramV738(result) {
+  const r = result || {};
+  const p = r.platform || {};
+  const t = r.tokenDetail || {};
+  const pools = r.pools || {};
+  const f = t.fields || {};
+  const lines = [
+    "🧪 <b>CoinMarketCap Coverage Test — V738</b>",
+    "",
+    `CMC_API_KEY: <b>${r.apiKeyConfigured===true?"CONFIGURED":"NOT CONFIGURED"}</b>`,
+    `Robinhood Chain / 4663 supported: <b>${p.robinhoodSupported===true?"YES":"NO / NOT FOUND"}</b>`,
+    `Platform-list HTTP: <b>${escapeHtml(String(p.httpStatus ?? "N/A"))}</b> | rows <b>${safeNumber(p.platformRows)}</b>`,
+  ];
+  if (p.match) {
+    lines.push(
+      `CMC platform: <b>${escapeHtml(String(p.match.name || "UNVERIFIED"))}</b> | platform ID <b>${escapeHtml(String(p.match.id ?? "UNVERIFIED"))}</b> | chain ID <b>${escapeHtml(String(p.match.chainId ?? "UNVERIFIED"))}</b>`,
+      `Supported DEX count: <b>${escapeHtml(String(p.match.supportedDexCount ?? "UNVERIFIED"))}</b>`
+    );
+  }
+  if (p.error) lines.push(`Platform error: <code>${escapeHtml(String(p.error))}</code>`);
+  lines.push("",`Test token: <code>${escapeHtml(String(r.token || "UNVERIFIED"))}</code>${r.usedDefaultToken?" (default diagnostic token)":""}`);
+  if (r.tokenDetail) {
+    lines.push(
+      `Token detail HTTP: <b>${escapeHtml(String(t.httpStatus ?? "N/A"))}</b> | ${escapeHtml(String(t.requestOutcome || "UNVERIFIED"))}`,
+      `Name/symbol: <b>${escapeHtml(String(f.name ?? "UNVERIFIED"))}</b> / <b>${escapeHtml(String(f.symbol ?? "UNVERIFIED"))}</b>`,
+      `Price USD: <b>${escapeHtml(String(f.priceUsd ?? "UNVERIFIED"))}</b>`,
+      `Liquidity USD: <b>${escapeHtml(String(f.liquidityUsd ?? "UNVERIFIED"))}</b>`,
+      `Market cap: <b>${escapeHtml(String(f.marketCap ?? "UNVERIFIED"))}</b>`,
+      `Holders: <b>${escapeHtml(String(f.holders ?? "UNVERIFIED"))}</b>`,
+      `Launch timestamp: <b>${escapeHtml(String(f.launchAt ?? "UNVERIFIED"))}</b>`
+    );
+    if (t.error) lines.push(`Token error: <code>${escapeHtml(String(t.error))}</code>`);
+  }
+  if (r.pools) {
+    lines.push(
+      "",
+      `Token pools HTTP: <b>${escapeHtml(String(pools.httpStatus ?? "N/A"))}</b> | pools <b>${safeNumber(pools.count)}</b>`
+    );
+    for (const row of Array.isArray(pools.rows)?pools.rows.slice(0,3):[]) {
+      lines.push(`• pool <code>${escapeHtml(String(row.poolAddress || "UNVERIFIED"))}</code> | liq $${escapeHtml(String(row.liquidityUsd ?? "UNVERIFIED"))} | 24h vol ${escapeHtml(String(row.volume24h ?? "UNVERIFIED"))} | ${escapeHtml(String(row.exchange || "DEX UNVERIFIED"))}`);
+    }
+    if (pools.error) lines.push(`Pools error: <code>${escapeHtml(String(pools.error))}</code>`);
+  }
+  lines.push(
+    "",
+    `CMC requests used: <b>${safeNumber(r.requests)}/${CMC_MAX_REQUESTS_V738}</b>`,
+    "<i>Diagnostic only. Zero scanner-budget requests, zero KV writes, no CMC data is used for scoring or Telegram qualification in V738.</i>"
+  );
+  return lines.join("\n");
+}
+
 function telegramHelpV271() {
   return [
     "🤖 <b>Robinhood Meme Hunter Commands</b>",
@@ -143394,6 +143642,7 @@ function telegramHelpV271() {
     "<code>/scoreaudit</code> — V725 Opportunity component + missing-evidence audit (read-only)",
     "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
     "<code>/datacoverage</code> — V734 hotfixed free-provider/data + V732 pool-bridge audit (read-only)",
+    "<code>/cmctest [0xADDRESS]</code> — V738 CoinMarketCap Robinhood Chain coverage test (diagnostic only)",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -144223,6 +144472,43 @@ async function telegramCommandReplyV271(
       collectorStatus:
         routeResultV592?.status || null,
       scannerBudgetConsumed:false
+    };
+  }
+
+
+  if (parsed.command === "/cmctest") {
+    const cmcV738 = await coinMarketCapCoverageTestV738(env, parsed.argument);
+    const replyV738 = coinMarketCapCoverageTelegramV738(cmcV738);
+    if (diagnosticV273) {
+      diagnosticV273.replyAttempted = true;
+      diagnosticV273.cmcTestV738 = {
+        apiKeyConfigured:cmcV738?.apiKeyConfigured===true,
+        robinhoodSupported:cmcV738?.platform?.robinhoodSupported===true,
+        requests:safeNumber(cmcV738?.requests),
+        scannerBudgetConsumed:false,
+        stateWrites:0,
+        hardGlobalLimitUnchanged:42
+      };
+    }
+    const sentV738 = await sendTelegram(env, replyV738, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV738?.success === true;
+      diagnosticV273.telegramStatus = sentV738?.status || null;
+      diagnosticV273.telegramMode = sentV738?.mode || null;
+      diagnosticV273.telegramError = sentV738?.error || null;
+      diagnosticV273.result = sentV738?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {
+      success:sentV738?.success === true,
+      ignored:false,
+      command:parsed.command,
+      cmcTestV738:{
+        apiKeyConfigured:cmcV738?.apiKeyConfigured===true,
+        robinhoodSupported:cmcV738?.platform?.robinhoodSupported===true,
+        requests:safeNumber(cmcV738?.requests),
+        scannerBudgetConsumed:false,
+        stateWrites:0
+      }
     };
   }
 
