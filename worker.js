@@ -1,4 +1,28 @@
 /**
+ * Robinhood Chain Meme Hunter — V739
+ * AUTHORITATIVE RUNTIME VERSION: V739
+ *
+ * V739 COINMARKETCAP FREE MARKET FALLBACK + USAGE METER
+ * - Builds directly forward from V738.
+ * - Adds CoinMarketCap DEX token detail as a tightly-bounded market fallback only for
+ *   the same priority/evidence-completion candidates already allowed into the existing
+ *   GeckoTerminal/CoinGecko recovery lane.
+ * - Provider order remains DexScreener -> GeckoTerminal -> CoinGecko Demo -> CoinMarketCap.
+ * - CMC is limited to one scanner request per scan, five-minute fresh spacing and a
+ *   forward-only bot-side monthly request cap; HTTP 429/5xx responses open cooldowns.
+ * - CMC market evidence is VERIFIED only when Robinhood Chain + exact token address +
+ *   positive USD price + positive USD liquidity are all present. Missing fields stay UNVERIFIED.
+ * - CMC does not invent pair identity, directional USD, transaction counts, launch age,
+ *   Momentum or whale flow; those remain on their existing independent verification paths.
+ * - Adds /cmcusage as a read-only persisted bot-side request meter. It makes zero provider
+ *   requests and zero state writes. CoinMarketCap account/dashboard usage remains authoritative.
+ * - Reuses the existing V728 one-slot evidence-completion reserve when earlier market
+ *   providers are unavailable; no extra reserve slot is created.
+ * - No scoring weights, Momentum, Confidence, Risk, qualification, Telegram thresholds,
+ *   notification reserve, provider trust rules or hard global 42-request ceiling are changed.
+ *
+ */
+/**
  * Robinhood Chain Meme Hunter — V738
  * AUTHORITATIVE RUNTIME VERSION: V738
  *
@@ -6480,7 +6504,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V738";
+const VERSION = "V739";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -14170,6 +14194,7 @@ function activeQualificationRequestV713(
     key === "DEXSCREENER_TOKEN_FALLBACK" ||
     key === "GECKOTERMINAL_FALLBACK" ||
     key === "COINGECKO_DEMO_FALLBACK_V660" ||
+    key === "COINMARKETCAP_FALLBACK_V739" ||
     key === "BLOCKSCOUT" ||
     key === "BLOCKSCOUT_LEGACY_HOLDERS" ||
     key === "BLOCKSCOUT_PRO_HOLDERS_V143" ||
@@ -15893,7 +15918,8 @@ function evidenceCompletionRequestV728(type) {
   return Boolean(
     key === "RPC:eth_getBlockByNumber" ||
     key === "GECKOTERMINAL_DIRECTIONAL_TRADES" ||
-    key === "COINGECKO_DEMO_FALLBACK_V660"
+    key === "COINGECKO_DEMO_FALLBACK_V660" ||
+    key === "COINMARKETCAP_FALLBACK_V739"
   );
 }
 
@@ -53495,6 +53521,25 @@ async function priorityMarketFallback(
         };
       }
 
+      const cmcV739 =
+        await maybeCoinMarketCapFallbackV739(
+          token,
+          budget,
+          watched,
+          state,
+          env,
+          demoFallbackEligibleV660 === true,
+          demoV660?.status || geckoUnavailableV660.status || trigger
+        );
+
+      if (cmcV739?.verified === true) {
+        return {
+          ...cmcV739,
+          marketProviderAvailabilityV147:
+            availabilityV147
+        };
+      }
+
       return {
         ...original,
         marketProviderAvailabilityV147:
@@ -53527,7 +53572,9 @@ async function priorityMarketFallback(
             availabilityV147
               .retryAfterMs,
           coinGeckoDemoV660:
-            demoV660
+            demoV660,
+          coinMarketCapV739:
+            cmcV739
         }
       };
     }
@@ -53551,6 +53598,25 @@ async function priorityMarketFallback(
           geckoUnavailableV660.status
       }
     );
+
+    const cmcV739 =
+      await maybeCoinMarketCapFallbackV739(
+        token,
+        budget,
+        watched,
+        state,
+        env,
+        demoFallbackEligibleV660 === true,
+        geckoUnavailableV660.status || trigger
+      );
+
+    if (cmcV739?.verified === true) {
+      return {
+        ...cmcV739,
+        marketProviderAvailabilityV147:
+          availabilityV147
+      };
+    }
 
     return {
       ...original,
@@ -53592,7 +53658,9 @@ async function priorityMarketFallback(
               ? "NOT_SELECTED_V660"
               : "COINGECKO_DEMO_NOT_CONFIGURED_V660",
           requestSent: false
-        }
+        },
+        coinMarketCapV739:
+          cmcV739
       }
     };
   }
@@ -53734,6 +53802,28 @@ async function priorityMarketFallback(
     }
   }
 
+  const cmcV739 =
+    await maybeCoinMarketCapFallbackV739(
+      token,
+      budget,
+      watched,
+      state,
+      env,
+      demoFallbackEligibleV660 === true,
+      coinGeckoDemoV660?.status || fallback?.status || trigger
+    );
+
+  if (cmcV739?.verified === true) {
+    return {
+      ...cmcV739,
+      marketProviderAvailabilityV147:
+        marketProviderAvailabilityV147(
+          state,
+          watched?.address || token
+        )
+    };
+  }
+
   return {
     ...original,
 
@@ -53782,7 +53872,9 @@ async function priorityMarketFallback(
               ? "NOT_SELECTED_V660"
               : "COINGECKO_DEMO_NOT_CONFIGURED_V660",
           requestSent: false
-        }
+        },
+      coinMarketCapV739:
+        cmcV739
     }
   };
 }
@@ -143381,6 +143473,368 @@ const CMC_TEST_DEFAULT_TOKEN_V738 = "0x232cdfc415d10b673845d83dc02ba2eabe7e30d1"
 const CMC_TARGET_CHAIN_ID_V738 = 4663;
 const CMC_MAX_REQUESTS_V738 = 3;
 
+/*
+ * V739 bounded CoinMarketCap scanner fallback.
+ * The bot-side cap is intentionally below the published free-plan allowance so
+ * normal diagnostics/manual testing and account-level activity retain headroom.
+ */
+const CMC_PLATFORM_V739 = "Robinhood Chain";
+const CMC_MIN_FRESH_INTERVAL_MS_V739 = 5 * 60 * 1000;
+const CMC_MAX_FRESH_PER_SCAN_V739 = 1;
+const CMC_MONTHLY_BOT_REQUEST_LIMIT_V739 = 10000;
+const CMC_429_BASE_COOLDOWN_MS_V739 = 10 * 60 * 1000;
+const CMC_MAX_429_COOLDOWN_MS_V739 = 2 * 60 * 60 * 1000;
+const CMC_5XX_COOLDOWN_MS_V739 = 10 * 60 * 1000;
+const CMC_AUTH_ERROR_COOLDOWN_MS_V739 = 60 * 60 * 1000;
+
+function coinMarketCapConfiguredV739(env) {
+  return Boolean(String(env?.CMC_API_KEY || "").trim());
+}
+
+function coinMarketCapServiceV739(state, env = null) {
+  state.services = state.services || {};
+  const existing =
+    state.services.coinMarketCapV739 && typeof state.services.coinMarketCapV739 === "object"
+      ? state.services.coinMarketCapV739
+      : {};
+  const monthKey = new Date().toISOString().slice(0, 7);
+  const sameMonth = existing.monthKeyV739 === monthKey;
+  const configured = env !== null
+    ? coinMarketCapConfiguredV739(env)
+    : existing.configured === true;
+  Object.assign(existing, {
+    configured,
+    monthKeyV739: monthKey,
+    monthRequestsV739: sameMonth ? safeNumber(existing.monthRequestsV739) : 0,
+    monthSuccessfulHttpV739: sameMonth ? safeNumber(existing.monthSuccessfulHttpV739) : 0,
+    monthVerifiedMarketV739: sameMonth ? safeNumber(existing.monthVerifiedMarketV739) : 0,
+    month429V739: sameMonth ? safeNumber(existing.month429V739) : 0,
+    month5xxV739: sameMonth ? safeNumber(existing.month5xxV739) : 0,
+    monthOtherErrorsV739: sameMonth ? safeNumber(existing.monthOtherErrorsV739) : 0,
+    monthBotLimitV739: CMC_MONTHLY_BOT_REQUEST_LIMIT_V739,
+    totalRequestsV739: safeNumber(existing.totalRequestsV739),
+    totalVerifiedMarketV739: safeNumber(existing.totalVerifiedMarketV739),
+    total429V739: safeNumber(existing.total429V739),
+    total5xxV739: safeNumber(existing.total5xxV739),
+    consecutive429V739: safeNumber(existing.consecutive429V739),
+    cooldownUntilV739: safeNumber(existing.cooldownUntilV739) || null,
+    lastRequestAtV739: safeNumber(existing.lastRequestAtV739) || null,
+    lastSuccessAtV739: safeNumber(existing.lastSuccessAtV739) || null,
+    lastVerifiedAtV739: safeNumber(existing.lastVerifiedAtV739) || null,
+    lastStatusV739: existing.lastStatusV739 || null,
+    lastHttpStatusV739: existing.lastHttpStatusV739 ?? null,
+    lastScanStartedAtV739: safeNumber(existing.lastScanStartedAtV739) || null,
+    lastScanRequestsV739: safeNumber(existing.lastScanRequestsV739)
+  });
+  state.services.coinMarketCapV739 = existing;
+  return existing;
+}
+
+function coinMarketCapFreshEligibilityV739(state, env = null) {
+  const service = coinMarketCapServiceV739(state, env);
+  const now = Date.now();
+  if (service.configured !== true) {
+    return { eligible:false, configured:false, reason:"CMC_NOT_CONFIGURED_V739", eligibleAt:null };
+  }
+  if (safeNumber(service.monthRequestsV739) >= CMC_MONTHLY_BOT_REQUEST_LIMIT_V739) {
+    return {
+      eligible:false,
+      configured:true,
+      reason:"CMC_MONTHLY_BOT_LIMIT_V739",
+      eligibleAt:null,
+      monthRequestsV739:safeNumber(service.monthRequestsV739),
+      monthLimitV739:CMC_MONTHLY_BOT_REQUEST_LIMIT_V739
+    };
+  }
+  const cooldownUntil = safeNumber(service.cooldownUntilV739);
+  if (cooldownUntil && now < cooldownUntil) {
+    return { eligible:false, configured:true, reason:"CMC_COOLDOWN_V739", eligibleAt:cooldownUntil };
+  }
+  const lastRequestAt = safeNumber(service.lastRequestAtV739);
+  const spacingAt = lastRequestAt ? lastRequestAt + CMC_MIN_FRESH_INTERVAL_MS_V739 : 0;
+  if (spacingAt && now < spacingAt) {
+    return { eligible:false, configured:true, reason:"CMC_FRESH_SPACING_V739", eligibleAt:spacingAt };
+  }
+  return { eligible:true, configured:true, reason:null, eligibleAt:now };
+}
+
+function registerCoinMarketCap429V739(service) {
+  const now = Date.now();
+  const recent = safeNumber(service.last429AtV739) &&
+    now - safeNumber(service.last429AtV739) <= 24 * 60 * 60 * 1000;
+  const level = Math.min(5, Math.max(1, recent ? safeNumber(service.consecutive429V739) + 1 : 1));
+  const cooldownMs = Math.min(
+    CMC_MAX_429_COOLDOWN_MS_V739,
+    CMC_429_BASE_COOLDOWN_MS_V739 * Math.pow(2, level - 1)
+  );
+  service.last429AtV739 = now;
+  service.consecutive429V739 = level;
+  service.cooldownUntilV739 = now + cooldownMs;
+  service.total429V739 = safeNumber(service.total429V739) + 1;
+  service.month429V739 = safeNumber(service.month429V739) + 1;
+  service.lastStatusV739 = "HTTP_429";
+  service.lastHttpStatusV739 = 429;
+  return cooldownMs;
+}
+
+function cmcTokenPayloadV739(json) {
+  if (!json || typeof json !== "object") return null;
+  if (json.data && typeof json.data === "object" && !Array.isArray(json.data)) return json.data;
+  return json;
+}
+
+function parseCoinMarketCapMarketV739(token, payload) {
+  const row = cmcTokenPayloadV739(payload);
+  if (!row || typeof row !== "object") return null;
+  const target = normalize(token);
+  const address = normalize(row?.addr ?? row?.a ?? row?.address);
+  const platform = String(row?.plt ?? row?.platform ?? row?.platformName ?? "").trim();
+  const platformOk = platform.toLowerCase().includes("robinhood");
+  const priceUsd = safeNumber(row?.p ?? row?.price ?? row?.priceUsd);
+  const liquidityUsd = safeNumber(row?.l ?? row?.liqUsd ?? row?.liquidityUsd);
+  if (!isAddress(address) || address !== target || !platformOk || priceUsd <= 0 || liquidityUsd <= 0) {
+    return null;
+  }
+  const marketCap = safeNumber(row?.mc ?? row?.mcap ?? row?.marketCap);
+  const volume24h = safeNumber(row?.v24h ?? row?.v24 ?? row?.volume24h);
+  const tsRaw = safeNumber(row?.ts);
+  const observedAt = tsRaw > 0 ? (tsRaw < 1e12 ? tsRaw * 1000 : tsRaw) : null;
+  return {
+    verified:true,
+    status:"VERIFIED",
+    cached:false,
+    source:"COINMARKETCAP_FALLBACK_V739",
+    providerSourceV739:"COINMARKETCAP_DEX_TOKEN_V739",
+    pairAddress:null,
+    baseTokenAddress:null,
+    quoteTokenAddress:null,
+    targetTokenSide:null,
+    url:null,
+    priceUsd:String(priceUsd),
+    liquidityUsd,
+    marketCap:marketCap > 0 ? marketCap : null,
+    fdv:null,
+    volume:{ m5:null, h1:null, h24:volume24h > 0 ? volume24h : null },
+    transactions:{},
+    buyPressure5m:null,
+    buyPressure1h:null,
+    buyPressure24h:null,
+    directionalFlow:{
+      m5:{verified:false,buyVolumeUsd:null,sellVolumeUsd:null,netFlowUsd:null},
+      h1:{verified:false,buyVolumeUsd:null,sellVolumeUsd:null,netFlowUsd:null},
+      h24:{verified:false,buyVolumeUsd:null,sellVolumeUsd:null,netFlowUsd:null}
+    },
+    pairCreatedAt:null,
+    imageUrl:null,
+    fallbackVerified:true,
+    cmcObservedAtV739:observedAt,
+    cmcPlatformV739:platform
+  };
+}
+
+async function coinMarketCapMarketDataV739(token, budget, watched, state, env, trigger) {
+  const service = coinMarketCapServiceV739(state, env);
+  budget.analysis.cmcFreshUsedV739 = safeNumber(budget.analysis.cmcFreshUsedV739);
+  const scanStartedAt = safeNumber(budget?.marketProviderPressureV428?.startedAt) || Date.now();
+  if (safeNumber(service.lastScanStartedAtV739) !== scanStartedAt) {
+    service.lastScanStartedAtV739 = scanStartedAt;
+    service.lastScanRequestsV739 = 0;
+  }
+  const eligibility = coinMarketCapFreshEligibilityV739(state, env);
+  if (eligibility.eligible !== true) {
+    return {
+      verified:false,
+      status:eligibility.reason || "CMC_NOT_ELIGIBLE_V739",
+      source:"COINMARKETCAP_V739",
+      fallbackTrigger:trigger,
+      configured:eligibility.configured === true,
+      freshEligibleAt:eligibility.eligibleAt || null,
+      requestSent:false
+    };
+  }
+  if (budget.analysis.cmcFreshUsedV739 >= CMC_MAX_FRESH_PER_SCAN_V739) {
+    return { verified:false, status:"CMC_SCAN_LIMIT_V739", source:"COINMARKETCAP_V739", fallbackTrigger:trigger, requestSent:false };
+  }
+  if (!consumeBudget(budget, "analysis", "COINMARKETCAP_FALLBACK_V739")) {
+    return { verified:false, status:"CMC_BUDGET_PROTECTED_V739", source:"COINMARKETCAP_V739", fallbackTrigger:trigger, requestSent:false };
+  }
+  budget.analysis.cmcFreshUsedV739++;
+  service.lastScanRequestsV739 = safeNumber(service.lastScanRequestsV739) + 1;
+  service.monthRequestsV739 = safeNumber(service.monthRequestsV739) + 1;
+  service.totalRequestsV739 = safeNumber(service.totalRequestsV739) + 1;
+  service.lastRequestAtV739 = Date.now();
+  const url = new URL("https://pro-api.coinmarketcap.com/v1/dex/token");
+  url.searchParams.set("platform", CMC_PLATFORM_V739);
+  url.searchParams.set("address", normalize(token));
+  try {
+    const response = await marketFetchV428(
+      url.toString(),
+      { headers:{ accept:"application/json", "X-CMC_PRO_API_KEY":String(env?.CMC_API_KEY || "").trim() } },
+      budget,
+      state,
+      { provider:"COINMARKETCAP_V739", feature:"CMC_MARKET_FALLBACK_V739", phase:"analysis", pathClass:"DEX_TOKEN" }
+    );
+    service.lastHttpStatusV739 = response.status;
+    if (response.status === 429) {
+      const cooldownMs = registerCoinMarketCap429V739(service);
+      return {
+        verified:false,
+        status:"CMC_HTTP_429_V739",
+        source:"COINMARKETCAP_V739",
+        fallbackTrigger:trigger,
+        rateLimited:true,
+        cooldownUntil:service.cooldownUntilV739,
+        adaptiveBackoffMs:cooldownMs,
+        requestSent:true
+      };
+    }
+    if (response.status >= 500 && response.status <= 599) {
+      service.month5xxV739 = safeNumber(service.month5xxV739) + 1;
+      service.total5xxV739 = safeNumber(service.total5xxV739) + 1;
+      service.cooldownUntilV739 = Date.now() + CMC_5XX_COOLDOWN_MS_V739;
+      service.lastStatusV739 = `HTTP_${response.status}`;
+      return {
+        verified:false,
+        status:`CMC_HTTP_${response.status}_V739`,
+        source:"COINMARKETCAP_V739",
+        fallbackTrigger:trigger,
+        cooldownUntil:service.cooldownUntilV739,
+        requestSent:true
+      };
+    }
+    if (!response.ok) {
+      service.monthOtherErrorsV739 = safeNumber(service.monthOtherErrorsV739) + 1;
+      service.lastStatusV739 = `HTTP_${response.status}`;
+      if (response.status === 401 || response.status === 403) {
+        service.cooldownUntilV739 = Date.now() + CMC_AUTH_ERROR_COOLDOWN_MS_V739;
+      }
+      return {
+        verified:false,
+        status:`CMC_HTTP_${response.status}_V739`,
+        source:"COINMARKETCAP_V739",
+        fallbackTrigger:trigger,
+        cooldownUntil:service.cooldownUntilV739 || null,
+        requestSent:true
+      };
+    }
+    service.monthSuccessfulHttpV739 = safeNumber(service.monthSuccessfulHttpV739) + 1;
+    service.lastSuccessAtV739 = Date.now();
+    service.lastStatusV739 = "HTTP_200";
+    service.cooldownUntilV739 = null;
+    service.consecutive429V739 = Math.max(0, safeNumber(service.consecutive429V739) - 1);
+    const payload = await response.json();
+    const market = parseCoinMarketCapMarketV739(token, payload);
+    if (!market) {
+      service.lastStatusV739 = "TOKEN_RETURNED_NOT_VERIFIED_V739";
+      return {
+        verified:false,
+        status:"CMC_TOKEN_RETURNED_NOT_VERIFIED_V739",
+        source:"COINMARKETCAP_V739",
+        fallbackTrigger:trigger,
+        requestSent:true
+      };
+    }
+    service.monthVerifiedMarketV739 = safeNumber(service.monthVerifiedMarketV739) + 1;
+    service.totalVerifiedMarketV739 = safeNumber(service.totalVerifiedMarketV739) + 1;
+    service.lastVerifiedAtV739 = Date.now();
+    service.lastStatusV739 = "VERIFIED";
+    const result = {
+      ...market,
+      fallbackTrigger:trigger,
+      requestSent:true,
+      cmcMonthRequestsV739:safeNumber(service.monthRequestsV739),
+      cmcMonthLimitV739:CMC_MONTHLY_BOT_REQUEST_LIMIT_V739
+    };
+    saveMarketCache(watched, result);
+    return result;
+  } catch (error) {
+    service.monthOtherErrorsV739 = safeNumber(service.monthOtherErrorsV739) + 1;
+    service.lastStatusV739 = "FETCH_ERROR";
+    return {
+      verified:false,
+      status:"CMC_FETCH_ERROR_V739",
+      source:"COINMARKETCAP_V739",
+      fallbackTrigger:trigger,
+      requestSent:true,
+      error:errorString(error)
+    };
+  }
+}
+
+async function maybeCoinMarketCapFallbackV739(token, budget, watched, state, env, eligible, trigger) {
+  if (eligible !== true) {
+    return { verified:false, status:"CMC_FALLBACK_ELIGIBILITY_FALSE_V739", source:"COINMARKETCAP_V739", requestSent:false };
+  }
+  if (!coinMarketCapConfiguredV739(env)) {
+    return { verified:false, status:"CMC_NOT_CONFIGURED_V739", source:"COINMARKETCAP_V739", requestSent:false };
+  }
+  return await coinMarketCapMarketDataV739(token, budget, watched, state, env, trigger);
+}
+
+function coinMarketCapUsageSnapshotV739(state) {
+  const service = coinMarketCapServiceV739(state, null);
+  const now = new Date();
+  const monthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+  const elapsedDays = Math.max(1 / 24, (Date.now() - monthStart) / (24 * 60 * 60 * 1000));
+  const requests = safeNumber(service.monthRequestsV739);
+  const avgPerDay = requests / elapsedDays;
+  const projected30 = avgPerDay * 30;
+  const limit = CMC_MONTHLY_BOT_REQUEST_LIMIT_V739;
+  return {
+    version:"V739_1",
+    configured:service.configured === true,
+    monthKey:service.monthKeyV739 || null,
+    requestsThisMonth:requests,
+    successfulHttpThisMonth:safeNumber(service.monthSuccessfulHttpV739),
+    verifiedMarketsThisMonth:safeNumber(service.monthVerifiedMarketV739),
+    http429ThisMonth:safeNumber(service.month429V739),
+    http5xxThisMonth:safeNumber(service.month5xxV739),
+    otherErrorsThisMonth:safeNumber(service.monthOtherErrorsV739),
+    lastScanRequests:safeNumber(service.lastScanRequestsV739),
+    avgRequestsPerDay:avgPerDay,
+    projected30DayRequests:projected30,
+    botMonthlyLimit:limit,
+    remainingBotAllowance:Math.max(0, limit - requests),
+    percentBotLimitUsed:limit > 0 ? (requests / limit) * 100 : null,
+    projected30DayPercent:limit > 0 ? (projected30 / limit) * 100 : null,
+    cooldownUntil:safeNumber(service.cooldownUntilV739) || null,
+    cooldownActive:safeNumber(service.cooldownUntilV739) > Date.now(),
+    lastRequestAt:safeNumber(service.lastRequestAtV739) || null,
+    lastSuccessAt:safeNumber(service.lastSuccessAtV739) || null,
+    lastVerifiedAt:safeNumber(service.lastVerifiedAtV739) || null,
+    lastStatus:service.lastStatusV739 || null,
+    lastHttpStatus:service.lastHttpStatusV739 ?? null,
+    note:"Bot-side request count only; CoinMarketCap dashboard/account usage is authoritative."
+  };
+}
+
+function coinMarketCapUsageTelegramV739(state) {
+  const m = coinMarketCapUsageSnapshotV739(state);
+  const fmt = n => safeNumber(n).toLocaleString("en-GB", {maximumFractionDigits:1});
+  const dateFmt = ts => safeNumber(ts) > 0 ? new Date(safeNumber(ts)).toISOString() : "NEVER";
+  const lines = [
+    "📊 <b>CoinMarketCap Usage Meter — V739</b>",
+    "",
+    `Configured: <b>${m.configured?"YES":"NO"}</b>`,
+    `Month: <b>${escapeHtml(String(m.monthKey || "UNVERIFIED"))}</b>`,
+    `Observed requests: <b>${fmt(m.requestsThisMonth)}</b> / bot cap <b>${fmt(m.botMonthlyLimit)}</b>`,
+    `Remaining bot allowance: <b>${fmt(m.remainingBotAllowance)}</b>`,
+    `Successful HTTP: <b>${fmt(m.successfulHttpThisMonth)}</b>`,
+    `Verified market recoveries: <b>${fmt(m.verifiedMarketsThisMonth)}</b>`,
+    `HTTP 429: <b>${fmt(m.http429ThisMonth)}</b> · HTTP 5xx: <b>${fmt(m.http5xxThisMonth)}</b> · other errors: <b>${fmt(m.otherErrorsThisMonth)}</b>`,
+    `Last scan CMC requests: <b>${fmt(m.lastScanRequests)}</b>`,
+    `Average/day: <b>${fmt(m.avgRequestsPerDay)}</b>`,
+    `Projected 30-day requests: <b>${fmt(m.projected30DayRequests)}</b> (${fmt(m.projected30DayPercent)}% of bot cap)`,
+    `Cooldown: <b>${m.cooldownActive?"ACTIVE":"NO"}</b>${m.cooldownUntil?` until ${escapeHtml(dateFmt(m.cooldownUntil))}`:""}`,
+    `Last status: <b>${escapeHtml(String(m.lastStatus || "NONE"))}</b> · HTTP ${escapeHtml(String(m.lastHttpStatus ?? "N/A"))}`,
+    `Last request: <b>${escapeHtml(dateFmt(m.lastRequestAt))}</b>`,
+    `Last verified market: <b>${escapeHtml(dateFmt(m.lastVerifiedAt))}</b>`,
+    "",
+    "<i>Read-only. Zero CMC/provider requests and zero state writes. Bot-side request meter only; CoinMarketCap account usage remains authoritative.</i>"
+  ];
+  return lines.join("\n");
+}
+
 function cmcExtractPayloadV738(json) {
   if (Array.isArray(json)) return json;
   if (Array.isArray(json?.data)) return json.data;
@@ -143643,6 +144097,7 @@ function telegramHelpV271() {
     "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
     "<code>/datacoverage</code> — V734 hotfixed free-provider/data + V732 pool-bridge audit (read-only)",
     "<code>/cmctest [0xADDRESS]</code> — V738 CoinMarketCap Robinhood Chain coverage test (diagnostic only)",
+    "<code>/cmcusage</code> — V739 CoinMarketCap bot-side monthly request meter (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -144582,6 +145037,23 @@ async function telegramCommandReplyV271(
   let reply;
 
   if (
+    parsed.command === "/cmcusage" ||
+    parsed.command === "/cmc"
+  ) {
+    reply = coinMarketCapUsageTelegramV739(state);
+    if (diagnosticV273) {
+      const meterV739 = coinMarketCapUsageSnapshotV739(state);
+      diagnosticV273.coinMarketCapUsageV739 = {
+        scannerBudgetConsumed:false,
+        externalProviderRequests:0,
+        stateWrites:0,
+        requestsThisMonth:safeNumber(meterV739?.requestsThisMonth),
+        verifiedMarketsThisMonth:safeNumber(meterV739?.verifiedMarketsThisMonth),
+        projected30DayRequests:safeNumber(meterV739?.projected30DayRequests),
+        cooldownActive:meterV739?.cooldownActive===true
+      };
+    }
+  } else if (
     parsed.command === "/sourceintel" ||
     parsed.command === "/sourceidentity"
   ) {
