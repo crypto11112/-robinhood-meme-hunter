@@ -1,6 +1,12 @@
 /**
- * Robinhood Chain Meme Hunter — V760
- * AUTHORITATIVE RUNTIME VERSION: V760
+ * Robinhood Chain Meme Hunter — V761
+ * AUTHORITATIVE RUNTIME VERSION: V761
+ *
+ * V761 RAW-LANE UPSTREAM ELIGIBILITY TRACE — DIAGNOSTIC ONLY:
+ * - Persists one bounded latest-scan snapshot showing why analysed candidates do or do not enter the V740 raw exact-pool lane before V755 admission.
+ * - Records ERC20 validity, exact-pool identity status, PoolId shape, quote validity/priceability, provider market verification/source, provider pair identity shape, and current 5m/1h provider activity already present on the candidate.
+ * - /poolwatch shows the latest upstream snapshot so periods with no fresh V760 admission event can be diagnosed without guessing or waiting indefinitely.
+ * - Adds zero provider/RPC requests, no new request slots, no scoring/qualification/collector/admission changes, and hard request cap remains 42.
  *
  * V760 RAW-WATCH ADMISSION REJECTION TRACE — DIAGNOSTIC ONLY:
  * - Persists a bounded recent-event trace for V755 raw-only admission decisions using the already-proven V756 telemetry store.
@@ -6658,7 +6664,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V760";
+const VERSION = "V761";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -78264,6 +78270,36 @@ function poolWatchDiagnosticTelegramV741(state) {
     lines.push("", "🧬 <b>V760 raw admission decision trace</b>", "No V760 admission decisions retained yet.");
   }
 
+  const upstreamV761 = state?.rawLaneUpstreamTraceV761 || null;
+  if (upstreamV761) {
+    lines.push(
+      "",
+      "🧭 <b>V761 raw-lane upstream eligibility trace</b>",
+      `Updated: <code>${escapeHtml(fmtTime(upstreamV761?.updatedAt))}</code>`,
+      `Analysed candidates: <b>${safeNumber(upstreamV761?.totalCandidates)}</b> · exact identity verified <b>${safeNumber(upstreamV761?.identityVerifiedCount)}</b> · raw V740 eligible <b>${safeNumber(upstreamV761?.rawEligibleCount)}</b>`,
+      `Provider market verified: <b>${safeNumber(upstreamV761?.providerMarketVerifiedCount)}</b> · provider current activity already present: <b>${safeNumber(upstreamV761?.providerCurrentActivityCount)}</b>`
+    );
+    if (upstreamV761?.error) {
+      lines.push(`Trace error: <code>${escapeHtml(String(upstreamV761.error))}</code>`);
+    }
+    const rowsV761 = Array.isArray(upstreamV761?.rows) ? upstreamV761.rows.slice(0,8) : [];
+    for (const row of rowsV761) {
+      const tokenShort = row?.address ? `${row.address.slice(0,8)}…${row.address.slice(-6)}` : "UNVERIFIED";
+      const poolShort = row?.poolId ? `${row.poolId.slice(0,10)}…${row.poolId.slice(-8)}` : "NONE";
+      const providerShort = row?.providerPair ? `${String(row.providerPair).slice(0,10)}…${String(row.providerPair).slice(-8)}` : "NONE";
+      lines.push(
+        `• <b>${escapeHtml(row?.symbol || "TOKEN")}</b> ${escapeHtml(tokenShort)} · raw eligible ${row?.rawEligible === true ? "YES" : "NO"}`,
+        `  identity ${row?.identityVerified === true ? "VERIFIED" : "NO"} · ${escapeHtml(row?.identityStatus || "UNVERIFIED")} · PoolId <code>${escapeHtml(poolShort)}</code>`,
+        `  quote valid ${row?.quoteTokenAddress ? "YES" : "NO"} · USD-priceable ${row?.quotePriceable === true ? "YES" : "NO"}`,
+        `  provider verified ${row?.providerMarketVerified === true ? "YES" : "NO"} · ${escapeHtml(row?.providerSource || "UNVERIFIED")} · pair <code>${escapeHtml(providerShort)}</code> · PoolId-shaped ${row?.providerPairLooksPoolId === true ? "YES" : "NO"}`,
+        `  activity 5m tx ${safeNumber(row?.provider5mTransactions)} / $${safeNumber(row?.provider5mVolumeUsd).toFixed(2)} · 1h tx ${safeNumber(row?.provider1hTransactions)} / $${safeNumber(row?.provider1hVolumeUsd).toFixed(2)} · current ${row?.providerCurrentActivity === true ? "YES" : "NO"}`,
+        `  lane reason ${Array.isArray(row?.reasons) && row.reasons.length ? escapeHtml(row.reasons.join(",")) : "NONE"}`
+      );
+    }
+  } else {
+    lines.push("", "🧭 <b>V761 raw-lane upstream eligibility trace</b>", "No V761 upstream snapshot retained yet.");
+  }
+
   lines.push(
     "",
     "🧪 <b>V753 raw-watch lifecycle removals</b>",
@@ -78349,7 +78385,7 @@ function poolWatchDiagnosticTelegramV741(state) {
 
   lines.push(
     "",
-    "<i>Read-only command: zero provider requests, zero scanner-budget requests and zero state writes. V748/V753 diagnostics are measurement-only; V753 records lifecycle removal telemetry on existing scan state and adds zero provider/RPC requests, zero request slots and no scoring/qualification changes. V758 changes telemetry authority/display only and uses the proven V756 persisted admission store. V760 adds bounded persisted admission-decision diagnostics only; it does not change V755 admission behavior.</i>"
+    "<i>Read-only command: zero provider requests, zero scanner-budget requests and zero state writes. V748/V753 diagnostics are measurement-only; V753 records lifecycle removal telemetry on existing scan state and adds zero provider/RPC requests, zero request slots and no scoring/qualification changes. V758 changes telemetry authority/display only and uses the proven V756 persisted admission store. V760 adds bounded persisted admission-decision diagnostics only; V761 adds a bounded latest-scan upstream raw-lane eligibility snapshot. Neither changes V755 admission behavior.</i>"
   );
   return lines.join("\n");
 }
@@ -98345,6 +98381,99 @@ for (
           historicalBackfill:false
         }
       }));
+
+  /*
+   * V761: bounded latest-scan upstream diagnostic. This observes the candidates
+   * already present in memory and explains why they do or do not enter the
+   * V740 raw-only lane. It adds no requests and does not change selection.
+   */
+  try {
+    const upstreamRowsV761 = (Array.isArray(candidates) ? candidates : [])
+      .map(candidate => {
+        const identity = candidate?.onChainPoolIdentityV153 || {};
+        const poolId = normalize(identity?.poolId);
+        const quoteTokenAddress = normalize(identity?.quoteTokenAddress);
+        const quoteEligibility = v254PriceableQuote(
+          quoteTokenAddress,
+          directionalQuoteReferenceV740
+        );
+        const market = candidate?.market || null;
+        const providerPair = normalize(market?.pairAddress);
+        const tx5 = market?.transactions?.m5 || null;
+        const tx1h = market?.transactions?.h1 || null;
+        const tx5Total = Math.max(0, safeNumber(tx5?.buys)) + Math.max(0, safeNumber(tx5?.sells));
+        const tx1hTotal = Math.max(0, safeNumber(tx1h?.buys)) + Math.max(0, safeNumber(tx1h?.sells));
+        const vol5 = Math.max(0, safeNumber(market?.volume?.m5));
+        const vol1h = Math.max(0, safeNumber(market?.volume?.h1));
+        const providerCurrentActivity = tx5Total > 0 || tx1hTotal > 0 || vol5 > 0 || vol1h > 0;
+        const rawEligible =
+          candidate?.validERC20 === true &&
+          identity?.verified === true &&
+          /^0x[a-f0-9]{64}$/.test(String(poolId || "")) &&
+          isAddress(quoteTokenAddress) &&
+          quoteEligibility?.eligible !== true;
+        const reasons = [];
+        if (candidate?.validERC20 !== true) reasons.push("ERC20_NOT_VERIFIED");
+        if (identity?.verified !== true) reasons.push(`IDENTITY_NOT_VERIFIED:${String(identity?.status || "UNVERIFIED")}`);
+        if (!/^0x[a-f0-9]{64}$/.test(String(poolId || ""))) reasons.push("POOLID_INVALID_OR_MISSING");
+        if (!isAddress(quoteTokenAddress)) reasons.push("QUOTE_INVALID_OR_MISSING");
+        if (isAddress(quoteTokenAddress) && quoteEligibility?.eligible === true) reasons.push("QUOTE_ALREADY_USD_PRICEABLE_STANDARD_PATH");
+        if (rawEligible) reasons.push("RAW_V740_ELIGIBLE");
+        return {
+          address:normalize(candidate?.address) || null,
+          symbol:candidate?.symbol || null,
+          validERC20:candidate?.validERC20 === true,
+          identityVerified:identity?.verified === true,
+          identityStatus:identity?.status || null,
+          identitySource:identity?.source || null,
+          poolId:/^0x[a-f0-9]{64}$/.test(String(poolId || "")) ? poolId : null,
+          quoteTokenAddress:isAddress(quoteTokenAddress) ? quoteTokenAddress : null,
+          quotePriceable:quoteEligibility?.eligible === true,
+          rawEligible,
+          reasons,
+          providerMarketVerified:market?.verified === true,
+          providerSource:market?.source || market?.provider || market?.marketSource || null,
+          providerPair:providerPair || null,
+          providerPairLooksPoolId:/^0x[a-f0-9]{64}$/.test(String(providerPair || "")),
+          providerPairLooksAddress:isAddress(providerPair),
+          provider5mTransactions:tx5Total,
+          provider1hTransactions:tx1hTotal,
+          provider5mVolumeUsd:vol5 || null,
+          provider1hVolumeUsd:vol1h || null,
+          providerCurrentActivity
+        };
+      })
+      .sort((a,b) =>
+        Number(b.rawEligible === true) - Number(a.rawEligible === true) ||
+        Number(b.providerCurrentActivity === true) - Number(a.providerCurrentActivity === true) ||
+        Number(b.identityVerified === true) - Number(a.identityVerified === true)
+      );
+
+    state.rawLaneUpstreamTraceV761 = {
+      schema:"RAW_LANE_UPSTREAM_TRACE_V761",
+      updatedAt:Date.now(),
+      totalCandidates:Array.isArray(candidates) ? candidates.length : 0,
+      rawEligibleCount:upstreamRowsV761.filter(row => row.rawEligible === true).length,
+      identityVerifiedCount:upstreamRowsV761.filter(row => row.identityVerified === true).length,
+      providerMarketVerifiedCount:upstreamRowsV761.filter(row => row.providerMarketVerified === true).length,
+      providerCurrentActivityCount:upstreamRowsV761.filter(row => row.providerCurrentActivity === true).length,
+      rows:upstreamRowsV761.slice(0,8),
+      externalRequestsAdded:0,
+      scoringChanged:false,
+      admissionChanged:false,
+      hardGlobalLimitUnchanged:42
+    };
+  } catch (errorV761) {
+    state.rawLaneUpstreamTraceV761 = {
+      schema:"RAW_LANE_UPSTREAM_TRACE_V761",
+      updatedAt:Date.now(),
+      error:String(errorV761?.message || errorV761 || "UNKNOWN_V761_TRACE_ERROR"),
+      externalRequestsAdded:0,
+      scoringChanged:false,
+      admissionChanged:false,
+      hardGlobalLimitUnchanged:42
+    };
+  }
 
   const directionalWatchRegistrationCandidatesV555 = [
     ...directionalPriorCompletionRecoveryCandidatesV574,
