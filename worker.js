@@ -1,7 +1,14 @@
 /**
- * Robinhood Chain Meme Hunter — V748
- * AUTHORITATIVE RUNTIME VERSION: V748
+ * Robinhood Chain Meme Hunter — V749
+ * AUTHORITATIVE RUNTIME VERSION: V749
  *
+ *
+ * V749 FRESH ACTIVE-POOL GATE — NO REQUEST/SCORING CHANGE:
+ * - Fixes V748 proof that a uniquely latest retained pool can still be ~10M blocks stale versus the current chain head.
+ * - Multi-pool raw-only selection now requires uniquely freshest retained Swap evidence within the existing V254 recent-evidence window (12,000 blocks).
+ * - Generic retained liquidity/activity alone can no longer select a multi-pool raw watch.
+ * - Existing raw-only multi-pool watches with no recent retained Swap evidence are retired; provider-corroborated identities and watches that already captured raw swaps are preserved.
+ * - Single-pool raw recovery is unchanged. No historical backfill, no USD promotion, no new request type, and hard request cap remains 42.
  * V748 RAW SWAP RANGE TRACE — DIAGNOSTIC ONLY, NO REQUEST/SCORING CHANGE:
  * - Instruments the existing V551/V740 Blockscout exact PoolManager Swap request for raw-only watches; adds zero provider/RPC requests.
  * - Persists the last requested from/to/head range, returned rows, Swap-topic rows, selected-PoolId topic matches, decoder inputs, decode successes/rejects and the selected pool's already-retained V746 last Swap block.
@@ -6587,7 +6594,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V748";
+const VERSION = "V749";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12429,6 +12436,7 @@ const DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551 = 600;
 const DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551 = 10;
 const DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V551 = 1200;
 const DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V566 = 4800;
+const RAW_MULTI_POOL_FRESH_SWAP_BLOCKS_V749 = VERIFIED_USD_COMPLETION_RECENT_BLOCKS_V254;
 const DIRECTIONAL_PRIOR_COMPLETION_FAST_MAX_SPAN_V582 = 38400;
 const DIRECTIONAL_PRIOR_COMPLETION_MEDIUM_SPAN_V582 = 19200;
 
@@ -48167,7 +48175,8 @@ function onChainPoolIdentityV153(
 function onChainPoolIdentityRecoveryV742(
   state,
   watched,
-  market = null
+  market = null,
+  latestNumberV749 = null
 ) {
   const existing = onChainPoolIdentityV153(watched, market);
 
@@ -48241,47 +48250,57 @@ function onChainPoolIdentityRecoveryV742(
 
   if (matches.length > 1) {
     /*
-     * V746: do not reject every multi-pool token. Use only retained evidence
-     * that the scanner has already observed. Swap-specific recency is stronger
-     * than generic Swap-or-liquidity recency. A selection is made only when
-     * the winning block is strictly greater than every alternative; ties and
-     * no-activity sets remain unresolved.
+     * V749: V748 proved that "latest retained" can still be millions of blocks
+     * stale. For multi-pool raw-only recovery, require a uniquely freshest
+     * retained Swap block inside the existing V254 recent-evidence window.
+     * Generic activity/liquidity is diagnostic only and cannot select a pool.
      */
-    const uniqueLatest = (rows, field) => {
-      const ranked = rows
-        .map(row => ({row, value:safeNumber(row?.[field])}))
-        .filter(item => item.value > 0)
-        .sort((a,b) => b.value - a.value || String(a.row?.poolId || "").localeCompare(String(b.row?.poolId || "")));
-      if (!ranked.length) return null;
-      if (ranked.length > 1 && ranked[0].value === ranked[1].value) return null;
-      return ranked[0];
-    };
+    const headV749 = Number(latestNumberV749);
+    const freshWindowV749 = RAW_MULTI_POOL_FRESH_SWAP_BLOCKS_V749;
 
-    const swapWinner = uniqueLatest(matches, "lastSwapBlockV746");
-    const activityWinner = swapWinner ? null : uniqueLatest(matches, "lastActivityBlockV746");
-    const winner = swapWinner || activityWinner;
+    if (!Number.isFinite(headV749) || headV749 <= 0) {
+      return {
+        ...existing,
+        verified:false,
+        status:"MULTI_POOL_FRESHNESS_HEAD_UNAVAILABLE_V749",
+        registryMatchCountV742:matches.length,
+        freshSwapWindowBlocksV749:freshWindowV749
+      };
+    }
 
-    if (winner?.row) {
-      const chosen = winner.row;
-      const basis = swapWinner
-        ? "UNIQUE_MOST_RECENT_RETAINED_SWAP_V746"
-        : "UNIQUE_MOST_RECENT_RETAINED_ACTIVITY_V746";
+    const freshSwapRowsV749 = matches
+      .map(row => ({
+        row,
+        swapBlock:safeNumber(row?.lastSwapBlockV746),
+        gap:Math.max(0, headV749 - safeNumber(row?.lastSwapBlockV746))
+      }))
+      .filter(item => item.swapBlock > 0 && item.swapBlock <= headV749 && item.gap <= freshWindowV749)
+      .sort((a,b) => b.swapBlock - a.swapBlock || String(a.row?.poolId || "").localeCompare(String(b.row?.poolId || "")));
+
+    const uniqueWinnerV749 =
+      freshSwapRowsV749.length > 0 &&
+      !(freshSwapRowsV749.length > 1 && freshSwapRowsV749[0].swapBlock === freshSwapRowsV749[1].swapBlock)
+        ? freshSwapRowsV749[0]
+        : null;
+
+    if (uniqueWinnerV749?.row) {
+      const chosen = uniqueWinnerV749.row;
       return {
         ...chosen,
-        verified: true,
-        status: swapWinner
-          ? "RECENT_SWAP_CANONICAL_POOL_SELECTED_RAW_ONLY_V746"
-          : "RECENT_ACTIVITY_CANONICAL_POOL_SELECTED_RAW_ONLY_V746",
-        source: swapWinner
-          ? "CANONICAL_POOL_REGISTRY_UNIQUE_LATEST_SWAP_V746"
-          : "CANONICAL_POOL_REGISTRY_UNIQUE_LATEST_ACTIVITY_V746",
-        activePoolSelectionV746: true,
-        activePoolSelectionBasisV746: basis,
-        registryMatchCountV742: matches.length,
-        selectedActivityBlockV746: safeNumber(chosen?.lastActivityBlockV746) || null,
-        selectedSwapBlockV746: safeNumber(chosen?.lastSwapBlockV746) || null,
-        proofV746:
-          "MULTI_POOL_RAW_ONLY_SELECTION_REQUIRES_UNIQUE_MOST_RECENT_ALREADY_OBSERVED_CANONICAL_ACTIVITY"
+        verified:true,
+        status:"FRESH_SWAP_CANONICAL_POOL_SELECTED_RAW_ONLY_V749",
+        source:"CANONICAL_POOL_REGISTRY_UNIQUE_FRESH_SWAP_V749",
+        activePoolSelectionV746:true,
+        activePoolSelectionBasisV746:"UNIQUE_MOST_RECENT_RETAINED_SWAP_V746",
+        freshActivePoolSelectionV749:true,
+        activePoolSelectionBasisV749:"UNIQUE_FRESH_RETAINED_SWAP_WITHIN_V254_WINDOW_V749",
+        registryMatchCountV742:matches.length,
+        selectedActivityBlockV746:safeNumber(chosen?.lastActivityBlockV746) || null,
+        selectedSwapBlockV746:safeNumber(chosen?.lastSwapBlockV746) || null,
+        selectedSwapGapBlocksV749:uniqueWinnerV749.gap,
+        freshSwapWindowBlocksV749:freshWindowV749,
+        headBlockV749:headV749,
+        proofV749:"MULTI_POOL_RAW_ONLY_SELECTION_REQUIRES_UNIQUE_RETAINED_SWAP_WITHIN_EXISTING_V254_RECENT_BLOCK_WINDOW"
       };
     }
 
@@ -48291,20 +48310,24 @@ function onChainPoolIdentityRecoveryV742(
     const activityBlocks = matches
       .map(row => safeNumber(row?.lastActivityBlockV746))
       .filter(value => value > 0);
+    const freshestSwapBlockV749 = swapBlocks.length ? Math.max(...swapBlocks) : null;
 
     return {
       ...existing,
-      verified: false,
-      status: "MULTIPLE_POOL_REGISTRY_MATCHES_AMBIGUOUS_ACTIVITY_V746",
-      registryMatchCountV742: matches.length,
-      registryPoolsWithSwapActivityV746: swapBlocks.length,
-      registryPoolsWithAnyActivityV746: activityBlocks.length,
-      registryLatestSwapBlockV746: swapBlocks.length ? Math.max(...swapBlocks) : null,
-      registryLatestActivityBlockV746: activityBlocks.length ? Math.max(...activityBlocks) : null,
-      poolIdsV742: matches
-        .map(row => normalize(row?.poolId))
-        .filter(Boolean)
-        .slice(0, 8)
+      verified:false,
+      status:freshSwapRowsV749.length > 1
+        ? "MULTI_POOL_FRESH_SWAP_TIE_AMBIGUOUS_V749"
+        : "MULTI_POOL_NO_FRESH_RETAINED_SWAP_V749",
+      registryMatchCountV742:matches.length,
+      registryPoolsWithSwapActivityV746:swapBlocks.length,
+      registryPoolsWithAnyActivityV746:activityBlocks.length,
+      registryLatestSwapBlockV746:freshestSwapBlockV749,
+      registryLatestActivityBlockV746:activityBlocks.length ? Math.max(...activityBlocks) : null,
+      freshestSwapGapBlocksV749:freshestSwapBlockV749 ? Math.max(0, headV749 - freshestSwapBlockV749) : null,
+      freshSwapCandidatesV749:freshSwapRowsV749.length,
+      freshSwapWindowBlocksV749:freshWindowV749,
+      headBlockV749:headV749,
+      poolIdsV742:matches.map(row => normalize(row?.poolId)).filter(Boolean).slice(0,8)
     };
   }
 
@@ -74883,24 +74906,44 @@ function reselectPersistedRawDirectionalWatchesV747(state, latestNumber) {
     if (matches.length <= 1) continue;
 
     const current = matches.find(row => row.poolId === currentPoolId) || null;
-    const swapWinner = uniqueLatest(matches, "lastSwapBlockV747");
-    const activityWinner = swapWinner ? null : uniqueLatest(matches, "lastActivityBlockV747");
-    const winner = swapWinner || activityWinner;
+    const freshWindowV749 = RAW_MULTI_POOL_FRESH_SWAP_BLOCKS_V749;
+    const freshSwapRowsV749 = matches
+      .map(row => ({row, value:safeNumber(row?.lastSwapBlockV747), gap:Math.max(0, head - safeNumber(row?.lastSwapBlockV747))}))
+      .filter(item => item.value > 0 && item.value <= head && item.gap <= freshWindowV749)
+      .sort((a,b) => b.value - a.value || String(a.row?.poolId || "").localeCompare(String(b.row?.poolId || "")));
 
-    if (!winner?.row || winner.row.poolId === currentPoolId) {
+    const swapWinner =
+      freshSwapRowsV749.length > 0 &&
+      !(freshSwapRowsV749.length > 1 && freshSwapRowsV749[0].value === freshSwapRowsV749[1].value)
+        ? freshSwapRowsV749[0]
+        : null;
+
+    if (!swapWinner?.row) {
+      delete root.entries[oldKey];
+      telemetry.staleMultiPoolRetiredV749 = safeNumber(telemetry?.staleMultiPoolRetiredV749) + 1;
+      telemetry.lastStaleRetirementV749 = {
+        at:Date.now(),
+        tokenAddress:token,
+        previousPoolId:currentPoolId,
+        canonicalPoolCount:matches.length,
+        freshestRetainedSwapBlock:matches.map(row => safeNumber(row?.lastSwapBlockV747)).filter(v => v > 0).sort((a,b) => b-a)[0] || null,
+        headBlock:head,
+        freshSwapWindowBlocks:freshWindowV749,
+        reason:freshSwapRowsV749.length > 1 ? "FRESH_SWAP_TIE_AMBIGUOUS_V749" : "NO_FRESH_RETAINED_SWAP_V749"
+      };
+      telemetry.updatedAt = Date.now();
+      continue;
+    }
+
+    const winner = swapWinner;
+    if (winner.row.poolId === currentPoolId) {
       telemetry.reselectionSkippedAmbiguousV747 = safeNumber(telemetry?.reselectionSkippedAmbiguousV747) + 1;
       continue;
     }
 
-    const basis = swapWinner
-      ? "UNIQUE_MOST_RECENT_RETAINED_SWAP_V747"
-      : "UNIQUE_MOST_RECENT_RETAINED_ACTIVITY_V747";
-    const winnerEvidenceBlock = swapWinner
-      ? safeNumber(winner.row?.lastSwapBlockV747)
-      : safeNumber(winner.row?.lastActivityBlockV747);
-    const currentEvidenceBlock = swapWinner
-      ? safeNumber(current?.lastSwapBlockV747)
-      : safeNumber(current?.lastActivityBlockV747);
+    const basis = "UNIQUE_FRESH_RETAINED_SWAP_WITHIN_V254_WINDOW_V749";
+    const winnerEvidenceBlock = safeNumber(winner.row?.lastSwapBlockV747);
+    const currentEvidenceBlock = safeNumber(current?.lastSwapBlockV747);
 
     if (winnerEvidenceBlock <= currentEvidenceBlock) {
       telemetry.reselectionSkippedAmbiguousV747 = safeNumber(telemetry?.reselectionSkippedAmbiguousV747) + 1;
@@ -74940,7 +74983,7 @@ function reselectPersistedRawDirectionalWatchesV747(state, latestNumber) {
       lastCollectedBlock:head,
       lastCollectedAt:null,
       lastAttemptAt:null,
-      lastStatus:"RESELECTED_ACTIVE_POOL_FORWARD_ONLY_AT_CURRENT_HEAD_V747",
+      lastStatus:"RESELECTED_FRESH_ACTIVE_POOL_FORWARD_ONLY_AT_CURRENT_HEAD_V749",
       adaptiveBlockSpan:DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551,
       saturatedAttempts:0,
       successfulRanges:0,
@@ -74958,7 +75001,7 @@ function reselectPersistedRawDirectionalWatchesV747(state, latestNumber) {
       activePoolEvidenceV555:false,
       lastActivePoolEvidenceAtV555:null,
       zeroActivityDeprioritisedV555:false,
-      registrationSourceV552:"V747_PERSISTED_RAW_ACTIVE_POOL_RESELECTION",
+      registrationSourceV552:"V749_PERSISTED_RAW_FRESH_ACTIVE_POOL_RESELECTION",
       verifiedObservedRegistrationV570:null,
       priorCompletionRecoveryV574:null,
       persistedObservedRecoveryV573:null,
@@ -74971,6 +75014,9 @@ function reselectPersistedRawDirectionalWatchesV747(state, latestNumber) {
         previousEvidenceBlock:currentEvidenceBlock || null,
         selectedEvidenceBlock:winnerEvidenceBlock || null,
         canonicalPoolCount:matches.length,
+        freshnessGateV749:true,
+        selectedSwapGapBlocksV749:Math.max(0, head - winnerEvidenceBlock),
+        freshSwapWindowBlocksV749:RAW_MULTI_POOL_FRESH_SWAP_BLOCKS_V749,
         forwardOnlyFromBlock:head + 1,
         historicalBackfill:false,
         usdPromoted:false
@@ -74994,6 +75040,13 @@ function reselectPersistedRawDirectionalWatchesV747(state, latestNumber) {
     migrations:migrations.slice(-8),
     externalRequestsAdded:0,
     hardRequestCapChanged:false
+  };
+  root.lastFreshnessRunV749 = {
+    at:Date.now(),
+    head,
+    freshSwapWindowBlocks:RAW_MULTI_POOL_FRESH_SWAP_BLOCKS_V749,
+    staleMultiPoolRetired:safeNumber(telemetry?.staleMultiPoolRetiredV749),
+    lastStaleRetirement:telemetry?.lastStaleRetirementV749 || null
   };
 
   return {
@@ -77164,6 +77217,9 @@ function poolIdentityMatchSnapshotV745(state) {
       ? state.poolRegistry
       : {};
 
+  const headV749 = safeNumber(root?.lastFreshnessRunV749?.head) || null;
+  const freshWindowV749 = RAW_MULTI_POOL_FRESH_SWAP_BLOCKS_V749;
+
   const rows = rawEntries
     .map(watch => {
       const token = normalize(watch?.tokenAddress);
@@ -77212,6 +77268,8 @@ function poolIdentityMatchSnapshotV745(state) {
           lastActivityBlock,
           lastSwapBlockV746,
           lastLiquidityBlockV746,
+          swapGapBlocksV749: headV749 && lastSwapBlockV746 ? Math.max(0, headV749 - lastSwapBlockV746) : null,
+          freshSwapV749: Boolean(headV749 && lastSwapBlockV746 && lastSwapBlockV746 <= headV749 && (headV749 - lastSwapBlockV746) <= freshWindowV749),
           lastSeenAt,
           activitySource: entry?.lastActivitySourceV185 || null,
           poolKeyCompleteV441: entry?.poolKeyCompleteV441 === true
@@ -77257,6 +77315,10 @@ function poolIdentityMatchSnapshotV745(state) {
         selectedHasLatestKnownActivity,
         selectedLastSwapBlockV746: selectedCandidate?.lastSwapBlockV746 || null,
         selectedLastLiquidityBlockV746: selectedCandidate?.lastLiquidityBlockV746 || null,
+        selectedSwapGapBlocksV749:selectedCandidate?.swapGapBlocksV749 ?? null,
+        selectedFreshSwapV749:selectedCandidate?.freshSwapV749 === true,
+        headBlockV749:headV749,
+        freshSwapWindowBlocksV749:freshWindowV749,
         reselectionV747: watch?.reselectionV747 || null,
         providerMarketVerified: cachedMarket?.verified === true,
         providerSource: providerSource || null,
@@ -77283,6 +77345,9 @@ function poolIdentityMatchSnapshotV745(state) {
     providerPairNotPoolIdCount: rows.filter(row => row?.providerMatchState === "PROVIDER_PAIR_NOT_32_BYTE_POOL_ID").length,
     noCachedProviderPairCount: rows.filter(row => row?.providerMatchState === "NO_CACHED_PROVIDER_PAIR").length,
     selectedLatestKnownActivityCount: rows.filter(row => row?.selectedHasLatestKnownActivity === true).length,
+    selectedFreshSwapCountV749:rows.filter(row => row?.selectedFreshSwapV749 === true).length,
+    freshnessV749:root?.lastFreshnessRunV749 || null,
+    staleMultiPoolRetiredV749:safeNumber(state?.poolWatchTelemetryV741?.staleMultiPoolRetiredV749),
     reselectionV747: state?.directionalExactPoolWatchV551?.lastReselectionRunV747 || null,
     reselectionTelemetryV747: {
       evaluated:safeNumber(state?.poolWatchTelemetryV741?.reselectionEvaluatedV747),
@@ -77319,10 +77384,12 @@ function poolIdentityMatchTelegramV745(state) {
     `Provider pair present but not a 32-byte PoolId: <b>${safeNumber(s.providerPairNotPoolIdCount)}</b>`,
     `No cached provider pair: <b>${safeNumber(s.noCachedProviderPairCount)}</b>`,
     `Selected pool has latest retained registry activity: <b>${safeNumber(s.selectedLatestKnownActivityCount)}</b>`,
-    `V747 persisted raw-watch reselections: <b>${safeNumber(s?.reselectionTelemetryV747?.migrated)}</b>`,
+    `V747/V749 persisted raw-watch reselections: <b>${safeNumber(s?.reselectionTelemetryV747?.migrated)}</b>`,
+    `V749 freshness: head <b>${escapeHtml(String(s?.freshnessV749?.head ?? "UNVERIFIED"))}</b> · window <b>${safeNumber(s?.freshnessV749?.freshSwapWindowBlocks || RAW_MULTI_POOL_FRESH_SWAP_BLOCKS_V749)}</b> blocks · selected fresh swaps <b>${safeNumber(s?.selectedFreshSwapCountV749)}</b>`,
+    `V749 stale multi-pool watches retired: <b>${safeNumber(s?.staleMultiPoolRetiredV749)}</b>`,
     `V747 last reselection run: evaluated <b>${safeNumber(s?.reselectionV747?.evaluated)}</b> · migrated <b>${safeNumber(s?.reselectionV747?.migrated)}</b>`,
     "",
-    "ℹ️ V747 re-evaluates already-persisted raw-only multi-pool watches from retained canonical activity. Provider-corroborated exact identity is never overridden; replacement watches restart forward-only at current head with zero historical backfill."
+    "ℹ️ V749 requires recent retained Swap evidence for multi-pool raw-only selection. Provider-corroborated exact identity and already-proven raw-swap watches are preserved; stale multi-pool raw watches are retired. Single-pool recovery is unchanged."
   ];
 
   if (!Array.isArray(s.rows) || !s.rows.length) {
@@ -77338,6 +77405,7 @@ function poolIdentityMatchTelegramV745(state) {
         `Selected ranges/raw swaps: <b>${safeNumber(row?.selectedSuccessfulRanges)} / ${safeNumber(row?.selectedRawSwaps)}</b> · pool-specific swaps at registration: <b>${safeNumber(row?.selectedPoolSpecificSwapsAtRegistration)}</b>`,
         `Selected registry activity block: <b>${escapeHtml(String(row?.selectedLastRegistryActivityBlock ?? "NONE"))}</b> · latest candidate activity block: <b>${escapeHtml(String(row?.latestKnownActivityBlock ?? "NONE"))}</b>`,
         `Selected Swap/Liquidity activity block V746: <b>${escapeHtml(String(row?.selectedLastSwapBlockV746 ?? "NONE"))}</b> / <b>${escapeHtml(String(row?.selectedLastLiquidityBlockV746 ?? "NONE"))}</b>`,
+        `V749 selected swap freshness: <b>${row?.selectedFreshSwapV749 === true ? "FRESH" : "STALE / UNPROVEN"}</b> · gap ${row?.selectedSwapGapBlocksV749 == null ? "UNVERIFIED" : escapeHtml(String(row.selectedSwapGapBlocksV749))} blocks`,
         `Selected has latest retained activity: <b>${row?.selectedHasLatestKnownActivity === true ? "YES" : "NO / UNPROVEN"}</b>`,
         `V747 migrated watch: <b>${row?.reselectionV747?.verified === true ? "YES" : "NO"}</b>${row?.reselectionV747?.verified === true ? ` · from <code>${escapeHtml(short(row.reselectionV747.previousPoolId))}</code> · basis ${escapeHtml(row.reselectionV747.basis || "UNVERIFIED")}` : ""}`,
         `Provider market verified: <b>${row?.providerMarketVerified === true ? "YES" : "NO"}</b> · source: <b>${escapeHtml(row?.providerSource || "UNVERIFIED")}</b>`,
@@ -77351,10 +77419,11 @@ function poolIdentityMatchTelegramV745(state) {
           const flags = [
             candidate?.selected ? "SELECTED" : null,
             candidate?.providerExactMatch ? "PROVIDER_MATCH" : null,
+            candidate?.freshSwapV749 ? "FRESH_SWAP_V749" : null,
             safeNumber(candidate?.lastActivityBlock) > 0 ? "RETAINED_ACTIVITY" : "NO_RETAINED_ACTIVITY"
           ].filter(Boolean).join(" · ");
           lines.push(
-            `  • <code>${escapeHtml(short(candidate?.poolId))}</code> — ${escapeHtml(flags || "NO_FLAGS")} · activity ${escapeHtml(String(candidate?.lastActivityBlock ?? "NONE"))} · swap ${escapeHtml(String(candidate?.lastSwapBlockV746 ?? "NONE"))} · liq ${escapeHtml(String(candidate?.lastLiquidityBlockV746 ?? "NONE"))}`
+            `  • <code>${escapeHtml(short(candidate?.poolId))}</code> — ${escapeHtml(flags || "NO_FLAGS")} · activity ${escapeHtml(String(candidate?.lastActivityBlock ?? "NONE"))} · swap ${escapeHtml(String(candidate?.lastSwapBlockV746 ?? "NONE"))} · swapGap ${candidate?.swapGapBlocksV749 == null ? "UNVERIFIED" : escapeHtml(String(candidate.swapGapBlocksV749))} · liq ${escapeHtml(String(candidate?.lastLiquidityBlockV746 ?? "NONE"))}`
           );
         }
       }
@@ -77363,7 +77432,7 @@ function poolIdentityMatchTelegramV745(state) {
 
   lines.push(
     "",
-    "<i>Read-only /poolmatch diagnostic: zero provider/RPC requests, zero scanner-budget requests and zero state writes. V747 adds only persisted raw-watch active-pool reselection from retained evidence; collection/scoring/qualification and hard request cap 42 remain unchanged.</i>"
+    "<i>Read-only /poolmatch diagnostic: zero provider/RPC requests, zero scanner-budget requests and zero state writes. V749 adds only a retained-evidence freshness gate/retirement for multi-pool raw watches; collection/scoring/qualification and hard request cap 42 remain unchanged.</i>"
   );
   return lines.join("\n");
 }
@@ -82956,7 +83025,8 @@ async function analyzeToken(
     onChainPoolIdentityRecoveryV742(
       state,
       watched,
-      market
+      market,
+      options?.latestNumberV749 ?? null
     );
 
   const onChainMarketEvidence =
@@ -93766,7 +93836,8 @@ for (
               )
             ),
 
-          liveMomentumActivityV152
+          liveMomentumActivityV152,
+          latestNumberV749: latestNumber
         }
       );
 
