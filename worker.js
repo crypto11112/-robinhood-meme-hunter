@@ -1,9 +1,10 @@
 /**
  * Robinhood Chain Meme Hunter
  *
- * V769:
- * - Adds /v4swapdirection: diagnostic-only BUY/SELL classification for the currently-live V4 pool discovered through the proven V768 RPC -> Uniswap path.
- * - Reuses the existing canonical signed int128 amount0/amount1 decoder already used by the bot; candidate delta < 0 = BUY, candidate delta > 0 = SELL.
+ * V770:
+ * - Preserves V769 directional swap decoding and the proven V768 RPC -> Uniswap live-pool path.
+ * - Adds /v4swapamounts: diagnostic-only exact raw target-token and paired-token amount aggregation for BUY vs SELL swaps.
+ * - No decimals or USD assumptions are introduced in V770; totals remain exact raw integer units from canonical signed int128 Swap deltas.
  * - Uses the same 600-block recent window, no KV writes, no scanner-budget requests, no USD claims and no scoring/admission/collector changes.
  *
  * V768:
@@ -40657,6 +40658,122 @@ function v4SwapDirectionTelegramV769(result) {
   if (r?.rejectedSwaps>0) lines.push(`Reject reasons: <code>${escapeHtml(JSON.stringify(r?.rejectReasons||{}).slice(0,500))}</code>`,"");
   lines.push(r?.error?`Diagnostic result: <code>${escapeHtml(String(r.error).slice(0,500))}</code>`:"Diagnostic result: <b>DIRECTIONAL_SWAP_DECODING_VERIFIED</b>","",
     `<i>Diagnostic only: ${safeNumber(r?.externalRequestsUsed)} external requests, one KV read, zero KV writes, zero scanner-budget requests. Counts are on-chain swaps only; V769 makes no USD-value claim.</i>`);
+  return lines.join("\\n");
+}
+
+
+async function v4SwapAmountsDiagnosticV770(env, requestedToken="") {
+  const live = await v4PoolLiveCompareDiagnosticV768(env, requestedToken);
+  const base = {
+    version:"V770",diagnostic:"V4_LIVE_SWAP_RAW_AMOUNTS",
+    tokenAddress:live?.tokenAddress||null,tokenSource:live?.tokenSource||null,
+    poolId:live?.bestLivePoolId||null,
+    liveDiscoveryResult:live?.error||"LIVE_V4_POOL_VERIFIED",
+    rpcProvider:live?.rpc?.provider||null,head:live?.rpc?.head??null,
+    fromBlock:live?.rpc?.fromBlock??null,toBlock:live?.rpc?.toBlock??null,
+    windowBlocks:safeNumber(live?.rpc?.windowBlocks)||600,
+    uniswapHttpStatus:live?.uniswap?.httpStatus??null,
+    uniswapOk:live?.uniswap?.ok===true,
+    tokenA:null,tokenB:null,targetToken:null,pairedToken:null,
+    exactPoolSwapRows:0,decodedSwaps:0,buySwaps:0,sellSwaps:0,rejectedSwaps:0,
+    buyTargetRaw:"0",buyPairedRaw:"0",sellTargetRaw:"0",sellPairedRaw:"0",
+    netTargetRawSigned:"0",netPairedRawSigned:"0",
+    rejectReasons:{},latestSwapBlock:null,sample:[],
+    externalRequestsUsed:safeNumber(live?.externalRequestsUsed),scannerBudgetConsumed:false,stateWrites:0,
+    error:null
+  };
+  if (live?.error) return {...base,error:`LIVE_POOL_DISCOVERY_FAILED:${live.error}`};
+  const pool = (live?.candidatePools||[]).find(r=>normalize(r?.poolId)===normalize(live?.bestLivePoolId));
+  if (!pool) return {...base,error:"BEST_LIVE_POOL_DETAILS_MISSING"};
+  base.tokenA=pool?.uniswapTokenA||null;
+  base.tokenB=pool?.uniswapTokenB||null;
+  base.targetToken=normalize(live?.tokenAddress)||null;
+
+  // Resolve the paired currency from the same canonical ordering used by V769.
+  const probeIdentity={poolId:live.bestLivePoolId,uniswapTokenA:base.tokenA,uniswapTokenB:base.tokenB};
+  const a=normalize(base.tokenA), b=normalize(base.tokenB), t=normalize(base.targetToken);
+  if (!isAddress(a) || !isAddress(b) || (t!==a && t!==b)) return {...base,error:"UNISWAP_CURRENCY_IDENTITY_UNVERIFIED_V770"};
+  base.pairedToken = t===a ? b : a;
+
+  const rpcEndpoint=v4PoolLiveRpcEndpointV767(env);
+  const logs=await v4PoolLiveRpcCallV767(rpcEndpoint.url,"eth_getLogs",[{
+    address:POOL_MANAGER,
+    fromBlock:`0x${safeNumber(live?.rpc?.fromBlock).toString(16)}`,
+    toBlock:`0x${safeNumber(live?.rpc?.toBlock).toString(16)}`,
+    topics:[SWAP_TOPIC,live.bestLivePoolId]
+  }]);
+  base.externalRequestsUsed+=1;
+  if (!logs?.ok) return {...base,error:`EXACT_POOL_SWAP_LOG_REQUEST_FAILED:${logs?.error||"UNKNOWN"}`};
+  const rows=Array.isArray(logs?.result)?logs.result:[];
+  base.exactPoolSwapRows=rows.length;
+
+  let buyTarget=0n,buyPaired=0n,sellTarget=0n,sellPaired=0n;
+  for (const row of rows) {
+    const d=v4SwapDirectionDecodeV769(row,live.tokenAddress,probeIdentity);
+    if (!d?.verified) {
+      base.rejectedSwaps+=1;
+      const reason=d?.status||"UNKNOWN_REJECT";
+      base.rejectReasons[reason]=safeNumber(base.rejectReasons[reason])+1;
+      continue;
+    }
+    let targetRaw=0n, pairedRaw=0n;
+    try { targetRaw=BigInt(d.candidateRawAmount||"0"); pairedRaw=BigInt(d.counterRawAmount||"0"); }
+    catch {
+      base.rejectedSwaps+=1;
+      base.rejectReasons.RAW_AMOUNT_PARSE_FAILED_V770=safeNumber(base.rejectReasons.RAW_AMOUNT_PARSE_FAILED_V770)+1;
+      continue;
+    }
+    if (targetRaw<=0n || pairedRaw<=0n) {
+      base.rejectedSwaps+=1;
+      base.rejectReasons.NON_POSITIVE_RAW_AMOUNT_V770=safeNumber(base.rejectReasons.NON_POSITIVE_RAW_AMOUNT_V770)+1;
+      continue;
+    }
+    base.decodedSwaps+=1;
+    if (d.side==="BUY") { base.buySwaps+=1; buyTarget+=targetRaw; buyPaired+=pairedRaw; }
+    else if (d.side==="SELL") { base.sellSwaps+=1; sellTarget+=targetRaw; sellPaired+=pairedRaw; }
+    if (safeNumber(d.blockNumber)>safeNumber(base.latestSwapBlock)) base.latestSwapBlock=d.blockNumber;
+    if (base.sample.length<6) base.sample.push({side:d.side,blockNumber:d.blockNumber,targetRaw:targetRaw.toString(),pairedRaw:pairedRaw.toString(),tx:d.transactionHash});
+  }
+  base.buyTargetRaw=buyTarget.toString();
+  base.buyPairedRaw=buyPaired.toString();
+  base.sellTargetRaw=sellTarget.toString();
+  base.sellPairedRaw=sellPaired.toString();
+  // Positive target net means more raw target units bought than sold; paired sign is opposite economic flow.
+  base.netTargetRawSigned=(buyTarget-sellTarget).toString();
+  base.netPairedRawSigned=(sellPaired-buyPaired).toString();
+
+  if (!rows.length) return {...base,error:"NO_EXACT_POOL_SWAPS_IN_RECENT_WINDOW"};
+  if (!base.decodedSwaps) return {...base,error:"NO_RAW_SWAP_AMOUNTS_DECODED"};
+  return base;
+}
+
+function v4SwapAmountsTelegramV770(result) {
+  const r=result||{};
+  const short=v=>{const s=String(v||"");return s.length>22?`${s.slice(0,12)}…${s.slice(-8)}`:(s||"NONE");};
+  const lines=[
+    "🧮 <b>V4 Raw Swap Amount Diagnostic — V770</b>","",
+    `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
+    `Live PoolId: <code>${escapeHtml(short(r?.poolId))}</code>`,
+    `Target / paired token: <code>${escapeHtml(short(r?.targetToken))}</code> / <code>${escapeHtml(short(r?.pairedToken))}</code>`,
+    `RPC: <b>${escapeHtml(String(r?.rpcProvider||"UNVERIFIED"))}</b>`,
+    `Window: <b>${escapeHtml(String(r?.fromBlock??"?"))}→${escapeHtml(String(r?.toBlock??"?"))}</b> (${safeNumber(r?.windowBlocks)} blocks)`,
+    `Uniswap identity: <b>${r?.uniswapOk===true?"VERIFIED":"UNVERIFIED"}</b>`,"",
+    "🔬 <b>Exact live-pool amount decoding</b>",
+    `Swap rows: <b>${safeNumber(r?.exactPoolSwapRows)}</b> · decoded <b>${safeNumber(r?.decodedSwaps)}</b> · rejected <b>${safeNumber(r?.rejectedSwaps)}</b>`,
+    `🟢 BUY swaps: <b>${safeNumber(r?.buySwaps)}</b>`,
+    `  target raw bought: <code>${escapeHtml(String(r?.buyTargetRaw??"0"))}</code>`,
+    `  paired raw paid: <code>${escapeHtml(String(r?.buyPairedRaw??"0"))}</code>`,
+    `🔴 SELL swaps: <b>${safeNumber(r?.sellSwaps)}</b>`,
+    `  target raw sold: <code>${escapeHtml(String(r?.sellTargetRaw??"0"))}</code>`,
+    `  paired raw received: <code>${escapeHtml(String(r?.sellPairedRaw??"0"))}</code>`,"",
+    "⚖️ <b>Raw directional balance</b>",
+    `Target raw BUY−SELL: <code>${escapeHtml(String(r?.netTargetRawSigned??"0"))}</code>`,
+    `Paired raw SELL receipts−BUY spend: <code>${escapeHtml(String(r?.netPairedRawSigned??"0"))}</code>`,
+    `Latest decoded swap block: <b>${escapeHtml(String(r?.latestSwapBlock??"NONE"))}</b>`,""
+  ];
+  if (r?.rejectedSwaps>0) lines.push(`Reject reasons: <code>${escapeHtml(JSON.stringify(r?.rejectReasons||{}).slice(0,500))}</code>`,"");
+  lines.push(r?.error?`Diagnostic result: <code>${escapeHtml(String(r.error).slice(0,500))}</code>`:"Diagnostic result: <b>RAW_SWAP_AMOUNTS_VERIFIED</b>","",
+    `<i>Diagnostic only: ${safeNumber(r?.externalRequestsUsed)} external requests, one KV read, zero KV writes, zero scanner-budget requests. V770 reports exact raw integer units only; no decimals, prices or USD values are assumed.</i>`);
   return lines.join("\\n");
 }
 
@@ -147705,6 +147822,7 @@ function telegramHelpV271() {
     "<code>/cmctest [0xADDRESS]</code> — V738 CoinMarketCap Robinhood Chain coverage test (diagnostic only)",
     "<code>/uniswaptest</code> — V764 one-request Uniswap Trade API POST quote test (diagnostic only)",
     "<code>/uniswapv4test [0xPOOLID]</code> — V765 one-request Uniswap V4 Pool Info test; auto-selects a retained PoolId when omitted",
+    "<code>/v4swapamounts [0xTOKEN]</code> — V770 verify exact raw target/paired amounts for BUY vs SELL swaps on the discovered live pool",
     "<code>/v4swapdirection [0xTOKEN]</code> — V769 verify BUY/SELL direction from signed on-chain V4 Swap deltas on the discovered live pool",
     "<code>/v4poollivecompare [0xTOKEN]</code> — V768 discover recent live PoolIds directly from PoolManager swaps, then identify token pools with Uniswap Pool Info (no DexScreener)",
     "<code>/v4poolcompare [0xTOKEN]</code> — V766 compare scanner PoolIds vs DexScreener active V4 pair + Uniswap Pool Info confirmation",
@@ -148545,6 +148663,32 @@ async function telegramCommandReplyV271(
 
 
 
+
+
+  if (parsed.command === "/v4swapamounts") {
+    const amountsV770 = await v4SwapAmountsDiagnosticV770(env, parsed.argument || "");
+    const replyV770 = v4SwapAmountsTelegramV770(amountsV770);
+    if (diagnosticV273) {
+      diagnosticV273.replyAttempted = true;
+      diagnosticV273.v4SwapAmountsV770 = {
+        tokenAddress:amountsV770?.tokenAddress||null,poolId:amountsV770?.poolId||null,
+        decodedSwaps:safeNumber(amountsV770?.decodedSwaps),buySwaps:safeNumber(amountsV770?.buySwaps),
+        sellSwaps:safeNumber(amountsV770?.sellSwaps),rejectedSwaps:safeNumber(amountsV770?.rejectedSwaps),
+        buyTargetRaw:amountsV770?.buyTargetRaw||"0",buyPairedRaw:amountsV770?.buyPairedRaw||"0",
+        sellTargetRaw:amountsV770?.sellTargetRaw||"0",sellPairedRaw:amountsV770?.sellPairedRaw||"0",
+        externalRequestsUsed:safeNumber(amountsV770?.externalRequestsUsed),scannerBudgetConsumed:false,stateWrites:0
+      };
+    }
+    const sentV770=await sendTelegram(env,replyV770,null,null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess=sentV770?.success===true;
+      diagnosticV273.telegramStatus=sentV770?.status||null;
+      diagnosticV273.telegramMode=sentV770?.mode||null;
+      diagnosticV273.telegramError=sentV770?.error||null;
+      diagnosticV273.result=sentV770?.success===true?"REPLY_SENT":"REPLY_FAILED";
+    }
+    return {success:sentV770?.success===true,ignored:false,command:parsed.command,v4SwapAmountsV770:amountsV770};
+  }
 
   if (parsed.command === "/v4swapdirection") {
     const directionV769 = await v4SwapDirectionDiagnosticV769(env, parsed.argument || "");
@@ -154393,6 +154537,16 @@ async function handleRequest(
   }
 
 
+
+
+  if (path === "/v4swapamounts") {
+    return jsonResponse(
+      await v4SwapAmountsDiagnosticV770(
+        env,
+        url.searchParams.get("token") || ""
+      )
+    );
+  }
 
   if (path === "/v4swapdirection") {
     return jsonResponse(
