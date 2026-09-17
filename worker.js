@@ -1,6 +1,18 @@
 /**
+ * Robinhood Chain Meme Hunter — V746
+ * AUTHORITATIVE RUNTIME VERSION: V746
+
+ * V746 RECENT-ACTIVE CANONICAL POOL SELECTION — NO REQUEST/SCORING CHANGE:
+ * - Fixes the V745 finding that a token may have many canonical V4 PoolKeys and a previously selected valid pool may not be the pool with the strongest retained recent activity.
+ * - Existing exact provider-corroborated identity remains authoritative. The V746 recovery lane only runs after the existing V153/V732 paths fail.
+ * - For multi-pool raw-only recovery, prefers a uniquely most-recent already-observed SWAP pool when swap-specific registry telemetry exists; otherwise it may use a uniquely most-recent retained SWAP_OR_LIQUIDITY activity block.
+ * - Ties, no retained activity, invalid PoolKeys and otherwise ambiguous multi-pool cases remain unresolved; V746 never guesses among equal/unsupported candidates.
+ * - Normal discovery now records last Swap and last ModifyLiquidity blocks inside the existing poolRegistry update path, using already-fetched logs only. No extra RPC/provider request is added.
+ * - The selected pool remains RAW ACTIVITY ONLY when its quote is not V254 USD-priceable. No USD value, Momentum/Opportunity credit, launch-age evidence or whale evidence is inferred from raw selection.
+ * - Watch cap remains 24, raw reserve remains 4, hard global request cap remains 42, and CMC/scoring/qualification/Telegram thresholds are unchanged.
+
  * Robinhood Chain Meme Hunter — V745
- * AUTHORITATIVE RUNTIME VERSION: V745
+ * HISTORICAL VERSION NOTE: V745
 
  * V745 EXACT-POOL IDENTITY MATCH DIAGNOSTIC — MEASUREMENT ONLY:
  * - Adds /poolmatch (alias /poolidentity) to compare every retained V740 raw-only watch against all canonical poolRegistry PoolKeys containing that token.
@@ -6556,7 +6568,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V745";
+const VERSION = "V746";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -23465,6 +23477,32 @@ function refreshKnownPoolActivityV185(
 
     entry.lastActivitySourceV185 =
       "NORMAL_DISCOVERY_LOG";
+
+    /*
+     * V746: classify already-observed normal discovery activity without adding
+     * any request. This lets raw-only multi-pool recovery prefer a uniquely
+     * most-recent Swap pool over liquidity-only activity when that evidence
+     * exists. Historical registry rows simply fall back to lastActivityBlock.
+     */
+    if (blockNumber && topic0 === SWAP_TOPIC) {
+      if (
+        !safeNumber(entry.lastSwapBlockV746) ||
+        blockNumber > safeNumber(entry.lastSwapBlockV746)
+      ) {
+        entry.lastSwapBlockV746 = blockNumber;
+      }
+      entry.lastSwapSeenAtV746 = now;
+    }
+
+    if (blockNumber && topic0 === MODIFY_LIQUIDITY_TOPIC) {
+      if (
+        !safeNumber(entry.lastLiquidityBlockV746) ||
+        blockNumber > safeNumber(entry.lastLiquidityBlockV746)
+      ) {
+        entry.lastLiquidityBlockV746 = blockNumber;
+      }
+      entry.lastLiquiditySeenAtV746 = now;
+    }
 
     refreshedPoolIds.add(
       poolId
@@ -48167,11 +48205,14 @@ function onChainPoolIdentityRecoveryV742(
       currency1V740: currency1,
       blockNumber: rawEntry?.blockNumber || null,
       transactionHash: rawEntry?.transactionHash || null,
+      lastActivityBlockV746: safeNumber(rawEntry?.lastActivityBlock) || null,
+      lastSwapBlockV746: safeNumber(rawEntry?.lastSwapBlockV746) || null,
+      lastLiquidityBlockV746: safeNumber(rawEntry?.lastLiquidityBlockV746) || null,
       rawActivityOnlyV740: true,
       usdQuoteVerifiedV740: false,
       registryIdentityRecoveryV742: true,
       proofV742:
-        "EXACTLY_ONE_CANONICAL_POOL_REGISTRY_POOLKEY_CONTAINS_CANDIDATE_NO_USD_QUOTE_CLAIM"
+        "EXACT_CANONICAL_POOL_REGISTRY_POOLKEY_CONTAINS_CANDIDATE_NO_USD_QUOTE_CLAIM"
     });
   }
 
@@ -48180,11 +48221,67 @@ function onChainPoolIdentityRecoveryV742(
   }
 
   if (matches.length > 1) {
+    /*
+     * V746: do not reject every multi-pool token. Use only retained evidence
+     * that the scanner has already observed. Swap-specific recency is stronger
+     * than generic Swap-or-liquidity recency. A selection is made only when
+     * the winning block is strictly greater than every alternative; ties and
+     * no-activity sets remain unresolved.
+     */
+    const uniqueLatest = (rows, field) => {
+      const ranked = rows
+        .map(row => ({row, value:safeNumber(row?.[field])}))
+        .filter(item => item.value > 0)
+        .sort((a,b) => b.value - a.value || String(a.row?.poolId || "").localeCompare(String(b.row?.poolId || "")));
+      if (!ranked.length) return null;
+      if (ranked.length > 1 && ranked[0].value === ranked[1].value) return null;
+      return ranked[0];
+    };
+
+    const swapWinner = uniqueLatest(matches, "lastSwapBlockV746");
+    const activityWinner = swapWinner ? null : uniqueLatest(matches, "lastActivityBlockV746");
+    const winner = swapWinner || activityWinner;
+
+    if (winner?.row) {
+      const chosen = winner.row;
+      const basis = swapWinner
+        ? "UNIQUE_MOST_RECENT_RETAINED_SWAP_V746"
+        : "UNIQUE_MOST_RECENT_RETAINED_ACTIVITY_V746";
+      return {
+        ...chosen,
+        verified: true,
+        status: swapWinner
+          ? "RECENT_SWAP_CANONICAL_POOL_SELECTED_RAW_ONLY_V746"
+          : "RECENT_ACTIVITY_CANONICAL_POOL_SELECTED_RAW_ONLY_V746",
+        source: swapWinner
+          ? "CANONICAL_POOL_REGISTRY_UNIQUE_LATEST_SWAP_V746"
+          : "CANONICAL_POOL_REGISTRY_UNIQUE_LATEST_ACTIVITY_V746",
+        activePoolSelectionV746: true,
+        activePoolSelectionBasisV746: basis,
+        registryMatchCountV742: matches.length,
+        selectedActivityBlockV746: safeNumber(chosen?.lastActivityBlockV746) || null,
+        selectedSwapBlockV746: safeNumber(chosen?.lastSwapBlockV746) || null,
+        proofV746:
+          "MULTI_POOL_RAW_ONLY_SELECTION_REQUIRES_UNIQUE_MOST_RECENT_ALREADY_OBSERVED_CANONICAL_ACTIVITY"
+      };
+    }
+
+    const swapBlocks = matches
+      .map(row => safeNumber(row?.lastSwapBlockV746))
+      .filter(value => value > 0);
+    const activityBlocks = matches
+      .map(row => safeNumber(row?.lastActivityBlockV746))
+      .filter(value => value > 0);
+
     return {
       ...existing,
       verified: false,
-      status: "MULTIPLE_POOL_REGISTRY_MATCHES_REQUIRE_DISAMBIGUATION_V742",
+      status: "MULTIPLE_POOL_REGISTRY_MATCHES_AMBIGUOUS_ACTIVITY_V746",
       registryMatchCountV742: matches.length,
+      registryPoolsWithSwapActivityV746: swapBlocks.length,
+      registryPoolsWithAnyActivityV746: activityBlocks.length,
+      registryLatestSwapBlockV746: swapBlocks.length ? Math.max(...swapBlocks) : null,
+      registryLatestActivityBlockV746: activityBlocks.length ? Math.max(...activityBlocks) : null,
       poolIdsV742: matches
         .map(row => normalize(row?.poolId))
         .filter(Boolean)
@@ -76781,6 +76878,8 @@ function poolIdentityMatchSnapshotV745(state) {
         }
 
         const lastActivityBlock = safeNumber(entry?.lastActivityBlock) || null;
+        const lastSwapBlockV746 = safeNumber(entry?.lastSwapBlockV746) || null;
+        const lastLiquidityBlockV746 = safeNumber(entry?.lastLiquidityBlockV746) || null;
         const lastSeenAt = safeNumber(entry?.lastSeenAt) || null;
         candidates.push({
           poolId,
@@ -76790,6 +76889,8 @@ function poolIdentityMatchSnapshotV745(state) {
           selected: poolId === selectedPoolId,
           providerExactMatch: providerPairIsPoolId && poolId === providerPairAddress,
           lastActivityBlock,
+          lastSwapBlockV746,
+          lastLiquidityBlockV746,
           lastSeenAt,
           activitySource: entry?.lastActivitySourceV185 || null,
           poolKeyCompleteV441: entry?.poolKeyCompleteV441 === true
@@ -76833,6 +76934,8 @@ function poolIdentityMatchSnapshotV745(state) {
         selectedLastCollectedBlock: watch?.lastCollectedBlock ?? null,
         selectedLastRegistryActivityBlock: selectedCandidate?.lastActivityBlock || null,
         selectedHasLatestKnownActivity,
+        selectedLastSwapBlockV746: selectedCandidate?.lastSwapBlockV746 || null,
+        selectedLastLiquidityBlockV746: selectedCandidate?.lastLiquidityBlockV746 || null,
         providerMarketVerified: cachedMarket?.verified === true,
         providerSource: providerSource || null,
         providerPairAddress: providerPairAddress || null,
@@ -76885,7 +76988,7 @@ function poolIdentityMatchTelegramV745(state) {
     `No cached provider pair: <b>${safeNumber(s.noCachedProviderPairCount)}</b>`,
     `Selected pool has latest retained registry activity: <b>${safeNumber(s.selectedLatestKnownActivityCount)}</b>`,
     "",
-    "ℹ️ Retained registry activity is from already-observed normal discovery logs and may be SWAP or liquidity activity; V745 does not invent a swap classification."
+    "ℹ️ V746 classifies newly observed normal-discovery activity by existing Swap/ModifyLiquidity topic0. Historical registry rows without that telemetry remain generic retained activity; no extra request is made."
   ];
 
   if (!Array.isArray(s.rows) || !s.rows.length) {
@@ -76900,6 +77003,7 @@ function poolIdentityMatchTelegramV745(state) {
         `Canonical pools containing token: <b>${safeNumber(row?.canonicalPoolCount)}</b> · alternatives: <b>${safeNumber(row?.alternativePoolCount)}</b>`,
         `Selected ranges/raw swaps: <b>${safeNumber(row?.selectedSuccessfulRanges)} / ${safeNumber(row?.selectedRawSwaps)}</b> · pool-specific swaps at registration: <b>${safeNumber(row?.selectedPoolSpecificSwapsAtRegistration)}</b>`,
         `Selected registry activity block: <b>${escapeHtml(String(row?.selectedLastRegistryActivityBlock ?? "NONE"))}</b> · latest candidate activity block: <b>${escapeHtml(String(row?.latestKnownActivityBlock ?? "NONE"))}</b>`,
+        `Selected Swap/Liquidity activity block V746: <b>${escapeHtml(String(row?.selectedLastSwapBlockV746 ?? "NONE"))}</b> / <b>${escapeHtml(String(row?.selectedLastLiquidityBlockV746 ?? "NONE"))}</b>`,
         `Selected has latest retained activity: <b>${row?.selectedHasLatestKnownActivity === true ? "YES" : "NO / UNPROVEN"}</b>`,
         `Provider market verified: <b>${row?.providerMarketVerified === true ? "YES" : "NO"}</b> · source: <b>${escapeHtml(row?.providerSource || "UNVERIFIED")}</b>`,
         `Provider pair/pool: <code>${escapeHtml(short(row?.providerPairAddress))}</code>`,
@@ -76915,7 +77019,7 @@ function poolIdentityMatchTelegramV745(state) {
             safeNumber(candidate?.lastActivityBlock) > 0 ? "RETAINED_ACTIVITY" : "NO_RETAINED_ACTIVITY"
           ].filter(Boolean).join(" · ");
           lines.push(
-            `  • <code>${escapeHtml(short(candidate?.poolId))}</code> — ${escapeHtml(flags || "NO_FLAGS")} · activity block ${escapeHtml(String(candidate?.lastActivityBlock ?? "NONE"))}`
+            `  • <code>${escapeHtml(short(candidate?.poolId))}</code> — ${escapeHtml(flags || "NO_FLAGS")} · activity ${escapeHtml(String(candidate?.lastActivityBlock ?? "NONE"))} · swap ${escapeHtml(String(candidate?.lastSwapBlockV746 ?? "NONE"))} · liq ${escapeHtml(String(candidate?.lastLiquidityBlockV746 ?? "NONE"))}`
           );
         }
       }
@@ -76924,7 +77028,7 @@ function poolIdentityMatchTelegramV745(state) {
 
   lines.push(
     "",
-    "<i>Read-only V745 diagnostic: zero provider/RPC requests, zero scanner-budget requests and zero state writes. Pool selection/collection/scoring/qualification remain unchanged; hard request cap remains 42.</i>"
+    "<i>Read-only /poolmatch diagnostic: zero provider/RPC requests, zero scanner-budget requests and zero state writes. V746 changes only raw-only multi-pool recovery selection; collection/scoring/qualification and hard request cap 42 remain unchanged.</i>"
   );
   return lines.join("\n");
 }
@@ -145142,7 +145246,7 @@ function telegramHelpV271() {
     "<code>/cmctest [0xADDRESS]</code> — V738 CoinMarketCap Robinhood Chain coverage test (diagnostic only)",
     "<code>/cmcusage</code> — V739 CoinMarketCap bot-side monthly request meter (read-only)",
     "<code>/poolwatch</code> — V741/V744 raw exact-pool watch diagnostic (read-only)",
-    "<code>/poolmatch</code> — V745 selected-vs-provider/canonical pool identity diagnostic (read-only)",
+    "<code>/poolmatch</code> — V746 selected-vs-provider/canonical pool activity identity diagnostic (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
