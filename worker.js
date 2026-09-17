@@ -1,4 +1,14 @@
 /**
+ * Robinhood Chain Meme Hunter — V797
+ *
+ * V797 FROZEN ACTIVE-POOL SNAPSHOT PAGINATION:
+ * - page 1 freezes the exact recent active V4 PoolId set into KV for this token;
+ * - p2/p3/... reuse the same frozen PoolIds instead of refetching a moving live set;
+ * - snapshot is token-specific and expires after 30 minutes;
+ * - page 1 uses one diagnostic KV write, later pages use zero writes;
+ * - preserves 100 PoolIds / 5 Uniswap batches per page and zero scanner-budget requests.
+ */
+/**
  * Robinhood Chain Meme Hunter — V796
  *
  * V796 PAGED ACTIVE-POOL REVERSE LOOKUP DIAGNOSTIC:
@@ -6874,7 +6884,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V795";
+const VERSION = "V797";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -41062,7 +41072,7 @@ async function v4PoolSearchActivePoolReverseLookupV795(env, activeRows, token, p
     }catch(error){out.externalRequestsUsed++;out.error=errorString(error);}
   }
   out.ok=out.batchesOk>0;
-  if(out.ok && !out.matches.length) out.error=nextPage?"TARGET_NOT_FOUND_ON_ACTIVE_POOL_PAGE_CONTINUE":"TARGET_NOT_FOUND_IN_ALL_ACTIVE_POOLIDS";
+  if(out.ok && !out.matches.length) out.error=nextPage?"TARGET_NOT_FOUND_ON_FROZEN_ACTIVE_POOL_PAGE_CONTINUE":"TARGET_NOT_FOUND_IN_FROZEN_ACTIVE_POOL_SNAPSHOT";
   return out;
 }
 
@@ -41078,12 +41088,13 @@ async function v4PoolSearchDiagnosticV791(env, argument="") {
   const autoTarget=v4PoolSearchAutoTokenV792(state);
   const token=isAddress(explicitToken)?explicitToken:(isAddress(autoTarget?.tokenAddress)?normalize(autoTarget.tokenAddress):null);
   const base={
-    version:"V796",diagnostic:"MANUAL_V4_ACTIVE_POOL_REVERSE_SEARCH_PAGED",tokenAddress:token||null,
+    version:"V797",diagnostic:"MANUAL_V4_FROZEN_ACTIVE_POOL_SNAPSHOT_PAGED",tokenAddress:token||null,
     tokenSource:isAddress(explicitToken)?"EXPLICIT_ARGUMENT":(autoTarget?.source||"NONE"),
     launchBlock:null,launchAnchorSource:null,rpcProvider:null,head:null,recentFromBlock:null,recentToBlock:null,
     recentSwapRows:0,livePoolIds:0,windows:[],initializeRows:0,decodedTokenMatches:0,
     matchingPoolIds:[],activeMatchingPoolIds:[],matchingRecentSwapRows:0,externalRequestsUsed:0,
-    scannerBudgetConsumed:false,stateWrites:0,kvRead:true,kvReadError:loaded?.error||null,error:null
+    scannerBudgetConsumed:false,stateWrites:0,kvRead:true,kvReadError:loaded?.error||null,error:null,
+    snapshotV797:{source:null,createdAt:null,ageMs:null,head:null,poolIds:0,writeAttempted:false,writeSaved:false,writeError:null}
   };
   if(!isAddress(token)) return {...base,error:"NO_VALID_TOKEN_USE_/v4poolsearch_0xTOKEN"};
   let anchor=v4PoolSearchLaunchAnchorV791(state,token,explicitBlock);
@@ -41094,42 +41105,87 @@ async function v4PoolSearchDiagnosticV791(env, argument="") {
 
   const rpc=v4PoolLiveRpcEndpointV767(env);
   base.rpcProvider=rpc.name;
-  const head=await v4PoolLiveRpcCallV767(rpc.url,"eth_blockNumber",[]);
-  base.externalRequestsUsed++;
-  if(!head?.ok) return {...base,error:`HEAD_FAILED:${head?.error||"UNKNOWN"}`};
-  const headNum=Number.parseInt(String(head.result||"0x0"),16);
-  if(!Number.isFinite(headNum)||headNum<=0) return {...base,error:"HEAD_UNVERIFIED"};
-  base.head=headNum;
-  const recentFrom=Math.max(0,headNum-599);
-  base.recentFromBlock=recentFrom;base.recentToBlock=headNum;
-  const swaps=await v4PoolLiveRpcCallV767(rpc.url,"eth_getLogs",[{address:normalize(POOL_MANAGER),fromBlock:`0x${recentFrom.toString(16)}`,toBlock:`0x${headNum.toString(16)}`,topics:[SWAP_TOPIC]}]);
-  base.externalRequestsUsed++;
-  if(!swaps?.ok) return {...base,error:`RECENT_SWAP_FAILED:${swaps?.error||"UNKNOWN"}`};
-  const swapRows=Array.isArray(swaps.result)?swaps.result:[];
-  base.recentSwapRows=swapRows.length;
-  const active=v4PoolLiveAggregateSwapRowsV768(swapRows);
-  base.livePoolIds=active.length;
-  const activeIds=new Set(active.map(r=>normalize(r?.poolId)).filter(isBytes32HexV765));
+  const SNAPSHOT_MAX_AGE_MS_V797=30*60*1000;
+  let active=[];
+  let swapRows=[];
 
-  // V795: exact reverse lookup of the currently-active PoolIds through Uniswap Pool Info.
-  // This bypasses launch-anchor recovery entirely and stops immediately when a live pool
-  // containing the target token is identified. V771 already proved exhaustive batching.
+  if(reversePage===1){
+    const head=await v4PoolLiveRpcCallV767(rpc.url,"eth_blockNumber",[]);
+    base.externalRequestsUsed++;
+    if(!head?.ok) return {...base,error:`HEAD_FAILED:${head?.error||"UNKNOWN"}`};
+    const headNum=Number.parseInt(String(head.result||"0x0"),16);
+    if(!Number.isFinite(headNum)||headNum<=0) return {...base,error:"HEAD_UNVERIFIED"};
+    base.head=headNum;
+    const recentFrom=Math.max(0,headNum-599);
+    base.recentFromBlock=recentFrom;base.recentToBlock=headNum;
+    const swaps=await v4PoolLiveRpcCallV767(rpc.url,"eth_getLogs",[{address:normalize(POOL_MANAGER),fromBlock:`0x${recentFrom.toString(16)}`,toBlock:`0x${headNum.toString(16)}`,topics:[SWAP_TOPIC]}]);
+    base.externalRequestsUsed++;
+    if(!swaps?.ok) return {...base,error:`RECENT_SWAP_FAILED:${swaps?.error||"UNKNOWN"}`};
+    swapRows=Array.isArray(swaps.result)?swaps.result:[];
+    base.recentSwapRows=swapRows.length;
+    active=v4PoolLiveAggregateSwapRowsV768(swapRows);
+    base.livePoolIds=active.length;
+
+    const frozenRowsV797=active.map(row=>({
+      poolId:normalize(row?.poolId),
+      freshSwapCount:safeNumber(row?.freshSwapCount),
+      lastFreshSwapBlock:safeNumber(row?.lastFreshSwapBlock)||null
+    })).filter(row=>isBytes32HexV765(row.poolId));
+    state.v4PoolSearchSnapshotV797={
+      tokenAddress:token,
+      createdAt:Date.now(),
+      head:headNum,
+      recentFromBlock:recentFrom,
+      recentToBlock:headNum,
+      recentSwapRows:swapRows.length,
+      poolRows:frozenRowsV797
+    };
+    base.snapshotV797={source:"CREATED_PAGE_1",createdAt:state.v4PoolSearchSnapshotV797.createdAt,ageMs:0,head:headNum,poolIds:frozenRowsV797.length,writeAttempted:true,writeSaved:false,writeError:null};
+    const saved=await writeState(env,state);
+    base.stateWrites=1;
+    base.snapshotV797.writeSaved=saved?.saved===true;
+    base.snapshotV797.writeError=saved?.error||null;
+    if(saved?.saved!==true) return {...base,error:`SNAPSHOT_WRITE_FAILED:${saved?.error||"UNKNOWN"}`};
+  }else{
+    const snap=state?.v4PoolSearchSnapshotV797;
+    const snapToken=normalize(snap?.tokenAddress);
+    const createdAt=safeNumber(snap?.createdAt);
+    const ageMs=createdAt>0?Math.max(0,Date.now()-createdAt):null;
+    const validToken=snapToken===token;
+    const validAge=ageMs!==null && ageMs<=SNAPSHOT_MAX_AGE_MS_V797;
+    const rows=Array.isArray(snap?.poolRows)?snap.poolRows:[];
+    if(!validToken || !validAge || !rows.length){
+      base.snapshotV797={source:"MISSING_OR_STALE",createdAt:createdAt||null,ageMs,head:safeNumber(snap?.head)||null,poolIds:rows.length,writeAttempted:false,writeSaved:false,writeError:null};
+      return {...base,error:"NO_VALID_FROZEN_SNAPSHOT_RERUN_PAGE_1"};
+    }
+    active=rows.map(row=>({poolId:normalize(row?.poolId),freshSwapCount:safeNumber(row?.freshSwapCount),lastFreshSwapBlock:safeNumber(row?.lastFreshSwapBlock)||null})).filter(row=>isBytes32HexV765(row.poolId));
+    base.head=safeNumber(snap?.head)||null;
+    base.recentFromBlock=safeNumber(snap?.recentFromBlock)||null;
+    base.recentToBlock=safeNumber(snap?.recentToBlock)||null;
+    base.recentSwapRows=safeNumber(snap?.recentSwapRows);
+    base.livePoolIds=active.length;
+    base.snapshotV797={source:"REUSED_FROZEN_PAGE_1",createdAt,ageMs,head:base.head,poolIds:active.length,writeAttempted:false,writeSaved:false,writeError:null};
+  }
+
+  const activeIds=new Set(active.map(r=>normalize(r?.poolId)).filter(isBytes32HexV765));
   const reverseV795=await v4PoolSearchActivePoolReverseLookupV795(env,active,token,reversePage);
   base.reverseLookupV795=reverseV795;
   base.externalRequestsUsed+=safeNumber(reverseV795?.externalRequestsUsed);
   if(Array.isArray(reverseV795?.matches) && reverseV795.matches.length){
     base.matchingPoolIds=reverseV795.matches.map(r=>normalize(r?.poolId)).filter(isBytes32HexV765);
     base.activeMatchingPoolIds=[...base.matchingPoolIds];
-    const hitSet=new Set(base.activeMatchingPoolIds);
-    base.matchingRecentSwapRows=swapRows.filter(log=>hitSet.has(normalize(log?.topics?.[1]))).length;
+    base.matchingRecentSwapRows=reverseV795.matches.reduce((sum,row)=>sum+safeNumber(row?.freshSwapCount),0);
     base.error=null;
     return base;
   }
   if(safeNumber(reverseV795?.nextPage)>0){
-    base.error="ACTIVE_POOL_PAGE_NO_MATCH_CONTINUE";
+    base.error="FROZEN_ACTIVE_POOL_PAGE_NO_MATCH_CONTINUE";
     return base;
   }
 
+  // Only after the complete frozen active set is exhausted do we use the historical Initialize fallback.
+  const headNum=safeNumber(base.head);
+  if(!(headNum>0)) return {...base,error:"FROZEN_SNAPSHOT_HEAD_UNVERIFIED"};
   const span=Math.max(1,Math.min(250,safeNumber(VALIDATION_CLOUD_UNKNOWN_POOL_RANGE_BLOCKS_V630)||250));
   const anchored=anchor.block>0 && anchor.block<=headNum;
   const ranges=anchored
@@ -41170,11 +41226,13 @@ async function v4PoolSearchDiagnosticV791(env, argument="") {
   base.matchingPoolIds=[...matched];
   base.activeMatchingPoolIds=base.matchingPoolIds.filter(pid=>activeIds.has(pid));
   if(base.activeMatchingPoolIds.length){
-    const activeMatchSet=new Set(base.activeMatchingPoolIds);
-    base.matchingRecentSwapRows=swapRows.filter(log=>activeMatchSet.has(normalize(log?.topics?.[1]))).length;
+    base.matchingRecentSwapRows=base.activeMatchingPoolIds.reduce((sum,pid)=>{
+      const row=active.find(r=>normalize(r?.poolId)===pid)||{};
+      return sum+safeNumber(row?.freshSwapCount);
+    },0);
   }
   if(base.activeMatchingPoolIds.length) return base;
-  base.error=base.matchingPoolIds.length?"TOKEN_POOL_INITIALIZE_FOUND_BUT_NOT_ACTIVE_IN_RECENT_SWAP_WINDOW":"NO_TOKEN_INITIALIZE_IN_BIDIRECTIONAL_500_BLOCK_WINDOW";
+  base.error=base.matchingPoolIds.length?"TOKEN_POOL_INITIALIZE_FOUND_BUT_NOT_ACTIVE_IN_FROZEN_SWAP_SNAPSHOT":"NO_TOKEN_INITIALIZE_IN_BIDIRECTIONAL_500_BLOCK_WINDOW";
   return base;
 }
 
@@ -41182,20 +41240,22 @@ function v4PoolSearchTelegramV791(result){
   const r=result||{};
   const short=v=>{const s=String(v||"");return s.length>22?`${s.slice(0,12)}…${s.slice(-8)}`:(s||"NONE");};
   const lines=[
-    "🧬 <b>Manual V4 Pool Search — V796</b>","",
+    "🧬 <b>Manual V4 Pool Search — V797</b>","",
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
     `Token source: <b>${escapeHtml(String(r?.tokenSource||"NONE"))}</b>`,
     `Launch anchor: <b>${escapeHtml(String(r?.launchBlock??"NONE"))}</b> · ${escapeHtml(String(r?.launchAnchorSource||"NONE"))}`,
-    `RPC: <b>${escapeHtml(String(r?.rpcProvider||"NONE"))}</b> · head <b>${escapeHtml(String(r?.head??"NONE"))}</b>`,
-    `Recent swaps / live PoolIds: <b>${safeNumber(r?.recentSwapRows)} / ${safeNumber(r?.livePoolIds)}</b>`,"",
-    "🦄 <b>Active PoolId reverse lookup — V796</b>",
+    `RPC: <b>${escapeHtml(String(r?.rpcProvider||"NONE"))}</b> · snapshot head <b>${escapeHtml(String(r?.head??"NONE"))}</b>`,
+    `Frozen recent swaps / PoolIds: <b>${safeNumber(r?.recentSwapRows)} / ${safeNumber(r?.livePoolIds)}</b>`,
+    `Snapshot: <b>${escapeHtml(String(r?.snapshotV797?.source||"NONE"))}</b> · pools <b>${safeNumber(r?.snapshotV797?.poolIds)}</b>${r?.snapshotV797?.ageMs!==null&&r?.snapshotV797?.ageMs!==undefined?` · age <b>${Math.floor(safeNumber(r.snapshotV797.ageMs)/1000)}s</b>`:""}`,
+    r?.snapshotV797?.writeAttempted===true?`Snapshot KV write: <b>${r?.snapshotV797?.writeSaved===true?"SAVED":"FAILED"}</b>${r?.snapshotV797?.writeError?` · <code>${escapeHtml(String(r.snapshotV797.writeError).slice(0,180))}</code>`:""}`:`Snapshot KV write: <b>NOT NEEDED</b>`,"",
+    "🦄 <b>Frozen active PoolId reverse lookup — V797</b>",
     `Page: <b>${safeNumber(r?.reverseLookupV795?.page)||1}</b> · offset <b>${safeNumber(r?.reverseLookupV795?.startOffset)}</b> · page size <b>${safeNumber(r?.reverseLookupV795?.pagePoolIds)}</b>`,
     `PoolIds checked this run: <b>${safeNumber(r?.reverseLookupV795?.poolIdsChecked)} / ${safeNumber(r?.reverseLookupV795?.poolIdsAvailable)}</b>`,
     `Remaining after page: <b>${safeNumber(r?.reverseLookupV795?.remainingPoolIds)}</b>`,
     `Uniswap batches OK/attempted: <b>${safeNumber(r?.reverseLookupV795?.batchesOk)} / ${safeNumber(r?.reverseLookupV795?.batchesAttempted)}</b>`,
     `Pools returned / token matches: <b>${safeNumber(r?.reverseLookupV795?.poolsReturned)} / ${safeNumber(r?.reverseLookupV795?.matches?.length)}</b>`,
     r?.reverseLookupV795?.error?`Reverse lookup result: <code>${escapeHtml(String(r.reverseLookupV795.error).slice(0,300))}</code>`:"Reverse lookup result: <b>EXACT_ACTIVE_POOL_FOUND</b>",
-    safeNumber(r?.reverseLookupV795?.nextPage)>0?`Next: <code>/v4poolsearch ${escapeHtml(String(r?.tokenAddress||""))} p${safeNumber(r.reverseLookupV795.nextPage)}</code>`:"Active-pool pages: <b>COMPLETE</b>","",
+    safeNumber(r?.reverseLookupV795?.nextPage)>0?`Next: <code>/v4poolsearch ${escapeHtml(String(r?.tokenAddress||""))} p${safeNumber(r.reverseLookupV795.nextPage)}</code>`:"Frozen active-pool pages: <b>COMPLETE</b>","",
     "🔎 <b>Historical Initialize fallback</b>"
   ];
   for(const w of Array.isArray(r?.windows)?r.windows:[]){
@@ -41206,8 +41266,8 @@ function v4PoolSearchTelegramV791(result){
     `Active matching PoolIds: <b>${safeNumber(r?.activeMatchingPoolIds?.length)}</b>`,
     `Matching recent swaps: <b>${safeNumber(r?.matchingRecentSwapRows)}</b>`);
   for(const pid of (r?.activeMatchingPoolIds||[]).slice(0,5)) lines.push(`✅ Active PoolId: <code>${escapeHtml(short(pid))}</code>`);
-  lines.push("",r?.error?`Diagnostic result: <code>${escapeHtml(String(r.error).slice(0,400))}</code>`:"Diagnostic result: <b>EXACT_ACTIVE_V4_POOL_FOUND</b>","",
-    `<i>Diagnostic only: ${safeNumber(r?.externalRequestsUsed)} external requests, one KV read, zero KV writes, zero scanner-budget requests. No scoring, Telegram qualification or USD inference is changed.</i>`);
+  lines.push("",r?.error?`Diagnostic result: <code>${escapeHtml(String(r.error).slice(0,400))}</code>`:`Diagnostic result: <b>EXACT_ACTIVE_V4_POOL_FOUND</b>`,"",
+    `<i>Diagnostic only: ${safeNumber(r?.externalRequestsUsed)} external requests, one KV read, ${safeNumber(r?.stateWrites)} KV writes, zero scanner-budget requests. No scoring, Telegram qualification or USD inference is changed.</i>`);
   return lines.join("\n");
 }
 
