@@ -1,6 +1,16 @@
 /**
- * Robinhood Chain Meme Hunter — V754
- * AUTHORITATIVE RUNTIME VERSION: V754
+ * Robinhood Chain Meme Hunter — V755
+ * AUTHORITATIVE RUNTIME VERSION: V755
+ *
+ * V755 RAW-WATCH CURRENT-ACTIVITY ADMISSION — NO REQUEST/SCORING CHANGE:
+ * - Prevents technically valid but inactive exact pools from consuming the four-slot raw reserve.
+ * - New raw-only watches require at least one current/fresh activity proof: current pool-specific swaps,
+ *   a fresh retained canonical Swap block inside the existing 12,000-block window, or an exact
+ *   provider↔PoolId match with current provider-reported 5m/1h transaction/volume activity.
+ * - Provider counts/volume are admission evidence only; they do not become verified directional USD,
+ *   Momentum, buy pressure or scoring credit.
+ * - Existing V742–V754 watch lifecycle, first-range fairness, stale retirement, scheduler, scoring,
+ *   Telegram gates, CMC and the hard global request cap of 42 are preserved.
  *
 
  * V754 RAW SINGLE-POOL FAIR OBSERVATION WINDOW — NO REQUEST/SCORING CHANGE:
@@ -6629,7 +6639,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V754";
+const VERSION = "V755";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -76122,6 +76132,81 @@ function decodeRawExactPoolSwapV740(state, row, watchRow) {
   };
 }
 
+function rawWatchCurrentActivityAdmissionV755(state, candidate, latestNumber) {
+  const identity = candidate?.onChainPoolIdentityV153 || {};
+  const token = normalize(candidate?.address);
+  const poolId = normalize(identity?.poolId);
+  const head = Number(latestNumber);
+  const reasons = [];
+
+  const poolSpecificSwaps =
+    candidate?.activity?.poolSpecific === true
+      ? Math.max(0, safeNumber(candidate?.activity?.swaps))
+      : 0;
+  if (poolSpecificSwaps > 0) reasons.push("CURRENT_POOL_SPECIFIC_SWAP_ACTIVITY_V755");
+
+  let retainedSwapBlock = 0;
+  let retainedSwapGap = null;
+  if (/^0x[a-f0-9]{64}$/.test(String(poolId || ""))) {
+    const registry =
+      state?.poolRegistry && typeof state.poolRegistry === "object"
+        ? state.poolRegistry
+        : {};
+    const row = registry?.[poolId] || Object.values(registry).find(r => normalize(r?.poolId) === poolId) || null;
+    retainedSwapBlock = safeNumber(row?.lastSwapBlockV746);
+    if (retainedSwapBlock > 0 && Number.isFinite(head) && head > 0 && retainedSwapBlock <= head) {
+      retainedSwapGap = Math.max(0, head - retainedSwapBlock);
+      if (retainedSwapGap <= RAW_MULTI_POOL_FRESH_SWAP_BLOCKS_V749) {
+        reasons.push("FRESH_RETAINED_SWAP_WITHIN_V254_WINDOW_V755");
+      }
+    }
+  }
+
+  const market = candidate?.market || null;
+  const providerPair = normalize(market?.pairAddress);
+  const exactProviderPoolMatch =
+    market?.verified === true &&
+    /^0x[a-f0-9]{64}$/.test(String(providerPair || "")) &&
+    providerPair === poolId;
+
+  const tx5 = market?.transactions?.m5 || null;
+  const tx1h = market?.transactions?.h1 || null;
+  const tx5Total = Math.max(0, safeNumber(tx5?.buys)) + Math.max(0, safeNumber(tx5?.sells));
+  const tx1hTotal = Math.max(0, safeNumber(tx1h?.buys)) + Math.max(0, safeNumber(tx1h?.sells));
+  const vol5 = Math.max(0, safeNumber(market?.volume?.m5));
+  const vol1h = Math.max(0, safeNumber(market?.volume?.h1));
+  const providerCurrentActivity = tx5Total > 0 || tx1hTotal > 0 || vol5 > 0 || vol1h > 0;
+
+  if (exactProviderPoolMatch && providerCurrentActivity) {
+    reasons.push("EXACT_PROVIDER_POOL_MATCH_WITH_CURRENT_ACTIVITY_V755");
+  }
+
+  const passes = reasons.length > 0;
+  return {
+    version:"V755",
+    passes,
+    reasons,
+    tokenAddress:isAddress(token) ? token : null,
+    poolId:/^0x[a-f0-9]{64}$/.test(String(poolId || "")) ? poolId : null,
+    poolSpecificSwaps,
+    retainedSwapBlock:retainedSwapBlock || null,
+    retainedSwapGapBlocks:retainedSwapGap,
+    freshSwapWindowBlocks:RAW_MULTI_POOL_FRESH_SWAP_BLOCKS_V749,
+    providerMarketVerified:market?.verified === true,
+    providerPair:providerPair || null,
+    exactProviderPoolMatch,
+    provider5mTransactions:tx5Total,
+    provider1hTransactions:tx1hTotal,
+    provider5mVolumeUsd:vol5 || null,
+    provider1hVolumeUsd:vol1h || null,
+    providerCurrentActivity,
+    providerActivityCreatesDirectionalUsd:false,
+    providerActivityCreatesMomentum:false,
+    providerActivityCreatesScoringCredit:false,
+    externalRequestsAdded:0
+  };
+}
+
 function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber, wethUsdGReference) {
   const reselectionV747 = reselectPersistedRawDirectionalWatchesV747(state, latestNumber);
   const singlePoolAdmissionV754 = retireStaleSinglePoolRawWatchesV754(state, latestNumber);
@@ -76165,6 +76250,37 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
     if (rawOnlyV740) {
       telemetryV741.rawHandoffAttempts =
         safeNumber(telemetryV741?.rawHandoffAttempts) + 1;
+      telemetryV741.updatedAt = now;
+
+      const admissionV755 = rawWatchCurrentActivityAdmissionV755(
+        state,
+        candidate,
+        latestNumber
+      );
+      candidate.rawWatchCurrentActivityAdmissionV755 = admissionV755;
+      telemetryV741.rawAdmissionEvaluatedV755 =
+        safeNumber(telemetryV741?.rawAdmissionEvaluatedV755) + 1;
+      if (admissionV755?.passes !== true) {
+        telemetryV741.rawAdmissionRejectedV755 =
+          safeNumber(telemetryV741?.rawAdmissionRejectedV755) + 1;
+        telemetryV741.lastRawAdmissionRejectV755 = {
+          at:now,
+          tokenAddress:normalize(candidate?.address) || null,
+          poolId:normalize(candidate?.onChainPoolIdentityV153?.poolId) || null,
+          admission:admissionV755
+        };
+        telemetryV741.updatedAt = now;
+        poolWatchTelemetryRejectV741(state, "RAW_CURRENT_ACTIVITY_NOT_PROVEN_V755");
+        continue;
+      }
+      telemetryV741.rawAdmissionAcceptedV755 =
+        safeNumber(telemetryV741?.rawAdmissionAcceptedV755) + 1;
+      telemetryV741.lastRawAdmissionAcceptV755 = {
+        at:now,
+        tokenAddress:normalize(candidate?.address) || null,
+        poolId:normalize(candidate?.onChainPoolIdentityV153?.poolId) || null,
+        reasons:Array.isArray(admissionV755?.reasons) ? admissionV755.reasons : []
+      };
       telemetryV741.updatedAt = now;
     }
     const poolSpecificSwapsV555 =
@@ -76220,6 +76336,8 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
         ? (quoteEligibility?.basis || existing.quoteBasis || null)
         : (existing.quoteBasis || null);
       existing.rawOnlyV740 = rawOnlyV740;
+      existing.rawWatchCurrentActivityAdmissionV755 =
+        rawOnlyV740 ? (candidate?.rawWatchCurrentActivityAdmissionV755 || existing.rawWatchCurrentActivityAdmissionV755 || null) : null;
       existing.currency0V740 = normalize(identity?.currency0V740) || existing.currency0V740 || null;
       existing.currency1V740 = normalize(identity?.currency1V740) || existing.currency1V740 || null;
       existing.lastQualifiedAt = now;
@@ -76293,6 +76411,8 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       quoteTokenAddress:quoteTokenAddress || null,
       quoteBasis:quoteEligibility?.eligible === true ? (quoteEligibility?.basis || null) : null,
       rawOnlyV740,
+      rawWatchCurrentActivityAdmissionV755:
+        rawOnlyV740 ? (candidate?.rawWatchCurrentActivityAdmissionV755 || null) : null,
       currency0V740:normalize(identity?.currency0V740) || null,
       currency1V740:normalize(identity?.currency1V740) || null,
       rawSwapLogsV740:0,
@@ -77951,6 +78071,7 @@ function poolWatchDiagnosticTelegramV741(state) {
     `Registration candidates seen: <b>${safeNumber(t.registrationCandidatesSeen)}</b>`,
     `Unpriceable-quote raw handoff attempts: <b>${safeNumber(t.rawHandoffAttempts)}</b>`,
     `Raw registered / refreshed: <b>${safeNumber(t.rawRegistered)} / ${safeNumber(t.rawRefreshed)}</b>`,
+    `V755 raw activity admission: evaluated <b>${safeNumber(t.rawAdmissionEvaluatedV755)}</b> · accepted <b>${safeNumber(t.rawAdmissionAcceptedV755)}</b> · rejected <b>${safeNumber(t.rawAdmissionRejectedV755)}</b>`,
     `Standard registered / refreshed: <b>${safeNumber(t.standardRegistered)} / ${safeNumber(t.standardRefreshed)}</b>`,
     `Pruned expired / invalid / capacity: <b>${safeNumber(t.prunedExpired)} / ${safeNumber(t.prunedInvalidIdentity)} / ${safeNumber(t.prunedCapacity)}</b>`,
     `Telemetry since: <code>${escapeHtml(fmtTime(t.startedAt))}</code>`,
@@ -78015,6 +78136,7 @@ function poolWatchDiagnosticTelegramV741(state) {
       lines.push(
         `• <b>${escapeHtml(row?.symbol || "TOKEN")}</b> ${escapeHtml(tokenShort)} | pool <code>${escapeHtml(poolShort)}</code>`,
         `  ranges ${safeNumber(row?.successfulRanges)} · swaps ${safeNumber(row?.rawSwapLogsV740)} (${safeNumber(row?.rawBuySwapsV740)}B/${safeNumber(row?.rawSellSwapsV740)}S) · rejected ${safeNumber(row?.rawDecodeRejectedV740)}`,
+      `  V755 admission ${row?.rawWatchCurrentActivityAdmissionV755?.passes === true ? "PASS" : "LEGACY/UNVERIFIED"}${Array.isArray(row?.rawWatchCurrentActivityAdmissionV755?.reasons) && row.rawWatchCurrentActivityAdmissionV755.reasons.length ? ` · ${row.rawWatchCurrentActivityAdmissionV755.reasons.join(",")}` : ""}`,
         `  last swap ${escapeHtml(fmtTime(row?.lastRawSwapAtV740))} · block ${escapeHtml(String(row?.lastCollectedBlock ?? "UNVERIFIED"))}`,
         `  status ${escapeHtml(row?.lastStatus || "UNVERIFIED")}`
       );
