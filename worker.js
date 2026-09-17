@@ -1,7 +1,13 @@
 /**
- * Robinhood Chain Meme Hunter — V749
- * AUTHORITATIVE RUNTIME VERSION: V749
+ * Robinhood Chain Meme Hunter — V750
+ * AUTHORITATIVE RUNTIME VERSION: V750
  *
+ *
+ * V750 POOLMATCH TELEGRAM CHUNKING FIX — TRANSPORT ONLY:
+ * - Preserves all V749 scanner/selection/freshness/collector/scoring behavior.
+ * - Routes /poolmatch and /poolidentity through the existing proven line-safe V292 Telegram chunk sender.
+ * - Fixes silent HTTP 400 failures when expanded V749 pool diagnostics exceed Telegram's single-message limit.
+ * - Zero provider/RPC requests, zero scanner-budget changes, zero scoring/qualification changes.
  *
  * V749 FRESH ACTIVE-POOL GATE — NO REQUEST/SCORING CHANGE:
  * - Fixes V748 proof that a uniquely latest retained pool can still be ~10M blocks stale versus the current chain head.
@@ -6594,7 +6600,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V749";
+const VERSION = "V750";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -147325,7 +147331,9 @@ async function telegramCommandReplyV271(
     parsed.command === "/learning" ||
     parsed.command === "/signallearn" ||
     parsed.command === "/launchcoverage" ||
-    parsed.command === "/coverage";
+    parsed.command === "/coverage" ||
+    parsed.command === "/poolmatch" ||
+    parsed.command === "/poolidentity";
 
   if (isFreshAnalyseV352) {
     await telegramAnalyseCheckpointV352(
