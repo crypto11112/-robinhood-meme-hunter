@@ -1,6 +1,15 @@
 /**
- * Robinhood Chain Meme Hunter — V739
- * AUTHORITATIVE RUNTIME VERSION: V739
+ * Robinhood Chain Meme Hunter — V740
+ * AUTHORITATIVE RUNTIME VERSION: V740
+
+ * V740 RAW EXACT-POOL FORWARD WATCH — EVIDENCE COMPLETION, NO SCORE CHANGE:
+ * - Separates exact V4 pool identity from USD-quote eligibility.
+ * - If a token has exactly one structurally valid watched V4 PoolId, that PoolId may be verified for raw forward-only activity even when its counter-token is not yet V254 USD-priceable.
+ * - Existing V732/V735 provider-corroborated exact PoolIds can use the same raw-only handoff when their quote is not USD-priceable.
+ * - Raw watches collect only future exact-pool Swap rows: buy/sell direction plus raw token/quote amounts and bounded counters. They DO NOT create USD values, Momentum points, Opportunity points, launch-age evidence, whale evidence, or historical backfill.
+ * - Once the quote later becomes V254-priceable, subsequent ranges automatically return to the existing exact-USD V551/V254 path. Earlier raw-only ranges are not retroactively promoted to USD.
+ * - Multiple non-canonical pools are never guessed: without provider corroboration they remain unresolved.
+ * - Hard global request cap remains 42; no Telegram threshold, scoring, provider ordering, or qualification gate is changed.
  *
  * V739 COINMARKETCAP FREE MARKET FALLBACK + USAGE METER
  * - Builds directly forward from V738.
@@ -6504,7 +6513,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V739";
+const VERSION = "V740";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -47911,41 +47920,46 @@ function onChainPoolIdentityV153(
       : [];
 
   const matches = [];
+  const structuralMatchesV740 = [];
 
   for (const pool of pools) {
-    const poolId =
-      normalize(pool?.poolId);
-
-    const currency0 =
-      normalize(pool?.currency0);
-
-    const currency1 =
-      normalize(pool?.currency1);
+    const poolId = normalize(pool?.poolId);
+    const currency0 = normalize(pool?.currency0);
+    const currency1 = normalize(pool?.currency1);
 
     if (
-      !/^0x[0-9a-f]{64}$/.test(
-        String(poolId || "")
-      ) ||
+      !/^0x[0-9a-f]{64}$/.test(String(poolId || "")) ||
       !isAddress(currency0) ||
-      !isAddress(currency1)
+      !isAddress(currency1) ||
+      currency0 === currency1
     ) {
       continue;
     }
 
-    const tokenIs0 =
-      currency0 === token;
-
-    const tokenIs1 =
-      currency1 === token;
+    const tokenIs0 = currency0 === token;
+    const tokenIs1 = currency1 === token;
 
     if (!tokenIs0 && !tokenIs1) {
       continue;
     }
 
-    const quoteToken =
-      tokenIs0
-        ? currency1
-        : currency0;
+    const quoteToken = tokenIs0 ? currency1 : currency0;
+
+    structuralMatchesV740.push({
+      verified: true,
+      status: "ONCHAIN_V4_POOL_IDENTITY_STRUCTURALLY_VERIFIED_V740",
+      source: "UNISWAP_V4_INITIALIZE_POOL_ID_V740",
+      poolId,
+      pairAddress: poolId,
+      candidateAddress: token,
+      quoteTokenAddress: quoteToken,
+      nativeQuote: quoteToken === ZERO,
+      candidateCurrencyIndexV740: tokenIs0 ? 0 : 1,
+      currency0V740: currency0,
+      currency1V740: currency1,
+      blockNumber: pool?.blockNumber || null,
+      transactionHash: pool?.transactionHash || null
+    });
 
     const quoteVerified =
       quoteToken === ZERO ||
@@ -47957,69 +47971,96 @@ function onChainPoolIdentityV153(
 
     matches.push({
       verified: true,
-      status:
-        "ONCHAIN_V4_POOL_IDENTITY_VERIFIED",
-      source:
-        "UNISWAP_V4_INITIALIZE_POOL_ID",
+      status: "ONCHAIN_V4_POOL_IDENTITY_VERIFIED",
+      source: "UNISWAP_V4_INITIALIZE_POOL_ID",
       poolId,
       pairAddress: poolId,
       candidateAddress: token,
       quoteTokenAddress: quoteToken,
-      nativeQuote:
-        quoteToken === ZERO,
-      /*
-       * For candidate/known-quote Gecko V4 pools the candidate is represented
-       * as the base asset. This is only asserted for deterministic quote pools.
-       */
+      nativeQuote: quoteToken === ZERO,
       targetTokenSide: "BASE",
-      blockNumber:
-        pool?.blockNumber || null,
-      transactionHash:
-        pool?.transactionHash || null
+      candidateCurrencyIndexV740: tokenIs0 ? 0 : 1,
+      currency0V740: currency0,
+      currency1V740: currency1,
+      blockNumber: pool?.blockNumber || null,
+      transactionHash: pool?.transactionHash || null
     });
   }
 
-  if (!matches.length) {
-    const currentProviderIdentityV732 =
-      exactGeckoProviderPoolIdentityV732(
-        watched,
-        market
-      );
+  if (matches.length) {
+    matches.sort(
+      (a, b) =>
+        safeNumber(b?.blockNumber) -
+        safeNumber(a?.blockNumber)
+    );
 
-    if (
-      currentProviderIdentityV732?.verified === true
-    ) {
-      persistProviderPoolIdentityV732(
-        watched,
-        currentProviderIdentityV732
-      );
+    return matches[0];
+  }
 
-      return currentProviderIdentityV732;
-    }
+  /*
+   * Preserve the stronger provider-corroborated bridge first. It can
+   * disambiguate a specific pool even when several initialized pools exist.
+   */
+  const currentProviderIdentityV732 =
+    exactGeckoProviderPoolIdentityV732(
+      watched,
+      market
+    );
 
-    const persistedProviderIdentityV732 =
-      persistedProviderPoolIdentityV732(
-        watched
-      );
+  if (currentProviderIdentityV732?.verified === true) {
+    persistProviderPoolIdentityV732(
+      watched,
+      currentProviderIdentityV732
+    );
 
-    if (persistedProviderIdentityV732) {
-      return persistedProviderIdentityV732;
-    }
+    return currentProviderIdentityV732;
+  }
 
+  const persistedProviderIdentityV732 =
+    persistedProviderPoolIdentityV732(
+      watched
+    );
+
+  if (persistedProviderIdentityV732) {
+    return persistedProviderIdentityV732;
+  }
+
+  /*
+   * V740: if and only if exactly one structurally valid on-chain V4 pool is
+   * known for this candidate, the PoolId itself is deterministic. The quote
+   * is NOT promoted to USD trust. This identity is raw-activity-only until
+   * V254 can independently price the quote.
+   */
+  if (structuralMatchesV740.length === 1) {
+    const only = structuralMatchesV740[0];
     return {
-      verified: false,
-      status:
-        "NO_KNOWN_QUOTE_V4_POOL"
+      ...only,
+      verified: true,
+      status: "UNIQUE_ONCHAIN_V4_POOL_IDENTITY_RAW_ONLY_V740",
+      source: "UNISWAP_V4_INITIALIZE_UNIQUE_POOL_RAW_ONLY_V740",
+      rawActivityOnlyV740: true,
+      usdQuoteVerifiedV740: false,
+      proofV740:
+        "EXACTLY_ONE_STRUCTURALLY_VALID_INITIALIZED_V4_POOL_FOR_CANDIDATE_NO_USD_QUOTE_CLAIM"
     };
   }
 
-  matches.sort(
-    (a, b) =>
-      safeNumber(b?.blockNumber) -
-      safeNumber(a?.blockNumber)
-  );
+  if (structuralMatchesV740.length > 1) {
+    return {
+      verified: false,
+      status: "MULTIPLE_NONCANONICAL_V4_POOLS_REQUIRE_DISAMBIGUATION_V740",
+      structuralPoolCountV740: structuralMatchesV740.length,
+      poolIdsV740: structuralMatchesV740
+        .map(row => normalize(row?.poolId))
+        .filter(Boolean)
+        .slice(0, 8)
+    };
+  }
 
-  return matches[0];
+  return {
+    verified: false,
+    status: "NO_KNOWN_QUOTE_V4_POOL"
+  };
 }
 
 function activityForToken(
@@ -74504,6 +74545,7 @@ function pruneDirectionalWatchV551(state) {
     if (safeNumber(row?.successfulRanges) > 0) return 3;
     if (row?.activePoolEvidenceV555 === true) return 2;
     if (row?.recentExactPoolSeedV556 === true) return 1;
+    if (row?.rawOnlyV740 === true) return 1;
     return 0;
   };
 
@@ -74609,7 +74651,7 @@ function pruneDirectionalWatchV551(state) {
       }))
       .slice(0,12),
     policy:
-      "EVER_CAUGHT_UP_THEN_CONTINUOUS_EXACT_USD_THEN_V466_PRIOR_COMPLETION_THEN_V573_RECOVERY_THEN_CONTIGUOUS_RANGES_THEN_ACTIVE_RECENCY"
+      "EVER_CAUGHT_UP_THEN_CONTINUOUS_EXACT_USD_OR_RAW_RANGE_THEN_V466_PRIOR_COMPLETION_THEN_V573_RECOVERY_THEN_CONTIGUOUS_RANGES_THEN_ACTIVE_OR_RAW_RECENCY"
   };
 
   root.updatedAt = now;
@@ -75038,6 +75080,94 @@ function verifiedObservedWatchCandidatesV570(
   return out;
 }
 
+
+function decodeRawExactPoolSwapV740(state, row, watchRow) {
+  const poolId = normalize(row?.topics?.[1]);
+  const expectedPoolId = normalize(watchRow?.poolId);
+  const token = normalize(watchRow?.tokenAddress || watchRow?.address);
+  const quote = normalize(watchRow?.quoteTokenAddress);
+
+  if (
+    normalize(row?.topics?.[0]) !== SWAP_TOPIC ||
+    !/^0x[a-f0-9]{64}$/.test(String(poolId || "")) ||
+    poolId !== expectedPoolId ||
+    !isAddress(token) ||
+    !isAddress(quote) ||
+    token === quote
+  ) {
+    return {verified:false,status:"RAW_IDENTITY_MISMATCH_V740"};
+  }
+
+  const registryPool = state?.poolRegistry?.[poolId] || null;
+  let currency0 = normalize(registryPool?.currency0 || watchRow?.currency0V740);
+  let currency1 = normalize(registryPool?.currency1 || watchRow?.currency1V740);
+  let identitySourceV740 =
+    isAddress(currency0) && isAddress(currency1)
+      ? "POOL_REGISTRY_OR_VERIFIED_WATCH_CURRENCIES_V740"
+      : null;
+
+  if (!isAddress(currency0) || !isAddress(currency1)) {
+    try {
+      if (BigInt(token) < BigInt(quote)) {
+        currency0 = token;
+        currency1 = quote;
+      } else {
+        currency0 = quote;
+        currency1 = token;
+      }
+      identitySourceV740 = "EXACT_WATCH_ADDRESS_SORT_V740";
+    } catch {
+      return {verified:false,status:"RAW_CURRENCY_IDENTITY_UNAVAILABLE_V740"};
+    }
+  }
+
+  const tokenIs0 = currency0 === token && currency1 === quote;
+  const tokenIs1 = currency1 === token && currency0 === quote;
+  if (!tokenIs0 && !tokenIs1) {
+    return {verified:false,status:"RAW_POOL_CURRENCY_SET_MISMATCH_V740"};
+  }
+
+  const amount0 = decodeSignedInt128WordV179(abiWordV179(row?.data, 0));
+  const amount1 = decodeSignedInt128WordV179(abiWordV179(row?.data, 1));
+
+  if (
+    amount0 === null || amount1 === null ||
+    amount0 === 0n || amount1 === 0n ||
+    ((amount0 > 0n && amount1 > 0n) || (amount0 < 0n && amount1 < 0n))
+  ) {
+    return {verified:false,status:"RAW_SWAP_DELTA_INVALID_V740"};
+  }
+
+  const candidateDelta = tokenIs0 ? amount0 : amount1;
+  const quoteDelta = tokenIs0 ? amount1 : amount0;
+  const side = candidateDelta < 0n ? "buy" : "sell";
+  const directionConsistent =
+    (side === "buy" && quoteDelta > 0n) ||
+    (side === "sell" && quoteDelta < 0n);
+
+  if (!directionConsistent) {
+    return {verified:false,status:"RAW_DIRECTION_INCONSISTENT_V740"};
+  }
+
+  return {
+    verified:true,
+    status:"RAW_EXACT_POOL_SWAP_DIRECTION_VERIFIED_V740",
+    poolId,
+    candidateAddress:token,
+    quoteTokenAddress:quote,
+    side,
+    candidateRawAmount:absBigIntV179(candidateDelta).toString(),
+    quoteRawAmount:absBigIntV179(quoteDelta).toString(),
+    candidateCurrencyIndexV740:tokenIs0 ? 0 : 1,
+    currencyIdentitySourceV740,
+    blockNumber:blockNumberFromAnyV180(row?.blockNumber ?? row?.block_number),
+    transactionHash:normalize(row?.transactionHash ?? row?.transaction_hash ?? row?.hash) || null,
+    logIndex:String(row?.logIndex ?? row?.log_index ?? "") || null,
+    exactUsdVerified:false,
+    exactUsdAmount:null
+  };
+}
+
 function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber, wethUsdGReference) {
   const root = pruneDirectionalWatchV551(state);
   const now = Date.now();
@@ -75067,6 +75197,9 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
     const poolId = normalize(identity?.poolId);
     const quoteTokenAddress = normalize(identity?.quoteTokenAddress);
     const quoteEligibility = v254PriceableQuote(quoteTokenAddress, wethUsdGReference);
+    const rawOnlyV740 =
+      quoteEligibility?.eligible !== true &&
+      candidate?.rawExactPoolWatchV740?.verified === true;
     const poolSpecificSwapsV555 =
       candidate?.activity?.poolSpecific === true
         ? Math.max(0, safeNumber(candidate?.activity?.swaps))
@@ -75088,7 +75221,8 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
     if (
       !isAddress(token) ||
       !/^0x[a-f0-9]{64}$/.test(String(poolId || "")) ||
-      quoteEligibility?.eligible !== true ||
+      !isAddress(quoteTokenAddress) ||
+      (quoteEligibility?.eligible !== true && !rawOnlyV740) ||
       !Number.isFinite(Number(latestNumber)) ||
       Number(latestNumber) <= 0
     ) {
@@ -75102,7 +75236,12 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
     if (existing && normalize(existing?.poolId) === poolId) {
       existing.symbol = candidate?.symbol || existing.symbol || null;
       existing.quoteTokenAddress = quoteTokenAddress || existing.quoteTokenAddress || null;
-      existing.quoteBasis = quoteEligibility?.basis || existing.quoteBasis || null;
+      existing.quoteBasis = quoteEligibility?.eligible === true
+        ? (quoteEligibility?.basis || existing.quoteBasis || null)
+        : (existing.quoteBasis || null);
+      existing.rawOnlyV740 = rawOnlyV740;
+      existing.currency0V740 = normalize(identity?.currency0V740) || existing.currency0V740 || null;
+      existing.currency1V740 = normalize(identity?.currency1V740) || existing.currency1V740 || null;
       existing.lastQualifiedAt = now;
       existing.lastOpportunityScore = safeNumber(candidate?.opportunity?.score);
       existing.lastConfidence = safeNumber(candidate?.confidence);
@@ -75120,7 +75259,9 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
           safeNumber(existing?.exactUsdTrades) === 0
         );
       existing.registrationSourceV552 =
-        candidate?.priorCompletionRecoveryV574?.verified === true
+        rawOnlyV740
+          ? "V740_VERIFIED_EXACT_POOL_RAW_ACTIVITY_HANDOFF"
+          : candidate?.priorCompletionRecoveryV574?.verified === true
           ? "PRIOR_V466_COMPLETION_WATCH_RECOVERY_V574"
           : candidate?.persistedObservedRecoveryV573?.verified === true
             ? "PERSISTED_EXACT_USD_WATCH_RECOVERY_V573"
@@ -75164,7 +75305,17 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       symbol:candidate?.symbol || null,
       poolId,
       quoteTokenAddress:quoteTokenAddress || null,
-      quoteBasis:quoteEligibility?.basis || null,
+      quoteBasis:quoteEligibility?.eligible === true ? (quoteEligibility?.basis || null) : null,
+      rawOnlyV740,
+      currency0V740:normalize(identity?.currency0V740) || null,
+      currency1V740:normalize(identity?.currency1V740) || null,
+      rawSwapLogsV740:0,
+      rawBuySwapsV740:0,
+      rawSellSwapsV740:0,
+      rawDecodeRejectedV740:0,
+      lastRawSwapAtV740:null,
+      lastRawCandidateAmountV740:null,
+      lastRawQuoteAmountV740:null,
       registeredAt:now,
       lastQualifiedAt:now,
       updatedAt:now,
@@ -75193,7 +75344,9 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       lastActivePoolEvidenceAtV555:activePoolEvidenceV555 ? now : null,
       zeroActivityDeprioritisedV555:false,
       registrationSourceV552:
-        candidate?.priorCompletionRecoveryV574?.verified === true
+        rawOnlyV740
+          ? "V740_VERIFIED_EXACT_POOL_RAW_ACTIVITY_HANDOFF"
+          : candidate?.priorCompletionRecoveryV574?.verified === true
           ? "PRIOR_V466_COMPLETION_WATCH_RECOVERY_V574"
           : candidate?.persistedObservedRecoveryV573?.verified === true
             ? "PERSISTED_EXACT_USD_WATCH_RECOVERY_V573"
@@ -75661,7 +75814,10 @@ async function advanceDirectionalWatchV551({
   const token = normalize(candidate.tokenAddress);
   const poolId = normalize(candidate.poolId);
   const quoteEligibility = v254PriceableQuote(candidate?.quoteTokenAddress, wethUsdGReference);
-  if (quoteEligibility?.eligible !== true) {
+  const rawOnlyV740 =
+    quoteEligibility?.eligible !== true &&
+    candidate?.rawOnlyV740 === true;
+  if (quoteEligibility?.eligible !== true && !rawOnlyV740) {
     candidate.lastAttemptAt = Date.now();
     candidate.lastStatus = "WATCH_QUOTE_BASIS_CURRENTLY_UNVERIFIED_V551";
     return {...base,status:candidate.lastStatus};
@@ -75869,6 +76025,128 @@ async function advanceDirectionalWatchV551({
         ...base,attempted:true,requestConsumed:true,fromBlock,toBlock,provider,
         returnedLogs:rows.length,rangeSaturated:true,
         adaptiveBlockSpan:candidate.adaptiveBlockSpan,
+        status:candidate.lastStatus
+      };
+    }
+
+    if (rawOnlyV740) {
+      const decodedRowsV740 = [];
+      const rejectedRowsV740 = [];
+
+      for (const row of rows) {
+        const decoded = decodeRawExactPoolSwapV740(
+          state,
+          row,
+          candidate
+        );
+        if (decoded?.verified === true) {
+          decodedRowsV740.push(decoded);
+        } else {
+          rejectedRowsV740.push({
+            status:decoded?.status || "RAW_DECODE_REJECTED_V740",
+            blockNumber:blockNumberFromAnyV180(row?.blockNumber ?? row?.block_number) || null,
+            transactionHash:normalize(row?.transactionHash ?? row?.transaction_hash ?? row?.hash) || null
+          });
+        }
+      }
+
+      const exactRawCoverageV740 =
+        rows.length === 0 || decodedRowsV740.length === rows.length;
+
+      if (!exactRawCoverageV740) {
+        const decodeBackoffSpanV740 = Math.max(
+          DIRECTIONAL_WATCH_MIN_BLOCK_SPAN_V551,
+          Math.min(
+            DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551,
+            Math.floor(configuredSpan / 2)
+          )
+        );
+        candidate.rawDecodeRejectedV740 =
+          safeNumber(candidate?.rawDecodeRejectedV740) + rejectedRowsV740.length;
+        candidate.adaptiveBlockSpan = decodeBackoffSpanV740;
+        candidate.lastStatus = "RAW_ROWS_NOT_ALL_DIRECTION_DECODABLE_NO_COVERAGE_ADVANCE_V740";
+        candidate.updatedAt = Date.now();
+        return {
+          ...base,
+          attempted:true,
+          requestConsumed:true,
+          fromBlock,
+          toBlock,
+          provider,
+          returnedLogs:rows.length,
+          rawOnlyV740:true,
+          rawDecodedSwapsV740:decodedRowsV740.length,
+          rawRejectedSwapsV740:rejectedRowsV740.length,
+          rawRejectedSamplesV740:rejectedRowsV740.slice(0,3),
+          coverageAdvanced:false,
+          adaptiveBlockSpan:candidate.adaptiveBlockSpan,
+          status:candidate.lastStatus
+        };
+      }
+
+      const buysV740 = decodedRowsV740.filter(row => row?.side === "buy").length;
+      const sellsV740 = decodedRowsV740.filter(row => row?.side === "sell").length;
+      const lastDecodedV740 = decodedRowsV740[decodedRowsV740.length - 1] || null;
+
+      candidate.lastCollectedBlock = toBlock;
+      candidate.coverageEndBlock = toBlock;
+      candidate.lastCollectedAt = Date.now();
+      candidate.updatedAt = Date.now();
+      candidate.lastStatus = "CONTIGUOUS_RAW_EXACT_POOL_RANGE_VERIFIED_V740";
+      candidate.successfulRanges = safeNumber(candidate?.successfulRanges) + 1;
+      candidate.rawSwapLogsV740 = safeNumber(candidate?.rawSwapLogsV740) + decodedRowsV740.length;
+      candidate.rawBuySwapsV740 = safeNumber(candidate?.rawBuySwapsV740) + buysV740;
+      candidate.rawSellSwapsV740 = safeNumber(candidate?.rawSellSwapsV740) + sellsV740;
+      candidate.rawDecodeRejectedV740 = safeNumber(candidate?.rawDecodeRejectedV740);
+      candidate.lastRawSwapAtV740 = decodedRowsV740.length ? Date.now() : (candidate?.lastRawSwapAtV740 || null);
+      candidate.lastRawCandidateAmountV740 = lastDecodedV740?.candidateRawAmount || candidate?.lastRawCandidateAmountV740 || null;
+      candidate.lastRawQuoteAmountV740 = lastDecodedV740?.quoteRawAmount || candidate?.lastRawQuoteAmountV740 || null;
+      candidate.lastRangeReturnedLogsV566 = rows.length;
+      candidate.lastDensitySpanAttemptV566 = configuredSpan;
+      candidate.gapDetected = false;
+
+      if (rows.length <= 50) {
+        candidate.adaptiveBlockSpan = Math.min(
+          DIRECTIONAL_WATCH_MAX_BLOCK_SPAN_V566,
+          Math.max(DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551, configuredSpan)
+        );
+      } else if (rows.length <= 200) {
+        candidate.adaptiveBlockSpan = Math.min(2400, configuredSpan);
+      } else if (rows.length <= 500) {
+        candidate.adaptiveBlockSpan = Math.min(1200, configuredSpan);
+      } else {
+        candidate.adaptiveBlockSpan = DIRECTIONAL_WATCH_DEFAULT_BLOCK_SPAN_V551;
+      }
+
+      if (toBlock >= head) {
+        candidate.everCaughtUpV565 = true;
+        candidate.firstCaughtUpAtV565 = safeNumber(candidate?.firstCaughtUpAtV565) || Date.now();
+        candidate.lastCaughtUpAtV565 = Date.now();
+      }
+
+      root.updatedAt = Date.now();
+
+      return {
+        ...base,
+        attempted:true,
+        requestConsumed:true,
+        provider,
+        fromBlock,
+        toBlock,
+        returnedLogs:rows.length,
+        exactUsdTrades:0,
+        rawOnlyV740:true,
+        rawDecodedSwapsV740:decodedRowsV740.length,
+        rawBuySwapsV740:buysV740,
+        rawSellSwapsV740:sellsV740,
+        rawCandidateAmountsAreIntegerBaseUnitsV740:true,
+        usdValuesCreatedV740:false,
+        historicalBackfillV740:false,
+        coverageAdvanced:true,
+        coverageStartBlock:candidate?.coverageStartBlock ?? null,
+        coverageEndBlock:candidate?.coverageEndBlock ?? null,
+        blocksRemainingToHead:Math.max(0, head - toBlock),
+        adaptiveBlockSpan:candidate?.adaptiveBlockSpan || configuredSpan,
         status:candidate.lastStatus
       };
     }
@@ -76100,6 +76378,12 @@ function directionalWatchSnapshotV551(state) {
       adaptiveBlockSpan:safeNumber(row?.adaptiveBlockSpan),
       successfulRanges:safeNumber(row?.successfulRanges),
       exactUsdTrades:safeNumber(row?.exactUsdTrades),
+      rawOnlyV740:row?.rawOnlyV740 === true,
+      rawSwapLogsV740:safeNumber(row?.rawSwapLogsV740),
+      rawBuySwapsV740:safeNumber(row?.rawBuySwapsV740),
+      rawSellSwapsV740:safeNumber(row?.rawSellSwapsV740),
+      rawDecodeRejectedV740:safeNumber(row?.rawDecodeRejectedV740),
+      lastRawSwapAtV740:row?.lastRawSwapAtV740 || null,
       everCaughtUpV565:row?.everCaughtUpV565 === true,
       firstCaughtUpAtV565:safeNumber(row?.firstCaughtUpAtV565) || null,
       lastCaughtUpAtV565:safeNumber(row?.lastCaughtUpAtV565) || null,
@@ -76141,7 +76425,7 @@ function directionalWatchSnapshotV551(state) {
     sameTokenMultiPoolSupportedV563:true,
     migrationV563:root?.lastKeyMigrationV563 || null,
     retentionPolicyV565:
-      "EVER_CAUGHT_UP_THEN_CONTINUOUS_EXACT_USD_THEN_V466_PRIOR_COMPLETION_THEN_V573_RECOVERY_THEN_CONTIGUOUS_RANGES_THEN_ACTIVE_RECENCY",
+      "EVER_CAUGHT_UP_THEN_CONTINUOUS_EXACT_USD_OR_RAW_RANGE_THEN_V466_PRIOR_COMPLETION_THEN_V573_RECOVERY_THEN_CONTIGUOUS_RANGES_THEN_ACTIVE_OR_RAW_RECENCY",
     lastPruneV565:root?.lastPruneV565 || null,
     watchedCount:entries.length,
     maxEntries:DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
@@ -96091,10 +96375,59 @@ for (
       )
       .slice(0, 2);
 
+  /*
+   * V740: exact PoolId watching no longer depends on immediate USD-quote
+   * priceability. Only already-verified exact identities enter this lane.
+   * For an unpriceable quote, the watch is explicitly raw-only and cannot
+   * create USD evidence or scoring credit.
+   */
+  const directionalQuoteReferenceV740 =
+    onChainDirectionalV179?.wethUsdGReferenceV187 ||
+    bestVerifiedWethUsdGReferenceV195(state);
+
+  const directionalRawExactPoolCandidatesV740 =
+    (Array.isArray(candidates) ? candidates : [])
+      .filter(candidate => {
+        const identity = candidate?.onChainPoolIdentityV153 || {};
+        const poolId = normalize(identity?.poolId);
+        const quoteTokenAddress = normalize(identity?.quoteTokenAddress);
+        const quoteEligibility = v254PriceableQuote(
+          quoteTokenAddress,
+          directionalQuoteReferenceV740
+        );
+        return (
+          candidate?.validERC20 === true &&
+          identity?.verified === true &&
+          /^0x[a-f0-9]{64}$/.test(String(poolId || "")) &&
+          isAddress(quoteTokenAddress) &&
+          quoteEligibility?.eligible !== true
+        );
+      })
+      .sort((a,b) =>
+        safeNumber(b?.analysisPriority) - safeNumber(a?.analysisPriority) ||
+        safeNumber(b?.opportunity?.score) - safeNumber(a?.opportunity?.score)
+      )
+      .slice(0, 3)
+      .map(candidate => ({
+        ...candidate,
+        rawExactPoolWatchV740:{
+          verified:true,
+          poolId:normalize(candidate?.onChainPoolIdentityV153?.poolId),
+          quoteTokenAddress:normalize(candidate?.onChainPoolIdentityV153?.quoteTokenAddress),
+          identitySource:candidate?.onChainPoolIdentityV153?.source || null,
+          identityStatus:candidate?.onChainPoolIdentityV153?.status || null,
+          rawActivityOnly:true,
+          usdQuoteVerified:false,
+          forwardOnly:true,
+          historicalBackfill:false
+        }
+      }));
+
   const directionalWatchRegistrationCandidatesV555 = [
     ...directionalPriorCompletionRecoveryCandidatesV574,
     ...directionalPersistedRecoveryCandidatesV573,
     ...directionalObservedExactPoolCandidatesV570,
+    ...directionalRawExactPoolCandidatesV740,
     ...directionalActiveExactPoolCandidatesV555,
     ...directionalProviderCorroboratedExactPoolCandidatesV737,
     ...completeExactPoolCandidatesV458
@@ -96131,6 +96464,33 @@ for (
       forwardOnlyStartRequired:true
     })),
     externalRequestsAdded:0,
+    historicalBackfill:false,
+    hardGlobalLimitUnchanged:42,
+    telegramThresholdsChanged:false
+  };
+
+  directionalWatchRegistrationV551.v740RawExactPoolHandoff = {
+    enabled:true,
+    considered:directionalRawExactPoolCandidatesV740.length,
+    rows:directionalRawExactPoolCandidatesV740.map(candidate => ({
+      address:normalize(candidate?.address),
+      symbol:candidate?.symbol || null,
+      poolId:normalize(candidate?.onChainPoolIdentityV153?.poolId) || null,
+      quoteTokenAddress:normalize(candidate?.onChainPoolIdentityV153?.quoteTokenAddress) || null,
+      identityStatus:candidate?.onChainPoolIdentityV153?.status || null,
+      identitySource:candidate?.onChainPoolIdentityV153?.source || null,
+      providerCorroboratedV732:candidate?.onChainPoolIdentityV153?.providerCorroboratedV732 === true,
+      uniqueOnChainRawOnlyV740:candidate?.onChainPoolIdentityV153?.rawActivityOnlyV740 === true,
+      usdQuotePriceableAtRegistration:false,
+      forwardOnlyStartRequired:true
+    })),
+    rawSwapDirectionOnlyUntilUsdQuoteVerified:true,
+    rawAmountsRemainIntegerBaseUnits:true,
+    createsUsdEvidence:false,
+    createsMomentumEvidence:false,
+    scoringChanged:false,
+    qualificationChanged:false,
+    externalRequestsAddedByRegistration:0,
     historicalBackfill:false,
     hardGlobalLimitUnchanged:42,
     telegramThresholdsChanged:false
