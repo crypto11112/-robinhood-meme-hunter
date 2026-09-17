@@ -1,7 +1,14 @@
 /**
- * Robinhood Chain Meme Hunter — V751
- * AUTHORITATIVE RUNTIME VERSION: V751
+ * Robinhood Chain Meme Hunter — V752
+ * AUTHORITATIVE RUNTIME VERSION: V752
  *
+ *
+ * V752 REGISTRATION-SWAP FRESHNESS FIX — NO REQUEST/SCORING CHANGE:
+ * - Fixes V751 allowing stale pool-specific swap counts captured at registration to protect a single-pool raw watch merely because the candidate was refreshed recently.
+ * - Registration-swap protection now requires the selected pool itself to have retained Swap evidence inside the existing 12,000-block V254/V749 freshness window. A recent timestamp alone is not sufficient.
+ * - Single-pool watches still receive the V744 fair first successful range. Provider-corroborated identities and watches with real captured raw swaps remain protected.
+ * - No new RPC/provider request, no historical backfill, no USD promotion, no scoring/qualification change, and hard request cap remains 42.
+ * - /poolmatch reports V752 single-pool admission/retirement telemetry.
  *
  * V751 SINGLE-POOL RAW WATCH FIRST-RANGE ADMISSION — NO REQUEST/SCORING CHANGE:
  * - Extends the V749 stale-evidence protection to raw-only tokens with exactly one canonical PoolId, without blocking the initial forward-only probe.
@@ -6607,7 +6614,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V751";
+const VERSION = "V752";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -75075,10 +75082,10 @@ function reselectPersistedRawDirectionalWatchesV747(state, latestNumber) {
   };
 }
 
-function retireStaleSinglePoolRawWatchesV751(state, latestNumber) {
+function retireStaleSinglePoolRawWatchesV752(state, latestNumber) {
   const head = Number(latestNumber);
   if (!Number.isFinite(head) || head <= 0) {
-    return {enabled:true,evaluated:0,retired:0,status:"LATEST_BLOCK_INVALID_V751"};
+    return {enabled:true,evaluated:0,retired:0,status:"LATEST_BLOCK_INVALID_V752"};
   }
 
   const root = directionalWatchRootV551(state);
@@ -75164,22 +75171,30 @@ function retireStaleSinglePoolRawWatchesV751(state, latestNumber) {
       retainedSwapGap <= RAW_MULTI_POOL_FRESH_SWAP_BLOCKS_V749;
 
     const registrationEvidenceAt = safeNumber(row?.lastActivePoolEvidenceAtV555);
-    const recentRegistrationSwap =
-      row?.activePoolEvidenceV555 === true &&
-      safeNumber(row?.poolSpecificSwapsV555) > 0 &&
+    const registrationTimestampFreshV752 =
       registrationEvidenceAt > 0 &&
       now - registrationEvidenceAt <= recentRegistrationMsV751;
+    /*
+     * V752: a recently-refreshed candidate must not turn an old registration
+     * swap count into "recent" evidence. The selected pool itself must have
+     * retained Swap evidence inside the same 12,000-block freshness window.
+     */
+    const recentRegistrationSwapV752 =
+      row?.activePoolEvidenceV555 === true &&
+      safeNumber(row?.poolSpecificSwapsV555) > 0 &&
+      registrationTimestampFreshV752 &&
+      freshRetainedSwap;
 
-    if (freshRetainedSwap || recentRegistrationSwap) {
+    if (freshRetainedSwap || recentRegistrationSwapV752) {
       protectedRecentEvidence++;
       continue;
     }
 
     delete root.entries[watchKey];
     retired++;
-    telemetry.staleSinglePoolRetiredV751 =
-      safeNumber(telemetry?.staleSinglePoolRetiredV751) + 1;
-    telemetry.lastStaleSinglePoolRetirementV751 = {
+    telemetry.staleSinglePoolRetiredV752 =
+      safeNumber(telemetry?.staleSinglePoolRetiredV752) + 1;
+    telemetry.lastStaleSinglePoolRetirementV752 = {
       at:now,
       tokenAddress:token,
       poolId:selectedPoolId,
@@ -75187,16 +75202,17 @@ function retireStaleSinglePoolRawWatchesV751(state, latestNumber) {
       rawSwapLogs:safeNumber(row?.rawSwapLogsV740),
       retainedSwapBlock:retainedSwapBlock || null,
       retainedSwapGapBlocks:retainedSwapGap,
-      recentRegistrationSwapEvidence:false,
+      registrationTimestampFreshV752,
+      recentRegistrationSwapEvidenceV752:false,
       freshSwapWindowBlocks:RAW_MULTI_POOL_FRESH_SWAP_BLOCKS_V749,
-      reason:"FIRST_RANGE_ZERO_SWAP_AND_NO_RECENT_SINGLE_POOL_SWAP_EVIDENCE_V751"
+      reason:"FIRST_RANGE_ZERO_SWAP_AND_NO_FRESH_BLOCK_VERIFIED_SINGLE_POOL_SWAP_EVIDENCE_V752"
     };
     telemetry.updatedAt = now;
-    retirements.push(telemetry.lastStaleSinglePoolRetirementV751);
+    retirements.push(telemetry.lastStaleSinglePoolRetirementV752);
   }
 
   root.updatedAt = Date.now();
-  root.lastSinglePoolAdmissionRunV751 = {
+  root.lastSinglePoolAdmissionRunV752 = {
     at:Date.now(),
     head,
     evaluated,
@@ -75965,7 +75981,7 @@ function decodeRawExactPoolSwapV740(state, row, watchRow) {
 
 function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber, wethUsdGReference) {
   const reselectionV747 = reselectPersistedRawDirectionalWatchesV747(state, latestNumber);
-  const singlePoolAdmissionV751 = retireStaleSinglePoolRawWatchesV751(state, latestNumber);
+  const singlePoolAdmissionV752 = retireStaleSinglePoolRawWatchesV752(state, latestNumber);
   const root = pruneDirectionalWatchV551(state);
   const now = Date.now();
   const telemetryV741 = poolWatchTelemetryRootV741(state);
@@ -77514,7 +77530,9 @@ function poolIdentityMatchSnapshotV745(state) {
     freshnessV749:root?.lastFreshnessRunV749 || null,
     staleMultiPoolRetiredV749:safeNumber(state?.poolWatchTelemetryV741?.staleMultiPoolRetiredV749),
     staleSinglePoolRetiredV751:safeNumber(state?.poolWatchTelemetryV741?.staleSinglePoolRetiredV751),
+    staleSinglePoolRetiredV752:safeNumber(state?.poolWatchTelemetryV741?.staleSinglePoolRetiredV752),
     singlePoolAdmissionV751:state?.directionalExactPoolWatchV551?.lastSinglePoolAdmissionRunV751 || null,
+    singlePoolAdmissionV752:state?.directionalExactPoolWatchV551?.lastSinglePoolAdmissionRunV752 || null,
     reselectionV747: state?.directionalExactPoolWatchV551?.lastReselectionRunV747 || null,
     reselectionTelemetryV747: {
       evaluated:safeNumber(state?.poolWatchTelemetryV741?.reselectionEvaluatedV747),
@@ -77554,11 +77572,12 @@ function poolIdentityMatchTelegramV745(state) {
     `V747/V749 persisted raw-watch reselections: <b>${safeNumber(s?.reselectionTelemetryV747?.migrated)}</b>`,
     `V749 freshness: head <b>${escapeHtml(String(s?.freshnessV749?.head ?? "UNVERIFIED"))}</b> · window <b>${safeNumber(s?.freshnessV749?.freshSwapWindowBlocks || RAW_MULTI_POOL_FRESH_SWAP_BLOCKS_V749)}</b> blocks · selected fresh swaps <b>${safeNumber(s?.selectedFreshSwapCountV749)}</b>`,
     `V749 stale multi-pool watches retired: <b>${safeNumber(s?.staleMultiPoolRetiredV749)}</b>`,
-    `V751 stale single-pool watches retired: <b>${safeNumber(s?.staleSinglePoolRetiredV751)}</b>`,
-    `V751 last single-pool admission: evaluated <b>${safeNumber(s?.singlePoolAdmissionV751?.evaluated)}</b> · retired <b>${safeNumber(s?.singlePoolAdmissionV751?.retired)}</b> · first-range protected <b>${safeNumber(s?.singlePoolAdmissionV751?.protectedFirstRange)}</b> · recent-evidence protected <b>${safeNumber(s?.singlePoolAdmissionV751?.protectedRecentEvidence)}</b>`,
+    `V751 historical stale single-pool watches retired: <b>${safeNumber(s?.staleSinglePoolRetiredV751)}</b>`,
+    `V752 stale single-pool watches retired: <b>${safeNumber(s?.staleSinglePoolRetiredV752)}</b>`,
+    `V752 last single-pool admission: evaluated <b>${safeNumber(s?.singlePoolAdmissionV752?.evaluated)}</b> · retired <b>${safeNumber(s?.singlePoolAdmissionV752?.retired)}</b> · first-range protected <b>${safeNumber(s?.singlePoolAdmissionV752?.protectedFirstRange)}</b> · fresh-evidence protected <b>${safeNumber(s?.singlePoolAdmissionV752?.protectedRecentEvidence)}</b>`,
     `V747 last reselection run: evaluated <b>${safeNumber(s?.reselectionV747?.evaluated)}</b> · migrated <b>${safeNumber(s?.reselectionV747?.migrated)}</b>`,
     "",
-    "ℹ️ V749 requires recent retained Swap evidence for multi-pool raw-only selection. V751 extends stale-watch retirement to single-pool raw watches only after they receive their first successful forward range and still show zero raw swaps with no recent retained/registration swap evidence. Provider-corroborated and already-proven raw-swap watches are preserved."
+    "ℹ️ V749 requires recent retained Swap evidence for multi-pool raw-only selection. V752 also requires registration-swap protection on single-pool watches to be backed by a fresh retained Swap block; a recently-refreshed stale swap count can no longer keep a dead watch alive. Provider-corroborated and already-proven raw-swap watches are preserved."
   ];
 
   if (!Array.isArray(s.rows) || !s.rows.length) {
@@ -77601,7 +77620,7 @@ function poolIdentityMatchTelegramV745(state) {
 
   lines.push(
     "",
-    "<i>Read-only /poolmatch diagnostic: zero provider/RPC requests, zero scanner-budget requests and zero state writes. V749 adds only a retained-evidence freshness gate/retirement for multi-pool raw watches; collection/scoring/qualification and hard request cap 42 remain unchanged.</i>"
+    "<i>Read-only /poolmatch diagnostic: zero provider/RPC requests, zero scanner-budget requests and zero state writes. V749/V752 add only retained-evidence freshness/admission rules for raw watches; collection/scoring/qualification and hard request cap 42 remain unchanged.</i>"
   );
   return lines.join("\n");
 }
