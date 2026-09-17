@@ -1,6 +1,16 @@
 /**
+ * Robinhood Chain Meme Hunter — V748
+ * AUTHORITATIVE RUNTIME VERSION: V748
+ *
+ * V748 RAW SWAP RANGE TRACE — DIAGNOSTIC ONLY, NO REQUEST/SCORING CHANGE:
+ * - Instruments the existing V551/V740 Blockscout exact PoolManager Swap request for raw-only watches; adds zero provider/RPC requests.
+ * - Persists the last requested from/to/head range, returned rows, Swap-topic rows, selected-PoolId topic matches, decoder inputs, decode successes/rejects and the selected pool's already-retained V746 last Swap block.
+ * - Distinguishes no current logs in the forward range from topic/PoolId filter handoff and decoder failures without changing the query, decoder, scheduler, pool selection, scoring or qualification.
+ * - /poolwatch surfaces the V748 trace and the block gap between retained Swap evidence and the forward collection range.
+ * - Hard request cap 42, watch cap 24, raw reserve 4, CMC, scoring, Telegram gates and all V742-V747 confirmed-working behavior remain unchanged.
+ *
  * Robinhood Chain Meme Hunter — V747
- * AUTHORITATIVE RUNTIME VERSION: V747
+ * HISTORICAL VERSION NOTE: V747
  *
  * V747 PERSISTED RAW-WATCH ACTIVE-POOL RESELECTION — NO REQUEST/SCORING CHANGE:
  * - Fixes the V746 deployment finding that already-persisted V742/V740 raw-only watches keep their old PoolId even when retained canonical activity proves a different pool is the unique stronger active candidate.
@@ -6577,7 +6587,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V747";
+const VERSION = "V748";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -76603,6 +76613,48 @@ async function advanceDirectionalWatchV551({
 
   candidate.lastAttemptAt = Date.now();
 
+  /*
+   * V748 diagnostic only: capture the exact existing raw-watch request range and
+   * compare it with already-retained poolRegistry Swap evidence. No new request.
+   */
+  if (rawOnlyV740) {
+    let registryEntryV748 = null;
+    const registryV748 =
+      state?.poolRegistry && typeof state.poolRegistry === "object"
+        ? state.poolRegistry
+        : {};
+    if (registryV748?.[poolId] && typeof registryV748[poolId] === "object") {
+      registryEntryV748 = registryV748[poolId];
+    } else {
+      registryEntryV748 = Object.values(registryV748).find(entry =>
+        normalize(entry?.poolId) === poolId
+      ) || null;
+    }
+    const retainedSwapBlockV748 = safeNumber(registryEntryV748?.lastSwapBlockV746) || null;
+    candidate.rawRangeTraceV748 = {
+      attemptedAt:Date.now(),
+      headBlock:head,
+      fromBlock,
+      toBlock,
+      configuredSpan,
+      coverageStartBlock:candidate?.coverageStartBlock ?? null,
+      selectedPoolId:poolId,
+      retainedSwapBlockV746:retainedSwapBlockV748,
+      retainedSwapBeforeRange:
+        retainedSwapBlockV748 != null ? retainedSwapBlockV748 < fromBlock : null,
+      blocksFromRetainedSwapToRangeStart:
+        retainedSwapBlockV748 != null ? fromBlock - retainedSwapBlockV748 : null,
+      returnedLogs:null,
+      swapTopicRows:null,
+      selectedPoolTopicMatches:null,
+      decoderInputs:null,
+      decodedSwaps:null,
+      decodeRejects:null,
+      httpStatus:null,
+      status:"REQUESTING_EXISTING_EXACT_POOL_SWAP_RANGE_V748"
+    };
+  }
+
   try {
     if(provider==="BLOCKSCOUT_PRO_UNIVERSAL_V2"){
       recordBlockscoutProUsageV611(
@@ -76619,6 +76671,12 @@ async function advanceDirectionalWatchV551({
         response.status
       );
     }
+    if (rawOnlyV740 && candidate?.rawRangeTraceV748) {
+      candidate.rawRangeTraceV748.httpStatus = response.status;
+      candidate.rawRangeTraceV748.status = response.ok
+        ? "HTTP_OK_AWAITING_ROWS_V748"
+        : `HTTP_${response.status}_V748`;
+    }
     if (!response.ok) {
       candidate.lastStatus = `BLOCKSCOUT_HTTP_${response.status}_V551`;
       candidate.updatedAt = Date.now();
@@ -76630,6 +76688,25 @@ async function advanceDirectionalWatchV551({
 
     const payload = await response.json();
     const rows = Array.isArray(payload?.result) ? payload.result : [];
+
+    if (rawOnlyV740 && candidate?.rawRangeTraceV748) {
+      const swapTopicRowsV748 = rows.filter(row =>
+        normalize(row?.topics?.[0]) === SWAP_TOPIC
+      );
+      const selectedPoolTopicMatchesV748 = swapTopicRowsV748.filter(row =>
+        normalize(row?.topics?.[1]) === poolId
+      );
+      candidate.rawRangeTraceV748.returnedLogs = rows.length;
+      candidate.rawRangeTraceV748.swapTopicRows = swapTopicRowsV748.length;
+      candidate.rawRangeTraceV748.selectedPoolTopicMatches =
+        selectedPoolTopicMatchesV748.length;
+      candidate.rawRangeTraceV748.status = rows.length === 0
+        ? "ZERO_LOGS_RETURNED_FOR_EXACT_FILTERED_RANGE_V748"
+        : selectedPoolTopicMatchesV748.length === rows.length
+          ? "ALL_RETURNED_ROWS_MATCH_SWAP_AND_SELECTED_POOL_V748"
+          : "RETURNED_ROWS_REQUIRE_FILTER_TRACE_V748";
+    }
+
     const saturated = rows.length >= BLOCKSCOUT_LOGS_MAX_ROWS_V180;
 
     candidate.returnedLogs = safeNumber(candidate?.returnedLogs) + rows.length;
@@ -76673,6 +76750,17 @@ async function advanceDirectionalWatchV551({
             transactionHash:normalize(row?.transactionHash ?? row?.transaction_hash ?? row?.hash) || null
           });
         }
+      }
+
+      if (candidate?.rawRangeTraceV748) {
+        candidate.rawRangeTraceV748.decoderInputs = rows.length;
+        candidate.rawRangeTraceV748.decodedSwaps = decodedRowsV740.length;
+        candidate.rawRangeTraceV748.decodeRejects = rejectedRowsV740.length;
+        candidate.rawRangeTraceV748.status = rows.length === 0
+          ? "NO_SWAP_ROWS_TO_DECODE_IN_FORWARD_RANGE_V748"
+          : rejectedRowsV740.length === 0
+            ? "ALL_EXACT_FILTERED_ROWS_DECODED_V748"
+            : "EXACT_FILTERED_ROWS_REJECTED_BY_DECODER_V748";
       }
 
       const exactRawCoverageV740 =
@@ -77340,7 +77428,11 @@ function poolWatchDiagnosticSnapshotV741(state) {
       rawDecodeRejectedV740:safeNumber(row?.rawDecodeRejectedV740),
       everCaughtUpV565:row?.everCaughtUpV565 === true,
       lastStatus:row?.lastStatus || null,
-      registrationSourceV552:row?.registrationSourceV552 || null
+      registrationSourceV552:row?.registrationSourceV552 || null,
+      rawRangeTraceV748:
+        row?.rawRangeTraceV748 && typeof row.rawRangeTraceV748 === "object"
+          ? row.rawRangeTraceV748
+          : null
     }));
 
   return {
@@ -77353,6 +77445,16 @@ function poolWatchDiagnosticSnapshotV741(state) {
     rawWithSwapsCount:rawWithSwaps.length,
     rawWithSuccessfulRangesCount:rawWithRanges.length,
     rawCaughtUpCount:rawCaughtUp.length,
+    traceV748:{
+      watchesWithTrace:rawEntries.filter(row => row?.rawRangeTraceV748 && typeof row.rawRangeTraceV748 === "object").length,
+      zeroLogRanges:rawEntries.filter(row => safeNumber(row?.rawRangeTraceV748?.returnedLogs) === 0 && row?.rawRangeTraceV748?.returnedLogs === 0).length,
+      rowsReturned:rawEntries.reduce((n,row)=>n+safeNumber(row?.rawRangeTraceV748?.returnedLogs),0),
+      swapTopicRows:rawEntries.reduce((n,row)=>n+safeNumber(row?.rawRangeTraceV748?.swapTopicRows),0),
+      selectedPoolTopicMatches:rawEntries.reduce((n,row)=>n+safeNumber(row?.rawRangeTraceV748?.selectedPoolTopicMatches),0),
+      decoderInputs:rawEntries.reduce((n,row)=>n+safeNumber(row?.rawRangeTraceV748?.decoderInputs),0),
+      decodedSwaps:rawEntries.reduce((n,row)=>n+safeNumber(row?.rawRangeTraceV748?.decodedSwaps),0),
+      decodeRejects:rawEntries.reduce((n,row)=>n+safeNumber(row?.rawRangeTraceV748?.decodeRejects),0)
+    },
     totals,
     telemetry:{
       startedAt:safeNumber(telemetry?.startedAt) || null,
@@ -77417,6 +77519,12 @@ function poolWatchDiagnosticTelegramV741(state) {
     `Decode rejects: <b>${safeNumber(totals.rawDecodeRejected)}</b>`,
     `Successful raw ranges: <b>${safeNumber(totals.rawSuccessfulRanges)}</b>`,
     "",
+    "🧪 <b>V748 existing-request swap trace</b>",
+    `Raw watches with trace: <b>${safeNumber(s?.traceV748?.watchesWithTrace)}</b>`,
+    `Latest traced zero-log ranges: <b>${safeNumber(s?.traceV748?.zeroLogRanges)}</b>`,
+    `Returned logs / Swap-topic rows / PoolId matches: <b>${safeNumber(s?.traceV748?.rowsReturned)} / ${safeNumber(s?.traceV748?.swapTopicRows)} / ${safeNumber(s?.traceV748?.selectedPoolTopicMatches)}</b>`,
+    `Decoder inputs / decoded / rejected: <b>${safeNumber(s?.traceV748?.decoderInputs)} / ${safeNumber(s?.traceV748?.decodedSwaps)} / ${safeNumber(s?.traceV748?.decodeRejects)}</b>`,
+    "",
     "🧪 <b>V741 forward-only handoff telemetry</b>",
     `Registration candidates seen: <b>${safeNumber(t.registrationCandidatesSeen)}</b>`,
     `Unpriceable-quote raw handoff attempts: <b>${safeNumber(t.rawHandoffAttempts)}</b>`,
@@ -77455,6 +77563,15 @@ function poolWatchDiagnosticTelegramV741(state) {
         `  last swap ${escapeHtml(fmtTime(row?.lastRawSwapAtV740))} · block ${escapeHtml(String(row?.lastCollectedBlock ?? "UNVERIFIED"))}`,
         `  status ${escapeHtml(row?.lastStatus || "UNVERIFIED")}`
       );
+      const trace = row?.rawRangeTraceV748;
+      if (trace && typeof trace === "object") {
+        lines.push(
+          `  V748 range ${escapeHtml(String(trace?.fromBlock ?? "?"))}→${escapeHtml(String(trace?.toBlock ?? "?"))} · head ${escapeHtml(String(trace?.headBlock ?? "?"))}`,
+          `  returned/swapTopic/poolMatch ${safeNumber(trace?.returnedLogs)}/${safeNumber(trace?.swapTopicRows)}/${safeNumber(trace?.selectedPoolTopicMatches)} · decoder ${safeNumber(trace?.decoderInputs)}→${safeNumber(trace?.decodedSwaps)} ok / ${safeNumber(trace?.decodeRejects)} rejected`,
+          `  retained Swap block ${escapeHtml(String(trace?.retainedSwapBlockV746 ?? "NONE"))} · gap to range ${trace?.blocksFromRetainedSwapToRangeStart == null ? "UNVERIFIED" : escapeHtml(String(trace.blocksFromRetainedSwapToRangeStart))} blocks`,
+          `  trace ${escapeHtml(trace?.status || "UNVERIFIED")}`
+        );
+      }
     }
   } else {
     lines.push("", "ℹ️ No active V740 raw-only watch rows are currently retained.");
@@ -77462,7 +77579,7 @@ function poolWatchDiagnosticTelegramV741(state) {
 
   lines.push(
     "",
-    "<i>Read-only command: zero provider requests, zero scanner-budget requests and zero state writes. V741/V744 diagnostics are measurement-only; V744 changes scheduler selection only and does not change request ceilings/scoring/qualification.</i>"
+    "<i>Read-only command: zero provider requests, zero scanner-budget requests and zero state writes. V748 trace is measurement-only and instruments the existing exact-pool request; it adds zero requests and does not change query/decoder/scheduler/scoring/qualification.</i>"
   );
   return lines.join("\n");
 }
@@ -145492,7 +145609,7 @@ function telegramHelpV271() {
     "<code>/datacoverage</code> — V734 hotfixed free-provider/data + V732 pool-bridge audit (read-only)",
     "<code>/cmctest [0xADDRESS]</code> — V738 CoinMarketCap Robinhood Chain coverage test (diagnostic only)",
     "<code>/cmcusage</code> — V739 CoinMarketCap bot-side monthly request meter (read-only)",
-    "<code>/poolwatch</code> — V741/V744 raw exact-pool watch diagnostic (read-only)",
+    "<code>/poolwatch</code> — V748 raw exact-pool range/log/decode trace diagnostic (read-only)",
     "<code>/poolmatch</code> — V747 selected-vs-provider/canonical pool activity + persisted-watch reselection diagnostic (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
