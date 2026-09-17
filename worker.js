@@ -1,6 +1,13 @@
 /**
- * Robinhood Chain Meme Hunter — V755
- * AUTHORITATIVE RUNTIME VERSION: V755
+ * Robinhood Chain Meme Hunter — V756
+ * AUTHORITATIVE RUNTIME VERSION: V756
+ *
+ * V756 RAW-WATCH ADMISSION TELEMETRY FIX — DIAGNOSTIC/PERSISTENCE ONLY:
+ * - Preserves V755 admission rules and all V742–V755 collection/selection/retirement behavior.
+ * - Adds a dedicated persisted raw-admission telemetry object so evaluated/accepted/rejected counts cannot silently remain zero while V755 rejection reasons are being recorded.
+ * - Persists the exact admission reasons and evidence snapshot on every newly accepted/refreshed raw-only watch.
+ * - /poolwatch reports V756 admission totals plus the exact accepted reason for each retained raw watch.
+ * - Adds zero provider/RPC requests, zero request slots, no scoring/qualification change, and hard request cap remains 42.
  *
  * V755 RAW-WATCH CURRENT-ACTIVITY ADMISSION — NO REQUEST/SCORING CHANGE:
  * - Prevents technically valid but inactive exact pools from consuming the four-slot raw reserve.
@@ -6639,7 +6646,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V755";
+const VERSION = "V756";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -76207,6 +76214,51 @@ function rawWatchCurrentActivityAdmissionV755(state, candidate, latestNumber) {
   };
 }
 
+function rawAdmissionTelemetryRootV756(state) {
+  if (!state.rawAdmissionTelemetryV756 || typeof state.rawAdmissionTelemetryV756 !== "object") {
+    state.rawAdmissionTelemetryV756 = {
+      schema:"RAW_WATCH_ACTIVITY_ADMISSION_TELEMETRY_V756",
+      startedAt:Date.now(),
+      updatedAt:null,
+      evaluated:0,
+      accepted:0,
+      rejected:0,
+      acceptedReasons:{},
+      rejectedReasons:{},
+      lastAccepted:null,
+      lastRejected:null
+    };
+  }
+  const t = state.rawAdmissionTelemetryV756;
+  t.acceptedReasons = t.acceptedReasons && typeof t.acceptedReasons === "object" ? t.acceptedReasons : {};
+  t.rejectedReasons = t.rejectedReasons && typeof t.rejectedReasons === "object" ? t.rejectedReasons : {};
+  return t;
+}
+
+function rawAdmissionRecordV756(state, admission, accepted, candidate) {
+  const t = rawAdmissionTelemetryRootV756(state);
+  const now = Date.now();
+  t.evaluated = safeNumber(t.evaluated) + 1;
+  const reasons = Array.isArray(admission?.reasons) && admission.reasons.length
+    ? admission.reasons.map(x => String(x))
+    : [accepted ? "ACCEPTED_REASON_UNSPECIFIED_V756" : "RAW_CURRENT_ACTIVITY_NOT_PROVEN_V755"];
+  const bucket = accepted ? t.acceptedReasons : t.rejectedReasons;
+  for (const reason of reasons) bucket[reason] = safeNumber(bucket?.[reason]) + 1;
+  const event = {
+    at:now,
+    accepted:accepted === true,
+    tokenAddress:normalize(candidate?.address) || null,
+    symbol:candidate?.symbol || null,
+    poolId:normalize(candidate?.onChainPoolIdentityV153?.poolId) || null,
+    reasons,
+    evidence:admission || null
+  };
+  if (accepted) { t.accepted = safeNumber(t.accepted) + 1; t.lastAccepted = event; }
+  else { t.rejected = safeNumber(t.rejected) + 1; t.lastRejected = event; }
+  t.updatedAt = now;
+  return event;
+}
+
 function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber, wethUsdGReference) {
   const reselectionV747 = reselectPersistedRawDirectionalWatchesV747(state, latestNumber);
   const singlePoolAdmissionV754 = retireStaleSinglePoolRawWatchesV754(state, latestNumber);
@@ -76260,6 +76312,10 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       candidate.rawWatchCurrentActivityAdmissionV755 = admissionV755;
       telemetryV741.rawAdmissionEvaluatedV755 =
         safeNumber(telemetryV741?.rawAdmissionEvaluatedV755) + 1;
+      const admissionEventV756 = rawAdmissionRecordV756(
+        state, admissionV755, admissionV755?.passes === true, candidate
+      );
+      candidate.rawWatchActivityAdmissionV756 = admissionEventV756;
       if (admissionV755?.passes !== true) {
         telemetryV741.rawAdmissionRejectedV755 =
           safeNumber(telemetryV741?.rawAdmissionRejectedV755) + 1;
@@ -76338,6 +76394,8 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       existing.rawOnlyV740 = rawOnlyV740;
       existing.rawWatchCurrentActivityAdmissionV755 =
         rawOnlyV740 ? (candidate?.rawWatchCurrentActivityAdmissionV755 || existing.rawWatchCurrentActivityAdmissionV755 || null) : null;
+      existing.rawWatchActivityAdmissionV756 =
+        rawOnlyV740 ? (candidate?.rawWatchActivityAdmissionV756 || existing.rawWatchActivityAdmissionV756 || null) : null;
       existing.currency0V740 = normalize(identity?.currency0V740) || existing.currency0V740 || null;
       existing.currency1V740 = normalize(identity?.currency1V740) || existing.currency1V740 || null;
       existing.lastQualifiedAt = now;
@@ -76413,6 +76471,8 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
       rawOnlyV740,
       rawWatchCurrentActivityAdmissionV755:
         rawOnlyV740 ? (candidate?.rawWatchCurrentActivityAdmissionV755 || null) : null,
+      rawWatchActivityAdmissionV756:
+        rawOnlyV740 ? (candidate?.rawWatchActivityAdmissionV756 || null) : null,
       currency0V740:normalize(identity?.currency0V740) || null,
       currency1V740:normalize(identity?.currency1V740) || null,
       rawSwapLogsV740:0,
@@ -78072,6 +78132,7 @@ function poolWatchDiagnosticTelegramV741(state) {
     `Unpriceable-quote raw handoff attempts: <b>${safeNumber(t.rawHandoffAttempts)}</b>`,
     `Raw registered / refreshed: <b>${safeNumber(t.rawRegistered)} / ${safeNumber(t.rawRefreshed)}</b>`,
     `V755 raw activity admission: evaluated <b>${safeNumber(t.rawAdmissionEvaluatedV755)}</b> · accepted <b>${safeNumber(t.rawAdmissionAcceptedV755)}</b> · rejected <b>${safeNumber(t.rawAdmissionRejectedV755)}</b>`,
+    `V756 persisted admission: evaluated <b>${safeNumber(state?.rawAdmissionTelemetryV756?.evaluated)}</b> · accepted <b>${safeNumber(state?.rawAdmissionTelemetryV756?.accepted)}</b> · rejected <b>${safeNumber(state?.rawAdmissionTelemetryV756?.rejected)}</b>`,
     `Standard registered / refreshed: <b>${safeNumber(t.standardRegistered)} / ${safeNumber(t.standardRefreshed)}</b>`,
     `Pruned expired / invalid / capacity: <b>${safeNumber(t.prunedExpired)} / ${safeNumber(t.prunedInvalidIdentity)} / ${safeNumber(t.prunedCapacity)}</b>`,
     `Telemetry since: <code>${escapeHtml(fmtTime(t.startedAt))}</code>`,
@@ -78137,6 +78198,7 @@ function poolWatchDiagnosticTelegramV741(state) {
         `• <b>${escapeHtml(row?.symbol || "TOKEN")}</b> ${escapeHtml(tokenShort)} | pool <code>${escapeHtml(poolShort)}</code>`,
         `  ranges ${safeNumber(row?.successfulRanges)} · swaps ${safeNumber(row?.rawSwapLogsV740)} (${safeNumber(row?.rawBuySwapsV740)}B/${safeNumber(row?.rawSellSwapsV740)}S) · rejected ${safeNumber(row?.rawDecodeRejectedV740)}`,
       `  V755 admission ${row?.rawWatchCurrentActivityAdmissionV755?.passes === true ? "PASS" : "LEGACY/UNVERIFIED"}${Array.isArray(row?.rawWatchCurrentActivityAdmissionV755?.reasons) && row.rawWatchCurrentActivityAdmissionV755.reasons.length ? ` · ${row.rawWatchCurrentActivityAdmissionV755.reasons.join(",")}` : ""}`,
+      `  V756 accepted reason ${row?.rawWatchActivityAdmissionV756?.accepted === true ? (Array.isArray(row?.rawWatchActivityAdmissionV756?.reasons) ? row.rawWatchActivityAdmissionV756.reasons.join(",") : "PASS") : "LEGACY/UNVERIFIED"}`,
         `  last swap ${escapeHtml(fmtTime(row?.lastRawSwapAtV740))} · block ${escapeHtml(String(row?.lastCollectedBlock ?? "UNVERIFIED"))}`,
         `  status ${escapeHtml(row?.lastStatus || "UNVERIFIED")}`
       );
