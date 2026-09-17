@@ -1,6 +1,16 @@
 /**
+ * Robinhood Chain Meme Hunter — V745
+ * AUTHORITATIVE RUNTIME VERSION: V745
+
+ * V745 EXACT-POOL IDENTITY MATCH DIAGNOSTIC — MEASUREMENT ONLY:
+ * - Adds /poolmatch (alias /poolidentity) to compare every retained V740 raw-only watch against all canonical poolRegistry PoolKeys containing that token.
+ * - Shows the selected V742/V740 PoolId, both on-chain currencies, cached provider pair/pool identity when available, exact provider-vs-selected match state, alternative canonical pools, and retained per-pool discovery activity evidence.
+ * - Retained discovery activity comes only from already-observed normal discovery logs and is labelled SWAP_OR_LIQUIDITY unless the existing watch already has pool-specific swap evidence; no event type is invented.
+ * - Makes zero provider/RPC requests, consumes zero scanner budget and performs zero state writes from the command.
+ * - Does not change pool selection, watch registration, collection scheduling, USD verification, scoring, qualification, Telegram thresholds, CMC behaviour, watch caps or the hard global request cap of 42.
+
  * Robinhood Chain Meme Hunter — V744
- * AUTHORITATIVE RUNTIME VERSION: V744
+ * HISTORICAL VERSION NOTE: V744
 
  * V744 RAW FIRST-RANGE SCHEDULER PRIORITY — NO REQUEST/SCORING CHANGE:
  * - Fixes the V743 diagnostic finding that retained raw-only watches could remain at REGISTERED_FORWARD_ONLY with zero successful ranges because established watches always won the scarce V551 scheduler slot.
@@ -6546,7 +6556,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V744";
+const VERSION = "V745";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -76720,6 +76730,205 @@ function directionalWatchSnapshotV551(state) {
 }
 
 
+
+function poolIdentityMatchSnapshotV745(state) {
+  const root =
+    state?.directionalExactPoolWatchV551 &&
+    typeof state.directionalExactPoolWatchV551 === "object"
+      ? state.directionalExactPoolWatchV551
+      : {entries:{}};
+
+  const rawEntries = Object.values(root?.entries || {})
+    .filter(row => row && typeof row === "object" && row?.rawOnlyV740 === true);
+
+  const registry =
+    state?.poolRegistry && typeof state.poolRegistry === "object"
+      ? state.poolRegistry
+      : {};
+
+  const rows = rawEntries
+    .map(watch => {
+      const token = normalize(watch?.tokenAddress);
+      const selectedPoolId = normalize(watch?.poolId);
+      const watched = isAddress(token) ? findWatched(state, token) : null;
+      const cachedMarket =
+        watched?.marketCache?.data && typeof watched.marketCache.data === "object"
+          ? watched.marketCache.data
+          : null;
+
+      const providerPairAddress = normalize(cachedMarket?.pairAddress);
+      const providerPairIsPoolId = /^0x[a-f0-9]{64}$/.test(String(providerPairAddress || ""));
+      const providerBaseTokenAddress = normalize(cachedMarket?.baseTokenAddress);
+      const providerQuoteTokenAddress = normalize(cachedMarket?.quoteTokenAddress);
+      const providerSource =
+        bridgeProviderSourceV735(cachedMarket) ||
+        String(cachedMarket?.providerSourceV735 || cachedMarket?.source || "") ||
+        null;
+
+      const candidates = [];
+      for (const [rawPoolId, entry] of Object.entries(registry)) {
+        const poolId = normalize(entry?.poolId || rawPoolId);
+        const currency0 = normalize(entry?.currency0);
+        const currency1 = normalize(entry?.currency1);
+        if (
+          !/^0x[a-f0-9]{64}$/.test(String(poolId || "")) ||
+          !isAddress(currency0) ||
+          !isAddress(currency1) ||
+          currency0 === currency1 ||
+          (currency0 !== token && currency1 !== token)
+        ) {
+          continue;
+        }
+
+        const lastActivityBlock = safeNumber(entry?.lastActivityBlock) || null;
+        const lastSeenAt = safeNumber(entry?.lastSeenAt) || null;
+        candidates.push({
+          poolId,
+          currency0,
+          currency1,
+          quoteTokenAddress: currency0 === token ? currency1 : currency0,
+          selected: poolId === selectedPoolId,
+          providerExactMatch: providerPairIsPoolId && poolId === providerPairAddress,
+          lastActivityBlock,
+          lastSeenAt,
+          activitySource: entry?.lastActivitySourceV185 || null,
+          poolKeyCompleteV441: entry?.poolKeyCompleteV441 === true
+        });
+      }
+
+      candidates.sort((a,b) => {
+        if (a.selected !== b.selected) return a.selected ? -1 : 1;
+        const activityDelta = safeNumber(b?.lastActivityBlock) - safeNumber(a?.lastActivityBlock);
+        if (activityDelta !== 0) return activityDelta;
+        return safeNumber(b?.lastSeenAt) - safeNumber(a?.lastSeenAt);
+      });
+
+      const selectedCandidate = candidates.find(row => row.selected) || null;
+      const activeBlocks = candidates
+        .map(row => safeNumber(row?.lastActivityBlock))
+        .filter(n => n > 0);
+      const latestKnownActivityBlock = activeBlocks.length ? Math.max(...activeBlocks) : null;
+      const selectedHasLatestKnownActivity =
+        Boolean(selectedCandidate && latestKnownActivityBlock) &&
+        safeNumber(selectedCandidate?.lastActivityBlock) === latestKnownActivityBlock;
+
+      let providerMatchState = "NO_CACHED_PROVIDER_PAIR";
+      if (providerPairAddress) {
+        if (!providerPairIsPoolId) providerMatchState = "PROVIDER_PAIR_NOT_32_BYTE_POOL_ID";
+        else if (providerPairAddress === selectedPoolId) providerMatchState = "EXACT_PROVIDER_SELECTED_POOL_MATCH";
+        else if (candidates.some(row => row.poolId === providerPairAddress)) providerMatchState = "PROVIDER_MATCHES_DIFFERENT_CANONICAL_POOL";
+        else providerMatchState = "PROVIDER_POOL_NOT_IN_CANONICAL_TOKEN_MATCHES";
+      }
+
+      return {
+        symbol: watch?.symbol || null,
+        tokenAddress: token || null,
+        selectedPoolId: selectedPoolId || null,
+        selectedCurrency0: normalize(selectedCandidate?.currency0) || normalize(watch?.currency0V740) || null,
+        selectedCurrency1: normalize(selectedCandidate?.currency1) || normalize(watch?.currency1V740) || null,
+        selectedQuoteTokenAddress: normalize(watch?.quoteTokenAddress) || normalize(selectedCandidate?.quoteTokenAddress) || null,
+        selectedSuccessfulRanges: safeNumber(watch?.successfulRanges),
+        selectedRawSwaps: safeNumber(watch?.rawSwapLogsV740),
+        selectedPoolSpecificSwapsAtRegistration: safeNumber(watch?.poolSpecificSwapsV555),
+        selectedLastCollectedBlock: watch?.lastCollectedBlock ?? null,
+        selectedLastRegistryActivityBlock: selectedCandidate?.lastActivityBlock || null,
+        selectedHasLatestKnownActivity,
+        providerMarketVerified: cachedMarket?.verified === true,
+        providerSource: providerSource || null,
+        providerPairAddress: providerPairAddress || null,
+        providerPairIsPoolId,
+        providerBaseTokenAddress: providerBaseTokenAddress || null,
+        providerQuoteTokenAddress: providerQuoteTokenAddress || null,
+        providerMatchState,
+        canonicalPoolCount: candidates.length,
+        alternativePoolCount: Math.max(0, candidates.length - (selectedCandidate ? 1 : 0)),
+        latestKnownActivityBlock,
+        candidates: candidates.slice(0,8)
+      };
+    })
+    .sort((a,b) => String(a?.symbol || a?.tokenAddress || "").localeCompare(String(b?.symbol || b?.tokenAddress || "")))
+    .slice(0,12);
+
+  return {
+    version: VERSION,
+    rawWatchCount: rawEntries.length,
+    rows,
+    providerExactMatchCount: rows.filter(row => row?.providerMatchState === "EXACT_PROVIDER_SELECTED_POOL_MATCH").length,
+    providerDifferentCanonicalPoolCount: rows.filter(row => row?.providerMatchState === "PROVIDER_MATCHES_DIFFERENT_CANONICAL_POOL").length,
+    providerPairNotPoolIdCount: rows.filter(row => row?.providerMatchState === "PROVIDER_PAIR_NOT_32_BYTE_POOL_ID").length,
+    noCachedProviderPairCount: rows.filter(row => row?.providerMatchState === "NO_CACHED_PROVIDER_PAIR").length,
+    selectedLatestKnownActivityCount: rows.filter(row => row?.selectedHasLatestKnownActivity === true).length,
+    readOnly:true,
+    externalProviderRequests:0,
+    scannerBudgetConsumed:false,
+    stateWrites:0,
+    scoringChanged:false,
+    qualificationChanged:false,
+    requestCap:42
+  };
+}
+
+function poolIdentityMatchTelegramV745(state) {
+  const s = poolIdentityMatchSnapshotV745(state);
+  const short = (value, left=10, right=8) => {
+    const v = String(value || "");
+    return v ? `${v.slice(0,left)}…${v.slice(-right)}` : "UNVERIFIED";
+  };
+
+  const lines = [
+    `🧬 <b>Exact Pool Identity Match — ${escapeHtml(VERSION)}</b>`,
+    "",
+    `Raw watches inspected: <b>${safeNumber(s.rawWatchCount)}</b>`,
+    `Exact provider ↔ selected PoolId matches: <b>${safeNumber(s.providerExactMatchCount)}</b>`,
+    `Provider points to different canonical pool: <b>${safeNumber(s.providerDifferentCanonicalPoolCount)}</b>`,
+    `Provider pair present but not a 32-byte PoolId: <b>${safeNumber(s.providerPairNotPoolIdCount)}</b>`,
+    `No cached provider pair: <b>${safeNumber(s.noCachedProviderPairCount)}</b>`,
+    `Selected pool has latest retained registry activity: <b>${safeNumber(s.selectedLatestKnownActivityCount)}</b>`,
+    "",
+    "ℹ️ Retained registry activity is from already-observed normal discovery logs and may be SWAP or liquidity activity; V745 does not invent a swap classification."
+  ];
+
+  if (!Array.isArray(s.rows) || !s.rows.length) {
+    lines.push("", "No active raw-only watches are currently retained.");
+  } else {
+    for (const row of s.rows) {
+      lines.push(
+        "",
+        `🔎 <b>${escapeHtml(row?.symbol || "TOKEN")}</b> <code>${escapeHtml(short(row?.tokenAddress,8,6))}</code>`,
+        `Selected PoolId: <code>${escapeHtml(short(row?.selectedPoolId))}</code>`,
+        `Selected currencies: <code>${escapeHtml(short(row?.selectedCurrency0,8,6))}</code> / <code>${escapeHtml(short(row?.selectedCurrency1,8,6))}</code>`,
+        `Canonical pools containing token: <b>${safeNumber(row?.canonicalPoolCount)}</b> · alternatives: <b>${safeNumber(row?.alternativePoolCount)}</b>`,
+        `Selected ranges/raw swaps: <b>${safeNumber(row?.selectedSuccessfulRanges)} / ${safeNumber(row?.selectedRawSwaps)}</b> · pool-specific swaps at registration: <b>${safeNumber(row?.selectedPoolSpecificSwapsAtRegistration)}</b>`,
+        `Selected registry activity block: <b>${escapeHtml(String(row?.selectedLastRegistryActivityBlock ?? "NONE"))}</b> · latest candidate activity block: <b>${escapeHtml(String(row?.latestKnownActivityBlock ?? "NONE"))}</b>`,
+        `Selected has latest retained activity: <b>${row?.selectedHasLatestKnownActivity === true ? "YES" : "NO / UNPROVEN"}</b>`,
+        `Provider market verified: <b>${row?.providerMarketVerified === true ? "YES" : "NO"}</b> · source: <b>${escapeHtml(row?.providerSource || "UNVERIFIED")}</b>`,
+        `Provider pair/pool: <code>${escapeHtml(short(row?.providerPairAddress))}</code>`,
+        `Provider ↔ selected status: <b>${escapeHtml(row?.providerMatchState || "UNVERIFIED")}</b>`
+      );
+
+      if (Array.isArray(row?.candidates) && row.candidates.length) {
+        lines.push("  <b>Canonical candidate pools</b>");
+        for (const candidate of row.candidates) {
+          const flags = [
+            candidate?.selected ? "SELECTED" : null,
+            candidate?.providerExactMatch ? "PROVIDER_MATCH" : null,
+            safeNumber(candidate?.lastActivityBlock) > 0 ? "RETAINED_ACTIVITY" : "NO_RETAINED_ACTIVITY"
+          ].filter(Boolean).join(" · ");
+          lines.push(
+            `  • <code>${escapeHtml(short(candidate?.poolId))}</code> — ${escapeHtml(flags || "NO_FLAGS")} · activity block ${escapeHtml(String(candidate?.lastActivityBlock ?? "NONE"))}`
+          );
+        }
+      }
+    }
+  }
+
+  lines.push(
+    "",
+    "<i>Read-only V745 diagnostic: zero provider/RPC requests, zero scanner-budget requests and zero state writes. Pool selection/collection/scoring/qualification remain unchanged; hard request cap remains 42.</i>"
+  );
+  return lines.join("\n");
+}
+
 function poolWatchDiagnosticSnapshotV741(state) {
   const root =
     state?.directionalExactPoolWatchV551 &&
@@ -144932,7 +145141,8 @@ function telegramHelpV271() {
     "<code>/datacoverage</code> — V734 hotfixed free-provider/data + V732 pool-bridge audit (read-only)",
     "<code>/cmctest [0xADDRESS]</code> — V738 CoinMarketCap Robinhood Chain coverage test (diagnostic only)",
     "<code>/cmcusage</code> — V739 CoinMarketCap bot-side monthly request meter (read-only)",
-    "<code>/poolwatch</code> — V741 raw exact-pool watch diagnostic (read-only)",
+    "<code>/poolwatch</code> — V741/V744 raw exact-pool watch diagnostic (read-only)",
+    "<code>/poolmatch</code> — V745 selected-vs-provider/canonical pool identity diagnostic (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -145872,6 +146082,24 @@ async function telegramCommandReplyV271(
   let reply;
 
   if (
+    parsed.command === "/poolmatch" ||
+    parsed.command === "/poolidentity"
+  ) {
+    reply = poolIdentityMatchTelegramV745(state);
+    if (diagnosticV273) {
+      const matchV745 = poolIdentityMatchSnapshotV745(state);
+      diagnosticV273.poolIdentityMatchV745 = {
+        scannerBudgetConsumed:false,
+        externalProviderRequests:0,
+        stateWrites:0,
+        rawWatchCount:safeNumber(matchV745?.rawWatchCount),
+        providerExactMatchCount:safeNumber(matchV745?.providerExactMatchCount),
+        providerDifferentCanonicalPoolCount:safeNumber(matchV745?.providerDifferentCanonicalPoolCount),
+        providerPairNotPoolIdCount:safeNumber(matchV745?.providerPairNotPoolIdCount),
+        hardRequestLimitUnchanged:42
+      };
+    }
+  } else if (
     parsed.command === "/poolwatch" ||
     parsed.command === "/watchpool"
   ) {
