@@ -1,7 +1,14 @@
 /**
- * Robinhood Chain Meme Hunter — V740
- * AUTHORITATIVE RUNTIME VERSION: V740
+ * Robinhood Chain Meme Hunter — V741
+ * AUTHORITATIVE RUNTIME VERSION: V741
 
+ * V741 RAW POOL WATCH DIAGNOSTIC — MEASUREMENT ONLY, NO COLLECTION/SCORING CHANGE:
+ * - Adds /poolwatch as a read-only diagnostic for the V740 raw exact-pool forward watch.
+ * - Reports active watches, raw-only/unpriceable-quote handoffs, successful ranges, exact raw swaps, buy/sell counts, decode rejects, last observed activity and current watch statuses.
+ * - Adds forward-only measurement counters for watch registration rejection reasons and prune/expiry reasons using the existing state write cycle only.
+ * - Makes zero provider requests from /poolwatch, zero scanner-budget requests and zero state writes from the command itself.
+ * - Does not change watch selection, collection ranges, USD verification, scoring, qualification, Telegram thresholds, provider ordering or the hard global request cap of 42.
+ *
  * V740 RAW EXACT-POOL FORWARD WATCH — EVIDENCE COMPLETION, NO SCORE CHANGE:
  * - Separates exact V4 pool identity from USD-quote eligibility.
  * - If a token has exactly one structurally valid watched V4 PoolId, that PoolId may be verified for raw forward-only activity even when its counter-token is not yet V254 USD-priceable.
@@ -6513,7 +6520,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V740";
+const VERSION = "V741";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -74490,22 +74497,77 @@ function directionalWatchRootV551(state) {
   return root;
 }
 
+function poolWatchTelemetryRootV741(state) {
+  state.poolWatchTelemetryV741 =
+    state?.poolWatchTelemetryV741 &&
+    typeof state.poolWatchTelemetryV741 === "object"
+      ? state.poolWatchTelemetryV741
+      : {
+          schemaVersion:"V741_1",
+          startedAt:Date.now(),
+          updatedAt:null,
+          registrationCandidatesSeen:0,
+          rawHandoffAttempts:0,
+          rawRegistered:0,
+          rawRefreshed:0,
+          standardRegistered:0,
+          standardRefreshed:0,
+          registrationRejected:{},
+          prunedExpired:0,
+          prunedInvalidIdentity:0,
+          prunedCapacity:0,
+          lastPruneAt:null
+        };
+
+  const t = state.poolWatchTelemetryV741;
+  t.schemaVersion = "V741_1";
+  t.registrationRejected =
+    t?.registrationRejected && typeof t.registrationRejected === "object"
+      ? t.registrationRejected
+      : {};
+  return t;
+}
+
+function poolWatchTelemetryIncV741(state, key, amount = 1) {
+  const t = poolWatchTelemetryRootV741(state);
+  t[key] = safeNumber(t?.[key]) + Math.max(0, safeNumber(amount));
+  t.updatedAt = Date.now();
+  return t[key];
+}
+
+function poolWatchTelemetryRejectV741(state, reason) {
+  const t = poolWatchTelemetryRootV741(state);
+  const key = String(reason || "UNKNOWN_REJECTION_V741");
+  t.registrationRejected[key] = safeNumber(t.registrationRejected?.[key]) + 1;
+  t.updatedAt = Date.now();
+}
+
 function pruneDirectionalWatchV551(state) {
   const root = directionalWatchRootV551(state);
   const now = Date.now();
   const beforeRows = Object.values(root.entries || {});
+  const telemetryV741 = poolWatchTelemetryRootV741(state);
+  let expiredRemovedV741 = 0;
+  let invalidRemovedV741 = 0;
 
   const eligibleRows = beforeRows.filter(row => {
     const token = normalize(row?.tokenAddress);
     const poolId = normalize(row?.poolId);
     const seenAt = safeNumber(row?.lastQualifiedAt || row?.registeredAt);
 
-    return (
+    const identityValidV741 =
       isAddress(token) &&
       /^0x[a-f0-9]{64}$/.test(String(poolId || "")) &&
-      seenAt > 0 &&
-      now - seenAt <= DIRECTIONAL_WATCH_MAX_AGE_MS_V551
-    );
+      seenAt > 0;
+    if (!identityValidV741) {
+      invalidRemovedV741++;
+      return false;
+    }
+    if (now - seenAt > DIRECTIONAL_WATCH_MAX_AGE_MS_V551) {
+      expiredRemovedV741++;
+      return false;
+    }
+    return true;
   });
 
   const retentionTierV565 = row => {
@@ -74588,6 +74650,23 @@ function pruneDirectionalWatchV551(state) {
     const key = directionalWatchKeyV563(row?.tokenAddress,row?.poolId);
     return key && !keptKeys.has(key);
   });
+
+  if (expiredRemovedV741 > 0) {
+    telemetryV741.prunedExpired =
+      safeNumber(telemetryV741?.prunedExpired) + expiredRemovedV741;
+  }
+  if (invalidRemovedV741 > 0) {
+    telemetryV741.prunedInvalidIdentity =
+      safeNumber(telemetryV741?.prunedInvalidIdentity) + invalidRemovedV741;
+  }
+  if (droppedRows.length > 0) {
+    telemetryV741.prunedCapacity =
+      safeNumber(telemetryV741?.prunedCapacity) + droppedRows.length;
+  }
+  if (expiredRemovedV741 > 0 || invalidRemovedV741 > 0 || droppedRows.length > 0) {
+    telemetryV741.updatedAt = now;
+    telemetryV741.lastPruneAt = now;
+  }
 
   root.entries = Object.fromEntries(
     rows
@@ -75171,11 +75250,15 @@ function decodeRawExactPoolSwapV740(state, row, watchRow) {
 function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber, wethUsdGReference) {
   const root = pruneDirectionalWatchV551(state);
   const now = Date.now();
+  const telemetryV741 = poolWatchTelemetryRootV741(state);
   let registered = 0;
   let refreshed = 0;
   const rows = [];
 
   for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    telemetryV741.registrationCandidatesSeen =
+      safeNumber(telemetryV741?.registrationCandidatesSeen) + 1;
+    telemetryV741.updatedAt = now;
     /*
      * V552: candidates reaching this helper have already been selected by the
      * protected V458 target lane. Re-running qualifiesTelegram() here is unsafe
@@ -75185,10 +75268,12 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
      * Keep the evidence requirements that actually matter for exact-pool
      * directional collection.
      */
-    if (
-      candidate?.validERC20 !== true ||
-      candidate?.onChainPoolIdentityV153?.verified !== true
-    ) {
+    if (candidate?.validERC20 !== true) {
+      poolWatchTelemetryRejectV741(state, "ERC20_NOT_VERIFIED");
+      continue;
+    }
+    if (candidate?.onChainPoolIdentityV153?.verified !== true) {
+      poolWatchTelemetryRejectV741(state, "EXACT_POOL_IDENTITY_NOT_VERIFIED");
       continue;
     }
 
@@ -75200,6 +75285,11 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
     const rawOnlyV740 =
       quoteEligibility?.eligible !== true &&
       candidate?.rawExactPoolWatchV740?.verified === true;
+    if (rawOnlyV740) {
+      telemetryV741.rawHandoffAttempts =
+        safeNumber(telemetryV741?.rawHandoffAttempts) + 1;
+      telemetryV741.updatedAt = now;
+    }
     const poolSpecificSwapsV555 =
       candidate?.activity?.poolSpecific === true
         ? Math.max(0, safeNumber(candidate?.activity?.swaps))
@@ -75218,19 +75308,32 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
         poolSpecificLiquidityEventsV556 > 0
       );
 
-    if (
-      !isAddress(token) ||
-      !/^0x[a-f0-9]{64}$/.test(String(poolId || "")) ||
-      !isAddress(quoteTokenAddress) ||
-      (quoteEligibility?.eligible !== true && !rawOnlyV740) ||
-      !Number.isFinite(Number(latestNumber)) ||
-      Number(latestNumber) <= 0
-    ) {
+    if (!isAddress(token)) {
+      poolWatchTelemetryRejectV741(state, "TOKEN_ADDRESS_INVALID");
+      continue;
+    }
+    if (!/^0x[a-f0-9]{64}$/.test(String(poolId || ""))) {
+      poolWatchTelemetryRejectV741(state, "POOL_ID_INVALID_OR_MISSING");
+      continue;
+    }
+    if (!isAddress(quoteTokenAddress)) {
+      poolWatchTelemetryRejectV741(state, "QUOTE_ADDRESS_INVALID_OR_MISSING");
+      continue;
+    }
+    if (quoteEligibility?.eligible !== true && !rawOnlyV740) {
+      poolWatchTelemetryRejectV741(state, "QUOTE_NOT_USD_PRICEABLE_AND_NO_V740_RAW_HANDOFF");
+      continue;
+    }
+    if (!Number.isFinite(Number(latestNumber)) || Number(latestNumber) <= 0) {
+      poolWatchTelemetryRejectV741(state, "LATEST_BLOCK_INVALID");
       continue;
     }
 
     const watchKeyV563 = directionalWatchKeyV563(token, poolId);
-    if (!watchKeyV563) continue;
+    if (!watchKeyV563) {
+      poolWatchTelemetryRejectV741(state, "WATCH_KEY_INVALID");
+      continue;
+    }
 
     const existing = root.entries[watchKeyV563];
     if (existing && normalize(existing?.poolId) === poolId) {
@@ -75280,6 +75383,12 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
         null;
       existing.updatedAt = now;
       refreshed++;
+      if (rawOnlyV740) {
+        telemetryV741.rawRefreshed = safeNumber(telemetryV741?.rawRefreshed) + 1;
+      } else {
+        telemetryV741.standardRefreshed = safeNumber(telemetryV741?.standardRefreshed) + 1;
+      }
+      telemetryV741.updatedAt = now;
       rows.push({
         watchKeyV563,
         tokenAddress:token,
@@ -75363,6 +75472,12 @@ function registerDirectionalWatchCandidatesV551(state, candidates, latestNumber,
         candidate?.persistedObservedRecoveryV573 || null
     };
     registered++;
+    if (rawOnlyV740) {
+      telemetryV741.rawRegistered = safeNumber(telemetryV741?.rawRegistered) + 1;
+    } else {
+      telemetryV741.standardRegistered = safeNumber(telemetryV741?.standardRegistered) + 1;
+    }
+    telemetryV741.updatedAt = now;
     rows.push({
       watchKeyV563,
       tokenAddress:token,
@@ -76432,6 +76547,190 @@ function directionalWatchSnapshotV551(state) {
     maxAgeHours:DIRECTIONAL_WATCH_MAX_AGE_MS_V551 / 3600000,
     entries
   };
+}
+
+
+function poolWatchDiagnosticSnapshotV741(state) {
+  const root =
+    state?.directionalExactPoolWatchV551 &&
+    typeof state.directionalExactPoolWatchV551 === "object"
+      ? state.directionalExactPoolWatchV551
+      : {entries:{}};
+  const entries = Object.values(root?.entries || {}).filter(row => row && typeof row === "object");
+  const rawEntries = entries.filter(row => row?.rawOnlyV740 === true);
+  const rawWithSwaps = rawEntries.filter(row => safeNumber(row?.rawSwapLogsV740) > 0);
+  const rawWithRanges = rawEntries.filter(row => safeNumber(row?.successfulRanges) > 0);
+  const rawCaughtUp = rawEntries.filter(row => row?.everCaughtUpV565 === true);
+  const telemetry =
+    state?.poolWatchTelemetryV741 && typeof state.poolWatchTelemetryV741 === "object"
+      ? state.poolWatchTelemetryV741
+      : {};
+
+  const statusCounts = {};
+  const registrationSources = {};
+  for (const row of entries) {
+    const status = String(row?.lastStatus || "UNVERIFIED");
+    statusCounts[status] = safeNumber(statusCounts[status]) + 1;
+    const source = String(row?.registrationSourceV552 || "UNVERIFIED");
+    registrationSources[source] = safeNumber(registrationSources[source]) + 1;
+  }
+
+  const totals = {
+    rawSwaps:rawEntries.reduce((n,row)=>n+safeNumber(row?.rawSwapLogsV740),0),
+    rawBuys:rawEntries.reduce((n,row)=>n+safeNumber(row?.rawBuySwapsV740),0),
+    rawSells:rawEntries.reduce((n,row)=>n+safeNumber(row?.rawSellSwapsV740),0),
+    rawDecodeRejected:rawEntries.reduce((n,row)=>n+safeNumber(row?.rawDecodeRejectedV740),0),
+    rawSuccessfulRanges:rawEntries.reduce((n,row)=>n+safeNumber(row?.successfulRanges),0)
+  };
+
+  const rawRows = [...rawEntries]
+    .sort((a,b) => {
+      const swapDelta = safeNumber(b?.rawSwapLogsV740) - safeNumber(a?.rawSwapLogsV740);
+      if (swapDelta !== 0) return swapDelta;
+      const collectDelta = safeNumber(b?.lastCollectedAt) - safeNumber(a?.lastCollectedAt);
+      if (collectDelta !== 0) return collectDelta;
+      return safeNumber(b?.registeredAt) - safeNumber(a?.registeredAt);
+    })
+    .slice(0,10)
+    .map(row => ({
+      symbol:row?.symbol || null,
+      tokenAddress:normalize(row?.tokenAddress) || null,
+      poolId:normalize(row?.poolId) || null,
+      quoteTokenAddress:normalize(row?.quoteTokenAddress) || null,
+      registeredAt:safeNumber(row?.registeredAt) || null,
+      lastCollectedAt:safeNumber(row?.lastCollectedAt) || null,
+      lastRawSwapAtV740:safeNumber(row?.lastRawSwapAtV740) || null,
+      coverageStartBlock:row?.coverageStartBlock ?? null,
+      coverageEndBlock:row?.coverageEndBlock ?? null,
+      lastCollectedBlock:row?.lastCollectedBlock ?? null,
+      successfulRanges:safeNumber(row?.successfulRanges),
+      rawSwapLogsV740:safeNumber(row?.rawSwapLogsV740),
+      rawBuySwapsV740:safeNumber(row?.rawBuySwapsV740),
+      rawSellSwapsV740:safeNumber(row?.rawSellSwapsV740),
+      rawDecodeRejectedV740:safeNumber(row?.rawDecodeRejectedV740),
+      everCaughtUpV565:row?.everCaughtUpV565 === true,
+      lastStatus:row?.lastStatus || null,
+      registrationSourceV552:row?.registrationSourceV552 || null
+    }));
+
+  return {
+    version:VERSION,
+    watchedCount:entries.length,
+    maxEntries:DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
+    rawOnlyWatchCount:rawEntries.length,
+    rawWithSwapsCount:rawWithSwaps.length,
+    rawWithSuccessfulRangesCount:rawWithRanges.length,
+    rawCaughtUpCount:rawCaughtUp.length,
+    totals,
+    telemetry:{
+      startedAt:safeNumber(telemetry?.startedAt) || null,
+      updatedAt:safeNumber(telemetry?.updatedAt) || null,
+      registrationCandidatesSeen:safeNumber(telemetry?.registrationCandidatesSeen),
+      rawHandoffAttempts:safeNumber(telemetry?.rawHandoffAttempts),
+      rawRegistered:safeNumber(telemetry?.rawRegistered),
+      rawRefreshed:safeNumber(telemetry?.rawRefreshed),
+      standardRegistered:safeNumber(telemetry?.standardRegistered),
+      standardRefreshed:safeNumber(telemetry?.standardRefreshed),
+      registrationRejected:
+        telemetry?.registrationRejected && typeof telemetry.registrationRejected === "object"
+          ? telemetry.registrationRejected
+          : {},
+      prunedExpired:safeNumber(telemetry?.prunedExpired),
+      prunedInvalidIdentity:safeNumber(telemetry?.prunedInvalidIdentity),
+      prunedCapacity:safeNumber(telemetry?.prunedCapacity),
+      lastPruneAt:safeNumber(telemetry?.lastPruneAt) || null
+    },
+    statusCounts,
+    registrationSources,
+    rawRows,
+    readOnly:true,
+    externalProviderRequests:0,
+    scannerBudgetConsumed:false,
+    stateWrites:0,
+    scoringChanged:false,
+    qualificationChanged:false,
+    requestCap:42
+  };
+}
+
+function poolWatchDiagnosticTelegramV741(state) {
+  const s = poolWatchDiagnosticSnapshotV741(state);
+  const t = s.telemetry || {};
+  const totals = s.totals || {};
+  const fmtTime = value => {
+    const n = safeNumber(value);
+    return n > 0 ? new Date(n).toISOString() : "NEVER";
+  };
+  const topReasons = Object.entries(t.registrationRejected || {})
+    .sort((a,b)=>safeNumber(b[1])-safeNumber(a[1]))
+    .slice(0,8);
+  const topStatuses = Object.entries(s.statusCounts || {})
+    .sort((a,b)=>safeNumber(b[1])-safeNumber(a[1]))
+    .slice(0,8);
+
+  const lines = [
+    `🧭 <b>Exact Pool Watch Diagnostic — ${escapeHtml(VERSION)}</b>`,
+    "",
+    `Active watches: <b>${s.watchedCount}/${s.maxEntries}</b>`,
+    `Raw-only V740 watches: <b>${s.rawOnlyWatchCount}</b>`,
+    `Raw watches with ≥1 successful range: <b>${s.rawWithSuccessfulRangesCount}</b>`,
+    `Raw watches with ≥1 exact swap: <b>${s.rawWithSwapsCount}</b>`,
+    `Raw watches caught up to head: <b>${s.rawCaughtUpCount}</b>`,
+    "",
+    "📈 <b>Raw exact-pool evidence retained</b>",
+    `Exact raw swaps: <b>${safeNumber(totals.rawSwaps)}</b>`,
+    `Buys / sells: <b>${safeNumber(totals.rawBuys)} / ${safeNumber(totals.rawSells)}</b>`,
+    `Decode rejects: <b>${safeNumber(totals.rawDecodeRejected)}</b>`,
+    `Successful raw ranges: <b>${safeNumber(totals.rawSuccessfulRanges)}</b>`,
+    "",
+    "🧪 <b>V741 forward-only handoff telemetry</b>",
+    `Registration candidates seen: <b>${safeNumber(t.registrationCandidatesSeen)}</b>`,
+    `Unpriceable-quote raw handoff attempts: <b>${safeNumber(t.rawHandoffAttempts)}</b>`,
+    `Raw registered / refreshed: <b>${safeNumber(t.rawRegistered)} / ${safeNumber(t.rawRefreshed)}</b>`,
+    `Standard registered / refreshed: <b>${safeNumber(t.standardRegistered)} / ${safeNumber(t.standardRefreshed)}</b>`,
+    `Pruned expired / invalid / capacity: <b>${safeNumber(t.prunedExpired)} / ${safeNumber(t.prunedInvalidIdentity)} / ${safeNumber(t.prunedCapacity)}</b>`,
+    `Telemetry since: <code>${escapeHtml(fmtTime(t.startedAt))}</code>`
+  ];
+
+  if (topReasons.length) {
+    lines.push("", "🚫 <b>Top registration rejection reasons</b>");
+    for (const [reason,count] of topReasons) {
+      lines.push(`• ${escapeHtml(reason)}: <b>${safeNumber(count)}</b>`);
+    }
+  }
+
+  if (topStatuses.length) {
+    lines.push("", "📡 <b>Current watch statuses</b>");
+    for (const [status,count] of topStatuses) {
+      lines.push(`• ${escapeHtml(status)}: <b>${safeNumber(count)}</b>`);
+    }
+  }
+
+  if (Array.isArray(s.rawRows) && s.rawRows.length) {
+    lines.push("", "🔬 <b>Raw watch rows</b>");
+    for (const row of s.rawRows) {
+      const tokenShort = row?.tokenAddress
+        ? `${row.tokenAddress.slice(0,8)}…${row.tokenAddress.slice(-6)}`
+        : "UNVERIFIED";
+      const poolShort = row?.poolId
+        ? `${row.poolId.slice(0,10)}…${row.poolId.slice(-8)}`
+        : "UNVERIFIED";
+      lines.push(
+        `• <b>${escapeHtml(row?.symbol || "TOKEN")}</b> ${escapeHtml(tokenShort)} | pool <code>${escapeHtml(poolShort)}</code>`,
+        `  ranges ${safeNumber(row?.successfulRanges)} · swaps ${safeNumber(row?.rawSwapLogsV740)} (${safeNumber(row?.rawBuySwapsV740)}B/${safeNumber(row?.rawSellSwapsV740)}S) · rejected ${safeNumber(row?.rawDecodeRejectedV740)}`,
+        `  last swap ${escapeHtml(fmtTime(row?.lastRawSwapAtV740))} · block ${escapeHtml(String(row?.lastCollectedBlock ?? "UNVERIFIED"))}`,
+        `  status ${escapeHtml(row?.lastStatus || "UNVERIFIED")}`
+      );
+    }
+  } else {
+    lines.push("", "ℹ️ No active V740 raw-only watch rows are currently retained.");
+  }
+
+  lines.push(
+    "",
+    "<i>Read-only command: zero provider requests, zero scanner-budget requests and zero state writes. V741 telemetry is measurement-only and does not change collection/scoring/qualification.</i>"
+  );
+  return lines.join("\n");
 }
 
 
@@ -144458,6 +144757,7 @@ function telegramHelpV271() {
     "<code>/datacoverage</code> — V734 hotfixed free-provider/data + V732 pool-bridge audit (read-only)",
     "<code>/cmctest [0xADDRESS]</code> — V738 CoinMarketCap Robinhood Chain coverage test (diagnostic only)",
     "<code>/cmcusage</code> — V739 CoinMarketCap bot-side monthly request meter (read-only)",
+    "<code>/poolwatch</code> — V741 raw exact-pool watch diagnostic (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
@@ -145397,6 +145697,26 @@ async function telegramCommandReplyV271(
   let reply;
 
   if (
+    parsed.command === "/poolwatch" ||
+    parsed.command === "/watchpool"
+  ) {
+    reply = poolWatchDiagnosticTelegramV741(state);
+    if (diagnosticV273) {
+      const watchV741 = poolWatchDiagnosticSnapshotV741(state);
+      diagnosticV273.poolWatchV741 = {
+        scannerBudgetConsumed:false,
+        externalProviderRequests:0,
+        stateWrites:0,
+        watchedCount:safeNumber(watchV741?.watchedCount),
+        rawOnlyWatchCount:safeNumber(watchV741?.rawOnlyWatchCount),
+        rawWithSwapsCount:safeNumber(watchV741?.rawWithSwapsCount),
+        rawSwaps:safeNumber(watchV741?.totals?.rawSwaps),
+        rawHandoffAttempts:safeNumber(watchV741?.telemetry?.rawHandoffAttempts),
+        rawRegistered:safeNumber(watchV741?.telemetry?.rawRegistered),
+        hardRequestLimitUnchanged:42
+      };
+    }
+  } else if (
     parsed.command === "/cmcusage" ||
     parsed.command === "/cmc"
   ) {
