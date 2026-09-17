@@ -1,4 +1,14 @@
 /**
+ * Robinhood Chain Meme Hunter — V795
+ *
+ * V795 ACTIVE-POOL REVERSE LOOKUP DIAGNOSTIC:
+ * - /v4poolsearch now checks currently-active PoolIds directly against Uniswap Pool Info in 20-PoolId batches;
+ * - stops as soon as a pool containing the requested token is found;
+ * - removes launch-block dependence from the primary manual diagnostic path;
+ * - preserves historical Initialize windows only as a fallback when no active Uniswap identity is found;
+ * - diagnostic only: zero KV writes, zero scanner-budget requests, no scoring/Telegram/USD changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V794
  *
  * V794 DEEP VERIFIED LAUNCH-ANCHOR RECOVERY:
@@ -6862,7 +6872,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V794";
+const VERSION = "V795";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -41009,6 +41019,45 @@ function v4PoolSearchAutoTokenV792(state) {
   return null;
 }
 
+
+async function v4PoolSearchActivePoolReverseLookupV795(env, activeRows, token) {
+  const apiKey=String(env?.UNISWAP_API_KEY||"").trim();
+  const target=normalize(token);
+  const ids=[...new Set((Array.isArray(activeRows)?activeRows:[]).map(r=>normalize(r?.poolId)).filter(isBytes32HexV765))];
+  const out={attempted:false,ok:false,poolIdsAvailable:ids.length,poolIdsChecked:0,batchesAttempted:0,batchesOk:0,poolsReturned:0,matches:[],externalRequestsUsed:0,httpStatus:null,error:null};
+  if(!apiKey){out.error="UNISWAP_API_KEY_NOT_CONFIGURED";return out;}
+  if(!ids.length){out.error="NO_ACTIVE_POOLIDS";return out;}
+  out.attempted=true;
+  for(let i=0;i<ids.length;i+=20){
+    const chunk=ids.slice(i,i+20);
+    out.batchesAttempted++;
+    out.poolIdsChecked+=chunk.length;
+    try{
+      const response=await fetch("https://liquidity.api.uniswap.org/lp/pool_info",{
+        method:"POST",
+        headers:{"x-api-key":apiKey,"content-type":"application/json","accept":"application/json"},
+        body:JSON.stringify({protocol:"V4",poolReferences:chunk.map(referenceIdentifier=>({protocol:"V4",chainId:4663,referenceIdentifier})),chainId:4663,pageSize:Math.max(1,chunk.length),currentPage:1})
+      });
+      out.externalRequestsUsed++; out.httpStatus=response.status;
+      const text=await response.text(); let payload=null; try{payload=text?JSON.parse(text):null;}catch{}
+      if(!response.ok){out.error=payload?.detail||payload?.message||payload?.error||(text?text.slice(0,700):`HTTP_${response.status}`);continue;}
+      out.batchesOk++;
+      const pools=Array.isArray(payload?.pools)?payload.pools:[]; out.poolsReturned+=pools.length;
+      for(const row of pools){
+        const poolId=normalize(row?.poolReferenceIdentifier);
+        const tokenA=normalize(row?.tokenAddressA), tokenB=normalize(row?.tokenAddressB);
+        if(tokenA!==target && tokenB!==target) continue;
+        const activity=(Array.isArray(activeRows)?activeRows:[]).find(a=>normalize(a?.poolId)===poolId)||{};
+        out.matches.push({poolId,tokenA,tokenB,liquidity:row?.poolLiquidity??null,fee:row?.fee??null,tickSpacing:row?.tickSpacing??null,hook:normalize(row?.hookAddress)||null,freshSwapCount:safeNumber(activity?.freshSwapCount),lastFreshSwapBlock:activity?.lastFreshSwapBlock||null});
+      }
+      if(out.matches.length){out.ok=true;out.error=null;return out;}
+    }catch(error){out.externalRequestsUsed++;out.error=errorString(error);}
+  }
+  out.ok=out.batchesOk>0;
+  if(out.ok && !out.matches.length) out.error="TARGET_NOT_FOUND_IN_ACTIVE_POOLIDS";
+  return out;
+}
+
 async function v4PoolSearchDiagnosticV791(env, argument="") {
   const parts=String(argument||"").trim().split(/\s+/).filter(Boolean);
   const explicitToken=normalize(parts[0]||"");
@@ -41019,7 +41068,7 @@ async function v4PoolSearchDiagnosticV791(env, argument="") {
   const autoTarget=v4PoolSearchAutoTokenV792(state);
   const token=isAddress(explicitToken)?explicitToken:(isAddress(autoTarget?.tokenAddress)?normalize(autoTarget.tokenAddress):null);
   const base={
-    version:"V794",diagnostic:"MANUAL_V4_BIDIRECTIONAL_POOL_SEARCH",tokenAddress:token||null,
+    version:"V795",diagnostic:"MANUAL_V4_ACTIVE_POOL_REVERSE_SEARCH",tokenAddress:token||null,
     tokenSource:isAddress(explicitToken)?"EXPLICIT_ARGUMENT":(autoTarget?.source||"NONE"),
     launchBlock:null,launchAnchorSource:null,rpcProvider:null,head:null,recentFromBlock:null,recentToBlock:null,
     recentSwapRows:0,livePoolIds:0,windows:[],initializeRows:0,decodedTokenMatches:0,
@@ -41051,6 +41100,21 @@ async function v4PoolSearchDiagnosticV791(env, argument="") {
   const active=v4PoolLiveAggregateSwapRowsV768(swapRows);
   base.livePoolIds=active.length;
   const activeIds=new Set(active.map(r=>normalize(r?.poolId)).filter(isBytes32HexV765));
+
+  // V795: exact reverse lookup of the currently-active PoolIds through Uniswap Pool Info.
+  // This bypasses launch-anchor recovery entirely and stops immediately when a live pool
+  // containing the target token is identified. V771 already proved exhaustive batching.
+  const reverseV795=await v4PoolSearchActivePoolReverseLookupV795(env,active,token);
+  base.reverseLookupV795=reverseV795;
+  base.externalRequestsUsed+=safeNumber(reverseV795?.externalRequestsUsed);
+  if(Array.isArray(reverseV795?.matches) && reverseV795.matches.length){
+    base.matchingPoolIds=reverseV795.matches.map(r=>normalize(r?.poolId)).filter(isBytes32HexV765);
+    base.activeMatchingPoolIds=[...base.matchingPoolIds];
+    const hitSet=new Set(base.activeMatchingPoolIds);
+    base.matchingRecentSwapRows=swapRows.filter(log=>hitSet.has(normalize(log?.topics?.[1]))).length;
+    base.error=null;
+    return base;
+  }
 
   const span=Math.max(1,Math.min(250,safeNumber(VALIDATION_CLOUD_UNKNOWN_POOL_RANGE_BLOCKS_V630)||250));
   const anchored=anchor.block>0 && anchor.block<=headNum;
@@ -41104,13 +41168,18 @@ function v4PoolSearchTelegramV791(result){
   const r=result||{};
   const short=v=>{const s=String(v||"");return s.length>22?`${s.slice(0,12)}…${s.slice(-8)}`:(s||"NONE");};
   const lines=[
-    "🧬 <b>Manual V4 Pool Search — V794</b>","",
+    "🧬 <b>Manual V4 Pool Search — V795</b>","",
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
     `Token source: <b>${escapeHtml(String(r?.tokenSource||"NONE"))}</b>`,
     `Launch anchor: <b>${escapeHtml(String(r?.launchBlock??"NONE"))}</b> · ${escapeHtml(String(r?.launchAnchorSource||"NONE"))}`,
     `RPC: <b>${escapeHtml(String(r?.rpcProvider||"NONE"))}</b> · head <b>${escapeHtml(String(r?.head??"NONE"))}</b>`,
     `Recent swaps / live PoolIds: <b>${safeNumber(r?.recentSwapRows)} / ${safeNumber(r?.livePoolIds)}</b>`,"",
-    "🔎 <b>Bidirectional Initialize windows</b>"
+    "🦄 <b>Active PoolId reverse lookup — V795</b>",
+    `PoolIds checked: <b>${safeNumber(r?.reverseLookupV795?.poolIdsChecked)} / ${safeNumber(r?.reverseLookupV795?.poolIdsAvailable)}</b>`,
+    `Uniswap batches OK/attempted: <b>${safeNumber(r?.reverseLookupV795?.batchesOk)} / ${safeNumber(r?.reverseLookupV795?.batchesAttempted)}</b>`,
+    `Pools returned / token matches: <b>${safeNumber(r?.reverseLookupV795?.poolsReturned)} / ${safeNumber(r?.reverseLookupV795?.matches?.length)}</b>`,
+    r?.reverseLookupV795?.error?`Reverse lookup result: <code>${escapeHtml(String(r.reverseLookupV795.error).slice(0,300))}</code>`:"Reverse lookup result: <b>EXACT_ACTIVE_POOL_FOUND</b>","",
+    "🔎 <b>Historical Initialize fallback</b>"
   ];
   for(const w of Array.isArray(r?.windows)?r.windows:[]){
     lines.push(`${escapeHtml(String(w?.label||"WINDOW"))}: <b>${escapeHtml(String(w?.fromBlock??"?"))}→${escapeHtml(String(w?.toBlock??"?"))}</b> · ${w?.attempted===true?"attempted":"not attempted"} · ${w?.ok===true?"OK":"FAILED"} · rows <b>${safeNumber(w?.rows)}</b> · token matches <b>${safeNumber(w?.tokenMatches)}</b>${w?.error?` · <code>${escapeHtml(String(w.error).slice(0,180))}</code>`:""}`);
@@ -149705,7 +149774,7 @@ function telegramHelpV271() {
     "<code>/uniswapv4test [0xPOOLID]</code> — V765 one-request Uniswap V4 Pool Info test; auto-selects a retained PoolId when omitted",
     "<code>/v4marketstatus</code> — V773 show the last production market/liquidity completion result",
     "<code>/v4prodstatus</code> — V772 show the last production scanner V4/Uniswap enrichment result",
-    "<code>/v4poolsearch [0xTOKEN] [launchBlock]</code> — V793 manual Validation Cloud PoolId search; recovers verified launch anchors from persisted watched-token launchpad evidence, auto-selects latest cursor token and supports anchorless fallback (diagnostic only)",
+    "<code>/v4poolsearch [0xTOKEN] [launchBlock]</code> — V795 manual active-PoolId reverse search through Uniswap Pool Info, with historical Initialize fallback (diagnostic only)",
     "<code>/v4allpools [0xTOKEN]</code> — V771 verify all recent live V4 pools for a token + normalized BUY/SELL amounts using on-chain decimals",
     "<code>/v4swapamounts [0xTOKEN]</code> — V770 verify exact raw target/paired amounts for BUY vs SELL swaps on the discovered live pool",
     "<code>/v4swapdirection [0xTOKEN]</code> — V769 verify BUY/SELL direction from signed on-chain V4 Swap deltas on the discovered live pool",
