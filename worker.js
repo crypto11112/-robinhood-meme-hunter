@@ -2,6 +2,7 @@
  * Robinhood Chain Meme Hunter
  *
  * V766:
+ * - V767 adds /v4poollivecompare: diagnostic-only Uniswap Pool Info + direct recent PoolManager Swap-log comparison across retained candidate PoolIds, with no DexScreener dependency.
  * - Adds /v4poolcompare: diagnostic-only comparison of the scanner's retained V4 PoolIds vs DexScreener's currently most-active bytes32 Uniswap V4 pair and Uniswap Pool Info confirmation.
  * - Auto-selects the newest token with multiple retained V760 PoolIds when no token is supplied, specifically to expose wrong-pool selection without hard-coding a token.
  * - Uses one DexScreener request + one Uniswap Pool Info request; one KV read; zero KV writes; zero scanner-budget requests; no scoring/admission/collector changes.
@@ -6695,7 +6696,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V766";
+const VERSION = "V767";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -40180,6 +40181,241 @@ async function v4PoolCompareDiagnosticV766(env, requestedToken = "") {
     base.comparison.uniswapConfirmsDexPool = uni?.exactReferenceMatch === true;
   }
   return base;
+}
+
+
+function v4PoolLiveCandidateIdsV767(state, tokenAddress) {
+  const token = normalize(tokenAddress);
+  const out = [];
+  const seen = new Set();
+  const add = (poolId, source, tokenHint = null, symbol = null) => {
+    const id = normalize(poolId);
+    if (!isBytes32HexV765(id) || seen.has(id)) return;
+    seen.add(id);
+    out.push({poolId:id, source, tokenHint:normalize(tokenHint) || null, symbol:symbol || null});
+  };
+
+  // Token-specific V760/V763 admission history first.
+  for (const row of v4PoolCompareScannerRowsV766(state, token)) {
+    add(row?.poolId, "TOKEN_SPECIFIC_V760", token, row?.symbol || null);
+  }
+
+  // Important V767 cross-token check: V765 may have proven a pool containing this
+  // token even when that pool was originally retained under the paired token.
+  const latestExact = newestAutoPoolIdV765(state);
+  add(latestExact?.poolId, latestExact?.source || "LATEST_GLOBAL_EXACT_POOL", latestExact?.tokenAddress, latestExact?.symbol);
+
+  // Add a bounded set of recent exact-provider PoolIds globally, because a V4 pool
+  // can be discovered/retained from either currency side.
+  const events = Array.isArray(state?.rawAdmissionTelemetryV756?.recentEventsV760)
+    ? [...state.rawAdmissionTelemetryV756.recentEventsV760].reverse()
+    : [];
+  for (const event of events) {
+    const e = event?.evidence || {};
+    if (!(e?.exactProviderPoolMatch === true || e?.providerPoolIdV451Matches === true)) continue;
+    add(event?.poolId, "RECENT_GLOBAL_EXACT_PROVIDER_V760", event?.tokenAddress, event?.symbol);
+    if (out.length >= 8) break;
+  }
+
+  // Finally include current raw watches for the explicit token.
+  const entries = Object.values(state?.directionalExactPoolWatchV551?.entries || {});
+  for (const row of entries) {
+    if (normalize(row?.tokenAddress) !== token) continue;
+    add(row?.poolId, "CURRENT_RAW_WATCH_V740", token, row?.symbol || null);
+    if (out.length >= 8) break;
+  }
+  return out.slice(0,8);
+}
+
+function v4PoolLiveRpcEndpointV767(env) {
+  const vc = validationCloudRpcUrlV627(env);
+  if (vc) return {name:"VALIDATION_CLOUD", url:vc};
+  const cs = chainstackRpcUrlV431(env);
+  if (cs) return {name:"CHAINSTACK", url:cs};
+  const drpc = drpcRpcUrlV626(env);
+  if (drpc) return {name:"DRPC", url:drpc};
+  return {name:"ROBINHOOD_PUBLIC_RPC", url:PUBLIC_RPC};
+}
+
+async function v4PoolLiveRpcCallV767(url, method, params) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 9000);
+  try {
+    const response = await fetch(url, {
+      method:"POST",
+      headers:{"content-type":"application/json","accept":"application/json"},
+      body:JSON.stringify({jsonrpc:"2.0",id:767,method,params}),
+      signal:controller.signal
+    });
+    const text = await response.text();
+    let payload = null;
+    try { payload = text ? JSON.parse(text) : null; } catch {}
+    if (!response.ok || payload?.error) {
+      return {ok:false,httpStatus:response.status,result:null,error:payload?.error?.message || payload?.error?.code || (text ? text.slice(0,500) : `HTTP_${response.status}`)};
+    }
+    return {ok:true,httpStatus:response.status,result:payload?.result,error:null};
+  } catch (error) {
+    return {ok:false,httpStatus:null,result:null,error:error?.name === "AbortError" ? "TIMEOUT" : errorString(error)};
+  } finally { clearTimeout(timer); }
+}
+
+async function v4PoolInfoBatchV767(env, poolIds) {
+  const apiKey = String(env?.UNISWAP_API_KEY || "").trim();
+  const ids = [...new Set((poolIds || []).map(normalize).filter(isBytes32HexV765))].slice(0,8);
+  if (!apiKey) return {attempted:false,ok:false,httpStatus:null,pools:[],error:"UNISWAP_API_KEY_NOT_CONFIGURED",externalRequestsUsed:0};
+  if (!ids.length) return {attempted:false,ok:false,httpStatus:null,pools:[],error:"NO_POOLIDS",externalRequestsUsed:0};
+  try {
+    const response = await fetch("https://liquidity.api.uniswap.org/lp/pool_info", {
+      method:"POST",
+      headers:{"x-api-key":apiKey,"content-type":"application/json","accept":"application/json"},
+      body:JSON.stringify({
+        protocol:"V4",
+        poolReferences:ids.map(referenceIdentifier => ({protocol:"V4",chainId:4663,referenceIdentifier})),
+        chainId:4663,
+        pageSize:Math.max(1,ids.length),
+        currentPage:1
+      })
+    });
+    const text = await response.text();
+    let payload = null;
+    try { payload = text ? JSON.parse(text) : null; } catch {}
+    if (!response.ok) return {attempted:true,ok:false,httpStatus:response.status,pools:[],error:payload?.detail || payload?.message || payload?.error || (text?text.slice(0,700):`HTTP_${response.status}`),externalRequestsUsed:1};
+    const pools = (Array.isArray(payload?.pools)?payload.pools:[]).map(row => ({
+      poolId:normalize(row?.poolReferenceIdentifier) || null,
+      protocol:row?.poolProtocol || null,
+      chainId:safeNumber(row?.chainId) || null,
+      tokenA:normalize(row?.tokenAddressA) || null,
+      tokenB:normalize(row?.tokenAddressB) || null,
+      liquidity:row?.poolLiquidity ?? null,
+      reserve0:row?.token0Reserves ?? null,
+      reserve1:row?.token1Reserves ?? null,
+      currentTick:row?.currentTick ?? null,
+      fee:row?.fee ?? null,
+      tickSpacing:row?.tickSpacing ?? null,
+      hook:normalize(row?.hookAddress) || null
+    }));
+    return {attempted:true,ok:true,httpStatus:response.status,pools,error:null,externalRequestsUsed:1};
+  } catch (error) {
+    return {attempted:true,ok:false,httpStatus:null,pools:[],error:errorString(error),externalRequestsUsed:1};
+  }
+}
+
+async function v4PoolLiveCompareDiagnosticV767(env, requestedToken = "") {
+  const explicit = normalize(requestedToken);
+  let loaded = {state:{},error:null};
+  try { loaded = await readState(env); } catch (error) { loaded = {state:{},error:errorString(error)}; }
+  const state = loaded?.state || {};
+  const auto = v4PoolCompareAutoTokenV766(state);
+  const token = isAddress(explicit) ? explicit : auto?.tokenAddress;
+  const base = {
+    version:"V767", diagnostic:"V4_UNISWAP_AND_DIRECT_LOG_LIVE_COMPARE",
+    tokenAddress:token || null, tokenSource:isAddress(explicit)?"EXPLICIT_ARGUMENT":auto?.source || "AUTO_UNAVAILABLE",
+    kvRead:true, kvReadError:loaded?.error || null,
+    candidatePools:[], uniswap:{attempted:false,ok:false,httpStatus:null,error:null,poolsReturned:0},
+    rpc:{provider:null,head:null,fromBlock:null,toBlock:null,windowBlocks:600,headOk:false,logsOk:false,httpStatusHead:null,httpStatusLogs:null,errorHead:null,errorLogs:null},
+    freshSwapRows:0, freshSwapPools:0, bestLivePoolId:null,
+    externalRequestsUsed:0, scannerBudgetConsumed:false, stateWrites:0, hardRequestLimitChanged:false
+  };
+  if (!isAddress(token)) return {...base,error:"NO_VALID_TOKEN_AVAILABLE"};
+
+  const candidates = v4PoolLiveCandidateIdsV767(state, token);
+  if (!candidates.length) return {...base,error:"NO_RETAINED_V4_POOLIDS_AVAILABLE"};
+  base.candidatePools = candidates.map(c => ({...c,uniswapRecognized:false,containsToken:false,uniswapLiquidity:null,freshSwapCount:0,lastFreshSwapBlock:null}));
+
+  const uni = await v4PoolInfoBatchV767(env, candidates.map(c=>c.poolId));
+  base.externalRequestsUsed += safeNumber(uni?.externalRequestsUsed);
+  base.uniswap = {attempted:uni?.attempted===true,ok:uni?.ok===true,httpStatus:uni?.httpStatus??null,error:uni?.error||null,poolsReturned:Array.isArray(uni?.pools)?uni.pools.length:0};
+  const uniMap = new Map((uni?.pools||[]).map(p=>[normalize(p?.poolId),p]));
+  for (const row of base.candidatePools) {
+    const p = uniMap.get(normalize(row.poolId));
+    if (!p) continue;
+    row.uniswapRecognized = true;
+    row.containsToken = normalize(p?.tokenA) === token || normalize(p?.tokenB) === token;
+    row.uniswapTokenA = p?.tokenA || null;
+    row.uniswapTokenB = p?.tokenB || null;
+    row.uniswapLiquidity = p?.liquidity ?? null;
+    row.uniswapCurrentTick = p?.currentTick ?? null;
+    row.uniswapFee = p?.fee ?? null;
+    row.uniswapHook = p?.hook || null;
+  }
+
+  const tokenPools = base.candidatePools.filter(r=>r.uniswapRecognized===true && r.containsToken===true).map(r=>r.poolId);
+  if (!tokenPools.length) return {...base,error:uni?.ok===true?"UNISWAP_RECOGNIZED_NO_CANDIDATE_POOL_CONTAINING_TOKEN":(uni?.error||"UNISWAP_POOL_INFO_FAILED")};
+
+  const rpcEndpoint = v4PoolLiveRpcEndpointV767(env);
+  base.rpc.provider = rpcEndpoint.name;
+  const head = await v4PoolLiveRpcCallV767(rpcEndpoint.url,"eth_blockNumber",[]);
+  base.externalRequestsUsed += 1;
+  base.rpc.headOk = head?.ok===true;
+  base.rpc.httpStatusHead = head?.httpStatus??null;
+  base.rpc.errorHead = head?.error||null;
+  if (!head?.ok) return {...base,error:"HEAD_REQUEST_FAILED"};
+  const headNum = Number.parseInt(String(head.result||"0x0"),16);
+  if (!Number.isFinite(headNum) || headNum<=0) return {...base,error:"HEAD_UNVERIFIED"};
+  const from = Math.max(0,headNum-base.rpc.windowBlocks+1);
+  base.rpc.head = headNum; base.rpc.fromBlock=from; base.rpc.toBlock=headNum;
+
+  const logs = await v4PoolLiveRpcCallV767(rpcEndpoint.url,"eth_getLogs",[{
+    address:POOL_MANAGER,
+    fromBlock:`0x${from.toString(16)}`,
+    toBlock:`0x${headNum.toString(16)}`,
+    topics:[SWAP_TOPIC,tokenPools]
+  }]);
+  base.externalRequestsUsed += 1;
+  base.rpc.logsOk = logs?.ok===true;
+  base.rpc.httpStatusLogs = logs?.httpStatus??null;
+  base.rpc.errorLogs = logs?.error||null;
+  if (!logs?.ok) return {...base,error:"RECENT_SWAP_LOG_REQUEST_FAILED"};
+
+  const rows = Array.isArray(logs.result)?logs.result:[];
+  base.freshSwapRows = rows.length;
+  for (const log of rows) {
+    const poolId = normalize(Array.isArray(log?.topics)?log.topics[1]:null);
+    const block = Number.parseInt(String(log?.blockNumber||"0x0"),16);
+    const row = base.candidatePools.find(r=>normalize(r.poolId)===poolId);
+    if (!row) continue;
+    row.freshSwapCount = safeNumber(row.freshSwapCount)+1;
+    if (Number.isFinite(block) && block>safeNumber(row.lastFreshSwapBlock)) row.lastFreshSwapBlock=block;
+  }
+  base.freshSwapPools = base.candidatePools.filter(r=>safeNumber(r.freshSwapCount)>0).length;
+  const best = [...base.candidatePools].filter(r=>r.containsToken===true).sort((a,b)=>(safeNumber(b.freshSwapCount)-safeNumber(a.freshSwapCount)) || (safeNumber(b.lastFreshSwapBlock)-safeNumber(a.lastFreshSwapBlock)))[0] || null;
+  base.bestLivePoolId = best && safeNumber(best.freshSwapCount)>0 ? best.poolId : null;
+  return base;
+}
+
+function v4PoolLiveCompareTelegramV767(result) {
+  const r=result||{};
+  const short=v=>{const s=String(v||"");return s.length>22?`${s.slice(0,12)}…${s.slice(-8)}`:(s||"NONE");};
+  const lines=[
+    "🧬 <b>V4 Direct Live Pool Comparison — V767</b>","",
+    `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
+    `Token source: <b>${escapeHtml(String(r?.tokenSource||"UNVERIFIED"))}</b>`,
+    `Candidate PoolIds tested: <b>${Array.isArray(r?.candidatePools)?r.candidatePools.length:0}</b>`,"",
+    "🦄 <b>Uniswap Pool Info</b>",
+    `HTTP / OK: <b>${escapeHtml(String(r?.uniswap?.httpStatus??"N/A"))} / ${r?.uniswap?.ok===true?"YES":"NO"}</b>`,
+    `Pools returned: <b>${safeNumber(r?.uniswap?.poolsReturned)}</b>`,"",
+    "⛓ <b>Direct recent PoolManager Swap logs</b>",
+    `RPC: <b>${escapeHtml(String(r?.rpc?.provider||"UNVERIFIED"))}</b>`,
+    `Head: <b>${escapeHtml(String(r?.rpc?.head??"UNVERIFIED"))}</b>`,
+    `Window: <b>${escapeHtml(String(r?.rpc?.fromBlock??"?"))}→${escapeHtml(String(r?.rpc?.toBlock??"?"))}</b> (${safeNumber(r?.rpc?.windowBlocks)} blocks)`,
+    `eth_getLogs: <b>${r?.rpc?.logsOk===true?"OK":"FAILED"}</b> · returned Swap rows <b>${safeNumber(r?.freshSwapRows)}</b>`,
+    `Pools with fresh swaps: <b>${safeNumber(r?.freshSwapPools)}</b>`,"",
+    "🔬 <b>Pool-by-pool result</b>"
+  ];
+  if (Array.isArray(r?.candidatePools) && r.candidatePools.length) {
+    for (const row of r.candidatePools) {
+      lines.push(`• <code>${escapeHtml(short(row?.poolId))}</code> · ${escapeHtml(String(row?.source||"UNKNOWN"))}`);
+      lines.push(`  Uniswap recognized ${row?.uniswapRecognized===true?"YES":"NO"} · contains token ${row?.containsToken===true?"YES":"NO"} · fresh swaps <b>${safeNumber(row?.freshSwapCount)}</b> · latest block <b>${row?.lastFreshSwapBlock??"NONE"}</b>`);
+      if (row?.uniswapRecognized===true) lines.push(`  liquidity ${escapeHtml(String(row?.uniswapLiquidity??"UNVERIFIED"))} · token A/B <code>${escapeHtml(short(row?.uniswapTokenA))}</code> / <code>${escapeHtml(short(row?.uniswapTokenB))}</code>`);
+    }
+  } else lines.push("No candidate pools retained.");
+  lines.push("",`🏁 Best currently-live PoolId: <code>${escapeHtml(short(r?.bestLivePoolId))}</code>`,
+    r?.rpc?.errorHead?`Head error: <code>${escapeHtml(String(r.rpc.errorHead).slice(0,400))}</code>`:"Head error: <b>NONE</b>",
+    r?.rpc?.errorLogs?`Logs error: <code>${escapeHtml(String(r.rpc.errorLogs).slice(0,400))}</code>`:"Logs error: <b>NONE</b>",
+    r?.uniswap?.error?`Uniswap error: <code>${escapeHtml(String(r.uniswap.error).slice(0,400))}</code>`:"Uniswap error: <b>NONE</b>",
+    r?.error?`Diagnostic result: <code>${escapeHtml(String(r.error).slice(0,400))}</code>`:"Diagnostic result: <b>COMPLETE</b>","",
+    `<i>Diagnostic only: ${safeNumber(r?.externalRequestsUsed)} external requests, one KV read, zero KV writes and zero scanner-budget requests. Uses Uniswap Pool Info plus direct PoolManager Swap logs; DexScreener is not used.</i>`);
+  return lines.join("\\n");
 }
 
 function v4PoolCompareTelegramV766(result) {
@@ -147227,6 +147463,7 @@ function telegramHelpV271() {
     "<code>/cmctest [0xADDRESS]</code> — V738 CoinMarketCap Robinhood Chain coverage test (diagnostic only)",
     "<code>/uniswaptest</code> — V764 one-request Uniswap Trade API POST quote test (diagnostic only)",
     "<code>/uniswapv4test [0xPOOLID]</code> — V765 one-request Uniswap V4 Pool Info test; auto-selects a retained PoolId when omitted",
+    "<code>/v4poollivecompare [0xTOKEN]</code> — V767 compare retained PoolIds via Uniswap Pool Info + direct recent PoolManager Swap logs (no DexScreener)",
     "<code>/v4poolcompare [0xTOKEN]</code> — V766 compare scanner PoolIds vs DexScreener active V4 pair + Uniswap Pool Info confirmation",
     "<code>/cmcusage</code> — V739 CoinMarketCap bot-side monthly request meter (read-only)",
     "<code>/poolwatch</code> — V748 raw exact-pool range/log/decode trace diagnostic (read-only)",
@@ -148064,6 +148301,31 @@ async function telegramCommandReplyV271(
   }
 
 
+
+
+  if (parsed.command === "/v4poollivecompare") {
+    const compareV767 = await v4PoolLiveCompareDiagnosticV767(env, parsed.argument || "");
+    const replyV767 = v4PoolLiveCompareTelegramV767(compareV767);
+    if (diagnosticV273) {
+      diagnosticV273.replyAttempted = true;
+      diagnosticV273.v4PoolLiveCompareV767 = {
+        tokenAddress:compareV767?.tokenAddress || null,
+        bestLivePoolId:compareV767?.bestLivePoolId || null,
+        freshSwapRows:safeNumber(compareV767?.freshSwapRows),
+        freshSwapPools:safeNumber(compareV767?.freshSwapPools),
+        externalRequestsUsed:safeNumber(compareV767?.externalRequestsUsed), scannerBudgetConsumed:false, stateWrites:0
+      };
+    }
+    const sentV767 = await sendTelegram(env, replyV767, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV767?.success === true;
+      diagnosticV273.telegramStatus = sentV767?.status || null;
+      diagnosticV273.telegramMode = sentV767?.mode || null;
+      diagnosticV273.telegramError = sentV767?.error || null;
+      diagnosticV273.result = sentV767?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV767?.success===true, ignored:false, command:parsed.command, v4PoolLiveCompareV767:compareV767};
+  }
 
   if (parsed.command === "/v4poolcompare") {
     const compareV766 = await v4PoolCompareDiagnosticV766(env, parsed.argument || "");
@@ -153863,6 +154125,16 @@ async function handleRequest(
     );
   }
 
+
+
+  if (path === "/v4poollivecompare") {
+    return jsonResponse(
+      await v4PoolLiveCompareDiagnosticV767(
+        env,
+        url.searchParams.get("token") || ""
+      )
+    );
+  }
 
   if (path === "/v4poolcompare") {
     return jsonResponse(
