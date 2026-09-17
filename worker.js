@@ -1,5 +1,13 @@
 /**
- * Robinhood Chain Meme Hunter — V763
+ * Robinhood Chain Meme Hunter
+ *
+ * V764:
+ * - Adds a one-request read-only Uniswap Trade API diagnostic at /uniswaptest and Telegram /uniswaptest.
+ * - Uses the existing UNISWAP_API_KEY server-side and the existing POST /v1/quote integration shape.
+ * - Reports configuration, HTTP status, verified output/routing, and exact API error without exposing the key.
+ * - Adds zero scanner-budget requests, zero KV writes, and changes no scanner/scoring/admission/collector logic.
+ *
+ * — V763
  * AUTHORITATIVE RUNTIME VERSION: V763
  *
  * V763 FRESH ON-CHAIN RAW ADMISSION GATE — TARGETED CORRECTION:
@@ -6677,7 +6685,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V763";
+const VERSION = "V764";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -39621,6 +39629,157 @@ async function getUniswapEthUsdGReferenceV196(
         errorString(error)
     };
   }
+}
+
+async function uniswapTradeApiDiagnosticV764(env) {
+  const apiKey = String(env.UNISWAP_API_KEY || "").trim();
+  const base = {
+    version: "V764",
+    diagnostic: "UNISWAP_TRADE_API_POST_QUOTE",
+    apiKeyConfigured: Boolean(apiKey),
+    apiKeyExposed: false,
+    endpoint: UNISWAP_TRADE_API_V196,
+    method: "POST",
+    chainId: 4663,
+    tokenIn: ZERO,
+    tokenOut: CANONICAL_USDG_V179,
+    amount: ONE_NATIVE_ETH_WEI_V196,
+    attempted: false,
+    httpStatus: null,
+    ok: false,
+    verified: false,
+    routing: null,
+    outputRaw: null,
+    priceUsdGPerWeth: null,
+    error: null,
+    externalRequestsUsed: 0,
+    scannerBudgetConsumed: false,
+    stateWrites: 0,
+    hardRequestLimitChanged: false
+  };
+
+  if (!apiKey) {
+    return {
+      ...base,
+      error: "UNISWAP_API_KEY_NOT_CONFIGURED"
+    };
+  }
+
+  try {
+    const response = await fetch(
+      UNISWAP_TRADE_API_V196,
+      {
+        method: "POST",
+        headers: {
+          "x-api-key": apiKey,
+          "content-type": "application/json",
+          accept: "application/json",
+          "x-erc20eth-enabled": "false"
+        },
+        body: JSON.stringify({
+          type: "EXACT_INPUT",
+          amount: ONE_NATIVE_ETH_WEI_V196,
+          tokenInChainId: 4663,
+          tokenOutChainId: 4663,
+          tokenIn: ZERO,
+          tokenOut: CANONICAL_USDG_V179,
+          swapper: UNISWAP_REFERENCE_SWAPPER_V196,
+          routingPreference: "BEST_PRICE",
+          slippageTolerance: 0.5
+        })
+      }
+    );
+
+    const httpStatus = response.status;
+    let payload = null;
+    let rawText = null;
+    try {
+      rawText = await response.text();
+      payload = rawText ? JSON.parse(rawText) : null;
+    } catch {
+      payload = null;
+    }
+
+    if (!response.ok) {
+      return {
+        ...base,
+        attempted: true,
+        httpStatus,
+        externalRequestsUsed: 1,
+        error:
+          payload?.detail ||
+          payload?.error ||
+          payload?.message ||
+          payload?.errors?.[0]?.message ||
+          (rawText ? String(rawText).slice(0, 500) : `HTTP_${httpStatus}`)
+      };
+    }
+
+    const quote = payload?.quote || null;
+    const output = quote?.output || quote?.aggregatedOutputs?.[0] || null;
+    const outputToken = normalize(output?.token);
+    const outputRaw = String(output?.amount || output?.startAmount || "").trim();
+    let outputBigInt = null;
+    try { outputBigInt = BigInt(outputRaw); } catch { outputBigInt = null; }
+
+    const outputVerified =
+      outputToken === CANONICAL_USDG_V179 &&
+      outputBigInt !== null &&
+      outputBigInt > 0n;
+
+    let priceUsdGPerWeth = null;
+    if (outputVerified) {
+      const amount = bigintDecimalToNumberV187(
+        outputBigInt,
+        CANONICAL_USDG_DECIMALS_V179
+      );
+      if (Number.isFinite(amount) && amount > 0) {
+        priceUsdGPerWeth = amount;
+      }
+    }
+
+    return {
+      ...base,
+      attempted: true,
+      httpStatus,
+      ok: true,
+      verified: outputVerified && Number.isFinite(priceUsdGPerWeth),
+      routing: payload?.routing || null,
+      outputRaw: outputRaw || null,
+      priceUsdGPerWeth,
+      externalRequestsUsed: 1,
+      error:
+        outputVerified
+          ? null
+          : "QUOTE_OUTPUT_UNVERIFIED"
+    };
+  } catch (error) {
+    return {
+      ...base,
+      attempted: true,
+      externalRequestsUsed: 1,
+      error: errorString(error)
+    };
+  }
+}
+
+function uniswapTradeApiDiagnosticTelegramV764(result) {
+  const r = result || {};
+  return [
+    "🦄 <b>Uniswap Trade API Test — V764</b>",
+    "",
+    `UNISWAP_API_KEY: <b>${r.apiKeyConfigured===true?"CONFIGURED":"NOT CONFIGURED"}</b>`,
+    `Request: <b>${escapeHtml(String(r.method || "POST"))}</b> <code>/v1/quote</code>`,
+    `Robinhood Chain: <b>${escapeHtml(String(r.chainId ?? 4663))}</b>`,
+    `HTTP: <b>${escapeHtml(String(r.httpStatus ?? "N/A"))}</b>`,
+    `API response: <b>${r.ok===true?"OK":"FAILED"}</b>`,
+    `Quote output verified: <b>${r.verified===true?"YES":"NO"}</b>`,
+    `Routing: <b>${escapeHtml(String(r.routing || "UNVERIFIED"))}</b>`,
+    `ETH→USDG reference: <b>${Number.isFinite(Number(r.priceUsdGPerWeth))?Number(r.priceUsdGPerWeth).toFixed(6):"UNVERIFIED"}</b>`,
+    r.error ? `Error: <code>${escapeHtml(String(r.error).slice(0,500))}</code>` : "Error: <b>NONE</b>",
+    "",
+    `<i>Diagnostic only: ${safeNumber(r.externalRequestsUsed)} external request, zero scanner-budget requests, zero KV writes. API key is never displayed.</i>`
+  ].join("\\n");
 }
 
 async function getV3WethUsdGReferenceV195(
@@ -146633,6 +146792,7 @@ function telegramHelpV271() {
     "<code>/evidenceaudit</code> — evidence-completion regression audit (read-only)",
     "<code>/datacoverage</code> — V734 hotfixed free-provider/data + V732 pool-bridge audit (read-only)",
     "<code>/cmctest [0xADDRESS]</code> — V738 CoinMarketCap Robinhood Chain coverage test (diagnostic only)",
+    "<code>/uniswaptest</code> — V764 one-request Uniswap Trade API POST quote test (diagnostic only)",
     "<code>/cmcusage</code> — V739 CoinMarketCap bot-side monthly request meter (read-only)",
     "<code>/poolwatch</code> — V748 raw exact-pool range/log/decode trace diagnostic (read-only)",
     "<code>/poolmatch</code> — V747 selected-vs-provider/canonical pool activity + persisted-watch reselection diagnostic (read-only)",
@@ -147468,6 +147628,48 @@ async function telegramCommandReplyV271(
     };
   }
 
+
+  if (parsed.command === "/uniswaptest") {
+    const uniswapV764 = await uniswapTradeApiDiagnosticV764(env);
+    const replyV764 = uniswapTradeApiDiagnosticTelegramV764(uniswapV764);
+    if (diagnosticV273) {
+      diagnosticV273.replyAttempted = true;
+      diagnosticV273.uniswapTestV764 = {
+        apiKeyConfigured: uniswapV764?.apiKeyConfigured === true,
+        attempted: uniswapV764?.attempted === true,
+        httpStatus: uniswapV764?.httpStatus ?? null,
+        ok: uniswapV764?.ok === true,
+        verified: uniswapV764?.verified === true,
+        externalRequestsUsed: safeNumber(uniswapV764?.externalRequestsUsed),
+        scannerBudgetConsumed: false,
+        stateWrites: 0,
+        hardGlobalLimitUnchanged: 42
+      };
+    }
+    const sentV764 = await sendTelegram(env, replyV764, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV764?.success === true;
+      diagnosticV273.telegramStatus = sentV764?.status || null;
+      diagnosticV273.telegramMode = sentV764?.mode || null;
+      diagnosticV273.telegramError = sentV764?.error || null;
+      diagnosticV273.result = sentV764?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {
+      success: sentV764?.success === true,
+      ignored: false,
+      command: parsed.command,
+      uniswapTestV764: {
+        apiKeyConfigured: uniswapV764?.apiKeyConfigured === true,
+        attempted: uniswapV764?.attempted === true,
+        httpStatus: uniswapV764?.httpStatus ?? null,
+        ok: uniswapV764?.ok === true,
+        verified: uniswapV764?.verified === true,
+        externalRequestsUsed: safeNumber(uniswapV764?.externalRequestsUsed),
+        scannerBudgetConsumed: false,
+        stateWrites: 0
+      }
+    };
+  }
 
   if (parsed.command === "/cmctest") {
     const cmcV738 = await coinMarketCapCoverageTestV738(env, parsed.argument);
@@ -153151,6 +153353,12 @@ async function handleRequest(
       await health(
         env
       )
+    );
+  }
+
+  if (path === "/uniswaptest") {
+    return jsonResponse(
+      await uniswapTradeApiDiagnosticV764(env)
     );
   }
 
