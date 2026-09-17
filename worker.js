@@ -1,6 +1,12 @@
 /**
- * Robinhood Chain Meme Hunter — V761
- * AUTHORITATIVE RUNTIME VERSION: V761
+ * Robinhood Chain Meme Hunter — V762
+ * AUTHORITATIVE RUNTIME VERSION: V762
+ *
+ * V762 FREE-PROVIDER SUFFICIENCY AUDIT — DIAGNOSTIC ONLY:
+ * - Aggregates the existing V760 admission traces and V761 upstream snapshots across scans.
+ * - Counts exact provider↔PoolId matches with current activity versus exact matches returning zero 5m/1h activity.
+ * - Separately counts upstream exact-identity, raw-lane eligibility, provider-market verification and provider-current-activity coverage.
+ * - Adds zero provider/RPC requests, no new request slots, no scoring/qualification/collector/admission changes, and hard request cap remains 42.
  *
  * V761 RAW-LANE UPSTREAM ELIGIBILITY TRACE — DIAGNOSTIC ONLY:
  * - Persists one bounded latest-scan snapshot showing why analysed candidates do or do not enter the V740 raw exact-pool lane before V755 admission.
@@ -6664,7 +6670,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V761";
+const VERSION = "V762";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -76267,6 +76273,72 @@ function rawWatchCurrentActivityAdmissionV755(state, candidate, latestNumber) {
   };
 }
 
+function rawProviderSufficiencyAuditRootV762(state) {
+  if (!state.rawProviderSufficiencyAuditV762 || typeof state.rawProviderSufficiencyAuditV762 !== "object") {
+    state.rawProviderSufficiencyAuditV762 = {
+      schema:"RAW_PROVIDER_SUFFICIENCY_AUDIT_V762",
+      startedAt:Date.now(), updatedAt:null,
+      admissionEvents:0, providerMarketVerifiedAdmissions:0,
+      exactProviderIdentityMatches:0, exactProviderIdentityMatchesWithCurrentActivity:0, exactProviderIdentityMatchesWithoutCurrentActivity:0,
+      providerCurrentActivityAdmissions:0, onChainCurrentActivityAdmissions:0,
+      upstreamScans:0, upstreamCandidates:0, upstreamIdentityVerified:0, upstreamRawEligible:0,
+      upstreamProviderMarketVerified:0, upstreamProviderCurrentActivity:0,
+      recentAdmissions:[], recentUpstreamScans:[]
+    };
+  }
+  const a = state.rawProviderSufficiencyAuditV762;
+  a.recentAdmissions = Array.isArray(a.recentAdmissions) ? a.recentAdmissions : [];
+  a.recentUpstreamScans = Array.isArray(a.recentUpstreamScans) ? a.recentUpstreamScans : [];
+  return a;
+}
+
+function rawProviderSufficiencyAdmissionRecordV762(state, admission, candidate, accepted) {
+  const a = rawProviderSufficiencyAuditRootV762(state);
+  const now = Date.now();
+  const exactMatch = admission?.exactProviderPoolMatch === true || admission?.providerPoolIdV451Matches === true;
+  const providerCurrent = admission?.providerCurrentActivity === true;
+  const retainedGap = admission?.retainedSwapGapBlocks;
+  const onChainCurrent = safeNumber(admission?.poolSpecificSwaps) > 0 ||
+    (retainedGap != null && Number.isFinite(Number(retainedGap)) && Number(retainedGap) <= RAW_MULTI_POOL_FRESH_SWAP_BLOCKS_V749);
+  a.admissionEvents = safeNumber(a.admissionEvents) + 1;
+  if (admission?.providerMarketVerified === true) a.providerMarketVerifiedAdmissions = safeNumber(a.providerMarketVerifiedAdmissions) + 1;
+  if (exactMatch) {
+    a.exactProviderIdentityMatches = safeNumber(a.exactProviderIdentityMatches) + 1;
+    if (providerCurrent) a.exactProviderIdentityMatchesWithCurrentActivity = safeNumber(a.exactProviderIdentityMatchesWithCurrentActivity) + 1;
+    else a.exactProviderIdentityMatchesWithoutCurrentActivity = safeNumber(a.exactProviderIdentityMatchesWithoutCurrentActivity) + 1;
+  }
+  if (providerCurrent) a.providerCurrentActivityAdmissions = safeNumber(a.providerCurrentActivityAdmissions) + 1;
+  if (onChainCurrent) a.onChainCurrentActivityAdmissions = safeNumber(a.onChainCurrentActivityAdmissions) + 1;
+  a.recentAdmissions.push({
+    at:now, tokenAddress:normalize(candidate?.address) || null, symbol:candidate?.symbol || null, poolId:admission?.poolId || null,
+    accepted:accepted === true, exactProviderIdentityMatch:exactMatch, providerMarketVerified:admission?.providerMarketVerified === true,
+    providerCurrentActivity:providerCurrent, onChainCurrentActivity:onChainCurrent,
+    provider5mTransactions:safeNumber(admission?.provider5mTransactions), provider1hTransactions:safeNumber(admission?.provider1hTransactions),
+    provider5mVolumeUsd:safeNumber(admission?.provider5mVolumeUsd), provider1hVolumeUsd:safeNumber(admission?.provider1hVolumeUsd),
+    providerSource:admission?.providerSource || null, reasons:Array.isArray(admission?.reasons) ? admission.reasons.slice(0,4) : []
+  });
+  if (a.recentAdmissions.length > 20) a.recentAdmissions = a.recentAdmissions.slice(-20);
+  a.updatedAt = now;
+}
+
+function rawProviderSufficiencyUpstreamRecordV762(state, snapshot) {
+  const a = rawProviderSufficiencyAuditRootV762(state);
+  const now = Date.now();
+  a.upstreamScans = safeNumber(a.upstreamScans) + 1;
+  a.upstreamCandidates = safeNumber(a.upstreamCandidates) + safeNumber(snapshot?.totalCandidates);
+  a.upstreamIdentityVerified = safeNumber(a.upstreamIdentityVerified) + safeNumber(snapshot?.identityVerifiedCount);
+  a.upstreamRawEligible = safeNumber(a.upstreamRawEligible) + safeNumber(snapshot?.rawEligibleCount);
+  a.upstreamProviderMarketVerified = safeNumber(a.upstreamProviderMarketVerified) + safeNumber(snapshot?.providerMarketVerifiedCount);
+  a.upstreamProviderCurrentActivity = safeNumber(a.upstreamProviderCurrentActivity) + safeNumber(snapshot?.providerCurrentActivityCount);
+  a.recentUpstreamScans.push({
+    at:now, totalCandidates:safeNumber(snapshot?.totalCandidates), identityVerifiedCount:safeNumber(snapshot?.identityVerifiedCount),
+    rawEligibleCount:safeNumber(snapshot?.rawEligibleCount), providerMarketVerifiedCount:safeNumber(snapshot?.providerMarketVerifiedCount),
+    providerCurrentActivityCount:safeNumber(snapshot?.providerCurrentActivityCount)
+  });
+  if (a.recentUpstreamScans.length > 20) a.recentUpstreamScans = a.recentUpstreamScans.slice(-20);
+  a.updatedAt = now;
+}
+
 function rawAdmissionTelemetryRootV756(state) {
   if (!state.rawAdmissionTelemetryV756 || typeof state.rawAdmissionTelemetryV756 !== "object") {
     state.rawAdmissionTelemetryV756 = {
@@ -76313,6 +76385,7 @@ function rawAdmissionRecordV756(state, admission, accepted, candidate) {
   t.recentEventsV760.push(event);
   if (t.recentEventsV760.length > 16) t.recentEventsV760 = t.recentEventsV760.slice(-16);
   t.updatedAt = now;
+  rawProviderSufficiencyAdmissionRecordV762(state, admission, candidate, accepted);
   return event;
 }
 
@@ -78300,6 +78373,33 @@ function poolWatchDiagnosticTelegramV741(state) {
     lines.push("", "🧭 <b>V761 raw-lane upstream eligibility trace</b>", "No V761 upstream snapshot retained yet.");
   }
 
+  const providerAuditV762 = state?.rawProviderSufficiencyAuditV762 || null;
+  if (providerAuditV762) {
+    lines.push(
+      "",
+      "📊 <b>V762 free-provider sufficiency audit</b>",
+      `Admission events: <b>${safeNumber(providerAuditV762?.admissionEvents)}</b> · provider market verified <b>${safeNumber(providerAuditV762?.providerMarketVerifiedAdmissions)}</b>`,
+      `Exact provider↔PoolId matches: <b>${safeNumber(providerAuditV762?.exactProviderIdentityMatches)}</b>`,
+      `• exact match + current provider activity: <b>${safeNumber(providerAuditV762?.exactProviderIdentityMatchesWithCurrentActivity)}</b>`,
+      `• exact match + ZERO current provider activity: <b>${safeNumber(providerAuditV762?.exactProviderIdentityMatchesWithoutCurrentActivity)}</b>`,
+      `Provider-current activity admissions: <b>${safeNumber(providerAuditV762?.providerCurrentActivityAdmissions)}</b> · on-chain-current activity admissions: <b>${safeNumber(providerAuditV762?.onChainCurrentActivityAdmissions)}</b>`,
+      `Upstream scans/candidates: <b>${safeNumber(providerAuditV762?.upstreamScans)} / ${safeNumber(providerAuditV762?.upstreamCandidates)}</b>`,
+      `Upstream identity verified / raw eligible: <b>${safeNumber(providerAuditV762?.upstreamIdentityVerified)} / ${safeNumber(providerAuditV762?.upstreamRawEligible)}</b>`,
+      `Upstream provider market verified / current activity: <b>${safeNumber(providerAuditV762?.upstreamProviderMarketVerified)} / ${safeNumber(providerAuditV762?.upstreamProviderCurrentActivity)}</b>`,
+      `Audit since: <code>${escapeHtml(fmtTime(providerAuditV762?.startedAt))}</code>`
+    );
+    const recentV762 = Array.isArray(providerAuditV762?.recentAdmissions) ? providerAuditV762.recentAdmissions.slice(-5).reverse() : [];
+    for (const row of recentV762) {
+      const tokenShort = row?.tokenAddress ? `${row.tokenAddress.slice(0,8)}…${row.tokenAddress.slice(-6)}` : "UNVERIFIED";
+      lines.push(
+        `• <b>${escapeHtml(row?.symbol || "TOKEN")}</b> ${escapeHtml(tokenShort)} · exact ${row?.exactProviderIdentityMatch === true ? "YES" : "NO"} · provider current ${row?.providerCurrentActivity === true ? "YES" : "NO"} · on-chain current ${row?.onChainCurrentActivity === true ? "YES" : "NO"}`,
+        `  activity 5m tx ${safeNumber(row?.provider5mTransactions)} / $${safeNumber(row?.provider5mVolumeUsd).toFixed(2)} · 1h tx ${safeNumber(row?.provider1hTransactions)} / $${safeNumber(row?.provider1hVolumeUsd).toFixed(2)} · ${escapeHtml(row?.providerSource || "UNVERIFIED")}`
+      );
+    }
+  } else {
+    lines.push("", "📊 <b>V762 free-provider sufficiency audit</b>", "No V762 audit evidence retained yet.");
+  }
+
   lines.push(
     "",
     "🧪 <b>V753 raw-watch lifecycle removals</b>",
@@ -78385,7 +78485,7 @@ function poolWatchDiagnosticTelegramV741(state) {
 
   lines.push(
     "",
-    "<i>Read-only command: zero provider requests, zero scanner-budget requests and zero state writes. V748/V753 diagnostics are measurement-only; V753 records lifecycle removal telemetry on existing scan state and adds zero provider/RPC requests, zero request slots and no scoring/qualification changes. V758 changes telemetry authority/display only and uses the proven V756 persisted admission store. V760 adds bounded persisted admission-decision diagnostics only; V761 adds a bounded latest-scan upstream raw-lane eligibility snapshot. Neither changes V755 admission behavior.</i>"
+    "<i>Read-only command: zero provider requests, zero scanner-budget requests and zero state writes. V748/V753 diagnostics are measurement-only; V753 records lifecycle removal telemetry on existing scan state and adds zero provider/RPC requests, zero request slots and no scoring/qualification changes. V758 changes telemetry authority/display only and uses the proven V756 persisted admission store. V760 adds bounded persisted admission-decision diagnostics only; V761 adds a bounded latest-scan upstream raw-lane eligibility snapshot; V762 aggregates those observations into a persistent provider-sufficiency audit. None changes V755 admission behavior.</i>"
   );
   return lines.join("\n");
 }
@@ -98463,6 +98563,7 @@ for (
       admissionChanged:false,
       hardGlobalLimitUnchanged:42
     };
+    rawProviderSufficiencyUpstreamRecordV762(state, state.rawLaneUpstreamTraceV761);
   } catch (errorV761) {
     state.rawLaneUpstreamTraceV761 = {
       schema:"RAW_LANE_UPSTREAM_TRACE_V761",
