@@ -1,6 +1,13 @@
 /**
  * Robinhood Chain Meme Hunter
  *
+ * V773:
+ * - Preserves the proven V772 production V4/Uniswap bridge unchanged.
+ * - Adds one bounded free market/liquidity completion attempt for the same V772 production target when its market remains unverified.
+ * - Reuses the existing GeckoTerminal verifier, cooldowns, per-scan gates and request budget; no new provider and no threshold/ceiling increase.
+ * - Only an existing market.verified=true result is promoted; no Uniswap raw-liquidity value is treated as USD.
+ * - Adds /v4marketstatus read-only Telegram status.
+ *
  * V772:
  * - Production integration of the verified free V4/Uniswap path: enriches at most one highest-priority under-evidenced scanner candidate per run using one recent PoolManager Swap query plus up to two Uniswap Pool Info batches.
  * - Feeds verified current V4 swap activity into existing activity/Momentum/Opportunity/Confidence recomputation without inferring USD value, changing thresholds, or raising the hard 42-request ceiling.
@@ -6716,7 +6723,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V772";
+const VERSION = "V773";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -91994,6 +92001,198 @@ async function enrichCandidateWithProductionV4V772(
 }
 
 
+/* =========================================================
+   V773 PRODUCTION MARKET / LIQUIDITY COMPLETION BRIDGE
+   =========================================================
+   Purpose:
+   - Reuse the exact candidate proven active by V772.
+   - Give that candidate ONE bounded free GeckoTerminal completion chance only
+     when market evidence is still unverified.
+   - Reuse all existing GeckoTerminal cooldown, fresh-spacing, scan-limit,
+     provider-health and analysis-budget guards.
+   - Never infer USD liquidity from Uniswap poolLiquidity/raw liquidity.
+   - Never change Telegram thresholds or the global/analysis request ceilings.
+*/
+function refreshCandidateAfterVerifiedMarketV773(candidate, state) {
+  if (!candidate || candidate?.market?.verified !== true) {
+    return {refreshed:false, reason:"MARKET_NOT_VERIFIED_V773"};
+  }
+
+  const historical = getHistoricalSnapshot(state, candidate.address);
+  candidate.momentum = momentumAnalysis(
+    historical,
+    candidate.market,
+    candidate.holders,
+    candidate.liveMomentumActivityV152,
+    candidate.ponsCurveFlowV216
+  );
+  candidate.marketQuality = marketQuality(candidate.market);
+  candidate.launchStage = launchStage(candidate.market);
+  candidate.risk = scoreRisk(
+    candidate.validation,
+    candidate.market,
+    candidate.holders,
+    candidate.activity,
+    candidate.whaleFlow
+  );
+  candidate.opportunity = scoreOpportunity(
+    candidate.validation,
+    candidate.market,
+    candidate.holders,
+    candidate.activity,
+    candidate.momentum,
+    candidate.marketQuality,
+    candidate.whaleFlow,
+    candidate.launchStage
+  );
+  candidate.signalConfirmation = signalConfirmation(candidate);
+  candidate.confidence = candidateConfidence(candidate);
+  evidenceQualityProtectionV158(candidate);
+  opportunityConfirmationCalibrationV253(candidate, {
+    refreshRaw:true,
+    phase:"V773_PRODUCTION_MARKET_LIQUIDITY_RECOMPUTE"
+  });
+  candidate.holderBreadthV136 = healthyHolderBreadthV136(candidate.holders);
+  candidate.analysisPriority = analysisPriority(candidate);
+
+  return {
+    refreshed:true,
+    opportunityAfter:safeNumber(candidate?.opportunity?.score),
+    momentumAfter:safeNumber(candidate?.momentum?.score),
+    confidenceAfter:safeNumber(candidate?.confidence?.score),
+    marketQualityAfter:candidate?.marketQuality?.verified === true
+      ? safeNumber(candidate?.marketQuality?.score)
+      : null
+  };
+}
+
+async function enrichProductionMarketLiquidityV773(
+  env,
+  state,
+  budget,
+  candidate,
+  productionV4EnrichmentV772
+) {
+  const token = normalize(candidate?.address);
+  const base = {
+    attempted:false,
+    applied:false,
+    tokenAddress:token || null,
+    v4Applied:productionV4EnrichmentV772?.applied === true,
+    provider:"GECKOTERMINAL",
+    externalRequestsUsed:0,
+    scannerBudgetConsumed:true,
+    marketVerifiedBefore:candidate?.market?.verified === true,
+    marketVerifiedAfter:candidate?.market?.verified === true,
+    liquidityVerifiedAfter:
+      candidate?.market?.verified === true &&
+      safeNumber(candidate?.market?.liquidityUsd) > 0,
+    status:"NOT_ATTEMPTED_V773",
+    error:null
+  };
+
+  if (!isAddress(token)) return {...base,status:"INVALID_TOKEN_V773"};
+  if (productionV4EnrichmentV772?.applied !== true) {
+    return {...base,status:"V772_ACTIVITY_NOT_APPLIED_V773"};
+  }
+  if (candidate?.market?.verified === true) {
+    return {
+      ...base,
+      applied:true,
+      status:"MARKET_ALREADY_VERIFIED_BEFORE_V773",
+      source:candidate?.market?.source || null,
+      priceUsd:candidate?.market?.priceUsd ?? null,
+      liquidityUsd:candidate?.market?.liquidityUsd ?? null,
+      opportunityAfter:safeNumber(candidate?.opportunity?.score),
+      momentumAfter:safeNumber(candidate?.momentum?.score),
+      confidenceAfter:safeNumber(candidate?.confidence?.score)
+    };
+  }
+
+  if (!budgetAvailable(budget,"analysis",1)) {
+    return {...base,status:"NO_ANALYSIS_HEADROOM_V773"};
+  }
+
+  const watched = Array.isArray(state?.watchedTokens)
+    ? state.watchedTokens.find(row => normalize(row?.address) === token) || null
+    : null;
+
+  const beforeUsed = safeNumber(budget?.totalUsed);
+  base.attempted = true;
+
+  let marketResult = null;
+  try {
+    marketResult = await geckoTerminalMarketData(
+      token,
+      budget,
+      watched,
+      state,
+      "V773_PRODUCTION_V4_MARKET_COMPLETION"
+    );
+  } catch (error) {
+    return {
+      ...base,
+      externalRequestsUsed:Math.max(0,safeNumber(budget?.totalUsed)-beforeUsed),
+      status:"GECKOTERMINAL_EXCEPTION_V773",
+      error:errorString(error)
+    };
+  }
+
+  const used = Math.max(0,safeNumber(budget?.totalUsed)-beforeUsed);
+  base.externalRequestsUsed = used;
+
+  if (marketResult?.verified !== true) {
+    return {
+      ...base,
+      status:marketResult?.status || "MARKET_STILL_UNVERIFIED_V773",
+      source:marketResult?.source || "GECKOTERMINAL",
+      providerResult:marketResult?.status || null,
+      freshEligibleAt:marketResult?.freshEligibleAt ?? null,
+      cooldownUntil:marketResult?.cooldownUntil ?? null
+    };
+  }
+
+  const liquidityUsd = safeNumber(marketResult?.liquidityUsd);
+  if (!(liquidityUsd > 0)) {
+    return {
+      ...base,
+      status:"VERIFIED_MARKET_WITHOUT_POSITIVE_LIQUIDITY_V773",
+      source:marketResult?.source || "GECKOTERMINAL",
+      priceUsd:marketResult?.priceUsd ?? null,
+      liquidityUsd:marketResult?.liquidityUsd ?? null
+    };
+  }
+
+  candidate.market = marketResult;
+  const refresh = refreshCandidateAfterVerifiedMarketV773(candidate,state);
+  candidate.productionMarketLiquidityV773 = {
+    verified:true,
+    source:marketResult?.source || "GECKOTERMINAL",
+    status:"PRODUCTION_MARKET_LIQUIDITY_APPLIED_V773",
+    recordedAt:Date.now(),
+    liquidityUsd,
+    priceUsd:marketResult?.priceUsd ?? null
+  };
+
+  return {
+    ...base,
+    applied:true,
+    marketVerifiedAfter:true,
+    liquidityVerifiedAfter:true,
+    status:"PRODUCTION_MARKET_LIQUIDITY_APPLIED_V773",
+    source:marketResult?.source || "GECKOTERMINAL",
+    priceUsd:marketResult?.priceUsd ?? null,
+    liquidityUsd,
+    marketCap:marketResult?.marketCap ?? null,
+    fdv:marketResult?.fdv ?? null,
+    refresh,
+    opportunityAfter:safeNumber(candidate?.opportunity?.score),
+    momentumAfter:safeNumber(candidate?.momentum?.score),
+    confidenceAfter:safeNumber(candidate?.confidence?.score)
+  };
+}
+
+
 async function scan(
   env,
   options = {}
@@ -97510,6 +97709,44 @@ for (
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
     version: "V772"
+  };
+
+  /*
+   * V773: once V772 has proven real current V4 activity for the selected
+   * production candidate, give that SAME candidate one bounded chance to
+   * complete verified price/liquidity through the bot's established free
+   * GeckoTerminal verifier. Existing provider gates and request ceilings remain.
+   */
+  let productionMarketLiquidityV773 = {
+    attempted:false,
+    applied:false,
+    status:"NO_V772_TARGET_V773",
+    tokenAddress:productionV4TargetV772?.address || null,
+    externalRequestsUsed:0,
+    scannerBudgetConsumed:true
+  };
+
+  if (productionV4TargetV772) {
+    productionMarketLiquidityV773 = await enrichProductionMarketLiquidityV773(
+      env,
+      state,
+      budget,
+      productionV4TargetV772,
+      productionV4EnrichmentV772
+    );
+
+    productionV4TargetV772.productionMarketLiquidityV773 =
+      productionMarketLiquidityV773;
+
+    candidates.sort((a,b) =>
+      safeNumber(b?.analysisPriority) - safeNumber(a?.analysisPriority)
+    );
+  }
+
+  state.productionMarketLiquidityV773 = {
+    ...(productionMarketLiquidityV773 || {}),
+    recordedAt:Date.now(),
+    version:"V773"
   };
 
   const currentLiveMeasurementCoverageV645Result =
@@ -148354,6 +148591,7 @@ function telegramHelpV271() {
     "<code>/cmctest [0xADDRESS]</code> — V738 CoinMarketCap Robinhood Chain coverage test (diagnostic only)",
     "<code>/uniswaptest</code> — V764 one-request Uniswap Trade API POST quote test (diagnostic only)",
     "<code>/uniswapv4test [0xPOOLID]</code> — V765 one-request Uniswap V4 Pool Info test; auto-selects a retained PoolId when omitted",
+    "<code>/v4marketstatus</code> — V773 show the last production market/liquidity completion result",
     "<code>/v4prodstatus</code> — V772 show the last production scanner V4/Uniswap enrichment result",
     "<code>/v4allpools [0xTOKEN]</code> — V771 verify all recent live V4 pools for a token + normalized BUY/SELL amounts using on-chain decimals",
     "<code>/v4swapamounts [0xTOKEN]</code> — V770 verify exact raw target/paired amounts for BUY vs SELL swaps on the discovered live pool",
@@ -149198,6 +149436,24 @@ async function telegramCommandReplyV271(
 
 
 
+
+  if (parsed.command === "/v4marketstatus") {
+    const stateV773 = await readState(env);
+    const resultV773 = stateV773?.state?.productionMarketLiquidityV773 || {
+      status:"NO_RECORDED_SCAN_YET_V773"
+    };
+    const replyV773 = productionMarketLiquidityStatusTelegramV773(resultV773);
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV773 = await sendTelegram(env, replyV773, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV773?.success === true;
+      diagnosticV273.telegramStatus = sentV773?.status || null;
+      diagnosticV273.telegramMode = sentV773?.mode || null;
+      diagnosticV273.telegramError = sentV773?.error || null;
+      diagnosticV273.result = sentV773?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV773?.success===true,ignored:false,command:parsed.command,productionMarketLiquidityV773:resultV773};
+  }
 
   if (parsed.command === "/v4prodstatus") {
     const stateV772 = await readState(env);
@@ -154984,6 +155240,37 @@ async function goldRushV3SwapDiagnosticV710(
   };
 }
 
+
+function productionMarketLiquidityStatusTelegramV773(result) {
+  const r = result || {};
+  const short = v => {
+    const x = String(v || "");
+    return x.length > 22 ? `${x.slice(0,12)}…${x.slice(-8)}` : (x || "NONE");
+  };
+  const money = v => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? `$${n.toLocaleString("en-US",{maximumFractionDigits:2})}` : "UNVERIFIED";
+  };
+  return [
+    "💧 <b>Production Market / Liquidity Bridge — V773</b>",
+    "",
+    `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
+    `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
+    `V4 activity applied first: <b>${r?.v4Applied === true ? "YES" : "NO"}</b>`,
+    `Attempted / applied: <b>${r?.attempted === true ? "YES" : "NO"} / ${r?.applied === true ? "YES" : "NO"}</b>`,
+    `Status: <code>${escapeHtml(String(r?.status || "NO_RECORDED_SCAN_YET_V773"))}</code>`,
+    `Provider/source: <b>${escapeHtml(String(r?.source || r?.provider || "N/A"))}</b>`,
+    `Extra requests used: <b>${safeNumber(r?.externalRequestsUsed)}</b>`,
+    "",
+    `Market verified: <b>${r?.marketVerifiedAfter === true ? "YES" : "NO"}</b>`,
+    `Liquidity verified: <b>${r?.liquidityVerifiedAfter === true ? "YES" : "NO"}</b>`,
+    `Price: <b>${money(r?.priceUsd)}</b>`,
+    `Liquidity: <b>${money(r?.liquidityUsd)}</b>`,
+    `Momentum / Opportunity / Confidence after: <b>${safeNumber(r?.momentumAfter)} / ${safeNumber(r?.opportunityAfter)} / ${safeNumber(r?.confidenceAfter)}</b>`,
+    "",
+    "<i>V773 reuses the existing free market verifier and its cooldown/budget rules. It never treats raw Uniswap liquidity as USD and changes no Telegram thresholds.</i>"
+  ].join("\\n");
+}
 
 function productionV4StatusTelegramV772(result) {
   const r = result || {};
