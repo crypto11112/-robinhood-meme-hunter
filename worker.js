@@ -1,6 +1,12 @@
 /**
  * Robinhood Chain Meme Hunter
  *
+ * V771:
+ * - Preserves the verified V770 raw-amount decoder, V769 BUY/SELL direction logic and V768 RPC -> Uniswap identification path.
+ * - Adds /v4allpools: diagnostic-only coverage across the full recent live V4 PoolManager set (bounded to 800 PoolIds / 40 Uniswap batches), identifies every currently-live pool containing the token, and aggregates exact BUY/SELL raw amounts per pool.
+ * - Adds on-chain ERC-20 symbol + decimals reads for the target and paired currencies, then reports normalized token amounts without introducing any USD-price assumption.
+ * - Reuses the single recent PoolManager log pull for all matching pools; no extra per-pool log requests, no KV writes, no scanner-budget requests and no scoring/admission/collector changes.
+ *
  * V770:
  * - Preserves V769 directional swap decoding and the proven V768 RPC -> Uniswap live-pool path.
  * - Adds /v4swapamounts: diagnostic-only exact raw target-token and paired-token amount aggregation for BUY vs SELL swaps.
@@ -6707,7 +6713,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V768";
+const VERSION = "V771";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -40774,6 +40780,187 @@ function v4SwapAmountsTelegramV770(result) {
   if (r?.rejectedSwaps>0) lines.push(`Reject reasons: <code>${escapeHtml(JSON.stringify(r?.rejectReasons||{}).slice(0,500))}</code>`,"");
   lines.push(r?.error?`Diagnostic result: <code>${escapeHtml(String(r.error).slice(0,500))}</code>`:"Diagnostic result: <b>RAW_SWAP_AMOUNTS_VERIFIED</b>","",
     `<i>Diagnostic only: ${safeNumber(r?.externalRequestsUsed)} external requests, one KV read, zero KV writes, zero scanner-budget requests. V770 reports exact raw integer units only; no decimals, prices or USD values are assumed.</i>`);
+  return lines.join("\\n");
+}
+
+
+
+function formatRawUnitsV771(raw, decimals) {
+  try {
+    const value = BigInt(String(raw ?? "0"));
+    const d = Number(decimals);
+    if (!Number.isInteger(d) || d < 0 || d > 255) return null;
+    const neg = value < 0n;
+    const n = neg ? -value : value;
+    if (d === 0) return `${neg?"-":""}${n.toString()}`;
+    let digits = n.toString();
+    if (digits.length <= d) digits = digits.padStart(d + 1, "0");
+    const whole = digits.slice(0, -d) || "0";
+    let frac = digits.slice(-d).replace(/0+$/, "");
+    return `${neg?"-":""}${whole}${frac?`.${frac}`:""}`;
+  } catch { return null; }
+}
+
+async function v4PoolInfoAllRecentV771(env, poolIds, maxIds=800) {
+  const apiKey = String(env?.UNISWAP_API_KEY || "").trim();
+  const allIds = [...new Set((poolIds || []).map(normalize).filter(isBytes32HexV765))];
+  const ids = allIds.slice(0, Math.max(1, Math.min(800, safeNumber(maxIds)||800)));
+  if (!apiKey) return {attempted:false,ok:false,httpStatus:null,pools:[],error:"UNISWAP_API_KEY_NOT_CONFIGURED",externalRequestsUsed:0,batches:0,successfulBatches:0,idsRequested:0,totalIdsAvailable:allIds.length,truncated:false};
+  if (!ids.length) return {attempted:false,ok:false,httpStatus:null,pools:[],error:"NO_POOLIDS",externalRequestsUsed:0,batches:0,successfulBatches:0,idsRequested:0,totalIdsAvailable:allIds.length,truncated:false};
+
+  const pools=[]; let externalRequestsUsed=0,lastHttpStatus=null,lastError=null,okBatches=0;
+  const chunks=[]; for(let i=0;i<ids.length;i+=20) chunks.push(ids.slice(i,i+20));
+  for (const chunk of chunks) {
+    try {
+      const response=await fetch("https://liquidity.api.uniswap.org/lp/pool_info",{
+        method:"POST",
+        headers:{"x-api-key":apiKey,"content-type":"application/json","accept":"application/json"},
+        body:JSON.stringify({protocol:"V4",poolReferences:chunk.map(referenceIdentifier=>({protocol:"V4",chainId:4663,referenceIdentifier})),chainId:4663,pageSize:Math.max(1,chunk.length),currentPage:1})
+      });
+      externalRequestsUsed+=1; lastHttpStatus=response.status;
+      const text=await response.text(); let payload=null; try{payload=text?JSON.parse(text):null;}catch{}
+      if(!response.ok){lastError=payload?.detail||payload?.message||payload?.error||(text?text.slice(0,700):`HTTP_${response.status}`);continue;}
+      okBatches+=1;
+      for(const row of (Array.isArray(payload?.pools)?payload.pools:[])) pools.push({
+        poolId:normalize(row?.poolReferenceIdentifier)||null,protocol:row?.poolProtocol||null,chainId:safeNumber(row?.chainId)||null,
+        tokenA:normalize(row?.tokenAddressA)||null,tokenB:normalize(row?.tokenAddressB)||null,liquidity:row?.poolLiquidity??null,
+        reserve0:row?.token0Reserves??null,reserve1:row?.token1Reserves??null,currentTick:row?.currentTick??null,
+        fee:row?.fee??null,tickSpacing:row?.tickSpacing??null,hook:normalize(row?.hookAddress)||null
+      });
+    } catch(error){externalRequestsUsed+=1;lastError=errorString(error);}
+  }
+  return {attempted:externalRequestsUsed>0,ok:okBatches===chunks.length,httpStatus:lastHttpStatus,pools,error:okBatches===chunks.length?null:lastError,externalRequestsUsed,batches:chunks.length,successfulBatches:okBatches,idsRequested:ids.length,totalIdsAvailable:allIds.length,truncated:allIds.length>ids.length};
+}
+
+async function v4Erc20MetaV771(rpcUrl, token) {
+  const address=normalize(token);
+  const out={address,symbol:null,decimals:null,symbolVerified:false,decimalsVerified:false,externalRequestsUsed:0,error:null};
+  if(!isAddress(address)) return {...out,error:"INVALID_TOKEN_ADDRESS"};
+  if(address==="0x0000000000000000000000000000000000000000") return {...out,symbol:"NATIVE",decimals:18,symbolVerified:true,decimalsVerified:true};
+  const symbol=await v4PoolLiveRpcCallV767(rpcUrl,"eth_call",[{to:address,data:"0x95d89b41"},"latest"]); out.externalRequestsUsed+=1;
+  const decimals=await v4PoolLiveRpcCallV767(rpcUrl,"eth_call",[{to:address,data:"0x313ce567"},"latest"]); out.externalRequestsUsed+=1;
+  if(symbol?.ok){const d=decodeErc20ProbeValueV419("symbol",symbol.result);if(d?.verified){out.symbol=d.value;out.symbolVerified=true;}}
+  if(decimals?.ok){const d=decodeErc20ProbeValueV419("decimals",decimals.result);if(d?.verified && Number.isInteger(d.value) && d.value>=0 && d.value<=255){out.decimals=d.value;out.decimalsVerified=true;}}
+  if(!out.symbolVerified||!out.decimalsVerified) out.error=`${!out.symbolVerified?"SYMBOL_UNVERIFIED":""}${!out.symbolVerified&&!out.decimalsVerified?"+":""}${!out.decimalsVerified?"DECIMALS_UNVERIFIED":""}`;
+  return out;
+}
+
+async function v4AllPoolsAmountsDiagnosticV771(env, requestedToken="") {
+  const explicit=normalize(requestedToken);
+  let loaded={state:{},error:null}; try{loaded=await readState(env);}catch(error){loaded={state:{},error:errorString(error)};}
+  const state=loaded?.state||{}; const auto=v4PoolCompareAutoTokenV766(state); const token=isAddress(explicit)?explicit:auto?.tokenAddress;
+  const base={
+    version:"V771",diagnostic:"V4_ALL_RECENT_LIVE_POOLS_NORMALIZED_AMOUNTS",tokenAddress:token||null,tokenSource:isAddress(explicit)?"EXPLICIT_ARGUMENT":auto?.source||"AUTO_UNAVAILABLE",
+    kvRead:true,kvReadError:loaded?.error||null,rpcProvider:null,head:null,fromBlock:null,toBlock:null,windowBlocks:600,
+    recentSwapRows:0,uniqueLivePoolIds:0,poolIdsCheckedByUniswap:0,coverageTruncated:false,coverageComplete:false,
+    uniswap:{ok:false,httpStatus:null,error:null,batches:0,successfulBatches:0,poolsReturned:0},matchingLivePools:0,
+    targetMetadata:null,metadataComplete:false,metadataAddressesRequested:0,metadataAddressesSkipped:0,
+    pools:[],allPoolTargetBuyRaw:"0",allPoolTargetSellRaw:"0",allPoolTargetNetRaw:"0",allPoolTargetBuy:null,allPoolTargetSell:null,allPoolTargetNet:null,
+    pairedTotals:{},decodedSwaps:0,buySwaps:0,sellSwaps:0,rejectedSwaps:0,rejectReasons:{},latestSwapBlock:null,
+    externalRequestsUsed:0,scannerBudgetConsumed:false,stateWrites:0,error:null
+  };
+  if(!isAddress(token)) return {...base,error:"NO_VALID_TOKEN_AVAILABLE"};
+  const rpcEndpoint=v4PoolLiveRpcEndpointV767(env); base.rpcProvider=rpcEndpoint.name;
+  const head=await v4PoolLiveRpcCallV767(rpcEndpoint.url,"eth_blockNumber",[]); base.externalRequestsUsed+=1;
+  if(!head?.ok) return {...base,error:`HEAD_REQUEST_FAILED:${head?.error||"UNKNOWN"}`};
+  const headNum=Number.parseInt(String(head.result||"0x0"),16); if(!Number.isFinite(headNum)||headNum<=0) return {...base,error:"HEAD_UNVERIFIED"};
+  const from=Math.max(0,headNum-base.windowBlocks+1); base.head=headNum;base.fromBlock=from;base.toBlock=headNum;
+  const logs=await v4PoolLiveRpcCallV767(rpcEndpoint.url,"eth_getLogs",[{address:POOL_MANAGER,fromBlock:`0x${from.toString(16)}`,toBlock:`0x${headNum.toString(16)}`,topics:[SWAP_TOPIC]}]); base.externalRequestsUsed+=1;
+  if(!logs?.ok) return {...base,error:`RECENT_SWAP_LOG_REQUEST_FAILED:${logs?.error||"UNKNOWN"}`};
+  const rows=Array.isArray(logs.result)?logs.result:[]; base.recentSwapRows=rows.length;
+  const active=v4PoolLiveAggregateSwapRowsV768(rows); base.uniqueLivePoolIds=active.length;
+  if(!active.length) return {...base,error:"NO_RECENT_V4_SWAP_POOLS_IN_WINDOW"};
+
+  // Bound at 800 PoolIds so the diagnostic stays below the Worker free-plan subrequest ceiling in ordinary use.
+  const uni=await v4PoolInfoAllRecentV771(env,active.map(r=>r.poolId),800); base.externalRequestsUsed+=safeNumber(uni?.externalRequestsUsed);
+  base.poolIdsCheckedByUniswap=safeNumber(uni?.idsRequested); base.coverageTruncated=uni?.truncated===true; base.coverageComplete=uni?.truncated!==true && safeNumber(uni?.successfulBatches)===safeNumber(uni?.batches);
+  base.uniswap={ok:uni?.ok===true,httpStatus:uni?.httpStatus??null,error:uni?.error||null,batches:safeNumber(uni?.batches),successfulBatches:safeNumber(uni?.successfulBatches),poolsReturned:Array.isArray(uni?.pools)?uni.pools.length:0};
+  if(!uni?.ok && !(Array.isArray(uni?.pools)&&uni.pools.length)) return {...base,error:uni?.error||"UNISWAP_POOL_INFO_FAILED"};
+
+  const activeMap=new Map(active.map(a=>[normalize(a.poolId),a]));
+  const matches=(uni?.pools||[]).filter(p=>normalize(p?.tokenA)===token||normalize(p?.tokenB)===token).map(p=>({...p,...(activeMap.get(normalize(p.poolId))||{})}));
+  matches.sort((a,b)=>(safeNumber(b.freshSwapCount)-safeNumber(a.freshSwapCount))||(safeNumber(b.lastFreshSwapBlock)-safeNumber(a.lastFreshSwapBlock)));
+  base.matchingLivePools=matches.length;
+  if(!matches.length) return {...base,error:"NO_RECENT_UNISWAP_V4_POOL_CONTAINING_TOKEN"};
+
+  // Metadata is bounded dynamically so even a very large live-pool universe cannot explode external subrequests.
+  const metaAddresses=[token,...new Set(matches.map(p=>normalize(p.tokenA)===token?normalize(p.tokenB):normalize(p.tokenA)).filter(isAddress))];
+  const metadataBudget=Math.max(0,48-base.externalRequestsUsed); // keep two-request safety headroom below 50.
+  const maxMetaAddresses=Math.floor(metadataBudget/2);
+  const requestedMeta=metaAddresses.slice(0,maxMetaAddresses); base.metadataAddressesRequested=requestedMeta.length;base.metadataAddressesSkipped=Math.max(0,metaAddresses.length-requestedMeta.length);
+  const metaMap=new Map();
+  for(const addr of requestedMeta){const m=await v4Erc20MetaV771(rpcEndpoint.url,addr);base.externalRequestsUsed+=safeNumber(m?.externalRequestsUsed);metaMap.set(normalize(addr),m);}
+  base.targetMetadata=metaMap.get(token)||null;
+  base.metadataComplete=base.metadataAddressesSkipped===0 && requestedMeta.every(a=>metaMap.get(normalize(a))?.decimalsVerified===true);
+
+  const rowMap=new Map();
+  for(const row of rows){const id=normalize(row?.topics?.[1]);if(!rowMap.has(id))rowMap.set(id,[]);rowMap.get(id).push(row);}
+  let totalBuyTarget=0n,totalSellTarget=0n;
+  const pairedAgg=new Map();
+  for(const pool of matches){
+    const poolId=normalize(pool.poolId);const a=normalize(pool.tokenA),b=normalize(pool.tokenB);const pair=token===a?b:a;
+    const probe={poolId,uniswapTokenA:a,uniswapTokenB:b};
+    let buyT=0n,buyP=0n,sellT=0n,sellP=0n,decoded=0,buy=0,sell=0,rejected=0,latest=null;const reasons={};
+    for(const row of (rowMap.get(poolId)||[])){
+      const d=v4SwapDirectionDecodeV769(row,token,probe);
+      if(!d?.verified){rejected++;base.rejectedSwaps++;const reason=d?.status||"UNKNOWN_REJECT";reasons[reason]=safeNumber(reasons[reason])+1;base.rejectReasons[reason]=safeNumber(base.rejectReasons[reason])+1;continue;}
+      let tr,pr;try{tr=BigInt(d.candidateRawAmount||"0");pr=BigInt(d.counterRawAmount||"0");}catch{rejected++;base.rejectedSwaps++;reasons.RAW_AMOUNT_PARSE_FAILED_V771=safeNumber(reasons.RAW_AMOUNT_PARSE_FAILED_V771)+1;base.rejectReasons.RAW_AMOUNT_PARSE_FAILED_V771=safeNumber(base.rejectReasons.RAW_AMOUNT_PARSE_FAILED_V771)+1;continue;}
+      if(tr<=0n||pr<=0n){rejected++;base.rejectedSwaps++;reasons.NON_POSITIVE_RAW_AMOUNT_V771=safeNumber(reasons.NON_POSITIVE_RAW_AMOUNT_V771)+1;base.rejectReasons.NON_POSITIVE_RAW_AMOUNT_V771=safeNumber(base.rejectReasons.NON_POSITIVE_RAW_AMOUNT_V771)+1;continue;}
+      decoded++;base.decodedSwaps++;if(d.side==="BUY"){buy++;base.buySwaps++;buyT+=tr;buyP+=pr;}else{sell++;base.sellSwaps++;sellT+=tr;sellP+=pr;}
+      if(safeNumber(d.blockNumber)>safeNumber(latest))latest=d.blockNumber;if(safeNumber(d.blockNumber)>safeNumber(base.latestSwapBlock))base.latestSwapBlock=d.blockNumber;
+    }
+    totalBuyTarget+=buyT;totalSellTarget+=sellT;
+    const prior=pairedAgg.get(pair)||{buyPaid:0n,sellReceived:0n,buySwaps:0,sellSwaps:0};prior.buyPaid+=buyP;prior.sellReceived+=sellP;prior.buySwaps+=buy;prior.sellSwaps+=sell;pairedAgg.set(pair,prior);
+    const tm=metaMap.get(token)||null,pm=metaMap.get(pair)||null;
+    base.pools.push({poolId,pairedToken:pair,freshSwapCount:safeNumber(pool.freshSwapCount),lastFreshSwapBlock:pool.lastFreshSwapBlock??null,liquidity:pool.liquidity??null,fee:pool.fee??null,tickSpacing:pool.tickSpacing??null,hook:pool.hook||null,
+      decodedSwaps:decoded,buySwaps:buy,sellSwaps:sell,rejectedSwaps:rejected,rejectReasons:reasons,
+      targetSymbol:tm?.symbol||null,targetDecimals:tm?.decimals??null,pairedSymbol:pm?.symbol||null,pairedDecimals:pm?.decimals??null,
+      buyTargetRaw:buyT.toString(),sellTargetRaw:sellT.toString(),buyPairedRaw:buyP.toString(),sellPairedRaw:sellP.toString(),
+      buyTarget:tm?.decimalsVerified?formatRawUnitsV771(buyT,tm.decimals):null,sellTarget:tm?.decimalsVerified?formatRawUnitsV771(sellT,tm.decimals):null,
+      buyPaired:pm?.decimalsVerified?formatRawUnitsV771(buyP,pm.decimals):null,sellPaired:pm?.decimalsVerified?formatRawUnitsV771(sellP,pm.decimals):null});
+  }
+  base.allPoolTargetBuyRaw=totalBuyTarget.toString();base.allPoolTargetSellRaw=totalSellTarget.toString();base.allPoolTargetNetRaw=(totalBuyTarget-totalSellTarget).toString();
+  if(base.targetMetadata?.decimalsVerified){base.allPoolTargetBuy=formatRawUnitsV771(totalBuyTarget,base.targetMetadata.decimals);base.allPoolTargetSell=formatRawUnitsV771(totalSellTarget,base.targetMetadata.decimals);base.allPoolTargetNet=formatRawUnitsV771(totalBuyTarget-totalSellTarget,base.targetMetadata.decimals);}
+  for(const [pair,v] of pairedAgg){const m=metaMap.get(pair)||null;base.pairedTotals[pair]={symbol:m?.symbol||null,decimals:m?.decimals??null,buyPaidRaw:v.buyPaid.toString(),sellReceivedRaw:v.sellReceived.toString(),buyPaid:m?.decimalsVerified?formatRawUnitsV771(v.buyPaid,m.decimals):null,sellReceived:m?.decimalsVerified?formatRawUnitsV771(v.sellReceived,m.decimals):null,buySwaps:v.buySwaps,sellSwaps:v.sellSwaps};}
+  if(!base.decodedSwaps) return {...base,error:"NO_ALL_POOL_SWAPS_DECODED"};
+  return base;
+}
+
+function v4AllPoolsTelegramV771(result){
+  const r=result||{};const short=v=>{const s=String(v||"");return s.length>22?`${s.slice(0,12)}…${s.slice(-8)}`:(s||"NONE");};
+  const meta=r?.targetMetadata||{};const lines=[
+    "🧮 <b>V4 All-Live-Pool Amount Diagnostic — V771</b>","",
+    `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>${meta?.symbol?` · <b>${escapeHtml(String(meta.symbol))}</b>`:""}`,
+    `Target decimals: <b>${meta?.decimalsVerified===true?escapeHtml(String(meta.decimals)):"UNVERIFIED"}</b>`,
+    `RPC: <b>${escapeHtml(String(r?.rpcProvider||"UNVERIFIED"))}</b> · window <b>${escapeHtml(String(r?.fromBlock??"?"))}→${escapeHtml(String(r?.toBlock??"?"))}</b>`,
+    `Recent Swap rows: <b>${safeNumber(r?.recentSwapRows)}</b> · unique live PoolIds <b>${safeNumber(r?.uniqueLivePoolIds)}</b>`,"",
+    "🦄 <b>Uniswap live-pool coverage</b>",
+    `PoolIds checked: <b>${safeNumber(r?.poolIdsCheckedByUniswap)}/${safeNumber(r?.uniqueLivePoolIds)}</b>`,
+    `Batches: <b>${safeNumber(r?.uniswap?.successfulBatches)}/${safeNumber(r?.uniswap?.batches)}</b> · HTTP <b>${escapeHtml(String(r?.uniswap?.httpStatus??"N/A"))}</b>`,
+    `Coverage: <b>${r?.coverageComplete===true?"COMPLETE":r?.coverageTruncated===true?"TRUNCATED":"PARTIAL"}</b>`,
+    `Live pools containing token: <b>${safeNumber(r?.matchingLivePools)}</b>`,"",
+    "🔬 <b>Per-pool decoded amounts</b>"
+  ];
+  const pools=Array.isArray(r?.pools)?r.pools:[];
+  if(!pools.length) lines.push("No matching pool amounts decoded.");
+  for(const p of pools.slice(0,12)){
+    lines.push(`• <code>${escapeHtml(short(p?.poolId))}</code> · swaps <b>${safeNumber(p?.decodedSwaps)}</b> (${safeNumber(p?.buySwaps)} BUY / ${safeNumber(p?.sellSwaps)} SELL) · rejected <b>${safeNumber(p?.rejectedSwaps)}</b>`);
+    lines.push(`  Pair: <b>${escapeHtml(String(p?.pairedSymbol||"UNKNOWN"))}</b> <code>${escapeHtml(short(p?.pairedToken))}</code> · decimals ${p?.pairedDecimals??"UNVERIFIED"}`);
+    lines.push(`  Target BUY / SELL: <b>${escapeHtml(String(p?.buyTarget??p?.buyTargetRaw??"0"))}</b> / <b>${escapeHtml(String(p?.sellTarget??p?.sellTargetRaw??"0"))}</b>`);
+    lines.push(`  Pair paid / received: <b>${escapeHtml(String(p?.buyPaired??p?.buyPairedRaw??"0"))}</b> / <b>${escapeHtml(String(p?.sellPaired??p?.sellPairedRaw??"0"))}</b>`);
+  }
+  if(pools.length>12) lines.push(`… ${pools.length-12} additional matching pools omitted from Telegram display but included in JSON diagnostic.`);
+  lines.push("","⚖️ <b>All-pool target-token total</b>",
+    `BUY: <b>${escapeHtml(String(r?.allPoolTargetBuy??r?.allPoolTargetBuyRaw??"0"))}</b>`,
+    `SELL: <b>${escapeHtml(String(r?.allPoolTargetSell??r?.allPoolTargetSellRaw??"0"))}</b>`,
+    `BUY−SELL: <b>${escapeHtml(String(r?.allPoolTargetNet??r?.allPoolTargetNetRaw??"0"))}</b>`,
+    `Decoded swaps: <b>${safeNumber(r?.decodedSwaps)}</b> · rejected <b>${safeNumber(r?.rejectedSwaps)}</b>`,
+    `Metadata: <b>${r?.metadataComplete===true?"COMPLETE":"PARTIAL"}</b> · addresses ${safeNumber(r?.metadataAddressesRequested)} checked / ${safeNumber(r?.metadataAddressesSkipped)} skipped`,""
+  );
+  if(r?.uniswap?.error) lines.push(`Uniswap note: <code>${escapeHtml(String(r.uniswap.error).slice(0,500))}</code>`);
+  if(r?.rejectedSwaps>0) lines.push(`Reject reasons: <code>${escapeHtml(JSON.stringify(r?.rejectReasons||{}).slice(0,500))}</code>`);
+  lines.push(r?.error?`Diagnostic result: <code>${escapeHtml(String(r.error).slice(0,500))}</code>`:"Diagnostic result: <b>ALL_LIVE_V4_POOL_AMOUNTS_VERIFIED</b>","",
+    `<i>Diagnostic only: ${safeNumber(r?.externalRequestsUsed)} external requests, one KV read, zero KV writes, zero scanner-budget requests. Normalized token units use on-chain decimals only; V771 still makes no USD-price claim.</i>`);
   return lines.join("\\n");
 }
 
@@ -147822,6 +148009,7 @@ function telegramHelpV271() {
     "<code>/cmctest [0xADDRESS]</code> — V738 CoinMarketCap Robinhood Chain coverage test (diagnostic only)",
     "<code>/uniswaptest</code> — V764 one-request Uniswap Trade API POST quote test (diagnostic only)",
     "<code>/uniswapv4test [0xPOOLID]</code> — V765 one-request Uniswap V4 Pool Info test; auto-selects a retained PoolId when omitted",
+    "<code>/v4allpools [0xTOKEN]</code> — V771 verify all recent live V4 pools for a token + normalized BUY/SELL amounts using on-chain decimals",
     "<code>/v4swapamounts [0xTOKEN]</code> — V770 verify exact raw target/paired amounts for BUY vs SELL swaps on the discovered live pool",
     "<code>/v4swapdirection [0xTOKEN]</code> — V769 verify BUY/SELL direction from signed on-chain V4 Swap deltas on the discovered live pool",
     "<code>/v4poollivecompare [0xTOKEN]</code> — V768 discover recent live PoolIds directly from PoolManager swaps, then identify token pools with Uniswap Pool Info (no DexScreener)",
@@ -148664,6 +148852,29 @@ async function telegramCommandReplyV271(
 
 
 
+
+  if (parsed.command === "/v4allpools") {
+    const allV771 = await v4AllPoolsAmountsDiagnosticV771(env, parsed.argument || "");
+    const replyV771 = v4AllPoolsTelegramV771(allV771);
+    if (diagnosticV273) {
+      diagnosticV273.replyAttempted = true;
+      diagnosticV273.v4AllPoolsV771 = {
+        tokenAddress:allV771?.tokenAddress||null,matchingLivePools:safeNumber(allV771?.matchingLivePools),
+        decodedSwaps:safeNumber(allV771?.decodedSwaps),buySwaps:safeNumber(allV771?.buySwaps),sellSwaps:safeNumber(allV771?.sellSwaps),
+        rejectedSwaps:safeNumber(allV771?.rejectedSwaps),coverageComplete:allV771?.coverageComplete===true,
+        externalRequestsUsed:safeNumber(allV771?.externalRequestsUsed),scannerBudgetConsumed:false,stateWrites:0
+      };
+    }
+    const sentV771=await sendTelegram(env,replyV771,null,null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess=sentV771?.success===true;
+      diagnosticV273.telegramStatus=sentV771?.status||null;
+      diagnosticV273.telegramMode=sentV771?.mode||null;
+      diagnosticV273.telegramError=sentV771?.error||null;
+      diagnosticV273.result=sentV771?.success===true?"REPLY_SENT":"REPLY_FAILED";
+    }
+    return {success:sentV771?.success===true,ignored:false,command:parsed.command,v4AllPoolsV771:allV771};
+  }
 
   if (parsed.command === "/v4swapamounts") {
     const amountsV770 = await v4SwapAmountsDiagnosticV770(env, parsed.argument || "");
@@ -154538,6 +154749,15 @@ async function handleRequest(
 
 
 
+
+  if (path === "/v4allpools") {
+    return jsonResponse(
+      await v4AllPoolsAmountsDiagnosticV771(
+        env,
+        url.searchParams.get("token") || ""
+      )
+    );
+  }
 
   if (path === "/v4swapamounts") {
     return jsonResponse(
