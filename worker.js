@@ -1,4 +1,15 @@
 /**
+ * Robinhood Chain Meme Hunter — V799
+ *
+ * V799 ROTATING ACTIVE-POOL IDENTITY INDEX:
+ * - replaces the production historical Initialize chase for unresolved candidates with a bounded live-pool indexing pass;
+ * - after the existing recent PoolManager Swap pull, checks up to 40 currently-active PoolIds through Uniswap Pool Info using the same two protected requests;
+ * - persists every verified PoolId <-> currency0/currency1 mapping into the existing canonical poolRegistry;
+ * - skips already-mapped active PoolIds on later scans so the live identity index expands instead of repeatedly checking the same pools;
+ * - if the selected candidate appears in the newly-expanded active index, applies exact pool-specific V4 activity immediately with no fourth request;
+ * - preserves the hard 42-request ceiling, three-request production envelope, Telegram thresholds, scoring rules and no-USD-inference rule.
+ */
+/**
  * Robinhood Chain Meme Hunter — V798
  *
  * V798 PINNED-BLOCK ACTIVE-POOL PAGINATION:
@@ -6895,7 +6906,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V798";
+const VERSION = "V799";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -92691,6 +92702,85 @@ async function v772UniswapIdentifyPools(env, budget, poolIds, tokenAddress) {
   return base;
 }
 
+
+async function v799IndexActivePoolsWithUniswap(env, budget, poolIds) {
+  const apiKey = String(env?.UNISWAP_API_KEY || "").trim();
+  const ids = [...new Set((poolIds || []).map(normalize).filter(isBytes32HexV765))].slice(0, 40);
+  const base = {
+    attempted:false, ok:false, poolIdsRequested:ids.length, poolsChecked:0,
+    batchesAttempted:0, successfulBatches:0, identities:[], externalRequestsUsed:0,
+    error:null
+  };
+  if (!apiKey) return {...base,error:"UNISWAP_API_KEY_NOT_CONFIGURED"};
+  if (!ids.length) return {...base,ok:true,error:null};
+
+  const chunks=[];
+  for(let i=0;i<ids.length;i+=20) chunks.push(ids.slice(i,i+20));
+  let lastError=null;
+
+  for(const chunk of chunks.slice(0,2)){
+    if(!budgetAvailable(budget,"analysis",1)){
+      lastError="V799_ANALYSIS_BUDGET_EXHAUSTED_BEFORE_UNISWAP";
+      break;
+    }
+    if(!consumeBudget(budget,"analysis","UNISWAP_V4_POOL_INFO_V772",1)){
+      lastError="V799_UNISWAP_REQUEST_BLOCKED_BY_EXISTING_RESERVE";
+      break;
+    }
+    base.attempted=true;
+    base.batchesAttempted++;
+    base.externalRequestsUsed++;
+    base.poolsChecked+=chunk.length;
+
+    try{
+      const response=await fetch("https://liquidity.api.uniswap.org/lp/pool_info",{
+        method:"POST",
+        headers:{
+          "x-api-key":apiKey,
+          "content-type":"application/json",
+          "accept":"application/json"
+        },
+        body:JSON.stringify({
+          protocol:"V4",
+          poolReferences:chunk.map(referenceIdentifier=>({
+            protocol:"V4",chainId:4663,referenceIdentifier
+          })),
+          chainId:4663,
+          pageSize:Math.max(1,chunk.length),
+          currentPage:1
+        })
+      });
+      const text=await response.text();
+      let payload=null;
+      try{payload=text?JSON.parse(text):null;}catch{}
+      if(!response.ok){
+        lastError=payload?.detail||payload?.message||payload?.error||`HTTP_${response.status}`;
+        continue;
+      }
+      base.successfulBatches++;
+      for(const row of (Array.isArray(payload?.pools)?payload.pools:[])){
+        const poolId=normalize(row?.poolReferenceIdentifier);
+        const currency0=normalize(row?.tokenAddressA);
+        const currency1=normalize(row?.tokenAddressB);
+        if(!isBytes32HexV765(poolId)) continue;
+        if(!isAddress(currency0) && currency0!==ZERO) continue;
+        if(!isAddress(currency1) && currency1!==ZERO) continue;
+        base.identities.push({
+          poolId,currency0,currency1,
+          fee:row?.fee??null,
+          tickSpacing:row?.tickSpacing??null,
+          source:"UNISWAP_POOL_INFO_V799"
+        });
+      }
+    }catch(error){
+      lastError=errorString(error);
+    }
+  }
+  base.ok=base.successfulBatches>0 || ids.length===0;
+  base.error=base.ok?null:lastError;
+  return base;
+}
+
 async function enrichCandidateWithProductionV4V772(
   env,
   state,
@@ -92834,201 +92924,104 @@ async function enrichCandidateWithProductionV4V772(
   let targetedInitCurrency1HttpV786=null;
 
   if (needsIndexedInitializeV781) {
-    const verifiedLaunchBlockV781=
-      safeNumber(candidate?.verifiedLaunchSourceV476?.launchBlock) ||
-      safeNumber(candidate?.verifiedLaunchAgeV223?.launchBlock) ||
-      0;
+    // V799: stop chasing a launch-centred historical Initialize window for every
+    // unresolved candidate. Instead, expand a canonical identity index of the pools
+    // that are actually swapping now. Already-mapped pools cost zero provider calls.
+    const activePoolIdsV799=[...new Set(active.map(row=>normalize(row?.poolId)).filter(isBytes32HexV765))];
+    const registryHasIdentityV799=poolId=>{
+      const row=state?.poolRegistry?.[poolId];
+      if(!row) return false;
+      const c0=normalize(row?.currency0||row?.token0||row?.currencyA);
+      const c1=normalize(row?.currency1||row?.token1||row?.currencyB);
+      return (isAddress(c0)||c0===ZERO) && (isAddress(c1)||c1===ZERO);
+    };
+    const unknownActiveIdsV799=activePoolIdsV799
+      .filter(poolId=>!registryHasIdentityV799(poolId))
+      .sort();
 
-    // V789: V788 proved Validation Cloud's 250-block generic Initialize reads
-    // are reliable, but V788 only advanced forward after its launch-centred pass.
-    // A pool initialized materially BEFORE the verified launch block could therefore
-    // never be reached. V789 keeps the same two protected historical requests but
-    // expands bidirectionally around verified launch evidence. Existing V788 forward
-    // progress is migrated so already-covered forward ranges are not repeated.
-    providerSafeIndexedSpanV783=Math.max(
-      1,
-      Math.min(250,safeNumber(VALIDATION_CLOUD_UNKNOWN_POOL_RANGE_BLOCKS_V630)||250)
+    const selectedForIndexV799=unknownActiveIdsV799.slice(0,40);
+    const indexV799=await v799IndexActivePoolsWithUniswap(
+      env,budget,selectedForIndexV799
     );
-    state.productionV4InitCursorV789 =
-      state.productionV4InitCursorV789 && typeof state.productionV4InitCursorV789 === "object"
-        ? state.productionV4InitCursorV789
+    base.externalRequestsUsed+=safeNumber(indexV799?.externalRequestsUsed);
+
+    let mappingsRegisteredV799=0;
+    for(const identity of (Array.isArray(indexV799?.identities)?indexV799.identities:[])){
+      const registration=registerPoolMapping(state,{
+        poolId:identity?.poolId,
+        currency0:identity?.currency0,
+        currency1:identity?.currency1,
+        fee:identity?.fee??null,
+        tickSpacing:identity?.tickSpacing??null,
+        poolKeySourceV441:"UNISWAP_POOL_INFO_V799"
+      });
+      if(registration?.registered===true) mappingsRegisteredV799++;
+    }
+
+    const exactActiveIdsV799=new Set();
+    for(const poolId of activePoolIdsV799){
+      const row=state?.poolRegistry?.[poolId];
+      if(!row) continue;
+      const c0=normalize(row?.currency0||row?.token0||row?.currencyA);
+      const c1=normalize(row?.currency1||row?.token1||row?.currencyB);
+      if(c0===token||c1===token) exactActiveIdsV799.add(poolId);
+    }
+    directMatchingIdsV781=exactActiveIdsV799;
+
+    state.productionV4ActivePoolIndexV799 =
+      state.productionV4ActivePoolIndexV799 && typeof state.productionV4ActivePoolIndexV799==="object"
+        ? state.productionV4ActivePoolIndexV799
         : {};
-    const priorCursorV789=state.productionV4InitCursorV789[token]||null;
-    const priorCursorV788=state.productionV4InitCursorV788?.[token]||null;
-    const launchValidV789=verifiedLaunchBlockV781>0 && verifiedLaunchBlockV781<=to;
-    const sameLaunchV789=cursor=>
-      cursor && (!launchValidV789 || safeNumber(cursor?.launchBlock)===verifiedLaunchBlockV781);
+    state.productionV4ActivePoolIndexV799.lastRunAt=Date.now();
+    state.productionV4ActivePoolIndexV799.lastHead=to;
+    state.productionV4ActivePoolIndexV799.livePoolIds=activePoolIdsV799.length;
+    state.productionV4ActivePoolIndexV799.knownBefore=
+      activePoolIdsV799.length-unknownActiveIdsV799.length;
+    state.productionV4ActivePoolIndexV799.unknownBefore=unknownActiveIdsV799.length;
+    state.productionV4ActivePoolIndexV799.requestedThisRun=selectedForIndexV799.length;
+    state.productionV4ActivePoolIndexV799.returnedThisRun=
+      Array.isArray(indexV799?.identities)?indexV799.identities.length:0;
+    state.productionV4ActivePoolIndexV799.registeredThisRun=mappingsRegisteredV799;
+    state.productionV4ActivePoolIndexV799.unknownAfter=Math.max(
+      0,unknownActiveIdsV799.length-mappingsRegisteredV799
+    );
+    state.productionV4ActivePoolIndexV799.lastError=indexV799?.error||null;
 
-    let backwardNextToV789=null;
-    let forwardNextFromV789=null;
-    let cursorMigratedFromV788=false;
+    initializeAttemptedV780=indexV799?.attempted===true;
+    initializeOkV780=indexV799?.ok===true;
+    initializeRowsV780=safeNumber(indexV799?.identities?.length);
+    initializeTokenMatchesV780=exactActiveIdsV799.size;
+    initializeActiveMatchesV780=exactActiveIdsV799.size;
+    initializeErrorV780=indexV799?.error||null;
+    targetedInitFromSourceV781="ROTATING_ACTIVE_POOL_IDENTITY_INDEX_V799";
+    targetedInitProviderV786="UNISWAP_POOL_INFO";
+    targetedInitCurrency0AttemptedV781=safeNumber(indexV799?.batchesAttempted)>0;
+    targetedInitCurrency1AttemptedV781=safeNumber(indexV799?.batchesAttempted)>1;
+    targetedInitCurrency0OkV781=safeNumber(indexV799?.successfulBatches)>0;
+    targetedInitCurrency1OkV781=safeNumber(indexV799?.successfulBatches)>1;
+    targetedInitCurrency0RowsV781=Math.min(20,safeNumber(indexV799?.identities?.length));
+    targetedInitCurrency1RowsV781=Math.max(0,safeNumber(indexV799?.identities?.length)-20);
+    targetedInitDecodedMatchesV781=exactActiveIdsV799.size;
+    targetedInitActiveMatchesV781=exactActiveIdsV799.size;
+    targetedInitErrorsV781=indexV799?.error?[String(indexV799.error)]:[];
+    providerSafeIndexedSpanV783=40;
+    targetedInitFromBlockV781=null;
+    targetedInitToBlockV783=null;
 
-    if(launchValidV789){
-      if(sameLaunchV789(priorCursorV789)){
-        backwardNextToV789=safeNumber(priorCursorV789?.backwardNextTo);
-        forwardNextFromV789=safeNumber(priorCursorV789?.forwardNextFrom);
-      }else{
-        // V788's first successful launch-centred pass covered launch-250 through
-        // launch+249. If a V788 cursor exists, preserve its farther forward progress
-        // and begin the newly-added backward search immediately before that coverage.
-        backwardNextToV789=Math.max(0,verifiedLaunchBlockV781-providerSafeIndexedSpanV783-1);
-        if(sameLaunchV789(priorCursorV788) && safeNumber(priorCursorV788?.nextFromBlock)>0){
-          forwardNextFromV789=Math.max(verifiedLaunchBlockV781+providerSafeIndexedSpanV783,safeNumber(priorCursorV788.nextFromBlock));
-          cursorMigratedFromV788=true;
-        }else{
-          // Fresh V789 token: request A covers the 250 blocks immediately before
-          // launch; request B covers launch through launch+249.
-          backwardNextToV789=Math.max(0,verifiedLaunchBlockV781-1);
-          forwardNextFromV789=verifiedLaunchBlockV781;
-        }
-      }
-      targetedInitFromSourceV781=cursorMigratedFromV788
-        ? "VERIFIED_LAUNCH_BIDIRECTIONAL_MIGRATED_V788_CURSOR_V789"
-        : (sameLaunchV789(priorCursorV789)
-            ? "VERIFIED_LAUNCH_BIDIRECTIONAL_CURSOR_V789"
-            : "VERIFIED_LAUNCH_BIDIRECTIONAL_START_V789");
-    }else{
-      // Without a verified launch anchor there is no useful forward history beyond
-      // the current head. Progressively walk backward two safe windows per scan.
-      backwardNextToV789=sameLaunchV789(priorCursorV789) && safeNumber(priorCursorV789?.backwardNextTo)>=0
-        ? safeNumber(priorCursorV789.backwardNextTo)
-        : to;
-      forwardNextFromV789=null;
-      targetedInitFromSourceV781=sameLaunchV789(priorCursorV789)
-        ? "RECENT_BACKWARD_CURSOR_V789"
-        : "RECENT_BACKWARD_START_V789";
-    }
-    targetedInitProviderV786="VALIDATION_CLOUD";
-
-    const decodedPoolIdsV781=new Set();
-    let minSuccessfulFromV789=null;
-    let maxSuccessfulToV789=null;
-    let backwardSuccessfulV789=false;
-    let forwardSuccessfulV789=false;
-    const rangesV789=[];
-
-    if(launchValidV789){
-      if(backwardNextToV789!==null && backwardNextToV789>=0){
-        rangesV789.push({
-          label:"BACKWARD",
-          requestType:"RPC:V789_GENERIC_INITIALIZE_BACKWARD",
-          from:Math.max(0,backwardNextToV789-providerSafeIndexedSpanV783+1),
-          to:Math.max(0,backwardNextToV789)
-        });
-      }
-      if(forwardNextFromV789!==null && forwardNextFromV789<=to){
-        rangesV789.push({
-          label:"FORWARD",
-          requestType:"RPC:V789_GENERIC_INITIALIZE_FORWARD",
-          from:Math.max(0,forwardNextFromV789),
-          to:Math.min(to,Math.max(0,forwardNextFromV789)+providerSafeIndexedSpanV783-1)
-        });
-      }
-    }else{
-      const firstTo=Math.max(0,backwardNextToV789);
-      const firstFrom=Math.max(0,firstTo-providerSafeIndexedSpanV783+1);
-      const secondTo=Math.max(0,firstFrom-1);
-      const secondFrom=Math.max(0,secondTo-providerSafeIndexedSpanV783+1);
-      rangesV789.push({label:"BACKWARD_A",requestType:"RPC:V789_GENERIC_INITIALIZE_BACKWARD",from:firstFrom,to:firstTo});
-      if(firstFrom>0) rangesV789.push({label:"BACKWARD_B",requestType:"RPC:V789_GENERIC_INITIALIZE_FORWARD",from:secondFrom,to:secondTo});
-    }
-
-    for(let rangeIndexV789=0;rangeIndexV789<Math.min(2,rangesV789.length);rangeIndexV789++){
-      const rangeV789=rangesV789[rangeIndexV789];
-      if(rangeV789.to<rangeV789.from) continue;
-      if(!consumeBudget(budget,"analysis",rangeV789.requestType,1)){
-        targetedInitErrorsV781.push(`${rangeV789.label}:BUDGET_BLOCKED`);
-        continue;
-      }
-      base.externalRequestsUsed++;
-      if(rangeIndexV789===0) targetedInitCurrency0AttemptedV781=true;
-      else targetedInitCurrency1AttemptedV781=true;
-
-      const initResultV789=await v4PoolLiveRpcCallV767(
-        rpcEndpoint.url,
-        "eth_getLogs",
-        [{
-          address:normalize(POOL_MANAGER),
-          fromBlock:`0x${rangeV789.from.toString(16)}`,
-          toBlock:`0x${rangeV789.to.toString(16)}`,
-          topics:[INITIALIZE_TOPIC]
-        }]
-      );
-      const okV789=initResultV789?.ok===true;
-      if(rangeIndexV789===0) targetedInitCurrency0OkV781=okV789;
-      else targetedInitCurrency1OkV781=okV789;
-      if(!okV789){
-        targetedInitErrorsV781.push(`${rangeV789.label}:${initResultV789?.error||"RPC_FAILED"}`);
-        continue;
-      }
-      const rowsV789=Array.isArray(initResultV789?.result)?initResultV789.result:[];
-      if(rangeIndexV789===0) targetedInitCurrency0RowsV781=rowsV789.length;
-      else targetedInitCurrency1RowsV781=rowsV789.length;
-      for(const log of rowsV789){
-        const decoded=decodeInitialize(log);
-        if(!decoded) continue;
-        const c0=normalize(decoded?.currency0);
-        const c1=normalize(decoded?.currency1);
-        if(c0!==token&&c1!==token) continue;
-        targetedInitDecodedMatchesV781++;
-        const poolId=normalize(decoded?.poolId);
-        if(isBytes32HexV765(poolId)) decodedPoolIdsV781.add(poolId);
-      }
-      minSuccessfulFromV789=minSuccessfulFromV789===null?rangeV789.from:Math.min(minSuccessfulFromV789,rangeV789.from);
-      maxSuccessfulToV789=maxSuccessfulToV789===null?rangeV789.to:Math.max(maxSuccessfulToV789,rangeV789.to);
-      if(rangeV789.label.startsWith("BACKWARD")){
-        backwardSuccessfulV789=true;
-        backwardNextToV789=rangeV789.from>0?rangeV789.from-1:-1;
-      }else{
-        forwardSuccessfulV789=true;
-        forwardNextFromV789=rangeV789.to+1;
-      }
-
-      let foundActiveV789=false;
-      for(const poolId of decodedPoolIdsV781){
-        if(activeByPoolIdV780.has(poolId)){foundActiveV789=true;break;}
-      }
-      if(foundActiveV789) break;
-    }
-
-    for(const poolId of decodedPoolIdsV781){
-      if(!activeByPoolIdV780.has(poolId)) continue;
-      directMatchingIdsV781.add(poolId);
-    }
-    targetedInitActiveMatchesV781=directMatchingIdsV781.size;
-    targetedInitFromBlockV781=minSuccessfulFromV789;
-    targetedInitToBlockV783=maxSuccessfulToV789;
-
-    if(minSuccessfulFromV789!==null || maxSuccessfulToV789!==null){
-      state.productionV4InitCursorV789[token]={
-        tokenAddress:token,
-        launchBlock:verifiedLaunchBlockV781||null,
-        backwardNextTo:backwardNextToV789,
-        forwardNextFrom:forwardNextFromV789,
-        lastFromBlock:minSuccessfulFromV789,
-        lastToBlock:maxSuccessfulToV789,
-        migratedFromV788:cursorMigratedFromV788,
-        backwardSuccessful:backwardSuccessfulV789,
-        forwardSuccessful:forwardSuccessfulV789,
-        updatedAt:Date.now(),
-        backwardComplete:backwardNextToV789<0,
-        forwardComplete:launchValidV789?forwardNextFromV789>to:true
-      };
-      const cursorEntriesV789=Object.entries(state.productionV4InitCursorV789);
-      if(cursorEntriesV789.length>256){
-        cursorEntriesV789
-          .sort((a,b)=>safeNumber(a?.[1]?.updatedAt)-safeNumber(b?.[1]?.updatedAt))
-          .slice(0,cursorEntriesV789.length-256)
-          .forEach(([k])=>{delete state.productionV4InitCursorV789[k];});
-      }
-    }
-
-    initializeAttemptedV780=targetedInitCurrency0AttemptedV781||targetedInitCurrency1AttemptedV781;
-    initializeOkV780=targetedInitCurrency0OkV781||targetedInitCurrency1OkV781;
-    initializeRowsV780=targetedInitCurrency0RowsV781+targetedInitCurrency1RowsV781;
-    initializeTokenMatchesV780=targetedInitDecodedMatchesV781;
-    initializeActiveMatchesV780=targetedInitActiveMatchesV781;
-    initializeErrorV780=targetedInitErrorsV781.length?targetedInitErrorsV781.join(" | "):null;
+    base.activePoolIndexV799={
+      livePoolIds:activePoolIdsV799.length,
+      knownBefore:activePoolIdsV799.length-unknownActiveIdsV799.length,
+      unknownBefore:unknownActiveIdsV799.length,
+      requestedThisRun:selectedForIndexV799.length,
+      poolsChecked:safeNumber(indexV799?.poolsChecked),
+      batchesAttempted:safeNumber(indexV799?.batchesAttempted),
+      successfulBatches:safeNumber(indexV799?.successfulBatches),
+      identitiesReturned:Array.isArray(indexV799?.identities)?indexV799.identities.length:0,
+      mappingsRegistered:mappingsRegisteredV799,
+      unknownAfter:Math.max(0,unknownActiveIdsV799.length-mappingsRegisteredV799),
+      targetActiveMatches:exactActiveIdsV799.size,
+      error:indexV799?.error||null
+    };
   }
 
   // V781 direct exact on-chain identity path: PoolManager Initialize proves the
@@ -93103,7 +93096,8 @@ async function enrichCandidateWithProductionV4V772(
       busiestAdded:0,
       freshestAdded:0,
       totalSelected:directMatchingIdsV781.size,
-      strategy:"ELIGIBLE_CANDIDATE_VALIDATION_CLOUD_BIDIRECTIONAL_INITIALIZE_V789",
+      strategy:"ROTATING_ACTIVE_POOL_IDENTITY_INDEX_V799",
+      activePoolIndexV799:base.activePoolIndexV799||null,
       indexedInitializeV781:{
         fromBlock:targetedInitFromBlockV781,
         toBlock:targetedInitToBlockV783,
@@ -93133,10 +93127,12 @@ async function enrichCandidateWithProductionV4V772(
     return {
       ...base,
       status: needsIndexedInitializeV781
-        ? "NO_ACTIVE_TOKEN_POOL_FROM_BIDIRECTIONAL_INITIALIZE_V789"
+        ? (safeNumber(base?.activePoolIndexV799?.unknownAfter) > 0
+            ? "ACTIVE_POOL_INDEX_EXPANDING_NO_TARGET_MATCH_V799"
+            : "TARGET_NOT_PRESENT_IN_CURRENT_ACTIVE_POOL_INDEX_V799")
         : (uni?.ok === true ? "NO_MATCHING_ACTIVE_POOL_IN_BOUNDED_SET_V772" : "UNISWAP_IDENTITY_UNVERIFIED_V772"),
       error: needsIndexedInitializeV781
-        ? (initializeErrorV780 || null)
+        ? (base?.activePoolIndexV799?.error || null)
         : (uni?.error || null)
     };
   }
@@ -93163,7 +93159,7 @@ async function enrichCandidateWithProductionV4V772(
     poolSpecific: true,
     verified: true,
     source: needsIndexedInitializeV781
-      ? "DIRECT_POOLMANAGER_SWAP_PLUS_BLOCKSCOUT_WIDE_INDEXED_IDENTITY_V786"
+      ? "DIRECT_POOLMANAGER_SWAP_PLUS_UNISWAP_ACTIVE_INDEX_V799"
       : "DIRECT_POOLMANAGER_SWAP_PLUS_UNISWAP_IDENTITY_V772",
     fromBlock: from,
     toBlock: to,
@@ -93200,7 +93196,7 @@ async function enrichCandidateWithProductionV4V772(
   return {
     ...base,
     applied: true,
-    status: "PRODUCTION_V4_ACTIVITY_APPLIED_V772",
+    status: needsIndexedInitializeV781 ? "PRODUCTION_V4_ACTIVITY_APPLIED_V799" : "PRODUCTION_V4_ACTIVITY_APPLIED_V772",
     opportunityAfter: safeNumber(candidate?.opportunity?.score),
     momentumAfter: safeNumber(candidate?.momentum?.score),
     confidenceAfter: safeNumber(candidate?.confidence?.score)
@@ -156557,33 +156553,34 @@ function productionV4StatusTelegramV772(result) {
     const x = String(v || "");
     return x.length > 22 ? `${x.slice(0,12)}…${x.slice(-8)}` : (x || "NONE");
   };
+  const idx=r?.activePoolIndexV799 || r?.poolSelectionV780?.activePoolIndexV799 || {};
   return [
-    "🧬 <b>Production V4 / Uniswap Bridge — V790</b>",
+    "🧬 <b>Production V4 / Uniswap Bridge — V799</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
     `Attempted / applied: <b>${r?.attempted === true ? "YES" : "NO"} / ${r?.applied === true ? "YES" : "NO"}</b>`,
-    `Status: <code>${escapeHtml(String(r?.status || "NO_RECORDED_SCAN_YET_V772"))}</code>`,
+    `Status: <code>${escapeHtml(String(r?.status || "NO_RECORDED_SCAN_YET_V799"))}</code>`,
     `RPC: <b>${escapeHtml(String(r?.rpcProvider || "N/A"))}</b>`,
     `Recent Swap RPC error: <code>${escapeHtml(String(r?.error || "NONE"))}</code>`,
     `Recent swaps / live PoolIds: <b>${safeNumber(r?.recentSwapRows)} / ${safeNumber(r?.uniqueLivePoolIds)}</b>`,
-    `Bounded PoolIds checked: <b>${safeNumber(r?.candidatePoolIdsChecked)}</b>`,
-    `V790 lane: <b>${escapeHtml(String(r?.poolSelectionV780?.strategy || "LEGACY"))}</b>`,
-    `V790 registry / retained / indexed-active / busiest / freshest: <b>${safeNumber(r?.poolSelectionV780?.registryTokenAdded)} / ${safeNumber(r?.poolSelectionV780?.retainedAdded)} / ${safeNumber(r?.poolSelectionV780?.recentInitializeActiveMatches)} / ${safeNumber(r?.poolSelectionV780?.busiestAdded)} / ${safeNumber(r?.poolSelectionV780?.freshestAdded)}</b>`,
-    `V790 Init window A attempted/OK/rows: <b>${r?.poolSelectionV780?.indexedInitializeV781?.currency0Attempted === true ? "YES" : "NO"} / ${r?.poolSelectionV780?.indexedInitializeV781?.currency0Ok === true ? "YES" : "NO"} / ${safeNumber(r?.poolSelectionV780?.indexedInitializeV781?.currency0Rows)}</b>`,
-    `V790 Init window B attempted/OK/rows: <b>${r?.poolSelectionV780?.indexedInitializeV781?.currency1Attempted === true ? "YES" : "NO"} / ${r?.poolSelectionV780?.indexedInitializeV781?.currency1Ok === true ? "YES" : "NO"} / ${safeNumber(r?.poolSelectionV780?.indexedInitializeV781?.currency1Rows)}</b>`,
-    `V790 searched range / token matches / active: <b>${safeNumber(r?.poolSelectionV780?.indexedInitializeV781?.fromBlock)}→${safeNumber(r?.poolSelectionV780?.indexedInitializeV781?.toBlock)} / ${safeNumber(r?.poolSelectionV780?.indexedInitializeV781?.decodedTokenMatches)} / ${safeNumber(r?.poolSelectionV780?.indexedInitializeV781?.activeMatches)}</b>`,
-    `V790 cursor source / window span: <b>${escapeHtml(String(r?.poolSelectionV780?.indexedInitializeV781?.fromSource || "NONE"))} / ${safeNumber(r?.poolSelectionV780?.indexedInitializeV781?.providerSafeSpanBlocksV783)} blocks</b>`,
-    `V790 provider / legacy HTTP fields: <b>${escapeHtml(String(r?.poolSelectionV780?.indexedInitializeV781?.providerV786 || "NONE"))} / ${safeNumber(r?.poolSelectionV780?.indexedInitializeV781?.currency0HttpV786)} / ${safeNumber(r?.poolSelectionV780?.indexedInitializeV781?.currency1HttpV786)}</b>`,
-    `V790 Initialize errors: <code>${escapeHtml(Array.isArray(r?.poolSelectionV780?.indexedInitializeV781?.errors) && r.poolSelectionV780.indexedInitializeV781.errors.length ? r.poolSelectionV780.indexedInitializeV781.errors.join(" | ") : "NONE")}</code>`,
+    "",
+    "🗂 <b>V799 Active-Pool Identity Index</b>",
+    `Known / unknown before: <b>${safeNumber(idx?.knownBefore)} / ${safeNumber(idx?.unknownBefore)}</b>`,
+    `Requested / checked this run: <b>${safeNumber(idx?.requestedThisRun)} / ${safeNumber(idx?.poolsChecked)}</b>`,
+    `Uniswap batches OK/attempted: <b>${safeNumber(idx?.successfulBatches)} / ${safeNumber(idx?.batchesAttempted)}</b>`,
+    `Identities returned / registered: <b>${safeNumber(idx?.identitiesReturned)} / ${safeNumber(idx?.mappingsRegistered)}</b>`,
+    `Unknown after: <b>${safeNumber(idx?.unknownAfter)}</b>`,
+    `Target active matches: <b>${safeNumber(idx?.targetActiveMatches)}</b>`,
+    `Index error: <code>${escapeHtml(String(idx?.error || "NONE"))}</code>`,
+    "",
     `Matching pools / swaps: <b>${Array.isArray(r?.matchingPoolIds) ? r.matchingPoolIds.length : 0} / ${safeNumber(r?.matchingSwapRows)}</b>`,
     `Extra production requests used: <b>${safeNumber(r?.externalRequestsUsed)}</b>`,
-    `V780 protected slots remaining / consumed: <b>${safeNumber(r?.requestReserveV776?.handoffRemainingV777 ?? r?.requestReserveV776?.reservedRequests)} / ${safeNumber(r?.requestReserveV776?.consumedProtectedRequests)}</b>`,
-    `V780 lower-priority requests blocked: <b>${safeNumber(r?.requestReserveV776?.blockedRequests)}</b>`,
-    `V780 handoff active / hard-boundary blocks: <b>${r?.requestReserveV776?.handoffActiveV777 === true ? "YES" : "NO"} / ${safeNumber(r?.requestReserveV776?.handoffHardBoundaryBlocksV777)}</b>`,
+    `Protected slots remaining / consumed: <b>${safeNumber(r?.requestReserveV776?.handoffRemainingV777 ?? r?.requestReserveV776?.reservedRequests)} / ${safeNumber(r?.requestReserveV776?.consumedProtectedRequests)}</b>`,
+    `Lower-priority requests blocked: <b>${safeNumber(r?.requestReserveV776?.blockedRequests)}</b>`,
     `Momentum / Opportunity / Confidence after: <b>${safeNumber(r?.momentumAfter)} / ${safeNumber(r?.opportunityAfter)} / ${safeNumber(r?.confidenceAfter)}</b>`,
     "",
-    "<i>Read-only status of the last scanner run. V772 changes no Telegram thresholds and infers no USD value from V4 activity.</i>"
+    "<i>V799 progressively indexes exact identities for currently-active V4 pools using the existing three-request production envelope. No Telegram thresholds or USD inference rules are changed.</i>"
   ].join("\n");
 }
 
