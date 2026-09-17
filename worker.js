@@ -1,6 +1,16 @@
 /**
+ * Robinhood Chain Meme Hunter — V743
+ * AUTHORITATIVE RUNTIME VERSION: V743
+
+ * V743 RAW WATCH CAPACITY RESERVATION — NO REQUEST/SCORING CHANGE:
+ * - Fixes the V742 diagnostic finding that raw-only watches were successfully registered but immediately displaced while the shared 24-watch list was full.
+ * - Keeps the total watch cap at 24 and reserves up to 4 existing slots for eligible V740 raw-only watches; unused raw reserve is automatically available to standard watches.
+ * - Within the reserved raw lane the existing evidence/recency retention ordering remains authoritative. Outside the reserve, all remaining rows continue to compete under the existing retention ordering.
+ * - Adds no RPC/provider requests, no new collection slot, no historical backfill and no extra state-write cycle.
+ * - USD verification, Momentum, Opportunity/Confidence/Risk scoring, qualification, Telegram thresholds, CMC behaviour and the hard global request cap of 42 are unchanged.
+
  * Robinhood Chain Meme Hunter — V742
- * AUTHORITATIVE RUNTIME VERSION: V742
+ * HISTORICAL VERSION NOTE: V742
 
  * V742 UPSTREAM RAW POOL IDENTITY RECOVERY — NO SCORE/THRESHOLD CHANGE:
  * - Fixes the V741 diagnostic finding that V740 saw zero registration candidates because many candidates reached NO_KNOWN_QUOTE_V4_POOL before the raw-watch handoff.
@@ -6527,7 +6537,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V742";
+const VERSION = "V743";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -12354,6 +12364,7 @@ const NATIVE_V3_SWEEP_REQUEST_RESERVE_V331 = 2;
  * One watched pool may advance per scan; no historical backfill is attempted.
  */
 const DIRECTIONAL_WATCH_MAX_ENTRIES_V551 = 24;
+const DIRECTIONAL_WATCH_RAW_RESERVE_V743 = 4;
 const DIRECTIONAL_WATCH_MAX_AGE_MS_V551 = 48 * 60 * 60 * 1000;
 const DIRECTIONAL_RECOVERY_MAX_POOLS_PER_TOKEN_V573 = 2;
 const DIRECTIONAL_RECOVERY_MAX_POOLS_PER_SCAN_V573 = 8;
@@ -74710,7 +74721,7 @@ function pruneDirectionalWatchV551(state) {
     return 0;
   };
 
-  const sortedRows = [...eligibleRows].sort((a,b) => {
+  const retentionCompareV743 = (a,b) => {
     const tierDelta = retentionTierV565(b) - retentionTierV565(a);
     if (tierDelta !== 0) return tierDelta;
 
@@ -74735,9 +74746,38 @@ function pruneDirectionalWatchV551(state) {
       safeNumber(b?.lastQualifiedAt || b?.registeredAt) -
       safeNumber(a?.lastQualifiedAt || a?.registeredAt)
     );
-  });
+  };
 
-  const rows = sortedRows.slice(0, DIRECTIONAL_WATCH_MAX_ENTRIES_V551);
+  const sortedRows = [...eligibleRows].sort(retentionCompareV743);
+
+  /*
+   * V743: reserve capacity inside the EXISTING 24-row watch list for the
+   * raw-only path proven by V742. This changes retention/admission only.
+   * If fewer than four raw watches exist, every unused reserved slot flows
+   * straight back to the normal watch population.
+   */
+  const rawEligibleRowsV743 = eligibleRows
+    .filter(row => row?.rawOnlyV740 === true)
+    .sort(retentionCompareV743);
+  const standardEligibleRowsV743 = eligibleRows
+    .filter(row => row?.rawOnlyV740 !== true)
+    .sort(retentionCompareV743);
+  const reservedRawRowsV743 = rawEligibleRowsV743.slice(
+    0,
+    Math.min(DIRECTIONAL_WATCH_RAW_RESERVE_V743, DIRECTIONAL_WATCH_MAX_ENTRIES_V551)
+  );
+  const remainingCapacityV743 = Math.max(
+    0,
+    DIRECTIONAL_WATCH_MAX_ENTRIES_V551 - reservedRawRowsV743.length
+  );
+  const remainingCandidatesV743 = [
+    ...standardEligibleRowsV743,
+    ...rawEligibleRowsV743.slice(reservedRawRowsV743.length)
+  ].sort(retentionCompareV743);
+  const rows = [
+    ...reservedRawRowsV743,
+    ...remainingCandidatesV743.slice(0, remainingCapacityV743)
+  ];
 
   const keptKeys = new Set(
     rows
@@ -74779,6 +74819,9 @@ function pruneDirectionalWatchV551(state) {
   root.lastPruneV565 = {
     at: now,
     maxEntries: DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
+    rawReserveV743: DIRECTIONAL_WATCH_RAW_RESERVE_V743,
+    reservedRawKeptV743: rows.filter(row => row?.rawOnlyV740 === true).length,
+    rawEligibleV743: rawEligibleRowsV743.length,
     beforeCount: beforeRows.length,
     eligibleCount: eligibleRows.length,
     keptCount: rows.length,
@@ -76716,6 +76759,7 @@ function poolWatchDiagnosticSnapshotV741(state) {
     version:VERSION,
     watchedCount:entries.length,
     maxEntries:DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
+    rawReserveSlotsV743:DIRECTIONAL_WATCH_RAW_RESERVE_V743,
     rawOnlyWatchCount:rawEntries.length,
     rawWithSwapsCount:rawWithSwaps.length,
     rawWithSuccessfulRangesCount:rawWithRanges.length,
@@ -76771,6 +76815,7 @@ function poolWatchDiagnosticTelegramV741(state) {
     `🧭 <b>Exact Pool Watch Diagnostic — ${escapeHtml(VERSION)}</b>`,
     "",
     `Active watches: <b>${s.watchedCount}/${s.maxEntries}</b>`,
+    `Raw-watch reserve V743: <b>${safeNumber(s.rawReserveSlotsV743)} slots</b> (inside existing cap)`,
     `Raw-only V740 watches: <b>${s.rawOnlyWatchCount}</b>`,
     `Raw watches with ≥1 successful range: <b>${s.rawWithSuccessfulRangesCount}</b>`,
     `Raw watches with ≥1 exact swap: <b>${s.rawWithSwapsCount}</b>`,
