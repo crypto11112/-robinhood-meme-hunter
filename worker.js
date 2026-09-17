@@ -1,6 +1,15 @@
 /**
+ * Robinhood Chain Meme Hunter — V744
+ * AUTHORITATIVE RUNTIME VERSION: V744
+
+ * V744 RAW FIRST-RANGE SCHEDULER PRIORITY — NO REQUEST/SCORING CHANGE:
+ * - Fixes the V743 diagnostic finding that retained raw-only watches could remain at REGISTERED_FORWARD_ONLY with zero successful ranges because established watches always won the scarce V551 scheduler slot.
+ * - A V740 raw-only watch with zero successful ranges receives temporary highest scheduler priority only until its first contiguous collection range is attempted successfully; after successfulRanges > 0 it immediately returns to the existing normal priority system.
+ * - This does not add a collection request, raise any reserve, increase the 24-watch cap, or change the hard global request cap of 42; it only chooses which already-eligible watch receives the existing V551 collection opportunity.
+ * - Raw collection remains forward-only. USD remains UNVERIFIED for non-priceable quotes, and scoring, qualification, Telegram thresholds, CMC behaviour and provider trust rules are unchanged.
+
  * Robinhood Chain Meme Hunter — V743
- * AUTHORITATIVE RUNTIME VERSION: V743
+ * HISTORICAL VERSION NOTE: V743
 
  * V743 RAW WATCH CAPACITY RESERVATION — NO REQUEST/SCORING CHANGE:
  * - Fixes the V742 diagnostic finding that raw-only watches were successfully registered but immediately displaced while the shared 24-watch list was full.
@@ -6537,7 +6546,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V743";
+const VERSION = "V744";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -75710,7 +75719,22 @@ function directionalWatchHasOtherPriorCompletionCatchupV579(
   );
 }
 
+function directionalWatchNeedsRawFirstRangePriorityV744(row) {
+  return Boolean(
+    row?.rawOnlyV740 === true &&
+    safeNumber(row?.successfulRanges) === 0 &&
+    Number.isFinite(Number(row?.lastCollectedBlock))
+  );
+}
+
 function directionalWatchPriorityTierV567(row) {
+  /*
+   * V744: raw-only watches that have never completed a range get exactly one
+   * temporary scheduler priority. Once successfulRanges > 0 this condition
+   * is false and the row immediately returns to the existing V578/V567 tiers.
+   */
+  if (directionalWatchNeedsRawFirstRangePriorityV744(row)) return 5;
+
   /*
    * V578: safely reconstructed V466 pools retain temporary catch-up priority
    * until they have actually reached the chain head. V577 released this
@@ -75988,6 +76012,8 @@ function configureDirectionalWatchReserveV553(state,budget,latestNumber) {
   reserve.poolId = candidate ? normalize(candidate?.poolId) : null;
   reserve.selectionPriorityTierV567 =
     candidate ? directionalWatchPriorityTierV567(candidate) : null;
+  reserve.rawFirstRangePriorityV744 =
+    candidate ? directionalWatchNeedsRawFirstRangePriorityV744(candidate) : false;
   reserve.priorCompletionFirstRangePriorityV577 =
     candidate ? directionalWatchNeedsFirstRangePriorityV577(candidate) : false;
   reserve.priorCompletionCatchupPriorityV578 =
@@ -76042,6 +76068,8 @@ async function advanceDirectionalWatchV551({
     watchedCount:Object.keys(root.entries || {}).length,
     selectedToken:candidate ? normalize(candidate?.tokenAddress) : null,
     selectedPoolId:candidate ? normalize(candidate?.poolId) : null,
+    rawFirstRangePriorityV744:
+      candidate ? directionalWatchNeedsRawFirstRangePriorityV744(candidate) : false,
     priorCompletionFirstRangePriorityV577:
       candidate ? directionalWatchNeedsFirstRangePriorityV577(candidate) : false,
     fromBlock:null,
@@ -76592,7 +76620,7 @@ async function advanceDirectionalWatchV551({
           head
         ),
       selectionPolicyV567:
-        "V578_PRIOR_COMPLETION_CATCHUP_TO_HEAD_THEN_EXPANSION_READY_THEN_ACTIVE_RECENT",
+        "V744_RAW_FIRST_RANGE_THEN_V578_PRIOR_COMPLETION_CATCHUP_TO_HEAD_THEN_EXPANSION_READY_THEN_ACTIVE_RECENT",
       configuredBlockSpanV562:configuredSpan,
       configuredBlockSpanV566:configuredSpan,
       baseConfiguredBlockSpanV562:baseConfiguredSpanV562,
@@ -76761,6 +76789,7 @@ function poolWatchDiagnosticSnapshotV741(state) {
     maxEntries:DIRECTIONAL_WATCH_MAX_ENTRIES_V551,
     rawReserveSlotsV743:DIRECTIONAL_WATCH_RAW_RESERVE_V743,
     rawOnlyWatchCount:rawEntries.length,
+    rawFirstRangePriorityPendingV744:rawEntries.filter(row => directionalWatchNeedsRawFirstRangePriorityV744(row)).length,
     rawWithSwapsCount:rawWithSwaps.length,
     rawWithSuccessfulRangesCount:rawWithRanges.length,
     rawCaughtUpCount:rawCaughtUp.length,
@@ -76817,6 +76846,7 @@ function poolWatchDiagnosticTelegramV741(state) {
     `Active watches: <b>${s.watchedCount}/${s.maxEntries}</b>`,
     `Raw-watch reserve V743: <b>${safeNumber(s.rawReserveSlotsV743)} slots</b> (inside existing cap)`,
     `Raw-only V740 watches: <b>${s.rawOnlyWatchCount}</b>`,
+    `Raw first-range priority pending V744: <b>${safeNumber(s.rawFirstRangePriorityPendingV744)}</b>`,
     `Raw watches with ≥1 successful range: <b>${s.rawWithSuccessfulRangesCount}</b>`,
     `Raw watches with ≥1 exact swap: <b>${s.rawWithSwapsCount}</b>`,
     `Raw watches caught up to head: <b>${s.rawCaughtUpCount}</b>`,
@@ -76872,7 +76902,7 @@ function poolWatchDiagnosticTelegramV741(state) {
 
   lines.push(
     "",
-    "<i>Read-only command: zero provider requests, zero scanner-budget requests and zero state writes. V741 telemetry is measurement-only and does not change collection/scoring/qualification.</i>"
+    "<i>Read-only command: zero provider requests, zero scanner-budget requests and zero state writes. V741/V744 diagnostics are measurement-only; V744 changes scheduler selection only and does not change request ceilings/scoring/qualification.</i>"
   );
   return lines.join("\n");
 }
