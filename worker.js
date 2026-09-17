@@ -1,6 +1,13 @@
 /**
  * Robinhood Chain Meme Hunter
  *
+ * V774:
+ * - Fixes production market evidence integrity: verified flag alone is not enough.
+ * - Requires positive verified priceUsd AND liquidityUsd before market completion is treated as usable.
+ * - A hollow pre-existing market.verified=true shell no longer skips the bounded free GeckoTerminal completion attempt after V4 activity is applied.
+ * - /v4marketstatus now distinguishes the pre-existing verified flag from usable completed market evidence.
+ * - Preserves V773/V772 provider routing, hard request ceiling, scoring functions and Telegram thresholds.
+ *
  * V773:
  * - Preserves the proven V772 production V4/Uniswap bridge unchanged.
  * - Adds one bounded free market/liquidity completion attempt for the same V772 production target when its market remains unverified.
@@ -6723,7 +6730,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V773";
+const VERSION = "V774";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -92074,6 +92081,16 @@ async function enrichProductionMarketLiquidityV773(
   productionV4EnrichmentV772
 ) {
   const token = normalize(candidate?.address);
+  // V774: a boolean verified flag is not sufficient market evidence by itself.
+  // Production completion requires a positive USD price and positive USD liquidity too.
+  const marketFlagVerifiedBeforeV774 = candidate?.market?.verified === true;
+  const priceUsdBeforeV774 = safeNumber(candidate?.market?.priceUsd);
+  const liquidityUsdBeforeV774 = safeNumber(candidate?.market?.liquidityUsd);
+  const marketUsableBeforeV774 =
+    marketFlagVerifiedBeforeV774 &&
+    priceUsdBeforeV774 > 0 &&
+    liquidityUsdBeforeV774 > 0;
+
   const base = {
     attempted:false,
     applied:false,
@@ -92082,24 +92099,25 @@ async function enrichProductionMarketLiquidityV773(
     provider:"GECKOTERMINAL",
     externalRequestsUsed:0,
     scannerBudgetConsumed:true,
-    marketVerifiedBefore:candidate?.market?.verified === true,
-    marketVerifiedAfter:candidate?.market?.verified === true,
-    liquidityVerifiedAfter:
-      candidate?.market?.verified === true &&
-      safeNumber(candidate?.market?.liquidityUsd) > 0,
-    status:"NOT_ATTEMPTED_V773",
+    marketFlagVerifiedBefore:marketFlagVerifiedBeforeV774,
+    marketVerifiedBefore:marketUsableBeforeV774,
+    marketVerifiedAfter:marketUsableBeforeV774,
+    liquidityVerifiedAfter:marketUsableBeforeV774,
+    preexistingPriceUsd:priceUsdBeforeV774 > 0 ? priceUsdBeforeV774 : null,
+    preexistingLiquidityUsd:liquidityUsdBeforeV774 > 0 ? liquidityUsdBeforeV774 : null,
+    status:"NOT_ATTEMPTED_V774",
     error:null
   };
 
-  if (!isAddress(token)) return {...base,status:"INVALID_TOKEN_V773"};
+  if (!isAddress(token)) return {...base,status:"INVALID_TOKEN_V774"};
   if (productionV4EnrichmentV772?.applied !== true) {
-    return {...base,status:"V772_ACTIVITY_NOT_APPLIED_V773"};
+    return {...base,status:"V772_ACTIVITY_NOT_APPLIED_V774"};
   }
-  if (candidate?.market?.verified === true) {
+  if (marketUsableBeforeV774) {
     return {
       ...base,
       applied:true,
-      status:"MARKET_ALREADY_VERIFIED_BEFORE_V773",
+      status:"MARKET_ALREADY_USABLE_BEFORE_V774",
       source:candidate?.market?.source || null,
       priceUsd:candidate?.market?.priceUsd ?? null,
       liquidityUsd:candidate?.market?.liquidityUsd ?? null,
@@ -92110,7 +92128,7 @@ async function enrichProductionMarketLiquidityV773(
   }
 
   if (!budgetAvailable(budget,"analysis",1)) {
-    return {...base,status:"NO_ANALYSIS_HEADROOM_V773"};
+    return {...base,status:"NO_ANALYSIS_HEADROOM_V774"};
   }
 
   const watched = Array.isArray(state?.watchedTokens)
@@ -92152,14 +92170,17 @@ async function enrichProductionMarketLiquidityV773(
     };
   }
 
+  const priceUsd = safeNumber(marketResult?.priceUsd);
   const liquidityUsd = safeNumber(marketResult?.liquidityUsd);
-  if (!(liquidityUsd > 0)) {
+  if (!(priceUsd > 0) || !(liquidityUsd > 0)) {
     return {
       ...base,
-      status:"VERIFIED_MARKET_WITHOUT_POSITIVE_LIQUIDITY_V773",
+      marketVerifiedAfter:false,
+      liquidityVerifiedAfter:false,
+      status:"VERIFIED_FLAG_WITHOUT_USABLE_PRICE_OR_LIQUIDITY_V774",
       source:marketResult?.source || "GECKOTERMINAL",
-      priceUsd:marketResult?.priceUsd ?? null,
-      liquidityUsd:marketResult?.liquidityUsd ?? null
+      priceUsd:priceUsd > 0 ? priceUsd : null,
+      liquidityUsd:liquidityUsd > 0 ? liquidityUsd : null
     };
   }
 
@@ -92181,7 +92202,7 @@ async function enrichProductionMarketLiquidityV773(
     liquidityVerifiedAfter:true,
     status:"PRODUCTION_MARKET_LIQUIDITY_APPLIED_V773",
     source:marketResult?.source || "GECKOTERMINAL",
-    priceUsd:marketResult?.priceUsd ?? null,
+    priceUsd,
     liquidityUsd,
     marketCap:marketResult?.marketCap ?? null,
     fdv:marketResult?.fdv ?? null,
@@ -155252,23 +155273,24 @@ function productionMarketLiquidityStatusTelegramV773(result) {
     return Number.isFinite(n) && n > 0 ? `$${n.toLocaleString("en-US",{maximumFractionDigits:2})}` : "UNVERIFIED";
   };
   return [
-    "💧 <b>Production Market / Liquidity Bridge — V773</b>",
+    "💧 <b>Production Market / Liquidity Bridge — V774</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
     `V4 activity applied first: <b>${r?.v4Applied === true ? "YES" : "NO"}</b>`,
     `Attempted / applied: <b>${r?.attempted === true ? "YES" : "NO"} / ${r?.applied === true ? "YES" : "NO"}</b>`,
-    `Status: <code>${escapeHtml(String(r?.status || "NO_RECORDED_SCAN_YET_V773"))}</code>`,
+    `Status: <code>${escapeHtml(String(r?.status || "NO_RECORDED_SCAN_YET_V774"))}</code>`,
     `Provider/source: <b>${escapeHtml(String(r?.source || r?.provider || "N/A"))}</b>`,
     `Extra requests used: <b>${safeNumber(r?.externalRequestsUsed)}</b>`,
     "",
-    `Market verified: <b>${r?.marketVerifiedAfter === true ? "YES" : "NO"}</b>`,
+    `Pre-existing market flag: <b>${r?.marketFlagVerifiedBefore === true ? "YES" : "NO"}</b>`,
+    `Usable market verified: <b>${r?.marketVerifiedAfter === true ? "YES" : "NO"}</b>`,
     `Liquidity verified: <b>${r?.liquidityVerifiedAfter === true ? "YES" : "NO"}</b>`,
     `Price: <b>${money(r?.priceUsd)}</b>`,
     `Liquidity: <b>${money(r?.liquidityUsd)}</b>`,
     `Momentum / Opportunity / Confidence after: <b>${safeNumber(r?.momentumAfter)} / ${safeNumber(r?.opportunityAfter)} / ${safeNumber(r?.confidenceAfter)}</b>`,
     "",
-    "<i>V773 reuses the existing free market verifier and its cooldown/budget rules. It never treats raw Uniswap liquidity as USD and changes no Telegram thresholds.</i>"
+    "<i>V774 requires verified flag + positive USD price + positive USD liquidity before market evidence is considered usable. It reuses the existing free verifier and changes no Telegram thresholds.</i>"
   ].join("\\n");
 }
 
