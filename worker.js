@@ -6735,7 +6735,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V775";
+const VERSION = "V776";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -13444,6 +13444,95 @@ function configureAdaptiveAnalysisHeadroomV416(budget, analysisQueueLength = 0) 
   return telemetry;
 }
 
+
+
+/* =========================================================
+   V776 PRODUCTION V4 REQUEST-HEADROOM RESERVATION
+   =========================================================
+   Purpose:
+   - Preserve three EXISTING analysis/global request slots once a fully analysed
+     candidate becomes eligible for the V772 production V4/Uniswap bridge.
+   - This is request ordering only: it does NOT raise the hard/global/analysis
+     ceilings, provider quotas, Telegram thresholds, or qualification rules.
+   - Lower-priority analysis can continue while it does not consume the protected
+     three-slot envelope. The V772 RPC + Uniswap request types consume/release it.
+*/
+function ensureProductionV4ReserveV776(budget) {
+  if (!budget?.analysis) return null;
+  if (!budget.analysis.productionV4ReserveV776 || typeof budget.analysis.productionV4ReserveV776 !== "object") {
+    budget.analysis.productionV4ReserveV776 = {
+      enabled:true, active:false, reservedRequests:0, activatedAt:null,
+      firstEligibleAddress:null, activationReason:null, blockedRequests:0,
+      consumedProtectedRequests:0, releasedAt:null, releaseReason:null
+    };
+  }
+  return budget.analysis.productionV4ReserveV776;
+}
+
+function activateProductionV4ReserveV776(budget, candidate, currentLiveVerifiedLaunchTokensV621) {
+  const reserve = ensureProductionV4ReserveV776(budget);
+  if (!reserve || reserve.active === true) return reserve;
+  if (!v772ProductionEligibleCandidate(candidate, currentLiveVerifiedLaunchTokensV621)) return reserve;
+
+  // Arm only when the real existing budget can currently fund all three V772 requests.
+  if (!budgetAvailable(budget, "analysis", 3)) {
+    reserve.activationReason = "ELIGIBLE_CANDIDATE_FOUND_BUT_THREE_SLOT_HEADROOM_ALREADY_UNAVAILABLE_V776";
+    return reserve;
+  }
+
+  reserve.active = true;
+  reserve.reservedRequests = 3;
+  reserve.activatedAt = Date.now();
+  reserve.firstEligibleAddress = normalize(candidate?.address) || null;
+  reserve.activationReason = "FIRST_V772_ELIGIBLE_ANALYSED_CANDIDATE_V776";
+  reserve.releasedAt = null;
+  reserve.releaseReason = null;
+  return reserve;
+}
+
+function productionV4ReserveDecisionV776(budget, phase, type, amount=1) {
+  const reserve = budget?.analysis?.productionV4ReserveV776;
+  if (phase !== "analysis" || reserve?.active !== true || safeNumber(reserve?.reservedRequests) <= 0) return null;
+
+  const requestType = String(type || "UNKNOWN");
+  const isProtectedV772 =
+    requestType === "RPC:V772_RECENT_POOLMANAGER_SWAPS" ||
+    requestType === "UNISWAP_V4_POOL_INFO_V772";
+
+  // The reserve is explicitly released immediately before the final V772 lane
+  // starts. This branch is only a safety valve if a V772 request reaches here
+  // during that handoff.
+  if (isProtectedV772) return null;
+
+  const reserved = Math.max(0, safeNumber(reserve.reservedRequests));
+  const notificationReserveRemaining =
+    budget?.notification?.globalReserveActiveV174 === true
+      ? Math.max(0, safeNumber(budget?.notification?.limit) - safeNumber(budget?.notification?.used))
+      : 0;
+  const preTelegramGlobalLimit = Math.max(0, safeNumber(budget?.totalLimit) - notificationReserveRemaining);
+  const needed = Math.max(1, safeNumber(amount));
+  const analysisBlocked =
+    safeNumber(budget?.analysis?.used) + needed >
+    Math.max(0, effectiveAnalysisLimitV416(budget) - reserved);
+  const globalBlocked =
+    safeNumber(budget?.totalUsed) + needed >
+    Math.max(0, preTelegramGlobalLimit - reserved);
+
+  if (analysisBlocked || globalBlocked) {
+    reserve.blockedRequests = safeNumber(reserve.blockedRequests) + 1;
+    reserve.lastBlockedType = requestType;
+    reserve.lastBlockedAt = Date.now();
+    budget.skipped.push({
+      phase, type, amount:needed,
+      reason:"V776_PRODUCTION_V4_THREE_SLOT_RESERVED",
+      reservedRequests:reserved,
+      firstEligibleAddress:reserve.firstEligibleAddress || null
+    });
+    return false;
+  }
+  return null;
+}
+
 function budgetAvailable(
   budget,
   phase,
@@ -16285,6 +16374,12 @@ function consumeBudget(
   type,
   amount = 1
 ) {
+  const productionV4ReserveDecision =
+    productionV4ReserveDecisionV776(budget, phase, type, amount);
+  if (productionV4ReserveDecision !== null) {
+    return productionV4ReserveDecision;
+  }
+
   const completionReserveDecisionV728 =
     tryConsumeEvidenceCompletionReserveV728(
       budget,
@@ -97659,6 +97754,14 @@ for (
       candidate
     );
 
+    // V776: once a real analysed candidate qualifies for the production V4 lane,
+    // protect three existing slots from lower-priority later analysis.
+    activateProductionV4ReserveV776(
+      budget,
+      candidate,
+      currentLiveVerifiedLaunchTokensV621
+    );
+
     scannerFunnelV415.returnedCandidates++;
     if(currentLiveVerifiedLaunchTokensV621.has(address)){
       scannerFunnelV415.freshCandidatePriorityV469
@@ -97713,6 +97816,17 @@ for (
     ) || null;
 
   if (productionV4TargetV772) {
+    // V776: the three slots have now served their purpose. Release the ordering
+    // guard immediately before V772 consumes the real existing budget.
+    const productionV4ReserveV776 = budget?.analysis?.productionV4ReserveV776;
+    if (productionV4ReserveV776?.active === true) {
+      productionV4ReserveV776.active = false;
+      productionV4ReserveV776.consumedProtectedRequests = 3;
+      productionV4ReserveV776.reservedRequests = 0;
+      productionV4ReserveV776.releasedAt = Date.now();
+      productionV4ReserveV776.releaseReason = "RELEASED_TO_SELECTED_V772_TARGET_V776";
+    }
+
     productionV4EnrichmentV772 =
       await enrichCandidateWithProductionV4V772(
         env,
@@ -97734,7 +97848,14 @@ for (
   state.productionV4EnrichmentV772 = {
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
-    version: "V772"
+    version: "V776",
+    requestReserveV776: {
+      ...(budget?.analysis?.productionV4ReserveV776 || {}),
+      active: budget?.analysis?.productionV4ReserveV776?.active === true,
+      reservedRequests: safeNumber(budget?.analysis?.productionV4ReserveV776?.reservedRequests),
+      blockedRequests: safeNumber(budget?.analysis?.productionV4ReserveV776?.blockedRequests),
+      consumedProtectedRequests: safeNumber(budget?.analysis?.productionV4ReserveV776?.consumedProtectedRequests)
+    }
   };
 
   /*
@@ -155316,7 +155437,7 @@ function productionV4StatusTelegramV772(result) {
     return x.length > 22 ? `${x.slice(0,12)}…${x.slice(-8)}` : (x || "NONE");
   };
   return [
-    "🧬 <b>Production V4 / Uniswap Bridge — V772</b>",
+    "🧬 <b>Production V4 / Uniswap Bridge — V776</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
@@ -155327,6 +155448,8 @@ function productionV4StatusTelegramV772(result) {
     `Bounded PoolIds checked: <b>${safeNumber(r?.candidatePoolIdsChecked)}</b>`,
     `Matching pools / swaps: <b>${Array.isArray(r?.matchingPoolIds) ? r.matchingPoolIds.length : 0} / ${safeNumber(r?.matchingSwapRows)}</b>`,
     `Extra production requests used: <b>${safeNumber(r?.externalRequestsUsed)}</b>`,
+    `V776 protected slots remaining / consumed: <b>${safeNumber(r?.requestReserveV776?.reservedRequests)} / ${safeNumber(r?.requestReserveV776?.consumedProtectedRequests)}</b>`,
+    `V776 lower-priority requests blocked: <b>${safeNumber(r?.requestReserveV776?.blockedRequests)}</b>`,
     `Momentum / Opportunity / Confidence after: <b>${safeNumber(r?.momentumAfter)} / ${safeNumber(r?.opportunityAfter)} / ${safeNumber(r?.confidenceAfter)}</b>`,
     "",
     "<i>Read-only status of the last scanner run. V772 changes no Telegram thresholds and infers no USD value from V4 activity.</i>"
