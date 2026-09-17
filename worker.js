@@ -1,5 +1,5 @@
 /**
- * Robinhood Chain Meme Hunter — V790
+ * Robinhood Chain Meme Hunter — V791
  *
  * V790 V789 BIDIRECTIONAL PROTECTED-HANDOFF AUTHORISATION FIX:
  * - preserves V789 bidirectional Validation Cloud Initialize cursor/search logic unchanged;
@@ -6833,7 +6833,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V790";
+const VERSION = "V791";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -40814,6 +40814,146 @@ function v4PoolLiveAggregateSwapRowsV768(rows) {
     map.set(poolId,current);
   }
   return [...map.values()].sort((a,b)=>(safeNumber(b.freshSwapCount)-safeNumber(a.freshSwapCount)) || (safeNumber(b.lastFreshSwapBlock)-safeNumber(a.lastFreshSwapBlock)));
+}
+
+
+
+/* =========================================================
+   V791 MANUAL BIDIRECTIONAL V4 POOL SEARCH DIAGNOSTIC
+   ========================================================= */
+function v4PoolSearchLaunchAnchorV791(state, token, explicitBlock = 0) {
+  const t=normalize(token);
+  const explicit=safeNumber(explicitBlock);
+  if(explicit>0) return {block:explicit,source:"EXPLICIT_BLOCK_ARGUMENT"};
+  const c789=state?.productionV4InitCursorV789?.[t];
+  if(safeNumber(c789?.launchBlock)>0) return {block:safeNumber(c789.launchBlock),source:"V789_CURSOR"};
+  const c788=state?.productionV4InitCursorV788?.[t];
+  if(safeNumber(c788?.launchBlock)>0) return {block:safeNumber(c788.launchBlock),source:"V788_CURSOR"};
+  const stores=[
+    ["DIRECT_ONCHAIN_V476",state?.directOnChainLaunchTelemetryV476?.recentVerifiedLaunches],
+    ["LAUNCHHOOD_V220",state?.launchHoodDiscoveryV220?.recentVerifiedLaunches],
+    ["FIXED_MINT_V222",state?.fixedMintLaunchpadDiscoveryV222?.recentVerifiedLaunches],
+    ["CLANKER_V224",state?.clankerVirtualsDiscoveryV224?.recentVerifiedLaunches],
+    ["PONS_V215",state?.ponsDiscoveryV215?.recentVerifiedLaunches],
+    ["FLAP_V214",state?.flapDiscoveryV214?.recentVerifiedLaunches],
+    ["BAGS_V210",state?.bagsDiscoveryV210?.recentVerifiedLaunches],
+    ["POOLS_TRADE_V209",state?.poolsTradeLaunchTelemetryV209?.recentVerifiedLaunches]
+  ];
+  for(const [name,rows] of stores){
+    if(!Array.isArray(rows)) continue;
+    const matches=rows.filter(row=>{
+      const rt=normalize(row?.token||row?.tokenAddress||row?.address||row?.contractAddress);
+      return rt===t;
+    }).sort((a,b)=>safeNumber(b?.blockNumber||b?.launchBlock)-safeNumber(a?.blockNumber||a?.launchBlock));
+    const row=matches[0];
+    const block=safeNumber(row?.launchBlock||row?.blockNumber);
+    if(block>0) return {block,source:name};
+  }
+  return {block:0,source:"NO_VERIFIED_LAUNCH_ANCHOR"};
+}
+
+async function v4PoolSearchDiagnosticV791(env, argument="") {
+  const parts=String(argument||"").trim().split(/\s+/).filter(Boolean);
+  const explicitToken=normalize(parts[0]||"");
+  const explicitBlock=safeNumber(parts[1]);
+  let loaded={state:{},error:null};
+  try{loaded=await readState(env);}catch(error){loaded={state:{},error:errorString(error)};}
+  const state=loaded?.state||{};
+  const latestToken=normalize(state?.productionV4EnrichmentV772?.tokenAddress);
+  const token=isAddress(explicitToken)?explicitToken:(isAddress(latestToken)?latestToken:null);
+  const base={
+    version:"V791",diagnostic:"MANUAL_V4_BIDIRECTIONAL_POOL_SEARCH",tokenAddress:token||null,
+    tokenSource:isAddress(explicitToken)?"EXPLICIT_ARGUMENT":(isAddress(latestToken)?"LAST_PRODUCTION_TOKEN":"NONE"),
+    launchBlock:null,launchAnchorSource:null,rpcProvider:null,head:null,recentFromBlock:null,recentToBlock:null,
+    recentSwapRows:0,livePoolIds:0,windows:[],initializeRows:0,decodedTokenMatches:0,
+    matchingPoolIds:[],activeMatchingPoolIds:[],matchingRecentSwapRows:0,externalRequestsUsed:0,
+    scannerBudgetConsumed:false,stateWrites:0,kvRead:true,kvReadError:loaded?.error||null,error:null
+  };
+  if(!isAddress(token)) return {...base,error:"NO_VALID_TOKEN_USE_/v4poolsearch_0xTOKEN"};
+  const anchor=v4PoolSearchLaunchAnchorV791(state,token,explicitBlock);
+  base.launchBlock=anchor.block||null;base.launchAnchorSource=anchor.source;
+  if(!(anchor.block>0)) return {...base,error:"NO_VERIFIED_LAUNCH_ANCHOR_USE_/v4poolsearch_0xTOKEN_BLOCK"};
+
+  const rpc=v4PoolLiveRpcEndpointV767(env);
+  base.rpcProvider=rpc.name;
+  const head=await v4PoolLiveRpcCallV767(rpc.url,"eth_blockNumber",[]);
+  base.externalRequestsUsed++;
+  if(!head?.ok) return {...base,error:`HEAD_FAILED:${head?.error||"UNKNOWN"}`};
+  const headNum=Number.parseInt(String(head.result||"0x0"),16);
+  if(!Number.isFinite(headNum)||headNum<=0) return {...base,error:"HEAD_UNVERIFIED"};
+  base.head=headNum;
+  const recentFrom=Math.max(0,headNum-599);
+  base.recentFromBlock=recentFrom;base.recentToBlock=headNum;
+  const swaps=await v4PoolLiveRpcCallV767(rpc.url,"eth_getLogs",[{address:normalize(POOL_MANAGER),fromBlock:`0x${recentFrom.toString(16)}`,toBlock:`0x${headNum.toString(16)}`,topics:[SWAP_TOPIC]}]);
+  base.externalRequestsUsed++;
+  if(!swaps?.ok) return {...base,error:`RECENT_SWAP_FAILED:${swaps?.error||"UNKNOWN"}`};
+  const swapRows=Array.isArray(swaps.result)?swaps.result:[];
+  base.recentSwapRows=swapRows.length;
+  const active=v4PoolLiveAggregateSwapRowsV768(swapRows);
+  base.livePoolIds=active.length;
+  const activeIds=new Set(active.map(r=>normalize(r?.poolId)).filter(isBytes32HexV765));
+
+  const span=Math.max(1,Math.min(250,safeNumber(VALIDATION_CLOUD_UNKNOWN_POOL_RANGE_BLOCKS_V630)||250));
+  const ranges=[
+    {label:"BACKWARD",from:Math.max(0,anchor.block-span),to:Math.max(0,anchor.block-1)},
+    {label:"FORWARD",from:anchor.block,to:Math.min(headNum,anchor.block+span-1)}
+  ];
+  const matched=new Set();
+  for(const range of ranges){
+    const row={label:range.label,fromBlock:range.from,toBlock:range.to,attempted:false,ok:false,rows:0,tokenMatches:0,error:null};
+    if(range.to<range.from){row.error="EMPTY_RANGE";base.windows.push(row);continue;}
+    row.attempted=true;
+    const logs=await v4PoolLiveRpcCallV767(rpc.url,"eth_getLogs",[{address:normalize(POOL_MANAGER),fromBlock:`0x${range.from.toString(16)}`,toBlock:`0x${range.to.toString(16)}`,topics:[INITIALIZE_TOPIC]}]);
+    base.externalRequestsUsed++;
+    row.ok=logs?.ok===true;
+    if(!row.ok){row.error=logs?.error||"RPC_FAILED";base.windows.push(row);continue;}
+    const rows=Array.isArray(logs.result)?logs.result:[];
+    row.rows=rows.length;base.initializeRows+=rows.length;
+    for(const log of rows){
+      const d=decodeInitialize(log);
+      if(!d) continue;
+      const c0=normalize(d?.currency0),c1=normalize(d?.currency1);
+      if(c0!==token&&c1!==token) continue;
+      row.tokenMatches++;base.decodedTokenMatches++;
+      const pid=normalize(d?.poolId);
+      if(isBytes32HexV765(pid)) matched.add(pid);
+    }
+    base.windows.push(row);
+  }
+  base.matchingPoolIds=[...matched];
+  base.activeMatchingPoolIds=base.matchingPoolIds.filter(pid=>activeIds.has(pid));
+  if(base.activeMatchingPoolIds.length){
+    const activeMatchSet=new Set(base.activeMatchingPoolIds);
+    base.matchingRecentSwapRows=swapRows.filter(log=>activeMatchSet.has(normalize(log?.topics?.[1]))).length;
+  }
+  if(base.activeMatchingPoolIds.length) return base;
+  base.error=base.matchingPoolIds.length?"TOKEN_POOL_INITIALIZE_FOUND_BUT_NOT_ACTIVE_IN_RECENT_SWAP_WINDOW":"NO_TOKEN_INITIALIZE_IN_BIDIRECTIONAL_500_BLOCK_WINDOW";
+  return base;
+}
+
+function v4PoolSearchTelegramV791(result){
+  const r=result||{};
+  const short=v=>{const s=String(v||"");return s.length>22?`${s.slice(0,12)}…${s.slice(-8)}`:(s||"NONE");};
+  const lines=[
+    "🧬 <b>Manual V4 Pool Search — V791</b>","",
+    `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
+    `Token source: <b>${escapeHtml(String(r?.tokenSource||"NONE"))}</b>`,
+    `Launch anchor: <b>${escapeHtml(String(r?.launchBlock??"NONE"))}</b> · ${escapeHtml(String(r?.launchAnchorSource||"NONE"))}`,
+    `RPC: <b>${escapeHtml(String(r?.rpcProvider||"NONE"))}</b> · head <b>${escapeHtml(String(r?.head??"NONE"))}</b>`,
+    `Recent swaps / live PoolIds: <b>${safeNumber(r?.recentSwapRows)} / ${safeNumber(r?.livePoolIds)}</b>`,"",
+    "🔎 <b>Bidirectional Initialize windows</b>"
+  ];
+  for(const w of Array.isArray(r?.windows)?r.windows:[]){
+    lines.push(`${escapeHtml(String(w?.label||"WINDOW"))}: <b>${escapeHtml(String(w?.fromBlock??"?"))}→${escapeHtml(String(w?.toBlock??"?"))}</b> · ${w?.attempted===true?"attempted":"not attempted"} · ${w?.ok===true?"OK":"FAILED"} · rows <b>${safeNumber(w?.rows)}</b> · token matches <b>${safeNumber(w?.tokenMatches)}</b>${w?.error?` · <code>${escapeHtml(String(w.error).slice(0,180))}</code>`:""}`);
+  }
+  lines.push("",`Initialize rows / token matches: <b>${safeNumber(r?.initializeRows)} / ${safeNumber(r?.decodedTokenMatches)}</b>`,
+    `Matching PoolIds: <b>${safeNumber(r?.matchingPoolIds?.length)}</b>`,
+    `Active matching PoolIds: <b>${safeNumber(r?.activeMatchingPoolIds?.length)}</b>`,
+    `Matching recent swaps: <b>${safeNumber(r?.matchingRecentSwapRows)}</b>`);
+  for(const pid of (r?.activeMatchingPoolIds||[]).slice(0,5)) lines.push(`✅ Active PoolId: <code>${escapeHtml(short(pid))}</code>`);
+  lines.push("",r?.error?`Diagnostic result: <code>${escapeHtml(String(r.error).slice(0,400))}</code>`:"Diagnostic result: <b>EXACT_ACTIVE_V4_POOL_FOUND</b>","",
+    `<i>Diagnostic only: ${safeNumber(r?.externalRequestsUsed)} external requests, one KV read, zero KV writes, zero scanner-budget requests. No scoring, Telegram qualification or USD inference is changed.</i>`);
+  return lines.join("\n");
 }
 
 async function v4PoolLiveCompareDiagnosticV768(env, requestedToken = "") {
@@ -149396,6 +149536,7 @@ function telegramHelpV271() {
     "<code>/uniswapv4test [0xPOOLID]</code> — V765 one-request Uniswap V4 Pool Info test; auto-selects a retained PoolId when omitted",
     "<code>/v4marketstatus</code> — V773 show the last production market/liquidity completion result",
     "<code>/v4prodstatus</code> — V772 show the last production scanner V4/Uniswap enrichment result",
+    "<code>/v4poolsearch [0xTOKEN] [launchBlock]</code> — V791 force a manual bidirectional Validation Cloud PoolId search (diagnostic only)",
     "<code>/v4allpools [0xTOKEN]</code> — V771 verify all recent live V4 pools for a token + normalized BUY/SELL amounts using on-chain decimals",
     "<code>/v4swapamounts [0xTOKEN]</code> — V770 verify exact raw target/paired amounts for BUY vs SELL swaps on the discovered live pool",
     "<code>/v4swapdirection [0xTOKEN]</code> — V769 verify BUY/SELL direction from signed on-chain V4 Swap deltas on the discovered live pool",
@@ -150256,6 +150397,21 @@ async function telegramCommandReplyV271(
       diagnosticV273.result = sentV773?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
     }
     return {success:sentV773?.success===true,ignored:false,command:parsed.command,productionMarketLiquidityV773:resultV773};
+  }
+
+  if (parsed.command === "/v4poolsearch") {
+    const searchV791 = await v4PoolSearchDiagnosticV791(env, parsed.argument || "");
+    const replyV791 = v4PoolSearchTelegramV791(searchV791);
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV791 = await sendTelegram(env, replyV791, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV791?.success === true;
+      diagnosticV273.telegramStatus = sentV791?.status || null;
+      diagnosticV273.telegramMode = sentV791?.mode || null;
+      diagnosticV273.telegramError = sentV791?.error || null;
+      diagnosticV273.result = sentV791?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV791?.success===true,ignored:false,command:parsed.command,v4PoolSearchV791:searchV791};
   }
 
   if (parsed.command === "/v4prodstatus") {
@@ -156250,6 +156406,12 @@ async function handleRequest(
 
 
 
+
+  if (path === "/v4poolsearch") {
+    const token=url.searchParams.get("token")||"";
+    const block=url.searchParams.get("block")||"";
+    return jsonResponse(await v4PoolSearchDiagnosticV791(env,`${token} ${block}`.trim()));
+  }
 
   if (path === "/v4allpools") {
     return jsonResponse(
