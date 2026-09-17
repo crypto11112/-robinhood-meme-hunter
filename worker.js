@@ -6735,7 +6735,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V776";
+const VERSION = "V777";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -13447,6 +13447,20 @@ function configureAdaptiveAnalysisHeadroomV416(budget, analysisQueueLength = 0) 
 
 
 /* =========================================================
+   V777 PRODUCTION V4 RESERVED-SLOT OWNERSHIP HANDOFF
+   =========================================================
+   - Fixes the V776-proven self-block: V776 correctly reserved 3 requests and
+     blocked lower-priority work, but the selected V772 request could then be
+     rejected by older internal reserve lanes.
+   - V777 transfers those already-protected slots to V772 and permits ONLY the
+     V772 RPC + Uniswap Pool Info request types to cross older internal reserves.
+   - budgetAvailable() remains authoritative, so the real analysis ceiling, hard
+     42-request cap and unused Telegram notification reserve are never bypassed.
+   - No extra requests, no provider changes, no scoring/qualification changes,
+     and no Telegram threshold changes.
+*/
+
+/* =========================================================
    V776 PRODUCTION V4 REQUEST-HEADROOM RESERVATION
    =========================================================
    Purpose:
@@ -13531,6 +13545,57 @@ function productionV4ReserveDecisionV776(budget, phase, type, amount=1) {
     return false;
   }
   return null;
+}
+
+function consumeAuthorisedProductionV4HandoffV777(budget, phase, type, amount = 1) {
+  const reserve = budget?.analysis?.productionV4ReserveV776;
+  const requestType = String(type || "UNKNOWN");
+  const isProtectedV772 =
+    phase === "analysis" &&
+    (requestType === "RPC:V772_RECENT_POOLMANAGER_SWAPS" ||
+      requestType === "UNISWAP_V4_POOL_INFO_V772");
+
+  if (
+    !isProtectedV772 ||
+    reserve?.handoffActiveV777 !== true ||
+    safeNumber(reserve?.handoffRemainingV777) < Math.max(1, safeNumber(amount))
+  ) {
+    return null;
+  }
+
+  const needed = Math.max(1, safeNumber(amount));
+
+  // V777 bypasses ONLY older internal reserve ordering. The real analysis limit,
+  // hard global ceiling and still-unused Telegram notification reserve remain absolute.
+  if (!budgetAvailable(budget, "analysis", needed)) {
+    reserve.handoffHardBoundaryBlocksV777 =
+      safeNumber(reserve.handoffHardBoundaryBlocksV777) + 1;
+    reserve.lastHandoffBlockedTypeV777 = requestType;
+    reserve.lastHandoffBlockedAtV777 = Date.now();
+    budget.skipped.push({
+      phase, type, amount:needed,
+      reason:"V777_PRODUCTION_V4_HANDOFF_REAL_BUDGET_UNAVAILABLE"
+    });
+    return false;
+  }
+
+  budget.totalUsed += needed;
+  budget.analysis.used += needed;
+
+  reserve.handoffRemainingV777 =
+    Math.max(0, safeNumber(reserve.handoffRemainingV777) - needed);
+  reserve.consumedProtectedRequests =
+    safeNumber(reserve.consumedProtectedRequests) + needed;
+  reserve.lastHandoffConsumedTypeV777 = requestType;
+  reserve.lastHandoffConsumedAtV777 = Date.now();
+
+  if (reserve.handoffRemainingV777 <= 0) {
+    reserve.handoffActiveV777 = false;
+    reserve.releasedAt = Date.now();
+    reserve.releaseReason = "V777_PRODUCTION_V4_HANDOFF_FULLY_CONSUMED";
+  }
+
+  return true;
 }
 
 function budgetAvailable(
@@ -16378,6 +16443,14 @@ function consumeBudget(
     productionV4ReserveDecisionV776(budget, phase, type, amount);
   if (productionV4ReserveDecision !== null) {
     return productionV4ReserveDecision;
+  }
+
+  const productionV4HandoffDecisionV777 =
+    consumeAuthorisedProductionV4HandoffV777(
+      budget, phase, type, amount
+    );
+  if (productionV4HandoffDecisionV777 !== null) {
+    return productionV4HandoffDecisionV777;
   }
 
   const completionReserveDecisionV728 =
@@ -97816,15 +97889,19 @@ for (
     ) || null;
 
   if (productionV4TargetV772) {
-    // V776: the three slots have now served their purpose. Release the ordering
-    // guard immediately before V772 consumes the real existing budget.
+    // V777: transfer ownership of the three protected slots to V772 itself.
+    // The lane may bypass older INTERNAL reserves, but never the real hard/global,
+    // analysis or Telegram-notification boundaries enforced by budgetAvailable().
     const productionV4ReserveV776 = budget?.analysis?.productionV4ReserveV776;
     if (productionV4ReserveV776?.active === true) {
       productionV4ReserveV776.active = false;
-      productionV4ReserveV776.consumedProtectedRequests = 3;
+      productionV4ReserveV776.handoffActiveV777 = true;
+      productionV4ReserveV776.handoffRemainingV777 =
+        Math.max(0, safeNumber(productionV4ReserveV776.reservedRequests));
+      productionV4ReserveV776.consumedProtectedRequests = 0;
       productionV4ReserveV776.reservedRequests = 0;
       productionV4ReserveV776.releasedAt = Date.now();
-      productionV4ReserveV776.releaseReason = "RELEASED_TO_SELECTED_V772_TARGET_V776";
+      productionV4ReserveV776.releaseReason = "HANDED_TO_SELECTED_V772_TARGET_V777";
     }
 
     productionV4EnrichmentV772 =
@@ -97848,7 +97925,7 @@ for (
   state.productionV4EnrichmentV772 = {
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
-    version: "V776",
+    version: "V777",
     requestReserveV776: {
       ...(budget?.analysis?.productionV4ReserveV776 || {}),
       active: budget?.analysis?.productionV4ReserveV776?.active === true,
@@ -155437,7 +155514,7 @@ function productionV4StatusTelegramV772(result) {
     return x.length > 22 ? `${x.slice(0,12)}…${x.slice(-8)}` : (x || "NONE");
   };
   return [
-    "🧬 <b>Production V4 / Uniswap Bridge — V776</b>",
+    "🧬 <b>Production V4 / Uniswap Bridge — V777</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
@@ -155448,8 +155525,9 @@ function productionV4StatusTelegramV772(result) {
     `Bounded PoolIds checked: <b>${safeNumber(r?.candidatePoolIdsChecked)}</b>`,
     `Matching pools / swaps: <b>${Array.isArray(r?.matchingPoolIds) ? r.matchingPoolIds.length : 0} / ${safeNumber(r?.matchingSwapRows)}</b>`,
     `Extra production requests used: <b>${safeNumber(r?.externalRequestsUsed)}</b>`,
-    `V776 protected slots remaining / consumed: <b>${safeNumber(r?.requestReserveV776?.reservedRequests)} / ${safeNumber(r?.requestReserveV776?.consumedProtectedRequests)}</b>`,
-    `V776 lower-priority requests blocked: <b>${safeNumber(r?.requestReserveV776?.blockedRequests)}</b>`,
+    `V777 protected slots remaining / consumed: <b>${safeNumber(r?.requestReserveV776?.handoffRemainingV777 ?? r?.requestReserveV776?.reservedRequests)} / ${safeNumber(r?.requestReserveV776?.consumedProtectedRequests)}</b>`,
+    `V777 lower-priority requests blocked: <b>${safeNumber(r?.requestReserveV776?.blockedRequests)}</b>`,
+    `V777 handoff active / hard-boundary blocks: <b>${r?.requestReserveV776?.handoffActiveV777 === true ? "YES" : "NO"} / ${safeNumber(r?.requestReserveV776?.handoffHardBoundaryBlocksV777)}</b>`,
     `Momentum / Opportunity / Confidence after: <b>${safeNumber(r?.momentumAfter)} / ${safeNumber(r?.opportunityAfter)} / ${safeNumber(r?.confidenceAfter)}</b>`,
     "",
     "<i>Read-only status of the last scanner run. V772 changes no Telegram thresholds and infers no USD value from V4 activity.</i>"
