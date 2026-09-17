@@ -1,4 +1,15 @@
 /**
+ * Robinhood Chain Meme Hunter — V798
+ *
+ * V798 PINNED-BLOCK ACTIVE-POOL PAGINATION:
+ * - removes V797 diagnostic KV snapshot writes entirely;
+ * - page 1 pins the exact chain head and every later page replays the same 600-block Swap range;
+ * - active PoolIds are sorted deterministically before pagination, so p1/p2/p3 cover one identical snapshot;
+ * - next-page commands carry h<block> so no persisted state is required;
+ * - preserves 100 PoolIds / 5 Uniswap batches per page, exact token matching and historical fallback;
+ * - diagnostic only: zero KV writes, zero scanner-budget requests, no scoring/Telegram/USD changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V797
  *
  * V797 FROZEN ACTIVE-POOL SNAPSHOT PAGINATION:
@@ -6884,7 +6895,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V797";
+const VERSION = "V798";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -41081,22 +41092,26 @@ async function v4PoolSearchDiagnosticV791(env, argument="") {
   const explicitToken=normalize(parts[0]||"");
   const pageMatch=String(parts.find(v=>/^p\d+$/i.test(v))||"p1").match(/^p(\d+)$/i);
   const reversePage=Math.max(1,safeNumber(pageMatch?.[1])||1);
+  const headMatch=String(parts.find(v=>/^h\d+$/i.test(v))||"").match(/^h(\d+)$/i);
+  const pinnedHeadArg=Math.max(0,safeNumber(headMatch?.[1]));
   const explicitBlock=safeNumber(parts.find(v=>/^\d+$/.test(v))||0);
+
   let loaded={state:{},error:null};
   try{loaded=await readState(env);}catch(error){loaded={state:{},error:errorString(error)};}
   const state=loaded?.state||{};
   const autoTarget=v4PoolSearchAutoTokenV792(state);
   const token=isAddress(explicitToken)?explicitToken:(isAddress(autoTarget?.tokenAddress)?normalize(autoTarget.tokenAddress):null);
   const base={
-    version:"V797",diagnostic:"MANUAL_V4_FROZEN_ACTIVE_POOL_SNAPSHOT_PAGED",tokenAddress:token||null,
+    version:"V798",diagnostic:"MANUAL_V4_PINNED_BLOCK_ACTIVE_POOL_PAGED",tokenAddress:token||null,
     tokenSource:isAddress(explicitToken)?"EXPLICIT_ARGUMENT":(autoTarget?.source||"NONE"),
     launchBlock:null,launchAnchorSource:null,rpcProvider:null,head:null,recentFromBlock:null,recentToBlock:null,
     recentSwapRows:0,livePoolIds:0,windows:[],initializeRows:0,decodedTokenMatches:0,
     matchingPoolIds:[],activeMatchingPoolIds:[],matchingRecentSwapRows:0,externalRequestsUsed:0,
     scannerBudgetConsumed:false,stateWrites:0,kvRead:true,kvReadError:loaded?.error||null,error:null,
-    snapshotV797:{source:null,createdAt:null,ageMs:null,head:null,poolIds:0,writeAttempted:false,writeSaved:false,writeError:null}
+    snapshotV798:{source:null,head:null,poolIds:0,pinnedFromArgument:pinnedHeadArg>0,deterministicSort:true}
   };
   if(!isAddress(token)) return {...base,error:"NO_VALID_TOKEN_USE_/v4poolsearch_0xTOKEN"};
+
   let anchor=v4PoolSearchLaunchAnchorV791(state,token,explicitBlock);
   if(!(anchor.block>0) && !isAddress(explicitToken) && safeNumber(autoTarget?.launchBlock)>0){
     anchor={block:safeNumber(autoTarget.launchBlock),source:autoTarget.source||"AUTO_CURSOR"};
@@ -41105,72 +41120,46 @@ async function v4PoolSearchDiagnosticV791(env, argument="") {
 
   const rpc=v4PoolLiveRpcEndpointV767(env);
   base.rpcProvider=rpc.name;
-  const SNAPSHOT_MAX_AGE_MS_V797=30*60*1000;
-  let active=[];
-  let swapRows=[];
 
-  if(reversePage===1){
+  let headNum=pinnedHeadArg;
+  if(!(headNum>0)){
     const head=await v4PoolLiveRpcCallV767(rpc.url,"eth_blockNumber",[]);
     base.externalRequestsUsed++;
     if(!head?.ok) return {...base,error:`HEAD_FAILED:${head?.error||"UNKNOWN"}`};
-    const headNum=Number.parseInt(String(head.result||"0x0"),16);
+    headNum=Number.parseInt(String(head.result||"0x0"),16);
     if(!Number.isFinite(headNum)||headNum<=0) return {...base,error:"HEAD_UNVERIFIED"};
-    base.head=headNum;
-    const recentFrom=Math.max(0,headNum-599);
-    base.recentFromBlock=recentFrom;base.recentToBlock=headNum;
-    const swaps=await v4PoolLiveRpcCallV767(rpc.url,"eth_getLogs",[{address:normalize(POOL_MANAGER),fromBlock:`0x${recentFrom.toString(16)}`,toBlock:`0x${headNum.toString(16)}`,topics:[SWAP_TOPIC]}]);
-    base.externalRequestsUsed++;
-    if(!swaps?.ok) return {...base,error:`RECENT_SWAP_FAILED:${swaps?.error||"UNKNOWN"}`};
-    swapRows=Array.isArray(swaps.result)?swaps.result:[];
-    base.recentSwapRows=swapRows.length;
-    active=v4PoolLiveAggregateSwapRowsV768(swapRows);
-    base.livePoolIds=active.length;
-
-    const frozenRowsV797=active.map(row=>({
-      poolId:normalize(row?.poolId),
-      freshSwapCount:safeNumber(row?.freshSwapCount),
-      lastFreshSwapBlock:safeNumber(row?.lastFreshSwapBlock)||null
-    })).filter(row=>isBytes32HexV765(row.poolId));
-    state.v4PoolSearchSnapshotV797={
-      tokenAddress:token,
-      createdAt:Date.now(),
-      head:headNum,
-      recentFromBlock:recentFrom,
-      recentToBlock:headNum,
-      recentSwapRows:swapRows.length,
-      poolRows:frozenRowsV797
-    };
-    base.snapshotV797={source:"CREATED_PAGE_1",createdAt:state.v4PoolSearchSnapshotV797.createdAt,ageMs:0,head:headNum,poolIds:frozenRowsV797.length,writeAttempted:true,writeSaved:false,writeError:null};
-    const saved=await writeState(env,state);
-    base.stateWrites=1;
-    base.snapshotV797.writeSaved=saved?.saved===true;
-    base.snapshotV797.writeError=saved?.error||null;
-    if(saved?.saved!==true) return {...base,error:`SNAPSHOT_WRITE_FAILED:${saved?.error||"UNKNOWN"}`};
+    base.snapshotV798.source="PINNED_FROM_PAGE_1_HEAD";
   }else{
-    const snap=state?.v4PoolSearchSnapshotV797;
-    const snapToken=normalize(snap?.tokenAddress);
-    const createdAt=safeNumber(snap?.createdAt);
-    const ageMs=createdAt>0?Math.max(0,Date.now()-createdAt):null;
-    const validToken=snapToken===token;
-    const validAge=ageMs!==null && ageMs<=SNAPSHOT_MAX_AGE_MS_V797;
-    const rows=Array.isArray(snap?.poolRows)?snap.poolRows:[];
-    if(!validToken || !validAge || !rows.length){
-      base.snapshotV797={source:"MISSING_OR_STALE",createdAt:createdAt||null,ageMs,head:safeNumber(snap?.head)||null,poolIds:rows.length,writeAttempted:false,writeSaved:false,writeError:null};
-      return {...base,error:"NO_VALID_FROZEN_SNAPSHOT_RERUN_PAGE_1"};
-    }
-    active=rows.map(row=>({poolId:normalize(row?.poolId),freshSwapCount:safeNumber(row?.freshSwapCount),lastFreshSwapBlock:safeNumber(row?.lastFreshSwapBlock)||null})).filter(row=>isBytes32HexV765(row.poolId));
-    base.head=safeNumber(snap?.head)||null;
-    base.recentFromBlock=safeNumber(snap?.recentFromBlock)||null;
-    base.recentToBlock=safeNumber(snap?.recentToBlock)||null;
-    base.recentSwapRows=safeNumber(snap?.recentSwapRows);
-    base.livePoolIds=active.length;
-    base.snapshotV797={source:"REUSED_FROZEN_PAGE_1",createdAt,ageMs,head:base.head,poolIds:active.length,writeAttempted:false,writeSaved:false,writeError:null};
+    base.snapshotV798.source="REPLAYED_PINNED_HEAD_ARGUMENT";
   }
+  base.head=headNum;
+  base.snapshotV798.head=headNum;
+
+  const recentFrom=Math.max(0,headNum-599);
+  base.recentFromBlock=recentFrom;base.recentToBlock=headNum;
+  const swaps=await v4PoolLiveRpcCallV767(rpc.url,"eth_getLogs",[{address:normalize(POOL_MANAGER),fromBlock:`0x${recentFrom.toString(16)}`,toBlock:`0x${headNum.toString(16)}`,topics:[SWAP_TOPIC]}]);
+  base.externalRequestsUsed++;
+  if(!swaps?.ok) return {...base,error:`PINNED_SWAP_RANGE_FAILED:${swaps?.error||"UNKNOWN"}`};
+  const swapRows=Array.isArray(swaps.result)?swaps.result:[];
+  base.recentSwapRows=swapRows.length;
+
+  // Reconstruct the same active set from the same block range on every page.
+  // Sort by PoolId so pagination is deterministic even if aggregation insertion order changes.
+  const active=v4PoolLiveAggregateSwapRowsV768(swapRows)
+    .map(row=>({
+      ...row,
+      poolId:normalize(row?.poolId)
+    }))
+    .filter(row=>isBytes32HexV765(row.poolId))
+    .sort((a,b)=>String(a.poolId).localeCompare(String(b.poolId)));
+  base.livePoolIds=active.length;
+  base.snapshotV798.poolIds=active.length;
 
   const activeIds=new Set(active.map(r=>normalize(r?.poolId)).filter(isBytes32HexV765));
   const reverseV795=await v4PoolSearchActivePoolReverseLookupV795(env,active,token,reversePage);
   base.reverseLookupV795=reverseV795;
   base.externalRequestsUsed+=safeNumber(reverseV795?.externalRequestsUsed);
+
   if(Array.isArray(reverseV795?.matches) && reverseV795.matches.length){
     base.matchingPoolIds=reverseV795.matches.map(r=>normalize(r?.poolId)).filter(isBytes32HexV765);
     base.activeMatchingPoolIds=[...base.matchingPoolIds];
@@ -41179,13 +41168,14 @@ async function v4PoolSearchDiagnosticV791(env, argument="") {
     return base;
   }
   if(safeNumber(reverseV795?.nextPage)>0){
-    base.error="FROZEN_ACTIVE_POOL_PAGE_NO_MATCH_CONTINUE";
+    base.error="PINNED_ACTIVE_POOL_PAGE_NO_MATCH_CONTINUE";
     return base;
   }
+  if(reverseV795?.error==="ACTIVE_POOL_PAGE_OUT_OF_RANGE"){
+    return {...base,error:"PINNED_ACTIVE_POOL_PAGE_OUT_OF_RANGE"};
+  }
 
-  // Only after the complete frozen active set is exhausted do we use the historical Initialize fallback.
-  const headNum=safeNumber(base.head);
-  if(!(headNum>0)) return {...base,error:"FROZEN_SNAPSHOT_HEAD_UNVERIFIED"};
+  // Only after the complete pinned active set is exhausted do we use the historical Initialize fallback.
   const span=Math.max(1,Math.min(250,safeNumber(VALIDATION_CLOUD_UNKNOWN_POOL_RANGE_BLOCKS_V630)||250));
   const anchored=anchor.block>0 && anchor.block<=headNum;
   const ranges=anchored
@@ -41232,30 +41222,34 @@ async function v4PoolSearchDiagnosticV791(env, argument="") {
     },0);
   }
   if(base.activeMatchingPoolIds.length) return base;
-  base.error=base.matchingPoolIds.length?"TOKEN_POOL_INITIALIZE_FOUND_BUT_NOT_ACTIVE_IN_FROZEN_SWAP_SNAPSHOT":"NO_TOKEN_INITIALIZE_IN_BIDIRECTIONAL_500_BLOCK_WINDOW";
+  base.error=base.matchingPoolIds.length?"TOKEN_POOL_INITIALIZE_FOUND_BUT_NOT_ACTIVE_IN_PINNED_SWAP_SNAPSHOT":"NO_TOKEN_INITIALIZE_IN_BIDIRECTIONAL_500_BLOCK_WINDOW";
   return base;
 }
 
 function v4PoolSearchTelegramV791(result){
   const r=result||{};
   const short=v=>{const s=String(v||"");return s.length>22?`${s.slice(0,12)}…${s.slice(-8)}`:(s||"NONE");};
+  const matches=Array.isArray(r?.reverseLookupV795?.matches)?r.reverseLookupV795.matches:[];
+  const exactFound=matches.length>0 || safeNumber(r?.activeMatchingPoolIds?.length)>0;
   const lines=[
-    "🧬 <b>Manual V4 Pool Search — V797</b>","",
+    "🧬 <b>Manual V4 Pool Search — V798</b>","",
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
     `Token source: <b>${escapeHtml(String(r?.tokenSource||"NONE"))}</b>`,
     `Launch anchor: <b>${escapeHtml(String(r?.launchBlock??"NONE"))}</b> · ${escapeHtml(String(r?.launchAnchorSource||"NONE"))}`,
-    `RPC: <b>${escapeHtml(String(r?.rpcProvider||"NONE"))}</b> · snapshot head <b>${escapeHtml(String(r?.head??"NONE"))}</b>`,
-    `Frozen recent swaps / PoolIds: <b>${safeNumber(r?.recentSwapRows)} / ${safeNumber(r?.livePoolIds)}</b>`,
-    `Snapshot: <b>${escapeHtml(String(r?.snapshotV797?.source||"NONE"))}</b> · pools <b>${safeNumber(r?.snapshotV797?.poolIds)}</b>${r?.snapshotV797?.ageMs!==null&&r?.snapshotV797?.ageMs!==undefined?` · age <b>${Math.floor(safeNumber(r.snapshotV797.ageMs)/1000)}s</b>`:""}`,
-    r?.snapshotV797?.writeAttempted===true?`Snapshot KV write: <b>${r?.snapshotV797?.writeSaved===true?"SAVED":"FAILED"}</b>${r?.snapshotV797?.writeError?` · <code>${escapeHtml(String(r.snapshotV797.writeError).slice(0,180))}</code>`:""}`:`Snapshot KV write: <b>NOT NEEDED</b>`,"",
-    "🦄 <b>Frozen active PoolId reverse lookup — V797</b>",
+    `RPC: <b>${escapeHtml(String(r?.rpcProvider||"NONE"))}</b> · pinned head <b>${escapeHtml(String(r?.head??"NONE"))}</b>`,
+    `Pinned range: <b>${escapeHtml(String(r?.recentFromBlock??"?"))}→${escapeHtml(String(r?.recentToBlock??"?"))}</b>`,
+    `Pinned recent swaps / PoolIds: <b>${safeNumber(r?.recentSwapRows)} / ${safeNumber(r?.livePoolIds)}</b>`,
+    `Snapshot source: <b>${escapeHtml(String(r?.snapshotV798?.source||"NONE"))}</b> · KV writes <b>${safeNumber(r?.stateWrites)}</b>`,"",
+    "🦄 <b>Pinned active PoolId reverse lookup — V798</b>",
     `Page: <b>${safeNumber(r?.reverseLookupV795?.page)||1}</b> · offset <b>${safeNumber(r?.reverseLookupV795?.startOffset)}</b> · page size <b>${safeNumber(r?.reverseLookupV795?.pagePoolIds)}</b>`,
     `PoolIds checked this run: <b>${safeNumber(r?.reverseLookupV795?.poolIdsChecked)} / ${safeNumber(r?.reverseLookupV795?.poolIdsAvailable)}</b>`,
     `Remaining after page: <b>${safeNumber(r?.reverseLookupV795?.remainingPoolIds)}</b>`,
     `Uniswap batches OK/attempted: <b>${safeNumber(r?.reverseLookupV795?.batchesOk)} / ${safeNumber(r?.reverseLookupV795?.batchesAttempted)}</b>`,
-    `Pools returned / token matches: <b>${safeNumber(r?.reverseLookupV795?.poolsReturned)} / ${safeNumber(r?.reverseLookupV795?.matches?.length)}</b>`,
-    r?.reverseLookupV795?.error?`Reverse lookup result: <code>${escapeHtml(String(r.reverseLookupV795.error).slice(0,300))}</code>`:"Reverse lookup result: <b>EXACT_ACTIVE_POOL_FOUND</b>",
-    safeNumber(r?.reverseLookupV795?.nextPage)>0?`Next: <code>/v4poolsearch ${escapeHtml(String(r?.tokenAddress||""))} p${safeNumber(r.reverseLookupV795.nextPage)}</code>`:"Frozen active-pool pages: <b>COMPLETE</b>","",
+    `Pools returned / token matches: <b>${safeNumber(r?.reverseLookupV795?.poolsReturned)} / ${matches.length}</b>`,
+    exactFound?"Reverse lookup result: <b>EXACT_ACTIVE_POOL_FOUND</b>":`Reverse lookup result: <code>${escapeHtml(String(r?.reverseLookupV795?.error||r?.error||"NO_MATCH").slice(0,300))}</code>`,
+    safeNumber(r?.reverseLookupV795?.nextPage)>0
+      ? `Next: <code>/v4poolsearch ${escapeHtml(String(r?.tokenAddress||""))} p${safeNumber(r.reverseLookupV795.nextPage)} h${safeNumber(r?.head)}</code>`
+      : "Pinned active-pool pages: <b>COMPLETE</b>","",
     "🔎 <b>Historical Initialize fallback</b>"
   ];
   for(const w of Array.isArray(r?.windows)?r.windows:[]){
