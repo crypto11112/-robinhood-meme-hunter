@@ -1,4 +1,14 @@
 /**
+ * Robinhood Chain Meme Hunter — V794
+ *
+ * V794 DEEP VERIFIED LAUNCH-ANCHOR RECOVERY:
+ * - extends /v4poolsearch launch-anchor recovery across bounded persisted KV state;
+ * - reuses canonical verifiedLaunchSourceV476 / launchpad trust evidence when older tokens have fallen out of watchedTokens;
+ * - accepts flattened historical launchBlock only with affirmative verified + launch-specific metadata;
+ * - never treats arbitrary blockNumber values as a launch anchor;
+ * - diagnostic remains read-only: no KV writes, no scanner-budget use, no scoring/Telegram/USD changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V793
  *
  * V793 MANUAL V4 VERIFIED-LAUNCH ANCHOR RECOVERY:
@@ -6852,7 +6862,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V793";
+const VERSION = "V794";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -40840,6 +40850,86 @@ function v4PoolLiveAggregateSwapRowsV768(rows) {
 /* =========================================================
    V791 MANUAL BIDIRECTIONAL V4 POOL SEARCH DIAGNOSTIC
    ========================================================= */
+function v4PoolSearchDeepVerifiedLaunchAnchorV794(state, token) {
+  const t=normalize(token);
+  if(!isAddress(t) || !state || typeof state!=="object") return null;
+
+  const seen=new Set();
+  const stack=[{value:state,path:"state",depth:0}];
+  const matches=[];
+  let visited=0;
+  const MAX_VISITED=50000;
+  const MAX_DEPTH=9;
+
+  const rowToken=row=>normalize(
+    row?.address || row?.token || row?.tokenAddress || row?.contractAddress || row?.assetAddress
+  );
+  const add=(block,source,priority,row,path)=>{
+    const b=safeNumber(block);
+    if(!(b>0)) return;
+    matches.push({
+      block:b,
+      source:`${source}_V794`,
+      priority:safeNumber(priority),
+      updatedAt:safeNumber(row?.updatedAt)||safeNumber(row?.verifiedAt)||safeNumber(row?.observedAt)||safeNumber(row?.selectedAt)||0,
+      path
+    });
+  };
+
+  while(stack.length && visited<MAX_VISITED){
+    const item=stack.pop();
+    const row=item?.value;
+    if(!row || typeof row!=="object") continue;
+    if(seen.has(row)) continue;
+    seen.add(row); visited++;
+
+    if(!Array.isArray(row)){
+      const rt=rowToken(row);
+      if(rt===t){
+        // Strongest generic shape: a persisted candidate already carrying the
+        // bot's canonical verified launch identity object.
+        const v476=row?.verifiedLaunchSourceV476;
+        if(v476?.verified===true && safeNumber(v476?.launchBlock)>0){
+          add(v476.launchBlock,"DEEP_STATE_VERIFIED_LAUNCH_SOURCE",100,row,item.path);
+        }
+
+        // Reuse the exact same launchpad trust rules used by production.
+        const trusted=verifiedLaunchSourceIdentityV476(row);
+        if(trusted?.verified===true && safeNumber(trusted?.launchBlock)>0){
+          add(trusted.launchBlock,`DEEP_STATE_${String(trusted?.protocol||"VERIFIED_LAUNCH").toUpperCase()}`,95,row,item.path);
+        }
+
+        // Some persisted history rows flatten the already-verified launch
+        // identity. Require an explicit launchBlock plus affirmative verified
+        // flag and launch-specific source/protocol/event metadata; never accept
+        // a generic blockNumber here.
+        const flattenedBlock=safeNumber(row?.launchBlock);
+        const launchMarker=String(
+          row?.source || row?.launchSource || row?.protocol || row?.family || row?.event || ""
+        ).toLowerCase();
+        if(flattenedBlock>0 && row?.verified===true && /launch|factory|tokenlaunched|tokencreated|clanker|pons|flap|bags|pools\.trade/.test(launchMarker)){
+          add(flattenedBlock,"DEEP_STATE_FLAT_VERIFIED_LAUNCH",85,row,item.path);
+        }
+      }
+    }
+
+    if(item.depth>=MAX_DEPTH) continue;
+    if(Array.isArray(row)){
+      for(let i=row.length-1;i>=0;i--){
+        const child=row[i];
+        if(child && typeof child==="object") stack.push({value:child,path:`${item.path}[${i}]`,depth:item.depth+1});
+      }
+    }else{
+      for(const [key,child] of Object.entries(row)){
+        if(child && typeof child==="object") stack.push({value:child,path:`${item.path}.${key}`,depth:item.depth+1});
+      }
+    }
+  }
+
+  matches.sort((a,b)=>(b.priority-a.priority)||(b.updatedAt-a.updatedAt));
+  return matches[0] || null;
+}
+
 function v4PoolSearchLaunchAnchorV791(state, token, explicitBlock = 0) {
   const t=normalize(token);
   const explicit=safeNumber(explicitBlock);
@@ -40860,6 +40950,15 @@ function v4PoolSearchLaunchAnchorV791(state, token, explicitBlock = 0) {
         source:`WATCHED_TOKEN_${String(verifiedV793?.protocol||"VERIFIED_LAUNCH").toUpperCase()}_V793`
       };
     }
+  }
+
+  // V794: older tokens can fall out of watchedTokens while their verified
+  // launch evidence remains in retry queues, completion/history telemetry or
+  // other persisted candidate snapshots. Search those structures locally and
+  // accept only already-verified launch-specific evidence.
+  const deepV794=v4PoolSearchDeepVerifiedLaunchAnchorV794(state,t);
+  if(deepV794?.block>0){
+    return {block:deepV794.block,source:deepV794.source};
   }
 
   const c789=state?.productionV4InitCursorV789?.[t];
@@ -40920,7 +41019,7 @@ async function v4PoolSearchDiagnosticV791(env, argument="") {
   const autoTarget=v4PoolSearchAutoTokenV792(state);
   const token=isAddress(explicitToken)?explicitToken:(isAddress(autoTarget?.tokenAddress)?normalize(autoTarget.tokenAddress):null);
   const base={
-    version:"V793",diagnostic:"MANUAL_V4_BIDIRECTIONAL_POOL_SEARCH",tokenAddress:token||null,
+    version:"V794",diagnostic:"MANUAL_V4_BIDIRECTIONAL_POOL_SEARCH",tokenAddress:token||null,
     tokenSource:isAddress(explicitToken)?"EXPLICIT_ARGUMENT":(autoTarget?.source||"NONE"),
     launchBlock:null,launchAnchorSource:null,rpcProvider:null,head:null,recentFromBlock:null,recentToBlock:null,
     recentSwapRows:0,livePoolIds:0,windows:[],initializeRows:0,decodedTokenMatches:0,
@@ -41005,7 +41104,7 @@ function v4PoolSearchTelegramV791(result){
   const r=result||{};
   const short=v=>{const s=String(v||"");return s.length>22?`${s.slice(0,12)}…${s.slice(-8)}`:(s||"NONE");};
   const lines=[
-    "🧬 <b>Manual V4 Pool Search — V793</b>","",
+    "🧬 <b>Manual V4 Pool Search — V794</b>","",
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
     `Token source: <b>${escapeHtml(String(r?.tokenSource||"NONE"))}</b>`,
     `Launch anchor: <b>${escapeHtml(String(r?.launchBlock??"NONE"))}</b> · ${escapeHtml(String(r?.launchAnchorSource||"NONE"))}`,
