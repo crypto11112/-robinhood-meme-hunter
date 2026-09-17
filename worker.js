@@ -1,6 +1,11 @@
 /**
- * Robinhood Chain Meme Hunter — V758
- * AUTHORITATIVE RUNTIME VERSION: V758
+ * Robinhood Chain Meme Hunter — V759
+ * AUTHORITATIVE RUNTIME VERSION: V759
+ *
+ * V759 /POOLWATCH CHUNKED TELEGRAM DELIVERY — TRANSPORT ONLY:
+ * - Fixes /poolwatch and /watchpool silently failing once restored persisted telemetry makes the reply exceed Telegram single-message size.
+ * - Routes those two diagnostics through the existing proven V292 line-safe chunked Telegram sender, matching /poolmatch.
+ * - Changes reply transport only: zero provider/RPC requests, zero scanner-budget requests, zero state writes, no scoring/qualification/collector changes, hard request cap remains 42.
  *
  * V758 RAW-WATCH ADMISSION TELEMETRY — AUTHORITATIVE PROVEN PERSISTENCE PATH:
  * - Preserves V755 admission rules and all V742–V757 collection/selection/retirement behavior.
@@ -6647,7 +6652,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V758";
+const VERSION = "V759";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -147942,7 +147947,7 @@ async function telegramCommandReplyV271(
       true;
   }
 
-  // V668: preserve the existing V317 chunked delivery and also route
+  // V759: preserve the existing chunked delivery and also route
   // /launchcoverage + /coverage through the proven V292 line-safe sender.
   // Launch-coverage diagnostics have grown beyond a safe single-message size,
   // which can make Telegram sendMessage return HTTP 400. Chunking changes only
@@ -147956,7 +147961,9 @@ async function telegramCommandReplyV271(
     parsed.command === "/launchcoverage" ||
     parsed.command === "/coverage" ||
     parsed.command === "/poolmatch" ||
-    parsed.command === "/poolidentity";
+    parsed.command === "/poolidentity" ||
+    parsed.command === "/poolwatch" ||
+    parsed.command === "/watchpool";
 
   if (isFreshAnalyseV352) {
     await telegramAnalyseCheckpointV352(
