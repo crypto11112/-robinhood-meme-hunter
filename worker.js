@@ -1,7 +1,14 @@
 /**
- * Robinhood Chain Meme Hunter — V741
- * AUTHORITATIVE RUNTIME VERSION: V741
+ * Robinhood Chain Meme Hunter — V742
+ * AUTHORITATIVE RUNTIME VERSION: V742
 
+ * V742 UPSTREAM RAW POOL IDENTITY RECOVERY — NO SCORE/THRESHOLD CHANGE:
+ * - Fixes the V741 diagnostic finding that V740 saw zero registration candidates because many candidates reached NO_KNOWN_QUOTE_V4_POOL before the raw-watch handoff.
+ * - After the existing V153/V732 identity paths fail, scans the already-decoded canonical state.poolRegistry for exact PoolKeys containing the candidate token.
+ * - If and only if exactly one structurally valid registry PoolId contains the token, that immutable PoolId + currency orientation may be verified for RAW ACTIVITY ONLY even when the counter-token is not V254 USD-priceable.
+ * - Multiple matching registry pools remain unresolved; no pool is guessed or ranked.
+ * - Adds zero provider requests and zero new request-budget slots. USD, Momentum, scoring, qualification and Telegram thresholds remain unchanged; hard global cap remains 42.
+ *
  * V741 RAW POOL WATCH DIAGNOSTIC — MEASUREMENT ONLY, NO COLLECTION/SCORING CHANGE:
  * - Adds /poolwatch as a read-only diagnostic for the V740 raw exact-pool forward watch.
  * - Reports active watches, raw-only/unpriceable-quote handoffs, successful ranges, exact raw swaps, buy/sell counts, decode rejects, last observed activity and current watch statuses.
@@ -6520,7 +6527,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V741";
+const VERSION = "V742";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -48070,6 +48077,98 @@ function onChainPoolIdentityV153(
   };
 }
 
+function onChainPoolIdentityRecoveryV742(
+  state,
+  watched,
+  market = null
+) {
+  const existing = onChainPoolIdentityV153(watched, market);
+
+  if (existing?.verified === true) {
+    return existing;
+  }
+
+  const token = normalize(watched?.address);
+  if (!isAddress(token) || token === ZERO || knownQuote(token)) {
+    return existing;
+  }
+
+  const registry =
+    state?.poolRegistry && typeof state.poolRegistry === "object"
+      ? state.poolRegistry
+      : {};
+
+  const matches = [];
+
+  for (const [rawPoolId, rawEntry] of Object.entries(registry)) {
+    const poolId = normalize(rawEntry?.poolId || rawPoolId);
+    const currency0 = normalize(rawEntry?.currency0);
+    const currency1 = normalize(rawEntry?.currency1);
+
+    if (
+      !/^0x[0-9a-f]{64}$/.test(String(poolId || "")) ||
+      !isAddress(currency0) ||
+      !isAddress(currency1) ||
+      currency0 === currency1
+    ) {
+      continue;
+    }
+
+    const tokenIs0 = currency0 === token;
+    const tokenIs1 = currency1 === token;
+    if (!tokenIs0 && !tokenIs1) {
+      continue;
+    }
+
+    const quoteTokenAddress = tokenIs0 ? currency1 : currency0;
+
+    matches.push({
+      verified: true,
+      status: "UNIQUE_POOL_REGISTRY_IDENTITY_RAW_ONLY_V742",
+      source: "CANONICAL_POOL_REGISTRY_UNIQUE_TOKEN_MATCH_V742",
+      poolId,
+      pairAddress: poolId,
+      candidateAddress: token,
+      quoteTokenAddress,
+      nativeQuote: quoteTokenAddress === ZERO,
+      targetTokenSide: "BASE",
+      candidateCurrencyIndexV740: tokenIs0 ? 0 : 1,
+      currency0V740: currency0,
+      currency1V740: currency1,
+      blockNumber: rawEntry?.blockNumber || null,
+      transactionHash: rawEntry?.transactionHash || null,
+      rawActivityOnlyV740: true,
+      usdQuoteVerifiedV740: false,
+      registryIdentityRecoveryV742: true,
+      proofV742:
+        "EXACTLY_ONE_CANONICAL_POOL_REGISTRY_POOLKEY_CONTAINS_CANDIDATE_NO_USD_QUOTE_CLAIM"
+    });
+  }
+
+  if (matches.length === 1) {
+    return matches[0];
+  }
+
+  if (matches.length > 1) {
+    return {
+      ...existing,
+      verified: false,
+      status: "MULTIPLE_POOL_REGISTRY_MATCHES_REQUIRE_DISAMBIGUATION_V742",
+      registryMatchCountV742: matches.length,
+      poolIdsV742: matches
+        .map(row => normalize(row?.poolId))
+        .filter(Boolean)
+        .slice(0, 8)
+    };
+  }
+
+  return {
+    ...existing,
+    registryIdentityRecoveryV742: false,
+    registryMatchCountV742: 0
+  };
+}
+
 function activityForToken(
   watched,
   logs
@@ -82102,7 +82201,8 @@ async function analyzeToken(
     );
 
   const onChainPoolIdentity =
-    onChainPoolIdentityV153(
+    onChainPoolIdentityRecoveryV742(
+      state,
       watched,
       market
     );
