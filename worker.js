@@ -1,4 +1,17 @@
 /**
+ * Robinhood Chain Meme Hunter — V779
+ *
+ * V779 ACTIVE EXACT-TOKEN REGISTRY PRIORITY — NO EXTRA REQUESTS:
+ * - Builds directly from deployed V778 and preserves V777 protected-budget handoff.
+ * - Before generic busy/fresh sampling, production V4 selection now scans the already-persisted
+ *   canonical poolRegistry for LIVE PoolIds whose exact currency0/currency1 contains the target token.
+ * - Only PoolIds also observed in the same 600-block Swap window are prioritised.
+ * - V767 global retained hints from unrelated tokens no longer consume the token-specific priority tier.
+ * - The envelope is unchanged: max 40 PoolIds, max 2 Uniswap Pool Info batches and 3 production requests.
+ * - No scoring, Telegram threshold, USD inference, provider trust or hard request ceiling changes.
+ */
+
+/**
  * Robinhood Chain Meme Hunter
  *
  * V775:
@@ -92087,9 +92100,11 @@ async function enrichCandidateWithProductionV4V772(
   base.recentSwapRows = rows.length;
   base.uniqueLivePoolIds = active.length;
 
-  // V778: retained token-specific PoolIds first, then balance BUSIEST and FRESHEST
-  // recent live pools inside the same fixed 40-PoolId / 2-Uniswap-batch envelope.
-  // This avoids starving newer/lower-volume pools behind globally busiest V4 pools.
+  // V779: use already-persisted exact token->PoolId identity before generic live-pool ranking.
+  // The production envelope remains unchanged: max 40 PoolIds, 2 Uniswap batches and
+  // 3 total V4 production requests. Registry rows are admitted only when their exact
+  // currency0/currency1 identity contains THIS token and that PoolId is live in the
+  // same 600-block Swap window. No pool identity is guessed.
   const selected = [];
   const seen = new Set();
   const add = id => {
@@ -92100,32 +92115,76 @@ async function enrichCandidateWithProductionV4V772(
     return true;
   };
 
-  const retainedRowsV778 = v4PoolLiveCandidateIdsV767(state, token);
-  for (const row of retainedRowsV778) add(row?.poolId);
+  const activeByPoolIdV779 = new Map(
+    active.map(row => [normalize(row?.poolId), row])
+  );
 
-  const remainingV778 = Math.max(0, 40 - selected.length);
-  const busiestQuotaV778 = Math.ceil(remainingV778 / 2);
-  let busiestAddedV778 = 0;
-  for (const row of active) {
-    if (selected.length >= 40 || busiestAddedV778 >= busiestQuotaV778) break;
-    if (add(row?.poolId)) busiestAddedV778++;
+  const registryTokenRowsV779 = [];
+  for (const [key, value] of Object.entries(state?.poolRegistry || {})) {
+    const poolId = normalize(value?.poolId || key);
+    if (!isBytes32HexV765(poolId) || !activeByPoolIdV779.has(poolId)) continue;
+    const currency0 = normalize(value?.currency0 || value?.token0 || value?.currencyA);
+    const currency1 = normalize(value?.currency1 || value?.token1 || value?.currencyB);
+    if (currency0 !== token && currency1 !== token) continue;
+    const activity = activeByPoolIdV779.get(poolId) || {};
+    registryTokenRowsV779.push({
+      poolId,
+      freshSwapCount: safeNumber(activity?.freshSwapCount),
+      lastFreshSwapBlock: safeNumber(activity?.lastFreshSwapBlock)
+    });
   }
-
-  const freshestV778 = [...active].sort((a,b) =>
+  registryTokenRowsV779.sort((a,b) =>
     (safeNumber(b?.lastFreshSwapBlock) - safeNumber(a?.lastFreshSwapBlock)) ||
     (safeNumber(b?.freshSwapCount) - safeNumber(a?.freshSwapCount))
   );
-  for (const row of freshestV778) {
+  let registryAddedV779 = 0;
+  for (const row of registryTokenRowsV779) {
+    if (add(row?.poolId)) registryAddedV779++;
+  }
+
+  // V767's retained set can include recent GLOBAL exact pools from other tokens.
+  // In V779 only rows explicitly tied to this token get the next priority tier;
+  // registry identity above remains the stronger exact structural proof.
+  const retainedRowsV779 = v4PoolLiveCandidateIdsV767(state, token);
+  const tokenSpecificRetainedV779 = retainedRowsV779.filter(row => {
+    const id = normalize(row?.poolId);
+    if (!activeByPoolIdV779.has(id)) return false;
+    const hint = normalize(row?.tokenHint);
+    const source = String(row?.source || "");
+    return hint === token || source === "TOKEN_SPECIFIC_V760" || source === "CURRENT_RAW_WATCH_V740";
+  });
+  let retainedAddedV779 = 0;
+  for (const row of tokenSpecificRetainedV779) {
+    if (add(row?.poolId)) retainedAddedV779++;
+  }
+
+  const remainingV779 = Math.max(0, 40 - selected.length);
+  const busiestQuotaV779 = Math.ceil(remainingV779 / 2);
+  let busiestAddedV779 = 0;
+  for (const row of active) {
+    if (selected.length >= 40 || busiestAddedV779 >= busiestQuotaV779) break;
+    if (add(row?.poolId)) busiestAddedV779++;
+  }
+
+  const freshestV779 = [...active].sort((a,b) =>
+    (safeNumber(b?.lastFreshSwapBlock) - safeNumber(a?.lastFreshSwapBlock)) ||
+    (safeNumber(b?.freshSwapCount) - safeNumber(a?.freshSwapCount))
+  );
+  let freshestAddedV779 = 0;
+  for (const row of freshestV779) {
     if (selected.length >= 40) break;
-    add(row?.poolId);
+    if (add(row?.poolId)) freshestAddedV779++;
   }
 
   base.poolSelectionV778 = {
-    retainedCandidates: retainedRowsV778.length,
-    busiestAdded: busiestAddedV778,
-    freshestAdded: Math.max(0, selected.length - retainedRowsV778.length - busiestAddedV778),
+    registryTokenCandidatesV779: registryTokenRowsV779.length,
+    registryTokenAddedV779: registryAddedV779,
+    retainedCandidates: tokenSpecificRetainedV779.length,
+    retainedAddedV779,
+    busiestAdded: busiestAddedV779,
+    freshestAdded: freshestAddedV779,
     totalSelected: selected.length,
-    strategy: "RETAINED_THEN_BALANCED_BUSY_FRESH_V778"
+    strategy: "ACTIVE_EXACT_TOKEN_REGISTRY_THEN_TOKEN_RETAINED_THEN_BALANCED_BUSY_FRESH_V779"
   };
   base.candidatePoolIdsChecked = selected.length;
 
@@ -97953,7 +98012,7 @@ for (
   state.productionV4EnrichmentV772 = {
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
-    version: "V777",
+    version: "V779",
     requestReserveV776: {
       ...(budget?.analysis?.productionV4ReserveV776 || {}),
       active: budget?.analysis?.productionV4ReserveV776?.active === true,
@@ -155542,7 +155601,7 @@ function productionV4StatusTelegramV772(result) {
     return x.length > 22 ? `${x.slice(0,12)}…${x.slice(-8)}` : (x || "NONE");
   };
   return [
-    "🧬 <b>Production V4 / Uniswap Bridge — V778</b>",
+    "🧬 <b>Production V4 / Uniswap Bridge — V779</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
@@ -155551,12 +155610,12 @@ function productionV4StatusTelegramV772(result) {
     `RPC: <b>${escapeHtml(String(r?.rpcProvider || "N/A"))}</b>`,
     `Recent swaps / live PoolIds: <b>${safeNumber(r?.recentSwapRows)} / ${safeNumber(r?.uniqueLivePoolIds)}</b>`,
     `Bounded PoolIds checked: <b>${safeNumber(r?.candidatePoolIdsChecked)}</b>`,
-    `V778 pool selection retained / busiest / freshest: <b>${safeNumber(r?.poolSelectionV778?.retainedCandidates)} / ${safeNumber(r?.poolSelectionV778?.busiestAdded)} / ${safeNumber(r?.poolSelectionV778?.freshestAdded)}</b>`,
+    `V779 pool selection registry / retained / busiest / freshest: <b>${safeNumber(r?.poolSelectionV778?.registryTokenAddedV779)} / ${safeNumber(r?.poolSelectionV778?.retainedAddedV779)} / ${safeNumber(r?.poolSelectionV778?.busiestAdded)} / ${safeNumber(r?.poolSelectionV778?.freshestAdded)}</b>`,
     `Matching pools / swaps: <b>${Array.isArray(r?.matchingPoolIds) ? r.matchingPoolIds.length : 0} / ${safeNumber(r?.matchingSwapRows)}</b>`,
     `Extra production requests used: <b>${safeNumber(r?.externalRequestsUsed)}</b>`,
-    `V778 protected slots remaining / consumed: <b>${safeNumber(r?.requestReserveV776?.handoffRemainingV777 ?? r?.requestReserveV776?.reservedRequests)} / ${safeNumber(r?.requestReserveV776?.consumedProtectedRequests)}</b>`,
-    `V778 lower-priority requests blocked: <b>${safeNumber(r?.requestReserveV776?.blockedRequests)}</b>`,
-    `V778 handoff active / hard-boundary blocks: <b>${r?.requestReserveV776?.handoffActiveV777 === true ? "YES" : "NO"} / ${safeNumber(r?.requestReserveV776?.handoffHardBoundaryBlocksV777)}</b>`,
+    `V779 protected slots remaining / consumed: <b>${safeNumber(r?.requestReserveV776?.handoffRemainingV777 ?? r?.requestReserveV776?.reservedRequests)} / ${safeNumber(r?.requestReserveV776?.consumedProtectedRequests)}</b>`,
+    `V779 lower-priority requests blocked: <b>${safeNumber(r?.requestReserveV776?.blockedRequests)}</b>`,
+    `V779 handoff active / hard-boundary blocks: <b>${r?.requestReserveV776?.handoffActiveV777 === true ? "YES" : "NO"} / ${safeNumber(r?.requestReserveV776?.handoffHardBoundaryBlocksV777)}</b>`,
     `Momentum / Opportunity / Confidence after: <b>${safeNumber(r?.momentumAfter)} / ${safeNumber(r?.opportunityAfter)} / ${safeNumber(r?.confidenceAfter)}</b>`,
     "",
     "<i>Read-only status of the last scanner run. V772 changes no Telegram thresholds and infers no USD value from V4 activity.</i>"
