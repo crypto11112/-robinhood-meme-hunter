@@ -1,7 +1,10 @@
 /**
  * Robinhood Chain Meme Hunter
  *
- * V771:
+ * V772:
+ * - Production integration of the verified free V4/Uniswap path: enriches at most one highest-priority under-evidenced scanner candidate per run using one recent PoolManager Swap query plus up to two Uniswap Pool Info batches.
+ * - Feeds verified current V4 swap activity into existing activity/Momentum/Opportunity/Confidence recomputation without inferring USD value, changing thresholds, or raising the hard 42-request ceiling.
+ * - V771:
  * - Preserves the verified V770 raw-amount decoder, V769 BUY/SELL direction logic and V768 RPC -> Uniswap identification path.
  * - Adds /v4allpools: diagnostic-only coverage across the full recent live V4 PoolManager set (bounded to 800 PoolIds / 40 Uniswap batches), identifies every currently-live pool containing the token, and aggregates exact BUY/SELL raw amounts per pool.
  * - Adds on-chain ERC-20 symbol + decimals reads for the target and paired currencies, then reports normalized token amounts without introducing any USD-price assumption.
@@ -6713,7 +6716,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V771";
+const VERSION = "V772";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -91699,6 +91702,298 @@ function registerSuccessfulAlertFollowUpV267(
 }
 
 
+
+/* =========================================================
+   V772 PRODUCTION V4 / UNISWAP EVIDENCE BRIDGE
+   =========================================================
+   Purpose:
+   - Move the proven V768-V771 free V4 path into the normal scanner.
+   - Enrich at most ONE highest-priority under-evidenced candidate per scan.
+   - Spend at most 3 existing analysis-budget requests:
+       1 x recent PoolManager Swap log query
+       up to 2 x Uniswap Pool Info batches (20 PoolIds each)
+   - Never raises the hard request ceiling or Telegram thresholds.
+   - Activity only: no USD inference and no liquidity-value inference.
+*/
+
+function v772ProductionEligibleCandidate(candidate, currentLiveVerifiedLaunchTokensV621) {
+  const address = normalize(candidate?.address);
+  if (!candidate || candidate?.validERC20 !== true || !isAddress(address)) return false;
+  if (candidate?.risk?.severeOverride === true) return false;
+  if (sameRunTerminalReject(candidate)?.terminal === true) return false;
+
+  const alreadyVerified =
+    candidate?.liveMomentumActivityV152?.verified === true &&
+    safeNumber(candidate?.liveMomentumActivityV152?.swaps) > 0;
+  if (alreadyVerified) return false;
+
+  const currentLive = currentLiveVerifiedLaunchTokensV621?.has(address) === true;
+  const opportunity = safeNumber(candidate?.opportunity?.score);
+  const confidence = safeNumber(candidate?.confidence?.score);
+
+  // One bounded lane: current verified launches first, otherwise serious near-misses.
+  return currentLive || opportunity >= 35 || confidence >= 45;
+}
+
+async function v772UniswapIdentifyPools(env, budget, poolIds, tokenAddress) {
+  const apiKey = String(env?.UNISWAP_API_KEY || "").trim();
+  const token = normalize(tokenAddress);
+  const ids = [...new Set((poolIds || []).map(normalize).filter(isBytes32HexV765))].slice(0, 40);
+  const base = {
+    attempted: false,
+    ok: false,
+    poolsChecked: 0,
+    batchesAttempted: 0,
+    successfulBatches: 0,
+    matchingPools: [],
+    externalRequestsUsed: 0,
+    error: null
+  };
+
+  if (!apiKey) return {...base, error:"UNISWAP_API_KEY_NOT_CONFIGURED"};
+  if (!ids.length) return {...base, error:"NO_POOLIDS"};
+
+  const chunks = [];
+  for (let i = 0; i < ids.length; i += 20) chunks.push(ids.slice(i, i + 20));
+
+  const matching = [];
+  let lastError = null;
+
+  for (const chunk of chunks.slice(0, 2)) {
+    if (!budgetAvailable(budget, "analysis", 1)) {
+      lastError = "V772_ANALYSIS_BUDGET_EXHAUSTED_BEFORE_UNISWAP";
+      break;
+    }
+    if (!consumeBudget(budget, "analysis", "UNISWAP_V4_POOL_INFO_V772", 1)) {
+      lastError = "V772_UNISWAP_REQUEST_BLOCKED_BY_EXISTING_RESERVE";
+      break;
+    }
+
+    base.attempted = true;
+    base.batchesAttempted++;
+    base.externalRequestsUsed++;
+    base.poolsChecked += chunk.length;
+
+    try {
+      const response = await fetch("https://liquidity.api.uniswap.org/lp/pool_info", {
+        method: "POST",
+        headers: {
+          "x-api-key": apiKey,
+          "content-type": "application/json",
+          "accept": "application/json"
+        },
+        body: JSON.stringify({
+          protocol: "V4",
+          poolReferences: chunk.map(referenceIdentifier => ({
+            protocol: "V4",
+            chainId: 4663,
+            referenceIdentifier
+          })),
+          chainId: 4663,
+          pageSize: Math.max(1, chunk.length),
+          currentPage: 1
+        })
+      });
+
+      const text = await response.text();
+      let payload = null;
+      try { payload = text ? JSON.parse(text) : null; } catch {}
+      if (!response.ok) {
+        lastError = payload?.detail || payload?.message || payload?.error || `HTTP_${response.status}`;
+        continue;
+      }
+
+      base.successfulBatches++;
+      for (const row of (Array.isArray(payload?.pools) ? payload.pools : [])) {
+        const poolId = normalize(row?.poolReferenceIdentifier);
+        const tokenA = normalize(row?.tokenAddressA);
+        const tokenB = normalize(row?.tokenAddressB);
+        if (!isBytes32HexV765(poolId)) continue;
+        if (tokenA !== token && tokenB !== token) continue;
+        matching.push({
+          poolId,
+          tokenA,
+          tokenB,
+          pairedToken: tokenA === token ? tokenB : tokenA,
+          liquidity: row?.poolLiquidity ?? null,
+          fee: row?.fee ?? null,
+          tickSpacing: row?.tickSpacing ?? null
+        });
+      }
+    } catch (error) {
+      lastError = errorString(error);
+    }
+  }
+
+  base.matchingPools = matching;
+  base.ok = base.successfulBatches > 0;
+  base.error = base.ok ? null : lastError;
+  return base;
+}
+
+async function enrichCandidateWithProductionV4V772(
+  env,
+  state,
+  budget,
+  candidate,
+  latestNumber
+) {
+  const token = normalize(candidate?.address);
+  const base = {
+    attempted: false,
+    applied: false,
+    tokenAddress: token || null,
+    rpcProvider: null,
+    fromBlock: null,
+    toBlock: latestNumber || null,
+    recentSwapRows: 0,
+    uniqueLivePoolIds: 0,
+    candidatePoolIdsChecked: 0,
+    matchingPoolIds: [],
+    matchingSwapRows: 0,
+    externalRequestsUsed: 0,
+    scannerBudgetConsumed: true,
+    usdValueInferred: false,
+    status: "NOT_ATTEMPTED_V772",
+    error: null
+  };
+
+  if (!isAddress(token)) return {...base, status:"INVALID_TOKEN_V772"};
+  if (!budgetAvailable(budget, "analysis", 3)) {
+    return {...base, status:"INSUFFICIENT_THREE_REQUEST_HEADROOM_V772"};
+  }
+
+  const rpcEndpoint = v4PoolLiveRpcEndpointV767(env);
+  const to = Math.max(0, safeNumber(latestNumber));
+  const from = Math.max(0, to - 599);
+  base.rpcProvider = rpcEndpoint.name;
+  base.fromBlock = from;
+  base.toBlock = to;
+
+  if (!consumeBudget(budget, "analysis", "RPC:V772_RECENT_POOLMANAGER_SWAPS", 1)) {
+    return {...base, status:"V772_RPC_REQUEST_BLOCKED_BY_EXISTING_RESERVE"};
+  }
+  base.attempted = true;
+  base.externalRequestsUsed++;
+
+  const logsResult = await v4PoolLiveRpcCallV767(
+    rpcEndpoint.url,
+    "eth_getLogs",
+    [{
+      address: normalize(POOL_MANAGER),
+      fromBlock: `0x${from.toString(16)}`,
+      toBlock: `0x${to.toString(16)}`,
+      topics: [SWAP_TOPIC]
+    }]
+  );
+
+  if (!logsResult?.ok) {
+    return {
+      ...base,
+      status:"RECENT_SWAP_LOG_QUERY_FAILED_V772",
+      error: logsResult?.error || "RPC_FAILED"
+    };
+  }
+
+  const rows = Array.isArray(logsResult.result) ? logsResult.result : [];
+  const active = v4PoolLiveAggregateSwapRowsV768(rows);
+  base.recentSwapRows = rows.length;
+  base.uniqueLivePoolIds = active.length;
+
+  // Retained token-specific PoolIds get first priority, then freshest/highest-activity live pools.
+  const selected = [];
+  const seen = new Set();
+  const add = id => {
+    const poolId = normalize(id);
+    if (!isBytes32HexV765(poolId) || seen.has(poolId) || selected.length >= 40) return;
+    seen.add(poolId);
+    selected.push(poolId);
+  };
+
+  for (const row of v4PoolLiveCandidateIdsV767(state, token)) add(row?.poolId);
+  for (const row of active) add(row?.poolId);
+  base.candidatePoolIdsChecked = selected.length;
+
+  const uni = await v772UniswapIdentifyPools(env, budget, selected, token);
+  base.externalRequestsUsed += safeNumber(uni?.externalRequestsUsed);
+  base.uniswap = uni;
+
+  const matchingIds = new Set((uni?.matchingPools || []).map(r => normalize(r?.poolId)).filter(isBytes32HexV765));
+  base.matchingPoolIds = [...matchingIds];
+
+  if (!matchingIds.size) {
+    return {
+      ...base,
+      status: uni?.ok === true ? "NO_MATCHING_ACTIVE_POOL_IN_BOUNDED_SET_V772" : "UNISWAP_IDENTITY_UNVERIFIED_V772",
+      error: uni?.error || null
+    };
+  }
+
+  const matchingRows = rows.filter(log => matchingIds.has(normalize(log?.topics?.[1])));
+  base.matchingSwapRows = matchingRows.length;
+
+  if (!matchingRows.length) {
+    return {...base, status:"MATCHING_POOL_FOUND_BUT_NO_RECENT_SWAPS_V772"};
+  }
+
+  const previous = getHistoricalSnapshot(state, token);
+  const existingLiquidityEvents = safeNumber(candidate?.liveMomentumActivityV152?.liquidityEvents);
+
+  candidate.activity = {
+    ...(candidate.activity || {}),
+    swaps: Math.max(safeNumber(candidate?.activity?.swaps), matchingRows.length),
+    poolSpecific: true
+  };
+
+  candidate.liveMomentumActivityV152 = {
+    swaps: matchingRows.length,
+    liquidityEvents: existingLiquidityEvents,
+    poolSpecific: true,
+    verified: true,
+    source: "DIRECT_POOLMANAGER_SWAP_PLUS_UNISWAP_IDENTITY_V772",
+    fromBlock: from,
+    toBlock: to,
+    matchingPoolIds: [...matchingIds]
+  };
+
+  candidate.momentum = momentumAnalysis(
+    previous,
+    candidate.market,
+    candidate.holders,
+    candidate.liveMomentumActivityV152
+  );
+
+  candidate.opportunity = scoreOpportunity(
+    candidate.validation,
+    candidate.market,
+    candidate.holders,
+    candidate.activity,
+    candidate.momentum,
+    candidate.marketQuality,
+    candidate.whaleFlow,
+    candidate.launchStage
+  );
+
+  candidate.signalConfirmation = signalConfirmation(candidate);
+  candidate.confidence = candidateConfidence(candidate);
+  evidenceQualityProtectionV158(candidate);
+  opportunityConfirmationCalibrationV253(candidate, {
+    refreshRaw: true,
+    phase: "V772_PRODUCTION_V4_RECOMPUTE"
+  });
+  candidate.analysisPriority = analysisPriority(candidate);
+
+  return {
+    ...base,
+    applied: true,
+    status: "PRODUCTION_V4_ACTIVITY_APPLIED_V772",
+    opportunityAfter: safeNumber(candidate?.opportunity?.score),
+    momentumAfter: safeNumber(candidate?.momentum?.score),
+    confidenceAfter: safeNumber(candidate?.confidence?.score)
+  };
+}
+
+
 async function scan(
   env,
   options = {}
@@ -97169,6 +97464,54 @@ for (
       )
   );
 
+  /*
+   * V772: production bridge for the newly verified free V4/Uniswap route.
+   * Exactly one highest-priority under-evidenced candidate may consume this
+   * bounded lane in a scan, and only if the existing budget can fund all
+   * three possible requests while preserving the existing hard ceilings.
+   */
+  let productionV4EnrichmentV772 = {
+    attempted: false,
+    applied: false,
+    status: "NO_ELIGIBLE_CANDIDATE_V772",
+    tokenAddress: null,
+    externalRequestsUsed: 0,
+    scannerBudgetConsumed: true
+  };
+
+  const productionV4TargetV772 =
+    candidates.find(candidate =>
+      v772ProductionEligibleCandidate(
+        candidate,
+        currentLiveVerifiedLaunchTokensV621
+      )
+    ) || null;
+
+  if (productionV4TargetV772) {
+    productionV4EnrichmentV772 =
+      await enrichCandidateWithProductionV4V772(
+        env,
+        state,
+        budget,
+        productionV4TargetV772,
+        latestNumber
+      );
+
+    productionV4TargetV772.productionV4EnrichmentV772 =
+      productionV4EnrichmentV772;
+
+    // The recompute can change priority, so restore deterministic ordering.
+    candidates.sort((a,b) =>
+      safeNumber(b?.analysisPriority) - safeNumber(a?.analysisPriority)
+    );
+  }
+
+  state.productionV4EnrichmentV772 = {
+    ...(productionV4EnrichmentV772 || {}),
+    recordedAt: Date.now(),
+    version: "V772"
+  };
+
   const currentLiveMeasurementCoverageV645Result =
     currentLiveMeasurementCoverageV645(
       candidates
@@ -102359,6 +102702,8 @@ for (
           ?.lastScheduledLatestBlock ||
         null
     },
+
+    productionV4EnrichmentV772,
 
     discoveryRpc: {
       publicCooldownActive:
@@ -148009,6 +148354,7 @@ function telegramHelpV271() {
     "<code>/cmctest [0xADDRESS]</code> — V738 CoinMarketCap Robinhood Chain coverage test (diagnostic only)",
     "<code>/uniswaptest</code> — V764 one-request Uniswap Trade API POST quote test (diagnostic only)",
     "<code>/uniswapv4test [0xPOOLID]</code> — V765 one-request Uniswap V4 Pool Info test; auto-selects a retained PoolId when omitted",
+    "<code>/v4prodstatus</code> — V772 show the last production scanner V4/Uniswap enrichment result",
     "<code>/v4allpools [0xTOKEN]</code> — V771 verify all recent live V4 pools for a token + normalized BUY/SELL amounts using on-chain decimals",
     "<code>/v4swapamounts [0xTOKEN]</code> — V770 verify exact raw target/paired amounts for BUY vs SELL swaps on the discovered live pool",
     "<code>/v4swapdirection [0xTOKEN]</code> — V769 verify BUY/SELL direction from signed on-chain V4 Swap deltas on the discovered live pool",
@@ -148852,6 +149198,24 @@ async function telegramCommandReplyV271(
 
 
 
+
+  if (parsed.command === "/v4prodstatus") {
+    const stateV772 = await readState(env);
+    const resultV772 = stateV772?.state?.productionV4EnrichmentV772 || {
+      status:"NO_RECORDED_SCAN_YET_V772"
+    };
+    const replyV772 = productionV4StatusTelegramV772(resultV772);
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV772 = await sendTelegram(env, replyV772, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV772?.success === true;
+      diagnosticV273.telegramStatus = sentV772?.status || null;
+      diagnosticV273.telegramMode = sentV772?.mode || null;
+      diagnosticV273.telegramError = sentV772?.error || null;
+      diagnosticV273.result = sentV772?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV772?.success===true,ignored:false,command:parsed.command,productionV4V772:resultV772};
+  }
 
   if (parsed.command === "/v4allpools") {
     const allV771 = await v4AllPoolsAmountsDiagnosticV771(env, parsed.argument || "");
@@ -154620,6 +154984,30 @@ async function goldRushV3SwapDiagnosticV710(
   };
 }
 
+
+function productionV4StatusTelegramV772(result) {
+  const r = result || {};
+  const short = v => {
+    const x = String(v || "");
+    return x.length > 22 ? `${x.slice(0,12)}…${x.slice(-8)}` : (x || "NONE");
+  };
+  return [
+    "🧬 <b>Production V4 / Uniswap Bridge — V772</b>",
+    "",
+    `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
+    `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
+    `Attempted / applied: <b>${r?.attempted === true ? "YES" : "NO"} / ${r?.applied === true ? "YES" : "NO"}</b>`,
+    `Status: <code>${escapeHtml(String(r?.status || "NO_RECORDED_SCAN_YET_V772"))}</code>`,
+    `RPC: <b>${escapeHtml(String(r?.rpcProvider || "N/A"))}</b>`,
+    `Recent swaps / live PoolIds: <b>${safeNumber(r?.recentSwapRows)} / ${safeNumber(r?.uniqueLivePoolIds)}</b>`,
+    `Bounded PoolIds checked: <b>${safeNumber(r?.candidatePoolIdsChecked)}</b>`,
+    `Matching pools / swaps: <b>${Array.isArray(r?.matchingPoolIds) ? r.matchingPoolIds.length : 0} / ${safeNumber(r?.matchingSwapRows)}</b>`,
+    `Extra production requests used: <b>${safeNumber(r?.externalRequestsUsed)}</b>`,
+    `Momentum / Opportunity / Confidence after: <b>${safeNumber(r?.momentumAfter)} / ${safeNumber(r?.opportunityAfter)} / ${safeNumber(r?.confidenceAfter)}</b>`,
+    "",
+    "<i>Read-only status of the last scanner run. V772 changes no Telegram thresholds and infers no USD value from V4 activity.</i>"
+  ].join("\n");
+}
 
 async function handleRequest(
   request,
