@@ -7000,7 +7000,16 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V817";
+const VERSION = "V818";
+/*
+ * V818 PRODUCTION V4 FAIR-LANE ROUTING
+ * - fixes V817-proven NORMAL_V772 starvation of eligible zero-swap rescue candidates;
+ * - ranks rescue candidates even during normal/rescue collisions;
+ * - alternates the single existing V4 lane across collisions using persisted prior routing;
+ * - remains one V4 target / max three V4 requests per scan;
+ * - hard global 42, risk/ERC20 gates, scoring, Telegram thresholds and V254 verified-USD path unchanged.
+ */
+
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -99647,53 +99656,84 @@ for (
    * near-miss instead of whichever happens to appear first in `candidates`.
    * No new provider calls and no threshold/scoring changes.
    */
+  /*
+   * V818: bounded fairness fix for the V817-proven collision:
+   * a rescue-eligible zero-swap candidate existed, three V4 requests were fundable,
+   * but NORMAL_V772 always owned the single production lane.
+   *
+   * Rank rescue candidates even when a normal target exists.  When both lanes
+   * have a candidate, alternate ownership using the previous persisted routing
+   * decision.  This preserves ONE target and the same maximum THREE V4 requests
+   * per scan; it only changes which already-eligible candidate receives them.
+   */
   const productionV4CoverageRescueCandidatesV816 =
-    productionV4NormalTargetV813
-      ? []
-      : candidates
-          .filter(candidate => v813CoverageRescueEligibleCandidate(candidate, state))
-          .map((candidate, index) => {
-            const marketKnown = candidate?.market?.verified === true ? 1 : 0;
-            const opportunity = safeNumber(candidate?.opportunity?.score);
-            const confidence = safeNumber(candidate?.confidence?.score);
-            const marketQuality = safeNumber(candidate?.marketQuality?.score);
-            const scannerAgeSeconds = Math.max(
-              0,
-              safeNumber(candidate?.scannerAgeSeconds ?? candidate?.scannerAge?.seconds)
-            );
+    candidates
+      .filter(candidate => v813CoverageRescueEligibleCandidate(candidate, state))
+      .map((candidate, index) => {
+        const marketKnown = candidate?.market?.verified === true ? 1 : 0;
+        const opportunity = safeNumber(candidate?.opportunity?.score);
+        const confidence = safeNumber(candidate?.confidence?.score);
+        const marketQuality = safeNumber(candidate?.marketQuality?.score);
+        const scannerAgeSeconds = Math.max(
+          0,
+          safeNumber(candidate?.scannerAgeSeconds ?? candidate?.scannerAge?.seconds)
+        );
 
-            return {
-              candidate,
-              index,
-              // Market-known first, then strongest existing analysis.
-              // Stable original-order tie break preserves deterministic behaviour.
-              rank:
-                marketKnown * 1000000000 +
-                opportunity * 1000000 +
-                confidence * 10000 +
-                marketQuality * 100 -
-                Math.min(scannerAgeSeconds, 99)
-            };
-          })
-          .sort((a, b) => (b.rank - a.rank) || (a.index - b.index));
+        return {
+          candidate,
+          index,
+          rank:
+            marketKnown * 1000000000 +
+            opportunity * 1000000 +
+            confidence * 10000 +
+            marketQuality * 100 -
+            Math.min(scannerAgeSeconds, 99)
+        };
+      })
+      .sort((a, b) => (b.rank - a.rank) || (a.index - b.index));
 
   const productionV4CoverageRescueTargetV813 =
     productionV4CoverageRescueCandidatesV816[0]?.candidate || null;
 
-  const productionV4TargetV772 =
-    productionV4NormalTargetV813 || productionV4CoverageRescueTargetV813 || null;
+  const previousProductionV4RoutingV818 =
+    state?.productionV4RoutingDiagnosticV818 ||
+    state?.productionV4RoutingDiagnosticV817 ||
+    null;
 
-  const productionV4SelectionModeV813 = productionV4NormalTargetV813
-    ? "NORMAL_V772"
-    : (productionV4CoverageRescueTargetV813 ? "ZERO_SWAP_COVERAGE_RESCUE_RANKED_V816" : "NONE");
+  const previousSelectionModeV818 =
+    String(previousProductionV4RoutingV818?.selectionMode || "").toUpperCase();
+
+  const productionV4CollisionV818 =
+    Boolean(productionV4NormalTargetV813 && productionV4CoverageRescueTargetV813);
+
+  const rescueOwnsCollisionV818 =
+    productionV4CollisionV818 &&
+    (
+      previousSelectionModeV818 === "NORMAL_V772" ||
+      previousSelectionModeV818 === "NORMAL_V772_COLLISION_V818"
+    );
+
+  const productionV4TargetV772 =
+    rescueOwnsCollisionV818
+      ? productionV4CoverageRescueTargetV813
+      : (productionV4NormalTargetV813 || productionV4CoverageRescueTargetV813 || null);
+
+  const productionV4SelectionModeV813 =
+    rescueOwnsCollisionV818
+      ? "ZERO_SWAP_COVERAGE_RESCUE_FAIR_V818"
+      : (
+          productionV4NormalTargetV813
+            ? (productionV4CollisionV818 ? "NORMAL_V772_COLLISION_V818" : "NORMAL_V772")
+            : (productionV4CoverageRescueTargetV813 ? "ZERO_SWAP_COVERAGE_RESCUE_RANKED_V816" : "NONE")
+        );
 
   /*
-   * V817 DIAGNOSTIC ONLY:
+   * V818 ROUTING/Fairness TELEMETRY:
    * Capture the real production-V4 routing decision and the exact V816 rescue
    * ranking inputs already present in memory. Zero provider requests and no
    * scoring/qualification/request-budget changes.
    */
-  const productionV4RoutingDiagnosticV817 = (() => {
+  const productionV4RoutingDiagnosticV818 = (() => {
     const rescueEligibleAll = candidates.filter(candidate =>
       v813CoverageRescueEligibleCandidate(candidate, state)
     );
@@ -99750,7 +99790,11 @@ for (
       normalTarget: normalize(productionV4NormalTargetV813?.address) || null,
       rescueTarget: normalize(productionV4CoverageRescueTargetV813?.address) || null,
       selectedTarget: normalize(productionV4TargetV772?.address) || null,
-      normalTargetDisplacedRescue: Boolean(productionV4NormalTargetV813 && rescueEligibleAll.length),
+      normalTargetDisplacedRescue:
+        Boolean(productionV4NormalTargetV813 && rescueEligibleAll.length && !rescueOwnsCollisionV818),
+      collisionPresentV818: productionV4CollisionV818,
+      rescueOwnsCollisionV818,
+      previousSelectionModeV818: previousSelectionModeV818 || null,
       rescueEligibleCountEvenIfNormalSelected: rescueEligibleAll.length,
       rankedCandidateCount: productionV4CoverageRescueCandidatesV816.length,
       gateCounts,
@@ -99768,7 +99812,9 @@ for (
       qualificationChanged: false
     };
   })();
-  state.productionV4RoutingDiagnosticV817 = productionV4RoutingDiagnosticV817;
+  state.productionV4RoutingDiagnosticV818 = productionV4RoutingDiagnosticV818;
+  // Compatibility alias for existing audit plumbing.
+  state.productionV4RoutingDiagnosticV817 = productionV4RoutingDiagnosticV818;
 
   if (productionV4TargetV772) {
     // V777: transfer ownership of the three protected slots to V772 itself.
