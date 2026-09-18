@@ -200,6 +200,10 @@
 
 /**
  * Robinhood Chain Meme Hunter
+ * V804 LIVE V254 STATUS DIAGNOSTIC
+ * - records the most recent V254 exact-USD lane decision inside existing qualification-audit state;
+ * - /evidenceaudit reports this live snapshot even when historical detailed rows are unavailable after deployment;
+ * - diagnostic-only: no scoring, provider, request-budget, qualification or Telegram threshold changes.
  *
  * V775:
  * - Fixes /v4marketstatus legacy-record compatibility: usable market status is recalculated from actual positive priceUsd + liquidityUsd instead of trusting stale persisted booleans.
@@ -6935,7 +6939,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V803";
+const VERSION = "V804";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -100559,6 +100563,42 @@ for (
   }
 
   /*
+   * V804: persist one compact live V254 decision snapshot inside the existing
+   * qualification-audit state. This piggybacks on the normal state write and
+   * lets /evidenceaudit report the latest exact-USD lane outcome even when
+   * historical qualification rows are absent after a deployment.
+   */
+  {
+    const auditStateV804 = ensureQualificationAuditV663(state);
+    auditStateV804.lastV254LiveStatusV804 = {
+      recordedAt: new Date().toISOString(),
+      candidatesEligible: safeNumber(verifiedUsdCompletionV254?.candidatesEligible),
+      attempted: safeNumber(verifiedUsdCompletionV254?.attempted),
+      recovered: safeNumber(verifiedUsdCompletionV254?.recovered),
+      resultCount: Array.isArray(verifiedUsdCompletionV254?.results)
+        ? verifiedUsdCompletionV254.results.length
+        : 0,
+      results: Array.isArray(verifiedUsdCompletionV254?.results)
+        ? verifiedUsdCompletionV254.results.slice(0, 3).map(row => ({
+            address: normalize(row?.address),
+            symbol: row?.symbol || null,
+            status: row?.status || null,
+            verifiedUsdRecovered: row?.verifiedUsdRecovered === true,
+            externalRequestsUsed: safeNumber(row?.externalRequestsUsed),
+            poolId: row?.poolSelection?.poolId || null,
+            candidatePoolCount: Array.isArray(row?.poolSelection?.candidatePoolIds)
+              ? row.poolSelection.candidatePoolIds.length
+              : 0,
+            liveSwapPoolCount: Array.isArray(row?.poolSelection?.liveSwapPoolIds)
+              ? row.poolSelection.liveSwapPoolIds.length
+              : 0,
+            selectedFrom: row?.poolSelection?.selectedFrom || null
+          }))
+        : []
+    };
+  }
+
+  /*
    * V212: zero-request candidate-specific bridge.
    * This is intentionally applied after all discovery/enrichment so Telegram
    * sees the freshest already-verified V179 records from this scan.
@@ -119998,7 +120038,7 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   if (!needsUsd) v254Blockers.push("USD_ENRICHMENT_NOT_NEEDED_OR_NOT_ELIGIBLE");
 
   return {
-    version: "V803_1",
+    version: "V804_1",
     diagnosticOnly: true,
     address,
     finalEvidence: {
@@ -120108,7 +120148,7 @@ function evidenceAuditSnapshotV727(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
     : [];
-  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1"]);
+  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1"]);
   const detailed = rows.filter(row =>
     compatibleAuditVersionsV803.has(String(row?.evidenceCompletionAuditV727?.version || ""))
   );
@@ -120171,7 +120211,7 @@ function evidenceAuditSnapshotV727(state) {
   }
   const top = obj => Object.entries(obj).sort((a,b) => safeNumber(b[1]) - safeNumber(a[1])).slice(0,10);
   return {
-    version: "V803",
+    version: "V804",
     diagnosticOnly: true,
     retainedQualificationRows: rows.length,
     detailedV730Rows: detailed.length,
@@ -120184,6 +120224,8 @@ function evidenceAuditSnapshotV727(state) {
       unusedRows: reserveUnusedRows,
       consumedTypes: top(reserveConsumedTypeCounts)
     },
+    lastV254LiveStatusV804:
+      state?.qualificationAuditV663?.lastV254LiveStatusV804 || null,
     interpretation: {
       noEvidenceIsPromoted: true,
       noProviderRequests: true,
@@ -120202,15 +120244,34 @@ function evidenceAuditTelegramMessageV727(state) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "🧪 <b>Evidence Completion Regression Audit — V803</b>",
+    "🧪 <b>Evidence Completion Regression Audit — V804</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
     `Compatible detailed rows: <b>${fmt(total)}</b>`,
     `Rows without compatible detail: <b>${fmt(d.legacyRowsWithoutV730Detail)}</b>`,
     ""
   ];
+  const liveV254 = d?.lastV254LiveStatusV804 || null;
+  if (liveV254) {
+    lines.push(
+      "🎯 <b>Latest live V254 status — V804</b>",
+      `Recorded: <code>${escapeHtml(liveV254.recordedAt || "UNVERIFIED")}</code>`,
+      `Eligible / attempted / recovered: <b>${fmt(liveV254.candidatesEligible)}</b> / <b>${fmt(liveV254.attempted)}</b> / <b>${fmt(liveV254.recovered)}</b>`
+    );
+    for (const row of Array.isArray(liveV254.results) ? liveV254.results : []) {
+      lines.push(
+        `• ${escapeHtml(row.symbol || row.address || "UNKNOWN")}: <b>${escapeHtml(row.status || "UNVERIFIED")}</b>`,
+        `  Pool: <code>${escapeHtml(row.poolId || "NONE")}</code> · candidate pools ${fmt(row.candidatePoolCount)} · live pools ${fmt(row.liveSwapPoolCount)} · requests ${fmt(row.externalRequestsUsed)} · recovered ${row.verifiedUsdRecovered === true ? "YES" : "NO"}`
+      );
+    }
+    lines.push("");
+  }
   if (!total) {
-    lines.push("⏳ Forward-only evidence diagnostic is building. Only compatible detailed audit rows are included.");
+    lines.push(
+      liveV254
+        ? "ℹ️ Historical compatible rows are empty, but the live V254 snapshot above is current and can be used for diagnosis."
+        : "⏳ Forward-only evidence diagnostic is building. No live V254 snapshot has been recorded yet."
+    );
     return lines.join("\n");
   }
   lines.push(
