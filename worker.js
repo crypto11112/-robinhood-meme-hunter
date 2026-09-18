@@ -1,5 +1,13 @@
 /**
- * Robinhood Chain Meme Hunter — V815
+ * Robinhood Chain Meme Hunter — V816
+ *
+ * V816 RANKED ZERO-SWAP COVERAGE RESCUE:
+ * - preserves the confirmed V815 V4 -> V254 -> verified-USD -> score path;
+ * - preserves V813 rescue eligibility and the single production-V4 target;
+ * - ranks all eligible no-known-pool/zero-swap rescue candidates instead of first-array-match;
+ * - prioritises verified market evidence, then Opportunity, Confidence and Market Quality;
+ * - zero additional provider requests; hard request ceiling remains 42;
+ * - no scoring or Telegram-threshold changes.
  *
  * V815 RUNTIME-STAMPED DIAGNOSTICS + V814 IDENTITY RECONCILIATION:
  * - preserves all V814 production/scoring/provider behaviour;
@@ -6992,7 +7000,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V815";
+const VERSION = "V816";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -99629,19 +99637,55 @@ for (
       )
     ) || null;
 
-  const productionV4CoverageRescueTargetV813 =
+  /*
+   * V816: V813 used first-array-match for the zero-swap rescue lane.
+   * The V815 forward audit proved the dominant blocker remains
+   * NOT_SELECTED_FOR_PRODUCTION_V4_AND_NO_KNOWN_POOL (33/63).
+   *
+   * Keep the exact same V813 eligibility gates and one-target/request budget,
+   * but rank ALL eligible rescue candidates and choose the strongest analysed
+   * near-miss instead of whichever happens to appear first in `candidates`.
+   * No new provider calls and no threshold/scoring changes.
+   */
+  const productionV4CoverageRescueCandidatesV816 =
     productionV4NormalTargetV813
-      ? null
-      : (candidates.find(candidate =>
-          v813CoverageRescueEligibleCandidate(candidate, state)
-        ) || null);
+      ? []
+      : candidates
+          .filter(candidate => v813CoverageRescueEligibleCandidate(candidate, state))
+          .map((candidate, index) => {
+            const marketKnown = candidate?.market?.verified === true ? 1 : 0;
+            const opportunity = safeNumber(candidate?.opportunity?.score);
+            const confidence = safeNumber(candidate?.confidence?.score);
+            const marketQuality = safeNumber(candidate?.marketQuality?.score);
+            const scannerAgeSeconds = Math.max(
+              0,
+              safeNumber(candidate?.scannerAgeSeconds ?? candidate?.scannerAge?.seconds)
+            );
+
+            return {
+              candidate,
+              index,
+              // Market-known first, then strongest existing analysis.
+              // Stable original-order tie break preserves deterministic behaviour.
+              rank:
+                marketKnown * 1000000000 +
+                opportunity * 1000000 +
+                confidence * 10000 +
+                marketQuality * 100 -
+                Math.min(scannerAgeSeconds, 99)
+            };
+          })
+          .sort((a, b) => (b.rank - a.rank) || (a.index - b.index));
+
+  const productionV4CoverageRescueTargetV813 =
+    productionV4CoverageRescueCandidatesV816[0]?.candidate || null;
 
   const productionV4TargetV772 =
     productionV4NormalTargetV813 || productionV4CoverageRescueTargetV813 || null;
 
   const productionV4SelectionModeV813 = productionV4NormalTargetV813
     ? "NORMAL_V772"
-    : (productionV4CoverageRescueTargetV813 ? "ZERO_SWAP_COVERAGE_RESCUE_V813" : "NONE");
+    : (productionV4CoverageRescueTargetV813 ? "ZERO_SWAP_COVERAGE_RESCUE_RANKED_V816" : "NONE");
 
   if (productionV4TargetV772) {
     // V777: transfer ownership of the three protected slots to V772 itself.
@@ -121164,7 +121208,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "🧪 <b>Evidence Completion Regression Audit — V815</b>",
+    "🧪 <b>Evidence Completion Regression Audit — V816</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
     `Compatible detailed rows: <b>${fmt(total)}</b>`,
