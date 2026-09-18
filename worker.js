@@ -1,6 +1,11 @@
 /**
  * Robinhood Chain Meme Hunter — V805
  *
+ * V806 EARLY PRODUCTION-V4 HEADROOM RESERVATION FIX:
+ * - arms the existing 3-request V772 reserve immediately after a candidate is confirmed valid ERC-20 and has completed normal analysis, before lower-priority post-analysis enrichment can spend those slots;
+ * - preserves the hard 42-request ceiling, Telegram reserve, provider limits, scoring thresholds and three-request V4 envelope;
+ * - no new requests, no paid provider dependency and no USD inference.
+ *
  * V805 LIVE V254 GATE DIAGNOSTIC + AUDIT COMPATIBILITY FIX:
  * - fixes /evidenceaudit excluding V802_1 rows while summarising only V730_1 rows;
  * - preserves compatible historical evidence rows while adding V805 live V254 gate diagnostics;
@@ -6939,7 +6944,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V805";
+const VERSION = "V806";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -98470,6 +98475,21 @@ for (
     }
 
     /* =====================================================
+       V806 EARLY PRODUCTION V4 HEADROOM RESERVATION
+       =====================================================
+       Arm the existing V776 three-request reservation as soon as a fully
+       analysed, valid ERC-20 candidate is V772-eligible. This is deliberately
+       before V175 and other lower-priority post-analysis enrichment lanes so
+       those lanes cannot consume the three slots V772 already needs.
+       No ceiling is raised and no request is made here.
+    */
+    activateProductionV4ReserveV776(
+      budget,
+      candidate,
+      currentLiveVerifiedLaunchTokensV621
+    );
+
+    /* =====================================================
        V175 EARLY VERIFIED DIRECTIONAL USD PRIORITY
        ===================================================== */
     if (
@@ -98943,13 +98963,8 @@ for (
       candidate
     );
 
-    // V776: once a real analysed candidate qualifies for the production V4 lane,
-    // protect three existing slots from lower-priority later analysis.
-    activateProductionV4ReserveV776(
-      budget,
-      candidate,
-      currentLiveVerifiedLaunchTokensV621
-    );
+    // V806: production V4 headroom, when eligible, was already reserved
+    // immediately after ERC-20 validation and before lower-priority enrichment.
 
     scannerFunnelV415.returnedCandidates++;
     if(currentLiveVerifiedLaunchTokensV621.has(address)){
@@ -99042,7 +99057,7 @@ for (
   state.productionV4EnrichmentV772 = {
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
-    version: "V805",
+    version: "V806",
     requestReserveV776: {
       ...(budget?.analysis?.productionV4ReserveV776 || {}),
       active: budget?.analysis?.productionV4ReserveV776?.active === true,
@@ -120087,7 +120102,7 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   if (!needsUsd) v254Blockers.push("USD_ENRICHMENT_NOT_NEEDED_OR_NOT_ELIGIBLE");
 
   return {
-    version: "V805_1",
+    version: "V806_1",
     diagnosticOnly: true,
     address,
     finalEvidence: {
@@ -120197,7 +120212,7 @@ function evidenceAuditSnapshotV727(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
     : [];
-  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V805_1"]);
+  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V806_1"]);
   const detailed = rows.filter(row =>
     compatibleAuditVersionsV803.has(String(row?.evidenceCompletionAuditV727?.version || ""))
   );
@@ -120260,7 +120275,7 @@ function evidenceAuditSnapshotV727(state) {
   }
   const top = obj => Object.entries(obj).sort((a,b) => safeNumber(b[1]) - safeNumber(a[1])).slice(0,10);
   return {
-    version: "V805",
+    version: "V806",
     diagnosticOnly: true,
     retainedQualificationRows: rows.length,
     detailedV730Rows: detailed.length,
@@ -120297,7 +120312,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "🧪 <b>Evidence Completion Regression Audit — V805</b>",
+    "🧪 <b>Evidence Completion Regression Audit — V806</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
     `Compatible detailed rows: <b>${fmt(total)}</b>`,
@@ -120307,7 +120322,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const liveV254 = d?.lastV254RelevantStatusV805 || d?.lastV254LiveStatusV804 || null;
   if (liveV254) {
     lines.push(
-      "🎯 <b>Last V4-active / V254-relevant status — V805</b>",
+      "🎯 <b>Last V4-active / V254-relevant status — V806</b>",
       `Recorded: <code>${escapeHtml(liveV254.recordedAt || "UNVERIFIED")}</code>`,
       `Eligible / attempted / recovered: <b>${fmt(liveV254.candidatesEligible)}</b> / <b>${fmt(liveV254.attempted)}</b> / <b>${fmt(liveV254.recovered)}</b>`
     );
@@ -156816,7 +156831,7 @@ function productionV4StatusTelegramV772(result) {
   };
   const idx=r?.activePoolIndexV799 || r?.poolSelectionV780?.activePoolIndexV799 || {};
   return [
-    "🧬 <b>Production V4 / Uniswap Bridge — V802</b>",
+    "🧬 <b>Production V4 / Uniswap Bridge — V806</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
@@ -156844,7 +156859,7 @@ function productionV4StatusTelegramV772(result) {
     `Lower-priority requests blocked: <b>${safeNumber(r?.requestReserveV776?.blockedRequests)}</b>`,
     `Momentum / Opportunity / Confidence after: <b>${safeNumber(r?.momentumAfter)} / ${safeNumber(r?.opportunityAfter)} / ${safeNumber(r?.confidenceAfter)}</b>`,
     "",
-    "<i>V802 preserves V801/V799 behavior and explicitly hands production-matched exact PoolIds into the V254 watched-pool completion path. No Telegram thresholds, request ceilings or USD inference rules are changed.</i>"
+    "<i>V806 preserves the V802 exact-PoolId handoff and reserves the existing three production-V4 request slots earlier, before lower-priority post-analysis enrichment can consume them. No Telegram thresholds, request ceilings or USD inference rules are changed.</i>"
   ].join("\n");
 }
 
