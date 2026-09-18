@@ -1,7 +1,11 @@
 /**
- * Robinhood Chain Meme Hunter — V812
+ * Robinhood Chain Meme Hunter — V813
  *
- * V812 NO_BOT_OBSERVED_SWAPS COVERAGE DIAGNOSTIC:
+ * V813 COVERAGE-RESCUE SELECTION + V812 DIAGNOSTIC:
+ * - preserves the proven V811/V812 exact-USD path unchanged;
+ * - normal V772 target selection remains first priority;
+ * - if no normal target exists, one highest-priority valid low-risk zero-swap candidate with no known V4 pool may use the same existing 3-request production lane;
+ * - no scoring/Telegram threshold changes and no increase to the hard 42-request ceiling;
  * - preserves the confirmed-working V811 V4 -> V254 -> verified-USD -> authoritative scoring path unchanged;
  * - adds forward-only, read-only classification for candidates with zero bot-observed swaps using already-held watched-pool, poolRegistry, market-pair and production-V4 state;
  * - adds zero provider requests, zero scoring/qualification changes, and keeps the hard 42-request ceiling unchanged.
@@ -6974,7 +6978,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V812";
+const VERSION = "V813";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -13722,10 +13726,12 @@ function ensureProductionV4ReserveV776(budget) {
   return budget.analysis.productionV4ReserveV776;
 }
 
-function activateProductionV4ReserveV776(budget, candidate, currentLiveVerifiedLaunchTokensV621) {
+function activateProductionV4ReserveV776(budget, candidate, currentLiveVerifiedLaunchTokensV621, state) {
   const reserve = ensureProductionV4ReserveV776(budget);
   if (!reserve || reserve.active === true) return reserve;
-  if (!v772ProductionEligibleCandidate(candidate, currentLiveVerifiedLaunchTokensV621)) return reserve;
+  const normalEligibleV813 = v772ProductionEligibleCandidate(candidate, currentLiveVerifiedLaunchTokensV621);
+  const rescueEligibleV813 = !normalEligibleV813 && v813CoverageRescueEligibleCandidate(candidate, state);
+  if (!normalEligibleV813 && !rescueEligibleV813) return reserve;
 
   // Arm only when the real existing budget can currently fund all three V772 requests.
   if (!budgetAvailable(budget, "analysis", 3)) {
@@ -13737,7 +13743,9 @@ function activateProductionV4ReserveV776(budget, candidate, currentLiveVerifiedL
   reserve.reservedRequests = 3;
   reserve.activatedAt = Date.now();
   reserve.firstEligibleAddress = normalize(candidate?.address) || null;
-  reserve.activationReason = "FIRST_V772_ELIGIBLE_ANALYSED_CANDIDATE_V776";
+  reserve.activationReason = normalEligibleV813
+    ? "FIRST_V772_ELIGIBLE_ANALYSED_CANDIDATE_V776"
+    : "FIRST_V813_ZERO_SWAP_COVERAGE_RESCUE_CANDIDATE";
   reserve.releasedAt = null;
   reserve.releaseReason = null;
   return reserve;
@@ -16747,7 +16755,9 @@ function activateV254FirstRequestEarlyV811(
 ) {
   const reserve = ensureV254FirstRequestReserveV807(budget);
   if (!reserve || reserve.active === true || reserve.consumed === true) return reserve;
-  if (!v772ProductionEligibleCandidate(candidate, currentLiveVerifiedLaunchTokensV621)) return reserve;
+  const normalEligibleV813 = v772ProductionEligibleCandidate(candidate, currentLiveVerifiedLaunchTokensV621);
+  const rescueEligibleV813 = !normalEligibleV813 && v813CoverageRescueEligibleCandidate(candidate, state);
+  if (!normalEligibleV813 && !rescueEligibleV813) return reserve;
 
   const token = normalize(candidate?.address);
   const riskAcceptable =
@@ -16759,7 +16769,8 @@ function activateV254FirstRequestEarlyV811(
     validERC20: candidate?.validERC20 === true,
     riskAcceptable,
     needsUsd,
-    v772Eligible: true
+    v772Eligible: normalEligibleV813,
+    coverageRescueEligibleV813: rescueEligibleV813
   };
 
   if (!isAddress(token) || candidate?.validERC20 !== true || !riskAcceptable || !needsUsd) {
@@ -93065,6 +93076,39 @@ function v772ProductionEligibleCandidate(candidate, currentLiveVerifiedLaunchTok
   return currentLive || opportunity >= 35 || confidence >= 45;
 }
 
+/* =========================================================
+   V813 BOUNDED ZERO-SWAP COVERAGE RESCUE
+   =========================================================
+   Purpose:
+   - Preserve the normal V772 selector as first priority.
+   - Only when no normal V772 target exists, allow ONE highest-priority
+     zero-swap candidate with acceptable risk and no known V4 pool identity
+     to use the existing production-V4 lane.
+   - This is coverage only: no scoring/Telegram threshold changes, no new
+     request ceiling, and no USD inference.
+*/
+function v813CoverageRescueEligibleCandidate(candidate, state) {
+  const address = normalize(candidate?.address);
+  if (!candidate || candidate?.validERC20 !== true || !isAddress(address)) return false;
+  if (candidate?.risk?.severeOverride === true) return false;
+  if (String(candidate?.risk?.label || "").toUpperCase() === "HIGH") return false;
+  if (sameRunTerminalReject(candidate)?.terminal === true) return false;
+  if (safeNumber(candidate?.activity?.swaps) > 0) return false;
+
+  const poolEvidence = v254PoolIdsForCandidate(candidate, state, []);
+  const knownPoolIds = Array.isArray(poolEvidence?.poolIds)
+    ? poolEvidence.poolIds.filter(poolId => /^0x[a-f0-9]{64}$/.test(String(normalize(poolId) || "")))
+    : [];
+  if (candidate?.onChainPoolIdentityV153?.verified === true || knownPoolIds.length > 0) return false;
+
+  const opportunity = safeNumber(candidate?.opportunity?.score);
+  const confidence = safeNumber(candidate?.confidence?.score);
+  const marketKnown = candidate?.market?.verified === true;
+
+  // Bounded fallback only: require at least some analysed evidence/priority.
+  return marketKnown || opportunity >= 20 || confidence >= 35;
+}
+
 async function v772UniswapIdentifyPools(env, budget, poolIds, tokenAddress) {
   const apiKey = String(env?.UNISWAP_API_KEY || "").trim();
   const token = normalize(tokenAddress);
@@ -98906,7 +98950,8 @@ for (
     activateProductionV4ReserveV776(
       budget,
       candidate,
-      currentLiveVerifiedLaunchTokensV621
+      currentLiveVerifiedLaunchTokensV621,
+      state
     );
 
     /* V811: protect one existing V254 request alongside the V806 3-slot V4 reserve. */
@@ -99439,13 +99484,27 @@ for (
     scannerBudgetConsumed: true
   };
 
-  const productionV4TargetV772 =
+  const productionV4NormalTargetV813 =
     candidates.find(candidate =>
       v772ProductionEligibleCandidate(
         candidate,
         currentLiveVerifiedLaunchTokensV621
       )
     ) || null;
+
+  const productionV4CoverageRescueTargetV813 =
+    productionV4NormalTargetV813
+      ? null
+      : (candidates.find(candidate =>
+          v813CoverageRescueEligibleCandidate(candidate, state)
+        ) || null);
+
+  const productionV4TargetV772 =
+    productionV4NormalTargetV813 || productionV4CoverageRescueTargetV813 || null;
+
+  const productionV4SelectionModeV813 = productionV4NormalTargetV813
+    ? "NORMAL_V772"
+    : (productionV4CoverageRescueTargetV813 ? "ZERO_SWAP_COVERAGE_RESCUE_V813" : "NONE");
 
   if (productionV4TargetV772) {
     // V777: transfer ownership of the three protected slots to V772 itself.
@@ -99473,6 +99532,11 @@ for (
         currentLiveVerifiedLaunchTokensV621?.has(normalize(productionV4TargetV772?.address)) === true
       );
 
+    productionV4EnrichmentV772 = {
+      ...(productionV4EnrichmentV772 || {}),
+      selectionModeV813: productionV4SelectionModeV813
+    };
+
     productionV4TargetV772.productionV4EnrichmentV772 =
       productionV4EnrichmentV772;
 
@@ -99496,7 +99560,8 @@ for (
   state.productionV4EnrichmentV772 = {
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
-    version: "V812",
+    version: "V813",
+    selectionModeV813: productionV4SelectionModeV813,
     requestReserveV776: {
       ...(budget?.analysis?.productionV4ReserveV776 || {}),
       active: budget?.analysis?.productionV4ReserveV776?.active === true,
@@ -120721,7 +120786,7 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   if (!needsUsd) v254Blockers.push("USD_ENRICHMENT_NOT_NEEDED_OR_NOT_ELIGIBLE");
 
   return {
-    version: "V812_1",
+    version: "V813_1",
     diagnosticOnly: true,
     address,
     finalEvidence: {
@@ -120832,7 +120897,7 @@ function evidenceAuditSnapshotV727(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
     : [];
-  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V806_1", "V807_1", "V808_1", "V812_1"]);
+  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V806_1", "V807_1", "V808_1", "V812_1", "V813_1"]);
   const detailed = rows.filter(row =>
     compatibleAuditVersionsV803.has(String(row?.evidenceCompletionAuditV727?.version || ""))
   );
@@ -120956,7 +121021,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "🧪 <b>Evidence Completion Regression Audit — V812</b>",
+    "🧪 <b>Evidence Completion Regression Audit — V813</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
     `Compatible detailed rows: <b>${fmt(total)}</b>`,
@@ -120966,7 +121031,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const liveV254 = d?.lastV254RelevantStatusV805 || d?.lastV254LiveStatusV804 || null;
   if (liveV254) {
     lines.push(
-      "🎯 <b>Last V4-active / V254-relevant status — V812</b>",
+      "🎯 <b>Last V4-active / V254-relevant status — V813</b>",
       `Recorded: <code>${escapeHtml(liveV254.recordedAt || "UNVERIFIED")}</code>`,
       `Eligible / attempted / recovered: <b>${fmt(liveV254.candidatesEligible)}</b> / <b>${fmt(liveV254.attempted)}</b> / <b>${fmt(liveV254.recovered)}</b>`
     );
@@ -120989,7 +121054,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const postRecoveryV809 = d?.lastV254PostRecoveryScoreV809 || null;
   if (postRecoveryV809) {
     lines.push(
-      "📈 <b>Post-recovery authoritative scoring — V812</b>",
+      "📈 <b>Post-recovery authoritative scoring — V813</b>",
       `Recorded: <code>${escapeHtml(postRecoveryV809.recordedAt || "UNVERIFIED")}</code>`,
       `Candidate: <code>${escapeHtml(postRecoveryV809.address || "UNVERIFIED")}</code>`,
       `Verified flow: <b>${postRecoveryV809.verifiedFlow ? "YES" : "NO"}</b> · records <b>${fmt(postRecoveryV809.verifiedRecordCount)}</b> · pools <b>${fmt(postRecoveryV809.verifiedPoolCount)}</b>`,
@@ -121031,7 +121096,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const noSwapV812 = d?.noBotObservedSwapsV812 || {};
   lines.push(
     "",
-    "🔬 <b>NO_BOT_OBSERVED_SWAPS coverage diagnostic — V812</b>",
+    "🔬 <b>NO_BOT_OBSERVED_SWAPS coverage diagnostic — V813</b>",
     `Forward-only classified rows: <b>${fmt(noSwapV812.sampledRows)}</b>`,
     `Known exact/canonical pool but no observed swap: <b>${fmt(noSwapV812.knownPoolRows)}</b>`,
     `Selected into production V4 lane: <b>${fmt(noSwapV812.productionSelectedRows)}</b>`
@@ -157504,7 +157569,7 @@ function productionV4StatusTelegramV772(result) {
   };
   const idx=r?.activePoolIndexV799 || r?.poolSelectionV780?.activePoolIndexV799 || {};
   return [
-    "🧬 <b>Production V4 / Uniswap Bridge — V812</b>",
+    "🧬 <b>Production V4 / Uniswap Bridge — V813</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
