@@ -1,5 +1,10 @@
 /**
- * Robinhood Chain Meme Hunter — V811
+ * Robinhood Chain Meme Hunter — V812
+ *
+ * V812 NO_BOT_OBSERVED_SWAPS COVERAGE DIAGNOSTIC:
+ * - preserves the confirmed-working V811 V4 -> V254 -> verified-USD -> authoritative scoring path unchanged;
+ * - adds forward-only, read-only classification for candidates with zero bot-observed swaps using already-held watched-pool, poolRegistry, market-pair and production-V4 state;
+ * - adds zero provider requests, zero scoring/qualification changes, and keeps the hard 42-request ceiling unchanged.
  *
  * V811 EARLY V254 ONE-SLOT RESERVATION FIX:
  * - reserves one existing V254 exact-USD request slot at the same early analysed-candidate point as the V806 three-request production-V4 reserve;
@@ -6969,7 +6974,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V811";
+const VERSION = "V812";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -99491,7 +99496,7 @@ for (
   state.productionV4EnrichmentV772 = {
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
-    version: "V811",
+    version: "V812",
     requestReserveV776: {
       ...(budget?.analysis?.productionV4ReserveV776 || {}),
       active: budget?.analysis?.productionV4ReserveV776?.active === true,
@@ -120554,6 +120559,87 @@ function candidateDirectionalUsdVerifiedV727(candidate, state) {
   return indexed || onChain;
 }
 
+function noBotObservedSwapsDiagnosticV812(candidate, state) {
+  const token = normalize(candidate?.address);
+  const observedSwaps = safeNumber(candidate?.activity?.swaps);
+  if (!isAddress(token) || observedSwaps > 0) {
+    return {
+      applicable: false,
+      reason: observedSwaps > 0 ? "HAS_BOT_OBSERVED_SWAPS" : "INVALID_TOKEN",
+      observedSwaps
+    };
+  }
+
+  const poolEvidence = v254PoolIdsForCandidate(candidate, state, []);
+  const watchedPoolIds = Array.from(new Set(
+    (Array.isArray(poolEvidence?.poolIds) ? poolEvidence.poolIds : [])
+      .map(normalize)
+      .filter(poolId => /^0x[a-f0-9]{64}$/.test(String(poolId || "")))
+  ));
+
+  const registryPoolIds = [];
+  for (const [rawPoolId, row] of Object.entries(state?.poolRegistry || {})) {
+    const poolId = normalize(rawPoolId || row?.poolId);
+    if (!/^0x[a-f0-9]{64}$/.test(String(poolId || ""))) continue;
+    const currency0 = normalize(row?.currency0 || row?.token0 || row?.tokenA);
+    const currency1 = normalize(row?.currency1 || row?.token1 || row?.tokenB);
+    if (currency0 === token || currency1 === token) registryPoolIds.push(poolId);
+  }
+
+  const uniqueRegistryPoolIds = Array.from(new Set(registryPoolIds));
+  const exactPoolIdentityVerified = candidate?.onChainPoolIdentityV153?.verified === true;
+  const marketPairKnown =
+    candidate?.market?.verified === true &&
+    Boolean(candidate?.market?.pairAddress);
+
+  const production = state?.productionV4EnrichmentV772 || {};
+  const selectedForProductionV4 = normalize(production?.tokenAddress) === token;
+  const productionAttempted = selectedForProductionV4 && production?.attempted === true;
+  const productionApplied = selectedForProductionV4 && production?.applied === true;
+  const productionStatus = selectedForProductionV4
+    ? String(production?.status || "UNVERIFIED")
+    : "NOT_SELECTED_THIS_SCAN";
+
+  const knownPoolCount = new Set([
+    ...watchedPoolIds,
+    ...uniqueRegistryPoolIds
+  ]).size;
+
+  let reason = "NO_KNOWN_POOL_OR_LIVE_SWAP";
+  if (productionApplied && observedSwaps <= 0) {
+    reason = "PRODUCTION_V4_APPLIED_BUT_CANDIDATE_SWAPS_ZERO";
+  } else if (
+    selectedForProductionV4 &&
+    productionAttempted &&
+    /NO_TARGET_MATCH|ACTIVE_POOL_INDEX_EXPANDING_NO_TARGET_MATCH/i.test(productionStatus)
+  ) {
+    reason = "SELECTED_V4_NO_ACTIVE_TARGET_MATCH";
+  } else if (selectedForProductionV4 && !productionAttempted) {
+    reason = "SELECTED_V4_NOT_ATTEMPTED";
+  } else if (knownPoolCount > 0 || exactPoolIdentityVerified) {
+    reason = "KNOWN_POOL_IDENTITY_BUT_NO_OBSERVED_SWAP";
+  } else if (marketPairKnown) {
+    reason = "MARKET_PAIR_KNOWN_BUT_V4_POOL_UNLINKED";
+  } else if (!selectedForProductionV4) {
+    reason = "NOT_SELECTED_FOR_PRODUCTION_V4_AND_NO_KNOWN_POOL";
+  }
+
+  return {
+    applicable: true,
+    reason,
+    observedSwaps,
+    exactPoolIdentityVerified,
+    watchedPoolCount: watchedPoolIds.length,
+    registryPoolCount: uniqueRegistryPoolIds.length,
+    knownPoolCount,
+    marketPairKnown,
+    selectedForProductionV4,
+    productionAttempted,
+    productionApplied,
+    productionStatus
+  };
+}
+
 function evidenceCompletionAuditV727(candidate, state, context = {}) {
   const address = normalize(candidate?.address);
   const market = candidate?.market || {};
@@ -120625,6 +120711,8 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   if (!(marketPairSideVerified || poolIdentityVerified)) v151Blockers.push("MARKET_PAIR_OR_POOL_IDENTITY_UNVERIFIED");
   if (!riskAcceptable) v151Blockers.push("RISK_NOT_ACCEPTABLE");
 
+  const noBotObservedSwapsV812 = noBotObservedSwapsDiagnosticV812(candidate, state);
+
   const v254Blockers = [];
   if (candidate?.validERC20 !== true) v254Blockers.push("ERC20_UNVERIFIED");
   if (!riskAcceptable) v254Blockers.push("RISK_NOT_ACCEPTABLE");
@@ -120633,7 +120721,7 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   if (!needsUsd) v254Blockers.push("USD_ENRICHMENT_NOT_NEEDED_OR_NOT_ELIGIBLE");
 
   return {
-    version: "V808_1",
+    version: "V812_1",
     diagnosticOnly: true,
     address,
     finalEvidence: {
@@ -120667,6 +120755,7 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
       selectionMode: normalize(v151?.address) === address ? (v151?.selectionMode || null) : null,
       status: normalize(v151?.address) === address ? (v151?.status || null) : null
     },
+    noBotObservedSwapsV812,
     v254: {
       eligible: v254Eligible,
       blockers: v254Blockers,
@@ -120743,7 +120832,7 @@ function evidenceAuditSnapshotV727(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
     : [];
-  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V806_1", "V807_1", "V808_1"]);
+  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V806_1", "V807_1", "V808_1", "V812_1"]);
   const detailed = rows.filter(row =>
     compatibleAuditVersionsV803.has(String(row?.evidenceCompletionAuditV727?.version || ""))
   );
@@ -120760,6 +120849,10 @@ function evidenceAuditSnapshotV727(state) {
   const statusCounts = {};
   const bridgeStatusCounts = {};
   const reserveConsumedTypeCounts = {};
+  const noBotSwapReasonCountsV812 = {};
+  let noBotSwapSampleRowsV812 = 0;
+  let noBotSwapKnownPoolRowsV812 = 0;
+  let noBotSwapProductionSelectedRowsV812 = 0;
   let reserveConsumedRows = 0;
   let reserveUnusedRows = 0;
   const bump = (obj, key) => { if (key) obj[key] = safeNumber(obj[key]) + 1; };
@@ -120774,6 +120867,17 @@ function evidenceAuditSnapshotV727(state) {
     if (f.directionalUsdVerified !== true) c.usdMissing++;
     if (f.exactPoolIdentityVerified !== true) c.poolIdentityMissing++;
     if (d.likelyGateStarvation === true) c.likelyGateStarvation++;
+    const noSwapV812 = d?.noBotObservedSwapsV812 || null;
+    if (noSwapV812?.applicable === true) {
+      noBotSwapSampleRowsV812++;
+      bump(noBotSwapReasonCountsV812, noSwapV812?.reason || "UNCLASSIFIED");
+      if (safeNumber(noSwapV812?.knownPoolCount) > 0 || noSwapV812?.exactPoolIdentityVerified === true) {
+        noBotSwapKnownPoolRowsV812++;
+      }
+      if (noSwapV812?.selectedForProductionV4 === true) {
+        noBotSwapProductionSelectedRowsV812++;
+      }
+    }
     const reserveV730 = d?.protectedCompletionSlotV730 || {};
     if (safeNumber(reserveV730?.consumed) > 0) {
       reserveConsumedRows++;
@@ -120798,6 +120902,7 @@ function evidenceAuditSnapshotV727(state) {
         if (x.eligible === true) c[`${lane}Eligible`]++;
         if (x.selected === true) c[`${lane}Selected`]++;
         if (x.attempted === true && c[`${lane}Attempted`] !== undefined) c[`${lane}Attempted`]++;
+        if (lane === "v254" && x.recovered === true) c.v254Recovered++;
         if ((x.verifiedAnyWindow === true || x.recovered === true) && c[`${lane}Verified`] !== undefined) c[`${lane}Verified`]++;
       }
       for (const reason of Array.isArray(x.blockers) ? x.blockers : []) bump(blockerCounts, `${lane}:${reason}`);
@@ -120806,7 +120911,7 @@ function evidenceAuditSnapshotV727(state) {
   }
   const top = obj => Object.entries(obj).sort((a,b) => safeNumber(b[1]) - safeNumber(a[1])).slice(0,10);
   return {
-    version: "V811",
+    version: "V812",
     diagnosticOnly: true,
     retainedQualificationRows: rows.length,
     detailedV730Rows: detailed.length,
@@ -120814,6 +120919,12 @@ function evidenceAuditSnapshotV727(state) {
     counts: c,
     topGateBlockers: top(blockerCounts),
     topSelectedLaneStatuses: top(statusCounts),
+    noBotObservedSwapsV812: {
+      sampledRows: noBotSwapSampleRowsV812,
+      knownPoolRows: noBotSwapKnownPoolRowsV812,
+      productionSelectedRows: noBotSwapProductionSelectedRowsV812,
+      reasons: top(noBotSwapReasonCountsV812)
+    },
     protectedCompletionSlotV730: {
       consumedRows: reserveConsumedRows,
       unusedRows: reserveUnusedRows,
@@ -120845,7 +120956,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "🧪 <b>Evidence Completion Regression Audit — V811</b>",
+    "🧪 <b>Evidence Completion Regression Audit — V812</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
     `Compatible detailed rows: <b>${fmt(total)}</b>`,
@@ -120855,7 +120966,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const liveV254 = d?.lastV254RelevantStatusV805 || d?.lastV254LiveStatusV804 || null;
   if (liveV254) {
     lines.push(
-      "🎯 <b>Last V4-active / V254-relevant status — V811</b>",
+      "🎯 <b>Last V4-active / V254-relevant status — V812</b>",
       `Recorded: <code>${escapeHtml(liveV254.recordedAt || "UNVERIFIED")}</code>`,
       `Eligible / attempted / recovered: <b>${fmt(liveV254.candidatesEligible)}</b> / <b>${fmt(liveV254.attempted)}</b> / <b>${fmt(liveV254.recovered)}</b>`
     );
@@ -120878,7 +120989,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const postRecoveryV809 = d?.lastV254PostRecoveryScoreV809 || null;
   if (postRecoveryV809) {
     lines.push(
-      "📈 <b>Post-recovery authoritative scoring — V811</b>",
+      "📈 <b>Post-recovery authoritative scoring — V812</b>",
       `Recorded: <code>${escapeHtml(postRecoveryV809.recordedAt || "UNVERIFIED")}</code>`,
       `Candidate: <code>${escapeHtml(postRecoveryV809.address || "UNVERIFIED")}</code>`,
       `Verified flow: <b>${postRecoveryV809.verifiedFlow ? "YES" : "NO"}</b> · records <b>${fmt(postRecoveryV809.verifiedRecordCount)}</b> · pools <b>${fmt(postRecoveryV809.verifiedPoolCount)}</b>`,
@@ -120917,6 +121028,21 @@ function evidenceAuditTelegramMessageV727(state) {
     "⏱ <b>Launch-age completion V258</b>",
     `Needed <b>${fmt(c.v258Needed)}</b> · selected <b>${fmt(c.v258Selected)}</b> · attempted <b>${fmt(c.v258Attempted)}</b> · recovered <b>${fmt(c.v258Recovered)}</b>`
   );
+  const noSwapV812 = d?.noBotObservedSwapsV812 || {};
+  lines.push(
+    "",
+    "🔬 <b>NO_BOT_OBSERVED_SWAPS coverage diagnostic — V812</b>",
+    `Forward-only classified rows: <b>${fmt(noSwapV812.sampledRows)}</b>`,
+    `Known exact/canonical pool but no observed swap: <b>${fmt(noSwapV812.knownPoolRows)}</b>`,
+    `Selected into production V4 lane: <b>${fmt(noSwapV812.productionSelectedRows)}</b>`
+  );
+  for (const [reason,count] of Array.isArray(noSwapV812.reasons) ? noSwapV812.reasons.slice(0,8) : []) {
+    lines.push(`• ${escapeHtml(reason)}: <b>${fmt(count)}</b>`);
+  }
+  if (!safeNumber(noSwapV812.sampledRows)) {
+    lines.push("• Forward-only V812 classification is building; existing historical rows are not guessed/backfilled.");
+  }
+
   if (Array.isArray(d.topGateBlockers) && d.topGateBlockers.length) {
     lines.push("", "🚧 <b>Top completion-gate blockers</b>");
     for (const [reason,count] of d.topGateBlockers.slice(0,8)) lines.push(`• ${escapeHtml(reason)}: <b>${fmt(count)}</b>`);
@@ -157378,7 +157504,7 @@ function productionV4StatusTelegramV772(result) {
   };
   const idx=r?.activePoolIndexV799 || r?.poolSelectionV780?.activePoolIndexV799 || {};
   return [
-    "🧬 <b>Production V4 / Uniswap Bridge — V811</b>",
+    "🧬 <b>Production V4 / Uniswap Bridge — V812</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
@@ -157406,7 +157532,7 @@ function productionV4StatusTelegramV772(result) {
     `Lower-priority requests blocked: <b>${safeNumber(r?.requestReserveV776?.blockedRequests)}</b>`,
     `Momentum / Opportunity / Confidence after: <b>${safeNumber(r?.momentumAfter)} / ${safeNumber(r?.opportunityAfter)} / ${safeNumber(r?.confidenceAfter)}</b>`,
     "",
-    "<i>V811 protects one existing V254 exact-USD request slot alongside the V806 three-request production-V4 reserve, while preserving the hard 42-request ceiling, Telegram thresholds and no-USD-inference rules.</i>"
+    "<i>V812 preserves the confirmed-working V811 V4/V254 request reserves and exact-USD path, while adding read-only NO_BOT_OBSERVED_SWAPS coverage classification. The hard 42-request ceiling, Telegram thresholds and no-USD-inference rules are unchanged.</i>"
   ].join("\n");
 }
 
