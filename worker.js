@@ -1,7 +1,7 @@
 /**
  * Robinhood Chain Meme Hunter — V816
  *
- * V816 RANKED ZERO-SWAP COVERAGE RESCUE:
+ * V817 RANKED ZERO-SWAP COVERAGE RESCUE:
  * - preserves the confirmed V815 V4 -> V254 -> verified-USD -> score path;
  * - preserves V813 rescue eligibility and the single production-V4 target;
  * - ranks all eligible no-known-pool/zero-swap rescue candidates instead of first-array-match;
@@ -7000,7 +7000,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V816";
+const VERSION = "V817";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -99687,6 +99687,89 @@ for (
     ? "NORMAL_V772"
     : (productionV4CoverageRescueTargetV813 ? "ZERO_SWAP_COVERAGE_RESCUE_RANKED_V816" : "NONE");
 
+  /*
+   * V817 DIAGNOSTIC ONLY:
+   * Capture the real production-V4 routing decision and the exact V816 rescue
+   * ranking inputs already present in memory. Zero provider requests and no
+   * scoring/qualification/request-budget changes.
+   */
+  const productionV4RoutingDiagnosticV817 = (() => {
+    const rescueEligibleAll = candidates.filter(candidate =>
+      v813CoverageRescueEligibleCandidate(candidate, state)
+    );
+    const gateCounts = {
+      totalCandidates: candidates.length,
+      validERC20: 0,
+      riskAcceptable: 0,
+      zeroObservedSwaps: 0,
+      noKnownExactPool: 0,
+      analysedFallbackEvidence: 0,
+      rescueEligible: rescueEligibleAll.length
+    };
+    for (const candidate of candidates) {
+      const address = normalize(candidate?.address);
+      const validERC20 = candidate?.validERC20 === true && isAddress(address);
+      const riskAcceptable =
+        candidate?.risk?.severeOverride !== true &&
+        String(candidate?.risk?.label || "").toUpperCase() !== "HIGH";
+      const zeroObservedSwaps = safeNumber(candidate?.activity?.swaps) <= 0;
+      const poolEvidence = v254PoolIdsForCandidate(candidate, state, []);
+      const knownPoolIds = Array.isArray(poolEvidence?.poolIds)
+        ? poolEvidence.poolIds.filter(poolId => /^0x[a-f0-9]{64}$/.test(String(normalize(poolId) || "")))
+        : [];
+      const noKnownExactPool =
+        candidate?.onChainPoolIdentityV153?.verified !== true &&
+        knownPoolIds.length === 0;
+      const opportunity = safeNumber(candidate?.opportunity?.score);
+      const confidence = safeNumber(candidate?.confidence?.score);
+      const marketKnown = candidate?.market?.verified === true;
+      const analysedFallbackEvidence = marketKnown || opportunity >= 20 || confidence >= 35;
+      if (validERC20) gateCounts.validERC20++;
+      if (riskAcceptable) gateCounts.riskAcceptable++;
+      if (zeroObservedSwaps) gateCounts.zeroObservedSwaps++;
+      if (noKnownExactPool) gateCounts.noKnownExactPool++;
+      if (analysedFallbackEvidence) gateCounts.analysedFallbackEvidence++;
+    }
+    const ranked = productionV4CoverageRescueCandidatesV816.slice(0, 5).map(row => ({
+      address: normalize(row?.candidate?.address) || null,
+      rank: safeNumber(row?.rank),
+      marketKnown: row?.candidate?.market?.verified === true,
+      opportunity: safeNumber(row?.candidate?.opportunity?.score),
+      confidence: safeNumber(row?.candidate?.confidence?.score),
+      marketQuality: safeNumber(row?.candidate?.marketQuality?.score),
+      analysisPriority: safeNumber(row?.candidate?.analysisPriority),
+      scannerAgeSeconds: Math.max(
+        0,
+        safeNumber(row?.candidate?.scannerAgeSeconds ?? row?.candidate?.scannerAge?.seconds)
+      )
+    }));
+    return {
+      runtimeVersion: VERSION,
+      recordedAt: new Date().toISOString(),
+      selectionMode: productionV4SelectionModeV813,
+      normalTarget: normalize(productionV4NormalTargetV813?.address) || null,
+      rescueTarget: normalize(productionV4CoverageRescueTargetV813?.address) || null,
+      selectedTarget: normalize(productionV4TargetV772?.address) || null,
+      normalTargetDisplacedRescue: Boolean(productionV4NormalTargetV813 && rescueEligibleAll.length),
+      rescueEligibleCountEvenIfNormalSelected: rescueEligibleAll.length,
+      rankedCandidateCount: productionV4CoverageRescueCandidatesV816.length,
+      gateCounts,
+      topRanked: ranked,
+      budgetAtSelection: {
+        totalUsed: safeNumber(budget?.totalUsed),
+        totalLimit: safeNumber(budget?.totalLimit) || 42,
+        analysisUsed: safeNumber(budget?.analysis?.used),
+        analysisLimit: safeNumber(budget?.analysis?.effectiveLimit || budget?.analysis?.limit),
+        canFundThreeAnalysisRequests: budgetAvailable(budget, "analysis", 3)
+      },
+      diagnosticOnly: true,
+      externalRequestsAdded: 0,
+      scoringChanged: false,
+      qualificationChanged: false
+    };
+  })();
+  state.productionV4RoutingDiagnosticV817 = productionV4RoutingDiagnosticV817;
+
   if (productionV4TargetV772) {
     // V777: transfer ownership of the three protected slots to V772 itself.
     // The lane may bypass older INTERNAL reserves, but never the real hard/global,
@@ -99741,7 +99824,7 @@ for (
   state.productionV4EnrichmentV772 = {
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
-    version: "V814",
+    version: VERSION,
     selectionModeV813: productionV4SelectionModeV813,
     requestReserveV776: {
       ...(budget?.analysis?.productionV4ReserveV776 || {}),
@@ -121190,6 +121273,8 @@ function evidenceAuditSnapshotV727(state) {
       state?.qualificationAuditV663?.lastV254ScanStatusV805 || null,
     lastV254PostRecoveryScoreV809:
       state?.qualificationAuditV663?.lastV254PostRecoveryScoreV809 || null,
+    productionV4RoutingDiagnosticV817:
+      state?.productionV4RoutingDiagnosticV817 || null,
     interpretation: {
       noEvidenceIsPromoted: true,
       noProviderRequests: true,
@@ -121208,7 +121293,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "🧪 <b>Evidence Completion Regression Audit — V816</b>",
+    `🧪 <b>Evidence Completion Regression Audit — ${escapeHtml(VERSION)}</b>`,
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
     `Compatible detailed rows: <b>${fmt(total)}</b>`,
@@ -121302,6 +121387,26 @@ function evidenceAuditTelegramMessageV727(state) {
   }
   if (!safeNumber(noSwapV812.sampledRows)) {
     lines.push("• Forward-only V812 classification is building; existing historical rows are not guessed/backfilled.");
+  }
+
+  const routingV817 = d?.productionV4RoutingDiagnosticV817 || null;
+  if (routingV817) {
+    const g = routingV817?.gateCounts || {};
+    const b = routingV817?.budgetAtSelection || {};
+    lines.push(
+      "",
+      `🧭 <b>Production V4 routing diagnostic — ${escapeHtml(routingV817.runtimeVersion || VERSION)}</b>`,
+      `Selection: <b>${escapeHtml(routingV817.selectionMode || "NONE")}</b>`,
+      `Normal / rescue / selected: <code>${escapeHtml(routingV817.normalTarget || "NONE")}</code> / <code>${escapeHtml(routingV817.rescueTarget || "NONE")}</code> / <code>${escapeHtml(routingV817.selectedTarget || "NONE")}</code>`,
+      `Rescue eligible now: <b>${fmt(routingV817.rescueEligibleCountEvenIfNormalSelected)}</b> · ranked: <b>${fmt(routingV817.rankedCandidateCount)}</b> · normal displaced rescue: <b>${routingV817.normalTargetDisplacedRescue ? "YES" : "NO"}</b>`,
+      `Gates — candidates:${fmt(g.totalCandidates)} · ERC20:${fmt(g.validERC20)} · riskOK:${fmt(g.riskAcceptable)} · zeroSwaps:${fmt(g.zeroObservedSwaps)} · noExactPool:${fmt(g.noKnownExactPool)} · analysedEvidence:${fmt(g.analysedFallbackEvidence)} · rescueEligible:${fmt(g.rescueEligible)}`,
+      `Budget at selection — total ${fmt(b.totalUsed)}/${fmt(b.totalLimit)} · analysis ${fmt(b.analysisUsed)}/${fmt(b.analysisLimit)} · can fund 3: <b>${b.canFundThreeAnalysisRequests ? "YES" : "NO"}</b>`
+    );
+    for (const row of Array.isArray(routingV817.topRanked) ? routingV817.topRanked : []) {
+      lines.push(
+        `• <code>${escapeHtml(row.address || "UNVERIFIED")}</code> rank:${fmt(row.rank)} · market:${row.marketKnown ? "YES" : "NO"} · opp:${fmt(row.opportunity)} · conf:${fmt(row.confidence)} · quality:${fmt(row.marketQuality)} · priority:${fmt(row.analysisPriority)} · age:${fmt(row.scannerAgeSeconds)}s`
+      );
+    }
   }
 
   if (Array.isArray(d.topGateBlockers) && d.topGateBlockers.length) {
