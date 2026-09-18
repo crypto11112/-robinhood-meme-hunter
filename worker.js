@@ -1,4 +1,13 @@
 /**
+ * Robinhood Chain Meme Hunter — V802
+ *
+ * V802 PRODUCTION V4 -> V254 EXACT-POOL HANDOFF FIX:
+ * - when production V4 proves exact active PoolIds, merges those exact identities into the candidate watched-pool record before V254 selection;
+ * - reuses verified Uniswap Pool Info / canonical poolRegistry currency identities only; never guesses pool currencies;
+ * - fixes the ordering gap where production could show matched pools/swaps while V254 still saw no exact watched pool;
+ * - preserves V801 pre-qualification exact-USD lane, V799 active-pool index, 42-request ceiling, Telegram thresholds and no-USD-inference rules.
+ */
+/**
  * Robinhood Chain Meme Hunter — V801
  *
  * V801 PREQUAL VERIFIED-USD / MOMENTUM STARVATION FIX:
@@ -6917,7 +6926,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V801";
+const VERSION = "V802";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -93156,6 +93165,65 @@ async function enrichCandidateWithProductionV4V772(
     return {...base, status:"MATCHING_POOL_FOUND_BUT_NO_RECENT_SWAPS_V772"};
   }
 
+  /*
+   * V802: production V4 has now proven the exact active PoolId(s). V254 still
+   * reads candidate pool identity from watched.pools, so explicitly bridge the
+   * already-verified identity into that canonical local structure before the
+   * later V254 completion pass. Only exact Uniswap/registry currencies are used.
+   */
+  const watchedV802 = findWatched(state, token);
+  const handoffRowsV802 = [];
+  if (watchedV802) {
+    for (const poolId of matchingIds) {
+      const uniRowV802 = Array.isArray(uni?.matchingPools)
+        ? uni.matchingPools.find(row => normalize(row?.poolId) === poolId)
+        : null;
+      const registryRowV802 = state?.poolRegistry?.[poolId] || null;
+
+      const currency0V802 = normalize(
+        uniRowV802?.tokenA || registryRowV802?.currency0 || registryRowV802?.tokenA
+      );
+      const currency1V802 = normalize(
+        uniRowV802?.tokenB || registryRowV802?.currency1 || registryRowV802?.tokenB
+      );
+
+      const identityValidV802 =
+        (isAddress(currency0V802) || currency0V802 === ZERO) &&
+        (isAddress(currency1V802) || currency1V802 === ZERO) &&
+        (currency0V802 === token || currency1V802 === token);
+
+      if (!identityValidV802) {
+        handoffRowsV802.push({poolId, merged:false, reason:"VERIFIED_CURRENCIES_UNAVAILABLE_V802"});
+        continue;
+      }
+
+      const resolvedV802 = {
+        poolId,
+        currency0: currency0V802,
+        currency1: currency1V802,
+        blockNumber: matchingRows
+          .filter(log => normalize(log?.topics?.[1]) === poolId)
+          .map(log => blockNumberFromAnyV180(log?.blockNumber))
+          .filter(Number.isFinite)
+          .sort((a,b)=>a-b)[0] || null,
+        source: uniRowV802 ? "UNISWAP_POOL_INFO_PRODUCTION_MATCH_V802" : "POOL_REGISTRY_PRODUCTION_MATCH_V802"
+      };
+
+      registerPoolMapping(state, resolvedV802);
+      const mergedV802 = v254MergeResolvedPoolIntoWatch(watchedV802, resolvedV802);
+      handoffRowsV802.push({poolId, merged:mergedV802 === true, source:resolvedV802.source});
+    }
+  }
+
+  candidate.productionV4ExactPoolHandoffV802 = {
+    attempted: true,
+    watchedFound: Boolean(watchedV802),
+    matchedPoolIds: [...matchingIds],
+    mergedPoolIds: handoffRowsV802.filter(row => row?.merged === true).map(row => row.poolId),
+    rows: handoffRowsV802
+  };
+  base.exactPoolHandoffV802 = candidate.productionV4ExactPoolHandoffV802;
+
   const previous = getHistoricalSnapshot(state, token);
   const existingLiquidityEvents = safeNumber(candidate?.liveMomentumActivityV152?.liquidityEvents);
 
@@ -98961,7 +99029,7 @@ for (
   state.productionV4EnrichmentV772 = {
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
-    version: "V800",
+    version: "V802",
     requestReserveV776: {
       ...(budget?.analysis?.productionV4ReserveV776 || {}),
       active: budget?.analysis?.productionV4ReserveV776?.active === true,
@@ -119921,7 +119989,7 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   if (!needsUsd) v254Blockers.push("USD_ENRICHMENT_NOT_NEEDED_OR_NOT_ELIGIBLE");
 
   return {
-    version: "V801_1",
+    version: "V802_1",
     diagnosticOnly: true,
     address,
     finalEvidence: {
@@ -156614,7 +156682,7 @@ function productionV4StatusTelegramV772(result) {
   };
   const idx=r?.activePoolIndexV799 || r?.poolSelectionV780?.activePoolIndexV799 || {};
   return [
-    "🧬 <b>Production V4 / Uniswap Bridge — V801</b>",
+    "🧬 <b>Production V4 / Uniswap Bridge — V802</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
@@ -156642,7 +156710,7 @@ function productionV4StatusTelegramV772(result) {
     `Lower-priority requests blocked: <b>${safeNumber(r?.requestReserveV776?.blockedRequests)}</b>`,
     `Momentum / Opportunity / Confidence after: <b>${safeNumber(r?.momentumAfter)} / ${safeNumber(r?.opportunityAfter)} / ${safeNumber(r?.confidenceAfter)}</b>`,
     "",
-    "<i>V801 preserves V800/V799 V4 indexing and adds one bounded pre-qualification verified-USD completion path plus post-V212 Momentum recomputation. No Telegram thresholds or request ceilings are changed.</i>"
+    "<i>V802 preserves V801/V799 behavior and explicitly hands production-matched exact PoolIds into the V254 watched-pool completion path. No Telegram thresholds, request ceilings or USD inference rules are changed.</i>"
   ].join("\n");
 }
 
