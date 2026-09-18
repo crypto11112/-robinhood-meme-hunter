@@ -1,5 +1,12 @@
 /**
- * Robinhood Chain Meme Hunter — V808
+ * Robinhood Chain Meme Hunter — V811
+ *
+ * V811 EARLY V254 ONE-SLOT RESERVATION FIX:
+ * - reserves one existing V254 exact-USD request slot at the same early analysed-candidate point as the V806 three-request production-V4 reserve;
+ * - while both reserves are active, lower-priority analysis must preserve four existing slots in total: 3 for production V4 + 1 for V254;
+ * - after production V4 finishes, the V254 slot is confirmed only when the final V801 prequalification gates are satisfied, otherwise it is released immediately;
+ * - fixes intermittent ANALYSIS_BUDGET_PROTECTED / requests 0 after otherwise valid risk:OK + exactPool:YES candidates;
+ * - hard 42-request ceiling, Telegram reserve, provider limits, scoring, qualification and USD-verification rules remain unchanged.
  *
  * V808 V254 CANONICAL POOL-REGISTRY IDENTITY ACCEPTANCE FIX:
  * - when V254 selects an exact PoolId already present in the canonical poolRegistry, validates that registry currency0/currency1 directly against the candidate token and known quote set;
@@ -6962,7 +6969,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V810";
+const VERSION = "V811";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -13754,7 +13761,13 @@ function productionV4ReserveDecisionV776(budget, phase, type, amount=1) {
   // during that handoff.
   if (isProtectedV772) return null;
 
-  const reserved = Math.max(0, safeNumber(reserve.reservedRequests));
+  const v254EarlyReservedV811 =
+    budget?.analysis?.v254FirstRequestReserveV807?.active === true
+      ? Math.max(0, safeNumber(budget.analysis.v254FirstRequestReserveV807.reservedRequests))
+      : 0;
+  const reserved =
+    Math.max(0, safeNumber(reserve.reservedRequests)) +
+    v254EarlyReservedV811;
   const notificationReserveRemaining =
     budget?.notification?.globalReserveActiveV174 === true
       ? Math.max(0, safeNumber(budget?.notification?.limit) - safeNumber(budget?.notification?.used))
@@ -16721,10 +16734,68 @@ function isProtectedV254FirstRequestTypeV807(type) {
   );
 }
 
-function activateV254FirstRequestReserveV807(budget, candidate, state, liveLogs, productionResult) {
+function activateV254FirstRequestEarlyV811(
+  budget,
+  candidate,
+  currentLiveVerifiedLaunchTokensV621,
+  state
+) {
   const reserve = ensureV254FirstRequestReserveV807(budget);
   if (!reserve || reserve.active === true || reserve.consumed === true) return reserve;
+  if (!v772ProductionEligibleCandidate(candidate, currentLiveVerifiedLaunchTokensV621)) return reserve;
+
+  const token = normalize(candidate?.address);
+  const riskAcceptable =
+    candidate?.risk?.severeOverride !== true &&
+    String(candidate?.risk?.label || "").toUpperCase() !== "HIGH";
+  const needsUsd = verifiedUsdCoverageV262(candidate, state)?.needsEnrichment === true;
+
+  reserve.earlyPrequalV811 = {
+    validERC20: candidate?.validERC20 === true,
+    riskAcceptable,
+    needsUsd,
+    v772Eligible: true
+  };
+
+  if (!isAddress(token) || candidate?.validERC20 !== true || !riskAcceptable || !needsUsd) {
+    reserve.activationReason = "V811_EARLY_PREQUAL_NOT_SATISFIED";
+    return reserve;
+  }
+
+  /*
+   * V811 protects a fourth EXISTING slot while the V806 3-slot V4 reserve is
+   * also active. No ceiling is raised; if four real slots do not exist now,
+   * the reserve is not armed.
+   */
+  if (!budgetAvailable(budget, "analysis", 4)) {
+    reserve.activationReason = "V811_EARLY_FOUR_SLOT_HEADROOM_UNAVAILABLE";
+    reserve.targetAddress = token;
+    return reserve;
+  }
+
+  reserve.active = true;
+  reserve.reservedRequests = 1;
+  reserve.targetAddress = token;
+  reserve.activatedAt = Date.now();
+  reserve.activationReason = "V811_EARLY_V254_SLOT_RESERVED_WITH_V4";
+  reserve.provisionalV811 = true;
+  reserve.releasedAt = null;
+  reserve.releaseReason = null;
+  return reserve;
+}
+
+function activateV254FirstRequestReserveV807(budget, candidate, state, liveLogs, productionResult) {
+  const reserve = ensureV254FirstRequestReserveV807(budget);
+  if (!reserve || reserve.consumed === true) return reserve;
+
   if (productionResult?.applied !== true) {
+    if (reserve.active === true && reserve.provisionalV811 === true) {
+      reserve.active = false;
+      reserve.reservedRequests = 0;
+      reserve.releasedAt = Date.now();
+      reserve.releaseReason = "V811_RELEASED_PRODUCTION_NOT_APPLIED";
+      reserve.provisionalV811 = false;
+    }
     reserve.activationReason = "V772_NOT_APPLIED";
     return reserve;
   }
@@ -16755,7 +16826,21 @@ function activateV254FirstRequestReserveV807(budget, candidate, state, liveLogs,
     !exactPoolAvailable ||
     !needsUsd
   ) {
+    if (reserve.active === true && reserve.provisionalV811 === true) {
+      reserve.active = false;
+      reserve.reservedRequests = 0;
+      reserve.releasedAt = Date.now();
+      reserve.releaseReason = "V811_RELEASED_FINAL_V254_PREQUAL_NOT_SATISFIED";
+      reserve.provisionalV811 = false;
+    }
     reserve.activationReason = "V254_PREQUAL_NOT_SATISFIED_V807";
+    return reserve;
+  }
+
+  if (reserve.active === true) {
+    reserve.targetAddress = token;
+    reserve.provisionalV811 = false;
+    reserve.activationReason = "V811_EARLY_RESERVE_CONFIRMED_AFTER_V772";
     return reserve;
   }
 
@@ -98819,6 +98904,14 @@ for (
       currentLiveVerifiedLaunchTokensV621
     );
 
+    /* V811: protect one existing V254 request alongside the V806 3-slot V4 reserve. */
+    activateV254FirstRequestEarlyV811(
+      budget,
+      candidate,
+      currentLiveVerifiedLaunchTokensV621,
+      state
+    );
+
     /* =====================================================
        V175 EARLY VERIFIED DIRECTIONAL USD PRIORITY
        ===================================================== */
@@ -99398,7 +99491,7 @@ for (
   state.productionV4EnrichmentV772 = {
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
-    version: "V810",
+    version: "V811",
     requestReserveV776: {
       ...(budget?.analysis?.productionV4ReserveV776 || {}),
       active: budget?.analysis?.productionV4ReserveV776?.active === true,
@@ -120713,7 +120806,7 @@ function evidenceAuditSnapshotV727(state) {
   }
   const top = obj => Object.entries(obj).sort((a,b) => safeNumber(b[1]) - safeNumber(a[1])).slice(0,10);
   return {
-    version: "V810",
+    version: "V811",
     diagnosticOnly: true,
     retainedQualificationRows: rows.length,
     detailedV730Rows: detailed.length,
@@ -120752,7 +120845,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "🧪 <b>Evidence Completion Regression Audit — V810</b>",
+    "🧪 <b>Evidence Completion Regression Audit — V811</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
     `Compatible detailed rows: <b>${fmt(total)}</b>`,
@@ -120762,7 +120855,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const liveV254 = d?.lastV254RelevantStatusV805 || d?.lastV254LiveStatusV804 || null;
   if (liveV254) {
     lines.push(
-      "🎯 <b>Last V4-active / V254-relevant status — V810</b>",
+      "🎯 <b>Last V4-active / V254-relevant status — V811</b>",
       `Recorded: <code>${escapeHtml(liveV254.recordedAt || "UNVERIFIED")}</code>`,
       `Eligible / attempted / recovered: <b>${fmt(liveV254.candidatesEligible)}</b> / <b>${fmt(liveV254.attempted)}</b> / <b>${fmt(liveV254.recovered)}</b>`
     );
@@ -120785,7 +120878,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const postRecoveryV809 = d?.lastV254PostRecoveryScoreV809 || null;
   if (postRecoveryV809) {
     lines.push(
-      "📈 <b>Post-recovery authoritative scoring — V810</b>",
+      "📈 <b>Post-recovery authoritative scoring — V811</b>",
       `Recorded: <code>${escapeHtml(postRecoveryV809.recordedAt || "UNVERIFIED")}</code>`,
       `Candidate: <code>${escapeHtml(postRecoveryV809.address || "UNVERIFIED")}</code>`,
       `Verified flow: <b>${postRecoveryV809.verifiedFlow ? "YES" : "NO"}</b> · records <b>${fmt(postRecoveryV809.verifiedRecordCount)}</b> · pools <b>${fmt(postRecoveryV809.verifiedPoolCount)}</b>`,
@@ -157285,7 +157378,7 @@ function productionV4StatusTelegramV772(result) {
   };
   const idx=r?.activePoolIndexV799 || r?.poolSelectionV780?.activePoolIndexV799 || {};
   return [
-    "🧬 <b>Production V4 / Uniswap Bridge — V808</b>",
+    "🧬 <b>Production V4 / Uniswap Bridge — V811</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
@@ -157313,7 +157406,7 @@ function productionV4StatusTelegramV772(result) {
     `Lower-priority requests blocked: <b>${safeNumber(r?.requestReserveV776?.blockedRequests)}</b>`,
     `Momentum / Opportunity / Confidence after: <b>${safeNumber(r?.momentumAfter)} / ${safeNumber(r?.opportunityAfter)} / ${safeNumber(r?.confidenceAfter)}</b>`,
     "",
-    "<i>V808 accepts canonical poolRegistry currency identity for an exact selected PoolId before V254 exact-USD completion, while preserving the V807/V806 request reserves, hard 42-request ceiling, Telegram thresholds and no-USD-inference rules.</i>"
+    "<i>V811 protects one existing V254 exact-USD request slot alongside the V806 three-request production-V4 reserve, while preserving the hard 42-request ceiling, Telegram thresholds and no-USD-inference rules.</i>"
   ].join("\n");
 }
 
