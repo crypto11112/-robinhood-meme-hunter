@@ -1,7 +1,12 @@
 /**
- * Robinhood Chain Meme Hunter — V807
+ * Robinhood Chain Meme Hunter — V808
  *
-
+ * V808 V254 CANONICAL POOL-REGISTRY IDENTITY ACCEPTANCE FIX:
+ * - when V254 selects an exact PoolId already present in the canonical poolRegistry, validates that registry currency0/currency1 directly against the candidate token and known quote set;
+ * - merges the verified canonical registry identity into the watched pool before exact-USD replay/history, so a known live PoolId is not rejected merely because the watched copy lacks currencies;
+ * - preserves the V807 one-slot V254 request reserve, V806 three-request production-V4 reserve, hard 42-request ceiling, Telegram thresholds and no-USD-inference rules;
+ * - adds zero provider requests and never guesses pool currencies.
+ *
  * V807 V254 EXACT-USD ONE-SLOT RESERVATION FIX:
  * - after a production V4 candidate is successfully applied and already satisfies the V801 exact-USD prequalification gates, reserves ONE existing analysis request for its first V254 exact-USD provider call;
  * - lower-priority enrichment cannot consume that one slot first; the protected V254 request may bypass older internal reserves but never the real analysis/global/Telegram boundaries;
@@ -6951,7 +6956,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V807";
+const VERSION = "V808";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -74651,6 +74656,95 @@ function exactCandidatePoolIdentityV257(
 }
 
 
+/*
+ * V808 CANONICAL EXACT-POOL REGISTRY IDENTITY
+ *
+ * V257 deliberately requires the selected PoolId to have complete currencies
+ * inside watched.pools. Production V4 can already have a stronger canonical
+ * mapping in state.poolRegistry, so use that verified mapping before spending
+ * any identity-recovery request. No currency is inferred or address-sorted.
+ */
+function exactCandidatePoolIdentityFromRegistryV808(
+  state,
+  watched,
+  selectedPoolId
+) {
+  const token = normalize(watched?.address);
+  const poolId = normalize(selectedPoolId);
+
+  if (
+    !isAddress(token) ||
+    token === ZERO ||
+    knownQuote(token) ||
+    !/^0x[a-f0-9]{64}$/.test(String(poolId || ""))
+  ) {
+    return {
+      verified:false,
+      status:"V808_REGISTRY_SELECTED_POOL_NOT_ELIGIBLE",
+      poolId:poolId || null
+    };
+  }
+
+  const registryPool = state?.poolRegistry?.[poolId] || null;
+  if (!registryPool) {
+    return {
+      verified:false,
+      status:"V808_SELECTED_POOL_NOT_IN_POOL_REGISTRY",
+      poolId
+    };
+  }
+
+  const currency0 = normalize(registryPool?.currency0);
+  const currency1 = normalize(registryPool?.currency1);
+  if (!isAddress(currency0) || !isAddress(currency1)) {
+    return {
+      verified:false,
+      status:"V808_POOL_REGISTRY_CURRENCIES_UNVERIFIED",
+      poolId
+    };
+  }
+
+  const tokenIs0 = currency0 === token;
+  const tokenIs1 = currency1 === token;
+  if (!tokenIs0 && !tokenIs1) {
+    return {
+      verified:false,
+      status:"V808_POOL_REGISTRY_TOKEN_MISMATCH",
+      poolId,
+      currency0,
+      currency1
+    };
+  }
+
+  const quoteToken = tokenIs0 ? currency1 : currency0;
+  if (quoteToken !== ZERO && !knownQuote(quoteToken)) {
+    return {
+      verified:false,
+      status:"V808_POOL_REGISTRY_QUOTE_UNVERIFIED",
+      poolId,
+      quoteTokenAddress:quoteToken || null,
+      currency0,
+      currency1
+    };
+  }
+
+  return {
+    verified:true,
+    status:"ONCHAIN_V4_EXACT_SELECTED_POOL_IDENTITY_VERIFIED_V808",
+    source:"CANONICAL_POOL_REGISTRY_EXACT_SELECTED_POOL_V808",
+    poolId,
+    pairAddress:poolId,
+    candidateAddress:token,
+    quoteTokenAddress:quoteToken,
+    nativeQuote:quoteToken === ZERO,
+    targetTokenSide:"BASE",
+    currency0,
+    currency1,
+    blockNumber:registryPool?.blockNumber || null,
+    transactionHash:registryPool?.transactionHash || null
+  };
+}
+
 function persistVerifiedUsdTradesV254(
   state,
   candidateAddress,
@@ -82904,6 +82998,7 @@ async function verifiedUsdCompletionPassV254(
       ),
     poolSelection: null,
     localRegistryRepair: null,
+    canonicalRegistryIdentityV808: null,
     initializeResolution: null,
     liveReplay: null,
     history: null,
@@ -83109,6 +83204,44 @@ async function verifiedUsdCompletionPassV254(
           pools.watched,
           poolId
         );
+
+  /*
+   * V808: if the watched copy is incomplete, accept the already-canonical
+   * poolRegistry mapping for this exact selected PoolId before any provider
+   * identity recovery. This is verified local identity only; no guessing.
+   */
+  if (identity?.verified !== true) {
+    const registryIdentityV808 =
+      exactCandidatePoolIdentityFromRegistryV808(
+        state,
+        pools.watched,
+        poolId
+      );
+
+    output.canonicalRegistryIdentityV808 = {
+      attempted:true,
+      verified:registryIdentityV808?.verified === true,
+      status:registryIdentityV808?.status || null,
+      source:registryIdentityV808?.source || null,
+      poolId:registryIdentityV808?.poolId || poolId || null,
+      quoteTokenAddress:registryIdentityV808?.quoteTokenAddress || null
+    };
+
+    if (registryIdentityV808?.verified === true) {
+      v254MergeResolvedPoolIntoWatch(
+        pools.watched,
+        {
+          poolId,
+          currency0:registryIdentityV808.currency0,
+          currency1:registryIdentityV808.currency1,
+          blockNumber:registryIdentityV808.blockNumber || null,
+          transactionHash:registryIdentityV808.transactionHash || null,
+          source:"CANONICAL_POOL_REGISTRY_EXACT_SELECTED_POOL_V808"
+        }
+      );
+      identity = registryIdentityV808;
+    }
+  }
 
   if (
     identity?.verified !==
@@ -99259,7 +99392,7 @@ for (
   state.productionV4EnrichmentV772 = {
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
-    version: "V807",
+    version: "V808",
     requestReserveV776: {
       ...(budget?.analysis?.productionV4ReserveV776 || {}),
       active: budget?.analysis?.productionV4ReserveV776?.active === true,
@@ -120311,7 +120444,7 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   if (!needsUsd) v254Blockers.push("USD_ENRICHMENT_NOT_NEEDED_OR_NOT_ELIGIBLE");
 
   return {
-    version: "V807_1",
+    version: "V808_1",
     diagnosticOnly: true,
     address,
     finalEvidence: {
@@ -120421,7 +120554,7 @@ function evidenceAuditSnapshotV727(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
     : [];
-  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V806_1", "V807_1"]);
+  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V806_1", "V807_1", "V808_1"]);
   const detailed = rows.filter(row =>
     compatibleAuditVersionsV803.has(String(row?.evidenceCompletionAuditV727?.version || ""))
   );
@@ -120484,7 +120617,7 @@ function evidenceAuditSnapshotV727(state) {
   }
   const top = obj => Object.entries(obj).sort((a,b) => safeNumber(b[1]) - safeNumber(a[1])).slice(0,10);
   return {
-    version: "V807",
+    version: "V808",
     diagnosticOnly: true,
     retainedQualificationRows: rows.length,
     detailedV730Rows: detailed.length,
@@ -120521,7 +120654,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "🧪 <b>Evidence Completion Regression Audit — V807</b>",
+    "🧪 <b>Evidence Completion Regression Audit — V808</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
     `Compatible detailed rows: <b>${fmt(total)}</b>`,
@@ -120531,7 +120664,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const liveV254 = d?.lastV254RelevantStatusV805 || d?.lastV254LiveStatusV804 || null;
   if (liveV254) {
     lines.push(
-      "🎯 <b>Last V4-active / V254-relevant status — V807</b>",
+      "🎯 <b>Last V4-active / V254-relevant status — V808</b>",
       `Recorded: <code>${escapeHtml(liveV254.recordedAt || "UNVERIFIED")}</code>`,
       `Eligible / attempted / recovered: <b>${fmt(liveV254.candidatesEligible)}</b> / <b>${fmt(liveV254.attempted)}</b> / <b>${fmt(liveV254.recovered)}</b>`
     );
@@ -157040,7 +157173,7 @@ function productionV4StatusTelegramV772(result) {
   };
   const idx=r?.activePoolIndexV799 || r?.poolSelectionV780?.activePoolIndexV799 || {};
   return [
-    "🧬 <b>Production V4 / Uniswap Bridge — V807</b>",
+    "🧬 <b>Production V4 / Uniswap Bridge — V808</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
@@ -157068,7 +157201,7 @@ function productionV4StatusTelegramV772(result) {
     `Lower-priority requests blocked: <b>${safeNumber(r?.requestReserveV776?.blockedRequests)}</b>`,
     `Momentum / Opportunity / Confidence after: <b>${safeNumber(r?.momentumAfter)} / ${safeNumber(r?.opportunityAfter)} / ${safeNumber(r?.confidenceAfter)}</b>`,
     "",
-    "<i>V807 preserves the V806 three-request production-V4 reserve and additionally protects one existing request for the first V254 exact-USD completion call after a successful low-risk exact-pool match. The hard 42-request ceiling, Telegram thresholds and USD inference rules are unchanged.</i>"
+    "<i>V808 accepts canonical poolRegistry currency identity for an exact selected PoolId before V254 exact-USD completion, while preserving the V807/V806 request reserves, hard 42-request ceiling, Telegram thresholds and no-USD-inference rules.</i>"
   ].join("\n");
 }
 
