@@ -1,4 +1,15 @@
 /**
+ * Robinhood Chain Meme Hunter — V801
+ *
+ * V801 PREQUAL VERIFIED-USD / MOMENTUM STARVATION FIX:
+ * - preserves V800/V799 production V4 indexing and all existing Telegram thresholds;
+ * - allows ONE existing protected V254 completion slot to select either an already-qualified candidate OR a pre-qualification candidate with observed V4 swaps, acceptable risk and an exact candidate pool identity available locally;
+ * - does not increase the V254 candidate count, history-request ceiling, global hard cap or provider budget;
+ * - after V212 attaches fresh verified on-chain USD flow, recomputes Momentum/Opportunity/Confidence even when Pons curve evidence is absent;
+ * - removes the circular dependency where exact directional evidence needed qualification before it could contribute to qualification;
+ * - no inferred USD and no threshold reduction.
+ */
+/**
  * Robinhood Chain Meme Hunter — V800
  *
  * V799 ROTATING ACTIVE-POOL IDENTITY INDEX:
@@ -6906,7 +6917,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V800";
+const VERSION = "V801";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -100163,39 +100174,72 @@ for (
   }
 
   /*
-   * V254: one protected completion target per scan.
-   *
-   * Only a candidate that already qualifies under the existing Telegram
-   * thresholds is eligible. This cannot make a non-qualifying candidate alert;
-   * it only attempts to complete missing exact-USD evidence before the final
-   * V212/V253 pass.
+   * V801: one protected completion target per scan, still using the exact same
+   * V254 request envelope.  The old ordering required Telegram qualification
+   * before exact-pool USD completion, even though that verified evidence can be
+   * needed to produce Momentum/Opportunity/Confidence.  Admit one bounded
+   * pre-qualification target only when it already has observed V4 swaps,
+   * acceptable risk and an exact candidate pool identity available locally.
+   * No thresholds are lowered and no extra candidate/request slot is added.
    */
   const verifiedUsdCompletionCandidatesV254 =
     candidates
-      .filter(
-        candidate =>
-          qualifiesTelegram(
-            candidate
-          ) &&
-          safeNumber(
-            candidate
-              ?.activity
-              ?.swaps
-          ) > 0 &&
+      .filter(candidate => {
+        const riskAcceptableV801 =
+          candidate?.risk?.severeOverride !== true &&
+          String(candidate?.risk?.label || "").toUpperCase() !== "HIGH";
+
+        const poolEvidenceV801 =
+          v254PoolIdsForCandidate(
+            candidate,
+            state,
+            liveOutput.logs
+          );
+
+        const exactPoolAvailableV801 =
+          candidate?.onChainPoolIdentityV153?.verified === true ||
+          Boolean(
+            poolEvidenceV801?.watched &&
+            Array.isArray(poolEvidenceV801?.poolIds) &&
+            poolEvidenceV801.poolIds.length > 0
+          );
+
+        candidate.v801VerifiedUsdPrequalEligibility = {
+          alreadyTelegramQualified: qualifiesTelegram(candidate),
+          validERC20: candidate?.validERC20 === true,
+          observedV4Swaps: safeNumber(candidate?.activity?.swaps),
+          riskAcceptable: riskAcceptableV801,
+          exactPoolAvailable: exactPoolAvailableV801,
+          needsEnrichment:
+            verifiedUsdCoverageV262(candidate, state)?.needsEnrichment === true
+        };
+
+        return (
+          candidate?.validERC20 === true &&
+          safeNumber(candidate?.activity?.swaps) > 0 &&
+          riskAcceptableV801 &&
+          exactPoolAvailableV801 &&
           verifiedUsdCoverageV262(
             candidate,
             state
           )?.needsEnrichment === true
-      )
-      .sort(
-        (a, b) =>
-          safeNumber(
-            b?.opportunity?.score
-          ) -
-          safeNumber(
-            a?.opportunity?.score
-          )
-      )
+        );
+      })
+      .sort((a, b) => {
+        const aq = qualifiesTelegram(a) ? 1 : 0;
+        const bq = qualifiesTelegram(b) ? 1 : 0;
+        if (bq !== aq) return bq - aq;
+
+        const priorityDelta =
+          safeNumber(b?.analysisPriority) -
+          safeNumber(a?.analysisPriority);
+        if (priorityDelta !== 0) return priorityDelta;
+
+        return (
+          safeNumber(b?.opportunity?.score) -
+          safeNumber(a?.opportunity?.score)
+        );
+      })
       .slice(
         0,
         VERIFIED_USD_COMPLETION_MAX_CANDIDATES_V254
@@ -100464,9 +100508,8 @@ for (
      * existing functions.
      */
     if (
-      candidate
-        ?.ponsCurveFlowV216
-        ?.verified === true
+      candidate?.ponsCurveFlowV216?.verified === true ||
+      verifiedFlowV212?.verified === true
     ) {
       const historicalV218 =
         getHistoricalSnapshot(
@@ -100524,7 +100567,9 @@ for (
       candidate.momentumPonsRecomputedV218 = {
         applied: true,
         source:
-          "VERIFIED_PONS_CURVE_FLOW_V216",
+          candidate?.ponsCurveFlowV216?.verified === true
+            ? "VERIFIED_PONS_CURVE_FLOW_V216"
+            : "VERIFIED_ONCHAIN_USD_FLOW_V212_V801",
         score:
           safeNumber(
             candidate?.momentum?.score
@@ -119830,8 +119875,19 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
     riskAcceptable;
   const needsUsd = verifiedUsdCoverageV262(candidate, state)?.needsEnrichment === true;
   const qualifiesNow = qualifiesTelegram(candidate);
+  const v254PoolEvidenceV801 =
+    v254PoolIdsForCandidate(candidate, state, []);
+  const v254ExactPoolAvailableV801 =
+    poolIdentityVerified ||
+    Boolean(
+      v254PoolEvidenceV801?.watched &&
+      Array.isArray(v254PoolEvidenceV801?.poolIds) &&
+      v254PoolEvidenceV801.poolIds.length > 0
+    );
   const v254Eligible =
-    qualifiesNow &&
+    candidate?.validERC20 === true &&
+    riskAcceptable &&
+    v254ExactPoolAvailableV801 &&
     safeNumber(candidate?.activity?.swaps) > 0 &&
     needsUsd;
 
@@ -119858,12 +119914,14 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   if (!riskAcceptable) v151Blockers.push("RISK_NOT_ACCEPTABLE");
 
   const v254Blockers = [];
-  if (!qualifiesNow) v254Blockers.push("NOT_TELEGRAM_QUALIFIED_BEFORE_V254");
+  if (candidate?.validERC20 !== true) v254Blockers.push("ERC20_UNVERIFIED");
+  if (!riskAcceptable) v254Blockers.push("RISK_NOT_ACCEPTABLE");
+  if (!v254ExactPoolAvailableV801) v254Blockers.push("EXACT_POOL_IDENTITY_UNAVAILABLE");
   if (!(safeNumber(candidate?.activity?.swaps) > 0)) v254Blockers.push("NO_BOT_OBSERVED_SWAPS");
   if (!needsUsd) v254Blockers.push("USD_ENRICHMENT_NOT_NEEDED_OR_NOT_ELIGIBLE");
 
   return {
-    version: "V730_1",
+    version: "V801_1",
     diagnosticOnly: true,
     address,
     finalEvidence: {
@@ -156556,7 +156614,7 @@ function productionV4StatusTelegramV772(result) {
   };
   const idx=r?.activePoolIndexV799 || r?.poolSelectionV780?.activePoolIndexV799 || {};
   return [
-    "🧬 <b>Production V4 / Uniswap Bridge — V800</b>",
+    "🧬 <b>Production V4 / Uniswap Bridge — V801</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
@@ -156584,7 +156642,7 @@ function productionV4StatusTelegramV772(result) {
     `Lower-priority requests blocked: <b>${safeNumber(r?.requestReserveV776?.blockedRequests)}</b>`,
     `Momentum / Opportunity / Confidence after: <b>${safeNumber(r?.momentumAfter)} / ${safeNumber(r?.opportunityAfter)} / ${safeNumber(r?.confidenceAfter)}</b>`,
     "",
-    "<i>V800 preserves V799 production behavior and only exposes the full token address plus exact matched PoolId(s) in /v4prodstatus. No Telegram thresholds, scoring, request limits or USD inference rules are changed.</i>"
+    "<i>V801 preserves V800/V799 V4 indexing and adds one bounded pre-qualification verified-USD completion path plus post-V212 Momentum recomputation. No Telegram thresholds or request ceilings are changed.</i>"
   ].join("\n");
 }
 
