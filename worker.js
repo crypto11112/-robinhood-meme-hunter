@@ -1,5 +1,12 @@
 /**
- * Robinhood Chain Meme Hunter — V805
+ * Robinhood Chain Meme Hunter — V807
+ *
+
+ * V807 V254 EXACT-USD ONE-SLOT RESERVATION FIX:
+ * - after a production V4 candidate is successfully applied and already satisfies the V801 exact-USD prequalification gates, reserves ONE existing analysis request for its first V254 exact-USD provider call;
+ * - lower-priority enrichment cannot consume that one slot first; the protected V254 request may bypass older internal reserves but never the real analysis/global/Telegram boundaries;
+ * - preserves the hard 42-request ceiling, V806 three-request V4 reserve, provider limits, scoring thresholds and no-USD-inference rule;
+ * - no additional request allowance is created.
  *
  * V806 EARLY PRODUCTION-V4 HEADROOM RESERVATION FIX:
  * - arms the existing 3-request V772 reserve immediately after a candidate is confirmed valid ERC-20 and has completed normal analysis, before lower-priority post-analysis enrichment can spend those slots;
@@ -6944,7 +6951,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V806";
+const VERSION = "V807";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -16660,6 +16667,174 @@ function tryConsumeEvidenceCompletionReserveV728(
   return null;
 }
 
+
+/* =========================================================
+   V807 V254 FIRST-REQUEST RESERVATION / OWNERSHIP HANDOFF
+   =========================================================
+   Purpose:
+   - Once V772 has actually applied exact V4 activity to a candidate that
+     already satisfies the V801 V254 prequalification gates, preserve ONE
+     existing request for the first exact-USD completion provider call.
+   - This is ordering only. It never raises the analysis limit, hard 42-request
+     ceiling, Telegram reserve or any provider quota.
+   - The protected V254 call may bypass older INTERNAL reserve ordering, but
+     budgetAvailable() remains authoritative for the real boundaries.
+*/
+function ensureV254FirstRequestReserveV807(budget) {
+  if (!budget?.analysis) return null;
+  if (!budget.analysis.v254FirstRequestReserveV807 || typeof budget.analysis.v254FirstRequestReserveV807 !== "object") {
+    budget.analysis.v254FirstRequestReserveV807 = {
+      enabled:true,
+      active:false,
+      reservedRequests:0,
+      targetAddress:null,
+      activatedAt:null,
+      activationReason:null,
+      blockedRequests:0,
+      consumed:false,
+      consumedAt:null,
+      consumedType:null,
+      hardBoundaryBlocks:0,
+      releasedAt:null,
+      releaseReason:null
+    };
+  }
+  return budget.analysis.v254FirstRequestReserveV807;
+}
+
+function isProtectedV254FirstRequestTypeV807(type) {
+  const t = String(type || "");
+  return (
+    t === "BLOCKSCOUT_V4_USD_COMPLETION_V254" ||
+    t.startsWith("BLOCKSCOUT_V4_USD_COMPLETION_V263_")
+  );
+}
+
+function activateV254FirstRequestReserveV807(budget, candidate, state, liveLogs, productionResult) {
+  const reserve = ensureV254FirstRequestReserveV807(budget);
+  if (!reserve || reserve.active === true || reserve.consumed === true) return reserve;
+  if (productionResult?.applied !== true) {
+    reserve.activationReason = "V772_NOT_APPLIED";
+    return reserve;
+  }
+
+  const token = normalize(candidate?.address);
+  const riskAcceptable =
+    candidate?.risk?.severeOverride !== true &&
+    String(candidate?.risk?.label || "").toUpperCase() !== "HIGH";
+  const pools = v254PoolIdsForCandidate(candidate, state, liveLogs || []);
+  const exactPoolAvailable =
+    candidate?.onChainPoolIdentityV153?.verified === true ||
+    Boolean(pools?.watched && Array.isArray(pools?.poolIds) && pools.poolIds.length > 0);
+  const needsUsd = verifiedUsdCoverageV262(candidate, state)?.needsEnrichment === true;
+
+  reserve.prequal = {
+    validERC20: candidate?.validERC20 === true,
+    observedV4Swaps: safeNumber(candidate?.activity?.swaps),
+    riskAcceptable,
+    exactPoolAvailable,
+    needsUsd
+  };
+
+  if (
+    !isAddress(token) ||
+    candidate?.validERC20 !== true ||
+    safeNumber(candidate?.activity?.swaps) <= 0 ||
+    !riskAcceptable ||
+    !exactPoolAvailable ||
+    !needsUsd
+  ) {
+    reserve.activationReason = "V254_PREQUAL_NOT_SATISFIED_V807";
+    return reserve;
+  }
+
+  if (!budgetAvailable(budget, "analysis", 1)) {
+    reserve.activationReason = "V254_PREQUAL_MET_BUT_ONE_SLOT_ALREADY_UNAVAILABLE_V807";
+    reserve.targetAddress = token;
+    return reserve;
+  }
+
+  reserve.active = true;
+  reserve.reservedRequests = 1;
+  reserve.targetAddress = token;
+  reserve.activatedAt = Date.now();
+  reserve.activationReason = "V772_APPLIED_V254_PREQUAL_ONE_SLOT_RESERVED_V807";
+  reserve.releasedAt = null;
+  reserve.releaseReason = null;
+  return reserve;
+}
+
+function v254FirstRequestReserveDecisionV807(budget, phase, type, amount = 1) {
+  const reserve = budget?.analysis?.v254FirstRequestReserveV807;
+  if (phase !== "analysis" || reserve?.active !== true || safeNumber(reserve?.reservedRequests) <= 0) return null;
+  if (isProtectedV254FirstRequestTypeV807(type)) return null;
+
+  const needed = Math.max(1, safeNumber(amount));
+  const reserved = Math.max(1, safeNumber(reserve.reservedRequests));
+  const notificationReserveRemaining =
+    budget?.notification?.globalReserveActiveV174 === true
+      ? Math.max(0, safeNumber(budget?.notification?.limit) - safeNumber(budget?.notification?.used))
+      : 0;
+  const preTelegramGlobalLimit = Math.max(0, safeNumber(budget?.totalLimit) - notificationReserveRemaining);
+  const analysisBlocked =
+    safeNumber(budget?.analysis?.used) + needed >
+    Math.max(0, effectiveAnalysisLimitV416(budget) - reserved);
+  const globalBlocked =
+    safeNumber(budget?.totalUsed) + needed >
+    Math.max(0, preTelegramGlobalLimit - reserved);
+
+  if (analysisBlocked || globalBlocked) {
+    reserve.blockedRequests = safeNumber(reserve.blockedRequests) + 1;
+    reserve.lastBlockedType = String(type || "UNKNOWN");
+    reserve.lastBlockedAt = Date.now();
+    budget.skipped.push({
+      phase,
+      type,
+      amount:needed,
+      reason:"V807_V254_FIRST_REQUEST_SLOT_RESERVED",
+      reservedFor:reserve.targetAddress || null
+    });
+    return false;
+  }
+  return null;
+}
+
+function consumeAuthorisedV254FirstRequestV807(budget, phase, type, amount = 1) {
+  const reserve = budget?.analysis?.v254FirstRequestReserveV807;
+  if (
+    phase !== "analysis" ||
+    reserve?.active !== true ||
+    !isProtectedV254FirstRequestTypeV807(type)
+  ) return null;
+
+  const needed = Math.max(1, safeNumber(amount));
+  if (needed > Math.max(1, safeNumber(reserve.reservedRequests))) return null;
+
+  if (!budgetAvailable(budget, "analysis", needed)) {
+    reserve.hardBoundaryBlocks = safeNumber(reserve.hardBoundaryBlocks) + 1;
+    reserve.lastHardBlockedType = String(type || "UNKNOWN");
+    reserve.lastHardBlockedAt = Date.now();
+    budget.skipped.push({
+      phase,
+      type,
+      amount:needed,
+      reason:"V807_V254_FIRST_REQUEST_REAL_BUDGET_UNAVAILABLE"
+    });
+    return false;
+  }
+
+  budget.totalUsed += needed;
+  budget.analysis.used += needed;
+  reserve.active = false;
+  reserve.reservedRequests = 0;
+  reserve.consumed = true;
+  reserve.consumedAt = Date.now();
+  reserve.consumedType = String(type || "UNKNOWN");
+  reserve.releasedAt = reserve.consumedAt;
+  reserve.releaseReason = "V807_V254_FIRST_REQUEST_CONSUMED";
+  return true;
+}
+
 function consumeBudget(
   budget,
   phase,
@@ -16678,6 +16853,22 @@ function consumeBudget(
     );
   if (productionV4HandoffDecisionV777 !== null) {
     return productionV4HandoffDecisionV777;
+  }
+
+  const v254FirstRequestConsumeV807 =
+    consumeAuthorisedV254FirstRequestV807(
+      budget, phase, type, amount
+    );
+  if (v254FirstRequestConsumeV807 !== null) {
+    return v254FirstRequestConsumeV807;
+  }
+
+  const v254FirstRequestReserveDecisionV807Result =
+    v254FirstRequestReserveDecisionV807(
+      budget, phase, type, amount
+    );
+  if (v254FirstRequestReserveDecisionV807Result !== null) {
+    return v254FirstRequestReserveDecisionV807Result;
   }
 
   const completionReserveDecisionV728 =
@@ -99054,16 +99245,34 @@ for (
     );
   }
 
+  const v254FirstRequestReserveV807 =
+    productionV4TargetV772
+      ? activateV254FirstRequestReserveV807(
+          budget,
+          productionV4TargetV772,
+          state,
+          liveOutput.logs,
+          productionV4EnrichmentV772
+        )
+      : ensureV254FirstRequestReserveV807(budget);
+
   state.productionV4EnrichmentV772 = {
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
-    version: "V806",
+    version: "V807",
     requestReserveV776: {
       ...(budget?.analysis?.productionV4ReserveV776 || {}),
       active: budget?.analysis?.productionV4ReserveV776?.active === true,
       reservedRequests: safeNumber(budget?.analysis?.productionV4ReserveV776?.reservedRequests),
       blockedRequests: safeNumber(budget?.analysis?.productionV4ReserveV776?.blockedRequests),
       consumedProtectedRequests: safeNumber(budget?.analysis?.productionV4ReserveV776?.consumedProtectedRequests)
+    },
+    v254FirstRequestReserveV807: {
+      ...(v254FirstRequestReserveV807 || {}),
+      active: v254FirstRequestReserveV807?.active === true,
+      reservedRequests: safeNumber(v254FirstRequestReserveV807?.reservedRequests),
+      blockedRequests: safeNumber(v254FirstRequestReserveV807?.blockedRequests),
+      consumed: v254FirstRequestReserveV807?.consumed === true
     }
   };
 
@@ -120102,7 +120311,7 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   if (!needsUsd) v254Blockers.push("USD_ENRICHMENT_NOT_NEEDED_OR_NOT_ELIGIBLE");
 
   return {
-    version: "V806_1",
+    version: "V807_1",
     diagnosticOnly: true,
     address,
     finalEvidence: {
@@ -120212,7 +120421,7 @@ function evidenceAuditSnapshotV727(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
     : [];
-  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V806_1"]);
+  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V806_1", "V807_1"]);
   const detailed = rows.filter(row =>
     compatibleAuditVersionsV803.has(String(row?.evidenceCompletionAuditV727?.version || ""))
   );
@@ -120275,7 +120484,7 @@ function evidenceAuditSnapshotV727(state) {
   }
   const top = obj => Object.entries(obj).sort((a,b) => safeNumber(b[1]) - safeNumber(a[1])).slice(0,10);
   return {
-    version: "V806",
+    version: "V807",
     diagnosticOnly: true,
     retainedQualificationRows: rows.length,
     detailedV730Rows: detailed.length,
@@ -120312,7 +120521,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "🧪 <b>Evidence Completion Regression Audit — V806</b>",
+    "🧪 <b>Evidence Completion Regression Audit — V807</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
     `Compatible detailed rows: <b>${fmt(total)}</b>`,
@@ -120322,7 +120531,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const liveV254 = d?.lastV254RelevantStatusV805 || d?.lastV254LiveStatusV804 || null;
   if (liveV254) {
     lines.push(
-      "🎯 <b>Last V4-active / V254-relevant status — V806</b>",
+      "🎯 <b>Last V4-active / V254-relevant status — V807</b>",
       `Recorded: <code>${escapeHtml(liveV254.recordedAt || "UNVERIFIED")}</code>`,
       `Eligible / attempted / recovered: <b>${fmt(liveV254.candidatesEligible)}</b> / <b>${fmt(liveV254.attempted)}</b> / <b>${fmt(liveV254.recovered)}</b>`
     );
@@ -156831,7 +157040,7 @@ function productionV4StatusTelegramV772(result) {
   };
   const idx=r?.activePoolIndexV799 || r?.poolSelectionV780?.activePoolIndexV799 || {};
   return [
-    "🧬 <b>Production V4 / Uniswap Bridge — V806</b>",
+    "🧬 <b>Production V4 / Uniswap Bridge — V807</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
@@ -156859,7 +157068,7 @@ function productionV4StatusTelegramV772(result) {
     `Lower-priority requests blocked: <b>${safeNumber(r?.requestReserveV776?.blockedRequests)}</b>`,
     `Momentum / Opportunity / Confidence after: <b>${safeNumber(r?.momentumAfter)} / ${safeNumber(r?.opportunityAfter)} / ${safeNumber(r?.confidenceAfter)}</b>`,
     "",
-    "<i>V806 preserves the V802 exact-PoolId handoff and reserves the existing three production-V4 request slots earlier, before lower-priority post-analysis enrichment can consume them. No Telegram thresholds, request ceilings or USD inference rules are changed.</i>"
+    "<i>V807 preserves the V806 three-request production-V4 reserve and additionally protects one existing request for the first V254 exact-USD completion call after a successful low-risk exact-pool match. The hard 42-request ceiling, Telegram thresholds and USD inference rules are unchanged.</i>"
   ].join("\n");
 }
 
