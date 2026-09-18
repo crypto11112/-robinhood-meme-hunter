@@ -217,6 +217,7 @@
 
 /**
  * Robinhood Chain Meme Hunter
+ * V809 — POST-RECOVERY SCORE OBSERVABILITY (DIAGNOSTIC ONLY)
  * V805 LIVE V254 STATUS DIAGNOSTIC
  * - records the most recent V254 exact-USD lane decision inside existing qualification-audit state;
  * - /evidenceaudit reports this live snapshot even when historical detailed rows are unavailable after deployment;
@@ -6956,7 +6957,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V808";
+const VERSION = "V809";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -99392,7 +99393,7 @@ for (
   state.productionV4EnrichmentV772 = {
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
-    version: "V808",
+    version: "V809",
     requestReserveV776: {
       ...(budget?.analysis?.productionV4ReserveV776 || {}),
       active: budget?.analysis?.productionV4ReserveV776?.active === true,
@@ -101208,6 +101209,59 @@ for (
         telegramDiagnosticV213:
           candidate.telegramVerifiedUsdDiagnosticV213
       });
+    }
+  }
+
+  /*
+   * V809 diagnostic-only: expose the post-V254/post-V212 authoritative score
+   * state for the most recent recovered exact-USD candidate. This adds zero
+   * provider requests, does not rescore anything itself, and only records
+   * values already produced by the existing V212/V218 recompute path.
+   */
+  {
+    const auditStateV809 = ensureQualificationAuditV663(state);
+    const liveV254V809 =
+      auditStateV809?.lastV254RelevantStatusV805 ||
+      auditStateV809?.lastV254LiveStatusV804 ||
+      null;
+
+    const recoveredRowV809 = Array.isArray(liveV254V809?.results)
+      ? liveV254V809.results.find(row => row?.verifiedUsdRecovered === true)
+      : null;
+
+    if (recoveredRowV809?.address) {
+      const recoveredAddressV809 = normalize(recoveredRowV809.address);
+      const recoveredCandidateV809 = (candidates || []).find(
+        candidate => normalize(candidate?.address) === recoveredAddressV809
+      );
+
+      if (recoveredCandidateV809) {
+        const verifiedFlowV809 = candidateVerifiedOnChainFlowV212(
+          recoveredCandidateV809,
+          state
+        );
+        auditStateV809.lastV254PostRecoveryScoreV809 = {
+          recordedAt: new Date().toISOString(),
+          address: recoveredAddressV809,
+          symbol: recoveredCandidateV809?.symbol || recoveredRowV809?.symbol || null,
+          verifiedFlow: verifiedFlowV809?.verified === true,
+          verifiedRecordCount: safeNumber(verifiedFlowV809?.recordCount),
+          verifiedPoolCount: Array.isArray(verifiedFlowV809?.poolIds)
+            ? verifiedFlowV809.poolIds.length
+            : 0,
+          recomputeApplied: recoveredCandidateV809?.momentumPonsRecomputedV218?.applied === true,
+          recomputeSource: recoveredCandidateV809?.momentumPonsRecomputedV218?.source || null,
+          momentumScore: safeNumber(recoveredCandidateV809?.momentum?.score),
+          momentumLabel: recoveredCandidateV809?.momentum?.label || null,
+          opportunityScore: safeNumber(recoveredCandidateV809?.opportunity?.score),
+          confidenceScore: safeNumber(recoveredCandidateV809?.confidence?.score),
+          confidenceLabel: recoveredCandidateV809?.confidence?.label || null,
+          analysisPriority: safeNumber(recoveredCandidateV809?.analysisPriority),
+          qualifiesTelegram: qualifiesTelegram(recoveredCandidateV809),
+          noScoringChangeV809: true,
+          zeroExtraRequestsV809: true
+        };
+      }
     }
   }
 
@@ -120617,7 +120671,7 @@ function evidenceAuditSnapshotV727(state) {
   }
   const top = obj => Object.entries(obj).sort((a,b) => safeNumber(b[1]) - safeNumber(a[1])).slice(0,10);
   return {
-    version: "V808",
+    version: "V809",
     diagnosticOnly: true,
     retainedQualificationRows: rows.length,
     detailedV730Rows: detailed.length,
@@ -120636,6 +120690,8 @@ function evidenceAuditSnapshotV727(state) {
       state?.qualificationAuditV663?.lastV254RelevantStatusV805 || null,
     lastV254ScanStatusV805:
       state?.qualificationAuditV663?.lastV254ScanStatusV805 || null,
+    lastV254PostRecoveryScoreV809:
+      state?.qualificationAuditV663?.lastV254PostRecoveryScoreV809 || null,
     interpretation: {
       noEvidenceIsPromoted: true,
       noProviderRequests: true,
@@ -120654,7 +120710,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "🧪 <b>Evidence Completion Regression Audit — V808</b>",
+    "🧪 <b>Evidence Completion Regression Audit — V809</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
     `Compatible detailed rows: <b>${fmt(total)}</b>`,
@@ -120664,7 +120720,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const liveV254 = d?.lastV254RelevantStatusV805 || d?.lastV254LiveStatusV804 || null;
   if (liveV254) {
     lines.push(
-      "🎯 <b>Last V4-active / V254-relevant status — V808</b>",
+      "🎯 <b>Last V4-active / V254-relevant status — V809</b>",
       `Recorded: <code>${escapeHtml(liveV254.recordedAt || "UNVERIFIED")}</code>`,
       `Eligible / attempted / recovered: <b>${fmt(liveV254.candidatesEligible)}</b> / <b>${fmt(liveV254.attempted)}</b> / <b>${fmt(liveV254.recovered)}</b>`
     );
@@ -120683,6 +120739,20 @@ function evidenceAuditTelegramMessageV727(state) {
       );
     }
     lines.push("");
+  }
+  const postRecoveryV809 = d?.lastV254PostRecoveryScoreV809 || null;
+  if (postRecoveryV809) {
+    lines.push(
+      "📈 <b>Post-recovery authoritative scoring — V809</b>",
+      `Recorded: <code>${escapeHtml(postRecoveryV809.recordedAt || "UNVERIFIED")}</code>`,
+      `Candidate: <code>${escapeHtml(postRecoveryV809.address || "UNVERIFIED")}</code>`,
+      `Verified flow: <b>${postRecoveryV809.verifiedFlow ? "YES" : "NO"}</b> · records <b>${fmt(postRecoveryV809.verifiedRecordCount)}</b> · pools <b>${fmt(postRecoveryV809.verifiedPoolCount)}</b>`,
+      `Recompute applied: <b>${postRecoveryV809.recomputeApplied ? "YES" : "NO"}</b> · source ${escapeHtml(postRecoveryV809.recomputeSource || "UNVERIFIED")}`,
+      `Momentum: <b>${fmt(postRecoveryV809.momentumScore)}</b> ${escapeHtml(postRecoveryV809.momentumLabel || "")}`,
+      `Opportunity: <b>${fmt(postRecoveryV809.opportunityScore)}</b> · Confidence: <b>${fmt(postRecoveryV809.confidenceScore)}</b> ${escapeHtml(postRecoveryV809.confidenceLabel || "")}`,
+      `Telegram-qualified after recompute: <b>${postRecoveryV809.qualifiesTelegram ? "YES" : "NO"}</b>`,
+      ""
+    );
   }
   if (!total) {
     lines.push(
