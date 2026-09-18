@@ -7000,7 +7000,22 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V819";
+const VERSION = "V820";
+/*
+ * V820 ZERO-SWAP RESCUE ELIGIBILITY-TIMING DIAGNOSTIC
+ * - Builds directly forward from confirmed V819.
+ * - Preserves V819 production V4 routing, distinct-candidate fairness,
+ *   one-target/max-three-request V4 lane and the proven V4 -> V254 ->
+ *   verified directional USD -> authoritative scoring path unchanged.
+ * - Adds zero-request, forward-only telemetry to explain why candidates that
+ *   finish as NOT_SELECTED_FOR_PRODUCTION_V4_AND_NO_KNOWN_POOL were not
+ *   rescue-eligible at the actual production-V4 routing moment.
+ * - Captures the exact V813 rescue gates at routing time and compares them
+ *   with the candidate's final same-scan state in the evidence audit.
+ * - No provider requests, no threshold/scoring/risk changes, and the hard
+ *   global request ceiling remains 42.
+ */
+
 /*
  * V818 PRODUCTION V4 FAIR-LANE ROUTING
  * - fixes V817-proven NORMAL_V772 starvation of eligible zero-swap rescue candidates;
@@ -99681,6 +99696,102 @@ for (
    *   Telegram thresholds and the proven V4 -> V254 -> verified-USD path.
    */
 
+  /*
+   * V820: snapshot the exact rescue gates at the production-V4 routing moment.
+   * This is intentionally read-only and uses only state/candidate evidence
+   * already in memory.  It lets later final-decision audit rows distinguish
+   * "was never eligible" from "became eligible only after routing".
+   */
+  const v820RescueGateSnapshot = candidate => {
+    const address = normalize(candidate?.address);
+    const validERC20 = Boolean(
+      candidate &&
+      candidate?.validERC20 === true &&
+      isAddress(address)
+    );
+    const severeRiskOverride =
+      candidate?.risk?.severeOverride === true;
+    const highRisk =
+      String(candidate?.risk?.label || "").toUpperCase() === "HIGH";
+    const terminal =
+      sameRunTerminalReject(candidate)?.terminal === true;
+    const observedSwaps =
+      safeNumber(candidate?.activity?.swaps);
+    const zeroObservedSwaps =
+      observedSwaps <= 0;
+
+    const poolEvidence =
+      v254PoolIdsForCandidate(candidate, state, []);
+    const knownPoolIds =
+      Array.isArray(poolEvidence?.poolIds)
+        ? poolEvidence.poolIds
+            .map(normalize)
+            .filter(poolId =>
+              /^0x[a-f0-9]{64}$/.test(String(poolId || ""))
+            )
+        : [];
+    const exactPoolIdentityVerified =
+      candidate?.onChainPoolIdentityV153?.verified === true;
+    const noKnownExactPool =
+      !exactPoolIdentityVerified &&
+      knownPoolIds.length === 0;
+
+    const opportunity =
+      safeNumber(candidate?.opportunity?.score);
+    const confidence =
+      safeNumber(candidate?.confidence?.score);
+    const marketKnown =
+      candidate?.market?.verified === true;
+    const analysedFallbackEvidence =
+      marketKnown ||
+      opportunity >= 20 ||
+      confidence >= 35;
+
+    const eligible =
+      validERC20 &&
+      !severeRiskOverride &&
+      !highRisk &&
+      !terminal &&
+      zeroObservedSwaps &&
+      noKnownExactPool &&
+      analysedFallbackEvidence;
+
+    const blockers = [];
+    if (!validERC20) blockers.push("ERC20_UNVERIFIED");
+    if (severeRiskOverride) blockers.push("SEVERE_RISK_OVERRIDE");
+    if (highRisk) blockers.push("RISK_HIGH");
+    if (terminal) blockers.push("SAME_RUN_TERMINAL_REJECT");
+    if (!zeroObservedSwaps) blockers.push("BOT_SWAPS_ALREADY_OBSERVED");
+    if (!noKnownExactPool) blockers.push("EXACT_POOL_ALREADY_KNOWN");
+    if (!analysedFallbackEvidence) blockers.push("INSUFFICIENT_ANALYSED_EVIDENCE");
+
+    return {
+      address: address || null,
+      eligible,
+      blockers,
+      validERC20,
+      riskAcceptable: !severeRiskOverride && !highRisk,
+      terminal,
+      observedSwaps,
+      zeroObservedSwaps,
+      exactPoolIdentityVerified,
+      knownPoolCount: knownPoolIds.length,
+      noKnownExactPool,
+      marketKnown,
+      opportunity,
+      confidence,
+      analysedFallbackEvidence
+    };
+  };
+
+  const productionV4RescueGateSnapshotsV820 = {};
+  for (const candidate of candidates) {
+    const snapshot = v820RescueGateSnapshot(candidate);
+    if (isAddress(snapshot?.address)) {
+      productionV4RescueGateSnapshotsV820[snapshot.address] = snapshot;
+    }
+  }
+
   const productionV4NormalAddressV819 =
     normalize(productionV4NormalTargetV813?.address) || null;
 
@@ -99832,6 +99943,9 @@ for (
       rankedCandidateCount: productionV4CoverageRescueCandidatesV816.length,
       gateCounts,
       topRanked: ranked,
+      rescueGateSnapshotsV820: productionV4RescueGateSnapshotsV820,
+      rescueGateSnapshotCountV820:
+        Object.keys(productionV4RescueGateSnapshotsV820).length,
       budgetAtSelection: {
         totalUsed: safeNumber(budget?.totalUsed),
         totalLimit: safeNumber(budget?.totalLimit) || 42,
@@ -99845,6 +99959,7 @@ for (
       qualificationChanged: false
     };
   })();
+  state.productionV4RoutingDiagnosticV820 = productionV4RoutingDiagnosticV818;
   state.productionV4RoutingDiagnosticV819 = productionV4RoutingDiagnosticV818;
   state.productionV4RoutingDiagnosticV818 = productionV4RoutingDiagnosticV818;
   // Compatibility alias for existing audit plumbing.
@@ -121128,6 +121243,119 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
 
   const noBotObservedSwapsV812 = noBotObservedSwapsDiagnosticV812(candidate, state);
 
+  /*
+   * V820: compare the final candidate state with the exact routing-time rescue
+   * gate snapshot captured earlier in this same scan.  No backfill/guessing.
+   */
+  const routingDiagnosticV820 =
+    state?.productionV4RoutingDiagnosticV820 ||
+    state?.productionV4RoutingDiagnosticV819 ||
+    null;
+  const routingGateV820 =
+    routingDiagnosticV820?.runtimeVersion === VERSION
+      ? routingDiagnosticV820?.rescueGateSnapshotsV820?.[address] || null
+      : null;
+  const finalRescueGateV820 = (() => {
+    const validERC20 =
+      candidate?.validERC20 === true &&
+      isAddress(address);
+    const severeRiskOverride =
+      candidate?.risk?.severeOverride === true;
+    const highRisk =
+      String(candidate?.risk?.label || "").toUpperCase() === "HIGH";
+    const terminal =
+      sameRunTerminalReject(candidate)?.terminal === true;
+    const observedSwaps =
+      safeNumber(candidate?.activity?.swaps);
+    const zeroObservedSwaps =
+      observedSwaps <= 0;
+    const poolEvidence =
+      v254PoolIdsForCandidate(candidate, state, []);
+    const knownPoolIds =
+      Array.isArray(poolEvidence?.poolIds)
+        ? poolEvidence.poolIds
+            .map(normalize)
+            .filter(poolId =>
+              /^0x[a-f0-9]{64}$/.test(String(poolId || ""))
+            )
+        : [];
+    const exactPoolIdentityVerified =
+      candidate?.onChainPoolIdentityV153?.verified === true;
+    const noKnownExactPool =
+      !exactPoolIdentityVerified &&
+      knownPoolIds.length === 0;
+    const opportunity =
+      safeNumber(candidate?.opportunity?.score);
+    const confidence =
+      safeNumber(candidate?.confidence?.score);
+    const marketKnown =
+      candidate?.market?.verified === true;
+    const analysedFallbackEvidence =
+      marketKnown ||
+      opportunity >= 20 ||
+      confidence >= 35;
+    const eligible =
+      validERC20 &&
+      !severeRiskOverride &&
+      !highRisk &&
+      !terminal &&
+      zeroObservedSwaps &&
+      noKnownExactPool &&
+      analysedFallbackEvidence;
+    const blockers = [];
+    if (!validERC20) blockers.push("ERC20_UNVERIFIED");
+    if (severeRiskOverride) blockers.push("SEVERE_RISK_OVERRIDE");
+    if (highRisk) blockers.push("RISK_HIGH");
+    if (terminal) blockers.push("SAME_RUN_TERMINAL_REJECT");
+    if (!zeroObservedSwaps) blockers.push("BOT_SWAPS_ALREADY_OBSERVED");
+    if (!noKnownExactPool) blockers.push("EXACT_POOL_ALREADY_KNOWN");
+    if (!analysedFallbackEvidence) blockers.push("INSUFFICIENT_ANALYSED_EVIDENCE");
+    return {
+      eligible,
+      blockers,
+      validERC20,
+      riskAcceptable: !severeRiskOverride && !highRisk,
+      terminal,
+      observedSwaps,
+      noKnownExactPool,
+      marketKnown,
+      opportunity,
+      confidence,
+      analysedFallbackEvidence
+    };
+  })();
+
+  const rescueEligibilityTimingV820 = {
+    runtimeVersion: VERSION,
+    routingSnapshotAvailable: Boolean(routingGateV820),
+    routingEligible:
+      routingGateV820
+        ? routingGateV820?.eligible === true
+        : null,
+    routingBlockers:
+      routingGateV820
+        ? (Array.isArray(routingGateV820?.blockers) ? routingGateV820.blockers : [])
+        : [],
+    finalEligible:
+      finalRescueGateV820.eligible === true,
+    finalBlockers:
+      finalRescueGateV820.blockers,
+    becameEligibleAfterRouting:
+      Boolean(
+        routingGateV820 &&
+        routingGateV820?.eligible !== true &&
+        finalRescueGateV820.eligible === true
+      ),
+    lostEligibilityAfterRouting:
+      Boolean(
+        routingGateV820 &&
+        routingGateV820?.eligible === true &&
+        finalRescueGateV820.eligible !== true
+      ),
+    routingGate: routingGateV820,
+    finalGate: finalRescueGateV820
+  };
+
   const v254Blockers = [];
   if (candidate?.validERC20 !== true) v254Blockers.push("ERC20_UNVERIFIED");
   if (!riskAcceptable) v254Blockers.push("RISK_NOT_ACCEPTABLE");
@@ -121136,7 +121364,7 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   if (!needsUsd) v254Blockers.push("USD_ENRICHMENT_NOT_NEEDED_OR_NOT_ELIGIBLE");
 
   return {
-    version: "V814_1",
+    version: "V820_1",
     diagnosticOnly: true,
     address,
     finalEvidence: {
@@ -121171,6 +121399,7 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
       status: normalize(v151?.address) === address ? (v151?.status || null) : null
     },
     noBotObservedSwapsV812,
+    rescueEligibilityTimingV820,
     v254: {
       eligible: v254Eligible,
       blockers: v254Blockers,
@@ -121247,7 +121476,7 @@ function evidenceAuditSnapshotV727(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
     : [];
-  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V806_1", "V807_1", "V808_1", "V812_1", "V814_1"]);
+  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V806_1", "V807_1", "V808_1", "V812_1", "V814_1", "V820_1"]);
   const detailed = rows.filter(row =>
     compatibleAuditVersionsV803.has(String(row?.evidenceCompletionAuditV727?.version || ""))
   );
@@ -121268,6 +121497,8 @@ function evidenceAuditSnapshotV727(state) {
   let noBotSwapSampleRowsV812 = 0;
   let noBotSwapKnownPoolRowsV812 = 0;
   let noBotSwapProductionSelectedRowsV812 = 0;
+  const rescueTimingCountsV820 = {};
+  let rescueTimingRowsV820 = 0;
   let reserveConsumedRows = 0;
   let reserveUnusedRows = 0;
   const bump = (obj, key) => { if (key) obj[key] = safeNumber(obj[key]) + 1; };
@@ -121293,6 +121524,33 @@ function evidenceAuditSnapshotV727(state) {
         noBotSwapProductionSelectedRowsV812++;
       }
     }
+    const timingV820 = d?.rescueEligibilityTimingV820 || null;
+    if (
+      noSwapV812?.applicable === true &&
+      noSwapV812?.reason === "NOT_SELECTED_FOR_PRODUCTION_V4_AND_NO_KNOWN_POOL" &&
+      timingV820?.runtimeVersion === "V820"
+    ) {
+      rescueTimingRowsV820++;
+      if (timingV820?.routingSnapshotAvailable !== true) {
+        bump(rescueTimingCountsV820, "ROUTING_SNAPSHOT_UNAVAILABLE");
+      } else if (timingV820?.becameEligibleAfterRouting === true) {
+        bump(rescueTimingCountsV820, "BECAME_ELIGIBLE_AFTER_ROUTING");
+      } else if (timingV820?.routingEligible === true) {
+        bump(rescueTimingCountsV820, "WAS_ELIGIBLE_AT_ROUTING_BUT_NOT_SELECTED");
+      } else {
+        const blockers = Array.isArray(timingV820?.routingBlockers)
+          ? timingV820.routingBlockers
+          : [];
+        if (!blockers.length) {
+          bump(rescueTimingCountsV820, "ROUTING_INELIGIBLE_UNCLASSIFIED");
+        } else {
+          for (const blocker of blockers) {
+            bump(rescueTimingCountsV820, `ROUTING_BLOCKER:${blocker}`);
+          }
+        }
+      }
+    }
+
     const reserveV730 = d?.protectedCompletionSlotV730 || {};
     if (safeNumber(reserveV730?.consumed) > 0) {
       reserveConsumedRows++;
@@ -121340,6 +121598,10 @@ function evidenceAuditSnapshotV727(state) {
       productionSelectedRows: noBotSwapProductionSelectedRowsV812,
       reasons: top(noBotSwapReasonCountsV812)
     },
+    rescueEligibilityTimingV820: {
+      forwardOnlyRows: rescueTimingRowsV820,
+      outcomes: top(rescueTimingCountsV820)
+    },
     protectedCompletionSlotV730: {
       consumedRows: reserveConsumedRows,
       unusedRows: reserveUnusedRows,
@@ -121354,7 +121616,10 @@ function evidenceAuditSnapshotV727(state) {
     lastV254PostRecoveryScoreV809:
       state?.qualificationAuditV663?.lastV254PostRecoveryScoreV809 || null,
     productionV4RoutingDiagnosticV817:
-      state?.productionV4RoutingDiagnosticV817 || null,
+      state?.productionV4RoutingDiagnosticV820 ||
+      state?.productionV4RoutingDiagnosticV819 ||
+      state?.productionV4RoutingDiagnosticV817 ||
+      null,
     interpretation: {
       noEvidenceIsPromoted: true,
       noProviderRequests: true,
@@ -121467,6 +121732,19 @@ function evidenceAuditTelegramMessageV727(state) {
   }
   if (!safeNumber(noSwapV812.sampledRows)) {
     lines.push("• Forward-only V812 classification is building; existing historical rows are not guessed/backfilled.");
+  }
+
+  const timingV820 = d?.rescueEligibilityTimingV820 || {};
+  lines.push(
+    "",
+    "⏳ <b>V820 rescue eligibility timing — forward only</b>",
+    `NOT_SELECTED rows classified with V820 timing: <b>${fmt(timingV820.forwardOnlyRows)}</b>`
+  );
+  for (const [reason,count] of Array.isArray(timingV820.outcomes) ? timingV820.outcomes.slice(0,8) : []) {
+    lines.push(`• ${escapeHtml(reason)}: <b>${fmt(count)}</b>`);
+  }
+  if (!safeNumber(timingV820.forwardOnlyRows)) {
+    lines.push("• Building from fresh V820 evaluations; no historical timing is guessed.");
   }
 
   const routingV817 = d?.productionV4RoutingDiagnosticV817 || null;
