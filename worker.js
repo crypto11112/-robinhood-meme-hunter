@@ -217,6 +217,11 @@
 
 /**
  * Robinhood Chain Meme Hunter
+ * V810 — DIRECT POST-RECOVERY SCORE CAPTURE (DIAGNOSTIC ONLY)
+ * - captures verified-flow post-recovery scores directly inside the V212 loop;
+ * - avoids V809's later candidate address re-lookup miss;
+ * - zero provider requests and no scoring/qualification changes.
+ *
  * V809 — POST-RECOVERY SCORE OBSERVABILITY (DIAGNOSTIC ONLY)
  * V805 LIVE V254 STATUS DIAGNOSTIC
  * - records the most recent V254 exact-USD lane decision inside existing qualification-audit state;
@@ -6957,7 +6962,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V809";
+const VERSION = "V810";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -99393,7 +99398,7 @@ for (
   state.productionV4EnrichmentV772 = {
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
-    version: "V809",
+    version: "V810",
     requestReserveV776: {
       ...(budget?.analysis?.productionV4ReserveV776 || {}),
       active: budget?.analysis?.productionV4ReserveV776?.active === true,
@@ -101195,6 +101200,43 @@ for (
       );
 
     if (verifiedFlowV212?.verified === true) {
+      /*
+       * V810 diagnostic-only: capture authoritative post-recovery scoring
+       * directly from the candidate object inside the verified-flow loop.
+       * This avoids V809's later address re-lookup, which could miss the
+       * recovered candidate even though V254 recovery succeeded. Zero
+       * provider requests and no scoring/qualification changes.
+       */
+      {
+        const auditStateV810 = ensureQualificationAuditV663(state);
+        auditStateV810.lastV254PostRecoveryScoreV809 = {
+          recordedAt: new Date().toISOString(),
+          address: normalize(candidate?.address),
+          symbol: candidate?.symbol || null,
+          verifiedFlow: true,
+          verifiedRecordCount: safeNumber(verifiedFlowV212?.recordCount),
+          verifiedPoolCount: Array.isArray(verifiedFlowV212?.poolIds)
+            ? verifiedFlowV212.poolIds.length
+            : 0,
+          recomputeApplied:
+            candidate?.momentumPonsRecomputedV218?.applied === true ||
+            verifiedFlowV212?.verified === true,
+          recomputeSource:
+            candidate?.momentumPonsRecomputedV218?.source ||
+            "VERIFIED_ONCHAIN_FLOW_V212_V810",
+          momentumScore: safeNumber(candidate?.momentum?.score),
+          momentumLabel: candidate?.momentum?.label || null,
+          opportunityScore: safeNumber(candidate?.opportunity?.score),
+          confidenceScore: safeNumber(candidate?.confidence?.score),
+          confidenceLabel: candidate?.confidence?.label || null,
+          analysisPriority: safeNumber(candidate?.analysisPriority),
+          qualifiesTelegram: qualifiesTelegram(candidate),
+          directCaptureV810: true,
+          noScoringChangeV810: true,
+          zeroExtraRequestsV810: true
+        };
+      }
+
       telegramVerifiedOnChainUsdV212.push({
         address:
           normalize(candidate?.address),
@@ -101213,7 +101255,7 @@ for (
   }
 
   /*
-   * V809 diagnostic-only: expose the post-V254/post-V212 authoritative score
+   * V810/V809 diagnostic-only: expose the post-V254/post-V212 authoritative score
    * state for the most recent recovered exact-USD candidate. This adds zero
    * provider requests, does not rescore anything itself, and only records
    * values already produced by the existing V212/V218 recompute path.
@@ -120671,7 +120713,7 @@ function evidenceAuditSnapshotV727(state) {
   }
   const top = obj => Object.entries(obj).sort((a,b) => safeNumber(b[1]) - safeNumber(a[1])).slice(0,10);
   return {
-    version: "V809",
+    version: "V810",
     diagnosticOnly: true,
     retainedQualificationRows: rows.length,
     detailedV730Rows: detailed.length,
@@ -120710,7 +120752,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "🧪 <b>Evidence Completion Regression Audit — V809</b>",
+    "🧪 <b>Evidence Completion Regression Audit — V810</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
     `Compatible detailed rows: <b>${fmt(total)}</b>`,
@@ -120720,7 +120762,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const liveV254 = d?.lastV254RelevantStatusV805 || d?.lastV254LiveStatusV804 || null;
   if (liveV254) {
     lines.push(
-      "🎯 <b>Last V4-active / V254-relevant status — V809</b>",
+      "🎯 <b>Last V4-active / V254-relevant status — V810</b>",
       `Recorded: <code>${escapeHtml(liveV254.recordedAt || "UNVERIFIED")}</code>`,
       `Eligible / attempted / recovered: <b>${fmt(liveV254.candidatesEligible)}</b> / <b>${fmt(liveV254.attempted)}</b> / <b>${fmt(liveV254.recovered)}</b>`
     );
@@ -120743,7 +120785,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const postRecoveryV809 = d?.lastV254PostRecoveryScoreV809 || null;
   if (postRecoveryV809) {
     lines.push(
-      "📈 <b>Post-recovery authoritative scoring — V809</b>",
+      "📈 <b>Post-recovery authoritative scoring — V810</b>",
       `Recorded: <code>${escapeHtml(postRecoveryV809.recordedAt || "UNVERIFIED")}</code>`,
       `Candidate: <code>${escapeHtml(postRecoveryV809.address || "UNVERIFIED")}</code>`,
       `Verified flow: <b>${postRecoveryV809.verifiedFlow ? "YES" : "NO"}</b> · records <b>${fmt(postRecoveryV809.verifiedRecordCount)}</b> · pools <b>${fmt(postRecoveryV809.verifiedPoolCount)}</b>`,
