@@ -1,7 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V813
+ * Robinhood Chain Meme Hunter — V814
  *
- * V813 COVERAGE-RESCUE SELECTION + V812 DIAGNOSTIC:
+ * V814 EXACT-POOL IDENTITY RECONCILIATION + V813 COVERAGE RESCUE:
  * - preserves the proven V811/V812 exact-USD path unchanged;
  * - normal V772 target selection remains first priority;
  * - if no normal target exists, one highest-priority valid low-risk zero-swap candidate with no known V4 pool may use the same existing 3-request production lane;
