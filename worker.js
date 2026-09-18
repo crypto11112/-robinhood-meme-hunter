@@ -1,9 +1,9 @@
 /**
- * Robinhood Chain Meme Hunter — V803
+ * Robinhood Chain Meme Hunter — V805
  *
- * V803 EVIDENCE-AUDIT COMPATIBILITY FIX:
+ * V805 LIVE V254 GATE DIAGNOSTIC + AUDIT COMPATIBILITY FIX:
  * - fixes /evidenceaudit excluding V802_1 rows while summarising only V730_1 rows;
- * - includes compatible V730_1, V802_1 and V803_1 evidence rows so the V802 exact-pool handoff can be measured correctly;
+ * - preserves compatible historical evidence rows while adding V805 live V254 gate diagnostics;
  * - adds explicit V254 attempted count to the read-only audit;
  * - diagnostic-only: no scoring, qualification, provider, request-budget or Telegram changes.
  */
@@ -99042,7 +99042,7 @@ for (
   state.productionV4EnrichmentV772 = {
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
-    version: "V803",
+    version: "V805",
     requestReserveV776: {
       ...(budget?.analysis?.productionV4ReserveV776 || {}),
       active: budget?.analysis?.productionV4ReserveV776?.active === true,
@@ -120087,7 +120087,7 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   if (!needsUsd) v254Blockers.push("USD_ENRICHMENT_NOT_NEEDED_OR_NOT_ELIGIBLE");
 
   return {
-    version: "V804_1",
+    version: "V805_1",
     diagnosticOnly: true,
     address,
     finalEvidence: {
@@ -120197,7 +120197,7 @@ function evidenceAuditSnapshotV727(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
     : [];
-  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1"]);
+  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V805_1"]);
   const detailed = rows.filter(row =>
     compatibleAuditVersionsV803.has(String(row?.evidenceCompletionAuditV727?.version || ""))
   );
@@ -120260,7 +120260,7 @@ function evidenceAuditSnapshotV727(state) {
   }
   const top = obj => Object.entries(obj).sort((a,b) => safeNumber(b[1]) - safeNumber(a[1])).slice(0,10);
   return {
-    version: "V804",
+    version: "V805",
     diagnosticOnly: true,
     retainedQualificationRows: rows.length,
     detailedV730Rows: detailed.length,
