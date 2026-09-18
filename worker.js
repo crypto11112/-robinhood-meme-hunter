@@ -233,6 +233,13 @@
 
 /**
  * Robinhood Chain Meme Hunter
+ * V814:
+ * - preserves V813 and the confirmed V4 -> V254 -> verified-USD scoring path;
+ * - adds zero-request exact-PoolId local identity reconciliation before V254 provider recovery;
+ * - never infers currencies from Swap logs or market pairs: complete verified currency0/currency1 are mandatory;
+ * - exposes the exact remaining identity failure reason when reconciliation cannot repair it;
+ * - no scoring/Telegram threshold/provider/request-cap changes.
+ *
  * V810 — DIRECT POST-RECOVERY SCORE CAPTURE (DIAGNOSTIC ONLY)
  * - captures verified-flow post-recovery scores directly inside the V212 loop;
  * - avoids V809's later candidate address re-lookup miss;
@@ -6978,7 +6985,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V813";
+const VERSION = "V814";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -74852,6 +74859,94 @@ function exactCandidatePoolIdentityFromRegistryV808(
   };
 }
 
+
+/*
+ * V814 EXACT-POOL LOCAL IDENTITY RECONCILIATION
+ *
+ * QUACK exposed a state mismatch where V254 could have an exact selected
+ * PoolId and current live Swap evidence but still stop at
+ * POOL_IDENTITY_STILL_UNVERIFIED with zero provider requests.
+ *
+ * This helper does NOT infer currencies from Swap logs or market pairs.
+ * It only searches already-verified local objects for the exact same PoolId,
+ * validates both currencies, registers that exact mapping canonically, and
+ * merges it into the watched candidate. Zero external requests.
+ */
+function reconcileExactPoolIdentityLocallyV814(
+  state,
+  watched,
+  selectedPoolId
+) {
+  const poolId = normalize(selectedPoolId);
+  const token = normalize(watched?.address);
+
+  const result = {
+    attempted:true,
+    repaired:false,
+    poolId:poolId || null,
+    source:null,
+    status:"V814_NO_VERIFIED_LOCAL_EXACT_POOL_IDENTITY"
+  };
+
+  if (
+    !/^0x[a-f0-9]{64}$/.test(String(poolId || "")) ||
+    !isAddress(token) ||
+    token === ZERO
+  ) {
+    result.status = "V814_LOCAL_RECONCILIATION_INPUT_INVALID";
+    return result;
+  }
+
+  const candidates = [];
+
+  const push = (row, source) => {
+    if (!row || normalize(row?.poolId) !== poolId) return;
+    const currency0 = normalize(row?.currency0);
+    const currency1 = normalize(row?.currency1);
+    if (!isAddress(currency0) || !isAddress(currency1)) return;
+    if (currency0 !== token && currency1 !== token) return;
+    candidates.push({
+      poolId,
+      currency0,
+      currency1,
+      blockNumber:row?.blockNumber || null,
+      transactionHash:row?.transactionHash || null,
+      source
+    });
+  };
+
+  push(state?.poolRegistry?.[poolId], "POOL_REGISTRY_V814");
+
+  for (const row of (Array.isArray(watched?.pools) ? watched.pools : [])) {
+    push(row, "WATCHED_POOL_V814");
+  }
+
+  for (const row of Object.values(state?.unknownPools || {})) {
+    push(row, "UNKNOWN_POOL_STATE_V814");
+  }
+
+  if (!candidates.length) return result;
+
+  const exact = candidates[0];
+  const registered = registerPoolMapping(state, exact);
+  v254MergeResolvedPoolIntoWatch(watched, exact);
+
+  const verified = exactCandidatePoolIdentityV257(watched, poolId);
+  if (verified?.verified !== true) {
+    result.status = verified?.status || "V814_LOCAL_RECONCILIATION_VALIDATION_FAILED";
+    result.source = exact.source;
+    return result;
+  }
+
+  result.repaired = true;
+  result.source = exact.source;
+  result.status = "V814_LOCAL_EXACT_POOL_IDENTITY_RECONCILED";
+  result.registryRegistered = registered?.registered === true;
+  result.identity = verified;
+  return result;
+}
+
+
 function persistVerifiedUsdTradesV254(
   state,
   candidateAddress,
@@ -83350,6 +83445,35 @@ async function verifiedUsdCompletionPassV254(
     }
   }
 
+  /*
+   * V814: before any provider identity recovery, reconcile the exact selected
+   * PoolId from already-verified local state only. This cannot infer a pool
+   * identity from Swap activity; complete currency0/currency1 are mandatory.
+   */
+  if (identity?.verified !== true) {
+    const localReconciliationV814 =
+      reconcileExactPoolIdentityLocallyV814(
+        state,
+        pools.watched,
+        poolId
+      );
+
+    output.localIdentityReconciliationV814 = {
+      attempted:localReconciliationV814?.attempted === true,
+      repaired:localReconciliationV814?.repaired === true,
+      status:localReconciliationV814?.status || null,
+      source:localReconciliationV814?.source || null,
+      poolId:localReconciliationV814?.poolId || poolId || null
+    };
+
+    if (
+      localReconciliationV814?.repaired === true &&
+      localReconciliationV814?.identity?.verified === true
+    ) {
+      identity = localReconciliationV814.identity;
+    }
+  }
+
   if (
     identity?.verified !==
       true
@@ -83522,7 +83646,13 @@ async function verifiedUsdCompletionPassV254(
       ...output,
       finalFlow,
       status:
-        "POOL_IDENTITY_STILL_UNVERIFIED"
+        "POOL_IDENTITY_STILL_UNVERIFIED",
+      identityStatusV814:
+        identity?.status || null,
+      canonicalRegistryStatusV814:
+        output?.canonicalRegistryIdentityV808?.status || null,
+      localReconciliationStatusV814:
+        output?.localIdentityReconciliationV814?.status || null
     };
   }
 
@@ -99560,7 +99690,7 @@ for (
   state.productionV4EnrichmentV772 = {
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
-    version: "V813",
+    version: "V814",
     selectionModeV813: productionV4SelectionModeV813,
     requestReserveV776: {
       ...(budget?.analysis?.productionV4ReserveV776 || {}),
@@ -120786,7 +120916,7 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   if (!needsUsd) v254Blockers.push("USD_ENRICHMENT_NOT_NEEDED_OR_NOT_ELIGIBLE");
 
   return {
-    version: "V813_1",
+    version: "V814_1",
     diagnosticOnly: true,
     address,
     finalEvidence: {
@@ -120897,7 +121027,7 @@ function evidenceAuditSnapshotV727(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
     : [];
-  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V806_1", "V807_1", "V808_1", "V812_1", "V813_1"]);
+  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V806_1", "V807_1", "V808_1", "V812_1", "V814_1"]);
   const detailed = rows.filter(row =>
     compatibleAuditVersionsV803.has(String(row?.evidenceCompletionAuditV727?.version || ""))
   );
@@ -121021,7 +121151,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "🧪 <b>Evidence Completion Regression Audit — V813</b>",
+    "🧪 <b>Evidence Completion Regression Audit — V814</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
     `Compatible detailed rows: <b>${fmt(total)}</b>`,
