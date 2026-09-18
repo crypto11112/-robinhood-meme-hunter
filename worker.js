@@ -1,5 +1,12 @@
 /**
- * Robinhood Chain Meme Hunter — V814
+ * Robinhood Chain Meme Hunter — V815
+ *
+ * V815 RUNTIME-STAMPED DIAGNOSTICS + V814 IDENTITY RECONCILIATION:
+ * - preserves all V814 production/scoring/provider behaviour;
+ * - stamps fresh V254 and post-recovery diagnostic snapshots with runtime VERSION;
+ * - removes misleading hard-coded V813 audit headings;
+ * - surfaces V814 exact-pool identity reconciliation statuses in /evidenceaudit;
+ * - zero additional provider requests; no threshold/scoring/request-cap changes.
  *
  * V814 EXACT-POOL IDENTITY RECONCILIATION + V813 COVERAGE RESCUE:
  * - preserves the proven V811/V812 exact-USD path unchanged;
@@ -6985,7 +6992,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V814";
+const VERSION = "V815";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -101265,6 +101272,7 @@ for (
 
     const snapshotV805 = {
       recordedAt: new Date().toISOString(),
+      runtimeVersion: VERSION,
       candidatesEligible: safeNumber(verifiedUsdCompletionV254?.candidatesEligible),
       attempted: safeNumber(verifiedUsdCompletionV254?.attempted),
       recovered: safeNumber(verifiedUsdCompletionV254?.recovered),
@@ -101286,7 +101294,10 @@ for (
             liveSwapPoolCount: Array.isArray(row?.poolSelection?.liveSwapPoolIds)
               ? row.poolSelection.liveSwapPoolIds.length
               : 0,
-            selectedFrom: row?.poolSelection?.selectedFrom || null
+            selectedFrom: row?.poolSelection?.selectedFrom || null,
+            identityStatusV814: row?.identityStatusV814 || null,
+            canonicalRegistryStatusV814: row?.canonicalRegistryStatusV814 || null,
+            localReconciliationStatusV814: row?.localReconciliationStatusV814 || null
           }))
         : []
     };
@@ -101504,6 +101515,7 @@ for (
         const auditStateV810 = ensureQualificationAuditV663(state);
         auditStateV810.lastV254PostRecoveryScoreV809 = {
           recordedAt: new Date().toISOString(),
+          runtimeVersion: VERSION,
           address: normalize(candidate?.address),
           symbol: candidate?.symbol || null,
           verifiedFlow: true,
@@ -101577,6 +101589,7 @@ for (
         );
         auditStateV809.lastV254PostRecoveryScoreV809 = {
           recordedAt: new Date().toISOString(),
+          runtimeVersion: VERSION,
           address: recoveredAddressV809,
           symbol: recoveredCandidateV809?.symbol || recoveredRowV809?.symbol || null,
           verifiedFlow: verifiedFlowV809?.verified === true,
@@ -121151,7 +121164,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "🧪 <b>Evidence Completion Regression Audit — V814</b>",
+    "🧪 <b>Evidence Completion Regression Audit — V815</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
     `Compatible detailed rows: <b>${fmt(total)}</b>`,
@@ -121161,7 +121174,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const liveV254 = d?.lastV254RelevantStatusV805 || d?.lastV254LiveStatusV804 || null;
   if (liveV254) {
     lines.push(
-      "🎯 <b>Last V4-active / V254-relevant status — V813</b>",
+      `🎯 <b>Last V4-active / V254-relevant status — ${escapeHtml(liveV254.runtimeVersion || "PRE_V815_UNSTAMPED")}</b>`,
       `Recorded: <code>${escapeHtml(liveV254.recordedAt || "UNVERIFIED")}</code>`,
       `Eligible / attempted / recovered: <b>${fmt(liveV254.candidatesEligible)}</b> / <b>${fmt(liveV254.attempted)}</b> / <b>${fmt(liveV254.recovered)}</b>`
     );
@@ -121178,13 +121191,22 @@ function evidenceAuditTelegramMessageV727(state) {
         `• ${escapeHtml(row.symbol || row.address || "UNKNOWN")}: <b>${escapeHtml(row.status || "UNVERIFIED")}</b>`,
         `  Pool: <code>${escapeHtml(row.poolId || "NONE")}</code> · candidate pools ${fmt(row.candidatePoolCount)} · live pools ${fmt(row.liveSwapPoolCount)} · requests ${fmt(row.externalRequestsUsed)} · recovered ${row.verifiedUsdRecovered === true ? "YES" : "NO"}`
       );
+      if (
+        row.identityStatusV814 ||
+        row.canonicalRegistryStatusV814 ||
+        row.localReconciliationStatusV814
+      ) {
+        lines.push(
+          `  V814 identity — final:${escapeHtml(row.identityStatusV814 || "UNVERIFIED")} · registry:${escapeHtml(row.canonicalRegistryStatusV814 || "UNVERIFIED")} · local:${escapeHtml(row.localReconciliationStatusV814 || "UNVERIFIED")}`
+        );
+      }
     }
     lines.push("");
   }
   const postRecoveryV809 = d?.lastV254PostRecoveryScoreV809 || null;
   if (postRecoveryV809) {
     lines.push(
-      "📈 <b>Post-recovery authoritative scoring — V813</b>",
+      `📈 <b>Post-recovery authoritative scoring — ${escapeHtml(postRecoveryV809.runtimeVersion || "PRE_V815_UNSTAMPED")}</b>`,
       `Recorded: <code>${escapeHtml(postRecoveryV809.recordedAt || "UNVERIFIED")}</code>`,
       `Candidate: <code>${escapeHtml(postRecoveryV809.address || "UNVERIFIED")}</code>`,
       `Verified flow: <b>${postRecoveryV809.verifiedFlow ? "YES" : "NO"}</b> · records <b>${fmt(postRecoveryV809.verifiedRecordCount)}</b> · pools <b>${fmt(postRecoveryV809.verifiedPoolCount)}</b>`,
@@ -121226,7 +121248,7 @@ function evidenceAuditTelegramMessageV727(state) {
   const noSwapV812 = d?.noBotObservedSwapsV812 || {};
   lines.push(
     "",
-    "🔬 <b>NO_BOT_OBSERVED_SWAPS coverage diagnostic — V813</b>",
+    `🔬 <b>NO_BOT_OBSERVED_SWAPS coverage diagnostic — audit runtime ${escapeHtml(VERSION)}</b>`,
     `Forward-only classified rows: <b>${fmt(noSwapV812.sampledRows)}</b>`,
     `Known exact/canonical pool but no observed swap: <b>${fmt(noSwapV812.knownPoolRows)}</b>`,
     `Selected into production V4 lane: <b>${fmt(noSwapV812.productionSelectedRows)}</b>`
