@@ -1,5 +1,5 @@
 /**
- * Robinhood Chain Meme Hunter — V799
+ * Robinhood Chain Meme Hunter — V800
  *
  * V799 ROTATING ACTIVE-POOL IDENTITY INDEX:
  * - replaces the production historical Initialize chase for unresolved candidates with a bounded live-pool indexing pass;
@@ -6906,7 +6906,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V799";
+const VERSION = "V800";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -41245,6 +41245,7 @@ function v4PoolSearchTelegramV791(result){
   const lines=[
     "🧬 <b>Manual V4 Pool Search — V798</b>","",
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
+    `Full token: <code>${escapeHtml(String(r?.tokenAddress || "NONE"))}</code>`,
     `Token source: <b>${escapeHtml(String(r?.tokenSource||"NONE"))}</b>`,
     `Launch anchor: <b>${escapeHtml(String(r?.launchBlock??"NONE"))}</b> · ${escapeHtml(String(r?.launchAnchorSource||"NONE"))}`,
     `RPC: <b>${escapeHtml(String(r?.rpcProvider||"NONE"))}</b> · pinned head <b>${escapeHtml(String(r?.head??"NONE"))}</b>`,
@@ -98949,7 +98950,7 @@ for (
   state.productionV4EnrichmentV772 = {
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
-    version: "V780",
+    version: "V800",
     requestReserveV776: {
       ...(budget?.analysis?.productionV4ReserveV776 || {}),
       active: budget?.analysis?.productionV4ReserveV776?.active === true,
@@ -156555,7 +156556,7 @@ function productionV4StatusTelegramV772(result) {
   };
   const idx=r?.activePoolIndexV799 || r?.poolSelectionV780?.activePoolIndexV799 || {};
   return [
-    "🧬 <b>Production V4 / Uniswap Bridge — V799</b>",
+    "🧬 <b>Production V4 / Uniswap Bridge — V800</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Token: <code>${escapeHtml(short(r?.tokenAddress))}</code>`,
@@ -156575,12 +156576,15 @@ function productionV4StatusTelegramV772(result) {
     `Index error: <code>${escapeHtml(String(idx?.error || "NONE"))}</code>`,
     "",
     `Matching pools / swaps: <b>${Array.isArray(r?.matchingPoolIds) ? r.matchingPoolIds.length : 0} / ${safeNumber(r?.matchingSwapRows)}</b>`,
+    ...(Array.isArray(r?.matchingPoolIds) && r.matchingPoolIds.length
+      ? ["🎯 <b>Exact matched PoolId(s)</b>", ...r.matchingPoolIds.slice(0,6).map((pid,i)=>`${i+1}. <code>${escapeHtml(String(pid))}</code>`)]
+      : ["🎯 Exact matched PoolId(s): <b>NONE</b>"]),
     `Extra production requests used: <b>${safeNumber(r?.externalRequestsUsed)}</b>`,
     `Protected slots remaining / consumed: <b>${safeNumber(r?.requestReserveV776?.handoffRemainingV777 ?? r?.requestReserveV776?.reservedRequests)} / ${safeNumber(r?.requestReserveV776?.consumedProtectedRequests)}</b>`,
     `Lower-priority requests blocked: <b>${safeNumber(r?.requestReserveV776?.blockedRequests)}</b>`,
     `Momentum / Opportunity / Confidence after: <b>${safeNumber(r?.momentumAfter)} / ${safeNumber(r?.opportunityAfter)} / ${safeNumber(r?.confidenceAfter)}</b>`,
     "",
-    "<i>V799 progressively indexes exact identities for currently-active V4 pools using the existing three-request production envelope. No Telegram thresholds or USD inference rules are changed.</i>"
+    "<i>V800 preserves V799 production behavior and only exposes the full token address plus exact matched PoolId(s) in /v4prodstatus. No Telegram thresholds, scoring, request limits or USD inference rules are changed.</i>"
   ].join("\n");
 }
 
