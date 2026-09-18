@@ -1,4 +1,13 @@
 /**
+ * Robinhood Chain Meme Hunter — V803
+ *
+ * V803 EVIDENCE-AUDIT COMPATIBILITY FIX:
+ * - fixes /evidenceaudit excluding V802_1 rows while summarising only V730_1 rows;
+ * - includes compatible V730_1, V802_1 and V803_1 evidence rows so the V802 exact-pool handoff can be measured correctly;
+ * - adds explicit V254 attempted count to the read-only audit;
+ * - diagnostic-only: no scoring, qualification, provider, request-budget or Telegram changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V802
  *
  * V802 PRODUCTION V4 -> V254 EXACT-POOL HANDOFF FIX:
@@ -6926,7 +6935,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V802";
+const VERSION = "V803";
 
 /*
  * V671 — scheduled relay POST routing fix.
@@ -99029,7 +99038,7 @@ for (
   state.productionV4EnrichmentV772 = {
     ...(productionV4EnrichmentV772 || {}),
     recordedAt: Date.now(),
-    version: "V802",
+    version: "V803",
     requestReserveV776: {
       ...(budget?.analysis?.productionV4ReserveV776 || {}),
       active: budget?.analysis?.productionV4ReserveV776?.active === true,
@@ -119989,7 +119998,7 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   if (!needsUsd) v254Blockers.push("USD_ENRICHMENT_NOT_NEEDED_OR_NOT_ELIGIBLE");
 
   return {
-    version: "V802_1",
+    version: "V803_1",
     diagnosticOnly: true,
     address,
     finalEvidence: {
@@ -120099,14 +120108,17 @@ function evidenceAuditSnapshotV727(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
     : [];
-  const detailed = rows.filter(row => row?.evidenceCompletionAuditV727?.version === "V730_1");
+  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1"]);
+  const detailed = rows.filter(row =>
+    compatibleAuditVersionsV803.has(String(row?.evidenceCompletionAuditV727?.version || ""))
+  );
   const c = {
     total: detailed.length,
     launchMissing: 0, momentumMissing: 0, marketMissing: 0, qualityMissing: 0,
     whaleMissing: 0, usdMissing: 0, poolIdentityMissing: 0, likelyGateStarvation: 0,
     v175Eligible: 0, v175Selected: 0, v175Attempted: 0, v175Verified: 0,
     v151Eligible: 0, v151Selected: 0, v151Attempted: 0, v151Verified: 0,
-    v254Eligible: 0, v254Selected: 0, v254Recovered: 0,
+    v254Eligible: 0, v254Selected: 0, v254Attempted: 0, v254Recovered: 0,
     v258Needed: 0, v258Selected: 0, v258Attempted: 0, v258Recovered: 0
   };
   const blockerCounts = {};
@@ -120159,7 +120171,7 @@ function evidenceAuditSnapshotV727(state) {
   }
   const top = obj => Object.entries(obj).sort((a,b) => safeNumber(b[1]) - safeNumber(a[1])).slice(0,10);
   return {
-    version: "V730",
+    version: "V803",
     diagnosticOnly: true,
     retainedQualificationRows: rows.length,
     detailedV730Rows: detailed.length,
@@ -120190,15 +120202,15 @@ function evidenceAuditTelegramMessageV727(state) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const pct = n => total > 0 ? `${(100 * safeNumber(n) / total).toFixed(1)}%` : "BUILDING";
   const lines = [
-    "🧪 <b>Evidence Completion Regression Audit — V730</b>",
+    "🧪 <b>Evidence Completion Regression Audit — V803</b>",
     "",
     `Qualification rows retained: <b>${fmt(d.retainedQualificationRows)}</b>`,
-    `V730 detailed rows: <b>${fmt(total)}</b>`,
-    `Legacy rows without V730 detail: <b>${fmt(d.legacyRowsWithoutV730Detail)}</b>`,
+    `Compatible detailed rows: <b>${fmt(total)}</b>`,
+    `Rows without compatible detail: <b>${fmt(d.legacyRowsWithoutV730Detail)}</b>`,
     ""
   ];
   if (!total) {
-    lines.push("⏳ Forward-only V730 diagnostic is building. Older V727/V728/V729 rows are intentionally excluded from this post-fix sample.");
+    lines.push("⏳ Forward-only evidence diagnostic is building. Only compatible detailed audit rows are included.");
     return lines.join("\n");
   }
   lines.push(
@@ -120216,7 +120228,7 @@ function evidenceAuditTelegramMessageV727(state) {
     "💵 <b>Directional completion lanes</b>",
     `V175 early lane: eligible <b>${fmt(c.v175Eligible)}</b> · selected <b>${fmt(c.v175Selected)}</b> · attempted <b>${fmt(c.v175Attempted)}</b> · verified <b>${fmt(c.v175Verified)}</b>`,
     `V151 prequal lane: eligible <b>${fmt(c.v151Eligible)}</b> · selected <b>${fmt(c.v151Selected)}</b> · attempted <b>${fmt(c.v151Attempted)}</b> · verified <b>${fmt(c.v151Verified)}</b>`,
-    `V254 exact-USD lane: eligible <b>${fmt(c.v254Eligible)}</b> · selected <b>${fmt(c.v254Selected)}</b> · recovered <b>${fmt(c.v254Recovered)}</b>`,
+    `V254 exact-USD lane: eligible <b>${fmt(c.v254Eligible)}</b> · selected <b>${fmt(c.v254Selected)}</b> · attempted <b>${fmt(c.v254Attempted)}</b> · recovered <b>${fmt(c.v254Recovered)}</b>`,
     "",
     "⏱ <b>Launch-age completion V258</b>",
     `Needed <b>${fmt(c.v258Needed)}</b> · selected <b>${fmt(c.v258Selected)}</b> · attempted <b>${fmt(c.v258Attempted)}</b> · recovered <b>${fmt(c.v258Recovered)}</b>`
