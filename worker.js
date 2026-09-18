@@ -7000,7 +7000,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V818";
+const VERSION = "V819";
 /*
  * V818 PRODUCTION V4 FAIR-LANE ROUTING
  * - fixes V817-proven NORMAL_V772 starvation of eligible zero-swap rescue candidates;
@@ -99666,9 +99666,33 @@ for (
    * decision.  This preserves ONE target and the same maximum THREE V4 requests
    * per scan; it only changes which already-eligible candidate receives them.
    */
+  /*
+   * V819 DISTINCT-CANDIDATE V4 FAIRNESS:
+   * - Builds directly forward from confirmed V818.
+   * - Fixes the live V818 diagnostic case where the normal V772 target and
+   *   zero-swap rescue target could be the same token.
+   * - A rescue candidate now competes for fairness only when its normalized
+   *   token address is different from the normal V772 target.
+   * - If the highest-ranked rescue is the normal token, the next highest-ranked
+   *   distinct eligible rescue can take the rescue slot.
+   * - Still exactly one production V4 target per scan and the same maximum
+   *   three production-V4 analysis requests.
+   * - Preserves the global 42-request ceiling, ERC20/risk gates, scoring,
+   *   Telegram thresholds and the proven V4 -> V254 -> verified-USD path.
+   */
+
+  const productionV4NormalAddressV819 =
+    normalize(productionV4NormalTargetV813?.address) || null;
+
   const productionV4CoverageRescueCandidatesV816 =
     candidates
-      .filter(candidate => v813CoverageRescueEligibleCandidate(candidate, state))
+      .filter(candidate =>
+        v813CoverageRescueEligibleCandidate(candidate, state) &&
+        (
+          !productionV4NormalAddressV819 ||
+          normalize(candidate?.address) !== productionV4NormalAddressV819
+        )
+      )
       .map((candidate, index) => {
         const marketKnown = candidate?.market?.verified === true ? 1 : 0;
         const opportunity = safeNumber(candidate?.opportunity?.score);
@@ -99696,6 +99720,7 @@ for (
     productionV4CoverageRescueCandidatesV816[0]?.candidate || null;
 
   const previousProductionV4RoutingV818 =
+    state?.productionV4RoutingDiagnosticV819 ||
     state?.productionV4RoutingDiagnosticV818 ||
     state?.productionV4RoutingDiagnosticV817 ||
     null;
@@ -99710,7 +99735,8 @@ for (
     productionV4CollisionV818 &&
     (
       previousSelectionModeV818 === "NORMAL_V772" ||
-      previousSelectionModeV818 === "NORMAL_V772_COLLISION_V818"
+      previousSelectionModeV818 === "NORMAL_V772_COLLISION_V818" ||
+      previousSelectionModeV818 === "NORMAL_V772_COLLISION_V819"
     );
 
   const productionV4TargetV772 =
@@ -99720,10 +99746,10 @@ for (
 
   const productionV4SelectionModeV813 =
     rescueOwnsCollisionV818
-      ? "ZERO_SWAP_COVERAGE_RESCUE_FAIR_V818"
+      ? "ZERO_SWAP_COVERAGE_RESCUE_FAIR_V819"
       : (
           productionV4NormalTargetV813
-            ? (productionV4CollisionV818 ? "NORMAL_V772_COLLISION_V818" : "NORMAL_V772")
+            ? (productionV4CollisionV818 ? "NORMAL_V772_COLLISION_V819" : "NORMAL_V772")
             : (productionV4CoverageRescueTargetV813 ? "ZERO_SWAP_COVERAGE_RESCUE_RANKED_V816" : "NONE")
         );
 
@@ -99734,8 +99760,12 @@ for (
    * scoring/qualification/request-budget changes.
    */
   const productionV4RoutingDiagnosticV818 = (() => {
-    const rescueEligibleAll = candidates.filter(candidate =>
+    const rescueEligibleRawV819 = candidates.filter(candidate =>
       v813CoverageRescueEligibleCandidate(candidate, state)
+    );
+    const rescueEligibleAll = rescueEligibleRawV819.filter(candidate =>
+      !productionV4NormalAddressV819 ||
+      normalize(candidate?.address) !== productionV4NormalAddressV819
     );
     const gateCounts = {
       totalCandidates: candidates.length,
@@ -99795,6 +99825,9 @@ for (
       collisionPresentV818: productionV4CollisionV818,
       rescueOwnsCollisionV818,
       previousSelectionModeV818: previousSelectionModeV818 || null,
+      rescueEligibleRawCountV819: rescueEligibleRawV819.length,
+      sameAddressRescueExcludedV819:
+        Math.max(0, rescueEligibleRawV819.length - rescueEligibleAll.length),
       rescueEligibleCountEvenIfNormalSelected: rescueEligibleAll.length,
       rankedCandidateCount: productionV4CoverageRescueCandidatesV816.length,
       gateCounts,
@@ -99812,6 +99845,7 @@ for (
       qualificationChanged: false
     };
   })();
+  state.productionV4RoutingDiagnosticV819 = productionV4RoutingDiagnosticV818;
   state.productionV4RoutingDiagnosticV818 = productionV4RoutingDiagnosticV818;
   // Compatibility alias for existing audit plumbing.
   state.productionV4RoutingDiagnosticV817 = productionV4RoutingDiagnosticV818;
