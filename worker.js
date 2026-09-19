@@ -1,4 +1,19 @@
 /**
+ * Robinhood Chain Meme Hunter — V861
+ *
+ * V861 MANUAL COMPLETE-HISTORY BUDGET REUSE:
+ * - builds directly from V860;
+ * - removes one redundant manual request only: when /analyse is immediately
+ *   running strict V458/V466 complete exact-pool history, V289 still resolves
+ *   the verified ETH/USDG reference but SKIPS its separate recent-history fetch;
+ * - V458/V466 then becomes the single source of Blockscout exact-pool history;
+ * - frees one request for V466 range subdivision without raising the 24-request
+ *   manual ceiling or weakening the V834 contract-creation reserve;
+ * - V289's existing behaviour is unchanged for any caller not explicitly using
+ *   the V861 complete-history mode;
+ * - automatic V4/scoring/qualification/Telegram behaviour untouched.
+ */
+/**
  * Robinhood Chain Meme Hunter — V860
  *
  * V860 VERIFIED V4 INITIALIZE-BLOCK COMPLETENESS FIX:
@@ -7412,7 +7427,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V860";
+const VERSION = "V861";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -119315,7 +119330,8 @@ async function manualWethUsdGReferenceV289(
 }
 
 async function manualVerifiedUsdRecoveryV289(
-  env, budget, state, candidate, manualLiveV4ResultV283
+  env, budget, state, candidate, manualLiveV4ResultV283,
+  skipRecentHistoryForCompleteV861 = false
 ) {
   const base = {
     attempted: false, verified: false, status: "NOT_ATTEMPTED",
@@ -119410,9 +119426,21 @@ async function manualVerifiedUsdRecoveryV289(
       ? Number(wethReferenceV289.priceUsdGPerWeth)
       : null;
 
-  const history = await blockscoutExactPoolUsdCompletionV254(
-    candidate, budget, state, latestBlock, wethUsdGReferenceV289, env
-  );
+  const history =
+    skipRecentHistoryForCompleteV861 === true
+      ? {
+          attempted:false,
+          verified:false,
+          status:"SKIPPED_REDUNDANT_RECENT_HISTORY_FOR_V466_V861",
+          providerPathV263:null,
+          provider:null,
+          returnedLogs:0,
+          rows:[]
+        }
+      : await blockscoutExactPoolUsdCompletionV254(
+          candidate, budget, state, latestBlock, wethUsdGReferenceV289, env
+        );
+
   const requestsUsed = Math.max(0, safeNumber(budget?.totalUsed) - before);
 
   base.auditV853.budgetAfterHistory = {
@@ -119472,7 +119500,12 @@ async function manualVerifiedUsdRecoveryV289(
     verified,
     status: verified
       ? "VERIFIED_FROM_EXACT_POOL_BLOCKSCOUT_HISTORY_V289"
-      : (history?.status || attached?.status || "VERIFIED_USD_NOT_RECOVERED_V289"),
+      : (
+          skipRecentHistoryForCompleteV861 === true &&
+          wethReferenceV289?.verified === true
+            ? "VERIFIED_REFERENCE_READY_FOR_COMPLETE_HISTORY_V861"
+            : (history?.status || attached?.status || "VERIFIED_USD_NOT_RECOVERED_V289")
+        ),
     requestsUsed,
     storedFlowStatus: attached?.status || stored?.status || null,
     historyStatus: history?.status || null,
@@ -120660,12 +120693,15 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     const bh=v289aV853?.budgetAfterHistory||{};
     const refuse=v289aV853?.latestBudgetRefusal||null;
     evidence.push(
-      `💵 V289 exact-USD recovery audit V860: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
+      `💵 V289 exact-USD recovery audit V861: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
       `• Active PoolId into V289: <code>${escapeHtml(v289aV853.poolId || "UNVERIFIED")}</code> | live selected <code>${escapeHtml(v289aV853.liveSelectedPoolId || "UNVERIFIED")}</code> | live swaps <b>${safeNumber(v289aV853.liveSwaps)}</b>`,
       `• Quote into V289: <code>${escapeHtml(v289aV853.quoteTokenAddress || "UNVERIFIED")}</code>`,
       `• Budget before V289: <b>${safeNumber(bb.totalUsed)}/${safeNumber(bb.totalLimit)}</b> | after reference <b>${safeNumber(br.totalUsed)}/${safeNumber(br.totalLimit)}</b> | after history <b>${safeNumber(bh.totalUsed)}/${safeNumber(bh.totalLimit)}</b>`,
       `• WETH/USDG reference: <b>${v289aV853.referenceVerified===true?"VERIFIED":"UNVERIFIED"}</b> | status <b>${escapeHtml(v289aV853.referenceStatus || "UNVERIFIED")}</b> | price <b>${Number.isFinite(Number(v289aV853.referencePriceUsdGPerWeth)) ? "$"+telegramPlainNumberV271(v289aV853.referencePriceUsdGPerWeth,2) : "UNVERIFIED"}</b>`,
       `• Exact-pool history: <b>${escapeHtml(v289aV853.historyStatus || "UNVERIFIED")}</b> | provider <b>${escapeHtml(v289aV853.historyProvider || v289aV853.provider || "UNVERIFIED")}</b> | rows <b>${safeNumber(v289aV853.historyReturnedLogs || v289aV853.rows)}</b>`,
+      v289aV853.historyStatus === "SKIPPED_REDUNDANT_RECENT_HISTORY_FOR_V466_V861"
+        ? `• V861 budget reuse: <b>RECENT HISTORY SKIPPED</b> — V466 owns exact-pool history; one request preserved`
+        : null,
       `• Exact USD: <b>${safeNumber(v289aV853.exactUsdTrades)}</b> | inserted <b>${safeNumber(v289aV853.inserted)}</b> | deduplicated <b>${safeNumber(v289aV853.deduplicated)}</b>`,
       `• V254 persistence rejects: timestamp <b>${safeNumber(v289aV853.persistenceTimestampRejected)}</b> | decoder <b>${safeNumber(v289aV853.persistenceDecoderNull)}</b> | candidate mismatch <b>${safeNumber(v289aV853.persistenceCandidateMismatch)}</b> | exact-USD reject <b>${safeNumber(v289aV853.persistenceExactUsdRejected)}</b>`,
       Array.isArray(v289aV853.historyTimestampSamples) && v289aV853.historyTimestampSamples.length
@@ -120680,7 +120716,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     candidate?.manualCompleteExactPoolV4V859 || null;
   if (completeV4V859) {
     evidence.push(
-      `🔒 Manual complete exact-V4-pool coverage V860: <b>${escapeHtml(completeV4V859.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(completeV4V859.requestsUsed)}</b>`,
+      `🔒 Manual complete exact-V4-pool coverage V861: <b>${escapeHtml(completeV4V859.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(completeV4V859.requestsUsed)}</b>`,
       `• PoolId: <code>${escapeHtml(completeV4V859.poolId || "UNVERIFIED")}</code> | provider <b>${escapeHtml(completeV4V859.provider || "UNVERIFIED")}</b>`,
       `• Range: <b>${escapeHtml(String(completeV4V859.fromBlock ?? "UNVERIFIED"))} → ${escapeHtml(String(completeV4V859.toBlock ?? "UNVERIFIED"))}</b> | cutoff block <b>${escapeHtml(String(completeV4V859.cutoffBlock ?? "UNVERIFIED"))}</b>`,
       `• V860 trusted pool start: <b>${escapeHtml(String(completeV4V859.trustedPoolStartBlockV860 ?? "UNVERIFIED"))}</b> | source <b>${escapeHtml(completeV4V859.trustedPoolStartSourceV860 || "NONE")}</b> | timestamp lookup sent <b>${completeV4V859.timestampLookupRequestSent === true ? "YES" : "NO"}</b>`,
@@ -121523,7 +121559,8 @@ async function telegramFreshAnalyseV276(
       budget,
       isolatedState,
       candidate,
-      manualLiveV4ResultV283
+      manualLiveV4ResultV283,
+      true
     );
 
   candidate.manualV289AuditV853 = {
@@ -121601,7 +121638,17 @@ async function telegramFreshAnalyseV276(
         );
 
   if (
-    manualVerifiedUsdRecoveryResultV289?.verified === true &&
+    (
+      manualVerifiedUsdRecoveryResultV289?.verified === true ||
+      (
+        manualVerifiedUsdRecoveryResultV289
+          ?.wethReferenceV289
+          ?.verified === true &&
+        manualVerifiedUsdRecoveryResultV289
+          ?.status ===
+          "VERIFIED_REFERENCE_READY_FOR_COMPLETE_HISTORY_V861"
+      )
+    ) &&
     candidate?.validERC20 === true &&
     candidate?.onChainPoolIdentityV153?.verified === true &&
     Number.isFinite(latestBlockV859) &&
