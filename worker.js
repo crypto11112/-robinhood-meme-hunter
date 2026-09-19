@@ -1,4 +1,15 @@
 /**
+ * Robinhood Chain Meme Hunter — V834
+ *
+ * V834 MANUAL LAUNCH-AGE PROOF RESERVE:
+ * - preserves V833 verified V3 directional USD repair and all confirmed-working V3/V4 behaviour unchanged;
+ * - /analyse protects two of its existing 24 analysis-request slots for the existing V619 exact contract-creation proof sequence;
+ * - only V619_MANUAL_GETCONTRACTCREATION and V619_MANUAL_CREATION_TX_DETAILS may consume the protected slots;
+ * - prevents a successful exact creation-tx match from losing the timestamp solely because the second V619 request was crowded out by earlier manual-analysis work;
+ * - does not raise the 24-request manual limit or the scanner 42-request hard ceiling;
+ * - no scoring, qualification, market-provider, V3 collector, V4, USD-maths or Telegram-threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V833
  *
  * V833 VERIFIED V3 READ-TIME USD REPAIR:
@@ -7099,7 +7110,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V833";
+const VERSION = "V834";
 /*
  * V821 PERSISTENT FAIR RESCUE SCHEDULING
  * - Builds forward from the confirmed V819 production V4 fairness path and
@@ -17183,12 +17194,55 @@ function consumeAuthorisedV254FirstRequestV807(budget, phase, type, amount = 1) 
   return true;
 }
 
+function manualCreationProofReserveDecisionV834(budget, phase, type, amount = 1) {
+  const reserve = budget?.analysis?.manualCreationProofReserveV834;
+  if (phase !== "analysis" || reserve?.active !== true) return null;
+
+  const protectedType =
+    type === "V619_MANUAL_GETCONTRACTCREATION" ||
+    type === "V619_MANUAL_CREATION_TX_DETAILS";
+
+  if (protectedType) return null;
+
+  const needed = Math.max(1, safeNumber(amount));
+  const reserved = Math.max(0, safeNumber(reserve?.reservedRequests));
+  if (reserved <= 0) return null;
+
+  const analysisBlocked =
+    safeNumber(budget?.analysis?.used) + needed >
+    Math.max(0, effectiveAnalysisLimitV416(budget) - reserved);
+  const globalBlocked =
+    safeNumber(budget?.totalUsed) + needed >
+    Math.max(0, safeNumber(budget?.totalLimit) - reserved);
+
+  if (analysisBlocked || globalBlocked) {
+    reserve.blockedRequests = safeNumber(reserve.blockedRequests) + 1;
+    reserve.lastBlockedType = String(type || "UNKNOWN");
+    reserve.lastBlockedAt = Date.now();
+    budget.skipped.push({
+      phase,
+      type,
+      amount: needed,
+      reason: "V834_MANUAL_CREATION_PROOF_RESERVE"
+    });
+    return false;
+  }
+
+  return null;
+}
+
 function consumeBudget(
   budget,
   phase,
   type,
   amount = 1
 ) {
+  const manualCreationReserveDecisionV834 =
+    manualCreationProofReserveDecisionV834(budget, phase, type, amount);
+  if (manualCreationReserveDecisionV834 !== null) {
+    return manualCreationReserveDecisionV834;
+  }
+
   const productionV4ReserveDecision =
     productionV4ReserveDecisionV776(budget, phase, type, amount);
   if (productionV4ReserveDecision !== null) {
@@ -114500,6 +114554,15 @@ function createTelegramAnalyseBudgetV276() {
   budget.notification.globalReserveActiveV174 =
     false;
 
+  /* V834: manual-only reservation inside the existing 24-request ceiling. */
+  budget.analysis.manualCreationProofReserveV834 = {
+    active: true,
+    reservedRequests: 2,
+    blockedRequests: 0,
+    lastBlockedType: null,
+    lastBlockedAt: null
+  };
+
   budget.manualAnalyseTelemetryV279 = {
     enabled: true,
     consumed: {}
@@ -119257,6 +119320,9 @@ async function manualContractCreationProofV619({env,state,budget,tokenAddress}){
   if(!consumeBudget(budget,"analysis","V619_MANUAL_GETCONTRACTCREATION",1)){
     out.status="MANUAL_BUDGET_UNAVAILABLE_CREATION_V619";return out;
   }
+  if (budget?.analysis?.manualCreationProofReserveV834) {
+    budget.analysis.manualCreationProofReserveV834.reservedRequests = 1;
+  }
   out.attempted=true; out.requestsUsed++;
   recordBlockscoutProUsageV611(state,"V619_MANUAL_GETCONTRACTCREATION",BLOCKSCOUT_PRO_STANDARD_CREDITS_V611);
   let r1;
@@ -119276,6 +119342,10 @@ async function manualContractCreationProofV619({env,state,budget,tokenAddress}){
   if(!txUrl){out.status="CREATION_TX_URL_UNAVAILABLE_V619";return out;}
   if(!consumeBudget(budget,"analysis","V619_MANUAL_CREATION_TX_DETAILS",1)){
     out.status="CREATION_VERIFIED_TIMESTAMP_BUDGET_UNAVAILABLE_V619";return out;
+  }
+  if (budget?.analysis?.manualCreationProofReserveV834) {
+    budget.analysis.manualCreationProofReserveV834.reservedRequests = 0;
+    budget.analysis.manualCreationProofReserveV834.active = false;
   }
   out.requestsUsed++;
   recordBlockscoutProUsageV611(state,"V619_MANUAL_CREATION_TX_DETAILS",BLOCKSCOUT_PRO_STANDARD_CREDITS_V611);
@@ -120034,6 +120104,12 @@ async function telegramFreshAnalyseV276(
     }
   }
   candidate.manualContractCreationV619=manualContractCreationV619;
+
+  /* V834: once the V619 decision is complete, release any unused manual reserve. */
+  if (budget?.analysis?.manualCreationProofReserveV834) {
+    budget.analysis.manualCreationProofReserveV834.reservedRequests = 0;
+    budget.analysis.manualCreationProofReserveV834.active = false;
+  }
 
   /*
    * V828 diagnostic-only manual market trace.
