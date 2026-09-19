@@ -1,5 +1,17 @@
 /**
- * Robinhood Chain Meme Hunter — V822
+ * Robinhood Chain Meme Hunter — V823
+ *
+ * V823 EVIDENCE HANDOFF TRACE + FINAL-ALERT DIAGNOSTICS:
+ * - builds directly from deployed V822; no score/qualification/provider/request-cap changes;
+ * - stamps forward-only V823 evidence-audit rows with runtime version so historical V821/V822 rows no longer mask current behaviour;
+ * - captures the evidence state immediately before Telegram rendering, using the exact candidate object that will be sent;
+ * - adds final-alert reasons for unresolved directional USD, exact-pool identity, launch age and rolling exact-pool USD;
+ * - exposes V822 FLOW vs FOUNDATION reserve state separately in /evidenceaudit;
+ * - adds a V823+ cohort section to /evidenceaudit showing selected -> attempted -> verified/recovered -> final-render completion;
+ * - diagnostic/handoff visibility only: zero new provider requests, no inferred USD, no threshold changes, hard request ceiling remains 42.
+ */
+/**
+ * Robinhood Chain Meme Hunter — V823
  *
  * V822 EVIDENCE-COMPLETION PRIORITY / BUDGET ISOLATION:
  * - builds directly forward from V821 and preserves all confirmed V821 scanner, V4, V254, scoring, qualification and Telegram behaviour;
@@ -7013,7 +7025,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V822";
+const VERSION = "V823";
 /*
  * V821 PERSISTENT FAIR RESCUE SCHEDULING
  * - Builds forward from the confirmed V819 production V4 fairness path and
@@ -86315,6 +86327,25 @@ function telegramMessage(
     `🧠 Smart-money candidate: <b>${smartMoneyCandidate}</b>`,
     "🧠 Smart-money identity verified: <b>NO</b>",
     "",
+    candidate?.evidenceHandoffTraceV823
+      ? "🧬 <b>Evidence handoff — V823</b>"
+      : null,
+    candidate?.evidenceHandoffTraceV823
+      ? `💵 Directional USD: <b>${candidate.evidenceHandoffTraceV823.directionalUsd?.verified ? "VERIFIED" : "UNVERIFIED"}</b> · ${escapeHtml(candidate.evidenceHandoffTraceV823.directionalUsd?.reason || "UNKNOWN")}`
+      : null,
+    candidate?.evidenceHandoffTraceV823
+      ? `🛰 Exact pool: <b>${candidate.evidenceHandoffTraceV823.exactPool?.verified ? "VERIFIED" : "UNVERIFIED"}</b> · ${escapeHtml(candidate.evidenceHandoffTraceV823.exactPool?.reason || "UNKNOWN")}`
+      : null,
+    candidate?.evidenceHandoffTraceV823
+      ? `✅ Verified on-chain USD: <b>${candidate.evidenceHandoffTraceV823.verifiedOnchainUsd?.verified ? "VERIFIED" : "UNVERIFIED"}</b> · ${escapeHtml(candidate.evidenceHandoffTraceV823.verifiedOnchainUsd?.reason || "UNKNOWN")}`
+      : null,
+    candidate?.evidenceHandoffTraceV823
+      ? `⏱ Launch age: <b>${candidate.evidenceHandoffTraceV823.launchAge?.verified ? "VERIFIED" : "UNVERIFIED"}</b> · ${escapeHtml(candidate.evidenceHandoffTraceV823.launchAge?.reason || "UNKNOWN")}`
+      : null,
+    candidate?.evidenceHandoffTraceV823
+      ? `🧾 Rolling exact-pool USD: <b>${candidate.evidenceHandoffTraceV823.rollingExactPoolUsd?.verified ? "VERIFIED" : "UNVERIFIED"}</b> · ${escapeHtml(candidate.evidenceHandoffTraceV823.rollingExactPoolUsd?.reason || "UNKNOWN")}`
+      : null,
+    candidate?.evidenceHandoffTraceV823 ? "" : null,
     `📡 Bot V4 telemetry — swaps: <b>${candidate.activity.swaps}</b>`,
     `💦 Bot V4 telemetry — liquidity events: <b>${candidate.activity.liquidityEvents}</b>`,
     "",
@@ -103724,6 +103755,55 @@ for (
       selectionReason:
         selectedV564?.selectionV564?.reason || "NO_EXACT_POOL_SELECTION_V564"
     });
+  }
+
+  /* V823: freeze the evidence handoff state on the exact candidate object
+   * immediately before Telegram qualification/rendering. Diagnostic only. */
+  for (const candidate of candidates || []) {
+    const addrV823 = normalize(candidate?.address);
+    const e175V823 = earlyDirectionalTradeEnrichmentV175 || {};
+    const e151V823 = directionalTradeEnrichment || {};
+    const v254RowV823 = (Array.isArray(verifiedUsdCompletionV254?.results) ? verifiedUsdCompletionV254.results : [])
+      .find(row => normalize(row?.address) === addrV823) || null;
+    const v258RowV823 = (Array.isArray(launchAgeCompletionV258?.results) ? launchAgeCompletionV258.results : [])
+      .find(row => normalize(row?.address) === addrV823) || null;
+    const directionalVerifiedV823 = candidateDirectionalUsdVerifiedV727(candidate, state);
+    const exactPoolVerifiedV823 = candidate?.onChainPoolIdentityV153?.verified === true;
+    const launchVerifiedV823 = candidate?.verifiedLaunchAgeV223?.verified === true || candidate?.launchStage?.verified === true;
+    const rollingV823 = candidate?.telegramRollingExactPoolUsdV564 || {};
+    const rollingVerifiedV823 = safeNumber(rollingV823?.selectionV564?.verifiedWindows) > 0;
+    const directionalSelectedV823 = normalize(e175V823?.selectedAddress) === addrV823 || normalize(e151V823?.address) === addrV823;
+    const directionalAttemptedV823 = (normalize(e175V823?.selectedAddress) === addrV823 && e175V823?.attempted === true) || (normalize(e151V823?.address) === addrV823 && e151V823?.attempted === true);
+    const directionalStatusV823 = normalize(e175V823?.selectedAddress) === addrV823
+      ? (e175V823?.status || "SELECTED_NO_STATUS")
+      : normalize(e151V823?.address) === addrV823
+        ? (e151V823?.status || "SELECTED_NO_STATUS")
+        : "NOT_SELECTED_FOR_DIRECTIONAL_COMPLETION";
+    candidate.evidenceHandoffTraceV823 = {
+      runtimeVersion: VERSION,
+      capturedAt: new Date().toISOString(),
+      directionalUsd: {
+        verified: directionalVerifiedV823, selected: directionalSelectedV823, attempted: directionalAttemptedV823,
+        reason: directionalVerifiedV823 ? "VERIFIED_IN_FINAL_CANDIDATE" : directionalStatusV823
+      },
+      exactPool: {
+        verified: exactPoolVerifiedV823,
+        reason: exactPoolVerifiedV823 ? "VERIFIED_IN_FINAL_CANDIDATE" : (v254RowV823?.identityStatusV814 || v254RowV823?.status || candidate?.onChainPoolIdentityV153?.status || "NO_VERIFIED_EXACT_POOL_IDENTITY")
+      },
+      verifiedOnchainUsd: {
+        verified: v254RowV823?.verifiedUsdRecovered === true || candidate?.onChainVerifiedFlowV212?.verified === true,
+        selected: Boolean(v254RowV823), attempted: Boolean(v254RowV823),
+        reason: v254RowV823?.status || (candidate?.onChainVerifiedFlowV212?.verified === true ? "VERIFIED_IN_FINAL_CANDIDATE" : "NOT_RECOVERED_BY_V254")
+      },
+      launchAge: {
+        verified: launchVerifiedV823, selected: Boolean(v258RowV823), attempted: v258RowV823?.attempted === true,
+        reason: launchVerifiedV823 ? "VERIFIED_IN_FINAL_CANDIDATE" : (v258RowV823?.status || "NO_VERIFIED_LAUNCH_AGE")
+      },
+      rollingExactPoolUsd: {
+        verified: rollingVerifiedV823,
+        reason: rollingVerifiedV823 ? "VERIFIED_WINDOWS_AVAILABLE" : (rollingV823?.selectionV564?.reason || "NO_VERIFIED_EXACT_POOL_ROLLING_WINDOWS")
+      }
+    };
   }
 
   /* =======================================================
@@ -121417,7 +121497,9 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   if (!needsUsd) v254Blockers.push("USD_ENRICHMENT_NOT_NEEDED_OR_NOT_ELIGIBLE");
 
   return {
-    version: "V814_1",
+    version: "V823_1",
+    runtimeVersion: VERSION,
+    recordedAtV823: new Date().toISOString(),
     diagnosticOnly: true,
     address,
     finalEvidence: {
@@ -121510,7 +121592,13 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
         ),
       releaseReason:
         context?.budget?.analysis?.evidenceCompletionReserveV728
-          ?.releaseReason || null
+          ?.releaseReason || null,
+      flowReservedV822: safeNumber(context?.budget?.analysis?.evidenceCompletionReserveV728?.flowReservedRequestsV822),
+      foundationReservedV822: safeNumber(context?.budget?.analysis?.evidenceCompletionReserveV728?.foundationReservedRequestsV822),
+      flowConsumedV822: safeNumber(context?.budget?.analysis?.evidenceCompletionReserveV728?.flowConsumedV822),
+      foundationConsumedV822: safeNumber(context?.budget?.analysis?.evidenceCompletionReserveV728?.foundationConsumedV822),
+      flowReleasedUnusedV822: safeNumber(context?.budget?.analysis?.evidenceCompletionReserveV728?.flowReleasedUnusedV822),
+      flowReleaseReasonV822: context?.budget?.analysis?.evidenceCompletionReserveV728?.flowReleaseReasonV822 || null
     },
     likelyGateStarvation:
       directionalUsdVerified !== true &&
@@ -121528,7 +121616,7 @@ function evidenceAuditSnapshotV727(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
     : [];
-  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V806_1", "V807_1", "V808_1", "V812_1", "V814_1"]);
+  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V806_1", "V807_1", "V808_1", "V812_1", "V814_1", "V823_1"]);
   const detailed = rows.filter(row =>
     compatibleAuditVersionsV803.has(String(row?.evidenceCompletionAuditV727?.version || ""))
   );
@@ -121551,6 +121639,13 @@ function evidenceAuditSnapshotV727(state) {
   let noBotSwapProductionSelectedRowsV812 = 0;
   let reserveConsumedRows = 0;
   let reserveUnusedRows = 0;
+  const v823 = {
+    rows: 0, directionalSelected: 0, directionalAttempted: 0, directionalVerified: 0,
+    v254Selected: 0, v254Attempted: 0, v254Recovered: 0,
+    finalDirectionalVerified: 0, finalExactPoolVerified: 0, finalLaunchAgeVerified: 0,
+    flowReserved: 0, flowConsumed: 0, flowReleasedUnused: 0,
+    foundationReserved: 0, foundationConsumed: 0
+  };
   const bump = (obj, key) => { if (key) obj[key] = safeNumber(obj[key]) + 1; };
   for (const row of detailed) {
     const d = row.evidenceCompletionAuditV727 || {};
@@ -121563,6 +121658,24 @@ function evidenceAuditSnapshotV727(state) {
     if (f.directionalUsdVerified !== true) c.usdMissing++;
     if (f.exactPoolIdentityVerified !== true) c.poolIdentityMissing++;
     if (d.likelyGateStarvation === true) c.likelyGateStarvation++;
+    if (String(d?.runtimeVersion || "") === "V823") {
+      v823.rows++;
+      if (d?.v175?.selected === true || d?.v151?.selected === true) v823.directionalSelected++;
+      if (d?.v175?.attempted === true || d?.v151?.attempted === true) v823.directionalAttempted++;
+      if (d?.v175?.verifiedAnyWindow === true || d?.v151?.verifiedAnyWindow === true) v823.directionalVerified++;
+      if (d?.v254?.selected === true) v823.v254Selected++;
+      if (d?.v254?.attempted === true) v823.v254Attempted++;
+      if (d?.v254?.recovered === true) v823.v254Recovered++;
+      if (f?.directionalUsdVerified === true) v823.finalDirectionalVerified++;
+      if (f?.exactPoolIdentityVerified === true) v823.finalExactPoolVerified++;
+      if (f?.launchAgeVerified === true) v823.finalLaunchAgeVerified++;
+      const rv = d?.protectedCompletionSlotV730 || {};
+      v823.flowReserved += safeNumber(rv?.flowReservedV822);
+      v823.flowConsumed += safeNumber(rv?.flowConsumedV822);
+      v823.flowReleasedUnused += safeNumber(rv?.flowReleasedUnusedV822);
+      v823.foundationReserved += safeNumber(rv?.foundationReservedV822);
+      v823.foundationConsumed += safeNumber(rv?.foundationConsumedV822);
+    }
     const noSwapV812 = d?.noBotObservedSwapsV812 || null;
     if (noSwapV812?.applicable === true) {
       noBotSwapSampleRowsV812++;
@@ -121626,6 +121739,7 @@ function evidenceAuditSnapshotV727(state) {
       unusedRows: reserveUnusedRows,
       consumedTypes: top(reserveConsumedTypeCounts)
     },
+    v823Cohort: v823,
     lastV254LiveStatusV804:
       state?.qualificationAuditV663?.lastV254LiveStatusV804 || null,
     lastV254RelevantStatusV805:
@@ -121778,6 +121892,18 @@ function evidenceAuditTelegramMessageV727(state) {
     lines.push("", "📡 <b>Selected-lane outcomes</b>");
     for (const [status,count] of d.topSelectedLaneStatuses.slice(0,6)) lines.push(`• ${escapeHtml(status)}: <b>${fmt(count)}</b>`);
   }
+  const cohortV823 = d?.v823Cohort || {};
+  lines.push(
+    "",
+    "🧬 <b>V823+ evidence handoff cohort</b>",
+    `Rows: <b>${fmt(cohortV823.rows)}</b>`,
+    `Directional selected / attempted / verified: <b>${fmt(cohortV823.directionalSelected)}</b> / <b>${fmt(cohortV823.directionalAttempted)}</b> / <b>${fmt(cohortV823.directionalVerified)}</b>`,
+    `V254 selected / attempted / recovered: <b>${fmt(cohortV823.v254Selected)}</b> / <b>${fmt(cohortV823.v254Attempted)}</b> / <b>${fmt(cohortV823.v254Recovered)}</b>`,
+    `Final directional / exact-pool / launch-age verified: <b>${fmt(cohortV823.finalDirectionalVerified)}</b> / <b>${fmt(cohortV823.finalExactPoolVerified)}</b> / <b>${fmt(cohortV823.finalLaunchAgeVerified)}</b>`,
+    `FLOW reserve reserved / consumed / released-unused: <b>${fmt(cohortV823.flowReserved)}</b> / <b>${fmt(cohortV823.flowConsumed)}</b> / <b>${fmt(cohortV823.flowReleasedUnused)}</b>`,
+    `FOUNDATION reserve reserved / consumed: <b>${fmt(cohortV823.foundationReserved)}</b> / <b>${fmt(cohortV823.foundationConsumed)}</b>`
+  );
+
   const reserveV730 = d?.protectedCompletionSlotV730 || {};
   lines.push(
     "",
