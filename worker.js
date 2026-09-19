@@ -1,4 +1,19 @@
 /**
+ * Robinhood Chain Meme Hunter — V863
+ *
+ * V863 MANUAL V466 RESUMABLE KV PROGRESS:
+ * - builds directly from V862;
+ * - persists ONLY manual exact-pool completion progress in a dedicated KV key;
+ * - /analyse reloads that progress before V458/V466, so saturated range
+ *   subdivisions continue across manual runs instead of restarting from the
+ *   verified Initialize block every time;
+ * - the dedicated progress entry expires after 6 hours and is deleted as soon
+ *   as V466 reaches verified complete coverage;
+ * - no autonomous watchlist/registry/scoring state is persisted or mutated;
+ * - no request ceiling increase; V834 reserve unchanged;
+ * - automatic scanner/V4/V458/V466 behaviour unchanged.
+ */
+/**
  * Robinhood Chain Meme Hunter — V862
  *
  * V862 MANUAL TRUSTED-START PRE-SPLIT:
@@ -7444,7 +7459,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V862";
+const VERSION = "V863";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -78583,6 +78598,84 @@ function exactPoolProgressStoreV466(state) {
   return state.completeExactPoolProgressV466;
 }
 
+/*
+ * V863 manual-only persistence.
+ * This is deliberately separate from the autonomous state document so a manual
+ * completion pass cannot overwrite scanner/watchlist state.
+ */
+const MANUAL_V466_PROGRESS_KEY_PREFIX_V863 = "manual:v466:progress:";
+const MANUAL_V466_PROGRESS_TTL_SECONDS_V863 = 6 * 60 * 60;
+
+function manualV466ProgressKeyV863(token) {
+  const address = normalize(token || "");
+  return isAddress(address)
+    ? `${MANUAL_V466_PROGRESS_KEY_PREFIX_V863}${address}`
+    : null;
+}
+
+async function loadManualV466ProgressV863(env, token) {
+  const key = manualV466ProgressKeyV863(token);
+  const {kv, binding} = getKV(env);
+  const base = {
+    key,
+    binding:binding || null,
+    loaded:false,
+    status:key ? "NO_SAVED_PROGRESS_V863" : "INVALID_TOKEN_V863",
+    progress:null,
+    error:null
+  };
+  if (!key || !kv) return {...base, status:key ? "KV_UNAVAILABLE_V863" : base.status};
+  try {
+    const raw = await kv.get(key);
+    if (!raw) return base;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") {
+      return {...base, status:"SAVED_PROGRESS_INVALID_V863"};
+    }
+    return {
+      ...base,
+      loaded:true,
+      status:"SAVED_PROGRESS_LOADED_V863",
+      progress:parsed
+    };
+  } catch (error) {
+    return {...base, status:"SAVED_PROGRESS_LOAD_ERROR_V863", error:errorString(error)};
+  }
+}
+
+async function saveManualV466ProgressV863(env, token, progress, verified=false) {
+  const key = manualV466ProgressKeyV863(token);
+  const {kv, binding} = getKV(env);
+  const base = {
+    key,
+    binding:binding || null,
+    saved:false,
+    deleted:false,
+    status:key ? "NOT_SAVED_V863" : "INVALID_TOKEN_V863",
+    error:null
+  };
+  if (!key || !kv) return {...base, status:key ? "KV_UNAVAILABLE_V863" : base.status};
+
+  try {
+    if (verified === true || !progress) {
+      if (typeof kv.delete === "function") {
+        await kv.delete(key);
+        return {...base, deleted:true, status:"PROGRESS_CLEARED_V863"};
+      }
+      return {...base, status:"KV_DELETE_UNAVAILABLE_V863"};
+    }
+
+    await kv.put(
+      key,
+      JSON.stringify(progress),
+      {expirationTtl: MANUAL_V466_PROGRESS_TTL_SECONDS_V863}
+    );
+    return {...base, saved:true, status:"PROGRESS_SAVED_V863"};
+  } catch (error) {
+    return {...base, status:"PROGRESS_SAVE_ERROR_V863", error:errorString(error)};
+  }
+}
+
 function emptyExactPoolAccumulatorV466(snapshotEndMs) {
   const make = (key, label, windowMs) => ({
     key,
@@ -120756,7 +120849,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     const bh=v289aV853?.budgetAfterHistory||{};
     const refuse=v289aV853?.latestBudgetRefusal||null;
     evidence.push(
-      `💵 V289 exact-USD recovery audit V862: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
+      `💵 V289 exact-USD recovery audit V863: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
       `• Active PoolId into V289: <code>${escapeHtml(v289aV853.poolId || "UNVERIFIED")}</code> | live selected <code>${escapeHtml(v289aV853.liveSelectedPoolId || "UNVERIFIED")}</code> | live swaps <b>${safeNumber(v289aV853.liveSwaps)}</b>`,
       `• Quote into V289: <code>${escapeHtml(v289aV853.quoteTokenAddress || "UNVERIFIED")}</code>`,
       `• Budget before V289: <b>${safeNumber(bb.totalUsed)}/${safeNumber(bb.totalLimit)}</b> | after reference <b>${safeNumber(br.totalUsed)}/${safeNumber(br.totalLimit)}</b> | after history <b>${safeNumber(bh.totalUsed)}/${safeNumber(bh.totalLimit)}</b>`,
@@ -120779,11 +120872,13 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     candidate?.manualCompleteExactPoolV4V859 || null;
   if (completeV4V859) {
     evidence.push(
-      `🔒 Manual complete exact-V4-pool coverage V862: <b>${escapeHtml(completeV4V859.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(completeV4V859.requestsUsed)}</b>`,
+      `🔒 Manual complete exact-V4-pool coverage V863: <b>${escapeHtml(completeV4V859.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(completeV4V859.requestsUsed)}</b>`,
       `• PoolId: <code>${escapeHtml(completeV4V859.poolId || "UNVERIFIED")}</code> | provider <b>${escapeHtml(completeV4V859.provider || "UNVERIFIED")}</b>`,
       `• Range: <b>${escapeHtml(String(completeV4V859.fromBlock ?? "UNVERIFIED"))} → ${escapeHtml(String(completeV4V859.toBlock ?? "UNVERIFIED"))}</b> | cutoff block <b>${escapeHtml(String(completeV4V859.cutoffBlock ?? "UNVERIFIED"))}</b>`,
       `• V860 trusted pool start: <b>${escapeHtml(String(completeV4V859.trustedPoolStartBlockV860 ?? "UNVERIFIED"))}</b> | source <b>${escapeHtml(completeV4V859.trustedPoolStartSourceV860 || "NONE")}</b> | timestamp lookup sent <b>${completeV4V859.timestampLookupRequestSent === true ? "YES" : "NO"}</b>`,
       `• V862 trusted-lifetime pre-split: <b>${completeV4V859.preSplitTrustedLifetimeV862 === true ? "YES — 2 DIRECT CHILD RANGES" : "NO"}</b>`,
+      `• V863 resume: loaded <b>${completeV4V859.manualProgressLoadedV863 === true ? "YES" : "NO"}</b> | load <b>${escapeHtml(completeV4V859.manualProgressLoadStatusV863 || "UNVERIFIED")}</b> | save <b>${escapeHtml(completeV4V859.manualProgressSaveStatusV863 || "UNVERIFIED")}</b>`,
+      `• V863 progress: completed ranges <b>${safeNumber(completeV4V859.completedRangesV863)}</b> | pending ranges <b>${safeNumber(completeV4V859.remainingPendingRangesV863)}</b> | cleared <b>${completeV4V859.manualProgressClearedV863 === true ? "YES" : "NO"}</b>`,
       `• Logs: <b>${safeNumber(completeV4V859.returnedLogs)}</b> | saturated <b>${completeV4V859.saturated === true ? "YES" : "NO"}</b> | every row exact USD <b>${completeV4V859.allReturnedRowsExactUsdDecoded === true ? "YES" : "NO"}</b>`,
       `• Full exact-pool 24h coverage: <b>${completeV4V859.fullExactPool24hCoverageVerified === true ? "VERIFIED" : "UNVERIFIED"}</b> | verified windows <b>${escapeHtml((completeV4V859.verifiedWindows || []).join(", ") || "NONE")}</b>`,
       `• Autonomous state: <b>UNCHANGED</b> · manual isolated state only`
@@ -121749,6 +121844,27 @@ async function telegramFreshAnalyseV276(
           )
         : null;
 
+    const manualV466LoadV863 =
+      await loadManualV466ProgressV863(
+        env,
+        candidate?.address
+      );
+
+    if (
+      manualV466LoadV863?.loaded === true &&
+      manualV466LoadV863?.progress &&
+      typeof manualV466LoadV863.progress === "object"
+    ) {
+      const manualStoreV863 =
+        exactPoolProgressStoreV466(
+          isolatedState
+        );
+
+      manualStoreV863[
+        normalize(candidate?.address)
+      ] = manualV466LoadV863.progress;
+    }
+
     manualCompleteExactPoolV4V859 =
       await blockscoutCompleteExactPoolDirectionalUsdV458(
         candidate,
@@ -121759,6 +121875,26 @@ async function telegramFreshAnalyseV276(
         env,
         trustedPoolStartBlockV860
       );
+
+    const remainingManualProgressV863 =
+      exactPoolProgressStoreV466(
+        isolatedState
+      )?.[
+        normalize(candidate?.address)
+      ] || null;
+
+    const manualV466SaveV863 =
+      await saveManualV466ProgressV863(
+        env,
+        candidate?.address,
+        remainingManualProgressV863,
+        manualCompleteExactPoolV4V859?.verified === true
+      );
+
+    manualCompleteExactPoolV4V859.manualV466LoadV863 =
+      manualV466LoadV863;
+    manualCompleteExactPoolV4V859.manualV466SaveV863 =
+      manualV466SaveV863;
 
     manualCompleteExactPoolV4V859.trustedPoolStartBlockV860 =
       trustedPoolStartBlockV860;
@@ -121827,7 +121963,39 @@ async function telegramFreshAnalyseV276(
     preSplitTrustedLifetimeV862:
       manualCompleteExactPoolV4V859
         ?.paginationV461
-        ?.preSplitTrustedLifetimeV862 === true
+        ?.preSplitTrustedLifetimeV862 === true,
+    manualProgressLoadedV863:
+      manualCompleteExactPoolV4V859
+        ?.manualV466LoadV863
+        ?.loaded === true,
+    manualProgressLoadStatusV863:
+      manualCompleteExactPoolV4V859
+        ?.manualV466LoadV863
+        ?.status || null,
+    manualProgressSaveStatusV863:
+      manualCompleteExactPoolV4V859
+        ?.manualV466SaveV863
+        ?.status || null,
+    manualProgressSavedV863:
+      manualCompleteExactPoolV4V859
+        ?.manualV466SaveV863
+        ?.saved === true,
+    manualProgressClearedV863:
+      manualCompleteExactPoolV4V859
+        ?.manualV466SaveV863
+        ?.deleted === true,
+    remainingPendingRangesV863:
+      safeNumber(
+        manualCompleteExactPoolV4V859
+          ?.multiScanProgressV466
+          ?.pendingRanges
+      ),
+    completedRangesV863:
+      safeNumber(
+        manualCompleteExactPoolV4V859
+          ?.multiScanProgressV466
+          ?.completedRanges
+      )
   };
 
   candidate.manualV289AuditV853 = candidate.manualV289AuditV853 || {
