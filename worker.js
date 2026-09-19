@@ -1,4 +1,16 @@
 /**
+ * Robinhood Chain Meme Hunter — V838
+ *
+ * V838 RESUMABLE MANUAL V4 ACTIVE-POOL DISCOVERY — PRESERVE-FIRST:
+ * - builds directly from V837/V834 safe behavior; V834 launch-proof reserve remains authoritative;
+ * - when no token-specific retained V4 PoolId exists, /analyse takes a bounded read-only snapshot
+ *   of recent PoolManager Swap PoolIds and stores ONLY manual diagnostic progress under a separate KV key;
+ * - scans at most 40 active PoolIds per /analyse in two Uniswap Pool Info batches of 20;
+ * - subsequent /analyse calls resume from the next slice instead of restarting or brute-forcing all pools;
+ * - exact token/currency match is required before local manual V4 identity is hydrated;
+ * - autonomous watchlist, production poolRegistry, scoring, V3, launch proof and hard request ceilings are unchanged.
+ */
+/**
  * Robinhood Chain Meme Hunter — V837
  *
  * V837 TARGETED MANUAL V4 / UNISWAP PARITY — PRESERVE-FIRST REPAIR:
@@ -7128,7 +7140,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V837";
+const VERSION = "V838";
 /*
  * V821 PERSISTENT FAIR RESCUE SCHEDULING
  * - Builds forward from the confirmed V819 production V4 fairness path and
@@ -117087,6 +117099,46 @@ async function manualTargetedV4UniswapHandoffV837(
   };
 }
 
+
+/* =========================================================
+   V838 RESUMABLE MANUAL V4 ACTIVE-POOL DISCOVERY
+   ========================================================= */
+async function manualResumableV4DiscoveryV838(env,budget,state,watched,candidate) {
+  const token=normalize(candidate?.address || watched?.address);
+  const base={attempted:false,verified:false,status:"NOT_ATTEMPTED_V838",tokenAddress:isAddress(token)?token:null,snapshotPoolIds:0,startOffset:0,checkedThisRun:0,nextOffset:0,uniswapBatches:0,uniswapPoolsReturned:0,exactMatches:0,selectedPoolId:null,quoteTokenAddress:null,requestsUsed:0,progressPersisted:false,autonomousWatchlistMutated:false,error:null};
+  if(!isAddress(token)||token===ZERO) return {...base,status:"INVALID_TOKEN_V838"};
+  if(candidate?.onChainPoolIdentityV153?.verified===true && isBytes32HexV765(normalize(candidate?.onChainPoolIdentityV153?.poolId))) return {...base,verified:true,status:"ALREADY_VERIFIED_V4_IDENTITY_V838",selectedPoolId:normalize(candidate.onChainPoolIdentityV153.poolId)};
+  const prior=candidate?.manualV4TargetedUniswapV837;
+  if(prior?.verified===true || prior?.selectedPoolId) return {...base,status:"TARGETED_V837_ALREADY_HAS_POOL_V838"};
+  const binding=env?.MEME_HUNTER_STATE,key=`robinhood-meme-hunter-manual-v4-v838:${token}`; let progress=null;
+  if(binding&&typeof binding.get==="function"){try{const raw=await binding.get(key);if(raw)progress=JSON.parse(raw);}catch(_){}}
+  const now=Date.now(); let ids=Array.isArray(progress?.poolIds)?progress.poolIds.map(normalize).filter(isBytes32HexV765):[]; let offset=Math.max(0,safeNumber(progress?.nextOffset));
+  const fresh=ids.length>0&&(now-safeNumber(progress?.capturedAt))<10*60*1000;
+  if(!fresh){
+    ids=[];offset=0;
+    if(!consumeBudget(budget,"analysis","V838_MANUAL_V4_HEAD",1)) return {...base,status:"V834_RESERVE_OR_BUDGET_BLOCKED_BEFORE_V4_HEAD_V838"};
+    base.requestsUsed++;base.attempted=true;const rpc=v4PoolLiveRpcEndpointV767(env);const head=await v4PoolLiveRpcCallV767(rpc.url,"eth_blockNumber",[]);
+    if(!head?.ok) return {...base,status:"V4_HEAD_FAILED_V838",error:head?.error||"HEAD_FAILED"}; const headNum=Number.parseInt(String(head.result||"0x0"),16);
+    if(!Number.isFinite(headNum)||headNum<=0) return {...base,status:"V4_HEAD_UNVERIFIED_V838"}; const from=Math.max(0,headNum-599);
+    if(!consumeBudget(budget,"analysis","V838_MANUAL_V4_RECENT_SWAPS",1)) return {...base,status:"V834_RESERVE_OR_BUDGET_BLOCKED_BEFORE_V4_SWAPS_V838"};
+    base.requestsUsed++;const swaps=await v4PoolLiveRpcCallV767(rpc.url,"eth_getLogs",[{address:normalize(POOL_MANAGER),fromBlock:`0x${from.toString(16)}`,toBlock:`0x${headNum.toString(16)}`,topics:[SWAP_TOPIC]}]);
+    if(!swaps?.ok) return {...base,status:"V4_RECENT_SWAPS_FAILED_V838",error:swaps?.error||"SWAPS_FAILED"};
+    ids=v4PoolLiveAggregateSwapRowsV768(Array.isArray(swaps.result)?swaps.result:[]).map(r=>normalize(r?.poolId)).filter(isBytes32HexV765).sort(); progress={capturedAt:now,head:headNum,poolIds:ids,nextOffset:0};
+    if(binding&&typeof binding.put==="function"){try{await binding.put(key,JSON.stringify(progress),{expirationTtl:3600});base.progressPersisted=true;}catch(_){}}
+  }
+  base.snapshotPoolIds=ids.length;if(!ids.length)return {...base,status:"NO_ACTIVE_V4_POOLIDS_V838"};if(offset>=ids.length)offset=0;base.startOffset=offset;
+  const slice=ids.slice(offset,offset+40),matches=[];
+  for(let i=0;i<slice.length;i+=20){const chunk=slice.slice(i,i+20);if(!chunk.length)break;if(!consumeBudget(budget,"analysis","UNISWAP_V4_RESUMABLE_MANUAL_V838",1)){base.status="V4_PAGE_BUDGET_EXHAUSTED_V838";break;}base.requestsUsed++;base.uniswapBatches++;base.attempted=true;base.checkedThisRun+=chunk.length;const lookup=await v4PoolInfoBatchV767(env,chunk);if(lookup?.ok!==true){base.error=lookup?.error||"UNISWAP_POOL_INFO_FAILED";continue;}const pools=Array.isArray(lookup?.pools)?lookup.pools:[];base.uniswapPoolsReturned+=pools.length;for(const row of pools){const pid=normalize(row?.poolId),a=normalize(row?.tokenA),b=normalize(row?.tokenB);if(chunk.includes(pid)&&(a===token||b===token))matches.push(row);}if(matches.length)break;}
+  base.exactMatches=matches.length;const advanced=Math.min(ids.length,offset+base.checkedThisRun);base.nextOffset=matches.length?offset:(advanced>=ids.length?0:advanced);
+  if(binding&&typeof binding.put==="function"){try{await binding.put(key,JSON.stringify({...progress,poolIds:ids,nextOffset:base.nextOffset,capturedAt:safeNumber(progress?.capturedAt)||now}),{expirationTtl:3600});base.progressPersisted=true;}catch(_){}}
+  if(!matches.length)return {...base,status:base.status==="V4_PAGE_BUDGET_EXHAUSTED_V838"?base.status:(base.nextOffset===0?"ACTIVE_POOL_SNAPSHOT_EXHAUSTED_NO_MATCH_V838":"ACTIVE_POOL_SLICE_NO_MATCH_CONTINUE_V838")};
+  matches.sort((a,b)=>{const qa=normalize(a?.tokenA)===token?normalize(a?.tokenB):normalize(a?.tokenA),qb=normalize(b?.tokenA)===token?normalize(b?.tokenB):normalize(b?.tokenA);return((qb===ZERO||knownQuote(qb))?1:0)-((qa===ZERO||knownQuote(qa))?1:0);});
+  const selected=matches[0],poolId=normalize(selected?.poolId),currency0=normalize(selected?.tokenA),currency1=normalize(selected?.tokenB),quoteTokenAddress=currency0===token?currency1:currency0;
+  v254MergeResolvedPoolIntoWatch(watched,{poolId,currency0,currency1,fee:selected?.fee??null,tickSpacing:selected?.tickSpacing??null,source:"UNISWAP_POOL_INFO_RESUMABLE_MANUAL_V838"});const strictIdentity=exactCandidatePoolIdentityV257(watched,poolId);base.selectedPoolId=poolId;base.quoteTokenAddress=quoteTokenAddress||null;
+  if(strictIdentity?.verified===true){candidate.onChainPoolIdentityV153={...strictIdentity,source:"UNISWAP_POOL_INFO_RESUMABLE_MANUAL_V838"};return {...base,verified:true,status:"EXACT_V4_POOL_VERIFIED_BY_UNISWAP_V838",quoteTokenAddress:normalize(strictIdentity?.quoteTokenAddress)||quoteTokenAddress||null};}
+  return {...base,status:"EXACT_TOKEN_POOL_FOUND_BUT_QUOTE_IDENTITY_NOT_ELIGIBLE_V838",error:strictIdentity?.status||null};
+}
+
 /* =========================================================
    V283 MANUAL EXACT-POOL LIVE V4 ENRICHMENT
    ========================================================= */
@@ -119192,6 +119244,15 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       `• Manual-state mutation: <b>ISOLATED ONLY</b> | autonomous watchlist <b>UNCHANGED</b>`
     );
   }
+  const mv4V838=candidate?.manualV4ResumableV838 || null;
+  if (mv4V838) {
+    evidence.push(
+      `🧭 Manual V4 resumable Uniswap V838: <b>${escapeHtml(mv4V838.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(mv4V838.requestsUsed)}</b>`,
+      `• Active snapshot PoolIds: <b>${safeNumber(mv4V838.snapshotPoolIds)}</b> | slice offset <b>${safeNumber(mv4V838.startOffset)}</b> | checked this run <b>${safeNumber(mv4V838.checkedThisRun)}</b> | next offset <b>${safeNumber(mv4V838.nextOffset)}</b>`,
+      `• Uniswap batches: <b>${safeNumber(mv4V838.uniswapBatches)}</b> | pools returned <b>${safeNumber(mv4V838.uniswapPoolsReturned)}</b> | exact matches <b>${safeNumber(mv4V838.exactMatches)}</b>`,
+      mv4V838?.selectedPoolId ? `• Exact V4 PoolId: <code>${escapeHtml(mv4V838.selectedPoolId)}</code> | identity <b>${mv4V838.verified===true ? "VERIFIED" : "UNVERIFIED"}</b>` : `• Exact V4 PoolId: <b>UNVERIFIED</b> | progress <b>${mv4V838.progressPersisted===true ? "PERSISTED" : "NOT_PERSISTED"}</b>`
+    );
+  }
   evidence.push(...manualRollingProgressLinesV572(candidate));
 
   if (v3) {
@@ -120033,6 +120094,11 @@ async function telegramFreshAnalyseV276(
 
   candidate.manualV4TargetedUniswapV837 =
     manualV4TargetedUniswapV837;
+
+  const manualV4ResumableV838 = await manualResumableV4DiscoveryV838(
+    env,budget,isolatedState,watched,candidate
+  );
+  candidate.manualV4ResumableV838 = manualV4ResumableV838;
 
   const manualLiveV4ResultV283 =
     await manualLiveV4EnrichmentV283(
