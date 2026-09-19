@@ -1,4 +1,20 @@
 /**
+ * Robinhood Chain Meme Hunter — V850
+ *
+ * V850 MANUAL V4 MULTI-POOL TOPIC-OR FIX — PRESERVE-FIRST:
+ * - builds directly from V849;
+ * - fixes the confirmed V848/V849 implementation bug where V283 assembled all
+ *   Uniswap-verified exact token PoolIds but eth_getLogs still filtered only the
+ *   previously selected single PoolId;
+ * - V283 now passes the verified PoolId set as a JSON-RPC topic-position OR
+ *   filter, so the existing ONE logs request can actually observe every retained
+ *   exact V4 pool and rank them by current Swap activity;
+ * - adds zero requests, does not raise the manual 24-request ceiling, and keeps
+ *   the V834/V846 creation-proof reserve unchanged;
+ * - no autonomous watchlist/registry writes and no automatic V4/V254/scoring,
+ *   qualification, provider-trust or Telegram-threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V849
  *
  * V849 MANUAL V4 LIVE-SELECTION PRIORITY — PRESERVE-FIRST:
@@ -7238,7 +7254,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V849";
+const VERSION = "V850";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -117844,7 +117860,9 @@ async function manualLiveV4EnrichmentV283(
               SWAP_TOPIC,
               MODIFY_LIQUIDITY_TOPIC
             ],
-            poolId
+            poolIdsV848.length === 1
+              ? poolIdsV848[0]
+              : poolIdsV848
           ]
         }
       ],
