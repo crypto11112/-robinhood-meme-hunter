@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V864
+ *
+ * V864 MANUAL V4 PRIORITY BUDGET ENVELOPE:
+ * - builds directly from V863;
+ * - creates a manual-only V4 priority reserve INSIDE the existing 24-request ceiling;
+ * - protects 10 requests for the proven V841 -> V196 -> V466 lane:
+ *     V841 exact token-indexed V4 identity: up to 3
+ *     V196 native ETH -> USDG reference: 1
+ *     V466 exact-pool completion: up to 6
+ * - the existing V834 creation-proof reserve is accounted for separately;
+ * - lower-priority analysis cannot consume those protected requests before V4 completion;
+ * - authorised V841/V196/V466 request types may use the protected headroom;
+ * - after V466 completes/saves progress, unused V4 reserve is released to later diagnostics;
+ * - hard manual ceiling remains 24; automatic scanner ceilings unchanged;
+ * - V863 resumable exact-pool progress remains as fallback for exceptionally active pools.
+ */
+/**
  * Robinhood Chain Meme Hunter — V863
  *
  * V863 MANUAL V466 RESUMABLE KV PROGRESS:
@@ -7459,7 +7476,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V863";
+const VERSION = "V864";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -17588,6 +17605,133 @@ function manualCreationProofReserveDecisionV834(budget, phase, type, amount = 1)
   return null;
 }
 
+function isManualV4PriorityTypeV864(type) {
+  const key = String(type || "");
+  return (
+    key.startsWith("BLOCKSCOUT_PRO:V841_TOKEN_") ||
+    key === "UNISWAP_V4_TOKEN_INDEXED_VERIFY_V841" ||
+    key === "UNISWAP_ETH_USDG_REFERENCE_V196" ||
+    key === "BLOCKSCOUT_V458_TIMESTAMP_TO_BLOCK" ||
+    key === "BLOCKSCOUT_V458_COMPLETE_EXACT_POOL_24H_LOGS"
+  );
+}
+
+function manualV4PriorityReserveDecisionV864(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  const reserve =
+    budget?.analysis?.manualV4PriorityReserveV864;
+
+  if (
+    phase !== "analysis" ||
+    reserve?.active !== true
+  ) {
+    return null;
+  }
+
+  const needed =
+    Math.max(1, safeNumber(amount));
+
+  if (isManualV4PriorityTypeV864(type)) {
+    reserve.authorisedRequests =
+      safeNumber(reserve.authorisedRequests) + needed;
+    reserve.lastAuthorisedType =
+      String(type || "UNKNOWN");
+    reserve.lastAuthorisedAt =
+      Date.now();
+    return null;
+  }
+
+  const v4Reserved =
+    Math.max(
+      0,
+      safeNumber(reserve.reservedRequests)
+    );
+
+  if (v4Reserved <= 0) {
+    return null;
+  }
+
+  const creationReserved =
+    budget?.analysis
+      ?.manualCreationProofReserveV834
+      ?.active === true
+      ? Math.max(
+          0,
+          safeNumber(
+            budget.analysis
+              .manualCreationProofReserveV834
+              .reservedRequests
+          )
+        )
+      : 0;
+
+  const protectedTotal =
+    v4Reserved + creationReserved;
+
+  const analysisBlocked =
+    safeNumber(budget?.analysis?.used) + needed >
+    Math.max(
+      0,
+      effectiveAnalysisLimitV416(budget) -
+        protectedTotal
+    );
+
+  const globalBlocked =
+    safeNumber(budget?.totalUsed) + needed >
+    Math.max(
+      0,
+      safeNumber(budget?.totalLimit) -
+        protectedTotal
+    );
+
+  if (
+    analysisBlocked ||
+    globalBlocked
+  ) {
+    reserve.blockedRequests =
+      safeNumber(reserve.blockedRequests) + 1;
+    reserve.lastBlockedType =
+      String(type || "UNKNOWN");
+    reserve.lastBlockedAt =
+      Date.now();
+
+    budget.skipped.push({
+      phase,
+      type,
+      amount:needed,
+      reason:
+        "V864_MANUAL_V4_PRIORITY_RESERVE"
+    });
+
+    return false;
+  }
+
+  return null;
+}
+
+function releaseManualV4PriorityReserveV864(
+  budget,
+  reason = "V4_PRIORITY_PHASE_COMPLETE"
+) {
+  const reserve =
+    budget?.analysis?.manualV4PriorityReserveV864;
+
+  if (!reserve) {
+    return null;
+  }
+
+  reserve.active = false;
+  reserve.releasedAt = Date.now();
+  reserve.releaseReason = String(reason);
+  reserve.reservedRequests = 0;
+
+  return reserve;
+}
+
 function consumeBudget(
   budget,
   phase,
@@ -17598,6 +17742,18 @@ function consumeBudget(
     manualCreationProofReserveDecisionV834(budget, phase, type, amount);
   if (manualCreationReserveDecisionV834 !== null) {
     return manualCreationReserveDecisionV834;
+  }
+
+  const manualV4PriorityDecisionV864 =
+    manualV4PriorityReserveDecisionV864(
+      budget,
+      phase,
+      type,
+      amount
+    );
+
+  if (manualV4PriorityDecisionV864 !== null) {
+    return manualV4PriorityDecisionV864;
   }
 
   const productionV4ReserveDecision =
@@ -115481,6 +115637,23 @@ function createTelegramAnalyseBudgetV276() {
     lastBlockedAt: null
   };
 
+  /*
+   * V864: separate manual-only V4 envelope within the same 24-request ceiling.
+   * The V834 creation reserve is additive while both are active.
+   */
+  budget.analysis.manualV4PriorityReserveV864 = {
+    active: true,
+    reservedRequests: 10,
+    blockedRequests: 0,
+    authorisedRequests: 0,
+    lastBlockedType: null,
+    lastBlockedAt: null,
+    lastAuthorisedType: null,
+    lastAuthorisedAt: null,
+    releasedAt: null,
+    releaseReason: null
+  };
+
   budget.manualAnalyseTelemetryV279 = {
     enabled: true,
     consumed: {}
@@ -120849,7 +121022,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     const bh=v289aV853?.budgetAfterHistory||{};
     const refuse=v289aV853?.latestBudgetRefusal||null;
     evidence.push(
-      `💵 V289 exact-USD recovery audit V863: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
+      `💵 V289 exact-USD recovery audit V864: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
       `• Active PoolId into V289: <code>${escapeHtml(v289aV853.poolId || "UNVERIFIED")}</code> | live selected <code>${escapeHtml(v289aV853.liveSelectedPoolId || "UNVERIFIED")}</code> | live swaps <b>${safeNumber(v289aV853.liveSwaps)}</b>`,
       `• Quote into V289: <code>${escapeHtml(v289aV853.quoteTokenAddress || "UNVERIFIED")}</code>`,
       `• Budget before V289: <b>${safeNumber(bb.totalUsed)}/${safeNumber(bb.totalLimit)}</b> | after reference <b>${safeNumber(br.totalUsed)}/${safeNumber(br.totalLimit)}</b> | after history <b>${safeNumber(bh.totalUsed)}/${safeNumber(bh.totalLimit)}</b>`,
@@ -120872,13 +121045,14 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     candidate?.manualCompleteExactPoolV4V859 || null;
   if (completeV4V859) {
     evidence.push(
-      `🔒 Manual complete exact-V4-pool coverage V863: <b>${escapeHtml(completeV4V859.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(completeV4V859.requestsUsed)}</b>`,
+      `🔒 Manual complete exact-V4-pool coverage V864: <b>${escapeHtml(completeV4V859.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(completeV4V859.requestsUsed)}</b>`,
       `• PoolId: <code>${escapeHtml(completeV4V859.poolId || "UNVERIFIED")}</code> | provider <b>${escapeHtml(completeV4V859.provider || "UNVERIFIED")}</b>`,
       `• Range: <b>${escapeHtml(String(completeV4V859.fromBlock ?? "UNVERIFIED"))} → ${escapeHtml(String(completeV4V859.toBlock ?? "UNVERIFIED"))}</b> | cutoff block <b>${escapeHtml(String(completeV4V859.cutoffBlock ?? "UNVERIFIED"))}</b>`,
       `• V860 trusted pool start: <b>${escapeHtml(String(completeV4V859.trustedPoolStartBlockV860 ?? "UNVERIFIED"))}</b> | source <b>${escapeHtml(completeV4V859.trustedPoolStartSourceV860 || "NONE")}</b> | timestamp lookup sent <b>${completeV4V859.timestampLookupRequestSent === true ? "YES" : "NO"}</b>`,
       `• V862 trusted-lifetime pre-split: <b>${completeV4V859.preSplitTrustedLifetimeV862 === true ? "YES — 2 DIRECT CHILD RANGES" : "NO"}</b>`,
       `• V863 resume: loaded <b>${completeV4V859.manualProgressLoadedV863 === true ? "YES" : "NO"}</b> | load <b>${escapeHtml(completeV4V859.manualProgressLoadStatusV863 || "UNVERIFIED")}</b> | save <b>${escapeHtml(completeV4V859.manualProgressSaveStatusV863 || "UNVERIFIED")}</b>`,
       `• V863 progress: completed ranges <b>${safeNumber(completeV4V859.completedRangesV863)}</b> | pending ranges <b>${safeNumber(completeV4V859.remainingPendingRangesV863)}</b> | cleared <b>${completeV4V859.manualProgressClearedV863 === true ? "YES" : "NO"}</b>`,
+      `• V864 V4 priority envelope: authorised <b>${safeNumber(completeV4V859?.v4PriorityReserveV864?.authorisedRequests)}</b> | lower-priority requests deferred <b>${safeNumber(completeV4V859?.v4PriorityReserveV864?.blockedRequests)}</b> | release <b>${escapeHtml(completeV4V859?.v4PriorityReserveV864?.releaseReason || "UNVERIFIED")}</b>`,
       `• Logs: <b>${safeNumber(completeV4V859.returnedLogs)}</b> | saturated <b>${completeV4V859.saturated === true ? "YES" : "NO"}</b> | every row exact USD <b>${completeV4V859.allReturnedRowsExactUsdDecoded === true ? "YES" : "NO"}</b>`,
       `• Full exact-pool 24h coverage: <b>${completeV4V859.fullExactPool24hCoverageVerified === true ? "VERIFIED" : "UNVERIFIED"}</b> | verified windows <b>${escapeHtml((completeV4V859.verifiedWindows || []).join(", ") || "NONE")}</b>`,
       `• Autonomous state: <b>UNCHANGED</b> · manual isolated state only`
@@ -121565,7 +121739,7 @@ async function telegramFreshAnalyseV276(
           holderPriorityCompletion:
             true,
           manualAnalyseOptimizationV280:
-            false,
+            true,
           liveMomentumActivityV152: {
             swaps:
               0,
@@ -121896,12 +122070,32 @@ async function telegramFreshAnalyseV276(
     manualCompleteExactPoolV4V859.manualV466SaveV863 =
       manualV466SaveV863;
 
+    manualCompleteExactPoolV4V859.manualV4PriorityReserveV864 =
+      releaseManualV4PriorityReserveV864(
+        budget,
+        manualCompleteExactPoolV4V859?.verified === true
+          ? "V466_COMPLETE_VERIFIED_V864"
+          : "V466_PASS_FINISHED_OR_PROGRESS_SAVED_V864"
+      );
+
     manualCompleteExactPoolV4V859.trustedPoolStartBlockV860 =
       trustedPoolStartBlockV860;
     manualCompleteExactPoolV4V859.trustedPoolStartSourceV860 =
       Number.isFinite(trustedPoolStartBlockV860)
         ? "V841_BLOCKSCOUT_PRO_INDEXED_INITIALIZE"
         : "NONE_FALLBACK_TO_EXISTING_V458";
+  }
+
+  if (
+    budget?.analysis
+      ?.manualV4PriorityReserveV864
+      ?.active === true
+  ) {
+    manualCompleteExactPoolV4V859.manualV4PriorityReserveV864 =
+      releaseManualV4PriorityReserveV864(
+        budget,
+        "V4_COMPLETE_PATH_NOT_ELIGIBLE_OR_FINISHED_V864"
+      );
   }
 
   candidate.completeExactPoolDirectionalUsdV458 =
@@ -121995,7 +122189,35 @@ async function telegramFreshAnalyseV276(
         manualCompleteExactPoolV4V859
           ?.multiScanProgressV466
           ?.completedRanges
-      )
+      ),
+    v4PriorityReserveV864: {
+      blockedRequests:
+        safeNumber(
+          manualCompleteExactPoolV4V859
+            ?.manualV4PriorityReserveV864
+            ?.blockedRequests ??
+          budget?.analysis
+            ?.manualV4PriorityReserveV864
+            ?.blockedRequests
+        ),
+      authorisedRequests:
+        safeNumber(
+          manualCompleteExactPoolV4V859
+            ?.manualV4PriorityReserveV864
+            ?.authorisedRequests ??
+          budget?.analysis
+            ?.manualV4PriorityReserveV864
+            ?.authorisedRequests
+        ),
+      releaseReason:
+        manualCompleteExactPoolV4V859
+          ?.manualV4PriorityReserveV864
+          ?.releaseReason ||
+        budget?.analysis
+          ?.manualV4PriorityReserveV864
+          ?.releaseReason ||
+        null
+    }
   };
 
   candidate.manualV289AuditV853 = candidate.manualV289AuditV853 || {
