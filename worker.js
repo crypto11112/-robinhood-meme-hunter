@@ -1,4 +1,25 @@
 /**
+ * Robinhood Chain Meme Hunter — V852
+ *
+ * V852 MANUAL ACTIVE-V4 → EXISTING V289 USD HANDOFF — PRESERVE-FIRST:
+ * - builds directly from V851 diagnostic-proven evidence;
+ * - fixes the proven manual blocker V212_VERIFIED_FLOW_NOT_AVAILABLE without
+ *   fabricating time-window USD from the V771 600-block aggregate;
+ * - V841 no longer stops merely because an older verified V4 identity exists:
+ *   it performs its existing token-indexed Blockscout + Uniswap verification
+ *   so every currently-known exact token pool can be considered;
+ * - every Uniswap-confirmed V841 pool is merged into the ISOLATED manual watched
+ *   identity set; no autonomous poolRegistry/watchlist state is written;
+ * - V283 combines V837 + V841 verified PoolIds, uses its existing single
+ *   topic-OR eth_getLogs request to select the pool with current Swap activity,
+ *   and promotes only that verified live PoolId into the isolated candidate;
+ * - the existing V289 exact-pool history/quote-pricing path then remains
+ *   authoritative for verified BUY/SELL USD and complete time windows;
+ * - V834/V846 creation-proof reserve and the /analyse 24-request ceiling remain
+ *   unchanged; lower-priority manual probes may be skipped if budget is spent;
+ * - automatic V4/V254/scoring/qualification/Telegram thresholds are unchanged.
+ */
+/**
  * Robinhood Chain Meme Hunter — V851
  *
  * V851 MANUAL V4 USD FLOW AUDIT — DIAGNOSTIC ONLY:
@@ -7271,7 +7292,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V851";
+const VERSION = "V852";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -117871,9 +117892,11 @@ function v4IndexedAddressTopicV841(address) {
 
 async function manualBlockscoutProTokenIndexedV4V841(env,budget,state,watched,candidate) {
   const token=normalize(candidate?.address || watched?.address);
-  const base={attempted:false,verified:false,status:"NOT_ATTEMPTED_V841",tokenAddress:isAddress(token)?token:null,provider:"BLOCKSCOUT_PRO",currency0Rows:0,currency1Rows:0,decodedMatches:0,candidatePoolIds:[],uniswapPoolsReturned:0,exactMatches:0,selectedPoolId:null,quoteTokenAddress:null,requestsUsed:0,autonomousWatchlistMutated:false,httpStatuses:[],errors:[],error:null};
+  const base={attempted:false,verified:false,status:"NOT_ATTEMPTED_V841",tokenAddress:isAddress(token)?token:null,provider:"BLOCKSCOUT_PRO",currency0Rows:0,currency1Rows:0,decodedMatches:0,candidatePoolIds:[],uniswapPoolsReturned:0,exactMatches:0,exactMatchedPools:[],selectedPoolId:null,quoteTokenAddress:null,priorVerifiedPoolId:null,requestsUsed:0,autonomousWatchlistMutated:false,httpStatuses:[],errors:[],error:null};
   if(!isAddress(token)||token===ZERO) return {...base,status:"INVALID_TOKEN_V841"};
-  if(candidate?.onChainPoolIdentityV153?.verified===true && isBytes32HexV765(normalize(candidate?.onChainPoolIdentityV153?.poolId))) return {...base,verified:true,status:"ALREADY_VERIFIED_V4_IDENTITY_V841",selectedPoolId:normalize(candidate.onChainPoolIdentityV153.poolId)};
+  if(candidate?.onChainPoolIdentityV153?.verified===true && isBytes32HexV765(normalize(candidate?.onChainPoolIdentityV153?.poolId))) {
+    base.priorVerifiedPoolId=normalize(candidate.onChainPoolIdentityV153.poolId);
+  }
   const apiKey=String(env?.BLOCKSCOUT_PRO_API_KEY||"").trim();
   if(!apiKey) return {...base,status:"BLOCKSCOUT_PRO_NOT_CONFIGURED_V841"};
   const topicToken=v4IndexedAddressTopicV841(token);
@@ -117916,11 +117939,28 @@ async function manualBlockscoutProTokenIndexedV4V841(env,budget,state,watched,ca
   base.requestsUsed++;const lookup=await v4PoolInfoBatchV767(env,ids);base.uniswapPoolsReturned=Array.isArray(lookup?.pools)?lookup.pools.length:0;
   if(lookup?.ok!==true) return {...base,status:"UNISWAP_POOL_INFO_UNVERIFIED_V841",error:lookup?.error||"UNISWAP_POOL_INFO_FAILED"};
   const matches=(lookup.pools||[]).filter(row=>{const pid=normalize(row?.poolId),a=normalize(row?.tokenA),b=normalize(row?.tokenB);return ids.includes(pid)&&(a===token||b===token);});
-  base.exactMatches=matches.length;if(!matches.length)return {...base,status:"BLOCKSCOUT_POOLIDS_NOT_CONFIRMED_BY_UNISWAP_V841"};
+  base.exactMatches=matches.length;
+  base.exactMatchedPools=matches.map(row=>({
+    poolId:normalize(row?.poolId),
+    currency0:normalize(row?.tokenA),
+    currency1:normalize(row?.tokenB),
+    quoteTokenAddress:normalize(row?.tokenA)===token?normalize(row?.tokenB):normalize(row?.tokenA),
+    fee:row?.fee??null,
+    tickSpacing:row?.tickSpacing??null
+  }));
+  if(!matches.length)return {...base,status:"BLOCKSCOUT_POOLIDS_NOT_CONFIRMED_BY_UNISWAP_V841"};
+  for(const row of matches){
+    const pid=normalize(row?.poolId),c0=normalize(row?.tokenA),c1=normalize(row?.tokenB);
+    v254MergeResolvedPoolIntoWatch(watched,{
+      poolId:pid,currency0:c0,currency1:c1,
+      fee:row?.fee??null,tickSpacing:row?.tickSpacing??null,
+      source:"BLOCKSCOUT_PRO_TOKEN_INDEXED_PLUS_UNISWAP_ALL_MATCHES_V852"
+    });
+  }
   matches.sort((a,b)=>{const qa=normalize(a?.tokenA)===token?normalize(a?.tokenB):normalize(a?.tokenA),qb=normalize(b?.tokenA)===token?normalize(b?.tokenB):normalize(b?.tokenA);return((qb===ZERO||knownQuote(qb))?1:0)-((qa===ZERO||knownQuote(qa))?1:0);});
   const selected=matches[0],poolId=normalize(selected?.poolId),currency0=normalize(selected?.tokenA),currency1=normalize(selected?.tokenB),quoteTokenAddress=currency0===token?currency1:currency0;
   base.selectedPoolId=poolId;base.quoteTokenAddress=quoteTokenAddress||null;
-  v254MergeResolvedPoolIntoWatch(watched,{poolId,currency0,currency1,fee:selected?.fee??null,tickSpacing:selected?.tickSpacing??null,source:"BLOCKSCOUT_PRO_TOKEN_INDEXED_PLUS_UNISWAP_V841"});
+  v254MergeResolvedPoolIntoWatch(watched,{poolId,currency0,currency1,fee:selected?.fee??null,tickSpacing:selected?.tickSpacing??null,source:"BLOCKSCOUT_PRO_TOKEN_INDEXED_PLUS_UNISWAP_SELECTED_V852"});
   const strictIdentity=exactCandidatePoolIdentityV257(watched,poolId);
   if(strictIdentity?.verified===true){candidate.onChainPoolIdentityV153={...strictIdentity,source:"BLOCKSCOUT_PRO_TOKEN_INDEXED_PLUS_UNISWAP_V841"};return {...base,verified:true,status:"EXACT_V4_POOL_VERIFIED_BLOCKSCOUT_PRO_UNISWAP_V841",quoteTokenAddress:normalize(strictIdentity?.quoteTokenAddress)||quoteTokenAddress||null};}
   return {...base,status:"EXACT_TOKEN_POOL_FOUND_BUT_QUOTE_IDENTITY_NOT_ELIGIBLE_V841",error:strictIdentity?.status||null};
@@ -117978,11 +118018,14 @@ async function manualLiveV4EnrichmentV283(
 
   const exactMatchedPoolIdsV848 = [
     ...new Set(
-      (candidate?.manualV4TargetedUniswapV837?.exactMatchedPools || [])
+      [
+        ...(candidate?.manualV4TargetedUniswapV837?.exactMatchedPools || []),
+        ...(candidate?.manualV4BlockscoutProIndexedV841?.exactMatchedPools || [])
+      ]
         .map(row => normalize(row?.poolId))
         .filter(value => /^0x[a-f0-9]{64}$/.test(String(value || "")))
     )
-  ].slice(0,8);
+  ].slice(0,20);
   const poolIdsV848 = exactMatchedPoolIdsV848.length
     ? exactMatchedPoolIdsV848
     : (/^0x[a-f0-9]{64}$/.test(String(priorPoolId || "")) ? [priorPoolId] : []);
@@ -118164,7 +118207,7 @@ async function manualLiveV4EnrichmentV283(
     if (strictIdentityV848?.verified===true) {
       candidate.onChainPoolIdentityV153={
         ...strictIdentityV848,
-        source:"UNISWAP_POOL_INFO_PLUS_CURRENT_SWAP_ACTIVITY_V848"
+        source:"TOKEN_INDEXED_UNISWAP_PLUS_CURRENT_SWAP_ACTIVITY_V852"
       };
     }
   }
@@ -118233,7 +118276,7 @@ function applyManualLiveV4EnrichmentV283(
     ...activity,
     verified: true,
     source:
-      "TELEGRAM_MANUAL_EXACT_POOL_600_BLOCK_MULTI_POOL_V848",
+      "TELEGRAM_MANUAL_EXACT_POOL_600_BLOCK_MULTI_POOL_V852",
     fromBlock:
       enrichment.fromBlock,
     toBlock:
@@ -120206,6 +120249,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       `• Provider: <b>BLOCKSCOUT PRO</b> | currency0 rows <b>${safeNumber(mv4V841.currency0Rows)}</b> | currency1 rows <b>${safeNumber(mv4V841.currency1Rows)}</b>`,
       `• Decoded token pools <b>${safeNumber(mv4V841.decodedMatches)}</b> | Uniswap pools returned <b>${safeNumber(mv4V841.uniswapPoolsReturned)}</b> | exact matches <b>${safeNumber(mv4V841.exactMatches)}</b>`,
       mv4V841?.selectedPoolId ? `• Exact V4 PoolId: <code>${escapeHtml(mv4V841.selectedPoolId)}</code> | identity <b>${mv4V841.verified===true ? "VERIFIED" : "UNVERIFIED"}</b>` : `• Exact V4 PoolId: <b>UNVERIFIED</b>`,
+      safeNumber(mv4V841?.exactMatchedPools?.length)>0 ? `• V852 verified pool set supplied to live selector: <b>${safeNumber(mv4V841.exactMatchedPools.length)}</b>` : null,
       mv4V841?.httpStatuses?.length ? `• Blockscout HTTP: <code>${escapeHtml(mv4V841.httpStatuses.join(" | "))}</code>` : `• Blockscout HTTP: <b>UNVERIFIED</b>`,
       mv4V841?.errors?.length ? `• Provider diagnostics: <code>${escapeHtml(mv4V841.errors.slice(-2).join(" | "))}</code>` : `• Provider diagnostics: <b>NONE</b>`,
       `• V4 identity source: <b>BLOCKSCOUT PRO INDEXED INITIALIZE → UNISWAP VERIFY</b>`
