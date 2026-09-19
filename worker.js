@@ -1,4 +1,19 @@
 /**
+ * Robinhood Chain Meme Hunter — V856
+ *
+ * V856 MANUAL V4 REQUEST RECLAIM FOR V289 — PRESERVE-FIRST:
+ * - builds directly from V855;
+ * - runs V841 token-indexed Blockscout + Uniswap verification before V837;
+ * - when V841 verifies at least one exact token PoolId, the redundant one-request
+ *   V837 lookup is skipped and represented explicitly in telemetry;
+ * - if V841 fails or returns no exact verified pools, V837 remains the fallback;
+ * - V283 continues to consume the combined verified PoolId set exactly as before;
+ * - this reclaims one manual request on the proven OZZY path for V289 WETH/USDG
+ *   verification + exact-pool history without raising the 24-request ceiling;
+ * - V834 creation-proof reserve remains intact;
+ * - automatic V4/V212/V254/scoring/qualification/Telegram behavior is untouched.
+ */
+/**
  * Robinhood Chain Meme Hunter — V855
  *
  * V855 MANUAL V289 PRIORITY ORDER FIX — PRESERVE-FIRST:
@@ -7336,7 +7351,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V855";
+const VERSION = "V856";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -120388,7 +120403,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   const mv4V837=candidate?.manualV4TargetedUniswapV837 || null;
   if (mv4V837) {
     evidence.push(
-      `🦄 Manual V4 targeted Uniswap V837: <b>${escapeHtml(mv4V837.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(mv4V837.requestsUsed)}</b>`,
+      `🦄 Manual V4 targeted Uniswap V837/V856: <b>${escapeHtml(mv4V837.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(mv4V837.requestsUsed)}</b>`,
       `• Retained token-specific PoolIds: <b>${safeNumber(mv4V837?.candidatePoolIds?.length)}</b> | Uniswap pools returned <b>${safeNumber(mv4V837.uniswapPoolsReturned)}</b> | exact matches <b>${safeNumber(mv4V837.exactMatches)}</b>`,
       mv4V837?.selectedPoolId
         ? `• Exact V4 PoolId: <code>${escapeHtml(mv4V837.selectedPoolId)}</code> | identity <b>${mv4V837.verified===true ? "VERIFIED" : "UNVERIFIED"}</b>`
@@ -120422,7 +120437,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     const bh=v289aV853?.budgetAfterHistory||{};
     const refuse=v289aV853?.latestBudgetRefusal||null;
     evidence.push(
-      `💵 V289 exact-USD recovery audit V855: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
+      `💵 V289 exact-USD recovery audit V856: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
       `• Active PoolId into V289: <code>${escapeHtml(v289aV853.poolId || "UNVERIFIED")}</code> | live selected <code>${escapeHtml(v289aV853.liveSelectedPoolId || "UNVERIFIED")}</code> | live swaps <b>${safeNumber(v289aV853.liveSwaps)}</b>`,
       `• Quote into V289: <code>${escapeHtml(v289aV853.quoteTokenAddress || "UNVERIFIED")}</code>`,
       `• Budget before V289: <b>${safeNumber(bb.totalUsed)}/${safeNumber(bb.totalLimit)}</b> | after reference <b>${safeNumber(br.totalUsed)}/${safeNumber(br.totalLimit)}</b> | after history <b>${safeNumber(bh.totalUsed)}/${safeNumber(bh.totalLimit)}</b>`,
@@ -121180,15 +121195,11 @@ async function telegramFreshAnalyseV276(
     save: manualMarketCacheSaveV829
   };
 
-  /* V849: V4 identity/live selection runs before unrelated manual directional/V3
-   * probes. This does not add requests or raise the 24-request ceiling; it only
-   * prevents a proven multi-pool V4 candidate from losing the existing V283
-   * head+logs opportunity to lower-priority manual probes. V834/V846 creation
-   * proof reserve remains authoritative and cannot be consumed by V283. */
-  /* V837: targeted manual parity with the retained automatic V4/Uniswap path.
-   * One Uniswap request maximum; V834's creation-proof reserve is authoritative. */
-  const manualV4TargetedUniswapV837 =
-    await manualTargetedV4UniswapHandoffV837(
+  /* V856: run the stronger token-indexed V841 path first. If it already proves
+   * exact token pools, do not spend the redundant V837 Uniswap request.
+   * V837 remains a fail-open fallback when V841 cannot verify the token pool set. */
+  const manualV4BlockscoutProIndexedV841 =
+    await manualBlockscoutProTokenIndexedV4V841(
       env,
       budget,
       isolatedState,
@@ -121196,13 +121207,45 @@ async function telegramFreshAnalyseV276(
       candidate
     );
 
+  candidate.manualV4BlockscoutProIndexedV841 =
+    manualV4BlockscoutProIndexedV841;
+
+  const v841ExactVerifiedV856 =
+    manualV4BlockscoutProIndexedV841?.verified === true &&
+    Array.isArray(manualV4BlockscoutProIndexedV841?.exactMatchedPools) &&
+    manualV4BlockscoutProIndexedV841.exactMatchedPools.length > 0;
+
+  const manualV4TargetedUniswapV837 =
+    v841ExactVerifiedV856
+      ? {
+          attempted:false,
+          verified:false,
+          status:"SKIPPED_V841_EXACT_POOL_SET_VERIFIED_V856",
+          tokenAddress:normalize(candidate?.address || watched?.address) || null,
+          candidatePoolIds:[],
+          candidateSources:[],
+          uniswapPoolsReturned:0,
+          exactMatches:0,
+          exactMatchedPools:[],
+          selectedPoolId:null,
+          quoteTokenAddress:null,
+          requestsUsed:0,
+          stateWrites:0,
+          autonomousWatchlistMutated:false,
+          error:null,
+          fallbackPreserved:true,
+          requestReclaimedForV289:true
+        }
+      : await manualTargetedV4UniswapHandoffV837(
+          env,
+          budget,
+          isolatedState,
+          watched,
+          candidate
+        );
+
   candidate.manualV4TargetedUniswapV837 =
     manualV4TargetedUniswapV837;
-
-  const manualV4BlockscoutProIndexedV841 = await manualBlockscoutProTokenIndexedV4V841(
-    env,budget,isolatedState,watched,candidate
-  );
-  candidate.manualV4BlockscoutProIndexedV841 = manualV4BlockscoutProIndexedV841;
 
   /* V841 supersedes raw-RPC history crawling and V838 brute-force paging in
    * /analyse. Older helpers remain in source for diagnostics/history only. */
