@@ -1,4 +1,15 @@
 /**
+ * Robinhood Chain Meme Hunter — V845
+ *
+ * V845 MANUAL V4 IDENTITY PRESENTATION + V619 BUDGET TRACE — PRESERVE-FIRST:
+ * - builds directly from confirmed-working V842; no V843/V844 execution changes are carried forward;
+ * - automatic/production V4 routing, V254, scoring, thresholds, provider routing and request ceilings are unchanged;
+ * - when V841 has already verified an exact manual V4 PoolId but no rolling ledger/watch exists, /analyse now displays that verified PoolId as identity-only evidence while every rolling USD window remains UNVERIFIED;
+ * - adds read-only V619 budget diagnostics immediately before the existing second creation-timestamp request and captures the exact current budget/reserve/skip state if that request is refused;
+ * - V619 request order, consumeBudget behaviour, reserves and 24-request manual ceiling are unchanged;
+ * - zero additional provider requests and zero autonomous-state writes are added.
+ */
+/**
  * Robinhood Chain Meme Hunter — V841
  *
  * V841 BLOCKSCOUT PRO TOKEN-INDEXED MANUAL V4 LOCATOR — PRESERVE-FIRST:
@@ -7180,7 +7191,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V842";
+const VERSION = "V845";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -86151,13 +86162,23 @@ function telegramRollingExactPoolUsdLinesV564(candidate) {
             value => /^0x[a-f0-9]{64}$/.test(String(normalize(value) || ""))
           )
         : [];
+    const manualIdentityPoolIdV845 =
+      candidate?.manualV4BlockscoutProIndexedV841?.verified === true &&
+      /^0x[a-f0-9]{64}$/.test(String(normalize(candidate?.manualV4BlockscoutProIndexedV841?.selectedPoolId) || ""))
+        ? normalize(candidate.manualV4BlockscoutProIndexedV841.selectedPoolId)
+        : candidate?.onChainPoolIdentityV153?.verified === true &&
+          /^0x[a-f0-9]{64}$/.test(String(normalize(candidate?.onChainPoolIdentityV153?.poolId) || ""))
+          ? normalize(candidate.onChainPoolIdentityV153.poolId)
+          : null;
 
     lines.push(
       observedPoolIdsV570.length === 1
         ? `🛰 Exact PoolId: <code>${escapeHtml(
             `${normalize(observedPoolIdsV570[0]).slice(0,10)}…${normalize(observedPoolIdsV570[0]).slice(-8)}`
           )}</code> <b>(OBSERVED — WATCH STARTING)</b>`
-        : "🛰 Exact PoolId: <b>UNVERIFIED</b>",
+        : manualIdentityPoolIdV845
+          ? `🛰 Exact PoolId: <code>${escapeHtml(`${manualIdentityPoolIdV845.slice(0,10)}…${manualIdentityPoolIdV845.slice(-8)}`)}</code> <b>(IDENTITY VERIFIED — WATCH NOT STARTED)</b>`
+          : "🛰 Exact PoolId: <b>UNVERIFIED</b>",
       "🟢 1m Buy USD: <b>UNVERIFIED</b>",
       "🔴 1m Sell USD: <b>UNVERIFIED</b>",
       "🟢 5m Buy USD: <b>UNVERIFIED</b>",
@@ -86176,7 +86197,9 @@ function telegramRollingExactPoolUsdLinesV564(candidate) {
       "🔴 24h Sell USD: <b>UNVERIFIED</b>",
       observedPoolIdsV570.length === 1
         ? "ℹ️ <i>Exact PoolId is proven from candidate-matched exact-USD V4 observations. Continuous rolling coverage starts forward-only; earlier observed USD remains shown separately and is not promoted into complete-window totals.</i>"
-        : "ℹ️ <i>Exact-pool continuous coverage is not yet proven for this token.</i>"
+        : manualIdentityPoolIdV845
+          ? "ℹ️ <i>V4 PoolId identity is verified, but no autonomous rolling watch or complete USD window is proven. All rolling values therefore remain UNVERIFIED.</i>"
+          : "ℹ️ <i>Exact-pool continuous coverage is not yet proven for this token.</i>"
     );
     return lines;
   }
@@ -119660,6 +119683,18 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
         : `• Creation time: <b>UNVERIFIED</b>`,
       `• Brand/launchpad identity: <b>UNVERIFIED unless an existing exact detector independently matches</b>`
     );
+    const btV845 = cpV619?.budgetTraceV845 || null;
+    const bBeforeV845 = btV845?.beforeSecondRequest || null;
+    const bAfterV845 = btV845?.afterRefusal || btV845?.afterConsume || null;
+    if (bBeforeV845) {
+      evidence.push(
+        `🧪 V619 request-2 budget trace V845: before total <b>${safeNumber(bBeforeV845.totalUsed)}/${safeNumber(bBeforeV845.totalLimit)}</b> · analysis <b>${safeNumber(bBeforeV845.analysisUsed)}/${safeNumber(bBeforeV845.analysisLimit)}</b> · V834 reserve <b>${bBeforeV845.manualCreationReserveActive===true?"ACTIVE":"OFF"}</b>/${safeNumber(bBeforeV845.manualCreationReservedRequests)}`,
+        `• Other reserves: productionV4 <b>${safeNumber(bBeforeV845.productionV4ReservedRequests)}</b> · handoff <b>${safeNumber(bBeforeV845.productionV4HandoffReservedRequests)}</b> · V254 <b>${safeNumber(bBeforeV845.v254FirstRequestReservedRequests)}</b> · completion <b>${safeNumber(bBeforeV845.evidenceCompletionReservedRequests)}</b> · ERC20 <b>${safeNumber(bBeforeV845.erc20UpstreamReservedRequests)}</b>`,
+        bAfterV845?.recentSkipped?.length
+          ? `• Latest budget refusal: <code>${escapeHtml(bAfterV845.recentSkipped.slice(-1).map(x=>`${x.type}:${x.reason}`).join(" | "))}</code>`
+          : `• Latest budget refusal: <b>NONE RECORDED</b>`
+      );
+    }
   }
   const mv4V837=candidate?.manualV4TargetedUniswapV837 || null;
   if (mv4V837) {
@@ -120019,6 +120054,30 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   return compact.join("\n");
 }
 
+function manualV619BudgetTraceV845(budget) {
+  const a = budget?.analysis || {};
+  const reserve = a?.manualCreationProofReserveV834 || {};
+  const skipped = Array.isArray(budget?.skipped) ? budget.skipped : [];
+  return {
+    totalUsed: safeNumber(budget?.totalUsed),
+    totalLimit: safeNumber(budget?.totalLimit),
+    analysisUsed: safeNumber(a?.used),
+    analysisLimit: effectiveAnalysisLimitV416(budget),
+    manualCreationReserveActive: reserve?.active === true,
+    manualCreationReservedRequests: safeNumber(reserve?.reservedRequests),
+    productionV4ReservedRequests: safeNumber(a?.productionV4ReserveV776?.reservedRequests),
+    productionV4HandoffReservedRequests: safeNumber(a?.productionV4HandoffReserveV777?.reservedRequests),
+    v254FirstRequestReservedRequests: safeNumber(a?.v254FirstRequestReserveV807?.reservedRequests),
+    evidenceCompletionReservedRequests: safeNumber(a?.evidenceCompletionReserveV728?.reservedRequests),
+    erc20UpstreamReservedRequests: safeNumber(a?.erc20UpstreamHeadroomReserveV690?.reservedRequests),
+    recentSkipped: skipped.slice(-6).map(row => ({
+      type: String(row?.type || "UNKNOWN"),
+      reason: String(row?.reason || "UNKNOWN"),
+      amount: safeNumber(row?.amount)
+    }))
+  };
+}
+
 async function manualContractCreationProofV619({env,state,budget,tokenAddress}){
   const token=normalize(tokenAddress);
   const out={
@@ -120027,7 +120086,8 @@ async function manualContractCreationProofV619({env,state,budget,tokenAddress}){
     creator:null,creationTransactionHash:null,transactionVerified:false,
     blockNumber:null,timestamp:null,timestampMs:null,creationAgeMs:null,
     creationAgeDisplay:"UNVERIFIED",brandPromoted:false,
-    scoringChanged:false,watchStateChanged:false
+    scoringChanged:false,watchStateChanged:false,
+    budgetTraceV845:null
   };
   if(!isAddress(token)){out.status="INVALID_TOKEN_V619";return out;}
 
@@ -120056,9 +120116,18 @@ async function manualContractCreationProofV619({env,state,budget,tokenAddress}){
 
   const txUrl=blockscoutProTransactionDetailsUrlV492(env,out.creationTransactionHash);
   if(!txUrl){out.status="CREATION_TX_URL_UNAVAILABLE_V619";return out;}
+  const beforeSecondRequestV845 = manualV619BudgetTraceV845(budget);
   if(!consumeBudget(budget,"analysis","V619_MANUAL_CREATION_TX_DETAILS",1)){
+    out.budgetTraceV845 = {
+      beforeSecondRequest: beforeSecondRequestV845,
+      afterRefusal: manualV619BudgetTraceV845(budget)
+    };
     out.status="CREATION_VERIFIED_TIMESTAMP_BUDGET_UNAVAILABLE_V619";return out;
   }
+  out.budgetTraceV845 = {
+    beforeSecondRequest: beforeSecondRequestV845,
+    afterConsume: manualV619BudgetTraceV845(budget)
+  };
   if (budget?.analysis?.manualCreationProofReserveV834) {
     budget.analysis.manualCreationProofReserveV834.reservedRequests = 0;
     budget.analysis.manualCreationProofReserveV834.active = false;
