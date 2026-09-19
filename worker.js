@@ -1,4 +1,19 @@
 /**
+ * Robinhood Chain Meme Hunter — V855
+ *
+ * V855 MANUAL V289 PRIORITY ORDER FIX — PRESERVE-FIRST:
+ * - builds directly from V854;
+ * - moves the existing V289 exact-USD recovery block to immediately after
+ *   V841/V283 V4 identity + live-pool selection;
+ * - V289 now runs before Gecko directional, native V3 probing and V3 auto-start,
+ *   so those lower-priority manual paths cannot consume its headroom first;
+ * - no V289 pricing/decoder maths are changed;
+ * - no request ceiling is raised and the V834 creation-proof reserve remains intact;
+ * - keeps V853/V854 audit telemetry so the next /analyse proves budget-before,
+ *   WETH/USDG reference status, exact-pool history attempt and exact-USD output;
+ * - automatic V4/V212/V254/scoring/qualification/Telegram behavior is untouched.
+ */
+/**
  * Robinhood Chain Meme Hunter — V854
  *
  * V854 PERSISTED VERIFIED WETH/USDG REUSE IN MANUAL V289:
@@ -7321,7 +7336,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V854";
+const VERSION = "V855";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -120407,7 +120422,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     const bh=v289aV853?.budgetAfterHistory||{};
     const refuse=v289aV853?.latestBudgetRefusal||null;
     evidence.push(
-      `💵 V289 exact-USD recovery audit V854: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
+      `💵 V289 exact-USD recovery audit V855: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
       `• Active PoolId into V289: <code>${escapeHtml(v289aV853.poolId || "UNVERIFIED")}</code> | live selected <code>${escapeHtml(v289aV853.liveSelectedPoolId || "UNVERIFIED")}</code> | live swaps <b>${safeNumber(v289aV853.liveSwaps)}</b>`,
       `• Quote into V289: <code>${escapeHtml(v289aV853.quoteTokenAddress || "UNVERIFIED")}</code>`,
       `• Budget before V289: <b>${safeNumber(bb.totalUsed)}/${safeNumber(bb.totalLimit)}</b> | after reference <b>${safeNumber(br.totalUsed)}/${safeNumber(br.totalLimit)}</b> | after history <b>${safeNumber(bh.totalUsed)}/${safeNumber(bh.totalLimit)}</b>`,
@@ -121216,6 +121231,51 @@ async function telegramFreshAnalyseV276(
     );
 
 
+  /* V855: V289 gets first use of remaining manual-analysis headroom after
+   * exact V4 identity/live selection. Lower-priority Gecko/V3 probes follow. */
+  const manualVerifiedUsdRecoveryResultV289 =
+    await manualVerifiedUsdRecoveryV289(
+      env,
+      budget,
+      isolatedState,
+      candidate,
+      manualLiveV4ResultV283
+    );
+
+  candidate.manualV289AuditV853 = {
+    ...(manualVerifiedUsdRecoveryResultV289?.auditV853 || {}),
+    attempted: manualVerifiedUsdRecoveryResultV289?.attempted === true,
+    verified: manualVerifiedUsdRecoveryResultV289?.verified === true,
+    status: manualVerifiedUsdRecoveryResultV289?.status || null,
+    requestsUsed: safeNumber(manualVerifiedUsdRecoveryResultV289?.requestsUsed),
+    storedFlowStatus: manualVerifiedUsdRecoveryResultV289?.storedFlowStatus || null,
+    historyStatus: manualVerifiedUsdRecoveryResultV289?.historyStatus || null,
+    provider: manualVerifiedUsdRecoveryResultV289?.provider || null,
+    rows: safeNumber(manualVerifiedUsdRecoveryResultV289?.rows),
+    exactUsdTrades: safeNumber(manualVerifiedUsdRecoveryResultV289?.exactUsdTrades),
+    inserted: safeNumber(manualVerifiedUsdRecoveryResultV289?.inserted),
+    deduplicated: safeNumber(manualVerifiedUsdRecoveryResultV289?.deduplicated),
+    zeroExtraRequests: true
+  };
+
+  candidate =
+    manualVerifiedUsdRecoveryResultV289?.candidate ||
+    candidate;
+
+  candidate.manualV289AuditV853 = candidate.manualV289AuditV853 || {
+    ...(manualVerifiedUsdRecoveryResultV289?.auditV853 || {}),
+    attempted: manualVerifiedUsdRecoveryResultV289?.attempted === true,
+    verified: manualVerifiedUsdRecoveryResultV289?.verified === true,
+    status: manualVerifiedUsdRecoveryResultV289?.status || null,
+    requestsUsed: safeNumber(manualVerifiedUsdRecoveryResultV289?.requestsUsed),
+    historyStatus: manualVerifiedUsdRecoveryResultV289?.historyStatus || null,
+    provider: manualVerifiedUsdRecoveryResultV289?.provider || null,
+    rows: safeNumber(manualVerifiedUsdRecoveryResultV289?.rows),
+    exactUsdTrades: safeNumber(manualVerifiedUsdRecoveryResultV289?.exactUsdTrades),
+    zeroExtraRequests: true
+  };
+
+
   /* V322: /analyse can use the already-proven guarded GeckoTerminal
    * pool-trades reader to obtain real individual BUY USD / SELL USD rows for
    * verified pool identities. This uses the isolated manual budget/state only.
@@ -121352,48 +121412,6 @@ async function telegramFreshAnalyseV276(
 
   candidate.manualV3AutoStartV688 =
     manualV3AutoStartV688;
-
-  const manualVerifiedUsdRecoveryResultV289 =
-    await manualVerifiedUsdRecoveryV289(
-      env,
-      budget,
-      isolatedState,
-      candidate,
-      manualLiveV4ResultV283
-    );
-
-  candidate.manualV289AuditV853 = {
-    ...(manualVerifiedUsdRecoveryResultV289?.auditV853 || {}),
-    attempted: manualVerifiedUsdRecoveryResultV289?.attempted === true,
-    verified: manualVerifiedUsdRecoveryResultV289?.verified === true,
-    status: manualVerifiedUsdRecoveryResultV289?.status || null,
-    requestsUsed: safeNumber(manualVerifiedUsdRecoveryResultV289?.requestsUsed),
-    storedFlowStatus: manualVerifiedUsdRecoveryResultV289?.storedFlowStatus || null,
-    historyStatus: manualVerifiedUsdRecoveryResultV289?.historyStatus || null,
-    provider: manualVerifiedUsdRecoveryResultV289?.provider || null,
-    rows: safeNumber(manualVerifiedUsdRecoveryResultV289?.rows),
-    exactUsdTrades: safeNumber(manualVerifiedUsdRecoveryResultV289?.exactUsdTrades),
-    inserted: safeNumber(manualVerifiedUsdRecoveryResultV289?.inserted),
-    deduplicated: safeNumber(manualVerifiedUsdRecoveryResultV289?.deduplicated),
-    zeroExtraRequests: true
-  };
-
-  candidate =
-    manualVerifiedUsdRecoveryResultV289?.candidate ||
-    candidate;
-
-  candidate.manualV289AuditV853 = candidate.manualV289AuditV853 || {
-    ...(manualVerifiedUsdRecoveryResultV289?.auditV853 || {}),
-    attempted: manualVerifiedUsdRecoveryResultV289?.attempted === true,
-    verified: manualVerifiedUsdRecoveryResultV289?.verified === true,
-    status: manualVerifiedUsdRecoveryResultV289?.status || null,
-    requestsUsed: safeNumber(manualVerifiedUsdRecoveryResultV289?.requestsUsed),
-    historyStatus: manualVerifiedUsdRecoveryResultV289?.historyStatus || null,
-    provider: manualVerifiedUsdRecoveryResultV289?.provider || null,
-    rows: safeNumber(manualVerifiedUsdRecoveryResultV289?.rows),
-    exactUsdTrades: safeNumber(manualVerifiedUsdRecoveryResultV289?.exactUsdTrades),
-    zeroExtraRequests: true
-  };
 
   const manualBitqueryUsdResultV285 =
     manualGeckoDirectionalResultV322?.verifiedAnyWindow === true
