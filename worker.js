@@ -1,4 +1,16 @@
 /**
+ * Robinhood Chain Meme Hunter — V848
+ *
+ * V848 MANUAL V4 MULTI-POOL LIVE SELECTION — PRESERVE-FIRST:
+ * - builds directly from confirmed-working V847;
+ * - preserves V846 V619 fix, V845 PoolId presentation, V847 watch diagnostic and all autonomous V4/V254/scoring behaviour;
+ * - V837 now retains every Uniswap-verified exact token pool returned inside its existing bounded lookup;
+ * - V283 reuses its existing single live eth_getLogs request across all those exact PoolIds using topic-OR, so no extra provider request is added;
+ * - when multiple verified pools exist, manual /analyse selects the pool with the strongest current Swap activity in the recent live window;
+ * - if no matching pool has current Swap activity, the prior verified identity is preserved and no live pool is guessed;
+ * - no autonomous watchlist/registry writes, no request-ceiling increase, no scoring/qualification/Telegram threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V847
  *
  * V847 AUTONOMOUS V4 WATCH REGISTRATION DIAGNOSTIC — READ ONLY:
@@ -7211,7 +7223,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V847";
+const VERSION = "V848";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -24701,7 +24713,7 @@ function refreshKnownPoolActivityV185(
     const entry =
       poolId
         ? state.poolRegistry?.[
-            poolId
+            poolIdsV848.length === 1 ? poolIdsV848[0] : poolIdsV848
           ]
         : null;
 
@@ -117163,6 +117175,7 @@ async function manualTargetedV4UniswapHandoffV837(
     candidateSources:[],
     uniswapPoolsReturned:0,
     exactMatches:0,
+    exactMatchedPools:[],
     selectedPoolId:null,
     quoteTokenAddress:null,
     requestsUsed:0,
@@ -117264,6 +117277,27 @@ async function manualTargetedV4UniswapHandoffV837(
     return ids.includes(poolId) && (a===token || b===token);
   });
   base.exactMatches=matches.length;
+  base.exactMatchedPools=matches.map(row => {
+    const poolId=normalize(row?.poolId);
+    const currency0=normalize(row?.tokenA);
+    const currency1=normalize(row?.tokenB);
+    const quoteTokenAddress=currency0===token ? currency1 : currency0;
+    return {
+      poolId, currency0, currency1, quoteTokenAddress,
+      fee:row?.fee ?? null, tickSpacing:row?.tickSpacing ?? null
+    };
+  }).filter(row => isBytes32HexV765(row.poolId));
+
+  /* V848: hydrate every Uniswap-verified exact token pool into the isolated
+   * manual watched copy. V283 can then decode the one shared live-log response
+   * without adding any autonomous state mutation. */
+  for (const row of base.exactMatchedPools) {
+    v254MergeResolvedPoolIntoWatch(watched,{
+      poolId:row.poolId, currency0:row.currency0, currency1:row.currency1,
+      fee:row.fee, tickSpacing:row.tickSpacing,
+      source:"UNISWAP_POOL_INFO_TARGETED_MANUAL_V848_MULTI_MATCH"
+    });
+  }
 
   if (!matches.length) {
     return {...base,status:"RETAINED_POOLIDS_NOT_TOKEN_MATCHED_BY_UNISWAP_V837"};
@@ -117651,7 +117685,7 @@ async function manualLiveV4EnrichmentV283(
     };
   }
 
-  const poolId =
+  const priorPoolId =
     normalize(
       candidate?.onChainPoolIdentityV153?.poolId ||
       candidate?.onChainPoolIdentityV153?.pairAddress ||
@@ -117662,7 +117696,19 @@ async function manualLiveV4EnrichmentV283(
         : null)
     );
 
-  if (!/^0x[a-f0-9]{64}$/.test(String(poolId || ""))) {
+  const exactMatchedPoolIdsV848 = [
+    ...new Set(
+      (candidate?.manualV4TargetedUniswapV837?.exactMatchedPools || [])
+        .map(row => normalize(row?.poolId))
+        .filter(value => /^0x[a-f0-9]{64}$/.test(String(value || "")))
+    )
+  ].slice(0,8);
+  const poolIdsV848 = exactMatchedPoolIdsV848.length
+    ? exactMatchedPoolIdsV848
+    : (/^0x[a-f0-9]{64}$/.test(String(priorPoolId || "")) ? [priorPoolId] : []);
+  let poolId = priorPoolId || poolIdsV848[0] || null;
+
+  if (!poolIdsV848.length) {
     return {
       ...base,
       status: "NO_VERIFIED_POOL_ID"
@@ -117746,7 +117792,7 @@ async function manualLiveV4EnrichmentV283(
   }
 
   const fromBlock =
-    Math.max(0, toBlock - 9);
+    Math.max(0, toBlock - 599);
 
   if (!budgetAvailable(budget, "analysis")) {
     return {
@@ -117813,10 +117859,39 @@ async function manualLiveV4EnrichmentV283(
     };
   }
 
+  /* V848: rank only the already-Uniswap-verified exact token PoolIds by the
+   * current live response. Topic[1] is the exact V4 PoolId for Swap/ModifyLiquidity. */
+  const activityByPoolV848 = {};
+  for (const id of poolIdsV848) activityByPoolV848[id]={swaps:0,liquidityEvents:0,total:0};
+  for (const log of logsResult.result) {
+    const id=normalize(log?.topics?.[1]);
+    if (!activityByPoolV848[id]) continue;
+    const topic0=normalize(log?.topics?.[0]);
+    if (topic0===normalize(SWAP_TOPIC)) activityByPoolV848[id].swaps++;
+    else if (topic0===normalize(MODIFY_LIQUIDITY_TOPIC)) activityByPoolV848[id].liquidityEvents++;
+    activityByPoolV848[id].total++;
+  }
+  const rankedV848=Object.entries(activityByPoolV848).sort((a,b)=>
+    safeNumber(b[1]?.swaps)-safeNumber(a[1]?.swaps) ||
+    safeNumber(b[1]?.liquidityEvents)-safeNumber(a[1]?.liquidityEvents)
+  );
+  const bestLiveV848=rankedV848.find(([,row])=>safeNumber(row?.swaps)>0) || null;
+  if (bestLiveV848) {
+    poolId=bestLiveV848[0];
+    const strictIdentityV848=exactCandidatePoolIdentityV257(watched,poolId);
+    if (strictIdentityV848?.verified===true) {
+      candidate.onChainPoolIdentityV153={
+        ...strictIdentityV848,
+        source:"UNISWAP_POOL_INFO_PLUS_CURRENT_SWAP_ACTIVITY_V848"
+      };
+    }
+  }
+
+  const selectedLogsV848 = logsResult.result.filter(log => normalize(log?.topics?.[1])===poolId);
   const liveActivity =
     activityForToken(
       watched,
-      logsResult.result
+      selectedLogsV848
     );
 
   return {
@@ -117844,8 +117919,11 @@ async function manualLiveV4EnrichmentV283(
       head?.provider || null,
     providerLogs:
       logsResult?.provider || null,
+    candidatePoolIdsV848:poolIdsV848,
+    activityByPoolV848,
+    liveSelectedPoolV848:bestLiveV848 ? poolId : null,
     logs:
-      logsResult.result
+      selectedLogsV848
   };
 }
 
@@ -117873,7 +117951,7 @@ function applyManualLiveV4EnrichmentV283(
     ...activity,
     verified: true,
     source:
-      "TELEGRAM_MANUAL_EXACT_POOL_10_BLOCK_WINDOW_V283",
+      "TELEGRAM_MANUAL_EXACT_POOL_600_BLOCK_MULTI_POOL_V848",
     fromBlock:
       enrichment.fromBlock,
     toBlock:
@@ -119830,6 +119908,12 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       mv4V837?.selectedPoolId
         ? `• Exact V4 PoolId: <code>${escapeHtml(mv4V837.selectedPoolId)}</code> | identity <b>${mv4V837.verified===true ? "VERIFIED" : "UNVERIFIED"}</b>`
         : `• Exact V4 PoolId: <b>UNVERIFIED</b>`,
+      safeNumber(mv4V837?.exactMatchedPools?.length)>1
+        ? `• V848 multi-pool candidates: <b>${safeNumber(mv4V837.exactMatchedPools.length)}</b> | live selection occurs in existing V283 RPC window`
+        : null,
+      candidate?.manualLiveV4EnrichmentV283?.liveSelectedPoolV848
+        ? `• V848 live-selected PoolId: <code>${escapeHtml(candidate.manualLiveV4EnrichmentV283.liveSelectedPoolV848)}</code>`
+        : null,
       `• Manual-state mutation: <b>ISOLATED ONLY</b> | autonomous watchlist <b>UNCHANGED</b>`
     );
   }
@@ -120763,6 +120847,7 @@ async function telegramFreshAnalyseV276(
       watched,
       candidate
     );
+  candidate.manualLiveV4EnrichmentV283 = manualLiveV4ResultV283;
 
   candidate =
     applyManualLiveV4EnrichmentV283(
