@@ -1,27 +1,4 @@
 /**
- * Robinhood Chain Meme Hunter — V844
- *
- * V844 MANUAL /ANALYSE LATENCY SAFETY — PRESERVE-FIRST:
- * - builds directly from V843 and preserves its V619 reserved-slot authority and verified manual PoolId handoff;
- * - reverts only the V843 manual exact-PoolId live query width from 600 blocks back to the prior 10-block V283 window;
- * - avoids making the already-heavy Telegram /analyse path wait on a wider exact-pool eth_getLogs request;
- * - standalone V768/V771 diagnostics remain available for 600-block live-V4 verification;
- * - no automatic/production V4 routing, V254, scoring, thresholds, request ceilings, KV state, or V841 Blockscout PRO locator changes.
- */
-/**
- * Robinhood Chain Meme Hunter — V843
- *
- * V843 MANUAL V4 HANDOFF + V619 RESERVE AUTHORITY — PRESERVE-FIRST:
- * - builds directly from V842; automatic/production V4 routing, V254, scoring, thresholds and hard ceilings are unchanged;
- * - preserves V841 Blockscout PRO -> Uniswap exact PoolId locator unchanged;
- * - gives ONLY the two existing V619 manual creation-proof request types authorised access to their V834 reserved slots, so unrelated analysis reserves cannot starve the second timestamp request;
- * - keeps the existing 24-request /analyse ceiling unchanged; no new request capacity is created;
- * - V844 supersedes V843's 600-block widening and restores the prior 10-block V283 manual live query for Telegram latency safety;
- * - a successful exact-PoolId eth_getLogs query now proves a zero-event window when empty instead of reporting the verified pool as absent;
- * - manual rolling-progress presentation now distinguishes a verified transient manual V4 handoff from the separate autonomous rolling watch;
- * - no autonomous watchlist/poolRegistry mutation and no V3/provider/scanner behaviour changes.
- */
-/**
  * Robinhood Chain Meme Hunter — V841
  *
  * V841 BLOCKSCOUT PRO TOKEN-INDEXED MANUAL V4 LOCATOR — PRESERVE-FIRST:
@@ -7203,7 +7180,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V844";
+const VERSION = "V842";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -17295,50 +17272,6 @@ function consumeAuthorisedV254FirstRequestV807(budget, phase, type, amount = 1) 
   return true;
 }
 
-function consumeAuthorisedManualCreationProofV843(budget, phase, type, amount = 1) {
-  const reserve = budget?.analysis?.manualCreationProofReserveV834;
-  if (phase !== "analysis" || reserve?.active !== true) return null;
-
-  const protectedType =
-    type === "V619_MANUAL_GETCONTRACTCREATION" ||
-    type === "V619_MANUAL_CREATION_TX_DETAILS";
-
-  if (!protectedType) return null;
-
-  const needed = Math.max(1, safeNumber(amount));
-  const reserved = Math.max(0, safeNumber(reserve?.reservedRequests));
-  if (reserved < needed) return null;
-
-  /*
-   * V843: this is not extra capacity. These slots were already withheld by V834.
-   * Consume them directly after the real manual hard/phase boundary check so
-   * unrelated generic reserves cannot re-block the request they were reserved for.
-   */
-  if (!budgetAvailable(budget, "analysis", needed)) {
-    reserve.hardBoundaryBlocksV843 = safeNumber(reserve.hardBoundaryBlocksV843) + 1;
-    reserve.lastHardBlockedTypeV843 = String(type || "UNKNOWN");
-    reserve.lastHardBlockedAtV843 = Date.now();
-    budget.skipped.push({
-      phase,
-      type,
-      amount: needed,
-      reason: "V843_V619_RESERVED_SLOT_REAL_BUDGET_UNAVAILABLE"
-    });
-    return false;
-  }
-
-  budget.totalUsed += needed;
-  budget.analysis.used += needed;
-  reserve.reservedRequests = Math.max(0, reserved - needed);
-  reserve.authorisedConsumesV843 = safeNumber(reserve.authorisedConsumesV843) + needed;
-  reserve.lastAuthorisedTypeV843 = String(type || "UNKNOWN");
-  reserve.lastAuthorisedAtV843 = Date.now();
-  if (reserve.reservedRequests <= 0) {
-    reserve.active = false;
-  }
-  return true;
-}
-
 function manualCreationProofReserveDecisionV834(budget, phase, type, amount = 1) {
   const reserve = budget?.analysis?.manualCreationProofReserveV834;
   if (phase !== "analysis" || reserve?.active !== true) return null;
@@ -17382,12 +17315,6 @@ function consumeBudget(
   type,
   amount = 1
 ) {
-  const authorisedManualCreationProofV843 =
-    consumeAuthorisedManualCreationProofV843(budget, phase, type, amount);
-  if (authorisedManualCreationProofV843 !== null) {
-    return authorisedManualCreationProofV843;
-  }
-
   const manualCreationReserveDecisionV834 =
     manualCreationProofReserveDecisionV834(budget, phase, type, amount);
   if (manualCreationReserveDecisionV834 !== null) {
@@ -117847,19 +117774,15 @@ async function manualLiveV4EnrichmentV283(
       logsResult.result
     );
 
-  /* V843: the RPC query itself is exact-PoolId scoped. A successful empty
-   * response therefore verifies zero recent events for that exact pool; it does
-   * not mean the already-Uniswap-verified pool identity is absent. */
-  const exactPoolWindowVerifiedV843 = true;
-
   return {
     ...base,
     attempted: true,
-    verified: exactPoolWindowVerifiedV843,
+    verified:
+      liveActivity?.poolSpecific === true,
     status:
-      logsResult.result.length > 0
-        ? "VERIFIED_EXACT_POOL_LIVE_600_BLOCK_WINDOW_V843"
-        : "VERIFIED_EXACT_POOL_ZERO_EVENTS_600_BLOCK_WINDOW_V843",
+      liveActivity?.poolSpecific === true
+        ? "VERIFIED_EXACT_POOL_LIVE_WINDOW"
+        : "POOL_NOT_PRESENT_IN_WATCHED_IDENTITY",
     poolId,
     fromBlock,
     toBlock,
@@ -117895,19 +117818,17 @@ function applyManualLiveV4EnrichmentV283(
     return candidate;
   }
 
-  const activity = {
-    ...activityForToken(
+  const activity =
+    activityForToken(
       watched,
       enrichment.logs
-    ),
-    poolSpecific: true
-  };
+    );
 
   const liveMomentumActivityV152 = {
     ...activity,
     verified: true,
     source:
-      "TELEGRAM_MANUAL_EXACT_POOL_600_BLOCK_WINDOW_V843",
+      "TELEGRAM_MANUAL_EXACT_POOL_10_BLOCK_WINDOW_V283",
     fromBlock:
       enrichment.fromBlock,
     toBlock:
@@ -119265,7 +119186,7 @@ async function manualNativeV3DirectionalV326(env, budget, candidate) {
     ledgerStatusV331:ledgerAfter?.status||ledgerBefore?.status||null,ledgerWriteStatusV331:ledgerWrite?.status||null,ledgerRecordsV331:Array.isArray(ledgerAfter?.records)?ledgerAfter.records.length:safeNumber(ledgerWrite?.records),ledgerRangesV331:Array.isArray(ledgerAfter?.ranges)?ledgerAfter.ranges.length:safeNumber(ledgerWrite?.ranges),ledgerInsertedV331:safeNumber(ledgerWrite?.inserted),ledgerDeduplicatedV331:safeNumber(ledgerWrite?.deduplicated),ledgerFirstBlockV331:Number.isFinite(Number(ledgerAfter?.firstObservedBlock))?Number(ledgerAfter.firstObservedBlock):null,ledgerLastBlockV331:Number.isFinite(Number(ledgerAfter?.lastObservedBlock))?Number(ledgerAfter.lastObservedBlock):null,rollingV334};
 }
 
-function manualRollingWatchProgressV572(state, candidate, manualLiveV4ResultV283 = null) {
+function manualRollingWatchProgressV572(state, candidate) {
   const token = normalize(candidate?.address);
   if (!isAddress(token)) return null;
 
@@ -119274,28 +119195,11 @@ function manualRollingWatchProgressV572(state, candidate, manualLiveV4ResultV283
     .filter(row => normalize(row?.tokenAddress) === token);
 
   if (!entries.length) {
-    const transientPoolIdV843 =
-      normalize(manualLiveV4ResultV283?.poolId) ||
-      normalize(candidate?.onChainPoolIdentityV153?.poolId);
-    const manualHandoffVerifiedV843 =
-      candidate?.onChainPoolIdentityV153?.verified === true &&
-      /^0x[a-f0-9]{64}$/.test(String(transientPoolIdV843 || "")) &&
-      manualLiveV4ResultV283?.attempted === true;
-
     return {
       enabled:true,
       watchFound:false,
-      manualHandoffFoundV843:manualHandoffVerifiedV843,
       tokenAddress:token,
-      poolId:manualHandoffVerifiedV843 ? transientPoolIdV843 : null,
-      manualLiveVerifiedV843:manualLiveV4ResultV283?.verified === true,
-      manualLiveStatusV843:manualLiveV4ResultV283?.status || null,
-      manualLiveFromBlockV843:manualLiveV4ResultV283?.fromBlock ?? null,
-      manualLiveToBlockV843:manualLiveV4ResultV283?.toBlock ?? null,
-      manualLiveSwapsV843:manualLiveV4ResultV283?.swaps ?? null,
-      reason:manualHandoffVerifiedV843
-        ? "VERIFIED_MANUAL_POOL_HANDOFF_NO_AUTONOMOUS_WATCH_V843"
-        : "NO_AUTONOMOUS_EXACT_POOL_WATCH_FOR_TOKEN_V572",
+      reason:"NO_AUTONOMOUS_EXACT_POOL_WATCH_FOR_TOKEN_V572",
       readOnly:true,
       externalRequestsAdded:0,
       autonomousWatchlistMutated:false
@@ -119432,17 +119336,6 @@ function manualRollingProgressLinesV572(candidate) {
   if (!p?.enabled) return [];
 
   if (p?.watchFound !== true) {
-    if (p?.manualHandoffFoundV843 === true) {
-      return [
-        "",
-        "📍 <b>Rolling Ledger Progress</b>",
-        `🎯 Manual exact V4 handoff: <b>VERIFIED</b> | PoolId <code>${escapeHtml(short(p?.poolId || ""))}</code>`,
-        `🛰 Current manual exact-pool window: <b>${escapeHtml(p?.manualLiveStatusV843 || "UNVERIFIED")}</b> | swaps <b>${safeNumber(p?.manualLiveSwapsV843)}</b>`,
-        `• Blocks: <b>${safeNumber(p?.manualLiveFromBlockV843)}</b>→<b>${safeNumber(p?.manualLiveToBlockV843)}</b>`,
-        "🛰 Autonomous V4 rolling watch: <b>NOT REGISTERED</b> (manual analysis is read-only)",
-        "ℹ️ <i>The verified manual PoolId is now handed into current live telemetry without mutating the autonomous scanner watchlist.</i>"
-      ];
-    }
     return [
       "",
       "📍 <b>Rolling Ledger Progress</b>",
@@ -120786,8 +120679,7 @@ async function telegramFreshAnalyseV276(
   candidate.manualRollingWatchProgressV572 =
     manualRollingWatchProgressV572(
       state,
-      candidate,
-      manualLiveV4ResultV283
+      candidate
     );
 
   const performance =
