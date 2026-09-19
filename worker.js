@@ -1,4 +1,16 @@
 /**
+ * Robinhood Chain Meme Hunter — V835
+ *
+ * V835 MANUAL V4 EXACT-POOL HANDOFF — DIAGNOSTIC ONLY:
+ * - builds directly from V834 and preserves V833 verified V3 directional USD and V834 launch-age reserve behaviour;
+ * - manual /analyse may reuse an exact 32-byte DexScreener Robinhood pairAddress as a V4 PoolId candidate only when the market row is verified and exact-token matched;
+ * - one bounded Uniswap V4 Pool Info request verifies that exact PoolId and its currencies;
+ * - only after exact token membership is verified is the pool added to the isolated manual watched clone so the existing V283 exact-pool live log probe can test recent PoolManager activity;
+ * - manual V4 verification never writes the autonomous watchlist, never mutates production poolRegistry, and never infers currencies or quote trust;
+ * - if pairAddress is absent/not-bytes32, Uniswap verification fails, token membership fails, or budget is unavailable, V4 remains UNVERIFIED;
+ * - adds at most one manual-analysis request before the already-existing V283 head/log probe; no scanner request-ceiling, scoring, qualification, V3 collector, V4 autonomous scanner, market-provider or Telegram-threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V834
  *
  * V834 MANUAL LAUNCH-AGE PROOF RESERVE:
@@ -7110,7 +7122,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V834";
+const VERSION = "V835";
 /*
  * V821 PERSISTENT FAIR RESCUE SCHEDULING
  * - Builds forward from the confirmed V819 production V4 fairness path and
@@ -116884,6 +116896,169 @@ function telegramAnalyseResultMessageV276(
 
 
 /* =========================================================
+   V835 MANUAL V4 EXACT-PAIR -> VERIFIED POOL HANDOFF
+   ========================================================= */
+async function manualV4ExactMarketPoolHandoffV835(env, budget, watched, candidate) {
+  const token = normalize(candidate?.address || watched?.address || "");
+  const market = candidate?.market || null;
+  const poolId = normalize(market?.pairAddress || "");
+  const base = {
+    attempted:false,
+    verified:false,
+    status:"NOT_ATTEMPTED_V835",
+    tokenAddress:isAddress(token) ? token : null,
+    poolId:/^0x[a-f0-9]{64}$/.test(String(poolId || "")) ? poolId : null,
+    tokenA:null,
+    tokenB:null,
+    quoteTokenAddress:null,
+    requestsUsed:0,
+    httpStatus:null,
+    error:null,
+    autonomousWatchlistMutated:false,
+    productionPoolRegistryMutated:false
+  };
+
+  if (!isAddress(token) || candidate?.validERC20 !== true) {
+    return {...base,status:"TOKEN_NOT_ELIGIBLE_V835"};
+  }
+
+  if (candidate?.onChainPoolIdentityV153?.verified === true) {
+    return {
+      ...base,
+      verified:true,
+      status:"EXISTING_V4_IDENTITY_ALREADY_VERIFIED_V835",
+      poolId:normalize(candidate?.onChainPoolIdentityV153?.poolId || candidate?.onChainPoolIdentityV153?.pairAddress) || null,
+      quoteTokenAddress:normalize(candidate?.onChainPoolIdentityV153?.quoteTokenAddress) || null
+    };
+  }
+
+  const baseToken = normalize(market?.baseTokenAddress || "");
+  const quoteToken = normalize(market?.quoteTokenAddress || "");
+  const exactTokenMatch = baseToken === token || quoteToken === token;
+
+  if (market?.verified !== true || !exactTokenMatch) {
+    return {...base,status:"MARKET_NOT_EXACT_VERIFIED_FOR_TOKEN_V835"};
+  }
+
+  if (!/^0x[a-f0-9]{64}$/.test(String(poolId || ""))) {
+    return {...base,status:"VERIFIED_MARKET_PAIR_NOT_V4_POOLID_V835"};
+  }
+
+  const apiKey = String(env?.UNISWAP_API_KEY || "").trim();
+  if (!apiKey) {
+    return {...base,status:"UNISWAP_API_KEY_NOT_CONFIGURED_V835"};
+  }
+
+  if (!budgetAvailable(budget,"analysis") || !consumeBudget(budget,"analysis","UNISWAP_V4_EXACT_MARKET_POOL_V835")) {
+    return {...base,status:"MANUAL_ANALYSIS_BUDGET_UNAVAILABLE_V835"};
+  }
+
+  const usedBeforeFetch = safeNumber(budget?.totalUsed);
+  try {
+    const response = await fetch("https://liquidity.api.uniswap.org/lp/pool_info", {
+      method:"POST",
+      headers:{
+        "x-api-key":apiKey,
+        "content-type":"application/json",
+        "accept":"application/json"
+      },
+      body:JSON.stringify({
+        protocol:"V4",
+        poolReferences:[{protocol:"V4",chainId:4663,referenceIdentifier:poolId}],
+        chainId:4663,
+        pageSize:1,
+        currentPage:1
+      })
+    });
+
+    const text = await response.text();
+    let payload = null;
+    try { payload = text ? JSON.parse(text) : null; } catch (_) {}
+
+    const requestDelta = Math.max(1, safeNumber(budget?.totalUsed) - usedBeforeFetch + 1);
+    const pools = Array.isArray(payload?.pools) ? payload.pools : [];
+    const row = pools.find(r => normalize(r?.poolReferenceIdentifier) === poolId) || pools[0] || null;
+
+    if (!response.ok) {
+      return {
+        ...base,attempted:true,requestsUsed:requestDelta,httpStatus:response.status,
+        status:`UNISWAP_V4_POOL_INFO_HTTP_${response.status}_V835`,
+        error:payload?.detail || payload?.message || payload?.error || (text ? text.slice(0,300) : null)
+      };
+    }
+
+    if (!row) {
+      return {...base,attempted:true,requestsUsed:requestDelta,httpStatus:response.status,status:"UNISWAP_V4_POOL_INFO_EMPTY_V835"};
+    }
+
+    const tokenA = normalize(row?.tokenAddressA || "");
+    const tokenB = normalize(row?.tokenAddressB || "");
+    const validCurrencies =
+      (isAddress(tokenA) || tokenA === ZERO) &&
+      (isAddress(tokenB) || tokenB === ZERO) &&
+      tokenA !== tokenB;
+    const tokenIsA = tokenA === token;
+    const tokenIsB = tokenB === token;
+
+    if (!validCurrencies || (!tokenIsA && !tokenIsB)) {
+      return {
+        ...base,attempted:true,requestsUsed:requestDelta,httpStatus:response.status,
+        tokenA:tokenA || null,tokenB:tokenB || null,
+        status:"UNISWAP_V4_EXACT_POOL_TOKEN_MISMATCH_V835"
+      };
+    }
+
+    const other = tokenIsA ? tokenB : tokenA;
+    watched.pools = Array.isArray(watched?.pools) ? watched.pools : [];
+    const existing = watched.pools.find(p => normalize(p?.poolId) === poolId);
+    if (!existing) {
+      watched.pools.push({
+        poolId,
+        currency0:tokenA,
+        currency1:tokenB,
+        source:"UNISWAP_V4_EXACT_MARKET_POOL_MANUAL_V835",
+        manualDiagnosticOnlyV835:true
+      });
+    }
+
+    const identity = onChainPoolIdentityV153(watched, market);
+    if (identity?.verified !== true || normalize(identity?.poolId) !== poolId) {
+      return {
+        ...base,attempted:true,requestsUsed:requestDelta,httpStatus:response.status,
+        tokenA,tokenB,quoteTokenAddress:other || null,
+        status:"V4_IDENTITY_NOT_PROMOTED_AFTER_EXACT_VERIFY_V835"
+      };
+    }
+
+    candidate.onChainPoolIdentityV153 = {
+      ...identity,
+      source:"UNISWAP_V4_EXACT_MARKET_POOL_MANUAL_V835",
+      manualDiagnosticOnlyV835:true
+    };
+
+    return {
+      ...base,
+      attempted:true,
+      verified:true,
+      status:"VERIFIED_EXACT_MARKET_V4_POOL_V835",
+      requestsUsed:requestDelta,
+      httpStatus:response.status,
+      tokenA,
+      tokenB,
+      quoteTokenAddress:normalize(identity?.quoteTokenAddress || other) || null
+    };
+  } catch (error) {
+    return {
+      ...base,
+      attempted:true,
+      requestsUsed:1,
+      status:"UNISWAP_V4_EXACT_POOL_FETCH_ERROR_V835",
+      error:errorString(error)
+    };
+  }
+}
+
+/* =========================================================
    V283 MANUAL EXACT-POOL LIVE V4 ENRICHMENT
    ========================================================= */
 
@@ -118977,6 +119152,15 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       `• Brand/launchpad identity: <b>UNVERIFIED unless an existing exact detector independently matches</b>`
     );
   }
+  if(candidate?.manualV4ExactMarketPoolV835){
+    const v835=candidate.manualV4ExactMarketPoolV835;
+    evidence.push(
+      `🧬 Manual V4 exact-pool V835: <b>${escapeHtml(v835?.status || "UNVERIFIED")}</b>${v835?.poolId ? ` | PoolId <code>${escapeHtml(v835.poolId)}</code>` : ""} | requests <b>${safeNumber(v835?.requestsUsed)}</b>`,
+      v835?.verified===true
+        ? `• V4 currencies: <code>${escapeHtml(v835?.tokenA || "UNVERIFIED")}</code> / <code>${escapeHtml(v835?.tokenB || "UNVERIFIED")}</code>`
+        : `• V4 exact-pool verification: <b>UNVERIFIED</b>`
+    );
+  }
   evidence.push(...manualRollingProgressLinesV572(candidate));
 
   if (v3) {
@@ -119804,6 +119988,20 @@ async function telegramFreshAnalyseV276(
 
   candidate.manualV3AutoStartV688 =
     manualV3AutoStartV688;
+
+  /* V835: when DexScreener has already returned an exact 32-byte pair id for
+   * this exact token, verify that one PoolId through Uniswap V4 Pool Info and
+   * seed only the isolated manual watched clone. No autonomous state/write. */
+  const manualV4ExactMarketPoolV835 =
+    await manualV4ExactMarketPoolHandoffV835(
+      env,
+      budget,
+      watched,
+      candidate
+    );
+
+  candidate.manualV4ExactMarketPoolV835 =
+    manualV4ExactMarketPoolV835;
 
   const manualLiveV4ResultV283 =
     await manualLiveV4EnrichmentV283(
