@@ -1,5 +1,12 @@
 /**
- * Robinhood Chain Meme Hunter — V826
+ * Robinhood Chain Meme Hunter — V827
+ *
+ * V827 REGRESSION REPAIR — EXACT-PAIR MARKET HANDOFF:
+ * - preserves the confirmed-working V825/V826 V3 exact-pool HTTP ledger unchanged;
+ * - if both manual DexScreener token-address routes return no usable target pair, /analyse may use the bot's already on-chain-verified V3 pool identity for one final exact-pair market lookup;
+ * - uses DexScreener's documented /latest/dex/pairs/{chainId}/{pairId} route and still requires exact requested-token matching before promoting market fields;
+ * - tightens the V826 token-pairs fallback so non-target rows cannot be admitted;
+ * - manual isolated budget only; no autonomous scanner request-limit, scoring, qualification, V3 ledger or 42-request-cap change.
  *
  * V826 REGRESSION REPAIR — MANUAL MARKET ENRICHMENT RECOVERY:
  * - preserves V825 exact-pool V3 ledger/USD upgrade logic unchanged;
@@ -60299,20 +60306,143 @@ async function marketData(
                 ? fallbackData
                 : [];
 
+            const exactFallbackPairsV827 =
+              fallbackPairs.filter(
+                row =>
+                  normalize(row?.baseToken?.address) === normalize(token) ||
+                  normalize(row?.quoteToken?.address) === normalize(token)
+              );
+
             if (
-              fallbackPairs.length
+              exactFallbackPairsV827.length
             ) {
               pairs.push(
-                ...fallbackPairs
+                ...exactFallbackPairsV827
               );
               service.lastStatus =
-                "VERIFIED_TOKEN_PAIRS_FALLBACK_V826";
+                "VERIFIED_TOKEN_PAIRS_FALLBACK_V827";
             }
           }
         }
 
         catch {
           /* Preserve the normal NO_MARKET_FOUND path below. */
+        }
+      }
+
+      /*
+       * V827 regression repair: /analyse may already possess a separately
+       * on-chain-verified Uniswap V3 pool identity even when DexScreener's
+       * token-address routes return zero usable rows. In that case use the
+       * documented exact-pair endpoint as the final market-enrichment route.
+       *
+       * This does NOT infer market data from the pool address. The address is
+       * only a lookup key; the returned DexScreener row must still contain the
+       * exact requested token as base or quote before any market fields can be
+       * promoted. The path is manual-only and consumes the isolated /analyse
+       * analysis budget.
+       */
+      if (
+        !pairs.length &&
+        state?.manualAnalyseTargetOnlyV825 === true
+      ) {
+        try {
+          const verifiedV3IdentityV827 =
+            await loadVerifiedV3PairIdentityV329(
+              env,
+              token
+            );
+
+          const exactPairV827 =
+            normalize(
+              verifiedV3IdentityV827?.record?.pairAddress
+            );
+
+          if (
+            verifiedV3IdentityV827?.valid === true &&
+            isAddress(exactPairV827) &&
+            consumeBudget(
+              budget,
+              "analysis",
+              "DEXSCREENER_EXACT_PAIR_FALLBACK_V827"
+            )
+          ) {
+            const exactPairResponseV827 =
+              await marketFetchV428(
+                `${DEXSCREENER_BASE}/latest/dex/pairs/robinhood/${exactPairV827}`,
+                {
+                  headers: {
+                    accept: "application/json"
+                  }
+                },
+                budget,
+                state,
+                {
+                  provider: "DEXSCREENER",
+                  feature: "DEX_MANUAL_EXACT_PAIR_FALLBACK_V827",
+                  phase: "analysis",
+                  pathClass: "LATEST_DEX_PAIRS_EXACT_V827"
+                }
+              );
+
+            if (
+              exactPairResponseV827.status === 429
+            ) {
+              registerDex429V147(
+                service,
+                exactPairResponseV827
+              );
+
+              markMarket429V157(
+                state,
+                "DEX"
+              );
+            }
+
+            else if (
+              exactPairResponseV827.ok
+            ) {
+              const exactPairPayloadV827 =
+                await exactPairResponseV827.json();
+
+              const exactPairRowsV827 =
+                Array.isArray(exactPairPayloadV827)
+                  ? exactPairPayloadV827
+                  : Array.isArray(exactPairPayloadV827?.pairs)
+                    ? exactPairPayloadV827.pairs
+                    : [];
+
+              const exactTargetRowsV827 =
+                exactPairRowsV827.filter(
+                  row =>
+                    normalize(row?.pairAddress) === exactPairV827 &&
+                    (
+                      normalize(row?.baseToken?.address) === normalize(token) ||
+                      normalize(row?.quoteToken?.address) === normalize(token)
+                    )
+                );
+
+              if (
+                exactTargetRowsV827.length
+              ) {
+                pairs.push(
+                  ...exactTargetRowsV827
+                );
+
+                service.lastStatus =
+                  "VERIFIED_EXACT_PAIR_FALLBACK_V827";
+
+                registerDexSuccessV147(
+                  service,
+                  "VERIFIED_EXACT_PAIR_FALLBACK_V827"
+                );
+              }
+            }
+          }
+        }
+
+        catch (_) {
+          /* Preserve the normal NO_MARKET_FOUND/fallback path below. */
         }
       }
 
@@ -60334,7 +60464,7 @@ async function marketData(
 
           source:
             state?.manualAnalyseTargetOnlyV825 === true
-              ? "DEXSCREENER_TOKENS_AND_TOKEN_PAIRS_V826"
+              ? "DEXSCREENER_TOKENS_TOKEN_PAIRS_AND_EXACT_PAIR_V827"
               : "DEXSCREENER_TOKENS_V1_NO_MARKET"
         };
 
