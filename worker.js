@@ -1,4 +1,20 @@
 /**
+ * Robinhood Chain Meme Hunter — V859
+ *
+ * V859 MANUAL COMPLETE EXACT-V4-POOL WINDOW HANDOFF — PRESERVE-FIRST:
+ * - builds directly from V858/V857's now-proven manual V4 USD recovery;
+ * - after V289 has verified active PoolId + ETH/USDG + exact-USD history,
+ *   /analyse invokes the EXISTING V458/V466 complete exact-PoolId verifier;
+ * - uses only the isolated manual state and remaining manual headroom;
+ * - V458/V466 keeps its existing strict completeness rules: timestamp->block
+ *   cutoff, exact PoolId filter, non-saturated ranges, every row exact-USD decodable;
+ * - if full exact-pool coverage is proven, the standard directional section may
+ *   use those verified V4 windows as a fallback after indexed feeds and before V3;
+ * - no partial/observed history is promoted to complete-window totals;
+ * - no request ceiling increase; V834 creation-proof reserve remains intact;
+ * - automatic V4/V212/V254/V458/scoring/qualification/Telegram behavior untouched.
+ */
+/**
  * Robinhood Chain Meme Hunter — V858
  *
  * V858 FINAL MANUAL HISTORY INSERT AUDIT — DIAGNOSTIC ONLY:
@@ -7379,7 +7395,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V858";
+const VERSION = "V859";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -87231,6 +87247,40 @@ function telegramMessage(
       }
     }
 
+    /*
+     * V859 complete exact-V4-pool presentation fallback.
+     * Only strict V458/V466 FULL exact-pool windows are eligible.
+     */
+    const v4Complete =
+      candidate?.completeExactPoolDirectionalUsdV458 || null;
+    const v4Row =
+      v4Complete?.verified === true &&
+      v4Complete?.flow?.verified === true
+        ? v4Complete?.flow?.windows?.[window]
+        : null;
+
+    if (
+      v4Row?.fullExactPoolCoverageVerified === true
+    ) {
+      const buy = Number(v4Row?.buyVolumeUsd);
+      const sell = Number(v4Row?.sellVolumeUsd);
+      const net = Number(v4Row?.netFlowUsd);
+
+      if (
+        [buy, sell, net].every(Number.isFinite) &&
+        buy >= 0 &&
+        sell >= 0
+      ) {
+        return {
+          verified:true,
+          buyUsd:money(buy),
+          sellUsd:money(sell),
+          netUsd:money(net),
+          source:"BLOCKSCOUT_COMPLETE_EXACT_V4_POOL_V859"
+        };
+      }
+    }
+
     /* V832 exact-pool V3 presentation fallback. */
     const v3Live = candidate?.liveV3WindowsV365 || null;
     const v3Identity = candidate?.nativeV3DirectionalV326 || null;
@@ -120560,7 +120610,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     const bh=v289aV853?.budgetAfterHistory||{};
     const refuse=v289aV853?.latestBudgetRefusal||null;
     evidence.push(
-      `💵 V289 exact-USD recovery audit V858: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
+      `💵 V289 exact-USD recovery audit V859: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
       `• Active PoolId into V289: <code>${escapeHtml(v289aV853.poolId || "UNVERIFIED")}</code> | live selected <code>${escapeHtml(v289aV853.liveSelectedPoolId || "UNVERIFIED")}</code> | live swaps <b>${safeNumber(v289aV853.liveSwaps)}</b>`,
       `• Quote into V289: <code>${escapeHtml(v289aV853.quoteTokenAddress || "UNVERIFIED")}</code>`,
       `• Budget before V289: <b>${safeNumber(bb.totalUsed)}/${safeNumber(bb.totalLimit)}</b> | after reference <b>${safeNumber(br.totalUsed)}/${safeNumber(br.totalLimit)}</b> | after history <b>${safeNumber(bh.totalUsed)}/${safeNumber(bh.totalLimit)}</b>`,
@@ -120573,6 +120623,19 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
         : `• History timestamp samples: <b>NONE</b>`,
       refuse ? `• Latest budget refusal at/after V289: <code>${escapeHtml(`${refuse.type||"UNKNOWN"}:${refuse.reason||"UNKNOWN"}`)}</code>` : `• Latest budget refusal at/after V289: <b>NONE</b>`,
       `• Diagnostic overhead: <b>ZERO provider requests · ZERO autonomous writes</b>`
+    );
+  }
+
+  const completeV4V859 =
+    candidate?.manualCompleteExactPoolV4V859 || null;
+  if (completeV4V859) {
+    evidence.push(
+      `🔒 Manual complete exact-V4-pool coverage V859: <b>${escapeHtml(completeV4V859.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(completeV4V859.requestsUsed)}</b>`,
+      `• PoolId: <code>${escapeHtml(completeV4V859.poolId || "UNVERIFIED")}</code> | provider <b>${escapeHtml(completeV4V859.provider || "UNVERIFIED")}</b>`,
+      `• Range: <b>${escapeHtml(String(completeV4V859.fromBlock ?? "UNVERIFIED"))} → ${escapeHtml(String(completeV4V859.toBlock ?? "UNVERIFIED"))}</b> | cutoff block <b>${escapeHtml(String(completeV4V859.cutoffBlock ?? "UNVERIFIED"))}</b>`,
+      `• Logs: <b>${safeNumber(completeV4V859.returnedLogs)}</b> | saturated <b>${completeV4V859.saturated === true ? "YES" : "NO"}</b> | every row exact USD <b>${completeV4V859.allReturnedRowsExactUsdDecoded === true ? "YES" : "NO"}</b>`,
+      `• Full exact-pool 24h coverage: <b>${completeV4V859.fullExactPool24hCoverageVerified === true ? "VERIFIED" : "UNVERIFIED"}</b> | verified windows <b>${escapeHtml((completeV4V859.verifiedWindows || []).join(", ") || "NONE")}</b>`,
+      `• Autonomous state: <b>UNCHANGED</b> · manual isolated state only`
     );
   }
 
@@ -121431,6 +121494,132 @@ async function telegramFreshAnalyseV276(
   candidate =
     manualVerifiedUsdRecoveryResultV289?.candidate ||
     candidate;
+
+  /*
+   * V859: use the EXISTING strict V458/V466 complete exact-pool verifier
+   * after V289. This runs only on the isolated manual clone and cannot mutate
+   * the autonomous watchlist/state.
+   */
+  let manualCompleteExactPoolV4V859 = {
+    enabled:true,
+    attempted:false,
+    verified:false,
+    status:"NOT_ELIGIBLE_V859",
+    requestsUsed:0,
+    fullExactPool24hCoverageVerified:false,
+    flow:null
+  };
+
+  const latestBlockV859 =
+    blockNumberFromAnyV180(
+      manualLiveV4ResultV283?.toBlock
+    );
+
+  const wethReferenceV859 =
+    manualVerifiedUsdRecoveryResultV289
+      ?.wethReferenceV289
+      ?.verified === true &&
+    Number.isFinite(
+      Number(
+        manualVerifiedUsdRecoveryResultV289
+          ?.wethReferenceV289
+          ?.priceUsdGPerWeth
+      )
+    ) &&
+    Number(
+      manualVerifiedUsdRecoveryResultV289
+        ?.wethReferenceV289
+        ?.priceUsdGPerWeth
+    ) > 0
+      ? {
+          verified:true,
+          source:
+            manualVerifiedUsdRecoveryResultV289
+              ?.wethReferenceV289
+              ?.source ||
+            "MANUAL_V289_VERIFIED_REFERENCE_V859",
+          priceUsdGPerWeth:
+            Number(
+              manualVerifiedUsdRecoveryResultV289
+                .wethReferenceV289
+                .priceUsdGPerWeth
+            )
+        }
+      : bestVerifiedWethUsdGReferenceV195(
+          isolatedState
+        );
+
+  if (
+    manualVerifiedUsdRecoveryResultV289?.verified === true &&
+    candidate?.validERC20 === true &&
+    candidate?.onChainPoolIdentityV153?.verified === true &&
+    Number.isFinite(latestBlockV859) &&
+    latestBlockV859 > 0 &&
+    wethReferenceV859?.verified === true &&
+    Number(wethReferenceV859?.priceUsdGPerWeth) > 0
+  ) {
+    manualCompleteExactPoolV4V859 =
+      await blockscoutCompleteExactPoolDirectionalUsdV458(
+        candidate,
+        budget,
+        isolatedState,
+        latestBlockV859,
+        wethReferenceV859,
+        env
+      );
+  }
+
+  candidate.completeExactPoolDirectionalUsdV458 =
+    manualCompleteExactPoolV4V859;
+
+  candidate.manualCompleteExactPoolV4V859 = {
+    attempted:
+      manualCompleteExactPoolV4V859?.attempted === true,
+    verified:
+      manualCompleteExactPoolV4V859?.verified === true,
+    status:
+      manualCompleteExactPoolV4V859?.status || null,
+    provider:
+      manualCompleteExactPoolV4V859?.provider || null,
+    poolId:
+      normalize(
+        manualCompleteExactPoolV4V859?.poolId
+      ) || null,
+    requestsUsed:
+      safeNumber(
+        manualCompleteExactPoolV4V859?.requestsUsed
+      ),
+    cutoffBlock:
+      manualCompleteExactPoolV4V859?.cutoffBlock ?? null,
+    fromBlock:
+      manualCompleteExactPoolV4V859?.fromBlock ?? null,
+    toBlock:
+      manualCompleteExactPoolV4V859?.toBlock ?? null,
+    returnedLogs:
+      safeNumber(
+        manualCompleteExactPoolV4V859?.returnedLogs
+      ),
+    saturated:
+      manualCompleteExactPoolV4V859?.saturated === true,
+    allReturnedRowsExactUsdDecoded:
+      manualCompleteExactPoolV4V859
+        ?.allReturnedRowsExactUsdDecoded === true,
+    fullExactPool24hCoverageVerified:
+      manualCompleteExactPoolV4V859
+        ?.fullExactPool24hCoverageVerified === true,
+    verifiedWindows:
+      Array.isArray(
+        manualCompleteExactPoolV4V859
+          ?.flow
+          ?.verifiedWindows
+      )
+        ? manualCompleteExactPoolV4V859.flow.verifiedWindows
+        : [],
+    paginationV461:
+      manualCompleteExactPoolV4V859?.paginationV461 || null,
+    multiScanProgressV466:
+      manualCompleteExactPoolV4V859?.multiScanProgressV466 || null
+  };
 
   candidate.manualV289AuditV853 = candidate.manualV289AuditV853 || {
     ...(manualVerifiedUsdRecoveryResultV289?.auditV853 || {}),
