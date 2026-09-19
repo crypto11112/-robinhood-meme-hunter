@@ -1,4 +1,18 @@
 /**
+ * Robinhood Chain Meme Hunter — V839
+ *
+ * V839 DIRECT TOKEN-INDEXED V4 INITIALIZE LOCATOR — PRESERVE-FIRST:
+ * - builds directly from V838 while preserving V834's two-request manual creation-proof reserve;
+ * - replaces manual active-PoolId brute-force paging with two exact PoolManager Initialize topic filters:
+ *   currency0 == analysed token and currency1 == analysed token;
+ * - the first three Initialize parameters are indexed, so PoolManager itself becomes the token→PoolId locator;
+ * - searches one bounded recent block range and accepts only logs decoded by the existing decodeInitialize();
+ * - verifies only returned PoolIds through one Uniswap V4 Pool Info request before hydrating manual identity;
+ * - existing V283 exact-pool live swap check remains authoritative after identity;
+ * - DexScreener is not used for V4 identity; no autonomous watchlist/poolRegistry mutation;
+ * - V3, V833 directional USD, launch proof, scoring, thresholds and hard request ceilings are unchanged.
+ */
+/**
  * Robinhood Chain Meme Hunter — V838
  *
  * V838 RESUMABLE MANUAL V4 ACTIVE-POOL DISCOVERY — PRESERVE-FIRST:
@@ -117139,6 +117153,90 @@ async function manualResumableV4DiscoveryV838(env,budget,state,watched,candidate
   return {...base,status:"EXACT_TOKEN_POOL_FOUND_BUT_QUOTE_IDENTITY_NOT_ELIGIBLE_V838",error:strictIdentity?.status||null};
 }
 
+
+/* =========================================================
+   V839 DIRECT TOKEN-INDEXED V4 INITIALIZE LOCATOR
+   ========================================================= */
+function v4IndexedAddressTopicV839(address) {
+  const a=normalize(address);
+  return isAddress(a) ? `0x${a.slice(2).padStart(64,"0")}` : null;
+}
+
+async function manualDirectTokenIndexedV4V839(env,budget,state,watched,candidate) {
+  const token=normalize(candidate?.address || watched?.address);
+  const base={attempted:false,verified:false,status:"NOT_ATTEMPTED_V839",tokenAddress:isAddress(token)?token:null,fromBlock:null,toBlock:null,currency0Rows:0,currency1Rows:0,decodedMatches:0,candidatePoolIds:[],uniswapPoolsReturned:0,exactMatches:0,selectedPoolId:null,quoteTokenAddress:null,requestsUsed:0,autonomousWatchlistMutated:false,error:null};
+  if(!isAddress(token)||token===ZERO) return {...base,status:"INVALID_TOKEN_V839"};
+  if(candidate?.onChainPoolIdentityV153?.verified===true && isBytes32HexV765(normalize(candidate?.onChainPoolIdentityV153?.poolId))) return {...base,verified:true,status:"ALREADY_VERIFIED_V4_IDENTITY_V839",selectedPoolId:normalize(candidate.onChainPoolIdentityV153.poolId)};
+
+  const topicToken=v4IndexedAddressTopicV839(token);
+  if(!topicToken) return {...base,status:"TOKEN_TOPIC_ENCODING_FAILED_V839"};
+  const rpcEndpoint=v4PoolLiveRpcEndpointV767(env);
+
+  if(!consumeBudget(budget,"analysis","V839_MANUAL_V4_HEAD",1)) return {...base,status:"V834_RESERVE_OR_BUDGET_BLOCKED_BEFORE_V4_HEAD_V839"};
+  base.requestsUsed++;base.attempted=true;
+  const head=await v4PoolLiveRpcCallV767(rpcEndpoint.url,"eth_blockNumber",[]);
+  if(!head?.ok) return {...base,status:"V4_HEAD_FAILED_V839",error:head?.error||"HEAD_FAILED"};
+  const headNum=Number.parseInt(String(head.result||"0x0"),16);
+  if(!Number.isFinite(headNum)||headNum<=0) return {...base,status:"V4_HEAD_UNVERIFIED_V839"};
+
+  // Exact indexed-topic filtering is dramatically narrower than generic Initialize scans.
+  // 750k blocks is bounded and recent; if the provider refuses the range, V839 reports it
+  // explicitly rather than silently falling back to unrelated-pool brute force.
+  const LOOKBACK_BLOCKS_V839=750000;
+  const from=Math.max(0,headNum-LOOKBACK_BLOCKS_V839+1);
+  base.fromBlock=from;base.toBlock=headNum;
+
+  const found=[];const seen=new Set();
+  const run=async(topics,label)=>{
+    if(!consumeBudget(budget,"analysis",`V839_TOKEN_INDEXED_INITIALIZE_${label}`,1)) return {ok:false,budgetBlocked:true,error:"BUDGET_BLOCKED"};
+    base.requestsUsed++;
+    const r=await v4PoolLiveRpcCallV767(rpcEndpoint.url,"eth_getLogs",[{address:normalize(POOL_MANAGER),fromBlock:`0x${from.toString(16)}`,toBlock:`0x${headNum.toString(16)}`,topics}]);
+    if(!r?.ok) return {ok:false,error:r?.error||"RPC_FAILED",rows:[]};
+    return {ok:true,rows:Array.isArray(r.result)?r.result:[]};
+  };
+
+  const c0=await run([INITIALIZE_TOPIC,null,topicToken],"CURRENCY0");
+  if(c0?.budgetBlocked) return {...base,status:"V834_RESERVE_OR_BUDGET_BLOCKED_CURRENCY0_V839"};
+  if(!c0?.ok) return {...base,status:"TOKEN_INDEXED_CURRENCY0_RPC_FAILED_V839",error:c0?.error||null};
+  base.currency0Rows=c0.rows.length;
+
+  const c1=await run([INITIALIZE_TOPIC,null,null,topicToken],"CURRENCY1");
+  if(c1?.budgetBlocked) return {...base,status:"V834_RESERVE_OR_BUDGET_BLOCKED_CURRENCY1_V839"};
+  if(!c1?.ok) return {...base,status:"TOKEN_INDEXED_CURRENCY1_RPC_FAILED_V839",error:c1?.error||null};
+  base.currency1Rows=c1.rows.length;
+
+  for(const log of [...c0.rows,...c1.rows]){
+    const d=decodeInitialize(log);if(!d) continue;
+    const a=normalize(d?.currency0),b=normalize(d?.currency1),pid=normalize(d?.poolId);
+    if((a!==token&&b!==token)||!isBytes32HexV765(pid)||seen.has(pid)) continue;
+    seen.add(pid);found.push({poolId:pid,currency0:a,currency1:b,decoded:d});
+  }
+  base.decodedMatches=found.length;base.candidatePoolIds=found.map(x=>x.poolId);
+  if(!found.length) return {...base,status:"NO_TOKEN_INDEXED_V4_INITIALIZE_IN_BOUNDED_RANGE_V839"};
+
+  // One exact verification request only. Uniswap is the identity verifier; RPC logs are locator evidence.
+  const ids=found.map(x=>x.poolId).slice(0,20);
+  if(!consumeBudget(budget,"analysis","UNISWAP_V4_TOKEN_INDEXED_VERIFY_V839",1)) return {...base,status:"V834_RESERVE_OR_BUDGET_BLOCKED_BEFORE_UNISWAP_V839"};
+  base.requestsUsed++;
+  const lookup=await v4PoolInfoBatchV767(env,ids);
+  base.uniswapPoolsReturned=Array.isArray(lookup?.pools)?lookup.pools.length:0;
+  if(lookup?.ok!==true) return {...base,status:"UNISWAP_POOL_INFO_UNVERIFIED_V839",error:lookup?.error||"UNISWAP_POOL_INFO_FAILED"};
+
+  const matches=(lookup.pools||[]).filter(row=>{
+    const pid=normalize(row?.poolId),a=normalize(row?.tokenA),b=normalize(row?.tokenB);
+    return ids.includes(pid)&&(a===token||b===token);
+  });
+  base.exactMatches=matches.length;
+  if(!matches.length) return {...base,status:"TOKEN_INDEXED_POOLIDS_NOT_CONFIRMED_BY_UNISWAP_V839"};
+  matches.sort((a,b)=>{const qa=normalize(a?.tokenA)===token?normalize(a?.tokenB):normalize(a?.tokenA),qb=normalize(b?.tokenA)===token?normalize(b?.tokenB):normalize(b?.tokenA);return((qb===ZERO||knownQuote(qb))?1:0)-((qa===ZERO||knownQuote(qa))?1:0);});
+  const selected=matches[0],poolId=normalize(selected?.poolId),currency0=normalize(selected?.tokenA),currency1=normalize(selected?.tokenB),quoteTokenAddress=currency0===token?currency1:currency0;
+  base.selectedPoolId=poolId;base.quoteTokenAddress=quoteTokenAddress||null;
+  v254MergeResolvedPoolIntoWatch(watched,{poolId,currency0,currency1,fee:selected?.fee??null,tickSpacing:selected?.tickSpacing??null,source:"UNISWAP_POOL_INFO_TOKEN_INDEXED_MANUAL_V839"});
+  const strictIdentity=exactCandidatePoolIdentityV257(watched,poolId);
+  if(strictIdentity?.verified===true){candidate.onChainPoolIdentityV153={...strictIdentity,source:"UNISWAP_POOL_INFO_TOKEN_INDEXED_MANUAL_V839"};return {...base,verified:true,status:"EXACT_V4_POOL_VERIFIED_BY_TOKEN_INDEXED_UNISWAP_V839",quoteTokenAddress:normalize(strictIdentity?.quoteTokenAddress)||quoteTokenAddress||null};}
+  return {...base,status:"EXACT_TOKEN_POOL_FOUND_BUT_QUOTE_IDENTITY_NOT_ELIGIBLE_V839",error:strictIdentity?.status||null};
+}
+
 /* =========================================================
    V283 MANUAL EXACT-POOL LIVE V4 ENRICHMENT
    ========================================================= */
@@ -119244,6 +119342,16 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       `• Manual-state mutation: <b>ISOLATED ONLY</b> | autonomous watchlist <b>UNCHANGED</b>`
     );
   }
+  const mv4V839=candidate?.manualV4DirectIndexedV839 || null;
+  if (mv4V839) {
+    evidence.push(
+      `🎯 Manual V4 token-indexed locator V839: <b>${escapeHtml(mv4V839.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(mv4V839.requestsUsed)}</b>`,
+      `• Search blocks: <b>${escapeHtml(String(mv4V839.fromBlock??"UNVERIFIED"))}→${escapeHtml(String(mv4V839.toBlock??"UNVERIFIED"))}</b> | currency0 rows <b>${safeNumber(mv4V839.currency0Rows)}</b> | currency1 rows <b>${safeNumber(mv4V839.currency1Rows)}</b>`,
+      `• Decoded token pools: <b>${safeNumber(mv4V839.decodedMatches)}</b> | Uniswap pools returned <b>${safeNumber(mv4V839.uniswapPoolsReturned)}</b> | exact matches <b>${safeNumber(mv4V839.exactMatches)}</b>`,
+      mv4V839?.selectedPoolId ? `• Exact V4 PoolId: <code>${escapeHtml(mv4V839.selectedPoolId)}</code> | identity <b>${mv4V839.verified===true ? "VERIFIED" : "UNVERIFIED"}</b>` : `• Exact V4 PoolId: <b>UNVERIFIED</b>`,
+      `• V4 identity source: <b>POOLMANAGER INDEXED INITIALIZE → UNISWAP VERIFY</b>`
+    );
+  }
   const mv4V838=candidate?.manualV4ResumableV838 || null;
   if (mv4V838) {
     evidence.push(
@@ -120095,9 +120203,18 @@ async function telegramFreshAnalyseV276(
   candidate.manualV4TargetedUniswapV837 =
     manualV4TargetedUniswapV837;
 
-  const manualV4ResumableV838 = await manualResumableV4DiscoveryV838(
+  const manualV4DirectIndexedV839 = await manualDirectTokenIndexedV4V839(
     env,budget,isolatedState,watched,candidate
   );
+  candidate.manualV4DirectIndexedV839 = manualV4DirectIndexedV839;
+
+  /* V839 supersedes V838 brute-force paging in /analyse. Keep the old helper in
+   * source for diagnostics/history, but spend zero requests on it here. */
+  const manualV4ResumableV838 = {
+    attempted:false, verified:false, status:"SKIPPED_SUPERSEDED_BY_TOKEN_INDEXED_V839",
+    snapshotPoolIds:0,startOffset:0,checkedThisRun:0,nextOffset:0,uniswapBatches:0,
+    uniswapPoolsReturned:0,exactMatches:0,selectedPoolId:null,requestsUsed:0,progressPersisted:false
+  };
   candidate.manualV4ResumableV838 = manualV4ResumableV838;
 
   const manualLiveV4ResultV283 =
