@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V866
+ *
+ * V866 ADAPTIVE TRUSTED-START V4 RANGE WALKER:
+ * - builds directly from V865;
+ * - preserves the V865 /v4completeaudit diagnostic and all V863 production behaviour;
+ * - changes ONLY V466 calls that already have a verified trusted Pool Initialize block;
+ * - replaces repeated large-parent binary probing with a forward adaptive chunk walker;
+ * - starts conservatively at 512 blocks from the verified Initialize block;
+ * - after every completed non-saturated chunk, sizes the next chunk from observed
+ *   exact-pool row density, targeting ~750 rows and allowing bounded growth up to 8x;
+ * - saturated chunks are still split safely; only the rightmost child continues
+ *   the forward walker, preventing overlap or gaps;
+ * - exact PoolId, 1,000-row saturation, exact-USD decoding, gap-free coverage,
+ *   request ceilings and UNVERIFIED-on-incomplete-evidence rules are unchanged;
+ * - automatic V4 callers without a trusted start block retain the existing V466 path.
+ */
+/**
  * Robinhood Chain Meme Hunter — V865
  *
  * V865 ISOLATED V4 COMPLETE-HISTORY AUDIT:
@@ -7476,7 +7493,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V865";
+const VERSION = "V866";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -43161,6 +43178,16 @@ async function v4CompleteAuditV865(env, requestedToken="") {
     pendingRanges:safeNumber(v466?.multiScanProgressV466?.pendingRanges),
     logRequestsUsed:safeNumber(v466?.paginationV461?.logRequestsUsed),
     stoppedReason:v466?.paginationV461?.stoppedReason||null,
+    adaptiveTrustedWalkerV866:
+      v466?.paginationV461?.adaptiveTrustedWalkerV866 === true,
+    adaptiveChunksCompletedV866:
+      safeNumber(
+        v466?.paginationV461?.adaptiveChunksCompletedV866
+      ),
+    adaptiveInitialSpanV866:
+      safeNumber(
+        v466?.paginationV461?.adaptiveInitialSpanV866
+      ),
     verifiedWindows:Array.isArray(v466?.flow?.verifiedWindows)
       ? v466.flow.verifiedWindows
       : []
@@ -43217,6 +43244,7 @@ function v4CompleteAuditTelegramV865(result) {
     "4️⃣ <b>V466 exact-pool completion</b>",
     `Status: <b>${escapeHtml(String(r?.v466?.status||"UNVERIFIED"))}</b>`,
     `V466 requests / log requests: <b>${safeNumber(r?.v466?.requestsUsed)} / ${safeNumber(r?.v466?.logRequestsUsed)}</b>`,
+    `V866 adaptive walker: <b>${r?.v466?.adaptiveTrustedWalkerV866===true?"YES":"NO"}</b> · completed adaptive chunks <b>${safeNumber(r?.v466?.adaptiveChunksCompletedV866)}</b> · initial span <b>${safeNumber(r?.v466?.adaptiveInitialSpanV866)}</b>`,
     `Completed / pending ranges: <b>${safeNumber(r?.v466?.completedRanges)} / ${safeNumber(r?.v466?.pendingRanges)}</b>`,
     `Returned exact-pool rows: <b>${safeNumber(r?.v466?.returnedLogs)}</b>`,
     `All decoded exact USD: <b>${r?.v466?.allReturnedRowsExactUsdDecoded===true?"YES":"NO"}</b>`,
@@ -83250,6 +83278,8 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
   let returnedLogsThisScan = 0;
   let initialFanoutRangesV465 = 0;
   let preSplitTrustedLifetimeV862 = false;
+  let adaptiveTrustedWalkerV866 = false;
+  let adaptiveChunksCompletedV866 = 0;
   let resumed = false;
 
   if (progress) {
@@ -83479,34 +83509,33 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
       fromBlock < toBlock
     ) {
       /*
-       * V862 manual-only optimization:
-       * V841 already proved the exact Initialize lower bound and V860/V861
-       * proved that the whole parent range saturates. Skip that parent request
-       * and spend both useful requests on two contiguous child ranges.
+       * V866 trusted-start strategy:
+       * V865 proved that repeatedly halving a huge saturated parent burns most
+       * of the nine V466 requests before useful coverage begins. Start with a
+       * conservative exact-pool chunk and then walk forward, learning the next
+       * span from the observed exact-pool row density.
        */
-      const midpointV862 =
-        Math.floor(
-          fromBlock +
-          ((toBlock - fromBlock) / 2)
+      const initialSpanV866 =
+        Math.min(
+          512,
+          Math.max(1, toBlock - fromBlock + 1)
         );
 
-      pending.push(
-        {
-          fromBlock,
-          toBlock:midpointV862,
-          fanoutV465:true,
-          preSplitV862:true
-        },
-        {
-          fromBlock:midpointV862 + 1,
-          toBlock,
-          fanoutV465:true,
-          preSplitV862:true
-        }
-      );
+      pending.push({
+        fromBlock,
+        toBlock:
+          Math.min(
+            toBlock,
+            fromBlock + initialSpanV866 - 1
+          ),
+        adaptiveV866:true,
+        adaptiveContinueV866:true,
+        adaptiveSpanV866:initialSpanV866
+      });
 
-      initialFanoutRangesV465 = 2;
-      preSplitTrustedLifetimeV862 = true;
+      initialFanoutRangesV465 = 1;
+      preSplitTrustedLifetimeV862 = false;
+      adaptiveTrustedWalkerV866 = true;
     } else {
       const first = await fetchRangeV466(fromBlock, toBlock);
       if (!first.ok) {
@@ -83593,14 +83622,73 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
 
     if (result.saturated) {
       saturatedRangesThisScan++;
-      const split = splitRangeForResumeV466(range);
-      if (split.length === 1 && split[0]?.terminalSingleBlockV466 === true) {
-        pending.unshift(split[0]);
-        stopReason = "SINGLE_BLOCK_RANGE_SATURATED_V466";
-        progress.allRowsExactUsdDecodedV466 = false;
-        break;
+
+      if (range?.adaptiveV866 === true) {
+        const leftFrom =
+          blockNumberFromAnyV180(range.fromBlock);
+        const rightTo =
+          blockNumberFromAnyV180(range.toBlock);
+
+        if (
+          !Number.isFinite(leftFrom) ||
+          !Number.isFinite(rightTo) ||
+          leftFrom >= rightTo
+        ) {
+          pending.unshift({
+            ...range,
+            terminalSingleBlockV466:true
+          });
+          stopReason =
+            "SINGLE_BLOCK_RANGE_SATURATED_V466";
+          progress.allRowsExactUsdDecodedV466 = false;
+          break;
+        }
+
+        const midpointV866 =
+          Math.floor(
+            leftFrom +
+            ((rightTo - leftFrom) / 2)
+          );
+
+        pending.unshift(
+          {
+            fromBlock:leftFrom,
+            toBlock:midpointV866,
+            adaptiveV866:true,
+            adaptiveContinueV866:false,
+            adaptiveSpanV866:
+              midpointV866 - leftFrom + 1,
+            resumedSplitV466:true
+          },
+          {
+            fromBlock:midpointV866 + 1,
+            toBlock:rightTo,
+            adaptiveV866:true,
+            adaptiveContinueV866:
+              range?.adaptiveContinueV866 === true,
+            adaptiveSpanV866:
+              rightTo - midpointV866,
+            resumedSplitV466:true
+          }
+        );
+      } else {
+        const split =
+          splitRangeForResumeV466(range);
+
+        if (
+          split.length === 1 &&
+          split[0]?.terminalSingleBlockV466 === true
+        ) {
+          pending.unshift(split[0]);
+          stopReason =
+            "SINGLE_BLOCK_RANGE_SATURATED_V466";
+          progress.allRowsExactUsdDecodedV466 = false;
+          break;
+        }
+
+        pending.unshift(...split);
       }
-      pending.unshift(...split);
+
       continue;
     }
 
@@ -83626,6 +83714,97 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
     if (completedRanges.length > V466_EXACT_POOL_PROGRESS_MAX_COMPLETED_RANGES) {
       completedRanges = completedRanges.slice(-V466_EXACT_POOL_PROGRESS_MAX_COMPLETED_RANGES);
     }
+
+    if (
+      range?.adaptiveV866 === true &&
+      range?.adaptiveContinueV866 === true &&
+      Number.isFinite(toBlock) &&
+      range.toBlock < toBlock
+    ) {
+      adaptiveTrustedWalkerV866 = true;
+      adaptiveChunksCompletedV866++;
+
+      const currentSpanV866 =
+        Math.max(
+          1,
+          safeNumber(
+            range?.adaptiveSpanV866 ||
+            (range.toBlock - range.fromBlock + 1)
+          )
+        );
+
+      const observedRowsV866 =
+        Math.max(
+          0,
+          safeNumber(result.rows?.length)
+        );
+
+      const targetRowsV866 = 750;
+      let nextSpanV866;
+
+      if (observedRowsV866 <= 0) {
+        nextSpanV866 =
+          currentSpanV866 * 8;
+      } else {
+        nextSpanV866 =
+          Math.floor(
+            currentSpanV866 *
+            (targetRowsV866 / observedRowsV866)
+          );
+
+        if (observedRowsV866 < 125) {
+          nextSpanV866 =
+            Math.max(
+              nextSpanV866,
+              currentSpanV866 * 4
+            );
+        } else if (observedRowsV866 < 300) {
+          nextSpanV866 =
+            Math.max(
+              nextSpanV866,
+              currentSpanV866 * 2
+            );
+        }
+      }
+
+      nextSpanV866 =
+        Math.max(
+          64,
+          Math.min(
+            currentSpanV866 * 8,
+            nextSpanV866
+          )
+        );
+
+      const nextFromV866 =
+        range.toBlock + 1;
+
+      const remainingBlocksV866 =
+        Math.max(
+          1,
+          toBlock - nextFromV866 + 1
+        );
+
+      nextSpanV866 =
+        Math.min(
+          nextSpanV866,
+          remainingBlocksV866
+        );
+
+      pending.unshift({
+        fromBlock:nextFromV866,
+        toBlock:
+          Math.min(
+            toBlock,
+            nextFromV866 + nextSpanV866 - 1
+          ),
+        adaptiveV866:true,
+        adaptiveContinueV866:true,
+        adaptiveSpanV866:nextSpanV866,
+        adaptiveRowsObservedV866:
+          observedRowsV866
+      });
+    }
   }
 
   if (pending.length && !stopReason && logRequestsUsed >= VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461) {
@@ -83639,7 +83818,14 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
     preSplitV862:r?.preSplitV862 === true,
     resumedSplitV466:r?.resumedSplitV466 === true,
     retryV466:r?.retryV466 === true,
-    terminalSingleBlockV466:r?.terminalSingleBlockV466 === true
+    terminalSingleBlockV466:r?.terminalSingleBlockV466 === true,
+    adaptiveV866:r?.adaptiveV866 === true,
+    adaptiveContinueV866:
+      r?.adaptiveContinueV866 === true,
+    adaptiveSpanV866:
+      safeNumber(r?.adaptiveSpanV866),
+    adaptiveRowsObservedV866:
+      safeNumber(r?.adaptiveRowsObservedV866)
   })).filter(r => Number.isFinite(r.fromBlock) && Number.isFinite(r.toBlock) && r.fromBlock <= r.toBlock);
   progress.completedRangesV466 = completedRanges;
   progress.updatedAt = Date.now();
@@ -83720,7 +83906,14 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
       stoppedReason:verified ? null : status,
       fanoutFirstV465:!resumed,
       initialFanoutRangesV465,
-      binaryTreePrimaryStrategyV465:false,
+      binaryTreePrimaryStrategyV465:
+        adaptiveTrustedWalkerV866 !== true,
+      adaptiveTrustedWalkerV866,
+      adaptiveChunksCompletedV866,
+      adaptiveInitialSpanV866:
+        adaptiveTrustedWalkerV866 === true
+          ? 512
+          : 0,
       persistedAcrossScansV466:true,
       resumedV466:resumed,
       preSplitTrustedLifetimeV862
