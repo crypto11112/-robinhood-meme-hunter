@@ -1,4 +1,17 @@
 /**
+ * Robinhood Chain Meme Hunter — V822
+ *
+ * V822 EVIDENCE-COMPLETION PRIORITY / BUDGET ISOLATION:
+ * - builds directly forward from V821 and preserves all confirmed V821 scanner, V4, V254, scoring, qualification and Telegram behaviour;
+ * - expands the existing V728/V730 completion reservation from one generic slot to at most TWO existing slots when real headroom exists: one FLOW slot and one FOUNDATION slot;
+ * - FLOW is reserved for GECKOTERMINAL_DIRECTIONAL_TRADES so market/launch-age fallback work cannot consume the only protected directional opportunity first;
+ * - FOUNDATION remains available to the already-authorised CoinGecko/CoinMarketCap market completion and exact block-timestamp recovery requests;
+ * - if only one real slot exists, FLOW wins; no request ceiling is raised and the hard global limit remains 42;
+ * - after the V175/V151 directional stage finishes, any unused FLOW slot is explicitly released so later V254/holder/V258 work is not needlessly starved;
+ * - the reserve is armed for any non-empty analysis queue, not only a current-live verified-launch cohort, so mature candidates can benefit from evidence completion too;
+ * - adds V822 reserve telemetry including per-class consumed counts, releases and blocked lower-priority requests;
+ * - no inferred USD, no score/threshold changes, no provider added, no extra request allowance.
+ *
  * Robinhood Chain Meme Hunter — V816
  *
  * V817 RANKED ZERO-SWAP COVERAGE RESCUE:
@@ -7000,7 +7013,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V821";
+const VERSION = "V822";
 /*
  * V821 PERSISTENT FAIR RESCUE SCHEDULING
  * - Builds forward from the confirmed V819 production V4 fairness path and
@@ -13543,7 +13556,14 @@ function createBudget() {
         hardRequestLimitRaised: false,
         analysisLimitRaised: false,
         notificationReserveChanged: false,
-        rule: "ONE_PRE_TELEGRAM_MARKET_OR_EVIDENCE_COMPLETION_SLOT_FOR_CURRENT_LIVE_VERIFIED_LAUNCH_V729"
+        flowReservedRequestsV822: 0,
+        foundationReservedRequestsV822: 0,
+        flowConsumedV822: 0,
+        foundationConsumedV822: 0,
+        flowReleasedUnusedV822: 0,
+        flowReleasedAtV822: null,
+        flowReleaseReasonV822: null,
+        rule: "V822_TWO_CLASS_EVIDENCE_COMPLETION_RESERVE_FLOW_FIRST_WITHIN_EXISTING_BUDGET"
       },
 
       directionalWatchReserveV553: {
@@ -16596,29 +16616,56 @@ function configureEvidenceCompletionReserveV728(
 
   if (!r) return null;
 
+  const enabled = active === true;
+  const canFundTwo = enabled && budgetAvailable(budget, "analysis", 2);
+  const canFundOne = enabled && budgetAvailable(budget, "analysis", 1);
+
+  /*
+   * V822: isolate one FLOW slot from one FOUNDATION slot, but only from
+   * headroom that already exists.  Nothing here raises analysis/global caps.
+   * If only one request remains, directional FLOW owns it because the audit
+   * showed directional completion was almost completely starved.
+   */
+  const totalReserved = canFundTwo ? 2 : (canFundOne ? 1 : 0);
+
   r.enabled = true;
-  r.active = active === true;
-  r.initialReservedRequests = r.active ? 1 : 0;
-  r.reservedRequests = r.active ? 1 : 0;
+  r.active = totalReserved > 0;
+  r.initialReservedRequests = totalReserved;
+  r.reservedRequests = totalReserved;
+  r.flowReservedRequestsV822 = totalReserved > 0 ? 1 : 0;
+  r.foundationReservedRequestsV822 = totalReserved > 1 ? 1 : 0;
+  r.flowConsumedV822 = 0;
+  r.foundationConsumedV822 = 0;
+  r.flowReleasedUnusedV822 = 0;
+  r.flowReleasedAtV822 = null;
+  r.flowReleaseReasonV822 = null;
   r.configuredAt = Date.now();
   r.releaseReason = r.active
     ? null
-    : "NO_CURRENT_LIVE_VERIFIED_LAUNCH_V728";
+    : (enabled
+        ? "NO_REAL_EVIDENCE_COMPLETION_HEADROOM_V822"
+        : "NO_ANALYSIS_QUEUE_V822");
   r.hardRequestLimitRaised = false;
   r.analysisLimitRaised = false;
   r.notificationReserveChanged = false;
+  r.rule = "V822_TWO_CLASS_EVIDENCE_COMPLETION_RESERVE_FLOW_FIRST_WITHIN_EXISTING_BUDGET";
 
   return r;
 }
 
-function evidenceCompletionRequestV728(type) {
+function evidenceCompletionClassV822(type) {
   const key = String(type || "");
-  return Boolean(
+  if (key === "GECKOTERMINAL_DIRECTIONAL_TRADES") return "FLOW";
+  if (
     key === "RPC:eth_getBlockByNumber" ||
-    key === "GECKOTERMINAL_DIRECTIONAL_TRADES" ||
     key === "COINGECKO_DEMO_FALLBACK_V660" ||
     key === "COINMARKETCAP_FALLBACK_V739"
-  );
+  ) return "FOUNDATION";
+  return null;
+}
+
+function evidenceCompletionRequestV728(type) {
+  return evidenceCompletionClassV822(type) !== null;
 }
 
 function preTelegramGlobalLimitV728(budget) {
@@ -16646,20 +16693,23 @@ function evidenceCompletionReserveAvailableV730(
   const r =
     budget?.analysis?.evidenceCompletionReserveV728;
 
-  const needed =
-    Math.max(
-      1,
-      safeNumber(amount)
-    );
+  const needed = Math.max(1, safeNumber(amount));
+  const requestClass = evidenceCompletionClassV822(type);
 
   if (
     r?.enabled !== true ||
     r?.active !== true ||
-    safeNumber(r?.reservedRequests) < needed ||
-    evidenceCompletionRequestV728(type) !== true
+    requestClass === null
   ) {
     return false;
   }
+
+  const classRemaining =
+    requestClass === "FLOW"
+      ? safeNumber(r?.flowReservedRequestsV822)
+      : safeNumber(r?.foundationReservedRequestsV822);
+
+  if (classRemaining < needed) return false;
 
   return (
     safeNumber(budget?.totalUsed) + needed <=
@@ -16687,59 +16737,116 @@ function tryConsumeEvidenceCompletionReserveV728(
   }
 
   const needed = Math.max(1, safeNumber(amount));
-  const allowed = evidenceCompletionRequestV728(type);
+  const requestClass = evidenceCompletionClassV822(type);
   const limit = preTelegramGlobalLimitV728(budget);
 
-  if (allowed) {
-    if (
-      needed > safeNumber(r.reservedRequests) ||
-      safeNumber(budget?.totalUsed) + needed > limit
-    ) {
-      return null;
+  if (requestClass !== null) {
+    const classKey =
+      requestClass === "FLOW"
+        ? "flowReservedRequestsV822"
+        : "foundationReservedRequestsV822";
+
+    const classRemaining = safeNumber(r?.[classKey]);
+
+    /*
+     * A FOUNDATION request may use only its own slot while FLOW is protected.
+     * If no FOUNDATION slot was available at configuration, it falls through
+     * to normal budget accounting rather than stealing FLOW.
+     */
+    if (classRemaining >= needed) {
+      if (safeNumber(budget?.totalUsed) + needed > limit) return null;
+
+      budget.totalUsed += needed;
+      budget.analysis.used += needed;
+      r[classKey] = Math.max(0, classRemaining - needed);
+      r.reservedRequests = Math.max(0, safeNumber(r.reservedRequests) - needed);
+      r.consumed = safeNumber(r.consumed) + needed;
+      r.consumedTypes =
+        r.consumedTypes && typeof r.consumedTypes === "object"
+          ? r.consumedTypes
+          : {};
+      const key = String(type || "UNKNOWN");
+      r.consumedTypes[key] = safeNumber(r.consumedTypes[key]) + needed;
+      r.lastConsumedType = key;
+      r.lastConsumedAt = Date.now();
+
+      if (requestClass === "FLOW") {
+        r.flowConsumedV822 = safeNumber(r.flowConsumedV822) + needed;
+      } else {
+        r.foundationConsumedV822 = safeNumber(r.foundationConsumedV822) + needed;
+      }
+
+      if (r.reservedRequests <= 0) {
+        r.active = false;
+        r.releasedAt = Date.now();
+        r.releaseReason = "V822_EVIDENCE_COMPLETION_SLOTS_CONSUMED";
+      }
+      return true;
     }
 
-    budget.totalUsed += needed;
-    budget.analysis.used += needed;
-    r.reservedRequests = Math.max(
-      0,
-      safeNumber(r.reservedRequests) - needed
-    );
-    r.consumed = safeNumber(r.consumed) + needed;
-    r.consumedTypes =
-      r.consumedTypes && typeof r.consumedTypes === "object"
-        ? r.consumedTypes
-        : {};
-    const key = String(type || "UNKNOWN");
-    r.consumedTypes[key] = safeNumber(r.consumedTypes[key]) + needed;
-    r.lastConsumedType = key;
-    r.lastConsumedAt = Date.now();
-    if (r.reservedRequests <= 0) {
-      r.active = false;
-      r.releasedAt = Date.now();
-      r.releaseReason = "V729_MARKET_OR_COMPLETION_SLOT_CONSUMED";
-    }
-    return true;
+    /* No slot for this class: normal request logic may still fund it. */
+    return null;
   }
 
+  /*
+   * Lower-priority analysis must leave every still-reserved completion slot
+   * intact.  This is ordering only and uses the same real limits.
+   */
   if (
+    safeNumber(budget?.analysis?.used) + needed >
+      Math.max(0, effectiveAnalysisLimitV416(budget) - safeNumber(r.reservedRequests)) ||
     safeNumber(budget?.totalUsed) + needed >
       Math.max(0, limit - safeNumber(r.reservedRequests))
   ) {
-    r.lowerPriorityRequestsBlocked =
-      safeNumber(r.lowerPriorityRequestsBlocked) + 1;
+    r.lowerPriorityRequestsBlocked = safeNumber(r.lowerPriorityRequestsBlocked) + 1;
     r.lastBlockedType = String(type || "UNKNOWN");
     r.lastBlockedAt = Date.now();
     budget.skipped.push({
       phase,
       type,
       amount: needed,
-      reason: "V729_MARKET_OR_EVIDENCE_COMPLETION_SLOT_RESERVED",
-      reservedRequests: safeNumber(r.reservedRequests)
+      reason: "V822_EVIDENCE_COMPLETION_SLOTS_RESERVED",
+      reservedRequests: safeNumber(r.reservedRequests),
+      flowReservedRequestsV822: safeNumber(r.flowReservedRequestsV822),
+      foundationReservedRequestsV822: safeNumber(r.foundationReservedRequestsV822)
     });
     return false;
   }
 
   return null;
+}
+
+function releaseUnusedFlowEvidenceReserveV822(
+  budget,
+  reason = "V151_DIRECTIONAL_STAGE_FINISHED"
+) {
+  const r = budget?.analysis?.evidenceCompletionReserveV728;
+  if (!r?.enabled) return null;
+
+  const unused = Math.max(0, safeNumber(r.flowReservedRequestsV822));
+  if (unused > 0) {
+    r.flowReservedRequestsV822 = 0;
+    r.reservedRequests = Math.max(0, safeNumber(r.reservedRequests) - unused);
+    r.flowReleasedUnusedV822 = safeNumber(r.flowReleasedUnusedV822) + unused;
+    r.flowReleasedAtV822 = Date.now();
+    r.flowReleaseReasonV822 = reason;
+  }
+
+  if (safeNumber(r.reservedRequests) <= 0 && r.active === true) {
+    r.active = false;
+    r.releasedAt = Date.now();
+    r.releaseReason = unused > 0
+      ? "V822_UNUSED_FLOW_SLOT_RELEASED_AFTER_DIRECTIONAL_STAGE"
+      : (r.releaseReason || "V822_NO_COMPLETION_SLOTS_REMAIN");
+  }
+
+  return {
+    released: unused,
+    remaining: safeNumber(r.reservedRequests),
+    foundationRemaining: safeNumber(r.foundationReservedRequestsV822),
+    flowRemaining: safeNumber(r.flowReservedRequestsV822),
+    reason
+  };
 }
 
 
@@ -97271,7 +97378,7 @@ for (
   const v728EvidenceCompletionReserve =
     configureEvidenceCompletionReserveV728(
       budget,
-      currentLiveVerifiedLaunchTokensV621.size > 0
+      v135AnalysisQueue.length > 0
     );
 
   scannerFunnelV415.freshCandidatePriorityV469
@@ -97362,6 +97469,8 @@ for (
       active: v728EvidenceCompletionReserve?.active === true,
       initialReservedRequests: safeNumber(v728EvidenceCompletionReserve?.initialReservedRequests),
       reservedRequests: safeNumber(v728EvidenceCompletionReserve?.reservedRequests),
+      flowReservedRequestsV822: safeNumber(v728EvidenceCompletionReserve?.flowReservedRequestsV822),
+      foundationReservedRequestsV822: safeNumber(v728EvidenceCompletionReserve?.foundationReservedRequestsV822),
       hardRequestLimitRaised: false,
       analysisLimitRaised: false,
       notificationReserveChanged: false
@@ -101239,6 +101348,19 @@ for (
         preQualificationDirectionalPoolV151.length
     };
   }
+
+  /*
+   * V822: V175/V151 have now had first right to the isolated FLOW slot.
+   * Release any unused FLOW reservation before V254/holder/V258 so the
+   * protection cannot become dead headroom later in the same scan.
+   */
+  const evidenceCompletionFlowReleaseV822 =
+    releaseUnusedFlowEvidenceReserveV822(
+      budget,
+      directionalTradeEnrichment?.attempted === true
+        ? "V151_DIRECTIONAL_ATTEMPT_FINISHED_V822"
+        : "V151_DIRECTIONAL_STAGE_NO_ATTEMPT_V822"
+    );
 
   /*
    * V801: one protected completion target per scan, still using the exact same
@@ -109658,6 +109780,13 @@ for (
       diagnosticSource: "V727_EVIDENCEAUDIT",
       protectedRequestsInitially: safeNumber(v728EvidenceCompletionReserve?.initialReservedRequests),
       protectedRequestsRemaining: safeNumber(budget?.analysis?.evidenceCompletionReserveV728?.reservedRequests),
+      flowReservedRequestsV822: safeNumber(budget?.analysis?.evidenceCompletionReserveV728?.flowReservedRequestsV822),
+      foundationReservedRequestsV822: safeNumber(budget?.analysis?.evidenceCompletionReserveV728?.foundationReservedRequestsV822),
+      flowConsumedV822: safeNumber(budget?.analysis?.evidenceCompletionReserveV728?.flowConsumedV822),
+      foundationConsumedV822: safeNumber(budget?.analysis?.evidenceCompletionReserveV728?.foundationConsumedV822),
+      flowReleasedUnusedV822: safeNumber(budget?.analysis?.evidenceCompletionReserveV728?.flowReleasedUnusedV822),
+      flowReleaseReasonV822: budget?.analysis?.evidenceCompletionReserveV728?.flowReleaseReasonV822 || null,
+      directionalStageReleaseV822: evidenceCompletionFlowReleaseV822 || null,
       consumed: safeNumber(budget?.analysis?.evidenceCompletionReserveV728?.consumed),
       consumedTypes: budget?.analysis?.evidenceCompletionReserveV728?.consumedTypes || {},
       lowerPriorityRequestsBlocked: safeNumber(budget?.analysis?.evidenceCompletionReserveV728?.lowerPriorityRequestsBlocked),
