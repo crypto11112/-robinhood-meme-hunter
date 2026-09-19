@@ -1,4 +1,14 @@
 /**
+ * Robinhood Chain Meme Hunter — V832
+ *
+ * V832 PRESENTATION/HANDOFF ONLY — VERIFIED V3 FLOW PROMOTION:
+ * - preserves V831 diagnostics and all confirmed-working V3/V4 collector, scoring, qualification, provider and request-budget behaviour unchanged;
+ * - top-level Verified Directional USD now prefers the existing verified indexed feed when available, otherwise it may use the bot's own exact-pool Uniswap V3 live ledger for a window only when that window is FULL integrity coverage and every captured trade has verified USD;
+ * - PARTIAL, USD-INCOMPLETE, interrupted or identity-unverified V3 windows remain UNVERIFIED;
+ * - source is labelled BOT_V3_EXACT_POOL_LIVE_LEDGER_V832 and is never misrepresented as an indexed provider feed;
+ * - no new external requests, no USD estimation, no scoring/Telegram-threshold changes, no V4 changes, and hard global request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V831
  *
  * V830 DIAGNOSTIC-ONLY — DEXSCREENER REQUEST AUDIT:
@@ -7077,7 +7087,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V831";
+const VERSION = "V832";
 /*
  * V821 PERSISTENT FAIR RESCUE SCHEDULING
  * - Builds forward from the confirmed V819 production V4 fairness path and
@@ -86453,16 +86463,22 @@ function telegramMessage(
       ? "DEXSCREENER pairCreatedAt"
       : "UNVERIFIED";
 
-  /* V322: directional USD is displayed only from an explicitly verified
-   * indexed trade feed. DexScreener counts/total volume are never split or
-   * estimated into buy/sell USD.
+  /* V832: preserve the strict V322/V323 indexed-feed proof first. If that
+   * evidence is unavailable for a window, presentation may fall back to the
+   * bot's own already-collected V3 exact-pool live ledger — but ONLY when the
+   * same window has FULL integrity coverage and every captured trade has
+   * verified USD. No partial V3 window is promoted and no USD is estimated.
    */
   const indexedDirectionalV322 = window => {
-    /* V323: accept either the verified GeckoTerminal pool-trade window or the
-     * existing strict Bitquery Trading.Trades manual fallback. Both are
-     * candidate-matched indexed trade evidence; DexScreener totals are never
-     * split or estimated.
-     */
+    const unverified = () => ({
+      verified: false,
+      buyUsd: "UNVERIFIED",
+      sellUsd: "UNVERIFIED",
+      netUsd: "UNVERIFIED",
+      source: null
+    });
+
+    /* V323 indexed-provider evidence remains first priority. */
     const geckoRow = market?.directionalFlow?.[window];
     const bitqueryFlow = candidate?.onChainVerifiedFlowV212;
     const bitqueryRow = bitqueryFlow?.windows?.[window];
@@ -86476,28 +86492,71 @@ function telegramMessage(
       bitqueryRow?.verified === true &&
       bitquerySource === "BITQUERY_TRADING_TRADES_MANUAL_V285";
 
-    const row = geckoVerified ? geckoRow : bitqueryVerified ? bitqueryRow : null;
-    const source = geckoVerified ? geckoSource : bitqueryVerified ? bitquerySource : "";
-    const sourceVerified = Boolean(row && source);
+    const indexedRow = geckoVerified ? geckoRow : bitqueryVerified ? bitqueryRow : null;
+    const indexedSource = geckoVerified ? geckoSource : bitqueryVerified ? bitquerySource : "";
 
-    if (!sourceVerified) {
-      return {verified: false, buyUsd: "UNVERIFIED", sellUsd: "UNVERIFIED", netUsd: "UNVERIFIED", source: null};
+    if (indexedRow && indexedSource) {
+      const buy = Number(indexedRow?.buyVolumeUsd);
+      const sell = Number(indexedRow?.sellVolumeUsd);
+      const net = Number(indexedRow?.netFlowUsd);
+      if ([buy, sell, net].every(Number.isFinite) && buy >= 0 && sell >= 0) {
+        return {
+          verified: true,
+          buyUsd: money(buy),
+          sellUsd: money(sell),
+          netUsd: money(net),
+          source: indexedSource
+        };
+      }
     }
 
-    const buy = Number(row?.buyVolumeUsd);
-    const sell = Number(row?.sellVolumeUsd);
-    const net = Number(row?.netFlowUsd);
-    if (![buy, sell, net].every(Number.isFinite) || buy < 0 || sell < 0) {
-      return {verified: false, buyUsd: "UNVERIFIED", sellUsd: "UNVERIFIED", netUsd: "UNVERIFIED", source: null};
+    /* V832 exact-pool V3 presentation fallback. */
+    const v3Live = candidate?.liveV3WindowsV365 || null;
+    const v3Identity = candidate?.nativeV3DirectionalV326 || null;
+    const labelByWindow = {m5: "5m", m15: "15m", h1: "1h", h6: "6h", h24: "24h"};
+    const label = labelByWindow[window] || null;
+    const v3Row = label ? v3Live?.windows?.[label] : null;
+    const liveReady =
+      (v3Live?.status === "LIVE_ROLLING_WINDOWS_V364" ||
+       v3Live?.status === "LIVE_ROLLING_WINDOWS_V371") &&
+      v3Live?.coverageActive === true &&
+      v3Live?.windows &&
+      normalize(v3Live?.token || "") === normalize(candidate?.address || "") &&
+      isAddress(normalize(v3Live?.pair || ""));
+    const identityVerified =
+      v3Identity?.verified === true ||
+      Boolean(v3Identity?.protocolEvidence);
+    const trades = safeNumber(v3Row?.trades);
+    const usdVerifiedTrades = safeNumber(v3Row?.usdVerifiedTrades);
+    const full =
+      liveReady &&
+      identityVerified &&
+      v3Row?.fullCoverage === true &&
+      v3Row?.coverage === "FULL_INTEGRITY_V371";
+    const usdComplete =
+      trades === 0 ||
+      usdVerifiedTrades === trades;
+    const buy = Number(v3Row?.buyUsd);
+    const sell = Number(v3Row?.sellUsd);
+    const net = Number(v3Row?.netUsd);
+
+    if (
+      full &&
+      usdComplete &&
+      [buy, sell, net].every(Number.isFinite) &&
+      buy >= 0 &&
+      sell >= 0
+    ) {
+      return {
+        verified: true,
+        buyUsd: money(buy),
+        sellUsd: money(sell),
+        netUsd: money(net),
+        source: "BOT_V3_EXACT_POOL_LIVE_LEDGER_V832"
+      };
     }
 
-    return {
-      verified: true,
-      buyUsd: money(buy),
-      sellUsd: money(sell),
-      netUsd: money(net),
-      source
-    };
+    return unverified();
   };
 
   const indexedM5V322 = indexedDirectionalV322("m5");
@@ -86505,7 +86564,19 @@ function telegramMessage(
   const indexedH1V322 = indexedDirectionalV322("h1");
   const indexedH6V322 = indexedDirectionalV322("h6");
   const indexedH24V322 = indexedDirectionalV322("h24");
-  const indexedDirectionalAnyV322 = [indexedM5V322, indexedM15V322, indexedH1V322, indexedH6V322, indexedH24V322].some(row => row.verified);
+  const indexedDirectionalRowsV832 = [indexedM5V322, indexedM15V322, indexedH1V322, indexedH6V322, indexedH24V322];
+  const indexedDirectionalAnyV322 = indexedDirectionalRowsV832.some(row => row.verified);
+  const directionalSourcesV832 = [...new Set(
+    indexedDirectionalRowsV832
+      .filter(row => row?.verified === true && row?.source)
+      .map(row => String(row.source))
+  )];
+  const directionalSourceTextV832 =
+    directionalSourcesV832.length === 1
+      ? directionalSourcesV832[0]
+      : directionalSourcesV832.length > 1
+        ? `MULTIPLE VERIFIED SOURCES (${directionalSourcesV832.join(" + ")})`
+        : "UNVERIFIED";
 
   const lines = [
     `🚨 <b>Robinhood Chain Meme Hunter ${VERSION}</b>`,
@@ -86580,9 +86651,9 @@ function telegramMessage(
       ? "ℹ️ <i>DexScreener counts/total volume are provider-reported. V327 never estimates buy-USD/sell-USD from them.</i>"
       : "ℹ️ <i>Provider-reported counts/total volume are separate from verified directional USD evidence.</i>",
     "",
-    "💵 <b>Verified Directional USD — INDEXED TRADE FEED</b>",
+    "💵 <b>Verified Directional USD — VERIFIED TRADE FLOW</b>",
     indexedDirectionalAnyV322
-      ? `🛰 Source: <b>${escapeHtml([indexedM5V322, indexedM15V322, indexedH1V322, indexedH6V322, indexedH24V322].find(row => row.verified)?.source || "VERIFIED_INDEXED_TRADE_FEED")}</b>`
+      ? `🛰 Source: <b>${escapeHtml(directionalSourceTextV832)}</b>`
       : "🛰 Source: <b>UNVERIFIED</b>",
     `🟢 5m Buy USD: <b>${indexedM5V322.buyUsd}</b>`,
     `🔴 5m Sell USD: <b>${indexedM5V322.sellUsd}</b>`,
@@ -86603,7 +86674,7 @@ function telegramMessage(
     `🟢 24h Buy USD: <b>${indexedH24V322.buyUsd}</b>`,
     `🔴 24h Sell USD: <b>${indexedH24V322.sellUsd}</b>`,
     `📈 24h Net USD: <b>${indexedH24V322.netUsd}</b>`,
-    "ℹ️ <i>Only complete verified indexed-trade windows are shown. Missing/partial coverage remains UNVERIFIED.</i>",
+    "ℹ️ <i>Each window is shown only from complete verified trade-flow evidence. Indexed feeds remain preferred; FULL + USD-complete exact-pool V3 windows may supply the value when indexed evidence is unavailable. Missing/partial coverage remains UNVERIFIED.</i>",
     candidate?.manualDirectionalDiagnosticsV324
       ? ""
       : null,
@@ -118705,7 +118776,8 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
   const shouldResumeV332 = (mode, line) => {
     const text = String(line || "");
     if (mode === "MARKET_ACTIVITY") {
-      return text.includes("💵 <b>Verified Directional USD — INDEXED TRADE FEED");
+      return text.includes("💵 <b>Verified Directional USD — INDEXED TRADE FEED") ||
+             text.includes("💵 <b>Verified Directional USD — VERIFIED TRADE FLOW");
     }
     if (mode === "INDEXED_DIRECTIONAL") {
       return text.includes("🔧 <b>Directional USD diagnostics") ||
