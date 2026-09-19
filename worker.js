@@ -1,5 +1,12 @@
 /**
- * Robinhood Chain Meme Hunter — V824
+ * Robinhood Chain Meme Hunter — V825
+ *
+ * V825 REGRESSION REPAIR — V3 USD EVIDENCE UPGRADE + MANUAL MARKET TARGET ISOLATION:
+ * - preserves V824 directional-execution repair and all existing provider/rate-limit protections.
+ * - fixes V3 trade dedup so an already-seen exact trade can be upgraded when a later observation carries verified USD evidence; original observation time is preserved.
+ * - applies the same upgrade rule to the persistent V331 ledger and the live V3 Durable Object bucket.
+ * - manual /analyse now marks its cloned state and uses its single DexScreener fresh request for the requested token only, instead of piggybacking unrelated tracked-call addresses.
+ * - no extra provider request, no scanner-budget increase, no scoring/qualification threshold change, no relaxed verification rule.
  *
  * V824 DIRECTIONAL EXECUTION REGRESSION REPAIR:
  * - fixes V432 unresolved-429 starvation where one historical GeckoTerminal 429 could defer optional directional trades indefinitely until an unrelated later Gecko success occurred;
@@ -7032,7 +7039,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V824";
+const VERSION = "V825";
 /*
  * V821 PERSISTENT FAIR RESCUE SCHEDULING
  * - Builds forward from the confirmed V819 production V4 fairness path and
@@ -59991,10 +59998,12 @@ async function marketData(
 
   try {
     const v295BatchAddresses =
-      dexPerformanceBatchAddressesV295(
-        state,
-        token
-      );
+      state?.manualAnalyseTargetOnlyV825 === true
+        ? [normalize(token)]
+        : dexPerformanceBatchAddressesV295(
+            state,
+            token
+          );
 
     setAthFollowUpStatusV296(service, {
       status: "REQUESTING",
@@ -117724,8 +117733,36 @@ async function persistNativeV3SwapLedgerV331(env, tokenAddress, pairAddress, row
     if (keys.has(tradeKey)) {
       deduplicated++;
       const i=recordIndex.get(tradeKey);
-      if(Number.isInteger(i)&&i>=0&&nativeV3VerifiedTimestampMsV334(row)&&!nativeV3VerifiedTimestampMsV334(records[i])){
-        records[i]={...records[i],blockTimestampMs:row.blockTimestampMs,timestampVerifiedV334:true,timestampBasis:"ONCHAIN_BLOCK_TIMESTAMP_V334"};
+      if(Number.isInteger(i)&&i>=0){
+        const existing=records[i]||{};
+        let upgraded={...existing};
+        let changed=false;
+        if(nativeV3VerifiedTimestampMsV334(row)&&!nativeV3VerifiedTimestampMsV334(existing)){
+          upgraded={...upgraded,blockTimestampMs:row.blockTimestampMs,timestampVerifiedV334:true,timestampBasis:"ONCHAIN_BLOCK_TIMESTAMP_V334"};
+          changed=true;
+        }
+        /* V825: a duplicate exact trade is the same tx/log evidence. If a
+         * later observation has stronger verified USD evidence, retain that
+         * improvement instead of permanently freezing the earlier null USD. */
+        if(
+          row?.usdVerified===true &&
+          Number.isFinite(Number(row?.usd)) && Number(row.usd)>0 &&
+          !(existing?.usdVerified===true && Number.isFinite(Number(existing?.usd)) && Number(existing.usd)>0)
+        ){
+          upgraded={
+            ...upgraded,
+            usd:Number(row.usd),
+            usdVerified:true,
+            priceUsd:Number.isFinite(Number(row?.priceUsd))?Number(row.priceUsd):(upgraded?.priceUsd??null),
+            sameCycleUsdV347:Number.isFinite(Number(row?.sameCycleUsdV347))?Number(row.sameCycleUsdV347):Number(row.usd),
+            sameCycleUsdVerifiedV347:true,
+            sameCycleUsdBasisV347:row?.sameCycleUsdBasisV347||row?.usdBasis||upgraded?.sameCycleUsdBasisV347||null,
+            v687ReferenceSource:row?.v687ReferenceSource||upgraded?.v687ReferenceSource||null,
+            v687ReferenceObservedAt:row?.v687ReferenceObservedAt||upgraded?.v687ReferenceObservedAt||null
+          };
+          changed=true;
+        }
+        if(changed) records[i]=upgraded;
       }
       continue;
     }
@@ -118821,6 +118858,11 @@ async function telegramFreshAnalyseV276(
     cloneStateForTelegramAnalyseV276(
       state
     );
+
+  /* V825: identify this cloned state so marketData can keep the one manual
+   * DexScreener request target-only. This flag exists only in the isolated
+   * /analyse state and never touches autonomous scanner state. */
+  isolatedState.manualAnalyseTargetOnlyV825 = true;
 
   let watched =
     findWatched(
@@ -167376,7 +167418,34 @@ if (url.pathname === "/reconcile-v374") {
     }
 
     const tradeKey = String(row?.tradeKey || "");
-    if (tradeKey && bucket.some(x => String(x?.tradeKey || "") === tradeKey)) return {inserted:0,deduped:true};
+    if (tradeKey) {
+      const existingIndex=bucket.findIndex(x => String(x?.tradeKey || "") === tradeKey);
+      if(existingIndex>=0){
+        const existing=bucket[existingIndex]||{};
+        const incomingUsd=Number(row?.usd);
+        const existingUsd=Number(existing?.usd);
+        const canUpgrade=
+          row?.usdVerified===true &&
+          Number.isFinite(incomingUsd) && incomingUsd>0 &&
+          !(existing?.usdVerified===true && Number.isFinite(existingUsd) && existingUsd>0);
+        if(canUpgrade){
+          /* Preserve original observedAt so upgrading valuation cannot move a
+           * historical trade into a newer rolling window. */
+          bucket[existingIndex]={
+            ...existing,
+            quoteTokenAddress:row?.quoteTokenAddress||existing?.quoteTokenAddress||null,
+            quoteAmount:Number.isFinite(Number(row?.quoteAmount))?Number(row.quoteAmount):(existing?.quoteAmount??null),
+            usd:incomingUsd,
+            usdVerified:true,
+            usdBasis:row?.sameCycleUsdBasisV347||row?.usdBasis||existing?.usdBasis||null,
+            observedAt:Number.isFinite(Number(existing?.observedAt))?Number(existing.observedAt):ts
+          };
+          this.liveBucketDirtyV403.add(key);
+          return {inserted:0,deduped:true,usdUpgradedV825:true};
+        }
+        return {inserted:0,deduped:true,usdUpgradedV825:false};
+      }
+    }
 
     bucket.push({tradeKey,transactionHash:row.transactionHash,logIndex:row.logIndex,blockNumber:row.blockNumber,side:row.side,tokenAmount:row.tokenAmount,quoteTokenAddress:row.quoteTokenAddress,quoteAmount:row.quoteAmount,usd:row.usd,usdVerified:row.usdVerified===true,usdBasis:row.sameCycleUsdBasisV347||null,observedAt:ts});
     this.liveBucketDirtyV403.add(key);
