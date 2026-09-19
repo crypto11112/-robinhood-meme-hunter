@@ -7180,7 +7180,15 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V841";
+const VERSION = "V842";
+/*
+ * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
+ * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
+ * - Reuses V768 recent 600-block PoolManager Swap discovery and Uniswap Pool Info.
+ * - Checks only the 20 busiest live PoolIds and returns up to 10 distinct non-quote tokens.
+ * - Read-only: zero KV writes, zero scanner-budget requests, no production/scoring/threshold changes.
+ * - Preserves V841 Blockscout PRO -> Uniswap manual V4 locator unchanged.
+ */
 /*
  * V821 PERSISTENT FAIR RESCUE SCHEDULING
  * - Builds forward from the confirmed V819 production V4 fairness path and
@@ -41975,6 +41983,138 @@ function v4PoolSearchTelegramV791(result){
   for(const pid of (r?.activeMatchingPoolIds||[]).slice(0,5)) lines.push(`✅ Active PoolId: <code>${escapeHtml(short(pid))}</code>`);
   lines.push("",r?.error?`Diagnostic result: <code>${escapeHtml(String(r.error).slice(0,400))}</code>`:`Diagnostic result: <b>EXACT_ACTIVE_V4_POOL_FOUND</b>`,"",
     `<i>Diagnostic only: ${safeNumber(r?.externalRequestsUsed)} external requests, one KV read, ${safeNumber(r?.stateWrites)} KV writes, zero scanner-budget requests. No scoring, Telegram qualification or USD inference is changed.</i>`);
+  return lines.join("\n");
+}
+
+
+/* =========================================================
+   V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
+   =========================================================
+   Read-only helper used only to choose a genuinely live V4 token for testing.
+   - Reads the same recent 600-block PoolManager Swap window used by V768/V771.
+   - Ranks live PoolIds by observed swap count.
+   - Verifies only the top 20 PoolIds through one Uniswap Pool Info batch.
+   - Returns distinct non-quote token addresses from those verified live pools.
+   - ZERO KV writes, ZERO scanner-budget requests, ZERO scoring/qualification changes.
+*/
+async function v4LiveTokensDiagnosticV842(env) {
+  const base = {
+    version:"V842",
+    diagnostic:"CURRENT_LIVE_V4_TOKEN_FINDER",
+    rpcProvider:null,
+    head:null,
+    fromBlock:null,
+    toBlock:null,
+    windowBlocks:600,
+    recentSwapRows:0,
+    uniqueLivePoolIds:0,
+    poolIdsChecked:0,
+    uniswap:{attempted:false,ok:false,httpStatus:null,error:null,poolsReturned:0},
+    liveTokens:[],
+    externalRequestsUsed:0,
+    scannerBudgetConsumed:false,
+    stateWrites:0,
+    error:null
+  };
+
+  const rpcEndpoint=v4PoolLiveRpcEndpointV767(env);
+  base.rpcProvider=rpcEndpoint.name;
+
+  const head=await v4PoolLiveRpcCallV767(rpcEndpoint.url,"eth_blockNumber",[]);
+  base.externalRequestsUsed+=1;
+  if(!head?.ok) return {...base,error:`HEAD_REQUEST_FAILED:${head?.error||"UNKNOWN"}`};
+
+  const headNum=Number.parseInt(String(head.result||"0x0"),16);
+  if(!Number.isFinite(headNum)||headNum<=0) return {...base,error:"HEAD_UNVERIFIED"};
+  const from=Math.max(0,headNum-base.windowBlocks+1);
+  base.head=headNum; base.fromBlock=from; base.toBlock=headNum;
+
+  const logs=await v4PoolLiveRpcCallV767(rpcEndpoint.url,"eth_getLogs",[{
+    address:POOL_MANAGER,
+    fromBlock:`0x${from.toString(16)}`,
+    toBlock:`0x${headNum.toString(16)}`,
+    topics:[SWAP_TOPIC]
+  }]);
+  base.externalRequestsUsed+=1;
+  if(!logs?.ok) return {...base,error:`RECENT_SWAP_LOG_REQUEST_FAILED:${logs?.error||"UNKNOWN"}`};
+
+  const rows=Array.isArray(logs.result)?logs.result:[];
+  base.recentSwapRows=rows.length;
+  const active=v4PoolLiveAggregateSwapRowsV768(rows);
+  base.uniqueLivePoolIds=active.length;
+  const selected=active.slice(0,20);
+  base.poolIdsChecked=selected.length;
+  if(!selected.length) return {...base,error:"NO_RECENT_V4_SWAP_POOLS"};
+
+  const info=await v4PoolInfoBatchV768(env,selected.map(row=>row.poolId));
+  base.externalRequestsUsed+=safeNumber(info?.externalRequestsUsed);
+  base.uniswap={
+    attempted:info?.attempted===true,
+    ok:info?.ok===true,
+    httpStatus:info?.httpStatus??null,
+    error:info?.error||null,
+    poolsReturned:Array.isArray(info?.pools)?info.pools.length:0
+  };
+  if(!info?.ok) return {...base,error:`UNISWAP_POOL_INFO_FAILED:${info?.error||"UNKNOWN"}`};
+
+  const activity=new Map(selected.map(row=>[normalize(row?.poolId),row]));
+  const seen=new Set();
+  const liveTokens=[];
+  for(const pool of (Array.isArray(info?.pools)?info.pools:[])){
+    const poolId=normalize(pool?.poolId);
+    const a=activity.get(poolId)||{};
+    const tokenA=normalize(pool?.tokenA);
+    const tokenB=normalize(pool?.tokenB);
+    const candidates=[tokenA,tokenB].filter(token=>
+      isAddress(token) && token!==ZERO && !knownQuote(token)
+    );
+    for(const token of candidates){
+      const key=`${token}:${poolId}`;
+      if(seen.has(key)) continue;
+      seen.add(key);
+      liveTokens.push({
+        tokenAddress:token,
+        poolId,
+        recentSwaps:safeNumber(a?.freshSwapCount),
+        lastSwapBlock:safeNumber(a?.lastFreshSwapBlock)||null,
+        pairedToken:token===tokenA?tokenB:tokenA,
+        fee:pool?.fee??null,
+        tickSpacing:pool?.tickSpacing??null,
+        hook:normalize(pool?.hook)||null
+      });
+    }
+  }
+  liveTokens.sort((a,b)=>safeNumber(b?.recentSwaps)-safeNumber(a?.recentSwaps));
+  base.liveTokens=liveTokens.slice(0,10);
+  if(!base.liveTokens.length) base.error="NO_NON_QUOTE_TOKENS_IN_TOP_LIVE_V4_POOLS";
+  return base;
+}
+
+function v4LiveTokensTelegramV842(result){
+  const r=result||{};
+  const short=v=>{const x=String(v||"");return x.length>22?`${x.slice(0,12)}…${x.slice(-8)}`:(x||"NONE");};
+  const lines=[
+    "🔥 <b>Current Live V4 Tokens — V842</b>","",
+    `RPC: <b>${escapeHtml(String(r?.rpcProvider||"NONE"))}</b> · head <b>${escapeHtml(String(r?.head??"NONE"))}</b>`,
+    `Window: <b>${escapeHtml(String(r?.fromBlock??"?"))}→${escapeHtml(String(r?.toBlock??"?"))}</b> (${safeNumber(r?.windowBlocks)} blocks)`,
+    `Recent swaps: <b>${safeNumber(r?.recentSwapRows)}</b> · live PoolIds: <b>${safeNumber(r?.uniqueLivePoolIds)}</b>`,
+    `Top PoolIds checked: <b>${safeNumber(r?.poolIdsChecked)}</b>`,
+    `Uniswap: <b>${escapeHtml(String(r?.uniswap?.httpStatus??"NONE"))}</b> · ${r?.uniswap?.ok===true?"OK":"FAILED"} · pools returned <b>${safeNumber(r?.uniswap?.poolsReturned)}</b>`,""
+  ];
+  const tokens=Array.isArray(r?.liveTokens)?r.liveTokens:[];
+  if(tokens.length){
+    lines.push("🪙 <b>Verified currently-active non-quote tokens</b>");
+    tokens.slice(0,10).forEach((row,i)=>{
+      lines.push(
+        `${i+1}. <code>${escapeHtml(String(row?.tokenAddress||""))}</code>`,
+        `   Pool: <code>${escapeHtml(short(row?.poolId))}</code> · recent swaps <b>${safeNumber(row?.recentSwaps)}</b>`
+      );
+    });
+    lines.push("",`Test first token: <code>/v4allpools ${escapeHtml(String(tokens[0]?.tokenAddress||""))}</code>`);
+  } else {
+    lines.push(`No usable live token returned. ${r?.error?`<code>${escapeHtml(String(r.error).slice(0,300))}</code>`:""}`);
+  }
+  lines.push("",`<i>Diagnostic only: ${safeNumber(r?.externalRequestsUsed)} external requests, zero KV writes, zero scanner-budget requests. Production routing/scoring is unchanged.</i>`);
   return lines.join("\n");
 }
 
@@ -153198,6 +153338,7 @@ function telegramHelpV271() {
     "<code>/v4marketstatus</code> — V773 show the last production market/liquidity completion result",
     "<code>/v4prodstatus</code> — V772 show the last production scanner V4/Uniswap enrichment result",
     "<code>/v4poolsearch [0xTOKEN] [p2...]</code> — V796 bounded 100-PoolId/page active reverse search through Uniswap Pool Info, with historical fallback after the final page (diagnostic only)",
+    "<code>/v4livetokens</code> — V842 return currently-active non-quote V4 token addresses from the busiest verified live pools (diagnostic only)",
     "<code>/v4allpools [0xTOKEN]</code> — V771 verify all recent live V4 pools for a token + normalized BUY/SELL amounts using on-chain decimals",
     "<code>/v4swapamounts [0xTOKEN]</code> — V770 verify exact raw target/paired amounts for BUY vs SELL swaps on the discovered live pool",
     "<code>/v4swapdirection [0xTOKEN]</code> — V769 verify BUY/SELL direction from signed on-chain V4 Swap deltas on the discovered live pool",
@@ -154162,6 +154303,31 @@ async function telegramCommandReplyV271(
       diagnosticV273.result=sentV769?.success===true?"REPLY_SENT":"REPLY_FAILED";
     }
     return {success:sentV769?.success===true,ignored:false,command:parsed.command,v4SwapDirectionV769:directionV769};
+  }
+
+  if (parsed.command === "/v4livetokens") {
+    const liveV842=await v4LiveTokensDiagnosticV842(env);
+    const replyV842=v4LiveTokensTelegramV842(liveV842);
+    if (diagnosticV273) {
+      diagnosticV273.replyAttempted=true;
+      diagnosticV273.v4LiveTokensV842={
+        liveTokens:safeNumber(liveV842?.liveTokens?.length),
+        recentSwapRows:safeNumber(liveV842?.recentSwapRows),
+        uniqueLivePoolIds:safeNumber(liveV842?.uniqueLivePoolIds),
+        poolIdsChecked:safeNumber(liveV842?.poolIdsChecked),
+        externalRequestsUsed:safeNumber(liveV842?.externalRequestsUsed),
+        scannerBudgetConsumed:false,stateWrites:0
+      };
+    }
+    const sentV842=await sendTelegram(env,replyV842,null,null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess=sentV842?.success===true;
+      diagnosticV273.telegramStatus=sentV842?.status||null;
+      diagnosticV273.telegramMode=sentV842?.mode||null;
+      diagnosticV273.telegramError=sentV842?.error||null;
+      diagnosticV273.result=sentV842?.success===true?"REPLY_SENT":"REPLY_FAILED";
+    }
+    return {success:sentV842?.success===true,ignored:false,command:parsed.command,v4LiveTokensV842:liveV842};
   }
 
   if (parsed.command === "/v4poollivecompare") {
@@ -160076,6 +160242,12 @@ async function handleRequest(
     const token=url.searchParams.get("token")||"";
     const block=url.searchParams.get("block")||"";
     return jsonResponse(await v4PoolSearchDiagnosticV791(env,`${token} ${block}`.trim()));
+  }
+
+  if (path === "/v4livetokens") {
+    return jsonResponse(
+      await v4LiveTokensDiagnosticV842(env)
+    );
   }
 
   if (path === "/v4allpools") {
