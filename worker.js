@@ -1,4 +1,19 @@
 /**
+ * Robinhood Chain Meme Hunter — V867
+ *
+ * V867 DIAGNOSTIC-ONLY V466 TRUE-REQUIREMENT MEASUREMENT:
+ * - builds directly from V866;
+ * - preserves V866 adaptive trusted-start range walker;
+ * - normal scanner, /analyse and every ordinary V466 caller retain the existing
+ *   9-log-request ceiling unchanged;
+ * - ONLY /v4completeaudit supplies an explicit diagnostic override of 14 V466
+ *   log requests, fitting exactly inside its isolated 20-request budget after
+ *   the six requests already used by V841/live-pool/V196 evidence;
+ * - exposes the effective V466 log ceiling in diagnostic telemetry;
+ * - no autonomous state writes, scoring changes, qualification changes,
+ *   provider-routing changes or production request-ceiling changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V866
  *
  * V866 ADAPTIVE TRUSTED-START V4 RANGE WALKER:
@@ -7493,7 +7508,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V866";
+const VERSION = "V867";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -42999,8 +43014,8 @@ function v4AllPoolsTelegramV771(result){
 async function v4CompleteAuditV865(env, requestedToken="") {
   const token=normalize(requestedToken);
   const base={
-    version:"V865",
-    diagnostic:"ISOLATED_V4_COMPLETE_HISTORY_AUDIT_V865",
+    version:"V867",
+    diagnostic:"ISOLATED_V4_COMPLETE_HISTORY_AUDIT_V867",
     diagnosticOnly:true,
     tokenAddress:isAddress(token)?token:null,
     maxExternalRequests:20,
@@ -43154,7 +43169,8 @@ async function v4CompleteAuditV865(env, requestedToken="") {
     ref,
     env,
     trustedPoolStartBlock,
-    rangeTrace
+    rangeTrace,
+    14
   );
 
   base.rangeTrace=rangeTrace;
@@ -43177,6 +43193,18 @@ async function v4CompleteAuditV865(env, requestedToken="") {
     completedRangesThisScan:safeNumber(v466?.multiScanProgressV466?.completedRangesThisScan),
     pendingRanges:safeNumber(v466?.multiScanProgressV466?.pendingRanges),
     logRequestsUsed:safeNumber(v466?.paginationV461?.logRequestsUsed),
+    productionMaxLogRequests:
+      safeNumber(
+        v466?.paginationV461?.productionMaxLogRequests ??
+        VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461
+      ),
+    effectiveMaxLogRequestsV867:
+      safeNumber(
+        v466?.paginationV461?.effectiveMaxLogRequestsV867 ??
+        v466?.paginationV461?.maxLogRequests
+      ),
+    diagnosticLogCeilingOverrideV867:
+      v466?.paginationV461?.diagnosticLogCeilingOverrideV867 === true,
     stoppedReason:v466?.paginationV461?.stoppedReason||null,
     adaptiveTrustedWalkerV866:
       v466?.paginationV461?.adaptiveTrustedWalkerV866 === true,
@@ -43224,7 +43252,7 @@ function v4CompleteAuditTelegramV865(result) {
   };
 
   const lines=[
-    "🧬 <b>V4 Complete-History Audit — V865</b>","",
+    "🧬 <b>V4 Complete-History Audit — V867</b>","",
     `Token: <code>${escapeHtml(String(r?.tokenAddress||"UNVERIFIED"))}</code>`,
     `Final status: <b>${escapeHtml(String(r?.finalStatus||"UNVERIFIED"))}</b>`,
     `Diagnostic requests: <b>${safeNumber(r?.budget?.totalUsed ?? r?.externalRequestsUsed)}/${safeNumber(r?.budget?.totalLimit || r?.maxExternalRequests)}</b>`,"",
@@ -43244,6 +43272,7 @@ function v4CompleteAuditTelegramV865(result) {
     "4️⃣ <b>V466 exact-pool completion</b>",
     `Status: <b>${escapeHtml(String(r?.v466?.status||"UNVERIFIED"))}</b>`,
     `V466 requests / log requests: <b>${safeNumber(r?.v466?.requestsUsed)} / ${safeNumber(r?.v466?.logRequestsUsed)}</b>`,
+    `V867 log ceiling: production <b>${safeNumber(r?.v466?.productionMaxLogRequests)}</b> · audit <b>${safeNumber(r?.v466?.effectiveMaxLogRequestsV867)}</b> · diagnostic override <b>${r?.v466?.diagnosticLogCeilingOverrideV867===true?"YES":"NO"}</b>`,
     `V866 adaptive walker: <b>${r?.v466?.adaptiveTrustedWalkerV866===true?"YES":"NO"}</b> · completed adaptive chunks <b>${safeNumber(r?.v466?.adaptiveChunksCompletedV866)}</b> · initial span <b>${safeNumber(r?.v466?.adaptiveInitialSpanV866)}</b>`,
     `Completed / pending ranges: <b>${safeNumber(r?.v466?.completedRanges)} / ${safeNumber(r?.v466?.pendingRanges)}</b>`,
     `Returned exact-pool rows: <b>${safeNumber(r?.v466?.returnedLogs)}</b>`,
@@ -83151,8 +83180,26 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
   wethUsdGReference,
   env,
   trustedPoolStartBlockV860 = null,
-  diagnosticRangeTraceV865 = null
+  diagnosticRangeTraceV865 = null,
+  diagnosticMaxLogRequestsV867 = null
 ) {
+  const effectiveMaxLogRequestsV867 =
+    Number.isFinite(Number(diagnosticMaxLogRequestsV867)) &&
+    Number(diagnosticMaxLogRequestsV867) >
+      VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461
+      ? Math.min(
+          14,
+          Math.max(
+            VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461,
+            Math.floor(Number(diagnosticMaxLogRequestsV867))
+          )
+        )
+      : VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461;
+
+  const diagnosticLogCeilingOverrideV867 =
+    effectiveMaxLogRequestsV867 >
+    VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461;
+
   const base = {
     enabled: true,
     measurementOnly: true,
@@ -83181,14 +83228,18 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
     paginationV461: {
       enabled: true,
       triggered: false,
-      maxLogRequests: VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461,
+      maxLogRequests: effectiveMaxLogRequestsV867,
       logRequestsUsed: 0,
       rangesFetched: 0,
       saturatedRanges: 0,
       unresolvedRanges: 0,
       dedupedRows: 0,
       coverageComplete: false,
-      stoppedReason: null
+      stoppedReason: null,
+      productionMaxLogRequests:
+        VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461,
+      effectiveMaxLogRequestsV867,
+      diagnosticLogCeilingOverrideV867
     },
     multiScanProgressV466: {
       enabled: true,
@@ -83443,7 +83494,7 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
       return result;
     };
 
-    if (logRequestsUsed >= VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461) {
+    if (logRequestsUsed >= effectiveMaxLogRequestsV867) {
       return finishTraceV865({
         ok:false,budgetBlocked:true,fromBlock:rangeFrom,toBlock:rangeTo,rows:[],saturated:false,
         status:"MAX_LOG_REQUESTS_REACHED_V466"
@@ -83592,7 +83643,7 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
 
       saturatedRangesThisScan++;
       const remainingLogRequests = Math.max(1,
-        VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461 - logRequestsUsed);
+        effectiveMaxLogRequestsV867 - logRequestsUsed);
       const blockCount = Math.max(1, toBlock - fromBlock + 1);
       initialFanoutRangesV465 = Math.max(1, Math.min(remainingLogRequests, blockCount));
       const baseSpan = Math.floor(blockCount / initialFanoutRangesV465);
@@ -83608,7 +83659,7 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
     }
   }
 
-  while (pending.length && logRequestsUsed < VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461) {
+  while (pending.length && logRequestsUsed < effectiveMaxLogRequestsV867) {
     const range = pending.shift();
     if (!range || range.fromBlock > range.toBlock) continue;
     const result = await fetchRangeV466(range.fromBlock, range.toBlock);
@@ -83807,7 +83858,7 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
     }
   }
 
-  if (pending.length && !stopReason && logRequestsUsed >= VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461) {
+  if (pending.length && !stopReason && logRequestsUsed >= effectiveMaxLogRequestsV867) {
     stopReason = "MAX_LOG_REQUESTS_REACHED_V466_PROGRESS_SAVED";
   }
 
