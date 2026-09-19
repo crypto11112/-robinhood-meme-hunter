@@ -1,4 +1,17 @@
 /**
+ * Robinhood Chain Meme Hunter — V858
+ *
+ * V858 FINAL MANUAL HISTORY INSERT AUDIT — DIAGNOSTIC ONLY:
+ * - builds directly from V857;
+ * - adds zero provider requests and zero autonomous-state writes;
+ * - exposes V254 persistence reject counters after exact-PoolId Blockscout history:
+ *   timestampRejected, decoderNull, candidateMismatch, exactUsdRejected;
+ * - exposes up to three raw history-row timestamp/key samples so Blockscout PRO
+ *   response-shape compatibility can be proven before changing the parser;
+ * - does not alter V196/V289/V254 maths, pool selection, request ceilings,
+ *   V834 reserve, automatic V4, scoring, qualification or Telegram thresholds.
+ */
+/**
  * Robinhood Chain Meme Hunter — V857
  *
  * V857 MANUAL V289 AUTO-PARITY ETH/USDG REFERENCE:
@@ -7366,7 +7379,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V857";
+const VERSION = "V858";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -119224,6 +119237,16 @@ async function manualVerifiedUsdRecoveryV289(
       historyStatus: null,
       historyProvider: null,
       historyReturnedLogs: 0,
+      persistenceRowsSeen: 0,
+      persistenceDecodedCandidateTrades: 0,
+      persistenceExactUsdTrades: 0,
+      persistenceInserted: 0,
+      persistenceDeduplicated: 0,
+      persistenceTimestampRejected: 0,
+      persistenceCandidateMismatch: 0,
+      persistenceExactUsdRejected: 0,
+      persistenceDecoderNull: 0,
+      historyTimestampSamples: [],
       latestBudgetRefusal: null
     }
   };
@@ -119315,6 +119338,28 @@ async function manualVerifiedUsdRecoveryV289(
     persistence = persistVerifiedUsdTradesV254(
       state, candidate.address, history.rows, wethUsdGReferenceV289, "BLOCKSCOUT_TIMESTAMP"
     );
+
+    base.auditV853.persistenceRowsSeen = safeNumber(persistence?.rowsSeen);
+    base.auditV853.persistenceDecodedCandidateTrades = safeNumber(persistence?.decodedCandidateTrades);
+    base.auditV853.persistenceExactUsdTrades = safeNumber(persistence?.exactUsdTrades);
+    base.auditV853.persistenceInserted = safeNumber(persistence?.inserted);
+    base.auditV853.persistenceDeduplicated = safeNumber(persistence?.deduplicated);
+    base.auditV853.persistenceTimestampRejected = safeNumber(persistence?.timestampRejected);
+    base.auditV853.persistenceCandidateMismatch = safeNumber(persistence?.candidateMismatch);
+    base.auditV853.persistenceExactUsdRejected = safeNumber(persistence?.exactUsdRejected);
+    base.auditV853.persistenceDecoderNull = safeNumber(persistence?.decoderNull);
+
+    base.auditV853.historyTimestampSamples =
+      history.rows.slice(0, 3).map(row => ({
+        timeStamp: row?.timeStamp ?? null,
+        timestamp: row?.timestamp ?? null,
+        blockTimestamp: row?.blockTimestamp ?? row?.block_timestamp ?? null,
+        blockNumber: row?.blockNumber ?? row?.block_number ?? null,
+        txHash: row?.transactionHash ?? row?.transaction_hash ?? row?.hash ?? null,
+        keys: row && typeof row === "object"
+          ? Object.keys(row).slice(0, 24)
+          : []
+      }));
   }
 
   const attached = attachManualStoredVerifiedUsdV287(candidate, state);
@@ -120515,13 +120560,17 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     const bh=v289aV853?.budgetAfterHistory||{};
     const refuse=v289aV853?.latestBudgetRefusal||null;
     evidence.push(
-      `💵 V289 exact-USD recovery audit V857: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
+      `💵 V289 exact-USD recovery audit V858: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
       `• Active PoolId into V289: <code>${escapeHtml(v289aV853.poolId || "UNVERIFIED")}</code> | live selected <code>${escapeHtml(v289aV853.liveSelectedPoolId || "UNVERIFIED")}</code> | live swaps <b>${safeNumber(v289aV853.liveSwaps)}</b>`,
       `• Quote into V289: <code>${escapeHtml(v289aV853.quoteTokenAddress || "UNVERIFIED")}</code>`,
       `• Budget before V289: <b>${safeNumber(bb.totalUsed)}/${safeNumber(bb.totalLimit)}</b> | after reference <b>${safeNumber(br.totalUsed)}/${safeNumber(br.totalLimit)}</b> | after history <b>${safeNumber(bh.totalUsed)}/${safeNumber(bh.totalLimit)}</b>`,
       `• WETH/USDG reference: <b>${v289aV853.referenceVerified===true?"VERIFIED":"UNVERIFIED"}</b> | status <b>${escapeHtml(v289aV853.referenceStatus || "UNVERIFIED")}</b> | price <b>${Number.isFinite(Number(v289aV853.referencePriceUsdGPerWeth)) ? "$"+telegramPlainNumberV271(v289aV853.referencePriceUsdGPerWeth,2) : "UNVERIFIED"}</b>`,
       `• Exact-pool history: <b>${escapeHtml(v289aV853.historyStatus || "UNVERIFIED")}</b> | provider <b>${escapeHtml(v289aV853.historyProvider || v289aV853.provider || "UNVERIFIED")}</b> | rows <b>${safeNumber(v289aV853.historyReturnedLogs || v289aV853.rows)}</b>`,
       `• Exact USD: <b>${safeNumber(v289aV853.exactUsdTrades)}</b> | inserted <b>${safeNumber(v289aV853.inserted)}</b> | deduplicated <b>${safeNumber(v289aV853.deduplicated)}</b>`,
+      `• V254 persistence rejects: timestamp <b>${safeNumber(v289aV853.persistenceTimestampRejected)}</b> | decoder <b>${safeNumber(v289aV853.persistenceDecoderNull)}</b> | candidate mismatch <b>${safeNumber(v289aV853.persistenceCandidateMismatch)}</b> | exact-USD reject <b>${safeNumber(v289aV853.persistenceExactUsdRejected)}</b>`,
+      Array.isArray(v289aV853.historyTimestampSamples) && v289aV853.historyTimestampSamples.length
+        ? `• History timestamp samples: <code>${escapeHtml(JSON.stringify(v289aV853.historyTimestampSamples).slice(0,1800))}</code>`
+        : `• History timestamp samples: <b>NONE</b>`,
       refuse ? `• Latest budget refusal at/after V289: <code>${escapeHtml(`${refuse.type||"UNKNOWN"}:${refuse.reason||"UNKNOWN"}`)}</code>` : `• Latest budget refusal at/after V289: <b>NONE</b>`,
       `• Diagnostic overhead: <b>ZERO provider requests · ZERO autonomous writes</b>`
     );
