@@ -1,5 +1,5 @@
 /**
- * Robinhood Chain Meme Hunter — V830
+ * Robinhood Chain Meme Hunter — V831
  *
  * V830 DIAGNOSTIC-ONLY — DEXSCREENER REQUEST AUDIT:
  * - preserves V829 manual verified market cache and the confirmed-working V825+ V3 exact-pool live ledger unchanged;
@@ -7077,7 +7077,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V830";
+const VERSION = "V831";
 /*
  * V821 PERSISTENT FAIR RESCUE SCHEDULING
  * - Builds forward from the confirmed V819 production V4 fairness path and
@@ -119113,14 +119113,14 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       (() => {
         const rows = Array.isArray(marketTraceV828?.dexRequestAuditV830?.recent) ? marketTraceV828.dexRequestAuditV830.recent : [];
         const last = marketTraceV828?.dexRequestAuditV830?.last || null;
-        if (!rows.length || !last) return `• V830 Dex request audit: <b>NO_RECORDED_NORMAL_DEX_REQUESTS</b>`;
+        if (!rows.length || !last) return `• V831 Dex request audit: <b>NO_RECORDED_NORMAL_DEX_REQUESTS</b>`;
         const spacing = last?.timeSincePreviousMs === null || last?.timeSincePreviousMs === undefined ? "FIRST_RECORDED" : `${Math.round(safeNumber(last.timeSincePreviousMs)/1000)}s`;
         const retry = last?.retryAfterRaw ? ` | Retry-After <b>${escapeHtml(String(last.retryAfterRaw))}</b>` : "";
         return `• V830 Dex request audit: last <b>${escapeHtml(last.pathClass || last.feature || "UNKNOWN")}</b> ${last?.httpStatus !== null && last?.httpStatus !== undefined ? `HTTP <b>${escapeHtml(String(last.httpStatus))}</b>` : `<b>${escapeHtml(last.outcome || "UNKNOWN")}</b>`} | prior-60s <b>${safeNumber(last.requestsInPrior60s)}</b> | spacing <b>${escapeHtml(spacing)}</b>${retry}`;
       })(),
       (() => {
         const rows = Array.isArray(marketTraceV828?.dexRequestAuditV830?.recent) ? marketTraceV828.dexRequestAuditV830.recent : [];
-        if (!rows.length) return `• V830 recent Dex timeline: <b>NONE</b>`;
+        if (!rows.length) return `• V831 recent Dex timeline: <b>NONE</b>`;
         const text = rows.slice(-6).map(row => {
           const ageS = Math.max(0, Math.round((Date.now()-safeNumber(row?.at))/1000));
           const code = row?.httpStatus !== null && row?.httpStatus !== undefined ? row.httpStatus : (row?.outcome || "ERR");
@@ -119979,6 +119979,7 @@ async function telegramFreshAnalyseV276(
           .slice(-6)
           .map(
             row => ({
+              at: safeNumber(row?.at) || null,
               feature: row?.feature || null,
               pathClass: row?.pathClass || null,
               outcome: row?.outcome || null,
@@ -120031,14 +120032,66 @@ async function telegramFreshAnalyseV276(
       athFollowUpHttpStatus:
         marketServiceV828?.athFollowUpV296?.httpStatus ?? null
     },
-    dexRequestAuditV830: {
-      recent: Array.isArray(marketServiceV828?.requestAuditV830)
+    dexRequestAuditV830: (() => {
+      const serviceRowsV831 = Array.isArray(marketServiceV828?.requestAuditV830)
         ? marketServiceV828.requestAuditV830.slice(-8).map(row => ({...row}))
-        : [],
-      last: marketServiceV828?.requestAuditLastV830
-        ? {...marketServiceV828.requestAuditLastV830}
-        : null
-    },
+        : [];
+      if (serviceRowsV831.length) {
+        return {
+          recent: serviceRowsV831,
+          last: marketServiceV828?.requestAuditLastV830
+            ? {...marketServiceV828.requestAuditLastV830}
+            : serviceRowsV831[serviceRowsV831.length - 1],
+          sourceV831: "DEX_SERVICE_AUDIT_V830"
+        };
+      }
+
+      /*
+       * V831 diagnostic repair: isolated /analyse state does not persist the
+       * service-level V830 audit consistently, but marketFetchV428 already
+       * records every market-provider request into this analysis budget's
+       * market-pressure ledger. Reconstruct the current-analysis Dex timeline
+       * from that authoritative in-scan ledger rather than reporting NONE.
+       * No provider requests or scanner behavior are changed.
+       */
+      const pressureRowsV831 = Array.isArray(marketPressureV828?.recentRequests)
+        ? marketPressureV828.recentRequests
+            .filter(row => String(row?.provider || "").toUpperCase() === "DEXSCREENER")
+            .slice(-8)
+        : [];
+      const rebuiltV831 = pressureRowsV831.map((row, index, rows) => {
+        const previousAt = index > 0 ? safeNumber(rows[index - 1]?.at) : 0;
+        const at = safeNumber(row?.at) || null;
+        return {
+          at,
+          feature: row?.feature || "UNKNOWN",
+          phase: row?.phase || null,
+          pathClass: row?.pathClass || null,
+          endpoint: row?.pathClass || "UNKNOWN",
+          requestsInPrior60s: at
+            ? rows.slice(0,index).filter(x => {
+                const t = safeNumber(x?.at);
+                return t > 0 && at - t >= 0 && at - t <= 60000;
+              }).length
+            : 0,
+          timeSincePreviousMs: at && previousAt ? Math.max(0, at - previousAt) : null,
+          previousFeature: index > 0 ? rows[index - 1]?.feature || null : null,
+          previousPathClass: index > 0 ? rows[index - 1]?.pathClass || null : null,
+          httpStatus: row?.httpStatus ?? null,
+          outcome: row?.outcome || null,
+          retryAfterRaw: null,
+          retryAfterMs: safeNumber(row?.retryAfterMs) || null,
+          cooldownUntilBefore: row?.before?.cooldownUntil || null,
+          sourceVersion: VERSION,
+          reconstructedV831: true
+        };
+      });
+      return {
+        recent: rebuiltV831,
+        last: rebuiltV831.length ? rebuiltV831[rebuiltV831.length - 1] : null,
+        sourceV831: rebuiltV831.length ? "MARKET_PRESSURE_LEDGER_V428" : "NONE"
+      };
+    })(),
     recentDexRequests:
       recentDexRequestsV828,
     consumedBudgetKeys:
