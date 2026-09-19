@@ -1,4 +1,11 @@
 /**
+ * Robinhood Chain Meme Hunter — V828
+ *
+ * V828 DIAGNOSTIC-ONLY — MANUAL MARKET PATH TRACE:
+ * - zero added provider requests and zero state writes;
+ * - preserves V827 behaviour, V825+ verified V3 ledger, scoring, qualification and all request ceilings;
+ * - surfaces the exact already-existing manual market gate/provider/route outcomes in /analyse so the remaining market enrichment break can be fixed without guessing.
+ *
  * Robinhood Chain Meme Hunter — V827
  *
  * V827 REGRESSION REPAIR — EXACT-PAIR MARKET HANDOFF:
@@ -7052,7 +7059,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V826";
+const VERSION = "V828";
 /*
  * V821 PERSISTENT FAIR RESCUE SCHEDULING
  * - Builds forward from the confirmed V819 production V4 fairness path and
@@ -118786,6 +118793,52 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     evidence.push("", `📡 Live V3 WebSocket Flow: <b>${escapeHtml(liveV3V365.status)}</b>`);
   }
 
+  const marketTraceV828 =
+    candidate?.manualMarketTraceV828 || null;
+
+  if (marketTraceV828) {
+    const dexRowsV828 =
+      Array.isArray(
+        marketTraceV828?.recentDexRequests
+      )
+        ? marketTraceV828.recentDexRequests
+        : [];
+
+    const dexRouteTextV828 =
+      dexRowsV828.length
+        ? dexRowsV828
+            .map(
+              row =>
+                `${row?.pathClass || row?.feature || "UNKNOWN"}:${row?.outcome || "UNKNOWN"}${row?.httpStatus !== null && row?.httpStatus !== undefined ? `(${row.httpStatus})` : ""}`
+            )
+            .join(" | ")
+        : "NO_DEXSCREENER_REQUEST_RECORDED";
+
+    const consumedTextV828 =
+      Array.isArray(
+        marketTraceV828?.consumedBudgetKeys
+      ) &&
+      marketTraceV828.consumedBudgetKeys.length
+        ? marketTraceV828.consumedBudgetKeys
+            .map(
+              row =>
+                `${row.key}=${safeNumber(row.count)}`
+            )
+            .join(", ")
+        : "NONE";
+
+    evidence.push(
+      "",
+      "🧪 <b>V828 Manual Market Path Trace — READ ONLY</b>",
+      `• Final market: <b>${marketTraceV828?.marketVerified === true ? "VERIFIED" : "UNVERIFIED"}</b> | status <b>${escapeHtml(marketTraceV828?.marketStatus || "NONE")}</b> | source <b>${escapeHtml(marketTraceV828?.marketSource || "NONE")}</b>`,
+      `• Manual fresh gate: <b>${marketTraceV828?.manualFreshGate?.freshOverrideEnabled === true ? "OPEN" : "BLOCKED"}</b> | reason <b>${escapeHtml(marketTraceV828?.manualFreshGate?.reason || "NONE")}</b>`,
+      `• Dex terminal status: <b>${escapeHtml(marketTraceV828?.dexService?.lastStatus || "NONE")}</b> | request status <b>${escapeHtml(marketTraceV828?.dexService?.athFollowUpStatus || "NONE")}</b>${marketTraceV828?.dexService?.athFollowUpHttpStatus !== null && marketTraceV828?.dexService?.athFollowUpHttpStatus !== undefined ? ` | HTTP <b>${escapeHtml(String(marketTraceV828.dexService.athFollowUpHttpStatus))}</b>` : ""}`,
+      `• Dex routes this /analyse: <b>${escapeHtml(dexRouteTextV828)}</b>`,
+      `• Market budget keys: <b>${escapeHtml(consumedTextV828)}</b>`,
+      "ℹ️ <i>Diagnostic only: no extra provider requests, no scoring changes and no collector changes.</i>"
+    );
+  }
+
   const d = directionalDiagnosticsV325 || candidate?.manualDirectionalDiagnosticsV324 || null;
   const indexedVerified = d?.gecko?.verifiedAnyWindow === true || d?.bitquery?.verified === true;
   evidence.push(`🛰 Indexed directional feed: <b>${indexedVerified ? "VERIFIED" : "UNVERIFIED"}</b>`);
@@ -119566,6 +119619,110 @@ async function telegramFreshAnalyseV276(
   }
   candidate.manualContractCreationV619=manualContractCreationV619;
 
+  /*
+   * V828 diagnostic-only manual market trace.
+   * Reads only already-existing in-memory telemetry. No provider requests,
+   * no KV writes, no scoring/qualification changes.
+   */
+  const marketServiceV828 =
+    dexService(
+      isolatedState
+    );
+
+  const marketPressureV828 =
+    marketPressureRootV428(
+      budget
+    );
+
+  const recentDexRequestsV828 =
+    Array.isArray(
+      marketPressureV828?.recentRequests
+    )
+      ? marketPressureV828.recentRequests
+          .filter(
+            row =>
+              String(row?.provider || "").toUpperCase() ===
+              "DEXSCREENER"
+          )
+          .slice(-6)
+          .map(
+            row => ({
+              feature: row?.feature || null,
+              pathClass: row?.pathClass || null,
+              outcome: row?.outcome || null,
+              httpStatus: row?.httpStatus ?? null,
+              latencyMs: safeNumber(row?.latencyMs),
+              retryAfterMs: safeNumber(row?.retryAfterMs) || null
+            })
+          )
+      : [];
+
+  candidate.manualMarketTraceV828 = {
+    diagnosticOnly: true,
+    zeroProviderRequestsAdded: true,
+    zeroStateWritesAdded: true,
+    marketVerified:
+      candidate?.market?.verified === true,
+    marketStatus:
+      candidate?.market?.status || null,
+    marketSource:
+      candidate?.market?.source || null,
+    pairAddress:
+      candidate?.market?.pairAddress || null,
+    pairCreatedAt:
+      Number.isFinite(
+        Number(
+          candidate?.market?.pairCreatedAt
+        )
+      )
+        ? Number(candidate.market.pairCreatedAt)
+        : null,
+    manualFreshGate:
+      {
+        ...manualMarketPreparationV277,
+        spacingMs:
+          TELEGRAM_ANALYSE_MARKET_SPACING_MS_V277
+      },
+    dexService: {
+      lastStatus:
+        marketServiceV828?.lastStatus || null,
+      lastRequestAt:
+        safeNumber(
+          marketServiceV828?.lastRequestAt
+        ) || null,
+      cooldownUntil:
+        safeNumber(
+          marketServiceV828?.cooldownUntil
+        ) || null,
+      athFollowUpStatus:
+        marketServiceV828?.athFollowUpV296?.status || null,
+      athFollowUpHttpStatus:
+        marketServiceV828?.athFollowUpV296?.httpStatus ?? null
+    },
+    recentDexRequests:
+      recentDexRequestsV828,
+    consumedBudgetKeys:
+      Object.entries(
+        budget
+          ?.manualAnalyseTelemetryV279
+          ?.consumed ||
+        {}
+      )
+        .filter(
+          ([key, value]) =>
+            safeNumber(value) > 0 &&
+            /DEXSCREENER|MARKET|COINGECKO|COINMARKETCAP/i.test(
+              String(key)
+            )
+        )
+        .map(
+          ([key, value]) => ({
+            key,
+            count: safeNumber(value)
+          })
+        )
+  };
+
   const telemetry = {
     status:
       "ANALYSIS_COMPLETE",
@@ -119741,6 +119898,8 @@ async function telegramFreshAnalyseV276(
       duplicatesRemoved: safeNumber(manualBitqueryUsdResultV285?.duplicatesRemoved),
       error: manualBitqueryUsdResultV285?.error || null
     },
+    manualMarketTraceV828:
+      candidate?.manualMarketTraceV828 || null,
     evidenceCompletenessV277:
       manualEvidenceCompletenessV277(
         candidate
