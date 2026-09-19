@@ -1,4 +1,14 @@
 /**
+ * Robinhood Chain Meme Hunter — V829
+ *
+ * V829 REGRESSION REPAIR — VERIFIED MANUAL MARKET CACHE FOR 429 RECOVERY:
+ * - preserves V828 diagnostics and the confirmed-working V825+ V3 exact-pool live ledger unchanged;
+ * - adds a separate bounded /analyse-only verified market cache keyed by the exact contract address;
+ * - only fresh, exact-contract, non-cached DexScreener VERIFIED market results are persisted;
+ * - a later /analyse can hydrate that exact verified cache before provider access, allowing existing stale-cache 429 recovery to work for tokens that are not on the autonomous watchlist;
+ * - cache age is capped by the existing MARKET_STALE_CACHE_MS and the registry is bounded to 32 contracts;
+ * - no extra provider requests, no watchlist mutation, no scoring/qualification changes and no V3 collector changes.
+ *
  * Robinhood Chain Meme Hunter — V828
  *
  * V828 DIAGNOSTIC-ONLY — MANUAL MARKET PATH TRACE:
@@ -7059,7 +7069,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V828";
+const VERSION = "V829";
 /*
  * V821 PERSISTENT FAIR RESCUE SCHEDULING
  * - Builds forward from the confirmed V819 production V4 fairness path and
@@ -12870,6 +12880,11 @@ const TELEGRAM_ANALYSE_MARKET_STATE_KEY_V277 =
   "robinhood-meme-hunter-telegram-analyse-market-v277";
 const TELEGRAM_ANALYSE_MARKET_SPACING_MS_V277 =
   60 * 1000;
+
+/* V829: bounded exact-contract verified market cache for isolated /analyse. */
+const TELEGRAM_ANALYSE_VERIFIED_MARKET_CACHE_KEY_V829 =
+  "robinhood-meme-hunter-telegram-analyse-verified-market-v829";
+const TELEGRAM_ANALYSE_VERIFIED_MARKET_CACHE_MAX_ENTRIES_V829 = 32;
 
 /*
  * V329 persistent Uniswap V3 pair identity.
@@ -115668,6 +115683,167 @@ async function manualMarketFreshGateV277(
 }
 
 
+function exactVerifiedManualMarketV829(tokenAddress, market) {
+  const token = normalize(tokenAddress);
+  if (!isAddress(token) || market?.verified !== true) return false;
+
+  const base = normalize(market?.baseTokenAddress);
+  const quote = normalize(market?.quoteTokenAddress);
+  const pair = normalize(market?.pairAddress);
+  const exactTokenMatch = base === token || quote === token;
+
+  return Boolean(
+    exactTokenMatch &&
+    isAddress(pair) &&
+    market?.cached !== true &&
+    market?.rateLimited !== true &&
+    String(market?.source || "").startsWith("DEXSCREENER_")
+  );
+}
+
+async function loadManualVerifiedMarketCacheV829(env, tokenAddress) {
+  const token = normalize(tokenAddress);
+  const result = {
+    loaded: false,
+    status: "NO_CACHE_V829",
+    tokenAddress: token || null,
+    timestamp: null,
+    ageMs: null,
+    market: null,
+    externalRequestsAdded: 0,
+    autonomousWatchlistMutated: false
+  };
+
+  if (!isAddress(token)) {
+    result.status = "INVALID_TOKEN_V829";
+    return result;
+  }
+
+  const { kv } = getKV(env);
+  if (!kv || typeof kv.get !== "function") {
+    result.status = "KV_UNAVAILABLE_V829";
+    return result;
+  }
+
+  try {
+    const raw = await kv.get(TELEGRAM_ANALYSE_VERIFIED_MARKET_CACHE_KEY_V829);
+    if (!raw) return result;
+
+    const parsed = JSON.parse(raw);
+    const entry = parsed?.entries?.[token] || null;
+    if (!entry) return result;
+
+    const timestamp = safeNumber(entry?.timestamp);
+    const ageMs = timestamp > 0 ? Math.max(0, Date.now() - timestamp) : null;
+    if (ageMs === null || ageMs > MARKET_STALE_CACHE_MS) {
+      result.status = "CACHE_EXPIRED_V829";
+      result.timestamp = timestamp || null;
+      result.ageMs = ageMs;
+      return result;
+    }
+
+    if (normalize(entry?.tokenAddress) !== token) {
+      result.status = "CACHE_TOKEN_MISMATCH_V829";
+      return result;
+    }
+
+    const market = entry?.market || null;
+    const base = normalize(market?.baseTokenAddress);
+    const quote = normalize(market?.quoteTokenAddress);
+    const pair = normalize(market?.pairAddress);
+    if (
+      market?.verified !== true ||
+      !(base === token || quote === token) ||
+      !isAddress(pair)
+    ) {
+      result.status = "CACHE_NOT_EXACT_VERIFIED_V829";
+      return result;
+    }
+
+    result.loaded = true;
+    result.status = "EXACT_VERIFIED_CACHE_LOADED_V829";
+    result.timestamp = timestamp;
+    result.ageMs = ageMs;
+    result.market = {
+      ...market,
+      cached: false,
+      cacheAgeMs: 0
+    };
+    return result;
+  } catch (error) {
+    result.status = "CACHE_READ_FAIL_OPEN_V829";
+    result.error = errorString(error);
+    return result;
+  }
+}
+
+async function saveManualVerifiedMarketCacheV829(env, tokenAddress, market) {
+  const token = normalize(tokenAddress);
+  const result = {
+    saved: false,
+    status: "NOT_SAVED_V829",
+    tokenAddress: token || null,
+    externalRequestsAdded: 0,
+    autonomousWatchlistMutated: false
+  };
+
+  if (!exactVerifiedManualMarketV829(token, market)) {
+    result.status = "MARKET_NOT_FRESH_EXACT_DEX_VERIFIED_V829";
+    return result;
+  }
+
+  const { kv } = getKV(env);
+  if (!kv || typeof kv.get !== "function" || typeof kv.put !== "function") {
+    result.status = "KV_UNAVAILABLE_V829";
+    return result;
+  }
+
+  try {
+    let registry = { entries: {} };
+    const raw = await kv.get(TELEGRAM_ANALYSE_VERIFIED_MARKET_CACHE_KEY_V829);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object" && parsed.entries && typeof parsed.entries === "object") {
+          registry = parsed;
+        }
+      } catch (_) {}
+    }
+
+    registry.entries = registry.entries || {};
+    registry.entries[token] = {
+      tokenAddress: token,
+      timestamp: Date.now(),
+      market: {
+        ...market,
+        cached: false,
+        cacheAgeMs: 0
+      }
+    };
+
+    const bounded = Object.entries(registry.entries)
+      .sort((a, b) => safeNumber(b?.[1]?.timestamp) - safeNumber(a?.[1]?.timestamp))
+      .slice(0, TELEGRAM_ANALYSE_VERIFIED_MARKET_CACHE_MAX_ENTRIES_V829);
+
+    registry.entries = Object.fromEntries(bounded);
+    registry.updatedAt = Date.now();
+    registry.version = "V829";
+
+    await kv.put(
+      TELEGRAM_ANALYSE_VERIFIED_MARKET_CACHE_KEY_V829,
+      JSON.stringify(registry)
+    );
+
+    result.saved = true;
+    result.status = "EXACT_VERIFIED_MARKET_SAVED_V829";
+    return result;
+  } catch (error) {
+    result.status = "CACHE_WRITE_FAIL_OPEN_V829";
+    result.error = errorString(error);
+    return result;
+  }
+}
+
 function prepareManualMarketStateV277(
   isolatedState,
   originalState,
@@ -118835,7 +119011,8 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       `• Dex terminal status: <b>${escapeHtml(marketTraceV828?.dexService?.lastStatus || "NONE")}</b> | request status <b>${escapeHtml(marketTraceV828?.dexService?.athFollowUpStatus || "NONE")}</b>${marketTraceV828?.dexService?.athFollowUpHttpStatus !== null && marketTraceV828?.dexService?.athFollowUpHttpStatus !== undefined ? ` | HTTP <b>${escapeHtml(String(marketTraceV828.dexService.athFollowUpHttpStatus))}</b>` : ""}`,
       `• Dex routes this /analyse: <b>${escapeHtml(dexRouteTextV828)}</b>`,
       `• Market budget keys: <b>${escapeHtml(consumedTextV828)}</b>`,
-      "ℹ️ <i>Diagnostic only: no extra provider requests, no scoring changes and no collector changes.</i>"
+      `• V829 verified manual cache: load <b>${escapeHtml(candidate?.manualMarketCacheV829?.load?.status || "NO_STATUS")}</b>${candidate?.manualMarketCacheV829?.load?.ageMs !== null && candidate?.manualMarketCacheV829?.load?.ageMs !== undefined ? ` | age <b>${Math.round(safeNumber(candidate.manualMarketCacheV829.load.ageMs)/1000)}s</b>` : ""} | save <b>${escapeHtml(candidate?.manualMarketCacheV829?.save?.status || "NO_STATUS")}</b>`,
+      "ℹ️ <i>Trace is read-only; V829 cache persistence adds zero provider requests and never mutates the autonomous watchlist.</i>"
     );
   }
 
@@ -119077,6 +119254,30 @@ async function telegramFreshAnalyseV276(
   watched =
     hydrationV277.watched;
 
+  /* V829: isolated /analyse tokens are not necessarily in the autonomous
+   * watchlist, so hydrate only a recent exact-contract VERIFIED manual market
+   * cache before the existing marketData() cache/429 logic runs. */
+  const manualMarketCacheLoadV829 =
+    await loadManualVerifiedMarketCacheV829(
+      env,
+      resolved.address
+    );
+
+  if (manualMarketCacheLoadV829?.loaded === true) {
+    const existingCacheTsV829 = safeNumber(watched?.marketCache?.timestamp);
+    const loadedCacheTsV829 = safeNumber(manualMarketCacheLoadV829?.timestamp);
+    if (loadedCacheTsV829 > existingCacheTsV829) {
+      watched.marketCache = {
+        timestamp: loadedCacheTsV829,
+        data: {
+          ...manualMarketCacheLoadV829.market,
+          cached: false,
+          cacheAgeMs: 0
+        }
+      };
+    }
+  }
+
   const manualMarketGateV277 =
     await manualMarketFreshGateV277(
       env,
@@ -119181,6 +119382,21 @@ async function telegramFreshAnalyseV276(
       }
     };
   }
+
+  /* V829: persist only a genuinely fresh, exact-contract VERIFIED DexScreener
+   * market result into a bounded manual-only cache. Cached/429/fallback results
+   * never refresh the timestamp, so stale evidence cannot live forever. */
+  const manualMarketCacheSaveV829 =
+    await saveManualVerifiedMarketCacheV829(
+      env,
+      resolved.address,
+      candidate?.market
+    );
+
+  candidate.manualMarketCacheV829 = {
+    load: manualMarketCacheLoadV829,
+    save: manualMarketCacheSaveV829
+  };
 
   /* V322: /analyse can use the already-proven guarded GeckoTerminal
    * pool-trades reader to obtain real individual BUY USD / SELL USD rows for
