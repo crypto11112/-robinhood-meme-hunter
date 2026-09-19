@@ -1,4 +1,14 @@
 /**
+ * Robinhood Chain Meme Hunter — V844
+ *
+ * V844 MANUAL /ANALYSE LATENCY SAFETY — PRESERVE-FIRST:
+ * - builds directly from V843 and preserves its V619 reserved-slot authority and verified manual PoolId handoff;
+ * - reverts only the V843 manual exact-PoolId live query width from 600 blocks back to the prior 10-block V283 window;
+ * - avoids making the already-heavy Telegram /analyse path wait on a wider exact-pool eth_getLogs request;
+ * - standalone V768/V771 diagnostics remain available for 600-block live-V4 verification;
+ * - no automatic/production V4 routing, V254, scoring, thresholds, request ceilings, KV state, or V841 Blockscout PRO locator changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V843
  *
  * V843 MANUAL V4 HANDOFF + V619 RESERVE AUTHORITY — PRESERVE-FIRST:
@@ -6,7 +16,7 @@
  * - preserves V841 Blockscout PRO -> Uniswap exact PoolId locator unchanged;
  * - gives ONLY the two existing V619 manual creation-proof request types authorised access to their V834 reserved slots, so unrelated analysis reserves cannot starve the second timestamp request;
  * - keeps the existing 24-request /analyse ceiling unchanged; no new request capacity is created;
- * - widens the existing V283 exact-PoolId manual live query from 10 blocks to the proven 600-block recent V4 window without adding requests;
+ * - V844 supersedes V843's 600-block widening and restores the prior 10-block V283 manual live query for Telegram latency safety;
  * - a successful exact-PoolId eth_getLogs query now proves a zero-event window when empty instead of reporting the verified pool as absent;
  * - manual rolling-progress presentation now distinguishes a verified transient manual V4 handoff from the separate autonomous rolling watch;
  * - no autonomous watchlist/poolRegistry mutation and no V3/provider/scanner behaviour changes.
@@ -7193,7 +7203,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V843";
+const VERSION = "V844";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -117764,7 +117774,7 @@ async function manualLiveV4EnrichmentV283(
   }
 
   const fromBlock =
-    Math.max(0, toBlock - 599);
+    Math.max(0, toBlock - 9);
 
   if (!budgetAvailable(budget, "analysis")) {
     return {
