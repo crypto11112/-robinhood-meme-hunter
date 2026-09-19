@@ -1,4 +1,19 @@
 /**
+ * Robinhood Chain Meme Hunter — V853
+ *
+ * V853 V289 EXACT-USD RECOVERY AUDIT — READ ONLY:
+ * - builds directly from V852;
+ * - adds zero provider requests and zero autonomous-state writes;
+ * - instruments the existing V289 call inside /analyse;
+ * - records budget before V289, after WETH/USDG reference resolution, and after
+ *   exact-pool Blockscout V254 history recovery;
+ * - exposes the exact live-selected PoolId/quote seen by V289, WETH reference
+ *   status/price, history status/provider/rows, exact-USD inserts and the latest
+ *   relevant budget refusal;
+ * - does not alter V841/V283 pool discovery/live selection, V289 maths,
+ *   request ceilings, V619 reserve, automatic V4/V254, scoring or thresholds.
+ */
+/**
  * Robinhood Chain Meme Hunter — V852
  *
  * V852 MANUAL ACTIVE-V4 → EXISTING V289 USD HANDOFF — PRESERVE-FIRST:
@@ -7292,7 +7307,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V852";
+const VERSION = "V853";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -119013,7 +119028,23 @@ async function manualVerifiedUsdRecoveryV289(
     requestsUsed: 0, storedFlowStatus: null, historyStatus: null,
     provider: null, rows: 0, inserted: 0, deduplicated: 0,
     exactUsdTrades: 0, candidate: candidate || null,
-    quoteDiagnosticsV288: null
+    quoteDiagnosticsV288: null,
+    auditV853: {
+      poolId: normalize(candidate?.onChainPoolIdentityV153?.poolId) || null,
+      quoteTokenAddress: normalize(candidate?.onChainPoolIdentityV153?.quoteTokenAddress) || null,
+      liveSelectedPoolId: normalize(manualLiveV4ResultV283?.liveSelectedPoolV848) || normalize(manualLiveV4ResultV283?.poolId) || null,
+      liveSwaps: safeNumber(manualLiveV4ResultV283?.swaps),
+      budgetBeforeV289: null,
+      budgetAfterReference: null,
+      budgetAfterHistory: null,
+      referenceStatus: null,
+      referenceVerified: false,
+      referencePriceUsdGPerWeth: null,
+      historyStatus: null,
+      historyProvider: null,
+      historyReturnedLogs: 0,
+      latestBudgetRefusal: null
+    }
   };
 
   const stored = attachManualStoredVerifiedUsdV287(candidate, state);
@@ -119045,6 +119076,13 @@ async function manualVerifiedUsdRecoveryV289(
     : [];
 
   const before = safeNumber(budget?.totalUsed);
+  base.auditV853.budgetBeforeV289 = {
+    totalUsed: safeNumber(budget?.totalUsed),
+    totalLimit: safeNumber(budget?.totalLimit),
+    analysisUsed: safeNumber(budget?.analysis?.used),
+    analysisLimit: safeNumber(budget?.analysis?.limit),
+    skippedCount: Array.isArray(budget?.skipped) ? budget.skipped.length : 0
+  };
   const wethReferenceV289 =
     await manualWethUsdGReferenceV289(
       env, budget, state, candidate, liveLogs
@@ -119054,10 +119092,42 @@ async function manualVerifiedUsdRecoveryV289(
   const quoteDiagnosticsV288 =
     manualQuoteDiagnosticsV288(candidate, wethUsdGReferenceV289);
 
+  base.auditV853.budgetAfterReference = {
+    totalUsed: safeNumber(budget?.totalUsed),
+    totalLimit: safeNumber(budget?.totalLimit),
+    analysisUsed: safeNumber(budget?.analysis?.used),
+    analysisLimit: safeNumber(budget?.analysis?.limit)
+  };
+  base.auditV853.referenceStatus = wethReferenceV289?.status || null;
+  base.auditV853.referenceVerified = wethReferenceV289?.verified === true;
+  base.auditV853.referencePriceUsdGPerWeth =
+    Number.isFinite(Number(wethReferenceV289?.priceUsdGPerWeth)) &&
+    Number(wethReferenceV289?.priceUsdGPerWeth) > 0
+      ? Number(wethReferenceV289.priceUsdGPerWeth)
+      : null;
+
   const history = await blockscoutExactPoolUsdCompletionV254(
     candidate, budget, state, latestBlock, wethUsdGReferenceV289, env
   );
   const requestsUsed = Math.max(0, safeNumber(budget?.totalUsed) - before);
+
+  base.auditV853.budgetAfterHistory = {
+    totalUsed: safeNumber(budget?.totalUsed),
+    totalLimit: safeNumber(budget?.totalLimit),
+    analysisUsed: safeNumber(budget?.analysis?.used),
+    analysisLimit: safeNumber(budget?.analysis?.limit)
+  };
+  base.auditV853.historyStatus = history?.status || null;
+  base.auditV853.historyProvider = history?.providerPathV263 || history?.provider || null;
+  base.auditV853.historyReturnedLogs = safeNumber(history?.returnedLogs);
+  if (Array.isArray(budget?.skipped) && budget.skipped.length) {
+    const last = budget.skipped[budget.skipped.length - 1];
+    base.auditV853.latestBudgetRefusal = {
+      phase: last?.phase || null,
+      type: last?.type || null,
+      reason: last?.reason || null
+    };
+  }
 
   let persistence = null;
   if (Array.isArray(history?.rows) && history.rows.length) {
@@ -119102,6 +119172,7 @@ async function manualVerifiedUsdRecoveryV289(
       resolverV291: wethReferenceV289?.resolverV291 || null,
       directV290: wethReferenceV289?.directV290 || null
     },
+    auditV853: base.auditV853,
     candidate
   };
 }
@@ -120255,6 +120326,25 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       `• V4 identity source: <b>BLOCKSCOUT PRO INDEXED INITIALIZE → UNISWAP VERIFY</b>`
     );
   }
+  const v289aV853=candidate?.manualV289AuditV853 || null;
+  if (v289aV853) {
+    const bb=v289aV853?.budgetBeforeV289||{};
+    const br=v289aV853?.budgetAfterReference||{};
+    const bh=v289aV853?.budgetAfterHistory||{};
+    const refuse=v289aV853?.latestBudgetRefusal||null;
+    evidence.push(
+      `💵 V289 exact-USD recovery audit V853: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
+      `• Active PoolId into V289: <code>${escapeHtml(v289aV853.poolId || "UNVERIFIED")}</code> | live selected <code>${escapeHtml(v289aV853.liveSelectedPoolId || "UNVERIFIED")}</code> | live swaps <b>${safeNumber(v289aV853.liveSwaps)}</b>`,
+      `• Quote into V289: <code>${escapeHtml(v289aV853.quoteTokenAddress || "UNVERIFIED")}</code>`,
+      `• Budget before V289: <b>${safeNumber(bb.totalUsed)}/${safeNumber(bb.totalLimit)}</b> | after reference <b>${safeNumber(br.totalUsed)}/${safeNumber(br.totalLimit)}</b> | after history <b>${safeNumber(bh.totalUsed)}/${safeNumber(bh.totalLimit)}</b>`,
+      `• WETH/USDG reference: <b>${v289aV853.referenceVerified===true?"VERIFIED":"UNVERIFIED"}</b> | status <b>${escapeHtml(v289aV853.referenceStatus || "UNVERIFIED")}</b> | price <b>${Number.isFinite(Number(v289aV853.referencePriceUsdGPerWeth)) ? "$"+telegramPlainNumberV271(v289aV853.referencePriceUsdGPerWeth,2) : "UNVERIFIED"}</b>`,
+      `• Exact-pool history: <b>${escapeHtml(v289aV853.historyStatus || "UNVERIFIED")}</b> | provider <b>${escapeHtml(v289aV853.historyProvider || v289aV853.provider || "UNVERIFIED")}</b> | rows <b>${safeNumber(v289aV853.historyReturnedLogs || v289aV853.rows)}</b>`,
+      `• Exact USD: <b>${safeNumber(v289aV853.exactUsdTrades)}</b> | inserted <b>${safeNumber(v289aV853.inserted)}</b> | deduplicated <b>${safeNumber(v289aV853.deduplicated)}</b>`,
+      refuse ? `• Latest budget refusal at/after V289: <code>${escapeHtml(`${refuse.type||"UNKNOWN"}:${refuse.reason||"UNKNOWN"}`)}</code>` : `• Latest budget refusal at/after V289: <b>NONE</b>`,
+      `• Diagnostic overhead: <b>ZERO provider requests · ZERO autonomous writes</b>`
+    );
+  }
+
   const wrV847 = candidate?.manualV4WatchRegistrationDiagnosticV847 || null;
   if (wrV847?.enabled === true && wrV847?.v841IdentityVerified === true) {
     evidence.push(
@@ -121198,9 +121288,38 @@ async function telegramFreshAnalyseV276(
       manualLiveV4ResultV283
     );
 
+  candidate.manualV289AuditV853 = {
+    ...(manualVerifiedUsdRecoveryResultV289?.auditV853 || {}),
+    attempted: manualVerifiedUsdRecoveryResultV289?.attempted === true,
+    verified: manualVerifiedUsdRecoveryResultV289?.verified === true,
+    status: manualVerifiedUsdRecoveryResultV289?.status || null,
+    requestsUsed: safeNumber(manualVerifiedUsdRecoveryResultV289?.requestsUsed),
+    storedFlowStatus: manualVerifiedUsdRecoveryResultV289?.storedFlowStatus || null,
+    historyStatus: manualVerifiedUsdRecoveryResultV289?.historyStatus || null,
+    provider: manualVerifiedUsdRecoveryResultV289?.provider || null,
+    rows: safeNumber(manualVerifiedUsdRecoveryResultV289?.rows),
+    exactUsdTrades: safeNumber(manualVerifiedUsdRecoveryResultV289?.exactUsdTrades),
+    inserted: safeNumber(manualVerifiedUsdRecoveryResultV289?.inserted),
+    deduplicated: safeNumber(manualVerifiedUsdRecoveryResultV289?.deduplicated),
+    zeroExtraRequests: true
+  };
+
   candidate =
     manualVerifiedUsdRecoveryResultV289?.candidate ||
     candidate;
+
+  candidate.manualV289AuditV853 = candidate.manualV289AuditV853 || {
+    ...(manualVerifiedUsdRecoveryResultV289?.auditV853 || {}),
+    attempted: manualVerifiedUsdRecoveryResultV289?.attempted === true,
+    verified: manualVerifiedUsdRecoveryResultV289?.verified === true,
+    status: manualVerifiedUsdRecoveryResultV289?.status || null,
+    requestsUsed: safeNumber(manualVerifiedUsdRecoveryResultV289?.requestsUsed),
+    historyStatus: manualVerifiedUsdRecoveryResultV289?.historyStatus || null,
+    provider: manualVerifiedUsdRecoveryResultV289?.provider || null,
+    rows: safeNumber(manualVerifiedUsdRecoveryResultV289?.rows),
+    exactUsdTrades: safeNumber(manualVerifiedUsdRecoveryResultV289?.exactUsdTrades),
+    zeroExtraRequests: true
+  };
 
   const manualBitqueryUsdResultV285 =
     manualGeckoDirectionalResultV322?.verifiedAnyWindow === true
