@@ -1,19 +1,19 @@
 /**
- * Robinhood Chain Meme Hunter — V864
+ * Robinhood Chain Meme Hunter — V865
  *
- * V864 MANUAL V4 PRIORITY BUDGET ENVELOPE:
- * - builds directly from V863;
- * - creates a manual-only V4 priority reserve INSIDE the existing 24-request ceiling;
- * - protects 10 requests for the proven V841 -> V196 -> V466 lane:
- *     V841 exact token-indexed V4 identity: up to 3
- *     V196 native ETH -> USDG reference: 1
- *     V466 exact-pool completion: up to 6
- * - the existing V834 creation-proof reserve is accounted for separately;
- * - lower-priority analysis cannot consume those protected requests before V4 completion;
- * - authorised V841/V196/V466 request types may use the protected headroom;
- * - after V466 completes/saves progress, unused V4 reserve is released to later diagnostics;
- * - hard manual ceiling remains 24; automatic scanner ceilings unchanged;
- * - V863 resumable exact-pool progress remains as fallback for exceptionally active pools.
+ * V865 ISOLATED V4 COMPLETE-HISTORY AUDIT:
+ * - builds from V863 (V864 reserve experiment intentionally discarded);
+ * - adds /v4completeaudit <token>, diagnostic-only;
+ * - isolated 20-request diagnostic budget, zero autonomous-state writes;
+ * - runs only the proven V4 completion chain:
+ *     V841 exact token-indexed PoolIds -> V283 current-live selection ->
+ *     V196 ETH/USDG -> V458/V466 exact-pool completion;
+ * - V466 accepts an optional trace sink used ONLY by this diagnostic and records
+ *   each exact-pool range request, rows returned, saturation, HTTP/result status
+ *   and budget before/after;
+ * - normal V466 callers omit the trace and behave exactly as before;
+ * - no scanner, scoring, qualification, alert threshold, provider routing or
+ *   production request ceiling changes.
  */
 /**
  * Robinhood Chain Meme Hunter — V863
@@ -7476,7 +7476,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V864";
+const VERSION = "V865";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -17605,133 +17605,6 @@ function manualCreationProofReserveDecisionV834(budget, phase, type, amount = 1)
   return null;
 }
 
-function isManualV4PriorityTypeV864(type) {
-  const key = String(type || "");
-  return (
-    key.startsWith("BLOCKSCOUT_PRO:V841_TOKEN_") ||
-    key === "UNISWAP_V4_TOKEN_INDEXED_VERIFY_V841" ||
-    key === "UNISWAP_ETH_USDG_REFERENCE_V196" ||
-    key === "BLOCKSCOUT_V458_TIMESTAMP_TO_BLOCK" ||
-    key === "BLOCKSCOUT_V458_COMPLETE_EXACT_POOL_24H_LOGS"
-  );
-}
-
-function manualV4PriorityReserveDecisionV864(
-  budget,
-  phase,
-  type,
-  amount = 1
-) {
-  const reserve =
-    budget?.analysis?.manualV4PriorityReserveV864;
-
-  if (
-    phase !== "analysis" ||
-    reserve?.active !== true
-  ) {
-    return null;
-  }
-
-  const needed =
-    Math.max(1, safeNumber(amount));
-
-  if (isManualV4PriorityTypeV864(type)) {
-    reserve.authorisedRequests =
-      safeNumber(reserve.authorisedRequests) + needed;
-    reserve.lastAuthorisedType =
-      String(type || "UNKNOWN");
-    reserve.lastAuthorisedAt =
-      Date.now();
-    return null;
-  }
-
-  const v4Reserved =
-    Math.max(
-      0,
-      safeNumber(reserve.reservedRequests)
-    );
-
-  if (v4Reserved <= 0) {
-    return null;
-  }
-
-  const creationReserved =
-    budget?.analysis
-      ?.manualCreationProofReserveV834
-      ?.active === true
-      ? Math.max(
-          0,
-          safeNumber(
-            budget.analysis
-              .manualCreationProofReserveV834
-              .reservedRequests
-          )
-        )
-      : 0;
-
-  const protectedTotal =
-    v4Reserved + creationReserved;
-
-  const analysisBlocked =
-    safeNumber(budget?.analysis?.used) + needed >
-    Math.max(
-      0,
-      effectiveAnalysisLimitV416(budget) -
-        protectedTotal
-    );
-
-  const globalBlocked =
-    safeNumber(budget?.totalUsed) + needed >
-    Math.max(
-      0,
-      safeNumber(budget?.totalLimit) -
-        protectedTotal
-    );
-
-  if (
-    analysisBlocked ||
-    globalBlocked
-  ) {
-    reserve.blockedRequests =
-      safeNumber(reserve.blockedRequests) + 1;
-    reserve.lastBlockedType =
-      String(type || "UNKNOWN");
-    reserve.lastBlockedAt =
-      Date.now();
-
-    budget.skipped.push({
-      phase,
-      type,
-      amount:needed,
-      reason:
-        "V864_MANUAL_V4_PRIORITY_RESERVE"
-    });
-
-    return false;
-  }
-
-  return null;
-}
-
-function releaseManualV4PriorityReserveV864(
-  budget,
-  reason = "V4_PRIORITY_PHASE_COMPLETE"
-) {
-  const reserve =
-    budget?.analysis?.manualV4PriorityReserveV864;
-
-  if (!reserve) {
-    return null;
-  }
-
-  reserve.active = false;
-  reserve.releasedAt = Date.now();
-  reserve.releaseReason = String(reason);
-  reserve.reservedRequests = 0;
-
-  return reserve;
-}
-
 function consumeBudget(
   budget,
   phase,
@@ -17742,18 +17615,6 @@ function consumeBudget(
     manualCreationProofReserveDecisionV834(budget, phase, type, amount);
   if (manualCreationReserveDecisionV834 !== null) {
     return manualCreationReserveDecisionV834;
-  }
-
-  const manualV4PriorityDecisionV864 =
-    manualV4PriorityReserveDecisionV864(
-      budget,
-      phase,
-      type,
-      amount
-    );
-
-  if (manualV4PriorityDecisionV864 !== null) {
-    return manualV4PriorityDecisionV864;
   }
 
   const productionV4ReserveDecision =
@@ -43117,6 +42978,274 @@ function v4AllPoolsTelegramV771(result){
   return lines.join("\\n");
 }
 
+
+async function v4CompleteAuditV865(env, requestedToken="") {
+  const token=normalize(requestedToken);
+  const base={
+    version:"V865",
+    diagnostic:"ISOLATED_V4_COMPLETE_HISTORY_AUDIT_V865",
+    diagnosticOnly:true,
+    tokenAddress:isAddress(token)?token:null,
+    maxExternalRequests:20,
+    externalRequestsUsed:0,
+    scannerBudgetConsumed:false,
+    autonomousStateWrites:0,
+    productionStateMutated:false,
+    v841:null,
+    live:null,
+    v196:null,
+    activePoolId:null,
+    trustedPoolStartBlock:null,
+    latestBlock:null,
+    v466:null,
+    rangeTrace:[],
+    finalStatus:"UNVERIFIED"
+  };
+
+  if(!isAddress(token)) {
+    return {...base,finalStatus:"INVALID_TOKEN_V865"};
+  }
+
+  const budget=createTelegramAnalyseBudgetV276();
+  budget.totalLimit=20;
+  budget.analysis.limit=20;
+  budget.analysis.manualCreationProofReserveV834={
+    active:false,
+    reservedRequests:0,
+    blockedRequests:0,
+    lastBlockedType:null,
+    lastBlockedAt:null
+  };
+
+  const isolatedState=newState();
+  const watched=temporaryWatchedTokenV276(token);
+  const candidate={
+    address:token,
+    symbol:"DIAGNOSTIC",
+    name:"Diagnostic Token",
+    validERC20:true
+  };
+
+  const used0=safeNumber(budget.totalUsed);
+  const identity=await manualBlockscoutProTokenIndexedV4V841(
+    env,budget,isolatedState,watched,candidate
+  );
+  candidate.manualV4BlockscoutProIndexedV841=identity;
+  base.v841={
+    status:identity?.status||null,
+    verified:identity?.verified===true,
+    requestsUsed:safeNumber(identity?.requestsUsed),
+    exactMatches:safeNumber(identity?.exactMatches),
+    selectedPoolId:normalize(identity?.selectedPoolId)||null,
+    exactMatchedPools:Array.isArray(identity?.exactMatchedPools)
+      ? identity.exactMatchedPools.map(row=>({
+          poolId:normalize(row?.poolId)||null,
+          blockNumber:blockNumberFromAnyV180(row?.blockNumber),
+          quoteTokenAddress:normalize(row?.quoteTokenAddress)||null
+        }))
+      : []
+  };
+
+  if(identity?.verified!==true) {
+    base.externalRequestsUsed=safeNumber(budget.totalUsed)-used0;
+    return {...base,finalStatus:identity?.status||"V841_NOT_VERIFIED_V865"};
+  }
+
+  const live=await manualLiveV4EnrichmentV283(
+    env,budget,watched,candidate
+  );
+  base.live={
+    status:live?.status||null,
+    verified:live?.verified===true,
+    poolId:normalize(live?.poolId)||null,
+    fromBlock:blockNumberFromAnyV180(live?.fromBlock),
+    toBlock:blockNumberFromAnyV180(live?.toBlock),
+    swaps:safeNumber(live?.swaps),
+    liquidityEvents:safeNumber(live?.liquidityEvents),
+    requestsUsed:safeNumber(live?.requestsUsed)
+  };
+
+  let latestBlock=blockNumberFromAnyV180(live?.toBlock);
+  if(!Number.isFinite(latestBlock) || latestBlock<=0) {
+    const rpcEndpoint=v4PoolLiveRpcEndpointV767(env);
+    if(rpcEndpoint?.url) {
+      const head=await v4PoolLiveRpcCallV767(
+        rpcEndpoint.url,"eth_blockNumber",[]
+      );
+      base.externalRequestsUsed++;
+      latestBlock=blockNumberFromAnyV180(head?.result);
+    }
+  }
+  base.latestBlock=Number.isFinite(latestBlock)?latestBlock:null;
+
+  const activePoolId=normalize(
+    candidate?.onChainPoolIdentityV153?.poolId ||
+    live?.poolId ||
+    identity?.selectedPoolId
+  );
+  base.activePoolId=isBytes32HexV765(activePoolId)?activePoolId:null;
+
+  const activeIndexedPool=
+    (Array.isArray(identity?.exactMatchedPools)
+      ? identity.exactMatchedPools
+      : []
+    ).find(row=>normalize(row?.poolId)===activePoolId) || null;
+
+  const trustedPoolStartBlock=
+    activeIndexedPool?.initializeBlockVerifiedV860===true
+      ? blockNumberFromAnyV180(activeIndexedPool?.blockNumber)
+      : blockNumberFromAnyV180(activeIndexedPool?.blockNumber);
+
+  base.trustedPoolStartBlock=
+    Number.isFinite(trustedPoolStartBlock)
+      ? trustedPoolStartBlock
+      : null;
+
+  if(
+    !isBytes32HexV765(activePoolId) ||
+    !Number.isFinite(latestBlock) ||
+    latestBlock<=0
+  ) {
+    base.externalRequestsUsed +=
+      Math.max(0,safeNumber(budget.totalUsed)-used0);
+    return {...base,finalStatus:"ACTIVE_POOL_OR_HEAD_UNVERIFIED_V865"};
+  }
+
+  const ref=await getUniswapEthUsdGReferenceV196(env,budget);
+  base.v196={
+    attempted:ref?.attempted===true,
+    verified:ref?.verified===true,
+    status:ref?.status||null,
+    priceUsdGPerWeth:Number.isFinite(Number(ref?.priceUsdGPerWeth))
+      ? Number(ref.priceUsdGPerWeth)
+      : null,
+    externalRequestsUsed:safeNumber(ref?.externalRequestsUsed)
+  };
+
+  if(ref?.verified!==true) {
+    base.externalRequestsUsed +=
+      Math.max(0,safeNumber(budget.totalUsed)-used0);
+    return {...base,finalStatus:ref?.status||"V196_NOT_VERIFIED_V865"};
+  }
+
+  const rangeTrace=[];
+  const v466=await blockscoutCompleteExactPoolDirectionalUsdV458(
+    candidate,
+    budget,
+    isolatedState,
+    latestBlock,
+    ref,
+    env,
+    trustedPoolStartBlock,
+    rangeTrace
+  );
+
+  base.rangeTrace=rangeTrace;
+  base.v466={
+    status:v466?.status||null,
+    attempted:v466?.attempted===true,
+    verified:v466?.verified===true,
+    requestsUsed:safeNumber(v466?.requestsUsed),
+    provider:v466?.provider||null,
+    poolId:normalize(v466?.poolId)||null,
+    fromBlock:blockNumberFromAnyV180(v466?.fromBlock),
+    toBlock:blockNumberFromAnyV180(v466?.toBlock),
+    cutoffBlock:blockNumberFromAnyV180(v466?.cutoffBlock),
+    returnedLogs:safeNumber(v466?.returnedLogs),
+    returnedLogsThisScan:safeNumber(v466?.returnedLogsThisScanV466),
+    saturated:v466?.saturated===true,
+    allReturnedRowsExactUsdDecoded:v466?.allReturnedRowsExactUsdDecoded===true,
+    fullExactPool24hCoverageVerified:v466?.fullExactPool24hCoverageVerified===true,
+    completedRanges:safeNumber(v466?.multiScanProgressV466?.completedRanges),
+    completedRangesThisScan:safeNumber(v466?.multiScanProgressV466?.completedRangesThisScan),
+    pendingRanges:safeNumber(v466?.multiScanProgressV466?.pendingRanges),
+    logRequestsUsed:safeNumber(v466?.paginationV461?.logRequestsUsed),
+    stoppedReason:v466?.paginationV461?.stoppedReason||null,
+    verifiedWindows:Array.isArray(v466?.flow?.verifiedWindows)
+      ? v466.flow.verifiedWindows
+      : []
+  };
+
+  base.externalRequestsUsed +=
+    Math.max(0,safeNumber(budget.totalUsed)-used0);
+
+  base.budget={
+    totalUsed:safeNumber(budget.totalUsed),
+    totalLimit:safeNumber(budget.totalLimit),
+    analysisUsed:safeNumber(budget?.analysis?.used),
+    analysisLimit:safeNumber(budget?.analysis?.limit),
+    skipped:Array.isArray(budget?.skipped)
+      ? budget.skipped.slice(-10)
+      : []
+  };
+
+  base.finalStatus=
+    v466?.verified===true
+      ? "COMPLETE_EXACT_POOL_USD_VERIFIED_V865"
+      : (v466?.status||"V466_NOT_VERIFIED_V865");
+
+  return base;
+}
+
+function v4CompleteAuditTelegramV865(result) {
+  const r=result||{};
+  const short=v=>{
+    const s=String(v||"");
+    return s.length>22
+      ? `${s.slice(0,12)}…${s.slice(-8)}`
+      : (s||"NONE");
+  };
+
+  const lines=[
+    "🧬 <b>V4 Complete-History Audit — V865</b>","",
+    `Token: <code>${escapeHtml(String(r?.tokenAddress||"UNVERIFIED"))}</code>`,
+    `Final status: <b>${escapeHtml(String(r?.finalStatus||"UNVERIFIED"))}</b>`,
+    `Diagnostic requests: <b>${safeNumber(r?.budget?.totalUsed ?? r?.externalRequestsUsed)}/${safeNumber(r?.budget?.totalLimit || r?.maxExternalRequests)}</b>`,"",
+    "1️⃣ <b>V841 exact V4 identity</b>",
+    `Status: <b>${escapeHtml(String(r?.v841?.status||"UNVERIFIED"))}</b>`,
+    `Exact matches: <b>${safeNumber(r?.v841?.exactMatches)}</b> · requests <b>${safeNumber(r?.v841?.requestsUsed)}</b>`,
+    `Selected identity PoolId: <code>${escapeHtml(short(r?.v841?.selectedPoolId))}</code>`,"",
+    "2️⃣ <b>Current-live pool selection</b>",
+    `Status: <b>${escapeHtml(String(r?.live?.status||"UNVERIFIED"))}</b>`,
+    `Active PoolId: <code>${escapeHtml(short(r?.activePoolId))}</code>`,
+    `Live swaps: <b>${safeNumber(r?.live?.swaps)}</b> · requests <b>${safeNumber(r?.live?.requestsUsed)}</b>`,
+    `Head: <b>${escapeHtml(String(r?.latestBlock??"UNVERIFIED"))}</b>`,
+    `Verified Initialize block: <b>${escapeHtml(String(r?.trustedPoolStartBlock??"UNVERIFIED"))}</b>`,"",
+    "3️⃣ <b>V196 ETH/USDG reference</b>",
+    `Status: <b>${escapeHtml(String(r?.v196?.status||"UNVERIFIED"))}</b>`,
+    `Verified: <b>${r?.v196?.verified===true?"YES":"NO"}</b>${Number.isFinite(Number(r?.v196?.priceUsdGPerWeth))?` · $${Number(r.v196.priceUsdGPerWeth).toFixed(2)}`:""}`,"",
+    "4️⃣ <b>V466 exact-pool completion</b>",
+    `Status: <b>${escapeHtml(String(r?.v466?.status||"UNVERIFIED"))}</b>`,
+    `V466 requests / log requests: <b>${safeNumber(r?.v466?.requestsUsed)} / ${safeNumber(r?.v466?.logRequestsUsed)}</b>`,
+    `Completed / pending ranges: <b>${safeNumber(r?.v466?.completedRanges)} / ${safeNumber(r?.v466?.pendingRanges)}</b>`,
+    `Returned exact-pool rows: <b>${safeNumber(r?.v466?.returnedLogs)}</b>`,
+    `All decoded exact USD: <b>${r?.v466?.allReturnedRowsExactUsdDecoded===true?"YES":"NO"}</b>`,
+    `Full exact-pool coverage: <b>${r?.v466?.fullExactPool24hCoverageVerified===true?"VERIFIED":"UNVERIFIED"}</b>`,
+    `Stop reason: <b>${escapeHtml(String(r?.v466?.stoppedReason||"NONE"))}</b>`,"",
+    "🔬 <b>Per-range trace</b>"
+  ];
+
+  const trace=Array.isArray(r?.rangeTrace)?r.rangeTrace:[];
+  if(!trace.length) {
+    lines.push("No V466 log-range requests were sent.");
+  } else {
+    for(const row of trace.slice(0,12)) {
+      lines.push(
+        `#${safeNumber(row?.request)} <b>${escapeHtml(String(row?.fromBlock??"?"))}→${escapeHtml(String(row?.toBlock??"?"))}</b> · span ${safeNumber(row?.blockSpan)} · rows <b>${safeNumber(row?.rows)}</b> · saturated <b>${row?.saturated===true?"YES":"NO"}</b> · ${escapeHtml(String(row?.status||"UNVERIFIED"))} · budget ${safeNumber(row?.budgetBefore?.totalUsed)}→${safeNumber(row?.budgetAfter?.totalUsed)}`
+      );
+    }
+    if(trace.length>12) {
+      lines.push(`… ${trace.length-12} additional range traces omitted.`);
+    }
+  }
+
+  lines.push(
+    "",
+    `<i>Diagnostic only: isolated budget; zero autonomous-state writes; scanner/scoring/qualification unchanged.</i>`
+  );
+
+  return lines.join("\\n");
+}
 
 async function v4ManualFlowAuditV851(env, requestedToken="") {
   const token = normalize(requestedToken);
@@ -82993,7 +83122,8 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
   latestBlock,
   wethUsdGReference,
   env,
-  trustedPoolStartBlockV860 = null
+  trustedPoolStartBlockV860 = null,
+  diagnosticRangeTraceV865 = null
 ) {
   const base = {
     enabled: true,
@@ -83225,32 +83355,113 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
   }
 
   const fetchRangeV466 = async (rangeFrom, rangeTo) => {
+    const traceV865 =
+      Array.isArray(diagnosticRangeTraceV865)
+        ? {
+            request:
+              diagnosticRangeTraceV865.length + 1,
+            fromBlock:rangeFrom,
+            toBlock:rangeTo,
+            blockSpan:
+              Number.isFinite(rangeFrom) &&
+              Number.isFinite(rangeTo)
+                ? Math.max(0, rangeTo - rangeFrom + 1)
+                : null,
+            budgetBefore:{
+              totalUsed:safeNumber(budget?.totalUsed),
+              totalLimit:safeNumber(budget?.totalLimit),
+              analysisUsed:safeNumber(budget?.analysis?.used),
+              analysisLimit:safeNumber(budget?.analysis?.limit)
+            },
+            rows:0,
+            saturated:false,
+            status:"STARTED",
+            httpStatus:null,
+            budgetBlocked:false,
+            error:null,
+            budgetAfter:null
+          }
+        : null;
+
+    if (traceV865) {
+      diagnosticRangeTraceV865.push(traceV865);
+    }
+
+    const finishTraceV865 = result => {
+      if (traceV865) {
+        traceV865.rows =
+          Array.isArray(result?.rows)
+            ? result.rows.length
+            : 0;
+        traceV865.saturated =
+          result?.saturated === true;
+        traceV865.status =
+          result?.status || "UNVERIFIED";
+        traceV865.httpStatus =
+          result?.httpStatus ?? null;
+        traceV865.budgetBlocked =
+          result?.budgetBlocked === true;
+        traceV865.error =
+          result?.error || null;
+        traceV865.budgetAfter = {
+          totalUsed:safeNumber(budget?.totalUsed),
+          totalLimit:safeNumber(budget?.totalLimit),
+          analysisUsed:safeNumber(budget?.analysis?.used),
+          analysisLimit:safeNumber(budget?.analysis?.limit)
+        };
+      }
+      return result;
+    };
+
     if (logRequestsUsed >= VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461) {
-      return {ok:false, budgetBlocked:true, fromBlock:rangeFrom, toBlock:rangeTo, rows:[], saturated:false,
-        status:"MAX_LOG_REQUESTS_REACHED_V466"};
+      return finishTraceV865({
+        ok:false,budgetBlocked:true,fromBlock:rangeFrom,toBlock:rangeTo,rows:[],saturated:false,
+        status:"MAX_LOG_REQUESTS_REACHED_V466"
+      });
     }
+
     if (!consumeBudget(budget, "analysis", "BLOCKSCOUT_V458_COMPLETE_EXACT_POOL_24H_LOGS")) {
-      return {ok:false, budgetBlocked:true, fromBlock:rangeFrom, toBlock:rangeTo, rows:[], saturated:false,
-        status:"ANALYSIS_BUDGET_PROTECTED_LOG_QUERY_V466"};
+      return finishTraceV865({
+        ok:false,budgetBlocked:true,fromBlock:rangeFrom,toBlock:rangeTo,rows:[],saturated:false,
+        status:"ANALYSIS_BUDGET_PROTECTED_LOG_QUERY_V466"
+      });
     }
+
     requestsUsed++;
     logRequestsUsed++;
+
     const logsUrl = `${apiBase}${separator}module=logs&action=getLogs` +
       `&fromBlock=${rangeFrom}&toBlock=${rangeTo}&address=${POOL_MANAGER}` +
       `&topic0=${SWAP_TOPIC}&topic1=${poolId}&topic0_1_opr=and${apiKeySuffix}`;
+
     try {
       const response = await fetch(logsUrl, {headers:{accept:"application/json"}});
       if (!response.ok) {
-        return {ok:false, fromBlock:rangeFrom, toBlock:rangeTo, rows:[], saturated:false,
-          status:`BLOCKSCOUT_EXACT_POOL_LOGS_HTTP_${response.status}_V466`};
+        return finishTraceV865({
+          ok:false,fromBlock:rangeFrom,toBlock:rangeTo,rows:[],saturated:false,
+          status:`BLOCKSCOUT_EXACT_POOL_LOGS_HTTP_${response.status}_V466`,
+          httpStatus:response.status
+        });
       }
+
       const payload = await response.json();
       const rows = Array.isArray(payload?.result) ? payload.result : [];
-      return {ok:true, fromBlock:rangeFrom, toBlock:rangeTo, rows,
-        saturated:rows.length >= BLOCKSCOUT_LOGS_MAX_ROWS_V180, status:"OK"};
+
+      return finishTraceV865({
+        ok:true,
+        fromBlock:rangeFrom,
+        toBlock:rangeTo,
+        rows,
+        saturated:rows.length >= BLOCKSCOUT_LOGS_MAX_ROWS_V180,
+        status:"OK",
+        httpStatus:response.status
+      });
     } catch (error) {
-      return {ok:false, fromBlock:rangeFrom, toBlock:rangeTo, rows:[], saturated:false,
-        status:"BLOCKSCOUT_EXACT_POOL_LOGS_FETCH_ERROR_V466", error:errorString(error)};
+      return finishTraceV865({
+        ok:false,fromBlock:rangeFrom,toBlock:rangeTo,rows:[],saturated:false,
+        status:"BLOCKSCOUT_EXACT_POOL_LOGS_FETCH_ERROR_V466",
+        error:errorString(error)
+      });
     }
   };
 
@@ -115637,23 +115848,6 @@ function createTelegramAnalyseBudgetV276() {
     lastBlockedAt: null
   };
 
-  /*
-   * V864: separate manual-only V4 envelope within the same 24-request ceiling.
-   * The V834 creation reserve is additive while both are active.
-   */
-  budget.analysis.manualV4PriorityReserveV864 = {
-    active: true,
-    reservedRequests: 10,
-    blockedRequests: 0,
-    authorisedRequests: 0,
-    lastBlockedType: null,
-    lastBlockedAt: null,
-    lastAuthorisedType: null,
-    lastAuthorisedAt: null,
-    releasedAt: null,
-    releaseReason: null
-  };
-
   budget.manualAnalyseTelemetryV279 = {
     enabled: true,
     consumed: {}
@@ -121022,7 +121216,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     const bh=v289aV853?.budgetAfterHistory||{};
     const refuse=v289aV853?.latestBudgetRefusal||null;
     evidence.push(
-      `💵 V289 exact-USD recovery audit V864: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
+      `💵 V289 exact-USD recovery audit V863: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
       `• Active PoolId into V289: <code>${escapeHtml(v289aV853.poolId || "UNVERIFIED")}</code> | live selected <code>${escapeHtml(v289aV853.liveSelectedPoolId || "UNVERIFIED")}</code> | live swaps <b>${safeNumber(v289aV853.liveSwaps)}</b>`,
       `• Quote into V289: <code>${escapeHtml(v289aV853.quoteTokenAddress || "UNVERIFIED")}</code>`,
       `• Budget before V289: <b>${safeNumber(bb.totalUsed)}/${safeNumber(bb.totalLimit)}</b> | after reference <b>${safeNumber(br.totalUsed)}/${safeNumber(br.totalLimit)}</b> | after history <b>${safeNumber(bh.totalUsed)}/${safeNumber(bh.totalLimit)}</b>`,
@@ -121045,14 +121239,13 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     candidate?.manualCompleteExactPoolV4V859 || null;
   if (completeV4V859) {
     evidence.push(
-      `🔒 Manual complete exact-V4-pool coverage V864: <b>${escapeHtml(completeV4V859.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(completeV4V859.requestsUsed)}</b>`,
+      `🔒 Manual complete exact-V4-pool coverage V863: <b>${escapeHtml(completeV4V859.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(completeV4V859.requestsUsed)}</b>`,
       `• PoolId: <code>${escapeHtml(completeV4V859.poolId || "UNVERIFIED")}</code> | provider <b>${escapeHtml(completeV4V859.provider || "UNVERIFIED")}</b>`,
       `• Range: <b>${escapeHtml(String(completeV4V859.fromBlock ?? "UNVERIFIED"))} → ${escapeHtml(String(completeV4V859.toBlock ?? "UNVERIFIED"))}</b> | cutoff block <b>${escapeHtml(String(completeV4V859.cutoffBlock ?? "UNVERIFIED"))}</b>`,
       `• V860 trusted pool start: <b>${escapeHtml(String(completeV4V859.trustedPoolStartBlockV860 ?? "UNVERIFIED"))}</b> | source <b>${escapeHtml(completeV4V859.trustedPoolStartSourceV860 || "NONE")}</b> | timestamp lookup sent <b>${completeV4V859.timestampLookupRequestSent === true ? "YES" : "NO"}</b>`,
       `• V862 trusted-lifetime pre-split: <b>${completeV4V859.preSplitTrustedLifetimeV862 === true ? "YES — 2 DIRECT CHILD RANGES" : "NO"}</b>`,
       `• V863 resume: loaded <b>${completeV4V859.manualProgressLoadedV863 === true ? "YES" : "NO"}</b> | load <b>${escapeHtml(completeV4V859.manualProgressLoadStatusV863 || "UNVERIFIED")}</b> | save <b>${escapeHtml(completeV4V859.manualProgressSaveStatusV863 || "UNVERIFIED")}</b>`,
       `• V863 progress: completed ranges <b>${safeNumber(completeV4V859.completedRangesV863)}</b> | pending ranges <b>${safeNumber(completeV4V859.remainingPendingRangesV863)}</b> | cleared <b>${completeV4V859.manualProgressClearedV863 === true ? "YES" : "NO"}</b>`,
-      `• V864 V4 priority envelope: authorised <b>${safeNumber(completeV4V859?.v4PriorityReserveV864?.authorisedRequests)}</b> | lower-priority requests deferred <b>${safeNumber(completeV4V859?.v4PriorityReserveV864?.blockedRequests)}</b> | release <b>${escapeHtml(completeV4V859?.v4PriorityReserveV864?.releaseReason || "UNVERIFIED")}</b>`,
       `• Logs: <b>${safeNumber(completeV4V859.returnedLogs)}</b> | saturated <b>${completeV4V859.saturated === true ? "YES" : "NO"}</b> | every row exact USD <b>${completeV4V859.allReturnedRowsExactUsdDecoded === true ? "YES" : "NO"}</b>`,
       `• Full exact-pool 24h coverage: <b>${completeV4V859.fullExactPool24hCoverageVerified === true ? "VERIFIED" : "UNVERIFIED"}</b> | verified windows <b>${escapeHtml((completeV4V859.verifiedWindows || []).join(", ") || "NONE")}</b>`,
       `• Autonomous state: <b>UNCHANGED</b> · manual isolated state only`
@@ -121739,7 +121932,7 @@ async function telegramFreshAnalyseV276(
           holderPriorityCompletion:
             true,
           manualAnalyseOptimizationV280:
-            true,
+            false,
           liveMomentumActivityV152: {
             swaps:
               0,
@@ -122070,32 +122263,12 @@ async function telegramFreshAnalyseV276(
     manualCompleteExactPoolV4V859.manualV466SaveV863 =
       manualV466SaveV863;
 
-    manualCompleteExactPoolV4V859.manualV4PriorityReserveV864 =
-      releaseManualV4PriorityReserveV864(
-        budget,
-        manualCompleteExactPoolV4V859?.verified === true
-          ? "V466_COMPLETE_VERIFIED_V864"
-          : "V466_PASS_FINISHED_OR_PROGRESS_SAVED_V864"
-      );
-
     manualCompleteExactPoolV4V859.trustedPoolStartBlockV860 =
       trustedPoolStartBlockV860;
     manualCompleteExactPoolV4V859.trustedPoolStartSourceV860 =
       Number.isFinite(trustedPoolStartBlockV860)
         ? "V841_BLOCKSCOUT_PRO_INDEXED_INITIALIZE"
         : "NONE_FALLBACK_TO_EXISTING_V458";
-  }
-
-  if (
-    budget?.analysis
-      ?.manualV4PriorityReserveV864
-      ?.active === true
-  ) {
-    manualCompleteExactPoolV4V859.manualV4PriorityReserveV864 =
-      releaseManualV4PriorityReserveV864(
-        budget,
-        "V4_COMPLETE_PATH_NOT_ELIGIBLE_OR_FINISHED_V864"
-      );
   }
 
   candidate.completeExactPoolDirectionalUsdV458 =
@@ -122189,35 +122362,7 @@ async function telegramFreshAnalyseV276(
         manualCompleteExactPoolV4V859
           ?.multiScanProgressV466
           ?.completedRanges
-      ),
-    v4PriorityReserveV864: {
-      blockedRequests:
-        safeNumber(
-          manualCompleteExactPoolV4V859
-            ?.manualV4PriorityReserveV864
-            ?.blockedRequests ??
-          budget?.analysis
-            ?.manualV4PriorityReserveV864
-            ?.blockedRequests
-        ),
-      authorisedRequests:
-        safeNumber(
-          manualCompleteExactPoolV4V859
-            ?.manualV4PriorityReserveV864
-            ?.authorisedRequests ??
-          budget?.analysis
-            ?.manualV4PriorityReserveV864
-            ?.authorisedRequests
-        ),
-      releaseReason:
-        manualCompleteExactPoolV4V859
-          ?.manualV4PriorityReserveV864
-          ?.releaseReason ||
-        budget?.analysis
-          ?.manualV4PriorityReserveV864
-          ?.releaseReason ||
-        null
-    }
+      )
   };
 
   candidate.manualV289AuditV853 = candidate.manualV289AuditV853 || {
@@ -155137,6 +155282,7 @@ function telegramHelpV271() {
     "<code>/v4marketstatus</code> — V773 show the last production market/liquidity completion result",
     "<code>/v4prodstatus</code> — V772 show the last production scanner V4/Uniswap enrichment result",
     "<code>/v4poolsearch [0xTOKEN] [p2...]</code> — V796 bounded 100-PoolId/page active reverse search through Uniswap Pool Info, with historical fallback after the final page (diagnostic only)",
+    "<code>/v4completeaudit 0x...</code> — V865 isolated exact V4 completion trace: every V466 range, rows, saturation, split and budget decision",
     "<code>/v4manualflowaudit 0x...</code> — V851 trace live V4 → V212 → exact USD → V254 → rolling-watch handoff (diagnostic only)",
     "<code>/v4livetokens</code> — V842 return currently-active non-quote V4 token addresses from the busiest verified live pools (diagnostic only)",
     "<code>/v4allpools [0xTOKEN]</code> — V771 verify all recent live V4 pools for a token + normalized BUY/SELL amounts using on-chain decimals",
@@ -156103,6 +156249,37 @@ async function telegramCommandReplyV271(
       diagnosticV273.result=sentV769?.success===true?"REPLY_SENT":"REPLY_FAILED";
     }
     return {success:sentV769?.success===true,ignored:false,command:parsed.command,v4SwapDirectionV769:directionV769};
+  }
+
+  if (parsed.command === "/v4completeaudit") {
+    const auditV865=await v4CompleteAuditV865(env, parsed.argument || "");
+    const replyV865=v4CompleteAuditTelegramV865(auditV865);
+    if (diagnosticV273) {
+      diagnosticV273.replyAttempted=true;
+      diagnosticV273.v4CompleteAuditV865={
+        tokenAddress:auditV865?.tokenAddress||null,
+        activePoolId:auditV865?.activePoolId||null,
+        finalStatus:auditV865?.finalStatus||null,
+        requestsUsed:safeNumber(auditV865?.budget?.totalUsed ?? auditV865?.externalRequestsUsed),
+        rangeRequests:safeNumber(auditV865?.rangeTrace?.length),
+        scannerBudgetConsumed:false,
+        stateWrites:0
+      };
+    }
+    const sentV865=await sendTelegram(env,replyV865,null,null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess=sentV865?.success===true;
+      diagnosticV273.telegramStatus=sentV865?.status||null;
+      diagnosticV273.telegramMode=sentV865?.mode||null;
+      diagnosticV273.telegramError=sentV865?.error||null;
+      diagnosticV273.result=sentV865?.success===true?"REPLY_SENT":"REPLY_FAILED";
+    }
+    return {
+      success:sentV865?.success===true,
+      ignored:false,
+      command:parsed.command,
+      v4CompleteAuditV865:auditV865
+    };
   }
 
   if (parsed.command === "/v4manualflowaudit") {
@@ -162066,6 +162243,15 @@ async function handleRequest(
     const token=url.searchParams.get("token")||"";
     const block=url.searchParams.get("block")||"";
     return jsonResponse(await v4PoolSearchDiagnosticV791(env,`${token} ${block}`.trim()));
+  }
+
+  if (path === "/v4completeaudit") {
+    return jsonResponse(
+      await v4CompleteAuditV865(
+        env,
+        url.searchParams.get("token") || ""
+      )
+    );
   }
 
   if (path === "/v4manualflowaudit") {
