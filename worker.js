@@ -1,4 +1,16 @@
 /**
+ * Robinhood Chain Meme Hunter — V833
+ *
+ * V833 VERIFIED V3 READ-TIME USD REPAIR:
+ * - builds directly from V832 and preserves V831 diagnostics plus all confirmed-working V3/V4 collection, scoring, qualification, provider and request-budget behaviour;
+ * - fixes a remaining live-ledger valuation gap where an exact WETH-quoted swap can be captured while the already-trusted verified WETH/USDG reference is temporarily unavailable, leaving that stored row USD-unverified even though the quote amount itself is exact;
+ * - live rolling-window reads may now value only those otherwise-unverified canonical-WETH quote rows from the same currently VERIFIED WETH/USDG reference already used by the collector;
+ * - repair is read-time only: original trade timestamps, side, quote amount and persisted trade rows are not rewritten, moved or backfilled;
+ * - canonical USDG rows keep their existing exact valuation path; unknown/non-canonical quote rows remain UNVERIFIED;
+ * - FULL windows are promoted at the top only when every captured trade is USD-verified after this strict repair; PARTIAL windows remain UNVERIFIED;
+ * - zero new external requests, zero extra KV writes, no V4 changes, no scoring/threshold changes, and hard global request ceiling remains 42.
+ */
+/**
  * Robinhood Chain Meme Hunter — V832
  *
  * V832 PRESENTATION/HANDOFF ONLY — VERIFIED V3 FLOW PROMOTION:
@@ -7087,7 +7099,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V832";
+const VERSION = "V833";
 /*
  * V821 PERSISTENT FAIR RESCUE SCHEDULING
  * - Builds forward from the confirmed V819 production V4 fairness path and
@@ -86552,7 +86564,7 @@ function telegramMessage(
         buyUsd: money(buy),
         sellUsd: money(sell),
         netUsd: money(net),
-        source: "BOT_V3_EXACT_POOL_LIVE_LEDGER_V832"
+        source: "BOT_V3_EXACT_POOL_LIVE_LEDGER_V833"
       };
     }
 
@@ -168271,17 +168283,53 @@ if (url.pathname === "/reconcile-v374") {
       if (Array.isArray(stored)) trades.push(...stored);
     }
     const defs = [["1m",60*1000],["5m",5*60*1000],["15m",15*60*1000],["30m",30*60*1000],["1h",60*60*1000],["6h",6*60*60*1000],["12h",12*60*60*1000],["24h",24*60*60*1000]];
+
+    /* V833: strict read-time repair for exact WETH-quote swaps that were
+     * captured while the same verified WETH/USDG reference used by persistSwap
+     * was momentarily unavailable. This does not mutate stored rows. */
+    let readTimeWethUsdPriceV833 = null;
+    let readTimeWethUsdSourceV833 = null;
+    try {
+      const {kv}=getKV(this.env);
+      if(kv){
+        const rawRef=await kv.get(V347_REFERENCE_DIAGNOSTIC_KEY_V348);
+        if(rawRef){
+          const ref=JSON.parse(rawRef);
+          const p=Number(ref?.priceUsdGPerWeth);
+          if(ref?.verified===true && Number.isFinite(p) && p>0){
+            readTimeWethUsdPriceV833=p;
+            readTimeWethUsdSourceV833=String(ref?.source||ref?.basis||"VERIFIED_WETH_USDG_REFERENCE_V347");
+          }
+        }
+      }
+    } catch(_) {}
+
     const windows = {};
     for (const [name,ms] of defs) {
       const rows = trades.filter(r => Number(r?.observedAt)>=nowMs-ms && Number(r?.observedAt)<=nowMs);
-      let buys=0,sells=0,buyUsd=0,sellUsd=0,usdVerifiedTrades=0;
+      let buys=0,sells=0,buyUsd=0,sellUsd=0,usdVerifiedTrades=0,usdReadTimeRepairedTradesV833=0;
       for (const r of rows) {
         if (r?.side==="BUY") buys++; else if (r?.side==="SELL") sells++;
-        const u=Number(r?.usd);
-        if (r?.usdVerified===true && Number.isFinite(u) && u>=0) { usdVerifiedTrades++; if(r?.side==="BUY") buyUsd+=u; else if(r?.side==="SELL") sellUsd+=u; }
+        let u=Number(r?.usd);
+        let usdVerified=r?.usdVerified===true && Number.isFinite(u) && u>=0;
+
+        if(!usdVerified &&
+           normalize(r?.quoteTokenAddress||"")===normalize(CANONICAL_WETH_V179) &&
+           Number.isFinite(Number(r?.quoteAmount)) && Number(r.quoteAmount)!==0 &&
+           Number.isFinite(readTimeWethUsdPriceV833) && readTimeWethUsdPriceV833>0){
+          u=Math.abs(Number(r.quoteAmount))*readTimeWethUsdPriceV833;
+          usdVerified=Number.isFinite(u) && u>0;
+          if(usdVerified) usdReadTimeRepairedTradesV833++;
+        }
+
+        if (usdVerified) {
+          usdVerifiedTrades++;
+          if(r?.side==="BUY") buyUsd+=u;
+          else if(r?.side==="SELL") sellUsd+=u;
+        }
       }
       const totalUsd=buyUsd+sellUsd;
-      windows[name]={trades:rows.length,buys,sells,usdVerifiedTrades,buyUsd:Number(buyUsd.toFixed(6)),sellUsd:Number(sellUsd.toFixed(6)),netUsd:Number((buyUsd-sellUsd).toFixed(6)),buyPressurePct:totalUsd>0?Number((buyUsd/totalUsd*100).toFixed(2)):null,coverage:"PENDING_V366"};
+      windows[name]={trades:rows.length,buys,sells,usdVerifiedTrades,usdReadTimeRepairedTradesV833,usdReadTimeRepairSourceV833:usdReadTimeRepairedTradesV833>0?readTimeWethUsdSourceV833:null,buyUsd:Number(buyUsd.toFixed(6)),sellUsd:Number(sellUsd.toFixed(6)),netUsd:Number((buyUsd-sellUsd).toFixed(6)),buyPressurePct:totalUsd>0?Number((buyUsd/totalUsd*100).toFixed(2)):null,coverage:"PENDING_V366"};
     }
     const cfg=this.config||await this.state.storage.get("config")||null;
     const stats=this.liveStatsV403 || await this.state.storage.get("stats")||{};
