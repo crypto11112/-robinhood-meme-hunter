@@ -1,4 +1,12 @@
 /**
+ * Robinhood Chain Meme Hunter — V830
+ *
+ * V830 DIAGNOSTIC-ONLY — DEXSCREENER REQUEST AUDIT:
+ * - preserves V829 manual verified market cache and the confirmed-working V825+ V3 exact-pool live ledger unchanged;
+ * - records normal DexScreener request endpoint class, feature, timestamp, spacing, rolling 60-second request count, HTTP status and Retry-After evidence in existing service telemetry;
+ * - /analyse displays the inherited recent scanner history plus any request made by that isolated manual run;
+ * - no added provider requests, no scoring/qualification changes, no V3 collector changes and no request-ceiling changes.
+ *
  * Robinhood Chain Meme Hunter — V829
  *
  * V829 REGRESSION REPAIR — VERIFIED MANUAL MARKET CACHE FOR 429 RECOVERY:
@@ -7069,7 +7077,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V829";
+const VERSION = "V830";
 /*
  * V821 PERSISTENT FAIR RESCUE SCHEDULING
  * - Builds forward from the confirmed V819 production V4 fairness path and
@@ -53909,6 +53917,51 @@ function retryAfterMsMarketV428(response) {
     : null;
 }
 
+function dexRequestPathV830(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    return parsed.pathname || "UNKNOWN";
+  } catch (_) {
+    return String(url || "").split("?")[0].replace(/^https?:\/\/[^/]+/i, "") || "UNKNOWN";
+  }
+}
+
+function dexRequestAuditV830(service, event = {}) {
+  if (!service || typeof service !== "object") return null;
+
+  const now = safeNumber(event?.at) || Date.now();
+  const prior = Array.isArray(service.requestAuditV830)
+    ? service.requestAuditV830.filter(row => row && safeNumber(row?.at) > 0)
+    : [];
+
+  const recent60Before = prior.filter(row => now - safeNumber(row?.at) >= 0 && now - safeNumber(row?.at) <= 60000);
+  const previous = prior.length ? prior[prior.length - 1] : null;
+  const previousAt = safeNumber(previous?.at) || 0;
+
+  const row = {
+    at: now,
+    feature: event?.feature || "UNKNOWN",
+    phase: event?.phase || null,
+    pathClass: event?.pathClass || null,
+    endpoint: event?.endpoint || "UNKNOWN",
+    requestsInPrior60s: recent60Before.length,
+    timeSincePreviousMs: previousAt ? Math.max(0, now - previousAt) : null,
+    previousFeature: previous?.feature || null,
+    previousPathClass: previous?.pathClass || null,
+    httpStatus: event?.httpStatus ?? null,
+    outcome: event?.outcome || null,
+    retryAfterRaw: event?.retryAfterRaw || null,
+    retryAfterMs: safeNumber(event?.retryAfterMs) || null,
+    cooldownUntilBefore: safeNumber(event?.cooldownUntilBefore) || null,
+    sourceVersion: VERSION
+  };
+
+  prior.push(row);
+  service.requestAuditV830 = prior.slice(-30);
+  service.requestAuditLastV830 = row;
+  return row;
+}
+
 async function marketFetchV428(
   url,
   options,
@@ -53938,6 +53991,16 @@ async function marketFetchV428(
           provider
         );
 
+  const dexAuditServiceV830 =
+    String(provider || "").toUpperCase() === "DEXSCREENER"
+      ? dexService(state)
+      : null;
+
+  const dexAuditCooldownBeforeV830 =
+    dexAuditServiceV830
+      ? safeNumber(dexAuditServiceV830.cooldownUntil) || null
+      : null;
+
   try {
     const response =
       await fetch(url, options);
@@ -53959,6 +54022,26 @@ async function marketFetchV428(
       retryAfterMsMarketV428(
         response
       );
+
+    const retryAfterRawV830 = (() => {
+      try { return String(response?.headers?.get?.("retry-after") || "").trim() || null; }
+      catch (_) { return null; }
+    })();
+
+    if (dexAuditServiceV830) {
+      dexRequestAuditV830(dexAuditServiceV830, {
+        at: startedAt,
+        feature: feature || "UNKNOWN",
+        phase: phase || null,
+        pathClass: pathClass || null,
+        endpoint: dexRequestPathV830(url),
+        httpStatus: status,
+        outcome,
+        retryAfterRaw: retryAfterRawV830,
+        retryAfterMs,
+        cooldownUntilBefore: dexAuditCooldownBeforeV830
+      });
+    }
 
     if (root?.enabled) {
       root.totalRequests =
@@ -54055,6 +54138,21 @@ async function marketFetchV428(
   }
 
   catch (error) {
+    if (dexAuditServiceV830) {
+      dexRequestAuditV830(dexAuditServiceV830, {
+        at: startedAt,
+        feature: feature || "UNKNOWN",
+        phase: phase || null,
+        pathClass: pathClass || null,
+        endpoint: dexRequestPathV830(url),
+        httpStatus: null,
+        outcome: "FETCH_ERROR",
+        retryAfterRaw: null,
+        retryAfterMs: null,
+        cooldownUntilBefore: dexAuditCooldownBeforeV830
+      });
+    }
+
     if (root?.enabled) {
       root.totalRequests =
         safeNumber(root.totalRequests) + 1;
@@ -119012,6 +119110,24 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       `• Dex routes this /analyse: <b>${escapeHtml(dexRouteTextV828)}</b>`,
       `• Market budget keys: <b>${escapeHtml(consumedTextV828)}</b>`,
       `• V829 verified manual cache: load <b>${escapeHtml(candidate?.manualMarketCacheV829?.load?.status || "NO_STATUS")}</b>${candidate?.manualMarketCacheV829?.load?.ageMs !== null && candidate?.manualMarketCacheV829?.load?.ageMs !== undefined ? ` | age <b>${Math.round(safeNumber(candidate.manualMarketCacheV829.load.ageMs)/1000)}s</b>` : ""} | save <b>${escapeHtml(candidate?.manualMarketCacheV829?.save?.status || "NO_STATUS")}</b>`,
+      (() => {
+        const rows = Array.isArray(marketTraceV828?.dexRequestAuditV830?.recent) ? marketTraceV828.dexRequestAuditV830.recent : [];
+        const last = marketTraceV828?.dexRequestAuditV830?.last || null;
+        if (!rows.length || !last) return `• V830 Dex request audit: <b>NO_RECORDED_NORMAL_DEX_REQUESTS</b>`;
+        const spacing = last?.timeSincePreviousMs === null || last?.timeSincePreviousMs === undefined ? "FIRST_RECORDED" : `${Math.round(safeNumber(last.timeSincePreviousMs)/1000)}s`;
+        const retry = last?.retryAfterRaw ? ` | Retry-After <b>${escapeHtml(String(last.retryAfterRaw))}</b>` : "";
+        return `• V830 Dex request audit: last <b>${escapeHtml(last.pathClass || last.feature || "UNKNOWN")}</b> ${last?.httpStatus !== null && last?.httpStatus !== undefined ? `HTTP <b>${escapeHtml(String(last.httpStatus))}</b>` : `<b>${escapeHtml(last.outcome || "UNKNOWN")}</b>`} | prior-60s <b>${safeNumber(last.requestsInPrior60s)}</b> | spacing <b>${escapeHtml(spacing)}</b>${retry}`;
+      })(),
+      (() => {
+        const rows = Array.isArray(marketTraceV828?.dexRequestAuditV830?.recent) ? marketTraceV828.dexRequestAuditV830.recent : [];
+        if (!rows.length) return `• V830 recent Dex timeline: <b>NONE</b>`;
+        const text = rows.slice(-6).map(row => {
+          const ageS = Math.max(0, Math.round((Date.now()-safeNumber(row?.at))/1000));
+          const code = row?.httpStatus !== null && row?.httpStatus !== undefined ? row.httpStatus : (row?.outcome || "ERR");
+          return `${ageS}s ago ${row?.pathClass || row?.feature || "UNKNOWN"}:${code}`;
+        }).join(" | ");
+        return `• V830 recent Dex timeline: <b>${escapeHtml(text)}</b>`;
+      })(),
       "ℹ️ <i>Trace is read-only; V829 cache persistence adds zero provider requests and never mutates the autonomous watchlist.</i>"
     );
   }
@@ -119914,6 +120030,14 @@ async function telegramFreshAnalyseV276(
         marketServiceV828?.athFollowUpV296?.status || null,
       athFollowUpHttpStatus:
         marketServiceV828?.athFollowUpV296?.httpStatus ?? null
+    },
+    dexRequestAuditV830: {
+      recent: Array.isArray(marketServiceV828?.requestAuditV830)
+        ? marketServiceV828.requestAuditV830.slice(-8).map(row => ({...row}))
+        : [],
+      last: marketServiceV828?.requestAuditLastV830
+        ? {...marketServiceV828.requestAuditLastV830}
+        : null
     },
     recentDexRequests:
       recentDexRequestsV828,
