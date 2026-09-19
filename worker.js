@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V851
+ *
+ * V851 MANUAL V4 USD FLOW AUDIT — DIAGNOSTIC ONLY:
+ * - builds directly from V850;
+ * - adds /v4manualflowaudit <token> (Telegram + HTTP);
+ * - reuses the proven V771 live V4 all-pool diagnostic to identify the currently
+ *   active exact PoolId(s), decoded BUY/SELL swaps and paired quote token;
+ * - then reads autonomous state only and audits the downstream chain:
+ *   active pool -> V212 flow -> exact-pool ledger -> exact-USD rows ->
+ *   quote consistency -> V254 quote priceability -> V570 rolling-watch registration;
+ * - reports the FIRST failing stage explicitly;
+ * - does not call /analyse, does not add the token to the watchlist, does not
+ *   mutate poolRegistry/ledger/scoring state, and adds zero KV writes;
+ * - scanner budgets, /analyse 24-request ceiling, V619 reserve, automatic V4,
+ *   V254 scoring, qualification and Telegram alert thresholds are unchanged.
+ */
+/**
  * Robinhood Chain Meme Hunter — V850
  *
  * V850 MANUAL V4 MULTI-POOL TOPIC-OR FIX — PRESERVE-FIRST:
@@ -7254,7 +7271,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V850";
+const VERSION = "V851";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -42753,6 +42770,238 @@ function v4AllPoolsTelegramV771(result){
   if(r?.rejectedSwaps>0) lines.push(`Reject reasons: <code>${escapeHtml(JSON.stringify(r?.rejectReasons||{}).slice(0,500))}</code>`);
   lines.push(r?.error?`Diagnostic result: <code>${escapeHtml(String(r.error).slice(0,500))}</code>`:"Diagnostic result: <b>ALL_LIVE_V4_POOL_AMOUNTS_VERIFIED</b>","",
     `<i>Diagnostic only: ${safeNumber(r?.externalRequestsUsed)} external requests, one KV read, zero KV writes, zero scanner-budget requests. Normalized token units use on-chain decimals only; V771 still makes no USD-price claim.</i>`);
+  return lines.join("\\n");
+}
+
+
+async function v4ManualFlowAuditV851(env, requestedToken="") {
+  const token = normalize(requestedToken);
+  const base = {
+    version:"V851",
+    diagnostic:"MANUAL_V4_USD_FLOW_AUDIT",
+    readOnly:true,
+    tokenAddress:isAddress(token)?token:null,
+    live:null,
+    selectedActivePoolId:null,
+    selectedActivePoolSwaps:0,
+    selectedQuoteToken:null,
+    selectedQuoteSymbol:null,
+    selectedQuoteDecimals:null,
+    v212FlowVerified:false,
+    v212FlowPoolIds:[],
+    v212ContainsActivePool:false,
+    autonomousLedgerRowsForToken:0,
+    autonomousLedgerRowsForActivePool:0,
+    exactUsdVerifiedRowsForActivePool:0,
+    quoteTokensInExactUsdRows:[],
+    quoteConsistent:false,
+    quotePriceable:false,
+    quotePriceMode:null,
+    wethUsdGReferenceVerified:false,
+    wethUsdGPrice:null,
+    autonomousWatchFound:false,
+    autonomousWatchPoolMatch:false,
+    firstFailingStage:"UNVERIFIED",
+    externalRequestsUsed:0,
+    kvReads:0,
+    kvWrites:0,
+    scannerBudgetConsumed:false,
+    autonomousStateMutated:false,
+    notes:[]
+  };
+
+  if(!isAddress(token)) {
+    return {...base,firstFailingStage:"INVALID_TOKEN_ADDRESS"};
+  }
+
+  const live = await v4AllPoolsAmountsDiagnosticV771(env, token);
+  base.live = {
+    error:live?.error||null,
+    coverageComplete:live?.coverageComplete===true,
+    recentSwapRows:safeNumber(live?.recentSwapRows),
+    uniqueLivePoolIds:safeNumber(live?.uniqueLivePoolIds),
+    matchingLivePools:safeNumber(live?.matchingLivePools),
+    decodedSwaps:safeNumber(live?.decodedSwaps),
+    buySwaps:safeNumber(live?.buySwaps),
+    sellSwaps:safeNumber(live?.sellSwaps),
+    rejectedSwaps:safeNumber(live?.rejectedSwaps),
+    pools:Array.isArray(live?.pools)?live.pools.map(p=>({
+      poolId:normalize(p?.poolId)||null,
+      freshSwapCount:safeNumber(p?.freshSwapCount),
+      decodedSwaps:safeNumber(p?.decodedSwaps),
+      buySwaps:safeNumber(p?.buySwaps),
+      sellSwaps:safeNumber(p?.sellSwaps),
+      rejectedSwaps:safeNumber(p?.rejectedSwaps),
+      pairedToken:normalize(p?.pairedToken)||null,
+      pairedSymbol:p?.pairedSymbol||null,
+      pairedDecimals:Number.isInteger(p?.pairedDecimals)?p.pairedDecimals:null,
+      buyPaired:p?.buyPaired??null,
+      sellPaired:p?.sellPaired??null
+    })):[],
+    externalRequestsUsed:safeNumber(live?.externalRequestsUsed)
+  };
+  base.externalRequestsUsed += safeNumber(live?.externalRequestsUsed);
+  base.kvReads += 1; // V771 performs one state read.
+
+  const pools = Array.isArray(live?.pools) ? live.pools : [];
+  const selected = pools
+    .slice()
+    .sort((a,b)=>
+      safeNumber(b?.decodedSwaps)-safeNumber(a?.decodedSwaps) ||
+      safeNumber(b?.freshSwapCount)-safeNumber(a?.freshSwapCount) ||
+      safeNumber(b?.lastFreshSwapBlock)-safeNumber(a?.lastFreshSwapBlock)
+    )[0] || null;
+
+  if(!selected || !isBytes32HexV765(normalize(selected?.poolId))) {
+    base.firstFailingStage = live?.error || "NO_ACTIVE_VERIFIED_V4_POOL_FOR_TOKEN";
+    return base;
+  }
+
+  const activePoolId = normalize(selected.poolId);
+  base.selectedActivePoolId = activePoolId;
+  base.selectedActivePoolSwaps = safeNumber(selected?.decodedSwaps);
+  base.selectedQuoteToken = normalize(selected?.pairedToken)||null;
+  base.selectedQuoteSymbol = selected?.pairedSymbol||null;
+  base.selectedQuoteDecimals = Number.isInteger(selected?.pairedDecimals)?selected.pairedDecimals:null;
+
+  let loaded={state:{},error:null};
+  try { loaded=await readState(env); } catch(error) { loaded={state:{},error:errorString(error)}; }
+  base.kvReads += 1;
+  const state=loaded?.state||{};
+  if(loaded?.error) base.notes.push(`STATE_READ:${loaded.error}`);
+
+  // V212 candidate-level verified flow, if present in retained candidate/history state.
+  // First inspect watched candidates, then recent analysed/qualification rows where available.
+  const candidateRows=[];
+  const watchedRoot = state?.watched || state?.tokens || state?.candidates || {};
+  if(Array.isArray(watchedRoot)) candidateRows.push(...watchedRoot);
+  else if(watchedRoot && typeof watchedRoot==="object") candidateRows.push(...Object.values(watchedRoot));
+  for(const key of ["recentCandidates","analysisHistory","qualified","qualificationHistory","latestCandidates"]) {
+    const v=state?.[key];
+    if(Array.isArray(v)) candidateRows.push(...v);
+    else if(v && typeof v==="object") candidateRows.push(...Object.values(v));
+  }
+  const retainedCandidate = candidateRows.find(row=>normalize(row?.address||row?.tokenAddress)===token) || null;
+  const flow = retainedCandidate?.onChainVerifiedFlowV212 || null;
+  base.v212FlowVerified = flow?.verified===true && normalize(flow?.tokenAddress||token)===token;
+  base.v212FlowPoolIds = Array.isArray(flow?.poolIds)
+    ? [...new Set(flow.poolIds.map(normalize).filter(isBytes32HexV765))]
+    : [];
+  base.v212ContainsActivePool = base.v212FlowPoolIds.includes(activePoolId);
+
+  const store = onChainDirectionalStoreV179(state);
+  const ledger = store?.[token];
+  const records = Array.isArray(ledger?.records)?ledger.records:[];
+  base.autonomousLedgerRowsForToken = records.length;
+
+  const activeRows = records.filter(row =>
+    normalize(row?.candidateAddress||row?.tokenAddress)===token &&
+    normalize(row?.poolId)===activePoolId
+  );
+  base.autonomousLedgerRowsForActivePool = activeRows.length;
+
+  const exactUsdRows = activeRows.filter(row =>
+    row?.exactUsdVerified===true &&
+    Number.isFinite(Number(row?.exactUsdAmount)) &&
+    Number(row.exactUsdAmount)>0 &&
+    (String(row?.side).toLowerCase()==="buy" || String(row?.side).toLowerCase()==="sell")
+  );
+  base.exactUsdVerifiedRowsForActivePool = exactUsdRows.length;
+
+  base.quoteTokensInExactUsdRows = [...new Set(
+    exactUsdRows.map(row=>normalize(row?.quoteTokenAddress)).filter(x=>typeof x==="string"&&x.length>0)
+  )];
+  base.quoteConsistent = base.quoteTokensInExactUsdRows.length===1;
+
+  const reference = bestVerifiedWethUsdGReferenceV195(state);
+  base.wethUsdGReferenceVerified = reference?.verified===true;
+  base.wethUsdGPrice = Number.isFinite(Number(reference?.priceUsdGPerWeth))
+    ? Number(reference.priceUsdGPerWeth)
+    : null;
+
+  const quoteForPriceability =
+    base.quoteConsistent
+      ? base.quoteTokensInExactUsdRows[0]
+      : base.selectedQuoteToken;
+  const priceability = v254PriceableQuote(quoteForPriceability, reference);
+  base.quotePriceable = priceability?.eligible===true;
+  base.quotePriceMode = priceability?.mode||null;
+
+  const watchRoot = directionalWatchRootV551(state);
+  const watchEntries = Object.values(watchRoot?.entries||{})
+    .filter(row=>normalize(row?.tokenAddress)===token);
+  base.autonomousWatchFound = watchEntries.length>0;
+  base.autonomousWatchPoolMatch = watchEntries.some(row=>normalize(row?.poolId)===activePoolId);
+
+  // First failure is deliberately ordered in the same direction as the USD/watch pipeline.
+  if(live?.coverageComplete!==true) {
+    base.firstFailingStage = "LIVE_V4_COVERAGE_NOT_COMPLETE";
+  } else if(base.selectedActivePoolSwaps<=0) {
+    base.firstFailingStage = "ACTIVE_POOL_HAS_NO_DECODED_SWAPS";
+  } else if(!base.selectedQuoteToken) {
+    base.firstFailingStage = "ACTIVE_POOL_QUOTE_TOKEN_UNVERIFIED";
+  } else if(base.v212FlowVerified!==true) {
+    base.firstFailingStage = "V212_VERIFIED_FLOW_NOT_AVAILABLE";
+  } else if(base.v212ContainsActivePool!==true) {
+    base.firstFailingStage = "V212_DOES_NOT_CONTAIN_CURRENT_ACTIVE_POOL";
+  } else if(base.autonomousLedgerRowsForActivePool===0) {
+    base.firstFailingStage = "NO_AUTONOMOUS_LEDGER_ROWS_FOR_ACTIVE_POOL";
+  } else if(base.exactUsdVerifiedRowsForActivePool===0) {
+    base.firstFailingStage = "NO_EXACT_USD_VERIFIED_ROWS_FOR_ACTIVE_POOL";
+  } else if(base.quoteConsistent!==true) {
+    base.firstFailingStage = "EXACT_USD_QUOTE_TOKEN_NOT_CONSISTENT";
+  } else if(base.quotePriceable!==true) {
+    base.firstFailingStage = "ACTIVE_QUOTE_NOT_V254_PRICEABLE";
+  } else if(base.autonomousWatchPoolMatch!==true) {
+    base.firstFailingStage = "V570_WATCH_NOT_REGISTERED_DESPITE_REQUIRED_EVIDENCE";
+  } else {
+    base.firstFailingStage = "NONE_PIPELINE_EVIDENCE_PRESENT";
+  }
+
+  return base;
+}
+
+function v4ManualFlowAuditTelegramV851(result) {
+  const r=result||{};
+  const short=v=>{const s=String(v||"");return s.length>22?`${s.slice(0,12)}…${s.slice(-8)}`:(s||"NONE");};
+  const lines=[
+    "🧪 <b>Manual V4 USD Flow Audit — V851</b>","",
+    `Token: <code>${escapeHtml(String(r?.tokenAddress||"UNVERIFIED"))}</code>`,
+    `First failing stage: <b>${escapeHtml(String(r?.firstFailingStage||"UNVERIFIED"))}</b>`,"",
+    "1️⃣ <b>Live V4 evidence (V771)</b>",
+    `Coverage: <b>${r?.live?.coverageComplete===true?"COMPLETE":"NOT COMPLETE"}</b>`,
+    `Recent swaps / live pools: <b>${safeNumber(r?.live?.recentSwapRows)} / ${safeNumber(r?.live?.matchingLivePools)}</b>`,
+    `Decoded BUY / SELL / rejected: <b>${safeNumber(r?.live?.buySwaps)} / ${safeNumber(r?.live?.sellSwaps)} / ${safeNumber(r?.live?.rejectedSwaps)}</b>`,
+    `Selected active PoolId: <code>${escapeHtml(short(r?.selectedActivePoolId))}</code>`,
+    `Selected-pool decoded swaps: <b>${safeNumber(r?.selectedActivePoolSwaps)}</b>`,
+    `Quote: <b>${escapeHtml(String(r?.selectedQuoteSymbol||"UNVERIFIED"))}</b> <code>${escapeHtml(short(r?.selectedQuoteToken))}</code>`,"",
+    "2️⃣ <b>V212 handoff</b>",
+    `Verified flow: <b>${r?.v212FlowVerified===true?"YES":"NO"}</b>`,
+    `Flow PoolIds: <b>${safeNumber(r?.v212FlowPoolIds?.length)}</b>`,
+    `Contains current active PoolId: <b>${r?.v212ContainsActivePool===true?"YES":"NO"}</b>`,"",
+    "3️⃣ <b>Autonomous exact-USD ledger</b>",
+    `Rows for token / active pool: <b>${safeNumber(r?.autonomousLedgerRowsForToken)} / ${safeNumber(r?.autonomousLedgerRowsForActivePool)}</b>`,
+    `Exact-USD verified rows: <b>${safeNumber(r?.exactUsdVerifiedRowsForActivePool)}</b>`,
+    `Quote tokens in exact-USD rows: <b>${safeNumber(r?.quoteTokensInExactUsdRows?.length)}</b> · consistent <b>${r?.quoteConsistent===true?"YES":"NO"}</b>`,"",
+    "4️⃣ <b>V254 quote priceability</b>",
+    `Mode: <b>${escapeHtml(String(r?.quotePriceMode||"UNVERIFIED"))}</b>`,
+    `Priceable: <b>${r?.quotePriceable===true?"YES":"NO"}</b>`,
+    `WETH/USDG reference: <b>${r?.wethUsdGReferenceVerified===true?"VERIFIED":"UNVERIFIED"}</b>${Number.isFinite(Number(r?.wethUsdGPrice))?` · ${escapeHtml(String(r.wethUsdGPrice))}`:""}`,"",
+    "5️⃣ <b>V570 rolling-watch handoff</b>",
+    `Any watch for token: <b>${r?.autonomousWatchFound===true?"YES":"NO"}</b>`,
+    `Watch matches current active PoolId: <b>${r?.autonomousWatchPoolMatch===true?"YES":"NO"}</b>`,""
+  ];
+  if(Array.isArray(r?.live?.pools) && r.live.pools.length){
+    lines.push("🏊 <b>Current matching live pools</b>");
+    for(const p of r.live.pools.slice(0,8)){
+      lines.push(`• <code>${escapeHtml(short(p?.poolId))}</code> · <b>${safeNumber(p?.decodedSwaps)}</b> swaps (${safeNumber(p?.buySwaps)}B/${safeNumber(p?.sellSwaps)}S) · quote ${escapeHtml(String(p?.pairedSymbol||"UNKNOWN"))}`);
+    }
+    lines.push("");
+  }
+  if(Array.isArray(r?.notes)&&r.notes.length) lines.push(`Notes: <code>${escapeHtml(r.notes.join(" | ").slice(0,700))}</code>`,"");
+  lines.push(
+    `<i>Diagnostic only: ${safeNumber(r?.externalRequestsUsed)} external requests, ${safeNumber(r?.kvReads)} KV reads, zero KV writes, zero scanner-budget requests. No watch/registry/scoring state is changed.</i>`
+  );
   return lines.join("\\n");
 }
 
@@ -153675,6 +153924,7 @@ function telegramHelpV271() {
     "<code>/v4marketstatus</code> — V773 show the last production market/liquidity completion result",
     "<code>/v4prodstatus</code> — V772 show the last production scanner V4/Uniswap enrichment result",
     "<code>/v4poolsearch [0xTOKEN] [p2...]</code> — V796 bounded 100-PoolId/page active reverse search through Uniswap Pool Info, with historical fallback after the final page (diagnostic only)",
+    "<code>/v4manualflowaudit 0x...</code> — V851 trace live V4 → V212 → exact USD → V254 → rolling-watch handoff (diagnostic only)",
     "<code>/v4livetokens</code> — V842 return currently-active non-quote V4 token addresses from the busiest verified live pools (diagnostic only)",
     "<code>/v4allpools [0xTOKEN]</code> — V771 verify all recent live V4 pools for a token + normalized BUY/SELL amounts using on-chain decimals",
     "<code>/v4swapamounts [0xTOKEN]</code> — V770 verify exact raw target/paired amounts for BUY vs SELL swaps on the discovered live pool",
@@ -154640,6 +154890,30 @@ async function telegramCommandReplyV271(
       diagnosticV273.result=sentV769?.success===true?"REPLY_SENT":"REPLY_FAILED";
     }
     return {success:sentV769?.success===true,ignored:false,command:parsed.command,v4SwapDirectionV769:directionV769};
+  }
+
+  if (parsed.command === "/v4manualflowaudit") {
+    const auditV851=await v4ManualFlowAuditV851(env, parsed.argument || "");
+    const replyV851=v4ManualFlowAuditTelegramV851(auditV851);
+    if (diagnosticV273) {
+      diagnosticV273.replyAttempted=true;
+      diagnosticV273.v4ManualFlowAuditV851={
+        tokenAddress:auditV851?.tokenAddress||null,
+        selectedActivePoolId:auditV851?.selectedActivePoolId||null,
+        firstFailingStage:auditV851?.firstFailingStage||null,
+        externalRequestsUsed:safeNumber(auditV851?.externalRequestsUsed),
+        scannerBudgetConsumed:false,stateWrites:0
+      };
+    }
+    const sentV851=await sendTelegram(env,replyV851,null,null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess=sentV851?.success===true;
+      diagnosticV273.telegramStatus=sentV851?.status||null;
+      diagnosticV273.telegramMode=sentV851?.mode||null;
+      diagnosticV273.telegramError=sentV851?.error||null;
+      diagnosticV273.result=sentV851?.success===true?"REPLY_SENT":"REPLY_FAILED";
+    }
+    return {success:sentV851?.success===true,ignored:false,command:parsed.command,v4ManualFlowAuditV851:auditV851};
   }
 
   if (parsed.command === "/v4livetokens") {
@@ -160579,6 +160853,15 @@ async function handleRequest(
     const token=url.searchParams.get("token")||"";
     const block=url.searchParams.get("block")||"";
     return jsonResponse(await v4PoolSearchDiagnosticV791(env,`${token} ${block}`.trim()));
+  }
+
+  if (path === "/v4manualflowaudit") {
+    return jsonResponse(
+      await v4ManualFlowAuditV851(
+        env,
+        url.searchParams.get("token") || ""
+      )
+    );
   }
 
   if (path === "/v4livetokens") {
