@@ -1,5 +1,11 @@
 /**
- * Robinhood Chain Meme Hunter — V825
+ * Robinhood Chain Meme Hunter — V826
+ *
+ * V826 REGRESSION REPAIR — MANUAL MARKET ENRICHMENT RECOVERY:
+ * - preserves V825 exact-pool V3 ledger/USD upgrade logic unchanged;
+ * - when manual /analyse gets HTTP 200 but zero target pairs from DexScreener tokens/v1, it may use one bounded documented token-pairs/v1 recovery request for the exact requested contract;
+ * - recovery is manual-only, budget-counted, never runs during active 429 cooldown, and does not increase autonomous scanner request ceilings or Dex fresh limits;
+ * - recovered pairs are still exact-address filtered and then pass through the existing verified market object/pairCreatedAt logic; no market values are inferred.
  *
  * V825 REGRESSION REPAIR — V3 USD EVIDENCE UPGRADE + MANUAL MARKET TARGET ISOLATION:
  * - preserves V824 directional-execution repair and all existing provider/rate-limit protections.
@@ -7039,7 +7045,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V825";
+const VERSION = "V826";
 /*
  * V821 PERSISTENT FAIR RESCUE SCHEDULING
  * - Builds forward from the confirmed V819 production V4 fairness path and
@@ -60234,17 +60240,17 @@ async function marketData(
        * source of 429s. The short V96 negative cache lets a later scan retry.
        */
       if (
-        false &&
+        state?.manualAnalyseTargetOnlyV825 === true &&
         consumeBudget(
           budget,
           "analysis",
-          "DEXSCREENER_TOKEN_FALLBACK"
+          "DEXSCREENER_TOKEN_PAIRS_FALLBACK_V826"
         )
       ) {
         try {
           const fallbackResponse =
             await marketFetchV428(
-              `${DEXSCREENER_BASE}/tokens/v1/robinhood/${token}`,
+              `${DEXSCREENER_BASE}/token-pairs/v1/robinhood/${token}`,
               {
                 headers: {
                   accept:
@@ -60257,11 +60263,11 @@ async function marketData(
                 provider:
                   "DEXSCREENER",
                 feature:
-                  "DEX_DISABLED_TOKEN_FALLBACK",
+                  "DEX_MANUAL_TOKEN_PAIRS_FALLBACK_V826",
                 phase:
                   "analysis",
                 pathClass:
-                  "TOKENS_V1_SINGLE"
+                  "TOKEN_PAIRS_V1_SINGLE_V826"
               }
             );
 
@@ -60300,7 +60306,7 @@ async function marketData(
                 ...fallbackPairs
               );
               service.lastStatus =
-                "VERIFIED_TOKEN_FALLBACK";
+                "VERIFIED_TOKEN_PAIRS_FALLBACK_V826";
             }
           }
         }
@@ -60327,7 +60333,9 @@ async function marketData(
             false,
 
           source:
-            "DEXSCREENER_BOTH_TOKEN_ROUTES"
+            state?.manualAnalyseTargetOnlyV825 === true
+              ? "DEXSCREENER_TOKENS_AND_TOKEN_PAIRS_V826"
+              : "DEXSCREENER_TOKENS_V1_NO_MARKET"
         };
 
         saveMarketCache(
