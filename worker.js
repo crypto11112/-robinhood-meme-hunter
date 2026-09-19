@@ -1,4 +1,17 @@
 /**
+ * Robinhood Chain Meme Hunter — V841
+ *
+ * V841 BLOCKSCOUT PRO TOKEN-INDEXED MANUAL V4 LOCATOR — PRESERVE-FIRST:
+ * - builds directly from V840 and preserves V834's two-request manual creation-proof reserve;
+ * - replaces impractical raw-RPC history crawling with the already-configured Blockscout PRO indexed logs API;
+ * - performs exactly two authenticated Initialize lookups: currency0 == analysed token and currency1 == analysed token;
+ * - uses the current multichain PRO route with chainid=4663 and BLOCKSCOUT_PRO_API_KEY;
+ * - accepts no V4 identity from Blockscout alone: returned PoolIds must still be confirmed by Uniswap Pool Info;
+ * - existing V283 exact-pool live V4 enrichment remains authoritative after identity;
+ * - V840 raw-RPC helper remains in source as diagnostic history but is not called by /analyse;
+ * - no autonomous watchlist/poolRegistry mutation, no V3/scoring/threshold/request-ceiling changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V840
  *
  * V840 ADAPTIVE RESUMABLE TOKEN-INDEXED V4 LOCATOR — PRESERVE-FIRST:
@@ -7167,7 +7180,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V840";
+const VERSION = "V841";
 /*
  * V821 PERSISTENT FAIR RESCUE SCHEDULING
  * - Builds forward from the confirmed V819 production V4 fairness path and
@@ -117350,6 +117363,71 @@ async function manualAdaptiveTokenIndexedV4V840(env,budget,state,watched,candida
 }
 
 /* =========================================================
+   V841 BLOCKSCOUT PRO TOKEN-INDEXED V4 INITIALIZE LOCATOR
+   ========================================================= */
+function v4IndexedAddressTopicV841(address) {
+  const a=normalize(address);
+  return isAddress(a) ? `0x${a.slice(2).padStart(64,"0")}` : null;
+}
+
+async function manualBlockscoutProTokenIndexedV4V841(env,budget,state,watched,candidate) {
+  const token=normalize(candidate?.address || watched?.address);
+  const base={attempted:false,verified:false,status:"NOT_ATTEMPTED_V841",tokenAddress:isAddress(token)?token:null,provider:"BLOCKSCOUT_PRO",currency0Rows:0,currency1Rows:0,decodedMatches:0,candidatePoolIds:[],uniswapPoolsReturned:0,exactMatches:0,selectedPoolId:null,quoteTokenAddress:null,requestsUsed:0,autonomousWatchlistMutated:false,httpStatuses:[],errors:[],error:null};
+  if(!isAddress(token)||token===ZERO) return {...base,status:"INVALID_TOKEN_V841"};
+  if(candidate?.onChainPoolIdentityV153?.verified===true && isBytes32HexV765(normalize(candidate?.onChainPoolIdentityV153?.poolId))) return {...base,verified:true,status:"ALREADY_VERIFIED_V4_IDENTITY_V841",selectedPoolId:normalize(candidate.onChainPoolIdentityV153.poolId)};
+  const apiKey=String(env?.BLOCKSCOUT_PRO_API_KEY||"").trim();
+  if(!apiKey) return {...base,status:"BLOCKSCOUT_PRO_NOT_CONFIGURED_V841"};
+  const topicToken=v4IndexedAddressTopicV841(token);
+  if(!topicToken) return {...base,status:"TOKEN_TOPIC_ENCODING_FAILED_V841"};
+
+  const fetchIndexed=async(currencyIndex)=>{
+    const topicNumber=currencyIndex===0?2:3;
+    const label=currencyIndex===0?"CURRENCY0":"CURRENCY1";
+    if(!consumeBudget(budget,"analysis",`BLOCKSCOUT_PRO:V841_TOKEN_${label}_INITIALIZE`,1)) return {ok:false,budgetBlocked:true,status:`V834_RESERVE_OR_BUDGET_BLOCKED_${label}_V841`,rows:[]};
+    base.requestsUsed++;base.attempted=true;
+    const params=new URLSearchParams({chainid:String(BLOCKSCOUT_PRO_CHAIN_ID),module:"logs",action:"getLogs",fromBlock:"0",toBlock:"latest",address:normalize(POOL_MANAGER),topic0:INITIALIZE_TOPIC,[`topic${topicNumber}`]:topicToken,[`topic0_${topicNumber}_opr`]:"and",apikey:apiKey});
+    try {
+      const response=await fetch(`${BLOCKSCOUT_PRO}/v2/api?${params.toString()}`,{headers:{accept:"application/json"}});
+      base.httpStatuses.push(`${label}:${response.status}`);
+      let payload=null;try{payload=await response.json();}catch(_){}
+      if(!response.ok){const msg=String(payload?.message||payload?.result||`HTTP_${response.status}`).slice(0,220);base.errors.push(`${label}:${msg}`);return {ok:false,error:msg,rows:[]};}
+      if(Array.isArray(payload?.result)) return {ok:true,rows:payload.result};
+      const status=String(payload?.status??""),message=String(payload?.message??""),result=String(payload?.result??"");
+      if(status==="0"&&/no\s+(records|logs)|not\s+found/i.test(`${message} ${result}`)) return {ok:true,rows:[]};
+      const msg=String(payload?.result??payload?.message??"UNEXPECTED_BLOCKSCOUT_PAYLOAD").slice(0,220);base.errors.push(`${label}:${msg}`);return {ok:false,error:msg,rows:[]};
+    } catch(error){const msg=errorString(error);base.errors.push(`${label}:${msg}`);return {ok:false,error:msg,rows:[]};}
+  };
+
+  const c0=await fetchIndexed(0);
+  if(c0?.budgetBlocked) return {...base,status:c0.status,error:"BUDGET_BLOCKED"};
+  if(!c0?.ok) return {...base,status:"BLOCKSCOUT_PRO_CURRENCY0_FAILED_V841",error:c0?.error||null};
+  base.currency0Rows=c0.rows.length;
+  const c1=await fetchIndexed(1);
+  if(c1?.budgetBlocked) return {...base,status:c1.status,error:"BUDGET_BLOCKED"};
+  if(!c1?.ok) return {...base,status:"BLOCKSCOUT_PRO_CURRENCY1_FAILED_V841",error:c1?.error||null};
+  base.currency1Rows=c1.rows.length;
+
+  const found=[],seen=new Set();
+  for(const row of [...c0.rows,...c1.rows]){const decoded=decodeInitialize(row);if(!decoded)continue;const a=normalize(decoded?.currency0),b=normalize(decoded?.currency1),pid=normalize(decoded?.poolId);if((a!==token&&b!==token)||!isBytes32HexV765(pid)||seen.has(pid))continue;seen.add(pid);found.push({poolId:pid,currency0:a,currency1:b,decoded});}
+  base.decodedMatches=found.length;base.candidatePoolIds=found.map(x=>x.poolId);
+  if(!found.length) return {...base,status:"BLOCKSCOUT_PRO_TOKEN_INDEXED_NO_MATCH_V841"};
+
+  const ids=found.map(x=>x.poolId).slice(0,20);
+  if(!consumeBudget(budget,"analysis","UNISWAP_V4_TOKEN_INDEXED_VERIFY_V841",1)) return {...base,status:"V834_RESERVE_OR_BUDGET_BLOCKED_BEFORE_UNISWAP_V841"};
+  base.requestsUsed++;const lookup=await v4PoolInfoBatchV767(env,ids);base.uniswapPoolsReturned=Array.isArray(lookup?.pools)?lookup.pools.length:0;
+  if(lookup?.ok!==true) return {...base,status:"UNISWAP_POOL_INFO_UNVERIFIED_V841",error:lookup?.error||"UNISWAP_POOL_INFO_FAILED"};
+  const matches=(lookup.pools||[]).filter(row=>{const pid=normalize(row?.poolId),a=normalize(row?.tokenA),b=normalize(row?.tokenB);return ids.includes(pid)&&(a===token||b===token);});
+  base.exactMatches=matches.length;if(!matches.length)return {...base,status:"BLOCKSCOUT_POOLIDS_NOT_CONFIRMED_BY_UNISWAP_V841"};
+  matches.sort((a,b)=>{const qa=normalize(a?.tokenA)===token?normalize(a?.tokenB):normalize(a?.tokenA),qb=normalize(b?.tokenA)===token?normalize(b?.tokenB):normalize(b?.tokenA);return((qb===ZERO||knownQuote(qb))?1:0)-((qa===ZERO||knownQuote(qa))?1:0);});
+  const selected=matches[0],poolId=normalize(selected?.poolId),currency0=normalize(selected?.tokenA),currency1=normalize(selected?.tokenB),quoteTokenAddress=currency0===token?currency1:currency0;
+  base.selectedPoolId=poolId;base.quoteTokenAddress=quoteTokenAddress||null;
+  v254MergeResolvedPoolIntoWatch(watched,{poolId,currency0,currency1,fee:selected?.fee??null,tickSpacing:selected?.tickSpacing??null,source:"BLOCKSCOUT_PRO_TOKEN_INDEXED_PLUS_UNISWAP_V841"});
+  const strictIdentity=exactCandidatePoolIdentityV257(watched,poolId);
+  if(strictIdentity?.verified===true){candidate.onChainPoolIdentityV153={...strictIdentity,source:"BLOCKSCOUT_PRO_TOKEN_INDEXED_PLUS_UNISWAP_V841"};return {...base,verified:true,status:"EXACT_V4_POOL_VERIFIED_BLOCKSCOUT_PRO_UNISWAP_V841",quoteTokenAddress:normalize(strictIdentity?.quoteTokenAddress)||quoteTokenAddress||null};}
+  return {...base,status:"EXACT_TOKEN_POOL_FOUND_BUT_QUOTE_IDENTITY_NOT_ELIGIBLE_V841",error:strictIdentity?.status||null};
+}
+
+/* =========================================================
    V283 MANUAL EXACT-POOL LIVE V4 ENRICHMENT
    ========================================================= */
 
@@ -119454,17 +119532,16 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       `• Manual-state mutation: <b>ISOLATED ONLY</b> | autonomous watchlist <b>UNCHANGED</b>`
     );
   }
-  const mv4V840=candidate?.manualV4AdaptiveIndexedV840 || null;
-  if (mv4V840) {
+  const mv4V841=candidate?.manualV4BlockscoutProIndexedV841 || null;
+  if (mv4V841) {
     evidence.push(
-      `🎯 Manual V4 adaptive token-indexed locator V840: <b>${escapeHtml(mv4V840.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(mv4V840.requestsUsed)}</b>`,
-      `• Safe chunk: <b>${safeNumber(mv4V840.chunkBlocks)} blocks</b> | windows this run <b>${safeNumber(mv4V840.windowsChecked)}</b> | search floor <b>${escapeHtml(String(mv4V840.searchFloorBlock??"UNVERIFIED"))}</b>`,
-      `• Last window: <b>${escapeHtml(String(mv4V840.windowFromBlock??"UNVERIFIED"))}→${escapeHtml(String(mv4V840.windowToBlock??"UNVERIFIED"))}</b> | next to-block <b>${escapeHtml(String(mv4V840.nextToBlock??"UNVERIFIED"))}</b>`,
-      `• currency0 rows <b>${safeNumber(mv4V840.currency0Rows)}</b> | currency1 rows <b>${safeNumber(mv4V840.currency1Rows)}</b> | decoded token pools <b>${safeNumber(mv4V840.decodedMatches)}</b>`,
-      `• Uniswap pools returned <b>${safeNumber(mv4V840.uniswapPoolsReturned)}</b> | exact matches <b>${safeNumber(mv4V840.exactMatches)}</b> | progress <b>${mv4V840.progressPersisted===true ? "PERSISTED" : "NOT_PERSISTED"}</b>`,
-      mv4V840?.selectedPoolId ? `• Exact V4 PoolId: <code>${escapeHtml(mv4V840.selectedPoolId)}</code> | identity <b>${mv4V840.verified===true ? "VERIFIED" : "UNVERIFIED"}</b>` : `• Exact V4 PoolId: <b>UNVERIFIED</b>`,
-      mv4V840?.rpcErrors?.length ? `• RPC range diagnostics: <code>${escapeHtml(mv4V840.rpcErrors.slice(-3).join(" | "))}</code>` : `• RPC range diagnostics: <b>NONE</b>`,
-      `• V4 identity source: <b>POOLMANAGER INDEXED INITIALIZE → UNISWAP VERIFY</b>`
+      `🎯 Manual V4 Blockscout PRO token-indexed locator V841: <b>${escapeHtml(mv4V841.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(mv4V841.requestsUsed)}</b>`,
+      `• Provider: <b>BLOCKSCOUT PRO</b> | currency0 rows <b>${safeNumber(mv4V841.currency0Rows)}</b> | currency1 rows <b>${safeNumber(mv4V841.currency1Rows)}</b>`,
+      `• Decoded token pools <b>${safeNumber(mv4V841.decodedMatches)}</b> | Uniswap pools returned <b>${safeNumber(mv4V841.uniswapPoolsReturned)}</b> | exact matches <b>${safeNumber(mv4V841.exactMatches)}</b>`,
+      mv4V841?.selectedPoolId ? `• Exact V4 PoolId: <code>${escapeHtml(mv4V841.selectedPoolId)}</code> | identity <b>${mv4V841.verified===true ? "VERIFIED" : "UNVERIFIED"}</b>` : `• Exact V4 PoolId: <b>UNVERIFIED</b>`,
+      mv4V841?.httpStatuses?.length ? `• Blockscout HTTP: <code>${escapeHtml(mv4V841.httpStatuses.join(" | "))}</code>` : `• Blockscout HTTP: <b>UNVERIFIED</b>`,
+      mv4V841?.errors?.length ? `• Provider diagnostics: <code>${escapeHtml(mv4V841.errors.slice(-2).join(" | "))}</code>` : `• Provider diagnostics: <b>NONE</b>`,
+      `• V4 identity source: <b>BLOCKSCOUT PRO INDEXED INITIALIZE → UNISWAP VERIFY</b>`
     );
   }
   const mv4V838=candidate?.manualV4ResumableV838 || null;
@@ -120318,15 +120395,15 @@ async function telegramFreshAnalyseV276(
   candidate.manualV4TargetedUniswapV837 =
     manualV4TargetedUniswapV837;
 
-  const manualV4AdaptiveIndexedV840 = await manualAdaptiveTokenIndexedV4V840(
+  const manualV4BlockscoutProIndexedV841 = await manualBlockscoutProTokenIndexedV4V841(
     env,budget,isolatedState,watched,candidate
   );
-  candidate.manualV4AdaptiveIndexedV840 = manualV4AdaptiveIndexedV840;
+  candidate.manualV4BlockscoutProIndexedV841 = manualV4BlockscoutProIndexedV841;
 
-  /* V839 supersedes V838 brute-force paging in /analyse. Keep the old helper in
-   * source for diagnostics/history, but spend zero requests on it here. */
+  /* V841 supersedes raw-RPC history crawling and V838 brute-force paging in
+   * /analyse. Older helpers remain in source for diagnostics/history only. */
   const manualV4ResumableV838 = {
-    attempted:false, verified:false, status:"SKIPPED_SUPERSEDED_BY_TOKEN_INDEXED_V840",
+    attempted:false, verified:false, status:"SKIPPED_SUPERSEDED_BY_BLOCKSCOUT_PRO_V841",
     snapshotPoolIds:0,startOffset:0,checkedThisRun:0,nextOffset:0,uniswapBatches:0,
     uniswapPoolsReturned:0,exactMatches:0,selectedPoolId:null,requestsUsed:0,progressPersisted:false
   };
