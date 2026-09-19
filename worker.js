@@ -1,4 +1,14 @@
 /**
+ * Robinhood Chain Meme Hunter — V847
+ *
+ * V847 AUTONOMOUS V4 WATCH REGISTRATION DIAGNOSTIC — READ ONLY:
+ * - builds directly from confirmed-working V846;
+ * - adds zero-request /analyse diagnostics explaining why a V841-verified exact V4 PoolId is or is not already present in the autonomous rolling-watch registry;
+ * - inspects the existing V570 V212 exact-USD handoff requirements, quote-token consistency/priceability, existing watch registry and verified autonomous identity lanes;
+ * - does not register a watch, persist manual identity, mutate poolRegistry/watch state, change scoring/qualification/providers, or alter request ceilings;
+ * - V846 V619 launch-age fix and V845 verified-PoolId presentation are preserved unchanged.
+ */
+/**
  * Robinhood Chain Meme Hunter — V846
  *
  * V846 V619 SECOND-REQUEST RESERVED-SLOT CONSUMPTION — PRESERVE-FIRST:
@@ -7201,7 +7211,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V846";
+const VERSION = "V847";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -119221,6 +119231,110 @@ async function manualNativeV3DirectionalV326(env, budget, candidate) {
     ledgerStatusV331:ledgerAfter?.status||ledgerBefore?.status||null,ledgerWriteStatusV331:ledgerWrite?.status||null,ledgerRecordsV331:Array.isArray(ledgerAfter?.records)?ledgerAfter.records.length:safeNumber(ledgerWrite?.records),ledgerRangesV331:Array.isArray(ledgerAfter?.ranges)?ledgerAfter.ranges.length:safeNumber(ledgerWrite?.ranges),ledgerInsertedV331:safeNumber(ledgerWrite?.inserted),ledgerDeduplicatedV331:safeNumber(ledgerWrite?.deduplicated),ledgerFirstBlockV331:Number.isFinite(Number(ledgerAfter?.firstObservedBlock))?Number(ledgerAfter.firstObservedBlock):null,ledgerLastBlockV331:Number.isFinite(Number(ledgerAfter?.lastObservedBlock))?Number(ledgerAfter.lastObservedBlock):null,rollingV334};
 }
 
+function manualV4WatchRegistrationDiagnosticV847(state, candidate) {
+  const token = normalize(candidate?.address);
+  const v841 = candidate?.manualV4BlockscoutProIndexedV841 || null;
+  const exactPoolId =
+    v841?.verified === true && /^0x[a-f0-9]{64}$/.test(String(normalize(v841?.selectedPoolId) || ""))
+      ? normalize(v841.selectedPoolId)
+      : null;
+
+  const base = {
+    enabled:true,
+    readOnly:true,
+    externalRequestsAdded:0,
+    autonomousStateMutated:false,
+    tokenAddress:isAddress(token)?token:null,
+    exactPoolId,
+    v841IdentityVerified:Boolean(exactPoolId),
+    autonomousWatchFound:false,
+    autonomousWatchPoolMatch:false,
+    validERC20:candidate?.validERC20 === true,
+    v212FlowVerified:false,
+    v212FlowPoolIds:[],
+    v212FlowContainsExactPool:false,
+    ledgerRecordsForToken:0,
+    exactPoolLedgerRecords:0,
+    exactUsdRows:0,
+    quoteTokens:[],
+    quoteTokenConsistent:false,
+    quotePriceable:false,
+    quoteBasis:null,
+    autonomousIdentityVerified:candidate?.onChainPoolIdentityV153?.verified === true,
+    autonomousIdentityPoolId:normalize(candidate?.onChainPoolIdentityV153?.poolId) || null,
+    autonomousIdentitySource:candidate?.onChainPoolIdentityV153?.source || null,
+    providerCorroboratedIdentity:
+      candidate?.onChainPoolIdentityV153?.providerCorroboratedV732 === true,
+    blocker:"UNVERIFIED"
+  };
+
+  if (!isAddress(token) || !exactPoolId) {
+    base.blocker = "NO_V841_VERIFIED_EXACT_POOL_ID";
+    return base;
+  }
+
+  const root = directionalWatchRootV551(state);
+  const watchEntries = Object.values(root?.entries || {})
+    .filter(row => normalize(row?.tokenAddress) === token);
+  base.autonomousWatchFound = watchEntries.length > 0;
+  base.autonomousWatchPoolMatch = watchEntries.some(row => normalize(row?.poolId) === exactPoolId);
+  if (base.autonomousWatchPoolMatch) {
+    base.blocker = "NONE_ALREADY_REGISTERED";
+    return base;
+  }
+
+  const flow = candidate?.onChainVerifiedFlowV212 || null;
+  base.v212FlowVerified = flow?.verified === true && normalize(flow?.tokenAddress) === token;
+  base.v212FlowPoolIds = Array.isArray(flow?.poolIds)
+    ? flow.poolIds.map(normalize).filter(x => /^0x[a-f0-9]{64}$/.test(String(x || "")))
+    : [];
+  base.v212FlowContainsExactPool = base.v212FlowPoolIds.includes(exactPoolId);
+
+  const store = onChainDirectionalStoreV179(state);
+  const ledger = store?.[token];
+  const records = Array.isArray(ledger?.records) ? ledger.records : [];
+  base.ledgerRecordsForToken = records.length;
+
+  const poolRows = records.filter(row =>
+    normalize(row?.candidateAddress) === token &&
+    normalize(row?.poolId) === exactPoolId
+  );
+  base.exactPoolLedgerRecords = poolRows.length;
+
+  const exactUsdRows = poolRows.filter(row =>
+    row?.exactUsdVerified === true &&
+    Number.isFinite(Number(row?.exactUsdAmount)) &&
+    Number(row.exactUsdAmount) > 0 &&
+    (row?.side === "buy" || row?.side === "sell")
+  );
+  base.exactUsdRows = exactUsdRows.length;
+
+  base.quoteTokens = Array.from(new Set(
+    exactUsdRows
+      .map(row => normalize(row?.quoteTokenAddress))
+      .filter(value => typeof value === "string" && value.length > 0)
+  ));
+  base.quoteTokenConsistent = base.quoteTokens.length === 1;
+
+  if (base.quoteTokenConsistent) {
+    const ref = bestVerifiedWethUsdGReferenceV195(state);
+    const q = v254PriceableQuote(base.quoteTokens[0], ref);
+    base.quotePriceable = q?.eligible === true;
+    base.quoteBasis = q?.basis || null;
+  }
+
+  if (base.validERC20 !== true) base.blocker = "ERC20_NOT_VERIFIED";
+  else if (base.v212FlowVerified !== true) base.blocker = "V212_VERIFIED_FLOW_NOT_AVAILABLE";
+  else if (base.v212FlowContainsExactPool !== true) base.blocker = "V212_FLOW_DOES_NOT_CONTAIN_V841_EXACT_POOL";
+  else if (base.exactPoolLedgerRecords === 0) base.blocker = "NO_AUTONOMOUS_DIRECTIONAL_RECORDS_FOR_EXACT_POOL";
+  else if (base.exactUsdRows === 0) base.blocker = "NO_V212_EXACT_USD_VERIFIED_ROWS_FOR_EXACT_POOL";
+  else if (base.quoteTokenConsistent !== true) base.blocker = "QUOTE_TOKEN_NOT_SINGLE_CONSISTENT_VALUE";
+  else if (base.quotePriceable !== true) base.blocker = "QUOTE_NOT_V254_PRICEABLE";
+  else base.blocker = "V570_REQUIREMENTS_PRESENT_BUT_WATCH_NOT_REGISTERED_CHECK_AUTONOMOUS_SELECTION";
+
+  return base;
+}
+
 function manualRollingWatchProgressV572(state, candidate) {
   const token = normalize(candidate?.address);
   if (!isAddress(token)) return null;
@@ -119729,6 +119843,18 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
       mv4V841?.httpStatuses?.length ? `• Blockscout HTTP: <code>${escapeHtml(mv4V841.httpStatuses.join(" | "))}</code>` : `• Blockscout HTTP: <b>UNVERIFIED</b>`,
       mv4V841?.errors?.length ? `• Provider diagnostics: <code>${escapeHtml(mv4V841.errors.slice(-2).join(" | "))}</code>` : `• Provider diagnostics: <b>NONE</b>`,
       `• V4 identity source: <b>BLOCKSCOUT PRO INDEXED INITIALIZE → UNISWAP VERIFY</b>`
+    );
+  }
+  const wrV847 = candidate?.manualV4WatchRegistrationDiagnosticV847 || null;
+  if (wrV847?.enabled === true && wrV847?.v841IdentityVerified === true) {
+    evidence.push(
+      `🧪 Autonomous V4 watch registration V847: <b>${escapeHtml(wrV847.blocker || "UNVERIFIED")}</b>`,
+      `• Existing autonomous watch: <b>${wrV847.autonomousWatchFound===true?"YES":"NO"}</b> | exact PoolId match <b>${wrV847.autonomousWatchPoolMatch===true?"YES":"NO"}</b>`,
+      `• V212 verified flow: <b>${wrV847.v212FlowVerified===true?"YES":"NO"}</b> | exact PoolId in flow <b>${wrV847.v212FlowContainsExactPool===true?"YES":"NO"}</b> | flow pools <b>${safeNumber(wrV847?.v212FlowPoolIds?.length)}</b>`,
+      `• Autonomous ledger rows: token <b>${safeNumber(wrV847.ledgerRecordsForToken)}</b> | exact pool <b>${safeNumber(wrV847.exactPoolLedgerRecords)}</b> | exact-USD verified <b>${safeNumber(wrV847.exactUsdRows)}</b>`,
+      `• Quote proof: tokens <b>${safeNumber(wrV847?.quoteTokens?.length)}</b> | consistent <b>${wrV847.quoteTokenConsistent===true?"YES":"NO"}</b> | V254-priceable <b>${wrV847.quotePriceable===true?"YES":"NO"}</b>${wrV847.quoteBasis?` · ${escapeHtml(wrV847.quoteBasis)}`:""}`,
+      `• Autonomous identity: <b>${wrV847.autonomousIdentityVerified===true?"VERIFIED":"UNVERIFIED"}</b>${wrV847.autonomousIdentityPoolId?` · <code>${escapeHtml(wrV847.autonomousIdentityPoolId)}</code>`:""}`,
+      `• Diagnostic is read-only: <b>ZERO requests · ZERO watch/registry writes</b>`
     );
   }
   const mv4V838=candidate?.manualV4ResumableV838 || null;
@@ -120759,6 +120885,12 @@ async function telegramFreshAnalyseV276(
 
   candidate.manualRollingWatchProgressV572 =
     manualRollingWatchProgressV572(
+      state,
+      candidate
+    );
+
+  candidate.manualV4WatchRegistrationDiagnosticV847 =
+    manualV4WatchRegistrationDiagnosticV847(
       state,
       candidate
     );
