@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V860
+ *
+ * V860 VERIFIED V4 INITIALIZE-BLOCK COMPLETENESS FIX:
+ * - builds directly from V859;
+ * - preserves the real Initialize blockNumber alongside each V841 exact-matched PoolId;
+ * - for manual /analyse only, passes the ACTIVE live-selected PoolId's verified
+ *   Initialize block into the existing V458/V466 complete exact-pool verifier;
+ * - V458/V466 accepts an optional trusted lower-bound block. When supplied,
+ *   it skips the redundant timestamp->block lookup and starts exactly at the
+ *   verified pool Initialize block;
+ * - if no verified V841 Initialize block exists for the active pool, the existing
+ *   V458/V466 timestamp lookup path remains unchanged;
+ * - all existing saturation/pagination/exact-USD/completeness rules remain intact;
+ * - no request ceiling increase; V834 reserve remains intact;
+ * - automatic V4/V212/V254/V458/scoring/qualification/Telegram behavior untouched.
+ */
+/**
  * Robinhood Chain Meme Hunter — V859
  *
  * V859 MANUAL COMPLETE EXACT-V4-POOL WINDOW HANDOFF — PRESERVE-FIRST:
@@ -7395,7 +7412,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V859";
+const VERSION = "V860";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -82694,7 +82711,8 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
   state,
   latestBlock,
   wethUsdGReference,
-  env
+  env,
+  trustedPoolStartBlockV860 = null
 ) {
   const base = {
     enabled: true,
@@ -82845,37 +82863,61 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
     snapshotStartMs = snapshotEndMs - VERIFIED_USD_COMPLETE_EXACT_POOL_LOOKBACK_MS_V458;
     cutoffTimestampSec = Math.floor(snapshotStartMs / 1000);
     toBlock = latestHead;
-    identityBlock = identityBlockCurrent || null;
 
-    if (!consumeBudget(budget, "analysis", "BLOCKSCOUT_V458_TIMESTAMP_TO_BLOCK")) {
-      return {...base, poolId, toBlock, identityBlock, status:"ANALYSIS_BUDGET_PROTECTED_TIMESTAMP_LOOKUP_V466"};
-    }
-    requestsUsed++;
-    timestampLookupRequestSent = true;
+    const trustedStartV860 =
+      blockNumberFromAnyV180(
+        trustedPoolStartBlockV860
+      );
 
-    const timestampUrl = `${apiBase}${separator}module=block&action=getblocknobytime` +
-      `&timestamp=${cutoffTimestampSec}&closest=before${apiKeySuffix}`;
-    try {
-      const response = await fetch(timestampUrl, {headers:{accept:"application/json"}});
-      if (!response.ok) {
-        return {...base, attempted:true, poolId, provider, requestsUsed, timestampLookupRequestSent:true,
-          cutoffTimestampSec, toBlock, identityBlock, status:`BLOCKSCOUT_TIMESTAMP_LOOKUP_HTTP_${response.status}_V466`};
+    identityBlock =
+      Number.isFinite(trustedStartV860) &&
+      trustedStartV860 > 0
+        ? trustedStartV860
+        : (identityBlockCurrent || null);
+
+    if (
+      Number.isFinite(trustedStartV860) &&
+      trustedStartV860 > 0
+    ) {
+      /*
+       * V860 manual-only shortcut: V841 already proved this exact PoolId and
+       * decoded its Initialize log, so this is a stronger lower bound than a
+       * generic 24h timestamp cutoff. No timestamp lookup request is needed.
+       */
+      cutoffBlock = trustedStartV860;
+      fromBlock = trustedStartV860;
+      queryCoversFullPoolLifetime = true;
+    } else {
+      if (!consumeBudget(budget, "analysis", "BLOCKSCOUT_V458_TIMESTAMP_TO_BLOCK")) {
+        return {...base, poolId, toBlock, identityBlock, status:"ANALYSIS_BUDGET_PROTECTED_TIMESTAMP_LOOKUP_V466"};
       }
-      const payload = await response.json();
-      cutoffBlock = blockNumberFromAnyV180(payload?.result?.blockNumber ?? payload?.result);
-      if (!Number.isFinite(cutoffBlock) || cutoffBlock < 0) {
-        return {...base, attempted:true, poolId, provider, requestsUsed, timestampLookupRequestSent:true,
-          cutoffTimestampSec, toBlock, identityBlock, status:"BLOCKSCOUT_TIMESTAMP_LOOKUP_INVALID_RESULT_V466"};
-      }
-    } catch (error) {
-      return {...base, attempted:true, poolId, provider, requestsUsed, timestampLookupRequestSent:true,
-        cutoffTimestampSec, toBlock, identityBlock, status:"BLOCKSCOUT_TIMESTAMP_LOOKUP_FETCH_ERROR_V466", error:errorString(error)};
-    }
+      requestsUsed++;
+      timestampLookupRequestSent = true;
 
-    fromBlock = Number.isFinite(identityBlock) && identityBlock > 0
-      ? Math.max(cutoffBlock, identityBlock)
-      : cutoffBlock;
-    queryCoversFullPoolLifetime = Number.isFinite(identityBlock) && identityBlock > 0 && identityBlock >= cutoffBlock;
+      const timestampUrl = `${apiBase}${separator}module=block&action=getblocknobytime` +
+        `&timestamp=${cutoffTimestampSec}&closest=before${apiKeySuffix}`;
+      try {
+        const response = await fetch(timestampUrl, {headers:{accept:"application/json"}});
+        if (!response.ok) {
+          return {...base, attempted:true, poolId, provider, requestsUsed, timestampLookupRequestSent:true,
+            cutoffTimestampSec, toBlock, identityBlock, status:`BLOCKSCOUT_TIMESTAMP_LOOKUP_HTTP_${response.status}_V466`};
+        }
+        const payload = await response.json();
+        cutoffBlock = blockNumberFromAnyV180(payload?.result?.blockNumber ?? payload?.result);
+        if (!Number.isFinite(cutoffBlock) || cutoffBlock < 0) {
+          return {...base, attempted:true, poolId, provider, requestsUsed, timestampLookupRequestSent:true,
+            cutoffTimestampSec, toBlock, identityBlock, status:"BLOCKSCOUT_TIMESTAMP_LOOKUP_INVALID_RESULT_V466"};
+        }
+      } catch (error) {
+        return {...base, attempted:true, poolId, provider, requestsUsed, timestampLookupRequestSent:true,
+          cutoffTimestampSec, toBlock, identityBlock, status:"BLOCKSCOUT_TIMESTAMP_LOOKUP_FETCH_ERROR_V466", error:errorString(error)};
+      }
+
+      fromBlock = Number.isFinite(identityBlock) && identityBlock > 0
+        ? Math.max(cutoffBlock, identityBlock)
+        : cutoffBlock;
+      queryCoversFullPoolLifetime = Number.isFinite(identityBlock) && identityBlock > 0 && identityBlock >= cutoffBlock;
+    }
     progress = {
       schema:"EXACT_POOL_MULTI_SCAN_PROGRESS_V466",
       tokenAddress:token,
@@ -118077,14 +118119,22 @@ async function manualBlockscoutProTokenIndexedV4V841(env,budget,state,watched,ca
   if(lookup?.ok!==true) return {...base,status:"UNISWAP_POOL_INFO_UNVERIFIED_V841",error:lookup?.error||"UNISWAP_POOL_INFO_FAILED"};
   const matches=(lookup.pools||[]).filter(row=>{const pid=normalize(row?.poolId),a=normalize(row?.tokenA),b=normalize(row?.tokenB);return ids.includes(pid)&&(a===token||b===token);});
   base.exactMatches=matches.length;
-  base.exactMatchedPools=matches.map(row=>({
-    poolId:normalize(row?.poolId),
-    currency0:normalize(row?.tokenA),
-    currency1:normalize(row?.tokenB),
-    quoteTokenAddress:normalize(row?.tokenA)===token?normalize(row?.tokenB):normalize(row?.tokenA),
-    fee:row?.fee??null,
-    tickSpacing:row?.tickSpacing??null
-  }));
+  base.exactMatchedPools=matches.map(row=>{
+    const pid=normalize(row?.poolId);
+    const indexed=found.find(x=>normalize(x?.poolId)===pid) || null;
+    return {
+      poolId:pid,
+      currency0:normalize(row?.tokenA),
+      currency1:normalize(row?.tokenB),
+      quoteTokenAddress:normalize(row?.tokenA)===token?normalize(row?.tokenB):normalize(row?.tokenA),
+      fee:row?.fee??null,
+      tickSpacing:row?.tickSpacing??null,
+      blockNumber:indexed?.decoded?.blockNumber ?? null,
+      initializeTransactionHash:normalize(indexed?.decoded?.transactionHash) || null,
+      initializeBlockVerifiedV860:
+        Number.isFinite(blockNumberFromAnyV180(indexed?.decoded?.blockNumber))
+    };
+  });
   if(!matches.length)return {...base,status:"BLOCKSCOUT_POOLIDS_NOT_CONFIRMED_BY_UNISWAP_V841"};
   for(const row of matches){
     const pid=normalize(row?.poolId),c0=normalize(row?.tokenA),c1=normalize(row?.tokenB);
@@ -120610,7 +120660,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     const bh=v289aV853?.budgetAfterHistory||{};
     const refuse=v289aV853?.latestBudgetRefusal||null;
     evidence.push(
-      `💵 V289 exact-USD recovery audit V859: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
+      `💵 V289 exact-USD recovery audit V860: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
       `• Active PoolId into V289: <code>${escapeHtml(v289aV853.poolId || "UNVERIFIED")}</code> | live selected <code>${escapeHtml(v289aV853.liveSelectedPoolId || "UNVERIFIED")}</code> | live swaps <b>${safeNumber(v289aV853.liveSwaps)}</b>`,
       `• Quote into V289: <code>${escapeHtml(v289aV853.quoteTokenAddress || "UNVERIFIED")}</code>`,
       `• Budget before V289: <b>${safeNumber(bb.totalUsed)}/${safeNumber(bb.totalLimit)}</b> | after reference <b>${safeNumber(br.totalUsed)}/${safeNumber(br.totalLimit)}</b> | after history <b>${safeNumber(bh.totalUsed)}/${safeNumber(bh.totalLimit)}</b>`,
@@ -120630,9 +120680,10 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     candidate?.manualCompleteExactPoolV4V859 || null;
   if (completeV4V859) {
     evidence.push(
-      `🔒 Manual complete exact-V4-pool coverage V859: <b>${escapeHtml(completeV4V859.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(completeV4V859.requestsUsed)}</b>`,
+      `🔒 Manual complete exact-V4-pool coverage V860: <b>${escapeHtml(completeV4V859.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(completeV4V859.requestsUsed)}</b>`,
       `• PoolId: <code>${escapeHtml(completeV4V859.poolId || "UNVERIFIED")}</code> | provider <b>${escapeHtml(completeV4V859.provider || "UNVERIFIED")}</b>`,
       `• Range: <b>${escapeHtml(String(completeV4V859.fromBlock ?? "UNVERIFIED"))} → ${escapeHtml(String(completeV4V859.toBlock ?? "UNVERIFIED"))}</b> | cutoff block <b>${escapeHtml(String(completeV4V859.cutoffBlock ?? "UNVERIFIED"))}</b>`,
+      `• V860 trusted pool start: <b>${escapeHtml(String(completeV4V859.trustedPoolStartBlockV860 ?? "UNVERIFIED"))}</b> | source <b>${escapeHtml(completeV4V859.trustedPoolStartSourceV860 || "NONE")}</b> | timestamp lookup sent <b>${completeV4V859.timestampLookupRequestSent === true ? "YES" : "NO"}</b>`,
       `• Logs: <b>${safeNumber(completeV4V859.returnedLogs)}</b> | saturated <b>${completeV4V859.saturated === true ? "YES" : "NO"}</b> | every row exact USD <b>${completeV4V859.allReturnedRowsExactUsdDecoded === true ? "YES" : "NO"}</b>`,
       `• Full exact-pool 24h coverage: <b>${completeV4V859.fullExactPool24hCoverageVerified === true ? "VERIFIED" : "UNVERIFIED"}</b> | verified windows <b>${escapeHtml((completeV4V859.verifiedWindows || []).join(", ") || "NONE")}</b>`,
       `• Autonomous state: <b>UNCHANGED</b> · manual isolated state only`
@@ -121558,6 +121609,35 @@ async function telegramFreshAnalyseV276(
     wethReferenceV859?.verified === true &&
     Number(wethReferenceV859?.priceUsdGPerWeth) > 0
   ) {
+    const activePoolIdV860 =
+      normalize(
+        candidate
+          ?.onChainPoolIdentityV153
+          ?.poolId
+      );
+
+    const v841ActivePoolV860 =
+      (
+        Array.isArray(
+          candidate
+            ?.manualV4BlockscoutProIndexedV841
+            ?.exactMatchedPools
+        )
+          ? candidate.manualV4BlockscoutProIndexedV841.exactMatchedPools
+          : []
+      ).find(
+        row =>
+          normalize(row?.poolId) ===
+          activePoolIdV860
+      ) || null;
+
+    const trustedPoolStartBlockV860 =
+      v841ActivePoolV860?.initializeBlockVerifiedV860 === true
+        ? blockNumberFromAnyV180(
+            v841ActivePoolV860?.blockNumber
+          )
+        : null;
+
     manualCompleteExactPoolV4V859 =
       await blockscoutCompleteExactPoolDirectionalUsdV458(
         candidate,
@@ -121565,8 +121645,16 @@ async function telegramFreshAnalyseV276(
         isolatedState,
         latestBlockV859,
         wethReferenceV859,
-        env
+        env,
+        trustedPoolStartBlockV860
       );
+
+    manualCompleteExactPoolV4V859.trustedPoolStartBlockV860 =
+      trustedPoolStartBlockV860;
+    manualCompleteExactPoolV4V859.trustedPoolStartSourceV860 =
+      Number.isFinite(trustedPoolStartBlockV860)
+        ? "V841_BLOCKSCOUT_PRO_INDEXED_INITIALIZE"
+        : "NONE_FALLBACK_TO_EXISTING_V458";
   }
 
   candidate.completeExactPoolDirectionalUsdV458 =
@@ -121618,7 +121706,13 @@ async function telegramFreshAnalyseV276(
     paginationV461:
       manualCompleteExactPoolV4V859?.paginationV461 || null,
     multiScanProgressV466:
-      manualCompleteExactPoolV4V859?.multiScanProgressV466 || null
+      manualCompleteExactPoolV4V859?.multiScanProgressV466 || null,
+    trustedPoolStartBlockV860:
+      manualCompleteExactPoolV4V859?.trustedPoolStartBlockV860 ?? null,
+    trustedPoolStartSourceV860:
+      manualCompleteExactPoolV4V859?.trustedPoolStartSourceV860 || null,
+    timestampLookupRequestSent:
+      manualCompleteExactPoolV4V859?.timestampLookupRequestSent === true
   };
 
   candidate.manualV289AuditV853 = candidate.manualV289AuditV853 || {
