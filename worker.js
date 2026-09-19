@@ -1,4 +1,19 @@
 /**
+ * Robinhood Chain Meme Hunter — V857
+ *
+ * V857 MANUAL V289 AUTO-PARITY ETH/USDG REFERENCE:
+ * - builds directly from V856;
+ * - fixes the proven manual/automatic mismatch: manual V289 now tries the existing
+ *   verified Uniswap V196 native-ETH -> canonical USDG quote before V291/V195;
+ * - this mirrors the already-working automatic scanner reference order:
+ *   same-batch V187 -> V196 -> V195 fallback;
+ * - a verified V196 quote is used directly by the existing V254 exact-PoolId
+ *   Blockscout history decoder and is bridged only into the isolated manual state;
+ * - V291/V195 remain unchanged fallbacks if V196 is unavailable/unverified;
+ * - no request ceiling increase; V834 creation-proof reserve remains intact;
+ * - automatic V4/V212/V254/scoring/qualification/Telegram behavior is untouched.
+ */
+/**
  * Robinhood Chain Meme Hunter — V856
  *
  * V856 MANUAL V4 REQUEST RECLAIM FOR V289 — PRESERVE-FIRST:
@@ -7351,7 +7366,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V856";
+const VERSION = "V857";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -119057,6 +119072,68 @@ async function manualWethUsdGReferenceV289(
 
   const before = safeNumber(budget?.totalUsed);
 
+  /*
+   * V857: mirror the proven automatic scanner reference path.
+   * The automatic path tries the Uniswap Trade API V196 native ETH -> USDG
+   * quote before the V3-only V195 resolver. Manual V289 now does the same.
+   */
+  const uniswapV196 =
+    await getUniswapEthUsdGReferenceV196(
+      env,
+      budget
+    );
+
+  if (uniswapV196?.verified === true) {
+    /* Isolated manual-state bridge only; no autonomous KV/watch mutation. */
+    persistVerifiedWethUsdGReferenceV452(
+      state,
+      {
+        uniswapV196
+      }
+    );
+
+    const requestsUsed =
+      Math.max(
+        0,
+        safeNumber(budget?.totalUsed) - before
+      );
+
+    return {
+      ...base,
+      attempted: true,
+      verified: true,
+      status:
+        "VERIFIED_UNISWAP_ETH_USDG_V196_V857",
+      source:
+        uniswapV196?.source ||
+        "UNISWAP_AGGREGATED_NATIVE_ETH_TO_CANONICAL_USDG_QUOTE_V196",
+      priceUsdGPerWeth:
+        Number(
+          uniswapV196.priceUsdGPerWeth
+        ),
+      requestsUsed,
+      v3Status:
+        "V3_FALLBACK_NOT_REQUIRED_V857",
+      v3PoolAddress: null,
+      v3SelectedFee: null,
+      resolverV291: null,
+      directV290: null,
+      uniswapV196,
+      reference: {
+        ...uniswapV196,
+        verified: true,
+        priceUsdGPerWeth:
+          Number(
+            uniswapV196.priceUsdGPerWeth
+          ),
+        externalRequestsUsed:
+          safeNumber(
+            uniswapV196?.externalRequestsUsed
+          )
+      }
+    };
+  }
+
   const resolverV291 = await manualResolveV3WethUsdGReferenceV291(
     env, state, budget
   );
@@ -119274,7 +119351,8 @@ async function manualVerifiedUsdRecoveryV289(
       v3PoolAddress: wethReferenceV289?.v3PoolAddress || null,
       v3SelectedFee: wethReferenceV289?.v3SelectedFee ?? null,
       resolverV291: wethReferenceV289?.resolverV291 || null,
-      directV290: wethReferenceV289?.directV290 || null
+      directV290: wethReferenceV289?.directV290 || null,
+      uniswapV196: wethReferenceV289?.uniswapV196 || null
     },
     auditV853: base.auditV853,
     candidate
@@ -120437,7 +120515,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     const bh=v289aV853?.budgetAfterHistory||{};
     const refuse=v289aV853?.latestBudgetRefusal||null;
     evidence.push(
-      `💵 V289 exact-USD recovery audit V856: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
+      `💵 V289 exact-USD recovery audit V857: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
       `• Active PoolId into V289: <code>${escapeHtml(v289aV853.poolId || "UNVERIFIED")}</code> | live selected <code>${escapeHtml(v289aV853.liveSelectedPoolId || "UNVERIFIED")}</code> | live swaps <b>${safeNumber(v289aV853.liveSwaps)}</b>`,
       `• Quote into V289: <code>${escapeHtml(v289aV853.quoteTokenAddress || "UNVERIFIED")}</code>`,
       `• Budget before V289: <b>${safeNumber(bb.totalUsed)}/${safeNumber(bb.totalLimit)}</b> | after reference <b>${safeNumber(br.totalUsed)}/${safeNumber(br.totalLimit)}</b> | after history <b>${safeNumber(bh.totalUsed)}/${safeNumber(bh.totalLimit)}</b>`,
