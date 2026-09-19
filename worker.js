@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V862
+ *
+ * V862 MANUAL TRUSTED-START PRE-SPLIT:
+ * - builds directly from V861;
+ * - for manual /analyse only, when V841 has already proved the exact active
+ *   PoolId Initialize block, V458/V466 no longer spends a log request on the
+ *   known-too-large whole-lifetime parent range;
+ * - instead it pre-splits the verified pool lifetime into two contiguous child
+ *   ranges and spends the two available V466 requests directly on those halves;
+ * - both halves must still be non-saturated and every returned row must pass the
+ *   existing exact candidate/exact-USD/timestamp checks before any window verifies;
+ * - if either half is saturated, coverage remains UNVERIFIED (no guessing);
+ * - no request ceiling increase; V834 reserve unchanged;
+ * - automatic V4/V458/V466 behaviour unchanged unless the optional trusted
+ *   manual pool-start argument is explicitly supplied.
+ */
+/**
  * Robinhood Chain Meme Hunter — V861
  *
  * V861 MANUAL COMPLETE-HISTORY BUDGET REUSE:
@@ -7427,7 +7444,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V861";
+const VERSION = "V862";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -82853,6 +82870,7 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
   let completeRangesThisScan = 0;
   let returnedLogsThisScan = 0;
   let initialFanoutRangesV465 = 0;
+  let preSplitTrustedLifetimeV862 = false;
   let resumed = false;
 
   if (progress) {
@@ -82988,73 +83006,116 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
   };
 
   if (!resumed) {
-    const first = await fetchRangeV466(fromBlock, toBlock);
-    if (!first.ok) {
-      progress.pendingRangesV466 = [{fromBlock, toBlock, initialV466:true}];
-      progress.updatedAt = Date.now();
-      store[token] = progress;
-      return {...base, attempted:true, poolId, provider, requestsUsed,
-        timestampLookupRequestSent, logRequestSent:!first.budgetBlocked,
-        cutoffTimestampSec, cutoffBlock, fromBlock, toBlock,
-        identityBlock:identityBlock || null, queryCoversFullPoolLifetime,
-        status:first.status, error:first.error || null,
-        multiScanProgressV466:{...base.multiScanProgressV466, snapshotFrozen:true, attempts:1,
-          pendingRanges:1, progressPersisted:true, staleProgressDiscarded, poolChangedProgressDiscarded},
-        paginationV461:{...base.paginationV461, logRequestsUsed, unresolvedRanges:1, stoppedReason:first.status}};
-    }
-
-    returnedLogsThisScan += first.rows.length;
-
-    if (!first.saturated) {
-      const persisted = persistVerifiedUsdTradesV254(state, token, first.rows, wethUsdGReference, "BLOCKSCOUT_TIMESTAMP");
-      const exact = first.rows.length === 0 ? true : (
-        safeNumber(persisted?.exactUsdTrades) === first.rows.length &&
-        safeNumber(persisted?.candidateMismatch) === 0 &&
-        safeNumber(persisted?.exactUsdRejected) === 0 &&
-        safeNumber(persisted?.timestampRejected) === 0
+    const trustedStartForPreSplitV862 =
+      blockNumberFromAnyV180(
+        trustedPoolStartBlockV860
       );
-      progress.allRowsExactUsdDecodedV466 = exact;
-      addCompleteExactPoolRowsToAccumulatorV466(state, token, poolId, first.rows, wethUsdGReference, progress);
-      progress.completedRangesV466 = [{fromBlock, toBlock, rows:first.rows.length}];
-      progress.pendingRangesV466 = [];
-      const coverageComplete = exact && safeNumber(progress?.accumulatorV466?.rejectedRows) === 0;
-      const flow = exactPoolFlowFromProgressV466(progress, coverageComplete);
-      const verified = flow?.windows?.h24?.fullExactPoolCoverageVerified === true && flow?.verified === true;
-      if (verified) delete store[token]; else store[token] = progress;
-      return {
-        ...base, attempted:true, verified, status:verified
-          ? "COMPLETE_EXACT_POOL_24H_USD_VERIFIED_V466"
-          : "EXACT_POOL_24H_ROWS_NOT_ALL_EXACT_USD_DECODABLE_V466",
-        provider, poolId, requestsUsed, timestampLookupRequestSent, logRequestSent:true,
-        cutoffTimestampSec, cutoffBlock, fromBlock, toBlock, identityBlock:identityBlock || null,
-        queryCoversFullPoolLifetime, returnedLogs:first.rows.length, returnedLogsThisScanV466:first.rows.length,
-        saturated:false, allReturnedRowsExactUsdDecoded:exact,
-        fullExactPool24hCoverageVerified:verified, fullTokenMarketCoverageVerified:false,
-        persistence:persisted, flow,
-        multiScanProgressV466:{enabled:true,resumed:false,snapshotFrozen:true,attempts:1,
-          completedRanges:1,pendingRanges:0,progressPersisted:!verified,completedAndCleared:verified,
-          staleProgressDiscarded,poolChangedProgressDiscarded},
-        paginationV461:{enabled:true,triggered:false,maxLogRequests:VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461,
-          logRequestsUsed,rangesFetched:1,saturatedRanges:0,unresolvedRanges:0,dedupedRows:first.rows.length,
-          coverageComplete:verified,stoppedReason:null,fanoutFirstV465:false,initialFanoutRangesV465:0,
-          binaryTreePrimaryStrategyV465:false,persistedAcrossScansV466:true}
-      };
-    }
 
-    saturatedRangesThisScan++;
-    const remainingLogRequests = Math.max(1,
-      VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461 - logRequestsUsed);
-    const blockCount = Math.max(1, toBlock - fromBlock + 1);
-    initialFanoutRangesV465 = Math.max(1, Math.min(remainingLogRequests, blockCount));
-    const baseSpan = Math.floor(blockCount / initialFanoutRangesV465);
-    const remainder = blockCount % initialFanoutRangesV465;
-    let cursor = fromBlock;
-    for (let i=0;i<initialFanoutRangesV465;i++) {
-      const span = baseSpan + (i < remainder ? 1 : 0);
-      const childFrom = cursor;
-      const childTo = i === initialFanoutRangesV465 - 1 ? toBlock : cursor + span - 1;
-      pending.push({fromBlock:childFrom,toBlock:childTo,fanoutV465:true});
-      cursor = childTo + 1;
+    if (
+      Number.isFinite(trustedStartForPreSplitV862) &&
+      trustedStartForPreSplitV862 > 0 &&
+      Number.isFinite(fromBlock) &&
+      Number.isFinite(toBlock) &&
+      fromBlock < toBlock
+    ) {
+      /*
+       * V862 manual-only optimization:
+       * V841 already proved the exact Initialize lower bound and V860/V861
+       * proved that the whole parent range saturates. Skip that parent request
+       * and spend both useful requests on two contiguous child ranges.
+       */
+      const midpointV862 =
+        Math.floor(
+          fromBlock +
+          ((toBlock - fromBlock) / 2)
+        );
+
+      pending.push(
+        {
+          fromBlock,
+          toBlock:midpointV862,
+          fanoutV465:true,
+          preSplitV862:true
+        },
+        {
+          fromBlock:midpointV862 + 1,
+          toBlock,
+          fanoutV465:true,
+          preSplitV862:true
+        }
+      );
+
+      initialFanoutRangesV465 = 2;
+      preSplitTrustedLifetimeV862 = true;
+    } else {
+      const first = await fetchRangeV466(fromBlock, toBlock);
+      if (!first.ok) {
+        progress.pendingRangesV466 = [{fromBlock, toBlock, initialV466:true}];
+        progress.updatedAt = Date.now();
+        store[token] = progress;
+        return {...base, attempted:true, poolId, provider, requestsUsed,
+          timestampLookupRequestSent, logRequestSent:!first.budgetBlocked,
+          cutoffTimestampSec, cutoffBlock, fromBlock, toBlock,
+          identityBlock:identityBlock || null, queryCoversFullPoolLifetime,
+          status:first.status, error:first.error || null,
+          multiScanProgressV466:{...base.multiScanProgressV466, snapshotFrozen:true, attempts:1,
+            pendingRanges:1, progressPersisted:true, staleProgressDiscarded, poolChangedProgressDiscarded},
+          paginationV461:{...base.paginationV461, logRequestsUsed, unresolvedRanges:1, stoppedReason:first.status}};
+      }
+
+      returnedLogsThisScan += first.rows.length;
+
+      if (!first.saturated) {
+        const persisted = persistVerifiedUsdTradesV254(state, token, first.rows, wethUsdGReference, "BLOCKSCOUT_TIMESTAMP");
+        const exact = first.rows.length === 0 ? true : (
+          safeNumber(persisted?.exactUsdTrades) === first.rows.length &&
+          safeNumber(persisted?.candidateMismatch) === 0 &&
+          safeNumber(persisted?.exactUsdRejected) === 0 &&
+          safeNumber(persisted?.timestampRejected) === 0
+        );
+        progress.allRowsExactUsdDecodedV466 = exact;
+        addCompleteExactPoolRowsToAccumulatorV466(state, token, poolId, first.rows, wethUsdGReference, progress);
+        progress.completedRangesV466 = [{fromBlock, toBlock, rows:first.rows.length}];
+        progress.pendingRangesV466 = [];
+        const coverageComplete = exact && safeNumber(progress?.accumulatorV466?.rejectedRows) === 0;
+        const flow = exactPoolFlowFromProgressV466(progress, coverageComplete);
+        const verified = flow?.windows?.h24?.fullExactPoolCoverageVerified === true && flow?.verified === true;
+        if (verified) delete store[token]; else store[token] = progress;
+        return {
+          ...base, attempted:true, verified, status:verified
+            ? "COMPLETE_EXACT_POOL_24H_USD_VERIFIED_V466"
+            : "EXACT_POOL_24H_ROWS_NOT_ALL_EXACT_USD_DECODABLE_V466",
+          provider, poolId, requestsUsed, timestampLookupRequestSent, logRequestSent:true,
+          cutoffTimestampSec, cutoffBlock, fromBlock, toBlock, identityBlock:identityBlock || null,
+          queryCoversFullPoolLifetime, returnedLogs:first.rows.length, returnedLogsThisScanV466:first.rows.length,
+          saturated:false, allReturnedRowsExactUsdDecoded:exact,
+          fullExactPool24hCoverageVerified:verified, fullTokenMarketCoverageVerified:false,
+          persistence:persisted, flow,
+          multiScanProgressV466:{enabled:true,resumed:false,snapshotFrozen:true,attempts:1,
+            completedRanges:1,pendingRanges:0,progressPersisted:!verified,completedAndCleared:verified,
+            staleProgressDiscarded,poolChangedProgressDiscarded},
+          paginationV461:{enabled:true,triggered:false,maxLogRequests:VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461,
+            logRequestsUsed,rangesFetched:1,saturatedRanges:0,unresolvedRanges:0,dedupedRows:first.rows.length,
+            coverageComplete:verified,stoppedReason:null,fanoutFirstV465:false,initialFanoutRangesV465:0,
+            binaryTreePrimaryStrategyV465:false,persistedAcrossScansV466:true}
+        };
+      }
+
+      saturatedRangesThisScan++;
+      const remainingLogRequests = Math.max(1,
+        VERIFIED_USD_COMPLETE_EXACT_POOL_MAX_LOG_REQUESTS_V461 - logRequestsUsed);
+      const blockCount = Math.max(1, toBlock - fromBlock + 1);
+      initialFanoutRangesV465 = Math.max(1, Math.min(remainingLogRequests, blockCount));
+      const baseSpan = Math.floor(blockCount / initialFanoutRangesV465);
+      const remainder = blockCount % initialFanoutRangesV465;
+      let cursor = fromBlock;
+      for (let i=0;i<initialFanoutRangesV465;i++) {
+        const span = baseSpan + (i < remainder ? 1 : 0);
+        const childFrom = cursor;
+        const childTo = i === initialFanoutRangesV465 - 1 ? toBlock : cursor + span - 1;
+        pending.push({fromBlock:childFrom,toBlock:childTo,fanoutV465:true});
+        cursor = childTo + 1;
+      }
     }
   }
 
@@ -83115,6 +83176,7 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
     fromBlock:blockNumberFromAnyV180(r?.fromBlock),
     toBlock:blockNumberFromAnyV180(r?.toBlock),
     fanoutV465:r?.fanoutV465 === true,
+    preSplitV862:r?.preSplitV862 === true,
     resumedSplitV466:r?.resumedSplitV466 === true,
     retryV466:r?.retryV466 === true,
     terminalSingleBlockV466:r?.terminalSingleBlockV466 === true
@@ -83200,7 +83262,8 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
       initialFanoutRangesV465,
       binaryTreePrimaryStrategyV465:false,
       persistedAcrossScansV466:true,
-      resumedV466:resumed
+      resumedV466:resumed,
+      preSplitTrustedLifetimeV862
     }
   };
 }
@@ -120693,7 +120756,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     const bh=v289aV853?.budgetAfterHistory||{};
     const refuse=v289aV853?.latestBudgetRefusal||null;
     evidence.push(
-      `💵 V289 exact-USD recovery audit V861: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
+      `💵 V289 exact-USD recovery audit V862: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
       `• Active PoolId into V289: <code>${escapeHtml(v289aV853.poolId || "UNVERIFIED")}</code> | live selected <code>${escapeHtml(v289aV853.liveSelectedPoolId || "UNVERIFIED")}</code> | live swaps <b>${safeNumber(v289aV853.liveSwaps)}</b>`,
       `• Quote into V289: <code>${escapeHtml(v289aV853.quoteTokenAddress || "UNVERIFIED")}</code>`,
       `• Budget before V289: <b>${safeNumber(bb.totalUsed)}/${safeNumber(bb.totalLimit)}</b> | after reference <b>${safeNumber(br.totalUsed)}/${safeNumber(br.totalLimit)}</b> | after history <b>${safeNumber(bh.totalUsed)}/${safeNumber(bh.totalLimit)}</b>`,
@@ -120716,10 +120779,11 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     candidate?.manualCompleteExactPoolV4V859 || null;
   if (completeV4V859) {
     evidence.push(
-      `🔒 Manual complete exact-V4-pool coverage V861: <b>${escapeHtml(completeV4V859.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(completeV4V859.requestsUsed)}</b>`,
+      `🔒 Manual complete exact-V4-pool coverage V862: <b>${escapeHtml(completeV4V859.status || "UNVERIFIED")}</b> | requests <b>${safeNumber(completeV4V859.requestsUsed)}</b>`,
       `• PoolId: <code>${escapeHtml(completeV4V859.poolId || "UNVERIFIED")}</code> | provider <b>${escapeHtml(completeV4V859.provider || "UNVERIFIED")}</b>`,
       `• Range: <b>${escapeHtml(String(completeV4V859.fromBlock ?? "UNVERIFIED"))} → ${escapeHtml(String(completeV4V859.toBlock ?? "UNVERIFIED"))}</b> | cutoff block <b>${escapeHtml(String(completeV4V859.cutoffBlock ?? "UNVERIFIED"))}</b>`,
       `• V860 trusted pool start: <b>${escapeHtml(String(completeV4V859.trustedPoolStartBlockV860 ?? "UNVERIFIED"))}</b> | source <b>${escapeHtml(completeV4V859.trustedPoolStartSourceV860 || "NONE")}</b> | timestamp lookup sent <b>${completeV4V859.timestampLookupRequestSent === true ? "YES" : "NO"}</b>`,
+      `• V862 trusted-lifetime pre-split: <b>${completeV4V859.preSplitTrustedLifetimeV862 === true ? "YES — 2 DIRECT CHILD RANGES" : "NO"}</b>`,
       `• Logs: <b>${safeNumber(completeV4V859.returnedLogs)}</b> | saturated <b>${completeV4V859.saturated === true ? "YES" : "NO"}</b> | every row exact USD <b>${completeV4V859.allReturnedRowsExactUsdDecoded === true ? "YES" : "NO"}</b>`,
       `• Full exact-pool 24h coverage: <b>${completeV4V859.fullExactPool24hCoverageVerified === true ? "VERIFIED" : "UNVERIFIED"}</b> | verified windows <b>${escapeHtml((completeV4V859.verifiedWindows || []).join(", ") || "NONE")}</b>`,
       `• Autonomous state: <b>UNCHANGED</b> · manual isolated state only`
@@ -121759,7 +121823,11 @@ async function telegramFreshAnalyseV276(
     trustedPoolStartSourceV860:
       manualCompleteExactPoolV4V859?.trustedPoolStartSourceV860 || null,
     timestampLookupRequestSent:
-      manualCompleteExactPoolV4V859?.timestampLookupRequestSent === true
+      manualCompleteExactPoolV4V859?.timestampLookupRequestSent === true,
+    preSplitTrustedLifetimeV862:
+      manualCompleteExactPoolV4V859
+        ?.paginationV461
+        ?.preSplitTrustedLifetimeV862 === true
   };
 
   candidate.manualV289AuditV853 = candidate.manualV289AuditV853 || {
