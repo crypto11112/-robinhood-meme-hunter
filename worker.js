@@ -1,4 +1,19 @@
 /**
+ * Robinhood Chain Meme Hunter — V849
+ *
+ * V849 MANUAL V4 LIVE-SELECTION PRIORITY — PRESERVE-FIRST:
+ * - builds directly from V848;
+ * - moves the already-existing V837/V841 identity + V283 live-pool selection
+ *   ahead of unrelated manual Gecko/V3 probes;
+ * - adds zero provider requests and keeps the /analyse 24-request ceiling;
+ * - preserves V846 V619 creation-proof reserve/fix and does not allow V283 to
+ *   consume those protected creation-proof slots;
+ * - V289 USD recovery remains in its original later position so it can still
+ *   reuse any verified reference evidence produced by existing downstream logic;
+ * - no autonomous watchlist/registry writes, no automatic V4/V254/scoring,
+ *   qualification or Telegram-threshold changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V848
  *
  * V848 MANUAL V4 MULTI-POOL LIVE SELECTION — PRESERVE-FIRST:
@@ -7223,7 +7238,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V848";
+const VERSION = "V849";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -120675,6 +120690,57 @@ async function telegramFreshAnalyseV276(
     save: manualMarketCacheSaveV829
   };
 
+  /* V849: V4 identity/live selection runs before unrelated manual directional/V3
+   * probes. This does not add requests or raise the 24-request ceiling; it only
+   * prevents a proven multi-pool V4 candidate from losing the existing V283
+   * head+logs opportunity to lower-priority manual probes. V834/V846 creation
+   * proof reserve remains authoritative and cannot be consumed by V283. */
+  /* V837: targeted manual parity with the retained automatic V4/Uniswap path.
+   * One Uniswap request maximum; V834's creation-proof reserve is authoritative. */
+  const manualV4TargetedUniswapV837 =
+    await manualTargetedV4UniswapHandoffV837(
+      env,
+      budget,
+      isolatedState,
+      watched,
+      candidate
+    );
+
+  candidate.manualV4TargetedUniswapV837 =
+    manualV4TargetedUniswapV837;
+
+  const manualV4BlockscoutProIndexedV841 = await manualBlockscoutProTokenIndexedV4V841(
+    env,budget,isolatedState,watched,candidate
+  );
+  candidate.manualV4BlockscoutProIndexedV841 = manualV4BlockscoutProIndexedV841;
+
+  /* V841 supersedes raw-RPC history crawling and V838 brute-force paging in
+   * /analyse. Older helpers remain in source for diagnostics/history only. */
+  const manualV4ResumableV838 = {
+    attempted:false, verified:false, status:"SKIPPED_SUPERSEDED_BY_BLOCKSCOUT_PRO_V841",
+    snapshotPoolIds:0,startOffset:0,checkedThisRun:0,nextOffset:0,uniswapBatches:0,
+    uniswapPoolsReturned:0,exactMatches:0,selectedPoolId:null,requestsUsed:0,progressPersisted:false
+  };
+  candidate.manualV4ResumableV838 = manualV4ResumableV838;
+
+  const manualLiveV4ResultV283 =
+    await manualLiveV4EnrichmentV283(
+      env,
+      budget,
+      watched,
+      candidate
+    );
+  candidate.manualLiveV4EnrichmentV283 = manualLiveV4ResultV283;
+
+  candidate =
+    applyManualLiveV4EnrichmentV283(
+      candidate,
+      watched,
+      isolatedState,
+      manualLiveV4ResultV283
+    );
+
+
   /* V322: /analyse can use the already-proven guarded GeckoTerminal
    * pool-trades reader to obtain real individual BUY USD / SELL USD rows for
    * verified pool identities. This uses the isolated manual budget/state only.
@@ -120811,51 +120877,6 @@ async function telegramFreshAnalyseV276(
 
   candidate.manualV3AutoStartV688 =
     manualV3AutoStartV688;
-
-  /* V837: targeted manual parity with the retained automatic V4/Uniswap path.
-   * One Uniswap request maximum; V834's creation-proof reserve is authoritative. */
-  const manualV4TargetedUniswapV837 =
-    await manualTargetedV4UniswapHandoffV837(
-      env,
-      budget,
-      isolatedState,
-      watched,
-      candidate
-    );
-
-  candidate.manualV4TargetedUniswapV837 =
-    manualV4TargetedUniswapV837;
-
-  const manualV4BlockscoutProIndexedV841 = await manualBlockscoutProTokenIndexedV4V841(
-    env,budget,isolatedState,watched,candidate
-  );
-  candidate.manualV4BlockscoutProIndexedV841 = manualV4BlockscoutProIndexedV841;
-
-  /* V841 supersedes raw-RPC history crawling and V838 brute-force paging in
-   * /analyse. Older helpers remain in source for diagnostics/history only. */
-  const manualV4ResumableV838 = {
-    attempted:false, verified:false, status:"SKIPPED_SUPERSEDED_BY_BLOCKSCOUT_PRO_V841",
-    snapshotPoolIds:0,startOffset:0,checkedThisRun:0,nextOffset:0,uniswapBatches:0,
-    uniswapPoolsReturned:0,exactMatches:0,selectedPoolId:null,requestsUsed:0,progressPersisted:false
-  };
-  candidate.manualV4ResumableV838 = manualV4ResumableV838;
-
-  const manualLiveV4ResultV283 =
-    await manualLiveV4EnrichmentV283(
-      env,
-      budget,
-      watched,
-      candidate
-    );
-  candidate.manualLiveV4EnrichmentV283 = manualLiveV4ResultV283;
-
-  candidate =
-    applyManualLiveV4EnrichmentV283(
-      candidate,
-      watched,
-      isolatedState,
-      manualLiveV4ResultV283
-    );
 
   const manualVerifiedUsdRecoveryResultV289 =
     await manualVerifiedUsdRecoveryV289(
