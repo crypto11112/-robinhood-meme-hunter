@@ -1,4 +1,18 @@
 /**
+ * Robinhood Chain Meme Hunter — V854
+ *
+ * V854 PERSISTED VERIFIED WETH/USDG REUSE IN MANUAL V289:
+ * - builds directly from V853;
+ * - manualWethUsdGReferenceV289 now checks the existing fresh verified
+ *   bestVerifiedWethUsdGReferenceV195(state) cache before spending any request;
+ * - only if no fresh verified persisted reference exists does V289 continue to
+ *   the existing V291/V195 on-chain resolver path;
+ * - preserves the existing 30-minute freshness/verification rules;
+ * - adds zero external requests, raises no request ceilings and does not weaken
+ *   the V834 manual creation-proof reserve;
+ * - leaves automatic V4/V212/V254/scoring/qualification/Telegram behavior untouched.
+ */
+/**
  * Robinhood Chain Meme Hunter — V853
  *
  * V853 V289 EXACT-USD RECOVERY AUDIT — READ ONLY:
@@ -7307,7 +7321,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V853";
+const VERSION = "V854";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -118951,6 +118965,66 @@ async function manualWethUsdGReferenceV289(
     };
   }
 
+  /*
+   * V854: reuse the bot's already-verified fresh WETH/USDG reference first.
+   * This helper enforces the existing verification + 30-minute freshness rules.
+   * No request is spent here. Only fall through to V291/V195 when unavailable.
+   */
+  const persistedV195V854 =
+    bestVerifiedWethUsdGReferenceV195(
+      state
+    );
+
+  if (
+    persistedV195V854?.verified === true &&
+    Number.isFinite(
+      Number(
+        persistedV195V854?.priceUsdGPerWeth
+      )
+    ) &&
+    Number(
+      persistedV195V854.priceUsdGPerWeth
+    ) > 0
+  ) {
+    return {
+      ...base,
+      attempted: false,
+      verified: true,
+      status:
+        "VERIFIED_FROM_FRESH_PERSISTED_WETH_USDG_V854",
+      source:
+        persistedV195V854?.source ||
+        "BEST_VERIFIED_WETH_USDG_REFERENCE_V195_V854",
+      priceUsdGPerWeth:
+        Number(
+          persistedV195V854.priceUsdGPerWeth
+        ),
+      requestsUsed: 0,
+      v3Status:
+        "FRESH_PERSISTED_VERIFIED_REFERENCE_V854",
+      v3PoolAddress:
+        normalize(
+          persistedV195V854?.poolAddress
+        ) || null,
+      v3SelectedFee:
+        persistedV195V854?.fee ?? null,
+      resolverV291: null,
+      directV290: null,
+      reference: {
+        ...persistedV195V854,
+        verified: true,
+        priceUsdGPerWeth:
+          Number(
+            persistedV195V854.priceUsdGPerWeth
+          ),
+        externalRequestsUsed: 0,
+        source:
+          persistedV195V854?.source ||
+          "BEST_VERIFIED_WETH_USDG_REFERENCE_V195_V854"
+      }
+    };
+  }
+
   const before = safeNumber(budget?.totalUsed);
 
   const resolverV291 = await manualResolveV3WethUsdGReferenceV291(
@@ -120333,7 +120407,7 @@ function telegramAnalyseParityMessageV294(candidate, directionalDiagnosticsV325 
     const bh=v289aV853?.budgetAfterHistory||{};
     const refuse=v289aV853?.latestBudgetRefusal||null;
     evidence.push(
-      `💵 V289 exact-USD recovery audit V853: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
+      `💵 V289 exact-USD recovery audit V854: <b>${escapeHtml(v289aV853.status || "UNVERIFIED")}</b> | attempted <b>${v289aV853.attempted===true?"YES":"NO"}</b> | requests <b>${safeNumber(v289aV853.requestsUsed)}</b>`,
       `• Active PoolId into V289: <code>${escapeHtml(v289aV853.poolId || "UNVERIFIED")}</code> | live selected <code>${escapeHtml(v289aV853.liveSelectedPoolId || "UNVERIFIED")}</code> | live swaps <b>${safeNumber(v289aV853.liveSwaps)}</b>`,
       `• Quote into V289: <code>${escapeHtml(v289aV853.quoteTokenAddress || "UNVERIFIED")}</code>`,
       `• Budget before V289: <b>${safeNumber(bb.totalUsed)}/${safeNumber(bb.totalLimit)}</b> | after reference <b>${safeNumber(br.totalUsed)}/${safeNumber(br.totalLimit)}</b> | after history <b>${safeNumber(bh.totalUsed)}/${safeNumber(bh.totalLimit)}</b>`,
