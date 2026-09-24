@@ -1,4 +1,20 @@
 /**
+ * Robinhood Chain Meme Hunter — V869
+ *
+ * V869 TELEGRAM POST-QUALIFICATION DELIVERY TRACE:
+ * - builds directly from V868;
+ * - records the exact outcome for every Telegram-qualified candidate after
+ *   final authoritative recompute: SENT, ALERT_COOLDOWN,
+ *   NOTIFICATION_BUDGET_EXHAUSTED, or TELEGRAM_SEND_FAILED;
+ * - records previous alert age/score, score delta, cooldown expiry,
+ *   new-accumulation override and Telegram API status/error when applicable;
+ * - persists only compact bounded diagnostic state in the existing main-state
+ *   write; adds zero provider requests and zero extra KV writes;
+ * - /evidenceaudit surfaces the latest trace;
+ * - no scoring, qualification, Telegram threshold, cooldown, provider routing,
+ *   request ceiling or autonomous trading behaviour changes.
+ */
+/**
  * Robinhood Chain Meme Hunter — V868
  *
  * V868 FINAL ISOLATED V4 COVERAGE MEASUREMENT:
@@ -7522,7 +7538,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V868";
+const VERSION = "V869";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -105822,8 +105838,24 @@ for (
   const telegramResults =
     [];
 
+  const telegramPostQualificationTraceV869 = {
+    runtimeVersion: VERSION,
+    recordedAt: new Date().toISOString(),
+    qualifiedCount: 0,
+    outcomes: [],
+    diagnosticOnly: true,
+    externalRequestsAdded: 0,
+    extraStateWrites: 0,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdsChanged: false,
+    alertCooldownChanged: false
+  };
+
   scannerFunnelV415.telegramQualified =
     candidates.filter(qualifiesTelegram).length;
+  telegramPostQualificationTraceV869.qualifiedCount =
+    scannerFunnelV415.telegramQualified;
 
   for (
     const candidate
@@ -105886,6 +105918,23 @@ for (
         ?.whaleFlow !==
         "NET_ACCUMULATION";
 
+    const telegramTraceBaseV869 = {
+      address,
+      symbol: candidate?.symbol || null,
+      opportunityScore: safeNumber(candidate?.opportunity?.score),
+      confidenceScore: safeNumber(candidate?.confidence?.score),
+      momentumScore: safeNumber(candidate?.momentum?.score),
+      previousAlertTimestamp: previousTimestamp || null,
+      previousAlertAgeMs:
+        previousTimestamp ? Math.max(0, Date.now() - previousTimestamp) : null,
+      previousScore,
+      scoreDelta: safeNumber(candidate?.opportunity?.score) - previousScore,
+      cooldownExpired,
+      scoreImproved,
+      newAccumulation,
+      whaleFlow: candidate?.whaleFlow?.flow || null
+    };
+
     if (
       !cooldownExpired &&
       !scoreImproved &&
@@ -105899,6 +105948,13 @@ for (
 
         reason:
           "ALERT_COOLDOWN"
+      });
+
+      telegramPostQualificationTraceV869.outcomes.push({
+        ...telegramTraceBaseV869,
+        outcome: "ALERT_COOLDOWN",
+        sendAttempted: false,
+        sent: false
       });
 
       continue;
@@ -105918,6 +105974,13 @@ for (
 
         reason:
           "NOTIFICATION_BUDGET_EXHAUSTED"
+      });
+
+      telegramPostQualificationTraceV869.outcomes.push({
+        ...telegramTraceBaseV869,
+        outcome: "NOTIFICATION_BUDGET_EXHAUSTED",
+        sendAttempted: false,
+        sent: false
       });
 
       continue;
@@ -105943,6 +106006,21 @@ for (
         result.success,
 
       result
+    });
+
+    telegramPostQualificationTraceV869.outcomes.push({
+      ...telegramTraceBaseV869,
+      outcome: result?.success === true ? "SENT" : "TELEGRAM_SEND_FAILED",
+      sendAttempted: true,
+      sent: result?.success === true,
+      telegramStatus: result?.status || null,
+      telegramMode: result?.mode || null,
+      telegramError: result?.error || null,
+      telegramMessageId:
+        result?.messageId ??
+        result?.message_id ??
+        result?.result?.message_id ??
+        null
     });
 
     if (
@@ -107486,6 +107564,11 @@ for (
     state,
     Date.now()
   );
+
+  state.telegramPostQualificationTraceV869 = {
+    ...telegramPostQualificationTraceV869,
+    outcomes: telegramPostQualificationTraceV869.outcomes.slice(-12)
+  };
 
   /*
    * V474: build the launch-coverage funnel only after Telegram evaluation is
@@ -125652,6 +125735,8 @@ function evidenceAuditSnapshotV727(state) {
       state?.qualificationAuditV663?.lastV254PostRecoveryScoreV809 || null,
     productionV4RoutingDiagnosticV817:
       state?.productionV4RoutingDiagnosticV817 || null,
+    telegramPostQualificationTraceV869:
+      state?.telegramPostQualificationTraceV869 || null,
     interpretation: {
       noEvidenceIsPromoted: true,
       noProviderRequests: true,
@@ -125723,6 +125808,33 @@ function evidenceAuditTelegramMessageV727(state) {
       ""
     );
   }
+  const telegramTraceV869 = d?.telegramPostQualificationTraceV869 || null;
+  if (telegramTraceV869) {
+    lines.push(
+      `📨 <b>Telegram post-qualification trace — ${escapeHtml(telegramTraceV869.runtimeVersion || VERSION)}</b>`,
+      `Recorded: <code>${escapeHtml(telegramTraceV869.recordedAt || "UNVERIFIED")}</code>`,
+      `Qualified candidates this scan: <b>${fmt(telegramTraceV869.qualifiedCount)}</b>`
+    );
+    const outcomesV869 = Array.isArray(telegramTraceV869.outcomes)
+      ? telegramTraceV869.outcomes
+      : [];
+    if (!outcomesV869.length) {
+      lines.push("• No Telegram-qualified candidates reached the delivery stage in this scan.");
+    }
+    for (const row of outcomesV869.slice(-8)) {
+      lines.push(
+        `• <code>${escapeHtml(row.address || "UNVERIFIED")}</code> ${escapeHtml(row.symbol || "")}: <b>${escapeHtml(row.outcome || "UNVERIFIED")}</b>`,
+        `  opp:${fmt(row.opportunityScore)} · conf:${fmt(row.confidenceScore)} · momentum:${fmt(row.momentumScore)} · previous:${fmt(row.previousScore)} · delta:${fmt(row.scoreDelta)} · cooldown:${row.cooldownExpired ? "EXPIRED" : "ACTIVE"} · newAccumulation:${row.newAccumulation ? "YES" : "NO"}`
+      );
+      if (row.sendAttempted === true) {
+        lines.push(
+          `  Telegram send: ${row.sent ? "SUCCESS" : "FAILED"} · status:${escapeHtml(row.telegramStatus || "UNVERIFIED")} · mode:${escapeHtml(row.telegramMode || "UNVERIFIED")} · error:${escapeHtml(row.telegramError || "NONE")} · messageId:${escapeHtml(row.telegramMessageId ?? "NONE")}`
+        );
+      }
+    }
+    lines.push("");
+  }
+
   if (!total) {
     lines.push(
       liveV254
