@@ -1,18 +1,18 @@
 /**
- * Robinhood Chain Meme Hunter — V869
+ * Robinhood Chain Meme Hunter — V870
  *
- * V869 TELEGRAM POST-QUALIFICATION DELIVERY TRACE:
+ * V869 DENSITY-STABLE ADAPTIVE V4 WALKER:
  * - builds directly from V868;
- * - records the exact outcome for every Telegram-qualified candidate after
- *   final authoritative recompute: SENT, ALERT_COOLDOWN,
- *   NOTIFICATION_BUDGET_EXHAUSTED, or TELEGRAM_SEND_FAILED;
- * - records previous alert age/score, score delta, cooldown expiry,
- *   new-accumulation override and Telegram API status/error when applicable;
- * - persists only compact bounded diagnostic state in the existing main-state
- *   write; adds zero provider requests and zero extra KV writes;
- * - /evidenceaudit surfaces the latest trace;
- * - no scoring, qualification, Telegram threshold, cooldown, provider routing,
- *   request ceiling or autonomous trading behaviour changes.
+ * - preserves the isolated /v4completeaudit 24-request / 18-log diagnostic envelope;
+ * - production V466 remains capped at 9 log requests;
+ * - changes ONLY the trusted-start adaptive V466 chunk growth policy;
+ * - lowers target rows from ~750 to ~600;
+ * - caps successful-range growth at 1.75x instead of up to 8x;
+ * - removes forced 4x/2x jumps after quiet chunks;
+ * - keeps saturated-range splitting, exact PoolId filtering, exact-USD rules,
+ *   gap-free coverage requirements and all production request ceilings unchanged;
+ * - goal: avoid overshooting from quiet zones into dense 1,000-row hotspots and
+ *   wasting multiple requests rediscovering a safe range size.
  */
 /**
  * Robinhood Chain Meme Hunter — V868
@@ -25027,9 +25027,7 @@ function refreshKnownPoolActivityV185(
 
     const entry =
       poolId
-        ? state.poolRegistry?.[
-            poolIdsV848.length === 1 ? poolIdsV848[0] : poolIdsV848
-          ]
+        ? state.poolRegistry?.[poolId]
         : null;
 
     if (!entry) {
@@ -43044,8 +43042,8 @@ function v4AllPoolsTelegramV771(result){
 async function v4CompleteAuditV865(env, requestedToken="") {
   const token=normalize(requestedToken);
   const base={
-    version:"V868",
-    diagnostic:"ISOLATED_V4_COMPLETE_HISTORY_AUDIT_V868",
+    version:"V869",
+    diagnostic:"ISOLATED_V4_COMPLETE_HISTORY_AUDIT_V869",
     diagnosticOnly:true,
     tokenAddress:isAddress(token)?token:null,
     maxExternalRequests:24,
@@ -43246,6 +43244,16 @@ async function v4CompleteAuditV865(env, requestedToken="") {
       safeNumber(
         v466?.paginationV461?.adaptiveInitialSpanV866
       ),
+    densityStableWalkerV869:
+      v466?.paginationV461?.densityStableWalkerV869 === true,
+    adaptiveTargetRowsV869:
+      safeNumber(
+        v466?.paginationV461?.adaptiveTargetRowsV869
+      ),
+    adaptiveMaxGrowthFactorV869:
+      Number(
+        v466?.paginationV461?.adaptiveMaxGrowthFactorV869 || 0
+      ),
     verifiedWindows:Array.isArray(v466?.flow?.verifiedWindows)
       ? v466.flow.verifiedWindows
       : []
@@ -43282,7 +43290,7 @@ function v4CompleteAuditTelegramV865(result) {
   };
 
   const lines=[
-    "🧬 <b>V4 Complete-History Audit — V868</b>","",
+    "🧬 <b>V4 Complete-History Audit — V869</b>","",
     `Token: <code>${escapeHtml(String(r?.tokenAddress||"UNVERIFIED"))}</code>`,
     `Final status: <b>${escapeHtml(String(r?.finalStatus||"UNVERIFIED"))}</b>`,
     `Diagnostic requests: <b>${safeNumber(r?.budget?.totalUsed ?? r?.externalRequestsUsed)}/${safeNumber(r?.budget?.totalLimit || r?.maxExternalRequests)}</b>`,"",
@@ -43304,6 +43312,7 @@ function v4CompleteAuditTelegramV865(result) {
     `V466 requests / log requests: <b>${safeNumber(r?.v466?.requestsUsed)} / ${safeNumber(r?.v466?.logRequestsUsed)}</b>`,
     `V868 log ceiling: production <b>${safeNumber(r?.v466?.productionMaxLogRequests)}</b> · audit <b>${safeNumber(r?.v466?.effectiveMaxLogRequestsV867)}</b> · diagnostic override <b>${r?.v466?.diagnosticLogCeilingOverrideV867===true?"YES":"NO"}</b>`,
     `V866 adaptive walker: <b>${r?.v466?.adaptiveTrustedWalkerV866===true?"YES":"NO"}</b> · completed adaptive chunks <b>${safeNumber(r?.v466?.adaptiveChunksCompletedV866)}</b> · initial span <b>${safeNumber(r?.v466?.adaptiveInitialSpanV866)}</b>`,
+    `V869 density-stable growth: <b>${r?.v466?.densityStableWalkerV869===true?"YES":"NO"}</b> · target rows <b>${safeNumber(r?.v466?.adaptiveTargetRowsV869)}</b> · max growth <b>${Number(r?.v466?.adaptiveMaxGrowthFactorV869||0).toFixed(2)}x</b>`,
     `Completed / pending ranges: <b>${safeNumber(r?.v466?.completedRanges)} / ${safeNumber(r?.v466?.pendingRanges)}</b>`,
     `Returned exact-pool rows: <b>${safeNumber(r?.v466?.returnedLogs)}</b>`,
     `All decoded exact USD: <b>${r?.v466?.allReturnedRowsExactUsdDecoded===true?"YES":"NO"}</b>`,
@@ -83822,39 +83831,56 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
           safeNumber(result.rows?.length)
         );
 
-      const targetRowsV866 = 750;
+      /*
+       * V869 density-stable growth.
+       *
+       * V868 proved that a quiet completed range can sit immediately beside a
+       * dense hotspot. Large 4x/8x jumps therefore waste requests by overshooting
+       * into another 1,000-row cap. Aim lower and grow gradually.
+       */
+      const targetRowsV866 = 600;
+      const maxGrowthFactorV869 = 1.75;
+      const minShrinkFactorV869 = 0.50;
+
       let nextSpanV866;
 
       if (observedRowsV866 <= 0) {
         nextSpanV866 =
-          currentSpanV866 * 8;
+          Math.floor(
+            currentSpanV866 *
+            maxGrowthFactorV869
+          );
       } else {
         nextSpanV866 =
           Math.floor(
             currentSpanV866 *
             (targetRowsV866 / observedRowsV866)
           );
-
-        if (observedRowsV866 < 125) {
-          nextSpanV866 =
-            Math.max(
-              nextSpanV866,
-              currentSpanV866 * 4
-            );
-        } else if (observedRowsV866 < 300) {
-          nextSpanV866 =
-            Math.max(
-              nextSpanV866,
-              currentSpanV866 * 2
-            );
-        }
       }
+
+      const maxGrowthSpanV869 =
+        Math.max(
+          currentSpanV866 + 1,
+          Math.floor(
+            currentSpanV866 *
+            maxGrowthFactorV869
+          )
+        );
+
+      const minShrinkSpanV869 =
+        Math.max(
+          64,
+          Math.floor(
+            currentSpanV866 *
+            minShrinkFactorV869
+          )
+        );
 
       nextSpanV866 =
         Math.max(
-          64,
+          minShrinkSpanV869,
           Math.min(
-            currentSpanV866 * 8,
+            maxGrowthSpanV869,
             nextSpanV866
           )
         );
@@ -84000,6 +84026,16 @@ async function blockscoutCompleteExactPoolDirectionalUsdV458(
       adaptiveInitialSpanV866:
         adaptiveTrustedWalkerV866 === true
           ? 512
+          : 0,
+      densityStableWalkerV869:
+        adaptiveTrustedWalkerV866 === true,
+      adaptiveTargetRowsV869:
+        adaptiveTrustedWalkerV866 === true
+          ? 600
+          : 0,
+      adaptiveMaxGrowthFactorV869:
+        adaptiveTrustedWalkerV866 === true
+          ? 1.75
           : 0,
       persistedAcrossScansV466:true,
       resumedV466:resumed,
@@ -105838,24 +105874,8 @@ for (
   const telegramResults =
     [];
 
-  const telegramPostQualificationTraceV869 = {
-    runtimeVersion: VERSION,
-    recordedAt: new Date().toISOString(),
-    qualifiedCount: 0,
-    outcomes: [],
-    diagnosticOnly: true,
-    externalRequestsAdded: 0,
-    extraStateWrites: 0,
-    scoringChanged: false,
-    qualificationChanged: false,
-    telegramThresholdsChanged: false,
-    alertCooldownChanged: false
-  };
-
   scannerFunnelV415.telegramQualified =
     candidates.filter(qualifiesTelegram).length;
-  telegramPostQualificationTraceV869.qualifiedCount =
-    scannerFunnelV415.telegramQualified;
 
   for (
     const candidate
@@ -105918,23 +105938,6 @@ for (
         ?.whaleFlow !==
         "NET_ACCUMULATION";
 
-    const telegramTraceBaseV869 = {
-      address,
-      symbol: candidate?.symbol || null,
-      opportunityScore: safeNumber(candidate?.opportunity?.score),
-      confidenceScore: safeNumber(candidate?.confidence?.score),
-      momentumScore: safeNumber(candidate?.momentum?.score),
-      previousAlertTimestamp: previousTimestamp || null,
-      previousAlertAgeMs:
-        previousTimestamp ? Math.max(0, Date.now() - previousTimestamp) : null,
-      previousScore,
-      scoreDelta: safeNumber(candidate?.opportunity?.score) - previousScore,
-      cooldownExpired,
-      scoreImproved,
-      newAccumulation,
-      whaleFlow: candidate?.whaleFlow?.flow || null
-    };
-
     if (
       !cooldownExpired &&
       !scoreImproved &&
@@ -105948,13 +105951,6 @@ for (
 
         reason:
           "ALERT_COOLDOWN"
-      });
-
-      telegramPostQualificationTraceV869.outcomes.push({
-        ...telegramTraceBaseV869,
-        outcome: "ALERT_COOLDOWN",
-        sendAttempted: false,
-        sent: false
       });
 
       continue;
@@ -105974,13 +105970,6 @@ for (
 
         reason:
           "NOTIFICATION_BUDGET_EXHAUSTED"
-      });
-
-      telegramPostQualificationTraceV869.outcomes.push({
-        ...telegramTraceBaseV869,
-        outcome: "NOTIFICATION_BUDGET_EXHAUSTED",
-        sendAttempted: false,
-        sent: false
       });
 
       continue;
@@ -106006,21 +105995,6 @@ for (
         result.success,
 
       result
-    });
-
-    telegramPostQualificationTraceV869.outcomes.push({
-      ...telegramTraceBaseV869,
-      outcome: result?.success === true ? "SENT" : "TELEGRAM_SEND_FAILED",
-      sendAttempted: true,
-      sent: result?.success === true,
-      telegramStatus: result?.status || null,
-      telegramMode: result?.mode || null,
-      telegramError: result?.error || null,
-      telegramMessageId:
-        result?.messageId ??
-        result?.message_id ??
-        result?.result?.message_id ??
-        null
     });
 
     if (
@@ -107564,11 +107538,6 @@ for (
     state,
     Date.now()
   );
-
-  state.telegramPostQualificationTraceV869 = {
-    ...telegramPostQualificationTraceV869,
-    outcomes: telegramPostQualificationTraceV869.outcomes.slice(-12)
-  };
 
   /*
    * V474: build the launch-coverage funnel only after Telegram evaluation is
@@ -125735,8 +125704,6 @@ function evidenceAuditSnapshotV727(state) {
       state?.qualificationAuditV663?.lastV254PostRecoveryScoreV809 || null,
     productionV4RoutingDiagnosticV817:
       state?.productionV4RoutingDiagnosticV817 || null,
-    telegramPostQualificationTraceV869:
-      state?.telegramPostQualificationTraceV869 || null,
     interpretation: {
       noEvidenceIsPromoted: true,
       noProviderRequests: true,
@@ -125808,33 +125775,6 @@ function evidenceAuditTelegramMessageV727(state) {
       ""
     );
   }
-  const telegramTraceV869 = d?.telegramPostQualificationTraceV869 || null;
-  if (telegramTraceV869) {
-    lines.push(
-      `📨 <b>Telegram post-qualification trace — ${escapeHtml(telegramTraceV869.runtimeVersion || VERSION)}</b>`,
-      `Recorded: <code>${escapeHtml(telegramTraceV869.recordedAt || "UNVERIFIED")}</code>`,
-      `Qualified candidates this scan: <b>${fmt(telegramTraceV869.qualifiedCount)}</b>`
-    );
-    const outcomesV869 = Array.isArray(telegramTraceV869.outcomes)
-      ? telegramTraceV869.outcomes
-      : [];
-    if (!outcomesV869.length) {
-      lines.push("• No Telegram-qualified candidates reached the delivery stage in this scan.");
-    }
-    for (const row of outcomesV869.slice(-8)) {
-      lines.push(
-        `• <code>${escapeHtml(row.address || "UNVERIFIED")}</code> ${escapeHtml(row.symbol || "")}: <b>${escapeHtml(row.outcome || "UNVERIFIED")}</b>`,
-        `  opp:${fmt(row.opportunityScore)} · conf:${fmt(row.confidenceScore)} · momentum:${fmt(row.momentumScore)} · previous:${fmt(row.previousScore)} · delta:${fmt(row.scoreDelta)} · cooldown:${row.cooldownExpired ? "EXPIRED" : "ACTIVE"} · newAccumulation:${row.newAccumulation ? "YES" : "NO"}`
-      );
-      if (row.sendAttempted === true) {
-        lines.push(
-          `  Telegram send: ${row.sent ? "SUCCESS" : "FAILED"} · status:${escapeHtml(row.telegramStatus || "UNVERIFIED")} · mode:${escapeHtml(row.telegramMode || "UNVERIFIED")} · error:${escapeHtml(row.telegramError || "NONE")} · messageId:${escapeHtml(row.telegramMessageId ?? "NONE")}`
-        );
-      }
-    }
-    lines.push("");
-  }
-
   if (!total) {
     lines.push(
       liveV254
