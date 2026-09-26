@@ -1,4 +1,22 @@
 /**
+ * V898 EVENT-DRIVEN DIAGNOSTIC EMAIL BRIDGE:
+ * - builds directly from deployed V897;
+ * - preserves /evidenceaudit and /diagnostics-read unchanged;
+ * - OPTIONAL: if DIAGNOSTIC_EMAIL binding + DIAGNOSTIC_EMAIL_TO +
+ *   DIAGNOSTIC_EMAIL_FROM are configured, scheduled scans may send a compact
+ *   diagnostic email when a meaningful state change occurs;
+ * - meaningful events: first/new real V888 targeted collector attempt,
+ *   V254 recovery, or Telegram qualification YES;
+ * - duplicate suppression is persisted in existing state;
+ * - hard global email cooldown: one diagnostic email per 60 minutes maximum,
+ *   so this bridge itself cannot send more than 24 emails/day;
+ * - multiple same-scan events are combined into one email;
+ * - email failures fail open and cannot stop scanning;
+ * - ZERO scanner/scoring/risk/qualification/request-budget changes;
+ * - no provider/RPC requests are added by the email bridge;
+ * - if email configuration is absent, behavior is identical to V897.
+ */
+/**
  * V897 SAFE READ-ONLY DIAGNOSTICS ROUTE:
  * - builds directly from deployed V896;
  * - adds authenticated GET /diagnostics-read for compact bot monitoring;
@@ -7846,7 +7864,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V897";
+const VERSION = "V898";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -165517,6 +165535,23 @@ async function diagnosticsReadV897(request, env) {
           }
         : null,
 
+      diagnosticEmail: {
+        configured:
+          diagnosticEmailConfiguredV898(env),
+        lastSentAt:
+          state?.diagnosticEmailBridgeV898?.lastSentAt || null,
+        lastStatus:
+          state?.diagnosticEmailBridgeV898?.lastStatus || null,
+        lastEventTypes:
+          Array.isArray(
+            state?.diagnosticEmailBridgeV898?.lastEventTypes
+          )
+            ? state.diagnosticEmailBridgeV898.lastEventTypes.slice(0, 6)
+            : [],
+        hardCooldownMinutes: 60,
+        maximumBridgeEmailsPerDay: 24
+      },
+
       usage: {
         scope:
           "BOT_SIDE_ESTIMATE_NOT_CLOUDFLARE_BILLING",
@@ -167463,6 +167498,263 @@ async function scheduledNativeV3CollectorV333(env){
 }
 
 /* =========================================================
+   V898 EVENT-DRIVEN DIAGNOSTIC EMAIL BRIDGE
+   ========================================================= */
+
+const DIAGNOSTIC_EMAIL_COOLDOWN_MS_V898 =
+  60 * 60 * 1000;
+
+function diagnosticEmailConfiguredV898(env) {
+  return Boolean(
+    env?.DIAGNOSTIC_EMAIL &&
+    typeof env.DIAGNOSTIC_EMAIL.send === "function" &&
+    String(env?.DIAGNOSTIC_EMAIL_TO || "").includes("@") &&
+    String(env?.DIAGNOSTIC_EMAIL_FROM || "").includes("@")
+  );
+}
+
+function diagnosticEmailFingerprintV898(prefix, row) {
+  return [
+    prefix,
+    String(row?.recordedAt || ""),
+    String(row?.address || row?.tokenAddress || ""),
+    String(row?.classification || row?.status || ""),
+    String(row?.recovered ?? ""),
+    String(row?.qualifiesTelegram ?? "")
+  ].join("|");
+}
+
+function buildDiagnosticEmailEventsV898(state) {
+  const events = [];
+
+  const collector =
+    state?.lastRealTargetedCollectorAttemptV896 || null;
+
+  if (collector?.requestAttempted === true) {
+    events.push({
+      type: "V888_TARGETED_COLLECTOR_ATTEMPT",
+      fingerprint:
+        diagnosticEmailFingerprintV898(
+          "collector",
+          collector
+        ),
+      line:
+        [
+          "V888 targeted collector attempt",
+          `token=${normalize(collector?.tokenAddress || "") || "NONE"}`,
+          `pool=${normalize(collector?.poolId || "") || "NONE"}`,
+          `classification=${collector?.classification || "UNVERIFIED"}`,
+          `rpcOk=${collector?.rpcOk === true ? "YES" : "NO"}`,
+          `rawRows=${safeNumber(collector?.rawRpcRows)}`,
+          `exactTopicRows=${safeNumber(collector?.exactTopicRows)}`,
+          `decodedExactUsdRows=${safeNumber(collector?.decodedExactUsdRows)}`,
+          `v179Rows=${safeNumber(collector?.v179LedgerRowsForTokenPool)}`
+        ].join(" · ")
+    });
+  }
+
+  const lastV254 =
+    state?.qualificationAuditV663?.lastV254RelevantStatusV805 ||
+    state?.qualificationAuditV663?.lastV254LiveStatusV804 ||
+    null;
+
+  if (safeNumber(lastV254?.recovered) > 0) {
+    events.push({
+      type: "V254_RECOVERY",
+      fingerprint:
+        diagnosticEmailFingerprintV898(
+          "v254",
+          lastV254
+        ),
+      line:
+        [
+          "V254 recovery",
+          `recordedAt=${lastV254?.recordedAt || "NONE"}`,
+          `eligible=${safeNumber(lastV254?.candidatesEligible ?? lastV254?.eligible)}`,
+          `attempted=${safeNumber(lastV254?.attempted)}`,
+          `recovered=${safeNumber(lastV254?.recovered)}`,
+          `status=${lastV254?.status || "UNVERIFIED"}`
+        ].join(" · ")
+    });
+  }
+
+  const postRecovery =
+    state?.qualificationAuditV663?.lastV254PostRecoveryScoreV809 ||
+    null;
+
+  if (postRecovery?.qualifiesTelegram === true) {
+    events.push({
+      type: "TELEGRAM_QUALIFIED",
+      fingerprint:
+        diagnosticEmailFingerprintV898(
+          "telegram",
+          postRecovery
+        ),
+      line:
+        [
+          "Telegram qualification YES",
+          `token=${normalize(postRecovery?.address || "") || "NONE"}`,
+          `opportunity=${safeNumber(postRecovery?.opportunityScore)}`,
+          `confidence=${safeNumber(postRecovery?.confidenceScore)}`,
+          `momentum=${safeNumber(postRecovery?.momentumScore)}`,
+          `verifiedFlow=${postRecovery?.verifiedFlow === true ? "YES" : "NO"}`,
+          `records=${safeNumber(postRecovery?.verifiedRecordCount)}`,
+          `pools=${safeNumber(postRecovery?.verifiedPoolCount)}`
+        ].join(" · ")
+    });
+  }
+
+  return events;
+}
+
+async function maybeSendDiagnosticEmailV898(env) {
+  if (!diagnosticEmailConfiguredV898(env)) {
+    return {
+      enabled: false,
+      sent: false,
+      status: "DIAGNOSTIC_EMAIL_NOT_CONFIGURED_V898"
+    };
+  }
+
+  let loaded;
+  try {
+    loaded = await readState(env);
+  } catch (error) {
+    return {
+      enabled: true,
+      sent: false,
+      status: "DIAGNOSTIC_EMAIL_STATE_READ_FAILED_V898",
+      error: errorString(error)
+    };
+  }
+
+  const state = loaded?.state || newState();
+  const bridge =
+    state?.diagnosticEmailBridgeV898 &&
+    typeof state.diagnosticEmailBridgeV898 === "object"
+      ? state.diagnosticEmailBridgeV898
+      : {};
+
+  const sentFingerprints =
+    bridge?.sentFingerprints &&
+    typeof bridge.sentFingerprints === "object"
+      ? bridge.sentFingerprints
+      : {};
+
+  const allEvents =
+    buildDiagnosticEmailEventsV898(state);
+
+  const unsent =
+    allEvents.filter(
+      event =>
+        event?.fingerprint &&
+        sentFingerprints[event.fingerprint] !== true
+    );
+
+  if (!unsent.length) {
+    return {
+      enabled: true,
+      sent: false,
+      status: "NO_NEW_DIAGNOSTIC_EMAIL_EVENT_V898"
+    };
+  }
+
+  const lastSentAt =
+    safeNumber(bridge?.lastSentAt);
+
+  if (
+    lastSentAt > 0 &&
+    Date.now() - lastSentAt <
+      DIAGNOSTIC_EMAIL_COOLDOWN_MS_V898
+  ) {
+    return {
+      enabled: true,
+      sent: false,
+      status: "DIAGNOSTIC_EMAIL_COOLDOWN_ACTIVE_V898",
+      pendingEvents: unsent.length,
+      cooldownUntil:
+        lastSentAt +
+        DIAGNOSTIC_EMAIL_COOLDOWN_MS_V898
+    };
+  }
+
+  const lines = [
+    "Robinhood Chain Meme Hunter diagnostic event",
+    `Version: ${VERSION}`,
+    `Time: ${new Date().toISOString()}`,
+    "",
+    ...unsent.map(event => `• ${event.line}`),
+    "",
+    "This message is diagnostic/read-only. It does not change scoring, qualification, risk gates, or request budgets."
+  ];
+
+  try {
+    await env.DIAGNOSTIC_EMAIL.send({
+      to: String(env.DIAGNOSTIC_EMAIL_TO),
+      from: String(env.DIAGNOSTIC_EMAIL_FROM),
+      subject:
+        `[Meme Hunter ${VERSION}] ${unsent
+          .map(event => event.type)
+          .join(" + ")
+          .slice(0, 120)}`,
+      text: lines.join("\n")
+    });
+  } catch (error) {
+    return {
+      enabled: true,
+      sent: false,
+      status: "DIAGNOSTIC_EMAIL_SEND_FAILED_V898",
+      error: errorString(error),
+      pendingEvents: unsent.length
+    };
+  }
+
+  const nextFingerprints = {
+    ...sentFingerprints
+  };
+
+  for (const event of unsent) {
+    nextFingerprints[event.fingerprint] = true;
+  }
+
+  /*
+   * Keep this tiny forever. Old fingerprints are only needed to suppress
+   * repeats, and the one-hour hard cooldown already caps send frequency.
+   */
+  const keys =
+    Object.keys(nextFingerprints);
+
+  if (keys.length > 96) {
+    for (const key of keys.slice(0, keys.length - 96)) {
+      delete nextFingerprints[key];
+    }
+  }
+
+  state.diagnosticEmailBridgeV898 = {
+    enabled: true,
+    lastSentAt: Date.now(),
+    lastStatus:
+      "DIAGNOSTIC_EMAIL_SENT_V898",
+    lastEventTypes:
+      unsent.map(event => event.type),
+    sentFingerprints:
+      nextFingerprints
+  };
+
+  const saved =
+    await writeState(env, state);
+
+  return {
+    enabled: true,
+    sent: true,
+    status: "DIAGNOSTIC_EMAIL_SENT_V898",
+    events: unsent.length,
+    stateSaved: saved?.saved === true,
+    stateSaveError: saved?.error || null
+  };
+}
+
+/* =========================================================
    SCHEDULED
    ========================================================= */
 
@@ -167487,6 +167779,26 @@ async function scheduledScan(
     nativeV3CollectorV333 = {status:"SCHEDULED_NATIVE_V3_COLLECTOR_ERROR_V333",error:String(error?.message||error).slice(0,180)};
   }
   result.nativeV3CollectorV333 = nativeV3CollectorV333;
+
+  /*
+   * V898: optional, fail-open diagnostic email bridge. This runs only after
+   * the normal scan has completed and therefore cannot influence selection,
+   * scoring, qualification, provider budgeting, or Telegram behavior.
+   */
+  try {
+    result.diagnosticEmailV898 =
+      await maybeSendDiagnosticEmailV898(env);
+  } catch (error) {
+    result.diagnosticEmailV898 = {
+      enabled:
+        diagnosticEmailConfiguredV898(env),
+      sent: false,
+      status:
+        "DIAGNOSTIC_EMAIL_UNHANDLED_ERROR_V898",
+      error:
+        errorString(error)
+    };
+  }
 
   console.log(
     jsonStringifySafeV246({
@@ -167557,6 +167869,9 @@ async function scheduledScan(
 
       nativeV3CollectorV333:
         result.nativeV3CollectorV333,
+
+      diagnosticEmailV898:
+        result.diagnosticEmailV898,
 
       timestamp:
         now()
