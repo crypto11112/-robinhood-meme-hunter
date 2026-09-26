@@ -1,4 +1,19 @@
 /**
+ * V888 EXACT-POOL TARGETED SWAP HANDOFF:
+ * - builds directly from deployed V887;
+ * - preserves V886 exact PoolId/side handoff and V887 V254 priority;
+ * - when production V4 selects a candidate with a VERIFIED exact PoolId but that
+ *   pool is absent from the normal 600-block all-pool live window, use one
+ *   EXISTING production-V4 analysis slot for a targeted exact-PoolId Swap query
+ *   over the existing V254 12,000-block recent-completion window;
+ * - only real PoolManager Swap logs for that exact PoolId count as observed
+ *   swaps; zero logs remain zero swaps and do not weaken V254 eligibility;
+ * - a successful targeted hit bypasses unnecessary active-pool identity indexing
+ *   because exact identity was already verified locally;
+ * - no new request ceiling, no extra production-V4 target, no scoring/risk/
+ *   Telegram threshold change, no V258 change, no Gecko change, no KV-key change.
+ */
+/**
  * V887 DIRECTIONAL TARGET -> EXISTING V254 EXACT-HISTORY PRIORITY:
  * - builds directly from deployed V886;
  * - preserves the confirmed V886 exact PoolId + token-side handoff;
@@ -7680,7 +7695,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V887";
+const VERSION = "V888";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -96476,6 +96491,17 @@ async function enrichCandidateWithProductionV4V772(
     candidatePoolIdsChecked: 0,
     matchingPoolIds: [],
     matchingSwapRows: 0,
+    exactPoolTargetedBackfillV888: {
+      eligible: false,
+      attempted: false,
+      poolId: null,
+      fromBlock: null,
+      toBlock: null,
+      returnedSwapRows: 0,
+      rpcProvider: null,
+      status: "NOT_ELIGIBLE_V888",
+      error: null
+    },
     externalRequestsUsed: 0,
     scannerBudgetConsumed: true,
     usdValueInferred: false,
@@ -96541,6 +96567,110 @@ async function enrichCandidateWithProductionV4V772(
 
   const activeByPoolIdV780 = new Map(active.map(row => [normalize(row?.poolId), row]));
 
+  /*
+   * V888 EXACT-POOL TARGETED SWAP HANDOFF
+   *
+   * The normal V772 path first discovers pools from an all-PoolManager 600-block
+   * Swap window. That is ideal for genuinely live pools, but V886/V887 proved a
+   * different case: the selected token can already have a VERIFIED exact PoolId
+   * and still miss the active set simply because that exact pool had no Swap in
+   * the last 600 blocks.
+   *
+   * Do not guess and do not weaken NO_BOT_OBSERVED_SWAPS. When exact identity is
+   * already verified, spend at most ONE existing production-V4 analysis request
+   * on that exact PoolId over the same 12,000-block recent window used by V254.
+   * Any returned rows are genuine bot-observed PoolManager Swap logs.
+   */
+  const exactIdentityV888 = candidate?.onChainPoolIdentityV153;
+  const exactPoolIdV888 = normalize(
+    exactIdentityV888?.poolId ||
+    exactIdentityV888?.pairAddress ||
+    ""
+  );
+  const exactPoolVerifiedV888 =
+    exactIdentityV888?.verified === true &&
+    /^0x[a-f0-9]{64}$/.test(String(exactPoolIdV888 || "")) &&
+    normalize(exactIdentityV888?.candidateAddress || token) === token;
+
+  let exactPoolBackfillRowsV888 = [];
+  let exactPoolBackfillMatchedV888 = false;
+
+  base.exactPoolTargetedBackfillV888 = {
+    eligible: exactPoolVerifiedV888 && !activeByPoolIdV780.has(exactPoolIdV888),
+    attempted: false,
+    poolId: exactPoolVerifiedV888 ? exactPoolIdV888 : null,
+    fromBlock: null,
+    toBlock: to,
+    returnedSwapRows: 0,
+    rpcProvider: rpcEndpoint.name,
+    status: exactPoolVerifiedV888
+      ? (activeByPoolIdV780.has(exactPoolIdV888)
+          ? "EXACT_POOL_ALREADY_PRESENT_IN_600_BLOCK_WINDOW_V888"
+          : "ELIGIBLE_EXACT_POOL_TARGETED_BACKFILL_V888")
+      : "VERIFIED_EXACT_POOL_REQUIRED_V888",
+    error: null
+  };
+
+  if (
+    base.exactPoolTargetedBackfillV888.eligible === true &&
+    budgetAvailable(budget, "analysis", 1)
+  ) {
+    const exactFromV888 = Math.max(
+      0,
+      to - VERIFIED_USD_COMPLETION_RECENT_BLOCKS_V254 + 1
+    );
+
+    base.exactPoolTargetedBackfillV888.fromBlock = exactFromV888;
+
+    if (
+      consumeBudget(
+        budget,
+        "analysis",
+        "RPC:V888_EXACT_POOL_TARGETED_SWAPS",
+        1
+      )
+    ) {
+      base.exactPoolTargetedBackfillV888.attempted = true;
+      base.externalRequestsUsed++;
+
+      const exactLogsV888 = await v4PoolLiveRpcCallV767(
+        rpcEndpoint.url,
+        "eth_getLogs",
+        [{
+          address: normalize(POOL_MANAGER),
+          fromBlock: `0x${exactFromV888.toString(16)}`,
+          toBlock: `0x${to.toString(16)}`,
+          topics: [SWAP_TOPIC, exactPoolIdV888]
+        }]
+      );
+
+      if (exactLogsV888?.ok === true) {
+        exactPoolBackfillRowsV888 =
+          (Array.isArray(exactLogsV888?.result) ? exactLogsV888.result : [])
+            .filter(log =>
+              normalize(log?.topics?.[0]) === normalize(SWAP_TOPIC) &&
+              normalize(log?.topics?.[1]) === exactPoolIdV888
+            );
+
+        exactPoolBackfillMatchedV888 = exactPoolBackfillRowsV888.length > 0;
+        base.exactPoolTargetedBackfillV888.returnedSwapRows =
+          exactPoolBackfillRowsV888.length;
+        base.exactPoolTargetedBackfillV888.status =
+          exactPoolBackfillMatchedV888
+            ? "EXACT_POOL_TARGETED_SWAPS_FOUND_V888"
+            : "EXACT_POOL_TARGETED_NO_SWAPS_IN_12000_BLOCK_WINDOW_V888";
+      } else {
+        base.exactPoolTargetedBackfillV888.status =
+          "EXACT_POOL_TARGETED_SWAP_QUERY_FAILED_V888";
+        base.exactPoolTargetedBackfillV888.error =
+          exactLogsV888?.error || "RPC_FAILED";
+      }
+    } else {
+      base.exactPoolTargetedBackfillV888.status =
+        "EXACT_POOL_TARGETED_REQUEST_BLOCKED_BY_EXISTING_RESERVE_V888";
+    }
+  }
+
   const registryTokenRowsV780 = [];
   for (const [key, value] of Object.entries(state?.poolRegistry || {})) {
     const poolId = normalize(value?.poolId || key);
@@ -96577,9 +96707,14 @@ async function enrichCandidateWithProductionV4V772(
   let initializeErrorV780=null;
 
   const needsIndexedInitializeV781 =
-    selected.length === 0;
+    selected.length === 0 &&
+    exactPoolBackfillMatchedV888 !== true;
 
-  let directMatchingIdsV781 = new Set();
+  let directMatchingIdsV781 = new Set(
+    exactPoolBackfillMatchedV888
+      ? [exactPoolIdV888]
+      : []
+  );
   let targetedInitCurrency0AttemptedV781=false;
   let targetedInitCurrency1AttemptedV781=false;
   let targetedInitCurrency0OkV781=false;
@@ -96744,15 +96879,33 @@ async function enrichCandidateWithProductionV4V772(
       busiestAdded:busiestAddedV780,
       freshestAdded:freshestAddedV780,
       totalSelected:selected.length,
-      strategy:"V779_TWO_BATCH_FALLBACK_ONLY_WHEN_EXACT_POOL_ALREADY_KNOWN_V783",
+      strategy: exactPoolBackfillMatchedV888
+        ? "V888_VERIFIED_EXACT_POOL_TARGETED_SWAP_BACKFILL"
+        : "V779_TWO_BATCH_FALLBACK_ONLY_WHEN_EXACT_POOL_ALREADY_KNOWN_V783",
       indexedInitializeV781:null
     };
-    base.candidatePoolIdsChecked=selected.length;
+    base.candidatePoolIdsChecked =
+      exactPoolBackfillMatchedV888
+        ? 1
+        : selected.length;
 
-    uni = await v772UniswapIdentifyPools(env,budget,selected,token);
-    base.externalRequestsUsed += safeNumber(uni?.externalRequestsUsed);
-    base.uniswap=uni;
-    matchingIds = new Set((uni?.matchingPools || []).map(r => normalize(r?.poolId)).filter(isBytes32HexV765));
+    if (exactPoolBackfillMatchedV888) {
+      uni = {
+        attempted:false,
+        ok:true,
+        matchingPools:[],
+        externalRequestsUsed:0,
+        error:null,
+        status:"SKIPPED_UNISWAP_IDENTITY_ALREADY_VERIFIED_V888"
+      };
+      base.uniswap = uni;
+      matchingIds = new Set([exactPoolIdV888]);
+    } else {
+      uni = await v772UniswapIdentifyPools(env,budget,selected,token);
+      base.externalRequestsUsed += safeNumber(uni?.externalRequestsUsed);
+      base.uniswap=uni;
+      matchingIds = new Set((uni?.matchingPools || []).map(r => normalize(r?.poolId)).filter(isBytes32HexV765));
+    }
   } else {
     base.poolSelectionV780={
       currentLiveVerifiedLaunchV780:currentLiveVerifiedLaunchV780===true,
@@ -96811,7 +96964,26 @@ async function enrichCandidateWithProductionV4V772(
     };
   }
 
-  const matchingRows = rows.filter(log => matchingIds.has(normalize(log?.topics?.[1])));
+  const matchingRowsRawV888 = [
+    ...rows.filter(log => matchingIds.has(normalize(log?.topics?.[1]))),
+    ...exactPoolBackfillRowsV888.filter(log =>
+      matchingIds.has(normalize(log?.topics?.[1]))
+    )
+  ];
+
+  const matchingRowsMapV888 = new Map();
+  for (const log of matchingRowsRawV888) {
+    const keyV888 = [
+      normalize(log?.transactionHash || ""),
+      normalize(log?.blockHash || ""),
+      String(log?.logIndex ?? ""),
+      normalize(log?.topics?.[1] || "")
+    ].join(":");
+    if (!matchingRowsMapV888.has(keyV888)) {
+      matchingRowsMapV888.set(keyV888, log);
+    }
+  }
+  const matchingRows = Array.from(matchingRowsMapV888.values());
   base.matchingSwapRows = matchingRows.length;
 
   if (!matchingRows.length) {
@@ -96929,7 +97101,11 @@ async function enrichCandidateWithProductionV4V772(
   return {
     ...base,
     applied: true,
-    status: needsIndexedInitializeV781 ? "PRODUCTION_V4_ACTIVITY_APPLIED_V799" : "PRODUCTION_V4_ACTIVITY_APPLIED_V772",
+    status: exactPoolBackfillMatchedV888
+      ? "PRODUCTION_V4_EXACT_POOL_TARGETED_SWAPS_APPLIED_V888"
+      : (needsIndexedInitializeV781
+          ? "PRODUCTION_V4_ACTIVITY_APPLIED_V799"
+          : "PRODUCTION_V4_ACTIVITY_APPLIED_V772"),
     opportunityAfter: safeNumber(candidate?.opportunity?.score),
     momentumAfter: safeNumber(candidate?.momentum?.score),
     confidenceAfter: safeNumber(candidate?.confidence?.score)
