@@ -1,4 +1,22 @@
 /**
+ * V897 SAFE READ-ONLY DIAGNOSTICS ROUTE:
+ * - builds directly from deployed V896;
+ * - adds authenticated GET /diagnostics-read for compact bot monitoring;
+ * - ZERO provider/RPC calls from the new route and ZERO state writes;
+ * - performs one normal KV/state read only;
+ * - closed by default: requires Cloudflare secret DIAGNOSTICS_READ_TOKEN and
+ *   Authorization: Bearer <token>; token is never accepted in a URL/query;
+ * - returns only an allow-listed compact snapshot: version/scheduler, last scan
+ *   budget, Gecko cooldown, V151/V254 status, V894 promotion, persisted V895/
+ *   V896 collector trace and last authoritative Telegram qualification result;
+ * - does NOT expose API/RPC/Telegram secrets, raw KV state, state key, full
+ *   candidate history, deployment controls, mutation routes, or write actions;
+ * - also exposes lightweight bot-side usage counters/projections only; it does
+ *   not claim to be Cloudflare billing/account usage;
+ * - existing scanner/scoring/risk/V258/V4/V254/Telegram logic and 48-request
+ *   hard ceiling are unchanged.
+ */
+/**
  * V896 LAST REAL V888 TARGETED-COLLECTOR ATTEMPT PERSISTENCE:
  * - builds directly from deployed V895;
  * - whenever the EXISTING V888 exact-PoolId targeted collector actually
@@ -7828,7 +7846,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V896";
+const VERSION = "V897";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -117385,6 +117403,7 @@ async function health(
       "/compact-state-v693",
       "/scan",
       "/state",
+      "/diagnostics-read",
       "/diagnostics",
       "/erc20-rpc",
       "/run-all",
@@ -165157,6 +165176,371 @@ function productionV4StatusTelegramV772(result) {
   ].join("\n");
 }
 
+
+/* =========================================================
+   V897 SAFE READ-ONLY DIAGNOSTICS ROUTE
+   ========================================================= */
+
+function diagnosticsReadAuthorisedV897(request, env) {
+  const expected = String(env?.DIAGNOSTICS_READ_TOKEN || "");
+  if (!expected) {
+    return {
+      ok: false,
+      status: 503,
+      reason: "DIAGNOSTICS_READ_TOKEN_NOT_CONFIGURED"
+    };
+  }
+
+  const auth = String(
+    request?.headers?.get("authorization") || ""
+  );
+
+  const prefix = "Bearer ";
+  if (!auth.startsWith(prefix)) {
+    return {
+      ok: false,
+      status: 401,
+      reason: "DIAGNOSTICS_AUTH_REQUIRED"
+    };
+  }
+
+  const supplied = auth.slice(prefix.length);
+
+  /*
+   * Length check first, then aggregate XOR. This avoids an obvious
+   * character-by-character early return without adding any dependency.
+   */
+  if (supplied.length !== expected.length) {
+    return {
+      ok: false,
+      status: 403,
+      reason: "DIAGNOSTICS_AUTH_DENIED"
+    };
+  }
+
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) {
+    diff |=
+      expected.charCodeAt(i) ^
+      supplied.charCodeAt(i);
+  }
+
+  return diff === 0
+    ? {ok:true, status:200, reason:"AUTHORISED"}
+    : {ok:false, status:403, reason:"DIAGNOSTICS_AUTH_DENIED"};
+}
+
+function compactCollectorTraceV897(row) {
+  if (!row || typeof row !== "object") return null;
+
+  return {
+    runtimeVersion: row.runtimeVersion || null,
+    recordedAt: row.recordedAt || null,
+    tokenAddress: normalize(row.tokenAddress) || null,
+    poolId: normalize(row.poolId) || null,
+    requestEligible: row.requestEligible === true,
+    requestAttempted: row.requestAttempted === true,
+    rpcProvider: row.rpcProvider || null,
+    rpcOk: row.rpcOk === true,
+    rpcError: row.rpcError || null,
+    rawRpcRows: safeNumber(row.rawRpcRows),
+    exactTopicRows: safeNumber(row.exactTopicRows),
+    registryPresent: row.registryPresent === true,
+    registryTokenMatch: row.registryTokenMatch === true,
+    decodedVerifiedRows: safeNumber(row.decodedVerifiedRows),
+    decodedCandidateMatchedRows:
+      safeNumber(row.decodedCandidateMatchedRows),
+    decodedExactUsdRows:
+      safeNumber(row.decodedExactUsdRows),
+    v179LedgerRowsForTokenPool:
+      safeNumber(row.v179LedgerRowsForTokenPool),
+    targetedRowsFedToV179CollectorInThisPath:
+      row.targetedRowsFedToV179CollectorInThisPath === true,
+    classification: row.classification || null
+  };
+}
+
+function compactV254V897(row) {
+  if (!row || typeof row !== "object") return null;
+
+  const relevant =
+    Array.isArray(row.relevantCandidates)
+      ? row.relevantCandidates.slice(0, 3).map(candidate => ({
+          address: normalize(candidate?.address) || null,
+          symbol: candidate?.symbol || null,
+          observedV4Swaps:
+            safeNumber(candidate?.observedV4Swaps),
+          exactPoolAvailable:
+            candidate?.exactPoolAvailable === true,
+          riskAcceptable:
+            candidate?.riskAcceptable === true,
+          needsEnrichment:
+            candidate?.needsEnrichment === true,
+          promotionV894: candidate?.verifiedExactPoolSwapPromotionV894
+            ? {
+                applied:
+                  candidate.verifiedExactPoolSwapPromotionV894
+                    .applied === true,
+                reason:
+                  candidate.verifiedExactPoolSwapPromotionV894
+                    .reason || null,
+                exactPoolId:
+                  normalize(
+                    candidate.verifiedExactPoolSwapPromotionV894
+                      .exactPoolId
+                  ) || null,
+                exactLedgerRows:
+                  safeNumber(
+                    candidate.verifiedExactPoolSwapPromotionV894
+                      .exactLedgerRows
+                  ),
+                promotedObservedSwaps:
+                  safeNumber(
+                    candidate.verifiedExactPoolSwapPromotionV894
+                      .promotedObservedSwaps
+                  )
+              }
+            : null
+        }))
+      : [];
+
+  return {
+    runtimeVersion: row.runtimeVersion || null,
+    recordedAt: row.recordedAt || null,
+    candidatesEligible: safeNumber(row.candidatesEligible),
+    attempted: safeNumber(row.attempted),
+    recovered: safeNumber(row.recovered),
+    status: row.status || null,
+    relevantCandidates: relevant
+  };
+}
+
+async function diagnosticsReadV897(request, env) {
+  const auth = diagnosticsReadAuthorisedV897(request, env);
+
+  if (!auth.ok) {
+    return jsonResponse(
+      {
+        ok: false,
+        version: VERSION,
+        error: auth.reason,
+        timestamp: now()
+      },
+      auth.status
+    );
+  }
+
+  const loaded = await readState(env);
+  const state = loaded?.state || newState();
+
+  const directional =
+    state?.directionalCompletionDiagnosticV882 || null;
+
+  const lastV254 =
+    state?.qualificationAuditV663?.lastV254RelevantStatusV805 ||
+    state?.qualificationAuditV663?.lastV254LiveStatusV804 ||
+    null;
+
+  const postRecovery =
+    state?.qualificationAuditV663?.lastV254PostRecoveryScoreV809 ||
+    null;
+
+  const lastRealCollector =
+    state?.lastRealTargetedCollectorAttemptV896 || null;
+
+  const currentCollector =
+    state?.productionV4EnrichmentV772
+      ?.targetedCollectorHandoffDiagnosticV895 || null;
+
+  const scheduledCount =
+    safeNumber(state?.scheduler?.scheduledRunCount);
+
+  const lastScheduledRunAt =
+    state?.scheduler?.lastScheduledRunAt || null;
+
+  const ageMs =
+    lastScheduledRunAt
+      ? Math.max(0, Date.now() - safeNumber(lastScheduledRunAt))
+      : null;
+
+  /*
+   * Bot-side operational counters only. These are intentionally labelled as
+   * estimates and are NOT Cloudflare account/billing usage.
+   */
+  const estimatedScansPerDay =
+    ageMs !== null &&
+    ageMs <= 15 * 60 * 1000
+      ? 288
+      : null;
+
+  return jsonResponse(
+    {
+      ok: true,
+      agent: "Robinhood Chain Meme Hunter",
+      version: VERSION,
+      timestamp: now(),
+
+      access: {
+        readOnly: true,
+        providerRequestsFromThisRoute: 0,
+        stateWritesFromThisRoute: 0,
+        rawStateExposed: false,
+        secretsExposed: false
+      },
+
+      persistence: {
+        configured: loaded?.persistent === true,
+        readError: loaded?.error || null
+      },
+
+      scheduler: {
+        scheduledRunCount: scheduledCount,
+        lastScheduledRunAt,
+        lastScheduledSuccessAt:
+          state?.scheduler?.lastScheduledSuccessAt || null,
+        lastScheduledStatus:
+          state?.scheduler?.lastScheduledStatus || null,
+        minutesSinceScheduledRun:
+          ageMs === null
+            ? null
+            : Math.round((ageMs / 60000) * 10) / 10
+      },
+
+      scan: {
+        lastScannedBlock:
+          state?.lastScannedBlock ?? null,
+        lastLiveScannedBlock:
+          state?.lastLiveScannedBlock ?? null,
+        directionalRecordedAt:
+          directional?.recordedAt || null,
+        budget: directional?.budget
+          ? {
+              totalUsed:
+                safeNumber(directional.budget.totalUsed),
+              totalLimit:
+                safeNumber(directional.budget.totalLimit),
+              analysisUsed:
+                safeNumber(directional.budget.analysisUsed),
+              analysisLimit:
+                safeNumber(directional.budget.analysisLimit),
+              notificationUsed:
+                safeNumber(directional.budget.notificationUsed),
+              notificationLimit:
+                safeNumber(directional.budget.notificationLimit)
+            }
+          : null
+      },
+
+      providers: {
+        gecko: directional?.gecko
+          ? {
+              lastStatus:
+                directional.gecko.lastStatus || null,
+              cooldownUntil:
+                directional.gecko.cooldownUntil || null,
+              last429At:
+                directional.gecko.last429At || null,
+              lastSuccessAt:
+                directional.gecko.lastSuccessAt || null,
+              consecutive429s:
+                safeNumber(directional.gecko.consecutive429s),
+              freshUsedThisScan:
+                safeNumber(directional.gecko.freshUsedThisScan),
+              freshPerScanLimit:
+                safeNumber(directional.gecko.freshPerScanLimit)
+            }
+          : null
+      },
+
+      directional: {
+        v151: directional?.v151
+          ? {
+              address:
+                normalize(directional.v151.address) || null,
+              symbol:
+                directional.v151.symbol || null,
+              selectionMode:
+                directional.v151.selectionMode || null,
+              attempted:
+                directional.v151.attempted === true,
+              verifiedAnyWindow:
+                directional.v151.verifiedAnyWindow === true,
+              status:
+                directional.v151.status || null,
+              poolAddress:
+                normalize(directional.v151.poolAddress) || null,
+              targetTokenSide:
+                directional.v151.targetTokenSide || null,
+              exactHistoryPriorityV887:
+                directional.v151.exactHistoryPriorityV887 || null
+            }
+          : null,
+        handoffGateCounts:
+          directional?.handoffGatesV883?.counts || null
+      },
+
+      v254: compactV254V897(lastV254),
+
+      collector: {
+        lastRealAttempt:
+          compactCollectorTraceV897(lastRealCollector),
+        currentScan:
+          compactCollectorTraceV897(currentCollector)
+      },
+
+      telegramQualification: postRecovery
+        ? {
+            runtimeVersion:
+              postRecovery.runtimeVersion || null,
+            recordedAt:
+              postRecovery.recordedAt || null,
+            address:
+              normalize(postRecovery.address) || null,
+            verifiedFlow:
+              postRecovery.verifiedFlow === true,
+            verifiedRecordCount:
+              safeNumber(postRecovery.verifiedRecordCount),
+            verifiedPoolCount:
+              safeNumber(postRecovery.verifiedPoolCount),
+            momentumScore:
+              safeNumber(postRecovery.momentumScore),
+            momentumLabel:
+              postRecovery.momentumLabel || null,
+            opportunityScore:
+              safeNumber(postRecovery.opportunityScore),
+            confidenceScore:
+              safeNumber(postRecovery.confidenceScore),
+            confidenceLabel:
+              postRecovery.confidenceLabel || null,
+            qualifiesTelegram:
+              postRecovery.qualifiesTelegram === true
+          }
+        : null,
+
+      usage: {
+        scope:
+          "BOT_SIDE_ESTIMATE_NOT_CLOUDFLARE_BILLING",
+        scheduledRunsObserved:
+          scheduledCount,
+        estimatedScansPerDay,
+        lastScanRequestBudget:
+          directional?.budget
+            ? {
+                used:
+                  safeNumber(directional.budget.totalUsed),
+                limit:
+                  safeNumber(directional.budget.totalLimit)
+              }
+            : null,
+        cloudflareBillingUsage:
+          "CHECK_CLOUDFLARE_DASHBOARD"
+      }
+    },
+    200
+  );
+}
+
+
 async function handleRequest(
   request,
   env
@@ -165204,7 +165588,7 @@ async function handleRequest(
             "GET, POST, OPTIONS",
 
           "access-control-allow-headers":
-            "content-type"
+            "content-type, authorization"
         }
       }
     );
@@ -166573,6 +166957,16 @@ async function handleRequest(
 
   if (
     path ===
+      "/diagnostics-read"
+  ) {
+    return await diagnosticsReadV897(
+      request,
+      env
+    );
+  }
+
+  if (
+    path ===
     "/diagnostics"
   ) {
     return jsonResponse(
@@ -166696,7 +167090,8 @@ async function handleRequest(
         "/rpc-test",
         "/scan",
         "/state",
-        "/diagnostics",
+        "/diagnostics-read",
+      "/diagnostics",
         "/erc20-rpc",
         "/run-all",
         "/test-telegram",
