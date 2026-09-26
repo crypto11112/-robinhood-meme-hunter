@@ -1,4 +1,20 @@
 /**
+ * V889 UNUSED FLOW SLOT -> PRIORITISED V254 HANDOFF:
+ * - builds directly from deployed V888;
+ * - preserves V888 exact-PoolId targeted swap recovery, V887 exact-history
+ *   priority, V258 protection, Gecko safeguards and the 48-request hard ceiling;
+ * - when the V175/V151 directional stage releases its unused FLOW completion
+ *   slot and the already-eligible single V254 candidate is the V887 exact-history
+ *   priority target, transfers ONE existing protected completion request to that
+ *   candidate's first exact-history provider request;
+ * - this may cross the exhausted analysis sub-budget exactly like the existing
+ *   protected completion-slot mechanism, but NEVER crosses the pre-Telegram
+ *   global boundary, never raises the 48-request ceiling and never adds a second
+ *   V254 candidate/request slot;
+ * - all V254 validity/risk/observed-swap/exact-pool/needs-USD gates remain
+ *   mandatory; zero scoring, threshold, V4-routing, V258, Gecko or KV changes.
+ */
+/**
  * V888 EXACT-POOL TARGETED SWAP HANDOFF:
  * - builds directly from deployed V887;
  * - preserves V886 exact PoolId/side handoff and V887 V254 priority;
@@ -7695,7 +7711,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V888";
+const VERSION = "V889";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -17598,6 +17614,148 @@ function releaseUnusedFlowEvidenceReserveV822(
 }
 
 
+
+/* =========================================================
+   V889 UNUSED FLOW SLOT -> PRIORITISED V254 HANDOFF
+   =========================================================
+   The FLOW completion slot was already protected inside the existing budget.
+   When V151 cannot spend it and releases it unused, V889 may transfer exactly
+   ONE such slot to the SAME scan's already-eligible V887-prioritised V254
+   candidate. The real pre-Telegram/global boundary remains authoritative.
+*/
+function ensureV889V254TransferredFlowSlot(budget) {
+  if (!budget?.analysis) return null;
+  if (
+    !budget.analysis.v254TransferredFlowSlotV889 ||
+    typeof budget.analysis.v254TransferredFlowSlotV889 !== "object"
+  ) {
+    budget.analysis.v254TransferredFlowSlotV889 = {
+      enabled: true,
+      active: false,
+      reservedRequests: 0,
+      targetAddress: null,
+      exactPoolId: null,
+      armedAt: null,
+      consumed: false,
+      consumedAt: null,
+      consumedType: null,
+      armReason: null,
+      blockedByGlobalBoundary: 0,
+      releaseSource: null
+    };
+  }
+  return budget.analysis.v254TransferredFlowSlotV889;
+}
+
+function armV889V254TransferredFlowSlot(
+  budget,
+  candidate,
+  flowReleaseResult
+) {
+  const slot = ensureV889V254TransferredFlowSlot(budget);
+  if (!slot || slot.active === true || slot.consumed === true) return slot;
+
+  const token = normalize(candidate?.address);
+  const priority = candidate?.directionalExactHistoryPriorityV887;
+  const releasedFlow = Math.max(
+    0,
+    safeNumber(flowReleaseResult?.released)
+  );
+
+  if (
+    releasedFlow <= 0 ||
+    priority?.requested !== true ||
+    !isAddress(token)
+  ) {
+    slot.armReason =
+      releasedFlow <= 0
+        ? "NO_UNUSED_FLOW_SLOT_TO_TRANSFER_V889"
+        : priority?.requested !== true
+          ? "V887_EXACT_HISTORY_PRIORITY_NOT_REQUESTED_V889"
+          : "INVALID_V254_TARGET_ADDRESS_V889";
+    return slot;
+  }
+
+  const preTelegramLimit = preTelegramGlobalLimitV728(budget);
+  if (safeNumber(budget?.totalUsed) + 1 > preTelegramLimit) {
+    slot.blockedByGlobalBoundary =
+      safeNumber(slot.blockedByGlobalBoundary) + 1;
+    slot.armReason = "PRE_TELEGRAM_GLOBAL_HEADROOM_UNAVAILABLE_V889";
+    return slot;
+  }
+
+  slot.active = true;
+  slot.reservedRequests = 1;
+  slot.targetAddress = token;
+  slot.exactPoolId = normalize(priority?.exactPoolId) || null;
+  slot.armedAt = Date.now();
+  slot.armReason = "UNUSED_FLOW_SLOT_TRANSFERRED_TO_V887_V254_TARGET_V889";
+  slot.releaseSource =
+    flowReleaseResult?.reason || "V151_DIRECTIONAL_STAGE";
+  return slot;
+}
+
+function consumeV889V254TransferredFlowSlot(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  const slot = budget?.analysis?.v254TransferredFlowSlotV889;
+
+  if (
+    phase !== "analysis" ||
+    slot?.active !== true ||
+    slot?.consumed === true ||
+    !isProtectedV254FirstRequestTypeV807(type)
+  ) {
+    return null;
+  }
+
+  const needed = Math.max(1, safeNumber(amount));
+  if (
+    needed > 1 ||
+    needed > Math.max(0, safeNumber(slot?.reservedRequests))
+  ) {
+    return null;
+  }
+
+  /*
+   * Deliberately do NOT call budgetAvailable("analysis") here: the whole point
+   * is to preserve the already-reserved completion slot after the ordinary
+   * analysis sub-budget is exhausted. The real pre-Telegram/global boundary is
+   * still enforced explicitly.
+   */
+  const preTelegramLimit = preTelegramGlobalLimitV728(budget);
+  if (safeNumber(budget?.totalUsed) + needed > preTelegramLimit) {
+    slot.blockedByGlobalBoundary =
+      safeNumber(slot.blockedByGlobalBoundary) + 1;
+    slot.lastBlockedAt = Date.now();
+    slot.lastBlockedType = String(type || "UNKNOWN");
+    budget.skipped.push({
+      phase,
+      type,
+      amount: needed,
+      reason: "V889_TRANSFERRED_FLOW_SLOT_GLOBAL_BOUNDARY_BLOCKED",
+      targetAddress: slot.targetAddress || null,
+      exactPoolId: slot.exactPoolId || null
+    });
+    return false;
+  }
+
+  budget.totalUsed += needed;
+  budget.analysis.used += needed;
+
+  slot.active = false;
+  slot.reservedRequests = 0;
+  slot.consumed = true;
+  slot.consumedAt = Date.now();
+  slot.consumedType = String(type || "UNKNOWN");
+
+  return true;
+}
+
+
 /* =========================================================
    V807 V254 FIRST-REQUEST RESERVATION / OWNERSHIP HANDOFF
    =========================================================
@@ -17989,6 +18147,14 @@ function consumeBudget(
     );
   if (v254FirstRequestConsumeV807 !== null) {
     return v254FirstRequestConsumeV807;
+  }
+
+  const v889TransferredFlowConsume =
+    consumeV889V254TransferredFlowSlot(
+      budget, phase, type, amount
+    );
+  if (v889TransferredFlowConsume !== null) {
+    return v889TransferredFlowConsume;
   }
 
   const v254FirstRequestReserveDecisionV807Result =
@@ -104730,6 +104896,19 @@ for (
         VERIFIED_USD_COMPLETION_MAX_CANDIDATES_V254
       );
 
+  /*
+   * V889: the FLOW slot was just released after V151. If the first candidate
+   * already passed every existing V254 gate AND is the V887 exact-history
+   * priority target, transfer exactly one unused protected completion request
+   * to its first V254 provider call.
+   */
+  const v889TransferredFlowSlot =
+    armV889V254TransferredFlowSlot(
+      budget,
+      verifiedUsdCompletionCandidatesV254[0] || null,
+      evidenceCompletionFlowReleaseV822
+    );
+
   const verifiedUsdCompletionV254 = {
     enabled: true,
     sourceVersion:
@@ -104750,6 +104929,12 @@ for (
     candidatesEligible:
       verifiedUsdCompletionCandidatesV254
         .length,
+    transferredFlowSlotV889: {
+      ...(v889TransferredFlowSlot || {}),
+      active: v889TransferredFlowSlot?.active === true,
+      consumed: v889TransferredFlowSlot?.consumed === true,
+      reservedRequests: safeNumber(v889TransferredFlowSlot?.reservedRequests)
+    },
     attempted: 0,
     recovered: 0,
     results: []
@@ -104943,6 +105128,17 @@ for (
           true,
         directionalExactHistoryPriorityV887:
           candidate?.directionalExactHistoryPriorityV887 || null,
+        transferredFlowSlotV889: {
+          ...(budget?.analysis?.v254TransferredFlowSlotV889 || {}),
+          active:
+            budget?.analysis?.v254TransferredFlowSlotV889?.active === true,
+          consumed:
+            budget?.analysis?.v254TransferredFlowSlotV889?.consumed === true,
+          reservedRequests:
+            safeNumber(
+              budget?.analysis?.v254TransferredFlowSlotV889?.reservedRequests
+            )
+        },
         historyProviderPathV263:
           completion
             ?.history
@@ -105019,6 +105215,8 @@ for (
       candidatesEligible: safeNumber(verifiedUsdCompletionV254?.candidatesEligible),
       attempted: safeNumber(verifiedUsdCompletionV254?.attempted),
       recovered: safeNumber(verifiedUsdCompletionV254?.recovered),
+      transferredFlowSlotV889:
+        verifiedUsdCompletionV254?.transferredFlowSlotV889 || null,
       relevantCandidates: relevantCandidatesV805,
       resultCount: Array.isArray(verifiedUsdCompletionV254?.results)
         ? verifiedUsdCompletionV254.results.length
