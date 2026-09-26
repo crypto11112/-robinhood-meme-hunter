@@ -1,4 +1,20 @@
 /**
+ * V896 LAST REAL V888 TARGETED-COLLECTOR ATTEMPT PERSISTENCE:
+ * - builds directly from deployed V895;
+ * - whenever the EXISTING V888 exact-PoolId targeted collector actually
+ *   attempts its request, persist the completed V895 diagnostic trace as the
+ *   last real collector attempt;
+ * - later scans with PoolId NONE, requestAttempted=false, or Selection NONE do
+ *   NOT overwrite that saved real-attempt trace;
+ * - /evidenceaudit prefers the persisted real attempt while also showing the
+ *   current scan collector state when it differs;
+ * - ZERO new provider requests and ZERO scanner/scoring/qualification changes;
+ * - this adds only one tiny diagnostic state object when a real V888 targeted
+ *   request occurs; no new KV namespace/key and no high-volume logging;
+ * - 48-request ceiling, V258, V254 gates, V4 selection, Gecko protections,
+ *   risk/scoring/Telegram thresholds remain unchanged.
+ */
+/**
  * V895 V888 TARGETED-COLLECTOR HANDOFF DIAGNOSTIC — READ ONLY:
  * - builds directly from deployed V894;
  * - adds ZERO provider requests and ZERO scanner/scoring/qualification changes;
@@ -7812,7 +7828,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V895";
+const VERSION = "V896";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -97315,6 +97331,29 @@ async function enrichCandidateWithProductionV4V772(
     }
   }
 
+  /*
+   * V896: retain the LAST REAL targeted-collector attempt. This deliberately
+   * runs only after the existing V888 request branch has completed, so the
+   * stored trace contains the final RPC/decoder/V179 classification.
+   *
+   * A later scan that never attempted the exact-pool request must not erase it.
+   */
+  if (
+    base?.targetedCollectorHandoffDiagnosticV895?.requestAttempted === true
+  ) {
+    state.lastRealTargetedCollectorAttemptV896 = {
+      ...base.targetedCollectorHandoffDiagnosticV895,
+      recordedAt: Date.now(),
+      runtimeVersion: VERSION,
+      v888Status:
+        base?.exactPoolTargetedBackfillV888?.status || null,
+      v888ReturnedSwapRows:
+        safeNumber(
+          base?.exactPoolTargetedBackfillV888?.returnedSwapRows
+        )
+    };
+  }
+
   const registryTokenRowsV780 = [];
   for (const [key, value] of Object.entries(state?.poolRegistry || {})) {
     const poolId = normalize(value?.poolId || key);
@@ -128231,6 +128270,10 @@ function evidenceAuditSnapshotV727(state) {
     directionalCompletionDiagnosticV882:
       state?.directionalCompletionDiagnosticV882 || null,
     targetedCollectorHandoffDiagnosticV895:
+      state?.lastRealTargetedCollectorAttemptV896 ||
+      state?.productionV4EnrichmentV772
+        ?.targetedCollectorHandoffDiagnosticV895 || null,
+    currentTargetedCollectorHandoffDiagnosticV895:
       state?.productionV4EnrichmentV772
         ?.targetedCollectorHandoffDiagnosticV895 || null,
     observedSwapHandoffDiagnosticV892:
@@ -128468,10 +128511,17 @@ function evidenceAuditTelegramMessageV727(state) {
 
 
   const collector895 = d?.targetedCollectorHandoffDiagnosticV895 || null;
+  const currentCollector895 =
+    d?.currentTargetedCollectorHandoffDiagnosticV895 || null;
   if (collector895) {
+    const isPersistedRealAttemptV896 =
+      collector895?.requestAttempted === true &&
+      Number.isFinite(Number(collector895?.recordedAt));
+
     lines.push(
       "",
-      `🧪 <b>V888 exact-pool collector handoff trace — V895</b>`,
+      `🧪 <b>V888 exact-pool collector handoff trace — V895/V896</b>`,
+      `Trace source: <b>${isPersistedRealAttemptV896 ? "LAST REAL ATTEMPT (PERSISTED V896)" : "CURRENT SCAN"}</b>${isPersistedRealAttemptV896 ? ` · ${escapeHtml(new Date(Number(collector895.recordedAt)).toISOString())}` : ""}`,
       `Token: <code>${escapeHtml(collector895.tokenAddress || "NONE")}</code>`,
       `PoolId: <code>${escapeHtml(collector895.poolId || "NONE")}</code>`,
       `Request eligible / attempted: <b>${collector895.requestEligible ? "YES" : "NO"} / ${collector895.requestAttempted ? "YES" : "NO"}</b> · provider ${escapeHtml(collector895.rpcProvider || "NONE")}`,
@@ -128484,6 +128534,16 @@ function evidenceAuditTelegramMessageV727(state) {
     );
     if (collector895.rpcError) {
       lines.push(`RPC error: <code>${escapeHtml(collector895.rpcError)}</code>`);
+    }
+
+    if (
+      isPersistedRealAttemptV896 &&
+      currentCollector895 &&
+      currentCollector895?.requestAttempted !== true
+    ) {
+      lines.push(
+        `Current scan collector: attempted <b>NO</b> · PoolId <code>${escapeHtml(currentCollector895.poolId || "NONE")}</code> · ${escapeHtml(currentCollector895.classification || "UNVERIFIED")}`
+      );
     }
   }
 
