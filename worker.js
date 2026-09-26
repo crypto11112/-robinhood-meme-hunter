@@ -1,4 +1,17 @@
 /**
+ * V892 OBSERVED-SWAP HANDOFF DIAGNOSTIC — READ ONLY:
+ * - builds directly from live V891;
+ * - adds ZERO provider requests and ZERO scan/qualification/scoring changes;
+ * - /evidenceaudit now traces the current V151 exact-pool target against:
+ *     1) production-V4 selected target,
+ *     2) persisted V179/V212 verified-flow ledger,
+ *     3) exact PoolId membership in that ledger,
+ *     4) latest retained candidate activity.swaps seen by V254,
+ *     5) latest NO_BOT_OBSERVED_SWAPS classification;
+ * - classifies the exact divergence without promoting evidence or changing any
+ *   V254 gate, V4 collector, request budget, Gecko handling, V258 or Telegram.
+ */
+/**
  * V891 GECKO-COOLDOWN EXACT-POOL PRIORITY:
  * - builds directly from deployed V890;
  * - only while Gecko directional completion is actively deferred by the real
@@ -7739,7 +7752,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V891";
+const VERSION = "V892";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -127195,6 +127208,204 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   };
 }
 
+
+/* =========================================================
+   V892 OBSERVED-SWAP HANDOFF DIAGNOSTIC — READ ONLY
+   ========================================================= */
+function observedSwapHandoffDiagnosticV892(state) {
+  const directional =
+    state?.directionalCompletionDiagnosticV882 || null;
+  const routing =
+    state?.productionV4RoutingDiagnosticV821 ||
+    state?.productionV4RoutingDiagnosticV819 ||
+    state?.productionV4RoutingDiagnosticV818 ||
+    state?.productionV4RoutingDiagnosticV817 ||
+    null;
+
+  const token =
+    normalize(directional?.v151?.address || "");
+  const priority =
+    directional?.v151?.exactHistoryPriorityV887 || null;
+
+  const exactPoolId =
+    normalize(
+      priority?.exactPoolId ||
+      directional?.v151?.poolAddress ||
+      ""
+    );
+
+  const rows =
+    Array.isArray(state?.qualificationAuditV663?.records)
+      ? state.qualificationAuditV663.records
+      : [];
+
+  const retained =
+    isAddress(token)
+      ? rows.find(row => normalize(row?.address) === token) || null
+      : null;
+
+  const evidence =
+    retained?.evidenceCompletionAuditV727 || null;
+
+  const observedSwapsAtAudit =
+    safeNumber(evidence?.finalEvidence?.observedSwaps);
+
+  const noSwap =
+    evidence?.noBotObservedSwapsV812 || null;
+
+  /*
+   * candidateVerifiedOnChainFlowV212() is purely local/state-derived and makes
+   * no provider request. A minimal candidate object is sufficient because the
+   * function keys the verified V179 ledger by candidate address.
+   */
+  const verifiedFlow =
+    isAddress(token)
+      ? candidateVerifiedOnChainFlowV212({ address: token }, state)
+      : null;
+
+  const flowPoolIds =
+    Array.isArray(verifiedFlow?.poolIds)
+      ? [...new Set(
+          verifiedFlow.poolIds
+            .map(normalize)
+            .filter(poolId => /^0x[a-f0-9]{64}$/.test(String(poolId || "")))
+        )]
+      : [];
+
+  const ledger =
+    isAddress(token)
+      ? onChainDirectionalStoreV179(state)?.[token]
+      : null;
+
+  const ledgerRows =
+    Array.isArray(ledger?.records)
+      ? ledger.records.filter(
+          row => normalize(row?.candidateAddress) === token
+        )
+      : [];
+
+  const exactPoolLedgerRows =
+    /^0x[a-f0-9]{64}$/.test(String(exactPoolId || ""))
+      ? ledgerRows.filter(
+          row => normalize(row?.poolId) === exactPoolId
+        )
+      : [];
+
+  const exactPoolVerifiedUsdRows =
+    exactPoolLedgerRows.filter(
+      row =>
+        row?.exactUsdVerified === true &&
+        Number.isFinite(Number(row?.exactUsdAmount)) &&
+        Number(row?.exactUsdAmount) > 0 &&
+        (row?.side === "buy" || row?.side === "sell")
+    );
+
+  const exactPoolInVerifiedFlow =
+    /^0x[a-f0-9]{64}$/.test(String(exactPoolId || "")) &&
+    flowPoolIds.includes(exactPoolId);
+
+  const productionSelectedAddress =
+    normalize(routing?.selectedTarget || "");
+
+  const sameV151AndProductionTarget =
+    isAddress(token) &&
+    token === productionSelectedAddress;
+
+  const v254Last =
+    state?.qualificationAuditV663?.lastV254RelevantStatusV805 ||
+    state?.qualificationAuditV663?.lastV254LiveStatusV804 ||
+    null;
+
+  const v254RelevantCandidate =
+    Array.isArray(v254Last?.relevantCandidates)
+      ? v254Last.relevantCandidates.find(
+          row => normalize(row?.address) === token
+        ) || null
+      : null;
+
+  let classification =
+    "INSUFFICIENT_CURRENT_TARGET_EVIDENCE_V892";
+
+  if (!isAddress(token)) {
+    classification = "NO_CURRENT_V151_TARGET_V892";
+  }
+  else if (!sameV151AndProductionTarget) {
+    classification = "V151_AND_PRODUCTION_V4_TARGET_DIVERGED_V892";
+  }
+  else if (verifiedFlow?.verified !== true) {
+    classification = "NO_VERIFIED_V179_V212_FLOW_FOR_TARGET_V892";
+  }
+  else if (!exactPoolInVerifiedFlow) {
+    classification = "VERIFIED_FLOW_EXISTS_BUT_NOT_FOR_CURRENT_EXACT_POOL_V892";
+  }
+  else if (observedSwapsAtAudit <= 0) {
+    classification = "VERIFIED_EXACT_POOL_FLOW_NOT_PROMOTED_TO_ACTIVITY_SWAPS_V892";
+  }
+  else if (v254RelevantCandidate && safeNumber(v254RelevantCandidate?.observedV4Swaps) <= 0) {
+    classification = "ACTIVITY_SWAPS_PRESENT_BUT_V254_SNAPSHOT_STALE_OR_PREMERGE_V892";
+  }
+  else {
+    classification = "OBSERVED_SWAP_HANDOFF_PRESENT_V892";
+  }
+
+  return {
+    version: "V892",
+    runtimeVersion: VERSION,
+    diagnosticOnly: true,
+    providerRequestsAdded: 0,
+    stateWritesAdded: 0,
+    scoringChanged: false,
+    qualificationChanged: false,
+    token: token || null,
+    symbol:
+      directional?.v151?.symbol ||
+      retained?.symbol ||
+      null,
+    v151SelectionMode:
+      directional?.v151?.selectionMode || null,
+    exactHistoryPriorityRequested:
+      priority?.requested === true,
+    exactPoolId:
+      /^0x[a-f0-9]{64}$/.test(String(exactPoolId || ""))
+        ? exactPoolId
+        : null,
+    productionV4SelectedAddress:
+      productionSelectedAddress || null,
+    sameV151AndProductionTarget,
+    retainedQualificationRowFound:
+      Boolean(retained),
+    observedSwapsAtAudit,
+    noBotObservedSwapsApplicable:
+      noSwap?.applicable === true,
+    noBotObservedSwapsReason:
+      noSwap?.reason || null,
+    verifiedFlow: {
+      verified: verifiedFlow?.verified === true,
+      recordCount: safeNumber(verifiedFlow?.recordCount),
+      poolCount: flowPoolIds.length,
+      poolIds: flowPoolIds.slice(0, 12),
+      exactPoolMatched: exactPoolInVerifiedFlow
+    },
+    persistedLedger: {
+      candidateRows: ledgerRows.length,
+      exactPoolRows: exactPoolLedgerRows.length,
+      exactPoolVerifiedUsdRows: exactPoolVerifiedUsdRows.length
+    },
+    lastV254Snapshot: v254RelevantCandidate
+      ? {
+          recordedAt: v254Last?.recordedAt || null,
+          runtimeVersion: v254Last?.runtimeVersion || null,
+          observedV4Swaps: safeNumber(v254RelevantCandidate?.observedV4Swaps),
+          exactPoolAvailable: v254RelevantCandidate?.exactPoolAvailable === true,
+          riskAcceptable: v254RelevantCandidate?.riskAcceptable === true,
+          needsEnrichment: v254RelevantCandidate?.needsEnrichment === true
+        }
+      : null,
+    classification
+  };
+}
+
+
 function evidenceAuditSnapshotV727(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
@@ -127386,6 +127597,8 @@ function evidenceAuditSnapshotV727(state) {
       state?.productionV4RoutingDiagnosticV817 || null,
     directionalCompletionDiagnosticV882:
       state?.directionalCompletionDiagnosticV882 || null,
+    observedSwapHandoffDiagnosticV892:
+      observedSwapHandoffDiagnosticV892(state),
     interpretation: {
       noEvidenceIsPromoted: true,
       noProviderRequests: true,
@@ -127584,6 +127797,35 @@ function evidenceAuditTelegramMessageV727(state) {
   }
   if (!safeNumber(noSwapV812.sampledRows)) {
     lines.push("• Forward-only V812 classification is building; existing historical rows are not guessed/backfilled.");
+  }
+
+
+  const swapHandoffV892 = d?.observedSwapHandoffDiagnosticV892 || null;
+  if (swapHandoffV892) {
+    const vf892 = swapHandoffV892?.verifiedFlow || {};
+    const pl892 = swapHandoffV892?.persistedLedger || {};
+    const v254892 = swapHandoffV892?.lastV254Snapshot || null;
+    lines.push(
+      "",
+      `🧬 <b>Observed-swap evidence handoff trace — V892</b>`,
+      `Target: <code>${escapeHtml(swapHandoffV892.token || "NONE")}</code> ${escapeHtml(swapHandoffV892.symbol || "")}`,
+      `V151 mode: <b>${escapeHtml(swapHandoffV892.v151SelectionMode || "NONE")}</b> · V887 priority ${swapHandoffV892.exactHistoryPriorityRequested ? "YES" : "NO"}`,
+      `Exact PoolId: <code>${escapeHtml(swapHandoffV892.exactPoolId || "NONE")}</code>`,
+      `V151 / production-V4 same target: <b>${swapHandoffV892.sameV151AndProductionTarget ? "YES" : "NO"}</b>`,
+      `Candidate activity.swaps at retained audit: <b>${fmt(swapHandoffV892.observedSwapsAtAudit)}</b> · no-swap classifier: <b>${escapeHtml(swapHandoffV892.noBotObservedSwapsReason || "NONE")}</b>`,
+      `Verified V179/V212 flow: <b>${vf892.verified ? "YES" : "NO"}</b> · records <b>${fmt(vf892.recordCount)}</b> · pools <b>${fmt(vf892.poolCount)}</b> · exact PoolId in flow <b>${vf892.exactPoolMatched ? "YES" : "NO"}</b>`,
+      `Persisted ledger — candidate rows <b>${fmt(pl892.candidateRows)}</b> · exact-pool rows <b>${fmt(pl892.exactPoolRows)}</b> · exact-pool verified-USD rows <b>${fmt(pl892.exactPoolVerifiedUsdRows)}</b>`
+    );
+    if (v254892) {
+      lines.push(
+        `Last V254 view — swaps <b>${fmt(v254892.observedV4Swaps)}</b> · exactPool ${v254892.exactPoolAvailable ? "YES" : "NO"} · risk ${v254892.riskAcceptable ? "OK" : "NO"} · needsUSD ${v254892.needsEnrichment ? "YES" : "NO"}`
+      );
+    } else {
+      lines.push("Last V254 view — <b>NO MATCHING CURRENT SNAPSHOT</b>");
+    }
+    lines.push(
+      `Diagnosis: <b>${escapeHtml(swapHandoffV892.classification || "UNVERIFIED")}</b>`
+    );
   }
 
   const routingV817 = d?.productionV4RoutingDiagnosticV817 || null;
