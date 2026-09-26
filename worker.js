@@ -1,5 +1,15 @@
 /**
- * Robinhood Chain Meme Hunter — V876
+ * Robinhood Chain Meme Hunter — V877
+ *
+ * V877 V258 BLOCK-TIMESTAMP FAILURE TRACE:
+ * - builds directly from deployed V876 and preserves the V876 provider-routing fix;
+ * - adds forward-only diagnostic detail for remaining V258 block timestamp failures;
+ * - records selected provider, verified launch block, request attempt/use, provider routing state,
+ *   compact error text and a normalized failure class in the existing evidence audit;
+ * - /evidenceaudit now summarizes V258 failure classes and providers so the next fix is based on
+ *   the dominant live failure rather than another routing guess;
+ * - diagnostic only: no scoring, Telegram qualification, launch-evidence rules, request ceilings,
+ *   KV keys, holder/risk logic, V4 routing or provider request count changes.
  *
  * V876 V258 BLOCK-TIMESTAMP ROUTING FIX:
  * - preserves V875 rescue-starvation fairness exactly;
@@ -7609,7 +7619,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V876";
+const VERSION = "V877";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -11253,6 +11263,17 @@ async function reservesLensLiquidityDiagnosticV441(
         "ANALYSIS_BUDGET_UNAVAILABLE_V441"
     };
   }
+
+  const providerRoutingV877 = {
+    configured: configuredProvidersV876.map(row => row.name),
+    usable: Array.isArray(routedProvidersV876?.usable)
+      ? routedProvidersV876.usable.map(row => row?.name || null).filter(Boolean)
+      : [],
+    cooling: Array.isArray(routedProvidersV876?.cooling)
+      ? routedProvidersV876.cooling.map(row => row?.name || null).filter(Boolean)
+      : [],
+    selected: provider?.name || null
+  };
 
   const before =
     safeNumber(
@@ -90513,6 +90534,23 @@ function verifiedLaunchTelemetryCandidatesV258(
 }
 
 
+function classifyBlockTimestampFailureV877(status, errorText = null) {
+  const statusText = String(status || "").toUpperCase();
+  const error = String(errorText || "").toUpperCase();
+
+  if (statusText === "VERIFIED_BLOCK_TIMESTAMP_V258") return "VERIFIED";
+  if (statusText.includes("BUDGET")) return "BUDGET_UNAVAILABLE";
+  if (statusText.includes("PROVIDER_UNAVAILABLE")) return "PROVIDER_UNAVAILABLE";
+  if (statusText.includes("UNVERIFIED")) return "NULL_OR_UNVERIFIED_TIMESTAMP";
+  if (statusText.includes("INVALID")) return "INVALID_TIMESTAMP";
+  if (error.includes("429") || error.includes("RATE") || error.includes("TOO MANY")) return "HTTP_429_OR_RATE_LIMIT";
+  if (error.includes("TIMEOUT") || error.includes("ABORT")) return "TIMEOUT";
+  if (error.includes("HTTP")) return "HTTP_ERROR";
+  if (error.includes("RPC") || error.includes("JSON-RPC") || error.includes("JSONRPC")) return "RPC_ERROR";
+  if (statusText === "BLOCK_TIMESTAMP_FETCH_FAILED") return "FETCH_FAILED_OTHER";
+  return statusText || "UNKNOWN";
+}
+
 async function verifiedLaunchBlockTimestampV258(
   env,
   budget,
@@ -90535,7 +90573,11 @@ async function verifiedLaunchBlockTimestampV258(
     launchTime: null,
     launchTimestampMs: null,
     externalRequestsUsed: 0,
-    status: null
+    status: null,
+    failureClassV877: null,
+    requestIssuedV877: false,
+    providerRoutingV877: null,
+    errorV877: null
   };
 
   if (
@@ -90614,6 +90656,7 @@ async function verifiedLaunchBlockTimestampV258(
     return {
       ...base,
       status: "BLOCK_TIMESTAMP_PROVIDER_UNAVAILABLE_V876",
+      failureClassV877: "PROVIDER_UNAVAILABLE",
       providerRoutingV876: {
         configured:
           configuredProvidersV876.map(row => row.name),
@@ -90621,6 +90664,15 @@ async function verifiedLaunchBlockTimestampV258(
           Array.isArray(routedProvidersV876?.cooling)
             ? routedProvidersV876.cooling.map(row => row?.name || null).filter(Boolean)
             : []
+      },
+      providerRoutingV877: {
+        configured: configuredProvidersV876.map(row => row.name),
+        usable: Array.isArray(routedProvidersV876?.usable)
+          ? routedProvidersV876.usable.map(row => row?.name || null).filter(Boolean)
+          : [],
+        cooling: Array.isArray(routedProvidersV876?.cooling)
+          ? routedProvidersV876.cooling.map(row => row?.name || null).filter(Boolean)
+          : []
       }
     };
   }
@@ -90701,7 +90753,10 @@ async function verifiedLaunchBlockTimestampV258(
         externalRequestsUsed:
           used,
         status:
-          "BLOCK_TIMESTAMP_UNVERIFIED"
+          "BLOCK_TIMESTAMP_UNVERIFIED",
+        requestIssuedV877: used > 0,
+        providerRoutingV877,
+        failureClassV877: "NULL_OR_UNVERIFIED_TIMESTAMP"
       };
     }
 
@@ -90726,7 +90781,10 @@ async function verifiedLaunchBlockTimestampV258(
         externalRequestsUsed:
           used,
         status:
-          "BLOCK_TIMESTAMP_INVALID"
+          "BLOCK_TIMESTAMP_INVALID",
+        requestIssuedV877: used > 0,
+        providerRoutingV877,
+        failureClassV877: "INVALID_TIMESTAMP"
       };
     }
 
@@ -90746,7 +90804,10 @@ async function verifiedLaunchBlockTimestampV258(
       externalRequestsUsed:
         used,
       status:
-        "VERIFIED_BLOCK_TIMESTAMP_V258"
+        "VERIFIED_BLOCK_TIMESTAMP_V258",
+      requestIssuedV877: used > 0,
+      providerRoutingV877,
+      failureClassV877: "VERIFIED"
     };
   }
 
@@ -90771,6 +90832,16 @@ async function verifiedLaunchBlockTimestampV258(
         "BLOCK_TIMESTAMP_FETCH_FAILED",
       routingFixVersion:
         "V876",
+      requestIssuedV877:
+        safeNumber(budget?.totalUsed) > before,
+      providerRoutingV877,
+      failureClassV877:
+        classifyBlockTimestampFailureV877(
+          "BLOCK_TIMESTAMP_FETCH_FAILED",
+          errorString(error)
+        ),
+      errorV877:
+        String(errorString(error) || "").slice(0, 240) || null,
       error:
         errorString(
           error
@@ -125764,6 +125835,23 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
       recovered: v258Row?.recovered === true,
       status: v258Row?.status || null,
       externalRequestsUsed: safeNumber(v258Row?.externalRequestsUsed),
+      blockTimestampV877: v258Row?.blockTimestampRecovery
+        ? {
+            blockNumber: safeNumber(v258Row?.blockTimestampRecovery?.blockNumber) || null,
+            provider: v258Row?.blockTimestampRecovery?.provider || null,
+            status: v258Row?.blockTimestampRecovery?.status || null,
+            attempted: v258Row?.blockTimestampRecovery?.attempted === true,
+            requestIssued: v258Row?.blockTimestampRecovery?.requestIssuedV877 === true,
+            externalRequestsUsed: safeNumber(v258Row?.blockTimestampRecovery?.externalRequestsUsed),
+            failureClass: v258Row?.blockTimestampRecovery?.failureClassV877 ||
+              classifyBlockTimestampFailureV877(
+                v258Row?.blockTimestampRecovery?.status,
+                v258Row?.blockTimestampRecovery?.errorV877 || v258Row?.blockTimestampRecovery?.error
+              ),
+            error: String(v258Row?.blockTimestampRecovery?.errorV877 || v258Row?.blockTimestampRecovery?.error || "").slice(0, 240) || null,
+            routing: v258Row?.blockTimestampRecovery?.providerRoutingV877 || null
+          }
+        : null,
       candidatePoolSize: safeNumber(v258?.candidatePoolSizeV259),
       candidatesEligibleThisScan: safeNumber(v258?.candidatesEligible)
     },
@@ -125845,6 +125933,10 @@ function evidenceAuditSnapshotV727(state) {
   };
   const blockerCounts = {};
   const statusCounts = {};
+  const v258FailureClassCountsV877 = {};
+  const v258ProviderCountsV877 = {};
+  const v258BlockStatusCountsV877 = {};
+  const v258ErrorSamplesV877 = [];
   const bridgeStatusCounts = {};
   const reserveConsumedTypeCounts = {};
   const noBotSwapReasonCountsV812 = {};
@@ -125938,6 +126030,22 @@ function evidenceAuditSnapshotV727(state) {
         if (x.selected === true) c.v258Selected++;
         if (x.attempted === true) c.v258Attempted++;
         if (x.recovered === true) c.v258Recovered++;
+        const btV877 = x?.blockTimestampV877 || null;
+        if (btV877) {
+          bump(v258FailureClassCountsV877, btV877?.failureClass || "UNKNOWN");
+          bump(v258ProviderCountsV877, btV877?.provider || "NO_PROVIDER");
+          bump(v258BlockStatusCountsV877, btV877?.status || "NO_BLOCK_TIMESTAMP_STATUS");
+          if (btV877?.error && v258ErrorSamplesV877.length < 5) {
+            v258ErrorSamplesV877.push({
+              address: d?.address || null,
+              blockNumber: safeNumber(btV877?.blockNumber) || null,
+              provider: btV877?.provider || null,
+              failureClass: btV877?.failureClass || null,
+              status: btV877?.status || null,
+              error: String(btV877.error).slice(0, 180)
+            });
+          }
+        }
       } else {
         if (x.eligible === true) c[`${lane}Eligible`]++;
         if (x.selected === true) c[`${lane}Selected`]++;
@@ -125959,6 +126067,12 @@ function evidenceAuditSnapshotV727(state) {
     counts: c,
     topGateBlockers: top(blockerCounts),
     topSelectedLaneStatuses: top(statusCounts),
+    v258FailureDiagnosticV877: {
+      failureClasses: top(v258FailureClassCountsV877),
+      providers: top(v258ProviderCountsV877),
+      blockTimestampStatuses: top(v258BlockStatusCountsV877),
+      errorSamples: v258ErrorSamplesV877
+    },
     riskGateDiagnosticV871: {
       sampledRejectedRows: riskRejectedRowsV871,
       verifiedRejectedRows: riskRejectedVerifiedV871,
@@ -126103,6 +126217,24 @@ function evidenceAuditTelegramMessageV727(state) {
     "⏱ <b>Launch-age completion V258</b>",
     `Needed <b>${fmt(c.v258Needed)}</b> · selected <b>${fmt(c.v258Selected)}</b> · attempted <b>${fmt(c.v258Attempted)}</b> · recovered <b>${fmt(c.v258Recovered)}</b>`
   );
+  const v258DiagV877 = d?.v258FailureDiagnosticV877 || {};
+  const v258FailureRowsV877 = Array.isArray(v258DiagV877?.failureClasses) ? v258DiagV877.failureClasses : [];
+  const v258ProviderRowsV877 = Array.isArray(v258DiagV877?.providers) ? v258DiagV877.providers : [];
+  const v258StatusRowsV877 = Array.isArray(v258DiagV877?.blockTimestampStatuses) ? v258DiagV877.blockTimestampStatuses : [];
+  lines.push(
+    "",
+    "🧭 <b>V258 block-timestamp failure trace — V877</b>"
+  );
+  if (!v258FailureRowsV877.length && !v258ProviderRowsV877.length && !v258StatusRowsV877.length) {
+    lines.push("• Forward-only V877 trace is building; older V876 failures are not guessed/backfilled.");
+  } else {
+    for (const [cls,count] of v258FailureRowsV877.slice(0,6)) lines.push(`• Failure ${escapeHtml(cls)}: <b>${fmt(count)}</b>`);
+    for (const [provider,count] of v258ProviderRowsV877.slice(0,5)) lines.push(`• Provider ${escapeHtml(provider)}: <b>${fmt(count)}</b>`);
+    for (const [status,count] of v258StatusRowsV877.slice(0,5)) lines.push(`• Status ${escapeHtml(status)}: <b>${fmt(count)}</b>`);
+    for (const sample of Array.isArray(v258DiagV877?.errorSamples) ? v258DiagV877.errorSamples.slice(0,3) : []) {
+      lines.push(`• Sample ${escapeHtml(sample?.provider || "NO_PROVIDER")} block ${fmt(sample?.blockNumber)} · ${escapeHtml(sample?.failureClass || sample?.status || "UNKNOWN")} · ${escapeHtml(sample?.error || "NO_ERROR_TEXT")}`);
+    }
+  }
   const riskGateV871 = d?.riskGateDiagnosticV871 || {};
   lines.push(
     "",
