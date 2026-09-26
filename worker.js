@@ -1,6 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V880
+ * Robinhood Chain Meme Hunter — V881
  *
+ * V881 HOTFIX: fixes /evidenceaudit ReferenceError caused by V880 reading an out-of-scope live scan context. Scanner/budget behaviour unchanged.
  * V880 REQUEST-HEADROOM + V258 PROTECTED TIMESTAMP SLOT:
  * - raises autonomous scanner hard request ceiling from 42 to 48 after Cloudflare capacity upgrade;
  * - raises base analysis ceiling from 21 to 27 so the six added requests are usable by evidence completion rather than only discovery;
@@ -7630,7 +7631,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V880";
+const VERSION = "V881";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -126339,10 +126340,11 @@ function evidenceAuditTelegramMessageV727(state) {
     "⏱ <b>Launch-age completion V258</b>",
     `Needed <b>${fmt(c.v258Needed)}</b> · selected <b>${fmt(c.v258Selected)}</b> · attempted <b>${fmt(c.v258Attempted)}</b> · recovered <b>${fmt(c.v258Recovered)}</b>`
   );
-  const v258ReserveV880 = context?.budget?.analysis?.v258TimestampReserveV880 || {};
-  lines.push(
-    `V880 protected timestamp slot: consumed <b>${fmt(v258ReserveV880.consumedRequests)}</b> · remaining <b>${fmt(v258ReserveV880.reservedRequests)}</b> · lower-priority blocked <b>${fmt(v258ReserveV880.lowerPriorityRequestsBlocked)}</b>`
-  );
+  // V881 HOTFIX: /evidenceaudit is a read-only state formatter and has no live scan
+  // `context` object. V880 incorrectly referenced context?.budget here, which caused
+  // the Telegram audit command to throw even though the scanner itself was healthy.
+  // The live V880 request-reserve telemetry remains available in /health; do not
+  // fabricate/backfill it into the persisted evidence audit.
   const v258DiagV877 = d?.v258FailureDiagnosticV877 || {};
   const v258FailureRowsV877 = Array.isArray(v258DiagV877?.failureClasses) ? v258DiagV877.failureClasses : [];
   const v258ProviderRowsV877 = Array.isArray(v258DiagV877?.providers) ? v258DiagV877.providers : [];
