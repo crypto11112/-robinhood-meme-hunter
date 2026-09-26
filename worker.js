@@ -1,5 +1,12 @@
 /**
- * Robinhood Chain Meme Hunter — V875
+ * Robinhood Chain Meme Hunter — V876
+ *
+ * V876 V258 BLOCK-TIMESTAMP ROUTING FIX:
+ * - preserves V875 rescue-starvation fairness exactly;
+ * - fixes V258 launch-age timestamp recovery selecting Alchemy whenever an Alchemy key exists;
+ * - V258 now chooses ONE currently usable analysis RPC using the bot's existing provider-health / cooldown ordering (Validation Cloud / Chainstack / public / Alchemy as configured);
+ * - still spends at most ONE eth_getBlockByNumber request for the protected launch-age completion attempt;
+ * - adds provider-selection diagnostics without changing scoring, qualification, Telegram thresholds, KV keys, risk logic, request ceilings or launch-evidence rules.
  *
  * V875 RESCUE STARVATION FAIRNESS FIX:
  * - builds directly from deployed V874;
@@ -7602,7 +7609,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V875";
+const VERSION = "V876";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -90563,20 +90570,60 @@ async function verifiedLaunchBlockTimestampV258(
     };
   }
 
-  const provider =
+  /*
+   * V876: the inherited V258 path hard-wired this lookup to Alchemy whenever
+   * an Alchemy key existed. That bypassed the bot's normal analysis-provider
+   * health/cooldown routing and caused repeated BLOCK_TIMESTAMP_FETCH_FAILED
+   * outcomes even while other RPC providers were healthy.
+   *
+   * Select exactly ONE usable provider using the existing routing order so
+   * the protected V258 completion slot still costs at most one request.
+   */
+  const validationCloudUrlV876 =
+    validationCloudRpcUrlV627(env);
+
+  const chainstackUrlV876 =
+    chainstackRpcUrlV431(env);
+
+  const alchemyUrlV876 =
     env?.ALCHEMY_API_KEY
-      ? {
-          name: "ALCHEMY",
-          url:
-            ALCHEMY_BASE +
-            env.ALCHEMY_API_KEY
-        }
-      : {
-          name:
-            "ROBINHOOD_PUBLIC_RPC",
-          url:
-            PUBLIC_RPC
-        };
+      ? ALCHEMY_BASE + env.ALCHEMY_API_KEY
+      : null;
+
+  const configuredProvidersV876 = [
+    {name: "VALIDATION_CLOUD", url: validationCloudUrlV876},
+    {name: "CHAINSTACK", url: chainstackUrlV876},
+    {name: "ROBINHOOD_PUBLIC_RPC", url: PUBLIC_RPC},
+    {name: "ALCHEMY", url: alchemyUrlV876}
+  ].filter(row => Boolean(row?.url));
+
+  const routedProvidersV876 =
+    orderAnalysisProvidersV424(
+      budget,
+      configuredProvidersV876,
+      "eth_getBlockByNumber"
+    );
+
+  const provider =
+    Array.isArray(routedProvidersV876?.usable) &&
+    routedProvidersV876.usable.length
+      ? routedProvidersV876.usable[0]
+      : null;
+
+  if (!provider?.url) {
+    return {
+      ...base,
+      status: "BLOCK_TIMESTAMP_PROVIDER_UNAVAILABLE_V876",
+      providerRoutingV876: {
+        configured:
+          configuredProvidersV876.map(row => row.name),
+        cooling:
+          Array.isArray(routedProvidersV876?.cooling)
+            ? routedProvidersV876.cooling.map(row => row?.name || null).filter(Boolean)
+            : []
+      }
+    };
+  }
 
   const before =
     safeNumber(
@@ -90722,6 +90769,8 @@ async function verifiedLaunchBlockTimestampV258(
         ),
       status:
         "BLOCK_TIMESTAMP_FETCH_FAILED",
+      routingFixVersion:
+        "V876",
       error:
         errorString(
           error
