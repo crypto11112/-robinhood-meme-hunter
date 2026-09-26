@@ -1,4 +1,26 @@
 /**
+ * V894 VERIFIED EXACT-POOL SWAP-EVIDENCE PROMOTION:
+ * - builds directly from deployed V893;
+ * - fixes the V892-proven local handoff bug where the SAME candidate and SAME
+ *   verified exact V4 PoolId can have deduplicated V179 exact-USD swap records
+ *   while candidate.activity.swaps remains zero before V254 eligibility;
+ * - before V254 filtering only, promotes already-persisted swap evidence into
+ *   candidate.activity.swaps when ALL strict proofs agree:
+ *     candidate address matches,
+ *     onChainPoolIdentityV153 is verified with a 32-byte PoolId,
+ *     state.poolRegistry for that PoolId contains the same token as currency0/1,
+ *     V179 rows match the same candidate AND same PoolId,
+ *     exactUsdVerified=true, side=buy/sell, positive exactUsdAmount,
+ *     and the observation is recent (<= 1 hour);
+ * - V179 already deduplicates stored trades by tradeKey, so no estimated or
+ *   synthetic swap count is created;
+ * - never borrows flow from another pool/token and never promotes a 20-byte
+ *   provider market pair;
+ * - zero provider requests, no request-budget increase, no V254 gate removal,
+ *   and no changes to risk/scoring/Telegram thresholds, V258, V4 routing,
+ *   Gecko cooldown enforcement or KV schema.
+ */
+/**
  * V893 VERIFIED-FLOW CANONICAL V4 POOL ALIGNMENT:
  * - builds directly from deployed V892;
  * - fixes the V892-proven case where candidate-matched verified V179/V212 flow
@@ -7772,7 +7794,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V893";
+const VERSION = "V894";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -105186,6 +105208,213 @@ for (
     };
   }
 
+
+  /*
+   * V894: strict local evidence promotion before V254 eligibility.
+   * This does NOT create evidence. It only carries already-deduplicated,
+   * candidate+PoolId-matched V179 swap records into the activity field that
+   * V254 has always required.
+   */
+  function promoteVerifiedExactPoolObservedSwapsV894(candidate) {
+    const token = normalize(candidate?.address);
+    const identity = candidate?.onChainPoolIdentityV153;
+    const poolId = normalize(
+      identity?.poolId ||
+      identity?.pairAddress ||
+      ""
+    );
+
+    const result = {
+      version: "V894",
+      evaluated: true,
+      applied: false,
+      reason: null,
+      token: isAddress(token) ? token : null,
+      exactPoolId:
+        /^0x[a-f0-9]{64}$/.test(String(poolId || ""))
+          ? poolId
+          : null,
+      priorActivitySwaps: safeNumber(candidate?.activity?.swaps),
+      promotedObservedSwaps: 0,
+      exactLedgerRows: 0,
+      registryVerified: false,
+      recencyMs: 60 * 60 * 1000,
+      zeroProviderRequests: true,
+      crossPoolEvidenceAllowed: false
+    };
+
+    if (!isAddress(token)) {
+      result.reason = "INVALID_CANDIDATE_ADDRESS_V894";
+      return result;
+    }
+
+    if (
+      identity?.verified !== true ||
+      !/^0x[a-f0-9]{64}$/.test(String(poolId || ""))
+    ) {
+      result.reason = "VERIFIED_EXACT_POOL_REQUIRED_V894";
+      return result;
+    }
+
+    const registry = state?.poolRegistry?.[poolId] || null;
+    const currency0 = normalize(
+      registry?.currency0 ||
+      registry?.tokenA ||
+      ""
+    );
+    const currency1 = normalize(
+      registry?.currency1 ||
+      registry?.tokenB ||
+      ""
+    );
+
+    const candidateIndex =
+      currency0 === token
+        ? 0
+        : currency1 === token
+          ? 1
+          : null;
+
+    if (
+      candidateIndex === null ||
+      currency0 === currency1 ||
+      !(
+        (isAddress(currency0) || currency0 === ZERO) &&
+        (isAddress(currency1) || currency1 === ZERO)
+      )
+    ) {
+      result.reason = "POOL_REGISTRY_TOKEN_MISMATCH_V894";
+      return result;
+    }
+
+    result.registryVerified = true;
+    result.candidateCurrencyIndex = candidateIndex;
+    result.currency0 = currency0;
+    result.currency1 = currency1;
+
+    const ledger =
+      onChainDirectionalStoreV179(state)?.[token];
+
+    const rows =
+      Array.isArray(ledger?.records)
+        ? ledger.records
+        : [];
+
+    const now = Date.now();
+    const cutoff = now - result.recencyMs;
+
+    const exactRows = rows.filter(row => {
+      const observedAt = safeNumber(row?.observedAt);
+      return (
+        normalize(row?.candidateAddress) === token &&
+        normalize(row?.poolId) === poolId &&
+        row?.exactUsdVerified === true &&
+        (row?.side === "buy" || row?.side === "sell") &&
+        Number.isFinite(Number(row?.exactUsdAmount)) &&
+        Number(row?.exactUsdAmount) > 0 &&
+        observedAt >= cutoff &&
+        observedAt <= now
+      );
+    });
+
+    result.exactLedgerRows = exactRows.length;
+
+    if (!exactRows.length) {
+      result.reason = "NO_RECENT_VERIFIED_EXACT_POOL_SWAP_ROWS_V894";
+      return result;
+    }
+
+    /*
+     * V179 storage already de-duplicates trades by tradeKey. Do not infer a
+     * count from volume or provider aggregates: the row count is the number of
+     * already-observed exact-pool swap records.
+     */
+    const verifiedObservedSwaps = exactRows.length;
+    const existingSwaps = safeNumber(candidate?.activity?.swaps);
+
+    candidate.activity =
+      candidate?.activity &&
+      typeof candidate.activity === "object"
+        ? candidate.activity
+        : {};
+
+    candidate.activity.swaps =
+      Math.max(existingSwaps, verifiedObservedSwaps);
+
+    const latestObservedAt = exactRows.reduce(
+      (max, row) =>
+        Math.max(max, safeNumber(row?.observedAt)),
+      0
+    );
+
+    const buyRows =
+      exactRows.filter(row => row?.side === "buy").length;
+    const sellRows =
+      exactRows.filter(row => row?.side === "sell").length;
+
+    candidate.verifiedExactPoolSwapPromotionV894 = {
+      ...result,
+      applied: true,
+      reason:
+        "VERIFIED_EXACT_POOL_V179_SWAPS_PROMOTED_TO_ACTIVITY_V894",
+      promotedObservedSwaps: candidate.activity.swaps,
+      promotedFromExactRows: verifiedObservedSwaps,
+      latestObservedAt,
+      buyRows,
+      sellRows,
+      source:
+        "ONCHAIN_DIRECTIONAL_V179_EXACT_POOL_EXACT_USD_V894"
+    };
+
+    return candidate.verifiedExactPoolSwapPromotionV894;
+  }
+
+  const verifiedExactPoolSwapPromotionV894 = {
+    enabled: true,
+    evaluated: 0,
+    applied: 0,
+    promotedRows: 0,
+    results: []
+  };
+
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const promotion =
+      promoteVerifiedExactPoolObservedSwapsV894(candidate);
+
+    if (!candidate?.verifiedExactPoolSwapPromotionV894) {
+      candidate.verifiedExactPoolSwapPromotionV894 = promotion;
+    }
+
+    verifiedExactPoolSwapPromotionV894.evaluated++;
+
+    if (promotion?.applied === true) {
+      verifiedExactPoolSwapPromotionV894.applied++;
+      verifiedExactPoolSwapPromotionV894.promotedRows +=
+        safeNumber(promotion?.promotedFromExactRows);
+    }
+
+    if (
+      promotion?.applied === true ||
+      (
+        candidate?.directionalExactHistoryPriorityV887?.requested === true
+      )
+    ) {
+      verifiedExactPoolSwapPromotionV894.results.push({
+        address: normalize(candidate?.address) || null,
+        symbol: candidate?.symbol || null,
+        applied: promotion?.applied === true,
+        reason: promotion?.reason || null,
+        exactPoolId: promotion?.exactPoolId || null,
+        priorActivitySwaps: safeNumber(promotion?.priorActivitySwaps),
+        finalActivitySwaps: safeNumber(candidate?.activity?.swaps),
+        exactLedgerRows: safeNumber(promotion?.exactLedgerRows),
+        registryVerified: promotion?.registryVerified === true,
+        latestObservedAt: promotion?.latestObservedAt || null
+      });
+    }
+  }
+
+
   /*
    * V801: one protected completion target per scan, still using the exact same
    * V254 request envelope.  The old ordering required Telegram qualification
@@ -105221,6 +105450,8 @@ for (
           alreadyTelegramQualified: qualifiesTelegram(candidate),
           validERC20: candidate?.validERC20 === true,
           observedV4Swaps: safeNumber(candidate?.activity?.swaps),
+          verifiedExactPoolSwapPromotionV894:
+            candidate?.verifiedExactPoolSwapPromotionV894 || null,
           riskAcceptable: riskAcceptableV801,
           exactPoolAvailable: exactPoolAvailableV801,
           needsEnrichment:
@@ -105297,6 +105528,7 @@ for (
     recentLookbackBlocks:
       VERIFIED_USD_COMPLETION_RECENT_BLOCKS_V254,
     requestCeilingsUnchanged: true,
+    verifiedExactPoolSwapPromotionV894,
     candidatesEligible:
       verifiedUsdCompletionCandidatesV254
         .length,
@@ -105568,6 +105800,8 @@ for (
           symbol: candidate?.symbol || null,
           validERC20: candidate?.validERC20 === true,
           observedV4Swaps: safeNumber(candidate?.activity?.swaps),
+          verifiedExactPoolSwapPromotionV894:
+            candidate?.verifiedExactPoolSwapPromotionV894 || null,
           liveV4Swaps: safeNumber(candidate?.liveMomentumActivityV152?.swaps),
           riskAcceptable: e?.riskAcceptable === true,
           exactPoolAvailable: e?.exactPoolAvailable === true,
@@ -105588,6 +105822,8 @@ for (
       recovered: safeNumber(verifiedUsdCompletionV254?.recovered),
       transferredFlowSlotV889:
         verifiedUsdCompletionV254?.transferredFlowSlotV889 || null,
+      verifiedExactPoolSwapPromotionV894:
+        verifiedUsdCompletionV254?.verifiedExactPoolSwapPromotionV894 || null,
       relevantCandidates: relevantCandidatesV805,
       resultCount: Array.isArray(verifiedUsdCompletionV254?.results)
         ? verifiedUsdCompletionV254.results.length
@@ -127607,6 +127843,12 @@ function observedSwapHandoffDiagnosticV892(state) {
       noSwap?.applicable === true,
     noBotObservedSwapsReason:
       noSwap?.reason || null,
+    verifiedExactPoolSwapPromotionV894:
+      retained?.v801VerifiedUsdPrequalEligibility
+        ?.verifiedExactPoolSwapPromotionV894 ||
+      retained?.verifiedExactPoolSwapPromotionV894 ||
+      v254RelevantCandidate?.verifiedExactPoolSwapPromotionV894 ||
+      null,
     verifiedFlow: {
       verified: verifiedFlow?.verified === true,
       recordCount: safeNumber(verifiedFlow?.recordCount),
@@ -128042,6 +128284,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `V893 canonical alignment: <b>${swapHandoffV892?.canonicalPoolAlignmentV893?.applied === true ? "APPLIED" : "NO"}</b> · ${escapeHtml(swapHandoffV892?.canonicalPoolAlignmentV893?.reason || "NONE")} · ${escapeHtml(swapHandoffV892?.canonicalPoolAlignmentV893?.originalPoolId || "NONE")} → ${escapeHtml(swapHandoffV892?.canonicalPoolAlignmentV893?.selectedPoolId || "NONE")}`,
       `V151 / production-V4 same target: <b>${swapHandoffV892.sameV151AndProductionTarget ? "YES" : "NO"}</b>`,
       `Candidate activity.swaps at retained audit: <b>${fmt(swapHandoffV892.observedSwapsAtAudit)}</b> · no-swap classifier: <b>${escapeHtml(swapHandoffV892.noBotObservedSwapsReason || "NONE")}</b>`,
+      `V894 swap promotion: <b>${swapHandoffV892?.verifiedExactPoolSwapPromotionV894?.applied === true ? "APPLIED" : "NO"}</b> · ${escapeHtml(swapHandoffV892?.verifiedExactPoolSwapPromotionV894?.reason || "NONE")} · exact rows ${fmt(swapHandoffV892?.verifiedExactPoolSwapPromotionV894?.exactLedgerRows)} · final swaps ${fmt(swapHandoffV892?.verifiedExactPoolSwapPromotionV894?.promotedObservedSwaps)}`,
       `Verified V179/V212 flow: <b>${vf892.verified ? "YES" : "NO"}</b> · records <b>${fmt(vf892.recordCount)}</b> · pools <b>${fmt(vf892.poolCount)}</b> · exact PoolId in flow <b>${vf892.exactPoolMatched ? "YES" : "NO"}</b>`,
       `Persisted ledger — candidate rows <b>${fmt(pl892.candidateRows)}</b> · exact-pool rows <b>${fmt(pl892.exactPoolRows)}</b> · exact-pool verified-USD rows <b>${fmt(pl892.exactPoolVerifiedUsdRows)}</b>`
     );
