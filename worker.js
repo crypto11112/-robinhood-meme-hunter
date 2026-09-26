@@ -1,4 +1,19 @@
 /**
+ * V887 DIRECTIONAL TARGET -> EXISTING V254 EXACT-HISTORY PRIORITY:
+ * - builds directly from deployed V886;
+ * - preserves the confirmed V886 exact PoolId + token-side handoff;
+ * - when V151 reaches Gecko defer/spacing with a verified exact PoolId but no
+ *   candidate-matched verified on-chain USD for that exact pool, marks that
+ *   SAME candidate for first priority inside the EXISTING one-candidate V254
+ *   exact-history completion lane later in the same scan;
+ * - all existing V254 eligibility gates remain mandatory: valid ERC20,
+ *   observed V4 swaps, acceptable risk, exact pool identity and needs enrichment;
+ * - adds ZERO V254 candidates and ZERO provider requests; only deterministic
+ *   ordering among already-eligible V254 candidates changes;
+ * - no threshold, scoring, V4 routing, V258, Gecko cooldown/spacing, KV,
+ *   Telegram or 48-request-ceiling changes.
+ */
+/**
  * V886 VERIFIED EXACT-POOL DIRECTIONAL HANDOFF + SPACING FALLBACK:
  * - builds directly from deployed V885;
  * - preserves V885's verified exact-pool identity normalisation and adds a strict recovery bridge from the already-proven production V4 handoff only when exactly one PoolId can be resolved against the canonical pool registry for the same token;
@@ -7665,7 +7680,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V886";
+const VERSION = "V887";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -104154,6 +104169,57 @@ for (
             state
           );
 
+    /*
+     * V887: if this exact directional target is deferred by Gecko and already
+     * has a verified exact PoolId, but that PoolId is not yet represented in
+     * candidate-matched verified on-chain USD, make it first priority inside
+     * the EXISTING V254 exact-history lane later in the same scan.
+     * Existing V254 gates still decide whether it is actually eligible.
+     */
+    const v887DeferredDirectionalStatus = String(enrichment?.status || "");
+    const v887ExactPoolId = normalize(
+      enrichment?.directionalIdentityV885?.exactPoolId ||
+      enrichment?.v886?.exactPoolId ||
+      directionalTarget?.onChainPoolIdentityV153?.poolId ||
+      directionalTarget?.onChainPoolIdentityV153?.pairAddress ||
+      ""
+    );
+    const v887Flow = candidateVerifiedOnChainFlowV212(
+      directionalTarget,
+      state
+    );
+    const v887FlowPoolIds = Array.isArray(v887Flow?.poolIds)
+      ? v887Flow.poolIds.map(normalize).filter(Boolean)
+      : [];
+    const v887ExactFlowMatched =
+      /^0x[a-f0-9]{64}$/.test(String(v887ExactPoolId || "")) &&
+      v887FlowPoolIds.includes(v887ExactPoolId);
+
+    const v887NeedsExactHistoryPriority =
+      (
+        v887DeferredDirectionalStatus === "GECKO_DIRECTIONAL_DEFER_ACTIVE_429_COOLDOWN_V824" ||
+        v887DeferredDirectionalStatus === "GECKOTERMINAL_FRESH_SPACING" ||
+        v887DeferredDirectionalStatus === "GECKOTERMINAL_COOLDOWN"
+      ) &&
+      /^0x[a-f0-9]{64}$/.test(String(v887ExactPoolId || "")) &&
+      directionalTarget?.onChainPoolIdentityV153?.verified === true &&
+      v887ExactFlowMatched !== true;
+
+    directionalTarget.directionalExactHistoryPriorityV887 = {
+      requested: v887NeedsExactHistoryPriority,
+      recordedAt: new Date().toISOString(),
+      deferredStatus: v887DeferredDirectionalStatus || null,
+      exactPoolId: /^0x[a-f0-9]{64}$/.test(String(v887ExactPoolId || ""))
+        ? v887ExactPoolId
+        : null,
+      verifiedFlowAvailable: v887Flow?.verified === true,
+      verifiedFlowRecords: safeNumber(v887Flow?.recordCount),
+      verifiedFlowPoolIds: v887FlowPoolIds,
+      exactPoolAlreadyMatched: v887ExactFlowMatched,
+      zeroExtraRequests: true,
+      v254EligibilityStillRequired: true
+    };
+
     if (
       enrichment?.status !==
         "V180_ONCHAIN_USDG_ALREADY_VERIFIED"
@@ -104368,7 +104434,9 @@ for (
         eligibleVerifiedMarketCandidates: safeNumber(
           directionalTradeEnrichment?.eligibleVerifiedMarketCandidates ??
           preQualificationDirectionalPoolV151?.length
-        )
+        ),
+        exactHistoryPriorityV887:
+          directionalTarget?.directionalExactHistoryPriorityV887 || null
       },
       gecko: {
         freshUsedThisScan: safeNumber(budget?.analysis?.geckoFreshUsed),
@@ -104461,6 +104529,15 @@ for (
         const aq = qualifiesTelegram(a) ? 1 : 0;
         const bq = qualifiesTelegram(b) ? 1 : 0;
         if (bq !== aq) return bq - aq;
+
+        /*
+         * V887: among candidates that already passed every existing V254 gate,
+         * give the current deferred directional target first access to the
+         * existing one-candidate exact-history slot.
+         */
+        const aV887 = a?.directionalExactHistoryPriorityV887?.requested === true ? 1 : 0;
+        const bV887 = b?.directionalExactHistoryPriorityV887?.requested === true ? 1 : 0;
+        if (bV887 !== aV887) return bV887 - aV887;
 
         const priorityDelta =
           safeNumber(b?.analysisPriority) -
@@ -104688,6 +104765,8 @@ for (
           completion
             ?.coverageEnrichedV263 ===
           true,
+        directionalExactHistoryPriorityV887:
+          candidate?.directionalExactHistoryPriorityV887 || null,
         historyProviderPathV263:
           completion
             ?.history
@@ -126924,6 +127003,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `V175 target: <code>${escapeHtml(v175x.selectedAddress || "NONE")}</code> · attempted <b>${v175x.attempted ? "YES" : "NO"}</b> · verified <b>${v175x.verifiedAnyWindow ? "YES" : "NO"}</b> · status <b>${escapeHtml(v175x.status || "NONE")}</b>`,
       `V151 target: <code>${escapeHtml(v151x.address || "NONE")}</code> · mode <b>${escapeHtml(v151x.selectionMode || "NONE")}</b> · attempted <b>${v151x.attempted ? "YES" : "NO"}</b> · verified <b>${v151x.verifiedAnyWindow ? "YES" : "NO"}</b> · status <b>${escapeHtml(v151x.status || "NONE")}</b>`,
       `Pool / side: <code>${escapeHtml(v151x.poolAddress || v175x.poolAddress || "NONE")}</code> / <b>${escapeHtml(v151x.targetTokenSide || v175x.targetTokenSide || "UNVERIFIED")}</b>`,
+      `V887 exact-history priority: <b>${v151x?.exactHistoryPriorityV887?.requested === true ? "YES" : "NO"}</b> · exactPool <code>${escapeHtml(v151x?.exactHistoryPriorityV887?.exactPoolId || "NONE")}</code> · prior exact-flow match <b>${v151x?.exactHistoryPriorityV887?.exactPoolAlreadyMatched === true ? "YES" : "NO"}</b>`,
       `Gecko fresh used: <b>${fmt(g882.freshUsedThisScan)}</b>/${fmt(g882.freshPerScanLimit)} · last status <b>${escapeHtml(g882.lastStatus || "NONE")}</b> · consecutive 429s <b>${fmt(g882.consecutive429s)}</b>`,
       `Gecko cooldown until: <code>${escapeHtml(String(g882.cooldownUntil || "NONE"))}</code> · last 429: <code>${escapeHtml(String(g882.last429At || "NONE"))}</code> · last success: <code>${escapeHtml(String(g882.lastSuccessAt || "NONE"))}</code>`,
       `FLOW reserve — consumed <b>${fmt(f882.flowConsumed)}</b> · released-unused <b>${fmt(f882.flowReleasedUnused)}</b> · reason <b>${escapeHtml(f882.flowReleaseReason || "NONE")}</b>`,
