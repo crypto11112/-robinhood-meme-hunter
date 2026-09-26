@@ -1,4 +1,18 @@
 /**
+ * Robinhood Chain Meme Hunter — V871
+ *
+ * V871 RISK-GATE REJECTION DIAGNOSTIC — READ ONLY:
+ * - builds directly from deployed V870;
+ * - adds zero-request risk-gate telemetry to /evidenceaudit;
+ * - proves whether RISK_NOT_ACCEPTABLE rows are severe overrides or ordinary HIGH risk;
+ * - classifies verified dangerous concentration, extreme top-holder ownership,
+ *   extremely low verified liquidity and other HIGH-risk reasons;
+ * - reports risk evidence verification, independent evidence count, top1/top10,
+ *   concentration classification and verified liquidity when already available;
+ * - changes no risk decision, scoring, qualification, Telegram threshold, provider
+ *   routing, request budget, V4 behaviour, KV key or hard 42-request ceiling.
+ */
+/**
  * Robinhood Chain Meme Hunter — V870
  *
  * V869 DENSITY-STABLE ADAPTIVE V4 WALKER:
@@ -7538,7 +7552,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V870";
+const VERSION = "V871";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -125381,6 +125395,33 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   const riskAcceptable =
     candidate?.risk?.severeOverride !== true &&
     String(candidate?.risk?.label || "").toUpperCase() !== "HIGH";
+  const riskV871 = candidate?.risk || {};
+  const whaleV871 = candidate?.holders?.whale || {};
+  const riskReasonsV871 = Array.isArray(riskV871?.reasons)
+    ? riskV871.reasons.map(reason => String(reason || "")).filter(Boolean)
+    : [];
+  const riskGateDiagnosticV871 = {
+    acceptable: riskAcceptable,
+    verified: riskV871?.verified === true,
+    severeOverride: riskV871?.severeOverride === true,
+    score: Number.isFinite(Number(riskV871?.score)) ? Number(riskV871.score) : null,
+    label: String(riskV871?.label || "UNVERIFIED").toUpperCase(),
+    reasons: riskReasonsV871,
+    independentEvidence: safeNumber(riskV871?.independentEvidence),
+    evidence: {
+      market: riskV871?.evidence?.market === true,
+      concentration: riskV871?.evidence?.concentration === true,
+      liveActivity: riskV871?.evidence?.liveActivity === true,
+      liquidityActivity: riskV871?.evidence?.liquidityActivity === true,
+      holderCounters: riskV871?.evidence?.holderCounters === true
+    },
+    holderConcentrationVerified: candidate?.holders?.concentrationVerified === true,
+    concentrationRisk: String(whaleV871?.concentrationRisk || "UNVERIFIED").toUpperCase(),
+    top1Percent: Number.isFinite(Number(whaleV871?.top1Percent)) ? Number(whaleV871.top1Percent) : null,
+    top10Percent: Number.isFinite(Number(whaleV871?.top10Percent)) ? Number(whaleV871.top10Percent) : null,
+    marketVerified: market?.verified === true,
+    liquidityUsd: market?.verified === true && Number.isFinite(Number(market?.liquidityUsd)) ? Number(market.liquidityUsd) : null
+  };
   const v175 = context?.earlyDirectionalTradeEnrichmentV175 || {};
   const v151 = context?.directionalTradeEnrichment || {};
   const v254 = context?.verifiedUsdCompletionV254 || {};
@@ -125451,7 +125492,7 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
   if (!needsUsd) v254Blockers.push("USD_ENRICHMENT_NOT_NEEDED_OR_NOT_ELIGIBLE");
 
   return {
-    version: "V824_1",
+    version: "V871_1",
     runtimeVersion: VERSION,
     recordedAtV823: new Date().toISOString(),
     diagnosticOnly: true,
@@ -125470,6 +125511,7 @@ function evidenceCompletionAuditV727(candidate, state, context = {}) {
       confidenceScore: confidence,
       telegramQualified: qualifiesNow
     },
+    riskGateDiagnosticV871,
     v175: {
       eligible: v175Eligible,
       blockers: v175Blockers,
@@ -125570,7 +125612,7 @@ function evidenceAuditSnapshotV727(state) {
   const rows = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
     : [];
-  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V806_1", "V807_1", "V808_1", "V812_1", "V814_1", "V823_1", "V824_1"]);
+  const compatibleAuditVersionsV803 = new Set(["V730_1", "V802_1", "V803_1", "V804_1", "V806_1", "V807_1", "V808_1", "V812_1", "V814_1", "V823_1", "V824_1", "V871_1"]);
   const detailed = rows.filter(row =>
     compatibleAuditVersionsV803.has(String(row?.evidenceCompletionAuditV727?.version || ""))
   );
@@ -125588,6 +125630,12 @@ function evidenceAuditSnapshotV727(state) {
   const bridgeStatusCounts = {};
   const reserveConsumedTypeCounts = {};
   const noBotSwapReasonCountsV812 = {};
+  const riskRejectReasonCountsV871 = {};
+  const riskRejectClassCountsV871 = {};
+  let riskRejectedRowsV871 = 0;
+  let riskRejectedVerifiedV871 = 0;
+  let riskRejectedSevereV871 = 0;
+  let riskRejectedConcentrationVerifiedV871 = 0;
   let noBotSwapSampleRowsV812 = 0;
   let noBotSwapKnownPoolRowsV812 = 0;
   let noBotSwapProductionSelectedRowsV812 = 0;
@@ -125629,6 +125677,17 @@ function evidenceAuditSnapshotV727(state) {
       v823.flowReleasedUnused += safeNumber(rv?.flowReleasedUnusedV822);
       v823.foundationReserved += safeNumber(rv?.foundationReservedV822);
       v823.foundationConsumed += safeNumber(rv?.foundationConsumedV822);
+    }
+    const riskDiagV871 = d?.riskGateDiagnosticV871 || null;
+    if (riskDiagV871 && riskDiagV871.acceptable === false) {
+      riskRejectedRowsV871++;
+      if (riskDiagV871.verified === true) riskRejectedVerifiedV871++;
+      if (riskDiagV871.severeOverride === true) riskRejectedSevereV871++;
+      if (riskDiagV871.holderConcentrationVerified === true) riskRejectedConcentrationVerifiedV871++;
+      const cls = riskDiagV871.severeOverride === true ? "SEVERE_OVERRIDE" : (riskDiagV871.label === "HIGH" ? "HIGH_RISK" : "OTHER_REJECT");
+      bump(riskRejectClassCountsV871, cls);
+      for (const reason of Array.isArray(riskDiagV871.reasons) ? riskDiagV871.reasons : []) bump(riskRejectReasonCountsV871, reason || "NO_REASON_RECORDED");
+      if (!(Array.isArray(riskDiagV871.reasons) && riskDiagV871.reasons.length)) bump(riskRejectReasonCountsV871, "NO_REASON_RECORDED");
     }
     const noSwapV812 = d?.noBotObservedSwapsV812 || null;
     if (noSwapV812?.applicable === true) {
@@ -125682,6 +125741,14 @@ function evidenceAuditSnapshotV727(state) {
     counts: c,
     topGateBlockers: top(blockerCounts),
     topSelectedLaneStatuses: top(statusCounts),
+    riskGateDiagnosticV871: {
+      sampledRejectedRows: riskRejectedRowsV871,
+      verifiedRejectedRows: riskRejectedVerifiedV871,
+      severeOverrideRows: riskRejectedSevereV871,
+      concentrationVerifiedRows: riskRejectedConcentrationVerifiedV871,
+      classes: top(riskRejectClassCountsV871),
+      reasons: top(riskRejectReasonCountsV871)
+    },
     noBotObservedSwapsV812: {
       sampledRows: noBotSwapSampleRowsV812,
       knownPoolRows: noBotSwapKnownPoolRowsV812,
@@ -125803,6 +125870,17 @@ function evidenceAuditTelegramMessageV727(state) {
     "⏱ <b>Launch-age completion V258</b>",
     `Needed <b>${fmt(c.v258Needed)}</b> · selected <b>${fmt(c.v258Selected)}</b> · attempted <b>${fmt(c.v258Attempted)}</b> · recovered <b>${fmt(c.v258Recovered)}</b>`
   );
+  const riskGateV871 = d?.riskGateDiagnosticV871 || {};
+  lines.push(
+    "",
+    `🛡 <b>Risk-gate rejection diagnostic — V871</b>`,
+    `Rejected rows sampled: <b>${fmt(riskGateV871.sampledRejectedRows)}</b> · risk verified: <b>${fmt(riskGateV871.verifiedRejectedRows)}</b> · severe override: <b>${fmt(riskGateV871.severeOverrideRows)}</b>`,
+    `Verified holder concentration on rejected rows: <b>${fmt(riskGateV871.concentrationVerifiedRows)}</b>`
+  );
+  for (const [cls,count] of Array.isArray(riskGateV871.classes) ? riskGateV871.classes.slice(0,5) : []) lines.push(`• Class ${escapeHtml(cls)}: <b>${fmt(count)}</b>`);
+  for (const [reason,count] of Array.isArray(riskGateV871.reasons) ? riskGateV871.reasons.slice(0,8) : []) lines.push(`• Reason ${escapeHtml(reason)}: <b>${fmt(count)}</b>`);
+  if (!safeNumber(riskGateV871.sampledRejectedRows)) lines.push("• Forward-only V871 risk rejection detail is building; historical V870 rows are not guessed/backfilled.");
+
   const noSwapV812 = d?.noBotObservedSwapsV812 || {};
   lines.push(
     "",
