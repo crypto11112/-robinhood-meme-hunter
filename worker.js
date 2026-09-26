@@ -1,4 +1,21 @@
 /**
+ * V899 VALIDATION-CLOUD-SAFE EXACT-POOL CHUNKING:
+ * - builds directly from deployed V898;
+ * - fixes the proven V888 failure where one 12,000-block eth_getLogs request
+ *   exceeded Validation Cloud's 2,000-block maximum range;
+ * - scans the SAME recent 12,000-block exact-PoolId window newest-first in
+ *   chunks of at most 2,000 blocks;
+ * - every chunk consumes the EXISTING analysis/request budget normally, so the
+ *   48-request hard ceiling, notification reserve, V258 reserve and all other
+ *   budget protections remain authoritative;
+ * - stops immediately when an exact-PoolId Swap row is found;
+ * - if the remaining protected budget cannot fund another chunk, records an
+ *   explicit incomplete/budget-limited result rather than falsely claiming
+ *   there were zero swaps in the full 12,000-block window;
+ * - ZERO scoring/risk/qualification/Telegram/market-selection changes;
+ * - preserves V898 optional diagnostic email bridge and all existing audits.
+ */
+/**
  * V898 EVENT-DRIVEN DIAGNOSTIC EMAIL BRIDGE:
  * - builds directly from deployed V897;
  * - preserves /evidenceaudit and /diagnostics-read unchanged;
@@ -7864,7 +7881,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V898";
+const VERSION = "V899";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -97150,8 +97167,10 @@ async function enrichCandidateWithProductionV4V772(
    * the last 600 blocks.
    *
    * Do not guess and do not weaken NO_BOT_OBSERVED_SWAPS. When exact identity is
-   * already verified, spend at most ONE existing production-V4 analysis request
-   * on that exact PoolId over the same 12,000-block recent window used by V254.
+   * already verified, query that exact PoolId over the same 12,000-block recent
+   * window used by V254. V899 keeps that window but respects provider range
+   * limits by issuing newest-first chunks of at most 2,000 blocks. Every chunk
+   * still passes through the existing budget/reserve machinery.
    * Any returned rows are genuine bot-observed PoolManager Swap logs.
    */
   const exactIdentityV888 = candidate?.onChainPoolIdentityV153;
@@ -97233,137 +97252,288 @@ async function enrichCandidateWithProductionV4V772(
   }
 
   if (
-    base.exactPoolTargetedBackfillV888.eligible === true &&
-    budgetAvailable(budget, "analysis", 1)
+    base.exactPoolTargetedBackfillV888.eligible === true
   ) {
     const exactFromV888 = Math.max(
       0,
       to - VERIFIED_USD_COMPLETION_RECENT_BLOCKS_V254 + 1
     );
 
-    base.exactPoolTargetedBackfillV888.fromBlock = exactFromV888;
+    const maxRangeBlocksV899 = 2000;
+    const chunkRangesV899 = [];
+    let cursorToV899 = to;
 
-    if (
-      consumeBudget(
-        budget,
-        "analysis",
-        "RPC:V888_EXACT_POOL_TARGETED_SWAPS",
-        1
-      )
+    while (
+      cursorToV899 >= exactFromV888 &&
+      chunkRangesV899.length < 6
     ) {
+      const chunkFromV899 = Math.max(
+        exactFromV888,
+        cursorToV899 - maxRangeBlocksV899 + 1
+      );
+
+      chunkRangesV899.push({
+        fromBlock: chunkFromV899,
+        toBlock: cursorToV899
+      });
+
+      cursorToV899 = chunkFromV899 - 1;
+    }
+
+    base.exactPoolTargetedBackfillV888.fromBlock = exactFromV888;
+    base.exactPoolTargetedBackfillV888.chunkSizeBlocksV899 =
+      maxRangeBlocksV899;
+    base.exactPoolTargetedBackfillV888.chunksPlannedV899 =
+      chunkRangesV899.length;
+    base.exactPoolTargetedBackfillV888.chunkRequestsAttemptedV899 = 0;
+    base.exactPoolTargetedBackfillV888.chunksCompletedV899 = 0;
+    base.exactPoolTargetedBackfillV888.chunkRangesV899 = [];
+    base.exactPoolTargetedBackfillV888.fullWindowCompletedV899 = false;
+    base.exactPoolTargetedBackfillV888.stopReasonV899 = null;
+
+    const d895 = base.targetedCollectorHandoffDiagnosticV895;
+    d895.chunkSizeBlocksV899 = maxRangeBlocksV899;
+    d895.chunksPlannedV899 = chunkRangesV899.length;
+    d895.chunkRequestsAttemptedV899 = 0;
+    d895.chunksCompletedV899 = 0;
+    d895.fullWindowCompletedV899 = false;
+    d895.stopReasonV899 = null;
+    d895.chunkTraceV899 = [];
+
+    let rpcFailureV899 = null;
+    let budgetBlockedV899 = false;
+    let successfulChunkCallsV899 = 0;
+    let rawRowsTotalV899 = 0;
+
+    for (let indexV899 = 0; indexV899 < chunkRangesV899.length; indexV899++) {
+      const rangeV899 = chunkRangesV899[indexV899];
+
+      if (
+        !budgetAvailable(budget, "analysis", 1) ||
+        !consumeBudget(
+          budget,
+          "analysis",
+          "RPC:V888_EXACT_POOL_TARGETED_SWAPS",
+          1
+        )
+      ) {
+        budgetBlockedV899 = true;
+        base.exactPoolTargetedBackfillV888.stopReasonV899 =
+          indexV899 === 0
+            ? "FIRST_CHUNK_BLOCKED_BY_EXISTING_BUDGET_PROTECTIONS_V899"
+            : "NEXT_CHUNK_BLOCKED_BY_EXISTING_BUDGET_PROTECTIONS_V899";
+        d895.stopReasonV899 =
+          base.exactPoolTargetedBackfillV888.stopReasonV899;
+        break;
+      }
+
       base.exactPoolTargetedBackfillV888.attempted = true;
       base.targetedCollectorHandoffDiagnosticV895.requestAttempted = true;
       base.externalRequestsUsed++;
+      base.exactPoolTargetedBackfillV888.chunkRequestsAttemptedV899++;
+      d895.chunkRequestsAttemptedV899++;
 
-      const exactLogsV888 = await v4PoolLiveRpcCallV767(
+      const traceV899 = {
+        index: indexV899 + 1,
+        fromBlock: rangeV899.fromBlock,
+        toBlock: rangeV899.toBlock,
+        rpcOk: false,
+        rawRows: 0,
+        exactTopicRows: 0,
+        error: null
+      };
+
+      const exactLogsV899 = await v4PoolLiveRpcCallV767(
         rpcEndpoint.url,
         "eth_getLogs",
         [{
           address: normalize(POOL_MANAGER),
-          fromBlock: `0x${exactFromV888.toString(16)}`,
-          toBlock: `0x${to.toString(16)}`,
+          fromBlock: `0x${rangeV899.fromBlock.toString(16)}`,
+          toBlock: `0x${rangeV899.toBlock.toString(16)}`,
           topics: [SWAP_TOPIC, exactPoolIdV888]
         }]
       );
 
-      if (exactLogsV888?.ok === true) {
-        const rawExactRowsV895 =
-          Array.isArray(exactLogsV888?.result)
-            ? exactLogsV888.result
-            : [];
+      if (exactLogsV899?.ok !== true) {
+        rpcFailureV899 =
+          exactLogsV899?.error || "RPC_FAILED";
+        traceV899.error = rpcFailureV899;
 
-        exactPoolBackfillRowsV888 =
-          rawExactRowsV895.filter(log =>
-            normalize(log?.topics?.[0]) === normalize(SWAP_TOPIC) &&
-            normalize(log?.topics?.[1]) === exactPoolIdV888
+        base.exactPoolTargetedBackfillV888.chunkRangesV899.push(
+          traceV899
+        );
+        d895.chunkTraceV899.push(traceV899);
+
+        base.exactPoolTargetedBackfillV888.stopReasonV899 =
+          "RPC_FAILURE_DURING_CHUNKED_EXACT_POOL_QUERY_V899";
+        d895.stopReasonV899 =
+          base.exactPoolTargetedBackfillV888.stopReasonV899;
+        break;
+      }
+
+      successfulChunkCallsV899++;
+      traceV899.rpcOk = true;
+
+      const rawChunkRowsV899 =
+        Array.isArray(exactLogsV899?.result)
+          ? exactLogsV899.result
+          : [];
+
+      const exactChunkRowsV899 =
+        rawChunkRowsV899.filter(log =>
+          normalize(log?.topics?.[0]) === normalize(SWAP_TOPIC) &&
+          normalize(log?.topics?.[1]) === exactPoolIdV888
+        );
+
+      traceV899.rawRows = rawChunkRowsV899.length;
+      traceV899.exactTopicRows = exactChunkRowsV899.length;
+
+      rawRowsTotalV899 += rawChunkRowsV899.length;
+      exactPoolBackfillRowsV888.push(...exactChunkRowsV899);
+
+      base.exactPoolTargetedBackfillV888.chunksCompletedV899++;
+      d895.chunksCompletedV899++;
+
+      base.exactPoolTargetedBackfillV888.chunkRangesV899.push(
+        traceV899
+      );
+      d895.chunkTraceV899.push(traceV899);
+
+      /*
+       * Newest-first early stop: one genuine exact-PoolId Swap row is enough
+       * to prove observed activity and exercise the decoder/handoff path.
+       */
+      if (exactChunkRowsV899.length > 0) {
+        base.exactPoolTargetedBackfillV888.stopReasonV899 =
+          "EXACT_POOL_SWAP_ROWS_FOUND_STOP_EARLY_V899";
+        d895.stopReasonV899 =
+          base.exactPoolTargetedBackfillV888.stopReasonV899;
+        break;
+      }
+    }
+
+    const fullWindowCompletedV899 =
+      !rpcFailureV899 &&
+      !budgetBlockedV899 &&
+      base.exactPoolTargetedBackfillV888.chunksCompletedV899 ===
+        chunkRangesV899.length;
+
+    base.exactPoolTargetedBackfillV888.fullWindowCompletedV899 =
+      fullWindowCompletedV899;
+    d895.fullWindowCompletedV899 =
+      fullWindowCompletedV899;
+
+    if (base.exactPoolTargetedBackfillV888.attempted === true) {
+      d895.rpcOk =
+        successfulChunkCallsV899 > 0 &&
+        rpcFailureV899 === null;
+      d895.rawRpcRows = rawRowsTotalV899;
+      d895.exactTopicRows = exactPoolBackfillRowsV888.length;
+    }
+
+    if (rpcFailureV899) {
+      base.exactPoolTargetedBackfillV888.status =
+        "EXACT_POOL_TARGETED_SWAP_QUERY_FAILED_V899";
+      base.exactPoolTargetedBackfillV888.error =
+        rpcFailureV899;
+      d895.rpcOk = false;
+      d895.rpcError = rpcFailureV899;
+      d895.classification =
+        "EXISTING_V888_TARGETED_RPC_FAILED_V895";
+    } else if (
+      base.exactPoolTargetedBackfillV888.attempted !== true
+    ) {
+      base.exactPoolTargetedBackfillV888.status =
+        "EXACT_POOL_TARGETED_REQUEST_BLOCKED_BY_EXISTING_RESERVE_V899";
+      d895.classification =
+        "EXISTING_V888_TARGETED_REQUEST_BUDGET_BLOCKED_V895";
+    } else if (
+      exactPoolBackfillRowsV888.length === 0 &&
+      budgetBlockedV899
+    ) {
+      base.exactPoolTargetedBackfillV888.status =
+        "EXACT_POOL_TARGETED_PARTIAL_WINDOW_BUDGET_LIMIT_V899";
+      d895.classification =
+        "V899_CHUNKED_WINDOW_INCOMPLETE_BUDGET_LIMIT";
+    } else {
+      let decodedVerifiedV895 = 0;
+      let decodedCandidateMatchedV895 = 0;
+      let decodedExactUsdV895 = 0;
+
+      for (const log of exactPoolBackfillRowsV888) {
+        const tradeV895 =
+          decodeV4SwapDirectionalV179(
+            state,
+            log,
+            null,
+            exactIdentityV888
           );
 
-        const d895 = base.targetedCollectorHandoffDiagnosticV895;
-        d895.rpcOk = true;
-        d895.rawRpcRows = rawExactRowsV895.length;
-        d895.exactTopicRows = exactPoolBackfillRowsV888.length;
-
-        let decodedVerifiedV895 = 0;
-        let decodedCandidateMatchedV895 = 0;
-        let decodedExactUsdV895 = 0;
-
-        for (const log of exactPoolBackfillRowsV888) {
-          const tradeV895 =
-            decodeV4SwapDirectionalV179(
-              state,
-              log,
-              null,
-              exactIdentityV888
-            );
-
-          if (tradeV895?.verified === true) {
-            decodedVerifiedV895++;
-          }
-          if (
-            tradeV895?.verified === true &&
-            normalize(tradeV895?.candidateAddress) === token &&
-            normalize(tradeV895?.poolId) === exactPoolIdV888
-          ) {
-            decodedCandidateMatchedV895++;
-          }
-          if (
-            tradeV895?.verified === true &&
-            normalize(tradeV895?.candidateAddress) === token &&
-            normalize(tradeV895?.poolId) === exactPoolIdV888 &&
-            tradeV895?.exactUsdVerified === true
-          ) {
-            decodedExactUsdV895++;
-          }
+        if (tradeV895?.verified === true) {
+          decodedVerifiedV895++;
         }
+        if (
+          tradeV895?.verified === true &&
+          normalize(tradeV895?.candidateAddress) === token &&
+          normalize(tradeV895?.poolId) === exactPoolIdV888
+        ) {
+          decodedCandidateMatchedV895++;
+        }
+        if (
+          tradeV895?.verified === true &&
+          normalize(tradeV895?.candidateAddress) === token &&
+          normalize(tradeV895?.poolId) === exactPoolIdV888 &&
+          tradeV895?.exactUsdVerified === true
+        ) {
+          decodedExactUsdV895++;
+        }
+      }
 
-        d895.decodedVerifiedRows = decodedVerifiedV895;
-        d895.decodedCandidateMatchedRows =
-          decodedCandidateMatchedV895;
-        d895.decodedExactUsdRows = decodedExactUsdV895;
+      d895.decodedVerifiedRows = decodedVerifiedV895;
+      d895.decodedCandidateMatchedRows =
+        decodedCandidateMatchedV895;
+      d895.decodedExactUsdRows = decodedExactUsdV895;
 
-        const ledgerAfterDecodeV895 =
-          onChainDirectionalStoreV179(state)?.[token];
-        d895.v179LedgerRowsForTokenPool =
-          Array.isArray(ledgerAfterDecodeV895?.records)
-            ? ledgerAfterDecodeV895.records.filter(
-                row =>
-                  normalize(row?.candidateAddress) === token &&
-                  normalize(row?.poolId) === exactPoolIdV888
-              ).length
-            : 0;
+      const ledgerAfterDecodeV895 =
+        onChainDirectionalStoreV179(state)?.[token];
+      d895.v179LedgerRowsForTokenPool =
+        Array.isArray(ledgerAfterDecodeV895?.records)
+          ? ledgerAfterDecodeV895.records.filter(
+              row =>
+                normalize(row?.candidateAddress) === token &&
+                normalize(row?.poolId) === exactPoolIdV888
+            ).length
+          : 0;
 
-        d895.classification =
-          exactPoolBackfillRowsV888.length === 0
-            ? "RPC_OK_GENUINE_ZERO_EXACT_POOL_SWAP_ROWS_V895"
-            : decodedCandidateMatchedV895 === 0
-              ? "RPC_RETURNED_EXACT_POOL_ROWS_BUT_DECODER_OR_IDENTITY_REJECTED_V895"
-              : d895.v179LedgerRowsForTokenPool === 0
-                ? "REAL_EXACT_POOL_SWAPS_DECODED_BUT_NOT_PRESENT_IN_V179_V895"
-                : "EXACT_POOL_SWAPS_ALREADY_PRESENT_IN_V179_V895";
+      exactPoolBackfillMatchedV888 =
+        exactPoolBackfillRowsV888.length > 0;
 
-        exactPoolBackfillMatchedV888 = exactPoolBackfillRowsV888.length > 0;
-        base.exactPoolTargetedBackfillV888.returnedSwapRows =
-          exactPoolBackfillRowsV888.length;
+      base.exactPoolTargetedBackfillV888.returnedSwapRows =
+        exactPoolBackfillRowsV888.length;
+
+      if (exactPoolBackfillMatchedV888) {
         base.exactPoolTargetedBackfillV888.status =
-          exactPoolBackfillMatchedV888
-            ? "EXACT_POOL_TARGETED_SWAPS_FOUND_V888"
-            : "EXACT_POOL_TARGETED_NO_SWAPS_IN_12000_BLOCK_WINDOW_V888";
+          "EXACT_POOL_TARGETED_SWAPS_FOUND_V899";
+      } else if (fullWindowCompletedV899) {
+        base.exactPoolTargetedBackfillV888.status =
+          "EXACT_POOL_TARGETED_NO_SWAPS_IN_FULL_12000_BLOCK_WINDOW_V899";
       } else {
         base.exactPoolTargetedBackfillV888.status =
-          "EXACT_POOL_TARGETED_SWAP_QUERY_FAILED_V888";
-        base.exactPoolTargetedBackfillV888.error =
-          exactLogsV888?.error || "RPC_FAILED";
-        base.targetedCollectorHandoffDiagnosticV895.rpcOk = false;
-        base.targetedCollectorHandoffDiagnosticV895.rpcError =
-          exactLogsV888?.error || "RPC_FAILED";
-        base.targetedCollectorHandoffDiagnosticV895.classification =
-          "EXISTING_V888_TARGETED_RPC_FAILED_V895";
+          "EXACT_POOL_TARGETED_NO_ROWS_PARTIAL_WINDOW_V899";
       }
-    } else {
-      base.exactPoolTargetedBackfillV888.status =
-        "EXACT_POOL_TARGETED_REQUEST_BLOCKED_BY_EXISTING_RESERVE_V888";
-      base.targetedCollectorHandoffDiagnosticV895.classification =
-        "EXISTING_V888_TARGETED_REQUEST_BUDGET_BLOCKED_V895";
+
+      d895.classification =
+        exactPoolBackfillRowsV888.length === 0
+          ? (
+              fullWindowCompletedV899
+                ? "RPC_OK_GENUINE_ZERO_EXACT_POOL_SWAP_ROWS_V895"
+                : "V899_CHUNKED_WINDOW_INCOMPLETE_NO_ROWS"
+            )
+          : decodedCandidateMatchedV895 === 0
+            ? "RPC_RETURNED_EXACT_POOL_ROWS_BUT_DECODER_OR_IDENTITY_REJECTED_V895"
+            : d895.v179LedgerRowsForTokenPool === 0
+              ? "REAL_EXACT_POOL_SWAPS_DECODED_BUT_NOT_PRESENT_IN_V179_V895"
+              : "EXACT_POOL_SWAPS_ALREADY_PRESENT_IN_V179_V895";
     }
   }
 
@@ -128563,6 +128733,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `PoolId: <code>${escapeHtml(collector895.poolId || "NONE")}</code>`,
       `Request eligible / attempted: <b>${collector895.requestEligible ? "YES" : "NO"} / ${collector895.requestAttempted ? "YES" : "NO"}</b> · provider ${escapeHtml(collector895.rpcProvider || "NONE")}`,
       `RPC OK: <b>${collector895.rpcOk ? "YES" : "NO"}</b> · raw rows ${fmt(collector895.rawRpcRows)} · exact-topic rows ${fmt(collector895.exactTopicRows)}`,
+      `V899 chunks attempted/completed/planned: <b>${fmt(collector895.chunkRequestsAttemptedV899)} / ${fmt(collector895.chunksCompletedV899)} / ${fmt(collector895.chunksPlannedV899)}</b> · full 12k window ${collector895.fullWindowCompletedV899 ? "YES" : "NO"} · stop ${escapeHtml(collector895.stopReasonV899 || "NONE")}`,
       `Registry present / token match: <b>${collector895.registryPresent ? "YES" : "NO"} / ${collector895.registryTokenMatch ? "YES" : "NO"}</b>`,
       `Decoded verified / candidate-match / exact-USD: <b>${fmt(collector895.decodedVerifiedRows)} / ${fmt(collector895.decodedCandidateMatchedRows)} / ${fmt(collector895.decodedExactUsdRows)}</b>`,
       `V179 rows for token+PoolId: <b>${fmt(collector895.v179LedgerRowsForTokenPool)}</b>`,
@@ -165274,7 +165445,16 @@ function compactCollectorTraceV897(row) {
       safeNumber(row.v179LedgerRowsForTokenPool),
     targetedRowsFedToV179CollectorInThisPath:
       row.targetedRowsFedToV179CollectorInThisPath === true,
-    classification: row.classification || null
+    classification: row.classification || null,
+    chunkSizeBlocksV899: safeNumber(row.chunkSizeBlocksV899),
+    chunksPlannedV899: safeNumber(row.chunksPlannedV899),
+    chunkRequestsAttemptedV899:
+      safeNumber(row.chunkRequestsAttemptedV899),
+    chunksCompletedV899:
+      safeNumber(row.chunksCompletedV899),
+    fullWindowCompletedV899:
+      row.fullWindowCompletedV899 === true,
+    stopReasonV899: row.stopReasonV899 || null
   };
 }
 
