@@ -1,4 +1,22 @@
 /**
+ * V895 V888 TARGETED-COLLECTOR HANDOFF DIAGNOSTIC — READ ONLY:
+ * - builds directly from deployed V894;
+ * - adds ZERO provider requests and ZERO scanner/scoring/qualification changes;
+ * - instruments the EXISTING V888 exact-PoolId targeted eth_getLogs request and
+ *   records: request eligibility/attempt, provider, raw RPC rows, exact-topic
+ *   filtered rows, local V179 decoder acceptance, candidate match, exact-USD
+ *   decode, registry identity, and existing V179 ledger rows for that token+pool;
+ * - explicitly records whether the V888 targeted rows are fed into the V179
+ *   collector by this production-V4 path (diagnostic fact only; no handoff added);
+ * - /evidenceaudit renders the trace so we can distinguish:
+ *     genuine zero swaps,
+ *     RPC/query failure,
+ *     decoder/identity rejection,
+ *     or returned real swaps that never enter V179;
+ * - 48-request ceiling, V258, V254 gates, V4 selection, Gecko protections,
+ *   risk/scoring/Telegram thresholds and KV schema are unchanged.
+ */
+/**
  * V894 VERIFIED EXACT-POOL SWAP-EVIDENCE PROMOTION:
  * - builds directly from deployed V893;
  * - fixes the V892-proven local handoff bug where the SAME candidate and SAME
@@ -7794,7 +7812,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V894";
+const VERSION = "V895";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -96983,6 +97001,28 @@ async function enrichCandidateWithProductionV4V772(
       status: "NOT_ELIGIBLE_V888",
       error: null
     },
+    targetedCollectorHandoffDiagnosticV895: {
+      enabled: true,
+      diagnosticOnly: true,
+      zeroExtraRequests: true,
+      tokenAddress: token || null,
+      poolId: null,
+      requestEligible: false,
+      requestAttempted: false,
+      rpcProvider: null,
+      rpcOk: false,
+      rpcError: null,
+      rawRpcRows: 0,
+      exactTopicRows: 0,
+      registryPresent: false,
+      registryTokenMatch: false,
+      decodedVerifiedRows: 0,
+      decodedCandidateMatchedRows: 0,
+      decodedExactUsdRows: 0,
+      v179LedgerRowsForTokenPool: 0,
+      targetedRowsFedToV179CollectorInThisPath: false,
+      classification: "NOT_EVALUATED_V895"
+    },
     externalRequestsUsed: 0,
     scannerBudgetConsumed: true,
     usdValueInferred: false,
@@ -97092,6 +97132,54 @@ async function enrichCandidateWithProductionV4V772(
     error: null
   };
 
+  {
+    const d895 = base.targetedCollectorHandoffDiagnosticV895;
+    d895.poolId = exactPoolVerifiedV888 ? exactPoolIdV888 : null;
+    d895.requestEligible =
+      base.exactPoolTargetedBackfillV888.eligible === true;
+    d895.rpcProvider = rpcEndpoint.name || null;
+
+    const registry895 =
+      exactPoolVerifiedV888
+        ? (state?.poolRegistry?.[exactPoolIdV888] || null)
+        : null;
+    const c0895 = normalize(
+      registry895?.currency0 ||
+      registry895?.tokenA ||
+      ""
+    );
+    const c1895 = normalize(
+      registry895?.currency1 ||
+      registry895?.tokenB ||
+      ""
+    );
+    d895.registryPresent = Boolean(registry895);
+    d895.registryTokenMatch =
+      c0895 === token || c1895 === token;
+
+    const ledger895 =
+      isAddress(token)
+        ? onChainDirectionalStoreV179(state)?.[token]
+        : null;
+    d895.v179LedgerRowsForTokenPool =
+      Array.isArray(ledger895?.records)
+        ? ledger895.records.filter(
+            row =>
+              normalize(row?.candidateAddress) === token &&
+              normalize(row?.poolId) === exactPoolIdV888
+          ).length
+        : 0;
+
+    d895.classification =
+      exactPoolVerifiedV888
+        ? (
+            d895.requestEligible
+              ? "READY_FOR_EXISTING_V888_TARGETED_REQUEST_V895"
+              : "EXACT_POOL_ALREADY_IN_RECENT_600_BLOCK_WINDOW_V895"
+          )
+        : "VERIFIED_EXACT_POOL_REQUIRED_V895";
+  }
+
   if (
     base.exactPoolTargetedBackfillV888.eligible === true &&
     budgetAvailable(budget, "analysis", 1)
@@ -97112,6 +97200,7 @@ async function enrichCandidateWithProductionV4V772(
       )
     ) {
       base.exactPoolTargetedBackfillV888.attempted = true;
+      base.targetedCollectorHandoffDiagnosticV895.requestAttempted = true;
       base.externalRequestsUsed++;
 
       const exactLogsV888 = await v4PoolLiveRpcCallV767(
@@ -97126,12 +97215,79 @@ async function enrichCandidateWithProductionV4V772(
       );
 
       if (exactLogsV888?.ok === true) {
+        const rawExactRowsV895 =
+          Array.isArray(exactLogsV888?.result)
+            ? exactLogsV888.result
+            : [];
+
         exactPoolBackfillRowsV888 =
-          (Array.isArray(exactLogsV888?.result) ? exactLogsV888.result : [])
-            .filter(log =>
-              normalize(log?.topics?.[0]) === normalize(SWAP_TOPIC) &&
-              normalize(log?.topics?.[1]) === exactPoolIdV888
+          rawExactRowsV895.filter(log =>
+            normalize(log?.topics?.[0]) === normalize(SWAP_TOPIC) &&
+            normalize(log?.topics?.[1]) === exactPoolIdV888
+          );
+
+        const d895 = base.targetedCollectorHandoffDiagnosticV895;
+        d895.rpcOk = true;
+        d895.rawRpcRows = rawExactRowsV895.length;
+        d895.exactTopicRows = exactPoolBackfillRowsV888.length;
+
+        let decodedVerifiedV895 = 0;
+        let decodedCandidateMatchedV895 = 0;
+        let decodedExactUsdV895 = 0;
+
+        for (const log of exactPoolBackfillRowsV888) {
+          const tradeV895 =
+            decodeV4SwapDirectionalV179(
+              state,
+              log,
+              null,
+              exactIdentityV888
             );
+
+          if (tradeV895?.verified === true) {
+            decodedVerifiedV895++;
+          }
+          if (
+            tradeV895?.verified === true &&
+            normalize(tradeV895?.candidateAddress) === token &&
+            normalize(tradeV895?.poolId) === exactPoolIdV888
+          ) {
+            decodedCandidateMatchedV895++;
+          }
+          if (
+            tradeV895?.verified === true &&
+            normalize(tradeV895?.candidateAddress) === token &&
+            normalize(tradeV895?.poolId) === exactPoolIdV888 &&
+            tradeV895?.exactUsdVerified === true
+          ) {
+            decodedExactUsdV895++;
+          }
+        }
+
+        d895.decodedVerifiedRows = decodedVerifiedV895;
+        d895.decodedCandidateMatchedRows =
+          decodedCandidateMatchedV895;
+        d895.decodedExactUsdRows = decodedExactUsdV895;
+
+        const ledgerAfterDecodeV895 =
+          onChainDirectionalStoreV179(state)?.[token];
+        d895.v179LedgerRowsForTokenPool =
+          Array.isArray(ledgerAfterDecodeV895?.records)
+            ? ledgerAfterDecodeV895.records.filter(
+                row =>
+                  normalize(row?.candidateAddress) === token &&
+                  normalize(row?.poolId) === exactPoolIdV888
+              ).length
+            : 0;
+
+        d895.classification =
+          exactPoolBackfillRowsV888.length === 0
+            ? "RPC_OK_GENUINE_ZERO_EXACT_POOL_SWAP_ROWS_V895"
+            : decodedCandidateMatchedV895 === 0
+              ? "RPC_RETURNED_EXACT_POOL_ROWS_BUT_DECODER_OR_IDENTITY_REJECTED_V895"
+              : d895.v179LedgerRowsForTokenPool === 0
+                ? "REAL_EXACT_POOL_SWAPS_DECODED_BUT_NOT_PRESENT_IN_V179_V895"
+                : "EXACT_POOL_SWAPS_ALREADY_PRESENT_IN_V179_V895";
 
         exactPoolBackfillMatchedV888 = exactPoolBackfillRowsV888.length > 0;
         base.exactPoolTargetedBackfillV888.returnedSwapRows =
@@ -97145,10 +97301,17 @@ async function enrichCandidateWithProductionV4V772(
           "EXACT_POOL_TARGETED_SWAP_QUERY_FAILED_V888";
         base.exactPoolTargetedBackfillV888.error =
           exactLogsV888?.error || "RPC_FAILED";
+        base.targetedCollectorHandoffDiagnosticV895.rpcOk = false;
+        base.targetedCollectorHandoffDiagnosticV895.rpcError =
+          exactLogsV888?.error || "RPC_FAILED";
+        base.targetedCollectorHandoffDiagnosticV895.classification =
+          "EXISTING_V888_TARGETED_RPC_FAILED_V895";
       }
     } else {
       base.exactPoolTargetedBackfillV888.status =
         "EXACT_POOL_TARGETED_REQUEST_BLOCKED_BY_EXISTING_RESERVE_V888";
+      base.targetedCollectorHandoffDiagnosticV895.classification =
+        "EXISTING_V888_TARGETED_REQUEST_BUDGET_BLOCKED_V895";
     }
   }
 
@@ -128067,6 +128230,9 @@ function evidenceAuditSnapshotV727(state) {
       state?.productionV4RoutingDiagnosticV817 || null,
     directionalCompletionDiagnosticV882:
       state?.directionalCompletionDiagnosticV882 || null,
+    targetedCollectorHandoffDiagnosticV895:
+      state?.productionV4EnrichmentV772
+        ?.targetedCollectorHandoffDiagnosticV895 || null,
     observedSwapHandoffDiagnosticV892:
       observedSwapHandoffDiagnosticV892(state),
     interpretation: {
@@ -128298,6 +128464,27 @@ function evidenceAuditTelegramMessageV727(state) {
     lines.push(
       `Diagnosis: <b>${escapeHtml(swapHandoffV892.classification || "UNVERIFIED")}</b>`
     );
+  }
+
+
+  const collector895 = d?.targetedCollectorHandoffDiagnosticV895 || null;
+  if (collector895) {
+    lines.push(
+      "",
+      `🧪 <b>V888 exact-pool collector handoff trace — V895</b>`,
+      `Token: <code>${escapeHtml(collector895.tokenAddress || "NONE")}</code>`,
+      `PoolId: <code>${escapeHtml(collector895.poolId || "NONE")}</code>`,
+      `Request eligible / attempted: <b>${collector895.requestEligible ? "YES" : "NO"} / ${collector895.requestAttempted ? "YES" : "NO"}</b> · provider ${escapeHtml(collector895.rpcProvider || "NONE")}`,
+      `RPC OK: <b>${collector895.rpcOk ? "YES" : "NO"}</b> · raw rows ${fmt(collector895.rawRpcRows)} · exact-topic rows ${fmt(collector895.exactTopicRows)}`,
+      `Registry present / token match: <b>${collector895.registryPresent ? "YES" : "NO"} / ${collector895.registryTokenMatch ? "YES" : "NO"}</b>`,
+      `Decoded verified / candidate-match / exact-USD: <b>${fmt(collector895.decodedVerifiedRows)} / ${fmt(collector895.decodedCandidateMatchedRows)} / ${fmt(collector895.decodedExactUsdRows)}</b>`,
+      `V179 rows for token+PoolId: <b>${fmt(collector895.v179LedgerRowsForTokenPool)}</b>`,
+      `Targeted rows fed into V179 by V888 path: <b>${collector895.targetedRowsFedToV179CollectorInThisPath ? "YES" : "NO"}</b>`,
+      `Diagnosis: <b>${escapeHtml(collector895.classification || "UNVERIFIED")}</b>`
+    );
+    if (collector895.rpcError) {
+      lines.push(`RPC error: <code>${escapeHtml(collector895.rpcError)}</code>`);
+    }
   }
 
   const routingV817 = d?.productionV4RoutingDiagnosticV817 || null;
