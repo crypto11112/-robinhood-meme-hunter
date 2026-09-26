@@ -1,4 +1,17 @@
 /**
+ * V891 GECKO-COOLDOWN EXACT-POOL PRIORITY:
+ * - builds directly from deployed V890;
+ * - only while Gecko directional completion is actively deferred by the real
+ *   HTTP-429 cooldown, V151 prefers an otherwise-eligible candidate with a
+ *   verified exact on-chain PoolId over a candidate that is merely market-ready;
+ * - this aligns V151 with the V4/V887/V254 on-chain recovery path when Gecko
+ *   cannot service the selected token;
+ * - outside active Gecko 429 cooldown the existing V151 ranking is unchanged;
+ * - no extra provider requests, no request-limit increase, no risk/scoring/
+ *   Telegram threshold changes, and no changes to V258, V254 gates, V4 rescue,
+ *   V890 protected-slot ordering, Gecko cooldown enforcement or KV state.
+ */
+/**
  * V890 PROTECTED-LANE ORDERING FIX:
  * - builds directly from deployed V889;
  * - fixes the confirmed ordering bug where the V880 V258 lower-priority reserve
@@ -7726,7 +7739,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V890";
+const VERSION = "V891";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -104484,17 +104497,81 @@ for (
           )
       );
 
+  /*
+   * V891: during an ACTIVE Gecko 429 cooldown, a market-only V151 target cannot
+   * progress through Gecko. Prefer an otherwise-identical eligible candidate
+   * that already owns a verified exact V4 PoolId so V884/V887/V254 can continue
+   * through the on-chain evidence path. Outside that live cooldown, preserve
+   * the original V151 target ordering exactly.
+   */
+  const geckoDirectionalEligibilityV891 =
+    geckoDirectionalEligibilityV432(state);
+
+  const geckoActive429CooldownV891 =
+    geckoDirectionalEligibilityV891?.eligible !== true &&
+    geckoDirectionalEligibilityV891?.reason ===
+      "GECKO_DIRECTIONAL_DEFER_ACTIVE_429_COOLDOWN_V824";
+
+  const exactPoolDirectionalCandidatesV891 =
+    geckoActive429CooldownV891
+      ? preQualificationDirectionalPoolV151.filter(candidate => {
+          const identity = candidate?.onChainPoolIdentityV153;
+          const poolId = normalize(
+            identity?.poolId ||
+            identity?.pairAddress ||
+            ""
+          );
+          return (
+            identity?.verified === true &&
+            /^0x[a-f0-9]{64}$/.test(String(poolId || ""))
+          );
+        })
+      : [];
+
+  const cooldownExactPoolTargetV891 =
+    exactPoolDirectionalCandidatesV891[0] || null;
+
+  const alreadyQualifiedHasExactPoolV891 =
+    alreadyQualifiedDirectionalTargetV151?.onChainPoolIdentityV153?.verified === true &&
+    /^0x[a-f0-9]{64}$/.test(
+      String(
+        normalize(
+          alreadyQualifiedDirectionalTargetV151?.onChainPoolIdentityV153?.poolId ||
+          alreadyQualifiedDirectionalTargetV151?.onChainPoolIdentityV153?.pairAddress ||
+          ""
+        ) || ""
+      )
+    );
+
   const directionalTarget =
-    alreadyQualifiedDirectionalTargetV151 ||
-    preQualificationDirectionalPoolV151[0] ||
-    null;
+    geckoActive429CooldownV891 && cooldownExactPoolTargetV891
+      ? (
+          alreadyQualifiedDirectionalTargetV151 &&
+          alreadyQualifiedHasExactPoolV891
+            ? alreadyQualifiedDirectionalTargetV151
+            : cooldownExactPoolTargetV891
+        )
+      : (
+          alreadyQualifiedDirectionalTargetV151 ||
+          preQualificationDirectionalPoolV151[0] ||
+          null
+        );
 
   const directionalSelectionModeV151 =
-    alreadyQualifiedDirectionalTargetV151
-      ? "ALREADY_TELEGRAM_QUALIFIED"
-      : directionalTarget
-        ? "PREQUAL_HIGHEST_PRIORITY_VERIFIED_MARKET_OR_ONCHAIN_POOL"
-        : "NO_VERIFIED_MARKET_CANDIDATE";
+    geckoActive429CooldownV891 &&
+    directionalTarget &&
+    directionalTarget === cooldownExactPoolTargetV891 &&
+    !(
+      alreadyQualifiedDirectionalTargetV151 &&
+      alreadyQualifiedHasExactPoolV891
+    )
+      ? "V891_GECKO_COOLDOWN_VERIFIED_EXACT_POOL_PRIORITY"
+      : alreadyQualifiedDirectionalTargetV151 &&
+        directionalTarget === alreadyQualifiedDirectionalTargetV151
+        ? "ALREADY_TELEGRAM_QUALIFIED"
+        : directionalTarget
+          ? "PREQUAL_HIGHEST_PRIORITY_VERIFIED_MARKET_OR_ONCHAIN_POOL"
+          : "NO_VERIFIED_MARKET_CANDIDATE";
 
   if (
     earlyDirectionalTradeEnrichmentV175.selectedAddress
@@ -104683,6 +104760,18 @@ for (
         directionalTarget.symbol || null,
       selectionMode:
         directionalSelectionModeV151,
+      v891: {
+        activeGecko429Cooldown: geckoActive429CooldownV891 === true,
+        exactPoolCandidates: exactPoolDirectionalCandidatesV891.length,
+        exactPoolPriorityApplied:
+          directionalSelectionModeV151 ===
+            "V891_GECKO_COOLDOWN_VERIFIED_EXACT_POOL_PRIORITY",
+        originalAlreadyQualifiedAddress:
+          normalize(alreadyQualifiedDirectionalTargetV151?.address) || null,
+        selectedExactPoolAddress:
+          normalize(cooldownExactPoolTargetV891?.address) || null,
+        zeroExtraRequests: true
+      },
       preQualification:
         !Boolean(
           alreadyQualifiedDirectionalTargetV151
