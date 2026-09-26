@@ -1,4 +1,19 @@
 /**
+ * Robinhood Chain Meme Hunter — V872
+ *
+ * V872 EARLY V4 HEADROOM RESERVATION FIX:
+ * - builds directly from deployed V871;
+ * - fixes the V871 production case where a NORMAL_V772 target existed at final
+ *   routing but request usage had already reached 39/42, leaving no safe
+ *   three-request envelope for the bounded V772 production bridge;
+ * - allows V776 to reserve the existing three-slot V4 envelope earlier for an
+ *   analysed, acceptable-risk, under-evidenced candidate that has credible
+ *   potential to become the final V772 target after later evidence recomputes;
+ * - does NOT raise the 42-request ceiling or any analysis/provider allowance;
+ * - does NOT change risk decisions, scoring, Telegram qualification/thresholds,
+ *   provider routing, V4 matching/decoding, KV keys, or the one-target V772 cap.
+ */
+/**
  * Robinhood Chain Meme Hunter — V871
  *
  * V871 RISK-GATE REJECTION DIAGNOSTIC — READ ONLY:
@@ -7552,7 +7567,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V871";
+const VERSION = "V872";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -14341,7 +14356,39 @@ function activateProductionV4ReserveV776(budget, candidate, currentLiveVerifiedL
   if (!reserve || reserve.active === true) return reserve;
   const normalEligibleV813 = v772ProductionEligibleCandidate(candidate, currentLiveVerifiedLaunchTokensV621);
   const rescueEligibleV813 = !normalEligibleV813 && v813CoverageRescueEligibleCandidate(candidate, state);
-  if (!normalEligibleV813 && !rescueEligibleV813) return reserve;
+
+  /*
+   * V872 EARLY-POTENTIAL RESERVATION:
+   * V871 proved that a candidate can become NORMAL_V772-eligible only after
+   * later evidence/recompute work, by which point the scan can already be at
+   * 39/42. Preserve the same three EXISTING slots earlier when the candidate
+   * is already a valid, acceptable-risk, under-evidenced analysed candidate.
+   * This reserves requests only; it does not make the candidate V772-eligible.
+   */
+  const addressV872 = normalize(candidate?.address);
+  const riskAcceptableV872 =
+    candidate?.risk?.severeOverride !== true &&
+    String(candidate?.risk?.label || "").toUpperCase() !== "HIGH";
+  const alreadyVerifiedV872 =
+    candidate?.liveMomentumActivityV152?.verified === true &&
+    safeNumber(candidate?.liveMomentumActivityV152?.swaps) > 0;
+  const currentLiveV872 = currentLiveVerifiedLaunchTokensV621?.has(addressV872) === true;
+  const opportunityV872 = safeNumber(candidate?.opportunity?.score);
+  const confidenceV872 = safeNumber(candidate?.confidence?.score);
+  const analysedEvidenceV872 =
+    candidate?.market?.verified === true ||
+    candidate?.onChainPoolIdentityV153?.verified === true ||
+    opportunityV872 >= 20 ||
+    confidenceV872 >= 35;
+  const earlyPotentialV872 =
+    candidate?.validERC20 === true &&
+    isAddress(addressV872) &&
+    riskAcceptableV872 &&
+    sameRunTerminalReject(candidate)?.terminal !== true &&
+    !alreadyVerifiedV872 &&
+    (currentLiveV872 || analysedEvidenceV872);
+
+  if (!normalEligibleV813 && !rescueEligibleV813 && !earlyPotentialV872) return reserve;
 
   // Arm only when the real existing budget can currently fund all three V772 requests.
   if (!budgetAvailable(budget, "analysis", 3)) {
@@ -14355,7 +14402,11 @@ function activateProductionV4ReserveV776(budget, candidate, currentLiveVerifiedL
   reserve.firstEligibleAddress = normalize(candidate?.address) || null;
   reserve.activationReason = normalEligibleV813
     ? "FIRST_V772_ELIGIBLE_ANALYSED_CANDIDATE_V776"
-    : "FIRST_V813_ZERO_SWAP_COVERAGE_RESCUE_CANDIDATE";
+    : (
+        rescueEligibleV813
+          ? "FIRST_V813_ZERO_SWAP_COVERAGE_RESCUE_CANDIDATE"
+          : "EARLY_POTENTIAL_V772_CANDIDATE_V872"
+      );
   reserve.releasedAt = null;
   reserve.releaseReason = null;
   return reserve;
