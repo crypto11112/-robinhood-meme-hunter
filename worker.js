@@ -7567,7 +7567,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V872";
+const VERSION = "V873";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -106360,6 +106360,52 @@ for (
     }
   }
 
+  /* V873 diagnostic-only: trace the most recent authoritative post-recovery
+   * candidate through the FINAL Telegram loop. Zero provider requests, zero
+   * scoring/qualification changes, and no notification behaviour changes. */
+  {
+    const auditV873 = ensureQualificationAuditV663(state);
+    const postV873 = auditV873?.lastV254PostRecoveryScoreV809 || null;
+    const addressV873 = normalize(postV873?.address);
+    if (addressV873) {
+      const candidateV873 = (candidates || []).find(
+        row => normalize(row?.address) === addressV873
+      ) || null;
+      const resultV873 = (telegramResults || []).find(
+        row => normalize(row?.address) === addressV873
+      ) || null;
+      const previousV873 = state?.alerts?.[addressV873];
+      const previousTimestampV873 = typeof previousV873 === "object"
+        ? safeNumber(previousV873?.timestamp)
+        : safeNumber(previousV873);
+      const previousScoreV873 = typeof previousV873 === "object"
+        ? safeNumber(previousV873?.score)
+        : 0;
+      auditV873.lastTelegramHandoffTraceV873 = {
+        recordedAt: new Date().toISOString(),
+        runtimeVersion: VERSION,
+        address: addressV873,
+        candidatePresentInFinalArray: Boolean(candidateV873),
+        postRecoveryQualified: postV873?.qualifiesTelegram === true,
+        finalQualifiesTelegram: candidateV873 ? qualifiesTelegram(candidateV873) === true : false,
+        opportunityScore: safeNumber(candidateV873?.opportunity?.score),
+        confidenceScore: safeNumber(candidateV873?.confidence?.score),
+        telegramResultPresent: Boolean(resultV873),
+        sent: resultV873?.sent === true,
+        resultReason: resultV873?.reason || resultV873?.result?.reason || null,
+        telegramSuccess: resultV873?.result?.success === true,
+        telegramHttpStatus: resultV873?.result?.status ?? resultV873?.result?.httpStatus ?? null,
+        telegramError: resultV873?.result?.error || null,
+        notificationBudgetAvailableAfterLoop: budgetAvailable(budget, "notification"),
+        notificationRequestsUsed: safeNumber(budget?.notification?.used),
+        previousAlertTimestamp: previousTimestampV873 || null,
+        previousAlertScore: previousScoreV873,
+        alertStatePresentAfterLoop: Boolean(previousV873),
+        diagnosticOnly: true
+      };
+    }
+  }
+
   /*
    * V174:
    * Telegram evaluation/sending is now finished. Any notification capacity
@@ -125890,6 +125936,21 @@ function evidenceAuditTelegramMessageV727(state) {
       `Momentum: <b>${fmt(postRecoveryV809.momentumScore)}</b> ${escapeHtml(postRecoveryV809.momentumLabel || "")}`,
       `Opportunity: <b>${fmt(postRecoveryV809.opportunityScore)}</b> · Confidence: <b>${fmt(postRecoveryV809.confidenceScore)}</b> ${escapeHtml(postRecoveryV809.confidenceLabel || "")}`,
       `Telegram-qualified after recompute: <b>${postRecoveryV809.qualifiesTelegram ? "YES" : "NO"}</b>`,
+      ""
+    );
+  }
+  const telegramTraceV873 = d?.lastTelegramHandoffTraceV873 || null;
+  if (telegramTraceV873) {
+    lines.push(
+      `📲 <b>Post-recovery Telegram handoff trace — ${escapeHtml(telegramTraceV873.runtimeVersion || "V873")}</b>`,
+      `Recorded: <code>${escapeHtml(telegramTraceV873.recordedAt || "UNVERIFIED")}</code>`,
+      `Candidate: <code>${escapeHtml(telegramTraceV873.address || "UNVERIFIED")}</code>`,
+      `Final candidate present: <b>${telegramTraceV873.candidatePresentInFinalArray ? "YES" : "NO"}</b> · post-recovery qualified: <b>${telegramTraceV873.postRecoveryQualified ? "YES" : "NO"}</b> · final qualifiesTelegram: <b>${telegramTraceV873.finalQualifiesTelegram ? "YES" : "NO"}</b>`,
+      `Final score: Opportunity <b>${fmt(telegramTraceV873.opportunityScore)}</b> · Confidence <b>${fmt(telegramTraceV873.confidenceScore)}</b>`,
+      `Telegram result row: <b>${telegramTraceV873.telegramResultPresent ? "YES" : "NO"}</b> · sent: <b>${telegramTraceV873.sent ? "YES" : "NO"}</b> · API success: <b>${telegramTraceV873.telegramSuccess ? "YES" : "NO"}</b>`,
+      `Result reason: <b>${escapeHtml(telegramTraceV873.resultReason || "NONE")}</b> · HTTP: <b>${escapeHtml(String(telegramTraceV873.telegramHttpStatus ?? "N/A"))}</b> · error: <b>${escapeHtml(telegramTraceV873.telegramError || "NONE")}</b>`,
+      `Notification used: <b>${fmt(telegramTraceV873.notificationRequestsUsed)}</b> · budget available after loop: <b>${telegramTraceV873.notificationBudgetAvailableAfterLoop ? "YES" : "NO"}</b>`,
+      `Alert state after loop: <b>${telegramTraceV873.alertStatePresentAfterLoop ? "YES" : "NO"}</b> · previous/recorded score: <b>${fmt(telegramTraceV873.previousAlertScore)}</b>`,
       ""
     );
   }
