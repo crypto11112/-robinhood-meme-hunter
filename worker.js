@@ -1,4 +1,6 @@
 /**
+ * V884 COINGECKO-COOLDOWN ON-CHAIN DIRECTIONAL FALLBACK (see runtime code).
+ *
  * Robinhood Chain Meme Hunter — V883
  *
 
@@ -7645,7 +7647,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V883";
+const VERSION = "V884";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -59943,6 +59945,99 @@ async function geckoDirectionalTradeFlow(
     directionalEligibilityV432
       .eligible !== true
   ) {
+    /*
+     * V884: do not weaken or bypass the real Gecko 429 cooldown.
+     * Instead, when the exact V4 PoolId is already verified, reuse ONLY
+     * candidate-matched exact-USD on-chain rows already persisted by V179/V212.
+     * This adds zero provider requests and accepts the fallback only when the
+     * CURRENT exact PoolId is actually represented in the verified flow.
+     */
+    const activeGecko429CooldownV884 =
+      directionalEligibilityV432.reason ===
+        "GECKO_DIRECTIONAL_DEFER_ACTIVE_429_COOLDOWN_V824";
+
+    if (
+      activeGecko429CooldownV884 &&
+      onChainIdentityVerifiedV153 === true
+    ) {
+      const onChainFlowV884 =
+        applyCandidateVerifiedOnChainFlowV212(
+          candidate,
+          state
+        );
+
+      const exactPoolIdV884 =
+        normalize(
+          onChainIdentityV153?.poolId ||
+          onChainIdentityV153?.pairAddress ||
+          ""
+        );
+
+      const flowPoolIdsV884 =
+        Array.isArray(onChainFlowV884?.poolIds)
+          ? onChainFlowV884.poolIds.map(normalize).filter(Boolean)
+          : [];
+
+      const exactPoolMatchedV884 =
+        /^0x[a-f0-9]{64}$/.test(exactPoolIdV884) &&
+        flowPoolIdsV884.includes(exactPoolIdV884);
+
+      if (
+        onChainFlowV884?.verified === true &&
+        exactPoolMatchedV884
+      ) {
+        const fallbackWindowsV884 = {};
+
+        for (const keyV884 of ["m5", "m15", "h1", "h6", "h24"]) {
+          const rowV884 = onChainFlowV884?.windows?.[keyV884];
+          if (!rowV884) continue;
+
+          fallbackWindowsV884[keyV884] = {
+            ...rowV884,
+            source: "ONCHAIN_DIRECTIONAL_V179_CANDIDATE_MATCHED_V212",
+            asOfAt: Date.now(),
+            coverageComplete: false,
+            returnedTrades: safeNumber(rowV884?.observedTrades),
+            countCrossCheck: {
+              verified: false,
+              reason: "V884_ONCHAIN_OBSERVED_EXACT_POOL_FLOW_NOT_PROVIDER_COUNT_MATCHED"
+            }
+          };
+        }
+
+        return {
+          attempted: false,
+          verifiedAnyWindow: true,
+          status: "V884_VERIFIED_ONCHAIN_DIRECTIONAL_FALLBACK_DURING_GECKO_COOLDOWN",
+          source: "ONCHAIN_DIRECTIONAL_V179_CANDIDATE_MATCHED_V212",
+          poolIdentitySourceV153,
+          onChainPoolIdentityUsedV153: true,
+          marketVerifiedForPoolIdentityV153: marketIdentityVerifiedV153,
+          poolAddress,
+          targetTokenSide: targetSide,
+          returnedCount: safeNumber(onChainFlowV884?.recordCount),
+          windows: fallbackWindowsV884,
+          v884: {
+            fallbackUsed: true,
+            zeroProviderRequests: true,
+            geckoCooldownPreserved: true,
+            geckoDeferredStatus: directionalEligibilityV432.reason,
+            exactPoolId: exactPoolIdV884,
+            exactPoolMatchedInVerifiedFlow: exactPoolMatchedV884,
+            verifiedRecords: safeNumber(onChainFlowV884?.recordCount),
+            flowPoolIds: flowPoolIdsV884
+          },
+          v432: {
+            optionalDirectionalDeferred: true,
+            marketFallbackPreserved: true,
+            last429At: directionalEligibilityV432.last429At,
+            lastSuccessAt: directionalEligibilityV432.lastSuccessAt,
+            ageSince429Ms: directionalEligibilityV432.ageSince429Ms ?? null
+          }
+        };
+      }
+    }
+
     return {
       attempted:
         false,
@@ -59953,6 +60048,15 @@ async function geckoDirectionalTradeFlow(
       status:
         directionalEligibilityV432
           .reason,
+
+      v884: {
+        fallbackUsed: false,
+        zeroProviderRequests: true,
+        geckoCooldownPreserved: true,
+        reason: activeGecko429CooldownV884
+          ? "NO_MATCHING_VERIFIED_EXACT_POOL_ONCHAIN_FLOW"
+          : "GECKO_DEFER_NOT_ACTIVE_429_COOLDOWN"
+      },
 
       v432: {
         optionalDirectionalDeferred:
