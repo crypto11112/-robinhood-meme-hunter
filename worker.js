@@ -1,5 +1,12 @@
 /**
- * Robinhood Chain Meme Hunter — V881
+ * Robinhood Chain Meme Hunter — V882
+ *
+ * V882 DIRECTIONAL-USD ATTEMPT STARVATION TRACE:
+ * - builds directly from deployed V881 and changes no scanner/scoring/qualification/provider behaviour;
+ * - records one current-scan V175/V151 directional completion snapshot after the directional stage;
+ * - exposes the selected target, attempt/result status, Gecko fresh-request usage/cooldown state, FLOW reserve consumption/release, and live request-budget position;
+ * - /evidenceaudit prints that current snapshot so selected-but-not-attempted directional enrichment can be traced to the exact gate instead of inferred from cumulative counters;
+ * - diagnostic only: no extra provider requests, no threshold changes, no request-ceiling changes, no V258/V254/V4/risk/KV logic changes.
  *
  * V881 HOTFIX: fixes /evidenceaudit ReferenceError caused by V880 reading an out-of-scope live scan context. Scanner/budget behaviour unchanged.
  * V880 REQUEST-HEADROOM + V258 PROTECTED TIMESTAMP SLOT:
@@ -7631,7 +7638,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V881";
+const VERSION = "V882";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -103834,6 +103841,81 @@ for (
         : "V151_DIRECTIONAL_STAGE_NO_ATTEMPT_V822"
     );
 
+
+  /*
+   * V882 diagnostic only: persist the exact current-scan directional handoff
+   * state after V175/V151 have had their opportunity and after the FLOW slot
+   * has been released/consumed. No provider call is made here.
+   */
+  {
+    const geckoSvcV882 =
+      state?.services?.geckoterminal && typeof state.services.geckoterminal === "object"
+        ? state.services.geckoterminal
+        : {};
+    const flowReserveV882 = budget?.analysis?.evidenceCompletionReserveV728 || {};
+    state.directionalCompletionDiagnosticV882 = {
+      version: "V882_1",
+      runtimeVersion: VERSION,
+      recordedAt: new Date().toISOString(),
+      v175: {
+        selectedAddress: normalize(earlyDirectionalTradeEnrichmentV175?.selectedAddress) || null,
+        symbol: earlyDirectionalTradeEnrichmentV175?.symbol || null,
+        eligible: earlyDirectionalTradeEnrichmentV175?.eligible === true,
+        attempted: earlyDirectionalTradeEnrichmentV175?.attempted === true,
+        verifiedAnyWindow: earlyDirectionalTradeEnrichmentV175?.verifiedAnyWindow === true,
+        status: earlyDirectionalTradeEnrichmentV175?.status || null,
+        poolAddress: earlyDirectionalTradeEnrichmentV175?.poolAddress || null,
+        targetTokenSide: earlyDirectionalTradeEnrichmentV175?.targetTokenSide || null
+      },
+      v151: {
+        address: normalize(directionalTradeEnrichment?.address) || null,
+        symbol: directionalTradeEnrichment?.symbol || null,
+        selectionMode: directionalTradeEnrichment?.selectionMode || directionalSelectionModeV151 || null,
+        attempted: directionalTradeEnrichment?.attempted === true,
+        verifiedAnyWindow: directionalTradeEnrichment?.verifiedAnyWindow === true,
+        status: directionalTradeEnrichment?.status || null,
+        poolAddress: directionalTradeEnrichment?.poolAddress || null,
+        targetTokenSide: directionalTradeEnrichment?.targetTokenSide || null,
+        eligibleVerifiedMarketCandidates: safeNumber(
+          directionalTradeEnrichment?.eligibleVerifiedMarketCandidates ??
+          preQualificationDirectionalPoolV151?.length
+        )
+      },
+      gecko: {
+        freshUsedThisScan: safeNumber(budget?.analysis?.geckoFreshUsed),
+        freshPerScanLimit: safeNumber(GECKOTERMINAL_MAX_FRESH_PER_SCAN),
+        cooldownUntil: geckoSvcV882?.cooldownUntil || null,
+        last429At: geckoSvcV882?.last429At || null,
+        lastSuccessAt: geckoSvcV882?.lastSuccessAt || null,
+        lastStatus: geckoSvcV882?.lastStatus || null,
+        consecutive429s: safeNumber(geckoSvcV882?.consecutive429s),
+        total429s: safeNumber(geckoSvcV882?.total429s),
+        totalRequests: safeNumber(geckoSvcV882?.totalRequests)
+      },
+      flowReserve: {
+        initialReservedRequests: safeNumber(flowReserveV882?.initialReservedRequests),
+        flowReservedRemaining: safeNumber(flowReserveV882?.flowReservedRequestsV822),
+        flowConsumed: safeNumber(flowReserveV882?.flowConsumedV822),
+        flowReleasedUnused: safeNumber(flowReserveV882?.flowReleasedUnusedV822),
+        flowReleaseReason: flowReserveV882?.flowReleaseReasonV822 || null,
+        lowerPriorityRequestsBlocked: safeNumber(flowReserveV882?.lowerPriorityRequestsBlocked),
+        releaseResult: evidenceCompletionFlowReleaseV822 || null
+      },
+      budget: {
+        totalUsed: safeNumber(budget?.totalUsed),
+        totalLimit: safeNumber(budget?.totalLimit),
+        analysisUsed: safeNumber(budget?.analysis?.used),
+        analysisLimit: safeNumber(budget?.analysis?.effectiveLimit || budget?.analysis?.limit),
+        notificationUsed: safeNumber(budget?.notification?.used),
+        notificationLimit: safeNumber(budget?.notification?.limit)
+      },
+      diagnosticOnly: true,
+      providerRequestsAdded: 0,
+      scoringChanged: false,
+      qualificationChanged: false
+    };
+  }
+
   /*
    * V801: one protected completion target per scan, still using the exact same
    * V254 request envelope.  The old ordering required Telegram qualification
@@ -126226,6 +126308,8 @@ function evidenceAuditSnapshotV727(state) {
       state?.qualificationAuditV663?.lastV254PostRecoveryScoreV809 || null,
     productionV4RoutingDiagnosticV817:
       state?.productionV4RoutingDiagnosticV817 || null,
+    directionalCompletionDiagnosticV882:
+      state?.directionalCompletionDiagnosticV882 || null,
     interpretation: {
       noEvidenceIsPromoted: true,
       noProviderRequests: true,
@@ -126335,7 +126419,29 @@ function evidenceAuditTelegramMessageV727(state) {
     "💵 <b>Directional completion lanes</b>",
     `V175 early lane: eligible <b>${fmt(c.v175Eligible)}</b> · selected <b>${fmt(c.v175Selected)}</b> · attempted <b>${fmt(c.v175Attempted)}</b> · verified <b>${fmt(c.v175Verified)}</b>`,
     `V151 prequal lane: eligible <b>${fmt(c.v151Eligible)}</b> · selected <b>${fmt(c.v151Selected)}</b> · attempted <b>${fmt(c.v151Attempted)}</b> · verified <b>${fmt(c.v151Verified)}</b>`,
-    `V254 exact-USD lane: eligible <b>${fmt(c.v254Eligible)}</b> · selected <b>${fmt(c.v254Selected)}</b> · attempted <b>${fmt(c.v254Attempted)}</b> · recovered <b>${fmt(c.v254Recovered)}</b>`,
+    `V254 exact-USD lane: eligible <b>${fmt(c.v254Eligible)}</b> · selected <b>${fmt(c.v254Selected)}</b> · attempted <b>${fmt(c.v254Attempted)}</b> · recovered <b>${fmt(c.v254Recovered)}</b>`
+  );
+  const directionalV882 = d?.directionalCompletionDiagnosticV882 || null;
+  if (directionalV882) {
+    const g882 = directionalV882?.gecko || {};
+    const f882 = directionalV882?.flowReserve || {};
+    const b882 = directionalV882?.budget || {};
+    const v175x = directionalV882?.v175 || {};
+    const v151x = directionalV882?.v151 || {};
+    lines.push(
+      "",
+      `🧭 <b>Current directional-attempt trace — ${escapeHtml(directionalV882.runtimeVersion || "V882")}</b>`,
+      `Recorded: <code>${escapeHtml(directionalV882.recordedAt || "UNVERIFIED")}</code>`,
+      `V175 target: <code>${escapeHtml(v175x.selectedAddress || "NONE")}</code> · attempted <b>${v175x.attempted ? "YES" : "NO"}</b> · verified <b>${v175x.verifiedAnyWindow ? "YES" : "NO"}</b> · status <b>${escapeHtml(v175x.status || "NONE")}</b>`,
+      `V151 target: <code>${escapeHtml(v151x.address || "NONE")}</code> · mode <b>${escapeHtml(v151x.selectionMode || "NONE")}</b> · attempted <b>${v151x.attempted ? "YES" : "NO"}</b> · verified <b>${v151x.verifiedAnyWindow ? "YES" : "NO"}</b> · status <b>${escapeHtml(v151x.status || "NONE")}</b>`,
+      `Pool / side: <code>${escapeHtml(v151x.poolAddress || v175x.poolAddress || "NONE")}</code> / <b>${escapeHtml(v151x.targetTokenSide || v175x.targetTokenSide || "UNVERIFIED")}</b>`,
+      `Gecko fresh used: <b>${fmt(g882.freshUsedThisScan)}</b>/${fmt(g882.freshPerScanLimit)} · last status <b>${escapeHtml(g882.lastStatus || "NONE")}</b> · consecutive 429s <b>${fmt(g882.consecutive429s)}</b>`,
+      `Gecko cooldown until: <code>${escapeHtml(String(g882.cooldownUntil || "NONE"))}</code> · last 429: <code>${escapeHtml(String(g882.last429At || "NONE"))}</code> · last success: <code>${escapeHtml(String(g882.lastSuccessAt || "NONE"))}</code>`,
+      `FLOW reserve — consumed <b>${fmt(f882.flowConsumed)}</b> · released-unused <b>${fmt(f882.flowReleasedUnused)}</b> · reason <b>${escapeHtml(f882.flowReleaseReason || "NONE")}</b>`,
+      `Budget after directional stage — total <b>${fmt(b882.totalUsed)}</b>/${fmt(b882.totalLimit)} · analysis <b>${fmt(b882.analysisUsed)}</b>/${fmt(b882.analysisLimit)}`
+    );
+  }
+  lines.push(
     "",
     "⏱ <b>Launch-age completion V258</b>",
     `Needed <b>${fmt(c.v258Needed)}</b> · selected <b>${fmt(c.v258Selected)}</b> · attempted <b>${fmt(c.v258Attempted)}</b> · recovered <b>${fmt(c.v258Recovered)}</b>`
