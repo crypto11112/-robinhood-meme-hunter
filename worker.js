@@ -1,4 +1,13 @@
 /**
+ * V886 VERIFIED EXACT-POOL DIRECTIONAL HANDOFF + SPACING FALLBACK:
+ * - builds directly from deployed V885;
+ * - preserves V885's verified exact-pool identity normalisation and adds a strict recovery bridge from the already-proven production V4 handoff only when exactly one PoolId can be resolved against the canonical pool registry for the same token;
+ * - keeps CoinGecko/GeckoTerminal rate-limit protection unchanged;
+ * - allows the existing candidate-matched verified on-chain directional fallback to run during GECKOTERMINAL_FRESH_SPACING as well as active 429 cooldown, with zero extra provider requests;
+ * - deferred fresh-spacing results now preserve PoolId / pool address / token side diagnostics instead of returning NONE / UNVERIFIED when identity is already known;
+ * - no threshold, scoring, V4 routing, V258, V254, KV, Telegram or 48-request-ceiling changes.
+ */
+/**
  * V885 VERIFIED DIRECTIONAL IDENTITY HANDOFF PRESERVATION:
  * - builds directly from deployed V884;
  * - normalizes an already-verified exact V4 identity before V175/V151 provider execution so pairAddress/target side are not lost between candidate analysis and directional fallback;
@@ -7656,7 +7665,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V885";
+const VERSION = "V886";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -59837,6 +59846,70 @@ function directionalIdentityHandoffV885(candidate, state) {
   const original = candidate?.onChainPoolIdentityV153;
   let identity = original && typeof original === "object" ? { ...original } : null;
 
+  /*
+   * V886: if the ordinary candidate identity is absent/incomplete but production
+   * V4 has already proven exactly one PoolId for this SAME candidate, recover
+   * only from that exact PoolId and the canonical local pool registry.
+   * No multi-pool guessing and no provider request is allowed here.
+   */
+  const originalPoolIdV886 = normalize(identity?.poolId || identity?.pairAddress || "");
+  const productionPoolIdsV886 = [
+    ...(Array.isArray(candidate?.productionV4ExactPoolHandoffV802?.mergedPoolIds)
+      ? candidate.productionV4ExactPoolHandoffV802.mergedPoolIds
+      : []),
+    ...(Array.isArray(candidate?.productionV4ExactPoolHandoffV802?.matchedPoolIds)
+      ? candidate.productionV4ExactPoolHandoffV802.matchedPoolIds
+      : []),
+    ...(Array.isArray(candidate?.liveMomentumActivityV152?.matchingPoolIds)
+      ? candidate.liveMomentumActivityV152.matchingPoolIds
+      : [])
+  ]
+    .map(normalize)
+    .filter(value => /^0x[a-f0-9]{64}$/.test(String(value || "")));
+
+  const uniqueProductionPoolIdsV886 = [...new Set(productionPoolIdsV886)];
+  const recoveredPoolIdV886 =
+    /^0x[a-f0-9]{64}$/.test(String(originalPoolIdV886 || ""))
+      ? originalPoolIdV886
+      : uniqueProductionPoolIdsV886.length === 1
+        ? uniqueProductionPoolIdsV886[0]
+        : "";
+
+  if (
+    (!identity || identity?.verified !== true || !/^0x[a-f0-9]{64}$/.test(String(originalPoolIdV886 || ""))) &&
+    /^0x[a-f0-9]{64}$/.test(String(recoveredPoolIdV886 || ""))
+  ) {
+    const registryV886 = state?.poolRegistry?.[recoveredPoolIdV886] || null;
+    const currency0V886 = normalize(registryV886?.currency0 || registryV886?.tokenA || "");
+    const currency1V886 = normalize(registryV886?.currency1 || registryV886?.tokenB || "");
+    const tokenIs0V886 = isAddress(token) && currency0V886 === token;
+    const tokenIs1V886 = isAddress(token) && currency1V886 === token;
+
+    if (
+      (tokenIs0V886 || tokenIs1V886) &&
+      (isAddress(currency0V886) || currency0V886 === ZERO) &&
+      (isAddress(currency1V886) || currency1V886 === ZERO) &&
+      currency0V886 !== currency1V886
+    ) {
+      identity = {
+        ...(identity || {}),
+        verified: true,
+        status: identity?.status || "PRODUCTION_V4_EXACT_POOL_HANDOFF_RECOVERED_V886",
+        source: identity?.source || "PRODUCTION_V4_EXACT_POOL_HANDOFF_PLUS_REGISTRY_V886",
+        poolId: recoveredPoolIdV886,
+        pairAddress: recoveredPoolIdV886,
+        candidateAddress: token,
+        quoteTokenAddress: tokenIs0V886 ? currency1V886 : currency0V886,
+        targetTokenSide: "BASE",
+        candidateCurrencyIndexV740: tokenIs0V886 ? 0 : 1,
+        currency0V740: currency0V886,
+        currency1V740: currency1V886,
+        recoveredFromProductionHandoffV886: true
+      };
+      candidate.onChainPoolIdentityV153 = identity;
+    }
+  }
+
   const poolId = normalize(identity?.poolId || identity?.pairAddress || "");
   const registry = /^0x[a-f0-9]{64}$/.test(String(poolId || ""))
     ? state?.poolRegistry?.[poolId]
@@ -59885,6 +59958,8 @@ function directionalIdentityHandoffV885(candidate, state) {
     marketTargetTokenSide: marketSide || null,
     identitySource: identity?.source || null,
     identityStatus: identity?.status || null,
+    recoveredFromProductionHandoffV886: identity?.recoveredFromProductionHandoffV886 === true,
+    productionPoolIdsConsideredV886: uniqueProductionPoolIdsV886,
     zeroProviderRequests: true
   };
 }
@@ -60191,6 +60266,115 @@ async function geckoDirectionalTradeFlow(
   if (
     !freshEligibility.eligible
   ) {
+    /*
+     * V886: fresh-spacing is our own request-spacing guard, not a failure of the
+     * candidate. If the exact current V4 PoolId already has candidate-matched
+     * verified on-chain USD flow, reuse that evidence with ZERO provider
+     * requests rather than idling solely because the next Gecko request is not
+     * yet due. The same strict exact-PoolId match used by V884 is preserved.
+     */
+    const spacingOrCooldownV886 =
+      freshEligibility.reason === "GECKOTERMINAL_FRESH_SPACING" ||
+      freshEligibility.reason === "GECKOTERMINAL_COOLDOWN";
+
+    if (
+      spacingOrCooldownV886 &&
+      onChainIdentityVerifiedV153 === true
+    ) {
+      const onChainFlowV886 =
+        applyCandidateVerifiedOnChainFlowV212(
+          candidate,
+          state
+        );
+
+      const exactPoolIdV886 =
+        normalize(
+          onChainIdentityV153?.poolId ||
+          onChainIdentityV153?.pairAddress ||
+          ""
+        );
+
+      const flowPoolIdsV886 =
+        Array.isArray(onChainFlowV886?.poolIds)
+          ? onChainFlowV886.poolIds.map(normalize).filter(Boolean)
+          : [];
+
+      const exactPoolMatchedV886 =
+        /^0x[a-f0-9]{64}$/.test(String(exactPoolIdV886 || "")) &&
+        flowPoolIdsV886.includes(exactPoolIdV886);
+
+      if (
+        onChainFlowV886?.verified === true &&
+        exactPoolMatchedV886
+      ) {
+        const fallbackWindowsV886 = {};
+
+        for (const keyV886 of ["m5", "m15", "h1", "h6", "h24"]) {
+          const rowV886 = onChainFlowV886?.windows?.[keyV886];
+          if (!rowV886) continue;
+
+          fallbackWindowsV886[keyV886] = {
+            ...rowV886,
+            source: "ONCHAIN_DIRECTIONAL_V179_CANDIDATE_MATCHED_V212",
+            asOfAt: Date.now(),
+            coverageComplete: false,
+            returnedTrades: safeNumber(rowV886?.observedTrades),
+            countCrossCheck: {
+              verified: false,
+              reason: "V886_ONCHAIN_OBSERVED_EXACT_POOL_FLOW_NOT_PROVIDER_COUNT_MATCHED"
+            }
+          };
+        }
+
+        return {
+          attempted: false,
+          verifiedAnyWindow: true,
+          status: "V886_VERIFIED_ONCHAIN_DIRECTIONAL_FALLBACK_DURING_GECKO_DEFER",
+          source: "ONCHAIN_DIRECTIONAL_V179_CANDIDATE_MATCHED_V212",
+          poolIdentitySourceV153,
+          onChainPoolIdentityUsedV153: true,
+          marketVerifiedForPoolIdentityV153: marketIdentityVerifiedV153,
+          poolAddress,
+          targetTokenSide: targetSide,
+          directionalIdentityV885,
+          returnedCount: safeNumber(onChainFlowV886?.recordCount),
+          windows: fallbackWindowsV886,
+          cooldownUntil:
+            freshEligibility.reason === "GECKOTERMINAL_COOLDOWN"
+              ? freshEligibility.eligibleAt
+              : null,
+          freshEligibleAt: freshEligibility.eligibleAt,
+          v886: {
+            fallbackUsed: true,
+            zeroProviderRequests: true,
+            geckoGuardPreserved: true,
+            geckoDeferredStatus: freshEligibility.reason,
+            exactPoolId: exactPoolIdV886,
+            exactPoolMatchedInVerifiedFlow: exactPoolMatchedV886,
+            verifiedRecords: safeNumber(onChainFlowV886?.recordCount),
+            flowPoolIds: flowPoolIdsV886
+          }
+        };
+      }
+    }
+
+    const diagnosticFlowV886 =
+      spacingOrCooldownV886
+        ? candidateVerifiedOnChainFlowV212(candidate, state)
+        : null;
+
+    const diagnosticExactPoolIdV886 =
+      normalize(
+        onChainIdentityV153?.poolId ||
+        onChainIdentityV153?.pairAddress ||
+        ""
+      );
+
+    const diagnosticFlowPoolIdsV886 =
+      Array.isArray(diagnosticFlowV886?.poolIds)
+        ? diagnosticFlowV886.poolIds.map(normalize).filter(Boolean)
+        : [];
+
     return {
       attempted:
         false,
@@ -60201,6 +60385,15 @@ async function geckoDirectionalTradeFlow(
       status:
         freshEligibility.reason,
 
+      poolAddress:
+        poolAddress || null,
+
+      targetTokenSide:
+        targetSide || null,
+
+      poolIdentitySourceV153,
+      directionalIdentityV885,
+
       cooldownUntil:
         freshEligibility.reason ===
           "GECKOTERMINAL_COOLDOWN"
@@ -60208,7 +60401,24 @@ async function geckoDirectionalTradeFlow(
           : null,
 
       freshEligibleAt:
-        freshEligibility.eligibleAt
+        freshEligibility.eligibleAt,
+
+      v886: {
+        fallbackUsed: false,
+        zeroProviderRequests: true,
+        geckoGuardPreserved: true,
+        geckoDeferredStatus: freshEligibility.reason,
+        exactPoolId:
+          /^0x[a-f0-9]{64}$/.test(String(diagnosticExactPoolIdV886 || ""))
+            ? diagnosticExactPoolIdV886
+            : null,
+        verifiedFlowAvailable: diagnosticFlowV886?.verified === true,
+        verifiedFlowRecords: safeNumber(diagnosticFlowV886?.recordCount),
+        flowPoolIds: diagnosticFlowPoolIdsV886,
+        exactPoolMatchedInVerifiedFlow:
+          /^0x[a-f0-9]{64}$/.test(String(diagnosticExactPoolIdV886 || "")) &&
+          diagnosticFlowPoolIdsV886.includes(diagnosticExactPoolIdV886)
+      }
     };
   }
 
