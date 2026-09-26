@@ -1,6 +1,13 @@
 /**
- * Robinhood Chain Meme Hunter — V882
+ * Robinhood Chain Meme Hunter — V883
  *
+
+ * V883 DIRECTIONAL TARGET HANDOFF GATE TRACE:
+ * - builds directly from V882 and changes no scanner/scoring/qualification/provider behaviour;
+ * - records the exact current candidate counts through the V175/V151 target gates (ERC20, terminal, risk, market, exact-pool, current-live and final directional eligibility);
+ * - records whether the persisted V176 unresolved directional target is present in the analysed candidate set and which gate it fails;
+ * - /evidenceaudit exposes these counts/reasons so the next behavioural fix can target the proven handoff blocker rather than CoinGecko or budget by guesswork;
+ * - diagnostic only: zero extra provider requests and no request-ceiling/cooldown/threshold/V258/V254/V4/KV changes.
  * V882 DIRECTIONAL-USD ATTEMPT STARVATION TRACE:
  * - builds directly from deployed V881 and changes no scanner/scoring/qualification/provider behaviour;
  * - records one current-scan V175/V151 directional completion snapshot after the directional stage;
@@ -7638,7 +7645,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V882";
+const VERSION = "V883";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -103853,10 +103860,71 @@ for (
         ? state.services.geckoterminal
         : {};
     const flowReserveV882 = budget?.analysis?.evidenceCompletionReserveV728 || {};
+
+    /* V883 diagnostic-only: trace the exact handoff gates before provider execution. */
+    const directionalGateRowsV883 = (Array.isArray(candidates) ? candidates : []).map(candidate => {
+      const addressV883 = normalize(candidate?.address);
+      const terminalV883 = sameRunTerminalAddresses.has(addressV883);
+      const riskOkV883 = candidate?.risk?.severeOverride !== true && String(candidate?.risk?.label || "").toUpperCase() !== "HIGH";
+      const marketVerifiedV883 = candidate?.market?.verified === true;
+      const pairAddressV883 = candidate?.market?.pairAddress || null;
+      const sideV883 = String(candidate?.market?.targetTokenSide || "").toUpperCase();
+      const marketDirectionalReadyV883 = marketVerifiedV883 && Boolean(pairAddressV883) && (sideV883 === "BASE" || sideV883 === "QUOTE");
+      const poolIdentityVerifiedV883 = candidate?.onChainPoolIdentityV153?.verified === true;
+      const currentLiveV883 = currentLiveVerifiedLaunchTokensV621.has(addressV883);
+      const finalEligibleV883 = candidate?.validERC20 === true && (marketDirectionalReadyV883 || poolIdentityVerifiedV883) && !terminalV883 && riskOkV883;
+      const reasonsV883 = [];
+      if (candidate?.validERC20 !== true) reasonsV883.push("ERC20_NOT_VERIFIED");
+      if (terminalV883) reasonsV883.push("SAME_RUN_TERMINAL");
+      if (!riskOkV883) reasonsV883.push("RISK_NOT_ACCEPTABLE");
+      if (!marketDirectionalReadyV883 && !poolIdentityVerifiedV883) reasonsV883.push("NO_VERIFIED_MARKET_OR_POOL_IDENTITY");
+      return {
+        address: addressV883 || null,
+        symbol: candidate?.symbol || candidate?.validation?.symbol || null,
+        validERC20: candidate?.validERC20 === true,
+        terminal: terminalV883,
+        riskOk: riskOkV883,
+        marketVerified: marketVerifiedV883,
+        marketDirectionalReady: marketDirectionalReadyV883,
+        poolIdentityVerified: poolIdentityVerifiedV883,
+        currentLive: currentLiveV883,
+        finalEligible: finalEligibleV883,
+        reasons: reasonsV883,
+        opportunity: safeNumber(candidate?.opportunity),
+        confidence: safeNumber(candidate?.confidence),
+        analysisPriority: safeNumber(candidate?.analysisPriority)
+      };
+    });
+    const pendingV176AddressV883 = normalize(state?.directionalUsdPriorityV176?.address);
+    const pendingV176RowV883 = pendingV176AddressV883
+      ? (directionalGateRowsV883.find(row => row.address === pendingV176AddressV883) || null)
+      : null;
+    const directionalGateCountsV883 = {
+      candidates: directionalGateRowsV883.length,
+      validERC20: directionalGateRowsV883.filter(row => row.validERC20).length,
+      nonTerminal: directionalGateRowsV883.filter(row => !row.terminal).length,
+      riskOk: directionalGateRowsV883.filter(row => row.riskOk).length,
+      marketVerified: directionalGateRowsV883.filter(row => row.marketVerified).length,
+      marketDirectionalReady: directionalGateRowsV883.filter(row => row.marketDirectionalReady).length,
+      poolIdentityVerified: directionalGateRowsV883.filter(row => row.poolIdentityVerified).length,
+      currentLive: directionalGateRowsV883.filter(row => row.currentLive).length,
+      finalEligible: directionalGateRowsV883.filter(row => row.finalEligible).length
+    };
+
     state.directionalCompletionDiagnosticV882 = {
-      version: "V882_1",
+      version: "V883_1",
       runtimeVersion: VERSION,
       recordedAt: new Date().toISOString(),
+      handoffGatesV883: {
+        counts: directionalGateCountsV883,
+        pendingV176Address: pendingV176AddressV883 || null,
+        pendingV176PresentInCandidates: Boolean(pendingV176RowV883),
+        pendingV176Row: pendingV176RowV883,
+        topRows: directionalGateRowsV883
+          .slice()
+          .sort((a,b) => safeNumber(b?.analysisPriority) - safeNumber(a?.analysisPriority))
+          .slice(0, 6)
+      },
       v175: {
         selectedAddress: normalize(earlyDirectionalTradeEnrichmentV175?.selectedAddress) || null,
         symbol: earlyDirectionalTradeEnrichmentV175?.symbol || null,
@@ -126440,6 +126508,20 @@ function evidenceAuditTelegramMessageV727(state) {
       `FLOW reserve — consumed <b>${fmt(f882.flowConsumed)}</b> · released-unused <b>${fmt(f882.flowReleasedUnused)}</b> · reason <b>${escapeHtml(f882.flowReleaseReason || "NONE")}</b>`,
       `Budget after directional stage — total <b>${fmt(b882.totalUsed)}</b>/${fmt(b882.totalLimit)} · analysis <b>${fmt(b882.analysisUsed)}</b>/${fmt(b882.analysisLimit)}`
     );
+    const h883 = directionalV882?.handoffGatesV883 || null;
+    if (h883) {
+      const hc883 = h883?.counts || {};
+      lines.push(
+        `V883 handoff gates — candidates <b>${fmt(hc883.candidates)}</b> · ERC20 <b>${fmt(hc883.validERC20)}</b> · riskOK <b>${fmt(hc883.riskOk)}</b> · marketReady <b>${fmt(hc883.marketDirectionalReady)}</b> · exactPool <b>${fmt(hc883.poolIdentityVerified)}</b> · currentLive <b>${fmt(hc883.currentLive)}</b> · finalEligible <b>${fmt(hc883.finalEligible)}</b>`,
+        `V176 pending: <code>${escapeHtml(h883.pendingV176Address || "NONE")}</code> · present in analysed candidates <b>${h883.pendingV176PresentInCandidates ? "YES" : "NO"}</b>`
+      );
+      if (h883?.pendingV176Row) {
+        lines.push(`V176 gates: ${escapeHtml((Array.isArray(h883.pendingV176Row?.reasons) && h883.pendingV176Row.reasons.length) ? h883.pendingV176Row.reasons.join(",") : "ELIGIBLE")}`);
+      }
+      for (const row of Array.isArray(h883?.topRows) ? h883.topRows.slice(0,4) : []) {
+        lines.push(`• ${escapeHtml(row?.symbol || row?.address || "UNKNOWN")} · eligible <b>${row?.finalEligible ? "YES" : "NO"}</b> · marketReady ${row?.marketDirectionalReady ? "YES" : "NO"} · exactPool ${row?.poolIdentityVerified ? "YES" : "NO"} · riskOK ${row?.riskOk ? "YES" : "NO"} · reasons ${escapeHtml((row?.reasons || []).join(",") || "NONE")}`);
+      }
+    }
   }
   lines.push(
     "",
