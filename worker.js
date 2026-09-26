@@ -1,4 +1,19 @@
 /**
+ * V890 PROTECTED-LANE ORDERING FIX:
+ * - builds directly from deployed V889;
+ * - fixes the confirmed ordering bug where the V880 V258 lower-priority reserve
+ *   rejected an authorised V889 transferred-FLOW V254 request before V889 could
+ *   consume its already-protected completion slot;
+ * - authorised V889/V890 V254 transferred-slot consumption is now evaluated
+ *   before the generic V258 lower-priority reservation decision;
+ * - V890 additionally preserves headroom for any still-active V258 timestamp
+ *   reserve before consuming the transferred V254 slot, so fixing V254 cannot
+ *   starve the launch-age completion lane;
+ * - 48-request hard ceiling, Telegram reserve, all V254 eligibility gates,
+ *   V258 behaviour, V888 exact-pool swap recovery, scoring/risk thresholds,
+ *   Gecko safeguards, V4 routing and KV state remain unchanged.
+ */
+/**
  * V889 UNUSED FLOW SLOT -> PRIORITISED V254 HANDOFF:
  * - builds directly from deployed V888;
  * - preserves V888 exact-PoolId targeted swap recovery, V887 exact-history
@@ -7711,7 +7726,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V889";
+const VERSION = "V890";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -17727,7 +17742,25 @@ function consumeV889V254TransferredFlowSlot(
    * still enforced explicitly.
    */
   const preTelegramLimit = preTelegramGlobalLimitV728(budget);
-  if (safeNumber(budget?.totalUsed) + needed > preTelegramLimit) {
+
+  /*
+   * V890: the transferred V254 slot is allowed to cross the exhausted analysis
+   * sub-budget, but it must not consume the still-active V258 timestamp slot.
+   * Preserve that one request inside the real pre-Telegram/global boundary.
+   */
+  const v258ReserveV890 = budget?.analysis?.v258TimestampReserveV880;
+  const v258ReservedRemainingV890 =
+    v258ReserveV890?.enabled === true &&
+    v258ReserveV890?.active === true
+      ? Math.max(0, safeNumber(v258ReserveV890?.reservedRequests))
+      : 0;
+
+  if (
+    safeNumber(budget?.totalUsed) +
+      needed +
+      v258ReservedRemainingV890 >
+    preTelegramLimit
+  ) {
     slot.blockedByGlobalBoundary =
       safeNumber(slot.blockedByGlobalBoundary) + 1;
     slot.lastBlockedAt = Date.now();
@@ -17736,9 +17769,11 @@ function consumeV889V254TransferredFlowSlot(
       phase,
       type,
       amount: needed,
-      reason: "V889_TRANSFERRED_FLOW_SLOT_GLOBAL_BOUNDARY_BLOCKED",
+      reason: "V890_TRANSFERRED_FLOW_SLOT_BLOCKED_TO_PRESERVE_V258_OR_GLOBAL_BOUNDARY",
       targetAddress: slot.targetAddress || null,
-      exactPoolId: slot.exactPoolId || null
+      exactPoolId: slot.exactPoolId || null,
+      v258ReservedRemaining: v258ReservedRemainingV890,
+      preTelegramLimit
     });
     return false;
   }
@@ -18116,6 +18151,24 @@ function consumeBudget(
   type,
   amount = 1
 ) {
+  /*
+   * V890 ORDERING FIX:
+   * An already-authorised transferred FLOW -> V254 slot must be offered first,
+   * otherwise V880's generic lower-priority protection returns false before the
+   * V254 owner can consume its reserved completion capacity.
+   *
+   * consumeV889V254TransferredFlowSlot() is itself strict: it only recognises
+   * approved V254 first-request types, at most one request, and now explicitly
+   * preserves any active V258 reserved headroom.
+   */
+  const v890TransferredFlowConsume =
+    consumeV889V254TransferredFlowSlot(
+      budget, phase, type, amount
+    );
+  if (v890TransferredFlowConsume !== null) {
+    return v890TransferredFlowConsume;
+  }
+
   const v258ReserveDecisionV880 =
     v258TimestampReserveDecisionV880(budget, phase, type, amount);
   if (v258ReserveDecisionV880 !== null) {
@@ -18147,14 +18200,6 @@ function consumeBudget(
     );
   if (v254FirstRequestConsumeV807 !== null) {
     return v254FirstRequestConsumeV807;
-  }
-
-  const v889TransferredFlowConsume =
-    consumeV889V254TransferredFlowSlot(
-      budget, phase, type, amount
-    );
-  if (v889TransferredFlowConsume !== null) {
-    return v889TransferredFlowConsume;
   }
 
   const v254FirstRequestReserveDecisionV807Result =
