@@ -1,4 +1,21 @@
 /**
+ * Robinhood Chain Meme Hunter — V874
+ *
+ * V874 KNOWN-POOL ZERO-SWAP RESCUE ROUTING FIX:
+ * - builds directly from deployed V873;
+ * - fixes the V873 production-routing case where a risk-safe zero-swap candidate
+ *   could be excluded from the rescue lane solely because an exact/canonical V4
+ *   PoolId was already known;
+ * - allows the existing one-target V813/V821 rescue lane to work both when exact
+ *   pool identity is still missing AND when exact pool identity is already known
+ *   but the bot has not yet observed live swaps for that token;
+ * - preserves the existing analysed-evidence threshold, ERC20/risk/terminal gates,
+ *   rescue ranking/fairness/backlog behaviour and three-request V4 envelope;
+ * - does NOT change scoring, Telegram qualification/thresholds, holder-risk logic,
+ *   provider routing, KV keys, V4 decoding, V254 verification rules or the hard
+ *   42-request ceiling.
+ */
+/**
  * Robinhood Chain Meme Hunter — V872
  *
  * V872 EARLY V4 HEADROOM RESERVATION FIX:
@@ -7567,7 +7584,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V873";
+const VERSION = "V874";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -95520,17 +95537,35 @@ function v813CoverageRescueEligibleCandidate(candidate, state) {
   if (sameRunTerminalReject(candidate)?.terminal === true) return false;
   if (safeNumber(candidate?.activity?.swaps) > 0) return false;
 
+  /*
+   * V874: exact/canonical pool identity is no longer a reason to reject a
+   * zero-swap rescue candidate. The V772 enrichment path already has a proven
+   * exact-pool branch: known token-specific PoolIds are intersected with the
+   * current PoolManager Swap window and then passed through exact Uniswap/pool
+   * identity verification. Keeping these candidates out of rescue created the
+   * V873 state where risk-safe + zero-swap + analysed evidence existed, budget
+   * could fund the lane, but rescueEligible remained zero.
+   *
+   * We still read pool evidence here so the condition remains explicit and easy
+   * to audit, but BOTH states are eligible: missing identity needs discovery;
+   * known identity needs live-swap completion. No verification is weakened.
+   */
   const poolEvidence = v254PoolIdsForCandidate(candidate, state, []);
   const knownPoolIds = Array.isArray(poolEvidence?.poolIds)
     ? poolEvidence.poolIds.filter(poolId => /^0x[a-f0-9]{64}$/.test(String(normalize(poolId) || "")))
     : [];
-  if (candidate?.onChainPoolIdentityV153?.verified === true || knownPoolIds.length > 0) return false;
+  const exactPoolAlreadyKnownV874 =
+    candidate?.onChainPoolIdentityV153?.verified === true ||
+    knownPoolIds.length > 0;
 
   const opportunity = safeNumber(candidate?.opportunity?.score);
   const confidence = safeNumber(candidate?.confidence?.score);
   const marketKnown = candidate?.market?.verified === true;
 
   // Bounded fallback only: require at least some analysed evidence/priority.
+  // `exactPoolAlreadyKnownV874` is intentionally not a reject gate: the rescue
+  // lane now covers both identity discovery and known-pool live-swap completion.
+  void exactPoolAlreadyKnownV874;
   return marketKnown || opportunity >= 20 || confidence >= 35;
 }
 
