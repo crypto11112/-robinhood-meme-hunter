@@ -1,5 +1,8 @@
 /**
- * Robinhood Chain Meme Hunter — V877
+ * Robinhood Chain Meme Hunter — V878
+ *
+ * V878 HOTFIX: fixes V877 providerRoutingV877 scope regression only.
+ * Preserves V876 routing/recovery behaviour and V877 diagnostic intent.
  *
  * V877 V258 BLOCK-TIMESTAMP FAILURE TRACE:
  * - builds directly from deployed V876 and preserves the V876 provider-routing fix;
@@ -7619,7 +7622,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V877";
+const VERSION = "V878";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -11263,17 +11266,6 @@ async function reservesLensLiquidityDiagnosticV441(
         "ANALYSIS_BUDGET_UNAVAILABLE_V441"
     };
   }
-
-  const providerRoutingV877 = {
-    configured: configuredProvidersV876.map(row => row.name),
-    usable: Array.isArray(routedProvidersV876?.usable)
-      ? routedProvidersV876.usable.map(row => row?.name || null).filter(Boolean)
-      : [],
-    cooling: Array.isArray(routedProvidersV876?.cooling)
-      ? routedProvidersV876.cooling.map(row => row?.name || null).filter(Boolean)
-      : [],
-    selected: provider?.name || null
-  };
 
   const before =
     safeNumber(
@@ -90651,6 +90643,17 @@ async function verifiedLaunchBlockTimestampV258(
     routedProvidersV876.usable.length
       ? routedProvidersV876.usable[0]
       : null;
+
+  const providerRoutingV877 = {
+    configured: configuredProvidersV876.map(row => row.name),
+    usable: Array.isArray(routedProvidersV876?.usable)
+      ? routedProvidersV876.usable.map(row => row?.name || null).filter(Boolean)
+      : [],
+    cooling: Array.isArray(routedProvidersV876?.cooling)
+      ? routedProvidersV876.cooling.map(row => row?.name || null).filter(Boolean)
+      : [],
+    selected: provider?.name || null
+  };
 
   if (!provider?.url) {
     return {
