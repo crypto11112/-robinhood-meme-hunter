@@ -1,4 +1,24 @@
 /**
+ * V893 VERIFIED-FLOW CANONICAL V4 POOL ALIGNMENT:
+ * - builds directly from deployed V892;
+ * - fixes the V892-proven case where candidate-matched verified V179/V212 flow
+ *   exists, but the current V887/V254 exact PoolId is a different pool with no
+ *   matching flow;
+ * - ONLY during an active Gecko HTTP-429 directional cooldown, and ONLY when
+ *   the current exact PoolId is absent from candidate-matched verified flow,
+ *   considers alternative 32-byte PoolIds from that SAME candidate's exact-USD
+ *   on-chain ledger;
+ * - an alternative is eligible only when its canonical local poolRegistry entry
+ *   proves the candidate token is currency0/currency1 and the pool has verified
+ *   exact-USD flow observed within the last hour;
+ * - selects deterministically by newest verified observation, then row count;
+ * - rewrites only candidate.onChainPoolIdentityV153 to that already-verified
+ *   canonical V4 identity; provider market pair identity is never promoted;
+ * - zero new provider requests, 48-request ceiling unchanged, and no changes to
+ *   risk/scoring/Telegram thresholds, V258, V254 eligibility gates, V4 rescue,
+ *   Gecko cooldown enforcement, or KV schema.
+ */
+/**
  * V892 OBSERVED-SWAP HANDOFF DIAGNOSTIC — READ ONLY:
  * - builds directly from live V891;
  * - adds ZERO provider requests and ZERO scan/qualification/scoring changes;
@@ -7752,7 +7772,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V892";
+const VERSION = "V893";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -60231,11 +60251,213 @@ function directionalIdentityHandoffV885(candidate, state) {
   };
 }
 
+
+/* =========================================================
+   V893 VERIFIED-FLOW CANONICAL V4 POOL ALIGNMENT
+   =========================================================
+   This is deliberately strict. It never converts a provider market pair into
+   a V4 PoolId and never treats token-level flow as pool-level proof. The only
+   alternative identities considered are 32-byte PoolIds already present in
+   this candidate's exact-USD on-chain ledger AND independently mapped in the
+   canonical local V4 poolRegistry to the same token.
+*/
+function alignDirectionalExactPoolToVerifiedFlowV893(candidate, state) {
+  const token = normalize(candidate?.address);
+  const current = candidate?.onChainPoolIdentityV153;
+  const currentPoolId = normalize(
+    current?.poolId ||
+    current?.pairAddress ||
+    ""
+  );
+
+  const base = {
+    version: "V893",
+    evaluated: true,
+    applied: false,
+    reason: null,
+    token: isAddress(token) ? token : null,
+    originalPoolId:
+      /^0x[a-f0-9]{64}$/.test(String(currentPoolId || ""))
+        ? currentPoolId
+        : null,
+    selectedPoolId: null,
+    eligibleAlternatives: 0,
+    verifiedFlowRowsConsidered: 0,
+    recencyWindowMs: 60 * 60 * 1000,
+    zeroProviderRequests: true
+  };
+
+  if (!isAddress(token)) {
+    return {...base, reason:"INVALID_TOKEN_V893"};
+  }
+
+  const geckoGate = geckoDirectionalEligibilityV432(state);
+  if (
+    geckoGate?.eligible === true ||
+    geckoGate?.reason !==
+      "GECKO_DIRECTIONAL_DEFER_ACTIVE_429_COOLDOWN_V824"
+  ) {
+    return {...base, reason:"GECKO_429_COOLDOWN_NOT_ACTIVE_V893"};
+  }
+
+  if (
+    current?.verified !== true ||
+    !/^0x[a-f0-9]{64}$/.test(String(currentPoolId || ""))
+  ) {
+    return {...base, reason:"CURRENT_EXACT_POOL_NOT_VERIFIED_V893"};
+  }
+
+  const flow = candidateVerifiedOnChainFlowV212(candidate, state);
+  if (flow?.verified !== true) {
+    return {...base, reason:"NO_CANDIDATE_MATCHED_VERIFIED_FLOW_V893"};
+  }
+
+  const flowPoolIds = Array.isArray(flow?.poolIds)
+    ? flow.poolIds.map(normalize).filter(id =>
+        /^0x[a-f0-9]{64}$/.test(String(id || ""))
+      )
+    : [];
+
+  if (flowPoolIds.includes(currentPoolId)) {
+    return {
+      ...base,
+      selectedPoolId: currentPoolId,
+      reason:"CURRENT_EXACT_POOL_ALREADY_MATCHES_VERIFIED_FLOW_V893"
+    };
+  }
+
+  const ledger = onChainDirectionalStoreV179(state)?.[token];
+  const records = Array.isArray(ledger?.records) ? ledger.records : [];
+  const now = Date.now();
+  const cutoff = now - base.recencyWindowMs;
+
+  const grouped = new Map();
+
+  for (const row of records) {
+    if (normalize(row?.candidateAddress) !== token) continue;
+    if (row?.exactUsdVerified !== true) continue;
+    if (row?.side !== "buy" && row?.side !== "sell") continue;
+    if (!Number.isFinite(Number(row?.exactUsdAmount))) continue;
+    if (Number(row.exactUsdAmount) <= 0) continue;
+
+    const observedAt = safeNumber(row?.observedAt);
+    if (observedAt < cutoff || observedAt > now) continue;
+
+    const poolId = normalize(row?.poolId);
+    if (!/^0x[a-f0-9]{64}$/.test(String(poolId || ""))) continue;
+
+    base.verifiedFlowRowsConsidered++;
+
+    const registry = state?.poolRegistry?.[poolId] || null;
+    const currency0 = normalize(
+      registry?.currency0 ||
+      registry?.tokenA ||
+      ""
+    );
+    const currency1 = normalize(
+      registry?.currency1 ||
+      registry?.tokenB ||
+      ""
+    );
+
+    const tokenIs0 = currency0 === token;
+    const tokenIs1 = currency1 === token;
+
+    if (
+      !(tokenIs0 || tokenIs1) ||
+      !(
+        (isAddress(currency0) || currency0 === ZERO) &&
+        (isAddress(currency1) || currency1 === ZERO)
+      ) ||
+      currency0 === currency1
+    ) {
+      continue;
+    }
+
+    const existing = grouped.get(poolId) || {
+      poolId,
+      currency0,
+      currency1,
+      quoteTokenAddress: tokenIs0 ? currency1 : currency0,
+      candidateCurrencyIndexV740: tokenIs0 ? 0 : 1,
+      rows: 0,
+      latestObservedAt: 0
+    };
+
+    existing.rows++;
+    existing.latestObservedAt = Math.max(
+      safeNumber(existing.latestObservedAt),
+      observedAt
+    );
+    grouped.set(poolId, existing);
+  }
+
+  const alternatives = [...grouped.values()]
+    .filter(row => row.poolId !== currentPoolId)
+    .sort((a, b) =>
+      safeNumber(b.latestObservedAt) -
+        safeNumber(a.latestObservedAt) ||
+      safeNumber(b.rows) - safeNumber(a.rows) ||
+      String(a.poolId).localeCompare(String(b.poolId))
+    );
+
+  base.eligibleAlternatives = alternatives.length;
+
+  if (!alternatives.length) {
+    return {...base, reason:"NO_RECENT_REGISTRY_VERIFIED_FLOW_POOL_V893"};
+  }
+
+  const selected = alternatives[0];
+
+  /*
+   * Candidate-level flow was already cryptographically tied to this token via
+   * the persisted V179 ledger; poolRegistry independently proves the immutable
+   * V4 currency pair. This is therefore identity reconciliation, not inference.
+   */
+  candidate.onChainPoolIdentityV153 = {
+    ...(current || {}),
+    verified: true,
+    status: "VERIFIED_FLOW_CANONICAL_POOL_REALIGNED_V893",
+    source: "V179_EXACT_USD_FLOW_PLUS_POOL_REGISTRY_V893",
+    poolId: selected.poolId,
+    pairAddress: selected.poolId,
+    candidateAddress: token,
+    quoteTokenAddress: selected.quoteTokenAddress,
+    targetTokenSide: "BASE",
+    candidateCurrencyIndexV740: selected.candidateCurrencyIndexV740,
+    currency0V740: selected.currency0,
+    currency1V740: selected.currency1,
+    alignedFromPoolIdV893: currentPoolId,
+    alignedAtV893: now,
+    verifiedFlowRowsV893: selected.rows,
+    latestVerifiedFlowObservedAtV893: selected.latestObservedAt
+  };
+
+  return {
+    ...base,
+    applied: true,
+    reason:"RECENT_VERIFIED_FLOW_CANONICAL_POOL_APPLIED_V893",
+    selectedPoolId: selected.poolId,
+    selectedRows: selected.rows,
+    latestObservedAt: selected.latestObservedAt,
+    quoteTokenAddress: selected.quoteTokenAddress
+  };
+}
+
 async function geckoDirectionalTradeFlow(
   candidate,
   budget,
   state
 ) {
+  const directionalExactPoolAlignmentV893 =
+    alignDirectionalExactPoolToVerifiedFlowV893(
+      candidate,
+      state
+    );
+
+  candidate.directionalExactPoolAlignmentV893 =
+    directionalExactPoolAlignmentV893;
+
   const directionalIdentityV885 =
     directionalIdentityHandoffV885(
       candidate,
@@ -104693,6 +104915,8 @@ for (
       verifiedFlowRecords: safeNumber(v887Flow?.recordCount),
       verifiedFlowPoolIds: v887FlowPoolIds,
       exactPoolAlreadyMatched: v887ExactFlowMatched,
+      canonicalPoolAlignmentV893:
+        directionalTarget?.directionalExactPoolAlignmentV893 || null,
       zeroExtraRequests: true,
       v254EligibilityStillRequired: true
     };
@@ -127365,6 +127589,10 @@ function observedSwapHandoffDiagnosticV892(state) {
       directional?.v151?.selectionMode || null,
     exactHistoryPriorityRequested:
       priority?.requested === true,
+    canonicalPoolAlignmentV893:
+      retained?.directionalExactHistoryPriorityV887?.canonicalPoolAlignmentV893 ||
+      retained?.directionalExactPoolAlignmentV893 ||
+      null,
     exactPoolId:
       /^0x[a-f0-9]{64}$/.test(String(exactPoolId || ""))
         ? exactPoolId
@@ -127811,6 +128039,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `Target: <code>${escapeHtml(swapHandoffV892.token || "NONE")}</code> ${escapeHtml(swapHandoffV892.symbol || "")}`,
       `V151 mode: <b>${escapeHtml(swapHandoffV892.v151SelectionMode || "NONE")}</b> · V887 priority ${swapHandoffV892.exactHistoryPriorityRequested ? "YES" : "NO"}`,
       `Exact PoolId: <code>${escapeHtml(swapHandoffV892.exactPoolId || "NONE")}</code>`,
+      `V893 canonical alignment: <b>${swapHandoffV892?.canonicalPoolAlignmentV893?.applied === true ? "APPLIED" : "NO"}</b> · ${escapeHtml(swapHandoffV892?.canonicalPoolAlignmentV893?.reason || "NONE")} · ${escapeHtml(swapHandoffV892?.canonicalPoolAlignmentV893?.originalPoolId || "NONE")} → ${escapeHtml(swapHandoffV892?.canonicalPoolAlignmentV893?.selectedPoolId || "NONE")}`,
       `V151 / production-V4 same target: <b>${swapHandoffV892.sameV151AndProductionTarget ? "YES" : "NO"}</b>`,
       `Candidate activity.swaps at retained audit: <b>${fmt(swapHandoffV892.observedSwapsAtAudit)}</b> · no-swap classifier: <b>${escapeHtml(swapHandoffV892.noBotObservedSwapsReason || "NONE")}</b>`,
       `Verified V179/V212 flow: <b>${vf892.verified ? "YES" : "NO"}</b> · records <b>${fmt(vf892.recordCount)}</b> · pools <b>${fmt(vf892.poolCount)}</b> · exact PoolId in flow <b>${vf892.exactPoolMatched ? "YES" : "NO"}</b>`,
