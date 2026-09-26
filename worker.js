@@ -1,4 +1,22 @@
 /**
+ * Robinhood Chain Meme Hunter — V875
+ *
+ * V875 RESCUE STARVATION FAIRNESS FIX:
+ * - builds directly from deployed V874;
+ * - preserves V874 known-pool zero-swap rescue eligibility;
+ * - fixes normal-vs-rescue collisions where the global previous collision owner
+ *   can leave the CURRENT queued rescue candidate starved even after it has lost
+ *   a production-V4 slot;
+ * - when the top current rescue candidate has backlog missCount > 0, that
+ *   candidate owns the next normal/rescue collision regardless of stale global
+ *   collision ownership; otherwise existing V821 alternation remains unchanged;
+ * - still exactly one production V4 target and the same maximum three-request
+ *   production-V4 envelope per scan;
+ * - does NOT change scoring, Telegram qualification/thresholds, holder-risk logic,
+ *   provider routing, KV keys, V4 decoding, V254 verification, or the hard
+ *   42-request ceiling.
+ */
+/**
  * Robinhood Chain Meme Hunter — V874
  *
  * V874 KNOWN-POOL ZERO-SWAP RESCUE ROUTING FIX:
@@ -7584,7 +7602,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V874";
+const VERSION = "V875";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -102109,9 +102127,24 @@ for (
   const lastCollisionOwnerV821 =
     String(state?.productionV4FairnessV821?.lastCollisionOwner || "").toUpperCase();
 
+  /*
+   * V875: candidate-local starvation override.
+   * V821 alternation is still the default, but a CURRENT top rescue candidate
+   * that already lost at least one eligible collision must receive the next
+   * collision slot. This prevents stale/global previous-owner state from
+   * starving a different queued rescue candidate.
+   */
+  const topRescueBacklogMissCountV875 = Math.max(
+    0,
+    safeNumber(productionV4CoverageRescueCandidatesV821[0]?.backlogMissCount)
+  );
+  const rescueStarvationOverrideV875 =
+    productionV4CollisionV818 &&
+    topRescueBacklogMissCountV875 > 0;
+
   const rescueOwnsCollisionV818 =
     productionV4CollisionV818 &&
-    lastCollisionOwnerV821 !== "RESCUE";
+    (rescueStarvationOverrideV875 || lastCollisionOwnerV821 !== "RESCUE");
 
   const productionV4TargetV772 =
     rescueOwnsCollisionV818
@@ -102120,7 +102153,9 @@ for (
 
   const productionV4SelectionModeV813 =
     rescueOwnsCollisionV818
-      ? "ZERO_SWAP_COVERAGE_RESCUE_FAIR_V821"
+      ? (rescueStarvationOverrideV875
+          ? "ZERO_SWAP_COVERAGE_RESCUE_STARVATION_V875"
+          : "ZERO_SWAP_COVERAGE_RESCUE_FAIR_V821")
       : (
           productionV4NormalTargetV813
             ? (productionV4CollisionV818 ? "NORMAL_V772_COLLISION_V821" : "NORMAL_V772")
@@ -102234,6 +102269,8 @@ for (
         Boolean(productionV4NormalTargetV813 && rescueEligibleAll.length && !rescueOwnsCollisionV818),
       collisionPresentV818: productionV4CollisionV818,
       rescueOwnsCollisionV818,
+      rescueStarvationOverrideV875,
+      topRescueBacklogMissCountV875,
       previousSelectionModeV818: previousSelectionModeV818 || null,
       rescueEligibleRawCountV819: rescueEligibleRawV819.length,
       sameAddressRescueExcludedV819:
