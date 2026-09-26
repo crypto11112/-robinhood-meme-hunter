@@ -1,5 +1,13 @@
 /**
- * Robinhood Chain Meme Hunter — V879
+ * Robinhood Chain Meme Hunter — V880
+ *
+ * V880 REQUEST-HEADROOM + V258 PROTECTED TIMESTAMP SLOT:
+ * - raises autonomous scanner hard request ceiling from 42 to 48 after Cloudflare capacity upgrade;
+ * - raises base analysis ceiling from 21 to 27 so the six added requests are usable by evidence completion rather than only discovery;
+ * - permanently protects one real pre-Telegram analysis/global request for the V258 eth_getBlockByNumber launch-timestamp lookup;
+ * - the V258 slot may be consumed only while the V258 timestamp lookup explicitly authorises it; other eth_getBlockByNumber calls cannot steal it;
+ * - keeps the 2-request Telegram reserve, provider cooldowns/quotas, scoring, qualification, holder/risk rules, V4 routing/fairness and USD-verification rules unchanged;
+ * - no provider allowance is bypassed and the new hard scanner ceiling is 48.
  *
  * V879 HOTFIX: routes /evidenceaudit and /completionaudit through the existing line-safe chunked Telegram sender so the expanded V258 diagnostic cannot exceed Telegram's single-message limit. Preserves V878 behavior otherwise.
  * Preserves V876 routing/recovery behaviour and V877 diagnostic intent.
@@ -7622,7 +7630,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V879";
+const VERSION = "V880";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -8704,7 +8712,7 @@ const CHAINSTACK_BACKWARD_EXACT_GETLOGS_403_COOLDOWN_MS_V639 =
    HARD REQUEST BUDGET
    ========================================================= */
 
-const MAX_EXTERNAL_REQUESTS = 42;
+const MAX_EXTERNAL_REQUESTS = 48;
 
 const SYSTEM_REQUEST_LIMIT = 2;
 
@@ -8728,7 +8736,7 @@ const V651_PRE_ANALYSIS_BACKLOG_REQUEST_LIMIT = 4;
  */
 const V170_POST_ANALYSIS_BACKLOG_RECLAIM_MAX_REQUESTS = 5;
 
-const ANALYSIS_REQUEST_LIMIT = 21;
+const ANALYSIS_REQUEST_LIMIT = 27;
 
 /*
  * V415 bounded secondary analysis-retry queue.
@@ -14160,6 +14168,23 @@ function createBudget() {
         verificationRuleChanged: false
       },
 
+      v258TimestampReserveV880: {
+        enabled: true,
+        active: true,
+        reservedRequests: 1,
+        initialReservedRequests: 1,
+        consumedRequests: 0,
+        authorisedConsume: false,
+        consumedAt: null,
+        lowerPriorityRequestsBlocked: 0,
+        lastBlockedType: null,
+        lastBlockedAt: null,
+        hardGlobalLimit: MAX_EXTERNAL_REQUESTS,
+        baseAnalysisLimit: ANALYSIS_REQUEST_LIMIT,
+        notificationReservePreserved: true,
+        rule: "V880_ONE_V258_BLOCK_TIMESTAMP_SLOT_RESERVED_INSIDE_48_GLOBAL_27_ANALYSIS_LIMITS"
+      },
+
       evidenceCompletionReserveV728: {
         enabled: true,
         active: false,
@@ -17787,12 +17812,92 @@ function manualCreationProofReserveDecisionV834(budget, phase, type, amount = 1)
   return null;
 }
 
+function v258TimestampReserveDecisionV880(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  if (phase !== "analysis") return null;
+
+  const reserve = budget?.analysis?.v258TimestampReserveV880;
+  if (reserve?.enabled !== true || reserve?.active !== true) return null;
+
+  const needed = Math.max(1, safeNumber(amount));
+  const authorisedV258TimestampRequest =
+    reserve.authorisedConsume === true &&
+    type === "RPC:eth_getBlockByNumber";
+
+  const notificationReserveRemaining =
+    budget?.notification?.globalReserveActiveV174 === true
+      ? Math.max(0, safeNumber(budget?.notification?.limit) - safeNumber(budget?.notification?.used))
+      : 0;
+  const preTelegramGlobalLimit = Math.max(
+    0,
+    safeNumber(budget?.totalLimit) - notificationReserveRemaining
+  );
+  const effectiveAnalysisLimit = effectiveAnalysisLimitV416(budget);
+  const reserved = Math.max(0, safeNumber(reserve.reservedRequests));
+
+  if (authorisedV258TimestampRequest && reserved >= needed) {
+    const globalFits =
+      safeNumber(budget?.totalUsed) + needed <= preTelegramGlobalLimit;
+    const analysisFits =
+      safeNumber(budget?.analysis?.used) + needed <= effectiveAnalysisLimit;
+
+    if (!globalFits || !analysisFits) {
+      reserve.hardBoundaryBlocks = safeNumber(reserve.hardBoundaryBlocks) + 1;
+      reserve.lastHardBoundaryBlockAt = Date.now();
+      return null;
+    }
+
+    budget.totalUsed += needed;
+    budget.analysis.used += needed;
+    reserve.reservedRequests = Math.max(0, reserved - needed);
+    reserve.consumedRequests = safeNumber(reserve.consumedRequests) + needed;
+    reserve.consumedAt = Date.now();
+    reserve.active = reserve.reservedRequests > 0;
+    return true;
+  }
+
+  if (reserved <= 0) return null;
+
+  const analysisWouldConsumeReservedSlot =
+    safeNumber(budget?.analysis?.used) + needed >
+    Math.max(0, effectiveAnalysisLimit - reserved);
+  const globalWouldConsumeReservedSlot =
+    safeNumber(budget?.totalUsed) + needed >
+    Math.max(0, preTelegramGlobalLimit - reserved);
+
+  if (analysisWouldConsumeReservedSlot || globalWouldConsumeReservedSlot) {
+    reserve.lowerPriorityRequestsBlocked =
+      safeNumber(reserve.lowerPriorityRequestsBlocked) + 1;
+    reserve.lastBlockedType = String(type || "UNKNOWN");
+    reserve.lastBlockedAt = Date.now();
+    budget.skipped.push({
+      phase,
+      type,
+      amount: needed,
+      reason: "V880_V258_BLOCK_TIMESTAMP_SLOT_RESERVED",
+      reservedRequests: reserved
+    });
+    return false;
+  }
+
+  return null;
+}
+
 function consumeBudget(
   budget,
   phase,
   type,
   amount = 1
 ) {
+  const v258ReserveDecisionV880 =
+    v258TimestampReserveDecisionV880(budget, phase, type, amount);
+  if (v258ReserveDecisionV880 !== null) {
+    return v258ReserveDecisionV880;
+  }
   const manualCreationReserveDecisionV834 =
     manualCreationProofReserveDecisionV834(budget, phase, type, amount);
   if (manualCreationReserveDecisionV834 !== null) {
@@ -90686,6 +90791,11 @@ async function verifiedLaunchBlockTimestampV258(
     );
 
   try {
+    const v258ReserveV880 = budget?.analysis?.v258TimestampReserveV880;
+    if (v258ReserveV880?.enabled === true) {
+      v258ReserveV880.authorisedConsume = true;
+    }
+
     const payload =
       await rpcCall(
         provider.url,
@@ -90699,6 +90809,10 @@ async function verifiedLaunchBlockTimestampV258(
         budget,
         "analysis"
       );
+
+    if (v258ReserveV880?.enabled === true) {
+      v258ReserveV880.authorisedConsume = false;
+    }
 
     const used =
       Math.max(
@@ -90815,6 +90929,11 @@ async function verifiedLaunchBlockTimestampV258(
   }
 
   catch (error) {
+    const v258ReserveV880 = budget?.analysis?.v258TimestampReserveV880;
+    if (v258ReserveV880?.enabled === true) {
+      v258ReserveV880.authorisedConsume = false;
+    }
+
     return {
       ...base,
       attempted:
@@ -102410,7 +102529,7 @@ for (
       topRanked: ranked,
       budgetAtSelection: {
         totalUsed: safeNumber(budget?.totalUsed),
-        totalLimit: safeNumber(budget?.totalLimit) || 42,
+        totalLimit: safeNumber(budget?.totalLimit) || MAX_EXTERNAL_REQUESTS,
         analysisUsed: safeNumber(budget?.analysis?.used),
         analysisLimit: safeNumber(budget?.analysis?.effectiveLimit || budget?.analysis?.limit),
         canFundThreeAnalysisRequests: budgetAvailable(budget, "analysis", 3)
@@ -126220,6 +126339,10 @@ function evidenceAuditTelegramMessageV727(state) {
     "⏱ <b>Launch-age completion V258</b>",
     `Needed <b>${fmt(c.v258Needed)}</b> · selected <b>${fmt(c.v258Selected)}</b> · attempted <b>${fmt(c.v258Attempted)}</b> · recovered <b>${fmt(c.v258Recovered)}</b>`
   );
+  const v258ReserveV880 = context?.budget?.analysis?.v258TimestampReserveV880 || {};
+  lines.push(
+    `V880 protected timestamp slot: consumed <b>${fmt(v258ReserveV880.consumedRequests)}</b> · remaining <b>${fmt(v258ReserveV880.reservedRequests)}</b> · lower-priority blocked <b>${fmt(v258ReserveV880.lowerPriorityRequestsBlocked)}</b>`
+  );
   const v258DiagV877 = d?.v258FailureDiagnosticV877 || {};
   const v258FailureRowsV877 = Array.isArray(v258DiagV877?.failureClasses) ? v258DiagV877.failureClasses : [];
   const v258ProviderRowsV877 = Array.isArray(v258DiagV877?.providers) ? v258DiagV877.providers : [];
@@ -126525,7 +126648,7 @@ function dataCoverageAuditV731(candidate, state, context = {}) {
     },
     requestBudgetSnapshot: {
       totalUsed: safeNumber(context?.budget?.totalUsed),
-      totalLimit: safeNumber(context?.budget?.totalLimit) || 42,
+      totalLimit: safeNumber(context?.budget?.totalLimit) || MAX_EXTERNAL_REQUESTS,
       analysisUsed: safeNumber(context?.budget?.analysis?.used),
       analysisLimit: safeNumber(context?.budget?.analysis?.effectiveLimit || context?.budget?.analysis?.limit)
     },
