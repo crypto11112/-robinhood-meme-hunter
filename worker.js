@@ -1,4 +1,13 @@
 /**
+ * V885 VERIFIED DIRECTIONAL IDENTITY HANDOFF PRESERVATION:
+ * - builds directly from deployed V884;
+ * - normalizes an already-verified exact V4 identity before V175/V151 provider execution so pairAddress/target side are not lost between candidate analysis and directional fallback;
+ * - may recover the exact PoolId from the canonical pool registry only when that same verified candidate PoolId is already present; no heuristic pool substitution is allowed;
+ * - preserves CoinGecko 429 cooldown and V884 exact-pool on-chain fallback requirements;
+ * - failed cooldown/fallback results now carry the verified pool/side context plus exact flow-match diagnostics into /evidenceaudit;
+ * - zero additional provider requests; 48-request ceiling, V258, V254 verification, V4 routing, scoring, risk, Telegram thresholds and KV keys unchanged.
+ */
+/**
  * V884 COINGECKO-COOLDOWN ON-CHAIN DIRECTIONAL FALLBACK (see runtime code).
  *
  * Robinhood Chain Meme Hunter — V883
@@ -7647,7 +7656,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V884";
+const VERSION = "V885";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -59823,11 +59832,74 @@ function geckoDirectionalEligibilityV432(
   };
 }
 
+function directionalIdentityHandoffV885(candidate, state) {
+  const token = normalize(candidate?.address);
+  const original = candidate?.onChainPoolIdentityV153;
+  let identity = original && typeof original === "object" ? { ...original } : null;
+
+  const poolId = normalize(identity?.poolId || identity?.pairAddress || "");
+  const registry = /^0x[a-f0-9]{64}$/.test(String(poolId || ""))
+    ? state?.poolRegistry?.[poolId]
+    : null;
+
+  if (identity?.verified === true && /^0x[a-f0-9]{64}$/.test(String(poolId || ""))) {
+    const currency0 = normalize(identity?.currency0V740 || registry?.currency0 || "");
+    const currency1 = normalize(identity?.currency1V740 || registry?.currency1 || "");
+    const tokenInPool = isAddress(token) && (currency0 === token || currency1 === token);
+
+    if (!identity.pairAddress) identity.pairAddress = poolId;
+
+    const side = String(identity?.targetTokenSide || "").toUpperCase();
+    if (side !== "BASE" && side !== "QUOTE" && tokenInPool) {
+      /* Existing on-chain identity convention: candidate token is the BASE side. */
+      identity.targetTokenSide = "BASE";
+      identity.targetTokenSideRecoveredV885 = true;
+    }
+
+    if (!identity.quoteTokenAddress && tokenInPool) {
+      identity.quoteTokenAddress = currency0 === token ? currency1 : currency0;
+      identity.quoteTokenRecoveredV885 = true;
+    }
+
+    identity.poolId = poolId;
+    identity.handoffNormalizedV885 = true;
+    candidate.onChainPoolIdentityV153 = identity;
+  }
+
+  const marketSide = String(candidate?.market?.targetTokenSide || "").toUpperCase();
+  const marketReady = candidate?.market?.verified === true &&
+    Boolean(candidate?.market?.pairAddress) &&
+    (marketSide === "BASE" || marketSide === "QUOTE");
+
+  return {
+    applied: identity?.verified === true,
+    token: token || null,
+    exactPoolId: /^0x[a-f0-9]{64}$/.test(String(normalize(identity?.poolId) || ""))
+      ? normalize(identity.poolId)
+      : null,
+    pairAddress: identity?.pairAddress || null,
+    targetTokenSide: String(identity?.targetTokenSide || "").toUpperCase() || null,
+    quoteTokenAddress: normalize(identity?.quoteTokenAddress) || null,
+    marketReady,
+    marketPairAddress: candidate?.market?.pairAddress || null,
+    marketTargetTokenSide: marketSide || null,
+    identitySource: identity?.source || null,
+    identityStatus: identity?.status || null,
+    zeroProviderRequests: true
+  };
+}
+
 async function geckoDirectionalTradeFlow(
   candidate,
   budget,
   state
 ) {
+  const directionalIdentityV885 =
+    directionalIdentityHandoffV885(
+      candidate,
+      state
+    );
+
   const market =
     candidate?.market;
 
@@ -60015,6 +60087,7 @@ async function geckoDirectionalTradeFlow(
           marketVerifiedForPoolIdentityV153: marketIdentityVerifiedV153,
           poolAddress,
           targetTokenSide: targetSide,
+          directionalIdentityV885,
           returnedCount: safeNumber(onChainFlowV884?.recordCount),
           windows: fallbackWindowsV884,
           v884: {
@@ -60038,6 +60111,23 @@ async function geckoDirectionalTradeFlow(
       }
     }
 
+    const fallbackDiagnosticFlowV885 =
+      activeGecko429CooldownV884
+        ? candidateVerifiedOnChainFlowV212(candidate, state)
+        : null;
+
+    const fallbackExactPoolIdV885 =
+      normalize(
+        onChainIdentityV153?.poolId ||
+        onChainIdentityV153?.pairAddress ||
+        ""
+      );
+
+    const fallbackFlowPoolIdsV885 =
+      Array.isArray(fallbackDiagnosticFlowV885?.poolIds)
+        ? fallbackDiagnosticFlowV885.poolIds.map(normalize).filter(Boolean)
+        : [];
+
     return {
       attempted:
         false,
@@ -60048,6 +60138,10 @@ async function geckoDirectionalTradeFlow(
       status:
         directionalEligibilityV432
           .reason,
+      poolAddress,
+      targetTokenSide: targetSide,
+      poolIdentitySourceV153,
+      directionalIdentityV885,
 
       v884: {
         fallbackUsed: false,
@@ -60056,6 +60150,19 @@ async function geckoDirectionalTradeFlow(
         reason: activeGecko429CooldownV884
           ? "NO_MATCHING_VERIFIED_EXACT_POOL_ONCHAIN_FLOW"
           : "GECKO_DEFER_NOT_ACTIVE_429_COOLDOWN"
+      },
+      v885: {
+        handoffPreserved: true,
+        exactPoolId: /^0x[a-f0-9]{64}$/.test(String(fallbackExactPoolIdV885 || ""))
+          ? fallbackExactPoolIdV885
+          : null,
+        targetTokenSide: targetSide || null,
+        poolAddress: poolAddress || null,
+        verifiedFlowAvailable: fallbackDiagnosticFlowV885?.verified === true,
+        verifiedFlowRecords: safeNumber(fallbackDiagnosticFlowV885?.recordCount),
+        flowPoolIds: fallbackFlowPoolIdsV885,
+        exactPoolMatchedInVerifiedFlow: /^0x[a-f0-9]{64}$/.test(String(fallbackExactPoolIdV885 || "")) && fallbackFlowPoolIdsV885.includes(fallbackExactPoolIdV885),
+        zeroProviderRequests: true
       },
 
       v432: {
