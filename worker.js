@@ -1,7 +1,7 @@
 /**
- * Robinhood Chain Meme Hunter — V878
+ * Robinhood Chain Meme Hunter — V879
  *
- * V878 HOTFIX: fixes V877 providerRoutingV877 scope regression only.
+ * V879 HOTFIX: routes /evidenceaudit and /completionaudit through the existing line-safe chunked Telegram sender so the expanded V258 diagnostic cannot exceed Telegram's single-message limit. Preserves V878 behavior otherwise.
  * Preserves V876 routing/recovery behaviour and V877 diagnostic intent.
  *
  * V877 V258 BLOCK-TIMESTAMP FAILURE TRACE:
@@ -7622,7 +7622,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V878";
+const VERSION = "V879";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -158045,7 +158045,9 @@ async function telegramCommandReplyV271(
     parsed.command === "/poolmatch" ||
     parsed.command === "/poolidentity" ||
     parsed.command === "/poolwatch" ||
-    parsed.command === "/watchpool";
+    parsed.command === "/watchpool" ||
+    parsed.command === "/evidenceaudit" ||
+    parsed.command === "/completionaudit";
 
   if (isFreshAnalyseV352) {
     await telegramAnalyseCheckpointV352(
