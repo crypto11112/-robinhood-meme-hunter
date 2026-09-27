@@ -1,4 +1,18 @@
 /**
+ * V921 PONS CANDIDATE-SOURCE RECENCY DIAGNOSTIC:
+ * - builds directly from deployed V920;
+ * - diagnostic-only change to explain why current Pons candidates can carry very old verified launch blocks;
+ * - preserves V920 target ordering, V919 RECENT_LIVE/BACKGROUND_HISTORY lanes, V918 history,
+ *   V916 decoder/USD persistence, risk gates, scoring, qualification, Telegram thresholds,
+ *   provider routing and the hard 48-request ceiling;
+ * - records, with ZERO extra provider requests, the launch evidence attached directly to each
+ *   current Pons candidate, the matching watched-token evidence, and the matching persisted
+ *   ponsDiscoveryV215 recentVerifiedLaunches row;
+ * - records persisted Pons discovery recency (last query/status/launch block/token and retained
+ *   launch block range) so stale candidate sourcing can be distinguished from stale discovery;
+ * - /evidenceaudit prints the selected/current Pons source trace. No evidence is promoted or rejected.
+ */
+/**
  * V920 PONS FRESH-LAUNCH TARGET PRIORITY:
  * - builds directly from deployed V919;
  * - keeps V919 RECENT_LIVE + BACKGROUND_HISTORY lanes unchanged;
@@ -8199,7 +8213,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V920";
+const VERSION = "V921";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -78145,6 +78159,272 @@ function v916AddressFromTopic(
     : null;
 }
 
+
+function v921PonsCandidateSourceTrace(
+  candidate,
+  state,
+  watched = null,
+  latestNumber = null
+) {
+  const token =
+    normalize(candidate?.address);
+
+  const head =
+    safeNumber(latestNumber);
+
+  const rowSummary = (
+    row,
+    location
+  ) => {
+    if (!row || typeof row !== "object") {
+      return null;
+    }
+
+    const protocol =
+      String(
+        row?.protocol ||
+        row?.protocolKey ||
+        ""
+      ).trim();
+
+    const block =
+      safeNumber(
+        row?.launchBlock ||
+        row?.blockNumber
+      );
+
+    return {
+      location,
+      verified:
+        row?.verified === true,
+      protocol:
+        protocol || null,
+      launchBlock:
+        block > 0
+          ? block
+          : null,
+      launchAgeBlocks:
+        head > 0 &&
+        block > 0
+          ? Math.max(
+              0,
+              head - block
+            )
+          : null,
+      curve:
+        isAddress(
+          normalize(row?.curve)
+        )
+          ? normalize(row?.curve)
+          : null,
+      pairToken:
+        String(
+          row?.pairToken || ""
+        ).toLowerCase() === "0x"
+          ? ZERO
+          : (
+              isAddress(
+                normalize(row?.pairToken)
+              )
+                ? normalize(row?.pairToken)
+                : null
+            ),
+      transactionHash:
+        normalize(
+          row?.transactionHash
+        ) || null,
+      source:
+        String(
+          row?.source || ""
+        ).trim() || null
+    };
+  };
+
+  const attachedRows =
+    [
+      rowSummary(
+        candidate?.verifiedLaunchSourceV476,
+        "CANDIDATE_VERIFIED_LAUNCH_SOURCE_V476"
+      ),
+      rowSummary(
+        candidate?.launchpadV476,
+        "CANDIDATE_LAUNCHPAD_V476"
+      ),
+      rowSummary(
+        candidate?.token?.launchpadV476,
+        "CANDIDATE_TOKEN_LAUNCHPAD_V476"
+      ),
+      rowSummary(
+        candidate?.launchpadV215,
+        "CANDIDATE_LAUNCHPAD_V215"
+      ),
+      rowSummary(
+        candidate?.token?.launchpadV215,
+        "CANDIDATE_TOKEN_LAUNCHPAD_V215"
+      ),
+      rowSummary(
+        watched?.token?.launchpadV476,
+        "WATCHED_TOKEN_LAUNCHPAD_V476"
+      ),
+      rowSummary(
+        watched?.launchpadV476,
+        "WATCHED_LAUNCHPAD_V476"
+      ),
+      rowSummary(
+        watched?.token?.launchpadV215,
+        "WATCHED_TOKEN_LAUNCHPAD_V215"
+      ),
+      rowSummary(
+        watched?.launchpadV215,
+        "WATCHED_LAUNCHPAD_V215"
+      )
+    ].filter(Boolean);
+
+  const retained =
+    Array.isArray(
+      state?.ponsDiscoveryV215
+        ?.recentVerifiedLaunches
+    )
+      ? state.ponsDiscoveryV215
+          .recentVerifiedLaunches
+      : [];
+
+  const persistedMatches =
+    retained
+      .filter(
+        row =>
+          normalize(row?.token) ===
+          token
+      )
+      .map(
+        row =>
+          rowSummary(
+            {
+              ...row,
+              verified: true,
+              protocol:
+                row?.protocol ||
+                "Pons V2"
+            },
+            "PERSISTED_PONS_DISCOVERY_V215"
+          )
+      )
+      .filter(Boolean)
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.launchBlock
+          ) -
+          safeNumber(
+            a?.launchBlock
+          )
+      );
+
+  const blocks =
+    retained
+      .map(
+        row =>
+          safeNumber(
+            row?.blockNumber ||
+            row?.launchBlock
+          )
+      )
+      .filter(
+        block =>
+          block > 0
+      );
+
+  const newestAttached =
+    attachedRows
+      .filter(
+        row =>
+          safeNumber(
+            row?.launchBlock
+          ) > 0
+      )
+      .slice()
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.launchBlock
+          ) -
+          safeNumber(
+            a?.launchBlock
+          )
+      )[0] || null;
+
+  return {
+    tokenAddress: token || null,
+    symbol:
+      candidate?.symbol || null,
+    attachedEvidence:
+      attachedRows,
+    attachedEvidenceCount:
+      attachedRows.length,
+    newestAttachedLocation:
+      newestAttached?.location ||
+      null,
+    newestAttachedLaunchBlock:
+      safeNumber(
+        newestAttached?.launchBlock
+      ) || null,
+    newestAttachedAgeBlocks:
+      safeNumber(
+        newestAttached?.launchAgeBlocks
+      ) || null,
+    persistedPonsMatchCount:
+      persistedMatches.length,
+    persistedPonsMatches:
+      persistedMatches.slice(
+        0,
+        4
+      ),
+    discoveryTelemetry: {
+      lastQueryAt:
+        state?.ponsDiscoveryV215
+          ?.lastQueryAt ||
+        null,
+      lastStatus:
+        state?.ponsDiscoveryV215
+          ?.lastStatus ||
+        null,
+      lastLaunchAt:
+        state?.ponsDiscoveryV215
+          ?.lastLaunchAt ||
+        null,
+      lastLaunchBlock:
+        safeNumber(
+          state?.ponsDiscoveryV215
+            ?.lastLaunchBlock
+        ) || null,
+      lastVerifiedToken:
+        normalize(
+          state?.ponsDiscoveryV215
+            ?.lastVerifiedToken
+        ) || null,
+      retainedCount:
+        retained.length,
+      retainedMinBlock:
+        blocks.length
+          ? Math.min(...blocks)
+          : null,
+      retainedMaxBlock:
+        blocks.length
+          ? Math.max(...blocks)
+          : null,
+      retainedMaxAgeBlocks:
+        head > 0 &&
+        blocks.length
+          ? Math.max(
+              0,
+              head -
+                Math.max(...blocks)
+            )
+          : null
+    }
+  };
+}
+
 function v916PonsLaunchMeta(
   candidate
 ) {
@@ -78536,10 +78816,19 @@ async function runDirectPonsCurveFlowV916(
     selectionLaunchBlockV920: null,
     selectionLaunchAgeBlocksV920: null,
     selectionPolicyV920:
-      "UNVERIFIED_FLOW_FIRST_THEN_FRESHEST_VERIFIED_PONS_LAUNCH_BLOCK"
+      "UNVERIFIED_FLOW_FIRST_THEN_FRESHEST_VERIFIED_PONS_LAUNCH_BLOCK",
+    candidateSourceDiagnosticV921: {
+      currentCandidateCount: 0,
+      eligibleCandidateCount: 0,
+      selectedToken: null,
+      rows: [],
+      discoveryTelemetry: null,
+      classification:
+        "NO_CURRENT_PONS_CANDIDATES_V921"
+    }
   };
 
-  const ranked =
+  const mappedPonsRowsV921 =
     (Array.isArray(candidates)
       ? candidates
       : [])
@@ -78574,6 +78863,14 @@ async function runDirectPonsCurveFlowV916(
             candidate
           );
 
+        const sourceTraceV921 =
+          v921PonsCandidateSourceTrace(
+            candidate,
+            state,
+            watched,
+            latestNumber
+          );
+
         try {
           delete candidate
             .__v916Watched;
@@ -78583,13 +78880,25 @@ async function runDirectPonsCurveFlowV916(
           candidate,
           lifecycle,
           meta,
+          sourceTraceV921,
           existingFlow:
             candidateVerifiedPonsCurveFlowV216(
               candidate,
               state
             )
         };
-      })
+      });
+
+  const currentPonsRowsV921 =
+    mappedPonsRowsV921
+      .filter(
+        row =>
+          row?.lifecycle
+            ?.preGraduation === true
+      );
+
+  const ranked =
+    currentPonsRowsV921
       .filter(row => {
         const candidate =
           row.candidate;
@@ -78646,6 +78955,120 @@ async function runDirectPonsCurveFlowV916(
 
   base.eligibleTargetsV920 =
     ranked.length;
+
+  const selectedTraceV921 =
+    selected?.sourceTraceV921 ||
+    null;
+
+  const discoveryTelemetryV921 =
+    selectedTraceV921
+      ?.discoveryTelemetry ||
+    currentPonsRowsV921[0]
+      ?.sourceTraceV921
+      ?.discoveryTelemetry ||
+    {
+      lastQueryAt:
+        state?.ponsDiscoveryV215
+          ?.lastQueryAt ||
+        null,
+      lastStatus:
+        state?.ponsDiscoveryV215
+          ?.lastStatus ||
+        null,
+      lastLaunchAt:
+        state?.ponsDiscoveryV215
+          ?.lastLaunchAt ||
+        null,
+      lastLaunchBlock:
+        safeNumber(
+          state?.ponsDiscoveryV215
+            ?.lastLaunchBlock
+        ) || null,
+      lastVerifiedToken:
+        normalize(
+          state?.ponsDiscoveryV215
+            ?.lastVerifiedToken
+        ) || null,
+      retainedCount:
+        Array.isArray(
+          state?.ponsDiscoveryV215
+            ?.recentVerifiedLaunches
+        )
+          ? state.ponsDiscoveryV215
+              .recentVerifiedLaunches
+              .length
+          : 0,
+      retainedMinBlock: null,
+      retainedMaxBlock: null,
+      retainedMaxAgeBlocks: null
+    };
+
+  base.candidateSourceDiagnosticV921 = {
+    currentCandidateCount:
+      currentPonsRowsV921.length,
+    eligibleCandidateCount:
+      ranked.length,
+    selectedToken:
+      normalize(
+        selected?.candidate?.address
+      ) || null,
+    rows:
+      currentPonsRowsV921
+        .map(row => ({
+          tokenAddress:
+            normalize(
+              row?.candidate?.address
+            ) || null,
+          symbol:
+            row?.candidate?.symbol ||
+            null,
+          eligible:
+            ranked.includes(row),
+          selected:
+            row === selected,
+          riskLabel:
+            String(
+              row?.candidate?.risk?.label ||
+              "UNVERIFIED"
+            ),
+          severeOverride:
+            row?.candidate?.risk
+              ?.severeOverride === true,
+          selectedMetaLaunchBlock:
+            safeNumber(
+              row?.meta?.launchBlock
+            ) || null,
+          sourceTrace:
+            row?.sourceTraceV921 ||
+            null
+        }))
+        .slice(0, 8),
+    discoveryTelemetry:
+      discoveryTelemetryV921,
+    classification:
+      currentPonsRowsV921.length === 0
+        ? "NO_CURRENT_PONS_CANDIDATES_V921"
+        : (
+            ranked.length === 0
+              ? "CURRENT_PONS_PRESENT_NONE_ELIGIBLE_V921"
+              : (
+                  safeNumber(
+                    selected?.meta
+                      ?.launchBlock
+                  ) > 0 &&
+                  safeNumber(
+                    latestNumber
+                  ) -
+                    safeNumber(
+                      selected?.meta
+                        ?.launchBlock
+                    ) >
+                    100000
+                    ? "SELECTED_PONS_LAUNCH_EVIDENCE_OLD_RELATIVE_TO_HEAD_V921"
+                    : "SELECTED_PONS_SOURCE_RECENCY_TRACE_CAPTURED_V921"
+                )
+          )
+  };
 
   if (!selected) {
     return base;
@@ -133649,10 +134072,12 @@ function evidenceAuditTelegramMessageV727(state) {
   if (ponsDirectV916) {
     lines.push(
       "",
-      "🧬 <b>Direct on-chain Pons V2 curve flow — V916</b>",
+      "🧬 <b>Direct on-chain Pons V2 curve flow — V916/V921</b>",
       `Recorded: <code>${escapeHtml(ponsDirectV916.recordedAt || "UNVERIFIED")}</code>`,
       `Target: <code>${escapeHtml(ponsDirectV916.tokenAddress || "NONE")}</code> ${escapeHtml(ponsDirectV916.symbol || "")} · curve <code>${escapeHtml(ponsDirectV916.curve || "NONE")}</code>`,
       `V920 selection — eligible ${fmt(ponsDirectV916.eligibleTargetsV920)} · verified launch block ${fmt(ponsDirectV916.selectionLaunchBlockV920)} · launch age ${fmt(ponsDirectV916.selectionLaunchAgeBlocksV920)} blocks · ${escapeHtml(ponsDirectV916.selectionPolicyV920 || "NONE")}`,
+      `V921 source diagnosis — <b>${escapeHtml(ponsDirectV916?.candidateSourceDiagnosticV921?.classification || "NONE")}</b> · current Pons ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.currentCandidateCount)} · eligible ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.eligibleCandidateCount)}`,
+      `V921 persisted Pons discovery — last status <b>${escapeHtml(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.lastStatus || "NONE")}</b> · last query ${escapeHtml(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.lastQueryAt || "NONE")} · last launch block ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.lastLaunchBlock)} · retained ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.retainedCount)} · retained blocks ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.retainedMinBlock)}→${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.retainedMaxBlock)}`,
       `Pair token: <code>${escapeHtml(ponsDirectV916.pairToken || "NONE")}</code> · USD basis <b>${escapeHtml(ponsDirectV916.quoteUsdBasis || "NONE")}</b>`,
       `RPC window: ${fmt(ponsDirectV916.fromBlock)} → ${fmt(ponsDirectV916.toBlock)} · provider <b>${escapeHtml(ponsDirectV916.provider || "NONE")}</b> · requests ${fmt(ponsDirectV916.requestsUsed)}`,
       `Curve logs: ${fmt(ponsDirectV916.logsReturned)} · decoded ${fmt(ponsDirectV916.decodedTrades)} · verified USD ${fmt(ponsDirectV916.verifiedUsdTrades)} · persisted new ${fmt(ponsDirectV916.persistedNewTrades)}`,
@@ -133662,6 +134087,62 @@ function evidenceAuditTelegramMessageV727(state) {
       `Bitquery state: <b>${escapeHtml(ponsDirectV916.bitqueryStatus || "NONE")}</b>`,
       `Status: <b>${escapeHtml(ponsDirectV916.status || "NONE")}</b>`
     );
+  }
+
+
+  const ponsSourceV921 =
+    ponsDirectV916
+      ?.candidateSourceDiagnosticV921 ||
+    null;
+
+  if (ponsSourceV921) {
+    for (
+      const row
+      of Array.isArray(
+        ponsSourceV921?.rows
+      )
+        ? ponsSourceV921.rows
+        : []
+    ) {
+      const trace =
+        row?.sourceTrace || {};
+
+      const evidence =
+        Array.isArray(
+          trace?.attachedEvidence
+        )
+          ? trace.attachedEvidence
+          : [];
+
+      const persisted =
+        Array.isArray(
+          trace?.persistedPonsMatches
+        )
+          ? trace.persistedPonsMatches
+          : [];
+
+      lines.push(
+        `• V921 <code>${escapeHtml(row?.tokenAddress || "NONE")}</code> ${escapeHtml(row?.symbol || "")} · eligible ${row?.eligible ? "YES" : "NO"} · selected ${row?.selected ? "YES" : "NO"} · risk ${escapeHtml(row?.riskLabel || "UNVERIFIED")} · meta launch ${fmt(row?.selectedMetaLaunchBlock)} · newest attached ${escapeHtml(trace?.newestAttachedLocation || "NONE")} @ ${fmt(trace?.newestAttachedLaunchBlock)} · persisted matches ${fmt(trace?.persistedPonsMatchCount)}`
+      );
+
+      for (
+        const sourceRow
+        of evidence.slice(0, 5)
+      ) {
+        lines.push(
+          `  ↳ ${escapeHtml(sourceRow?.location || "UNKNOWN")} · verified ${sourceRow?.verified ? "YES" : "NO"} · ${escapeHtml(sourceRow?.protocol || "NONE")} · block ${fmt(sourceRow?.launchBlock)} · age ${fmt(sourceRow?.launchAgeBlocks)} · source ${escapeHtml(sourceRow?.source || "NONE")}`
+        );
+      }
+
+      for (
+        const persistedRow
+        of persisted.slice(0, 2)
+      ) {
+        lines.push(
+          `  ↳ PERSISTED_V215 · block ${fmt(persistedRow?.launchBlock)} · age ${fmt(persistedRow?.launchAgeBlocks)} · tx ${escapeHtml(persistedRow?.transactionHash || "NONE")}`
+        );
+      }
+    }
   }
 
   const ponsFlowV913 =
