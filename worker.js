@@ -1,4 +1,17 @@
 /**
+ * V903 MOMENTUM DIAGNOSTIC TRANSPORT FIX — READ ONLY:
+ * - builds directly from deployed V902;
+ * - fixes only the confirmed audit-plumbing bug: V902 persisted
+ *   lastMomentumHandoffDiagnosticV902 on qualificationAuditV663, while
+ *   /evidenceaudit tried to read it from evidenceAuditSnapshotV727, whose
+ *   reduced return object did not expose that field;
+ * - /evidenceaudit now reads the persisted qualification-audit diagnostic
+ *   directly first, with the old snapshot lookup retained as fallback;
+ * - zero provider/RPC requests, zero state writes from the command, zero
+ *   scoring, Momentum, thresholds, risk, Telegram, qualification or budget
+ *   changes.
+ */
+/**
  * V902 MOMENTUM HANDOFF DIAGNOSTIC — READ ONLY:
  * - builds directly from deployed V901;
  * - traces verified V179/V212 USD flow and V894 promoted swaps into the
@@ -7925,7 +7938,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V902";
+const VERSION = "V903";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -129208,8 +129221,17 @@ function evidenceAuditTelegramMessageV727(state) {
       ""
     );
   }
+  /*
+   * V903 transport fix: V902 stores this diagnostic directly on
+   * qualificationAuditV663. evidenceAuditSnapshotV727 intentionally returns a
+   * reduced aggregate and does not carry arbitrary audit-root fields, so read
+   * the persisted source directly. Keep the snapshot lookup as a compatibility
+   * fallback only.
+   */
   const momentumDiagV902 =
-    d?.lastMomentumHandoffDiagnosticV902 || null;
+    state?.qualificationAuditV663?.lastMomentumHandoffDiagnosticV902 ||
+    d?.lastMomentumHandoffDiagnosticV902 ||
+    null;
 
   if (momentumDiagV902) {
     const m5v902 = momentumDiagV902?.v212?.m5 || {};
@@ -129225,7 +129247,7 @@ function evidenceAuditTelegramMessageV727(state) {
         : "UNVERIFIED";
 
     lines.push(
-      `🧠 <b>Momentum handoff diagnostic — V902</b>`,
+      `🧠 <b>Momentum handoff diagnostic — V902/V903</b>`,
       `Recorded: <code>${escapeHtml(momentumDiagV902.recordedAt || "UNVERIFIED")}</code>`,
       `Candidate: <code>${escapeHtml(momentumDiagV902.token || "NONE")}</code> ${escapeHtml(momentumDiagV902.symbol || "")}`,
       `V212 verified: <b>${momentumDiagV902?.v212?.verified ? "YES" : "NO"}</b> · records <b>${fmt(momentumDiagV902?.v212?.recordCount)}</b> · pools <b>${fmt(momentumDiagV902?.v212?.poolCount)}</b>`,
