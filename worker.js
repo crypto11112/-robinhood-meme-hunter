@@ -8363,7 +8363,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V939";
+const VERSION = "V940";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -137301,6 +137301,173 @@ function rescoreTriggerMessageV939(state) {
   return lines.join("\n");
 }
 
+
+/* =========================================================
+   V940 FINAL RISK-VERIFICATION COMPLETION AUDIT — READ ONLY
+   ========================================================= */
+function riskCompletionAuditV940(state) {
+  const records = Array.isArray(state?.qualificationAuditV663?.records)
+    ? state.qualificationAuditV663.records
+    : [];
+  const now = Date.now();
+  const cutoff = now - QUALIFICATION_AUDIT_RETENTION_MS_V663;
+
+  const rows = records
+    .filter(row => {
+      const at = safeNumber(row?.lastEvaluatedAt || row?.firstEvaluatedAt);
+      return isAddress(normalize(row?.address)) && at >= cutoff && at <= now + 5 * 60 * 1000;
+    })
+    .map(row => {
+      const ea = row?.evidenceCompletionAuditV727 && typeof row.evidenceCompletionAuditV727 === "object"
+        ? row.evidenceCompletionAuditV727 : {};
+      const risk = ea?.riskGateDiagnosticV871 && typeof ea.riskGateDiagnosticV871 === "object"
+        ? ea.riskGateDiagnosticV871 : {};
+      const coverage = row?.dataCoverageAuditV731 && typeof row.dataCoverageAuditV731 === "object"
+        ? row.dataCoverageAuditV731 : {};
+      const holderCoverage = coverage?.evidence?.holders || {};
+      const holderProvider = coverage?.providers?.blockscoutHolders || {};
+      const f = ea?.finalEvidence || {};
+
+      const riskVerified = row?.riskVerified === true || risk?.verified === true;
+      const riskScore = riskVerified ? safeNumber(row?.riskScore ?? risk?.score) : null;
+      const riskLabel = String(risk?.label || (riskVerified ? "VERIFIED" : "UNVERIFIED")).toUpperCase();
+      const severeOverride = risk?.severeOverride === true;
+      const verifiedRiskBlocks = severeOverride || riskLabel === "HIGH" || (riskVerified && safeNumber(riskScore) > MAX_ALERT_RISK);
+
+      const ev = risk?.evidence || {};
+      const marketEvidence = ev?.market === true;
+      const concentrationEvidence = ev?.concentration === true;
+      const liveActivityEvidence = ev?.liveActivity === true;
+      const holderCounterEvidence = ev?.holderCounters === true;
+      const independentComputed = [marketEvidence, concentrationEvidence, liveActivityEvidence, holderCounterEvidence].filter(Boolean).length;
+      const independentEvidence = Math.max(independentComputed, safeNumber(risk?.independentEvidence));
+      const riskReasons = Array.isArray(risk?.reasons) ? risk.reasons.map(x => String(x || "")).filter(Boolean) : [];
+      const holderIntegrityBlocked = riskReasons.some(reason => /^Holder integrity unresolved:/i.test(reason));
+      const enoughEvidenceByExistingRiskRule = independentEvidence >= 2 && !holderIntegrityBlocked;
+
+      const holderStatus = String(row?.holderStatus || holderCoverage?.status || holderProvider?.status || "").trim() || null;
+      const holderCoverageClass = String(holderCoverage?.classification || holderProvider?.classification || "NOT_ATTEMPTED").toUpperCase();
+      const holderAttempted = holderCoverage?.attempted === true || holderProvider?.observed === true || Boolean(holderStatus);
+      const holderFullyVerified = row?.holderEvidenceVerified === true || holderCoverage?.verified === true;
+
+      let diagnosis = "RISK_ALREADY_VERIFIED";
+      if (!riskVerified) {
+        if (enoughEvidenceByExistingRiskRule) diagnosis = "RISK_EVIDENCE_ALREADY_SUFFICIENT_RECOMPUTE_OR_HANDOFF_MISSING";
+        else if (holderIntegrityBlocked) diagnosis = "HOLDER_INTEGRITY_UNRESOLVED";
+        else if (independentEvidence === 1) diagnosis = "ONE_MORE_INDEPENDENT_RISK_EVIDENCE_CLASS_NEEDED";
+        else if (independentEvidence === 0) diagnosis = "NO_INDEPENDENT_RISK_EVIDENCE_CLASSES_VERIFIED";
+        else diagnosis = "RISK_EVIDENCE_GENUINELY_INCOMPLETE";
+      } else if (verifiedRiskBlocks) diagnosis = "VERIFIED_RISK_BLOCKS_TELEGRAM";
+      else diagnosis = "VERIFIED_RISK_ACCEPTABLE";
+
+      let holderDiagnosis = "HOLDER_NOT_REQUIRED_FOR_CURRENT_RISK_SUFFICIENCY";
+      if (!riskVerified && !enoughEvidenceByExistingRiskRule) {
+        if (holderIntegrityBlocked) holderDiagnosis = "HOLDER_INTEGRITY_REJECTED";
+        else if (holderFullyVerified) holderDiagnosis = "HOLDER_VERIFIED_BUT_RISK_STILL_INCOMPLETE";
+        else if (holderCoverageClass === "PROVIDER_LIMITED") holderDiagnosis = "HOLDER_PROVIDER_LIMITED";
+        else if (holderCoverageClass === "BUDGET_BLOCKED") holderDiagnosis = "HOLDER_BUDGET_BLOCKED";
+        else if (holderCoverageClass === "DATA_NOT_FOUND") holderDiagnosis = "HOLDER_DATA_NOT_FOUND_OR_INDEXING_LAG";
+        else if (holderCoverageClass === "VERIFICATION_REJECTED") holderDiagnosis = "HOLDER_EVIDENCE_FAILED_VERIFICATION";
+        else if (!holderAttempted) holderDiagnosis = "HOLDER_VERIFICATION_NOT_ATTEMPTED";
+        else holderDiagnosis = "HOLDER_EVIDENCE_INCOMPLETE";
+      }
+
+      return {
+        address: normalize(row?.address), symbol: row?.symbol || null,
+        lastEvaluatedAt: safeNumber(row?.lastEvaluatedAt),
+        opportunity: safeNumber(row?.opportunityScore), confidence: safeNumber(row?.confidenceScore),
+        riskVerified, riskScore, riskLabel, verifiedRiskBlocks, diagnosis,
+        independentEvidence,
+        evidence: { market: marketEvidence, concentration: concentrationEvidence, liveActivity: liveActivityEvidence, holderCounters: holderCounterEvidence },
+        enoughEvidenceByExistingRiskRule, holderIntegrityBlocked, holderFullyVerified,
+        holderAttempted, holderStatus, holderCoverageClass, holderDiagnosis,
+        marketVerifiedFinal: f?.marketVerified === true,
+        exactPoolVerifiedFinal: f?.exactPoolIdentityVerified === true,
+        observedSwaps: safeNumber(f?.observedSwaps),
+        telegramReasons: Array.isArray(row?.telegramReasons) ? row.telegramReasons.filter(Boolean) : [],
+        riskReasons
+      };
+    })
+    .filter(row => !row.riskVerified || row.verifiedRiskBlocks)
+    .sort((a,b) => {
+      const rank = x => x.diagnosis === "RISK_EVIDENCE_ALREADY_SUFFICIENT_RECOMPUTE_OR_HANDOFF_MISSING" ? 6
+        : x.diagnosis === "ONE_MORE_INDEPENDENT_RISK_EVIDENCE_CLASS_NEEDED" ? 5
+        : x.diagnosis === "HOLDER_INTEGRITY_UNRESOLVED" ? 4
+        : x.diagnosis === "NO_INDEPENDENT_RISK_EVIDENCE_CLASSES_VERIFIED" ? 3
+        : x.diagnosis === "RISK_EVIDENCE_GENUINELY_INCOMPLETE" ? 2 : 1;
+      if (rank(b) !== rank(a)) return rank(b) - rank(a);
+      if (b.opportunity !== a.opportunity) return b.opportunity - a.opportunity;
+      return b.lastEvaluatedAt - a.lastEvaluatedAt;
+    });
+
+  const diagnosisCounts = {};
+  const holderDiagnosisCounts = {};
+  for (const row of rows) {
+    diagnosisCounts[row.diagnosis] = safeNumber(diagnosisCounts[row.diagnosis]) + 1;
+    holderDiagnosisCounts[row.holderDiagnosis] = safeNumber(holderDiagnosisCounts[row.holderDiagnosis]) + 1;
+  }
+
+  return {
+    version: "V940", runtimeVersion: VERSION,
+    source: "QUALIFICATION_AUDIT_V663_PLUS_V727_V736_RISK_COMPLETION_V940",
+    recordedAt: new Date().toISOString(),
+    rowsAnalysed: rows.length,
+    unverifiedRiskRows: rows.filter(r => !r.riskVerified).length,
+    alreadySufficientRiskEvidenceRows: rows.filter(r => r.diagnosis === "RISK_EVIDENCE_ALREADY_SUFFICIENT_RECOMPUTE_OR_HANDOFF_MISSING").length,
+    oneEvidenceClassShortRows: rows.filter(r => r.diagnosis === "ONE_MORE_INDEPENDENT_RISK_EVIDENCE_CLASS_NEEDED").length,
+    zeroEvidenceClassRows: rows.filter(r => r.diagnosis === "NO_INDEPENDENT_RISK_EVIDENCE_CLASSES_VERIFIED").length,
+    holderIntegrityBlockedRows: rows.filter(r => r.diagnosis === "HOLDER_INTEGRITY_UNRESOLVED").length,
+    verifiedRiskBlocksRows: rows.filter(r => r.diagnosis === "VERIFIED_RISK_BLOCKS_TELEGRAM").length,
+    diagnosisCounts: Object.entries(diagnosisCounts).sort((a,b)=>b[1]-a[1]).map(([reason,count])=>({reason,count})),
+    holderDiagnosisCounts: Object.entries(holderDiagnosisCounts).sort((a,b)=>b[1]-a[1]).map(([reason,count])=>({reason,count})),
+    rows: rows.slice(0,16),
+    riskRule: "Existing scoreRisk(): VERIFIED normally requires >=2 independent classes among market, concentration, live swaps, holder counters; unresolved holder integrity can still hold risk UNVERIFIED; severe overrides are unchanged.",
+    providerRequestsAdded: 0, stateWritesAdded: 0, riskChanged: false, scoringChanged: false, qualificationChanged: false, telegramThresholdsChanged: false
+  };
+}
+
+function riskCompletionMessageV940(state) {
+  const d = riskCompletionAuditV940(state);
+  const fmt = n => safeNumber(n).toLocaleString("en-GB");
+  const yn = v => v === true ? "YES" : "NO";
+  const lines = [
+    "🛡 <b>Final Risk Verification Completion Audit — V940</b>", "",
+    `Source: <b>${escapeHtml(d.source)}</b>`,
+    `Rows analysed: <b>${fmt(d.rowsAnalysed)}</b> · risk still UNVERIFIED <b>${fmt(d.unverifiedRiskRows)}</b>`,
+    `Risk evidence already sufficient under existing scoreRisk() rules: <b>${fmt(d.alreadySufficientRiskEvidenceRows)}</b>`,
+    `Exactly one independent evidence class short: <b>${fmt(d.oneEvidenceClassShortRows)}</b>`,
+    `Zero independent risk evidence classes: <b>${fmt(d.zeroEvidenceClassRows)}</b>`,
+    `Holder-integrity blocked: <b>${fmt(d.holderIntegrityBlockedRows)}</b>`,
+    `Verified HIGH/severe risk still blocks Telegram: <b>${fmt(d.verifiedRiskBlocksRows)}</b>`
+  ];
+  if (d.diagnosisCounts?.length) {
+    lines.push("", "🧭 <b>Risk completion diagnosis</b>");
+    for (const x of d.diagnosisCounts.slice(0,8)) lines.push(`• ${escapeHtml(x.reason)}: <b>${fmt(x.count)}</b>`);
+  }
+  if (d.holderDiagnosisCounts?.length) {
+    lines.push("", "👥 <b>Holder-evidence diagnosis</b>");
+    for (const x of d.holderDiagnosisCounts.slice(0,8)) lines.push(`• ${escapeHtml(x.reason)}: <b>${fmt(x.count)}</b>`);
+  }
+  if (d.rows?.length) {
+    lines.push("", "🔬 <b>Highest-value affected candidates</b>");
+    for (const row of d.rows.slice(0,12)) {
+      const ev = row.evidence || {};
+      const blockers = row.telegramReasons.slice(0,5).join(" | ") || "NONE";
+      const rr = row.riskReasons.slice(0,3).join(" | ") || "NONE";
+      lines.push(
+        `• <b>${escapeHtml(row.symbol || "UNKNOWN")}</b> <code>${escapeHtml(shortAddressV937(row.address || ""))}</code> — Opp <b>${fmt(row.opportunity)}</b> · Conf <b>${fmt(row.confidence)}</b> · Risk <b>${row.riskVerified ? fmt(row.riskScore) : "UNVERIFIED"}</b>`,
+        `  ↳ independent risk classes: <b>${fmt(row.independentEvidence)}/4</b> · market ${yn(ev.market)} · concentration ${yn(ev.concentration)} · live swaps ${yn(ev.liveActivity)} · holder counters ${yn(ev.holderCounters)}`,
+        `  ↳ diagnosis: <b>${escapeHtml(row.diagnosis)}</b>`,
+        `  ↳ holder path: ${escapeHtml(row.holderDiagnosis)} · class ${escapeHtml(row.holderCoverageClass || "NONE")} · status ${escapeHtml(row.holderStatus || "NONE")}`,
+        `  ↳ risk reasons: ${escapeHtml(rr)}`,
+        `  ↳ Telegram blockers: ${escapeHtml(blockers)}`
+      );
+    }
+  }
+  lines.push("", `<i>${escapeHtml(d.riskRule)}</i>`, "<i>Read-only. Zero provider requests, zero state writes, no risk/scoring/qualification/Telegram-threshold changes.</i>");
+  return lines.join("\n");
+}
+
 async function finalTelegramQualificationAuditMessageV934(env, state) {
   const loaded = await loadFinalTelegramQualificationAuditV934(env, state);
   const d = loaded?.snapshot || null;
@@ -168089,6 +168256,27 @@ async function telegramCommandReplyV271(
       };
     }
   } else if (
+    parsed.command === "/riskaudit" ||
+    parsed.command === "/riskcompletion"
+  ) {
+    reply = riskCompletionMessageV940(state);
+
+    if (diagnosticV273) {
+      const riskV940 = riskCompletionAuditV940(state);
+      diagnosticV273.riskCompletionAuditV940 = {
+        scannerBudgetConsumed: false,
+        externalProviderRequests: 0,
+        stateWrites: 0,
+        unverifiedRiskRows: safeNumber(riskV940?.unverifiedRiskRows),
+        alreadySufficientRiskEvidenceRows: safeNumber(riskV940?.alreadySufficientRiskEvidenceRows),
+        oneEvidenceClassShortRows: safeNumber(riskV940?.oneEvidenceClassShortRows),
+        holderIntegrityBlockedRows: safeNumber(riskV940?.holderIntegrityBlockedRows),
+        riskChanged: false,
+        scoringChanged: false,
+        qualificationChanged: false
+      };
+    }
+  } else if (
     parsed.command === "/scoreaudit" ||
     parsed.command === "/oppaudit"
   ) {
@@ -168563,7 +168751,9 @@ async function telegramCommandReplyV271(
     parsed.command === "/scorehandoff" ||
     parsed.command === "/handoffaudit" ||
     parsed.command === "/rescoreaudit" ||
-    parsed.command === "/rescoretrigger";
+    parsed.command === "/rescoretrigger" ||
+    parsed.command === "/riskaudit" ||
+    parsed.command === "/riskcompletion";
 
   if (isFreshAnalyseV352) {
     await telegramAnalyseCheckpointV352(
