@@ -169799,7 +169799,7 @@ function holderPrototypeTargetV947(state, argument = "") {
 }
 async function directChainHolderPrototypeV947(state, env, argument = "") {
   const target = holderPrototypeTargetV947(state, argument);
-  if (!target) return { version: "V949", status: "NO_VALID_TOKEN_TARGET", externalRequestsUsed: 0, stateWrites: 0 };
+  if (!target) return { version: "V950", status: "NO_VALID_TOKEN_TARGET", externalRequestsUsed: 0, stateWrites: 0 };
   const address = target.address;
   const budget = holderPrototypeBudgetV947();
   const identity = [];
@@ -169827,140 +169827,159 @@ async function directChainHolderPrototypeV947(state, env, argument = "") {
   let head = null;
   try { if (headCall?.result) head = Number(BigInt(headCall.result)); } catch (_) {}
   if (!(head > 0)) return {
-    version:"V949", status:"HEAD_UNVERIFIED", address, symbol:target.symbol,
+    version:"V950", status:"HEAD_UNVERIFIED", address, symbol:target.symbol,
     identity, externalRequestsUsed:safeNumber(budget?.totalUsed), stateWrites:0
   };
 
   const launchBlock = safeNumber(target.launchBlock) > 0 ? Math.floor(safeNumber(target.launchBlock)) : null;
-  const maxCoveredBlocks = HOLDER_PROTOTYPE_MAX_LOG_REQUESTS_V947 * HOLDER_PROTOTYPE_CHUNK_BLOCKS_V947;
   const fullRangeKnown = launchBlock !== null && launchBlock <= head;
   const requiredBlocks = fullRangeKnown ? Math.max(1, head - launchBlock + 1) : null;
-  const requiredChunks = requiredBlocks !== null ? Math.ceil(requiredBlocks / HOLDER_PROTOTYPE_CHUNK_BLOCKS_V947) : null;
-  const canCompleteFullHistory = fullRangeKnown && requiredChunks <= HOLDER_PROTOTYPE_MAX_LOG_REQUESTS_V947;
-  const scanFrom = canCompleteFullHistory
-    ? launchBlock
-    : Math.max(0, head - maxCoveredBlocks + 1);
 
-  const ranges = [];
-  for (let from = scanFrom; from <= head && ranges.length < HOLDER_PROTOTYPE_MAX_LOG_REQUESTS_V947; from += HOLDER_PROTOTYPE_CHUNK_BLOCKS_V947) {
-    ranges.push({fromBlock:from,toBlock:Math.min(head,from + HOLDER_PROTOTYPE_CHUNK_BLOCKS_V947 - 1)});
-  }
+  // V950: empirically discover the largest block range this free RPC path accepts
+  // for this exact token/topic. A successful empty response still proves the range
+  // is accepted; it does NOT prove full holder history is empty.
+  const probeSizesRaw = [500000, 250000, 100000, 50000, 20000, 10000, 5000, 2000];
+  const probeSizes = [...new Set(probeSizesRaw.map(n => Math.min(n, Math.max(1, requiredBlocks || n))).filter(n => n > 0))];
+  const adaptiveProbeResults = [];
+  let largestSafeRange = 0;
+  let largestSafeRows = null;
+  let firstFailure = null;
 
-  const logs = [];
-  const rangeResults = [];
-  let providerFailure = null;
-  for (const range of ranges) {
+  for (const size of probeSizes) {
     if (!budgetAvailable(budget, "analysis")) break;
+    const fromBlock = Math.max(launchBlock || 0, head - size + 1);
+    const actualSize = head - fromBlock + 1;
     const r = await rpc(env, "eth_getLogs", [{
       address,
-      fromBlock:"0x"+range.fromBlock.toString(16),
-      toBlock:"0x"+range.toBlock.toString(16),
+      fromBlock:"0x"+fromBlock.toString(16),
+      toBlock:"0x"+head.toString(16),
       topics:[ERC20_TRANSFER_TOPIC_V947]
     }], budget, "analysis");
-    if (!Array.isArray(r?.result)) {
-      providerFailure = r?.error || r?.status || "ETH_GETLOGS_UNVERIFIED";
-      rangeResults.push({...range,ok:false,rows:0,error:providerFailure});
-      break;
+    const ok = Array.isArray(r?.result);
+    const error = ok ? null : (r?.error || r?.status || "ETH_GETLOGS_UNVERIFIED");
+    const rows = ok ? r.result.length : 0;
+    adaptiveProbeResults.push({requestedBlocks:size,actualBlocks:actualSize,fromBlock,toBlock:head,ok,rows,error});
+    if (ok && actualSize > largestSafeRange) {
+      largestSafeRange = actualSize;
+      largestSafeRows = rows;
     }
-    logs.push(...r.result);
-    rangeResults.push({...range,ok:true,rows:r.result.length});
+    if (!ok && !firstFailure) firstFailure = {requestedBlocks:size,actualBlocks:actualSize,error};
   }
 
-  const scannedThrough = rangeResults.filter(r=>r.ok).length
-    ? rangeResults.filter(r=>r.ok).slice(-1)[0].toBlock : scanFrom - 1;
-  const completeHistory = canCompleteFullHistory && !providerFailure && scannedThrough >= head && rangeResults.length === requiredChunks;
-  const blocksScanned = rangeResults.filter(r=>r.ok).reduce((n,r)=>n+(r.toBlock-r.fromBlock+1),0);
-  const transferRows = logs.length;
-  const transfersPer1000Blocks = blocksScanned > 0 ? transferRows / blocksScanned * 1000 : 0;
-  const estimatedRequestsForFullHistory = requiredChunks;
+  const estimatedAdaptiveRequests = fullRangeKnown && largestSafeRange > 0
+    ? Math.ceil(requiredBlocks / largestSafeRange) : null;
+  const fixed2000Estimate = fullRangeKnown ? Math.ceil(requiredBlocks / 2000) : null;
+  const improvementFactor = estimatedAdaptiveRequests > 0 && fixed2000Estimate > 0
+    ? fixed2000Estimate / estimatedAdaptiveRequests : null;
 
-  const balances = new Map();
-  let decodedTransfers = 0;
-  if (completeHistory) {
-    for (const log of logs) {
-      const topics = Array.isArray(log?.topics) ? log.topics : [];
-      const from = topicAddressV947(topics[1]);
-      const to = topicAddressV947(topics[2]);
-      const amount = transferAmountV947(log?.data);
-      if (!from || !to || amount === null) continue;
-      decodedTransfers++;
-      if (from !== ZERO) balances.set(from, (balances.get(from) || 0n) - amount);
-      if (to !== ZERO) balances.set(to, (balances.get(to) || 0n) + amount);
-    }
-  }
-
+  // Exact reconstruction is only allowed when the full known history itself fits
+  // inside the already-proven safe range. Re-run that one complete range so exact
+  // balances come from a single authoritative full-history response, never by
+  // stitching overlapping probes.
+  let completeHistory = false;
   let exact = null;
-  if (completeHistory && totalSupply !== null && totalSupply !== undefined) {
-    let supply = 0n;
-    try { supply = BigInt(String(totalSupply)); } catch (_) {}
-    const watched = Array.isArray(state?.watchedTokens)
-      ? state.watchedTokens.find(t => normalize(t?.address || t?.token) === address) : null;
-    const market = watched?.marketCache?.data || target?.row?.market || target?.row?.marketSnapshot || null;
-    const verifiedPair = normalize(market?.pairAddress || "") || null;
-    let infrastructureBalance = 0n;
-    const positive = [];
-    const infrastructure = [];
-    for (const [holderAddress, bal] of balances.entries()) {
-      if (bal <= 0n) continue;
-      const reason = infrastructureHolderReason(holderAddress, watched || {address,token:address}, verifiedPair);
-      if (reason) {
-        infrastructureBalance += bal;
-        infrastructure.push({address:holderAddress,balance:bal,reason});
-      } else {
-        positive.push({address:holderAddress,balance:bal});
+  let fullHistoryRows = 0;
+  let fullHistoryError = null;
+  let decodedTransfers = 0;
+  if (fullRangeKnown && largestSafeRange >= requiredBlocks && budgetAvailable(budget, "analysis")) {
+    const r = await rpc(env, "eth_getLogs", [{
+      address,
+      fromBlock:"0x"+launchBlock.toString(16),
+      toBlock:"0x"+head.toString(16),
+      topics:[ERC20_TRANSFER_TOPIC_V947]
+    }], budget, "analysis");
+    if (Array.isArray(r?.result)) {
+      completeHistory = true;
+      fullHistoryRows = r.result.length;
+      const balances = new Map();
+      for (const log of r.result) {
+        const topics = Array.isArray(log?.topics) ? log.topics : [];
+        const from = topicAddressV947(topics[1]);
+        const to = topicAddressV947(topics[2]);
+        const amount = transferAmountV947(log?.data);
+        if (!from || !to || amount === null) continue;
+        decodedTransfers++;
+        if (from !== ZERO) balances.set(from, (balances.get(from) || 0n) - amount);
+        if (to !== ZERO) balances.set(to, (balances.get(to) || 0n) + amount);
       }
+      if (totalSupply !== null && totalSupply !== undefined) {
+        let supply = 0n;
+        try { supply = BigInt(String(totalSupply)); } catch (_) {}
+        const watched = Array.isArray(state?.watchedTokens)
+          ? state.watchedTokens.find(t => normalize(t?.address || t?.token) === address) : null;
+        const market = watched?.marketCache?.data || target?.row?.market || target?.row?.marketSnapshot || null;
+        const verifiedPair = normalize(market?.pairAddress || "") || null;
+        let infrastructureBalance = 0n;
+        const positive = [];
+        const infrastructure = [];
+        for (const [holderAddress, bal] of balances.entries()) {
+          if (bal <= 0n) continue;
+          const reason = infrastructureHolderReason(holderAddress, watched || {address,token:address}, verifiedPair);
+          if (reason) {
+            infrastructureBalance += bal;
+            infrastructure.push({address:holderAddress,balance:bal,reason});
+          } else {
+            positive.push({address:holderAddress,balance:bal});
+          }
+        }
+        positive.sort((a,b)=>a.balance===b.balance?0:(a.balance>b.balance?-1:1));
+        const ownershipSupply = supply - infrastructureBalance;
+        const top1 = positive[0]?.balance || 0n;
+        const top10 = positive.slice(0,10).reduce((n,x)=>n+x.balance,0n);
+        const pct = raw => {
+          if (ownershipSupply <= 0n) return null;
+          try { return Number(raw * 1000000n / ownershipSupply) / 10000; } catch (_) { return null; }
+        };
+        const reconstructedPositiveSupply = positive.reduce((n,x)=>n+x.balance,0n);
+        exact = {
+          holderCount: positive.length,
+          topHolderPct: pct(top1),
+          top10Pct: pct(top10),
+          totalSupply: supply.toString(),
+          infrastructureBalance: infrastructureBalance.toString(),
+          ownershipSupply: ownershipSupply.toString(),
+          reconstructedPositiveSupply: reconstructedPositiveSupply.toString(),
+          infrastructureRows: infrastructure.length,
+          negativeBalanceRows: [...balances.values()].filter(v=>v<0n).length,
+          zeroBalanceRows: [...balances.values()].filter(v=>v===0n).length,
+          supplyReconciliationPct: ownershipSupply > 0n ? Number(reconstructedPositiveSupply * 1000000n / ownershipSupply) / 10000 : null,
+          top10: positive.slice(0,10).map(x=>({address:x.address,balance:x.balance.toString(),percentage:pct(x.balance)}))
+        };
+      }
+    } else {
+      fullHistoryError = r?.error || r?.status || "FULL_HISTORY_ETH_GETLOGS_UNVERIFIED";
     }
-    positive.sort((a,b)=>a.balance===b.balance?0:(a.balance>b.balance?-1:1));
-    const ownershipSupply = supply - infrastructureBalance;
-    const top1 = positive[0]?.balance || 0n;
-    const top10 = positive.slice(0,10).reduce((n,x)=>n+x.balance,0n);
-    const pct = raw => {
-      if (ownershipSupply <= 0n) return null;
-      try { return Number(raw * 1000000n / ownershipSupply) / 10000; } catch (_) { return null; }
-    };
-    const reconstructedPositiveSupply = positive.reduce((n,x)=>n+x.balance,0n);
-    exact = {
-      holderCount: positive.length,
-      topHolderPct: pct(top1),
-      top10Pct: pct(top10),
-      totalSupply: supply.toString(),
-      infrastructureBalance: infrastructureBalance.toString(),
-      ownershipSupply: ownershipSupply.toString(),
-      reconstructedPositiveSupply: reconstructedPositiveSupply.toString(),
-      infrastructureRows: infrastructure.length,
-      negativeBalanceRows: [...balances.values()].filter(v=>v<0n).length,
-      zeroBalanceRows: [...balances.values()].filter(v=>v===0n).length,
-      supplyReconciliationPct: ownershipSupply > 0n ? Number(reconstructedPositiveSupply * 1000000n / ownershipSupply) / 10000 : null,
-      top10: positive.slice(0,10).map(x=>({address:x.address,balance:x.balance.toString(),percentage:pct(x.balance)}))
-    };
   }
 
-  let diagnosis = "PARTIAL_WINDOW_FEASIBILITY_ONLY";
-  if (providerFailure) diagnosis = "DIRECT_RPC_TRANSFER_LOG_PROVIDER_FAILURE";
-  else if (!fullRangeKnown) diagnosis = "VERIFIED_LAUNCH_BLOCK_NOT_AVAILABLE_FULL_RECONSTRUCTION_NOT_ATTEMPTED";
-  else if (!canCompleteFullHistory) diagnosis = "FULL_HISTORY_EXCEEDS_BOUNDED_PROTOTYPE_REQUEST_CAP";
+  let diagnosis = "ADAPTIVE_RANGE_PROBE_COMPLETE";
+  if (!fullRangeKnown) diagnosis = "VERIFIED_LAUNCH_BLOCK_NOT_AVAILABLE";
+  else if (!(largestSafeRange > 0)) diagnosis = "NO_ACCEPTED_TRANSFER_LOG_RANGE_FOUND";
   else if (completeHistory && exact) diagnosis = "FULL_DIRECT_CHAIN_HOLDER_RECONSTRUCTION_COMPLETE";
-  else if (completeHistory) diagnosis = "FULL_TRANSFER_HISTORY_SCANNED_BUT_SUPPLY_UNVERIFIED";
+  else if (largestSafeRange >= requiredBlocks) diagnosis = "FULL_HISTORY_RANGE_ACCEPTED_BUT_FINAL_REPLAY_FAILED";
+  else if (estimatedAdaptiveRequests !== null) diagnosis = "ADAPTIVE_RANGE_MEASURED_FULL_HISTORY_STILL_REQUIRES_MULTIPLE_REQUESTS";
 
   return {
-    version:"V949", status:"DIRECT_CHAIN_HOLDER_PROTOTYPE_COMPLETE", diagnosis,
+    version:"V950", status:"DIRECT_CHAIN_HOLDER_ADAPTIVE_PROTOTYPE_COMPLETE", diagnosis,
     address, symbol:target.symbol || null,
     launchBlock, launchSourceV949: target.launchSourceV949 || null,
     autoSelectedV949: target.autoSelectedV949 === true,
     autoCandidateCountV949: safeNumber(target.autoCandidateCountV949),
-    head, fullRangeKnown, requiredBlocks, requiredChunks,
-    chunkBlocks:HOLDER_PROTOTYPE_CHUNK_BLOCKS_V947,
-    maxLogRequests:HOLDER_PROTOTYPE_MAX_LOG_REQUESTS_V947,
-    canCompleteFullHistory, completeHistory,
-    scanFrom, scannedThrough, blocksScanned,
-    transferRows, decodedTransfers,
-    transfersPer1000Blocks,
-    estimatedRequestsForFullHistory,
-    providerFailure,
-    identity, totalSupply:totalSupply!==null&&totalSupply!==undefined?String(totalSupply):null,
+    head, fullRangeKnown, requiredBlocks,
+    fixed2000Estimate,
+    largestSafeRange,
+    largestSafeRows,
+    estimatedAdaptiveRequests,
+    improvementFactor,
+    adaptiveProbeResults,
+    firstFailure,
+    completeHistory,
+    fullHistoryRows,
+    fullHistoryError,
+    decodedTransfers,
+    identity,
+    totalSupply:totalSupply!==null&&totalSupply!==undefined?String(totalSupply):null,
     decimals:Number.isFinite(decimals)?decimals:null,
     exact,
-    rangeResults,
     externalRequestsUsed:safeNumber(budget?.totalUsed),
     maxExternalRequests:HOLDER_PROTOTYPE_MAX_TOTAL_REQUESTS_V947,
     stateWrites:0, persistentStateMutated:false,
@@ -169974,23 +169993,29 @@ async function directChainHolderPrototypeV947(state, env, argument = "") {
 function directChainHolderPrototypeMessageV947(d) {
   const fmt = n => Number.isFinite(Number(n)) ? Number(n).toLocaleString("en-GB") : "UNVERIFIED";
   if (!d || d.status === "NO_VALID_TOKEN_TARGET") {
-    return "🧬 <b>Direct-Chain Holder Prototype — V949</b>\n\nNo valid token target was available. Use <code>/holderprototype 0xTOKEN</code>.";
+    return "🧬 <b>Adaptive Direct-Chain Holder Prototype — V950</b>\n\nNo valid token target was available. Use <code>/holderprototype 0xTOKEN</code>.";
   }
   const lines = [
-    "🧬 <b>Direct-Chain Holder Prototype — V949</b>", "",
+    "🧬 <b>Adaptive Direct-Chain Holder Prototype — V950</b>", "",
     `Token: <b>${escapeHtml(d.symbol || "TOKEN")}</b> <code>${escapeHtml(shortAddressV937(d.address || ""))}</code>`,
     `Target selection: <b>${d.autoSelectedV949 ? "AUTO_VERIFIED_LAUNCH_V949" : "EXPLICIT_TOKEN"}</b> · verified-launch candidates <b>${fmt(d.autoCandidateCountV949)}</b>`,
     `Launch source: <b>${escapeHtml(d.launchSourceV949 || "NONE")}</b>`,
     `Diagnosis: <b>${escapeHtml(d.diagnosis || "UNKNOWN")}</b>`,
     `Launch block: <b>${fmt(d.launchBlock)}</b> · head <b>${fmt(d.head)}</b>`,
-    `History blocks: <b>${fmt(d.requiredBlocks)}</b> · estimated 2,000-block log requests <b>${fmt(d.estimatedRequestsForFullHistory)}</b>`,
-    `Prototype capacity: <b>${fmt(d.maxLogRequests)}</b> log requests · full history fits <b>${d.canCompleteFullHistory?"YES":"NO"}</b>`, "",
-    "📡 <b>Measured direct-chain Transfer activity</b>",
-    `Blocks scanned: <b>${fmt(d.blocksScanned)}</b> · Transfer rows <b>${fmt(d.transferRows)}</b>`,
-    `Transfer rows / 1,000 blocks: <b>${Number(d.transfersPer1000Blocks||0).toFixed(2)}</b>`,
-    `RPC/provider failure: <b>${escapeHtml(d.providerFailure || "NONE")}</b>`,
+    `History blocks: <b>${fmt(d.requiredBlocks)}</b>`, "",
+    "📡 <b>Adaptive eth_getLogs range probe</b>",
+    `Largest verified-safe range: <b>${fmt(d.largestSafeRange)} blocks</b> · rows in that probe <b>${fmt(d.largestSafeRows)}</b>`,
+    `Fixed 2,000-block estimate: <b>${fmt(d.fixed2000Estimate)} requests</b>`,
+    `Adaptive estimate at verified-safe range: <b>${fmt(d.estimatedAdaptiveRequests)} requests</b>`,
+    `Estimated improvement: <b>${Number.isFinite(Number(d.improvementFactor)) ? Number(d.improvementFactor).toFixed(1)+"×" : "UNVERIFIED"}</b>`,
     `External requests used: <b>${fmt(d.externalRequestsUsed)}/${fmt(d.maxExternalRequests)}</b>`
   ];
+  if (Array.isArray(d.adaptiveProbeResults) && d.adaptiveProbeResults.length) {
+    lines.push("", "🧪 <b>Range tests</b>");
+    for (const p of d.adaptiveProbeResults) {
+      lines.push(`• ${fmt(p.actualBlocks)} blocks — <b>${p.ok ? "OK" : "FAILED"}</b> · rows ${fmt(p.rows)}${p.error ? ` · ${escapeHtml(String(p.error)).slice(0,120)}` : ""}`);
+    }
+  }
   if (d.completeHistory && d.exact) {
     lines.push("", "✅ <b>Full-history reconstructed holder ledger</b>",
       `Holder count (positive, non-infrastructure): <b>${fmt(d.exact.holderCount)}</b>`,
@@ -169999,8 +170024,8 @@ function directChainHolderPrototypeMessageV947(d) {
       `Infrastructure rows excluded: <b>${fmt(d.exact.infrastructureRows)}</b>`,
       `Ownership-supply reconciliation: <b>${d.exact.supplyReconciliationPct===null?"UNVERIFIED":Number(d.exact.supplyReconciliationPct).toFixed(2)+"%"}</b>`);
   } else {
-    lines.push("", "⚠️ <b>No holder count / Top 10 is promoted from this partial window.</b>",
-      "Exact current holders require the full Transfer history from a verified launch/deployment block. V949 measures whether that is practical without weakening production verification.");
+    lines.push("", "⚠️ <b>No holder count / Top 10 is promoted from a partial history.</b>",
+      "V950 only measures the largest range the current free RPC actually accepts. Exact holders still require complete verified Transfer history.");
   }
   lines.push("", "<i>Prototype only. Zero persistent state writes. Existing Blockscout/GoldRush/Bitquery holder code remains intact and production risk/scoring/Telegram logic is unchanged.</i>");
   return lines.join("\n");
