@@ -1,4 +1,9 @@
 /**
+ * V935 RECONSTRUCTED TELEGRAM QUALIFICATION AUDIT:
+ * - /telegramaudit no longer depends on a special end-of-scan snapshot or dedicated KV write;
+ * - reconstructs directly from already-persisted qualificationAuditV663 records plus V725/V727 evidence detail;
+ * - read-only command, zero provider requests, zero writes, no scoring/qualification/threshold changes.
+ *
  * V934 GUARANTEED-END-OF-SCAN TELEGRAM AUDIT PERSISTENCE:
  * - preserves V932 final-candidate audit content and all V933 fallbacks;
  * - moves the dedicated snapshot write to immediately after the authoritative main-state write;
@@ -8341,7 +8346,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V934";
+const VERSION = "V935";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -136740,6 +136745,184 @@ function finalTelegramQualificationAuditSnapshotV932(state) {
   return state?.finalTelegramQualificationAuditV932 || state?.qualificationAuditV663?.lastFinalTelegramQualificationAuditV932 || null;
 }
 
+
+function finalTelegramQualificationAuditReconstructedV935(state) {
+  const records = Array.isArray(state?.qualificationAuditV663?.records)
+    ? state.qualificationAuditV663.records
+    : [];
+  const now = Date.now();
+  const cutoff = now - QUALIFICATION_AUDIT_RETENTION_MS_V663;
+  const rows = records
+    .filter(row => {
+      const at = safeNumber(row?.lastEvaluatedAt || row?.firstEvaluatedAt);
+      return isAddress(normalize(row?.address)) && at >= cutoff && at <= now + 5 * 60 * 1000;
+    })
+    .map(row => {
+      const score = row?.scoreAuditV725 && typeof row.scoreAuditV725 === "object" ? row.scoreAuditV725 : {};
+      const evidence = row?.evidenceCompletionAuditV727 && typeof row.evidenceCompletionAuditV727 === "object" ? row.evidenceCompletionAuditV727 : {};
+      const finalEvidence = evidence?.finalEvidence && typeof evidence.finalEvidence === "object" ? evidence.finalEvidence : {};
+      const missingMask = safeNumber(score?.missingMask);
+      const missingGroups = [];
+      if (missingMask & SCORE_AUDIT_MISSING_MARKET_V725) missingGroups.push("MARKET");
+      if (missingMask & SCORE_AUDIT_MISSING_LAUNCH_V725) missingGroups.push("LAUNCH");
+      if (missingMask & SCORE_AUDIT_MISSING_HOLDER_COUNT_V725) missingGroups.push("HOLDER_COUNT");
+      if (missingMask & SCORE_AUDIT_MISSING_CONCENTRATION_V725) missingGroups.push("CONCENTRATION");
+      if (missingMask & SCORE_AUDIT_MISSING_MOMENTUM_V725) missingGroups.push("MOMENTUM");
+      if (missingMask & SCORE_AUDIT_MISSING_QUALITY_V725) missingGroups.push("MARKET_QUALITY");
+      if (missingMask & SCORE_AUDIT_MISSING_WHALE_FLOW_V725) missingGroups.push("WHALE_FLOW");
+
+      const verifiedButMissing = [];
+      if (finalEvidence?.marketVerified === true && (missingMask & SCORE_AUDIT_MISSING_MARKET_V725)) verifiedButMissing.push("MARKET");
+      if (finalEvidence?.launchAgeVerified === true && (missingMask & SCORE_AUDIT_MISSING_LAUNCH_V725)) verifiedButMissing.push("LAUNCH");
+      if (finalEvidence?.momentumVerified === true && (missingMask & SCORE_AUDIT_MISSING_MOMENTUM_V725)) verifiedButMissing.push("MOMENTUM");
+      if (finalEvidence?.marketQualityVerified === true && (missingMask & SCORE_AUDIT_MISSING_QUALITY_V725)) verifiedButMissing.push("MARKET_QUALITY");
+      if (finalEvidence?.whaleFlowVerified === true && (missingMask & SCORE_AUDIT_MISSING_WHALE_FLOW_V725)) verifiedButMissing.push("WHALE_FLOW");
+
+      const opportunity = safeNumber(row?.opportunityScore);
+      const recomputedBase = Number.isFinite(Number(score?.baseScore)) ? Number(score.baseScore) : opportunity;
+      const reasons = Array.isArray(row?.telegramReasons) ? row.telegramReasons.filter(Boolean) : [];
+      return {
+        address: normalize(row?.address),
+        symbol: row?.symbol || null,
+        lastEvaluatedAt: safeNumber(row?.lastEvaluatedAt),
+        evaluationCount: safeNumber(row?.evaluationCount),
+        qualifiesTelegram: row?.telegramQualified === true,
+        telegramSent: row?.telegramSent === true,
+        telegramReasons: reasons,
+        firstTelegramBlocker: reasons[0] || null,
+        opportunity,
+        recomputedBase,
+        scoreParityDelta: opportunity - recomputedBase,
+        confidence: safeNumber(row?.confidenceScore),
+        momentum: safeNumber(finalEvidence?.momentumScore ?? 0),
+        riskVerified: row?.riskVerified === true,
+        riskScore: row?.riskVerified === true ? safeNumber(row?.riskScore) : null,
+        signalCount: safeNumber(row?.signalCount),
+        evidence: {
+          marketVerified: row?.marketVerified === true || finalEvidence?.marketVerified === true,
+          launchVerified: finalEvidence?.launchAgeVerified === true,
+          momentumVerified: finalEvidence?.momentumVerified === true,
+          marketQualityVerified: finalEvidence?.marketQualityVerified === true,
+          whaleFlowVerified: finalEvidence?.whaleFlowVerified === true,
+          directionalUsdVerified: finalEvidence?.directionalUsdVerified === true,
+          exactPoolVerified: finalEvidence?.exactPoolIdentityVerified === true,
+          observedSwaps: safeNumber(finalEvidence?.observedSwaps),
+          observedLiquidityEvents: safeNumber(finalEvidence?.observedLiquidityEvents)
+        },
+        missingScoreGroups: missingGroups,
+        verifiedEvidencePresentButScoreViewMissing: verifiedButMissing,
+        missingPositiveMechanicalHeadroom: safeNumber(score?.missingPositiveMax),
+        mechanicalCeiling: safeNumber(score?.mechanicalCeilingWithMissingPositiveEvidence)
+      };
+    })
+    .sort((a,b) => {
+      if (b.lastEvaluatedAt !== a.lastEvaluatedAt) return b.lastEvaluatedAt - a.lastEvaluatedAt;
+      if (b.opportunity !== a.opportunity) return b.opportunity - a.opportunity;
+      return b.confidence - a.confidence;
+    });
+
+  const latestAt = rows.length ? safeNumber(rows[0]?.lastEvaluatedAt) : 0;
+  const recentWindowMs = 60 * 60 * 1000;
+  const recentRows = latestAt
+    ? rows.filter(row => safeNumber(row?.lastEvaluatedAt) >= latestAt - recentWindowMs)
+    : [];
+  const activeRows = recentRows.length ? recentRows : rows;
+  const rejected = activeRows.filter(row => row.qualifiesTelegram !== true);
+  const qualified = activeRows.filter(row => row.qualifiesTelegram === true);
+  const countTop = values => Object.entries(values).sort((a,b)=>safeNumber(b[1])-safeNumber(a[1])).slice(0,10).map(([reason,count])=>({reason,count:safeNumber(count)}));
+  const reasonCounts = {}, firstBlockerCounts = {}, missingCounts = {};
+  let verifiedButMissingRows=0, scoreParityMismatchRows=0, opportunityBelow60=0, confidenceBelow55=0, riskRejected=0, otherwiseNearThreshold=0;
+  for (const row of rejected) {
+    for (const reason of row.telegramReasons || []) reasonCounts[reason] = safeNumber(reasonCounts[reason]) + 1;
+    if (row.firstTelegramBlocker) firstBlockerCounts[row.firstTelegramBlocker] = safeNumber(firstBlockerCounts[row.firstTelegramBlocker]) + 1;
+    for (const g of row.missingScoreGroups || []) missingCounts[g] = safeNumber(missingCounts[g]) + 1;
+    if ((row.verifiedEvidencePresentButScoreViewMissing || []).length) verifiedButMissingRows++;
+    if (Math.abs(safeNumber(row.scoreParityDelta)) > 0.01) scoreParityMismatchRows++;
+    if (safeNumber(row.opportunity) < MIN_ALERT_SCORE) opportunityBelow60++;
+    if (safeNumber(row.confidence) < MIN_CONFIDENCE_ALERT) confidenceBelow55++;
+    if (!row.riskVerified || safeNumber(row.riskScore) > MAX_ALERT_RISK) riskRejected++;
+    if (safeNumber(row.opportunity) >= MIN_ALERT_SCORE - 15 && safeNumber(row.confidence) >= MIN_CONFIDENCE_ALERT - 10 && row.riskVerified && safeNumber(row.riskScore) <= MAX_ALERT_RISK) otherwiseNearThreshold++;
+  }
+  const topRejected = [...rejected].sort((a,b)=> b.opportunity-a.opportunity || b.confidence-a.confidence || b.lastEvaluatedAt-a.lastEvaluatedAt).slice(0,8);
+  return {
+    version:"V935",
+    runtimeVersion:VERSION,
+    source:"QUALIFICATION_AUDIT_V663_RECONSTRUCTED_V935",
+    reconstructedAt:new Date().toISOString(),
+    latestEvaluationAt: latestAt ? new Date(latestAt).toISOString() : null,
+    retainedRows: rows.length,
+    activeWindowMs: recentRows.length ? recentWindowMs : null,
+    candidateCount: activeRows.length,
+    qualifiedCount: qualified.length,
+    rejectedCount: rejected.length,
+    opportunityBelow60,
+    confidenceBelow55,
+    riskRejected,
+    otherwiseNearThreshold,
+    verifiedButMissingRows,
+    scoreParityMismatchRows,
+    reasonCounts: countTop(reasonCounts),
+    firstBlockerCounts: countTop(firstBlockerCounts),
+    missingScoreGroupCounts: countTop(missingCounts),
+    topRejected,
+    thresholds:{opportunity:MIN_ALERT_SCORE,confidence:MIN_CONFIDENCE_ALERT,maxRisk:MAX_ALERT_RISK,minLiquidity:MIN_ALERT_LIQUIDITY},
+    providerRequestsAdded:0,
+    stateWritesFromCommand:0,
+    scoringChanged:false,
+    qualificationChanged:false,
+    telegramThresholdsChanged:false
+  };
+}
+
+function finalTelegramQualificationAuditMessageV935(state) {
+  const d = finalTelegramQualificationAuditReconstructedV935(state);
+  const fmt = v => safeNumber(v).toLocaleString("en-GB");
+  const lines = [
+    "📨 <b>Post-Recovery Telegram Qualification Audit — V935</b>",
+    "",
+    `Source: <b>${escapeHtml(d.source)}</b>`,
+    `Latest retained evaluation: <code>${escapeHtml(d.latestEvaluationAt || "NONE")}</code>`,
+    `Retained qualification rows: <b>${fmt(d.retainedRows)}</b>`,
+    `Rows analysed in current reconstructed window: <b>${fmt(d.candidateCount)}</b> · qualified <b>${fmt(d.qualifiedCount)}</b> · rejected <b>${fmt(d.rejectedCount)}</b>`,
+    `Thresholds: Opportunity ≥${fmt(d?.thresholds?.opportunity)} · Confidence ≥${fmt(d?.thresholds?.confidence)} · Risk ≤${fmt(d?.thresholds?.maxRisk)}`,
+    "",
+    "🚧 <b>Qualification pressure</b>",
+    `• Opportunity below threshold: <b>${fmt(d.opportunityBelow60)}</b>`,
+    `• Confidence below threshold: <b>${fmt(d.confidenceBelow55)}</b>`,
+    `• Risk rejected/unverified: <b>${fmt(d.riskRejected)}</b>`,
+    `• Near-threshold, risk-acceptable rejects: <b>${fmt(d.otherwiseNearThreshold)}</b>`,
+    `• Score parity mismatches: <b>${fmt(d.scoreParityMismatchRows)}</b>`,
+    `• Verified evidence present but score-view missing: <b>${fmt(d.verifiedButMissingRows)}</b>`
+  ];
+  if (d.firstBlockerCounts?.length) {
+    lines.push("", "🧱 <b>First Telegram blockers</b>");
+    for (const row of d.firstBlockerCounts.slice(0,6)) lines.push(`• ${escapeHtml(row.reason)}: <b>${fmt(row.count)}</b>`);
+  }
+  if (d.missingScoreGroupCounts?.length) {
+    lines.push("", "🧩 <b>Missing score evidence in retained scoring view</b>");
+    for (const row of d.missingScoreGroupCounts.slice(0,7)) lines.push(`• ${escapeHtml(row.reason)}: <b>${fmt(row.count)}</b>`);
+  }
+  if (d.topRejected?.length) {
+    lines.push("", "🔎 <b>Best rejected retained candidates</b>");
+    for (const row of d.topRejected.slice(0,6)) {
+      const missing=(row.missingScoreGroups||[]).join(",")||"NONE";
+      const stale=(row.verifiedEvidencePresentButScoreViewMissing||[]).join(",")||"NONE";
+      const blockers=(row.telegramReasons||[]).slice(0,5).join(" | ")||"NONE";
+      lines.push(
+        `• <b>${escapeHtml(row.symbol || "UNKNOWN")}</b> <code>${escapeHtml(shortAddress(row.address || ""))}</code> — Opp <b>${fmt(row.opportunity)}</b> · Conf <b>${fmt(row.confidence)}</b> · Risk <b>${row.riskVerified ? fmt(row.riskScore) : "UNVERIFIED"}</b>`,
+        `  ↳ blockers: ${escapeHtml(blockers)}`,
+        `  ↳ missing score groups: ${escapeHtml(missing)}`,
+        `  ↳ verified-but-score-missing: ${escapeHtml(stale)} · parity Δ ${fmt(row.scoreParityDelta)}`
+      );
+    }
+  }
+  if (!d.retainedRows) {
+    lines.push("", "⏳ No retained qualification rows are available yet. A normal scan that reaches qualification will populate the existing V663 audit records.");
+  }
+  lines.push("", "<i>V935 reconstructs this read-only audit from already-persisted qualification/evidence records. It makes zero provider requests and zero writes and does not change scoring or Telegram thresholds.</i>");
+  return lines.join("\n");
+}
+
 async function finalTelegramQualificationAuditMessageV934(env, state) {
   const loaded = await loadFinalTelegramQualificationAuditV934(env, state);
   const d = loaded?.snapshot || null;
@@ -167468,21 +167651,20 @@ async function telegramCommandReplyV271(
     parsed.command === "/telegramaudit" ||
     parsed.command === "/qualstarve"
   ) {
-    reply = await finalTelegramQualificationAuditMessageV934(env, state);
+    reply = finalTelegramQualificationAuditMessageV935(state);
 
     if (diagnosticV273) {
-      const loadedAuditV934 = await loadFinalTelegramQualificationAuditV934(env, state);
-      const auditV932 = loadedAuditV934?.snapshot || null;
+      const auditV935 = finalTelegramQualificationAuditReconstructedV935(state);
       diagnosticV273.finalTelegramQualificationAuditV932 = {
         scannerBudgetConsumed: false,
         externalProviderRequests: 0,
         stateWrites: 0,
-        snapshotSource: loadedAuditV934?.source || "NONE",
-        candidateCount: safeNumber(auditV932?.candidateCount),
-        qualifiedCount: safeNumber(auditV932?.qualifiedCount),
-        rejectedCount: safeNumber(auditV932?.rejectedCount),
-        scoreParityMismatchRows: safeNumber(auditV932?.scoreParityMismatchRows),
-        verifiedButMissingRows: safeNumber(auditV932?.verifiedButMissingRows),
+        snapshotSource: auditV935?.source || "NONE",
+        candidateCount: safeNumber(auditV935?.candidateCount),
+        qualifiedCount: safeNumber(auditV935?.qualifiedCount),
+        rejectedCount: safeNumber(auditV935?.rejectedCount),
+        scoreParityMismatchRows: safeNumber(auditV935?.scoreParityMismatchRows),
+        verifiedButMissingRows: safeNumber(auditV935?.verifiedButMissingRows),
         scoringChanged: false,
         qualificationChanged: false
       };
