@@ -1,4 +1,12 @@
 /**
+ * V951 MANUAL GOLDRUSH HOLDER SNAPSHOT TEST:
+ * - preserves all V950 production logic and every existing holder/provider path;
+ * - adds Telegram /goldrushholders (alias /holderprovider) as a thin wrapper around the preserved V702/V704 GoldRush Robinhood token_holders_v2 diagnostic;
+ * - explicit token argument supported; otherwise selects the highest-value retained risk-UNVERIFIED holder candidate;
+ * - manual diagnostic only: no production scoring/risk/qualification changes and no automatic provider spend;
+ * - existing GoldRush usage ledger/credit guard accounting remains preserved.
+ */
+/**
  * V936 TELEGRAM AUDIT DELIVERY HOTFIX:
  * - preserves V935 reconstructed qualification audit logic;
  * - routes /telegramaudit and /qualstarve through the proven chunked Telegram reply sender;
@@ -8364,7 +8372,7 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
-const VERSION = "V949";
+const VERSION = "V951";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -168485,6 +168493,32 @@ async function telegramCommandReplyV271(
       };
     }
   } else if (
+    parsed.command === "/goldrushholders" ||
+    parsed.command === "/holderprovider"
+  ) {
+    const targetV951 = goldRushHolderTestTargetV951(state, env, parsed.argument || "");
+    const testV951 = targetV951?.address
+      ? await goldRushHolderDiagnosticV702(env, targetV951.address)
+      : null;
+    reply = goldRushHolderTestMessageV951(testV951 || {}, targetV951);
+
+    if (diagnosticV273) {
+      diagnosticV273.goldRushHolderSnapshotTestV951 = {
+        scannerBudgetConsumed: false,
+        externalProviderRequests: safeNumber(testV951?.externalRequestsUsed),
+        address: targetV951?.address || null,
+        targetSource: targetV951?.source || null,
+        httpStatus: testV951?.httpStatus ?? null,
+        status: testV951?.status || null,
+        itemsReturned: safeNumber(testV951?.goldRush?.itemsReturned),
+        totalCount: testV951?.goldRush?.pagination?.totalCount ?? null,
+        productionHolderChanged: false,
+        riskChanged: false,
+        scoringChanged: false,
+        qualificationChanged: false
+      };
+    }
+  } else if (
     parsed.command === "/holderprototype" ||
     parsed.command === "/directholders"
   ) {
@@ -169057,6 +169091,8 @@ async function telegramCommandReplyV271(
     parsed.command === "/ownershipaudit" ||
     parsed.command === "/denominatoraudit" ||
     parsed.command === "/riskclassaudit" ||
+    parsed.command === "/goldrushholders" ||
+    parsed.command === "/holderprovider" ||
     parsed.command === "/holderprototype" ||
     parsed.command === "/directholders";
 
@@ -173011,6 +173047,69 @@ async function goldRushHolderDiagnosticV702(
   };
 }
 
+
+
+function goldRushHolderTestTargetV951(state, env, argument = "") {
+  const explicit = normalize(String(argument || "").trim().split(/\s+/)[0] || "");
+  if (isAddress(explicit)) return { address: explicit, source: "EXPLICIT_TOKEN_V951", row: null };
+
+  try {
+    const audit = holderRecoveryAuditV941(state, env);
+    const rows = Array.isArray(audit?.rows) ? audit.rows : [];
+    const candidate = rows.find(r => isAddress(normalize(r?.address))) || null;
+    if (candidate) return {
+      address: normalize(candidate.address),
+      source: "HIGHEST_VALUE_RISK_UNVERIFIED_HOLDER_ROW_V951",
+      row: candidate
+    };
+  } catch (_) {}
+
+  const records = Array.isArray(state?.qualificationAuditV663?.records)
+    ? [...state.qualificationAuditV663.records].reverse()
+    : [];
+  const row = records.find(r => isAddress(normalize(r?.address))) || null;
+  return row ? {
+    address: normalize(row.address),
+    source: "LATEST_RETAINED_QUALIFICATION_ROW_V951",
+    row
+  } : null;
+}
+
+function goldRushHolderTestMessageV951(result, target) {
+  const fmt = n => safeNumber(n).toLocaleString("en-GB");
+  if (!target?.address) {
+    return "👥 <b>GoldRush Holder Snapshot Test — V951</b>\n\nNo retained token target was available. Use <code>/goldrushholders 0xTOKEN</code>.";
+  }
+  const g = result?.goldRush || {};
+  const p = g?.pagination || {};
+  const lines = [
+    "👥 <b>GoldRush Holder Snapshot Test — V951</b>", "",
+    `Token: <code>${escapeHtml(shortAddressV937(target.address))}</code>`,
+    `Target source: <b>${escapeHtml(target.source || "UNKNOWN")}</b>`,
+    `API key configured: <b>${result?.apiKeyConfigured === true ? "YES" : "NO"}</b>`,
+    `HTTP: <b>${escapeHtml(String(result?.httpStatus ?? "N/A"))}</b> · OK <b>${result?.httpOk === true ? "YES" : "NO"}</b>`,
+    `Status: <b>${escapeHtml(result?.status || "UNKNOWN")}</b>`,
+    `Capability: <b>${escapeHtml(result?.capabilityDecisionV703 || "UNKNOWN")}</b>`,
+    `Holder rows returned: <b>${fmt(g?.itemsReturned)}</b>`,
+    `Pagination total holder count: <b>${p?.totalCount !== null && p?.totalCount !== undefined ? fmt(p.totalCount) : "UNAVAILABLE"}</b>`,
+    `Has more pages: <b>${p?.hasMore === true ? "YES" : p?.hasMore === false ? "NO" : "UNAVAILABLE"}</b>`,
+    `External requests used: <b>${fmt(result?.externalRequestsUsed)}</b>`
+  ];
+  if (g?.errorMessage || g?.errorCode) {
+    lines.push(`Provider error: <b>${escapeHtml(String(g?.errorMessage || g?.errorCode))}</b>`);
+  }
+  if (Array.isArray(g?.sample) && g.sample.length) {
+    lines.push("", "🔬 <b>Returned holder sample</b>");
+    for (const row of g.sample.slice(0,10)) {
+      lines.push(`• <code>${escapeHtml(shortAddressV937(row?.address || ""))}</code> · balance ${escapeHtml(String(row?.balance ?? "UNAVAILABLE"))}`);
+    }
+  }
+  lines.push(
+    "",
+    "<i>Manual capability test only. It uses the preserved V702/V704 GoldRush holder endpoint and does not change production holder evidence, risk, scoring, qualification or Telegram thresholds.</i>"
+  );
+  return lines.join("\n");
+}
 
 
 async function goldRushMarketUsdDiagnosticV705(
