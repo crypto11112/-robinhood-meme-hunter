@@ -1,4 +1,17 @@
 /**
+ * V929 LIVE V887/V923 PRIORITY OVER BACKGROUND CONTINUATION:
+ * - builds directly from deployed V928;
+ * - fixes the live-proven V928 routing collision where a safe V927 background
+ *   keyed continuation could override the current pre-V891/V887 exact-pool
+ *   priority target during a real Gecko 429 cooldown;
+ * - when that exact collision exists, the CURRENT risk-acceptable verified
+ *   exact-pool target keeps the production V4 lane so V923/V901 can operate;
+ * - V927 background continuation remains unchanged for non-conflicting scans;
+ * - V925 current-candidate keyed continuation still has first priority;
+ * - no new provider request, no request-cap increase, no risk/scoring/Telegram/
+ *   Pons/qualification threshold change.
+ */
+/**
  * V928 HIGH-PROGRESS CONTINUATION RESERVED-SLOT HANDOFF:
  * - builds directly from live-proven V927 deterministic keyed continuation queue;
  * - allows one selected safe background keyed continuation already at >=4/6 to consume one EXISTING V777 production-V4 handoff slot for RPC:V888_EXACT_POOL_TARGETED_SWAPS;
@@ -8289,7 +8302,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V928";
+const VERSION = "V929";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -109364,8 +109377,116 @@ for (
   // Compatibility alias: downstream V926 background-only collector plumbing is retained unchanged.
   const backgroundContinuationV926 = backgroundContinuationV927;
 
+  /*
+   * V929: V927 background work must not displace the SAME current exact-pool
+   * target that V908/V891 will prioritise later while Gecko is in a real 429
+   * cooldown. Reproduce that already-proven selector here only for arbitration
+   * against BACKGROUND work. V925 current keyed continuation remains first.
+   * No request is made and no evidence is promoted by this selector.
+   */
+  const geckoEligibilityRoutingV929 =
+    geckoDirectionalEligibilityV432(state);
+
+  const activeGecko429CooldownRoutingV929 =
+    geckoEligibilityRoutingV929?.eligible !== true &&
+    geckoEligibilityRoutingV929?.reason ===
+      "GECKO_DIRECTIONAL_DEFER_ACTIVE_429_COOLDOWN_V824";
+
+  const alreadyQualifiedRoutingV929 =
+    activeGecko429CooldownRoutingV929
+      ? (
+          candidates.find(candidate =>
+            qualifiesTelegram(candidate) &&
+            candidate?.market?.verified === true &&
+            sameRunTerminalReject(candidate)?.terminal !== true
+          ) || null
+        )
+      : null;
+
+  const alreadyQualifiedExactRoutingV929 =
+    alreadyQualifiedRoutingV929?.onChainPoolIdentityV153?.verified === true &&
+    /^0x[a-f0-9]{64}$/.test(
+      String(
+        normalize(
+          alreadyQualifiedRoutingV929?.onChainPoolIdentityV153?.poolId ||
+          alreadyQualifiedRoutingV929?.onChainPoolIdentityV153?.pairAddress ||
+          ""
+        ) || ""
+      )
+    );
+
+  const exactPoolCandidatesRoutingV929 =
+    activeGecko429CooldownRoutingV929
+      ? candidates
+          .filter(candidate => {
+            const address = normalize(candidate?.address);
+            const identity = candidate?.onChainPoolIdentityV153;
+            const poolId = normalize(
+              identity?.poolId ||
+              identity?.pairAddress ||
+              ""
+            );
+            const marketSide =
+              String(
+                candidate?.market?.targetTokenSide || ""
+              ).toUpperCase();
+            const marketReady =
+              candidate?.market?.verified === true &&
+              Boolean(candidate?.market?.pairAddress) &&
+              (
+                marketSide === "BASE" ||
+                marketSide === "QUOTE"
+              );
+            const exactPoolReady =
+              identity?.verified === true &&
+              /^0x[a-f0-9]{64}$/.test(
+                String(poolId || "")
+              );
+            const riskOk =
+              candidate?.risk?.severeOverride !== true &&
+              String(candidate?.risk?.label || "").toUpperCase() !== "HIGH";
+
+            return (
+              isAddress(address) &&
+              candidate?.validERC20 === true &&
+              (marketReady || exactPoolReady) &&
+              exactPoolReady &&
+              sameRunTerminalReject(candidate)?.terminal !== true &&
+              riskOk
+            );
+          })
+          .sort(
+            (a, b) =>
+              safeNumber(b?.analysisPriority) -
+              safeNumber(a?.analysisPriority)
+          )
+      : [];
+
+  const preV891TargetRoutingV929 =
+    activeGecko429CooldownRoutingV929
+      ? (
+          alreadyQualifiedRoutingV929 &&
+          alreadyQualifiedExactRoutingV929
+            ? alreadyQualifiedRoutingV929
+            : exactPoolCandidatesRoutingV929[0] || null
+        )
+      : null;
+
+  const backgroundAddressRoutingV929 =
+    normalize(backgroundContinuationV927?.candidate?.address || backgroundContinuationV927?.token || "");
+  const preV891AddressRoutingV929 =
+    normalize(preV891TargetRoutingV929?.address || "");
+
+  const preV891OverridesBackgroundV929 =
+    Boolean(
+      backgroundContinuationV927 &&
+      isAddress(preV891AddressRoutingV929) &&
+      preV891AddressRoutingV929 !== backgroundAddressRoutingV929
+    );
+
   const productionV4TargetV772 =
     continuationPriorityV925?.candidate ||
+    (preV891OverridesBackgroundV929 ? preV891TargetRoutingV929 : null) ||
     backgroundContinuationV927?.candidate ||
     defaultProductionV4TargetV925;
 
@@ -109383,9 +109504,11 @@ for (
   const productionV4SelectionModeV813 =
     continuationPriorityV925
       ? "INCOMPLETE_KEYED_EXACT_POOL_CONTINUATION_PRIORITY_V925"
-      : backgroundContinuationV927
-        ? "DETERMINISTIC_BACKGROUND_KEYED_CONTINUATION_QUEUE_V927"
-        : defaultProductionV4SelectionModeV925;
+      : preV891OverridesBackgroundV929
+        ? "PRE_V891_EXACT_POOL_PRIORITY_OVER_BACKGROUND_V929"
+        : backgroundContinuationV927
+          ? "DETERMINISTIC_BACKGROUND_KEYED_CONTINUATION_QUEUE_V927"
+          : defaultProductionV4SelectionModeV925;
 
   if (productionV4CollisionV818) {
     state.productionV4FairnessV821 = {
@@ -109490,6 +109613,21 @@ for (
       normalTarget: normalize(productionV4NormalTargetV813?.address) || null,
       rescueTarget: normalize(productionV4CoverageRescueTargetV813?.address) || null,
       selectedTarget: normalize(productionV4TargetV772?.address) || null,
+      preV891BackgroundArbitrationV929: {
+        gecko429CooldownActive: activeGecko429CooldownRoutingV929,
+        priorityTarget: isAddress(preV891AddressRoutingV929)
+          ? preV891AddressRoutingV929
+          : null,
+        backgroundTarget: isAddress(backgroundAddressRoutingV929)
+          ? backgroundAddressRoutingV929
+          : null,
+        backgroundDisplaced: preV891OverridesBackgroundV929,
+        exactPoolCandidates: exactPoolCandidatesRoutingV929.length,
+        reason: preV891OverridesBackgroundV929
+          ? "CURRENT_PRE_V891_EXACT_POOL_TARGET_OUTRANKS_BACKGROUND_V929"
+          : "NO_PRE_V891_BACKGROUND_COLLISION_V929",
+        externalRequestsAdded: 0
+      },
       continuationPriorityV925: continuationPriorityV925
         ? {
             selected: true,
