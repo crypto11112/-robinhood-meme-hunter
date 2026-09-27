@@ -1,4 +1,18 @@
 /**
+ * V900 RESUMABLE EXACT-POOL CHUNK COVERAGE:
+ * - builds directly from deployed V899;
+ * - preserves V899's <=2,000-block Validation Cloud-safe exact-PoolId chunks;
+ * - when protected per-scan budget stops the 12,000-block lookup, saves the
+ *   next unfinished block range in existing state and resumes it on a later
+ *   eligible scan for the SAME token + exact PoolId;
+ * - freezes the original 12,000-block window for that progress record;
+ * - successful chunks advance progress; RPC failures do not skip ranges;
+ * - finding a genuine exact-PoolId Swap row stops immediately;
+ * - no new KV namespace, no higher request cap, no extra provider type;
+ * - ZERO scoring/risk/qualification/Telegram/market-selection changes;
+ * - preserves V898 email bridge and all V899 diagnostics.
+ */
+/**
  * V899 VALIDATION-CLOUD-SAFE EXACT-POOL CHUNKING:
  * - builds directly from deployed V898;
  * - fixes the proven V888 failure where one 12,000-block eth_getLogs request
@@ -7881,7 +7895,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V899";
+const VERSION = "V900";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -97254,21 +97268,58 @@ async function enrichCandidateWithProductionV4V772(
   if (
     base.exactPoolTargetedBackfillV888.eligible === true
   ) {
-    const exactFromV888 = Math.max(
+    const freshExactFromV900 = Math.max(
       0,
       to - VERIFIED_USD_COMPLETION_RECENT_BLOCKS_V254 + 1
     );
 
     const maxRangeBlocksV899 = 2000;
-    const chunkRangesV899 = [];
-    let cursorToV899 = to;
+    const progressTtlMsV900 = 6 * 60 * 60 * 1000;
 
+    const priorProgressV900 =
+      state?.exactPoolChunkProgressV900 &&
+      typeof state.exactPoolChunkProgressV900 === "object"
+        ? state.exactPoolChunkProgressV900
+        : null;
+
+    const sameTargetV900 =
+      normalize(priorProgressV900?.tokenAddress) === token &&
+      normalize(priorProgressV900?.poolId) === exactPoolIdV888;
+
+    const progressFreshV900 =
+      safeNumber(priorProgressV900?.updatedAt) > 0 &&
+      Date.now() - safeNumber(priorProgressV900?.updatedAt) <=
+        progressTtlMsV900;
+
+    const canResumeV900 =
+      sameTargetV900 &&
+      progressFreshV900 &&
+      priorProgressV900?.complete !== true &&
+      safeNumber(priorProgressV900?.nextToBlock) >=
+        safeNumber(priorProgressV900?.windowFromBlock);
+
+    const windowFromV900 =
+      canResumeV900
+        ? safeNumber(priorProgressV900.windowFromBlock)
+        : freshExactFromV900;
+
+    const windowToV900 =
+      canResumeV900
+        ? safeNumber(priorProgressV900.windowToBlock)
+        : to;
+
+    let cursorToV899 =
+      canResumeV900
+        ? safeNumber(priorProgressV900.nextToBlock)
+        : windowToV900;
+
+    const chunkRangesV899 = [];
     while (
-      cursorToV899 >= exactFromV888 &&
+      cursorToV899 >= windowFromV900 &&
       chunkRangesV899.length < 6
     ) {
       const chunkFromV899 = Math.max(
-        exactFromV888,
+        windowFromV900,
         cursorToV899 - maxRangeBlocksV899 + 1
       );
 
@@ -97280,25 +97331,69 @@ async function enrichCandidateWithProductionV4V772(
       cursorToV899 = chunkFromV899 - 1;
     }
 
-    base.exactPoolTargetedBackfillV888.fromBlock = exactFromV888;
+    const priorCompletedChunksV900 =
+      canResumeV900
+        ? safeNumber(priorProgressV900?.completedChunks)
+        : 0;
+
+    const totalPlannedChunksV900 =
+      Math.max(
+        1,
+        Math.ceil(
+          (windowToV900 - windowFromV900 + 1) /
+          maxRangeBlocksV899
+        )
+      );
+
+    state.exactPoolChunkProgressV900 = {
+      tokenAddress: token,
+      poolId: exactPoolIdV888,
+      windowFromBlock: windowFromV900,
+      windowToBlock: windowToV900,
+      nextToBlock:
+        canResumeV900
+          ? safeNumber(priorProgressV900.nextToBlock)
+          : windowToV900,
+      completedChunks: priorCompletedChunksV900,
+      totalPlannedChunks: totalPlannedChunksV900,
+      complete: false,
+      foundSwapRows: false,
+      createdAt:
+        canResumeV900
+          ? safeNumber(priorProgressV900?.createdAt) || Date.now()
+          : Date.now(),
+      updatedAt: Date.now(),
+      runtimeVersion: VERSION
+    };
+
+    base.exactPoolTargetedBackfillV888.fromBlock = windowFromV900;
+    base.exactPoolTargetedBackfillV888.toBlock = windowToV900;
     base.exactPoolTargetedBackfillV888.chunkSizeBlocksV899 =
       maxRangeBlocksV899;
     base.exactPoolTargetedBackfillV888.chunksPlannedV899 =
-      chunkRangesV899.length;
+      totalPlannedChunksV900;
     base.exactPoolTargetedBackfillV888.chunkRequestsAttemptedV899 = 0;
     base.exactPoolTargetedBackfillV888.chunksCompletedV899 = 0;
     base.exactPoolTargetedBackfillV888.chunkRangesV899 = [];
     base.exactPoolTargetedBackfillV888.fullWindowCompletedV899 = false;
     base.exactPoolTargetedBackfillV888.stopReasonV899 = null;
+    base.exactPoolTargetedBackfillV888.resumedV900 = canResumeV900;
+    base.exactPoolTargetedBackfillV888.resumeCompletedBeforeV900 =
+      priorCompletedChunksV900;
 
     const d895 = base.targetedCollectorHandoffDiagnosticV895;
     d895.chunkSizeBlocksV899 = maxRangeBlocksV899;
-    d895.chunksPlannedV899 = chunkRangesV899.length;
+    d895.chunksPlannedV899 = totalPlannedChunksV900;
     d895.chunkRequestsAttemptedV899 = 0;
     d895.chunksCompletedV899 = 0;
     d895.fullWindowCompletedV899 = false;
     d895.stopReasonV899 = null;
     d895.chunkTraceV899 = [];
+    d895.resumedV900 = canResumeV900;
+    d895.resumeCompletedBeforeV900 = priorCompletedChunksV900;
+    d895.cumulativeChunksCompletedV900 = priorCompletedChunksV900;
+    d895.windowFromBlockV900 = windowFromV900;
+    d895.windowToBlockV900 = windowToV900;
 
     let rpcFailureV899 = null;
     let budgetBlockedV899 = false;
@@ -97400,6 +97495,37 @@ async function enrichCandidateWithProductionV4V772(
       d895.chunkTraceV899.push(traceV899);
 
       /*
+       * V900: only a successful chunk advances persistent progress.
+       * RPC failures never skip an unchecked block range.
+       */
+      const progressNowV900 =
+        state?.exactPoolChunkProgressV900;
+
+      if (
+        progressNowV900 &&
+        normalize(progressNowV900?.tokenAddress) === token &&
+        normalize(progressNowV900?.poolId) === exactPoolIdV888
+      ) {
+        progressNowV900.completedChunks =
+          safeNumber(progressNowV900.completedChunks) + 1;
+        progressNowV900.nextToBlock =
+          rangeV899.fromBlock - 1;
+        progressNowV900.updatedAt = Date.now();
+        progressNowV900.runtimeVersion = VERSION;
+        progressNowV900.foundSwapRows =
+          exactChunkRowsV899.length > 0;
+        progressNowV900.complete =
+          exactChunkRowsV899.length > 0 ||
+          progressNowV900.nextToBlock <
+            safeNumber(progressNowV900.windowFromBlock);
+
+        d895.cumulativeChunksCompletedV900 =
+          safeNumber(progressNowV900.completedChunks);
+        d895.nextToBlockV900 =
+          safeNumber(progressNowV900.nextToBlock);
+      }
+
+      /*
        * Newest-first early stop: one genuine exact-PoolId Swap row is enough
        * to prove observed activity and exercise the decoder/handoff path.
        */
@@ -97412,16 +97538,24 @@ async function enrichCandidateWithProductionV4V772(
       }
     }
 
+    const progressAfterV900 =
+      state?.exactPoolChunkProgressV900;
+
     const fullWindowCompletedV899 =
       !rpcFailureV899 &&
-      !budgetBlockedV899 &&
-      base.exactPoolTargetedBackfillV888.chunksCompletedV899 ===
-        chunkRangesV899.length;
+      progressAfterV900?.foundSwapRows !== true &&
+      progressAfterV900?.complete === true &&
+      safeNumber(progressAfterV900?.nextToBlock) <
+        safeNumber(progressAfterV900?.windowFromBlock);
 
     base.exactPoolTargetedBackfillV888.fullWindowCompletedV899 =
       fullWindowCompletedV899;
     d895.fullWindowCompletedV899 =
       fullWindowCompletedV899;
+    d895.cumulativeChunksCompletedV900 =
+      safeNumber(progressAfterV900?.completedChunks);
+    d895.nextToBlockV900 =
+      safeNumber(progressAfterV900?.nextToBlock);
 
     if (base.exactPoolTargetedBackfillV888.attempted === true) {
       d895.rpcOk =
@@ -97432,6 +97566,16 @@ async function enrichCandidateWithProductionV4V772(
     }
 
     if (rpcFailureV899) {
+      if (
+        state?.exactPoolChunkProgressV900 &&
+        normalize(state.exactPoolChunkProgressV900?.tokenAddress) === token &&
+        normalize(state.exactPoolChunkProgressV900?.poolId) === exactPoolIdV888
+      ) {
+        state.exactPoolChunkProgressV900.updatedAt = Date.now();
+        state.exactPoolChunkProgressV900.lastError = rpcFailureV899;
+        state.exactPoolChunkProgressV900.runtimeVersion = VERSION;
+      }
+
       base.exactPoolTargetedBackfillV888.status =
         "EXACT_POOL_TARGETED_SWAP_QUERY_FAILED_V899";
       base.exactPoolTargetedBackfillV888.error =
@@ -97512,9 +97656,29 @@ async function enrichCandidateWithProductionV4V772(
         exactPoolBackfillRowsV888.length;
 
       if (exactPoolBackfillMatchedV888) {
+        if (
+          state?.exactPoolChunkProgressV900 &&
+          normalize(state.exactPoolChunkProgressV900?.tokenAddress) === token &&
+          normalize(state.exactPoolChunkProgressV900?.poolId) === exactPoolIdV888
+        ) {
+          state.exactPoolChunkProgressV900.complete = true;
+          state.exactPoolChunkProgressV900.foundSwapRows = true;
+          state.exactPoolChunkProgressV900.updatedAt = Date.now();
+        }
+
         base.exactPoolTargetedBackfillV888.status =
           "EXACT_POOL_TARGETED_SWAPS_FOUND_V899";
       } else if (fullWindowCompletedV899) {
+        if (
+          state?.exactPoolChunkProgressV900 &&
+          normalize(state.exactPoolChunkProgressV900?.tokenAddress) === token &&
+          normalize(state.exactPoolChunkProgressV900?.poolId) === exactPoolIdV888
+        ) {
+          state.exactPoolChunkProgressV900.complete = true;
+          state.exactPoolChunkProgressV900.foundSwapRows = false;
+          state.exactPoolChunkProgressV900.updatedAt = Date.now();
+        }
+
         base.exactPoolTargetedBackfillV888.status =
           "EXACT_POOL_TARGETED_NO_SWAPS_IN_FULL_12000_BLOCK_WINDOW_V899";
       } else {
@@ -128733,7 +128897,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `PoolId: <code>${escapeHtml(collector895.poolId || "NONE")}</code>`,
       `Request eligible / attempted: <b>${collector895.requestEligible ? "YES" : "NO"} / ${collector895.requestAttempted ? "YES" : "NO"}</b> · provider ${escapeHtml(collector895.rpcProvider || "NONE")}`,
       `RPC OK: <b>${collector895.rpcOk ? "YES" : "NO"}</b> · raw rows ${fmt(collector895.rawRpcRows)} · exact-topic rows ${fmt(collector895.exactTopicRows)}`,
-      `V899 chunks attempted/completed/planned: <b>${fmt(collector895.chunkRequestsAttemptedV899)} / ${fmt(collector895.chunksCompletedV899)} / ${fmt(collector895.chunksPlannedV899)}</b> · full 12k window ${collector895.fullWindowCompletedV899 ? "YES" : "NO"} · stop ${escapeHtml(collector895.stopReasonV899 || "NONE")}`,
+      `V899/V900 chunks this scan attempted/completed/planned: <b>${fmt(collector895.chunkRequestsAttemptedV899)} / ${fmt(collector895.chunksCompletedV899)} / ${fmt(collector895.chunksPlannedV899)}</b> · cumulative ${fmt(collector895.cumulativeChunksCompletedV900)} · resumed ${collector895.resumedV900 ? "YES" : "NO"} · full 12k window ${collector895.fullWindowCompletedV899 ? "YES" : "NO"} · stop ${escapeHtml(collector895.stopReasonV899 || "NONE")}`,
       `Registry present / token match: <b>${collector895.registryPresent ? "YES" : "NO"} / ${collector895.registryTokenMatch ? "YES" : "NO"}</b>`,
       `Decoded verified / candidate-match / exact-USD: <b>${fmt(collector895.decodedVerifiedRows)} / ${fmt(collector895.decodedCandidateMatchedRows)} / ${fmt(collector895.decodedExactUsdRows)}</b>`,
       `V179 rows for token+PoolId: <b>${fmt(collector895.v179LedgerRowsForTokenPool)}</b>`,
@@ -165454,7 +165618,18 @@ function compactCollectorTraceV897(row) {
       safeNumber(row.chunksCompletedV899),
     fullWindowCompletedV899:
       row.fullWindowCompletedV899 === true,
-    stopReasonV899: row.stopReasonV899 || null
+    stopReasonV899: row.stopReasonV899 || null,
+    resumedV900: row.resumedV900 === true,
+    resumeCompletedBeforeV900:
+      safeNumber(row.resumeCompletedBeforeV900),
+    cumulativeChunksCompletedV900:
+      safeNumber(row.cumulativeChunksCompletedV900),
+    nextToBlockV900:
+      safeNumber(row.nextToBlockV900),
+    windowFromBlockV900:
+      safeNumber(row.windowFromBlockV900),
+    windowToBlockV900:
+      safeNumber(row.windowToBlockV900)
   };
 }
 
