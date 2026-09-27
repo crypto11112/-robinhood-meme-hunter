@@ -8363,7 +8363,11 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V942";
+const VERSION = "V943";
+/* V943: diagnostic-only ownership denominator + risk-class handoff trace.
+ * Adds forward-only totalSupply/infrastructure/ownershipSupply capture and
+ * /ownershipaudit without changing holder verification, risk rules, scoring,
+ * qualification, Telegram thresholds, request budgets, or provider routing. */
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -108525,6 +108529,35 @@ for (
             holdersV656?.concentrationVerified === true,
           whaleVerified:
             holdersV656?.whale?.verified === true,
+          // V943 diagnostic-only denominator trace. These values are already
+          // produced by the holder-integrity engine; copying them here adds
+          // no provider request and does not alter verification.
+          denominatorV943: {
+            totalSupply:
+              candidate?.validation?.totalSupply ??
+              watched?.metadata?.totalSupply ??
+              null,
+            ownershipSupply:
+              holderIntegrityV656?.ownershipSupply ?? null,
+            infrastructureBalanceSum:
+              holderIntegrityV656?.infrastructureBalanceSum ?? null,
+            infrastructureRows:
+              Number.isFinite(Number(holderIntegrityV656?.infrastructureRows))
+                ? Number(holderIntegrityV656.infrastructureRows)
+                : null,
+            ownershipConcentrationBasis:
+              holderIntegrityV656?.ownershipConcentrationBasis || null,
+            positiveHolderRows:
+              Number.isFinite(Number(holdersV656?.positiveHolderRows))
+                ? Number(holdersV656.positiveHolderRows)
+                : null,
+            integrityVerified:
+              holderIntegrityV656?.verified === true,
+            integrityStatus:
+              holderIntegrityV656?.status || null,
+            verifiedPairInfrastructureApplied:
+              holdersV656?.verifiedPairInfrastructureApplied === true
+          },
           blockscoutPro: {
             configured: blockscoutProV656?.configured === true,
             attempted: blockscoutProV656?.attempted === true,
@@ -168383,6 +168416,29 @@ async function telegramCommandReplyV271(
       };
     }
   } else if (
+    parsed.command === "/ownershipaudit" ||
+    parsed.command === "/denominatoraudit" ||
+    parsed.command === "/riskclassaudit"
+  ) {
+    reply = ownershipRiskMessageV943(state);
+
+    if (diagnosticV273) {
+      const ownershipV943 = ownershipRiskAuditV943(state);
+      diagnosticV273.ownershipRiskAuditV943 = {
+        scannerBudgetConsumed: false,
+        externalProviderRequests: 0,
+        stateWrites: 0,
+        rowsAnalysed: safeNumber(ownershipV943?.rowsAnalysed),
+        forwardDenominatorTraceRows: safeNumber(ownershipV943?.forwardDenominatorTraceRows),
+        twoPlusClassesButHolderIntegrityBlocks: safeNumber(ownershipV943?.twoPlusClassesButHolderIntegrityBlocks),
+        twoPlusClassesTrueHandoffGap: safeNumber(ownershipV943?.twoPlusClassesTrueHandoffGap),
+        marketVerifiedLiveActivityStillNeeded: safeNumber(ownershipV943?.marketVerifiedLiveActivityStillNeeded),
+        riskChanged: false,
+        scoringChanged: false,
+        qualificationChanged: false
+      };
+    }
+  } else if (
     parsed.command === "/holderaudit" ||
     parsed.command === "/holderrecovery"
   ) {
@@ -168883,7 +168939,10 @@ async function telegramCommandReplyV271(
     parsed.command === "/riskaudit" ||
     parsed.command === "/riskcompletion" ||
     parsed.command === "/holderaudit" ||
-    parsed.command === "/holderrecovery";
+    parsed.command === "/holderrecovery" ||
+    parsed.command === "/ownershipaudit" ||
+    parsed.command === "/denominatoraudit" ||
+    parsed.command === "/riskclassaudit";
 
   if (isFreshAnalyseV352) {
     await telegramAnalyseCheckpointV352(
@@ -169204,6 +169263,184 @@ async function telegramWebhookSetupV271(
 
 
 /* =========================================================
+   V943 OWNERSHIP DENOMINATOR + RISK-CLASS HANDOFF AUDIT
+   READ ONLY — ZERO PROVIDER REQUESTS / ZERO STATE WRITES
+   ========================================================= */
+function ownershipRiskAuditV943(state) {
+  const records = Array.isArray(state?.qualificationAuditV663?.records)
+    ? state.qualificationAuditV663.records
+    : [];
+  const nowMs = Date.now();
+  const cutoff = nowMs - QUALIFICATION_AUDIT_RETENTION_MS_V663;
+
+  const rows = records
+    .filter(row => {
+      const at = safeNumber(row?.lastEvaluatedAt || row?.firstEvaluatedAt);
+      return isAddress(normalize(row?.address)) && at >= cutoff && at <= nowMs + 5 * 60 * 1000;
+    })
+    .map(row => {
+      const ea = row?.evidenceCompletionAuditV727 && typeof row.evidenceCompletionAuditV727 === "object"
+        ? row.evidenceCompletionAuditV727 : {};
+      const risk = ea?.riskGateDiagnosticV871 && typeof ea.riskGateDiagnosticV871 === "object"
+        ? ea.riskGateDiagnosticV871 : {};
+      const ev = risk?.evidence || {};
+      const trace = row?.holderRecoveryTraceV941 && typeof row.holderRecoveryTraceV941 === "object"
+        ? row.holderRecoveryTraceV941 : null;
+      const denominator = trace?.denominatorV943 && typeof trace.denominatorV943 === "object"
+        ? trace.denominatorV943 : null;
+      const riskReasons = Array.isArray(risk?.reasons)
+        ? risk.reasons.map(x => String(x || "")).filter(Boolean)
+        : [];
+      const holderStatus = String(
+        row?.holderStatus || trace?.integrityStatus || trace?.primaryBlocker || ""
+      );
+      const holderIntegrityBlocked =
+        riskReasons.some(reason => /^Holder integrity unresolved:/i.test(reason)) ||
+        holderStatus === "NO_POSITIVE_OWNERSHIP_SUPPLY" ||
+        holderStatus === "NO_POSITIVE_OWNERSHIP_BALANCES";
+      const market = ev?.market === true;
+      const concentration = ev?.concentration === true;
+      const liveActivity = ev?.liveActivity === true;
+      const holderCounters = ev?.holderCounters === true;
+      const independent = Math.max(
+        [market, concentration, liveActivity, holderCounters].filter(Boolean).length,
+        safeNumber(risk?.independentEvidence)
+      );
+      const riskVerified = row?.riskVerified === true || risk?.verified === true;
+      const twoClassesAlreadyPresent = independent >= 2;
+      let riskClassDiagnosis = "INSUFFICIENT_INDEPENDENT_RISK_CLASSES";
+      if (riskVerified) riskClassDiagnosis = "RISK_ALREADY_VERIFIED";
+      else if (twoClassesAlreadyPresent && holderIntegrityBlocked) {
+        riskClassDiagnosis = "TWO_PLUS_CLASSES_PRESENT_BUT_HOLDER_INTEGRITY_OVERRIDE_BLOCKS";
+      } else if (twoClassesAlreadyPresent) {
+        riskClassDiagnosis = "TWO_PLUS_CLASSES_PRESENT_RISK_RECOMPUTE_OR_HANDOFF_GAP";
+      } else if (market && !liveActivity) {
+        riskClassDiagnosis = "MARKET_VERIFIED_LIVE_ACTIVITY_STILL_NEEDED_FOR_SECOND_CLASS";
+      }
+
+      let denominatorDiagnosis = "NO_FORWARD_V943_DENOMINATOR_TRACE_YET";
+      if (denominator) {
+        const supply = (() => { try { return BigInt(String(denominator.totalSupply ?? "0")); } catch { return 0n; } })();
+        const infra = (() => { try { return BigInt(String(denominator.infrastructureBalanceSum ?? "0")); } catch { return 0n; } })();
+        const own = (() => { try { return BigInt(String(denominator.ownershipSupply ?? "0")); } catch { return 0n; } })();
+        if (supply <= 0n) denominatorDiagnosis = "TOTAL_SUPPLY_MISSING_OR_NONPOSITIVE";
+        else if (infra >= supply) denominatorDiagnosis = "INFRASTRUCTURE_BALANCE_EQUALS_OR_EXCEEDS_TOTAL_SUPPLY";
+        else if (own <= 0n) denominatorDiagnosis = "OWNERSHIP_SUPPLY_NONPOSITIVE_AFTER_INFRASTRUCTURE_EXCLUSIONS";
+        else if (safeNumber(denominator.positiveHolderRows) <= 0 && holderStatus === "NO_POSITIVE_OWNERSHIP_BALANCES") {
+          denominatorDiagnosis = "POSITIVE_OWNERSHIP_SUPPLY_BUT_NO_POSITIVE_NON_INFRASTRUCTURE_HOLDER_ROWS";
+        } else denominatorDiagnosis = "OWNERSHIP_DENOMINATOR_POSITIVE";
+      }
+
+      return {
+        address: normalize(row?.address),
+        symbol: row?.symbol || null,
+        opportunity: safeNumber(row?.opportunityScore),
+        confidence: safeNumber(row?.confidenceScore),
+        riskVerified,
+        riskScore: riskVerified ? safeNumber(row?.riskScore ?? risk?.score) : null,
+        independentEvidence: independent,
+        evidence: { market, concentration, liveActivity, holderCounters },
+        holderIntegrityBlocked,
+        holderStatus: holderStatus || null,
+        riskClassDiagnosis,
+        denominatorDiagnosis,
+        denominator,
+        telegramReasons: Array.isArray(row?.telegramReasons) ? row.telegramReasons.filter(Boolean) : []
+      };
+    })
+    .filter(row =>
+      !row.riskVerified ||
+      row.holderIntegrityBlocked ||
+      row.holderStatus === "NO_POSITIVE_OWNERSHIP_SUPPLY" ||
+      row.holderStatus === "NO_POSITIVE_OWNERSHIP_BALANCES"
+    )
+    .sort((a,b) =>
+      (b.opportunity - a.opportunity) ||
+      (b.confidence - a.confidence) ||
+      (b.independentEvidence - a.independentEvidence)
+    );
+
+  const denominatorCounts = {};
+  const riskClassCounts = {};
+  for (const row of rows) {
+    denominatorCounts[row.denominatorDiagnosis] = safeNumber(denominatorCounts[row.denominatorDiagnosis]) + 1;
+    riskClassCounts[row.riskClassDiagnosis] = safeNumber(riskClassCounts[row.riskClassDiagnosis]) + 1;
+  }
+
+  return {
+    version: "V943",
+    runtimeVersion: VERSION,
+    source: "QUALIFICATION_AUDIT_PLUS_FORWARD_DENOMINATOR_TRACE_V943",
+    recordedAt: new Date().toISOString(),
+    rowsAnalysed: rows.length,
+    forwardDenominatorTraceRows: rows.filter(r => !!r.denominator).length,
+    noPositiveOwnershipSupplyRows: rows.filter(r => r.holderStatus === "NO_POSITIVE_OWNERSHIP_SUPPLY").length,
+    noPositiveOwnershipBalancesRows: rows.filter(r => r.holderStatus === "NO_POSITIVE_OWNERSHIP_BALANCES").length,
+    twoPlusClassesButHolderIntegrityBlocks: rows.filter(r => r.riskClassDiagnosis === "TWO_PLUS_CLASSES_PRESENT_BUT_HOLDER_INTEGRITY_OVERRIDE_BLOCKS").length,
+    twoPlusClassesTrueHandoffGap: rows.filter(r => r.riskClassDiagnosis === "TWO_PLUS_CLASSES_PRESENT_RISK_RECOMPUTE_OR_HANDOFF_GAP").length,
+    marketVerifiedLiveActivityStillNeeded: rows.filter(r => r.riskClassDiagnosis === "MARKET_VERIFIED_LIVE_ACTIVITY_STILL_NEEDED_FOR_SECOND_CLASS").length,
+    denominatorCounts: Object.entries(denominatorCounts).sort((a,b)=>b[1]-a[1]).map(([reason,count])=>({reason,count})),
+    riskClassCounts: Object.entries(riskClassCounts).sort((a,b)=>b[1]-a[1]).map(([reason,count])=>({reason,count})),
+    rows: rows.slice(0,16),
+    providerRequestsAdded: 0,
+    stateWritesAddedByCommand: 0,
+    riskChanged: false,
+    holderRulesChanged: false,
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdsChanged: false
+  };
+}
+
+function ownershipRiskMessageV943(state) {
+  const d = ownershipRiskAuditV943(state);
+  const fmt = n => safeNumber(n).toLocaleString("en-GB");
+  const yn = v => v === true ? "YES" : "NO";
+  const lines = [
+    "🧮 <b>Ownership Denominator / Risk-Class Audit — V943</b>", "",
+    `Source: <b>${escapeHtml(d.source)}</b>`,
+    `Rows analysed: <b>${fmt(d.rowsAnalysed)}</b> · forward V943 denominator traces <b>${fmt(d.forwardDenominatorTraceRows)}</b>`,
+    `NO_POSITIVE_OWNERSHIP_SUPPLY: <b>${fmt(d.noPositiveOwnershipSupplyRows)}</b> · NO_POSITIVE_OWNERSHIP_BALANCES: <b>${fmt(d.noPositiveOwnershipBalancesRows)}</b>`,
+    `≥2 risk classes already present but holder-integrity override blocks: <b>${fmt(d.twoPlusClassesButHolderIntegrityBlocks)}</b>`,
+    `≥2 classes present with a true recompute/handoff gap: <b>${fmt(d.twoPlusClassesTrueHandoffGap)}</b>`,
+    `Market verified but live activity still needed as second class: <b>${fmt(d.marketVerifiedLiveActivityStillNeeded)}</b>`
+  ];
+  if (d.riskClassCounts?.length) {
+    lines.push("", "🧭 <b>Risk-class diagnosis</b>");
+    for (const x of d.riskClassCounts.slice(0,8)) lines.push(`• ${escapeHtml(x.reason)}: <b>${fmt(x.count)}</b>`);
+  }
+  if (d.denominatorCounts?.length) {
+    lines.push("", "🧱 <b>Ownership-denominator diagnosis</b>");
+    for (const x of d.denominatorCounts.slice(0,8)) lines.push(`• ${escapeHtml(x.reason)}: <b>${fmt(x.count)}</b>`);
+  }
+  if (d.rows?.length) {
+    lines.push("", "🔬 <b>Highest-value affected candidates</b>");
+    for (const row of d.rows.slice(0,12)) {
+      const ev = row.evidence || {};
+      const den = row.denominator || {};
+      const blockers = row.telegramReasons.slice(0,5).join(" | ") || "NONE";
+      lines.push(
+        `• <b>${escapeHtml(row.symbol || "UNKNOWN")}</b> <code>${escapeHtml(shortAddressV937(row.address || ""))}</code> — Opp <b>${fmt(row.opportunity)}</b> · Conf <b>${fmt(row.confidence)}</b> · risk classes <b>${fmt(row.independentEvidence)}/4</b>`,
+        `  ↳ classes: market ${yn(ev.market)} · concentration ${yn(ev.concentration)} · live swaps ${yn(ev.liveActivity)} · holder counters ${yn(ev.holderCounters)}`,
+        `  ↳ risk-class diagnosis: <b>${escapeHtml(row.riskClassDiagnosis)}</b>`,
+        `  ↳ holder integrity: ${row.holderIntegrityBlocked ? "BLOCKING" : "not blocking"} · ${escapeHtml(row.holderStatus || "NONE")}`,
+        `  ↳ denominator: <b>${escapeHtml(row.denominatorDiagnosis)}</b> · totalSupply ${escapeHtml(String(den.totalSupply ?? "NOT_RETAINED"))} · infrastructure ${escapeHtml(String(den.infrastructureBalanceSum ?? "NOT_RETAINED"))} · ownership ${escapeHtml(String(den.ownershipSupply ?? "NOT_RETAINED"))} · positive rows ${escapeHtml(String(den.positiveHolderRows ?? "NOT_RETAINED"))}`,
+        `  ↳ Telegram blockers: ${escapeHtml(blockers)}`
+      );
+    }
+  }
+  if (!d.forwardDenominatorTraceRows) {
+    lines.push("", "⏳ V943 denominator fields are forward-only. Complete one V943 live scan to populate totalSupply / infrastructure / ownership-supply detail for newly analysed candidates.");
+  }
+  lines.push(
+    "",
+    "<i>Important: V943 distinguishes 'market verified and live swaps still needed' from the stronger case where both risk classes are already verified. It does not weaken holder-integrity protections.</i>",
+    "<i>Read-only command: zero provider requests, zero state writes, no holder/risk/scoring/qualification/Telegram-threshold changes.</i>"
+  );
+  return lines.join("\n");
+}
+
+/* =========================================================
    V941 HOLDER RECOVERY / FREE-DATA PATH AUDIT — READ ONLY
    ========================================================= */
 function holderRecoveryTraceV941(candidate) {
@@ -169220,6 +169457,10 @@ function holderRecoveryTraceV941(candidate) {
     concentrationVerified: h?.concentrationVerified === true,
     whaleVerified: h?.whaleVerified === true,
     primaryBlocker: h?.primaryBlocker || null,
+    denominatorV943:
+      h?.denominatorV943 && typeof h.denominatorV943 === "object"
+        ? h.denominatorV943
+        : null,
     path: p ? {
       publicV2HolderRows: p?.publicV2HolderRows || null,
       legacyHolderRows: p?.legacyHolderRows || null,
