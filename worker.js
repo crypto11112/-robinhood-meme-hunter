@@ -1,4 +1,22 @@
 /**
+ * V908 PRE-V887 EXACT-POOL CONTINUATION ORDERING FIX:
+ * - builds directly from deployed V907;
+ * - fixes the ordering bug proven by Ponchan: production V4/V888 runs BEFORE the
+ *   later V151 stage writes directionalExactHistoryPriorityV887, so V901 could
+ *   reject the exact-pool continuation as V887_PRIORITY_NOT_REQUESTED even when
+ *   the same candidate later became the real V891/V887 priority target;
+ * - before production enrichment, computes the SAME current-scan V891 exact-pool
+ *   priority target from existing candidate/risk/terminal/priority state while
+ *   Gecko's real 429 cooldown is active;
+ * - V901 may arm for the production-selected candidate only when it equals that
+ *   predicted V891 target, has strict verified exact PoolId, acceptable risk,
+ *   and no existing V179 rows for that exact pool;
+ * - one protected request maximum remains unchanged; V258/FLOW/FOUNDATION/
+ *   Telegram headroom and the 48-request hard ceiling remain authoritative;
+ * - zero scoring/risk/Momentum/Telegram threshold/qualification changes;
+ * - preserves V904/V906/V907 behavior and diagnostics.
+ */
+/**
  * V907 AUTHORITATIVE MOMENTUM DIAGNOSTIC ALIGNMENT — READ ONLY:
  * - builds directly from deployed V906;
  * - fixes stale V902/V904 Momentum telemetry that deliberately retained an old
@@ -7998,7 +8016,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V907";
+const VERSION = "V908";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -18450,7 +18468,8 @@ function ensureV901ExactPoolContinuationSlot(budget) {
 function armV901ExactPoolContinuationSlot(
   budget,
   candidate,
-  state
+  state,
+  preV891PriorityV908 = null
 ) {
   const slot = ensureV901ExactPoolContinuationSlot(budget);
   if (!slot || slot.consumed === true) return slot;
@@ -18464,6 +18483,18 @@ function armV901ExactPoolContinuationSlot(
 
   const v887Requested =
     candidate?.directionalExactHistoryPriorityV887?.requested === true;
+
+  const preV891PriorityAddressV908 =
+    normalize(preV891PriorityV908?.address || "");
+
+  const preV891PriorityMatchedV908 =
+    preV891PriorityV908?.activeGecko429Cooldown === true &&
+    isAddress(preV891PriorityAddressV908) &&
+    preV891PriorityAddressV908 === token;
+
+  const v887OrPreV891PriorityV908 =
+    v887Requested ||
+    preV891PriorityMatchedV908;
 
   const riskAcceptable =
     candidate?.risk?.severeOverride !== true &&
@@ -18504,8 +18535,13 @@ function armV901ExactPoolContinuationSlot(
     return slot;
   }
 
-  if (!v887Requested) {
+  if (!v887OrPreV891PriorityV908) {
     slot.armReason = "V887_PRIORITY_NOT_REQUESTED_V901";
+    slot.preV891PriorityMatchedV908 = false;
+    slot.preV891PriorityAddressV908 =
+      isAddress(preV891PriorityAddressV908)
+        ? preV891PriorityAddressV908
+        : null;
     return slot;
   }
 
@@ -18521,8 +18557,18 @@ function armV901ExactPoolContinuationSlot(
 
   slot.active = true;
   slot.armedAt = Date.now();
+  slot.preV891PriorityMatchedV908 =
+    preV891PriorityMatchedV908;
+  slot.preV891PriorityAddressV908 =
+    isAddress(preV891PriorityAddressV908)
+      ? preV891PriorityAddressV908
+      : null;
+  slot.preV891SelectionModeV908 =
+    preV891PriorityV908?.selectionMode || null;
   slot.armReason =
-    "V887_PRIORITY_EXACT_POOL_CONTINUATION_ARMED_V901";
+    v887Requested
+      ? "V887_PRIORITY_EXACT_POOL_CONTINUATION_ARMED_V901"
+      : "PRE_V891_PRIORITY_EXACT_POOL_CONTINUATION_ARMED_V908";
   return slot;
 }
 
@@ -105396,6 +105442,134 @@ for (
   // Compatibility alias for existing audit plumbing.
   state.productionV4RoutingDiagnosticV817 = productionV4RoutingDiagnosticV818;
 
+  /*
+   * V908: production V4 executes before the later V151/V887 stage, so V901
+   * cannot rely only on directionalExactHistoryPriorityV887 being written yet.
+   * Reproduce the current-scan V891 target decision here from already-available
+   * candidate state. This is selection telemetry only and makes no request.
+   */
+  const geckoEligibilityPreV891V908 =
+    geckoDirectionalEligibilityV432(state);
+
+  const activeGecko429CooldownPreV891V908 =
+    geckoEligibilityPreV891V908?.eligible !== true &&
+    geckoEligibilityPreV891V908?.reason ===
+      "GECKO_DIRECTIONAL_DEFER_ACTIVE_429_COOLDOWN_V824";
+
+  const alreadyQualifiedPreV891V908 =
+    candidates.find(candidate =>
+      qualifiesTelegram(candidate) &&
+      candidate?.market?.verified === true &&
+      !sameRunTerminalAddresses.has(
+        normalize(candidate?.address)
+      )
+    ) || null;
+
+  const alreadyQualifiedExactPreV891V908 =
+    alreadyQualifiedPreV891V908?.onChainPoolIdentityV153?.verified === true &&
+    /^0x[a-f0-9]{64}$/.test(
+      String(
+        normalize(
+          alreadyQualifiedPreV891V908?.onChainPoolIdentityV153?.poolId ||
+          alreadyQualifiedPreV891V908?.onChainPoolIdentityV153?.pairAddress ||
+          ""
+        ) || ""
+      )
+    );
+
+  const exactPoolCandidatesPreV891V908 =
+    activeGecko429CooldownPreV891V908
+      ? candidates
+          .filter(candidate => {
+            const address = normalize(candidate?.address);
+            const identity = candidate?.onChainPoolIdentityV153;
+            const poolId = normalize(
+              identity?.poolId ||
+              identity?.pairAddress ||
+              ""
+            );
+            const marketSide =
+              String(
+                candidate?.market?.targetTokenSide || ""
+              ).toUpperCase();
+            const marketReady =
+              candidate?.market?.verified === true &&
+              Boolean(candidate?.market?.pairAddress) &&
+              (
+                marketSide === "BASE" ||
+                marketSide === "QUOTE"
+              );
+            const exactPoolReady =
+              identity?.verified === true &&
+              /^0x[a-f0-9]{64}$/.test(
+                String(poolId || "")
+              );
+            const riskOk =
+              candidate?.risk?.severeOverride !== true &&
+              String(candidate?.risk?.label || "").toUpperCase() !== "HIGH";
+
+            return (
+              candidate?.validERC20 === true &&
+              (marketReady || exactPoolReady) &&
+              exactPoolReady &&
+              !sameRunTerminalAddresses.has(address) &&
+              riskOk
+            );
+          })
+          .sort(
+            (a, b) =>
+              safeNumber(b?.analysisPriority) -
+              safeNumber(a?.analysisPriority)
+          )
+      : [];
+
+  const preV891TargetV908 =
+    activeGecko429CooldownPreV891V908
+      ? (
+          alreadyQualifiedPreV891V908 &&
+          alreadyQualifiedExactPreV891V908
+            ? alreadyQualifiedPreV891V908
+            : exactPoolCandidatesPreV891V908[0] || null
+        )
+      : null;
+
+  const preV891PriorityV908 = {
+    activeGecko429Cooldown:
+      activeGecko429CooldownPreV891V908,
+    address:
+      normalize(preV891TargetV908?.address) || null,
+    selectionMode:
+      activeGecko429CooldownPreV891V908 &&
+      preV891TargetV908
+        ? (
+            alreadyQualifiedPreV891V908 &&
+            alreadyQualifiedExactPreV891V908 &&
+            normalize(preV891TargetV908?.address) ===
+              normalize(alreadyQualifiedPreV891V908?.address)
+              ? "ALREADY_TELEGRAM_QUALIFIED"
+              : "V891_GECKO_COOLDOWN_VERIFIED_EXACT_POOL_PRIORITY"
+          )
+        : "NONE",
+    exactPoolCandidates:
+      exactPoolCandidatesPreV891V908.length,
+    computedBeforeProductionV4: true,
+    zeroExtraRequests: true
+  };
+
+  state.preV891PriorityDiagnosticV908 = {
+    ...preV891PriorityV908,
+    runtimeVersion: VERSION,
+    recordedAt: new Date().toISOString(),
+    productionSelectedAddress:
+      normalize(productionV4TargetV772?.address) || null,
+    sameAsProductionSelected:
+      Boolean(
+        preV891PriorityV908.address &&
+        preV891PriorityV908.address ===
+          normalize(productionV4TargetV772?.address)
+      )
+  };
+
   let productionV4PreIdentityV905 = null;
 
   if (productionV4TargetV772) {
@@ -105413,7 +105587,8 @@ for (
       armV901ExactPoolContinuationSlot(
         budget,
         productionV4TargetV772,
-        state
+        state,
+        preV891PriorityV908
       );
 
     // V777: transfer ownership of the three protected slots to V772 itself.
@@ -130207,7 +130382,8 @@ function evidenceAuditTelegramMessageV727(state) {
       `Request eligible / attempted: <b>${collector895.requestEligible ? "YES" : "NO"} / ${collector895.requestAttempted ? "YES" : "NO"}</b> · provider ${escapeHtml(collector895.rpcProvider || "NONE")}`,
       `RPC OK: <b>${collector895.rpcOk ? "YES" : "NO"}</b> · raw rows ${fmt(collector895.rawRpcRows)} · exact-topic rows ${fmt(collector895.exactTopicRows)}`,
       `V899/V900 chunks this scan attempted/completed/planned: <b>${fmt(collector895.chunkRequestsAttemptedV899)} / ${fmt(collector895.chunksCompletedV899)} / ${fmt(collector895.chunksPlannedV899)}</b> · cumulative ${fmt(collector895.cumulativeChunksCompletedV900)} · resumed ${collector895.resumedV900 ? "YES" : "NO"} · full 12k window ${collector895.fullWindowCompletedV899 ? "YES" : "NO"} · stop ${escapeHtml(collector895.stopReasonV899 || "NONE")}`,
-      `V901 protected continuation: consumed <b>${state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.consumed === true ? "YES" : "NO"}</b> · crossed analysis cap <b>${state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.bypassedAnalysisSubBudget === true ? "YES" : "NO"}</b> · reason <b>${escapeHtml(state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.armReason || "NONE")}</b>`,
+      `V901/V908 protected continuation: consumed <b>${state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.consumed === true ? "YES" : "NO"}</b> · crossed analysis cap <b>${state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.bypassedAnalysisSubBudget === true ? "YES" : "NO"}</b> · reason <b>${escapeHtml(state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.armReason || "NONE")}</b>`,
+      `V908 pre-V891 target: <code>${escapeHtml(state?.preV891PriorityDiagnosticV908?.address || "NONE")}</code> · production target <code>${escapeHtml(state?.preV891PriorityDiagnosticV908?.productionSelectedAddress || "NONE")}</code> · same <b>${state?.preV891PriorityDiagnosticV908?.sameAsProductionSelected ? "YES" : "NO"}</b> · cooldown ${state?.preV891PriorityDiagnosticV908?.activeGecko429Cooldown ? "YES" : "NO"} · exact candidates ${fmt(state?.preV891PriorityDiagnosticV908?.exactPoolCandidates)}`,
       `Registry present / token match: <b>${collector895.registryPresent ? "YES" : "NO"} / ${collector895.registryTokenMatch ? "YES" : "NO"}</b>`,
       `Decoded verified / candidate-match / exact-USD: <b>${fmt(collector895.decodedVerifiedRows)} / ${fmt(collector895.decodedCandidateMatchedRows)} / ${fmt(collector895.decodedExactUsdRows)}</b>`,
       `V179 rows for token+PoolId: <b>${fmt(collector895.v179LedgerRowsForTokenPool)}</b>`,
