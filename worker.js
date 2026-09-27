@@ -1,4 +1,17 @@
 /**
+ * V915 PRE-V891 TDZ HOTFIX:
+ * - builds directly from V914;
+ * - fixes the live V914 runtime exception:
+ *     "Cannot access sameRunTerminalAddresses before initialization";
+ * - V908 pre-V891 telemetry runs before the later terminal-address Set is
+ *   constructed, so the two early references now use the already-existing
+ *   sameRunTerminalReject(candidate) function directly;
+ * - preserves the exact same terminal-rejection semantics without moving the
+ *   later Set, duplicating state, adding requests, or changing candidate gates;
+ * - preserves V914 scheduler memory isolation, V913 Pons diagnostics and V912
+ *   lifecycle routing unchanged.
+ */
+/**
  * V914 SCHEDULER MEMORY-ISOLATION FIX:
  * - builds directly from deployed V913;
  * - fixes the live V913 failure:
@@ -8110,7 +8123,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V914";
+const VERSION = "V915";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -106253,9 +106266,7 @@ for (
     candidates.find(candidate =>
       qualifiesTelegram(candidate) &&
       candidate?.market?.verified === true &&
-      !sameRunTerminalAddresses.has(
-        normalize(candidate?.address)
-      )
+      sameRunTerminalReject(candidate)?.terminal !== true
     ) || null;
 
   const alreadyQualifiedExactPreV891V908 =
@@ -106305,7 +106316,7 @@ for (
               candidate?.validERC20 === true &&
               (marketReady || exactPoolReady) &&
               exactPoolReady &&
-              !sameRunTerminalAddresses.has(address) &&
+              sameRunTerminalReject(candidate)?.terminal !== true &&
               riskOk
             );
           })
