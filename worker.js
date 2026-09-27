@@ -767,6 +767,11 @@
  *   42-request ceiling.
  */
 /**
+ * V937 HOTFIX:
+ * - fixes /telegramaudit runtime ReferenceError caused by calling non-global shortAddress();
+ * - adds dedicated shortAddressV937 helper and preserves V935/V936 audit and chunked delivery logic;
+ * - no scoring, qualification, provider, V4, Pons, Telegram threshold, or request-cap changes.
+ *
  * Robinhood Chain Meme Hunter — V874
  *
  * V874 KNOWN-POOL ZERO-SWAP RESCUE ROUTING FIX:
@@ -8352,7 +8357,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V936";
+const VERSION = "V937";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -136752,6 +136757,12 @@ function finalTelegramQualificationAuditSnapshotV932(state) {
 }
 
 
+
+function shortAddressV937(address) {
+  const value = normalize(address);
+  return isAddress(value) ? `${value.slice(0, 6)}…${value.slice(-4)}` : "UNVERIFIED";
+}
+
 function finalTelegramQualificationAuditReconstructedV935(state) {
   const records = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records
@@ -136915,7 +136926,7 @@ function finalTelegramQualificationAuditMessageV935(state) {
       const stale=(row.verifiedEvidencePresentButScoreViewMissing||[]).join(",")||"NONE";
       const blockers=(row.telegramReasons||[]).slice(0,5).join(" | ")||"NONE";
       lines.push(
-        `• <b>${escapeHtml(row.symbol || "UNKNOWN")}</b> <code>${escapeHtml(shortAddress(row.address || ""))}</code> — Opp <b>${fmt(row.opportunity)}</b> · Conf <b>${fmt(row.confidence)}</b> · Risk <b>${row.riskVerified ? fmt(row.riskScore) : "UNVERIFIED"}</b>`,
+        `• <b>${escapeHtml(row.symbol || "UNKNOWN")}</b> <code>${escapeHtml(shortAddressV937(row.address || ""))}</code> — Opp <b>${fmt(row.opportunity)}</b> · Conf <b>${fmt(row.confidence)}</b> · Risk <b>${row.riskVerified ? fmt(row.riskScore) : "UNVERIFIED"}</b>`,
         `  ↳ blockers: ${escapeHtml(blockers)}`,
         `  ↳ missing score groups: ${escapeHtml(missing)}`,
         `  ↳ verified-but-score-missing: ${escapeHtml(stale)} · parity Δ ${fmt(row.scoreParityDelta)}`
@@ -136975,7 +136986,7 @@ async function finalTelegramQualificationAuditMessageV934(env, state) {
       const stale = (row.verifiedEvidencePresentButScoreViewMissing || []).join(",") || "NONE";
       const reasons = (row.telegramReasons || []).join(" | ") || "NONE";
       lines.push(
-        `• <b>${escapeHtml(row.symbol || "UNKNOWN")}</b> <code>${escapeHtml(shortAddress(row.address || ""))}</code> — Opp <b>${fmt(row.opportunity)}</b> · Conf <b>${fmt(row.confidence)}</b> · Mom <b>${fmt(row.momentum)}</b> · Risk <b>${row.riskVerified ? fmt(row.riskScore) : "UNVERIFIED"}</b>`,
+        `• <b>${escapeHtml(row.symbol || "UNKNOWN")}</b> <code>${escapeHtml(shortAddressV937(row.address || ""))}</code> — Opp <b>${fmt(row.opportunity)}</b> · Conf <b>${fmt(row.confidence)}</b> · Mom <b>${fmt(row.momentum)}</b> · Risk <b>${row.riskVerified ? fmt(row.riskScore) : "UNVERIFIED"}</b>`,
         `  ↳ blockers: ${escapeHtml(reasons)}`,
         `  ↳ missing score groups: ${escapeHtml(missing)}`,
         `  ↳ verified-but-score-missing: ${escapeHtml(stale)} · parity Δ ${fmt(row.scoreParityDelta)}`
@@ -137035,7 +137046,7 @@ async function finalTelegramQualificationAuditMessageV933(env, state) {
       const stale = (row.verifiedEvidencePresentButScoreViewMissing || []).join(",") || "NONE";
       const reasons = (row.telegramReasons || []).join(" | ") || "NONE";
       lines.push(
-        `• <b>${escapeHtml(row.symbol || "UNKNOWN")}</b> <code>${escapeHtml(shortAddress(row.address || ""))}</code> — Opp <b>${fmt(row.opportunity)}</b> · Conf <b>${fmt(row.confidence)}</b> · Mom <b>${fmt(row.momentum)}</b> · Risk <b>${row.riskVerified ? fmt(row.riskScore) : "UNVERIFIED"}</b>`,
+        `• <b>${escapeHtml(row.symbol || "UNKNOWN")}</b> <code>${escapeHtml(shortAddressV937(row.address || ""))}</code> — Opp <b>${fmt(row.opportunity)}</b> · Conf <b>${fmt(row.confidence)}</b> · Mom <b>${fmt(row.momentum)}</b> · Risk <b>${row.riskVerified ? fmt(row.riskScore) : "UNVERIFIED"}</b>`,
         `  ↳ blockers: ${escapeHtml(reasons)}`,
         `  ↳ missing score groups: ${escapeHtml(missing)}`,
         `  ↳ verified-but-score-missing: ${escapeHtml(stale)} · parity Δ ${fmt(row.scoreParityDelta)}`
