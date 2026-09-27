@@ -1,4 +1,10 @@
 /**
+ * V928 HIGH-PROGRESS CONTINUATION RESERVED-SLOT HANDOFF:
+ * - builds directly from live-proven V927 deterministic keyed continuation queue;
+ * - allows one selected safe background keyed continuation already at >=4/6 to consume one EXISTING V777 production-V4 handoff slot for RPC:V888_EXACT_POOL_TARGETED_SWAPS;
+ * - fixes repeated WARCAT 4/6 starvation caused only by internal reserve ordering;
+ * - does not raise the 48-request hard cap, analysis limit, Telegram reserve, V258/FLOW/FOUNDATION protections, risk gates, scoring thresholds or Pons routing.
+ *
  * V927 DETERMINISTIC KEYED CONTINUATION QUEUE:
  * - Drains retained incomplete token+PoolId jobs by highest progress, then oldest creation.
  * - Can safely reconstruct background-only eligibility from persisted qualification audit evidence.
@@ -8283,7 +8289,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V927";
+const VERSION = "V928";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -19555,12 +19561,138 @@ function consumeV901ExactPoolContinuationSlot(
   return true;
 }
 
+
+/* =========================================================
+   V928 HIGH-PROGRESS BACKGROUND CONTINUATION HANDOFF SLOT
+   ========================================================= */
+function armV928HighProgressContinuationHandoffSlot(
+  budget,
+  continuationV927,
+  selectedCandidate
+) {
+  if (!budget?.analysis) return null;
+
+  const token = normalize(continuationV927?.token || continuationV927?.tokenAddress || "");
+  const poolId = normalize(continuationV927?.poolId || "");
+  const selectedToken = normalize(selectedCandidate?.address || "");
+  const completedChunks = Math.max(0, safeNumber(continuationV927?.completedChunks));
+  const totalPlannedChunks = Math.max(0, safeNumber(continuationV927?.totalPlannedChunks));
+
+  const slot = {
+    enabled: true,
+    active: false,
+    consumed: false,
+    tokenAddress: isAddress(token) ? token : null,
+    poolId: /^0x[a-f0-9]{64}$/.test(String(poolId || "")) ? poolId : null,
+    completedChunks,
+    totalPlannedChunks,
+    armedAt: null,
+    consumedAt: null,
+    consumedType: null,
+    reason: null
+  };
+
+  if (
+    !isAddress(token) ||
+    selectedToken !== token ||
+    !/^0x[a-f0-9]{64}$/.test(String(poolId || ""))
+  ) {
+    slot.reason = "V928_SELECTED_BACKGROUND_KEY_MISMATCH";
+  } else if (completedChunks < 4 || totalPlannedChunks <= completedChunks) {
+    slot.reason = "V928_BACKGROUND_KEY_NOT_HIGH_PROGRESS_INCOMPLETE";
+  } else {
+    slot.active = true;
+    slot.armedAt = Date.now();
+    slot.reason = "V928_HIGH_PROGRESS_BACKGROUND_CONTINUATION_ARMED";
+  }
+
+  budget.analysis.highProgressContinuationHandoffV928 = slot;
+  return slot;
+}
+
+function consumeV928HighProgressContinuationHandoffSlot(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  const slot = budget?.analysis?.highProgressContinuationHandoffV928;
+  const reserve = budget?.analysis?.productionV4ReserveV776;
+  const requestType = String(type || "");
+  const needed = Math.max(1, safeNumber(amount));
+
+  if (
+    phase !== "analysis" ||
+    requestType !== "RPC:V888_EXACT_POOL_TARGETED_SWAPS" ||
+    needed !== 1 ||
+    slot?.active !== true ||
+    slot?.consumed === true
+  ) {
+    return null;
+  }
+
+  /*
+   * V928 consumes only one request from an EXISTING V777 handoff allocation.
+   * It never creates capacity. Real analysis/global/Telegram boundaries remain
+   * enforced by budgetAvailable(), and if no handoff slot remains we fall
+   * through unchanged to V901/V923/normal budget logic.
+   */
+  if (
+    reserve?.handoffActiveV777 !== true ||
+    safeNumber(reserve?.handoffRemainingV777) < 1
+  ) {
+    slot.reason = "V928_NO_EXISTING_V777_HANDOFF_SLOT_AVAILABLE";
+    return null;
+  }
+
+  if (!budgetAvailable(budget, "analysis", 1)) {
+    slot.reason = "V928_REAL_BUDGET_BOUNDARY_BLOCKED";
+    return false;
+  }
+
+  budget.totalUsed += 1;
+  budget.analysis.used += 1;
+
+  reserve.handoffRemainingV777 =
+    Math.max(0, safeNumber(reserve.handoffRemainingV777) - 1);
+  reserve.consumedProtectedRequests =
+    safeNumber(reserve.consumedProtectedRequests) + 1;
+  reserve.lastHandoffConsumedTypeV777 = requestType;
+  reserve.lastHandoffConsumedAtV777 = Date.now();
+
+  if (reserve.handoffRemainingV777 <= 0) {
+    reserve.handoffActiveV777 = false;
+    reserve.releasedAt = Date.now();
+    reserve.releaseReason = "V928_HIGH_PROGRESS_CONTINUATION_CONSUMED_FINAL_V777_SLOT";
+  }
+
+  slot.active = false;
+  slot.consumed = true;
+  slot.consumedAt = Date.now();
+  slot.consumedType = requestType;
+  slot.reason = "V928_EXISTING_V777_HANDOFF_SLOT_CONSUMED";
+  return true;
+}
+
 function consumeBudget(
   budget,
   phase,
   type,
   amount = 1
 ) {
+  /*
+   * V928: one high-progress (>=4/6) safe V927 background continuation may
+   * consume one already-existing V777 handoff slot before older reserve
+   * ordering can block V888. No request capacity is added.
+   */
+  const v928HighProgressContinuation =
+    consumeV928HighProgressContinuationHandoffSlot(
+      budget, phase, type, amount
+    );
+  if (v928HighProgressContinuation !== null) {
+    return v928HighProgressContinuation;
+  }
+
   /*
    * V901: one strictly-scoped exact-pool continuation may cross only the
    * exhausted analysis sub-budget while preserving real protected headroom.
@@ -109597,6 +109729,18 @@ for (
       );
 
     /*
+     * V928: if V927 selected a safe background continuation already at >=4/6,
+     * arm one permission to consume a single EXISTING V777 handoff request.
+     * This fixes internal reserve-order starvation without increasing capacity.
+     */
+    const highProgressContinuationHandoffV928 =
+      armV928HighProgressContinuationHandoffSlot(
+        budget,
+        backgroundContinuationV927,
+        productionV4TargetV772
+      );
+
+    /*
      * V901: arm one tightly-scoped continuation permission for this selected
      * V887-priority exact-pool target. It is only consumed later if the normal
      * analysis sub-budget is exhausted.
@@ -109639,6 +109783,20 @@ for (
     productionV4EnrichmentV772 = {
       ...(productionV4EnrichmentV772 || {}),
       selectionModeV813: productionV4SelectionModeV813
+    };
+
+    state.highProgressContinuationHandoffV928 = {
+      ...(budget?.analysis?.highProgressContinuationHandoffV928 || {
+        enabled:true, active:false, consumed:false, reason:"V928_NOT_ARMED"
+      }),
+      runtimeVersion: VERSION,
+      recordedAt: new Date().toISOString(),
+      hardRequestCap: safeNumber(budget?.totalLimit) || MAX_EXTERNAL_REQUESTS,
+      totalUsedAfterProduction: safeNumber(budget?.totalUsed),
+      analysisUsedAfterProduction: safeNumber(budget?.analysis?.used),
+      v777HandoffRemainingAfterProduction: safeNumber(
+        budget?.analysis?.productionV4ReserveV776?.handoffRemainingV777
+      )
     };
 
     productionV4TargetV772.productionV4EnrichmentV772 =
@@ -135133,6 +135291,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `V925 keyed continuation priority: <b>${routingV817?.continuationPriorityV925?.selected === true ? "SELECTED" : "NONE"}</b> · key <code>${escapeHtml(routingV817?.continuationPriorityV925?.key || "NONE")}</code> · progress ${fmt(routingV817?.continuationPriorityV925?.completedChunks)}/${fmt(routingV817?.continuationPriorityV925?.totalPlannedChunks)} · reason ${escapeHtml(routingV817?.continuationPriorityV925?.reason || "NONE")}`,
       `V926 background keyed continuation: <b>${routingV817?.backgroundContinuationV926?.selected === true ? "SELECTED" : "NONE"}</b> · key <code>${escapeHtml(routingV817?.backgroundContinuationV926?.key || "NONE")}</code> · progress ${fmt(routingV817?.backgroundContinuationV926?.completedChunks)}/${fmt(routingV817?.backgroundContinuationV926?.totalPlannedChunks)} · reason ${escapeHtml(routingV817?.backgroundContinuationV926?.reason || "NONE")}`,
       `V927 continuation queue: <b>${routingV817?.backgroundContinuationV927?.selected === true ? "SELECTED" : "NONE"}</b> · key <code>${escapeHtml(routingV817?.backgroundContinuationV927?.key || "NONE")}</code> · progress ${fmt(routingV817?.backgroundContinuationV927?.completedChunks)}/${fmt(routingV817?.backgroundContinuationV927?.totalPlannedChunks)} · queue ${fmt(routingV817?.backgroundContinuationV927?.queueDepth)} · audit-safety ${fmt(routingV817?.backgroundContinuationV927?.safetyRecoveredFromAudit)} · source ${escapeHtml(routingV817?.backgroundContinuationV927?.safetySource || "NONE")} · reason ${escapeHtml(routingV817?.backgroundContinuationV927?.reason || "NONE")}`,
+      `V928 high-progress handoff: <b>${state?.highProgressContinuationHandoffV928?.consumed === true ? "CONSUMED" : (state?.highProgressContinuationHandoffV928?.active === true ? "ARMED" : "NONE")}</b> · progress ${fmt(state?.highProgressContinuationHandoffV928?.completedChunks)}/${fmt(state?.highProgressContinuationHandoffV928?.totalPlannedChunks)} · key <code>${escapeHtml((state?.highProgressContinuationHandoffV928?.tokenAddress && state?.highProgressContinuationHandoffV928?.poolId) ? `${state.highProgressContinuationHandoffV928.tokenAddress}:${state.highProgressContinuationHandoffV928.poolId}` : "NONE")}</code> · reason ${escapeHtml(state?.highProgressContinuationHandoffV928?.reason || "NONE")} · V777 remaining ${fmt(state?.highProgressContinuationHandoffV928?.v777HandoffRemainingAfterProduction)} · cap ${fmt(state?.highProgressContinuationHandoffV928?.hardRequestCap)}`,
       `Rescue eligible now: <b>${fmt(routingV817.rescueEligibleCountEvenIfNormalSelected)}</b> · ranked: <b>${fmt(routingV817.rankedCandidateCount)}</b> · normal displaced rescue: <b>${routingV817.normalTargetDisplacedRescue ? "YES" : "NO"}</b>`,
       `Gates — candidates:${fmt(g.totalCandidates)} · ERC20:${fmt(g.validERC20)} · riskOK:${fmt(g.riskAcceptable)} · zeroSwaps:${fmt(g.zeroObservedSwaps)} · noExactPool:${fmt(g.noKnownExactPool)} · analysedEvidence:${fmt(g.analysedFallbackEvidence)} · rescueEligible:${fmt(g.rescueEligible)}`,
       `Budget at selection — total ${fmt(b.totalUsed)}/${fmt(b.totalLimit)} · analysis ${fmt(b.analysisUsed)}/${fmt(b.analysisLimit)} · can fund 3: <b>${b.canFundThreeAnalysisRequests ? "YES" : "NO"}</b>`,
