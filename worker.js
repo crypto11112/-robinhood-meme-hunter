@@ -1619,6 +1619,11 @@
 
 /**
  * Robinhood Chain Meme Hunter
+ * V954
+ * - full Blockscout authenticated-request accounting audit/fix
+ * - meters V841 token-indexed Blockscout Pro log requests that previously bypassed V611
+ * - preserves all V953 holder routing, scoring, risk, Telegram and provider behavior
+ *
  * V953
  * - promotes the already-proven V704 GoldRush holder endpoint as the guarded production fallback during a confirmed same-run Blockscout holder outage for the current qualification owner / priority candidate;
  * - preserves the existing one-GoldRush-holder-request-per-scan guard, V709 credit guard, all holder-integrity/exclusion logic, legacy Blockscout/Bitquery paths, scoring, risk thresholds and Telegram qualification;
@@ -8375,7 +8380,7 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
-const VERSION = "V953";
+const VERSION = "V954";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -21805,7 +21810,8 @@ function blockscoutProUsageTelegramMessageV611(state,fallbackV615=null){
     "",
     `Pre-V611 usage: <b>DATA UNVERIFIED</b>`,
     `Actual account-wide usage: <b>DATA UNVERIFIED</b>`,
-    "<i>Bot-side forward-only estimate. Blockscout Dev Portal remains authoritative. /blockscoutusage makes no external provider request and does not mutate meter state; it also reads the V3 fallback singleton meter internally.</i>"
+    `V954 accounting coverage: <b>AUTHENTICATED V841 TOKEN-INDEXED LOG CALLS NOW METERED</b>`,
+    "<i>Bot-side forward-only estimate. Blockscout Dev Portal remains authoritative. V954 closes a confirmed V841 authenticated-request accounting gap; older/pre-V954 usage cannot be backfilled. /blockscoutusage makes no external provider request and does not mutate meter state; it also reads the V3 fallback singleton meter internally.</i>"
   );
 
   return lines.join("\n");
@@ -128474,7 +128480,18 @@ async function manualBlockscoutProTokenIndexedV4V841(env,budget,state,watched,ca
     base.requestsUsed++;base.attempted=true;
     const params=new URLSearchParams({chainid:String(BLOCKSCOUT_PRO_CHAIN_ID),module:"logs",action:"getLogs",fromBlock:"0",toBlock:"latest",address:normalize(POOL_MANAGER),topic0:INITIALIZE_TOPIC,[`topic${topicNumber}`]:topicToken,[`topic0_${topicNumber}_opr`]:"and",apikey:apiKey});
     try {
+      /* V954: this authenticated Blockscout Pro request previously bypassed the
+       * V611 account-side credit meter entirely. Count each actual V841 HTTP
+       * request at the standard Blockscout credit cost before fetch, then bind
+       * its HTTP status back to the same endpoint row. */
+      const usageEndpointV954=`V841_TOKEN_INDEXED_${label}_INITIALIZE`;
+      recordBlockscoutProUsageV611(
+        state,
+        usageEndpointV954,
+        BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
+      );
       const response=await fetch(`${BLOCKSCOUT_PRO}/v2/api?${params.toString()}`,{headers:{accept:"application/json"}});
+      updateBlockscoutProHttpStatusV611(state,usageEndpointV954,response.status);
       base.httpStatuses.push(`${label}:${response.status}`);
       let payload=null;try{payload=await response.json();}catch(_){}
       if(!response.ok){const msg=String(payload?.message||payload?.result||`HTTP_${response.status}`).slice(0,220);base.errors.push(`${label}:${msg}`);return {ok:false,error:msg,rows:[]};}
