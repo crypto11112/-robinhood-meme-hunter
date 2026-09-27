@@ -8363,8 +8363,8 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V943";
-/* V943: diagnostic-only ownership denominator + risk-class handoff trace.
+const VERSION = "V944";
+/* V944: persists the exact ownership denominator at the NO_POSITIVE_OWNERSHIP_SUPPLY decision point; preserves V943 audit semantics.
  * Adds forward-only totalSupply/infrastructure/ownershipSupply capture and
  * /ownershipaudit without changing holder verification, risk rules, scoring,
  * qualification, Telegram thresholds, request budgets, or provider routing. */
@@ -71314,6 +71314,34 @@ async function holderIntelligence(
         "NO_POSITIVE_OWNERSHIP_SUPPLY"
       ),
 
+      // V944: retain the exact denominator inputs at the early-return point.
+      // These values were already calculated above; this adds no request and
+      // does not alter holder/risk verification.
+      integrity: {
+        verified: false,
+        status: "NO_POSITIVE_OWNERSHIP_SUPPLY",
+        impossibleBalanceCount: 0,
+        percentageSum: null,
+        supply: supply.toString(),
+        ownershipSupply: ownershipSupply.toString(),
+        infrastructureBalanceSum: infrastructureBalanceSum.toString(),
+        infrastructureRows: prepared.filter(h => Boolean(h.infrastructureReason)).length,
+        topHolderBalanceSum: null,
+        ownershipConcentrationBasis: "TOTAL_SUPPLY_MINUS_VERIFIED_INFRASTRUCTURE_V944"
+      },
+
+      denominatorDecisionV944: {
+        capturedAt: Date.now(),
+        totalSupply: supply.toString(),
+        infrastructureBalanceSum: infrastructureBalanceSum.toString(),
+        ownershipSupply: ownershipSupply.toString(),
+        preparedHolderRows: prepared.length,
+        infrastructureRows: prepared.filter(h => Boolean(h.infrastructureReason)).length,
+        positiveNonInfrastructureRawRows: prepared.filter(h => !h.infrastructureReason && h.valueBig > 0n).length,
+        failureCondition: "OWNERSHIP_SUPPLY_LE_ZERO",
+        integrityStatus: "NO_POSITIVE_OWNERSHIP_SUPPLY"
+      },
+
       verified:
         countersVerified,
 
@@ -108533,24 +108561,42 @@ for (
           // produced by the holder-integrity engine; copying them here adds
           // no provider request and does not alter verification.
           denominatorV943: {
+            // V944 prefers the exact early-return snapshot when present.
+            capturedAt:
+              safeNumber(holdersV656?.denominatorDecisionV944?.capturedAt) || null,
             totalSupply:
+              holdersV656?.denominatorDecisionV944?.totalSupply ??
+              holderIntegrityV656?.supply ??
               candidate?.validation?.totalSupply ??
               watched?.metadata?.totalSupply ??
               null,
             ownershipSupply:
+              holdersV656?.denominatorDecisionV944?.ownershipSupply ??
               holderIntegrityV656?.ownershipSupply ?? null,
             infrastructureBalanceSum:
+              holdersV656?.denominatorDecisionV944?.infrastructureBalanceSum ??
               holderIntegrityV656?.infrastructureBalanceSum ?? null,
             infrastructureRows:
-              Number.isFinite(Number(holderIntegrityV656?.infrastructureRows))
-                ? Number(holderIntegrityV656.infrastructureRows)
-                : null,
+              Number.isFinite(Number(holdersV656?.denominatorDecisionV944?.infrastructureRows))
+                ? Number(holdersV656.denominatorDecisionV944.infrastructureRows)
+                : (Number.isFinite(Number(holderIntegrityV656?.infrastructureRows))
+                    ? Number(holderIntegrityV656.infrastructureRows)
+                    : null),
             ownershipConcentrationBasis:
-              holderIntegrityV656?.ownershipConcentrationBasis || null,
+              holderIntegrityV656?.ownershipConcentrationBasis ||
+              (holdersV656?.denominatorDecisionV944 ? "TOTAL_SUPPLY_MINUS_VERIFIED_INFRASTRUCTURE_V944" : null),
             positiveHolderRows:
-              Number.isFinite(Number(holdersV656?.positiveHolderRows))
-                ? Number(holdersV656.positiveHolderRows)
+              Number.isFinite(Number(holdersV656?.denominatorDecisionV944?.positiveNonInfrastructureRawRows))
+                ? Number(holdersV656.denominatorDecisionV944.positiveNonInfrastructureRawRows)
+                : (Number.isFinite(Number(holdersV656?.positiveHolderRows))
+                    ? Number(holdersV656.positiveHolderRows)
+                    : null),
+            preparedHolderRows:
+              Number.isFinite(Number(holdersV656?.denominatorDecisionV944?.preparedHolderRows))
+                ? Number(holdersV656.denominatorDecisionV944.preparedHolderRows)
                 : null,
+            failureCondition:
+              holdersV656?.denominatorDecisionV944?.failureCondition || null,
             integrityVerified:
               holderIntegrityV656?.verified === true,
             integrityStatus:
@@ -169368,9 +169414,9 @@ function ownershipRiskAuditV943(state) {
   }
 
   return {
-    version: "V943",
+    version: "V944",
     runtimeVersion: VERSION,
-    source: "QUALIFICATION_AUDIT_PLUS_FORWARD_DENOMINATOR_TRACE_V943",
+    source: "QUALIFICATION_AUDIT_PLUS_EXACT_DENOMINATOR_DECISION_V944",
     recordedAt: new Date().toISOString(),
     rowsAnalysed: rows.length,
     forwardDenominatorTraceRows: rows.filter(r => !!r.denominator).length,
@@ -169397,7 +169443,7 @@ function ownershipRiskMessageV943(state) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const yn = v => v === true ? "YES" : "NO";
   const lines = [
-    "🧮 <b>Ownership Denominator / Risk-Class Audit — V943</b>", "",
+    "🧮 <b>Ownership Denominator / Risk-Class Audit — V944</b>", "",
     `Source: <b>${escapeHtml(d.source)}</b>`,
     `Rows analysed: <b>${fmt(d.rowsAnalysed)}</b> · forward V943 denominator traces <b>${fmt(d.forwardDenominatorTraceRows)}</b>`,
     `NO_POSITIVE_OWNERSHIP_SUPPLY: <b>${fmt(d.noPositiveOwnershipSupplyRows)}</b> · NO_POSITIVE_OWNERSHIP_BALANCES: <b>${fmt(d.noPositiveOwnershipBalancesRows)}</b>`,
@@ -169430,11 +169476,11 @@ function ownershipRiskMessageV943(state) {
     }
   }
   if (!d.forwardDenominatorTraceRows) {
-    lines.push("", "⏳ V943 denominator fields are forward-only. Complete one V943 live scan to populate totalSupply / infrastructure / ownership-supply detail for newly analysed candidates.");
+    lines.push("", "⏳ V944 captures denominator inputs at the exact NO_POSITIVE_OWNERSHIP_SUPPLY decision point. Complete one V944 live scan for newly analysed affected candidates.");
   }
   lines.push(
     "",
-    "<i>Important: V943 distinguishes 'market verified and live swaps still needed' from the stronger case where both risk classes are already verified. It does not weaken holder-integrity protections.</i>",
+    "<i>Important: V944 preserves V943 risk-class separation and captures the exact denominator decision without weakening holder-integrity protections. V943 distinguished 'market verified and live swaps still needed' from the stronger case where both risk classes are already verified. It does not weaken holder-integrity protections.</i>",
     "<i>Read-only command: zero provider requests, zero state writes, no holder/risk/scoring/qualification/Telegram-threshold changes.</i>"
   );
   return lines.join("\n");
