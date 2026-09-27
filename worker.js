@@ -1,4 +1,22 @@
 /**
+ * V911 EARLY PRODUCTION-V4 HEADROOM RESERVATION FIX:
+ * - builds directly from deployed V910;
+ * - fixes the V910-proven ordering failure where a verified current-live launch
+ *   reached V772 only after the scan had already consumed the three requests
+ *   needed for exact V4 PoolId recovery;
+ * - provisionally protects the EXISTING V772 three-request envelope before the
+ *   candidate-analysis loop whenever at least one current-live verified launch
+ *   is already present in that loop;
+ * - the reservation changes request ordering only: it does not increase the
+ *   48-request global ceiling, analysis ceiling, provider quota, Telegram
+ *   reserve, scoring, risk gates, Momentum, qualification or thresholds;
+ * - if no production target survives analysis, the provisional envelope is
+ *   released so later spare-capacity work is not permanently blocked;
+ * - if a production target survives, the existing V777 handoff gives those
+ *   already-protected slots to the normal V772 exact-identity path;
+ * - preserves V904/V906/V907/V908/V909/V910 behavior.
+ */
+/**
  * V910 CURRENT-LIVE IDENTITY-SOURCE DIAGNOSTIC — READ ONLY:
  * - builds directly from deployed V909;
  * - answers why a current-live production target can have strong launch/activity
@@ -8047,7 +8065,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V910";
+const VERSION = "V911";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -14907,6 +14925,102 @@ function activateProductionV4ReserveV776(budget, candidate, currentLiveVerifiedL
   reserve.releasedAt = null;
   reserve.releaseReason = null;
   return reserve;
+}
+
+
+/* =========================================================
+   V911 PROVISIONAL PRE-ANALYSIS V772 RESERVATION
+   ========================================================= */
+function activatePreAnalysisProductionV4ReserveV911(
+  budget,
+  analysisQueue,
+  currentLiveVerifiedLaunchTokensV621
+) {
+  const reserve = ensureProductionV4ReserveV776(budget);
+  if (!reserve) return null;
+
+  const queue = Array.isArray(analysisQueue) ? analysisQueue : [];
+  const currentLiveQueued = queue
+    .map(row => normalize(row?.address))
+    .filter(address =>
+      isAddress(address) &&
+      currentLiveVerifiedLaunchTokensV621?.has(address) === true
+    );
+
+  reserve.preAnalysisV911 = {
+    enabled: true,
+    considered: true,
+    currentLiveQueued: currentLiveQueued.length,
+    currentLiveAddresses: currentLiveQueued.slice(0, 8),
+    activated: false,
+    reason: null,
+    totalUsedAtDecision: safeNumber(budget?.totalUsed),
+    analysisUsedAtDecision: safeNumber(budget?.analysis?.used),
+    reservedRequests: safeNumber(reserve?.reservedRequests)
+  };
+
+  if (reserve.active === true) {
+    reserve.preAnalysisV911.activated = true;
+    reserve.preAnalysisV911.reason = "EXISTING_V776_RESERVE_ALREADY_ACTIVE";
+    reserve.preAnalysisV911.reservedRequests =
+      safeNumber(reserve?.reservedRequests);
+    return reserve;
+  }
+
+  if (!currentLiveQueued.length) {
+    reserve.preAnalysisV911.reason =
+      "NO_CURRENT_LIVE_VERIFIED_LAUNCH_IN_ANALYSIS_QUEUE_V911";
+    return reserve;
+  }
+
+  if (!budgetAvailable(budget, "analysis", 3)) {
+    reserve.preAnalysisV911.reason =
+      "THREE_REQUEST_HEADROOM_ALREADY_UNAVAILABLE_BEFORE_ANALYSIS_V911";
+    return reserve;
+  }
+
+  reserve.active = true;
+  reserve.reservedRequests = 3;
+  reserve.activatedAt = Date.now();
+  reserve.firstEligibleAddress = currentLiveQueued[0] || null;
+  reserve.activationReason =
+    "PRE_ANALYSIS_CURRENT_LIVE_V772_HEADROOM_V911";
+  reserve.releasedAt = null;
+  reserve.releaseReason = null;
+
+  reserve.preAnalysisV911.activated = true;
+  reserve.preAnalysisV911.reason =
+    "PROTECTED_THREE_EXISTING_REQUESTS_BEFORE_ANALYSIS_V911";
+  reserve.preAnalysisV911.reservedRequests = 3;
+
+  return reserve;
+}
+
+function releaseUnusedPreAnalysisProductionV4ReserveV911(
+  budget,
+  reason = "NO_PRODUCTION_TARGET_AFTER_ANALYSIS_V911"
+) {
+  const reserve = budget?.analysis?.productionV4ReserveV776;
+  if (
+    !reserve ||
+    reserve.active !== true ||
+    reserve.activationReason !==
+      "PRE_ANALYSIS_CURRENT_LIVE_V772_HEADROOM_V911"
+  ) {
+    return false;
+  }
+
+  reserve.active = false;
+  reserve.releasedAt = Date.now();
+  reserve.releaseReason = reason;
+  reserve.reservedRequests = 0;
+
+  if (reserve.preAnalysisV911 && typeof reserve.preAnalysisV911 === "object") {
+    reserve.preAnalysisV911.releasedUnused = true;
+    reserve.preAnalysisV911.releaseReason = reason;
+  }
+
+  return true;
 }
 
 function productionV4ReserveDecisionV776(budget, phase, type, amount=1) {
@@ -102852,6 +102966,13 @@ for (
       v135AnalysisQueue.length > 0
     );
 
+  const v911PreAnalysisProductionV4Reserve =
+    activatePreAnalysisProductionV4ReserveV911(
+      budget,
+      v135AnalysisQueue,
+      currentLiveVerifiedLaunchTokensV621
+    );
+
   scannerFunnelV415.freshCandidatePriorityV469
     .currentLiveVerifiedLaunchPriorityV621
     .erc20IdentityReserveV653 = {
@@ -102942,6 +103063,41 @@ for (
       reservedRequests: safeNumber(v728EvidenceCompletionReserve?.reservedRequests),
       flowReservedRequestsV822: safeNumber(v728EvidenceCompletionReserve?.flowReservedRequestsV822),
       foundationReservedRequestsV822: safeNumber(v728EvidenceCompletionReserve?.foundationReservedRequestsV822),
+      hardRequestLimitRaised: false,
+      analysisLimitRaised: false,
+      notificationReserveChanged: false
+    };
+
+  scannerFunnelV415.freshCandidatePriorityV469
+    .currentLiveVerifiedLaunchPriorityV621
+    .productionV4PreAnalysisReserveV911 = {
+      enabled: true,
+      activated:
+        v911PreAnalysisProductionV4Reserve
+          ?.preAnalysisV911?.activated === true,
+      reason:
+        v911PreAnalysisProductionV4Reserve
+          ?.preAnalysisV911?.reason || null,
+      currentLiveQueued:
+        safeNumber(
+          v911PreAnalysisProductionV4Reserve
+            ?.preAnalysisV911?.currentLiveQueued
+        ),
+      reservedRequests:
+        safeNumber(
+          v911PreAnalysisProductionV4Reserve
+            ?.preAnalysisV911?.reservedRequests
+        ),
+      totalUsedAtDecision:
+        safeNumber(
+          v911PreAnalysisProductionV4Reserve
+            ?.preAnalysisV911?.totalUsedAtDecision
+        ),
+      analysisUsedAtDecision:
+        safeNumber(
+          v911PreAnalysisProductionV4Reserve
+            ?.preAnalysisV911?.analysisUsedAtDecision
+        ),
       hardRequestLimitRaised: false,
       analysisLimitRaised: false,
       notificationReserveChanged: false
@@ -105646,6 +105802,14 @@ for (
           )
       : [];
 
+  const v911UnusedPreAnalysisReserveReleased =
+    !productionV4TargetV772
+      ? releaseUnusedPreAnalysisProductionV4ReserveV911(
+          budget,
+          "NO_PRODUCTION_TARGET_AFTER_ANALYSIS_V911"
+        )
+      : false;
+
   const preV891TargetV908 =
     activeGecko429CooldownPreV891V908
       ? (
@@ -106237,6 +106401,25 @@ for (
       reservedRequests: safeNumber(v254FirstRequestReserveV807?.reservedRequests),
       blockedRequests: safeNumber(v254FirstRequestReserveV807?.blockedRequests),
       consumed: v254FirstRequestReserveV807?.consumed === true
+    },
+    preAnalysisProductionV4ReserveV911: {
+      ...(budget?.analysis?.productionV4ReserveV776?.preAnalysisV911 || {}),
+      activeAtPersistence:
+        budget?.analysis?.productionV4ReserveV776?.active === true,
+      reservedRequestsAtPersistence:
+        safeNumber(
+          budget?.analysis?.productionV4ReserveV776?.reservedRequests
+        ),
+      handoffActiveV777:
+        budget?.analysis?.productionV4ReserveV776
+          ?.handoffActiveV777 === true,
+      handoffRemainingV777:
+        safeNumber(
+          budget?.analysis?.productionV4ReserveV776
+            ?.handoffRemainingV777
+        ),
+      unusedReleased:
+        v911UnusedPreAnalysisReserveReleased === true
     },
     exactPoolContinuationSlotV901: {
       ...(budget?.analysis?.exactPoolContinuationSlotV901 || {}),
@@ -131032,7 +131215,8 @@ function evidenceAuditTelegramMessageV727(state) {
       `Normal / rescue / selected: <code>${escapeHtml(routingV817.normalTarget || "NONE")}</code> / <code>${escapeHtml(routingV817.rescueTarget || "NONE")}</code> / <code>${escapeHtml(routingV817.selectedTarget || "NONE")}</code>`,
       `Rescue eligible now: <b>${fmt(routingV817.rescueEligibleCountEvenIfNormalSelected)}</b> · ranked: <b>${fmt(routingV817.rankedCandidateCount)}</b> · normal displaced rescue: <b>${routingV817.normalTargetDisplacedRescue ? "YES" : "NO"}</b>`,
       `Gates — candidates:${fmt(g.totalCandidates)} · ERC20:${fmt(g.validERC20)} · riskOK:${fmt(g.riskAcceptable)} · zeroSwaps:${fmt(g.zeroObservedSwaps)} · noExactPool:${fmt(g.noKnownExactPool)} · analysedEvidence:${fmt(g.analysedFallbackEvidence)} · rescueEligible:${fmt(g.rescueEligible)}`,
-      `Budget at selection — total ${fmt(b.totalUsed)}/${fmt(b.totalLimit)} · analysis ${fmt(b.analysisUsed)}/${fmt(b.analysisLimit)} · can fund 3: <b>${b.canFundThreeAnalysisRequests ? "YES" : "NO"}</b>`
+      `Budget at selection — total ${fmt(b.totalUsed)}/${fmt(b.totalLimit)} · analysis ${fmt(b.analysisUsed)}/${fmt(b.analysisLimit)} · can fund 3: <b>${b.canFundThreeAnalysisRequests ? "YES" : "NO"}</b>`,
+      `V911 pre-analysis V772 reserve — activated <b>${state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.activated ? "YES" : "NO"}</b> · reason ${escapeHtml(state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.reason || "NONE")} · current-live queued ${fmt(state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.currentLiveQueued)} · reserved ${fmt(state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.reservedRequests)} · handoff remaining ${fmt(state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.handoffRemainingV777)} · unused released ${state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.unusedReleased ? "YES" : "NO"}`
     );
     for (const row of Array.isArray(routingV817.topRanked) ? routingV817.topRanked : []) {
       lines.push(
