@@ -1,4 +1,19 @@
 /**
+ * V920 PONS FRESH-LAUNCH TARGET PRIORITY:
+ * - builds directly from deployed V919;
+ * - keeps V919 RECENT_LIVE + BACKGROUND_HISTORY lanes unchanged;
+ * - changes only eligible Pons target ordering;
+ * - among otherwise eligible pre-graduation Pons V2 candidates, prioritises:
+ *     1) candidates without already-verified Pons flow,
+ *     2) the highest strictly verified Pons launch block (freshest launch),
+ *     3) existing analysisPriority as the final tie-breaker;
+ * - does not infer activity from token names, stale market data, or unverified age;
+ * - adds selection telemetry so /evidenceaudit shows how many eligible targets
+ *   existed and the selected verified launch block / age in blocks;
+ * - no provider, request ceiling, risk gate, scoring, qualification, Momentum,
+ *   Telegram threshold, decoder, USD conversion, or V918/V919 lane change.
+ */
+/**
  * V919 PONS LIVE-FIRST + BACKGROUND HISTORY:
  * - builds directly from deployed V918;
  * - keeps the proven V916 decoder/USD verification and V918 resumable history;
@@ -8184,7 +8199,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V919";
+const VERSION = "V920";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -78516,7 +78531,12 @@ async function runDirectPonsCurveFlowV916(
     liveToBlockV919: null,
     liveLastScannedHeadV919: null,
     liveRefreshDueV919: false,
-    liveRefreshIntervalBlocksV919: 300
+    liveRefreshIntervalBlocksV919: 300,
+    eligibleTargetsV920: 0,
+    selectionLaunchBlockV920: null,
+    selectionLaunchAgeBlocksV920: null,
+    selectionPolicyV920:
+      "UNVERIFIED_FLOW_FIRST_THEN_FRESHEST_VERIFIED_PONS_LAUNCH_BLOCK"
   };
 
   const ranked =
@@ -78606,6 +78626,12 @@ async function runDirectPonsCurveFlowV916(
             b?.existingFlow?.verified === true
           ) ||
           safeNumber(
+            b?.meta?.launchBlock
+          ) -
+          safeNumber(
+            a?.meta?.launchBlock
+          ) ||
+          safeNumber(
             b?.candidate
               ?.analysisPriority
           ) -
@@ -78618,9 +78644,17 @@ async function runDirectPonsCurveFlowV916(
   const selected =
     ranked[0] || null;
 
+  base.eligibleTargetsV920 =
+    ranked.length;
+
   if (!selected) {
     return base;
   }
+
+  base.selectionLaunchBlockV920 =
+    safeNumber(
+      selected?.meta?.launchBlock
+    ) || null;
 
   const candidate =
     selected.candidate;
@@ -78665,6 +78699,17 @@ async function runDirectPonsCurveFlowV916(
     safeNumber(
       latestNumber
     );
+
+  if (head > 0) {
+    base.selectionLaunchAgeBlocksV920 =
+      base.selectionLaunchBlockV920
+        ? Math.max(
+            0,
+            head -
+              base.selectionLaunchBlockV920
+          )
+        : null;
+  }
 
   if (!(head > 0)) {
     return {
@@ -133607,6 +133652,7 @@ function evidenceAuditTelegramMessageV727(state) {
       "🧬 <b>Direct on-chain Pons V2 curve flow — V916</b>",
       `Recorded: <code>${escapeHtml(ponsDirectV916.recordedAt || "UNVERIFIED")}</code>`,
       `Target: <code>${escapeHtml(ponsDirectV916.tokenAddress || "NONE")}</code> ${escapeHtml(ponsDirectV916.symbol || "")} · curve <code>${escapeHtml(ponsDirectV916.curve || "NONE")}</code>`,
+      `V920 selection — eligible ${fmt(ponsDirectV916.eligibleTargetsV920)} · verified launch block ${fmt(ponsDirectV916.selectionLaunchBlockV920)} · launch age ${fmt(ponsDirectV916.selectionLaunchAgeBlocksV920)} blocks · ${escapeHtml(ponsDirectV916.selectionPolicyV920 || "NONE")}`,
       `Pair token: <code>${escapeHtml(ponsDirectV916.pairToken || "NONE")}</code> · USD basis <b>${escapeHtml(ponsDirectV916.quoteUsdBasis || "NONE")}</b>`,
       `RPC window: ${fmt(ponsDirectV916.fromBlock)} → ${fmt(ponsDirectV916.toBlock)} · provider <b>${escapeHtml(ponsDirectV916.provider || "NONE")}</b> · requests ${fmt(ponsDirectV916.requestsUsed)}`,
       `Curve logs: ${fmt(ponsDirectV916.logsReturned)} · decoded ${fmt(ponsDirectV916.decodedTrades)} · verified USD ${fmt(ponsDirectV916.verifiedUsdTrades)} · persisted new ${fmt(ponsDirectV916.persistedNewTrades)}`,
