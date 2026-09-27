@@ -1,4 +1,16 @@
 /**
+ * V907 AUTHORITATIVE MOMENTUM DIAGNOSTIC ALIGNMENT — READ ONLY:
+ * - builds directly from deployed V906;
+ * - fixes stale V902/V904 Momentum telemetry that deliberately retained an old
+ *   zero-Momentum case even after a newer authoritative verified-V212 recompute;
+ * - whenever the existing verified-V212 recompute runs, the persisted Momentum
+ *   handoff diagnostic is replaced by that SAME candidate's fresh diagnostic;
+ * - therefore /evidenceaudit Momentum telemetry and last post-recovery scoring
+ *   follow the same authoritative verified-flow loop and timestamp progression;
+ * - zero provider/RPC requests, zero scoring/Momentum/risk/Telegram/qualification
+ *   changes, zero request-budget changes, and no candidate-selection changes.
+ */
+/**
  * V906 CANONICAL PRODUCTION V4 EXACT-POOL HANDOFF:
  * - builds directly from deployed V905;
  * - fixes the V905-proven multi-pool handoff gap where production V4 can prove
@@ -7986,7 +7998,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V906";
+const VERSION = "V907";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -107765,17 +107777,28 @@ for (
         const auditStateV902 =
           ensureQualificationAuditV663(state);
 
-        const priorDiagV902 =
-          auditStateV902.lastMomentumHandoffDiagnosticV902 || null;
-
-        if (
-          !priorDiagV902 ||
-          safeNumber(momentumDiagV902?.finalMomentum?.score) <= 0 ||
-          safeNumber(priorDiagV902?.finalMomentum?.score) > 0
-        ) {
-          auditStateV902.lastMomentumHandoffDiagnosticV902 =
-            momentumDiagV902;
-        }
+        /*
+         * V907: this diagnostic must describe the same latest authoritative
+         * verified-V212 candidate that the post-recovery scoring snapshot will
+         * record below. V902 intentionally preferred retaining zero-Momentum
+         * examples for debugging, but that made /evidenceaudit stale once the
+         * pipeline began producing newer nonzero Momentum candidates.
+         *
+         * Always replace with the current verified-flow recompute. This is
+         * telemetry only; the candidate and all score objects are untouched.
+         */
+        auditStateV902.lastMomentumHandoffDiagnosticV902 =
+          {
+            ...momentumDiagV902,
+            telemetryAlignmentV907: {
+              alignedToLatestVerifiedV212Recompute: true,
+              runtimeVersion: VERSION,
+              candidateAddress:
+                normalize(candidate?.address) || null,
+              recordedAt:
+                momentumDiagV902?.recordedAt || new Date().toISOString()
+            }
+          };
       }
 
 
@@ -129987,8 +130010,9 @@ function evidenceAuditTelegramMessageV727(state) {
         : "UNVERIFIED";
 
     lines.push(
-      `🧠 <b>Momentum handoff diagnostic — V902/V903/V904</b>`,
+      `🧠 <b>Momentum handoff diagnostic — V902/V903/V904/V907</b>`,
       `Recorded: <code>${escapeHtml(momentumDiagV902.recordedAt || "UNVERIFIED")}</code>`,
+      `V907 latest-authoritative alignment: <b>${momentumDiagV902?.telemetryAlignmentV907?.alignedToLatestVerifiedV212Recompute ? "YES" : "NO"}</b>`,
       `Candidate: <code>${escapeHtml(momentumDiagV902.token || "NONE")}</code> ${escapeHtml(momentumDiagV902.symbol || "")}`,
       `V212 verified: <b>${momentumDiagV902?.v212?.verified ? "YES" : "NO"}</b> · records <b>${fmt(momentumDiagV902?.v212?.recordCount)}</b> · pools <b>${fmt(momentumDiagV902?.v212?.poolCount)}</b>`,
       `V212 5m: verified ${m5v902?.verified ? "YES" : "NO"} · trades ${fmt(m5v902?.observedTrades)} · buys/sells ${fmt(m5v902?.buys)}/${fmt(m5v902?.sells)} · buy pressure ${pressureV902(m5v902)}`,
