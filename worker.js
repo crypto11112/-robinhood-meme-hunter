@@ -8363,7 +8363,12 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V945";
+const VERSION = "V946";
+/* V946: removes the watched-state dependency from the targeted denominator replay.
+ * Old retained failures can be replayed from their address: totalSupply is freshly
+ * verified by direct ERC-20 eth_call and the existing holder pipeline is then run
+ * on a synthetic cloned watched token. Zero persistent writes.
+ */
 /* V945: adds a targeted, non-persistent ownership-denominator replay.
  * /denominatorreplay [token] reruns the existing holder pipeline on cloned
  * state with a strict six-request diagnostic ceiling, exposing the actual
@@ -169398,69 +169403,116 @@ async function denominatorReplayV945(state, env, argument = "") {
   const selected = denominatorReplayTargetV945(state, argument);
   if (!selected) {
     return {
-      version: "V945", status: "NO_RETAINED_NO_POSITIVE_OWNERSHIP_SUPPLY_TARGET",
-      externalRequestsUsed: 0, stateWrites: 0
-    };
-  }
-  const address = normalize(selected?.address);
-  const stateClone = clonePlainV945(state);
-  const watched = stateClone?.watchedTokens?.find(t => normalize(t?.address) === address) || null;
-  if (!watched) {
-    return {
-      version: "V945", status: "TARGET_NOT_PRESENT_IN_WATCHED_STATE",
-      address, symbol: selected?.symbol || null,
-      retainedHolderStatus: selected?.holderStatus || null,
+      version: "V946", status: "NO_RETAINED_NO_POSITIVE_OWNERSHIP_SUPPLY_TARGET",
       externalRequestsUsed: 0, stateWrites: 0
     };
   }
 
-  const totalSupply =
+  const address = normalize(selected?.address);
+  const stateClone = clonePlainV945(state) || {};
+  let watched = stateClone?.watchedTokens?.find(t => normalize(t?.address) === address) || null;
+  const budget = denominatorReplayBudgetV945();
+  // V946 allows two identity reads plus the existing bounded holder replay.
+  budget.totalLimit = 8;
+  budget.analysis.limit = 8;
+
+  let syntheticWatchedV946 = false;
+  if (!watched) {
+    syntheticWatchedV946 = true;
+    watched = {
+      address,
+      token: address,
+      metadata: {
+        address,
+        name: selected?.name || null,
+        symbol: selected?.symbol || null,
+        decimals: null,
+        totalSupply: null
+      },
+      pools: [],
+      discoverySource: "RETAINED_QUALIFICATION_ROW_V946",
+      firstSeenAt: safeNumber(selected?.firstEvaluatedAt) || Date.now(),
+      lastSeenAt: Date.now()
+    };
+    if (!Array.isArray(stateClone.watchedTokens)) stateClone.watchedTokens = [];
+    stateClone.watchedTokens.push(watched);
+  }
+
+  let totalSupply =
     watched?.metadata?.totalSupply ??
     watched?.validationCache?.data?.totalSupply ??
     watched?.validation?.totalSupply ?? null;
-  const decimals =
+  let decimals =
     watched?.metadata?.decimals ??
     watched?.validationCache?.data?.decimals ??
     watched?.validation?.decimals ?? null;
-  const market = watched?.marketCache?.data && typeof watched.marketCache.data === "object"
-    ? watched.marketCache.data
-    : null;
+
+  const identityReadsV946 = [];
+  if (!totalSupply) {
+    try {
+      const probe = await erc20ProbeV418(env, address, "0x18160ddd", "totalSupply", budget);
+      identityReadsV946.push({ method: "totalSupply", ok: probe?.ok === true, provider: probe?.provider || null, error: probe?.error || null });
+      if (probe?.ok === true) {
+        const decoded = decodeErc20ProbeValueV419("totalSupply", probe.raw);
+        if (decoded?.verified === true && decoded?.value !== null && decoded?.value !== undefined) {
+          totalSupply = decoded.value;
+          watched.metadata.totalSupply = decoded.value;
+        }
+      }
+    } catch (e) {
+      identityReadsV946.push({ method: "totalSupply", ok: false, provider: null, error: errorString(e) });
+    }
+  }
+  if (decimals === null || decimals === undefined) {
+    try {
+      const probe = await erc20ProbeV418(env, address, "0x313ce567", "decimals", budget);
+      identityReadsV946.push({ method: "decimals", ok: probe?.ok === true, provider: probe?.provider || null, error: probe?.error || null });
+      if (probe?.ok === true) {
+        const decoded = decodeErc20ProbeValueV419("decimals", probe.raw);
+        if (decoded?.verified === true) {
+          decimals = decoded.value;
+          watched.metadata.decimals = decoded.value;
+        }
+      }
+    } catch (e) {
+      identityReadsV946.push({ method: "decimals", ok: false, provider: null, error: errorString(e) });
+    }
+  }
 
   const previousPartial = watched?.partialHolderCacheV149?.data || null;
   const previousDecision = previousPartial?.denominatorDecisionV944 || null;
 
   if (!totalSupply) {
     return {
-      version: "V945", status: "REPLAY_BLOCKED_TOTAL_SUPPLY_NOT_RETAINED",
+      version: "V946", status: "DIRECT_REPLAY_TOTAL_SUPPLY_UNVERIFIED",
       address, symbol: selected?.symbol || watched?.metadata?.symbol || null,
       retainedHolderStatus: selected?.holderStatus || null,
-      previousDecision,
-      externalRequestsUsed: 0, stateWrites: 0
+      syntheticWatchedV946, identityReadsV946,
+      externalRequestsUsed: safeNumber(budget?.totalUsed), stateWrites: 0,
+      requestBudget: requestBudgetSnapshotV264(budget)
     };
   }
 
-  // Force the cloned replay to evaluate the current holder pipeline, while
-  // leaving the real persistent watched token untouched.
+  // Force only the cloned/synthetic token through current holder discovery.
   delete watched.partialHolderCacheV149;
   delete watched.holderCache;
   delete watched.holderIntegrityQuarantineV162;
   delete watched.holderIndexLagV422;
 
-  const budget = denominatorReplayBudgetV945();
+  const marketCandidatesV946 = [
+    watched?.marketCache?.data,
+    selected?.market,
+    selected?.marketSnapshot,
+    selected?.evidenceCompletionAuditV727?.market
+  ];
+  const market = marketCandidatesV946.find(x => x && typeof x === "object") || null;
+
   let result = null;
   let error = null;
   try {
     result = await holderIntelligence(
-      address,
-      totalSupply,
-      budget,
-      watched,
-      market,
-      true,
-      env,
-      stateClone,
-      decimals,
-      false
+      address, totalSupply, budget, watched, market, true, env, stateClone,
+      decimals, false
     );
   } catch (e) {
     error = errorString(e);
@@ -169490,14 +169542,17 @@ async function denominatorReplayV945(state, env, argument = "") {
 
   const path = result?.holderPathDiagnosticV665 || null;
   return {
-    version: "V945",
-    status: error ? "TARGETED_DENOMINATOR_REPLAY_FAILED" : "TARGETED_DENOMINATOR_REPLAY_COMPLETE",
+    version: "V946",
+    status: error ? "DIRECT_ADDRESS_DENOMINATOR_REPLAY_FAILED" : "DIRECT_ADDRESS_DENOMINATOR_REPLAY_COMPLETE",
     address,
     symbol: selected?.symbol || watched?.metadata?.symbol || null,
     retainedOpportunity: safeNumber(selected?.opportunityScore),
     retainedConfidence: safeNumber(selected?.confidenceScore),
     retainedHolderStatus: selected?.holderStatus || null,
+    syntheticWatchedV946,
+    identityReadsV946,
     totalSupplyInput: String(totalSupply),
+    decimalsInput: decimals,
     marketVerifiedInput: market?.verified === true,
     marketPair: normalize(market?.pairAddress || "") || null,
     previousDecision,
@@ -169529,7 +169584,7 @@ async function denominatorReplayV945(state, env, argument = "") {
     error,
     requestBudget: requestBudgetSnapshotV264(budget),
     externalRequestsUsed: safeNumber(budget?.totalUsed),
-    maxExternalRequests: 6,
+    maxExternalRequests: 8,
     stateWrites: 0,
     persistentStateMutated: false,
     scoringChanged: false,
@@ -169538,25 +169593,24 @@ async function denominatorReplayV945(state, env, argument = "") {
     telegramThresholdsChanged: false
   };
 }
-
 function denominatorReplayMessageV945(d) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   if (!d || d.status === "NO_RETAINED_NO_POSITIVE_OWNERSHIP_SUPPLY_TARGET") {
-    return "🧪 <b>Targeted Ownership-Denominator Replay — V945</b>\n\nNo retained NO_POSITIVE_OWNERSHIP_SUPPLY target is currently available.\n\n<i>No provider requests or state writes were made.</i>";
+    return "🧪 <b>Targeted Ownership-Denominator Replay — V946</b>\n\nNo retained NO_POSITIVE_OWNERSHIP_SUPPLY target is currently available.\n\n<i>No provider requests or state writes were made.</i>";
   }
-  if (d.status === "TARGET_NOT_PRESENT_IN_WATCHED_STATE" || d.status === "REPLAY_BLOCKED_TOTAL_SUPPLY_NOT_RETAINED") {
+  if (d.status === "DIRECT_REPLAY_TOTAL_SUPPLY_UNVERIFIED") {
     return [
-      "🧪 <b>Targeted Ownership-Denominator Replay — V945</b>", "",
+      "🧪 <b>Targeted Ownership-Denominator Replay — V946</b>", "",
       `Token: <b>${escapeHtml(d.symbol || "UNKNOWN")}</b> <code>${escapeHtml(shortAddressV937(d.address || ""))}</code>`,
       `Status: <b>${escapeHtml(d.status)}</b>`,
       `Retained holder status: <b>${escapeHtml(d.retainedHolderStatus || "NONE")}</b>`, "",
-      "The replay cannot safely reconstruct the denominator because the required retained input is absent.",
+      "Direct replay could not verify totalSupply from the token address, so the denominator was not reconstructed.",
       "<i>No provider requests or state writes were made.</i>"
     ].join("\n");
   }
   const r = d.replayDecision || {};
   const lines = [
-    "🧪 <b>Targeted Ownership-Denominator Replay — V945</b>", "",
+    "🧪 <b>Targeted Ownership-Denominator Replay — V946</b>", "",
     `Token: <b>${escapeHtml(d.symbol || "UNKNOWN")}</b> <code>${escapeHtml(shortAddressV937(d.address || ""))}</code>`,
     `Retained score: Opportunity <b>${fmt(d.retainedOpportunity)}</b> · Confidence <b>${fmt(d.retainedConfidence)}</b>`,
     `Retained holder status: <b>${escapeHtml(d.retainedHolderStatus || "NONE")}</b>`,
@@ -169575,7 +169629,7 @@ function denominatorReplayMessageV945(d) {
     `External requests used: <b>${fmt(d.externalRequestsUsed)}/${fmt(d.maxExternalRequests)}</b> · persistent state writes <b>0</b>`
   ];
   if (d.error) lines.push(`Error: <code>${escapeHtml(d.error)}</code>`);
-  lines.push("", "<i>V945 replays the existing holder pipeline on cloned state only. It does not alter holder evidence, risk, scoring, qualification or Telegram thresholds.</i>");
+  lines.push("", "<i>V946 can rebuild old retained failures directly from the token address using fresh read-only ERC-20 and holder evidence on synthetic cloned state. It does not alter holder evidence, risk, scoring, qualification or Telegram thresholds.</i>");
   return lines.join("\n");
 }
 
