@@ -1,4 +1,21 @@
 /**
+ * V923 PRIORITY EXACT-POOL FOUNDATION REALLOCATION:
+ * - builds directly from live-proven V922;
+ * - fixes repeated live cases where a current risk-acceptable V151/V887 exact-pool
+ *   candidate reached production V4 but its first V888/V899 targeted exact-pool
+ *   request was blocked after lower-priority completion work consumed headroom;
+ * - when the production-selected token is also the pre-V891 Gecko-cooldown exact-pool
+ *   priority target, V923 may use ONE already-reserved V822 FOUNDATION slot for the
+ *   first V888 exact-pool chunk;
+ * - this is a reallocation inside existing headroom only: it never consumes the FLOW
+ *   slot, V258 timestamp slot, Telegram notification reserve, or raises the 48-request
+ *   hard ceiling / 27-request base analysis limit;
+ * - if no FOUNDATION slot exists, all existing V901/V908 and normal budget behaviour
+ *   remains authoritative;
+ * - no risk gates, scoring, qualification, Telegram thresholds, Pons V922 freshness
+ *   routing, V216/V218 math, exact-pool verification rules, or provider order changes.
+ */
+/**
  * V922 PONS RECENT-LIVE FRESHNESS GATE:
  * - builds directly from deployed V921 after V921 proved stale Pons launch metadata was genuine
  *   DIRECT_ONCHAIN_PONS_V2_TOKENLAUNCHED_V476 evidence, not corrupt/persisted V215 contamination;
@@ -8230,7 +8247,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V922";
+const VERSION = "V923";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -18769,6 +18786,212 @@ function v258TimestampReserveDecisionV880(
   return null;
 }
 
+
+/* =========================================================
+   V923 PRIORITY EXACT-POOL FOUNDATION REALLOCATION
+   ========================================================= */
+
+function ensureV923PriorityExactPoolFoundationSlot(budget) {
+  if (!budget?.analysis) return null;
+
+  if (
+    !budget.analysis.priorityExactPoolFoundationV923 ||
+    typeof budget.analysis.priorityExactPoolFoundationV923 !== "object"
+  ) {
+    budget.analysis.priorityExactPoolFoundationV923 = {
+      enabled: true,
+      active: false,
+      targetAddress: null,
+      exactPoolId: null,
+      armedAt: null,
+      armReason: null,
+      consumed: false,
+      consumedAt: null,
+      consumedType: null,
+      sourceReserve: "V822_FOUNDATION",
+      preservedFlow: true,
+      preservedV258: true,
+      preservedTelegram: true,
+      hardRequestLimitRaised: false,
+      analysisLimitRaised: false,
+      blockedByProtectedHeadroom: 0
+    };
+  }
+
+  return budget.analysis.priorityExactPoolFoundationV923;
+}
+
+function armV923PriorityExactPoolFoundationSlot(
+  budget,
+  candidate,
+  state,
+  preV891PriorityV908 = null
+) {
+  const slot = ensureV923PriorityExactPoolFoundationSlot(budget);
+  if (!slot || slot.consumed === true) return slot;
+
+  const token = normalize(candidate?.address || "");
+  const exactPoolId = normalize(
+    candidate?.onChainPoolIdentityV153?.poolId ||
+    candidate?.onChainPoolIdentityV153?.pairAddress ||
+    ""
+  );
+  const preAddress = normalize(preV891PriorityV908?.address || "");
+  const samePriorityTarget =
+    preV891PriorityV908?.activeGecko429Cooldown === true &&
+    isAddress(preAddress) &&
+    preAddress === token;
+  const riskAcceptable =
+    candidate?.risk?.severeOverride !== true &&
+    String(candidate?.risk?.label || "").toUpperCase() !== "HIGH";
+  const exactPoolVerified =
+    candidate?.onChainPoolIdentityV153?.verified === true &&
+    /^0x[a-f0-9]{64}$/.test(String(exactPoolId || ""));
+
+  const ledger = isAddress(token)
+    ? onChainDirectionalStoreV179(state)?.[token]
+    : null;
+  const exactRows = Array.isArray(ledger?.records)
+    ? ledger.records.filter(row =>
+        normalize(row?.candidateAddress) === token &&
+        normalize(row?.poolId) === exactPoolId
+      )
+    : [];
+
+  const reserve = budget?.analysis?.evidenceCompletionReserveV728;
+  const foundationRemaining =
+    reserve?.enabled === true && reserve?.active === true
+      ? Math.max(0, safeNumber(reserve?.foundationReservedRequestsV822))
+      : 0;
+
+  slot.active = false;
+  slot.targetAddress = isAddress(token) ? token : null;
+  slot.exactPoolId = /^0x[a-f0-9]{64}$/.test(String(exactPoolId || ""))
+    ? exactPoolId
+    : null;
+  slot.foundationRemainingAtArm = foundationRemaining;
+  slot.preV891PriorityAddress = isAddress(preAddress) ? preAddress : null;
+
+  if (!isAddress(token) || candidate?.validERC20 !== true) {
+    slot.armReason = "INVALID_OR_UNVERIFIED_ERC20_V923";
+    return slot;
+  }
+  if (!riskAcceptable) {
+    slot.armReason = "RISK_NOT_ACCEPTABLE_V923";
+    return slot;
+  }
+  if (!samePriorityTarget) {
+    slot.armReason = "PRODUCTION_NOT_PRE_V891_PRIORITY_TARGET_V923";
+    return slot;
+  }
+  if (!exactPoolVerified) {
+    slot.armReason = "VERIFIED_EXACT_POOL_REQUIRED_V923";
+    return slot;
+  }
+  if (exactRows.length > 0) {
+    slot.armReason = "EXACT_POOL_V179_ROWS_ALREADY_PRESENT_V923";
+    return slot;
+  }
+  if (foundationRemaining < 1) {
+    slot.armReason = "NO_V822_FOUNDATION_SLOT_AVAILABLE_V923";
+    return slot;
+  }
+
+  slot.active = true;
+  slot.armedAt = Date.now();
+  slot.armReason = "PRE_V891_PRIORITY_FOUNDATION_SLOT_ARMED_V923";
+  return slot;
+}
+
+function consumeV923PriorityExactPoolFoundationSlot(
+  budget,
+  tokenAddress,
+  exactPoolId,
+  type = "RPC:V888_EXACT_POOL_TARGETED_SWAPS"
+) {
+  const slot = budget?.analysis?.priorityExactPoolFoundationV923;
+  if (slot?.active !== true || slot?.consumed === true) return null;
+
+  const token = normalize(tokenAddress || "");
+  const poolId = normalize(exactPoolId || "");
+  if (
+    token !== normalize(slot?.targetAddress || "") ||
+    poolId !== normalize(slot?.exactPoolId || "") ||
+    String(type || "") !== "RPC:V888_EXACT_POOL_TARGETED_SWAPS"
+  ) {
+    return null;
+  }
+
+  const reserve = budget?.analysis?.evidenceCompletionReserveV728;
+  const foundationRemaining = Math.max(
+    0,
+    safeNumber(reserve?.foundationReservedRequestsV822)
+  );
+
+  if (
+    reserve?.enabled !== true ||
+    reserve?.active !== true ||
+    foundationRemaining < 1 ||
+    safeNumber(reserve?.reservedRequests) < 1
+  ) {
+    slot.active = false;
+    slot.armReason = "V822_FOUNDATION_SLOT_NO_LONGER_AVAILABLE_V923";
+    return null;
+  }
+
+  const v258Reserve = budget?.analysis?.v258TimestampReserveV880;
+  const v258Remaining =
+    v258Reserve?.enabled === true && v258Reserve?.active === true
+      ? Math.max(0, safeNumber(v258Reserve?.reservedRequests))
+      : 0;
+  const preTelegramLimit = preTelegramGlobalLimitV728(budget);
+
+  if (
+    safeNumber(budget?.totalUsed) + 1 + v258Remaining > preTelegramLimit
+  ) {
+    slot.blockedByProtectedHeadroom =
+      safeNumber(slot.blockedByProtectedHeadroom) + 1;
+    slot.lastBlockedAt = Date.now();
+    slot.armReason = "V923_BLOCKED_TO_PRESERVE_V258_OR_TELEGRAM_HEADROOM";
+    return null;
+  }
+
+  budget.totalUsed += 1;
+  budget.analysis.used += 1;
+
+  reserve.foundationReservedRequestsV822 = Math.max(
+    0,
+    foundationRemaining - 1
+  );
+  reserve.reservedRequests = Math.max(
+    0,
+    safeNumber(reserve.reservedRequests) - 1
+  );
+  reserve.consumed = safeNumber(reserve.consumed) + 1;
+  reserve.foundationConsumedV822 =
+    safeNumber(reserve.foundationConsumedV822) + 1;
+  reserve.consumedTypes =
+    reserve.consumedTypes && typeof reserve.consumedTypes === "object"
+      ? reserve.consumedTypes
+      : {};
+  reserve.consumedTypes[String(type)] =
+    safeNumber(reserve.consumedTypes[String(type)]) + 1;
+  reserve.lastConsumedType = String(type);
+  reserve.lastConsumedAt = Date.now();
+
+  if (reserve.reservedRequests <= 0) {
+    reserve.active = false;
+    reserve.releasedAt = Date.now();
+    reserve.releaseReason = "V923_PRIORITY_EXACT_POOL_USED_V822_FOUNDATION_SLOT";
+  }
+
+  slot.active = false;
+  slot.consumed = true;
+  slot.consumedAt = Date.now();
+  slot.consumedType = String(type);
+  slot.armReason = "V822_FOUNDATION_REALLOCATED_TO_PRIORITY_EXACT_POOL_V923";
+  return true;
+}
 
 /* =========================================================
    V901 PROTECTED EXACT-POOL CONTINUATION SLOT
@@ -101593,14 +101816,33 @@ async function enrichCandidateWithProductionV4V772(
     for (let indexV899 = 0; indexV899 < chunkRangesV899.length; indexV899++) {
       const rangeV899 = chunkRangesV899[indexV899];
 
-      if (
-        !consumeBudget(
+      /*
+       * V923: for the first chunk only, a current pre-V891 priority exact-pool
+       * target may consume the V822 FOUNDATION slot that was already reserved
+       * inside the same hard limits. FLOW, V258 and Telegram headroom remain
+       * protected. If that slot is unavailable, fall back unchanged to the
+       * existing V901/normal budget machinery.
+       */
+      const priorityFoundationFundedV923 =
+        indexV899 === 0
+          ? consumeV923PriorityExactPoolFoundationSlot(
+              budget,
+              token,
+              exactPoolIdV888,
+              "RPC:V888_EXACT_POOL_TARGETED_SWAPS"
+            )
+          : null;
+
+      const exactPoolRequestFundedV923 =
+        priorityFoundationFundedV923 === true ||
+        consumeBudget(
           budget,
           "analysis",
           "RPC:V888_EXACT_POOL_TARGETED_SWAPS",
           1
-        )
-      ) {
+        );
+
+      if (!exactPoolRequestFundedV923) {
         budgetBlockedV899 = true;
         base.exactPoolTargetedBackfillV888.stopReasonV899 =
           indexV899 === 0
@@ -108885,6 +109127,19 @@ for (
         : null;
 
     /*
+     * V923: when this production target is also the pre-V891 exact-pool
+     * priority candidate, earmark the already-existing V822 FOUNDATION slot
+     * for the FIRST targeted V888 chunk. No new request capacity is created.
+     */
+    const priorityExactPoolFoundationV923 =
+      armV923PriorityExactPoolFoundationSlot(
+        budget,
+        productionV4TargetV772,
+        state,
+        preV891PriorityV908
+      );
+
+    /*
      * V901: arm one tightly-scoped continuation permission for this selected
      * V887-priority exact-pool target. It is only consumed later if the normal
      * analysis sub-budget is exhausted.
@@ -109449,6 +109704,13 @@ for (
       bypassedAnalysisSubBudget:
         budget?.analysis?.exactPoolContinuationSlotV901
           ?.bypassedAnalysisSubBudget === true
+    },
+    priorityExactPoolFoundationV923: {
+      ...(budget?.analysis?.priorityExactPoolFoundationV923 || {}),
+      active:
+        budget?.analysis?.priorityExactPoolFoundationV923?.active === true,
+      consumed:
+        budget?.analysis?.priorityExactPoolFoundationV923?.consumed === true
     }
   };
 
@@ -134185,6 +134447,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `RPC OK: <b>${collector895.rpcOk ? "YES" : "NO"}</b> · raw rows ${fmt(collector895.rawRpcRows)} · exact-topic rows ${fmt(collector895.exactTopicRows)}`,
       `V899/V900 chunks this scan attempted/completed/planned: <b>${fmt(collector895.chunkRequestsAttemptedV899)} / ${fmt(collector895.chunksCompletedV899)} / ${fmt(collector895.chunksPlannedV899)}</b> · cumulative ${fmt(collector895.cumulativeChunksCompletedV900)} · resumed ${collector895.resumedV900 ? "YES" : "NO"} · full 12k window ${collector895.fullWindowCompletedV899 ? "YES" : "NO"} · stop ${escapeHtml(collector895.stopReasonV899 || "NONE")}`,
       `V901/V908 protected continuation: consumed <b>${state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.consumed === true ? "YES" : "NO"}</b> · crossed analysis cap <b>${state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.bypassedAnalysisSubBudget === true ? "YES" : "NO"}</b> · reason <b>${escapeHtml(state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.armReason || "NONE")}</b>`,
+      `V923 priority exact-pool FOUNDATION: active <b>${state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.active === true ? "YES" : "NO"}</b> · consumed <b>${state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.consumed === true ? "YES" : "NO"}</b> · target <code>${escapeHtml(state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.targetAddress || "NONE")}</code> · reason <b>${escapeHtml(state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.armReason || "NONE")}</b>`,
       `V908 pre-V891 target: <code>${escapeHtml(state?.preV891PriorityDiagnosticV908?.address || "NONE")}</code> · production target <code>${escapeHtml(state?.preV891PriorityDiagnosticV908?.productionSelectedAddress || "NONE")}</code> · same <b>${state?.preV891PriorityDiagnosticV908?.sameAsProductionSelected ? "YES" : "NO"}</b> · cooldown ${state?.preV891PriorityDiagnosticV908?.activeGecko429Cooldown ? "YES" : "NO"} · exact candidates ${fmt(state?.preV891PriorityDiagnosticV908?.exactPoolCandidates)}`,
       `Registry present / token match: <b>${collector895.registryPresent ? "YES" : "NO"} / ${collector895.registryTokenMatch ? "YES" : "NO"}</b>`,
       `Decoded verified / candidate-match / exact-USD: <b>${fmt(collector895.decodedVerifiedRows)} / ${fmt(collector895.decodedCandidateMatchedRows)} / ${fmt(collector895.decodedExactUsdRows)}</b>`,
