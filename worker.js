@@ -1,4 +1,20 @@
 /**
+ * V914 SCHEDULER MEMORY-ISOLATION FIX:
+ * - builds directly from deployed V913;
+ * - fixes the live V913 failure:
+ *     "Durable Object's isolate exceeded its memory limit and was reset";
+ * - keeps ScanSchedulerV673 as a lightweight alarm/orchestration Durable Object;
+ * - heavy scheduled/manual scan execution is relayed to the normal Worker HTTP
+ *   context through the already-existing /scan?v670ScheduledRelay=1 surface;
+ * - the relay response is compact so the scheduler Durable Object never parses
+ *   or retains the full multi-megabyte scan result in memory;
+ * - preserves the V723/V724 immediate qualification-follow-up behavior by
+ *   returning only the small fields needed by the scheduler;
+ * - preserves V912 Pons lifecycle routing and V913 Pons-flow diagnostic;
+ * - no provider, scoring, risk, Momentum, qualification, Telegram threshold,
+ *   KV key, cadence or 48-request ceiling change.
+ */
+/**
  * V913 PONS V2 CURVE-FLOW HANDOFF DIAGNOSTIC:
  * - builds directly from deployed V912;
  * - adds zero-request telemetry to isolate why verified pre-graduation Pons V2
@@ -8094,7 +8110,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V913";
+const VERSION = "V914";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -168619,7 +168635,14 @@ async function diagnosticsReadV897(request, env) {
         minutesSinceScheduledRun:
           ageMs === null
             ? null
-            : Math.round((ageMs / 60000) * 10) / 10
+            : Math.round((ageMs / 60000) * 10) / 10,
+        memoryIsolationV914: {
+          enabled: true,
+          schedulerDurableObjectRole:
+            "LIGHTWEIGHT_ORCHESTRATION_ONLY",
+          heavyScanExecutionContext:
+            "NORMAL_WORKER_HTTP_RELAY_V914"
+        }
       },
 
       scan: {
@@ -170150,6 +170173,71 @@ async function handleRequest(
     "/scan"
   ) {
     if (scheduledRelayV671) {
+      const relayModeV914 =
+        String(
+          url.searchParams.get(
+            "v914RelayMode"
+          ) || ""
+        );
+
+      if (
+        relayModeV914 === "scheduled"
+      ) {
+        const resultV914 =
+          await scheduledScan(env);
+
+        return jsonResponse(
+          compactHeavyScanRelayResultV914(
+            resultV914,
+            "scheduled"
+          )
+        );
+      }
+
+      if (
+        relayModeV914 ===
+        "qualification-followup"
+      ) {
+        const resultV914 =
+          await scan(
+            env,
+            {
+              scheduled: true,
+              qualificationFollowUpV723: true
+            }
+          );
+
+        return jsonResponse(
+          compactHeavyScanRelayResultV914(
+            resultV914,
+            "qualification-followup"
+          )
+        );
+      }
+
+      if (
+        relayModeV914 === "manual"
+      ) {
+        const resultV914 =
+          await scan(
+            env,
+            {
+              scheduled: false
+            }
+          );
+
+        return jsonResponse(
+          compactHeavyScanRelayResultV914(
+            resultV914,
+            "manual"
+          )
+        );
+      }
+
+      /*
+       * Preserve the historical V670/V671 relay behavior for any old caller
+       * that still supplies only v670ScheduledRelay=1.
+       */
       return jsonResponse(
         await scheduledScan(
           env
@@ -172734,7 +172822,7 @@ function compactManualScanResultV719(result) {
     candidates,
     v719ManualDurableRelay: {
       enabled: true,
-      heavyScanRanInsideDurableObject: true,
+      heavyScanRanInsideDurableObject: false,
       compactHttpResponse: true,
       fullDiagnosticResponseSuppressed: true,
       scannerLogicChanged: false,
@@ -172743,6 +172831,144 @@ function compactManualScanResultV719(result) {
     },
     timestamp: now()
   };
+}
+
+
+function compactHeavyScanRelayResultV914(
+  result,
+  mode = "scheduled"
+) {
+  return {
+    ok: true,
+    version: VERSION,
+    status: result?.status || null,
+    latestBlock:
+      result?.latestBlock ?? null,
+    scheduledRun:
+      result?.scheduledRun === true,
+    qualifyingCandidates:
+      result?.qualifyingCandidates ?? null,
+    requestBudget: {
+      used:
+        safeNumber(
+          result?.requestBudget?.used
+        ),
+      cloudflareSubrequestCircuitV722: {
+        open:
+          result?.requestBudget
+            ?.cloudflareSubrequestCircuitV722
+            ?.open === true
+      }
+    },
+    scannerFunnelV415: {
+      retryQueueAfterAnalysis:
+        safeNumber(
+          result?.scannerFunnelV415
+            ?.retryQueueAfterAnalysis
+        )
+    },
+    v723TwoStageQualification:
+      result?.v723TwoStageQualification
+        ? {
+            followUpArmed:
+              result.v723TwoStageQualification
+                .followUpArmed === true,
+            followUpAt:
+              result.v723TwoStageQualification
+                .followUpAt ?? null,
+            followUpReason:
+              result.v723TwoStageQualification
+                .followUpReason || null
+          }
+        : null,
+    nativeV3CollectorV333:
+      result?.nativeV3CollectorV333
+        ? {
+            status:
+              result.nativeV3CollectorV333
+                .status || null,
+            requestsUsed:
+              safeNumber(
+                result.nativeV3CollectorV333
+                  .requestsUsed
+              )
+          }
+        : null,
+    v914SchedulerMemoryIsolation: {
+      enabled: true,
+      mode,
+      heavyScanRanInsideDurableObject: false,
+      heavyScanExecutionContext:
+        "NORMAL_WORKER_HTTP_RELAY_V914",
+      compactRelayResponse: true,
+      fullScanResponseReturnedToDurableObject: false,
+      scannerLogicChanged: false,
+      requestCeilingChanged: false,
+      telegramThresholdChanged: false
+    },
+    timestamp: now()
+  };
+}
+
+async function relayHeavyScanOutsideSchedulerV914(
+  mode = "scheduled"
+) {
+  const allowedModes =
+    new Set([
+      "scheduled",
+      "qualification-followup",
+      "manual"
+    ]);
+
+  const relayMode =
+    allowedModes.has(mode)
+      ? mode
+      : "scheduled";
+
+  const relayUrl =
+    `${V670_SELF_SCAN_URL}&v914RelayMode=${encodeURIComponent(relayMode)}`;
+
+  const response =
+    await fetch(
+      relayUrl,
+      {
+        method: "POST",
+        headers: {
+          "x-robinhood-meme-hunter-cron-relay":
+            "V914",
+          "x-robinhood-meme-hunter-memory-isolation":
+            "V914"
+        }
+      }
+    );
+
+  let body = null;
+
+  try {
+    body =
+      await response.json();
+  } catch (_) {
+    body = null;
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      `V914_HEAVY_SCAN_RELAY_HTTP_${response.status}:` +
+      String(
+        body?.error ||
+        body?.status ||
+        "NO_JSON_BODY"
+      ).slice(0, 180)
+    );
+  }
+
+  if (!body || typeof body !== "object") {
+    throw new Error(
+      "V914_HEAVY_SCAN_RELAY_INVALID_BODY"
+    );
+  }
+
+  return body;
 }
 
 export class ScanSchedulerV673 {
@@ -172852,10 +173078,10 @@ export class ScanSchedulerV673 {
     const url = new URL(request.url);
 
     if (url.pathname === "/manual-scan-v719") {
-      const result = await scan(
-        this.env,
-        { scheduled: false }
-      );
+      const result =
+        await relayHeavyScanOutsideSchedulerV914(
+          "manual"
+        );
 
       const retryQueueAfterAnalysisV724 =
         safeNumber(result?.scannerFunnelV415?.retryQueueAfterAnalysis);
@@ -172893,9 +173119,20 @@ export class ScanSchedulerV673 {
         };
       }
 
-      return jsonResponse(
-        compactManualScanResultV719(result)
-      );
+      return jsonResponse({
+        ...result,
+        v719ManualDurableRelay: {
+          enabled: true,
+          heavyScanRanInsideDurableObject: false,
+          heavyScanExecutionContext:
+            "NORMAL_WORKER_HTTP_RELAY_V914",
+          compactHttpResponse: true,
+          fullDiagnosticResponseSuppressed: true,
+          scannerLogicChanged: false,
+          requestCeilingChanged: false,
+          telegramThresholdChanged: false
+        }
+      });
     }
 
     if (url.pathname === "/ensure") {
@@ -172954,12 +173191,12 @@ export class ScanSchedulerV673 {
     }
 
     try {
-      result = qualificationFollowUpV723
-        ? await scan(this.env, {
-            scheduled: true,
-            qualificationFollowUpV723: true
-          })
-        : await scheduledScan(this.env);
+      result =
+        await relayHeavyScanOutsideSchedulerV914(
+          qualificationFollowUpV723
+            ? "qualification-followup"
+            : "scheduled"
+        );
     } catch (error) {
       failure = errorString(error);
       console.error("V673_DURABLE_SCHEDULED_SCAN_ERROR", failure);
@@ -173045,7 +173282,22 @@ export class ScanSchedulerV673 {
           nextAlarmAt
         ),
       schedulerAlignmentV684:
-        "FIVE_MINUTE_WALL_CLOCK_BOUNDARIES"
+        "FIVE_MINUTE_WALL_CLOCK_BOUNDARIES",
+      v914MemoryIsolation: {
+        enabled: true,
+        heavyScanRanInsideDurableObject: false,
+        heavyScanExecutionContext:
+          result?.v914SchedulerMemoryIsolation
+            ?.heavyScanExecutionContext ||
+          "NORMAL_WORKER_HTTP_RELAY_V914",
+        compactRelayResponse:
+          result?.v914SchedulerMemoryIsolation
+            ?.compactRelayResponse === true,
+        relayMode:
+          qualificationFollowUpV723
+            ? "qualification-followup"
+            : "scheduled"
+      }
     };
 
     try {
