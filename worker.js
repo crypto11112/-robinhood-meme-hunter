@@ -1,4 +1,21 @@
 /**
+ * V922 PONS RECENT-LIVE FRESHNESS GATE:
+ * - builds directly from deployed V921 after V921 proved stale Pons launch metadata was genuine
+ *   DIRECT_ONCHAIN_PONS_V2_TOKENLAUNCHED_V476 evidence, not corrupt/persisted V215 contamination;
+ * - preserves all V921 source diagnostics and V920 freshness ordering;
+ * - changes ONLY direct-Pons target eligibility between the V919 RECENT_LIVE and
+ *   BACKGROUND_HISTORY lanes;
+ * - a Pons candidate may consume the valuable RECENT_LIVE slot only when its strictly verified
+ *   launch block is within 100,000 blocks of the current verified head;
+ * - older verified Pons candidates are NOT discarded: they may continue V918 BACKGROUND_HISTORY
+ *   only when that token already has a V919 live scan and the 300-block live-refresh interval
+ *   has NOT yet become due;
+ * - an old dormant token whose live refresh is due is skipped instead of repeatedly spending
+ *   the live Pons request on a known-old curve;
+ * - no decoder, V216/V218 math, risk gate, scoring, qualification, Telegram threshold,
+ *   provider, request ceiling, V918 cursor semantics, or hard 48-request limit changes.
+ */
+/**
  * V921 PONS CANDIDATE-SOURCE RECENCY DIAGNOSTIC:
  * - builds directly from deployed V920;
  * - diagnostic-only change to explain why current Pons candidates can carry very old verified launch blocks;
@@ -8213,7 +8230,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V921";
+const VERSION = "V922";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -78825,6 +78842,17 @@ async function runDirectPonsCurveFlowV916(
       discoveryTelemetry: null,
       classification:
         "NO_CURRENT_PONS_CANDIDATES_V921"
+    },
+    freshnessRoutingV922: {
+      freshLaunchMaxAgeBlocks: 100000,
+      baseEligible: 0,
+      recentLiveEligible: 0,
+      backgroundHistoryEligible: 0,
+      oldLiveRefreshDueSkipped: 0,
+      selectedMode: null,
+      selectedToken: null,
+      status:
+        "NO_V922_PONS_SELECTION"
     }
   };
 
@@ -78950,11 +78978,114 @@ async function runDirectPonsCurveFlowV916(
           )
       );
 
+  const headForRoutingV922 =
+    safeNumber(
+      latestNumber
+    );
+
+  const freshLaunchMaxAgeBlocksV922 =
+    100000;
+
+  const recentLiveRankedV922 =
+    ranked.filter(row => {
+      const launchBlock =
+        safeNumber(
+          row?.meta?.launchBlock
+        );
+
+      return (
+        headForRoutingV922 > 0 &&
+        launchBlock > 0 &&
+        headForRoutingV922 -
+          launchBlock <=
+          freshLaunchMaxAgeBlocksV922
+      );
+    });
+
+  const oldRowsV922 =
+    ranked.filter(
+      row =>
+        !recentLiveRankedV922
+          .includes(row)
+    );
+
+  const backgroundHistoryRankedV922 =
+    oldRowsV922.filter(row => {
+      const token =
+        normalize(
+          row?.candidate?.address
+        );
+
+      const liveEntry =
+        state?.ponsCurveTradesV216
+          ?.directRpcLiveV919
+          ?.entries?.[token];
+
+      const priorLiveHead =
+        safeNumber(
+          liveEntry?.lastScannedHead
+        );
+
+      return (
+        priorLiveHead > 0 &&
+        headForRoutingV922 > 0 &&
+        headForRoutingV922 -
+          priorLiveHead <
+          300
+      );
+    });
+
+  const oldLiveRefreshDueSkippedV922 =
+    oldRowsV922.length -
+    backgroundHistoryRankedV922.length;
+
   const selected =
-    ranked[0] || null;
+    recentLiveRankedV922[0] ||
+    backgroundHistoryRankedV922[0] ||
+    null;
+
+  const selectedModeV922 =
+    selected
+      ? (
+          recentLiveRankedV922
+            .includes(selected)
+            ? "FRESH_RECENT_LIVE_ELIGIBLE_V922"
+            : "OLD_BACKGROUND_HISTORY_ONLY_V922"
+        )
+      : null;
 
   base.eligibleTargetsV920 =
     ranked.length;
+
+  base.freshnessRoutingV922 = {
+    freshLaunchMaxAgeBlocks:
+      freshLaunchMaxAgeBlocksV922,
+    baseEligible:
+      ranked.length,
+    recentLiveEligible:
+      recentLiveRankedV922.length,
+    backgroundHistoryEligible:
+      backgroundHistoryRankedV922.length,
+    oldLiveRefreshDueSkipped:
+      Math.max(
+        0,
+        oldLiveRefreshDueSkippedV922
+      ),
+    selectedMode:
+      selectedModeV922,
+    selectedToken:
+      normalize(
+        selected?.candidate?.address
+      ) || null,
+    status:
+      selected
+        ? selectedModeV922
+        : (
+            ranked.length > 0
+              ? "ONLY_OLD_PONS_WITH_LIVE_REFRESH_DUE_SKIPPED_V922"
+              : "NO_BASE_ELIGIBLE_PONS_TARGET_V922"
+          )
+  };
 
   const selectedTraceV921 =
     selected?.sourceTraceV921 ||
@@ -79052,20 +79183,25 @@ async function runDirectPonsCurveFlowV916(
             ranked.length === 0
               ? "CURRENT_PONS_PRESENT_NONE_ELIGIBLE_V921"
               : (
-                  safeNumber(
-                    selected?.meta
-                      ?.launchBlock
-                  ) > 0 &&
-                  safeNumber(
-                    latestNumber
-                  ) -
-                    safeNumber(
-                      selected?.meta
-                        ?.launchBlock
-                    ) >
-                    100000
-                    ? "SELECTED_PONS_LAUNCH_EVIDENCE_OLD_RELATIVE_TO_HEAD_V921"
-                    : "SELECTED_PONS_SOURCE_RECENCY_TRACE_CAPTURED_V921"
+                  !selected &&
+                  oldLiveRefreshDueSkippedV922 > 0
+                    ? "OLD_PONS_PRESENT_BUT_RECENT_LIVE_BLOCKED_BY_V922"
+                    : (
+                        safeNumber(
+                          selected?.meta
+                            ?.launchBlock
+                        ) > 0 &&
+                        safeNumber(
+                          latestNumber
+                        ) -
+                          safeNumber(
+                            selected?.meta
+                              ?.launchBlock
+                          ) >
+                          100000
+                          ? "SELECTED_OLD_PONS_FOR_BACKGROUND_HISTORY_ONLY_V922"
+                          : "SELECTED_PONS_SOURCE_RECENCY_TRACE_CAPTURED_V921"
+                      )
                 )
           )
   };
@@ -79288,9 +79424,14 @@ async function runDirectPonsCurveFlowV916(
       liveRefreshIntervalBlocksV919;
 
   const laneV919 =
-    liveRefreshDueV919
-      ? "RECENT_LIVE"
-      : "BACKGROUND_HISTORY";
+    selectedModeV922 ===
+      "OLD_BACKGROUND_HISTORY_ONLY_V922"
+      ? "BACKGROUND_HISTORY"
+      : (
+          liveRefreshDueV919
+            ? "RECENT_LIVE"
+            : "BACKGROUND_HISTORY"
+        );
 
   let fromBlock;
   let toBlock;
@@ -134072,11 +134213,12 @@ function evidenceAuditTelegramMessageV727(state) {
   if (ponsDirectV916) {
     lines.push(
       "",
-      "🧬 <b>Direct on-chain Pons V2 curve flow — V916/V921</b>",
+      "🧬 <b>Direct on-chain Pons V2 curve flow — V916/V922</b>",
       `Recorded: <code>${escapeHtml(ponsDirectV916.recordedAt || "UNVERIFIED")}</code>`,
       `Target: <code>${escapeHtml(ponsDirectV916.tokenAddress || "NONE")}</code> ${escapeHtml(ponsDirectV916.symbol || "")} · curve <code>${escapeHtml(ponsDirectV916.curve || "NONE")}</code>`,
       `V920 selection — eligible ${fmt(ponsDirectV916.eligibleTargetsV920)} · verified launch block ${fmt(ponsDirectV916.selectionLaunchBlockV920)} · launch age ${fmt(ponsDirectV916.selectionLaunchAgeBlocksV920)} blocks · ${escapeHtml(ponsDirectV916.selectionPolicyV920 || "NONE")}`,
       `V921 source diagnosis — <b>${escapeHtml(ponsDirectV916?.candidateSourceDiagnosticV921?.classification || "NONE")}</b> · current Pons ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.currentCandidateCount)} · eligible ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.eligibleCandidateCount)}`,
+      `V922 freshness routing — <b>${escapeHtml(ponsDirectV916?.freshnessRoutingV922?.status || "NONE")}</b> · base eligible ${fmt(ponsDirectV916?.freshnessRoutingV922?.baseEligible)} · fresh recent-live ${fmt(ponsDirectV916?.freshnessRoutingV922?.recentLiveEligible)} · old background ${fmt(ponsDirectV916?.freshnessRoutingV922?.backgroundHistoryEligible)} · old live-due skipped ${fmt(ponsDirectV916?.freshnessRoutingV922?.oldLiveRefreshDueSkipped)} · max fresh age ${fmt(ponsDirectV916?.freshnessRoutingV922?.freshLaunchMaxAgeBlocks)} blocks`,
       `V921 persisted Pons discovery — last status <b>${escapeHtml(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.lastStatus || "NONE")}</b> · last query ${escapeHtml(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.lastQueryAt || "NONE")} · last launch block ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.lastLaunchBlock)} · retained ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.retainedCount)} · retained blocks ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.retainedMinBlock)}→${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.retainedMaxBlock)}`,
       `Pair token: <code>${escapeHtml(ponsDirectV916.pairToken || "NONE")}</code> · USD basis <b>${escapeHtml(ponsDirectV916.quoteUsdBasis || "NONE")}</b>`,
       `RPC window: ${fmt(ponsDirectV916.fromBlock)} → ${fmt(ponsDirectV916.toBlock)} · provider <b>${escapeHtml(ponsDirectV916.provider || "NONE")}</b> · requests ${fmt(ponsDirectV916.requestsUsed)}`,
