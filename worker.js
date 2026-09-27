@@ -1,4 +1,20 @@
 /**
+ * V916 DIRECT ON-CHAIN PONS V2 CURVE FLOW:
+ * - builds directly from deployed V915;
+ * - removes Bitquery as a hard dependency for fresh pre-graduation Pons V2 flow;
+ * - uses the official Pons V2 CurveBuy / CurveSell events directly from each
+ *   verified launch curve;
+ * - one selected risk-acceptable Pons candidate per scan;
+ * - bounded 1,900-block exact-curve eth_getLogs window;
+ * - one batched eth_getBlockByNumber request for verified timestamps;
+ * - converts quote flow to USD only for canonical USDG or native/WETH with the
+ *   bot's existing fresh verified WETH/USDG reference;
+ * - feeds the resulting verified rows into the existing V216 store and V218
+ *   Momentum/scoring path;
+ * - preserves V915 scheduler memory isolation, V912 lifecycle routing, all
+ *   scoring/risk/Telegram thresholds and the 48-request hard ceiling.
+ */
+/**
  * V915 PRE-V891 TDZ HOTFIX:
  * - builds directly from V914;
  * - fixes the live V914 runtime exception:
@@ -8123,7 +8139,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V915";
+const VERSION = "V916";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -77949,6 +77965,1174 @@ function qualificationBreakdownV712(
 }
 
 
+
+/* =========================================================
+   V916 DIRECT ON-CHAIN PONS V2 CURVE FLOW
+   ========================================================= */
+
+const PONS_V2_CURVE_BUY_TOPIC_V916 =
+  "0xec36bf571f136799e8dc0b0b8bea4b04d8bd3d43de838aab0d5fc21d4cbfc455";
+
+const PONS_V2_CURVE_SELL_TOPIC_V916 =
+  "0x8113d738abdcb6b38357e9d53a54a7157861a09031b453651f0fe7fe151f59df";
+
+function v916HexWord(
+  data,
+  index
+) {
+  const clean =
+    String(data || "")
+      .replace(/^0x/, "");
+
+  const start =
+    index * 64;
+
+  if (
+    clean.length <
+      start + 64 ||
+    !/^[0-9a-fA-F]+$/.test(clean)
+  ) {
+    return null;
+  }
+
+  return clean.slice(
+    start,
+    start + 64
+  );
+}
+
+function v916BigIntWord(
+  data,
+  index
+) {
+  const word =
+    v916HexWord(
+      data,
+      index
+    );
+
+  if (!word) return null;
+
+  try {
+    return BigInt(
+      `0x${word}`
+    );
+  } catch {
+    return null;
+  }
+}
+
+function v916DecimalFromRaw(
+  raw,
+  decimals
+) {
+  if (
+    typeof raw !== "bigint" ||
+    !Number.isInteger(decimals) ||
+    decimals < 0 ||
+    decimals > 36
+  ) {
+    return null;
+  }
+
+  const base =
+    10n ** BigInt(decimals);
+
+  const whole =
+    raw / base;
+
+  const fraction =
+    raw % base;
+
+  const fractionText =
+    fraction
+      .toString()
+      .padStart(decimals, "0")
+      .slice(0, 12)
+      .replace(/0+$/, "");
+
+  const text =
+    fractionText
+      ? `${whole.toString()}.${fractionText}`
+      : whole.toString();
+
+  const n = Number(text);
+
+  return Number.isFinite(n)
+    ? n
+    : null;
+}
+
+function v916AddressFromTopic(
+  topic
+) {
+  const clean =
+    String(topic || "")
+      .toLowerCase()
+      .replace(/^0x/, "");
+
+  if (
+    !/^[0-9a-f]{64}$/.test(clean)
+  ) {
+    return null;
+  }
+
+  const address =
+    `0x${clean.slice(24)}`;
+
+  return isAddress(address)
+    ? normalize(address)
+    : null;
+}
+
+function v916PonsLaunchMeta(
+  candidate
+) {
+  const direct =
+    candidate?.verifiedLaunchSourceV476 ||
+    candidate?.launchpadV476 ||
+    candidate?.token?.launchpadV476 ||
+    null;
+
+  const v215 =
+    candidate?.launchpadV215 ||
+    candidate?.token?.launchpadV215 ||
+    null;
+
+  const watched =
+    candidate?.__v916Watched ||
+    null;
+
+  const watchedDirect =
+    watched?.token?.launchpadV476 ||
+    watched?.launchpadV476 ||
+    null;
+
+  const watchedV215 =
+    watched?.token?.launchpadV215 ||
+    watched?.launchpadV215 ||
+    null;
+
+  const rows =
+    [
+      direct,
+      v215,
+      watchedDirect,
+      watchedV215
+    ].filter(Boolean);
+
+  let curve = null;
+  let pairToken = null;
+  let launchBlock = null;
+  let verified = false;
+
+  for (const row of rows) {
+    const protocol =
+      String(
+        row?.protocol ||
+        row?.protocolKey ||
+        ""
+      ).trim().toLowerCase();
+
+    const isPons =
+      protocol === "pons v2" ||
+      protocol === "pons_v2";
+
+    if (!isPons) continue;
+
+    verified =
+      verified ||
+      row?.verified === true;
+
+    if (!curve) {
+      const value =
+        normalize(row?.curve);
+      if (
+        isAddress(value) &&
+        value !== ZERO
+      ) {
+        curve = value;
+      }
+    }
+
+    if (!pairToken) {
+      const raw =
+        String(
+          row?.pairToken || ""
+        ).toLowerCase();
+
+      if (raw === "0x") {
+        pairToken = ZERO;
+      } else {
+        const value =
+          normalize(raw);
+
+        if (isAddress(value)) {
+          pairToken = value;
+        }
+      }
+    }
+
+    if (!launchBlock) {
+      const value =
+        safeNumber(
+          row?.launchBlock ||
+          row?.blockNumber
+        );
+
+      if (value > 0) {
+        launchBlock = value;
+      }
+    }
+  }
+
+  return {
+    verified,
+    curve,
+    pairToken,
+    launchBlock
+  };
+}
+
+function v916QuoteUsdBasis(
+  state,
+  pairToken
+) {
+  const quote =
+    normalize(pairToken);
+
+  if (
+    quote ===
+      CANONICAL_USDG_V179
+  ) {
+    return {
+      verified: true,
+      decimals:
+        CANONICAL_USDG_DECIMALS_V179,
+      usdPerQuote: 1,
+      source:
+        "CANONICAL_USDG_1_TO_1_V916"
+    };
+  }
+
+  if (
+    quote === ZERO ||
+    quote ===
+      CANONICAL_WETH_V179
+  ) {
+    const ref =
+      bestVerifiedWethUsdGReferenceV195(
+        state
+      );
+
+    const price =
+      Number(
+        ref?.priceUsdGPerWeth
+      );
+
+    if (
+      ref?.verified === true &&
+      Number.isFinite(price) &&
+      price > 0
+    ) {
+      return {
+        verified: true,
+        decimals: 18,
+        usdPerQuote: price,
+        source:
+          ref?.source ||
+          "VERIFIED_WETH_USDG_REFERENCE_V916"
+      };
+    }
+  }
+
+  return {
+    verified: false,
+    decimals: null,
+    usdPerQuote: null,
+    source:
+      "QUOTE_USD_BASIS_UNVERIFIED_V916"
+  };
+}
+
+function v916ConsumeProtectedRequest(
+  budget,
+  type
+) {
+  if (
+    !budget ||
+    cloudflareSubrequestCircuitOpenV722(
+      budget
+    )
+  ) {
+    return false;
+  }
+
+  const limit =
+    preTelegramGlobalLimitV728(
+      budget
+    );
+
+  if (
+    safeNumber(
+      budget?.totalUsed
+    ) + 1 > limit
+  ) {
+    budget.skipped.push({
+      phase: "analysis",
+      type,
+      amount: 1,
+      reason:
+        "V916_PONS_DIRECT_FLOW_BLOCKED_TO_PRESERVE_TELEGRAM_HEADROOM"
+    });
+    return false;
+  }
+
+  budget.totalUsed += 1;
+  budget.analysis.used += 1;
+
+  budget.analysis.ponsDirectCurveFlowV916 =
+    budget.analysis.ponsDirectCurveFlowV916 &&
+    typeof budget.analysis.ponsDirectCurveFlowV916 ===
+      "object"
+      ? budget.analysis.ponsDirectCurveFlowV916
+      : {
+          used: 0,
+          types: {}
+        };
+
+  const lane =
+    budget.analysis
+      .ponsDirectCurveFlowV916;
+
+  lane.used =
+    safeNumber(
+      lane.used
+    ) + 1;
+
+  lane.types[type] =
+    safeNumber(
+      lane.types[type]
+    ) + 1;
+
+  lane.lastUsedAt =
+    Date.now();
+
+  return true;
+}
+
+async function v916RawRpcHttp(
+  env,
+  budget,
+  body,
+  type
+) {
+  if (
+    !v916ConsumeProtectedRequest(
+      budget,
+      type
+    )
+  ) {
+    return {
+      ok: false,
+      status:
+        "REQUEST_BUDGET_PROTECTED_V916",
+      result: null,
+      provider: null,
+      error:
+        "REQUEST_BUDGET_PROTECTED_V916"
+    };
+  }
+
+  const endpoint =
+    v4PoolLiveRpcEndpointV767(
+      env
+    );
+
+  const controller =
+    new AbortController();
+
+  const timer =
+    setTimeout(
+      () =>
+        controller.abort(),
+      9000
+    );
+
+  try {
+    const response =
+      await fetch(
+        endpoint.url,
+        {
+          method: "POST",
+          headers: {
+            "content-type":
+              "application/json",
+            accept:
+              "application/json"
+          },
+          body:
+            JSON.stringify(body),
+          signal:
+            controller.signal
+        }
+      );
+
+    const raw =
+      await response.text();
+
+    let payload = null;
+
+    try {
+      payload =
+        raw
+          ? JSON.parse(raw)
+          : null;
+    } catch {}
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        status:
+          `HTTP_${response.status}`,
+        result: payload,
+        provider:
+          endpoint.name,
+        error:
+          raw
+            ? raw.slice(0, 300)
+            : `HTTP_${response.status}`
+      };
+    }
+
+    return {
+      ok: true,
+      status: "OK",
+      result: payload,
+      provider:
+        endpoint.name,
+      error: null
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status:
+        error?.name ===
+          "AbortError"
+          ? "TIMEOUT"
+          : "FETCH_ERROR",
+      result: null,
+      provider:
+        endpoint.name,
+      error:
+        errorString(error)
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runDirectPonsCurveFlowV916(
+  env,
+  state,
+  budget,
+  candidates,
+  latestNumber
+) {
+  const base = {
+    version: "V916",
+    attempted: false,
+    tokenAddress: null,
+    symbol: null,
+    curve: null,
+    pairToken: null,
+    fromBlock: null,
+    toBlock: null,
+    logsReturned: 0,
+    decodedTrades: 0,
+    verifiedUsdTrades: 0,
+    timestampsRequested: 0,
+    timestampsVerified: 0,
+    provider: null,
+    requestsUsed: 0,
+    status:
+      "NO_ELIGIBLE_PONS_TARGET_V916",
+    persistedNewTrades: 0
+  };
+
+  const ranked =
+    (Array.isArray(candidates)
+      ? candidates
+      : [])
+      .map(candidate => {
+        const watched =
+          findWatched(
+            state,
+            normalize(
+              candidate?.address
+            )
+          );
+
+        Object.defineProperty(
+          candidate,
+          "__v916Watched",
+          {
+            value:
+              watched || null,
+            configurable: true,
+            enumerable: false,
+            writable: true
+          }
+        );
+
+        const lifecycle =
+          ponsV2LifecycleRoutingV912(
+            candidate
+          );
+
+        const meta =
+          v916PonsLaunchMeta(
+            candidate
+          );
+
+        try {
+          delete candidate
+            .__v916Watched;
+        } catch {}
+
+        return {
+          candidate,
+          lifecycle,
+          meta
+        };
+      })
+      .filter(row => {
+        const candidate =
+          row.candidate;
+
+        const existing =
+          candidateVerifiedPonsCurveFlowV216(
+            candidate,
+            state
+          );
+
+        return (
+          row.lifecycle
+            ?.preGraduation === true &&
+          row.meta?.verified === true &&
+          isAddress(
+            row.meta?.curve
+          ) &&
+          (
+            row.meta?.pairToken ===
+              ZERO ||
+            isAddress(
+              row.meta?.pairToken
+            )
+          ) &&
+          candidate?.validERC20 ===
+            true &&
+          candidate?.risk?.severeOverride !==
+            true &&
+          String(
+            candidate?.risk?.label || ""
+          ).toUpperCase() !== "HIGH" &&
+          existing?.verified !== true
+        );
+      })
+      .sort(
+        (a, b) =>
+          safeNumber(
+            b?.candidate
+              ?.analysisPriority
+          ) -
+          safeNumber(
+            a?.candidate
+              ?.analysisPriority
+          )
+      );
+
+  const selected =
+    ranked[0] || null;
+
+  if (!selected) {
+    return base;
+  }
+
+  const candidate =
+    selected.candidate;
+
+  const token =
+    normalize(
+      candidate?.address
+    );
+
+  const curve =
+    normalize(
+      selected.meta.curve
+    );
+
+  const pairToken =
+    normalize(
+      selected.meta.pairToken
+    );
+
+  const usdBasis =
+    v916QuoteUsdBasis(
+      state,
+      pairToken
+    );
+
+  if (
+    usdBasis?.verified !== true
+  ) {
+    return {
+      ...base,
+      tokenAddress: token,
+      symbol:
+        candidate?.symbol || null,
+      curve,
+      pairToken,
+      status:
+        "PONS_QUOTE_USD_BASIS_UNVERIFIED_V916"
+    };
+  }
+
+  const head =
+    safeNumber(
+      latestNumber
+    );
+
+  if (!(head > 0)) {
+    return {
+      ...base,
+      tokenAddress: token,
+      symbol:
+        candidate?.symbol || null,
+      curve,
+      pairToken,
+      status:
+        "LATEST_BLOCK_UNVERIFIED_V916"
+    };
+  }
+
+  const launchBlock =
+    safeNumber(
+      selected.meta
+        ?.launchBlock
+    );
+
+  const fromBlock =
+    Math.max(
+      launchBlock > 0
+        ? launchBlock
+        : 0,
+      Math.max(
+        0,
+        head - 1899
+      )
+    );
+
+  const toHex =
+    `0x${Math.trunc(head)
+      .toString(16)}`;
+
+  const fromHex =
+    `0x${Math.trunc(fromBlock)
+      .toString(16)}`;
+
+  const getLogs =
+    await v916RawRpcHttp(
+      env,
+      budget,
+      {
+        jsonrpc: "2.0",
+        id: 91601,
+        method: "eth_getLogs",
+        params: [
+          {
+            address: curve,
+            fromBlock:
+              fromHex,
+            toBlock:
+              toHex,
+            topics: [
+              [
+                PONS_V2_CURVE_BUY_TOPIC_V916,
+                PONS_V2_CURVE_SELL_TOPIC_V916
+              ]
+            ]
+          }
+        ]
+      },
+      "RPC:V916_PONS_CURVE_LOGS"
+    );
+
+  if (!getLogs.ok) {
+    return {
+      ...base,
+      attempted: true,
+      tokenAddress: token,
+      symbol:
+        candidate?.symbol || null,
+      curve,
+      pairToken,
+      fromBlock,
+      toBlock: head,
+      provider:
+        getLogs.provider,
+      requestsUsed: 1,
+      status:
+        getLogs.status ||
+        "PONS_CURVE_LOG_REQUEST_FAILED_V916",
+      error:
+        getLogs.error || null
+    };
+  }
+
+  const logs =
+    Array.isArray(
+      getLogs?.result?.result
+    )
+      ? getLogs.result.result
+      : [];
+
+  if (!logs.length) {
+    return {
+      ...base,
+      attempted: true,
+      tokenAddress: token,
+      symbol:
+        candidate?.symbol || null,
+      curve,
+      pairToken,
+      fromBlock,
+      toBlock: head,
+      provider:
+        getLogs.provider,
+      requestsUsed: 1,
+      logsReturned: 0,
+      status:
+        "NO_PONS_CURVE_EVENTS_IN_WINDOW_V916"
+    };
+  }
+
+  const blockHexes =
+    Array.from(
+      new Set(
+        logs
+          .map(row =>
+            String(
+              row?.blockNumber ||
+              ""
+            ).toLowerCase()
+          )
+          .filter(value =>
+            /^0x[0-9a-f]+$/.test(
+              value
+            )
+          )
+      )
+    )
+      .sort(
+        (a, b) =>
+          Number(
+            BigInt(b)
+          ) -
+          Number(
+            BigInt(a)
+          )
+      )
+      .slice(0, 25);
+
+  const batch =
+    blockHexes.map(
+      (blockHex, index) => ({
+        jsonrpc: "2.0",
+        id:
+          916100 + index,
+        method:
+          "eth_getBlockByNumber",
+        params: [
+          blockHex,
+          false
+        ]
+      })
+    );
+
+  let timestampMap =
+    new Map();
+
+  let timestampRequest =
+    null;
+
+  if (batch.length) {
+    timestampRequest =
+      await v916RawRpcHttp(
+        env,
+        budget,
+        batch,
+        "RPC:V916_PONS_BLOCK_TIMESTAMPS_BATCH"
+      );
+
+    if (
+      timestampRequest.ok &&
+      Array.isArray(
+        timestampRequest.result
+      )
+    ) {
+      const byId =
+        new Map(
+          timestampRequest.result.map(
+            row => [
+              safeNumber(
+                row?.id
+              ),
+              row?.result || null
+            ]
+          )
+        );
+
+      batch.forEach(
+        (request, index) => {
+          const block =
+            byId.get(
+              request.id
+            );
+
+          const timestampHex =
+            block?.timestamp;
+
+          if (
+            /^0x[0-9a-f]+$/i.test(
+              String(
+                timestampHex || ""
+              )
+            )
+          ) {
+            const seconds =
+              Number(
+                BigInt(
+                  timestampHex
+                )
+              );
+
+            if (
+              Number.isFinite(
+                seconds
+              ) &&
+              seconds > 0
+            ) {
+              timestampMap.set(
+                blockHexes[index],
+                seconds * 1000
+              );
+            }
+          }
+        }
+      );
+    }
+  }
+
+  const telemetry =
+    state.ponsCurveTradesV216 &&
+    typeof state.ponsCurveTradesV216 ===
+      "object"
+      ? state.ponsCurveTradesV216
+      : newState().ponsCurveTradesV216;
+
+  state.ponsCurveTradesV216 =
+    telemetry;
+
+  telemetry.recentTrades =
+    Array.isArray(
+      telemetry.recentTrades
+    )
+      ? telemetry.recentTrades
+      : [];
+
+  const known =
+    new Set(
+      telemetry.recentTrades.map(
+        row =>
+          `${normalize(
+            row?.transactionHash
+          )}:${String(
+            row?.logIndex ||
+            ""
+          )}:${String(
+            row?.side ||
+            ""
+          )}:${normalize(
+            row?.token
+          )}`
+      )
+    );
+
+  let decodedTrades = 0;
+  let verifiedUsdTrades = 0;
+  let persistedNewTrades = 0;
+
+  for (const log of logs) {
+    const topic0 =
+      normalize(
+        log?.topics?.[0]
+      );
+
+    const side =
+      topic0 ===
+        PONS_V2_CURVE_BUY_TOPIC_V916
+        ? "buy"
+        : topic0 ===
+            PONS_V2_CURVE_SELL_TOPIC_V916
+          ? "sell"
+          : null;
+
+    if (!side) continue;
+
+    const blockHex =
+      String(
+        log?.blockNumber || ""
+      ).toLowerCase();
+
+    const observedAt =
+      timestampMap.get(
+        blockHex
+      );
+
+    if (
+      !safeNumber(
+        observedAt
+      )
+    ) {
+      continue;
+    }
+
+    const word0 =
+      v916BigIntWord(
+        log?.data,
+        0
+      );
+
+    const word1 =
+      v916BigIntWord(
+        log?.data,
+        1
+      );
+
+    if (
+      word0 === null ||
+      word1 === null
+    ) {
+      continue;
+    }
+
+    decodedTrades++;
+
+    const quoteRaw =
+      side === "buy"
+        ? word0
+        : word1;
+
+    const quoteAmount =
+      v916DecimalFromRaw(
+        quoteRaw,
+        usdBasis.decimals
+      );
+
+    const tradeUsd =
+      Number.isFinite(
+        quoteAmount
+      )
+        ? quoteAmount *
+          usdBasis.usdPerQuote
+        : null;
+
+    if (
+      !Number.isFinite(
+        tradeUsd
+      ) ||
+      tradeUsd <= 0
+    ) {
+      continue;
+    }
+
+    const txHash =
+      normalize(
+        log?.transactionHash
+      );
+
+    if (
+      !/^0x[a-f0-9]{64}$/.test(
+        String(
+          txHash || ""
+        )
+      )
+    ) {
+      continue;
+    }
+
+    const logIndex =
+      String(
+        log?.logIndex ||
+        ""
+      ).toLowerCase();
+
+    const trader =
+      v916AddressFromTopic(
+        log?.topics?.[1]
+      );
+
+    const recipient =
+      v916AddressFromTopic(
+        log?.topics?.[2]
+      );
+
+    const key =
+      `${txHash}:${logIndex}:${side}:${token}`;
+
+    verifiedUsdTrades++;
+
+    if (known.has(key)) {
+      continue;
+    }
+
+    known.add(key);
+
+    telemetry.recentTrades.push({
+      verified: true,
+      source:
+        "DIRECT_RPC_PONS_V2_CURVE_EVENTS_V916",
+      protocol:
+        "pons_v2",
+      protocolFamily:
+        "Pons",
+      network:
+        "Robinhood",
+      token,
+      tokenSymbol:
+        candidate?.symbol || null,
+      curve,
+      quoteToken:
+        pairToken,
+      side,
+      tradeUsd,
+      quoteAmount,
+      trader:
+        trader || null,
+      recipient:
+        recipient || null,
+      transactionHash:
+        txHash,
+      logIndex:
+        logIndex || null,
+      blockNumber:
+        safeNumber(
+          Number(
+            BigInt(
+              blockHex
+            )
+          )
+        ) || null,
+      observedAt,
+      usdVerification:
+        usdBasis.source,
+      exactCandidateMatch:
+        true,
+      v4PoolVerified:
+        false
+    });
+
+    telemetry.lastTradeAt =
+      observedAt;
+
+    telemetry.lastToken =
+      token;
+
+    persistedNewTrades++;
+  }
+
+  telemetry.recentTrades =
+    telemetry.recentTrades.slice(
+      -500
+    );
+
+  telemetry.totalVerifiedTrades =
+    safeNumber(
+      telemetry.totalVerifiedTrades
+    ) +
+    persistedNewTrades;
+
+  telemetry.lastStatus =
+    persistedNewTrades > 0
+      ? "VERIFIED_DIRECT_RPC_PONS_V2_TRADES_FOUND_V916"
+      : verifiedUsdTrades > 0
+        ? "DIRECT_RPC_PONS_V2_TRADES_ALREADY_PERSISTED_V916"
+        : "DIRECT_RPC_PONS_V2_EVENTS_NO_VERIFIED_USD_ROWS_V916";
+
+  telemetry.lastDirectRpcV916 = {
+    tokenAddress: token,
+    curve,
+    pairToken,
+    fromBlock,
+    toBlock: head,
+    logsReturned:
+      logs.length,
+    decodedTrades,
+    verifiedUsdTrades,
+    persistedNewTrades,
+    timestampsRequested:
+      blockHexes.length,
+    timestampsVerified:
+      timestampMap.size,
+    provider:
+      getLogs.provider,
+    requestsUsed:
+      1 +
+      (
+        timestampRequest
+          ? 1
+          : 0
+      ),
+    at:
+      Date.now()
+  };
+
+  return {
+    ...base,
+    attempted: true,
+    tokenAddress: token,
+    symbol:
+      candidate?.symbol || null,
+    curve,
+    pairToken,
+    fromBlock,
+    toBlock: head,
+    logsReturned:
+      logs.length,
+    decodedTrades,
+    verifiedUsdTrades,
+    timestampsRequested:
+      blockHexes.length,
+    timestampsVerified:
+      timestampMap.size,
+    provider:
+      getLogs.provider,
+    requestsUsed:
+      1 +
+      (
+        timestampRequest
+          ? 1
+          : 0
+      ),
+    persistedNewTrades,
+    status:
+      telemetry.lastStatus,
+    quoteUsdBasis:
+      usdBasis.source
+  };
+}
+
 /* =========================================================
    V216 VERIFIED PONS V2 CURVE FLOW
    ========================================================= */
@@ -78060,7 +79244,15 @@ function candidateVerifiedPonsCurveFlowV216(
               ) * 100
             : null,
         source:
-          "BITQUERY_TRADING_PONS_V2_V216"
+          valid.some(
+            trade =>
+              String(
+                trade?.source || ""
+              ) ===
+                "DIRECT_RPC_PONS_V2_CURVE_EVENTS_V916"
+          )
+            ? "DIRECT_RPC_PONS_V2_CURVE_EVENTS_V916"
+            : "BITQUERY_TRADING_PONS_V2_V216"
       };
     };
 
@@ -78094,7 +79286,15 @@ function candidateVerifiedPonsCurveFlowV216(
       valid.length,
     windows,
     source:
-      "BITQUERY_TRADING_PONS_V2_V216",
+      valid.some(
+        trade =>
+          String(
+            trade?.source || ""
+          ) ===
+            "DIRECT_RPC_PONS_V2_CURVE_EVENTS_V916"
+      )
+        ? "DIRECT_RPC_PONS_V2_CURVE_EVENTS_V916"
+        : "BITQUERY_TRADING_PONS_V2_V216",
     status:
       valid.length
         ? "VERIFIED_PONS_CURVE_FLOW_AVAILABLE"
@@ -109095,6 +110295,42 @@ for (
   }
 
   /*
+   * V916: when Bitquery is plan/quota blocked, use the verified Pons curve
+   * address already carried by the candidate and read CurveBuy/CurveSell
+   * directly from chain. The result is persisted into the existing V216 store
+   * before V216/V218 candidate recomputation below.
+   */
+  const directPonsCurveFlowV916 =
+    await runDirectPonsCurveFlowV916(
+      env,
+      state,
+      budget,
+      candidates,
+      latestNumber
+    );
+
+  state.directPonsCurveFlowDiagnosticV916 = {
+    ...directPonsCurveFlowV916,
+    recordedAt:
+      new Date().toISOString(),
+    bitqueryStatus:
+      bagsDiscoveryV210?.status ||
+      state?.bagsDiscoveryV210
+        ?.lastStatus ||
+      null,
+    hardRequestLimit:
+      MAX_EXTERNAL_REQUESTS,
+    analysisLimit:
+      ANALYSIS_REQUEST_LIMIT,
+    noScoringThresholdChange:
+      true,
+    noRiskThresholdChange:
+      true,
+    noTelegramThresholdChange:
+      true
+  };
+
+  /*
    * V212: zero-request candidate-specific bridge.
    * This is intentionally applied after all discovery/enrichment so Telegram
    * sees the freshest already-verified V179 records from this scan.
@@ -131675,6 +132911,24 @@ function evidenceAuditTelegramMessageV727(state) {
         `Current scan collector: attempted <b>NO</b> · PoolId <code>${escapeHtml(currentCollector895.poolId || "NONE")}</code> · ${escapeHtml(currentCollector895.classification || "UNVERIFIED")}`
       );
     }
+  }
+
+  const ponsDirectV916 =
+    state?.directPonsCurveFlowDiagnosticV916 || null;
+
+  if (ponsDirectV916) {
+    lines.push(
+      "",
+      "🧬 <b>Direct on-chain Pons V2 curve flow — V916</b>",
+      `Recorded: <code>${escapeHtml(ponsDirectV916.recordedAt || "UNVERIFIED")}</code>`,
+      `Target: <code>${escapeHtml(ponsDirectV916.tokenAddress || "NONE")}</code> ${escapeHtml(ponsDirectV916.symbol || "")} · curve <code>${escapeHtml(ponsDirectV916.curve || "NONE")}</code>`,
+      `Pair token: <code>${escapeHtml(ponsDirectV916.pairToken || "NONE")}</code> · USD basis <b>${escapeHtml(ponsDirectV916.quoteUsdBasis || "NONE")}</b>`,
+      `RPC window: ${fmt(ponsDirectV916.fromBlock)} → ${fmt(ponsDirectV916.toBlock)} · provider <b>${escapeHtml(ponsDirectV916.provider || "NONE")}</b> · requests ${fmt(ponsDirectV916.requestsUsed)}`,
+      `Curve logs: ${fmt(ponsDirectV916.logsReturned)} · decoded ${fmt(ponsDirectV916.decodedTrades)} · verified USD ${fmt(ponsDirectV916.verifiedUsdTrades)} · persisted new ${fmt(ponsDirectV916.persistedNewTrades)}`,
+      `Block timestamps: requested ${fmt(ponsDirectV916.timestampsRequested)} · verified ${fmt(ponsDirectV916.timestampsVerified)}`,
+      `Bitquery state: <b>${escapeHtml(ponsDirectV916.bitqueryStatus || "NONE")}</b>`,
+      `Status: <b>${escapeHtml(ponsDirectV916.status || "NONE")}</b>`
+    );
   }
 
   const ponsFlowV913 =
