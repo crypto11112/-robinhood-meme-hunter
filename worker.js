@@ -1,4 +1,16 @@
 /**
+ * V913 PONS V2 CURVE-FLOW HANDOFF DIAGNOSTIC:
+ * - builds directly from deployed V912;
+ * - adds zero-request telemetry to isolate why verified pre-graduation Pons V2
+ *   candidates can be correctly routed to the bonding curve yet still show
+ *   "Pons flow NOT YET VERIFIED";
+ * - traces existing V217 target selection -> shared Bitquery V216 response ->
+ *   verified persisted curve rows -> candidateVerifiedPonsCurveFlowV216 ->
+ *   V218 recompute;
+ * - makes no provider request, routing, scoring, risk, Momentum, Telegram,
+ *   qualification, threshold or request-budget change.
+ */
+/**
  * V912 PONS V2 LIFECYCLE-AWARE ROUTING FIX:
  * - builds directly from deployed V911;
  * - fixes the V911-proven waste where a freshly verified Pons V2 bonding-curve
@@ -8082,7 +8094,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V912";
+const VERSION = "V913";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -78061,6 +78073,291 @@ function candidateVerifiedPonsCurveFlowV216(
   };
 }
 
+
+/* =========================================================
+   V913 PONS V2 CURVE-FLOW HANDOFF DIAGNOSTIC
+   ========================================================= */
+
+function buildPonsCurveFlowDiagnosticV913(
+  state,
+  candidates,
+  bagsDiscoveryV210
+) {
+  const nowMs = Date.now();
+
+  const shared =
+    bagsDiscoveryV210?.ponsCurveTradesV216 || {};
+
+  const targetTokens =
+    Array.isArray(shared?.targetTokens)
+      ? shared.targetTokens
+          .map(normalize)
+          .filter(isAddress)
+      : [];
+
+  const targetSet =
+    new Set(targetTokens);
+
+  const persistedRows =
+    Array.isArray(state?.ponsCurveTradesV216?.recentTrades)
+      ? state.ponsCurveTradesV216.recentTrades
+      : [];
+
+  const ponsCandidates =
+    (Array.isArray(candidates) ? candidates : [])
+      .map(candidate => {
+        const lifecycle =
+          ponsV2LifecycleRoutingV912(candidate);
+
+        if (lifecycle.verifiedPonsV2 !== true) {
+          return null;
+        }
+
+        const address =
+          normalize(candidate?.address);
+
+        const candidateRows =
+          persistedRows.filter(row =>
+            row?.verified === true &&
+            normalize(row?.token) === address &&
+            row?.protocol === "pons_v2"
+          );
+
+        const validCandidateRows =
+          candidateRows.filter(row =>
+            (row?.side === "buy" || row?.side === "sell") &&
+            Number.isFinite(Number(row?.tradeUsd)) &&
+            Number(row?.tradeUsd) > 0 &&
+            safeNumber(row?.observedAt) > 0
+          );
+
+        const latestObservedAt =
+          validCandidateRows.reduce(
+            (max, row) =>
+              Math.max(max, safeNumber(row?.observedAt)),
+            0
+          );
+
+        const flow =
+          candidate?.ponsCurveFlowV216 ||
+          candidateVerifiedPonsCurveFlowV216(
+            candidate,
+            state
+          );
+
+        const windows =
+          flow?.windows || {};
+
+        const verifiedWindowNames =
+          Object.entries(windows)
+            .filter(([, row]) => row?.verified === true)
+            .map(([name]) => name);
+
+        const sameResponseTrades =
+          Array.isArray(shared?.trades)
+            ? shared.trades.filter(row =>
+                normalize(row?.token) === address
+              ).length
+            : 0;
+
+        let diagnosis;
+
+        if (flow?.verified === true) {
+          diagnosis =
+            "VERIFIED_PONS_CURVE_FLOW_AVAILABLE_V913";
+        } else if (!targetSet.has(address)) {
+          diagnosis =
+            "PONS_CANDIDATE_NOT_IN_V217_TARGET_LIST_V913";
+        } else if (
+          safeNumber(shared?.rowsSeen) === 0
+        ) {
+          diagnosis =
+            "TARGETED_BUT_BITQUERY_RETURNED_ZERO_PONS_TRADES_V913";
+        } else if (
+          safeNumber(shared?.verifiedTrades) === 0
+        ) {
+          diagnosis =
+            "BITQUERY_ROWS_RETURNED_BUT_NONE_PASSED_V216_VERIFICATION_V913";
+        } else if (
+          sameResponseTrades === 0 &&
+          validCandidateRows.length === 0
+        ) {
+          diagnosis =
+            "VERIFIED_PONS_TRADES_EXIST_BUT_NOT_FOR_THIS_TARGET_V913";
+        } else if (
+          validCandidateRows.length > 0 &&
+          flow?.verified !== true
+        ) {
+          diagnosis =
+            "CANDIDATE_MATCHED_VALID_ROWS_PRESENT_BUT_FLOW_NOT_PROMOTED_V913";
+        } else {
+          diagnosis =
+            "PONS_FLOW_HANDOFF_UNRESOLVED_V913";
+        }
+
+        return {
+          address,
+          symbol:
+            candidate?.symbol ||
+            candidate?.validation?.symbol ||
+            null,
+          preGraduation:
+            lifecycle.preGraduation === true,
+          graduated:
+            lifecycle.graduated === true,
+          targetedV217:
+            targetSet.has(address),
+          sameResponseTradesV216:
+            sameResponseTrades,
+          persistedCandidateRows:
+            candidateRows.length,
+          validPersistedCandidateRows:
+            validCandidateRows.length,
+          latestTradeAgeMs:
+            latestObservedAt > 0
+              ? Math.max(0, nowMs - latestObservedAt)
+              : null,
+          candidateFlowVerified:
+            flow?.verified === true,
+          candidateFlowRecordCount:
+            safeNumber(flow?.recordCount),
+          verifiedWindows:
+            verifiedWindowNames,
+          v218Recomputed:
+            candidate?.momentumPonsRecomputedV218?.applied === true,
+          diagnosis
+        };
+      })
+      .filter(Boolean);
+
+  const attempted =
+    bagsDiscoveryV210?.attempted === true;
+
+  const httpStatus =
+    safeNumber(
+      bagsDiscoveryV210?.httpStatus ||
+      state?.bagsDiscoveryV210?.lastHttpStatus
+    ) || null;
+
+  let overallDiagnosis;
+
+  if (
+    bagsDiscoveryV210?.status === "HTTP_402" ||
+    httpStatus === 402
+  ) {
+    overallDiagnosis =
+      "BITQUERY_PLAN_OR_QUOTA_BLOCKED_V913";
+  } else if (
+    bagsDiscoveryV210?.status &&
+    String(bagsDiscoveryV210.status).startsWith("HTTP_")
+  ) {
+    overallDiagnosis =
+      "BITQUERY_SHARED_REQUEST_HTTP_FAILURE_V913";
+  } else if (
+    ponsCandidates.some(row =>
+      row.candidateFlowVerified === true
+    )
+  ) {
+    overallDiagnosis =
+      "AT_LEAST_ONE_PONS_FLOW_VERIFIED_V913";
+  } else if (
+    ponsCandidates.length > 0 &&
+    ponsCandidates.every(row =>
+      row.targetedV217 !== true
+    )
+  ) {
+    overallDiagnosis =
+      "CURRENT_PONS_CANDIDATES_NOT_INCLUDED_IN_V217_TARGETS_V913";
+  } else if (
+    ponsCandidates.some(row =>
+      row.diagnosis ===
+        "TARGETED_BUT_BITQUERY_RETURNED_ZERO_PONS_TRADES_V913"
+    )
+  ) {
+    overallDiagnosis =
+      "TARGETED_PONS_CANDIDATE_BUT_NO_TRADING_ROWS_RETURNED_V913";
+  } else if (
+    ponsCandidates.some(row =>
+      row.diagnosis ===
+        "BITQUERY_ROWS_RETURNED_BUT_NONE_PASSED_V216_VERIFICATION_V913"
+    )
+  ) {
+    overallDiagnosis =
+      "PONS_ROWS_RETURNED_BUT_V216_VERIFICATION_REJECTED_ALL_V913";
+  } else {
+    overallDiagnosis =
+      "PONS_CURVE_FLOW_REQUIRES_NEXT_NARROW_FIX_V913";
+  }
+
+  return {
+    version: "V913",
+    runtimeVersion: VERSION,
+    recordedAt: new Date().toISOString(),
+    sharedRequest: {
+      attempted,
+      status:
+        bagsDiscoveryV210?.status ||
+        state?.bagsDiscoveryV210?.lastStatus ||
+        null,
+      httpStatus,
+      externalRequestsUsed:
+        safeNumber(
+          bagsDiscoveryV210?.externalRequestsUsed
+        )
+    },
+    v217Targeting: {
+      targetTokenCount:
+        safeNumber(shared?.targetTokenCount),
+      targetTokens:
+        targetTokens.slice(0, 20),
+      currentScanLaunchesExcludedUntilNextScan:
+        shared?.currentScanLaunchesExcludedUntilNextScan === true
+    },
+    v216Response: {
+      rowsSeen:
+        safeNumber(shared?.rowsSeen),
+      verifiedTrades:
+        safeNumber(shared?.verifiedTrades),
+      newlyObserved:
+        safeNumber(shared?.newlyObserved),
+      verifiedPonsTokenSetSize:
+        safeNumber(shared?.verifiedPonsTokenSetSize),
+      status:
+        shared?.status || null
+    },
+    cumulative: {
+      persistedRecentTrades:
+        persistedRows.length,
+      totalRowsSeen:
+        safeNumber(
+          state?.ponsCurveTradesV216?.totalRowsSeen
+        ),
+      totalVerifiedTrades:
+        safeNumber(
+          state?.ponsCurveTradesV216?.totalVerifiedTrades
+        ),
+      lastStatus:
+        state?.ponsCurveTradesV216?.lastStatus || null,
+      lastTradeAt:
+        safeNumber(
+          state?.ponsCurveTradesV216?.lastTradeAt
+        ) || null,
+      lastToken:
+        normalize(
+          state?.ponsCurveTradesV216?.lastToken
+        ) || null
+    },
+    candidates:
+      ponsCandidates.slice(0, 12),
+    diagnosis:
+      overallDiagnosis,
+    zeroProviderRequestsAdded: true,
+    scoringChanged: false,
+    qualificationChanged: false,
+    requestCeilingChanged: false
+  };
+}
+
 /* =========================================================
    V212 CANDIDATE-MATCHED VERIFIED ON-CHAIN USD → TELEGRAM
    ========================================================= */
@@ -109059,6 +109356,13 @@ for (
     }
   }
 
+  state.ponsCurveFlowHandoffDiagnosticV913 =
+    buildPonsCurveFlowDiagnosticV913(
+      state,
+      candidates,
+      bagsDiscoveryV210
+    );
+
   /*
    * V810/V809 diagnostic-only: expose the post-V254/post-V212 authoritative score
    * state for the most recent recovered exact-USD candidate. This adds zero
@@ -131342,6 +131646,38 @@ function evidenceAuditTelegramMessageV727(state) {
     ) {
       lines.push(
         `Current scan collector: attempted <b>NO</b> · PoolId <code>${escapeHtml(currentCollector895.poolId || "NONE")}</code> · ${escapeHtml(currentCollector895.classification || "UNVERIFIED")}`
+      );
+    }
+  }
+
+  const ponsFlowV913 =
+    state?.ponsCurveFlowHandoffDiagnosticV913 || null;
+
+  if (ponsFlowV913) {
+    const sq = ponsFlowV913.sharedRequest || {};
+    const tg = ponsFlowV913.v217Targeting || {};
+    const v216 = ponsFlowV913.v216Response || {};
+    const cum = ponsFlowV913.cumulative || {};
+
+    lines.push(
+      "",
+      "🧬 <b>Pons V2 curve-flow handoff diagnostic — V913</b>",
+      `Recorded: <code>${escapeHtml(ponsFlowV913.recordedAt || "UNVERIFIED")}</code>`,
+      `Shared Bitquery request — attempted ${sq.attempted ? "YES" : "NO"} · status <b>${escapeHtml(sq.status || "NONE")}</b> · HTTP ${sq.httpStatus ?? "N/A"} · requests ${fmt(sq.externalRequestsUsed)}`,
+      `V217 targets — ${fmt(tg.targetTokenCount)} · current-scan launches deferred one scan ${tg.currentScanLaunchesExcludedUntilNextScan ? "YES" : "NO"}`,
+      `V216 response — rows ${fmt(v216.rowsSeen)} · verified trades ${fmt(v216.verifiedTrades)} · newly observed ${fmt(v216.newlyObserved)} · verified-token set ${fmt(v216.verifiedPonsTokenSetSize)} · status <b>${escapeHtml(v216.status || "NONE")}</b>`,
+      `Persisted V216 — recent trades ${fmt(cum.persistedRecentTrades)} · total rows ${fmt(cum.totalRowsSeen)} · total verified ${fmt(cum.totalVerifiedTrades)} · last status <b>${escapeHtml(cum.lastStatus || "NONE")}</b>`,
+      `Diagnosis: <b>${escapeHtml(ponsFlowV913.diagnosis || "NONE")}</b>`
+    );
+
+    for (
+      const row
+      of Array.isArray(ponsFlowV913.candidates)
+        ? ponsFlowV913.candidates
+        : []
+    ) {
+      lines.push(
+        `• <code>${escapeHtml(row.address || "NONE")}</code> ${escapeHtml(row.symbol || "")} · target V217 ${row.targetedV217 ? "YES" : "NO"} · response trades ${fmt(row.sameResponseTradesV216)} · persisted valid ${fmt(row.validPersistedCandidateRows)} · flow ${row.candidateFlowVerified ? "VERIFIED" : "NO"} · windows ${escapeHtml((row.verifiedWindows || []).join(",") || "NONE")} · V218 recompute ${row.v218Recomputed ? "YES" : "NO"} · <b>${escapeHtml(row.diagnosis || "NONE")}</b>`
       );
     }
   }
