@@ -1,4 +1,13 @@
 /**
+ * V934 GUARANTEED-END-OF-SCAN TELEGRAM AUDIT PERSISTENCE:
+ * - preserves V932 final-candidate audit content and all V933 fallbacks;
+ * - moves the dedicated snapshot write to immediately after the authoritative main-state write;
+ * - serializes with native JSON.stringify into a new V934-specific KV key;
+ * - exposes saved/binding/error telemetry directly in the /scan response;
+ * - /telegramaudit reads V934 dedicated KV first, then V933/main-state fallbacks;
+ * - diagnostic only: no scoring, qualification, Telegram threshold, provider-request, or scanner-budget changes.
+ */
+/**
  * V933 DURABLE POST-RECOVERY TELEGRAM QUALIFICATION AUDIT:
  * - preserves the V932 final-candidate audit logic;
  * - persists the compact audit snapshot under its own KV key so normal main-state races cannot erase it;
@@ -8332,7 +8341,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V933";
+const VERSION = "V934";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -114987,22 +114996,11 @@ for (
     };
   }
 
-  /* V932: diagnostic-only snapshot of the exact final candidate objects
-   * immediately before Telegram qualification. */
+  /* V932/V934: capture the exact final candidate objects immediately before
+   * Telegram qualification. V934 deliberately delays the dedicated KV write
+   * until the guaranteed end-of-scan persistence path. */
   const finalTelegramQualificationAuditV932 =
     captureFinalTelegramQualificationAuditV932(state, candidates);
-  const finalTelegramQualificationAuditPersistenceV933 =
-    await persistFinalTelegramQualificationAuditV933(
-      env,
-      finalTelegramQualificationAuditV932
-    );
-  state.finalTelegramQualificationAuditPersistenceV933 = {
-    saved: finalTelegramQualificationAuditPersistenceV933?.saved === true,
-    binding: finalTelegramQualificationAuditPersistenceV933?.binding || null,
-    error: finalTelegramQualificationAuditPersistenceV933?.error || null,
-    recordedAt: finalTelegramQualificationAuditV932?.recordedAt || null,
-    dedicatedKey: FINAL_TELEGRAM_QUALIFICATION_AUDIT_KEY_V933
-  };
 
   /* =======================================================
      TELEGRAM
@@ -116802,6 +116800,15 @@ for (
     await writeState(
       env,
       state
+    );
+
+  /* V934: guaranteed end-of-scan durable Telegram qualification snapshot.
+   * This happens only after the authoritative main-state write succeeds, so
+   * a completed scan can prove whether the dedicated audit write succeeded. */
+  const finalTelegramQualificationAuditPersistenceV934 =
+    await persistFinalTelegramQualificationAuditV934(
+      env,
+      finalTelegramQualificationAuditV932
     );
 
   const discoveryRpc =
@@ -120959,6 +120966,16 @@ for (
             budget
           )
       }
+    },
+
+    finalTelegramQualificationAuditV934: {
+      captured: Boolean(finalTelegramQualificationAuditV932),
+      candidateCount: safeNumber(finalTelegramQualificationAuditV932?.candidateCount),
+      saved: finalTelegramQualificationAuditPersistenceV934?.saved === true,
+      binding: finalTelegramQualificationAuditPersistenceV934?.binding || null,
+      error: finalTelegramQualificationAuditPersistenceV934?.error || null,
+      dedicatedKey: FINAL_TELEGRAM_QUALIFICATION_AUDIT_KEY_V934,
+      recordedAt: finalTelegramQualificationAuditV932?.recordedAt || null
     },
 
     qualifyingCandidates:
@@ -136497,6 +136514,49 @@ function scoreAuditTelegramMessageV725(state) {
 
 
 
+const FINAL_TELEGRAM_QUALIFICATION_AUDIT_KEY_V934 = "robinhood-meme-hunter-v934-final-telegram-qualification-audit";
+
+async function persistFinalTelegramQualificationAuditV934(env, snapshot) {
+  const { kv, binding } = getKV(env);
+  if (!kv || !snapshot || typeof snapshot !== "object") {
+    return { saved:false, binding:binding || null, error:!kv ? "KV_NOT_CONFIGURED_V934" : "SNAPSHOT_UNAVAILABLE_V934" };
+  }
+  try {
+    const payload = JSON.stringify({
+      schemaVersion:"V934",
+      savedAt:new Date().toISOString(),
+      snapshot
+    });
+    if (!payload || payload.length < 2) {
+      return { saved:false, binding, error:"EMPTY_SERIALIZED_SNAPSHOT_V934" };
+    }
+    await kv.put(FINAL_TELEGRAM_QUALIFICATION_AUDIT_KEY_V934, payload);
+    return { saved:true, binding, error:null, bytes:payload.length };
+  } catch (error) {
+    return { saved:false, binding, error:errorString(error) };
+  }
+}
+
+async function loadFinalTelegramQualificationAuditV934(env, state) {
+  const { kv } = getKV(env);
+  if (kv) {
+    try {
+      const raw = await kv.get(FINAL_TELEGRAM_QUALIFICATION_AUDIT_KEY_V934);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        const snapshot = parsed?.snapshot && typeof parsed.snapshot === "object" ? parsed.snapshot : parsed;
+        if (snapshot && typeof snapshot === "object") {
+          return { snapshot, source:"DEDICATED_KV_V934", savedAt:parsed?.savedAt || null };
+        }
+      }
+    } catch (_) {}
+  }
+  const old = await loadFinalTelegramQualificationAuditV933(env, state);
+  if (old?.snapshot) return old;
+  const fallback = finalTelegramQualificationAuditSnapshotV932(state);
+  return { snapshot:fallback, source:fallback ? "MAIN_STATE_FALLBACK_V932" : "NONE" };
+}
+
 const FINAL_TELEGRAM_QUALIFICATION_AUDIT_KEY_V933 = "robinhood-meme-hunter-v933-final-telegram-qualification-audit";
 
 async function persistFinalTelegramQualificationAuditV933(env, snapshot) {
@@ -136678,6 +136738,66 @@ function captureFinalTelegramQualificationAuditV932(state, candidates) {
 
 function finalTelegramQualificationAuditSnapshotV932(state) {
   return state?.finalTelegramQualificationAuditV932 || state?.qualificationAuditV663?.lastFinalTelegramQualificationAuditV932 || null;
+}
+
+async function finalTelegramQualificationAuditMessageV934(env, state) {
+  const loaded = await loadFinalTelegramQualificationAuditV934(env, state);
+  const d = loaded?.snapshot || null;
+  const source = loaded?.source || "NONE";
+  const fmt = v => safeNumber(v).toLocaleString("en-GB");
+  if (!d) {
+    return [
+      "📨 <b>Post-Recovery Telegram Qualification Audit — V934</b>",
+      "",
+      "⏳ No durable final-candidate snapshot yet. Complete one V934 live scan, then use /telegramaudit again.",
+      "",
+      "<i>Read-only command. Zero provider requests, zero state writes from this command, no scoring or Telegram threshold changes.</i>"
+    ].join("\n");
+  }
+  const lines = [
+    "📨 <b>Post-Recovery Telegram Qualification Audit — V934</b>",
+    "",
+    `Snapshot source: <b>${escapeHtml(source)}</b>`,
+    `Recorded: <code>${escapeHtml(d.recordedAt || "UNVERIFIED")}</code>`,
+    `Runtime: <b>${escapeHtml(d.runtimeVersion || d.version || "UNVERIFIED")}</b>`,
+    `Final candidates: <b>${fmt(d.candidateCount)}</b> · qualified <b>${fmt(d.qualifiedCount)}</b> · rejected <b>${fmt(d.rejectedCount)}</b>`,
+    `Thresholds: Opportunity ≥${fmt(d?.thresholds?.opportunity)} · Confidence ≥${fmt(d?.thresholds?.confidence)} · Risk ≤${fmt(d?.thresholds?.maxRisk)}`,
+    "",
+    "🚧 <b>Final qualification pressure</b>",
+    `• Opportunity below threshold: <b>${fmt(d.opportunityBelow60)}</b>`,
+    `• Confidence below threshold: <b>${fmt(d.confidenceBelow55)}</b>`,
+    `• Risk rejected/unverified: <b>${fmt(d.riskRejected)}</b>`,
+    `• Near-threshold, risk-acceptable rejects: <b>${fmt(d.otherwiseNearThreshold)}</b>`,
+    `• Score parity mismatches on final objects: <b>${fmt(d.scoreParityMismatchRows)}</b>`,
+    `• Verified evidence present but score-view missing: <b>${fmt(d.verifiedButMissingRows)}</b>`
+  ];
+  if (Array.isArray(d.firstBlockerCounts) && d.firstBlockerCounts.length) {
+    lines.push("", "🧱 <b>First Telegram blockers</b>");
+    for (const row of d.firstBlockerCounts.slice(0,6)) lines.push(`• ${escapeHtml(row.reason)}: <b>${fmt(row.count)}</b>`);
+  }
+  if (Array.isArray(d.missingScoreGroupCounts) && d.missingScoreGroupCounts.length) {
+    lines.push("", "🧩 <b>Missing score evidence on FINAL objects</b>");
+    for (const row of d.missingScoreGroupCounts.slice(0,7)) lines.push(`• ${escapeHtml(row.reason)}: <b>${fmt(row.count)}</b>`);
+  }
+  if (Array.isArray(d.topRejected) && d.topRejected.length) {
+    lines.push("", "🔎 <b>Best rejected candidates after recovery</b>");
+    for (const row of d.topRejected.slice(0,6)) {
+      const missing = (row.missingScoreGroups || []).join(",") || "NONE";
+      const stale = (row.verifiedEvidencePresentButScoreViewMissing || []).join(",") || "NONE";
+      const reasons = (row.telegramReasons || []).join(" | ") || "NONE";
+      lines.push(
+        `• <b>${escapeHtml(row.symbol || "UNKNOWN")}</b> <code>${escapeHtml(shortAddress(row.address || ""))}</code> — Opp <b>${fmt(row.opportunity)}</b> · Conf <b>${fmt(row.confidence)}</b> · Mom <b>${fmt(row.momentum)}</b> · Risk <b>${row.riskVerified ? fmt(row.riskScore) : "UNVERIFIED"}</b>`,
+        `  ↳ blockers: ${escapeHtml(reasons)}`,
+        `  ↳ missing score groups: ${escapeHtml(missing)}`,
+        `  ↳ verified-but-score-missing: ${escapeHtml(stale)} · parity Δ ${fmt(row.scoreParityDelta)}`
+      );
+    }
+  }
+  lines.push(
+    "",
+    "<i>Diagnostic only. Snapshot is persisted at the guaranteed end-of-scan path under a dedicated KV key in V934. /telegramaudit itself makes zero provider requests and zero writes; scoring and Telegram thresholds are unchanged.</i>"
+  );
+  return lines.join("\n");
 }
 
 async function finalTelegramQualificationAuditMessageV933(env, state) {
@@ -167348,16 +167468,16 @@ async function telegramCommandReplyV271(
     parsed.command === "/telegramaudit" ||
     parsed.command === "/qualstarve"
   ) {
-    reply = await finalTelegramQualificationAuditMessageV933(env, state);
+    reply = await finalTelegramQualificationAuditMessageV934(env, state);
 
     if (diagnosticV273) {
-      const loadedAuditV933 = await loadFinalTelegramQualificationAuditV933(env, state);
-      const auditV932 = loadedAuditV933?.snapshot || null;
+      const loadedAuditV934 = await loadFinalTelegramQualificationAuditV934(env, state);
+      const auditV932 = loadedAuditV934?.snapshot || null;
       diagnosticV273.finalTelegramQualificationAuditV932 = {
         scannerBudgetConsumed: false,
         externalProviderRequests: 0,
         stateWrites: 0,
-        snapshotSource: loadedAuditV933?.source || "NONE",
+        snapshotSource: loadedAuditV934?.source || "NONE",
         candidateCount: safeNumber(auditV932?.candidateCount),
         qualifiedCount: safeNumber(auditV932?.qualifiedCount),
         rejectedCount: safeNumber(auditV932?.rejectedCount),
