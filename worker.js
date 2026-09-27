@@ -1,4 +1,19 @@
 /**
+ * V930 PONS OLD/UNVERIFIED ONE-TIME LIVE BOOTSTRAP:
+ * - builds directly from deployed V929;
+ * - fixes the live-proven V922 dead-end where an otherwise eligible pre-graduation
+ *   Pons V2 candidate with verified launch/curve metadata but no prior V919 live scan
+ *   was classified old and could never enter V916/V919 to establish current curve flow;
+ * - preserves the 100,000-block fresh-launch gate for normal RECENT_LIVE priority;
+ * - allows ONE bootstrap RECENT_LIVE probe for an old eligible token only when its
+ *   Pons flow is still unverified and no successful V930 bootstrap has completed;
+ * - after a successful bootstrap with no verified flow, the token is not allowed to
+ *   fall straight into old BACKGROUND_HISTORY, preventing an unbounded stale-history drain;
+ * - successful verified flow can continue through the existing V918/V919/V216/V218 paths;
+ * - no new request capacity, provider, scoring, risk, Telegram, V4 routing, Gecko,
+ *   qualification threshold or hard 48-request-cap changes.
+ */
+/**
  * V929 LIVE V887/V923 PRIORITY OVER BACKGROUND CONTINUATION:
  * - builds directly from deployed V928;
  * - fixes the live-proven V928 routing collision where a safe V927 background
@@ -8302,7 +8317,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V929";
+const VERSION = "V930";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -79726,7 +79741,17 @@ async function runDirectPonsCurveFlowV916(
           liveEntry?.lastScannedHead
         );
 
+      /*
+       * V930: a one-time old/unverified bootstrap that completed without
+       * establishing verified Pons flow must not immediately become a giant
+       * stale BACKGROUND_HISTORY job on the following scan.
+       */
+      const completedBootstrapWithoutFlowV930 =
+        liveEntry?.bootstrapCompletedV930 === true &&
+        row?.existingFlow?.verified !== true;
+
       return (
+        !completedBootstrapWithoutFlowV930 &&
         priorLiveHead > 0 &&
         headForRoutingV922 > 0 &&
         headForRoutingV922 -
@@ -79735,12 +79760,47 @@ async function runDirectPonsCurveFlowV916(
       );
     });
 
+  /*
+   * V930: V922 previously had no route for an old but otherwise-valid Pons
+   * candidate which had never received a V919 live scan. Give exactly one
+   * such unverified-flow token a RECENT_LIVE bootstrap opportunity. The
+   * normal fresh-launch lane remains higher priority.
+   */
+  const oldUnverifiedBootstrapRankedV930 =
+    oldRowsV922.filter(row => {
+      const token =
+        normalize(
+          row?.candidate?.address
+        );
+
+      const liveEntry =
+        state?.ponsCurveTradesV216
+          ?.directRpcLiveV919
+          ?.entries?.[token];
+
+      const priorLiveHead =
+        safeNumber(
+          liveEntry?.lastScannedHead
+        );
+
+      return (
+        row?.existingFlow?.verified !== true &&
+        !(priorLiveHead > 0) &&
+        liveEntry?.bootstrapCompletedV930 !== true
+      );
+    });
+
   const oldLiveRefreshDueSkippedV922 =
-    oldRowsV922.length -
-    backgroundHistoryRankedV922.length;
+    Math.max(
+      0,
+      oldRowsV922.length -
+        backgroundHistoryRankedV922.length -
+        oldUnverifiedBootstrapRankedV930.length
+    );
 
   const selected =
     recentLiveRankedV922[0] ||
+    oldUnverifiedBootstrapRankedV930[0] ||
     backgroundHistoryRankedV922[0] ||
     null;
 
@@ -79750,7 +79810,10 @@ async function runDirectPonsCurveFlowV916(
           recentLiveRankedV922
             .includes(selected)
             ? "FRESH_RECENT_LIVE_ELIGIBLE_V922"
-            : "OLD_BACKGROUND_HISTORY_ONLY_V922"
+            : oldUnverifiedBootstrapRankedV930
+                .includes(selected)
+              ? "OLD_UNVERIFIED_FLOW_BOOTSTRAP_V930"
+              : "OLD_BACKGROUND_HISTORY_ONLY_V922"
         )
       : null;
 
@@ -79766,6 +79829,8 @@ async function runDirectPonsCurveFlowV916(
       recentLiveRankedV922.length,
     backgroundHistoryEligible:
       backgroundHistoryRankedV922.length,
+    oldUnverifiedBootstrapEligibleV930:
+      oldUnverifiedBootstrapRankedV930.length,
     oldLiveRefreshDueSkipped:
       Math.max(
         0,
@@ -79887,20 +79952,25 @@ async function runDirectPonsCurveFlowV916(
                   oldLiveRefreshDueSkippedV922 > 0
                     ? "OLD_PONS_PRESENT_BUT_RECENT_LIVE_BLOCKED_BY_V922"
                     : (
-                        safeNumber(
-                          selected?.meta
-                            ?.launchBlock
-                        ) > 0 &&
-                        safeNumber(
-                          latestNumber
-                        ) -
-                          safeNumber(
-                            selected?.meta
-                              ?.launchBlock
-                          ) >
-                          100000
-                          ? "SELECTED_OLD_PONS_FOR_BACKGROUND_HISTORY_ONLY_V922"
-                          : "SELECTED_PONS_SOURCE_RECENCY_TRACE_CAPTURED_V921"
+                        selectedModeV922 ===
+                          "OLD_UNVERIFIED_FLOW_BOOTSTRAP_V930"
+                          ? "SELECTED_OLD_UNVERIFIED_PONS_LIVE_BOOTSTRAP_V930"
+                          : (
+                              safeNumber(
+                                selected?.meta
+                                  ?.launchBlock
+                              ) > 0 &&
+                              safeNumber(
+                                latestNumber
+                              ) -
+                                safeNumber(
+                                  selected?.meta
+                                    ?.launchBlock
+                                ) >
+                                100000
+                                ? "SELECTED_OLD_PONS_FOR_BACKGROUND_HISTORY_ONLY_V922"
+                                : "SELECTED_PONS_SOURCE_RECENCY_TRACE_CAPTURED_V921"
+                            )
                       )
                 )
           )
@@ -80052,6 +80122,14 @@ async function runDirectPonsCurveFlowV916(
 
   ponsTelemetryV918.directRpcLiveV919.entries[token] =
     liveStateV919;
+
+  if (
+    selectedModeV922 ===
+      "OLD_UNVERIFIED_FLOW_BOOTSTRAP_V930"
+  ) {
+    liveStateV919.bootstrapSelectedV930 = true;
+    liveStateV919.bootstrapSelectedAtV930 = Date.now();
+  }
 
   const progressKeyV918 =
     token;
@@ -80360,6 +80438,16 @@ async function runDirectPonsCurveFlowV916(
     if (laneV919 === "RECENT_LIVE") {
       liveStateV919.lastScannedHead =
         head;
+
+      if (
+        selectedModeV922 ===
+          "OLD_UNVERIFIED_FLOW_BOOTSTRAP_V930"
+      ) {
+        liveStateV919.bootstrapCompletedV930 = true;
+        liveStateV919.bootstrapCompletedHeadV930 = head;
+        liveStateV919.bootstrapCompletedAtV930 = Date.now();
+        liveStateV919.bootstrapVerifiedFlowV930 = false;
+      }
 
       liveStateV919.scansCompleted =
         safeNumber(
@@ -80795,6 +80883,17 @@ async function runDirectPonsCurveFlowV916(
   if (laneV919 === "RECENT_LIVE") {
     liveStateV919.lastScannedHead =
       head;
+
+    if (
+      selectedModeV922 ===
+        "OLD_UNVERIFIED_FLOW_BOOTSTRAP_V930"
+    ) {
+      liveStateV919.bootstrapCompletedV930 = true;
+      liveStateV919.bootstrapCompletedHeadV930 = head;
+      liveStateV919.bootstrapCompletedAtV930 = Date.now();
+      liveStateV919.bootstrapVerifiedFlowV930 =
+        verifiedUsdTrades > 0;
+    }
 
     liveStateV919.scansCompleted =
       safeNumber(
@@ -135237,7 +135336,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `Target: <code>${escapeHtml(ponsDirectV916.tokenAddress || "NONE")}</code> ${escapeHtml(ponsDirectV916.symbol || "")} · curve <code>${escapeHtml(ponsDirectV916.curve || "NONE")}</code>`,
       `V920 selection — eligible ${fmt(ponsDirectV916.eligibleTargetsV920)} · verified launch block ${fmt(ponsDirectV916.selectionLaunchBlockV920)} · launch age ${fmt(ponsDirectV916.selectionLaunchAgeBlocksV920)} blocks · ${escapeHtml(ponsDirectV916.selectionPolicyV920 || "NONE")}`,
       `V921 source diagnosis — <b>${escapeHtml(ponsDirectV916?.candidateSourceDiagnosticV921?.classification || "NONE")}</b> · current Pons ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.currentCandidateCount)} · eligible ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.eligibleCandidateCount)}`,
-      `V922 freshness routing — <b>${escapeHtml(ponsDirectV916?.freshnessRoutingV922?.status || "NONE")}</b> · base eligible ${fmt(ponsDirectV916?.freshnessRoutingV922?.baseEligible)} · fresh recent-live ${fmt(ponsDirectV916?.freshnessRoutingV922?.recentLiveEligible)} · old background ${fmt(ponsDirectV916?.freshnessRoutingV922?.backgroundHistoryEligible)} · old live-due skipped ${fmt(ponsDirectV916?.freshnessRoutingV922?.oldLiveRefreshDueSkipped)} · max fresh age ${fmt(ponsDirectV916?.freshnessRoutingV922?.freshLaunchMaxAgeBlocks)} blocks`,
+      `V922/V930 freshness routing — <b>${escapeHtml(ponsDirectV916?.freshnessRoutingV922?.status || "NONE")}</b> · base eligible ${fmt(ponsDirectV916?.freshnessRoutingV922?.baseEligible)} · fresh recent-live ${fmt(ponsDirectV916?.freshnessRoutingV922?.recentLiveEligible)} · old bootstrap ${fmt(ponsDirectV916?.freshnessRoutingV922?.oldUnverifiedBootstrapEligibleV930)} · old background ${fmt(ponsDirectV916?.freshnessRoutingV922?.backgroundHistoryEligible)} · old live-due skipped ${fmt(ponsDirectV916?.freshnessRoutingV922?.oldLiveRefreshDueSkipped)} · max fresh age ${fmt(ponsDirectV916?.freshnessRoutingV922?.freshLaunchMaxAgeBlocks)} blocks`,
       `V921 persisted Pons discovery — last status <b>${escapeHtml(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.lastStatus || "NONE")}</b> · last query ${escapeHtml(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.lastQueryAt || "NONE")} · last launch block ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.lastLaunchBlock)} · retained ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.retainedCount)} · retained blocks ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.retainedMinBlock)}→${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.retainedMaxBlock)}`,
       `Pair token: <code>${escapeHtml(ponsDirectV916.pairToken || "NONE")}</code> · USD basis <b>${escapeHtml(ponsDirectV916.quoteUsdBasis || "NONE")}</b>`,
       `RPC window: ${fmt(ponsDirectV916.fromBlock)} → ${fmt(ponsDirectV916.toBlock)} · provider <b>${escapeHtml(ponsDirectV916.provider || "NONE")}</b> · requests ${fmt(ponsDirectV916.requestsUsed)}`,
