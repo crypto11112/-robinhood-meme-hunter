@@ -1,4 +1,18 @@
 /**
+ * V910 CURRENT-LIVE IDENTITY-SOURCE DIAGNOSTIC — READ ONLY:
+ * - builds directly from deployed V909;
+ * - answers why a current-live production target can have strong launch/activity
+ *   evidence yet no exact V4 PoolId;
+ * - records which verified live-launch detector(s) actually admitted the token,
+ *   whether those source events expose a 32-byte PoolId, watched/registry/
+ *   unknown-pool exact identity hints, and the V772/V799 Initialize outcome;
+ * - classifies whether the missing identity is a bridge failure, missing local
+ *   mapping, or simply a verified launch source that contains no V4 Pool proof;
+ * - zero provider/RPC requests, zero candidate-selection changes, zero scoring,
+ *   risk, Momentum, Telegram, qualification or request-budget changes;
+ * - preserves V904/V906/V907/V908/V909 behavior.
+ */
+/**
  * V909 CURRENT-LIVE ACTIVE-POOL IDENTITY PRIORITY:
  * - builds directly from deployed V908;
  * - fixes the repeated fresh-launch bottleneck where V772 sees hundreds of live
@@ -8033,7 +8047,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V909";
+const VERSION = "V910";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -105739,6 +105753,440 @@ for (
     );
   }
 
+
+  /*
+   * V910 diagnostic-only identity source trace.
+   * No external request and no mutation of candidate evidence/scoring.
+   */
+  {
+    const targetV910 = productionV4TargetV772 || null;
+    const tokenV910 = normalize(targetV910?.address || "");
+    const watchedV910 =
+      isAddress(tokenV910)
+        ? findWatched(state, tokenV910)
+        : null;
+
+    const sourceRowsV910 = [];
+    const addSourceEventsV910 = (
+      source,
+      events,
+      requireVerified = false
+    ) => {
+      for (const event of (Array.isArray(events) ? events : [])) {
+        const eventToken = normalize(
+          event?.token ||
+          event?.tokenAddress ||
+          event?.address ||
+          ""
+        );
+        if (!isAddress(tokenV910) || eventToken !== tokenV910) continue;
+        if (
+          requireVerified &&
+          event?.decodeVerified !== true &&
+          event?.verified !== true
+        ) continue;
+
+        const poolId = normalize(
+          event?.poolId ||
+          event?.poolID ||
+          event?.id ||
+          ""
+        );
+        sourceRowsV910.push({
+          source,
+          verified:
+            event?.decodeVerified === true ||
+            event?.verified === true ||
+            source === "GENERIC_VERIFIED_LAUNCH_REGISTRY_V515" ||
+            source === "DOPPLER_EXACT_LAUNCH_V514",
+          poolId:
+            isBytes32HexV765(poolId)
+              ? poolId
+              : null,
+          blockNumber:
+            blockNumberFromAnyV180(
+              event?.blockNumber ||
+              event?.block ||
+              event?.launchBlock
+            ) || null,
+          transactionHash:
+            normalize(
+              event?.transactionHash ||
+              event?.txHash ||
+              ""
+            ) || null
+        });
+      }
+    };
+
+    addSourceEventsV910(
+      "RWA_EXACT_LAUNCH_V495",
+      liveDiscovery?.rwaExactLaunchDetectorV495?.events,
+      true
+    );
+    addSourceEventsV910(
+      "POOLS_TRADE_LAUNCH_V208",
+      liveDiscovery?.poolsTradeLaunchEventsV208?.events,
+      true
+    );
+    addSourceEventsV910(
+      "POOLS_TRADE_LAUNCH_V205",
+      liveDiscovery?.poolsTradeLaunchEventsV205?.events,
+      true
+    );
+    addSourceEventsV910(
+      "GENERIC_VERIFIED_LAUNCH_REGISTRY_V515",
+      liveDiscovery?.genericVerifiedLaunchDetectorRegistryV515?.events,
+      false
+    );
+    addSourceEventsV910(
+      "DOPPLER_EXACT_LAUNCH_V514",
+      liveDiscovery?.dopplerExactLaunchDetectorV514?.events,
+      false
+    );
+    addSourceEventsV910(
+      "DIRECT_ONCHAIN_LAUNCH_V476",
+      liveDiscovery?.directOnChainLaunchEventsV476?.events,
+      true
+    );
+
+    const liveFromV910 = safeNumber(liveDiscovery?.fromBlock);
+    const liveToV910 = safeNumber(liveDiscovery?.toBlock);
+    for (
+      const event of (
+        Array.isArray(
+          state?.poolsTradeLaunchTelemetryV209?.recentVerifiedLaunches
+        )
+          ? state.poolsTradeLaunchTelemetryV209.recentVerifiedLaunches
+          : []
+      )
+    ) {
+      const eventToken = normalize(
+        event?.token ||
+        event?.tokenAddress ||
+        ""
+      );
+      const blockNumber =
+        blockNumberFromAnyV180(event?.blockNumber);
+      if (
+        eventToken !== tokenV910 ||
+        !Number.isFinite(blockNumber) ||
+        !liveFromV910 ||
+        !liveToV910 ||
+        blockNumber < liveFromV910 ||
+        blockNumber > liveToV910
+      ) continue;
+      const poolId = normalize(event?.poolId || "");
+      sourceRowsV910.push({
+        source:"POOLS_TRADE_RECENT_VERIFIED_V209",
+        verified:true,
+        poolId:isBytes32HexV765(poolId) ? poolId : null,
+        blockNumber,
+        transactionHash:
+          normalize(event?.transactionHash || event?.txHash || "") || null
+      });
+    }
+
+    const sourcePoolIdsV910 = [
+      ...new Set(
+        sourceRowsV910
+          .map(row => normalize(row?.poolId))
+          .filter(isBytes32HexV765)
+      )
+    ];
+
+    const watchedPoolRowsV910 =
+      Array.isArray(watchedV910?.pools)
+        ? watchedV910.pools
+        : [];
+
+    const watchedPoolIdsV910 = [
+      ...new Set(
+        watchedPoolRowsV910
+          .map(row => normalize(row?.poolId))
+          .filter(isBytes32HexV765)
+      )
+    ];
+
+    const registryRowsV910 =
+      Object.entries(state?.poolRegistry || {})
+        .map(([key,row]) => {
+          const poolId = normalize(row?.poolId || key);
+          const currency0 = normalize(
+            row?.currency0 || row?.tokenA || ""
+          );
+          const currency1 = normalize(
+            row?.currency1 || row?.tokenB || ""
+          );
+          return {
+            poolId,
+            currency0,
+            currency1,
+            tokenMatch:
+              isAddress(tokenV910) &&
+              (currency0 === tokenV910 || currency1 === tokenV910)
+          };
+        })
+        .filter(row =>
+          row.tokenMatch &&
+          isBytes32HexV765(row.poolId)
+        );
+
+    const unknownPoolRowsV910 =
+      Object.entries(state?.unknownPools || {})
+        .map(([key,row]) => {
+          const poolId = normalize(row?.poolId || key);
+          const currency0 = normalize(
+            row?.currency0 || row?.tokenA || ""
+          );
+          const currency1 = normalize(
+            row?.currency1 || row?.tokenB || ""
+          );
+          const tokenHint = normalize(
+            row?.token ||
+            row?.tokenAddress ||
+            row?.candidateAddress ||
+            ""
+          );
+          return {
+            poolId,
+            currency0,
+            currency1,
+            tokenMatch:
+              isAddress(tokenV910) &&
+              (
+                currency0 === tokenV910 ||
+                currency1 === tokenV910 ||
+                tokenHint === tokenV910
+              )
+          };
+        })
+        .filter(row =>
+          row.tokenMatch &&
+          isBytes32HexV765(row.poolId)
+        );
+
+    const launchpadRowsV910 =
+      watchedV910 && typeof watchedV910 === "object"
+        ? Object.entries(watchedV910)
+            .filter(([key,row]) =>
+              /^launchpadV\d+$/.test(key) &&
+              row &&
+              typeof row === "object"
+            )
+            .map(([key,row]) => ({
+              key,
+              verified: row?.verified === true,
+              protocol:
+                row?.protocol ||
+                row?.protocolKey ||
+                null,
+              source: row?.source || null,
+              poolId:
+                isBytes32HexV765(
+                  normalize(
+                    row?.poolId ||
+                    row?.poolID ||
+                    ""
+                  )
+                )
+                  ? normalize(
+                      row?.poolId ||
+                      row?.poolID
+                    )
+                  : null,
+              launchBlock:
+                blockNumberFromAnyV180(
+                  row?.launchBlock ||
+                  row?.blockNumber
+                ) || null,
+              transactionHash:
+                normalize(
+                  row?.transactionHash ||
+                  row?.txHash ||
+                  ""
+                ) || null
+            }))
+            .filter(row => row.verified)
+        : [];
+
+    const identityPostV910 =
+      targetV910?.onChainPoolIdentityV153 || null;
+
+    const poolSelectionV910 =
+      productionV4EnrichmentV772?.poolSelectionV780 || {};
+
+    const recentInitMatchesV910 =
+      safeNumber(
+        poolSelectionV910?.recentInitializeTokenMatches
+      );
+    const indexedInitMatchesV910 =
+      safeNumber(
+        poolSelectionV910?.indexedInitializeV781
+          ?.decodedTokenMatches
+      );
+
+    let classificationV910 =
+      "NO_PRODUCTION_TARGET_V910";
+
+    if (targetV910) {
+      if (
+        identityPostV910?.verified === true &&
+        isBytes32HexV765(
+          normalize(
+            identityPostV910?.poolId ||
+            identityPostV910?.pairAddress ||
+            ""
+          )
+        )
+      ) {
+        classificationV910 =
+          "EXACT_V4_IDENTITY_ALREADY_RECOVERED_V910";
+      }
+      else if (sourcePoolIdsV910.length > 0) {
+        classificationV910 =
+          "VERIFIED_LAUNCH_SOURCE_HAS_EXACT_POOLID_NOT_PROMOTED_V910";
+      }
+      else if (registryRowsV910.length > 0) {
+        classificationV910 =
+          "POOL_REGISTRY_HAS_TOKEN_POOL_IDENTITY_NOT_PROMOTED_V910";
+      }
+      else if (watchedPoolIdsV910.length > 0) {
+        classificationV910 =
+          "WATCHED_TOKEN_HAS_EXACT_POOL_HINT_NOT_PROMOTED_V910";
+      }
+      else if (unknownPoolRowsV910.length > 0) {
+        classificationV910 =
+          "UNKNOWN_POOL_STATE_HAS_TOKEN_POOL_HINT_NOT_PROMOTED_V910";
+      }
+      else if (
+        recentInitMatchesV910 > 0 ||
+        indexedInitMatchesV910 > 0
+      ) {
+        classificationV910 =
+          "INITIALIZE_TOKEN_MATCH_SEEN_BUT_IDENTITY_NOT_PROMOTED_V910";
+      }
+      else if (
+        currentLiveVerifiedLaunchTokensV621?.has(tokenV910) === true &&
+        sourceRowsV910.length > 0
+      ) {
+        classificationV910 =
+          "VERIFIED_CURRENT_LIVE_LAUNCH_WITHOUT_V4_POOL_PROOF_V910";
+      }
+      else if (
+        currentLiveVerifiedLaunchTokensV621?.has(tokenV910) === true
+      ) {
+        classificationV910 =
+          "CURRENT_LIVE_MEMBERSHIP_SOURCE_NOT_RECONSTRUCTED_V910";
+      }
+      else {
+        classificationV910 =
+          "NON_CURRENT_LIVE_TARGET_WITHOUT_V4_POOL_PROOF_V910";
+      }
+    }
+
+    state.currentLiveIdentitySourceDiagnosticV910 = {
+      version:"V910",
+      runtimeVersion:VERSION,
+      recordedAt:new Date().toISOString(),
+      diagnosticOnly:true,
+      providerRequestsAdded:0,
+      scoringChanged:false,
+      qualificationChanged:false,
+      tokenAddress:isAddress(tokenV910) ? tokenV910 : null,
+      symbol:
+        targetV910?.symbol ||
+        targetV910?.validation?.symbol ||
+        null,
+      productionSelectionMode:
+        productionV4SelectionModeV813 || null,
+      currentLiveVerified:
+        isAddress(tokenV910) &&
+        currentLiveVerifiedLaunchTokensV621?.has(tokenV910) === true,
+      inLiveDiscoveryNewTokens:
+        isAddress(tokenV910) &&
+        Array.isArray(liveDiscovery?.newTokens)
+          ? liveDiscovery.newTokens
+              .map(normalize)
+              .includes(tokenV910)
+          : false,
+      inLiveDiscoverySeenTokens:
+        isAddress(tokenV910) &&
+        Array.isArray(liveDiscovery?.seenTokens)
+          ? liveDiscovery.seenTokens
+              .map(normalize)
+              .includes(tokenV910)
+          : false,
+      sourceRows:sourceRowsV910.slice(0,12),
+      sourceNames:[
+        ...new Set(
+          sourceRowsV910.map(row => row.source)
+        )
+      ],
+      sourceExactPoolIds:sourcePoolIdsV910.slice(0,8),
+      watchedFound:Boolean(watchedV910),
+      watchedExactPoolIds:watchedPoolIdsV910.slice(0,8),
+      verifiedLaunchpadRows:launchpadRowsV910.slice(0,8),
+      registryTokenPoolIds:
+        registryRowsV910
+          .map(row => row.poolId)
+          .slice(0,8),
+      unknownStateTokenPoolIds:
+        unknownPoolRowsV910
+          .map(row => row.poolId)
+          .slice(0,8),
+      identityPostVerified:
+        identityPostV910?.verified === true,
+      identityPostPoolId:
+        isBytes32HexV765(
+          normalize(
+            identityPostV910?.poolId ||
+            identityPostV910?.pairAddress ||
+            ""
+          )
+        )
+          ? normalize(
+              identityPostV910?.poolId ||
+              identityPostV910?.pairAddress
+            )
+          : null,
+      productionStatus:
+        productionV4EnrichmentV772?.status || null,
+      recentInitialize:{
+        attempted:
+          poolSelectionV910?.recentInitializeAttempted === true,
+        ok:
+          poolSelectionV910?.recentInitializeOk === true,
+        rows:
+          safeNumber(
+            poolSelectionV910?.recentInitializeRows
+          ),
+        tokenMatches:recentInitMatchesV910,
+        activeMatches:
+          safeNumber(
+            poolSelectionV910?.recentInitializeActiveMatches
+          )
+      },
+      indexedInitialize:{
+        currency0Attempted:
+          poolSelectionV910?.indexedInitializeV781
+            ?.currency0Attempted === true,
+        currency1Attempted:
+          poolSelectionV910?.indexedInitializeV781
+            ?.currency1Attempted === true,
+        decodedTokenMatches:indexedInitMatchesV910,
+        activeMatches:
+          safeNumber(
+            poolSelectionV910?.indexedInitializeV781
+              ?.activeMatches
+          )
+      },
+      activeIndexV909:
+        productionV4EnrichmentV772?.activePoolIndexV799 || null,
+      classification:classificationV910
+    };
+  }
+
   state.exactPoolV151HandoffDiagnosticV905 =
     productionV4TargetV772
       ? exactPoolV151HandoffDiagnosticV905(
@@ -130512,6 +130960,34 @@ function evidenceAuditTelegramMessageV727(state) {
         `Current scan collector: attempted <b>NO</b> · PoolId <code>${escapeHtml(currentCollector895.poolId || "NONE")}</code> · ${escapeHtml(currentCollector895.classification || "UNVERIFIED")}`
       );
     }
+  }
+
+  const identitySourceV910 =
+    state?.currentLiveIdentitySourceDiagnosticV910 || null;
+
+  if (identitySourceV910) {
+    const initRecentV910 =
+      identitySourceV910?.recentInitialize || {};
+    const initIndexedV910 =
+      identitySourceV910?.indexedInitialize || {};
+    const activeIndexV910 =
+      identitySourceV910?.activeIndexV909 || {};
+
+    lines.push(
+      "",
+      `🧬 <b>Current-live identity source diagnostic — V910</b>`,
+      `Recorded: <code>${escapeHtml(identitySourceV910.recordedAt || "UNVERIFIED")}</code>`,
+      `Target: <code>${escapeHtml(identitySourceV910.tokenAddress || "NONE")}</code> ${escapeHtml(identitySourceV910.symbol || "")} · current-live <b>${identitySourceV910.currentLiveVerified ? "YES" : "NO"}</b> · mode <b>${escapeHtml(identitySourceV910.productionSelectionMode || "NONE")}</b>`,
+      `Live discovery membership — new ${identitySourceV910.inLiveDiscoveryNewTokens ? "YES" : "NO"} · seen ${identitySourceV910.inLiveDiscoverySeenTokens ? "YES" : "NO"}`,
+      `Verified launch sources: <b>${fmt(Array.isArray(identitySourceV910.sourceRows) ? identitySourceV910.sourceRows.length : 0)}</b> · ${escapeHtml((identitySourceV910.sourceNames || []).join(", ") || "NONE")}`,
+      `Source exact PoolIds: <b>${fmt(Array.isArray(identitySourceV910.sourceExactPoolIds) ? identitySourceV910.sourceExactPoolIds.length : 0)}</b> · watched exact pools ${fmt(Array.isArray(identitySourceV910.watchedExactPoolIds) ? identitySourceV910.watchedExactPoolIds.length : 0)} · registry token pools ${fmt(Array.isArray(identitySourceV910.registryTokenPoolIds) ? identitySourceV910.registryTokenPoolIds.length : 0)} · unknown-state token pools ${fmt(Array.isArray(identitySourceV910.unknownStateTokenPoolIds) ? identitySourceV910.unknownStateTokenPoolIds.length : 0)}`,
+      `Verified launchpad rows on watch: <b>${fmt(Array.isArray(identitySourceV910.verifiedLaunchpadRows) ? identitySourceV910.verifiedLaunchpadRows.length : 0)}</b> · ${escapeHtml((identitySourceV910.verifiedLaunchpadRows || []).map(row => `${row.key}:${row.protocol || "UNKNOWN"}`).join(", ") || "NONE")}`,
+      `Initialize recent — attempted/ok ${initRecentV910.attempted ? "YES" : "NO"}/${initRecentV910.ok ? "YES" : "NO"} · rows ${fmt(initRecentV910.rows)} · token matches ${fmt(initRecentV910.tokenMatches)} · active matches ${fmt(initRecentV910.activeMatches)}`,
+      `Initialize indexed — c0/c1 attempted ${initIndexedV910.currency0Attempted ? "YES" : "NO"}/${initIndexedV910.currency1Attempted ? "YES" : "NO"} · token matches ${fmt(initIndexedV910.decodedTokenMatches)} · active matches ${fmt(initIndexedV910.activeMatches)}`,
+      `V909 active index — strategy <b>${escapeHtml(activeIndexV910.selectionStrategyV909 || "NONE")}</b> · requested ${fmt(activeIndexV910.requestedThisRun)} · target matches ${fmt(activeIndexV910.targetActiveMatches)}`,
+      `Post identity: <b>${identitySourceV910.identityPostVerified ? "VERIFIED" : "UNVERIFIED"}</b> · PoolId <code>${escapeHtml(identitySourceV910.identityPostPoolId || "NONE")}</code> · production ${escapeHtml(identitySourceV910.productionStatus || "NONE")}`,
+      `Diagnosis: <b>${escapeHtml(identitySourceV910.classification || "NONE")}</b>`
+    );
   }
 
   const exactPoolHandoffV905 =
