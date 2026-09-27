@@ -1,4 +1,21 @@
 /**
+ * V912 PONS V2 LIFECYCLE-AWARE ROUTING FIX:
+ * - builds directly from deployed V911;
+ * - fixes the V911-proven waste where a freshly verified Pons V2 bonding-curve
+ *   token was routed into the Uniswap V4 identity lane before graduation;
+ * - honours the bot's existing V215/V238 policy:
+ *     pre-graduation venue = PONS_V2_BONDING_CURVE
+ *     DO_NOT_ASSUME_V4_UNTIL_GRADUATION_VERIFIED;
+ * - verified Pons V2 tokens without a verified graduated V4 PoolId are excluded
+ *   from V772/V813 V4 discovery and from the provisional V911 three-request V4
+ *   reservation, leaving those existing requests available to useful evidence;
+ * - once a Pons V2 token has a verified exact V4 PoolId / V238 graduation proof,
+ *   normal V4 routing remains allowed;
+ * - existing Pons curve-flow V216/V218 scoring path is preserved unchanged;
+ * - no provider added, no request ceiling raised, no scoring/risk/Momentum/
+ *   Telegram threshold/qualification changes.
+ */
+/**
  * V911 EARLY PRODUCTION-V4 HEADROOM RESERVATION FIX:
  * - builds directly from deployed V910;
  * - fixes the V910-proven ordering failure where a verified current-live launch
@@ -8065,7 +8082,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V911";
+const VERSION = "V912";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -14940,18 +14957,42 @@ function activatePreAnalysisProductionV4ReserveV911(
   if (!reserve) return null;
 
   const queue = Array.isArray(analysisQueue) ? analysisQueue : [];
-  const currentLiveQueued = queue
-    .map(row => normalize(row?.address))
-    .filter(address =>
-      isAddress(address) &&
-      currentLiveVerifiedLaunchTokensV621?.has(address) === true
-    );
+  const currentLiveQueuedRowsV912 = queue
+    .filter(row => {
+      const address = normalize(row?.address);
+      return (
+        isAddress(address) &&
+        currentLiveVerifiedLaunchTokensV621?.has(address) === true &&
+        ponsV2LifecycleRoutingV912(row).preGraduation !== true
+      );
+    });
+
+  const currentLiveQueued =
+    currentLiveQueuedRowsV912
+      .map(row => normalize(row?.address));
+
+  const ponsPreGraduationSkippedV912 =
+    queue.filter(row => {
+      const address = normalize(row?.address);
+      return (
+        isAddress(address) &&
+        currentLiveVerifiedLaunchTokensV621?.has(address) === true &&
+        ponsV2LifecycleRoutingV912(row).preGraduation === true
+      );
+    });
 
   reserve.preAnalysisV911 = {
     enabled: true,
     considered: true,
     currentLiveQueued: currentLiveQueued.length,
     currentLiveAddresses: currentLiveQueued.slice(0, 8),
+    ponsPreGraduationSkippedV912:
+      ponsPreGraduationSkippedV912.length,
+    ponsPreGraduationAddressesV912:
+      ponsPreGraduationSkippedV912
+        .map(row => normalize(row?.address))
+        .filter(isAddress)
+        .slice(0, 8),
     activated: false,
     reason: null,
     totalUsedAtDecision: safeNumber(budget?.totalUsed),
@@ -97783,11 +97824,112 @@ function registerSuccessfulAlertFollowUpV267(
    - Activity only: no USD inference and no liquidity-value inference.
 */
 
+
+function ponsV2LifecycleRoutingV912(subject) {
+  const direct =
+    subject?.verifiedLaunchSourceV476 ||
+    subject?.launchpadV476 ||
+    subject?.token?.launchpadV476 ||
+    null;
+
+  const v215 =
+    subject?.launchpadV215 ||
+    subject?.token?.launchpadV215 ||
+    null;
+
+  const protocol =
+    String(
+      direct?.protocol ||
+      direct?.protocolKey ||
+      v215?.protocol ||
+      v215?.protocolKey ||
+      ""
+    ).trim().toLowerCase();
+
+  const verifiedPonsV2 =
+    (
+      direct?.verified === true &&
+      (
+        protocol === "pons v2" ||
+        protocol === "pons_v2"
+      )
+    ) ||
+    (
+      v215?.verified === true &&
+      (
+        protocol === "pons v2" ||
+        protocol === "pons_v2"
+      )
+    );
+
+  const directExactPoolId =
+    normalize(
+      subject?.onChainPoolIdentityV153?.poolId ||
+      subject?.onChainPoolIdentityV153?.pairAddress ||
+      ""
+    );
+
+  const v238PoolId =
+    normalize(
+      v215?.v4PoolId ||
+      ""
+    );
+
+  const graduated =
+    verifiedPonsV2 &&
+    (
+      (
+        v215?.v4PoolVerified === true &&
+        isBytes32HexV765(v238PoolId)
+      ) ||
+      String(v215?.lifecycle || "").toUpperCase() ===
+        "GRADUATED_UNISWAP_V4_VERIFIED_V238" ||
+      (
+        subject?.onChainPoolIdentityV153?.verified === true &&
+        isBytes32HexV765(directExactPoolId)
+      )
+    );
+
+  return {
+    verifiedPonsV2,
+    graduated,
+    preGraduation:
+      verifiedPonsV2 && !graduated,
+    protocol:
+      verifiedPonsV2 ? "Pons V2" : null,
+    venue:
+      verifiedPonsV2 && !graduated
+        ? "PONS_V2_BONDING_CURVE"
+        : graduated
+          ? "UNISWAP_V4_VERIFIED_GRADUATION"
+          : null,
+    exactPoolId:
+      isBytes32HexV765(v238PoolId)
+        ? v238PoolId
+        : (
+            isBytes32HexV765(directExactPoolId)
+              ? directExactPoolId
+              : null
+          ),
+    source:
+      v215?.v4PoolVerified === true
+        ? "V238_VERIFIED_PONS_GRADUATION"
+        : direct?.source || null
+  };
+}
+
 function v772ProductionEligibleCandidate(candidate, currentLiveVerifiedLaunchTokensV621) {
   const address = normalize(candidate?.address);
   if (!candidate || candidate?.validERC20 !== true || !isAddress(address)) return false;
   if (candidate?.risk?.severeOverride === true) return false;
   if (sameRunTerminalReject(candidate)?.terminal === true) return false;
+
+  const ponsLifecycleV912 =
+    ponsV2LifecycleRoutingV912(candidate);
+
+  if (ponsLifecycleV912.preGraduation === true) {
+    return false;
+  }
 
   const alreadyVerified =
     candidate?.liveMomentumActivityV152?.verified === true &&
@@ -97820,6 +97962,13 @@ function v813CoverageRescueEligibleCandidate(candidate, state) {
   if (String(candidate?.risk?.label || "").toUpperCase() === "HIGH") return false;
   if (sameRunTerminalReject(candidate)?.terminal === true) return false;
   if (safeNumber(candidate?.activity?.swaps) > 0) return false;
+
+  const ponsLifecycleV912 =
+    ponsV2LifecycleRoutingV912(candidate);
+
+  if (ponsLifecycleV912.preGraduation === true) {
+    return false;
+  }
 
   /*
    * V874: exact/canonical pool identity is no longer a reason to reject a
@@ -105379,6 +105528,58 @@ for (
     tokenAddress: null,
     externalRequestsUsed: 0,
     scannerBudgetConsumed: true
+  };
+
+  const ponsLifecycleRowsV912 =
+    candidates
+      .map(candidate => {
+        const lifecycle = ponsV2LifecycleRoutingV912(candidate);
+        return {
+          address: normalize(candidate?.address) || null,
+          symbol:
+            candidate?.symbol ||
+            candidate?.validation?.symbol ||
+            null,
+          verifiedPonsV2:
+            lifecycle.verifiedPonsV2 === true,
+          preGraduation:
+            lifecycle.preGraduation === true,
+          graduated:
+            lifecycle.graduated === true,
+          venue:
+            lifecycle.venue || null,
+          exactPoolId:
+            lifecycle.exactPoolId || null,
+          ponsCurveFlowVerified:
+            candidate?.ponsCurveFlowV216?.verified === true
+        };
+      })
+      .filter(row => row.verifiedPonsV2);
+
+  state.ponsLifecycleRoutingDiagnosticV912 = {
+    version:"V912",
+    runtimeVersion:VERSION,
+    recordedAt:new Date().toISOString(),
+    currentCandidateCount:
+      ponsLifecycleRowsV912.length,
+    preGraduationCount:
+      ponsLifecycleRowsV912
+        .filter(row => row.preGraduation).length,
+    graduatedCount:
+      ponsLifecycleRowsV912
+        .filter(row => row.graduated).length,
+    rows:
+      ponsLifecycleRowsV912.slice(0, 8),
+    v4Policy:
+      "DO_NOT_ROUTE_VERIFIED_PONS_V2_TO_V4_UNTIL_GRADUATION_VERIFIED_V912",
+    preGraduationVenue:
+      "PONS_V2_BONDING_CURVE",
+    ponsCurveFlowPath:
+      "EXISTING_V216_V218",
+    providerRequestsAdded:0,
+    requestCeilingChanged:false,
+    scoringChanged:false,
+    qualificationChanged:false
   };
 
   const productionV4NormalTargetV813 =
@@ -131145,6 +131346,26 @@ function evidenceAuditTelegramMessageV727(state) {
     }
   }
 
+  const ponsRoutingV912 =
+    state?.ponsLifecycleRoutingDiagnosticV912 || null;
+
+  if (ponsRoutingV912) {
+    lines.push(
+      "",
+      "🧬 <b>Pons V2 lifecycle routing — V912</b>",
+      `Recorded: <code>${escapeHtml(ponsRoutingV912.recordedAt || "UNVERIFIED")}</code>`,
+      `Current Pons candidates: <b>${fmt(ponsRoutingV912.currentCandidateCount)}</b> · pre-graduation ${fmt(ponsRoutingV912.preGraduationCount)} · graduated ${fmt(ponsRoutingV912.graduatedCount)}`,
+      `Policy: <b>${escapeHtml(ponsRoutingV912.v4Policy || "NONE")}</b>`,
+      `Pre-graduation venue: <b>${escapeHtml(ponsRoutingV912.preGraduationVenue || "NONE")}</b> · flow path <b>${escapeHtml(ponsRoutingV912.ponsCurveFlowPath || "NONE")}</b>`
+    );
+
+    for (const row of Array.isArray(ponsRoutingV912.rows) ? ponsRoutingV912.rows : []) {
+      lines.push(
+        `• <code>${escapeHtml(row.address || "NONE")}</code> ${escapeHtml(row.symbol || "")} · pre-grad ${row.preGraduation ? "YES" : "NO"} · graduated ${row.graduated ? "YES" : "NO"} · venue ${escapeHtml(row.venue || "NONE")} · exact PoolId <code>${escapeHtml(row.exactPoolId || "NONE")}</code> · Pons flow ${row.ponsCurveFlowVerified ? "VERIFIED" : "NOT YET VERIFIED"}`
+      );
+    }
+  }
+
   const identitySourceV910 =
     state?.currentLiveIdentitySourceDiagnosticV910 || null;
 
@@ -131216,7 +131437,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `Rescue eligible now: <b>${fmt(routingV817.rescueEligibleCountEvenIfNormalSelected)}</b> · ranked: <b>${fmt(routingV817.rankedCandidateCount)}</b> · normal displaced rescue: <b>${routingV817.normalTargetDisplacedRescue ? "YES" : "NO"}</b>`,
       `Gates — candidates:${fmt(g.totalCandidates)} · ERC20:${fmt(g.validERC20)} · riskOK:${fmt(g.riskAcceptable)} · zeroSwaps:${fmt(g.zeroObservedSwaps)} · noExactPool:${fmt(g.noKnownExactPool)} · analysedEvidence:${fmt(g.analysedFallbackEvidence)} · rescueEligible:${fmt(g.rescueEligible)}`,
       `Budget at selection — total ${fmt(b.totalUsed)}/${fmt(b.totalLimit)} · analysis ${fmt(b.analysisUsed)}/${fmt(b.analysisLimit)} · can fund 3: <b>${b.canFundThreeAnalysisRequests ? "YES" : "NO"}</b>`,
-      `V911 pre-analysis V772 reserve — activated <b>${state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.activated ? "YES" : "NO"}</b> · reason ${escapeHtml(state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.reason || "NONE")} · current-live queued ${fmt(state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.currentLiveQueued)} · reserved ${fmt(state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.reservedRequests)} · handoff remaining ${fmt(state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.handoffRemainingV777)} · unused released ${state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.unusedReleased ? "YES" : "NO"}`
+      `V911/V912 pre-analysis V772 reserve — activated <b>${state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.activated ? "YES" : "NO"}</b> · reason ${escapeHtml(state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.reason || "NONE")} · V4-current-live queued ${fmt(state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.currentLiveQueued)} · Pons pre-grad skipped ${fmt(state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.ponsPreGraduationSkippedV912)} · reserved ${fmt(state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.reservedRequests)} · handoff remaining ${fmt(state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.handoffRemainingV777)} · unused released ${state?.productionV4EnrichmentV772?.preAnalysisProductionV4ReserveV911?.unusedReleased ? "YES" : "NO"}`
     );
     for (const row of Array.isArray(routingV817.topRanked) ? routingV817.topRanked : []) {
       lines.push(
