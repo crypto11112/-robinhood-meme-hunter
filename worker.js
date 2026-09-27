@@ -1,4 +1,22 @@
 /**
+ * V901 PROTECTED EXACT-POOL CONTINUATION SLOT:
+ * - builds directly from deployed V900;
+ * - V900 proved an eligible exact-pool continuation can be blocked solely by
+ *   the exhausted analysis sub-budget while substantial global headroom remains;
+ * - grants at most ONE V888/V899/V900 exact-PoolId chunk per scan permission to
+ *   cross ONLY the analysis sub-budget when ordinary analysis funding is gone;
+ * - the slot is armed only for a valid ERC20, risk-acceptable, V887-priority
+ *   candidate with a verified 32-byte exact PoolId and no existing exact-pool
+ *   V179 rows;
+ * - the real pre-Telegram/global boundary remains absolute and the bypass must
+ *   preserve all still-active V258 + FLOW/FOUNDATION completion reservations;
+ * - if ordinary analysis budget is available, V901 is NOT consumed;
+ * - one V901 request maximum per scan; 48-request hard ceiling unchanged;
+ * - ZERO scoring/risk/qualification/Telegram/market-selection changes;
+ * - preserves V900 resumable progress, V899 <=2,000-block chunking, V898 email
+ *   bridge and all existing diagnostics.
+ */
+/**
  * V900 RESUMABLE EXACT-POOL CHUNK COVERAGE:
  * - builds directly from deployed V899;
  * - preserves V899's <=2,000-block Validation Cloud-safe exact-PoolId chunks;
@@ -7895,7 +7913,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V900";
+const VERSION = "V901";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -18314,12 +18332,231 @@ function v258TimestampReserveDecisionV880(
   return null;
 }
 
+
+/* =========================================================
+   V901 PROTECTED EXACT-POOL CONTINUATION SLOT
+   ========================================================= */
+
+function ensureV901ExactPoolContinuationSlot(budget) {
+  if (!budget?.analysis) return null;
+
+  if (
+    !budget.analysis.exactPoolContinuationSlotV901 ||
+    typeof budget.analysis.exactPoolContinuationSlotV901 !== "object"
+  ) {
+    budget.analysis.exactPoolContinuationSlotV901 = {
+      enabled: true,
+      active: false,
+      targetAddress: null,
+      exactPoolId: null,
+      armedAt: null,
+      armReason: null,
+      consumed: false,
+      consumedAt: null,
+      consumedType: null,
+      bypassedAnalysisSubBudget: false,
+      blockedByProtectedHeadroom: 0
+    };
+  }
+
+  return budget.analysis.exactPoolContinuationSlotV901;
+}
+
+function armV901ExactPoolContinuationSlot(
+  budget,
+  candidate,
+  state
+) {
+  const slot = ensureV901ExactPoolContinuationSlot(budget);
+  if (!slot || slot.consumed === true) return slot;
+
+  const token = normalize(candidate?.address);
+  const poolId = normalize(
+    candidate?.onChainPoolIdentityV153?.poolId ||
+    candidate?.directionalExactHistoryPriorityV887?.exactPoolId ||
+    ""
+  );
+
+  const v887Requested =
+    candidate?.directionalExactHistoryPriorityV887?.requested === true;
+
+  const riskAcceptable =
+    candidate?.risk?.severeOverride !== true &&
+    String(candidate?.risk?.label || "").toUpperCase() !== "HIGH";
+
+  const exactPoolVerified =
+    candidate?.onChainPoolIdentityV153?.verified === true &&
+    /^0x[a-f0-9]{64}$/.test(String(poolId || ""));
+
+  const ledger =
+    isAddress(token)
+      ? onChainDirectionalStoreV179(state)?.[token]
+      : null;
+
+  const exactRows =
+    Array.isArray(ledger?.records)
+      ? ledger.records.filter(
+          row =>
+            normalize(row?.candidateAddress) === token &&
+            normalize(row?.poolId) === poolId
+        )
+      : [];
+
+  slot.active = false;
+  slot.targetAddress = isAddress(token) ? token : null;
+  slot.exactPoolId =
+    /^0x[a-f0-9]{64}$/.test(String(poolId || ""))
+      ? poolId
+      : null;
+
+  if (!isAddress(token) || candidate?.validERC20 !== true) {
+    slot.armReason = "INVALID_OR_UNVERIFIED_ERC20_V901";
+    return slot;
+  }
+
+  if (!riskAcceptable) {
+    slot.armReason = "RISK_NOT_ACCEPTABLE_V901";
+    return slot;
+  }
+
+  if (!v887Requested) {
+    slot.armReason = "V887_PRIORITY_NOT_REQUESTED_V901";
+    return slot;
+  }
+
+  if (!exactPoolVerified) {
+    slot.armReason = "VERIFIED_EXACT_POOL_REQUIRED_V901";
+    return slot;
+  }
+
+  if (exactRows.length > 0) {
+    slot.armReason = "EXACT_POOL_V179_ROWS_ALREADY_PRESENT_V901";
+    return slot;
+  }
+
+  slot.active = true;
+  slot.armedAt = Date.now();
+  slot.armReason =
+    "V887_PRIORITY_EXACT_POOL_CONTINUATION_ARMED_V901";
+  return slot;
+}
+
+function consumeV901ExactPoolContinuationSlot(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  const slot =
+    budget?.analysis?.exactPoolContinuationSlotV901;
+
+  if (
+    phase !== "analysis" ||
+    String(type || "") !== "RPC:V888_EXACT_POOL_TARGETED_SWAPS" ||
+    slot?.active !== true ||
+    slot?.consumed === true
+  ) {
+    return null;
+  }
+
+  const needed = Math.max(1, safeNumber(amount));
+  if (needed !== 1) return null;
+
+  /*
+   * V901 exists only for the case proven by V900: ordinary analysis funding
+   * is exhausted. If normal analysis budget can still fund the request, fall
+   * through and leave V901 untouched.
+   */
+  if (budgetAvailable(budget, "analysis", needed)) {
+    return null;
+  }
+
+  const preTelegramLimit =
+    preTelegramGlobalLimitV728(budget);
+
+  const v258Reserve =
+    budget?.analysis?.v258TimestampReserveV880;
+
+  const v258Remaining =
+    v258Reserve?.enabled === true &&
+    v258Reserve?.active === true
+      ? Math.max(0, safeNumber(v258Reserve?.reservedRequests))
+      : 0;
+
+  const evidenceReserve =
+    budget?.analysis?.evidenceCompletionReserveV728;
+
+  const evidenceRemaining =
+    evidenceReserve?.enabled === true &&
+    evidenceReserve?.active === true
+      ? Math.max(0, safeNumber(evidenceReserve?.reservedRequests))
+      : 0;
+
+  /*
+   * Never steal V258, FLOW or FOUNDATION headroom. Notification reserve is
+   * already excluded by preTelegramGlobalLimitV728().
+   */
+  if (
+    safeNumber(budget?.totalUsed) +
+      needed +
+      v258Remaining +
+      evidenceRemaining >
+    preTelegramLimit
+  ) {
+    slot.blockedByProtectedHeadroom =
+      safeNumber(slot.blockedByProtectedHeadroom) + 1;
+    slot.lastBlockedAt = Date.now();
+
+    budget.skipped.push({
+      phase,
+      type,
+      amount: needed,
+      reason:
+        "V901_EXACT_POOL_CONTINUATION_BLOCKED_TO_PRESERVE_PROTECTED_HEADROOM",
+      targetAddress: slot.targetAddress || null,
+      exactPoolId: slot.exactPoolId || null,
+      v258Remaining,
+      evidenceRemaining,
+      preTelegramLimit
+    });
+
+    return false;
+  }
+
+  budget.totalUsed += needed;
+  budget.analysis.used += needed;
+
+  slot.active = false;
+  slot.consumed = true;
+  slot.consumedAt = Date.now();
+  slot.consumedType = String(type || "");
+  slot.bypassedAnalysisSubBudget = true;
+
+  return true;
+}
+
 function consumeBudget(
   budget,
   phase,
   type,
   amount = 1
 ) {
+  /*
+   * V901: one strictly-scoped exact-pool continuation may cross only the
+   * exhausted analysis sub-budget while preserving real protected headroom.
+   */
+  const v901ExactPoolContinuation =
+    consumeV901ExactPoolContinuationSlot(
+      budget,
+      phase,
+      type,
+      amount
+    );
+
+  if (v901ExactPoolContinuation !== null) {
+    return v901ExactPoolContinuation;
+  }
+
   /*
    * V890 ORDERING FIX:
    * An already-authorised transferred FLOW -> V254 slot must be offered first,
@@ -97404,7 +97641,6 @@ async function enrichCandidateWithProductionV4V772(
       const rangeV899 = chunkRangesV899[indexV899];
 
       if (
-        !budgetAvailable(budget, "analysis", 1) ||
         !consumeBudget(
           budget,
           "analysis",
@@ -104227,6 +104463,18 @@ for (
   state.productionV4RoutingDiagnosticV817 = productionV4RoutingDiagnosticV818;
 
   if (productionV4TargetV772) {
+    /*
+     * V901: arm one tightly-scoped continuation permission for this selected
+     * V887-priority exact-pool target. It is only consumed later if the normal
+     * analysis sub-budget is exhausted.
+     */
+    const exactPoolContinuationSlotV901 =
+      armV901ExactPoolContinuationSlot(
+        budget,
+        productionV4TargetV772,
+        state
+      );
+
     // V777: transfer ownership of the three protected slots to V772 itself.
     // The lane may bypass older INTERNAL reserves, but never the real hard/global,
     // analysis or Telegram-notification boundaries enforced by budgetAvailable().
@@ -104295,6 +104543,16 @@ for (
       reservedRequests: safeNumber(v254FirstRequestReserveV807?.reservedRequests),
       blockedRequests: safeNumber(v254FirstRequestReserveV807?.blockedRequests),
       consumed: v254FirstRequestReserveV807?.consumed === true
+    },
+    exactPoolContinuationSlotV901: {
+      ...(budget?.analysis?.exactPoolContinuationSlotV901 || {}),
+      active:
+        budget?.analysis?.exactPoolContinuationSlotV901?.active === true,
+      consumed:
+        budget?.analysis?.exactPoolContinuationSlotV901?.consumed === true,
+      bypassedAnalysisSubBudget:
+        budget?.analysis?.exactPoolContinuationSlotV901
+          ?.bypassedAnalysisSubBudget === true
     }
   };
 
@@ -128898,6 +129156,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `Request eligible / attempted: <b>${collector895.requestEligible ? "YES" : "NO"} / ${collector895.requestAttempted ? "YES" : "NO"}</b> · provider ${escapeHtml(collector895.rpcProvider || "NONE")}`,
       `RPC OK: <b>${collector895.rpcOk ? "YES" : "NO"}</b> · raw rows ${fmt(collector895.rawRpcRows)} · exact-topic rows ${fmt(collector895.exactTopicRows)}`,
       `V899/V900 chunks this scan attempted/completed/planned: <b>${fmt(collector895.chunkRequestsAttemptedV899)} / ${fmt(collector895.chunksCompletedV899)} / ${fmt(collector895.chunksPlannedV899)}</b> · cumulative ${fmt(collector895.cumulativeChunksCompletedV900)} · resumed ${collector895.resumedV900 ? "YES" : "NO"} · full 12k window ${collector895.fullWindowCompletedV899 ? "YES" : "NO"} · stop ${escapeHtml(collector895.stopReasonV899 || "NONE")}`,
+      `V901 protected continuation: consumed <b>${state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.consumed === true ? "YES" : "NO"}</b> · crossed analysis cap <b>${state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.bypassedAnalysisSubBudget === true ? "YES" : "NO"}</b> · reason <b>${escapeHtml(state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.armReason || "NONE")}</b>`,
       `Registry present / token match: <b>${collector895.registryPresent ? "YES" : "NO"} / ${collector895.registryTokenMatch ? "YES" : "NO"}</b>`,
       `Decoded verified / candidate-match / exact-USD: <b>${fmt(collector895.decodedVerifiedRows)} / ${fmt(collector895.decodedCandidateMatchedRows)} / ${fmt(collector895.decodedExactUsdRows)}</b>`,
       `V179 rows for token+PoolId: <b>${fmt(collector895.v179LedgerRowsForTokenPool)}</b>`,
