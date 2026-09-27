@@ -1,4 +1,22 @@
 /**
+ * V906 CANONICAL PRODUCTION V4 EXACT-POOL HANDOFF:
+ * - builds directly from deployed V905;
+ * - fixes the V905-proven multi-pool handoff gap where production V4 can prove
+ *   several exact token pools, V254 can see them, but candidate-level
+ *   onChainPoolIdentityV153 remains unverified because V886 only accepted one
+ *   unique production PoolId;
+ * - among production PoolIds with real current PoolManager Swap rows, selects
+ *   ONE canonical pool only when exactCandidatePoolIdentityV257 independently
+ *   verifies the candidate token and a supported quote from watched/poolRegistry;
+ * - deterministic rank: freshest observed Swap block, then Swap count, then
+ *   lexical PoolId tie-break; no inferred currencies and no provider market pair;
+ * - persists the verified canonical choice on the watched token for bounded
+ *   reuse by the existing V885/V886 directional handoff on a later scan;
+ * - zero additional provider/RPC requests; 48-request ceiling unchanged;
+ * - no scoring/risk/Momentum/Telegram/qualification/market-selection changes;
+ * - preserves V904 direct V212 Momentum input and V905 diagnostics.
+ */
+/**
  * V905 EXACT-POOL / V151 HANDOFF DIAGNOSTIC — READ ONLY:
  * - builds directly from deployed V904;
  * - traces the production-V4 selected candidate through exact PoolId discovery
@@ -7968,7 +7986,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V905";
+const VERSION = "V906";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -60570,12 +60588,59 @@ function directionalIdentityHandoffV885(candidate, state) {
     .filter(value => /^0x[a-f0-9]{64}$/.test(String(value || "")));
 
   const uniqueProductionPoolIdsV886 = [...new Set(productionPoolIdsV886)];
+
+  /*
+   * V906: V905 proved that the safe V886 "exactly one PoolId" rule becomes a
+   * dead-end when production has independently verified several active pools.
+   * Prefer the bounded canonical choice produced from real Swap activity +
+   * strict V257 identity. It may come from the same candidate object or from
+   * the watched token persisted by the immediately-prior production scan.
+   */
+  const watchedV906 =
+    isAddress(token)
+      ? findWatched(state, token)
+      : null;
+
+  const candidateCanonicalV906 =
+    candidate?.productionV4ExactPoolHandoffV802
+      ?.canonicalPoolV906 || null;
+
+  const watchedCanonicalV906 =
+    watchedV906?.productionCanonicalPoolV906 || null;
+
+  const canonicalTtlMsV906 =
+    6 * 60 * 60 * 1000;
+
+  const canonicalFreshV906 = row =>
+    row?.verified === true &&
+    /^0x[a-f0-9]{64}$/.test(
+      String(normalize(row?.poolId) || "")
+    ) &&
+    normalize(row?.candidateAddress || token) === token &&
+    safeNumber(row?.selectedAt) > 0 &&
+    Date.now() - safeNumber(row?.selectedAt) <=
+      canonicalTtlMsV906;
+
+  const canonicalRowV906 =
+    canonicalFreshV906(candidateCanonicalV906)
+      ? candidateCanonicalV906
+      : canonicalFreshV906(watchedCanonicalV906)
+        ? watchedCanonicalV906
+        : null;
+
+  const canonicalPoolIdV906 =
+    canonicalRowV906
+      ? normalize(canonicalRowV906.poolId)
+      : "";
+
   const recoveredPoolIdV886 =
     /^0x[a-f0-9]{64}$/.test(String(originalPoolIdV886 || ""))
       ? originalPoolIdV886
-      : uniqueProductionPoolIdsV886.length === 1
-        ? uniqueProductionPoolIdsV886[0]
-        : "";
+      : /^0x[a-f0-9]{64}$/.test(String(canonicalPoolIdV906 || ""))
+        ? canonicalPoolIdV906
+        : uniqueProductionPoolIdsV886.length === 1
+          ? uniqueProductionPoolIdsV886[0]
+          : "";
 
   if (
     (!identity || identity?.verified !== true || !/^0x[a-f0-9]{64}$/.test(String(originalPoolIdV886 || ""))) &&
@@ -60606,8 +60671,23 @@ function directionalIdentityHandoffV885(candidate, state) {
         candidateCurrencyIndexV740: tokenIs0V886 ? 0 : 1,
         currency0V740: currency0V886,
         currency1V740: currency1V886,
-        recoveredFromProductionHandoffV886: true
+        recoveredFromProductionHandoffV886: true,
+        recoveredFromCanonicalProductionV906:
+          recoveredPoolIdV886 === canonicalPoolIdV906 &&
+          Boolean(canonicalRowV906),
+        canonicalProductionSelectedAtV906:
+          recoveredPoolIdV886 === canonicalPoolIdV906
+            ? safeNumber(canonicalRowV906?.selectedAt) || null
+            : null
       };
+      if (
+        identity.recoveredFromCanonicalProductionV906 === true
+      ) {
+        identity.status =
+          "PRODUCTION_V4_CANONICAL_EXACT_POOL_HANDOFF_RECOVERED_V906";
+        identity.source =
+          "PRODUCTION_V4_CANONICAL_POOL_PLUS_REGISTRY_V906";
+      }
       candidate.onChainPoolIdentityV153 = identity;
     }
   }
@@ -60662,6 +60742,14 @@ function directionalIdentityHandoffV885(candidate, state) {
     identityStatus: identity?.status || null,
     recoveredFromProductionHandoffV886: identity?.recoveredFromProductionHandoffV886 === true,
     productionPoolIdsConsideredV886: uniqueProductionPoolIdsV886,
+    canonicalPoolIdV906:
+      /^0x[a-f0-9]{64}$/.test(String(canonicalPoolIdV906 || ""))
+        ? canonicalPoolIdV906
+        : null,
+    canonicalPoolFreshV906: Boolean(canonicalRowV906),
+    recoveredFromCanonicalProductionV906:
+      identity?.recoveredFromCanonicalProductionV906 === true ||
+      identity?.recoveredFromProductionHandoffV906 === true,
     zeroProviderRequests: true
   };
 }
@@ -97821,9 +97909,12 @@ function exactPoolV151HandoffDiagnosticV905(
   if (isAddress(token)) {
     if (postExactVerified) {
       classification =
-        preExactVerified
-          ? "EXACT_POOL_ALREADY_VERIFIED_BEFORE_PRODUCTION_V905"
-          : "EXACT_POOL_VERIFIED_BY_PRODUCTION_PATH_V905";
+        postIdentity?.recoveredFromProductionHandoffV906 === true ||
+        postIdentity?.canonicalSelectionV906 === true
+          ? "CANONICAL_MULTI_POOL_IDENTITY_PROMOTED_V906"
+          : preExactVerified
+            ? "EXACT_POOL_ALREADY_VERIFIED_BEFORE_PRODUCTION_V905"
+            : "EXACT_POOL_VERIFIED_BY_PRODUCTION_PATH_V905";
     } else if (uniqueRegistryPoolIds.length > 0) {
       classification =
         "REGISTRY_HAS_TOKEN_POOL_BUT_CANDIDATE_IDENTITY_NOT_LINKED_V905";
@@ -97910,7 +98001,9 @@ function exactPoolV151HandoffDiagnosticV905(
         Array.isArray(enrichment?.matchingPoolIds)
           ? enrichment.matchingPoolIds.slice(0, 8)
           : [],
-      matchingSwapRows: safeNumber(enrichment?.matchingSwapRows)
+      matchingSwapRows: safeNumber(enrichment?.matchingSwapRows),
+      canonicalPoolV906:
+        enrichment?.canonicalPoolSelectionV906 || null
     },
 
     identityDiscovery: {
@@ -99015,14 +99108,157 @@ async function enrichCandidateWithProductionV4V772(
     }
   }
 
+  /*
+   * V906: production has already paid for and verified the matching PoolIds and
+   * current Swap rows above. When more than one exact token pool is active, V886
+   * deliberately refused to guess. Rank only pools that pass the existing strict
+   * V257 identity check AFTER the V802 merge has placed exact currencies into the
+   * watched token. This turns proven multi-pool activity into one deterministic
+   * candidate-level identity without a new request or inferred currency.
+   */
+  const canonicalPoolCandidatesV906 = [];
+
+  if (watchedV802) {
+    for (const poolId of matchingIds) {
+      const exactIdentityV906 =
+        exactCandidatePoolIdentityV257(
+          watchedV802,
+          poolId
+        );
+
+      if (exactIdentityV906?.verified !== true) continue;
+
+      const poolSwapRowsV906 =
+        matchingRows.filter(
+          log =>
+            normalize(log?.topics?.[0]) === normalize(SWAP_TOPIC) &&
+            normalize(log?.topics?.[1]) === poolId
+        );
+
+      if (!poolSwapRowsV906.length) continue;
+
+      const swapBlocksV906 =
+        poolSwapRowsV906
+          .map(log => blockNumberFromAnyV180(log?.blockNumber))
+          .filter(Number.isFinite);
+
+      const latestSwapBlockV906 =
+        swapBlocksV906.length
+          ? Math.max(...swapBlocksV906)
+          : null;
+
+      if (!Number.isFinite(latestSwapBlockV906)) continue;
+
+      canonicalPoolCandidatesV906.push({
+        poolId,
+        exactIdentity: exactIdentityV906,
+        latestSwapBlock: latestSwapBlockV906,
+        swapCount: poolSwapRowsV906.length
+      });
+    }
+  }
+
+  canonicalPoolCandidatesV906.sort(
+    (a, b) =>
+      safeNumber(b?.latestSwapBlock) -
+        safeNumber(a?.latestSwapBlock) ||
+      safeNumber(b?.swapCount) -
+        safeNumber(a?.swapCount) ||
+      String(a?.poolId || "").localeCompare(
+        String(b?.poolId || "")
+      )
+  );
+
+  const canonicalPoolV906 =
+    canonicalPoolCandidatesV906[0] || null;
+
+  if (canonicalPoolV906?.exactIdentity?.verified === true) {
+    candidate.onChainPoolIdentityV153 = {
+      ...canonicalPoolV906.exactIdentity,
+      status:
+        "PRODUCTION_V4_CANONICAL_EXACT_POOL_VERIFIED_V906",
+      source:
+        "PRODUCTION_V4_CURRENT_SWAP_PLUS_STRICT_V257_IDENTITY_V906",
+      recoveredFromProductionHandoffV906: true,
+      canonicalSelectionV906: true,
+      canonicalSwapCountV906:
+        safeNumber(canonicalPoolV906.swapCount),
+      canonicalLatestSwapBlockV906:
+        safeNumber(canonicalPoolV906.latestSwapBlock),
+      canonicalCandidateCountV906:
+        canonicalPoolCandidatesV906.length,
+      canonicalSelectedAtV906:
+        Date.now()
+    };
+
+    /*
+     * Persist only the compact already-verified identity needed for the next
+     * directional pass. The timestamp prevents an old production choice from
+     * becoming a permanent identity override.
+     */
+    watchedV802.productionCanonicalPoolV906 = {
+      verified: true,
+      poolId:
+        canonicalPoolV906.poolId,
+      candidateAddress: token,
+      quoteTokenAddress:
+        normalize(
+          canonicalPoolV906.exactIdentity?.quoteTokenAddress
+        ) || null,
+      targetTokenSide:
+        canonicalPoolV906.exactIdentity?.targetTokenSide || "BASE",
+      latestSwapBlock:
+        safeNumber(canonicalPoolV906.latestSwapBlock),
+      swapCount:
+        safeNumber(canonicalPoolV906.swapCount),
+      candidateCount:
+        canonicalPoolCandidatesV906.length,
+      selectedAt:
+        Date.now(),
+      source:
+        "PRODUCTION_V4_CURRENT_SWAP_PLUS_STRICT_V257_IDENTITY_V906"
+    };
+  }
+
   candidate.productionV4ExactPoolHandoffV802 = {
     attempted: true,
     watchedFound: Boolean(watchedV802),
     matchedPoolIds: [...matchingIds],
     mergedPoolIds: handoffRowsV802.filter(row => row?.merged === true).map(row => row.poolId),
-    rows: handoffRowsV802
+    rows: handoffRowsV802,
+    canonicalPoolV906: canonicalPoolV906
+      ? {
+          verified:
+            canonicalPoolV906?.exactIdentity?.verified === true,
+          poolId:
+            canonicalPoolV906.poolId,
+          latestSwapBlock:
+            safeNumber(canonicalPoolV906.latestSwapBlock),
+          swapCount:
+            safeNumber(canonicalPoolV906.swapCount),
+          candidateCount:
+            canonicalPoolCandidatesV906.length,
+          quoteTokenAddress:
+            normalize(
+              canonicalPoolV906.exactIdentity?.quoteTokenAddress
+            ) || null,
+          selectedAt:
+            Date.now()
+        }
+      : {
+          verified: false,
+          poolId: null,
+          latestSwapBlock: null,
+          swapCount: 0,
+          candidateCount:
+            canonicalPoolCandidatesV906.length,
+          quoteTokenAddress: null,
+          selectedAt: Date.now()
+        }
   };
   base.exactPoolHandoffV802 = candidate.productionV4ExactPoolHandoffV802;
+  base.canonicalPoolSelectionV906 =
+    candidate.productionV4ExactPoolHandoffV802.canonicalPoolV906;
 
   const previous = getHistoricalSnapshot(state, token);
   const existingLiquidityEvents = safeNumber(candidate?.liveMomentumActivityV152?.liquidityEvents);
@@ -129982,13 +130218,14 @@ function evidenceAuditTelegramMessageV727(state) {
 
     lines.push(
       "",
-      `🧬 <b>Exact-pool → V151 handoff diagnostic — V905</b>`,
+      `🧬 <b>Exact-pool → V151 handoff diagnostic — V905/V906</b>`,
       `Recorded: <code>${escapeHtml(exactPoolHandoffV905.recordedAt || "UNVERIFIED")}</code>`,
       `Production target: <code>${escapeHtml(exactPoolHandoffV905.tokenAddress || "NONE")}</code> ${escapeHtml(exactPoolHandoffV905.symbol || "")} · mode <b>${escapeHtml(r905.selectionMode || "NONE")}</b>`,
       `V151 target: <code>${escapeHtml(v151v905.address || "NONE")}</code> · same target <b>${v151v905.sameAsProductionTarget ? "YES" : "NO"}</b> · V887 requested ${v151v905.exactHistoryRequested ? "YES" : "NO"}`,
       `Exact identity pre/post: <b>${id905.preVerified ? "YES" : "NO"}/${id905.postVerified ? "YES" : "NO"}</b> · post PoolId <code>${escapeHtml(id905.postPoolId || "NONE")}</code> · source ${escapeHtml(id905.postSource || "NONE")}`,
       `Local exact-pool evidence — registry matches <b>${fmt(id905.registryMatchingCount)}</b> · V254-known pools <b>${fmt(id905.v254KnownPoolCount)}</b>`,
       `V772 production — attempted <b>${p905.attempted ? "YES" : "NO"}</b> · applied ${p905.applied ? "YES" : "NO"} · status <b>${escapeHtml(p905.status || "NONE")}</b> · requests ${fmt(p905.externalRequestsUsed)} · recent swaps ${fmt(p905.recentSwapRows)} · live pools ${fmt(p905.uniqueLivePoolIds)} · checked ${fmt(p905.candidatePoolIdsChecked)} · matched ${fmt(Array.isArray(p905.matchingPoolIds) ? p905.matchingPoolIds.length : 0)}`,
+      `V906 canonical pool — verified <b>${p905?.canonicalPoolV906?.verified ? "YES" : "NO"}</b> · PoolId <code>${escapeHtml(p905?.canonicalPoolV906?.poolId || "NONE")}</code> · eligible pools ${fmt(p905?.canonicalPoolV906?.candidateCount)} · swaps ${fmt(p905?.canonicalPoolV906?.swapCount)} · latest block ${fmt(p905?.canonicalPoolV906?.latestSwapBlock)}`,
       `Identity discovery — current-live ${i905.currentLiveVerifiedLaunch ? "YES" : "NO"} · strategy <b>${escapeHtml(i905.strategy || "NONE")}</b> · registry candidates/added ${fmt(i905.registryTokenCandidates)}/${fmt(i905.registryTokenAdded)} · retained ${fmt(i905.retainedCandidates)}/${fmt(i905.retainedAdded)}`,
       `Initialize recent — attempted/ok ${i905.recentInitializeAttempted ? "YES" : "NO"}/${i905.recentInitializeOk ? "YES" : "NO"} · rows ${fmt(i905.recentInitializeRows)} · token matches ${fmt(i905.recentInitializeTokenMatches)} · active matches ${fmt(i905.recentInitializeActiveMatches)}`,
       `Initialize indexed — c0/c1 attempted ${i905.indexedInitializeCurrency0Attempted ? "YES" : "NO"}/${i905.indexedInitializeCurrency1Attempted ? "YES" : "NO"} · ok ${i905.indexedInitializeCurrency0Ok ? "YES" : "NO"}/${i905.indexedInitializeCurrency1Ok ? "YES" : "NO"} · decoded matches ${fmt(i905.indexedInitializeDecodedTokenMatches)} · active matches ${fmt(i905.indexedInitializeActiveMatches)}`,
