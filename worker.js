@@ -1,4 +1,17 @@
 /**
+ * V917 RECURRING-CREATOR RUNTIME HOTFIX:
+ * - builds directly from deployed V916;
+ * - fixes the live scan TDZ exception:
+ *     "Cannot access 'recurringCreatorPriorityV505' before initialization";
+ * - the earlier V503 route was incorrectly reading the later V505 const before
+ *   that const existed. It now passes the creator already selected by
+ *   recurringCreatorWorkV503 itself;
+ * - removes a second latent reference to undeclared targetToken in the later
+ *   V505 check and uses only the already-selected persisted-origin token;
+ * - preserves V916 direct Pons curve collector, V915 scheduler isolation,
+ *   scoring/risk/Telegram thresholds, provider order and request ceilings.
+ */
+/**
  * V916 DIRECT ON-CHAIN PONS V2 CURVE FLOW:
  * - builds directly from deployed V915;
  * - removes Bitquery as a hard dependency for fresh pre-graduation Pons V2 flow;
@@ -8139,7 +8152,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V916";
+const VERSION = "V917";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -146567,11 +146580,8 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
         state,
         budget,
         forcedCreator:
-          recurringCreatorPriorityV505
-            ?.pendingCreatorWork
-            ?.creator ||
-          recurringCreatorPriorityV505
-            ?.tokenCreatorMatch
+          recurringCreatorWorkV503
+            ?.candidate
             ?.creator ||
           null
       });
@@ -146817,7 +146827,6 @@ async function runPersistedVerifiedOriginRawTraceBacklogV486({
         telemetry?.selectedToken ||
         selected?.token ||
         selected?.address ||
-        targetToken ||
         null
     });
 
