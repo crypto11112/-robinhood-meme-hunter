@@ -8363,7 +8363,17 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V946";
+const VERSION = "V947";
+/* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
+ * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
+ * It never feeds results into production holder/risk/scoring logic and performs zero
+ * persistent state writes. If the full verified launch->head history fits inside the
+ * bounded diagnostic request cap, it reconstructs exact current balances and reports
+ * holder count / Top 1 / Top 10 after the EXISTING infrastructure exclusions. If the
+ * history is too large, it reports measured log density and estimated request cost
+ * without pretending the partial window is a complete holder ledger. Legacy provider
+ * holder paths are preserved unchanged as fallback/reference code.
+ */
 /* V946: removes the watched-state dependency from the targeted denominator replay.
  * Old retained failures can be replayed from their address: totalSupply is freshly
  * verified by direct ERC-20 eth_call and the existing holder pipeline is then run
@@ -168473,6 +168483,28 @@ async function telegramCommandReplyV271(
       };
     }
   } else if (
+    parsed.command === "/holderprototype" ||
+    parsed.command === "/directholders"
+  ) {
+    const protoV947 = await directChainHolderPrototypeV947(state, env, parsed.argument || "");
+    reply = directChainHolderPrototypeMessageV947(protoV947);
+
+    if (diagnosticV273) {
+      diagnosticV273.directChainHolderPrototypeV947 = {
+        scannerBudgetConsumed: false,
+        externalProviderRequests: safeNumber(protoV947?.externalRequestsUsed),
+        stateWrites: 0,
+        address: protoV947?.address || null,
+        diagnosis: protoV947?.diagnosis || null,
+        completeHistory: protoV947?.completeHistory === true,
+        holderCount: protoV947?.exact?.holderCount ?? null,
+        productionHolderChanged: false,
+        riskChanged: false,
+        scoringChanged: false,
+        qualificationChanged: false
+      };
+    }
+  } else if (
     parsed.command === "/denominatorreplay" ||
     parsed.command === "/ownershipreplay"
   ) {
@@ -169022,7 +169054,9 @@ async function telegramCommandReplyV271(
     parsed.command === "/holderrecovery" ||
     parsed.command === "/ownershipaudit" ||
     parsed.command === "/denominatoraudit" ||
-    parsed.command === "/riskclassaudit";
+    parsed.command === "/riskclassaudit" ||
+    parsed.command === "/holderprototype" ||
+    parsed.command === "/directholders";
 
   if (isFreshAnalyseV352) {
     await telegramAnalyseCheckpointV352(
@@ -169593,6 +169627,305 @@ async function denominatorReplayV945(state, env, argument = "") {
     telegramThresholdsChanged: false
   };
 }
+
+/* =========================================================
+   V947 DIRECT-CHAIN HOLDER RECONSTRUCTION PROTOTYPE
+   - Manual diagnostic only; zero persistent state writes.
+   - Uses direct ERC-20 Transfer logs through existing RPC routing.
+   - Exact holder count / Top 1 / Top 10 are emitted ONLY when the
+     complete known launch->head range was scanned successfully.
+   - Partial scans are feasibility measurements only and never feed risk.
+   ========================================================= */
+const ERC20_TRANSFER_TOPIC_V947 =
+  "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const HOLDER_PROTOTYPE_CHUNK_BLOCKS_V947 = 2000;
+const HOLDER_PROTOTYPE_MAX_LOG_REQUESTS_V947 = 8;
+const HOLDER_PROTOTYPE_MAX_TOTAL_REQUESTS_V947 = 12;
+
+function holderPrototypeBudgetV947() {
+  const budget = createBudget();
+  budget.totalUsed = 0;
+  budget.totalLimit = HOLDER_PROTOTYPE_MAX_TOTAL_REQUESTS_V947;
+  budget.system.used = 0; budget.system.limit = 0;
+  budget.discovery.used = 0; budget.discovery.limit = 0;
+  budget.discovery.liveUsed = 0; budget.discovery.liveLimit = 0;
+  budget.discovery.backlogUsed = 0; budget.discovery.backlogLimit = 0;
+  budget.analysis.used = 0; budget.analysis.limit = HOLDER_PROTOTYPE_MAX_TOTAL_REQUESTS_V947;
+  budget.notification.used = 0; budget.notification.limit = 0;
+  budget.notification.globalReserveActiveV174 = false;
+  return budget;
+}
+
+function topicAddressV947(topic) {
+  const s = String(topic || "").toLowerCase();
+  if (!/^0x[a-f0-9]{64}$/.test(s)) return null;
+  const a = normalize("0x" + s.slice(-40));
+  return isAddress(a) ? a : null;
+}
+
+function transferAmountV947(data) {
+  const s = String(data || "");
+  if (!/^0x[a-fA-F0-9]{64}$/.test(s)) return null;
+  try { return BigInt(s); } catch (_) { return null; }
+}
+
+function launchBlockForHolderPrototypeV947(state, address, retainedRow) {
+  const watched = Array.isArray(state?.watchedTokens)
+    ? state.watchedTokens.find(t => normalize(t?.address || t?.token) === address)
+    : null;
+  const values = [
+    watched?.launchpadV258?.launchBlock,
+    watched?.verifiedLaunchAgeV223?.launchBlock,
+    watched?.launchBlock,
+    watched?.metadata?.launchBlock,
+    retainedRow?.launchBlock,
+    retainedRow?.verifiedLaunchBlock,
+    retainedRow?.launchAge?.launchBlock,
+    retainedRow?.verifiedLaunchAgeV223?.launchBlock,
+    retainedRow?.evidenceCompletionAuditV727?.launchBlock,
+    retainedRow?.evidenceCompletionAuditV727?.launchAge?.launchBlock,
+    retainedRow?.evidenceCompletionAuditV727?.launch?.launchBlock
+  ];
+  for (const v of values) {
+    const n = safeNumber(v);
+    if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  }
+  return null;
+}
+
+function holderPrototypeTargetV947(state, argument = "") {
+  const raw = String(argument || "").trim().split(/\\s+/).filter(Boolean);
+  const explicit = normalize(raw[0] || "");
+  const explicitLaunch = safeNumber(raw[1]);
+  const records = Array.isArray(state?.qualificationAuditV663?.records)
+    ? state.qualificationAuditV663.records : [];
+  let row = null;
+  let address = null;
+  if (isAddress(explicit)) {
+    address = explicit;
+    row = [...records].reverse().find(r => normalize(r?.address) === address) || null;
+  } else {
+    row = denominatorReplayTargetV945(state, "");
+    address = normalize(row?.address || "");
+    if (!isAddress(address)) {
+      const watched = Array.isArray(state?.watchedTokens) ? state.watchedTokens : [];
+      const candidate = [...watched].reverse().find(w => isAddress(normalize(w?.address || w?.token)));
+      address = normalize(candidate?.address || candidate?.token || "");
+    }
+  }
+  if (!isAddress(address)) return null;
+  return {
+    address,
+    row,
+    symbol: row?.symbol || row?.name || null,
+    launchBlock: explicitLaunch > 0 ? Math.floor(explicitLaunch) : launchBlockForHolderPrototypeV947(state, address, row)
+  };
+}
+
+async function directChainHolderPrototypeV947(state, env, argument = "") {
+  const target = holderPrototypeTargetV947(state, argument);
+  if (!target) return { version: "V947", status: "NO_VALID_TOKEN_TARGET", externalRequestsUsed: 0, stateWrites: 0 };
+  const address = target.address;
+  const budget = holderPrototypeBudgetV947();
+  const identity = [];
+
+  let totalSupply = null;
+  let decimals = null;
+  try {
+    const p = await erc20ProbeV418(env, address, "0x18160ddd", "totalSupply", budget);
+    identity.push({method:"totalSupply",ok:p?.ok===true,provider:p?.provider||null,error:p?.error||null});
+    if (p?.ok === true) {
+      const d = decodeErc20ProbeValueV419("totalSupply", p.raw);
+      if (d?.verified === true) totalSupply = d.value;
+    }
+  } catch (e) { identity.push({method:"totalSupply",ok:false,error:errorString(e)}); }
+  try {
+    const p = await erc20ProbeV418(env, address, "0x313ce567", "decimals", budget);
+    identity.push({method:"decimals",ok:p?.ok===true,provider:p?.provider||null,error:p?.error||null});
+    if (p?.ok === true) {
+      const d = decodeErc20ProbeValueV419("decimals", p.raw);
+      if (d?.verified === true) decimals = safeNumber(d.value);
+    }
+  } catch (e) { identity.push({method:"decimals",ok:false,error:errorString(e)}); }
+
+  const headCall = await rpc(env, "eth_blockNumber", [], budget, "analysis");
+  let head = null;
+  try { if (headCall?.result) head = Number(BigInt(headCall.result)); } catch (_) {}
+  if (!(head > 0)) return {
+    version:"V947", status:"HEAD_UNVERIFIED", address, symbol:target.symbol,
+    identity, externalRequestsUsed:safeNumber(budget?.totalUsed), stateWrites:0
+  };
+
+  const launchBlock = safeNumber(target.launchBlock) > 0 ? Math.floor(safeNumber(target.launchBlock)) : null;
+  const maxCoveredBlocks = HOLDER_PROTOTYPE_MAX_LOG_REQUESTS_V947 * HOLDER_PROTOTYPE_CHUNK_BLOCKS_V947;
+  const fullRangeKnown = launchBlock !== null && launchBlock <= head;
+  const requiredBlocks = fullRangeKnown ? Math.max(1, head - launchBlock + 1) : null;
+  const requiredChunks = requiredBlocks !== null ? Math.ceil(requiredBlocks / HOLDER_PROTOTYPE_CHUNK_BLOCKS_V947) : null;
+  const canCompleteFullHistory = fullRangeKnown && requiredChunks <= HOLDER_PROTOTYPE_MAX_LOG_REQUESTS_V947;
+  const scanFrom = canCompleteFullHistory
+    ? launchBlock
+    : Math.max(0, head - maxCoveredBlocks + 1);
+
+  const ranges = [];
+  for (let from = scanFrom; from <= head && ranges.length < HOLDER_PROTOTYPE_MAX_LOG_REQUESTS_V947; from += HOLDER_PROTOTYPE_CHUNK_BLOCKS_V947) {
+    ranges.push({fromBlock:from,toBlock:Math.min(head,from + HOLDER_PROTOTYPE_CHUNK_BLOCKS_V947 - 1)});
+  }
+
+  const logs = [];
+  const rangeResults = [];
+  let providerFailure = null;
+  for (const range of ranges) {
+    if (!budgetAvailable(budget, "analysis")) break;
+    const r = await rpc(env, "eth_getLogs", [{
+      address,
+      fromBlock:"0x"+range.fromBlock.toString(16),
+      toBlock:"0x"+range.toBlock.toString(16),
+      topics:[ERC20_TRANSFER_TOPIC_V947]
+    }], budget, "analysis");
+    if (!Array.isArray(r?.result)) {
+      providerFailure = r?.error || r?.status || "ETH_GETLOGS_UNVERIFIED";
+      rangeResults.push({...range,ok:false,rows:0,error:providerFailure});
+      break;
+    }
+    logs.push(...r.result);
+    rangeResults.push({...range,ok:true,rows:r.result.length});
+  }
+
+  const scannedThrough = rangeResults.filter(r=>r.ok).length
+    ? rangeResults.filter(r=>r.ok).slice(-1)[0].toBlock : scanFrom - 1;
+  const completeHistory = canCompleteFullHistory && !providerFailure && scannedThrough >= head && rangeResults.length === requiredChunks;
+  const blocksScanned = rangeResults.filter(r=>r.ok).reduce((n,r)=>n+(r.toBlock-r.fromBlock+1),0);
+  const transferRows = logs.length;
+  const transfersPer1000Blocks = blocksScanned > 0 ? transferRows / blocksScanned * 1000 : 0;
+  const estimatedRequestsForFullHistory = requiredChunks;
+
+  const balances = new Map();
+  let decodedTransfers = 0;
+  if (completeHistory) {
+    for (const log of logs) {
+      const topics = Array.isArray(log?.topics) ? log.topics : [];
+      const from = topicAddressV947(topics[1]);
+      const to = topicAddressV947(topics[2]);
+      const amount = transferAmountV947(log?.data);
+      if (!from || !to || amount === null) continue;
+      decodedTransfers++;
+      if (from !== ZERO) balances.set(from, (balances.get(from) || 0n) - amount);
+      if (to !== ZERO) balances.set(to, (balances.get(to) || 0n) + amount);
+    }
+  }
+
+  let exact = null;
+  if (completeHistory && totalSupply !== null && totalSupply !== undefined) {
+    let supply = 0n;
+    try { supply = BigInt(String(totalSupply)); } catch (_) {}
+    const watched = Array.isArray(state?.watchedTokens)
+      ? state.watchedTokens.find(t => normalize(t?.address || t?.token) === address) : null;
+    const market = watched?.marketCache?.data || target?.row?.market || target?.row?.marketSnapshot || null;
+    const verifiedPair = normalize(market?.pairAddress || "") || null;
+    let infrastructureBalance = 0n;
+    const positive = [];
+    const infrastructure = [];
+    for (const [holderAddress, bal] of balances.entries()) {
+      if (bal <= 0n) continue;
+      const reason = infrastructureHolderReason(holderAddress, watched || {address,token:address}, verifiedPair);
+      if (reason) {
+        infrastructureBalance += bal;
+        infrastructure.push({address:holderAddress,balance:bal,reason});
+      } else {
+        positive.push({address:holderAddress,balance:bal});
+      }
+    }
+    positive.sort((a,b)=>a.balance===b.balance?0:(a.balance>b.balance?-1:1));
+    const ownershipSupply = supply - infrastructureBalance;
+    const top1 = positive[0]?.balance || 0n;
+    const top10 = positive.slice(0,10).reduce((n,x)=>n+x.balance,0n);
+    const pct = raw => {
+      if (ownershipSupply <= 0n) return null;
+      try { return Number(raw * 1000000n / ownershipSupply) / 10000; } catch (_) { return null; }
+    };
+    const reconstructedPositiveSupply = positive.reduce((n,x)=>n+x.balance,0n);
+    exact = {
+      holderCount: positive.length,
+      topHolderPct: pct(top1),
+      top10Pct: pct(top10),
+      totalSupply: supply.toString(),
+      infrastructureBalance: infrastructureBalance.toString(),
+      ownershipSupply: ownershipSupply.toString(),
+      reconstructedPositiveSupply: reconstructedPositiveSupply.toString(),
+      infrastructureRows: infrastructure.length,
+      negativeBalanceRows: [...balances.values()].filter(v=>v<0n).length,
+      zeroBalanceRows: [...balances.values()].filter(v=>v===0n).length,
+      supplyReconciliationPct: ownershipSupply > 0n ? Number(reconstructedPositiveSupply * 1000000n / ownershipSupply) / 10000 : null,
+      top10: positive.slice(0,10).map(x=>({address:x.address,balance:x.balance.toString(),percentage:pct(x.balance)}))
+    };
+  }
+
+  let diagnosis = "PARTIAL_WINDOW_FEASIBILITY_ONLY";
+  if (providerFailure) diagnosis = "DIRECT_RPC_TRANSFER_LOG_PROVIDER_FAILURE";
+  else if (!fullRangeKnown) diagnosis = "VERIFIED_LAUNCH_BLOCK_NOT_AVAILABLE_FULL_RECONSTRUCTION_NOT_ATTEMPTED";
+  else if (!canCompleteFullHistory) diagnosis = "FULL_HISTORY_EXCEEDS_BOUNDED_PROTOTYPE_REQUEST_CAP";
+  else if (completeHistory && exact) diagnosis = "FULL_DIRECT_CHAIN_HOLDER_RECONSTRUCTION_COMPLETE";
+  else if (completeHistory) diagnosis = "FULL_TRANSFER_HISTORY_SCANNED_BUT_SUPPLY_UNVERIFIED";
+
+  return {
+    version:"V947", status:"DIRECT_CHAIN_HOLDER_PROTOTYPE_COMPLETE", diagnosis,
+    address, symbol:target.symbol || null,
+    launchBlock, head, fullRangeKnown, requiredBlocks, requiredChunks,
+    chunkBlocks:HOLDER_PROTOTYPE_CHUNK_BLOCKS_V947,
+    maxLogRequests:HOLDER_PROTOTYPE_MAX_LOG_REQUESTS_V947,
+    canCompleteFullHistory, completeHistory,
+    scanFrom, scannedThrough, blocksScanned,
+    transferRows, decodedTransfers,
+    transfersPer1000Blocks,
+    estimatedRequestsForFullHistory,
+    providerFailure,
+    identity, totalSupply:totalSupply!==null&&totalSupply!==undefined?String(totalSupply):null,
+    decimals:Number.isFinite(decimals)?decimals:null,
+    exact,
+    rangeResults,
+    externalRequestsUsed:safeNumber(budget?.totalUsed),
+    maxExternalRequests:HOLDER_PROTOTYPE_MAX_TOTAL_REQUESTS_V947,
+    stateWrites:0, persistentStateMutated:false,
+    productionHolderChanged:false, riskChanged:false, scoringChanged:false,
+    qualificationChanged:false, telegramThresholdsChanged:false,
+    legacyHolderProvidersPreserved:true,
+    directChainPrototypeOnly:true
+  };
+}
+
+function directChainHolderPrototypeMessageV947(d) {
+  const fmt = n => Number.isFinite(Number(n)) ? Number(n).toLocaleString("en-GB") : "UNVERIFIED";
+  if (!d || d.status === "NO_VALID_TOKEN_TARGET") {
+    return "🧬 <b>Direct-Chain Holder Prototype — V947</b>\n\nNo valid token target was available. Use <code>/holderprototype 0xTOKEN</code>.";
+  }
+  const lines = [
+    "🧬 <b>Direct-Chain Holder Prototype — V947</b>", "",
+    `Token: <b>${escapeHtml(d.symbol || "TOKEN")}</b> <code>${escapeHtml(shortAddressGlobalV937(d.address))}</code>`,
+    `Diagnosis: <b>${escapeHtml(d.diagnosis || "UNKNOWN")}</b>`,
+    `Launch block: <b>${fmt(d.launchBlock)}</b> · head <b>${fmt(d.head)}</b>`,
+    `History blocks: <b>${fmt(d.requiredBlocks)}</b> · estimated 2,000-block log requests <b>${fmt(d.estimatedRequestsForFullHistory)}</b>`,
+    `Prototype capacity: <b>${fmt(d.maxLogRequests)}</b> log requests · full history fits <b>${d.canCompleteFullHistory?"YES":"NO"}</b>`, "",
+    "📡 <b>Measured direct-chain Transfer activity</b>",
+    `Blocks scanned: <b>${fmt(d.blocksScanned)}</b> · Transfer rows <b>${fmt(d.transferRows)}</b>`,
+    `Transfer rows / 1,000 blocks: <b>${Number(d.transfersPer1000Blocks||0).toFixed(2)}</b>`,
+    `RPC/provider failure: <b>${escapeHtml(d.providerFailure || "NONE")}</b>`,
+    `External requests used: <b>${fmt(d.externalRequestsUsed)}/${fmt(d.maxExternalRequests)}</b>`
+  ];
+  if (d.completeHistory && d.exact) {
+    lines.push("", "✅ <b>Full-history reconstructed holder ledger</b>",
+      `Holder count (positive, non-infrastructure): <b>${fmt(d.exact.holderCount)}</b>`,
+      `Top holder: <b>${d.exact.topHolderPct===null?"UNVERIFIED":Number(d.exact.topHolderPct).toFixed(2)+"%"}</b>`,
+      `Top 10: <b>${d.exact.top10Pct===null?"UNVERIFIED":Number(d.exact.top10Pct).toFixed(2)+"%"}</b>`,
+      `Infrastructure rows excluded: <b>${fmt(d.exact.infrastructureRows)}</b>`,
+      `Ownership-supply reconciliation: <b>${d.exact.supplyReconciliationPct===null?"UNVERIFIED":Number(d.exact.supplyReconciliationPct).toFixed(2)+"%"}</b>`);
+  } else {
+    lines.push("", "⚠️ <b>No holder count / Top 10 is promoted from this partial window.</b>",
+      "Exact current holders require the full Transfer history from a verified launch/deployment block. V947 measures whether that is practical without weakening production verification.");
+  }
+  lines.push("", "<i>Prototype only. Zero persistent state writes. Existing Blockscout/GoldRush/Bitquery holder code remains intact and production risk/scoring/Telegram logic is unchanged.</i>");
+  return lines.join("\n");
+}
+
 function denominatorReplayMessageV945(d) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   if (!d || d.status === "NO_RETAINED_NO_POSITIVE_OWNERSHIP_SUPPLY_TARGET") {
