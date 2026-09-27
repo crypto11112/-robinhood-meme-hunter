@@ -8317,7 +8317,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V930";
+const VERSION = "V931";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -79564,6 +79564,8 @@ async function runDirectPonsCurveFlowV916(
       recentLiveEligible: 0,
       backgroundHistoryEligible: 0,
       oldLiveRefreshDueSkipped: 0,
+      persistedBootstrapQueueEligibleV931: 0,
+      persistedBootstrapQueueRetainedV931: 0,
       selectedMode: null,
       selectedToken: null,
       status:
@@ -79640,8 +79642,104 @@ async function runDirectPonsCurveFlowV916(
             ?.preGraduation === true
       );
 
+  /*
+   * V931: short-lived persisted bootstrap queue. Only entries which had
+   * already passed the normal V916/V920 eligibility gates are stored. The
+   * queue is not an alternate risk path: queued candidates are reconstructed
+   * with the verified launch evidence and risk snapshot that originally
+   * qualified them, expire quickly, and are still filtered by the same ranked
+   * eligibility predicate below.
+   */
+  const ponsTelemetryQueueV931 =
+    state.ponsCurveTradesV216 &&
+    typeof state.ponsCurveTradesV216 === "object"
+      ? state.ponsCurveTradesV216
+      : newState().ponsCurveTradesV216;
+
+  state.ponsCurveTradesV216 =
+    ponsTelemetryQueueV931;
+
+  ponsTelemetryQueueV931.persistedBootstrapQueueV931 =
+    ponsTelemetryQueueV931.persistedBootstrapQueueV931 &&
+    typeof ponsTelemetryQueueV931.persistedBootstrapQueueV931 === "object"
+      ? ponsTelemetryQueueV931.persistedBootstrapQueueV931
+      : { version: "V931", entries: {} };
+
+  const queueEntriesV931 =
+    ponsTelemetryQueueV931.persistedBootstrapQueueV931.entries &&
+    typeof ponsTelemetryQueueV931.persistedBootstrapQueueV931.entries === "object"
+      ? ponsTelemetryQueueV931.persistedBootstrapQueueV931.entries
+      : {};
+
+  ponsTelemetryQueueV931.persistedBootstrapQueueV931.entries =
+    queueEntriesV931;
+
+  const nowV931 = Date.now();
+  const queueTtlMsV931 = 30 * 60 * 1000;
+  const currentTokenSetV931 = new Set(
+    mappedPonsRowsV921
+      .map(row => normalize(row?.candidate?.address))
+      .filter(isAddress)
+  );
+
+  for (const [queuedTokenRaw, entry] of Object.entries(queueEntriesV931)) {
+    const queuedToken = normalize(queuedTokenRaw);
+    const expiresAt = safeNumber(entry?.expiresAt);
+    const liveEntry =
+      state?.ponsCurveTradesV216?.directRpcLiveV919?.entries?.[queuedToken];
+
+    if (
+      !isAddress(queuedToken) ||
+      !(expiresAt > nowV931) ||
+      entry?.consumed === true ||
+      liveEntry?.bootstrapCompletedV930 === true
+    ) {
+      delete queueEntriesV931[queuedTokenRaw];
+    }
+  }
+
+  const queuedMappedRowsV931 = [];
+
+  for (const entry of Object.values(queueEntriesV931)) {
+    const token = normalize(entry?.tokenAddress);
+    if (!isAddress(token) || currentTokenSetV931.has(token)) continue;
+
+    const launch = entry?.verifiedLaunchSourceV476 || null;
+    const candidate = {
+      address: token,
+      symbol: entry?.symbol || null,
+      validERC20: true,
+      risk: {
+        label: entry?.riskLabel || "LOW",
+        severeOverride: false
+      },
+      analysisPriority: safeNumber(entry?.analysisPriority),
+      verifiedLaunchSourceV476: launch
+    };
+
+    const lifecycle = ponsV2LifecycleRoutingV912(candidate);
+    const meta = v916PonsLaunchMeta(candidate);
+
+    queuedMappedRowsV931.push({
+      candidate,
+      lifecycle,
+      meta,
+      sourceTraceV921: v921PonsCandidateSourceTrace(
+        candidate,
+        state,
+        null,
+        latestNumber
+      ),
+      existingFlow: candidateVerifiedPonsCurveFlowV216(candidate, state),
+      restoredFromPersistedBootstrapQueueV931: true
+    });
+  }
+
+  const ponsRowsWithQueueV931 =
+    currentPonsRowsV921.concat(queuedMappedRowsV931);
+
   const ranked =
-    currentPonsRowsV921
+    ponsRowsWithQueueV931
       .filter(row => {
         const candidate =
           row.candidate;
@@ -79724,6 +79822,45 @@ async function runDirectPonsCurveFlowV916(
           .includes(row)
     );
 
+  /* V931: retain old, otherwise-eligible unverified-flow rows briefly. */
+  for (const row of oldRowsV922) {
+    const token = normalize(row?.candidate?.address);
+    const curve = normalize(row?.meta?.curve);
+    const pairToken = normalize(row?.meta?.pairToken || ZERO);
+    if (
+      !isAddress(token) ||
+      !isAddress(curve) ||
+      row?.existingFlow?.verified === true ||
+      row?.candidate?.risk?.severeOverride === true ||
+      String(row?.candidate?.risk?.label || "").toUpperCase() === "HIGH"
+    ) continue;
+
+    const launchEvidence = {
+      verified: true,
+      protocol: "Pons V2",
+      protocolKey: "pons_v2",
+      curve,
+      pairToken,
+      blockNumber: safeNumber(row?.meta?.launchBlock),
+      launchBlock: safeNumber(row?.meta?.launchBlock),
+      source: row?.meta?.source || "PERSISTED_ELIGIBLE_PONS_BOOTSTRAP_V931"
+    };
+
+    const prior = queueEntriesV931[token];
+    queueEntriesV931[token] = {
+      version: "V931",
+      tokenAddress: token,
+      symbol: row?.candidate?.symbol || prior?.symbol || null,
+      riskLabel: String(row?.candidate?.risk?.label || prior?.riskLabel || "LOW").toUpperCase(),
+      analysisPriority: safeNumber(row?.candidate?.analysisPriority),
+      verifiedLaunchSourceV476: launchEvidence,
+      queuedAt: prior?.queuedAt || nowV931,
+      updatedAt: nowV931,
+      expiresAt: Math.max(safeNumber(prior?.expiresAt), nowV931 + queueTtlMsV931),
+      consumed: false
+    };
+  }
+
   const backgroundHistoryRankedV922 =
     oldRowsV922.filter(row => {
       const token =
@@ -79742,7 +79879,18 @@ async function runDirectPonsCurveFlowV916(
         );
 
       /*
-       * V930: a one-time old/unverified bootstrap that completed without
+       * V931:
+ * - preserves V930 one-shot old/unverified Pons live bootstrap;
+ * - adds a short-lived persisted Pons bootstrap queue so a candidate which
+ *   passed the existing ERC20/risk/pre-graduation/verified-launch gates does
+ *   not lose its one bootstrap opportunity merely because it rotates out of
+ *   the next current candidate set;
+ * - queued entries expire after 30 minutes, remain one-shot, and never bypass
+ *   the original risk or lifecycle gates;
+ * - fixes V892 audit classification to honor an already-applied V894 swap
+ *   promotion when the retained audit snapshot is older than the promotion.
+ *
+ * V930: a one-time old/unverified bootstrap that completed without
        * establishing verified Pons flow must not immediately become a giant
        * stale BACKGROUND_HISTORY job on the following scan.
        */
@@ -79812,10 +79960,25 @@ async function runDirectPonsCurveFlowV916(
             ? "FRESH_RECENT_LIVE_ELIGIBLE_V922"
             : oldUnverifiedBootstrapRankedV930
                 .includes(selected)
-              ? "OLD_UNVERIFIED_FLOW_BOOTSTRAP_V930"
+              ? (
+                  selected?.restoredFromPersistedBootstrapQueueV931 === true
+                    ? "OLD_UNVERIFIED_FLOW_BOOTSTRAP_FROM_QUEUE_V931"
+                    : "OLD_UNVERIFIED_FLOW_BOOTSTRAP_V930"
+                )
               : "OLD_BACKGROUND_HISTORY_ONLY_V922"
         )
       : null;
+
+  if (
+    selected?.restoredFromPersistedBootstrapQueueV931 === true &&
+    isAddress(normalize(selected?.candidate?.address))
+  ) {
+    const selectedTokenV931 = normalize(selected.candidate.address);
+    if (queueEntriesV931[selectedTokenV931]) {
+      queueEntriesV931[selectedTokenV931].consumed = true;
+      queueEntriesV931[selectedTokenV931].consumedAt = nowV931;
+    }
+  }
 
   base.eligibleTargetsV920 =
     ranked.length;
@@ -79831,6 +79994,10 @@ async function runDirectPonsCurveFlowV916(
       backgroundHistoryRankedV922.length,
     oldUnverifiedBootstrapEligibleV930:
       oldUnverifiedBootstrapRankedV930.length,
+    persistedBootstrapQueueEligibleV931:
+      oldUnverifiedBootstrapRankedV930.filter(row => row?.restoredFromPersistedBootstrapQueueV931 === true).length,
+    persistedBootstrapQueueRetainedV931:
+      Object.keys(queueEntriesV931).length,
     oldLiveRefreshDueSkipped:
       Math.max(
         0,
@@ -80124,8 +80291,7 @@ async function runDirectPonsCurveFlowV916(
     liveStateV919;
 
   if (
-    selectedModeV922 ===
-      "OLD_UNVERIFIED_FLOW_BOOTSTRAP_V930"
+    (["OLD_UNVERIFIED_FLOW_BOOTSTRAP_V930", "OLD_UNVERIFIED_FLOW_BOOTSTRAP_FROM_QUEUE_V931"].includes(selectedModeV922))
   ) {
     liveStateV919.bootstrapSelectedV930 = true;
     liveStateV919.bootstrapSelectedAtV930 = Date.now();
@@ -80885,8 +81051,7 @@ async function runDirectPonsCurveFlowV916(
       head;
 
     if (
-      selectedModeV922 ===
-        "OLD_UNVERIFIED_FLOW_BOOTSTRAP_V930"
+      (["OLD_UNVERIFIED_FLOW_BOOTSTRAP_V930", "OLD_UNVERIFIED_FLOW_BOOTSTRAP_FROM_QUEUE_V931"].includes(selectedModeV922))
     ) {
       liveStateV919.bootstrapCompletedV930 = true;
       liveStateV919.bootstrapCompletedHeadV930 = head;
@@ -134713,6 +134878,19 @@ function observedSwapHandoffDiagnosticV892(state) {
         ) || null
       : null;
 
+  const promotionV894ForDiagnosis =
+    retained?.v801VerifiedUsdPrequalEligibility?.verifiedExactPoolSwapPromotionV894 ||
+    retained?.verifiedExactPoolSwapPromotionV894 ||
+    v254RelevantCandidate?.verifiedExactPoolSwapPromotionV894 ||
+    null;
+
+  const effectiveObservedSwapsV931 = Math.max(
+    observedSwapsAtAudit,
+    promotionV894ForDiagnosis?.applied === true
+      ? safeNumber(promotionV894ForDiagnosis?.promotedObservedSwaps)
+      : 0
+  );
+
   let classification =
     "INSUFFICIENT_CURRENT_TARGET_EVIDENCE_V892";
 
@@ -134728,7 +134906,7 @@ function observedSwapHandoffDiagnosticV892(state) {
   else if (!exactPoolInVerifiedFlow) {
     classification = "VERIFIED_FLOW_EXISTS_BUT_NOT_FOR_CURRENT_EXACT_POOL_V892";
   }
-  else if (observedSwapsAtAudit <= 0) {
+  else if (effectiveObservedSwapsV931 <= 0) {
     classification = "VERIFIED_EXACT_POOL_FLOW_NOT_PROMOTED_TO_ACTIVITY_SWAPS_V892";
   }
   else if (v254RelevantCandidate && safeNumber(v254RelevantCandidate?.observedV4Swaps) <= 0) {
@@ -134769,16 +134947,13 @@ function observedSwapHandoffDiagnosticV892(state) {
     retainedQualificationRowFound:
       Boolean(retained),
     observedSwapsAtAudit,
+    effectiveObservedSwapsV931,
     noBotObservedSwapsApplicable:
       noSwap?.applicable === true,
     noBotObservedSwapsReason:
       noSwap?.reason || null,
     verifiedExactPoolSwapPromotionV894:
-      retained?.v801VerifiedUsdPrequalEligibility
-        ?.verifiedExactPoolSwapPromotionV894 ||
-      retained?.verifiedExactPoolSwapPromotionV894 ||
-      v254RelevantCandidate?.verifiedExactPoolSwapPromotionV894 ||
-      null,
+      promotionV894ForDiagnosis,
     verifiedFlow: {
       verified: verifiedFlow?.verified === true,
       recordCount: safeNumber(verifiedFlow?.recordCount),
@@ -135336,7 +135511,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `Target: <code>${escapeHtml(ponsDirectV916.tokenAddress || "NONE")}</code> ${escapeHtml(ponsDirectV916.symbol || "")} · curve <code>${escapeHtml(ponsDirectV916.curve || "NONE")}</code>`,
       `V920 selection — eligible ${fmt(ponsDirectV916.eligibleTargetsV920)} · verified launch block ${fmt(ponsDirectV916.selectionLaunchBlockV920)} · launch age ${fmt(ponsDirectV916.selectionLaunchAgeBlocksV920)} blocks · ${escapeHtml(ponsDirectV916.selectionPolicyV920 || "NONE")}`,
       `V921 source diagnosis — <b>${escapeHtml(ponsDirectV916?.candidateSourceDiagnosticV921?.classification || "NONE")}</b> · current Pons ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.currentCandidateCount)} · eligible ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.eligibleCandidateCount)}`,
-      `V922/V930 freshness routing — <b>${escapeHtml(ponsDirectV916?.freshnessRoutingV922?.status || "NONE")}</b> · base eligible ${fmt(ponsDirectV916?.freshnessRoutingV922?.baseEligible)} · fresh recent-live ${fmt(ponsDirectV916?.freshnessRoutingV922?.recentLiveEligible)} · old bootstrap ${fmt(ponsDirectV916?.freshnessRoutingV922?.oldUnverifiedBootstrapEligibleV930)} · old background ${fmt(ponsDirectV916?.freshnessRoutingV922?.backgroundHistoryEligible)} · old live-due skipped ${fmt(ponsDirectV916?.freshnessRoutingV922?.oldLiveRefreshDueSkipped)} · max fresh age ${fmt(ponsDirectV916?.freshnessRoutingV922?.freshLaunchMaxAgeBlocks)} blocks`,
+      `V922/V930/V931 freshness routing — <b>${escapeHtml(ponsDirectV916?.freshnessRoutingV922?.status || "NONE")}</b> · base eligible ${fmt(ponsDirectV916?.freshnessRoutingV922?.baseEligible)} · fresh recent-live ${fmt(ponsDirectV916?.freshnessRoutingV922?.recentLiveEligible)} · old bootstrap ${fmt(ponsDirectV916?.freshnessRoutingV922?.oldUnverifiedBootstrapEligibleV930)} · queued bootstrap ${fmt(ponsDirectV916?.freshnessRoutingV922?.persistedBootstrapQueueEligibleV931)} · queue retained ${fmt(ponsDirectV916?.freshnessRoutingV922?.persistedBootstrapQueueRetainedV931)} · old background ${fmt(ponsDirectV916?.freshnessRoutingV922?.backgroundHistoryEligible)} · old live-due skipped ${fmt(ponsDirectV916?.freshnessRoutingV922?.oldLiveRefreshDueSkipped)} · max fresh age ${fmt(ponsDirectV916?.freshnessRoutingV922?.freshLaunchMaxAgeBlocks)} blocks`,
       `V921 persisted Pons discovery — last status <b>${escapeHtml(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.lastStatus || "NONE")}</b> · last query ${escapeHtml(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.lastQueryAt || "NONE")} · last launch block ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.lastLaunchBlock)} · retained ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.retainedCount)} · retained blocks ${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.retainedMinBlock)}→${fmt(ponsDirectV916?.candidateSourceDiagnosticV921?.discoveryTelemetry?.retainedMaxBlock)}`,
       `Pair token: <code>${escapeHtml(ponsDirectV916.pairToken || "NONE")}</code> · USD basis <b>${escapeHtml(ponsDirectV916.quoteUsdBasis || "NONE")}</b>`,
       `RPC window: ${fmt(ponsDirectV916.fromBlock)} → ${fmt(ponsDirectV916.toBlock)} · provider <b>${escapeHtml(ponsDirectV916.provider || "NONE")}</b> · requests ${fmt(ponsDirectV916.requestsUsed)}`,
