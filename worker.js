@@ -1,4 +1,21 @@
 /**
+ * V904 VERIFIED V212 -> MOMENTUM HANDOFF:
+ * - builds directly from deployed V903;
+ * - fixes the V903-proven gap where exact verified V179/V212 directional USD
+ *   existed but momentumAnalysis() had no direct V212 input;
+ * - adds verifiedFlowV212 as an OPTIONAL momentum input and uses exactly ONE
+ *   canonical verified window (15m -> 5m -> 1h) to avoid double-counting;
+ * - V212 may score only after normal historical maturity and only with a
+ *   minimum verified sample: >=5 trades, >=2 buys and >=$25 total observed USD;
+ * - directional contribution is capped at the existing 7/12-point pressure
+ *   signal and counts as ONE positive signal only; V212 alone cannot create
+ *   GOOD/STRONG momentum;
+ * - if existing verified market-directional USD is already present, V904 does
+ *   not add a second directional signal;
+ * - zero provider/RPC requests, no inferred USD, no Telegram threshold/risk/
+ *   qualification/request-budget changes.
+ */
+/**
  * V903 MOMENTUM DIAGNOSTIC TRANSPORT FIX — READ ONLY:
  * - builds directly from deployed V902;
  * - fixes only the confirmed audit-plumbing bug: V902 persisted
@@ -7938,7 +7955,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V903";
+const VERSION = "V904";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -71002,7 +71019,8 @@ function momentumAnalysis(
   market,
   holders,
   liveActivityV152 = null,
-  ponsCurveFlowV216 = null
+  ponsCurveFlowV216 = null,
+  verifiedFlowV212 = null
 ) {
   /*
    * V218 verified Pons V2 curve momentum.
@@ -71361,6 +71379,125 @@ function momentumAnalysis(
           ponsReasons
       };
     })();
+
+
+  /*
+   * V904: exact verified V212 directional USD is now a direct OPTIONAL
+   * momentum input. Select one canonical window only so the same underlying
+   * trades cannot score in 5m + 15m + 1h simultaneously.
+   *
+   * Priority intentionally favours 15m as a useful noise/recency balance,
+   * then 5m, then 1h. A window must have a real verified sample before it is
+   * even eligible to contribute.
+   */
+  const v212WindowsV904 =
+    verifiedFlowV212?.windows || {};
+
+  const v212WindowOrderV904 = [
+    ["m15", "15m"],
+    ["m5", "5m"],
+    ["h1", "1h"]
+  ];
+
+  let v212CanonicalKeyV904 = null;
+  let v212CanonicalLabelV904 = null;
+  let v212CanonicalWindowV904 = null;
+
+  if (verifiedFlowV212?.verified === true) {
+    for (const [key, label] of v212WindowOrderV904) {
+      const row = v212WindowsV904?.[key] || null;
+      const observedTrades = safeNumber(row?.observedTrades);
+      const buys = safeNumber(row?.buys);
+      const buyVolumeUsd = Math.max(0, safeNumber(row?.buyVolumeUsd));
+      const sellVolumeUsd = Math.max(0, safeNumber(row?.sellVolumeUsd));
+      const totalUsd = buyVolumeUsd + sellVolumeUsd;
+
+      if (
+        row?.verified === true &&
+        observedTrades >= 5 &&
+        buys >= 2 &&
+        totalUsd >= 25
+      ) {
+        v212CanonicalKeyV904 = key;
+        v212CanonicalLabelV904 = label;
+        v212CanonicalWindowV904 = row;
+        break;
+      }
+    }
+  }
+
+  const v212MomentumEvidenceV904 = (() => {
+    const empty = {
+      inputProvided: verifiedFlowV212?.verified === true,
+      verified: false,
+      eligible: false,
+      applied: false,
+      window: null,
+      windowKey: null,
+      observedTrades: 0,
+      buys: 0,
+      sells: 0,
+      totalUsd: 0,
+      buyVolumeUsd: 0,
+      sellVolumeUsd: 0,
+      netFlowUsd: 0,
+      buyPressureUsd: null,
+      scoreContribution: 0,
+      positiveSignals: 0,
+      reason:
+        verifiedFlowV212?.verified === true
+          ? "NO_CANONICAL_V212_WINDOW_MEETS_MIN_SAMPLE_V904"
+          : "NO_VERIFIED_V212_FLOW_V904",
+      source: "VERIFIED_ONCHAIN_USD_FLOW_V212_V904",
+      exactVerifiedUsdOnly: true,
+      usdInferred: false,
+      oneCanonicalWindowOnly: true
+    };
+
+    if (!v212CanonicalWindowV904) return empty;
+
+    const observedTrades =
+      safeNumber(v212CanonicalWindowV904?.observedTrades);
+    const buys =
+      safeNumber(v212CanonicalWindowV904?.buys);
+    const sells =
+      safeNumber(v212CanonicalWindowV904?.sells);
+    const buyVolumeUsd =
+      Math.max(0, safeNumber(v212CanonicalWindowV904?.buyVolumeUsd));
+    const sellVolumeUsd =
+      Math.max(0, safeNumber(v212CanonicalWindowV904?.sellVolumeUsd));
+    const totalUsd =
+      buyVolumeUsd + sellVolumeUsd;
+    const netFlowUsd =
+      buyVolumeUsd - sellVolumeUsd;
+
+    const reportedPressure =
+      Number(v212CanonicalWindowV904?.buyPressureUsd);
+
+    const buyPressureUsd =
+      Number.isFinite(reportedPressure)
+        ? reportedPressure
+        : totalUsd > 0
+          ? (buyVolumeUsd / totalUsd) * 100
+          : null;
+
+    return {
+      ...empty,
+      verified: true,
+      eligible: true,
+      window: v212CanonicalLabelV904,
+      windowKey: v212CanonicalKeyV904,
+      observedTrades,
+      buys,
+      sells,
+      totalUsd,
+      buyVolumeUsd,
+      sellVolumeUsd,
+      netFlowUsd,
+      buyPressureUsd,
+      reason: "CANONICAL_VERIFIED_V212_WINDOW_READY_V904"
+    };
+  })();
 
   if (!previous) {
     if (
@@ -71855,22 +71992,67 @@ function momentumAnalysis(
       ? directionalPressureH1V151
       : directionalPressureM5V151;
 
+  /*
+   * V904: use V212 only when the pre-existing market directional lane is not
+   * already verified, preventing the same directional concept from scoring
+   * twice. One V212 canonical window contributes one signal at most.
+   */
+  const v212PressureV904 =
+    verifiedDirectionalPressureV151 === null &&
+    v212MomentumEvidenceV904?.eligible === true &&
+    Number.isFinite(
+      Number(v212MomentumEvidenceV904?.buyPressureUsd)
+    )
+      ? Number(v212MomentumEvidenceV904.buyPressureUsd)
+      : null;
+
+  const effectiveDirectionalPressureV904 =
+    verifiedDirectionalPressureV151 !== null
+      ? verifiedDirectionalPressureV151
+      : v212PressureV904;
+
+  const directionalSourceV904 =
+    verifiedDirectionalPressureV151 !== null
+      ? (
+          directionalPressureH1V151 !== null
+            ? "MARKET_DIRECTIONAL_H1_V151"
+            : "MARKET_DIRECTIONAL_M5_V151"
+        )
+      : v212PressureV904 !== null
+        ? "VERIFIED_ONCHAIN_V212"
+        : null;
+
   if (
-    verifiedDirectionalPressureV151 !== null &&
-    verifiedDirectionalPressureV151 >= 60
+    effectiveDirectionalPressureV904 !== null &&
+    effectiveDirectionalPressureV904 >= 60
   ) {
     positiveSignals++;
 
-    score +=
-      verifiedDirectionalPressureV151 >= 70
+    const directionalPointsV904 =
+      effectiveDirectionalPressureV904 >= 70
         ? 12
         : 7;
 
-    reasons.push(
-      directionalPressureH1V151 !== null
-        ? "Verified USD buy pressure (1h)"
-        : "Verified USD buy pressure (5m)"
-    );
+    score += directionalPointsV904;
+
+    if (directionalSourceV904 === "VERIFIED_ONCHAIN_V212") {
+      v212MomentumEvidenceV904.applied = true;
+      v212MomentumEvidenceV904.scoreContribution =
+        directionalPointsV904;
+      v212MomentumEvidenceV904.positiveSignals = 1;
+      v212MomentumEvidenceV904.reason =
+        "VERIFIED_V212_DIRECTIONAL_PRESSURE_APPLIED_V904";
+
+      reasons.push(
+        `Verified on-chain V212 USD buy pressure ${effectiveDirectionalPressureV904.toFixed(1)}% (${v212MomentumEvidenceV904.window})`
+      );
+    } else {
+      reasons.push(
+        directionalPressureH1V151 !== null
+          ? "Verified USD buy pressure (1h)"
+          : "Verified USD buy pressure (5m)"
+      );
+    }
   }
 
   else if (
@@ -71945,6 +72127,8 @@ function momentumAnalysis(
         countersUsable ||
         onChainActivityUsableV152 ||
         ponsMomentumEvidenceV218
+          .verified === true ||
+        v212MomentumEvidenceV904
           .verified === true
       ),
 
@@ -72008,17 +72192,26 @@ function momentumAnalysis(
     ponsCurveMomentumV218:
       ponsMomentumEvidenceV218,
 
+    verifiedOnChainDirectionalUsdV904:
+      v212MomentumEvidenceV904,
+
     directionalUsdPressureV151: {
       verified:
-        verifiedDirectionalPressureV151 !== null,
+        effectiveDirectionalPressureV904 !== null,
       window:
         directionalPressureH1V151 !== null
           ? "h1"
           : directionalPressureM5V151 !== null
             ? "m5"
-            : null,
+            : v212MomentumEvidenceV904?.applied === true
+              ? v212MomentumEvidenceV904?.windowKey
+              : null,
       buyPressureUsd:
-        verifiedDirectionalPressureV151
+        effectiveDirectionalPressureV904,
+      sourceV904:
+        directionalSourceV904,
+      v212AppliedV904:
+        v212MomentumEvidenceV904?.applied === true
     },
 
     reasons
@@ -87752,16 +87945,23 @@ function momentumHandoffDiagnosticV902(
   const momentumConsumesPons = pons?.verified === true;
 
   /*
-   * Structural fact only: momentumAnalysis() currently receives previous,
-   * market, holders, liveActivityV152 and ponsCurveFlowV216. It does not
-   * receive verifiedFlowV212 directly.
+   * V904: authoritative recompute now passes verifiedFlowV212 directly into
+   * momentumAnalysis(). Record whether that input was actually present and
+   * whether the canonical V212 signal was applied.
    */
-  const directV212InputToMomentumAnalysis = false;
+  const directV212InputToMomentumAnalysis =
+    momentum?.verifiedOnChainDirectionalUsdV904?.inputProvided === true;
 
   let classification = "NO_VERIFIED_V212_FLOW_V902";
 
   if (v212Verified) {
     if (
+      momentum?.verifiedOnChainDirectionalUsdV904?.applied === true
+    ) {
+      classification =
+        "VERIFIED_V212_FLOW_APPLIED_TO_MOMENTUM_V904";
+    }
+    else if (
       safeNumber(momentum?.score) <= 0 &&
       !momentumConsumesMarketDirectional &&
       !momentumConsumesLiveActivity &&
@@ -87877,7 +88077,31 @@ function momentumHandoffDiagnosticV902(
       liveMomentumActivityVerified: live?.verified === true,
       liveMomentumSwaps: safeNumber(live?.swaps),
       liveMomentumLiquidityEvents: safeNumber(live?.liquidityEvents),
-      ponsCurveVerified: pons?.verified === true
+      ponsCurveVerified: pons?.verified === true,
+      v212DirectInputProvidedV904:
+        momentum?.verifiedOnChainDirectionalUsdV904?.inputProvided === true,
+      v212CanonicalWindowV904:
+        momentum?.verifiedOnChainDirectionalUsdV904?.window || null,
+      v212CanonicalTradesV904:
+        safeNumber(
+          momentum?.verifiedOnChainDirectionalUsdV904?.observedTrades
+        ),
+      v212CanonicalBuyPressureV904:
+        Number.isFinite(
+          Number(
+            momentum?.verifiedOnChainDirectionalUsdV904?.buyPressureUsd
+          )
+        )
+          ? Number(
+              momentum.verifiedOnChainDirectionalUsdV904.buyPressureUsd
+            )
+          : null,
+      v212AppliedV904:
+        momentum?.verifiedOnChainDirectionalUsdV904?.applied === true,
+      v212ScoreContributionV904:
+        safeNumber(
+          momentum?.verifiedOnChainDirectionalUsdV904?.scoreContribution
+        )
     },
 
     finalMomentum: {
@@ -106945,7 +107169,8 @@ for (
           candidate.market,
           candidate.holders,
           candidate.liveMomentumActivityV152,
-          candidate.ponsCurveFlowV216
+          candidate.ponsCurveFlowV216,
+          verifiedFlowV212
         );
 
       candidate.opportunity =
@@ -129247,7 +129472,7 @@ function evidenceAuditTelegramMessageV727(state) {
         : "UNVERIFIED";
 
     lines.push(
-      `🧠 <b>Momentum handoff diagnostic — V902/V903</b>`,
+      `🧠 <b>Momentum handoff diagnostic — V902/V903/V904</b>`,
       `Recorded: <code>${escapeHtml(momentumDiagV902.recordedAt || "UNVERIFIED")}</code>`,
       `Candidate: <code>${escapeHtml(momentumDiagV902.token || "NONE")}</code> ${escapeHtml(momentumDiagV902.symbol || "")}`,
       `V212 verified: <b>${momentumDiagV902?.v212?.verified ? "YES" : "NO"}</b> · records <b>${fmt(momentumDiagV902?.v212?.recordCount)}</b> · pools <b>${fmt(momentumDiagV902?.v212?.poolCount)}</b>`,
@@ -129257,6 +129482,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `V894 promotion: <b>${momentumDiagV902?.v894?.applied ? "APPLIED" : "NO"}</b> · exact rows ${fmt(momentumDiagV902?.v894?.exactLedgerRows)} · final activity.swaps ${fmt(momentumDiagV902?.v894?.finalActivitySwaps)}`,
       `History: present <b>${historyV902?.present ? "YES" : "NO"}</b> · mature ${historyV902?.matureEnough ? "YES" : "NO"} · age ${Number.isFinite(Number(historyV902?.ageMinutes)) ? Number(historyV902.ageMinutes).toFixed(1) + "m" : "UNVERIFIED"}`,
       `Momentum inputs — direct V212 <b>${inputV902?.directV212InputToMomentumAnalysis ? "YES" : "NO"}</b> · market directional h1/m5 ${inputV902?.marketDirectionalH1Verified ? "YES" : "NO"}/${inputV902?.marketDirectionalM5Verified ? "YES" : "NO"} · live V4 ${inputV902?.liveMomentumActivityVerified ? "YES" : "NO"} · Pons ${inputV902?.ponsCurveVerified ? "YES" : "NO"}`,
+      `V904 direct V212 — window <b>${escapeHtml(inputV902?.v212CanonicalWindowV904 || "NONE")}</b> · trades ${fmt(inputV902?.v212CanonicalTradesV904)} · buy pressure ${Number.isFinite(Number(inputV902?.v212CanonicalBuyPressureV904)) ? Number(inputV902.v212CanonicalBuyPressureV904).toFixed(1) + "%" : "UNVERIFIED"} · applied <b>${inputV902?.v212AppliedV904 ? "YES" : "NO"}</b> · points ${fmt(inputV902?.v212ScoreContributionV904)}`,
       `Final Momentum: <b>${fmt(finalV902?.score)}</b> ${escapeHtml(finalV902?.label || "")} · verified ${finalV902?.verified ? "YES" : "NO"} · positive signals ${fmt(finalV902?.positiveSignals)}`,
       `Reasons: ${escapeHtml(Array.isArray(finalV902?.reasons) && finalV902.reasons.length ? finalV902.reasons.join(" | ") : "NONE")}`,
       `Diagnosis: <b>${escapeHtml(momentumDiagV902?.classification || "NONE")}</b>`,
