@@ -767,6 +767,12 @@
  *   42-request ceiling.
  */
 /**
+ * V939 HOTFIX:
+ * - Adds /rescoreaudit and /rescoretrigger read-only post-recovery rescore-trigger audit.
+ * - Separates genuine call-relevant rescore trigger gaps from rows still blocked by risk or missing market/pool identity.
+ * - Uses explicit V151/V254/V258 recovery telemetry where available and does not invent per-evidence timing.
+ * - Preserves V938 diagnostics and all production/scoring/qualification behavior.
+ *
  * V938 HOTFIX:
  * - fixes /telegramaudit runtime ReferenceError caused by calling non-global shortAddress();
  * - adds dedicated shortAddressV937 helper and preserves V935/V936 audit and chunked delivery logic;
@@ -8357,7 +8363,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V938";
+const VERSION = "V939";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -137112,6 +137118,189 @@ function scoreHandoffMessageV938(state) {
   return lines.join("\n");
 }
 
+
+/* =========================================================
+   V939 POST-RECOVERY RESCORE-TRIGGER AUDIT — READ ONLY
+   ========================================================= */
+function rescoreTriggerAuditV939(state) {
+  const records = Array.isArray(state?.qualificationAuditV663?.records)
+    ? state.qualificationAuditV663.records
+    : [];
+  const now = Date.now();
+  const cutoff = now - QUALIFICATION_AUDIT_RETENTION_MS_V663;
+
+  const authoritativePostRecovery = state?.lastV254PostRecoveryScoreV809 ||
+    state?.qualificationAuditV663?.lastV254PostRecoveryScoreV809 || null;
+  const postAddr = normalize(authoritativePostRecovery?.address || "");
+
+  const rows = records
+    .filter(row => {
+      const at = safeNumber(row?.lastEvaluatedAt || row?.firstEvaluatedAt);
+      return isAddress(normalize(row?.address)) && at >= cutoff && at <= now + 5 * 60 * 1000;
+    })
+    .map(row => {
+      const address = normalize(row?.address);
+      const score = row?.scoreAuditV725 && typeof row.scoreAuditV725 === "object" ? row.scoreAuditV725 : {};
+      const evidence = row?.evidenceCompletionAuditV727 && typeof row.evidenceCompletionAuditV727 === "object" ? row.evidenceCompletionAuditV727 : {};
+      const f = evidence?.finalEvidence && typeof evidence.finalEvidence === "object" ? evidence.finalEvidence : {};
+      const risk = evidence?.riskGateDiagnosticV871 && typeof evidence.riskGateDiagnosticV871 === "object" ? evidence.riskGateDiagnosticV871 : {};
+      const missingMask = safeNumber(score?.missingMask);
+
+      const recoveredAfterScore = [];
+      const presentButScoreMissing = [];
+      const add = (bit, name, verified, recoveredSignal) => {
+        if ((missingMask & bit) && verified === true) {
+          presentButScoreMissing.push(name);
+          if (recoveredSignal === true) recoveredAfterScore.push(name);
+        }
+      };
+      add(SCORE_AUDIT_MISSING_MARKET_V725, "MARKET", f?.marketVerified === true, evidence?.v151?.verifiedAnyWindow === true || evidence?.v254?.recovered === true);
+      add(SCORE_AUDIT_MISSING_LAUNCH_V725, "LAUNCH", f?.launchAgeVerified === true, evidence?.v258?.recovered === true);
+      add(SCORE_AUDIT_MISSING_MOMENTUM_V725, "MOMENTUM", f?.momentumVerified === true, true);
+      add(SCORE_AUDIT_MISSING_QUALITY_V725, "MARKET_QUALITY", f?.marketQualityVerified === true, true);
+      add(SCORE_AUDIT_MISSING_WHALE_FLOW_V725, "WHALE_FLOW", f?.whaleFlowVerified === true, true);
+
+      const riskVerified = row?.riskVerified === true || risk?.verified === true;
+      const riskScore = riskVerified ? safeNumber(row?.riskScore ?? risk?.score) : null;
+      const riskLabel = String(risk?.label || (riskVerified ? "VERIFIED" : "UNVERIFIED")).toUpperCase();
+      const riskSevere = risk?.severeOverride === true;
+      const riskBlocks = riskSevere || riskLabel === "HIGH" || (riskVerified && safeNumber(riskScore) > MAX_ALERT_RISK);
+
+      const marketVerified = f?.marketVerified === true;
+      const exactPoolVerified = f?.exactPoolIdentityVerified === true;
+      const launchVerified = f?.launchAgeVerified === true;
+      const momentumVerified = f?.momentumVerified === true;
+      const whaleFlowVerified = f?.whaleFlowVerified === true;
+      const marketQualityVerified = f?.marketQualityVerified === true;
+      const directionalUsdVerified = f?.directionalUsdVerified === true;
+
+      const sameTokenPostRecovery = isAddress(postAddr) && postAddr === address;
+      const recomputeApplied = sameTokenPostRecovery && authoritativePostRecovery?.recomputeApplied === true;
+
+      let rescoreTriggerDiagnosis = "NO_VERIFIED_EVIDENCE_SCORE_MISMATCH";
+      if (presentButScoreMissing.length) {
+        if (recomputeApplied) rescoreTriggerDiagnosis = "AUTHORITATIVE_RECOMPUTE_ALREADY_APPLIED";
+        else if (riskBlocks) rescoreTriggerDiagnosis = "RESCORE_NOT_CALL_RELEVANT_VERIFIED_RISK_BLOCKS";
+        else if (!riskVerified) rescoreTriggerDiagnosis = "MISSING_FINAL_RISK_VERIFICATION_BEFORE_CALL_RELEVANT_RESCORE";
+        else if (!(marketVerified || exactPoolVerified)) rescoreTriggerDiagnosis = "MISSING_MARKET_OR_POOL_IDENTITY_BEFORE_CALL_RELEVANT_RESCORE";
+        else rescoreTriggerDiagnosis = "VERIFIED_EVIDENCE_ARRIVED_WITHOUT_RETAINED_AUTHORITATIVE_RESCORE";
+      }
+
+      return {
+        address,
+        symbol: row?.symbol || null,
+        lastEvaluatedAt: safeNumber(row?.lastEvaluatedAt),
+        retainedOpportunity: safeNumber(row?.opportunityScore),
+        retainedConfidence: safeNumber(row?.confidenceScore),
+        presentButScoreMissing,
+        recoveredAfterScore,
+        riskVerified,
+        riskScore,
+        riskLabel,
+        riskBlocks,
+        marketVerified,
+        exactPoolVerified,
+        launchVerified,
+        momentumVerified,
+        whaleFlowVerified,
+        marketQualityVerified,
+        directionalUsdVerified,
+        v151Selected: evidence?.v151?.selected === true,
+        v151Verified: evidence?.v151?.verifiedAnyWindow === true,
+        v151Status: evidence?.v151?.status || null,
+        v254Selected: evidence?.v254?.selected === true,
+        v254Recovered: evidence?.v254?.recovered === true,
+        v254Status: evidence?.v254?.status || null,
+        v258Selected: evidence?.v258?.selected === true,
+        v258Recovered: evidence?.v258?.recovered === true,
+        v258Status: evidence?.v258?.status || null,
+        sameTokenPostRecovery,
+        recomputeApplied,
+        postOpportunity: sameTokenPostRecovery ? safeNumber(authoritativePostRecovery?.opportunityScore) : null,
+        postConfidence: sameTokenPostRecovery ? safeNumber(authoritativePostRecovery?.confidenceScore) : null,
+        postQualified: sameTokenPostRecovery ? authoritativePostRecovery?.qualifiesTelegram === true : null,
+        telegramReasons: Array.isArray(row?.telegramReasons) ? row.telegramReasons.filter(Boolean) : [],
+        rescoreTriggerDiagnosis
+      };
+    })
+    .filter(row => row.presentButScoreMissing.length > 0)
+    .sort((a,b) => {
+      const rank = x => x.rescoreTriggerDiagnosis === "VERIFIED_EVIDENCE_ARRIVED_WITHOUT_RETAINED_AUTHORITATIVE_RESCORE" ? 5
+        : x.rescoreTriggerDiagnosis === "MISSING_FINAL_RISK_VERIFICATION_BEFORE_CALL_RELEVANT_RESCORE" ? 4
+        : x.rescoreTriggerDiagnosis === "MISSING_MARKET_OR_POOL_IDENTITY_BEFORE_CALL_RELEVANT_RESCORE" ? 3
+        : x.rescoreTriggerDiagnosis === "AUTHORITATIVE_RECOMPUTE_ALREADY_APPLIED" ? 2
+        : 1;
+      if (rank(b) !== rank(a)) return rank(b) - rank(a);
+      if (b.retainedOpportunity !== a.retainedOpportunity) return b.retainedOpportunity - a.retainedOpportunity;
+      return b.lastEvaluatedAt - a.lastEvaluatedAt;
+    });
+
+  const counts = {};
+  for (const row of rows) counts[row.rescoreTriggerDiagnosis] = safeNumber(counts[row.rescoreTriggerDiagnosis]) + 1;
+  return {
+    version: "V939",
+    runtimeVersion: VERSION,
+    source: "QUALIFICATION_AUDIT_V663_PLUS_V727_RESCORE_TRIGGER_V939",
+    recordedAt: new Date().toISOString(),
+    mismatchRows: rows.length,
+    recoveredAfterScoreRows: rows.filter(r => r.recoveredAfterScore.length > 0).length,
+    authoritativeRecomputeRows: rows.filter(r => r.recomputeApplied).length,
+    callRelevantTriggerGapRows: rows.filter(r => r.rescoreTriggerDiagnosis === "VERIFIED_EVIDENCE_ARRIVED_WITHOUT_RETAINED_AUTHORITATIVE_RESCORE").length,
+    riskVerificationStillMissingRows: rows.filter(r => r.rescoreTriggerDiagnosis === "MISSING_FINAL_RISK_VERIFICATION_BEFORE_CALL_RELEVANT_RESCORE").length,
+    marketIdentityStillMissingRows: rows.filter(r => r.rescoreTriggerDiagnosis === "MISSING_MARKET_OR_POOL_IDENTITY_BEFORE_CALL_RELEVANT_RESCORE").length,
+    verifiedRiskStillBlocksRows: rows.filter(r => r.rescoreTriggerDiagnosis === "RESCORE_NOT_CALL_RELEVANT_VERIFIED_RISK_BLOCKS").length,
+    diagnosisCounts: Object.entries(counts).sort((a,b)=>b[1]-a[1]).map(([reason,count])=>({reason,count})),
+    rows: rows.slice(0, 16),
+    timingNote: "Per-evidence arrival timestamps are not retained for every legacy V663 row. V939 marks recovery-after-score only where a completion lane (V151/V254/V258) explicitly records recovery; otherwise it reports evidence present at final retained audit without inventing timing.",
+    providerRequestsAdded: 0,
+    stateWritesAdded: 0,
+    scoringChanged: false,
+    qualificationChanged: false,
+    riskChanged: false,
+    telegramThresholdsChanged: false
+  };
+}
+
+function rescoreTriggerMessageV939(state) {
+  const d = rescoreTriggerAuditV939(state);
+  const fmt = v => Number.isFinite(Number(v)) ? Number(v).toLocaleString("en-GB", { maximumFractionDigits: 2 }) : "UNVERIFIED";
+  const lines = [
+    "🔁 <b>Post-Recovery Rescore Trigger Audit — V939</b>",
+    "",
+    `Source: <b>${escapeHtml(d.source)}</b>`,
+    `Verified-evidence / score-view mismatches: <b>${fmt(d.mismatchRows)}</b>`,
+    `Explicit completion-lane recovery after retained score: <b>${fmt(d.recoveredAfterScoreRows)}</b>`,
+    `Authoritative recompute retained/applied: <b>${fmt(d.authoritativeRecomputeRows)}</b>`,
+    `Call-relevant rescore-trigger gaps: <b>${fmt(d.callRelevantTriggerGapRows)}</b>`,
+    `Still missing final risk verification: <b>${fmt(d.riskVerificationStillMissingRows)}</b>`,
+    `Still missing market/pool identity: <b>${fmt(d.marketIdentityStillMissingRows)}</b>`,
+    `Verified HIGH/severe risk still blocks: <b>${fmt(d.verifiedRiskStillBlocksRows)}</b>`
+  ];
+  if (d.diagnosisCounts?.length) {
+    lines.push("", "🧭 <b>Trigger diagnosis</b>");
+    for (const x of d.diagnosisCounts.slice(0, 8)) lines.push(`• ${escapeHtml(x.reason)}: <b>${fmt(x.count)}</b>`);
+  }
+  if (d.rows?.length) {
+    lines.push("", "🔬 <b>Highest-value affected candidates</b>");
+    for (const row of d.rows.slice(0, 12)) {
+      const evidence = row.presentButScoreMissing.join(",") || "NONE";
+      const recovered = row.recoveredAfterScore.join(",") || "NOT_EXPLICITLY_TIMESTAMPED";
+      const blockers = row.telegramReasons.slice(0,5).join(" | ") || "NONE";
+      lines.push(
+        `• <b>${escapeHtml(row.symbol || "UNKNOWN")}</b> <code>${escapeHtml(shortAddressV937(row.address || ""))}</code> — Opp <b>${fmt(row.retainedOpportunity)}</b> · Conf <b>${fmt(row.retainedConfidence)}</b> · Risk <b>${row.riskVerified ? fmt(row.riskScore) : "UNVERIFIED"}</b>`,
+        `  ↳ verified but score-view missing: <b>${escapeHtml(evidence)}</b>`,
+        `  ↳ explicit recovery-after-score: <b>${escapeHtml(recovered)}</b>`,
+        `  ↳ V151 verified ${row.v151Verified ? "YES" : "NO"} · V254 recovered ${row.v254Recovered ? "YES" : "NO"} · V258 recovered ${row.v258Recovered ? "YES" : "NO"}`,
+        `  ↳ recompute retained/applied: <b>${row.recomputeApplied ? "YES" : "NO"}</b>`,
+        `  ↳ diagnosis: <b>${escapeHtml(row.rescoreTriggerDiagnosis)}</b>`,
+        `  ↳ blockers: ${escapeHtml(blockers)}`
+      );
+    }
+  }
+  lines.push("", `<i>${escapeHtml(d.timingNote)}</i>`, "<i>Read-only. Zero provider requests, zero state writes, no scoring, risk, qualification or Telegram-threshold changes.</i>");
+  return lines.join("\n");
+}
+
 async function finalTelegramQualificationAuditMessageV934(env, state) {
   const loaded = await loadFinalTelegramQualificationAuditV934(env, state);
   const d = loaded?.snapshot || null;
@@ -167879,6 +168068,27 @@ async function telegramCommandReplyV271(
       };
     }
   } else if (
+    parsed.command === "/rescoreaudit" ||
+    parsed.command === "/rescoretrigger"
+  ) {
+    reply = rescoreTriggerMessageV939(state);
+
+    if (diagnosticV273) {
+      const rescoreV939 = rescoreTriggerAuditV939(state);
+      diagnosticV273.rescoreTriggerAuditV939 = {
+        scannerBudgetConsumed: false,
+        externalProviderRequests: 0,
+        stateWrites: 0,
+        mismatchRows: safeNumber(rescoreV939?.mismatchRows),
+        recoveredAfterScoreRows: safeNumber(rescoreV939?.recoveredAfterScoreRows),
+        callRelevantTriggerGapRows: safeNumber(rescoreV939?.callRelevantTriggerGapRows),
+        riskVerificationStillMissingRows: safeNumber(rescoreV939?.riskVerificationStillMissingRows),
+        marketIdentityStillMissingRows: safeNumber(rescoreV939?.marketIdentityStillMissingRows),
+        scoringChanged: false,
+        qualificationChanged: false
+      };
+    }
+  } else if (
     parsed.command === "/scoreaudit" ||
     parsed.command === "/oppaudit"
   ) {
@@ -168351,7 +168561,9 @@ async function telegramCommandReplyV271(
     parsed.command === "/telegramaudit" ||
     parsed.command === "/qualstarve" ||
     parsed.command === "/scorehandoff" ||
-    parsed.command === "/handoffaudit";
+    parsed.command === "/handoffaudit" ||
+    parsed.command === "/rescoreaudit" ||
+    parsed.command === "/rescoretrigger";
 
   if (isFreshAnalyseV352) {
     await telegramAnalyseCheckpointV352(
