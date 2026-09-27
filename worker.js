@@ -8363,7 +8363,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V941";
+const VERSION = "V942";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -69378,6 +69378,26 @@ async function holderIntelligence(
   }
 
   /*
+   * V942: independent-holder rescue during a confirmed same-run Blockscout
+   * outage. The V134 circuit used to return lower-priority candidates before
+   * they could reach the existing V704 GoldRush fallback. That made a configured
+   * independent holder source effectively unreachable exactly when Blockscout
+   * was unavailable. Keep this narrow: verified market + Telegram liquidity,
+   * existing analysis budget, configured GoldRush key. goldRushHoldersV704()
+   * remains authoritative for the one-request-per-scan and credit guards.
+   */
+  let blockscoutOutageGoldRushRecoveryV942 = {
+    eligible: false,
+    attempted: false,
+    success: false,
+    verified: false,
+    status: "NOT_NEEDED",
+    rowCount: 0,
+    holderCount: null,
+    data: null
+  };
+
+  /*
    * V134 same-run outage circuit breaker.
    *
    * V133 guarantees the priority candidate is analysed first. If that first
@@ -69395,30 +69415,98 @@ async function holderIntelligence(
       true &&
     !priorityCompletion
   ) {
-    const staleHolderCache =
+    const staleHolderCacheV942 =
       cachedHolderIntelligence(
         watched,
         HOLDER_STALE_CACHE_MS
       );
 
-    if (
-      staleHolderCache
-    ) {
+    const goldRushOutageEligibleV942 =
+      !staleHolderCacheV942 &&
+      market?.verified === true &&
+      safeNumber(market?.liquidityUsd) >= MIN_ALERT_LIQUIDITY &&
+      Boolean(String(env?.GOLDRUSH_API_KEY || "").trim()) &&
+      budgetAvailable(budget, "analysis");
+
+    blockscoutOutageGoldRushRecoveryV942.eligible =
+      goldRushOutageEligibleV942;
+
+    if (goldRushOutageEligibleV942) {
+      const rescueV942 =
+        await goldRushHoldersV704(
+          token,
+          budget,
+          env
+        );
+
+      blockscoutOutageGoldRushRecoveryV942 = {
+        eligible: true,
+        attempted: rescueV942?.attempted === true,
+        success: rescueV942?.success === true,
+        verified: rescueV942?.verified === true,
+        status: rescueV942?.status || null,
+        rowCount: safeNumber(rescueV942?.rowCount),
+        holderCount: rescueV942?.holderCount ?? null,
+        data:
+          rescueV942?.success === true &&
+          rescueV942?.verified === true &&
+          Array.isArray(rescueV942?.data?.items) &&
+          rescueV942.data.items.length > 0
+            ? rescueV942.data
+            : null
+      };
+    }
+
+    if (!blockscoutOutageGoldRushRecoveryV942.data) {
+      const staleHolderCache =
+        staleHolderCacheV942;
+
+      if (
+        staleHolderCache
+      ) {
+        budget
+          .blockscoutHolderOutage
+          .lowerPriorityCacheFallbacks =
+          safeNumber(
+            budget
+              .blockscoutHolderOutage
+              .lowerPriorityCacheFallbacks
+          ) +
+          1;
+
+        return {
+          ...staleHolderCache,
+
+          holderSource:
+            "STALE_CACHE_BLOCKSCOUT_RUN_OUTAGE",
+
+          blockscoutUnavailable:
+            true,
+
+          blockscoutRunCircuitBreaker:
+            true,
+
+          blockscoutOutageGoldRushRecoveryV942,
+
+          blockscoutProHolderFallbackV143:
+            blockscoutProDeferredTelemetryV164()
+        };
+      }
+
       budget
         .blockscoutHolderOutage
-        .lowerPriorityCacheFallbacks =
+        .lowerPriorityFreshRequestsSuppressed =
         safeNumber(
           budget
             .blockscoutHolderOutage
-            .lowerPriorityCacheFallbacks
+            .lowerPriorityFreshRequestsSuppressed
         ) +
         1;
 
       return {
-        ...staleHolderCache,
-
-        holderSource:
-          "STALE_CACHE_BLOCKSCOUT_RUN_OUTAGE",
+        ...unverifiedHolders(
+          "BLOCKSCOUT_HOLDER_OUTAGE_DEFERRED"
+        ),
 
         blockscoutUnavailable:
           true,
@@ -69426,77 +69514,58 @@ async function holderIntelligence(
         blockscoutRunCircuitBreaker:
           true,
 
+        holderSource:
+          "BLOCKSCOUT_OUTAGE_DEFERRED",
+
+        blockscoutOutageGoldRushRecoveryV942,
+
+        holderPathDiagnosticV665: {
+          diagnosticOnly: true,
+          publicV2HolderRows: {
+            attempted: false,
+            rowsAvailable: false,
+            status: "SUPPRESSED_BY_SAME_RUN_OUTAGE_CIRCUIT"
+          },
+          legacyHolderRows: {
+            attempted: false,
+            rowsAvailable: false,
+            status: "SUPPRESSED_BY_SAME_RUN_OUTAGE_CIRCUIT"
+          },
+          bitqueryReuse: {
+            checked: false,
+            matched: false,
+            used: false,
+            status: "SUPPRESSED_BY_SAME_RUN_OUTAGE_CIRCUIT"
+          },
+          blockscoutProHolder:
+            blockscoutProDeferredTelemetryV164(),
+          goldRushOutageRescueV942:
+            blockscoutOutageGoldRushRecoveryV942,
+          sameRunHolderOutageCircuit: {
+            active: true,
+            detectedToken:
+              budget?.blockscoutHolderOutage?.detectedToken || null,
+            lowerPriorityFreshRequestsSuppressed:
+              safeNumber(
+                budget?.blockscoutHolderOutage
+                  ?.lowerPriorityFreshRequestsSuppressed
+              ),
+            lowerPriorityCacheFallbacks:
+              safeNumber(
+                budget?.blockscoutHolderOutage
+                  ?.lowerPriorityCacheFallbacks
+              )
+          },
+          finalStatus:
+            blockscoutOutageGoldRushRecoveryV942.attempted
+              ? "BLOCKSCOUT_OUTAGE_GOLDRUSH_RESCUE_NO_VERIFIED_ROWS_V942"
+              : "BLOCKSCOUT_HOLDER_OUTAGE_DEFERRED"
+        },
+
         blockscoutProHolderFallbackV143:
           blockscoutProDeferredTelemetryV164()
       };
     }
-
-    budget
-      .blockscoutHolderOutage
-      .lowerPriorityFreshRequestsSuppressed =
-      safeNumber(
-        budget
-          .blockscoutHolderOutage
-          .lowerPriorityFreshRequestsSuppressed
-      ) +
-      1;
-
-    return {
-      ...unverifiedHolders(
-        "BLOCKSCOUT_HOLDER_OUTAGE_DEFERRED"
-      ),
-
-      blockscoutUnavailable:
-        true,
-
-      blockscoutRunCircuitBreaker:
-        true,
-
-      holderSource:
-        "BLOCKSCOUT_OUTAGE_DEFERRED",
-
-      holderPathDiagnosticV665: {
-        diagnosticOnly: true,
-        publicV2HolderRows: {
-          attempted: false,
-          rowsAvailable: false,
-          status: "SUPPRESSED_BY_SAME_RUN_OUTAGE_CIRCUIT"
-        },
-        legacyHolderRows: {
-          attempted: false,
-          rowsAvailable: false,
-          status: "SUPPRESSED_BY_SAME_RUN_OUTAGE_CIRCUIT"
-        },
-        bitqueryReuse: {
-          checked: false,
-          matched: false,
-          used: false,
-          status: "SUPPRESSED_BY_SAME_RUN_OUTAGE_CIRCUIT"
-        },
-        blockscoutProHolder:
-          blockscoutProDeferredTelemetryV164(),
-        sameRunHolderOutageCircuit: {
-          active: true,
-          detectedToken:
-            budget?.blockscoutHolderOutage?.detectedToken || null,
-          lowerPriorityFreshRequestsSuppressed:
-            safeNumber(
-              budget?.blockscoutHolderOutage
-                ?.lowerPriorityFreshRequestsSuppressed
-            ),
-          lowerPriorityCacheFallbacks:
-            safeNumber(
-              budget?.blockscoutHolderOutage
-                ?.lowerPriorityCacheFallbacks
-            )
-        },
-        finalStatus:
-          "BLOCKSCOUT_HOLDER_OUTAGE_DEFERRED"
-      },
-
-      blockscoutProHolderFallbackV143:
-        blockscoutProDeferredTelemetryV164()
-    };
   }
 
   /*
@@ -69510,13 +69579,13 @@ async function holderIntelligence(
    * only two requests instead of three.
    */
   let holders =
-    null;
+    blockscoutOutageGoldRushRecoveryV942?.data || null;
 
   let v2HolderRowsUnavailable =
-    false;
+    !holders;
 
   let legacyHolderRowsUnavailable =
-    false;
+    !holders;
 
   let blockscoutProCounterFallbackV247 = {
     configured:
@@ -69535,36 +69604,50 @@ async function holderIntelligence(
     retryAfterMs: 0
   };
 
-  let goldRushHolderFallbackV704 = {
-    configured:
-      Boolean(
-        String(
-          env?.GOLDRUSH_API_KEY ||
-          ""
-        ).trim()
-      ),
-    attempted:
-      false,
-    success:
-      false,
-    verified:
-      false,
-    status:
-      String(
-        env?.GOLDRUSH_API_KEY ||
-        ""
-      ).trim()
-        ? "NOT_NEEDED_YET"
-        : "GOLDRUSH_API_KEY_NOT_CONFIGURED_V704",
-    httpStatus:
-      null,
-    holderCount:
-      null,
-    rowCount:
-      0,
-    hasMore:
-      null
-  };
+  let goldRushHolderFallbackV704 =
+    blockscoutOutageGoldRushRecoveryV942?.attempted === true
+      ? {
+          configured: true,
+          attempted: true,
+          success: blockscoutOutageGoldRushRecoveryV942.success === true,
+          verified: blockscoutOutageGoldRushRecoveryV942.verified === true,
+          status: blockscoutOutageGoldRushRecoveryV942.status || null,
+          httpStatus: null,
+          holderCount: blockscoutOutageGoldRushRecoveryV942.holderCount ?? null,
+          rowCount: safeNumber(blockscoutOutageGoldRushRecoveryV942.rowCount),
+          hasMore: null,
+          outageRescueV942: true
+        }
+      : {
+          configured:
+            Boolean(
+              String(
+                env?.GOLDRUSH_API_KEY ||
+                ""
+              ).trim()
+            ),
+          attempted:
+            false,
+          success:
+            false,
+          verified:
+            false,
+          status:
+            String(
+              env?.GOLDRUSH_API_KEY ||
+              ""
+            ).trim()
+              ? "NOT_NEEDED_YET"
+              : "GOLDRUSH_API_KEY_NOT_CONFIGURED_V704",
+          httpStatus:
+            null,
+          holderCount:
+            null,
+          rowCount:
+            0,
+          hasMore:
+            null
+        };
 
   let blockscoutProHolderFallbackV143 = {
     configured:
@@ -69852,6 +69935,7 @@ async function holderIntelligence(
     null;
 
   if (
+    !blockscoutOutageGoldRushRecoveryV942?.data &&
     budgetAvailable(
       budget,
       "analysis"
@@ -69874,6 +69958,17 @@ async function holderIntelligence(
       ? "TOKEN_DETAILS_FALLBACK"
       : null;
 
+  if (
+    blockscoutOutageGoldRushRecoveryV942?.data &&
+    counterData.holderCount === null &&
+    blockscoutOutageGoldRushRecoveryV942.holderCount !== null
+  ) {
+    counterData.holderCount =
+      blockscoutOutageGoldRushRecoveryV942.holderCount;
+    counterSource =
+      "GOLDRUSH_OUTAGE_RESCUE_COUNT_V942";
+  }
+
   /*
    * V95: counters are useful even if the V2 holder-row endpoint
    * is temporarily unavailable. Do not tie counter recovery to
@@ -69886,6 +69981,7 @@ async function holderIntelligence(
       counterData.transferCount ===
         null
     ) &&
+    !blockscoutOutageGoldRushRecoveryV942?.data &&
     budgetAvailable(
       budget,
       "analysis"
@@ -70881,6 +70977,8 @@ async function holderIntelligence(
           blockscoutProCounterFallbackV247,
         goldRushHolderV704:
           goldRushHolderFallbackV704,
+        goldRushOutageRescueV942:
+          blockscoutOutageGoldRushRecoveryV942,
         priorityHolderProCompletionV666:
           budget?.analysis
             ?.priorityHolderProCompletionV666
@@ -71726,6 +71824,8 @@ async function holderIntelligence(
         blockscoutProCounterFallbackV247,
       goldRushHolderV704:
         goldRushHolderFallbackV704,
+      goldRushOutageRescueV942:
+        blockscoutOutageGoldRushRecoveryV942,
       sameRunHolderOutageCircuit: {
         active:
           budget?.blockscoutHolderOutage?.active === true,
@@ -169127,6 +169227,7 @@ function holderRecoveryTraceV941(candidate) {
       blockscoutProHolder: p?.blockscoutProHolder || null,
       blockscoutProCounters: p?.blockscoutProCounters || null,
       goldRushHolderV704: p?.goldRushHolderV704 || null,
+      goldRushOutageRescueV942: p?.goldRushOutageRescueV942 || null,
       sameRunHolderOutageCircuit: p?.sameRunHolderOutageCircuit || null,
       providerWideOutageEvidenceV666: p?.providerWideOutageEvidenceV666 || null,
       finalStatus: p?.finalStatus || null
@@ -169177,6 +169278,7 @@ function holderRecoveryAuditV941(state, env) {
       const bitqueryUsed = p?.bitqueryReuse?.used === true;
       const pro = p?.blockscoutProHolder || {};
       const gold = p?.goldRushHolderV704 || {};
+      const outageRescueV942 = p?.goldRushOutageRescueV942 || {};
       const goldConfiguredAtCapture = gold?.configured === true;
       const goldAttempted = gold?.attempted === true;
       const goldVerified = gold?.verified === true && gold?.success === true && safeNumber(gold?.rowCount) > 0;
@@ -169226,6 +169328,10 @@ function holderRecoveryAuditV941(state, env) {
         goldVerified,
         goldStatus: gold?.status || null,
         goldRows: safeNumber(gold?.rowCount),
+        outageRescueEligibleV942: outageRescueV942?.eligible === true,
+        outageRescueAttemptedV942: outageRescueV942?.attempted === true,
+        outageRescueVerifiedV942: outageRescueV942?.verified === true && safeNumber(outageRescueV942?.rowCount) > 0,
+        outageRescueStatusV942: outageRescueV942?.status || null,
         liveSwapCouldBeSecondClass,
         telegramReasons: Array.isArray(row?.telegramReasons) ? row.telegramReasons.filter(Boolean) : []
       };
@@ -169248,9 +169354,9 @@ function holderRecoveryAuditV941(state, env) {
   const diagnosisCounts = {};
   for (const row of rows) diagnosisCounts[row.diagnosis] = safeNumber(diagnosisCounts[row.diagnosis]) + 1;
   return {
-    version: "V941",
+    version: "V942",
     runtimeVersion: VERSION,
-    source: "QUALIFICATION_AUDIT_PLUS_FORWARD_HOLDER_PATH_TRACE_V941",
+    source: "QUALIFICATION_AUDIT_PLUS_FORWARD_HOLDER_PATH_TRACE_V942",
     recordedAt: new Date().toISOString(),
     rowsAnalysed: rows.length,
     rowsWithV941PathDetail: rows.filter(r => r.diagnosis !== "LEGACY_ROW_NO_V941_PATH_DETAIL_YET").length,
@@ -169261,10 +169367,13 @@ function holderRecoveryAuditV941(state, env) {
     freeGoldRushAttemptedNoVerifiedRows: rows.filter(r => r.diagnosis === "FREE_GOLDRUSH_ATTEMPTED_NO_VERIFIED_ROWS").length,
     freeGoldRushRecoveredRows: rows.filter(r => r.diagnosis === "FREE_GOLDRUSH_RECOVERED_VERIFIED_ROWS").length,
     freeBitqueryReuseRecoveredRows: rows.filter(r => r.diagnosis === "FREE_REUSED_BITQUERY_RECOVERED_ROWS").length,
+    outageRescueEligibleV942: rows.filter(r => r.outageRescueEligibleV942).length,
+    outageRescueAttemptedV942: rows.filter(r => r.outageRescueAttemptedV942).length,
+    outageRescueVerifiedV942: rows.filter(r => r.outageRescueVerifiedV942).length,
     liveSwapCouldCompleteRiskRows: rows.filter(r => r.liveSwapCouldBeSecondClass).length,
     diagnosisCounts: Object.entries(diagnosisCounts).sort((a,b)=>b[1]-a[1]).map(([reason,count])=>({reason,count})),
     rows: rows.slice(0,16),
-    interpretation: "V941 does not assume a paid provider is required. It exposes whether existing public/legacy Blockscout, retained Bitquery rows, authenticated Blockscout Pro, and the existing one-request GoldRush fallback were available/attempted/successful. Forward path detail appears only after V941 analyses a candidate; legacy rows are not backfilled or guessed.",
+    interpretation: "V942 preserves all existing holder-verification rules and adds one narrow independent-source bypass: during a confirmed same-run Blockscout holder outage, one market-qualified candidate may still reach the existing guarded GoldRush holder fallback. GoldRush's one-request-per-scan and credit guards remain authoritative. Legacy rows are not backfilled or guessed.",
     providerRequestsAdded: 0,
     stateWritesAddedByCommand: 0,
     riskChanged: false,
@@ -169279,7 +169388,7 @@ function holderRecoveryMessageV941(state, env) {
   const fmt = n => safeNumber(n).toLocaleString("en-GB");
   const yn = v => v === true ? "YES" : "NO";
   const lines = [
-    "👥 <b>Holder Recovery / Free-Data Path Audit — V941</b>", "",
+    "👥 <b>Holder Recovery / Free-Data Path Audit — V942</b>", "",
     `Source: <b>${escapeHtml(d.source)}</b>`,
     `Risk-UNVERIFIED rows analysed: <b>${fmt(d.rowsAnalysed)}</b>`,
     `Rows with V941 holder-path detail: <b>${fmt(d.rowsWithV941PathDetail)}</b> · legacy awaiting fresh trace <b>${fmt(d.legacyRowsAwaitingFreshTrace)}</b>`,
@@ -169287,6 +169396,7 @@ function holderRecoveryMessageV941(state, env) {
     `GoldRush available but not selected: <b>${fmt(d.freeGoldRushAvailableNotSelected)}</b>`,
     `GoldRush attempted but no verified rows: <b>${fmt(d.freeGoldRushAttemptedNoVerifiedRows)}</b>`,
     `GoldRush verified recoveries: <b>${fmt(d.freeGoldRushRecoveredRows)}</b> · reused Bitquery recoveries <b>${fmt(d.freeBitqueryReuseRecoveredRows)}</b>`,
+    `V942 Blockscout-outage bypass — eligible <b>${fmt(d.outageRescueEligibleV942)}</b> · attempted <b>${fmt(d.outageRescueAttemptedV942)}</b> · verified <b>${fmt(d.outageRescueVerifiedV942)}</b>`,
     `Market already verified + live swaps could supply second risk class: <b>${fmt(d.liveSwapCouldCompleteRiskRows)}</b>`
   ];
   if (d.diagnosisCounts?.length) {
@@ -169303,6 +169413,7 @@ function holderRecoveryMessageV941(state, env) {
         `  ↳ public rows ${yn(row.publicRows)} · legacy rows ${yn(row.legacyRows)} · Bitquery reuse ${yn(row.bitqueryUsed)}`,
         `  ↳ Blockscout Pro attempted/success ${yn(row.proAttempted)}/${yn(row.proSuccess)} · ${escapeHtml(row.proStatus || "NONE")}`,
         `  ↳ GoldRush configured/attempted/verified ${yn(row.goldConfigured)}/${yn(row.goldAttempted)}/${yn(row.goldVerified)} · rows ${fmt(row.goldRows)} · ${escapeHtml(row.goldStatus || "NONE")}`,
+        `  ↳ V942 outage bypass eligible/attempted/verified ${yn(row.outageRescueEligibleV942)}/${yn(row.outageRescueAttemptedV942)}/${yn(row.outageRescueVerifiedV942)} · ${escapeHtml(row.outageRescueStatusV942 || "NONE")}`,
         `  ↳ live swaps could complete risk without holder recovery: <b>${yn(row.liveSwapCouldBeSecondClass)}</b>`,
         `  ↳ Telegram blockers: ${escapeHtml(blockers)}`
       );
