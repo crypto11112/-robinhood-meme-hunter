@@ -1619,7 +1619,7 @@
 
 /**
  * Robinhood Chain Meme Hunter
- * V952
+ * V953
  * - promotes the already-proven V704 GoldRush holder endpoint as the guarded production fallback during a confirmed same-run Blockscout holder outage for the current qualification owner / priority candidate;
  * - preserves the existing one-GoldRush-holder-request-per-scan guard, V709 credit guard, all holder-integrity/exclusion logic, legacy Blockscout/Bitquery paths, scoring, risk thresholds and Telegram qualification;
  * V814:
@@ -8375,7 +8375,7 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
-const VERSION = "V952";
+const VERSION = "V953";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -70392,6 +70392,36 @@ async function holderIntelligence(
     safeNumber(market?.liquidityUsd) >=
       MIN_ALERT_LIQUIDITY;
 
+  /*
+   * V953: protect the single GoldRush holder request for the active
+   * qualification owner. V718 allowed any market-qualified rescue candidate
+   * to consume the one-request V704 slot first; later, the candidate actually
+   * being qualified could reach holder recovery and see only
+   * GOLDRUSH_SCAN_REQUEST_LIMIT_REACHED_V704.
+   *
+   * The old Blockscout Pro V143/V247 routes remain intact and still run first.
+   * When Pro is unavailable (including current HTTP 402 responses), GoldRush
+   * is only a fallback. Lower-priority market rescues may use GoldRush only
+   * when there is no different active qualification owner. No verification,
+   * concentration, denominator, risk or Telegram rule is weakened.
+   */
+  const goldRushProtectedOwnerAddressV953 =
+    normalize(
+      budget?.analysis
+        ?.erc20UpstreamHeadroomReserveV690
+        ?.qualificationReserveV713
+        ?.activeAddress ||
+      ""
+    );
+
+  const goldRushDifferentProtectedOwnerExistsV953 =
+    isAddress(goldRushProtectedOwnerAddressV953) &&
+    goldRushProtectedOwnerAddressV953 !== normalize(token);
+
+  const goldRushMarketRescueAllowedV953 =
+    goldRushVerifiedMarketRescueV718 &&
+    !goldRushDifferentProtectedOwnerExistsV953;
+
   if (
     (
       !holders ||
@@ -70402,7 +70432,7 @@ async function holderIntelligence(
     (
       priorityCompletion === true ||
       goldRushActiveQualificationOwnerV717 ||
-      goldRushVerifiedMarketRescueV718
+      goldRushMarketRescueAllowedV953
     ) &&
     String(
       env?.GOLDRUSH_API_KEY ||
@@ -70450,7 +70480,23 @@ async function holderIntelligence(
       hasMore:
         goldRushResultV704
           ?.hasMore ??
-        null
+        null,
+      v953: {
+        protectedOwner:
+          isAddress(goldRushProtectedOwnerAddressV953)
+            ? goldRushProtectedOwnerAddressV953
+            : null,
+        currentTokenIsProtectedOwner:
+          goldRushActiveQualificationOwnerV717 === true,
+        marketRescueAllowed:
+          goldRushMarketRescueAllowedV953 === true,
+        differentProtectedOwnerExists:
+          goldRushDifferentProtectedOwnerExistsV953 === true,
+        proStatusBeforeGoldRush:
+          blockscoutProHolderFallbackV143?.status || null,
+        proHttpStatusBeforeGoldRush:
+          blockscoutProHolderFallbackV143?.httpStatus ?? null
+      }
     };
 
     if (
