@@ -1,4 +1,10 @@
 /**
+ * V936 TELEGRAM AUDIT DELIVERY HOTFIX:
+ * - preserves V935 reconstructed qualification audit logic;
+ * - routes /telegramaudit and /qualstarve through the proven chunked Telegram reply sender;
+ * - fixes silent Telegram send failures when the reconstructed audit exceeds the single-message limit;
+ * - zero scoring, qualification, threshold, provider, V4 or Pons changes.
+ *
  * V935 RECONSTRUCTED TELEGRAM QUALIFICATION AUDIT:
  * - /telegramaudit no longer depends on a special end-of-scan snapshot or dedicated KV write;
  * - reconstructs directly from already-persisted qualificationAuditV663 records plus V725/V727 evidence detail;
@@ -8346,7 +8352,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V935";
+const VERSION = "V936";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -168138,7 +168144,9 @@ async function telegramCommandReplyV271(
     parsed.command === "/poolwatch" ||
     parsed.command === "/watchpool" ||
     parsed.command === "/evidenceaudit" ||
-    parsed.command === "/completionaudit";
+    parsed.command === "/completionaudit" ||
+    parsed.command === "/telegramaudit" ||
+    parsed.command === "/qualstarve";
 
   if (isFreshAnalyseV352) {
     await telegramAnalyseCheckpointV352(
