@@ -8363,7 +8363,8 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V947";
+/* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
+const VERSION = "V949";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -169630,7 +169631,7 @@ async function denominatorReplayV945(state, env, argument = "") {
 }
 
 /* =========================================================
-   V948 DIRECT-CHAIN HOLDER RECONSTRUCTION PROTOTYPE
+   V949 DIRECT-CHAIN HOLDER RECONSTRUCTION PROTOTYPE
    - Manual diagnostic only; zero persistent state writes.
    - Uses direct ERC-20 Transfer logs through existing RPC routing.
    - Exact holder count / Top 1 / Top 10 are emitted ONLY when the
@@ -169694,38 +169695,111 @@ function launchBlockForHolderPrototypeV947(state, address, retainedRow) {
   return null;
 }
 
+
+function holderPrototypeAutoCandidatesV949(state) {
+  const map = new Map();
+  const add = (address, launchBlock, symbol = null, row = null, source = null) => {
+    const token = normalize(address || "");
+    const block = safeNumber(launchBlock);
+    if (!isAddress(token) || !(block > 0)) return;
+    const existing = map.get(token);
+    const candidate = {
+      address: token,
+      launchBlock: Math.floor(block),
+      symbol: symbol || row?.symbol || row?.metadata?.symbol || null,
+      row: row || null,
+      launchSourceV949: source || "VERIFIED_LAUNCH_EVIDENCE_V949"
+    };
+    // Prefer the freshest/highest verified launch block for the same token.
+    if (!existing || candidate.launchBlock > existing.launchBlock) map.set(token, candidate);
+  };
+
+  // First reuse production's own verified launch identity rules on watched tokens.
+  for (const watched of Array.isArray(state?.watchedTokens) ? state.watchedTokens : []) {
+    const token = normalize(watched?.address || watched?.token || "");
+    if (!isAddress(token)) continue;
+    const launch = verifiedLaunchSourceIdentityV476(watched);
+    if (launch?.verified === true && safeNumber(launch?.launchBlock) > 0) {
+      add(token, launch.launchBlock, watched?.metadata?.symbol || watched?.symbol || null, watched,
+        `WATCHED_${String(launch?.protocol || "VERIFIED_LAUNCH").toUpperCase()}_V949`);
+    }
+  }
+
+  // Reuse the same already-persisted verified launch stores used by V791/V794.
+  const stores = [
+    ["DIRECT_ONCHAIN_V476", state?.directOnChainLaunchTelemetryV476?.recentVerifiedLaunches],
+    ["LAUNCHHOOD_V220", state?.launchHoodDiscoveryV220?.recentVerifiedLaunches],
+    ["FIXED_MINT_V222", state?.fixedMintLaunchpadDiscoveryV222?.recentVerifiedLaunches],
+    ["CLANKER_V224", state?.clankerVirtualsDiscoveryV224?.recentVerifiedLaunches],
+    ["PONS_V215", state?.ponsDiscoveryV215?.recentVerifiedLaunches],
+    ["FLAP_V214", state?.flapDiscoveryV214?.recentVerifiedLaunches],
+    ["BAGS_V210", state?.bagsDiscoveryV210?.recentVerifiedLaunches],
+    ["POOLS_TRADE_V209", state?.poolsTradeLaunchTelemetryV209?.recentVerifiedLaunches]
+  ];
+  for (const [source, rows] of stores) {
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows) {
+      const token = normalize(row?.token || row?.tokenAddress || row?.address || row?.contractAddress || "");
+      const block = safeNumber(row?.launchBlock || row?.blockNumber);
+      const verified = row?.verified === true || /DIRECT_ONCHAIN|LAUNCHHOOD|FIXED_MINT|CLANKER|PONS|FLAP|BAGS|POOLS_TRADE/.test(source);
+      if (!verified) continue;
+      add(token, block, row?.symbol || row?.tokenSymbol || null, row, `${source}_V949`);
+    }
+  }
+
+  // Cursor rows are also accepted because production already retained their verified launch anchors.
+  for (const [source, store] of [
+    ["V789_CURSOR", state?.productionV4InitCursorV789],
+    ["V788_CURSOR", state?.productionV4InitCursorV788]
+  ]) {
+    if (!store || typeof store !== "object") continue;
+    for (const [key, row] of Object.entries(store)) {
+      add(row?.tokenAddress || key, row?.launchBlock, row?.symbol || null, row, `${source}_V949`);
+    }
+  }
+
+  // Freshest verified launch first = smallest likely history and best chance of fitting the prototype cap.
+  return [...map.values()].sort((a, b) =>
+    (b.launchBlock - a.launchBlock) ||
+    (safeNumber(b?.row?.updatedAt) - safeNumber(a?.row?.updatedAt)) ||
+    a.address.localeCompare(b.address)
+  );
+}
+
 function holderPrototypeTargetV947(state, argument = "") {
-  const raw = String(argument || "").trim().split(/\\s+/).filter(Boolean);
+  const raw = String(argument || "").trim().split(/\s+/).filter(Boolean);
   const explicit = normalize(raw[0] || "");
   const explicitLaunch = safeNumber(raw[1]);
   const records = Array.isArray(state?.qualificationAuditV663?.records)
     ? state.qualificationAuditV663.records : [];
-  let row = null;
-  let address = null;
+
   if (isAddress(explicit)) {
-    address = explicit;
-    row = [...records].reverse().find(r => normalize(r?.address) === address) || null;
-  } else {
-    row = denominatorReplayTargetV945(state, "");
-    address = normalize(row?.address || "");
-    if (!isAddress(address)) {
-      const watched = Array.isArray(state?.watchedTokens) ? state.watchedTokens : [];
-      const candidate = [...watched].reverse().find(w => isAddress(normalize(w?.address || w?.token)));
-      address = normalize(candidate?.address || candidate?.token || "");
-    }
+    const row = [...records].reverse().find(r => normalize(r?.address) === explicit) || null;
+    const anchor = explicitLaunch > 0
+      ? { block: Math.floor(explicitLaunch), source: "EXPLICIT_BLOCK_ARGUMENT_V949" }
+      : v4PoolSearchLaunchAnchorV791(state, explicit, 0);
+    return {
+      address: explicit,
+      row,
+      symbol: row?.symbol || row?.name || null,
+      launchBlock: safeNumber(anchor?.block) > 0 ? Math.floor(safeNumber(anchor.block)) : null,
+      launchSourceV949: anchor?.source || "NO_VERIFIED_LAUNCH_ANCHOR_V949",
+      autoSelectedV949: false
+    };
   }
-  if (!isAddress(address)) return null;
+
+  const candidates = holderPrototypeAutoCandidatesV949(state);
+  const selected = candidates[0] || null;
+  if (!selected) return null;
   return {
-    address,
-    row,
-    symbol: row?.symbol || row?.name || null,
-    launchBlock: explicitLaunch > 0 ? Math.floor(explicitLaunch) : launchBlockForHolderPrototypeV947(state, address, row)
+    ...selected,
+    autoSelectedV949: true,
+    autoCandidateCountV949: candidates.length
   };
 }
-
 async function directChainHolderPrototypeV947(state, env, argument = "") {
   const target = holderPrototypeTargetV947(state, argument);
-  if (!target) return { version: "V947", status: "NO_VALID_TOKEN_TARGET", externalRequestsUsed: 0, stateWrites: 0 };
+  if (!target) return { version: "V949", status: "NO_VALID_TOKEN_TARGET", externalRequestsUsed: 0, stateWrites: 0 };
   const address = target.address;
   const budget = holderPrototypeBudgetV947();
   const identity = [];
@@ -169753,7 +169827,7 @@ async function directChainHolderPrototypeV947(state, env, argument = "") {
   let head = null;
   try { if (headCall?.result) head = Number(BigInt(headCall.result)); } catch (_) {}
   if (!(head > 0)) return {
-    version:"V947", status:"HEAD_UNVERIFIED", address, symbol:target.symbol,
+    version:"V949", status:"HEAD_UNVERIFIED", address, symbol:target.symbol,
     identity, externalRequestsUsed:safeNumber(budget?.totalUsed), stateWrites:0
   };
 
@@ -169869,9 +169943,12 @@ async function directChainHolderPrototypeV947(state, env, argument = "") {
   else if (completeHistory) diagnosis = "FULL_TRANSFER_HISTORY_SCANNED_BUT_SUPPLY_UNVERIFIED";
 
   return {
-    version:"V947", status:"DIRECT_CHAIN_HOLDER_PROTOTYPE_COMPLETE", diagnosis,
+    version:"V949", status:"DIRECT_CHAIN_HOLDER_PROTOTYPE_COMPLETE", diagnosis,
     address, symbol:target.symbol || null,
-    launchBlock, head, fullRangeKnown, requiredBlocks, requiredChunks,
+    launchBlock, launchSourceV949: target.launchSourceV949 || null,
+    autoSelectedV949: target.autoSelectedV949 === true,
+    autoCandidateCountV949: safeNumber(target.autoCandidateCountV949),
+    head, fullRangeKnown, requiredBlocks, requiredChunks,
     chunkBlocks:HOLDER_PROTOTYPE_CHUNK_BLOCKS_V947,
     maxLogRequests:HOLDER_PROTOTYPE_MAX_LOG_REQUESTS_V947,
     canCompleteFullHistory, completeHistory,
@@ -169897,11 +169974,13 @@ async function directChainHolderPrototypeV947(state, env, argument = "") {
 function directChainHolderPrototypeMessageV947(d) {
   const fmt = n => Number.isFinite(Number(n)) ? Number(n).toLocaleString("en-GB") : "UNVERIFIED";
   if (!d || d.status === "NO_VALID_TOKEN_TARGET") {
-    return "🧬 <b>Direct-Chain Holder Prototype — V947</b>\n\nNo valid token target was available. Use <code>/holderprototype 0xTOKEN</code>.";
+    return "🧬 <b>Direct-Chain Holder Prototype — V949</b>\n\nNo valid token target was available. Use <code>/holderprototype 0xTOKEN</code>.";
   }
   const lines = [
-    "🧬 <b>Direct-Chain Holder Prototype — V947</b>", "",
+    "🧬 <b>Direct-Chain Holder Prototype — V949</b>", "",
     `Token: <b>${escapeHtml(d.symbol || "TOKEN")}</b> <code>${escapeHtml(shortAddressV937(d.address || ""))}</code>`,
+    `Target selection: <b>${d.autoSelectedV949 ? "AUTO_VERIFIED_LAUNCH_V949" : "EXPLICIT_TOKEN"}</b> · verified-launch candidates <b>${fmt(d.autoCandidateCountV949)}</b>`,
+    `Launch source: <b>${escapeHtml(d.launchSourceV949 || "NONE")}</b>`,
     `Diagnosis: <b>${escapeHtml(d.diagnosis || "UNKNOWN")}</b>`,
     `Launch block: <b>${fmt(d.launchBlock)}</b> · head <b>${fmt(d.head)}</b>`,
     `History blocks: <b>${fmt(d.requiredBlocks)}</b> · estimated 2,000-block log requests <b>${fmt(d.estimatedRequestsForFullHistory)}</b>`,
@@ -169921,7 +170000,7 @@ function directChainHolderPrototypeMessageV947(d) {
       `Ownership-supply reconciliation: <b>${d.exact.supplyReconciliationPct===null?"UNVERIFIED":Number(d.exact.supplyReconciliationPct).toFixed(2)+"%"}</b>`);
   } else {
     lines.push("", "⚠️ <b>No holder count / Top 10 is promoted from this partial window.</b>",
-      "Exact current holders require the full Transfer history from a verified launch/deployment block. V947 measures whether that is practical without weakening production verification.");
+      "Exact current holders require the full Transfer history from a verified launch/deployment block. V949 measures whether that is practical without weakening production verification.");
   }
   lines.push("", "<i>Prototype only. Zero persistent state writes. Existing Blockscout/GoldRush/Bitquery holder code remains intact and production risk/scoring/Telegram logic is unchanged.</i>");
   return lines.join("\n");
