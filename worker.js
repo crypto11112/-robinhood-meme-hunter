@@ -1619,6 +1619,9 @@
 
 /**
  * Robinhood Chain Meme Hunter
+ * V952
+ * - promotes the already-proven V704 GoldRush holder endpoint as the guarded production fallback during a confirmed same-run Blockscout holder outage for the current qualification owner / priority candidate;
+ * - preserves the existing one-GoldRush-holder-request-per-scan guard, V709 credit guard, all holder-integrity/exclusion logic, legacy Blockscout/Bitquery paths, scoring, risk thresholds and Telegram qualification;
  * V814:
  * - preserves V813 and the confirmed V4 -> V254 -> verified-USD scoring path;
  * - adds zero-request exact-PoolId local identity reconciliation before V254 provider recovery;
@@ -8372,7 +8375,7 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
-const VERSION = "V951";
+const VERSION = "V952";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -69456,15 +69459,61 @@ async function holderIntelligence(
         HOLDER_STALE_CACHE_MS
       );
 
+    /*
+     * V952: V951 proved the preserved V704 GoldRush endpoint returns real
+     * Robinhood holder rows/counts. During a confirmed Blockscout outage the
+     * old V942 gate still required VERIFIED market + liquidity before allowing
+     * the independent fallback, which could strand the current qualification
+     * owner before its market stage had completed. Allow the CURRENT protected
+     * qualification owner / legacy priority candidate to reach GoldRush too.
+     *
+     * Safety remains unchanged: goldRushHoldersV704() still enforces the
+     * one-request-per-scan ceiling and V709 routine-credit guard, and every
+     * returned row still passes the existing holder-integrity, infrastructure
+     * exclusion, ownership-denominator and concentration pipeline below.
+     */
+    const goldRushActiveQualificationOwnerV952 =
+      Boolean(
+        budget?.analysis
+          ?.erc20UpstreamHeadroomReserveV690
+          ?.qualificationReserveV713
+          ?.phaseV714 ===
+          "ACTIVE_CANDIDATE_QUALIFICATION" &&
+        normalize(
+          budget?.analysis
+            ?.erc20UpstreamHeadroomReserveV690
+            ?.qualificationReserveV713
+            ?.activeAddress
+        ) === normalize(token)
+      );
+
+    const goldRushPriorityOwnerV952 =
+      priorityCompletion === true ||
+      goldRushActiveQualificationOwnerV952;
+
+    const goldRushVerifiedMarketV952 =
+      market?.verified === true &&
+      safeNumber(market?.liquidityUsd) >= MIN_ALERT_LIQUIDITY;
+
     const goldRushOutageEligibleV942 =
       !staleHolderCacheV942 &&
-      market?.verified === true &&
-      safeNumber(market?.liquidityUsd) >= MIN_ALERT_LIQUIDITY &&
+      (goldRushPriorityOwnerV952 || goldRushVerifiedMarketV952) &&
       Boolean(String(env?.GOLDRUSH_API_KEY || "").trim()) &&
       budgetAvailable(budget, "analysis");
 
     blockscoutOutageGoldRushRecoveryV942.eligible =
       goldRushOutageEligibleV942;
+    blockscoutOutageGoldRushRecoveryV942.v952 = {
+      enabled: true,
+      priorityCompletion: priorityCompletion === true,
+      activeQualificationOwner: goldRushActiveQualificationOwnerV952,
+      verifiedMarketLiquidityGate: goldRushVerifiedMarketV952,
+      reason: goldRushOutageEligibleV942
+        ? (goldRushPriorityOwnerV952
+            ? "CURRENT_QUALIFICATION_OWNER_OR_PRIORITY_V952"
+            : "VERIFIED_MARKET_LIQUIDITY_V952")
+        : "V952_GUARD_NOT_SATISFIED"
+    };
 
     if (goldRushOutageEligibleV942) {
       const rescueV942 =
@@ -69474,6 +69523,9 @@ async function holderIntelligence(
           env
         );
 
+      const v952EligibilityTrace =
+        blockscoutOutageGoldRushRecoveryV942.v952 || null;
+
       blockscoutOutageGoldRushRecoveryV942 = {
         eligible: true,
         attempted: rescueV942?.attempted === true,
@@ -69482,6 +69534,7 @@ async function holderIntelligence(
         status: rescueV942?.status || null,
         rowCount: safeNumber(rescueV942?.rowCount),
         holderCount: rescueV942?.holderCount ?? null,
+        v952: v952EligibilityTrace,
         data:
           rescueV942?.success === true &&
           rescueV942?.verified === true &&
