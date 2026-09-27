@@ -1,4 +1,19 @@
 /**
+ * V918 RESUMABLE PONS CURVE HISTORY:
+ * - builds directly from deployed V917;
+ * - preserves V916 direct on-chain Pons CurveBuy/CurveSell decoding;
+ * - replaces the one-shot latest-1,900-block window with a persisted,
+ *   resumable exact-curve cursor starting from the verified Pons launch block;
+ * - advances at most 1,900 blocks per successful scan and never advances a
+ *   failed RPC/timestamp segment;
+ * - if a chunk contains events in more than 25 distinct blocks, timestamps the
+ *   oldest 25 event blocks first and advances only through the last fully
+ *   timestamped block so later events are not skipped;
+ * - once caught up, continues forward from the persisted next block;
+ * - keeps the existing request ceiling, Telegram headroom, risk gates,
+ *   scoring, qualification and provider order unchanged.
+ */
+/**
  * V917 RECURRING-CREATOR RUNTIME HOTFIX:
  * - builds directly from deployed V916;
  * - fixes the live scan TDZ exception:
@@ -8152,7 +8167,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V917";
+const VERSION = "V918";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -78470,7 +78485,15 @@ async function runDirectPonsCurveFlowV916(
     requestsUsed: 0,
     status:
       "NO_ELIGIBLE_PONS_TARGET_V916",
-    persistedNewTrades: 0
+    persistedNewTrades: 0,
+    historyModeV918:
+      "RESUMABLE_FROM_VERIFIED_LAUNCH_BLOCK",
+    launchBlockV918: null,
+    historyCompleteThroughV918: null,
+    nextBlockV918: null,
+    chunksCompletedV918: 0,
+    resumedV918: false,
+    caughtUpV918: false
   };
 
   const ranked =
@@ -78635,24 +78658,165 @@ async function runDirectPonsCurveFlowV916(
         ?.launchBlock
     );
 
-  const fromBlock =
-    Math.max(
+  const ponsTelemetryV918 =
+    state.ponsCurveTradesV216 &&
+    typeof state.ponsCurveTradesV216 === "object"
+      ? state.ponsCurveTradesV216
+      : newState().ponsCurveTradesV216;
+
+  state.ponsCurveTradesV216 =
+    ponsTelemetryV918;
+
+  ponsTelemetryV918.directRpcProgressV918 =
+    ponsTelemetryV918.directRpcProgressV918 &&
+    typeof ponsTelemetryV918.directRpcProgressV918 === "object"
+      ? ponsTelemetryV918.directRpcProgressV918
+      : {
+          version: "V918",
+          entries: {}
+        };
+
+  ponsTelemetryV918.directRpcProgressV918.entries =
+    ponsTelemetryV918.directRpcProgressV918.entries &&
+    typeof ponsTelemetryV918.directRpcProgressV918.entries === "object"
+      ? ponsTelemetryV918.directRpcProgressV918.entries
+      : {};
+
+  const progressKeyV918 =
+    token;
+
+  let progressV918 =
+    ponsTelemetryV918.directRpcProgressV918
+      .entries[progressKeyV918];
+
+  const progressMatchesV918 =
+    progressV918 &&
+    typeof progressV918 === "object" &&
+    normalize(progressV918?.curve) === curve &&
+    (
+      launchBlock <= 0 ||
+      safeNumber(progressV918?.launchBlock) === launchBlock
+    );
+
+  if (!progressMatchesV918) {
+    progressV918 = {
+      version: "V918",
+      tokenAddress: token,
+      curve,
+      pairToken,
+      launchBlock:
+        launchBlock > 0
+          ? launchBlock
+          : null,
+      nextBlock:
+        launchBlock > 0
+          ? launchBlock
+          : Math.max(
+              0,
+              head - 1899
+            ),
+      completeThrough: null,
+      chunksCompleted: 0,
+      requestsAttempted: 0,
+      logsSeen: 0,
+      verifiedUsdTrades: 0,
+      persistedTrades: 0,
+      caughtUp: false,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+
+    ponsTelemetryV918.directRpcProgressV918
+      .entries[progressKeyV918] =
+        progressV918;
+  }
+
+  const resumedV918 =
+    safeNumber(
+      progressV918?.chunksCompleted
+    ) > 0 ||
+    safeNumber(
+      progressV918?.completeThrough
+    ) > 0;
+
+  let fromBlock =
+    safeNumber(
+      progressV918?.nextBlock
+    );
+
+  if (!(fromBlock >= 0)) {
+    fromBlock =
       launchBlock > 0
         ? launchBlock
-        : 0,
-      Math.max(
-        0,
-        head - 1899
-      )
+        : Math.max(
+            0,
+            head - 1899
+          );
+  }
+
+  if (fromBlock > head) {
+    progressV918.caughtUp = true;
+    progressV918.updatedAt = Date.now();
+
+    return {
+      ...base,
+      tokenAddress: token,
+      symbol:
+        candidate?.symbol || null,
+      curve,
+      pairToken,
+      quoteUsdBasis:
+        usdBasis.source,
+      launchBlockV918:
+        launchBlock > 0
+          ? launchBlock
+          : null,
+      historyCompleteThroughV918:
+        safeNumber(
+          progressV918?.completeThrough
+        ) || null,
+      nextBlockV918:
+        fromBlock,
+      chunksCompletedV918:
+        safeNumber(
+          progressV918?.chunksCompleted
+        ),
+      resumedV918,
+      caughtUpV918: true,
+      progressStatusV918:
+        "PONS_CURVE_HISTORY_CAUGHT_UP_AWAITING_NEW_BLOCKS_V918",
+      status:
+        "PONS_CURVE_HISTORY_CAUGHT_UP_AWAITING_NEW_BLOCKS_V918"
+    };
+  }
+
+  const toBlock =
+    Math.min(
+      head,
+      fromBlock + 1899
     );
 
   const toHex =
-    `0x${Math.trunc(head)
+    `0x${Math.trunc(toBlock)
       .toString(16)}`;
 
   const fromHex =
     `0x${Math.trunc(fromBlock)
       .toString(16)}`;
+
+  progressV918.requestsAttempted =
+    safeNumber(
+      progressV918.requestsAttempted
+    ) + 1;
+
+  progressV918.lastAttemptFromBlock =
+    fromBlock;
+
+  progressV918.lastAttemptToBlock =
+    toBlock;
+
+  progressV918.lastAttemptAt =
+    Date.now();
 
   const getLogs =
     await v916RawRpcHttp(
@@ -78691,10 +78855,31 @@ async function runDirectPonsCurveFlowV916(
       curve,
       pairToken,
       fromBlock,
-      toBlock: head,
+      toBlock,
       provider:
         getLogs.provider,
       requestsUsed: 1,
+      launchBlockV918:
+        launchBlock > 0
+          ? launchBlock
+          : null,
+      historyCompleteThroughV918:
+        safeNumber(
+          progressV918?.completeThrough
+        ) || null,
+      nextBlockV918:
+        safeNumber(
+          progressV918?.nextBlock
+        ) || fromBlock,
+      chunksCompletedV918:
+        safeNumber(
+          progressV918?.chunksCompleted
+        ),
+      resumedV918,
+      caughtUpV918:
+        progressV918?.caughtUp === true,
+      progressStatusV918:
+        progressV918?.lastStatus || null,
       status:
         getLogs.status ||
         "PONS_CURVE_LOG_REQUEST_FAILED_V916",
@@ -78711,6 +78896,28 @@ async function runDirectPonsCurveFlowV916(
       : [];
 
   if (!logs.length) {
+    progressV918.completeThrough =
+      toBlock;
+
+    progressV918.nextBlock =
+      toBlock + 1;
+
+    progressV918.chunksCompleted =
+      safeNumber(
+        progressV918.chunksCompleted
+      ) + 1;
+
+    progressV918.caughtUp =
+      toBlock >= head;
+
+    progressV918.lastStatus =
+      progressV918.caughtUp
+        ? "PONS_CURVE_HISTORY_CAUGHT_UP_NO_EVENTS_V918"
+        : "PONS_CURVE_HISTORY_CHUNK_EMPTY_CONTINUE_V918";
+
+    progressV918.updatedAt =
+      Date.now();
+
     return {
       ...base,
       attempted: true,
@@ -78719,14 +78926,33 @@ async function runDirectPonsCurveFlowV916(
         candidate?.symbol || null,
       curve,
       pairToken,
+      quoteUsdBasis:
+        usdBasis.source,
       fromBlock,
-      toBlock: head,
+      toBlock,
       provider:
         getLogs.provider,
       requestsUsed: 1,
       logsReturned: 0,
+      launchBlockV918:
+        launchBlock > 0
+          ? launchBlock
+          : null,
+      historyCompleteThroughV918:
+        toBlock,
+      nextBlockV918:
+        toBlock + 1,
+      chunksCompletedV918:
+        safeNumber(
+          progressV918.chunksCompleted
+        ),
+      resumedV918,
+      caughtUpV918:
+        progressV918.caughtUp === true,
+      progressStatusV918:
+        progressV918.lastStatus,
       status:
-        "NO_PONS_CURVE_EVENTS_IN_WINDOW_V916"
+        progressV918.lastStatus
     };
   }
 
@@ -78750,10 +78976,10 @@ async function runDirectPonsCurveFlowV916(
       .sort(
         (a, b) =>
           Number(
-            BigInt(b)
+            BigInt(a)
           ) -
           Number(
-            BigInt(a)
+            BigInt(b)
           )
       )
       .slice(0, 25);
@@ -78848,14 +79074,7 @@ async function runDirectPonsCurveFlowV916(
   }
 
   const telemetry =
-    state.ponsCurveTradesV216 &&
-    typeof state.ponsCurveTradesV216 ===
-      "object"
-      ? state.ponsCurveTradesV216
-      : newState().ponsCurveTradesV216;
-
-  state.ponsCurveTradesV216 =
-    telemetry;
+    ponsTelemetryV918;
 
   telemetry.recentTrades =
     Array.isArray(
@@ -79065,6 +79284,134 @@ async function runDirectPonsCurveFlowV916(
     persistedNewTrades++;
   }
 
+  const allEventBlockHexesV918 =
+    Array.from(
+      new Set(
+        logs
+          .map(row =>
+            String(
+              row?.blockNumber ||
+              ""
+            ).toLowerCase()
+          )
+          .filter(value =>
+            /^0x[0-9a-f]+$/.test(
+              value
+            )
+          )
+      )
+    )
+      .sort(
+        (a, b) =>
+          Number(
+            BigInt(a)
+          ) -
+          Number(
+            BigInt(b)
+          )
+      );
+
+  const allEventBlocksTimestampedV918 =
+    allEventBlockHexesV918.length > 0 &&
+    allEventBlockHexesV918.every(
+      blockHex =>
+        timestampMap.has(
+          blockHex
+        )
+    );
+
+  const timestampedBlockNumbersV918 =
+    blockHexes
+      .filter(blockHex =>
+        timestampMap.has(
+          blockHex
+        )
+      )
+      .map(blockHex =>
+        Number(
+          BigInt(
+            blockHex
+          )
+        )
+      )
+      .filter(Number.isFinite);
+
+  const highestTimestampedBlockV918 =
+    timestampedBlockNumbersV918.length
+      ? Math.max(
+          ...timestampedBlockNumbersV918
+        )
+      : null;
+
+  let completeThroughV918 =
+    null;
+
+  if (allEventBlocksTimestampedV918) {
+    completeThroughV918 =
+      toBlock;
+  } else if (
+    Number.isFinite(
+      highestTimestampedBlockV918
+    )
+  ) {
+    completeThroughV918 =
+      highestTimestampedBlockV918;
+  }
+
+  if (
+    Number.isFinite(
+      completeThroughV918
+    ) &&
+    completeThroughV918 >= fromBlock
+  ) {
+    progressV918.completeThrough =
+      completeThroughV918;
+
+    progressV918.nextBlock =
+      completeThroughV918 + 1;
+
+    progressV918.chunksCompleted =
+      safeNumber(
+        progressV918.chunksCompleted
+      ) + 1;
+
+    progressV918.caughtUp =
+      completeThroughV918 >= head;
+
+    progressV918.lastStatus =
+      allEventBlocksTimestampedV918
+        ? (
+            progressV918.caughtUp
+              ? "PONS_CURVE_HISTORY_CAUGHT_UP_V918"
+              : "PONS_CURVE_HISTORY_CHUNK_COMPLETE_V918"
+          )
+        : "PONS_CURVE_HISTORY_PARTIAL_EVENT_BLOCKS_TIMESTAMPED_V918";
+  } else {
+    progressV918.lastStatus =
+      "PONS_CURVE_HISTORY_NOT_ADVANCED_TIMESTAMP_VERIFICATION_INCOMPLETE_V918";
+  }
+
+  progressV918.logsSeen =
+    safeNumber(
+      progressV918.logsSeen
+    ) +
+    logs.length;
+
+  progressV918.verifiedUsdTrades =
+    safeNumber(
+      progressV918.verifiedUsdTrades
+    ) +
+    verifiedUsdTrades;
+
+  progressV918.persistedTrades =
+    safeNumber(
+      progressV918.persistedTrades
+    ) +
+    persistedNewTrades;
+
+  progressV918.updatedAt =
+    Date.now();
+
   telemetry.recentTrades =
     telemetry.recentTrades.slice(
       -500
@@ -79088,7 +79435,7 @@ async function runDirectPonsCurveFlowV916(
     curve,
     pairToken,
     fromBlock,
-    toBlock: head,
+    toBlock,
     logsReturned:
       logs.length,
     decodedTrades,
@@ -79107,6 +79454,29 @@ async function runDirectPonsCurveFlowV916(
           ? 1
           : 0
       ),
+    historyModeV918:
+      "RESUMABLE_FROM_VERIFIED_LAUNCH_BLOCK",
+    launchBlockV918:
+      launchBlock > 0
+        ? launchBlock
+        : null,
+    historyCompleteThroughV918:
+      safeNumber(
+        progressV918?.completeThrough
+      ) || null,
+    nextBlockV918:
+      safeNumber(
+        progressV918?.nextBlock
+      ) || null,
+    chunksCompletedV918:
+      safeNumber(
+        progressV918?.chunksCompleted
+      ),
+    resumedV918,
+    caughtUpV918:
+      progressV918?.caughtUp === true,
+    progressStatusV918:
+      progressV918?.lastStatus || null,
     at:
       Date.now()
   };
@@ -79120,7 +79490,7 @@ async function runDirectPonsCurveFlowV916(
     curve,
     pairToken,
     fromBlock,
-    toBlock: head,
+    toBlock,
     logsReturned:
       logs.length,
     decodedTrades,
@@ -79142,7 +79512,30 @@ async function runDirectPonsCurveFlowV916(
     status:
       telemetry.lastStatus,
     quoteUsdBasis:
-      usdBasis.source
+      usdBasis.source,
+    historyModeV918:
+      "RESUMABLE_FROM_VERIFIED_LAUNCH_BLOCK",
+    launchBlockV918:
+      launchBlock > 0
+        ? launchBlock
+        : null,
+    historyCompleteThroughV918:
+      safeNumber(
+        progressV918?.completeThrough
+      ) || null,
+    nextBlockV918:
+      safeNumber(
+        progressV918?.nextBlock
+      ) || null,
+    chunksCompletedV918:
+      safeNumber(
+        progressV918?.chunksCompleted
+      ),
+    resumedV918,
+    caughtUpV918:
+      progressV918?.caughtUp === true,
+    progressStatusV918:
+      progressV918?.lastStatus || null
   };
 }
 
@@ -132939,6 +133332,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `RPC window: ${fmt(ponsDirectV916.fromBlock)} → ${fmt(ponsDirectV916.toBlock)} · provider <b>${escapeHtml(ponsDirectV916.provider || "NONE")}</b> · requests ${fmt(ponsDirectV916.requestsUsed)}`,
       `Curve logs: ${fmt(ponsDirectV916.logsReturned)} · decoded ${fmt(ponsDirectV916.decodedTrades)} · verified USD ${fmt(ponsDirectV916.verifiedUsdTrades)} · persisted new ${fmt(ponsDirectV916.persistedNewTrades)}`,
       `Block timestamps: requested ${fmt(ponsDirectV916.timestampsRequested)} · verified ${fmt(ponsDirectV916.timestampsVerified)}`,
+      `V918 history — launch ${fmt(ponsDirectV916.launchBlockV918)} · complete through ${fmt(ponsDirectV916.historyCompleteThroughV918)} · next ${fmt(ponsDirectV916.nextBlockV918)} · chunks ${fmt(ponsDirectV916.chunksCompletedV918)} · resumed ${ponsDirectV916.resumedV918 ? "YES" : "NO"} · caught up ${ponsDirectV916.caughtUpV918 ? "YES" : "NO"} · ${escapeHtml(ponsDirectV916.progressStatusV918 || "NONE")}`,
       `Bitquery state: <b>${escapeHtml(ponsDirectV916.bitqueryStatus || "NONE")}</b>`,
       `Status: <b>${escapeHtml(ponsDirectV916.status || "NONE")}</b>`
     );
