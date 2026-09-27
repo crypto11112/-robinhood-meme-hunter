@@ -1,4 +1,12 @@
 /**
+ * V925 INCOMPLETE KEYED EXACT-POOL CONTINUATION PRIORITY:
+ * - prefers a still-valid/current candidate whose exact token+PoolId already has
+ *   incomplete keyed V924 progress before starting another brand-new exact-pool job;
+ * - preserves one production V4 target, existing request ceilings/reserves, current
+ *   risk/eligibility gates, V923 FOUNDATION reallocation, V922 Pons routing, scoring
+ *   and Telegram thresholds;
+ * - falls back unchanged to normal/rescue routing when no eligible continuation exists.
+ *
  * V924 KEYED EXACT-POOL CHUNK CONTINUATION:
  * - builds directly from live-proven V923;
  * - preserves V923 priority FOUNDATION reallocation and every V922/V923 protection;
@@ -8261,7 +8269,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V924";
+const VERSION = "V925";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -19085,6 +19093,71 @@ function pruneExactPoolProgressV924(state, ttlMs, keepKey = null) {
     if (updatedAt <= 0 || now - updatedAt > ttlMs) delete map[key];
   }
   return Object.keys(map).length;
+}
+
+/* =========================================================
+   V925 INCOMPLETE KEYED EXACT-POOL CONTINUATION PRIORITY
+   ========================================================= */
+
+function selectIncompleteExactPoolContinuationV925(
+  candidates,
+  state,
+  currentLiveVerifiedLaunchTokensV621
+) {
+  const rows = [];
+  const now = Date.now();
+  const ttlMs = 6 * 60 * 60 * 1000;
+  const map = ensureExactPoolProgressMapV924(state);
+
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const token = normalize(candidate?.address || "");
+    const identity = candidate?.onChainPoolIdentityV153;
+    const poolId = normalize(identity?.poolId || identity?.pairAddress || "");
+    const key = exactPoolProgressKeyV924(token, poolId);
+    if (!key || identity?.verified !== true) continue;
+
+    const progress = map?.[key];
+    if (!progress || typeof progress !== "object") continue;
+    if (progress?.complete === true || progress?.foundSwapRows === true) continue;
+
+    const updatedAt = safeNumber(progress?.updatedAt);
+    if (!(updatedAt > 0) || now - updatedAt > ttlMs) continue;
+    if (safeNumber(progress?.nextToBlock) < safeNumber(progress?.windowFromBlock)) continue;
+
+    const riskAcceptable =
+      candidate?.validERC20 === true &&
+      isAddress(token) &&
+      candidate?.risk?.severeOverride !== true &&
+      String(candidate?.risk?.label || "").toUpperCase() !== "HIGH";
+    if (!riskAcceptable) continue;
+
+    const normalEligible = v772ProductionEligibleCandidate(
+      candidate,
+      currentLiveVerifiedLaunchTokensV621
+    );
+    const rescueEligible = v813CoverageRescueEligibleCandidate(candidate, state);
+    if (!normalEligible && !rescueEligible) continue;
+
+    rows.push({
+      candidate,
+      key,
+      token,
+      poolId,
+      completedChunks: Math.max(0, safeNumber(progress?.completedChunks)),
+      totalPlannedChunks: Math.max(1, safeNumber(progress?.totalPlannedChunks)),
+      updatedAt,
+      normalEligible,
+      rescueEligible
+    });
+  }
+
+  rows.sort((a, b) =>
+    (b.completedChunks - a.completedChunks) ||
+    (a.updatedAt - b.updatedAt) ||
+    a.key.localeCompare(b.key)
+  );
+
+  return rows[0] || null;
 }
 
 /* =========================================================
@@ -108944,12 +109017,28 @@ for (
     productionV4CollisionV818 &&
     (rescueStarvationOverrideV875 || lastCollisionOwnerV821 !== "RESCUE");
 
-  const productionV4TargetV772 =
+  const defaultProductionV4TargetV925 =
     rescueOwnsCollisionV818
       ? productionV4CoverageRescueTargetV813
       : (productionV4NormalTargetV813 || productionV4CoverageRescueTargetV813 || null);
 
-  const productionV4SelectionModeV813 =
+  /*
+   * V925: after repeated live V924 scans created valid keyed progress but target
+   * rotation kept starting new jobs, prefer one CURRENT, still-eligible incomplete
+   * keyed token+PoolId. This only changes which already-eligible candidate receives
+   * the existing single production lane; it adds no request and weakens no gate.
+   */
+  const continuationPriorityV925 =
+    selectIncompleteExactPoolContinuationV925(
+      candidates,
+      state,
+      currentLiveVerifiedLaunchTokensV621
+    );
+
+  const productionV4TargetV772 =
+    continuationPriorityV925?.candidate || defaultProductionV4TargetV925;
+
+  const defaultProductionV4SelectionModeV925 =
     rescueOwnsCollisionV818
       ? (rescueStarvationOverrideV875
           ? "ZERO_SWAP_COVERAGE_RESCUE_STARVATION_V875"
@@ -108959,6 +109048,11 @@ for (
             ? (productionV4CollisionV818 ? "NORMAL_V772_COLLISION_V821" : "NORMAL_V772")
             : (productionV4CoverageRescueTargetV813 ? "ZERO_SWAP_COVERAGE_RESCUE_QUEUED_V821" : "NONE")
         );
+
+  const productionV4SelectionModeV813 =
+    continuationPriorityV925
+      ? "INCOMPLETE_KEYED_EXACT_POOL_CONTINUATION_PRIORITY_V925"
+      : defaultProductionV4SelectionModeV925;
 
   if (productionV4CollisionV818) {
     state.productionV4FairnessV821 = {
@@ -109063,6 +109157,19 @@ for (
       normalTarget: normalize(productionV4NormalTargetV813?.address) || null,
       rescueTarget: normalize(productionV4CoverageRescueTargetV813?.address) || null,
       selectedTarget: normalize(productionV4TargetV772?.address) || null,
+      continuationPriorityV925: continuationPriorityV925
+        ? {
+            selected: true,
+            tokenAddress: continuationPriorityV925.token,
+            poolId: continuationPriorityV925.poolId,
+            key: continuationPriorityV925.key,
+            completedChunks: continuationPriorityV925.completedChunks,
+            totalPlannedChunks: continuationPriorityV925.totalPlannedChunks,
+            normalEligible: continuationPriorityV925.normalEligible === true,
+            rescueEligible: continuationPriorityV925.rescueEligible === true,
+            reason: "CURRENT_STILL_ELIGIBLE_INCOMPLETE_KEYED_PROGRESS_V925"
+          }
+        : { selected: false, reason: "NO_CURRENT_ELIGIBLE_INCOMPLETE_KEYED_PROGRESS_V925" },
       normalTargetDisplacedRescue:
         Boolean(productionV4NormalTargetV813 && rescueEligibleAll.length && !rescueOwnsCollisionV818),
       collisionPresentV818: productionV4CollisionV818,
@@ -134789,6 +134896,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `🧭 <b>Production V4 routing diagnostic — ${escapeHtml(routingV817.runtimeVersion || VERSION)}</b>`,
       `Selection: <b>${escapeHtml(routingV817.selectionMode || "NONE")}</b>`,
       `Normal / rescue / selected: <code>${escapeHtml(routingV817.normalTarget || "NONE")}</code> / <code>${escapeHtml(routingV817.rescueTarget || "NONE")}</code> / <code>${escapeHtml(routingV817.selectedTarget || "NONE")}</code>`,
+      `V925 keyed continuation priority: <b>${routingV817?.continuationPriorityV925?.selected === true ? "SELECTED" : "NONE"}</b> · key <code>${escapeHtml(routingV817?.continuationPriorityV925?.key || "NONE")}</code> · progress ${fmt(routingV817?.continuationPriorityV925?.completedChunks)}/${fmt(routingV817?.continuationPriorityV925?.totalPlannedChunks)} · reason ${escapeHtml(routingV817?.continuationPriorityV925?.reason || "NONE")}`,
       `Rescue eligible now: <b>${fmt(routingV817.rescueEligibleCountEvenIfNormalSelected)}</b> · ranked: <b>${fmt(routingV817.rankedCandidateCount)}</b> · normal displaced rescue: <b>${routingV817.normalTargetDisplacedRescue ? "YES" : "NO"}</b>`,
       `Gates — candidates:${fmt(g.totalCandidates)} · ERC20:${fmt(g.validERC20)} · riskOK:${fmt(g.riskAcceptable)} · zeroSwaps:${fmt(g.zeroObservedSwaps)} · noExactPool:${fmt(g.noKnownExactPool)} · analysedEvidence:${fmt(g.analysedFallbackEvidence)} · rescueEligible:${fmt(g.rescueEligible)}`,
       `Budget at selection — total ${fmt(b.totalUsed)}/${fmt(b.totalLimit)} · analysis ${fmt(b.analysisUsed)}/${fmt(b.analysisLimit)} · can fund 3: <b>${b.canFundThreeAnalysisRequests ? "YES" : "NO"}</b>`,
