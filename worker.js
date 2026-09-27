@@ -1,4 +1,12 @@
 /**
+ * V926 BACKGROUND KEYED EXACT-POOL CONTINUATION:
+ * - builds directly from deployed V925;
+ * - when no CURRENT candidate can resume retained V924 keyed progress, one recent
+ *   incomplete token+PoolId may run as measurement-only background exact-pool work;
+ * - requires retained non-HIGH/non-severe candidate evidence and pool-registry token match;
+ * - does not insert the background row into scoring/qualification/Telegram candidates;
+ * - adds no request capacity and preserves the 48-request ceiling/reserves.
+ *
  * V925 INCOMPLETE KEYED EXACT-POOL CONTINUATION PRIORITY:
  * - prefers a still-valid/current candidate whose exact token+PoolId already has
  *   incomplete keyed V924 progress before starting another brand-new exact-pool job;
@@ -8269,7 +8277,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V925";
+const VERSION = "V926";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -19157,6 +19165,81 @@ function selectIncompleteExactPoolContinuationV925(
     a.key.localeCompare(b.key)
   );
 
+  return rows[0] || null;
+}
+
+
+function retainedCandidateRowsV926(state) {
+  const rows = [];
+  const pushRoot = value => {
+    if (Array.isArray(value)) rows.push(...value);
+    else if (value && typeof value === "object") rows.push(...Object.values(value));
+  };
+  pushRoot(state?.watched || state?.tokens || state?.candidates || {});
+  for (const key of ["recentCandidates","analysisHistory","qualified","qualificationHistory","latestCandidates"]) {
+    pushRoot(state?.[key]);
+  }
+  return rows;
+}
+
+function selectBackgroundExactPoolContinuationV926(state) {
+  const now = Date.now();
+  const ttlMs = 6 * 60 * 60 * 1000;
+  const map = ensureExactPoolProgressMapV924(state);
+  const retained = retainedCandidateRowsV926(state);
+  const rows = [];
+
+  for (const [key, progress] of Object.entries(map)) {
+    if (!progress || typeof progress !== "object") continue;
+    if (progress?.complete === true || progress?.foundSwapRows === true) continue;
+    const updatedAt = safeNumber(progress?.updatedAt);
+    if (!(updatedAt > 0) || now - updatedAt > ttlMs) continue;
+    if (safeNumber(progress?.nextToBlock) < safeNumber(progress?.windowFromBlock)) continue;
+
+    const token = normalize(progress?.tokenAddress || String(key).split(":")[0] || "");
+    const poolId = normalize(progress?.poolId || String(key).split(":")[1] || "");
+    if (!isAddress(token) || !/^0x[a-f0-9]{64}$/.test(String(poolId || ""))) continue;
+
+    const registry = state?.poolRegistry?.[poolId] || null;
+    const c0 = normalize(registry?.currency0 || registry?.token0 || registry?.tokenA || "");
+    const c1 = normalize(registry?.currency1 || registry?.token1 || registry?.tokenB || "");
+    if (!(c0 === token || c1 === token)) continue;
+
+    const prior = retained.find(row => normalize(row?.address || row?.tokenAddress || "") === token) || null;
+    if (!prior) continue;
+    const riskAcceptable =
+      prior?.validERC20 === true &&
+      prior?.risk?.severeOverride !== true &&
+      String(prior?.risk?.label || "").toUpperCase() !== "HIGH";
+    if (!riskAcceptable) continue;
+
+    const candidate = {
+      ...prior,
+      address: token,
+      validERC20: true,
+      onChainPoolIdentityV153: {
+        ...(prior?.onChainPoolIdentityV153 || {}),
+        verified: true,
+        candidateAddress: token,
+        poolId,
+        pairAddress: poolId,
+        source: prior?.onChainPoolIdentityV153?.source || "PERSISTED_KEYED_PROGRESS_V924_V926"
+      }
+    };
+
+    rows.push({
+      candidate, key, token, poolId, updatedAt,
+      completedChunks: Math.max(0, safeNumber(progress?.completedChunks)),
+      totalPlannedChunks: Math.max(1, safeNumber(progress?.totalPlannedChunks)),
+      source: "BACKGROUND_RETAINED_KEYED_PROGRESS_V926"
+    });
+  }
+
+  rows.sort((a,b) =>
+    (b.completedChunks - a.completedChunks) ||
+    (a.updatedAt - b.updatedAt) ||
+    a.key.localeCompare(b.key)
+  );
   return rows[0] || null;
 }
 
@@ -101638,7 +101721,8 @@ async function enrichCandidateWithProductionV4V772(
   budget,
   candidate,
   latestNumber,
-  currentLiveVerifiedLaunchV780 = false
+  currentLiveVerifiedLaunchV780 = false,
+  backgroundExactPoolContinuationV926 = false
 ) {
   const token = normalize(candidate?.address);
   const base = {
@@ -101694,8 +101778,14 @@ async function enrichCandidateWithProductionV4V772(
   };
 
   if (!isAddress(token)) return {...base, status:"INVALID_TOKEN_V772"};
-  if (!budgetAvailable(budget, "analysis", 3)) {
-    return {...base, status:"INSUFFICIENT_THREE_REQUEST_HEADROOM_V772"};
+  const requiredHeadroomV926 = backgroundExactPoolContinuationV926 === true ? 1 : 3;
+  if (!budgetAvailable(budget, "analysis", requiredHeadroomV926)) {
+    return {
+      ...base,
+      status: backgroundExactPoolContinuationV926 === true
+        ? "INSUFFICIENT_BACKGROUND_EXACT_POOL_HEADROOM_V926"
+        : "INSUFFICIENT_THREE_REQUEST_HEADROOM_V772"
+    };
   }
 
   const rpcEndpoint = v4PoolLiveRpcEndpointV767(env);
@@ -101704,34 +101794,39 @@ async function enrichCandidateWithProductionV4V772(
   base.rpcProvider = rpcEndpoint.name;
   base.fromBlock = from;
   base.toBlock = to;
+  base.backgroundExactPoolContinuationV926 = backgroundExactPoolContinuationV926 === true;
 
-  if (!consumeBudget(budget, "analysis", "RPC:V772_RECENT_POOLMANAGER_SWAPS", 1)) {
-    return {...base, status:"V772_RPC_REQUEST_BLOCKED_BY_EXISTING_RESERVE"};
+  let rows = [];
+  let active = [];
+  if (backgroundExactPoolContinuationV926 !== true) {
+    if (!consumeBudget(budget, "analysis", "RPC:V772_RECENT_POOLMANAGER_SWAPS", 1)) {
+      return {...base, status:"V772_RPC_REQUEST_BLOCKED_BY_EXISTING_RESERVE"};
+    }
+    base.attempted = true;
+    base.externalRequestsUsed++;
+
+    const logsResult = await v4PoolLiveRpcCallV767(
+      rpcEndpoint.url,
+      "eth_getLogs",
+      [{
+        address: normalize(POOL_MANAGER),
+        fromBlock: `0x${from.toString(16)}`,
+        toBlock: `0x${to.toString(16)}`,
+        topics: [SWAP_TOPIC]
+      }]
+    );
+
+    if (!logsResult?.ok) {
+      return {
+        ...base,
+        status:"RECENT_SWAP_LOG_QUERY_FAILED_V772",
+        error: logsResult?.error || "RPC_FAILED"
+      };
+    }
+
+    rows = Array.isArray(logsResult.result) ? logsResult.result : [];
+    active = v4PoolLiveAggregateSwapRowsV768(rows);
   }
-  base.attempted = true;
-  base.externalRequestsUsed++;
-
-  const logsResult = await v4PoolLiveRpcCallV767(
-    rpcEndpoint.url,
-    "eth_getLogs",
-    [{
-      address: normalize(POOL_MANAGER),
-      fromBlock: `0x${from.toString(16)}`,
-      toBlock: `0x${to.toString(16)}`,
-      topics: [SWAP_TOPIC]
-    }]
-  );
-
-  if (!logsResult?.ok) {
-    return {
-      ...base,
-      status:"RECENT_SWAP_LOG_QUERY_FAILED_V772",
-      error: logsResult?.error || "RPC_FAILED"
-    };
-  }
-
-  const rows = Array.isArray(logsResult.result) ? logsResult.result : [];
-  const active = v4PoolLiveAggregateSwapRowsV768(rows);
   base.recentSwapRows = rows.length;
   base.uniqueLivePoolIds = active.length;
 
@@ -102343,6 +102438,19 @@ async function enrichCandidateWithProductionV4V772(
         safeNumber(
           base?.exactPoolTargetedBackfillV888?.returnedSwapRows
         )
+    };
+  }
+
+  if (backgroundExactPoolContinuationV926 === true) {
+    return {
+      ...base,
+      attempted: base?.exactPoolTargetedBackfillV888?.attempted === true,
+      applied: false,
+      status: base?.exactPoolTargetedBackfillV888?.status || "BACKGROUND_EXACT_POOL_CONTINUATION_V926",
+      backgroundOnlyV926: true,
+      scoringChangedV926: false,
+      qualificationChangedV926: false,
+      telegramChangedV926: false
     };
   }
 
@@ -109035,8 +109143,15 @@ for (
       currentLiveVerifiedLaunchTokensV621
     );
 
+  const backgroundContinuationV926 =
+    continuationPriorityV925
+      ? null
+      : selectBackgroundExactPoolContinuationV926(state);
+
   const productionV4TargetV772 =
-    continuationPriorityV925?.candidate || defaultProductionV4TargetV925;
+    continuationPriorityV925?.candidate ||
+    backgroundContinuationV926?.candidate ||
+    defaultProductionV4TargetV925;
 
   const defaultProductionV4SelectionModeV925 =
     rescueOwnsCollisionV818
@@ -109052,7 +109167,9 @@ for (
   const productionV4SelectionModeV813 =
     continuationPriorityV925
       ? "INCOMPLETE_KEYED_EXACT_POOL_CONTINUATION_PRIORITY_V925"
-      : defaultProductionV4SelectionModeV925;
+      : backgroundContinuationV926
+        ? "BACKGROUND_INCOMPLETE_KEYED_EXACT_POOL_CONTINUATION_V926"
+        : defaultProductionV4SelectionModeV925;
 
   if (productionV4CollisionV818) {
     state.productionV4FairnessV821 = {
@@ -109170,6 +109287,17 @@ for (
             reason: "CURRENT_STILL_ELIGIBLE_INCOMPLETE_KEYED_PROGRESS_V925"
           }
         : { selected: false, reason: "NO_CURRENT_ELIGIBLE_INCOMPLETE_KEYED_PROGRESS_V925" },
+      backgroundContinuationV926: backgroundContinuationV926
+        ? {
+            selected: true,
+            tokenAddress: backgroundContinuationV926.token,
+            poolId: backgroundContinuationV926.poolId,
+            key: backgroundContinuationV926.key,
+            completedChunks: backgroundContinuationV926.completedChunks,
+            totalPlannedChunks: backgroundContinuationV926.totalPlannedChunks,
+            reason: "PERSISTED_INCOMPLETE_KEY_SELECTED_OUTSIDE_CURRENT_CANDIDATE_QUEUE_V926"
+          }
+        : { selected: false, reason: "NO_SAFE_RETAINED_BACKGROUND_KEYED_PROGRESS_V926" },
       normalTargetDisplacedRescue:
         Boolean(productionV4NormalTargetV813 && rescueEligibleAll.length && !rescueOwnsCollisionV818),
       collisionPresentV818: productionV4CollisionV818,
@@ -109399,7 +109527,9 @@ for (
         budget,
         productionV4TargetV772,
         latestNumber,
-        currentLiveVerifiedLaunchTokensV621?.has(normalize(productionV4TargetV772?.address)) === true
+        currentLiveVerifiedLaunchTokensV621?.has(normalize(productionV4TargetV772?.address)) === true,
+        backgroundContinuationV926 != null &&
+          normalize(backgroundContinuationV926?.token) === normalize(productionV4TargetV772?.address)
       );
 
     productionV4EnrichmentV772 = {
@@ -134897,6 +135027,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `Selection: <b>${escapeHtml(routingV817.selectionMode || "NONE")}</b>`,
       `Normal / rescue / selected: <code>${escapeHtml(routingV817.normalTarget || "NONE")}</code> / <code>${escapeHtml(routingV817.rescueTarget || "NONE")}</code> / <code>${escapeHtml(routingV817.selectedTarget || "NONE")}</code>`,
       `V925 keyed continuation priority: <b>${routingV817?.continuationPriorityV925?.selected === true ? "SELECTED" : "NONE"}</b> · key <code>${escapeHtml(routingV817?.continuationPriorityV925?.key || "NONE")}</code> · progress ${fmt(routingV817?.continuationPriorityV925?.completedChunks)}/${fmt(routingV817?.continuationPriorityV925?.totalPlannedChunks)} · reason ${escapeHtml(routingV817?.continuationPriorityV925?.reason || "NONE")}`,
+      `V926 background keyed continuation: <b>${routingV817?.backgroundContinuationV926?.selected === true ? "SELECTED" : "NONE"}</b> · key <code>${escapeHtml(routingV817?.backgroundContinuationV926?.key || "NONE")}</code> · progress ${fmt(routingV817?.backgroundContinuationV926?.completedChunks)}/${fmt(routingV817?.backgroundContinuationV926?.totalPlannedChunks)} · reason ${escapeHtml(routingV817?.backgroundContinuationV926?.reason || "NONE")}`,
       `Rescue eligible now: <b>${fmt(routingV817.rescueEligibleCountEvenIfNormalSelected)}</b> · ranked: <b>${fmt(routingV817.rankedCandidateCount)}</b> · normal displaced rescue: <b>${routingV817.normalTargetDisplacedRescue ? "YES" : "NO"}</b>`,
       `Gates — candidates:${fmt(g.totalCandidates)} · ERC20:${fmt(g.validERC20)} · riskOK:${fmt(g.riskAcceptable)} · zeroSwaps:${fmt(g.zeroObservedSwaps)} · noExactPool:${fmt(g.noKnownExactPool)} · analysedEvidence:${fmt(g.analysedFallbackEvidence)} · rescueEligible:${fmt(g.rescueEligible)}`,
       `Budget at selection — total ${fmt(b.totalUsed)}/${fmt(b.totalLimit)} · analysis ${fmt(b.analysisUsed)}/${fmt(b.analysisLimit)} · can fund 3: <b>${b.canFundThreeAnalysisRequests ? "YES" : "NO"}</b>`,
