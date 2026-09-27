@@ -8365,6 +8365,7 @@
 */
 const VERSION = "V947";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
+ * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
  * It never feeds results into production holder/risk/scoring logic and performs zero
  * persistent state writes. If the full verified launch->head history fits inside the
@@ -169629,7 +169630,7 @@ async function denominatorReplayV945(state, env, argument = "") {
 }
 
 /* =========================================================
-   V947 DIRECT-CHAIN HOLDER RECONSTRUCTION PROTOTYPE
+   V948 DIRECT-CHAIN HOLDER RECONSTRUCTION PROTOTYPE
    - Manual diagnostic only; zero persistent state writes.
    - Uses direct ERC-20 Transfer logs through existing RPC routing.
    - Exact holder count / Top 1 / Top 10 are emitted ONLY when the
@@ -169900,7 +169901,7 @@ function directChainHolderPrototypeMessageV947(d) {
   }
   const lines = [
     "🧬 <b>Direct-Chain Holder Prototype — V947</b>", "",
-    `Token: <b>${escapeHtml(d.symbol || "TOKEN")}</b> <code>${escapeHtml(shortAddressGlobalV937(d.address))}</code>`,
+    `Token: <b>${escapeHtml(d.symbol || "TOKEN")}</b> <code>${escapeHtml(shortAddressV937(d.address || ""))}</code>`,
     `Diagnosis: <b>${escapeHtml(d.diagnosis || "UNKNOWN")}</b>`,
     `Launch block: <b>${fmt(d.launchBlock)}</b> · head <b>${fmt(d.head)}</b>`,
     `History blocks: <b>${fmt(d.requiredBlocks)}</b> · estimated 2,000-block log requests <b>${fmt(d.estimatedRequestsForFullHistory)}</b>`,
