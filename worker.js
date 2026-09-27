@@ -1,4 +1,17 @@
 /**
+ * V905 EXACT-POOL / V151 HANDOFF DIAGNOSTIC — READ ONLY:
+ * - builds directly from deployed V904;
+ * - traces the production-V4 selected candidate through exact PoolId discovery
+ *   and compares it with the current V151 directional target;
+ * - captures pre/post exact identity, matching poolRegistry entries, V254-known
+ *   PoolIds, V772/V780/V781 identity-discovery telemetry, Uniswap matches and
+ *   request-budget state;
+ * - classifies budget blocking, unpromoted registry/Initialize/Uniswap evidence,
+ *   target divergence, or genuinely missing exact token-pool evidence;
+ * - zero additional provider/RPC requests and no scoring/risk/Momentum/Telegram/
+ *   qualification/request-budget/selection changes.
+ */
+/**
  * V904 VERIFIED V212 -> MOMENTUM HANDOFF:
  * - builds directly from deployed V903;
  * - fixes the V903-proven gap where exact verified V179/V212 directional USD
@@ -7955,7 +7968,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V904";
+const VERSION = "V905";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -97724,6 +97737,244 @@ async function v799IndexActivePoolsWithUniswap(env, budget, poolIds) {
   return base;
 }
 
+
+function exactPoolV151HandoffDiagnosticV905(
+  candidate,
+  state,
+  enrichment,
+  routing,
+  budget,
+  preIdentity = null
+) {
+  const token = normalize(candidate?.address);
+  const directional =
+    state?.directionalCompletionDiagnosticV882 || null;
+  const v151 = directional?.v151 || null;
+  const v151Address = normalize(v151?.address || "");
+
+  const postIdentity = candidate?.onChainPoolIdentityV153 || null;
+  const postPoolId = normalize(
+    postIdentity?.poolId ||
+    postIdentity?.pairAddress ||
+    ""
+  );
+  const postExactVerified =
+    postIdentity?.verified === true &&
+    /^0x[a-f0-9]{64}$/.test(String(postPoolId || "")) &&
+    normalize(postIdentity?.candidateAddress || token) === token;
+
+  const prePoolId = normalize(
+    preIdentity?.poolId ||
+    preIdentity?.pairAddress ||
+    ""
+  );
+  const preExactVerified =
+    preIdentity?.verified === true &&
+    /^0x[a-f0-9]{64}$/.test(String(prePoolId || "")) &&
+    normalize(preIdentity?.candidateAddress || token) === token;
+
+  const registryPoolIds = [];
+  for (const [rawPoolId, row] of Object.entries(state?.poolRegistry || {})) {
+    const poolId = normalize(rawPoolId || row?.poolId);
+    if (!/^0x[a-f0-9]{64}$/.test(String(poolId || ""))) continue;
+    const c0 = normalize(row?.currency0 || row?.token0 || row?.tokenA || "");
+    const c1 = normalize(row?.currency1 || row?.token1 || row?.tokenB || "");
+    if (c0 === token || c1 === token) registryPoolIds.push(poolId);
+  }
+  const uniqueRegistryPoolIds = Array.from(new Set(registryPoolIds));
+
+  const v254Evidence =
+    isAddress(token)
+      ? v254PoolIdsForCandidate(candidate, state, [])
+      : null;
+  const v254PoolIds = Array.from(new Set(
+    (Array.isArray(v254Evidence?.poolIds) ? v254Evidence.poolIds : [])
+      .map(normalize)
+      .filter(poolId => /^0x[a-f0-9]{64}$/.test(String(poolId || "")))
+  ));
+
+  const poolSelection = enrichment?.poolSelectionV780 || {};
+  const indexedInit = poolSelection?.indexedInitializeV781 || {};
+  const uniswap = enrichment?.uniswap || {};
+  const targeted = enrichment?.exactPoolTargetedBackfillV888 || {};
+
+  const uniswapMatchingPools =
+    Array.isArray(uniswap?.matchingPools)
+      ? uniswap.matchingPools
+          .map(row => normalize(row?.poolId))
+          .filter(poolId => /^0x[a-f0-9]{64}$/.test(String(poolId || "")))
+      : [];
+
+  const budgetStatus = String(enrichment?.status || "");
+  const budgetBlocked =
+    /BUDGET|HEADROOM|RESERVE|PROTECTED/i.test(budgetStatus);
+
+  const recentInitializeMatches =
+    safeNumber(poolSelection?.recentInitializeTokenMatches);
+  const indexedInitializeMatches =
+    safeNumber(indexedInit?.decodedTokenMatches);
+  const indexedActiveMatches =
+    safeNumber(indexedInit?.activeMatches);
+
+  let classification = "NO_PRODUCTION_V4_TARGET_V905";
+
+  if (isAddress(token)) {
+    if (postExactVerified) {
+      classification =
+        preExactVerified
+          ? "EXACT_POOL_ALREADY_VERIFIED_BEFORE_PRODUCTION_V905"
+          : "EXACT_POOL_VERIFIED_BY_PRODUCTION_PATH_V905";
+    } else if (uniqueRegistryPoolIds.length > 0) {
+      classification =
+        "REGISTRY_HAS_TOKEN_POOL_BUT_CANDIDATE_IDENTITY_NOT_LINKED_V905";
+    } else if (indexedInitializeMatches > 0 || indexedActiveMatches > 0) {
+      classification =
+        "INDEXED_INITIALIZE_TOKEN_MATCH_NOT_PROMOTED_TO_IDENTITY_V905";
+    } else if (recentInitializeMatches > 0) {
+      classification =
+        "RECENT_INITIALIZE_TOKEN_MATCH_NOT_PROMOTED_TO_IDENTITY_V905";
+    } else if (uniswapMatchingPools.length > 0) {
+      classification =
+        "UNISWAP_TOKEN_POOL_MATCH_NOT_PROMOTED_TO_IDENTITY_V905";
+    } else if (budgetBlocked) {
+      classification =
+        "EXACT_POOL_IDENTITY_DISCOVERY_BUDGET_BLOCKED_V905";
+    } else if (
+      enrichment?.attempted === true &&
+      safeNumber(enrichment?.recentSwapRows) > 0
+    ) {
+      classification =
+        "RECENT_V4_SWAP_ACTIVITY_SEEN_BUT_NO_TOKEN_POOL_IDENTITY_V905";
+    } else {
+      classification =
+        "NO_EXACT_TOKEN_POOL_EVIDENCE_FOUND_IN_SELECTED_PATH_V905";
+    }
+  }
+
+  return {
+    version: "V905",
+    runtimeVersion: VERSION,
+    recordedAt: new Date().toISOString(),
+    diagnosticOnly: true,
+    externalRequestsAdded: 0,
+    scoringChanged: false,
+    qualificationChanged: false,
+    selectionChanged: false,
+
+    tokenAddress: isAddress(token) ? token : null,
+    symbol: candidate?.symbol || candidate?.validation?.symbol || null,
+
+    routing: {
+      selectionMode: routing?.selectionMode || null,
+      normalTarget: normalize(routing?.normalTarget) || null,
+      rescueTarget: normalize(routing?.rescueTarget) || null,
+      selectedTarget: normalize(routing?.selectedTarget) || null
+    },
+
+    v151: {
+      address: isAddress(v151Address) ? v151Address : null,
+      selectionMode: v151?.selectionMode || null,
+      exactHistoryRequested:
+        v151?.exactHistoryPriorityV887?.requested === true,
+      exactPoolId: normalize(
+        v151?.exactHistoryPriorityV887?.exactPoolId ||
+        v151?.poolAddress ||
+        ""
+      ) || null,
+      sameAsProductionTarget:
+        isAddress(v151Address) && v151Address === token
+    },
+
+    exactIdentity: {
+      preVerified: preExactVerified,
+      prePoolId: preExactVerified ? prePoolId : null,
+      postVerified: postExactVerified,
+      postPoolId: postExactVerified ? postPoolId : null,
+      postSource: postIdentity?.source || null,
+      registryMatchingCount: uniqueRegistryPoolIds.length,
+      registryMatchingPools: uniqueRegistryPoolIds.slice(0, 8),
+      v254KnownPoolCount: v254PoolIds.length,
+      v254KnownPools: v254PoolIds.slice(0, 8)
+    },
+
+    productionEnrichment: {
+      attempted: enrichment?.attempted === true,
+      applied: enrichment?.applied === true,
+      status: enrichment?.status || null,
+      error: enrichment?.error || null,
+      externalRequestsUsed: safeNumber(enrichment?.externalRequestsUsed),
+      recentSwapRows: safeNumber(enrichment?.recentSwapRows),
+      uniqueLivePoolIds: safeNumber(enrichment?.uniqueLivePoolIds),
+      candidatePoolIdsChecked: safeNumber(enrichment?.candidatePoolIdsChecked),
+      matchingPoolIds:
+        Array.isArray(enrichment?.matchingPoolIds)
+          ? enrichment.matchingPoolIds.slice(0, 8)
+          : [],
+      matchingSwapRows: safeNumber(enrichment?.matchingSwapRows)
+    },
+
+    identityDiscovery: {
+      currentLiveVerifiedLaunch:
+        poolSelection?.currentLiveVerifiedLaunchV780 === true,
+      strategy: poolSelection?.strategy || null,
+      registryTokenCandidates:
+        safeNumber(poolSelection?.registryTokenCandidates),
+      registryTokenAdded:
+        safeNumber(poolSelection?.registryTokenAdded),
+      retainedCandidates:
+        safeNumber(poolSelection?.retainedCandidates),
+      retainedAdded:
+        safeNumber(poolSelection?.retainedAdded),
+
+      recentInitializeAttempted:
+        poolSelection?.recentInitializeAttempted === true,
+      recentInitializeOk:
+        poolSelection?.recentInitializeOk === true,
+      recentInitializeRows:
+        safeNumber(poolSelection?.recentInitializeRows),
+      recentInitializeTokenMatches:
+        recentInitializeMatches,
+      recentInitializeActiveMatches:
+        safeNumber(poolSelection?.recentInitializeActiveMatches),
+
+      indexedInitializeCurrency0Attempted:
+        indexedInit?.currency0Attempted === true,
+      indexedInitializeCurrency1Attempted:
+        indexedInit?.currency1Attempted === true,
+      indexedInitializeCurrency0Ok:
+        indexedInit?.currency0Ok === true,
+      indexedInitializeCurrency1Ok:
+        indexedInit?.currency1Ok === true,
+      indexedInitializeDecodedTokenMatches:
+        indexedInitializeMatches,
+      indexedInitializeActiveMatches:
+        indexedActiveMatches,
+
+      uniswapAttempted: uniswap?.attempted === true,
+      uniswapOk: uniswap?.ok === true,
+      uniswapStatus: uniswap?.status || null,
+      uniswapMatchingPoolCount: uniswapMatchingPools.length,
+
+      targetedExactPoolEligible: targeted?.eligible === true,
+      targetedExactPoolAttempted: targeted?.attempted === true,
+      targetedExactPoolStatus: targeted?.status || null
+    },
+
+    budget: {
+      totalUsed: safeNumber(budget?.totalUsed),
+      totalLimit: safeNumber(budget?.totalLimit) || MAX_EXTERNAL_REQUESTS,
+      analysisUsed: safeNumber(budget?.analysis?.used),
+      analysisLimit: safeNumber(
+        budget?.analysis?.effectiveLimit ||
+        budget?.analysis?.limit
+      )
+    },
+
+    classification
+  };
+}
+
+
 async function enrichCandidateWithProductionV4V772(
   env,
   state,
@@ -104897,7 +105148,14 @@ for (
   // Compatibility alias for existing audit plumbing.
   state.productionV4RoutingDiagnosticV817 = productionV4RoutingDiagnosticV818;
 
+  let productionV4PreIdentityV905 = null;
+
   if (productionV4TargetV772) {
+    productionV4PreIdentityV905 =
+      productionV4TargetV772?.onChainPoolIdentityV153
+        ? { ...productionV4TargetV772.onChainPoolIdentityV153 }
+        : null;
+
     /*
      * V901: arm one tightly-scoped continuation permission for this selected
      * V887-priority exact-pool target. It is only consumed later if the normal
@@ -104948,6 +105206,27 @@ for (
       safeNumber(b?.analysisPriority) - safeNumber(a?.analysisPriority)
     );
   }
+
+  state.exactPoolV151HandoffDiagnosticV905 =
+    productionV4TargetV772
+      ? exactPoolV151HandoffDiagnosticV905(
+          productionV4TargetV772,
+          state,
+          productionV4EnrichmentV772,
+          productionV4RoutingDiagnosticV818,
+          budget,
+          productionV4PreIdentityV905
+        )
+      : {
+          version: "V905",
+          runtimeVersion: VERSION,
+          recordedAt: new Date().toISOString(),
+          diagnosticOnly: true,
+          externalRequestsAdded: 0,
+          tokenAddress: null,
+          symbol: null,
+          classification: "NO_PRODUCTION_V4_TARGET_V905"
+        };
 
   const v254FirstRequestReserveV807 =
     productionV4TargetV772
@@ -129688,6 +129967,35 @@ function evidenceAuditTelegramMessageV727(state) {
         `Current scan collector: attempted <b>NO</b> · PoolId <code>${escapeHtml(currentCollector895.poolId || "NONE")}</code> · ${escapeHtml(currentCollector895.classification || "UNVERIFIED")}`
       );
     }
+  }
+
+  const exactPoolHandoffV905 =
+    state?.exactPoolV151HandoffDiagnosticV905 || null;
+
+  if (exactPoolHandoffV905) {
+    const r905 = exactPoolHandoffV905?.routing || {};
+    const v151v905 = exactPoolHandoffV905?.v151 || {};
+    const id905 = exactPoolHandoffV905?.exactIdentity || {};
+    const p905 = exactPoolHandoffV905?.productionEnrichment || {};
+    const i905 = exactPoolHandoffV905?.identityDiscovery || {};
+    const b905 = exactPoolHandoffV905?.budget || {};
+
+    lines.push(
+      "",
+      `🧬 <b>Exact-pool → V151 handoff diagnostic — V905</b>`,
+      `Recorded: <code>${escapeHtml(exactPoolHandoffV905.recordedAt || "UNVERIFIED")}</code>`,
+      `Production target: <code>${escapeHtml(exactPoolHandoffV905.tokenAddress || "NONE")}</code> ${escapeHtml(exactPoolHandoffV905.symbol || "")} · mode <b>${escapeHtml(r905.selectionMode || "NONE")}</b>`,
+      `V151 target: <code>${escapeHtml(v151v905.address || "NONE")}</code> · same target <b>${v151v905.sameAsProductionTarget ? "YES" : "NO"}</b> · V887 requested ${v151v905.exactHistoryRequested ? "YES" : "NO"}`,
+      `Exact identity pre/post: <b>${id905.preVerified ? "YES" : "NO"}/${id905.postVerified ? "YES" : "NO"}</b> · post PoolId <code>${escapeHtml(id905.postPoolId || "NONE")}</code> · source ${escapeHtml(id905.postSource || "NONE")}`,
+      `Local exact-pool evidence — registry matches <b>${fmt(id905.registryMatchingCount)}</b> · V254-known pools <b>${fmt(id905.v254KnownPoolCount)}</b>`,
+      `V772 production — attempted <b>${p905.attempted ? "YES" : "NO"}</b> · applied ${p905.applied ? "YES" : "NO"} · status <b>${escapeHtml(p905.status || "NONE")}</b> · requests ${fmt(p905.externalRequestsUsed)} · recent swaps ${fmt(p905.recentSwapRows)} · live pools ${fmt(p905.uniqueLivePoolIds)} · checked ${fmt(p905.candidatePoolIdsChecked)} · matched ${fmt(Array.isArray(p905.matchingPoolIds) ? p905.matchingPoolIds.length : 0)}`,
+      `Identity discovery — current-live ${i905.currentLiveVerifiedLaunch ? "YES" : "NO"} · strategy <b>${escapeHtml(i905.strategy || "NONE")}</b> · registry candidates/added ${fmt(i905.registryTokenCandidates)}/${fmt(i905.registryTokenAdded)} · retained ${fmt(i905.retainedCandidates)}/${fmt(i905.retainedAdded)}`,
+      `Initialize recent — attempted/ok ${i905.recentInitializeAttempted ? "YES" : "NO"}/${i905.recentInitializeOk ? "YES" : "NO"} · rows ${fmt(i905.recentInitializeRows)} · token matches ${fmt(i905.recentInitializeTokenMatches)} · active matches ${fmt(i905.recentInitializeActiveMatches)}`,
+      `Initialize indexed — c0/c1 attempted ${i905.indexedInitializeCurrency0Attempted ? "YES" : "NO"}/${i905.indexedInitializeCurrency1Attempted ? "YES" : "NO"} · ok ${i905.indexedInitializeCurrency0Ok ? "YES" : "NO"}/${i905.indexedInitializeCurrency1Ok ? "YES" : "NO"} · decoded matches ${fmt(i905.indexedInitializeDecodedTokenMatches)} · active matches ${fmt(i905.indexedInitializeActiveMatches)}`,
+      `Uniswap identity — attempted ${i905.uniswapAttempted ? "YES" : "NO"} · ok ${i905.uniswapOk ? "YES" : "NO"} · matches ${fmt(i905.uniswapMatchingPoolCount)} · status <b>${escapeHtml(i905.uniswapStatus || "NONE")}</b>`,
+      `Budget at V905 snapshot — total <b>${fmt(b905.totalUsed)}</b>/${fmt(b905.totalLimit)} · analysis <b>${fmt(b905.analysisUsed)}</b>/${fmt(b905.analysisLimit)}`,
+      `Diagnosis: <b>${escapeHtml(exactPoolHandoffV905.classification || "NONE")}</b>`
+    );
   }
 
   const routingV817 = d?.productionV4RoutingDiagnosticV817 || null;
