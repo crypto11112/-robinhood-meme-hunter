@@ -1,4 +1,18 @@
 /**
+ * V924 KEYED EXACT-POOL CHUNK CONTINUATION:
+ * - builds directly from live-proven V923;
+ * - preserves V923 priority FOUNDATION reallocation and every V922/V923 protection;
+ * - fixes the live-observed case where V899/V900 progress repeatedly returned to 1/6
+ *   because the single legacy progress slot was overwritten when production rotated
+ *   between token + exact-PoolId targets;
+ * - stores resumable V899/V900 progress per token + exact PoolId and restores the
+ *   matching cursor when that exact target returns on a later scan;
+ * - successful chunks alone advance the keyed cursor; RPC failures/budget blocks do not;
+ * - mirrors the active keyed entry into legacy exactPoolChunkProgressV900 for backwards
+ *   diagnostics/compatibility; stale keyed entries expire under the existing 6h TTL;
+ * - no extra provider calls, no higher request cap, and no risk/scoring/Telegram/Pons changes.
+ */
+/**
  * V923 PRIORITY EXACT-POOL FOUNDATION REALLOCATION:
  * - builds directly from live-proven V922;
  * - fixes repeated live cases where a current risk-acceptable V151/V887 exact-pool
@@ -8247,7 +8261,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V923";
+const VERSION = "V924";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -18991,6 +19005,86 @@ function consumeV923PriorityExactPoolFoundationSlot(
   slot.consumedType = String(type);
   slot.armReason = "V822_FOUNDATION_REALLOCATED_TO_PRIORITY_EXACT_POOL_V923";
   return true;
+}
+
+/* =========================================================
+   V924 KEYED EXACT-POOL CHUNK CONTINUATION
+   ========================================================= */
+
+function exactPoolProgressKeyV924(tokenAddress, exactPoolId) {
+  const token = normalize(tokenAddress || "");
+  const poolId = normalize(exactPoolId || "");
+  return isAddress(token) && /^0x[a-f0-9]{64}$/.test(poolId)
+    ? `${token}:${poolId}`
+    : null;
+}
+
+function ensureExactPoolProgressMapV924(state) {
+  if (!state || typeof state !== "object") return {};
+  if (
+    !state.exactPoolChunkProgressByTargetV924 ||
+    typeof state.exactPoolChunkProgressByTargetV924 !== "object" ||
+    Array.isArray(state.exactPoolChunkProgressByTargetV924)
+  ) {
+    state.exactPoolChunkProgressByTargetV924 = {};
+  }
+  return state.exactPoolChunkProgressByTargetV924;
+}
+
+function getExactPoolProgressV924(state, tokenAddress, exactPoolId) {
+  const key = exactPoolProgressKeyV924(tokenAddress, exactPoolId);
+  if (!key) return { key: null, progress: null, source: "INVALID_KEY_V924" };
+
+  const map = ensureExactPoolProgressMapV924(state);
+  const keyed = map?.[key];
+  if (keyed && typeof keyed === "object") {
+    return { key, progress: keyed, source: "KEYED_PROGRESS_V924" };
+  }
+
+  /* One-time backwards-compatible migration of the currently active V900 slot. */
+  const legacy =
+    state?.exactPoolChunkProgressV900 &&
+    typeof state.exactPoolChunkProgressV900 === "object"
+      ? state.exactPoolChunkProgressV900
+      : null;
+
+  if (
+    legacy &&
+    normalize(legacy?.tokenAddress) === normalize(tokenAddress || "") &&
+    normalize(legacy?.poolId) === normalize(exactPoolId || "")
+  ) {
+    map[key] = { ...legacy, progressKeyV924: key, migratedAtV924: Date.now() };
+    return { key, progress: map[key], source: "MIGRATED_LEGACY_V900_TO_V924" };
+  }
+
+  return { key, progress: null, source: "NEW_KEYED_PROGRESS_V924" };
+}
+
+function setExactPoolProgressV924(state, tokenAddress, exactPoolId, progress) {
+  const key = exactPoolProgressKeyV924(tokenAddress, exactPoolId);
+  if (!key || !state || typeof state !== "object") return null;
+  const map = ensureExactPoolProgressMapV924(state);
+  map[key] = {
+    ...(progress && typeof progress === "object" ? progress : {}),
+    tokenAddress: normalize(tokenAddress || ""),
+    poolId: normalize(exactPoolId || ""),
+    progressKeyV924: key,
+    runtimeVersion: VERSION
+  };
+  /* Preserve legacy readers/audits by mirroring only the active target. */
+  state.exactPoolChunkProgressV900 = map[key];
+  return map[key];
+}
+
+function pruneExactPoolProgressV924(state, ttlMs, keepKey = null) {
+  const map = ensureExactPoolProgressMapV924(state);
+  const now = Date.now();
+  for (const [key, row] of Object.entries(map)) {
+    if (key === keepKey) continue;
+    const updatedAt = safeNumber(row?.updatedAt);
+    if (updatedAt <= 0 || now - updatedAt > ttlMs) delete map[key];
+  }
+  return Object.keys(map).length;
 }
 
 /* =========================================================
@@ -101689,11 +101783,10 @@ async function enrichCandidateWithProductionV4V772(
     const maxRangeBlocksV899 = 2000;
     const progressTtlMsV900 = 6 * 60 * 60 * 1000;
 
-    const priorProgressV900 =
-      state?.exactPoolChunkProgressV900 &&
-      typeof state.exactPoolChunkProgressV900 === "object"
-        ? state.exactPoolChunkProgressV900
-        : null;
+    const progressLookupV924 =
+      getExactPoolProgressV924(state, token, exactPoolIdV888);
+    const priorProgressV900 = progressLookupV924.progress;
+    const progressKeyV924 = progressLookupV924.key;
 
     const sameTargetV900 =
       normalize(priorProgressV900?.tokenAddress) === token &&
@@ -101758,26 +101851,31 @@ async function enrichCandidateWithProductionV4V772(
         )
       );
 
-    state.exactPoolChunkProgressV900 = {
-      tokenAddress: token,
-      poolId: exactPoolIdV888,
-      windowFromBlock: windowFromV900,
-      windowToBlock: windowToV900,
-      nextToBlock:
-        canResumeV900
-          ? safeNumber(priorProgressV900.nextToBlock)
-          : windowToV900,
-      completedChunks: priorCompletedChunksV900,
-      totalPlannedChunks: totalPlannedChunksV900,
-      complete: false,
-      foundSwapRows: false,
-      createdAt:
-        canResumeV900
-          ? safeNumber(priorProgressV900?.createdAt) || Date.now()
-          : Date.now(),
-      updatedAt: Date.now(),
-      runtimeVersion: VERSION
-    };
+    setExactPoolProgressV924(
+      state,
+      token,
+      exactPoolIdV888,
+      {
+        windowFromBlock: windowFromV900,
+        windowToBlock: windowToV900,
+        nextToBlock:
+          canResumeV900
+            ? safeNumber(priorProgressV900.nextToBlock)
+            : windowToV900,
+        completedChunks: priorCompletedChunksV900,
+        totalPlannedChunks: totalPlannedChunksV900,
+        complete: false,
+        foundSwapRows: false,
+        createdAt:
+          canResumeV900
+            ? safeNumber(priorProgressV900?.createdAt) || Date.now()
+            : Date.now(),
+        updatedAt: Date.now(),
+        resumeSourceV924: progressLookupV924.source
+      }
+    );
+    const retainedProgressTargetsV924 =
+      pruneExactPoolProgressV924(state, progressTtlMsV900, progressKeyV924);
 
     base.exactPoolTargetedBackfillV888.fromBlock = windowFromV900;
     base.exactPoolTargetedBackfillV888.toBlock = windowToV900;
@@ -101807,6 +101905,9 @@ async function enrichCandidateWithProductionV4V772(
     d895.cumulativeChunksCompletedV900 = priorCompletedChunksV900;
     d895.windowFromBlockV900 = windowFromV900;
     d895.windowToBlockV900 = windowToV900;
+    d895.progressKeyV924 = progressKeyV924;
+    d895.progressSourceV924 = progressLookupV924.source;
+    d895.retainedProgressTargetsV924 = retainedProgressTargetsV924;
 
     let rpcFailureV899 = null;
     let budgetBlockedV899 = false;
@@ -101930,7 +102031,7 @@ async function enrichCandidateWithProductionV4V772(
        * RPC failures never skip an unchecked block range.
        */
       const progressNowV900 =
-        state?.exactPoolChunkProgressV900;
+        getExactPoolProgressV924(state, token, exactPoolIdV888).progress;
 
       if (
         progressNowV900 &&
@@ -101954,6 +102055,12 @@ async function enrichCandidateWithProductionV4V772(
           safeNumber(progressNowV900.completedChunks);
         d895.nextToBlockV900 =
           safeNumber(progressNowV900.nextToBlock);
+        setExactPoolProgressV924(
+          state,
+          token,
+          exactPoolIdV888,
+          progressNowV900
+        );
       }
 
       /*
@@ -101970,7 +102077,7 @@ async function enrichCandidateWithProductionV4V772(
     }
 
     const progressAfterV900 =
-      state?.exactPoolChunkProgressV900;
+      getExactPoolProgressV924(state, token, exactPoolIdV888).progress;
 
     const fullWindowCompletedV899 =
       !rpcFailureV899 &&
@@ -101997,14 +102104,17 @@ async function enrichCandidateWithProductionV4V772(
     }
 
     if (rpcFailureV899) {
-      if (
-        state?.exactPoolChunkProgressV900 &&
-        normalize(state.exactPoolChunkProgressV900?.tokenAddress) === token &&
-        normalize(state.exactPoolChunkProgressV900?.poolId) === exactPoolIdV888
-      ) {
-        state.exactPoolChunkProgressV900.updatedAt = Date.now();
-        state.exactPoolChunkProgressV900.lastError = rpcFailureV899;
-        state.exactPoolChunkProgressV900.runtimeVersion = VERSION;
+      const failedProgressV924 =
+        getExactPoolProgressV924(state, token, exactPoolIdV888).progress;
+      if (failedProgressV924) {
+        failedProgressV924.updatedAt = Date.now();
+        failedProgressV924.lastError = rpcFailureV899;
+        setExactPoolProgressV924(
+          state,
+          token,
+          exactPoolIdV888,
+          failedProgressV924
+        );
       }
 
       base.exactPoolTargetedBackfillV888.status =
@@ -102087,27 +102197,35 @@ async function enrichCandidateWithProductionV4V772(
         exactPoolBackfillRowsV888.length;
 
       if (exactPoolBackfillMatchedV888) {
-        if (
-          state?.exactPoolChunkProgressV900 &&
-          normalize(state.exactPoolChunkProgressV900?.tokenAddress) === token &&
-          normalize(state.exactPoolChunkProgressV900?.poolId) === exactPoolIdV888
-        ) {
-          state.exactPoolChunkProgressV900.complete = true;
-          state.exactPoolChunkProgressV900.foundSwapRows = true;
-          state.exactPoolChunkProgressV900.updatedAt = Date.now();
+        const matchedProgressV924 =
+          getExactPoolProgressV924(state, token, exactPoolIdV888).progress;
+        if (matchedProgressV924) {
+          matchedProgressV924.complete = true;
+          matchedProgressV924.foundSwapRows = true;
+          matchedProgressV924.updatedAt = Date.now();
+          setExactPoolProgressV924(
+            state,
+            token,
+            exactPoolIdV888,
+            matchedProgressV924
+          );
         }
 
         base.exactPoolTargetedBackfillV888.status =
           "EXACT_POOL_TARGETED_SWAPS_FOUND_V899";
       } else if (fullWindowCompletedV899) {
-        if (
-          state?.exactPoolChunkProgressV900 &&
-          normalize(state.exactPoolChunkProgressV900?.tokenAddress) === token &&
-          normalize(state.exactPoolChunkProgressV900?.poolId) === exactPoolIdV888
-        ) {
-          state.exactPoolChunkProgressV900.complete = true;
-          state.exactPoolChunkProgressV900.foundSwapRows = false;
-          state.exactPoolChunkProgressV900.updatedAt = Date.now();
+        const zeroProgressV924 =
+          getExactPoolProgressV924(state, token, exactPoolIdV888).progress;
+        if (zeroProgressV924) {
+          zeroProgressV924.complete = true;
+          zeroProgressV924.foundSwapRows = false;
+          zeroProgressV924.updatedAt = Date.now();
+          setExactPoolProgressV924(
+            state,
+            token,
+            exactPoolIdV888,
+            zeroProgressV924
+          );
         }
 
         base.exactPoolTargetedBackfillV888.status =
@@ -134446,6 +134564,7 @@ function evidenceAuditTelegramMessageV727(state) {
       `Request eligible / attempted: <b>${collector895.requestEligible ? "YES" : "NO"} / ${collector895.requestAttempted ? "YES" : "NO"}</b> · provider ${escapeHtml(collector895.rpcProvider || "NONE")}`,
       `RPC OK: <b>${collector895.rpcOk ? "YES" : "NO"}</b> · raw rows ${fmt(collector895.rawRpcRows)} · exact-topic rows ${fmt(collector895.exactTopicRows)}`,
       `V899/V900 chunks this scan attempted/completed/planned: <b>${fmt(collector895.chunkRequestsAttemptedV899)} / ${fmt(collector895.chunksCompletedV899)} / ${fmt(collector895.chunksPlannedV899)}</b> · cumulative ${fmt(collector895.cumulativeChunksCompletedV900)} · resumed ${collector895.resumedV900 ? "YES" : "NO"} · full 12k window ${collector895.fullWindowCompletedV899 ? "YES" : "NO"} · stop ${escapeHtml(collector895.stopReasonV899 || "NONE")}`,
+      `V924 keyed continuation: source <b>${escapeHtml(collector895.progressSourceV924 || "NONE")}</b> · retained targets ${fmt(collector895.retainedProgressTargetsV924)} · key <code>${escapeHtml(collector895.progressKeyV924 || "NONE")}</code>`,
       `V901/V908 protected continuation: consumed <b>${state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.consumed === true ? "YES" : "NO"}</b> · crossed analysis cap <b>${state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.bypassedAnalysisSubBudget === true ? "YES" : "NO"}</b> · reason <b>${escapeHtml(state?.productionV4EnrichmentV772?.exactPoolContinuationSlotV901?.armReason || "NONE")}</b>`,
       `V923 priority exact-pool FOUNDATION: active <b>${state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.active === true ? "YES" : "NO"}</b> · consumed <b>${state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.consumed === true ? "YES" : "NO"}</b> · target <code>${escapeHtml(state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.targetAddress || "NONE")}</code> · reason <b>${escapeHtml(state?.productionV4EnrichmentV772?.priorityExactPoolFoundationV923?.armReason || "NONE")}</b>`,
       `V908 pre-V891 target: <code>${escapeHtml(state?.preV891PriorityDiagnosticV908?.address || "NONE")}</code> · production target <code>${escapeHtml(state?.preV891PriorityDiagnosticV908?.productionSelectedAddress || "NONE")}</code> · same <b>${state?.preV891PriorityDiagnosticV908?.sameAsProductionSelected ? "YES" : "NO"}</b> · cooldown ${state?.preV891PriorityDiagnosticV908?.activeGecko429Cooldown ? "YES" : "NO"} · exact candidates ${fmt(state?.preV891PriorityDiagnosticV908?.exactPoolCandidates)}`,
