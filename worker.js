@@ -1,4 +1,13 @@
 /**
+ * V932 POST-RECOVERY TELEGRAM QUALIFICATION AUDIT:
+ * - builds directly from deployed V931;
+ * - adds read-only /telegramaudit (alias /qualstarve) against the FINAL candidate objects immediately before Telegram qualification;
+ * - compares current Opportunity with a component recomputation from the same final object and records exact Telegram blockers;
+ * - exposes current evidence presence, missing score groups, score parity delta, and top rejected candidates;
+ * - records whether verified evidence is present on the final candidate yet absent from the score-component view;
+ * - zero provider requests, zero scoring/qualification changes, zero Telegram threshold changes, zero request-cap changes.
+ */
+/**
  * V930 PONS OLD/UNVERIFIED ONE-TIME LIVE BOOTSTRAP:
  * - builds directly from deployed V929;
  * - fixes the live-proven V922 dead-end where an otherwise eligible pre-graduation
@@ -8317,7 +8326,7 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V931";
+const VERSION = "V932";
 /*
  * V842 CURRENT LIVE V4 TOKEN FINDER — DIAGNOSTIC ONLY
  * - Adds /v4livetokens (Telegram + HTTP) to select real currently-active V4 test tokens.
@@ -114972,6 +114981,10 @@ for (
     };
   }
 
+  /* V932: diagnostic-only snapshot of the exact final candidate objects
+   * immediately before Telegram qualification. */
+  captureFinalTelegramQualificationAuditV932(state, candidates);
+
   /* =======================================================
      TELEGRAM
      ======================================================= */
@@ -136460,6 +136473,217 @@ function scoreAuditTelegramMessageV725(state) {
     "<i>Read-only command. Zero provider requests, zero state writes, no scoring or Telegram threshold changes.</i>"
   );
 
+  return lines.join("\n");
+}
+
+
+
+function finalTelegramQualificationAuditRowV932(candidate, state) {
+  const scoreDetail = opportunityScoreAuditV725(candidate);
+  const reasons = telegramQualificationReasons(candidate);
+  const missingMask = safeNumber(scoreDetail?.missingMask);
+  const marketVerified = candidate?.market?.verified === true;
+  const launchVerified = candidate?.launchStage?.verified === true || candidate?.verifiedLaunchAgeV223?.verified === true;
+  const holderCountVerified = candidate?.holders?.countersVerified === true;
+  const concentrationVerified = candidate?.holders?.concentrationVerified === true && candidate?.holders?.whale?.verified === true;
+  const momentumVerified = candidate?.momentum?.verified === true;
+  const qualityVerified = candidate?.marketQuality?.verified === true;
+  const whaleFlowVerified = candidate?.whaleFlow?.verified === true;
+  const directionalUsdVerified = candidateDirectionalUsdVerifiedV727(candidate, state) === true || candidate?.onChainVerifiedFlowV212?.verified === true;
+  const exactPoolVerified = candidate?.onChainPoolIdentityV153?.verified === true;
+  const observedSwaps = safeNumber(candidate?.activity?.swaps);
+  const observedLiquidityEvents = safeNumber(candidate?.activity?.liquidityEvents);
+  const finalOpportunity = safeNumber(candidate?.opportunity?.score);
+  const recomputedBase = safeNumber(scoreDetail?.baseScore);
+  const confidence = safeNumber(candidate?.confidence?.score);
+
+  const verifiedButMissing = [];
+  if (marketVerified && (missingMask & SCORE_AUDIT_MISSING_MARKET_V725)) verifiedButMissing.push("MARKET");
+  if (launchVerified && (missingMask & SCORE_AUDIT_MISSING_LAUNCH_V725)) verifiedButMissing.push("LAUNCH");
+  if (holderCountVerified && (missingMask & SCORE_AUDIT_MISSING_HOLDER_COUNT_V725)) verifiedButMissing.push("HOLDER_COUNT");
+  if (concentrationVerified && (missingMask & SCORE_AUDIT_MISSING_CONCENTRATION_V725)) verifiedButMissing.push("CONCENTRATION");
+  if (momentumVerified && (missingMask & SCORE_AUDIT_MISSING_MOMENTUM_V725)) verifiedButMissing.push("MOMENTUM");
+  if (qualityVerified && (missingMask & SCORE_AUDIT_MISSING_QUALITY_V725)) verifiedButMissing.push("MARKET_QUALITY");
+  if (whaleFlowVerified && (missingMask & SCORE_AUDIT_MISSING_WHALE_FLOW_V725)) verifiedButMissing.push("WHALE_FLOW");
+
+  const missingGroups = [];
+  if (missingMask & SCORE_AUDIT_MISSING_MARKET_V725) missingGroups.push("MARKET");
+  if (missingMask & SCORE_AUDIT_MISSING_LAUNCH_V725) missingGroups.push("LAUNCH");
+  if (missingMask & SCORE_AUDIT_MISSING_HOLDER_COUNT_V725) missingGroups.push("HOLDER_COUNT");
+  if (missingMask & SCORE_AUDIT_MISSING_CONCENTRATION_V725) missingGroups.push("CONCENTRATION");
+  if (missingMask & SCORE_AUDIT_MISSING_MOMENTUM_V725) missingGroups.push("MOMENTUM");
+  if (missingMask & SCORE_AUDIT_MISSING_QUALITY_V725) missingGroups.push("MARKET_QUALITY");
+  if (missingMask & SCORE_AUDIT_MISSING_WHALE_FLOW_V725) missingGroups.push("WHALE_FLOW");
+
+  return {
+    address: normalize(candidate?.address),
+    symbol: candidate?.symbol || null,
+    opportunity: finalOpportunity,
+    recomputedBase,
+    scoreParityDelta: finalOpportunity - recomputedBase,
+    confidence,
+    momentum: safeNumber(candidate?.momentum?.score),
+    riskVerified: candidate?.risk?.verified === true,
+    riskScore: safeNumber(candidate?.risk?.score),
+    signalCount: safeNumber(candidate?.signalConfirmation?.signals),
+    qualifiesTelegram: qualifiesTelegram(candidate) === true,
+    telegramReasons: reasons,
+    firstTelegramBlocker: reasons?.[0] || null,
+    evidence: {
+      marketVerified,
+      launchVerified,
+      holderCountVerified,
+      concentrationVerified,
+      momentumVerified,
+      qualityVerified,
+      whaleFlowVerified,
+      directionalUsdVerified,
+      exactPoolVerified,
+      observedSwaps,
+      observedLiquidityEvents,
+      verifiedFlowV212: candidate?.onChainVerifiedFlowV212?.verified === true,
+      verifiedFlowRecordsV212: safeNumber(candidate?.onChainVerifiedFlowV212?.recordCount)
+    },
+    missingScoreGroups: missingGroups,
+    verifiedEvidencePresentButScoreViewMissing: verifiedButMissing,
+    missingPositiveMechanicalHeadroom: safeNumber(scoreDetail?.missingPositiveMax),
+    mechanicalCeiling: safeNumber(scoreDetail?.mechanicalCeilingWithMissingPositiveEvidence),
+    diagnosticOnly: true
+  };
+}
+
+function captureFinalTelegramQualificationAuditV932(state, candidates) {
+  const rows = (Array.isArray(candidates) ? candidates : [])
+    .map(candidate => finalTelegramQualificationAuditRowV932(candidate, state))
+    .sort((a,b) => {
+      if (b.opportunity !== a.opportunity) return b.opportunity - a.opportunity;
+      if (b.confidence !== a.confidence) return b.confidence - a.confidence;
+      return safeNumber(b.momentum) - safeNumber(a.momentum);
+    });
+
+  const rejected = rows.filter(row => row.qualifiesTelegram !== true);
+  const reasonCounts = {};
+  const firstBlockerCounts = {};
+  const missingCounts = {};
+  let verifiedButMissingRows = 0;
+  let scoreParityMismatchRows = 0;
+  let opportunityBelow60 = 0;
+  let confidenceBelow55 = 0;
+  let riskRejected = 0;
+  let otherwiseNearThreshold = 0;
+
+  for (const row of rejected) {
+    for (const reason of row.telegramReasons || []) reasonCounts[reason] = safeNumber(reasonCounts[reason]) + 1;
+    if (row.firstTelegramBlocker) firstBlockerCounts[row.firstTelegramBlocker] = safeNumber(firstBlockerCounts[row.firstTelegramBlocker]) + 1;
+    for (const group of row.missingScoreGroups || []) missingCounts[group] = safeNumber(missingCounts[group]) + 1;
+    if ((row.verifiedEvidencePresentButScoreViewMissing || []).length) verifiedButMissingRows++;
+    if (Math.abs(safeNumber(row.scoreParityDelta)) > 0.01) scoreParityMismatchRows++;
+    if (safeNumber(row.opportunity) < MIN_ALERT_SCORE) opportunityBelow60++;
+    if (safeNumber(row.confidence) < MIN_CONFIDENCE_ALERT) confidenceBelow55++;
+    if (!row.riskVerified || safeNumber(row.riskScore) > MAX_ALERT_RISK) riskRejected++;
+    if (safeNumber(row.opportunity) >= MIN_ALERT_SCORE - 15 && safeNumber(row.confidence) >= MIN_CONFIDENCE_ALERT - 10 && row.riskVerified && safeNumber(row.riskScore) <= MAX_ALERT_RISK) otherwiseNearThreshold++;
+  }
+
+  const topEntries = obj => Object.entries(obj || {}).sort((a,b) => safeNumber(b[1]) - safeNumber(a[1])).slice(0,10).map(([reason,count]) => ({reason,count:safeNumber(count)}));
+  const snapshot = {
+    version: "V932",
+    runtimeVersion: VERSION,
+    recordedAt: new Date().toISOString(),
+    diagnosticOnly: true,
+    candidateCount: rows.length,
+    qualifiedCount: rows.length - rejected.length,
+    rejectedCount: rejected.length,
+    opportunityBelow60,
+    confidenceBelow55,
+    riskRejected,
+    otherwiseNearThreshold,
+    verifiedButMissingRows,
+    scoreParityMismatchRows,
+    reasonCounts: topEntries(reasonCounts),
+    firstBlockerCounts: topEntries(firstBlockerCounts),
+    missingScoreGroupCounts: topEntries(missingCounts),
+    topRejected: rejected.slice(0,8),
+    topAll: rows.slice(0,8),
+    thresholds: {
+      opportunity: MIN_ALERT_SCORE,
+      confidence: MIN_CONFIDENCE_ALERT,
+      maxRisk: MAX_ALERT_RISK,
+      minLiquidity: MIN_ALERT_LIQUIDITY
+    },
+    scoringChanged: false,
+    qualificationChanged: false,
+    telegramThresholdsChanged: false,
+    providerRequestsAdded: 0,
+    stateWritesFromCommand: 0
+  };
+  state.finalTelegramQualificationAuditV932 = snapshot;
+  const audit = ensureQualificationAuditV663(state);
+  audit.lastFinalTelegramQualificationAuditV932 = snapshot;
+  return snapshot;
+}
+
+function finalTelegramQualificationAuditSnapshotV932(state) {
+  return state?.finalTelegramQualificationAuditV932 || state?.qualificationAuditV663?.lastFinalTelegramQualificationAuditV932 || null;
+}
+
+function finalTelegramQualificationAuditMessageV932(state) {
+  const d = finalTelegramQualificationAuditSnapshotV932(state);
+  const fmt = v => safeNumber(v).toLocaleString("en-GB");
+  if (!d) {
+    return [
+      "📨 <b>Post-Recovery Telegram Qualification Audit — V932</b>",
+      "",
+      "⏳ No V932 final-candidate snapshot yet. Run one live scan, then use /telegramaudit again.",
+      "",
+      "<i>Read-only command. Zero provider requests, zero state writes, no scoring or Telegram threshold changes.</i>"
+    ].join("\n");
+  }
+  const lines = [
+    "📨 <b>Post-Recovery Telegram Qualification Audit — V932</b>",
+    "",
+    `Recorded: <code>${escapeHtml(d.recordedAt || "UNVERIFIED")}</code>`,
+    `Runtime: <b>${escapeHtml(d.runtimeVersion || "UNVERIFIED")}</b>`,
+    `Final candidates: <b>${fmt(d.candidateCount)}</b> · qualified <b>${fmt(d.qualifiedCount)}</b> · rejected <b>${fmt(d.rejectedCount)}</b>`,
+    `Thresholds: Opportunity ≥${fmt(d?.thresholds?.opportunity)} · Confidence ≥${fmt(d?.thresholds?.confidence)} · Risk ≤${fmt(d?.thresholds?.maxRisk)}`,
+    "",
+    "🚧 <b>Final qualification pressure</b>",
+    `• Opportunity below threshold: <b>${fmt(d.opportunityBelow60)}</b>`,
+    `• Confidence below threshold: <b>${fmt(d.confidenceBelow55)}</b>`,
+    `• Risk rejected/unverified: <b>${fmt(d.riskRejected)}</b>`,
+    `• Near-threshold, risk-acceptable rejects: <b>${fmt(d.otherwiseNearThreshold)}</b>`,
+    `• Score parity mismatches on final objects: <b>${fmt(d.scoreParityMismatchRows)}</b>`,
+    `• Verified evidence present but score-view missing: <b>${fmt(d.verifiedButMissingRows)}</b>`
+  ];
+
+  if (Array.isArray(d.firstBlockerCounts) && d.firstBlockerCounts.length) {
+    lines.push("", "🧱 <b>First Telegram blockers</b>");
+    for (const row of d.firstBlockerCounts.slice(0,6)) lines.push(`• ${escapeHtml(row.reason)}: <b>${fmt(row.count)}</b>`);
+  }
+  if (Array.isArray(d.missingScoreGroupCounts) && d.missingScoreGroupCounts.length) {
+    lines.push("", "🧩 <b>Missing score evidence on FINAL objects</b>");
+    for (const row of d.missingScoreGroupCounts.slice(0,7)) lines.push(`• ${escapeHtml(row.reason)}: <b>${fmt(row.count)}</b>`);
+  }
+  if (Array.isArray(d.topRejected) && d.topRejected.length) {
+    lines.push("", "🔎 <b>Best rejected candidates after recovery</b>");
+    for (const row of d.topRejected.slice(0,6)) {
+      const missing = (row.missingScoreGroups || []).join(",") || "NONE";
+      const stale = (row.verifiedEvidencePresentButScoreViewMissing || []).join(",") || "NONE";
+      const blockers = (row.telegramReasons || []).slice(0,5).join(",") || "NONE";
+      lines.push(
+        `• <b>${escapeHtml(row.symbol || "UNKNOWN")}</b> <code>${escapeHtml(row.address || "")}</code>`,
+        `  Opportunity ${fmt(row.opportunity)} · recomputed base ${fmt(row.recomputedBase)} · Δ ${row.scoreParityDelta >= 0 ? "+" : ""}${fmt(row.scoreParityDelta)} · Confidence ${fmt(row.confidence)} · Momentum ${fmt(row.momentum)}`,
+        `  Risk ${row.riskVerified ? fmt(row.riskScore) : "UNVERIFIED"} · signals ${fmt(row.signalCount)} · swaps ${fmt(row?.evidence?.observedSwaps)} · V212 ${row?.evidence?.verifiedFlowV212 ? `YES/${fmt(row?.evidence?.verifiedFlowRecordsV212)}` : "NO"}`,
+        `  Missing score groups: ${escapeHtml(missing)}`,
+        `  Verified-but-missing mismatch: ${escapeHtml(stale)}`,
+        `  Telegram blockers: ${escapeHtml(blockers)}`
+      );
+    }
+  }
+  lines.push(
+    "",
+    "<i>Diagnostic only: this reads the final post-recovery candidate objects immediately before Telegram. It does not assume missing evidence is positive.</i>",
+    "<i>Zero provider requests, zero state writes from the command, no scoring/qualification/threshold changes.</i>"
+  );
   return lines.join("\n");
 }
 
@@ -167004,6 +167228,27 @@ async function telegramCommandReplyV271(
         directionalUsdMissing: safeNumber(evidenceAuditV727?.counts?.usdMissing),
         momentumMissing: safeNumber(evidenceAuditV727?.counts?.momentumMissing),
         launchAgeMissing: safeNumber(evidenceAuditV727?.counts?.launchMissing)
+      };
+    }
+  } else if (
+    parsed.command === "/telegramaudit" ||
+    parsed.command === "/qualstarve"
+  ) {
+    reply = finalTelegramQualificationAuditMessageV932(state);
+
+    if (diagnosticV273) {
+      const auditV932 = finalTelegramQualificationAuditSnapshotV932(state);
+      diagnosticV273.finalTelegramQualificationAuditV932 = {
+        scannerBudgetConsumed: false,
+        externalProviderRequests: 0,
+        stateWrites: 0,
+        candidateCount: safeNumber(auditV932?.candidateCount),
+        qualifiedCount: safeNumber(auditV932?.qualifiedCount),
+        rejectedCount: safeNumber(auditV932?.rejectedCount),
+        scoreParityMismatchRows: safeNumber(auditV932?.scoreParityMismatchRows),
+        verifiedButMissingRows: safeNumber(auditV932?.verifiedButMissingRows),
+        scoringChanged: false,
+        qualificationChanged: false
       };
     }
   } else if (
