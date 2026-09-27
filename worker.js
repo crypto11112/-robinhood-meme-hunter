@@ -8363,7 +8363,13 @@
  * - A verified PRO success still clears/de-escalates the outage state normally
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
-const VERSION = "V944";
+const VERSION = "V945";
+/* V945: adds a targeted, non-persistent ownership-denominator replay.
+ * /denominatorreplay [token] reruns the existing holder pipeline on cloned
+ * state with a strict six-request diagnostic ceiling, exposing the actual
+ * totalSupply → infrastructure exclusions → ownershipSupply decision without
+ * changing production holder/risk/scoring/qualification logic.
+ */
 /* V944: persists the exact ownership denominator at the NO_POSITIVE_OWNERSHIP_SUPPLY decision point; preserves V943 audit semantics.
  * Adds forward-only totalSupply/infrastructure/ownershipSupply capture and
  * /ownershipaudit without changing holder verification, risk rules, scoring,
@@ -168462,6 +168468,29 @@ async function telegramCommandReplyV271(
       };
     }
   } else if (
+    parsed.command === "/denominatorreplay" ||
+    parsed.command === "/ownershipreplay"
+  ) {
+    const replayV945 = await denominatorReplayV945(state, env, parsed.argument || "");
+    reply = denominatorReplayMessageV945(replayV945);
+
+    if (diagnosticV273) {
+      diagnosticV273.denominatorReplayV945 = {
+        scannerBudgetConsumed: false,
+        externalProviderRequests: safeNumber(replayV945?.externalRequestsUsed),
+        stateWrites: 0,
+        address: replayV945?.address || null,
+        replayStatus: replayV945?.replayStatus || replayV945?.status || null,
+        diagnosis: replayV945?.diagnosis || null,
+        persistentStateMutated: false,
+        riskChanged: false,
+        scoringChanged: false,
+        qualificationChanged: false
+      };
+    }
+  } else if (
+    parsed.command === "/denominatorreplay" ||
+    parsed.command === "/ownershipreplay" ||
     parsed.command === "/ownershipaudit" ||
     parsed.command === "/denominatoraudit" ||
     parsed.command === "/riskclassaudit"
@@ -169307,6 +169336,248 @@ async function telegramWebhookSetupV271(
 }
 
 
+
+
+/* =========================================================
+   V945 TARGETED OWNERSHIP-DENOMINATOR REPLAY
+   - Manual diagnostic only.
+   - Uses a cloned watched/state object and never persists replay mutations.
+   - Clears only cloned holder caches so the existing holder pipeline is
+     actually re-evaluated instead of returning the old V149 partial cache.
+   - Caps the replay at 6 external analysis requests.
+   - Does NOT change holder/risk/scoring/qualification/Telegram logic.
+   ========================================================= */
+function clonePlainV945(value) {
+  try {
+    if (typeof structuredClone === "function") return structuredClone(value);
+  } catch (_) {}
+  try { return JSON.parse(JSON.stringify(value)); } catch (_) { return null; }
+}
+
+function denominatorReplayTargetV945(state, argument = "") {
+  const explicit = normalize(argument || "");
+  const records = Array.isArray(state?.qualificationAuditV663?.records)
+    ? state.qualificationAuditV663.records
+    : [];
+  const nowMs = Date.now();
+  const cutoff = nowMs - QUALIFICATION_AUDIT_RETENTION_MS_V663;
+  const candidates = records.filter(row => {
+    const address = normalize(row?.address);
+    const at = safeNumber(row?.lastEvaluatedAt || row?.firstEvaluatedAt);
+    return isAddress(address) && at >= cutoff && at <= nowMs + 5 * 60 * 1000 &&
+      String(row?.holderStatus || "") === "NO_POSITIVE_OWNERSHIP_SUPPLY";
+  });
+  if (isAddress(explicit)) {
+    return candidates.find(row => normalize(row?.address) === explicit) ||
+      records.find(row => normalize(row?.address) === explicit) || null;
+  }
+  return candidates.sort((a,b) => {
+    const oa = safeNumber(a?.opportunityScore), ob = safeNumber(b?.opportunityScore);
+    if (ob !== oa) return ob - oa;
+    const ca = safeNumber(a?.confidenceScore), cb = safeNumber(b?.confidenceScore);
+    if (cb !== ca) return cb - ca;
+    return safeNumber(b?.lastEvaluatedAt) - safeNumber(a?.lastEvaluatedAt);
+  })[0] || null;
+}
+
+function denominatorReplayBudgetV945() {
+  const budget = createBudget();
+  budget.totalUsed = 0;
+  budget.totalLimit = 6;
+  budget.system.used = 0; budget.system.limit = 0;
+  budget.discovery.used = 0; budget.discovery.limit = 0;
+  budget.discovery.liveUsed = 0; budget.discovery.liveLimit = 0;
+  budget.discovery.backlogUsed = 0; budget.discovery.backlogLimit = 0;
+  budget.analysis.used = 0; budget.analysis.limit = 6;
+  budget.notification.used = 0; budget.notification.limit = 0;
+  budget.notification.globalReserveActiveV174 = false;
+  return budget;
+}
+
+async function denominatorReplayV945(state, env, argument = "") {
+  const selected = denominatorReplayTargetV945(state, argument);
+  if (!selected) {
+    return {
+      version: "V945", status: "NO_RETAINED_NO_POSITIVE_OWNERSHIP_SUPPLY_TARGET",
+      externalRequestsUsed: 0, stateWrites: 0
+    };
+  }
+  const address = normalize(selected?.address);
+  const stateClone = clonePlainV945(state);
+  const watched = stateClone?.watchedTokens?.find(t => normalize(t?.address) === address) || null;
+  if (!watched) {
+    return {
+      version: "V945", status: "TARGET_NOT_PRESENT_IN_WATCHED_STATE",
+      address, symbol: selected?.symbol || null,
+      retainedHolderStatus: selected?.holderStatus || null,
+      externalRequestsUsed: 0, stateWrites: 0
+    };
+  }
+
+  const totalSupply =
+    watched?.metadata?.totalSupply ??
+    watched?.validationCache?.data?.totalSupply ??
+    watched?.validation?.totalSupply ?? null;
+  const decimals =
+    watched?.metadata?.decimals ??
+    watched?.validationCache?.data?.decimals ??
+    watched?.validation?.decimals ?? null;
+  const market = watched?.marketCache?.data && typeof watched.marketCache.data === "object"
+    ? watched.marketCache.data
+    : null;
+
+  const previousPartial = watched?.partialHolderCacheV149?.data || null;
+  const previousDecision = previousPartial?.denominatorDecisionV944 || null;
+
+  if (!totalSupply) {
+    return {
+      version: "V945", status: "REPLAY_BLOCKED_TOTAL_SUPPLY_NOT_RETAINED",
+      address, symbol: selected?.symbol || watched?.metadata?.symbol || null,
+      retainedHolderStatus: selected?.holderStatus || null,
+      previousDecision,
+      externalRequestsUsed: 0, stateWrites: 0
+    };
+  }
+
+  // Force the cloned replay to evaluate the current holder pipeline, while
+  // leaving the real persistent watched token untouched.
+  delete watched.partialHolderCacheV149;
+  delete watched.holderCache;
+  delete watched.holderIntegrityQuarantineV162;
+  delete watched.holderIndexLagV422;
+
+  const budget = denominatorReplayBudgetV945();
+  let result = null;
+  let error = null;
+  try {
+    result = await holderIntelligence(
+      address,
+      totalSupply,
+      budget,
+      watched,
+      market,
+      true,
+      env,
+      stateClone,
+      decimals,
+      false
+    );
+  } catch (e) {
+    error = errorString(e);
+  }
+
+  const decision = result?.denominatorDecisionV944 || null;
+  const integrity = result?.integrity || null;
+  const replayStatus = integrity?.status || result?.reason || (error ? "REPLAY_EXCEPTION" : "UNKNOWN");
+  let diagnosis = "REPLAY_COMPLETED_OTHER_HOLDER_STATE";
+  if (error) diagnosis = "REPLAY_EXCEPTION";
+  else if (result?.concentrationVerified === true && integrity?.verified === true) {
+    diagnosis = "LEGACY_DENOMINATOR_FAILURE_RECOVERED_WITH_CURRENT_HOLDER_EVIDENCE";
+  } else if (replayStatus === "NO_POSITIVE_OWNERSHIP_SUPPLY") {
+    let supply = 0n, infra = 0n, own = 0n;
+    try { supply = BigInt(String(decision?.totalSupply ?? integrity?.supply ?? "0")); } catch (_) {}
+    try { infra = BigInt(String(decision?.infrastructureBalanceSum ?? integrity?.infrastructureBalanceSum ?? "0")); } catch (_) {}
+    try { own = BigInt(String(decision?.ownershipSupply ?? integrity?.ownershipSupply ?? "0")); } catch (_) {}
+    if (supply <= 0n) diagnosis = "TOTAL_SUPPLY_NON_POSITIVE_OR_MALFORMED";
+    else if (infra >= supply) diagnosis = "INFRASTRUCTURE_EXCLUSIONS_CONSUME_OR_EXCEED_TOTAL_SUPPLY";
+    else if (own <= 0n) diagnosis = "OWNERSHIP_SUPPLY_NON_POSITIVE_AFTER_EXCLUSIONS";
+    else diagnosis = "NO_POSITIVE_OWNERSHIP_SUPPLY_STATUS_WITH_POSITIVE_REPLAY_DENOMINATOR";
+  } else if (replayStatus === "NO_POSITIVE_OWNERSHIP_BALANCES") {
+    diagnosis = "POSITIVE_DENOMINATOR_BUT_NO_USABLE_NON_INFRASTRUCTURE_HOLDER_BALANCES";
+  } else if (/UNAVAILABLE|DEFERRED|NO_HOLDER|INDEX/i.test(String(replayStatus))) {
+    diagnosis = "CURRENT_HOLDER_DATA_UNAVAILABLE_FOR_DETERMINISTIC_REPLAY";
+  }
+
+  const path = result?.holderPathDiagnosticV665 || null;
+  return {
+    version: "V945",
+    status: error ? "TARGETED_DENOMINATOR_REPLAY_FAILED" : "TARGETED_DENOMINATOR_REPLAY_COMPLETE",
+    address,
+    symbol: selected?.symbol || watched?.metadata?.symbol || null,
+    retainedOpportunity: safeNumber(selected?.opportunityScore),
+    retainedConfidence: safeNumber(selected?.confidenceScore),
+    retainedHolderStatus: selected?.holderStatus || null,
+    totalSupplyInput: String(totalSupply),
+    marketVerifiedInput: market?.verified === true,
+    marketPair: normalize(market?.pairAddress || "") || null,
+    previousDecision,
+    replayStatus,
+    replayVerified: result?.verified === true,
+    countersVerified: result?.countersVerified === true,
+    concentrationVerified: result?.concentrationVerified === true,
+    holderSource: result?.holderSource || null,
+    replayDecision: decision || {
+      totalSupply: integrity?.supply ?? null,
+      infrastructureBalanceSum: integrity?.infrastructureBalanceSum ?? null,
+      ownershipSupply: integrity?.ownershipSupply ?? null,
+      preparedHolderRows: Array.isArray(result?.topHolders) ? result.topHolders.length : null,
+      infrastructureRows: integrity?.infrastructureRows ?? (Array.isArray(result?.infrastructureHolders) ? result.infrastructureHolders.length : null),
+      positiveNonInfrastructureRawRows: result?.positiveHolderRows ?? null,
+      failureCondition: null
+    },
+    providerPath: path ? {
+      publicV2HolderRows: path?.publicV2HolderRows || null,
+      legacyHolderRows: path?.legacyHolderRows || null,
+      bitqueryReuse: path?.bitqueryReuse || null,
+      blockscoutProHolder: path?.blockscoutProHolder || null,
+      goldRushHolderV704: path?.goldRushHolderV704 || null,
+      finalStatus: path?.finalStatus || null
+    } : null,
+    blockscoutPro: result?.blockscoutProHolderFallbackV143 || null,
+    goldRush: result?.goldRushHolderFallbackV704 || result?.blockscoutOutageGoldRushRecoveryV942 || null,
+    diagnosis,
+    error,
+    requestBudget: requestBudgetSnapshotV264(budget),
+    externalRequestsUsed: safeNumber(budget?.totalUsed),
+    maxExternalRequests: 6,
+    stateWrites: 0,
+    persistentStateMutated: false,
+    scoringChanged: false,
+    riskChanged: false,
+    qualificationChanged: false,
+    telegramThresholdsChanged: false
+  };
+}
+
+function denominatorReplayMessageV945(d) {
+  const fmt = n => safeNumber(n).toLocaleString("en-GB");
+  if (!d || d.status === "NO_RETAINED_NO_POSITIVE_OWNERSHIP_SUPPLY_TARGET") {
+    return "🧪 <b>Targeted Ownership-Denominator Replay — V945</b>\n\nNo retained NO_POSITIVE_OWNERSHIP_SUPPLY target is currently available.\n\n<i>No provider requests or state writes were made.</i>";
+  }
+  if (d.status === "TARGET_NOT_PRESENT_IN_WATCHED_STATE" || d.status === "REPLAY_BLOCKED_TOTAL_SUPPLY_NOT_RETAINED") {
+    return [
+      "🧪 <b>Targeted Ownership-Denominator Replay — V945</b>", "",
+      `Token: <b>${escapeHtml(d.symbol || "UNKNOWN")}</b> <code>${escapeHtml(shortAddressV937(d.address || ""))}</code>`,
+      `Status: <b>${escapeHtml(d.status)}</b>`,
+      `Retained holder status: <b>${escapeHtml(d.retainedHolderStatus || "NONE")}</b>`, "",
+      "The replay cannot safely reconstruct the denominator because the required retained input is absent.",
+      "<i>No provider requests or state writes were made.</i>"
+    ].join("\n");
+  }
+  const r = d.replayDecision || {};
+  const lines = [
+    "🧪 <b>Targeted Ownership-Denominator Replay — V945</b>", "",
+    `Token: <b>${escapeHtml(d.symbol || "UNKNOWN")}</b> <code>${escapeHtml(shortAddressV937(d.address || ""))}</code>`,
+    `Retained score: Opportunity <b>${fmt(d.retainedOpportunity)}</b> · Confidence <b>${fmt(d.retainedConfidence)}</b>`,
+    `Retained holder status: <b>${escapeHtml(d.retainedHolderStatus || "NONE")}</b>`,
+    `Replay holder status: <b>${escapeHtml(d.replayStatus || "NONE")}</b>`,
+    `Replay verified / concentration / counters: <b>${d.replayVerified ? "YES" : "NO"} / ${d.concentrationVerified ? "YES" : "NO"} / ${d.countersVerified ? "YES" : "NO"}</b>`,
+    `Holder source: <b>${escapeHtml(d.holderSource || "NONE")}</b>`, "",
+    "🧮 <b>Replayed denominator</b>",
+    `• totalSupply: <code>${escapeHtml(String(r.totalSupply ?? d.totalSupplyInput ?? "UNAVAILABLE"))}</code>`,
+    `• infrastructure excluded: <code>${escapeHtml(String(r.infrastructureBalanceSum ?? "UNAVAILABLE"))}</code>`,
+    `• ownershipSupply: <code>${escapeHtml(String(r.ownershipSupply ?? "UNAVAILABLE"))}</code>`,
+    `• prepared holder rows: <b>${escapeHtml(String(r.preparedHolderRows ?? "UNAVAILABLE"))}</b>`,
+    `• infrastructure rows: <b>${escapeHtml(String(r.infrastructureRows ?? "UNAVAILABLE"))}</b>`,
+    `• positive non-infrastructure rows: <b>${escapeHtml(String(r.positiveNonInfrastructureRawRows ?? "UNAVAILABLE"))}</b>`,
+    `• failure condition: <b>${escapeHtml(String(r.failureCondition ?? "NONE"))}</b>`, "",
+    `🏁 Diagnosis: <b>${escapeHtml(d.diagnosis || "UNKNOWN")}</b>`,
+    `External requests used: <b>${fmt(d.externalRequestsUsed)}/${fmt(d.maxExternalRequests)}</b> · persistent state writes <b>0</b>`
+  ];
+  if (d.error) lines.push(`Error: <code>${escapeHtml(d.error)}</code>`);
+  lines.push("", "<i>V945 replays the existing holder pipeline on cloned state only. It does not alter holder evidence, risk, scoring, qualification or Telegram thresholds.</i>");
+  return lines.join("\n");
+}
 
 /* =========================================================
    V943 OWNERSHIP DENOMINATOR + RISK-CLASS HANDOFF AUDIT
