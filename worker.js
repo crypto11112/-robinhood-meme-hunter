@@ -1,5 +1,8 @@
 /**
- * V956 V3 HTTP PROVIDER ROUTE DIAGNOSTICS:
+ * V957 V3 HTTP PROVIDER ROUTE DIAGNOSTIC DISPLAY FIX:
+ * - fixes /v3status display gating so persisted V605 HTTP-poll telemetry renders whenever the
+ *   collector status itself proves HTTP polling is active;
+ * - diagnostic/display-only: no provider routing, verification, scoring, holder, risk, or Telegram changes.
  * - preserves all V955 routing and verification behaviour unchanged;
  * - expands /v3status with V605/V609 HTTP log-provider attempts/successes/failures;
  * - exposes shared-head active provider/fallback depth and Blockscout fallback telemetry;
@@ -8396,7 +8399,7 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
-const VERSION = "V956";
+const VERSION = "V957";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -167312,7 +167315,7 @@ function v3CollectorControlTelegramMessageV592(action, token, result) {
     );
   }
 
-  if (result?.transportModeV606==="HTTP_ETH_GETLOGS" || result?.v3HttpLogPollingV605?.enabled===true) {
+  if (result?.transportModeV606==="HTTP_ETH_GETLOGS" || result?.v3HttpLogPollingV605?.enabled===true || String(result?.status||"")==="HTTP_LOG_POLL_PLUS_SHARED_HEAD_ACTIVE_V605" || String(result?.status||"").startsWith("HTTP_LOG_POLL_")) {
     lines.push(`V605/V606 transport: <b>HTTP eth_getLogs</b>`);
 
     const httpPollV956=result?.v3HttpLogPollingV605||{};
