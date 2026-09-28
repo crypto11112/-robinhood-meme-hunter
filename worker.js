@@ -1,4 +1,14 @@
 /**
+ * V955 BLOCKSCOUT CREDIT-EFFICIENCY ROUTING:
+ * - preserves V954 as the frozen rollback baseline;
+ * - adds Validation Cloud as the first V3 HTTP eth_getLogs provider before paid/credit-bearing Blockscout fallback;
+ * - adds Validation Cloud as the first shared-head HTTP provider before Blockscout head fallback;
+ * - keeps Robinhood public RPC and all existing free/provider fallbacks intact;
+ * - keeps Blockscout V615/V616 as last-resort fallback only, preserving exact-pool integrity checks;
+ * - does NOT change holder/counter routes, risk/scoring, qualification, Telegram thresholds, V3/V4 evidence rules, or provider verification standards;
+ * - purpose: reduce Blockscout api/eth-rpc credit burn without reducing verified evidence quality.
+ */
+/**
  * V951 MANUAL GOLDRUSH HOLDER SNAPSHOT TEST:
  * - preserves all V950 production logic and every existing holder/provider path;
  * - adds Telegram /goldrushholders (alias /holderprovider) as a thin wrapper around the preserved V702/V704 GoldRush Robinhood token_holders_v2 diagnostic;
@@ -8380,7 +8390,7 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
-const VERSION = "V954";
+const VERSION = "V955";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -21810,8 +21820,8 @@ function blockscoutProUsageTelegramMessageV611(state,fallbackV615=null){
     "",
     `Pre-V611 usage: <b>DATA UNVERIFIED</b>`,
     `Actual account-wide usage: <b>DATA UNVERIFIED</b>`,
-    `V954 accounting coverage: <b>AUTHENTICATED V841 TOKEN-INDEXED LOG CALLS NOW METERED</b>`,
-    "<i>Bot-side forward-only estimate. Blockscout Dev Portal remains authoritative. V954 closes a confirmed V841 authenticated-request accounting gap; older/pre-V954 usage cannot be backfilled. /blockscoutusage makes no external provider request and does not mutate meter state; it also reads the V3 fallback singleton meter internally.</i>"
+    `V955 accounting/routing: <b>V841 METERED + VALIDATION CLOUD FIRST FOR V3 HTTP LOGS/HEAD</b>`,
+    "<i>Bot-side forward-only estimate. Blockscout Dev Portal remains authoritative. V955 preserves the V954 V841 accounting fix and routes routine V3 HTTP log/head work to Validation Cloud before Blockscout fallback; older/pre-V954 usage cannot be backfilled. /blockscoutusage makes no external provider request and does not mutate meter state; it also reads the V3 fallback singleton meter internally.</i>"
   );
 
   return lines.join("\n");
@@ -182800,6 +182810,10 @@ if (url.pathname === "/reconcile-v374") {
       rows.push({id,url:http,source});
     };
 
+    /* V955: prefer the existing free Validation Cloud HTTP RPC before any
+     * Blockscout fallback. This path returns the same on-chain eth_getLogs
+     * evidence and keeps the existing V605 integrity checks authoritative. */
+    push("VALIDATION_CLOUD",validationCloudRpcUrlV627(this.env),"VALIDATION_CLOUD_RPC_V955");
     push(this.env.DRPC_WSS_URL,"DRPC_WSS_URL_DERIVED_HTTP");
     push("QUICKNODE",this.env.QUICKNODE_WSS_URL,"QUICKNODE_WSS_URL_DERIVED_HTTP");
     push("GENERIC_V3",this.env.V3_WSS_URL,"V3_WSS_URL_DERIVED_HTTP");
@@ -183885,6 +183899,9 @@ if (url.pathname === "/reconcile-v374") {
       rows.push({id,url:http,source});
     };
 
+    /* V955: use Validation Cloud for routine shared-head eth_blockNumber
+     * polling before the Blockscout V616 credit-bearing fallback. */
+    push("VALIDATION_CLOUD",validationCloudRpcUrlV627(this.env),"VALIDATION_CLOUD_RPC_V955");
     push("ROBINHOOD_PUBLIC_RPC",PUBLIC_RPC,"PUBLIC_RPC");
     push(this.env.DRPC_WSS_URL,"DRPC_WSS_URL_DERIVED_HTTP");
     push("QUICKNODE",this.env.QUICKNODE_WSS_URL,"QUICKNODE_WSS_URL_DERIVED_HTTP");
