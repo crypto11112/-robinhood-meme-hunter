@@ -1,4 +1,10 @@
 /**
+ * V956 V3 HTTP PROVIDER ROUTE DIAGNOSTICS:
+ * - preserves all V955 routing and verification behaviour unchanged;
+ * - expands /v3status with V605/V609 HTTP log-provider attempts/successes/failures;
+ * - exposes shared-head active provider/fallback depth and Blockscout fallback telemetry;
+ * - diagnostic only: zero threshold/scoring/risk/holder/Telegram qualification changes.
+ *
  * V955 BLOCKSCOUT CREDIT-EFFICIENCY ROUTING:
  * - preserves V954 as the frozen rollback baseline;
  * - adds Validation Cloud as the first V3 HTTP eth_getLogs provider before paid/credit-bearing Blockscout fallback;
@@ -8390,7 +8396,7 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
-const VERSION = "V955";
+const VERSION = "V956";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -167308,6 +167314,32 @@ function v3CollectorControlTelegramMessageV592(action, token, result) {
 
   if (result?.transportModeV606==="HTTP_ETH_GETLOGS" || result?.v3HttpLogPollingV605?.enabled===true) {
     lines.push(`V605/V606 transport: <b>HTTP eth_getLogs</b>`);
+
+    const httpPollV956=result?.v3HttpLogPollingV605||{};
+    const statsV956=httpPollV956?.providerStatsV609||{};
+    const providerRowsV956=Object.entries(statsV956)
+      .filter(([id,row])=>id!=="totalAttempts"&&id!=="totalSuccesses"&&id!=="totalFailures"&&id!=="lastProvider"&&id!=="lastOutcome"&&id!=="lastAt"&&row&&typeof row==="object")
+      .sort((a,b)=>safeNumber(b?.[1]?.attempts)-safeNumber(a?.[1]?.attempts));
+
+    lines.push(
+      `HTTP log last provider: <b>${escapeHtml(String(httpPollV956?.lastProviderId||statsV956?.lastProvider||"NONE"))}</b>`,
+      `HTTP log provider totals: attempts <b>${safeNumber(statsV956?.totalAttempts)}</b> · success <b>${safeNumber(statsV956?.totalSuccesses)}</b> · fail <b>${safeNumber(statsV956?.totalFailures)}</b>`
+    );
+
+    for(const [id,row] of providerRowsV956.slice(0,7)){
+      let detailV956=`${id}: ${safeNumber(row?.attempts)} req · ${safeNumber(row?.successes)} ok · ${safeNumber(row?.failures)} fail`;
+      if(Number.isFinite(Number(row?.lastHttpStatus))) detailV956+=` · HTTP ${Number(row.lastHttpStatus)}`;
+      if(row?.lastRpcError) detailV956+=` · RPC ${String(row.lastRpcError).slice(0,90)}`;
+      else if(row?.lastError) detailV956+=` · ${String(row.lastError).slice(0,90)}`;
+      lines.push(`↳ <b>${escapeHtml(detailV956)}</b>`);
+    }
+
+    const sharedV956=result?.sharedHeadV602||{};
+    lines.push(
+      `Shared head HTTP provider: <b>${escapeHtml(String(sharedV956?.activeProvider||sharedV956?.lastProviderV607||"NONE"))}</b> · fallback depth <b>${sharedV956?.lastProviderFallbackDepthV607 ?? "UNVERIFIED"}</b>`,
+      `Blockscout head fallback: attempts <b>${safeNumber(sharedV956?.blockscoutHeadTelemetryV616?.attempts)}</b> · success <b>${safeNumber(sharedV956?.blockscoutHeadTelemetryV616?.successes)}</b> · fail <b>${safeNumber(sharedV956?.blockscoutHeadTelemetryV616?.failures)}</b>`,
+      `Blockscout V3 log fallback: attempts <b>${safeNumber(result?.v3BlockscoutFallbackV615?.telemetry?.attempts)}</b> · success <b>${safeNumber(result?.v3BlockscoutFallbackV615?.telemetry?.successes)}</b> · fail <b>${safeNumber(result?.v3BlockscoutFallbackV615?.telemetry?.failures)}</b>`
+    );
   }
 
   if (result?.pair) {
