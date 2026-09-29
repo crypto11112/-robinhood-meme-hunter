@@ -1660,6 +1660,13 @@
 
 /**
  * Robinhood Chain Meme Hunter
+ * V981 LAUNCH-COVERAGE PERSISTENCE DIAGNOSTIC
+ * - Preserves all V980 scanner/risk-first/provider/scoring/Telegram behaviour.
+ * - Adds zero-request proof across the scheduled relay -> authoritative state-write ->
+ *   launch-coverage snapshot path so successful scheduler runs can be compared with
+ *   the persisted /launchcoverage record.
+ * - Does not raise request ceilings or change qualification thresholds.
+ *
  * V980 RISK-FIRST COMPLETION PRIORITY
  * - prioritises verified risk-acceptable candidates for strict on-chain Market completion;
  * - skips already-verified HIGH/severe/Risk>59 candidates from scarce V441/V455 completion spend;
@@ -8431,7 +8438,7 @@
 /* V974: preserve V973 post-V4 price refresh, widen the single ReservesLens priority so a verified PoolKey + exact PoolId + USD quote basis can use one real remaining global request even when the analysis sub-cap is exhausted, and bind V438 refresh to the exact verified PoolId already proven by the current candidate. Adds diagnostics only around V179 exact-USD sample availability; no scoring/risk/Telegram threshold changes. */
 /* V973: refresh V438 exact-pool execution-price evidence after production V4/V888 and before V441/V455, so same-scan verified V179 exact-USD swaps are visible to strict market completion. Zero new provider requests and no proof/threshold changes. */
 /* V972: preserve V971 handoff fix and prioritise one existing analysis request for strict ReservesLens market completion without raising any ceiling. */
-const VERSION = "V980";
+const VERSION = "V981";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -167118,6 +167125,8 @@ function launchCoverageTelegramMessageV474(state) {
     `🔭 <b>Launch Coverage Funnel — ${escapeHtml(VERSION)}</b>`,
     "",
     "<b>Latest scan</b>",
+    `Captured: <code>${safeNumber(last?.capturedAt) > 0 ? escapeHtml(new Date(safeNumber(last.capturedAt)).toISOString()) : "UNVERIFIED"}</code>`,
+    `Coverage state updated: <code>${safeNumber(c?.lastUpdatedAt) > 0 ? escapeHtml(new Date(safeNumber(c.lastUpdatedAt)).toISOString()) : "UNVERIFIED"}</code>`,
     `Live addresses observed: <b>${fmt(last.liveAddressesObserved)}</b>`,
     `New addresses discovered*: <b>${fmt(last.discoveredNewAddresses)}</b>`,
     `Positively verified launches: <b>${fmt(last.positivelyVerifiedLaunchesThisScan)}</b>`,
@@ -167191,6 +167200,7 @@ function launchCoverageTelegramMessageV474(state) {
     "",
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
+    "V981 adds zero-request launch-coverage persistence timestamps and scheduler relay proof; scanner logic, provider ceilings, scoring, risk and Telegram thresholds are unchanged.",
     "<i>V701 lets one same-token protected V666 holder-row request borrow only the V675 fifth/rescue identity slot, while four ERC20 identity requests, hard 42 and Telegram reserve remain protected. All V687-V700 working behaviour is preserved.</i>"
   ].join("\n");
 }
@@ -169688,7 +169698,15 @@ async function telegramCommandReplyV271(
       `Success: <b>${lastV969?.success === true || lastV969?.ok === true ? "YES" : lastV969?.success === false || lastV969?.ok === false ? "NO" : "UNVERIFIED"}</b>`,
       `Failure: <code>${escapeHtml(String(lastV969?.failure || lastV969?.error || "NONE"))}</code>`,
       "",
-      "<i>Read-only. Zero provider requests, zero scanner writes. Reads only the existing V673 scheduler Durable Object status.</i>"
+      "💾 <b>V981 launch-coverage persistence proof</b>",
+      `State save succeeded: <b>${lastV969?.launchCoveragePersistenceV981?.stateSaved === true ? "YES" : lastV969?.launchCoveragePersistenceV981?.stateSaved === false ? "NO" : "N/A"}</b>`,
+      `Relay scan version: <b>${escapeHtml(String(lastV969?.launchCoveragePersistenceV981?.scanVersion || "N/A"))}</b>`,
+      `Coverage scans observed by completed scan: <b>${safeNumber(lastV969?.launchCoveragePersistenceV981?.cumulativeScansObserved)}</b>`,
+      `Coverage last scan captured: <code>${fmtTsV969(lastV969?.launchCoveragePersistenceV981?.lastScanCapturedAt)}</code>`,
+      `Latest coverage live / verified launches / returned: <b>${safeNumber(lastV969?.launchCoveragePersistenceV981?.lastScanLiveAddresses)} / ${safeNumber(lastV969?.launchCoveragePersistenceV981?.lastScanVerifiedLaunches)} / ${safeNumber(lastV969?.launchCoveragePersistenceV981?.lastScanReturnedCandidates)}</b>`,
+      `Save error: <code>${escapeHtml(String(lastV969?.launchCoveragePersistenceV981?.saveError || "NONE"))}</code>`,
+      "",
+      "<i>Read-only. Zero provider requests, zero scanner writes. V981 compares scheduler relay evidence with the authoritative launch-coverage state write.</i>"
     ].join("\n");
 
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
@@ -181707,6 +181725,25 @@ function compactHeavyScanRelayResultV914(
               )
           }
         : null,
+    launchCoveragePersistenceV981: {
+      scanVersion: result?.version || VERSION,
+      stateSaved: result?.persistence?.stateSaved === true,
+      saveError: result?.persistence?.saveError || null,
+      cumulativeScansObserved:
+        safeNumber(result?.launchCoverageCumulativeV474?.scansObserved),
+      cumulativeLastUpdatedAt:
+        safeNumber(result?.launchCoverageCumulativeV474?.lastUpdatedAt) || null,
+      lastScanCapturedAt:
+        safeNumber(result?.launchCoverageCumulativeV474?.lastScan?.capturedAt) || null,
+      lastScanLiveAddresses:
+        safeNumber(result?.launchCoverageCumulativeV474?.lastScan?.liveAddressesObserved),
+      lastScanVerifiedLaunches:
+        safeNumber(result?.launchCoverageCumulativeV474?.lastScan?.positivelyVerifiedLaunchesThisScan),
+      lastScanReturnedCandidates:
+        safeNumber(result?.launchCoverageCumulativeV474?.lastScan?.currentLiveReturnedCandidates),
+      diagnosticOnly: true,
+      zeroExtraRequests: true
+    },
     v914SchedulerMemoryIsolation: {
       enabled: true,
       mode,
@@ -182096,6 +182133,8 @@ export class ScanSchedulerV673 {
         ),
       schedulerAlignmentV684:
         "FIVE_MINUTE_WALL_CLOCK_BOUNDARIES",
+      launchCoveragePersistenceV981:
+        result?.launchCoveragePersistenceV981 || null,
       v914MemoryIsolation: {
         enabled: true,
         heavyScanRanInsideDurableObject: false,
