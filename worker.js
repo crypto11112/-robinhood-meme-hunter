@@ -8421,8 +8421,8 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
-/* V967: prioritise strict provider-independent V441/V455 on-chain market completion for market-unverified valuation-ready candidates. */
-const VERSION = "V971";
+/* V972: preserve V971 handoff fix and prioritise one existing analysis request for strict ReservesLens market completion without raising any ceiling. */
+const VERSION = "V972";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -12139,7 +12139,14 @@ async function reservesLensLiquidityDiagnosticV441(
     diagnosticOnly: true,
     promotionApplied: false,
     valuationTargetingV447: selectedReadinessV447,
-    handoffVersion: "V971"
+    handoffVersion: "V972",
+    v972MarketLensPriority: {
+      armed: false,
+      consumed: false,
+      hardBoundaryBlocked: false,
+      targetAddress: normalize(target?.address) || null,
+      poolId: poolKey?.poolId || null
+    }
   };
 
   const calldata =
@@ -12151,7 +12158,7 @@ async function reservesLensLiquidityDiagnosticV441(
     Object.assign(target.reservesLensLiquidityDiagnosticV441, {
       status: "RESERVES_LENS_CALLDATA_ENCODING_FAILED_V441",
       error: "CALLDATA_ENCODING_FAILED",
-      handoffVersion: "V971"
+      handoffVersion: "V972"
     });
     return {
       ...base,
@@ -12180,7 +12187,7 @@ async function reservesLensLiquidityDiagnosticV441(
     Object.assign(target.reservesLensLiquidityDiagnosticV441, {
       status: "ANALYSIS_BUDGET_UNAVAILABLE_V441",
       error: "ANALYSIS_BUDGET_UNAVAILABLE",
-      handoffVersion: "V971"
+      handoffVersion: "V972"
     });
     return {
       ...base,
@@ -12200,27 +12207,62 @@ async function reservesLensLiquidityDiagnosticV441(
     };
   }
 
+  /* V972: arm a single scoped priority owner immediately around the existing
+   * ReservesLens eth_call. This prevents older internal analysis reservations
+   * from consuming/blocking the last otherwise-available request, while
+   * budgetAvailable() still protects the real analysis/global/Telegram limits. */
+  budget.analysis.v972MarketLensPriority = {
+    enabled: true,
+    active: true,
+    consumed: false,
+    consumedAt: null,
+    consumedType: null,
+    hardBoundaryBlocked: false,
+    lastBlockedAt: null,
+    blockReason: null,
+    armedAt: Date.now(),
+    targetAddress: normalize(target?.address) || null,
+    poolId: poolKey?.poolId || null
+  };
+  target.reservesLensLiquidityDiagnosticV441.v972MarketLensPriority.armed = true;
+
   const before =
     safeNumber(
       budget?.totalUsed
     );
 
-  const call =
-    await rpc(
-      env,
-      "eth_call",
-      [
-        {
-          to:
-            UNISWAP_V4_RESERVES_LENS_V441,
-          data:
-            calldata
-        },
-        "latest"
-      ],
-      budget,
-      "analysis"
-    );
+  let call;
+  try {
+    call =
+      await rpc(
+        env,
+        "eth_call",
+        [
+          {
+            to:
+              UNISWAP_V4_RESERVES_LENS_V441,
+            data:
+              calldata
+          },
+          "latest"
+        ],
+        budget,
+        "analysis"
+      );
+  } finally {
+    const slotV972 = budget?.analysis?.v972MarketLensPriority;
+    if (slotV972) {
+      target.reservesLensLiquidityDiagnosticV441.v972MarketLensPriority = {
+        armed: true,
+        consumed: slotV972.consumed === true,
+        hardBoundaryBlocked: slotV972.hardBoundaryBlocked === true,
+        targetAddress: slotV972.targetAddress || null,
+        poolId: slotV972.poolId || null,
+        blockReason: slotV972.blockReason || null
+      };
+      slotV972.active = false;
+    }
+  }
 
   const used =
     Math.max(
@@ -12241,7 +12283,7 @@ async function reservesLensLiquidityDiagnosticV441(
       provider: call?.provider || null,
       error: call?.error || null,
       externalRequestsUsed: used,
-      handoffVersion: "V971"
+      handoffVersion: "V972"
     });
     return {
       ...base,
@@ -12295,7 +12337,7 @@ async function reservesLensLiquidityDiagnosticV441(
       provider: call?.provider || null,
       error: "RESPONSE_DECODE_FAILED",
       externalRequestsUsed: used,
-      handoffVersion: "V971"
+      handoffVersion: "V972"
     });
     return {
       ...base,
@@ -12402,7 +12444,7 @@ async function reservesLensLiquidityDiagnosticV441(
     provider: call?.provider || null,
     error: null,
     externalRequestsUsed: used,
-    handoffVersion: "V971",
+    handoffVersion: "V972",
     status:
       valuation?.status ||
       "DECODED_V441",
@@ -20008,12 +20050,72 @@ function consumeV928HighProgressContinuationHandoffSlot(
   return true;
 }
 
+
+/* =========================================================
+   V972 STRICT ON-CHAIN MARKET RESERVESLENS PRIORITY SLOT
+   =========================================================
+   - One existing analysis request may be temporarily prioritised for the
+     V441/V455 ReservesLens eth_call after a candidate has a verified complete
+     PoolKey and verified USD quote basis but market is still incomplete.
+   - This DOES NOT raise the effective analysis ceiling, global hard ceiling,
+     provider quota, or Telegram reserve. budgetAvailable() remains absolute.
+   - It bypasses only older internal ordering reserves for this one scoped
+     RPC:eth_call while v972MarketLensPriority.active is true.
+*/
+function consumeV972MarketLensPriority(
+  budget,
+  phase,
+  type,
+  amount = 1
+) {
+  const slot = budget?.analysis?.v972MarketLensPriority;
+  if (
+    phase !== "analysis" ||
+    String(type || "") !== "RPC:eth_call" ||
+    slot?.active !== true ||
+    slot?.consumed === true
+  ) {
+    return null;
+  }
+
+  const needed = Math.max(1, safeNumber(amount));
+  if (needed !== 1) return null;
+
+  /* Never cross the real analysis/global/Telegram boundary. */
+  if (!budgetAvailable(budget, "analysis", 1)) {
+    slot.hardBoundaryBlocked = true;
+    slot.lastBlockedAt = Date.now();
+    slot.blockReason = "V972_REAL_BUDGET_BOUNDARY_UNAVAILABLE";
+    return false;
+  }
+
+  budget.totalUsed += 1;
+  budget.analysis.used += 1;
+
+  slot.active = false;
+  slot.consumed = true;
+  slot.consumedAt = Date.now();
+  slot.consumedType = String(type || "");
+  slot.blockReason = null;
+  return true;
+}
+
 function consumeBudget(
   budget,
   phase,
   type,
   amount = 1
 ) {
+  /* V972: the scoped ReservesLens owner gets first refusal on one existing
+   * analysis request. Real ceilings remain enforced inside the helper. */
+  const v972MarketLensPriority =
+    consumeV972MarketLensPriority(
+      budget, phase, type, amount
+    );
+  if (v972MarketLensPriority !== null) {
+    return v972MarketLensPriority;
+  }
+
   /*
    * V928: one high-progress (>=4/6) safe V927 background continuation may
    * consume one already-existing V777 handoff slot before older reserve
@@ -117780,6 +117882,14 @@ for (
       lensStatus: lensV968?.status || null,
       lensError: lensV968?.error || null,
       lensExternalRequestsUsed: safeNumber(lensV968?.externalRequestsUsed),
+      v972MarketLensPriorityArmed:
+        selectedCandidateV968?.reservesLensLiquidityDiagnosticV441?.v972MarketLensPriority?.armed === true,
+      v972MarketLensPriorityConsumed:
+        selectedCandidateV968?.reservesLensLiquidityDiagnosticV441?.v972MarketLensPriority?.consumed === true,
+      v972MarketLensPriorityHardBlocked:
+        selectedCandidateV968?.reservesLensLiquidityDiagnosticV441?.v972MarketLensPriority?.hardBoundaryBlocked === true,
+      v972MarketLensPriorityBlockReason:
+        selectedCandidateV968?.reservesLensLiquidityDiagnosticV441?.v972MarketLensPriority?.blockReason || null,
       handoffVersion: selectedCandidateV968?.reservesLensLiquidityDiagnosticV441?.handoffVersion || null,
       v455PoolKeyVerified: eligibilityV968?.poolKeyVerified === true,
       v455ExactPoolIdentity: eligibilityV968?.exactPoolIdentity === true,
@@ -176068,7 +176178,7 @@ function marketCompletionAuditTelegramV968(result) {
   const yesNo = v => v === true ? "YES" : v === false ? "NO" : "N/A";
   const reasons = Array.isArray(r?.failureReasons) ? r.failureReasons : [];
   return [
-    "🧪 <b>On-Chain Market Completion Audit — V971</b>",
+    "🧪 <b>On-Chain Market Completion Audit — V972</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Scan version: <b>${escapeHtml(String(r?.scanVersion || "NONE"))}</b>`,
@@ -176090,7 +176200,9 @@ function marketCompletionAuditTelegramV968(result) {
     `Lens status: <code>${escapeHtml(String(r?.lensStatus || "NONE"))}</code>`,
     `Lens error: <code>${escapeHtml(String(r?.lensError || "NONE").slice(0,220))}</code>`,
     `Lens external requests used: <b>${safeNumber(r?.lensExternalRequestsUsed)}</b>`,
-    `V971 PoolKey handoff: <b>${escapeHtml(String(r?.handoffVersion || "NONE"))}</b>`,
+    `V972 Lens priority armed / consumed: <b>${yesNo(r?.v972MarketLensPriorityArmed)} / ${yesNo(r?.v972MarketLensPriorityConsumed)}</b>`,
+    `V972 Lens priority hard-blocked: <b>${yesNo(r?.v972MarketLensPriorityHardBlocked)}</b> · ${escapeHtml(String(r?.v972MarketLensPriorityBlockReason || "NONE"))}`,
+    `V972 PoolKey handoff: <b>${escapeHtml(String(r?.handoffVersion || "NONE"))}</b>`,
     `V455 sees PoolKey / exact PoolId: <b>${yesNo(r?.v455PoolKeyVerified)} / ${yesNo(r?.v455ExactPoolIdentity)}</b>`,
     `Verified Lens USD liquidity: <b>${yesNo(r?.lensVerified)}</b>`,
     `Liquidity semantics usable: <b>${yesNo(r?.semanticUsable)}</b>`,
@@ -176102,7 +176214,7 @@ function marketCompletionAuditTelegramV968(result) {
     "🚧 <b>Exact failure reason(s)</b>",
     ...(reasons.length ? reasons.slice(0,8).map(x => `• <code>${escapeHtml(String(x))}</code>`) : ["• NONE"]),
     "",
-    "<i>Read-only. Zero provider requests and zero state writes. V971 reports the most recent completed scan's V967/V441/V455 market-completion evidence plus the corrected PoolKey handoff and Lens failure detail; it does not change provider routing, proof standards, scoring, risk or Telegram thresholds.</i>"
+    "<i>Read-only. Zero provider requests and zero state writes. V972 reports the most recent completed scan's V967/V441/V455 market-completion evidence plus the corrected PoolKey handoff, scoped Lens-priority telemetry and Lens failure detail; it does not change provider routing, proof standards, scoring, risk or Telegram thresholds.</i>"
   ].join("\n");
 }
 
