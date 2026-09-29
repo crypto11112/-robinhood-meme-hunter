@@ -1660,6 +1660,11 @@
 
 /**
  * Robinhood Chain Meme Hunter
+ * V980 RISK-FIRST COMPLETION PRIORITY
+ * - prioritises verified risk-acceptable candidates for strict on-chain Market completion;
+ * - skips already-verified HIGH/severe/Risk>59 candidates from scarce V441/V455 completion spend;
+ * - risk-UNVERIFIED candidates remain eligible behind verified acceptable-risk candidates;
+ * - no risk threshold, score threshold, provider ceiling, Telegram reserve or proof standard is changed.
  * V954
  * - full Blockscout authenticated-request accounting audit/fix
  * - meters V841 token-indexed Blockscout Pro log requests that previously bypassed V611
@@ -8426,7 +8431,7 @@
 /* V974: preserve V973 post-V4 price refresh, widen the single ReservesLens priority so a verified PoolKey + exact PoolId + USD quote basis can use one real remaining global request even when the analysis sub-cap is exhausted, and bind V438 refresh to the exact verified PoolId already proven by the current candidate. Adds diagnostics only around V179 exact-USD sample availability; no scoring/risk/Telegram threshold changes. */
 /* V973: refresh V438 exact-pool execution-price evidence after production V4/V888 and before V441/V455, so same-scan verified V179 exact-USD swaps are visible to strict market completion. Zero new provider requests and no proof/threshold changes. */
 /* V972: preserve V971 handoff fix and prioritise one existing analysis request for strict ReservesLens market completion without raising any ceiling. */
-const VERSION = "V979";
+const VERSION = "V980";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -11855,6 +11860,20 @@ async function reservesLensLiquidityDiagnosticV441(
       proofRequirementsChanged: false,
       requestCeilingChanged: false,
       telegramThresholdChanged: false
+    },
+    v980RiskFirstCompletion: {
+      enabled: true,
+      verifiedAcceptableCandidates: 0,
+      verifiedTerminalRiskSkipped: 0,
+      riskUnverifiedCandidates: 0,
+      selectedRiskVerified: null,
+      selectedRiskAcceptable: null,
+      selectedRiskScore: null,
+      selectedRiskLabel: null,
+      selectedAddress: null,
+      changedRiskThresholds: false,
+      changedTelegramThresholds: false,
+      changedRequestCeilings: false
     }
   };
 
@@ -11939,6 +11958,33 @@ async function reservesLensLiquidityDiagnosticV441(
             verifiedPoolKeyReadyV721 &&
             readiness?.valuationReady === true;
 
+          /*
+           * V980 RISK-FIRST COMPLETION PRIORITY
+           * Scarce Market-completion requests should not be spent ahead of a safer
+           * candidate on a token already proven HIGH/severe or over the existing
+           * Telegram risk ceiling. This changes ordering only. Risk-UNVERIFIED rows
+           * remain eligible, but verified acceptable-risk rows rank first.
+           */
+          const riskV980 = candidate?.risk || {};
+          const riskScoreRawV980 = Number(riskV980?.score);
+          const riskScoreFiniteV980 = Number.isFinite(riskScoreRawV980);
+          const riskLabelV980 = String(riskV980?.label || "UNVERIFIED").toUpperCase();
+          const riskVerifiedV980 = riskV980?.verified === true;
+          const riskTerminalV980 =
+            riskVerifiedV980 &&
+            (
+              riskV980?.severeOverride === true ||
+              riskLabelV980 === "HIGH" ||
+              (riskScoreFiniteV980 && riskScoreRawV980 > 59)
+            );
+          const riskAcceptableV980 =
+            riskVerifiedV980 &&
+            !riskTerminalV980 &&
+            (
+              !riskScoreFiniteV980 ||
+              riskScoreRawV980 <= 59
+            );
+
           return {
             candidate,
             key,
@@ -11948,7 +11994,14 @@ async function reservesLensLiquidityDiagnosticV441(
             allFreshMarketProvidersUnavailableV721,
             onChainRescueTargetV721,
             strictOnChainCompletionTargetV967,
+            riskVerifiedV980,
+            riskAcceptableV980,
+            riskTerminalV980,
+            riskScoreV980: riskScoreFiniteV980 ? riskScoreRawV980 : null,
+            riskLabelV980,
             score:
+              (riskAcceptableV980 ? 100000 : 0) +
+              (riskTerminalV980 ? -100000 : 0) +
               (
                 strictOnChainCompletionTargetV967
                   ? 50000
@@ -11996,6 +12049,19 @@ async function reservesLensLiquidityDiagnosticV441(
           b.score - a.score
       );
 
+  base.v980RiskFirstCompletion.verifiedAcceptableCandidates =
+    ranked.filter(row => row?.riskAcceptableV980 === true).length;
+  base.v980RiskFirstCompletion.verifiedTerminalRiskSkipped =
+    ranked.filter(row => row?.riskTerminalV980 === true).length;
+  base.v980RiskFirstCompletion.riskUnverifiedCandidates =
+    ranked.filter(row => row?.riskVerifiedV980 !== true).length;
+
+  /* V980: never spend the scarce strict Market-completion slot on a candidate
+   * already VERIFIED above the existing risk ceiling. Unknown-risk candidates
+   * are retained so holder/risk completion can still resolve them later. */
+  const rankedV980 =
+    ranked.filter(row => row?.riskTerminalV980 !== true);
+
   let target =
     null;
 
@@ -12007,7 +12073,7 @@ async function reservesLensLiquidityDiagnosticV441(
 
   for (
     const row
-    of ranked
+    of rankedV980
   ) {
     const key =
       row?.key;
@@ -12107,6 +12173,17 @@ async function reservesLensLiquidityDiagnosticV441(
         telegramThresholdChanged: false
       };
 
+      base.v980RiskFirstCompletion.selectedRiskVerified =
+        row?.riskVerifiedV980 === true;
+      base.v980RiskFirstCompletion.selectedRiskAcceptable =
+        row?.riskAcceptableV980 === true;
+      base.v980RiskFirstCompletion.selectedRiskScore =
+        row?.riskScoreV980 ?? null;
+      base.v980RiskFirstCompletion.selectedRiskLabel =
+        row?.riskLabelV980 || null;
+      base.v980RiskFirstCompletion.selectedAddress =
+        normalize(row?.candidate?.address) || null;
+
       break;
     }
   }
@@ -12118,7 +12195,9 @@ async function reservesLensLiquidityDiagnosticV441(
     return {
       ...base,
       status:
-        "NO_RETURNED_CANDIDATE_WITH_COMPLETE_POOL_KEY_V441"
+        (ranked.length > 0 && rankedV980.length === 0)
+          ? "ALL_COMPLETE_POOLKEY_CANDIDATES_VERIFIED_RISK_REJECTED_V980"
+          : "NO_RETURNED_CANDIDATE_WITH_COMPLETE_POOL_KEY_V441"
     };
   }
 
