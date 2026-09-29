@@ -8459,7 +8459,7 @@
 /* V974: preserve V973 post-V4 price refresh, widen the single ReservesLens priority so a verified PoolKey + exact PoolId + USD quote basis can use one real remaining global request even when the analysis sub-cap is exhausted, and bind V438 refresh to the exact verified PoolId already proven by the current candidate. Adds diagnostics only around V179 exact-USD sample availability; no scoring/risk/Telegram threshold changes. */
 /* V973: refresh V438 exact-pool execution-price evidence after production V4/V888 and before V441/V455, so same-scan verified V179 exact-USD swaps are visible to strict market completion. Zero new provider requests and no proof/threshold changes. */
 /* V972: preserve V971 handoff fix and prioritise one existing analysis request for strict ReservesLens market completion without raising any ceiling. */
-const VERSION = "V983";
+const VERSION = "V985";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -167226,6 +167226,90 @@ function updateLaunchCoverageCumulativeV474(
   return cumulative;
 }
 
+
+/* =========================================================
+   V985 — resilient compact /launchcoverage formatter
+   =========================================================
+   The legacy V474 formatter remains intact for rollback/reference. V985
+   deliberately renders only bounded, already-persisted coverage fields so
+   Telegram delivery cannot be blocked by the very large diagnostic sections
+   accumulated in the main state. Zero provider requests and zero writes.
+*/
+function launchCoverageTelegramMessageV985(state) {
+  const c = ensureLaunchCoverageCumulativeV474(state);
+  const last = c?.lastScan || {};
+  const fmt = value => Number(safeNumber(value)).toLocaleString("en-GB");
+  const ratio = (a, b) => {
+    const n = safeNumber(a), d = safeNumber(b);
+    return d > 0 ? `${(n / d * 100).toFixed(1)}%` : "UNVERIFIED";
+  };
+  const reasonSummary = counts => {
+    const rows = Object.entries(counts || {})
+      .filter(([,v]) => safeNumber(v) > 0)
+      .sort((a,b) => safeNumber(b[1]) - safeNumber(a[1]))
+      .slice(0, 6);
+    return rows.length
+      ? rows.map(([k,v]) => `${escapeHtml(String(k))} ×${fmt(v)}`).join("; ")
+      : "None";
+  };
+
+  const evidence = (Array.isArray(last.currentLiveEvidenceCompletionV656)
+    ? last.currentLiveEvidenceCompletionV656 : [])
+    .slice(0, 4)
+    .map((row, i) => {
+      const a = normalize(row?.address);
+      const short = isAddress(a) ? `${a.slice(0,6)}…${a.slice(-4)}` : "UNVERIFIED";
+      const sym = escapeHtml(row?.symbol || `Candidate ${i+1}`);
+      const market = escapeHtml(row?.market?.primaryBlocker || (row?.market?.verified === true ? "VERIFIED" : "UNVERIFIED"));
+      const holders = escapeHtml(row?.holders?.primaryBlocker || (row?.holders?.fullyVerified === true ? "VERIFIED" : "UNVERIFIED"));
+      const risk = row?.risk?.verified === true
+        ? `VERIFIED ${fmt(row?.risk?.score)}/100`
+        : escapeHtml(row?.risk?.reason || row?.risk?.status || "RISK_UNVERIFIED");
+      return `• <b>${sym}</b> (<code>${escapeHtml(short)}</code>) — Market: ${market}; Holders: ${holders}; Risk: ${risk}`;
+    });
+
+  const captured = last?.capturedAt || last?.recordedAt || last?.at || c?.updatedAt || state?.updatedAt || "UNVERIFIED";
+  const updated = c?.updatedAt || last?.updatedAt || captured;
+
+  const lines = [
+    `🔭 <b>Launch Coverage Funnel — ${escapeHtml(VERSION)}</b>`,
+    "",
+    "<b>Latest scan</b>",
+    `Captured: ${escapeHtml(String(captured))}`,
+    `Coverage state updated: ${escapeHtml(String(updated))}`,
+    `Live addresses observed: ${fmt(last?.liveAddressesObserved)}`,
+    `New addresses discovered*: ${fmt(last?.newAddressesDiscovered)}`,
+    `Positively verified launches: ${fmt(last?.positivelyVerifiedLaunches)}`,
+    `Current/live selected for analysis: ${fmt(last?.currentLiveSelectedForAnalysis)}`,
+    `Current/live analysis loop entered: ${fmt(last?.currentLiveAnalysisLoopEntered)}`,
+    `Current/live budget deferred: ${fmt(last?.currentLiveBudgetDeferred)}`,
+    `↳ Defer reasons: ${reasonSummary(last?.currentLiveBudgetDeferReasons)}`,
+    `Current/live returned candidates: ${fmt(last?.currentLiveReturnedCandidates)}`,
+    `Returned with verified launch source: ${fmt(last?.returnedCurrentLiveWithVerifiedLaunchSource)}`,
+    `Returned with launch source UNVERIFIED: ${fmt(last?.returnedCurrentLiveWithUnverifiedLaunchSource)}`,
+    `Telegram qualified: ${fmt(last?.telegramQualified)}`,
+    `↳ Qualification blockers: ${reasonSummary(last?.telegramQualificationBlockers)}`,
+    `Telegram sent: ${fmt(last?.telegramSent)}`,
+    "",
+    "<b>V656 evidence completion — current/live returned</b>",
+    ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
+    "",
+    "<b>Cumulative since V474</b>",
+    `Scans observed: ${fmt(c?.scansObserved)}`,
+    `Live addresses observed: ${fmt(c?.liveAddressesObserved)}`,
+    `Positively verified launches: ${fmt(c?.positivelyVerifiedLaunches)}`,
+    `Current/live returned candidates: ${fmt(c?.currentLiveReturnedCandidates)}`,
+    `Launch-source verification among returned current/live candidates: ${ratio(c?.returnedCurrentLiveWithVerifiedLaunchSource, c?.currentLiveReturnedCandidates)}`,
+    `Telegram sent: ${fmt(c?.telegramSent)}`,
+    "",
+    "⚠️ Probable launches: DATA UNVERIFIED",
+    "⚠️ Unsupported launch sources: DATA UNVERIFIED",
+    "",
+    "<i>V985 uses a bounded read-only formatter for /launchcoverage so oversized diagnostic history cannot break Telegram delivery. Scanner, persistence, scoring, risk, provider budgets and Telegram qualification logic are unchanged.</i>"
+  ];
+  return lines.join("\n");
+}
+
 function launchCoverageTelegramMessageV474(state) {
   const c =
     ensureLaunchCoverageCumulativeV474(state);
@@ -170755,7 +170839,7 @@ async function telegramCommandReplyV271(
       "/coverage"
   ) {
     reply =
-      launchCoverageTelegramMessageV474(
+      launchCoverageTelegramMessageV985(
         state
       );
 
