@@ -8426,7 +8426,7 @@
 /* V974: preserve V973 post-V4 price refresh, widen the single ReservesLens priority so a verified PoolKey + exact PoolId + USD quote basis can use one real remaining global request even when the analysis sub-cap is exhausted, and bind V438 refresh to the exact verified PoolId already proven by the current candidate. Adds diagnostics only around V179 exact-USD sample availability; no scoring/risk/Telegram threshold changes. */
 /* V973: refresh V438 exact-pool execution-price evidence after production V4/V888 and before V441/V455, so same-scan verified V179 exact-USD swaps are visible to strict market completion. Zero new provider requests and no proof/threshold changes. */
 /* V972: preserve V971 handoff fix and prioritise one existing analysis request for strict ReservesLens market completion without raising any ceiling. */
-const VERSION = "V976";
+const VERSION = "V977";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -115534,7 +115534,7 @@ for (
    * This is zero-request evidence handoff only; all V438/V455 proof rules stay
    * unchanged.
    */
-  const marketExactPoolCollectorHandoffV976 =
+  const marketExactPoolCollectorHandoffResultV976 =
     await marketExactPoolCollectorHandoffV976(
       env,
       state,
@@ -115544,7 +115544,7 @@ for (
     );
 
   state.marketExactPoolCollectorHandoffV976 =
-    marketExactPoolCollectorHandoffV976;
+    marketExactPoolCollectorHandoffResultV976;
 
   const onChainMarketFoundationRefreshV973 =
     refreshOnChainMarketFoundationV973(
