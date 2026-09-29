@@ -8421,8 +8421,9 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
+/* V973: refresh V438 exact-pool execution-price evidence after production V4/V888 and before V441/V455, so same-scan verified V179 exact-USD swaps are visible to strict market completion. Zero new provider requests and no proof/threshold changes. */
 /* V972: preserve V971 handoff fix and prioritise one existing analysis request for strict ReservesLens market completion without raising any ceiling. */
-const VERSION = "V972";
+const VERSION = "V973";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -14253,6 +14254,129 @@ function onChainMarketFoundationV438(
       priceVerified
         ? "INDEPENDENT_EXACT_POOL_USD_LIQUIDITY_PROOF"
         : "RECENT_EXACT_USD_EXECUTION_PRICE_AND_LIQUIDITY_PROOF"
+  };
+}
+
+
+/* =========================================================
+   V973 POST-V4 EXACT-POOL PRICE REFRESH
+   ========================================================= */
+
+function refreshOnChainMarketFoundationV973(
+  state,
+  candidates
+) {
+  const rows = [];
+
+  for (
+    const candidate
+    of Array.isArray(candidates)
+      ? candidates
+      : []
+  ) {
+    const token =
+      normalize(candidate?.address);
+
+    if (!isAddress(token)) {
+      continue;
+    }
+
+    const watched =
+      findWatched(state, token);
+
+    if (!watched) {
+      rows.push({
+        address: token,
+        applied: false,
+        reason: "WATCHED_TOKEN_NOT_FOUND_V973"
+      });
+      continue;
+    }
+
+    const before =
+      candidate
+        ?.market
+        ?.onChainMarketFoundationV438 ||
+      watched
+        ?.onChainMarketFoundationV438 ||
+      null;
+
+    const validation =
+      candidate?.validation || {
+        decimals:
+          candidate?.decimals,
+        totalSupply:
+          candidate?.totalSupply
+      };
+
+    const refreshed =
+      onChainMarketFoundationV438(
+        state,
+        watched,
+        validation,
+        token
+      );
+
+    candidate.market = {
+      ...(candidate?.market || {}),
+      onChainMarketFoundationV438:
+        refreshed
+    };
+
+    watched.onChainMarketFoundationV438 =
+      refreshed;
+
+    candidate.onChainMarketFoundationRefreshV973 = {
+      version: "V973",
+      applied: true,
+      refreshedAt: Date.now(),
+      beforeVerified:
+        before?.verifiedObservedExecutionPrice === true,
+      afterVerified:
+        refreshed?.verifiedObservedExecutionPrice === true,
+      beforeSampleCount:
+        safeNumber(before?.sampleCount),
+      afterSampleCount:
+        safeNumber(refreshed?.sampleCount),
+      status:
+        refreshed?.status || null,
+      latestPoolId:
+        normalize(refreshed?.latestPoolId) || null,
+      latestObservedAt:
+        safeNumber(refreshed?.latestObservedAt) || null,
+      externalRequestsAdded: 0,
+      proofRequirementsChanged: false
+    };
+
+    rows.push({
+      address: token,
+      symbol:
+        candidate?.symbol || null,
+      ...candidate.onChainMarketFoundationRefreshV973
+    });
+  }
+
+  return {
+    version: "V973",
+    runtimeVersion: VERSION,
+    recordedAt: Date.now(),
+    candidatesSeen:
+      Array.isArray(candidates)
+        ? candidates.length
+        : 0,
+    refreshed:
+      rows.filter(row => row?.applied === true).length,
+    becamePriceVerified:
+      rows.filter(row =>
+        row?.beforeVerified !== true &&
+        row?.afterVerified === true
+      ).length,
+    rows: rows.slice(0, 12),
+    externalRequestsAdded: 0,
+    providerRoutingChanged: false,
+    proofRequirementsChanged: false,
+    scoringChanged: false,
+    telegramThresholdChanged: false
   };
 }
 
@@ -115085,6 +115209,24 @@ for (
       "USE_ONLY_ALREADY_VERIFIED_COMPLETE_POOLKEYS_V450"
   };
 
+  /*
+   * V973: V438 originally ran inside analyzeToken(), before the production V4
+   * V772/V888 exact-pool lane. That meant a same-scan V888/V179 exact-USD
+   * recovery could exist in state but V441/V455 still saw the stale pre-V4
+   * foundation with no execution price. Refresh V438 now, after production V4
+   * has had its chance and immediately before ReservesLens/V455 consume it.
+   * This is zero-request evidence handoff only; all V438/V455 proof rules stay
+   * unchanged.
+   */
+  const onChainMarketFoundationRefreshV973 =
+    refreshOnChainMarketFoundationV973(
+      state,
+      candidates
+    );
+
+  state.onChainMarketFoundationRefreshV973 =
+    onChainMarketFoundationRefreshV973;
+
   const reservesLensLiquidityResultV441 =
     await reservesLensLiquidityDiagnosticV441(
       env,
@@ -117891,6 +118033,18 @@ for (
       v972MarketLensPriorityBlockReason:
         selectedCandidateV968?.reservesLensLiquidityDiagnosticV441?.v972MarketLensPriority?.blockReason || null,
       handoffVersion: selectedCandidateV968?.reservesLensLiquidityDiagnosticV441?.handoffVersion || null,
+      v973PriceRefreshApplied:
+        selectedCandidateV968?.onChainMarketFoundationRefreshV973?.applied === true,
+      v973PriceBeforeVerified:
+        selectedCandidateV968?.onChainMarketFoundationRefreshV973?.beforeVerified === true,
+      v973PriceAfterVerified:
+        selectedCandidateV968?.onChainMarketFoundationRefreshV973?.afterVerified === true,
+      v973PriceSampleCount:
+        safeNumber(selectedCandidateV968?.onChainMarketFoundationRefreshV973?.afterSampleCount),
+      v973PriceRefreshStatus:
+        selectedCandidateV968?.onChainMarketFoundationRefreshV973?.status || null,
+      v973LatestPoolId:
+        selectedCandidateV968?.onChainMarketFoundationRefreshV973?.latestPoolId || null,
       v455PoolKeyVerified: eligibilityV968?.poolKeyVerified === true,
       v455ExactPoolIdentity: eligibilityV968?.exactPoolIdentity === true,
       lensVerified: eligibilityV968?.lensVerified === true,
@@ -176178,7 +176332,7 @@ function marketCompletionAuditTelegramV968(result) {
   const yesNo = v => v === true ? "YES" : v === false ? "NO" : "N/A";
   const reasons = Array.isArray(r?.failureReasons) ? r.failureReasons : [];
   return [
-    "🧪 <b>On-Chain Market Completion Audit — V972</b>",
+    "🧪 <b>On-Chain Market Completion Audit — V973</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Scan version: <b>${escapeHtml(String(r?.scanVersion || "NONE"))}</b>`,
@@ -176203,6 +176357,9 @@ function marketCompletionAuditTelegramV968(result) {
     `V972 Lens priority armed / consumed: <b>${yesNo(r?.v972MarketLensPriorityArmed)} / ${yesNo(r?.v972MarketLensPriorityConsumed)}</b>`,
     `V972 Lens priority hard-blocked: <b>${yesNo(r?.v972MarketLensPriorityHardBlocked)}</b> · ${escapeHtml(String(r?.v972MarketLensPriorityBlockReason || "NONE"))}`,
     `V972 PoolKey handoff: <b>${escapeHtml(String(r?.handoffVersion || "NONE"))}</b>`,
+    `V973 post-V4 price refresh applied: <b>${yesNo(r?.v973PriceRefreshApplied)}</b>`,
+    `V973 price before / after: <b>${yesNo(r?.v973PriceBeforeVerified)} / ${yesNo(r?.v973PriceAfterVerified)}</b> · samples <b>${safeNumber(r?.v973PriceSampleCount)}</b>`,
+    `V973 refresh status: <code>${escapeHtml(String(r?.v973PriceRefreshStatus || "NONE"))}</code>`,
     `V455 sees PoolKey / exact PoolId: <b>${yesNo(r?.v455PoolKeyVerified)} / ${yesNo(r?.v455ExactPoolIdentity)}</b>`,
     `Verified Lens USD liquidity: <b>${yesNo(r?.lensVerified)}</b>`,
     `Liquidity semantics usable: <b>${yesNo(r?.semanticUsable)}</b>`,
@@ -176214,7 +176371,7 @@ function marketCompletionAuditTelegramV968(result) {
     "🚧 <b>Exact failure reason(s)</b>",
     ...(reasons.length ? reasons.slice(0,8).map(x => `• <code>${escapeHtml(String(x))}</code>`) : ["• NONE"]),
     "",
-    "<i>Read-only. Zero provider requests and zero state writes. V972 reports the most recent completed scan's V967/V441/V455 market-completion evidence plus the corrected PoolKey handoff, scoped Lens-priority telemetry and Lens failure detail; it does not change provider routing, proof standards, scoring, risk or Telegram thresholds.</i>"
+    "<i>Read-only. Zero provider requests and zero state writes. V973 reports the most recent completed scan's V967/V441/V455 market-completion evidence plus the corrected PoolKey handoff, scoped Lens-priority telemetry and the post-production-V4 V438 exact-price refresh; it does not change provider routing, proof standards, scoring, risk or Telegram thresholds.</i>"
   ].join("\n");
 }
 
