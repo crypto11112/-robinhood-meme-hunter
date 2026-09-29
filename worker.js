@@ -1,10 +1,11 @@
 /**
- * V983 KV EMERGENCY COMPACTION + SCHEDULER RE-ARM HARDENING:
- * - preserves V982 scanner/discovery/scoring/risk/Telegram/provider behaviour;
- * - when V692 Tier 1/2 still exceeds the 25 MiB KV value limit, trims only bounded diagnostic/history working sets and retries once;
- * - creates durable KV headroom instead of leaving /launchcoverage frozen;
- * - arms and verifies the next V673 alarm before writing scheduler diagnostics, with one retry if needed;
- * - no request ceilings or qualification thresholds are changed.
+ * Robinhood Chain Meme Hunter — V988
+ * V988 SEQUENTIAL HOLDER-CLAIM RE-RANK:
+ * - preserves V987 holder-entry rescue and all V983/V986 reliability/reporting fixes;
+ * - after protected V666 claim #1 is actually consumed, re-ranks only the remaining unresolved, non-terminal holder/risk candidates before claim #2;
+ * - only the V984 first target or the V988 dynamically selected second target receives protected holder-priority status;
+ * - prevents an incidental queue row from consuming claim #2 before the re-rank decision;
+ * - max two claims, provider ceilings, risk proofs and Telegram thresholds remain unchanged.
  */
 /**
  * V961 BLOCKSCOUT JSON-RPC CALL-SITE AUDIT DEPLOY-FIX:
