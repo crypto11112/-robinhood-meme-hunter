@@ -8422,7 +8422,7 @@
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
 /* V967: prioritise strict provider-independent V441/V455 on-chain market completion for market-unverified valuation-ready candidates. */
-const VERSION = "V968";
+const VERSION = "V969";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -167679,6 +167679,7 @@ function telegramHelpV271() {
     "<code>/uniswapv4test [0xPOOLID]</code> — V765 one-request Uniswap V4 Pool Info test; auto-selects a retained PoolId when omitted",
     "<code>/v4marketstatus</code> — V773 show the last production market/liquidity completion result",
     "<code>/marketaudit</code> — V968 show the latest strict on-chain Market completion prerequisites and exact failure reason",
+    "<code>/schedulerstatus</code> — V969 show the V673 five-minute scheduler alarm and last completed scheduled run",
     "<code>/v4prodstatus</code> — V772 show the last production scanner V4/Uniswap enrichment result",
     "<code>/v4poolsearch [0xTOKEN] [p2...]</code> — V796 bounded 100-PoolId/page active reverse search through Uniswap Pool Info, with historical fallback after the final page (diagnostic only)",
     "<code>/v4completeaudit 0x...</code> — V865 isolated exact V4 completion trace: every V466 range, rows, saturation, split and budget decision",
@@ -168576,6 +168577,66 @@ async function telegramCommandReplyV271(
       diagnosticV273.result = sentV968?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
     }
     return {success:sentV968?.success===true,ignored:false,command:parsed.command,marketCompletionAuditV968:resultV968};
+  }
+
+  if (parsed.command === "/schedulerstatus" || parsed.command === "/scheduler") {
+    let statusV969 = null;
+    try {
+      statusV969 = await Promise.race([
+        scanSchedulerRequestV673(env, "/status", "GET"),
+        new Promise(resolve => setTimeout(() => resolve({
+          ok:false,
+          version:VERSION,
+          status:"SCAN_SCHEDULER_STATUS_TIMEOUT_V969",
+          timestamp:now()
+        }), 1800))
+      ]);
+    } catch (error) {
+      statusV969 = {
+        ok:false,
+        version:VERSION,
+        status:"SCAN_SCHEDULER_STATUS_EXCEPTION_V969",
+        error:errorString(error),
+        timestamp:now()
+      };
+    }
+
+    const lastV969 = statusV969?.last || null;
+    const fmtTsV969 = (v) => {
+      const n = Number(v);
+      if (!Number.isFinite(n) || n <= 0) return "NONE";
+      try { return new Date(n).toISOString(); } catch (_) { return "UNVERIFIED"; }
+    };
+    const replyV969 = [
+      "🫀 <b>Scanner Scheduler Status — V969</b>",
+      "",
+      `Scheduler: <b>${escapeHtml(String(statusV969?.scheduler || "UNVERIFIED"))}</b>`,
+      `Status: <b>${escapeHtml(String(statusV969?.status || (statusV969?.ok === true ? "OK" : "UNVERIFIED")))}</b>`,
+      `Alarm armed: <b>${statusV969?.alarmArmed === true ? "YES" : statusV969?.alarmArmed === false ? "NO" : "UNVERIFIED"}</b>`,
+      `Next alarm: <code>${escapeHtml(String(statusV969?.nextAlarmIso || "NONE"))}</code>`,
+      `5m aligned: <b>${statusV969?.nextAlarmAlignedV684 === true ? "YES" : statusV969?.nextAlarmAlignedV684 === false ? "NO" : "UNVERIFIED"}</b>`,
+      "",
+      "📍 <b>Last scheduler record</b>",
+      `Present: <b>${lastV969 ? "YES" : "NO"}</b>`,
+      `Started: <code>${fmtTsV969(lastV969?.startedAt)}</code>`,
+      `Completed: <code>${fmtTsV969(lastV969?.completedAt)}</code>`,
+      `Trigger: <b>${escapeHtml(String(lastV969?.trigger || lastV969?.reason || "UNVERIFIED"))}</b>`,
+      `Success: <b>${lastV969?.success === true || lastV969?.ok === true ? "YES" : lastV969?.success === false || lastV969?.ok === false ? "NO" : "UNVERIFIED"}</b>`,
+      `Failure: <code>${escapeHtml(String(lastV969?.failure || lastV969?.error || "NONE"))}</code>`,
+      "",
+      "<i>Read-only. Zero provider requests, zero scanner writes. Reads only the existing V673 scheduler Durable Object status.</i>"
+    ].join("\n");
+
+    if (diagnosticV273) diagnosticV273.replyAttempted = true;
+    const sentV969 = await sendTelegram(env, replyV969, null, null);
+    if (diagnosticV273) {
+      diagnosticV273.replySuccess = sentV969?.success === true;
+      diagnosticV273.telegramStatus = sentV969?.status || null;
+      diagnosticV273.telegramMode = sentV969?.mode || null;
+      diagnosticV273.telegramError = sentV969?.error || null;
+      diagnosticV273.result = sentV969?.success === true ? "REPLY_SENT" : "REPLY_FAILED";
+    }
+    return {success:sentV969?.success===true,ignored:false,command:parsed.command,schedulerStatusV969:statusV969};
   }
 
   if (parsed.command === "/v4marketstatus") {
