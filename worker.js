@@ -8421,7 +8421,7 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
-const VERSION = "V965";
+const VERSION = "V966";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -167007,6 +167007,7 @@ async function coinMarketCapMarketDataV739(token, budget, watched, state, env, t
       state,
       { provider:"COINMARKETCAP_V739", feature:"CMC_MARKET_FALLBACK_V739", phase:"analysis", pathClass:"DEX_TOKEN" }
     );
+    await captureCoinMarketCapResponseDiagnosticV966(service, response, url.toString(), token, trigger, env);
     service.lastHttpStatusV739 = response.status;
     if (response.status === 429) {
       const cooldownMs = registerCoinMarketCap429V739(service);
@@ -167081,6 +167082,7 @@ async function coinMarketCapMarketDataV739(token, budget, watched, state, env, t
     saveMarketCache(watched, result);
     return result;
   } catch (error) {
+    captureCoinMarketCapFetchErrorV966(service, url.toString(), token, trigger, error, env);
     service.monthOtherErrorsV739 = safeNumber(service.monthOtherErrorsV739) + 1;
     service.lastStatusV739 = "FETCH_ERROR";
     return {
@@ -167102,6 +167104,117 @@ async function maybeCoinMarketCapFallbackV739(token, budget, watched, state, env
     return { verified:false, status:"CMC_NOT_CONFIGURED_V739", source:"COINMARKETCAP_V739", requestSent:false };
   }
   return await coinMarketCapMarketDataV739(token, budget, watched, state, env, trigger);
+}
+
+
+function sanitizeCmcDiagnosticBodyV966(text, env = null) {
+  let value = String(text ?? "");
+  const key = String(env?.CMC_API_KEY || "").trim();
+  if (key) value = value.split(key).join("[REDACTED_CMC_KEY]");
+  value = value.replace(/[\u0000-\u001F\u007F]/g, " ").replace(/\s+/g, " ").trim();
+  return value.slice(0, 1400);
+}
+
+async function captureCoinMarketCapResponseDiagnosticV966(service, response, url, token, trigger, env = null) {
+  if (!service || typeof service !== "object") return;
+  const now = Date.now();
+  let safeUrl = null;
+  let endpoint = null;
+  let params = {};
+  try {
+    const parsed = new URL(String(url || ""));
+    endpoint = parsed.pathname || null;
+    for (const [k,v] of parsed.searchParams.entries()) params[k] = v;
+    safeUrl = `${parsed.origin}${parsed.pathname}${parsed.search}`;
+  } catch {}
+  let body = "";
+  try { body = sanitizeCmcDiagnosticBodyV966(await response.clone().text(), env); } catch {}
+  const headers = {};
+  try {
+    for (const name of ["content-type","date","x-request-id","x-correlation-id","cf-ray"]) {
+      const v = response.headers.get(name);
+      if (v) headers[name] = String(v).slice(0, 300);
+    }
+  } catch {}
+  service.lastDiagnosticV966 = {
+    recordedAt: now,
+    endpoint,
+    safeUrl,
+    requestMethod:"GET",
+    requestParams:params,
+    targetToken:normalize(token),
+    fallbackTrigger:trigger || null,
+    httpStatus:safeNumber(response?.status) || null,
+    responseOk:response?.ok === true,
+    responseHeaders:headers,
+    responseBody:body || null,
+    configuredPlatform:CMC_PLATFORM_V739,
+    apiKeyPresent:coinMarketCapConfiguredV739(env),
+    note:"V966 safe response capture; API key is never stored."
+  };
+}
+
+function captureCoinMarketCapFetchErrorV966(service, url, token, trigger, error, env = null) {
+  if (!service || typeof service !== "object") return;
+  let endpoint = null;
+  let params = {};
+  try {
+    const parsed = new URL(String(url || ""));
+    endpoint = parsed.pathname || null;
+    for (const [k,v] of parsed.searchParams.entries()) params[k] = v;
+  } catch {}
+  service.lastDiagnosticV966 = {
+    recordedAt:Date.now(), endpoint, requestMethod:"GET", requestParams:params,
+    targetToken:normalize(token), fallbackTrigger:trigger || null,
+    httpStatus:null, responseOk:false, responseHeaders:{}, responseBody:null,
+    configuredPlatform:CMC_PLATFORM_V739, apiKeyPresent:coinMarketCapConfiguredV739(env),
+    fetchError:sanitizeCmcDiagnosticBodyV966(errorString(error), env),
+    note:"V966 safe fetch-error capture; API key is never stored."
+  };
+}
+
+function coinMarketCapDiagnosticSnapshotV966(state) {
+  const service = coinMarketCapServiceV739(state, null);
+  const d = service?.lastDiagnosticV966 && typeof service.lastDiagnosticV966 === "object"
+    ? service.lastDiagnosticV966 : null;
+  return {
+    version:"V966",
+    configured:service?.configured === true,
+    lastStatus:service?.lastStatusV739 || null,
+    lastHttpStatus:service?.lastHttpStatusV739 ?? null,
+    diagnostic:d
+  };
+}
+
+function coinMarketCapDiagnosticTelegramV966(state) {
+  const snap = coinMarketCapDiagnosticSnapshotV966(state);
+  const d = snap.diagnostic;
+  const when = ts => safeNumber(ts) > 0 ? new Date(safeNumber(ts)).toISOString() : "NEVER";
+  const p = d?.requestParams || {};
+  const lines = [
+    "🧪 <b>CoinMarketCap Request Diagnostic — V966</b>", "",
+    `Configured: <b>${snap.configured?"YES":"NO"}</b>`,
+    `Last V739 status: <b>${escapeHtml(String(snap.lastStatus || "NONE"))}</b> · HTTP ${escapeHtml(String(snap.lastHttpStatus ?? "N/A"))}`,
+    `Diagnostic captured: <b>${d?"YES":"NO"}</b>${d?.recordedAt?` · ${escapeHtml(when(d.recordedAt))}`:""}`,
+  ];
+  if (d) {
+    lines.push(
+      `Endpoint: <code>${escapeHtml(String(d.endpoint || "UNKNOWN"))}</code>`,
+      `Method: <b>${escapeHtml(String(d.requestMethod || "GET"))}</b>`,
+      `Platform parameter: <code>${escapeHtml(String(p.platform ?? d.configuredPlatform ?? "NONE"))}</code>`,
+      `Address parameter: <code>${escapeHtml(String(p.address ?? p.contract_address ?? d.targetToken ?? "NONE"))}</code>`,
+      `HTTP: <b>${escapeHtml(String(d.httpStatus ?? "N/A"))}</b> · response OK: <b>${d.responseOk===true?"YES":"NO"}</b>`,
+      `API key present: <b>${d.apiKeyPresent===true?"YES":"NO"}</b>`,
+      `Fallback trigger: <b>${escapeHtml(String(d.fallbackTrigger || "NONE"))}</b>`,
+      `Response content-type: <b>${escapeHtml(String(d.responseHeaders?.["content-type"] || "N/A"))}</b>`,
+      `Request ID: <code>${escapeHtml(String(d.responseHeaders?.["x-request-id"] || d.responseHeaders?.["x-correlation-id"] || "N/A"))}</code>`,
+      `Safe response body: <code>${escapeHtml(String(d.responseBody || d.fetchError || "EMPTY"))}</code>`
+    );
+  } else {
+    lines.push("No post-V966 CMC request has been captured yet. Wait for the next normal CMC fallback attempt; this command itself makes zero provider requests.");
+  }
+  lines.push("", "<i>Read-only. Zero provider requests, zero state writes. V966 records only a truncated safe response body and request metadata; the CMC API key is never stored or displayed. No market/scoring/risk/Telegram behaviour is changed.</i>");
+  return lines.join("\n");
 }
 
 function coinMarketCapUsageSnapshotV739(state) {
@@ -167444,6 +167557,7 @@ function telegramHelpV271() {
     "<code>/v4poollivecompare [0xTOKEN]</code> — V768 discover recent live PoolIds directly from PoolManager swaps, then identify token pools with Uniswap Pool Info (no DexScreener)",
     "<code>/v4poolcompare [0xTOKEN]</code> — V766 compare scanner PoolIds vs DexScreener active V4 pair + Uniswap Pool Info confirmation",
     "<code>/cmcusage</code> — V739 CoinMarketCap bot-side monthly request meter (read-only)",
+    "<code>/cmcdiagnostic</code> — V966 last CoinMarketCap endpoint/status/safe response diagnostic (read-only)",
     "<code>/poolwatch</code> — V748 raw exact-pool range/log/decode trace diagnostic (read-only)",
     "<code>/poolmatch</code> — V747 selected-vs-provider/canonical pool activity + persisted-watch reselection diagnostic (read-only)",
     "<code>/usage</code> — Durable Object daily write monitor",
@@ -168790,6 +168904,22 @@ async function telegramCommandReplyV271(
         rawHandoffAttempts:safeNumber(watchV741?.telemetry?.rawHandoffAttempts),
         rawRegistered:safeNumber(watchV741?.telemetry?.rawRegistered),
         hardRequestLimitUnchanged:42
+      };
+    }
+  } else if (
+    parsed.command === "/cmcdiagnostic" ||
+    parsed.command === "/cmcdiag"
+  ) {
+    reply = coinMarketCapDiagnosticTelegramV966(state);
+    if (diagnosticV273) {
+      const cmcDiagV966 = coinMarketCapDiagnosticSnapshotV966(state);
+      diagnosticV273.coinMarketCapDiagnosticV966 = {
+        scannerBudgetConsumed:false,
+        externalProviderRequests:0,
+        stateWrites:0,
+        captured:cmcDiagV966?.diagnostic ? true : false,
+        lastHttpStatus:cmcDiagV966?.diagnostic?.httpStatus ?? null,
+        endpoint:cmcDiagV966?.diagnostic?.endpoint || null
       };
     }
   } else if (
