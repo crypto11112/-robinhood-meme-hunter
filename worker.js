@@ -8459,7 +8459,17 @@
 /* V974: preserve V973 post-V4 price refresh, widen the single ReservesLens priority so a verified PoolKey + exact PoolId + USD quote basis can use one real remaining global request even when the analysis sub-cap is exhausted, and bind V438 refresh to the exact verified PoolId already proven by the current candidate. Adds diagnostics only around V179 exact-USD sample availability; no scoring/risk/Telegram threshold changes. */
 /* V973: refresh V438 exact-pool execution-price evidence after production V4/V888 and before V441/V455, so same-scan verified V179 exact-USD swaps are visible to strict market completion. Zero new provider requests and no proof/threshold changes. */
 /* V972: preserve V971 handoff fix and prioritise one existing analysis request for strict ReservesLens market completion without raising any ceiling. */
-const VERSION = "V986";
+/*
+ * V987 HOLDER/RISK PRIORITY ENTRY RESCUE
+ * - preserves V984 queue ordering and V983 persistence/scheduler protection;
+ * - prevents the selected unresolved holder/risk target from being stranded at
+ *   analyzeToken's internal analysis-entry boundary when real pre-Telegram
+ *   global headroom still exists;
+ * - downstream V666/V677 budget protection remains authoritative;
+ * - adds bounded /launchcoverage telemetry for entry + V666 claim/use proof;
+ * - no provider ceiling, scoring, risk rule or Telegram threshold changes.
+ */
+const VERSION = "V987";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -97068,13 +97078,91 @@ async function analyzeToken(
   let holders =
     unverifiedHolders();
 
-  if (
-    validation.totalSupply &&
+  /*
+   * V987 HOLDER/RISK PRIORITY ENTRY RESCUE
+   *
+   * V984 moves the best unresolved non-terminal holder/risk candidate to the
+   * front of the bounded analysis queue, but analyzeToken historically refused
+   * to enter holderIntelligence() once the ordinary analysis sub-cap was
+   * exhausted. That could strand the very candidate V984 selected before the
+   * already-protected V666 holder-Pro request had a chance to claim/consume.
+   *
+   * V987 changes only that entry boundary. For an explicitly selected
+   * holderPriorityCompletion candidate, holderIntelligence() may be entered
+   * when the ordinary analysis gate is closed ONLY if one real request still
+   * fits inside the existing pre-Telegram global allowance. The downstream
+   * V666/V677 gates remain authoritative, no hard/provider ceiling is raised,
+   * and no holder/risk proof standard changes.
+   */
+  const holderEntryNormalAvailableV987 =
     budgetAvailable(
       budget,
       "analysis"
+    );
+
+  const holderPriorityEntryRequestedV987 =
+    Boolean(
+      options?.holderPriorityCompletion ??
+      options?.priorityCompletion
+    );
+
+  const holderNotificationReserveRemainingV987 =
+    budget?.notification?.globalReserveActiveV174 === true
+      ? Math.max(
+          0,
+          safeNumber(budget.notification?.limit) -
+            safeNumber(budget.notification?.used)
+        )
+      : 0;
+
+  const holderPreTelegramGlobalLimitV987 =
+    Math.max(
+      0,
+      safeNumber(budget?.totalLimit) -
+        holderNotificationReserveRemainingV987
+    );
+
+  const holderPriorityEntryRescueV987 =
+    Boolean(
+      !holderEntryNormalAvailableV987 &&
+      holderPriorityEntryRequestedV987 &&
+      safeNumber(budget?.totalUsed) + 1 <=
+        holderPreTelegramGlobalLimitV987
+    );
+
+  const holderPriorityEntryTelemetryV987 = {
+    enabled: true,
+    selectedPriorityCandidate:
+      holderPriorityEntryRequestedV987,
+    normalAnalysisEntryAvailable:
+      holderEntryNormalAvailableV987,
+    rescueEntryUsed:
+      holderPriorityEntryRescueV987,
+    enteredHolderIntelligence: false,
+    totalUsedBefore:
+      safeNumber(budget?.totalUsed),
+    effectiveAnalysisLimit:
+      effectiveAnalysisLimitV416(budget),
+    preTelegramGlobalLimit:
+      holderPreTelegramGlobalLimitV987,
+    notificationReserveRemaining:
+      holderNotificationReserveRemainingV987,
+    v666ClaimedForToken: false,
+    v666UsedForToken: false,
+    v666ConsumeStatus: null,
+    requestCeilingsChanged: false,
+    riskRulesChanged: false
+  };
+
+  if (
+    validation.totalSupply &&
+    (
+      holderEntryNormalAvailableV987 ||
+      holderPriorityEntryRescueV987
     )
   ) {
+    holderPriorityEntryTelemetryV987.enteredHolderIntelligence = true;
+
     holders =
       await holderIntelligence(
         address,
@@ -97082,10 +97170,7 @@ async function analyzeToken(
         budget,
         watched,
         market,
-        Boolean(
-          options?.holderPriorityCompletion ??
-          options?.priorityCompletion
-        ),
+        holderPriorityEntryRequestedV987,
         env,
         state,
         validation.decimals,
@@ -97093,6 +97178,28 @@ async function analyzeToken(
           options?.manualAnalyseOptimizationV280
         )
       );
+  }
+
+  {
+    const laneV987 =
+      budget?.analysis?.priorityHolderProCompletionV666 || null;
+    const sameTokenLaneV987 =
+      normalize(laneV987?.address) === address;
+
+    holderPriorityEntryTelemetryV987.v666ClaimedForToken =
+      sameTokenLaneV987 && laneV987?.claimed === true;
+    holderPriorityEntryTelemetryV987.v666UsedForToken =
+      sameTokenLaneV987 && laneV987?.used === true;
+    holderPriorityEntryTelemetryV987.v666ConsumeStatus =
+      sameTokenLaneV987
+        ? laneV987?.consumeStatus || null
+        : null;
+
+    holders = {
+      ...holders,
+      holderPriorityEntryV987:
+        holderPriorityEntryTelemetryV987
+    };
   }
 
   /* V225: recover a verified holder count for display/telemetry only.
@@ -110578,7 +110685,9 @@ for (
                   "HOLDER_EVIDENCE_UNVERIFIED"
                 ),
           pathDiagnosticV665:
-            holdersV656?.holderPathDiagnosticV665 || null
+            holdersV656?.holderPathDiagnosticV665 || null,
+          priorityEntryV987:
+            holdersV656?.holderPriorityEntryV987 || null
         },
         risk: {
           verified: riskV656?.verified === true,
@@ -167270,7 +167379,11 @@ function launchCoverageTelegramMessageV985(state) {
       const risk = row?.risk?.verified === true
         ? `VERIFIED ${fmt(row?.risk?.score)}/100`
         : escapeHtml(row?.risk?.reason || row?.risk?.status || "RISK_UNVERIFIED");
-      return `• <b>${sym}</b> (<code>${escapeHtml(short)}</code>) — Market: ${market}; Holders: ${holders}; Risk: ${risk}`;
+      const v987 = row?.holders?.priorityEntryV987 || null;
+      const v987Text = v987
+        ? `; V987 holder-priority entry ${v987.enteredHolderIntelligence === true ? "YES" : "NO"}${v987.rescueEntryUsed === true ? " (RESCUE)" : ""} · V666 claim/use ${v987.v666ClaimedForToken === true ? "YES" : "NO"}/${v987.v666UsedForToken === true ? "YES" : "NO"}${v987.v666ConsumeStatus ? ` · ${escapeHtml(String(v987.v666ConsumeStatus))}` : ""}`
+        : "";
+      return `• <b>${sym}</b> (<code>${escapeHtml(short)}</code>) — Market: ${market}; Holders: ${holders}; Risk: ${risk}${v987Text}`;
     });
 
   const lines = [
@@ -167307,7 +167420,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V986 keeps V985's bounded /launchcoverage formatter but maps it to the authoritative V474 persisted field names and formats persisted timestamps as ISO dates. Scanner, persistence, scoring, risk, provider budgets and Telegram qualification logic are unchanged.</i>"
+    "<i>V987 preserves V986 reporting and V984 holder/risk ordering, and lets only the explicitly selected holder-priority candidate enter the existing V666 completion path across the internal analysis sub-cap when real pre-Telegram global headroom remains. Hard/provider ceilings, risk proof rules and Telegram thresholds are unchanged.</i>"
   ];
   return lines.join("\\n");
 }
