@@ -1,4 +1,12 @@
 /**
+ * V983 KV EMERGENCY COMPACTION + SCHEDULER RE-ARM HARDENING:
+ * - preserves V982 scanner/discovery/scoring/risk/Telegram/provider behaviour;
+ * - when V692 Tier 1/2 still exceeds the 25 MiB KV value limit, trims only bounded diagnostic/history working sets and retries once;
+ * - creates durable KV headroom instead of leaving /launchcoverage frozen;
+ * - arms and verifies the next V673 alarm before writing scheduler diagnostics, with one retry if needed;
+ * - no request ceilings or qualification thresholds are changed.
+ */
+/**
  * V961 BLOCKSCOUT JSON-RPC CALL-SITE AUDIT DEPLOY-FIX:
  * - diagnostic-only accounting upgrade; no provider routing/scoring/risk/qualification changes;
  * - meters authenticated Blockscout /json-rpc calls by RPC method and exact call site;
@@ -8445,7 +8453,7 @@
 /* V974: preserve V973 post-V4 price refresh, widen the single ReservesLens priority so a verified PoolKey + exact PoolId + USD quote basis can use one real remaining global request even when the analysis sub-cap is exhausted, and bind V438 refresh to the exact verified PoolId already proven by the current candidate. Adds diagnostics only around V179 exact-USD sample availability; no scoring/risk/Telegram threshold changes. */
 /* V973: refresh V438 exact-pool execution-price evidence after production V4/V888 and before V441/V455, so same-scan verified V179 exact-USD swaps are visible to strict market completion. Zero new provider requests and no proof/threshold changes. */
 /* V972: preserve V971 handoff fix and prioritise one existing analysis request for strict ReservesLens market completion without raising any ceiling. */
-const VERSION = "V982";
+const VERSION = "V983";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -25240,6 +25248,109 @@ function compactTier2StateV692(
 }
 
 
+const V983_EMERGENCY_QUALIFICATION_KEEP = 750;
+const V983_EMERGENCY_VERIFIED_LAUNCH_KEEP = 1500;
+const V983_EMERGENCY_TOKEN_ORIGIN_KEEP = 750;
+const V983_EMERGENCY_GENERIC_PROCESSED_KEEP = 300;
+const V983_EMERGENCY_GENERIC_OBSERVATIONS_KEEP = 500;
+const V983_EMERGENCY_GENERIC_REJECTED_KEEP = 150;
+const V983_EMERGENCY_RAW_PROOF_KEEP = 125;
+
+/*
+ * V983 emergency Tier 3 is reached only when V692 Tier 1 + Tier 2 still leave
+ * the authoritative state at/above Cloudflare KV's 25 MiB value limit.
+ * It trims only bounded diagnostic/history working sets already classified as
+ * disposable/derivable by V692. Confirmed detector/source definitions, current
+ * scanner candidates, scoring, risk and Telegram qualification state are not
+ * touched. The goal is to create durable headroom instead of merely shaving a
+ * few bytes below the hard limit for one scan.
+ */
+function compactTier3EmergencyStateV983(
+  state,
+  telemetry
+) {
+  const audit = state?.qualificationAuditV663;
+  if (audit && typeof audit === "object") {
+    const trimmed = trimArrayTailV692(
+      audit.records,
+      V983_EMERGENCY_QUALIFICATION_KEEP
+    );
+    audit.records = trimmed.value;
+    audit.maxRecords = V983_EMERGENCY_QUALIFICATION_KEEP;
+    addTrimCountV692(telemetry, "V983.qualificationAuditRecords", trimmed.removed);
+  }
+
+  const meter = state?.verifiedLaunchMeterV470;
+  if (meter && typeof meter === "object") {
+    const trimmed = trimArrayTailV692(
+      meter.records,
+      V983_EMERGENCY_VERIFIED_LAUNCH_KEEP
+    );
+    meter.records = trimmed.value;
+    meter.maxRecords = V983_EMERGENCY_VERIFIED_LAUNCH_KEEP;
+    if (safeNumber(trimmed.removed) > 0) {
+      meter.droppedForCapacity = safeNumber(meter.droppedForCapacity) + safeNumber(trimmed.removed);
+      meter.capacityTruncated = true;
+    }
+    addTrimCountV692(telemetry, "V983.verifiedLaunchMeterRecords", trimmed.removed);
+  }
+
+  const origin = state?.tokenOriginTraceV477;
+  if (origin && typeof origin === "object") {
+    if (Array.isArray(origin.recentVerifiedOrigins)) {
+      const recent = trimArrayTailV692(origin.recentVerifiedOrigins, 75);
+      origin.recentVerifiedOrigins = recent.value;
+      addTrimCountV692(telemetry, "V983.recentVerifiedOrigins", recent.removed);
+    }
+    if (origin.tokenOrigins && typeof origin.tokenOrigins === "object") {
+      const rows = trimObjectInsertionTailV692(
+        origin.tokenOrigins,
+        V983_EMERGENCY_TOKEN_ORIGIN_KEEP
+      );
+      origin.tokenOrigins = rows.value;
+      if (safeNumber(rows.removed) > 0) {
+        const clusters = origin.creatorClusters && typeof origin.creatorClusters === "object"
+          ? Object.keys(origin.creatorClusters).length
+          : 0;
+        origin.creatorClusters = {};
+        addTrimCountV692(telemetry, "V983.tokenOriginRows", rows.removed);
+        addTrimCountV692(telemetry, "V983.derivedCreatorClustersReset", clusters);
+      }
+    }
+  }
+
+  const generic = state?.genericUnknownSourceProofV517;
+  if (generic && typeof generic === "object") {
+    const specs = [
+      ["processedReceipts", V983_EMERGENCY_GENERIC_PROCESSED_KEEP],
+      ["observations", V983_EMERGENCY_GENERIC_OBSERVATIONS_KEEP],
+      ["rejectedPatterns", V983_EMERGENCY_GENERIC_REJECTED_KEEP]
+    ];
+    for (const [field, keep] of specs) {
+      const trimmed = trimObjectInsertionTailV692(generic[field], keep);
+      generic[field] = trimmed.value;
+      addTrimCountV692(telemetry, `V983.genericUnknownSourceProofV517.${field}`, trimmed.removed);
+    }
+  }
+
+  const rawProofRoots = [
+    ["dopplerWholeReceiptPatternV512", ["processedReceipts", "receiptObservations"]],
+    ["dopplerCanonicalPatternProofV513", ["processedValidationReceipts", "validationProofs", "rejectedPatternKeys"]],
+    ["dopplerExactMechanismProofV511", ["processedReceipts", "receiptProofs"]],
+    ["ponsV2CreationReceiptProofV509", ["processedReceipts", "proofs"]]
+  ];
+  for (const [rootName, fields] of rawProofRoots) {
+    const root = state?.[rootName];
+    if (!root || typeof root !== "object") continue;
+    for (const field of fields) {
+      const trimmed = trimObjectInsertionTailV692(root[field], V983_EMERGENCY_RAW_PROOF_KEEP);
+      root[field] = trimmed.value;
+      addTrimCountV692(telemetry, `V983.${rootName}.${field}`, trimmed.removed);
+    }
+  }
+}
+
+
 function applyPreventativeStateCapsV693(
   state
 ) {
@@ -26615,26 +26726,91 @@ async function writeState(
         compactBytesV982 >=
         V692_KV_HARD_LIMIT_BYTES
       ) {
+        /*
+         * V983: V982 proved that the normal V692 caps can leave the state only
+         * slightly above the KV hard limit. Apply one emergency history-only
+         * tier and retry once, creating real headroom for future scans.
+         */
+        compactTier3EmergencyStateV983(
+          state,
+          telemetryV982
+        );
+
+        const emergencySerializedV983 =
+          jsonStringifySafeV246(
+            state,
+            0
+          );
+
+        const emergencyBytesV983 =
+          utf8BytesV692(
+            emergencySerializedV983
+          );
+
+        const trimmedV983 = {
+          ...(telemetryV982.lastTrimmed || {})
+        };
+
+        telemetryV982.lastAfterBytes = emergencyBytesV983;
+        telemetryV982.lastTier3AppliedV983 = true;
+        telemetryV982.lastBelowHardLimit =
+          emergencyBytesV983 < V692_KV_HARD_LIMIT_BYTES;
+        telemetryV982.lastTargetMet =
+          emergencyBytesV983 <= V692_STATE_TARGET_BYTES;
+
+        if (
+          emergencyBytesV983 >=
+          V692_KV_HARD_LIMIT_BYTES
+        ) {
+          return {
+            saved: false,
+            binding,
+            error:
+              "STATE_STILL_TOO_LARGE_AFTER_EMERGENCY_TIER3_V983",
+            stateCompactionV693: {
+              mode:
+                "AUTOMATIC_EMERGENCY_TIER3_FAILED_V983",
+              beforeBytes: bytesV693,
+              afterTier2Bytes: compactBytesV982,
+              afterBytes: emergencyBytesV983,
+              targetBytes: V692_STATE_TARGET_BYTES,
+              hardLimitBytes: V692_KV_HARD_LIMIT_BYTES,
+              maintenanceRoute: "/compact-state-v693",
+              preventativeTrimmed:
+                preventativeV693?.trimmed || {},
+              automaticTrimmedV983: trimmedV983,
+              directionalRetentionV698,
+              fullStateSerializations: 3,
+              externalProviderRequestsAdded: 0
+            }
+          };
+        }
+
+        await kv.put(
+          STATE_KEY,
+          emergencySerializedV983
+        );
+
         return {
-          saved: false,
+          saved: true,
           binding,
-          error:
-            "STATE_STILL_TOO_LARGE_AFTER_AUTOMATIC_COMPACTION_V982",
+          error: null,
           stateCompactionV693: {
             mode:
-              "AUTOMATIC_OVERSIZE_FALLBACK_V982",
+              "AUTOMATIC_EMERGENCY_TIER3_SAVED_V983",
             beforeBytes: bytesV693,
-            afterBytes: compactBytesV982,
+            afterTier2Bytes: compactBytesV982,
+            afterBytes: emergencyBytesV983,
             targetBytes: V692_STATE_TARGET_BYTES,
             hardLimitBytes: V692_KV_HARD_LIMIT_BYTES,
-            maintenanceRoute:
-              "/compact-state-v693",
+            targetMet:
+              emergencyBytesV983 <= V692_STATE_TARGET_BYTES,
+            belowHardLimit: true,
             preventativeTrimmed:
               preventativeV693?.trimmed || {},
-            automaticTrimmedV982:
-              trimmedV982,
+            automaticTrimmedV983: trimmedV983,
             directionalRetentionV698,
-            fullStateSerializations: 2,
+            fullStateSerializations: 3,
             externalProviderRequestsAdded: 0
           }
         };
@@ -26651,7 +26827,7 @@ async function writeState(
         error: null,
         stateCompactionV693: {
           mode:
-            "AUTOMATIC_OVERSIZE_FALLBACK_SAVED_V982",
+            "AUTOMATIC_OVERSIZE_FALLBACK_SAVED_V983",
           beforeBytes: bytesV693,
           afterBytes: compactBytesV982,
           targetBytes: V692_STATE_TARGET_BYTES,
@@ -167317,7 +167493,7 @@ function launchCoverageTelegramMessageV474(state) {
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
     "V981 adds zero-request launch-coverage persistence timestamps and scheduler relay proof; scanner logic, provider ceilings, scoring, risk and Telegram thresholds are unchanged.",
-    "V982 automatically applies the existing safe V692 Tier-1/Tier-2 retention caps only when a normal state write would exceed the KV hard limit, then retries that same authoritative write once; no provider, scoring, risk or Telegram thresholds are changed.",
+    "V983 preserves V982 Tier-1/Tier-2 compaction and adds one emergency history-only Tier-3 retry when the state is still above KV's hard limit; scanner logic, provider ceilings, scoring, risk and Telegram thresholds are unchanged.",
     "<i>V701 lets one same-token protected V666 holder-row request borrow only the V675 fifth/rescue identity slot, while four ERC20 identity requests, hard 42 and Telegram reserve remain protected. All V687-V700 working behaviour is preserved.</i>"
   ].join("\n");
 }
@@ -169815,7 +169991,7 @@ async function telegramCommandReplyV271(
       `Success: <b>${lastV969?.success === true || lastV969?.ok === true ? "YES" : lastV969?.success === false || lastV969?.ok === false ? "NO" : "UNVERIFIED"}</b>`,
       `Failure: <code>${escapeHtml(String(lastV969?.failure || lastV969?.error || "NONE"))}</code>`,
       "",
-      "💾 <b>V982 launch-coverage persistence proof</b>",
+      "💾 <b>V983 launch-coverage persistence proof</b>",
       `State save succeeded: <b>${lastV969?.launchCoveragePersistenceV981?.stateSaved === true ? "YES" : lastV969?.launchCoveragePersistenceV981?.stateSaved === false ? "NO" : "N/A"}</b>`,
       `Relay scan version: <b>${escapeHtml(String(lastV969?.launchCoveragePersistenceV981?.scanVersion || "N/A"))}</b>`,
       `Coverage scans observed by completed scan: <b>${safeNumber(lastV969?.launchCoveragePersistenceV981?.cumulativeScansObserved)}</b>`,
@@ -169824,8 +170000,10 @@ async function telegramCommandReplyV271(
       `Save error: <code>${escapeHtml(String(lastV969?.launchCoveragePersistenceV981?.saveError || "NONE"))}</code>`,
       `State compaction mode: <code>${escapeHtml(String(lastV969?.launchCoveragePersistenceV981?.stateCompactionMode || "NONE"))}</code>`,
       `State bytes after write/compaction: <b>${safeNumber(lastV969?.launchCoveragePersistenceV981?.stateCompactionAfterBytes)}</b>`,
+      `V983 scheduler re-arm verified: <b>${lastV969?.schedulerRearmV983?.armed === true ? "YES" : lastV969?.schedulerRearmV983?.armed === false ? "NO" : "N/A"}</b>`,
+      `V983 re-arm retry / error: <b>${lastV969?.schedulerRearmV983?.retryUsed === true ? "YES" : "NO"}</b> · <code>${escapeHtml(String(lastV969?.schedulerRearmV983?.error || "NONE"))}</code>`,
       "",
-      "<i>Read-only. Zero provider requests, zero scanner writes. V982 preserves the V981 relay proof and automatically rescues oversized state writes with the existing safe V692 compaction tiers.</i>"
+      "<i>Read-only. Zero provider requests and zero scanner writes. V983 adds an emergency history-only Tier-3 KV rescue and verified scheduler re-arm while preserving scanner, provider, scoring, risk and Telegram rules.</i>"
     ].join("\n");
 
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
@@ -182275,6 +182453,50 @@ export class ScanSchedulerV673 {
       }
     };
 
+    /*
+     * V983 scheduler hardening: arm the next alarm BEFORE writing diagnostic
+     * status, verify it, and retry once if Cloudflare storage reports no alarm.
+     * A failed/oversized KV state write in the relayed scan must never be able to
+     * strand the five-minute scheduler with Alarm armed: NO.
+     */
+    let alarmRearmV983 = {
+      attempted: true,
+      requestedAt: nextAlarmAt,
+      armed: false,
+      verifiedAt: null,
+      retryUsed: false,
+      error: null
+    };
+
+    try {
+      await this.state.storage.setAlarm(nextAlarmAt);
+      let verifiedAlarmV983 = Number(await this.state.storage.getAlarm());
+      if (!Number.isFinite(verifiedAlarmV983) || verifiedAlarmV983 <= completedAt) {
+        alarmRearmV983.retryUsed = true;
+        const retryAtV983 = followUpNeededV724
+          ? Date.now() + 1500
+          : nextAlignedScanBoundaryV684(Date.now() + 1000);
+        alarmRearmV983.requestedAt = retryAtV983;
+        await this.state.storage.setAlarm(retryAtV983);
+        verifiedAlarmV983 = Number(await this.state.storage.getAlarm());
+      }
+      alarmRearmV983.verifiedAt = Number.isFinite(verifiedAlarmV983)
+        ? verifiedAlarmV983
+        : null;
+      alarmRearmV983.armed =
+        Number.isFinite(verifiedAlarmV983) &&
+        verifiedAlarmV983 > Date.now();
+    } catch (error) {
+      alarmRearmV983.error = errorString(error);
+      console.error("V983_SCHEDULER_REARM_FAILED", alarmRearmV983.error);
+    }
+
+    last.nextAlarmAt = alarmRearmV983.verifiedAt || alarmRearmV983.requestedAt;
+    last.nextAlarmAlignedV684 = last.nextAlarmAt
+      ? isAlignedScanBoundaryV684(last.nextAlarmAt)
+      : false;
+    last.schedulerRearmV983 = alarmRearmV983;
+
     try {
       await this.state.storage.put("v673:last", last);
     } catch (error) {
@@ -182284,9 +182506,8 @@ export class ScanSchedulerV673 {
     // V724 may arm one immediate qualification follow-up when a primary scan leaves
     // persisted retries after either physical exhaustion or >=40/42 logical requests;
     // otherwise retain the exact five-minute wall-clock cadence.
-    // We deliberately catch scan failures above so Cloudflare alarm retries cannot
-    // create duplicate scans.
-    await this.state.storage.setAlarm(nextAlarmAt);
+    // V983 verifies the re-arm before diagnostic persistence so scanner cadence is
+    // protected even when the relayed authoritative KV state cannot be saved.
 
     console.log(
       jsonStringifySafeV246({
