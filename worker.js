@@ -8421,11 +8421,12 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
+/* V976: one bounded strict-market exact-pool collector handoff. After production V4, select the same class of verified PoolKey/PoolId market candidate, mirror its already-verified PoolKey into the canonical pool registry when safe, and allow at most ONE recent exact-PoolId Swap query while preserving one request of headroom for ReservesLens. Returned rows use the existing V254/V179 exact-USD decoder/persistence path. No proof, scoring, risk or Telegram threshold is weakened. */
 /* V975: diagnostic-only exact-pool swap → V179 trace for the same candidate selected by the strict on-chain Market lane. Reuses the existing V888/V895 collector result and last-real-attempt record; adds zero provider requests and changes no routing, proof standard, scoring, risk, request ceiling or Telegram threshold. */
 /* V974: preserve V973 post-V4 price refresh, widen the single ReservesLens priority so a verified PoolKey + exact PoolId + USD quote basis can use one real remaining global request even when the analysis sub-cap is exhausted, and bind V438 refresh to the exact verified PoolId already proven by the current candidate. Adds diagnostics only around V179 exact-USD sample availability; no scoring/risk/Telegram threshold changes. */
 /* V973: refresh V438 exact-pool execution-price evidence after production V4/V888 and before V441/V455, so same-scan verified V179 exact-USD swaps are visible to strict market completion. Zero new provider requests and no proof/threshold changes. */
 /* V972: preserve V971 handoff fix and prioritise one existing analysis request for strict ReservesLens market completion without raising any ceiling. */
-const VERSION = "V975";
+const VERSION = "V976";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -14276,6 +14277,254 @@ function onChainMarketFoundationV438(
 /* =========================================================
    V973 POST-V4 EXACT-POOL PRICE REFRESH
    ========================================================= */
+
+
+async function marketExactPoolCollectorHandoffV976(
+  env,
+  state,
+  budget,
+  candidates,
+  latestNumber
+) {
+  const base = {
+    version: "V976",
+    runtimeVersion: VERSION,
+    recordedAt: Date.now(),
+    selected: false,
+    candidateAddress: null,
+    symbol: null,
+    poolId: null,
+    completePoolKey: false,
+    exactIdentityVerified: false,
+    registryPresentBefore: false,
+    registryTokenMatchBefore: false,
+    registrySeedAttempted: false,
+    registrySeeded: false,
+    registryConflict: false,
+    requestEligible: false,
+    requestAttempted: false,
+    requestSent: false,
+    rpcProvider: null,
+    rpcOk: false,
+    rpcError: null,
+    fromBlock: null,
+    toBlock: null,
+    rawRows: 0,
+    exactTopicRows: 0,
+    persistRowsSeen: 0,
+    decodedCandidateTrades: 0,
+    exactUsdTrades: 0,
+    inserted: 0,
+    v179RowsAfter: 0,
+    status: "NO_ELIGIBLE_MARKET_EXACT_POOL_TARGET_V976",
+    maxRequestsThisScan: 1,
+    requestsUsed: 0,
+    preservesLensHeadroom: true,
+    proofRequirementsChanged: false,
+    scoringChanged: false,
+    riskChanged: false,
+    telegramThresholdChanged: false
+  };
+
+  const rows = (Array.isArray(candidates) ? candidates : [])
+    .map(candidate => {
+      const token = normalize(candidate?.address);
+      const key = completePoolKeyV441(state, candidate);
+      const readiness = reservesLensValuationReadinessV447(state, candidate, key);
+      const identity = candidate?.onChainPoolIdentityV153 || null;
+      const poolId = normalize(key?.poolId || identity?.poolId || "");
+      const identityPoolId = normalize(identity?.poolId || identity?.pairAddress || "");
+      const exactIdentityVerified =
+        identity?.verified === true &&
+        /^0x[a-f0-9]{64}$/.test(String(identityPoolId || "")) &&
+        identityPoolId === poolId &&
+        normalize(identity?.candidateAddress || token) === token;
+      const marketVerified = candidate?.market?.verified === true;
+      const keyHasToken =
+        normalize(key?.currency0) === token || normalize(key?.currency1) === token;
+      const score =
+        (marketVerified ? 0 : 100000) +
+        (key?.verified === true ? 50000 : 0) +
+        (exactIdentityVerified ? 25000 : 0) +
+        (readiness?.quoteUsdReady === true ? 5000 : 0) +
+        (readiness?.priceVerified === true ? 1000 : 0) +
+        safeNumber(candidate?.analysisPriority);
+      return {candidate, token, key, readiness, identity, poolId, exactIdentityVerified, marketVerified, keyHasToken, score};
+    })
+    .filter(row =>
+      isAddress(row.token) &&
+      row.marketVerified !== true &&
+      row.key?.verified === true &&
+      row.keyHasToken === true &&
+      row.exactIdentityVerified === true &&
+      row.readiness?.quoteUsdReady === true
+    )
+    .sort((a,b)=>b.score-a.score);
+
+  const selected = rows[0] || null;
+  if (!selected) return base;
+
+  const {candidate, token, key, identity, poolId} = selected;
+  Object.assign(base, {
+    selected: true,
+    candidateAddress: token,
+    symbol: candidate?.symbol || null,
+    poolId,
+    completePoolKey: true,
+    exactIdentityVerified: true
+  });
+
+  state.poolRegistry = state.poolRegistry && typeof state.poolRegistry === "object"
+    ? state.poolRegistry : {};
+  const existing = state.poolRegistry?.[poolId] || null;
+  const existingC0 = normalize(existing?.currency0 || existing?.token0 || existing?.currencyA || "");
+  const existingC1 = normalize(existing?.currency1 || existing?.token1 || existing?.currencyB || "");
+  base.registryPresentBefore = Boolean(existing);
+  base.registryTokenMatchBefore = existingC0 === token || existingC1 === token;
+
+  if (!existing) {
+    base.registrySeedAttempted = true;
+    const seeded = registerPoolMapping(state, {
+      poolId,
+      currency0: key.currency0,
+      currency1: key.currency1,
+      fee: key.fee,
+      tickSpacing: key.tickSpacing,
+      hooks: key.hooks,
+      poolKeyCompleteV441: true,
+      poolKeySourceV441: key.source || "V976_VERIFIED_POOLKEY_HANDOFF"
+    });
+    base.registrySeeded = seeded?.registered === true;
+  } else if (
+    (existingC0 && existingC0 !== normalize(key.currency0)) ||
+    (existingC1 && existingC1 !== normalize(key.currency1))
+  ) {
+    base.registryConflict = true;
+    base.status = "CANONICAL_POOL_REGISTRY_CONFLICT_V976";
+    candidate.marketExactPoolCollectorHandoffV976 = {...base};
+    return base;
+  }
+
+  const registryNow = state.poolRegistry?.[poolId] || null;
+  const c0Now = normalize(registryNow?.currency0 || "");
+  const c1Now = normalize(registryNow?.currency1 || "");
+  if (!(c0Now === token || c1Now === token)) {
+    base.status = "VERIFIED_POOLKEY_NOT_AVAILABLE_TO_DECODER_V976";
+    candidate.marketExactPoolCollectorHandoffV976 = {...base};
+    return base;
+  }
+
+  const ledgerBefore = onChainDirectionalStoreV179(state)?.[token];
+  const existingRows = Array.isArray(ledgerBefore?.records)
+    ? ledgerBefore.records.filter(row =>
+        normalize(row?.candidateAddress) === token &&
+        normalize(row?.poolId) === poolId &&
+        row?.exactUsdVerified === true
+      )
+    : [];
+  if (existingRows.length > 0) {
+    base.v179RowsAfter = existingRows.length;
+    base.status = "EXACT_POOL_V179_ROWS_ALREADY_PRESENT_V976";
+    candidate.marketExactPoolCollectorHandoffV976 = {...base};
+    return base;
+  }
+
+  /* Preserve one real request of headroom for the downstream ReservesLens call. */
+  if (!budgetAvailable(budget, "analysis", 2)) {
+    base.status = "PRESERVE_ONE_REQUEST_FOR_RESERVESLENS_V976";
+    candidate.marketExactPoolCollectorHandoffV976 = {...base};
+    return base;
+  }
+
+  base.requestEligible = true;
+  if (!consumeBudget(budget, "analysis", "RPC:V976_MARKET_EXACT_POOL_SWAP", 1)) {
+    base.status = "EXACT_POOL_REQUEST_BLOCKED_BY_EXISTING_BUDGET_V976";
+    candidate.marketExactPoolCollectorHandoffV976 = {...base};
+    return base;
+  }
+
+  const rpcEndpoint = v4PoolLiveRpcEndpointV767(env);
+  const to = Math.max(0, safeNumber(latestNumber));
+  const from = Math.max(0, to - 1999);
+  Object.assign(base, {
+    requestAttempted: true,
+    requestSent: true,
+    requestsUsed: 1,
+    rpcProvider: rpcEndpoint?.name || null,
+    fromBlock: from,
+    toBlock: to
+  });
+
+  const result = await v4PoolLiveRpcCallV767(
+    rpcEndpoint.url,
+    "eth_getLogs",
+    [{
+      address: normalize(POOL_MANAGER),
+      fromBlock: `0x${from.toString(16)}`,
+      toBlock: `0x${to.toString(16)}`,
+      topics: [SWAP_TOPIC, poolId]
+    }]
+  );
+
+  if (result?.ok !== true) {
+    base.rpcError = result?.error || "RPC_FAILED";
+    base.status = "EXACT_POOL_RPC_FAILED_V976";
+    candidate.marketExactPoolCollectorHandoffV976 = {...base};
+    return base;
+  }
+
+  base.rpcOk = true;
+  const rawRows = Array.isArray(result?.result) ? result.result : [];
+  const exactRows = rawRows.filter(log =>
+    normalize(log?.topics?.[0]) === normalize(SWAP_TOPIC) &&
+    normalize(log?.topics?.[1]) === poolId
+  );
+  base.rawRows = rawRows.length;
+  base.exactTopicRows = exactRows.length;
+
+  const quoteTokenAddress = normalize(key.currency0) === token
+    ? normalize(key.currency1)
+    : normalize(key.currency0);
+  const exactWatchIdentity = {
+    verified: true,
+    poolId,
+    candidateAddress: token,
+    quoteTokenAddress
+  };
+
+  const persisted = persistVerifiedUsdTradesV254(
+    state,
+    token,
+    exactRows,
+    state?.verifiedWethUsdGReferenceV452 || null,
+    "LIVE_NOW",
+    exactWatchIdentity
+  );
+
+  base.persistRowsSeen = safeNumber(persisted?.rowsSeen);
+  base.decodedCandidateTrades = safeNumber(persisted?.decodedCandidateTrades);
+  base.exactUsdTrades = safeNumber(persisted?.exactUsdTrades);
+  base.inserted = safeNumber(persisted?.inserted);
+
+  const ledgerAfter = onChainDirectionalStoreV179(state)?.[token];
+  base.v179RowsAfter = Array.isArray(ledgerAfter?.records)
+    ? ledgerAfter.records.filter(row =>
+        normalize(row?.candidateAddress) === token &&
+        normalize(row?.poolId) === poolId &&
+        row?.exactUsdVerified === true
+      ).length
+    : 0;
+
+  base.status = exactRows.length === 0
+    ? "RPC_OK_ZERO_EXACT_POOL_ROWS_LAST_2000_BLOCKS_V976"
+    : base.v179RowsAfter > 0
+      ? "EXACT_POOL_ROWS_PERSISTED_TO_V179_V976"
+      : "EXACT_POOL_ROWS_FOUND_BUT_NO_EXACT_USD_V179_V976";
+
+  candidate.marketExactPoolCollectorHandoffV976 = {...base};
+  state.marketExactPoolCollectorHandoffV976 = {...base};
+  return base;
+}
 
 function refreshOnChainMarketFoundationV973(
   state,
@@ -115285,6 +115534,18 @@ for (
    * This is zero-request evidence handoff only; all V438/V455 proof rules stay
    * unchanged.
    */
+  const marketExactPoolCollectorHandoffV976 =
+    await marketExactPoolCollectorHandoffV976(
+      env,
+      state,
+      budget,
+      candidates,
+      latestNumber
+    );
+
+  state.marketExactPoolCollectorHandoffV976 =
+    marketExactPoolCollectorHandoffV976;
+
   const onChainMarketFoundationRefreshV973 =
     refreshOnChainMarketFoundationV973(
       state,
@@ -118182,6 +118443,49 @@ for (
       v975BackfillFromBlock: backfillMatchesV975 ? safeNumber(currentBackfillV975?.fromBlock) : 0,
       v975BackfillToBlock: backfillMatchesV975 ? safeNumber(currentBackfillV975?.toBlock) : 0,
       v975BackfillReturnedSwapRows: backfillMatchesV975 ? safeNumber(currentBackfillV975?.returnedSwapRows) : 0,
+      v976MarketCollectorSelected:
+        selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.selected === true,
+      v976MarketCollectorTargetMatch:
+        normalize(selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.candidateAddress) === selectedAddressV968 &&
+        normalize(selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.poolId) === selectedPoolV975,
+      v976RegistryPresentBefore:
+        selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.registryPresentBefore === true,
+      v976RegistryTokenMatchBefore:
+        selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.registryTokenMatchBefore === true,
+      v976RegistrySeeded:
+        selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.registrySeeded === true,
+      v976RegistryConflict:
+        selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.registryConflict === true,
+      v976RequestEligible:
+        selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.requestEligible === true,
+      v976RequestAttempted:
+        selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.requestAttempted === true,
+      v976RequestSent:
+        selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.requestSent === true,
+      v976RpcProvider:
+        selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.rpcProvider || null,
+      v976RpcOk:
+        selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.rpcOk === true,
+      v976RpcError:
+        selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.rpcError || null,
+      v976FromBlock:
+        safeNumber(selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.fromBlock),
+      v976ToBlock:
+        safeNumber(selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.toBlock),
+      v976RawRows:
+        safeNumber(selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.rawRows),
+      v976ExactTopicRows:
+        safeNumber(selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.exactTopicRows),
+      v976DecodedCandidateTrades:
+        safeNumber(selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.decodedCandidateTrades),
+      v976ExactUsdTrades:
+        safeNumber(selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.exactUsdTrades),
+      v976Inserted:
+        safeNumber(selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.inserted),
+      v976V179RowsAfter:
+        safeNumber(selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.v179RowsAfter),
+      v976Status:
+        selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.status || null,
       v455PoolKeyVerified: eligibilityV968?.poolKeyVerified === true,
       v455ExactPoolIdentity: eligibilityV968?.exactPoolIdentity === true,
       lensVerified: eligibilityV968?.lensVerified === true,
@@ -176469,7 +176773,7 @@ function marketCompletionAuditTelegramV968(result) {
   const yesNo = v => v === true ? "YES" : v === false ? "NO" : "N/A";
   const reasons = Array.isArray(r?.failureReasons) ? r.failureReasons : [];
   return [
-    "🧪 <b>On-Chain Market Completion Audit — V975</b>",
+    "🧪 <b>On-Chain Market Completion Audit — V976</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Scan version: <b>${escapeHtml(String(r?.scanVersion || "NONE"))}</b>`,
@@ -176514,6 +176818,17 @@ function marketCompletionAuditTelegramV968(result) {
     `Collector classification: <code>${escapeHtml(String(r?.v975CollectorClassification || "NONE"))}</code>`,
     `V888 backfill status: <code>${escapeHtml(String(r?.v975BackfillStatus || "NONE"))}</code>`,
     `V888 range / returned swaps: <b>${safeNumber(r?.v975BackfillFromBlock)}→${safeNumber(r?.v975BackfillToBlock)} / ${safeNumber(r?.v975BackfillReturnedSwapRows)}</b>`,
+    "",
+    "🔗 <b>V976 strict-market exact-pool handoff</b>",
+    `Selected / same market target: <b>${yesNo(r?.v976MarketCollectorSelected)} / ${yesNo(r?.v976MarketCollectorTargetMatch)}</b>`,
+    `Registry before present / token match / seeded: <b>${yesNo(r?.v976RegistryPresentBefore)} / ${yesNo(r?.v976RegistryTokenMatchBefore)} / ${yesNo(r?.v976RegistrySeeded)}</b>`,
+    `Registry conflict: <b>${yesNo(r?.v976RegistryConflict)}</b>`,
+    `Collector eligible / attempted / sent: <b>${yesNo(r?.v976RequestEligible)} / ${yesNo(r?.v976RequestAttempted)} / ${yesNo(r?.v976RequestSent)}</b>`,
+    `RPC provider / OK: <b>${escapeHtml(String(r?.v976RpcProvider || "NONE"))} / ${yesNo(r?.v976RpcOk)}</b>`,
+    `RPC error: <code>${escapeHtml(String(r?.v976RpcError || "NONE").slice(0,220))}</code>`,
+    `Range / raw / exact-topic: <b>${safeNumber(r?.v976FromBlock)}→${safeNumber(r?.v976ToBlock)} / ${safeNumber(r?.v976RawRows)} / ${safeNumber(r?.v976ExactTopicRows)}</b>`,
+    `Decoded candidate / exact-USD / inserted / V179 after: <b>${safeNumber(r?.v976DecodedCandidateTrades)} / ${safeNumber(r?.v976ExactUsdTrades)} / ${safeNumber(r?.v976Inserted)} / ${safeNumber(r?.v976V179RowsAfter)}</b>`,
+    `V976 status: <code>${escapeHtml(String(r?.v976Status || "NONE"))}</code>`,
     `V455 sees PoolKey / exact PoolId: <b>${yesNo(r?.v455PoolKeyVerified)} / ${yesNo(r?.v455ExactPoolIdentity)}</b>`,
     `Verified Lens USD liquidity: <b>${yesNo(r?.lensVerified)}</b>`,
     `Liquidity semantics usable: <b>${yesNo(r?.semanticUsable)}</b>`,
@@ -176525,7 +176840,7 @@ function marketCompletionAuditTelegramV968(result) {
     "🚧 <b>Exact failure reason(s)</b>",
     ...(reasons.length ? reasons.slice(0,8).map(x => `• <code>${escapeHtml(String(x))}</code>`) : ["• NONE"]),
     "",
-    "<i>Read-only. Zero provider requests and zero state writes. V975 adds a same-token/same-PoolId trace of the existing V888/V895 exact-pool collector into V179, so zero price samples can be classified as no raw swaps, decode/identity rejection, missing exact-USD conversion, or V179 handoff loss. Proof standards, provider routing, scoring, risk and Telegram thresholds are unchanged.</i>"
+    "<i>Read-only command. V976 adds one bounded same-target exact-PoolId market handoff in the normal scan: it can seed only an already-verified PoolKey into the canonical registry and can use at most one recent exact-pool RPC request while preserving Lens headroom. Returned rows still must pass the existing V254/V179 exact-USD decoder. Proof standards, scoring, risk and Telegram thresholds are unchanged.</i>"
   ].join("\n");
 }
 
