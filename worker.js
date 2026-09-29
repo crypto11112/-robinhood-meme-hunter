@@ -1,5 +1,11 @@
 /**
- * Robinhood Chain Meme Hunter — V988
+ * Robinhood Chain Meme Hunter — V989
+ * V989 MARKET-FALLBACK DIAGNOSTIC CLARITY:
+ * - preserves V988 sequential holder-claim behaviour unchanged;
+ * - fixes /launchcoverage second-target display by falling back to the selected address when the symbol is unavailable;
+ * - exposes existing CoinGecko Demo and CoinMarketCap fallback status inside V656 market diagnostics;
+ * - diagnostic-only: adds zero provider requests and changes no budgets, cooldowns, scoring, risk rules or Telegram thresholds.
+ *
  * V988 SEQUENTIAL HOLDER-CLAIM RE-RANK:
  * - preserves V987 holder-entry rescue and all V983/V986 reliability/reporting fixes;
  * - after protected V666 claim #1 is actually consumed, re-ranks only the remaining unresolved, non-terminal holder/risk candidates before claim #2;
@@ -8480,7 +8486,7 @@
  *   row from consuming claim #2 before the re-rank decision;
  * - max two claims, provider ceilings, risk proofs and Telegram thresholds unchanged.
  */
-const VERSION = "V988";
+const VERSION = "V989";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -110673,7 +110679,25 @@ for (
             fallbackTrigger:
               alternativeV656?.fallbackTrigger || null,
             earliestMarketRetryAt:
-              alternativeV656?.earliestMarketRetryAt || null
+              alternativeV656?.earliestMarketRetryAt || null,
+            coinGeckoDemoV660: alternativeV656?.coinGeckoDemoV660
+              ? {
+                  verified: alternativeV656.coinGeckoDemoV660?.verified === true,
+                  requestSent: alternativeV656.coinGeckoDemoV660?.requestSent === true,
+                  status: alternativeV656.coinGeckoDemoV660?.status || null,
+                  cooldownUntil: alternativeV656.coinGeckoDemoV660?.cooldownUntil || null,
+                  freshEligibleAt: alternativeV656.coinGeckoDemoV660?.freshEligibleAt || null
+                }
+              : null,
+            coinMarketCapV739: alternativeV656?.coinMarketCapV739
+              ? {
+                  verified: alternativeV656.coinMarketCapV739?.verified === true,
+                  requestSent: alternativeV656.coinMarketCapV739?.requestSent === true,
+                  status: alternativeV656.coinMarketCapV739?.status || null,
+                  cooldownUntil: alternativeV656.coinMarketCapV739?.cooldownUntil || null,
+                  freshEligibleAt: alternativeV656.coinMarketCapV739?.freshEligibleAt || null
+                }
+              : null
           },
           onChain: onChainV656
             ? {
@@ -167497,7 +167521,12 @@ function launchCoverageTelegramMessageV985(state) {
       const v987Text = v987
         ? `; V987 holder-priority entry ${v987.enteredHolderIntelligence === true ? "YES" : "NO"}${v987.rescueEntryUsed === true ? " (RESCUE)" : ""} · V666 claim/use ${v987.v666ClaimedForToken === true ? "YES" : "NO"}/${v987.v666UsedForToken === true ? "YES" : "NO"}${v987.v666ConsumeStatus ? ` · ${escapeHtml(String(v987.v666ConsumeStatus))}` : ""}`
         : "";
-      return `• <b>${sym}</b> (<code>${escapeHtml(short)}</code>) — Market: ${market}; Holders: ${holders}; Risk: ${risk}${v987Text}`;
+      const demo = row?.market?.alternative?.coinGeckoDemoV660 || null;
+      const cmc = row?.market?.alternative?.coinMarketCapV739 || null;
+      const fallbackText = (demo || cmc)
+        ? `; Market fallback — Demo: ${escapeHtml(String(demo?.verified === true ? "VERIFIED" : (demo?.status || "N/A")))}${demo?.requestSent === true ? " (REQUESTED)" : ""} · CMC: ${escapeHtml(String(cmc?.verified === true ? "VERIFIED" : (cmc?.status || "N/A")))}${cmc?.requestSent === true ? " (REQUESTED)" : ""}`
+        : "";
+      return `• <b>${sym}</b> (<code>${escapeHtml(short)}</code>) — Market: ${market}; Holders: ${holders}; Risk: ${risk}${fallbackText}${v987Text}`;
     });
 
   const lines = [
@@ -167523,10 +167552,10 @@ function launchCoverageTelegramMessageV985(state) {
     "<b>V656 evidence completion — current/live returned</b>",
     ...(evidence.length ? evidence : ["• No V656 candidate diagnostic captured in this scan."]),
     "",
-    "<b>V988 sequential holder-claim re-rank</b>",
+    "<b>V989 holder-claim / market-fallback diagnostic</b>",
     `First target: ${escapeHtml(String(last?.holderRiskSecondClaimV988?.firstTarget || "NONE"))}`,
     `First claim consumed / re-rank: ${last?.holderRiskSecondClaimV988?.firstClaimConsumed === true ? "YES" : "NO"} / ${last?.holderRiskSecondClaimV988?.rerankTriggered === true ? "YES" : "NO"}`,
-    `Second target: ${escapeHtml(String(last?.holderRiskSecondClaimV988?.selectedSymbol || "NONE"))} · ${escapeHtml(String(last?.holderRiskSecondClaimV988?.selectedReason || "NONE"))}`,
+    `Second target: ${escapeHtml(String(last?.holderRiskSecondClaimV988?.selectedSymbol || last?.holderRiskSecondClaimV988?.selectedAddress || "NONE"))} · ${escapeHtml(String(last?.holderRiskSecondClaimV988?.selectedReason || "NONE"))}`,
     "",
     "<b>Cumulative since V474</b>",
     `Scans observed: ${fmt(c?.scansObserved)}`,
@@ -167539,7 +167568,7 @@ function launchCoverageTelegramMessageV985(state) {
     "⚠️ Probable launches: DATA UNVERIFIED",
     "⚠️ Unsupported launch sources: DATA UNVERIFIED",
     "",
-    "<i>V988 preserves V987 holder-entry rescue and re-ranks the remaining unresolved non-terminal holder candidates only after protected claim #1 is consumed, so claim #2 cannot be opportunistically taken before that decision. Max two claims, hard/provider ceilings, risk proofs and Telegram thresholds are unchanged.</i>"
+    "<i>V989 preserves V988 holder-claim behaviour unchanged. It fixes second-target display clarity and exposes the already-existing CoinGecko Demo/CMC fallback outcome when GeckoTerminal is unavailable. Diagnostic-only: no provider request, budget, cooldown, scoring, risk or Telegram threshold changes.</i>"
   ];
   return lines.join("\\n");
 }
