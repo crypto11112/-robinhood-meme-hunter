@@ -8421,7 +8421,7 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
-const VERSION = "V961";
+const VERSION = "V963";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -169279,7 +169279,9 @@ async function telegramCommandReplyV271(
     parsed.command === "/blockscouttransport" ||
     parsed.command === "/transportusage"
   ) {
-    return {reply:blockscoutTransportAuditTelegramV962(state),state};
+    // V963: assign the diagnostic reply and continue through the proven
+    // Telegram send path. V962 returned early here, so Telegram never sent it.
+    reply = blockscoutTransportAuditTelegramV962(state);
   }
 
   if (
