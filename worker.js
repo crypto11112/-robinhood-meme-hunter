@@ -1,4 +1,13 @@
 /**
+ * V958 BLOCKSCOUT CREDIT-EFFICIENCY PASS:
+ * - preserves V957 as the rollback baseline and preserves all verification/scoring/Telegram thresholds;
+ * - reuses verified holder intelligence for up to 30 minutes ONLY for non-priority/background analysis, while the existing 20-minute Telegram strong-confirmation freshness ceiling remains unchanged;
+ * - priority/evidence-completion candidates continue to require the existing fresh-holder path when the normal 20-minute cache has expired;
+ * - routes V551 continuous exact-pool eth_getLogs ranges <=2,000 blocks to Validation Cloud first; Blockscout remains a budgeted fallback only when Validation Cloud cannot provide the exact range;
+ * - ranges above the proven Validation Cloud 2,000-block limit keep the existing Blockscout path unchanged;
+ * - no holder/concentration/risk evidence is invented, no stale evidence is promoted to fresh, and no request ceiling is raised.
+ */
+/**
  * V957 V3 HTTP PROVIDER ROUTE DIAGNOSTIC DISPLAY FIX:
  * - fixes /v3status display gating so persisted V605 HTTP-poll telemetry renders whenever the
  *   collector status itself proves HTTP polling is active;
@@ -8399,7 +8408,7 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
-const VERSION = "V957";
+const VERSION = "V958";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -14186,6 +14195,21 @@ const HOLDER_CACHE_MS =
 
 const HOLDER_STALE_CACHE_MS =
   2 * 60 * 60 * 1000;
+
+/*
+ * V958 Blockscout credit efficiency.
+ * The normal verified holder cache remains 20 minutes and therefore preserves
+ * existing alert freshness semantics. Lower-priority/background analysis may
+ * reuse the same already-VERIFIED snapshot for another 10 minutes, but that
+ * extended reuse remains cached/stale for Telegram and can never satisfy the
+ * existing <=20-minute strong-confirmation freshness ceiling. Priority
+ * completion bypasses this extension and refreshes through the existing path.
+ */
+const HOLDER_BACKGROUND_REUSE_MS_V958 =
+  30 * 60 * 1000;
+
+/* Validation Cloud's explicitly proven safe eth_getLogs range in this bot. */
+const V958_VALIDATION_CLOUD_V551_MAX_BLOCKS = 2000;
 
 /* V225: display-only verified holder-count recovery.
  * This cache never changes countersVerified, concentration, scoring or qualification.
@@ -20178,6 +20202,19 @@ function consumeBudget(
   const protectedDirectionalWatchTypeV553 =
     "BLOCKSCOUT_V551_CONTINUOUS_EXACT_POOL_LOGS";
 
+  /*
+   * V958: when V551 uses Validation Cloud through rpcCall(), consumeBudget()
+   * sees the generic RPC:eth_getLogs type. Treat that single explicitly-armed
+   * request as the same protected V551 slot; no other eth_getLogs request gains
+   * this priority and no request ceiling changes.
+   */
+  const protectedDirectionalWatchRequestV958 =
+    type === protectedDirectionalWatchTypeV553 ||
+    (
+      type === "RPC:eth_getLogs" &&
+      budget?.analysis?.v958DirectionalRpcActive === true
+    );
+
   if (
     !priorityHolderProRequestV666 &&
     !holderProCounterContinuationV680 &&
@@ -20186,7 +20223,7 @@ function consumeBudget(
     !qualificationPriorityV713 &&
     phase === "analysis" &&
     directionalWatchReserveV553?.active === true &&
-    type !== protectedDirectionalWatchTypeV553
+    !protectedDirectionalWatchRequestV958
   ) {
     const protectedTypesV553 = new Set([
       protectedUsdGTypeV182,
@@ -21829,8 +21866,8 @@ function blockscoutProUsageTelegramMessageV611(state,fallbackV615=null){
     "",
     `Pre-V611 usage: <b>DATA UNVERIFIED</b>`,
     `Actual account-wide usage: <b>DATA UNVERIFIED</b>`,
-    `V955 accounting/routing: <b>V841 METERED + VALIDATION CLOUD FIRST FOR V3 HTTP LOGS/HEAD</b>`,
-    "<i>Bot-side forward-only estimate. Blockscout Dev Portal remains authoritative. V955 preserves the V954 V841 accounting fix and routes routine V3 HTTP log/head work to Validation Cloud before Blockscout fallback; older/pre-V954 usage cannot be backfilled. /blockscoutusage makes no external provider request and does not mutate meter state; it also reads the V3 fallback singleton meter internally.</i>"
+    `V958 accounting/routing: <b>V841 METERED + VALIDATION CLOUD FIRST FOR V3 + V551 ELIGIBLE LOG RANGES</b>`,
+    "<i>Bot-side forward-only estimate. Blockscout Dev Portal remains authoritative. V958 preserves V957/V955 routing, moves eligible <=2,000-block V551 exact-pool log ranges to Validation Cloud before Blockscout fallback, and reuses already-verified holder evidence for background analysis up to 30 minutes while keeping the prior 20-minute Telegram freshness ceiling unchanged. Older usage cannot be backfilled. /blockscoutusage is read-only.</i>"
   );
 
   return lines.join("\n");
@@ -69411,6 +69448,58 @@ async function holderIntelligence(
   }
 
   /*
+   * V958: reduce repeated Blockscout holder+counter refreshes for background
+   * candidates only. This extension begins only after the proven 20-minute
+   * normal cache has expired and ends at 30 minutes. It is NEVER used for a
+   * priority completion candidate. The returned row remains explicitly cached
+   * with its real age, so telegramCoreEvidenceFreshnessV169() still rejects it
+   * beyond the unchanged 20-minute alert ceiling. If this token later becomes
+   * priority, the extension is bypassed and the existing fresh provider path
+   * runs. Pair-infrastructure correction protection is preserved.
+   */
+  const backgroundHolderCacheV958 =
+    priorityCompletion !== true
+      ? cachedHolderIntelligence(
+          watched,
+          HOLDER_BACKGROUND_REUSE_MS_V958
+        )
+      : null;
+
+  const backgroundPairMisclassifiedV958 =
+    Boolean(
+      backgroundHolderCacheV958 &&
+      verifiedPairAddress &&
+      Array.isArray(backgroundHolderCacheV958.topHolders) &&
+      backgroundHolderCacheV958.topHolders.some(
+        holder =>
+          normalize(holder?.address) === verifiedPairAddress &&
+          holder?.infrastructure !== true
+      )
+    );
+
+  if (
+    backgroundHolderCacheV958 &&
+    !backgroundPairMisclassifiedV958
+  ) {
+    return {
+      ...backgroundHolderCacheV958,
+      holderSource:
+        "CACHE_V958_CREDIT_EFFICIENCY",
+      creditEfficiencyV958: {
+        reusedVerifiedBackgroundHolderCache: true,
+        priorityCompletion: false,
+        cacheAgeMs:
+          safeNumber(backgroundHolderCacheV958.holderCacheAgeMs),
+        maximumReuseAgeMs:
+          HOLDER_BACKGROUND_REUSE_MS_V958,
+        telegramFreshnessCeilingUnchangedMs:
+          TELEGRAM_HOLDER_STRONG_CONFIRMATION_MAX_AGE_MS_V168,
+        freshEvidencePromoted: false
+      }
+    };
+  }
+
+  /*
    * V149: repeated newly-launched PoolManager-dominant holder responses can
    * contain no usable external ownership rows yet. Reuse that unverified
    * state briefly instead of repeating the same holder API work every scan.
@@ -87879,7 +87968,13 @@ async function advanceDirectionalWatchV551({
     fullTokenMarketCoverageClaimed:false,
     scoringChanged:false,
     qualificationChanged:false,
-    telegramThresholdChanged:false
+    telegramThresholdChanged:false,
+    creditEfficiencyV958:{
+      validationCloudFirstForV551:true,
+      validationCloudMaxBlocks:V958_VALIDATION_CLOUD_V551_MAX_BLOCKS,
+      backgroundHolderReuseMaxAgeMs:HOLDER_BACKGROUND_REUSE_MS_V958,
+      telegramHolderFreshnessUnchanged:true
+    }
   };
 
   if (!candidate) return base;
@@ -88036,24 +88131,34 @@ async function advanceDirectionalWatchV551({
   const fromBlock = lastCollectedBlock + 1;
   const toBlock = Math.min(head, fromBlock + configuredSpan - 1);
 
-  if (!consumeBudget(budget, "analysis", "BLOCKSCOUT_V551_CONTINUOUS_EXACT_POOL_LOGS")) {
-    return {...base,fromBlock,toBlock,status:"ANALYSIS_BUDGET_PROTECTED_V551"};
-  }
+  /*
+   * V958: V551 used Blockscout indexed getLogs for every exact-pool advance.
+   * For ranges inside Validation Cloud's proven <=2,000-block limit, consume
+   * the same analysis slot through the normal JSON-RPC health/accounting path
+   * and ask Validation Cloud first. Blockscout is retained as a second,
+   * separately-budgeted fallback only if that exact RPC request fails. Larger
+   * ranges preserve the existing Blockscout path unchanged.
+   */
+  const validationCloudV551EligibleV958 =
+    validationCloudConfiguredV627(env) &&
+    (toBlock - fromBlock + 1) <=
+      V958_VALIDATION_CLOUD_V551_MAX_BLOCKS;
 
-  const provider = env?.BLOCKSCOUT_PRO_API_KEY
+  let provider = null;
+  let blockscoutProviderV958 = env?.BLOCKSCOUT_PRO_API_KEY
     ? "BLOCKSCOUT_PRO_UNIVERSAL_V2"
     : "BLOCKSCOUT_PUBLIC";
-  const apiBase = provider === "BLOCKSCOUT_PRO_UNIVERSAL_V2"
+  const apiBaseV958 = blockscoutProviderV958 === "BLOCKSCOUT_PRO_UNIVERSAL_V2"
     ? `${BLOCKSCOUT_PRO}/v2/api?chain_id=${BLOCKSCOUT_PRO_CHAIN_ID}`
     : `${BLOCKSCOUT}/api`;
-  const separator = apiBase.includes("?") ? "&" : "?";
-  const apiKeySuffix = provider === "BLOCKSCOUT_PRO_UNIVERSAL_V2"
+  const separatorV958 = apiBaseV958.includes("?") ? "&" : "?";
+  const apiKeySuffixV958 = blockscoutProviderV958 === "BLOCKSCOUT_PRO_UNIVERSAL_V2"
     ? `&apikey=${encodeURIComponent(env.BLOCKSCOUT_PRO_API_KEY)}`
     : "";
 
-  const logsUrl = `${apiBase}${separator}module=logs&action=getLogs` +
+  const logsUrlV958 = `${apiBaseV958}${separatorV958}module=logs&action=getLogs` +
     `&fromBlock=${fromBlock}&toBlock=${toBlock}&address=${POOL_MANAGER}` +
-    `&topic0=${SWAP_TOPIC}&topic1=${poolId}&topic0_1_opr=and${apiKeySuffix}`;
+    `&topic0=${SWAP_TOPIC}&topic1=${poolId}&topic0_1_opr=and${apiKeySuffixV958}`;
 
   candidate.lastAttemptAt = Date.now();
   if (
@@ -88109,38 +88214,123 @@ async function advanceDirectionalWatchV551({
   }
 
   try {
-    if(provider==="BLOCKSCOUT_PRO_UNIVERSAL_V2"){
-      recordBlockscoutProUsageV611(
-        state,
-        "V551_CONTINUOUS_EXACT_POOL_LOGS",
-        BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
-      );
-    }
-    const response = await fetch(logsUrl,{headers:{accept:"application/json"}});
-    if(provider==="BLOCKSCOUT_PRO_UNIVERSAL_V2"){
-      updateBlockscoutProHttpStatusV611(
-        state,
-        "V551_CONTINUOUS_EXACT_POOL_LOGS",
-        response.status
-      );
-    }
-    if (rawOnlyV740 && candidate?.rawRangeTraceV748) {
-      candidate.rawRangeTraceV748.httpStatus = response.status;
-      candidate.rawRangeTraceV748.status = response.ok
-        ? "HTTP_OK_AWAITING_ROWS_V748"
-        : `HTTP_${response.status}_V748`;
-    }
-    if (!response.ok) {
-      candidate.lastStatus = `BLOCKSCOUT_HTTP_${response.status}_V551`;
-      candidate.updatedAt = Date.now();
-      return {
-        ...base,attempted:true,requestConsumed:true,fromBlock,toBlock,provider,
-        status:candidate.lastStatus
-      };
+    let rows = null;
+    let responseStatusV958 = null;
+    let validationCloudAttemptedV958 = false;
+    let validationCloudErrorV958 = null;
+    let blockscoutFallbackAttemptedV958 = false;
+
+    if (validationCloudV551EligibleV958) {
+      validationCloudAttemptedV958 = true;
+      try {
+        budget.analysis.v958DirectionalRpcActive = true;
+        let vcResultV958;
+        try {
+          vcResultV958 = await rpcCall(
+            validationCloudRpcUrlV627(env),
+            "eth_getLogs",
+            [{
+              fromBlock: `0x${BigInt(fromBlock).toString(16)}`,
+              toBlock: `0x${BigInt(toBlock).toString(16)}`,
+              address: POOL_MANAGER,
+              topics: [SWAP_TOPIC, poolId]
+            }],
+            budget,
+            "analysis"
+          );
+        } finally {
+          budget.analysis.v958DirectionalRpcActive = false;
+        }
+
+        if (!Array.isArray(vcResultV958)) {
+          throw new Error("VALIDATION_CLOUD_INVALID_LOG_RESULT_V958");
+        }
+
+        rows = vcResultV958;
+        provider = "VALIDATION_CLOUD_V958";
+        responseStatusV958 = 200;
+      } catch (errorV958) {
+        validationCloudErrorV958 =
+          errorString(errorV958);
+      }
     }
 
-    const payload = await response.json();
-    const rows = Array.isArray(payload?.result) ? payload.result : [];
+    if (!Array.isArray(rows)) {
+      const blockscoutBudgetTypeV958 =
+        "BLOCKSCOUT_V551_CONTINUOUS_EXACT_POOL_LOGS";
+
+      if (!consumeBudget(budget, "analysis", blockscoutBudgetTypeV958)) {
+        return {
+          ...base,
+          attempted:validationCloudAttemptedV958,
+          requestConsumed:validationCloudAttemptedV958,
+          fromBlock,
+          toBlock,
+          provider:validationCloudAttemptedV958 ? "VALIDATION_CLOUD_V958" : null,
+          validationCloudAttemptedV958,
+          validationCloudErrorV958,
+          blockscoutFallbackAttemptedV958:false,
+          status:validationCloudAttemptedV958
+            ? "V958_VALIDATION_CLOUD_FAILED_BLOCKSCOUT_FALLBACK_BUDGET_PROTECTED"
+            : "ANALYSIS_BUDGET_PROTECTED_V551"
+        };
+      }
+
+      blockscoutFallbackAttemptedV958 = true;
+      provider = blockscoutProviderV958;
+
+      if(provider==="BLOCKSCOUT_PRO_UNIVERSAL_V2"){
+        recordBlockscoutProUsageV611(
+          state,
+          "V551_CONTINUOUS_EXACT_POOL_LOGS",
+          BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
+        );
+      }
+
+      const responseV958 = await fetch(
+        logsUrlV958,
+        {headers:{accept:"application/json"}}
+      );
+      responseStatusV958 = responseV958.status;
+
+      if(provider==="BLOCKSCOUT_PRO_UNIVERSAL_V2"){
+        updateBlockscoutProHttpStatusV611(
+          state,
+          "V551_CONTINUOUS_EXACT_POOL_LOGS",
+          responseV958.status
+        );
+      }
+
+      if (!responseV958.ok) {
+        candidate.lastStatus = `BLOCKSCOUT_HTTP_${responseV958.status}_V551`;
+        candidate.updatedAt = Date.now();
+        return {
+          ...base,attempted:true,requestConsumed:true,fromBlock,toBlock,provider,
+          validationCloudAttemptedV958,
+          validationCloudErrorV958,
+          blockscoutFallbackAttemptedV958,
+          status:candidate.lastStatus
+        };
+      }
+
+      const payloadV958 = await responseV958.json();
+      rows = Array.isArray(payloadV958?.result) ? payloadV958.result : [];
+    }
+
+    if (rawOnlyV740 && candidate?.rawRangeTraceV748) {
+      candidate.rawRangeTraceV748.httpStatus = responseStatusV958;
+      candidate.rawRangeTraceV748.status =
+        Array.isArray(rows)
+          ? "HTTP_OK_AWAITING_ROWS_V748"
+          : `HTTP_${responseStatusV958 || "UNVERIFIED"}_V748`;
+      candidate.rawRangeTraceV748.providerV958 = provider;
+      candidate.rawRangeTraceV748.validationCloudAttemptedV958 =
+        validationCloudAttemptedV958;
+      candidate.rawRangeTraceV748.validationCloudErrorV958 =
+        validationCloudErrorV958;
+      candidate.rawRangeTraceV748.blockscoutFallbackAttemptedV958 =
+        blockscoutFallbackAttemptedV958;
+    }
 
     if (rawOnlyV740 && candidate?.rawRangeTraceV748) {
       const swapTopicRowsV748 = rows.filter(row =>
