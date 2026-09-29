@@ -8426,7 +8426,7 @@
 /* V974: preserve V973 post-V4 price refresh, widen the single ReservesLens priority so a verified PoolKey + exact PoolId + USD quote basis can use one real remaining global request even when the analysis sub-cap is exhausted, and bind V438 refresh to the exact verified PoolId already proven by the current candidate. Adds diagnostics only around V179 exact-USD sample availability; no scoring/risk/Telegram threshold changes. */
 /* V973: refresh V438 exact-pool execution-price evidence after production V4/V888 and before V441/V455, so same-scan verified V179 exact-USD swaps are visible to strict market completion. Zero new provider requests and no proof/threshold changes. */
 /* V972: preserve V971 handoff fix and prioritise one existing analysis request for strict ReservesLens market completion without raising any ceiling. */
-const VERSION = "V977";
+const VERSION = "V978";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -14320,6 +14320,11 @@ async function marketExactPoolCollectorHandoffV976(
     maxRequestsThisScan: 1,
     requestsUsed: 0,
     preservesLensHeadroom: true,
+    v978PairedSlotArmed: false,
+    v978ExactPoolSlotConsumed: false,
+    v978LensSlotRemaining: false,
+    v978PairHardBlocked: false,
+    v978PairBlockReason: null,
     proofRequirementsChanged: false,
     scoringChanged: false,
     riskChanged: false,
@@ -14429,19 +14434,40 @@ async function marketExactPoolCollectorHandoffV976(
     return base;
   }
 
-  /* Preserve one real request of headroom for the downstream ReservesLens call. */
-  if (!budgetAvailable(budget, "analysis", 2)) {
-    base.status = "PRESERVE_ONE_REQUEST_FOR_RESERVESLENS_V976";
+  /* V978: pair the exact-pool lookup with the immediately-following
+   * ReservesLens eth_call. This does not add capacity: both requests must fit
+   * inside the real global ceiling after preserving the unused Telegram
+   * notification reserve. It bypasses only older analysis-subcap/reserve
+   * ordering so the two completion requests do not block each other. */
+  if (!v974MarketLensRealGlobalBudgetAvailable(budget, 2)) {
+    base.v978PairHardBlocked = true;
+    base.v978PairBlockReason = "V978_REAL_GLOBAL_OR_TELEGRAM_BOUNDARY_UNAVAILABLE";
+    base.status = "V978_PAIRED_MARKET_REAL_BUDGET_UNAVAILABLE";
     candidate.marketExactPoolCollectorHandoffV976 = {...base};
     return base;
   }
 
+  budget.analysis.v978PairedMarketCompletion = {
+    active: true,
+    armedAt: Date.now(),
+    candidateAddress: token,
+    poolId,
+    exactPoolConsumed: false,
+    lensConsumed: false,
+    hardBoundaryBlocked: false,
+    blockReason: null
+  };
+  base.v978PairedSlotArmed = true;
   base.requestEligible = true;
-  if (!consumeBudget(budget, "analysis", "RPC:V976_MARKET_EXACT_POOL_SWAP", 1)) {
-    base.status = "EXACT_POOL_REQUEST_BLOCKED_BY_EXISTING_BUDGET_V976";
-    candidate.marketExactPoolCollectorHandoffV976 = {...base};
-    return base;
-  }
+
+  /* Consume the first member of the pair directly against the real global
+   * boundary. The second member is consumed by consumeV972MarketLensPriority()
+   * when V441 issues the next scoped RPC:eth_call. */
+  budget.totalUsed += 1;
+  budget.analysis.used += 1;
+  budget.analysis.v978PairedMarketCompletion.exactPoolConsumed = true;
+  base.v978ExactPoolSlotConsumed = true;
+  base.v978LensSlotRemaining = true;
 
   const rpcEndpoint = v4PoolLiveRpcEndpointV767(env);
   const to = Math.max(0, safeNumber(latestNumber));
@@ -20494,6 +20520,31 @@ function consumeV972MarketLensPriority(
   type,
   amount = 1
 ) {
+  const requestType = String(type || "");
+  const pairedV978 = budget?.analysis?.v978PairedMarketCompletion;
+  if (
+    phase === "analysis" &&
+    requestType === "RPC:eth_call" &&
+    pairedV978?.active === true &&
+    pairedV978?.exactPoolConsumed === true &&
+    pairedV978?.lensConsumed !== true
+  ) {
+    const neededV978 = Math.max(1, safeNumber(amount));
+    if (neededV978 !== 1) return false;
+    if (!v974MarketLensRealGlobalBudgetAvailable(budget, 1)) {
+      pairedV978.hardBoundaryBlocked = true;
+      pairedV978.blockReason = "V978_LENS_REAL_GLOBAL_OR_TELEGRAM_BOUNDARY_UNAVAILABLE";
+      return false;
+    }
+    budget.totalUsed += 1;
+    budget.analysis.used += 1;
+    pairedV978.lensConsumed = true;
+    pairedV978.active = false;
+    pairedV978.consumedAt = Date.now();
+    pairedV978.blockReason = null;
+    return true;
+  }
+
   const slot = budget?.analysis?.v972MarketLensPriority;
   if (
     phase !== "analysis" ||
@@ -118486,6 +118537,18 @@ for (
         safeNumber(selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.v179RowsAfter),
       v976Status:
         selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.status || null,
+      v978PairedSlotArmed:
+        selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.v978PairedSlotArmed === true,
+      v978ExactPoolSlotConsumed:
+        selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.v978ExactPoolSlotConsumed === true,
+      v978LensSlotRemaining:
+        selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.v978LensSlotRemaining === true,
+      v978PairHardBlocked:
+        selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.v978PairHardBlocked === true,
+      v978PairBlockReason:
+        selectedCandidateV968?.marketExactPoolCollectorHandoffV976?.v978PairBlockReason || null,
+      v978LensSlotConsumed:
+        budget?.analysis?.v978PairedMarketCompletion?.lensConsumed === true,
       v455PoolKeyVerified: eligibilityV968?.poolKeyVerified === true,
       v455ExactPoolIdentity: eligibilityV968?.exactPoolIdentity === true,
       lensVerified: eligibilityV968?.lensVerified === true,
@@ -176829,6 +176892,8 @@ function marketCompletionAuditTelegramV968(result) {
     `Range / raw / exact-topic: <b>${safeNumber(r?.v976FromBlock)}→${safeNumber(r?.v976ToBlock)} / ${safeNumber(r?.v976RawRows)} / ${safeNumber(r?.v976ExactTopicRows)}</b>`,
     `Decoded candidate / exact-USD / inserted / V179 after: <b>${safeNumber(r?.v976DecodedCandidateTrades)} / ${safeNumber(r?.v976ExactUsdTrades)} / ${safeNumber(r?.v976Inserted)} / ${safeNumber(r?.v976V179RowsAfter)}</b>`,
     `V976 status: <code>${escapeHtml(String(r?.v976Status || "NONE"))}</code>`,
+    `V978 paired Market slot armed / exact-pool used / Lens used: <b>${yesNo(r?.v978PairedSlotArmed)} / ${yesNo(r?.v978ExactPoolSlotConsumed)} / ${yesNo(r?.v978LensSlotConsumed)}</b>`,
+    `V978 paired slot hard-blocked: <b>${yesNo(r?.v978PairHardBlocked)}</b> · ${escapeHtml(String(r?.v978PairBlockReason || "NONE"))}`,
     `V455 sees PoolKey / exact PoolId: <b>${yesNo(r?.v455PoolKeyVerified)} / ${yesNo(r?.v455ExactPoolIdentity)}</b>`,
     `Verified Lens USD liquidity: <b>${yesNo(r?.lensVerified)}</b>`,
     `Liquidity semantics usable: <b>${yesNo(r?.semanticUsable)}</b>`,
@@ -176840,7 +176905,7 @@ function marketCompletionAuditTelegramV968(result) {
     "🚧 <b>Exact failure reason(s)</b>",
     ...(reasons.length ? reasons.slice(0,8).map(x => `• <code>${escapeHtml(String(x))}</code>`) : ["• NONE"]),
     "",
-    "<i>Read-only command. V976 adds one bounded same-target exact-PoolId market handoff in the normal scan: it can seed only an already-verified PoolKey into the canonical registry and can use at most one recent exact-pool RPC request while preserving Lens headroom. Returned rows still must pass the existing V254/V179 exact-USD decoder. Proof standards, scoring, risk and Telegram thresholds are unchanged.</i>"
+    "<i>Read-only command. V978 preserves V976's verified exact-PoolId handoff and pairs its one exact-pool request with one immediately-following ReservesLens request only when both fit inside the existing real global budget after Telegram reserve. No global/provider ceiling is raised. Returned rows still must pass the existing V254/V179 exact-USD decoder. Proof standards, scoring, risk and Telegram thresholds are unchanged.</i>"
   ].join("\n");
 }
 
