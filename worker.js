@@ -1682,6 +1682,12 @@
  *   the persisted /launchcoverage record.
  * - Does not raise request ceilings or change qualification thresholds.
  *
+ * V984 HOLDER/RISK COMPLETION PRIORITY
+ * - Preserves V983 scheduler re-arm and compact-state persistence fixes.
+ * - Reorders only the bounded analysis queue so the strongest non-terminal candidate still missing verified holder/concentration evidence reaches the protected V666 holder lane before lower-value rows.
+ * - Dedicated V422/V658 retry targets retain priority; verified terminal holder-risk rows remain excluded by existing pruning.
+ * - Adds no provider requests, raises no request ceiling, and changes no risk/scoring/Telegram threshold.
+ *
  * V980 RISK-FIRST COMPLETION PRIORITY
  * - prioritises verified risk-acceptable candidates for strict on-chain Market completion;
  * - skips already-verified HIGH/severe/Risk>59 candidates from scarce V441/V455 completion spend;
@@ -108927,6 +108933,130 @@ for (
       ...analysisSelected
     ];
 
+  /*
+   * V984 HOLDER/RISK COMPLETION PRIORITY
+   *
+   * Recent live scans proved that the two protected V666 holder-Pro claims can
+   * be consumed by candidates that later resolve to Risk 100 while another
+   * candidate remains HOLDER/RISK_UNVERIFIED. We cannot know a fresh token's
+   * final concentration before reading holder evidence, so V984 does not guess
+   * that outcome and does not loosen any risk rule. Instead it makes the queue
+   * deterministic: among NON-TERMINAL rows, the best candidate still lacking a
+   * fresh verified holder-integrity + concentration cache is moved to the front
+   * of the bounded analysis queue. Existing dedicated V422 and V658 retry
+   * targets receive the strongest preference, followed by already-verified
+   * market evidence and current/live verified-launch status. This is ordering
+   * only and creates zero additional requests.
+   */
+  const holderRiskPriorityV984 = {
+    enabled: true,
+    selectedAddress: null,
+    selectedSymbol: null,
+    selectedReason: "NO_UNRESOLVED_NONTERMINAL_HOLDER_TARGET_V984",
+    queueIndexBefore: null,
+    movedToFront: false,
+    unresolvedCandidates: 0,
+    terminalSkipped: 0,
+    dedicatedHolderRetry: false,
+    rotatingEvidenceRetry: false,
+    marketCacheVerified: false,
+    currentLiveVerifiedLaunch: false,
+    requestCeilingsChanged: false,
+    riskThresholdChanged: false,
+    telegramThresholdChanged: false
+  };
+
+  const holderRiskRowsV984 =
+    v135AnalysisQueue
+      .map((token, index) => {
+        const tokenAddress = normalize(token?.address);
+        const terminal = terminalPriorityRejectFromWatched(token);
+        if (terminal?.terminal === true) {
+          holderRiskPriorityV984.terminalSkipped++;
+          return null;
+        }
+
+        const holderCache = cachedHolderIntelligence(token, HOLDER_STALE_CACHE_MS);
+        const holderComplete = Boolean(
+          holderCache?.integrity?.verified === true &&
+          holderCache?.integrity?.status === "VERIFIED" &&
+          holderCache?.concentrationVerified === true &&
+          holderCache?.whale?.verified === true
+        );
+
+        if (holderComplete) return null;
+        holderRiskPriorityV984.unresolvedCandidates++;
+
+        const dedicatedHolderRetry =
+          Boolean(holderEvidenceRetryTokenV422) &&
+          tokenAddress === normalize(holderEvidenceRetryTokenV422?.address);
+        const rotatingEvidenceRetry =
+          Boolean(evidenceCompletionRetryTokenV658) &&
+          tokenAddress === normalize(evidenceCompletionRetryTokenV658?.address);
+        const marketCacheVerified =
+          token?.marketCache?.data?.verified === true;
+        const currentLiveVerifiedLaunch =
+          currentLiveVerifiedLaunchTokensV621.has(tokenAddress);
+        const partialHolder =
+          Boolean(cachedPartialHolderStateV149(token));
+
+        return {
+          token,
+          index,
+          tokenAddress,
+          dedicatedHolderRetry,
+          rotatingEvidenceRetry,
+          marketCacheVerified,
+          currentLiveVerifiedLaunch,
+          partialHolder,
+          score:
+            (dedicatedHolderRetry ? 1000000 : 0) +
+            (rotatingEvidenceRetry ? 900000 : 0) +
+            (marketCacheVerified ? 50000 : 0) +
+            (currentLiveVerifiedLaunch ? 25000 : 0) +
+            (partialHolder ? 10000 : 0) +
+            safeNumber(analysisPriority(token))
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => (b.score - a.score) || (a.index - b.index));
+
+  const holderRiskTargetV984 = holderRiskRowsV984[0] || null;
+  const holderRiskPriorityAddressV984 =
+    normalize(holderRiskTargetV984?.tokenAddress);
+
+  if (holderRiskTargetV984) {
+    holderRiskPriorityV984.selectedAddress = holderRiskPriorityAddressV984 || null;
+    holderRiskPriorityV984.selectedSymbol =
+      holderRiskTargetV984?.token?.metadata?.symbol ||
+      holderRiskTargetV984?.token?.symbol ||
+      null;
+    holderRiskPriorityV984.queueIndexBefore = holderRiskTargetV984.index;
+    holderRiskPriorityV984.dedicatedHolderRetry = holderRiskTargetV984.dedicatedHolderRetry;
+    holderRiskPriorityV984.rotatingEvidenceRetry = holderRiskTargetV984.rotatingEvidenceRetry;
+    holderRiskPriorityV984.marketCacheVerified = holderRiskTargetV984.marketCacheVerified;
+    holderRiskPriorityV984.currentLiveVerifiedLaunch = holderRiskTargetV984.currentLiveVerifiedLaunch;
+    holderRiskPriorityV984.selectedReason =
+      holderRiskTargetV984.dedicatedHolderRetry
+        ? "V422_DUE_HOLDER_RETRY_FIRST_V984"
+        : holderRiskTargetV984.rotatingEvidenceRetry
+          ? "V658_ROTATING_EVIDENCE_RETRY_FIRST_V984"
+          : holderRiskTargetV984.marketCacheVerified
+            ? "VERIFIED_MARKET_MISSING_HOLDER_EVIDENCE_FIRST_V984"
+            : holderRiskTargetV984.currentLiveVerifiedLaunch
+              ? "CURRENT_LIVE_VERIFIED_LAUNCH_MISSING_HOLDERS_FIRST_V984"
+              : "BEST_NONTERMINAL_UNRESOLVED_HOLDER_TARGET_V984";
+
+    if (holderRiskTargetV984.index > 0) {
+      const [selectedHolderTargetV984] =
+        v135AnalysisQueue.splice(holderRiskTargetV984.index, 1);
+      v135AnalysisQueue.unshift(selectedHolderTargetV984);
+      holderRiskPriorityV984.movedToFront = true;
+    }
+  }
+
+  scannerFunnelV415.holderRiskPriorityV984 = holderRiskPriorityV984;
+
   const v653FreshVerifiedLaunchErc20Reserve =
     configureFreshVerifiedLaunchErc20ReserveV653(
       budget,
@@ -110206,6 +110336,7 @@ for (
            * of repeatedly hammering the same unavailable holder endpoint.
            */
           holderPriorityCompletion:
+            address === holderRiskPriorityAddressV984 ||
             (
               freshMarketSlotHandoffV159
                 .triggered
@@ -167462,6 +167593,9 @@ function launchCoverageTelegramMessageV474(state) {
         ? coinGeckoTraceLinesV664
         : ["• No market fallback trace captured in this scan."]
     ),
+    "",
+    "<b>V984 holder/risk priority — latest scan</b>",
+    `• Target: ${escapeHtml(String(d?.scannerFunnelV415?.holderRiskPriorityV984?.selectedSymbol || "NONE"))} <code>${escapeHtml(shortAddress(d?.scannerFunnelV415?.holderRiskPriorityV984?.selectedAddress || ""))}</code> · reason ${escapeHtml(String(d?.scannerFunnelV415?.holderRiskPriorityV984?.selectedReason || "NONE"))} · moved-first ${d?.scannerFunnelV415?.holderRiskPriorityV984?.movedToFront === true ? "YES" : "NO"} · unresolved ${fmt(d?.scannerFunnelV415?.holderRiskPriorityV984?.unresolvedCandidates)}`,
     "",
     "<b>V667 holder/risk decision trace — latest scan</b>",
     ...(
