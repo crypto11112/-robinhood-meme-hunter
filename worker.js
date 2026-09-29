@@ -8426,7 +8426,7 @@
 /* V974: preserve V973 post-V4 price refresh, widen the single ReservesLens priority so a verified PoolKey + exact PoolId + USD quote basis can use one real remaining global request even when the analysis sub-cap is exhausted, and bind V438 refresh to the exact verified PoolId already proven by the current candidate. Adds diagnostics only around V179 exact-USD sample availability; no scoring/risk/Telegram threshold changes. */
 /* V973: refresh V438 exact-pool execution-price evidence after production V4/V888 and before V441/V455, so same-scan verified V179 exact-USD swaps are visible to strict market completion. Zero new provider requests and no proof/threshold changes. */
 /* V972: preserve V971 handoff fix and prioritise one existing analysis request for strict ReservesLens market completion without raising any ceiling. */
-const VERSION = "V978";
+const VERSION = "V979";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -14273,6 +14273,109 @@ function onChainMarketFoundationV438(
   };
 }
 
+
+
+
+/* =========================================================
+   V979 FRESH PER-SCAN PAIRED-MARKET DECISION AUDIT
+   Diagnostic only. Persists one compact decision record on every completed
+   scan so /marketaudit cannot silently remain on an older qualifying record.
+   No provider requests, scoring, risk, budget ceilings or Telegram behaviour
+   are changed by this helper.
+   ========================================================= */
+function marketPairDecisionAuditV979(state, candidates, handoffV976, budget) {
+  const rows = (Array.isArray(candidates) ? candidates : []).map(candidate => {
+    const token = normalize(candidate?.address);
+    const key = completePoolKeyV441(state, candidate);
+    const readiness = reservesLensValuationReadinessV447(state, candidate, key);
+    const identity = candidate?.onChainPoolIdentityV153 || null;
+    const poolId = normalize(key?.poolId || identity?.poolId || identity?.pairAddress || "");
+    const identityPoolId = normalize(identity?.poolId || identity?.pairAddress || "");
+    const marketIncomplete = candidate?.market?.verified !== true;
+    const completePoolKey = key?.verified === true;
+    const keyHasToken = normalize(key?.currency0) === token || normalize(key?.currency1) === token;
+    const exactPoolId = /^0x[a-f0-9]{64}$/.test(String(poolId || ""));
+    const exactIdentityVerified =
+      identity?.verified === true &&
+      exactPoolId &&
+      identityPoolId === poolId &&
+      normalize(identity?.candidateAddress || token) === token;
+    const quoteUsdReady = readiness?.quoteUsdReady === true;
+    const pairEligible =
+      isAddress(token) && marketIncomplete && completePoolKey && keyHasToken &&
+      exactIdentityVerified && quoteUsdReady;
+    const missing = [];
+    if (!isAddress(token)) missing.push("TOKEN_ADDRESS_INVALID");
+    if (!marketIncomplete) missing.push("MARKET_ALREADY_VERIFIED");
+    if (!completePoolKey) missing.push("VERIFIED_COMPLETE_POOLKEY_REQUIRED");
+    if (completePoolKey && !keyHasToken) missing.push("POOLKEY_TOKEN_MISMATCH");
+    if (!exactIdentityVerified) missing.push("VERIFIED_EXACT_POOL_IDENTITY_REQUIRED");
+    if (!quoteUsdReady) missing.push("VERIFIED_USD_QUOTE_BASIS_REQUIRED");
+    const score =
+      (marketIncomplete ? 100000 : 0) +
+      (completePoolKey ? 30000 : 0) +
+      (exactIdentityVerified ? 20000 : 0) +
+      (quoteUsdReady ? 10000 : 0) +
+      safeNumber(candidate?.analysisPriority);
+    return {
+      token, symbol:candidate?.symbol || null, poolId:poolId || null,
+      marketIncomplete, completePoolKey, keyHasToken, exactIdentityVerified,
+      quoteUsdReady, pairEligible, missing, score
+    };
+  }).sort((a,b)=>b.score-a.score);
+
+  const eligible = rows.find(r => r.pairEligible) || null;
+  const best = eligible || rows[0] || null;
+  const notificationReserveRemaining =
+    budget?.notification?.globalReserveActiveV174 === true
+      ? Math.max(0, safeNumber(budget?.notification?.limit) - safeNumber(budget?.notification?.used))
+      : 0;
+  const preTelegramGlobalLimit = Math.max(0, safeNumber(budget?.totalLimit) - notificationReserveRemaining);
+  const realGlobalHeadroom = Math.max(0, preTelegramGlobalLimit - safeNumber(budget?.totalUsed));
+  const pair = budget?.analysis?.v978PairedMarketCompletion || null;
+  const handoff = handoffV976 || {};
+
+  let decision = "NO_RETURNED_CANDIDATE";
+  if (best) {
+    if (!eligible) decision = `PAIR_NOT_ELIGIBLE:${(best.missing || []).join("|") || "UNKNOWN"}`;
+    else if (handoff?.v978PairedSlotArmed === true || pair?.armedAt) decision = "V978_PAIR_ARMED";
+    else if (handoff?.v978PairHardBlocked === true) decision = handoff?.v978PairBlockReason || "V978_PAIR_HARD_BLOCKED";
+    else decision = handoff?.status || "ELIGIBLE_BUT_PAIR_NOT_ARMED";
+  }
+
+  return {
+    version:"V979",
+    runtimeVersion:VERSION,
+    recordedAt:Date.now(),
+    candidateCount:rows.length,
+    candidateAddress:best?.token || null,
+    symbol:best?.symbol || null,
+    poolId:best?.poolId || null,
+    marketIncomplete:best?.marketIncomplete === true,
+    completePoolKey:best?.completePoolKey === true,
+    exactPoolIdentity:best?.exactIdentityVerified === true,
+    quoteUsdReady:best?.quoteUsdReady === true,
+    pairEligible:best?.pairEligible === true,
+    missingPrerequisites:Array.isArray(best?.missing) ? best.missing.slice(0,8) : [],
+    realGlobalHeadroomBeforeAudit:realGlobalHeadroom,
+    totalUsed:safeNumber(budget?.totalUsed),
+    totalLimit:safeNumber(budget?.totalLimit),
+    analysisUsed:safeNumber(budget?.analysis?.used),
+    analysisLimit:safeNumber(budget?.analysis?.limit),
+    notificationReserveRemaining,
+    handoffSelected:handoff?.selected === true,
+    handoffTargetMatch:Boolean(best?.token && normalize(handoff?.candidateAddress) === best.token && normalize(handoff?.poolId) === normalize(best?.poolId)),
+    pairedSlotArmed:handoff?.v978PairedSlotArmed === true || Boolean(pair?.armedAt),
+    exactPoolSlotConsumed:handoff?.v978ExactPoolSlotConsumed === true || pair?.exactPoolConsumed === true,
+    lensSlotConsumed:pair?.lensConsumed === true,
+    pairHardBlocked:handoff?.v978PairHardBlocked === true || pair?.hardBoundaryBlocked === true,
+    pairBlockReason:handoff?.v978PairBlockReason || pair?.blockReason || null,
+    handoffStatus:handoff?.status || null,
+    decision,
+    diagnosticOnly:true,
+    zeroExtraRequests:true
+  };
+}
 
 /* =========================================================
    V973 POST-V4 EXACT-POOL PRICE REFRESH
@@ -115597,6 +115700,15 @@ for (
   state.marketExactPoolCollectorHandoffV976 =
     marketExactPoolCollectorHandoffResultV976;
 
+  /* V979: always persist the paired-market decision for THIS scan, even when
+   * no candidate reaches V441/V455. This is zero-request telemetry only. */
+  state.marketPairDecisionAuditV979 = marketPairDecisionAuditV979(
+    state,
+    candidates,
+    marketExactPoolCollectorHandoffResultV976,
+    budget
+  );
+
   const onChainMarketFoundationRefreshV973 =
     refreshOnChainMarketFoundationV973(
       state,
@@ -169429,12 +169541,15 @@ async function telegramCommandReplyV271(
 
   if (parsed.command === "/marketaudit" || parsed.command === "/marketcompletion") {
     const stateV968 = await readState(env);
-    const resultV968 = stateV968?.state?.marketCompletionAuditV968 || {
-      recordedAt: null,
-      scanVersion: VERSION,
-      candidateCount: 0,
-      selected: false,
-      failureReasons: ["NO_COMPLETED_V968_SCAN_RECORDED_YET"]
+    const resultV968 = {
+      ...(stateV968?.state?.marketCompletionAuditV968 || {
+        recordedAt: null,
+        scanVersion: VERSION,
+        candidateCount: 0,
+        selected: false,
+        failureReasons: ["NO_COMPLETED_V968_SCAN_RECORDED_YET"]
+      }),
+      v979LatestScanDecision: stateV968?.state?.marketPairDecisionAuditV979 || null
     };
     const replyV968 = marketCompletionAuditTelegramV968(resultV968);
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
@@ -176836,7 +176951,7 @@ function marketCompletionAuditTelegramV968(result) {
   const yesNo = v => v === true ? "YES" : v === false ? "NO" : "N/A";
   const reasons = Array.isArray(r?.failureReasons) ? r.failureReasons : [];
   return [
-    "🧪 <b>On-Chain Market Completion Audit — V976</b>",
+    "🧪 <b>On-Chain Market Completion Audit — V979</b>",
     "",
     `Recorded: <b>${r?.recordedAt ? escapeHtml(new Date(r.recordedAt).toISOString()) : "NONE"}</b>`,
     `Scan version: <b>${escapeHtml(String(r?.scanVersion || "NONE"))}</b>`,
@@ -176894,6 +177009,15 @@ function marketCompletionAuditTelegramV968(result) {
     `V976 status: <code>${escapeHtml(String(r?.v976Status || "NONE"))}</code>`,
     `V978 paired Market slot armed / exact-pool used / Lens used: <b>${yesNo(r?.v978PairedSlotArmed)} / ${yesNo(r?.v978ExactPoolSlotConsumed)} / ${yesNo(r?.v978LensSlotConsumed)}</b>`,
     `V978 paired slot hard-blocked: <b>${yesNo(r?.v978PairHardBlocked)}</b> · ${escapeHtml(String(r?.v978PairBlockReason || "NONE"))}`,
+    "",
+    "🛰 <b>V979 latest completed-scan paired-slot decision</b>",
+    `Latest decision recorded: <b>${r?.v979LatestScanDecision?.recordedAt ? escapeHtml(new Date(r.v979LatestScanDecision.recordedAt).toISOString()) : "NONE"}</b> · runtime <b>${escapeHtml(String(r?.v979LatestScanDecision?.runtimeVersion || "NONE"))}</b>`,
+    `Candidates / chosen token: <b>${safeNumber(r?.v979LatestScanDecision?.candidateCount)}</b> · <code>${escapeHtml(short(r?.v979LatestScanDecision?.candidateAddress))}</code> ${escapeHtml(String(r?.v979LatestScanDecision?.symbol || ""))}`,
+    `PoolKey / exact PoolId / USD basis / pair eligible: <b>${yesNo(r?.v979LatestScanDecision?.completePoolKey)} / ${yesNo(r?.v979LatestScanDecision?.exactPoolIdentity)} / ${yesNo(r?.v979LatestScanDecision?.quoteUsdReady)} / ${yesNo(r?.v979LatestScanDecision?.pairEligible)}</b>`,
+    `Headroom total/limit · analysis used/limit · Telegram reserve: <b>${safeNumber(r?.v979LatestScanDecision?.totalUsed)}/${safeNumber(r?.v979LatestScanDecision?.totalLimit)} · ${safeNumber(r?.v979LatestScanDecision?.analysisUsed)}/${safeNumber(r?.v979LatestScanDecision?.analysisLimit)} · ${safeNumber(r?.v979LatestScanDecision?.notificationReserveRemaining)}</b>`,
+    `Pair armed / exact-pool used / Lens used: <b>${yesNo(r?.v979LatestScanDecision?.pairedSlotArmed)} / ${yesNo(r?.v979LatestScanDecision?.exactPoolSlotConsumed)} / ${yesNo(r?.v979LatestScanDecision?.lensSlotConsumed)}</b>`,
+    `Decision: <code>${escapeHtml(String(r?.v979LatestScanDecision?.decision || "NONE").slice(0,350))}</code>`,
+    `Missing prerequisites: <code>${escapeHtml((Array.isArray(r?.v979LatestScanDecision?.missingPrerequisites) && r.v979LatestScanDecision.missingPrerequisites.length) ? r.v979LatestScanDecision.missingPrerequisites.join(" | ") : "NONE")}</code>`,
     `V455 sees PoolKey / exact PoolId: <b>${yesNo(r?.v455PoolKeyVerified)} / ${yesNo(r?.v455ExactPoolIdentity)}</b>`,
     `Verified Lens USD liquidity: <b>${yesNo(r?.lensVerified)}</b>`,
     `Liquidity semantics usable: <b>${yesNo(r?.semanticUsable)}</b>`,
@@ -176905,7 +177029,7 @@ function marketCompletionAuditTelegramV968(result) {
     "🚧 <b>Exact failure reason(s)</b>",
     ...(reasons.length ? reasons.slice(0,8).map(x => `• <code>${escapeHtml(String(x))}</code>`) : ["• NONE"]),
     "",
-    "<i>Read-only command. V978 preserves V976's verified exact-PoolId handoff and pairs its one exact-pool request with one immediately-following ReservesLens request only when both fit inside the existing real global budget after Telegram reserve. No global/provider ceiling is raised. Returned rows still must pass the existing V254/V179 exact-USD decoder. Proof standards, scoring, risk and Telegram thresholds are unchanged.</i>"
+    "<i>Read-only command. V979 adds a fresh paired-market decision record on every completed scan so stale V977/V978 market-lane records can be distinguished from current scan decisions. It makes zero provider requests and does not change V978 budget logic, proof standards, scoring, risk or Telegram thresholds.</i>"
   ].join("\n");
 }
 
