@@ -1,9 +1,10 @@
 /**
- * V960 BLOCKSCOUT JSON-RPC CALL-SITE DIAGNOSTIC:
- * - diagnostic-only extension over V959;
- * - adds /blockscoutrpcaudit (alias /rpcaudit) to separate known current-day Blockscout PRO JSON-RPC call sites/methods;
- * - splits V3 fallback reservations forward-only into V615 eth_getLogs vs V616 eth_blockNumber purposes;
- * - changes no provider routing, verification, scoring, risk, qualification, request ceilings, or Telegram thresholds.
+ * V961 BLOCKSCOUT JSON-RPC CALL-SITE AUDIT DEPLOY-FIX:
+ * - diagnostic-only accounting upgrade; no provider routing/scoring/risk/qualification changes;
+ * - meters authenticated Blockscout /json-rpc calls by RPC method and exact call site;
+ * - extends the V615/V616 Durable Object fallback meter with by-method/by-call-site detail;
+ * - adds read-only /blockscoutrpc (alias /rpcusage) with zero provider requests;
+ * - purpose: identify the remaining Blockscout api/eth-rpc credit consumer before any further reroute.
  *
  * V959 BLOCKSCOUT USAGE COMMAND RESILIENCE FIX:
  * - preserves all V958 routing, caching, verification, scoring and Telegram behavior;
@@ -8420,7 +8421,7 @@
  * - Existing KV binding/key, request budgets and Telegram thresholds are unchanged
 */
 /* V949: smarter /holderprototype auto-selection chooses freshest token with verified launch/deployment anchor; legacy holder providers remain preserved and production logic unchanged. */
-const VERSION = "V960";
+const VERSION = "V961";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -21598,131 +21599,6 @@ function updateBlockscoutProHttpStatusV611(state,endpoint,httpStatus){
   }
 }
 
-
-/* =========================================================
-   V960 — BLOCKSCOUT JSON-RPC METHOD / CALL-SITE DIAGNOSTIC
-   Diagnostic only: no routing, budget, scoring, risk or Telegram changes.
-   ========================================================= */
-
-function ensureBlockscoutRpcAuditV960(state){
-  const day=utcDayKeyV611();
-  const existing=
-    state?.blockscoutRpcAuditV960 &&
-    typeof state.blockscoutRpcAuditV960==="object"
-      ? state.blockscoutRpcAuditV960
-      : null;
-
-  if(!existing || existing.utcDay!==day){
-    state.blockscoutRpcAuditV960={
-      version:"V960",
-      utcDay:day,
-      startedAt:Date.now(),
-      attempts:0,
-      byMethod:{},
-      byCallSite:{},
-      last:null
-    };
-  }
-  return state.blockscoutRpcAuditV960;
-}
-
-function recordBlockscoutRpcAttemptV960(state,method,callSite,httpStatus=null){
-  if(!state || typeof state!=="object")return;
-  const audit=ensureBlockscoutRpcAuditV960(state);
-  const m=String(method||"UNKNOWN_RPC_METHOD").slice(0,80);
-  const site=String(callSite||"UNKNOWN_CALL_SITE").slice(0,120);
-  const at=Date.now();
-
-  audit.attempts=safeNumber(audit.attempts)+1;
-  audit.byMethod[m]=safeNumber(audit.byMethod[m])+1;
-  audit.byCallSite[site]=safeNumber(audit.byCallSite[site])+1;
-  audit.last={method:m,callSite:site,at,httpStatus:Number.isFinite(Number(httpStatus))?Number(httpStatus):null};
-}
-
-function updateBlockscoutRpcStatusV960(state,method,callSite,httpStatus){
-  if(!state?.blockscoutRpcAuditV960)return;
-  const status=Number(httpStatus);
-  if(!Number.isFinite(status))return;
-  const audit=ensureBlockscoutRpcAuditV960(state);
-  audit.last={
-    method:String(method||"UNKNOWN_RPC_METHOD").slice(0,80),
-    callSite:String(callSite||"UNKNOWN_CALL_SITE").slice(0,120),
-    at:Date.now(),
-    httpStatus:status
-  };
-}
-
-function blockscoutRpcAuditSnapshotV960(state){
-  const a=ensureBlockscoutRpcAuditV960(state);
-  const methods=Object.entries(a.byMethod||{})
-    .map(([method,attempts])=>({method,attempts:safeNumber(attempts)}))
-    .sort((x,y)=>y.attempts-x.attempts || x.method.localeCompare(y.method));
-  const callSites=Object.entries(a.byCallSite||{})
-    .map(([callSite,attempts])=>({callSite,attempts:safeNumber(attempts)}))
-    .sort((x,y)=>y.attempts-x.attempts || x.callSite.localeCompare(y.callSite));
-
-  return {
-    version:"V960",
-    utcDay:a.utcDay,
-    startedAt:a.startedAt||null,
-    attempts:safeNumber(a.attempts),
-    methods,
-    callSites,
-    last:a.last||null,
-    knownMainWorkerJsonRpcSites:[
-      {callSite:"V248_PRO_JSONRPC_ETH_GETLOGS",method:"eth_getLogs"},
-      {callSite:"V613_V3_EXACT_POOL_ONE_SHOT",method:"eth_getLogs"}
-    ],
-    separateDurableObjectSites:[
-      {callSite:"V615_V3_BLOCKSCOUT_FALLBACK",method:"eth_getLogs",telemetry:"V3 fallback meter / v3status"},
-      {callSite:"V616_V3_BLOCKSCOUT_HEAD_FALLBACK",method:"eth_blockNumber",telemetry:"v3status"}
-    ],
-    readOnlyReport:true
-  };
-}
-
-function blockscoutRpcAuditTelegramV960(state,fallbackV615=null){
-  const a=blockscoutRpcAuditSnapshotV960(state);
-  const lines=[
-    `🧪 <b>Blockscout JSON-RPC Audit — V960</b>`,
-    "",
-    `Forward-only V960 main-worker RPC attempts: <b>${safeNumber(a.attempts).toLocaleString("en-GB")}</b>`,
-    `UTC day: <b>${escapeHtml(String(a.utcDay||"UNVERIFIED"))}</b>`,
-    `Started: <b>${a.startedAt?escapeHtml(new Date(a.startedAt).toISOString()):"BUILDING"}</b>`,
-    "",
-    `🔬 <b>By RPC method</b>`
-  ];
-
-  if(a.methods.length){
-    for(const r of a.methods.slice(0,12)){
-      lines.push(`• ${escapeHtml(r.method)} — <b>${safeNumber(r.attempts).toLocaleString("en-GB")}</b>`);
-    }
-  }else{
-    lines.push("• No main-worker Blockscout JSON-RPC request observed since V960 deployed.");
-  }
-
-  lines.push("","🧭 <b>By call site</b>");
-  if(a.callSites.length){
-    for(const r of a.callSites.slice(0,12)){
-      lines.push(`• ${escapeHtml(r.callSite)} — <b>${safeNumber(r.attempts).toLocaleString("en-GB")}</b>`);
-    }
-  }else{
-    lines.push("• NONE OBSERVED");
-  }
-
-  lines.push(
-    "",
-    `V615 V3 fallback DO requests: <b>${safeNumber(fallbackV615?.requests).toLocaleString("en-GB")}</b> · credits <b>${safeNumber(fallbackV615?.creditsUsed).toLocaleString("en-GB")}</b>`,
-    `V615 status: <b>${escapeHtml(String(fallbackV615?.status||"UNAVAILABLE"))}</b>`,
-    "",
-    `Known main-worker JSON-RPC inventory: <b>V248 eth_getLogs + V613 one-shot eth_getLogs</b>`,
-    `Separate DO JSON-RPC inventory: <b>V615 eth_getLogs + V616 eth_blockNumber</b>`,
-    "",
-    `<i>Diagnostic only. V960 does not reroute RPC, change budgets, loosen verification, change scoring/risk, or change Telegram qualification. Counts are forward-only from V960 deployment; Blockscout Dev Portal remains authoritative for account-wide credits.</i>`
-  );
-  return lines.join("\n");
-}
-
 function blockscoutProUsageSnapshotV611(state){
   const nowMs=Date.now();
   const day=utcDayKeyV611(nowMs);
@@ -21876,6 +21752,51 @@ function blockscoutProUsageSnapshotV611(state){
   };
 }
 
+
+function ensureBlockscoutRpcAuditV960(state){
+  const day=utcDayKeyV611();
+  const current=state?.blockscoutRpcAuditV960;
+  if(!current || current.utcDay!==day){
+    state.blockscoutRpcAuditV960={
+      version:"V960",
+      utcDay:day,
+      startedAt:Date.now(),
+      requests:0,
+      estimatedCredits:0,
+      byMethod:{},
+      byCallsite:{},
+      lastMethod:null,
+      lastCallsite:null,
+      lastRequestAt:null
+    };
+  }
+  return state.blockscoutRpcAuditV960;
+}
+
+function recordBlockscoutRpcAuditV960(state,method,callsite,credits=BLOCKSCOUT_PRO_STANDARD_CREDITS_V611){
+  if(!state || typeof state!=="object") return null;
+  const root=ensureBlockscoutRpcAuditV960(state);
+  const m=String(method||"UNKNOWN").slice(0,80);
+  const c=String(callsite||"UNKNOWN").slice(0,120);
+  const cost=Math.max(0,Math.trunc(Number(credits)||BLOCKSCOUT_PRO_STANDARD_CREDITS_V611));
+  root.requests=safeNumber(root.requests)+1;
+  root.estimatedCredits=safeNumber(root.estimatedCredits)+cost;
+  const mr=root.byMethod[m]||{requests:0,estimatedCredits:0,lastRequestAt:null};
+  mr.requests=safeNumber(mr.requests)+1; mr.estimatedCredits=safeNumber(mr.estimatedCredits)+cost; mr.lastRequestAt=Date.now(); root.byMethod[m]=mr;
+  const cr=root.byCallsite[c]||{requests:0,estimatedCredits:0,method:m,lastRequestAt:null};
+  cr.requests=safeNumber(cr.requests)+1; cr.estimatedCredits=safeNumber(cr.estimatedCredits)+cost; cr.method=m; cr.lastRequestAt=Date.now(); root.byCallsite[c]=cr;
+  root.lastMethod=m; root.lastCallsite=c; root.lastRequestAt=Date.now();
+  return root;
+}
+
+function blockscoutRpcAuditSnapshotV960(state){
+  const day=utcDayKeyV611();
+  const raw=state?.blockscoutRpcAuditV960?.utcDay===day ? state.blockscoutRpcAuditV960 : {utcDay:day,startedAt:null,requests:0,estimatedCredits:0,byMethod:{},byCallsite:{}};
+  const topMethods=Object.entries(raw.byMethod||{}).map(([method,row])=>({method,requests:safeNumber(row?.requests),estimatedCredits:safeNumber(row?.estimatedCredits),lastRequestAt:row?.lastRequestAt||null})).sort((a,b)=>b.estimatedCredits-a.estimatedCredits||b.requests-a.requests);
+  const topCallsites=Object.entries(raw.byCallsite||{}).map(([callsite,row])=>({callsite,method:row?.method||"UNKNOWN",requests:safeNumber(row?.requests),estimatedCredits:safeNumber(row?.estimatedCredits),lastRequestAt:row?.lastRequestAt||null})).sort((a,b)=>b.estimatedCredits-a.estimatedCredits||b.requests-a.requests);
+  return {version:VERSION,utcDay:day,startedAt:raw.startedAt||null,requests:safeNumber(raw.requests),estimatedCredits:safeNumber(raw.estimatedCredits),topMethods:topMethods.slice(0,12),topCallsites:topCallsites.slice(0,20),lastMethod:raw.lastMethod||null,lastCallsite:raw.lastCallsite||null,lastRequestAt:raw.lastRequestAt||null};
+}
+
 const V3_BLOCKSCOUT_FALLBACK_METER_READ_TIMEOUT_MS_V959 = 1500;
 
 async function v3BlockscoutFallbackMeterSnapshotFromDoV615(env){
@@ -21925,88 +21846,35 @@ async function v3BlockscoutFallbackMeterSnapshotFromDoV615(env){
 }
 
 
-function blockscoutRpcAuditV960(state,fallbackV615=null){
-  const meter=blockscoutProUsageSnapshotV611(state);
-  const byEndpoint=state?.blockscoutProUsageV611?.byEndpoint||{};
-  const mainRows=[];
-  const addMain=(key,method,callsite)=>{
-    const row=byEndpoint?.[key]||{};
-    mainRows.push({
-      key,method,callsite,
-      requests:safeNumber(row?.requests),
-      estimatedCredits:safeNumber(row?.estimatedCredits),
-      lastHttpStatus:Number.isFinite(Number(row?.lastHttpStatus))?Number(row.lastHttpStatus):null,
-      lastRequestAt:Number.isFinite(Number(row?.lastRequestAt))?Number(row.lastRequestAt):null
-    });
-  };
-  addMain("V248_PRO_JSONRPC_ETH_GETLOGS","eth_getLogs","V248 indexed backlog");
-  addMain("V613_V3_EXACT_POOL_ONE_SHOT","eth_getLogs","V613 manual one-shot test");
-
-  const byPurpose=fallbackV615?.byPurpose&&typeof fallbackV615.byPurpose==="object"
-    ? fallbackV615.byPurpose:{};
-  const fallbackRows=Object.entries(byPurpose).map(([purpose,row])=>({
-    purpose,
-    method:purpose.includes("BLOCKNUMBER")?"eth_blockNumber":purpose.includes("GETLOGS")?"eth_getLogs":"UNCLASSIFIED",
-    requests:safeNumber(row?.requests),
-    estimatedCredits:safeNumber(row?.creditsUsed),
-    lastRequestAt:Number.isFinite(Number(row?.lastReservedAt))?Number(row.lastReservedAt):null
-  })).sort((a,b)=>b.estimatedCredits-a.estimatedCredits||b.requests-a.requests);
-
-  const mainRpcRequests=mainRows.reduce((a,r)=>a+r.requests,0);
-  const mainRpcCredits=mainRows.reduce((a,r)=>a+r.estimatedCredits,0);
-  const fallbackRpcRequests=safeNumber(fallbackV615?.requests);
-  const fallbackRpcCredits=safeNumber(fallbackV615?.creditsUsed);
-
-  return {
-    version:VERSION,
-    diagnostic:"BLOCKSCOUT_JSON_RPC_CALLSITE_AUDIT_V960",
-    utcDay:meter?.utcDay||utcDayKeyV611(),
-    mainRows,
-    fallbackRows,
-    mainRpcRequests,
-    mainRpcCredits,
-    fallbackRpcRequests,
-    fallbackRpcCredits,
-    knownRpcRequests:mainRpcRequests+fallbackRpcRequests,
-    knownRpcCredits:mainRpcCredits+fallbackRpcCredits,
-    fallbackPurposeBreakdownAvailable:Object.keys(byPurpose).length>0,
-    fallbackMeterStatus:fallbackV615?.status||null,
-    knownDirectCodePaths:[
-      "V248 eth_getLogs — authenticated PRO indexed backlog",
-      "V613 eth_getLogs — manual /blockscoutv3test only",
-      "V615 eth_getLogs — V3 exact-pool emergency fallback",
-      "V616 eth_blockNumber — shared-head emergency fallback"
-    ],
-    note:"Forward-only diagnostic. V960 does not create provider requests and does not change routing. Older V3 fallback reservations made before V960 remain aggregate-only and cannot be split by method retroactively."
-  };
-}
-
-function blockscoutRpcAuditTelegramV960(state,fallbackV615=null){
-  const r=blockscoutRpcAuditV960(state,fallbackV615);
-  const fmt=n=>Math.round(safeNumber(n)).toLocaleString("en-GB");
-  const rows=[];
-  rows.push("🧭 <b>Blockscout JSON-RPC Call-Site Audit — V960</b>","");
-  rows.push(`UTC day: <b>${escapeHtml(r.utcDay)}</b>`);
-  rows.push(`Known current-day JSON-RPC requests: <b>${fmt(r.knownRpcRequests)}</b>`);
-  rows.push(`Known estimated credits: <b>${fmt(r.knownRpcCredits)}</b>`,"");
-  rows.push("🔎 <b>Main-worker explicit PRO JSON-RPC</b>");
-  for(const row of r.mainRows){
-    rows.push(`• ${escapeHtml(row.method)} · ${escapeHtml(row.callsite)} — ${fmt(row.requests)} req / ${fmt(row.estimatedCredits)} credits${row.lastHttpStatus!==null?` · HTTP ${row.lastHttpStatus}`:""}`);
+globalThis.blockscoutRpcAuditTelegramV961 = function(state,fallbackV615=null){
+  const r=blockscoutRpcAuditSnapshotV960(state);
+  const fmt=n=>Number.isFinite(Number(n))?Math.round(Number(n)).toLocaleString("en-GB"):"0";
+  const methodMap=new Map();
+  for(const row of r.topMethods||[]){methodMap.set(row.method,{method:row.method,requests:safeNumber(row.requests),credits:safeNumber(row.estimatedCredits),source:"MAIN_WORKER"});}
+  for(const [method,row] of Object.entries(fallbackV615?.byMethod||{})){
+    const prior=methodMap.get(method)||{method,requests:0,credits:0,source:""};
+    prior.requests+=safeNumber(row?.requests); prior.credits+=safeNumber(row?.creditsUsed); prior.source=prior.source?"MAIN+V3_DO":"V3_DO"; methodMap.set(method,prior);
   }
-  rows.push("", "🔌 <b>V3 fallback Durable Object JSON-RPC</b>");
-  if(r.fallbackRows.length){
-    for(const row of r.fallbackRows.slice(0,8)){
-      rows.push(`• ${escapeHtml(row.method)} · ${escapeHtml(row.purpose)} — ${fmt(row.requests)} req / ${fmt(row.estimatedCredits)} credits`);
-    }
-  }else{
-    rows.push(`• Method split: <b>${r.fallbackPurposeBreakdownAvailable?"EMPTY":"BUILDING FROM V960"}</b>`);
-    rows.push(`• Legacy aggregate — ${fmt(r.fallbackRpcRequests)} req / ${fmt(r.fallbackRpcCredits)} credits`);
-  }
-  rows.push("", "🧬 <b>Known direct Blockscout PRO JSON-RPC code paths</b>");
-  for(const line of r.knownDirectCodePaths)rows.push(`• ${escapeHtml(line)}`);
-  rows.push("", "<i>Diagnostic only: zero provider requests, zero routing/scoring/risk/Telegram changes. Compare this forward-only current-day count with Blockscout Dev Portal; pre-V960 fallback requests cannot be split by method retroactively.</i>");
-  return rows.join("\n");
-}
+  const methods=[...methodMap.values()].sort((a,b)=>b.credits-a.credits||b.requests-a.requests);
+  const callsites=[];
+  for(const row of r.topCallsites||[]){callsites.push({callsite:row.callsite,method:row.method,requests:safeNumber(row.requests),credits:safeNumber(row.estimatedCredits),source:"MAIN"});}
+  for(const [callsite,row] of Object.entries(fallbackV615?.byCallsite||{})){callsites.push({callsite,method:row?.method||"UNKNOWN",requests:safeNumber(row?.requests),credits:safeNumber(row?.creditsUsed),source:"V3_DO"});}
+  callsites.sort((a,b)=>b.credits-a.credits||b.requests-a.requests);
+  const totalReq=methods.reduce((n,x)=>n+x.requests,0); const totalCredits=methods.reduce((n,x)=>n+x.credits,0);
+  const lines=[
+    `🧪 <b>Blockscout JSON-RPC Call-Site Audit — V961</b>`,"",
+    `Forward-only V961 RPC requests: <b>${fmt(totalReq)}</b>`,
+    `Forward-only estimated RPC credits: <b>${fmt(totalCredits)}</b>`,
+    `Main-worker V961 RPC requests: <b>${fmt(r.requests)}</b>`,
+    `V3 DO fallback requests: <b>${fmt(fallbackV615?.requests)}</b>`,"",
+    `🔌 <b>By RPC method</b>`
+  ];
+  if(methods.length){for(const x of methods.slice(0,10)) lines.push(`• ${escapeHtml(x.method)} — ${fmt(x.requests)} req / ${fmt(x.credits)} credits · ${escapeHtml(x.source)}`);} else lines.push("• No V961 RPC request captured yet.");
+  lines.push("","🧭 <b>By exact call site</b>");
+  if(callsites.length){for(const x of callsites.slice(0,14)) lines.push(`• ${escapeHtml(x.callsite)} — ${escapeHtml(x.method)} · ${fmt(x.requests)} req / ${fmt(x.credits)} credits · ${escapeHtml(x.source)}`);} else lines.push("• No V961 call-site request captured yet.");
+  lines.push("",`Known V3 fallback meter status: <b>${escapeHtml(String(fallbackV615?.status||"BUILDING"))}</b>`,"<i>Diagnostic only. Counts forward from V961 deployment and makes zero provider requests. If the Blockscout Dev Portal api/eth-rpc total rises materially faster than this audit, that proves a still-uninstrumented/external Blockscout RPC consumer remains. No provider routing, verification, scoring, risk, qualification or Telegram thresholds are changed.</i>");
+  return lines.join("\\n");
+};
 
 function blockscoutProUsageTelegramMessageV611(state,fallbackV615=null){
   const r=blockscoutProUsageSnapshotV611(state);
@@ -22099,8 +21967,8 @@ function blockscoutProUsageTelegramMessageV611(state,fallbackV615=null){
     "",
     `Pre-V611 usage: <b>DATA UNVERIFIED</b>`,
     `Actual account-wide usage: <b>DATA UNVERIFIED</b>`,
-    `V960 accounting/routing: <b>V959 BEHAVIOUR + FORWARD-ONLY JSON-RPC CALL-SITE DIAGNOSTIC</b>`,
-    "<i>Bot-side forward-only estimate. Blockscout Dev Portal remains authoritative. V960 preserves every V959 routing, credit-saving and verification rule and adds only forward-only JSON-RPC method/call-site telemetry. No provider routing, scoring, risk or Telegram qualification is changed. Older usage cannot be backfilled. /blockscoutusage is read-only.</i>"
+    `V961 accounting/routing: <b>V958 CREDIT SAVINGS + V959 NON-BLOCKING METER + V960 RPC CALL-SITE AUDIT</b>`,
+    "<i>Bot-side forward-only estimate. Blockscout Dev Portal remains authoritative. V961 preserves every V958/V959 credit-saving, verification and non-blocking meter rule and adds forward-only JSON-RPC method/call-site accounting only. Older usage cannot be backfilled. /blockscoutusage and /blockscoutrpc are read-only.</i>"
   );
 
   return lines.join("\n");
@@ -40770,13 +40638,14 @@ async function fetchBlockscoutBacklogTopicV248(
   }
 
   try {
-    recordBlockscoutRpcAttemptV960(
-      state,
-      "eth_getLogs",
-      "V248_PRO_JSONRPC_ETH_GETLOGS"
-    );
     recordBlockscoutProUsageV611(
       state,
+      "V248_PRO_JSONRPC_ETH_GETLOGS",
+      BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
+    );
+    recordBlockscoutRpcAuditV960(
+      state,
+      "eth_getLogs",
       "V248_PRO_JSONRPC_ETH_GETLOGS",
       BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
     );
@@ -40811,12 +40680,6 @@ async function fetchBlockscoutBacklogTopicV248(
 
     updateBlockscoutProHttpStatusV611(
       state,
-      "V248_PRO_JSONRPC_ETH_GETLOGS",
-      response.status
-    );
-    updateBlockscoutRpcStatusV960(
-      state,
-      "eth_getLogs",
       "V248_PRO_JSONRPC_ETH_GETLOGS",
       response.status
     );
@@ -167458,7 +167321,7 @@ function telegramHelpV271() {
     "<code>/chainstack</code> — Chainstack monthly RPC usage meter",
     "<code>/validationusage</code> — Validation Cloud free-tier usage meter",
     "<code>/blockscoutusage</code> — Blockscout PRO daily credit meter (read-only)",
-    "<code>/blockscoutrpcaudit</code> — V960 exact Blockscout JSON-RPC method/call-site audit (read-only)",
+    "<code>/blockscoutrpc</code> — V960 Blockscout JSON-RPC method/call-site audit (read-only)",
     "<code>/goldrush</code> — GoldRush forward-only credit meter + monthly routine guard",
     "<code>/blockscoutv3test 0xADDRESS</code> — one-shot exact V3 Blockscout log test",
     "<code>/help</code> — command list",
@@ -169329,6 +169192,20 @@ async function telegramCommandReplyV271(
       };
     }
   } else if (
+    parsed.command === "/blockscoutrpc" ||
+    parsed.command === "/rpcusage"
+  ) {
+    const fallbackMeterV960=
+      await v3BlockscoutFallbackMeterSnapshotFromDoV615(env);
+    reply=globalThis.blockscoutRpcAuditTelegramV961(state,fallbackMeterV960);
+    if(diagnosticV273){
+      diagnosticV273.blockscoutRpcAuditV960={
+        ...blockscoutRpcAuditSnapshotV960(state),
+        v3FallbackRequests:safeNumber(fallbackMeterV960?.requests),
+        scannerBudgetConsumed:false,externalProviderRequests:0,stateWrites:0
+      };
+    }
+  } else if (
     parsed.command === "/blockscoutusage" ||
     parsed.command === "/blockscout"
   ) {
@@ -169370,44 +169247,6 @@ async function telegramCommandReplyV271(
           status:fallbackMeterV615?.status||null
         }
       };
-    }
-  } else if (
-    parsed.command === "/blockscoutrpcaudit" ||
-    parsed.command === "/rpcaudit"
-  ) {
-    const fallbackMeterV615=
-      await v3BlockscoutFallbackMeterSnapshotFromDoV615(env);
-    reply=blockscoutRpcAuditTelegramV960(state,fallbackMeterV615);
-    if(diagnosticV273){
-      diagnosticV273.blockscoutRpcAuditV960={
-        ...blockscoutRpcAuditSnapshotV960(state),
-        fallbackV615:{
-          requests:safeNumber(fallbackMeterV615?.requests),
-          creditsUsed:safeNumber(fallbackMeterV615?.creditsUsed),
-          status:fallbackMeterV615?.status||null
-        },
-        scannerBudgetConsumed:false,
-        externalProviderRequests:0,
-        stateWrites:0
-      };
-    }
-  } else if (
-    parsed.command === "/blockscoutrpcaudit" ||
-    parsed.command === "/rpcaudit"
-  ) {
-    const fallbackMeterV960=
-      await v3BlockscoutFallbackMeterSnapshotFromDoV615(
-        env
-      );
-
-    reply=blockscoutRpcAuditTelegramV960(
-      state,
-      fallbackMeterV960
-    );
-
-    if(diagnosticV273){
-      diagnosticV273.blockscoutRpcAuditV960=
-        blockscoutRpcAuditV960(state,fallbackMeterV960);
     }
   } else if (
     parsed.command === "/validationusage" ||
@@ -178776,13 +178615,14 @@ async function blockscoutV3OneShotTestV613(env,state,tokenInput){
   const controller=new AbortController();
   const timer=setTimeout(()=>controller.abort(),6000);
 
-  recordBlockscoutRpcAttemptV960(
-    state,
-    "eth_getLogs",
-    "V613_V3_EXACT_POOL_ONE_SHOT"
-  );
   recordBlockscoutProUsageV611(
     state,
+    "V613_V3_EXACT_POOL_ONE_SHOT",
+    BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
+  );
+  recordBlockscoutRpcAuditV960(
+    state,
+    "eth_getLogs",
     "V613_V3_EXACT_POOL_ONE_SHOT",
     BLOCKSCOUT_PRO_STANDARD_CREDITS_V611
   );
@@ -178804,12 +178644,6 @@ async function blockscoutV3OneShotTestV613(env,state,tokenInput){
 
     updateBlockscoutProHttpStatusV611(
       state,
-      "V613_V3_EXACT_POOL_ONE_SHOT",
-      response.status
-    );
-    updateBlockscoutRpcStatusV960(
-      state,
-      "eth_getLogs",
       "V613_V3_EXACT_POOL_ONE_SHOT",
       response.status
     );
@@ -183536,8 +183370,9 @@ if (url.pathname === "/reconcile-v374") {
       deniedDailyCap:safeNumber(active.deniedDailyCap),
       deniedGlobalSpacing:safeNumber(active.deniedGlobalSpacing),
       byToken:active.byToken||{},
-      byPurpose:active.byPurpose||{},
-      endpoint:"BLOCKSCOUT_PRO_JSONRPC_MIXED_V960",
+      byMethod:active.byMethod||{},
+      byCallsite:active.byCallsite||{},
+      endpoint:"BLOCKSCOUT_PRO_JSONRPC_V960",
       creditsPerRequest:BLOCKSCOUT_PRO_STANDARD_CREDITS_V611,
       externalProviderRequest:false,
       timestamp:now()
@@ -183553,7 +183388,8 @@ if (url.pathname === "/reconcile-v374") {
       Math.trunc(Number(body?.credits)||BLOCKSCOUT_PRO_STANDARD_CREDITS_V611)
     );
     const token=normalize(body?.token||"");
-    const purpose=String(body?.purpose||"UNCLASSIFIED_V3_BLOCKSCOUT_RPC").slice(0,96);
+    const rpcMethodV960=String(body?.rpcMethod||"UNKNOWN").slice(0,80);
+    const rpcCallsiteV960=String(body?.rpcCallsite||"V615_V3_FALLBACK_UNKNOWN").slice(0,120);
     const nowMs=Date.now();
     const day=utcDayKeyV611();
     let raw=await this.state.storage.get("v615:blockscoutFallbackUsage")||{};
@@ -183568,7 +183404,8 @@ if (url.pathname === "/reconcile-v374") {
         deniedDailyCap:0,
         deniedGlobalSpacing:0,
         byToken:{},
-        byPurpose:{}
+        byMethod:{},
+        byCallsite:{}
       };
     }
 
@@ -183626,13 +183463,19 @@ if (url.pathname === "/reconcile-v374") {
     row.creditsUsed=safeNumber(row.creditsUsed)+credits;
     row.lastReservedAt=nowMs;
     raw.byToken[tokenKey]=row;
-
-    raw.byPurpose=raw.byPurpose||{};
-    const purposeRow=raw.byPurpose[purpose]||{requests:0,creditsUsed:0};
-    purposeRow.requests=safeNumber(purposeRow.requests)+1;
-    purposeRow.creditsUsed=safeNumber(purposeRow.creditsUsed)+credits;
-    purposeRow.lastReservedAt=nowMs;
-    raw.byPurpose[purpose]=purposeRow;
+    raw.byMethod=raw.byMethod||{};
+    const methodRowV960=raw.byMethod[rpcMethodV960]||{requests:0,creditsUsed:0,lastReservedAt:null};
+    methodRowV960.requests=safeNumber(methodRowV960.requests)+1;
+    methodRowV960.creditsUsed=safeNumber(methodRowV960.creditsUsed)+credits;
+    methodRowV960.lastReservedAt=nowMs;
+    raw.byMethod[rpcMethodV960]=methodRowV960;
+    raw.byCallsite=raw.byCallsite||{};
+    const callsiteRowV960=raw.byCallsite[rpcCallsiteV960]||{requests:0,creditsUsed:0,method:rpcMethodV960,lastReservedAt:null};
+    callsiteRowV960.requests=safeNumber(callsiteRowV960.requests)+1;
+    callsiteRowV960.creditsUsed=safeNumber(callsiteRowV960.creditsUsed)+credits;
+    callsiteRowV960.method=rpcMethodV960;
+    callsiteRowV960.lastReservedAt=nowMs;
+    raw.byCallsite[rpcCallsiteV960]=callsiteRowV960;
 
     await this.doPutV404("v615:blockscoutFallbackUsage",raw);
 
@@ -183660,7 +183503,7 @@ if (url.pathname === "/reconcile-v374") {
     return ns.get(ns.idFromName(V3_BLOCKSCOUT_FALLBACK_METER_NAME_V615));
   }
 
-  async reserveBlockscoutFallbackCreditV615(credits,purpose="UNCLASSIFIED_V3_BLOCKSCOUT_RPC") {
+  async reserveBlockscoutFallbackCreditV615(credits,rpcMethodV960="UNKNOWN",rpcCallsiteV960="V615_V3_FALLBACK_UNKNOWN") {
     const stub=await this.blockscoutFallbackMeterStubV615();
     if(!stub){
       return {
@@ -183679,7 +183522,8 @@ if (url.pathname === "/reconcile-v374") {
           body:JSON.stringify({
             credits,
             token:this.config?.token||null,
-            purpose:String(purpose||"UNCLASSIFIED_V3_BLOCKSCOUT_RPC").slice(0,96)
+            rpcMethod:rpcMethodV960,
+            rpcCallsite:rpcCallsiteV960
           })
         }
       );
@@ -183730,7 +183574,8 @@ if (url.pathname === "/reconcile-v374") {
     const reserve=
       await this.reserveBlockscoutFallbackCreditV615(
         BLOCKSCOUT_PRO_STANDARD_CREDITS_V611,
-        "V615_ETH_GETLOGS"
+        "eth_getLogs",
+        "V615_V3_EXACT_POOL_FALLBACK"
       );
 
     if(reserve?.reserved!==true){
@@ -184506,7 +184351,8 @@ if (url.pathname === "/reconcile-v374") {
     const reserve=
       await this.reserveBlockscoutFallbackCreditV615(
         BLOCKSCOUT_PRO_STANDARD_CREDITS_V611,
-        "V616_ETH_BLOCKNUMBER"
+        "eth_blockNumber",
+        "V616_SHARED_HEAD_FALLBACK"
       );
 
     if(reserve?.reserved!==true){
