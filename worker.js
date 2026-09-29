@@ -1660,6 +1660,13 @@
 
 /**
  * Robinhood Chain Meme Hunter
+ * V982 AUTOMATIC SAFE STATE-COMPACTION FALLBACK
+ * - preserves V981 scheduler/launch-coverage persistence proof;
+ * - when the normal scan state write crosses the existing KV hard limit,
+ *   applies the already-proven V692 Tier-1 + Tier-2 safe retention caps once,
+ *   reserializes once, and saves the compacted authoritative state if it fits;
+ * - no provider requests, no request-ceiling changes, no score/risk/Telegram changes.
+ *
  * V981 LAUNCH-COVERAGE PERSISTENCE DIAGNOSTIC
  * - Preserves all V980 scanner/risk-first/provider/scoring/Telegram behaviour.
  * - Adds zero-request proof across the scheduled relay -> authoritative state-write ->
@@ -8438,7 +8445,7 @@
 /* V974: preserve V973 post-V4 price refresh, widen the single ReservesLens priority so a verified PoolKey + exact PoolId + USD quote basis can use one real remaining global request even when the analysis sub-cap is exhausted, and bind V438 refresh to the exact verified PoolId already proven by the current candidate. Adds diagnostics only around V179 exact-USD sample availability; no scoring/risk/Telegram threshold changes. */
 /* V973: refresh V438 exact-pool execution-price evidence after production V4/V888 and before V441/V455, so same-scan verified V179 exact-USD swaps are visible to strict market completion. Zero new provider requests and no proof/threshold changes. */
 /* V972: preserve V971 handoff fix and prioritise one existing analysis request for strict ReservesLens market completion without raising any ceiling. */
-const VERSION = "V981";
+const VERSION = "V982";
 /* V947: adds an isolated direct-chain ERC-20 holder reconstruction feasibility prototype.
  * V948 hotfix: /holderprototype reply formatter now uses the existing shortAddressV937 helper; fixes runtime ReferenceError without changing prototype logic.
  * /holderprototype [token] scans Transfer logs directly through the existing RPC router.
@@ -26530,29 +26537,135 @@ async function writeState(
       bytesV693 >=
       V692_KV_HARD_LIMIT_BYTES
     ) {
+      /*
+       * V982: the scanner is healthy but an oversized authoritative state must
+       * not make launch-coverage persistence freeze. Reuse the already-proven
+       * V692 safe count-first retention tiers only after the normal cheap write
+       * has actually crossed the hard limit. This adds no provider requests and
+       * performs only one additional whole-state stringify on the exceptional
+       * oversized path.
+       */
+      state.stateCompactionV692 =
+        state?.stateCompactionV692 &&
+        typeof state.stateCompactionV692 === "object"
+          ? state.stateCompactionV692
+          : {
+              schemaVersion: "V692_1",
+              enabled: true,
+              targetBytes: V692_STATE_TARGET_BYTES,
+              kvHardLimitBytes: V692_KV_HARD_LIMIT_BYTES,
+              totalCompactions: 0,
+              totalBytesRemoved: 0
+            };
+
+      const telemetryV982 =
+        state.stateCompactionV692;
+
+      telemetryV982.lastEvaluatedAt = Date.now();
+      telemetryV982.lastMode =
+        "AUTOMATIC_OVERSIZE_FALLBACK_V982";
+      telemetryV982.lastTrimmed = {};
+      telemetryV982.lastBeforeBytes = bytesV693;
+      telemetryV982.fullSerializationsThisWrite = 2;
+
+      compactTier1StateV692(
+        state,
+        telemetryV982
+      );
+
+      compactTier2StateV692(
+        state,
+        telemetryV982
+      );
+
+      const compactSerializedV982 =
+        jsonStringifySafeV246(
+          state,
+          0
+        );
+
+      const compactBytesV982 =
+        utf8BytesV692(
+          compactSerializedV982
+        );
+
+      const trimmedV982 = {
+        ...(telemetryV982.lastTrimmed || {})
+      };
+
+      telemetryV982.lastAfterBytes =
+        compactBytesV982;
+      telemetryV982.lastTier2Applied = true;
+      telemetryV982.lastNeededCompaction =
+        Object.keys(trimmedV982).length > 0;
+      telemetryV982.lastTargetMet =
+        compactBytesV982 <=
+        V692_STATE_TARGET_BYTES;
+      telemetryV982.lastBelowHardLimit =
+        compactBytesV982 <
+        V692_KV_HARD_LIMIT_BYTES;
+
+      if (telemetryV982.lastNeededCompaction) {
+        telemetryV982.lastCompactedAt = Date.now();
+        telemetryV982.totalCompactions =
+          safeNumber(telemetryV982.totalCompactions) + 1;
+      }
+
+      if (
+        compactBytesV982 >=
+        V692_KV_HARD_LIMIT_BYTES
+      ) {
+        return {
+          saved: false,
+          binding,
+          error:
+            "STATE_STILL_TOO_LARGE_AFTER_AUTOMATIC_COMPACTION_V982",
+          stateCompactionV693: {
+            mode:
+              "AUTOMATIC_OVERSIZE_FALLBACK_V982",
+            beforeBytes: bytesV693,
+            afterBytes: compactBytesV982,
+            targetBytes: V692_STATE_TARGET_BYTES,
+            hardLimitBytes: V692_KV_HARD_LIMIT_BYTES,
+            maintenanceRoute:
+              "/compact-state-v693",
+            preventativeTrimmed:
+              preventativeV693?.trimmed || {},
+            automaticTrimmedV982:
+              trimmedV982,
+            directionalRetentionV698,
+            fullStateSerializations: 2,
+            externalProviderRequestsAdded: 0
+          }
+        };
+      }
+
+      await kv.put(
+        STATE_KEY,
+        compactSerializedV982
+      );
+
       return {
-        saved:
-          false,
-
+        saved: true,
         binding,
-
-        error:
-          "STATE_TOO_LARGE_USE_COMPACT_STATE_V693",
-
+        error: null,
         stateCompactionV693: {
           mode:
-            "NORMAL_SCAN_PREVENTATIVE_ONLY_V693",
-          afterBytes:
-            bytesV693,
-          hardLimitBytes:
-            V692_KV_HARD_LIMIT_BYTES,
-          maintenanceRoute:
-            "/compact-state-v693",
+            "AUTOMATIC_OVERSIZE_FALLBACK_SAVED_V982",
+          beforeBytes: bytesV693,
+          afterBytes: compactBytesV982,
+          targetBytes: V692_STATE_TARGET_BYTES,
+          hardLimitBytes: V692_KV_HARD_LIMIT_BYTES,
+          targetMet:
+            compactBytesV982 <=
+            V692_STATE_TARGET_BYTES,
+          belowHardLimit: true,
           preventativeTrimmed:
-            preventativeV693?.trimmed ||
-            {},
+            preventativeV693?.trimmed || {},
+          automaticTrimmedV982:
+            trimmedV982,
           directionalRetentionV698,
-          fullStateSerializations: 1,
+          fullStateSerializations: 2,
           externalProviderRequestsAdded: 0
         }
       };
@@ -118831,6 +118944,9 @@ for (
       saveError:
         save.error,
 
+      stateCompactionV693:
+        save.stateCompactionV693 || null,
+
       previousLastScannedBlock:
         previousBacklogCursor,
 
@@ -167201,6 +167317,7 @@ function launchCoverageTelegramMessageV474(state) {
     "*New-address discovery can include backlog catch-up; live-address counts are the better current-scan comparison.",
     "V683 preserves V682 owner diagnostics and allows at most two sequential protected V666 holder-Pro claims per scan: the second may rotate to a different later verified token only after the first is consumed and only when real pre-Telegram global headroom remains.",
     "V981 adds zero-request launch-coverage persistence timestamps and scheduler relay proof; scanner logic, provider ceilings, scoring, risk and Telegram thresholds are unchanged.",
+    "V982 automatically applies the existing safe V692 Tier-1/Tier-2 retention caps only when a normal state write would exceed the KV hard limit, then retries that same authoritative write once; no provider, scoring, risk or Telegram thresholds are changed.",
     "<i>V701 lets one same-token protected V666 holder-row request borrow only the V675 fifth/rescue identity slot, while four ERC20 identity requests, hard 42 and Telegram reserve remain protected. All V687-V700 working behaviour is preserved.</i>"
   ].join("\n");
 }
@@ -169698,15 +169815,17 @@ async function telegramCommandReplyV271(
       `Success: <b>${lastV969?.success === true || lastV969?.ok === true ? "YES" : lastV969?.success === false || lastV969?.ok === false ? "NO" : "UNVERIFIED"}</b>`,
       `Failure: <code>${escapeHtml(String(lastV969?.failure || lastV969?.error || "NONE"))}</code>`,
       "",
-      "💾 <b>V981 launch-coverage persistence proof</b>",
+      "💾 <b>V982 launch-coverage persistence proof</b>",
       `State save succeeded: <b>${lastV969?.launchCoveragePersistenceV981?.stateSaved === true ? "YES" : lastV969?.launchCoveragePersistenceV981?.stateSaved === false ? "NO" : "N/A"}</b>`,
       `Relay scan version: <b>${escapeHtml(String(lastV969?.launchCoveragePersistenceV981?.scanVersion || "N/A"))}</b>`,
       `Coverage scans observed by completed scan: <b>${safeNumber(lastV969?.launchCoveragePersistenceV981?.cumulativeScansObserved)}</b>`,
       `Coverage last scan captured: <code>${fmtTsV969(lastV969?.launchCoveragePersistenceV981?.lastScanCapturedAt)}</code>`,
       `Latest coverage live / verified launches / returned: <b>${safeNumber(lastV969?.launchCoveragePersistenceV981?.lastScanLiveAddresses)} / ${safeNumber(lastV969?.launchCoveragePersistenceV981?.lastScanVerifiedLaunches)} / ${safeNumber(lastV969?.launchCoveragePersistenceV981?.lastScanReturnedCandidates)}</b>`,
       `Save error: <code>${escapeHtml(String(lastV969?.launchCoveragePersistenceV981?.saveError || "NONE"))}</code>`,
+      `State compaction mode: <code>${escapeHtml(String(lastV969?.launchCoveragePersistenceV981?.stateCompactionMode || "NONE"))}</code>`,
+      `State bytes after write/compaction: <b>${safeNumber(lastV969?.launchCoveragePersistenceV981?.stateCompactionAfterBytes)}</b>`,
       "",
-      "<i>Read-only. Zero provider requests, zero scanner writes. V981 compares scheduler relay evidence with the authoritative launch-coverage state write.</i>"
+      "<i>Read-only. Zero provider requests, zero scanner writes. V982 preserves the V981 relay proof and automatically rescues oversized state writes with the existing safe V692 compaction tiers.</i>"
     ].join("\n");
 
     if (diagnosticV273) diagnosticV273.replyAttempted = true;
@@ -181729,6 +181848,10 @@ function compactHeavyScanRelayResultV914(
       scanVersion: result?.version || VERSION,
       stateSaved: result?.persistence?.stateSaved === true,
       saveError: result?.persistence?.saveError || null,
+      stateCompactionMode:
+        result?.persistence?.stateCompactionV693?.mode || null,
+      stateCompactionAfterBytes:
+        safeNumber(result?.persistence?.stateCompactionV693?.afterBytes),
       cumulativeScansObserved:
         safeNumber(result?.launchCoverageCumulativeV474?.scansObserved),
       cumulativeLastUpdatedAt:
